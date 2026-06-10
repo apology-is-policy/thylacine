@@ -104,7 +104,7 @@ The kernel-internal call signature (entry takes `void *arg`, returns void) is th
 #### `exits(msg)` (P2-Da)
 
 Terminates the calling process. `msg` is a status string captured by reference into `Proc->exit_msg` ("ok" → exit_status 0; anything else → exit_status 1; caller-owned lifetime, typically a string literal). Steps:
-1. Re-parent any orphan children to kproc.
+1. Re-parent any orphan children to **init** (`g_init_proc`, published by `joey_thunk` via `proc_publish_init` before exec — 2B-F3, aligning the code with ARCH §7.9 step 6), falling back to **kproc** while init is not up (early boot, the in-kernel test phase, or after init itself died — `proc_become_zombie_locked` clears `g_init_proc` at init's own ZOMBIE transition so it never dangles). Children adopted **already-ZOMBIE** trigger one `wakeup(&adopter->child_done)` inside `proc_reparent_children` (their original exits-side wakeup went to the now-dead parent — without the fresh wake, an adopter blocked in a wait-any could sleep over a reapable zombie). joey reaps adoptees with a `t_wait_pid_for(-1, WAIT_WNOHANG, …)` sweep per getty iteration (`usr/joey/joey.c::reap_adopted_orphans`); its session/bringup waits are all **by-pid** (`t_wait_pid_for(pid, 0, …)`) so an adopted orphan's zombie can never be mistaken for a tracked child (and conversely the sweep never steals a tracked child's exit — the by-pid waits claim their targets).
 2. Set Proc state=ZOMBIE, exit_status, exit_msg.
 3. Mark calling Thread state=EXITING — sched() leaves it out of the run tree.
 4. Wake parent's `child_done` Rendez.
@@ -311,7 +311,7 @@ The reverse order (`r->lock → proc_table_lock`) is **forbidden**. `wait_pid_co
 
 **Phase 5+ trip-hazard**: when multi-thread Procs land, invariant (1) weakens (sibling threads can mutate the parent's children list concurrently). At that point `wait_pid_cond` MUST acquire `proc_table_lock` AND the sleep protocol must be refactored to break the resulting `r->lock → proc_table_lock` cycle. Documented in `docs/handoffs/014-p2h-r5h.md` and `docs/handoffs/015-p3a-f75.md`.
 
-**The race that motivated this lock (R5-H F75)**: parent A in `exits()` runs `proc_reparent_children` walking A's children to rewrite each `c->parent = kproc`. If a child B is concurrently in its own `exits()` reading `c->parent` (= A) for the wakeup target, and B's wakeup line fires after A's full exits → ZOMBIE → wakeup-grandparent → grandparent reaps A → A freed chain, B accesses freed memory at `wakeup(&A->child_done)`. The lock serializes A's mutation with B's read; the wakeup-inside-lock structure additionally prevents A from being reaped between B's read and B's wakeup.
+**The race that motivated this lock (R5-H F75)**: parent A in `exits()` runs `proc_reparent_children` walking A's children to rewrite each `c->parent` to the adopter (init since 2B-F3, else kproc). If a child B is concurrently in its own `exits()` reading `c->parent` (= A) for the wakeup target, and B's wakeup line fires after A's full exits → ZOMBIE → wakeup-grandparent → grandparent reaps A → A freed chain, B accesses freed memory at `wakeup(&A->child_done)`. The lock serializes A's mutation with B's read; the wakeup-inside-lock structure additionally prevents A from being reaped between B's read and B's wakeup.
 
 ### `kernel/thread.c` (~160 LOC)
 

@@ -47,6 +47,7 @@ void test_proc_rfork_stress_1000(void);
 void test_proc_cascading_rfork_wait_smoke(void);
 void test_proc_cascading_rfork_stress(void);
 void test_proc_orphan_reparent_smoke(void);
+void test_proc_orphan_reparent_to_init(void);
 void test_proc_console_attached_smoke(void);
 void test_proc_stripes_smoke(void);
 void test_proc_legate_scope_teardown(void);
@@ -60,6 +61,7 @@ void test_proc_legate_teardown_from_zombie_chokepoint(void);
 extern void proc_test_link(struct Proc *p);
 extern void proc_test_unlink(struct Proc *p);
 extern void proc_test_legate_teardown(u32 scope_id, struct Proc *except);
+extern void proc_test_set_init(struct Proc *p);
 
 static volatile u32 g_proc_test_ran;
 static volatile u64 g_cpu_run_count[DTB_MAX_CPUS];
@@ -286,6 +288,11 @@ void test_proc_cascading_rfork_wait_smoke(void) {
 //   A (and eventually B too — boot's wait_pid is on kproc, and B was
 //   reparented to kproc, so boot can reap B in a subsequent wait_pid).
 //
+//   Since 2B-F3 this exercises the kproc FALLBACK leg of the adopter
+//   selection (g_init_proc is NULL during the in-kernel test phase —
+//   joey is created after test_run_all). The init leg is
+//   proc.orphan_reparent_to_init below.
+//
 // This is the test that the cascading_rfork_stress did NOT exercise:
 // proc_reparent_children with NON-EMPTY p->children. Without the
 // proc_table_lock at this site, the F75 race would fire — A's reparent
@@ -362,6 +369,273 @@ void test_proc_orphan_reparent_smoke(void) {
     TEST_ASSERT(thread_total_destroyed() - t_destroyed_before == 2,
         "orphan-reparent: thread_total_destroyed mismatch (Thread leak?)");
 }
+
+// =============================================================================
+// 2B-F3: orphan reparent targets init (g_init_proc) when published.
+//
+// proc.orphan_reparent_to_init
+//   boot rforks I (a stand-in init that spins until released, then reaps
+//   its adopted orphan via wait_pid and exits); boot points g_init_proc
+//   at I via proc_test_set_init. boot rforks A; A rforks B (grandchild,
+//   spins until released) and exits WITHOUT waiting for B → B reparents
+//   to I (NOT kproc — the pre-2B-F3 target; this assert fails on the
+//   reparent-to-kproc code). boot releases B (it exits → ZOMBIE child of
+//   I) and releases I, which reaps B — proving an adopted orphan is
+//   reaped by init rather than leaking as a permanent zombie. Counters
+//   balance 3/3 (no Proc-table leak).
+//
+//   While g_init_proc points at I, ANY orphaning exit in the system
+//   would reparent there — safe because the test phase runs serially
+//   (no concurrent orphan producers; console_mgr is a kproc Thread, not
+//   a Proc). I's own death auto-clears g_init_proc at the
+//   proc_become_zombie_locked chokepoint; the explicit
+//   proc_test_set_init(NULL) restore is belt.
+//
+//   boot's reaps use wait_pid_for(pid) so they never steal I's adoptee —
+//   the same by-pid discipline joey's supervisor loop uses against its
+//   tracked children.
+// =============================================================================
+
+static volatile u32 g_oti_init_go;        // boot sets → init_sim may reap
+static volatile u32 g_oti_init_reaped;    // pid init_sim reaped (0 = none yet)
+static volatile u32 g_oti_gc_pid;         // grandchild pid, published by A
+static volatile u32 g_oti_gc_release;     // boot sets → grandchild exits
+
+static void oti_init_sim_entry(void *arg) {
+    (void)arg;
+    while (__atomic_load_n(&g_oti_init_go, __ATOMIC_ACQUIRE) == 0u)
+        sched();
+    // Sole child by now is the adopted orphan (zombie or about to be:
+    // its exits wakes our child_done since we became its parent).
+    int st = -1;
+    int r = wait_pid(&st);
+    __atomic_store_n(&g_oti_init_reaped, (u32)(r > 0 ? r : 0),
+                     __ATOMIC_RELEASE);
+    exits("ok");
+}
+
+static void oti_grandchild_entry(void *arg) {
+    (void)arg;
+    while (__atomic_load_n(&g_oti_gc_release, __ATOMIC_ACQUIRE) == 0u)
+        sched();
+    exits("ok");
+}
+
+static void oti_parent_entry(void *arg) {
+    (void)arg;
+    int gc_pid = rfork(RFPROC, oti_grandchild_entry, NULL);
+    if (gc_pid <= 0) extinction("test: orphan-to-init grandchild rfork failed");
+    __atomic_store_n(&g_oti_gc_pid, (u32)gc_pid, __ATOMIC_RELEASE);
+    // Exit with B alive → proc_reparent_children with non-empty children,
+    // targeting the published init.
+    exits("ok");
+}
+
+// OTI_CHECK (audit F2): both 2B-F3 tests publish a stand-in init via
+// proc_test_set_init; a bare TEST_ASSERT early-return after that point would
+// strand g_init_proc pointing at a never-reaping spinner, so later tests'
+// orphans would adopt into it and fail spuriously. OTI_CHECK routes the
+// post-publish checks through the fail: epilogue, which restores
+// g_init_proc = NULL and releases the gate flags. (A failed run extincts at
+// the test-phase gate regardless; this only protects the diagnostic quality of
+// the remaining tests in that run.)
+#define OTI_CHECK(cond, msg) \
+    do { if (!(cond)) { test_fail(msg); goto fail; } } while (0)
+
+void test_proc_orphan_reparent_to_init(void) {
+    u64 created_before   = proc_total_created();
+    u64 destroyed_before = proc_total_destroyed();
+
+    g_oti_init_go     = 0;
+    g_oti_init_reaped = 0;
+    g_oti_gc_pid      = 0;
+    g_oti_gc_release  = 0;
+
+    int init_pid = rfork(RFPROC, oti_init_sim_entry, NULL);
+    TEST_ASSERT(init_pid > 0, "rfork init_sim failed");
+    struct Proc *init_sim = proc_find_by_pid(init_pid);
+    TEST_ASSERT(init_sim != NULL, "init_sim Proc not found by pid");
+    proc_test_set_init(init_sim);   // every check past here is OTI_CHECK
+
+    int parent_pid = rfork(RFPROC, oti_parent_entry, NULL);
+    OTI_CHECK(parent_pid > 0, "rfork orphaning parent failed");
+
+    int st = -1;
+    int r = wait_pid_for(parent_pid, 0, &st);
+    OTI_CHECK(r == parent_pid, "reap the orphaning parent by pid");
+    OTI_CHECK(st == 0, "orphaning parent exit status");
+
+    // A's ZOMBIE was observed through the proc_table_lock-held reap, so
+    // its reparent (same critical section) is visible. B is still ALIVE
+    // (spinning on g_oti_gc_release), so the pointer is stable: nothing
+    // reaps it until init_sim does, and init_sim is gated on g_oti_init_go.
+    u32 gc_pid = __atomic_load_n(&g_oti_gc_pid, __ATOMIC_ACQUIRE);
+    OTI_CHECK(gc_pid != 0, "grandchild pid was not published");
+    struct Proc *gc = proc_find_by_pid((int)gc_pid);
+    OTI_CHECK(gc != NULL, "orphaned grandchild not found post-reparent");
+    OTI_CHECK(gc->parent != kproc(),
+        "orphan went to kproc despite a published init (pre-2B-F3 target)");
+    OTI_CHECK(gc->parent == init_sim,
+        "orphan reparented to g_init_proc (ARCH 7.9 step 6)");
+
+    // Release B (exits → ZOMBIE child of init_sim), then let init_sim reap.
+    __atomic_store_n(&g_oti_gc_release, 1u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_oti_init_go, 1u, __ATOMIC_RELEASE);
+
+    int ist = -1;
+    int ir = wait_pid_for(init_pid, 0, &ist);
+    OTI_CHECK(ir == init_pid, "reap init_sim by pid");
+    OTI_CHECK(ist == 0, "init_sim exit status");
+    OTI_CHECK(__atomic_load_n(&g_oti_init_reaped, __ATOMIC_ACQUIRE) == gc_pid,
+        "init_sim reaped the adopted orphan (init reaps adoptees)");
+
+    // init_sim's death auto-cleared g_init_proc (proc_become_zombie_locked
+    // chokepoint); assert that, then restore explicitly as belt.
+    OTI_CHECK(proc_init_proc() == NULL,
+        "g_init_proc not auto-cleared at init death");
+    proc_test_set_init(NULL);
+
+    // 3 created (init_sim + A + B); 3 destroyed (A by boot, B by init_sim,
+    // init_sim by boot) — adopted orphans do not leak the Proc table.
+    TEST_ASSERT(proc_total_created()   - created_before   == 3,
+        "orphan-to-init: proc_total_created mismatch");
+    TEST_ASSERT(proc_total_destroyed() - destroyed_before == 3,
+        "orphan-to-init: proc_total_destroyed mismatch (adopted-orphan LEAK?)");
+    return;
+
+fail:
+    // Restore the adopter pointer (the load-bearing cleanup: later tests'
+    // orphans must fall back to kproc, not a stranded stand-in) and release
+    // the gates so the helpers exit rather than spin. Helper zombies may leak
+    // until the failed run extincts at the test-phase gate.
+    proc_test_set_init(NULL);
+    __atomic_store_n(&g_oti_gc_release, 1u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_oti_init_go, 1u, __ATOMIC_RELEASE);
+}
+
+// =============================================================================
+// proc.orphan_reparent_zombie_to_init
+//   The adopted-ALREADY-ZOMBIE leg of proc_reparent_children (the
+//   `adopted_zombie` branch + its child_done wakeup), which
+//   orphan_reparent_to_init does NOT exercise -- that test adopts the
+//   grandchild while ALIVE, so the branch is never taken. Here B exits and
+//   ZOMBIES *before* its parent A exits, so A's reparent moves a ZOMBIE to
+//   init: the exact path that sets adopted_zombie and fires the adopted-zombie
+//   wakeup, and that init must still be able to reap. boot makes the ordering
+//   deterministic by polling B to ZOMBIE before releasing A -- no timing
+//   dependence.
+//
+//   Coverage boundary: this does NOT place init BLOCKED in wait_pid at the
+//   instant of adoption (where the wakeup is what releases it) -- that needs
+//   init to already hold an alive child. A lost wake there surfaces as a
+//   reap-hang caught by the boot timeout; the wakeup is the same child_done
+//   primitive every exits() uses (no-lost-wake argument at the g_proc_table_-
+//   lock header). Left as a reasoned residual.
+// =============================================================================
+
+static volatile u32 g_otz_go;          // boot → init_sim may reap + exit
+static volatile u32 g_otz_a_go;        // boot → A may exit (after B has zombied)
+static volatile u32 g_otz_b_pid;       // grandchild pid, published by A
+static volatile u32 g_otz_init_reaped; // pid init_sim reaped (0 = none)
+
+static void otz_init_sim_entry(void *arg) {
+    (void)arg;
+    while (__atomic_load_n(&g_otz_go, __ATOMIC_ACQUIRE) == 0u)
+        sched();
+    int st = -1;
+    int r = wait_pid(&st);   // walks children, finds the adopted ZOMBIE, reaps
+    __atomic_store_n(&g_otz_init_reaped, (u32)(r > 0 ? r : 0),
+                     __ATOMIC_RELEASE);
+    exits("ok");
+}
+
+static void otz_grandchild_entry(void *arg) {
+    (void)arg;
+    exits("ok");             // zombie immediately; child of A, unreaped
+}
+
+static void otz_parent_entry(void *arg) {
+    (void)arg;
+    int b = rfork(RFPROC, otz_grandchild_entry, NULL);
+    if (b <= 0) extinction("test: orphan-zombie-to-init grandchild rfork failed");
+    __atomic_store_n(&g_otz_b_pid, (u32)b, __ATOMIC_RELEASE);
+    // Block until boot has confirmed B is ZOMBIE, then exit → A reparents a
+    // ZOMBIE child (adopted_zombie == true, deterministically).
+    while (__atomic_load_n(&g_otz_a_go, __ATOMIC_ACQUIRE) == 0u)
+        sched();
+    exits("ok");
+}
+
+void test_proc_orphan_reparent_zombie_to_init(void) {
+    u64 created_before   = proc_total_created();
+    u64 destroyed_before = proc_total_destroyed();
+
+    g_otz_go = 0; g_otz_a_go = 0; g_otz_b_pid = 0; g_otz_init_reaped = 0;
+
+    int init_pid = rfork(RFPROC, otz_init_sim_entry, NULL);
+    TEST_ASSERT(init_pid > 0, "rfork init_sim failed");
+    struct Proc *init_sim = proc_find_by_pid(init_pid);
+    TEST_ASSERT(init_sim != NULL, "init_sim Proc not found by pid");
+    proc_test_set_init(init_sim);   // every check past here is OTI_CHECK
+
+    int parent_pid = rfork(RFPROC, otz_parent_entry, NULL);
+    OTI_CHECK(parent_pid > 0, "rfork orphaning parent failed");
+
+    // Wait for A to publish B, then poll B to ZOMBIE so A's exit adopts a
+    // ZOMBIE (the branch under test). B is a child of A and unreaped here, so
+    // the pointer is stable until init_sim reaps it at the very end.
+    u32 b_pid = 0;
+    while ((b_pid = __atomic_load_n(&g_otz_b_pid, __ATOMIC_ACQUIRE)) == 0u)
+        sched();
+    struct Proc *b = proc_find_by_pid((int)b_pid);
+    OTI_CHECK(b != NULL, "grandchild B not found");
+    while (__atomic_load_n(&b->state, __ATOMIC_ACQUIRE) != PROC_STATE_ZOMBIE)
+        sched();
+
+    // B is ZOMBIE; release A. A exits → proc_reparent_children moves the
+    // ZOMBIE B to init_sim (the adopted_zombie path).
+    __atomic_store_n(&g_otz_a_go, 1u, __ATOMIC_RELEASE);
+
+    int st = -1;
+    int r = wait_pid_for(parent_pid, 0, &st);
+    OTI_CHECK(r == parent_pid, "reap the orphaning parent by pid");
+
+    // B is now a ZOMBIE child of init_sim, still unreaped (init_sim gated).
+    OTI_CHECK(b->parent == init_sim,
+        "already-zombie orphan reparented to g_init_proc (adopted_zombie leg)");
+    OTI_CHECK((int)__atomic_load_n(&b->state, __ATOMIC_ACQUIRE)
+        == (int)PROC_STATE_ZOMBIE, "adopted orphan still ZOMBIE pre-init-reap");
+
+    // Release init_sim; it reaps the adopted zombie and exits.
+    __atomic_store_n(&g_otz_go, 1u, __ATOMIC_RELEASE);
+
+    int ist = -1;
+    int ir = wait_pid_for(init_pid, 0, &ist);
+    OTI_CHECK(ir == init_pid, "reap init_sim by pid");
+    OTI_CHECK(__atomic_load_n(&g_otz_init_reaped, __ATOMIC_ACQUIRE) == b_pid,
+        "init_sim reaped the adopted ZOMBIE orphan");
+
+    OTI_CHECK(proc_init_proc() == NULL,
+        "g_init_proc not auto-cleared at init death");
+    proc_test_set_init(NULL);
+
+    // 3 created (init_sim + A + B); 3 destroyed (A by boot, B by init_sim,
+    // init_sim by boot) — adopted ZOMBIE orphans do not leak the Proc table.
+    TEST_ASSERT(proc_total_created()   - created_before   == 3,
+        "orphan-zombie-to-init: proc_total_created mismatch");
+    TEST_ASSERT(proc_total_destroyed() - destroyed_before == 3,
+        "orphan-zombie-to-init: proc_total_destroyed mismatch (LEAK?)");
+    return;
+
+fail:
+    // Same cleanup as the alive-adoption test: restore the adopter pointer and
+    // release the gates so the helpers exit rather than spin.
+    proc_test_set_init(NULL);
+    __atomic_store_n(&g_otz_a_go, 1u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_otz_go, 1u, __ATOMIC_RELEASE);
+}
+
+#undef OTI_CHECK
 
 // proc.cascading_rfork_stress
 //   100 iterations of the cascading_rfork_wait_smoke pattern.

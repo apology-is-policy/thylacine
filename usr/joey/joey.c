@@ -340,10 +340,11 @@ static int pouch_smoke_core(const char *name, size_t name_len,
         (void)t_close(rd);
         return -1;
     }
-    // Reap the child first. t_wait_pid blocks until it zombies; proc_free
+    // Reap the child first (by pid: an adopted-orphan zombie must not be
+    // consumed here -- 2B-F3). The wait blocks until it zombies; proc_free
     // then drains its handle table, closing the pipe write-end.
     int status = -1;
-    long reaped = t_wait_pid(&status);
+    long reaped = t_wait_pid_for((int)pid, 0, &status);
     if (reaped != pid) {
         t_putstr("joey: pouch-smoke t_wait_pid wrong pid\n");
         (void)t_close(rd);
@@ -506,7 +507,7 @@ static int pouch_smoke_one_argv(const char *name, size_t name_len,
         return -1;
     }
     int status = -1;
-    long reaped = t_wait_pid(&status);
+    long reaped = t_wait_pid_for((int)pid, 0, &status);
     if (reaped != pid) {
         t_putstr("joey: pouch-smoke-argv t_wait_pid wrong pid\n");
         (void)t_close(rd);
@@ -808,7 +809,7 @@ static int do_native_coreutil_smoke(void) {
         return -1;
     }
     int cs_status = -1;
-    long cs_reaped = t_wait_pid(&cs_status);
+    long cs_reaped = t_wait_pid_for((int)cs_pid, 0, &cs_status);
     if (cs_reaped != cs_pid || cs_status != 0) {
         t_putstr("joey: /coreutil-smoke FAILED\n");
         return -1;
@@ -1653,7 +1654,7 @@ static int do_login_e2e(void) {
     }
 
     int lst = -1;
-    long lreaped = t_wait_pid(&lst);
+    long lreaped = t_wait_pid_for((int)lpid, 0, &lst);
     if (lreaped != lpid || lst != 0) {
         t_putstr("joey: /sbin/login E2E FAILED (login exit_status != 0)\n");
         return -1;
@@ -1731,7 +1732,7 @@ static int do_recover_e2e(void) {
         return -1;
     }
     int lst = -1;
-    long lreaped = t_wait_pid(&lst);
+    long lreaped = t_wait_pid_for((int)lpid, 0, &lst);
     // The phrase is consumed; scrub the captured static (boot-secret hygiene),
     // regardless of outcome.
     (void)t_explicit_bzero(g_michael_phrase, sizeof(g_michael_phrase));
@@ -1745,26 +1746,62 @@ static int do_recover_e2e(void) {
     return 0;
 }
 
+// reap_adopted_orphans -- 2B-F3: the init reaper duty. Orphans (children of
+// any exited Proc) reparent to joey (kernel proc_reparent_children targets
+// g_init_proc, ARCH section 7.9 step 6); when they later exit they zombie in
+// joey's children until reaped. Drain every CURRENTLY-ready zombie with a
+// non-blocking wait-any: WAIT_WNOHANG returns 0 once no zombie is ready (live
+// children remain -- stratumd/corvus/login) and -1 with no children at all,
+// so the loop is bounded by the ready-zombie count and NEVER blocks. Safe
+// against stealing a tracked child ONLY because every joey wait for a
+// specific child is by-pid (t_wait_pid_for(pid)) -- a tracked child's zombie
+// can be consumed here iff its by-pid wait has not started yet, which the
+// call placement avoids: the sweep runs only between session waits in the
+// getty loop, never between a spawn and its by-pid wait.
+static void reap_adopted_orphans(void) {
+    for (;;) {
+        int st = 0;
+        long r = t_wait_pid_for(-1, WAIT_WNOHANG, &st);
+        if (r <= 0) break;
+        // Neutral wording + status (audit F3): joey cannot cheaply tell an
+        // adopted orphan from a direct daemon (stratumd / corvus) dying, and a
+        // dead boot server is the most operationally significant event a
+        // session can witness -- don't mislabel it as routine orphan hygiene.
+        char nb[24];
+        t_putstr("joey: reaped child pid=");
+        t_putstr(itoa_dec(r, nb, sizeof(nb)));
+        t_putstr(" status=");
+        t_putstr(itoa_dec(st, nb, sizeof(nb)));
+        t_putstr("\n");
+    }
+}
+
 // session_getty_loop -- the live login session; NEVER returns (joey is init).
 // Runs AFTER SYS_BOOT_COMPLETE, so the harness has already observed the banner +
 // killed QEMU -- this is the real-console path. `cfd` is the /dev/cons handle joey
 // opened BEFORE relinquishing its console-attach (audit F2: SYS_CONSOLE_OPEN is
 // gated on console-attach, which joey drops right after the open; a user shell
-// can never open the console). Each iteration spawns /sbin/login on cfd (fd
-// 0/1/2) and waits the session; on logout it loops (getty), reusing the SAME cfd
-// (joey holds it for the loop's lifetime; each login inherits a ref, released at
-// its reap). In the harness, login blocks reading /dev/cons (no input) --
-// harmless, QEMU is already gone. On a spawn failure, fall through to reaping
-// orphans forever (joey must never exit -> the banner stays valid). F5 (P3,
-// degraded-state-only): a flapping login (e.g. corvus persistently down) would
-// respin without backoff; at v1.0 corvus is a persistent boot server so this
-// does not occur -- a timed getty backoff is a v1.x lift (needs a sleep
-// primitive wired into the getty).
+// can never open the console). Each iteration sweeps adopted-orphan zombies
+// (2B-F3: orphans that died during the previous session), then spawns
+// /sbin/login on cfd (fd 0/1/2) and waits the session BY PID -- the by-pid
+// wait ignores adopted orphans' exits (the kernel cond filter skips them), so
+// an orphan death mid-session can neither end the session wait early nor
+// respin a second login on the same cfd (the pre-2B-F3 wait-any hazard). On
+// logout it loops (getty), reusing the SAME cfd (joey holds it for the loop's
+// lifetime; each login inherits a ref, released at its reap). In the harness,
+// login blocks reading /dev/cons (no input) -- harmless, QEMU is already
+// gone. On a spawn failure, fall through to reaping children forever (joey
+// must never exit -> the banner stays valid). F5 (P3, degraded-state-only): a
+// flapping login (e.g. corvus persistently down) would respin without
+// backoff; at v1.0 corvus is a persistent boot server so this does not occur
+// -- a timed getty backoff is a v1.x lift (needs a sleep primitive wired into
+// the getty).
 static void session_getty_loop(long cfd) {
     static const char login_argv[] = "login\0";
     const char login_name[] = "login";
     unsigned int fds[3] = { (unsigned int)cfd, (unsigned int)cfd, (unsigned int)cfd };
     for (;;) {
+        reap_adopted_orphans();
         struct t_sys_spawn_args req = {
             .name_va       = (unsigned long)login_name,
             .argv_data_va  = (unsigned long)login_argv,
@@ -1780,11 +1817,17 @@ static void session_getty_loop(long cfd) {
         long lpid = t_spawn_full_argv(&req);
         if (lpid <= 0) break;
         int st = 0;
-        (void)t_wait_pid(&st);       // wait the session; on logout, loop -> fresh login on the SAME cfd
+        // Wait the session BY PID; on logout, loop -> sweep orphans -> fresh
+        // login on the SAME cfd.
+        (void)t_wait_pid_for((int)lpid, 0, &st);
     }
     for (;;) {
         int st = 0;
-        (void)t_wait_pid(&st);       // fallback: reap orphans; never exit
+        // Fallback (login unspawnable): blocking wait-any IS the orphan
+        // reaper here; never exit. With live children (stratumd/corvus) it
+        // blocks; adopted zombies wake it (the kernel posts an adopted-
+        // zombie wakeup to init's child_done).
+        (void)t_wait_pid(&st);
     }
 }
 
@@ -1800,7 +1843,7 @@ int main(void) {
         return 1;
     }
     int status = -1;
-    long reaped = t_wait_pid(&status);
+    long reaped = t_wait_pid_for((int)pid, 0, &status);
     if (reaped != pid || status != 0) {
         t_putstr("joey: /hello orchestration FAILED\n");
         return 1;
@@ -1822,7 +1865,7 @@ int main(void) {
         return 1;
     }
     int as_status = -1;
-    long as_reaped = t_wait_pid(&as_status);
+    long as_reaped = t_wait_pid_for((int)as_pid, 0, &as_status);
     if (as_reaped != as_pid || as_status != 0) {
         t_putstr("joey: /alloc-smoke orchestration FAILED\n");
         return 1;
@@ -1845,7 +1888,7 @@ int main(void) {
         return 1;
     }
     int bt_status = -1;
-    long bt_reaped = t_wait_pid(&bt_status);
+    long bt_reaped = t_wait_pid_for((int)bt_pid, 0, &bt_status);
     if (bt_reaped != bt_pid || bt_status != 0) {
         t_putstr("joey: /burrow-torture FAILED -- kernel burrow attach/detach/re-attach corruption (single-threaded or SMP) REPRODUCED\n");
         return 1;
@@ -1867,7 +1910,7 @@ int main(void) {
         return 1;
     }
     int ls_status = -1;
-    long ls_reaped = t_wait_pid(&ls_status);
+    long ls_reaped = t_wait_pid_for((int)ls_pid, 0, &ls_status);
     if (ls_reaped != ls_pid || ls_status != 0) {
         t_putstr("joey: /loom-smoke orchestration FAILED\n");
         return 1;
@@ -1903,7 +1946,7 @@ int main(void) {
         return 1;
     }
     int ut_status = -1;
-    long ut_reaped = t_wait_pid(&ut_status);
+    long ut_reaped = t_wait_pid_for((int)ut_pid, 0, &ut_status);
     if (ut_reaped != ut_pid || ut_status != 0) {
         t_putstr("joey: /u-test orchestration FAILED\n");
         return 1;
@@ -1925,7 +1968,7 @@ int main(void) {
         return 1;
     }
     int ubt_status = -1;
-    long ubt_reaped = t_wait_pid(&ubt_status);
+    long ubt_reaped = t_wait_pid_for((int)ubt_pid, 0, &ubt_status);
     if (ubt_reaped != ubt_pid || ubt_status != 0) {
         t_putstr("joey: /u-builtin-test orchestration FAILED\n");
         return 1;
@@ -1947,7 +1990,7 @@ int main(void) {
         return 1;
     }
     int urd_status = -1;
-    long urd_reaped = t_wait_pid(&urd_status);
+    long urd_reaped = t_wait_pid_for((int)urd_pid, 0, &urd_status);
     if (urd_reaped != urd_pid || urd_status != 0) {
         t_putstr("joey: /u-readdir-test orchestration FAILED\n");
         return 1;
@@ -1969,7 +2012,7 @@ int main(void) {
         return 1;
     }
     int ugl_status = -1;
-    long ugl_reaped = t_wait_pid(&ugl_status);
+    long ugl_reaped = t_wait_pid_for((int)ugl_pid, 0, &ugl_status);
     if (ugl_reaped != ugl_pid || ugl_status != 0) {
         t_putstr("joey: /u-glob-test orchestration FAILED\n");
         return 1;
@@ -1991,7 +2034,7 @@ int main(void) {
         return 1;
     }
     int usb_status = -1;
-    long usb_reaped = t_wait_pid(&usb_status);
+    long usb_reaped = t_wait_pid_for((int)usb_pid, 0, &usb_status);
     if (usb_reaped != usb_pid || usb_status != 0) {
         t_putstr("joey: /u-subst-test orchestration FAILED\n");
         return 1;
@@ -2013,7 +2056,7 @@ int main(void) {
         return 1;
     }
     int urp_status = -1;
-    long urp_reaped = t_wait_pid(&urp_status);
+    long urp_reaped = t_wait_pid_for((int)urp_pid, 0, &urp_status);
     if (urp_reaped != urp_pid || urp_status != 0) {
         t_putstr("joey: /u-repl-test orchestration FAILED\n");
         return 1;
@@ -2034,7 +2077,7 @@ int main(void) {
         return 1;
     }
     int usix_status = -1;
-    long usix_reaped = t_wait_pid(&usix_status);
+    long usix_reaped = t_wait_pid_for((int)usix_pid, 0, &usix_status);
     if (usix_reaped != usix_pid || usix_status != 0) {
         t_putstr("joey: /u-6-test orchestration FAILED\n");
         return 1;
@@ -2058,7 +2101,7 @@ int main(void) {
         return 1;
     }
     int ujb_status = -1;
-    long ujb_reaped = t_wait_pid(&ujb_status);
+    long ujb_reaped = t_wait_pid_for((int)ujb_pid, 0, &ujb_status);
     if (ujb_reaped != ujb_pid || ujb_status != 0) {
         t_putstr("joey: /u-job-test orchestration FAILED\n");
         return 1;
@@ -2081,7 +2124,7 @@ int main(void) {
         return 1;
     }
     int usev_status = -1;
-    long usev_reaped = t_wait_pid(&usev_status);
+    long usev_reaped = t_wait_pid_for((int)usev_pid, 0, &usev_status);
     if (usev_reaped != usev_pid || usev_status != 0) {
         t_putstr("joey: /u-7-test orchestration FAILED\n");
         return 1;
@@ -2107,7 +2150,7 @@ int main(void) {
         return 1;
     }
     int ut_shell_status = -1;
-    long ut_shell_reaped = t_wait_pid(&ut_shell_status);
+    long ut_shell_reaped = t_wait_pid_for((int)ut_shell_pid, 0, &ut_shell_status);
     if (ut_shell_reaped != ut_shell_pid || ut_shell_status != 0) {
         t_putstr("joey: /ut orchestration FAILED\n");
         return 1;
@@ -2220,7 +2263,7 @@ int main(void) {
             return 1;
         }
         int tp_status = -1;
-        long tp_reaped = t_wait_pid(&tp_status);
+        long tp_reaped = t_wait_pid_for((int)tp_pid, 0, &tp_status);
         if (tp_reaped != tp_pid || tp_status != 0) {
             t_putstr("joey: /thread-probe orchestration FAILED\n");
             return 1;
@@ -2245,7 +2288,7 @@ int main(void) {
             return 1;
         }
         int tfp_status = -1;
-        long tfp_reaped = t_wait_pid(&tfp_status);
+        long tfp_reaped = t_wait_pid_for((int)tfp_pid, 0, &tfp_status);
         if (tfp_reaped != tfp_pid || tfp_status == 0) {
             t_putstr("joey: /thread-fault-probe did NOT fault-terminate (C-F1 regressed)\n");
             return 1;
@@ -2808,7 +2851,7 @@ int main(void) {
                     return 1;
                 }
                 int ls_status = -1;
-                long ls_reaped = t_wait_pid(&ls_status);
+                long ls_reaped = t_wait_pid_for((int)ls_pid, 0, &ls_status);
                 if (ls_reaped != ls_pid || ls_status != 0) {
                     t_putstr("joey: /loom-stress orchestration FAILED (concurrent/death stress)\n");
                     return 1;
@@ -2831,7 +2874,7 @@ int main(void) {
                     return 1;
                 }
                 int lb_status = -1;
-                long lb_reaped = t_wait_pid(&lb_status);
+                long lb_reaped = t_wait_pid_for((int)lb_pid, 0, &lb_status);
                 if (lb_reaped != lb_pid || lb_status != 0) {
                     t_putstr("joey: /loom-bench orchestration FAILED\n");
                     return 1;
@@ -3127,7 +3170,7 @@ int main(void) {
                     return 1;
                 }
                 int urt_status = -1;
-                long urt_reaped = t_wait_pid(&urt_status);
+                long urt_reaped = t_wait_pid_for((int)urt_pid, 0, &urt_status);
                 if (urt_reaped != urt_pid || urt_status != 0) {
                     t_putstr("joey: /u-redir-test FAILED\n");
                     return 1;
@@ -3150,7 +3193,7 @@ int main(void) {
                     return 1;
                 }
                 int fms_status = -1;
-                long fms_reaped = t_wait_pid(&fms_status);
+                long fms_reaped = t_wait_pid_for((int)fms_pid, 0, &fms_status);
                 if (fms_reaped != fms_pid || fms_status != 0) {
                     t_putstr("joey: /fs-mut-smoke FAILED\n");
                     return 1;
@@ -3212,11 +3255,10 @@ int main(void) {
                 t_putstr("joey: t_spawn(\"legate-prover\") FAILED\n");
                 return 1;
             }
-            // No-member legate -> no reparented grandchild -> a single reap
-            // suffices. corvus stays running, so t_wait_pid only returns the
-            // exited prover.
+            // No-member legate -> no reparented grandchild -> a single
+            // by-pid reap suffices; corvus stays running.
             int lp_status = -1;
-            long lp_reaped = t_wait_pid(&lp_status);
+            long lp_reaped = t_wait_pid_for((int)lp_pid, 0, &lp_status);
             if (lp_reaped != lp_pid || lp_status != 0) {
                 t_putstr("joey: /legate-prover orchestration FAILED\n");
                 return 1;

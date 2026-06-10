@@ -127,6 +127,17 @@ static void joey_thunk(void *arg) {
     // console-attach-only so I-27 is untouched.
     proc_mark_may_post_service(p);
 
+    // 2B-F3: publish this Proc as init -- the orphan-adopter (ARCH section
+    // 7.9 step 6: orphans reparent to init; kproc is only the pre-init
+    // fallback). Stamped in the child's own context like the console-attach
+    // bit above. joey is the FIRST user Proc; its numeric pid is 1 only on a
+    // test-free boot (the in-kernel test phase consumes pids first), which is
+    // why the adopter is this pointer, not a pid. Any Proc that orphans
+    // children before this line falls back to kproc -- benign, since the
+    // pre-joey boot has no orphan producers (the test phase reaps everything,
+    // counter-asserted per test).
+    proc_publish_init(p);
+
     u64 entry = 0, sp = 0;
     int rc = exec_setup(p, ia->blob, ia->blob_size, &entry, &sp);
     if (rc != 0) {

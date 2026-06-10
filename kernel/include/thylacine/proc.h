@@ -97,11 +97,12 @@ struct Proc {
     int               exit_status;       // P2-D: 0 = clean; non-zero = error
     struct Thread    *threads;          // doubly-linked list head (Thread.next_in_proc)
 
-    // P2-D: parent/children linkage. parent is set at rfork time; never
-    // changes (no setpgrp at v1.0). children is the head of a singly-
-    // linked list of child Procs chained via Proc.sibling. On exit,
-    // orphaned children re-parent to the kernel proc (PID 0) — Phase 2
-    // close switches this to PID 1 (init) once init exists.
+    // P2-D: parent/children linkage. parent is set at rfork time and is
+    // rewritten only by proc_reparent_children when the parent exits with
+    // live children (no setpgrp at v1.0). children is the head of a singly-
+    // linked list of child Procs chained via Proc.sibling. On exit, orphaned
+    // children re-parent to init (g_init_proc; 2B-F3, ARCH 7.9 step 6),
+    // falling back to kproc (PID 0) while init is not up.
     struct Proc      *parent;
     struct Proc      *children;
     struct Proc      *sibling;
@@ -446,6 +447,17 @@ void proc_init(void);
 // Accessor for the kernel proc (PID 0). Returns NULL before proc_init.
 struct Proc *kproc(void);
 
+// 2B-F3: publish `p` as init — the orphan-adopter (ARCH section 7.9
+// step 6). Called once per boot from joey_thunk in the child's own
+// context, before exec. Extincts on double-publish or a corrupted Proc.
+void proc_publish_init(struct Proc *p);
+
+// Accessor for init (joey, the first user Proc). NULL while init is not
+// up — early boot before joey, the in-kernel test phase, or after init
+// died; proc_reparent_children falls back to kproc then. Lock-free
+// (acquire load paired with the publish/clear store-release).
+struct Proc *proc_init_proc(void);
+
 // SLUB-allocate a fresh Proc descriptor. Initializes pid (next monotonic
 // pid), threads = NULL, thread_count = 0, state = ALIVE, child_done
 // initialized. parent / children / sibling left NULL (caller wires
@@ -535,10 +547,12 @@ int rfork_with_caps(unsigned flags, void (*entry)(void *), void *arg,
 // exits() to terminate ALL threads of the Proc atomically (a Phase 2
 // close refinement).
 //
-// Re-parenting of orphaned children: if the exiting Proc has children,
-// they re-parent to kproc() (PID 0; init at Phase 5+). Their parent
-// pointer is updated; their child_done is irrelevant since kproc never
-// calls wait_pid().
+// Re-parenting of orphaned children: if the exiting Proc has children, they
+// re-parent to init (g_init_proc), or to kproc() while init is not up. The
+// adopter's child_done IS load-bearing: a child adopted already-ZOMBIE gets an
+// explicit wakeup so an adopter blocked in wait_pid reaps it rather than
+// sleeping over it (the I-9 fix in proc_reparent_children); init reaps adoptees
+// via its getty supervisor loop.
 __attribute__((noreturn))
 void exits(const char *msg);
 

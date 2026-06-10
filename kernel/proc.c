@@ -42,6 +42,17 @@
 
 static struct kmem_cache *g_proc_cache;
 static struct Proc       *g_kproc;
+// 2B-F3: init (joey, the first user Proc) -- the orphan-adopter per ARCH
+// section 7.9 step 6 ("children re-parented to PID 1 (init)"). NULL until
+// joey_thunk publishes it (proc_publish_init); proc_reparent_children
+// falls back to kproc while NULL (early boot / in-kernel tests). Written
+// ONLY under g_proc_table_lock (publish; the clear in proc_become_zombie_
+// locked when init itself dies -- so it never dangles past init's ZOMBIE
+// transition, and a post-init-death reparent falls back to kproc instead
+// of chaining onto a reapable zombie). Lock-held readers use plain loads;
+// the lock-free accessor proc_init_proc() pairs acquire with the
+// store-release.
+static struct Proc       *g_init_proc;
 // R6-A F107: u32 (was int). Signed-overflow on `int` atomic_fetch_add at
 // INT_MAX is UB per C11 5.1.2.4; u32 has defined modular wrap. Cast to
 // int at p->pid assignment with an INT_MAX guard so the public PID type
@@ -105,31 +116,41 @@ static u32                g_next_legate_scope;
 //         (calling sleep, which calls wait_pid_cond), it is NOT
 //         concurrently in exits or rfork.
 //
-//         **kproc EXCEPTION (R6-A F105)**: `g_kproc->children` IS
-//         multi-writer — every exiting non-kproc Proc with orphan
-//         children calls `proc_reparent_children(p)` which mutates
-//         `g_kproc->children` (sets `c->sibling = g_kproc->children;
-//         g_kproc->children = c`). The mutators serialize via
-//         proc_table_lock, so each mutation is internally atomic, but
-//         a kthread (kproc's own thread) walking lockless in
-//         wait_pid_cond CAN observe an interleaving where a non-kproc
-//         Proc's reparent is mid-execution.
+//         **ADOPTER EXCEPTION (R6-A F105; widened by 2B-F3)**: the
+//         orphan-adopter's children list (`g_init_proc->children` when
+//         init is up, else `g_kproc->children`) IS multi-writer — every
+//         exiting Proc with orphan children calls
+//         `proc_reparent_children(p)` which head-inserts into the
+//         adopter's list (sets `c->sibling = adopter->children;
+//         adopter->children = c`). The mutators serialize via
+//         proc_table_lock, but the adopter's own thread walking
+//         lockless in wait_pid_cond CAN observe a mid-insert
+//         interleaving (e.g. the new head visible before its sibling
+//         store, ARM64 weak ordering).
 //
-//         At v1.0 P3-A this is QUIESCENT: no test creates orphan
-//         grandchildren (every test reaps grandchildren before parent
-//         exits, so `proc_reparent_children` always runs with empty
-//         `p->children`, never mutating kproc's list). Concrete
-//         consequences IF a future test breaks this: walker could miss
-//         a child mid-insert and return "no zombie" → benign sleep
-//         until next wakeup. No UAF possible because kproc never reaps,
-//         so children of kproc are never freed.
+//         Since 2B-F3 this is ROUTINE, not quiescent (orphan adoption
+//         is the feature, and the adopter — init/joey — DOES wait_pid).
+//         It stays SOUND on two grounds:
 //
-//         Phase 5+ (when concurrent parent+child exits become routine
-//         OR a kthread reaper for kproc's adopted orphans lands), this
-//         walker MUST acquire proc_table_lock (or the mutators MUST
-//         use atomic stores so the walker is structurally safe with
-//         atomic loads). Trip-hazard documented in handoffs/015 +
-//         phase3-status.md + reference/14-process-model.md.
+//           (a) No UAF: a stale walk can only land on the dying
+//               parent's remaining orphans (valid, unfreed Procs mid-
+//               move) or NULL. Nodes in the adopter's list are
+//               unlinked+freed ONLY by the adopter's own wait_pid_for
+//               (joey is single-threaded; a multi-thread adopter is
+//               serialized by wait_active, RW-2 2B-F1/F2) — never
+//               concurrently with that same thread's sleeping cond
+//               walk.
+//
+//           (b) No lost wake: a mid-insert walk can at worst MISS a
+//               zombie and sleep. Every zombie-producing event wakes
+//               the adopter's child_done — the child's own exits
+//               (parent == adopter post-adoption) or, for children
+//               adopted already-ZOMBIE, the explicit adopted-zombie
+//               wakeup in proc_reparent_children. The wakeup's r->lock
+//               release pairs with the sleeper's cond-check acquire,
+//               so the re-evaluation sees the consistent post-insert
+//               list (the insert precedes the wakeup in the same
+//               proc_table_lock critical section).
 //
 //     (2) Per-child `state` is mutated by the child's own exits under
 //         proc_table_lock + observed via the wakeup→sleep handshake's
@@ -252,6 +273,29 @@ void proc_init(void) {
 
 struct Proc *kproc(void) {
     return g_kproc;
+}
+
+// 2B-F3: publish `p` as init (the orphan-adopter). Called once per boot
+// from joey_thunk, in the child's own context before exec -- the same
+// stamp-in-own-context pattern as the console-attach bit. Single-publish
+// is a v1.0 invariant: joey never exits on success, and a failed joey
+// extincts the boot, so no re-publish path exists.
+void proc_publish_init(struct Proc *p) {
+    if (!p || p->magic != PROC_MAGIC)
+        extinction("proc_publish_init: NULL or corrupted Proc");
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    bool dup = (g_init_proc != NULL);
+    if (!dup)
+        __atomic_store_n(&g_init_proc, p, __ATOMIC_RELEASE);
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    if (dup) extinction("proc_publish_init: init already published");
+}
+
+// Lock-free accessor (tests, diagnostics). Acquire pairs with the
+// publish/clear store-release; NULL means "init not up" (pre-joey boot,
+// or init died -- both fall back to kproc as the orphan-adopter).
+struct Proc *proc_init_proc(void) {
+    return __atomic_load_n(&g_init_proc, __ATOMIC_ACQUIRE);
 }
 
 struct Proc *proc_alloc(void) {
@@ -439,8 +483,9 @@ u64 proc_total_destroyed(void) { return __atomic_load_n(&g_proc_destroyed, __ATO
 //
 // Both walkers DFS from kproc through the children/sibling tree. The
 // proc-table forms a rooted tree with kproc at the root; every Proc
-// alive has a path from kproc through parent pointers (zombies + their
-// children re-parent on exit per orphan_reparent_to_kproc).
+// alive has a path from kproc through parent pointers (init is a child
+// of kproc, and orphans re-parent on exit to init-else-kproc per
+// proc_reparent_children — both stay inside the kproc-rooted tree).
 
 // Recursive helper. PRECONDITION: caller holds g_proc_table_lock.
 static struct Proc *proc_find_by_pid_walk(struct Proc *root, int pid) {
@@ -514,26 +559,52 @@ static void proc_unlink_child(struct Proc *parent, struct Proc *child) {
     child->parent  = NULL;
 }
 
-// Re-parent a Proc's children to kproc on exit. At Phase 5+ this targets
-// init (PID 1); at v1.0 there's no init yet so kproc adopts orphans.
-// kproc never calls wait_pid, so adopted orphans become permanent
-// zombies — acceptable at v1.0 because the only test scenarios that
-// exercise exits don't have orphan grandchildren. Phase 2 close adds
-// a kthread reaper or moves to PID 1.
+// Re-parent a Proc's children to init (g_init_proc) on exit -- ARCH
+// section 7.9 step 6. Fallback to kproc while init is not up (early
+// boot before joey exists, the in-kernel test phase, or after init
+// itself died): orphans created then must still get a valid parent.
+// init (joey) runs a wait-any WNOHANG sweep in its supervisor loop, so
+// adopted orphans are reaped instead of leaking as permanent zombies
+// (the pre-2B-F3 defect: kproc never calls wait_pid for arbitrary
+// orphans, so a kproc-adopted orphan that exited leaked its Proc).
 //
 // PRECONDITION (P3-A, R5-H F75 close): caller must hold
 // `g_proc_table_lock`. This function rewrites every reparented child's
 // `parent` and `sibling` pointers — the exact mutations the F75 race
 // targeted. Holding the lock here closes the race against any child's
-// concurrent `exits()` that reads `p->parent`.
+// concurrent `exits()` that reads `p->parent`. The same lock makes the
+// g_init_proc read here atomic with the clear in proc_become_zombie_
+// locked: a dying init's own reparent runs AFTER its clear (program
+// order in the same critical section), so `adopter == p` is
+// structurally unreachable -- the check below is belt.
+//
+// Adopted-ZOMBIE wakeup: a child that is ALREADY a zombie at adoption
+// generated its exits()-side wakeup against the OLD parent (now dying),
+// so without a fresh wake the adopter could sleep in a blocking
+// wait-any over a reapable zombie until some unrelated child exits
+// (I-9-shaped lost-wake). Wake the adopter's child_done once if any
+// adoptee arrived ZOMBIE. Lock order proc_table_lock -> r->lock is the
+// established exits() discipline; the adopter is alive under the lock
+// (kproc never dies; a dead init was cleared before this read). No
+// child_exit note is re-posted: the note was delivered to the
+// then-parent at exit time, and wait_pid re-discovers zombies by
+// walking p->children (the documented note-loss recovery).
 static void proc_reparent_children(struct Proc *p) {
+    struct Proc *adopter = g_init_proc;
+    if (!adopter || adopter == p || adopter->state != PROC_STATE_ALIVE)
+        adopter = g_kproc;
+    bool adopted_zombie = false;
     while (p->children) {
         struct Proc *c = p->children;
         p->children = c->sibling;
-        c->parent = g_kproc;
-        c->sibling = g_kproc->children;
-        g_kproc->children = c;
+        c->parent = adopter;
+        c->sibling = adopter->children;
+        adopter->children = c;
+        if (c->state == PROC_STATE_ZOMBIE)
+            adopted_zombie = true;
     }
+    if (adopted_zombie)
+        wakeup(&adopter->child_done);
 }
 
 // Shared internal worker for rfork + rfork_with_caps. The only difference
@@ -1252,6 +1323,16 @@ static void proc_become_zombie_locked(struct Proc *p, int status, const char *ms
         g_console_trusted_proc = NULL;
     }
 
+    // 2B-F3: clear init on its own death, BEFORE the reparent below --
+    // same never-dangle chokepoint discipline as the console clears, and
+    // the ordering makes a dying init's own children fall back to kproc
+    // (a self-adopt here would loop the reparent forever). Not a v1.0
+    // success path (init never exits; a failed init extincts the boot in
+    // joey_run), but the death path must be sound regardless.
+    if (g_init_proc == p) {
+        __atomic_store_n(&g_init_proc, NULL, __ATOMIC_RELEASE);
+    }
+
     if (p->children) {
         proc_reparent_children(p);
     }
@@ -1800,13 +1881,17 @@ void el0_return_die_check(void) {
 // Soundness rests on the three invariants documented in detail at
 // `g_proc_table_lock`'s declaration block above. Briefly:
 //
-//   1. Single-writer children list (per non-kproc parent at v1.0).
-//      **kproc EXCEPTION (R6-A F105)**: g_kproc->children IS multi-
-//      writer (any exiting Proc with orphan children writes here under
-//      proc_table_lock). At v1.0 P3-A this is quiescent because no
-//      test creates orphan grandchildren. Phase 5+ (or any future test
-//      with cascading-exits + non-empty-grandchildren) MUST refactor
-//      this walker to take proc_table_lock or use atomic loads.
+//   1. Single-writer children list (per non-adopter parent at v1.0).
+//      **ADOPTER EXCEPTION (R6-A F105; widened by 2B-F3)**: the orphan-
+//      adopter's children list (init when up, else kproc) IS multi-
+//      writer (any exiting Proc with orphan children head-inserts here
+//      under proc_table_lock) and since 2B-F3 that is ROUTINE. Sound
+//      because a stale walk only reaches valid unfreed Procs (no
+//      concurrent free of the adopter's children — only the adopter's
+//      own thread reaps them) and a missed zombie is re-discovered at
+//      the next child_done wakeup (exits-side wake, or the adopted-
+//      zombie wake in proc_reparent_children). Full chain at the
+//      g_proc_table_lock declaration block above.
 //
 //   2. Per-child `state` visibility via the wakeup→sleep handshake's
 //      release/acquire on r->lock.
@@ -2031,6 +2116,16 @@ void proc_test_link(struct Proc *p) {
         extinction("proc_test_link: NULL or corrupted Proc");
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
     proc_link_child(kproc(), p);
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+}
+
+// proc_test_set_init — point g_init_proc at `p` (NULL restores the
+// pre-init fallback). Bypasses proc_publish_init's single-publish gate
+// so the 2B-F3 reparent-to-init test can simulate a live init during
+// the pre-joey test phase and restore afterward.
+void proc_test_set_init(struct Proc *p) {
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    __atomic_store_n(&g_init_proc, p, __ATOMIC_RELEASE);
     spin_unlock_irqrestore(&g_proc_table_lock, s);
 }
 
