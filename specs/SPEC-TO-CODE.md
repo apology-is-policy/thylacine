@@ -880,3 +880,25 @@ Liveness: TLC-clean (`EverySubmittedPosts`) — 1505 states.
 cfgs run with `-deadlock`; each module's `Done` self-loop keeps the
 all-terminal state from tripping the deadlock check. The three modules together
 are the Loom-5 pre-commit gate; see docs/LOOM.md §7 + §10.
+
+## death_wake.tla — the #811/LS-5 group-terminate death-wake cascade (HOLOTYPE RW-2 SA-1)
+
+Spec-first re-enabled for this surface (user-directed 2026-06-10; CLAUDE.md). The
+model pins the EXISTING, audit-clean impl — the design-level proof of the
+no-lost-death-wake (I-9 generalized) + exactly-once-ZOMBIE (I-24) the #809/#811
+audits established by prose. The clean cfg is TLC-green; `death_wake_buggy.cfg`
+(`BUGGY_OBSERVE_BEFORE_REGISTER`) is the executable counterexample of the
+#809-audit F1 lost-wake / non-reaping hang.
+
+| Spec action | Code site | Invariant pinned |
+|---|---|---|
+| `SleepBegin` / `AcquireLock` / `RegisterObserve` (the CORRECT register-then-observe under `wlock`) | `kernel/sched.c::sleep` + `tsleep` — take per-Thread `wait_lock`, register (`rendez_blocked_on` + `THREAD_SLEEPING`), re-check `group_exit_msg` (+ the LS-5 latch via `thread_die_pending`) BEFORE dropping the lock + sleeping | `NoLostDeathWake` / `NoStuckSleeper` (I-9): a registered-then-observed sleeper either sees `gflag` and dies or is found+woken by the walk. |
+| `RegisterBuggy` / `SleepBegin` buggy leg (observe BEFORE register, OUTSIDE the lock) | (none — the anti-pattern the impl does NOT do; the buggy cfg only) | the lost-wake window: `BUGGY_OBSERVE_BEFORE_REGISTER` makes `NoLostDeathWake` fail. |
+| `CascadeSet` (publish `gflag` once) | `kernel/proc.c::proc_group_terminate` — the set-once `group_exit_msg` RELEASE CAS | set-once; the RELEASE precedes the per-Thread walk. |
+| `CascadeWalk(t)` (per-Thread wake under `~wlock[t]`) | `proc_group_terminate` / `proc_interrupt_terminate_wake` — walk `p->threads` under `g_proc_table_lock`, take each peer's `wait_lock`, read `rendez_blocked_on`, `wakeup()` (Option-A stack-pin: lock held across the wake) | the cascade wakes only a SLEEPING peer it can lock (never one mid reg-obs). |
+| `Resume(t)` / `RunCheckpoint(t)` (die at the EL0-return tail) | `arch/arm64/exception.c::el0_return_die_check` (sync + IRQ-from-EL0 tails) — a flagged Thread `sched()`s away noreturn; a woken sleeper returns `*_INTR` then dies at the tail | `ZombieImpliesAllDead` (I-24): no Thread runs at EL0 after the ZOMBIE transition. |
+| `ProcReap` (last out → ZOMBIE, set once) | `proc.c::thread_exit_self` / `exits` last-Thread-out `proc_become_zombie_locked` | exactly-once ZOMBIE; `EventuallyReaps` (liveness) is the witness the hang cannot occur. |
+
+Pre-commit gate: `death_wake.cfg` clean GREEN + `death_wake_buggy.cfg`
+counterexample confirmed, on any change to `sleep`/`tsleep`'s register-then-observe,
+the `wait_lock`/`rendez_blocked_on` protocol, or `proc_group_terminate`'s cascade.
