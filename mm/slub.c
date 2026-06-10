@@ -43,6 +43,13 @@
 static struct kmem_cache g_meta_cache;
 static struct kmem_cache g_kmalloc_caches[KMALLOC_NUM_CACHES];
 static struct kmem_cache *g_cache_list_head;
+// RW-1 A-F2: guards g_cache_list_head + every next_cache splice/walk.
+// Boot-time creates are serial, but runtime create/destroy (tests) and
+// any future list walker (/ctl/mem) race the splice without it. LEAF:
+// never held across a cache-lock acquire or an allocation (the destroy
+// path unlinks under it, then frees the descriptor after release).
+// Zero-init = unlocked, so it is valid from the first init_cache call.
+static spin_lock_t g_cache_list_lock;
 
 static const char *KMALLOC_NAMES[KMALLOC_NUM_CACHES] = {
     NULL, NULL, NULL,
@@ -124,9 +131,12 @@ static void init_cache(struct kmem_cache *c, const char *name,
     c->slabs_drained   = 0;
     spin_lock_init(&c->lock);
 
-    // Link onto the global list (head insertion).
+    // Link onto the global list (head insertion), under the list lock
+    // (RW-1 A-F2).
+    irq_state_t s = spin_lock_irqsave(&g_cache_list_lock);
     c->next_cache    = g_cache_list_head;
     g_cache_list_head = c;
+    spin_unlock_irqrestore(&g_cache_list_lock, s);
 }
 
 // ---------------------------------------------------------------------------
@@ -309,7 +319,10 @@ void kmem_cache_destroy(struct kmem_cache *c) {
         extinction("kmem_cache_destroy: live objects remain (full slabs)");
     }
 
-    // Unlink from the global cache list.
+    // Unlink from the global cache list, under the list lock (RW-1
+    // A-F2). The descriptor free stays OUTSIDE it — the list lock is a
+    // leaf and must never nest a cache-lock acquire.
+    irq_state_t s = spin_lock_irqsave(&g_cache_list_lock);
     if (g_cache_list_head == c) {
         g_cache_list_head = c->next_cache;
     } else {
@@ -320,6 +333,7 @@ void kmem_cache_destroy(struct kmem_cache *c) {
             }
         }
     }
+    spin_unlock_irqrestore(&g_cache_list_lock, s);
 
     // Return the cache descriptor itself.
     kmem_cache_free(&g_meta_cache, c);
@@ -351,6 +365,12 @@ void *kmalloc(size_t n, unsigned flags) {
     // page itself records the order (set by alloc_pages); kfree
     // reads it back.
     // P3-Bb: return a direct-map KVA, not the raw PA.
+    // RW-1 A-F1: the rounding below wraps for n within PAGE_SIZE-1 of
+    // SIZE_MAX, turning a near-SIZE_MAX request into a 1-page success
+    // (which also defeats kcalloc's n*size overflow guard — size==1
+    // admits exactly this range). Non-wrapping oversize n is already
+    // safe: alloc_locked rejects order > MAX_ORDER.
+    if (n > (~(size_t)0) - (PAGE_SIZE - 1)) return NULL;
     size_t pages = (n + PAGE_SIZE - 1) >> PAGE_SHIFT;
     unsigned order = (unsigned)ceil_log2_u64((u64)pages);
     struct page *p = alloc_pages(order, flags);
@@ -431,24 +451,30 @@ void slub_init(void) {
 
 u64 slub_total_alloc(void) {
     u64 total = 0;
+    irq_state_t s = spin_lock_irqsave(&g_cache_list_lock);
     for (struct kmem_cache *c = g_cache_list_head; c; c = c->next_cache) {
         total += c->alloc_count;
     }
+    spin_unlock_irqrestore(&g_cache_list_lock, s);
     return total;
 }
 
 u64 slub_total_free(void) {
     u64 total = 0;
+    irq_state_t s = spin_lock_irqsave(&g_cache_list_lock);
     for (struct kmem_cache *c = g_cache_list_head; c; c = c->next_cache) {
         total += c->free_count;
     }
+    spin_unlock_irqrestore(&g_cache_list_lock, s);
     return total;
 }
 
 u64 slub_active_slabs(void) {
     u64 total = 0;
+    irq_state_t s = spin_lock_irqsave(&g_cache_list_lock);
     for (struct kmem_cache *c = g_cache_list_head; c; c = c->next_cache) {
         total += c->slabs_active;
     }
+    spin_unlock_irqrestore(&g_cache_list_lock, s);
     return total;
 }

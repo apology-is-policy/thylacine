@@ -66,6 +66,30 @@ void test_slub_kmem_smoke(void) {
         "phys_free_pages drift: free count not restored after kmem smoke");
 }
 
+// RW-1 A-F1 regression: a near-SIZE_MAX kmalloc must fail, not wrap.
+// Pre-fix, `(n + PAGE_SIZE - 1) >> PAGE_SHIFT` wrapped for n within
+// PAGE_SIZE-1 of SIZE_MAX, so the large path computed pages ~ 0,
+// order 0, and returned ONE page for the request — a heap-overflow
+// primitive that also defeated kcalloc's own n*size guard (size==1
+// admits exactly this range). Each leg below returns non-NULL on the
+// pre-fix code, failing the assert.
+void test_slub_kmalloc_overflow_guard(void) {
+    size_t size_max = ~(size_t)0;
+
+    TEST_ASSERT(kmalloc(size_max, 0) == NULL,
+                "kmalloc(SIZE_MAX) must return NULL, not wrap");
+    TEST_ASSERT(kmalloc(size_max - (PAGE_SIZE - 2), 0) == NULL,
+                "kmalloc just inside the wrap range must return NULL");
+    TEST_ASSERT(kcalloc(size_max - 100, 1, 0) == NULL,
+                "kcalloc(SIZE_MAX-100, 1) must return NULL "
+                "(its n*size guard alone does not catch size==1)");
+
+    // Contract pin (passes pre-fix too): a huge but non-wrapping
+    // request fails via alloc_locked's order > MAX_ORDER reject.
+    TEST_ASSERT(kmalloc((size_t)1 << 40, 0) == NULL,
+                "kmalloc(1 TiB) must return NULL via the order bound");
+}
+
 // 10 000-iteration kmalloc/kfree leak check (ROADMAP §4.2 exit
 // criterion). Cycles a single 64-byte allocation through kmalloc →
 // kfree 10 000 times. Single pointer (10K array would overflow the
