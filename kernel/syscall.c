@@ -952,11 +952,13 @@ static s64 sys_lseek_handler(u64 hraw, u64 offset_raw, u64 whence_raw) {
     struct Spoor *c = sys_lookup_rw_handle(p, (hidx_t)hraw, 0);
     if (!c)                                           return -1;
 
-    // R16b-gamma-mount-close audit F3 close: reject lseek on non-seekable
-    // Devs. The presence of `dev->stat_native` is the seek-capability
-    // indicator at v1.0: file-like Devs (devramfs) implement it; stream-like
-    // Devs leave it NULL. POSIX lseek(2) on a pipe returns -1/ESPIPE.
-    if (c->dev->stat_native == NULL)                { spoor_clunk(c); return -1; }
+    // Reject lseek on a non-seekable Dev (POSIX lseek(2) on a pipe -> ESPIPE).
+    // RW-4 R2-F2: the old `dev->stat_native == NULL` heuristic broke when #957
+    // (devsrv) + A-4b (devproc) gave non-seekable Devs a .stat_native for fstat,
+    // regressing lseek to succeed on an offset their read/write ignore. The
+    // explicit dev->seekable flag (devramfs + dev9p only) decouples fstat-ability
+    // from seekability.
+    if (!c->dev->seekable)                          { spoor_clunk(c); return -1; }
 
     s64 offset = (s64)offset_raw;
     s64 new_off;

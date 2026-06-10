@@ -136,6 +136,14 @@ struct srvconn_chan {
     u32            head;          // next write index; mod SRVCONN_RING_CAP
     u32            tail;          // next read index; mod SRVCONN_RING_CAP
     bool           eof;           // teardown latched this direction
+    bool           reading;       // a blocking consumer holds the single-reader
+                                  // role (RW-4 R2-F1 busy-guard): the rendez is
+                                  // single-waiter, but the byte-mode userspace
+                                  // read() path has no p9_client-lock serializer
+                                  // and peer Threads share the fd, so a 2nd
+                                  // concurrent blocking recv is refused (-1)
+                                  // rather than registering a 2nd waiter (which
+                                  // trips the single-waiter extinction)
     struct Rendez  rendez;        // the single blocking consumer waits here
     u8             buf[SRVCONN_RING_CAP];
 };

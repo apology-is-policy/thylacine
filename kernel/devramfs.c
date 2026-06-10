@@ -563,6 +563,7 @@ struct Dev devramfs = {
     .walk     = devramfs_walk,
     .stat     = devramfs_stat,
     .stat_native = devramfs_stat_native,
+    .seekable = true,   // file content: read/write honor the byte offset (RW-4 R2-F2)
 
     .open     = devramfs_open,
     .create   = devramfs_create,

@@ -63,6 +63,16 @@ struct Dev {
     // baked tree, so enforcement does not brick).
     bool         perm_enforced;
 
+    // SYS_LSEEK is permitted only on Devs whose read/write HONOR the byte offset
+    // (file content with a meaningful position): devramfs + dev9p set this true.
+    // Stream / service / control Devs (devsrv conn+registry, devproc, devnotes,
+    // devcons, devnone, devctl) leave it false (the zero default) -> lseek returns
+    // -1 (POSIX ESPIPE). Was inferred from `.stat_native != NULL` until RW-4 R2-F2:
+    // #957 (devsrv) and A-4b (devproc) added .stat_native to non-seekable Devs for
+    // fstat, silently regressing lseek to succeed-on-an-unused-offset; an explicit
+    // flag decouples "can fstat" from "can seek".
+    bool         seekable;
+
     // Lifecycle: called by the kernel.
     //   reset()    — re-initialize the dev (Plan 9 `dev->reset`);
     //                kernel-driven on hardware reset.

@@ -1551,6 +1551,44 @@ static void loom_wait_for_completions(struct Loom *l, u32 min_complete,
     poll_waiter_init(&pw, &r);
 
     for (;;) {
+        // SQPOLL ring: the kthread is the SOLE driver (rearm / admit / pump). A
+        // min_complete ENTER reaches this wait even on an SQPOLL ring; it MUST NOT
+        // drive loom_rearm_pending / loom_admit_chain / the pump here -- doing so
+        // writes l->chain + l->cq_tail (under l->lock) while the parked kthread
+        // reads them lock-free in loom_sqpoll_park_cond (a data race, R4-F1), and
+        // breaks the Loom-5 F4 single-admitter premise (widening the over-admit
+        // residual to single-threaded SQPOLL+chain). Instead just sample + wait
+        // for the kthread to post CQEs. "Nothing more can complete" mirrors the
+        // park cond EXACTLY: no inflight op AND no held re-arm AND no held chain
+        // (a back-pressured kthread-owned stream resumes on the post-reap wake, so
+        // the ENTER caller must sleep on it, not give up). Reads under l->lock are
+        // race-free vs the kthread's own l->lock-held chain/rearm writes.
+        if (l->sqpoll) {
+            spin_lock(&l->lock);
+            u32 sq_ready    = loom_cq_ready(l);
+            bool sq_more    = (l->async_inflight > 0)
+                              || __atomic_load_n(&l->rearm_pending, __ATOMIC_ACQUIRE) != 0u
+                              || l->chain != NULL;
+            spin_unlock(&l->lock);
+            if (sq_ready >= min_complete) break;
+            if (!sq_more)                 break;
+
+            pw.ready = false;
+            bool sq_sleep;
+            spin_lock(&l->lock);
+            poll_waiter_list_register(&l->cq_waiters, &pw);
+            sq_more  = (l->async_inflight > 0)
+                       || __atomic_load_n(&l->rearm_pending, __ATOMIC_ACQUIRE) != 0u
+                       || l->chain != NULL;
+            sq_sleep = (loom_cq_ready(l) < min_complete) && sq_more;
+            spin_unlock(&l->lock);
+            if (!sq_sleep) { poll_waiter_list_unregister(&pw); continue; }
+            int ss = sleep(&r, loom_cqw_cond, &pw);
+            poll_waiter_list_unregister(&pw);
+            if (ss == SLEEP_INTR) break;   // #811: ENTER caller's Proc group-terminating
+            continue;                       // woken by a posted CQE -> re-sample
+        }
+
         // Re-arm any MORE-pending multishot op (Loom-5) BEFORE the give-up sample:
         // a stream that posted a MORE shot last pump (async_inflight--, rearm set)
         // must re-issue (async_inflight++) here, else the inflight==0 give-up arm

@@ -672,6 +672,71 @@ the UP-like in-kernel tests stay quiescent). Five transferable moves:
 
 ---
 
+## 6.15 The recurrent class — the multi-thread-Proc lift outran per-Proc shared-state serialization (RW-2 + RW-4, 2026-06-10)
+
+The single most productive question in the HOLOTYPE re-review has been: **"this
+per-Proc structure was written when a Proc was single-threaded — who serializes
+it now that threads are real?"** P6 (pouch-threads) made a Proc a set of peer
+Threads sharing one address space, one handle table, one Territory, one set of
+service connections — and `rfork(RFNAMEG)` shares a Territory *across* Procs.
+Every structure that was implicitly protected by "only one thread of control ever
+touches my Proc's state" lost that protection the moment threads landed, but the
+locks/multi-waiters did not all arrive with them. The defects are **latent**
+(no current in-tree workload drives two threads into the same structure
+concurrently) yet **EL0-reachable** (a user pthread program — or two RFNAMEG
+Procs — reaches them with no privilege), so they read as P1: correct under
+current coverage, a kernel UAF/extinction under a realistic-but-absent workload.
+
+Independently surfaced instances (two RWs, four findings, one root cause):
+
+- **RW-2 2C-F1 [P1]** — a poll registration outlives the polled object's ref: a
+  peer thread closing the fd frees the object while another thread's poll waiter
+  still points into it (UAF).
+- **RW-2 2B-F1/F2 [P1]** — `wait_pid`'s single-waiter `child_done` + a lockless
+  cond walk: two threads reaping concurrently corrupt the walk / lose a wake.
+- **RW-4 SA-F1 [P1]** — the per-Territory mount table + `root_spoor` carry no
+  lock at all (only `dot_lock`, added by LS-4 for the cwd string); a concurrent
+  `pivot_root`/`unmount` on one thread frees a Spoor a walking thread is mid-read
+  on (`root_spoor` UAF), and `mount_lookup` returns a source a concurrent
+  `unmount` just freed.
+- **RW-4 R2-F1 [P1]** — the byte-mode `/srv` connection's single-waiter `Rendez`
+  was safe only under the 9P-client lock serialization (one drainer per ring);
+  the P6-pouch-sockets byte-mode userspace `read()` path bypasses that lock, so
+  two threads reading one conn fd trip `extinction("rendez already has a waiter")`.
+
+The already-fixed precedents are the same class caught earlier, one structure at
+a time: **#844** (handle-table lock), **LS-4** (`dot_lock` for the cwd string),
+**#713** (`vma_lock` for the VMA list — "stratumd is the first heavily-threaded
+Proc"), **#847** (per-Burrow dual-refcount). Each was found in isolation; the
+RW-review made the *pattern* legible.
+
+**The generalizable move — when you touch ANY per-Proc-shared structure:**
+1. Enumerate its writers and readers. If more than one Thread of a Proc (or more
+   than one RFNAMEG-sharing Proc) can reach it concurrently, it needs a lock or a
+   multi-waiter — "the current programs don't do that" is the latent-P1 trap, not
+   a safety argument (the kernel must be sound against any EL0 program).
+2. A **single-waiter `Rendez`** on per-Proc-reachable state is a red flag: it is
+   safe ONLY if something *else* guarantees a single drainer (e.g. a client lock).
+   The instant a second code path reaches the same wait without that guarantee,
+   the single-waiter assertion is an unprivileged extinction. Prefer the
+   `poll_waiter_list` multi-waiter, or an explicit single-reader busy-guard (the
+   `devcons` pattern: a 2nd concurrent reader gets `-1`, never a 2nd waiter).
+3. A lock added for *one* field of a shared struct (LS-4's `dot_lock` guards only
+   `dot_path`) does NOT cover the rest of the struct — the unguarded siblings
+   (`mounts[]`, `root_spoor`) are the next finding. Audit the *whole* struct.
+4. The fix is mechanical (a near-leaf lock, taken around the read-modify-write,
+   never held across a blocking call — the `dot_lock` discipline: copy/swap under
+   the lock, free/clone/walk outside it). The hard part is *finding* every member;
+   the cross-cut (RW-10) maintains the ledger of per-Proc-shared structures ×
+   their serialization so the sweep is exhaustive, not one-finding-at-a-time.
+
+This is the soundness twin of the masking-bug-stack (§6.1) and the flake/ownership
+dismissal (§6.11): the convenience-seeking read is "no program does that, so it's
+dormant." It is not dormant — it is *latent*, and latent-reachable-from-EL0 is a
+live soundness defect. Enqueue + fix or escalate; never file it "tracked dormant."
+
+---
+
 ## 7. Appendix — reproduction recipe
 
 ```sh

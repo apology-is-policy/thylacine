@@ -60,7 +60,12 @@ static struct Spoor *clone_walk_zero(struct Spoor *src) {
     struct Spoor *q = spoor_clone(src);
     if (!q) return NULL;
     struct Walkqid *w = src->dev->walk(src, q, (const char **)0, 0);
-    if (!w || w->spoor != q) {
+    // Validate the reply shape with the same rigor as the main resolution loop
+    // (which rejects w->nqid != 1): a 0-element walk MUST yield w->nqid == 0. A
+    // Dev returning w->spoor == q with a phantom step (nqid != 0) would hand back
+    // a crossed root carrying a qid the Dev set during a step that never
+    // happened. All real Devs honor nname==0 -> nqid==0; reject otherwise.
+    if (!w || w->spoor != q || w->nqid != 0) {
         if (w) walkqid_free(w);
         q->aux = NULL;
         spoor_unref(q);

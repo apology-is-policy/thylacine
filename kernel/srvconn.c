@@ -390,16 +390,30 @@ long srvconn_client_recv(struct SrvConn *cn, u8 *buf, long n) {
     if (n == 0) return 0;
 
     struct srvconn_chan *ch = &cn->s2c;
+
+    // RW-4 R2-F1: claim the single-reader role. ch->rendez is single-waiter; a
+    // 2nd concurrent blocking consumer would trip its single-waiter extinction.
+    // The 9P-mode path is serialized by the kernel p9_client lock (one drainer),
+    // but the byte-mode userspace read() path is not, and peer Threads share the
+    // fd -- refuse the 2nd reader (-1) rather than register a 2nd waiter (the
+    // devcons single-reader pattern). Released on every exit below.
+    spin_lock(&ch->lock);
+    if (ch->reading) { spin_unlock(&ch->lock); return -1; }
+    ch->reading = true;
+    spin_unlock(&ch->lock);
+
+    long ret;
     for (;;) {
         spin_lock(&ch->lock);
         if (ch->count > 0) {
-            long got = chan_ring_read(ch, buf, n);
+            ret = chan_ring_read(ch, buf, n);
             spin_unlock(&ch->lock);
-            return got;
+            break;
         }
         if (ch->eof) {
             spin_unlock(&ch->lock);
-            return 0;                        // EOF — torn down, drained
+            ret = 0;                          // EOF — torn down, drained
+            break;
         }
         spin_unlock(&ch->lock);
 
@@ -411,14 +425,22 @@ long srvconn_client_recv(struct SrvConn *cn, u8 *buf, long n) {
                         cn->client_deadline_ns);
         if (ts == TSLEEP_TIMEDOUT) {
             cn->client_timed_out = true;
-            return -1;                       // corvus hung past the deadline
+            ret = -1;                         // corvus hung past the deadline
+            break;
         }
         // #811 (ARCH §8.8.1): death-interrupted -> Proc group-terminating;
         // return so the Thread unwinds to its EL0-return die-check.
-        if (ts == TSLEEP_INTR)
-            return -1;
+        if (ts == TSLEEP_INTR) {
+            ret = -1;
+            break;
+        }
         // TSLEEP_AWOKEN — loop, re-check the channel under the lock.
     }
+
+    spin_lock(&ch->lock);
+    ch->reading = false;
+    spin_unlock(&ch->lock);
+    return ret;
 }
 
 long srvconn_server_send(struct SrvConn *cn, const u8 *buf, long n) {
@@ -467,16 +489,28 @@ long srvconn_server_recv_blocking(struct SrvConn *cn, u8 *buf, long n) {
     if (n == 0) return 0;
 
     struct srvconn_chan *ch = &cn->c2s;
+
+    // RW-4 R2-F1: same single-reader busy-guard as srvconn_client_recv (this is
+    // the byte-mode POSIX-server read() path, the most exposed concurrent-reader
+    // case). A 2nd concurrent blocking reader is refused (-1), never a 2nd
+    // single-waiter Rendez waiter.
+    spin_lock(&ch->lock);
+    if (ch->reading) { spin_unlock(&ch->lock); return -1; }
+    ch->reading = true;
+    spin_unlock(&ch->lock);
+
+    long ret;
     for (;;) {
         spin_lock(&ch->lock);
         if (ch->count > 0) {
-            long got = chan_ring_read(ch, buf, n);
+            ret = chan_ring_read(ch, buf, n);
             spin_unlock(&ch->lock);
-            return got;
+            break;
         }
         if (ch->eof) {
             spin_unlock(&ch->lock);
-            return 0;                        // EOF — connection torn down
+            ret = 0;                          // EOF — connection torn down
+            break;
         }
         spin_unlock(&ch->lock);
 
@@ -485,15 +519,22 @@ long srvconn_server_recv_blocking(struct SrvConn *cn, u8 *buf, long n) {
         // srvconn_teardown's chan_set_eof on c2s (peer closed).
         int ts = tsleep(&ch->rendez, chan_cond_readable, ch, 0u);
         if (ts == TSLEEP_TIMEDOUT) {
-            // Unreachable with deadline=0; defense in depth.
-            return -1;
+            ret = -1;                         // Unreachable with deadline=0; defense in depth.
+            break;
         }
         // #811 (ARCH §8.8.1): death-interrupted -> Proc group-terminating;
         // return so the Thread unwinds to its EL0-return die-check.
-        if (ts == TSLEEP_INTR)
-            return -1;
+        if (ts == TSLEEP_INTR) {
+            ret = -1;
+            break;
+        }
         // TSLEEP_AWOKEN — loop, re-check the channel under the lock.
     }
+
+    spin_lock(&ch->lock);
+    ch->reading = false;
+    spin_unlock(&ch->lock);
+    return ret;
 }
 
 // =============================================================================

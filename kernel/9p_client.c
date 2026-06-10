@@ -289,6 +289,14 @@ static void demux_frame_locked(struct p9_client *c, size_t len) {
             int result = map_error(0, drc, &dr);
             owner->done = true;                       // set before the callback;
             owner->on_complete(owner, result, &dr);   // may free owner -> last use
+            // Same fail-closed posture as the sync DONE path: a negative drc is
+            // an unrecoverable protocol violation that left outstanding[tag]
+            // uncleared. This owner already got its error CQE (result < 0); latch
+            // the session dead so the leaked slot cannot wedge the pool and every
+            // remaining in-flight op fails closed. owner may be freed by the
+            // callback above; mark_dead touches only the OTHER inflight[] slots
+            // (this tag was NULLed before dispatch).
+            if (drc < 0) client_mark_dead_locked(c);
             return;
         }
         if (len > c->recv_cap) { client_mark_dead_locked(c); return; }  // defensive
@@ -457,6 +465,19 @@ static int client_run(struct p9_client *c, size_t built_len,
     // session.outstanding[tag], applies fid state) under c->lock.
     int drc = p9_session_dispatch_rmsg(&c->session, rpc.reply_buf,
                                        (size_t)rpc.reply_len, out);
+    // A negative drc is an UNRECOVERABLE protocol violation: a reply that is
+    // well-framed (it reached demux) but cannot be parsed for its own
+    // outstanding op -- a wrong R-type on the tag, a body that fails the
+    // strict-length parse, or a tag-echo mismatch. dispatch_rmsg returns before
+    // clear_outstanding on every such path, so the session.outstanding[tag] slot
+    // is otherwise LEAKED (a benign Rlerror returns 0, not <0, so this never
+    // fires on a normal server error). Fail closed -- identical in class to the
+    // demux-level malformations client_mark_dead_locked already latches on
+    // (a corrupted in-kernel ring / a buggy server). Without this the leaked
+    // slot exhausts the 64-tag pool after <=64 such replies (a session wedge),
+    // and a later well-formed reply on the still-active tag dispatches
+    // ownerlessly + can spuriously mutate fid state.
+    if (drc < 0) client_mark_dead_locked(c);
     // Do NOT free rpc.reply_buf here: dispatch set the read/readdir/readlink
     // zero-copy aliases (out->read_data etc.) pointing INTO it, and the public
     // op copies those out AFTER this returns. Keep it as the client's

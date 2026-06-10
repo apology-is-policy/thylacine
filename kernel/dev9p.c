@@ -636,6 +636,7 @@ struct Dev dev9p = {
     .walk     = dev9p_walk,
     .stat     = dev9p_stat,
     .stat_native = dev9p_stat_native,
+    .seekable = true,   // file content: read/write honor the byte offset (RW-4 R2-F2)
 
     .open     = dev9p_open,
     .create   = dev9p_create,
