@@ -34,7 +34,6 @@
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
 
-#include "../arch/arm64/asid.h"
 #include "../arch/arm64/mmu.h"
 #include "../arch/arm64/timer.h"   // timer_now_ns (A-4a legate valid_until expiry)
 #include "../arch/arm64/uaccess.h"
@@ -185,9 +184,10 @@ static void proc_init_fields(struct Proc *p, int pid) {
     p->pid   = pid;
     p->state = PROC_STATE_ALIVE;
     rendez_init(&p->child_done);
-    // P3-Bcb: pgtable_root + asid left at 0 by KP_ZERO. proc_alloc
-    // (post-phys_init) installs real values; proc_init (kproc, pre-
-    // phys_init) leaves them at 0 — kproc never enters EL0 and never
+    // P3-Bcb: pgtable_root + context_id left at 0 by KP_ZERO. proc_alloc
+    // (post-phys_init) installs a real pgtable_root and leaves context_id 0
+    // for the rolling allocator to stamp at first switch; proc_init (kproc,
+    // pre-phys_init) leaves both at 0 — kproc never enters EL0 and never
     // needs a user-half page table or a non-kernel ASID.
     // parent / children / sibling / exit_status / exit_msg / threads /
     // territory all left NULL/0 via KP_ZERO; caller (proc_init for kproc;
@@ -286,29 +286,15 @@ struct Proc *proc_alloc(void) {
         return NULL;
     }
 
-    // P3-Bcb: per-Proc page-table root + ASID. The pgtable_root is a
-    // fresh L0 (KP_ZERO; all 512 entries invalid). The asid is taken
-    // from the asid_alloc free-list / monotonic counter. Both are
-    // installed in TTBR0_EL1 at context switch (P3-Bd) so each Proc's
-    // user-half is independent.
-    //
-    // Order: pgtable_create FIRST (more failure-prone — buddy may be
-    // exhausted), asid_alloc SECOND. Rollback flow on either failure
-    // transitions to ZOMBIE and calls proc_free, which idempotently
-    // releases pgtable (root != 0) + asid (asid != 0).
+    // P3-Bcb / RW-1 B-F1: per-Proc page-table root. A fresh L0 (KP_ZERO; all
+    // 512 entries invalid), installed in TTBR0_EL1 at context switch so each
+    // Proc's user-half is independent. The ASID is NOT assigned here:
+    // context_id stays 0 ("never assigned", KP_ZERO) and the rolling allocator
+    // stamps it at the first context switch (asid_resolve, the context-switch
+    // pre-hook; ARCH section 6.2.1). There is no ASID-space exhaustion to roll
+    // back from -- rollover recycles the space.
     p->pgtable_root = proc_pgtable_create();
     if (p->pgtable_root == 0) {
-        p->state = PROC_STATE_ZOMBIE;
-        proc_free(p);
-        return NULL;
-    }
-    // RW-1 B-F1 fail-soft interim: asid_alloc returns 0 on ASID-space
-    // exhaustion (no longer extincts). Roll back like any other alloc
-    // failure -- proc_free releases the pgtable just created and skips
-    // asid_free (p->asid == 0). The spawn syscall surfaces -errno. (The
-    // generation-rollover redesign, ARCH section 6.2, removes exhaustion.)
-    p->asid = asid_alloc();
-    if (p->asid == 0) {
         p->state = PROC_STATE_ZOMBIE;
         proc_free(p);
         return NULL;
@@ -417,25 +403,23 @@ void proc_free(struct Proc *p) {
         p->notes = NULL;
     }
 
-    // P3-Bcb: release per-Proc address space resources. Both calls are
-    // idempotent on 0: kproc + rolled-back-pre-pgtable_create paths
-    // hit no-ops cleanly. asid_free issues an inner-shareable broadcast
-    // TLB-flush by ASID before returning the slot to the pool (so the
-    // next reuser sees a clean TLB).
+    // RW-1 B-F1: release the per-Proc page table. There is NO per-Proc ASID
+    // free in the rolling-ASID model -- the Proc's context_id is simply
+    // dropped; its hardware ASID value stays reserved in the current
+    // generation's bitmap until the next rollover, which reclaims the whole
+    // space at once (ARCH section 6.2.1).
     //
-    // F4 hardening (audit-r-memory-model): asid_free runs BEFORE
-    // proc_pgtable_destroy. Doing it first ensures all sibling-CPU TLB
-    // entries tagged with this Proc's ASID are invalidated before the
-    // sub-table pages return to the buddy free-list -- a speculative
-    // walker on another CPU can't reach a recently-recycled L1/L2/L3
-    // page via stale TLB hints. Pre-F4 the order was reversed; both
-    // orders are correct (asid_free is the TLB-flush step in either
-    // position), but this order narrows the speculative-prefetch
-    // window. See arch/arm64/mmu.c proc_pgtable_destroy doc comment.
-    if (p->asid != 0) {                // ASID 0 is kernel-reserved
-        asid_free(p->asid);
-        p->asid = 0;
-    }
+    // This is TLB-safe WITHOUT the old asid_free broadcast (the F4
+    // asid_free-before-destroy ordering is moot -- there is no asid_free):
+    //   - the leaf user mappings were already invalidated by vma_drain's
+    //     all-ASID `tlbi vaae1is` (vma_drain runs above, before proc_free);
+    //   - no live CPU holds this dead Proc's TTBR0 (every thread was reaped +
+    //     on_cpu-spun before proc_free), so no CPU translates under its ASID
+    //     and no walk reaches a recently-recycled L1/L2/L3 page;
+    //   - any eventual reuse of the ASID value is gated by the rollover's
+    //     per-CPU flush_pending local flush before the value goes live again.
+    // (Matches the Linux model: no TLB flush at mm teardown; reclaim at
+    // rollover.)
     if (p->pgtable_root != 0) {
         proc_pgtable_destroy(p->pgtable_root);
         p->pgtable_root = 0;

@@ -106,8 +106,8 @@ static void exec_thunk(void *arg) {
         uart_putdec((u64)ea->iteration);
         uart_puts("] exec_thunk: pid=");
         uart_putdec((u64)p->pid);
-        uart_puts(" asid=");
-        uart_putdec((u64)p->asid);
+        uart_puts(" context_id=");
+        uart_puthex64((u64)p->context_id);
         uart_puts(" pgtable_root=");
         uart_puthex64((u64)p->pgtable_root);
         uart_puts(" cpu=");

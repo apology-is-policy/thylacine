@@ -142,13 +142,16 @@ struct Proc {
     // half mapping. P3-Bd loads pgtable_root into TTBR0_EL1 at context
     // switch; P3-Be handles the kproc kernel-only path.
     //
-    // asid is the ASID assigned to this Proc by asid_alloc. Used at
-    // P3-Bd as the high bits of TTBR0_EL1 so the TLB tags the Proc's
-    // entries with its own ASID (avoiding cross-Proc TLB pollution).
-    // kproc gets asid = 0 (ASID_RESERVED_KERNEL).
+    // context_id is the rolling-ASID context (generation | hardware ASID) --
+    // RW-1 B-F1; ARCH section 6.2.1. Replaces the per-Proc-permanent u16 asid.
+    // 0 == "never assigned" (always misses). Resolved + re-stamped at context
+    // switch by asid_resolve (the pre-hook) into the high bits of TTBR0_EL1;
+    // never allocated at create nor freed at reap (rollover recycles the
+    // space). kproc keeps context_id = 0 (pgtable_root == 0 -> kernel TTBR0,
+    // bypassing the allocator). Accessed via __atomic_* (the fast path is
+    // lockless). See arch/arm64/asid.{c,h}.
     paddr_t            pgtable_root;
-    u16                asid;
-    u16                _pad_asid[3];     // explicit alignment padding
+    u64                context_id;
 
     // P3-Da: per-Proc VMA list (sorted by vaddr_start ascending). Each
     // VMA describes a contiguous user-VA range with permissions +

@@ -135,7 +135,7 @@ void test_pgtable_install_user_pte_smoke(void) {
     paddr_t backing_pa = page_to_pa(backing_pg);
 
     // Install RW + R (no exec).
-    int rc = mmu_install_user_pte(p->pgtable_root, p->asid,
+    int rc = mmu_install_user_pte(p->pgtable_root, 0,
                                   USER_VA, backing_pa, VMA_PROT_RW,
                                   /*device_memory=*/false);
     TEST_EXPECT_EQ(rc, 0, "install RW PTE should succeed");
@@ -158,7 +158,7 @@ void test_pgtable_install_user_pte_smoke(void) {
     // Install RX (read-only + exec) at a different vaddr.
     paddr_t code_pa = page_to_pa(alloc_pages(0, KP_ZERO));
     TEST_ASSERT(code_pa != 0, "alloc_pages code backing failed");
-    rc = mmu_install_user_pte(p->pgtable_root, p->asid,
+    rc = mmu_install_user_pte(p->pgtable_root, 0,
                               USER_VA + ONE_PAGE, code_pa, VMA_PROT_RX,
                               /*device_memory=*/false);
     TEST_EXPECT_EQ(rc, 0, "install RX PTE should succeed");
@@ -184,22 +184,22 @@ void test_pgtable_install_user_pte_constraints(void) {
         "pgtable_root=0 rejected");
 
     // Unaligned vaddr.
-    TEST_EXPECT_EQ(mmu_install_user_pte(p->pgtable_root, p->asid,
+    TEST_EXPECT_EQ(mmu_install_user_pte(p->pgtable_root, 0,
                                         USER_VA + 1, backing_pa, VMA_PROT_RW, false), -1,
         "unaligned vaddr rejected");
 
     // Unaligned pa.
-    TEST_EXPECT_EQ(mmu_install_user_pte(p->pgtable_root, p->asid,
+    TEST_EXPECT_EQ(mmu_install_user_pte(p->pgtable_root, 0,
                                         USER_VA, backing_pa + 1, VMA_PROT_RW, false), -1,
         "unaligned pa rejected");
 
     // vaddr in TTBR1 high half — installer rejects (top bits set).
-    TEST_EXPECT_EQ(mmu_install_user_pte(p->pgtable_root, p->asid,
+    TEST_EXPECT_EQ(mmu_install_user_pte(p->pgtable_root, 0,
                                         0xFFFF000000000000ull, backing_pa, VMA_PROT_RW, false), -1,
         "high-VA vaddr rejected");
 
     // W+X prot.
-    TEST_EXPECT_EQ(mmu_install_user_pte(p->pgtable_root, p->asid,
+    TEST_EXPECT_EQ(mmu_install_user_pte(p->pgtable_root, 0,
                                         USER_VA, backing_pa,
                                         VMA_PROT_READ | VMA_PROT_WRITE | VMA_PROT_EXEC, false), -1,
         "W+X rejected at PTE installer (defense-in-depth)");
@@ -214,7 +214,7 @@ void test_pgtable_install_user_pte_idempotent(void) {
     TEST_ASSERT(backing_pa != 0, "backing alloc");
 
     // First install.
-    int rc = mmu_install_user_pte(p->pgtable_root, p->asid,
+    int rc = mmu_install_user_pte(p->pgtable_root, 0,
                                   USER_VA, backing_pa, VMA_PROT_RW,
                                   /*device_memory=*/false);
     TEST_EXPECT_EQ(rc, 0, "first install ok");
@@ -223,7 +223,7 @@ void test_pgtable_install_user_pte_idempotent(void) {
     // new sub-tables.
     u64 free_before_second = phys_free_pages();
 
-    rc = mmu_install_user_pte(p->pgtable_root, p->asid,
+    rc = mmu_install_user_pte(p->pgtable_root, 0,
                               USER_VA, backing_pa, VMA_PROT_RW, false);
     TEST_EXPECT_EQ(rc, 0, "idempotent second install returns 0");
     TEST_EXPECT_EQ(phys_free_pages(), free_before_second,
@@ -232,7 +232,7 @@ void test_pgtable_install_user_pte_idempotent(void) {
     // Mismatching install (different PA) returns -1.
     paddr_t other_pa = page_to_pa(alloc_pages(0, KP_ZERO));
     TEST_ASSERT(other_pa != 0, "other backing alloc");
-    rc = mmu_install_user_pte(p->pgtable_root, p->asid,
+    rc = mmu_install_user_pte(p->pgtable_root, 0,
                               USER_VA, other_pa, VMA_PROT_RW, false);
     TEST_EXPECT_EQ(rc, -1, "mismatching install rejected");
 

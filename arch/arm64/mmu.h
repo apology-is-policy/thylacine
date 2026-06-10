@@ -381,19 +381,16 @@ paddr_t mmu_kernel_ttbr0_pa(void);
 // Returns 0 on OOM (caller treats as ENOMEM and rolls back the Proc
 // allocation). Idempotent on input root == 0.
 //
-// TLB lifecycle: asid_free issues a broadcast `tlbi aside1is` that
-// invalidates all TLB entries tagged with the freed Proc's ASID. The
-// flush happens BEFORE the ASID is returned to the free-list (see
-// arch/arm64/asid.c), which ensures any subsequent reuser starts with a
-// clean TLB. Independently, the freed pgtable PAs may be returned to
-// buddy by proc_pgtable_destroy and recycled — that's safe because:
+// TLB lifecycle (RW-1 B-F1, the rolling-ASID model -- there is no per-Proc
+// asid_free): the freed pgtable PAs may be returned to buddy by
+// proc_pgtable_destroy and recycled -- that's safe because:
 //   (a) The Proc is not running on any CPU at proc_free time (its sole
 //       thread reached THREAD_EXITING + sched dropped it; wait_pid spun
-//       on on_cpu == 0 before reaping).
-//   (b) No other Proc uses our ASID until asid_free's flush + free-list
-//       push, after which any reuser sees no stale entries.
-// proc.c::proc_free's order (proc_pgtable_destroy before asid_free) is
-// thus correct; reversing would also be correct.
+//       on on_cpu == 0 before reaping), so no CPU walks its tables.
+//   (b) Its leaf mappings were invalidated by vma_drain's all-ASID
+//       `tlbi vaae1is`; its hardware ASID stays reserved until the next
+//       rollover, whose per-CPU flush_pending local flush gates any reuse.
+// See arch/arm64/asid.{c,h} for the allocator and proc.c::proc_free.
 // =============================================================================
 
 paddr_t proc_pgtable_create(void);

@@ -33,6 +33,8 @@
 
 #include "test.h"
 
+#include "../../arch/arm64/mmu.h"   // mmu_kernel_ttbr0_pa (RW-1 B-F1 ctx.ttbr0)
+
 #include <thylacine/context.h>
 #include <thylacine/extinction.h>
 #include <thylacine/proc.h>
@@ -76,10 +78,11 @@ void test_thread_create_user_ctx_layout(void) {
                 "fresh thread is RUNNABLE");
     TEST_ASSERT(t->proc == p, "Thread's proc pointer");
     TEST_ASSERT(t->kstack_base != NULL, "Thread has kstack");
-    // ttbr0 should encode the Proc's asid + pgtable_root.
-    u64 expected_ttbr0 = ((u64)p->asid << 48) | (u64)p->pgtable_root;
-    TEST_EXPECT_EQ(t->ctx.ttbr0, expected_ttbr0,
-                   "ctx.ttbr0 = (asid<<48)|pgtable_root");
+    // RW-1 B-F1: ctx.ttbr0 is baked to the kernel TTBR0 at create; the rolling
+    // ASID user value (asid << 48 | pgtable_root) is installed by the context-
+    // switch pre-hook before the first switch, not at create.
+    TEST_EXPECT_EQ(t->ctx.ttbr0, (u64)mmu_kernel_ttbr0_pa(),
+                   "ctx.ttbr0 = kernel TTBR0 at create (rolling ASID set at switch)");
     TEST_EXPECT_EQ(t->clear_child_tid, 0ull,
                    "clear_child_tid defaults to 0 (unset)");
 

@@ -408,8 +408,10 @@ static enum fault_result demand_page_locked(struct Proc *p,
         return FAULT_UNHANDLED_USER;
     }
 
-    // 5. Install the leaf PTE in the per-Proc TTBR0 tree.
-    int rc = mmu_install_user_pte(p->pgtable_root, p->asid,
+    // 5. Install the leaf PTE in the per-Proc TTBR0 tree. The asid arg is
+    // vestigial (the install does an all-ASID `tlbi vaae1is`); pass 0 -- the
+    // Proc's rolling ASID is resolved at context switch, not here (RW-1 B-F1).
+    int rc = mmu_install_user_pte(p->pgtable_root, 0,
                                   page_va, page_pa, vma->prot,
                                   device_memory);
     if (rc != 0)                         return FAULT_UNHANDLED_USER;

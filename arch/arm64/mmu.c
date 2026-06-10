@@ -44,6 +44,7 @@
 
 #include "mmu.h"
 #include "kaslr.h"
+#include "asid.h"             // asid_hw_bits (TCR_EL1.AS sizing, RW-1 B-F1)
 
 #include <stddef.h>           // size_t (P3-Bb mmu_map_mmio)
 #include <stdint.h>
@@ -665,6 +666,7 @@ static void build_page_tables(u64 slide) {
 #define TCR_IPS_36BIT    (1ull  << 32)        // 64 GiB physical max (sufficient)
 #define TCR_IPS_40BIT    (2ull  << 32)        // 1 TiB physical max
 #define TCR_IPS_VALUE    TCR_IPS_40BIT
+#define TCR_AS_16BIT     (1ull  << 36)        // ASID size: 1 = 16-bit (else 8-bit)
 
 #define TCR_VALUE \
     (TCR_T0SZ_48BIT | TCR_TG0_4K | TCR_SH0_INNER | TCR_ORGN0_WB | TCR_IRGN0_WB | \
@@ -716,8 +718,12 @@ void mmu_program_this_cpu(void) {
         "orr x9, x9, %4\n"
         "msr sctlr_el1, x9\n"
         "isb\n"
+        // RW-1 B-F1: TCR_EL1.AS = 1 (16-bit ASIDs) when the CPU reports
+        // ID_AA64MMFR0_EL1.ASIDBits == 0b0010, else 0 (8-bit). Each CPU reads
+        // its own register; ARM requires a uniform ASID width system-wide.
         :: "r" ((u64)MAIR_VALUE),
-           "r" ((u64)TCR_VALUE),
+           "r" ((u64)TCR_VALUE |
+                (asid_hw_bits() == 16u ? TCR_AS_16BIT : 0ull)),
            "r" ((u64)(uintptr_t)l0_ttbr0),
            "r" ((u64)(uintptr_t)l0_ttbr1),
            "r" ((u64)(SCTLR_M | SCTLR_C | SCTLR_I))
@@ -1361,23 +1367,20 @@ bool mmu_directmap_is_pagemapped(paddr_t pa) {
 // referenced by a (now-being-torn-down) translation regime should not
 // be reused for a different mapping until any cached translations are
 // invalidated. The Proc lifecycle handles this independently of the
-// pgtable walker:
+// pgtable walker (RW-1 B-F1, the rolling-ASID model):
 //   - proc.c::wait_pid spun on `ct->on_cpu == 0` before reaping, so no
-//     CPU is mid-walk against this Proc's TTBR0 at proc_free time.
-//   - asid.c::asid_free broadcasts `tlbi aside1is` BEFORE pushing the
-//     ASID onto the free-list, so any subsequent reuser of the ASID
-//     starts with a TLB clean of this Proc's prior translations.
+//     CPU is mid-walk against this Proc's TTBR0 at proc_free time -- and
+//     no live CPU holds this dead Proc's TTBR0 at all, so no CPU
+//     translates under its ASID or walks its (now-freed) tables.
+//   - the leaf user mappings were invalidated by vma_drain's all-ASID
+//     `tlbi vaae1is` (proc.c::proc_free runs vma_drain before this).
+//   - the Proc's hardware ASID value stays RESERVED in the current
+//     generation until the next rollover; any eventual reuse is gated by
+//     the rollover's per-CPU flush_pending local flush. So a recycled
+//     ASID never goes live over stale entries for this Proc.
 // The walker may therefore free table pages without per-walk TLB ops.
-//
-// Ordering (F4 hardening, audit-r-memory-model): proc.c::proc_free
-// invokes asid_free BEFORE proc_pgtable_destroy. With asid_free first,
-// any TLB entries on sibling CPUs tagged with this Proc's ASID are
-// invalidated before the sub-table pages re-enter the buddy
-// free-list, narrowing the window in which a speculative walker (now
-// using stale TLB hints) could reach a recently-recycled sub-table
-// page. Reverse order is also correct (asid_free-after-destroy was
-// the pre-F4 baseline; the asid teardown still flushes TLB before the
-// ASID is reused), but the F4 order is the defense-in-depth choice.
+// (There is no per-Proc asid_free in the rolling model -- the old F4
+// asid_free-before-destroy ordering is moot; see proc.c::proc_free.)
 
 // F4 (audit-r-memory-model, P2): before each table page goes back to
 // the buddy, zero its contents. L3 entries are LEAF page descriptors
@@ -1653,8 +1656,10 @@ int mmu_install_user_pte(paddr_t pgtable_root, u16 asid,
 // up to ~10000 ns per burrow_unmap (vs ~50 ns for the leaf-clear
 // + TLBI we do here). (2) The pages eventually go free when the
 // Proc dies via proc_pgtable_destroy, which (per F4 hardening)
-// zeroes each table page before returning it to the buddy and runs
-// after asid_free has flushed the inner-shareable TLB.
+// zeroes each table page before returning it to the buddy; in the
+// rolling-ASID model (RW-1 B-F1) there is no per-Proc asid_free --
+// the leaf flush here + vma_drain's all-ASID `tlbi vaae1is` cover the
+// dead Proc's translations.
 int mmu_uninstall_user_pte(paddr_t pgtable_root, u16 asid, u64 vaddr) {
     (void)asid;   // reserved (tlbi vaae1is is all-ASID broadcast)
 

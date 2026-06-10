@@ -41,6 +41,7 @@
 #include <thylacine/types.h>
 #include <atomic_lse.h>   // t_atomic_fetch_add_relaxed_u32 (W1.5 LSE-patchable)
 
+#include "../arch/arm64/asid.h"     // RW-1 B-F1: asid_resolve (context-switch ASID pre-hook).
 #include "../arch/arm64/gic.h"      // P3-G: gic_send_ipi for ready/wakeup wake-idle-peer.
 #include "../arch/arm64/timer.h"    // P5-tsleep: counter read + ns->counter conversion.
 #include "../arch/arm64/uart.h"     // DEBUG (#857): sched_dump_runnable diagnostic.
@@ -703,6 +704,24 @@ void sched_arm_clear_on_cpu(struct Thread *prev) {
     cs->prev_to_clear_on_cpu = prev;
 }
 
+// RW-1 B-F1: the context-switch ASID pre-hook. Resolves next's Proc to its
+// current-generation rolling ASID (asid_resolve; spec asid.tla FastSwitch /
+// SlowSwitch) and composes the TTBR0_EL1 value into next's Context, so the asm
+// cpu_switch_context loads a coherent (ASID | pgtable_root) for next's address
+// space. kproc / kernel threads (pgtable_root == 0) keep the kernel TTBR0 baked
+// at thread create -- the hook is a no-op for them (ASID 0, never the
+// allocator). MUST run with IRQs masked on the CPU next is about to run on: the
+// run-queue lock is held at the sched() call site (and thread_switch is the
+// single-threaded test primitive), so smp_cpu_idx_self() names next's CPU and
+// the per-CPU active slot the resolve publishes into is the right one.
+void sched_install_asid_ttbr0(struct Thread *next) {
+    struct Proc *p = next->proc;
+    if (p && p->pgtable_root != 0) {
+        u64 asid = asid_resolve(&p->context_id, smp_cpu_idx_self());
+        next->ctx.ttbr0 = (asid << ASID_TTBR0_SHIFT) | (u64)p->pgtable_root;
+    }
+}
+
 void sched_finish_task_switch(void) {
     struct CpuSched *cs = this_cpu_sched();
     // P2-Cf: clear prev's on_cpu (mirror of sched()'s C-side resume
@@ -1034,6 +1053,11 @@ void sched(void) {
     // `next` may already read true here; the idempotent re-store is harmless.)
     __atomic_store_n(&next->on_cpu, true, __ATOMIC_RELAXED);
     cs->prev_to_clear_on_cpu = prev;
+
+    // RW-1 B-F1: install next's rolling-ASID TTBR0 before the asm switch loads
+    // it. Runs here -- IRQs masked, cs->lock held, CPU stable -- so the ASID
+    // resolve publishes into the active slot of the CPU next will run on.
+    sched_install_asid_ttbr0(next);
 
     cpu_switch_context(&prev->ctx, &next->ctx);
 

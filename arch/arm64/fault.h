@@ -98,7 +98,8 @@ enum fault_result arch_fault_handle(const struct fault_info *fi);
 //   1. vma_lookup(p, fi->vaddr) — find the VMA covering the faulting VA.
 //   2. Permission check vs fi->is_write / fi->is_instruction.
 //   3. Resolve the BURROW offset → backing PA.
-//   4. mmu_install_user_pte(p->pgtable_root, p->asid, vaddr, pa, prot).
+//   4. mmu_install_user_pte(p->pgtable_root, 0, vaddr, pa, prot)
+//      (the asid arg is vestigial -- the install is an all-ASID TLBI; RW-1 B-F1).
 //
 // Returns:
 //   FAULT_HANDLED         — PTE installed; ERET will resume safely.

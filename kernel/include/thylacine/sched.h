@@ -73,6 +73,14 @@ void sched_finish_task_switch(void);
 // sched_finish_task_switch.
 void sched_arm_clear_on_cpu(struct Thread *prev);
 
+// RW-1 B-F1: the context-switch ASID pre-hook. Resolves next's Proc to its
+// current-generation rolling ASID and installs the TTBR0_EL1 value into next's
+// Context before the asm cpu_switch_context loads it. No-op for kproc / kernel
+// threads (pgtable_root == 0). MUST be called with IRQs masked on the CPU next
+// will run on (the run-queue lock is held at the sched() site). See
+// arch/arm64/asid.{c,h}.
+void sched_install_asid_ttbr0(struct Thread *next);
+
 // Diagnostic accessor: per-CPU idle thread pointer. Returns the Thread
 // installed at sched_init time (CPU 0 = kthread; CPU N = the per_cpu_main
 // idle). NULL if sched_init has not yet been called for cpu_idx, or

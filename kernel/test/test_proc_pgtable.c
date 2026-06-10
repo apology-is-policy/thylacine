@@ -3,19 +3,18 @@
 // Three+1 smoke tests:
 //
 //   proc.pgtable_alloc_smoke
-//     proc_alloc returns a Proc with non-zero pgtable_root and an asid
-//     in [ASID_USER_FIRST, ASID_USER_LAST]. The pgtable_root is page-
-//     aligned. proc_free releases both — verified by asid inflight
-//     decrementing.
+//     proc_alloc returns a Proc with non-zero, page-aligned pgtable_root and
+//     context_id == 0 (RW-1 B-F1: no ASID is assigned until the first context
+//     switch; the rolling allocator stamps it then).
 //
 //   proc.pgtable_lifecycle_stress
 //     Many alloc/free cycles. Verify proc_total_created /
-//     proc_total_destroyed advance in step (no leak), and asid_inflight
-//     returns to baseline (no ASID leak).
+//     proc_total_destroyed advance in step (no leak).
 //
 //   proc.ttbr0_swap_smoke
-//     Two rfork'd children record their live TTBR0_EL1; verify each
-//     equals (asid<<48) | pgtable_root.
+//     Two rfork'd children record their live TTBR0_EL1; verify the ASID pre-
+//     hook installed (rolling asid << 48) | pgtable_root with a valid user
+//     ASID, and that two concurrently-live children hold distinct ASIDs.
 //
 //   proc.pgtable_destroy_walk_releases_subtables  (P3-Db; closes
 //                                                  trip-hazard #116)
@@ -49,8 +48,6 @@ void test_proc_ttbr0_swap_smoke(void);
 void test_proc_pgtable_destroy_walk_releases_subtables(void);
 
 void test_proc_pgtable_alloc_smoke(void) {
-    unsigned asid_inflight_before = asid_inflight();
-
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc returned NULL");
 
@@ -59,36 +56,27 @@ void test_proc_pgtable_alloc_smoke(void) {
     TEST_ASSERT((p->pgtable_root & (PAGE_SIZE - 1)) == 0,
         "pgtable_root is not page-aligned");
 
-    TEST_ASSERT(p->asid >= ASID_USER_FIRST,
-        "proc_alloc asid below ASID_USER_FIRST");
-    TEST_ASSERT(p->asid <= ASID_USER_LAST,
-        "proc_alloc asid above ASID_USER_LAST");
-
-    TEST_EXPECT_EQ(asid_inflight(), asid_inflight_before + 1u,
-        "asid_inflight did not advance by 1 after proc_alloc");
+    // RW-1 B-F1: no ASID at proc_alloc -- context_id stays 0 ("never assigned")
+    // until the rolling allocator stamps it at the first context switch.
+    TEST_EXPECT_EQ(p->context_id, 0ull,
+        "proc_alloc should leave context_id 0 (rolling ASID assigned at switch)");
 
     // Drive Proc to ZOMBIE so proc_free's lifecycle gate passes.
     p->state = 2;     // PROC_STATE_ZOMBIE
     proc_free(p);
-
-    TEST_EXPECT_EQ(asid_inflight(), asid_inflight_before,
-        "asid_inflight did not return to baseline after proc_free");
 }
 
 void test_proc_pgtable_lifecycle_stress(void) {
     enum { ITERS = 64 };
 
-    u64      created_before  = proc_total_created();
-    u64      destroyed_before = proc_total_destroyed();
-    unsigned asid_before     = asid_inflight();
+    u64 created_before   = proc_total_created();
+    u64 destroyed_before = proc_total_destroyed();
 
     for (int i = 0; i < ITERS; i++) {
         struct Proc *p = proc_alloc();
         TEST_ASSERT(p != NULL, "proc_alloc failed mid-stress");
         TEST_ASSERT(p->pgtable_root != 0,
             "proc_alloc didn't install pgtable_root mid-stress");
-        TEST_ASSERT(p->asid >= ASID_USER_FIRST && p->asid <= ASID_USER_LAST,
-            "proc_alloc asid out of range mid-stress");
 
         p->state = 2;     // PROC_STATE_ZOMBIE
         proc_free(p);
@@ -98,8 +86,6 @@ void test_proc_pgtable_lifecycle_stress(void) {
         "proc_total_created didn't advance by ITERS");
     TEST_ASSERT(proc_total_destroyed() - destroyed_before == ITERS,
         "proc_total_destroyed didn't advance by ITERS (leak?)");
-    TEST_EXPECT_EQ(asid_inflight(), asid_before,
-        "asid_inflight didn't return to baseline (ASID leak?)");
 }
 
 // =============================================================================
@@ -107,34 +93,31 @@ void test_proc_pgtable_lifecycle_stress(void) {
 // =============================================================================
 
 // Cross-thread observation slots. Two children each record their live
-// TTBR0_EL1, their Proc's pgtable_root, and their Proc's ASID. The
-// parent verifies post-reap.
+// TTBR0_EL1 and their Proc's pgtable_root. The parent verifies post-reap that
+// the context-switch ASID pre-hook (RW-1 B-F1) installed a valid rolling
+// (asid << 48) | pgtable_root.
 static volatile u64 g_ttbr0_test_ttbr0[2];
 static volatile u64 g_ttbr0_test_pgtable[2];
-static volatile u32 g_ttbr0_test_asid[2];
 
 static void ttbr0_swap_child(void *arg) {
     int idx = (int)(uintptr_t)arg;
 
-    // Read TTBR0_EL1 — the value cpu_switch_context loaded when
-    // switching into us. It MUST equal (proc->asid << 48) | proc->pgtable_root.
+    // Read TTBR0_EL1 — the value cpu_switch_context loaded when switching into
+    // us, composed by the ASID pre-hook = (rolling asid << 48) | pgtable_root.
     u64 ttbr0;
     __asm__ __volatile__("mrs %0, ttbr0_el1" : "=r"(ttbr0));
 
     struct Thread *t = current_thread();
     g_ttbr0_test_ttbr0[idx]   = ttbr0;
     g_ttbr0_test_pgtable[idx] = t->proc->pgtable_root;
-    g_ttbr0_test_asid[idx]    = t->proc->asid;
 
     exits("ok");
 }
 
 void test_proc_ttbr0_swap_smoke(void) {
-    // Reset slots so a stale value from a prior test wouldn't pass.
     for (int i = 0; i < 2; i++) {
         g_ttbr0_test_ttbr0[i]   = 0;
         g_ttbr0_test_pgtable[i] = 0;
-        g_ttbr0_test_asid[i]    = 0;
     }
 
     int pid0 = rfork(RFPROC, ttbr0_swap_child, (void *)(uintptr_t)0);
@@ -147,23 +130,30 @@ void test_proc_ttbr0_swap_smoke(void) {
     int reaped1 = wait_pid(&status);
     TEST_ASSERT(reaped0 > 0 && reaped1 > 0, "wait_pid failed");
 
+    u64 asid_max = (1ull << asid_bits()) - 1u;   // 255 (8-bit) or 65535 (16-bit)
+    u64 child_asid[2];
+
     for (int i = 0; i < 2; i++) {
         TEST_ASSERT(g_ttbr0_test_pgtable[i] != 0,
             "child pgtable_root is 0 (rfork didn't allocate?)");
-        TEST_ASSERT(g_ttbr0_test_asid[i] >= ASID_USER_FIRST &&
-                    g_ttbr0_test_asid[i] <= ASID_USER_LAST,
-            "child asid out of valid range");
 
-        u64 expected = ((u64)g_ttbr0_test_asid[i] << 48) |
-                       g_ttbr0_test_pgtable[i];
-        TEST_EXPECT_EQ(g_ttbr0_test_ttbr0[i], expected,
-            "live TTBR0_EL1 doesn't match (asid<<48)|pgtable_root");
+        // Low 48 bits of the live TTBR0 are the page-table base = pgtable_root.
+        u64 base = g_ttbr0_test_ttbr0[i] & ((1ull << 48) - 1u);
+        TEST_EXPECT_EQ(base, g_ttbr0_test_pgtable[i],
+            "live TTBR0_EL1 base doesn't match pgtable_root");
+
+        // High bits are the rolling ASID; it must be a valid user ASID.
+        child_asid[i] = g_ttbr0_test_ttbr0[i] >> 48;
+        TEST_ASSERT(child_asid[i] >= ASID_USER_FIRST && child_asid[i] <= asid_max,
+            "child rolling ASID out of valid range");
     }
 
-    // Two distinct children must have distinct ASIDs (else asid_alloc
-    // is broken or context switch loaded the wrong TTBR0).
-    TEST_ASSERT(g_ttbr0_test_asid[0] != g_ttbr0_test_asid[1],
-        "two rfork'd children share the same ASID (asid_alloc bug?)");
+    // Two children that both ran before any rollover (true at v1.0 test scales:
+    // an ASID is reserved, not reused, until a rollover) hold distinct ASIDs --
+    // else the rolling allocator handed one ASID to two address spaces or the
+    // switch loaded the wrong TTBR0.
+    TEST_ASSERT(child_asid[0] != child_asid[1],
+        "two live children share the same rolling ASID");
 
     // And distinct pgtable roots.
     TEST_ASSERT(g_ttbr0_test_pgtable[0] != g_ttbr0_test_pgtable[1],
@@ -219,9 +209,8 @@ void test_proc_pgtable_destroy_walk_releases_subtables(void) {
     l2[0] = mk_table_pte(l3_pa);
 
     // Drop the Proc. proc_free → proc_pgtable_destroy walks the tree,
-    // freeing L1, L2, L3 sub-tables AND the L0 root. asid_free fires
-    // alongside, but ASIDs are slot indices not buddy pages — they
-    // don't affect free_pages.
+    // freeing L1, L2, L3 sub-tables AND the L0 root. (RW-1 B-F1: there is no
+    // per-Proc asid_free; the Proc's context_id is just dropped.)
     p->state = 2;     // PROC_STATE_ZOMBIE
     proc_free(p);
 

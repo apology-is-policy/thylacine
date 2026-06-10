@@ -440,7 +440,9 @@ int burrow_unmap(struct Proc *p, u64 vaddr, size_t length) {
     // boot helper paths that synthesize a Proc without an MMU
     // arm). mmu_uninstall_user_range rejects pgtable_root == 0;
     // we ignore the rc (vma_free still runs).
-    (void)mmu_uninstall_user_range(p->pgtable_root, p->asid,
+    // RW-1 B-F1: the asid arg is vestigial (mmu_uninstall_user_range does an
+    // all-ASID `tlbi vaae1is`); pass 0 now that the Proc has no permanent ASID.
+    (void)mmu_uninstall_user_range(p->pgtable_root, 0,
                                    vaddr, want_end);
 
     vma_remove(p, vma);

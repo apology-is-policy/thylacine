@@ -370,21 +370,23 @@ static struct Thread *thread_create_internal(struct Proc *proc,
     //                              THREAD_KSTACK_TOTAL_SIZE (P2-Dc).
     //                              Stack grows down through pages 7→4
     //                              (16 KiB usable) then hits guard.
-    //   ctx.ttbr0 = (asid << 48) | pgtable_root  — P3-Bdb. Loaded into
-    //                              TTBR0_EL1 on first cpu_switch_context
-    //                              into this thread. For non-kproc Procs:
-    //                              the Proc's ASID + pgtable_root.
-    //                              For kproc threads: kernel-only TTBR0
-    //                              (l0_ttbr0 PA | ASID 0).
+    //   ctx.ttbr0 = kernel TTBR0 (ASID 0) — RW-1 B-F1. The real user value
+    //                              (rolling ASID << 48 | pgtable_root) is
+    //                              installed by the context-switch pre-hook
+    //                              (sched_install_asid_ttbr0) before the first
+    //                              switch into this thread; the ASID is not
+    //                              known until switch time. Baking the kernel
+    //                              TTBR0 makes a never-reached missing-pre-hook
+    //                              path fault SAFELY (no EL0 mappings under the
+    //                              kernel root) instead of aliasing ASID 0 onto
+    //                              a user page table. kproc threads run on it.
     //
     // Other ctx fields stay zero via KP_ZERO.
     t->ctx.x20 = (u64)(uintptr_t)arg;
     t->ctx.x21 = (u64)(uintptr_t)entry_void;
     t->ctx.lr  = (u64)(uintptr_t)thread_trampoline;
     t->ctx.sp  = (u64)((uintptr_t)kalloc_base + THREAD_KSTACK_TOTAL_SIZE);
-    t->ctx.ttbr0 = (proc->pgtable_root != 0)
-                 ? (((u64)proc->asid << 48) | (u64)proc->pgtable_root)
-                 : (u64)mmu_kernel_ttbr0_pa();      // ASID 0 implicit
+    t->ctx.ttbr0 = (u64)mmu_kernel_ttbr0_pa();
 
     thread_link_into_proc(t, proc);
     __atomic_fetch_add(&g_thread_created, 1u, __ATOMIC_RELAXED);
@@ -423,11 +425,11 @@ struct Thread *thread_create_with_arg(struct Proc *proc,
 // schedule-in and eret. The kstack stays valid past the eret because
 // every later exception (syscall, IRQ, fault) lands on it.
 //
-// TTBR0 (ASID | pgtable_root) comes from `proc` exactly as in
-// thread_create_internal — a userspace Proc always has pgtable_root != 0
-// post-exec_setup. Kproc would fail with TTBR0 = kernel's, which is the
-// correct fault for a buggy caller; the syscall handler rejects calls
-// from threads not on a userspace Proc upstream.
+// TTBR0 is baked to the kernel value (ASID 0) at create exactly as in
+// thread_create_internal (RW-1 B-F1); the rolling-ASID user value is installed
+// by the context-switch pre-hook before the first switch. A userspace Proc
+// always has pgtable_root != 0 post-exec_setup; the syscall handler rejects
+// thread_spawn from threads not on a userspace Proc upstream.
 struct Thread *thread_create_user(struct Proc *proc,
                                   u64 user_entry_va,
                                   u64 user_sp_va,
@@ -472,9 +474,9 @@ struct Thread *thread_create_user(struct Proc *proc,
     t->ctx.x22 = user_tls_va;
     t->ctx.lr  = (u64)(uintptr_t)thread_user_trampoline;
     t->ctx.sp  = (u64)((uintptr_t)kalloc_base + THREAD_KSTACK_TOTAL_SIZE);
-    t->ctx.ttbr0 = (proc->pgtable_root != 0)
-                 ? (((u64)proc->asid << 48) | (u64)proc->pgtable_root)
-                 : (u64)mmu_kernel_ttbr0_pa();
+    // RW-1 B-F1: kernel TTBR0 (ASID 0); the pre-hook installs the rolling-ASID
+    // user value before the first switch. See thread_create_internal.
+    t->ctx.ttbr0 = (u64)mmu_kernel_ttbr0_pa();
 
     thread_link_into_proc(t, proc);
     __atomic_fetch_add(&g_thread_created, 1u, __ATOMIC_RELAXED);
@@ -607,6 +609,11 @@ void thread_switch(struct Thread *next) {
     __atomic_store_n(&next->on_cpu, true, __ATOMIC_RELAXED);
     sched_arm_clear_on_cpu(prev);
     set_current_thread(next);
+
+    // RW-1 B-F1: install next's rolling-ASID TTBR0 before the asm switch (a
+    // no-op for the kernel threads thread_switch is used with, but kept
+    // uniform with sched()'s switch path). IRQs are masked across thread_switch.
+    sched_install_asid_ttbr0(next);
 
     cpu_switch_context(&prev->ctx, &next->ctx);
 

@@ -406,10 +406,11 @@ void boot_main(void) {
     // P2-Fd: burrow_init creates the BURROW SLUB cache. Order doesn't matter
     // wrt proc_init (no kproc-BURROW ownership at v1.0); placed near
     // handle_init for grouping.
-    // P3-Ba: asid_init initializes the ASID allocator. No SLUB dependency
-    // (state lives in BSS). Must run BEFORE any future code that calls
-    // asid_alloc; placed early so the order is unambiguous as Phase 3+
-    // sub-chunks add per-Proc TTBR0 alloc paths.
+    // P3-Ba / RW-1 B-F1: asid_init initializes the rolling-ASID allocator
+    // (generation + bitmap + per-CPU active/reserved/flush_pending; reads the
+    // ASID width). No SLUB dependency (state lives in BSS). Runs after the MMU
+    // is up (asid_hw_bits reads ID_AA64MMFR0_EL1) and before any context switch
+    // calls asid_resolve.
     territory_init();
     handle_init();
     burrow_init();
