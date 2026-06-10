@@ -97,14 +97,19 @@ struct Thread {
     struct Thread     *runnable_next;
     struct Thread     *runnable_prev;
 
-    // P2-Bb: rendez backref. NULL when not sleeping on a Rendez. Set
-    // by sleep(r, ...) under r->lock atomically with state =
-    // THREAD_SLEEPING; cleared by wakeup(r) under r->lock atomically
-    // with state = THREAD_RUNNABLE. Diagnostic + invariant aid: a
-    // SLEEPING thread with rendez_blocked_on != NULL is sleeping on
-    // that specific Rendez; any debugger / extinction dump can name
-    // the wait condition. Future poll/futex (Phase 5) generalize to a
-    // wait-list of (Rendez, condition) tuples; for now single-Rendez.
+    // P2-Bb + #811 (ARCH §8.8.1): rendez backref. NULL when not sleeping on a
+    // Rendez. ONLY the owning Thread mutates it -- SET at register (in sleep /
+    // tsleep, under the owner's `wait_lock` + r->lock, with state =
+    // THREAD_SLEEPING) and CLEARED on resume (under the owner's `wait_lock`).
+    // `wakeup(r)` does NOT clear it (it walks via `r->waiter`, not this field).
+    // The group-terminate / interrupt-terminate cascade only READS it, under
+    // the peer's `wait_lock` -- the read-only waker->sleeper edge that keeps the
+    // #811 lock graph acyclic and lets the cascade `wakeup()` a sleeper's
+    // stack-allocated Rendez (Option-A pin) without it being popped. Diagnostic
+    // + invariant aid: a SLEEPING thread with rendez_blocked_on != NULL is
+    // sleeping on that specific Rendez; a debugger / extinction dump can name
+    // the wait condition. (poll/futex still register a single owning Rendez per
+    // sleep; the per-fd hooks are a separate poll_waiter list.)
     struct Rendez     *rendez_blocked_on;
 
     // P2-Bc: scheduler-tick preemption. `slice_remaining` is the

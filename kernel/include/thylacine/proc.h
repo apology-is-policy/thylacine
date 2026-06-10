@@ -230,14 +230,17 @@ struct Proc {
     // visible via future debug surfaces for audit verification.
     u32                proc_flags;
 
-    // Reserved (4 bytes). Was srv_conn_count (u8) + _pad_srv[3]: the
-    // per-Proc /srv client-connection cap, removed in stalk-3b-β
-    // (3a-audit F4 — a session needs corvus AND its stratum-fs
-    // concurrently, so one connection per Proc no longer holds). Kept as
-    // explicit padding so proc_flags (u32) is followed by 4 bytes before
-    // the 8-byte-aligned `stripes` — struct Proc stays 264 and every
-    // subsequent offset assert holds.
-    u32                _pad_srv;
+    // RW-2 2B-F1/F2: per-Proc wait_pid_for serialization (repurposed from the
+    // former srv_conn_count/_pad_srv reserved u32, removed in stalk-3b-β -- same
+    // size + offset, so struct Proc stays 264 and every offset assert holds).
+    // At most ONE Thread of a Proc may be inside wait_pid_for's reap-or-sleep
+    // critical section at a time: p->child_done is a single-waiter Rendez (a 2nd
+    // concurrent waiter trips sleep's single-waiter assert -> extinction) and
+    // wait_pid_cond walks p->children locklessly (racing a peer's reap+free ->
+    // UAF). Accessed via __atomic exchange(1)/store(0); 0 == free. The v1.x
+    // multi-waiter child_done + proc_table_lock-protected cond promotion lifts
+    // this from "refuse the 2nd concurrent caller" to "all may wait".
+    u32                wait_active;
 
     // P5-corvus-srv: the kernel's per-Proc identity tag — the
     // thylacine's stripe pattern; every animal's is unique. Drawn from

@@ -262,3 +262,87 @@ void test_proc_multi_thread_reap(void) {
     TEST_EXPECT_EQ(t_destroyed_delta, (u64)(MTR_N_WORKERS + 1),
                    "wait_pid drained all N+1 Threads");
 }
+
+// ---------------------------------------------------------------------------
+// proc.wait_pid_concurrent_waiter_refused  (RW-2 2B-F1/F2)
+//
+// At most ONE Thread of a Proc may be inside wait_pid_for at a time (p->child_-
+// done is a single-waiter Rendez -> F1 extinction; wait_pid_cond's lockless
+// p->children walk races a peer's reap+free -> F2 UAF). The per-Proc wait_active
+// flag refuses a genuinely-CONCURRENT 2nd caller with -1 (a SOLE waiter, even in
+// a multi-thread Proc, is correctly allowed -- this is why kproc's boot Thread
+// keeps reaping).
+//
+// Two worker Threads of one Proc race into wait_pid_for with a live (spinning)
+// CHILD present. Exactly one claims wait_active + sleeps on child_done; the
+// other hits the guard -> -1. The child then exits, waking the claimer to reap
+// it. Asserts: exactly ONE worker was refused, and the OTHER reaped the child.
+// FAILS PRE-FIX: pre-fix BOTH workers sleep on child_done -> the 2nd trips the
+// single-waiter assert -> kernel extinction (deterministic on -smp 1: the
+// claimer sleeps, then the peer's sleep() hits r->waiter != NULL).
+// ---------------------------------------------------------------------------
+
+static volatile u32 g_wpcw_refused;     // count of guard-refused workers (rc==-1)
+static volatile int g_wpcw_reaped_pid;  // the rc of the worker that reaped (>0)
+static volatile u32 g_wpcw_done;        // workers finished
+
+static void wpcw_child_entry(void *arg) {
+    (void)arg;
+    // Stay alive (a non-zombie child) until a worker has been guard-refused, so
+    // the claiming worker is provably SLEEPING (holding wait_active) when the
+    // other worker hits the guard. Then exit to wake the claimer to reap us.
+    while (__atomic_load_n(&g_wpcw_refused, __ATOMIC_ACQUIRE) == 0u) sched();
+    exits("ok");
+}
+
+static void wpcw_worker_entry(void *arg) {
+    (void)arg;
+    int status = -123;
+    int rc = wait_pid_for(-1, 0, &status);
+    if (rc == -1) {
+        __atomic_fetch_add(&g_wpcw_refused, 1u, __ATOMIC_ACQ_REL);
+    } else {
+        __atomic_store_n(&g_wpcw_reaped_pid, rc, __ATOMIC_RELEASE);
+    }
+    __atomic_fetch_add(&g_wpcw_done, 1u, __ATOMIC_ACQ_REL);
+    thread_exit_self();
+}
+
+static void wpcw_parent_entry(void *arg) {
+    (void)arg;
+    struct Proc *p = current_thread()->proc;
+
+    int child_pid = rfork(RFPROC, wpcw_child_entry, NULL);
+    if (child_pid <= 0) extinction("wpcw: rfork child failed");
+    __atomic_store_n(&g_wpcw_reaped_pid, child_pid, __ATOMIC_RELEASE); // expected
+
+    struct Thread *w0 = thread_create_with_arg(p, wpcw_worker_entry, NULL);
+    struct Thread *w1 = thread_create_with_arg(p, wpcw_worker_entry, NULL);
+    if (!w0 || !w1) extinction("wpcw: thread_create_with_arg failed");
+    ready(w0);
+    ready(w1);
+
+    while (__atomic_load_n(&g_wpcw_done, __ATOMIC_ACQUIRE) < 2u) sched();
+    exits("ok");
+}
+
+void test_proc_wait_pid_concurrent_waiter_refused(void) {
+    __atomic_store_n(&g_wpcw_refused, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_wpcw_done, 0u, __ATOMIC_RELEASE);
+    // g_wpcw_reaped_pid is seeded to the child's pid by the parent; if a worker
+    // reaps the child it re-stores the same pid (the reap returns child_pid).
+
+    int pid = rfork(RFPROC, wpcw_parent_entry, NULL);
+    TEST_ASSERT(pid > 0, "rfork parent failed");
+
+    int status = -1;
+    int reaped = wait_pid(&status);   // boot reaps the multi-thread test Proc
+    TEST_EXPECT_EQ(reaped, pid, "reaped the multi-thread test Proc");
+
+    TEST_EXPECT_EQ(__atomic_load_n(&g_wpcw_refused, __ATOMIC_ACQUIRE), 1u,
+        "exactly ONE of two concurrent same-Proc waiters is guard-refused "
+        "(pre-fix: the 2nd trips the single-waiter assert -> extinction)");
+    TEST_ASSERT(__atomic_load_n(&g_wpcw_reaped_pid, __ATOMIC_ACQUIRE) > 0,
+        "the OTHER (sole) waiter reaped the child -- a multi-thread Proc with "
+        "one waiter is correctly ALLOWED (kproc keeps reaping)");
+}

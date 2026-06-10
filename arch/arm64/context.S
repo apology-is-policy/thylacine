@@ -30,9 +30,11 @@
 // cpu_switch_context saves the live TTBR0_EL1 into prev (atomic with the
 // other register saves) and loads next's TTBR0 into the live CPU. An ISB
 // after MSR TTBR0_EL1 makes the change visible to subsequent fetches.
-// No TLB invalidate is needed: per-Proc ASIDs (1..255) tag user-mappings
-// in the TLB; cross-Proc TLB entries don't collide. Kernel mappings
-// (TTBR1, global, ASID-agnostic) are unaffected.
+// No TLB invalidate is needed here: rolling ASIDs (RW-1, ARCH §6.2.1; the
+// sched.c pre-switch hook composes next's current-generation ASID into
+// ctx.ttbr0) tag user-mappings so cross-Proc entries don't collide. ASID
+// recycling is made safe by the allocator's generation-rollover broadcast
+// flush, not by this path. Kernel mappings (TTBR1, global) are unaffected.
 //
 // P4-Ic5-FP: eager save/restore of FP/SIMD state. Q0..Q31 + FPSR + FPCR
 // saved into prev and loaded from next every context switch. The kernel

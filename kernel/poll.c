@@ -172,7 +172,13 @@ static int poll_cond_any_flagged(void *arg) {
 // reader without RIGHT_READ can still observe POLLHUP/POLLERR (POSIX
 // permits polling a write-only fd for POLLIN — revents=0).
 static int poll_scan_one(struct Proc *p, struct pollfd *pfd,
-                         struct poll_waiter *pw_or_null) {
+                         struct poll_waiter *pw_or_null,
+                         struct Handle *keep_out) {
+    // RW-2 2C-F1: `keep_out` (non-NULL only on the REGISTER scan) receives the
+    // obj ref this scan must HOLD past the sleep when it registers a waiter on
+    // an object's poll_list -- see the retain decision below. Default: hold
+    // nothing (zeroed snapshot; handle_put no-ops on it).
+    if (keep_out) *keep_out = (struct Handle){0};
     s16 revents = 0;
     if (pfd->fd < 0) {
         pfd->revents = POLLNVAL;
@@ -180,8 +186,10 @@ static int poll_scan_one(struct Proc *p, struct pollfd *pfd,
     }
     // #844: snapshot + hold the obj ref across the brief scan. dev->poll /
     // srv_handle_poll register a waiter but return promptly; the actual poll
-    // sleep happens later in sys_poll_for_proc (the poll-hook list lifetime is
-    // poll's own concern, unchanged here). handle_put before every return.
+    // sleep happens later in sys_poll_for_proc. handle_put before every return
+    // EXCEPT when this scan registered a waiter on the object's poll_list --
+    // then the ref is RETAINED (transferred to keep_out) so the object cannot
+    // be freed out from under the still-listed stack waiter (RW-2 2C-F1 below).
     struct Handle hh;
     if (handle_get(p, (hidx_t)pfd->fd, &hh) < 0) {
         pfd->revents = POLLNVAL;
@@ -219,7 +227,24 @@ static int poll_scan_one(struct Proc *p, struct pollfd *pfd,
         break;
     }
     pfd->revents = revents;
-    handle_put(&hh);
+
+    // RW-2 2C-F1 (the multi-thread-Proc poll-lifetime UAF): if this scan
+    // REGISTERED a waiter on the object's embedded poll_list (pw_or_null got
+    // listed -> pw->list != NULL), the object must stay alive until we
+    // unregister. The poll-hook precondition in <thylacine/poll.h> assumed a
+    // single-thread-per-Proc poller; that lift landed at P6-pouch-threads, so a
+    // SIBLING thread closing the last handle to this object would
+    // spoor_clunk/srvconn_unref it -> free the embedded poll_list out from
+    // under our still-listed stack waiter -> UAF at poll_waiter_list_unregister.
+    // Retain the obj ref (transfer hh to keep_out); sys_poll_for_proc drops it
+    // AFTER the unregister sweep, when no waiter references the list anymore.
+    // A scan that did NOT register (POLLNVAL, a no-.poll dev, a NULL-obj Spoor)
+    // drops the transient ref now.
+    if (keep_out && pw_or_null && pw_or_null->list != NULL) {
+        *keep_out = hh;            // RETAIN -- released post-sweep by the caller
+    } else {
+        handle_put(&hh);
+    }
     return (revents != 0) ? 1 : 0;
 }
 
@@ -238,8 +263,13 @@ s64 sys_poll_for_proc(struct Proc *p, struct pollfd *kfds, u64 nfds,
     struct Rendez r;
     rendez_init(&r);
     struct poll_waiter waiters[PROC_HANDLE_MAX];
+    // RW-2 2C-F1: per-fd retained obj refs. A registering scan holds the obj
+    // ref past the sleep (zeroed = "nothing held"); released after the
+    // unregister sweep. ~1.5 KiB on the kstack alongside waiters[] (~2 KiB).
+    struct Handle held[PROC_HANDLE_MAX];
     for (u64 i = 0; i < nfds; i++) {
         poll_waiter_init(&waiters[i], &r);
+        held[i] = (struct Handle){0};
     }
 
     s64 ready_count = 0;
@@ -250,7 +280,7 @@ s64 sys_poll_for_proc(struct Proc *p, struct pollfd *kfds, u64 nfds,
     // No readiness event between sample and sleep can slip past a
     // not-yet-installed hook.
     for (u64 i = 0; i < nfds; i++) {
-        ready_count += poll_scan_one(p, &kfds[i], &waiters[i]);
+        ready_count += poll_scan_one(p, &kfds[i], &waiters[i], &held[i]);
     }
 
     // Fast path: any fd ready at the first scan → unregister all,
@@ -299,7 +329,7 @@ s64 sys_poll_for_proc(struct Proc *p, struct pollfd *kfds, u64 nfds,
     // change happens-before via the object lock's release/acquire chain.
     ready_count = 0;
     for (u64 i = 0; i < nfds; i++) {
-        ready_count += poll_scan_one(p, &kfds[i], NULL);
+        ready_count += poll_scan_one(p, &kfds[i], NULL, NULL);
     }
 
 unregister_and_return:
@@ -315,6 +345,15 @@ unregister_and_return:
     for (u64 i = 0; i < nfds; i++) {
         poll_waiter_list_unregister(&waiters[i]);
         waiters[i].magic = 0;   // defense-in-depth: scribble before stack pops
+    }
+    // RW-2 2C-F1: release the obj refs retained for registered waiters, AFTER
+    // the unregister sweep -- now no waiter references any object's poll_list,
+    // so a final handle_put that drops an object's last ref (a sibling closed
+    // its fd while we polled) runs its close hook against a list we are no
+    // longer on. Order is load-bearing: unregister-all THEN handle_put-all.
+    // handle_put no-ops on the zeroed snapshot of a non-registering scan.
+    for (u64 i = 0; i < nfds; i++) {
+        handle_put(&held[i]);
     }
     return ready_count;
 }

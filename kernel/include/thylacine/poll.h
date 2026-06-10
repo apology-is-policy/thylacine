@@ -58,23 +58,29 @@
 //   kernel-side unregister sweep knows which list each hook is on
 //   without consulting the Dev.
 //
-// HANDLE-SLOT LIFETIME (v1.0 INVARIANT)
+// REGISTERED-OBJECT LIFETIME (multi-thread-Proc safe -- RW-2 2C-F1)
 //
-//   `sys_poll_for_proc` resolves each fd to its `struct Handle` slot
-//   via `handle_get` once per scan (first scan + post-wake re-scan),
-//   then dereferences `slot->kind` and `slot->obj`. The slot pointer
-//   itself is a BORROW into the caller's table — valid only while the
-//   caller holds it. At v1.0, `struct Proc` is single-thread-per-Proc,
-//   so the poller's own thread is the only one mutating its handle
-//   table. The borrow is sound.
+//   The dangerous window is not merely "between the two scans" -- it is
+//   the entire time a stack waiter stays listed on an object's embedded
+//   `poll_waiter_list` (`r->poll_list` in a pipe ring, `cn->poll_list`
+//   in a SrvConn): the first scan REGISTERS, the poller SLEEPS, and the
+//   waiter remains listed across the whole sleep. Multi-thread Procs
+//   landed at P6-pouch-threads, so a SIBLING thread sharing the handle
+//   table can `handle_close` the last handle to that object DURING the
+//   sleep -> `spoor_clunk` / `srvconn_unref` frees the object and its
+//   embedded list, leaving the still-listed stack waiter's `pw->list`
+//   dangling -> `poll_waiter_list_unregister` would spin_lock freed
+//   memory (and `poll_waiter_list_wake` would walk a freed list).
 //
-//   A future multi-thread-per-Proc lift breaks this: a sibling thread
-//   could call `handle_close` between the first scan and the post-wake
-//   re-scan, freeing the obj. The fix at that lift is to bump the
-//   kobj's refcount at the first scan (per-kind operation: Spoor →
-//   `spoor_ref`; Srv → `srvconn_ref` / inherent SrvService lifetime)
-//   and drop at the unregister sweep. Until then this comment is the
-//   invariant declaration.
+//   FIX (applied): `poll_scan_one`'s register scan RETAINS the
+//   `handle_get` obj ref (the `struct Handle` snapshot) whenever it
+//   actually registers a waiter (`pw->list != NULL`), instead of
+//   dropping it before the sleep. `sys_poll_for_proc` drops every
+//   retained ref AFTER the unregister sweep. Holding the handle ref
+//   keeps the object alive -- directly for a SrvConn, and transitively
+//   for a pipe ring (the ring ref is dropped only at `spoor_clunk`, so a
+//   live Spoor handle ref defers it). So the embedded `poll_waiter_list`
+//   cannot be freed while any waiter is listed on it.
 //
 // THE Dev.poll vtable op (declared in <thylacine/dev.h>)
 //

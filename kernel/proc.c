@@ -1854,6 +1854,26 @@ int wait_pid_for(int want_pid, int flags, int *status_out) {
 
     const bool nohang = (flags & WAIT_WNOHANG) != 0;
 
+    // RW-2 2B-F1/F2: serialize wait_pid_for per-Proc -- at most ONE Thread of a
+    // Proc may be in the reap-or-sleep critical section at a time. `p->child_-
+    // done` is a single-waiter Rendez (a 2nd concurrent waiter trips `sleep`'s
+    // single-waiter assert -> kernel extinction, F1), and `wait_pid_cond` walks
+    // `p->children` locklessly (under r->lock, never g_proc_table_lock -- the
+    // P3-A lock-order choice), racing a peer's `proc_unlink_child`+`proc_free`
+    // reap -> UAF (F2). Both rest on a single-writer/single-waiter premise the
+    // P6 multi-thread-Proc lift falsified. The exchange refuses a genuinely-
+    // CONCURRENT 2nd caller (returns -1) -- NOT every multi-thread Proc: a
+    // single-thread Proc, AND a legitimately-multi-thread Proc with only one
+    // waiting Thread (kproc has many kthreads but only the boot Thread reaps;
+    // a server with one designated reaper), see wait_active == 0 and proceed.
+    // The flag is contended ONLY by two Threads of the SAME Proc both inside
+    // wait_pid_for. Cleared at the single `out:` exit. (Promoting `child_done`
+    // to multi-waiter + a proc_table_lock-protected cond -- the tracked v1.x
+    // completeness -- lifts this from "refuse the 2nd" to "all may wait".)
+    if (__atomic_exchange_n(&p->wait_active, 1u, __ATOMIC_ACQUIRE) != 0u)
+        return -1;
+
+    int ret;
     for (;;) {
         // P3-A: walk + unlink + state capture under g_proc_table_lock.
         // Atomic with concurrent exits() on our children — they hold the
@@ -1884,7 +1904,8 @@ int wait_pid_for(int want_pid, int flags, int *status_out) {
         if (!any_match) {
             // No matching child (none at all, or none with want_pid).
             spin_unlock_irqrestore(&g_proc_table_lock, s);
-            return -1;
+            ret = -1;
+            goto out;
         }
 
         if (zombie) {
@@ -1952,14 +1973,17 @@ int wait_pid_for(int want_pid, int flags, int *status_out) {
             proc_free(zombie);
 
             if (status_out) *status_out = status;
-            return pid;
+            ret = pid;
+            goto out;
         }
 
         // A matching child is alive but not yet a zombie. Release the lock.
         spin_unlock_irqrestore(&g_proc_table_lock, s);
 
-        if (nohang)
-            return 0;        // WAIT_WNOHANG: report "not ready" without blocking.
+        if (nohang) {
+            ret = 0;         // WAIT_WNOHANG: report "not ready" without blocking.
+            goto out;
+        }
 
         // Sleep on child_done; exits() in a matching child wakes us. The
         // cond re-evaluates the SAME pid filter under r->lock; sleep is
@@ -1971,9 +1995,17 @@ int wait_pid_for(int want_pid, int flags, int *status_out) {
         // group-terminating (a peer / kill flagged it while we waited on a
         // child). Return so the waiting Thread unwinds to its EL0-return
         // die-check; do NOT loop (re-sleep would re-INTR = livelock).
-        if (sleep(&p->child_done, wait_pid_cond, &ctx) == SLEEP_INTR)
-            return -1;
+        if (sleep(&p->child_done, wait_pid_cond, &ctx) == SLEEP_INTR) {
+            ret = -1;
+            goto out;
+        }
     }
+out:
+    // RW-2 2B-F1/F2: release the per-Proc wait serialization. Reached on EVERY
+    // non-extinction exit (the zombie-with-bad-threads paths are noreturn). The
+    // RELEASE pairs with the next claimant's ACQUIRE exchange.
+    __atomic_store_n(&p->wait_active, 0u, __ATOMIC_RELEASE);
+    return ret;
 }
 
 // wait_pid — reap ANY zombie child, blocking. The pervasive (any,

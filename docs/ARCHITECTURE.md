@@ -1108,7 +1108,8 @@ not a law, and made HMP a cross-cutting retrofit).
   (the existing behavior, preserved). HMP bodies bias by capacity (§8.4.4).
 - **`balance()`** — the load-rebalancing abstraction. v1.0 implements it as
   **pull-only work-stealing**: an idle CPU pulls one *non-pinned* runnable thread
-  from a peer (round-robin-from-rotating-start, bounded steal frequency, the steal
+  from a peer (round-robin-from-rotating-start; steal frequency is bounded only
+  by the `sched()` invocation rate — there is no explicit rate limit; the steal
   claims `on_cpu` under the peer lock per §8.4.1). The abstraction is deliberately
   **future-ready**: it is shaped to host a capacity-aware **push** path — *misfit
   migration*, pushing a heavy task off a low-capacity core to a high-capacity one

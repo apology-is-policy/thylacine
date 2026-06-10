@@ -616,3 +616,39 @@ void test_sched_ready_on_cross_cpu_enqueue(void) {
     }
     thread_free(t);
 }
+
+// scheduler.ready_on_clamps_stale_vd  (RW-2 2A-F1)
+//   A thread carries its vd_t from its last yield on whatever CPU it last ran
+//   on; each CPU's vd_counter is an independent clock. A cross-CPU wake must
+//   CLAMP the (possibly stale, foreign-clock) key to THIS CPU's clock, else a
+//   high stale key tails the thread behind every fresh local yielder ->
+//   starvation (the I-17 / ARCH §8.2 "reinsert at current virtual time"
+//   violation). Pre-fix ready_on inserted the stale key verbatim.
+void test_sched_ready_on_clamps_stale_vd(void) {
+    const s64 STALE = (s64)1 << 40;   // far above any real test-time vd_counter
+    unsigned self = smp_cpu_idx_self();
+
+    // A stale-HIGH key (as if minted by a fast foreign clock) is clamped down
+    // to this CPU's vd_counter -- below STALE, and non-negative.
+    struct Thread *t = thread_create(kproc(), sched_test_thread_a);
+    TEST_ASSERT(t != NULL, "thread_create failed");
+    TEST_EXPECT_EQ(t->state, THREAD_RUNNABLE, "fresh thread RUNNABLE");
+    t->vd_t = STALE;
+    ready_on(self, t);
+    TEST_ASSERT(t->vd_t < STALE,
+        "ready_on clamped a stale-high vd_t to this CPU's clock (pre-fix: verbatim)");
+    TEST_ASSERT(t->vd_t >= 0, "clamped vd_t is sane");
+    sched_remove_if_runnable(t);
+    thread_free(t);
+
+    // A key already at/below the clock is NOT bumped -- the clamp neither
+    // penalizes (no back-of-queue fresh key) nor credits; it preserves the
+    // benign same-CPU "brief sleeper wakes near the front" behavior.
+    struct Thread *t2 = thread_create(kproc(), sched_test_thread_a);
+    TEST_ASSERT(t2 != NULL, "thread_create t2 failed");
+    t2->vd_t = 0;
+    ready_on(self, t2);
+    TEST_EXPECT_EQ(t2->vd_t, (s64)0, "vd_t already at/below the clock is unchanged");
+    sched_remove_if_runnable(t2);
+    thread_free(t2);
+}

@@ -113,9 +113,11 @@ void sched_install_bootcpu_idle(struct Thread *t);
 // new work). Without this signaling, secondaries (no per-CPU timer at
 // v1.0) starve runnable threads while sitting in WFI.
 //
-// Boot CPU stays FALSE forever: its post-init flow is `_torpor`'s asm wfi
-// loop with no C-level set hook; secondaries are the canonical wake
-// target. See ARCH §8 + scheduler.tla `EnterWFI` for the spec model.
+// The boot CPU participates too: post-SMP-redesign cpu0 runs a per-CPU pinned
+// in-tree idle (`bootcpu_idle_main`, ARCH §8.4.2) that toggles this flag around
+// its own WFI exactly like a secondary's idle -- the old "boot CPU stays FALSE
+// forever / `_torpor` asm loop with no C hook" special case is retired with the
+// `g_bootcpu_idle` off-tree state. See ARCH §8.4.5 + scheduler.tla `EnterWFI`.
 void sched_set_idle_in_wfi(bool in_wfi);
 bool sched_idle_in_wfi(unsigned cpu_idx);
 

@@ -371,6 +371,24 @@ void per_cpu_main(int cpu_idx) {
         extinction("per_cpu_main: invalid cpu_idx");
     }
 
+    // RW-2 2A-F4: the PSCI context_id (`cpu_idx` -- used for this CPU's stack
+    // slot, sched_init, and the per-CPU idle) and smp_cpu_idx_self()
+    // (MPIDR&0xff -- used by EVERY runtime per-CPU access: this_cpu_sched,
+    // sched_tick, preempt_check_irq, asid_resolve) MUST name the same slot. On
+    // a sparse / cluster-MPIDR board (Aff1=cluster, Aff0 restarting at 0 per
+    // cluster) they DIVERGE: this CPU initializes slot `cpu_idx` yet resolves
+    // every runtime access to a DIFFERENT slot -- silently ALIASING another
+    // CPU's live CpuSched, whose single-slot on_cpu handoff is then written by
+    // two CPUs (the #860-class half-saved-ctx corruption). A bound check cannot
+    // detect aliasing. This equality check makes the dense-Aff0 assumption
+    // (I-15; the tracked DTB MPIDR->dense-logical-index map) FAIL LOUD on the
+    // first non-dense board instead of corrupting silently. QEMU virt / RPi are
+    // dense-Aff0 -> dormant on every v1.0 target.
+    if ((unsigned)cpu_idx != smp_cpu_idx_self()) {
+        extinction("per_cpu_main: PSCI context_id != MPIDR-derived cpu index "
+                   "(sparse/cluster MPIDR topology unsupported)");
+    }
+
     // P4-Ic5-FP: enable CPACR_EL1.FPEN = 0b11 on this secondary CPU
     // before any context switch. Boot CPU did this in boot_main; each
     // secondary does it independently here because CPACR_EL1 is

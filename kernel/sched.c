@@ -641,6 +641,21 @@ void ready_on(unsigned target_cpu, struct Thread *t) {
 
     if (in_run_tree(cs, t))       extinction("ready of already-runnable Thread");
 
+    // RW-2 2A-F1 (ARCH §8.2: "reinserted with its ve_t set to the current
+    // virtual time"): a thread carries the vd_t from its last yield on whatever
+    // CPU it last ran on. Each CPU's vd_counter is an independent clock; a
+    // cross-CPU wake (a wakeup() / timer-tick on a CPU other than where t last
+    // ran -- select_target_cpu returns the waker's CPU at v1.0) would otherwise
+    // enqueue t with a STALE key minted by a foreign clock. A high stale key
+    // from a fast clock onto a slow-clock CPU tails t behind every fresh
+    // yielder -> starvation bounded only by the inter-CPU counter gap (an I-17
+    // latency-bound violation). Clamp to this CPU's clock: t is placed at "now"
+    // -- never penalized (a fresh-yielder back-of-queue key) and never unfairly
+    // credited (it keeps a lower key only when it already sorts at/before now,
+    // preserving the benign same-CPU "brief sleeper wakes near the front"). The
+    // steal path already rebases (unconditionally) for the same reason.
+    if (t->vd_t > cs->vd_counter) t->vd_t = cs->vd_counter;
+
     insert_sorted(cs, t);
 
     spin_unlock_irqrestore(&cs->lock, s);
@@ -975,16 +990,17 @@ void sched(void) {
     }
 
     if (prev == next) {
-        // pick_next or steal returned prev. Don't switch to self —
-        // re-insert and continue. With work-stealing this can happen
-        // if our own pick_next gave NULL but try_steal pulled prev
-        // back from a peer (e.g., prev was migrated mid-flight by
-        // some future cross-CPU placer). Re-insert under our lock.
-        if (prev->state == THREAD_RUNNING) {
-            insert_sorted(cs, prev);
-        }
-        spin_unlock_irqrestore(&cs->lock, s);
-        return;
+        // RW-2 2A-F2: structurally impossible in the redesigned scheduler, so
+        // fail loud rather than corrupt the tree. `prev` is `current` -- it is
+        // on_cpu and is NOT in any run tree (it was unlinked when it became
+        // current). pick_next returns only tree members; try_steal ASSERTs its
+        // victim is RUNNABLE && !on_cpu (§8.4.5). Neither can return `prev`. The
+        // prior body re-inserted a RUNNING, on_cpu thread into the run tree and
+        // dropped the lock -- a latent RunqRunnable / RunqOnCpuSafe violation
+        // (a running thread, lock-free, looking stealable) that would extinct
+        // the *next* picker on its invariant ASSERT rather than here. Fail at
+        // the source.
+        extinction("sched: pick_next/try_steal returned the current thread");
     }
 
     if (prev->state == THREAD_RUNNING) {
@@ -1090,7 +1106,12 @@ void sched(void) {
         }
         spin_lock_t *lk = cs_now->pending_release_lock;
         cs_now->pending_release_lock = NULL;
-        spin_unlock(lk);
+        // RW-2 2A-F3: NULL-guard, symmetric with sched_finish_task_switch (the
+        // trampoline resume). The test-only thread_switch primitive bypasses
+        // sched() and arms no pending_release_lock; a thread suspended INSIDE
+        // sched() that is later resumed via thread_switch reaches here with
+        // lk == NULL -> spin_unlock(NULL) would store through address 0.
+        if (lk) spin_unlock(lk);
         __asm__ __volatile__("msr daif, %x0\n" :: "r"(s) : "memory");
     }
 }
