@@ -103,3 +103,34 @@ void test_asid_inflight_count(void) {
     TEST_EXPECT_EQ(asid_inflight(), baseline,
         "inflight returned to baseline after both frees");
 }
+
+// RW-1 B-F1 fail-soft: ASID-space exhaustion returns 0 (the kernel-reserved
+// sentinel) gracefully -- it no longer extincts the kernel. Drain the pool
+// to exhaustion, assert the over-limit allocs return 0, then free every
+// ASID this test took so the global pool is restored for the rest of boot.
+// Deterministic: kernel tests run single-threaded on the boot CPU before
+// any user Proc competes for the allocator. (The generation-rollover
+// redesign -- ARCH 6.2 -- removes exhaustion; this test moves with it.)
+void test_asid_exhaustion_failsoft(void) {
+    static u16 held[ASID_USER_MAX];
+    unsigned n = 0;
+
+    for (;;) {
+        u16 a = asid_alloc();
+        if (a == 0u) break;            // exhausted -> graceful 0, no extinct
+        TEST_ASSERT(n < ASID_USER_MAX,
+            "asid_alloc handed out more than ASID_USER_MAX without exhausting");
+        held[n++] = a;
+    }
+    TEST_ASSERT(n >= 1u, "exhaustion test allocated at least one ASID");
+
+    // Still exhausted: a second over-limit alloc stays 0 (idempotent
+    // graceful failure, not a one-shot).
+    TEST_ASSERT(asid_alloc() == 0u,
+        "exhausted asid_alloc stays 0 on a repeat call (no extinction)");
+
+    // Restore the pool: free exactly what this test took.
+    for (unsigned i = 0; i < n; i++) {
+        asid_free(held[i]);
+    }
+}

@@ -302,7 +302,17 @@ struct Proc *proc_alloc(void) {
         proc_free(p);
         return NULL;
     }
-    p->asid = asid_alloc();      // extincts on exhaustion (no rollback path)
+    // RW-1 B-F1 fail-soft interim: asid_alloc returns 0 on ASID-space
+    // exhaustion (no longer extincts). Roll back like any other alloc
+    // failure -- proc_free releases the pgtable just created and skips
+    // asid_free (p->asid == 0). The spawn syscall surfaces -errno. (The
+    // generation-rollover redesign, ARCH section 6.2, removes exhaustion.)
+    p->asid = asid_alloc();
+    if (p->asid == 0) {
+        p->state = PROC_STATE_ZOMBIE;
+        proc_free(p);
+        return NULL;
+    }
 
     // P6-pouch-signals-impl: allocate the per-Proc note queue. NULL on OOM
     // routes through the same rollback path as the handle-table / pgtable

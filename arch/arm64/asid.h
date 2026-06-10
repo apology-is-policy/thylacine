@@ -40,9 +40,13 @@
 // if called twice.
 void asid_init(void);
 
-// Allocate a fresh ASID in [ASID_USER_FIRST, ASID_USER_LAST]. On
-// exhaustion at v1.0, extincts loudly. Caller assigns the returned
-// ASID to a per-Proc page-table root (TTBR0_EL1 layout).
+// Allocate a fresh ASID in [ASID_USER_FIRST, ASID_USER_LAST]. Returns 0
+// (ASID_RESERVED_KERNEL -- never a valid user ASID) on exhaustion (RW-1
+// B-F1 fail-soft interim): the caller (proc_alloc) MUST check for 0 and
+// fail the spawn gracefully rather than installing ASID 0 (which would
+// alias the kernel's global mappings). Caller assigns a non-zero return
+// to a per-Proc page-table root (TTBR0_EL1 layout). The generation-
+// rollover redesign (ARCH section 6.2) removes exhaustion entirely.
 u16 asid_alloc(void);
 
 // Release an ASID back to the free-list. Issues a TLB-invalidate-by-ASID

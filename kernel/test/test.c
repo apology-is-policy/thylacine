@@ -133,6 +133,7 @@ void test_vmo_dup_oom_rollback(void);
 void test_asid_alloc_unique(void);
 void test_asid_free_reuses(void);
 void test_asid_inflight_count(void);
+void test_asid_exhaustion_failsoft(void);
 void test_proc_pgtable_alloc_smoke(void);
 void test_proc_pgtable_lifecycle_stress(void);
 void test_proc_ttbr0_swap_smoke(void);
@@ -997,6 +998,7 @@ struct test_case g_tests[] = {
     { "asid.alloc_unique",             test_asid_alloc_unique,             false, NULL },
     { "asid.free_reuses",              test_asid_free_reuses,              false, NULL },
     { "asid.inflight_count",           test_asid_inflight_count,           false, NULL },
+    { "asid.exhaustion_failsoft",      test_asid_exhaustion_failsoft,      false, NULL },
     { "proc.pgtable_alloc_smoke",      test_proc_pgtable_alloc_smoke,      false, NULL },
     { "proc.pgtable_lifecycle_stress", test_proc_pgtable_lifecycle_stress, false, NULL },
     { "proc.ttbr0_swap_smoke",         test_proc_ttbr0_swap_smoke,         false, NULL },

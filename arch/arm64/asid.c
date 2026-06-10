@@ -94,9 +94,17 @@ u16 asid_alloc(void) {
         // Monotonic path: hand out a fresh ASID.
         asid = g_next_asid++;
     } else {
+        // RW-1 B-F1 fail-soft interim: ASID-space exhaustion returns 0
+        // (ASID_RESERVED_KERNEL -- never a valid user ASID, so an
+        // unambiguous failure sentinel) instead of extincting the whole
+        // kernel. proc_alloc rolls the partially-built Proc back and fails
+        // the spawn with -errno, turning an unprivileged whole-system DoS
+        // (the 256th concurrent Proc) into a per-spawn error. The
+        // generation-rollover redesign (ARCH section 6.2) removes
+        // exhaustion entirely; this interim holds until it lands. No
+        // counters are touched on this path -- nothing was allocated.
         spin_unlock_irqrestore(&g_asid_lock, s);
-        extinction("asid_alloc: 8-bit ASID space exhausted at v1.0 "
-                   "(generation rollover deferred to Phase 5+)");
+        return 0u;
     }
 
     g_asid_inflight++;
