@@ -283,6 +283,42 @@ void test_9p_session_walk_round_trip(void) {
     TEST_EXPECT_EQ(r.qids[0].path, (u64)200, "Rwalk qid[0].path round-trip");
 }
 
+// RW-4 round-2 R-B-F1: a LOCAL fid-table-full condition must NOT latch the shared
+// session dead. fid_bind fails on capacity (n_bound_fids >= 256), which is not a
+// server protocol fault -- R3-F1's mark_dead-on-drc<0 would otherwise take the
+// whole root FS down on the 257th concurrent fid. Two legs: send_walk fails CLOSED
+// when the table is full (the primary defense), and a dispatch-time fid_bind
+// failure (the TOCTOU residual) surfaces as a per-op error (rc==0, is_error),
+// NOT the -1 the client reads as a protocol violation.
+void test_9p_session_walk_fid_full_no_latch(void) {
+    struct p9_session s;
+    TEST_EXPECT_EQ(drive_session_open(&s, /*root_fid=*/0), 0, "drive_session_open");
+
+    // (a) SEND-time capacity pre-check: a full fid table fails the walk CLOSED
+    // here (clean -1, no server round-trip), not at dispatch.
+    size_t saved = s.n_bound_fids;
+    s.n_bound_fids = P9_SESSION_MAX_FIDS;
+    int len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 5, 0, NULL, NULL);
+    TEST_ASSERT(len < 0, "send_walk fails closed when the fid table is full");
+    s.n_bound_fids = saved;
+
+    // (b) DISPATCH-time TOCTOU: send a walk (table not yet full), then fill the
+    // table (modeling a peer binding the last fid during this op's recv), then
+    // dispatch the conformant Rwalk. Pre-fix this returned -1 -> the client
+    // latched the shared session dead; post-fix it returns 0 + is_error so the
+    // op fails with -EIO and the session stays ALIVE.
+    len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 6, 0, NULL, NULL);
+    TEST_ASSERT(len > 0, "send_walk(0->6) ok (table not yet full)");
+    u32 sz; u8 ty; u16 tag;
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &tag);
+    s.n_bound_fids = P9_SESSION_MAX_FIDS;   // the table fills during the recv window
+    len = synth_rwalk_single(g_buf, sizeof(g_buf), tag, P9_QTDIR, 1, 200);
+    struct p9_dispatch_result r;
+    int rc = p9_session_dispatch_rmsg(&s, g_buf, (size_t)len, &r);
+    TEST_EXPECT_EQ(rc, 0, "dispatch returns 0 (per-op error), NOT -1 (would latch the session dead)");
+    TEST_ASSERT(r.is_error, "local fid-full surfaces as a per-op error, not a protocol violation");
+}
+
 void test_9p_session_clunk_round_trip(void) {
     struct p9_session s;
     drive_session_open(&s, /*root_fid=*/0);

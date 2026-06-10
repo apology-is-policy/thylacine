@@ -42,6 +42,7 @@
 
 #include <thylacine/9p_session.h>
 #include <thylacine/9p_wire.h>
+#include <thylacine/errno.h>     // T_E_IO for the synthetic local-failure ecode
 #include <thylacine/types.h>
 
 // =============================================================================
@@ -284,6 +285,12 @@ int p9_session_send_walk(struct p9_session *s,
     // Per spec's SendWalk precondition: no other in-flight op targets
     // new_fid as either src or destination.
     if (any_outstanding_on_fid(s, new_fid)) return -1;
+    // RW-4 round-2 (R-B-F1): pre-check the fid-table capacity so a walk that
+    // could not bind new_fid at dispatch fails CLOSED here (clean -1 -> caller
+    // -EIO, no server round-trip, no shared-session death) instead of surfacing
+    // as a dispatch-time fid_bind failure. The dispatch path still handles the
+    // rare TOCTOU residual (a peer binds the last fid during this op's recv).
+    if (s->n_bound_fids >= P9_SESSION_MAX_FIDS) return -1;
     int t = alloc_tag(s);
     if (t < 0) return -1;
     int rc = p9_build_twalk(out, cap, (u16)t,
@@ -886,8 +893,20 @@ int p9_session_dispatch_rmsg(struct p9_session *s,
         // At this bring-up subset we bind unconditionally; nuanced
         // partial-walk semantics (when nwqid < requested nwname) land
         // in P5-session-walk-partial.
-        if (fid_bind(s, op->new_fid) < 0) return -1;
-        out->nwqid        = nwqid;
+        if (fid_bind(s, op->new_fid) < 0) {
+            // fid_bind fails ONLY on a LOCAL condition (the fid table is full, or
+            // a redundant already-bound fid) -- the server's Rwalk is conformant.
+            // Surface it as a per-op error (a synthetic Rlerror) so this op
+            // completes with -EIO + the common tail clears the tag, WITHOUT the
+            // -1 that R3-F1's mark_dead-on-drc<0 reads as a protocol violation:
+            // a local 256-fid exhaustion must NOT latch the shared root-FS session
+            // dead (round-2 R-B-F1). send_walk's capacity pre-check makes this the
+            // rare TOCTOU residual (a peer bound the last fid during this recv).
+            out->is_error = true;
+            out->ecode    = T_E_IO;   // EIO (POSIX-aligned 9P2000.L wire errno)
+        } else {
+            out->nwqid    = nwqid;
+        }
     } else if (op->kind == P9_TCLUNK) {
         u16 tag_check;
         rc = p9_parse_rclunk(rmsg, len, &tag_check);

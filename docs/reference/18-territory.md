@@ -113,8 +113,13 @@ u64                territory_total_destroyed(void);
 stalk-2: keyed by the `mountpoint` Spoor's `(dc, devno, qid.path)` identity (the
 Spoor is NOT retained -- only its identity is copied; the caller `stalk`s it and
 clunks it). `mount_lookup(p, probe)` is the `stalk` cross-mount probe -- it
-returns the borrowed source of the first entry matching `probe`'s identity, or
-NULL. See `docs/reference/104-stalk.md` "Mount crossing" for the full picture.
+returns a **REF-HELD** source of the first entry matching `probe`'s identity, or
+NULL. **The caller MUST `spoor_clunk` the result** (RW-4 SA-F1 changed the contract
+from borrow to owned: the lookup + `spoor_ref` happen atomically under `ns_lock` so
+a concurrent `unmount` cannot free the source mid-cross; `stalk_cross_mounts` clunks
+it after `clone_walk_zero`). `territory_root_ref(p)` is the companion atomic
+read+ref of `root_spoor` (caller clunks) -- the only sound way to take the FROM_ROOT
+walk base in a multi-thread Proc. See `docs/reference/104-stalk.md` "Mount crossing".
 
 | Return | Meaning |
 |---|---|
@@ -299,11 +304,11 @@ Plan 9's `unmount(name, old)` can remove a specific entry; `unmount(name)` remov
 
 ### RFNAMEG (shared territory) is not implemented
 
-`rfork(RFNAMEG)` extincts at v1.0. The Territory `ref` field exists for forward-looking sharing semantics but is always `1`. Phase 5+ syscall surface lands the share path with a per-Territory lock.
+`rfork(RFNAMEG)` extincts at v1.0, so the Territory `ref` field is normally `1` (its multi-holder semantics are forward-looking). The per-Territory `ns_lock` already serializes multi-**Thread** access (peer Threads of one Proc share the Territory -- the RW-4 SA-F1 surface); the RFNAMEG cross-**Proc** *share* path is the remaining Phase 5+ work.
 
-### Single-CPU lifecycle at v1.0
+### Per-Territory locking (RW-4 SA-F1)
 
-bind / unbind / mount / unmount / territory_clone are not internally synchronized; concurrent callers on different CPUs would race. At v1.0 only the boot CPU calls these (rfork is single-CPU; tests run on boot). Phase 5+ adds a per-Territory lock.
+`mount` / `unmount` / `bind` / `unbind` / `territory_chroot` / `territory_pivot_root` / `territory_clone` / `mount_lookup` / `territory_root_ref` serialize `mounts[]` / `nmounts` / `binds[]` / `nbinds` / `root_spoor` under the per-Territory **`ns_lock`** (a near-leaf spinlock). Peer Threads of a Proc share the Territory, so a concurrent `pivot_root` / `unmount` on one thread must not free a Spoor a walking thread is mid-read on -- `ns_lock` closes that UAF (the #848 race, promoted P3-dormant -> P1 by the P6 multi-thread lift and fixed in RW-4). The lock is held ONLY for the table read-modify-write, **NEVER across `stalk`** (it blocks on 9P) or across a `spoor_clunk` (the Dev close hook may sleep): the displaced/removed source is captured under the lock and clunked outside it (the `dot_lock` discipline). The `cwd` (`dot_path`) has its own separate `dot_lock`.
 
 ### `territory_clone` bumps refcount per-entry; failed mid-loop is partial
 
@@ -337,7 +342,8 @@ ARCH §9.6 specifies `mount(source_spoor_fd, target_path, flags)` as a user-visi
 | `chroot` user-visible syscall (SYS_CHROOT) | **Landed (P5-stratumd-stub-bringup-e2)** |
 | In-kernel tests | 16 total (3 bind + 7 mount + 6 chroot) |
 | Spec `territory.tla` + buggy configs | **Landed (P5-stratumd-stub-bringup-e2)** — 1 clean + 5 buggy cfgs |
-| Per-Territory lock | Phase 5+ |
+| Per-Territory `ns_lock` (mounts/binds/root_spoor) | **Done (RW-4 SA-F1)** |
+| RFNAMEG cross-Proc shared territory | Phase 5+ |
 | RFNAMEG shared territory | Phase 5+ |
 | Mount-union walk (MBEFORE/MAFTER ordering at walk time) | Phase 5+ |
 | `pivot_root` / `unchroot` (replace one-way chroot) | v1.x per CORVUS-DESIGN §10.1 Q2 |

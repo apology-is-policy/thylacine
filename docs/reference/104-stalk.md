@@ -392,11 +392,18 @@ allocation in the resolver beyond the Spoor clones, which are SLUB).
   `stalk` calls, via persisted `Chan->mh` back-pointers) is a v1.x refinement;
   v1.0's in-call trail containment is the audited invariant. `/srv` is not yet a
   namespace-resident path (stalk-3 mounts devsrv there).
-- **No per-Territory mount-table lock.** Like the rest of the per-Proc Territory
-  (binds/mounts have never been locked), `cross_mounts`/`mount_lookup` read
-  `mounts[]` without a lock. A peer thread mutating the table concurrently
-  (multi-thread Proc) is the same inherited lock-free-Territory class as the
-  `handle_get` TOCTOU; SMP Territory locking is a Phase-5+ item.
+- **Per-Territory mount-table lock (RW-4 SA-F1).** `cross_mounts` / `mount_lookup`
+  / the FROM_ROOT `root_spoor` reads, and every mutator (`mount` / `unmount` /
+  `bind` / `chroot` / `pivot_root` / `territory_clone`), serialize `mounts[]` /
+  `nmounts` / `binds[]` / `root_spoor` under the per-Territory `ns_lock`. This
+  closed the #848 race (a peer Thread's concurrent `pivot_root`/`unmount` could
+  free a Spoor a walking Thread was mid-read on -- the multi-thread-Proc UAF
+  class, the namespace twin of the `handle_get` TOCTOU `#844` closed). `ns_lock`
+  is a near-leaf, held only for the table read-modify-write: `mount_lookup`
+  returns a **ref-held** source (caller clunks) so the lock is never held across
+  `clone_walk_zero` / `stalk`, and a displaced source is clunked OUTSIDE the lock.
+  Any NEW `mounts[]`/`root_spoor` reader MUST go through `mount_lookup` /
+  `territory_root_ref` (do not add a bare lock-free read).
 - **`SYS_WALK_OPEN` still exists.** Single-component callers (joey bringup
   probes, the pouch openat seam) are unchanged; migrating them to `SYS_OPEN` and
   retiring `SYS_WALK_OPEN` is a deferred cleanup.

@@ -1408,9 +1408,10 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     //       mode: caller has not called SYS_CHROOT yet (root_spoor ==
     //       NULL) → -1.
     //
-    // Both paths converge on src; src is NOT spoor_ref'd here — the
-    // syscall's source ownership stays with the caller (handle table or
-    // Territory). spoor_clone(src) below is what mints the new Spoor for
+    // Both paths return a REF-HELD src: the handle arm via sys_lookup_spoor's
+    // #844 by-value snapshot, the FROM_ROOT arm via RW-4 SA-F1's
+    // territory_root_ref (atomic read+ref under ns_lock). Every exit path below
+    // spoor_clunks src exactly once. spoor_clone(src) mints the new Spoor for
     // the result fd.
     struct Spoor *src;
     if (spoor_fd_raw == SYS_WALK_OPEN_FROM_ROOT) {

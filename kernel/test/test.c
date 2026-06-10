@@ -528,6 +528,7 @@ void test_9p_session_init_destroy(void);
 void test_9p_session_version_handshake(void);
 void test_9p_session_attach_handshake(void);
 void test_9p_session_walk_round_trip(void);
+void test_9p_session_walk_fid_full_no_latch(void);
 void test_9p_session_clunk_round_trip(void);
 void test_9p_session_clunk_send_time_unbinds(void);
 void test_9p_session_dispatch_rlerror(void);
@@ -1483,6 +1484,7 @@ struct test_case g_tests[] = {
     { "9p_session.version_handshake",  test_9p_session_version_handshake,  false, NULL },
     { "9p_session.attach_handshake",   test_9p_session_attach_handshake,   false, NULL },
     { "9p_session.walk_round_trip",    test_9p_session_walk_round_trip,    false, NULL },
+    { "9p_session.walk_fid_full_no_latch", test_9p_session_walk_fid_full_no_latch, false, NULL },
     { "9p_session.clunk_round_trip",   test_9p_session_clunk_round_trip,   false, NULL },
     { "9p_session.clunk_send_time_unbinds",
                                        test_9p_session_clunk_send_time_unbinds,

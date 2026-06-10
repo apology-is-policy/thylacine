@@ -219,7 +219,11 @@ void joey_run(void) {
         struct SrvRegistry *boot_reg = srv_boot_registry();
         if (!boot_reg)
             extinction("joey: boot service registry not initialized");
-        struct Spoor *srv_root_dir = kt->proc->territory->root_spoor;
+        // RW-4 SA-F1: use territory_root_ref (atomic read+ref under ns_lock) so
+        // the "no bare root_spoor read outside territory.c" invariant stays total
+        // and uniform with the syscall FROM_ROOT readers -- even though kproc's
+        // territory has a single mutator at boot. Released after the stalk base use.
+        struct Spoor *srv_root_dir = territory_root_ref(kt->proc->territory);
         if (!srv_root_dir)
             extinction("joey: kproc territory has no root_spoor for /srv mount");
 
@@ -228,6 +232,7 @@ void joey_run(void) {
         // keys on /srv's own (dc, devno, qid.path) identity.
         struct Spoor *srv_mp = stalk(kt->proc, srv_root_dir, "srv", 3,
                                      STALK_MOUNT, 0);
+        spoor_clunk(srv_root_dir);   // SA-F1: release the root ref (stalk borrowed it)
         if (!srv_mp)
             extinction("joey: stalk(/srv) for boot devsrv mount failed");
 
