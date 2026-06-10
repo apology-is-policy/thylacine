@@ -250,16 +250,19 @@ Any change to the surfaces below MUST spawn a focused adversarial soundness audi
 
 The trigger list is *cumulative*: as new audit-bearing files appear (e.g. Phase 4 adds the 9P client; Phase 5 adds futex / poll / notes / pty), they're appended here in the same PR that introduces them.
 
+### The reviewer agent (`.claude/agents/holotype-reviewer.md`)
+
+The prosecutor is a **dedicated agent definition**, not an inlined general-purpose subagent: `.claude/agents/holotype-reviewer.md` pins `model: fable` + `effort: max` + the standing prosecute discipline, so every round spawns it identically with only a scoped per-round prompt on top. **Always start the reviewer as Fable** (the strongest model; the highest-leverage place to spend capability). The Fable cybersecurity/biology content filter can trip on security-heavy surfaces — model fallback is enabled, so a trip degrades to Opus mid-run instead of failing the round; the main loop runs on Opus (the durable home for the findings, which the filter would otherwise trip on Fable-as-main). The agent reports `MODEL(start)` as its first output line and `MODEL(end)` as its last, independently — a **start != end mismatch is the in-band signal that the fallback fired mid-run**. An on-disk agent definition loads at session START: after creating/editing the `.md`, start a fresh session (or open the `/agents` UI) before `subagent_type: holotype-reviewer` resolves.
+
 ### How to run an audit round
 
-1. Spawn a soundness-prosecutor agent (general-purpose subagent, `run_in_background: true`). Use the most capable model available.
+1. Spawn the dedicated reviewer agent (`subagent_type: holotype-reviewer`, `run_in_background: true`). Model + effort + the prosecute-not-defend discipline come from the agent definition; the prompt carries only the round-specific scope, invariants, and adversarial categories.
 2. In the prompt, include `memory/audit_rN_closed_list.md` contents as the "already fixed — do not re-report" preamble.
 3. Scope the prompt to the surface you changed.
-4. Tell the agent explicitly to prosecute, not defend. Brutal but grounded.
-5. Wait for the completion notification. Do not poll.
-6. Trust but verify: the agent's summary describes intent; validate quoted file:line references.
-7. Fix every P0/P1/P2 finding before merge. P3 findings get tracked or closed with explicit justification.
-8. Append the round's closed list to `memory/audit_rN_closed_list.md` for the cumulative do-not-re-report set.
+4. Wait for the completion notification. Do not poll.
+5. Trust but verify: validate quoted file:line references AND check the agent's `MODEL(start)` / `MODEL(end)` lines — a mismatch means a mid-run model fallback, so weigh the post-fallback portion accordingly (re-spawn on the stronger model if a key surface was reviewed after the fallback).
+6. Fix every P0/P1/P2 finding before merge. P3 findings get tracked or closed with explicit justification.
+7. Append the round's closed list to `memory/audit_rN_closed_list.md` for the cumulative do-not-re-report set.
 
 ### Prosecutor agent prompt template
 
@@ -310,7 +313,9 @@ Report format per finding:
 **Suggested fix**: <1-2 sentences>
 
 At the end: Summary with counts by severity + confidence notes on
-areas you couldn't audit as deeply as you wanted.
+areas you couldn't audit as deeply as you wanted. Then the final line
+`MODEL(end): <model name + id>` (per your agent definition — report it
+fresh; a mismatch vs MODEL(start) flags a mid-run model fallback).
 
 Be brutal but grounded. Quote code; don't paraphrase it.
 ```
