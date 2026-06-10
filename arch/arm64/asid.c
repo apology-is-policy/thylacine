@@ -148,15 +148,20 @@ static void flush_context(void) {
         g_flush_pending[i] = true;
     }
     g_asid_cur_idx = ASID_USER_FIRST;
-    g_asid_rollovers++;
+    // Atomic: asid_rollover_count() reads this locklessly (diagnostic).
+    __atomic_fetch_add(&g_asid_rollovers, 1u, __ATOMIC_RELAXED);
 }
 
 // spec: new_context (the SlowSwitch non-fast resolution). Assign a current-
 // generation context_id for a Proc whose stored context_id is stale (old_cid;
 // 0 == never assigned). Under g_asid_lock.
 static u64 new_context(u64 old_cid) {
+    // g_asid_generation is read locklessly by the fast path (gen_match), so all
+    // accesses are __atomic_* even under g_asid_lock (the lock serializes
+    // writers; the atomic store keeps the lockless reader race-free, RW-1 F2).
+    u64 generation = __atomic_load_n(&g_asid_generation, __ATOMIC_RELAXED);
     if (old_cid != 0) {
-        u64 new_cid = g_asid_generation | (old_cid & g_asid_val_mask);
+        u64 new_cid = generation | (old_cid & g_asid_val_mask);
         // Old ASID reserved for us across a rollover -> keep it (re-stamp).
         if (check_update_reserved(old_cid, new_cid))
             return new_cid;
@@ -169,7 +174,8 @@ static u64 new_context(u64 old_cid) {
     u64 v = map_find_free(g_asid_cur_idx);
     if (v > g_asid_last) {
         // No free ASID this generation -> roll over.
-        g_asid_generation += g_asid_gen_unit;
+        generation += g_asid_gen_unit;
+        __atomic_store_n(&g_asid_generation, generation, __ATOMIC_RELAXED);
         flush_context();
         v = map_find_free(ASID_USER_FIRST);
         // Guaranteed by construction: flush_context reserves at most one ASID
@@ -179,7 +185,7 @@ static u64 new_context(u64 old_cid) {
     }
     map_set(v);
     g_asid_cur_idx = v;
-    return g_asid_generation | v;
+    return generation | v;
 }
 
 // =============================================================================
@@ -189,11 +195,20 @@ static u64 new_context(u64 old_cid) {
 void asid_init(void) {
     if (g_asid_initialized) extinction("asid_init called twice");
 
+    // The bitmap + generation are sized from the BOOT CPU's ASID width;
+    // mmu_program_this_cpu sets each CPU's TCR_EL1.AS from its own ASIDBits.
+    // ARM requires a uniform ASID width across all PEs in a system (the ASID
+    // size is system-wide), so the boot-CPU width governs all CPUs (RW-1 F3/
+    // SA-3 -- a heterogeneous-ASID-width system would be an architectural
+    // violation, not a config Thylacine targets).
     g_asid_bits     = asid_hw_bits();              // 8 or 16
     g_asid_val_mask = (1ull << g_asid_bits) - 1u;
     g_asid_gen_unit = (1ull << g_asid_bits);
     g_asid_last     = g_asid_val_mask;             // max user ASID value
-    g_asid_generation = g_asid_gen_unit;           // generation #1 (never 0)
+    // generation #1 (never 0). __atomic for symmetry with the lockless reader
+    // (single-threaded at init, but keeps every access to g_asid_generation
+    // uniformly atomic -- RW-1 F2).
+    __atomic_store_n(&g_asid_generation, g_asid_gen_unit, __ATOMIC_RELAXED);
 
     map_clear_all();
     for (unsigned i = 0; i < DTB_MAX_CPUS; i++) {
@@ -208,6 +223,12 @@ void asid_init(void) {
 
 u64 asid_resolve(u64 *context_id, unsigned cpu) {
     if (!g_asid_initialized) extinction("asid_resolve before asid_init");
+    // The per-CPU arrays are [DTB_MAX_CPUS]; an out-of-range cpu would corrupt
+    // adjacent BSS. The production caller passes smp_cpu_idx_self(); this
+    // fail-fast mirrors ipi_resched_handler's bound guard (RW-1 audit F3). The
+    // systemic dense-Aff0 < DTB_MAX_CPUS assumption shared by the whole
+    // scheduler is tracked separately (the DTB MPIDR->logical-index map).
+    ASSERT_OR_DIE(cpu < DTB_MAX_CPUS, "asid_resolve: cpu index out of range");
 
     u64 cid        = __atomic_load_n(context_id, __ATOMIC_RELAXED);
     u64 old_active = __atomic_load_n(&g_active_asids[cpu], __ATOMIC_RELAXED);

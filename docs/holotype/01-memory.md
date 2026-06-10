@@ -37,12 +37,31 @@ corruption. Extensive verified-sound lists (see the register's RW-1 footer).
 - `83bd74e` — **B-F1 scripture**: ASID generation-rollover design (ARCH §6.2.1 + I-31 + audit rows). No code.
 
 ## OWED before the RW-1 close (the close-checklist)
-1. **ASID generation-rollover** (B-F1 proper fix) — the remaining sub-chunk:
-   `specs/asid.tla` (model-first: clean + the `rollover_steals_active` buggy
-   cfg, TLC-green) → impl (asid.c rewrite + `_Atomic u64 context_id` on Proc +
-   the `asid_check_and_switch` context-switch pre-hook + TCR.AS=1 from ASIDBits;
-   drop asid_alloc-at-create / asid_free-at-reap) → focused `holotype-reviewer`
-   audit. Design: ARCH §6.2.1 + `memory/project_asid_rollover_design.md`.
+1. **ASID generation-rollover** (B-F1 proper fix) — IN PROGRESS:
+   - **`specs/asid.tla` LANDED `@4fe50f7`** (model-first): clean cfg TLC-GREEN
+     (52033 states, 5 invariants) + 4 buggy cfgs confirmed (rollover_steals_active
+     -> ActiveClaimed; fast_no_regen -> NoActiveAlias; no_flush_pending +
+     fast_no_flush_check -> NoStaleTLB). The clean run SURFACED a design point:
+     the fast path needs TWO guards (gen-match AND ~flush_pending / Linux's
+     `old_active_asid != 0`); the impl carries both.
+   - **impl LANDED `@d742ffa`**: asid.c/h rewrite (asid_resolve fast/slow +
+     new_context + flush_context + check_update_reserved); `u64 context_id` on
+     Proc (sizeof 264 unchanged); the `sched_install_asid_ttbr0` context-switch
+     pre-hook at both cpu_switch_context sites; TCR_EL1.AS from ASIDBits; drop
+     asid_alloc/asid_free; teardown TLB-safe via vma_drain's vaae1is +
+     flush_pending (no per-Proc flush). **default 806/806 PASS, 0 EXTINCTION,
+     clean boot -smp4.** SMP gate on d742ffa: **PASS -- 0 CORRUPTION**
+     across default+UBSan x smp4/smp8 (N=10 each; timing classifications =
+     benign #894 host-load, expected with the reviewer running concurrently).
+   - **Self-audit (Opus) found**: SA-1 [P2] asid.c:172 non-atomic
+     `g_asid_generation +=` racing the lockless gen_match load (-> __atomic_store);
+     SA-2 [P3] g_asid_rollovers++ vs the lockless diagnostic load; SA-3 [P3/doc]
+     per-CPU ASIDBits uniformity assumption. All HELD to merge with the Fable
+     reviewer's findings, fix AFTER the SMP gate, re-gate, then close.
+   - **Fable `holotype-reviewer` audit IN FLIGHT** on d742ffa (the full SMP-race
+     prosecution). NEXT: merge findings + SA-1/2/3, fix, re-build/test/gate,
+     append `audit_holotype_rw1_closed_list.md`, then the remaining items below.
+   Design: ARCH §6.2.1 + `memory/project_asid_rollover_design.md`.
 2. **C-F2 [P2]** — add the `p->vma_lock` precondition to the `burrow_map` /
    `burrow_unmap` header doc blocks (`burrow.h:258-300`). Trivial.
 3. **C-F3 [P3]** — `vma_alloc` reject `WRITE && !READ` (mirror syscall.c:391/544).

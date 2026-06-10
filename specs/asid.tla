@@ -65,6 +65,17 @@
 (*       no-pending-flush; omitting the second silently corrupts across a      *)
 (*       rollover. The impl MUST carry the `old_active_asid != 0` fast-path    *)
 (*       guard -- that is this second guard.)                                  *)
+(*   asid_buggy_reserve_value_only       BUGGY_RESERVE_VALUE_ONLY=TRUE -- a    *)
+(*       Proc reclaims its old ASID if that VALUE is reserved by ANY CPU       *)
+(*       (ownerless), rather than only if the Proc OWNS a reservation of that  *)
+(*       value. So it can reclaim an ASID another live Proc is running ->      *)
+(*       NoActiveAlias VIOLATED (needs >= 4 Procs to expose). The impl does    *)
+(*       NOT have this bug: check_update_reserved compares the FULL context_id *)
+(*       (reserved[i] == old_cid, generation included), so a Proc reclaims     *)
+(*       only its own reservation. (HOLOTYPE RW-1 audit F1: the original spec  *)
+(*       modeled this ownerless reclaim and its clean cfg was falsely green at *)
+(*       3 Procs -- one short of the counterexample. The fix: the OwnsReserved-*)
+(*       Value ownership predicate + cfg bounds raised to >= 4 Procs.)         *)
 (*                                                                         *)
 (* THE TWO FAST-PATH GUARDS (both load-bearing; each has a buggy cfg):        *)
 (*   (1) generation-match  -- do not reuse a stale-generation ASID (a rollover *)
@@ -107,7 +118,8 @@ CONSTANTS
     BUGGY_ROLLOVER_STEALS_ACTIVE,    \* BOOLEAN
     BUGGY_FAST_NO_REGEN,             \* BOOLEAN
     BUGGY_NO_FLUSH_PENDING,          \* BOOLEAN
-    BUGGY_FAST_NO_FLUSH_CHECK        \* BOOLEAN
+    BUGGY_FAST_NO_FLUSH_CHECK,       \* BOOLEAN
+    BUGGY_RESERVE_VALUE_ONLY         \* BOOLEAN
 
 ASSUME Cardinality(CPUs) >= 2
 ASSUME Cardinality(Asids) >= 1
@@ -117,6 +129,7 @@ ASSUME BUGGY_ROLLOVER_STEALS_ACTIVE \in BOOLEAN
 ASSUME BUGGY_FAST_NO_REGEN \in BOOLEAN
 ASSUME BUGGY_NO_FLUSH_PENDING \in BOOLEAN
 ASSUME BUGGY_FAST_NO_FLUSH_CHECK \in BOOLEAN
+ASSUME BUGGY_RESERVE_VALUE_ONLY \in BOOLEAN
 
 Gens == 1..MaxGen
 
@@ -125,15 +138,29 @@ VARIABLES
     pgen,        \* [Procs -> 0..MaxGen]      -- the generation half of each Proc's context_id
     pasid,       \* [Procs -> Asids \cup {NULL}] -- the ASID half
     active,      \* [CPUs -> Asids \cup {NULL}]  -- active_asids[cpu] (published, lockless)
-    reserved,    \* [CPUs -> Asids \cup {NULL}]  -- reserved_asids[cpu] (preserved across rollover)
+    reserved,    \* [CPUs -> Asids \cup {NULL}]  -- the reserved ASID VALUE per CPU (preserved across rollover)
+    rproc,       \* [CPUs -> Procs \cup {NULL}]  -- the Proc that OWNS each CPU's reservation
     curproc,     \* [CPUs -> Procs \cup {NULL}]  -- the Proc each CPU is currently running
     amap,        \* SUBSET Asids                 -- claimed ASIDs in the current generation
     fpend,       \* [CPUs -> BOOLEAN]            -- flush_pending[cpu]
     tlb          \* [CPUs -> [Asids -> Procs \cup {NULL}]] -- the (ASID -> address space) the CPU's TLB caches
 
-vars == <<gen, pgen, pasid, active, reserved, curproc, amap, fpend, tlb>>
+vars == <<gen, pgen, pasid, active, reserved, rproc, curproc, amap, fpend, tlb>>
 
 ReservedSet == { reserved[k] : k \in CPUs } \ {NULL}
+
+\* The reservation is OWNED: the impl stores the full context_id (generation |
+\* value) in reserved_asids[cpu] and reclaims via a FULL-context_id compare
+\* (check_update_reserved: reserved[i] == old_cid), so a Proc reclaims ONLY its
+\* OWN reservation -- (rproc[k]=p, reserved[k]=value) is the (owner, value) pair
+\* that the full-cid compare distinguishes. The model carries the owner (rproc)
+\* alongside the value (reserved): a Proc may keep its reserved ASID iff it owns
+\* a reservation OF THAT VALUE. The value-only (ownerless) form below is the
+\* F1 bug -- it lets a Proc reclaim another live Proc's ASID -> NoActiveAlias.
+OwnsReservedValue(p) ==
+    IF BUGGY_RESERVE_VALUE_ONLY
+      THEN pasid[p] \in ReservedSet                                      \* ownerless (BUGGY: the F1 alias)
+      ELSE \E k \in CPUs : rproc[k] = p /\ reserved[k] = pasid[p]        \* p owns a reservation of its value
 
 TypeOk ==
     /\ gen      \in Gens
@@ -141,6 +168,7 @@ TypeOk ==
     /\ pasid    \in [Procs -> Asids \cup {NULL}]
     /\ active   \in [CPUs -> Asids \cup {NULL}]
     /\ reserved \in [CPUs -> Asids \cup {NULL}]
+    /\ rproc    \in [CPUs -> Procs \cup {NULL}]
     /\ curproc  \in [CPUs -> Procs \cup {NULL}]
     /\ amap     \in SUBSET Asids
     /\ fpend    \in [CPUs -> BOOLEAN]
@@ -152,6 +180,7 @@ Init ==
     /\ pasid    = [p \in Procs |-> NULL]
     /\ active   = [c \in CPUs |-> NULL]
     /\ reserved = [c \in CPUs |-> NULL]
+    /\ rproc    = [c \in CPUs |-> NULL]
     /\ curproc  = [c \in CPUs |-> NULL]
     /\ amap     = {}
     /\ fpend    = [c \in CPUs |-> FALSE]
@@ -178,7 +207,7 @@ FastSwitch(c, p) ==
        \/ ~fpend[c]
     /\ active'  = [active EXCEPT ![c] = pasid[p]]
     /\ curproc' = [curproc EXCEPT ![c] = p]
-    /\ UNCHANGED <<gen, pgen, pasid, reserved, amap, fpend, tlb>>
+    /\ UNCHANGED <<gen, pgen, pasid, reserved, rproc, amap, fpend, tlb>>
 
 (***************************************************************************)
 (* SlowSwitch(c, p): a MISS (stale generation or never-assigned). Resolve a  *)
@@ -197,8 +226,11 @@ FastSwitch(c, p) ==
 SlowSwitch(c, p) ==
     /\ pgen[p] # gen \/ pasid[p] = NULL
     /\ LET freeNow     == Asids \ amap
+           \* canKeep: the Proc's old ASID value is reclaimable -- free this
+           \* generation, OR it OWNS a reservation of that value (the impl's
+           \* full-context_id check_update_reserved; NOT mere value membership).
            canKeep     == /\ pasid[p] \in Asids
-                          /\ (pasid[p] \notin amap \/ pasid[p] \in ReservedSet)
+                          /\ (pasid[p] \notin amap \/ OwnsReservedValue(p))
            needRollover == ~canKeep /\ freeNow = {}
        IN
        \/ /\ ~needRollover
@@ -206,6 +238,7 @@ SlowSwitch(c, p) ==
                 /\ gen'      = gen
                 /\ amap'     = amap \cup {na}
                 /\ reserved' = reserved
+                /\ rproc'    = rproc
                 /\ fpend'    = [fpend EXCEPT ![c] = FALSE]
                 /\ tlb'      = IF fpend[c]
                                  THEN [tlb EXCEPT ![c] = [a \in Asids |-> NULL]]
@@ -216,14 +249,20 @@ SlowSwitch(c, p) ==
                 /\ pasid'    = [pasid EXCEPT ![p] = na]
        \/ /\ needRollover
           /\ gen < MaxGen
+          \* flush_context preserves each CPU's active VALUE (or its existing
+          \* reserved if idle) AND the owning Proc -- rr / rrp in lockstep,
+          \* matching the impl storing the full context_id (value + identity).
           /\ LET rr        == [k \in CPUs |-> IF active[k] \in Asids
-                                                THEN active[k] ELSE reserved[k]]
+                                                THEN active[k]  ELSE reserved[k]]
+                 rrp       == [k \in CPUs |-> IF active[k] \in Asids
+                                                THEN curproc[k] ELSE rproc[k]]
                  rrSet     == { rr[k] : k \in CPUs } \ {NULL}
                  amapFlush == IF BUGGY_ROLLOVER_STEALS_ACTIVE THEN {} ELSE rrSet
                  postFree  == Asids \ amapFlush
              IN \E na \in postFree :
                   /\ gen'      = gen + 1
                   /\ reserved' = rr
+                  /\ rproc'    = rrp
                   /\ amap'     = amapFlush \cup {na}
                   /\ fpend'    = IF BUGGY_NO_FLUSH_PENDING
                                    THEN [fpend EXCEPT ![c] = FALSE]
@@ -244,7 +283,7 @@ Deschedule(c) ==
     /\ curproc[c] # NULL
     /\ active'  = [active EXCEPT ![c] = NULL]
     /\ curproc' = [curproc EXCEPT ![c] = NULL]
-    /\ UNCHANGED <<gen, pgen, pasid, reserved, amap, fpend, tlb>>
+    /\ UNCHANGED <<gen, pgen, pasid, reserved, rproc, amap, fpend, tlb>>
 
 (***************************************************************************)
 (* CacheTranslation(c): the running CPU caches a translation under its        *)
@@ -254,7 +293,7 @@ CacheTranslation(c) ==
     /\ curproc[c] # NULL
     /\ active[c] \in Asids
     /\ tlb' = [tlb EXCEPT ![c][active[c]] = curproc[c]]
-    /\ UNCHANGED <<gen, pgen, pasid, active, reserved, curproc, amap, fpend>>
+    /\ UNCHANGED <<gen, pgen, pasid, active, reserved, rproc, curproc, amap, fpend>>
 
 Next ==
     \/ \E c \in CPUs, p \in Procs : FastSwitch(c, p)
