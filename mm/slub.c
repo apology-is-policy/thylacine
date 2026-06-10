@@ -290,6 +290,19 @@ struct kmem_cache *kmem_cache_create(const char *name, size_t size,
                                      size_t align, unsigned flags) {
     if (size > SLUB_MAX_OBJECT_SIZE) return NULL;
 
+    // RW-1 F-S3: reject an alignment so large that no object fits a
+    // single-page slab -- init_cache would then compute objects_per_slab
+    // == 0, leaving an empty freelist that NULL-derefs at the first alloc.
+    // Mirror init_cache's sizing (min-align floor, min-object floor,
+    // round-up-to-align) so the rejection is exact; slab_order is 0 (one
+    // page), so any actual_size > PAGE_SIZE yields zero objects.
+    {
+        size_t a = align < SLUB_MIN_ALIGN ? SLUB_MIN_ALIGN : align;
+        size_t actual = size < SLUB_MIN_OBJECT_SIZE ? SLUB_MIN_OBJECT_SIZE : size;
+        actual = round_up_size(actual, a);
+        if (actual > PAGE_SIZE) return NULL;
+    }
+
     struct kmem_cache *c = kmem_cache_alloc(&g_meta_cache, KP_ZERO);
     if (!c) return NULL;
     init_cache(c, name, size, align, flags);
@@ -299,24 +312,31 @@ struct kmem_cache *kmem_cache_create(const char *name, size_t size,
 void kmem_cache_destroy(struct kmem_cache *c) {
     if (!c) return;
 
-    // Drain all partial slabs.
+    // Contract: the caller must have quiesced the cache (no concurrent
+    // kmem_cache_alloc/free on any CPU) AND freed every object. Both are
+    // the caller's responsibility -- same discipline as magazines_drain_all
+    // -- so the live-count read + the partial-drain below run without
+    // c->lock (RW-1 F-S2).
+    //
+    // RW-1 F-S1: a cache holding ANY live object must not be destroyed.
+    // The partial-drain below returns each partial slab's page to the
+    // buddy unconditionally; if such a slab still held a live object the
+    // page would be recycled under it -> silent use-after-free. The
+    // pre-existing guard tested only `nr_full`, so a *partial* slab with a
+    // live object slipped through as a silent free while the (less
+    // dangerous) full-slab case was a loud extinction. `alloc_count -
+    // free_count` is the exact live-object count across full AND partial
+    // slabs -- the complete check, subsuming the old nr_full one.
+    if (c->alloc_count - c->free_count != 0) {
+        extinction("kmem_cache_destroy: live objects remain");
+    }
+
+    // Drain all (now provably empty) partial slabs.
     while (!list_empty(&c->partial_list)) {
         struct page *slab = c->partial_list.next;
         list_remove(slab);
         c->nr_partial--;
         slab_drain(c, slab);
-    }
-
-    // F33 (audit-r3): destroy with full slabs outstanding means the
-    // caller has live objects in those slabs. The contract documented
-    // in the header says "Caller's responsibility to ensure no live
-    // objects remain" — surfacing the violation as an extinction is
-    // honest. Without this, the full slabs would leak and their
-    // struct pages would carry dangling slab_cache pointers; if the
-    // backing pages got recycled, kfree-from-different-cache could
-    // dereference the freed kmem_cache descriptor.
-    if (c->nr_full != 0) {
-        extinction("kmem_cache_destroy: live objects remain (full slabs)");
     }
 
     // Unlink from the global cache list, under the list lock (RW-1
@@ -477,4 +497,13 @@ u64 slub_active_slabs(void) {
     }
     spin_unlock_irqrestore(&g_cache_list_lock, s);
     return total;
+}
+
+// Live (currently-allocated) object count for one cache: the quantity the
+// RW-1 F-S1 destroy guard tests. A diagnostic snapshot (cumulative counters
+// are u64; a lock-free read may be momentarily stale under concurrent
+// alloc/free, which is fine for diagnostics + the quiesced destroy check).
+u64 kmem_cache_live_count(const struct kmem_cache *c) {
+    if (!c) return 0;
+    return c->alloc_count - c->free_count;
 }

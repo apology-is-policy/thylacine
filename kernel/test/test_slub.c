@@ -90,6 +90,52 @@ void test_slub_kmalloc_overflow_guard(void) {
                 "kmalloc(1 TiB) must return NULL via the order bound");
 }
 
+// RW-1 F-S1 / F-S3 regression: the kmem_cache_destroy liveness guard +
+// the create-time too-large-align reject.
+//
+// F-S1 pins the quantity the destroy guard tests (kmem_cache_live_count =
+// alloc_count - free_count) across a partial slab -- the case the old
+// nr_full-only guard missed. The extinction arm itself is not unit-testable
+// (it halts the kernel by design, like the nr_full guard), so we verify the
+// guard's INPUT is exact and that a balanced cache destroys cleanly.
+//
+// F-S3 verifies an alignment too large for a single-page slab is rejected
+// at create (pre-fix it built a cache with objects_per_slab == 0 whose
+// first alloc NULL-deref'd the empty freelist).
+void test_slub_cache_destroy_guards(void) {
+    u64 baseline = phys_free_pages();
+
+    // F-S1: a fresh cache; one partial slab; live-count tracks exactly.
+    struct kmem_cache *c = kmem_cache_create("guard-typed", 48, 8, 0);
+    TEST_ASSERT(c != NULL, "kmem_cache_create(48,8) returned NULL");
+    TEST_EXPECT_EQ((int)kmem_cache_live_count(c), 0, "fresh cache: 0 live");
+
+    void *a = kmem_cache_alloc(c, 0);
+    void *b = kmem_cache_alloc(c, 0);
+    void *d = kmem_cache_alloc(c, 0);
+    TEST_ASSERT(a && b && d, "three allocs from guard cache");
+    TEST_EXPECT_EQ((int)kmem_cache_live_count(c), 3, "3 live after 3 allocs");
+
+    kmem_cache_free(c, b);
+    TEST_EXPECT_EQ((int)kmem_cache_live_count(c), 2,
+                   "2 live after 1 free (partial slab, still live)");
+    kmem_cache_free(c, a);
+    kmem_cache_free(c, d);
+    TEST_EXPECT_EQ((int)kmem_cache_live_count(c), 0, "0 live after all freed");
+
+    // Now destroy is provably safe (live == 0) -- must not extinct.
+    kmem_cache_destroy(c);
+
+    // F-S3: an alignment whose rounded object exceeds one page -> reject.
+    TEST_ASSERT(kmem_cache_create("toobig-align", 64, 8192, 0) == NULL,
+                "align 8192 (> PAGE_SIZE) must be rejected, not yield a "
+                "0-object cache");
+
+    magazines_drain_all();
+    TEST_ASSERT(phys_free_pages() == baseline,
+                "phys_free_pages drift after destroy-guard test");
+}
+
 // 10 000-iteration kmalloc/kfree leak check (ROADMAP §4.2 exit
 // criterion). Cycles a single 64-byte allocation through kmalloc →
 // kfree 10 000 times. Single pointer (10K array would overflow the

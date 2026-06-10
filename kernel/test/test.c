@@ -32,6 +32,7 @@ void test_phys_leak_10k(void);
 void test_slub_kmem_smoke(void);
 void test_slub_leak_10k(void);
 void test_slub_kmalloc_overflow_guard(void);
+void test_slub_cache_destroy_guards(void);
 void test_gic_init_smoke(void);
 void test_timer_tick_increments(void);
 void test_hardening_detect_smoke(void);
@@ -842,6 +843,7 @@ struct test_case g_tests[] = {
     { "slub.kmem_smoke",               test_slub_kmem_smoke,               false, NULL },
     { "slub.leak_10k",                 test_slub_leak_10k,                 false, NULL },
     { "slub.kmalloc_overflow_guard",   test_slub_kmalloc_overflow_guard,   false, NULL },
+    { "slub.cache_destroy_guards",     test_slub_cache_destroy_guards,     false, NULL },
     { "gic.init_smoke",                test_gic_init_smoke,                false, NULL },
     { "timer.tick_increments",         test_timer_tick_increments,         false, NULL },
     { "hardening.detect_smoke",        test_hardening_detect_smoke,        false, NULL },

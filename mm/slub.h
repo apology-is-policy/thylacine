@@ -108,4 +108,7 @@ u64 slub_total_alloc(void);
 u64 slub_total_free(void);
 u64 slub_active_slabs(void);
 
+// Live (currently-allocated) object count for one cache.
+u64 kmem_cache_live_count(const struct kmem_cache *c);
+
 #endif // THYLACINE_MM_SLUB_H
