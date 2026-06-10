@@ -1,6 +1,6 @@
 # HOLOTYPE RW-2 — Scheduler / SMP / threads / death / wait-wake
 
-**Status: CLOSED** (`@<close-sha>`). 0 P0 across the surface; every P1 and the
+**Status: CLOSED** (`@5033b94`). 0 P0 across the surface; every P1 and the
 in-scope P2/P3 soundness defects fixed in-arc with regressions; the non-soundness
 + design-bearing items surfaced/registered. The #809/#811/LS-5/#926/wait_pid-v2
 death machinery was prosecuted **SOUND under composition** — the live defects
@@ -77,7 +77,7 @@ guard) + the MPIDR assert are each explicitly SOUND. Three P3s, all fixed:
 - `e504e8b` — the RW-2 fix class: 4 P1 + 3 P3 (poll ref-retention; vd_t clamp;
   wait_active serialization; prev==next fail-loud; resume NULL guard; per_cpu_main
   MPIDR assert; 4 doc corrections) + 2 regression tests.
-- `<close-sha>` — the round-2 P3 fixes (poll.h listener-retain caveat; the 2
+- `5033b94` — the round-2 P3 fixes (poll.h listener-retain caveat; the 2
   test-quality fixes) + this report + the register/HOLOTYPE rows.
 
 ## Verified SOUND (reviewed and survived — do not re-prosecute without new code)
