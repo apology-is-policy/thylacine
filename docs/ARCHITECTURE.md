@@ -1254,8 +1254,12 @@ Acyclic because (a) only the owning Thread *writes* `rendez_blocked_on`, so the 
 
 #### 8.8.2 Note-interruptible sleep — the `interrupt` default disposition (LS-5)
 
-**STATUS**: DESIGNED (scripture-first; implementation follows — LS-5, the Life
-Support arc, `docs/LIFE-SUPPORT.md`). Builds directly on §8.8.1.
+**STATUS**: IMPLEMENTED (LS-5a P1 + LS-5b P2 + LS-5c P3-terminate, 2026-06;
+the focused adversarial round + the LS-CI `ls-5` scenario ride LS-5-audit,
+task #963). As-built per `docs/LIFE-SUPPORT.md` LS-5: the P3-terminate wake
+predicate is the `PROC_FLAG_INTR_TERMINATE_PENDING` latch (proc.h), read
+lock-free by `thread_die_pending` (notes.c) at every §8.8.1 sleep site; the
+EL0-return tail remains the truth. Builds directly on §8.8.1.
 
 `interrupt` (the cooked-Ctrl-C note) is, at v1.0, half-wired: the kernel posts it
 but (a) to a NULL `g_console_owner` during a login session [dropped], (b) an

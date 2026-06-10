@@ -202,6 +202,51 @@ static int notes_find_locked(struct NoteQueue *q, const char *name,
     return -1;
 }
 
+// LS-5c (P3-terminate, ARCH 8.8.2): arm the terminate latch when an
+// `interrupt` lands in the queue of a Proc whose LS-5b disposition is
+// terminate -- no async handler, not self-managing. Caller MUST hold q->lock.
+// ALL latch writes are q->lock-serialized (this arm vs the clears in
+// notes_set_handler / notes_mark_self_managing / notes_drain_intr_locked) --
+// without that, a concurrent SYS_NOTIFY could store its handler and clear
+// the latch BETWEEN this function's handler check and its set, stranding a
+// stale armed latch behind a registered handler, which would *_INTR every
+// future sleep of a surviving Proc. Masks are deliberately NOT consulted:
+// they are per-Thread, and both the lock-free sleep predicate
+// (thread_die_pending) and the EL0-return tail apply the observing thread's
+// own mask. RELEASE pairs with the lock-free acquire reads.
+//
+// kproc guard: in-kernel tests post notes to kproc's queue via the boot
+// thread (devnotes is stateless -- a notes fd reads the CALLER's queue), and
+// kproc never registers a handler nor opens a notes fd, so without the guard
+// a test's interrupt post would arm kproc and every subsequent kernel-thread
+// sleep would return *_INTR; kproc threads also never EL0-return, so the
+// latch could never be consumed.
+static void notes_arm_intr_terminate_locked(struct Proc *p, const char *name) {
+    if (notes_name_to_bit(name) != (int)NOTE_BIT_INTERRUPT) return;
+    if (p == kproc()) return;
+    if (__atomic_load_n(&p->handler_va, __ATOMIC_ACQUIRE) != 0) return;
+    if (proc_is_self_managing_notes(p)) return;
+    __atomic_or_fetch(&p->proc_flags, PROC_FLAG_INTR_TERMINATE_PENDING,
+                      __ATOMIC_RELEASE);
+}
+
+// LS-5c: clear the terminate latch when the LAST queued `interrupt` is
+// drained (the fd-read path of a Proc holding an inherited notes fd, or the
+// dispatcher's handler-delivery pop). Caller MUST hold q->lock. A no-op
+// unless the popped note is an interrupt and no interrupt remains queued.
+static void notes_drain_intr_locked(struct Proc *p, struct NoteQueue *q,
+                                    const struct Note *popped) {
+    if (notes_name_to_bit(popped->name) != (int)NOTE_BIT_INTERRUPT) return;
+    u32 idx = q->head;
+    for (u32 n = 0; n < q->count; n++) {
+        if (notes_name_to_bit(q->ring[idx].name) == (int)NOTE_BIT_INTERRUPT)
+            return;                  // another interrupt remains queued
+        idx = (idx + 1) % NOTE_QUEUE_DEPTH;
+    }
+    __atomic_and_fetch(&p->proc_flags, ~PROC_FLAG_INTR_TERMINATE_PENDING,
+                       __ATOMIC_RELEASE);
+}
+
 int notes_post(struct Proc *p, const char *name, u32 arg,
                struct Proc *sender, bool synthetic) {
     if (!p) return -1;
@@ -240,6 +285,10 @@ int notes_post(struct Proc *p, const char *name, u32 arg,
         if (found >= 0) {
             q->ring[found].arg = arg;
             q->ring[found].timestamp_ns = ts;
+            // LS-5c: the coalesced entry re-evaluates the disposition too --
+            // the original post may have declined to arm (a handler existed
+            // then) while THIS post's disposition is terminate.
+            notes_arm_intr_terminate_locked(p, name);
             // Wake registered poll_waiters AND devnotes_read's pollers
             // (same list at F3 close).
             poll_waiter_list_wake(&q->poll_list);
@@ -262,6 +311,15 @@ int notes_post(struct Proc *p, const char *name, u32 arg,
     q->ring[idx].timestamp_ns = ts;
     q->tail = (q->tail + 1) % NOTE_QUEUE_DEPTH;
     q->count++;
+
+    // LS-5c (P3-terminate): a freshly-enqueued `interrupt` whose disposition
+    // is terminate arms the lock-free latch the #811 sleep predicate reads.
+    // The WAKE of already-blocked threads is the caller's duty (it requires
+    // g_proc_table_lock for the p->threads walk): every interrupt-posting
+    // site calls proc_interrupt_terminate_wake after this returns. A
+    // not-yet-sleeping thread is covered without the wake -- its sleep's
+    // register-then-observe reads the latch.
+    notes_arm_intr_terminate_locked(p, name);
 
     // Wake every registered poll_waiter (including any devnotes_read
     // parked on this list per F3 close) BEFORE we drop the queue lock.
@@ -404,6 +462,9 @@ int notes_dequeue_for_fd_locked(struct Proc *p, struct Thread *t,
         if (bit >= 0 && (mask & (1u << (u32)bit)) == 0) {
             *out = q->ring[idx];
             notes_pop_at_locked(q, idx);
+            // LS-5c: draining the last queued interrupt un-arms the
+            // terminate latch (an inherited-notes-fd reader consumed it).
+            notes_drain_intr_locked(p, q, out);
             return 1;
         }
         idx = (idx + 1) % NOTE_QUEUE_DEPTH;
@@ -441,6 +502,11 @@ int notes_dequeue_locked(struct Proc *p, struct Thread *t, struct Note *out) {
             if (bit >= 0 && (mask & (1u << (u32)bit)) == 0) {
                 *out = q->ring[idx];
                 notes_pop_at_locked(q, idx);
+                // LS-5c: the handler-delivery pop of the last queued
+                // interrupt un-arms the terminate latch (normally already
+                // clear -- notes_set_handler cleared it at registration --
+                // so this is defense-in-depth for the dispatcher pop).
+                notes_drain_intr_locked(p, q, out);
                 return 1;
             }
             idx = (idx + 1) % NOTE_QUEUE_DEPTH;
@@ -544,6 +610,73 @@ int notes_interrupt_should_terminate_locked(struct Proc *p, struct Thread *t) {
     // A self-managing Proc (opened its notes fd) consumes its own notes.
     if (proc_is_self_managing_notes(p)) return 0;
     return notes_interrupt_pending_locked(p->notes, t);
+}
+
+// LS-5c: the SYS_NOTIFY body. The handler store and the latch clear run
+// under q->lock so they serialize against notes_post's check-handler-then-arm
+// (see notes_arm_intr_terminate_locked). The store keeps RELEASE (pairs with
+// the dispatcher's acquire, F9) -- q->lock alone would not order it for the
+// LOCKLESS handler_va readers.
+void notes_set_handler(struct Proc *p, u64 handler_va) {
+    if (!p) return;
+    struct NoteQueue *q = p->notes;
+    if (!q) {       // pre-notes-alloc rollback window; no latch can exist
+        __atomic_store_n(&p->handler_va, handler_va, __ATOMIC_RELEASE);
+        return;
+    }
+    spin_lock(&q->lock);
+    __atomic_store_n(&p->handler_va, handler_va, __ATOMIC_RELEASE);
+    if (handler_va != 0) {
+        // Registering a handler changes the disposition to CATCH: a queued
+        // interrupt now delivers to the handler at the tail. Un-arm.
+        // (Unregistering does NOT re-arm -- the unregistering thread reaches
+        // its own tail right after this syscall, where LS-5b re-evaluates,
+        // and a blocked peer is then covered by the death cascade exits()
+        // triggers; see ARCH 8.8.2.)
+        __atomic_and_fetch(&p->proc_flags, ~PROC_FLAG_INTR_TERMINATE_PENDING,
+                           __ATOMIC_RELEASE);
+    }
+    spin_unlock(&q->lock);
+}
+
+// LS-5c: the SYS_NOTE_OPEN tail. The self-managing mark and the latch clear
+// run under q->lock, same serialization rationale as notes_set_handler.
+void notes_mark_self_managing(struct Proc *p) {
+    if (!p) return;
+    struct NoteQueue *q = p->notes;
+    if (!q) {
+        proc_mark_self_managing_notes(p);
+        return;
+    }
+    spin_lock(&q->lock);
+    proc_mark_self_managing_notes(p);
+    __atomic_and_fetch(&p->proc_flags, ~PROC_FLAG_INTR_TERMINATE_PENDING,
+                       __ATOMIC_RELEASE);
+    spin_unlock(&q->lock);
+}
+
+// The widened #811 death predicate (ARCH 8.8.1 + 8.8.2). LOCK-FREE: atomic
+// loads of group_exit_msg + proc_flags, and the OWNER-read note_mask (`t` is
+// always the calling thread at every site -- sleep/tsleep's register-then-
+// observe, torpor's post-register check, the 9P reader's unwind decision --
+// and a thread's mask only changes by its own SYS_NOTE_MASK, never while it
+// is inside one of those calls). A masked thread reads false from the latch
+// leg: it neither unwinds nor terminates until it unmasks (masking defers --
+// matching the EL0-return tail, which also applies the observing thread's
+// mask, so a latch-woken thread never unwinds into a tail that refuses to
+// act). group_exit_msg is checked FIRST and ignores the mask (death is not
+// deferrable; N-4).
+bool thread_die_pending(struct Thread *t) {
+    if (!t) return false;
+    struct Proc *p = t->proc;
+    if (!p) return false;
+    if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL)
+        return true;
+    if ((__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) &
+         PROC_FLAG_INTR_TERMINATE_PENDING) != 0 &&
+        (t->note_mask & (1u << NOTE_BIT_INTERRUPT)) == 0)
+        return true;
+    return false;
 }
 
 void notes_deliver_at_el0_return(struct exception_context *ctx);

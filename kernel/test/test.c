@@ -55,6 +55,10 @@ void test_rendez_sleep_immediate_cond_true(void);
 void test_rendez_basic_handoff(void);
 void test_rendez_death_interrupts_sleep(void);
 void test_rendez_wakeup_no_waiter(void);
+void test_rendez_intr_terminate_interrupts_sleep(void);
+void test_rendez_intr_terminate_register_observe(void);
+void test_rendez_intr_terminate_masked_sleeps_through(void);
+void test_rendez_intr_terminate_interrupts_tsleep(void);
 void test_tsleep_fast_path_cond_true(void);
 void test_tsleep_no_deadline_degrades(void);
 void test_tsleep_past_deadline_immediate(void);
@@ -248,6 +252,8 @@ void test_notes_proc_lifecycle(void);
 void test_notes_peek_does_not_pop(void);
 void test_notes_interrupt_terminate_gate(void);
 void test_notes_self_managing_flag(void);
+void test_notes_intr_latch_lifecycle(void);
+void test_notes_die_pending_predicate(void);
 void test_directmap_kva_round_trip(void);
 void test_directmap_alloc_through_directmap(void);
 void test_directmap_vmalloc_mmio_smoke(void);
@@ -870,6 +876,14 @@ struct test_case g_tests[] = {
     { "rendez.basic_handoff",          test_rendez_basic_handoff,          false, NULL },
     { "rendez.death_interrupts_sleep", test_rendez_death_interrupts_sleep, false, NULL },
     { "rendez.wakeup_no_waiter",       test_rendez_wakeup_no_waiter,       false, NULL },
+    { "rendez.intr_terminate_interrupts_sleep",
+                                       test_rendez_intr_terminate_interrupts_sleep,  false, NULL },
+    { "rendez.intr_terminate_register_observe",
+                                       test_rendez_intr_terminate_register_observe,  false, NULL },
+    { "rendez.intr_terminate_masked_sleeps_through",
+                                       test_rendez_intr_terminate_masked_sleeps_through, false, NULL },
+    { "rendez.intr_terminate_interrupts_tsleep",
+                                       test_rendez_intr_terminate_interrupts_tsleep, false, NULL },
     { "tsleep.fast_path_cond_true",
                                        test_tsleep_fast_path_cond_true,
                                                                            false, NULL },
@@ -1140,6 +1154,8 @@ struct test_case g_tests[] = {
     { "notes.peek_does_not_pop",               test_notes_peek_does_not_pop,               false, NULL },
     { "notes.interrupt_terminate_gate",        test_notes_interrupt_terminate_gate,        false, NULL },
     { "notes.self_managing_flag",              test_notes_self_managing_flag,              false, NULL },
+    { "notes.intr_latch_lifecycle",            test_notes_intr_latch_lifecycle,            false, NULL },
+    { "notes.die_pending_predicate",           test_notes_die_pending_predicate,           false, NULL },
     { "directmap.kva_round_trip",      test_directmap_kva_round_trip,      false, NULL },
     { "directmap.alloc_through_directmap",
                                        test_directmap_alloc_through_directmap,

@@ -335,6 +335,45 @@ int notes_reenqueue_head_locked(struct NoteQueue *q, const struct Note *n);
 int notes_interrupt_should_terminate_locked(struct Proc *p, struct Thread *t);
 
 // =============================================================================
+// LS-5c (P3-terminate, ARCH 8.8.2): the terminate-disposition interrupt latch.
+// =============================================================================
+//
+// PROC_FLAG_INTR_TERMINATE_PENDING (proc.h) caches "an uncaught interrupt
+// will terminate this Proc at its next EL0-return tail" so the #811
+// sleep/tsleep register-then-observe can read it LOCK-FREE (the sleep path
+// must never take q->lock -- the devnotes F3-close ABBA). ALL latch writes
+// run under p->notes->lock: the set in notes_post's interrupt arm, and the
+// clears in the three disposition-change choke points below + the
+// drained-last-interrupt clear inside the dequeue helpers. The EL0-return
+// tail re-validates against the live queue, so a stale-positive latch costs
+// one spurious *_INTR unwind, never a wrong termination.
+
+// Register/clear the async note handler (the SYS_NOTIFY body). Stores
+// handler_va with RELEASE (pairs with the dispatcher's acquire, F9) and, when
+// registering (handler_va != 0), clears the terminate latch -- BOTH under
+// q->lock, so the store+clear cannot interleave with notes_post's
+// check-handler-then-arm and leave a stale armed latch behind a registered
+// handler (which would *_INTR every future sleep of a surviving Proc).
+void notes_set_handler(struct Proc *p, u64 handler_va);
+
+// Mark `p` self-managing (the SYS_NOTE_OPEN tail; wraps
+// proc_mark_self_managing_notes) and clear the terminate latch -- both under
+// q->lock, same serialization rationale as notes_set_handler.
+void notes_mark_self_managing(struct Proc *p);
+
+// The WIDENED #811 death predicate (ARCH 8.8.1 + 8.8.2): true iff `t`, on
+// returning to its EL0-return tail now, will die there -- its Proc is
+// group-terminating (group_exit_msg set), OR a terminate-disposition
+// `interrupt` is pending (the latch) and `interrupt` is not masked for `t`
+// (a masked thread defers: it neither unwinds nor terminates until it
+// unmasks). LOCK-FREE (atomic loads + the owner-read note_mask): callable
+// from sleep/tsleep's register-then-observe under wait_lock/r->lock, from
+// torpor's post-register check under torpor_lock, and from the 9P client's
+// reader-unwind decision. Replaces every direct group_exit_msg load at
+// those sites.
+bool thread_die_pending(struct Thread *t);
+
+// =============================================================================
 // Synthetic posters — kernel-internal callers (proc.c::exits, pipe.c write
 // path). These wrap notes_post with the appropriate canonical name + arg
 // packing + synthetic=true.

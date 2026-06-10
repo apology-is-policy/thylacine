@@ -8,6 +8,7 @@
 #include <thylacine/9p_session.h>
 #include <thylacine/9p_transport.h>
 #include <thylacine/9p_wire.h>
+#include <thylacine/notes.h>    // LS-5c: thread_die_pending (the widened #811 predicate)
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
@@ -127,15 +128,16 @@ static int map_error(int session_send_rc, int exchange_rc,
 #define CLIENT_WAIT_DEAD  1     // session torn down; -P9_E_IO
 #define CLIENT_WAIT_DIED  2     // caller's Proc group-terminating; unwind
 
-// Is the calling Thread's Proc group-terminating (#811)? A blocking recv /
-// sleep returning the death-interrupt is THIS Proc dying -- the reader must
-// UNWIND (hand off the reader role + return), NOT mark the shared session
-// dead: the client is shared across Procs (corvus + joey on the Stratum root),
-// so one Proc dying must not strand the survivors' in-flight ops (ARCH §21.10).
+// Is the calling Thread dying (#811, widened by LS-5c per ARCH 8.8.2)? A
+// group-terminating Proc OR a pending terminate-disposition `interrupt` (a
+// Ctrl-C'd coreutil blocked in a 9P RPC takes the same unwind). A blocking
+// recv / sleep returning the death-interrupt is THIS thread dying -- the
+// reader must UNWIND (hand off the reader role + abandon its rpc, the #845
+// Tflush), NOT mark the shared session dead: the client is shared across
+// Procs (corvus + joey on the Stratum root), so one Proc dying must not
+// strand the survivors' in-flight ops (ARCH §21.10).
 static bool client_self_dying(void) {
-    struct Thread *t = current_thread();
-    return t && t->proc &&
-           __atomic_load_n(&t->proc->group_exit_msg, __ATOMIC_ACQUIRE) != NULL;
+    return thread_die_pending(current_thread());
 }
 
 // rpc sleep predicate (evaluated under rpc->rendez.lock inside sleep()). Reads

@@ -313,9 +313,40 @@ idle-cancel moves wholly to LS-8; LS-5 delivers the foreground-command interrupt
   it (status 1) instead of being a no-op -- the two U-7 arc probes that pinned
   the forwarded child's status to 0 were relaxed to "reaped (no hang)" (their
   stated intent); the forward-not-handle assertion is untouched.
-- **LS-5c — P3-terminate.** Widen the #811 wake predicate to
-  death-or-terminate-interrupt; the blocked single-thread child wakes + dies.
-  Re-validate every #811 site (I-9 generalized).
+- **LS-5c — P3-terminate. [done]** The #811 wake predicate widened to
+  death-or-terminate-interrupt; a blocked child wakes + dies. As-built:
+  `PROC_FLAG_INTR_TERMINATE_PENDING` (proc_flags bit 7) is the LOCK-FREE
+  wake-hint — set by `notes_post`'s interrupt arm (no handler + not
+  self-managing + never kproc, under q->lock), cleared under the same q->lock
+  by handler registration (`notes_set_handler`, which also closes the
+  notify-vs-post arm race), the self-managing mark
+  (`notes_mark_self_managing`), and draining the last queued interrupt (both
+  dequeue helpers). `thread_die_pending` (notes.c) = `group_exit_msg` set OR
+  latch-armed-and-unmasked-for-this-thread; it replaces every direct
+  group_exit_msg load in the sleep paths — sleep/tsleep x4
+  register-then-observe (sched.c), torpor's post-register check, and the 9P
+  client's `client_self_dying` (a Ctrl-C'd coreutil blocked in a 9P RPC takes
+  the audited #845 Tflush unwind). The WAKE (`proc_interrupt_terminate_wake`,
+  internally latch-gated, caller holds g_proc_table_lock) is the #811 death
+  walk verbatim minus `torpor_wake_all_for_proc` (torpor waiters are
+  reachable via `rendez_blocked_on`; tsleep's widened check closes the
+  register-after-walk race) and minus `smp_resched_others` (the IRQ-from-EL0
+  tail evaluates only group_exit_msg, so the IPI buys nothing — the
+  never-syscalling-spinner gap is tracked, #964); wired at all four
+  interrupt-post sites (console post, SAK, `postnote_walk_cb`, the
+  SYS_POSTNOTE self-post, which now takes the table lock for the walk). The
+  EL0-return tail stays the TRUTH (the LS-5b predicate re-runs against the
+  live queue); a stale-positive latch costs one spurious `*_INTR` unwind,
+  never a wrong termination; a masked thread is woken but re-sleeps (masking
+  defers; death still overrides the mask). Kernel-unit-tested (+6:
+  `rendez.intr_terminate_{interrupts_sleep,register_observe,
+  masked_sleeps_through,interrupts_tsleep}` — the first drives the REAL waker
+  under the deterministic harness, possible because it has no IPI — +
+  `notes.intr_latch_lifecycle` + `notes.die_pending_predicate`); **803/803**
+  (HVF + TCG), 0 EXTINCTION, login E2E OK. Runtime regression: u-7-test
+  flow 5 (`sleep 3600 &` + `kill <pid>` + `wait` reaps promptly) — proven
+  NON-VACUOUS by stash + rebuild on the base kernel, where it hangs the boot
+  check (Error 1) exactly as pre-LS-5c semantics predict.
 - **LS-5-audit** — one focused adversarial round over the whole surface (the
   death-path + notes lineage — #788/#806/#807/#808/#860/#809/#811/#926, the most
   bug-prone in the tree), then the LS-CI `ls-5` scenario (`yes` + Ctrl-C ->

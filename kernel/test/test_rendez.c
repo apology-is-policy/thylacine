@@ -26,11 +26,14 @@
 
 #include "test.h"
 
+#include <thylacine/notes.h>   // LS-5c: notes_post arm + NOTE_BIT_INTERRUPT
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
 #include <thylacine/sched.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
+
+#include "../../arch/arm64/timer.h"   // LS-5c: far tsleep deadline (timer_now_ns)
 
 // ---------------------------------------------------------------------------
 // rendez.sleep_immediate_cond_true
@@ -293,4 +296,232 @@ void test_rendez_wakeup_no_waiter(void) {
     n = wakeup(&r);
     TEST_EXPECT_EQ(n, 0,
         "second wakeup must also return 0");
+}
+
+// ---------------------------------------------------------------------------
+// rendez.intr_terminate_* — LS-5c (P3-terminate, ARCH 8.8.2): the widened
+// #811 wake. A terminate-disposition `interrupt` (notes_post arms the
+// PROC_FLAG_INTR_TERMINATE_PENDING latch) wakes a blocked sleeper exactly
+// like group-exit death: sleep returns SLEEP_INTR and the thread unwinds to
+// its EL0-return tail (where, in production, the LS-5b dispatch terminates
+// it). Unlike the death test above, these drive the REAL waker
+// (proc_interrupt_terminate_wake) -- it issues no IPI broadcast, so it is
+// safe under the deterministic single-CPU harness.
+// ---------------------------------------------------------------------------
+
+static volatile u32   g_intr_run_cnt;
+static volatile int   g_intr_sleep_rc;
+static struct Rendez  g_intr_rendez;
+static struct Proc   *g_intr_proc;
+
+static void intr_consumer_entry(void) {
+    g_intr_run_cnt++;                            // -> 1: pre-sleep run
+    g_intr_sleep_rc = sleep(&g_intr_rendez, death_cond_false, NULL);
+    g_intr_run_cnt++;                            // -> 2: post-INTR run
+    for (;;) sched();
+}
+
+// The blocked-sleeper leg: consumer parks SLEEPING; boot posts a REAL
+// `interrupt` (arms the latch -- fresh Proc, no handler, not self-managing)
+// and runs the REAL wake walk under g_proc_table_lock. The consumer resumes,
+// its resume-path thread_die_pending check fires, sleep returns SLEEP_INTR.
+void test_rendez_intr_terminate_interrupts_sleep(void) {
+    g_intr_run_cnt  = 0;
+    g_intr_sleep_rc = 0x7fffffff;
+    rendez_init(&g_intr_rendez);
+
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u,
+        "run tree must be empty at test entry");
+
+    g_intr_proc = proc_alloc();
+    TEST_ASSERT(g_intr_proc != NULL, "proc_alloc failed");
+
+    struct Thread *consumer = thread_create(g_intr_proc, intr_consumer_entry);
+    TEST_ASSERT(consumer != NULL, "thread_create(consumer) failed");
+    ready(consumer);
+    sched();
+
+    TEST_EXPECT_EQ(g_intr_run_cnt, 1u, "consumer ran once before sleeping");
+    TEST_EXPECT_EQ(consumer->state, THREAD_SLEEPING,
+        "consumer must be SLEEPING (parked on the never-woken rendez)");
+
+    // The REAL production sequence: post (arms the latch under q->lock),
+    // then the wake walk under g_proc_table_lock -- exactly what
+    // postnote_walk_cb / proc_console_post_interrupt do.
+    TEST_EXPECT_EQ(notes_post(g_intr_proc, "interrupt", 0u, NULL, true), 0,
+        "interrupt post accepted");
+    TEST_ASSERT(proc_intr_terminate_pending(g_intr_proc),
+        "the post armed the terminate latch");
+    irq_state_t s = proc_table_lock_acquire();
+    proc_interrupt_terminate_wake(g_intr_proc);
+    proc_table_lock_release(s);
+
+    TEST_EXPECT_EQ(consumer->state, THREAD_RUNNABLE,
+        "sleeper readied by the terminate wake");
+    sched();
+
+    TEST_EXPECT_EQ(g_intr_run_cnt, 2u, "consumer resumed after the wake");
+    TEST_EXPECT_EQ(g_intr_sleep_rc, SLEEP_INTR,
+        "sleep returned SLEEP_INTR for the terminate-pending Proc (LS-5c)");
+    TEST_ASSERT(consumer->rendez_blocked_on == NULL,
+        "consumer cleared its backref on the interrupted resume");
+
+    thread_free(consumer);
+    g_intr_proc->state = PROC_STATE_ZOMBIE;
+    proc_free(g_intr_proc);
+    g_intr_proc = NULL;
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
+}
+
+// The register-then-observe leg (I-9): the latch is armed BEFORE the thread
+// ever sleeps. Its first sleep registers, re-observes the latch under
+// wait_lock, undoes the registration, and returns SLEEP_INTR -- with NO wake
+// call at all (the waker ran before the sleeper registered; the walk found
+// nothing; the post-register check is what closes the race).
+void test_rendez_intr_terminate_register_observe(void) {
+    g_intr_run_cnt  = 0;
+    g_intr_sleep_rc = 0x7fffffff;
+    rendez_init(&g_intr_rendez);
+
+    g_intr_proc = proc_alloc();
+    TEST_ASSERT(g_intr_proc != NULL, "proc_alloc failed");
+
+    // Arm FIRST (the waker's walk would find no sleeper and wake nothing).
+    TEST_EXPECT_EQ(notes_post(g_intr_proc, "interrupt", 0u, NULL, true), 0,
+        "interrupt post accepted");
+    TEST_ASSERT(proc_intr_terminate_pending(g_intr_proc), "latch armed");
+
+    struct Thread *consumer = thread_create(g_intr_proc, intr_consumer_entry);
+    TEST_ASSERT(consumer != NULL, "thread_create(consumer) failed");
+    ready(consumer);
+    sched();
+
+    // One yield: the consumer's FIRST sleep observed the latch at its
+    // post-register check and returned synchronously -- never SLEEPING.
+    TEST_EXPECT_EQ(g_intr_run_cnt, 2u,
+        "consumer's first sleep returned without ever parking");
+    TEST_EXPECT_EQ(g_intr_sleep_rc, SLEEP_INTR,
+        "register-then-observe returned SLEEP_INTR (no wake was issued)");
+    TEST_ASSERT(g_intr_rendez.waiter == NULL,
+        "the undone registration left the rendez empty");
+
+    thread_free(consumer);
+    g_intr_proc->state = PROC_STATE_ZOMBIE;
+    proc_free(g_intr_proc);
+    g_intr_proc = NULL;
+}
+
+// The masked leg: a thread that masked `interrupt` is NOT interrupted by the
+// latch (masking defers) -- the wake walk still wakes it (by design: the
+// walk does not read masks), but its resume-path predicate reads its own
+// mask, loops, re-registers, and sleeps again. Death (group_exit_msg) then
+// overrides the mask (N-4: death is not deferrable) -- the cleanup leg.
+static void intr_masked_consumer_entry(void) {
+    g_intr_run_cnt++;                            // -> 1: pre-sleep run
+    current_thread()->note_mask |= (1u << NOTE_BIT_INTERRUPT);
+    g_intr_sleep_rc = sleep(&g_intr_rendez, death_cond_false, NULL);
+    g_intr_run_cnt++;                            // -> 2: post-INTR run
+    for (;;) sched();
+}
+
+void test_rendez_intr_terminate_masked_sleeps_through(void) {
+    g_intr_run_cnt  = 0;
+    g_intr_sleep_rc = 0x7fffffff;
+    rendez_init(&g_intr_rendez);
+
+    g_intr_proc = proc_alloc();
+    TEST_ASSERT(g_intr_proc != NULL, "proc_alloc failed");
+
+    struct Thread *consumer =
+        thread_create(g_intr_proc, intr_masked_consumer_entry);
+    TEST_ASSERT(consumer != NULL, "thread_create(consumer) failed");
+    ready(consumer);
+    sched();
+
+    TEST_EXPECT_EQ(consumer->state, THREAD_SLEEPING, "masked consumer parked");
+
+    // Arm + wake. The walk wakes the masked sleeper (benign spurious wake);
+    // its own-mask predicate keeps it alive: it re-registers and re-sleeps.
+    TEST_EXPECT_EQ(notes_post(g_intr_proc, "interrupt", 0u, NULL, true), 0,
+        "interrupt post accepted");
+    TEST_ASSERT(proc_intr_terminate_pending(g_intr_proc),
+        "latch armed (masks are per-thread; the proc-level arm ignores them)");
+    irq_state_t s = proc_table_lock_acquire();
+    proc_interrupt_terminate_wake(g_intr_proc);
+    proc_table_lock_release(s);
+    sched();
+
+    TEST_EXPECT_EQ(g_intr_run_cnt, 1u,
+        "masked consumer absorbed the wake and re-slept (no INTR)");
+    TEST_EXPECT_EQ(consumer->state, THREAD_SLEEPING,
+        "masked consumer is SLEEPING again");
+    TEST_ASSERT(consumer->rendez_blocked_on == &g_intr_rendez,
+        "masked consumer re-registered on the rendez");
+    TEST_EXPECT_EQ(g_intr_sleep_rc, 0x7fffffff,
+        "sleep has not returned for the masked consumer");
+
+    // Cleanup leg = death overrides the mask: publish group_exit_msg + wake
+    // (the hand-rolled cascade-equivalent the death test uses; the full
+    // proc_group_terminate would broadcast an IPI and wake idle secondaries).
+    __atomic_store_n(&g_intr_proc->group_exit_msg, "killed", __ATOMIC_RELEASE);
+    (void)wakeup(&g_intr_rendez);
+    sched();
+
+    TEST_EXPECT_EQ(g_intr_run_cnt, 2u, "death-wake resumed the masked consumer");
+    TEST_EXPECT_EQ(g_intr_sleep_rc, SLEEP_INTR,
+        "death overrides the interrupt mask (SLEEP_INTR)");
+
+    thread_free(consumer);
+    g_intr_proc->state = PROC_STATE_ZOMBIE;
+    proc_free(g_intr_proc);
+    g_intr_proc = NULL;
+}
+
+// The tsleep leg: the deadline-bounded sleep takes the same widened
+// register-then-observe + resume-path checks (the surface `/sleep` blocks
+// in, via torpor). A far-deadline tsleep'er is woken by the terminate wake
+// and returns TSLEEP_INTR long before its deadline.
+static void intr_tsleep_consumer_entry(void) {
+    g_intr_run_cnt++;                            // -> 1: pre-sleep run
+    g_intr_sleep_rc = tsleep(&g_intr_rendez, death_cond_false, NULL,
+                             timer_now_ns() + 60ull * 1000000000ull);
+    g_intr_run_cnt++;                            // -> 2: post-INTR run
+    for (;;) sched();
+}
+
+void test_rendez_intr_terminate_interrupts_tsleep(void) {
+    g_intr_run_cnt  = 0;
+    g_intr_sleep_rc = 0x7fffffff;
+    rendez_init(&g_intr_rendez);
+
+    g_intr_proc = proc_alloc();
+    TEST_ASSERT(g_intr_proc != NULL, "proc_alloc failed");
+
+    struct Thread *consumer =
+        thread_create(g_intr_proc, intr_tsleep_consumer_entry);
+    TEST_ASSERT(consumer != NULL, "thread_create(consumer) failed");
+    ready(consumer);
+    sched();
+
+    TEST_EXPECT_EQ(g_intr_run_cnt, 1u, "consumer ran once before tsleeping");
+    TEST_EXPECT_EQ(consumer->state, THREAD_SLEEPING,
+        "consumer parked on the far-deadline tsleep");
+
+    TEST_EXPECT_EQ(notes_post(g_intr_proc, "interrupt", 0u, NULL, true), 0,
+        "interrupt post accepted");
+    irq_state_t s = proc_table_lock_acquire();
+    proc_interrupt_terminate_wake(g_intr_proc);
+    proc_table_lock_release(s);
+    sched();
+
+    TEST_EXPECT_EQ(g_intr_run_cnt, 2u, "consumer resumed after the wake");
+    TEST_EXPECT_EQ(g_intr_sleep_rc, TSLEEP_INTR,
+        "tsleep returned TSLEEP_INTR for the terminate-pending Proc (LS-5c)");
+    TEST_ASSERT(consumer->rendez_blocked_on == NULL,
+        "consumer cleared its backref on the interrupted resume");
+
+    thread_free(consumer);
+    g_intr_proc->state = PROC_STATE_ZOMBIE;
+    proc_free(g_intr_proc);
+    g_intr_proc = NULL;
 }

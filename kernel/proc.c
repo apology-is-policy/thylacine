@@ -789,6 +789,12 @@ void proc_console_post_interrupt(void) {
     struct Proc *owner = g_console_owner;
     if (owner && owner->magic == PROC_MAGIC && owner->state == PROC_STATE_ALIVE) {
         notes_post(owner, "interrupt", 0u, NULL, true);
+        // LS-5c (P3-terminate): if the post armed the terminate latch (the
+        // owner has no handler and is not self-managing -- never the session
+        // shell, which is self-managing), wake its blocked threads so the
+        // LS-5b terminate fires at their EL0-return tails. g_proc_table_lock
+        // is held (this function's lock), satisfying the wake's contract.
+        proc_interrupt_terminate_wake(owner);
     }
     spin_unlock_irqrestore(&g_proc_table_lock, s);
 }
@@ -845,6 +851,10 @@ void proc_console_sak(void) {
     if (owner && owner->magic == PROC_MAGIC && owner->state == PROC_STATE_ALIVE) {
         proc_revoke_console_attached(owner);
         notes_post(owner, "interrupt", 0u, NULL, true);
+        // LS-5c: same conditional wake as proc_console_post_interrupt -- a
+        // blocked non-self-managing revoked owner unwinds + terminates rather
+        // than sleeping through the revocation note. g_proc_table_lock held.
+        proc_interrupt_terminate_wake(owner);
     }
 
     // (2) Re-grant the console to the trusted login authority and make it the
@@ -938,6 +948,48 @@ bool proc_is_self_managing_notes(const struct Proc *p) {
     if (!p || p->magic != PROC_MAGIC) return false;
     return (__atomic_load_n(&p->proc_flags, __ATOMIC_RELAXED)
             & PROC_FLAG_SELF_MANAGING_NOTES) != 0;
+}
+
+bool proc_intr_terminate_pending(const struct Proc *p) {
+    // Fail-closed: a NULL or corrupted Proc reads as nothing-pending. Acquire
+    // pairs with the release set in notes_post's arm (the latch is read
+    // LOCK-FREE by the #811 sleep predicate, thread_die_pending — see the
+    // PROC_FLAG_INTR_TERMINATE_PENDING contract in proc.h).
+    if (!p || p->magic != PROC_MAGIC) return false;
+    return (__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE)
+            & PROC_FLAG_INTR_TERMINATE_PENDING) != 0;
+}
+
+// LS-5c (P3-terminate, ARCH 8.8.2): wake every blocked Thread of `p` so it
+// unwinds (*_INTR) to its EL0-return tail, where the LS-5b uncaught-interrupt
+// default-terminate fires against the live queue. The walk is the #811
+// universal death-wake template (proc_group_terminate, above the same lock
+// contract): the only record of "Thread T sleeps on Rendez R" is the reverse
+// pointer t->rendez_blocked_on, read under the peer's wait_lock -- the same
+// lock the sleeper's register-then-observe takes, which is the I-9
+// serialization -- with wait_lock HELD ACROSS wakeup (Option A) so a torpor
+// waiter's stack rendez cannot be popped out from under the waker.
+//
+// Deliberate deltas from the death template (see the proc.h contract):
+// no torpor_wake_all_for_proc (torpor waiters are reachable through
+// rendez_blocked_on, and tsleep's widened register-then-observe closes the
+// register-after-walk race) and no smp_resched_others (the IRQ-from-EL0 tail
+// evaluates only group_exit_msg -- an IPI cannot accelerate a RUNNING
+// thread's interrupt-death; task #964 tracks the never-syscalling gap). The
+// no-IPI shape also lets the in-kernel unit test drive this REAL waker under
+// the deterministic single-CPU harness (the death test must hand-roll the
+// cascade to avoid waking idle secondaries).
+void proc_interrupt_terminate_wake(struct Proc *p) {
+    if (!p || p->magic != PROC_MAGIC) return;
+    if (p == g_kproc) return;            // belt: the arm never latches kproc
+    if (p->state != PROC_STATE_ALIVE) return;
+    if (!proc_intr_terminate_pending(p)) return;
+    for (struct Thread *peer = p->threads; peer; peer = peer->next_in_proc) {
+        irq_state_t ws = spin_lock_irqsave(&peer->wait_lock);
+        struct Rendez *r = peer->rendez_blocked_on;
+        if (r) wakeup(r);
+        spin_unlock_irqrestore(&peer->wait_lock, ws);
+    }
 }
 
 // =============================================================================

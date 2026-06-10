@@ -390,6 +390,26 @@ struct Proc {
 // stays self-managing for life); NOT propagated by rfork (a spawned child
 // starts fresh -- a dumb coreutil never opens it, so Ctrl-C terminates it).
 #define PROC_FLAG_SELF_MANAGING_NOTES (1u << 6)
+// LS-5c (P3-terminate, ARCH 8.8.2): a terminate-disposition `interrupt` is
+// pending -- notes_post enqueued an `interrupt` while the Proc had no async
+// handler and was not self-managing, so (per the LS-5b default disposition)
+// the Proc terminates at its next EL0-return tail. The latch is the
+// LOCK-FREE wake-hint the #811 sleep/tsleep register-then-observe reads
+// (the widened death predicate, thread_die_pending: group_exit_msg OR this
+// bit while `interrupt` is unmasked for the thread) -- the sleep path can
+// never take p->notes->lock (the devnotes F3-close ABBA), so the
+// disposition decided at post time is cached here. The EL0-return tail
+// remains the TRUTH (it re-runs the full LS-5b predicate against the live
+// queue); a stale-positive latch costs one spurious *_INTR unwind, never a
+// wrong termination. UNLIKE the one-way bits above this one is a LATCH:
+// set and cleared ONLY under p->notes->lock (set: notes_post's interrupt
+// arm; cleared: handler registration [notes_set_handler], the self-managing
+// mark [notes_mark_self_managing], draining the last queued interrupt) so
+// it tracks its disposition inputs race-free. NOT propagated by rfork (a
+// pending interrupt is the parent's, not the child's). NEVER set on kproc
+// (the arm guards it: in-kernel tests post to kproc's queue via the boot
+// thread, and an armed kproc would *_INTR every kernel-thread sleep).
+#define PROC_FLAG_INTR_TERMINATE_PENDING (1u << 7)
 
 _Static_assert(sizeof(struct Proc) == 264,
                "struct Proc size pinned at 264 bytes (SYS_EXIT_GROUP baseline "
@@ -569,17 +589,17 @@ void thread_exit_self(void);
 // `msg` (NULL -> "killed"). Idempotent (CAS the flag; first msg wins).
 //
 // Mechanism: (1) CAS p->group_exit_msg = msg; (2) torpor_wake_all_for_proc(p)
-// so already-sleeping futex peers return; (3) smp_resched_others() so a peer
-// spinning in userspace on another CPU traps + hits its IRQ-from-EL0 die-check
-// (the periodic timer is the floor if the IPI is missed). v1.0 envelope (ARCH
-// OPEN Q 7.9.A): a peer blocked indefinitely in a non-torpor/non-note kernel
-// sleep dies at its call's completion, not instantly.
+// so already-sleeping futex peers return; (3) the #811 universal death-wake
+// (ARCH 8.8.1): walk p->threads, per-peer wait_lock -> rendez_blocked_on ->
+// wakeup, so EVERY rendez sleeper returns *_INTR and dies at its EL0-return
+// die-check; (4) smp_resched_others() so a peer running in userspace on
+// another CPU traps + hits its IRQ-from-EL0 die-check (the periodic timer is
+// the floor if the IPI is missed).
 //
-// LOCK CONTRACT: acquires NO g_proc_table_lock. It takes torpor_lock + (via
-// wakeup) rendez/cs locks -- all strictly BELOW g_proc_table_lock in the lock
-// order -- so it is safe to call EITHER holding g_proc_table_lock (the
-// cross-Proc kill walk_cb, where the target is alive under the lock) OR not
-// (SYS_EXIT_GROUP on self->proc, which cannot be reaped while running).
+// LOCK CONTRACT (#811): the caller MUST hold g_proc_table_lock -- the
+// p->threads walk races a concurrent thread_free into a UAF otherwise. It
+// additionally takes torpor_lock + per-peer wait_lock + (via wakeup)
+// rendez/timerwait locks, all strictly BELOW g_proc_table_lock in the order.
 void proc_group_terminate(struct Proc *p, const char *msg);
 
 // EL0-return-tail die-check (ARCH §7.9.1, invariant I-24). Called at every
@@ -910,5 +930,35 @@ void proc_mark_self_managing_notes(struct Proc *p);
 // NOT self-managing -- the SAFE default (an unverifiable Proc does not dodge
 // the interrupt default-terminate). Atomic load (multi-writer word).
 bool proc_is_self_managing_notes(const struct Proc *p);
+
+// =============================================================================
+// LS-5c: the terminate-disposition interrupt wake (P3-terminate, ARCH 8.8.2).
+// =============================================================================
+
+// proc_intr_terminate_pending — true iff `p` carries
+// PROC_FLAG_INTR_TERMINATE_PENDING (see the flag's comment for the latch
+// contract). Fail-closed on a NULL / corrupted `p`. Acquire load: pairs with
+// the release set in notes_post's arm so a lock-free reader (the #811 sleep
+// predicate via thread_die_pending) observes a fully-published latch.
+bool proc_intr_terminate_pending(const struct Proc *p);
+
+// proc_interrupt_terminate_wake — wake every Thread of `p` blocked in a
+// rendez sleep so it unwinds (*_INTR) to its EL0-return tail, where the
+// LS-5b uncaught-interrupt default-terminate fires. Internally gated on
+// proc_intr_terminate_pending (a no-op unless notes_post armed the latch),
+// so interrupt-posting sites call it unconditionally after the post.
+//
+// CALLER MUST HOLD g_proc_table_lock (the walk reads p->threads, mutated
+// only under that lock -- the #811 contract proc_group_terminate carries).
+// The body is the #811 universal death-wake template: per-peer wait_lock ->
+// rendez_blocked_on -> wakeup, lock order g_proc_table_lock -> wait_lock ->
+// (wakeup: g_timerwait.lock -> r->lock). Deliberately NO
+// torpor_wake_all_for_proc (a torpor waiter's stack rendez is reachable via
+// rendez_blocked_on, and tsleep's widened register-then-observe closes the
+// register-after-walk race) and NO smp_resched_others (the IRQ-from-EL0
+// tail evaluates only group_exit_msg, so an IPI cannot accelerate a RUNNING
+// thread's interrupt-death -- it reaches its next sync-from-EL0 tail
+// regardless; the never-syscalling spinner gap is tracked as task #964).
+void proc_interrupt_terminate_wake(struct Proc *p);
 
 #endif // THYLACINE_PROC_H

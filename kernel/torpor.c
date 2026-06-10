@@ -36,6 +36,7 @@
 #include <thylacine/torpor.h>
 
 #include <thylacine/extinction.h>
+#include <thylacine/notes.h>    // LS-5c: thread_die_pending (the widened #811 predicate)
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
 #include <thylacine/spinlock.h>
@@ -203,9 +204,9 @@ s64 sys_torpor_wait_for_proc(struct Proc *p, u64 addr_va, u32 expected,
     torpor_buckets[idx] = &w;
 
     // SYS_EXIT_GROUP / kill cross-thread shootdown lost-wakeup close (I-24).
-    // Re-check the Proc's group-termination flag AFTER registering, UNDER
-    // torpor_lock -- the same lock proc_group_terminate's torpor_wake_all walk
-    // takes. This makes the wake airtight against the register-vs-walk race:
+    // Re-check the death predicate AFTER registering, UNDER torpor_lock --
+    // the same lock proc_group_terminate's torpor_wake_all walk takes. This
+    // makes the wake airtight against the register-vs-walk race:
     //   - if we registered BEFORE the wake-all walk, the walk finds us +
     //     wakes us (awoken=1) -> tsleep returns immediately;
     //   - if we register AFTER the walk (it missed us), then the flag-set
@@ -214,7 +215,15 @@ s64 sys_torpor_wait_for_proc(struct Proc *p, u64 addr_va, u32 expected,
     //     flag here and we do NOT sleep.
     // Either way a group-terminating Proc's futex sleeper does not sleep
     // through the exit; it returns + dies at its EL0-return die-check.
-    if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL) {
+    //
+    // LS-5c (ARCH 8.8.2): widened to thread_die_pending (group-exit death OR
+    // a pending terminate-disposition `interrupt`). For the interrupt leg
+    // this early-exit is conservative-prompt, not the I-9 closure -- the
+    // interrupt waker (proc_interrupt_terminate_wake) does NOT take
+    // torpor_lock; its register-after-walk race is closed one layer down by
+    // tsleep's own register-then-observe under wait_lock (the torpor waiter's
+    // stack rendez is reachable via rendez_blocked_on for the wake itself).
+    if (thread_die_pending(current_thread())) {
         torpor_bucket_unlink_locked(&w);
         spin_unlock(&torpor_lock);
         return TORPOR_OK;

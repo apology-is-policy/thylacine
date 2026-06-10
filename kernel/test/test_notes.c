@@ -643,3 +643,152 @@ void test_notes_self_managing_flag(void) {
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
 }
+
+// ---------------------------------------------------------------------------
+// intr_latch_lifecycle (LS-5c P3-terminate)
+// ---------------------------------------------------------------------------
+//
+// The PROC_FLAG_INTR_TERMINATE_PENDING latch: armed by notes_post's
+// interrupt arm (no handler + not self-managing), cleared by handler
+// registration (notes_set_handler), the self-managing mark
+// (notes_mark_self_managing), and draining the last queued interrupt.
+
+void test_notes_intr_latch_lifecycle(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+
+    // (a) An interrupt post to a handler-less non-self-managing Proc ARMS.
+    TEST_EXPECT_EQ(notes_post(p, "interrupt", 0u, NULL, true), 0, "post 1");
+    TEST_ASSERT(proc_intr_terminate_pending(p),
+                "interrupt post armed the latch");
+
+    // (b) Registering a handler clears it (under q->lock, serialized with
+    // the arm -- the SYS_NOTIFY-vs-post race close).
+    notes_set_handler(p, 0x1000u);
+    TEST_ASSERT(!proc_intr_terminate_pending(p),
+                "handler registration cleared the latch");
+
+    // (c) With a handler registered, a second post does NOT re-arm.
+    TEST_EXPECT_EQ(notes_post(p, "interrupt", 0u, NULL, true), 0, "post 2");
+    TEST_ASSERT(!proc_intr_terminate_pending(p),
+                "handler-bearing Proc never arms");
+
+    // (d) Unregistering does not retro-arm; the NEXT post re-evaluates.
+    notes_set_handler(p, 0u);
+    TEST_ASSERT(!proc_intr_terminate_pending(p),
+                "unregister does not retro-arm");
+    TEST_EXPECT_EQ(notes_post(p, "interrupt", 0u, NULL, true), 0, "post 3");
+    TEST_ASSERT(proc_intr_terminate_pending(p),
+                "post after unregister re-arms");
+
+    // (e) Drain-clear: three interrupts queued; the latch survives popping
+    // the first two and clears on the LAST.
+    struct Note got;
+    spin_lock(&p->notes->lock);
+    TEST_EXPECT_EQ(notes_dequeue_for_fd_locked(p, NULL, &got), 1, "pop 1");
+    spin_unlock(&p->notes->lock);
+    TEST_ASSERT(proc_intr_terminate_pending(p),
+                "latch survives a pop with interrupts remaining");
+    spin_lock(&p->notes->lock);
+    TEST_EXPECT_EQ(notes_dequeue_for_fd_locked(p, NULL, &got), 1, "pop 2");
+    spin_unlock(&p->notes->lock);
+    TEST_ASSERT(proc_intr_terminate_pending(p), "latch survives pop 2");
+    spin_lock(&p->notes->lock);
+    TEST_EXPECT_EQ(notes_dequeue_for_fd_locked(p, NULL, &got), 1, "pop 3");
+    spin_unlock(&p->notes->lock);
+    TEST_ASSERT(!proc_intr_terminate_pending(p),
+                "draining the last interrupt cleared the latch");
+
+    // (f) The self-managing mark clears + suppresses future arms.
+    TEST_EXPECT_EQ(notes_post(p, "interrupt", 0u, NULL, true), 0, "post 4");
+    TEST_ASSERT(proc_intr_terminate_pending(p), "post 4 armed");
+    p->state = PROC_STATE_ALIVE;
+    notes_mark_self_managing(p);
+    TEST_ASSERT(!proc_intr_terminate_pending(p),
+                "self-managing mark cleared the latch");
+    TEST_EXPECT_EQ(notes_post(p, "interrupt", 0u, NULL, true), 0, "post 5");
+    TEST_ASSERT(!proc_intr_terminate_pending(p),
+                "self-managing Proc never arms");
+
+    // (g) Non-interrupt names never arm (fresh Proc -- p carries the
+    // self-managing mark from (f)).
+    struct Proc *p2 = proc_alloc();
+    TEST_ASSERT(p2 != NULL, "proc_alloc p2 succeeded");
+    TEST_EXPECT_EQ(notes_post(p2, "child_exit", 0u, NULL, true), 0,
+                   "post child_exit");
+    TEST_EXPECT_EQ(notes_post(p2, "pipe", 0u, NULL, true), 0, "post pipe");
+    TEST_ASSERT(!proc_intr_terminate_pending(p2),
+                "non-interrupt posts never arm");
+
+    // (h) The kproc guard: an interrupt post to kproc's queue never arms
+    // (in-kernel tests post to kproc's queue via the boot thread; an armed
+    // kproc would *_INTR every kernel-thread sleep). Only when the boot
+    // queue is empty, so the drain leaves it exactly as found.
+    struct Proc *kp = kproc();
+    if (kp && kp->notes) {
+        spin_lock(&kp->notes->lock);
+        u32 pre = kp->notes->count;
+        spin_unlock(&kp->notes->lock);
+        if (pre == 0u) {
+            TEST_EXPECT_EQ(notes_post(kp, "interrupt", 0u, NULL, true), 0,
+                           "post to kproc queue accepted");
+            TEST_ASSERT(!proc_intr_terminate_pending(kp),
+                        "kproc never arms (the guard)");
+            struct Note kgot;
+            spin_lock(&kp->notes->lock);
+            int kpop = notes_dequeue_for_fd_locked(kp, NULL, &kgot);
+            spin_unlock(&kp->notes->lock);
+            TEST_EXPECT_EQ(kpop, 1, "kproc queue drained back to empty");
+        }
+    }
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+    p2->state = PROC_STATE_ZOMBIE;
+    proc_free(p2);
+}
+
+// ---------------------------------------------------------------------------
+// die_pending_predicate (LS-5c P3-terminate)
+// ---------------------------------------------------------------------------
+//
+// thread_die_pending — the widened #811 sleep predicate: group-exit death
+// (mask-blind) OR the terminate latch gated by the thread's own mask.
+
+void test_notes_die_pending_predicate(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+
+    // The predicate reads only t->proc + t->note_mask (the LS-5b fake-
+    // thread idiom, plus the proc binding).
+    struct Thread fake_t;
+    fake_t.proc      = p;
+    fake_t.note_mask = 0u;
+
+    TEST_ASSERT(!thread_die_pending(NULL), "NULL thread -> false");
+    TEST_ASSERT(!thread_die_pending(&fake_t), "fresh Proc -> false");
+
+    // Latch leg: armed + unmasked -> true; masked -> false (masking defers).
+    TEST_EXPECT_EQ(notes_post(p, "interrupt", 0u, NULL, true), 0, "post");
+    TEST_ASSERT(thread_die_pending(&fake_t), "armed + unmasked -> true");
+    fake_t.note_mask = (1u << NOTE_BIT_INTERRUPT);
+    TEST_ASSERT(!thread_die_pending(&fake_t),
+                "armed + MASKED -> false (the thread defers)");
+
+    // Death leg: group_exit_msg overrides the mask (death is not deferrable).
+    __atomic_store_n(&p->group_exit_msg, "killed", __ATOMIC_RELEASE);
+    TEST_ASSERT(thread_die_pending(&fake_t),
+                "group exit -> true even with interrupt masked");
+    __atomic_store_n(&p->group_exit_msg, (const char *)NULL, __ATOMIC_RELEASE);
+    fake_t.note_mask = 0u;
+
+    // Drain the interrupt -> the latch clears -> false again.
+    struct Note got;
+    spin_lock(&p->notes->lock);
+    (void)notes_dequeue_for_fd_locked(p, NULL, &got);
+    spin_unlock(&p->notes->lock);
+    TEST_ASSERT(!thread_die_pending(&fake_t), "drained -> false");
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}

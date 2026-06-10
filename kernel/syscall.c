@@ -2515,14 +2515,19 @@ static s64 sys_note_open_handler(void) {
     // (a self-managing Proc reads + acts on its interrupt; only a non-self-
     // managing handler-less Proc auto-terminates). One-way; set only after the
     // fd exists (the declaration is "I successfully obtained a notes fd").
-    proc_mark_self_managing_notes(p);
+    // LS-5c: routed through notes_mark_self_managing, which also clears the
+    // terminate latch under q->lock (the disposition just changed to consume).
+    notes_mark_self_managing(p);
     return (s64)fd;
 }
 
 // SYS_NOTIFY(handler_va) — register/clear the async note handler.
 // F9 audit close: release-store so a multi-thread Proc's other Thread
 // observing handler_va in notes_deliver_at_el0_return sees a coherent
-// value (paired with the acquire-load in notes.c).
+// value (paired with the acquire-load in notes.c). LS-5c: the store runs
+// inside notes_set_handler under q->lock so it serializes against
+// notes_post's check-handler-then-arm of the terminate latch (registering
+// a handler un-arms it).
 static s64 sys_notify_handler(u64 handler_va) {
     struct Thread *t = current_thread();
     if (!t || !t->proc) return -1;
@@ -2532,7 +2537,7 @@ static s64 sys_notify_handler(u64 handler_va) {
         if (handler_va >= UACCESS_USER_VA_TOP) return -1;
         if (handler_va & 0x3) return -1;     // aarch64 instructions are 4-aligned
     }
-    __atomic_store_n(&p->handler_va, handler_va, __ATOMIC_RELEASE);
+    notes_set_handler(p, handler_va);
     return 0;
 }
 
@@ -2639,6 +2644,13 @@ static int postnote_walk_cb(struct Proc *target, void *arg) {
     // Post. notes_post is safe under proc_table_lock -- see the lock-order
     // discussion in sys_postnote_handler.
     int rc = notes_post(target, w->name, 0u, w->caller, false);
+    // LS-5c (P3-terminate): if the post armed the terminate latch (an
+    // `interrupt` to a handler-less non-self-managing target -- the shell's
+    // Ctrl-C forward to a blocked foreground child is the canonical case),
+    // wake the target's blocked threads so the LS-5b terminate fires at
+    // their EL0-return tails. Internally gated on the latch; the walk's
+    // g_proc_table_lock contract is satisfied (proc_for_each holds it).
+    if (rc == 0) proc_interrupt_terminate_wake(target);
     w->result = (rc == 0) ? 1 : -1;
     return 1;
 }
@@ -2704,6 +2716,19 @@ static s64 sys_postnote_handler(u64 pid_raw, u64 name_va, u64 name_len_raw) {
             proc_table_lock_release(s);
         }
         int rc = notes_post(p, buf, 0u, p, false);
+        // LS-5c (P3-terminate): a self-post of `interrupt` in a multi-thread
+        // Proc may arm the terminate latch while a PEER thread is blocked in
+        // a rendez sleep -- wake the peers so they unwind to their tails (the
+        // posting thread itself is running and reaches its own tail at this
+        // syscall's return). The wake walks p->threads, so it needs
+        // g_proc_table_lock (the #811 contract); take it only when the latch
+        // armed (the read is a benign pre-check -- the wake re-validates
+        // under its own internal gate, and `p` is self, immune to reap here).
+        if (rc == 0 && proc_intr_terminate_pending(p)) {
+            irq_state_t ws = proc_table_lock_acquire();
+            proc_interrupt_terminate_wake(p);
+            proc_table_lock_release(ws);
+        }
         return (rc == 0) ? 0 : (s64)-1;
     }
 

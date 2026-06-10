@@ -185,6 +185,74 @@ UX, a minimal editor, id/whoami/date) for breadth and LS-8 (U-PTY: pollable cons
 termios + async) for depth. Tasks #944-#953. Supersedes the loose U-9..N / U-PTY
 rows above with a workflow-driven sequence.
 
+**LS-5c [done] (P3-terminate; KERNEL -- audit-bearing death-path + wait/wake
+surface, the formal round rides LS-5-audit #963).** The #811/ARCH-8.8.1
+death-wake predicate is widened to "group-exit death OR a pending
+terminate-disposition `interrupt`" (ARCH 8.8.2), so a child BLOCKED in the
+kernel (sleep / pipe read / cons read / poll / 9P RPC / torpor) wakes,
+unwinds `*_INTR` to its EL0-return tail, and the LS-5b disposition terminates
+it -- closing the last LS-5 property: `sleep 30` + Ctrl-C now dies promptly.
+As-built: `PROC_FLAG_INTR_TERMINATE_PENDING` (proc_flags bit 7; a LATCH,
+unlike the one-way bits) is the LOCK-FREE wake-hint -- the sleep path can
+never take `q->lock` (the devnotes F3-close ABBA), so the disposition decided
+at post time is cached on the Proc. ALL latch writes run under
+`p->notes->lock`: SET by `notes_post`'s interrupt arm
+(`notes_arm_intr_terminate_locked`: name==interrupt + no handler + not
+self-managing + never kproc -- the kproc guard is load-bearing, in-kernel
+tests post to the boot thread's queue); CLEARED by handler registration
+(`notes_set_handler` -- the SYS_NOTIFY store moves under `q->lock`, closing
+the store-vs-arm interleave that would strand a stale armed latch behind a
+registered handler = spurious-`*_INTR`-forever), the self-managing mark
+(`notes_mark_self_managing`, the SYS_NOTE_OPEN tail), and draining the last
+queued interrupt (`notes_drain_intr_locked` in both dequeue helpers).
+`thread_die_pending(t)` (notes.c, lock-free: group_exit_msg acquire-load OR
+latch-armed AND interrupt-unmasked-for-t) replaces every direct
+group_exit_msg read at the sleep sites: sleep/tsleep x4 register-then-observe
+(sched.c), torpor's post-register check (torpor.c -- conservative-prompt for
+the interrupt leg; the I-9 closure is tsleep's own check one layer down), and
+the 9P client's `client_self_dying` (a Ctrl-C'd coreutil blocked in a 9P RPC
+takes the audited #845 Tflush unwind, not a session kill). The WAKE
+(`proc_interrupt_terminate_wake`, internally latch-gated; caller MUST hold
+g_proc_table_lock) is the #811 death-walk verbatim (per-peer wait_lock ->
+rendez_blocked_on -> wakeup, Option A) MINUS `torpor_wake_all_for_proc`
+(torpor waiters' stack rendez is reachable via rendez_blocked_on) and MINUS
+`smp_resched_others` (the IRQ-from-EL0 tail evaluates only group_exit_msg, so
+the IPI buys nothing -- the never-syscalling pure-spinner gap, which also
+afflicts single-thread `kill`, is pre-existing and now tracked as #964);
+wired at all four interrupt-post sites (proc_console_post_interrupt,
+proc_console_sak, postnote_walk_cb [the shell's Ctrl-C forward], and the
+SYS_POSTNOTE self-post which now takes the table lock for the walk). The
+EL0-return tail stays the TRUTH: a stale-positive latch costs one spurious
+`*_INTR` unwind (confined to a notify-race in-flight window = POSIX
+EINTR-with-handler semantics, or the inherited-notes-fd exotic), never a
+wrong termination; a MASKED thread is woken by the walk but its own-mask
+predicate re-sleeps it (masking defers; unmasking later fires the terminate
+at the next tail; death still overrides the mask). All ten #811 blocking
+sites' `*_INTR` arms re-validated mechanism-agnostic (cleanup -> return, no
+loop, none re-reads group_exit_msg). Also fixed in passing: the
+proc_group_terminate header-contract drift in proc.h (it still described the
+pre-#811 "acquires NO g_proc_table_lock" envelope; proc.c's "caller MUST
+hold" is the truth). Tests +6 (803/803, HVF + TCG):
+`rendez.intr_terminate_interrupts_sleep` (drives the REAL waker under the
+deterministic harness -- possible because it has no IPI broadcast, which the
+death test must hand-roll around), `..._register_observe` (the I-9 leg: latch
+armed BEFORE the first sleep -> immediate SLEEP_INTR with NO wake call),
+`..._masked_sleeps_through` (wake absorbed, re-sleeps; death-overrides-mask
+cleanup), `..._interrupts_tsleep` (the /sleep surface), +
+`notes.intr_latch_lifecycle` (arm / notify-clear / no-rearm-with-handler /
+re-arm-after-unregister / drain-clear-on-last / self-managing-clear /
+kproc-guard) + `notes.die_pending_predicate`. Runtime regression: u-7-test
+flow 5 (`sleep 3600 &` + `kill <pid>` + `wait` reaps promptly) -- proven
+NON-VACUOUS by stash + rebuild on the base kernel where it HANGS the boot
+check (Error 1). 0 EXTINCTION, login E2E OK; the full SMP gate + the
+interactive `ls-5.exp` ride LS-5-audit (#963). Files: proc.h (flag + decls +
+the contract-drift fix), proc.c (pending-read + wake + console-site wiring),
+notes.h (3 decls + the latch section), notes.c (arm + drain + set_handler +
+mark_self_managing + thread_die_pending), syscall.c (notify/note_open rewire
++ the 2 postnote wakes), sched.c (x4 widened checks), torpor.c, 9p_client.c,
+test_rendez.c + test_notes.c + test.c (+6 tests), usr/u-7-test (flow 5),
+usr/lib/libthyla-rs/src/time.rs (stale not-note-interruptible comment).
+
 **LS-5b [done] (P2 default disposition; KERNEL -- audit-bearing death-path +
 notes surface, the formal round rides LS-5-audit #963).** An uncaught `interrupt`
 now default-terminates a NON-self-managing, handler-less Proc at the EL0-return

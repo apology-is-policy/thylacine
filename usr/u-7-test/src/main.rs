@@ -74,6 +74,9 @@ pub extern "C" fn rs_main() -> i64 {
     if let Err(rc) = flow_repl_integrated() {
         return rc;
     }
+    if let Err(rc) = flow_blocked_child_interrupt() {
+        return rc;
+    }
 
     t_putstr("u-7-test: all OK\n");
     0
@@ -342,6 +345,55 @@ fn flow_repl_integrated() -> Result<(), i64> {
     }
 
     t_putstr("u-7-test: integrated Repl (note delivery + bg reap + exit) OK\n");
+    Ok(())
+}
+
+// Flow 5 -- LS-5c (P3-terminate, ARCH 8.8.2): a posted `interrupt` WAKES a
+// child BLOCKED in the kernel (here `/sleep 3600`, parked in a torpor tsleep)
+// and terminates it. Pre-LS-5c the interrupt sat queued while the child slept
+// (notes deliver only at the EL0-return tail, which a blocked thread never
+// reaches), so the `wait` below blocked the full 3600 s = the boot-check
+// timeout; post-LS-5c the post arms the terminate latch + wakes the sleeper,
+// it unwinds to its tail, and the LS-5b disposition terminates it. The reap
+// is the assertion (the child cannot complete on its own inside the boot
+// window); the exit status is not pinned (the LS-5b lesson).
+fn flow_blocked_child_interrupt() -> Result<(), i64> {
+    let mut env = Env::new();
+    env.interactive = true;
+
+    if eval_source(&mut env, "sleep 3600 &").is_err() {
+        return fail("flow 5: `sleep 3600 &` errored");
+    }
+    let pids = env.jobs().live_pids();
+    if pids.len() != 1 {
+        return fail("flow 5: the background sleep was not registered");
+    }
+    let pid = pids[0];
+
+    // Give the child a beat to reach its torpor sleep. The wake is correct
+    // either way (a not-yet-blocked child dies at its next sync tail via the
+    // latch's register-then-observe); the beat makes the BLOCKED leg -- the
+    // one this flow exists to regress -- the leg actually exercised.
+    let _ = time::sleep(Duration::from_millis(50));
+
+    // `kill <pid>` posts `interrupt` (the builtin's default note name).
+    let cmd = alloc::format!("kill {}", pid);
+    if eval_source(&mut env, &cmd).is_err() {
+        return fail("flow 5: `kill <pid>` errored");
+    }
+    if env.status() != 0 {
+        return fail("flow 5: `kill <pid>` reported a send failure");
+    }
+
+    // The blocked sleeper must die + reap promptly (this hung pre-LS-5c).
+    if eval_source(&mut env, "wait").is_err() {
+        return fail("flow 5: `wait` errored");
+    }
+    if !env.jobs().live_pids().is_empty() {
+        return fail("flow 5: the interrupted sleeper was not reaped");
+    }
+
+    t_putstr("u-7-test: blocked `sleep 3600` interrupted + reaped OK (LS-5c)\n");
     Ok(())
 }
 

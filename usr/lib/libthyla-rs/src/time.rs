@@ -46,9 +46,11 @@ pub fn sleep(dur: Duration) -> Result<()> {
     }
     // Stack-local sentinel. We initialize to 0 and pass expected = 0,
     // so the kernel's "value matches => sleep" path is taken. Nobody
-    // else can address this stack slot, so the wait can only end via
-    // timeout. (A signal can't preempt it -- SYS_TORPOR_WAIT is not
-    // interruptible by notes at v1.0.)
+    // else can address this stack slot, so for a SURVIVING caller the
+    // wait can only end via timeout. (LS-5c: a terminate-disposition
+    // `interrupt` -- and group-exit death -- DOES end the wait early,
+    // but only on the way to terminating the whole Proc at the kernel
+    // return tail, so this function never observes it returning.)
     let sentinel = AtomicU32::new(0);
     match torpor::wait(&sentinel, 0, Some(dur)) {
         Ok(torpor::WaitResult::TimedOut) => Ok(()),

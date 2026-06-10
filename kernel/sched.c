@@ -31,6 +31,7 @@
 
 #include <thylacine/dtb.h>
 #include <thylacine/extinction.h>
+#include <thylacine/notes.h>    // LS-5c: thread_die_pending (the widened #811 predicate)
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
 #include <thylacine/sched.h>
@@ -1316,17 +1317,22 @@ int sleep(struct Rendez *r, int (*cond)(void *arg), void *arg) {
         t->rendez_blocked_on = r;
         t->state             = THREAD_SLEEPING;
 
-        // Register-then-observe (I-9 death-wake close, ARCH §8.8.1): re-check
-        // the Proc's group_exit_msg UNDER wait_lock -- the same lock the
-        // cascade (proc_group_terminate) takes per peer. If set: either we
-        // registered before the cascade's walk (it finds + wakes us), or the
-        // flag-set happens-before our wait_lock acquire (so this acquire-load
-        // observes it). Either way we must NOT sleep through the group exit:
-        // undo the registration and return SLEEP_INTR -- the caller unwinds and
-        // the Thread dies at its EL0-return die-check. kproc never group-
-        // terminates, so its kernel threads never take this branch.
-        if (t->proc &&
-            __atomic_load_n(&t->proc->group_exit_msg, __ATOMIC_ACQUIRE) != NULL) {
+        // Register-then-observe (I-9 death-wake close, ARCH §8.8.1; widened
+        // by LS-5c per §8.8.2): re-check the death predicate UNDER wait_lock
+        // -- the same lock both wakers (proc_group_terminate AND
+        // proc_interrupt_terminate_wake) take per peer. thread_die_pending =
+        // group_exit_msg set, OR a terminate-disposition `interrupt` is
+        // pending (the PROC_FLAG_INTR_TERMINATE_PENDING latch, unmasked for
+        // this thread). If true: either we registered before the waker's
+        // walk (it finds + wakes us), or the flag-set happens-before our
+        // wait_lock acquire (so the acquire-load observes it). Either way we
+        // must NOT sleep through it: undo the registration and return
+        // SLEEP_INTR -- the caller unwinds and the Thread dies at its
+        // EL0-return tail (die-check for group exit; the LS-5b dispatch for
+        // the interrupt, which re-validates against the live queue). kproc
+        // never group-terminates and the latch is never armed on kproc, so
+        // kernel threads never take this branch.
+        if (thread_die_pending(t)) {
             r->waiter            = NULL;
             t->rendez_blocked_on = NULL;
             t->state             = THREAD_RUNNING;
@@ -1352,10 +1358,10 @@ int sleep(struct Rendez *r, int (*cond)(void *arg), void *arg) {
         t->rendez_blocked_on = NULL;
         spin_lock(&r->lock);
 
-        // Woken by the cascade? Return INTR rather than looping (the next
-        // register-then-observe would catch it anyway -- this is the prompt path).
-        if (t->proc &&
-            __atomic_load_n(&t->proc->group_exit_msg, __ATOMIC_ACQUIRE) != NULL) {
+        // Woken by a death/terminate waker? Return INTR rather than looping
+        // (the next register-then-observe would catch it anyway -- this is
+        // the prompt path). Widened to thread_die_pending (LS-5c).
+        if (thread_die_pending(t)) {
             rc = SLEEP_INTR;
             break;
         }
@@ -1436,12 +1442,13 @@ int tsleep(struct Rendez *r, int (*cond)(void *arg), void *arg,
         timerwait_link(t);
         t->state             = THREAD_SLEEPING;
 
-        // Register-then-observe (I-9 death-wake close, ARCH §8.8.1): identical
-        // to sleep(). Set => undo the FULL registration (rendez + timer-wait)
-        // and return TSLEEP_INTR; the caller unwinds + the Thread dies at its
-        // EL0-return die-check.
-        if (t->proc &&
-            __atomic_load_n(&t->proc->group_exit_msg, __ATOMIC_ACQUIRE) != NULL) {
+        // Register-then-observe (I-9 death-wake close, ARCH §8.8.1; widened
+        // by LS-5c per §8.8.2): identical to sleep() -- thread_die_pending =
+        // group-exit death OR a pending terminate-disposition `interrupt`
+        // unmasked for this thread. True => undo the FULL registration
+        // (rendez + timer-wait) and return TSLEEP_INTR; the caller unwinds +
+        // the Thread dies at its EL0-return tail.
+        if (thread_die_pending(t)) {
             r->waiter            = NULL;
             t->rendez_blocked_on = NULL;
             timerwait_unlink(t);
@@ -1468,9 +1475,9 @@ int tsleep(struct Rendez *r, int (*cond)(void *arg), void *arg,
         spin_lock(&g_timerwait.lock);
         spin_lock(&r->lock);
 
-        // Woken by the cascade? Return INTR (prompt path).
-        if (t->proc &&
-            __atomic_load_n(&t->proc->group_exit_msg, __ATOMIC_ACQUIRE) != NULL) {
+        // Woken by a death/terminate waker? Return INTR (prompt path).
+        // Widened to thread_die_pending (LS-5c).
+        if (thread_die_pending(t)) {
             ret = TSLEEP_INTR;
             break;
         }
