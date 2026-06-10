@@ -283,7 +283,8 @@ void test_proc_multi_thread_reap(void) {
 // ---------------------------------------------------------------------------
 
 static volatile u32 g_wpcw_refused;     // count of guard-refused workers (rc==-1)
-static volatile int g_wpcw_reaped_pid;  // the rc of the worker that reaped (>0)
+static volatile int g_wpcw_reaped_pid;  // SET only by the worker that reaped (its rc)
+static volatile int g_wpcw_expect_pid;  // the child's pid (the expected reaped value)
 static volatile u32 g_wpcw_done;        // workers finished
 
 static void wpcw_child_entry(void *arg) {
@@ -314,7 +315,7 @@ static void wpcw_parent_entry(void *arg) {
 
     int child_pid = rfork(RFPROC, wpcw_child_entry, NULL);
     if (child_pid <= 0) extinction("wpcw: rfork child failed");
-    __atomic_store_n(&g_wpcw_reaped_pid, child_pid, __ATOMIC_RELEASE); // expected
+    __atomic_store_n(&g_wpcw_expect_pid, child_pid, __ATOMIC_RELEASE); // expected
 
     struct Thread *w0 = thread_create_with_arg(p, wpcw_worker_entry, NULL);
     struct Thread *w1 = thread_create_with_arg(p, wpcw_worker_entry, NULL);
@@ -329,8 +330,12 @@ static void wpcw_parent_entry(void *arg) {
 void test_proc_wait_pid_concurrent_waiter_refused(void) {
     __atomic_store_n(&g_wpcw_refused, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_wpcw_done, 0u, __ATOMIC_RELEASE);
-    // g_wpcw_reaped_pid is seeded to the child's pid by the parent; if a worker
-    // reaps the child it re-stores the same pid (the reap returns child_pid).
+    // RW-2 R2-F2: reaped_pid is a SENTINEL (0) -- it is witnessed ONLY when the
+    // claiming worker actually reaps the child (storing the child's pid). The
+    // parent stores the expected child pid into expect_pid separately, so the
+    // final equality is NON-tautological (a never-reaped child leaves 0 != pid).
+    __atomic_store_n(&g_wpcw_reaped_pid, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_wpcw_expect_pid, 0, __ATOMIC_RELEASE);
 
     int pid = rfork(RFPROC, wpcw_parent_entry, NULL);
     TEST_ASSERT(pid > 0, "rfork parent failed");
@@ -342,7 +347,10 @@ void test_proc_wait_pid_concurrent_waiter_refused(void) {
     TEST_EXPECT_EQ(__atomic_load_n(&g_wpcw_refused, __ATOMIC_ACQUIRE), 1u,
         "exactly ONE of two concurrent same-Proc waiters is guard-refused "
         "(pre-fix: the 2nd trips the single-waiter assert -> extinction)");
-    TEST_ASSERT(__atomic_load_n(&g_wpcw_reaped_pid, __ATOMIC_ACQUIRE) > 0,
-        "the OTHER (sole) waiter reaped the child -- a multi-thread Proc with "
-        "one waiter is correctly ALLOWED (kproc keeps reaping)");
+    int got = __atomic_load_n(&g_wpcw_reaped_pid, __ATOMIC_ACQUIRE);
+    int exp = __atomic_load_n(&g_wpcw_expect_pid, __ATOMIC_ACQUIRE);
+    TEST_ASSERT(exp > 0, "child pid recorded");
+    TEST_EXPECT_EQ(got, exp,
+        "the OTHER (sole) waiter actually reaped the child (its pid) -- a "
+        "multi-thread Proc with one waiter is correctly ALLOWED (kproc reaps)");
 }

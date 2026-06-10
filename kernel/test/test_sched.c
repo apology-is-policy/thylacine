@@ -647,8 +647,20 @@ void test_sched_ready_on_clamps_stale_vd(void) {
     struct Thread *t2 = thread_create(kproc(), sched_test_thread_a);
     TEST_ASSERT(t2 != NULL, "thread_create t2 failed");
     t2->vd_t = 0;
+    // RW-2 R2-F1: t2's key 0 is the band HEAD on the LIVE boot CPU; a
+    // slice-expiry preemption in the place->capture->remove window would
+    // dispatch t2 (lowest vd_t), which yields + re-keys -> a host-timing
+    // false-red on the EQ below. Mask IRQs across the triplet (the sibling
+    // cross-CPU test instead targets a PARKED peer; self-target needs the
+    // mask). spin_lock_irqsave(NULL) is the "IRQ-mask only" primitive; ready_on
+    // / sched_remove_if_runnable nest their own cs->lock save/restore, staying
+    // masked. (The STALE half above needs no mask: its clamped key == vd_counter
+    // sorts at the TAIL, never dispatched.)
+    irq_state_t s = spin_lock_irqsave(NULL);
     ready_on(self, t2);
-    TEST_EXPECT_EQ(t2->vd_t, (s64)0, "vd_t already at/below the clock is unchanged");
+    s64 t2_vd = t2->vd_t;
     sched_remove_if_runnable(t2);
+    spin_unlock_irqrestore(NULL, s);
+    TEST_EXPECT_EQ(t2_vd, (s64)0, "vd_t already at/below the clock is unchanged");
     thread_free(t2);
 }

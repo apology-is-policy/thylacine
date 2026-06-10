@@ -76,11 +76,30 @@
 //   `handle_get` obj ref (the `struct Handle` snapshot) whenever it
 //   actually registers a waiter (`pw->list != NULL`), instead of
 //   dropping it before the sleep. `sys_poll_for_proc` drops every
-//   retained ref AFTER the unregister sweep. Holding the handle ref
-//   keeps the object alive -- directly for a SrvConn, and transitively
-//   for a pipe ring (the ring ref is dropped only at `spoor_clunk`, so a
-//   live Spoor handle ref defers it). So the embedded `poll_waiter_list`
-//   cannot be freed while any waiter is listed on it.
+//   retained ref AFTER the unregister sweep.
+//
+//   The two REAL registering paths are both KOBJ_SPOOR, and the retained
+//   Spoor handle ref keeps the object alive TRANSITIVELY:
+//     - pipe ring: `devpipe_close` drops the ring ref only at the Spoor's
+//       last `spoor_clunk`, so a live Spoor handle ref defers the free of
+//       `r->poll_list`.
+//     - devsrv connection Spoor (the live corvus `/srv` path, a KOBJ_SPOOR
+//       with a `SRV_CONN_MAGIC` aux): `devsrv_close` -> `srvconn_unref`
+//       likewise runs only at the Spoor's last clunk, deferring the free of
+//       `cn->poll_list`.
+//
+//   CAVEAT -- the KObj_Srv LISTENER retain is INERT (RW-2 R2-poll F1). The
+//   only KObj_Srv path that registers a poll waiter is a SrvService listener
+//   (`svc_listener_poll` -> `svc->poll_list`); but `handle_acquire_obj` /
+//   `handle_release_obj` are NO-OPS for KObj_Srv, so the retained `held[]`
+//   entry holds no ref to the SrvService or its registry. Listener-poll
+//   lifetime is safe ONLY because the sole registry today is the immortal
+//   boot registry (`g_boot_srv_registry`; SrvService entries are tombstoned,
+//   never freed). A mortal per-session registry (A-5b / #827, see
+//   `kernel/devsrv.c` `srv_registry_unref`'s `kfree(reg)`) reintroduces the
+//   round-1 UAF on the listener-poll path: it MUST then take a real
+//   `srv_registry_ref` at register and drop it post-sweep (or thread a
+//   registry ref through `held[]`). Tracked.
 //
 // THE Dev.poll vtable op (declared in <thylacine/dev.h>)
 //
