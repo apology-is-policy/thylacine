@@ -316,16 +316,23 @@ void test_territory_mount_devno_disambiguates(void) {
     TEST_EXPECT_EQ(territory_nmounts(p), 2,
         "distinct devno -> TWO entries (NOT a collision/idempotent no-op)");
 
-    // mount_lookup resolves each mount point to its OWN source by devno.
-    TEST_ASSERT(mount_lookup(p, mp1) == a, "lookup (-,1,0) -> a");
-    TEST_ASSERT(mount_lookup(p, mp2) == b, "lookup (-,2,0) -> b");
+    // mount_lookup resolves each mount point to its OWN source by devno. RW-4
+    // SA-F1: mount_lookup now returns a REF-HELD source -- clunk each result.
+    struct Spoor *r1 = mount_lookup(p, mp1);
+    TEST_ASSERT(r1 == a, "lookup (-,1,0) -> a");
+    if (r1) spoor_clunk(r1);
+    struct Spoor *r2 = mount_lookup(p, mp2);
+    TEST_ASSERT(r2 == b, "lookup (-,2,0) -> b");
+    if (r2) spoor_clunk(r2);
     TEST_ASSERT(mount_lookup(p, mp3) == NULL, "lookup unmounted devno -> NULL");
 
     // unmount by mp1 removes ONLY a's entry; b's (same dc+qid, other devno) stays.
     TEST_EXPECT_EQ(unmount(p, mp1), 0, "unmount (-,1,0)");
     TEST_EXPECT_EQ(territory_nmounts(p), 1, "one entry left after unmount");
     TEST_ASSERT(mount_lookup(p, mp1) == NULL, "(-,1,0) gone");
-    TEST_ASSERT(mount_lookup(p, mp2) == b, "(-,2,0) still -> b");
+    struct Spoor *r3 = mount_lookup(p, mp2);
+    TEST_ASSERT(r3 == b, "(-,2,0) still -> b");
+    if (r3) spoor_clunk(r3);
 
     territory_unref(p);
     spoor_unref(a);
@@ -333,6 +340,66 @@ void test_territory_mount_devno_disambiguates(void) {
     spoor_unref(mp1);
     spoor_unref(mp2);
     spoor_unref(mp3);
+}
+
+// RW-4 SA-F1: mount_lookup transfers a ref, so a looked-up source survives a
+// concurrent unmount that drops the table's ref. PRE-FIX mount_lookup returned a
+// BORROW: the unmount below would free the source (the table was its last holder)
+// and the held pointer would dangle -> the subsequent spoor_clunk(got) would
+// extinct on the SPOOR_MAGIC check (use-after-free). Deterministic stand-in for
+// the SMP pivot/unmount-vs-walk race the ci-smp-gate witnesses.
+void test_territory_mount_lookup_ref_survives_unmount(void) {
+    struct Territory *p = territory_alloc();
+    TEST_ASSERT(p != NULL, "territory_alloc");
+    struct Spoor *src = spoor_alloc(&devnone);
+    struct Spoor *mp  = spoor_alloc(&devnone);
+    TEST_ASSERT(src && mp, "spoor_alloc");
+    mp->qid.path = 7; mp->devno = 9;
+
+    u64 freed_before = spoor_total_freed();
+    TEST_EXPECT_EQ(mount(p, src, mp, 0), 0, "mount");   // src: table holds a ref
+    spoor_unref(src);                                    // drop the test's ref -> table is the ONLY holder
+
+    struct Spoor *got = mount_lookup(p, mp);             // SA-F1: returns a REF-HELD source
+    TEST_ASSERT(got == src, "mount_lookup -> src");
+
+    TEST_EXPECT_EQ(unmount(p, mp), 0, "unmount drops the table ref");
+    TEST_EXPECT_EQ(spoor_total_freed(), freed_before,
+        "the lookup ref kept src alive across unmount (pre-fix: freed here -> dangling)");
+
+    spoor_clunk(got);                                    // now the last holder -> frees
+    TEST_EXPECT_EQ(spoor_total_freed(), freed_before + 1, "clunk freed src");
+
+    territory_unref(p);
+    spoor_unref(mp);
+}
+
+// RW-4 SA-F1: territory_root_ref takes a ref atomically, so a FROM_ROOT reader
+// holding the result survives a concurrent pivot/chroot that swaps root_spoor +
+// clunks the displaced root. Pins the helper the syscall FROM_ROOT paths rely on.
+void test_territory_root_ref_survives_pivot(void) {
+    struct Territory *p = territory_alloc();
+    TEST_ASSERT(p != NULL, "territory_alloc");
+    struct Spoor *r  = spoor_alloc(&devnone);
+    struct Spoor *r2 = spoor_alloc(&devnone);
+    TEST_ASSERT(r && r2, "spoor_alloc");
+
+    TEST_EXPECT_EQ(territory_chroot(p, r), 0, "chroot to r");   // r: territory holds a ref
+    spoor_unref(r);                                             // territory is the ONLY holder
+
+    u64 freed_before = spoor_total_freed();
+    struct Spoor *got = territory_root_ref(p);                  // SA-F1: REF-HELD root
+    TEST_ASSERT(got == r, "territory_root_ref -> r");
+
+    TEST_EXPECT_EQ(territory_chroot(p, r2), 0, "pivot away to r2");  // drops the territory's ref on r
+    TEST_EXPECT_EQ(spoor_total_freed(), freed_before,
+        "the root_ref kept r alive across the pivot (pre-fix borrow: freed -> dangling)");
+
+    spoor_clunk(got);                                          // last holder of r -> frees
+    TEST_EXPECT_EQ(spoor_total_freed(), freed_before + 1, "clunk freed r");
+
+    territory_unref(p);                                        // drops r2
+    spoor_unref(r2);
 }
 
 // stalk-2 audit F1: mount() must reject a mount that would create a cycle in the

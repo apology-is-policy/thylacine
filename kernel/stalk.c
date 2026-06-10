@@ -101,9 +101,14 @@ int stalk_cross_mounts(struct Proc *p, struct Spoor *probe,
     // crosses are possible. The bound remains as a defensive backstop (it would
     // stop crossing rather than spin even if a cycle somehow existed).
     for (int hops = 0; hops < PGRP_MAX_MOUNTS; hops++) {
+        // RW-4 SA-F1: mount_lookup now returns a REF-HELD source (the lookup +
+        // ref are atomic under the Territory ns_lock, so a concurrent unmount
+        // cannot free it mid-cross). clone_walk_zero mints an INDEPENDENT crossed
+        // Spoor from it; release the transferred ref immediately after.
         struct Spoor *src = mount_lookup(p->territory, id);
         if (!src) break;                          // id is not a mount point
         struct Spoor *crossed = clone_walk_zero(src);
+        spoor_clunk(src);                         // done with the looked-up source
         if (!crossed) {
             if (cur) spoor_clunk(cur);
             return -1;

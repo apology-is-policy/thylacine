@@ -138,6 +138,17 @@ struct Territory {
     // STALK-DESIGN.md 4.3.
     spin_lock_t          dot_lock;
     char                *dot_path;
+    // RW-4 SA-F1: serializes the mount table (mounts[]/nmounts), the bind table
+    // (binds[]/nbinds), and root_spoor against concurrent access by peer Threads
+    // of a Proc (which share the Territory) and by rfork(RFNAMEG)-sharing Procs.
+    // Before SA-F1 these were unlocked -- a concurrent pivot_root/unmount on one
+    // thread could free a Spoor a walking thread was mid-read on (root_spoor /
+    // mount-source UAF). A near-leaf lock: held ONLY for the table read-modify-
+    // write, NEVER across stalk or a spoor_clunk (the Dev close hook may sleep) --
+    // the displaced/removed source is captured under the lock + clunked outside it
+    // (the dot_lock free-outside-the-lock discipline). Placed last so every pinned
+    // offset above is unchanged.
+    spin_lock_t          ns_lock;
 };
 
 _Static_assert(sizeof(struct PgrpMount) == 32,
@@ -146,10 +157,11 @@ _Static_assert(sizeof(struct PgrpMount) == 32,
                "the abstract path_id_t target to the (dc, devno, qid.path) "
                "mount-point identity; the deliberate +16/entry growth.");
 _Static_assert(sizeof(struct Territory)
-               == 32 + 8 * PGRP_MAX_BINDS + 32 * PGRP_MAX_MOUNTS + 16,
+               == 32 + 8 * PGRP_MAX_BINDS + 32 * PGRP_MAX_MOUNTS + 24,
                "struct Territory size pinned (stalk-2: 24 header + 8 root_spoor "
                "+ 8*PGRP_MAX_BINDS + 32*PGRP_MAX_MOUNTS; LS-4 appended "
-               "dot_lock[4] + pad[4] + dot_path[8] = 16 after mounts[]).");
+               "dot_lock[4] + pad[4] + dot_path[8] = 16 after mounts[]; RW-4 SA-F1 "
+               "appended ns_lock[4] + pad[4] = 8 more = 24).");
 _Static_assert(__builtin_offsetof(struct Territory, magic) == 0,
                "magic must be at offset 0 (SLUB freelist write "
                "clobbers it on free, double-free defense)");
@@ -302,12 +314,22 @@ int mount(struct Territory *territory, struct Spoor *source,
 //   -1   no entry exists at `mountpoint`'s identity / mountpoint is NULL.
 int unmount(struct Territory *territory, struct Spoor *mountpoint);
 
-// mount_lookup: the `stalk` cross-mount probe (Plan 9 `domount`). Returns
-// the BORROWED source Spoor of the FIRST mount entry whose mount-point
-// identity matches `probe`'s (dc, devno, qid.path), or NULL if `probe` is
-// not a mount point. The returned ref is the table's -- the caller must NOT
-// clunk it; `stalk` clone-walks it to mint an independent crossed Spoor.
+// mount_lookup: the `stalk` cross-mount probe (Plan 9 `domount`). Returns a
+// REF-HELD source Spoor of the FIRST mount entry whose mount-point identity
+// matches `probe`'s (dc, devno, qid.path), or NULL if `probe` is not a mount
+// point. RW-4 SA-F1 changed the contract from borrow to OWNED: the lookup +
+// spoor_ref happen atomically under ns_lock so a concurrent unmount cannot free
+// the source between the lookup and the caller's use. THE CALLER MUST
+// spoor_clunk the returned Spoor when done (stalk_cross_mounts clunks it after
+// clone_walk_zero mints the independent crossed Spoor).
 struct Spoor *mount_lookup(struct Territory *territory, struct Spoor *probe);
+
+// territory_root_ref: atomically read root_spoor + take a ref under ns_lock, so
+// the read+ref cannot race a concurrent territory_pivot_root / territory_chroot
+// that swaps root_spoor + clunks the displaced one to zero (RW-4 SA-F1). Returns
+// a REF-HELD root Spoor (caller spoor_clunks it) or NULL if no root is set. This
+// is the ONLY sound way to obtain the FROM_ROOT walk base in a multi-thread Proc.
+struct Spoor *territory_root_ref(struct Territory *territory);
 
 // =============================================================================
 // Chroot (root-Spoor pivot) — P5-stratumd-stub-bringup-e2.

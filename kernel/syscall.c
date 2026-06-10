@@ -1415,10 +1415,12 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     struct Spoor *src;
     if (spoor_fd_raw == SYS_WALK_OPEN_FROM_ROOT) {
         if (!p->territory)                            return -1;
-        src = p->territory->root_spoor;
+        // RW-4 SA-F1: atomic read+ref under the Territory ns_lock. The prior
+        // read-then-spoor_ref left a UAF window: a concurrent pivot_root could
+        // swap root_spoor + clunk the old one to zero between the read and the
+        // ref. territory_root_ref closes it.
+        src = territory_root_ref(p->territory);
         if (!src)                                     return -1;
-        spoor_ref(src);   // #844: ref the Territory root so the exit clunk is
-                          // uniform + it survives a concurrent pivot_root
     } else {
         src = sys_lookup_spoor(p, (hidx_t)spoor_fd_raw, RIGHT_READ);   // ref-held
         if (!src)                                     return -1;
@@ -1683,11 +1685,11 @@ static s64 sys_chdir_handler(u64 path_va, u64 path_len_raw, u64 a2, u64 a3) {
 
     // Resolve the cleaned absolute path from the Territory root to verify it
     // exists, is a directory, and the caller holds X (search). stalk borrows
-    // root (never refs/clunks it); we hold a ref across the call for the uniform
-    // exit clunk (survives a concurrent pivot_root, like sys_open_handler).
-    struct Spoor *root = p->territory->root_spoor;
+    // root (never refs/clunks it); RW-4 SA-F1: territory_root_ref takes the ref
+    // ATOMICALLY under ns_lock (a plain read-then-ref raced a concurrent
+    // pivot_root's swap+clunk-to-zero). Released at the uniform exit clunk below.
+    struct Spoor *root = territory_root_ref(p->territory);
     if (!root)                                       return -1;
-    spoor_ref(root);
     // `cleaned` is already an absolute, lexically-resolved path (no `.`/`..`
     // remain), so stalk's own `..` clamp at root_spoor is a redundant safety net
     // here -- the containment was already established by cwd_lexical_resolve.
@@ -1751,10 +1753,10 @@ static s64 sys_open_handler(u64 start_fd_raw, u64 path_va,
     struct Spoor *start;
     if (start_fd_raw == SYS_WALK_OPEN_FROM_ROOT) {
         if (!p->territory)                           return -1;
-        start = p->territory->root_spoor;
+        // RW-4 SA-F1: atomic read+ref under ns_lock (the prior read-then-ref
+        // raced a concurrent pivot_root that frees the old root mid-window).
+        start = territory_root_ref(p->territory);
         if (!start)                                  return -1;
-        spoor_ref(start);   // #844: ref the Territory root for the uniform exit
-                            // clunk (survives a concurrent pivot_root)
     } else {
         start = sys_lookup_spoor(p, (hidx_t)start_fd_raw, RIGHT_READ);   // ref-held
         if (!start)                                  return -1;
@@ -1869,10 +1871,10 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
     struct Spoor *src;
     if (parent_fd_raw == SYS_WALK_OPEN_FROM_ROOT) {
         if (!p->territory)                            return -1;
-        src = p->territory->root_spoor;
+        // RW-4 SA-F1: atomic read+ref under ns_lock (closes the read-then-ref
+        // UAF window vs a concurrent pivot_root).
+        src = territory_root_ref(p->territory);
         if (!src)                                     return -1;
-        spoor_ref(src);   // #844: ref the Territory root (uniform exit clunk;
-                          // survives a concurrent pivot_root)
     } else {
         src = sys_lookup_spoor(p, (hidx_t)parent_fd_raw, RIGHT_WRITE);   // ref-held
         if (!src)                                     return -1;
@@ -2132,10 +2134,9 @@ static s64 sys_readdir_handler(u64 fd_raw, u64 buf_va, u64 buf_len_raw) {
 // (and the root survives a concurrent pivot_root). NULL on failure (no ref).
 static struct Spoor *sys_resolve_dir_wr(struct Proc *p, u64 fd_raw) {
     if (fd_raw == SYS_WALK_OPEN_FROM_ROOT) {
-        if (!p->territory)                            return NULL;
-        struct Spoor *root = p->territory->root_spoor;
-        if (root) spoor_ref(root);
-        return root;
+        // RW-4 SA-F1: atomic read+ref under ns_lock (territory_root_ref handles a
+        // NULL Territory) -- the prior read-then-ref raced a concurrent pivot_root.
+        return territory_root_ref(p->territory);
     }
     return sys_lookup_spoor(p, (hidx_t)fd_raw, RIGHT_WRITE);
 }
@@ -3302,7 +3303,10 @@ static struct Spoor *sys_resolve_mountpoint(struct Proc *p,
     if (path_len_raw > SYS_OPEN_PATH_MAX)             return NULL;
     if (!sys_validate_user_buf(path_va, path_len_raw)) return NULL;
 
-    struct Spoor *start = p->territory->root_spoor;
+    // RW-4 SA-F1: REF-HELD root (was a bare borrow -- a concurrent pivot_root
+    // could free `start` while stalk walks it -> UAF). Clunked after stalk below
+    // (and on every early-return path that follows).
+    struct Spoor *start = territory_root_ref(p->territory);
     if (!start)                                       return NULL;
 
     // Copy + validate the path (reject embedded NUL -- truncation / wire-leak
@@ -3311,13 +3315,15 @@ static struct Spoor *sys_resolve_mountpoint(struct Proc *p,
     char path_scratch[SYS_OPEN_PATH_MAX + 1];
     for (u64 i = 0; i < path_len_raw; i++) {
         u8 b;
-        if (uaccess_load_u8(path_va + i, &b) != 0)    return NULL;
-        if (b == '\0')                                return NULL;
+        if (uaccess_load_u8(path_va + i, &b) != 0)    { spoor_clunk(start); return NULL; }
+        if (b == '\0')                                { spoor_clunk(start); return NULL; }
         path_scratch[i] = (char)b;
     }
     path_scratch[path_len_raw] = '\0';
 
-    return stalk(p, start, path_scratch, path_len_raw, STALK_MOUNT, 0);
+    struct Spoor *mp = stalk(p, start, path_scratch, path_len_raw, STALK_MOUNT, 0);
+    spoor_clunk(start);   // SA-F1: release the root ref (stalk only borrowed it)
+    return mp;
 }
 
 static s64 sys_mount_handler(u64 path_va, u64 path_len_raw,

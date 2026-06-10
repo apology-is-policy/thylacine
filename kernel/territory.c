@@ -62,6 +62,7 @@ static void territory_init_fields(struct Territory *p) {
     p->nmounts    = 0;
     p->root_spoor = NULL;
     spin_lock_init(&p->dot_lock);
+    spin_lock_init(&p->ns_lock);   // RW-4 SA-F1: mounts[]/binds[]/root_spoor guard
     p->dot_path   = NULL;   // NULL == cwd "/" (allocated lazily on first chdir)
     // KP_ZERO already cleared binds[] and mounts[]; nothing more to do.
 }
@@ -113,6 +114,13 @@ struct Territory *territory_clone(struct Territory *parent) {
     struct Territory *child = territory_alloc();
     if (!child) return NULL;
 
+    // RW-4 SA-F1: the bind/mount/root deep-copy reads parent's tables -- take
+    // parent->ns_lock so a concurrent mount/unmount/pivot on a peer thread (or an
+    // rfork(RFNAMEG)-sharing Proc) cannot tear the copy or free a source mid-ref.
+    // spoor_ref under the lock is safe (atomic, non-sleeping). Released after the
+    // root copy, before the dot_path copy (which takes the separate dot_lock).
+    spin_lock(&parent->ns_lock);
+
     // Deep-copy the bind table. Models the spec's ForkClone action's
     // bindings update: the child gets an independent function value.
     child->nbinds = parent->nbinds;
@@ -143,6 +151,7 @@ struct Territory *territory_clone(struct Territory *parent) {
     if (child->root_spoor) {
         spoor_ref(child->root_spoor);
     }
+    spin_unlock(&parent->ns_lock);
 
     // LS-4: copy the cwd snapshot (POSIX fork semantics -- the child inherits
     // the parent's cwd, independent thereafter). Take the PARENT's dot_lock so
@@ -419,20 +428,27 @@ int bind(struct Territory *territory, path_id_t src, path_id_t dst) {
     if (territory->magic != PGRP_MAGIC)
         extinction("bind on corrupted Territory");
 
-    if (src == dst)                       return -4;
-    if (would_create_cycle(territory, src, dst)) return -1;
+    if (src == dst)                       return -4;   // no table access; pre-lock
+
+    // RW-4 SA-F1: the cycle check + dup scan READ binds[]/nbinds and the append
+    // WRITES them -- serialize against a concurrent bind/unbind/clone under ns_lock.
+    // No sleeping call inside (pure table RMW), so holding the lock is leaf-safe.
+    spin_lock(&territory->ns_lock);
+    if (would_create_cycle(territory, src, dst)) { spin_unlock(&territory->ns_lock); return -1; }
 
     for (int i = 0; i < territory->nbinds; i++) {
         if (territory->binds[i].src == src && territory->binds[i].dst == dst) {
+            spin_unlock(&territory->ns_lock);
             return -2;
         }
     }
 
-    if (territory->nbinds >= PGRP_MAX_BINDS)   return -3;
+    if (territory->nbinds >= PGRP_MAX_BINDS) { spin_unlock(&territory->ns_lock); return -3; }
 
     territory->binds[territory->nbinds].src = src;
     territory->binds[territory->nbinds].dst = dst;
     territory->nbinds++;
+    spin_unlock(&territory->ns_lock);
     return 0;
 }
 
@@ -441,13 +457,16 @@ int unbind(struct Territory *territory, path_id_t src, path_id_t dst) {
     if (territory->magic != PGRP_MAGIC)
         extinction("unbind on corrupted Territory");
 
+    spin_lock(&territory->ns_lock);   // RW-4 SA-F1: serialize the binds[] RMW
     for (int i = 0; i < territory->nbinds; i++) {
         if (territory->binds[i].src == src && territory->binds[i].dst == dst) {
             territory->binds[i] = territory->binds[territory->nbinds - 1];
             territory->nbinds--;
+            spin_unlock(&territory->ns_lock);
             return 0;
         }
     }
+    spin_unlock(&territory->ns_lock);
     return -1;
 }
 
@@ -551,11 +570,21 @@ int mount(struct Territory *territory, struct Spoor *source,
     if (!mountpoint)                    return -1;
     if (mountpoint->magic != SPOOR_MAGIC) return -1;
 
+    // RW-4 SA-F1: the cycle check + idempotency scan + MREPL/append all read or
+    // write mounts[]/nmounts -- serialize under ns_lock against a concurrent
+    // mount/unmount/clone on a peer thread. spoor_ref is leaf-safe inside the
+    // lock; the MREPL spoor_clunk(old) is captured under the lock + deferred to
+    // OUTSIDE it (the displaced source's Dev close hook may sleep -- never hold a
+    // spinlock across it, the dot_lock free-outside-the-lock discipline).
+    struct Spoor *to_clunk = NULL;
+    int rc;
+    spin_lock(&territory->ns_lock);
+
     // I-3: reject a mount that would create a cycle in the mount-identity graph
     // (a self-mount, or a cross-tree oscillation). stalk-2 audit F1 -- enforce
     // the DAG here rather than relying on cross_mounts' loop bound, so a
     // cyclic mount cannot be installed + then resolve to a wrong endpoint.
-    if (would_create_mount_cycle(territory, source, mountpoint)) return -3;
+    if (would_create_mount_cycle(territory, source, mountpoint)) { rc = -3; goto out; }
 
     // Idempotency: (key(mountpoint), source) pair already in the table → no-op.
     // Spec: <<path, s>> \notin mounts[p] precondition under the re-keyed
@@ -563,7 +592,8 @@ int mount(struct Territory *territory, struct Spoor *source,
     for (int i = 0; i < territory->nmounts; i++) {
         if (mount_key_eq(&territory->mounts[i], mountpoint) &&
             territory->mounts[i].source == source) {
-            return 0;
+            rc = 0;
+            goto out;
         }
     }
 
@@ -578,22 +608,21 @@ int mount(struct Territory *territory, struct Spoor *source,
     if (flags & MREPL) {
         for (int i = 0; i < territory->nmounts; i++) {
             if (mount_key_eq(&territory->mounts[i], mountpoint)) {
-                struct Spoor *old = territory->mounts[i].source;
+                // spoor_clunk (not spoor_unref): MREPL displaces a holder; if this
+                // was the last ref on `old`, the Dev's close hook must run to
+                // release per-Spoor state (P5-mount-syscall fix). Deferred to `out`.
+                to_clunk = territory->mounts[i].source;
                 territory->mounts[i].source = source;
                 territory->mounts[i].flags  = flags;
                 spoor_ref(source);
-                // spoor_clunk (not spoor_unref): MREPL displaces a
-                // holder; if this was the last ref on `old`, the
-                // Dev's close hook must run to release per-Spoor
-                // state. P5-mount-syscall fix.
-                spoor_clunk(old);
-                return 0;
+                rc = 0;
+                goto out;
             }
         }
         // MREPL with no existing entry: fall through to append.
     }
 
-    if (territory->nmounts >= PGRP_MAX_MOUNTS)  return -2;
+    if (territory->nmounts >= PGRP_MAX_MOUNTS) { rc = -2; goto out; }
 
     // Take the per-entry reference BEFORE installing the entry. The path
     // below is infallible after the ref, so no rollback is needed.
@@ -607,7 +636,12 @@ int mount(struct Territory *territory, struct Spoor *source,
     e->flags       = flags;
     e->_pad        = 0;
     territory->nmounts++;
-    return 0;
+    rc = 0;
+
+out:
+    spin_unlock(&territory->ns_lock);
+    if (to_clunk) spoor_clunk(to_clunk);
+    return rc;
 }
 
 int unmount(struct Territory *territory, struct Spoor *mountpoint) {
@@ -616,44 +650,57 @@ int unmount(struct Territory *territory, struct Spoor *mountpoint) {
     if (!mountpoint)                    return -1;
     if (mountpoint->magic != SPOOR_MAGIC) return -1;
 
+    // RW-4 SA-F1: scan + swap-remove under ns_lock against a concurrent
+    // mount/unmount/clone; capture the removed source + clunk it OUTSIDE the lock
+    // (its Dev close hook may sleep).
+    struct Spoor *to_clunk = NULL;
+    int rc = -1;
+    spin_lock(&territory->ns_lock);
     for (int i = 0; i < territory->nmounts; i++) {
         if (mount_key_eq(&territory->mounts[i], mountpoint)) {
-            struct Spoor *source = territory->mounts[i].source;
-            // Remove by swapping with the last element. Order within
-            // mounts[] is not load-bearing at v1.0; MBEFORE/MAFTER union
-            // walking (Phase 5+) will introduce an ordering invariant
-            // and the removal will switch to shift-down at that point.
+            // spoor_clunk (not spoor_unref) so the Dev's close hook runs if this
+            // is the last holder -- the ARCH 9.6.6 lifecycle where the user
+            // already closed the attach_9p fd and the mount-table was the only
+            // holder keeping the 9P session alive (P5-mount-syscall fix). Deferred
+            // to outside the lock.
+            to_clunk = territory->mounts[i].source;
+            // Remove by swapping with the last element. Order within mounts[] is
+            // not load-bearing at v1.0; MBEFORE/MAFTER union walking (Phase 5+)
+            // introduces an ordering invariant + switches to shift-down then.
             territory->mounts[i] = territory->mounts[territory->nmounts - 1];
             territory->nmounts--;
-            // Drop the per-entry refcount LAST. spoor_clunk (not
-            // spoor_unref) so the Dev's close hook runs if this is
-            // the last holder — required for the ARCH §9.6.6
-            // lifecycle where a user has already closed the
-            // attach_9p fd and the mount-table was the only holder
-            // keeping the 9P session alive. P5-mount-syscall fix.
-            spoor_clunk(source);
-            return 0;
+            rc = 0;
+            break;
         }
     }
-    return -1;
+    spin_unlock(&territory->ns_lock);
+    if (to_clunk) spoor_clunk(to_clunk);
+    return rc;
 }
 
-// mount_lookup -- the `stalk` cross-mount probe (Plan 9 domount). Returns the
-// BORROWED source of the FIRST entry whose mount-point identity matches
-// `probe`'s (dc, devno, qid.path), or NULL. The table keeps its ref; the
-// caller (stalk) clone-walks the result to mint an independent crossed Spoor.
+// mount_lookup -- the `stalk` cross-mount probe (Plan 9 domount). Returns a
+// REF-HELD source of the FIRST entry whose mount-point identity matches `probe`'s
+// (dc, devno, qid.path), or NULL. RW-4 SA-F1: the lookup + spoor_ref happen
+// atomically under ns_lock so a concurrent unmount cannot free the source between
+// the lookup and the caller's use. THE CALLER MUST spoor_clunk the result
+// (stalk_cross_mounts clunks it after clone_walk_zero mints the crossed Spoor).
 struct Spoor *mount_lookup(struct Territory *territory, struct Spoor *probe) {
     if (!territory)                    return NULL;
     if (territory->magic != PGRP_MAGIC) extinction("mount_lookup on corrupted Territory");
     if (!probe)                        return NULL;
     if (probe->magic != SPOOR_MAGIC)   extinction("mount_lookup probe corrupted Spoor");
 
+    struct Spoor *src = NULL;
+    spin_lock(&territory->ns_lock);
     for (int i = 0; i < territory->nmounts; i++) {
         if (mount_key_eq(&territory->mounts[i], probe)) {
-            return territory->mounts[i].source;
+            src = territory->mounts[i].source;
+            spoor_ref(src);   // transfer a ref to the caller (atomic vs unmount)
+            break;
         }
     }
-    return NULL;
+    spin_unlock(&territory->ns_lock);
+    return src;
 }
 
 // =============================================================================
@@ -681,23 +728,30 @@ int territory_chroot(struct Territory *territory, struct Spoor *source) {
 
     if (!source_is_valid(source))       return -1;
 
-    // Idempotent same-pointer: same Spoor reasserted as root → no-op
-    // success; refcount unchanged. Matches spec precondition
-    // `root_spoor[p] # s` (the action simply doesn't fire when s ==
-    // old).
-    if (territory->root_spoor == source) return 0;
-
-    struct Spoor *old = territory->root_spoor;
-
-    // Bump BEFORE swap. spoor_ref extincts on a corrupted source; under
-    // a clean Spoor the swap is then infallible.
+    // RW-4 SA-F1: the idempotency check + read-old + ref + swap run under ns_lock
+    // so a concurrent FROM_ROOT reader (territory_root_ref) and a peer chroot/pivot
+    // cannot observe a torn swap or free `old` mid-read. spoor_ref is leaf-safe
+    // inside; the displaced root's spoor_clunk is deferred to OUTSIDE the lock (its
+    // Dev close hook may sleep).
+    struct Spoor *old = NULL;
+    spin_lock(&territory->ns_lock);
+    // Idempotent same-pointer: same Spoor reasserted as root -> no-op success;
+    // refcount unchanged. Matches spec precondition `root_spoor[p] # s`.
+    if (territory->root_spoor == source) {
+        spin_unlock(&territory->ns_lock);
+        return 0;
+    }
+    old = territory->root_spoor;
+    // Bump BEFORE swap. spoor_ref extincts on a corrupted source; under a clean
+    // Spoor the swap is then infallible.
     spoor_ref(source);
     territory->root_spoor = source;
+    spin_unlock(&territory->ns_lock);
 
     if (old) {
-        // spoor_clunk (not spoor_unref) — see header comment + mount()
-        // MREPL precedent. If this Territory was the last holder of
-        // `old`, the Dev's close hook runs here.
+        // spoor_clunk (not spoor_unref) -- see header comment + mount() MREPL
+        // precedent. If this Territory was the last holder of `old`, the Dev's
+        // close hook runs here.
         spoor_clunk(old);
     }
     return 0;
@@ -732,28 +786,49 @@ int territory_pivot_root(struct Territory *territory, struct Spoor *source) {
     // from kproc's territory_chroot at boot). Returning -1 here makes
     // the syscall fail-closed -- the caller MUST have established a
     // root via SYS_CHROOT first (which all v1.0 Procs do, via kproc).
-    if (!territory->root_spoor)         return -1;
-
-    // Idempotent same-pointer: same Spoor reasserted as root → no-op
-    // success; refcount unchanged. Matches territory_chroot's
-    // behavior + Plan 9 / Linux pivot-to-same semantics.
-    if (territory->root_spoor == source) return 0;
-
-    struct Spoor *old = territory->root_spoor;
-
-    // Bump BEFORE swap. spoor_ref extincts on a corrupted source under
-    // its own invariant; pre-swap any failure leaves the territory
-    // unchanged. Post-swap the swap is infallible.
+    // RW-4 SA-F1: the precondition + idempotency + read-old + ref + swap run
+    // under ns_lock (so a concurrent FROM_ROOT reader / peer pivot cannot race
+    // the check or free `old` mid-read); the displaced root's spoor_clunk is
+    // deferred to OUTSIDE the lock (its Dev close hook may sleep).
+    struct Spoor *old = NULL;
+    spin_lock(&territory->ns_lock);
+    if (!territory->root_spoor) {
+        spin_unlock(&territory->ns_lock);
+        return -1;
+    }
+    // Idempotent same-pointer: same Spoor reasserted as root -> no-op success;
+    // refcount unchanged. Matches territory_chroot + Plan 9 / Linux pivot-to-same.
+    if (territory->root_spoor == source) {
+        spin_unlock(&territory->ns_lock);
+        return 0;
+    }
+    old = territory->root_spoor;
+    // Bump BEFORE swap. spoor_ref extincts on a corrupted source; the swap is
+    // then infallible.
     spoor_ref(source);
     territory->root_spoor = source;
+    spin_unlock(&territory->ns_lock);
 
-    // spoor_clunk (NOT spoor_unref) on the displaced root: if THIS
-    // Territory was the last holder, the Dev's close hook runs. Same
-    // discipline as territory_chroot + mount()'s MREPL displacement.
-    // For joey's pivot the old devramfs root is held by kproc as well
-    // (system-wide; ARCH-invariant for the v1.0 boot path), so this
-    // clunk drops joey's per-Territory ref but does NOT free the
-    // underlying tree structurally.
+    // spoor_clunk (NOT spoor_unref) on the displaced root: if THIS Territory was
+    // the last holder, the Dev's close hook runs. Same discipline as
+    // territory_chroot + mount()'s MREPL displacement. For joey's pivot the old
+    // devramfs root is held by kproc as well (system-wide; ARCH-invariant for the
+    // v1.0 boot path), so this clunk drops joey's per-Territory ref but does NOT
+    // free the underlying tree structurally. `old` is non-NULL (precondition).
     spoor_clunk(old);
     return 0;
+}
+
+// territory_root_ref -- atomically read root_spoor + take a ref under ns_lock, so
+// the read+ref cannot race a concurrent territory_pivot_root / territory_chroot
+// that swaps root_spoor + clunks the displaced one to zero (RW-4 SA-F1). Returns
+// a REF-HELD root Spoor (caller spoor_clunks it) or NULL if no root is set.
+struct Spoor *territory_root_ref(struct Territory *territory) {
+    if (!territory)                    return NULL;
+    if (territory->magic != PGRP_MAGIC) extinction("territory_root_ref on corrupted Territory");
+    spin_lock(&territory->ns_lock);
+    struct Spoor *r = territory->root_spoor;
+    if (r) spoor_ref(r);
+    spin_unlock(&territory->ns_lock);
+    return r;
 }
