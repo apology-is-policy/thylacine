@@ -1391,12 +1391,11 @@ int proc_count_live_peers_locked(struct Proc *p, struct Thread *self) {
 //   - If the calling Proc is kproc, extincts (kproc runs at EL1; an
 //     EL0 fault tagged to kproc means the exception handler's
 //     current_thread()/proc bookkeeping is broken).
-//   - If the Proc has live peer Threads (thread_count > 1), extincts
-//     with a specific message. v1.0 lacks cross-thread shootdown;
-//     exits() would extinct anyway -- the specific message attributes
-//     the cause cleanly. Multi-thread fault delivery (cross-Thread
-//     shootdown via SYS_THREAD_EXIT on peers) is a v1.x extension
-//     paired with SYS_EXIT_GROUP.
+//   - The Proc may have live peer Threads (thread_count > 1): exits()
+//     (below) routes a multi-thread Proc through the #809/#811 group
+//     cascade, so a userspace fault terminates the whole Proc, not the
+//     kernel. (Pre-#809 this branch extincted because exits() could not
+//     yet shoot down peers; that dependency has landed -- RW-1 C-F1.)
 //
 // The uart line preserves the visibility the prior `extinction_with_addr`
 // call provided: a faulting userspace binary still announces itself on
@@ -1428,30 +1427,23 @@ void proc_fault_terminate(const char *name, uintptr_t faulting_addr) {
                                          "proc_fault_terminate routed to kproc (impossible at EL0)",
                                          faulting_addr);
 
-    if (p->thread_count > 1) {
-        // v1.0: exits() rejects a Proc with live peer Threads (no
-        // cross-thread shootdown). Surface the cause clearly rather
-        // than letting exits() extinct with its generic message.
-        uart_puts("user fault: pid=");
-        uart_putdec((u64)p->pid);
-        uart_puts(" reason=\"");
-        uart_puts(name);
-        uart_puts("\" addr=");
-        uart_puthex64((u64)faulting_addr);
-        uart_puts(" -- multi-thread Proc fault termination not yet supported\n");
-        extinction_with_addr(
-            "EL0 fault in multi-thread Proc (v1.x: cross-thread shootdown)",
-            faulting_addr);
-    }
-
-    // Single-thread Proc: cleanly terminate. The uart line preserves
-    // pre-#3a visibility; exits() runs the standard teardown
-    // (child_exit note to parent, ZOMBIE state, sched). Parent's
-    // wait_pid observes exit_status = 1 at v1.0 (sys_exits_handler
-    // collapses non-"ok" messages to 1); the structured 64-bit
-    // exit_status that distinguishes fault-terminated from clean-
-    // non-zero is a v1.x lift per docs/ERRORS.md "Exit-status
-    // semantics".
+    // Terminate the faulting Proc -- single OR multi-thread (RW-1 C-F1).
+    // exits() runs the standard teardown for a peerless Proc (child_exit
+    // note to parent, ZOMBIE, sched) AND, for a Proc with live peer
+    // Threads, routes through the #809/#811 group cascade
+    // (proc_group_terminate flags the group + wakes/IPIs every peer;
+    // thread_exit_self self-exits this faulting Thread; the last Thread out
+    // reaps with this snare:* status). So a userspace fault in a
+    // multi-thread Proc (stratumd, the virtio-blk driver running DMA
+    // pointer arithmetic) terminates the PROC, not the kernel -- the exact
+    // snare:* per-Proc-termination contract the pre-#809 thread_count>1
+    // extinction predated and violated. The dependency that branch waited
+    // on (cross-thread shootdown) has landed; the branch is now retired.
+    //
+    // The uart line preserves pre-#3a visibility: a faulting binary
+    // announces pid + reason + addr on the boot log. Parent wait_pid
+    // observes exit_status = 1 at v1.0 (sys_exits_handler collapses non-"ok"
+    // to 1); the structured 64-bit status is a v1.x lift per docs/ERRORS.md.
     uart_puts("user fault: pid=");
     uart_putdec((u64)p->pid);
     uart_puts(" reason=\"");
@@ -1461,7 +1453,8 @@ void proc_fault_terminate(const char *name, uintptr_t faulting_addr) {
     uart_puts(" -- terminating Proc\n");
 
     exits(name);
-    /* UNREACHABLE -- exits is noreturn */
+    /* UNREACHABLE -- exits is noreturn (single-thread: sched; multi-thread:
+       thread_exit_self after the group cascade) */
 }
 
 void exits(const char *msg) {

@@ -2228,6 +2228,31 @@ int main(void) {
         t_putstr("joey: /thread-probe reaped status=0; SYS_THREAD_SPAWN/EXIT verified\n");
     }
 
+    // === /thread-fault-probe -- HOLOTYPE RW-1 C-F1 regression ===
+    // A deliberate EL0 fault in a MULTI-thread Proc must terminate the
+    // Proc (via the #809/#811 group cascade), NOT extinct the kernel.
+    // Pre-fix (proc_fault_terminate's stale thread_count>1 extinction)
+    // this binary crashed the whole kernel and the boot never reached
+    // `Thylacine boot OK`. Post-fix joey reaps it with a non-zero
+    // (fault-collapsed) status while the kernel stays up -- the
+    // multi-thread analog of /pouch-hello-fault. A status of 0 would mean
+    // it survived the fault (the bug) or exited clean; either is wrong.
+    {
+        const char tfp_name[] = "thread-fault-probe";
+        long tfp_pid = t_spawn(tfp_name, sizeof(tfp_name) - 1);
+        if (tfp_pid <= 0) {
+            t_putstr("joey: t_spawn(\"thread-fault-probe\") FAILED\n");
+            return 1;
+        }
+        int tfp_status = -1;
+        long tfp_reaped = t_wait_pid(&tfp_status);
+        if (tfp_reaped != tfp_pid || tfp_status == 0) {
+            t_putstr("joey: /thread-fault-probe did NOT fault-terminate (C-F1 regressed)\n");
+            return 1;
+        }
+        t_putstr("joey: thread-fault-probe ok (multi-thread Proc fault terminated cleanly; kernel did NOT extinct)\n");
+    }
+
     // === /sbin/corvus spawn + E2E ===
     // Moved to do_corvus_bringup() (defined above main) and called
     // POST-PIVOT below, so corvus lands on the persistent Stratum root
