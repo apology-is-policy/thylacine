@@ -93,6 +93,14 @@ proc lc_send {line} {
     send "$line\r"
 }
 
+# Send a raw Ctrl-C (byte 0x03). The kernel console RX cooks it to the
+# `interrupt` note (kernel/cons.c); Ctrl-A (0x01) stays the qemu monitor escape,
+# so 0x03 passes through to the guest. Used by the LS-5 scenarios.
+proc lc_ctrlc {} {
+    lc_step "send Ctrl-C (0x03)"
+    send "\x03"
+}
+
 # Run `cmd` and assert its OUTPUT contains `expected` (exact). The editor does
 # not emit typed input as plain text (see "Echo discipline" above), so we match
 # the OUTPUT directly -- no echo-consume step. Choose `expected` so it cannot

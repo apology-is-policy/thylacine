@@ -220,7 +220,7 @@ Imperium (#959), re-sequenced by whatever Holotype found.
 
 | RW | Scope | Status |
 |---|---|---|
-| RW-0 | LS-5 audit fold-in (#963) | IN PROGRESS |
+| RW-0 | LS-5 audit fold-in (#963) | **done** — 1 P1 (ut eager note-queue open, `f145ce8`) + 3 P3 (F3 kproc latch guard fixed; F2/F4 accepted + doc); `ls-5.exp` landed; register seeded (HT00.F1–F4) |
 | RW-1 | Memory | pending |
 | RW-2 | Sched/SMP/threads/death/wait-wake | pending |
 | RW-3 | Exception entry + syscall surface | pending |

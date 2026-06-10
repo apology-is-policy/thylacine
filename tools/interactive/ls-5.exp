@@ -1,0 +1,73 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-5.exp -- the LS-5 (interactive Ctrl-C) regression net.
+#
+# Proves, over a real PTY, that `interrupt` is a real catchable note (LS-5,
+# docs/LIFE-SUPPORT.md + ARCH 8.8.2). Three cases, each asserting session
+# SURVIVAL via a post-Ctrl-C upper-cased probe token (the LS-CI echo discipline:
+# match OUTPUT only, never the typed line). A logged-out session would send the
+# probe to the login prompt instead, so the token never renders -> timeout fail.
+#
+#   (A) FRESH-PROMPT Ctrl-C -- BEFORE any command -- does NOT log the user out.
+#       The session shell is the console owner (LS-5a) AND self-managing from its
+#       first prompt, so an uncaught interrupt is consumed, not a default-
+#       terminate. This is the Holotype RW-0 F1 regression: pre-fix the shell
+#       opened its note queue LAZILY (only after the first keystroke), so a
+#       Ctrl-C before any input terminated it -> login teardown -> logout.
+#   (B) A foreground command BLOCKED in the kernel (`sleep 3600`) is interrupted
+#       promptly (LS-5c: the #811 wake widened to terminate-interrupt). If LS-5c
+#       regressed, the sleep would run 3600s and the probe would never get a
+#       prompt (timeout fail) -- so the prompt-returns-fast IS the assertion.
+#   (C) A foreground command FLOODING output (`yes`) is interrupted (LS-5b/c:
+#       terminate at the EL0-return tail). expect scans past the y-flood for the
+#       post-interrupt probe token.
+
+source [file join [file dirname [info script]] lib.exp]
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# (A) Fresh-prompt Ctrl-C -- the RW-0 F1 regression. No command has run, so the
+# shell has not been nudged into anything by a prior keystroke. Post-fix the
+# shell is self-managing from the first prompt and survives; the probe runs.
+#
+# The empty \r between the Ctrl-C and the probe is LOAD-BEARING: the kernel
+# cooked-consumes the 0x03 (the editor never sees a byte), so the `interrupt`
+# sits in the shell's note queue while the editor stays blocked mid-read. Notes
+# drain only at the prompt cycle (repl::feed Accept -> deliver_notes), and a
+# foreground wait FORWARDS a queued interrupt to its children -- so without a
+# drain the stale note would kill the probe pipeline itself. The empty line
+# cycles the REPL: Accept("") -> deliver_notes consumes + discards the stale
+# interrupt (no handler registered) -> the probe then runs on a clean queue.
+lc_ctrlc
+sleep 1
+send "\r"
+sleep 1
+lc_send "echo holo-fresh | tr a-z A-Z"
+lc_expect "HOLO-FRESH" "session survives a fresh-prompt Ctrl-C (RW-0 F1)"
+lc_pass "LS-5(A): fresh-prompt Ctrl-C does not log out (self-managing shell)"
+
+# (B) Blocked-in-kernel child: `sleep 3600` foreground. The shell blocks in its
+# interruptible foreground wait; the child blocks in a torpor tsleep. Ctrl-C is
+# forwarded to the child, which LS-5c wakes + terminates; the shell reaps it and
+# the prompt returns far inside the per-command timeout (the sleep would be 1h).
+lc_send "sleep 3600"
+sleep 2
+lc_ctrlc
+sleep 1
+lc_send "echo holo-sleep | tr a-z A-Z"
+lc_expect "HOLO-SLEEP" "blocked `sleep 3600` interrupted by Ctrl-C (LS-5c)"
+lc_pass "LS-5(B): a kernel-blocked child wakes + dies on Ctrl-C"
+
+# (C) Output-flooding child: `yes`. Ctrl-C terminates it at its EL0-return tail
+# (LS-5b/c). expect scans past the y-flood for the post-interrupt probe token.
+lc_send "yes"
+sleep 1
+lc_ctrlc
+sleep 1
+lc_send "echo holo-yes | tr a-z A-Z"
+lc_expect "HOLO-YES" "flooding `yes` interrupted by Ctrl-C (LS-5b/c)"
+lc_pass "LS-5(C): an output-bound child dies on Ctrl-C"
+
+lc_quit
+lc_pass "LS-CI ls-5: fresh-prompt(F1) + blocked(LS-5c) + flooding(LS-5b/c) all verified"
+exit 0

@@ -197,6 +197,52 @@ consolidation scripture commit that also decides the LS re-entry point).
 The LS line (LS-6/7/K -> LS-8/LS-test -> Imperium #959) resumes at the
 RW-13 emerge decision.
 
+**RW-0 [done] (HOLOTYPE opener: the owed LS-5 focused review, #963).** One
+reviewer pass over the three LS-5 commits (`2a6c9ed` + `9f407d0` + `9886704`)
+-- the kernel notes/latch/wake surface, the spawn-perm gate, the shell forward
+path -- plus the owed interactive regression net; doubles as the arc's
+methodology calibration. **F1 [P1] (USERSPACE, ut): a Ctrl-C at a FRESH login
+prompt logged the session out** -- the session shell is console owner (LS-5a)
+but opened its note queue LAZILY (first keystroke), so an uncaught `interrupt`
+before any input took the LS-5b default-terminate, and login read the shell's
+exit as logout. FIXED `@f145ce8`: ut opens the queue eagerly for a real
+session (gated on `io::stdout_is_live()`; the bare-spawn boot check stays lazy
+-- an eager open there would mint the note fd as fd 0). Kernel surface
+reviewed SOUND: 0 P0/P1/P2. Three P3s (#980), all dispositioned at this close:
+**F2** (a console Ctrl-C is a synthetic `interrupt` post; a queue holding 16
+non-interrupt notes gives coalesce nothing to overwrite -> -EAGAIN -> the
+Ctrl-C drops and the latch never arms; unreachable for a typical fg coreutil)
+-> ACCEPTED + notes.h known-caveat; **F3** (`thread_die_pending` read the
+latch with no kproc guard -- correctness rested entirely on the single arm
+site refusing kproc) -> FIXED: kproc skip on the latch leg + a forced-flag leg
+in `notes.die_pending_predicate` (the wake already carried its own
+`g_kproc` belt; the SYS_POSTNOTE self-post pre-check is caller-side, never
+kproc -- all three latch readers now kproc-safe); **F4** (multi-thread
+disposition race: thread B registering a handler / opening the notes fd
+between an interrupt post and blocked thread A's resume costs A one spurious
+`*_INTR`, e.g. -P9_E_IO; the tail re-validates so never a wrong termination;
+v1.0-unreachable -- multi-thread Procs are stratumd-class, never
+console-owner/fg) -> ACCEPTED + notes.h known-caveat. **The regression net
+landed: `tools/interactive/ls-5.exp`** (+ `lib.exp::lc_ctrlc`) -- three cases
+over a real PTY, each asserting session survival via an upper-cased output
+probe: (A) fresh-prompt Ctrl-C (the F1 regression; the empty-\r drain between
+Ctrl-C and probe is LOAD-BEARING -- the kernel cooked-consumes 0x03 so the
+note sits queued while the editor stays blocked, and the next foreground wait
+would FORWARD the stale note to the probe pipeline itself; the empty line
+cycles deliver_notes first), (B) `sleep 3600` + Ctrl-C reaps promptly (LS-5c
+blocked-in-kernel), (C) `yes` + Ctrl-C (LS-5b/c flooding). PASS first-attempt
+TCG via `tools/test-interactive.sh ls-5`. Matrix: kernel 803/803 + 0
+EXTINCTION + login E2E; SMP gate (default+UBSan x smp4/smp8, N=10) PASS --
+0 CORRUPTION all four configs (ubsan-smp8 7/10 benign host-timing
+classifications, the documented #894-family fragility; the gate's verdict
+keys on corruption only). Register seeded: `docs/holotype/00-register.md`
+(HT00.F1-F4);
+closed list `memory/audit_ls5_closed_list.md` (feeds RW-2). Residual on the
+surface: #964 (never-syscalling spinner, pre-existing). Files: notes.c
+(thread_die_pending kproc guard), notes.h (F2/F4 caveats), test_notes.c
+(forced-flag leg), tools/interactive/{ls-5.exp,lib.exp}. NEXT = RW-1 (memory,
+FULL).
+
 **LS-5c [done] (P3-terminate; KERNEL -- audit-bearing death-path + wait/wake
 surface, the formal round rides LS-5-audit #963).** The #811/ARCH-8.8.1
 death-wake predicate is widened to "group-exit death OR a pending

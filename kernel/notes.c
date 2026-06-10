@@ -672,7 +672,13 @@ bool thread_die_pending(struct Thread *t) {
     if (!p) return false;
     if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL)
         return true;
-    if ((__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) &
+    // kproc never takes the latch leg (RW-0 F3 defense-in-depth): the sole
+    // arm site (notes_arm_intr_terminate_locked) already refuses kproc, but
+    // a future arm path that forgot the guard would otherwise put every
+    // kernel kthread sleep into perpetual *_INTR unwind -- and kproc threads
+    // never EL0-return, so the latch could never be consumed.
+    if (p != kproc() &&
+        (__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) &
          PROC_FLAG_INTR_TERMINATE_PENDING) != 0 &&
         (t->note_mask & (1u << NOTE_BIT_INTERRUPT)) == 0)
         return true;

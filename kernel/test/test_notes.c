@@ -789,6 +789,18 @@ void test_notes_die_pending_predicate(void) {
     spin_unlock(&p->notes->lock);
     TEST_ASSERT(!thread_die_pending(&fake_t), "drained -> false");
 
+    // RW-0 F3 (defense-in-depth): the latch leg never fires for kproc, even
+    // with the flag FORCED onto proc_flags (the arm site refuses kproc; this
+    // guards a future arm path that forgets to). Forced directly because
+    // notes_post's arm cannot set it.
+    fake_t.proc = kproc();
+    __atomic_or_fetch(&kproc()->proc_flags, PROC_FLAG_INTR_TERMINATE_PENDING,
+                      __ATOMIC_RELEASE);
+    TEST_ASSERT(!thread_die_pending(&fake_t),
+                "kproc latch leg guarded even when forced (RW-0 F3)");
+    __atomic_and_fetch(&kproc()->proc_flags,
+                       ~PROC_FLAG_INTR_TERMINATE_PENDING, __ATOMIC_RELEASE);
+
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
 }

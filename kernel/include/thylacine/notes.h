@@ -265,6 +265,16 @@ void notes_queue_free(struct NoteQueue *q);
 // posts when queue count >= NOTE_COALESCE_THRESHOLD); false (userspace
 // SYS_POSTNOTE path) skips coalesce — -EAGAIN bubbles to userspace.
 //
+// Known caveat (RW-0 F2, accepted): a console Ctrl-C is a synthetic
+// `interrupt` post, so when the target queue already holds NOTE_QUEUE_DEPTH
+// entries NONE of which is an interrupt, the coalesce pass finds no
+// same-name slot to overwrite -> -EAGAIN -> the interrupt is dropped AND
+// the LS-5c terminate latch is never armed (the arm rides a landed post).
+// That Ctrl-C is lost. Unreachable for a typical foreground coreutil (its
+// queue is near-empty; the precondition is 16 queued, unconsumed
+// child_exit/pipe/user notes), so accepted at v1.0; a queue-pressure
+// poster would revisit (e.g. reserve the head slot for interrupt/kill).
+//
 // Wakes every registered hook on q->poll_list (devnotes_read parkers AND
 // SYS_POLL pollers; multi-waiter via the poll_waiter_list mechanism).
 int notes_post(struct Proc *p, const char *name, u32 arg,
@@ -347,6 +357,17 @@ int notes_interrupt_should_terminate_locked(struct Proc *p, struct Thread *t);
 // drained-last-interrupt clear inside the dequeue helpers. The EL0-return
 // tail re-validates against the live queue, so a stale-positive latch costs
 // one spurious *_INTR unwind, never a wrong termination.
+//
+// Known caveat (RW-0 F4, accepted): the spurious-*_INTR window has a
+// multi-thread variant. Thread B registering a handler (SYS_NOTIFY) or
+// opening the notes fd (self-managing) AFTER an interrupt armed the latch
+// but BEFORE a latch-woken thread A reaches its EL0-return tail clears the
+// latch — but A has already unwound its blocked syscall *_INTR (e.g. a 9P
+// RPC surfaces -P9_E_IO). No wrong termination (the tail re-validates);
+// the cost is one EINTR-class return on A, the POSIX EINTR-with-handler
+// shape. Unreachable at v1.0: multi-thread Procs are stratumd-class and
+// never console-owner/foreground, and the single-thread variant requires
+// the Proc to change its own disposition concurrently with a Ctrl-C.
 
 // Register/clear the async note handler (the SYS_NOTIFY body). Stores
 // handler_va with RELEASE (pairs with the dispatcher's acquire, F9) and, when
