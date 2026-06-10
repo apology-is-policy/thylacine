@@ -185,6 +185,18 @@ UX, a minimal editor, id/whoami/date) for breadth and LS-8 (U-PTY: pollable cons
 termios + async) for depth. Tasks #944-#953. Supersedes the loose U-9..N / U-PTY
 rows above with a workflow-driven sequence.
 
+**HOLOTYPE arc DFS-inserted here (2026-06-10, user-approved; see
+`docs/HOLOTYPE.md`).** The whole-system deep review arc pre-empts the LS
+emerge at the post-LS-5c boundary: six lenses (soundness / completeness /
+SOTA / performance / consistency / gaps) over RW-0..RW-13, priority-ordered
+for the review-model window. RW-0 = the owed LS-5 focused audit (#963),
+folded in as the opener + methodology calibration. Fix policy: soundness
+P0/P1/P2 in-arc with regression tests; non-soundness findings registered in
+`docs/holotype/00-register.md` + enqueued, triaged at RW-13 (the
+consolidation scripture commit that also decides the LS re-entry point).
+The LS line (LS-6/7/K -> LS-8/LS-test -> Imperium #959) resumes at the
+RW-13 emerge decision.
+
 **LS-5c [done] (P3-terminate; KERNEL -- audit-bearing death-path + wait/wake
 surface, the formal round rides LS-5-audit #963).** The #811/ARCH-8.8.1
 death-wake predicate is widened to "group-exit death OR a pending
