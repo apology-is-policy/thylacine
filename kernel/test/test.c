@@ -368,6 +368,7 @@ void test_perm_check_hostowner_override(void);
 void test_perm_in_group(void);
 void test_perm_want_for_omode(void);
 void test_perm_rights_for_omode(void);
+void test_perm_oexec_no_read_leak(void);
 void test_perm_wstat_policy(void);
 void test_perm_devramfs_enforced_real_metadata(void);
 void test_perm_dev_flags(void);
@@ -1949,6 +1950,7 @@ struct test_case g_tests[] = {
     { "perm.in_group",                 test_perm_in_group,                 false, NULL },
     { "perm.want_for_omode",           test_perm_want_for_omode,           false, NULL },
     { "perm.rights_for_omode",         test_perm_rights_for_omode,         false, NULL },
+    { "perm.oexec_no_read_leak",       test_perm_oexec_no_read_leak,       false, NULL },
     { "perm.wstat_policy",             test_perm_wstat_policy,             false, NULL },
     { "perm.devramfs_enforced_real_metadata",
                                        test_perm_devramfs_enforced_real_metadata, false, NULL },

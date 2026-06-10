@@ -28,12 +28,15 @@
 // Display impl uses static strings; no String, no Box, no heap.
 //
 // TRAPS:
-//   - T_E_PERM (= 1) collides with the pouch boundary-line's flat
-//     -1/EIO sentinel on the pouch side (see kernel errno.h header
-//     comment + docs/ERRORS.md). Native libthyla-rs callers bypass
-//     pouch, so the `NotPermitted` variant is safe to mint and observe
-//     directly. The trap only matters when a kernel handler returns
-//     `-T_E_PERM` to a pouch-via-musl program.
+//   - T_E_PERM (= 1) collides with the kernel's flat -1 GENERIC error
+//     sentinel. The kernel forbids any handler returning -T_E_PERM
+//     (errno.h: handlers use -T_E_ACCES = 13 for "denied"), so a -1 from
+//     a syscall NEVER means EPERM -- it means "unspecified failure."
+//     from_syscall_return() therefore maps -1 to `Io` (matching the pouch
+//     boundary-line's -1 -> EIO choice), NOT to `NotPermitted` (RW-3
+//     R4-F1: aliasing -1 onto NotPermitted mislabeled every flat-error
+//     failure as a permission problem). `NotPermitted` is reachable only
+//     via an explicit `Error::from(1)` (a real, non-kernel EPERM source).
 
 use core::fmt;
 
@@ -201,6 +204,17 @@ impl Error {
     pub fn from_syscall_return(rc: i64) -> Result<i64> {
         if rc >= 0 {
             Ok(rc)
+        } else if rc == -1 {
+            // RW-3 R4-F1: the kernel's flat -1 is its GENERIC error sentinel,
+            // NOT EPERM. errno.h forbids any handler returning -T_E_PERM (=1)
+            // -- handlers use -T_E_ACCES (13) for "denied" -- so a -1 never
+            // means "operation not permitted." Map it to Io (matching the pouch
+            // boundary-line's -1 -> EIO choice) rather than aliasing onto the
+            // loaded `NotPermitted` variant, which mislabeled every flat-error
+            // failure (missing file, denied write, bad fd) as a permission
+            // problem. The per-cause -T_E_* upgrade across the kernel handlers
+            // is the systemic fix (ERRORS.md rollout; the F7 re-vote).
+            Err(Error::Io)
         } else {
             // POSIX errnos fit in i32. A kernel handler returning a
             // wildly out-of-range negative value (well below -i32::MAX)
@@ -210,7 +224,7 @@ impl Error {
             let errno = if rc < -(i32::MAX as i64) {
                 i32::MAX
             } else {
-                // rc is in [i32::MIN..0); -rc fits in i32 by the bound.
+                // rc is in [i32::MIN..-1]; -rc fits in i32 by the bound.
                 (-rc) as i32
             };
             Err(Error::from(errno))

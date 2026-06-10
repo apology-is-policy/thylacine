@@ -2464,9 +2464,10 @@ static s64 sys_thread_spawn_handler(u64 entry_va, u64 sp_va,
 __attribute__((noreturn))
 static void sys_thread_exit_handler(void) {
     thread_exit_self();
-    // thread_exit_self is __noreturn; the wrapper inherits via the
-    // attribute, so the compiler does not emit a fall-through.
-    __builtin_unreachable();
+    // thread_exit_self is __noreturn. Match the EXITS/EXIT_GROUP siblings'
+    // extinction backstop (RW-3 R2-F2): if the "noreturn" ever returns, fail
+    // loud here rather than UB-falling-through into the next dispatch case.
+    extinction("sys_thread_exit returned");
 }
 
 // =============================================================================
@@ -3447,7 +3448,11 @@ static s64 sys_explicit_bzero_handler(u64 buf_va, u64 len) {
     struct Proc *p = t->proc;
     if (!p)                                          return -1;
     if (!sys_validate_user_buf(buf_va, len))         return -1;
-    if (len > SYS_RW_MAX) len = SYS_RW_MAX;
+    // RW-3 R2-F1: reject len > SYS_RW_MAX -- do NOT silently cap. For a secret-
+    // scrub primitive, capping + returning success would silently retain the
+    // tail of the buffer; the libthyla-rs wrapper documents -1 on oversize, and
+    // SYS_PUTS/SYS_READDIR reject oversize the same way.
+    if (len > SYS_RW_MAX)                             return -1;
     if (len == 0)                                    return 0;
 
     for (u64 i = 0; i < len; i++) {

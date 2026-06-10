@@ -85,6 +85,7 @@ below are the v1.0 set; additions append (no renumbering).
 | `T_E_PIPE`      | 32    | `EPIPE`      | Broken pipe (write to closed pipe/socket) |
 | `T_E_RANGE`     | 34    | `ERANGE`     | Numerical result out of range |
 | `T_E_TIMEDOUT`  | 110   | `ETIMEDOUT`  | Operation timed out |
+| `T_E_CANCELED`  | 125   | `ECANCELED`  | Operation canceled (Loom LINK-chain cancel: a CQE for a linked SQE dropped when an earlier link failed) |
 
 The values follow Linux's errno numbering (which musl + glibc agree on
 for AArch64). Pouch's `bits/errno.h` is unchanged; the boundary-line
@@ -112,7 +113,7 @@ fits within `NOTE_NAME_MAX = 16` bytes including the NUL terminator.
 | Name              | Length | POSIX-equiv signal | Cause |
 |---|---|---|---|
 | `snare:segv`      | 10+1   | `SIGSEGV`          | EL0 data/instruction fault on a VA with no covering VMA, or W^X / permission violation |
-| `snare:bus`       | 9+1    | `SIGBUS`           | EL0 data fault on a VA inside a VMA but the underlying Burrow can't satisfy the page (e.g., truncated mmap) |
+| `snare:bus`       | 9+1    | `SIGBUS`           | **RESERVED -- no v1.0 emitter**: a VA-inside-a-VMA-but-Burrow-cannot-satisfy fault would map here, but `arch_fault_handle` returns `FAULT_UNHANDLED_USER` and the EL0 dispatcher posts `snare:segv` (the bus subset is not yet distinguished, like `snare:fpe`). Reserved so callers do not invent a name. |
 | `snare:align`     | 11+1   | `SIGBUS` (subset)  | EL0 PC or SP alignment fault |
 | `snare:bti`       | 9+1    | `SIGILL` (subset)  | EL0 BTI fault (indirect branch to non-`bti j/c/jc` target on FEAT_BTI hardware) |
 | `snare:brk`       | 9+1    | `SIGTRAP`          | EL0 `brk #imm` (assertion / debug trap) |
@@ -121,9 +122,9 @@ fits within `NOTE_NAME_MAX = 16` bytes including the NUL terminator.
 
 The `snare:` prefix is reserved for kernel-synthetic fault notes. User
 processes that want to define their own structured event names should
-NOT use the `snare:` prefix (the kernel asserts on `notes_post` with a
-`snare:`-prefixed `name` from a non-kernel-synthetic caller; see
-`kernel/notes.c::notes_post`).
+NOT use the `snare:` prefix (the kernel rejects, returning -1 from,
+`notes_post` with a `snare:`-prefixed `name` from a non-kernel-synthetic
+caller; see `kernel/notes.c::notes_post`).
 
 **Bit-position assignment in `note_mask`**: each `snare:*` shares the
 existing `NOTE_BIT_*` block (extends with `NOTE_BIT_SNARE`). Setting
@@ -139,23 +140,20 @@ P6-pouch-stratumd-boot 16b-γ-mount-bind hardening pass the kernel
 extincted on EL0 unhandled faults; the change documented here is
 the close of the auditor's #3a recommendation.)
 
-**Multi-thread Proc carve-out** (F8 audit close, v1.0 limitation):
-the "kernel does NOT extinct" promise above applies to single-thread
-Procs. A multi-thread Proc (`thread_count > 1`) that faults DOES
-extinct the kernel with a specific message
-(`EL0 fault in multi-thread Proc (v1.x: cross-thread shootdown)`).
-The reason: `exits(name)` for a Proc with live peer Threads requires
-cross-thread shootdown (Linux's `CLONE_THREAD`-style `exit_group`)
-which is a v1.x extension paired with `SYS_EXIT_GROUP` (see
-CLAUDE.md's "pouch abort -> _Exit override" audit-trigger row).
-`proc_fault_terminate` surfaces the cause clearly via a uart line
-before extincting, so test failures attribute correctly.
-
-This carve-out narrows the contract: at v1.0, the kernel survives
-faults in single-thread Procs (the actual target — stratumd, joey,
-all pouch-hello-* binaries) but not in multi-thread Procs (today only
-`/pouch-hello-threads`; its happy-path doesn't fault). v1.x closes
-the carve-out when `SYS_EXIT_GROUP` lands.
+**Multi-thread Proc fault** (the prior v1.0 carve-out is now CLOSED --
+RW-1 C-F1, commit `2891bf2`): a multi-thread Proc (`thread_count > 1`)
+that faults at EL0 group-terminates the WHOLE Proc -- the kernel does
+NOT extinct. `proc_fault_terminate` posts the `snare:*` cause and
+cascades peer-Thread termination through the `SYS_EXIT_GROUP`
+group-terminate machinery (ARCH 7.9.1 / I-24; the #809 / #811 universal
+death-interruptible-sleep cascade), then the offending Proc dies and the
+kernel keeps serving others. The earlier limitation -- a multi-thread
+fault extincted the kernel with `EL0 fault in multi-thread Proc
+(v1.x: cross-thread shootdown)` -- was retired when `SYS_EXIT_GROUP`
+(syscall 60) landed; that message no longer exists. The single-thread
+and multi-thread fault paths now both terminate only the offending Proc.
+`proc_fault_terminate` still emits the uart diagnostic before
+terminating, so test failures attribute correctly.
 
 ## Exit-status semantics
 

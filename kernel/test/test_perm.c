@@ -26,6 +26,7 @@ void test_perm_check_hostowner_override(void);
 void test_perm_in_group(void);
 void test_perm_want_for_omode(void);
 void test_perm_rights_for_omode(void);
+void test_perm_oexec_no_read_leak(void);
 void test_perm_wstat_policy(void);
 void test_perm_devramfs_enforced_real_metadata(void);
 void test_perm_dev_flags(void);
@@ -141,7 +142,7 @@ void test_perm_want_for_omode(void) {
     TEST_EXPECT_EQ(perm_want_for_omode(0u), PERM_R,            "OREAD -> R");
     TEST_EXPECT_EQ(perm_want_for_omode(1u), PERM_W,            "OWRITE -> W");
     TEST_EXPECT_EQ(perm_want_for_omode(2u), PERM_R | PERM_W,   "ORDWR -> R|W");
-    TEST_EXPECT_EQ(perm_want_for_omode(3u), PERM_X,            "OEXEC -> X");
+    TEST_EXPECT_EQ(perm_want_for_omode(3u), PERM_R | PERM_X,   "OEXEC -> R|X (handle is read-capable; RW-3 R3-F1)");
     TEST_EXPECT_EQ(perm_want_for_omode(0u | 0x10u), PERM_R | PERM_W,
                    "OREAD|OTRUNC -> R|W (truncate writes)");
     TEST_EXPECT_EQ(perm_want_for_omode(1u | 0x10u), PERM_W,
@@ -161,6 +162,37 @@ void test_perm_rights_for_omode(void) {
     // RIGHT_TRANSFER is caller policy (sys_walk_open_handler), never from the map.
     TEST_ASSERT((rights_for_omode(2u) & RIGHT_TRANSFER) == 0,
                 "rights_for_omode never sets TRANSFER");
+}
+
+// RW-3 R3-F1 regression: an OEXEC open mints a RIGHT_READ handle
+// (rights_for_omode), so perm_check on the OEXEC `want` MUST require read --
+// else execute-only (--x) permission yields a read-capable handle, the
+// execute->read leak on the I-22 chokepoint. Fails pre-fix (perm_want_for_omode
+// returned PERM_X, so the x-only file passed and a readable handle was minted).
+void test_perm_oexec_no_read_leak(void) {
+    struct Proc p;
+    unsigned want = perm_want_for_omode(3u);   // OEXEC
+
+    // Owner of an execute-only file (0100 = --x------): pre-fix this passed
+    // (PERM_X satisfied) and the open minted a readable handle; post-fix denied.
+    struct t_stat x_only = mkstat(0100u, 100u, 200u);
+    mkproc(&p, 100u, 999u, CAP_NONE);
+    TEST_EXPECT_EQ(perm_check(&p, &x_only, want), -1,
+                   "OEXEC on an execute-only file is denied (no execute->read leak)");
+
+    // Owner of an r-x file (0500 = r-x------): a normal executable -- OEXEC
+    // allowed (read present, so the read-capable handle is legitimate).
+    struct t_stat rx = mkstat(0500u, 100u, 200u);
+    mkproc(&p, 100u, 999u, CAP_NONE);
+    TEST_EXPECT_EQ(perm_check(&p, &rx, want), 0,
+                   "OEXEC on an r-x file is allowed");
+
+    // Owner of a read-only file (0400 = r--------): read present but no execute
+    // bit -- denied (execute intent unmet; confirms want includes PERM_X).
+    struct t_stat r_only = mkstat(0400u, 100u, 200u);
+    mkproc(&p, 100u, 999u, CAP_NONE);
+    TEST_EXPECT_EQ(perm_check(&p, &r_only, want), -1,
+                   "OEXEC on a read-only file is denied (no execute bit)");
 }
 
 // =============================================================================

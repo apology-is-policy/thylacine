@@ -45,7 +45,12 @@ unsigned perm_want_for_omode(u32 omode) {
         case 0:  want = PERM_R;            break;  // OREAD
         case 1:  want = PERM_W;            break;  // OWRITE
         case 2:  want = PERM_R | PERM_W;   break;  // ORDWR
-        default: want = PERM_X;            break;  // OEXEC (3)
+        // OEXEC mints a RIGHT_READ handle (rights_for_omode below), so the
+        // identity check MUST require read too -- else execute-only (--x)
+        // permission would mint a read-capable handle (RW-3 R3-F1: the
+        // execute->read leak on the I-22 chokepoint). Require read AND execute:
+        // read because the handle reads the file, execute for the open intent.
+        default: want = PERM_R | PERM_X;   break;  // OEXEC (3)
     }
     if (omode & 0x10u) want |= PERM_W;             // OTRUNC truncates -> write
     return want;
@@ -53,11 +58,12 @@ unsigned perm_want_for_omode(u32 omode) {
 
 // rights_for_omode -- map a SYS_WALK_OPEN omode to the handle RIGHT_* envelope
 // (A-3b/F1). Parallel to perm_want_for_omode but in the capability bit-space:
-// the handle's rights must not exceed the access perm_check validated. Note the
-// deliberate divergence at OEXEC -- perm_want_for_omode returns PERM_X (execute
-// is an identity-axis check), but the HANDLE only needs RIGHT_READ to load the
-// binary (there is no RIGHT_EXEC). RIGHT_TRANSFER + the T_OPATH born-R|W base
-// are caller policy (sys_walk_open_handler), NOT derived here.
+// the handle's rights must not exceed the access perm_check validated. OEXEC
+// grants RIGHT_READ (the handle loads the binary via read; there is no
+// RIGHT_EXEC) -- and perm_want_for_omode(OEXEC) accordingly requires PERM_R
+// (RW-3 R3-F1), so the granted right never exceeds the checked access.
+// RIGHT_TRANSFER + the T_OPATH born-R|W base are caller policy
+// (sys_walk_open_handler), NOT derived here.
 rights_t rights_for_omode(u32 omode) {
     rights_t r;
     switch (omode & 0x3u) {

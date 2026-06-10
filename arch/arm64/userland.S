@@ -47,6 +47,21 @@
 userland_enter:
     bti     c
 
+    // RW-3 R1-F1 / I-24: before the FIRST eret to EL0, self-exit if this Proc is
+    // group-terminating (SYS_EXIT_GROUP / kill / legate-scope teardown landing on
+    // a child still in exec_setup). Without this, a group-terminating freshly-
+    // exec'd Proc erets to EL0 and runs its ELF entry until the next trap.
+    // Mirrors thread_user_trampoline (context.S). Park entry_pc/user_sp in
+    // callee-saved x19/x20 -- they survive the C call (el0_return_die_check
+    // clobbers caller-saved x0/x1) AND are zeroed in the GPR sweep below;
+    // userland_enter never returns, so the x19/x20 clobber is sound. If the
+    // check fires it is noreturn (thread_exit_self -> sched), so the die path
+    // NEVER enters the daifset..eret window below (#713-safe) -- it runs here
+    // with IRQs still enabled, before the mask.
+    mov     x19, x0
+    mov     x20, x1
+    bl      el0_return_die_check
+
     // P6 #713: mask ALL of DAIF for the ELR-set..eret window. This
     // function is called from a kthread with IRQs ENABLED; without the
     // mask, an IRQ taken between `msr elr_el1` (below) and `eret` re-enters
@@ -58,10 +73,12 @@ userland_enter:
     // the mask only closes the interruptible kernel-side window.
     msr     daifset, #0xf
 
-    // Park entry_pc (x0) + user_sp (x1) in caller-saved scratch
-    // (x16/x17) so the GPR-zeroing sweep below can clobber x0/x1.
-    mov     x16, x0
-    mov     x17, x1
+    // Move the parked entry_pc (x19) + user_sp (x20) into the x16/x17 scratch
+    // the GPR-zeroing sweep clobbers. (x0/x1 were consumed by the
+    // el0_return_die_check call above; x19/x20 survived it and are themselves
+    // zeroed in the sweep below.)
+    mov     x16, x19
+    mov     x17, x20
 
     // PSTATE for the eret target: EL0t, all DAIF clear.
     msr     elr_el1,  x16            // ELR_EL1 := entry_pc
