@@ -100,15 +100,27 @@ pub extern "C" fn rs_main() -> i64 {
 
     let mut buf = [0u8; 256];
     // U-7c: the shell's own note queue (for `on note` / `mask note` handlers,
-    // delivered at each prompt cycle) is opened LAZILY -- only after the first
-    // successful read proves a real input stream exists. The bare-spawn boot
-    // check has an EMPTY handle table, so `Notes::open_self` would mint the
-    // note fd as fd 0 and the read below would then block on the note queue
-    // instead of EOFing; deferring the open to a confirmed session avoids that
-    // collision (a session `ut` already holds fd 0/1/2 from login, so its note
-    // fd lands at 3+). The cons fd has no `.poll` hook until U-PTY, so notes
-    // stay sync-point delivered -- the note fd is NOT added to this poll set.
-    let mut notes_opened = false;
+    // delivered at each prompt cycle). The cons fd has no `.poll` hook until
+    // U-PTY, so notes stay sync-point delivered -- the note fd is NOT added to
+    // this poll set.
+    //
+    // LS-5 / Holotype RW-0 F1: open it EAGERLY for a real session. A session
+    // `ut` is the console OWNER (LS-5a), so until it is self-managing (has
+    // opened its note queue) an uncaught `interrupt` default-terminates it
+    // (LS-5b/c) -- which means a Ctrl-C at a FRESH prompt, before the first
+    // keystroke, would terminate the shell and log the user out. Opening the
+    // queue here makes the shell self-managing from its very first prompt.
+    // `stdout_is_live()` (a zero-length write to fd 1) is the session-vs-boot-
+    // check discriminator already used for set_stdio_inherit above: login hands
+    // a session `ut` fd 0/1/2 together, so a live fd 1 implies a live fd 0 and
+    // the note fd lands at 3+. The bare-spawn boot check has an EMPTY handle
+    // table + no live fd 1, so we DON'T open (an eager open there would mint the
+    // note fd as fd 0 and the first read would block on the note queue instead
+    // of EOFing) -- and it breaks on the fd-0 read error below before ever
+    // needing notes.
+    if io::stdout_is_live() {
+        repl.open_notes();
+    }
     let exit_code: i32 = loop {
         // A poll error (e.g. no fd 0 on the bare-spawn boot check) is
         // ignored; the read below then surfaces the same EOF/error and
@@ -118,10 +130,6 @@ pub extern "C" fn rs_main() -> i64 {
         match io::stdin().read(&mut buf) {
             Ok(0) | Err(_) => break repl.exit_code(),
             Ok(n) => {
-                if !notes_opened {
-                    repl.open_notes();
-                    notes_opened = true;
-                }
                 if let Some(code) = repl.feed(&buf[..n], &mut out) {
                     break code;
                 }
