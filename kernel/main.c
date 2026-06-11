@@ -100,6 +100,10 @@ static void boot_stack_paint(void) {
     for (u64 *p = lo; p < hi; p++) *p = BOOT_STACK_SENTINEL;
 }
 
+#ifdef KERNEL_TESTS
+// #806 boot-stack high-water probe: only the gated test suite drives the deep
+// stack usage this reports, so it is part of the test scaffolding (#61). The
+// painter above stays unconditional (cheap; harmless in the production shape).
 static void boot_stack_report(void) {
     u64 lo  = (u64)(uintptr_t)_boot_stack_bottom;
     u64 top = (u64)(uintptr_t)_boot_stack_top;
@@ -119,6 +123,7 @@ static void boot_stack_report(void) {
     uart_puthex64(deepest);
     uart_puts("\n");
 }
+#endif /* KERNEL_TESTS */
 
 void boot_main(void);
 
@@ -650,6 +655,7 @@ void boot_main(void) {
     // tested implicitly via the smoke flows so we don't pin
     // ourselves to evolving subsystem layouts. Future host-side
     // sanitizer matrix lands at P1-I.
+#ifdef KERNEL_TESTS
     uart_puts("  tests:\n");
     test_run_all();
     uart_puts("  tests: ");
@@ -674,6 +680,13 @@ void boot_main(void) {
 
     // #806 probe: report the boot-stack high-water left by the suite.
     boot_stack_report();
+#else
+    // Production shape (#61, KERNEL_TESTS=OFF): the in-kernel suite is not
+    // compiled. Emit a one-line marker so a production boot is self-identifying.
+    // The "tests:" PASS line is informational -- only "Thylacine boot OK" + the
+    // "EXTINCTION:" prefix are the binding tooling ABI (TOOLING.md §10).
+    uart_puts("  tests: DISABLED (KERNEL_TESTS=OFF production build)\n");
+#endif
 
     // Wait for ticks to confirm IRQ delivery, then print the count.
     // 5 ticks at 1000 Hz = 5 ms — enough to demonstrate the path is

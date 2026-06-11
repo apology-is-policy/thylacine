@@ -374,17 +374,21 @@ bool sched_in_cpu_tree(unsigned cpu, struct Thread *t) {
     return present;
 }
 
+#ifdef KERNEL_TESTS
+// Test-support accessors (gated by KERNEL_TESTS, #61): the unit suite reads
+// need_resched_pending() to observe the same-CPU wake-preempt path (RW-11
+// SA-1b) and clears it to establish a clean baseline. Production code never
+// calls either -- preemption is driven by sched()'s entry need_resched_clear
+// (R5-H F93) and preempt_check_irq -- so they compile out of the production
+// shape rather than sit dead in the symbol table.
 bool sched_need_resched_pending(unsigned cpu) {
     return need_resched_pending(cpu);
 }
 
-// Test-support (RW-11 SA-1b): clear a CPU's need_resched so a unit test can
-// establish a clean baseline before exercising the same-CPU wake-preempt path
-// (whose observable is need_resched_pending). Pairs with the diagnostic above;
-// production code clears via sched()'s entry (R5-H F93) and preempt_check_irq.
 void sched_clear_need_resched_for_test(unsigned cpu) {
     need_resched_clear(cpu);
 }
+#endif /* KERNEL_TESTS */
 
 void sched_set_idle_in_wfi(bool in_wfi) {
     unsigned idx = smp_cpu_idx_self();

@@ -63,6 +63,8 @@
 #   --hardening-full Enable P1-H hardening flags.
 #   --kaslr          Enable KASLR.
 #   --sanitize=ubsan UBSan kernel build (separate build dir).
+#   --production     V1.0 lean boot shape: drop the in-kernel test suite
+#                    (KERNEL_TESTS=OFF) + joey's boot-test probe ladder (#61).
 #   --verbose        Verbose CMake/Cargo output.
 
 set -euo pipefail
@@ -93,6 +95,9 @@ build_type="Debug"
 hardening_full="OFF"
 kaslr="OFF"
 sanitize=""
+# #61 (RW-11 R4-F1): production boot shape. ON (default) keeps the in-kernel
+# test suite (dev/CI); --production flips it OFF for the lean V1.0 kernel.
+kernel_tests="ON"
 build_dir_override=""
 verbose=""
 extra_cmake_args=()
@@ -109,6 +114,13 @@ while [[ $# -gt 0 ]]; do
             ;;
         --kaslr)
             kaslr="ON"
+            shift
+            ;;
+        --production)
+            # #61 (RW-11 R4-F1/F2): the V1.0 production boot shape. Drops the
+            # in-kernel test suite (KERNEL_TESTS=OFF). #61b extends this same flag
+            # to gate joey's boot-test probe ladder (THYLA_BOOT_PROBES=OFF).
+            kernel_tests="OFF"
             shift
             ;;
         --sanitize=*)
@@ -209,20 +221,21 @@ stratum_host_tools_stale() {
 }
 
 build_kernel() {
-    echo "==> Building kernel (build_type=$build_type, hardening=$hardening_full, kaslr=$kaslr, sanitize='${sanitize_cmake}', dir=$KERNEL_BUILD)"
+    echo "==> Building kernel (build_type=$build_type, hardening=$hardening_full, kaslr=$kaslr, sanitize='${sanitize_cmake}', tests=$kernel_tests, dir=$KERNEL_BUILD)"
     cmake -S "$REPO_ROOT" -B "$KERNEL_BUILD" \
         -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN_FILE" \
         -DCMAKE_BUILD_TYPE="$build_type" \
         -DTHYLACINE_HARDENING_FULL="$hardening_full" \
         -DTHYLACINE_KASLR="$kaslr" \
         -DTHYLACINE_SANITIZE="$sanitize_cmake" \
+        -DKERNEL_TESTS="$kernel_tests" \
         ${extra_cmake_args[@]+"${extra_cmake_args[@]}"}
     cmake --build "$KERNEL_BUILD" $verbose
     # HX-2: bake the live symbol table from the linked ELF + re-link (two-pass;
     # shared with tools/test-fault.sh so every dump path is symbolized).
     "$REPO_ROOT/tools/regen-halls-symtab.sh" "$KERNEL_BUILD" "$verbose"
     echo "==> Kernel built: $KERNEL_BUILD/thylacine.elf"
-    ledger "kernel ELF: BUILT ($build_type, hardening=$hardening_full, kaslr=$kaslr, sanitize='${sanitize_cmake:-none}')"
+    ledger "kernel ELF: BUILT ($build_type, hardening=$hardening_full, kaslr=$kaslr, sanitize='${sanitize_cmake:-none}', tests=$kernel_tests)"
     ls -la "$KERNEL_BUILD/thylacine.elf"
 
     # P4-E: build the ramfs cpio alongside the kernel so QEMU's

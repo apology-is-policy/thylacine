@@ -6,6 +6,17 @@
 # Per ROADMAP.md §4 (Phase 1): kernel skeleton. P1-A produces the minimal boot
 # stub; subsequent sub-chunks add MMU, KASLR, allocator, etc.
 
+# KERNEL_TESTS (#61, RW-11 R4-F1): the production boot shape. ON (default) keeps
+# the in-kernel test suite -- test/*.c compiled + g_tests[] run at boot by
+# test_run_all() (kernel/main.c) -- which is the dev/CI shape every gate depends
+# on. OFF excludes test/*.c entirely and (via the KERNEL_TESTS compile define)
+# skips the boot-time test_run_all() + the boot-stack-report probe, yielding the
+# lean production kernel the V1.0 boot-time budget targets. Set OFF by
+# tools/build.sh --production (which flips the joey THYLA_BOOT_PROBES gate in
+# lockstep). Collides with nothing in ARCHITECTURE.md §28: it gates only test
+# scaffolding, never a real boot-ordering step or an invariant-bearing path.
+option(KERNEL_TESTS "Compile + run the in-kernel test suite at boot" ON)
+
 set(KERNEL_SRCS
     main.c
     extinction.c
@@ -39,39 +50,6 @@ set(KERNEL_SRCS
     ../mm/magazines.c
     ../mm/phys.c
     ../mm/slub.c
-    test/test.c
-    test/test_kaslr.c
-    test/test_dtb.c
-    test/test_phys.c
-    test/test_slub.c
-    test/test_gic.c
-    test/test_timer.c
-    test/test_hardening.c
-    test/test_alternatives.c
-    test/test_context.c
-    test/test_fp.c
-    test/test_sched.c
-    test/test_rendez.c
-    test/test_tsleep.c
-    test/test_smp.c
-    test/test_proc.c
-    test/test_proc_identity.c
-    test/test_territory.c
-    test/test_territory_mount.c
-    test/test_territory_chroot.c
-    test/test_handle.c
-    test/test_burrow.c
-    test/test_elf.c
-    test/test_asid.c
-    test/test_directmap.c
-    test/test_proc_pgtable.c
-    test/test_fault_decode.c
-    test/test_halls.c
-    test/test_vma.c
-    test/test_burrow_map_proc.c
-    test/test_demand_page.c
-    test/test_exec.c
-    test/test_syscall.c
     territory.c
     handle.c
     burrow.c
@@ -118,6 +96,46 @@ set(KERNEL_SRCS
     torpor.c
     notes.c
     devnotes.c
+)
+
+# The in-kernel test suite (gated by KERNEL_TESTS). Every test/*.c registers
+# into g_tests[]; test_run_all() (kernel/main.c) executes them at boot. Kept in
+# its own list so the production shape (KERNEL_TESTS=OFF) drops the whole suite
+# from the link without touching the production source list above.
+set(KERNEL_TEST_SRCS
+    test/test.c
+    test/test_kaslr.c
+    test/test_dtb.c
+    test/test_phys.c
+    test/test_slub.c
+    test/test_gic.c
+    test/test_timer.c
+    test/test_hardening.c
+    test/test_alternatives.c
+    test/test_context.c
+    test/test_fp.c
+    test/test_sched.c
+    test/test_rendez.c
+    test/test_tsleep.c
+    test/test_smp.c
+    test/test_proc.c
+    test/test_proc_identity.c
+    test/test_territory.c
+    test/test_territory_mount.c
+    test/test_territory_chroot.c
+    test/test_handle.c
+    test/test_burrow.c
+    test/test_elf.c
+    test/test_asid.c
+    test/test_directmap.c
+    test/test_proc_pgtable.c
+    test/test_fault_decode.c
+    test/test_halls.c
+    test/test_vma.c
+    test/test_burrow_map_proc.c
+    test/test_demand_page.c
+    test/test_exec.c
+    test/test_syscall.c
     test/test_dev.c
     test/test_trivial_devs.c
     test/test_devproc.c
@@ -208,6 +226,18 @@ endif()
 set(KERNEL_LD_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/../arch/arm64/kernel.ld)
 
 add_executable(thylacine.elf ${KERNEL_SRCS} ${HALLS_SYMTAB_GEN})
+
+# The in-kernel test suite is opt-in (ON by default). When ON, the test sources
+# join the link and KERNEL_TESTS is defined so kernel/main.c runs test_run_all()
+# + boot_stack_report() and sched.c compiles its test-only accessors. When OFF
+# (tools/build.sh --production), none of that scaffolding is compiled.
+if(KERNEL_TESTS)
+    target_sources(thylacine.elf PRIVATE ${KERNEL_TEST_SRCS})
+    target_compile_definitions(thylacine.elf PRIVATE KERNEL_TESTS)
+    message(STATUS "Kernel: in-kernel test suite ENABLED (KERNEL_TESTS=ON)")
+else()
+    message(STATUS "Kernel: production shape -- in-kernel test suite DISABLED (KERNEL_TESTS=OFF)")
+endif()
 
 target_include_directories(thylacine.elf
     PRIVATE

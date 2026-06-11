@@ -4,13 +4,18 @@
 # Per ARCHITECTURE.md §3: real build system is CMake (kernel) + Cargo (Rust).
 # This Makefile is just for muscle memory (`make kernel`, `make test`, etc.).
 
-.PHONY: all kernel sysroot userspace disk pool clean test test-tcg test-cross-reboot test-interactive smp-gate run run-tcg gdb specs help
+.PHONY: all kernel production sysroot userspace disk pool clean test test-tcg test-cross-reboot test-interactive smp-gate run run-tcg gdb specs help
 
 all:
 	@tools/build.sh all
 
 kernel:
 	@tools/build.sh kernel
+
+# #61: the V1.0 lean production image -- no in-kernel test suite, no joey
+# boot-test probe ladder. Boots straight to the login getty.
+production:
+	@tools/build.sh all --production
 
 sysroot:
 	@tools/build.sh sysroot

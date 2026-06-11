@@ -244,16 +244,21 @@ bool sched_wake_preempts(u32 woken_band, u32 cur_band, bool cur_is_idle);
 // ready_on enqueue test to prove placement landed on the intended CPU.
 bool sched_in_cpu_tree(unsigned cpu, struct Thread *t);
 
-// Diagnostic (HMP tests, #866 F1): true iff `cpu`'s need-resched (preempt-
-// pending) flag is set. The cross-CPU ready_on enqueue test asserts this is set
-// on the target after a cross-CPU placement -- proving the placed thread will
-// be reconsidered at the target's next preempt_check_irq rather than waiting a
-// full slice (the I-17/I-8 leak the #864 audit found and F1 fixes).
+// Test-support accessors (gated by KERNEL_TESTS, #61): both are exercised only
+// by the in-kernel suite, so they share the build-shape gate with their .c
+// definitions.
+//   - sched_need_resched_pending (HMP tests, #866 F1): true iff `cpu`'s
+//     need-resched flag is set. The cross-CPU ready_on enqueue test asserts it
+//     is set on the target after a cross-CPU placement -- proving the placed
+//     thread is reconsidered at the next preempt_check_irq rather than waiting a
+//     full slice (the I-17/I-8 leak the #864 audit found and F1 fixes).
+//   - sched_clear_need_resched_for_test (RW-11 SA-1b): clears a CPU's
+//     need_resched so a unit test can establish a clean baseline before
+//     exercising the same-CPU wake-preempt path.
+#ifdef KERNEL_TESTS
 bool sched_need_resched_pending(unsigned cpu);
-
-// Test-support (RW-11 SA-1b): clear a CPU's need_resched so a unit test can
-// establish a clean baseline before exercising the same-CPU wake-preempt path.
 void sched_clear_need_resched_for_test(unsigned cpu);
+#endif /* KERNEL_TESTS */
 
 // Diagnostic accessors.
 unsigned sched_runnable_count(void);
