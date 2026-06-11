@@ -6,16 +6,19 @@ coreutils sample; all `claude-fable-5`, MODEL start==end on all four -- no
 fallback) + an Opus seam self-audit. Closed list:
 `memory/audit_holotype_rw9_closed_list.md`.
 
-**Status: IN PROGRESS (dirty close, converging) -- round-2 caught + fixed an
-incomplete recursion bound; round-3 in flight.** Round-1: 1 P1 + 11 P2 + ~22
-P3 -- by far the most findings of any RW round. The P1 + 10 of the 11 P2 are
-fixed + committed (`07a27c9` recursion + command-sub hang, `c1aea9d` + `dcc4d08`
-coreutils, `cd7eae2` notes/Ctrl-C); the 11th P2 (R3-F2 multi-line render) is
-REGISTERED with justification (cosmetic + invasive + no screen-state harness).
-Round-2 (mandatory dirty-close re-audit) returned 1 P2 + 1 P3 -- it caught that
-the round-1 recursion fix bounded brackets but NOT expression-operator
-recursion (RND2-F1); fixed `@aae24db` + a self-audit P3. Round-3 re-prosecutes
-the F1 fix before the clean close (see "Round-2 + round-3").
+**Status: CLOSED (dirty close, CONVERGED CLEAN over 3 rounds).** Round-1: 1 P1
++ 11 P2 + ~22 P3 -- by far the most findings of any RW round. The P1 + 10 of
+the 11 P2 fixed + committed (`07a27c9` recursion + command-sub hang, `c1aea9d`
++ `dcc4d08` coreutils, `cd7eae2` notes/Ctrl-C); the 11th P2 (R3-F2 multi-line
+render) REGISTERED with justification. The mandatory dirty-close round-2 (Fable,
+MODEL start==end) caught that the round-1 recursion fix bounded brackets but NOT
+expression-operator recursion (RND2-F1 P2) + a tr P3 + a self-audit P3 -- all
+fixed `@aae24db` with non-vacuous regressions. Round-3 (Fable, MODEL start==end)
+re-prosecuted the F1 fix by exhaustive call-graph enumeration and returned
+**CLEAN 0/0/0/0** with a firm completeness verdict (`parse_unary` + `parse_pow`
+ARE the only unbounded operator vectors). A clean close via 3 rounds is still
+clean -- the discipline doing its job. Verified: default boot OK + u-subst-test
+14/14 + coreutil-smoke 42/42 + 0 EXTINCTION; SMP gate PASS 0 corruption.
 
 ## The soundness model for this surface
 
