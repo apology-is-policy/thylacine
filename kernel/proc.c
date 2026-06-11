@@ -945,42 +945,45 @@ void proc_console_sak(void) {
     bool trusted_live = trusted && trusted->magic == PROC_MAGIC
                         && trusted->state == PROC_STATE_ALIVE;
 
-    // Idempotent under a BREAK flood: if the trusted login authority already
-    // holds the console, the SAK is a no-op -- no spurious revoke / re-grant /
-    // note. (This is also the only path on which owner == trusted, so the steps
-    // below never revoke-then-re-grant the same Proc.)
-    if (trusted_live && owner == trusted) {
+    // Idempotent under a BREAK flood: once the trusted login authority is the
+    // sole console authority (console-attached) and no owner remains to revoke,
+    // a repeat SAK is a no-op. RW-7 R2-F1: post-fix the trusted Proc is
+    // attach-only and is NEVER the console OWNER, so the prior `owner == trusted`
+    // guard could no longer fire -- this is its replacement.
+    if (trusted_live && owner == NULL && proc_is_console_attached(trusted)) {
         spin_unlock_irqrestore(&g_proc_table_lock, s);
         return;
     }
 
-    // (1) Revoke the console-attach bit from the current owner + post it a
-    // notify note (a foreground app learns it lost the console). Guarded on a
-    // live owner: after the owner exited, proc_become_zombie_locked already
-    // cleared the pointer, so there is nothing to revoke. The note reuses the
-    // existing `interrupt` name (the closed notes table -- notes.c -- has no
-    // dedicated "console-revoked"/"hangup" name; a distinct name is a v1.x notes
-    // SEAM, additive when a consumer needs to tell SAK-revoke from Ctrl-C). At
-    // v1.0 the owner is joey, whose fd 0 is a pipe/cap, not /dev/cons -- the note
-    // is a courtesy with no behavioral consumer yet.
+    // (1) Revoke the console-attach bit from the current owner. RW-7 R2-F2: post
+    // NO note here. Reusing `interrupt` to mean "you lost the console" was a
+    // benign courtesy BEFORE LS-5; LS-5 made `interrupt` a real
+    // terminate-if-uncaught note, so posting it to the old owner TERMINATES a
+    // non-self-managing owner (joey during bringup -> init dies) or spuriously
+    // kills a session shell's foreground command. SAK-revoke needs its OWN note
+    // name (a dedicated `hangup` / `console-revoked`; RW-7 R2-F3, a v1.x notes
+    // SEAM) -- until then, the attach-bit revoke is the SAK's observable effect
+    // on the old owner (it loses elevation authority). Guarded on a live owner:
+    // after the owner exited, proc_become_zombie_locked already cleared it.
     if (owner && owner->magic == PROC_MAGIC && owner->state == PROC_STATE_ALIVE) {
         proc_revoke_console_attached(owner);
-        notes_post(owner, "interrupt", 0u, NULL, true);
-        // LS-5c: same conditional wake as proc_console_post_interrupt -- a
-        // blocked non-self-managing revoked owner unwinds + terminates rather
-        // than sleeping through the revocation note. g_proc_table_lock held.
-        proc_interrupt_terminate_wake(owner);
     }
 
-    // (2) Re-grant the console to the trusted login authority and make it the
-    // owner. FAIL-SAFE: with no trusted Proc alive, revoke-only (owner = NULL) --
-    // no Proc can redeem CAP_HOSTOWNER / a clearance (the devcap redeem gate keys
-    // on PROC_FLAG_CONSOLE_ATTACHED) until a trusted login claims the console.
+    // (2) Re-grant the console-ATTACH (elevation authority) to the trusted login
+    // authority, but do NOT make it the console OWNER. RW-7 R2-F1: owner and
+    // attach are DISTINCT roles post-LS-5 -- the OWNER is the `interrupt`
+    // (Ctrl-C) target; the ATTACH gates SAK/elevation redemption (the devcap
+    // gate keys on PROC_FLAG_CONSOLE_ATTACHED). corvus is the login AUTHORITY,
+    // never a Ctrl-C target; making it the owner meant a Ctrl-C after SAK posted
+    // `interrupt` to corvus, arming its terminate latch (non-self-managing) and
+    // killing the trusted path until reboot. The Ctrl-C owner is re-established
+    // when login spawns the session shell (SPAWN_PERM_CONSOLE_OWNER); during the
+    // login window there is no foreground terminate target. FAIL-SAFE: with no
+    // trusted Proc alive, the attach is simply not granted -- no Proc can redeem
+    // elevation until a trusted login claims the console.
+    g_console_owner = NULL;
     if (trusted_live) {
         proc_mark_console_attached(trusted);   // atomic OR; trusted ALIVE-checked
-        g_console_owner = trusted;
-    } else {
-        g_console_owner = NULL;
     }
     spin_unlock_irqrestore(&g_proc_table_lock, s);
 }

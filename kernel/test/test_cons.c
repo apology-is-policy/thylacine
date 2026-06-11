@@ -52,6 +52,7 @@ void test_cons_sak_revoke_regrant(void);
 void test_cons_sak_failsafe_revoke_only(void);
 void test_cons_sak_idempotent_flood(void);
 void test_cons_sak_via_console_mgr(void);
+void test_cons_sak_does_not_terminate_trusted(void);
 void test_proc_console_relinquish(void);              // A-5a (I-27)
 void test_proc_console_relinquish_other_owner(void);  // A-5a (self-only)
 void test_cons_console_open(void);                    // A-5a (SYS_CONSOLE_OPEN)
@@ -373,10 +374,12 @@ void test_cons_console_open(void) {
     proc_free(p);
 }
 
-// A-4c-2 SAK core: a recognized BREAK revokes the console from the current owner
-// (+ notifies it) and re-grants it to the trusted login authority, which becomes
-// the new owner. proc_console_sak is invoked DIRECTLY (the console_mgr dispatch
-// is straight-line; the cons_rx_input -> sak-pending half is cons.break_sets_sak)
+// A-4c-2 SAK core (RW-7 R2-F1/F2 update): a recognized BREAK revokes the console
+// ATTACH from the current owner and re-grants the ATTACH to the trusted login
+// authority -- WITHOUT making it the owner and WITHOUT posting a note. owner
+// (the Ctrl-C target) and attach (the elevation authority) are distinct roles
+// post-LS-5. proc_console_sak is invoked DIRECTLY (the console_mgr dispatch is
+// straight-line; the cons_rx_input -> sak-pending half is cons.break_sets_sak)
 // so the transition is deterministic under the UP-like test scheduler.
 void test_cons_sak_revoke_regrant(void) {
     struct Proc *owner   = proc_alloc();
@@ -397,16 +400,13 @@ void test_cons_sak_revoke_regrant(void) {
     proc_console_sak();
 
     TEST_ASSERT(!proc_is_console_attached(owner), "SAK revoked the old owner's console bit");
-    TEST_ASSERT(proc_is_console_attached(trusted), "SAK granted the trusted Proc the console bit");
-    TEST_EXPECT_EQ(proc_test_console_owner(), trusted, "trusted is the new console owner");
-    TEST_EXPECT_EQ(owner->notes->count, 1u, "the revoked owner got a notify note");
-
-    struct Note got;
-    spin_lock(&owner->notes->lock);
-    int popped = notes_dequeue_locked(owner, NULL, &got);
-    spin_unlock(&owner->notes->lock);
-    TEST_EXPECT_EQ(popped, 1, "dequeued the notify note");
-    TEST_ASSERT(name_eq(got.name, "interrupt"), "the notify note is `interrupt`");
+    TEST_ASSERT(proc_is_console_attached(trusted), "SAK granted the trusted Proc the console attach");
+    // RW-7 R2-F1: the trusted Proc is attach-only -- NOT the console owner.
+    TEST_EXPECT_EQ(proc_test_console_owner(), (struct Proc *)NULL,
+                   "SAK leaves the owner NULL (trusted is the elevation authority, not a Ctrl-C target)");
+    // RW-7 R2-F2: SAK posts NO note -- `interrupt` is now a terminate note, so
+    // the old benign courtesy post would kill a non-self-managing owner.
+    TEST_EXPECT_EQ(owner->notes->count, 0u, "SAK posts no note to the revoked owner");
 
     // Clear the pointers BEFORE freeing so neither dangles.
     proc_set_console_owner(NULL);
@@ -435,32 +435,36 @@ void test_cons_sak_failsafe_revoke_only(void) {
     TEST_ASSERT(!proc_is_console_attached(owner), "SAK revoked the owner's console bit");
     TEST_EXPECT_EQ(proc_test_console_owner(), (struct Proc *)NULL,
                    "fail-safe: owner cleared to NULL (revoke-only)");
-    TEST_EXPECT_EQ(owner->notes->count, 1u, "the revoked owner got a notify note");
+    TEST_EXPECT_EQ(owner->notes->count, 0u, "RW-7 R2-F2: SAK posts no note to the revoked owner");
 
     proc_set_console_owner(NULL);
     owner->state = PROC_STATE_ZOMBIE;                    // proc_free requires ZOMBIE
     proc_free(owner);
 }
 
-// A-4c-2 SAK idempotency: if the trusted authority already holds + owns the
-// console, a SAK (and a BREAK flood) is a no-op -- no spurious revoke / re-grant
-// / note.
+// A-4c-2 SAK idempotency (RW-7 R2-F1 update): once the trusted login authority
+// is the sole console authority (attached) and no owner remains to revoke, a SAK
+// (and a BREAK flood) is a no-op -- no spurious re-grant / revoke / note. (The
+// pre-fix premise "trusted already OWNS the console" is gone: post-R2-F1 trusted
+// is attach-only and is never the owner.)
 void test_cons_sak_idempotent_flood(void) {
     struct Proc *trusted = proc_alloc();
     TEST_ASSERT(trusted != NULL, "proc_alloc trusted");
     TEST_ASSERT(trusted->notes != NULL, "trusted has a note queue");
     trusted->state = PROC_STATE_ALIVE;
 
+    // The post-SAK steady state: trusted is attach-only, no console owner.
     proc_mark_console_attached(trusted);
-    proc_set_console_owner(trusted);           // trusted already owns the console
+    proc_set_console_owner(NULL);
     proc_set_console_trusted(trusted);
 
-    proc_console_sak();                         // owner == trusted -> no-op
+    proc_console_sak();                         // already in the idempotent state -> no-op
     proc_console_sak();                         // flood: still a no-op
 
-    TEST_ASSERT(proc_is_console_attached(trusted), "trusted retains the console (idempotent)");
-    TEST_EXPECT_EQ(proc_test_console_owner(), trusted, "trusted remains the console owner");
-    TEST_EXPECT_EQ(trusted->notes->count, 0u, "no spurious notify note on a no-op SAK");
+    TEST_ASSERT(proc_is_console_attached(trusted), "trusted retains the console attach (idempotent)");
+    TEST_EXPECT_EQ(proc_test_console_owner(), (struct Proc *)NULL,
+                   "owner stays NULL (trusted is attach-only, never the Ctrl-C owner)");
+    TEST_EXPECT_EQ(trusted->notes->count, 0u, "no spurious note on a no-op SAK");
 
     proc_set_console_owner(NULL);
     proc_set_console_trusted(NULL);
@@ -500,8 +504,9 @@ void test_cons_sak_via_console_mgr(void) {
     TEST_ASSERT(!cons_test_sak_pending(), "console_mgr consumed sak-pending");
     TEST_ASSERT(!proc_is_console_attached(owner), "console_mgr SAK revoked the owner");
     TEST_ASSERT(proc_is_console_attached(trusted), "console_mgr SAK re-granted the trusted Proc");
-    TEST_EXPECT_EQ(proc_test_console_owner(), trusted, "trusted is the new console owner");
-    TEST_EXPECT_EQ(owner->notes->count, 1u, "the revoked owner got a notify note");
+    TEST_EXPECT_EQ(proc_test_console_owner(), (struct Proc *)NULL,
+                   "RW-7 R2-F1: SAK leaves the owner NULL (trusted is attach-only)");
+    TEST_EXPECT_EQ(owner->notes->count, 0u, "RW-7 R2-F2: SAK posts no note");
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "console_mgr re-SLEEPING after the SAK");
 
     proc_set_console_owner(NULL);
@@ -510,4 +515,64 @@ void test_cons_sak_via_console_mgr(void) {
     trusted->state = PROC_STATE_ZOMBIE;
     proc_free(owner);
     proc_free(trusted);
+}
+
+// RW-7 R2: read the LS-5 terminate latch (the `interrupt`-default-terminate
+// disposition arms PROC_FLAG_INTR_TERMINATE_PENDING; proc.c's
+// proc_intr_terminate_pending reads the same bit).
+static bool intr_latch(struct Proc *p) {
+    return (__atomic_load_n(&p->proc_flags, __ATOMIC_RELAXED)
+            & PROC_FLAG_INTR_TERMINATE_PENDING) != 0;
+}
+
+// RW-7 R2-F1/F2 regression (the trusted-login-authority survival test): SAK
+// separates the console OWNER (the Ctrl-C target) from the trusted login
+// authority (the elevation/attach role). Pre-fix, SAK made the trusted Proc the
+// OWNER and posted it `interrupt`, so (F2) the SAK armed the OLD owner's LS-5
+// terminate latch, and (F1) a Ctrl-C AFTER the SAK posted `interrupt` to the
+// trusted login authority (corvus), arming ITS latch -> the trusted path died
+// until reboot. Post-fix the SAK grants only the ATTACH, leaves the owner NULL,
+// and posts no note -- so neither the old owner nor the trusted authority is
+// terminated.
+void test_cons_sak_does_not_terminate_trusted(void) {
+    struct Proc *owner   = proc_alloc();
+    struct Proc *trusted = proc_alloc();
+    struct Proc *control = proc_alloc();   // latch-mechanism positive control
+    TEST_ASSERT(owner && trusted && control, "proc_alloc owner + trusted + control");
+    TEST_ASSERT(owner->notes != NULL, "owner has a note queue");
+    owner->state = trusted->state = control->state = PROC_STATE_ALIVE;
+
+    // Positive control: a bare `interrupt` post to a non-self-managing Proc with
+    // no handler arms the LS-5 terminate latch -- proving the latch mechanism is
+    // LIVE in this harness, so the "no latch" assertions below are non-vacuous.
+    notes_post(control, "interrupt", 0u, NULL, true);
+    TEST_ASSERT(intr_latch(control),
+                "control: interrupt to a bare Proc arms the terminate latch");
+
+    proc_mark_console_attached(owner);
+    proc_set_console_owner(owner);
+    proc_set_console_trusted(trusted);
+
+    proc_console_sak();
+
+    // R2-F1: trusted gets the ATTACH but is NOT the console owner.
+    TEST_ASSERT(proc_is_console_attached(trusted), "SAK granted trusted the console attach");
+    TEST_EXPECT_EQ(proc_test_console_owner(), (struct Proc *)NULL,
+                   "SAK leaves the owner NULL (trusted is attach-only)");
+    // R2-F2: the SAK posted no `interrupt`, so the old owner is NOT terminated.
+    TEST_ASSERT(!intr_latch(owner), "SAK did not arm the OLD owner's terminate latch");
+    TEST_EXPECT_EQ(owner->notes->count, 0u, "SAK posted no note to the owner");
+
+    // R2-F1 crux: a Ctrl-C after SAK targets g_console_owner (now NULL) -- NOT
+    // corvus -- so the trusted login authority survives.
+    proc_console_post_interrupt();
+    TEST_ASSERT(!intr_latch(trusted),
+                "Ctrl-C after SAK does NOT terminate the trusted login authority");
+
+    proc_set_console_owner(NULL);
+    proc_set_console_trusted(NULL);
+    owner->state = trusted->state = control->state = PROC_STATE_ZOMBIE;
+    proc_free(owner);
+    proc_free(trusted);
+    proc_free(control);
 }
