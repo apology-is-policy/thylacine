@@ -202,8 +202,12 @@ fn eval_block_inner(env: &mut Env, stmts: &[Statement]) -> EvalResult<StatementF
         // a called function / sourced / eval'd sub-script) unwinds the
         // whole statement stack: short-circuit to Return so every
         // enclosing block / loop / function returns, and the top-level
-        // driver reads `env.exit_requested()` to terminate (U-6e-a).
-        if env.exit_requested().is_some() {
+        // driver reads `env.exit_requested()` to terminate (U-6e-a). A
+        // terminate-intent interrupt (Ctrl-C in a runaway loop, R2-F3)
+        // unwinds the same way -- it propagates across function-call
+        // boundaries here, where a loop-local Break could not -- and the
+        // REPL clears it via `take_interrupt()` after the command unwinds.
+        if env.exit_requested().is_some() || env.interrupt_pending() {
             return Ok(StatementFlow::Return);
         }
         match flow {
@@ -1758,7 +1762,18 @@ fn eval_if(env: &mut Env, stmt: &IfStmt) -> EvalResult<StatementFlow> {
 }
 
 fn eval_while(env: &mut Env, stmt: &WhileStmt) -> EvalResult<StatementFlow> {
+    let mut tick: u32 = 0;
     loop {
+        // R2-F3: a loop whose body never blocks in a foreground wait (pure
+        // shell eval -- `while (1==1) { }`) would otherwise never observe a
+        // Ctrl-C `interrupt` note; poll the queue every LOOP_INTERRUPT_STRIDE
+        // iterations and unwind to the prompt on one. A body that DOES run a
+        // foreground command is already interruptible via the command's
+        // wait_pids_interruptible, so this only governs the no-child case.
+        if tick % LOOP_INTERRUPT_STRIDE == 0 && poll_loop_interrupt(env) {
+            return Ok(StatementFlow::Return);
+        }
+        tick = tick.wrapping_add(1);
         let cond_v = eval_expr(env, &stmt.cond)?;
         if !cond_v.is_truthy() {
             break;
@@ -1779,7 +1794,13 @@ fn eval_for(env: &mut Env, stmt: &ForStmt) -> EvalResult<StatementFlow> {
     // needs &mut env, but we'd otherwise hold an immutable borrow
     // via list_v.0).
     let elements: Vec<String> = list_v.0.clone();
+    let mut tick: u32 = 0;
     for el in elements {
+        // R2-F3: same strided terminate-intent interrupt poll as eval_while.
+        if tick % LOOP_INTERRUPT_STRIDE == 0 && poll_loop_interrupt(env) {
+            return Ok(StatementFlow::Return);
+        }
+        tick = tick.wrapping_add(1);
         env.let_set(stmt.var_name.clone(), Value::scalar(el));
         match eval_block(env, &stmt.body)? {
             StatementFlow::Normal | StatementFlow::Continue => continue,
@@ -1941,6 +1962,50 @@ pub fn deliver_pending_notes(env: &mut Env) {
         }
     }
     env.status_set(saved_status);
+}
+
+/// How often (in iterations) `eval_while` / `eval_for` poll the note queue for
+/// a terminate-intent interrupt (R2-F3). A strided poll keeps a hot pure-eval
+/// loop from paying a `try_read` syscall every iteration while bounding Ctrl-C
+/// latency to a handful of iterations -- microseconds for the tight-loop case
+/// the fix targets.
+const LOOP_INTERRUPT_STRIDE: u32 = 128;
+
+/// Non-blocking poll of the shell's note queue for a pending `interrupt`
+/// during a long-running shell-eval loop (R2-F3 / scripture 10.2). Returns
+/// true (and latches `env.set_interrupt()`) when a terminate-intent
+/// `interrupt` is queued, so the loop unwinds to the prompt. Non-interrupt
+/// notes read past while looking are DEFERRED (`env.defer_note`) -- so an
+/// `on note` handler still fires at the post-command drain and a `child_exit`
+/// is not lost -- mirroring `drain_fg_wait_notes`. No-op (false) when the note
+/// fd is closed (host tests / pre-`open_notes`): nothing posts a console
+/// interrupt there, and `try_read` would have no queue to read.
+fn poll_loop_interrupt(env: &mut Env) -> bool {
+    if env.interrupt_pending() {
+        return true;
+    }
+    if env.notes().is_none() {
+        return false;
+    }
+    loop {
+        // The immutable borrow for `notes()` ends with `try_read`; `note` is
+        // owned, freeing `env` for `defer_note` / `set_interrupt`.
+        let next = match env.notes() {
+            Some(n) => n.try_read(),
+            None => return false,
+        };
+        match next {
+            Ok(Some(note)) => {
+                if note.name == "interrupt" {
+                    env.set_interrupt();
+                    return true;
+                }
+                env.defer_note(note);
+            }
+            // Empty / masked-only queue or a transient read error -> no interrupt.
+            _ => return false,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------

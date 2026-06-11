@@ -144,6 +144,15 @@ impl Repl {
                     // The user pressed Enter; move the terminal past the
                     // edited line before any eval output or the next prompt.
                     let _ = out.write_all(b"\r\n");
+                    // R3-F1: drain notes BEFORE evaluating the line. A Ctrl-C
+                    // pressed while idle at the prompt queues an `interrupt`
+                    // note; left in the queue, the next command's
+                    // wait_pids_interruptible would forward that stale note to
+                    // the just-spawned child and spuriously kill it. Draining
+                    // here fires any `on note` handler for the idle note and
+                    // discards an unhandled idle interrupt (benign at a sync
+                    // point), so the new command starts from a clean queue.
+                    self.deliver_notes();
                     if !line.trim().is_empty() {
                         self.editor.push_history(line.clone());
                     }
@@ -226,6 +235,13 @@ impl Repl {
             msg.push_str("\r\n");
             let _ = out.write_all(msg.as_bytes());
             let _ = out.flush();
+        }
+        // R2-F3: a Ctrl-C that broke a runaway loop set the one-shot
+        // interrupt flag, which unwound the eval to here. Clear it so the
+        // next command starts clean, and report it in $status (130 = 128 +
+        // interrupt, the shell convention).
+        if self.env.take_interrupt() {
+            self.env.status_set(130);
         }
     }
 

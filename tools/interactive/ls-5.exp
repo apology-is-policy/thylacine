@@ -26,25 +26,27 @@ source [file join [file dirname [info script]] lib.exp]
 lc_boot
 lc_login michael correct-horse-battery-staple-v1
 
-# (A) Fresh-prompt Ctrl-C -- the RW-0 F1 regression. No command has run, so the
-# shell has not been nudged into anything by a prior keystroke. Post-fix the
-# shell is self-managing from the first prompt and survives; the probe runs.
+# (A) Fresh-prompt Ctrl-C -- the RW-0 F1 + RW-9 R3-F1 regression. No command has
+# run, so the shell has not been nudged into anything by a prior keystroke.
+# Post-fix the shell is self-managing from the first prompt and survives; the
+# probe runs DIRECTLY after the Ctrl-C, with NO intervening REPL cycle.
 #
-# The empty \r between the Ctrl-C and the probe is LOAD-BEARING: the kernel
-# cooked-consumes the 0x03 (the editor never sees a byte), so the `interrupt`
-# sits in the shell's note queue while the editor stays blocked mid-read. Notes
-# drain only at the prompt cycle (repl::feed Accept -> deliver_notes), and a
-# foreground wait FORWARDS a queued interrupt to its children -- so without a
-# drain the stale note would kill the probe pipeline itself. The empty line
-# cycles the REPL: Accept("") -> deliver_notes consumes + discards the stale
-# interrupt (no handler registered) -> the probe then runs on a clean queue.
+# The kernel cooked-consumes the 0x03 (the editor never sees a byte), so the
+# `interrupt` sits in the shell's note queue while the editor stays blocked
+# mid-read. RW-9 R3-F1 drains the queue at the TOP of the Accept arm (before the
+# accepted line is evaluated), so the probe pipeline's OWN acceptance consumes +
+# discards the stale interrupt and the pipeline then runs on a clean queue.
+# Pre-R3-F1 this test inserted a manual empty-line REPL cycle (`send "\r"`) to
+# drain first -- a verify-around: it papered over the very defect (a foreground
+# wait forwards the stale queued interrupt and kills the next command) that the
+# direct probe below now asserts is fixed. If R3-F1 regressed, the probe
+# pipeline would be killed by the stale interrupt and "HOLO-FRESH" would never
+# render -> timeout fail.
 lc_ctrlc
 sleep 1
-send "\r"
-sleep 1
 lc_send "echo holo-fresh | tr a-z A-Z"
-lc_expect "HOLO-FRESH" "session survives a fresh-prompt Ctrl-C (RW-0 F1)"
-lc_pass "LS-5(A): fresh-prompt Ctrl-C does not log out (self-managing shell)"
+lc_expect "HOLO-FRESH" "fresh-prompt Ctrl-C: session survives AND the stale interrupt is drained at Accept, not forwarded to the next command (RW-0 F1 + RW-9 R3-F1)"
+lc_pass "LS-5(A): fresh-prompt Ctrl-C does not log out, and does not kill the next command"
 
 # (B) Blocked-in-kernel child: `sleep 3600` foreground. The shell blocks in its
 # interruptible foreground wait; the child blocks in a torpor tsleep. Ctrl-C is
@@ -68,6 +70,22 @@ lc_send "echo holo-yes | tr a-z A-Z"
 lc_expect "HOLO-YES" "flooding `yes` interrupted by Ctrl-C (LS-5b/c)"
 lc_pass "LS-5(C): an output-bound child dies on Ctrl-C"
 
+# (D) RW-9 R2-F3: a runaway shell-eval loop with NO foreground child
+# (`while (1) { let spin = 1 }`) is interruptible. The shell itself spins in
+# eval_while -- there is no child to forward to -- so pre-fix the loop never
+# observed the queued `interrupt` and spun forever (escapable only by external
+# kill). Post-fix eval_while polls the note queue every LOOP_INTERRUPT_STRIDE
+# iterations and unwinds to the prompt on a terminate-intent interrupt. The
+# prompt returning fast IS the assertion: a regressed loop spins past the
+# per-command timeout and the probe never renders.
+lc_send "while (1) { let spin = 1 }"
+sleep 2
+lc_ctrlc
+sleep 1
+lc_send "echo holo-loop | tr a-z A-Z"
+lc_expect "HOLO-LOOP" "runaway pure-eval loop interrupted by Ctrl-C (RW-9 R2-F3)"
+lc_pass "LS-5(D): a runaway shell-eval loop dies on Ctrl-C"
+
 lc_quit
-lc_pass "LS-CI ls-5: fresh-prompt(F1) + blocked(LS-5c) + flooding(LS-5b/c) all verified"
+lc_pass "LS-CI ls-5: fresh-prompt(F1+R3-F1) + blocked(LS-5c) + flooding(LS-5b/c) + runaway-loop(R2-F3) all verified"
 exit 0

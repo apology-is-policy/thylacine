@@ -170,6 +170,15 @@ pub struct Env {
     /// EL0 stack into a guard-page `snare:segv` (scripture 8.1). A `Cell`
     /// because the `&Env` command-substitution path must inc/dec it.
     eval_depth: Cell<u32>,
+    /// One-shot "a terminate-intent `interrupt` arrived inside a running
+    /// command" flag (R2-F3 / scripture 10.2). Set by the loop interrupt poll
+    /// (`poll_loop_interrupt`) when Ctrl-C reaches a runaway shell-eval loop
+    /// that has no foreground child to forward it to; checked by `eval_block`
+    /// after every statement so it unwinds every enclosing loop / block /
+    /// function -- the same propagation `pending_exit` uses -- returning the
+    /// shell to the prompt. The REPL clears it (and sets `$status = 130`)
+    /// once the command has unwound.
+    interrupt_pending: bool,
 }
 
 /// Maximum eval-stack recursion depth (function calls / command-substitution
@@ -202,6 +211,7 @@ impl Env {
             note_mask: libthyla_rs::notes::NoteMask::NONE,
             deferred_notes: Vec::new(),
             eval_depth: Cell::new(0),
+            interrupt_pending: false,
         }
     }
 
@@ -507,6 +517,27 @@ impl Env {
     /// short-circuit the statement stack.
     pub fn exit_requested(&self) -> Option<i32> {
         self.pending_exit
+    }
+
+    // === Pending interrupt (R2-F3 / scripture 10.2) ===
+
+    /// Flag a pending terminate-intent interrupt (Ctrl-C inside a runaway
+    /// shell-eval loop). Idempotent; `eval_block` unwinds on it.
+    pub fn set_interrupt(&mut self) {
+        self.interrupt_pending = true;
+    }
+
+    /// Whether a terminate-intent interrupt is pending. `eval_block` checks
+    /// this after each statement to unwind every enclosing block to the
+    /// prompt (the `pending_exit` propagation, but transient per-command).
+    pub fn interrupt_pending(&self) -> bool {
+        self.interrupt_pending
+    }
+
+    /// Consume the pending-interrupt flag (one-shot). The REPL calls this once
+    /// the interrupted command has unwound so the next command starts clean.
+    pub fn take_interrupt(&mut self) -> bool {
+        core::mem::replace(&mut self.interrupt_pending, false)
     }
 
     // === Background jobs (U-7a) ===
