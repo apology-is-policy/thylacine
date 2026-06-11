@@ -44,6 +44,16 @@
 #    couples the ramfs re-bake to the pool re-bake so /system.key always matches
 #    (a mismatch = STM_EBADTAG at mount; the year-long "AEGIS corruption" ghost).
 #    A bare `kernel`/`all` regenerates BOTH together, so they always agree.
+# 3. `ramfs.cpio` is NOT re-baked by `disk` (nor by `userspace`) alone -- only by
+#    `ramfs`, `pool`, and the `kernel`/`all` chain. The devramfs (QEMU -initrd)
+#    holds the PRE-PIVOT binaries: joey's boot chain + every boot-test probe that
+#    runs BEFORE the pivot to the disk-backed FS (coreutil-smoke, the u-* tests,
+#    the login E2E). So after editing a userspace binary, `userspace` + `disk`
+#    boots the STALE pre-pivot binary from the old ramfs -- the change reaches
+#    only the POST-pivot disk image. Re-bake with `ramfs` (or just use
+#    `kernel`/`all`, which chains build_ramfs). TELL: a probe's self-reported
+#    count/output does not move though you "rebuilt" (e.g. a newly-added
+#    coreutil-smoke check still reports the old total).
 #
 # Every run prints a "SUMMARY for target ..." block at the END listing exactly
 # what was BUILT / REUSED / PRESERVED -- read that to know the resulting state.
