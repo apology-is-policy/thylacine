@@ -32,19 +32,33 @@ done
 
 ---
 
-## The nine specs
+## The spec inventory (as-built; RW-10 reconcile 2026-06-11)
 
-| # | Spec | Phase | Invariants |
-|---|---|---|---|
-| 1 | `scheduler.tla` | 2 | EEVDF correctness, IPI ordering, wakeup atomicity, work-stealing fairness |
-| 2 | `territory.tla` | 2 | bind/mount semantics, cycle-freedom, isolation between processes |
-| 3 | `handles.tla` | 2 | Rights monotonicity, transfer-via-9P invariant, hardware-handle non-transferability |
-| 4 | `burrow.tla` | 3 | Refcount + mapping lifecycle, no-use-after-free |
-| 5 | `9p_client.tla` | 4 | Tag uniqueness per session, fid lifecycle, out-of-order completion correctness, flow control |
-| 6 | `poll.tla` | 5 | Wait/wake state machine, missed-wakeup-freedom across N fds |
-| 7 | `futex.tla` | 5 | FUTEX_WAIT / FUTEX_WAKE atomicity (no wakeup lost between value check and sleep) |
-| 8 | `notes.tla` | 5 | Note delivery ordering, signal mask correctness, async safety |
-| 9 | `pty.tla` | 5 | Master/slave atomicity, termios state transitions |
+The Phase-0 plan gate-tied nine specs; the committed inventory is **17
+modules** (the authoritative table: `docs/ARCHITECTURE.md §25.2`). Three of
+the planned nine were dropped per the 2026-05-23 spec-to-code suspension:
+`futex.tla` (torpor is prose-validated), `notes.tla` (prose + audit + tests),
+`pty.tla` (the PTY mechanism is unbuilt — LS-8, task #952).
+
+| Spec | Landed | Pins |
+|---|---|---|
+| `scheduler.tla` | P2 | Wait/wake atomicity, IPI ordering, steal no-double-enqueue, eventual-progress liveness |
+| `territory.tla` | P2 | Bind cycle-freedom, isolation, mount-refcount consistency |
+| `handles.tla` | P2 | Rights ceiling, transfer-only-via-9P, hw non-transferability, caps ceiling |
+| `burrow.tla` | P2/P3 | Dual refcount + mapping lifecycle |
+| `9p_client.tla` | P4/P5 | Tag uniqueness, fid lifecycle, flow control |
+| `poll.tla` | P5 | Missed-wakeup-freedom across N fds |
+| `pipe.tla` | P5 | Pipe two-direction wait/wake |
+| `tsleep.tla` | P5 | Deadline-bounded Rendez sleep |
+| `corvus.tla` | P5 | Key-agent session/identity/elevation protocol |
+| `sched_ctxsw.tla` | P5 | Uniform-EL1h kernel (I-21) |
+| `sched_oncpu.tla` | deep-smp-review | Diagnostic — reproduces the #860 class |
+| `sched_alpha.tla` | deep-smp-review | The SMP-redesign gating model |
+| `asid.tla` | RW-1 | ASID generation-rollover safety (I-31) |
+| `death_wake.tla` | RW-2 | Death-wake cascade (I-9 generalized + I-24) |
+| `loom.tla` | Loom-1 | Completion integrity (I-29), submit pin (I-30) |
+| `loom_multishot.tla` | Loom-5 | I-29 generalized to a CQE stream |
+| `loom_order.tla` | Loom-5 | LINK/DRAIN ordering + cancel completeness |
 
 ---
 
@@ -99,9 +113,9 @@ If you cannot articulate the invariant formally, you don't understand it well en
 
 ## Status
 
-Phase 0 complete; no specs written yet. All 9 land per phase per the table above:
-
-- Phase 2 (next): `scheduler.tla`, `territory.tla`, `handles.tla`.
-- Phase 3: `burrow.tla`.
-- Phase 4: `9p_client.tla`.
-- Phase 5: `poll.tla`, `futex.tla`, `notes.tla`, `pty.tla`.
+All 17 modules in the inventory table above are committed, each with clean
+cfg(s) + buggy-cfg counterexamples (71 buggy cfgs total). `make specs` runs
+every module's default clean cfg and fails on any TLC failure; the buggy-cfg
+counterexample runs remain a manual per-surface pre-commit discipline (the
+tiered automated gate is a tracked task — RW-10 F3). The canonical
+action↔source mapping lives in `SPEC-TO-CODE.md`.

@@ -218,22 +218,24 @@ Pre-pend wins because the GIC's pending-bit semantics are stable across enable t
 
 ## Known caveats / footguns
 
-### Single-waiter per KObj_IRQ
+### Single-waiter per KObj_IRQ (busy-guard since RW-7 R1-F1)
 
-The Rendez allows at most one sleeping thread. Two concurrent `kobj_irq_wait` calls on the same KObj_IRQ extincts on the second. v1.0 acceptable: a driver process has one IRQ-handling thread per IRQ. Phase 5+ adds multi-waiter via poll/futex when userspace event multiplexing lands.
+The Rendez allows at most one sleeping thread. A second concurrent `kobj_irq_wait` on the same KObj_IRQ is **refused with -1** by a busy-guard claimed under the lock (the devcons single-reader pattern; `irqfwd.c:353-358`) — pre-RW-7 it tripped sched.c's "rendez already has a waiter" extinction, an unprivileged kernel kill from any two-threaded driver. v1.0 contract: one IRQ-handling thread per IRQ fd; multi-waiter lands with a future poll-hook integration if a driver demands it.
 
 ### Edge-triggered counter, not a queue
 
 The `pending_count` is a count, not a queue of (timestamp, payload) tuples. Drivers can't recover "what time did each IRQ fire" — they get an aggregate count. For VirtIO this is sufficient (the device's used-ring carries per-completion info); for arbitrary IRQ sources it may matter. Phase 5+ might add a per-IRQ ring buffer if a driver demands it.
 
-### gic_disable_irq + gic_attach(NULL, NULL) order at destroy
+### Stale-fire safety (gic_disable_irq + gic_attach(NULL, NULL) order at destroy)
 
-The destroy path disables BEFORE clearing the handler slot. A subtle race: if a fire is pending in the GIC at the moment of disable, and the GIC delivers it after disable but before attach-NULL, dispatch runs with the still-valid k. Currently safe because:
-1. SGI/PPI/SPI go through the "IRQ pending" → "delivered" transition while the CPU still has IRQs unmasked at the GIC.
-2. gic_disable_irq writes to ICENABLER which suppresses *future* deliveries; in-flight deliveries continue.
-3. The dispatch's magic check catches a UAF if k is freed between the GIC's "delivery start" and dispatch entry.
+*(This is the "stale-fire safety" lifecycle discussion `kernel/irqfwd.c`'s destroy path points at.)*
 
-A stronger guarantee would be a synchronous "drain pending" step in destroy. Held to Phase 5+ when concurrent destroy + IRQ becomes a real scenario (currently single-threaded boot test pattern).
+The destroy path disables BEFORE clearing the handler slot, and `gic_attach(intid, NULL, NULL)` is rejected by the gic API (the slot retains `kobj_irq_dispatch` + `arg=k`). A fire pending in the GIC at the moment of disable can still be delivered mid-teardown — `gic_disable_irq` writes ICENABLER, which suppresses *future* deliveries; in-flight deliveries continue, and a dispatch already acknowledged on another CPU cannot be retracted at all (RW-7 R1-F2). The teardown is safe under that window because of two guards, both RW-7 R1-F2:
+
+1. **The `dying` guard** (`irqfwd.c:156,168,296`): set under the lock BEFORE the free; a dispatch that wins the race observes `dying` and touches `*k` no further.
+2. **The magic clobber** (`magic = 0` at free): a dispatch holding a stale `k` pointer past the free sees the mismatch and bails before any other field read.
+
+A stronger guarantee (synchronous drain-pending in destroy) is held until concurrent destroy-vs-IRQ becomes a real driver pattern; the RW-7 fix makes the existing window touch-nothing rather than UAF.
 
 ### `__atomic_fetch_add` on g_irq_total_fires uses RELAXED
 

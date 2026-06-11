@@ -73,7 +73,7 @@ each Spoor, check whether it is a mount point **by Spoor identity**; if so, cros
 |---|---|---|
 | `binds[]`/`mounts[]` are **read nowhere in a walk path** today (only clone / unref / cycle-check / diagnostics). | `kernel/territory.c` survey | `stalk` is a **clean first consumer**; no existing walk behavior to preserve. |
 | Mount table keyed by **abstract `path_id_t = u32`**, no string mapping; only callers hardcode `t_mount(fd, 99, 0)`. | `territory.h:64-68`, `stub-driver.c:81` | Re-key to **mount-point Spoor identity** (Plan 9 domount); retire `path_id_t`. |
-| `SYS_WALK_OPEN` is single-component (rejects `/ . ..`), never consults mounts. | `syscall.c:1571-1599` | `stalk` is the new multi-component path; generalizes the single-hop contract. |
+| `SYS_WALK_OPEN` is single-component (rejects `/ . ..`), never consults mounts. *(Historical survey row — superseded by #957: single-hop walks now cross mounts via the same audited `cross_mounts`.)* | `syscall.c:1571-1599` | `stalk` is the new multi-component path; generalizes the single-hop contract. |
 | `dev9p_walk` batches up to `P9_MAX_WALK`=16 components per `Twalk`, rejects partial. | `dev9p.c:130-230` | Batching is *available* but **not used in v1.0** (see 4.3 — enforcement correctness). |
 | `perm_check(p, &st, PERM_X)` + `spoor_stat_native` is the existing single-hop X-search. | `perm.c:18-52`, `syscall.c:1564-1568` | `stalk` runs this **per component** (the privilege boundary it must uphold). |
 | `devsrv` IS a registered Dev (real `attach`/`walk`, stub `open`) but **mounted into no territory**. | `dev.c:123`, `devsrv.c` | Mount it per-territory; make `open` do the connect. |

@@ -126,7 +126,7 @@ so the loop body may freely take `&mut self`) and dispatches each action:
 |---|---|
 | `NoChange` | nothing |
 | `Redraw` | `render(prompt)` → sink |
-| `Accept(line)` | `\r\n` → sink; push non-empty line to history; `run_line`; if `env.exit_requested()` → return `Some(code)`; else `reap_jobs` (U-7a) then `deliver_notes` (U-7c, §3.7) then fresh prompt |
+| `Accept(line)` | `\r\n` → sink; **`deliver_notes` FIRST (the RW-9 R3-F1 stale-idle drain, `cd7eae2` — a Ctrl-C queued while idle at the prompt must not deliver mid-next-command)**; push non-empty line to history; `run_line` (which clears a consumed interrupt via `take_interrupt()` → `$status=130`); if `env.exit_requested()` → return `Some(code)`; else `reap_jobs` (U-7a) then `deliver_notes` (U-7c, §3.7) then fresh prompt |
 | `Cancel` (Ctrl-C) | `\r\n` + fresh prompt (the editor already reset its buffer) |
 | `Eof` (Ctrl-D, empty buffer) | `\r\n`; return `Some(env.status())` |
 | `ClearScreen` (Ctrl-L) | `\x1b[2J\x1b[H` + render |
@@ -201,7 +201,9 @@ set) is U-PTY / U-7c-b.
 `Repl::deliver_notes(&mut self)` runs in the `Accept` branch right after
 `reap_jobs` (the same prompt-cycle sync point) and delegates to
 `eval::deliver_pending_notes(&mut self.env)` — see `94-utopia-eval.md` §9.6.
-It drains the shell's own note queue (opened lazily by `open_notes`, §3.1) and
+It drains the shell's own note queue (opened EAGERLY at REPL start when
+stdout is live — the LS-5/RW-0 HT00.F1 fix `f145ce8`; the bare-spawn boot
+check deliberately stays lazy so the note fd is not minted as fd 0) and
 fires any registered `on note` handler; `mask note` defers a class for its
 body via the kernel Thread mask. Delivery is at this sync point (not async)
 because the cons fd is unpollable until U-PTY. `deliver_notes` is `pub` so the

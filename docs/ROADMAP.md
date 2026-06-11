@@ -982,7 +982,7 @@ None mandatory. Network protocol correctness is smoltcp's responsibility (it's b
 
 ### 9.5 Risks
 
-- **`futex` correctness under heavy threading**: many threading libraries depend on it; subtle bugs can manifest at high contention. Mitigation: covered by `futex.tla`; stress-test under the Linux test programs.
+- **`futex` correctness under heavy threading**: many threading libraries depend on it; subtle bugs can manifest at high contention. Mitigation: the torpor wait/wake atomicity is prose-validated + audited (no `futex.tla` per the 2026-05-23 suspension; `death_wake.tla` covers the death-wake interaction); stress-test under the Linux test programs.
 - **`epoll`**: Linux-specific; many programs assume it. Mitigation: implement at v1.0 if low-effort; otherwise programs that assume it fall to "best effort" tier; v1.1 brings the full thing.
 - **glibc dynamic linker**: glibc assumes `/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1`. Mitigation: musl-static and musl-dynamic are the primary compat target; glibc-dynamic is best-effort.
 - **Network stack maturity**: smoltcp is capable but not a full Linux network stack. Programs that assume specific socket options or kernel network behavior may fail. Mitigation: fall back to a Plan 9 IP stack port if smoltcp can't cover; coordinate at Phase 6 entry.
@@ -1211,7 +1211,7 @@ This is the last phase of v1.0 and the highest-risk angle (`NOVEL.md` Angle #4 â
 
 ### 11.3 Specs landing this phase
 
-None mandatory. Halcyon is mostly UI; the underlying primitives (9P client, framebuffer, BURROW transfer, signals, PTY) are spec'd at earlier phases.
+None mandatory. Halcyon is mostly UI; the underlying primitives (9P client, framebuffer, BURROW transfer, signals) are spec'd or prose-validated at earlier phases. PTY is the exception â€” not yet built (LS-8, task #952); its validation lands with it.
 
 ### 11.4 Audit-trigger surfaces introduced
 

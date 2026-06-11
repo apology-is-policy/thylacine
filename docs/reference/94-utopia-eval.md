@@ -643,6 +643,36 @@ would post (`/u-job-test` scenarios 16-19).
 
 ---
 
+### 9.8 RW-9 hardening: eval recursion cap + the interrupt unwind + command-sub lifecycles
+
+Landed across the RW-9 close (`07a27c9` + `cd7eae2` + `aae24db`); the parser
+halves are in `93-utopia-parser.md` §8.8.
+
+- **Eval recursion cap.** `Env.eval_depth` (a `Cell<u32>`,
+  `EVAL_MAX_DEPTH = 64`) is bumped at `eval_block` AND
+  `run_command_substitution_script` — bounding nested block/function/
+  substitution evaluation independently of the parser's bounds (a deeply
+  nested SCRIPT can be parse-shallow but eval-deep through function calls).
+  Trips to `EvalErrorKind::RecursionLimit` → graceful `$status`.
+- **The interrupt unwind.** `Env.interrupt_pending` is a one-shot flag
+  mirroring `pending_exit`: `poll_loop_interrupt` (non-blocking note read,
+  strided every `LOOP_INTERRUPT_STRIDE = 128` iterations inside
+  `eval_while`/`eval_for`; defers non-interrupt notes) sets it;
+  `eval_block_inner` checks it after every statement and returns
+  `StatementFlow::Return`, unwinding loops/blocks/functions without
+  executing further statements; `eval_command`'s Simple path bails
+  post-`evaluate_argv` (SA-1 — an interrupt must not spawn the next
+  command); `run_line` consumes it via `take_interrupt()` → `$status=130`.
+  This is what makes `while (1) { let spin = 1 }` — a loop that never
+  spawns and never syscalls in its body — Ctrl-C-interruptible (RW-9
+  R2-F3; `ls-5.exp` case D).
+- **Command-substitution capture lifecycle (R2-F1).** A NON-final pipeline
+  element that fails to spawn used to orphan the capture write end — the
+  shell then blocked forever on `read_to_end` (un-interruptible, fds held).
+  The fix drops every un-consumed `stdin_files`/`stdout_files` Vec BEFORE
+  the drain, so EOF arrives on the partial-spawn path too. Regression:
+  `/u-subst-test` #10 + the `flow_process_pipe` part-(c) discipline.
+
 ## 10. Open questions deferred to later sub-chunks
 
 | Question | Owning sub-chunk |

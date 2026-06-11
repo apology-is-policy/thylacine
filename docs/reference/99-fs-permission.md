@@ -148,7 +148,7 @@ rwx triple):
   owner bits if `principal_id == st->uid`, else group bits if `proc_in_group`,
   else other bits; allow iff `(bits & want) == want`. Owner-first is
   authoritative (owner judged on owner bits only).
-- `perm_want_for_omode(omode)` — OREAD→R, OWRITE→W, ORDWR→R|W, OEXEC→X, +OTRUNC→W.
+- `perm_want_for_omode(omode)` — OREAD→R, OWRITE→W, ORDWR→R|W, OEXEC→R|X (an OEXEC open mints a RIGHT_READ-capable handle, so BOTH are checked — the RW-3 R3-F1 execute→read-leak close), +OTRUNC→W.
 - `perm_wstat_check(p, cur_uid, valid, new_gid)` — the ownership-change policy:
   MODE ⇒ owner|`CAP_HOSTOWNER`; UID ⇒ `CAP_HOSTOWNER` only (no give-away); GID ⇒
   (owner ∧ member of `new_gid`) | `CAP_HOSTOWNER`.

@@ -1,12 +1,23 @@
 # Spec-to-code mapping
 
-For each TLA+ spec, this file maps each action / invariant to a source location. CI will eventually verify the mapping is current — file must exist, function must exist, line range must match. Stale mapping = failing CI (Phase 2 close adds the CI gate).
+For each TLA+ spec, this file maps each action / invariant to a source location. **Honest status (RW-10, 2026-06-11):** the CI currency-gate planned at Phase-2 close was never built — `make specs` runs each module's default clean cfg and fails on TLC failure, but nothing verifies these mappings automatically and nothing runs the buggy-cfg set; both remain manual discipline (the tiered spec-gate runner is a tracked task). Line numbers in older sections drift; each section's **Currency note** records what moved since it was written.
 
 Per `CLAUDE.md` Spec-first policy: if the four (spec, technical reference, code, user reference) disagree, **the spec wins**.
 
 ---
 
 ## scheduler.tla — P2-Cg/H impl mapping (SMP discipline lifted to spec)
+
+> **Currency note (RW-10, 2026-06-11).** The P4-Ic6 subsections below describe
+> `g_bootcpu_idle` + its deadlock-path dispatch as landed — that mechanism was
+> **RETIRED** by the SMP redesign (#863, deep-smp-review 2026-06-05): the
+> off-tree boot-CPU idle was the #860 root cause and is replaced by the
+> per-CPU **pinned in-tree idle** (`cpu_pinned`; `kernel/sched.c` keeps the
+> history in comments at :396/:817/:973). The as-built migration/idle model is
+> pinned by `sched_alpha.tla` (the gating model) + `sched_oncpu.tla` (the
+> diagnostic) — see their sections at the end of this file. Line numbers in
+> this section are P2/P4-era (`try_steal` is now ~:788). scheduler.tla's
+> wait/wake + IPI-ordering actions still map as written.
 
 Status: **wait/wake proven; SMP runqueue + IPI ordering proven; LatencyBound liveness proven (P2-H, minimal universe); full-universe per-thread fairness deferred to Phase 5+**. Models thread state machine + per-CPU dispatch + cross-CPU work-stealing (`Steal`) + per-(src,dst) FIFO IPI delivery (`IPI_Send` / `IPI_Deliver`) with state-consistency, wait/wake-atomicity, no-double-enqueue, FIFO-ordering, and "every runnable thread eventually runs" invariants. Proves `NoMissedWakeup` (ARCH §28 I-9), `NoDoubleEnqueue` (ARCH §8.4), `IPIOrdering` (ARCH §28 I-18), and `LatencyBound` (ARCH §28 I-17) under the correct primitives + fairness assumptions; produces a counterexample for each under the corresponding buggy primitive (or, for LatencyBound, fairness drop). Does NOT yet model EEVDF deadline math (post-P2-Cg, deferred to Phase 5+).
 
@@ -142,6 +153,17 @@ Liveness: TLC-clean at `Threads = {t1, t2}, CPUs = {c1}, MaxIPIs = 1` — 23 dis
 
 ## territory.tla — P2-Ea spec + P5-attach-mount extension (impl at P2-Eb + P5-attach-mount)
 
+> **Currency note (RW-10, 2026-06-11).** The Mount/Unmount rows below model a
+> PATH-keyed mount table; **stalk-2 re-keyed `PgrpMount` to the full
+> mount-point Spoor identity `(dc, devno, qid.path)`** (`kernel/territory.c`
+> mount/unmount/mount_lookup; STALK-DESIGN §5 + ARCH §9.6.7), and the impl
+> additionally carries a mount-graph cycle check (`territory.c:587`) the spec
+> does not model (the spec's `NoCycle` covers the bind graph only). The
+> refcount-consistency invariant the spec pins is key-shape-independent and
+> still holds as mapped; the re-key + the second cycle check are unmodeled
+> strengthenings, not violations. RW-4 added the per-Territory `ns_lock`
+> (SA-F1) — also unmodeled (the spec's actions are atomic).
+
 Status: **cycle-freedom proven; isolation structural; mount-refcount consistency proven; impl landed at P2-Eb + P5-attach-mount.** Models the Plan 9 territory primitives — `bind` as a directed graph with cycle-freedom (I-3) the primary state invariant, AND `mount` as a (path, Spoor) graft table with `MountRefcountConsistency` the per-Spoor refcount invariant per ARCH §9.6.6. Isolation (I-1) is structural. RFNAMEG (shared territory) is deliberately not modeled at this phase. The user-visible `mount` syscall is deferred until fd-syscall infrastructure exists (P5-fd-syscalls); the kernel-internal C API is the v1.0 deliverable.
 
 TLC verdicts at `Procs = {p1, p2}, Paths = {a, b, c}, Spoors = {s1, s2}`:
@@ -196,6 +218,17 @@ TLC verdicts at `Procs = {p1, p2}, Paths = {a, b, c}, Spoors = {s1, s2}`:
 
 ## handles.tla — P2-Fa + P4-Ib + P4-Ic3 + P4-Ic5b1b spec (impl at P2-Fc + P4-Ib + P4-Ic3 + P4-Ic5b1b)
 
+> **Currency note (RW-10, 2026-06-11).** Since this section was written:
+> (a) **KOBJ_LOOM** landed as a FOURTH non-transferable partition
+> (`handle.h:106-122` — anywhere below saying "three partitions"/"three
+> asserts" is one short); (b) the **#844 handle-lifetime pass** rewrote the
+> table internals (per-Proc table lock; `handle_get` returns a BY-VALUE
+> snapshot with the obj refcount held, paired with `handle_put`) — the spec's
+> abstract alloc/dup/transfer actions still map, but line numbers drifted;
+> (c) any mention of a `handle_transfer_via_9p` `-ENOTSUP` stub is wrong —
+> **no transfer codepath was ever built** (I-4 holds vacuously; the positive
+> 9P-transfer path remains future work).
+
 Status: **rights ceiling proven; hardware-handle non-transferability proven; transfer-only-via-9P proven; capability monotonicity proven; hw-handle non-duplicability proven; hw-resource exclusivity proven; hw-handle-implies-cap proven; rfork-capability-grant ceiling proven; elevation-only-cap axis + rfork-strip discipline proven (P5-hostowner); KObj_Srv non-transferability + walk-derivation proven (P5-corvus-srv); impl landed at P2-Fc + P4-Ib + P4-Ic3 + P4-Ic5b1b + P5-corvus-srv-impl-a1 (the `KObj_Srv` kind + its non-transferable partition; the `devsrv` walk-derivation lands in -impl-a3).** Models the kernel handle table with typed kobjs partitioned into transferable + hardware sets, per-handle provenance tags, abstract 9P sessions, per-Proc coarse capabilities, and dynamic per-Proc capability ceilings (rfork-time inheritance). ARCH §28 invariants pinned: I-2 (capability monotonic reduction), I-4 (transfer only via 9P), I-5 (hardware handles non-transferable — covers MMIO + IRQ + DMA), I-6 (rights monotonic on transfer). I-7 (BURROW refcount + mapping lifecycle) is OUT OF SCOPE — covered by `burrow.tla`.
 
 P4-Ic5b1b adds no new spec state, actions, or invariants — the existing `HwKObjs` partition + the 5 hw-kobj invariants (HwHandlesAtOrigin, NoHwDup, HwResourceExclusive, HwHandleImpliesCap, RightsCeiling) apply uniformly to KObj_DMA. PA stability is a structural impl property (no kernel code path mutates KObj_DMA's `pa` after `kobj_dma_create`). The kernel-allocates-PA discipline (vs MMIO's user-specifies-PA) is a syscall-surface design choice that doesn't surface in the abstract handle-table model. See the `HandleAlloc` row below for the DMA-side impl cross-reference.
@@ -234,7 +267,7 @@ The main `handles.cfg` keeps `SrvKObjs = {}`, so the P5-corvus-srv additions (th
 | `BuggyHwCreateNoCap(p, k, granted)` | (none — bug class statically prevented at P4-Ib) | Syscall handlers gate on `__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_HW_CREATE` before allocating. R9 F146 hardened the read to acquire-fence. |
 | `RforkWithCaps(parent, child, granted)` | `kernel/proc.c::rfork_internal` (P4-Ic3, lines 469-538) + `rfork_with_caps` (lines 545-548) | Kernel-internal capability grant primitive. `child->caps = __atomic_load_n(&parent->caps, __ATOMIC_ACQUIRE) & caps_mask` enforces `granted \subseteq proc_caps[parent]` regardless of caller-supplied mask. The plain `rfork` is a delegate with `caps_mask = CAP_NONE`. **P5-hostowner**: the spec's `RforkWithCaps` now also strips `ElevationOnly` from the child's caps and ceiling (`granted \ ElevationOnly`); the impl strip — `& ~CAP_ELEVATION_ONLY` in `rfork_internal` — lands in P5-hostowner-b. |
 | `BuggyRforkElevate(parent, child, gained)` | (none — bug class statically prevented at P4-Ic3) | The AND with `parent_caps` at line 499 of `rfork_internal` makes it impossible for the caller to elevate the child's caps above the parent's. A future refactor that replaces `&` with `=` or `\|` would re-introduce the bug. |
-| `HostownerGrant(p)` | (P5-hostowner-b — the kernel `cap` device, not yet implemented) | Models the `cap` device's `use`-file redemption: a console-attached Proc redeems a pending grant and the kernel ORs `CAP_HOSTOWNER` into its `caps` (the spec also raises `proc_ceiling`, modeling the legitimate authorization growth). corvus's passphrase + console gates are modeled in `corvus.tla::AdminElevate`; this action is the cap arithmetic only. The SOLE action admitting `CapHostowner` into any `proc_caps`. |
+| `HostownerGrant(p)` | `kernel/devcap.c` use-file redemption (landed P5-hostowner-b; the A-4a clearance redeem shares the locked kind-branched core) | Models the `cap` device's `use`-file redemption: a console-attached Proc redeems a pending grant and the kernel ORs `CAP_HOSTOWNER` into its `caps` (the spec also raises `proc_ceiling`, modeling the legitimate authorization growth). corvus's passphrase + console gates are modeled in `corvus.tla::AdminElevate`; this action is the cap arithmetic only. The SOLE action admitting `CapHostowner` into any `proc_caps`. |
 | `BuggyRforkNoStrip(parent, child, granted)` | (P5-hostowner-b — statically prevented once `rfork_internal` ANDs the child's caps with `~CAP_ELEVATION_ONLY`) | The bug: `rfork` omits the elevation-only strip, so an elevated parent leaks `CAP_HOSTOWNER` to a forked child that lacks `PROC_FLAG_CONSOLE_ATTACHED`. Caught by `CapsCeiling` — the child's ceiling is correctly stripped, its caps are not. |
 | `WalkDerive(p, h, k)` | (P5-corvus-srv-impl-a3 — `kernel/devsrv.c` walk op) | Walking a `KObj_Srv` handle yields a fresh child Spoor; because `/srv` is its own Dev, the child kobj is structurally `KObj_Srv` (allocated in the `SrvKObjs` partition), via="walk", inheriting the parent handle's rights as its ceiling. |
 | `BuggySrvWalkTx(p, h, k)` | (none — bug class prevented once `devsrv`'s walk op mints the child Spoor with the `KObj_Srv` kind) | The bug: the walk op constructs the child Spoor with a transferable kobj kind (or routes `/srv` through `dev9p`), so the child can 9P-transfer between Procs. Caught by `WalkChildIsSrv`. |
@@ -321,6 +354,18 @@ TLC-clean at `VmoIds = {v1, v2}, MaxRefs = 2` — 100 distinct states explored; 
 
 
 ## 9p_client.tla — P5-spec (Phase 5 entry; spec-first)
+
+> **Currency note (RW-10, 2026-06-11).** Three impl arcs moved under this
+> section after it was written: **#841** (the elected-reader restoration —
+> lock never held across recv; multi-in-flight tag demux; `be_reader`
+> election + hand-off; ARCH §21.10), **#845** (Tflush-on-abandon — the
+> `awaiting_flush` tag state sits DIRECTLY on the modeled I-10 surface: an
+> abandoned tag is not reusable until its Rflush), and **Loom-2b** (the
+> pluggable-completion seam — `p9_rpc.on_complete` WAKE_RENDEZ vs POST_CQE).
+> The spec's tag-uniqueness + fid-lifecycle invariants still hold over the
+> as-built (the #841/#845 audits + the 4 buggy cfgs are the evidence); the
+> action↔site rows below pre-date the restructure and their line numbers
+> drifted.
 
 Pins ARCH §28 invariants:
 
@@ -446,6 +491,16 @@ small (<200 distinct) but every bug class reaches its violation in ≤ 6 steps
   integration + invariants.
 
 ## corvus.tla — P5-corvus-spec (Phase 5 corvus daemon; spec-first)
+
+> **Currency note (RW-10, 2026-06-11).** (a) Rows below that map to
+> `SYS_POST_SERVICE` / `SYS_SRV_CONNECT` / `SRV_CONN_PER_PROC_MAX` describe
+> syscalls **retired at stalk-3c** — the as-built path is the per-territory
+> `/srv` (post = `devsrv_create`, connect = open-on-`/srv` via
+> `devsrv_open_connect`). (b) The spec treats the console-attach bit as
+> one-way; the impl gained `proc_revoke_console_attached` (A-4c2/RW-7 —
+> revocable on a LIVE Proc). No live violation (RW-6 F2 re-queries the live
+> bit at the gates), but the spec under-models revocation — a re-model rides
+> any future corvus-protocol change.
 
 Status: **landed at P5-corvus-spec**. Models the corvus key-agent
 daemon's session state machine + capability arithmetic + authorization
@@ -679,17 +734,23 @@ cfgs run with `-deadlock`; `poll.tla`'s `Done` self-loop keeps a
 legitimate terminal state from tripping the deadlock check. See
 ARCH §23.3.
 
-## futex.tla — Phase 5 (planned)
+## futex.tla — DROPPED (2026-05-23 spec-to-code suspension)
 
-(Stub. Will pin: FUTEX_WAIT / FUTEX_WAKE atomicity — ARCH §28 I-9.)
+Never written. The `torpor` wait-on-address primitive (Phase 6) is
+prose-validated (`kernel/torpor.c` + `torpor.h` reasoning + the focused
+audit); `death_wake.tla` covers the death-wake interaction (I-9 generalized).
 
-## notes.tla — Phase 5 (planned)
+## notes.tla — DROPPED (2026-05-23 spec-to-code suspension)
 
-(Stub. Will pin: note delivery ordering, signal mask correctness — ARCH §28 I-19.)
+Never written. The kernel notes substrate (Phase 6, sub-chunk 13a) is
+prose-validated: design + N-1..N-5 invariants in ARCH §7.6.1-§7.6.8, the
+4-round 13a audit, and the `notes.*` test suite (I-19).
 
-## pty.tla — Phase 5 (planned)
+## pty.tla — DEFERRED (mechanism unbuilt)
 
-(Stub. Will pin: master/slave atomicity, termios state transitions — ARCH §28 I-20.)
+The PTY surface itself is not yet built (LS-8, task #952; `kernel/cons.c`
+records the deferral). Spec-or-prose validation lands with the mechanism
+(I-20 is RESERVED in ARCH §28 until then).
 
 ---
 
@@ -699,8 +760,10 @@ Status: **TLC-green; Loom-2a + Loom-2b + Loom-3 + Loom-4 (4a/4b/4c/4d) landed
 (substrate + the pluggable-completion seam + the batch-enter core + the SQPOLL
 transport-deadline substrate + the CQ wait-list + the SQPOLL poll-thread + the
 focused SQPOLL audit close); the Loom-5 SPEC landed as two new focused modules
-(`loom_multishot.tla` + `loom_order.tla`, documented below) -- the Loom-5 IMPL +
-Loom-6 pending. Loom-4d (the audit close) added NO
+(`loom_multishot.tla` + `loom_order.tla`, documented below). *(Currency: the
+Loom-5 IMPL + the whole Loom-6 arc subsequently LANDED -- the arc is COMPLETE
+at 6d; see `docs/reference/107-loom.md`. No spec mechanism changed after
+`d48a8da`.)* Loom-4d (the audit close) added NO
 new spec mechanism -- the F1 borrow-guard `spoor_ref`, the F2 admittability park
 cond, and the SA-2 `P9_PUMP_BUSY` yield are impl refinements WITHIN the `d48a8da`
 CQ-waiter + Teardown model (the kthread is one `PostCqe` producer + the `Teardown`
@@ -902,3 +965,77 @@ audits established by prose. The clean cfg is TLC-green; `death_wake_buggy.cfg`
 Pre-commit gate: `death_wake.cfg` clean GREEN + `death_wake_buggy.cfg`
 counterexample confirmed, on any change to `sleep`/`tsleep`'s register-then-observe,
 the `wait_lock`/`rendez_blocked_on` protocol, or `proc_group_terminate`'s cascade.
+
+---
+
+## pipe.tla — P5-pipe (section added at RW-10; the spec landed P5)
+
+Models the two-direction pipe wait/wake state machine (I-9 specialized):
+bounded ring + reader/writer sleep/wake pairs + EOF/EPIPE on close. Clean cfg
++ 4 buggy cfgs (`read_no_wake_writer` / `write_no_wake_reader` /
+`close_read_no_wake_writer` / `close_write_no_wake_reader`), each dropping
+one wake edge.
+
+| Spec action | Code site | Invariant pinned |
+|---|---|---|
+| `ReadDrain` / `ReadEof` / `ReadSleep` | `kernel/pipe.c::pipe_read` (drain under the pipe lock; EOF when write end closed + ring empty; sleep on the read Rendez otherwise) | a reader sleeps only when the ring is empty AND the write end is open |
+| `WriteAppend` / `WriteEpipe` / `WriteSleep` | `kernel/pipe.c::pipe_write` (append under the lock; `-1` + the synthetic `pipe` note when the read end is closed; sleep when full) | a writer sleeps only when the ring is full AND the read end is open |
+| `CloseRead` / `CloseWrite` | `kernel/pipe.c` close paths (wake the OPPOSITE side's sleepers on every close) | the buggy cfgs prove dropping any close-wake edge strands a sleeper |
+
+Pre-commit gate: `pipe.cfg` clean + the 4 buggy cfgs on any change to
+`kernel/pipe.c`'s wait/wake or close paths.
+
+---
+
+## asid.tla — RW-1 B-F1 (the rolling-ASID allocator; spec-first re-enabled, model-first)
+
+Models the Linux-arm64-style generation-rollover allocator (I-31). Written +
+TLC-green BEFORE the impl (`d742ffa`); the focused audit (`d40dbbb`) fixed
+the spec's own F1 (ownerless reservation reclaim the impl never had — the
+`rproc` ownership model; cfg bounds >= 4 Procs). Clean cfg + 5 buggy cfgs
+(`rollover_steals_active` / `fast_no_regen` / `fast_no_flush_check` /
+`no_flush_pending` / `reserve_value_only`).
+
+| Spec action | Code site | Invariant pinned |
+|---|---|---|
+| `FastSwitch(c, p)` | `arch/arm64/asid.c::asid_check_and_switch` generation-match fast path — lockless `xchg` publish into `active_asids[cpu]` | `NoActiveAlias`: the publish makes the ASID visible to a concurrent rollover BEFORE the TTBR0 write |
+| `SlowSwitch(c, p)` | `asid.c::new_context` under `g_asid_lock` — claim a free ASID or roll the generation (reset bitmap; preserve each CPU's active ASID into `reserved_asids[cpu]`; set per-CPU `flush_pending`) | `ActiveClaimed` + rollover preserves active/reserved (a running CPU is never yanked) |
+| `Deschedule(c)` | the context switch away from a Proc (the per-CPU active slot becomes reclaimable only via the rollover's reserve pass) | — |
+| `CacheTranslation(c)` | (hardware TLB fill; no code site) — cleared by the `flush_pending` local `tlbi` consumed at the next switch | `NoStaleTLB`: no CPU runs on a translation cached under a previous generation's aliasing |
+
+Pre-commit gate: `asid.cfg` clean + the 5 buggy cfgs on any change to
+`arch/arm64/asid.c` or the context-switch pre-hook.
+
+---
+
+## sched_oncpu.tla — deep-smp-review (the #860 DIAGNOSTIC; counterexample-only)
+
+Models the PRE-redesign scheduler: the on_cpu protocol + the off-tree
+`g_bootcpu_idle` deadlock-path dispatch. **Maps to NO live code** — the
+modeled mechanism was retired at #863; the spec exists to REPRODUCE the #860
+class (`prefix860` cfgs) and to prove the in-tree guard (`intree_guard` cfg)
+closes it. Per-option cfgs only (no default `sched_oncpu.cfg`), so `make
+specs` skips it by design.
+
+| Spec action | Code site | Role |
+|---|---|---|
+| `DeadlockDispatch(c, prev)` | (RETIRED — was `kernel/sched.c`'s g_bootcpu_idle fallback; history in comments at `sched.c:396,817,973`) | the #860 root cause, reproduced by `sched_oncpu_prefix860*.cfg` |
+| `StartSwitch` / `FinishSwitch` / `StealSrc` / `Resume` | the on_cpu multi-step switch as it existed pre-redesign | the substrate the diagnostic needs |
+
+---
+
+## sched_alpha.tla — deep-smp-review (the SMP-redesign GATING model)
+
+The target-design model the redesign (#863) was validated against: per-CPU
+**pinned in-tree idle** (`IsPinned(t) == t \in CPUs` — each CPU's idle thread
+lives in its own runq and is never stolen), the multi-step switch with the
+on_cpu handoff, stealing, and `Place`. TLC-green (2-CPU + 3-CPU cfgs).
+
+| Spec action | Code site | Invariant pinned |
+|---|---|---|
+| `StartSwitch(c)` / `FinishSwitch(c)` | `kernel/sched.c::sched` + `arch/arm64/context.S::cpu_switch_context` — the two-step switch with the `prev_to_clear_on_cpu` handoff | I-21-adjacent migration safety: a ctx/kstack is never written by two CPUs concurrently |
+| `StealCand(c)` / `RemoveFromRunq` | `kernel/sched.c::try_steal` (pinned idles excluded — `cpu_pinned`) | steal never moves a pinned idle; no double-enqueue |
+| `Place(t)` | `kernel/sched.c::ready` / `ready_on` (+ the RW-2 2A-F1 vd_t clamp) | a woken thread lands in exactly one runq |
+
+Pre-commit gate: `sched_alpha.cfg` + `sched_alpha_3cpu.cfg` clean on any
+change to the on_cpu protocol, the pinned-idle dispatch, or `try_steal`.

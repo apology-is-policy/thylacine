@@ -29,9 +29,13 @@ Response payload: empty. Status codes:
 ```
 verify payload length + passphrase length bounds
 verify session_token_matches(token)                 → else BadAuth
-verify conn.peer.console == 1                       → else PermissionDenied
-verify sys_passphrase EQUALS SYSTEM_PASSPHRASE      → else BadAuth
-                                                      (byte-compare, constant time over the equal-length window)
+verify peer_live_info(conn).console == 1            → else PermissionDenied
+                                                      (a LIVE SYS_SRV_PEER re-query — RW-6 F2;
+                                                       the cached conn.peer snapshot is stale the
+                                                       moment the kernel revokes the bit, C-22)
+verify argon2id+AEGIS unwrap of system-wrap succeeds → else BadAuth
+                                                      (A-5c-b: the real system-identity unwrap
+                                                       replaced the v1.0-interim byte-compare)
 t_cap_grant(T_CAP_HOSTOWNER, conn.peer.stripes)     → else InternalError
 return OK
 ```
@@ -62,7 +66,7 @@ All of this lands when CRVS persistence does. Until then: the hardcoded passphra
 
 ### Why the passphrase isn't `_Static_assert`-pinned in the spec
 
-The spec models the passphrase as opaque "valid/invalid" — `BUGGY_ELEVATE_WITHOUT_CONSOLE` already covers the console-attached failure mode, and `BUGGY_ADMIN_WITHOUT_PROC_CAP` covers the post-elevation gate. The passphrase itself is part of the corvus-internal check `specs/corvus.tla::AdminElevate` abstracts as a precondition; the byte-compare-against-`SYSTEM_PASSPHRASE` is the v1.0 instantiation.
+The spec models the passphrase as opaque "valid/invalid" — `BUGGY_ELEVATE_WITHOUT_CONSOLE` already covers the console-attached failure mode, and `BUGGY_ADMIN_WITHOUT_PROC_CAP` covers the post-elevation gate. The passphrase itself is part of the corvus-internal check `specs/corvus.tla::AdminElevate` abstracts as a precondition; the as-built instantiation is the A-5c-b argon2id+AEGIS unwrap of the host-baked `system-wrap` (fail-closed on missing/corrupt/wrong-passphrase — the v1.0-interim byte-compare did not survive).
 
 ## Joey: ADMIN_ELEVATE + t_cap_use bootstrap (`usr/joey/joey.c`)
 

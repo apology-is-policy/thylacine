@@ -704,6 +704,36 @@ usr/utopia/libutopia/src/parser/
                  collect_* helpers
 ```
 
+## 8.8 Input-bounded recursion (RW-9 hardening)
+
+The shell builds with `panic = "abort"` and the EL0 stack is 256 KiB + a
+guard page, so any input-driven unbounded recursion in the parser is a
+`snare:segv` shell death (= session logout for the session `ut`). RW-9
+landed THREE independent bounds, one per recursion vector class
+(`07a27c9` round-1 + `aae24db` round-2):
+
+1. **Bracket nesting** — `check_token_nesting` (a pre-pass over the token
+   stream, `PARSE_MAX_NESTING = 64`): bounds every bracket-shaped descent
+   (`{`/`(`/`[`/case/if bodies) before the recursive parse begins.
+2. **Cross-lex re-entry** — `parse_subscript`'s RELEX depth
+   (`AtomicU32`, `PARSE_MAX_RELEX = 32`): bounds the `$(...)`-style
+   re-lex/re-parse vector that re-enters the parser through a NEW token
+   stream (invisible to the per-stream pre-pass).
+3. **Expression-operator chains** — `ExprParser.depth`
+   (`EXPR_MAX_DEPTH = 256`) checked at `parse_pow` + `parse_unary`: bounds
+   the NON-bracket descents (`!!!…`, `~~~…`, `2**2**…`), which round-2
+   (RND2-F1) proved the first two bounds cannot see — round-3's exhaustive
+   call-graph enumeration confirmed `parse_unary` + `parse_pow` are the
+   only input-unbounded-with-bounded-brackets vectors.
+
+All three trip to `ParseErrorKind::RecursionLimit` → a graceful `$status`,
+never a crash (scripture 8.1). **The durable RW-9 lesson**: a "complete"
+recursion fix can miss an entire vector class the regression test cannot
+see — bounding "the parser" means ENUMERATING every recursive descent
+(brackets, re-lex re-entry, operator chains) and bounding each. Regressions:
+`/u-subst-test` #10/#11/#12 (brackets + relex + eval) and #13/#14 (the
+operator chains `!`×2000 / `**`×1000).
+
 ## 9. Status
 
 - **U-5a LANDED**: tokenizer with span tracking, full reserved-word + operator coverage, single + double-quoted strings with parts, top-level + DQ-interior dollar forms, substitutions (`$()`, `` `{}` ``), process substitution, heredocs with body collection (interp + non-interp + strip-tabs), regex literal after `=~`. Reference impl at `usr/utopia/libutopia/src/parser/lexer.rs` (~900 LOC + ~560 LOC `#[cfg(test)]` tests).

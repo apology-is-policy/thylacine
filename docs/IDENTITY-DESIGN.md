@@ -1828,15 +1828,22 @@ pass; landed scripture-first, no code):
   -- the SAK runs on the kthread (a DIFFERENT thread than the owner), so the proc_flags
   single-writer convention requires atomicity here (the documented multi-thread lift);
   `proc_mark_console_attached` is made correspondingly atomic.
-- **SAK transition (I-27 handoff).** Under `g_proc_table_lock`, on the kthread: (1) revoke
-  `PROC_FLAG_CONSOLE_ATTACHED` from the current `g_console_owner` + post it a notify note (a
-  foreground app learns it lost the console); (2) re-grant the bit to corvus (the elevation
-  authority) + set `g_console_owner = corvus`. The re-grant target is corvus, identified by a
-  single `g_console_trusted_proc` pointer set when joey establishes corvus. FAIL-SAFE: if no
-  trusted proc is registered/alive, the SAK is REVOKE-ONLY (`g_console_owner = NULL`; no Proc
-  can then redeem elevation until a trusted login claims the console -- the security-correct
-  default). Idempotent under a BREAK flood. Guarantees the post-SAK redeemer is the TCB's (the
-  devcap redeem gate keys on `PROC_FLAG_CONSOLE_ATTACHED`, devcap.c:310).
+- **SAK transition (I-27 handoff; as-built post-RW-7 `@2608c88` — ATTACH and OWNER are
+  distinct roles).** Under `g_proc_table_lock`, on the kthread: (1) revoke
+  `PROC_FLAG_CONSOLE_ATTACHED` from the live current owner (no note is posted — a dedicated
+  `hangup`/`console-revoked` note name is the RW-7 R2-F3 v1.x notes SEAM; until then the
+  attach-bit revoke is the SAK's observable effect on the old owner); (2) set
+  `g_console_owner = NULL` unconditionally — corvus is the login AUTHORITY, never a Ctrl-C
+  target; making it the owner meant a post-SAK Ctrl-C posted `interrupt` to corvus and killed
+  the trusted path until reboot (RW-7 R2-F1). The Ctrl-C owner is re-established when login
+  spawns the session shell (`SPAWN_PERM_CONSOLE_OWNER`); during the login window there is no
+  foreground terminate target; (3) re-grant the ATTACH bit only (elevation authority, never
+  ownership) to corvus via the single `g_console_trusted_proc` pointer set when joey
+  establishes corvus. FAIL-SAFE: if no trusted proc is registered/alive, the SAK is
+  REVOKE-ONLY (no Proc can then redeem elevation until a trusted login claims the console --
+  the security-correct default). Idempotent under a BREAK flood. Guarantees the post-SAK
+  redeemer is the TCB's (the devcap redeem gate keys on `PROC_FLAG_CONSOLE_ATTACHED`,
+  devcap.c:310).
 - **Data wait = single `Rendez` + single-reader busy-guard.** `poll_waiter_list_wake` is not
   IRQ-safe, so the data-ready wake uses a `Rendez` + `wakeup()` (IRQ-safe). The console is a
   single-reader resource; a 2nd concurrent blocking `devcons_read` returns -1 (rather than the
