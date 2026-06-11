@@ -74,14 +74,24 @@ fn run(args: Args) -> i64 {
 }
 
 // `mkdir -p`: create each ancestor then the leaf, treating an already-present
-// component as success. Only meaningful for an absolute path (v1.0 has no cwd,
-// LS-4); a relative path falls through to create_dir's InvalidArgument.
+// component as success. A relative path is resolved against the per-Proc cwd
+// (LS-4) so the ancestor loop walks the real absolute chain; pre-LS-4 this
+// short-circuited a relative path into a single create_dir, so `mkdir -p a/b`
+// silently failed for the form every interactive user types (RW-9 R4-F4).
 fn mkdir_p(path: &str) -> Result<()> {
-    if !path.starts_with('/') {
-        return fs::create_dir(path);
-    }
+    let joined;
+    let abs = if path.starts_with('/') {
+        path
+    } else {
+        let cwd = env::current_dir().unwrap_or_else(|_| String::from("/"));
+        let mut s = String::from(cwd.trim_end_matches('/'));
+        s.push('/');
+        s.push_str(path);
+        joined = s;
+        joined.as_str()
+    };
     let mut acc = String::new();
-    for comp in path.split('/').filter(|s| !s.is_empty()) {
+    for comp in abs.split('/').filter(|s| !s.is_empty()) {
         acc.push('/');
         acc.push_str(comp);
         match fs::create_dir(acc.as_str()) {

@@ -1,20 +1,31 @@
 // pwd -- print the working directory.
 //
-// DEGENERATE at v1.0 (DOC-GAP G07): Thylacine has no per-Proc
-// current-directory concept. libthyla-rs::fs only accepts ABSOLUTE paths,
-// and territory mount/bind take absolute mount points -- there is no
-// getcwd/chdir. The only well-defined working-directory anchor is the
-// Proc's territory root, which is always "/". So pwd prints "/". When a
-// real cwd lands (a per-Proc dot, Plan 9-style), pwd reads it here.
+// Prints the per-Proc current directory (LS-4 landed SYS_GETCWD/SYS_CHDIR and
+// env::current_dir()). Before LS-4 there was no cwd concept, so this hardcoded
+// the territory-root anchor "/"; the substrate moved and the binary was never
+// revisited (RW-9 R4-F4 -- the LS-4-stale coreutil group).
 
 #![no_std]
 #![no_main]
+
+extern crate alloc;
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
-    libthyla_rs::io::out(b"/\n");
-    0
+    match libthyla_rs::env::current_dir() {
+        Ok(cwd) => {
+            libthyla_rs::io::out(cwd.as_bytes());
+            libthyla_rs::io::out(b"\n");
+            0
+        }
+        // cwd defaults to "/" (territory root); a getcwd failure still reports
+        // the root anchor but with a nonzero status.
+        Err(_) => {
+            libthyla_rs::io::out(b"/\n");
+            1
+        }
+    }
 }

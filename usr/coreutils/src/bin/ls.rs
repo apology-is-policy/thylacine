@@ -67,8 +67,15 @@ fn run(args: Args) -> i64 {
             Err(_) => eprintln!("ls: invalid UTF-8 path"),
         }
     }
-    if dirs.is_empty() {
-        dirs.push("/");
+    // No operand -> list the per-Proc cwd (LS-4), not the territory root. Held
+    // in cwd_holder so its &str lives as long as `dirs` (RW-9 R4-F4).
+    let cwd_holder = if dirs.is_empty() {
+        Some(env::current_dir().unwrap_or_else(|_| String::from("/")))
+    } else {
+        None
+    };
+    if let Some(ref c) = cwd_holder {
+        dirs.push(c.as_str());
     }
 
     let multi = dirs.len() > 1;

@@ -10,8 +10,13 @@
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
+extern crate alloc;
+use alloc::string::String;
+use core::fmt::Write as FmtWrite;
+
 use libthyla_rs::env::{self, Args};
-use libthyla_rs::{eprintln, println};
+use libthyla_rs::eprintln;
+use libthyla_rs::io::{self, Write};
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
@@ -53,11 +58,20 @@ fn run(args: Args) -> i64 {
     }
 
     let mut i = first;
+    let mut out = io::stdout();
+    let mut buf = String::new();
     loop {
         if (incr > 0 && i > last) || (incr < 0 && i < last) {
             break;
         }
-        println!("{}", i);
+        buf.clear();
+        let _ = write!(&mut buf, "{}\n", i);
+        // A dead stdout (`seq N | head -1`) stops the generator instead of
+        // spinning a failing write per remaining value -- the EPIPE pipe-note
+        // never terminates a non-reading native Proc (RW-9 R4-F3).
+        if out.write_all(buf.as_bytes()).is_err() {
+            break;
+        }
         match i.checked_add(incr) {
             Some(n) => i = n,
             None => break, // would overflow past the i64 boundary
