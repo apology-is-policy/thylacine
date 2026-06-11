@@ -2571,22 +2571,17 @@ static void sys_noted_handler(struct exception_context *ctx, u64 arg) {
         return;
     }
     if (arg == 1) {
-        // NDFLT -- default action. For the v1.0 supported set every
-        // default is exits(name), which requires live_peers == 0
-        // (exits extincts on live peer threads -- cross-thread shoot-
-        // down is v1.x).
-        //
-        // R3-F2 audit close: refuse NDFLT in multi-thread Procs so the
-        // kernel does not extinct on userspace-driven path. The user's
-        // handler can fall back to NCONT (restore) or do its own
-        // cleanup. Single-thread Procs reach exits cleanly.
-        irq_state_t s = proc_table_lock_acquire();
-        int live_peers = proc_count_live_peers_locked(t->proc, t);
-        proc_table_lock_release(s);
-        if (live_peers != 0) {
-            ctx->regs[0] = (u64)(s64)-1;
-            return;
-        }
+        // NDFLT -- default action: exits(name). For the v1.0 supported set
+        // every uncaught default is process termination. Post-#811 (ARCH
+        // 8.8.1) exits() on a Proc with live peers CASCADES via
+        // proc_group_terminate (it no longer extincts), so a multi-thread
+        // Proc's uncaught default-terminate signal terminates the WHOLE Proc
+        // -- the POSIX default action. RW-8 R5-F1: the prior live-peers
+        // refusal (-1) predated #809/#811 and, with pouch's always-installed
+        // handler bypassing the LS-5 kernel default-terminate, silently
+        // swallowed SIGINT/SIGTERM in multi-thread pouch daemons (NDFLT
+        // refused -> bootstrap NCONT-resumes -> the signal evaporates). The
+        // cascade is the same #811 path a multi-thread exits() already takes.
         notes_noted_default(t);
         // unreachable
     }

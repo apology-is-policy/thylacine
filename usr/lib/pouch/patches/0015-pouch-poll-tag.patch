@@ -87,7 +87,7 @@ serving is impossible.
 
 --- a/src/select/poll.c
 +++ b/src/select/poll.c
-@@ -1,20 +1,121 @@
+@@ -1,20 +1,133 @@
 +/* pouch boundary-line replacement for poll() (P6-pouch-stratumd-boot
 + * 16c-pre poll-tag-dispatch).
 + *
@@ -175,48 +175,60 @@ serving is impossible.
 +	 * array directly (zero copy). Most pouch programs poll only on
 +	 * pipe fds / spoor handles / etc; the tagged-socket case is
 +	 * specific to AF_UNIX SOCK_STREAM consumers. */
-+	int has_tagged = 0;
++	/* A negative fd is POSIX-ignored (revents := 0, not polled). It must
++	 * also force the slow path: the fast path would hand it to the kernel,
++	 * which returns POLLNVAL for fd < 0 (counted ready), defeating the
++	 * timeout and busy-spinning the caller. A tagged fd needs translation
++	 * (R5-F3). */
++	int needs_slow = 0;
 +	for (nfds_t i = 0; i < n; i++) {
-+		if ((fds[i].fd & POUCH_SOCK_TAG) != 0) {
-+			has_tagged = 1;
++		if (fds[i].fd < 0 || (fds[i].fd & POUCH_SOCK_TAG) != 0) {
++			needs_slow = 1;
 +			break;
 +		}
 +	}
-+	if (!has_tagged) {
++	if (!needs_slow) {
 +		return syscall_cp(SYS_poll, fds, n, timeout);
 +	}
 +
-+	/* Tagged-translation slow path. */
++	/* Compact the active (fd >= 0) entries into kfds, translating tagged
++	 * sockets; map[] records each kept entry's original index. A negative fd
++	 * is EXCLUDED from the kernel array entirely (not merely set to -1) so it
++	 * cannot make the kernel return immediately -- only the live fds drive
++	 * the blocking poll, and the ignored entry reads revents 0. */
 +	struct pollfd kfds[POUCH_POLL_NFDS_MAX];
++	nfds_t map[POUCH_POLL_NFDS_MAX];
++	nfds_t nk = 0;
 +	for (nfds_t i = 0; i < n; i++) {
-+		kfds[i].events  = fds[i].events;
-+		kfds[i].revents = 0;
-+		if ((fds[i].fd & POUCH_SOCK_TAG) != 0) {
-+			int kfd = pouch_sock_kernel_fd(fds[i].fd);
-+			if (kfd < 0) {
-+				/* FRESH or vacant slot. The kernel sets
-+				 * POLLNVAL on fd < 0; surface that uniformly
-+				 * via a negative sentinel. errno from
-+				 * pouch_sock_kernel_fd (ENOTCONN / EBADF) is
-+				 * shadowed because POLLNVAL in revents is the
-+				 * POSIX-correct surface for poll(); the next
-+				 * read/write on the slot will report the
-+				 * specific errno. */
-+				kfds[i].fd = -1;
-+				continue;
-+			}
-+			kfds[i].fd = kfd;
-+		} else {
-+			kfds[i].fd = fds[i].fd;
++		if (fds[i].fd < 0) {
++			fds[i].revents = 0;
++			continue;
 +		}
++		int kfd;
++		if ((fds[i].fd & POUCH_SOCK_TAG) != 0) {
++			kfd = pouch_sock_kernel_fd(fds[i].fd);
++			/* FRESH/vacant tagged slot is a genuinely-invalid fd:
++			 * keep it (kfd = -1) so the kernel reports POLLNVAL, the
++			 * POSIX EBADF surface. Unlike a caller-disabled negative
++			 * fd, this is a real error the caller must see. */
++			if (kfd < 0) kfd = -1;
++		} else {
++			kfd = fds[i].fd;
++		}
++		kfds[nk].fd      = kfd;
++		kfds[nk].events  = fds[i].events;
++		kfds[nk].revents = 0;
++		map[nk] = i;
++		nk++;
 +	}
 +
-+	int r = syscall_cp(SYS_poll, kfds, n, timeout);
++	int r = syscall_cp(SYS_poll, kfds, nk, timeout);
 +
-+	/* Copy revents back. fds[i].fd is left untouched so the caller
-+	 * still sees their original (possibly tagged) identifiers. */
-+	for (nfds_t i = 0; i < n; i++) {
-+		fds[i].revents = kfds[i].revents;
++	/* Map revents back (fd left untouched so the caller still sees its
++	 * original tagged identifiers). Ignored fd < 0 entries already read
++	 * revents 0 from the build loop. */
++	for (nfds_t k = 0; k < nk; k++) {
++		fds[map[k]].revents = kfds[k].revents;
 +	}
 +
 +	return r;

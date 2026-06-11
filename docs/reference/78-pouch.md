@@ -921,7 +921,7 @@ POSIX calls dispatch through the slot:
 - `listen(tagged_fd, backlog)` is a no-op pouch-side validation. `backlog` is ignored.
 - `accept(tagged_fd, ...)` calls `SYS_srv_accept` and returns the **raw kernel Spoor fd** (NOT pouch-tagged). Subsequent `read/write/close` on it bypass the pouch dispatch shim.
 - `connect(tagged_fd, ...)` extracts the name and calls `SYS_srv_connect(name, name_len, NULL, 0)`. `path_len=0` is the kernel's "no Twalk" case; in byte mode the kernel ALSO skips the 9P handshake. Per-Proc cap = 1 outstanding client connection.
-- `getsockopt(fd, SOL_SOCKET, SO_PEERCRED, ...)` calls `SYS_srv_peer` and marshals `srv_peer_info` (stripes/caps/console/alive) into `struct ucred` (pid = peer stripes truncated to pid_t; uid = gid = 0 at v1.0 — Thylacine has no uid model). Other levels/options return `ENOPROTOOPT`.
+- `getsockopt(fd, SOL_SOCKET, SO_PEERCRED, ...)` calls `SYS_srv_peer` and marshals `srv_peer_info` into `struct ucred`: `pid` = peer stripes truncated to pid_t; `uid` = the kernel-stamped `principal_id`; `gid` = `primary_gid` — the unforgeable A-3 identity channel, since the 0006 sockets patch (the pre-A-3 `uid = gid = 0` stub is retired). Other levels/options return `ENOPROTOOPT`.
 
 The dispatch shims in `src/unistd/{read,write,close}.c` test `(fd & POUCH_SOCK_TAG)`; tagged → route through `pouch_sock_kernel_fd(fd)`; untagged → pass straight to `SYS_read/write/close`. Cost: one bit-test on the common path.
 

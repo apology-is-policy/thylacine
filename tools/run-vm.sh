@@ -123,7 +123,7 @@ if [[ -f "$DISK_IMG" ]]; then
     # don't support).
     disk_flags=(
         -global virtio-mmio.force-legacy=false
-        -drive "if=none,id=disk0,format=raw,file=$DISK_IMG"
+        -drive "if=none,id=disk0,format=raw,file=$DISK_IMG,cache=writethrough"
         -device virtio-blk-device,drive=disk0
     )
 fi
@@ -150,7 +150,7 @@ POOL_IMG="${THYLACINE_POOL_IMG:-$REPO_ROOT/build/fixtures/pool.img}"
 pool_flags=()
 if [[ -f "$POOL_IMG" ]]; then
     pool_flags=(
-        -drive "if=none,id=pool0,format=raw,file=$POOL_IMG"
+        -drive "if=none,id=pool0,format=raw,file=$POOL_IMG,cache=writethrough"
         -device virtio-blk-device,drive=pool0
     )
 fi

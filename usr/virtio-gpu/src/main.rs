@@ -402,6 +402,10 @@ fn init_device(slot_va: u64, dma_pa: u64) -> bool {
     unsafe { write32(slot_va + REG_STATUS, STATUS_ACKNOWLEDGE) };
     unsafe { write32(slot_va + REG_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER) };
 
+    // VIRTIO 1.2 3.1.1 step 4: read bank-0 device features before bank-1.
+    // Some backends treat a missing bank-0 read as a protocol error.
+    unsafe { write32(slot_va + REG_DEVICE_FEATURES_SEL, 0) };
+    let _dev_feat_lo = unsafe { read32(slot_va + REG_DEVICE_FEATURES) };
     unsafe { write32(slot_va + REG_DEVICE_FEATURES_SEL, 1) };
     let dev_feat_hi = unsafe { read32(slot_va + REG_DEVICE_FEATURES) };
     if dev_feat_hi & VIRTIO_F_VERSION_1_BIT_BANK1 == 0 {

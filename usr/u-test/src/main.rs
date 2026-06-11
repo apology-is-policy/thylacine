@@ -114,9 +114,82 @@ pub extern "C" fn rs_main() -> i64 {
     if let Err(rc) = flow_eval_redirect() {
         return rc;
     }
+    if let Err(rc) = flow_bufreader_error_leg() {
+        return rc;
+    }
 
     t_putstr("u-test: all OK\n");
     0
+}
+
+// =============================================================================
+// Flow -- BufReader inner-read-error leg (RW-8 R1-F1 / R2-F1 regression)
+// =============================================================================
+//
+// BufReader::fill_buf set_len(cap)s over the Vec's uninitialized spare
+// capacity, reads, then set_len(n)s to the read count. On the inner-read
+// ERROR leg the pre-fix code skipped the truncation, leaving len == cap with
+// an uninitialized tail; the next fill_buf saw pos < len, skipped the refill,
+// and handed the caller `&buf[pos..]` over uninitialized heap (UB + an
+// info-leak of recycled allocations). A scripted reader yields Ok("AB"), then
+// Err, then Ok("CD"); after the error the next read MUST re-enter the inner
+// reader and return "CD" -- pre-fix it returned the stale tail without calling
+// inner (reads stays 2; bytes are garbage, not "CD").
+struct ScriptedReader {
+    step: u8,
+    reads: u32,
+}
+
+impl Read for ScriptedReader {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Error> {
+        self.reads += 1;
+        let r = match self.step {
+            0 => {
+                buf[..2].copy_from_slice(b"AB");
+                Ok(2)
+            }
+            1 => Err(Error::Io),
+            _ => {
+                buf[..2].copy_from_slice(b"CD");
+                Ok(2)
+            }
+        };
+        self.step += 1;
+        r
+    }
+}
+
+fn flow_bufreader_error_leg() -> Result<(), i64> {
+    use libthyla_rs::io::BufReader;
+
+    let mut br = BufReader::with_capacity(4, ScriptedReader { step: 0, reads: 0 });
+    let mut out = [0u8; 2];
+
+    // 1st read: inner yields "AB".
+    let n = br.read(&mut out).map_err(|_| 70i64)?;
+    if n != 2 || &out != b"AB" {
+        return Err(71);
+    }
+
+    // 2nd read: inner errors -- BufReader propagates the Err.
+    if br.read(&mut out).is_ok() {
+        return Err(72);
+    }
+
+    // 3rd read (post-error): MUST re-fill from inner and return "CD".
+    let n = br.read(&mut out).map_err(|_| 73i64)?;
+    if n != 2 || &out != b"CD" {
+        return Err(74);
+    }
+
+    // Inner must have been entered exactly 3 times (Ok, Err, Ok): the
+    // post-error read re-read inner rather than serving the uninitialized tail.
+    if br.get_ref().reads != 3 {
+        return Err(75);
+    }
+
+    t_putstr("u-test: bufreader_error_leg OK\n");
+    Ok(())
 }
 
 // =============================================================================

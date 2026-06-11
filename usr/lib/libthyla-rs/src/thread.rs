@@ -127,11 +127,15 @@ pub fn exit_self() -> ! {
 ///     as not-live).
 ///
 /// MULTI-THREAD EXIT SAFETY:
-///   At v1.0 the kernel `exits()` triggers `extinction()` if any peer
-///   thread is still RUNNING. A parent that joined via this protocol
-///   is guaranteed the child is EXITING before returning, so SYS_EXITS
-///   reaches `live_peers == 0` and the Proc transitions to ZOMBIE
-///   cleanly. v1.x will add SYS_EXIT_GROUP for the cascade case.
+///   `exits()` on a Proc with live peers (#811, ARCH 8.8.1) CASCADES --
+///   it routes through `proc_group_terminate` (flag + wake every sleeping
+///   peer + IPI the running ones) and self-exits; the last Thread out
+///   reaps the Proc. It does NOT extinct the kernel. So `t_exits` from any
+///   Thread (incl. the `#[panic_handler]` / OOM path) terminates the whole
+///   Proc cleanly, and `exit_self` on the LAST Thread transitions it to
+///   ZOMBIE. Joining via this protocol before exiting just keeps the
+///   teardown orderly (the child is already EXITING). The cascade syscall
+///   `SYS_EXIT_GROUP` has landed (`t_exit_group`, =60).
 pub fn set_tid_address(tid_word: &AtomicU32) -> Tid {
     // SAFETY: &AtomicU32 is 4-byte aligned + writable in user-VA for
     // the duration of the call.

@@ -508,9 +508,27 @@ build_sysroot() {
                     'SYS_postnote 47' 'SYS_note_mask 48' \
                     'SYS_rt_sigaction 0xFFFF' 'SYS_rt_sigprocmask 0xFFFF' \
                     'SYS_tkill 0xFFFF' 'SYS_kill 0xFFFF' \
-                    'SYS_rt_sigreturn 0xFFFF'; do
+                    'SYS_rt_sigreturn 0xFFFF' \
+                    'SYS_mmap 37' 'SYS_munmap 38' \
+                    'SYS_srv_accept 27' 'SYS_srv_peer 28' \
+                    'SYS_mmio_create 2' 'SYS_irq_create 3' 'SYS_irq_wait 4' \
+                    'SYS_mmio_map 5' 'SYS_dma_create 6' 'SYS_dma_map 7' \
+                    'SYS_walk_open 34' \
+                    'SYS_fstat 50' 'SYS_lseek 51'; do
             grep -q "^#define $seam\$" "$syscall_h" || {
                 echo "    SEAM: '#define $seam' missing from bits/syscall.h" >&2
+                fail=1
+            }
+        done
+        # fstat/lseek are #undef'd from their 0xFFFF base then redefined to
+        # 50/51 by 0010. The value-grep above proves the 50/51 define exists,
+        # but both defines coexist in the header; require the #undef so a
+        # re-vendor that drops it (leaving 0xFFFF to win) fails here, not at
+        # runtime with a silent ENOSYS on the stratumd keyfile path.
+        local undef
+        for undef in SYS_fstat SYS_lseek; do
+            grep -qE "^#undef[[:space:]]+$undef\$" "$syscall_h" || {
+                echo "    SEAM: '#undef $undef' (0010 retarget) missing from bits/syscall.h" >&2
                 fail=1
             }
         done

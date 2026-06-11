@@ -56,7 +56,7 @@ use core::arch::asm;
 use libthyla_rs::{
     T_PROT_READ, T_PROT_WRITE, T_RIGHT_MAP, T_RIGHT_READ, T_RIGHT_SIGNAL,
     T_RIGHT_WRITE, t_dma_create, t_dma_map, t_exits, t_irq_create, t_irq_wait,
-    t_mmio_create, t_mmio_map, t_puts, t_putstr,
+    t_mmio_create, t_mmio_map, t_puts, t_putstr, virtio_rmb,
 };
 
 // =============================================================================
@@ -520,6 +520,9 @@ fn wait_and_verify(irq_handle: i64, slot_va: u64, dma_va: u64) -> Result<(), ()>
     //   used_elem ring[]; // offset 4 — { le32 id; le32 len }
     let used_va = dma_va + USED_OFF;
     let used_idx = unsafe { read16(used_va + 2) };
+    // VIRTIO 1.2 2.7.13.2: a reader barrier after used.idx, before reading the
+    // used-ring entry / status / payload the device wrote (matches blk-rw).
+    virtio_rmb();
     if used_idx != 1 {
         log("virtio-blk-probe: FAIL — used.idx != 1 (got ");
         log_dec(used_idx as u32);

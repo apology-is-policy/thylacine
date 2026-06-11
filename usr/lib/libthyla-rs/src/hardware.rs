@@ -532,6 +532,13 @@ impl Dma {
     }
 
     /// Byte-level read view.
+    ///
+    /// DEVICE-ALIASING CAVEAT: the DMA region is Normal-WB memory the device
+    /// writes concurrently. A `&[u8]` asserts the bytes are immutable for the
+    /// borrow, so do NOT hold the returned slice across a window in which the
+    /// device may DMA-write -- the compiler may cache/hoist a load and return
+    /// stale bytes. For device-concurrent access use `read_u32` (volatile) or
+    /// raw `base_va()` with an explicit `virtio_rmb` / `dsb`.
     #[inline]
     #[must_use]
     pub fn as_slice(&self) -> &[u8] {
@@ -545,6 +552,12 @@ impl Dma {
     /// Multiple `&mut Dma` cannot exist concurrently (Rust borrow
     /// rules); the resulting `&mut [u8]` is exclusive for the
     /// borrow's lifetime.
+    ///
+    /// DEVICE-ALIASING CAVEAT: a `&mut [u8]` asserts EXCLUSIVE access; a device
+    /// DMA-write while the borrow is live is UB (the compiler treats the slice
+    /// as `noalias`). Take this view only while the device is quiesced for this
+    /// region; for device-concurrent buffers use `write_u32` (volatile) + an
+    /// explicit barrier before the device-visible notify.
     #[inline]
     #[must_use]
     pub fn as_slice_mut(&mut self) -> &mut [u8] {
@@ -559,10 +572,12 @@ impl Dma {
     ///
     /// Panics on `offset + 4 > len()` or `offset % 4 != 0`.
     ///
-    /// Inserts a compiler fence so the read isn't reordered around
-    /// neighbouring barrier-bearing code. The HARDWARE barrier
-    /// (`dmb ishld` via `virtio_rmb`) is still the caller's
-    /// responsibility for cross-device-CPU visibility.
+    /// The `compiler_fence` here is COMPILER-ONLY -- it emits no instruction
+    /// and provides ZERO CPU<->device ordering; the `Ordering::Acquire` arg
+    /// does NOT make this an acquire-load against the device. A HARDWARE
+    /// barrier (`dmb ishld` via `virtio_rmb` after the device's used-ring
+    /// update, `dsb` before a device-visible notify) is MANDATORY for
+    /// cross-device-CPU visibility and is the caller's responsibility.
     #[inline]
     #[must_use]
     pub fn read_u32(&self, offset: usize) -> u32 {

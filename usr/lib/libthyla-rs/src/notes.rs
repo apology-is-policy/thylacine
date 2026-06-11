@@ -331,6 +331,15 @@ impl Notes {
     /// Uses `poll(timeout=0)` to probe readiness without blocking;
     /// if POLLIN is set, follows with a `read`. Errors propagate
     /// from the underlying read.
+    ///
+    /// SINGLE-CONSUMER ONLY (concurrency caveat): the poll-then-read is not
+    /// atomic. If a SECOND consumer of the same per-Proc queue (a peer Thread,
+    /// or another `Notes` fd -- per N-5 all opens share ONE queue) drains the
+    /// note between the poll and the read, the following `read()` -- which
+    /// BLOCKS -- has nothing to return and parks. So `try_read` is truly
+    /// non-blocking only for a single-consumer queue (the shell's main loop,
+    /// the v1.0 use). A non-blocking multi-consumer probe needs a kernel
+    /// non-blocking note-read (v1.x).
     pub fn try_read(&self) -> Result<Option<Note>> {
         let mut pollfd = TPollFd {
             fd: self.handle.raw(),

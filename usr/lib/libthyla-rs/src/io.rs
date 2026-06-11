@@ -300,11 +300,15 @@ impl<R: Read> BufReader<R> {
         Self::with_capacity(DEFAULT_BUF_CAPACITY, inner)
     }
 
-    /// Wrap `inner` with a buffer of `capacity` bytes.
+    /// Wrap `inner` with a buffer of `capacity` bytes (floored at 1).
+    ///
+    /// A zero-capacity buffer would make `fill_buf` read into an empty slice
+    /// (`Ok(0)`) and report a false EOF on the `BufRead` surface; the 1-byte
+    /// floor keeps the buffered path making progress.
     pub fn with_capacity(capacity: usize, inner: R) -> Self {
         BufReader {
             inner,
-            buf: Vec::with_capacity(capacity),
+            buf: Vec::with_capacity(capacity.max(1)),
             pos: 0,
         }
     }
@@ -350,17 +354,38 @@ impl<R: Read> Read for BufReader<R> {
 impl<R: Read> BufRead for BufReader<R> {
     fn fill_buf(&mut self) -> Result<&[u8]> {
         if self.pos >= self.buf.len() {
-            // Buffer exhausted. Refill from inner. Resize the Vec to
-            // its full capacity (safe for u8 — every bit-pattern is
-            // valid), read into it, then truncate to the read count.
+            // Buffer exhausted. Refill from inner. set_len(cap) exposes the
+            // Vec's uninitialized spare capacity, but ONLY for the read: every
+            // exit below restores len to reflect exactly the INITIALIZED bytes,
+            // so a `&self.buf[..]` is never formed over uninit memory. The Err
+            // leg in particular must reset -- otherwise len stays at cap with an
+            // uninitialized tail, the next call sees pos < len, skips the
+            // refill, and hands the caller `&self.buf[pos..]` over uninitialized
+            // heap (UB + a process-local info-leak of recycled allocations).
             let cap = self.buf.capacity();
-            // SAFETY: u8 has no invalid bit patterns; the buffer's
-            // capacity bytes are allocated; we're about to overwrite
-            // exactly the bytes we read and truncate the rest.
+            // SAFETY: u8 has no invalid bit patterns; the buffer's capacity
+            // bytes are allocated. The length is corrected on every path before
+            // any read of the buffer's contents.
             unsafe {
                 self.buf.set_len(cap);
             }
-            let n = self.inner.read(&mut self.buf[..])?;
+            let n = match self.inner.read(&mut self.buf[..]) {
+                // Clamp the trusted count to cap: a kernel ABI regression
+                // returning n > cap would make set_len(n) violate the Vec
+                // invariant (out-of-bounds reads), strictly worse than a short
+                // read. The clamp turns that into safe truncation.
+                Ok(n) => cmp::min(n, cap),
+                Err(e) => {
+                    // SAFETY: 0 <= cap. Reset to the empty state so the
+                    // uninitialized tail is never observable and the next call
+                    // re-fills cleanly.
+                    unsafe {
+                        self.buf.set_len(0);
+                    }
+                    self.pos = 0;
+                    return Err(e);
+                }
+            };
             unsafe {
                 self.buf.set_len(n);
             }

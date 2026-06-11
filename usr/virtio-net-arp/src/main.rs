@@ -506,6 +506,11 @@ fn parse_rx_frame(rxpool_dma_va: u64, desc_idx: u32, frame_len: u32) -> Option<A
     if frame_len < VIRTIO_NET_HDR_LEN + ETH_HDR_LEN + ARP_LEN {
         return None;
     }
+    // The device controls the used-ring id; reject an out-of-range desc_idx
+    // before it scales the RX-pool base (else an OOB read past the pool).
+    if desc_idx >= QUEUE_SIZE as u32 {
+        return None;
+    }
     let base = rxpool_dma_va + desc_idx as u64 * RX_BUF_LEN as u64;
     let eth = base + VIRTIO_NET_HDR_LEN as u64;
     let arp = eth + ETH_HDR_LEN as u64;

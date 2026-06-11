@@ -333,6 +333,10 @@ fn init_device(slot_va: u64, dma_pa: u64, dma_va: u64) -> bool {
     unsafe { write32(slot_va + REG_STATUS, STATUS_ACKNOWLEDGE) };
     unsafe { write32(slot_va + REG_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER) };
 
+    // VIRTIO 1.2 3.1.1 step 4: read bank-0 device features before bank-1.
+    // Some backends treat a missing bank-0 read as a protocol error.
+    unsafe { write32(slot_va + REG_DEVICE_FEATURES_SEL, 0) };
+    let _dev_feat_lo = unsafe { read32(slot_va + REG_DEVICE_FEATURES) };
     unsafe { write32(slot_va + REG_DEVICE_FEATURES_SEL, 1) };
     let dev_feat_hi = unsafe { read32(slot_va + REG_DEVICE_FEATURES) };
     if dev_feat_hi & VIRTIO_F_VERSION_1_BIT_BANK1 == 0 {
@@ -508,8 +512,11 @@ fn drain_used(dma_va: u64, last_used_idx: u16, mut avail_idx: u16,
         let desc_id = unsafe { read32(elem_va + 0) };
         let used_len = unsafe { read32(elem_va + 4) };
 
-        if (desc_id as u16) >= QUEUE_SIZE {
-            // Malformed used entry — desc_id out of range. Log + skip.
+        if desc_id >= QUEUE_SIZE as u32 {
+            // Malformed used entry — desc_id out of range. Compare the FULL
+            // u32 (a `desc_id as u16` truncation would let 0x1_0000 pass the
+            // bound, then index event_pool at desc_id*8 = 512 KiB OOB).
+            // Log + skip.
             log("virtio-input: WARN — used.elem.id out of range: ");
             log_dec(desc_id);
             log("\n");
