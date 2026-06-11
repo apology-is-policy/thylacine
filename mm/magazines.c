@@ -1,8 +1,12 @@
 // Per-CPU magazines — Bonwick & Adams 2001 ("Magazines and Vmem"),
 // illumos-style kmem. Each CPU has small stacks of pre-fetched
 // pages; alloc / free hot-path is a stack pop / push without
-// touching the buddy lock. Refill on empty / drain on full are
-// batched so each buddy-lock acquisition covers MAGAZINE_SIZE pages.
+// touching the buddy lock. Refill on empty / drain on full move
+// MAGAZINE_SIZE/2 pages per boundary crossing — but each page is a
+// separate buddy_alloc/buddy_free call, so the buddy lock is taken
+// once PER PAGE on the refill/drain path, not once per batch (a
+// buddy bulk-op under one lock hold is the named v1.x lift,
+// HT11.R1-F6).
 //
 // Refill / drain target half-full so a subsequent free / alloc
 // doesn't immediately swap back. Linux uses a similar half-fill

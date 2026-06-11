@@ -312,12 +312,13 @@ enum fault_result arch_fault_handle(const struct fault_info *fi) {
     //    permission check, BURROW resolution, and PTE install. Returns
     //    FAULT_HANDLED on success → ERET resumes. Returns
     //    FAULT_UNHANDLED_USER if no VMA covers vaddr / permission denied
-    //    / sub-table OOM — caller (exception.c) extincts at v1.0; Phase
-    //    5+ note delivery upgrades this to SIGSEGV.
+    //    / sub-table OOM — caller (exception.c) terminates the Proc via
+    //    proc_fault_terminate + a snare:* note (ERRORS.md; the v1.0
+    //    extinction policy was retired by P6 hardening #3a).
     //
-    //    At v1.0 pre-P3-E this branch is dead code in production (no
-    //    EL0 thread runs); tests drive `userland_demand_page` directly
-    //    with a synthetic fault_info + manually-constructed Proc.
+    //    This is the live production demand-page path (every EL0 first
+    //    touch lands here); tests additionally drive `userland_demand_page`
+    //    directly with a synthetic fault_info + manually-constructed Proc.
     if (fi->from_user) {
         struct Thread *t = current_thread();
         if (!t || t->magic != THREAD_MAGIC) return FAULT_UNHANDLED_USER;

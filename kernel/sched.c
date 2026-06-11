@@ -540,8 +540,10 @@ void sched_set_notify_enabled(bool enabled) {
 // only one gets the work).
 //
 // Closes R5-H F78. Without this, ready/wakeup placing work on this CPU's
-// tree leaves idle peer CPUs stuck in WFI indefinitely (secondaries have
-// no per-CPU timer at v1.0; only IPI wakes WFI). Maps to scheduler.tla
+// tree leaves an idle peer waiting in WFI for its next 1 ms tick (or, during
+// the pre-production quiescent phase — before smp_enable_secondary_preemption
+// arms the secondaries' banked timers — indefinitely; only IPI wakes WFI
+// there). The IPI is the prompt wake on both. Maps to scheduler.tla
 // `NotifyWFIPeer(src, dst)` action.
 //
 // Called WITHOUT cs->lock held — peer's wake handler doesn't contend with

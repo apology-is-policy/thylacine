@@ -6,6 +6,34 @@ Closes the ROADMAP §6.2 Phase-4 exit criterion *"IRQ-to-userspace handler laten
 
 The benchmark composes the full kernel IRQ-to-userspace path under load — GIC distributor pending-set → CPU IRQ vector entry → `kobj_irq_dispatch` → wakeup of the userspace blocker → scheduler decision → context switch → ERET to EL0 → first userspace instruction — and reports p50/p99/max in counter cycles and nanoseconds.
 
+## What this bench actually measures (HOLOTYPE RW-11, HT11.SA-1a)
+
+**As-built, every number this bench has ever logged is a slice-quantum
+reading, not an IRQ-path reading.** The bench runs inside `test_run_all()`
+— BEFORE `sched_set_notify_enabled(true)` and before
+`smp_enable_secondary_preemption` arms the secondaries' timers
+(`kernel/main.c`: tests at :654, the production transition at :734). In
+that quiescent phase: the SPI lands on CPU0 (the bench driver, busy-yield
+polling); the woken child is enqueued on CPU0's rq; `ready_on`'s same-CPU
+branch sends no need_resched and its `sched_notify_idle_peer()`
+early-returns on the disabled gate; the idle peers sit in WFI with no
+timer and no IPI. The only release is CPU0's slice expiry — and the
+handshake phase-locks to the slice boundary, so the measured delta is
+exactly one slice: `THREAD_DEFAULT_SLICE_TICKS (6) × 1 ms`. Measured at
+RW-11: p50 = 6.0224–6.0236 ms across 3 HVF boots with σ≈10 µs (TCG ~9.1 ms
+= the same 6 ticks with emulation-stretched tick periods). The production
+wake paths — the notify-IPI idle-peer steal, the 1 ms tick-steal backstop,
+and the saturated same-CPU slice wait — are all UNMEASURED by anything.
+
+Bench variants that would measure real paths (registered, RW-11): run the
+bench post-transition (joey-spawned, like loom-bench) to measure the
+notify-steal path; park the driver in `tsleep` so CPU0 is idle at wake to
+measure the same-CPU idle path. Each variant measures a DIFFERENT path;
+the log line must state which. The reasoned IRQ→EL0 *path* cost (entry +
+ack + dispatch + wake + switch + eret, excluding the placement wait) is
+~0.6–1.4 µs (HT11.R4-F8) — the <5 µs p99 target is plausible once the
+placement question (HT11.SA-1b — no wake-preemption) is settled.
+
 The benchmark also delivers a small kernel-side primitive that lifts a long-standing limitation: `timer_enable_el0_counter_access()` sets `CNTKCTL_EL1.EL0PCTEN = 1` per-CPU at boot, enabling EL0 reads of `CNTPCT_EL0` without trap. This is required for the bench's userspace side and is a load-bearing prerequisite for any future userspace vDSO clock primitive.
 
 ## Public API additions

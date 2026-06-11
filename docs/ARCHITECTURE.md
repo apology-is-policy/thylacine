@@ -457,11 +457,11 @@ Flags: `KP_ZERO` (zero on alloc), `KP_DMA` (low-32-bit physical), `KP_NOWAIT` (r
 
 **Mechanism** (`mm/slub.c`):
 - Per-object-class slab pages, each containing N objects of identical size.
-- Per-CPU "active slab" pointer; allocations come from this slab without lock.
+- Per-CPU "active slab" pointer; allocations come from this slab without lock. **DEFERRED (v1.x)** — as-built every `kmem_cache_alloc`/`free` takes the per-cache global `c->lock` (the per-CPU lockless fast path, SLUB's defining mechanism, is not yet built; HT11.R1-F7 + HT01.A-H/T. The page-allocator layer DOES have per-CPU magazines for orders 0/9).
 - Free objects within a slab are tracked via a free-list embedded in the unused object memory (zero overhead per free object).
 - When the active slab is full, fetch a new partially-full or empty slab from the per-class partial list.
 - When a slab is fully free for some time, return its page(s) to the buddy allocator.
-- Per-class debug mode: red zones, poison patterns, allocation/free trace. Compiled out in release builds; on in `slub_debug=1` boot cmdline.
+- Per-class debug mode: red zones, poison patterns, allocation/free trace. Compiled out in release builds; on in `slub_debug=1` boot cmdline. **DEFERRED (v1.x)** — no debug mode exists as-built (HT01.A-H/T).
 
 **Standard caches**:
 - `proc_cache` (size of `struct Proc`)

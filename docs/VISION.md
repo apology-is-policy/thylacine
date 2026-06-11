@@ -166,11 +166,11 @@ Throughput-focused budgets are insufficient: a 50 ms commit pause is invisible a
 | Halcyon frame time (60 Hz floor) | < 10 ms | < 16 ms | < 33 ms |
 
 These are aggressive — seL4 / Fuchsia / Helios territory — and achievable on QEMU + Hypervisor.framework on Apple Silicon. They are gated:
-- Boot times: Phase 8 v1.0 release exit.
-- Syscall latencies: measured continuously from Phase 2 onward.
-- 9P round-trip: gated at Phase 4 exit.
+- Boot times: Phase 8 v1.0 release exit. *(Measurement status, HOLOTYPE RW-11: not measurable as committed until a production boot configuration exists — the in-kernel test suite + joey's probe ladder run unconditionally in the only build shape; the kernel's own `boot-time:` self-measure reports ~1.25 s under HVF with the suite in-line, non-test fraction ~0.1 s. HT11.R4-F1/F2.)*
+- Syscall latencies: Phase 8 v1.0 release exit. *(The original "measured continuously from Phase 2 onward" was never built — no per-syscall bench exists; the nearest measured proxy is loom-bench's NOP enter, 83 ns/op under HVF at RW-11. A getpid-class + pipe bench is owed. HT11.G2/G3.)*
+- 9P round-trip: Phase 8 v1.0 release exit. *(The original "gated at Phase 4 exit" was never numerically gated; first measured at RW-11 — present-proxy full-path round-trip 24–61 µs under HVF, floor inside the 50 µs p50.)*
 - Halcyon frame time: gated at Phase 8 exit.
-- IRQ-to-handler: gated at Phase 8 v1.0 release exit (drives the userspace-driver argument; if we miss this number, the driver model is broken).
+- IRQ-to-handler: gated at Phase 8 v1.0 release exit (drives the userspace-driver argument; if we miss this number, the driver model is broken). *(Measurement status, RW-11: irq-bench as-built measures the test-mode slice-wait path, not the IRQ path — see `docs/reference/41-irq-bench.md` "What this bench actually measures"; the production wake paths are unmeasured. HT11.SA-1a/G4.)*
 
 Tail-latency regression is treated as a bug, not a performance variance.
 
