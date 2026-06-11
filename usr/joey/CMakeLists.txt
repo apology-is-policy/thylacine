@@ -13,6 +13,13 @@
 add_executable(joey joey.c)
 target_link_libraries(joey PRIVATE t)
 
+# #61 (RW-11 R4-F2): when THYLA_BOOT_PROBES is ON (default) compile joey's
+# boot-test probe ladder; OFF yields the lean production init (no probes). The
+# option is declared in the parent usr/CMakeLists.txt.
+if(THYLA_BOOT_PROBES)
+    target_compile_definitions(joey PRIVATE THYLA_BOOT_PROBES)
+endif()
+
 # A-5c-c: the build generates the host-baked system recovery phrase header here
 # (tools/build.sh emit_corvus_recovery_header). joey #includes it (guarded by
 # __has_include) to drive the live RECOVER(system) boot E2E. Absent header ->

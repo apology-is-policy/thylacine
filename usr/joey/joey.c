@@ -60,6 +60,7 @@ static const char *itoa_dec(long v, char *buf, size_t buf_sz) {
     return buf;
 }
 
+#if THYLA_BOOT_PROBES  /* #61: corvus-protocol + smoke-probe helpers (boot-test only) */
 // mem_contains — is `needle` (length nlen) a substring of `hay` (length
 // hlen)? A tiny no-libc helper for content-checking relayed child output.
 static int mem_contains(const unsigned char *hay, size_t hlen,
@@ -864,6 +865,7 @@ static long connect_corvus(void) {
     t_close(wr_yield);
     return result;
 }
+#endif /* THYLA_BOOT_PROBES (corvus-protocol + smoke-probe helpers) */
 
 // A-1.7 capability-scoped service storage: idempotent mkdir returning a
 // NON-OPENED (O_PATH) walkable handle (FS-delta) -- the valid base for the
@@ -932,6 +934,7 @@ static int do_corvus_bringup(long storage_dup_fd) {
     t_putstr(itoa_dec(corvus_pid, buf, sizeof(buf)));
     t_putstr("\n");
 
+#if THYLA_BOOT_PROBES
     long conn_fd = connect_corvus();
     if (conn_fd < 0) {
         t_putstr("joey: t_srv_connect(\"corvus\", \"ctl\") FAILED\n");
@@ -1558,6 +1561,7 @@ static int do_corvus_bringup(long storage_dup_fd) {
     // service cleanup).
 
     t_putstr("joey: corvus-d hybrid-PKE round-trip verified via /srv/corvus (b3b)\n");
+#endif /* THYLA_BOOT_PROBES (corvus boot-test ladder; the spawn above is real bringup) */
 
     return 0;
 }
@@ -1584,6 +1588,7 @@ static int do_corvus_bringup(long storage_dup_fd) {
 // during a session) is untouched.
 #define LOGIN_PERMS ((unsigned int)T_SPAWN_PERM_MAY_POST_SERVICE)
 
+#if THYLA_BOOT_PROBES  /* #61: login + recover boot-test E2E helpers */
 // do_login_e2e -- prove the /sbin/login orchestration NON-interactively on the
 // boot path. The harness passes at the banner + kills QEMU, so the live
 // getty-loop never runs in CI; this seeded run is the CI coverage of
@@ -1745,6 +1750,7 @@ static int do_recover_e2e(void) {
     t_putstr("joey: login !recover E2E OK (live RECOVER(user) via the login UX; michael passphrase reset+restored)\n");
     return 0;
 }
+#endif /* THYLA_BOOT_PROBES (login + recover boot-test E2E helpers) */
 
 // reap_adopted_orphans -- 2B-F3: the init reaper duty. Orphans (children of
 // any exited Proc) reparent to joey (kernel proc_reparent_children targets
@@ -1843,6 +1849,7 @@ int main(void) {
     char buf[24];
     t_putstr("joey: hello from /joey (real userspace binary, loaded from ramfs)\n");
 
+#if THYLA_BOOT_PROBES
     // === /hello orchestration (P5-spawn-wait) ===
     const char hello_name[] = "hello";
     long pid = t_spawn(hello_name, sizeof(hello_name) - 1);
@@ -2394,6 +2401,7 @@ int main(void) {
         t_putstr("joey: probe /system.key lseek SEEK_END/SEEK_SET OK\n");
         t_putstr("joey: probe A-2a owner=system + SYS_WSTAT reject paths OK\n");
     }
+#endif /* THYLA_BOOT_PROBES (pre-pivot boot-test probe ladder) */
 
     // === stratumd boot pool mount (P6-pouch-stratumd-boot sub-chunk 16b-gamma) ===
     //
@@ -2733,6 +2741,7 @@ int main(void) {
             t_putstr(itoa_dec(post_n, buf, sizeof(buf)));
             t_putstr(" bytes); root now disk-backed Stratum FS\n");
 
+#if THYLA_BOOT_PROBES
             // === FS-mutation foundation E2E (FS-alpha + FS-beta) ===
             // Exercise SYS_WALK_CREATE + SYS_WRITE + SYS_FSYNC + SYS_READDIR
             // end-to-end against the real disk-backed Stratum FS (through the
@@ -3208,6 +3217,7 @@ int main(void) {
                 }
                 t_putstr("joey: /fs-mut-smoke reaped status=0; LS-3b fs-mutation API verified\n");
             }
+#endif /* THYLA_BOOT_PROBES (post-pivot boot-test probe ladder) */
 
             (void)t_close(sd_rd);
         }
@@ -3246,6 +3256,7 @@ int main(void) {
         }
         (void)t_close(corvus_storage);
 
+#if THYLA_BOOT_PROBES
         // === A-4a-3: the legate E2E prover ===
         // corvus is up, michael is eligible for fs-admin (granted in the bringup),
         // and the global session is closed (the bringup's reconnect path closed
@@ -3273,11 +3284,13 @@ int main(void) {
             }
             t_putstr("joey: /legate-prover reaped status=0; legate E2E verified\n");
         }
+#endif /* THYLA_BOOT_PROBES (legate E2E prover) */
     }
 
     // === A-5a: the /sbin/login session core + the boot->session transition ===
     // joey is the long-running init (ARCH section 5.1). IDENTITY-DESIGN.md 9.9.
     //
+#if THYLA_BOOT_PROBES
     // (0.5) Prove the /sbin/login `!recover` recovery UX drives a LIVE
     // RECOVER(user) (A-5c-c-2). Fresh-pool-gated; runs BEFORE the login E2E
     // because it resets + restores michael's passphrase, which the login E2E
@@ -3293,6 +3306,7 @@ int main(void) {
     if (do_login_e2e() != 0) {
         return 1;
     }
+#endif /* THYLA_BOOT_PROBES (login + recover boot-test E2Es) */
 
     // (2) Signal boot-complete. All boot-test asserts have passed, so the kernel
     // prints "Thylacine boot OK" here (the banner no longer rides joey's exit;

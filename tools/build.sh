@@ -95,9 +95,11 @@ build_type="Debug"
 hardening_full="OFF"
 kaslr="OFF"
 sanitize=""
-# #61 (RW-11 R4-F1): production boot shape. ON (default) keeps the in-kernel
-# test suite (dev/CI); --production flips it OFF for the lean V1.0 kernel.
+# #61 (RW-11 R4-F1/F2): production boot shape. ON (default) keeps the in-kernel
+# test suite + joey's boot-test probe ladder (dev/CI); --production flips both
+# OFF for the lean V1.0 boot-to-getty.
 kernel_tests="ON"
+boot_probes="ON"
 build_dir_override=""
 verbose=""
 extra_cmake_args=()
@@ -117,10 +119,12 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --production)
-            # #61 (RW-11 R4-F1/F2): the V1.0 production boot shape. Drops the
-            # in-kernel test suite (KERNEL_TESTS=OFF). #61b extends this same flag
-            # to gate joey's boot-test probe ladder (THYLA_BOOT_PROBES=OFF).
+            # #61 (RW-11 R4-F1/F2): the V1.0 production boot shape. Drops both
+            # the in-kernel test suite (KERNEL_TESTS=OFF) and joey's boot-test
+            # probe ladder (THYLA_BOOT_PROBES=OFF), so the lean image boots
+            # straight to the login getty.
             kernel_tests="OFF"
+            boot_probes="OFF"
             shift
             ;;
         --sanitize=*)
@@ -386,15 +390,16 @@ build_userspace() {
     # A-5c-c: the generated recovery-phrase header must exist before joey compiles.
     emit_corvus_recovery_header
     # C side — CMake.
-    echo "==> Building userspace C (dir=$USR_BUILD)"
+    echo "==> Building userspace C (dir=$USR_BUILD, boot_probes=$boot_probes)"
     cmake -S "$REPO_ROOT/usr" -B "$USR_BUILD" \
         -DCMAKE_TOOLCHAIN_FILE="$USR_TOOLCHAIN_FILE" \
         -DCMAKE_BUILD_TYPE="$build_type" \
         -DTHYLA_GENERATED_DIR="$GEN_DIR" \
+        -DTHYLA_BOOT_PROBES="$boot_probes" \
         ${extra_cmake_args[@]+"${extra_cmake_args[@]}"}
     cmake --build "$USR_BUILD" $verbose
     echo "==> Userspace C built under $USR_BUILD"
-    ledger "userspace: BUILT (native libt C binaries + the Rust workspace below)"
+    ledger "userspace: BUILT (native libt C binaries + the Rust workspace below; boot_probes=$boot_probes)"
     ls -la "$USR_BUILD/hello/hello" 2>/dev/null || true
 
     # Rust side — cargo. Optional: if rustup hasn't installed the

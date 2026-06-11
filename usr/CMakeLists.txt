@@ -40,6 +40,13 @@ set(USR_LINKER_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/scripts/aarch64-userspace.ld
 # per-binary CMakeLists files stay minimal.
 add_link_options(-T${USR_LINKER_SCRIPT})
 
+# #61 (RW-11 R4-F2): production boot shape -- joey's boot-test probe ladder.
+# ON (default) keeps the probes (dev/CI asserts on their output). OFF
+# (tools/build.sh --production) compiles joey without the ladder, so the lean
+# init boots straight to the login getty with no argon2-bearing boot-test
+# probes in the boot-to-prompt window. joey/CMakeLists.txt consumes it.
+option(THYLA_BOOT_PROBES "Compile joey's boot-test probe ladder" ON)
+
 add_subdirectory(lib/libt)
 add_subdirectory(hello)
 add_subdirectory(joey)
