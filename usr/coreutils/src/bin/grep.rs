@@ -13,9 +13,10 @@ use alloc::vec::Vec;
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
+use core::fmt::Write as _;
 use libthyla_rs::env::{self, Args};
 use libthyla_rs::fs::File;
-use libthyla_rs::{eprintln, io, print, println};
+use libthyla_rs::{eprintln, io};
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
@@ -45,7 +46,7 @@ struct Flags {
     count: bool,
 }
 
-fn grep_data(data: &[u8], pat: &[u8], f: &Flags, prefix: Option<&str>) -> usize {
+fn grep_data(out: &mut io::OutSink, data: &[u8], pat: &[u8], f: &Flags, prefix: Option<&str>) -> usize {
     let mut lines: Vec<&[u8]> = data.split(|&b| b == b'\n').collect();
     if data.last() == Some(&b'\n') {
         lines.pop();
@@ -56,13 +57,13 @@ fn grep_data(data: &[u8], pat: &[u8], f: &Flags, prefix: Option<&str>) -> usize 
             matches += 1;
             if !f.count {
                 if let Some(p) = prefix {
-                    print!("{}:", p);
+                    let _ = write!(out, "{}:", p);
                 }
                 if f.number {
-                    print!("{}:", n + 1);
+                    let _ = write!(out, "{}:", n + 1);
                 }
-                io::out(line);
-                io::out(b"\n");
+                out.put(line);
+                out.put(b"\n");
             }
         }
     }
@@ -126,13 +127,14 @@ fn run(args: Args) -> i64 {
     let multi = files.len() > 1;
     let mut any_match = false;
     let mut status_err = false;
+    let mut out = io::OutSink::new();
 
     if files.is_empty() {
         match io::slurp(&mut io::stdin()) {
             Ok(data) => {
-                let m = grep_data(&data, pat, &f, None);
+                let m = grep_data(&mut out, &data, pat, &f, None);
                 if f.count {
-                    println!("{}", m);
+                    let _ = writeln!(out, "{}", m);
                 }
                 any_match |= m > 0;
             }
@@ -146,12 +148,12 @@ fn run(args: Args) -> i64 {
             match File::open(path).and_then(|mut fh| io::slurp(&mut fh)) {
                 Ok(data) => {
                     let prefix = if multi { Some(path) } else { None };
-                    let m = grep_data(&data, pat, &f, prefix);
+                    let m = grep_data(&mut out, &data, pat, &f, prefix);
                     if f.count {
                         if multi {
-                            println!("{}:{}", path, m);
+                            let _ = writeln!(out, "{}:{}", path, m);
                         } else {
-                            println!("{}", m);
+                            let _ = writeln!(out, "{}", m);
                         }
                     }
                     any_match |= m > 0;
@@ -162,6 +164,11 @@ fn run(args: Args) -> i64 {
                 }
             }
         }
+    }
+
+    if out.failed() {
+        eprintln!("grep: write error");
+        status_err = true;
     }
 
     if status_err {

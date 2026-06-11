@@ -42,6 +42,7 @@ fn normalize(path: &str) -> String {
 
 fn run(args: Args) -> i64 {
     let mut status = 0;
+    let mut out = io::OutSink::new();
     let mut had = false;
     for op in args.operands() {
         had = true;
@@ -73,11 +74,15 @@ fn run(args: Args) -> i64 {
             }
         };
         let canon = normalize(&abs);
-        io::out(canon.as_bytes());
-        io::out(b"\n");
+        out.put(canon.as_bytes());
+        out.put(b"\n");
     }
     if !had {
         eprintln!("realpath: missing operand");
+        return 1;
+    }
+    if out.failed() {
+        eprintln!("realpath: write error");
         return 1;
     }
     status

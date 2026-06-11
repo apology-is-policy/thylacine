@@ -13,21 +13,22 @@ use alloc::vec::Vec;
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
+use core::fmt::Write as _;
 use libthyla_rs::env::{self, Args};
 use libthyla_rs::fs::File;
-use libthyla_rs::{eprintln, io, print};
+use libthyla_rs::{eprintln, io};
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
     run(env::args())
 }
 
-fn emit(line: &[u8], count: usize, with_count: bool) {
+fn emit(out: &mut io::OutSink, line: &[u8], count: usize, with_count: bool) {
     if with_count {
-        print!("{:>7} ", count);
+        let _ = write!(out, "{:>7} ", count);
     }
-    io::out(line);
-    io::out(b"\n");
+    out.put(line);
+    out.put(b"\n");
 }
 
 fn run(args: Args) -> i64 {
@@ -82,13 +83,14 @@ fn run(args: Args) -> i64 {
         lines.pop(); // drop the spurious empty after a trailing newline
     }
 
+    let mut out = io::OutSink::new();
     let mut prev: Option<&[u8]> = None;
     let mut count = 0usize;
     for line in lines {
         match prev {
             Some(p) if p == line => count += 1,
             Some(p) => {
-                emit(p, count, with_count);
+                emit(&mut out, p, count, with_count);
                 prev = Some(line);
                 count = 1;
             }
@@ -99,7 +101,11 @@ fn run(args: Args) -> i64 {
         }
     }
     if let Some(p) = prev {
-        emit(p, count, with_count);
+        emit(&mut out, p, count, with_count);
+    }
+    if out.failed() {
+        eprintln!("uniq: write error");
+        return 1;
     }
     0
 }

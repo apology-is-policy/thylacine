@@ -22,10 +22,17 @@ pub extern "C" fn rs_main() -> i64 {
     run(env::args())
 }
 
-fn expand(set: &[u8]) -> Vec<u8> {
+// Expand `a-z` byte ranges. Returns None if the set opens an unsupported
+// POSIX bracket construct (`[:class:]` / `[=equiv=]`): tr v1 has no class
+// support, and silently treating `[:space:]` as the literal bytes
+// `[ : s p a c e ]` corrupts data (exit 0), so reject it visibly instead.
+fn expand(set: &[u8]) -> Option<Vec<u8>> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < set.len() {
+        if set[i] == b'[' && i + 1 < set.len() && (set[i + 1] == b':' || set[i + 1] == b'=') {
+            return None;
+        }
         if i + 2 < set.len() && set[i + 1] == b'-' && set[i + 2] >= set[i] {
             for b in set[i]..=set[i + 2] {
                 out.push(b);
@@ -36,7 +43,7 @@ fn expand(set: &[u8]) -> Vec<u8> {
             i += 1;
         }
     }
-    out
+    Some(out)
 }
 
 fn run(args: Args) -> i64 {
@@ -48,7 +55,13 @@ fn run(args: Args) -> i64 {
     }
 
     let set1 = match args.get(idx) {
-        Some(s) => expand(s),
+        Some(s) => match expand(s) {
+            Some(v) => v,
+            None => {
+                eprintln!("tr: POSIX character classes ([:class:], [=equiv=]) are not supported");
+                return 1;
+            }
+        },
         None => {
             eprintln!("tr: missing operand");
             return 1;
@@ -60,7 +73,13 @@ fn run(args: Args) -> i64 {
         Vec::new()
     } else {
         match args.get(idx) {
-            Some(s) => expand(s),
+            Some(s) => match expand(s) {
+                Some(v) => v,
+                None => {
+                    eprintln!("tr: POSIX character classes ([:class:], [=equiv=]) are not supported");
+                    return 1;
+                }
+            },
             None => {
                 eprintln!("tr: translate mode needs two sets");
                 return 1;

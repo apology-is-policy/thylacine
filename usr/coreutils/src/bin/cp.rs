@@ -85,6 +85,29 @@ fn run(args: Args) -> i64 {
         } else {
             String::from(dest)
         };
+        // Refuse a copy whose source and destination resolve to the same file
+        // (`cp f f` / `cp f .` would otherwise open-then-truncate the source to
+        // 0 bytes -- silent data loss, exit 0). No symlinks at v1 (G11), so
+        // lexical canonicalization is true file identity. With -r, additionally
+        // refuse a destination inside the source tree (a runaway self-copy).
+        if let (Some(cs), Some(ct)) = (canon(src), canon(target.as_str())) {
+            if cs == ct {
+                eprintln!("cp: '{}' and '{}' are the same file", src, target);
+                status = 1;
+                continue;
+            }
+            if recursive && fs::is_dir(src) {
+                let mut prefix = cs;
+                if !prefix.ends_with('/') {
+                    prefix.push('/');
+                }
+                if ct.starts_with(prefix.as_str()) {
+                    eprintln!("cp: cannot copy a directory, '{}', into itself, '{}'", src, target);
+                    status = 1;
+                    continue;
+                }
+            }
+        }
         if let Err(e) = cp_one(src, target.as_str()) {
             eprintln!("cp: {} -> {}: {}", src, target, e);
             status = 1;
@@ -122,6 +145,36 @@ fn copy_file(src: &str, dst: &str) -> Result<()> {
     let mut w = File::create(dst)?;
     io::copy(&mut r, &mut w)?;
     Ok(())
+}
+
+// Canonicalize lexically: anchor a relative path against the per-Proc cwd
+// (LS-4), collapse `.`/`..`/`//`. None only if the cwd is unreadable for a
+// relative input. Mirrors the realpath coreutil; sound as file identity
+// because v1 has no symlinks (G11).
+fn canon(path: &str) -> Option<String> {
+    let abs = if path.starts_with('/') {
+        String::from(path)
+    } else {
+        let mut cwd = env::current_dir().ok()?;
+        if !cwd.ends_with('/') {
+            cwd.push('/');
+        }
+        cwd.push_str(path);
+        cwd
+    };
+    let mut stack: Vec<&str> = Vec::new();
+    for comp in abs.split('/') {
+        match comp {
+            "" | "." => {}
+            ".." => {
+                stack.pop();
+            }
+            c => stack.push(c),
+        }
+    }
+    let mut out = String::from("/");
+    out.push_str(&stack.join("/"));
+    Some(out)
 }
 
 fn base(path: &str) -> &str {

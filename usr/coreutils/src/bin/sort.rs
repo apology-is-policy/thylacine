@@ -12,7 +12,7 @@ static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::Th
 
 use libthyla_rs::env::{self, Args};
 use libthyla_rs::fs::File;
-use libthyla_rs::io::{self, Write};
+use libthyla_rs::io;
 use libthyla_rs::eprintln;
 
 #[no_mangle]
@@ -104,7 +104,7 @@ fn run(args: Args) -> i64 {
         lines.reverse();
     }
 
-    let mut out = io::stdout();
+    let mut out = io::OutSink::new();
     let mut prev: Option<&[u8]> = None;
     for line in lines {
         if uniq {
@@ -113,8 +113,12 @@ fn run(args: Args) -> i64 {
             }
             prev = Some(line);
         }
-        let _ = out.write_all(line);
-        let _ = out.write_all(b"\n");
+        out.put(line);
+        out.put(b"\n");
+    }
+    if out.failed() {
+        eprintln!("sort: write error");
+        return 1;
     }
     0
 }

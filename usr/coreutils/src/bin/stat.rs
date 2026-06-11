@@ -12,9 +12,11 @@
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
+use core::fmt::Write as _;
 use libthyla_rs::env::{self, Args};
 use libthyla_rs::fs::{self, Metadata};
-use libthyla_rs::{eprintln, print};
+use libthyla_rs::io;
+use libthyla_rs::eprintln;
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
@@ -35,6 +37,7 @@ fn type_word(m: &Metadata) -> &'static str {
 
 fn run(args: Args) -> i64 {
     let mut status = 0;
+    let mut out = io::OutSink::new();
     let mut had = false;
     for op in args.operands() {
         had = true;
@@ -48,22 +51,25 @@ fn run(args: Args) -> i64 {
         };
         match fs::metadata(path) {
             Ok(m) => {
-                print!("  File: {}\n", path);
-                print!(
+                let _ = write!(out, "  File: {}\n", path);
+                let _ = write!(
+                    out,
                     "  Size: {}\tBlocks: {}\tIO Block: {}\t{}\n",
                     m.len(),
                     m.blocks(),
                     m.blksize(),
                     type_word(&m)
                 );
-                print!(
+                let _ = write!(
+                    out,
                     "  Mode: ({:04o})\tLinks: {}\tUid: ({})\tGid: ({})\n",
                     m.permissions() & 0o7777,
                     m.nlink(),
                     m.uid(),
                     m.gid()
                 );
-                print!(
+                let _ = write!(
+                    out,
                     "Access: {}\tModify: {}\tChange: {}\n",
                     m.atime_sec(),
                     m.mtime_sec(),
@@ -78,6 +84,10 @@ fn run(args: Args) -> i64 {
     }
     if !had {
         eprintln!("stat: missing operand");
+        return 1;
+    }
+    if out.failed() {
+        eprintln!("stat: write error");
         return 1;
     }
     status

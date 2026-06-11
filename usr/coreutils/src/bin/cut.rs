@@ -52,46 +52,46 @@ fn selected(pos: usize, ranges: &[(usize, usize)]) -> bool {
     ranges.iter().any(|&(lo, hi)| pos >= lo && pos <= hi)
 }
 
-fn cut_line_fields(line: &[u8], delim: u8, ranges: &[(usize, usize)]) {
+fn cut_line_fields(out: &mut io::OutSink, line: &[u8], delim: u8, ranges: &[(usize, usize)]) {
     let fields: Vec<&[u8]> = line.split(|&b| b == delim).collect();
     // If there is no delimiter, GNU cut prints the whole line unchanged.
     if fields.len() == 1 {
-        io::out(line);
-        io::out(b"\n");
+        out.put(line);
+        out.put(b"\n");
         return;
     }
     let mut first = true;
     for (i, fld) in fields.iter().enumerate() {
         if selected(i + 1, ranges) {
             if !first {
-                io::out(&[delim]);
+                out.put(&[delim]);
             }
-            io::out(fld);
+            out.put(fld);
             first = false;
         }
     }
-    io::out(b"\n");
+    out.put(b"\n");
 }
 
-fn cut_line_chars(line: &[u8], ranges: &[(usize, usize)]) {
+fn cut_line_chars(out: &mut io::OutSink, line: &[u8], ranges: &[(usize, usize)]) {
     for (i, &b) in line.iter().enumerate() {
         if selected(i + 1, ranges) {
-            io::out(&[b]);
+            out.put(&[b]);
         }
     }
-    io::out(b"\n");
+    out.put(b"\n");
 }
 
-fn process(data: &[u8], by_field: bool, delim: u8, ranges: &[(usize, usize)]) {
+fn process(out: &mut io::OutSink, data: &[u8], by_field: bool, delim: u8, ranges: &[(usize, usize)]) {
     let mut lines: Vec<&[u8]> = data.split(|&b| b == b'\n').collect();
     if data.last() == Some(&b'\n') {
         lines.pop();
     }
     for line in lines {
         if by_field {
-            cut_line_fields(line, delim, ranges);
+            cut_line_fields(out, line, delim, ranges);
         } else {
-            cut_line_chars(line, ranges);
+            cut_line_chars(out, line, ranges);
         }
     }
 }
@@ -157,6 +157,7 @@ fn run(args: Args) -> i64 {
     };
 
     let mut status = 0;
+    let mut out = io::OutSink::new();
     let mut had = false;
     let mut i = idx;
     while let Some(op) = args.get(i) {
@@ -171,7 +172,7 @@ fn run(args: Args) -> i64 {
             }
         };
         match File::open(path).and_then(|mut f| io::slurp(&mut f)) {
-            Ok(data) => process(&data, by_field, delim, &ranges),
+            Ok(data) => process(&mut out, &data, by_field, delim, &ranges),
             Err(e) => {
                 eprintln!("cut: {}: {}", path, e);
                 status = 1;
@@ -180,12 +181,16 @@ fn run(args: Args) -> i64 {
     }
     if !had {
         match io::slurp(&mut io::stdin()) {
-            Ok(data) => process(&data, by_field, delim, &ranges),
+            Ok(data) => process(&mut out, &data, by_field, delim, &ranges),
             Err(e) => {
                 eprintln!("cut: stdin: {}", e);
                 status = 1;
             }
         }
+    }
+    if out.failed() {
+        eprintln!("cut: write error");
+        return 1;
     }
     status
 }

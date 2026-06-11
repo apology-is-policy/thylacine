@@ -9,11 +9,12 @@
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
+use core::fmt::Write as _;
 use libthyla_rs::env::{self, Args};
 use libthyla_rs::err::Result;
 use libthyla_rs::fs::File;
 use libthyla_rs::io::{self, Read};
-use libthyla_rs::{eprintln, print};
+use libthyla_rs::eprintln;
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
@@ -31,7 +32,7 @@ fn read_full<R: Read>(r: &mut R, buf: &mut [u8]) -> Result<usize> {
     Ok(got)
 }
 
-fn dump<R: Read>(r: &mut R) -> Result<()> {
+fn dump<R: Read>(out: &mut io::OutSink, r: &mut R) -> Result<()> {
     let mut buf = [0u8; 16];
     let mut offset: u64 = 0;
     loop {
@@ -39,31 +40,32 @@ fn dump<R: Read>(r: &mut R) -> Result<()> {
         if n == 0 {
             break;
         }
-        print!("{:08x}  ", offset);
+        let _ = write!(out, "{:08x}  ", offset);
         for (i, &byte) in buf.iter().enumerate() {
             if i < n {
-                print!("{:02x} ", byte);
+                let _ = write!(out, "{:02x} ", byte);
             } else {
-                io::out(b"   ");
+                out.put(b"   ");
             }
             if i == 7 {
-                io::out(b" ");
+                out.put(b" ");
             }
         }
-        io::out(b" |");
+        out.put(b" |");
         for &b in &buf[..n] {
             let pc = if (0x20..0x7f).contains(&b) { b } else { b'.' };
-            io::out(&[pc]);
+            out.put(&[pc]);
         }
-        io::out(b"|\n");
+        out.put(b"|\n");
         offset += n as u64;
     }
-    print!("{:08x}\n", offset);
+    let _ = write!(out, "{:08x}\n", offset);
     Ok(())
 }
 
 fn run(args: Args) -> i64 {
     let mut status = 0;
+    let mut out = io::OutSink::new();
     let mut had = false;
     for op in args.operands() {
         had = true;
@@ -76,7 +78,7 @@ fn run(args: Args) -> i64 {
             }
         };
         if path == "-" {
-            if let Err(e) = dump(&mut io::stdin()) {
+            if let Err(e) = dump(&mut out, &mut io::stdin()) {
                 eprintln!("hexdump: -: {}", e);
                 status = 1;
             }
@@ -84,7 +86,7 @@ fn run(args: Args) -> i64 {
         }
         match File::open(path) {
             Ok(mut f) => {
-                if let Err(e) = dump(&mut f) {
+                if let Err(e) = dump(&mut out, &mut f) {
                     eprintln!("hexdump: {}: {}", path, e);
                     status = 1;
                 }
@@ -96,10 +98,14 @@ fn run(args: Args) -> i64 {
         }
     }
     if !had {
-        if let Err(e) = dump(&mut io::stdin()) {
+        if let Err(e) = dump(&mut out, &mut io::stdin()) {
             eprintln!("hexdump: stdin: {}", e);
             status = 1;
         }
+    }
+    if out.failed() {
+        eprintln!("hexdump: write error");
+        return 1;
     }
     status
 }

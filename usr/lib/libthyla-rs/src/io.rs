@@ -633,10 +633,96 @@ pub fn err(buf: &[u8]) {
     let _ = stderr().write_all(buf);
 }
 
-/// Read all of `reader` into a fresh `Vec` (thin wrapper over the `Read`
-/// default `read_to_end`). The "load the whole file" helper for `wc`/`sort`.
+/// A stdout sink that LATCHES the first write error: once a write to fd 1
+/// fails, every later `put` / `write!` is a no-op and `failed()` stays true.
+/// Lets a coreutil emit its payload without `?`-threading a `Result` through
+/// every formatting helper, then report a single "write error" + a nonzero
+/// exit at the end -- the cat/head discipline, which `io::out` (swallow and
+/// keep trying) does not provide. Use this for PAYLOAD (the data the utility
+/// exists to produce); a silent truncation that still exits 0 is the data-loss
+/// class this guards against. The `core::fmt::Write` impl is infallible by
+/// design (it routes through the latch), so `write!(sink, ...)` never returns
+/// an error to handle -- check `failed()` once when done.
+pub struct OutSink {
+    out: Stdout,
+    failed: bool,
+}
+
+impl OutSink {
+    #[inline]
+    #[must_use]
+    pub fn new() -> Self {
+        OutSink { out: Stdout, failed: false }
+    }
+
+    /// Write all of `buf` to stdout. A no-op once a prior write has failed.
+    #[inline]
+    pub fn put(&mut self, buf: &[u8]) {
+        if self.failed {
+            return;
+        }
+        if self.out.write_all(buf).is_err() {
+            self.failed = true;
+        }
+    }
+
+    /// True once any write has failed -- the caller's nonzero-exit signal.
+    #[inline]
+    #[must_use]
+    pub fn failed(&self) -> bool {
+        self.failed
+    }
+}
+
+impl Default for OutSink {
+    #[inline]
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl core::fmt::Write for OutSink {
+    #[inline]
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        self.put(s.as_bytes());
+        // Always Ok: the latched `failed` flag, not this return, carries the
+        // status, so the `write!` machinery never aborts a partial format.
+        Ok(())
+    }
+}
+
+/// Upper bound on a single `slurp`. Leaves headroom under the 4 MiB
+/// userspace heap (`alloc::INITIAL_HEAP_SIZE`) for the caller's derived
+/// working set (sort's line-ref vector, etc.), so an oversized input yields
+/// a graceful `NoMemory` error instead of an allocator OOM-abort -- with
+/// `panic = "abort"` an OOM kills the Proc, which for the session shell is a
+/// logout. Streaming utilities should prefer chunked reads; `slurp` is only
+/// for whole-input loads that genuinely need the bytes resident.
+pub const SLURP_CAP: usize = 2 * 1024 * 1024;
+
+/// Read all of `reader` into a fresh `Vec`, bounded by `SLURP_CAP`. The
+/// "load the whole input" helper for `wc`/`sort`/`cut`/`uniq`/`grep`/`cmp`/
+/// `tail`. Returns `NoMemory` if the input exceeds the cap.
 pub fn slurp<R: Read + ?Sized>(reader: &mut R) -> Result<Vec<u8>> {
+    slurp_capped(reader, SLURP_CAP)
+}
+
+/// Like `slurp` but with an explicit byte limit. Reads until EOF or `limit`
+/// bytes consumed, returning `NoMemory` the moment the input would exceed
+/// `limit` (the caller fails gracefully rather than OOM-aborting on an
+/// unbounded input). Chunked, so it never over-allocates past the limit.
+pub fn slurp_capped<R: Read + ?Sized>(reader: &mut R, limit: usize) -> Result<Vec<u8>> {
     let mut v = Vec::new();
-    reader.read_to_end(&mut v)?;
+    let mut buf = [0u8; 8 * 1024];
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        if v.len() + n > limit {
+            return Err(Error::NoMemory);
+        }
+        v.extend_from_slice(&buf[..n]);
+    }
     Ok(v)
 }

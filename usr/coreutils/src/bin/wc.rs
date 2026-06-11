@@ -11,9 +11,10 @@
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
+use core::fmt::Write as _;
 use libthyla_rs::env::{self, Args};
 use libthyla_rs::fs::File;
-use libthyla_rs::{eprintln, io, print};
+use libthyla_rs::{eprintln, io};
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
@@ -46,20 +47,20 @@ fn count(data: &[u8]) -> Counts {
     Counts { lines, words, bytes }
 }
 
-fn print_counts(c: &Counts, l: bool, w: bool, by: bool, name: Option<&str>) {
+fn print_counts(out: &mut io::OutSink, c: &Counts, l: bool, w: bool, by: bool, name: Option<&str>) {
     if l {
-        print!("{:>7}", c.lines);
+        let _ = write!(out, "{:>7}", c.lines);
     }
     if w {
-        print!("{:>7}", c.words);
+        let _ = write!(out, "{:>7}", c.words);
     }
     if by {
-        print!("{:>7}", c.bytes);
+        let _ = write!(out, "{:>7}", c.bytes);
     }
     if let Some(nm) = name {
-        print!(" {}", nm);
+        let _ = write!(out, " {}", nm);
     }
-    io::out(b"\n");
+    out.put(b"\n");
 }
 
 fn run(args: Args) -> i64 {
@@ -92,6 +93,7 @@ fn run(args: Args) -> i64 {
     let mut total = Counts { lines: 0, words: 0, bytes: 0 };
     let mut nfiles = 0usize;
     let mut status = 0;
+    let mut out = io::OutSink::new();
     let mut had = false;
     let mut i = idx;
     while let Some(op) = args.get(i) {
@@ -108,7 +110,7 @@ fn run(args: Args) -> i64 {
         match File::open(path).and_then(|mut f| io::slurp(&mut f)) {
             Ok(data) => {
                 let c = count(&data);
-                print_counts(&c, want_l, want_w, want_c, Some(path));
+                print_counts(&mut out, &c, want_l, want_w, want_c, Some(path));
                 total.lines += c.lines;
                 total.words += c.words;
                 total.bytes += c.bytes;
@@ -125,7 +127,7 @@ fn run(args: Args) -> i64 {
         match io::slurp(&mut io::stdin()) {
             Ok(data) => {
                 let c = count(&data);
-                print_counts(&c, want_l, want_w, want_c, None);
+                print_counts(&mut out, &c, want_l, want_w, want_c, None);
             }
             Err(e) => {
                 eprintln!("wc: stdin: {}", e);
@@ -133,7 +135,11 @@ fn run(args: Args) -> i64 {
             }
         }
     } else if nfiles > 1 {
-        print_counts(&total, want_l, want_w, want_c, Some("total"));
+        print_counts(&mut out, &total, want_l, want_w, want_c, Some("total"));
+    }
+    if out.failed() {
+        eprintln!("wc: write error");
+        return 1;
     }
     status
 }

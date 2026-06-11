@@ -20,11 +20,12 @@ use alloc::vec::Vec;
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
+use core::fmt::Write as _;
 use libthyla_rs::env::{self, Args};
 use libthyla_rs::err::Result;
 use libthyla_rs::fs::{self, Metadata};
 use libthyla_rs::io;
-use libthyla_rs::{eprintln, print};
+use libthyla_rs::eprintln;
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
@@ -80,24 +81,29 @@ fn run(args: Args) -> i64 {
 
     let multi = dirs.len() > 1;
     let mut status = 0;
+    let mut out = io::OutSink::new();
     let mut first = true;
     for dir in dirs {
         if multi {
             if !first {
-                io::out(b"\n");
+                out.put(b"\n");
             }
-            print!("{}:\n", dir);
+            let _ = write!(out, "{}:\n", dir);
         }
         first = false;
-        if let Err(e) = list_dir(dir, all, long) {
+        if let Err(e) = list_dir(&mut out, dir, all, long) {
             eprintln!("ls: {}: {}", dir, e);
             status = 1;
         }
     }
+    if out.failed() {
+        eprintln!("ls: write error");
+        return 1;
+    }
     status
 }
 
-fn list_dir(dir: &str, all: bool, long: bool) -> Result<()> {
+fn list_dir(out: &mut io::OutSink, dir: &str, all: bool, long: bool) -> Result<()> {
     let mut names: Vec<String> = Vec::new();
     for ent in fs::read_dir(dir)? {
         let name = ent?.into_file_name();
@@ -112,18 +118,20 @@ fn list_dir(dir: &str, all: bool, long: bool) -> Result<()> {
         if long {
             let full = join(dir, name);
             match fs::metadata(&full) {
-                Ok(m) => print_long(&m, name),
-                Err(_) => print!("??????????    ? {}\n", name),
+                Ok(m) => print_long(out, &m, name),
+                Err(_) => {
+                    let _ = write!(out, "??????????    ? {}\n", name);
+                }
             }
         } else {
-            io::out(name.as_bytes());
-            io::out(b"\n");
+            out.put(name.as_bytes());
+            out.put(b"\n");
         }
     }
     Ok(())
 }
 
-fn print_long(m: &Metadata, name: &str) {
+fn print_long(out: &mut io::OutSink, m: &Metadata, name: &str) {
     let mut perms = [b'-'; 10];
     perms[0] = if m.is_dir() {
         b'd'
@@ -152,7 +160,8 @@ fn print_long(m: &Metadata, name: &str) {
         }
     }
     let ps = core::str::from_utf8(&perms).unwrap_or("??????????");
-    print!(
+    let _ = write!(
+        out,
         "{} {:>3} {:>5} {:>5} {:>9} {}\n",
         ps,
         m.nlink(),

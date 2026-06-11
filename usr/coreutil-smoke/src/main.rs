@@ -151,6 +151,10 @@ pub extern "C" fn rs_main() -> i64 {
     c.expect("uniq", "uniq", &[], b"a\na\nb\nb\nb\nc\n", b"a\nb\nc\n", 0);
     c.expect("tr upper", "tr", &["a-z", "A-Z"], b"hello\n", b"HELLO\n", 0);
     c.expect("tr -d", "tr", &["-d", "l"], b"hello\n", b"heo\n", 0);
+    // RW-9 R4-F6: a POSIX class is rejected, not silently mangled. Pre-fix,
+    // `tr -d '[:space:]'` stripped the literal bytes [ : s p a c e ] and left
+    // " b\n" at exit 0 (silent corruption); now it is empty + exit 1.
+    c.expect("tr class reject", "tr", &["-d", "[:space:]"], b"a b\n", b"", 1);
     c.expect("cut -f", "cut", &["-d:", "-f2"], b"a:b:c\n", b"b\n", 0);
     c.expect("cut -c", "cut", &["-c1-3"], b"abcdef\n", b"abc\n", 0);
     c.expect("grep match", "grep", &["ba"], b"foo\nbar\nbaz\n", b"bar\nbaz\n", 0);

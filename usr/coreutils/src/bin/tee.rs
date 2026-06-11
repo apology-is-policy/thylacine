@@ -77,6 +77,7 @@ fn run(args: Args) -> i64 {
 
     let mut stdin = io::stdin();
     let mut stdout = io::stdout();
+    let mut stdout_failed = false;
     let mut buf = [0u8; 8 * 1024];
     loop {
         let n = match stdin.read(&mut buf) {
@@ -89,7 +90,14 @@ fn run(args: Args) -> i64 {
             }
         };
         let chunk = &buf[..n];
-        let _ = stdout.write_all(chunk);
+        // The stdout leg is payload too: a swallowed write silently truncates
+        // tee's primary output. Report once, stop writing the dead sink, but
+        // keep the files flowing (the tee contract).
+        if !stdout_failed && stdout.write_all(chunk).is_err() {
+            eprintln!("tee: stdout: write error");
+            status = 1;
+            stdout_failed = true;
+        }
         // Fan out to the files, dropping any that error mid-stream.
         let mut keep = Vec::with_capacity(sinks.len());
         for mut f in sinks.drain(..) {
@@ -101,6 +109,10 @@ fn run(args: Args) -> i64 {
             }
         }
         sinks = keep;
+        // Every sink is gone -- no reason to drain the rest of stdin.
+        if stdout_failed && sinks.is_empty() {
+            break;
+        }
     }
     status
 }
