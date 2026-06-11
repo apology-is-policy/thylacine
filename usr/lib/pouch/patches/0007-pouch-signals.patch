@@ -469,16 +469,16 @@ flag set + value verified); exits 0.
 +         *   SIGKILL: terminate (NDFLT; though this branch is unreachable
 +         *            because the kernel handles kill before delivery)
 +         *
-+         * F2 audit close (sub-chunk 13b): NDFLT is refused by the kernel
-+         * in a multi-thread Proc (R3-F2 of 13a) because exits() requires
-+         * live_peers == 0 — cross-thread shootdown is a v1.x extension.
-+         * Without a fallback, a worker Thread receiving a default-action
-+         * note (e.g., a SIGPIPE delivered to a worker whose note_mask
-+         * doesn't block pipe — documented limitation that child threads
-+         * don't inherit the constructor's BIT_PIPE mask) would NDFLT-fail
-+         * and drop into for(;;), wedging the Thread. The fallback below
-+         * NCONT-resumes on NDFLT refusal so the Thread continues. v1.x
-+         * cross-thread shootdown lets NDFLT terminate the whole Proc. */
++         * RW-8 R5-F1 (Thylacine cc79551): the kernel NDFLT arm no longer
++         * refuses a multi-thread Proc -- it routes NDFLT through exits() ->
++         * proc_group_terminate (the #811 cascade), so an uncaught
++         * terminating signal terminates the WHOLE Proc (the POSIX default
++         * action). SYS_noted(NDFLT) therefore does NOT return here for a
++         * terminating disposition. The `if (r < 0)` NCONT fallback below is
++         * now defense-in-depth against a future ABI drift only (a non-
++         * terminating default, or a kernel re-introducing a refusal) -- NOT
++         * the normal multi-thread path; relying on it to swallow a
++         * terminating signal would be the bug. */
 +        if (sig == SIGCHLD) {
 +            __syscall(SYS_noted, POUCH_SYS_NOTED_NCONT);
 +        } else {

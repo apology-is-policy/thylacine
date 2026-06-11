@@ -87,7 +87,7 @@ serving is impossible.
 
 --- a/src/select/poll.c
 +++ b/src/select/poll.c
-@@ -1,20 +1,133 @@
+@@ -1,20 +1,150 @@
 +/* pouch boundary-line replacement for poll() (P6-pouch-stratumd-boot
 + * 16c-pre poll-tag-dispatch).
 + *
@@ -157,10 +157,16 @@ serving is impossible.
 -		((ppoll_ts_t){ timeout/1000, timeout%1000*1000000 }) : 0,
 -		0, _NSIG/8);
 -#endif
-+	/* Zero-fd poll is degenerate POSIX: with timeout >= 0 it's a
-+	 * pure sleep; pass through so the kernel handles it uniformly. */
++	/* Zero fds: the kernel rejects nfds == 0, so we cannot pass it through.
++	 * A nonblocking probe over no fds is immediately "nothing ready" (0); a
++	 * timed or indefinite wait over no fds has no zero-fd kernel sleep surface
++	 * at v1.0 (ENOSYS, matching 0005 select()). RND2-F1. */
 +	if (n == 0) {
-+		return syscall_cp(SYS_poll, fds, n, timeout);
++		if (timeout == 0) {
++			return 0;
++		}
++		errno = ENOSYS;
++		return -1;
 +	}
 +	if (!fds) {
 +		errno = EFAULT;
@@ -220,6 +226,17 @@ serving is impossible.
 +		kfds[nk].revents = 0;
 +		map[nk] = i;
 +		nk++;
++	}
++
++	if (nk == 0) {
++		/* Every entry was a POSIX-ignored negative fd. Same as the n == 0
++		 * case above: the kernel rejects nfds == 0, so do NOT pass through
++		 * (RND2-F1). Nonblocking -> 0; timed/indefinite -> ENOSYS. */
++		if (timeout == 0) {
++			return 0;
++		}
++		errno = ENOSYS;
++		return -1;
 +	}
 +
 +	int r = syscall_cp(SYS_poll, kfds, nk, timeout);
