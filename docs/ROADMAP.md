@@ -956,6 +956,11 @@ No new formal specs. Per the 2026-05-23 spec-to-code suspension (`CLAUDE.md`), t
   2. Constructs a new process territory with the container root + synthetic Linux servers (`/proc-linux`, `/sys-linux`, `/dev-linux`).
   3. Starts the container's init inside the territory.
 - This is the "flatpak / Steam Deck" model — containers are territories. No cgroups, no seccomp at v1.0; territory isolation is the boundary.
+- **Container exec prerequisite** (HOLOTYPE #58, pulled forward to the pre-rc sub-arc): spawn must resolve binaries through the territory/stalk namespace (per-component X-search), retiring the flat `devramfs_lookup` — without it a container's binaries are categorically unexecutable.
+
+**On-system toolchain (v1.0 scope per HOLOTYPE RW-13 / D3, 2026-06-11)**:
+- clang/lld + make + git ported via Pouch — the self-hosting / build-storm (W2) story. Cross-compile-from-host remains the primary build path; the on-system toolchain is the additive v1.0 deliverable that makes VISION §11's full-developer-expectation userland coherent (`gcc`/`make`/`git` had no phase home before this vote — HOLOTYPE RW-12 W2-F1).
+- The single largest Phase-8 pole; sequenced after the net arc + the container runner.
 
 **Network stack**:
 - `net/` (userspace 9P server): TCP/IP stack via smoltcp Rust port.

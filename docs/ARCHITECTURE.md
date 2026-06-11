@@ -2166,11 +2166,11 @@ The kernel implements a 9P2000.L client with the Stratum extensions enumerated i
 
 Implementation (`kernel/9p_*` — split across `9p_wire.c`, `9p_session.c`, `9p_transport.c`, `9p_attach.c`): wire protocol encode/decode, fid management, tag pool, outstanding-request table, dispatch loop, Unix-socket transport. Spec: `specs/9p_client.tla`.
 
-### 14.3 Per-process 9P session
+### 14.3 9P session model (as-built: shared-multiplexed)
 
-At process creation, if the process inherits a Stratum mount, a fresh 9P connection is established. (Per VISION §11, one connection per Proc at v1.0; multiplexing is a v2.x optimization.) The connection is kept alive for the process's lifetime; closed at exit.
+**The original one-connection-per-Proc intent is superseded by the as-built shared client** (corrected 2026-06-11, HOLOTYPE RW-12 W1-F1). At v1.0 the kernel runs a *single shared, multiplexed* 9P client over the mounted Stratum connection (the #841 elected-reader design, §21.10): Procs that inherit the Stratum mount share the client via `territory_clone`, and it demultiplexes their concurrent RPCs by tag. The original design intent — one fresh connection per Proc (VISION §11) — is superseded; a per-Proc-connection model remains a possible v2.x direction where per-process Stratum-side territory isolation would justify the per-connection cost. Per-*user* sessions do get their own Stratum connection, via login's `--role client` stratumd (A-5b).
 
-Stratum sees N connections, one per Thylacine process, and gives each its own per-connection territory (Stratum's per-connection fid namespace per `stratum/v2/docs/reference/20-9p.md`). Thylacine's per-process territory and Stratum's per-connection territory are complementary layers (VISION §11).
+Each Stratum connection carries its own per-connection fid namespace / territory (`stratum/v2/docs/reference/20-9p.md`). Thylacine's per-process territory and Stratum's per-connection territory remain complementary layers (VISION §11): the Thylacine territory governs cross-server composition, the Stratum per-connection territory governs composition within one Stratum connection.
 
 ### 14.3a Boot lifecycle (Stratum-mounted root)
 
@@ -3268,6 +3268,16 @@ Deferred to Phase 6 (Linux binary compat phase).
 
 ### 23.8 Phase 7 Utopia priority order
 
+> **Reconciled 2026-06-11 (HOLOTYPE RW-12 W6-F1/F2/F8 + the RW-13 re-plan).**
+> This list predates the LS arc; three items below are NOT Phase-7 (Utopia)
+> must-haves and have moved: **the editor is LS-7 (native `nora`)**, not the
+> Helix-via-Pouch port (Helix-via-Pouch is an optional Phase-8 port); **the
+> PTY master/slave server (`/dev/ptmx` + `/dev/pts/`) is Phase 8**, while LS-8
+> delivers single-console termios via `/dev/consctl` (the Utopia-completion
+> piece); **`/tmp`,`/run` tmpfs is Phase 8** (it pairs with the container
+> runner; `/home` is the v1.0 workaround). Authoritative LS scope:
+> `docs/LIFE-SUPPORT.md`; the forward re-plan: `docs/holotype/13-consolidation.md`.
+
 ```
 Must have (Utopia does not work without these — Phase 7 exit gate):
   libthyla-rs heap allocator + File I/O + Path + Poll + Notes + Command/Child  (U-2)
@@ -3657,7 +3667,7 @@ The complete list of load-bearing invariants. Source for `VISION.md §8`. Each m
 | I-17 | EEVDF latency bound: delay between runnable and running ≤ slice_size × N | DESIGN TARGET, not yet enforced as stated: the quantitative bound needs the full EEVDF deadline math, which is deferred (RW-2 2A-F6 → RW-13). As-built the eventual-progress form holds (ordered dispatch + timer preempt; `scheduler.tla` `LatencyBound` proves *eventually runs*, i.e. I-8's property, not the quantitative bound) | `scheduler.tla` (qualitative liveness only) |
 | I-18 | IPIs from CPU A to CPU B are processed in send order | GIC SGI ordering | `scheduler.tla` |
 | I-19 | Note delivery preserves causal order within a process; every posted non-`kill` note is consumed exactly once across the handler + fd-read paths; `kill` is non-catchable; an uncaught `interrupt` (no handler, not masked, on a non-self-managing Proc) default-terminates the Proc — the SIGINT-shaped per-note disposition (§8.8.2, LS-5) | Per-Proc `NoteQueue` under lock; EL0-return-tail dispatch; `devnotes` Dev; the self-managing gate = notes-fd-open. Sub-invariants N-1..N-5 enumerated in §7.6.7 | (`notes.tla` planned then dropped per CLAUDE.md spec-to-code suspension; prose + audit + tests) |
-| I-20 | PTY master ↔ slave atomicity | RESERVED — the PTY mechanism is not yet built (deferred to the LS-8 line, task #952; `cons.c` records the deferral). No `pty.tla` was written (spec-to-code suspension); validation lands with the mechanism | (lands with LS-8) |
+| I-20 | PTY master ↔ slave atomicity | RESERVED — the PTY master/slave *pair* (`/dev/ptmx` + `/dev/pts/<n>`) is a **Phase-8** deliverable, NOT LS-8 (corrected 2026-06-11, HOLOTYPE RW-12 W6-F2): LS-8 (task #952) delivers single-console line discipline only — pollable cons (8a) + termios/`consctl` ISIG/ECHO (8b) + the shell poll loop (8c) — and explicitly excludes the master/slave mechanism (LIFE-SUPPORT.md LS-8 "Plus … `/dev/ptmx`+`/dev/pts`"). No `pty.tla` was written (spec-to-code suspension); validation lands with the Phase-8 PTY server | (lands with the Phase-8 PTY server) |
 | I-21 | Kernel executes uniformly at EL1h (`SPSel=1`); `SP_EL0` is exclusively the userspace stack | Boot sets `SPSel=1` and never lowers it; per-thread kernel stack carries exception frames; `test_smp` asserts `SPSel==1` | `sched_ctxsw.tla` |
 | I-22 | No identity carries ambient super-authority: there is no superuser identity; `hostowner` is an authority *source* (the system key), not an identity; elevated power is acquired only via the legate (scoped, audited, ephemeral) | Syscall surface grants no authority by identity alone; capabilities are explicit (grant or legate activation) via the `cap` device + clearance-level policy | `IDENTITY-DESIGN.md §3.3/§8.2` (prose + audit + tests per the spec-to-code suspension) |
 | I-23 | A service's filesystem authority is bounded by the storage capability it is handed: it reaches only that subtree, at only the handle's rights R, with no ambient FS authority beyond it; authority is monotonic (any delegate is `<=` R + same subtree). `RIGHT_TRANSFER` is withheld at grant as least-authority hardening (reserved for the Phase-5+ 9P-transfer surface; does NOT gate spawn-endow at v1.0, so intra-grant delegation is possible + sound). Confinement at v1.0 is cooperative (the service chroots to the capability as its first action; spawner-set-root is the v1.x form). | Spawner endows a `handle_dup`-reduced (`R|W`) Spoor at spawn; service chroots to it + confines all FS ops to it; a composition of I-2/I-4/I-6 (handles) + I-1/I-3 (territory) | `ARCHITECTURE.md §3.6` + `docs/detour-status.md A-1.7` (prose + audit + tests per the spec-to-code suspension) |

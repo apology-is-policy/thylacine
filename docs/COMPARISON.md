@@ -51,7 +51,7 @@ Cells use:
 | Per-process territory, primary | ✓ | ✓ | ○ (`unshare`) | ✗ | ✗ | ○ | ✗ | ✓ |
 | `bind` / `mount` as composition | ✓ | ✓ | ~ (mount only) | ✗ | ✗ | ○ | ✗ | ✓ |
 | Container = territory, no separate runtime | ✓ | ✓ | ✗ (cgroups+ns) | ✗ | ✗ | ○ | ✗ | ✓ |
-| Union mounts native | ✓ | ✓ | ○ (overlayfs) | ✗ | ✗ | ✗ | ✗ | ✓ |
+| Union mounts native | ✓ | ✓ | ○ (overlayfs) | ✗ | ✗ | ✗ | ✗ | ○ (v1.x) |
 | **Protocol / IPC** |
 | 9P-native protocol | ✓ | ✓ | ○ (virtfs) | ✗ | ✗ | ~ (scheme model) | ✗ | ★ totalized |
 | One IPC mechanism for everything | ✓ | ✓ | ✗ | ✗ | ✗ | ○ | ✗ | ✓ |
@@ -256,7 +256,7 @@ This puts Thylacine at "useful Linux compat" territory — narrower than Linux's
 
 **Where Linux / Fuchsia have**: extensive testing, sanitizers, fuzzers, but no formal proofs. CFI catches a class of CFG attacks at runtime.
 
-**Where Thylacine targets**: formal specs for load-bearing invariants, not full functional correctness. Nine TLA+ specs (`scheduler`, `territory`, `handles`, `burrow`, `9p_client`, `poll`, `futex`, `notes`, `pty`) gate-tied to phases. Adversarial audit cadence (modeled on Stratum's 15-round audit history). Sanitizer matrices (ASan, UBSan, TSan) on every commit. Property-based tests + fuzzers as standard. The bar is *practical formal verification* — every load-bearing invariant has a spec; the spec is the source of truth; the implementation references the spec; CI runs TLC on every PR touching specified subsystems.
+**Where Thylacine targets**: formal specs for load-bearing invariants, not full functional correctness. **17 TLA+ modules** pinning the §28 invariants (the authoritative inventory is `ARCHITECTURE.md §25.2`; the originally-planned `futex`/`notes`/`pty` specs were dropped 2026-05-23 — torpor + notes are prose-validated, PTY is unbuilt). Adversarial audit cadence (modeled on Stratum's 15-round audit history). Sanitizer matrices (ASan, UBSan, TSan) on every commit. Property-based tests + fuzzers as standard. The bar is *practical formal verification* — every load-bearing invariant has a spec; the spec is the source of truth; the implementation references the spec; CI runs TLC on every PR touching specified subsystems.
 
 This is the same bar Stratum holds itself to. It's higher than Linux and Fuchsia; lower than seL4's full-correctness proof. The trade: seL4-class verification for a Plan 9-shaped OS would take a decade and require ~10x the team. Practical TLA+ verification is achievable in the project's actual scope.
 
@@ -268,7 +268,7 @@ Targets for Thylacine v1.0 (from VISION §3.6 + ARCHITECTURE plans):
 - **Userspace drivers** (Rust): ~10-15 KLOC across virtio-blk, virtio-net, virtio-gpu, virtio-input, network stack.
 - **Halcyon** (Rust): ~8-12 KLOC.
 - **Compat layer** (musl port + syscall shim, C99): ~5-8 KLOC of new code on top of musl's existing ~30 KLOC.
-- **TLA+ specs**: ~3-5 KLOC across nine specs.
+- **TLA+ specs**: ~3-5 KLOC across 17 modules (`ARCHITECTURE.md §25.2`).
 - **Total**: ~60-80 KLOC of new code at v1.0.
 
 For comparison:
@@ -315,7 +315,7 @@ We do *not* lead on raw throughput. We trade throughput for the architectural in
 - **Per-process territory = per-connection Stratum territory**. Cleanest possible OS-FS coupling.
 - **MTE enabled by default where hardware supports**. Catches UAF / heap overflow at hardware speed.
 - **W^X as enumerated invariant** (not just default-on policy).
-- **Spec-first for invariant-bearing changes**, with nine TLA+ specs gate-tied to phases.
+- **Spec-first for invariant-bearing changes**, with 17 TLA+ modules pinning the §28 invariants (applied per-surface; `ARCHITECTURE.md §25.2`).
 - **Designed-not-implemented v2.0 contracts**: capability elevation, multikernel SMP, in-kernel Stratum driver. Architectural shape committed at Phase 0; implementations land later.
 
 ### 5.3 Where Thylacine deliberately doesn't compete

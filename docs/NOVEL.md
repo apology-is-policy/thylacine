@@ -26,7 +26,7 @@ The goal is to make `ARCHITECTURE.md` easier to write: each angle becomes a know
 | 5 | Stratum as native FS with territory coupling | Low | 4–6 KLOC C99 (kernel side) | Phase 5 |
 | 6 | EEVDF scheduler on Plan 9-heritage kernel | Medium | 4–6 KLOC C99 | Phase 2 |
 | 7 | SOTA security hardening from day one | Low-medium | 3–5 KLOC C99 (mostly compiler/linker config + targeted code) | Phase 1-2 |
-| 8 | Formal verification cadence: nine TLA+ specs | Low-medium | 4–6 KLOC TLA+ | Continuous |
+| 8 | Formal verification cadence: 17 TLA+ modules pinning §28 invariants | Low-medium | 4–6 KLOC TLA+ | Continuous |
 | 9 | Designed-not-implemented v2.0 contracts | Low | ~0 KLOC (specifications only) | Phase 0 |
 | 10 | Capability-scoped service storage | Low | ~0.5-1 KLOC userspace + FS-delta O_PATH primitive (small kernel) | Convergence detour: FS-delta -> A-1.7, before A-1b |
 
@@ -626,11 +626,13 @@ The model:
 
 ---
 
-### 3.8 Angle #8 — Formal verification cadence: nine TLA+ specs gate-tied to phases
+### 3.8 Angle #8 — Formal verification cadence: TLA+ modules pinning the load-bearing invariants
 
 **Why it's novel**: seL4 has full functional correctness in Isabelle (heroic, multi-decade effort). Linux has no formal verification. Fuchsia has scattered TLA+ for some protocols. Plan 9 / 9Front have none. **Practical TLA+ verification of every load-bearing OS invariant — gate-tied to phases, with the spec mandated before the implementation, with CI-gated TLC runs on every PR — is rare even in well-funded projects.** Stratum proved the model works for a filesystem; Thylacine applies it to an OS.
 
-The nine specs:
+> **As-built currency note (2026-06-11, HOLOTYPE RW-12).** The cadence shipped **17 TLA+ modules** (the authoritative inventory is `ARCHITECTURE.md §25.2`), not nine. Of the Phase-0 plan below, `poll.tla` shipped and **`futex.tla`/`notes.tla`/`pty.tla` were dropped 2026-05-23** (torpor + notes are prose-validated; PTY is unbuilt). The modules added since: `pipe`/`tsleep`/`corvus` + the SMP-redesign set (`sched_ctxsw`/`sched_oncpu`/`sched_alpha`) + `asid` + `death_wake` + the Loom family (`loom`/`loom_multishot`/`loom_order`). Spec-first design is now applied **per-surface** (the broad spec-to-code suspension, re-enabled for the SMP/ASID/death-wake/Loom surfaces).
+
+The nine originally-planned specs (Phase-0 design):
 
 | # | Spec | What it proves | Phase |
 |---|---|---|---|
@@ -645,7 +647,7 @@ The nine specs:
 | 9 | `pty.tla` | Master/slave atomicity, termios state transitions | Phase 5 |
 
 **Scope — in**:
-- All nine specs written before their respective phase exits.
+- The spec-first discipline: an invariant-bearing surface's model precedes its implementation (now applied per-surface — see the currency note above).
 - Each spec has a `*.tla` (model), `*.cfg` (TLC config), and `*_buggy.cfg` (config that demonstrates a specific bug at the spec level — the executable-documentation pattern from Stratum).
 - TLC clean under bounded parameters (4 threads, 8 procs, 16-step traces typical) in < 10 min on a developer laptop.
 - CI runs TLC on every PR touching specified subsystems; failing TLC blocks merge.
@@ -697,7 +699,7 @@ The nine specs:
 - **Alloy** (bounded model checking). Considered; less well-suited to liveness properties than TLA+. TLA+ is the better fit for OS protocols.
 - **No formal verification, rely on tests + audits**. Rejected: SOTA tenet; the audit-only model has missed bugs Stratum's specs caught.
 
-**Sequence**: Continuous from Phase 0. `scheduler.tla` and `territory.tla` and `handles.tla` are Phase 2 deliverables. `burrow.tla` is Phase 3. `9p_client.tla` is Phase 4. `poll.tla`, `futex.tla`, `notes.tla`, `pty.tla` are Phase 5.
+**Sequence**: Continuous from Phase 0. `scheduler.tla` / `territory.tla` / `handles.tla` are Phase 2; `burrow.tla` Phase 3; `9p_client.tla` Phase 4; `poll.tla` Phase 5. The planned `futex`/`notes`/`pty` specs were dropped 2026-05-23 (prose-validated / unbuilt); the 11 modules added since (`pipe`/`tsleep`/`corvus`/`sched_ctxsw`/`sched_oncpu`/`sched_alpha`/`asid`/`death_wake`/`loom`/`loom_multishot`/`loom_order`) landed with their surfaces.
 
 ---
 
@@ -817,7 +819,7 @@ Natural order, derived from the dependencies:
 ### Phase C — Userspace + Utopia (Phases 5-7 of ROADMAP)
 
 - **Angle #1 — POSIX surfaces as 9P servers.** Phase 5-7 deliverables. The POSIX surfaces (`/proc`, `/dev/pts/`, `/sys`, `/run`) all arrive as 9P servers in this phase block.
-- **Angle #8 — Formal verification.** `poll.tla`, `futex.tla`, `notes.tla`, `pty.tla` at Phase 5.
+- **Angle #8 — Formal verification.** `poll.tla` at Phase 5 (the planned `futex`/`notes`/`pty` specs were dropped 2026-05-23; `pipe`/`tsleep` + the SMP/ASID/death-wake/Loom modules landed with later surfaces).
 - **Utopia milestone (Phase 5 exit)**: the textual POSIX environment is complete and "feels real, not broken." musl port + uutils-coreutils (full flag coverage, no subset) + `rc` + `bash` + `vim` + `tmux` + `ssh` + `git` + `make` + `python3` + `gcc`/`clang` all run. BusyBox in initramfs as the recovery shell. The user can use Thylacine for real work via SSH or UART console at this point — subsequent phases (Linux compat at Phase 6, hardening at Phase 7, Halcyon at Phase 8) are additive over Utopia, not replacements. Utopia is the v0.5-equivalent visible deliverable.
 
 ### Phase D — Linux compat + network (Phase 6 of ROADMAP)
@@ -830,7 +832,7 @@ Natural order, derived from the dependencies:
 ### Phase E — Hardening + audit + v1.0-rc (Phase 7 of ROADMAP)
 
 - **Angle #7 — Final security audit pass** across every audit-trigger surface from `ARCHITECTURE.md §25.4`.
-- **Angle #8 — Spec-to-code mapping verified end-to-end** for all 9 TLA+ specs.
+- **Angle #8 — Spec-to-code mapping verified end-to-end** for all 17 TLA+ modules (`SPEC-TO-CODE.md`).
 - **Angle #6 — 8-CPU SMP 72-hour stress.**
 - All latency budgets (VISION §4.5) measured and gated.
 - Fuzzer integration (1000+ CPU-hours per surface).
