@@ -80,6 +80,8 @@ use alloc::vec::Vec;
 use super::ast::{
     BinOp, CaseExpr, CaseExprArm, Expr, ExprContext, ExprKind, MatchOp, Script, UnOp,
 };
+use core::sync::atomic::{AtomicU32, Ordering};
+
 use super::error::{ParseError, ParseErrorKind, ParseResult};
 use super::lexer::tokenize;
 use super::parse::parse_tokens;
@@ -1390,9 +1392,38 @@ fn retokenize_arith_word(text: &str, base_start: usize) -> Option<Vec<Token>> {
 /// or U-6 needs absolute coordinates for error reporting, the
 /// outer span (passed here as `_outer_span`) anchors the
 /// translation.
-fn parse_subscript(body: &str, _outer_span: Span) -> ParseResult<Script> {
-    let toks = tokenize(body)?;
-    parse_tokens(toks, body.len())
+/// Maximum `$(...)` command-substitution re-lex depth. Each nested
+/// substitution re-tokenizes + re-parses its body -- a full lex+parse stack
+/// frame per `$(` -- which the single-stream `check_token_nesting` pass cannot
+/// see (a `$(...)` is one Subst token in the outer stream). 32 nested
+/// substitutions is far beyond any real script and well under the 256 KiB EL0
+/// stack at the heavier re-lex frame cost.
+const PARSE_MAX_RELEX: u32 = 32;
+
+/// Live `$(...)` re-lex recursion depth. A process-global counter because
+/// parsing is single-threaded (the shell parses one line at a time); under a
+/// hypothetical concurrent parse it would only trip the bound earlier -- it
+/// fails safe (a graceful RecursionLimit), never unsound.
+static RELEX_DEPTH: AtomicU32 = AtomicU32::new(0);
+
+/// Eagerly parse a substitution body (`$(cmd)`, `` `{cmd}` ``, `<(cmd)`,
+/// `>(cmd)`) into a sub-Script. Bounds the re-lex recursion depth so
+/// `$($($(...)))` yields a graceful error rather than overflowing the EL0
+/// stack into a guard-page snare:segv (scripture 8.1).
+fn parse_subscript(body: &str, span: Span) -> ParseResult<Script> {
+    let d = RELEX_DEPTH.fetch_add(1, Ordering::Relaxed);
+    let result = if d >= PARSE_MAX_RELEX {
+        Err(ParseError {
+            kind: ParseErrorKind::RecursionLimit,
+            span,
+        })
+    } else {
+        tokenize(body).and_then(|toks| parse_tokens(toks, body.len()))
+    };
+    // Balance the counter on every path (success and error) so a top-level
+    // parse always returns it to its prior value.
+    RELEX_DEPTH.fetch_sub(1, Ordering::Relaxed);
+    result
 }
 
 /// Helper for VarIndex / VarSlice -- called when the closing `)`

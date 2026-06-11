@@ -144,6 +144,16 @@ pub enum ParseErrorKind {
     /// A `case` arm had no patterns before the `=>` separator (e.g.,
     /// `case $x { => body }`).
     EmptyCasePattern,
+
+    // === Resource bound (scripture 8.1) =============================
+    //
+    /// Input nesting exceeded the parser's recursion bound -- either the
+    /// `()`/`{}` bracket nesting within one token stream (subshells, brace
+    /// blocks, control-flow bodies, arith groups) or the `$(...)` command-
+    /// substitution re-lex depth. A graceful error rather than overflowing
+    /// the 256 KiB EL0 stack into a guard-page snare:segv (which would kill
+    /// the shell Proc -> logout). See PARSE_MAX_NESTING / PARSE_MAX_RELEX.
+    RecursionLimit,
 }
 
 impl fmt::Display for ParseError {
@@ -215,6 +225,10 @@ impl fmt::Display for ParseError {
 
             ParseErrorKind::EmptyCasePattern => {
                 f.write_str("empty pattern list before `=>` in case arm")
+            }
+
+            ParseErrorKind::RecursionLimit => {
+                f.write_str("input nesting too deep (recursion limit exceeded)")
             }
         }
     }

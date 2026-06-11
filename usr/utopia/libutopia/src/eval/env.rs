@@ -162,7 +162,22 @@ pub struct Env {
     /// retained somewhere; this is that somewhere. Drained FIFO, before the
     /// live queue, by `deliver_pending_notes`.
     deferred_notes: Vec<libthyla_rs::notes::Note>,
+    /// Eval-stack recursion depth -- the count of nested `eval_block` +
+    /// command-substitution frames currently live. Bounded by
+    /// `EVAL_MAX_DEPTH` so a runaway recursion (`fn f { f }`, a self-
+    /// `source`, an `eval`-bomb, or executed `$($($(...)))` nesting) yields a
+    /// graceful `RecursionLimit` error instead of overflowing the 256 KiB
+    /// EL0 stack into a guard-page `snare:segv` (scripture 8.1). A `Cell`
+    /// because the `&Env` command-substitution path must inc/dec it.
+    eval_depth: Cell<u32>,
 }
+
+/// Maximum eval-stack recursion depth (function calls / command-substitution
+/// nesting / source / eval). Conservative against the 256 KiB EL0 stack: the
+/// heaviest eval frame (a command-substitution level) burns a few KiB, so 64
+/// nested levels stays well under the stack while sitting far beyond any real
+/// script's nesting (the deepest realistic recursion is a handful of levels).
+pub(crate) const EVAL_MAX_DEPTH: u32 = 64;
 
 impl Env {
     /// Construct a fresh Env with a single empty global frame, all
@@ -186,7 +201,30 @@ impl Env {
             notes: None,
             note_mask: libthyla_rs::notes::NoteMask::NONE,
             deferred_notes: Vec::new(),
+            eval_depth: Cell::new(0),
         }
+    }
+
+    // === Eval-stack recursion bound (scripture 8.1) ===
+
+    /// Enter one eval-recursion level. Returns `true` if the level is at the
+    /// limit -- in that case NO frame is pushed and the caller MUST bail
+    /// (returning a `RecursionLimit` error) WITHOUT calling `eval_recursion_leave`.
+    /// Returns `false` on success: a frame was pushed and the caller MUST call
+    /// `eval_recursion_leave` on every exit path (success and error).
+    pub(crate) fn eval_recursion_enter(&self) -> bool {
+        let d = self.eval_depth.get();
+        if d >= EVAL_MAX_DEPTH {
+            return true;
+        }
+        self.eval_depth.set(d + 1);
+        false
+    }
+
+    /// Leave one eval-recursion level. Saturating so a stray leave can never
+    /// underflow the counter (which would falsely relax the bound).
+    pub(crate) fn eval_recursion_leave(&self) {
+        self.eval_depth.set(self.eval_depth.get().saturating_sub(1));
     }
 
     // === Scope manipulation ===

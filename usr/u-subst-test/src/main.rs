@@ -145,6 +145,47 @@ pub extern "C" fn rs_main() -> i64 {
         return fail("propagated substitution left wrong status");
     }
 
+    // 10. RW-9 R2-F1 regression: a command substitution whose NON-FINAL
+    //     element fails to spawn must NOT hang. Pre-fix the capture write end
+    //     was orphaned in the parent (the never-spawned last element never
+    //     took it), so read_to_end blocked forever -- an un-interruptible
+    //     shell hang. The fix drops the un-consumed pipe ends before draining.
+    //     Reaching the assertions at all is the regression (pre-fix the boot
+    //     hangs here); we also pin the empty capture + 127 status.
+    if eval_source(&mut env, "let h = $(no-such-binary-xyz123 | echo done)").is_err() {
+        return fail("non-final-spawn-fail substitution errored unexpectedly");
+    }
+    if !env.get("h").as_scalar().is_empty() {
+        return fail("non-final-spawn-fail substitution captured non-empty output");
+    }
+    if env.status() != 127 {
+        return fail("non-final-spawn-fail substitution did not set status 127");
+    }
+
+    // 11. RW-9 R2-F2 regression: unbounded eval recursion (a self-calling
+    //     function) must yield a graceful error, NOT a 256 KiB EL0 stack
+    //     overflow -> snare:segv -> shell death. Pre-fix this crashed the
+    //     Proc; post-fix eval hits EVAL_MAX_DEPTH and returns Err.
+    let mut rec_env = Env::new();
+    if eval_source(&mut rec_env, "fn rec_probe { rec_probe }\nrec_probe").is_ok() {
+        return fail("self-recursive function did not hit the eval recursion bound");
+    }
+
+    // 12. RW-9 R1-F1/SA-1 regression: deeply nested parser input must yield a
+    //     graceful error, NOT a parse-time stack overflow. check_token_nesting
+    //     trips at PARSE_MAX_NESTING; 300 nested levels would overflow the EL0
+    //     stack pre-fix (the recursive-descent had no depth cap).
+    let mut deep = String::new();
+    let mut depth_i = 0;
+    while depth_i < 300 {
+        deep.push('(');
+        depth_i += 1;
+    }
+    let mut deep_env = Env::new();
+    if eval_source(&mut deep_env, &deep).is_ok() {
+        return fail("deeply nested parser input did not hit the nesting bound");
+    }
+
     t_putstr("u-subst-test: all OK\n");
     0
 }

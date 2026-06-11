@@ -177,6 +177,25 @@ pub fn eval_script(env: &mut Env, script: &Script) -> EvalResult<StatementFlow> 
 /// implicit-fail in script mode without try-suppression) and
 /// converts to `Return` if triggered.
 pub fn eval_block(env: &mut Env, stmts: &[Statement]) -> EvalResult<StatementFlow> {
+    // Bound eval-stack recursion (scripture 8.1). Function calls, `source`, and
+    // `eval` all re-enter through eval_block; without a cap, `fn f { f }`, a
+    // self-`source`, or an `eval`-bomb overflows the 256 KiB EL0 stack into a
+    // guard-page snare:segv -> shell death. Command substitution adds its own
+    // bound at run_command_substitution_script (it routes through eval_pipeline,
+    // not eval_block). An empty block cannot recurse -> skip the accounting
+    // (and avoid needing a fallback error span).
+    if stmts.is_empty() {
+        return Ok(StatementFlow::Normal);
+    }
+    if env.eval_recursion_enter() {
+        return Err(EvalError::new(EvalErrorKind::RecursionLimit, stmts[0].span));
+    }
+    let result = eval_block_inner(env, stmts);
+    env.eval_recursion_leave();
+    result
+}
+
+fn eval_block_inner(env: &mut Env, stmts: &[Statement]) -> EvalResult<StatementFlow> {
     for stmt in stmts {
         let flow = eval_statement(env, stmt)?;
         // `exit` requested anywhere in this statement (directly, or via
@@ -1420,6 +1439,26 @@ pub(crate) fn run_command_substitution_script(
         env.status_set(0);
         return Ok(String::new());
     }
+    // Bound command-substitution recursion (scripture 8.1): a nested `$(...)`
+    // in an element's words re-enters here via evaluate_argv, so without a cap
+    // `$($($(...)))` overflows the 256 KiB EL0 stack into a guard-page
+    // snare:segv. Shares Env's eval-depth counter with eval_block so the bound
+    // holds across mixed function/source/subst nesting. eval_recursion_leave
+    // runs on every return path (the inner fn's `?`/early returns all unwind
+    // back through here).
+    if env.eval_recursion_enter() {
+        return Err(EvalError::new(EvalErrorKind::RecursionLimit, span));
+    }
+    let result = run_command_substitution_script_inner(env, script, span);
+    env.eval_recursion_leave();
+    result
+}
+
+fn run_command_substitution_script_inner(
+    env: &Env,
+    script: &Script,
+    span: Span,
+) -> EvalResult<String> {
     if script.statements.len() != 1 {
         return Err(EvalError::new(
             EvalErrorKind::NotImplemented("command substitution body must be a single pipeline (v1.0)"),
@@ -1586,6 +1625,17 @@ fn capture_external_pipeline(
             }
         }
     }
+
+    // Drop every un-consumed pipe end BEFORE draining the capture read end.
+    // On the success path all entries are already None (taken into children),
+    // so this is a no-op. On a NON-FINAL element spawn failure the capture
+    // write end (stdout_files[n-1]) and the failed element's ends are still
+    // owned here; unless they are closed first, read_to_end below blocks
+    // forever -- the capture pipe delivers EOF only when its last write end
+    // closes (kernel pipe cond_can_read = count>0 || write_eof), and the
+    // never-spawned last element never received that write end.
+    drop(stdin_files);
+    drop(stdout_files);
 
     // Drain the capture read end to EOF (before reaping -- see fn note).
     let mut out_bytes: Vec<u8> = Vec::new();

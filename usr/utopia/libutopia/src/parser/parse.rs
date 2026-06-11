@@ -59,10 +59,46 @@ pub fn parse(source: &str) -> ParseResult<Script> {
     parse_tokens(tokens, source.len())
 }
 
+/// Maximum `()`/`{}`/`(( ))` bracket-nesting depth accepted within a single
+/// token stream. Subshells, brace blocks, control-flow bodies, and arith
+/// groups each recurse one level per opener; without a bound, deeply nested
+/// input (`((((...))))`, `{{{...}}}`, `if{if{...}}`) overflows the 256 KiB EL0
+/// stack into a guard-page snare:segv -> shell death (scripture 8.1). 64 is
+/// far beyond any real script's nesting (the deepest realistic nesting is a
+/// handful of levels). The `$(...)` command-substitution re-lex vector is
+/// bounded separately in `parse_subscript` (it crosses a re-tokenize boundary
+/// this single-stream pass cannot see).
+const PARSE_MAX_NESTING: i32 = 64;
+
+/// Reject a token stream whose `()`/`{}`/`(( ))` nesting exceeds
+/// `PARSE_MAX_NESTING`, BEFORE the recursive-descent parser walks it. A single
+/// linear pass tracking the running nesting depth (one `+1` per opener token =
+/// one recursive-descent level); MAX-nesting, so sequential non-nested brackets
+/// (`(a); (b); ...`) are unaffected. `(( ))` is a single DoubleLParen token =
+/// one arith-group level, so it counts +1 like `(`.
+fn check_token_nesting(tokens: &[Token]) -> ParseResult<()> {
+    let mut depth: i32 = 0;
+    for t in tokens {
+        match t.kind {
+            TokenKind::LParen | TokenKind::LBrace | TokenKind::DoubleLParen => depth += 1,
+            TokenKind::RParen | TokenKind::RBrace | TokenKind::DoubleRParen => depth -= 1,
+            _ => {}
+        }
+        if depth > PARSE_MAX_NESTING {
+            return Err(ParseError {
+                kind: ParseErrorKind::RecursionLimit,
+                span: t.span,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Parse a pre-tokenized stream into a Script AST. Useful when the
 /// caller already has the tokens (e.g., for incremental parsing or
 /// editor integration).
 pub fn parse_tokens(tokens: Vec<Token>, source_len: usize) -> ParseResult<Script> {
+    check_token_nesting(&tokens)?;
     Parser::new(tokens, source_len).parse_script()
 }
 
