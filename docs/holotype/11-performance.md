@@ -146,6 +146,14 @@ Five prosecutors, four independent multi-way convergences.
   design). The fix is additive (a check-preempt-on-wake + self
   need_resched; weakens no invariant, composes with on_cpu/I-8/I-21) and
   folds naturally into the RW-13 EEVDF reconcile (HT02.2A-F6).
+  **LANDED `@fb5e776`** (#60, the D4 pre-rc emerge): user-voted option C =
+  realize the INTERACTIVE band (ARCH 8.3). Same-CPU wake-preempt + the
+  syscall-return preempt point + INTERACTIVE for CAP-gated IRQ-waiters + the
+  trusted console session (owner/attached); the 2A-F6 reconcile folded in.
+  Audit 0 P0/0 P1/1 P2 (F1 over-broad console gate, narrowed)/1 P3 (→#61);
+  SMP gate 0-corruption. NOTE the irq-bench number stays slice-quantum until
+  the SA-1a bench-mode artifact is addressed (#62) — #60 fixes the production
+  wake path, which the bench never measured.
 - **HT11.R4-F1 — no production boot configuration**. Every `test/test_*.c`
   is in the unconditional kernel build; `test_run_all()` runs on every
   boot (main.c:654, extinct-on-fail); the kernel's own `boot-time:` line
