@@ -6,10 +6,14 @@ coreutils sample; all `claude-fable-5`, MODEL start==end on all four -- no
 fallback) + an Opus seam self-audit. Closed list:
 `memory/audit_holotype_rw9_closed_list.md`.
 
-**Status: IN PROGRESS (dirty close).** 1 P1 + 11 P2 + ~22 P3 -- by far the most
-findings of any RW round. The two highest-value groups are FIXED + verified +
-committed; the remaining P2s + P3s + the mandatory dirty-close round-2 are
-owed (see "Remaining work").
+**Status: IN PROGRESS (dirty close) -- all 12 P2 + the P1 FIXED or REGISTERED;
+the mandatory round-2 re-audit on the fixes is the remaining gate.** 1 P1 + 11
+P2 + ~22 P3 -- by far the most findings of any RW round. The P1 + 10 of the 11
+P2 are fixed + verified + committed (`07a27c9` recursion + command-sub hang,
+`c1aea9d` + `dcc4d08` coreutils, `cd7eae2` notes/Ctrl-C); the 11th P2 (R3-F2
+multi-line render) is REGISTERED with justification (cosmetic + invasive +
+no screen-state harness -- see its row). The dirty-close round-2 + the P3
+cluster triage remain (see "Remaining work").
 
 ## The soundness model for this surface
 
@@ -34,13 +38,13 @@ seam (the recurrent HOLOTYPE theme) is the highest-stakes interaction.
 | HT09.R1-F1 / SA-1 / R2-F2 | parser + eval | S | **P2** | parser: `parser/parse.rs` + `parser/expr.rs::parse_subscript`; eval: `eval/stmt.rs::eval_block` + `run_command_substitution_script` | Unbounded recursion (CONVERGED 3-way R1+R2+self). The recursive-descent parser AND the evaluator had NO depth cap, so deeply nested input (`((((...))))`, `{{{...}}}`, `if{if{...}}`, `$($($(...)))`) or runaway eval (`fn f { f }`, self-`source`, eval-bomb) overflows the 256 KiB EL0 stack -> guard-page snare:segv -> shell death/logout | **FIXED** `@07a27c9` -- parser: linear token-nesting pre-pass (PARSE_MAX_NESTING=64) + a process-global re-lex counter in parse_subscript (PARSE_MAX_RELEX=32); eval: a shared Env eval-depth Cell at eval_block + run_command_substitution_script (EVAL_MAX_DEPTH=64), leave-balanced. New ParseErrorKind/EvalErrorKind::RecursionLimit. Regressions `/u-subst-test` #11 (eval) + #12 (parser) |
 | HT09.R4-F4 | coreutils | S | **P2** | `coreutils/src/bin/{ls,mkdir,pwd}.rs` | LS-4-stale (the recurrent substrate-moved theme, a 6th time): LS-4 landed per-Proc cwd, but `pwd` hardcoded "/", `ls` with no operand listed "/" not the cwd, and `mkdir -p a/b` (relative) silently failed (short-circuited to a single create_dir) | **FIXED** `@c1aea9d` -- all three use `env::current_dir()`; mkdir_p resolves a relative path against the cwd. Deep interactive verification (cd + ls/pwd) owed to the interactive E2E / round-2 |
 | HT09.R4-F3 | coreutils / seq | S | **P2** | `coreutils/src/bin/seq.rs` | seq emitted via the error-swallowing `println!`, so `seq 1 N \| head -1` kept generating ~2^63 failing SYS_WRITEs after head closed the pipe (the EPIPE pipe-note never terminates a non-reading native Proc) -> a pegged-CPU runaway | **FIXED** `@c1aea9d` -- `io::stdout().write_all` + break-on-error (the yes.rs idiom) |
-| HT09.R2-F3 | eval / loops | S | **P2** | `eval/stmt.rs::eval_while` / `eval_for` | A runaway loop is un-interruptible: the loop bodies never drain the note queue, and the LS-5 eager note-open makes `interrupt` deliver-disposition (queues, does not terminate). `while (1==1) { }` spins, un-Ctrl-C-able; only external `kill` stops it | **OWED** -- FIX: drain a terminate-intent `interrupt` between iterations + pin loop-interrupt semantics in scripture 10.2. Coupled with R3-F1 (the notes seam). Task #50 |
-| HT09.R3-F1 | REPL / notes | S | **P2** | `repl.rs:143-167` Accept arm + `tools/interactive/ls-5.exp:36-47` | A stale idle-prompt Ctrl-C kills the user's NEXT foreground command: the Accept arm runs `run_line` BEFORE `deliver_notes`, so the next command's `wait_pids_interruptible` forwards the stale queued `interrupt` to the just-spawned child -> spurious kill. **AND ls-5.exp papers over it with a load-bearing `\r` -- a VERIFY-AROUND of a live defect** (a stewardship issue) | **OWED** -- FIX: drain notes at the TOP of the Accept arm (before run_line); delete the load-bearing `\r` from ls-5.exp so the E2E asserts the real behavior. Needs the interactive E2E to verify. Task #50 |
-| HT09.R3-F2 | line editor | S | **P2** | `line_editor.rs:691-755` render | Multi-line render block-crawl: the renderer is stateless about its prev frame, so every keystroke on a continuation line shifts the block down a row + leaves stale duplicate rows (the unlanded U-6 `prev_render_lines`/`\x1b[J` promise). Section 11.4 multi-line editing is visually broken | **OWED** -- FIX: stateful renderer (record prev cursor_line+total; `\x1b[{prev}F` prologue + `\x1b[J` after last line) + a screen-state E2E. Invasive; assess fix-vs-register at round-2. Task #52 |
-| HT09.R4-F1 | coreutils / cp | S | **P2** | `coreutils/src/bin/cp.rs` | cp has no same-file or into-itself guard: `cp f f` / `cp f .` truncates the source to 0 bytes (open-then-create-trunc on the same file), silent data loss exit 0; `cp -r src src/sub` is a runaway (create-before-readdir yields the new dir) | **OWED** -- FIX: refuse on resolved-identity-equal src/dst; for -r refuse a dst lexically prefixed by src. Task #51 |
-| HT09.R4-F2 | coreutils | S | **P2** | tail/sort/cut/grep/uniq/wc/cmp `.rs` | Seven utils slurp whole inputs into the 4 MiB fixed heap -> silent OOM-abort (exit 1, no message) on real /sbin binaries; cmp's OOM exit-1 collides with its "differ" verdict (a silently-wrong result) | **OWED** -- FIX: stream the easy ones (wc/grep/cut/uniq/cmp); a metadata-size pre-check guard is the cheap interim for all seven. Task #51 |
-| HT09.R4-F5 | coreutils | S | **P2** | cut/uniq/grep/wc/sort/hexdump/ls/stat/realpath/tee/tr `.rs` | Nine+ utils write their PAYLOAD through the error-swallowing `io::out`/`print!` (or explicit `let _ =`), so a mid-stream stdout failure (a 9P-backed sink erroring) silently truncates output and exits 0 -- the silent-truncation/data-loss class | **OWED** -- FIX: route payload writes through `write_all` with the head/tail status discipline (error -> eprintln + nonzero exit + stop). Task #51 |
-| HT09.R4-F6 | coreutils / tr | S | **P2** | `coreutils/src/bin/tr.rs::expand` | tr treats `[:class:]` as literal bytes -> `tr -d '[:space:]'` silently strips the letters s/p/a/c/e + brackets, preserving whitespace -- silently-wrong data, exit 0 | **OWED** -- FIX (cheap): reject any set containing the `[:` shape (or a bare `[`) with an error, converting silent corruption into a visible failure. Task #51 |
+| HT09.R2-F3 | eval / loops | S | **P2** | `eval/stmt.rs::eval_while` / `eval_for` | A runaway loop is un-interruptible: the loop bodies never drain the note queue, and the LS-5 eager note-open makes `interrupt` deliver-disposition (queues, does not terminate). `while (1==1) { }` spins, un-Ctrl-C-able; only external `kill` stops it | **FIXED** `@cd7eae2` -- eval_while/eval_for poll the note queue every LOOP_INTERRUPT_STRIDE (128) iterations; a terminate-intent interrupt latches `Env::interrupt_pending` (checked by eval_block after every statement, propagated like `pending_exit` across loops/blocks/functions) -> unwind to the prompt + `$status 130`. Scripture 10.2 pinned. Regression: ls-5.exp case (D) |
+| HT09.R3-F1 | REPL / notes | S | **P2** | `repl.rs:143-167` Accept arm + `tools/interactive/ls-5.exp:36-47` | A stale idle-prompt Ctrl-C kills the user's NEXT foreground command: the Accept arm runs `run_line` BEFORE `deliver_notes`, so the next command's `wait_pids_interruptible` forwards the stale queued `interrupt` to the just-spawned child -> spurious kill. **AND ls-5.exp papers over it with a load-bearing `\r` -- a VERIFY-AROUND of a live defect** (a stewardship issue) | **FIXED** `@cd7eae2` -- `deliver_notes()` at the TOP of the Accept arm (before run_line) consumes a stale idle interrupt so the next command starts on a clean queue; the load-bearing `\r` verify-around deleted from ls-5.exp case (A). Verified: ls-5 interactive E2E all 4 cases PASS (HOLO-FRESH/SLEEP/YES/LOOP) |
+| HT09.R3-F2 | line editor | S | **P2** | `line_editor.rs:691-755` render | Multi-line render block-crawl: the renderer is stateless about its prev frame, so every keystroke on a continuation line shifts the block down a row + leaves stale duplicate rows (the unlanded U-6 `prev_render_lines`/`\x1b[J` promise). Section 11.4 multi-line editing is visually broken | **REGISTERED** (round-2 disposition) -- the fix (stateful renderer: a `prev_cursor_line` cell + `\x1b[{prev}F`/`\x1b[J` prologue + reset-points threaded through repl.rs after every `\r\n`/command-output write) is INVASIVE on the audited-clean line editor (HT00.F1 + the verified char-boundary / no-underflow render arithmetic), the bug is COSMETIC (on-screen rendering, explicitly "not a panic" -- no soundness / availability / data-integrity impact), and there is NO screen-state verification harness (the boot probe checks emitted bytes; cfg(test) does not run in-VM; the finding itself names "a screen-state E2E" as the required verification). Landing an unverifiable rewrite on a verified-sound surface is the wrong trade. Pre-existing + already documented (the `render()` doc-comment U-6 caveat). Task #52 + `docs/reference/92-utopia-line-editor.md` Known caveats |
+| HT09.R4-F1 | coreutils / cp | S | **P2** | `coreutils/src/bin/cp.rs` | cp has no same-file or into-itself guard: `cp f f` / `cp f .` truncates the source to 0 bytes (open-then-create-trunc on the same file), silent data loss exit 0; `cp -r src src/sub` is a runaway (create-before-readdir yields the new dir) | **FIXED** `@dcc4d08` -- lexical-canonical same-file guard (anchor relative against cwd, collapse `.`/`..`/`//` -- the realpath idiom; sound as identity given no symlinks, G11) refuses an identity-equal copy; with -r also refuses a dst inside the src tree. (The read-only pre-pivot smoke can't exercise the writable-fs case; that E2E is owed.) |
+| HT09.R4-F2 | coreutils | S | **P2** | tail/sort/cut/grep/uniq/wc/cmp `.rs` | Seven utils slurp whole inputs into the 4 MiB fixed heap -> silent OOM-abort (exit 1, no message) on real /sbin binaries; cmp's OOM exit-1 collides with its "differ" verdict (a silently-wrong result) | **FIXED** `@dcc4d08` -- `io::slurp` now capped at `SLURP_CAP` (2 MiB, chunked via `slurp_capped`) -> a graceful `NoMemory` error (which every caller already surfaces) instead of an OOM-abort, fixing all seven at the shared helper. Streaming the seven is the deferred proper fix. |
+| HT09.R4-F5 | coreutils | S | **P2** | cut/uniq/grep/wc/sort/hexdump/ls/stat/realpath/tee/tr `.rs` | Nine+ utils write their PAYLOAD through the error-swallowing `io::out`/`print!` (or explicit `let _ =`), so a mid-stream stdout failure (a 9P-backed sink erroring) silently truncates output and exits 0 -- the silent-truncation/data-loss class | **FIXED** `@dcc4d08` -- new `io::OutSink` latches the first write error (later puts no-op) so the cat/head discipline (report once + nonzero exit) is available without ?-threading; cut/uniq/grep/wc/hexdump/ls/stat/sort/realpath route payload through it, tee's stdout leg is checked. The existing exact-output smoke checks (wc/cut/grep/uniq/sort/hexdump/realpath) pin the conversions byte-for-byte. |
+| HT09.R4-F6 | coreutils / tr | S | **P2** | `coreutils/src/bin/tr.rs::expand` | tr treats `[:class:]` as literal bytes -> `tr -d '[:space:]'` silently strips the letters s/p/a/c/e + brackets, preserving whitespace -- silently-wrong data, exit 0 | **FIXED** `@dcc4d08` -- `expand()` returns None on a `[:`/`[=` construct and tr rejects it (exit 1) instead of mangling the data. Regression: coreutil-smoke `tr class reject` (`tr -d '[:space:]'` on `a b\n` -> pre-fix ` b\n` exit 0; post-fix empty exit 1) |
 
 ### P3 cluster (owed -- triage at round-2 / fix-cheap-or-register)
 
@@ -121,20 +125,27 @@ seam (the recurrent HOLOTYPE theme) is the highest-stakes interaction.
 
 ## Remaining work (owed; this is a DIRTY close)
 
-1. **P2 fixes**: R2-F3 + R3-F1 (notes/Ctrl-C, coupled, needs interactive E2E),
-   R3-F2 (multi-line render, invasive), R4-F1 (cp data-loss), R4-F2 (slurp
-   OOM), R4-F5 (swallowed payload writes), R4-F6 (tr classes -- cheap).
-2. **P3 cluster**: fix the cheap/mechanical ones (R1-F2 subshell-`)`,
-   R4-F6-adjacent), register the rest.
-3. **Dirty-close round-2 re-audit** on ALL the fixes (mandatory: 1 P1 + 11 P2,
-   invasive recursion-cap + notes-seam restructures). Focus the prosecutor on
-   the recursion-cap leave-balance, the command-sub drop-ordering, and the
-   notes-drain-reorder.
-4. **Scripture**: pin loop-interrupt semantics in UTOPIA-SHELL-DESIGN section
-   10.2 (R2-F3); reconcile the section 6.13/7.3/7.4 scripture-vs-impl deltas
-   (R1-F3/F4).
-5. Verified-sound interactive E2E for the LS-4 coreutils (cd + ls/pwd) and the
-   notes/Ctrl-C fix.
+**All P2 are FIXED or REGISTERED; the P1 is FIXED.** What remains:
+
+1. **Dirty-close round-2 re-audit** on ALL the fixes (MANDATORY: 1 P1 + 11 P2,
+   invasive recursion-cap + notes-seam + coreutils restructures). Focus the
+   prosecutor on: the recursion-cap leave-balance (no leak / no false-trip);
+   the command-sub drop-ordering; the **new `interrupt_pending` propagation**
+   (does it unwind exactly the right scopes? can the flag leak across commands
+   or be set-without-clear?); the **top-of-Accept drain** (does it consume a
+   note that should have reached the command? double-drain hazards?);
+   `poll_loop_interrupt` borrow/defer correctness; the `io::OutSink` latch +
+   the `slurp` cap + the cp lexical-canonical guard.
+2. **P3 cluster**: triaged below -- fix the cheap/mechanical ones where safe,
+   register the rest (R1-F2 subshell-`)` is a parser-grammar gap on the
+   verified-sound parser; chmod/chown coreutils MISSING is the highest-value
+   register).
+3. **Scripture**: section 10.2 loop-interrupt semantics PINNED (`cd7eae2`-adjacent
+   doc commit). The section 6.13/7.3/7.4 scripture-vs-impl deltas (R1-F3/F4) stay
+   registered (arith `<<`/`>>`, legacy `~` op, braceless bodies).
+4. **Owed E2Es** (verification gaps, registered): a writable-fs cp same-file +
+   slurp-cap E2E (the read-only pre-pivot smoke can't exercise them); a
+   screen-state E2E for the R3-F2 multi-line renderer.
 
 ## Reference
 

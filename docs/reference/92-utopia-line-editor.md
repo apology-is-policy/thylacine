@@ -379,21 +379,32 @@ characters start. Per UTOPIA-VISUAL.md section 3.2.
 For `prompt_width < 2`, the prefix degenerates to just `⋮` (visible
 width 1). Most disciplined Pale Fire prompts are `>= 2`.
 
-### Multi-line ghost-clear caveat (deferred to U-6)
+### Multi-line render caveat (HOLOTYPE RW-9 R3-F2, REGISTERED)
 
-`render(prompt)` is `&self` and does NOT clear lines BELOW the last
-line of the current render. If the previous render occupied more
-lines than the current one (e.g. user deleted content shrinking the
-multi-line buffer), trailing stale lines remain on screen.
+`render(prompt)` is `&self` and stateless about its previous frame. Two
+symptoms follow:
 
-U-6 will revisit by either:
-- Lifting `render(prompt)` to `&mut self` + tracking `prev_render_lines`,
-  then emitting `\x1b[J` (erase to end of screen) at the start of
-  each render after backing up to the prompt's first line.
-- Or having the U-6 main loop track this externally.
+1. **Ghost-clear**: it does NOT clear lines BELOW the last line of the current
+   render, so shrinking a multi-line buffer leaves trailing stale rows.
+2. **Block-crawl** (RW-9 R3-F2): it opens with `\r\x1b[K` (clear the *current*
+   line only), assuming the terminal cursor sits on the prompt line -- but while
+   editing a continuation line the cursor is one or more rows down, so the
+   re-emitted block starts from there and crawls downward a row per keystroke,
+   leaving stale duplicate rows.
 
-For U-4b the boot probe only checks emitted bytes (not screen state),
-so the ghost-clear is invisible at test time.
+**Why still registered (not yet fixed).** The correct fix is a stateful
+renderer: a `prev_cursor_line` cell + a `\r\x1b[{prev}F` (back up to the block
+top) + `\x1b[J` (erase to end of screen) prologue, plus reset-points threaded
+through `repl.rs` at every point that moves the terminal cursor outside a render
+(the `\r\n` + command output between Accept cycles -- otherwise the prologue
+backs up over committed output). That is invasive on a surface whose
+char-boundary / no-underflow render arithmetic is audited-clean, and there is no
+screen-state verification harness (the boot probe checks emitted bytes only;
+cfg(test) does not run in-VM). RW-9 round-2 dispositioned it as REGISTERED:
+landing an unverifiable renderer rewrite on a verified-sound surface is the
+wrong trade. The fix lands with a screen-state E2E harness. Until then the
+block-crawl is a single-line-editing-clean cosmetic defect (no soundness /
+availability / data-integrity impact).
 
 ### Smart Up/Down nav (U-4c)
 
