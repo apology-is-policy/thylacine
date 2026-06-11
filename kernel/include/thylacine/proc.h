@@ -469,6 +469,15 @@ struct Proc *proc_alloc(void);
 // on violation.
 void proc_free(struct Proc *p);
 
+// RW-7 R3-F1: reset every virtio device this Proc drove (via its KObj_MMIO
+// handles) before its KObj_DMA pages free back to the buddy allocator, so a
+// driver that died abnormally cannot DMA into recycled memory. Called from
+// the proc-exit handle-close sites (proc_close_handles_at_exit + proc_free);
+// must run only on a quiesced handle table (no peer mutator). Returns the
+// number of devices reset (a no-op returning 0 on a NULL Proc / NULL table).
+// Exposed for the device-death-quiesce regression test.
+int proc_quiesce_owned_devices(struct Proc *p);
+
 // P2-D: rfork — Plan 9 process/thread creation primitive.
 //
 // `flags` selects which resources are shared vs cloned (per ARCH §7.4).

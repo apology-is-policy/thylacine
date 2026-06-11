@@ -202,6 +202,18 @@ void virtio_set_status(struct virtio_mmio_dev *dev, u32 status);
 void virtio_add_status(struct virtio_mmio_dev *dev, u32 bits);
 void virtio_reset(struct virtio_mmio_dev *dev);
 
+// RW-7 R3-F1: reset every probed MMIO transport whose register slot falls
+// within [pa, pa+size). The proc-death device-quiesce hook (kernel/proc.c)
+// calls this for each KObj_MMIO a dying driver held, BEFORE the driver's
+// KObj_DMA pages are freed back to the buddy allocator -- a still-armed
+// device would otherwise DMA a virtqueue completion into recycled memory
+// (silent cross-Proc corruption; I-7 device-stop clause unmet on abnormal
+// death). Resetting a slot the driver never armed is a harmless status
+// write; the page-exclusive KObj_MMIO claim (mmio_handle.c overlap
+// rejection) guarantees no other live driver owns a slot in the range.
+// Returns the number of transports reset.
+int virtio_mmio_reset_in_range(u64 pa, size_t size);
+
 // Standard initialization sequence per VIRTIO 1.2 §3.1.1 steps 1-5:
 //   reset → ACKNOWLEDGE → DRIVER → (caller selects features here) →
 //   FEATURES_OK → re-read STATUS to verify FEATURES_OK still set.
@@ -216,6 +228,15 @@ void virtio_reset(struct virtio_mmio_dev *dev);
 // caller's feature set is unacceptable).
 bool virtio_negotiate_features(struct virtio_mmio_dev *dev,
                                 u32 want_features_lo);
+
+// Negotiated split-virtqueue size for a device-reported QueueNumMax:
+// min(num_max, VIRTIO_VQ_NUM_DEFAULT), rejected to 0 when num_max is 0 or
+// the clamped result is not a power of two. The split-ring index
+// arithmetic masks with the size, so a non-pow2 size (a malformed/hostile
+// device -- VIRTIO 1.2 §2.7 mandates QueueNumMax be a power of 2) is
+// unsupported rather than armed (RW-7 R3-F6). virtio_virtqueue_create
+// returns NULL when this returns 0.
+u32 virtio_vq_size_for(u32 num_max);
 
 // Allocate + register a virtqueue at queue index `qidx`. Steps:
 //   1. Write QUEUE_SEL = qidx

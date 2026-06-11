@@ -463,6 +463,9 @@ void test_virtio_rng_present(void);
 void test_virtio_negotiate_features_smoke(void);
 void test_virtio_virtqueue_alloc_destroy(void);
 void test_virtio_find_by_device_id(void);
+void test_virtio_reset_in_range_no_match(void);
+void test_virtio_vq_size_for(void);
+void test_virtio_proc_death_quiesces_device(void);
 void test_irqfwd_create_destroy(void);
 void test_irqfwd_refcount_lifecycle(void);
 void test_irqfwd_wait_wakes_on_sgi(void);
@@ -1387,6 +1390,10 @@ struct test_case g_tests[] = {
     { "virtio.virtqueue_alloc_destroy",
                                        test_virtio_virtqueue_alloc_destroy, false, NULL },
     { "virtio.find_by_device_id",      test_virtio_find_by_device_id,      false, NULL },
+    { "virtio.reset_in_range_no_match", test_virtio_reset_in_range_no_match, false, NULL },
+    { "virtio.vq_size_for",            test_virtio_vq_size_for,            false, NULL },
+    { "virtio.proc_death_quiesces_device",
+                                       test_virtio_proc_death_quiesces_device, false, NULL },
     { "irqfwd.create_destroy",         test_irqfwd_create_destroy,         false, NULL },
     { "irqfwd.refcount_lifecycle",     test_irqfwd_refcount_lifecycle,     false, NULL },
     { "irqfwd.wait_wakes_on_sgi",      test_irqfwd_wait_wakes_on_sgi,      false, NULL },

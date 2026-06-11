@@ -21,6 +21,7 @@
 #include <thylacine/devsrv.h>
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
+#include <thylacine/mmio_handle.h>
 #include <thylacine/notes.h>
 #include <thylacine/page.h>
 #include <thylacine/territory.h>
@@ -32,6 +33,7 @@
 #include <thylacine/thread.h>
 #include <thylacine/torpor.h>
 #include <thylacine/types.h>
+#include <thylacine/virtio.h>
 #include <thylacine/vma.h>
 
 #include "../arch/arm64/mmu.h"
@@ -392,6 +394,46 @@ struct Proc *proc_alloc(void) {
     return p;
 }
 
+// RW-7 R3-F1: before a dying Proc's KObj_DMA pages return to the buddy
+// allocator, stop every virtio device the Proc drove -- otherwise an armed
+// device keeps the freed pages' PAs latched in its virtqueue and DMAs a
+// used-ring completion into recycled memory (silent cross-Proc corruption;
+// I-7's device-stop clause is unmet on ABNORMAL driver death -- e.g.
+// stratumd's virtio-blk dying via _Exit on an abort / mallocng assert). A
+// well-behaved driver resets its own device before exit; this is the kernel
+// backstop for the crash path the kernel cannot make a driver run.
+//
+// We walk the Proc's KObj_MMIO handles -- its device-register claims -- and
+// reset every probed virtio transport whose slot falls in each claimed
+// range. The reset writes through the kernel's permanent .base MMIO mapping,
+// independent of the user mapping torn down by vma_drain. Page-exclusive
+// KObj_MMIO claims (mmio_handle.c overlap rejection) mean no OTHER live
+// driver owns a slot in the range, so a broad in-range reset never disturbs
+// a sibling driver's device.
+//
+// Called from BOTH proc-exit handle-close sites so every death path is
+// covered before the pages free: proc_close_handles_at_exit (single-thread
+// voluntary exit, incl. the _Exit crash path) and proc_free (multi-thread
+// reap -- stratumd, the live trigger -- plus single-thread-killed and
+// orphan/rollback). NO table lock: like handle_table_free, this runs only on
+// a quiesced table (thread_count==1 sole caller at exit, or all threads
+// reaped at proc_free), so no peer mutates it. Returns the device count for
+// the regression test. The structural close is a per-device KObj_VIRTIO_DEV
+// that resets on owner-death (device-session model; RW-7 R3-F8, Phase 5+).
+int proc_quiesce_owned_devices(struct Proc *p) {
+    if (!p || !p->handles) return 0;
+    struct HandleTable *t = p->handles;
+    int reset = 0;
+    for (int i = 0; i < PROC_HANDLE_MAX; i++) {
+        struct Handle *h = &t->slots[i];
+        if (h->magic != HANDLE_MAGIC) continue;
+        if (h->kind != KOBJ_MMIO || !h->obj) continue;
+        struct KObj_MMIO *k = (struct KObj_MMIO *)h->obj;
+        reset += virtio_mmio_reset_in_range(k->pa, k->size);
+    }
+    return reset;
+}
+
 void proc_free(struct Proc *p) {
     if (!p)                       extinction("proc_free(NULL)");
     // Magic check catches double-free and corrupt-Proc passes. SLUB's
@@ -407,6 +449,14 @@ void proc_free(struct Proc *p) {
     // forgot exits; INVALID means we're freeing an uninitialized Proc.
     if (p->state != PROC_STATE_ZOMBIE)
         extinction("proc_free of non-ZOMBIE Proc (lifecycle violation)");
+
+    // RW-7 R3-F1: stop any virtio device this Proc drove BEFORE vma_drain /
+    // handle_table_free free its KObj_DMA pages back to the buddy (a still-
+    // armed device would DMA into recycled memory). No-op when p->handles is
+    // already NULL (single-thread voluntary exit closed -- and quiesced -- at
+    // proc_close_handles_at_exit); does the work for the multi-thread reap,
+    // single-thread-killed, and orphan/rollback paths whose table is intact.
+    proc_quiesce_owned_devices(p);
 
     // P3-Da: drain VMAs first. Each Vma carries a burrow_unmap; releasing
     // them BEFORE handle_table_free is the right order — handle closure
@@ -1408,6 +1458,10 @@ static void proc_become_zombie_locked(struct Proc *p, int status, const char *ms
 static void proc_close_handles_at_exit(struct Proc *p) {
     if (!p) return;
     if (p->handles) {
+        // RW-7 R3-F1: stop this Proc's virtio devices before its fds (and the
+        // KObj_DMA pages they hold) close -- the single-thread voluntary-exit
+        // leg of the device-death quiesce. proc_free covers the other paths.
+        proc_quiesce_owned_devices(p);
         handle_table_free(p->handles);
         p->handles = NULL;
     }

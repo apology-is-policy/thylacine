@@ -191,12 +191,49 @@ struct virtio_mmio_dev *virtio_mmio_find_by_device_id(u32 device_id) {
     return NULL;
 }
 
+int virtio_mmio_reset_in_range(u64 pa, size_t size) {
+    if (size == 0) return 0;
+    if (size > (u64)-1 - pa) return 0;          // overflow ⇒ caller mis-use
+    u64 end = pa + (u64)size;
+    int reset = 0;
+    for (int i = 0; i < g_virtio_mmio_dev_count; i++) {
+        u64 dpa = (u64)g_virtio_mmio_devs[i].pa;
+        if (dpa >= pa && dpa < end) {
+            virtio_reset(&g_virtio_mmio_devs[i]);
+            reset++;
+        }
+    }
+    return reset;
+}
+
 // =============================================================================
 // Virtqueue allocation.
 // =============================================================================
 
+// RW-7 R3-F6: virtio_virtqueue_create gives each split-ring exactly one
+// page (alloc_pages(0)); the default queue size MUST keep every ring within
+// that page, and the vring index arithmetic requires a power-of-two size
+// (VIRTIO 1.2 §2.7). desc table = 16*N; used ring = 6 + 8*N (+2 trailing).
+_Static_assert((VIRTIO_VQ_NUM_DEFAULT & (VIRTIO_VQ_NUM_DEFAULT - 1u)) == 0,
+               "VIRTIO_VQ_NUM_DEFAULT must be a power of 2 (VIRTIO 1.2 §2.7)");
+_Static_assert(16u * VIRTIO_VQ_NUM_DEFAULT <= PAGE_SIZE,
+               "descriptor table (16*N) must fit one page");
+_Static_assert(6u + 8u * VIRTIO_VQ_NUM_DEFAULT <= PAGE_SIZE,
+               "used ring (6+8*N) must fit one page");
+
 // Min(a, b) for u32.
 static u32 u32_min(u32 a, u32 b) { return a < b ? a : b; }
+
+u32 virtio_vq_size_for(u32 num_max) {
+    if (num_max == 0) return 0;
+    u32 size = u32_min(num_max, VIRTIO_VQ_NUM_DEFAULT);
+    // The vring index masks with `size`; a non-power-of-two size has
+    // undefined wraparound. VIRTIO 1.2 §2.7 guarantees QueueNumMax is a
+    // power of 2, so a non-pow2 here is a malformed/hostile device --
+    // fail closed rather than arm an unsound ring.
+    if ((size & (size - 1u)) != 0) return 0;
+    return size;
+}
 
 struct virtio_virtqueue *virtio_virtqueue_create(struct virtio_mmio_dev *dev,
                                                   u32 qidx) {
@@ -205,11 +242,12 @@ struct virtio_virtqueue *virtio_virtqueue_create(struct virtio_mmio_dev *dev,
     // Step 1: select the queue.
     virtio_mmio_write32(dev, VIRTIO_MMIO_QUEUE_SEL, qidx);
 
-    // Step 2: device tells us its max. Zero means this index unsupported.
+    // Step 2: device tells us its max. virtio_vq_size_for clamps to our
+    // per-ring single-page default AND rejects (->0) a zero or non-pow2
+    // QueueNumMax (RW-7 R3-F6) -- the ring index arithmetic needs pow2.
     u32 num_max = virtio_mmio_read32(dev, VIRTIO_MMIO_QUEUE_NUM_MAX);
-    if (num_max == 0) return NULL;
-
-    u32 size = u32_min(num_max, VIRTIO_VQ_NUM_DEFAULT);
+    u32 size = virtio_vq_size_for(num_max);
+    if (size == 0) return NULL;
 
     struct virtio_virtqueue *vq = kmalloc(sizeof(*vq), KP_ZERO);
     if (!vq) return NULL;
@@ -269,11 +307,20 @@ struct virtio_virtqueue *virtio_virtqueue_create(struct virtio_mmio_dev *dev,
 void virtio_virtqueue_destroy(struct virtio_virtqueue *vq) {
     if (!vq) return;
 
-    // Disarm + select before tearing down so the device doesn't
-    // continue posting completions to about-to-be-freed memory.
+    // Disarm the queue before freeing its ring pages. Writing QUEUE_READY=0
+    // un-arms it; the readback is the VIRTIO 1.2 §4.2.3.2 synchronization
+    // point (forces the write to land before we free the pages).
+    //
+    // RW-7 R3-F2: QUEUE_READY=0 does NOT drain a DMA already in the device's
+    // pipeline -- only a full device reset (virtio_reset, status=0) guarantees
+    // no further used-ring write. A caller that frees these pages back to a
+    // SHARED allocator MUST reset the device first: random.c does before its
+    // destroy; the proc-death quiesce (virtio_mmio_reset_in_range) does for a
+    // dying driver. This per-queue disarm is the belt to that suspenders.
     if (vq->dev) {
         virtio_mmio_write32(vq->dev, VIRTIO_MMIO_QUEUE_SEL, vq->qidx);
         virtio_mmio_write32(vq->dev, VIRTIO_MMIO_QUEUE_READY, 0);
+        (void)virtio_mmio_read32(vq->dev, VIRTIO_MMIO_QUEUE_READY);
     }
 
     if (vq->desc_pages)  free_pages(vq->desc_pages, 0);
