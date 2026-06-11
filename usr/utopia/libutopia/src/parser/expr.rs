@@ -136,7 +136,22 @@ struct ExprParser {
     pos: usize,
     source_len: usize,
     ctx: ExprContext,
+    /// Operator-recursion depth -- the count of live `parse_pow` + `parse_unary`
+    /// frames. The flat `check_token_nesting` pre-pass bounds BRACKET nesting,
+    /// but the right-associative `**` chain (`parse_pow` self-recursion) and the
+    /// prefix `!`/`-`/`~` chain (`parse_unary` self-recursion) are NOT bracket
+    /// tokens, so a line of e.g. 2000 `!` (`if (!!!...x) {}`) would otherwise
+    /// drive that many frames past the 256 KiB EL0 stack into a guard-page
+    /// `snare:segv` -> shell death (scripture 8.1). Bounded by EXPR_MAX_DEPTH
+    /// (RW-9 round-2 F1; the bracket-only check_token_nesting missed this).
+    depth: u32,
 }
+
+/// Maximum operator-recursion depth (combined `parse_pow` + `parse_unary`
+/// frames). Each frame is a few hundred bytes; 256 keeps the deepest chain
+/// well under the 256 KiB EL0 stack while sitting far beyond any real
+/// expression's operator nesting.
+const EXPR_MAX_DEPTH: u32 = 256;
 
 impl ExprParser {
     fn new(tokens: Vec<Token>, source_len: usize, ctx: ExprContext) -> Self {
@@ -150,6 +165,7 @@ impl ExprParser {
             pos: 0,
             source_len,
             ctx,
+            depth: 0,
         }
     }
 
@@ -764,6 +780,22 @@ impl ExprParser {
     }
 
     fn parse_pow(&mut self) -> ParseResult<Expr> {
+        // Operator-recursion bound (RW-9 round-2 F1): `2**2**...**2` recurses
+        // here per `**`. Guard before the work; balance the decrement on every
+        // return path via the inner-fn split (mirrors eval_block).
+        if self.depth >= EXPR_MAX_DEPTH {
+            return Err(ParseError {
+                kind: ParseErrorKind::RecursionLimit,
+                span: self.current_span(),
+            });
+        }
+        self.depth += 1;
+        let r = self.parse_pow_inner();
+        self.depth -= 1;
+        r
+    }
+
+    fn parse_pow_inner(&mut self) -> ParseResult<Expr> {
         if self.ctx != ExprContext::Arith {
             return self.parse_unary();
         }
@@ -786,6 +818,23 @@ impl ExprParser {
     }
 
     fn parse_unary(&mut self) -> ParseResult<Expr> {
+        // Operator-recursion bound (RW-9 round-2 F1): a prefix `!`/`-`/`~`
+        // chain recurses here per operator. Same guard + inner-fn split as
+        // parse_pow; the shared `self.depth` bounds the combined pow+unary
+        // nesting (they call each other), so one cap covers both vectors.
+        if self.depth >= EXPR_MAX_DEPTH {
+            return Err(ParseError {
+                kind: ParseErrorKind::RecursionLimit,
+                span: self.current_span(),
+            });
+        }
+        self.depth += 1;
+        let r = self.parse_unary_inner();
+        self.depth -= 1;
+        r
+    }
+
+    fn parse_unary_inner(&mut self) -> ParseResult<Expr> {
         // Unary operators: `! - ~`. `-` and `~` are arith-only;
         // `!` is logical and works in cond + arith.
         let op = match self.peek_kind() {

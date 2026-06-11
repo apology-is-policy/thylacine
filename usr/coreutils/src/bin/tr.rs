@@ -14,7 +14,7 @@ use alloc::vec::Vec;
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
 use libthyla_rs::env::{self, Args};
-use libthyla_rs::io::{self, Read, Write};
+use libthyla_rs::io::{self, Read};
 use libthyla_rs::eprintln;
 
 #[no_mangle]
@@ -105,7 +105,10 @@ fn run(args: Args) -> i64 {
     }
 
     let mut inp = io::stdin();
-    let mut out = io::stdout();
+    // A filter (like cat/cut/wc): payload through OutSink so a mid-stream
+    // stdout error reports + exits nonzero, not silently truncates at exit 0
+    // (RW-9 round-2 F2 -- tr is a filter, not a seq/yes-style generator).
+    let mut out = io::OutSink::new();
     let mut buf = [0u8; 4096];
     let mut tmp: Vec<u8> = Vec::with_capacity(4096);
     loop {
@@ -127,9 +130,14 @@ fn run(args: Args) -> i64 {
                 tmp.push(map[b as usize]);
             }
         }
-        if out.write_all(&tmp).is_err() {
+        out.put(&tmp);
+        if out.failed() {
             break;
         }
+    }
+    if out.failed() {
+        eprintln!("tr: write error");
+        return 1;
     }
     0
 }

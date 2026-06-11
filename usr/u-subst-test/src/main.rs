@@ -186,6 +186,37 @@ pub extern "C" fn rs_main() -> i64 {
         return fail("deeply nested parser input did not hit the nesting bound");
     }
 
+    // 13. RW-9 round-2 F1 regression: a deep PREFIX-OPERATOR chain is NOT a
+    //     bracket nest, so check_token_nesting (#12) misses it -- ~2000 `!`
+    //     drove parse_unary that many frames into the EL0 stack pre-fix
+    //     (-> snare:segv -> shell death). Post-fix it trips EXPR_MAX_DEPTH.
+    let mut bangs = String::from("if (");
+    let mut bi = 0;
+    while bi < 2000 {
+        bangs.push('!');
+        bi += 1;
+    }
+    bangs.push_str("1) { let z = 1 }");
+    let mut bang_env = Env::new();
+    if eval_source(&mut bang_env, &bangs).is_ok() {
+        return fail("deep prefix-operator (!) chain did not hit the expr recursion bound");
+    }
+
+    // 14. RW-9 round-2 F1 regression: the right-associative `**` chain recurses
+    //     through parse_pow (the other unbounded operator vector). `2**2**...`
+    //     with 1000 `**` overflowed pre-fix; post-fix it trips EXPR_MAX_DEPTH.
+    let mut pows = String::from("(( 2");
+    let mut wi = 0;
+    while wi < 1000 {
+        pows.push_str("**2");
+        wi += 1;
+    }
+    pows.push_str(" ))");
+    let mut pow_env = Env::new();
+    if eval_source(&mut pow_env, &pows).is_ok() {
+        return fail("deep `**` chain did not hit the expr recursion bound");
+    }
+
     t_putstr("u-subst-test: all OK\n");
     0
 }

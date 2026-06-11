@@ -1025,6 +1025,14 @@ fn eval_command(env: &mut Env, cmd: &Command) -> EvalResult<StatementFlow> {
             // empty-argv path achieves both.)
             env.status_set(0);
             let argv = evaluate_argv(env, &simple.words)?;
+            // SA-1 (RW-9 round-2 self-audit): a Ctrl-C that interrupted a
+            // `$(...)` argument latched interrupt_pending while expanding argv.
+            // Do NOT spawn the command on the partial capture -- bail so the
+            // flag unwinds to the prompt (eval_block re-observes it after this
+            // statement). Mirrors the exit_requested checks on this path.
+            if env.interrupt_pending() {
+                return Ok(StatementFlow::Normal);
+            }
             if argv.is_empty() {
                 return Ok(StatementFlow::Normal);
             }
