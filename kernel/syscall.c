@@ -18,6 +18,7 @@
 #include <thylacine/devsrv.h>
 #include <thylacine/dma_handle.h>
 #include <thylacine/elf.h>
+#include <thylacine/errno.h>
 #include <thylacine/exec.h>
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
@@ -2413,12 +2414,12 @@ static s64 sys_set_tid_address_handler(u64 tidptr_raw) {
 static s64 sys_thread_spawn_handler(u64 entry_va, u64 sp_va,
                                     u64 arg_va, u64 tls_va) {
     struct Thread *t = current_thread();
-    if (!t)                                          return -22; // -EINVAL
+    if (!t)                                          return -T_E_INVAL;
     struct Proc *p = t->proc;
-    if (!p)                                          return -22;
-    if (p->magic != PROC_MAGIC)                      return -22;
-    if (p == kproc())                                return -22;
-    if (p->pgtable_root == 0)                        return -22;
+    if (!p)                                          return -T_E_INVAL;
+    if (p->magic != PROC_MAGIC)                      return -T_E_INVAL;
+    if (p == kproc())                                return -T_E_INVAL;
+    if (p->pgtable_root == 0)                        return -T_E_INVAL;
 
     // entry_va: must be non-NULL + 4-byte aligned + within user VA.
     //
@@ -2432,9 +2433,9 @@ static s64 sys_thread_spawn_handler(u64 entry_va, u64 sp_va,
     // returns success, the eret fires, the CPU alignment check trips, the
     // kernel extincts. Convert to -EINVAL at the gate so misalignment
     // becomes a clean userspace error instead of a kernel-killing payload.
-    if (entry_va == 0)                               return -22;
-    if (entry_va & 0x3u)                              return -22;
-    if (entry_va >= UACCESS_USER_VA_TOP)              return -22;
+    if (entry_va == 0)                               return -T_E_INVAL;
+    if (entry_va & 0x3u)                              return -T_E_INVAL;
+    if (entry_va >= UACCESS_USER_VA_TOP)              return -T_E_INVAL;
 
     // sp_va: AAPCS64 requires 16-byte stack alignment at function entry.
     // The pouch pthread layer is responsible for picking an aligned top
@@ -2447,17 +2448,17 @@ static s64 sys_thread_spawn_handler(u64 entry_va, u64 sp_va,
     // created a fragile boundary: any compiler-emitted prologue using
     // `[sp, #+N]` (rare but ABI-permitted for register-save slots) would
     // dereference at a TTBR1 address. Matches entry_va's strict `>=`.
-    if (sp_va == 0)                                   return -22;
-    if ((sp_va & 0xFu) != 0)                          return -22;
-    if (sp_va >= UACCESS_USER_VA_TOP)                 return -22;
+    if (sp_va == 0)                                   return -T_E_INVAL;
+    if ((sp_va & 0xFu) != 0)                          return -T_E_INVAL;
+    if (sp_va >= UACCESS_USER_VA_TOP)                 return -T_E_INVAL;
 
     // tls_va: 0 is permitted (no TLS yet — the entry can set it
     // afterward via msr tpidr_el0). Non-zero must be in user VA. No
     // alignment requirement — TLS layout is libc-defined.
-    if (tls_va != 0 && tls_va >= UACCESS_USER_VA_TOP) return -22;
+    if (tls_va != 0 && tls_va >= UACCESS_USER_VA_TOP) return -T_E_INVAL;
 
     struct Thread *nt = thread_create_user(p, entry_va, sp_va, arg_va, tls_va);
-    if (!nt)                                         return -12; // -ENOMEM
+    if (!nt)                                         return -T_E_NOMEM;
 
     // ready() inserts the new RUNNABLE Thread into the run-tree. From
     // here it can be picked by any CPU on the next sched() tick.

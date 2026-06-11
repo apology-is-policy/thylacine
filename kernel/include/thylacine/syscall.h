@@ -457,12 +457,15 @@ enum {
 
     // P5-hostowner-b-b: SYS_CAP_GRANT(cap_mask, target_stripes) and
     // SYS_CAP_USE(cap_mask) — userspace bridges to the kernel `cap` device
-    // (CORVUS-DESIGN.md §5.5.1). The Dev write op (devcap_write on
-    // /cap/grant or /cap/use) is the eventual production path through a
-    // future namespace-aware open syscall; at v1.0 we lack t_open, so the
-    // two writers (corvus → grant, the console-attached redeemer → use)
-    // reach the cores directly via these syscalls. Same gate semantics
-    // as the Dev op (CAP_GRANT_HOSTOWNER for grant; PROC_FLAG_CONSOLE_-
+    // (CORVUS-DESIGN.md §5.5.1). A namespace-aware open exists since
+    // stalk (SYS_OPEN resolves paths), but the syscall bridges REMAIN the
+    // production path because the two writers are CHROOTED — corvus to its
+    // storage capability, the redeemer to its session tree — and a /cap
+    // file walk is not reachable from those roots (the argued file-first
+    // deviation; CLAUDE.md A-4 row). The Dev write op (devcap_write on
+    // /cap/grant or /cap/use) stays the conceptual path for un-chrooted
+    // writers + tests. Same gate semantics as the Dev op
+    // (CAP_GRANT_HOSTOWNER for grant; PROC_FLAG_CONSOLE_-
     // ATTACHED + matching stripes + matching cap_mask for use).
     //
     // SYS_CAP_GRANT returns 0 on success (a synthetic "wrote frame" ack;
@@ -507,10 +510,13 @@ enum {
     //   - dev->open fails (Rlerror / permission)
     //   - handle table full
     //
-    // The returned handle has RIGHT_READ | RIGHT_WRITE | RIGHT_TRANSFER —
-    // matching SYS_ATTACH_9P's envelope. The underlying fid's omode is
-    // what the server actually enforces; a SYS_WRITE on an OREAD-only fid
-    // gets -1 from the server's Rlerror, not from a rights gate here.
+    // The returned handle's rights are DERIVED FROM omode (A-3b F1,
+    // rights_for_omode: OREAD→RIGHT_READ, OWRITE→RIGHT_WRITE, ORDWR→R|W,
+    // OEXEC→RIGHT_READ, +OTRUNC→+RIGHT_WRITE; a normally-opened handle
+    // adds RIGHT_TRANSFER; T_OPATH keeps the born-R|W navigation base
+    // with NO TRANSFER) — the capability axis cannot exceed the access
+    // the perm_check validated. The server additionally enforces the
+    // fid's omode (defense in depth, no longer the only gate).
     //
     // Lifecycle: dev9p_walk allocates a fresh fid + populates the new
     // Spoor's priv with fid_owned=true. dev9p_close on the new Spoor

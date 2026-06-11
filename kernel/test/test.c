@@ -247,6 +247,7 @@ void test_notes_queue_alloc_free_smoke(void);
 void test_notes_post_dequeue_smoke(void);
 void test_notes_post_ordering(void);
 void test_notes_unknown_name_rejected(void);
+void test_notes_snare_forge_rejected(void);
 void test_notes_queue_full_returns_minus1(void);
 void test_notes_coalesce_synthetic(void);
 void test_notes_mask_defers(void);
@@ -602,6 +603,7 @@ void test_9p_client_mkdir(void);
 void test_9p_client_unlinkat(void);
 void test_9p_client_readlink(void);
 void test_9p_client_rlerror_propagates_to_negative_errno(void);
+void test_9p_client_rlerror_hostile_ecode_bounded(void);
 void test_9p_client_op_before_handshake_returns_ebusy(void);
 void test_9p_client_lock_released_between_ops(void);
 void test_9p_client_async_op_posts_cqe(void);
@@ -1171,6 +1173,7 @@ struct test_case g_tests[] = {
     { "notes.post_dequeue_smoke",              test_notes_post_dequeue_smoke,              false, NULL },
     { "notes.post_ordering",                   test_notes_post_ordering,                   false, NULL },
     { "notes.unknown_name_rejected",           test_notes_unknown_name_rejected,           false, NULL },
+    { "notes.snare_forge_rejected",            test_notes_snare_forge_rejected,            false, NULL },
     { "notes.queue_full_returns_minus1",       test_notes_queue_full_returns_minus1,       false, NULL },
     { "notes.coalesce_synthetic",              test_notes_coalesce_synthetic,              false, NULL },
     { "notes.mask_defers",                     test_notes_mask_defers,                     false, NULL },
@@ -1627,6 +1630,9 @@ struct test_case g_tests[] = {
     { "9p_client.readlink",            test_9p_client_readlink,            false, NULL },
     { "9p_client.rlerror_propagates_to_negative_errno",
                                        test_9p_client_rlerror_propagates_to_negative_errno,
+                                                                           false, NULL },
+    { "9p_client.rlerror_hostile_ecode_bounded",
+                                       test_9p_client_rlerror_hostile_ecode_bounded,
                                                                            false, NULL },
     { "9p_client.op_before_handshake_returns_ebusy",
                                        test_9p_client_op_before_handshake_returns_ebusy,

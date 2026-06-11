@@ -11,6 +11,7 @@
 //   notes.post_dequeue_smoke          — single post → single dequeue
 //   notes.post_ordering               — three posts dequeued in order
 //   notes.unknown_name_rejected       — notes_post with unknown name → -1
+//   notes.snare_forge_rejected        — user-path snare:* post → -1 (ABI)
 //   notes.queue_full_returns_minus1   — non-synthetic posts fail at full
 //   notes.coalesce_synthetic          — synthetic poster merges at threshold
 //   notes.mask_defers                 — masked entries skipped at dequeue
@@ -39,6 +40,7 @@ void test_notes_queue_alloc_free_smoke(void);
 void test_notes_post_dequeue_smoke(void);
 void test_notes_post_ordering(void);
 void test_notes_unknown_name_rejected(void);
+void test_notes_snare_forge_rejected(void);
 void test_notes_queue_full_returns_minus1(void);
 void test_notes_coalesce_synthetic(void);
 void test_notes_mask_defers(void);
@@ -142,6 +144,35 @@ void test_notes_unknown_name_rejected(void) {
     TEST_EXPECT_EQ(notes_post(p, "",           0u, NULL, true), -1,
                    "post(empty) rejected");
     TEST_EXPECT_EQ(p->notes->count, 0u, "no rejected post landed in queue");
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// ---------------------------------------------------------------------------
+// snare_forge_rejected
+// ---------------------------------------------------------------------------
+
+void test_notes_snare_forge_rejected(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+
+    // The ERRORS.md ABI commitment: the snare: prefix is reserved for
+    // kernel-synthetic posters. A userspace-path post (synthetic=false,
+    // the SYS_POSTNOTE shape) of ANY snare:* name must be rejected —
+    // independent of whether snare:* ever joins the supported name set.
+    TEST_EXPECT_EQ(notes_post(p, "snare:segv", 0u, NULL, false), -1,
+                   "user-path post(snare:segv) rejected");
+    TEST_EXPECT_EQ(notes_post(p, "snare:bus", 0u, NULL, false), -1,
+                   "user-path post(snare:bus) rejected");
+    TEST_EXPECT_EQ(notes_post(p, "snare:", 0u, NULL, false), -1,
+                   "user-path post(snare:) rejected");
+    TEST_EXPECT_EQ(p->notes->count, 0u, "no forged snare landed in queue");
+
+    // Control (non-vacuous): the same user path lands a supported name.
+    TEST_EXPECT_EQ(notes_post(p, "interrupt", 0u, NULL, false), 0,
+                   "user-path post(interrupt) lands");
+    TEST_EXPECT_EQ(p->notes->count, 1u, "control note queued");
 
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);

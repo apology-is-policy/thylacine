@@ -56,12 +56,22 @@ run-tcg:
 gdb:
 	@tools/run-vm.sh --gdb
 
+# Runs each spec's DEFAULT (clean) cfg and FAILS if any TLC run fails.
+# Specs with no default cfg (per-option cfgs only, e.g. sched_oncpu) are
+# skipped by name. TTrace replay modules (TLC counterexample droppings)
+# are skipped. The buggy-cfg counterexample gate is a separate, manual
+# per-surface discipline today (RW-10 F3; the tiered runner is tracked).
 specs:
-	@cd specs && for s in *.tla; do \
+	@cd specs && fail=0; for s in *.tla; do \
+		case "$$s" in *_TTrace_*) continue;; esac; \
+		cfg="$${s%.tla}.cfg"; \
+		if [ ! -f "$$cfg" ]; then echo "== $$s == (no default cfg; skipped)"; continue; fi; \
 		echo "== $$s =="; \
-		java -cp /tmp/tla2tools.jar tlc2.TLC -workers auto -deadlock \
-			-config "$${s%.tla}.cfg" "$$s" 2>&1 | tail -3; \
-	done
+		if java -cp /tmp/tla2tools.jar tlc2.TLC -workers auto -deadlock \
+			-config "$$cfg" "$$s" > "/tmp/tlc-$$s.log" 2>&1; \
+		then tail -3 "/tmp/tlc-$$s.log"; \
+		else tail -5 "/tmp/tlc-$$s.log"; echo "** $$s FAILED **"; fail=1; fi; \
+	done; exit $$fail
 
 help:
 	@echo "Thylacine OS — make targets:"

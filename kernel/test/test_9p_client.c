@@ -39,6 +39,7 @@ void test_9p_client_mkdir(void);
 void test_9p_client_unlinkat(void);
 void test_9p_client_readlink(void);
 void test_9p_client_rlerror_propagates_to_negative_errno(void);
+void test_9p_client_rlerror_hostile_ecode_bounded(void);
 void test_9p_client_op_before_handshake_returns_ebusy(void);
 void test_9p_client_lock_released_between_ops(void);
 void test_9p_client_async_op_posts_cqe(void);
@@ -253,7 +254,10 @@ static int canonical_responder(void *ctx, const u8 *req, size_t req_len,
     return -1;
 }
 
-// Responder that always returns Rlerror with a fixed ecode.
+// Responder that always returns Rlerror. The ecode is file-scope so the
+// hostile-ecode test can stage out-of-range values; default 2 (ENOENT).
+static u32 g_rlerror_ecode = 2;
+
 static int rlerror_responder(void *ctx, const u8 *req, size_t req_len,
                                u8 *resp, size_t resp_cap) {
     (void)ctx;
@@ -269,13 +273,16 @@ static int rlerror_responder(void *ctx, const u8 *req, size_t req_len,
         // Same — give Rattach so handshake completes.
         return canonical_responder(ctx, req, req_len, resp, resp_cap);
     }
-    // Anything else: Rlerror with ecode = 2 (ENOENT).
+    // Anything else: Rlerror with ecode = g_rlerror_ecode.
     size_t total = P9_HDR_LEN + 4;
     if (resp_cap < total) return -1;
     resp[0] = 11; resp[1] = 0; resp[2] = 0; resp[3] = 0;
     resp[4] = P9_RLERROR;
     resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
-    resp[7] = 2; resp[8] = 0; resp[9] = 0; resp[10] = 0;
+    resp[7]  = (u8)(g_rlerror_ecode & 0xff);
+    resp[8]  = (u8)((g_rlerror_ecode >> 8) & 0xff);
+    resp[9]  = (u8)((g_rlerror_ecode >> 16) & 0xff);
+    resp[10] = (u8)((g_rlerror_ecode >> 24) & 0xff);
     return (int)total;
 }
 
@@ -506,6 +513,54 @@ void test_9p_client_rlerror_propagates_to_negative_errno(void) {
     rc = p9_client_walk_one(&g_client, 0, 5, (const u8 *)"x", 1, NULL);
     TEST_EXPECT_EQ(rc, -2, "walk Rlerror → -ENOENT");
 
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// A hostile/buggy server controls the Rlerror ecode wire field. The
+// client bounds it before negating (9p_client.c map_error): ecode 0 (an
+// error reply must carry a nonzero errno) and anything past the 4095
+// errno window collapse to -P9_E_IO — without the bound, -(int)ecode on
+// 0x80000000 is signed-overflow UB (a UBSan kernel halt reachable by any
+// Rlerror). Regression for the bound (RW-10 ledger I-14 test gap).
+void test_9p_client_rlerror_hostile_ecode_bounded(void) {
+    int rc = p9_loopback_init(&g_loopback, g_loopback_resp,
+                                sizeof(g_loopback_resp),
+                                rlerror_responder, NULL);
+    TEST_EXPECT_EQ(rc, 0, "loopback init (hostile rlerror)");
+
+    rc = p9_client_init(&g_client, 0, 8192,
+                         p9_loopback_ops_for(&g_loopback),
+                         g_recv_buf, sizeof(g_recv_buf));
+    TEST_EXPECT_EQ(rc, 0, "client init");
+
+    const u8 uname[] = {'r'};
+    const u8 aname[] = {'/'};
+    rc = p9_client_handshake(&g_client, uname, sizeof(uname),
+                               aname, sizeof(aname), 0);
+    TEST_EXPECT_EQ(rc, 0, "handshake ok");
+
+    // ecode = 0: collapses to -EIO, never 0 ("success" from an error).
+    g_rlerror_ecode = 0;
+    rc = p9_client_walk_one(&g_client, 0, 5, (const u8 *)"x", 1, NULL);
+    TEST_EXPECT_EQ(rc, -P9_E_IO, "ecode 0 collapses to -EIO");
+
+    // ecode = 0x80000000: -(int)ecode would be signed-overflow UB.
+    g_rlerror_ecode = 0x80000000u;
+    rc = p9_client_walk_one(&g_client, 0, 6, (const u8 *)"x", 1, NULL);
+    TEST_EXPECT_EQ(rc, -P9_E_IO, "ecode 2^31 collapses to -EIO");
+
+    // ecode = 4096: one past the pouch [-4095,-2] passthrough window.
+    g_rlerror_ecode = 4096;
+    rc = p9_client_walk_one(&g_client, 0, 7, (const u8 *)"x", 1, NULL);
+    TEST_EXPECT_EQ(rc, -P9_E_IO, "ecode 4096 collapses to -EIO");
+
+    // Control: 4095 (in-window) passes through as -4095.
+    g_rlerror_ecode = 4095;
+    rc = p9_client_walk_one(&g_client, 0, 8, (const u8 *)"x", 1, NULL);
+    TEST_EXPECT_EQ(rc, -4095, "ecode 4095 passes through");
+
+    g_rlerror_ecode = 2;
     p9_client_destroy(&g_client);
     p9_loopback_destroy(&g_loopback);
 }

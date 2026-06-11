@@ -93,6 +93,16 @@
 // e_machine — architecture.
 #define EM_AARCH64    183
 
+// The acceptance constants the loader gates on are ABI-fixed by the ELF
+// spec; pin them so a header edit (or a conflicting include) cannot
+// silently shift what elf_load accepts.
+_Static_assert(ELFCLASS64 == 2,    "ELF ABI pin: e_ident[EI_CLASS] 64-bit");
+_Static_assert(ELFDATA2LSB == 1,   "ELF ABI pin: e_ident[EI_DATA] little-endian");
+_Static_assert(EV_CURRENT == 1,    "ELF ABI pin: version");
+_Static_assert(ELFOSABI_NONE == 0, "ELF ABI pin: System V OSABI");
+_Static_assert(ET_EXEC == 2,       "ELF ABI pin: e_type executable");
+_Static_assert(EM_AARCH64 == 183,  "ELF ABI pin: e_machine ARM64");
+
 // p_type — program-header type.
 #define PT_NULL       0
 #define PT_LOAD       1   // a loadable segment (the only type we map)
