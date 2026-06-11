@@ -341,3 +341,27 @@ ACCEPTED (closed-with-justification + doc caveat), TRACKED (#N), REGISTERED
 **RW-12 X-lens overflow (RW-10 category, not a gap):** the nine-specs fossil survives in `COMPARISON.md:259/271/318` + `NOVEL.md` Angle #8 + `estimate.md:41` ("nine TLA+ specs ... futex, notes, pty" — real inventory 17; those 3 dropped 2026-05-23). RW-10 swept the spec-tooling/CLAUDE.md surfaces, not these positioning docs. NOT trivially-mechanical (a multi-location count+framing change) → registered for the #64 RW-13 honesty pass, not fixed in-arc.
 
 **RW-12 verified PRESENT (do not re-derive as gaps):** the FS substrate (create/fsync/readdir/rename/unlink + fstat/lseek/wstat + atomic rename + dev9p mtime); the audited multi-in-flight 9P client (#841) + the complete Loom arc; spawn-full-argv + wait_pid_for + group-terminate + handle-close-at-exit + pipes/pipelines; the namespace *primitive* (mount/unmount/chroot/pivot_root, I-28 containment, I-1 isolation, rbind-for-free); A-5 single-session login→home→shell→logout; the line editor + job control + Ctrl-C-as-note; virtio-net/blk/gpu/input + the QEMU harness; AF_UNIX SOCK_STREAM + SO_PEERCRED; the closed aux items env::args / io::stdio / cwd / static uname. **The substrate is broad and sound (RW-1..11); the gaps are the userland surface a workload needs + the scripture reconciliation debt.**
+
+## RW-13 — Consolidation + emerge (the arc capstone). The full triage + the re-planned roadmap + the four voted scope decisions: `docs/holotype/13-consolidation.md`. Status: CLOSED — the arc EMERGES here.
+
+The ~250 register rows above are overwhelmingly already dispositioned
+(FIXED in-arc / ACCEPTED-with-caveat / v1.x-TRACKED). RW-13 places the open
+set; the four v1.0 scope forks were voted 2026-06-11:
+
+| Triage bucket | Rows | Disposition |
+|---|---|---|
+| **v1.0-pull, scope-independent (D4, first)** | HT11.SA-1/#60, HT11.R4-F1/F2/#61, HT12.W5-F2/#65 | the pre-rc hardening sub-arc |
+| **v1.0-pull, container keystone (D2)** | HT10.F9/HT12.W5-F1/#58, HT12.W5-F3/#66, HT10.F8/#57 | pulled forward (pre-LS) |
+| **v1.0-pull, reconciliation (#64, first emerge chunk)** | HT12.W4-F9, W1-F1..F4, W6-F1/F2, the nine-specs fossil | the doc-hygiene pass (section 2.1 authoritative) |
+| **LS line (Phase-7 completion)** | HT12.W2-F4/W3-F2/F3 -> LS-K; W6-F2/F3/F4/F5 -> LS-8; W6-F1 -> LS-7; W3-F1 -> LS-6; #69 sub-seams | re-sequenced, section 3.2 |
+| **Phase 8 (D1 net + D2 containers + D3 toolchain)** | HT12.W4-* -> #68; HT12.W5-F4/F5/F6/#70; HT12.W2-F1/#67 (NEW v1.0 scope) | section 3.3 |
+| **Phase 9 (hardening -> rc)** | HT11 #62 budget-gating items | section 3.4 |
+| **v1.x (recorded re-entry)** | #23/#26/#28/#46/#54, union mounts, LS-9 cluster, #20 (errno, owed vote) | section 3.5 |
+| **rejected-with-rationale (H4)** | HT12.W5-F10 (seccomp non-goal), W6-F7 (mouse/OSC52 -> Halcyon), W4-F13 (daemon-logging) | record-only |
+
+The four voted decisions (D1 networking IN / D2 containers BUILD-core / D3
+toolchain IN / D4 pre-rc-hardening FIRST) are recorded in
+`13-consolidation.md` section 2. The single systemic finding of the whole arc
+— the P6 multi-thread-Proc lift outrunning the wait/wake machinery, where
+almost every P1 lived (RW-2/4/5/7/8/9) — is `13-consolidation.md` section 1.2
++ DEBUGGING-PLAYBOOK 6.15. **The HOLOTYPE arc is COMPLETE.**

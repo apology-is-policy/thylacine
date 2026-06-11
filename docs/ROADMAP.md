@@ -90,6 +90,19 @@ The execution numbering reflects what status docs use (`docs/phaseN-status.md`).
 
 When in doubt, the **execution phase** in this table is authoritative — it is what `docs/phaseN-status.md`, `memory/project_active.md`, and commit messages use. Document section headers + in-body "Phase N" references elsewhere lag pending the renumber pass.
 
+### 2.2 The HOLOTYPE RW-13 re-plan (2026-06-11)
+
+The thirteen-part whole-system deep review (`docs/HOLOTYPE.md`, RW-0..RW-13) closed 2026-06-11. It found the specimen **sound** (0 P0 across the tree; ~15 P1 + ~40 P2 all fixed in-arc; the three cross-cuts returned 0 soundness) and re-planned the road to a maximal-coherent v1.0. The full triage + the four voted scope decisions live in `docs/holotype/13-consolidation.md`; this subsection is the roadmap-facing summary.
+
+**The four v1.0 scope decisions (voted 2026-06-11):**
+- **D1 — Networking is IN v1.0** (Phase 8). The Plan 9 `/net`-via-`netd` shape stands; the net design pass fills the 7 holes inside section 9.1 (packet filter, DNS/`/net/cs` mechanism, `/ctl/net` observability, poll-over-9P readiness, IP config, server-side acceptance criteria, the section 9.3 spec-waiver re-scope).
+- **D2 — Containers: build the tractable core** for v1.0. exec-from-namespace (route the 5 spawn variants through stalk + per-component X-search, retiring the flat `devramfs_lookup`) + the namespace-introspection substrate (Spoor name-retention so the Plan 9 `ns` tool renders) build now; **union mounts move to v1.x** (COMPARISON `✓` -> `○`, fail-loud the no-op `bind_before/after`).
+- **D3 — The on-system toolchain is IN v1.0** (NEW Phase-8 scope). clang/lld + make + git ported via Pouch; the self-hosting / build-storm (W2) story is part of v1.0. This makes VISION section 397 "no subset" + the Phase-9 "parallel make" criterion coherent — and is the single largest Phase-8 pole.
+- **D4 — Pre-rc hardening lands FIRST** (scope-independent): the 6 ms wake-preemption slice cliff fix (the latency-budget gate cannot pass without it), a production `KERNEL_TESTS=OFF` boot configuration + gated joey ladder, and the Resource/DoS floor (per-Proc page/thread/child caps — a fork/thread/memory bomb currently extincts the box).
+
+**The forward sequence** (the arc emerges here; the system resumes building):
+RW-13 reconciliation pass (the long-deferred section-2.1 renumber propagation + the present-tense honesty edits — pure scripture) -> the D4 pre-rc sub-arc -> the container keystone (exec-from-namespace + ns substrate) -> the **LS line, Phase-7 completion** (LS-K id/whoami/date + the wall clock -> LS-8 termios/PTY -> LS-7 the nora editor -> LS-6 login echo) -> **Phase 8** (net arc -> container runner -> on-system toolchain -> Linux binary shim) -> **Phase 9** (hardening -> v1.0-rc.1) -> **Phase 10** (Halcyon -> v1.0 final). The section 10/11 fallback stands: if Halcyon slips, the Phase-9 rc ships as v1.0.
+
 ---
 
 ## 3. Principles throughout
