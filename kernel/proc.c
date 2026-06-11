@@ -16,6 +16,7 @@
 //   2. proc_init      — kproc (PID 0) appears
 //   3. thread_init    — kthread (TID 0) appears, parented to kproc
 
+#include <thylacine/burrow.h>
 #include <thylacine/caps.h>
 #include <thylacine/devcap.h>
 #include <thylacine/devsrv.h>
@@ -403,34 +404,63 @@ struct Proc *proc_alloc(void) {
 // well-behaved driver resets its own device before exit; this is the kernel
 // backstop for the crash path the kernel cannot make a driver run.
 //
-// We walk the Proc's KObj_MMIO handles -- its device-register claims -- and
-// reset every probed virtio transport whose slot falls in each claimed
-// range. The reset writes through the kernel's permanent .base MMIO mapping,
-// independent of the user mapping torn down by vma_drain. Page-exclusive
-// KObj_MMIO claims (mmio_handle.c overlap rejection) mean no OTHER live
-// driver owns a slot in the range, so a broad in-range reset never disturbs
-// a sibling driver's device.
+// A driver's device-register claim (KObj_MMIO) is reachable two ways, and we
+// walk BOTH (round-2 F1): the handle table (an open fd) AND the per-Proc VMA
+// list (a BURROW_TYPE_MMIO mapping). SYS_MMIO_MAP transfers the KObj_MMIO ref
+// to the VMA's mapping and a driver can then CLOSE the fd (the idiomatic
+// mmap-then-close), leaving the device reachable ONLY through the VMA -- a
+// handle-only walk would miss it and reopen the corruption window. Both walks
+// run BEFORE vma_drain frees the VMAs; a device reached by both is reset twice
+// (status=0 is idempotent). The reset writes through the kernel's permanent
+// .base MMIO mapping, independent of the user mapping vma_drain tears down.
+// Page-exclusive KObj_MMIO claims (mmio_handle.c overlap rejection) mean no
+// OTHER live DRIVER owns a slot in the range; the one in-range slot the kernel
+// itself drives -- virtio-rng -- is skipped inside virtio_mmio_reset_in_range
+// (round-2 F2), so the reset never disturbs a device this Proc did not own.
 //
-// Called from BOTH proc-exit handle-close sites so every death path is
-// covered before the pages free: proc_close_handles_at_exit (single-thread
-// voluntary exit, incl. the _Exit crash path) and proc_free (multi-thread
-// reap -- stratumd, the live trigger -- plus single-thread-killed and
-// orphan/rollback). NO table lock: like handle_table_free, this runs only on
-// a quiesced table (thread_count==1 sole caller at exit, or all threads
-// reaped at proc_free), so no peer mutates it. Returns the device count for
-// the regression test. The structural close is a per-device KObj_VIRTIO_DEV
-// that resets on owner-death (device-session model; RW-7 R3-F8, Phase 5+).
+// Called from BOTH proc-exit handle-close sites so every death path is covered
+// before the pages free: proc_close_handles_at_exit (single-thread voluntary
+// exit, incl. the _Exit crash path) and proc_free (multi-thread reap --
+// stratumd, the live trigger -- plus single-thread-killed and orphan/rollback).
+// NO lock: like the adjacent handle_table_free + vma_drain, this runs only on a
+// quiesced Proc (thread_count==1 sole caller at exit, or all threads reaped at
+// proc_free), so no peer mutates the table or the VMA list. Returns the device
+// count for the regression test.
+//
+// RESIDUAL (round-3 F1, trust-envelope): a driver that FULLY releases its
+// KObj_MMIO claim (SYS_BURROW_DETACH + close the fd) while the device is still
+// armed is invisible to BOTH walks -- but that is a malicious/buggy
+// CAP_HW_CREATE driver (the v1.0 envelope: kproc grants CAP_HW_CREATE only to
+// trusted drivers; stratumd maps-and-holds), the same posture as the
+// mmio_handle.c rng-slot residual. The structural close is a per-device
+// KObj_VIRTIO_DEV that resets at owner-death OR last-claim-drop (device-session
+// model; R3-F8, P5+), which closes this residual by construction.
 int proc_quiesce_owned_devices(struct Proc *p) {
-    if (!p || !p->handles) return 0;
-    struct HandleTable *t = p->handles;
+    if (!p) return 0;
     int reset = 0;
-    for (int i = 0; i < PROC_HANDLE_MAX; i++) {
-        struct Handle *h = &t->slots[i];
-        if (h->magic != HANDLE_MAGIC) continue;
-        if (h->kind != KOBJ_MMIO || !h->obj) continue;
-        struct KObj_MMIO *k = (struct KObj_MMIO *)h->obj;
+
+    // (a) device-register claims held by an open fd.
+    struct HandleTable *t = p->handles;
+    if (t) {
+        for (int i = 0; i < PROC_HANDLE_MAX; i++) {
+            struct Handle *h = &t->slots[i];
+            if (h->magic != HANDLE_MAGIC) continue;
+            if (h->kind != KOBJ_MMIO || !h->obj) continue;
+            struct KObj_MMIO *k = (struct KObj_MMIO *)h->obj;
+            reset += virtio_mmio_reset_in_range(k->pa, k->size);
+        }
+    }
+
+    // (b) device-register claims held ONLY by a BURROW_TYPE_MMIO mapping (fd
+    // closed after SYS_MMIO_MAP). Independent of (a): a NULL handle table does
+    // not imply no mapped devices.
+    for (struct Vma *v = p->vmas; v; v = v->next) {
+        struct Burrow *b = v->burrow;
+        if (!b || b->type != BURROW_TYPE_MMIO || !b->kobj_mmio) continue;
+        struct KObj_MMIO *k = b->kobj_mmio;
         reset += virtio_mmio_reset_in_range(k->pa, k->size);
     }
+
     return reset;
 }
 
@@ -934,9 +964,10 @@ void proc_console_relinquish(struct Proc *p) {
 // A-4c-2: the SAK transition (I-27 trusted-path handoff). Called from the
 // console_mgr kthread on a recognized serial BREAK. The whole transition runs
 // under g_proc_table_lock so the owner + trusted pointers cannot be reaped/freed
-// mid-transition (the A-4c-1 console-owner lifetime discipline). Lock order
-// g_proc_table_lock -> note q->lock matches proc_console_post_interrupt and the
-// proc_become_zombie_locked -> notes_post_child_exit order (audited; acyclic).
+// mid-transition (the A-4c-1 console-owner lifetime discipline). RW-7 R2-F2: the
+// SAK posts NO note, so it takes ONLY g_proc_table_lock -- the prior
+// g_proc_table_lock -> note q->lock edge is gone (revoke/mark/is-attached are
+// lock-free atomic RMWs), strictly simplifying the lock order.
 void proc_console_sak(void) {
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
     struct Proc *owner   = g_console_owner;

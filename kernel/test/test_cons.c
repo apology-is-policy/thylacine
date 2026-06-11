@@ -23,9 +23,11 @@
 //   cons.console_owner_intr — proc_console_post_interrupt posts to the owner;
 //                             NULL/zombie owner is a no-op
 //   proc.revoke_console_attached — the atomic clear (A-4c-2); idempotent
-//   cons.sak_revoke_regrant — SAK revokes from owner (+ note) + re-grants to trusted
-//   cons.sak_failsafe_revoke_only — SAK with no trusted Proc clears the owner
-//   cons.sak_idempotent_flood — SAK when trusted already owns is a no-op (no note)
+//   cons.sak_revoke_regrant — SAK revokes the owner's attach (NO note) + grants the attach to trusted; owner -> NULL
+//   cons.sak_failsafe_revoke_only — SAK with no trusted Proc clears the owner, grants no attach
+//   cons.sak_idempotent_flood — SAK when trusted is the sole attach holder with no owner is a no-op
+//   cons.sak_does_not_terminate_trusted — RW-7 R2-F1/F2: SAK then Ctrl-C terminates neither the old owner nor trusted
+//   cons.sak_attaches_from_relinquished_state — first SAK (owner NULL, trusted unattached) attaches trusted
 
 #include "test.h"
 
@@ -53,6 +55,7 @@ void test_cons_sak_failsafe_revoke_only(void);
 void test_cons_sak_idempotent_flood(void);
 void test_cons_sak_via_console_mgr(void);
 void test_cons_sak_does_not_terminate_trusted(void);
+void test_cons_sak_attaches_from_relinquished_state(void);
 void test_proc_console_relinquish(void);              // A-5a (I-27)
 void test_proc_console_relinquish_other_owner(void);  // A-5a (self-only)
 void test_cons_console_open(void);                    // A-5a (SYS_CONSOLE_OPEN)
@@ -575,4 +578,35 @@ void test_cons_sak_does_not_terminate_trusted(void) {
     proc_free(owner);
     proc_free(trusted);
     proc_free(control);
+}
+
+// RW-7 round-2 F4: the production-typical FIRST SAK fires from {owner == NULL
+// (joey already relinquished its boot console), trusted == corvus alive but NOT
+// yet attached}. The repurposed idempotency guard (proc_console_sak) must NOT
+// no-op this state -- it must PROCEED to attach corvus -- and is saved only by
+// its `proc_is_console_attached(trusted)` conjunct being false here. No other SAK
+// test drives owner==NULL + unattached-trusted, so a future guard simplification
+// that dropped the attach conjunct would no-op every real first SAK (the trusted
+// path unreachable) and the suite would stay green. This pins it.
+void test_cons_sak_attaches_from_relinquished_state(void) {
+    struct Proc *trusted = proc_alloc();
+    TEST_ASSERT(trusted != NULL, "proc_alloc trusted");
+    trusted->state = PROC_STATE_ALIVE;
+
+    // The relinquished state: no console owner; trusted designated but UNATTACHED.
+    proc_set_console_owner(NULL);
+    proc_set_console_trusted(trusted);
+    TEST_ASSERT(!proc_is_console_attached(trusted), "trusted unattached pre-SAK");
+
+    proc_console_sak();
+
+    TEST_ASSERT(proc_is_console_attached(trusted),
+                "first SAK from the relinquished state ATTACHES the trusted authority");
+    TEST_EXPECT_EQ(proc_test_console_owner(), (struct Proc *)NULL,
+                   "owner stays NULL (trusted is attach-only)");
+
+    proc_set_console_owner(NULL);
+    proc_set_console_trusted(NULL);
+    trusted->state = PROC_STATE_ZOMBIE;
+    proc_free(trusted);
 }

@@ -327,6 +327,7 @@ void test_cons_sak_failsafe_revoke_only(void);
 void test_cons_sak_idempotent_flood(void);
 void test_cons_sak_via_console_mgr(void);
 void test_cons_sak_does_not_terminate_trusted(void);
+void test_cons_sak_attaches_from_relinquished_state(void);
 void test_proc_console_relinquish(void);
 void test_proc_console_relinquish_other_owner(void);
 void test_cons_console_open(void);
@@ -467,6 +468,7 @@ void test_virtio_find_by_device_id(void);
 void test_virtio_reset_in_range_no_match(void);
 void test_virtio_vq_size_for(void);
 void test_virtio_proc_death_quiesces_device(void);
+void test_virtio_proc_death_quiesces_vma_only_device(void);
 void test_irqfwd_create_destroy(void);
 void test_irqfwd_refcount_lifecycle(void);
 void test_irqfwd_wait_wakes_on_sgi(void);
@@ -1256,6 +1258,8 @@ struct test_case g_tests[] = {
     { "cons.sak_via_console_mgr",      test_cons_sak_via_console_mgr,      false, NULL },
     { "cons.sak_does_not_terminate_trusted",
                                        test_cons_sak_does_not_terminate_trusted, false, NULL },
+    { "cons.sak_attaches_from_relinquished_state",
+                                       test_cons_sak_attaches_from_relinquished_state, false, NULL },
     { "proc.console_relinquish",       test_proc_console_relinquish,       false, NULL },
     { "proc.console_relinquish_other", test_proc_console_relinquish_other_owner, false, NULL },
     { "cons.console_open",             test_cons_console_open,             false, NULL },
@@ -1397,6 +1401,8 @@ struct test_case g_tests[] = {
     { "virtio.vq_size_for",            test_virtio_vq_size_for,            false, NULL },
     { "virtio.proc_death_quiesces_device",
                                        test_virtio_proc_death_quiesces_device, false, NULL },
+    { "virtio.proc_death_quiesces_vma_only_device",
+                                       test_virtio_proc_death_quiesces_vma_only_device, false, NULL },
     { "irqfwd.create_destroy",         test_irqfwd_create_destroy,         false, NULL },
     { "irqfwd.refcount_lifecycle",     test_irqfwd_refcount_lifecycle,     false, NULL },
     { "irqfwd.wait_wakes_on_sgi",      test_irqfwd_wait_wakes_on_sgi,      false, NULL },

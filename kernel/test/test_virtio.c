@@ -7,12 +7,14 @@
 
 #include "test.h"
 
+#include <thylacine/burrow.h>
 #include <thylacine/handle.h>
 #include <thylacine/mmio_handle.h>
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
 #include <thylacine/types.h>
 #include <thylacine/virtio.h>
+#include <thylacine/vma.h>
 
 void test_virtio_mmio_probe(void);
 void test_virtio_magic_value(void);
@@ -24,6 +26,7 @@ void test_virtio_find_by_device_id(void);
 void test_virtio_reset_in_range_no_match(void);
 void test_virtio_vq_size_for(void);
 void test_virtio_proc_death_quiesces_device(void);
+void test_virtio_proc_death_quiesces_vma_only_device(void);
 
 // =============================================================================
 // Tests.
@@ -243,4 +246,44 @@ void test_virtio_proc_death_quiesces_device(void) {
     // -> kobj_mmio_unref releases the claim. Mirrors drop_test_proc.
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
+}
+
+void test_virtio_proc_death_quiesces_vma_only_device(void) {
+    // R3-F1 round-2 F1 regression: a driver can SYS_MMIO_MAP a device then CLOSE
+    // the fd -- the KObj_MMIO then lives ONLY on the VMA's BURROW_TYPE_MMIO
+    // mapping, NOT the handle table. The handle-only walk missed it and reopened
+    // the DMA-into-freed-pages corruption; proc_quiesce must reset it via the
+    // VMA walk. (The covered fd-open path is test_virtio_proc_death_quiesces_device.)
+    u64 page = 0;
+    int expected = 0;
+    if (!find_empty_virtio_page(&page, &expected)) return;  // skip: no empty page
+
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    struct KObj_MMIO *km = kobj_mmio_create(page, PAGE_SIZE);
+    TEST_ASSERT(km != NULL, "kobj_mmio_create over an empty virtio page");
+
+    struct Burrow *b = burrow_create_mmio(km);
+    TEST_ASSERT(b != NULL, "burrow_create_mmio");
+
+    // SYS_MMIO_MAP equivalent: install the device mapping as a VMA.
+    int rc = burrow_map(p, b, 0x40000000ull, PAGE_SIZE, VMA_PROT_RW);
+    TEST_EXPECT_EQ(rc, 0, "burrow_map installed the MMIO VMA");
+
+    // Drop the construction ref -> the KObj_MMIO now lives ONLY on the VMA's
+    // mapping ref. No fd handle was ever installed: this is the fd-closed state.
+    burrow_unref(b);
+
+    // The handle table holds no KObj_MMIO; the device is reachable only via the
+    // VMA. The VMA walk (round-2 F1) is what must still find + reset it.
+    int n = proc_quiesce_owned_devices(p);
+    TEST_EXPECT_EQ(n, expected,
+                   "proc death resets a device held ONLY by a VMA (fd closed)");
+
+    // proc_free walks + releases the VMA + Burrow (-> kobj_mmio_unref); then
+    // drop the test's own km ref. Mirrors test_mmio_map_install_vma.
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+    kobj_mmio_unref(km);
 }

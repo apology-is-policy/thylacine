@@ -476,9 +476,11 @@ void boot_main(void) {
     // P4-Ib R9 F142: reserve kernel-owned INTIDs in g_intid_claimed
     // so that subsequent kobj_irq_create (via SYS_IRQ_CREATE syscall
     // from a userspace driver) can't accidentally clobber the timer
-    // or IPI_RESCHED handler slots. Must run AFTER timer_init +
-    // smp_init (their gic_attach calls bypass the claim layer) and
-    // BEFORE any user-driven kobj_irq_create.
+    // or IPI_RESCHED handler slots. Runs AFTER timer_init (the virtual-timer
+    // PPI is attached) but BEFORE smp_init (RW-7 R1-F4: irqfwd_init pre-claims
+    // SGI 0 = IPI_RESCHED here; smp_init attaches its handler later via
+    // gic_attach, which bypasses the claim layer -- the reservation is
+    // order-independent) and BEFORE any user-driven kobj_irq_create.
     irqfwd_init();
 
     // P4-Ic2 R10 F154: reserve kernel-owned MMIO PA ranges in

@@ -198,10 +198,23 @@ int virtio_mmio_reset_in_range(u64 pa, size_t size) {
     int reset = 0;
     for (int i = 0; i < g_virtio_mmio_dev_count; i++) {
         u64 dpa = (u64)g_virtio_mmio_devs[i].pa;
-        if (dpa >= pa && dpa < end) {
-            virtio_reset(&g_virtio_mmio_devs[i]);
-            reset++;
-        }
+        if (dpa < pa || dpa >= end) continue;
+        // RW-7 round-2 F2: the kernel CSPRNG (random.c) DRIVES the virtio-rng
+        // slot under g_rng_dev_lock. It is co-paged with sibling slots and
+        // deliberately NOT page-reserved, so a driver whose own slot shares the
+        // rng's page legitimately claims that page (rng + a userspace blk driver
+        // both in page 0 is the live config). A driver's death must NOT reset the
+        // rng -- that races random.c's in-flight pull (this path holds no rng
+        // lock). The rng is kernel-owned, never a dying driver's device to stop.
+        if (g_virtio_mmio_devs[i].device_id == VIRTIO_DEVICE_ID_RNG) continue;
+        virtio_reset(&g_virtio_mmio_devs[i]);
+        // RW-7 round-3 F2: read STATUS back -- the same VIRTIO 1.2 §2.4.2 /
+        // §4.2.3.2 synchronization point virtio_virtqueue_destroy uses, so the
+        // status=0 store lands (device-side reset processed) BEFORE the caller
+        // frees the KObj_DMA pages. Dormant where MMIO stores trap synchronously
+        // (QEMU TCG/HVF), load-bearing on a substrate with posted device writes.
+        (void)virtio_get_status(&g_virtio_mmio_devs[i]);
+        reset++;
     }
     return reset;
 }

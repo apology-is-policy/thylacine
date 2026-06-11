@@ -43,9 +43,10 @@
 #define KOBJ_IRQ_MAGIC 0x4952510DBADC0DECULL
 
 // RW-7 R1-F1: kobj_irq_wait returns this sentinel when a concurrent waiter
-// already holds the (single-waiter) Rendez. SYS_IRQ_WAIT maps it to -1. A
-// real collapsed-IRQ count never reaches it (it would need 2^32 fires with
-// no intervening drain; the mapping is fail-safe regardless).
+// already holds the (single-waiter) Rendez. SYS_IRQ_WAIT maps it to -1. A real
+// collapsed-IRQ count can NEVER equal it: kobj_irq_dispatch saturates
+// pending_count at 0xFFFFFFFE (RW-7 round-2 F3), so the sentinel value-space is
+// disjoint from any real count.
 #define KOBJ_IRQ_WAIT_BUSY 0xFFFFFFFFu
 
 // Reserved test SGI for irqfwd. SGI 0 = IPI_RESCHED (P2-Cdc); SGI 1 =

@@ -575,12 +575,16 @@ bool gic_init(void) {
     // so the vmalloc-driven path is the durable form.
     //
     // Redist region: cap the mapped size at the actual CPU count.
-    // QEMU virt's DTB reports the full reservation for max_cpus (≈ 64 MiB
-    // at 256 max-CPUs × 0x40000 per CPU), but only the configured CPUs'
-    // frames are populated. Mapping the full reported region would burn
+    // QEMU virt's DTB reports the full reservation for max_cpus (≈ 32 MiB
+    // at 256 max-CPUs × GICR_FRAME_STRIDE = 0x20000, the two 64 KiB GICv3
+    // redistributor frames RD_base + SGI_base per CPU), but only the configured
+    // CPUs' frames are populated. Mapping the full reported region would burn
     // through l3_vmalloc unnecessarily. The usable redist region is
-    // `dtb_cpu_count * GICR_FRAME_STRIDE`. dtb_cpu_count is set BEFORE
-    // gic_init in boot_main; smp_init / smp_cpu_count haven't run yet.
+    // `dtb_cpu_count * GICR_FRAME_STRIDE`. dtb_cpu_count is set BEFORE gic_init
+    // in boot_main; smp_init / smp_cpu_count haven't run yet. (RW-7 R1-F3: the
+    // stride is a fixed 0x20000, NOT walked via GICR_TYPER.Last + the VLPI-frame
+    // bit -- correct for QEMU virt + GIC-500/600; a board with VLPI redist frames
+    // or a non-contiguous layout is an I-15 board-bringup seam.)
     u32 cpu_count = dtb_cpu_count();
     if (cpu_count == 0) cpu_count = 1;
     u64 redist_used_size = (u64)cpu_count * GICR_FRAME_STRIDE;

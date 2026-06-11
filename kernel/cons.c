@@ -85,8 +85,8 @@ void cons_rx_input(u8 byte, bool is_break) {
         // data byte -- EL0-written bytes cannot forge it, and the accompanying
         // DR byte (0x00) is never enqueued. Set sak-pending + defer the
         // privileged revoke/re-grant to console_mgr's process context
-        // (proc_console_sak takes g_proc_table_lock + posts a note -- neither is
-        // IRQ-safe). The recognizer is stateless: one flag, no multi-byte state
+        // (proc_console_sak takes g_proc_table_lock to revoke + re-grant the
+        // console-attach bit -- not IRQ-safe). The recognizer is stateless: one flag, no multi-byte state
         // machine to starve or partially-spoof (the I-27 "cannot be
         // starved/spoofed by crafted input" obligation is thus structural).
         cons_sak_store(true);
@@ -146,12 +146,19 @@ void console_mgr_main(void) {
         cons_sak_store(false);
         spin_unlock_irqrestore(&g_cons.lock, s);
 
-        // Ctrl-C first (the foreground app gets its interrupt), then the SAK
-        // (which revokes the console from that same owner + re-grants to the
-        // trusted login authority). Both run in process context, never under
-        // g_cons.lock -- proc_console_sak takes g_proc_table_lock + posts a note.
-        if (do_intr) proc_console_post_interrupt();
-        if (do_sak)  proc_console_sak();
+        // RW-7 R2-F2 (round-2 F2): a SAK SUPERSEDES a Ctrl-C coalesced into the
+        // same batch -- the two pending flags lose their arrival order, and
+        // posting `interrupt` to the PRE-SAK owner (joey during bringup ->
+        // non-self-managing -> the LS-5 terminate latch -> init dies) is exactly
+        // the outcome R2-F2 removed from the SAK itself, re-synthesized via
+        // coalescing. Post-SAK the owner is NULL, so the chronologically-correct
+        // delivery of an after-BREAK Ctrl-C is a drop; a before-BREAK Ctrl-C
+        // losing to a near-simultaneous SAK is the operator's intent (they hit
+        // BREAK to reach the trusted prompt). Both run in process context, never
+        // under g_cons.lock (proc_console_sak takes g_proc_table_lock; since
+        // R2-F2 it posts NO note -- it only revokes + re-grants the attach bit).
+        if (do_sak)       proc_console_sak();
+        else if (do_intr) proc_console_post_interrupt();
     }
 }
 

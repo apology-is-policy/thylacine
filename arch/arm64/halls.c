@@ -29,17 +29,25 @@
 #include <thylacine/smp.h>
 #include <thylacine/types.h>
 
-// Per-CPU live-exception-frame slot + re-entrancy guard. Per-CPU: only the
-// local CPU's exception handlers write its slot and only the local CPU's
-// halls_dump reads it, so no atomics are needed (handlers do not migrate
-// CPUs mid-execution at v1.0).
+// Per-CPU live-exception-frame slot + re-entrancy guard. No atomics are needed:
+// each CPU's slot is written ONLY by that CPU's own exception wrappers
+// (halls_enter_frame / halls_leave_frame run on the local CPU) and read ONLY by
+// that CPU's halls_dump -- never two CPUs on one slot at once.
 //
-// The slot can be left STALE: a handler that departs via a noreturn path
-// (exception_sync_lower_el_impl -> proc_fault_terminate/exits -> sched, when
-// an EL0 fault or SYS_EXITS terminates the *Proc* but not the kernel) skips
-// its wrapper's halls_leave_frame, stranding the slot pointing at a kstack
-// that thread_free later returns to the buddy. halls_dump does NOT trust the
-// raw slot for that reason -- HX-I4's plausibility gate rejects a stale slot.
+// The slot can be left STALE or STRANDED, and halls_dump does NOT trust the raw
+// slot for either reason -- HX-I4's plausibility gate (halls_frame_is_live)
+// rejects an implausible slot and falls back to capture-current:
+//   - NORETURN: a handler that departs via a noreturn path
+//     (exception_sync_lower_el_impl -> proc_fault_terminate/exits -> sched, when
+//     an EL0 fault or SYS_EXITS terminates the *Proc* but not the kernel) skips
+//     its wrapper's halls_leave_frame, stranding the slot at a kstack thread_free
+//     later returns to the buddy.
+//   - MIGRATION: a BLOCKING EL0 syscall handler can resume on a DIFFERENT CPU
+//     after a wakeup, so its halls_leave_frame runs on CPU B -- it overwrites B's
+//     slot with a stale value and strands A's slot. This is NOT a data race (the
+//     writer moved CPUs sequentially; it did not become concurrent, so the
+//     no-atomics rule still holds) -- the stale/stranded VALUE is exactly what
+//     HX-I4 catches.
 static const struct exception_context *g_halls_frame[DTB_MAX_CPUS];
 static u8 g_halls_in_dump[DTB_MAX_CPUS];
 

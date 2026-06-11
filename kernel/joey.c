@@ -109,8 +109,9 @@ static void joey_thunk(void *arg) {
 
     // A-4c-1: joey is the boot console owner -- the target the console_mgr
     // kthread posts the `interrupt` note (Ctrl-C) to. proc_become_zombie_locked
-    // clears the owner when joey exits (so it never dangles); A-4c-2's SAK
-    // re-grants ownership to corvus.
+    // clears the owner when joey exits (so it never dangles); A-4c-2's SAK grants
+    // the console-ATTACH to corvus (RW-7 R2-F1: NOT ownership -- the owner stays
+    // NULL until login spawns the session shell, SPAWN_PERM_CONSOLE_OWNER).
     proc_set_console_owner(p);
 
     // A-5b (#827b): joey is ALSO the root of the service-posting chain. It

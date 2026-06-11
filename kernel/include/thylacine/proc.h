@@ -771,7 +771,7 @@ int proc_for_each(int (*callback)(struct Proc *p, void *arg), void *arg);
 void proc_mark_console_attached(struct Proc *p);
 
 // proc_revoke_console_attached — clear PROC_FLAG_CONSOLE_ATTACHED on `p`
-// (the unset side the A-4c-2 SAK needs; the SAK is the sole revoker). The
+// (the unset side the A-4c-2 SAK + the A-5a proc_console_relinquish both use). The
 // AND is atomic (multi-writer bit; see proc_mark_console_attached). A
 // no-op on a NULL/corrupt Proc (fail-closed). Owner-lifetime is the
 // caller's responsibility — proc_console_sak calls this under
@@ -785,10 +785,13 @@ bool proc_is_console_attached(const struct Proc *p);
 
 // A-4c-1: the kernel console owner (the trusted-path anchor for /dev/cons).
 //
-// proc_set_console_owner — record `p` as the current console owner (joey at
-// boot; A-4c-2's SAK re-grants to corvus). Takes g_proc_table_lock. Pass NULL
-// to clear (the A-4c-2 fail-safe revoke-only). proc_become_zombie_locked also
-// clears it automatically when the owner dies, so the pointer never dangles.
+// proc_set_console_owner — record `p` as the current console owner = the
+// `interrupt`/Ctrl-C target (joey at boot; login's session shell via
+// SPAWN_PERM_CONSOLE_OWNER). DISTINCT from the console-ATTACH (the elevation
+// authority): RW-7 R2-F1 -- the SAK clears the owner to NULL and grants the
+// ATTACH only; it does NOT make corvus the owner. Takes g_proc_table_lock. Pass
+// NULL to clear. proc_become_zombie_locked also clears it when the owner dies,
+// so the pointer never dangles.
 void proc_set_console_owner(struct Proc *p);
 
 // proc_console_post_interrupt — post the `interrupt` note (Ctrl-C) to the
@@ -817,12 +820,16 @@ void proc_set_console_trusted(struct Proc *p);
 
 // proc_console_sak — the A-4c-2 SAK transition (I-27 trusted-path handoff). Run
 // from the console_mgr kthread on a recognized serial BREAK. Under
-// g_proc_table_lock: revoke the console-attach bit from the current owner + post
-// it a notify note, then re-grant the bit to the trusted login authority and
-// make it the owner. FAIL-SAFE: with no trusted Proc alive, revoke-only (owner
-// cleared to NULL) -- no Proc can redeem CAP_HOSTOWNER / a clearance until a
-// trusted login claims the console. Idempotent if the trusted Proc already owns
-// the console (a BREAK flood is a no-op).
+// g_proc_table_lock (RW-7 R2-F1/F2 as-built): revoke the console-ATTACH bit from
+// the current owner (NO note -- LS-5 made `interrupt` a terminate note, so the
+// old courtesy post would KILL a non-self-managing owner), then grant the ATTACH
+// to the trusted login authority and clear the OWNER to NULL. owner and attach
+// are distinct roles: corvus is the elevation authority, NEVER the Ctrl-C target
+// (the owner is re-established when login spawns the session shell). FAIL-SAFE:
+// with no trusted Proc alive, no attach is granted -- no Proc can redeem
+// CAP_HOSTOWNER / a clearance until a trusted login claims the console.
+// Idempotent once the trusted Proc is the sole attach holder with no owner (a
+// BREAK flood is a no-op).
 void proc_console_sak(void);
 
 // =============================================================================

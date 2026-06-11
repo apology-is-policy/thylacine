@@ -82,10 +82,11 @@ _Static_assert(__builtin_offsetof(struct exception_context, far) == 0x118,
 // thin wrapper that records its register frame in the per-CPU Halls slot for
 // the duration of the handler, so halls_dump (reached from extinction) reads
 // the dying frame without threading ctx through every signature. A normal
-// return restores the previous slot; an extinction (noreturn) inside the
-// handler skips the restore, leaving the slot pointed at the dying frame.
-// The handlers themselves do not migrate CPUs mid-execution, so set-on-this-
-// CPU / restore-on-this-CPU holds (see halls.c).
+// return restores the previous slot; a noreturn extinction inside the handler
+// skips the restore, leaving the slot at the dying frame; a BLOCKING handler
+// that resumes on another CPU runs its restore there, stranding the slot.
+// halls_dump never trusts the raw slot regardless -- HX-I4's plausibility gate
+// rejects an implausible slot and falls back to capture-current (see halls.c).
 // ---------------------------------------------------------------------------
 
 static void exception_sync_curr_el_impl(struct exception_context *ctx);

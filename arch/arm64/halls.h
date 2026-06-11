@@ -44,8 +44,11 @@ void halls_dump(const struct exception_context *ctx);
 // halls_dump(NULL) reads it from the extinction path.
 //
 // enter returns the previous slot value; leave restores it -- so a nested
-// exception (rare at v1.0; handlers do not migrate CPUs mid-execution)
-// saves/restores correctly rather than clobbering an outer frame.
+// exception saves/restores correctly rather than clobbering an outer frame. A
+// handler that BLOCKS and resumes on another CPU (a blocking EL0 syscall) runs
+// its leave on that other CPU, stranding/clobbering the per-CPU slot with a
+// stale value -- harmless because halls_dump trusts the slot only through HX-I4's
+// plausibility gate (see halls.c).
 const struct exception_context *halls_enter_frame(const struct exception_context *ctx);
 void halls_leave_frame(const struct exception_context *prev);
 

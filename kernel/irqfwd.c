@@ -169,7 +169,10 @@ static void kobj_irq_dispatch(u32 intid, void *arg) {
         spin_unlock_irqrestore(&k->rendez.lock, s);
         return;             // teardown owns *k now
     }
-    k->pending_count++;
+    // RW-7 round-2 F3: saturate at 0xFFFFFFFE so a pathological un-drained count
+    // can never equal KOBJ_IRQ_WAIT_BUSY (0xFFFFFFFF). Drivers handle collapsed
+    // IRQs via used-ring state anyway, so the exact count past the cap is moot.
+    if (k->pending_count < 0xFFFFFFFEu) k->pending_count++;
     k->in_dispatch = true;
     spin_unlock_irqrestore(&k->rendez.lock, s);
 
