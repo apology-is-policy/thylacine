@@ -169,8 +169,9 @@ static size_t format_status(struct Proc *p, char *buf, size_t cap) {
     n = fmt_str(buf, cap, off, state_name(p->state)); if (!n) return 0; off += n;
     n = fmt_str(buf, cap, off, "\n");             if (!n) return 0; off += n;
 
+    int tc = __atomic_load_n(&p->thread_count, __ATOMIC_ACQUIRE);  // #65 F6: lockless reader
     n = fmt_str(buf, cap, off, "threads: ");      if (!n) return 0; off += n;
-    n = fmt_sdec(buf, cap, off, p->thread_count); if (!n && p->thread_count != 0) return 0; off += n;
+    n = fmt_sdec(buf, cap, off, tc);              if (!n && tc != 0) return 0; off += n;
     n = fmt_str(buf, cap, off, "\n");             if (!n) return 0; off += n;
 
     // #65 (I-32): the per-Proc resource-floor counters (the SEAM counters a

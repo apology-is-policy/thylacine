@@ -150,8 +150,9 @@ static int format_procs_cb(struct Proc *p, void *arg) {
     if (!n) { s->overflow = true; return 0; }
     s->off += n;
 
-    n = fmt_sdec(s->buf, s->cap, s->off, p->thread_count);
-    if (!n && p->thread_count != 0) { s->overflow = true; return 0; }
+    int tc = __atomic_load_n(&p->thread_count, __ATOMIC_ACQUIRE);  // #65 F6
+    n = fmt_sdec(s->buf, s->cap, s->off, tc);
+    if (!n && tc != 0) { s->overflow = true; return 0; }
     s->off += n;
 
     // #65 (I-32): the resource-floor counters as two trailing columns (the SEAM
@@ -186,7 +187,7 @@ static int format_procs_cb(struct Proc *p, void *arg) {
 static size_t format_procs(char *buf, size_t cap) {
     size_t off = 0;
     size_t n;
-    n = fmt_str(buf, cap, off, "PID    STATE      THREADS\n");
+    n = fmt_str(buf, cap, off, "PID    STATE      THREADS    PAGES    CHILDREN\n");
     if (!n) return 0;
     off += n;
 

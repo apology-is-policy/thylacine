@@ -66,7 +66,7 @@ offset asserts at 264 / 268):
 
 | Field | Type | Write domain | Meaning |
 |---|---|---|---|
-| `page_count` | `u32` | `p->vma_lock` | live anon pages via `SYS_BURROW_ATTACH` |
+| `page_count` | `u32` | `p->vma_lock` | live anon pages via `SYS_BURROW_ATTACH` **and** the `SYS_LOOM_SETUP` ring (audit F1) |
 | `child_count` | `u32` | `g_proc_table_lock` | live direct children == `children` list length |
 | `thread_count` | `int` | `g_proc_table_lock` | live threads (pre-existing) |
 
@@ -94,15 +94,27 @@ TOCTOU overshoot). Every failure path after the charge (create-fail, map-fail)
 and a successful `SYS_BURROW_DETACH` (`rc == 0`) uncharge the same rounded
 `npages`.
 
-Page-cap **scope**: `SYS_BURROW_ATTACH` anon pages only. Not counted: pgtable
-sub-tables (transitively bounded by mapped VA ≤ `page_count`), kstacks (bounded
-by the thread cap), the exec image (one-shot, bounded by the binary, committed
-before the first thread). Charged as the burrow's *logical* `page_count`;
-physical commitment is ≤ 2× from buddy power-of-2 order rounding — the cap bounds
-logical attached anon. v1.0 has no mid-life `vma_drain` (no in-place re-exec), so
-attach/detach balance the counter while the Proc lives; at exit the Proc and its
-counter vanish together (`vma_drain` is the SEAM hook where a future aggregate
-would uncharge).
+Page-cap **scope**: every user-controllable, repeatable anon-page commit.
+**Counted**: `SYS_BURROW_ATTACH` regions, **and** the `SYS_LOOM_SETUP` ring
+(audit F1 — `sys_loom_setup_for_proc` charges `ring_size/PAGE_SIZE` at setup,
+because the ring is EL0-reachable, repeatable, and the handle slot is reused on
+close while `mapping_count` keeps the ring VMA alive; without the charge a
+non-TCB Proc accumulated uncharged anon to the physical cliff). **Not counted**
+(each separately bounded, none a repeatable bomb): pgtable sub-tables
+(transitively bounded by mapped VA ≤ `page_count`), kstacks (bounded by the
+thread cap), the exec image / user stack (one-shot at spawn, bounded by the
+binary + `EXEC_USER_STACK_SIZE`, transitively bounded by the child cap across
+children).
+
+Charged as the *logical* page count (the VMA span / ring span). **Physical
+commitment is ≤ 2×** the charged count because `burrow_create_anon` rounds the
+allocation up to a buddy power-of-2 order (audit F2) — so the per-Proc *physical*
+anon ceiling is up to `~2 * PROC_PAGE_MAX` (≈ 512 MiB). The cap bounds *logical*
+attached anon; precise-RAM accounting is the SEAM's job. v1.0 has no mid-life
+`vma_drain` (no in-place re-exec), so attach/detach (and the ring's
+detach / `vma_drain`) balance the counter while the Proc lives; at exit the Proc
+and its counter vanish together (`vma_drain` is the SEAM hook where a future
+aggregate would uncharge).
 
 ### Thread cap — `sys_thread_spawn_handler`
 (`kernel/syscall.c`). `proc_thread_cap_ok` is checked after argument validation
@@ -110,6 +122,14 @@ and before `thread_create_user`, refusing `-EAGAIN` (the POSIX `RLIMIT_NPROC`
 convention). kproc is already excluded at the handler top. The thread cap is the
 tightest of the three because each thread pins `THREAD_KSTACK_TOTAL_SIZE` (32
 KiB) of **unswappable** kernel kstack (256 → 8 MiB).
+
+The thread cap covers `SYS_THREAD_SPAWN` (the only EL0 thread-create path).
+**Kernel-side kthreads spawned on a Proc's behalf** — at v1.0 only the Loom
+SQPOLL poll-thread (`SYS_LOOM_SETUP | LOOM_SETUP_SQPOLL`, spawned against the
+exempt `kproc`) — are **not** counted by the thread cap (audit F4). They are
+bounded transitively: one per live SQPOLL Loom, and the number of Looms a Proc
+can hold is now bounded by the page cap (the F1 ring charge) and the handle
+table (`PROC_HANDLE_MAX` = 64), so the SQPOLL kstack footprint is bounded.
 
 ### Child cap — `rfork_internal`
 (`kernel/proc.c`). `proc_child_cap_ok` is checked **early** — right after the
@@ -168,12 +188,17 @@ before any single Proc hits its cap).
 `kernel/test/test_resource.c` (6 tests, registered in `kernel/test/test.c`):
 `resource.exempt_only_system` (the unforgeable exemption), `page_charge_caps`
 (charge/uncharge/clamp/overflow + exempt bypass), `thread_cap_ok`,
-`child_cap_ok`, `child_count_tracks_list` (counter == list length via
-link/unlink), and `page_cap_attach_enforced` (the **real**
+`child_cap_ok`, `child_count_tracks_list` (counter == list length via the
+test-only link/unlink), `child_count_rfork_reap` (the **production**
+`proc_link_child` ++ at rfork + `proc_unlink_child` -- at the reap, via a real
+rfork + `wait_pid_for`), and `page_cap_attach_enforced` (the **real**
 `sys_burrow_attach_for_proc` path: over-cap → `-ENOMEM` allocating nothing,
 boundary-fit → success + charge, detach → uncharge, exempt → bypass). The
 integration test pre-sets `page_count` near the cap so it exercises the boundary
-without a 256-MiB allocation. SMP-gated (the counters are SMP-shared state).
+without a 256-MiB allocation. SMP-gated (the counters are SMP-shared state). The
+thread-cap and child-cap *reject* paths are predicate-tested only (a real reject
+needs a non-exempt EL0 context — an owed E2E, since the in-kernel harness runs as
+exempt kproc).
 
 ## Performance
 

@@ -95,6 +95,7 @@ void test_resource_page_charge_caps(void);
 void test_resource_thread_cap_ok(void);
 void test_resource_child_cap_ok(void);
 void test_resource_child_count_tracks_list(void);
+void test_resource_child_count_rfork_reap(void);
 void test_resource_page_cap_attach_enforced(void);
 void test_proc_identity_kproc_is_system(void);
 void test_proc_identity_rfork_inherits(void);
@@ -978,6 +979,8 @@ struct test_case g_tests[] = {
     { "resource.child_cap_ok",         test_resource_child_cap_ok,         false, NULL },
     { "resource.child_count_tracks_list",
                                        test_resource_child_count_tracks_list, false, NULL },
+    { "resource.child_count_rfork_reap",
+                                       test_resource_child_count_rfork_reap, false, NULL },
     { "resource.page_cap_attach_enforced",
                                        test_resource_page_cap_attach_enforced, false, NULL },
     { "proc_identity.kproc_is_system", test_proc_identity_kproc_is_system, false, NULL },

@@ -2970,6 +2970,18 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
     struct Loom *l = loom_create(entries, cq_entries);
     if (!l)                                          return -1;
 
+    // #65 (I-32 / audit F1): the ring is anonymous pages mapped into the Proc's
+    // address space -- the SAME memory-bomb class SYS_BURROW_ATTACH is capped
+    // for. SYS_LOOM_SETUP is EL0-reachable + repeatable (close reuses the handle
+    // slot while mapping_count keeps the ring VMA alive), so WITHOUT this charge
+    // a non-TCB Proc accumulates uncharged anon up to the physical cliff,
+    // defeating the per-Proc page cap. Charge ring_size's pages here (under the
+    // same vma_lock as the map -> exact); relief comes from SYS_BURROW_DETACH on
+    // the ring VA (the ring is a normal VMA in the burrow window, so the existing
+    // detach uncharge fires) or vma_drain at exit. The close-without-detach
+    // accumulation therefore hits PROC_PAGE_MAX instead of RAM.
+    u32 ring_pages = (u32)(l->ring_size / PAGE_SIZE);
+
     // Map the ring RW into the burrow-attach window. burrow_map takes its OWN
     // mapping_count ref (vma_alloc -> burrow_acquire_mapping); the Loom keeps
     // its handle_count ref, so the ring stays alive while EITHER side holds it
@@ -2983,7 +2995,13 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
         loom_unref(l);
         return -1;
     }
+    if (!proc_page_charge(p, ring_pages)) {
+        spin_unlock(&p->vma_lock);
+        loom_unref(l);
+        return -1;                                   // over the per-Proc page cap
+    }
     if (burrow_map(p, l->ring, vaddr, (size_t)l->ring_size, VMA_PROT_RW) != 0) {
+        proc_page_uncharge(p, ring_pages);
         spin_unlock(&p->vma_lock);
         loom_unref(l);
         return -1;
@@ -2999,6 +3017,7 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
         if (loom_start_sqpoll(l) != 0) {
             spin_lock(&p->vma_lock);
             (void)burrow_unmap(p, vaddr, (size_t)l->ring_size);
+            proc_page_uncharge(p, ring_pages);       // #65: the ring VMA freed
             spin_unlock(&p->vma_lock);
             loom_unref(l);
             return -1;
@@ -3014,6 +3033,7 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
     if (fd < 0) {
         spin_lock(&p->vma_lock);
         (void)burrow_unmap(p, vaddr, (size_t)l->ring_size);
+        proc_page_uncharge(p, ring_pages);           // #65: the ring VMA freed
         spin_unlock(&p->vma_lock);
         loom_unref(l);
         return -1;

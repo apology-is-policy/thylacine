@@ -93,7 +93,12 @@ static void thread_link_into_proc(struct Thread *t, struct Proc *p) {
     t->next_in_proc = p->threads;
     if (p->threads) p->threads->prev_in_proc = t;
     p->threads = t;
-    p->thread_count++;
+    // #65 audit F6: atomic to match the sibling page_count/child_count counters
+    // so the LOCKLESS cross-Proc /proc reader (devproc, which holds no lock) gets
+    // a coherent snapshot. The write stays under g_proc_table_lock; the atomic
+    // only adds the release the lockless reader's acquire pairs with. Under-lock
+    // readers (the exit/reap logic) stay plain -- the lock serializes them.
+    __atomic_fetch_add(&p->thread_count, 1, __ATOMIC_RELEASE);
     proc_table_lock_release(s);
 }
 
@@ -114,7 +119,7 @@ static void thread_unlink_from_proc(struct Thread *t) {
     }
     t->next_in_proc = NULL;
     t->prev_in_proc = NULL;
-    p->thread_count--;
+    __atomic_fetch_sub(&p->thread_count, 1, __ATOMIC_RELEASE);   // #65 audit F6
     proc_table_lock_release(s);
 }
 

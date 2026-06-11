@@ -742,10 +742,14 @@ under `g_proc_table_lock`; the counter is `++`/`--` at `proc_link_child` /
 `proc_unlink_child`. A bounded TOCTOU overshoot (≤ ncpus−1 extra per axis) is
 acceptable for a floor and is documented at each site.
 
-**Page-cap scope (precise).** Counts `SYS_BURROW_ATTACH` anon pages *only* — the
-one user-controllable, unbounded commit vector (anon is eager at v1.0, so attach
-is the single charge point). Page-table sub-tables are transitively bounded by
-the mapped VA (≤ `page_count`); kstacks by the thread cap; the exec image is
+**Page-cap scope (precise).** Counts every *repeatable* user-controllable anon
+commit: `SYS_BURROW_ATTACH` regions **and** the `SYS_LOOM_SETUP` ring (the audit
+F1 fix — the ring is EL0-reachable + repeatable, and closing the loom fd reuses
+the handle slot while `mapping_count` keeps the ring VMA alive, so without the
+charge a non-TCB Proc accumulated uncharged anon to the physical cliff; the ring
+is charged at setup and relieved by `SYS_BURROW_DETACH` on the ring VA or
+`vma_drain` at exit). Page-table sub-tables are transitively bounded by the
+mapped VA (≤ `page_count`); kstacks by the thread cap; the exec image is
 one-shot, bounded by the binary, and committed before the Proc's first thread.
 Charged as the burrow's logical `page_count`; physical commitment is ≤ 2× from
 buddy power-of-2 order rounding — the cap bounds logical attached anon, and

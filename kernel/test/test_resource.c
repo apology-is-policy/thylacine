@@ -50,6 +50,7 @@ void test_resource_page_charge_caps(void);
 void test_resource_thread_cap_ok(void);
 void test_resource_child_cap_ok(void);
 void test_resource_child_count_tracks_list(void);
+void test_resource_child_count_rfork_reap(void);
 void test_resource_page_cap_attach_enforced(void);
 
 #define A_REAL_USER 1000u
@@ -67,6 +68,8 @@ static void res_drop(struct Proc *p) {
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
 }
+
+static void res_child_thunk(void *arg) { (void)arg; exits("ok"); }
 
 void test_resource_exempt_only_system(void) {
     struct Proc *sys  = res_make((u32)PRINCIPAL_SYSTEM);
@@ -171,6 +174,28 @@ void test_resource_child_count_tracks_list(void) {
                    "unlink restores child_count");
 
     res_drop(p);
+}
+
+// Exercises the PRODUCTION child_count maintenance through a real rfork + reap
+// (proc_link_child ++ at rfork, proc_unlink_child -- at the reap) -- not just the
+// test-only proc_test_unlink. The harness runs as a kproc thread, so the child
+// is kproc's; kproc is exempt (the cap never fires), but the counter is
+// maintained regardless. wait_pid_for(pid) reaps exactly our child, so a stray
+// zombie from another test cannot perturb the delta.
+void test_resource_child_count_rfork_reap(void) {
+    struct Proc *kp = kproc();
+    u32 base = __atomic_load_n(&kp->child_count, __ATOMIC_ACQUIRE);
+
+    int pid = rfork(RFPROC, res_child_thunk, NULL);
+    TEST_ASSERT(pid > 0, "rfork failed");
+    TEST_EXPECT_EQ(__atomic_load_n(&kp->child_count, __ATOMIC_ACQUIRE), base + 1u,
+                   "rfork bumps kproc child_count (proc_link_child)");
+
+    int st = -1;
+    int reaped = wait_pid_for(pid, 0, &st);
+    TEST_EXPECT_EQ(reaped, pid, "reap the rforked child by pid");
+    TEST_EXPECT_EQ(__atomic_load_n(&kp->child_count, __ATOMIC_ACQUIRE), base,
+                   "reap restores child_count (proc_unlink_child)");
 }
 
 void test_resource_page_cap_attach_enforced(void) {

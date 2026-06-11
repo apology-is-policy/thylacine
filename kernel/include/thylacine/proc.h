@@ -249,7 +249,8 @@ struct Proc {
 
     // RW-2 2B-F1/F2: per-Proc wait_pid_for serialization (repurposed from the
     // former srv_conn_count/_pad_srv reserved u32, removed in stalk-3b-β -- same
-    // size + offset, so struct Proc stays 264 and every offset assert holds).
+    // size + offset at the time, so this field's offset is unchanged; the struct
+    // later grew to 272 when the #65 resource-floor counters appended).
     // At most ONE Thread of a Proc may be inside wait_pid_for's reap-or-sleep
     // critical section at a time: p->child_done is a single-waiter Rendez (a 2nd
     // concurrent waiter trips sleep's single-waiter assert -> extinction) and
