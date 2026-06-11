@@ -2457,6 +2457,13 @@ static s64 sys_thread_spawn_handler(u64 entry_va, u64 sp_va,
     // alignment requirement — TLS layout is libc-defined.
     if (tls_va != 0 && tls_va >= UACCESS_USER_VA_TOP) return -T_E_INVAL;
 
+    // #65 (I-32): the per-Proc thread cap. A non-TCB Proc at PROC_THREAD_MAX is
+    // refused -EAGAIN (the POSIX RLIMIT_NPROC convention) before the kstack
+    // alloc -- bounding a thread bomb (each thread pins unswappable kernel
+    // kstack). kproc is already rejected above; the SYSTEM boot/service chain is
+    // exempt. A bounded TOCTOU overshoot (<= ncpus-1) is acceptable for a floor.
+    if (!proc_thread_cap_ok(p))                      return -T_E_AGAIN;
+
     struct Thread *nt = thread_create_user(p, entry_va, sp_va, arg_va, tls_va);
     if (!nt)                                         return -T_E_NOMEM;
 
@@ -2848,10 +2855,22 @@ s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw) {
         return -1;
     }
 
+    // #65 (I-32): charge this Proc's anon-page floor BEFORE committing the
+    // eager allocation. Under vma_lock, so the check+charge is atomic against a
+    // sibling attach (the cap is exact). A non-TCB Proc over PROC_PAGE_MAX is
+    // refused with -ENOMEM here -- it never reaches the allocator. Uncharged on
+    // every failure path below + on SYS_BURROW_DETACH.
+    u32 npages = (u32)(length / PAGE_SIZE);
+    if (!proc_page_charge(p, npages)) {
+        spin_unlock(&p->vma_lock);
+        return -T_E_NOMEM;
+    }
+
     // burrow_create_anon: handle_count = 1 (the construction reference),
     // mapping_count = 0; pages allocated eagerly (power-of-2 rounded).
     struct Burrow *b = burrow_create_anon(length);
     if (!b) {
+        proc_page_uncharge(p, npages);
         spin_unlock(&p->vma_lock);
         return -1;
     }
@@ -2864,6 +2883,7 @@ s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw) {
     // burrow_unref frees the Burrow (mapping_count still 0).
     if (burrow_map(p, b, vaddr, length, VMA_PROT_RW) != 0) {
         burrow_unref(b);
+        proc_page_uncharge(p, npages);
         spin_unlock(&p->vma_lock);
         return -1;
     }
@@ -2911,6 +2931,11 @@ s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
     // the Burrow's pages — mapping_count reaches 0 with handle_count
     // already 0.
     int rc = burrow_unmap(p, vaddr_raw, length);
+    // #65 (I-32): uncharge the anon-page floor ONLY on a successful unmap (rc==0
+    // means the pages were freed); the same rounded length that attach charged.
+    // Under vma_lock, so it pairs exactly with the charge.
+    if (rc == 0)
+        proc_page_uncharge(p, (u32)(length / PAGE_SIZE));
     spin_unlock(&p->vma_lock);
 
     return (s64)rc;

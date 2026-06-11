@@ -619,6 +619,9 @@ static void proc_link_child(struct Proc *parent, struct Proc *child) {
     child->parent  = parent;
     child->sibling = parent->children;
     parent->children = child;
+    // #65 (I-32): child_count == the length of `children`. Atomic (under the
+    // lock here, but a cross-Proc /proc reader loads it without the lock).
+    __atomic_fetch_add(&parent->child_count, 1u, __ATOMIC_RELEASE);
 }
 
 // Unlink a child from its parent's children list. The child's state is
@@ -637,6 +640,10 @@ static void proc_unlink_child(struct Proc *parent, struct Proc *child) {
     }
     child->sibling = NULL;
     child->parent  = NULL;
+    // #65 (I-32): keep child_count == list length. Guarded so a (corruption-
+    // induced) zero never wraps to UINT32_MAX.
+    if (__atomic_load_n(&parent->child_count, __ATOMIC_RELAXED) > 0)
+        __atomic_fetch_sub(&parent->child_count, 1u, __ATOMIC_RELEASE);
 }
 
 // Re-parent a Proc's children to init (g_init_proc) on exit -- ARCH
@@ -680,11 +687,71 @@ static void proc_reparent_children(struct Proc *p) {
         c->parent = adopter;
         c->sibling = adopter->children;
         adopter->children = c;
+        // #65 (I-32): reparent splices directly (no proc_link/unlink_child), so
+        // rebase both counts to keep child_count == list length. p is dying
+        // (its count is about to vanish) but track it symmetrically anyway.
+        __atomic_fetch_add(&adopter->child_count, 1u, __ATOMIC_RELEASE);
+        if (__atomic_load_n(&p->child_count, __ATOMIC_RELAXED) > 0)
+            __atomic_fetch_sub(&p->child_count, 1u, __ATOMIC_RELEASE);
         if (c->state == PROC_STATE_ZOMBIE)
             adopted_zombie = true;
     }
     if (adopted_zombie)
         wakeup(&adopter->child_done);
+}
+
+// =============================================================================
+// #65 (invariant I-32): the per-Proc resource floor
+// =============================================================================
+
+bool proc_resource_exempt(const struct Proc *p) {
+    // The TCB (PRINCIPAL_SYSTEM: kproc + the boot/service chain) is unbounded so
+    // the floor cannot pinch the FS server / the orphan-adopter / the kthread
+    // root. Unforgeable: no post-login Proc can acquire PRINCIPAL_SYSTEM
+    // (CAP_SET_IDENTITY rejects it), and principal_id is immutable on a running
+    // Proc -> a plain read is sound. NULL -> non-exempt (fail-closed).
+    return p && p->principal_id == PRINCIPAL_SYSTEM;
+}
+
+bool proc_page_charge(struct Proc *p, u32 npages) {
+    if (!p) return false;
+    // Caller holds p->vma_lock (the attach/detach serialization domain), so the
+    // load + the cap decision + the store are atomic against sibling attaches
+    // -> the page cap is EXACT. The atomic store keeps a lockless cross-Proc
+    // /proc reader coherent.
+    u32 cur = __atomic_load_n(&p->page_count, __ATOMIC_RELAXED);
+    if (npages > 0xFFFFFFFFu - cur) return false;   // counter overflow (refuse)
+    if (!proc_resource_exempt(p) && cur + npages > PROC_PAGE_MAX)
+        return false;                                // over cap -> caller -ENOMEM
+    __atomic_store_n(&p->page_count, cur + npages, __ATOMIC_RELEASE);
+    return true;
+}
+
+void proc_page_uncharge(struct Proc *p, u32 npages) {
+    if (!p) return;
+    // Caller holds p->vma_lock. Clamp so an over-uncharge (should never happen --
+    // every uncharge matches a charge) never wraps past 0.
+    u32 cur = __atomic_load_n(&p->page_count, __ATOMIC_RELAXED);
+    u32 nv  = (cur >= npages) ? cur - npages : 0;
+    __atomic_store_n(&p->page_count, nv, __ATOMIC_RELEASE);
+}
+
+bool proc_thread_cap_ok(struct Proc *p) {
+    if (!p) return false;
+    if (proc_resource_exempt(p)) return true;
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    bool ok = p->thread_count < PROC_THREAD_MAX;
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return ok;
+}
+
+bool proc_child_cap_ok(struct Proc *p) {
+    if (!p) return false;
+    if (proc_resource_exempt(p)) return true;
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    bool ok = p->child_count < PROC_CHILD_MAX;
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return ok;
 }
 
 // Shared internal worker for rfork + rfork_with_caps. The only difference
@@ -718,6 +785,14 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     if (!parent)             extinction("rfork from thread with no proc");
     if (parent->magic != PROC_MAGIC)
                              extinction("rfork from thread with corrupted proc");
+
+    // #65 (I-32): the per-Proc child cap. Reject a fork bomb EARLY -- before the
+    // heavy proc_alloc / territory_clone / thread_create -- so it is cheap. The
+    // TOCTOU vs proc_link_child's ++ (a later, separate lock hold) is a bounded
+    // overshoot (<= ncpus-1 concurrent spawners) -- acceptable for a floor. kproc
+    // + the SYSTEM boot/service chain are exempt (a bomb is untrusted post-login
+    // code, not the TCB). The graceful-OOM backstop bounds the recursive case.
+    if (!proc_child_cap_ok(parent)) return -1;
 
     struct Proc *child = proc_alloc();
     if (!child) return -1;
@@ -2245,6 +2320,10 @@ void proc_test_unlink(struct Proc *p) {
     for (struct Proc **pp = &kproc()->children; *pp; pp = &(*pp)->sibling) {
         if (*pp == p) {
             *pp = p->sibling;
+            // #65 (I-32): keep kproc's child_count == list length (proc_test_link
+            // bumped it via proc_link_child).
+            if (__atomic_load_n(&kproc()->child_count, __ATOMIC_RELAXED) > 0)
+                __atomic_fetch_sub(&kproc()->child_count, 1u, __ATOMIC_RELEASE);
             break;
         }
     }

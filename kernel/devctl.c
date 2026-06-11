@@ -154,6 +154,28 @@ static int format_procs_cb(struct Proc *p, void *arg) {
     if (!n && p->thread_count != 0) { s->overflow = true; return 0; }
     s->off += n;
 
+    // #65 (I-32): the resource-floor counters as two trailing columns (the SEAM
+    // counters). Atomic loads -- a cross-Proc reader holds no per-Proc lock.
+    n = fmt_str(s->buf, s->cap, s->off, "    ");
+    if (!n) { s->overflow = true; return 0; }
+    s->off += n;
+    {
+        u32 pages = __atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE);
+        n = fmt_sdec(s->buf, s->cap, s->off, (int)pages);
+        if (!n && pages != 0) { s->overflow = true; return 0; }
+        s->off += n;
+    }
+
+    n = fmt_str(s->buf, s->cap, s->off, "    ");
+    if (!n) { s->overflow = true; return 0; }
+    s->off += n;
+    {
+        u32 kids = __atomic_load_n(&p->child_count, __ATOMIC_ACQUIRE);
+        n = fmt_sdec(s->buf, s->cap, s->off, (int)kids);
+        if (!n && kids != 0) { s->overflow = true; return 0; }
+        s->off += n;
+    }
+
     n = fmt_str(s->buf, s->cap, s->off, "\n");
     if (!n) { s->overflow = true; return 0; }
     s->off += n;

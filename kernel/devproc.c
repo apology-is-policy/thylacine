@@ -173,6 +173,21 @@ static size_t format_status(struct Proc *p, char *buf, size_t cap) {
     n = fmt_sdec(buf, cap, off, p->thread_count); if (!n && p->thread_count != 0) return 0; off += n;
     n = fmt_str(buf, cap, off, "\n");             if (!n) return 0; off += n;
 
+    // #65 (I-32): the per-Proc resource-floor counters (the SEAM counters a
+    // future aggregate quota reads). Atomic loads -- a cross-Proc reader holds
+    // no per-Proc lock. page_count == live SYS_BURROW_ATTACH anon pages;
+    // child_count == live direct children.
+    {
+        u32 pages = __atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE);
+        u32 kids  = __atomic_load_n(&p->child_count, __ATOMIC_ACQUIRE);
+        n = fmt_str(buf, cap, off, "pages:   ");   if (!n) return 0; off += n;
+        n = fmt_sdec(buf, cap, off, (int)pages);   if (!n && pages != 0) return 0; off += n;
+        n = fmt_str(buf, cap, off, "\n");          if (!n) return 0; off += n;
+        n = fmt_str(buf, cap, off, "children:");   if (!n) return 0; off += n;
+        n = fmt_sdec(buf, cap, off, (int)kids);    if (!n && kids != 0) return 0; off += n;
+        n = fmt_str(buf, cap, off, "\n");          if (!n) return 0; off += n;
+    }
+
     if (p->state == PROC_STATE_ZOMBIE) {
         n = fmt_str(buf, cap, off, "exit:    ");   if (!n) return 0; off += n;
         n = fmt_sdec(buf, cap, off, p->exit_status); if (!n && p->exit_status != 0) return 0; off += n;

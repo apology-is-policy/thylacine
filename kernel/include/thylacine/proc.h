@@ -89,6 +89,22 @@ struct Vma;
 // membership and a consumer resolves beyond the cache by principal_id.
 #define PROC_SUPP_GIDS_MAX 15
 
+// #65 (invariant I-32): the per-Proc resource floor. Fixed maxima that bound a
+// non-TCB Proc's resource use so a fork/thread/memory bomb is bounded, not
+// box-extincting. Tunable; generous for any v1.0 user workload (shell +
+// coreutils + editor) yet a bomb hits them fast. The TCB (PRINCIPAL_SYSTEM) is
+// exempt (proc_resource_exempt). Full rationale: IDENTITY-DESIGN.md §3.8.
+//
+//   PROC_PAGE_MAX   -- live anon pages via SYS_BURROW_ATTACH (256 MiB). The
+//                      memory-bomb bound; checked under vma_lock so it is exact.
+//   PROC_THREAD_MAX -- live threads. Tighter than the others because a thread
+//                      pins THREAD_KSTACK_TOTAL bytes of UNSWAPPABLE kernel
+//                      kstack (256 threads -> 8 MiB kstacks).
+//   PROC_CHILD_MAX  -- live DIRECT children (the direct-fork rate).
+#define PROC_PAGE_MAX   65536u   // 256 MiB at 4-KiB pages
+#define PROC_THREAD_MAX 256
+#define PROC_CHILD_MAX  256
+
 struct Proc {
     u64               magic;            // PROC_MAGIC
     int               pid;
@@ -374,6 +390,37 @@ struct Proc {
     u32                legate_session_id;
     u32                legate_scope_id;
     u64                legate_valid_until;
+
+    // #65 (invariant I-32): per-Proc resource-floor counters. A DoS bound,
+    // NOT a privilege axis -- they cap a non-TCB Proc's resource use so a
+    // fork/thread/memory bomb hits a clean limit instead of stressing the
+    // allocator toward the box-killing cliff. `thread_count` (above) is the
+    // third counter.
+    //
+    // page_count -- live anonymous pages committed via SYS_BURROW_ATTACH (the
+    //   user-unbounded memory-bomb vector; anon is eager at v1.0 so attach is
+    //   the single charge point). Charged += npages on a successful attach,
+    //   -= npages on a successful detach, both UNDER `vma_lock` (the lock that
+    //   already serializes the attach/detach path) -- so the page cap is
+    //   EXACT (no TOCTOU overshoot). NOT charged: pgtable sub-tables
+    //   (transitively bounded by mapped VA <= page_count), kstacks (bounded by
+    //   the thread cap), the exec image (one-shot, bounded by the binary). At
+    //   exit the Proc + this counter vanish together (no surviving aggregate at
+    //   v1.0; vma_drain is the SEAM hook where a future aggregate uncharges).
+    //   External stat readers use __atomic_load_n (a coherent snapshot).
+    // child_count -- live DIRECT children == the length of the `children` list.
+    //   ++ at proc_link_child, -- at proc_unlink_child, and re-based at
+    //   proc_reparent_children (adopter += N) -- all under g_proc_table_lock.
+    //   The child cap is checked EARLY in rfork_internal (before the heavy
+    //   proc_alloc/territory_clone/thread_create), so it carries a bounded
+    //   TOCTOU overshoot (<= ncpus-1 concurrent spawners) -- acceptable for a
+    //   floor (a bound, not an exact accountant).
+    // NEITHER is propagated by rfork (a child starts with its own zeroed
+    // counts -- KP_ZERO). PRINCIPAL_SYSTEM Procs (the TCB) maintain the
+    // counters for observability but are EXEMPT from the caps
+    // (proc_resource_exempt).
+    u32                page_count;
+    u32                child_count;
 };
 
 #define PROC_FLAG_NODUMP            (1u << 0)
@@ -418,12 +465,17 @@ struct Proc {
 // thread, and an armed kproc would *_INTR every kernel-thread sleep).
 #define PROC_FLAG_INTR_TERMINATE_PENDING (1u << 7)
 
-_Static_assert(sizeof(struct Proc) == 264,
-               "struct Proc size pinned at 264 bytes (SYS_EXIT_GROUP baseline "
-               "248 + the A-4a legate block: legate_session_id u32 + "
-               "legate_scope_id u32 + legate_valid_until u64 = 16 -> 264). "
-               "Adding a field grows the SLUB cache; update this assert "
-               "deliberately so the change is intentional.");
+_Static_assert(sizeof(struct Proc) == 272,
+               "struct Proc size pinned at 272 bytes (the A-4a 264 baseline + "
+               "the #65 resource-floor block: page_count u32 + child_count u32 "
+               "= 8 -> 272). Adding a field grows the SLUB cache; update this "
+               "assert deliberately so the change is intentional.");
+_Static_assert(__builtin_offsetof(struct Proc, page_count) == 264,
+               "#65 resource-floor counters append after the A-4a legate "
+               "block; existing offsets stay stable (KP_ZERO inits them 0).");
+_Static_assert(__builtin_offsetof(struct Proc, child_count) == 268,
+               "child_count follows page_count in the #65 resource-floor "
+               "block (offset 268).");
 _Static_assert(__builtin_offsetof(struct Proc, principal_id) == 168,
                "A-1a identity block appends after handler_va; existing "
                "offsets must stay stable (KP_ZERO inits the new tail).");
@@ -468,6 +520,40 @@ struct Proc *proc_alloc(void);
 // (no live threads) and state == ZOMBIE (or post-reap path). Extincts
 // on violation.
 void proc_free(struct Proc *p);
+
+// #65 (invariant I-32): the per-Proc resource floor.
+//
+// proc_resource_exempt -- the TCB (PRINCIPAL_SYSTEM: kproc + the boot/service
+//   chain) is exempt from the caps so the floor cannot pinch the FS server /
+//   the orphan-adopter / the kthread root. UNFORGEABLE: a post-login Proc
+//   cannot acquire PRINCIPAL_SYSTEM (CAP_SET_IDENTITY rejects it, §3.3), and
+//   principal_id is immutable on a running Proc, so a plain read is sound. A
+//   NULL p is treated as non-exempt (fail-closed).
+bool proc_resource_exempt(const struct Proc *p);
+
+// proc_page_charge / proc_page_uncharge -- the SYS_BURROW_ATTACH anon-page
+//   counter. The CALLER MUST HOLD p->vma_lock (the lock that serializes the
+//   attach/detach path), so the check + charge is atomic against sibling
+//   attaches and the page cap is EXACT. charge returns true (and adds npages)
+//   if the Proc is exempt OR the new total fits PROC_PAGE_MAX; false (charging
+//   nothing) if it would exceed (caller rejects with -ENOMEM) or npages would
+//   overflow. uncharge clamp-subtracts (never underflows past 0).
+bool proc_page_charge(struct Proc *p, u32 npages);
+void proc_page_uncharge(struct Proc *p, u32 npages);
+
+// proc_thread_cap_ok -- the thread-spawn gate. Returns true if the Proc is
+//   exempt OR thread_count < PROC_THREAD_MAX. Takes g_proc_table_lock for the
+//   read (the thread_count write domain). The check and the later
+//   thread_link_into_proc ++ are at different lock holds, so a bounded TOCTOU
+//   overshoot (<= ncpus-1 concurrent spawners) is possible -- acceptable for a
+//   floor.
+bool proc_thread_cap_ok(struct Proc *p);
+
+// proc_child_cap_ok -- the rfork/spawn gate. Returns true if the Proc is exempt
+//   OR child_count < PROC_CHILD_MAX. Takes g_proc_table_lock for the read (the
+//   child_count write domain). Checked EARLY in rfork_internal (before the heavy
+//   alloc), so it carries the same bounded TOCTOU overshoot as the thread cap.
+bool proc_child_cap_ok(struct Proc *p);
 
 // RW-7 R3-F1: reset every virtio device this Proc drove (via its KObj_MMIO
 // handles) before its KObj_DMA pages free back to the buddy allocator, so a

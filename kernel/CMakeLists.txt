@@ -118,6 +118,7 @@ set(KERNEL_TEST_SRCS
     test/test_smp.c
     test/test_proc.c
     test/test_proc_identity.c
+    test/test_resource.c
     test/test_territory.c
     test/test_territory_mount.c
     test/test_territory_chroot.c
