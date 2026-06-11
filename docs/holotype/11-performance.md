@@ -170,6 +170,18 @@ Five prosecutors, four independent multi-way convergences.
   entry — never in the boot-to-prompt window; only the TEST probes put it
   on the boot path. (Corrects the session's earlier carve-out framing;
   corvus's own boot self-test is deliberately argon2-free.)
+- **LANDED `@2500dc9` (#61a, KERNEL_TESTS) + `@fe1452c` (#61b,
+  THYLA_BOOT_PROBES).** A `tools/build.sh --production` build shape flips both
+  `KERNEL_TESTS=OFF` (drops test/*.c + `test_run_all()`) and
+  `THYLA_BOOT_PROBES=OFF` (gates joey's whole probe ladder; the real bringup --
+  stratumd-mount/pivot/corvus-spawn/boot_complete/getty -- stays). **Measured
+  on TCG: OFF boot-time `21.5 ms` vs the ON build's `525 ms`** -- the V1.0-RISK
+  boot-budget rows are now met by the production shape with wide margin; the ON
+  (dev/CI) build is byte-behavior-identical (tests 827/827 + all probes). The
+  HVF 1249-1265 ms figure was the ON build; the production shape removes the
+  same test-suite + probe cost. Honest residual: --production mints no bootstrap
+  users (dev fixtures) -> the first-login provisioning UX is a SEAM for the
+  LS/login line (not a perf item).
 
 ### V1.X-REWORK (real cost; SOTA named; the ranked backlog)
 

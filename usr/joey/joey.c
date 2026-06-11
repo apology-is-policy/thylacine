@@ -882,14 +882,18 @@ static long mkdir_or_open(long parent_fd, const char *name, unsigned long name_l
     return t_walk_open(parent_fd, name, name_len, T_OPATH);
 }
 
+#if THYLA_BOOT_PROBES
 // A-5c-c-2: michael's recovery phrase, captured from the fresh-pool USER_CREATE
 // OK frame in do_corvus_bringup so do_recover_e2e (which spawns /sbin/login,
 // after joey's corvus conn is closed) can drive the login `!recover` UX through
 // a live RECOVER(user). g_recover_armed implies a fresh pool AND a captured
 // phrase. Scrubbed once consumed. RECOVERY_PHRASE_MAX is 215 -> 256 fits.
+// Probe-only (#61 F1): written by the gated bringup ladder, read by the gated
+// recover E2E -- gated so the production init carries no dead phrase BSS.
 static unsigned char g_michael_phrase[256];
 static size_t g_michael_phrase_len = 0;
 static int g_recover_armed = 0;
+#endif /* THYLA_BOOT_PROBES (recovery-phrase capture state) */
 
 // A-1.7: corvus bringup -- spawn /sbin/corvus handing it `storage_dup_fd`
 // (a R|W-no-TRANSFER storage-root capability) at fd 0, then drive the
@@ -1561,7 +1565,32 @@ static int do_corvus_bringup(long storage_dup_fd) {
     // service cleanup).
 
     t_putstr("joey: corvus-d hybrid-PKE round-trip verified via /srv/corvus (b3b)\n");
-#endif /* THYLA_BOOT_PROBES (corvus boot-test ladder; the spawn above is real bringup) */
+#else
+    // Production shape (#61 F3): the ON ladder's connect_corvus() above is the
+    // corvus readiness + liveness barrier -- a corvus that exec's then dies (or
+    // never posts /srv/corvus) times it out -> return 1 -> no banner. The lean
+    // shape keeps a MINIMAL verb-free analog so boot-OK still attests corvus is
+    // reachable (else a runtime-failed corvus boots OK while every login fails,
+    // diagnosable only via the orphan-sweep breadcrumb). open=connect on the
+    // namespace-resident /srv/corvus drives Tversion+Tattach, so a successful
+    // open proves corvus is up + serving; close it at once (login reconnects).
+    // Bounded + paced like connect_corvus (60 x 100 ms); a dead corvus is
+    // boot-fatal, matching the ON barrier.
+    {
+        long ready = -1;
+        for (int i = 0; i < 60; i++) {
+            ready = t_open(T_WALK_OPEN_FROM_ROOT, "/srv/corvus", 11, T_OREAD);
+            if (ready >= 0) { (void)t_close(ready); break; }
+            unsigned int pacer = 0;
+            (void)t_torpor_wait(&pacer, 0u, 100000u); /* 100 ms */
+        }
+        if (ready < 0) {
+            t_putstr("joey: corvus did not post /srv/corvus -- bringup FAILED\n");
+            return 1;
+        }
+        t_putstr("joey: corvus ready (/srv/corvus posted)\n");
+    }
+#endif /* THYLA_BOOT_PROBES (ON: the boot-test ladder; OFF: the minimal readiness barrier) */
 
     return 0;
 }

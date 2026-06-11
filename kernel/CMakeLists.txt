@@ -83,8 +83,6 @@ set(KERNEL_SRCS
     9p_wire.c
     9p_session.c
     9p_transport.c
-    9p_transport_loopback.c
-    9p_transport_mq.c
     9p_client.c
     dev9p.c
     9p_attach.c
@@ -204,6 +202,12 @@ set(KERNEL_TEST_SRCS
     test/test_attach_probe.c
     test/test_stratumd_stub.c
     test/test_stub_driver.c
+    # Test-only transport infrastructure (not under test/, but referenced only by
+    # the 9P/Loom test cases -- #61 F2). 9p_transport_mq is the Loom-6c
+    # multi-in-flight test transport; 9p_transport_loopback is the single-slot
+    # test transport it builds on. No production code references either.
+    9p_transport_loopback.c
+    9p_transport_mq.c
 )
 
 # HX-2: in-kernel symbol table (kallsyms-style). Generated PER-BUILD-DIR from

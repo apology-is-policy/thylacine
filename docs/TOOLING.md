@@ -411,12 +411,47 @@ tools/build.sh sysroot      ← build the pouch POSIX sysroot (Phase 6 — POUCH
 tools/build.sh userspace    ← cargo build --release --workspace for Rust components
 tools/build.sh disk         ← assemble build/disk.img (Stratum volume + initramfs)
 tools/build.sh all          ← kernel + sysroot + userspace + disk
+tools/build.sh all --production ← the lean V1.0 boot shape (no tests, no boot-test probes)
 tools/build.sh piboot       ← convert kernel ELF to kernel8.img for Pi 5 netboot (post-v1.0)
 tools/test.sh               ← run-vm.sh + test runner (boots VM, runs test suite, reports)
 tools/build.sh clean        ← remove build artifacts
 ```
 
-A top-level `Makefile` provides `make kernel`, `make all`, `make test`, etc. as conventional aliases for the above.
+A top-level `Makefile` provides `make kernel`, `make all`, `make test`, `make production`, etc. as conventional aliases for the above.
+
+### The production boot shape (`--production`, #61)
+
+By default every build is the **dev/CI shape**: the in-kernel test suite is
+compiled in and `test_run_all()` runs the whole `g_tests[]` at boot, and joey
+(the init) runs its boot-test probe ladder before signalling boot-complete.
+That shape is what every gate depends on, but it is NOT what V1.0 ships: the
+kernel self-measures a ~525 ms (TCG) / ~1.2 s (HVF) boot-time dominated by the
+test suite + the probes (incl. joey's argon2id E2E derivations).
+
+`tools/build.sh --production` (or `make production`) produces the **lean
+boot shape**, flipping two CMake options in lockstep:
+
+- `KERNEL_TESTS=OFF` — drops `kernel/test/*.c` from the kernel link and skips
+  `test_run_all()` + the boot-stack probe (the banner prints
+  `tests: DISABLED (KERNEL_TESTS=OFF production build)`). Kernel flat binary
+  929 KiB → 282 KiB.
+- `THYLA_BOOT_PROBES=OFF` — compiles joey without its boot-test probe ladder.
+  The **real bringup is unconditional**: stratumd mount → `pivot_root` → `/srv`
+  re-graft → corvus spawn → `SYS_BOOT_COMPLETE` → console relinquish → the
+  login getty. Only the probes (torture/stress/bench + the corvus
+  USER_CREATE/AUTH/RECOVER/login E2E ladder) compile out.
+
+Measured: the production shape boots to `Thylacine boot OK` in **~21.5 ms**
+(TCG) — vs ~525 ms for the dev build — well under the 500 ms `VISION.md §4.5`
+target. The `Thylacine boot OK` banner + the `EXTINCTION:` prefix (the binding
+tooling ABI, §10) are byte-identical in both shapes.
+
+**Caveat — first-login provisioning is a seam.** The dev/CI shape's probe
+ladder also mints the bootstrap users (michael/susan/cora) as test fixtures.
+`--production` does NOT create them, so a real production deployment boots to
+the login getty with an empty user set and needs a first-login
+account-provisioning UX (owned by the login/Life-Support line). The production
+shape is the build + boot-time deliverable; the deployment UX is separable.
 
 Cross-compilation toolchain (installed on host macOS):
 - Kernel + native freestanding userspace: `clang` with `--target=aarch64-none-elf`.
