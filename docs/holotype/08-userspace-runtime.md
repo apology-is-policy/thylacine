@@ -2,7 +2,7 @@
 
 **Tier**: STANDARD (lenses S + C + area-local T). **Status**: CLOSED (dirty
 close; converged round-2). **Fix commits**: Thylacine `cc79551`; Stratum
-(`thylacine-pouch-arm`) `bf0cde0`. **Report commit**: *(pending)*.
+(`thylacine-pouch-arm`) `bf0cde0`. **Report commit**: `2392775`.
 
 ## Surface
 
