@@ -179,6 +179,13 @@ void ready(struct Thread *t);
 // specs/sched_alpha.tla (Place picks the target non-deterministically).
 void ready_on(unsigned target_cpu, struct Thread *t);
 
+// RW-11 SA-1b (ARCH 8.3): realize the INTERACTIVE band for a latency-critical
+// USER thread -- one that blocks waiting for a device IRQ (kobj_irq_wait) or
+// console input (devcons_read). Sticky NORMAL -> INTERACTIVE so its wakes
+// preempt NORMAL work (sched_wake_preempts). No-op for kernel threads (keeps
+// the in-kernel test runner NORMAL) and idempotent (never touches IDLE idles).
+void sched_mark_interactive(struct Thread *t);
+
 // HMP foundation (ARCH §8.4.3): the placement POLICY. Choose the CPU whose
 // run tree `t` should be enqueued on, given the CPU it last ran on / the
 // CPU waking it (prev_cpu). v1.0 homogeneous body returns prev_cpu (CPU-
@@ -224,6 +231,14 @@ bool sched_capacity_normalize(const u32 *raw_dmips, unsigned n, u32 *out_caps);
 unsigned sched_place_by_capacity(u32 util, unsigned prev_cpu,
                                  const u32 *caps, unsigned n, bool hetero);
 
+// RW-11 SA-1b wake-preemption policy, PURE (the verification boundary -- a unit
+// test drives it against synthetic bands). True iff a wake of a `woken_band`
+// thread should preempt a `cur_band` current thread (or the idle). Fixed-
+// priority bands (ARCH 8.3, lower number = higher priority): the idle yields to
+// any real thread; otherwise a strictly-higher band preempts; same band is
+// EEVDF-fair (no wake-preempt). No globals.
+bool sched_wake_preempts(u32 woken_band, u32 cur_band, bool cur_is_idle);
+
 // Diagnostic (HMP tests): true iff `t` is currently linked in `cpu`'s run
 // tree. Takes that CPU's lock for a consistent read. Used by the cross-CPU
 // ready_on enqueue test to prove placement landed on the intended CPU.
@@ -235,6 +250,10 @@ bool sched_in_cpu_tree(unsigned cpu, struct Thread *t);
 // be reconsidered at the target's next preempt_check_irq rather than waiting a
 // full slice (the I-17/I-8 leak the #864 audit found and F1 fixes).
 bool sched_need_resched_pending(unsigned cpu);
+
+// Test-support (RW-11 SA-1b): clear a CPU's need_resched so a unit test can
+// establish a clean baseline before exercising the same-CPU wake-preempt path.
+void sched_clear_need_resched_for_test(unsigned cpu);
 
 // Diagnostic accessors.
 unsigned sched_runnable_count(void);

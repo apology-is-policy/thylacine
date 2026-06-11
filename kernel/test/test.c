@@ -54,6 +54,8 @@ void test_sched_place_by_capacity_synthetic_dtb(void);
 void test_sched_select_target_cpu_homogeneous_is_prev(void);
 void test_sched_ready_on_cross_cpu_enqueue(void);
 void test_sched_ready_on_clamps_stale_vd(void);
+void test_sched_wake_preempts_policy(void);
+void test_sched_wake_preempt_same_cpu(void);
 void test_rendez_sleep_immediate_cond_true(void);
 void test_rendez_basic_handoff(void);
 void test_rendez_death_interrupts_sleep(void);
@@ -896,6 +898,10 @@ struct test_case g_tests[] = {
                                        test_sched_ready_on_cross_cpu_enqueue, false, NULL },
     { "scheduler.ready_on_clamps_stale_vd",
                                        test_sched_ready_on_clamps_stale_vd, false, NULL },
+    { "scheduler.wake_preempts_policy",
+                                       test_sched_wake_preempts_policy,    false, NULL },
+    { "scheduler.wake_preempt_same_cpu",
+                                       test_sched_wake_preempt_same_cpu,   false, NULL },
     { "rendez.sleep_immediate_cond_true",
                                        test_rendez_sleep_immediate_cond_true,
                                                                            false, NULL },

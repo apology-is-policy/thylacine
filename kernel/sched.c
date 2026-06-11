@@ -378,6 +378,14 @@ bool sched_need_resched_pending(unsigned cpu) {
     return need_resched_pending(cpu);
 }
 
+// Test-support (RW-11 SA-1b): clear a CPU's need_resched so a unit test can
+// establish a clean baseline before exercising the same-CPU wake-preempt path
+// (whose observable is need_resched_pending). Pairs with the diagnostic above;
+// production code clears via sched()'s entry (R5-H F93) and preempt_check_irq.
+void sched_clear_need_resched_for_test(unsigned cpu) {
+    need_resched_clear(cpu);
+}
+
 void sched_set_idle_in_wfi(bool in_wfi) {
     unsigned idx = smp_cpu_idx_self();
     if (idx >= DTB_MAX_CPUS) return;
@@ -604,6 +612,31 @@ static void sched_notify_cpu(unsigned target) {
     (void)gic_send_ipi(target, IPI_RESCHED);
 }
 
+// Wake-preemption policy (RW-11 SA-1b -- the 6 ms slice cliff). PURE so a unit
+// test drives it against synthetic bands (the "verification boundary", like
+// sched_place_by_capacity). Lower band number = higher priority (sched.h).
+// Fixed-priority bands (ARCH 8.3): a strictly-higher-priority band preempts; a
+// CPU running its idle yields to ANY real thread; same band is EEVDF-fair (no
+// wake-preempt -- a latency-critical thread runs in the INTERACTIVE band, which
+// always preempts NORMAL/IDLE). This is what enforces 8.3's "always serves the
+// highest-priority band with runnable threads" ON THE WAKE PATH: without it a
+// newly-runnable higher-band thread waited up to a full slice for the next
+// tick-driven preempt.
+bool sched_wake_preempts(u32 woken_band, u32 cur_band, bool cur_is_idle) {
+    if (cur_is_idle) return true;
+    return woken_band < cur_band;
+}
+
+// Should a just-woken thread on THIS CPU preempt the thread currently running
+// here? Reads current_thread() + cs->idle, so it MUST be called under cs->lock
+// with IRQs masked (the window ready_on holds) where both are stable. `cs` is
+// THIS CPU's sched (target_cpu == self at the only call site).
+static bool sched_should_preempt_on_wake(struct CpuSched *cs, struct Thread *woken) {
+    struct Thread *cur = current_thread();
+    if (!cur) return false;                  // pre-thread boot: nothing to preempt
+    return sched_wake_preempts(woken->band, cur->band, cur == cs->idle);
+}
+
 // HMP foundation (#864, ARCH §8.4.3): the enqueue MECHANISM, separated from the
 // placement POLICY (select_target_cpu). Insert RUNNABLE `t` into target_cpu's
 // run tree under that CPU's lock. On a uniform topology target_cpu is always
@@ -660,6 +693,20 @@ void ready_on(unsigned target_cpu, struct Thread *t) {
 
     insert_sorted(cs, t);
 
+    // Wake-preemption (RW-11 SA-1b): if the just-enqueued thread outranks the
+    // thread currently on THIS CPU, request a reschedule so it is served at the
+    // next preempt point (preempt_check_irq at IRQ-return / the EL0-return tail)
+    // instead of waiting up to a full slice -- the empirically-pinned 6 ms cliff.
+    // Decided HERE, under cs->lock with IRQs masked, where current_thread() +
+    // cs->idle are stable. The cross-CPU branch's need_resched_set (below) is the
+    // peer-targeted analog (#866 F1); the same-CPU notify (sched_notify_idle_peer)
+    // is orthogonal -- it offloads the wakee to an IDLE PEER if one exists (no
+    // preemption needed then); this flag covers the no-idle-peer case, the
+    // saturated regime the p99.9 budget describes.
+    bool preempt_self = (target_cpu == self) &&
+                        sched_should_preempt_on_wake(cs, t);
+    if (preempt_self) need_resched_set(self);
+
     spin_unlock_irqrestore(&cs->lock, s);
 
     // Wake the right CPU, AFTER releasing the lock so its IPI handler doesn't
@@ -692,6 +739,39 @@ void ready(struct Thread *t) {
     // == the pre-#864 "enqueue on the CPU that woke you" behavior, exactly.
     unsigned target = select_target_cpu(t, smp_cpu_idx_self());
     ready_on(target, t);
+}
+
+// Realize the INTERACTIVE band (ARCH 8.3) for a latency-critical USER thread.
+// A thread that blocks waiting for a device IRQ (kobj_irq_wait) or for console
+// input (devcons_read) is a latency-sensitive "terminal app / driver" in 8.3's
+// taxonomy, so its wakes should preempt NORMAL work (via sched_wake_preempts).
+// The two callers each enforce their OWN trust gate so the realized INTERACTIVE
+// set stays narrow: kobj_irq_wait is implicitly CAP_HW_CREATE-gated (reaching it
+// requires an IRQ kobj), and devcons_read gates on the trusted console session
+// (owner/attached) -- this generic helper only adds the user-thread gate below.
+// Sticky + one-way (NORMAL -> INTERACTIVE): set when the thread first takes the
+// role; never demoted at v1.0 -- the dynamic boost-on-wake/demote-on-quantum
+// classifier (Plan 9 sched) is the v1.x EEVDF lift (I-17).
+//
+// Gated to USER threads (proc->pgtable_root != 0): a kernel thread -- notably
+// the in-kernel test runner, which drives both wait paths synchronously --
+// stays NORMAL, so the boost never pollutes kernel scheduling or test
+// isolation. Idempotent; ONLY NORMAL is promoted, so a pinned IDLE idle is
+// never touched. `t->band` is written while `t` is current (RUNNING, in no run
+// tree); the value publishes to a waker's under-cs->lock read via the
+// sleep->wake->ready_on(insert_sorted under cs->lock) happens-before edge.
+//
+// Caveat (ARCH 8.3 "no aging across bands at v1.0"): a CPU-bound INTERACTIVE
+// thread starves NORMAL. Bounded in practice -- the realized INTERACTIVE set is
+// mostly-blocked + trusted (CAP_HW_CREATE drivers + the console-owner/attached
+// session: the shell + login/corvus -- NOT an arbitrary console-stdin reader);
+// the general CPU-DoS bound is the per-Proc quota (#65).
+void sched_mark_interactive(struct Thread *t) {
+    if (!t) return;
+    if (t->magic != THREAD_MAGIC) return;
+    if (!t->proc || t->proc->pgtable_root == 0) return;   // kernel thread: stays NORMAL
+    if (t->band != SCHED_BAND_NORMAL) return;             // idempotent; never touch IDLE
+    t->band = SCHED_BAND_INTERACTIVE;
 }
 
 // P2-Ce: finish_task_switch helper for thread_trampoline.

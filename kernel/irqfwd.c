@@ -21,7 +21,9 @@
 #include <thylacine/extinction.h>
 #include <thylacine/irqfwd.h>
 #include <thylacine/rendez.h>
+#include <thylacine/sched.h>                 // RW-11 SA-1b: sched_mark_interactive
 #include <thylacine/spinlock.h>
+#include <thylacine/thread.h>                // RW-11 SA-1b: current_thread
 #include <thylacine/types.h>
 
 #include <thylacine/smp.h>                  // IPI_RESCHED (P4-Ib R9 F142)
@@ -364,6 +366,13 @@ u32 kobj_irq_wait(struct KObj_IRQ *k) {
     }
     k->waiting = true;
     spin_unlock_irqrestore(&k->rendez.lock, s);
+
+    // RW-11 SA-1b: an IRQ-service thread is latency-critical -- its wake should
+    // preempt NORMAL work. Promote it to the INTERACTIVE band (ARCH 8.3) so the
+    // pending IRQ runs it ahead of any NORMAL thread sharing its CPU (closes the
+    // IRQ-to-driver leg of the 6 ms slice cliff). Sticky + no-op for kernel
+    // threads; the driver thread is the current thread here (pre-sleep).
+    sched_mark_interactive(current_thread());
 
     // Block until pending_count > 0. sleep's cond loop guarantees no
     // spurious return. #811 (ARCH §8.8.1): a death-interrupted sleep means the

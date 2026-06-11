@@ -13,8 +13,10 @@
 #include <thylacine/dev.h>
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
+#include <thylacine/sched.h>                 // RW-11 SA-1b: sched_mark_interactive
 #include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
+#include <thylacine/thread.h>                // RW-11 SA-1b: current_thread
 #include <thylacine/types.h>
 
 #include "../arch/arm64/uart.h"
@@ -237,6 +239,24 @@ static long devcons_read(struct Spoor *c, void *buf, long n, s64 off) {
     }
     g_cons.reader_busy = true;
     spin_unlock_irqrestore(&g_cons.lock, s);
+
+    // RW-11 SA-1b: a TRUSTED console reader -- the session shell (the console
+    // OWNER) or a console-ATTACHED authority (login/corvus) -- is an interactive
+    // "terminal app" (ARCH 8.3); its wake (input arrived) should preempt NORMAL
+    // work, so it is promoted to the INTERACTIVE band. The gate is NARROW on
+    // purpose (audit F1): /dev/cons has NO per-open capability gate and is
+    // inherited as stdin by foreground children at v1.0 (PTY is LS-8/Phase-8), so
+    // an ungated promotion would let any unprivileged program that reads its stdin
+    // self-promote above NORMAL and starve it (a fixed-priority band, no aging).
+    // The band==NORMAL pre-check keeps the (locking) owner query off the path once
+    // the reader is already promoted (sticky) -- and bounds it to interactive
+    // frequency for an untrusted reader that stays NORMAL.
+    struct Thread *reader = current_thread();
+    if (reader && reader->band == SCHED_BAND_NORMAL && reader->proc &&
+        (proc_is_console_attached(reader->proc) ||
+         proc_is_console_owner(reader->proc))) {
+        sched_mark_interactive(reader);
+    }
 
     u8 *out = (u8 *)buf;
     long got = 0;

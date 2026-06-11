@@ -626,6 +626,59 @@ A cross-CPU `ready_on` sets the target's `need_resched` (`#866` F1) so a *busy* 
 - **Verifiable now → built + tested**: the placement *logic* is unit-tested against a synthetic asymmetric DTB — `scheduler.capacity_normalize_synthetic_dtb` (raw `capacity-dmips-mhz` → normalized caps + hetero verdict) and `scheduler.place_by_capacity_synthetic_dtb` ("heavy task → high-capacity CPU; light task stays; heavy task already on the biggest core stays") — plus `scheduler.select_target_cpu_homogeneous_is_prev` (the v1.0 behavior-preservation guarantee on the real uniform topology) and `scheduler.ready_on_cross_cpu_enqueue` (the cross-CPU enqueue mechanism). Safety composition is `specs/sched_alpha.tla` (arbitrary placement).
 - **NOT verifiable until real heterogeneous HW → deferred**: the empirical EAS tuning (PELT decay constants, energy model, schedutil/DVFS, misfit thresholds). QEMU virt declares a homogeneous DTB; HVF runs guest vCPUs on real P/E cores but the host floats them (no stable declared asymmetry). HVF closes the speed gap, not the heterogeneity gap. The EAS layer is additive + pre-modeled, landing when it becomes verifiable.
 
+### Wake-preemption + the realized INTERACTIVE band (RW-11 SA-1b)
+
+Closes the empirically-pinned 6 ms "slice cliff" (HT11.SA-1 / R2-F1): a
+newly-runnable higher-priority-band thread now preempts on the *wake* path,
+instead of waiting up to a full slice for the next tick-driven preempt. The
+mechanism is additive — it weakens no invariant and composes with the `on_cpu`
+protocol / I-8 / I-21.
+
+- **`bool sched_wake_preempts(u32 woken_band, u32 cur_band, bool cur_is_idle)`** —
+  PURE policy (the verification boundary, like `sched_place_by_capacity`). True
+  iff the wakee outranks the current thread: a CPU running its idle yields to any
+  real wake; a strictly-higher-priority (lower-number) band preempts; same band
+  is EEVDF-fair (no wake-preempt). Unit-tested by `scheduler.wake_preempts_policy`.
+- **`ready_on`'s same-CPU branch** consults it under `cs->lock` (where
+  `current_thread()` + `cs->idle` are stable) and sets THIS CPU's `need_resched`
+  when it returns true — the same-CPU analog of the `#866` F1 cross-CPU
+  `need_resched` (the half that was missing). Verified by
+  `scheduler.wake_preempt_same_cpu` (an INTERACTIVE wake sets the flag; a NORMAL
+  wake does not).
+- **The syscall-return preempt point** (`arch/arm64/exception.c`, the SVC tail)
+  consumes a wake-set `need_resched` as the waker returns to EL0 — so a wake
+  during a syscall (a pipe reader, a 9P reply, a torpor wake) yields promptly,
+  not at the next tick. Symmetric with the IRQ-return paths (`vectors.S` already
+  `bl preempt_check_irq`); ordered preempt-then-die-check so the I-24 die-check
+  stays the freshest exit gate.
+- **`void sched_mark_interactive(struct Thread *t)`** realizes the INTERACTIVE
+  band (ARCH §8.3): a USER thread blocking in `kobj_irq_wait` (a device-IRQ
+  driver) or `devcons_read` (the console session reader) is promoted
+  NORMAL → INTERACTIVE (sticky, one-way) so its wake preempts NORMAL work. Gated
+  to user threads (a kproc — notably the in-kernel test runner that drives both
+  paths synchronously — stays NORMAL); verified by
+  `scheduler.wake_preempt_same_cpu` part (c). **Each caller adds its own TRUST
+  gate** so the set stays narrow (wake-preemption audit F1): the IRQ leg is
+  implicitly `CAP_HW_CREATE`-gated (you need an IRQ kobj to reach
+  `kobj_irq_wait`); the console leg (`kernel/cons.c`) promotes only the trusted
+  console session — `proc_is_console_owner` (the shell) **or**
+  `proc_is_console_attached` (login/corvus) — never an arbitrary foreground
+  program that inherited `/dev/cons` as stdin (which would otherwise self-promote
+  above NORMAL and starve it, since `/dev/cons` has no per-open cap gate + PTY is
+  unbuilt).
+
+**Known caveat — no cross-band aging (ARCH §8.3).** Bands are strict fixed
+priority; a CPU-bound INTERACTIVE thread starves NORMAL on its CPU. Bounded by
+the deliberately-narrow, mostly-blocked realized set (CAP-gated drivers + the
+trusted console session: the owner shell + console-attached login/corvus) + the
+per-Proc CPU quota (#65). The dynamic boost-on-wake / demote-on-
+quantum classifier (Plan 9) + the controlling-tty rule are the deferred EEVDF
+lift. **Adjacency note:** the `virtio-input` driver busy-polls (`yield` hint)
+after its `t_irq_wait`, so it now runs that poll in INTERACTIVE — a faster,
+CPU-monopolizing poll that marginally narrows the host QMP-injection window of
+the already-tracked, intermittent #34 timing flake (verified intermittent, not a
+new deterministic failure mode — virtio-input passed 3/3 on re-run post-change).
+
 ## Multi-boot CI gate + timing soft-warn (#865)
 
 **Single boots lie.** The #788/#806/#860 SMP context-corruption races are layout-/timing-sensitive and pass a single boot most of the time — a one-shot `tools/test.sh` is the verification gap that masked #860 for weeks. The soundness gate is therefore **multi-boot**:

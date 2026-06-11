@@ -917,6 +917,23 @@ void proc_set_console_owner(struct Proc *p) {
     spin_unlock_irqrestore(&g_proc_table_lock, s);
 }
 
+// proc_is_console_owner -- true iff `p` is the current g_console_owner (the
+// Ctrl-C target = the session shell, via SPAWN_PERM_CONSOLE_OWNER). Reads the
+// owner pointer under g_proc_table_lock (the sanctioned discipline -- the
+// pointer is written under that lock and cleared on owner-death) and compares it
+// to `p`; it NEVER dereferences the owner, so there is no UAF even against a
+// concurrent owner exit. RW-11 SA-1b uses this to gate the devcons_read
+// INTERACTIVE promotion to the trusted console session (the shell + the
+// console-attached login/corvus), keeping an arbitrary console-stdin-reading
+// foreground program OUT of the INTERACTIVE band (audit F1). Fail-closed on NULL.
+bool proc_is_console_owner(const struct Proc *p) {
+    if (!p) return false;
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    bool yes = (g_console_owner == p);
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return yes;
+}
+
 void proc_set_console_trusted(struct Proc *p) {
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
     g_console_trusted_proc = p;

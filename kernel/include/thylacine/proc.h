@@ -783,6 +783,13 @@ void proc_revoke_console_attached(struct Proc *p);
 // atomic load (the bit is multi-writer post-A-4c-2).
 bool proc_is_console_attached(const struct Proc *p);
 
+// proc_is_console_owner — true iff `p` is the current console owner (the Ctrl-C
+// target = the session shell, SPAWN_PERM_CONSOLE_OWNER). Compares the owner
+// pointer under g_proc_table_lock WITHOUT dereferencing it (no UAF). RW-11
+// SA-1b: gates the devcons_read INTERACTIVE promotion to the trusted console
+// session. Fail-closed on NULL.
+bool proc_is_console_owner(const struct Proc *p);
+
 // A-4c-1: the kernel console owner (the trusted-path anchor for /dev/cons).
 //
 // proc_set_console_owner — record `p` as the current console owner = the

@@ -1017,6 +1017,30 @@ This produces:
 - Fair share: weight `w` gets `w / W_total` of CPU time.
 - No starvation: every runnable thread eventually has the earliest deadline.
 
+**As-built (v1.0; the 2A-F6 / RW-11 SA-1b reconcile).** The shipped scheduler is
+a *simplified* EEVDF: each thread carries a single monotonic `vd_t` minted from a
+per-CPU yield counter (FIFO-within-band, reinserted at "current virtual time" on
+wake -- RW-2 2A-F1), NOT the weighted `ve_t`/`vd_t` math above. The full weighted
+form -- and with it the I-17 *quantitative* latency bound -- is a deferred design
+target (the EEVDF lift). What v1.0 DOES guarantee:
+- **Fixed-priority bands enforced on the wake path (RW-11 SA-1b).** `pick_next`
+  already serves the highest-priority band first (8.3), but a *newly-runnable*
+  higher-band thread used to wait up to a full slice for the next tick-driven
+  preempt -- the empirically-pinned 6 ms "slice cliff". `sched_wake_preempts`
+  closes it: a same-CPU wake sets `need_resched` when the wakee outranks the
+  current thread (a CPU running its idle yields to any real wake; a strictly-
+  higher band always preempts; same band stays EEVDF-fair). It is consumed at the
+  next preempt point -- `preempt_check_irq` after every IRQ AND, since RW-11, at
+  the *syscall-return tail* (the SOTA return-to-user preempt point; Linux/seL4/
+  Fuchsia all do it) so a wake during a syscall yields as the waker returns to
+  EL0, not at the next tick. The cross-CPU analog (`need_resched` on the target +
+  a kick) is the #866 F1 half.
+- **Cross-band starvation is NOT bounded** (see 8.3): bands are strict fixed
+  priority with no cross-band aging at v1.0, so a CPU-bound INTERACTIVE thread
+  starves NORMAL on its CPU. The realized INTERACTIVE set is deliberately narrow
+  + mostly-blocked (8.3); the general CPU-DoS bound is the per-Proc quota (#65),
+  and cross-band aging is the EEVDF-lift fairness extension.
+
 ### 8.3 Three priority bands
 
 Threads belong to one of three bands:
@@ -1035,6 +1059,26 @@ schedule(cpu) {
 ```
 
 Within a band, EEVDF picks. Across bands, fixed priority (no aging across bands at v1.0; would be a fairness extension).
+
+**Realized at v1.0 (RW-11 SA-1b).** The INTERACTIVE band is no longer only
+designed: a USER thread that blocks waiting for a device IRQ (`kobj_irq_wait`) or
+for console input (`devcons_read`) is promoted to INTERACTIVE
+(`sched_mark_interactive`), so its wake preempts NORMAL work (8.2 "as-built").
+The promotion is sticky + one-way and gated to user threads (a kernel thread --
+notably the in-kernel test runner that drives both wait paths synchronously --
+stays NORMAL, so the boost never pollutes kernel scheduling). Each leg further
+enforces a TRUST gate so the realized set stays narrow: the IRQ leg is implicitly
+`CAP_HW_CREATE`-gated (reaching `kobj_irq_wait` requires an IRQ kobj), and the
+console leg gates on the trusted console session -- the OWNER shell + the
+console-ATTACHED login/corvus -- NOT an arbitrary foreground program that inherits
+`/dev/cons` as stdin (which, since `/dev/cons` has no per-open capability gate and
+PTY is unbuilt, would otherwise let unprivileged EL0 code self-promote above
+NORMAL and starve it; the wake-preemption audit F1). The full "anything
+from a controlling tty" rule + a dynamic boost-on-wake / demote-on-quantum
+classifier (Plan 9) are the EEVDF-lift refinement; the controlling-tty inference
+lands with the PTY work (Phase 8). The **no-cross-band-aging** caveat above is
+now load-bearing: a CPU-bound INTERACTIVE thread starves NORMAL on its CPU
+(bounded by the deliberately-narrow, mostly-blocked realized set + the #65 quota).
 
 ### 8.4 Per-CPU run trees + the SMP mechanism
 

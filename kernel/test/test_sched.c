@@ -664,3 +664,91 @@ void test_sched_ready_on_clamps_stale_vd(void) {
     TEST_EXPECT_EQ(t2_vd, (s64)0, "vd_t already at/below the clock is unchanged");
     thread_free(t2);
 }
+
+// scheduler.wake_preempts_policy  (RW-11 SA-1b)
+//   The PURE wake-preemption decision (sched_wake_preempts) against synthetic
+//   bands -- the verification boundary, like sched_place_by_capacity. Fixed-
+//   priority bands (ARCH 8.3): a CPU running its idle yields to ANY real wake; a
+//   strictly-higher-priority (lower-number) band preempts; same band is EEVDF-
+//   fair (no wake-preempt). This is what enforces 8.3's "always serves the
+//   highest-priority band with runnable threads" ON THE WAKE PATH.
+void test_sched_wake_preempts_policy(void) {
+    // A CPU running its idle yields to ANY real wake (the idle->real case),
+    // regardless of the woken band.
+    TEST_EXPECT_EQ(sched_wake_preempts(SCHED_BAND_NORMAL,      SCHED_BAND_IDLE, true), true,
+        "idle current yields to a NORMAL wake");
+    TEST_EXPECT_EQ(sched_wake_preempts(SCHED_BAND_INTERACTIVE, SCHED_BAND_IDLE, true), true,
+        "idle current yields to an INTERACTIVE wake");
+
+    // Cross-band: a strictly-higher-priority band preempts (fixed priority).
+    TEST_EXPECT_EQ(sched_wake_preempts(SCHED_BAND_INTERACTIVE, SCHED_BAND_NORMAL, false), true,
+        "INTERACTIVE wake preempts a NORMAL current");
+    TEST_EXPECT_EQ(sched_wake_preempts(SCHED_BAND_NORMAL,      SCHED_BAND_IDLE,   false), true,
+        "NORMAL wake preempts an IDLE-band current");
+
+    // Same band: EEVDF-fair, no wake-preempt (latency comes from the band).
+    TEST_EXPECT_EQ(sched_wake_preempts(SCHED_BAND_NORMAL,      SCHED_BAND_NORMAL,      false), false,
+        "NORMAL wake does NOT preempt a NORMAL current (same band)");
+    TEST_EXPECT_EQ(sched_wake_preempts(SCHED_BAND_INTERACTIVE, SCHED_BAND_INTERACTIVE, false), false,
+        "INTERACTIVE wake does NOT preempt an INTERACTIVE current (same band)");
+
+    // A lower-priority band never preempts a higher one.
+    TEST_EXPECT_EQ(sched_wake_preempts(SCHED_BAND_NORMAL, SCHED_BAND_INTERACTIVE, false), false,
+        "NORMAL wake does NOT preempt an INTERACTIVE current");
+    TEST_EXPECT_EQ(sched_wake_preempts(SCHED_BAND_IDLE,   SCHED_BAND_NORMAL,      false), false,
+        "IDLE wake does NOT preempt a NORMAL current");
+}
+
+// scheduler.wake_preempt_same_cpu  (RW-11 SA-1b)
+//   ready_on(self, t) sets THIS CPU's need_resched iff t outranks the current
+//   (running test-runner) thread -- the same-CPU analog of the #866 F1 cross-CPU
+//   need_resched, the half that was missing (the 6 ms slice cliff). The runner is
+//   a NORMAL kproc thread: an INTERACTIVE wake preempts it (flag set); a NORMAL
+//   wake does not (same band). Masked across the place->observe->remove window (a
+//   slice-expiry preempt would dispatch the placed thread / race the flag, like
+//   the clamp test above) + a clean baseline via the test-clear. Also pins the
+//   sched_mark_interactive gate: it is a no-op on a kproc (kernel) thread.
+void test_sched_wake_preempt_same_cpu(void) {
+    unsigned self = smp_cpu_idx_self();
+
+    // (a) A higher-band (INTERACTIVE) same-CPU wake sets need_resched.
+    struct Thread *hi = thread_create(kproc(), sched_test_thread_a);
+    TEST_ASSERT(hi != NULL, "thread_create hi failed");
+    hi->band = SCHED_BAND_INTERACTIVE;               // synthetic: drive the mechanism directly
+    irq_state_t s = spin_lock_irqsave(NULL);
+    sched_clear_need_resched_for_test(self);
+    ready_on(self, hi);
+    bool hi_pending = sched_need_resched_pending(self);
+    sched_remove_if_runnable(hi);
+    sched_clear_need_resched_for_test(self);          // leave no dangling preempt
+    spin_unlock_irqrestore(NULL, s);
+    TEST_EXPECT_EQ(hi_pending, true,
+        "an INTERACTIVE same-CPU wake set need_resched (preempts the NORMAL runner)");
+    thread_free(hi);
+
+    // (b) A same-band (NORMAL) same-CPU wake does NOT set need_resched.
+    struct Thread *lo = thread_create(kproc(), sched_test_thread_a);
+    TEST_ASSERT(lo != NULL, "thread_create lo failed");
+    TEST_EXPECT_EQ(lo->band, (u32)SCHED_BAND_NORMAL, "fresh thread is NORMAL (== runner band)");
+    s = spin_lock_irqsave(NULL);
+    sched_clear_need_resched_for_test(self);
+    ready_on(self, lo);
+    bool lo_pending = sched_need_resched_pending(self);
+    sched_remove_if_runnable(lo);
+    sched_clear_need_resched_for_test(self);
+    spin_unlock_irqrestore(NULL, s);
+    TEST_EXPECT_EQ(lo_pending, false,
+        "a NORMAL same-CPU wake did NOT set need_resched (same band is EEVDF-fair)");
+    thread_free(lo);
+
+    // (c) sched_mark_interactive is a no-op on a kproc (kernel) thread -- the
+    //     gate that keeps the in-kernel test runner (and any kproc) NORMAL, so
+    //     the IRQ-wait / console-read boost never pollutes kernel scheduling.
+    struct Thread *k = thread_create(kproc(), sched_test_thread_a);
+    TEST_ASSERT(k != NULL, "thread_create k failed");
+    TEST_EXPECT_EQ(k->band, (u32)SCHED_BAND_NORMAL, "fresh kproc thread is NORMAL");
+    sched_mark_interactive(k);
+    TEST_EXPECT_EQ(k->band, (u32)SCHED_BAND_NORMAL,
+        "sched_mark_interactive is a no-op on a kproc (kernel) thread");
+    thread_free(k);
+}
