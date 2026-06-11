@@ -467,6 +467,7 @@ void test_irqfwd_create_destroy(void);
 void test_irqfwd_refcount_lifecycle(void);
 void test_irqfwd_wait_wakes_on_sgi(void);
 void test_irqfwd_collapses_concurrent_fires(void);
+void test_irqfwd_second_waiter_refused(void);
 void test_virtio_pci_init_called(void);
 void test_virtio_pci_count_within_bound(void);
 void test_virtio_pci_devices_have_vendor(void);
@@ -1391,6 +1392,7 @@ struct test_case g_tests[] = {
     { "irqfwd.wait_wakes_on_sgi",      test_irqfwd_wait_wakes_on_sgi,      false, NULL },
     { "irqfwd.collapses_concurrent_fires",
                                        test_irqfwd_collapses_concurrent_fires, false, NULL },
+    { "irqfwd.second_waiter_refused",  test_irqfwd_second_waiter_refused,  false, NULL },
     { "virtio_pci.init_called",        test_virtio_pci_init_called,        false, NULL },
     { "virtio_pci.count_within_bound", test_virtio_pci_count_within_bound, false, NULL },
     { "virtio_pci.devices_have_vendor",

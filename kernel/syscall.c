@@ -321,6 +321,10 @@ static s64 sys_irq_wait_handler(u64 hraw) {
 
     u32 count = kobj_irq_wait(k);
     handle_put(&hh);
+    // RW-7 R1-F1: a 2nd concurrent waiter on the single-waiter KObj_IRQ is
+    // refused (would otherwise extinct the kernel at sleep's single-waiter
+    // assert). Surface it as the same -1 error a bad handle returns.
+    if (count == KOBJ_IRQ_WAIT_BUSY) return -1;
     return (s64)count;
 }
 

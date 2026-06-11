@@ -149,16 +149,37 @@ static void kobj_irq_dispatch(u32 intid, void *arg) {
     struct KObj_IRQ *k = (struct KObj_IRQ *)arg;
     if (!k || k->magic != KOBJ_IRQ_MAGIC) return;
 
-    // Order: increment under r->lock + DROP the lock + then wakeup
-    // (which RE-takes r->lock). Holding the lock through wakeup would
-    // deadlock-by-recursion since wakeup wants the same lock.
+    // RW-7 R1-F2: the GIC slot holds a RAW, non-refcounted `k`, and
+    // gic_disable_irq does NOT retract an already-acknowledged IRQ that is
+    // mid-dispatch on another CPU -- so a concurrent kobj_irq_free_internal
+    // could kfree(k) while this runs (UAF). Two guards make the free safe:
+    //   - `dying`: a dispatch arriving after teardown began touches *k no
+    //     further (no count, no wake);
+    //   - `in_dispatch`: marks this dispatch in-flight under the lock so the
+    //     freeing CPU spins until our LAST touch of *k (the final unlock
+    //     below, after clearing in_dispatch) has completed before kfree.
+    // At most one dispatch per INTID is in flight (handlers run IRQ-masked,
+    // no nesting; an SPI targets one CPU) so `in_dispatch` is a plain bool.
+    //
+    // Order: increment under r->lock + DROP the lock + then wakeup (which
+    // RE-takes r->lock). Holding the lock through wakeup would deadlock-by-
+    // recursion since wakeup wants the same lock.
     irq_state_t s = spin_lock_irqsave(&k->rendez.lock);
+    if (k->dying) {
+        spin_unlock_irqrestore(&k->rendez.lock, s);
+        return;             // teardown owns *k now
+    }
     k->pending_count++;
+    k->in_dispatch = true;
     spin_unlock_irqrestore(&k->rendez.lock, s);
 
     __atomic_fetch_add(&g_irq_total_fires, 1u, __ATOMIC_RELAXED);
 
     wakeup(&k->rendez);
+
+    s = spin_lock_irqsave(&k->rendez.lock);
+    k->in_dispatch = false;   // LAST touch of *k on this path
+    spin_unlock_irqrestore(&k->rendez.lock, s);
 }
 
 // =============================================================================
@@ -253,10 +274,28 @@ static void kobj_irq_free_internal(struct KObj_IRQ *k) {
     // Unregister attempt — gic_attach(intid, NULL, NULL) currently
     // returns false (NULL handler is rejected by the gic API), so the
     // handler slot retains its kobj_irq_dispatch + arg=k pointer. The
-    // magic-clobber below makes any post-free dispatch see magic=0 and
-    // return early. See docs/reference/36-irqfwd.md "stale-fire safety"
-    // for the full lifecycle discussion.
+    // dying-guard + magic-clobber below make any post-free dispatch
+    // touch *k no further. See docs/reference/36-irqfwd.md "stale-fire
+    // safety" for the full lifecycle discussion.
     gic_attach(k->intid, NULL, NULL);
+
+    // RW-7 R1-F2: gic_disable_irq masks future fires but does NOT retract an
+    // IRQ already acknowledged and mid-dispatch on another CPU -- that
+    // dispatch holds a raw `k` and would UAF once we kfree it. Set `dying`
+    // (under the lock, so a dispatch that takes the lock from here on sees it
+    // and returns without touching *k), then SPIN until any in-flight dispatch
+    // has cleared `in_dispatch` -- its final unlock is its last touch of *k.
+    // Bounded: a single in-flight handler runs IRQ-masked and completes in
+    // microseconds. free_internal runs in process context; the dispatch runs
+    // on a DIFFERENT CPU (IRQ context), so no same-CPU self-deadlock.
+    for (;;) {
+        irq_state_t ds = spin_lock_irqsave(&k->rendez.lock);
+        k->dying = true;
+        bool in_flight = k->in_dispatch;
+        spin_unlock_irqrestore(&k->rendez.lock, ds);
+        if (!in_flight) break;
+        __asm__ __volatile__("yield" ::: "memory");
+    }
 
     // P4-Ib: release the INTID claim so a subsequent kobj_irq_create
     // for the same INTID can succeed.
@@ -308,19 +347,34 @@ u32 kobj_irq_wait(struct KObj_IRQ *k) {
     if (k->magic != KOBJ_IRQ_MAGIC)
         extinction("kobj_irq_wait of corrupted KObj_IRQ");
 
+    // RW-7 R1-F1: the Rendez is single-waiter -- sleep() EXTINCTS the kernel
+    // on a 2nd concurrent sleeper (sched.c "rendez already has a waiter"). But
+    // the KObj_IRQ handle lives in the per-Proc handle table, SHARED across a
+    // multi-thread Proc's peer Threads, so two of them could both reach a
+    // SYS_IRQ_WAIT on one fd. Claim the single-waiter slot under the lock and
+    // refuse a 2nd concurrent waiter (the devcons single-reader pattern) so a
+    // driver bug is a clean error, not a whole-kernel extinction.
+    irq_state_t s = spin_lock_irqsave(&k->rendez.lock);
+    if (k->waiting) {
+        spin_unlock_irqrestore(&k->rendez.lock, s);
+        return KOBJ_IRQ_WAIT_BUSY;
+    }
+    k->waiting = true;
+    spin_unlock_irqrestore(&k->rendez.lock, s);
+
     // Block until pending_count > 0. sleep's cond loop guarantees no
     // spurious return. #811 (ARCH §8.8.1): a death-interrupted sleep means the
     // Proc is group-terminating -- return so the Thread unwinds to its EL0-
     // return die-check (the count is immaterial; the Thread never reaches EL0).
-    if (sleep(&k->rendez, kobj_irq_pending_cond, k) == SLEEP_INTR)
-        return 0;
+    int rc = sleep(&k->rendez, kobj_irq_pending_cond, k);
 
-    // Re-take the lock to atomically read + zero pending_count. An IRQ
-    // that fires between sleep's return and this read MUST NOT be lost
-    // — it'll be reflected in the next wait, but `count` returned here
-    // captures only the IRQs that arrived BEFORE the lock acquire.
-    irq_state_t s = spin_lock_irqsave(&k->rendez.lock);
-    u32 count = k->pending_count;
+    // Re-take the lock to clear the waiter slot AND atomically read + zero
+    // pending_count. An IRQ that fires between sleep's return and this read
+    // MUST NOT be lost -- it is reflected in the next wait; `count` returned
+    // here captures only the IRQs that arrived BEFORE the lock acquire.
+    s = spin_lock_irqsave(&k->rendez.lock);
+    k->waiting = false;
+    u32 count = (rc == SLEEP_INTR) ? 0u : k->pending_count;
     k->pending_count = 0;
     spin_unlock_irqrestore(&k->rendez.lock, s);
     return count;

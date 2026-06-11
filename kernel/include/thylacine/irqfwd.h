@@ -16,8 +16,11 @@
 //   - Kernel-internal API only. Userspace driver bindings (handle
 //     table integration for KOBJ_IRQ release) land at P4-I+ alongside
 //     the first userspace driver.
-//   - Single-waiter per KObj_IRQ (Rendez convention). Multi-waiter
-//     queues land at Phase 5+ (poll/futex).
+//   - Single-WAITER per KObj_IRQ (Rendez convention) -- but the handle
+//     is shared across a multi-thread Proc's peer Threads, so the
+//     `waiting` busy-guard (RW-7 R1-F1) refuses a 2nd concurrent
+//     kobj_irq_wait rather than reaching sleep()'s single-waiter
+//     extinction. A real multi-subscriber fan-out is Phase 5+ (poll).
 //   - One KObj_IRQ owns its INTID exclusively. Sharing one IRQ across
 //     multiple subscribers would require a wakeup fan-out; v1.0 each
 //     driver gets its own GIC line.
@@ -39,6 +42,12 @@
 // clobbers it (use-after-free defense, mirrors burrow.c / spoor.c).
 #define KOBJ_IRQ_MAGIC 0x4952510DBADC0DECULL
 
+// RW-7 R1-F1: kobj_irq_wait returns this sentinel when a concurrent waiter
+// already holds the (single-waiter) Rendez. SYS_IRQ_WAIT maps it to -1. A
+// real collapsed-IRQ count never reaches it (it would need 2^32 fires with
+// no intervening drain; the mapping is fail-safe regardless).
+#define KOBJ_IRQ_WAIT_BUSY 0xFFFFFFFFu
+
 // Reserved test SGI for irqfwd. SGI 0 = IPI_RESCHED (P2-Cdc); SGI 1 =
 // IPI_IRQFWD_TEST. The remaining SGIs (2..15) are available for future
 // IPIs (e.g., a TLB shootdown IPI when SMP-aware ASID rollover lands).
@@ -48,8 +57,11 @@ struct KObj_IRQ {
     u64           magic;        // KOBJ_IRQ_MAGIC
     u32           intid;        // GIC INTID (SGI / PPI / SPI)
     int           ref;          // refcount (kobj_irq_create starts at 1)
-    struct Rendez rendez;       // single-waiter; lock guards pending_count
+    struct Rendez rendez;       // single-waiter; lock guards the fields below
     u32           pending_count; // collapsed-IRQ count since last wait
+    bool          waiting;      // RW-7 R1-F1: a kobj_irq_wait holds the slot
+    bool          dying;        // RW-7 R1-F2: teardown started; dispatch skips wake
+    bool          in_dispatch;  // RW-7 R1-F2: a dispatch is mid-flight on some CPU
 };
 
 // One-time setup: pre-reserve INTIDs owned by kernel-internal callers

@@ -17,6 +17,7 @@ void test_irqfwd_create_destroy(void);
 void test_irqfwd_refcount_lifecycle(void);
 void test_irqfwd_wait_wakes_on_sgi(void);
 void test_irqfwd_collapses_concurrent_fires(void);
+void test_irqfwd_second_waiter_refused(void);
 
 // =============================================================================
 // Helpers.
@@ -120,5 +121,27 @@ void test_irqfwd_collapses_concurrent_fires(void) {
     // at least 1 must be observed (the IRQ delivered AT LEAST once).
     TEST_ASSERT(count >= 1, "at least 1 IRQ collapsed into wait");
 
+    kobj_irq_destroy(k);
+}
+
+// RW-7 R1-F1: the KObj_IRQ Rendez is single-waiter -- sleep() extincts the
+// kernel on a 2nd concurrent sleeper. The handle is shared across a multi-
+// thread Proc's peer Threads, so kobj_irq_wait must REFUSE a 2nd concurrent
+// waiter (return KOBJ_IRQ_WAIT_BUSY) rather than reach sleep(). A real first
+// waiter is asleep inside sleep() and cannot be driven from this single-
+// threaded test, so we simulate it by setting `waiting` directly: the guard
+// is the same lock-protected check either way. Pre-fix, this path reached
+// sleep() and extincted.
+void test_irqfwd_second_waiter_refused(void) {
+    struct KObj_IRQ *k = kobj_irq_create(IPI_IRQFWD_TEST);
+    TEST_ASSERT(k != NULL, "create OK");
+
+    k->waiting = true;          // a peer Thread "already holds" the waiter slot
+    u32 r = kobj_irq_wait(k);
+    TEST_EXPECT_EQ(r, (u32)KOBJ_IRQ_WAIT_BUSY,
+                   "2nd concurrent waiter refused with BUSY (no extinction)");
+    TEST_ASSERT(k->waiting, "the busy path leaves the first waiter's slot held");
+
+    k->waiting = false;         // release the simulated slot before teardown
     kobj_irq_destroy(k);
 }
