@@ -6,14 +6,16 @@ coreutils sample; all `claude-fable-5`, MODEL start==end on all four -- no
 fallback) + an Opus seam self-audit. Closed list:
 `memory/audit_holotype_rw9_closed_list.md`.
 
-**Status: IN PROGRESS (dirty close) -- all 12 P2 + the P1 FIXED or REGISTERED;
-the mandatory round-2 re-audit on the fixes is the remaining gate.** 1 P1 + 11
-P2 + ~22 P3 -- by far the most findings of any RW round. The P1 + 10 of the 11
-P2 are fixed + verified + committed (`07a27c9` recursion + command-sub hang,
-`c1aea9d` + `dcc4d08` coreutils, `cd7eae2` notes/Ctrl-C); the 11th P2 (R3-F2
-multi-line render) is REGISTERED with justification (cosmetic + invasive +
-no screen-state harness -- see its row). The dirty-close round-2 + the P3
-cluster triage remain (see "Remaining work").
+**Status: IN PROGRESS (dirty close, converging) -- round-2 caught + fixed an
+incomplete recursion bound; round-3 in flight.** Round-1: 1 P1 + 11 P2 + ~22
+P3 -- by far the most findings of any RW round. The P1 + 10 of the 11 P2 are
+fixed + committed (`07a27c9` recursion + command-sub hang, `c1aea9d` + `dcc4d08`
+coreutils, `cd7eae2` notes/Ctrl-C); the 11th P2 (R3-F2 multi-line render) is
+REGISTERED with justification (cosmetic + invasive + no screen-state harness).
+Round-2 (mandatory dirty-close re-audit) returned 1 P2 + 1 P3 -- it caught that
+the round-1 recursion fix bounded brackets but NOT expression-operator
+recursion (RND2-F1); fixed `@aae24db` + a self-audit P3. Round-3 re-prosecutes
+the F1 fix before the clean close (see "Round-2 + round-3").
 
 ## The soundness model for this surface
 
@@ -45,6 +47,27 @@ seam (the recurrent HOLOTYPE theme) is the highest-stakes interaction.
 | HT09.R4-F2 | coreutils | S | **P2** | tail/sort/cut/grep/uniq/wc/cmp `.rs` | Seven utils slurp whole inputs into the 4 MiB fixed heap -> silent OOM-abort (exit 1, no message) on real /sbin binaries; cmp's OOM exit-1 collides with its "differ" verdict (a silently-wrong result) | **FIXED** `@dcc4d08` -- `io::slurp` now capped at `SLURP_CAP` (2 MiB, chunked via `slurp_capped`) -> a graceful `NoMemory` error (which every caller already surfaces) instead of an OOM-abort, fixing all seven at the shared helper. Streaming the seven is the deferred proper fix. |
 | HT09.R4-F5 | coreutils | S | **P2** | cut/uniq/grep/wc/sort/hexdump/ls/stat/realpath/tee/tr `.rs` | Nine+ utils write their PAYLOAD through the error-swallowing `io::out`/`print!` (or explicit `let _ =`), so a mid-stream stdout failure (a 9P-backed sink erroring) silently truncates output and exits 0 -- the silent-truncation/data-loss class | **FIXED** `@dcc4d08` -- new `io::OutSink` latches the first write error (later puts no-op) so the cat/head discipline (report once + nonzero exit) is available without ?-threading; cut/uniq/grep/wc/hexdump/ls/stat/sort/realpath route payload through it, tee's stdout leg is checked. The existing exact-output smoke checks (wc/cut/grep/uniq/sort/hexdump/realpath) pin the conversions byte-for-byte. |
 | HT09.R4-F6 | coreutils / tr | S | **P2** | `coreutils/src/bin/tr.rs::expand` | tr treats `[:class:]` as literal bytes -> `tr -d '[:space:]'` silently strips the letters s/p/a/c/e + brackets, preserving whitespace -- silently-wrong data, exit 0 | **FIXED** `@dcc4d08` -- `expand()` returns None on a `[:`/`[=` construct and tr rejects it (exit 1) instead of mangling the data. Regression: coreutil-smoke `tr class reject` (`tr -d '[:space:]'` on `a b\n` -> pre-fix ` b\n` exit 0; post-fix empty exit 1) |
+
+### Round-2 + round-3 (the dirty-close re-audit on the FIXES)
+
+The original close was dirty (1 P1 + 11 P2 + invasive recursion/notes/coreutils
+restructures), so the fixes were re-prosecuted. Round-2 (Fable, MODEL
+start==end) returned NOT clean -- it caught that the round-1 recursion fix was
+INCOMPLETE:
+
+| ID | Lens | Sev | Finding | Disposition |
+|---|---|---|---|---|
+| HT09.RND2-F1 | S | **P2** | The `07a27c9` recursion fix bounded BRACKET nesting (`check_token_nesting`) but NOT expression-operator recursion: a prefix `!`/`-`/`~` chain (`parse_unary` self-recursion) or a `**` chain (`parse_pow` self-recursion) -- none of which are bracket tokens -- still overflowed the 256 KiB EL0 stack -> `snare:segv` -> shell death. The exact R1-F1/SA-1 class; the fix had missed a vector, and the #12 regression (pure brackets) gave false confidence. | **FIXED** `@aae24db` -- a shared `ExprParser.depth` counter, guarded + decrement-balanced (inner-fn split) at `parse_pow` + `parse_unary` (the only two input-unbounded-with-bounded-brackets vectors; nested case/parens require braces/parens -> already bounded). `EXPR_MAX_DEPTH = 256`. Regressions `/u-subst-test` #13 (2000 `!`) + #14 (1000 `**`): pre-fix crash, post-fix graceful `RecursionLimit`. |
+| HT09.RND2-F2 | S | P3 | tr exited 0 on a genuine (non-pipe) stdout write error -- inconsistent with its OutSink filter siblings (the R4-F5 disposition "tr's write leg already broke on error" conflated stopping with reporting). | **FIXED** `@aae24db` -- tr is a FILTER, so its write leg now routes through `io::OutSink` -> report + exit 1. The broader EPIPE-vs-real distinguishability (the kernel returns `-1` not `-T_E_PIPE` for a native pipe write, so NO filter can be silent-on-EPIPE-only) is a REGISTERED follow-up shared by every filter. |
+| HT09.SA-1 | S | P3 | (Opus self-audit) `eval_command` checked `exit_requested` but not `interrupt_pending` after `evaluate_argv`, so a Ctrl-C'd `$(...)` ARGUMENT let the outer command run once on the partial capture before the flag unwound. | **FIXED** `@aae24db` -- the `interrupt_pending` bail after `evaluate_argv` (mirrors the `exit_requested` checks). |
+
+Round-2 VERIFIED-SOUND (do not re-prosecute): the interrupt machinery (no flag
+leak; eval_block unwinds across function/loop/command-sub via the flag), the
+eval_depth + RELEX_DEPTH leave-balance, the command-sub drop-ordering, the
+OutSink latch, the slurp cap, and the cp lexical-canonical guard -- all
+confirmed by the agent + the Opus self-audit. Round-3 (in flight at the time of
+writing) re-prosecutes the `@aae24db` F1 fix (completeness: are `parse_unary` +
+`parse_pow` REALLY the only unbounded operator vectors?) before the clean close.
 
 ### P3 cluster (owed -- triage at round-2 / fix-cheap-or-register)
 
