@@ -678,6 +678,89 @@ Remaining before promotion to binding scripture: walk the §4 S5+ scenario catal
 - `ROADMAP.md §7.2a` — the Corvus arc (login, hostowner, per-user stratumd).
 - `docs/phase7-status.md` — Utopia shell arc (paused at U-6d-a).
 
+### 3.8 Resource/DoS floor — the per-Proc caps (RESOLVED 2026-06-11, #65; invariant I-32)
+
+The §8.4 sweep recorded a BUILD item: "**Resource/DoS floor** (minimal per-Proc
+page + thread + child caps). Exit: a fork/thread/memory bomb is bounded, not
+box-extincting." This is its resolution. It is a **resource** axis, NOT a
+privilege axis — it confers and bypasses no capability, so it is orthogonal to
+I-22 (no identity carries ambient authority) and to the whole §3.7.1 privilege
+model. It composes a *policy floor* over an already-present *graceful-OOM
+backstop*.
+
+**The two layers.**
+
+1. **Graceful-OOM (the backstop — already holds; #65 verifies + preserves it).**
+   Every user-reachable creation path fails gracefully, never by extinction:
+   `proc_alloc → NULL` (rfork `-1`), `thread_create → NULL`, `territory_clone →
+   NULL`, `burrow_create_anon → NULL`, and a pgtable-on-fault allocation failure
+   `→ mmu_install_user_pte -1 → userland_demand_page FAULT_UNHANDLED_USER →
+   proc_fault_terminate` (a *per-Proc* kill, not a box extinction). So a
+   *recursive* cross-Proc fork bomb is already bounded at the physical-memory
+   cliff — each level just errors, the box survives. This is the load-bearing
+   "not box-extincting" property; the audit prosecutes that no path on these
+   chains extincts on user-triggerable exhaustion.
+
+2. **Per-Proc caps (the floor — the BUILD; the early policy bound + the SEAM
+   counters).** A single misbehaving Proc hits a clean limit *early* — before it
+   stresses the allocator toward the cliff or degrades the whole box's
+   responsiveness — and the future quota layer reads the counters the floor
+   maintains.
+
+**The caps (tunable floor constants; `kernel/include/thylacine/proc.h`).**
+
+| Constant | v1.0 value | Bounds |
+|---|---|---|
+| `PROC_PAGE_MAX` | 65536 pages (256 MiB) | per-Proc live anon pages committed via `SYS_BURROW_ATTACH` (the memory-bomb vector) |
+| `PROC_THREAD_MAX` | 256 | per-Proc live threads (tighter — a thread pins 32 KiB of *unswappable* kernel kstack) |
+| `PROC_CHILD_MAX` | 256 | per-Proc live *direct* children (the direct-fork rate) |
+
+All three are generous for any v1.0 user workload (shell + coreutils + editor)
+and a bomb hits them fast. They are a *floor*, not an exact accountant; the
+SEAM (RAM-relative / per-user quota) refines them.
+
+**The exemption — `PRINCIPAL_SYSTEM` (the TCB), and it is unforgeable.**
+`proc_resource_exempt(p) ≡ (p->principal_id == PRINCIPAL_SYSTEM)`. kproc and the
+SYSTEM-stamped boot/service chain (joey, corvus, stratumd, pre-login) are
+*unbounded*; the floor binds only untrusted post-login user code. The rationale
+is threat-alignment: a bomb is untrusted code, and we must not risk capping the
+FS server (stratumd's memory growth), the orphan-adopter (joey's adopted
+children), or the kthread root (kproc — its "children" are kernel threads, its
+"memory" is kernel allocations). The exemption is **unforgeable**: a post-login
+Proc cannot acquire `PRINCIPAL_SYSTEM` (§3.3 — the spawn/`CAP_SET_IDENTITY` path
+rejects SYSTEM), and `principal_id` is immutable on a running Proc, so a capped
+user can neither reach nor race into the exempt set.
+
+**Enforcement points (all under the relevant existing lock).** Page —
+`sys_burrow_attach_for_proc`, under `vma_lock`, after the page count is known,
+before `burrow_create_anon` (and the matching uncharge in
+`sys_burrow_detach_for_proc` on a successful unmap). Thread —
+`sys_thread_spawn_handler`, reading `thread_count` under `g_proc_table_lock`.
+Child — `rfork_internal` (the *single* Proc-creation chokepoint — every
+`SYS_SPAWN_*` variant routes through it, so none escapes), reading `child_count`
+under `g_proc_table_lock`; the counter is `++`/`--` at `proc_link_child` /
+`proc_unlink_child`. A bounded TOCTOU overshoot (≤ ncpus−1 extra per axis) is
+acceptable for a floor and is documented at each site.
+
+**Page-cap scope (precise).** Counts `SYS_BURROW_ATTACH` anon pages *only* — the
+one user-controllable, unbounded commit vector (anon is eager at v1.0, so attach
+is the single charge point). Page-table sub-tables are transitively bounded by
+the mapped VA (≤ `page_count`); kstacks by the thread cap; the exec image is
+one-shot, bounded by the binary, and committed before the Proc's first thread.
+Charged as the burrow's logical `page_count`; physical commitment is ≤ 2× from
+buddy power-of-2 order rounding — the cap bounds logical attached anon, and
+precise-RAM accounting is the SEAM's job. v1.0 has no mid-life `vma_drain` (no
+in-place re-exec), so attach/detach balance the counter while the Proc lives; at
+exit the Proc and its counter vanish together (`vma_drain` is the SEAM hook where
+a future *aggregate* counter would uncharge).
+
+**Observability + the SEAM.** `page_count` and `child_count` join `thread_count`
+in the per-Proc stat surface (`/proc/<pid>`, `/ctl`). This is both the SEAM
+counter exposure and the reconciliation of the W5-F8 finding (the
+memory-accounting seam was recorded as a nonexistent `/ctl/mm/` — the real v1.0
+surface is the per-Proc stat above; the aggregate/cgroup-equivalent quota that
+reads these counters is the recorded SEAM, not a built `/ctl/mm/`).
+
 ---
 
 ## 8. The convergence detour (binding arc)
