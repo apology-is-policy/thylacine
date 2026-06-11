@@ -1791,15 +1791,18 @@ static void reap_adopted_orphans(void) {
 // lifetime; each login inherits a ref, released at its reap). In the harness,
 // login blocks reading /dev/cons (no input) -- harmless, QEMU is already
 // gone. On a spawn failure, fall through to reaping children forever (joey
-// must never exit -> the banner stays valid). F5 (P3, degraded-state-only): a
-// flapping login (e.g. corvus persistently down) would respin without
-// backoff; at v1.0 corvus is a persistent boot server so this does not occur
-// -- a timed getty backoff is a v1.x lift (needs a sleep primitive wired into
-// the getty).
+// must never exit -> the banner stays valid). A flapping login (a wedged
+// /dev/cons returning instant EOF, or a persistently-down corvus past the
+// prompt) is paced by a fixed t_torpor_wait backoff between respawns (RW-6
+// R4-F2) so a degraded state cannot busy-spin init into CPU/Proc-table churn.
+// The "needs a sleep primitive" premise of the old deferral was wrong --
+// t_torpor_wait is already a pacer in this file (the stratumd retry).
+#define GETTY_RESPAWN_BACKOFF_US 250000L /* 250 ms -> respawns bounded to ~4/sec */
 static void session_getty_loop(long cfd) {
     static const char login_argv[] = "login\0";
     const char login_name[] = "login";
     unsigned int fds[3] = { (unsigned int)cfd, (unsigned int)cfd, (unsigned int)cfd };
+    unsigned int getty_pacer = 0; /* never-woken pacer word for the backoff */
     for (;;) {
         reap_adopted_orphans();
         struct t_sys_spawn_args req = {
@@ -1820,6 +1823,11 @@ static void session_getty_loop(long cfd) {
         // Wait the session BY PID; on logout, loop -> sweep orphans -> fresh
         // login on the SAME cfd.
         (void)t_wait_pid_for((int)lpid, 0, &st);
+        // Pace respawns (RW-6 R4-F2): block on a never-woken stack-local pacer for
+        // the backoff so a fast-exiting login cannot 100%-CPU spin spawn/reap. In the
+        // harness login blocks on /dev/cons and never exits, so this never fires; it
+        // bites only the real flapping-login degraded state.
+        (void)t_torpor_wait(&getty_pacer, 0, GETTY_RESPAWN_BACKOFF_US);
     }
     for (;;) {
         int st = 0;
@@ -3306,9 +3314,15 @@ int main(void) {
     // state would break the trusted path). Anything that fails AFTER the banner
     // is post-PASS, so keep this minimal + robust (relinquish cannot fail here --
     // joey is still console-attached).
-    if (t_console_relinquish() != 0) {
-        t_putstr("joey: t_console_relinquish FAILED\n");
-        return 1;
+    int relinquished = (t_console_relinquish() == 0);
+    if (!relinquished) {
+        // Unreachable today (joey is console-attached here, so relinquish cannot
+        // fail). But init must NEVER exit post-BOOT_COMPLETE (RW-6 R4-F3): a return
+        // would orphan corvus/stratumd to kproc with no getty -- a half-dead
+        // post-PASS system. On this leg joey is STILL console-attached, so running
+        // the getty would break I-27 ({joey,corvus} both attached); persist-reap
+        // forever instead (degraded: alive, no interactive login).
+        t_putstr("joey: t_console_relinquish FAILED -- persisting without getty\n");
     }
 
     // (5) The live login session: getty-loop /sbin/login on the console handle.
@@ -3316,8 +3330,9 @@ int main(void) {
     // sessions, in the harness login blocks on /dev/cons (QEMU is already gone
     // post-banner). If the console could not be opened, joey still persists (the
     // banner printed) -- reap orphans forever, no interactive login.
-    if (console_fd < 0) {
-        t_putstr("joey: t_console_open FAILED -- persisting without a login console\n");
+    if (!relinquished || console_fd < 0) {
+        if (console_fd < 0)
+            t_putstr("joey: t_console_open FAILED -- persisting without a login console\n");
         for (;;) { int st = 0; (void)t_wait_pid(&st); }
     }
     session_getty_loop(console_fd);

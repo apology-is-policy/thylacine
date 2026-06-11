@@ -69,6 +69,18 @@ pub const ARGON2_T_COST: u32 = 2;
 pub const ARGON2_M_COST_KIB: u32 = 16 * 1024;
 pub const ARGON2_PARALLELISM: u32 = 1;
 
+// On-disk cost-parameter envelope (RW-6 R1-F1). crvs_v1_unpack rejects any wrap
+// whose Argon2 cost exceeds what the v1.0 writers ever emit (t_cost in {2,8},
+// m_cost_kib=16384, parallelism=1). Without this a tampered or bit-rotted header
+// can wedge the single-threaded daemon on a ~4e9-pass KDF (t_cost) or OOM-abort it
+// (m_cost beyond corvus's ~24 MiB heap) -- turning a graceful per-user BadAuth into
+// a whole-daemon DoS. The ceilings sit far above every emitted value, so a valid
+// wrap is never rejected; the m_cost ceiling equals the heap bound, so the OOM leg
+// is unreachable. A future preset bump moves with the state-file version.
+pub const ARGON2_MAX_T_COST: u32 = 256;
+pub const ARGON2_MAX_M_COST_KIB: u32 = ARGON2_M_COST_KIB;
+pub const ARGON2_MAX_PARALLELISM: u32 = 4;
+
 // AD for the keypair-wrap AEAD: "thylacine-corvus-v1" || user_name || backend_id.
 pub const AD_PREFIX: &[u8] = b"thylacine-corvus-v1";
 pub const BACKEND_ID_PASSPHRASE: u8 = 0;
@@ -129,6 +141,44 @@ const _: () = assert!(
     BIP39_WORDLIST.len() == BIP39_WORDLIST_LEN,
     "BIP-39 wordlist must be exactly 2^11 entries"
 );
+// bip39_word_index resolves words by binary_search, which is correct only over a
+// strictly-ascending list. Pin sorted-AND-unique at compile time (RW-6 R1 note) so a
+// mis-sorted or duplicated edit fails the build, not a silent wrong-word resolution.
+const fn bip39_wordlist_strictly_sorted() -> bool {
+    let mut i = 1;
+    while i < BIP39_WORDLIST.len() {
+        let a = BIP39_WORDLIST[i - 1].as_bytes();
+        let b = BIP39_WORDLIST[i].as_bytes();
+        let mut j = 0;
+        let mut less = false;
+        let mut decided = false;
+        while j < a.len() && j < b.len() {
+            if a[j] < b[j] {
+                less = true;
+                decided = true;
+                break;
+            }
+            if a[j] > b[j] {
+                decided = true;
+                break;
+            }
+            j += 1;
+        }
+        if !decided {
+            // One is a prefix of the other; strictly-less iff the prior is shorter.
+            less = a.len() < b.len();
+        }
+        if !less {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+const _: () = assert!(
+    bip39_wordlist_strictly_sorted(),
+    "BIP-39 wordlist must be strictly ascending (sorted + unique) for binary_search"
+);
 
 // AD for the recovery-keyslot AEAD: "thylacine-corvus-recovery-v1" || subject ||
 // 0x00. Domain-separated from the passphrase-wrap AD (AD_PREFIX) by the prefix,
@@ -155,6 +205,10 @@ pub fn wipe(buf: &mut [u8]) {
     }
 }
 
+// Derive a 32-byte KEK. The returned key is the caller's to wipe; the argon2 0.5
+// working-memory matrix (passphrase-derived intermediate state) is dropped without
+// scrub (the upstream crate has no zeroize-on-drop -- RW-6 R1-F3). corvus mitigates
+// the disk/coredump leak with mlockall + DONTDUMP (C-2); the residue never leaves RAM.
 pub fn argon2id_kek(
     passphrase: &[u8],
     salt: &[u8],
@@ -176,7 +230,13 @@ pub fn aegis_wrap(
     plaintext: &[u8],
     ciphertext_out: &mut [u8],
 ) -> [u8; AEGIS256_TAG_LEN] {
-    debug_assert_eq!(plaintext.len(), ciphertext_out.len());
+    // Hard contract (RW-6 R1-F4): a length mismatch is a caller bug, not data; assert
+    // in release too (copy_from_slice would panic anyway -- this names why).
+    assert_eq!(
+        plaintext.len(),
+        ciphertext_out.len(),
+        "aegis_wrap: ciphertext_out length must equal plaintext length"
+    );
     ciphertext_out.copy_from_slice(plaintext);
     let cipher = Aegis256::<AEGIS256_TAG_LEN>::new(key, nonce);
     cipher.encrypt_in_place(ciphertext_out, ad)
@@ -192,8 +252,17 @@ pub fn aegis_unwrap(
     let mut buf: Vec<u8> = Vec::with_capacity(ciphertext.len());
     buf.extend_from_slice(ciphertext);
     let cipher = Aegis256::<AEGIS256_TAG_LEN>::new(key, nonce);
-    cipher.decrypt_in_place(&mut buf, tag, ad).ok()?;
-    Some(buf)
+    // decrypt_in_place decrypts THEN verifies the tag; on a correct-key / corrupt-tag
+    // case (bit-rot or tamper on the tag bytes) `buf` holds the real plaintext when
+    // the tag check fails. Scrub it on the failure path (RW-6 SA-2) -- never drop a
+    // secret-bearing buffer unwiped, even when the result is discarded.
+    match cipher.decrypt_in_place(&mut buf, tag, ad) {
+        Ok(()) => Some(buf),
+        Err(_) => {
+            wipe(&mut buf);
+            None
+        }
+    }
 }
 
 pub fn sha256_kek(parts: &[&[u8]]) -> [u8; AEGIS256_KEY_LEN] {
@@ -218,6 +287,10 @@ pub fn generate_hybrid_keypair<R: RngCore + CryptoRng>(rng: &mut R) -> Option<[u
     let mut ek_bytes = mlkem_ek.as_bytes();
     let mut dk_bytes = mlkem_dk.as_bytes();
     if ek_bytes.len() != MLKEM_EK_LEN || dk_bytes.len() != MLKEM_DK_LEN {
+        // Scrub the ML-KEM decapsulation-key byte copy on this path too (RW-6 R1-F2);
+        // the success path already wipes both. (Unreachable -- the sizes are type-fixed.)
+        wipe(&mut dk_bytes[..]);
+        wipe(&mut ek_bytes[..]);
         return None;
     }
     let mut kp = [0u8; KEYPAIR_LEN];
@@ -514,6 +587,16 @@ fn crvs_v1_unpack(blob: &[u8]) -> Option<CrvsFields> {
         return None;
     }
     let parallelism = u32::from_le_bytes([blob[20], blob[21], blob[22], blob[23]]);
+    // Reject a cost outside the v1.0 emit envelope (RW-6 R1-F1): a tampered/bit-rotted
+    // header must not wedge the KDF (t_cost) or OOM-abort the daemon (m_cost). Fail
+    // closed, mirroring the m64 overflow guard above. Lower bounds are Params::new's job.
+    if t_cost > ARGON2_MAX_T_COST
+        || (m64 as u32) > ARGON2_MAX_M_COST_KIB
+        || parallelism == 0
+        || parallelism > ARGON2_MAX_PARALLELISM
+    {
+        return None;
+    }
     let mut salt = [0u8; ARGON2_SALT_LEN];
     let mut nonce = [0u8; AEGIS256_NONCE_LEN];
     let mut ciphertext = [0u8; KEYPAIR_LEN];
@@ -872,6 +955,49 @@ mod tests {
         blob[0] ^= 0xff;
         assert!(RecoveryWrap::from_bytes(&blob).is_none());
         assert!(RecoveryWrap::from_bytes(&blob[..TOTAL_LEN - 1]).is_none());
+    }
+
+    #[test]
+    fn crvs_unpack_rejects_out_of_envelope_cost() {
+        // RW-6 R1-F1: a well-formed wrap (valid magic/version) carrying an absurd
+        // on-disk Argon2 cost must be rejected, so a tampered/bit-rotted header cannot
+        // wedge the single-threaded daemon (t_cost) or OOM-abort it (m_cost). Pre-fix
+        // crvs_v1_unpack bounded only the m64->u32 fit, so every assert below failed.
+        let kw = KeypairWrap {
+            t_cost: ARGON2_T_COST,
+            m_cost_kib: ARGON2_M_COST_KIB,
+            parallelism: ARGON2_PARALLELISM,
+            salt: [0x11u8; ARGON2_SALT_LEN],
+            nonce: [0x22u8; AEGIS256_NONCE_LEN],
+            ciphertext: [0x33u8; KEYPAIR_LEN],
+            tag: [0x44u8; AEGIS256_TAG_LEN],
+        };
+        // The in-envelope wrap still parses (no false reject of valid data).
+        assert!(KeypairWrap::from_bytes(&kw.to_bytes()).is_some());
+
+        // t_cost: u32::MAX and ceiling+1 rejected; exactly the ceiling accepted.
+        let mut b = kw.to_bytes();
+        b[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(KeypairWrap::from_bytes(&b).is_none());
+        let mut b = kw.to_bytes();
+        b[8..12].copy_from_slice(&(ARGON2_MAX_T_COST + 1).to_le_bytes());
+        assert!(KeypairWrap::from_bytes(&b).is_none());
+        let mut b = kw.to_bytes();
+        b[8..12].copy_from_slice(&ARGON2_MAX_T_COST.to_le_bytes());
+        assert!(KeypairWrap::from_bytes(&b).is_some());
+
+        // m_cost beyond the heap ceiling rejected (the OOM-abort leg).
+        let mut b = kw.to_bytes();
+        b[12..20].copy_from_slice(&((ARGON2_MAX_M_COST_KIB as u64) + 1).to_le_bytes());
+        assert!(KeypairWrap::from_bytes(&b).is_none());
+
+        // parallelism 0 and over-ceiling rejected.
+        let mut b = kw.to_bytes();
+        b[20..24].copy_from_slice(&0u32.to_le_bytes());
+        assert!(KeypairWrap::from_bytes(&b).is_none());
+        let mut b = kw.to_bytes();
+        b[20..24].copy_from_slice(&(ARGON2_MAX_PARALLELISM + 1).to_le_bytes());
+        assert!(KeypairWrap::from_bytes(&b).is_none());
     }
 
     #[test]

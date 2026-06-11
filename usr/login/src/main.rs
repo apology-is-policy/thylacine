@@ -495,6 +495,9 @@ unsafe fn provision_dek(ctl_root: i64, owner_uid: u32, owner_gid: u32,
     let fd = t_open(ctl_root, node.as_ptr(), node.len(), T_OWRITE);
     if fd < 0 {
         t_putstr("login: provision-dek open denied (kernel rwx / walk)\n");
+        // pl already carries the session token; scrub on this early-return too
+        // (RW-6 R4-F1 -- the bzero below at the write path was the only covered leg).
+        let _ = t_explicit_bzero(pl.as_mut_ptr(), pl.len());
         return false;
     }
     let ok = write_one(fd, &pl);
@@ -880,12 +883,21 @@ pub extern "C" fn rs_main() -> i64 {
     write_out(b"password: ");
     if !read_line(FD_IN, &mut pass) {
         write_out(b"login: no passphrase\n");
+        // read_line may have partially filled pass before failing; scrub (RW-6 R4-F1).
+        unsafe {
+            let _ = t_explicit_bzero(pass.as_mut_ptr(), pass.len());
+        }
         return 1;
     }
 
     let conn = connect_corvus();
     if conn < 0 {
         write_out(b"login: corvus unavailable\n");
+        // This leg never reaches the post-auth scrub below; scrub the cleartext
+        // passphrase here too (RW-6 R4-F1 -- the #828 A-F1 "every path" hole).
+        unsafe {
+            let _ = t_explicit_bzero(pass.as_mut_ptr(), pass.len());
+        }
         return 1;
     }
 

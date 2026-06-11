@@ -640,9 +640,11 @@ unsafe fn recover_fail_inc(subject: &[u8]) {
             return;
         }
     }
-    // Bound the table (only EXISTING users ever reach this, so it is naturally
-    // <= MAX_USERS; the cap is belt-and-suspenders).
-    if v.len() >= MAX_USERS {
+    // Bound the table. The subject universe is up to MAX_USERS users PLUS the fixed
+    // SYSTEM_WRAP_SUBJECT (handle_recover_system charges it), so the cap is MAX_USERS+1
+    // (RW-6 R2-F5/R3-F2) -- a flat MAX_USERS could drop the system subject under table
+    // exhaustion and silently un-rate-limit RECOVER(system).
+    if v.len() >= MAX_USERS + 1 {
         return;
     }
     let mut s = Vec::new();
@@ -823,6 +825,14 @@ unsafe fn identity_db_parse(blob: &[u8]) -> bool {
             return false;
         }
         if name_n == 0 || name_n > MAX_USER_LEN {
+            return false;
+        }
+        // The writer emits only BACKEND_ID_PASSPHRASE; reject any other backend so the
+        // parser's accepted domain equals the writer's emitted domain (RW-6 R3-F5).
+        // Inert today (build_ad always uses the passphrase AD), but a future
+        // backend-dispatching AUTH must never select an unwrap path from an
+        // unvalidated on-disk byte.
+        if backend != BACKEND_ID_PASSPHRASE {
             return false;
         }
         if off + 4 * supp_n + name_n > blob.len() {
@@ -1281,6 +1291,10 @@ const CLEARANCE_DB: &[u8] = b"clearance.db";
 const CLEARANCE_DB_TMP: &[u8] = b"clearance.db.tmp";
 const CLEARANCE_DB_VERSION: u32 = 1;
 const CLEARANCE_DB_HEADER_LEN: usize = 12;
+// Pin the header layout (RW-6 R3-F4), mirroring identity.db's IDENTITY_DB_HEADER_LEN
+// assert: magic(4) + version(4) + count(4). A future field add on one side without
+// the other would drift the parse offset silently; catch it at build time.
+const _: () = assert!(CLEARANCE_DB_HEADER_LEN == 12, "clearance.db header layout drift");
 const MAX_ELIGIBILITY: usize = 2 * MAX_USERS; // same bound class as GROUPS
 const CLEARANCE_DB_MAX: usize = 256 * 1024;
 
@@ -1927,6 +1941,22 @@ unsafe fn peer_live_caps(handle: i64) -> u64 {
     info.caps
 }
 
+// Like peer_live_caps but returns the full LIVE peer snapshot (RW-6 R2-F2). The
+// privileged console-gated verbs (ADMIN_ELEVATE / RECOVER(system)) must gate on the
+// live console bit + stripes, NOT the at-accept cache: console attachment is revocable
+// on a live Proc (kernel proc_revoke_console_attached), so a cached snapshot can be
+// stale in either direction. None on a dead peer or syscall error -- fail closed.
+unsafe fn peer_live_info(handle: i64) -> Option<TSrvPeerInfo> {
+    let mut info = TSrvPeerInfo::default();
+    if t_srv_peer(handle, &mut info) != 0 {
+        return None;
+    }
+    if info.alive == 0 {
+        return None;
+    }
+    Some(info)
+}
+
 // handle_user_create — USER_CREATE verb (verb_id=5). Admin-gated as of
 // P5-hostowner-b-b: the caller's connection peer must hold CAP_HOSTOWNER
 // (the corvus-d audit's deferred F2-gate-half now closes here), unless
@@ -2026,6 +2056,16 @@ unsafe fn handle_user_create(handle: i64, payload: &[u8], response: &mut Vec<u8>
         return stage_response(response, STATUS_PERMISSION_DENIED, &[]);
     }
     if user_states_count() >= MAX_USERS {
+        return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
+    }
+    // Cap the live group count before the UPG push below (RW-6 R3-F1, the a1b-F1
+    // sibling). groups_count() counts standalone groups AND per-user UPGs; a1b-F1
+    // capped handle_group_create but this UPG side-writer was unguarded, so creating
+    // 2*MAX_USERS standalone groups then one user persisted group_count==513, which
+    // identity_db_parse (cap 2*MAX_USERS==512) rejects -> next-boot FATAL boot-brick.
+    // 256 UPG + up-to-256 standalone == 512 exactly, so a legitimate 256-user
+    // deployment never false-fails.
+    if groups_count() >= 2 * MAX_USERS {
         return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
     }
     // A UPG group named after the user must not already exist (it would be an
@@ -2174,8 +2214,7 @@ unsafe fn handle_user_create(handle: i64, payload: &[u8], response: &mut Vec<u8>
 //
 // OK reply: phrase_len u16 LE + fresh_phrase.
 unsafe fn handle_recover(
-    _handle: i64,
-    peer: &TSrvPeerInfo,
+    handle: i64,
     payload: &[u8],
     response: &mut Vec<u8>,
 ) {
@@ -2184,7 +2223,7 @@ unsafe fn handle_recover(
     }
     if payload[0] == 0 {
         // subject_kind=0 (system / hostowner-c): recover the system identity.
-        return handle_recover_system(peer, payload, response);
+        return handle_recover_system(handle, payload, response);
     }
     if payload[0] != 1 {
         return stage_response(response, STATUS_BAD_FORMAT, &[]);
@@ -2396,10 +2435,19 @@ unsafe fn handle_recover(
 //   [5+pl..]       new_passphrase
 //
 // OK reply: phrase_len u16 LE + fresh_phrase.
-unsafe fn handle_recover_system(peer: &TSrvPeerInfo, payload: &[u8], response: &mut Vec<u8>) {
-    // Console gate FIRST (cheap; the system identity must never be recoverable
-    // from a non-console peer -- the trusted-path requirement, same as ADMIN_ELEVATE).
-    if peer.console == 0 {
+unsafe fn handle_recover_system(handle: i64, payload: &[u8], response: &mut Vec<u8>) {
+    // Console gate FIRST (cheap), on the LIVE peer snapshot (RW-6 R2-F2). The system
+    // identity must never be recoverable from a non-console peer (the trusted-path
+    // requirement, same as ADMIN_ELEVATE), and console attachment is revocable on a
+    // live Proc (kernel proc_revoke_console_attached) -- so the at-accept cache could
+    // pass a peer that has since lost console. This is the ONLY console gate on this
+    // path (unlike ADMIN_ELEVATE, the kernel has no /cap/use backstop here), so it must
+    // be a fresh SYS_SRV_PEER query. Fail closed on a dead peer / syscall error.
+    let info = match peer_live_info(handle) {
+        Some(i) => i,
+        None => return stage_response(response, STATUS_PERMISSION_DENIED, &[]),
+    };
+    if info.console == 0 {
         return stage_response(response, STATUS_PERMISSION_DENIED, &[]);
     }
     // Parse: subject_kind(1) + phrase_len(2) + phrase + new_pass_len(2) + pass.
@@ -2922,7 +2970,7 @@ unsafe fn handle_clearance_revoke(handle: i64, payload: &[u8], response: &mut Ve
 //   STATUS_PERMISSION_DENIED peer is not console-attached
 //   STATUS_INTERNAL_ERROR    cap grant registration failed (e.g., table
 //                            full; the kernel rejected the syscall)
-unsafe fn handle_admin_elevate(peer: &TSrvPeerInfo, payload: &[u8],
+unsafe fn handle_admin_elevate(handle: i64, payload: &[u8],
                                response: &mut Vec<u8>) {
     if payload.len() < TOKEN_LEN + 2 {
         return stage_response(response, STATUS_BAD_FORMAT, &[]);
@@ -2944,11 +2992,17 @@ unsafe fn handle_admin_elevate(peer: &TSrvPeerInfo, payload: &[u8],
         return stage_response(response, STATUS_BAD_AUTH, &[]);
     }
 
-    // Console-attached check via the cached peer info — console
-    // attachment is immutable (one-way kernel-stamped, never propagated
-    // by rfork), so the at-accept snapshot is authoritative. The kernel
-    // re-verifies at /cap/use redemption as the load-bearing gate.
-    if peer.console == 0 {
+    // Console-attached check on the LIVE peer snapshot (RW-6 R2-F2). Console
+    // attachment is REVOCABLE on a live Proc (kernel proc_revoke_console_attached),
+    // so the at-accept cache can be stale -- re-query per C-22, matching every sibling
+    // verb (peer_live_caps). The kernel re-verifies PROC_FLAG_CONSOLE_ATTACHED at
+    // /cap/use redemption as the load-bearing gate; this corvus-side check is
+    // defense-in-depth, now live. Fail closed on a dead peer / syscall error.
+    let info = match peer_live_info(handle) {
+        Some(i) => i,
+        None => return stage_response(response, STATUS_PERMISSION_DENIED, &[]),
+    };
+    if info.console == 0 {
         return stage_response(response, STATUS_PERMISSION_DENIED, &[]);
     }
 
@@ -2971,7 +3025,7 @@ unsafe fn handle_admin_elevate(peer: &TSrvPeerInfo, payload: &[u8],
     // Register the pending grant for the peer's stripes. The kernel's
     // cap_register_grant_for_writer gate-checks CAP_GRANT_HOSTOWNER (set
     // on corvus by joey's t_spawn_with_perms mask).
-    if t_cap_grant(T_CAP_HOSTOWNER, peer.stripes) != 0 {
+    if t_cap_grant(T_CAP_HOSTOWNER, info.stripes) != 0 {
         return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
     }
 
@@ -3314,7 +3368,11 @@ impl Conn {
         for slot in self.fids.iter_mut() {
             *slot = None;
         }
+        // Scrub before clear (RW-6 R2-F3/SA-5): pending_request may hold a passphrase
+        // frame, pending_response a token/DEK; clear() alone leaves them in capacity.
+        wipe(&mut self.pending_request);
         self.pending_request.clear();
+        wipe(&mut self.pending_response);
         self.pending_response.clear();
         self.pending_response_off = 0;
         self.version_done = false;
@@ -3335,6 +3393,10 @@ fn drain_response(conn: &mut Conn, out: &mut [u8], cap: usize) -> usize {
     );
     conn.pending_response_off += n;
     if conn.pending_response_off >= conn.pending_response.len() {
+        // A fully-drained response may have carried a secret (the AUTH token, the
+        // UNWRAP DEK); scrub the backing bytes before clear() (RW-6 R2-F3/SA-5).
+        // clear() drops len to 0 but leaves the secret in the Vec's capacity.
+        wipe(&mut conn.pending_response);
         conn.pending_response.clear();
         conn.pending_response_off = 0;
     }
@@ -3392,18 +3454,18 @@ unsafe fn try_dispatch_verb(conn: &mut Conn) {
         let mut payload_owned = Vec::with_capacity(payload.len());
         payload_owned.extend_from_slice(payload);
 
-        // Reset response staging before dispatch.
+        // Reset response staging before dispatch; scrub any prior (possibly
+        // partially-drained) secret response first (RW-6 R2-F3/SA-5).
+        wipe(&mut conn.pending_response);
         conn.pending_response.clear();
         conn.pending_response_off = 0;
 
-        // Snapshot the bits the gated verbs need before re-borrowing
-        // conn.pending_response. The handle is a primitive; the peer
-        // snapshot is Copy (TSrvPeerInfo is repr-C with primitive
-        // fields). C-22: peer_live_caps inside the gated handlers does
-        // the fresh SYS_SRV_PEER query — these are just stable inputs
-        // (immutable identity + the handle for re-query).
+        // Snapshot the conn handle + id before re-borrowing conn.pending_response.
+        // C-22: every gated handler does its OWN fresh SYS_SRV_PEER query from the
+        // handle (peer_live_caps / peer_live_info) -- the dispatch passes NO peer
+        // snapshot, so a stale at-accept identity can never reach a gate (RW-6 R2-F2;
+        // the at-accept conn.peer stays for corvus.tla's ConnOpIdentityIsKernelTruth).
         let conn_handle = conn.handle;
-        let conn_peer = conn.peer;
         let conn_id = conn.conn_id;
 
         match verb_id {
@@ -3413,9 +3475,9 @@ unsafe fn try_dispatch_verb(conn: &mut Conn) {
             VERB_UNWRAP => handle_unwrap(&payload_owned, &mut conn.pending_response),
             VERB_USER_CREATE => handle_user_create(conn_handle, &payload_owned,
                                                    &mut conn.pending_response),
-            VERB_ADMIN_ELEVATE => handle_admin_elevate(&conn_peer, &payload_owned,
+            VERB_ADMIN_ELEVATE => handle_admin_elevate(conn_handle, &payload_owned,
                                                        &mut conn.pending_response),
-            VERB_RECOVER => handle_recover(conn_handle, &conn_peer, &payload_owned,
+            VERB_RECOVER => handle_recover(conn_handle, &payload_owned,
                                            &mut conn.pending_response),
             VERB_WRAP => handle_wrap(&payload_owned, &mut conn.pending_response),
             VERB_RESOLVE_ID => handle_resolve_id(&payload_owned, &mut conn.pending_response),
@@ -3800,7 +3862,11 @@ unsafe fn service_conn(conn: &mut Conn) -> Result<bool, ()> {
             sent += n as usize;
         }
 
-        // Remove the consumed Tmsg from in_buf.
+        // Scrub then remove the consumed Tmsg: a Twrite frame carries the verb payload
+        // (an AUTH/RECOVER passphrase) and drain leaves the consumed prefix in the Vec's
+        // capacity otherwise (RW-6 R2-F3/SA-5). payload_owned is wiped at dispatch; this
+        // closes the raw inbound copy.
+        wipe(&mut conn.in_buf[..size]);
         conn.in_buf.drain(..size);
 
         // F3 close (P5-corvus-srv-impl audit): the conn is in fail-stop
