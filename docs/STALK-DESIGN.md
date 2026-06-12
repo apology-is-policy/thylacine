@@ -243,8 +243,11 @@ reads back (`fd2path`, `/proc/<pid>/fd`, `/proc/<pid>/ns`). The full design is
 ARCH §9.6.9 + invariant I-33; what matters *here* is that the accumulation rides
 the existing trail and the resolver stays **write-only** to it:
 
-- The base seed comes free: `spoor_clone(start)` shares `start`'s Path (the
-  `root_spoor` is seeded `/`). Each successful walk step replaces the freshly
+- The base seed comes free: `spoor_clone(start)` shares `start`'s Path. The
+  root-filesystem Dev attach (`devramfs_attach` / `dev9p_attach_client`) seeds
+  its root Spoor `/` at birth, so an absolute resolve roots at `/` (the seed is
+  at attach, not chroot, so the Path stays immutable-after-publish -- no race
+  with a concurrent `fd2path`). Each successful walk step replaces the freshly
   cloned `nc`'s shared Path with `addelem(parent->path, name)`. The trail-pop that
   implements `..` needs **no** Path op — each trail entry already carries its own
   correct Path, and popping reveals the parent's shorter one. This is exactly why
