@@ -8,10 +8,10 @@
 // Plan 9 device spec "#<dc>" (e.g. "#9"=9P, "#s"=srv, "#p"=proc) when the
 // source is a device root with no namespace name.
 //
-// At v1.0 there is no getpid syscall, so `ns` with no operand shows kproc's
-// namespace (pid 0 -- the system root namespace); `ns <pid>` shows a specific
-// Proc's. (A /proc/self alias + a self-pid default land with the #66c
-// /proc/<pid>/fd work.)
+// `ns` with no operand shows kproc's namespace (pid 0 -- the system root
+// namespace); `ns <pid>` shows a specific Proc's. (LS-K added getpid, so a
+// /proc/self alias + a self-pid default could now use it; that lands with the
+// #66c /proc/<pid>/fd work.)
 
 #![no_std]
 #![no_main]

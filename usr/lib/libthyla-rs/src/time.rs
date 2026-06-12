@@ -23,6 +23,7 @@ use core::sync::atomic::AtomicU32;
 
 use crate::err::{Error, Result};
 use crate::torpor;
+use crate::{T_CLOCK_MONOTONIC, T_CLOCK_REALTIME, t_clock_gettime};
 
 /// Block the calling Thread for at least `dur`.
 ///
@@ -72,3 +73,76 @@ pub fn sleep(dur: Duration) -> Result<()> {
 // uses `?` propagation through torpor::wait already.
 #[allow(dead_code)]
 fn _force_error_in_scope(_e: Error) {}
+
+// ---------------------------------------------------------------------------
+// LS-K: monotonic + wall-clock timestamps over SYS_CLOCK_GETTIME (ARCH §22.6).
+// ---------------------------------------------------------------------------
+
+// Mirror of the kernel's `struct t_timespec` (syscall.h): 16 bytes, two i64.
+#[repr(C)]
+struct TimeSpec {
+    tv_sec: i64,
+    tv_nsec: i64,
+}
+
+// Read a clock into a Duration. The kernel only returns non-zero on a bad
+// clk_id (we pass the two valid constants) or a bad buffer (ours is a valid
+// stack slot), so a non-zero return is unreachable here -- map it to ZERO
+// defensively. tv_sec >= 0 (epoch or uptime); tv_nsec is clamped to [0, 1e9).
+fn read_clock(clk_id: u64) -> Duration {
+    let mut ts = TimeSpec { tv_sec: 0, tv_nsec: 0 };
+    let rc = unsafe { t_clock_gettime(clk_id, &mut ts as *mut TimeSpec as u64) };
+    if rc != 0 {
+        return Duration::ZERO;
+    }
+    Duration::new(ts.tv_sec.max(0) as u64, ts.tv_nsec.clamp(0, 999_999_999) as u32)
+}
+
+/// A monotonic timestamp (`CLOCK_MONOTONIC` -- nanoseconds since boot). Never
+/// goes backward; use it to measure elapsed intervals.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct Instant(Duration);
+
+impl Instant {
+    /// The current monotonic time.
+    pub fn now() -> Instant {
+        Instant(read_clock(T_CLOCK_MONOTONIC))
+    }
+
+    /// The Duration elapsed since this Instant (saturating at zero).
+    pub fn elapsed(&self) -> Duration {
+        Instant::now().0.saturating_sub(self.0)
+    }
+
+    /// The Duration from `earlier` to `self` (saturating at zero).
+    pub fn duration_since(&self, earlier: Instant) -> Duration {
+        self.0.saturating_sub(earlier.0)
+    }
+}
+
+/// A wall-clock timestamp (`CLOCK_REALTIME`), as a Duration since the Unix
+/// epoch. May read `1970 + uptime` on a platform with no real-time clock (the
+/// fail-soft path; ARCH §22.6).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct SystemTime(Duration);
+
+impl SystemTime {
+    /// 1970-01-01T00:00:00Z.
+    pub const UNIX_EPOCH: SystemTime = SystemTime(Duration::ZERO);
+
+    /// The current wall-clock time.
+    pub fn now() -> SystemTime {
+        SystemTime(read_clock(T_CLOCK_REALTIME))
+    }
+
+    /// The Duration from `earlier` to `self`; `Err` (carrying the back-step
+    /// amount) if `earlier` is later. Like std's `duration_since`, with the
+    /// `SystemTimeError` collapsed to the Duration it would carry.
+    pub fn duration_since(&self, earlier: SystemTime) -> core::result::Result<Duration, Duration> {
+        if self.0 >= earlier.0 {
+            Ok(self.0 - earlier.0)
+        } else {
+            Err(earlier.0 - self.0)
+        }
+    }
+}

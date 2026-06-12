@@ -185,6 +185,16 @@ pub extern "C" fn rs_main() -> i64 {
     c.expect("cat FILE", "cat", &["/version"], b"", b"Thylacine v0.1-dev\n", 0);
     c.expect_contains("wc FILE", "wc", &["-l", "/version"], b"", b"/version", 0);
 
+    // --- LS-K: identity + clock. This smoke runs as PRINCIPAL_SYSTEM
+    // (joey-spawned), so uid == gid == 0xFFFFFFFE == 4294967294 -- exact-
+    // matchable, proving the wrappers read the right field end-to-end. `date`
+    // is time-varying; "UTC" proves it ran + formatted (the wall clock's 2020+
+    // plausibility is the always-on kernel test clock.realtime_anchored). ---
+    c.expect("whoami SYSTEM", "whoami", &[], b"", b"4294967294\n", 0);
+    c.expect("id -u SYSTEM", "id", &["-u"], b"", b"4294967294\n", 0);
+    c.expect("id SYSTEM", "id", &[], b"", b"uid=4294967294 gid=4294967294 groups=4294967294\n", 0);
+    c.expect_contains("date UTC", "date", &[], b"", b"UTC", 0);
+
     if c.fails == 0 {
         t_putstr(&format!("coreutil-smoke: all OK ({} checks)\n", c.checks));
         0

@@ -76,6 +76,7 @@ pub mod cap;
 pub mod env;
 pub mod fs;
 pub mod hardware;
+pub mod identity;
 pub mod io;
 pub mod loom;
 pub mod ninep;
@@ -220,6 +221,13 @@ pub const T_SYS_LOOM_ENTER: u64       = 68;
 pub const T_SYS_CHDIR: u64            = 69;     // LS-4 per-Proc cwd: set dot
 pub const T_SYS_GETCWD: u64           = 70;     // LS-4 per-Proc cwd: read dot
 pub const T_SYS_FD2PATH: u64          = 71;     // #66 fd -> namespace name (Plan 9 fd2path)
+pub const T_SYS_GETPID: u64           = 72;     // LS-K identity: pid
+pub const T_SYS_GETUID: u64           = 73;     // LS-K identity: principal_id
+pub const T_SYS_GETGID: u64           = 74;     // LS-K identity: primary_gid
+pub const T_SYS_CLOCK_GETTIME: u64    = 75;     // LS-K clock: realtime/monotonic
+// SYS_CLOCK_GETTIME clock ids (match Linux clockid_t).
+pub const T_CLOCK_REALTIME: u64       = 0;
+pub const T_CLOCK_MONOTONIC: u64      = 1;
 // SYS_UNLINK flags: rmdir an empty directory vs unlink a non-directory.
 // Mirrors the kernel's SYS_UNLINK_REMOVEDIR / wire P9_UNLINK_AT_REMOVEDIR.
 pub const T_UNLINK_REMOVEDIR: u32     = 0x200;
@@ -1628,6 +1636,47 @@ pub unsafe fn t_fd2path(fd: i32, buf: *mut u8, buf_len: usize) -> i64 {
         in("x1") buf as u64,
         in("x2") buf_len as u64,
         in("x8") T_SYS_FD2PATH,
+        options(nostack)
+    );
+    x0
+}
+
+// t_getpid / t_getuid / t_getgid -- the calling Proc's pid / principal_id /
+// primary_gid (LS-K). No args; the value is the return (always >= 0, < 2^32).
+// See the `identity` module for the safe u32 wrappers.
+#[inline(always)]
+pub unsafe fn t_getpid() -> i64 {
+    let mut x0: i64 = 0;
+    asm!("svc #0", inlateout("x0") x0, in("x8") T_SYS_GETPID, options(nostack));
+    x0
+}
+
+#[inline(always)]
+pub unsafe fn t_getuid() -> i64 {
+    let mut x0: i64 = 0;
+    asm!("svc #0", inlateout("x0") x0, in("x8") T_SYS_GETUID, options(nostack));
+    x0
+}
+
+#[inline(always)]
+pub unsafe fn t_getgid() -> i64 {
+    let mut x0: i64 = 0;
+    asm!("svc #0", inlateout("x0") x0, in("x8") T_SYS_GETGID, options(nostack));
+    x0
+}
+
+// t_clock_gettime -- fill a 16-byte struct t_timespec { i64 tv_sec; i64 tv_nsec }
+// at `ts_va` for `clk_id` (T_CLOCK_REALTIME / T_CLOCK_MONOTONIC) (LS-K). Returns
+// 0 / -EINVAL (bad clk_id) / -EFAULT (bad va). See the `time` module for the safe
+// Instant / SystemTime API.
+#[inline(always)]
+pub unsafe fn t_clock_gettime(clk_id: u64, ts_va: u64) -> i64 {
+    let mut x0: i64 = clk_id as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") ts_va,
+        in("x8") T_SYS_CLOCK_GETTIME,
         options(nostack)
     );
     x0

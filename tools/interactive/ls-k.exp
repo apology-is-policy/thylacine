@@ -1,0 +1,36 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-k.exp -- LS-K id / whoami / date over a real PTY.
+#
+# Proves the LS-K identity + clock coreutils resolve from the session shell and
+# print the logged-in user's identity + the wall clock:
+#   id      -> "uid=1000 gid=1000 groups=1000". michael is the first user
+#             (corvus FIRST_AUTO_ID = 1000; the boot log "login: michael uid=1000
+#             gid=1000" confirms it). Matches "uid=1000" -- a distinctive token
+#             that cannot appear in the typed command line.
+#   whoami  -> michael's numeric uid "1000" (uid->name resolution is a v1.x seam).
+#   date    -> "... UTC" (the wall clock, anchored from the PL031 RTC at boot).
+#
+# Honors the three LS-CI portability facts (lib.exp): run under script(1), global
+# spawn_id (lc_boot), match OUTPUT not typed input -- "uid=1000", "1000", and
+# "UTC" are all command OUTPUT and cannot appear in the typed lines.
+
+source [file join [file dirname [info script]] lib.exp]
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# id: the logged-in user's identity (numeric at v1.0; uid == gid == 1000).
+lc_run_expect "id" "uid=1000"
+lc_pass "LS-K(a): id prints the logged-in user's uid/gid"
+
+# whoami: the numeric uid (1000); name resolution is a recorded v1.x seam.
+lc_run_expect "whoami" "1000"
+lc_pass "LS-K(b): whoami prints the user id"
+
+# date: the wall clock, anchored from the PL031 RTC at boot, always UTC.
+lc_run_expect "date" "UTC"
+lc_pass "LS-K(c): date prints the wall-clock time in UTC"
+
+lc_quit
+lc_pass "LS-CI ls-k: id + whoami + date all verified"
+exit 0
