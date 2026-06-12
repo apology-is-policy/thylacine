@@ -57,6 +57,26 @@ use crate::eval::{builtin, deliver_pending_notes, eval_source, Env};
 use crate::line_editor::{EditorAction, LineEditor};
 use crate::palette::Role;
 
+/// ut's prompt-mode console line discipline (the LS-8b `/dev/consctl` ABI,
+/// absolute form -- every flag named, so the result is independent of the
+/// prior state): no canonical line assembly + no kernel echo (the line editor
+/// draws its own) + ISIG so Ctrl-C cooks to the `interrupt` note the shell
+/// services + no CR/NL translation (the editor handles CR). Matches
+/// `/sbin/login`'s MODE_DEFAULT; unifying the consctl mode vocabulary across
+/// login + ut is a later cosmetic cleanup. LS-7 adds the cooked/raw variants
+/// for the foreground-child dance.
+const CONSOLE_MODE_DEFAULT: &[u8] = b"-icanon -echo +isig -icrnl -onlcr";
+
+/// Apply a console mode by writing the absolute flag string to a consctl fd
+/// (`cons_set_mode_cmd` applies one write atomically). Best-effort: true iff
+/// the whole command was accepted (n == len). A pre-#94-B kernel (or a bad fd)
+/// rejects the I/O -> false -> the shell runs without driving the discipline
+/// (no regression: it keeps whatever mode it was started in).
+fn console_set_mode(fd: i32, cmd: &[u8]) -> bool {
+    let w = unsafe { libthyla_rs::t_write(fd as i64, cmd.as_ptr(), cmd.len()) };
+    w == cmd.len() as i64
+}
+
 /// The Utopia read-parse-eval loop driver.
 pub struct Repl {
     env: Env,
@@ -89,6 +109,30 @@ impl Repl {
     /// `Stdio::Piped`-then-drop convention.
     pub fn set_stdio_inherit(&mut self, v: bool) {
         self.env.stdio_inherit = v;
+    }
+
+    /// #94-B-b: record the inherited `/dev/consctl` fd that login forwarded
+    /// (`--consctl-fd N`). A session `ut` -- not login -- owns the console line
+    /// discipline for the session; LS-7's editor dance reads it from the Env
+    /// (set cooked/raw around a foreground child). No effect beyond holding the
+    /// fd until then; a fd-less boot check / host test never calls this.
+    pub fn set_consctl_fd(&mut self, fd: i32) {
+        self.env.consctl_fd = Some(fd);
+    }
+
+    /// #94-B-b: establish ut's prompt-mode line discipline through the
+    /// inherited consctl fd -- raw byte-at-a-time, no kernel echo (the line
+    /// editor draws its own), ISIG so Ctrl-C cooks to the `interrupt` note the
+    /// shell services, no CR/NL translation. Returns true iff the mode write
+    /// was accepted; the `ut` binary turns that into the boot-log witness that
+    /// the inherited-fd consctl reach extends to a user-identity shell (the
+    /// #94-B end of the gate drop). Inert false when no consctl fd was
+    /// forwarded -- the shell simply runs in whatever mode login left.
+    pub fn console_apply_default(&self) -> bool {
+        match self.env.consctl_fd {
+            Some(fd) => console_set_mode(fd, CONSOLE_MODE_DEFAULT),
+            None => false,
+        }
     }
 
     /// Borrow the evaluator state (tests + callers that inspect `$status`).
@@ -362,6 +406,20 @@ mod tests {
         let (repl, exit, _) = drive(&[b"let greeting = hello\n"]);
         assert_eq!(exit, None);
         assert_eq!(repl.env().get("greeting").as_scalar(), "hello");
+    }
+
+    #[test]
+    fn console_apply_default_is_inert_without_a_forwarded_fd() {
+        // #94-B-b: a fd-less `ut` (the bare-spawn boot check, or any host test)
+        // never received a consctl fd. console_apply_default MUST report false
+        // WITHOUT touching the SVC -- the `None` arm returns before any t_write
+        // -- so the shell silently runs in whatever mode it started in (no
+        // panic, no false `ut: consctl ok` witness). A freshly-built Repl has
+        // no consctl fd (set_consctl_fd is the only path to a `Some`). The
+        // `Some(fd)` write path is exercised by the boot-log E2E witness (a host
+        // test cannot drive the SVC).
+        let repl = Repl::new();
+        assert!(!repl.console_apply_default());
     }
 
     #[test]

@@ -102,8 +102,13 @@ fn parse_consctl_fd() -> i64 {
     let mut it = env::args().operands();
     while let Some(a) = it.next() {
         if a == b"--consctl-fd" {
+            // Lower bound 3: a consctl fd is ALWAYS an inherited slot past the 3
+            // stdio fds (joey hands it at fd 3), so 0/1/2 is never valid.
+            // Rejecting them keeps a stray `--consctl-fd 1` from writing the mode
+            // string to a stdio fd as raw bytes + a FALSE `login: consctl ok`
+            // witness (audit F3); a value below the stdio range is malformed.
             return match it.next().and_then(parse_u64) {
-                Some(v) if v <= i64::MAX as u64 => v as i64,
+                Some(v) if (3..=i64::MAX as u64).contains(&v) => v as i64,
                 _ => -1,
             };
         }
@@ -1096,15 +1101,28 @@ pub extern "C" fn rs_main() -> i64 {
     // `ut` the g_console_owner -- the Proc that receives the `interrupt` note on
     // Ctrl-C. login holds MAY_POST_SERVICE (from joey), which is the gate for
     // CONSOLE_OWNER; the owner bit never confers console-attach (I-27 untouched).
-    let mut child = match Command::new(SHELL)
+    let mut shell_cmd = Command::new(SHELL);
+    shell_cmd
         .identity(pid, gid, &supp)
         .caps(SHELL_CAPS)
         .perm(T_SPAWN_PERM_CONSOLE_OWNER)
         .stdin(Stdio::Inherit)
         .stdout(Stdio::Inherit)
-        .stderr(Stdio::Inherit)
-        .spawn()
-    {
+        .stderr(Stdio::Inherit);
+    // #94-B-b: forward the inherited /dev/consctl fd to the session shell so the
+    // shell -- not login -- owns the console line discipline (the controlling-
+    // terminal termios) for the session. It lands at the child's fd 3 (the first
+    // inherited slot after the 3 stdio slots); ut is told its number via
+    // --consctl-fd. Neither login nor ut is console-attached -- consctl I/O is
+    // ungated (#94-B-a), the attach/SAK gate (I-27) untouched; ut holds it
+    // privately (it never re-forwards it to a user child).
+    if consctl_fd >= 0 {
+        shell_cmd
+            .inherit_fd(consctl_fd as i32)
+            .arg("--consctl-fd")
+            .arg("3");
+    }
+    let mut child = match shell_cmd.spawn() {
         Ok(c) => c,
         Err(_) => {
             write_out(b"login: shell spawn failed\n");

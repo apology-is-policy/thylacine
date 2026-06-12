@@ -115,6 +115,19 @@ pub struct Env {
     /// / `spawn_pipeline_elements`. stdin stays Piped-drop regardless at
     /// LS-2 -- interactive child stdin is LS-5/LS-8.
     pub stdio_inherit: bool,
+    /// #94-B-b: the inherited `/dev/consctl` fd, if login forwarded one
+    /// (`--consctl-fd N`). A session `ut` -- not login -- owns the console line
+    /// discipline: `Repl::console_apply_default` establishes the prompt mode
+    /// through it, and LS-7's editor dance (set cooked/raw around a foreground
+    /// child) reads it here. `None` on a fd-less boot check / host test, where
+    /// every console-mode call is an inert no-op.
+    ///
+    /// Held as a passive raw `i32`, NOT closed: login retains its own copy and
+    /// the kernel reaps `ut`'s handle table at exit, so closing it here would
+    /// only sever the session line discipline. Do NOT wrap it in a `File` /
+    /// `Handle` (whose `Drop` would close it) -- the no-close lifetime is the
+    /// contract LS-7's dance relies on (audit F2).
+    pub consctl_fd: Option<i32>,
     /// Nesting depth of `try { ... }` blocks. While > 0, implicit-
     /// fail is suppressed regardless of `interactive` -- the
     /// enclosing try will pick up the failure via its post-body
@@ -203,6 +216,7 @@ impl Env {
             cwd: "/".to_string(),
             interactive: false,
             stdio_inherit: false,
+            consctl_fd: None, // #94-B-b: set by Repl::set_consctl_fd if forwarded
             implicit_fail_suppressed: 0,
             trace_depth: 0,
             pending_exit: None,

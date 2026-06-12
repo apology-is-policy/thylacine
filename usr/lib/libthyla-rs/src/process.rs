@@ -50,8 +50,8 @@ use crate::err::{Error, Result};
 use crate::fs::File;
 use crate::handle::{Handle, Rights};
 use crate::{
-    t_pipe, t_spawn_full_argv, t_wait_pid_for, TSpawnArgs, T_SPAWN_IDENTITY_SET, T_SPAWN_NAME_MAX,
-    T_SYS_SPAWN_ARGV_DATA_MAX, T_SYS_SPAWN_ARGV_MAX, T_WAIT_WNOHANG,
+    t_pipe, t_spawn_full_argv, t_wait_pid_for, TSpawnArgs, T_SPAWN_IDENTITY_SET, T_SPAWN_MAX_FDS,
+    T_SPAWN_NAME_MAX, T_SYS_SPAWN_ARGV_DATA_MAX, T_SYS_SPAWN_ARGV_MAX, T_WAIT_WNOHANG,
 };
 use alloc_crate::string::String;
 use alloc_crate::vec::Vec;
@@ -196,6 +196,15 @@ pub struct Command {
     // nothing. /sbin/login confers MAY_POST_SERVICE on the per-user proxy
     // stratumd it spawns to back the encrypted home.
     perm_flags: u64,
+    // #94-B-b: extra parent fds to inherit into the child at the positional
+    // slots AFTER stdin/stdout/stderr -- child fd 3, then 4, ... -- in call
+    // order. Each entry is a raw parent fd (a KOBJ_SPOOR handle) that must be
+    // live at spawn time; the kernel refcount-bumps it into the child with the
+    // parent's rights (I-6 monotonic) and the parent retains its own copy. The
+    // first non-stdio surface to use it is login forwarding the inherited
+    // /dev/consctl fd to the session shell (so the shell, not login, owns the
+    // console line discipline). Total fd_list (3 stdio + these) <= MAX_FDS.
+    inherit_fds: Vec<i32>,
 }
 
 impl Command {
@@ -213,6 +222,7 @@ impl Command {
             cap_mask: !0u64, // inherit all caps; kernel intersects with parent
             identity: None,  // A-5a: inherit the caller's identity by default
             perm_flags: 0,   // A-5b: grant no SPAWN_PERM_* bits by default
+            inherit_fds: Vec::new(), // #94-B-b: no extra inherited fds by default
         }
     }
 
@@ -295,6 +305,31 @@ impl Command {
         self
     }
 
+    /// #94-B-b: inherit an extra parent fd into the child at the next
+    /// positional slot after stdin/stdout/stderr (child fd 3, then 4, ... in
+    /// call order). `fd` is a raw parent fd referring to a `KOBJ_SPOOR` handle
+    /// that must be live at spawn time; the kernel refcount-bumps it into the
+    /// child with the parent's rights (I-6 monotonic), and the parent keeps its
+    /// own fd (no transfer, no close). The child is told the slot out-of-band
+    /// (e.g. an argv flag), since the kernel installs positionally.
+    ///
+    /// The v1.0 consumer is `/sbin/login` forwarding the inherited
+    /// `/dev/consctl` fd to the session shell `ut`, so the shell -- not login --
+    /// owns the console line discipline. The total fd_list (the 3 stdio slots
+    /// plus every `inherit_fd`) must not exceed `SYS_SPAWN_MAX_FDS` (16); an
+    /// over-long list fails the spawn with `InvalidArgument`.
+    ///
+    /// `fd` MUST refer to a `KOBJ_SPOOR` handle: the I-5 non-transferable kinds
+    /// (`KObj_MMIO` / `KObj_IRQ` / `KObj_DMA` / `KObj_Loom`) are NOT inheritable.
+    /// The kernel is the authoritative gate (`sys_bump_inherit_fds` rejects a
+    /// non-`KOBJ_SPOOR` or a stale fd -> the spawn fails `InvalidArgument`,
+    /// fail-safe), so a wrong `fd` cannot leak -- but pass only Spoor handles.
+    #[inline]
+    pub fn inherit_fd(&mut self, fd: i32) -> &mut Command {
+        self.inherit_fds.push(fd);
+        self
+    }
+
     /// Spawn the child. Returns a `Child` handle; the parent retains
     /// any `Stdio::Piped` ends as `Child::stdin` / `stdout` / `stderr`.
     pub fn spawn(&mut self) -> Result<Child> {
@@ -331,12 +366,23 @@ impl Command {
         let stdout_p = resolve_stdio(&mut self.stdout, 1)?;
         let stderr_p = resolve_stdio(&mut self.stderr, 2)?;
 
-        // fd_list is always 3 entries at v1: positional stdin/stdout/stderr.
-        let fd_list: [u32; 3] = [
-            stdin_p.child_fd as u32,
-            stdout_p.child_fd as u32,
-            stderr_p.child_fd as u32,
-        ];
+        // fd_list: the 3 positional stdio slots, then any inherit_fd entries at
+        // child slots 3.. (#94-B-b), in call order. The total must fit
+        // SYS_SPAWN_MAX_FDS (16). Built as a Vec kept alive -- like the old
+        // array -- until the syscall returns (args_record.fd_list_va aliases it).
+        let mut fd_list: Vec<u32> = Vec::with_capacity(3 + self.inherit_fds.len());
+        fd_list.push(stdin_p.child_fd as u32);
+        fd_list.push(stdout_p.child_fd as u32);
+        fd_list.push(stderr_p.child_fd as u32);
+        for &extra in &self.inherit_fds {
+            fd_list.push(extra as u32);
+        }
+        if fd_list.len() > T_SPAWN_MAX_FDS {
+            // Early return BEFORE the syscall: the owned PreparedStdio values
+            // (stdin_p/stdout_p/stderr_p, holding any minted pipe ends) drop at
+            // scope end here, releasing them -- no kernel spawn state minted yet.
+            return Err(Error::InvalidArgument);
+        }
 
         // A-5a: the identity block. supp_arr is an OWNED local -> dropped at
         // end of spawn(), so the supp_gids_va pointer stays valid through the
@@ -357,7 +403,7 @@ impl Command {
             name_len: self.name.len() as u32,
             argv_data_len: argv_buf.len() as u32,
             argc,
-            fd_count: 3,
+            fd_count: fd_list.len() as u32,
             perm_flags: self.perm_flags as u32,
             _pad_envp: 0,
             cap_mask: self.cap_mask,

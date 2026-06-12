@@ -199,6 +199,25 @@ cannot exfiltrate a keystroke. **cons (the data leaf) keeps its full I/O re-gate
 (console-input theft is the A-5a-F2 break). See `devdev_console_gate_ok` +
 `dev_kind_is_cons_io`.
 
+**The session shell owns the line discipline (#94-B-b).** The consctl fd reaches
+the session shell `ut` one hop past login: `/sbin/login` forwards its inherited
+consctl fd to `ut` via the new `libthyla-rs Command::inherit_fd(fd)` (the spawn
+fd_list grows from the 3 stdio slots to `3+N`, the extra fd landing at the child's
+fd 3) plus the arg `--consctl-fd 3`. `ut` — a USER-identity, NON-console-attached
+Proc — parses the arg, holds the fd on its `Repl` (`Env.consctl_fd`), and
+establishes its prompt-mode line discipline through it (`Repl::console_apply_default`
+writes `CONSOLE_MODE_DEFAULT` = `-icanon -echo +isig -icrnl -onlcr`: raw
+byte-at-a-time so the U-4 line editor draws its own echo; ISIG so Ctrl-C cooks to
+the `interrupt` note `ut` services). The boot witness is `ut: consctl ok`. This is
+the controlling-terminal model — the foreground session shell, not login, owns the
+tty termios — and it is I-27-safe: `ut` is never console-attached (the inherited
+consctl fd confers no attach), it holds the fd PRIVATELY (it never re-forwards it
+to a user child it spawns), and consctl cannot read console INPUT. The
+`raw/cooked dance` around a foreground child (set the mode it needs + switch its
+stdin `Piped`→`Inherit` + restore `ut`'s mode after) is **LS-7** — the editor arc,
+where the child's mode needs are known; `Repl::console_apply_default` is the
+primitive it builds on.
+
 A consctl write that applies a mode also **discards any half-assembled canonical
 line** (resets `g_cons.line_len` under `g_cons.lock` — the `tcsetattr` TCSAFLUSH
 discipline). So a `canonical → raw → canonical` flip can never strand a fragment

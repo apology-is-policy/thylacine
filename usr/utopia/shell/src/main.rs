@@ -40,6 +40,7 @@ extern crate alloc;
 
 use alloc::string::String;
 use libthyla_rs::alloc::ThylaAlloc;
+use libthyla_rs::env;
 use libthyla_rs::io::{self, Read};
 use libthyla_rs::poll::{AsFd, PollEvents, PollSet, PollTimeout};
 use libthyla_rs::t_putstr;
@@ -73,6 +74,43 @@ fn print_banner() {
     t_putstr(&banner);
 }
 
+/// #94-B-b: parse "--consctl-fd N" from argv -> the inherited consctl fd, or -1
+/// if absent/malformed. login forwards its inherited /dev/consctl fd to ut via
+/// `Command::inherit_fd` (so it lands at ut's fd 3) and passes its number here.
+/// A bare-spawned ut (the boot check) is given no such arg -> -1 -> ut runs
+/// unchanged. N is parsed generically (always 3 in the trusted login->ut chain).
+fn parse_consctl_fd() -> i64 {
+    let mut it = env::args().operands();
+    while let Some(a) = it.next() {
+        if a == b"--consctl-fd" {
+            // Lower bound 3: a consctl fd is ALWAYS an inherited slot past the 3
+            // stdio fds (the trusted chain hands it at fd 3), so 0/1/2 is never
+            // valid. Rejecting them keeps a stray `--consctl-fd 1` from writing
+            // the mode string to a stdio fd as raw bytes + a FALSE `ut: consctl
+            // ok` witness (audit F3); a value below the stdio range is malformed.
+            return match it.next().and_then(parse_u64) {
+                Some(v) if (3..=i64::MAX as u64).contains(&v) => v as i64,
+                _ => -1,
+            };
+        }
+    }
+    -1
+}
+
+fn parse_u64(s: &[u8]) -> Option<u64> {
+    if s.is_empty() {
+        return None;
+    }
+    let mut v: u64 = 0;
+    for &c in s {
+        if !c.is_ascii_digit() {
+            return None;
+        }
+        v = v.checked_mul(10)?.checked_add((c - b'0') as u64)?;
+    }
+    Some(v)
+}
+
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
     print_banner();
@@ -86,6 +124,26 @@ pub extern "C" fn rs_main() -> i64 {
     // convention (and that `ut` exits before any spawn anyway: it breaks on the
     // fd-0 read error below).
     repl.set_stdio_inherit(io::stdout_is_live());
+
+    // #94-B-b: a session `ut` receives login's inherited /dev/consctl fd
+    // (--consctl-fd N), so the SHELL -- not login -- owns the console line
+    // discipline for the session. Establish ut's prompt mode (raw: the line
+    // editor draws its own echo; ISIG so Ctrl-C is the `interrupt` note ut
+    // services) through it, and on success emit the boot-log witness that the
+    // inherited-fd consctl reach extends to a user-identity shell (the #94-B end
+    // of the gate drop; the hard regression is the kernel `devdev.cons_gate`
+    // test). The fd is held on the Repl for LS-7's foreground-child mode dance.
+    // A bare-spawned `ut` parses -1 and runs unchanged.
+    let consctl_fd = parse_consctl_fd();
+    if consctl_fd >= 0 {
+        repl.set_consctl_fd(consctl_fd as i32);
+        if repl.console_apply_default() {
+            t_putstr("ut: consctl ok (console line discipline via inherited fd)\n");
+        } else {
+            t_putstr("ut: consctl unavailable (mode-set rejected)\n");
+        }
+    }
+
     let mut out = io::stdout();
     // Draw the first prompt (no-op to the UART if fd 1 is absent).
     repl.draw_prompt(&mut out);
