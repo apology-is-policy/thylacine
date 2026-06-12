@@ -360,6 +360,12 @@ void test_devctl_kernel_base_gated(void);
 void test_devctl_read_sched_format(void);
 void test_devctl_write_rejected(void);
 void test_devctl_read_dir_returns_neg1(void);
+void test_devdev_bestiary_smoke(void);
+void test_devdev_attach_returns_dir(void);
+void test_devdev_walk_to_each_leaf(void);
+void test_devdev_walk_unknown_misses(void);
+void test_devdev_trivial_leaves(void);
+void test_devdev_cons_gate(void);
 void test_cpio_is_valid_recognizes_magic(void);
 void test_cpio_iter_empty_archive(void);
 void test_cpio_iter_single_entry(void);
@@ -1315,6 +1321,12 @@ struct test_case g_tests[] = {
     { "devctl.read_sched_format",      test_devctl_read_sched_format,      false, NULL },
     { "devctl.write_rejected",         test_devctl_write_rejected,         false, NULL },
     { "devctl.read_dir_returns_neg1",  test_devctl_read_dir_returns_neg1,  false, NULL },
+    { "devdev.bestiary_smoke",         test_devdev_bestiary_smoke,         false, NULL },
+    { "devdev.attach_returns_dir",     test_devdev_attach_returns_dir,     false, NULL },
+    { "devdev.walk_to_each_leaf",      test_devdev_walk_to_each_leaf,      false, NULL },
+    { "devdev.walk_unknown_misses",    test_devdev_walk_unknown_misses,    false, NULL },
+    { "devdev.trivial_leaves",         test_devdev_trivial_leaves,         false, NULL },
+    { "devdev.cons_gate",              test_devdev_cons_gate,              false, NULL },
     { "cpio.is_valid_recognizes_magic",
                                        test_cpio_is_valid_recognizes_magic, false, NULL },
     { "cpio.iter_empty_archive",       test_cpio_iter_empty_archive,       false, NULL },

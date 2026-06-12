@@ -359,12 +359,20 @@ void test_devramfs_readdir_synth_dir_empty(void) {
 
     // /ctl is a synth mount point too (#57): present, a directory, empty.
     struct Spoor *ctl = walk_one(root, "ctl");
-    spoor_unref(root);
     TEST_ASSERT(ctl != NULL, "walk('ctl') -> synth dir");
     TEST_EXPECT_EQ(ctl->qid.type, QTDIR, "ctl is a directory");
     TEST_EXPECT_EQ(devramfs.readdir(ctl, buf, (long)sizeof(buf), 0), (long)0,
                    "ctl synthetic mount-point dir is empty (0 == EOD)");
     spoor_unref(ctl);
+
+    // /dev is a synth mount point too (#57b): present, a directory, empty.
+    struct Spoor *dev = walk_one(root, "dev");
+    spoor_unref(root);
+    TEST_ASSERT(dev != NULL, "walk('dev') -> synth dir");
+    TEST_EXPECT_EQ(dev->qid.type, QTDIR, "dev is a directory");
+    TEST_EXPECT_EQ(devramfs.readdir(dev, buf, (long)sizeof(buf), 0), (long)0,
+                   "dev synthetic mount-point dir is empty (0 == EOD)");
+    spoor_unref(dev);
 }
 
 // The resume cookie must let a small buffer paginate the whole root with no
@@ -386,7 +394,7 @@ void test_devramfs_readdir_paginates_no_dup_no_skip(void) {
     s64 off = 0;                 // start cookie
     u64 prev_last = 0;           // last cookie seen (monotonic check)
     int  count = 0;
-    bool saw_welcome = false, saw_srv = false, saw_ctl = false;
+    bool saw_welcome = false, saw_srv = false, saw_ctl = false, saw_dev = false;
     bool monotonic = true, well_formed = true;
 
     for (int guard = 0; guard < 4096; guard++) {  // guard against a non-advancing bug
@@ -405,6 +413,7 @@ void test_devramfs_readdir_paginates_no_dup_no_skip(void) {
             if (name_eq(name, "welcome")) saw_welcome = true;
             if (name_eq(name, "srv"))     saw_srv = true;
             if (name_eq(name, "ctl"))     saw_ctl = true;
+            if (name_eq(name, "dev"))     saw_dev = true;
             count++;
             in_run++;
             pos += len;
@@ -418,9 +427,10 @@ void test_devramfs_readdir_paginates_no_dup_no_skip(void) {
     TEST_ASSERT(saw_welcome, "paginated walk still finds 'welcome'");
     TEST_ASSERT(saw_srv, "paginated walk still finds the 'srv' synth dir");
     TEST_ASSERT(saw_ctl, "paginated walk still finds the 'ctl' synth dir");
-    // Total enumerated == files + the three synthetic dirs (srv, proc, ctl).
-    TEST_EXPECT_EQ((u64)count, (u64)(devramfs_file_count() + 3),
-                   "paginated count == files + 3 synth dirs (no skip, no dup)");
+    TEST_ASSERT(saw_dev, "paginated walk still finds the 'dev' synth dir (#57b)");
+    // Total enumerated == files + the four synthetic dirs (srv, proc, ctl, dev).
+    TEST_EXPECT_EQ((u64)count, (u64)(devramfs_file_count() + 4),
+                   "paginated count == files + 4 synth dirs (no skip, no dup)");
 
     spoor_clunk(root);
 }

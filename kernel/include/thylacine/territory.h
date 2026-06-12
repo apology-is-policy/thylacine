@@ -55,12 +55,18 @@ struct Spoor;
 // eventual ramfs + /proc + /dev + /net binds.
 #define PGRP_MAX_BINDS  8
 
-// Mount-table size. Sufficient for the v1.0 boot path: root mount + a
-// handful of /dev synthetic devices + /proc + /ctl. The proc.rfork
-// stress test clones Territories en masse; each clone deep-copies
-// mounts[] and bumps a spoor_ref per entry, so the cap is kept tight to
-// hold the per-clone cost in check.
-#define PGRP_MAX_MOUNTS  8
+// Mount-table size. Sufficient for the v1.0 boot path. joey is the high-water
+// mark: the kproc boot namespace mounts /srv + /proc + /ctl + /dev (4) onto
+// devramfs synth dirs (inherited by every Proc), and the long-running init then
+// re-grafts /srv + /bin + /proc + /ctl + /dev (5) onto the pivoted disk root --
+// 9 live entries (#57b). The pre-pivot kernel mounts ORPHAN after pivot (their
+// devramfs mount points become unreachable from the disk root) but remain in the
+// table, so the count is pre+post per re-grafted dir; a pivot-time GC of dead
+// mounts is the tracked seam (would halve joey's count). 12 leaves headroom for
+// /net (Phase 8) without another bump. The proc.rfork stress test clones
+// Territories en masse; each clone deep-copies mounts[] + bumps a spoor_ref per
+// entry, so the cap stays modest to hold the per-clone cost in check.
+#define PGRP_MAX_MOUNTS  12
 
 // Path identifier. At v1.0 abstract `u32` — bind/mount take whatever
 // numeric ID the caller decides on (tests pick small integers). The

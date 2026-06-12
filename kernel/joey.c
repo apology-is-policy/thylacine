@@ -325,6 +325,15 @@ void joey_run(void) {
         if (joey_mount_static_dev(kt, &devctl, "ctl", 3) != 0)
             extinction("joey: /ctl mount (devctl) failed");
         uart_puts("  joey: /proc + /ctl mounted (kernel introspection Devs)\n");
+
+        // #57b: graft the /dev char-device directory (devdev: null/zero/full/
+        // random/urandom + cons/consctl). ARCH 9.4. The trivial leaves are
+        // world-rw; cons/consctl are I-27-gated at devdev.open (the namespace
+        // front-door enforces the SAME console-attach check as SYS_CONSOLE_OPEN,
+        // so /dev/cons adds no ungated console reader -- IDENTITY-DESIGN 9.8).
+        if (joey_mount_static_dev(kt, &devdev, "dev", 3) != 0)
+            extinction("joey: /dev mount (devdev) failed");
+        uart_puts("  joey: /dev mounted (kernel char devices)\n");
     }
 
     uart_puts("  joey: rforking child for /joey (");

@@ -25,6 +25,7 @@
 extern struct Dev devramfs;
 extern struct Dev devproc;
 extern struct Dev devctl;
+extern struct Dev devdev;
 
 void test_namespace_layout_proc_ctl_cross(void);
 
@@ -95,5 +96,26 @@ void test_namespace_layout_proc_ctl_cross(void) {
     TEST_ASSERT((proc_q->qid.type & QTDIR) != 0, "devproc root is a directory");
     spoor_clunk(proc_q);
 
-    territory_unref(pr.territory);   // drops both mount entries + the root
+    // (4) Mount devdev onto /dev; /dev/null crosses to the devdev root (#57b).
+    // This exercises devdev's reuse-nc walk through clone_walk_zero (the #57a
+    // lesson regression) -- a mounted Dev whose walk ignored nc would be
+    // unreachable here.
+    base = territory_root_ref(pr.territory);
+    struct Spoor *dev_mp = stalk(&pr, base, "dev", 3, STALK_MOUNT, 0);
+    spoor_clunk(base);
+    TEST_ASSERT(dev_mp != NULL, "stalk(dev, STALK_MOUNT) -> the synth mount point");
+    struct Spoor *dev_root = devdev.attach(NULL);
+    TEST_ASSERT(dev_root != NULL, "devdev.attach");
+    TEST_EXPECT_EQ(mount(pr.territory, dev_root, dev_mp, MREPL), 0, "mount devdev @ /dev");
+    spoor_clunk(dev_root);
+    spoor_clunk(dev_mp);
+
+    base = territory_root_ref(pr.territory);
+    struct Spoor *devnull_q = stalk(&pr, base, "dev/null", 8, STALK_WALK, 0);
+    spoor_clunk(base);
+    TEST_ASSERT(devnull_q != NULL, "/dev/null resolves through the mount (#57b)");
+    TEST_EXPECT_EQ((u64)devnull_q->dc, (u64)'d', "/dev/null served by devdev (dc 'd')");
+    spoor_clunk(devnull_q);
+
+    territory_unref(pr.territory);   // drops all three mount entries + the root
 }

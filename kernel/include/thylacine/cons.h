@@ -30,6 +30,16 @@
 // devcons_read and/or the console_mgr kthread as appropriate.
 void cons_rx_input(u8 byte, bool is_break);
 
+// #57b: the shared console-input/output API -- the ONE implementation behind
+// both console front doors. `devcons` (the SYS_CONSOLE_OPEN syscall path) and
+// `devdev`'s /dev/cons leaf (the namespace path) both call these, so the
+// single-reader busy-guard bounds the console to one reader across both doors.
+// cons_input_read: blocking RX-ring drain (death-interruptible; -1 on
+// bad-args/reader-busy; >= 1 on data). cons_output_write: forward each byte to
+// the UART (== n at v1.0).
+long cons_input_read(void *buf, long n);
+long cons_output_write(const void *buf, long n);
+
 // The console_mgr kproc kthread entry. Spawned once at boot (boot_main). Sleeps
 // on the console-manager Rendez; on wake, performs the deferred privileged work
 // in process context: post the `interrupt` note to the current console owner

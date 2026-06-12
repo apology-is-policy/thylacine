@@ -122,6 +122,7 @@ void dev_init(void) {
     dev_register(&devramfs);
     dev_register(&devsrv);          // P5-corvus-srv: /srv service registry (dc='s')
     dev_register(&devcap);          // P5-hostowner-b: /cap elevation device (dc='k')
+    dev_register(&devdev);          // #57b: /dev char-device directory (dc='d')
 
     // Walk bestiary: dev->init() may itself dev_register additional
     // devs (e.g., a virtio probe that fans out to multiple instances).

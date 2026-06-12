@@ -227,8 +227,13 @@ static void devcons_close(struct Spoor *c) {
 // a 2nd sleeper would extinct). Returns the byte count (>= 1) on data, 0 only on
 // a death-interrupt with nothing buffered (immaterial -- a group-flagged Thread
 // never re-enters EL0), or -1 on bad args / reader-busy.
-static long devcons_read(struct Spoor *c, void *buf, long n, s64 off) {
-    (void)c; (void)off;
+//
+// #57b: this is the ONE console-input implementation, shared by both front doors
+// -- `devcons` (the SYS_CONSOLE_OPEN syscall path) and `devdev`'s /dev/cons leaf
+// (the namespace path). Both call cons_input_read, so the single-reader busy-guard
+// (g_cons.reader_busy) bounds the console to one reader ACROSS both doors -- there
+// is no second reader path that could race the first.
+long cons_input_read(void *buf, long n) {
     if (!buf || n < 0) return -1;
     if (n == 0)        return 0;
 
@@ -280,6 +285,11 @@ static long devcons_read(struct Spoor *c, void *buf, long n, s64 off) {
     return got;
 }
 
+static long devcons_read(struct Spoor *c, void *buf, long n, s64 off) {
+    (void)c; (void)off;
+    return cons_input_read(buf, n);
+}
+
 static struct Block *devcons_bread(struct Spoor *c, long n, s64 off) {
     (void)c; (void)n; (void)off;
     return NULL;
@@ -288,8 +298,10 @@ static struct Block *devcons_bread(struct Spoor *c, long n, s64 off) {
 // Writes forward each byte to the PL011 UART via uart_putc. Plan 9
 // idiom: writes don't persist — the byte IS the message. Returns the
 // number of bytes accepted (== n at v1.0; UART can't fail short).
-static long devcons_write(struct Spoor *c, const void *buf, long n, s64 off) {
-    (void)c; (void)off;
+//
+// #57b: the ONE console-output implementation, shared by devcons (the syscall
+// path) and devdev's /dev/cons leaf (the namespace path).
+long cons_output_write(const void *buf, long n) {
     if (!buf) return -1;
     if (n < 0) return -1;
     if (n == 0) return 0;
@@ -299,6 +311,11 @@ static long devcons_write(struct Spoor *c, const void *buf, long n, s64 off) {
         uart_putc((char)bytes[i]);
     }
     return n;
+}
+
+static long devcons_write(struct Spoor *c, const void *buf, long n, s64 off) {
+    (void)c; (void)off;
+    return cons_output_write(buf, n);
 }
 
 static long devcons_bwrite(struct Spoor *c, struct Block *bp, s64 off) {

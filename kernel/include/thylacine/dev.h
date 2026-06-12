@@ -244,6 +244,7 @@ extern struct Dev devnotes;       // dc='n'  — per-Proc note queue (fd-first v
 extern struct Dev devproc;        // dc='p'  — /proc/<pid>/{status,cmdline,ctl,ns}
 extern struct Dev devctl;         // dc='C'  — /ctl/{procs,memory,devices,kernel-base,sched}
 extern struct Dev devramfs;       // dc='m'  — /ramfs/<file> from cpio newc initrd
+extern struct Dev devdev;         // dc='d'  — /dev char-device directory (#57b)
 
 // devramfs diagnostics (used by tests).
 int  devramfs_file_count(void);

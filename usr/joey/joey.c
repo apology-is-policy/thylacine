@@ -2752,6 +2752,13 @@ int main(void) {
                 t_putstr("joey: #57 pre-pivot t_open(/ctl) FAILED\n");
                 return 1;
             }
+            // #57b: /dev (devdev: the char-device directory). O_PATH crosses the
+            // mount, yielding the devdev root.
+            long dev_dev_h = t_open(T_WALK_OPEN_FROM_ROOT, "/dev", 4, T_OPATH);
+            if (dev_dev_h < 0) {
+                t_putstr("joey: #57b pre-pivot t_open(/dev) FAILED\n");
+                return 1;
+            }
 
             if (t_pivot_root(sd_attach_fd) != 0) {
                 t_putstr("joey: stratumd-boot t_pivot_root FAILED\n");
@@ -2824,6 +2831,17 @@ int main(void) {
                 }
             }
             (void)t_close(ctl_dev_h);
+            // #57b: re-establish /dev on the pivoted root (mirror /proc + /ctl).
+            {
+                long mk = t_walk_create(T_WALK_OPEN_FROM_ROOT, "dev", 3, T_OREAD,
+                                        T_WALK_CREATE_DMDIR | 0755u);
+                if (mk >= 0) (void)t_close(mk);
+                if (t_mount("/dev", 4, dev_dev_h, T_MREPL) != 0) {
+                    t_putstr("joey: #57b post-pivot t_mount(/dev) FAILED\n");
+                    return 1;
+                }
+            }
+            (void)t_close(dev_dev_h);
 
             long post_fd = t_walk_open(T_WALK_OPEN_FROM_ROOT, sentinel_name,
                                         sentinel_len, T_OREAD);
