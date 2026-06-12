@@ -38,6 +38,7 @@ static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::Th
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use libthyla_rs::env;
 use libthyla_rs::process::{Child, Command, Stdio};
 use libthyla_rs::{
     t_attach_9p_srv, t_close, t_explicit_bzero, t_mount, t_open, t_poll, t_putstr, t_read,
@@ -71,6 +72,58 @@ const SHELL: &str = "/bin/ut";  // #58: resolved via joey's post-pivot /bin bind
 // fork-grantable user caps (mlock + getrandom). login must HOLD these to pass
 // them down, so joey grants login CAP_SET_IDENTITY | LOCK_PAGES | CSPRNG_READ.
 const SHELL_CAPS: u64 = T_CAP_LOCK_PAGES | T_CAP_CSPRNG_READ;
+
+// ── LS-6 / #94-B: the console line discipline via the inherited consctl fd ──
+//
+// joey's getty (and the seeded do_login_e2e) pass "--consctl-fd 3" + an inherited
+// /dev/consctl handle at fd 3 when the console is real. login -- which is NOT
+// console-attached -- drives the line discipline through that handle: the kernel
+// devdev_open mint-gate kept joey the only minter, but consctl I/O is reachable
+// by the delegated holder of the inherited fd (#94-B). The five-flag stty-style
+// grammar is the LS-8b consctl ABI (cons_set_mode_cmd applies one write
+// atomically). The mode strings are ABSOLUTE (every flag named), so the result is
+// independent of the prior state.
+//
+//   COOKED_ECHO   = the username read: line editing + visible typing + Enter (CR)
+//                   terminates the canonical line (ICRNL) + clean output (ONLCR).
+//   COOKED_NOECHO = the passphrase read: same, but ECHO clear -> the kernel's
+//                   HARD no-output guarantee masks the passphrase (LS-8b).
+//   DEFAULT       = ISIG only (== CONS_TERMIOS_DEFAULT): raw byte-at-a-time, no
+//                   echo, Ctrl-C -> interrupt. Restored before the shell, whose
+//                   line editor wants raw per-keystroke input.
+const MODE_COOKED_ECHO: &[u8] = b"+icanon +echo +isig +icrnl +onlcr";
+const MODE_COOKED_NOECHO: &[u8] = b"+icanon -echo +isig +icrnl +onlcr";
+const MODE_DEFAULT: &[u8] = b"-icanon -echo +isig -icrnl -onlcr";
+
+// Parse "--consctl-fd N" from argv -> the consctl fd, or -1 if absent/malformed.
+// N is the child fd the inherited handle landed at (always 3 in the trusted
+// joey->login chain, but parsed generically).
+fn parse_consctl_fd() -> i64 {
+    let mut it = env::args().operands();
+    while let Some(a) = it.next() {
+        if a == b"--consctl-fd" {
+            return match it.next().and_then(parse_u64) {
+                Some(v) if v <= i64::MAX as u64 => v as i64,
+                _ => -1,
+            };
+        }
+    }
+    -1
+}
+
+// Apply a console mode via the inherited consctl fd. Best-effort: returns true
+// iff the whole command was accepted (cons_set_mode_cmd returns n on success,
+// -1 on a malformed token OR -- on a pre-#94-B kernel -- the I/O gate). A false
+// result means login simply runs without the line discipline (no regression --
+// the raw byte-at-a-time prompt the pre-LS-6 login used). A negative fd (no
+// console / not passed) is a no-op.
+fn set_console_mode(consctl_fd: i64, cmd: &[u8]) -> bool {
+    if consctl_fd < 0 {
+        return false;
+    }
+    let w = unsafe { t_write(consctl_fd, cmd.as_ptr(), cmd.len()) };
+    w == cmd.len() as i64
+}
 
 fn write_out(buf: &[u8]) {
     let mut off = 0usize;
@@ -868,8 +921,22 @@ pub extern "C" fn rs_main() -> i64 {
     let mut user: Vec<u8> = Vec::new();
     let mut pass: Vec<u8> = Vec::new();
 
+    // LS-6 (#94-B): cooked + echo for the username read (line editing + visible
+    // typing). The first mode-set doubles as the boot-log witness that a
+    // non-attached login can drive the INHERITED consctl fd (the #94-B gate drop);
+    // the hard regression for the gate is the kernel devdev.cons_gate test.
+    let consctl_fd = parse_consctl_fd();
+    if consctl_fd >= 0 {
+        if set_console_mode(consctl_fd, MODE_COOKED_ECHO) {
+            t_putstr("login: consctl ok (line discipline via inherited fd)\n");
+        } else {
+            t_putstr("login: consctl unavailable (mode-set rejected)\n");
+        }
+    }
+
     write_out(b"\nThylacine login: ");
     if !read_line(FD_IN, &mut user) || user.is_empty() {
+        set_console_mode(consctl_fd, MODE_DEFAULT); // restore before exit
         write_out(b"login: no username\n");
         return 1;
     }
@@ -878,10 +945,17 @@ pub extern "C" fn rs_main() -> i64 {
     // phrase and returns to the getty prompt (no session is created). `!` cannot
     // begin a real corvus username, so this cannot shadow a user.
     if user.as_slice() == RECOVERY_SENTINEL {
+        // Recovery reads (phrase, new passphrase) run at the default raw prompt
+        // (unchanged from pre-LS-6); restore before entering. A cooked + masked
+        // recovery flow is a small follow-up, not a regression.
+        set_console_mode(consctl_fd, MODE_DEFAULT);
         return unsafe { do_recover_flow() };
     }
     write_out(b"password: ");
-    if !read_line(FD_IN, &mut pass) {
+    set_console_mode(consctl_fd, MODE_COOKED_NOECHO); // mask the passphrase (HARD no-echo)
+    let pw_ok = read_line(FD_IN, &mut pass);
+    set_console_mode(consctl_fd, MODE_DEFAULT); // restore for auth + the shell's raw editor
+    if !pw_ok {
         write_out(b"login: no passphrase\n");
         // read_line may have partially filled pass before failing; scrub (RW-6 R4-F1).
         unsafe {

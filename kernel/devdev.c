@@ -11,13 +11,16 @@
 //   /dev/random   — CSPRNG (kern_random_bytes); writes consumed
 //   /dev/urandom  — alias of random (POSIX compat; same handler)
 //   /dev/cons     — the console (delegates to the shared cons.c API)
-//   /dev/consctl  — console mode control (v1.0-modeless; termios is LS-8 #952)
+//   /dev/consctl  — console mode control (LS-8b termios; the five line flags)
 //
 // dc='d'. The trivial leaves (null/zero/full/random/urandom) are world-rw and
 // UNGATED -- the same on every Unix. cons/consctl are the console: `devdev_open`
 // enforces the I-27 gate-at-namespace-open -- a console-attach check IDENTICAL to
 // SYS_CONSOLE_OPEN's, so binding /dev/cons as a walkable path adds NO ungated
-// front door to the single-reader console (see IDENTITY-DESIGN.md §9.8).
+// front door to the single-reader console (see IDENTITY-DESIGN.md §9.8). cons
+// ALSO re-gates its I/O; consctl's I/O is intentionally inheritance-reachable so
+// a delegated login/shell can set the line discipline (#94-B -- the open-mint
+// gate is the protection; see devdev_console_gate_ok).
 
 #include <thylacine/cons.h>
 #include <thylacine/dev.h>
@@ -65,21 +68,54 @@ static const struct dev_leaf g_dev_leaves[] = {
 
 #define DEV_LEAF_COUNT  (sizeof(g_dev_leaves) / sizeof(g_dev_leaves[0]))
 
-// cons + consctl are the console -- the I-27 gated leaves.
+// cons + consctl are the console leaves. The OPEN gate (devdev_open) covers
+// BOTH: opening either by NAME requires console-attach, so only the trusted
+// console holder can MINT a cons/consctl fd through the namespace.
 static bool dev_kind_is_console(u32 kind) {
     return kind == DEV_KIND_CONS || kind == DEV_KIND_CONSCTL;
 }
 
-// The I-27 console-attach gate. A non-console-attached caller must reach NEITHER
-// the open NOR the I/O path of cons/consctl. Enforced at THREE sites -- open,
-// read, write -- not just open, because SYS_WALK_OPEN_OPATH (T_OPATH) SKIPS
-// dev->open (kernel/syscall.c): an O_PATH walk-open of /dev/cons yields a born-
-// R|W handle WITHOUT invoking devdev_open, and sys_read_for_proc gates only on
-// RIGHT_READ (no COPEN requirement -- SYS_CONSOLE_OPEN's handle is read without
-// COPEN too), so a gate-at-open-only design would let any EL0 Proc O_PATH-open
-// then read /dev/cons and steal the getty's console input. Re-checking at the I/O
-// sites closes that bypass; the gate IS the console-attach state, enforced
-// wherever console I/O happens. Fail-closed on a NULL thread/proc.
+// The console-DATA leaf. cons (NOT consctl) keeps the per-I/O re-gate: console
+// INPUT is the single-reader resource whose theft is the A-5a-F2 break, so
+// reads (and, symmetrically, writes/polls) of /dev/cons re-check console-attach
+// even on an already-opened handle. consctl is the console-CONTROL leaf and is
+// deliberately NOT in this set -- see devdev_console_gate_ok (#94-B).
+static bool dev_kind_is_cons_io(u32 kind) {
+    return kind == DEV_KIND_CONS;
+}
+
+// The I-27 console-attach gate, enforced at two tiers:
+//
+//   1. OPEN (both cons + consctl): only a console-attached caller can MINT a
+//      cons/consctl fd by name. This is the mint gate.
+//
+//   2. cons I/O (read/write/poll of /dev/cons only): the data path re-checks
+//      attach on every I/O, because SYS_WALK_OPEN_OPATH (T_OPATH) SKIPS
+//      dev->open (kernel/syscall.c) and sys_read_for_proc gates only on
+//      RIGHT_READ, so a gate-at-open-only design would let any EL0 Proc
+//      O_PATH-open then read /dev/cons and steal the getty's console input.
+//      (#81's CWALKONLY now also rejects an O_PATH-walked handle at the syscall
+//      layer before dev->read; the cons I/O re-gate stays as belt-and-suspenders
+//      on the single-reader input -- the highest-stakes leaf.)
+//
+// consctl I/O is intentionally NOT re-gated (#94-B): the console line discipline
+// (termios) must be settable by a non-console-attached but deliberately-delegated
+// Proc -- /sbin/login and the session shell set cooked/echo via an INHERITED
+// consctl fd (the getty, console-attached, opens it pre-relinquish and passes it
+// down). That is sound because (a) the open-mint gate means only a console-
+// attached Proc creates a consctl fd; (b) #81's CWALKONLY blocks the O_PATH-walk
+// bypass; (c) a consctl fd reaches a non-attached Proc ONLY by deliberate
+// spawn-inheritance from the trusted chain. At #94-B-a the chain TERMINATES at
+// login: joey opens consctl + hands it to login (child fd 3), but login's shell
+// spawn carries only stdin/stdout/stderr (libthyla-rs Command's fd_list is the
+// 3 stdio slots), so the fd does NOT reach ut yet. #94-B-b extends the chain to
+// ut (via Command::inherit_fd), where ut holds it PRIVATELY (never passing it to
+// a user child) for the raw/cooked dance. A random EL0 Proc never holds one. The
+// inherited fd IS the capability. consctl is a CONTROL surface (the five mode
+// flags); it can never read console INPUT (DEV_KIND_CONSCTL routes read ->
+// cons_render_mode, NOT cons_input_read), so an ungated consctl write cannot
+// exfiltrate a keystroke -- it only flips the global termios, which the trusted
+// chain is exactly what's authorized to do. Fail-closed on a NULL thread/proc.
 static bool devdev_console_gate_ok(void) {
     struct Thread *t = current_thread();
     return t != NULL && proc_is_console_attached(t->proc);
@@ -214,9 +250,12 @@ static long devdev_read(struct Spoor *c, void *buf, long n, s64 off) {
     if (n < 0) return -1;
 
     u32 kind = (u32)c->qid.path;
-    // I-27: the console I/O gate (also at open; re-checked here to close the
-    // O_PATH bypass -- see devdev_console_gate_ok).
-    if (dev_kind_is_console(kind) && !devdev_console_gate_ok()) return -1;
+    // I-27: the console-DATA I/O gate -- cons ONLY (also at open; re-checked here
+    // to close the O_PATH bypass). consctl is NOT re-gated: its mode line is
+    // readable by a deliberately-delegated holder of an inherited consctl fd
+    // (#94-B -- see devdev_console_gate_ok). The open-mint gate + #81 CWALKONLY
+    // are the protections; the inherited fd is the capability.
+    if (dev_kind_is_cons_io(kind) && !devdev_console_gate_ok()) return -1;
     switch (kind) {
     case DEV_KIND_ROOT:                       // readdir deferred (match devctl)
         return -1;
@@ -260,9 +299,11 @@ static long devdev_write(struct Spoor *c, const void *buf, long n, s64 off) {
     if (n < 0) return -1;
 
     u32 kind = (u32)c->qid.path;
-    // I-27: the console I/O gate (also at open; re-checked here to close the
-    // O_PATH bypass -- see devdev_console_gate_ok).
-    if (dev_kind_is_console(kind) && !devdev_console_gate_ok()) return -1;
+    // I-27: the console-DATA I/O gate -- cons ONLY (also at open; re-checked here
+    // to close the O_PATH bypass). consctl writes (the termios mode-set) are NOT
+    // re-gated: a deliberately-delegated holder of an inherited consctl fd
+    // (login/ut) flips the line discipline (#94-B -- see devdev_console_gate_ok).
+    if (dev_kind_is_cons_io(kind) && !devdev_console_gate_ok()) return -1;
     switch (kind) {
     case DEV_KIND_NULL:
     case DEV_KIND_ZERO:                         // silently consume
@@ -313,14 +354,19 @@ static struct Spoor *devdev_power(struct Spoor *c, int on) {
 static short devdev_poll(struct Spoor *c, short events, struct poll_waiter *pw) {
     if (!c) return POLLNVAL;
     u32 kind = (u32)c->qid.path;
-    if (dev_kind_is_console(kind)) {
+    // cons (the data path) stays I/O-gated -- an O_PATH walk-open skips
+    // devdev_open, so a non-attached poller could otherwise register a wake hook
+    // and learn console-input timing; POLLNVAL closes it.
+    if (dev_kind_is_cons_io(kind)) {
         if (!devdev_console_gate_ok()) return POLLNVAL;
-        if (kind == DEV_KIND_CONS) return cons_poll(events, pw);
-        // consctl: a control file (LS-8b), never blocks -- always ready for the
-        // requested events (the mode line is always readable; a write applies
-        // immediately). No data-readiness hook.
-        return (short)(events & POLL_REQUESTABLE);
+        return cons_poll(events, pw);
     }
+    // consctl + the trivial leaves: never block -- always ready for the requested
+    // events. consctl poll is UNGATED (#94-B): it returns a state-INDEPENDENT
+    // constant (always-ready) and installs NO data-readiness hook, so it leaks
+    // nothing and grants nothing even if reached via an O_PATH handle (whose
+    // read/write CWALKONLY blocks at the syscall layer); a control surface has no
+    // input timing to leak.
     return (short)(events & POLL_REQUESTABLE);
 }
 

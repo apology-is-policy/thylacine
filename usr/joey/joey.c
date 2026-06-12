@@ -1664,24 +1664,38 @@ static int do_login_e2e(void) {
     }
     (void)t_close(cr_wr);
 
-    static const char login_argv[] = "login\0";
+    // #94-B: thread a real /dev/consctl fd to the seeded login so its LS-6 mode
+    // dance runs DETERMINISTICALLY in CI against a live consctl handle -- this
+    // exercises the whole userspace chain (kernel installs the inherited consctl
+    // fd at child fd 3; login parses --consctl-fd; a NON-attached login WRITES
+    // consctl, the #94-B gate drop). login emits "login: consctl ok" to the boot
+    // log when the write+readback succeeds (the greppable witness; the hard gate
+    // for the kernel gate-drop is the devdev.cons_gate unit test). joey is still
+    // console-attached here (do_login_e2e runs before the relinquish), so the
+    // devdev_open mint-gate lets it open. Best-effort: -1 runs the bare spawn.
+    long cc_fd = t_open(T_WALK_OPEN_FROM_ROOT, "/dev/consctl", 12, T_ORDWR);
+    static const char login_argv_bare[]    = "login\0";
+    static const char login_argv_consctl[] = "login\0" "--consctl-fd\0" "3\0";
     const char login_name[] = "/bin/login";  // #58: resolved via the post-pivot /bin bind
-    unsigned int login_fds[3] = { (unsigned int)cr_rd, (unsigned int)cr_rd,
-                                  (unsigned int)cr_rd };
+    int e2e_cc = (cc_fd >= 0);
+    unsigned int login_fds[4] = { (unsigned int)cr_rd, (unsigned int)cr_rd,
+                                  (unsigned int)cr_rd, (unsigned int)cc_fd };
     struct t_sys_spawn_args lreq = {
         .name_va       = (unsigned long)login_name,
-        .argv_data_va  = (unsigned long)login_argv,
+        .argv_data_va  = (unsigned long)(e2e_cc ? login_argv_consctl : login_argv_bare),
         .fd_list_va    = (unsigned long)login_fds,
         .name_len      = sizeof(login_name) - 1,
-        .argv_data_len = sizeof(login_argv) - 1,
-        .argc          = 1,
-        .fd_count      = 3,
+        .argv_data_len = e2e_cc ? (unsigned int)(sizeof(login_argv_consctl) - 1)
+                                : (unsigned int)(sizeof(login_argv_bare) - 1),
+        .argc          = e2e_cc ? 3u : 1u,
+        .fd_count      = e2e_cc ? 4u : 3u,
         .perm_flags    = LOGIN_PERMS,
         ._pad_envp     = 0,
         .cap_mask      = LOGIN_CAPS,
     };
     long lpid = t_spawn_full_argv(&lreq);
     (void)t_close(cr_rd);   // joey's copy; login holds its inherited fd 0
+    if (cc_fd >= 0) (void)t_close(cc_fd);   // joey's copy; login holds inherited fd 3
     if (lpid <= 0) {
         t_putstr("joey: login-e2e t_spawn_full_argv FAILED\n");
         return -1;
@@ -1833,21 +1847,34 @@ static void reap_adopted_orphans(void) {
 // The "needs a sleep primitive" premise of the old deferral was wrong --
 // t_torpor_wait is already a pacer in this file (the stratumd retry).
 #define GETTY_RESPAWN_BACKOFF_US 250000L /* 250 ms -> respawns bounded to ~4/sec */
-static void session_getty_loop(long cfd) {
-    static const char login_argv[] = "login\0";
+// session_getty_loop -- the getty. `cfd` is the /dev/cons handle (fd 0/1/2);
+// `consctl_fd` is the /dev/consctl mode-control handle joey opened while still
+// console-attached (>= 0), or -1 if it could not be opened. When present, it is
+// passed as the login child's 4th inherited fd -> child fd 3 (the kernel installs
+// fds positionally), and "--consctl-fd 3" tells login it is there. login uses it
+// for the LS-6 echo dance (cooked/echo username, masked password) WITHOUT being
+// console-attached -- the inherited fd is the capability (#94-B; the open-mint
+// gate kept joey the only minter). joey holds its consctl_fd for the loop's
+// lifetime (like cfd); each login inherits a ref, released at its reap.
+static void session_getty_loop(long cfd, long consctl_fd) {
+    static const char login_argv_bare[]    = "login\0";
+    static const char login_argv_consctl[] = "login\0" "--consctl-fd\0" "3\0";
     const char login_name[] = "/bin/login";  // #58: resolved via the post-pivot /bin bind
-    unsigned int fds[3] = { (unsigned int)cfd, (unsigned int)cfd, (unsigned int)cfd };
+    int with_cc = (consctl_fd >= 0);
+    unsigned int fds[4] = { (unsigned int)cfd, (unsigned int)cfd, (unsigned int)cfd,
+                            (unsigned int)consctl_fd };
     unsigned int getty_pacer = 0; /* never-woken pacer word for the backoff */
     for (;;) {
         reap_adopted_orphans();
         struct t_sys_spawn_args req = {
             .name_va       = (unsigned long)login_name,
-            .argv_data_va  = (unsigned long)login_argv,
+            .argv_data_va  = (unsigned long)(with_cc ? login_argv_consctl : login_argv_bare),
             .fd_list_va    = (unsigned long)fds,
             .name_len      = sizeof(login_name) - 1,
-            .argv_data_len = sizeof(login_argv) - 1,
-            .argc          = 1,
-            .fd_count      = 3,
+            .argv_data_len = with_cc ? (unsigned int)(sizeof(login_argv_consctl) - 1)
+                                     : (unsigned int)(sizeof(login_argv_bare) - 1),
+            .argc          = with_cc ? 3u : 1u,
+            .fd_count      = with_cc ? 4u : 3u,
             .perm_flags    = LOGIN_PERMS,
             ._pad_envp     = 0,
             .cap_mask      = LOGIN_CAPS,
@@ -3542,6 +3569,16 @@ int main(void) {
     // holds it for the getty's lifetime and hands a ref to each login.
     long console_fd = t_console_open();
 
+    // (3b) Open /dev/consctl NOW too, while joey is still console-attached. The
+    // devdev_open mint-gate requires console-attach (#94-B); joey is the sole
+    // minter and hands the fd down to each login so a non-attached login/shell
+    // can set the line discipline (cooked/echo) via the INHERITED fd -- the
+    // inherited fd is the capability. Best-effort: a failed open (-1) just means
+    // the getty's logins run without the LS-6 echo dance (no regression; login
+    // degrades to the raw byte-at-a-time prompt). /dev is mounted post-pivot
+    // (the #57b re-graft, above), so the path resolves here.
+    long consctl_fd = t_open(T_WALK_OPEN_FROM_ROOT, "/dev/consctl", 12, T_ORDWR);
+
     // (4) Drop the boot console-attach (I-27: during a user session corvus must
     // be the SOLE console-attached Proc; a post-SAK {joey,corvus} both-attached
     // state would break the trusted path). Anything that fails AFTER the banner
@@ -3568,6 +3605,6 @@ int main(void) {
             t_putstr("joey: t_console_open FAILED -- persisting without a login console\n");
         for (;;) { int st = 0; (void)t_wait_pid(&st); }
     }
-    session_getty_loop(console_fd);
+    session_getty_loop(console_fd, consctl_fd);
     return 1;   // unreachable -- session_getty_loop never returns
 }

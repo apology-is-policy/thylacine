@@ -185,7 +185,19 @@ seam). `cons_render_mode` renders the current mode back as five `+name`/`-name`
 tokens + `'\n'` (34 bytes; the symmetric `tcgetattr` seam). Phase-8 Pouch maps
 `tcsetattr`/`tcgetattr` ↔ these strings at the boundary-line. Today `devdev.c`'s
 `/dev/consctl` leaf routes its write→`cons_set_mode_cmd` and read→`cons_render_mode`
-(offset-sliced for read-to-EOF), still behind the I-27 console-attach gate.
+(offset-sliced for read-to-EOF). Its **open** is still I-27 console-attach-gated
+(the mint gate — only the console holder can name + open it), but since **#94-B**
+its **I/O is NOT re-gated**: a delegated holder of an INHERITED consctl fd
+(`/sbin/login`, the session shell) drives the line discipline without being
+console-attached. Sound because the open-mint gate + `CWALKONLY`/#81 (which rejects
+an O_PATH-walked handle at `sys_read`/`write`/`readdir` before `dev->read`/`write`)
+mean a consctl fd reaches a non-attached Proc ONLY by deliberate spawn-inheritance
+from the trusted chain (joey, console-attached, opens it pre-relinquish and hands
+it down) — the inherited fd is the capability. consctl is a control surface (the
+five mode flags); it can never read console INPUT, so an ungated consctl write
+cannot exfiltrate a keystroke. **cons (the data leaf) keeps its full I/O re-gate**
+(console-input theft is the A-5a-F2 break). See `devdev_console_gate_ok` +
+`dev_kind_is_cons_io`.
 
 A consctl write that applies a mode also **discards any half-assembled canonical
 line** (resets `g_cons.line_len` under `g_cons.lock` — the `tcsetattr` TCSAFLUSH
@@ -244,10 +256,12 @@ but the kernel is unambiguous against any consctl writer (LS-8 audit F1).
   arms the empty→non-empty poll edge **once** on the Enter flush (the chars buffer
   with the ring empty → no edge while assembling); the deferred mgr walk then makes
   the hook ready.
-- (LS-8 audit F2b) `devdev.cons_gate` (extended) — the I-27 gate on the **namespace**
-  path now also covers the live consctl I/O + the poll site: non-attached consctl
-  read/write → `-1`, cons/consctl `poll` → `POLLNVAL`; attached consctl read renders
-  + poll passes.
+- (#94-B) `devdev.cons_gate` — the I-27 gate split on the **namespace** path:
+  **cons** stays fully I/O-re-gated (non-attached read/write → `-1`, `poll` →
+  `POLLNVAL`); **consctl** keeps its open-mint gate but its I/O is **ungated**
+  (non-attached read renders the mode line, write applies + takes effect [asserted
+  via `cons_test_termios`], `poll` is always-ready). The non-attached consctl
+  write is restored via `cons_test_set_termios` so the probe is non-destructive.
 - (A-4c) `cons.blocking_read_wakeup`, `cons.ctrlc_consumed`,
   `cons.break_sets_sak`, `cons.sak_via_console_mgr`, the SAK/owner role-split set.
 
@@ -258,7 +272,9 @@ but the kernel is unambiguous against any consctl writer (LS-8 audit F1).
   buffered.
 - `cons_poll`: never errors (returns the ready revents; `0` if neither requested
   event is ready). `devdev_poll` returns `POLLNVAL` for a non-console-attached
-  caller of `/dev/cons` / `/dev/consctl` (the I-27 gate, like read/write).
+  caller of `/dev/cons` (the I-27 gate, like cons read/write). `/dev/consctl` poll
+  is **ungated** since #94-B (always-ready; consistent with its ungated I/O —
+  consctl installs no data-readiness hook + has no input timing to leak).
 
 ## Known caveats / footguns
 
@@ -282,17 +298,20 @@ but the kernel is unambiguous against any consctl writer (LS-8 audit F1).
   == `CONS_RING_SIZE` (256), so a 256-char line + NL = 257 bytes; the 256 chars
   fill the ring and the NL is dropped (bounded, never corrupting). A real line is
   far shorter; this is the pathological edge (`cons.cook_line_overflow`).
-- **`/dev/consctl` is still I-27 console-attach-gated** (open + read + write).
-  The session-leader that wants to control termios is the **non-attached** login
-  (it reads the console via an inherited `SYS_CONSOLE_OPEN` fd, never opens
-  `/dev/consctl`), so the **login echo consumer (LS-6) is pending a console-mode
-  access decision**: either relax the consctl I/O re-gate (the O_PATH bypass is
-  already closed by `CWALKONLY`/#81, so the open-gate + inherited-handle model
-  suffices) and have the getty pass login a consctl fd, or add a capability-keyed
-  `SYS_CONSOLE_MODE(fd)` (deviates from the consctl-file scripture). The LS-8b
-  kernel mechanism is complete + unit-tested independent of this; `ut` (LS-8c)
-  drives cooked mode for foreground children without the gate question (it is the
-  console **owner**, and sets mode for itself).
+- **`/dev/consctl` open is I-27 console-attach-gated; its I/O is NOT (since #94-B).**
+  The session-leader that controls termios is the **non-attached** login (it reads
+  the console via an inherited `SYS_CONSOLE_OPEN` fd; it cannot open the gated
+  `/dev/consctl`). The console-mode-access fork was resolved **B (inherited consctl
+  fd)** (user-voted 2026-06-12) over C (`SYS_CONSOLE_MODE(fd)`, which would deviate
+  from the consctl-file scripture): the I/O re-gate is dropped for consctl, and the
+  getty (joey, console-attached) opens `/dev/consctl` pre-relinquish and hands it
+  to each login via spawn-fd inheritance (child fd 3) + `--consctl-fd 3`. login
+  does the LS-6 dance (cooked+echo username / cooked-noecho passphrase / restore).
+  Sound: the open-mint gate + `CWALKONLY`/#81 mean only the trusted chain ever
+  holds a consctl fd — the inherited fd is the capability. The **ut raw/cooked
+  dance** for foreground children (`ut` is the console *owner*, not attached, so it
+  too needs the inherited fd) is **#94-B-b** (with `Command::inherit_fd` + the
+  login→ut forward), co-located with LS-7.
 - The echo/output **capture sink** (`g_cons_echo_capture`) is test-only — always
   false in production (the emit path is then one never-taken branch + `uart_putc`).
   It is always-compiled, consistent with the other `cons_test_*` hooks; #71 gates

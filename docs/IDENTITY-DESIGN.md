@@ -2036,12 +2036,21 @@ and ungated.
 - **Two gated entry points = defense-in-depth.** `SYS_CONSOLE_OPEN` keeps its gate (the
   bootstrap still needs the syscall before `/dev` is mounted); `devdev.open` is the namespace
   front-door's gate. Retiring `SYS_CONSOLE_OPEN` in favor of the path alone is a v1.x seam.
-- **`consctl` is present + gated but carries NO v1.0 modes** (read EOF / write -1; there is no
-  termios/line-discipline yet -- that is LS-8 #952). The path + the gate exist now so the LS-8
-  PTY surface lands its mode-control content into an already-secured, already-named file rather
-  than introducing a new gated path later. (Plan 9 conventionally pairs `cons` with `consctl`;
-  gating `consctl` identically is correct because disabling echo / setting raw mode on the
-  trusted login prompt is itself a console-trust operation.)
+- **`consctl` is present + gated** -- the path + the gate exist now so the line-discipline
+  content lands into an already-named file. (Plan 9 conventionally pairs `cons` with `consctl`.)
+  **As-built supersession (LS-8b + #94-B):** LS-8b filled in the five-flag termios modes (no
+  longer "read EOF / write -1"), and **#94-B-a then DROPPED the consctl I/O re-gate** (the
+  user-voted "B = inherited consctl fd" resolution, 2026-06-12; ARCH §23.5.1 + §25.4). The #57b
+  rationale above -- "gating `consctl` identically is correct because disabling echo / setting
+  raw mode ... is itself a console-trust operation" -- is **superseded for I/O**: the
+  console-trust check that matters is the **OPEN mint-gate** (kept; only a console-attached Proc
+  can NAME + open consctl), not a per-I/O re-check. Once minted by the trusted console holder, an
+  INHERITED consctl fd is the capability -- a non-console-attached but deliberately-delegated
+  Proc (login, the session shell) sets the line discipline through it. Sound because the
+  open-mint gate + `CWALKONLY`/#81 keep a consctl fd inside the trusted spawn chain (joey ->
+  login), and consctl is a control surface (the five flags) that can never read console INPUT.
+  **cons (the input/data leaf) keeps its full per-I/O re-gate** -- console-input theft is the
+  A-5a-F2 break, so that re-check is load-bearing and unchanged.
 - **One console implementation, two front doors.** `devdev`'s `cons` leaf delegates its I/O to
   the SAME `cons.c` ring/uart code path `devcons` (the syscall Dev) uses -- the single-reader
   busy-guard, the INTERACTIVE-band promotion, and the death-interruptible read are reused, not

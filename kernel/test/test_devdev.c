@@ -10,6 +10,7 @@
 
 #include "test.h"
 
+#include <thylacine/cons.h>                  // #94-B: cons_test_termios + CONS_ICANON
 #include <thylacine/dev.h>
 #include <thylacine/poll.h>
 #include <thylacine/proc.h>
@@ -164,25 +165,35 @@ void test_devdev_cons_gate(void) {
     struct Spoor *cc_d = walk_to("consctl");
     bool cc_deny = (cc_d != NULL) && (devdev.open(cc_d, 0) == NULL);
 
-    // I/O gate (closes the O_PATH-skips-open bypass): read/write directly on an
-    // UNOPENED cons spoor without console-attach must also fail -- T_OPATH skips
-    // dev->open, so the gate is re-checked at the I/O sites. cons_d is walked but
-    // never opened (the O_PATH shape). Without the I/O gate, devdev_read here
+    // cons I/O gate (closes the O_PATH-skips-open bypass): read/write/poll
+    // directly on an UNOPENED cons spoor without console-attach must fail --
+    // T_OPATH skips dev->open, so cons re-checks at the I/O sites. cons_d is
+    // walked but never opened (the O_PATH shape); without the I/O gate devdev_read
     // would reach cons_input_read and steal console input.
-    char gbuf[4];
+    char gbuf[8];
     bool cons_read_deny  = (cons_d != NULL) && (devdev.read(cons_d, gbuf, sizeof(gbuf), 0) < 0);
     bool cons_write_deny = (cons_d != NULL) && (devdev.write(cons_d, "x", 1, 0) < 0);
+    bool cons_poll_deny  = (cons_d != NULL) && (devdev.poll(cons_d, POLLIN, NULL) == POLLNVAL);
 
-    // 8b: consctl read/write are now LIVE (cons_render_mode / cons_set_mode_cmd,
-    // replacing the v1.0 read->0/write->-1 stub), so the I/O gate must cover them
-    // too. The denied write is rejected AT THE GATE (before cons_set_mode_cmd), so
-    // it cannot mutate the global termios. And the poll gate (devdev_poll ->
-    // POLLNVAL) for BOTH console leaves -- an O_PATH walk-open skips devdev_open,
-    // so a non-attached poller could otherwise learn console-input timing.
-    bool cc_read_deny   = (cc_d != NULL)   && (devdev.read(cc_d, gbuf, sizeof(gbuf), 0) < 0);
-    bool cc_write_deny  = (cc_d != NULL)   && (devdev.write(cc_d, "+echo", 5, 0) < 0);
-    bool cons_poll_deny = (cons_d != NULL) && (devdev.poll(cons_d, POLLIN, NULL) == POLLNVAL);
-    bool cc_poll_deny   = (cc_d != NULL)   && (devdev.poll(cc_d, POLLIN, NULL) == POLLNVAL);
+    // #94-B: consctl (the CONTROL leaf) is NOT I/O-re-gated -- a delegated holder
+    // of an INHERITED consctl fd (login/ut) must set the line discipline without
+    // being console-attached. So a NON-attached caller's consctl I/O SUCCEEDS:
+    // read renders the mode line (> 0); write applies (returns n) + takes effect;
+    // poll is always-ready (never POLLNVAL). The open-mint gate (still enforced --
+    // cc_deny above) + #81 CWALKONLY are the protections. The write mutates the
+    // global termios, so snapshot + restore it around the probe.
+    bool cc_read_allow = (cc_d != NULL) && (devdev.read(cc_d, gbuf, sizeof(gbuf), 0) > 0);
+    u32  saved_tio = cons_test_termios();
+    bool cc_write_took = false;
+    if (cc_d != NULL) {
+        // "+icanon" sets a flag the boot default (ISIG only) lacks -- reading it
+        // back via the kernel termios proves the non-attached write reached
+        // cons_set_mode_cmd (not merely returned a count).
+        bool w = (devdev.write(cc_d, "+icanon", 7, 0) == 7);
+        cc_write_took = w && ((cons_test_termios() & CONS_ICANON) != 0u);
+    }
+    cons_test_set_termios(saved_tio);   // restore: a non-attached write mutated it
+    bool cc_poll_allow_un = (cc_d != NULL) && (devdev.poll(cc_d, POLLIN, NULL) != POLLNVAL);
 
     // ALLOW: console-attached -> open succeeds.
     proc_mark_console_attached(p);
@@ -208,10 +219,10 @@ void test_devdev_cons_gate(void) {
     TEST_ASSERT(cc_deny, "I-27: non-attached open of /dev/consctl DENIED");
     TEST_ASSERT(cons_read_deny, "I-27: non-attached read of /dev/cons DENIED (O_PATH bypass)");
     TEST_ASSERT(cons_write_deny, "I-27: non-attached write of /dev/cons DENIED (O_PATH bypass)");
-    TEST_ASSERT(cc_read_deny, "I-27: non-attached read of /dev/consctl DENIED (8b live I/O)");
-    TEST_ASSERT(cc_write_deny, "I-27: non-attached write of /dev/consctl DENIED (8b live I/O)");
     TEST_ASSERT(cons_poll_deny, "I-27: non-attached poll of /dev/cons -> POLLNVAL");
-    TEST_ASSERT(cc_poll_deny, "I-27: non-attached poll of /dev/consctl -> POLLNVAL");
+    TEST_ASSERT(cc_read_allow, "#94-B: non-attached read of /dev/consctl ALLOWED (renders mode line)");
+    TEST_ASSERT(cc_write_took, "#94-B: non-attached write of /dev/consctl ALLOWED + applied (inherited-fd capability)");
+    TEST_ASSERT(cc_poll_allow_un, "#94-B: non-attached poll of /dev/consctl always-ready (not POLLNVAL)");
     TEST_ASSERT(cons_a != NULL, "walk /dev/cons (attached)");
     TEST_ASSERT(cons_allow, "console-attached open of /dev/cons ALLOWED");
     TEST_ASSERT(cc_allow_read, "console-attached read of /dev/consctl renders the mode line");
