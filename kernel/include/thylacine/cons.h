@@ -19,6 +19,8 @@
 
 #include <thylacine/types.h>
 
+struct poll_waiter;   // <thylacine/poll.h> -- the cons_poll hook parameter
+
 // Feed one received byte to the console input layer. Called from the PL011 RX
 // IRQ handler (arch/arm64/uart.c::uart_rx_handler), IRQ context. `is_break` is
 // true when the PL011 flagged a line BREAK on this entry (DR bit-10 BE) -- the
@@ -39,6 +41,15 @@ void cons_rx_input(u8 byte, bool is_break);
 // the UART (== n at v1.0).
 long cons_input_read(void *buf, long n);
 long cons_output_write(const void *buf, long n);
+
+// LS-8a: the shared console poll. Register-then-observe under the cons lock:
+// POLLIN iff the RX ring is non-empty; POLLOUT always (the UART never blocks);
+// if `pw` is non-NULL, install it on the console poll-hook list. The IRQ
+// producer cannot walk that list (poll_waiter_list_wake is not IRQ-safe), so a
+// POLLIN edge sets a flag + wakes console_mgr, which walks it in process context
+// (the cons_poll.tla I-9 deferred-wake relay). Shared by devcons
+// (SYS_CONSOLE_OPEN) + devdev's /dev/cons leaf -- #57b single-impl.
+short cons_poll(short events, struct poll_waiter *pw);
 
 // The console_mgr kproc kthread entry. Spawned once at boot (boot_main). Sleeps
 // on the console-manager Rendez; on wake, performs the deferred privileged work
@@ -63,6 +74,17 @@ bool cons_test_intr_pending(void);
 // True iff an A-4c-2 SAK (serial BREAK) is pending (set by cons_rx_input on a
 // BREAK, cleared by the console_mgr kthread before proc_console_sak runs).
 bool cons_test_sak_pending(void);
+
+// True iff a POLLIN deferred-wake (cons_rx_input set poll_wake_pending) awaits
+// console_mgr's hook-list walk (LS-8a). Cleared by cons_service_deferred.
+bool cons_test_pollwake_pending(void);
+
+// Run ONE console_mgr service iteration (drain the deferred flags + act) -- the
+// production cons_service_deferred path, driven deterministically. Lets a test
+// exercise the LS-8a deferred poll-wake relay (register a poll_waiter via
+// cons_poll -> cons_rx_input a byte -> cons_test_service_deferred wakes the hook)
+// without a live console_mgr kthread or a real UART IRQ.
+void cons_test_service_deferred(void);
 
 // Force the single-reader busy flag (to exercise the devcons_read busy-guard
 // without a second live reader thread).

@@ -11,6 +11,7 @@
 
 #include <thylacine/cons.h>
 #include <thylacine/dev.h>
+#include <thylacine/poll.h>                  // LS-8a: pollable cons (deferred poll-wake)
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
 #include <thylacine/sched.h>                 // RW-11 SA-1b: sched_mark_interactive
@@ -54,9 +55,23 @@ struct cons_input {
     bool        reader_busy;           // a devcons_read is parked (single-reader)
     bool        intr_pending;          // mutated under lock; read locklessly in cond -- cons_intr_*
     bool        sak_pending;           // A-4c-2: a serial BREAK (SAK) awaits console_mgr -- cons_sak_*
+    bool        poll_wake_pending;     // LS-8a: a POLLIN edge awaits console_mgr's hook walk -- cons_pollwake_*
+
+    // LS-8a: the poll-hook list for /dev/cons. The SYS_CONSOLE_OPEN fd (devcons)
+    // AND the namespace /dev/cons leaf (devdev) share it -- #57b single-impl, so
+    // a wake reaches every poller of the one console. cons_rx_input runs in IRQ
+    // context and CANNOT walk it (poll_waiter_list_wake takes a plain non-irqsave
+    // lock + nests a wakeup); it sets poll_wake_pending instead, and console_mgr
+    // walks the list in process context (the cons_poll.tla I-9 deferred-wake
+    // relay). The list lives in this file-scope static -> IMMORTAL, so the
+    // RW-2 2C-F1 registered-object-lifetime hazard (a sibling freeing the
+    // embedded list mid-sleep) structurally cannot arise here; multi-poller
+    // composition is the standard poll.tla case (each poller has its own private
+    // Rendez + stack waiter).
+    struct poll_waiter_list poll_list;
 };
 
-static struct cons_input g_cons = { .lock = SPIN_LOCK_INIT };
+static struct cons_input g_cons = { .lock = SPIN_LOCK_INIT, .poll_list = POLL_WAITER_LIST_INIT };
 static struct Rendez g_cons_data_rendez = RENDEZ_INIT;   // a reader parks here
 static struct Rendez g_cons_mgr_rendez  = RENDEZ_INIT;   // console_mgr parks here
 
@@ -78,6 +93,8 @@ static inline bool cons_intr_load(void)    { return __atomic_load_n(&g_cons.intr
 static inline void cons_intr_store(bool v) { __atomic_store_n(&g_cons.intr_pending, v, __ATOMIC_RELAXED); }
 static inline bool cons_sak_load(void)     { return __atomic_load_n(&g_cons.sak_pending, __ATOMIC_RELAXED); }
 static inline void cons_sak_store(bool v)  { __atomic_store_n(&g_cons.sak_pending, v, __ATOMIC_RELAXED); }
+static inline bool cons_pollwake_load(void)   { return __atomic_load_n(&g_cons.poll_wake_pending, __ATOMIC_RELAXED); }
+static inline void cons_pollwake_store(bool v) { __atomic_store_n(&g_cons.poll_wake_pending, v, __ATOMIC_RELAXED); }
 
 void cons_rx_input(u8 byte, bool is_break) {
     bool wake_data = false, wake_mgr = false;
@@ -103,6 +120,20 @@ void cons_rx_input(u8 byte, bool is_break) {
             g_cons.tail = (g_cons.tail + 1u) & (CONS_RING_SIZE - 1u);
             cons_count_store(c + 1u);
             wake_data = true;
+            // LS-8a: relay the POLLIN readiness edge to pollers. Only the
+            // empty->non-empty transition needs a wake -- a poller that sampled
+            // count>0 returned POLLIN without sleeping, so the only sleeping
+            // pollers sampled count==0, and this byte (c==0) is the edge that
+            // makes them ready. poll_waiter_list_wake is NOT IRQ-safe, so set
+            // the flag + wake console_mgr (which walks the hook list in process
+            // context). The flag is set under g_cons.lock, the SAME lock as the
+            // count store, so the mgr's deferred drain+walk is causally after
+            // this mutation -> any poller that registered before it is found
+            // (register-then-observe; cons_poll.tla NoMissedConsPoll).
+            if (c == 0u) {
+                cons_pollwake_store(true);
+                wake_mgr = true;
+            }
         }
         // else: ring full -> drop (bounded; never overflows).
     }
@@ -129,7 +160,47 @@ static int cons_data_ready(void *arg) {
 // SAK). Same lockless-under-Rendez-lock discipline as cons_data_ready.
 static int cons_mgr_pending(void *arg) {
     (void)arg;
-    return cons_intr_load() || cons_sak_load();
+    return cons_intr_load() || cons_sak_load() || cons_pollwake_load();
+}
+
+// Service all deferred console actions in process context: drain the flags
+// under g_cons.lock, then act with the lock RELEASED. The act must run lock-free
+// -- proc_console_sak takes g_proc_table_lock; poll_waiter_list_wake takes the
+// poll_list lock + nests a wakeup; neither is legal under g_cons.lock. Shared by
+// console_mgr_main + the test harness (cons_test_service_deferred) so a test
+// drives the production path EXACTLY.
+static void cons_service_deferred(void) {
+    irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+    bool do_intr = cons_intr_load();
+    bool do_sak  = cons_sak_load();
+    bool do_poll = cons_pollwake_load();
+    cons_intr_store(false);
+    cons_sak_store(false);
+    cons_pollwake_store(false);
+    spin_unlock_irqrestore(&g_cons.lock, s);
+
+    // RW-7 R2-F2 (round-2 F2): a SAK SUPERSEDES a Ctrl-C coalesced into the
+    // same batch -- the two pending flags lose their arrival order, and
+    // posting `interrupt` to the PRE-SAK owner (joey during bringup ->
+    // non-self-managing -> the LS-5 terminate latch -> init dies) is exactly
+    // the outcome R2-F2 removed from the SAK itself, re-synthesized via
+    // coalescing. Post-SAK the owner is NULL, so the chronologically-correct
+    // delivery of an after-BREAK Ctrl-C is a drop; a before-BREAK Ctrl-C
+    // losing to a near-simultaneous SAK is the operator's intent (they hit
+    // BREAK to reach the trusted prompt). Both run in process context, never
+    // under g_cons.lock (proc_console_sak takes g_proc_table_lock; since
+    // R2-F2 it posts NO note -- it only revokes + re-grants the attach bit).
+    if (do_sak)       proc_console_sak();
+    else if (do_intr) proc_console_post_interrupt();
+
+    // LS-8a: the deferred poll-wake. A POLLIN edge (cons_rx_input set
+    // poll_wake_pending) -> walk the hook list now, in process context, where
+    // poll_waiter_list_wake's plain lock + nested wakeup are legal. Independent
+    // of intr/sak (a data byte arrives with no Ctrl-C). The walk runs with
+    // g_cons.lock RELEASED (lock order object -> list); the producer's count
+    // mutation already happened-before via the just-drained flag, so any poller
+    // registered before it is found -- cons_poll.tla NoMissedConsPoll.
+    if (do_poll)      poll_waiter_list_wake(&g_cons.poll_list);
 }
 
 // The console_mgr kproc kthread (spawned once at boot). Services deferred
@@ -140,27 +211,7 @@ void console_mgr_main(void) {
         // death-interrupt just re-loops -- there is no caller state to unwind.
         if (sleep(&g_cons_mgr_rendez, cons_mgr_pending, NULL) == SLEEP_INTR)
             continue;
-
-        irq_state_t s = spin_lock_irqsave(&g_cons.lock);
-        bool do_intr = cons_intr_load();
-        bool do_sak  = cons_sak_load();
-        cons_intr_store(false);
-        cons_sak_store(false);
-        spin_unlock_irqrestore(&g_cons.lock, s);
-
-        // RW-7 R2-F2 (round-2 F2): a SAK SUPERSEDES a Ctrl-C coalesced into the
-        // same batch -- the two pending flags lose their arrival order, and
-        // posting `interrupt` to the PRE-SAK owner (joey during bringup ->
-        // non-self-managing -> the LS-5 terminate latch -> init dies) is exactly
-        // the outcome R2-F2 removed from the SAK itself, re-synthesized via
-        // coalescing. Post-SAK the owner is NULL, so the chronologically-correct
-        // delivery of an after-BREAK Ctrl-C is a drop; a before-BREAK Ctrl-C
-        // losing to a near-simultaneous SAK is the operator's intent (they hit
-        // BREAK to reach the trusted prompt). Both run in process context, never
-        // under g_cons.lock (proc_console_sak takes g_proc_table_lock; since
-        // R2-F2 it posts NO note -- it only revokes + re-grants the attach bit).
-        if (do_sak)       proc_console_sak();
-        else if (do_intr) proc_console_post_interrupt();
+        cons_service_deferred();
     }
 }
 
@@ -171,6 +222,7 @@ void cons_test_reset(void) {
     g_cons.reader_busy = false;
     cons_intr_store(false);
     cons_sak_store(false);
+    cons_pollwake_store(false);
     spin_unlock_irqrestore(&g_cons.lock, s);
 }
 
@@ -180,6 +232,14 @@ bool cons_test_intr_pending(void) {
 
 bool cons_test_sak_pending(void) {
     return cons_sak_load();
+}
+
+bool cons_test_pollwake_pending(void) {
+    return cons_pollwake_load();
+}
+
+void cons_test_service_deferred(void) {
+    cons_service_deferred();
 }
 
 void cons_test_set_reader_busy(bool busy) {
@@ -337,6 +397,33 @@ static struct Spoor *devcons_power(struct Spoor *c, int on) {
     return NULL;
 }
 
+// LS-8a: the ONE console poll implementation, shared by devcons (the
+// SYS_CONSOLE_OPEN fd) + devdev's /dev/cons leaf (#57b single-impl). Register-
+// then-observe: sample readiness AND (if pw) install the hook, BOTH under
+// g_cons.lock -- so a cons_rx_input that sets the ring count under the same lock
+// is serialized against this sample+register (the producer's mutation either
+// happens-before the sample, seen directly, or after, found by the deferred
+// hook-list walk). POLLIN iff the ring holds >= 1 byte; POLLOUT always
+// (uart_putc never blocks -- a poller must therefore request POLLIN to wait for
+// input). pw is registered UNCONDITIONALLY (even when POLLIN-ready);
+// sys_poll_for_proc's fast path unregisters it -- the poll.tla / devpipe
+// discipline. The poll_waiter_list_register nests the (plain) list lock under
+// g_cons.lock (irqsave) -- lock order object -> list, IRQs already masked.
+short cons_poll(short events, struct poll_waiter *pw) {
+    short revents = 0;
+    irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+    if ((events & POLLIN) && cons_count_load() > 0u) revents |= POLLIN;
+    if (events & POLLOUT)                            revents |= POLLOUT;
+    if (pw) poll_waiter_list_register(&g_cons.poll_list, pw);
+    spin_unlock_irqrestore(&g_cons.lock, s);
+    return revents;
+}
+
+static short devcons_poll(struct Spoor *c, short events, struct poll_waiter *pw) {
+    (void)c;
+    return cons_poll(events, pw);
+}
+
 struct Dev devcons = {
     .dc       = 'c',
     .name     = "cons",
@@ -357,6 +444,7 @@ struct Dev devcons = {
     .bread    = devcons_bread,
     .write    = devcons_write,
     .bwrite   = devcons_bwrite,
+    .poll     = devcons_poll,
 
     .remove   = devcons_remove,
     .wstat    = devcons_wstat,

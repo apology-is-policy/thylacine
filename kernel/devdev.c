@@ -21,6 +21,7 @@
 
 #include <thylacine/cons.h>
 #include <thylacine/dev.h>
+#include <thylacine/poll.h>
 #include <thylacine/proc.h>
 #include <thylacine/random.h>
 #include <thylacine/spoor.h>
@@ -294,6 +295,25 @@ static struct Spoor *devdev_power(struct Spoor *c, int on) {
     return NULL;
 }
 
+// LS-8a: poll dispatch. The cons leaf delegates to the shared cons_poll (real RX
+// readiness + the deferred-wake hook); the trivial leaves never block, so they
+// are always ready for the requested events (the NULL-.poll semantics, made
+// explicit here so /dev/cons can differ). The console leaves are I-27-gated here
+// too (like read/write): an O_PATH walk-open skips devdev_open, so a
+// non-attached caller could otherwise register a wake hook on the console and
+// learn its input timing -- POLLNVAL closes it. consctl is modeless at v1.0 (the
+// termios write surface is LS-8b) -> no ready events.
+static short devdev_poll(struct Spoor *c, short events, struct poll_waiter *pw) {
+    if (!c) return POLLNVAL;
+    u32 kind = (u32)c->qid.path;
+    if (dev_kind_is_console(kind)) {
+        if (!devdev_console_gate_ok()) return POLLNVAL;
+        if (kind == DEV_KIND_CONS) return cons_poll(events, pw);
+        return 0;   // consctl: not a data stream at v1.0 (LS-8b adds termios)
+    }
+    return (short)(events & POLL_REQUESTABLE);
+}
+
 struct Dev devdev = {
     .dc       = 'd',
     .name     = "dev",
@@ -314,6 +334,7 @@ struct Dev devdev = {
     .bread    = devdev_bread,
     .write    = devdev_write,
     .bwrite   = devdev_bwrite,
+    .poll     = devdev_poll,
 
     .remove   = devdev_remove,
     .wstat    = devdev_wstat,

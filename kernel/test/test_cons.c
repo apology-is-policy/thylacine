@@ -35,7 +35,9 @@
 #include <thylacine/dev.h>
 #include <thylacine/handle.h>   // A-5a: struct Handle / handle_get / KOBJ_SPOOR / RIGHT_*
 #include <thylacine/notes.h>
+#include <thylacine/poll.h>     // LS-8a: cons_poll + poll_waiter
 #include <thylacine/proc.h>
+#include <thylacine/rendez.h>   // LS-8a: Rendez for the poll_waiter
 #include <thylacine/sched.h>
 #include <thylacine/spoor.h>
 #include <thylacine/thread.h>
@@ -60,6 +62,8 @@ void test_proc_console_relinquish(void);              // A-5a (I-27)
 void test_proc_console_relinquish_other_owner(void);  // A-5a (self-only)
 void test_cons_console_open(void);                    // A-5a (SYS_CONSOLE_OPEN)
 void test_uart_rx_path_enabled(void);                 // #943 console-RX guard
+void test_cons_poll_readiness(void);                  // LS-8a (POLLIN/POLLOUT sample)
+void test_cons_poll_deferred_wake(void);              // LS-8a (the I-9 deferred relay)
 
 // cons.c test hooks + the extern Dev (read slot ignores the Spoor arg, so the
 // tests pass NULL). proc.c test helpers (the test_proc.c / test_devproc.c pattern).
@@ -609,4 +613,75 @@ void test_cons_sak_attaches_from_relinquished_state(void) {
     proc_set_console_trusted(NULL);
     trusted->state = PROC_STATE_ZOMBIE;
     proc_free(trusted);
+}
+
+// LS-8a: cons_poll readiness sampling. POLLIN iff the RX ring holds data;
+// POLLOUT always (the UART never blocks -- so a poller MUST request POLLIN to
+// wait for input, never POLLIN|POLLOUT). pw == NULL == sample-only (no hook).
+void test_cons_poll_readiness(void) {
+    cons_test_reset();
+    sched();                                            // drain any stale mgr wake
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "console_mgr SLEEPING at entry");
+
+    // Empty ring: not POLLIN-ready; always POLLOUT-ready.
+    TEST_EXPECT_EQ((int)(cons_poll(POLLIN, NULL) & POLLIN), 0,
+                   "empty cons: not POLLIN-ready");
+    TEST_ASSERT((cons_poll(POLLOUT, NULL) & POLLOUT) != 0,
+                "cons is always POLLOUT-ready (UART never blocks)");
+    short both = cons_poll(POLLIN | POLLOUT, NULL);
+    TEST_ASSERT((both & POLLOUT) != 0 && (both & POLLIN) == 0,
+                "empty cons: POLLOUT ready, POLLIN not");
+
+    // Seed a byte (the 0->1 edge wakes console_mgr): POLLIN ready on re-sample.
+    cons_rx_input((u8)'r', false);
+    TEST_ASSERT((cons_poll(POLLIN, NULL) & POLLIN) != 0,
+                "buffered data -> POLLIN ready");
+
+    cons_test_reset();                                  // clears poll_wake_pending
+    sched();                                            // drain the woken mgr back to SLEEPING
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "console_mgr drained to SLEEPING");
+}
+
+// LS-8a: the I-9 DEFERRED poll-wake relay, driven through the REAL boot
+// console_mgr kthread (cons_poll.tla). A poller registers a hook; a data byte
+// arrives in IRQ context (cons_rx_input) and sets poll_wake_pending but does NOT
+// walk the hook list (poll_waiter_list_wake is not IRQ-safe) -- so the hook stays
+// not-ready until console_mgr runs in process context and walks it. A LOST relay
+// (the cons_poll.tla NoMissedConsPoll violation) would leave pw.ready false and
+// hang a real poller forever. Mirrors test_cons_sak_via_console_mgr's
+// single-runnable sched() dance.
+void test_cons_poll_deferred_wake(void) {
+    cons_test_reset();
+    sched();                                            // console_mgr to SLEEPING
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "console_mgr SLEEPING at entry");
+
+    // Poller side: register a hook via cons_poll on the empty ring (register-
+    // then-observe). No POLLIN yet; the hook is not ready.
+    struct Rendez r; rendez_init(&r);
+    struct poll_waiter pw; poll_waiter_init(&pw, &r);
+    short rev = cons_poll(POLLIN, &pw);
+    TEST_EXPECT_EQ((int)(rev & POLLIN), 0, "empty cons: no POLLIN at register");
+    TEST_ASSERT(!pw.ready, "poll_waiter not ready before any data");
+
+    // Producer (IRQ side): a data byte on the empty->non-empty edge arms
+    // poll_wake_pending + wakes console_mgr (RUNNABLE) -- but does NOT walk the
+    // hook list (deferred). The hook MUST still be not-ready here.
+    cons_rx_input((u8)'p', false);
+    TEST_ASSERT(cons_test_pollwake_pending(), "data byte armed poll_wake_pending");
+    TEST_ASSERT(!pw.ready, "the IRQ producer did NOT wake the poll hook (deferred)");
+    TEST_EXPECT_EQ(sched_runnable_count(), 1u, "console_mgr RUNNABLE post-byte");
+
+    // Yield: console_mgr runs cons_service_deferred -> drains poll_wake_pending ->
+    // poll_waiter_list_wake walks the list -> pw.ready = true, then re-sleeps.
+    sched();
+    TEST_ASSERT(pw.ready, "console_mgr's deferred walk set the poll hook ready");
+    TEST_ASSERT(!cons_test_pollwake_pending(), "console_mgr consumed poll_wake_pending");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "console_mgr re-SLEEPING after the walk");
+
+    // The ring now holds the byte -> POLLIN ready on re-sample.
+    TEST_ASSERT((cons_poll(POLLIN, NULL) & POLLIN) != 0,
+                "buffered data -> POLLIN ready on re-sample");
+
+    poll_waiter_list_unregister(&pw);                   // NoStaleHook (stack waiter)
+    cons_test_reset();
 }
