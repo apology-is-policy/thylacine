@@ -163,6 +163,15 @@ void test_devdev_cons_gate(void) {
     struct Spoor *cc_d = walk_to("consctl");
     bool cc_deny = (cc_d != NULL) && (devdev.open(cc_d, 0) == NULL);
 
+    // I/O gate (closes the O_PATH-skips-open bypass): read/write directly on an
+    // UNOPENED cons spoor without console-attach must also fail -- T_OPATH skips
+    // dev->open, so the gate is re-checked at the I/O sites. cons_d is walked but
+    // never opened (the O_PATH shape). Without the I/O gate, devdev_read here
+    // would reach cons_input_read and steal console input.
+    char gbuf[4];
+    bool cons_read_deny  = (cons_d != NULL) && (devdev.read(cons_d, gbuf, sizeof(gbuf), 0) < 0);
+    bool cons_write_deny = (cons_d != NULL) && (devdev.write(cons_d, "x", 1, 0) < 0);
+
     // ALLOW: console-attached -> open succeeds.
     proc_mark_console_attached(p);
     struct Spoor *cons_a = walk_to("cons");
@@ -178,6 +187,8 @@ void test_devdev_cons_gate(void) {
     TEST_ASSERT(cons_deny, "I-27: non-attached open of /dev/cons DENIED");
     TEST_ASSERT(cc_d != NULL, "walk /dev/consctl resolves the name");
     TEST_ASSERT(cc_deny, "I-27: non-attached open of /dev/consctl DENIED");
+    TEST_ASSERT(cons_read_deny, "I-27: non-attached read of /dev/cons DENIED (O_PATH bypass)");
+    TEST_ASSERT(cons_write_deny, "I-27: non-attached write of /dev/cons DENIED (O_PATH bypass)");
     TEST_ASSERT(cons_a != NULL, "walk /dev/cons (attached)");
     TEST_ASSERT(cons_allow, "console-attached open of /dev/cons ALLOWED");
 

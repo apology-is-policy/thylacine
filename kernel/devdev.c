@@ -69,6 +69,21 @@ static bool dev_kind_is_console(u32 kind) {
     return kind == DEV_KIND_CONS || kind == DEV_KIND_CONSCTL;
 }
 
+// The I-27 console-attach gate. A non-console-attached caller must reach NEITHER
+// the open NOR the I/O path of cons/consctl. Enforced at THREE sites -- open,
+// read, write -- not just open, because SYS_WALK_OPEN_OPATH (T_OPATH) SKIPS
+// dev->open (kernel/syscall.c): an O_PATH walk-open of /dev/cons yields a born-
+// R|W handle WITHOUT invoking devdev_open, and sys_read_for_proc gates only on
+// RIGHT_READ (no COPEN requirement -- SYS_CONSOLE_OPEN's handle is read without
+// COPEN too), so a gate-at-open-only design would let any EL0 Proc O_PATH-open
+// then read /dev/cons and steal the getty's console input. Re-checking at the I/O
+// sites closes that bypass; the gate IS the console-attach state, enforced
+// wherever console I/O happens. Fail-closed on a NULL thread/proc.
+static bool devdev_console_gate_ok(void) {
+    struct Thread *t = current_thread();
+    return t != NULL && proc_is_console_attached(t->proc);
+}
+
 // =============================================================================
 // Walk.
 // =============================================================================
@@ -179,10 +194,8 @@ static int devdev_stat(struct Spoor *c, u8 *dp, int n) {
 // Proc cannot even spoof console output). The trivial leaves pass through ungated.
 static struct Spoor *devdev_open(struct Spoor *c, int omode) {
     if (!c) return NULL;
-    if (dev_kind_is_console((u32)c->qid.path)) {
-        struct Thread *t = current_thread();
-        if (!t || !proc_is_console_attached(t->proc)) return NULL;
-    }
+    if (dev_kind_is_console((u32)c->qid.path) && !devdev_console_gate_ok())
+        return NULL;
     return dev_simple_open(c, omode);
 }
 
@@ -201,6 +214,9 @@ static long devdev_read(struct Spoor *c, void *buf, long n, s64 off) {
     if (n < 0) return -1;
 
     u32 kind = (u32)c->qid.path;
+    // I-27: the console I/O gate (also at open; re-checked here to close the
+    // O_PATH bypass -- see devdev_console_gate_ok).
+    if (dev_kind_is_console(kind) && !devdev_console_gate_ok()) return -1;
     switch (kind) {
     case DEV_KIND_ROOT:                       // readdir deferred (match devctl)
         return -1;
@@ -236,6 +252,9 @@ static long devdev_write(struct Spoor *c, const void *buf, long n, s64 off) {
     if (n < 0) return -1;
 
     u32 kind = (u32)c->qid.path;
+    // I-27: the console I/O gate (also at open; re-checked here to close the
+    // O_PATH bypass -- see devdev_console_gate_ok).
+    if (dev_kind_is_console(kind) && !devdev_console_gate_ok()) return -1;
     switch (kind) {
     case DEV_KIND_NULL:
     case DEV_KIND_ZERO:                         // silently consume
