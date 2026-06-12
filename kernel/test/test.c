@@ -128,6 +128,8 @@ void test_territory_mount_clone_bumps_refs(void);
 void test_territory_mount_destroy_drops_all_refs(void);
 void test_territory_mount_devno_disambiguates(void);
 void test_territory_mount_rejects_cycle(void);
+void test_territory_mount_mp_path_lifecycle(void);
+void test_territory_mount_format_ns(void);
 void test_territory_mount_lookup_ref_survives_unmount(void);
 void test_territory_root_ref_survives_pivot(void);
 void test_territory_chroot_smoke(void);
@@ -434,6 +436,7 @@ void test_stalk_cross_mount_no_leak(void);
 void test_stalk_path_accumulate(void);
 void test_stalk_path_dotdot(void);
 void test_stalk_path_cross_transplant(void);
+void test_stalk_path_adopt_transplant(void);
 void test_devsrv_registered(void);
 void test_devsrv_open_root_dir(void);
 void test_devsrv_stat_native_root(void);
@@ -1047,6 +1050,8 @@ struct test_case g_tests[] = {
     { "territory_mount.destroy_drops_all_refs",           test_territory_mount_destroy_drops_all_refs,           false, NULL },
     { "territory_mount.devno_disambiguates",              test_territory_mount_devno_disambiguates,              false, NULL },
     { "territory_mount.rejects_cycle",                    test_territory_mount_rejects_cycle,                    false, NULL },
+    { "territory_mount.mp_path_lifecycle",                test_territory_mount_mp_path_lifecycle,                false, NULL },
+    { "territory_mount.format_ns",                        test_territory_mount_format_ns,                        false, NULL },
     { "territory_mount.lookup_ref_survives_unmount",      test_territory_mount_lookup_ref_survives_unmount,      false, NULL },
     { "territory_mount.root_ref_survives_pivot",          test_territory_root_ref_survives_pivot,                false, NULL },
     { "territory.chroot_smoke",                           test_territory_chroot_smoke,                           false, NULL },
@@ -2085,6 +2090,7 @@ struct test_case g_tests[] = {
     { "stalk.path_accumulate",         test_stalk_path_accumulate,         false, NULL },
     { "stalk.path_dotdot",             test_stalk_path_dotdot,             false, NULL },
     { "stalk.path_cross_transplant",   test_stalk_path_cross_transplant,   false, NULL },
+    { "stalk.path_adopt_transplant",   test_stalk_path_adopt_transplant,   false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
 };
 

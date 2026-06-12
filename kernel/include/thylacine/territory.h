@@ -44,6 +44,7 @@
 #include <thylacine/types.h>
 
 struct Spoor;
+struct Path;   // <thylacine/path.h> -- #66 namespace name retention (I-33)
 
 // PGRP_MAGIC — sentinel set at territory_alloc; checked at territory_unref
 // final release. SLUB's freelist write at kmem_cache_free clobbers offset
@@ -98,10 +99,20 @@ struct PgrpBind {
 // points (the A-5b corvus + per-user-stratum-fs case). devno (Plan 9 Chan.dev,
 // minted per attach by spoor_next_devno) closes that.
 //
-// Field order: pointer first (8B, 8-aligned), u64 qid_path (8B), then the three
-// u32s + pad fill the last 16B. sizeof(PgrpMount) = 32.
+// mp_path (#66, I-33): the mount-POINT's namespace name (the Plan 9 Chan.path of
+// the directory mounted onto -- "/srv", "/proc"), captured by path_ref'ing the
+// resolved mountpoint Spoor's ->path at mount()/MREPL and dropped at unmount() /
+// MREPL-displace / Territory final release / cloned per entry at territory_clone.
+// STRICTLY introspection-only (I-33): the mount table keys on the (dc, devno,
+// qid.path) identity above, NEVER on mp_path -- a NULL/stale/absent mp_path
+// changes only what /proc/<pid>/ns displays, never which entry stalk crosses.
+// NULL when the mountpoint had no retained name (kernel-internal direct walks).
+//
+// Field order: two pointers first (16B, 8-aligned), u64 qid_path (8B), then the
+// three u32s + pad fill the last 16B. sizeof(PgrpMount) = 40.
 struct PgrpMount {
     struct Spoor   *source;
+    struct Path    *mp_path;  // #66 (I-33): mount-point namespace name; ref-held
     u64             mp_qid_path;
     int             mp_dc;
     u32             mp_devno;
@@ -157,17 +168,17 @@ struct Territory {
     spin_lock_t          ns_lock;
 };
 
-_Static_assert(sizeof(struct PgrpMount) == 32,
-               "struct PgrpMount pinned at 32 bytes (8 source + 8 mp_qid_path + "
-               "4 mp_dc + 4 mp_devno + 4 flags + 4 pad). stalk-2 re-keyed from "
-               "the abstract path_id_t target to the (dc, devno, qid.path) "
-               "mount-point identity; the deliberate +16/entry growth.");
+_Static_assert(sizeof(struct PgrpMount) == 40,
+               "struct PgrpMount pinned at 40 bytes (8 source + 8 mp_path + "
+               "8 mp_qid_path + 4 mp_dc + 4 mp_devno + 4 flags + 4 pad). #66 "
+               "added the 8-byte mp_path (the mount-point namespace name, I-33); "
+               "stalk-2 re-keyed the target to the (dc, devno, qid.path) identity.");
 _Static_assert(sizeof(struct Territory)
-               == 32 + 8 * PGRP_MAX_BINDS + 32 * PGRP_MAX_MOUNTS + 24,
+               == 32 + 8 * PGRP_MAX_BINDS + 40 * PGRP_MAX_MOUNTS + 24,
                "struct Territory size pinned (stalk-2: 24 header + 8 root_spoor "
-               "+ 8*PGRP_MAX_BINDS + 32*PGRP_MAX_MOUNTS; LS-4 appended "
-               "dot_lock[4] + pad[4] + dot_path[8] = 16 after mounts[]; RW-4 SA-F1 "
-               "appended ns_lock[4] + pad[4] = 8 more = 24).");
+               "+ 8*PGRP_MAX_BINDS + 40*PGRP_MAX_MOUNTS [#66 grew PgrpMount 32->40]; "
+               "LS-4 appended dot_lock[4] + pad[4] + dot_path[8] = 16 after "
+               "mounts[]; RW-4 SA-F1 appended ns_lock[4] + pad[4] = 8 more = 24).");
 _Static_assert(__builtin_offsetof(struct Territory, magic) == 0,
                "magic must be at offset 0 (SLUB freelist write "
                "clobbers it on free, double-free defense)");
@@ -186,10 +197,10 @@ _Static_assert(__builtin_offsetof(struct Territory, mounts)
                "mounts[] pinned after binds[]");
 // LS-4: the cwd fields trail mounts[] so the offsets above stay fixed.
 _Static_assert(__builtin_offsetof(struct Territory, dot_lock)
-               == 32 + 8 * PGRP_MAX_BINDS + 32 * PGRP_MAX_MOUNTS,
-               "dot_lock pinned after mounts[] (LS-4)");
+               == 32 + 8 * PGRP_MAX_BINDS + 40 * PGRP_MAX_MOUNTS,
+               "dot_lock pinned after mounts[] (LS-4; #66 grew PgrpMount 32->40)");
 _Static_assert(__builtin_offsetof(struct Territory, dot_path)
-               == 32 + 8 * PGRP_MAX_BINDS + 32 * PGRP_MAX_MOUNTS + 8,
+               == 32 + 8 * PGRP_MAX_BINDS + 40 * PGRP_MAX_MOUNTS + 8,
                "dot_path pinned after dot_lock (4B lock + 4B pad)");
 
 // Bring up the territory subsystem. Allocates the Territory SLUB cache
@@ -432,5 +443,22 @@ int  territory_nbinds(struct Territory *territory);
 int  territory_nmounts(struct Territory *territory);
 u64  territory_total_created(void);
 u64  territory_total_destroyed(void);
+
+// territory_format_ns (#66): render the mount list + bind count into `buf`
+// (NUL-NOT-appended; the caller treats [0,len) as the content) for the
+// /proc/<pid>/ns introspection file. One line per mount entry:
+//   "mount <mountpoint-name> <source-name-or-#dc>\n"
+// then "binds: <N>\n". The mount-point name is the entry's ref-held mp_path
+// (I-33; "?" when unknown); the source name is its Spoor's ->path, or "#<dc>"
+// (the Plan 9 device spec) when the source is a device root with no namespace
+// name. Reads the mount table UNDER ns_lock (the entries + their ref-held,
+// immutable Path strings are stable for the read); truncates at `cap` (the
+// list is best-effort introspection -- I-33). Returns the byte count written
+// (<= cap). NULL/zero-cap -> 0. The CALLER must hold the target Proc alive
+// (devproc runs this inside a proc_for_each callback under g_proc_table_lock,
+// which keeps p->territory alive -- the #57a F2 envelope); the resulting
+// g_proc_table_lock -> ns_lock lock edge is acyclic (nothing under ns_lock
+// takes g_proc_table_lock).
+u64  territory_format_ns(struct Territory *territory, char *buf, u64 cap);
 
 #endif // THYLACINE_PGRP_H

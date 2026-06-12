@@ -210,18 +210,18 @@ static size_t format_cmdline(struct Proc *p, char *buf, size_t cap) {
     return off;
 }
 
-// ns: report territory bind count (the territory's binds[] is private
-// to territory.c; we just expose count + opaque path_id pairs would
-// require a territory_iter API that's not yet there). v1.0: print the
-// count.
+// ns: render the territory's mount list (mount-point name + source name) + the
+// bind count, via territory_format_ns (#66). The renderer takes the territory's
+// ns_lock to read mounts[] -- the entries + their ref-held, immutable Path
+// strings are stable for the read -- so format_ns runs under BOTH g_proc_table_-
+// lock (the #57a F2 envelope keeping p->territory alive) AND, briefly, ns_lock.
+// That g_proc_table_lock -> ns_lock edge is acyclic (nothing under ns_lock takes
+// g_proc_table_lock; mount/unmount/clone only spoor_ref / path_ref / defer the
+// sleeping clunk outside the lock). Pre-#66 this read the bind COUNT locklessly
+// (a single aligned-int read); the mount LIST is a pointer walk a concurrent
+// unmount could free, so the lock is now load-bearing for the read.
 static size_t format_ns(struct Proc *p, char *buf, size_t cap) {
-    size_t off = 0;
-    size_t n;
-    n = fmt_str(buf, cap, off, "binds: ");                   if (!n) return 0; off += n;
-    n = fmt_sdec(buf, cap, off, territory_nbinds(p->territory));
-    if (!n && territory_nbinds(p->territory) != 0)            return 0; off += n;
-    n = fmt_str(buf, cap, off, "\n");                         if (!n) return 0; off += n;
-    return off;
+    return (size_t)territory_format_ns(p->territory, buf, (u64)cap);
 }
 
 // =============================================================================
@@ -452,24 +452,30 @@ static void devproc_close(struct Spoor *c) {
 // Read: dispatch by qid kind. Generates synthetic content into a stack
 // buffer, then copies the requested [off, off+n) slice.
 //
-// Buffer cap is large enough for the v1.0 fields (status fits in <128 B
-// even with longest pid; cmdline + ns are smaller). 256 B is generous.
-#define DEVPROC_READ_BUF 256
+// Buffer cap. status fits in <128 B; cmdline is smaller. #66 made ns render the
+// full mount list ("mount <pt> <src>\n" per entry, up to PGRP_MAX_MOUNTS=12). 512 B
+// holds the common short-name boot layout; a single deep mountpoint/source name
+// (each up to SYS_OPEN_PATH_MAX=1024) can exceed it, so the list truncates --
+// cleanly, at a whole-line boundary (territory_format_ns audit F2), best-effort
+// per I-33. Stack-safe. (Completeness for deep namespaces is a v1.x offset-aware
+// multi-read.)
+#define DEVPROC_READ_BUF 512
 
 // #57a F2: format under g_proc_table_lock (the kill-path shape) so the target
 // Proc cannot be unlinked + freed between the lookup and the field deref
 // (proc_unlink_child requires the lock; under it a Proc is either linked-alive
 // or already unlinked-not-found). A non-zero callback return early-stops at the
-// matched pid (also bounding the lock-hold). format_ns reads p->territory->nbinds
-// LOCKLESSLY -- territory_nbinds is a bare `return p->nbinds`, an aligned-int
-// single-copy-atomic read that takes NO ns_lock, so there is no
-// g_proc_table_lock -> ns_lock edge; the read is safe only because
-// g_proc_table_lock keeps p (and thus p->territory) alive, and a marginally
-// stale count is fine for a "binds: N" display. No sleep / no allocation runs
-// under the lock. Pre-#57a devproc was unmounted, so this read was
-// single-threaded only; the mount makes it cross-Proc + concurrently-reapable,
-// so the old "no concurrent reap" comment was FALSE for the cross-Proc case --
-// the bare-pointer-after-unlock deref was a UAF.
+// matched pid (also bounding the lock-hold). g_proc_table_lock keeps p (and thus
+// p->territory + p->handles) alive across the format.
+//
+// #66: format_ns now reads the territory's mount LIST (pointer-chasing
+// mounts[].mp_path / .source->path), so it takes p->territory->ns_lock inside
+// territory_format_ns -- a g_proc_table_lock -> ns_lock edge. It is ACYCLIC
+// (nothing held under ns_lock takes g_proc_table_lock: mount/unmount/clone only
+// spoor_ref / path_ref and defer the sleeping spoor_clunk to OUTSIDE ns_lock).
+// The pre-#66 lockless `binds: N` read was sound only because it was a single
+// aligned-int copy; a mount-list pointer walk a concurrent unmount could free
+// genuinely needs the lock. No sleep / no allocation runs under either lock.
 struct devproc_read_ctx {
     int     pid;
     u32     kind;

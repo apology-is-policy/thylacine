@@ -272,9 +272,33 @@ asid_init → proc_init → thread_init → sched_init → dev_init
 
 ---
 
+## Namespace name retention — `Spoor.path` (the Plan 9 `Chan.path`, #66)
+
+Each `struct Spoor` carries a `struct Path *path` (`<thylacine/path.h>` + `kernel/path.c`) — the cleaned namespace name it was reached by (`/srv/stratum`, `/bin/joey`, `/proc/3/ns`). The Plan 9 4th-edition `Chan.path`, adapted: Thylacine's is Plan 9's MINUS the `mtpt` mount-point history (`stalk` resolves `..` lexically against its own in-call trail, contained at `root_spoor`, so a Path is a pure name string).
+
+```c
+struct Path { int ref; u32 len; char s[]; };   // ref atomic; s immutable, NUL-terminated, begins '/'
+struct Path *path_make_root(void);                                   // "/", ref 1
+struct Path *path_addelem(const struct Path *parent, const char *name, u64 namelen);  // COW: parent + "/name"
+struct Path *path_parent(const struct Path *p);                      // the ".." pop
+void path_ref(struct Path *p);  void path_unref(struct Path *p);     // both NULL-safe; extinct on <=0 pre-value
+```
+
+**Invariant I-33 — the name is NON-LOAD-BEARING.** The resolver is *write-only* to `->path`: `stalk` / the single-hop walk / create *append* to it; nothing reads `->path` to make a resolution, a per-component X-search, a mount-cross, or any `perm_check` decision (those consult only `(dc, devno, qid.path)` + `stat_native`). So a wrong / stale / absent / failed-to-allocate Path changes ONLY the cosmetic content of the introspection readers — never a resolution outcome or a security decision. A path-alloc failure leaves `->path` NULL and **the walk still succeeds**.
+
+**Lifetime — subordinate to the Spoor's.** Each referencing Spoor holds exactly one Path ref for its whole life: NULL at `spoor_alloc`; SHARED via `path_ref` at `spoor_clone` (copy-on-walk: clones share until a walk replaces); dropped at `spoor_free_internal`. A Path frees with its last Spoor. The string is IMMUTABLE once built (`path_addelem` always allocates a fresh Path, never mutates a shared one), so the only concurrently-mutated field is the atomic `ref` — the Path string is read locklessly, and the `Spoor.path` field needs no lock (set-before-publish / read-after, like `qid`/`dev`).
+
+**The `/` seed is at FS-Dev ATTACH, not chroot.** `devramfs_attach` + `dev9p_attach_client` seed `path_make_root()` at Spoor BIRTH, before publication. This is the key SMP move: a published Spoor's `->path` is never re-stamped (chroot/pivot do NOT touch it), so the field is immutable-after-publish and needs no field lock — only the atomic `path->ref` is concurrent. Non-root-FS device attach roots (devsrv/devproc/...) leave `->path` NULL; they render as the Plan 9 device spec `#<dc>` in `/proc/<pid>/ns`.
+
+**Accumulation hooks (3 sites).** `stalk` appends one element per successful walk step (`spoor_path_extend`) and, on a mount-cross or an open=connect adoption, TRANSPLANTS the mount-point's / walked name onto the crossed/adopted Spoor (`spoor_path_transplant` — so a `/srv/corvus` connection fd reports `/srv/corvus`, not the endpoint's internal `/`); `sys_walk_open_handler` + `sys_walk_create_handler` each append once. A missed hook = an incomplete-but-never-wrong name (the I-33 fail-soft).
+
+**Consumers.** `SYS_FD2PATH(fd, buf, cap)` (= 71) copies `handle→spoor→path→s` — the path the fd was REACHED by, so it can be STALE after a rename/unmount (NOT a re-open key). `/proc/<pid>/ns` renders the territory mount list via the refcounted `PgrpMount.mp_path` (the mount-POINT's `Path`; see `docs/reference/18-territory.md` + `32-devproc.md`). `/proc/<pid>/fd` is deferred to #66c (blocked on the #926 handle-table lifetime). The native `ns [pid]` tool reads `/proc/<pid>/ns`.
+
+---
+
 ## Spec cross-reference
 
-P4-A is impl-only (no new TLA+ module). The lifecycle is single-CPU at v1.0 — `spoor_alloc / spoor_unref / spoor_clone / spoor_clunk` follow the same shape as `burrow.c`'s refcount discipline, which `specs/burrow.tla::NoUseAfterFree` already proves.
+P4-A is impl-only (no new TLA+ module). The lifecycle is single-CPU at v1.0 — `spoor_alloc / spoor_unref / spoor_clone / spoor_clunk` follow the same shape as `burrow.c`'s refcount discipline, which `specs/burrow.tla::NoUseAfterFree` already proves. The `Path` (#66) shares that refcount shape (atomic `ref`, extinct on `<=0` pre-value); it adds no new lifetime axis (one Path ref per Spoor, freed with the Spoor).
 
 The dual-refcount pattern from `burrow.tla` does NOT apply to Spoor: Spoor has a single refcount (no separate "mappings" axis). The simpler "alive iff ref > 0" invariant is enforced by the impl-side magic check + ref dual-check at decrement.
 

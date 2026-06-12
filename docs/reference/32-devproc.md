@@ -55,7 +55,7 @@ Becoming reachable through `stalk` required fixing `devproc_walk` to honor the *
 
 `devproc.perm_enforced == false`, so `/proc` is world-walkable (Plan 9 all-pids-visible introspection); the per-pid `ctl` **kill** authority stays I-26 two-axis-gated at the write site, independent of namespace reachability — the mount widens *visibility*, never *authority*. Per-namespace `/proc` filtering (a container sees only its own pids) is the container runner (#70).
 
-**Read-path lifetime (#57a focused-audit F2).** `devproc_read` and `devproc_stat_native` find the target Proc and read its fields (`format_status`/`format_ns` / the uid+gid) **inside a `proc_for_each` callback — under `g_proc_table_lock`** (the kill-path shape), early-stopping at the matched pid. Before #57a devproc was unmounted, so these ran single-threaded only; they used `proc_find_by_pid` (which locks, walks, **unlocks**, returns the bare pointer) and then dereferenced it *outside* the lock. Once the mount makes `/proc` cross-Proc reachable (Proc A reading `/proc/<B>` by path or `SYS_FSTAT`), a concurrent reap (`wait_pid` on another CPU) could `kmem_cache_free(B)` in the lookup→deref window — a **UAF** (info leak or a wild `p->territory` deref → extinction). Holding `g_proc_table_lock` across the find+read closes it: a reaped Proc is unlinked-under-the-lock (`proc_unlink_child`'s precondition) *before* it is freed, so under the lock a Proc is either linked-and-alive (safe to deref) or already-unlinked-and-not-found. `format_ns`'s `territory_nbinds(p->territory)` is a lockless plain int read of a valid-because-locked territory — no nested lock, no sleep under the spinlock.
+**Read-path lifetime (#57a focused-audit F2).** `devproc_read` and `devproc_stat_native` find the target Proc and read its fields (`format_status`/`format_ns` / the uid+gid) **inside a `proc_for_each` callback — under `g_proc_table_lock`** (the kill-path shape), early-stopping at the matched pid. Before #57a devproc was unmounted, so these ran single-threaded only; they used `proc_find_by_pid` (which locks, walks, **unlocks**, returns the bare pointer) and then dereferenced it *outside* the lock. Once the mount makes `/proc` cross-Proc reachable (Proc A reading `/proc/<B>` by path or `SYS_FSTAT`), a concurrent reap (`wait_pid` on another CPU) could `kmem_cache_free(B)` in the lookup→deref window — a **UAF** (info leak or a wild `p->territory` deref → extinction). Holding `g_proc_table_lock` across the find+read closes it: a reaped Proc is unlinked-under-the-lock (`proc_unlink_child`'s precondition) *before* it is freed, so under the lock a Proc is either linked-and-alive (safe to deref) or already-unlinked-and-not-found. `format_ns` (#66b) now calls `territory_format_ns`, which takes the target territory's `ns_lock` to read the mount LIST (a pointer walk a concurrent unmount could free, unlike the pre-#66 single-aligned-int `binds: N` read). That is a **nested** `g_proc_table_lock → ns_lock` acquire, and it is acyclic: nothing held under `ns_lock` (in `territory.c`: mount/unmount/clone/chroot/pivot/bind/unbind/mount_lookup) ever takes `g_proc_table_lock` — they only `spoor_ref`/`path_ref` (atomic) and defer the sleeping `spoor_clunk` to outside the lock. Under `ns_lock` the entries + their ref-held immutable `Path` strings are stable; no sleep, no allocation runs under either lock.
 
 ---
 
@@ -113,10 +113,15 @@ The check is computed **directly** in `devproc_write` (NOT via `perm_check`): `C
 ### `/proc/<pid>/ns`
 
 ```
+mount <mountpoint-name> <source-name-or-#dc>
+mount <mountpoint-name> <source-name-or-#dc>
+...
 binds: <decimal>
 ```
 
-v1.0 reports the territory's bind count. Future extension dumps each bind as `from -> to` lines once `territory_iter` is added.
+The Plan 9 `ns` substrate (#66b). One `mount` line per entry in the Proc's territory mount table, then the bind count. The **mountpoint** column is the namespace name the directory was mounted onto — the entry's refcounted `PgrpMount.mp_path` (a `Spoor.path`, #66a; `?` when the mountpoint had no retained name, e.g. a kernel-internal direct walk). The **source** column is the mounted tree's namespace name (`source->path`) when it has one, else `#<dc>` — the Plan 9 device spec (`#9`=9P, `#s`=srv, `#p`=proc, `#-`=devnone). Rendered by `territory.c::territory_format_ns` (so the `ns_lock` discipline stays in `territory.c`); `devproc.c::format_ns` is now a thin call into it. Per **I-33** the mount table keys on the `(dc, devno, qid.path)` identity, NEVER on `mp_path`, so the names are introspection-only — a wrong/absent name can only misreport this file, never change a resolution. A list longer than the read buffer (`DEVPROC_READ_BUF` = 512) truncates cleanly (best-effort introspection). Read it with the native `ns [pid]` tool (`usr/coreutils/src/bin/ns.rs`).
+
+The bind column stays a count: `binds[]` are abstract `path_id_t` pairs (no string names) at v1.0.
 
 ---
 

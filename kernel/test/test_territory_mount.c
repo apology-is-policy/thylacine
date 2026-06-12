@@ -44,6 +44,7 @@
 #include "test.h"
 
 #include <thylacine/dev.h>
+#include <thylacine/path.h>
 #include <thylacine/spoor.h>
 #include <thylacine/territory.h>
 #include <thylacine/types.h>
@@ -59,6 +60,8 @@ void test_territory_mount_clone_bumps_refs(void);
 void test_territory_mount_destroy_drops_all_refs(void);
 void test_territory_mount_devno_disambiguates(void);
 void test_territory_mount_rejects_cycle(void);
+void test_territory_mount_mp_path_lifecycle(void);   // #66
+void test_territory_mount_format_ns(void);           // #66
 
 // Mint a mount-point Spoor with a distinct identity (devnone dc '-', devno 0,
 // the given qid.path). The mount table keys on (dc, devno, qid.path), so a
@@ -67,6 +70,23 @@ static struct Spoor *mkmp(u64 qid_path) {
     struct Spoor *mp = spoor_alloc(&devnone);
     if (mp) mp->qid.path = qid_path;
     return mp;
+}
+
+// #66: build a Path "/<name>" (ref == 1, caller-owned). For the mount-point
+// name tests -- mkmp gives an unnamed (NULL-path) Spoor; this stamps a name.
+static struct Path *mkname(const char *name) {
+    struct Path *root = path_make_root();
+    if (!root) return NULL;
+    u64 n = 0; while (name[n]) n++;
+    struct Path *p = path_addelem(root, name, n);
+    path_unref(root);
+    return p;   // "/name", ref 1
+}
+
+static bool mnt_streq(const char *a, const char *b) {
+    u64 i = 0;
+    while (a[i] && b[i] && a[i] == b[i]) i++;
+    return a[i] == '\0' && b[i] == '\0';
 }
 
 void test_territory_mount_smoke(void) {
@@ -444,4 +464,107 @@ void test_territory_mount_rejects_cycle(void) {
     spoor_unref(mpB);
     spoor_unref(srcB);
     spoor_unref(mpA);
+}
+
+// #66 (I-33): the mount entry retains the mount-POINT's namespace name (mp_path)
+// with a Path ref, shared across clones, dropped at unmount / MREPL-displace /
+// final release. This exercises the FOUR mp_path lifecycle hooks via the live
+// Path counters -- a missed path_ref/unref shows up as a leak or a double-free.
+void test_territory_mount_mp_path_lifecycle(void) {
+    struct Territory *parent = territory_alloc();
+    TEST_ASSERT(parent != NULL, "territory_alloc");
+    struct Spoor *s  = spoor_alloc(&devnone);
+    struct Spoor *mp = mkmp(11u);
+    TEST_ASSERT(s && mp, "spoor_alloc/mkmp");
+    mp->path = mkname("srv");                       // mountpoint named "/srv"
+    TEST_ASSERT(mp->path != NULL, "mkname");
+
+    u64 pa0 = path_total_allocated(), pf0 = path_total_freed();
+
+    // mount: the entry takes ONE ref on mp->path (no new alloc).
+    TEST_EXPECT_EQ(mount(parent, s, mp, 0), 0, "mount with a named mount point");
+    TEST_EXPECT_EQ(path_total_allocated() - pa0, (u64)0,
+                   "mount path_ref's the mount-point name; allocates no new Path");
+    TEST_EXPECT_EQ(path_total_freed() - pf0, (u64)0, "mount frees no Path");
+
+    // clone: the child SHARES mp->path -> a second entry ref (still no alloc).
+    struct Territory *child = territory_clone(parent);
+    TEST_ASSERT(child != NULL, "territory_clone");
+    TEST_EXPECT_EQ(path_total_allocated() - pa0, (u64)0, "clone shares; no new Path");
+    TEST_EXPECT_EQ(path_total_freed() - pf0, (u64)0, "clone frees no Path");
+
+    // Destroy the child: drops ITS entry ref. The Path is still held by the
+    // parent's entry + the test's mp->path, so it must NOT free yet.
+    territory_unref(child);
+    TEST_EXPECT_EQ(path_total_freed() - pf0, (u64)0,
+                   "child destroy drops one mp_path ref but does NOT free (still held)");
+
+    // Destroy the parent: drops the parent's entry ref. The test's mp still
+    // holds the last ref via mp->path -> still no free.
+    territory_unref(parent);
+    TEST_EXPECT_EQ(path_total_freed() - pf0, (u64)0,
+                   "parent destroy drops the last ENTRY ref; mp->path still holds it");
+
+    // Drop the test's mp Spoor: spoor_free_internal path_unref's mp->path ->
+    // the LAST ref -> the Path frees exactly once.
+    spoor_unref(mp);
+    TEST_EXPECT_EQ(path_total_freed() - pf0, (u64)1,
+                   "the mount-point name frees exactly once when its last ref drops");
+
+    spoor_unref(s);
+}
+
+// #66: territory_format_ns renders one "mount <pt> <src>\n" line per entry +
+// "binds: N\n". Mount-point name from mp_path; source label = source->path when
+// the source has a namespace name, else "#<dc>" (the Plan 9 device spec).
+void test_territory_mount_format_ns(void) {
+    struct Territory *p = territory_alloc();
+    TEST_ASSERT(p != NULL, "territory_alloc");
+
+    // Entry 1: /srv <- a device-root source (no path) -> "#-" (devnone dc='-').
+    struct Spoor *sa  = spoor_alloc(&devnone);
+    struct Spoor *msrv = mkmp(1u);
+    TEST_ASSERT(sa && msrv, "alloc 1");
+    msrv->path = mkname("srv");
+    TEST_ASSERT(msrv->path != NULL, "mkname srv");
+    TEST_EXPECT_EQ(mount(p, sa, msrv, 0), 0, "mount /srv");
+
+    // Entry 2: /proc <- a source WITH a namespace name "/realsrc" -> the path.
+    struct Spoor *sb   = spoor_alloc(&devnone);
+    struct Spoor *mproc = mkmp(2u);
+    TEST_ASSERT(sb && mproc, "alloc 2");
+    mproc->path = mkname("proc");
+    sb->path    = mkname("realsrc");
+    TEST_ASSERT(mproc->path && sb->path, "mkname proc/realsrc");
+    TEST_EXPECT_EQ(mount(p, sb, mproc, 0), 0, "mount /proc");
+
+    char buf[256];
+    u64 n = territory_format_ns(p, buf, sizeof(buf));
+    TEST_ASSERT(n > 0 && n < sizeof(buf), "format_ns produced bounded output");
+    buf[n] = '\0';
+    TEST_ASSERT(mnt_streq(buf,
+                "mount /srv #-\nmount /proc /realsrc\nbinds: 0\n"),
+                "ns renders both mounts (name + #dc / source-path) + bind count");
+
+    // F2 (audit): truncation discards a partial line at a whole-line boundary --
+    // a cap that fits line 1 ("mount /srv #-\n" = 14 B) but not line 2 yields
+    // EXACTLY the first complete line, with NO partial second line AND NO
+    // trailing "binds:" (which would falsely imply completeness).
+    char mid[20];
+    u64 m = territory_format_ns(p, mid, sizeof(mid));
+    TEST_ASSERT(m == 14, "format_ns truncated to one whole line (14 B)");
+    mid[m] = '\0';
+    TEST_ASSERT(mnt_streq(mid, "mount /srv #-\n"),
+                "F2: truncation is clean -- first whole line only, no partial, no binds");
+
+    // A cap too small even for line 1 yields a clean empty result (no partial).
+    char tiny[8];
+    u64 t = territory_format_ns(p, tiny, sizeof(tiny));
+    TEST_EXPECT_EQ((int)t, 0, "F2: cap below one line -> empty (no partial 'mount ')");
+
+    territory_unref(p);
+    spoor_unref(sa);
+    spoor_unref(sb);
+    spoor_unref(msrv);
+    spoor_unref(mproc);
 }

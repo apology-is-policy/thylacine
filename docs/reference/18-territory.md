@@ -340,6 +340,8 @@ ARCH §9.6 specifies `mount(source_spoor_fd, target_path, flags)` as a user-visi
 | `territory_unref` final-release drops root_spoor ref | **Landed (P5-stratumd-stub-bringup-e2)** |
 | `mount` / `unmount` user-visible syscalls (SYS_MOUNT / SYS_UNMOUNT) | **Landed (P5-mount-syscall)** |
 | `chroot` user-visible syscall (SYS_CHROOT) | **Landed (P5-stratumd-stub-bringup-e2)** |
+| `PgrpMount.mp_path` (the mount-point's namespace name, I-33) + lifecycle (ref at mount/MREPL; share at clone; drop at unmount/MREPL-displace/final-release) | **Landed (#66b)** — `struct PgrpMount` 32→40B; introspection-only (the table keys on `(dc, devno, qid.path)`, never `mp_path`) |
+| `territory_format_ns` (renders the mount list for `/proc/<pid>/ns`, under `ns_lock`) | **Landed (#66b)** — see `docs/reference/32-devproc.md` |
 | In-kernel tests | 16 total (3 bind + 7 mount + 6 chroot) |
 | Spec `territory.tla` + buggy configs | **Landed (P5-stratumd-stub-bringup-e2)** — 1 clean + 5 buggy cfgs |
 | Per-Territory `ns_lock` (mounts/binds/root_spoor) | **Done (RW-4 SA-F1)** |

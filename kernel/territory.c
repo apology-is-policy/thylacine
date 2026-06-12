@@ -40,6 +40,7 @@
 // automatically by call ordering, not by init ordering.
 
 #include <thylacine/extinction.h>
+#include <thylacine/path.h>
 #include <thylacine/spoor.h>
 #include <thylacine/territory.h>
 #include <thylacine/types.h>
@@ -140,6 +141,10 @@ struct Territory *territory_clone(struct Territory *parent) {
     for (int i = 0; i < parent->nmounts; i++) {
         child->mounts[i] = parent->mounts[i];
         spoor_ref(child->mounts[i].source);
+        // #66 (I-33): the cloned entry SHARES the parent's mount-point name --
+        // one more Path ref per clone, dropped at this child's unmount /
+        // final-release. path_ref is NULL-safe (a nameless mount stays nameless).
+        path_ref(child->mounts[i].mp_path);
     }
 
     // Deep-copy the root_spoor pivot (P5-stratumd-stub-bringup-e2). Each
@@ -216,6 +221,13 @@ void territory_unref(struct Territory *p) {
         // path; current Dev close hooks don't touch the Territory, so
         // the direction is cosmetic.
         for (int i = p->nmounts - 1; i >= 0; i--) {
+            // #66 (I-33): drop the entry's mount-point name ref (the matched
+            // counterpart to the path_ref at mount()/MREPL/clone). path_unref is
+            // NULL-safe + non-sleeping (refcount + kfree, no Dev close hook), so
+            // it needs no defer-outside-lock; here at final release there is no
+            // concurrent accessor anyway.
+            path_unref(p->mounts[i].mp_path);
+            p->mounts[i].mp_path = NULL;
             spoor_clunk(p->mounts[i].source);
         }
         // Clear nmounts so a post-free read (UAF) sees consistent state
@@ -373,6 +385,110 @@ int territory_nmounts(struct Territory *p) {
 
 u64 territory_total_created(void)   { return __atomic_load_n(&g_pgrp_created, __ATOMIC_RELAXED); }
 u64 territory_total_destroyed(void) { return __atomic_load_n(&g_pgrp_destroyed, __ATOMIC_RELAXED); }
+
+// =============================================================================
+// /proc/<pid>/ns rendering (#66). Tiny append helpers -- each returns false on
+// overflow (the renderer then stops; the list is best-effort introspection per
+// I-33). *off advances only on a fit.
+// =============================================================================
+
+static bool ns_put_str(char *buf, u64 cap, u64 *off, const char *s) {
+    u64 o = *off;
+    for (u64 i = 0; s[i] != '\0'; i++) {
+        if (o >= cap) return false;
+        buf[o++] = s[i];
+    }
+    *off = o;
+    return true;
+}
+
+// Append a bounded byte run (a Path string `s` is NOT necessarily reread as
+// NUL-terminated here -- we copy exactly `n` bytes, the cached path->len).
+static bool ns_put_bytes(char *buf, u64 cap, u64 *off, const char *s, u64 n) {
+    if (*off + n > cap) return false;
+    for (u64 i = 0; i < n; i++) buf[*off + i] = s[i];
+    *off += n;
+    return true;
+}
+
+static bool ns_put_udec(char *buf, u64 cap, u64 *off, u64 v) {
+    char tmp[24];
+    int n = 0;
+    if (v == 0) tmp[n++] = '0';
+    else while (v > 0 && n < (int)sizeof(tmp)) { tmp[n++] = (char)('0' + (v % 10)); v /= 10; }
+    if (*off + (u64)n > cap) return false;
+    for (int i = 0; i < n; i++) buf[(*off)++] = tmp[n - 1 - i];
+    return true;
+}
+
+u64 territory_format_ns(struct Territory *p, char *buf, u64 cap) {
+    if (!p || !buf || cap == 0)   return 0;
+    if (p->magic != PGRP_MAGIC)   extinction("territory_format_ns of corrupted Territory");
+
+    u64 off = 0;
+    // Read the mount table UNDER ns_lock: while held, each entry's source +
+    // mp_path are ref-pinned (and source->path is ref-pinned by source + is an
+    // immutable string), so every byte copied below is stable. ns_lock is a
+    // near-leaf; the bounded buffer writes take no further lock + cannot sleep.
+    // The g_proc_table_lock -> ns_lock edge the devproc caller introduces is
+    // acyclic (no ns_lock holder takes g_proc_table_lock).
+    spin_lock(&p->ns_lock);
+    bool truncated = false;
+    for (int i = 0; i < p->nmounts; i++) {
+        struct PgrpMount *m = &p->mounts[i];
+        // Render a COMPLETE "mount <pt> <src>\n" line or NONE: snapshot off, and
+        // on any overflow rewind to discard the partial line (#66b audit F2 --
+        // so a truncated list never leaves a half "mount " prefix that the
+        // trailing "binds:" then concatenates into a malformed record). The
+        // output is therefore always a sequence of whole lines.
+        u64 line_start = off;
+        bool ok = ns_put_str(buf, cap, &off, "mount ");
+
+        // Mount-point name (the Plan 9 Chan.path of the dir mounted onto). NULL
+        // mp_path -> "?" (a kernel-internal mountpoint with no retained name).
+        if (ok) {
+            if (m->mp_path && m->mp_path->len)
+                ok = ns_put_bytes(buf, cap, &off, m->mp_path->s, m->mp_path->len);
+            else
+                ok = ns_put_str(buf, cap, &off, "?");
+        }
+        if (ok) ok = ns_put_str(buf, cap, &off, " ");
+
+        // Source label: the source Spoor's namespace name when it has one (a
+        // mounted sub-tree); else "#<dc>" -- the Plan 9 device spec (a device
+        // root has no namespace path; '#9'=9P, '#s'=srv, '#p'=proc, ...).
+        if (ok) {
+            struct Spoor *src = m->source;
+            if (src && src->path && src->path->len) {
+                ok = ns_put_bytes(buf, cap, &off, src->path->s, src->path->len);
+            } else {
+                char dev[3];
+                dev[0] = '#';
+                dev[1] = src ? (char)src->dc : '?';
+                dev[2] = '\0';
+                ok = ns_put_str(buf, cap, &off, dev);
+            }
+        }
+        if (ok) ok = ns_put_str(buf, cap, &off, "\n");
+
+        if (!ok) { off = line_start; truncated = true; break; }   // discard partial
+    }
+    // Bind count (binds[] are abstract path_id_t at v1.0 -- no string names to
+    // render; the count keeps the file's pre-#66 contract). Emit it ONLY when the
+    // mount list rendered in full -- a "binds:" line after a truncated list would
+    // falsely imply completeness. Rewind a partial binds line too (F2).
+    int nb = p->nbinds;
+    spin_unlock(&p->ns_lock);
+
+    if (!truncated) {
+        u64 bstart = off;
+        if (!(ns_put_str(buf, cap, &off, "binds: ") &&
+              ns_put_udec(buf, cap, &off, (u64)(nb < 0 ? 0 : nb)) &&
+              ns_put_str(buf, cap, &off, "\n")))
+            off = bstart;
+    }
+    return off;
+}
 
 // =============================================================================
 // bind / unbind.
@@ -612,6 +728,14 @@ int mount(struct Territory *territory, struct Spoor *source,
                 // was the last ref on `old`, the Dev's close hook must run to
                 // release per-Spoor state (P5-mount-syscall fix). Deferred to `out`.
                 to_clunk = territory->mounts[i].source;
+                // #66 (I-33): re-capture the mount-point name from the new
+                // mountpoint Spoor (same (dc,devno,qid.path) identity, fresh
+                // resolve -> latest retained name). ref-NEW-before-unref-OLD so a
+                // (degenerate) shared Path object survives the swap.
+                struct Path *old_mp = territory->mounts[i].mp_path;
+                territory->mounts[i].mp_path = mountpoint->path;
+                path_ref(territory->mounts[i].mp_path);
+                path_unref(old_mp);
                 territory->mounts[i].source = source;
                 territory->mounts[i].flags  = flags;
                 spoor_ref(source);
@@ -630,6 +754,12 @@ int mount(struct Territory *territory, struct Spoor *source,
 
     struct PgrpMount *e = &territory->mounts[territory->nmounts];
     e->source      = source;
+    // #66 (I-33): retain the mount-POINT's namespace name for /proc/<pid>/ns.
+    // path_ref is NULL-safe (a kernel-internal mountpoint with no retained name
+    // -> NULL mp_path -> rendered "?"). Introspection-only: the entry keys on
+    // the (dc, devno, qid.path) identity below, never on mp_path.
+    e->mp_path     = mountpoint->path;
+    path_ref(e->mp_path);
     e->mp_qid_path = mountpoint->qid.path;
     e->mp_dc       = mountpoint->dc;
     e->mp_devno    = mountpoint->devno;
@@ -664,6 +794,11 @@ int unmount(struct Territory *territory, struct Spoor *mountpoint) {
             // holder keeping the 9P session alive (P5-mount-syscall fix). Deferred
             // to outside the lock.
             to_clunk = territory->mounts[i].source;
+            // #66 (I-33): drop the removed entry's mount-point name BEFORE the
+            // swap-remove overwrites the slot (else the Path ref leaks). The
+            // last entry's own mp_path ref TRANSFERS into slot i via the struct
+            // copy -- no ref change for it. path_unref is non-sleeping (no defer).
+            path_unref(territory->mounts[i].mp_path);
             // Remove by swapping with the last element. Order within mounts[] is
             // not load-bearing at v1.0; MBEFORE/MAFTER union walking (Phase 5+)
             // introduces an ordering invariant + switches to shift-down then.

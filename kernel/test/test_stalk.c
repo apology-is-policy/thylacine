@@ -66,6 +66,7 @@ void test_stalk_cross_mount_no_leak(void);
 void test_stalk_path_accumulate(void);
 void test_stalk_path_dotdot(void);
 void test_stalk_path_cross_transplant(void);
+void test_stalk_path_adopt_transplant(void);   // #66 F2 (owed from #66a)
 
 // =============================================================================
 // The fixture Dev.
@@ -218,6 +219,39 @@ static struct Dev stalkfix_replace = {
 
 static struct Spoor *fix_root_replace(void) {
     return dev_simple_attach(&stalkfix_replace, QTDIR);
+}
+
+// #66 F2: a replacement-open whose result carries NO namespace name -- the
+// FAITHFUL devsrv open=connect shape (devsrv mints a FRESH endpoint Spoor via
+// devsrv_attach / p9_attached_root_spoor, which has its own attach-seed path
+// "/" or NULL, NEVER the quarry's "/srv/<name>"). fix_open_replace above clones
+// the quarry (sharing its path), so it canNOT prove the adoption-arm transplant;
+// this one drops the path so the test is NON-VACUOUS: without the F2 transplant
+// the adopted Spoor's name would be NULL, not the walked path.
+static struct Spoor *fix_open_replace_nopath(struct Spoor *c, int omode) {
+    if (!c) return NULL;
+    struct Spoor *rep = spoor_clone(c);
+    if (!rep) return NULL;
+    rep->flag    |= COPEN;
+    rep->mode     = omode;
+    rep->qid.vers = 0xBEEFu;
+    if (rep->path) { path_unref(rep->path); rep->path = NULL; }   // a nameless mint
+    return rep;
+}
+
+static struct Dev stalkfix_replace_nopath = {
+    .dc            = (int)'Z',
+    .name          = "stalkfix_replace_nopath",
+    .perm_enforced = true,
+    .attach        = NULL,
+    .walk          = fix_walk,
+    .stat_native   = fix_stat_native,
+    .open          = fix_open_replace_nopath,
+    .close         = fix_close,
+};
+
+static struct Spoor *fix_root_replace_nopath(void) {
+    return dev_simple_attach(&stalkfix_replace_nopath, QTDIR);
 }
 
 // A synthetic SYSTEM Proc with no caps -- the owner of every fixture node, so
@@ -676,5 +710,29 @@ void test_stalk_path_cross_transplant(void) {
     territory_unref(p.territory);
     spoor_clunk(src);
     spoor_clunk(mp);
+    spoor_unref(root);
+}
+
+// #66 F2 (owed from the #66a audit): the STALK_OPEN open=connect adoption arm
+// (stalk.c -- Dev.open RETURNS a different Spoor) must TRANSPLANT the walked
+// namespace name onto the adopted replacement. With fix_open_replace_nopath
+// (the faithful devsrv mint: the replacement carries NO name of its own), the
+// only way q->path == "/a/b" is the spoor_path_transplant the F2 fix added; the
+// pre-fix code (adopt without transplant) would leave q->path == NULL.
+void test_stalk_path_adopt_transplant(void) {
+    struct Proc p; mkproc_system(&p);
+    struct Spoor *root = fix_root_replace_nopath();
+    TEST_ASSERT(root != NULL, "fix_root_replace_nopath");
+    root->path = path_make_root();
+    TEST_ASSERT(root->path != NULL, "seed root /");
+
+    struct Spoor *q = stalk(&p, root, "a/b", 3, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "resolve+open a/b (adoption arm)");
+    TEST_EXPECT_EQ((u64)q->qid.vers, (u64)0xBEEFu,
+                   "open returned the nameless replacement (opened != quarry)");
+    TEST_ASSERT(q->path != NULL && fix_streq(q->path->s, "/a/b"),
+                "adopted Spoor takes the WALKED name /a/b (F2 transplant; "
+                "pre-fix this was NULL)");
+    spoor_clunk(q);
     spoor_unref(root);
 }

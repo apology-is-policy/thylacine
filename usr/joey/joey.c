@@ -2497,6 +2497,36 @@ int main(void) {
         }
         t_putstr("joey: probe #66 fd2path / + /srv (cross-transplant) OK\n");
     }
+    // #66b: /proc/<pid>/ns -- the Plan 9 `ns` substrate (the territory mount
+    // list). Read kproc's (/proc/0/ns): pid 0 ALWAYS exists + carries the boot
+    // mounts (/srv, /proc, /ctl, /dev), so the rendered list is non-empty + has
+    // a "mount " line. Proves the devproc_read -> format_ns -> territory_format_ns
+    // path end-to-end through the REAL syscall (the g_proc_table_lock + ns_lock
+    // nesting), not just the unit test's direct territory_format_ns call. T_OREAD
+    // (a real read, NOT T_OPATH -- #81 blocks byte I/O on O_PATH handles).
+    {
+        long nf = t_open(T_WALK_OPEN_FROM_ROOT, "/proc/0/ns", 10, T_OREAD);
+        if (nf < 0) { t_putstr("joey: probe #66b open /proc/0/ns FAILED\n"); return 1; }
+        char nsbuf[256];
+        long nn = t_read(nf, nsbuf, sizeof(nsbuf) - 1);
+        (void)t_close(nf);
+        if (nn <= 0) { t_putstr("joey: probe #66b read /proc/0/ns empty\n"); return 1; }
+        nsbuf[nn] = '\0';
+        int saw_mount = 0;
+        for (long i = 0; i + 6 <= nn; i++) {
+            if (nsbuf[i] == 'm' && nsbuf[i+1] == 'o' && nsbuf[i+2] == 'u' &&
+                nsbuf[i+3] == 'n' && nsbuf[i+4] == 't' && nsbuf[i+5] == ' ') {
+                saw_mount = 1;
+                break;
+            }
+        }
+        if (!saw_mount) {
+            t_putstr("joey: #66b /proc/0/ns has no mount line: '");
+            t_putstr(nsbuf); t_putstr("'\n");
+            return 1;
+        }
+        t_putstr("joey: probe #66b /proc/0/ns mount-list OK\n");
+    }
 #endif /* THYLA_BOOT_PROBES (pre-pivot boot-test probe ladder) */
 
     // === stratumd boot pool mount (P6-pouch-stratumd-boot sub-chunk 16b-gamma) ===
