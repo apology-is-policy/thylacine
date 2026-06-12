@@ -219,6 +219,7 @@ pub const T_SYS_LOOM_REGISTER: u64    = 67;
 pub const T_SYS_LOOM_ENTER: u64       = 68;
 pub const T_SYS_CHDIR: u64            = 69;     // LS-4 per-Proc cwd: set dot
 pub const T_SYS_GETCWD: u64           = 70;     // LS-4 per-Proc cwd: read dot
+pub const T_SYS_FD2PATH: u64          = 71;     // #66 fd -> namespace name (Plan 9 fd2path)
 // SYS_UNLINK flags: rmdir an empty directory vs unlink a non-directory.
 // Mirrors the kernel's SYS_UNLINK_REMOVEDIR / wire P9_UNLINK_AT_REMOVEDIR.
 pub const T_UNLINK_REMOVEDIR: u32     = 0x200;
@@ -1606,6 +1607,26 @@ pub unsafe fn t_getcwd(buf: *mut u8, buf_len: usize) -> i64 {
         inlateout("x0") x0,
         in("x1") buf_len as u64,
         in("x8") T_SYS_GETCWD,
+        options(nostack)
+    );
+    x0
+}
+
+// t_fd2path -- copy the namespace name `fd` was reached by into `buf`
+// (NUL-terminated) (#66; the Plan 9 fd2path(2)). Returns the path length
+// (excluding NUL), or 0 if the name is unknown (a real path always begins with
+// '/', so 0 unambiguously means unknown), or -1 if `fd` is not a held Spoor
+// handle or `buf` is too small. The name is best-effort metadata, never
+// load-bearing (ARCHITECTURE.md I-33).
+#[inline(always)]
+pub unsafe fn t_fd2path(fd: i32, buf: *mut u8, buf_len: usize) -> i64 {
+    let mut x0: i64 = fd as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") buf as u64,
+        in("x2") buf_len as u64,
+        in("x8") T_SYS_FD2PATH,
         options(nostack)
     );
     x0

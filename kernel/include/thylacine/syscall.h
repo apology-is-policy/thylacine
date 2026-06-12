@@ -1342,6 +1342,19 @@ enum {
     //   chdir) into the user buffer, NUL-terminated. Returns the path length
     //   (excluding the NUL), or -1 if buf_len is too small for path + NUL.
     SYS_GETCWD = 70,   // arg: buf_va (x0), buf_len (x1)
+
+    // SYS_FD2PATH(fd, buf_va, buf_len) -> len / -1  (#66; the Plan 9 fd2path(2))
+    //   Copy the namespace name the fd was reached by (the cleaned path it was
+    //   walked/opened along -- e.g. "/bin/joey", "/srv/stratum") into the user
+    //   buffer, NUL-terminated. Returns the path length (excluding the NUL), or
+    //   -1 if `fd` is not a held KOBJ_SPOOR handle or buf_len is too small for
+    //   path + NUL. A fd with NO known name (a nameless attach root, or a walk
+    //   from a nameless fd) returns 0 (an empty result -- "unknown"); a real
+    //   path always begins with '/', so len == 0 unambiguously means unknown.
+    //   No access RIGHT is required (the name is of something the caller already
+    //   holds). The name is best-effort introspection metadata, NEVER
+    //   load-bearing (ARCHITECTURE.md I-33): it can be unknown but is never wrong.
+    SYS_FD2PATH = 71,  // arg: fd (x0), buf_va (x1), buf_len (x2)
 };
 
 // SYS_WALK_OPEN's FROM_ROOT sentinel: when passed as the spoor_fd, the

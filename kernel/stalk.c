@@ -117,6 +117,12 @@ int stalk_cross_mounts(struct Proc *p, struct Spoor *probe,
         cur = crossed;
         id  = cur;                                // mount-over-mount: re-test
     }
+    // #66: a crossed Spoor takes the MOUNT-POINT's namespace name -- the user
+    // named `probe`'s path (e.g. /mnt), and crossing into the mounted tree keeps
+    // that name, NOT the mount source's internal name. One transplant on the
+    // final link (a mount-over-mount chain keeps the original mount point's
+    // name). Non-load-bearing (I-33): cosmetic only.
+    if (cur) spoor_path_transplant(cur, probe);
     *out = cur;
     return 0;
 }
@@ -237,6 +243,14 @@ struct Spoor *stalk(struct Proc *p, struct Spoor *start,
             goto fail;
         }
         walkqid_free(w);
+
+        // #66: append the walked component to nc's namespace name. nc SHARES
+        // parent's Path (from spoor_clone); spoor_path_extend reads that shared
+        // Path as the base and replaces it with the extended one. Non-load-bearing
+        // (I-33) -- an OOM leaves nc->path NULL ("unknown") and the walk still
+        // succeeds. (`.`/`..` never reach here in stalk -- the resolver handles
+        // them above -- so this is always a real component.)
+        spoor_path_extend(nc, namebuf, clen);
 
         // Push UN-crossed. The cross happens lazily when nc later becomes a
         // parent (cross-on-descent above) or, for the quarry, at the end below.

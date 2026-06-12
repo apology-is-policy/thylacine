@@ -30,6 +30,7 @@
 #include <thylacine/dtb.h>
 #include <thylacine/extinction.h>
 #include <thylacine/page.h>
+#include <thylacine/path.h>
 #include <thylacine/proc.h>
 #include <thylacine/spoor.h>
 #include <thylacine/syscall.h>
@@ -261,7 +262,14 @@ static void devramfs_init(void) {
 
 static struct Spoor *devramfs_attach(const char *spec) {
     (void)spec;
-    return dev_simple_attach(&devramfs, QTDIR);
+    struct Spoor *c = dev_simple_attach(&devramfs, QTDIR);
+    // #66: devramfs is the root filesystem -- its attach root is "/" (the boot
+    // root_spoor; also the /bin bind SOURCE, where stalk_cross_mounts then
+    // transplants "/bin" onto the crossed clone, so this "/" is seen only when
+    // devramfs IS the namespace root). Seeded at birth, before publication ->
+    // immutable (I-33 set-before-publish; no lock). NULL (OOM) -> "unknown".
+    if (c) c->path = path_make_root();
+    return c;
 }
 
 static struct Walkqid *devramfs_walk(struct Spoor *c, struct Spoor *nc,

@@ -97,6 +97,7 @@ enum {
     T_SYS_CONSOLE_RELINQUISH = 63, // A-5a: drop own console-attach (I-27)
     T_SYS_CONSOLE_OPEN      = 64,  // A-5a: open /dev/cons -> R|W KOBJ_SPOOR fd
     T_SYS_OPEN              = 65,  // A-5b-0/stalk-1: multi-component pathname open
+    T_SYS_FD2PATH           = 71,  // #66: fd -> namespace name (Plan 9 fd2path)
 };
 
 // SYS_UNLINK flags: rmdir an empty directory (vs unlink a non-directory).
@@ -1116,6 +1117,27 @@ static inline long t_walk_open(long spoor_fd, const char *name,
         "svc #0"
         : "+r"(x0)
         : "r"(x1), "r"(x2), "r"(x3), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_fd2path — copy the namespace name `fd` was reached by into `buf`
+// (NUL-terminated) (#66; the Plan 9 fd2path(2)). Returns the path length
+// (excluding NUL), 0 if the name is unknown (a real path begins with '/', so 0
+// unambiguously means unknown), or -1 if `fd` is not a held KOBJ_SPOOR handle or
+// `buf` is too small. No access RIGHT is required. The name is best-effort
+// introspection metadata, never load-bearing (ARCHITECTURE.md I-33).
+__attribute__((always_inline))
+static inline long t_fd2path(long fd, char *buf, size_t buf_len) {
+    register long x0 __asm__("x0") = fd;
+    register long x1 __asm__("x1") = (long)(unsigned long)buf;
+    register long x2 __asm__("x2") = (long)buf_len;
+    register long x8 __asm__("x8") = T_SYS_FD2PATH;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x2), "r"(x8)
         : "memory", "cc"
     );
     return x0;

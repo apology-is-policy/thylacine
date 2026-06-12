@@ -2464,6 +2464,37 @@ int main(void) {
         t_putstr("joey: probe A-2a owner=system + SYS_WSTAT reject paths OK\n");
         t_putstr("joey: probe #81 T_OPATH-read of /system.key DENIED (-1) OK\n");
     }
+    // #66: fd2path -- the namespace name a fd was reached by (Plan 9 fd2path).
+    // Proves SYS_FD2PATH end-to-end on the REAL boot namespace: the "/" attach
+    // seed + a single walk + a mount cross-transplant. Pre-pivot here (devramfs
+    // root + the /srv synthetic mount).
+    {
+        char p66[64];
+        // (a) "/" -- the devramfs attach-root seed. Opening "/" resolves zero
+        // components, so the quarry inherits root's "/" name.
+        long r66 = t_open(T_WALK_OPEN_FROM_ROOT, "/", 1, T_OPATH);
+        if (r66 < 0) { t_putstr("joey: probe #66 open / FAILED\n"); return 1; }
+        long n66 = t_fd2path(r66, p66, sizeof(p66));
+        (void)t_close(r66);
+        if (n66 != 1 || p66[0] != '/' || p66[1] != '\0') {
+            t_putstr("joey: #66 fd2path(/) wrong: '"); t_putstr(p66); t_putstr("'\n");
+            return 1;
+        }
+        // (b) "/srv" -- a single walk THEN a mount cross-transplant: the crossed
+        // devsrv root carries its OWN name "/", but fd2path must report the
+        // MOUNT-POINT name "/srv" (the transplant). This is the load-bearing
+        // cross case on a real mount.
+        long s66 = t_open(T_WALK_OPEN_FROM_ROOT, "/srv", 4, T_OPATH);
+        if (s66 < 0) { t_putstr("joey: probe #66 open /srv FAILED\n"); return 1; }
+        long m66 = t_fd2path(s66, p66, sizeof(p66));
+        (void)t_close(s66);
+        if (m66 != 4 || p66[0] != '/' || p66[1] != 's' || p66[2] != 'r' ||
+            p66[3] != 'v' || p66[4] != '\0') {
+            t_putstr("joey: #66 fd2path(/srv) wrong: '"); t_putstr(p66); t_putstr("'\n");
+            return 1;
+        }
+        t_putstr("joey: probe #66 fd2path / + /srv (cross-transplant) OK\n");
+    }
 #endif /* THYLA_BOOT_PROBES (pre-pivot boot-test probe ladder) */
 
     // === stratumd boot pool mount (P6-pouch-stratumd-boot sub-chunk 16b-gamma) ===

@@ -32,6 +32,7 @@
 
 #include <thylacine/caps.h>
 #include <thylacine/dev.h>
+#include <thylacine/path.h>     // #66: quarry->path assertions
 #include <thylacine/perm.h>
 #include <thylacine/proc.h>
 #include <thylacine/spoor.h>
@@ -61,6 +62,10 @@ void test_stalk_cross_mount_xsearch_deny(void);
 void test_stalk_mount_amode_no_cross(void);
 void test_stalk_cross_mount_chain(void);
 void test_stalk_cross_mount_no_leak(void);
+// #66: namespace-name accumulation through the real resolver.
+void test_stalk_path_accumulate(void);
+void test_stalk_path_dotdot(void);
+void test_stalk_path_cross_transplant(void);
 
 // =============================================================================
 // The fixture Dev.
@@ -598,6 +603,75 @@ void test_stalk_cross_mount_no_leak(void) {
     spoor_clunk(q);
     u64 live_after = spoor_total_allocated() - spoor_total_freed();
     TEST_EXPECT_EQ(live_after, live_before, "no Spoor leak across a crossed resolve");
+
+    territory_unref(p.territory);
+    spoor_clunk(src);
+    spoor_clunk(mp);
+    spoor_unref(root);
+}
+
+// =============================================================================
+// #66 -- namespace-name accumulation through the real resolver.
+//
+// The fixture root is a qid Dev (not devramfs/dev9p), so it carries no seeded
+// Path; these tests seed `root->path = "/"` manually (mimicking the attach
+// seed) and then assert the quarry's accumulated name.
+// =============================================================================
+
+void test_stalk_path_accumulate(void) {
+    struct Proc p; mkproc_system(&p);
+    struct Spoor *root = fix_root();
+    TEST_ASSERT(root != NULL, "fix_root");
+    root->path = path_make_root();
+    TEST_ASSERT(root->path != NULL, "seed root /");
+
+    u64 pa0 = path_total_allocated(), pf0 = path_total_freed();
+    struct Spoor *q = stalk(&p, root, "a/deep/leaf", 11, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "resolve a/deep/leaf");
+    TEST_ASSERT(q->path != NULL && fix_streq(q->path->s, "/a/deep/leaf"),
+                "quarry path accumulated to /a/deep/leaf");
+    spoor_clunk(q);
+    // Every Path allocated during the resolve (one per hop) is freed: the trail
+    // unwinds inside stalk; the quarry's path frees with q above. (root's "/"
+    // was allocated before this window and frees at unref below.)
+    TEST_EXPECT_EQ(path_total_allocated() - pa0, path_total_freed() - pf0,
+                   "no Path leak across a multi-hop resolve");
+    spoor_unref(root);
+}
+
+void test_stalk_path_dotdot(void) {
+    struct Proc p; mkproc_system(&p);
+    struct Spoor *root = fix_root();
+    TEST_ASSERT(root != NULL, "fix_root");
+    root->path = path_make_root();
+    // 'deep' is walked then popped by '..'; the name must reflect the pop.
+    struct Spoor *q = stalk(&p, root, "a/deep/../b", 11, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "resolve a/deep/../b");
+    TEST_ASSERT(q->path != NULL && fix_streq(q->path->s, "/a/b"),
+                ".. yields /a/b (deep popped from the name, not /a/deep/b)");
+    spoor_clunk(q);
+    spoor_unref(root);
+}
+
+void test_stalk_path_cross_transplant(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+    root->path = path_make_root();
+
+    struct Spoor *src = stalk(&p, root, "a", 1, STALK_WALK, 0);
+    struct Spoor *mp  = stalk(&p, root, "loop", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(src != NULL && mp != NULL, "resolve src + mount point");
+    TEST_EXPECT_EQ(mount(p.territory, src, mp, 0), 0, "mount a onto loop");
+
+    // Resolving loop/b crosses the /loop mount: the crossed clone (a clone of
+    // the 'a' subtree root, whose OWN name is /a) must take the MOUNT-POINT's
+    // name /loop, NOT the source's /a -- so the child b reads /loop/b.
+    struct Spoor *q = stalk(&p, root, "loop/b", 6, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "resolve loop/b (crossed)");
+    TEST_ASSERT(q->path != NULL && fix_streq(q->path->s, "/loop/b"),
+                "crossed quarry takes the mount-point name: /loop/b");
+    spoor_clunk(q);
 
     territory_unref(p.territory);
     spoor_clunk(src);

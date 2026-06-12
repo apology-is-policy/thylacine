@@ -43,6 +43,7 @@
 
 struct Dev;
 struct Spoor;
+struct Path;   // <thylacine/path.h> -- the #66 namespace-name retention (I-33)
 
 // Plan 9 9P qid — identity of a path within a single Dev. Wire format
 // is 1 byte type + 4 bytes vers + 8 bytes path (13 bytes). The in-kernel
@@ -108,6 +109,17 @@ struct Spoor {
     s64           offset;      // read/write cursor; advanced on read/write
 
     void         *aux;         // dev-private state; opaque to spoor.c
+
+    struct Path  *path;        // #66: the namespace name this Spoor was reached
+                               // by (the Plan 9 Chan.path), refcounted +
+                               // copy-on-walk. NULL == "name unknown". STRICTLY
+                               // non-load-bearing (I-33): set-before-publish by
+                               // the walk path, read-after by the introspection
+                               // readers; the resolver NEVER consults it. Shared
+                               // by spoor_clone (path_ref), dropped at
+                               // spoor_free_internal. Lifetime subset of the
+                               // Spoor's; the field needs no lock (like qid/dev)
+                               // -- only path->ref is concurrent (atomic).
 };
 
 _Static_assert(__builtin_offsetof(struct Spoor, magic) == 0,
@@ -221,5 +233,29 @@ void            walkqid_free(struct Walkqid *w);
 // open) and the stalk resolver (the per-component X-search stat fetch).
 struct t_stat;
 int spoor_stat_native(struct Spoor *c, struct t_stat *out);
+
+// =============================================================================
+// Namespace name retention (#66 -- the Plan 9 Chan.path; I-33). The bridge
+// between the resolver (which knows the walked component) and the per-Spoor
+// Path. Both are called on a THREAD-LOCAL Spoor before it is published to a
+// handle table, so the c->path field needs no lock; only path->ref is concurrent.
+// =============================================================================
+
+// spoor_path_extend -- a successful walk step: extend `c`'s namespace name by
+// one component `name` (`namelen` bytes). `c` was just spoor_clone'd from its
+// parent, so `c->path` currently SHARES the parent's Path; this reads that
+// shared Path as the base, allocates the extended one (copy-on-walk -- the
+// shared Path is never mutated), and installs it (dropping the shared ref).
+// Handles the three forms (`.` keeps the shared parent Path unchanged; `..`
+// pops; else append). On allocation failure / overflow `c->path` becomes NULL
+// ("unknown") and the WALK STILL SUCCEEDS -- the Path is non-load-bearing
+// (I-33). NULL-safe in `c`.
+void spoor_path_extend(struct Spoor *c, const char *name, u64 namelen);
+
+// spoor_path_transplant -- a mount cross: REPLACE `dst`'s Path with a ref to
+// `src`'s. Used by stalk_cross_mounts to stamp the MOUNT-POINT's namespace name
+// onto the crossed clone (the user is "at /mnt" regardless of the mount
+// source's internal name). NULL-safe.
+void spoor_path_transplant(struct Spoor *dst, struct Spoor *src);
 
 #endif  // THYLACINE_SPOOR_H

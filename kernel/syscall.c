@@ -27,6 +27,7 @@
 #include <thylacine/mmio_handle.h>
 #include <thylacine/notes.h>
 #include <thylacine/page.h>
+#include <thylacine/path.h>    // struct Path (SYS_FD2PATH reads ->s/->len; #66)
 #include <thylacine/pipe.h>
 #include <thylacine/poll.h>
 #include <thylacine/perm.h>
@@ -1570,6 +1571,16 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     // returned in w->qid[] — the next open() will refresh nc->qid).
     walkqid_free(w);
 
+    // #66: append the walked component to nc's namespace name. nc SHARES src's
+    // Path (from spoor_clone); spoor_path_extend reads that shared Path as the
+    // base and installs the extended one. src was released above, but nc holds
+    // the shared Path ref, so it is alive. Non-load-bearing (I-33) -- an OOM
+    // leaves nc->path NULL. (`.`/`..` are rejected as components above, so this
+    // is always a real name.) Done before the result-cross so a mount-point nc
+    // carries the walked name, which stalk_cross_mounts then transplants onto
+    // the mounted root.
+    spoor_path_extend(nc, name_scratch, name_len_raw);
+
     // #957: cross the walked RESULT. If nc is a mount point, yield the MOUNTED
     // ROOT (Plan 9 domount on the resolved node), so a single-hop SYS_WALK_OPEN
     // onto a mount point opens/returns the mounted tree -- identical to stalk's
@@ -1753,6 +1764,47 @@ static s64 sys_getcwd_handler(u64 buf_va, u64 buf_len_raw, u64 a2, u64 a3) {
     for (int i = 0; i <= len; i++) {                 // include the trailing NUL
         if (uaccess_store_u8(buf_va + (u64)i, (u8)scratch[i]) != 0) return -1;
     }
+    return (s64)len;
+}
+
+// =============================================================================
+// SYS_FD2PATH — return the namespace name a fd was reached by (#66; the Plan 9
+// fd2path(2)). Copies the fd's Spoor's Path string (+ trailing NUL) into the
+// user buffer and returns the length (excluding NUL). The fd must be a
+// KOBJ_SPOOR handle the caller holds (rights == 0: NO specific access right --
+// the name is of something the caller already opened, not new authority). A
+// Spoor with no known name (NULL Path -- a nameless attach root, or a walk from
+// a nameless fd) yields a 0-length result ("unknown"), NEVER an error: a valid
+// path always begins with '/' (len >= 1), so len == 0 unambiguously means
+// unknown. The Path is non-load-bearing (I-33) and immutable while the Spoor is
+// ref-held (set-before-publish), so it is read locklessly with no path_ref.
+// =============================================================================
+
+static s64 sys_fd2path_handler(u64 fd_raw, u64 buf_va, u64 buf_len_raw, u64 a3) {
+    (void)a3;
+    struct Thread *t = current_thread();             if (!t) return -1;
+    struct Proc *p = t->proc;                        if (!p) return -1;
+    if (buf_len_raw == 0)                            return -1;
+    if (buf_len_raw > SYS_OPEN_PATH_MAX + 1)         return -1;
+    if (!sys_validate_user_buf(buf_va, buf_len_raw)) return -1;
+
+    // #844: sys_lookup_spoor TRANSFERS the ref -- spoor_clunk on every exit.
+    // rights == 0 -> any KOBJ_SPOOR handle (no access right required).
+    struct Spoor *c = sys_lookup_spoor(p, (hidx_t)fd_raw, 0);
+    if (!c)                                          return -1;
+
+    // c is ref-held, so c->path (if non-NULL) is alive + immutable (I-33). Read
+    // its length + bytes directly. NULL Path -> 0 ("unknown"), still a success.
+    struct Path *pp = c->path;
+    u32 len = pp ? pp->len : 0u;
+    if ((u64)len + 1 > buf_len_raw)                 { spoor_clunk(c); return -1; }   // path + NUL must fit
+
+    for (u32 i = 0; i < len; i++) {
+        if (uaccess_store_u8(buf_va + (u64)i, (u8)pp->s[i]) != 0) { spoor_clunk(c); return -1; }
+    }
+    if (uaccess_store_u8(buf_va + (u64)len, 0) != 0)             { spoor_clunk(c); return -1; }   // trailing NUL
+
+    spoor_clunk(c);
     return (s64)len;
 }
 
@@ -2013,6 +2065,13 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
         spoor_clunk(nc);
         return -1;
     }
+
+    // #66: append the created name to nc's namespace name. nc SHARES src's Path
+    // (the clone-walk does not extend it -- nname==0); spoor_path_extend reads
+    // that shared (parent) Path and installs the extended one. Non-load-bearing
+    // (I-33). create returns nc opened in place (opened == nc), the Spoor
+    // installed below.
+    spoor_path_extend(nc, name_scratch, name_len_raw);
 
     // A-3 audit F1 (the create leg, closed in lockstep with the SYS_WALK_OPEN
     // leg): derive the handle rights from omode (rights_for_omode) so the
@@ -5501,6 +5560,13 @@ void syscall_dispatch(struct exception_context *ctx) {
                                                ctx->regs[1],
                                                ctx->regs[2],
                                                ctx->regs[3]);
+        return;
+
+    case SYS_FD2PATH:
+        ctx->regs[0] = (u64)sys_fd2path_handler(ctx->regs[0],
+                                                ctx->regs[1],
+                                                ctx->regs[2],
+                                                ctx->regs[3]);
         return;
 
     case SYS_WALK_CREATE:

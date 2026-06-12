@@ -404,6 +404,14 @@ void test_perm_check_dac_override_cap(void);
 void test_perm_wstat_chown_cap(void);
 void test_perm_check_want_zero_denied(void);
 void test_perm_wstat_rejects_unknown_valid_bit(void);
+void test_path_make_root(void);
+void test_path_addelem_forms(void);
+void test_path_parent_forms(void);
+void test_path_addelem_overflow_null(void);
+void test_path_ref_balance(void);
+void test_path_spoor_clone_shares(void);
+void test_path_spoor_extend(void);
+void test_path_spoor_transplant(void);
 void test_stalk_resolve_multi(void);
 void test_stalk_resolve_deep(void);
 void test_stalk_leading_and_double_slash(void);
@@ -423,6 +431,9 @@ void test_stalk_cross_mount_xsearch_deny(void);
 void test_stalk_mount_amode_no_cross(void);
 void test_stalk_cross_mount_chain(void);
 void test_stalk_cross_mount_no_leak(void);
+void test_stalk_path_accumulate(void);
+void test_stalk_path_dotdot(void);
+void test_stalk_path_cross_transplant(void);
 void test_devsrv_registered(void);
 void test_devsrv_open_root_dir(void);
 void test_devsrv_stat_native_root(void);
@@ -2044,6 +2055,14 @@ struct test_case g_tests[] = {
     { "perm.check_want_zero_denied",   test_perm_check_want_zero_denied,   false, NULL },
     { "perm.wstat_rejects_unknown_valid_bit",
                                        test_perm_wstat_rejects_unknown_valid_bit, false, NULL },
+    { "path.make_root",                test_path_make_root,                false, NULL },
+    { "path.addelem_forms",            test_path_addelem_forms,            false, NULL },
+    { "path.parent_forms",             test_path_parent_forms,             false, NULL },
+    { "path.addelem_overflow_null",    test_path_addelem_overflow_null,    false, NULL },
+    { "path.ref_balance",              test_path_ref_balance,              false, NULL },
+    { "path.spoor_clone_shares",       test_path_spoor_clone_shares,       false, NULL },
+    { "path.spoor_extend",             test_path_spoor_extend,             false, NULL },
+    { "path.spoor_transplant",         test_path_spoor_transplant,         false, NULL },
     { "stalk.resolve_multi",           test_stalk_resolve_multi,           false, NULL },
     { "stalk.resolve_deep",            test_stalk_resolve_deep,            false, NULL },
     { "stalk.leading_and_double_slash", test_stalk_leading_and_double_slash, false, NULL },
@@ -2063,6 +2082,9 @@ struct test_case g_tests[] = {
     { "stalk.mount_amode_no_cross",    test_stalk_mount_amode_no_cross,    false, NULL },
     { "stalk.cross_mount_chain",       test_stalk_cross_mount_chain,       false, NULL },
     { "stalk.cross_mount_no_leak",     test_stalk_cross_mount_no_leak,     false, NULL },
+    { "stalk.path_accumulate",         test_stalk_path_accumulate,         false, NULL },
+    { "stalk.path_dotdot",             test_stalk_path_dotdot,             false, NULL },
+    { "stalk.path_cross_transplant",   test_stalk_path_cross_transplant,   false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
 };
 

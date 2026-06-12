@@ -7,6 +7,7 @@
 
 #include <thylacine/dev.h>
 #include <thylacine/extinction.h>
+#include <thylacine/path.h>     // #66: the per-Spoor namespace-name Path (I-33)
 #include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
 #include <thylacine/types.h>
@@ -80,6 +81,12 @@ static void spoor_free_internal(struct Spoor *c) {
     // for diagnostic detection of a premature-free bug.
     if (__atomic_load_n(&c->ref, __ATOMIC_ACQUIRE) != 0)
         extinction("spoor_free_internal with ref > 0 (premature free)");
+
+    // #66: drop this Spoor's hold on its namespace-name Path. A Path frees
+    // exactly when its last referencing Spoor frees (lifetime subset of the
+    // Spoor's, I-33); path_unref is NULL-safe.
+    path_unref(c->path);
+    c->path = NULL;
 
     // Clobber magic explicitly so a stale-pointer dereference between
     // free and SLUB-list-write extincts on the magic check rather than
@@ -167,6 +174,16 @@ struct Spoor *spoor_clone(struct Spoor *c) {
     // the clone inherits it. Together with dc + qid.path this is the mount-key.
     nc->devno  = c->devno;
 
+    // #66: SHARE the parent's namespace-name Path (Plan 9 cclone -- O(1) incref,
+    // copies no string; the hot walk path runs this on every hop, including the
+    // ones that fail + unwind). A successful resolution step then REPLACES this
+    // shared Path with an extended private one via spoor_path_walked; a mount
+    // cross replaces it via spoor_path_transplant; a clone that is neither (the
+    // "/" quarry, the clone_walk_zero cross source) inherits the parent's name.
+    // path_ref is NULL-safe (a NULL parent Path == "unknown" stays unknown).
+    nc->path = c->path;
+    path_ref(nc->path);
+
     return nc;
 }
 
@@ -223,6 +240,39 @@ void spoor_clunk(struct Spoor *c) {
 
 u64 spoor_total_allocated(void) { return g_spoor_allocated; }
 u64 spoor_total_freed(void)     { return g_spoor_freed; }
+
+// =============================================================================
+// Namespace name retention (#66 -- the Plan 9 Chan.path; I-33).
+// =============================================================================
+
+void spoor_path_extend(struct Spoor *c, const char *name, u64 namelen) {
+    if (!c) return;
+    // `c->path` is the parent's Path (shared via spoor_clone). "." -- a no-op
+    // step (same place + name): keep it. Nothing to do.
+    if (namelen == 1 && name && name[0] == '.') return;
+
+    // ".." pops; any other component appends. path_addelem reads c->path (the
+    // shared parent Path) as the base and allocates a FRESH owned Path (ref ==
+    // 1) -- it NEVER mutates the shared Path (immutable-string property), so
+    // reading c->path then replacing it below is safe. NULL on OOM / overflow /
+    // unknown-parent -> the name becomes "unknown" and the walk still succeeds.
+    struct Path *np = path_addelem(c->path, name, namelen);
+
+    // Replace c's currently-shared Path with the new one. The drop releases the
+    // ref spoor_clone took on the parent's Path; the parent keeps its own.
+    struct Path *old = c->path;
+    c->path = np;
+    path_unref(old);
+}
+
+void spoor_path_transplant(struct Spoor *dst, struct Spoor *src) {
+    if (!dst) return;
+    struct Path *np = src ? src->path : NULL;
+    path_ref(np);                 // NULL-safe; take dst's own hold on src's Path
+    struct Path *old = dst->path;
+    dst->path = np;
+    path_unref(old);              // drop the Path the clone-walk shared from the source
+}
 
 // =============================================================================
 // Walkqid allocation (P4-C).
