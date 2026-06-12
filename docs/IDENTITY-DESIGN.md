@@ -1964,6 +1964,53 @@ pass; landed scripture-first, no code):
   to distinguish SAK-revoke from Ctrl-C). c-2 impl + audit close `a0f6163` (R1 CLEAN, 0/1/0/2
   all fixed; the A-4 arc is DONE). **A-4-pre + A-4a + A-4b + A-4c all LANDED + audited CLEAN.**
 
+**#57b -- the namespace front-door for the console (the I-27 gate-at-namespace-open).** A-4c
+gated the SYSCALL entry point (`SYS_CONSOLE_OPEN` checks `proc_is_console_attached` --
+syscall.c, the A-5a-F2 fix); the console had NO filesystem path. The container-keystone
+namespace layout (#57b; user-voted "Full /dev incl cons" 2026-06-12) binds the kernel char
+devices at `/dev` (ARCH §9.4) via a new aggregating directory Dev (`devdev`, dc='d') mounted
+with the /srv-idiom (the kernel boot mount in the kproc territory + the post-pivot MREPL
+re-graft, inherited by every Proc via `territory_clone`). Two of its leaves -- `cons` and
+`consctl` -- are the console; the rest (`null`/`zero`/`full`/`random`/`urandom`) are world-rw
+and ungated.
+
+- **The load-bearing soundness point: making `/dev/cons` a walkable path must NOT create a
+  SECOND, ungated front door to the console.** The console is a single-reader resource (the RX
+  ring is drained by one parked reader; `devcons_read`'s busy-guard returns -1 to a 2nd
+  blocking reader). If `open("/dev/cons")` were ungated, any EL0 Proc could become that single
+  reader and steal the getty's console input -- the exact A-5a-F2 break the syscall gate
+  closed, and a passphrase typed at the login prompt would land in the thief's read. So
+  `devdev.open` enforces the SAME `proc_is_console_attached(current_thread()->proc)` gate for
+  the `cons`/`consctl` qids that `SYS_CONSOLE_OPEN` enforces. **The trusted-path gate now
+  covers the namespace open, not just the syscall.**
+- **I-27 is preserved, not weakened.** `walk("/dev/cons")` resolves the name (Plan 9 shape --
+  the path exists), but `open` fails -1 for a non-attached caller. Only joey (pre-relinquish)
+  and post-SAK corvus -- the console-attach holders -- can open it, exactly as via the syscall
+  today. The user shell never opens `/dev/cons`; it INHERITS the fd login opened while attached
+  and passed as stdio, so the gate-at-open does not regress the session's console I/O. The gate
+  is at OPEN (covering all subsequent read AND write -- so a non-attached Proc cannot even
+  spoof console OUTPUT), and it is orthogonal to the leaf's rwx perms (0666), exactly as
+  `/ctl/kernel-base`'s `CAP_HOSTOWNER` read-gate is orthogonal to its perms (#57a F1).
+- **Two gated entry points = defense-in-depth.** `SYS_CONSOLE_OPEN` keeps its gate (the
+  bootstrap still needs the syscall before `/dev` is mounted); `devdev.open` is the namespace
+  front-door's gate. Retiring `SYS_CONSOLE_OPEN` in favor of the path alone is a v1.x seam.
+- **`consctl` is present + gated but carries NO v1.0 modes** (read EOF / write -1; there is no
+  termios/line-discipline yet -- that is LS-8 #952). The path + the gate exist now so the LS-8
+  PTY surface lands its mode-control content into an already-secured, already-named file rather
+  than introducing a new gated path later. (Plan 9 conventionally pairs `cons` with `consctl`;
+  gating `consctl` identically is correct because disabling echo / setting raw mode on the
+  trusted login prompt is itself a console-trust operation.)
+- **One console implementation, two front doors.** `devdev`'s `cons` leaf delegates its I/O to
+  the SAME `cons.c` ring/uart code path `devcons` (the syscall Dev) uses -- the single-reader
+  busy-guard, the INTERACTIVE-band promotion, and the death-interruptible read are reused, not
+  forked. There is no second reader path that could race the first.
+
+[#57b scripture-first: this section + ARCH §9.4 (as-built) + §28 I-27 (the namespace-open
+enforcement cell) + §25.4 (the audit-trigger row) + the focused audit. The aggregating-Dev
+mechanics (the dual-mode reuse-`nc` walk) inherit the #57a lesson -- a mounted Dev's `.walk`
+must return the caller's pre-clone as `wq->spoor` or `clone_walk_zero` cannot cross the /dev
+mount.]
+
 **New invariants** (land in ARCHITECTURE.md §28; mirrored here):
 - **I-25 -- legate scope is bounded + fully revoked.** A legate's elevated caps are bounded
   to its `legate_scope_id` subtree, attenuate to children by I-2, and are FULLY revoked (the
