@@ -378,7 +378,18 @@ cooked-ish v1.0 console (no raw mode needed). Full editors (helix via Pouch,
 thematically. Tests: LS-CI (open a file, edit a line, save, `cat` shows the
 edit).
 
-### LS-K — Kernel introspection syscalls (id / whoami / date) [KERNEL + audit-light; scripture ARCH §22.6]
+### LS-K — Kernel introspection syscalls (id / whoami / date) [done; KERNEL + audit-light; scripture ARCH §22.6]
+
+**LANDED** (scripture `9dcd9d0` -> LS-K-a `a7ca2dc` kernel -> LS-K-b `3cc7cea`
+userspace -> audit close). 866/866 kernel tests (+5 `test_clock.c`) +
+coreutil-smoke 46 (+4) + the `ls-k` LS-CI (id/whoami/date over a real PTY) +
+the SMP gate (0 corruption). Fable focused audit **0 P0 / 0 P1 / 1 P2 / 3 P3**,
+all fixed (F1 the `clock_gettime` `ts_va` alignment guard -- benign at SCTLR.A=0,
+latent extinction if set; F2 the RTC plausibility ceiling -- a floating
+`0xFFFFFFFF` = 2106 defeated the low-only floor; F3 the rtc.h fail-soft-scope
+doc; F4 the public `timer_wallclock_offset_ns` underflow guard). Closed list
+`audit_lsk_closed_list.md`. Owed: a non-vacuous EL0 odd-`ts_va` regression for
+F1 (the in-kernel harness has no mapped-unaligned user VA + SCTLR.A=0).
 
 **Kernel.** Four tiny read-only syscalls that unblock useful tools. Closes
 G13/G14. **Design RESOLVED 2026-06-12** (research-collapsed to the Plan 9 +

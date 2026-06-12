@@ -64,6 +64,11 @@ void test_clock_wallclock_offset_math(void) {
         timer_wallclock_offset_ns(1600000000ull, 1000)
             == 1600000000ull * 1000000000ull - 1000ull,
         "offset(E, M) must be E*1e9 - M");
+    // LS-K audit F4: a small nonzero epoch whose epoch_ns < mono_now must
+    // fail-soft to 0 (the public helper must be total). Pre-fix the subtraction
+    // wrapped to ~UINT64_MAX; the guard returns 0.
+    TEST_ASSERT(timer_wallclock_offset_ns(1ull, 2000000000ull) == 0,
+        "offset(epoch_ns < mono) must be 0 (no u64 underflow)");
 }
 
 void test_clock_identity_syscalls(void) {

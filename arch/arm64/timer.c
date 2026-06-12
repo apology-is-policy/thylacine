@@ -209,8 +209,15 @@ u64 timer_ns_to_counter(u64 ns) {
 static u64 g_wallclock_offset_ns;   // CLOCK_REALTIME = timer_now_ns() + this
 
 u64 timer_wallclock_offset_ns(u64 epoch_seconds, u64 mono_now_ns) {
-    if (epoch_seconds == 0) return 0;
-    return epoch_seconds * 1000000000ull - mono_now_ns;
+    u64 epoch_ns = epoch_seconds * 1000000000ull;
+    // Fail-soft on a 0 epoch (no RTC), AND on the implausible case epoch_ns <
+    // mono_now (which would underflow the u64 subtraction). Production never
+    // hits the latter -- rtc_read_epoch_seconds returns 0 or >= the 2020 floor,
+    // whose epoch_ns (>= 1.5e18) dominates a boot-early mono -- but this public
+    // helper must be total against any caller/test input (LS-K audit F4).
+    if (epoch_seconds == 0 || epoch_ns < mono_now_ns)
+        return 0;
+    return epoch_ns - mono_now_ns;
 }
 
 void timer_set_wallclock_anchor(u64 epoch_seconds) {

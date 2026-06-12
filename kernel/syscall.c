@@ -1855,6 +1855,13 @@ s64 sys_clock_gettime_handler(u64 clk_id, u64 ts_va, u64 a2, u64 a3) {
     }
     if (!sys_validate_user_buf(ts_va, sizeof(struct t_timespec)))
         return -T_E_FAULT;
+    // uaccess_store_u32 requires a 4-byte-aligned target (an unaligned STR
+    // alignment-faults, which the uaccess fixup table does NOT catch -> kernel
+    // extinction the moment SCTLR_EL1.A is set). All four stores sit at
+    // ts_va + {0,4,8,12}, so a 4-byte-aligned ts_va aligns every store. Reject
+    // a misaligned ts_va up front (a conformant struct t_timespec is 8-aligned).
+    if (ts_va & 0x3u)
+        return -T_E_FAULT;
 
     u64 sec  = ns / 1000000000ull;
     u32 nsec = (u32)(ns % 1000000000ull);
