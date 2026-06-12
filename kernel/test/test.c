@@ -35,6 +35,11 @@ void test_slub_kmalloc_overflow_guard(void);
 void test_slub_cache_destroy_guards(void);
 void test_gic_init_smoke(void);
 void test_timer_tick_increments(void);
+void test_clock_monotonic_advances(void);
+void test_clock_realtime_anchored(void);
+void test_clock_wallclock_offset_math(void);
+void test_clock_identity_syscalls(void);
+void test_clock_gettime_errors(void);
 void test_hardening_detect_smoke(void);
 void test_alternatives_patch_applied(void);
 void test_alternatives_atomics_correct(void);
@@ -903,6 +908,11 @@ struct test_case g_tests[] = {
     { "slub.cache_destroy_guards",     test_slub_cache_destroy_guards,     false, NULL },
     { "gic.init_smoke",                test_gic_init_smoke,                false, NULL },
     { "timer.tick_increments",         test_timer_tick_increments,         false, NULL },
+    { "clock.monotonic_advances",      test_clock_monotonic_advances,      false, NULL },
+    { "clock.realtime_anchored",       test_clock_realtime_anchored,       false, NULL },
+    { "clock.wallclock_offset_math",   test_clock_wallclock_offset_math,   false, NULL },
+    { "clock.identity_syscalls",       test_clock_identity_syscalls,       false, NULL },
+    { "clock.gettime_errors",          test_clock_gettime_errors,          false, NULL },
     { "hardening.detect_smoke",        test_hardening_detect_smoke,        false, NULL },
     { "alternatives.patch_applied",    test_alternatives_patch_applied,    false, NULL },
     { "alternatives.atomics_correct",  test_alternatives_atomics_correct,  false, NULL },

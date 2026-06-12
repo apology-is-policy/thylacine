@@ -23,6 +23,7 @@
 #include "../arch/arm64/kaslr.h"
 #include "../arch/arm64/mmu.h"          // mmu_retire_ttbr0_identity (P3-Bda)
 #include "../arch/arm64/timer.h"
+#include "../arch/arm64/rtc.h"          // rtc_read_epoch_seconds (LS-K wall clock)
 #include "../mm/magazines.h"
 #include "../mm/phys.h"
 #include "../mm/slub.h"
@@ -350,6 +351,12 @@ void boot_main(void) {
     if (!timer_init(1000)) {
         extinction("timer_init failed (CNTFRQ_EL0 = 0 or hz out of range)");
     }
+    // LS-K: read the PL031 RTC once + anchor CLOCK_REALTIME to the monotonic
+    // counter. Runs after timer_init (g_freq set, timer_now_ns live) and after
+    // the MMU/vmalloc are up (gic_init mapped MMIO above), strictly before
+    // smp_init (the write-once-before-SMP anchor discipline). Fails soft to a 0
+    // epoch (no extinction) -> realtime reads 1970 + uptime if no RTC.
+    timer_set_wallclock_anchor(rtc_read_epoch_seconds());
     if (!gic_attach(TIMER_INTID_EL1_VIRT, timer_irq_handler, NULL)) {
         extinction("gic_attach(timer) failed");
     }

@@ -265,6 +265,98 @@ The handler's `g_ticks++` happens before `write_cntp_tval_el0(g_reload)`. If a s
 
 ---
 
+## Wall clock + the LS-K clock surface (CLOCK_REALTIME / CLOCK_MONOTONIC)
+
+LS-K (ARCH §22.6) exposes two clocks to userspace through `SYS_CLOCK_GETTIME`,
+built on this timer plus a one-shot PL031 RTC read.
+
+### The two clocks
+
+- **`CLOCK_MONOTONIC`** is `timer_now_ns()` verbatim — ns since boot from
+  `CNTVCT_EL0`, the existing tsleep/poll timebase. Never goes backward.
+- **`CLOCK_REALTIME`** is `timer_realtime_ns()` = `timer_now_ns()` + a single
+  boot-time offset. The offset ties the wall-clock epoch (read once from the RTC)
+  to the monotonic counter: `realtime(now) = epoch_anchor_ns + (mono_now −
+  mono_at_anchor)`. The fast counter supplies the resolution + the elapsed delta;
+  the slow RTC is touched exactly once.
+
+### The wall-clock anchor (`arch/arm64/timer.c`)
+
+```c
+u64 timer_wallclock_offset_ns(u64 epoch_seconds, u64 mono_now_ns);  // pure; epoch 0 -> 0
+void timer_set_wallclock_anchor(u64 epoch_seconds);                 // write-once, boot CPU
+u64 timer_realtime_ns(void);                                        // mono + offset
+```
+
+A single `static u64 g_wallclock_offset_ns` holds `epoch_ns − mono_at_anchor`.
+It is written **once** on the boot CPU (from `boot_main`, right after
+`timer_init`, before `smp_init`) and read unsynchronized by `clock_gettime` on
+any CPU. Soundness mirrors `g_freq`: an aligned `u64` load on aarch64 is atomic,
+and the SMP bring-up barrier orders the single write before any secondary's
+first read — so the read is always a coherent snapshot with no lock. A `0` epoch
+(no RTC) yields a `0` offset, so `CLOCK_REALTIME == CLOCK_MONOTONIC` (1970 +
+uptime) — the honest "no wall clock" signal, never a fabricated time.
+
+The offset math cannot underflow for any plausible epoch: `epoch_ns` (~1.6e18
+for 2020+) dominates the boot-early `mono_at_anchor` (< ~1e10), and
+`epoch_seconds × 1e9` stays well inside `u64` (a 32-bit RTC epoch × 1e9 ≈
+4.3e18 < 1.8e19).
+
+### The PL031 RTC (`arch/arm64/rtc.c`)
+
+`rtc_read_epoch_seconds()` discovers the ARM PrimeCell PL031 via the DTB
+(`dtb_get_compat_reg("arm,pl031", …)`) with the QEMU-`virt` fixed-base fallback
+`0x09010000` (the same I-15 pattern as PL011), maps it with `mmu_map_mmio`, and
+reads the 32-bit `RTCDR` (offset 0) — the Unix epoch in seconds (QEMU seeds it
+from the host clock). Returns `0` (fail-soft) if no PL031 is reachable or the
+read is below a 2020 plausibility floor. The MMIO region is reserved in
+`kobj_mmio_reserve_kernel_ranges` (`reserve_compat("arm,pl031")`) so a
+`CAP_HW_CREATE` userspace driver cannot claim the RTC slot (I-5).
+
+The kernel reads the RTC **once** at boot and never again at v1.0; the mapping is
+held (there is no `mmu_unmap_mmio`, and one page of vmalloc for a reserved device
+is harmless). A settable clock / re-read is the recorded v1.x seam.
+
+### The syscall handlers (`kernel/syscall.c`)
+
+| Syscall | Number | Returns |
+|---|---|---|
+| `SYS_GETPID` | 72 | `current->proc->pid` (always > 0) |
+| `SYS_GETUID` | 73 | `current->proc->principal_id` |
+| `SYS_GETGID` | 74 | `current->proc->primary_gid` |
+| `SYS_CLOCK_GETTIME` | 75 | `0` / `-EINVAL` (bad clk_id) / `-EFAULT` (bad va) |
+
+The three identity reads carry no capability and mutate nothing; the field
+values are `< 2^32`, so the `s64` return is never negative (no error-aliasing).
+`SYS_CLOCK_GETTIME` validates `clk_id` **first** (a bad id returns `-EINVAL`
+without touching the buffer), then fills `struct t_timespec { s64 tv_sec;
+s64 tv_nsec; }` (16 bytes, `_Static_assert`-pinned; the musl/arm64 layout) via
+four `uaccess_store_u32` writes (low/high of each `i64`, little-endian) — any
+fault routes to `-EFAULT`. `T_CLOCK_REALTIME = 0` / `T_CLOCK_MONOTONIC = 1` match
+Linux `clockid_t`.
+
+### Tests (`kernel/test/test_clock.c`)
+
+`clock.monotonic_advances` (timer_now_ns strictly advances across a busy-wait),
+`clock.realtime_anchored` (realtime ≥ monotonic always; and a plausible wall
+clock on the QEMU-virt test target — a 0 here would be a real RTC regression, not
+the fail-soft path, which is for RTC-less bare metal), `clock.wallclock_offset_math`
+(the pure offset helper: fail-soft 0 and `E·1e9 − M`), `clock.identity_syscalls`
+(getpid/getuid/getgid return the calling Proc's own fields), `clock.gettime_errors`
+(bad clk_id → `-EINVAL`; NULL buffer → `-EFAULT`). The RTC hardware read is
+covered transitively (the boot anchor feeds the realtime-plausibility assertion);
+the success copy-out path is covered by the `id`/`whoami`/`date` LS-CI E2E.
+
+### v1.x seams (recorded in ARCH §22.6)
+
+Settable wall clock + a timekeeper / NTP; a vDSO `clock_gettime` (EL0 CNTVCT is
+already enabled, see `timer_enable_el0_counter_access`); a 64-bit RTC (the 32-bit
+`RTCDR` wraps in 2106); uid→name resolution + `getgroups` (whoami/id are numeric
+at v1.0); the pouch boundary-line mapping musl `getpid`/`clock_gettime` onto these
+numbers.
+
+---
+
 ## See also
 
 - `docs/reference/01-boot.md` — entry sequence (`timer_init` slot in `boot_main`).

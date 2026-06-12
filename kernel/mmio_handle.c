@@ -376,6 +376,12 @@ void kobj_mmio_reserve_kernel_ranges(void) {
     // boot banner ABI, EXTINCTION delivery, etc.).
     reserve_compat("arm,pl011");
 
+    // PL031 RTC (LS-K): the kernel reads it once at boot to anchor the wall
+    // clock (CLOCK_REALTIME). It holds no live behaviour after that read, but
+    // the slot is reserved so a CAP_HW_CREATE userspace driver cannot claim
+    // the RTC region (I-5; same posture as PL011). No-ops if absent.
+    reserve_compat("arm,pl031");
+
     // PCIe ECAM: kernel uses for VirtIO PCI enumeration (P4-H). The
     // ECAM mapping is per-bus; we reserve the WHOLE ECAM range (typically
     // 256 MiB on QEMU virt). Drivers should use individual VirtIO PCI

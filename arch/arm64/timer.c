@@ -195,6 +195,33 @@ u64 timer_ns_to_counter(u64 ns) {
          + (ns % 1000000000ull) * g_freq / 1000000000ull;
 }
 
+// ---------------------------------------------------------------------------
+// LS-K: wall clock (CLOCK_REALTIME).
+//
+// A single offset (epoch_ns - mono_ns_at_anchor) added to the monotonic clock
+// yields the wall clock. One aligned u64, write-once on the boot CPU before
+// smp_init: an aligned u64 load on aarch64 is atomic, and the smp bring-up
+// barrier orders the single write before any secondary reads it, so
+// clock_gettime on any CPU reads a coherent value with no lock. 0 (no RTC)
+// keeps realtime == monotonic (1970 + uptime, the honest "no wall clock"
+// signal). See ARCH §22.6.
+// ---------------------------------------------------------------------------
+static u64 g_wallclock_offset_ns;   // CLOCK_REALTIME = timer_now_ns() + this
+
+u64 timer_wallclock_offset_ns(u64 epoch_seconds, u64 mono_now_ns) {
+    if (epoch_seconds == 0) return 0;
+    return epoch_seconds * 1000000000ull - mono_now_ns;
+}
+
+void timer_set_wallclock_anchor(u64 epoch_seconds) {
+    g_wallclock_offset_ns =
+        timer_wallclock_offset_ns(epoch_seconds, timer_now_ns());
+}
+
+u64 timer_realtime_ns(void) {
+    return timer_now_ns() + g_wallclock_offset_ns;
+}
+
 void timer_busy_wait_ticks(u64 n) {
     u64 target = g_ticks + n;
     while (g_ticks < target) {

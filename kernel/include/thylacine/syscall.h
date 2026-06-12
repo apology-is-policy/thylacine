@@ -1358,7 +1358,45 @@ enum {
     //   reached by, not a live lookup, so a later rename / unmount of a component
     //   can leave it naming a different object. Do NOT use it as a re-open key.
     SYS_FD2PATH = 71,  // arg: fd (x0), buf_va (x1), buf_len (x2)
+
+    // LS-K identity reads (ARCH §22.6). Each returns the calling Proc's field;
+    // no args, no memory write, no capability. The field values are < 2^32, so
+    // the s64 return is always non-negative (never aliases an error).
+    SYS_GETPID = 72,   // -> pid (the per-Proc pid, always > 0)
+    SYS_GETUID = 73,   // -> principal_id (the durable user; A-1a)
+    SYS_GETGID = 74,   // -> primary_gid (the durable primary group; A-1a)
+
+    // SYS_CLOCK_GETTIME(clk_id, timespec_va) -> 0 / -EINVAL / -EFAULT  (LS-K)
+    //   Fill a struct t_timespec at timespec_va for clk_id:
+    //     T_CLOCK_REALTIME  (0): wall-clock ns since the Unix epoch
+    //     T_CLOCK_MONOTONIC (1): ns since boot (CNTVCT; never goes backward)
+    //   Returns 0 on success, -T_E_INVAL on an unknown clk_id, -T_E_FAULT on a
+    //   bad timespec_va. The clk_id is validated FIRST, so a bad id never reads
+    //   the buffer. See ARCH §22.6.
+    SYS_CLOCK_GETTIME = 75,  // arg: clk_id (x0), timespec_va (x1)
 };
+
+// SYS_CLOCK_GETTIME clock ids. Values match Linux clockid_t so a future pouch
+// boundary-line maps clock_gettime 1:1.
+#define T_CLOCK_REALTIME   0
+#define T_CLOCK_MONOTONIC  1
+
+// SYS_CLOCK_GETTIME timestamp record. 16 bytes, the musl/arm64 struct timespec
+// layout (time_t tv_sec = i64, long tv_nsec = i64). _Static_asserts pin the
+// size + offsets so libt / libthyla-rs / a future pouch patch decode a fixed
+// record. tv_nsec is in [0, 1e9).
+struct t_timespec {
+    s64 tv_sec;    // 0: seconds (since the Unix epoch for REALTIME; since boot
+                   //    for MONOTONIC)
+    s64 tv_nsec;   // 8: nanoseconds within the second, [0, 1000000000)
+};
+_Static_assert(sizeof(struct t_timespec) == 16,
+               "struct t_timespec is a SYS_CLOCK_GETTIME ABI type -- pinned at "
+               "16 bytes (the musl/arm64 struct timespec layout)");
+_Static_assert(__builtin_offsetof(struct t_timespec, tv_sec)  == 0,
+               "t_timespec.tv_sec at ABI offset 0");
+_Static_assert(__builtin_offsetof(struct t_timespec, tv_nsec) == 8,
+               "t_timespec.tv_nsec at ABI offset 8");
 
 // SYS_WALK_OPEN's FROM_ROOT sentinel: when passed as the spoor_fd, the
 // kernel uses the caller's Territory's root_spoor as the walk source

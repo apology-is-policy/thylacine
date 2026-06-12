@@ -1813,6 +1813,64 @@ static s64 sys_fd2path_handler(u64 fd_raw, u64 buf_va, u64 buf_len_raw, u64 a3) 
     return (s64)len;
 }
 
+// =============================================================================
+// LS-K (ARCH §22.6): identity reads + clock_gettime. The three identity calls
+// return the calling Proc's durable fields (no args, no memory write, no
+// capability); the field values are < 2^32 so the s64 return is never negative
+// (no error-aliasing). SYS_CLOCK_GETTIME fills a t_timespec for MONOTONIC
+// (CNTVCT) or the boot-anchored REALTIME wall clock. All four are NON-static so
+// the kernel tests call them directly. current_thread() is always valid in a
+// syscall frame -- the !t / !p guards are defense-in-depth.
+// =============================================================================
+
+s64 sys_getpid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+    (void)a0; (void)a1; (void)a2; (void)a3;
+    struct Thread *t = current_thread();             if (!t) return -1;
+    struct Proc *p = t->proc;                        if (!p) return -1;
+    return (s64)p->pid;
+}
+
+s64 sys_getuid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+    (void)a0; (void)a1; (void)a2; (void)a3;
+    struct Thread *t = current_thread();             if (!t) return -1;
+    struct Proc *p = t->proc;                        if (!p) return -1;
+    return (s64)(u64)p->principal_id;
+}
+
+s64 sys_getgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+    (void)a0; (void)a1; (void)a2; (void)a3;
+    struct Thread *t = current_thread();             if (!t) return -1;
+    struct Proc *p = t->proc;                        if (!p) return -1;
+    return (s64)(u64)p->primary_gid;
+}
+
+s64 sys_clock_gettime_handler(u64 clk_id, u64 ts_va, u64 a2, u64 a3) {
+    (void)a2; (void)a3;
+    // Validate the clock id FIRST -- a bad id never touches the buffer.
+    u64 ns;
+    switch (clk_id) {
+    case T_CLOCK_REALTIME:  ns = timer_realtime_ns(); break;
+    case T_CLOCK_MONOTONIC: ns = timer_now_ns();      break;
+    default:                return -T_E_INVAL;
+    }
+    if (!sys_validate_user_buf(ts_va, sizeof(struct t_timespec)))
+        return -T_E_FAULT;
+
+    u64 sec  = ns / 1000000000ull;
+    u32 nsec = (u32)(ns % 1000000000ull);
+    // struct t_timespec { s64 tv_sec @0; s64 tv_nsec @8 }. aarch64 is
+    // little-endian, so each i64 is [low u32, high u32]. tv_sec fits ~33 bits
+    // (epoch ~1.7e9 s) so its high word is small but nonzero; tv_nsec < 1e9
+    // fits a u32 (high word 0). Stored via the audited uaccess_store_u32 (no
+    // uaccess_store_u64 exists); any store fault -> -EFAULT, nothing else
+    // touched.
+    if (uaccess_store_u32(ts_va + 0,  (u32)(sec & 0xFFFFFFFFu)) != 0) return -T_E_FAULT;
+    if (uaccess_store_u32(ts_va + 4,  (u32)(sec >> 32))         != 0) return -T_E_FAULT;
+    if (uaccess_store_u32(ts_va + 8,  nsec)                     != 0) return -T_E_FAULT;
+    if (uaccess_store_u32(ts_va + 12, 0u)                       != 0) return -T_E_FAULT;
+    return 0;
+}
+
 static s64 sys_open_handler(u64 start_fd_raw, u64 path_va,
                             u64 path_len_raw, u64 omode_raw) {
     struct Thread *t = current_thread();
@@ -5585,6 +5643,26 @@ void syscall_dispatch(struct exception_context *ctx) {
                                                 ctx->regs[1],
                                                 ctx->regs[2],
                                                 ctx->regs[3]);
+        return;
+
+    case SYS_GETPID:
+        ctx->regs[0] = (u64)sys_getpid_handler(ctx->regs[0], ctx->regs[1],
+                                               ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_GETUID:
+        ctx->regs[0] = (u64)sys_getuid_handler(ctx->regs[0], ctx->regs[1],
+                                               ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_GETGID:
+        ctx->regs[0] = (u64)sys_getgid_handler(ctx->regs[0], ctx->regs[1],
+                                               ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_CLOCK_GETTIME:
+        ctx->regs[0] = (u64)sys_clock_gettime_handler(ctx->regs[0], ctx->regs[1],
+                                                      ctx->regs[2], ctx->regs[3]);
         return;
 
     case SYS_WALK_CREATE:

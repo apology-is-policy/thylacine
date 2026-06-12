@@ -97,6 +97,34 @@ u64 timer_ns_to_counter(u64 ns);
 // the loop so the CPU sleeps until the next IRQ rather than spin-hot.
 void timer_busy_wait_ticks(u64 n);
 
+// ---------------------------------------------------------------------------
+// LS-K: wall clock (CLOCK_REALTIME) over the monotonic timebase.
+//
+// timer_now_ns() above IS CLOCK_MONOTONIC (ns since boot). The wall clock is a
+// boot-time anchor: the kernel reads the RTC once (rtc_read_epoch_seconds) and
+// ties that epoch to the monotonic counter, so CLOCK_REALTIME advances with the
+// same fast counter without ever re-reading the slow RTC. See ARCH §22.6.
+// ---------------------------------------------------------------------------
+
+// Compute the wall-clock offset (epoch_ns - mono_now_ns) the realtime clock adds
+// to the monotonic clock. `epoch_seconds` == 0 (no RTC) yields 0 -- the
+// fail-soft case where CLOCK_REALTIME == CLOCK_MONOTONIC (1970 + uptime). Pure
+// (no global state); split out so the offset math is unit-testable without
+// mutating the live clock. For any plausible epoch, epoch_ns (~1.6e18) dominates
+// mono_now_ns (boot-early), so the subtraction never underflows.
+u64 timer_wallclock_offset_ns(u64 epoch_seconds, u64 mono_now_ns);
+
+// Set the wall-clock anchor from the boot RTC read. WRITE-ONCE on the boot CPU,
+// before smp_init (the g_freq discipline): the offset is a single aligned u64,
+// so an unsynchronized read on any CPU is a coherent snapshot (no lock). Stores
+// timer_wallclock_offset_ns(epoch_seconds, timer_now_ns()).
+void timer_set_wallclock_anchor(u64 epoch_seconds);
+
+// Current CLOCK_REALTIME in nanoseconds since the Unix epoch:
+// timer_now_ns() + the wall-clock offset. Before timer_set_wallclock_anchor (or
+// after anchoring a 0 epoch) this equals timer_now_ns() (== 1970 + uptime).
+u64 timer_realtime_ns(void);
+
 // P4-Ic-latency: enable EL0 reads of the architectural counter via
 // CNTKCTL_EL1. Sets EL0VCTEN (virtual counter; the timebase userspace
 // should read, matching the virtual timer) and EL0PCTEN (physical
