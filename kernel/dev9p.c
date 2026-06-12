@@ -310,6 +310,13 @@ static struct Spoor *dev9p_open(struct Spoor *c, int omode) {
     // since they match; richer flag translation lands when Plan 9 +
     // Linux callers diverge.
     u32 flags = (u32)(omode & 0x3);
+    // OEXEC (Plan 9 access mode 3) -> O_RDONLY (#58 exec-from-namespace). 9P2000.L
+    // has no exec-open, and `flags & O_ACCMODE == 3` is the INVALID Linux access
+    // mode (a conformant server rejects it -EINVAL; Stratum only works today by a
+    // permissive read-gate). The kernel just READS the file to exec it -- the
+    // X-permission was enforced identity-side at stalk's perm_check(PERM_R|PERM_X)
+    // BEFORE this open -- so a dev9p OEXEC-open reads the bytes as O_RDONLY.
+    if (flags == 3) flags = 0;
     if (omode & 0x10) flags |= 01000;       // OTRUNC → O_TRUNC
     struct p9_qid qid;
     u32 iounit;

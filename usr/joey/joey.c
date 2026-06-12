@@ -2767,6 +2767,12 @@ int main(void) {
             // (the system binaries live once, in the initrd). mkdir /bin is
             // idempotent (the Stratum pool persists across reboots); the MREPL
             // mount takes its own spoor_ref, so the pre-pivot handle closes after.
+            // ORDERING INVARIANT (#58 audit F3): every post-pivot /bin/<name>
+            // spawn (corvus, legate-prover, login, loom-*, u-redir-test,
+            // fs-mut-smoke) resolves ONLY because this bind precedes it. A refactor
+            // that reorders a /bin/<name> spawn before this line -- or makes the
+            // stratumd/pivot block conditional -- breaks resolution; it fails LOUDLY
+            // at the first such spawn (corvus), so the coupling is self-announcing.
             {
                 long mkbin = t_walk_create(T_WALK_OPEN_FROM_ROOT, "bin", 3, T_OREAD,
                                            T_WALK_CREATE_DMDIR | 0755u);

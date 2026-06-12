@@ -659,7 +659,10 @@ void boot_main(void) {
     // #58: the spawn tests resolve the binary through the caller's namespace
     // (exec_load_from_namespace -> stalk), so the test Proc (kproc) needs a
     // root_spoor. Root it at devramfs BEFORE the suite; joey_run idempotently
-    // re-roots it later for the boot chain.
+    // re-roots it later for the boot chain. NOTE (#58 audit F5): kproc's root is
+    // now devramfs for the WHOLE suite -- no test may assume an unrooted kproc or
+    // FROM_ROOT == -1 (pre-#58 kproc was already devramfs-rooted for joey, so
+    // there is no behavior delta; this just moves the root earlier).
     joey_root_kproc_at_devramfs();
     uart_puts("  tests:\n");
     test_run_all();

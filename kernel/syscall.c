@@ -3685,7 +3685,7 @@ void *exec_load_from_namespace(struct Proc *p, const char *name,
     // enforced -- no regression; a > cap binary already failed before #58).
     struct t_stat st;
     if (spoor_stat_native(quarry, &st) != 0)       { spoor_clunk(quarry); return NULL; }
-    if (st.size <= 0 || (u64)st.size > SYS_SPAWN_BLOB_MAX) { spoor_clunk(quarry); return NULL; }
+    if (st.size == 0 || st.size > SYS_SPAWN_BLOB_MAX)      { spoor_clunk(quarry); return NULL; }
     size_t sz = (size_t)st.size;
 
     void *blob = kmalloc(sz, 0);
