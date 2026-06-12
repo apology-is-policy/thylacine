@@ -378,14 +378,56 @@ cooked-ish v1.0 console (no raw mode needed). Full editors (helix via Pouch,
 thematically. Tests: LS-CI (open a file, edit a line, save, `cat` shows the
 edit).
 
-### LS-K — Kernel introspection syscalls (id / whoami / date)
+### LS-K — Kernel introspection syscalls (id / whoami / date) [KERNEL + audit-light; scripture ARCH §22.6]
 
-**Kernel** (small, audit-light). Three tiny read-only syscalls that unblock
-useful tools: `t_getpid` / `t_getuid` / `t_getgid` (-> `id`, `whoami`; the Proc
-already carries `principal_id`/`primary_gid` from A-1a) + `t_clock_gettime` (->
-`date`; the kernel already has `CNTVCT`/the virtual timer — expose monotonic +
-a wall-clock base). Each = a syscall + a `libthyla-rs` wrapper + the coreutil
-(adopt from aux). Closes G13/G14. Tests: kernel unit + the coreutils via LS-CI.
+**Kernel.** Four tiny read-only syscalls that unblock useful tools. Closes
+G13/G14. **Design RESOLVED 2026-06-12** (research-collapsed to the Plan 9 +
+POSIX idiom — no fork; canonical statement ARCH §22.6):
+
+- **`SYS_GETPID = 72` / `SYS_GETUID = 73` / `SYS_GETGID = 74`** — return the
+  calling Proc's `pid` / `principal_id` / `primary_gid` (all durable Proc fields
+  since A-1a). No args, no memory write, no capability; the value is the return.
+- **`SYS_CLOCK_GETTIME = 75`**`(clk_id, timespec_va)` — fill a `struct t_timespec
+  { i64 tv_sec; i64 tv_nsec; }` (16 B, `_Static_assert`-pinned, the musl/arm64
+  layout) for `T_CLOCK_MONOTONIC = 1` (nanoseconds since boot, from
+  `timer_now_ns()` / `CNTVCT_EL0` — already the tsleep timebase) or
+  `T_CLOCK_REALTIME = 0` (nanoseconds since the Unix epoch). `-EINVAL` on a bad
+  `clk_id`; `-EFAULT` on a bad `timespec_va`. The `T_CLOCK_*` ids match Linux
+  `clockid_t` so a future pouch boundary-line maps `clock_gettime` 1:1.
+
+**The wall-clock base (the one genuinely-new mechanism).** MONOTONIC is free
+(the kernel already has `CNTVCT`). REALTIME needs a real epoch. The kernel reads
+the **PL031 RTC once at boot** (`arch/arm64/rtc.c`: `dtb_get_compat_reg("arm,pl031",
+…)` + the QEMU-`virt` `0x09010000` fallback, the PL011 pattern; the 32-bit
+`RTCDR` = host Unix seconds), snapshots the monotonic counter at the same instant
+(`timer_set_wallclock_anchor`), and computes `realtime(now) = epoch_anchor_ns +
+(mono_now − mono_anchor)`. The slow RTC is touched exactly once; the fast counter
+gives the delta + sub-second resolution. **Fail-soft**: no PL031 / implausible
+read -> `epoch_anchor = 0` -> REALTIME reads `1970 + uptime` (the honest "no
+wall-clock" signal), never an extinction. The PL031 MMIO slot is reserved (I-5);
+the device derives from the DTB (I-15). **No new §28 invariant** (read-only;
+covered by I-15 + I-5).
+
+**Userspace.** `usr/lib/libthyla-rs`: `time::now()` / `Instant` / `SystemTime`
+(realizing the pre-documented `time.rs` v1.x plan) + the `clock_gettime` wrapper;
+the `getpid`/`getuid`/`getgid` wrappers. The three native coreutils `id` / `whoami`
+/ `date` (authored native — the aux branch has none, since `date` needs the
+not-yet-existing clock surface). **v1.0 limitation**: `whoami` / `id` render the
+*numeric* `principal_id` / `primary_gid` — uid->name resolution (a corvus
+`NAME_LOOKUP` verb or a kernel `principal_name` stamped at `CAP_SET_IDENTITY`) and
+`getgroups` (the supplementary-group set) are recorded **v1.x seams** (ARCH §22.6),
+not LS-K scope.
+
+**Split**: LS-K scripture (ARCH §22.6 + this section + the §25.4 audit row +
+CLAUDE.md mirror; no code) -> **LS-K-a** (kernel: `rtc.c` + the anchor + the 4
+syscalls + the I-5 reservation + kernel unit tests + the `11-timer.md` wall-clock
+section; audit-bearing — new MMIO/I-15/I-5 + new ABI) -> **LS-K-b** (userspace:
+the lib wrappers + `id`/`whoami`/`date` + build wiring + the `ls-k` LS-CI) -> one
+focused audit over the kernel surface + the SMP gate. Tests: kernel unit (the RTC
+anchor; MONOTONIC strictly advances; REALTIME > a 2020 floor when the RTC is
+present; `clock_gettime` `EINVAL`/`EFAULT`; `getpid`/`getuid`/`getgid` return the
+Proc fields) + the `ls-k` LS-CI (`id` -> `uid=…`, `whoami` -> the principal,
+`date` -> a plausible wall-clock line).
 
 ### LS-8 — U-PTY: the line-discipline substrate [KERNEL + audit-bearing]
 
