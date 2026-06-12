@@ -81,6 +81,7 @@ static bool              g_ramfs_initialized;
 #define RAMFS_QID_SYNTH_BASE  0x1000000000000000ULL
 #define RAMFS_QID_SYNTH_SRV   (RAMFS_QID_SYNTH_BASE + 1ULL)   // /srv
 #define RAMFS_QID_SYNTH_PROC  (RAMFS_QID_SYNTH_BASE + 2ULL)   // /proc
+#define RAMFS_QID_SYNTH_CTL   (RAMFS_QID_SYNTH_BASE + 3ULL)   // /ctl
 
 struct ramfs_synth_dir {
     const char *name;
@@ -90,6 +91,7 @@ struct ramfs_synth_dir {
 static const struct ramfs_synth_dir g_ramfs_synth_dirs[] = {
     { "srv",  RAMFS_QID_SYNTH_SRV  },
     { "proc", RAMFS_QID_SYNTH_PROC },
+    { "ctl",  RAMFS_QID_SYNTH_CTL  },
 };
 
 static inline bool ramfs_qid_is_synth(u64 path) {

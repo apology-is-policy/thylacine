@@ -346,17 +346,29 @@ static struct Spoor *devctl_attach(const char *spec) {
 
 static struct Walkqid *devctl_walk(struct Spoor *c, struct Spoor *nc,
                                     const char **name, int nname) {
-    (void)nc;
     if (!c) return NULL;
     if (nname < 0) return NULL;
 
     struct Walkqid *wq = walkqid_alloc(nname);
     if (!wq) return NULL;
 
-    struct Spoor *cur = spoor_clone(c);
-    if (!cur) {
-        walkqid_free(wq);
-        return NULL;
+    // Reuse-nc contract (stalk / sys_walk_open_handler + clone_walk_zero's
+    // mount-cross): a non-NULL nc is the caller's pre-clone and MUST be the
+    // returned wq->spoor -- a 0-element walk then returns nc unchanged with
+    // nqid == 0, the shape clone_walk_zero needs to cross the /ctl mount (#57).
+    // nc == NULL is the legacy direct-call shape (the kernel-internal devctl
+    // tests). Same dual mode devramfs_walk adopted at 16b-gamma; without it a
+    // mounted devctl is unreachable through stalk (wq->spoor != nc -> reject).
+    struct Spoor *cur;
+    if (nc) {
+        cur = nc;
+        cur->qid = c->qid;
+    } else {
+        cur = spoor_clone(c);
+        if (!cur) {
+            walkqid_free(wq);
+            return NULL;
+        }
     }
 
     int n = 0;

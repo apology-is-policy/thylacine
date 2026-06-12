@@ -47,6 +47,14 @@ Subkinds 5..15 reserved for `mem`, `fd/`, `wait`, `note`, `args`, etc. — added
 
 `PROC_QID_ROOT_PATH = 0` is the sentinel for the dev's apex directory; pid=0 (kproc) is encoded with subkind `PQS_PID_DIR` (= 1), so kproc's root path is `(0 << 32) | 1 = 1`, distinct from the dev root.
 
+### Namespace residence (#57a)
+
+devproc is **mounted at `/proc`** in the boot namespace (`kernel/joey.c::joey_mount_static_dev`), grafted onto the synthetic devramfs `/proc` mount-point dir in the kproc Territory (inherited by every Proc via `territory_clone`) and re-grafted onto the pivoted disk root by the long-running init. Before #57a devproc was kernel-internal — defined and unit-tested but unreachable by a path.
+
+Becoming reachable through `stalk` required fixing `devproc_walk` to honor the **reuse-`nc` contract**: a non-NULL `nc` (the caller's `spoor_clone(parent)`) must be returned as `wq->spoor`, and a 0-element walk must yield `nqid == 0` — the shape `stalk`'s `clone_walk_zero` needs to cross the mount. devproc had kept the pre-16b-gamma self-cloning shape (returning its own `spoor_clone`, which `stalk` rejects as `wq->spoor != nc`) precisely because it had never been mounted; the dual mode (`nc == NULL` → self-clone, for the kernel-internal direct-call tests; `nc != NULL` → reuse) matches `devramfs_walk`.
+
+`devproc.perm_enforced == false`, so `/proc` is world-walkable (Plan 9 all-pids-visible introspection); the per-pid `ctl` **kill** authority stays I-26 two-axis-gated at the write site, independent of namespace reachability — the mount widens *visibility*, never *authority*. Per-namespace `/proc` filtering (a container sees only its own pids) is the container runner (#70).
+
 ---
 
 ## File contents (v1.0)

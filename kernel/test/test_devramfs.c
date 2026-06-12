@@ -317,6 +317,8 @@ void test_devramfs_readdir_enumerates_root(void) {
     TEST_EXPECT_EQ((u64)qt, (u64)QTDIR, "srv is QTDIR");
     TEST_ASSERT(ramfs_de_run_has(buf, got, "proc", &qt), "root lists 'proc'");
     TEST_EXPECT_EQ((u64)qt, (u64)QTDIR, "proc is QTDIR");
+    TEST_ASSERT(ramfs_de_run_has(buf, got, "ctl", &qt), "root lists 'ctl'");
+    TEST_EXPECT_EQ((u64)qt, (u64)QTDIR, "ctl is QTDIR");
 
     spoor_clunk(root);
 }
@@ -348,13 +350,21 @@ void test_devramfs_readdir_buffer_too_small_errs(void) {
 void test_devramfs_readdir_synth_dir_empty(void) {
     struct Spoor *root = devramfs.attach("");
     struct Spoor *srv = walk_one(root, "srv");
-    spoor_unref(root);
     TEST_ASSERT(srv != NULL, "walk('srv') -> synth dir");
     TEST_EXPECT_EQ(srv->qid.type, QTDIR, "srv is a directory");
     char buf[64];
     TEST_EXPECT_EQ(devramfs.readdir(srv, buf, (long)sizeof(buf), 0), (long)0,
                    "synthetic mount-point dir is empty (0 == EOD)");
     spoor_unref(srv);
+
+    // /ctl is a synth mount point too (#57): present, a directory, empty.
+    struct Spoor *ctl = walk_one(root, "ctl");
+    spoor_unref(root);
+    TEST_ASSERT(ctl != NULL, "walk('ctl') -> synth dir");
+    TEST_EXPECT_EQ(ctl->qid.type, QTDIR, "ctl is a directory");
+    TEST_EXPECT_EQ(devramfs.readdir(ctl, buf, (long)sizeof(buf), 0), (long)0,
+                   "ctl synthetic mount-point dir is empty (0 == EOD)");
+    spoor_unref(ctl);
 }
 
 // The resume cookie must let a small buffer paginate the whole root with no
@@ -376,7 +386,7 @@ void test_devramfs_readdir_paginates_no_dup_no_skip(void) {
     s64 off = 0;                 // start cookie
     u64 prev_last = 0;           // last cookie seen (monotonic check)
     int  count = 0;
-    bool saw_welcome = false, saw_srv = false;
+    bool saw_welcome = false, saw_srv = false, saw_ctl = false;
     bool monotonic = true, well_formed = true;
 
     for (int guard = 0; guard < 4096; guard++) {  // guard against a non-advancing bug
@@ -394,6 +404,7 @@ void test_devramfs_readdir_paginates_no_dup_no_skip(void) {
             last_cookie = ck;
             if (name_eq(name, "welcome")) saw_welcome = true;
             if (name_eq(name, "srv"))     saw_srv = true;
+            if (name_eq(name, "ctl"))     saw_ctl = true;
             count++;
             in_run++;
             pos += len;
@@ -406,9 +417,10 @@ void test_devramfs_readdir_paginates_no_dup_no_skip(void) {
     TEST_ASSERT(monotonic, "resume cookies strictly increase (no dup, no rewind)");
     TEST_ASSERT(saw_welcome, "paginated walk still finds 'welcome'");
     TEST_ASSERT(saw_srv, "paginated walk still finds the 'srv' synth dir");
-    // Total enumerated == files + the two synthetic dirs (srv, proc).
-    TEST_EXPECT_EQ((u64)count, (u64)(devramfs_file_count() + 2),
-                   "paginated count == files + 2 synth dirs (no skip, no dup)");
+    TEST_ASSERT(saw_ctl, "paginated walk still finds the 'ctl' synth dir");
+    // Total enumerated == files + the three synthetic dirs (srv, proc, ctl).
+    TEST_EXPECT_EQ((u64)count, (u64)(devramfs_file_count() + 3),
+                   "paginated count == files + 3 synth dirs (no skip, no dup)");
 
     spoor_clunk(root);
 }

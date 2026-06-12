@@ -2737,6 +2737,22 @@ int main(void) {
                 return 1;
             }
 
+            // #57: grab pre-pivot handles to the kernel introspection Devs the
+            // kproc boot namespace mounted (devproc @ /proc, devctl @ /ctl), so
+            // they can be re-grafted onto the pivoted (disk) root -- the same
+            // pre-pivot-handle + post-pivot-MREPL idiom as /srv + /bin. O_PATH
+            // crosses each mount, yielding the Dev root (not the synth point).
+            long proc_dev_h = t_open(T_WALK_OPEN_FROM_ROOT, "/proc", 5, T_OPATH);
+            if (proc_dev_h < 0) {
+                t_putstr("joey: #57 pre-pivot t_open(/proc) FAILED\n");
+                return 1;
+            }
+            long ctl_dev_h = t_open(T_WALK_OPEN_FROM_ROOT, "/ctl", 4, T_OPATH);
+            if (ctl_dev_h < 0) {
+                t_putstr("joey: #57 pre-pivot t_open(/ctl) FAILED\n");
+                return 1;
+            }
+
             if (t_pivot_root(sd_attach_fd) != 0) {
                 t_putstr("joey: stratumd-boot t_pivot_root FAILED\n");
                 return 1;
@@ -2783,6 +2799,31 @@ int main(void) {
                 }
             }
             (void)t_close(bin_src_h);
+
+            // #57: re-establish /proc + /ctl on the pivoted root (mirror /srv +
+            // /bin). mkdir each (idempotent -- the Stratum pool persists across
+            // reboots), graft the pre-pivot Dev root (MREPL; the mount takes its
+            // own ref), then close the handle.
+            {
+                long mk = t_walk_create(T_WALK_OPEN_FROM_ROOT, "proc", 4, T_OREAD,
+                                        T_WALK_CREATE_DMDIR | 0755u);
+                if (mk >= 0) (void)t_close(mk);
+                if (t_mount("/proc", 5, proc_dev_h, T_MREPL) != 0) {
+                    t_putstr("joey: #57 post-pivot t_mount(/proc) FAILED\n");
+                    return 1;
+                }
+            }
+            (void)t_close(proc_dev_h);
+            {
+                long mk = t_walk_create(T_WALK_OPEN_FROM_ROOT, "ctl", 3, T_OREAD,
+                                        T_WALK_CREATE_DMDIR | 0755u);
+                if (mk >= 0) (void)t_close(mk);
+                if (t_mount("/ctl", 4, ctl_dev_h, T_MREPL) != 0) {
+                    t_putstr("joey: #57 post-pivot t_mount(/ctl) FAILED\n");
+                    return 1;
+                }
+            }
+            (void)t_close(ctl_dev_h);
 
             long post_fd = t_walk_open(T_WALK_OPEN_FROM_ROOT, sentinel_name,
                                         sentinel_len, T_OREAD);

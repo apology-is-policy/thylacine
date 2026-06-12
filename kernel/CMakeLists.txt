@@ -120,6 +120,7 @@ set(KERNEL_TEST_SRCS
     test/test_proc_identity.c
     test/test_resource.c
     test/test_exec_namespace.c
+    test/test_namespace_layout.c
     test/test_territory.c
     test/test_territory_mount.c
     test/test_territory_chroot.c

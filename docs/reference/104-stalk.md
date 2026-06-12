@@ -21,7 +21,14 @@ from a base Spoor, applying a per-component permission X-search and `.`/`..`
 
 It is the foundation under A-5b's isolation requirement: namespace-resident
 `/srv` (stalk-3) is its first consumer, but stalk also unlocks every absolute
-path in the OS.
+path in the OS — including exec-from-namespace (#58, every spawn resolves
+through stalk) and the **kernel introspection layout** (#57a: `devproc` @ `/proc`
++ `devctl` @ `/ctl` mounted into the boot namespace, ARCH §9.4). #57a surfaced
+that a Dev becomes stalk-reachable only if its `Dev.walk` honors the
+**reuse-`nc` contract** (`clone_walk_zero`'s mount-cross requires the walk to
+return the caller's pre-clone as `wq->spoor`, a 0-element walk yielding
+`nqid == 0`) — devproc/devctl carried the pre-16b-gamma self-cloning shape
+because they had never been mounted.
 
 ## Public API
 

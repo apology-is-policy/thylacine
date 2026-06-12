@@ -45,6 +45,12 @@ The Dev's vtable follows the directory-Dev pattern from devproc (`30-dev-spoor.m
 
 Single-level layout — no per-pid axis (unlike devproc). Subkind enum values 1..5 are leaf kinds; 0 is the root sentinel. New leaves get the next sequential subkind; reserved range up to 31 (single byte) before nested directories need richer encoding.
 
+### Namespace residence (#57a)
+
+devctl is **mounted at `/ctl`** in the boot namespace (`kernel/joey.c::joey_mount_static_dev`, the /srv idiom), grafted onto a synthetic devramfs `/ctl` mount-point dir and re-grafted onto the pivoted disk root by the long-running init. Before #57a devctl was kernel-internal — unreachable by a path.
+
+`/ctl` is **read-only** (`devctl_write` returns -1) and `devctl.perm_enforced` is unset (false), so it is world-readable introspection — the mount widens *visibility*, never *authority*. Reaching it through `stalk` required the same **reuse-`nc` walk fix** as devproc (see `docs/reference/32-devproc.md`, "Namespace residence"): `devctl_walk` now returns the caller's pre-clone `nc` as `wq->spoor` (0-element walk → `nqid == 0`), the shape `clone_walk_zero`'s mount-cross needs, with the `nc == NULL` legacy path preserved for the direct-call kernel tests.
+
 ---
 
 ## File contents (v1.0)

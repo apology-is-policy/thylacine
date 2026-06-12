@@ -178,6 +178,36 @@ void joey_root_kproc_at_devramfs(void) {
     uart_puts("  joey: kproc territory rooted at devramfs (FROM_ROOT walks live)\n");
 }
 
+// #57: graft a static single-instance kernel Dev's root onto a synthetic
+// devramfs mount-point dir in the kproc territory (the /srv idiom, generalized).
+// `mp` resolves WITHOUT crossing (STALK_MOUNT) so the mount keys on the synth
+// dir's own (dc, devno, qid.path); MREPL so a re-run replaces. The dev->attach
+// ref is dropped after mount() takes its own (success) or after the failure
+// path (mount took none). Returns 0 on success, -1 on any step's failure --
+// the caller extincts with a Dev-specific message (a boot that cannot mount
+// its introspection layer is unrecoverable). joey + every descendant inherits
+// the mount via territory_clone; the pivot drops it (synth-dir-keyed), so the
+// long-running session re-grafts post-pivot (usr/joey/joey.c).
+static int joey_mount_static_dev(struct Thread *kt, struct Dev *dev,
+                                 const char *mp, int mp_len) {
+    struct Spoor *root_dir = territory_root_ref(kt->proc->territory);
+    if (!root_dir)
+        return -1;
+    struct Spoor *mp_spoor = stalk(kt->proc, root_dir, mp, mp_len, STALK_MOUNT, 0);
+    spoor_clunk(root_dir);
+    if (!mp_spoor)
+        return -1;
+    struct Spoor *dev_root = dev->attach(NULL);
+    if (!dev_root) {
+        spoor_clunk(mp_spoor);
+        return -1;
+    }
+    int rc = mount(kt->proc->territory, dev_root, mp_spoor, MREPL);
+    spoor_clunk(dev_root);   // mount holds its own ref on success; none on failure
+    spoor_clunk(mp_spoor);   // transient identity probe
+    return rc;
+}
+
 void joey_run(void) {
     // One-call guard. v1.0 invariant — joey_run is called exactly once
     // per boot from boot_main. The guard catches accidental double-call
@@ -281,6 +311,20 @@ void joey_run(void) {
         spoor_clunk(devsrv_root);
         spoor_clunk(srv_mp);
         uart_puts("  joey: /srv mounted (namespace-resident service registry)\n");
+
+        // #57: graft the kernel introspection Devs onto their synthetic
+        // mount-point dirs -- /proc (devproc: per-pid status/cmdline/ctl/ns)
+        // and /ctl (devctl: procs/memory/devices/sched). ARCH 9.4 "v1.0
+        // target" layout. Inherited by joey + descendants; the long-running
+        // session re-grafts post-pivot. devctl_write is -1 (read-only), and
+        // /proc/<pid>/ctl writes stay I-26 two-axis-gated (owner OR
+        // CAP_HOSTOWNER/CAP_KILL) independent of namespace reachability -- so
+        // the mount widens visibility, never authority.
+        if (joey_mount_static_dev(kt, &devproc, "proc", 4) != 0)
+            extinction("joey: /proc mount (devproc) failed");
+        if (joey_mount_static_dev(kt, &devctl, "ctl", 3) != 0)
+            extinction("joey: /ctl mount (devctl) failed");
+        uart_puts("  joey: /proc + /ctl mounted (kernel introspection Devs)\n");
     }
 
     uart_puts("  joey: rforking child for /joey (");
