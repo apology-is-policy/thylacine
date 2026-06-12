@@ -210,7 +210,6 @@ static void devdev_close(struct Spoor *c) {
 }
 
 static long devdev_read(struct Spoor *c, void *buf, long n, s64 off) {
-    (void)off;
     if (!c || !buf) return -1;
     if (n < 0) return -1;
 
@@ -235,8 +234,16 @@ static long devdev_read(struct Spoor *c, void *buf, long n, s64 off) {
         return kern_random_bytes(buf, n);
     case DEV_KIND_CONS:                         // the shared console-input drain
         return cons_input_read(buf, n);
-    case DEV_KIND_CONSCTL:                      // no modes at v1.0 (termios = LS-8)
-        return 0;
+    case DEV_KIND_CONSCTL: {                     // LS-8b: read back the mode line
+        char tmp[40];                            // "+icanon +echo +isig +icrnl +onlcr\n" = 34
+        long len = cons_render_mode(tmp, (long)sizeof(tmp));
+        if (off < 0 || off >= len) return 0;     // EOF (and bad offset reads empty)
+        long avail = len - (long)off;
+        long cnt = (n < avail) ? n : avail;
+        u8 *out = (u8 *)buf;
+        for (long i = 0; i < cnt; i++) out[i] = (u8)tmp[(long)off + i];
+        return cnt;
+    }
     default:
         return -1;
     }
@@ -268,8 +275,8 @@ static long devdev_write(struct Spoor *c, const void *buf, long n, s64 off) {
         return -1;
     case DEV_KIND_CONS:                         // the shared console-output path
         return cons_output_write(buf, n);
-    case DEV_KIND_CONSCTL:                      // no modes at v1.0
-        return -1;
+    case DEV_KIND_CONSCTL:                      // LS-8b: stty-style +/-flag parse
+        return cons_set_mode_cmd(buf, n);
     case DEV_KIND_ROOT:
     default:
         return -1;
@@ -309,7 +316,10 @@ static short devdev_poll(struct Spoor *c, short events, struct poll_waiter *pw) 
     if (dev_kind_is_console(kind)) {
         if (!devdev_console_gate_ok()) return POLLNVAL;
         if (kind == DEV_KIND_CONS) return cons_poll(events, pw);
-        return 0;   // consctl: not a data stream at v1.0 (LS-8b adds termios)
+        // consctl: a control file (LS-8b), never blocks -- always ready for the
+        // requested events (the mode line is always readable; a write applies
+        // immediately). No data-readiness hook.
+        return (short)(events & POLL_REQUESTABLE);
     }
     return (short)(events & POLL_REQUESTABLE);
 }

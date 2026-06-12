@@ -21,6 +21,39 @@
 
 struct poll_waiter;   // <thylacine/poll.h> -- the cons_poll hook parameter
 
+// =============================================================================
+// LS-8b: the line discipline (termios) -- five independent flags.
+// =============================================================================
+//
+// The single physical console carries a global termios word (per-fd termios is
+// Phase-8 /dev/pts, I-20). Five fine-grained flags (granularity B, user-voted
+// 2026-06-12) gate the cooking in cons_rx_input + cons_output_write:
+//
+//   CONS_ICANON  canonical (line) mode: assemble a line, deliver on Enter,
+//                handle erase (backspace). Off -> raw byte-at-a-time.
+//   CONS_ECHO    echo each input byte to console output (HARD off-guarantee:
+//                ECHO clear -> NO input byte reaches the output -- the password
+//                mask; the cooked erase/redraw never leaks a masked byte).
+//   CONS_ISIG    Ctrl-C (0x03) -> the deferred `interrupt` note (the LS-5 path).
+//                Off -> 0x03 is an ordinary data byte.
+//   CONS_ICRNL   translate an input CR (0x0d) -> NL (0x0a).
+//   CONS_ONLCR   translate an output (and echoed) NL -> CR NL.
+//
+// The wire grammar (the /dev/consctl control file -- NOT ioctl, the Plan 9
+// idiom) names these "icanon"/"echo"/"isig"/"icrnl"/"onlcr" (see
+// cons_set_mode_cmd / cons_render_mode). The boot DEFAULT is CONS_ISIG only --
+// byte-at-a-time, Ctrl-C cooked, no echo, no translation == EXACTLY the
+// pre-LS-8b behavior, so the mechanism is inert until a consumer opts into
+// cooked mode (login for cooked-echo prompts; ut for its raw line editor).
+#define CONS_ICANON  0x01u
+#define CONS_ECHO    0x02u
+#define CONS_ISIG    0x04u
+#define CONS_ICRNL   0x08u
+#define CONS_ONLCR   0x10u
+
+#define CONS_TERMIOS_ALL      (CONS_ICANON | CONS_ECHO | CONS_ISIG | CONS_ICRNL | CONS_ONLCR)
+#define CONS_TERMIOS_DEFAULT  CONS_ISIG   // boot default == the pre-LS-8b behavior
+
 // Feed one received byte to the console input layer. Called from the PL011 RX
 // IRQ handler (arch/arm64/uart.c::uart_rx_handler), IRQ context. `is_break` is
 // true when the PL011 flagged a line BREAK on this entry (DR bit-10 BE) -- the
@@ -50,6 +83,23 @@ long cons_output_write(const void *buf, long n);
 // (the cons_poll.tla I-9 deferred-wake relay). Shared by devcons
 // (SYS_CONSOLE_OPEN) + devdev's /dev/cons leaf -- #57b single-impl.
 short cons_poll(short events, struct poll_waiter *pw);
+
+// LS-8b: the /dev/consctl control surface (the Plan 9 idiom, not ioctl). Both
+// take a KERNEL buffer (the syscall layer already copied user->kernel).
+//
+// cons_set_mode_cmd: parse + apply one consctl write. The grammar is
+// whitespace-separated "+name"/"-name" tokens (name in {icanon,echo,isig,icrnl,
+// onlcr}); "+" sets the flag, "-" clears it. ALL tokens are parsed before any is
+// applied -- a single malformed token rejects the whole write (atomic
+// multi-flag set, the tcsetattr seam) and leaves the mode unchanged. Returns n
+// on success, -1 on a malformed command (bad sign, unknown name, empty).
+//
+// cons_render_mode: render the current mode for read-back (the tcgetattr seam)
+// as five space-separated "+name"/"-name" tokens + '\n' (same grammar as the
+// write -- symmetric). Writes the WHOLE line into buf (needs >= 34 bytes);
+// returns the byte count, or 0 if buf is too small (never a partial line).
+long cons_set_mode_cmd(const void *buf, long n);
+long cons_render_mode(void *buf, long n);
 
 // The console_mgr kproc kthread entry. Spawned once at boot (boot_main). Sleeps
 // on the console-manager Rendez; on wake, performs the deferred privileged work
@@ -89,5 +139,22 @@ void cons_test_service_deferred(void);
 // Force the single-reader busy flag (to exercise the devcons_read busy-guard
 // without a second live reader thread).
 void cons_test_set_reader_busy(bool busy);
+
+// LS-8b: read / force the global termios word (drive the cooking deterministically
+// without a live consctl writer). cons_test_set_termios mirrors what a consctl
+// write does (under g_cons.lock).
+u32  cons_test_termios(void);
+void cons_test_set_termios(u32 v);
+
+// LS-8b: the echo/output capture sink. Console echo + cons_output_write emit
+// through cons_emit, which (only when capture is ON -- a test hook) buffers the
+// bytes instead of writing the UART, so a test can assert EXACTLY what was
+// echoed (and the ECHO-off no-output property). Always OFF in production (the
+// emit path is then a single never-taken branch + uart_putc).
+// cons_test_echo_capture(on) enables + resets the buffer; cons_test_echo_captured
+// copies up to `max` captured bytes into out and returns the TRUE captured count
+// (so a test detects truncation/overflow).
+void cons_test_echo_capture(bool on);
+u32  cons_test_echo_captured(u8 *out, u32 max);
 
 #endif // THYLACINE_CONS_H

@@ -358,6 +358,15 @@ void test_cons_console_open(void);
 void test_uart_rx_path_enabled(void);   // #943 console-RX guard
 void test_cons_poll_readiness(void);     // LS-8a
 void test_cons_poll_deferred_wake(void); // LS-8a
+void test_cons_termios_default(void);            // LS-8b
+void test_cons_cook_canonical_line(void);        // LS-8b
+void test_cons_cook_echo_off_no_output(void);    // LS-8b
+void test_cons_cook_isig_toggle(void);           // LS-8b
+void test_cons_cook_icrnl(void);                 // LS-8b
+void test_cons_cook_onlcr_output(void);          // LS-8b
+void test_cons_consctl_parse(void);              // LS-8b
+void test_cons_consctl_render(void);             // LS-8b
+void test_cons_cook_line_overflow(void);         // LS-8b
 void test_devctl_bestiary_smoke(void);
 void test_devctl_attach_returns_dir(void);
 void test_devctl_walk_to_each_leaf(void);
@@ -1342,6 +1351,15 @@ struct test_case g_tests[] = {
     { "uart.rx_path_enabled",          test_uart_rx_path_enabled,          false, NULL },
     { "cons.poll_readiness",           test_cons_poll_readiness,           false, NULL },
     { "cons.poll_deferred_wake",       test_cons_poll_deferred_wake,       false, NULL },
+    { "cons.termios_default",          test_cons_termios_default,          false, NULL },
+    { "cons.cook_canonical_line",      test_cons_cook_canonical_line,      false, NULL },
+    { "cons.cook_echo_off_no_output",  test_cons_cook_echo_off_no_output,  false, NULL },
+    { "cons.cook_isig_toggle",         test_cons_cook_isig_toggle,         false, NULL },
+    { "cons.cook_icrnl",               test_cons_cook_icrnl,               false, NULL },
+    { "cons.cook_onlcr_output",        test_cons_cook_onlcr_output,        false, NULL },
+    { "cons.consctl_parse",            test_cons_consctl_parse,            false, NULL },
+    { "cons.consctl_render",           test_cons_consctl_render,           false, NULL },
+    { "cons.cook_line_overflow",       test_cons_cook_line_overflow,       false, NULL },
     { "devctl.bestiary_smoke",         test_devctl_bestiary_smoke,         false, NULL },
     { "devctl.attach_returns_dir",     test_devctl_attach_returns_dir,     false, NULL },
     { "devctl.walk_to_each_leaf",      test_devctl_walk_to_each_leaf,      false, NULL },

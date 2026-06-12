@@ -1,10 +1,11 @@
 # 111 — The console device (`/dev/cons`, `kernel/cons.c`)
 
-**Status:** as-built through **LS-8a** (pollable cons + the deferred poll-wake).
-The termios line discipline (`/dev/consctl`, the cooked/raw cooking) is **LS-8b**
-(in progress; this doc's "Line discipline" section is a forward pointer until it
-lands). The PTY master/slave pair (`/dev/ptmx` + `/dev/pts`) is **Phase 8**
-(I-20).
+**Status:** as-built through **LS-8b** (pollable cons + the deferred poll-wake +
+the five-flag termios line discipline + `/dev/consctl`). The shell-side
+multi-fd poll loop + the cooked-default flip is **LS-8c**; the per-fd-termios PTY
+master/slave pair (`/dev/ptmx` + `/dev/pts`) is **Phase 8** (I-20). The login
+echo consumer (LS-6 fold-in) is pending a console-mode access decision (see
+"Known caveats / footguns").
 
 ## Purpose
 
@@ -40,6 +41,13 @@ long cons_output_write(const void *buf, long n);
 // never blocks); if pw != NULL, install it on the console hook list under the
 // cons lock (register-then-observe). Shared by devcons + the /dev/cons leaf.
 short cons_poll(short events, struct poll_waiter *pw);
+
+// LS-8b: the /dev/consctl control surface (the Plan 9 idiom, not ioctl). Both
+// take a KERNEL buffer. cons_set_mode_cmd parses + applies one consctl write
+// ("+name"/"-name" tokens, atomic; -1 on malformed); cons_render_mode renders
+// the current mode for read-back (five "+name"/"-name" tokens + '\n', 34 bytes).
+long cons_set_mode_cmd(const void *buf, long n);
+long cons_render_mode(void *buf, long n);
 
 // The console_mgr kproc kthread entry (spawned once at boot).
 void console_mgr_main(void);
@@ -131,13 +139,53 @@ thread freeing an embedded list mid-sleep) **structurally cannot arise** here
 composition is the standard `poll.tla` case (each poller has its own private
 Rendez + stack waiter).
 
-## Line discipline (termios) — LS-8b (forward pointer)
+## Line discipline (termios) — LS-8b (as-built)
 
-The cooked/raw line discipline — `ICANON` (line buffering + erase), `ECHO`,
-`ISIG` (Ctrl-C → the `interrupt` note vs a `0x03` byte), `ICRNL`, `ONLCR`, the
-five independent flags set via stty-style `/dev/consctl` writes — lands at
-**LS-8b** (ARCH §23.5.1). Today (`devdev.c`) `/dev/consctl` is console-attach-
-gated but modeless: read → 0, write → -1.
+The single console carries a global termios word (`g_cons.termios`, per-fd
+termios is Phase-8 `/dev/pts`, I-20). Five **independent** flags (granularity B,
+user-voted 2026-06-12) gate the cooking:
+
+| Flag | Effect | Where |
+|---|---|---|
+| `CONS_ICANON` | line mode: assemble a line, deliver on Enter, handle erase (BS/DEL) | `cons_rx_input` |
+| `CONS_ECHO` | echo each input byte to output (HARD off-guarantee: the password mask) | `cons_rx_input` |
+| `CONS_ISIG` | Ctrl-C (0x03) → the `interrupt` note (LS-5); off → a `0x03` data byte | `cons_rx_input` |
+| `CONS_ICRNL` | input CR (0x0d) → NL (0x0a) | `cons_rx_input` |
+| `CONS_ONLCR` | output (and echoed) NL → CR NL | `cons_output_write` + echo |
+
+**The cooking runs in `cons_rx_input` (IRQ context).** `uart_putc` is lock-free
++ IRQ-safe (it polls TXFF, writes DR — no lock, no sleep), so echo-from-IRQ is
+sound; no second raw ring / deferred-cook is needed (the ISIG Ctrl-C→note path is
+already deferred via `intr_pending` + `console_mgr`). This is the simpler sound
+choice for a low-volume (human-typing) console; Linux's `flush_to_ldisc` deferral
+is a throughput optimization a single console doesn't need. Echo bytes are staged
+under `g_cons.lock` (a ≤3-byte stack buffer — the erase `"\b \b"` is the max) and
+emitted via `cons_emit` AFTER the lock is released, so the UART busy-wait never
+runs under `g_cons.lock`.
+
+**The boot default is `CONS_ISIG` only** — byte-at-a-time, Ctrl-C cooked, no
+echo, no translation == EXACTLY the pre-LS-8b behavior. So LS-8b **breaks
+nothing**: `ut` and foreground commands are unchanged; the mechanism is inert
+until a consumer opts into cooked mode (login for cooked-echo prompts; `ut` for
+its raw line editor — LS-8c). A *cooked* default is coupled to `ut`'s raw/cooked
+dance (its editor needs raw per-keystroke input), so it lands with LS-8c.
+
+**The ECHO-off hard guarantee.** With `CONS_ECHO` clear, NO input byte reaches
+the console output — every echo (the typed char, the erase `"\b \b"`, the NL) is
+gated by the flag. The password mask is thus a kernel property, not a
+cooperative one (a consumer cannot accidentally echo via the cooked erase/redraw).
+
+### `/dev/consctl` — the control surface (the Plan 9 idiom, not ioctl)
+
+`cons_set_mode_cmd` parses one write: whitespace-separated `+name`/`-name`
+tokens (`name` in `{icanon,echo,isig,icrnl,onlcr}`); `+` sets, `-` clears. ALL
+tokens are parsed before any is applied — a single malformed token rejects the
+whole write (`-1`, no change), so a multi-flag write is atomic (the `tcsetattr`
+seam). `cons_render_mode` renders the current mode back as five `+name`/`-name`
+tokens + `'\n'` (34 bytes; the symmetric `tcgetattr` seam). Phase-8 Pouch maps
+`tcsetattr`/`tcgetattr` ↔ these strings at the boundary-line. Today `devdev.c`'s
+`/dev/consctl` leaf routes its write→`cons_set_mode_cmd` and read→`cons_render_mode`
+(offset-sliced for read-to-EOF), still behind the I-27 console-attach gate.
 
 ## State machines
 
@@ -164,6 +212,23 @@ gated but modeless: read → 0, write → -1.
   `poll_wake_pending`, the hook stays NOT ready — proving the deferral) → yield →
   the mgr walks → the hook is ready. A lost relay would leave it unready
   (`NoMissedConsPoll`).
+- (LS-8b) `cons.termios_default` — the default is `CONS_ISIG` only; raw
+  byte-at-a-time + Ctrl-C-note + no-echo (the no-breakage guarantee).
+- (LS-8b) `cons.cook_canonical_line` — assemble + erase (BS) + deliver-on-Enter;
+  the ring sees only the edited line + NL; echo = typed + `"\b \b"` + NL.
+- (LS-8b) `cons.cook_echo_off_no_output` — the ECHO-off hard guarantee: a typed
+  line echoes **zero** bytes yet still delivers to the reader (the password mask).
+- (LS-8b) `cons.cook_isig_toggle` — ISIG set → Ctrl-C is the note; clear → `0x03`
+  is ring data.
+- (LS-8b) `cons.cook_icrnl` — input CR → NL when set; verbatim when clear.
+- (LS-8b) `cons.cook_onlcr_output` — output NL → CR NL when set; bare LF when
+  clear (via the `cons_emit` capture sink).
+- (LS-8b) `cons.consctl_parse` — `+name`/`-name` set/clear; atomic multi-token;
+  malformed (`+bogus`, missing sign, empty, one bad token) → `-1`, no change.
+- (LS-8b) `cons.consctl_render` — the read-back string for default + all-set; a
+  too-small buffer renders nothing.
+- (LS-8b) `cons.cook_line_overflow` — a pathologically long line is bounded (the
+  line buffer never overflows past `CONS_LINE_MAX`; ASAN-clean).
 - (A-4c) `cons.blocking_read_wakeup`, `cons.ctrlc_consumed`,
   `cons.break_sets_sak`, `cons.sak_via_console_mgr`, the SAK/owner role-split set.
 
@@ -186,5 +251,30 @@ gated but modeless: read → 0, write → -1.
   re-checked** — consistent with `devcons_read`. The O_PATH bypass that motivated
   re-gating the `devdev` path (#57b/#81) does not reach `devcons` (it is minted
   only by the gated syscall, never walked in the namespace).
-- The single-console termios state (LS-8b) will be **global** to the one v1.0
-  console; per-fd termios needs `/dev/pts` (Phase 8).
+- The single-console termios state (LS-8b) is **global** to the one v1.0
+  console; per-fd termios needs `/dev/pts` (Phase 8). Two concurrent input
+  sources interleave into one shared line buffer (under `g_cons.lock` — no
+  corruption, but bytes from two typists mix); v1.0 has one console.
+- **Canonical-mode line termination needs `CONS_ICRNL`.** A terminal sends CR on
+  Enter; without ICRNL a CR is buffered as an ordinary char (it does NOT
+  terminate the line). Cooked consumers (login) set `ICANON|ECHO|ISIG|ICRNL`
+  (+`ONLCR` for a clean line break on echo) — the Unix cooked-mode convention.
+- **A line filling the entire ring drops its terminating NL.** `CONS_LINE_MAX`
+  == `CONS_RING_SIZE` (256), so a 256-char line + NL = 257 bytes; the 256 chars
+  fill the ring and the NL is dropped (bounded, never corrupting). A real line is
+  far shorter; this is the pathological edge (`cons.cook_line_overflow`).
+- **`/dev/consctl` is still I-27 console-attach-gated** (open + read + write).
+  The session-leader that wants to control termios is the **non-attached** login
+  (it reads the console via an inherited `SYS_CONSOLE_OPEN` fd, never opens
+  `/dev/consctl`), so the **login echo consumer (LS-6) is pending a console-mode
+  access decision**: either relax the consctl I/O re-gate (the O_PATH bypass is
+  already closed by `CWALKONLY`/#81, so the open-gate + inherited-handle model
+  suffices) and have the getty pass login a consctl fd, or add a capability-keyed
+  `SYS_CONSOLE_MODE(fd)` (deviates from the consctl-file scripture). The LS-8b
+  kernel mechanism is complete + unit-tested independent of this; `ut` (LS-8c)
+  drives cooked mode for foreground children without the gate question (it is the
+  console **owner**, and sets mode for itself).
+- The echo/output **capture sink** (`g_cons_echo_capture`) is test-only — always
+  false in production (the emit path is then one never-taken branch + `uart_putc`).
+  It is always-compiled, consistent with the other `cons_test_*` hooks; #71 gates
+  the file's test-support uniformly under `KERNEL_TESTS` later.

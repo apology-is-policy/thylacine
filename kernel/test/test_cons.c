@@ -64,6 +64,15 @@ void test_cons_console_open(void);                    // A-5a (SYS_CONSOLE_OPEN)
 void test_uart_rx_path_enabled(void);                 // #943 console-RX guard
 void test_cons_poll_readiness(void);                  // LS-8a (POLLIN/POLLOUT sample)
 void test_cons_poll_deferred_wake(void);              // LS-8a (the I-9 deferred relay)
+void test_cons_termios_default(void);                 // LS-8b (default == pre-LS-8b)
+void test_cons_cook_canonical_line(void);             // LS-8b (assemble + erase + deliver)
+void test_cons_cook_echo_off_no_output(void);         // LS-8b (the ECHO-off hard guarantee)
+void test_cons_cook_isig_toggle(void);                // LS-8b (Ctrl-C note vs data byte)
+void test_cons_cook_icrnl(void);                      // LS-8b (input CR -> NL)
+void test_cons_cook_onlcr_output(void);               // LS-8b (output NL -> CR NL)
+void test_cons_consctl_parse(void);                   // LS-8b (+/-flag parse + malformed)
+void test_cons_consctl_render(void);                  // LS-8b (read-back render)
+void test_cons_cook_line_overflow(void);              // LS-8b (bounded line buffer)
 
 // cons.c test hooks + the extern Dev (read slot ignores the Spoor arg, so the
 // tests pass NULL). proc.c test helpers (the test_proc.c / test_devproc.c pattern).
@@ -684,4 +693,266 @@ void test_cons_poll_deferred_wake(void) {
 
     poll_waiter_list_unregister(&pw);                   // NoStaleHook (stack waiter)
     cons_test_reset();
+}
+
+// =============================================================================
+// LS-8b: the line discipline (termios / consctl). The cooking runs in
+// cons_rx_input (IRQ context); these tests drive it synthetically (the harness
+// cannot inject UART RX) and observe echo via the test capture sink (cons_emit
+// buffers instead of writing the UART when capture is on).
+// =============================================================================
+
+// Drain the byte ring into `buf` (the devcons.read path ignores the Spoor).
+static long cons_drain(u8 *buf, long n) {
+    return devcons.read(NULL, buf, n, 0);
+}
+
+// Settle the console_mgr back to SLEEPING: a canonical line delivery / Ctrl-C
+// arms a deferred flag + wakes the mgr; reset clears the flags, sched() lets it
+// re-observe the false cond and re-sleep (the cons.sak_via_console_mgr pattern).
+static void cons_settle_mgr(void) {
+    cons_test_echo_capture(false);
+    cons_test_reset();
+    sched();
+}
+
+// LS-8b: the boot default is CONS_ISIG only -- byte-at-a-time, Ctrl-C cooked, no
+// echo, no translation == EXACTLY the pre-LS-8b behavior (the no-breakage
+// guarantee). A data byte goes straight to the ring; 0x03 is the interrupt note.
+void test_cons_termios_default(void) {
+    cons_test_reset();
+    sched();
+    TEST_EXPECT_EQ((long)cons_test_termios(), (long)CONS_TERMIOS_DEFAULT,
+                   "reset -> termios is the boot default");
+    TEST_EXPECT_EQ((long)cons_test_termios(), (long)CONS_ISIG,
+                   "boot default == ISIG only");
+
+    // No echo at default (ECHO clear): capture stays empty across a data byte.
+    cons_test_echo_capture(true);
+    cons_rx_input((u8)'q', false);
+    u8 cap[16];
+    TEST_EXPECT_EQ((long)cons_test_echo_captured(cap, sizeof(cap)), 0L,
+                   "default ECHO-clear: a data byte echoes nothing");
+    cons_test_echo_capture(false);
+
+    u8 buf[8];
+    TEST_EXPECT_EQ(cons_drain(buf, sizeof(buf)), 1L, "raw byte-at-a-time to the ring");
+    TEST_EXPECT_EQ((long)buf[0], (long)'q', "the data byte is 'q'");
+
+    // ISIG default: Ctrl-C is the interrupt note, not ring data.
+    cons_rx_input(0x03u, false);
+    TEST_ASSERT(cons_test_intr_pending(), "default ISIG: Ctrl-C -> interrupt note");
+    cons_settle_mgr();
+}
+
+// LS-8b: canonical mode assembles a line, handles erase (backspace), and
+// delivers the whole line + NL on Enter. With ECHO the typed chars + the erase
+// "\b \b" + the NL are echoed; the ring sees ONLY the edited line.
+void test_cons_cook_canonical_line(void) {
+    cons_test_reset();
+    sched();
+    cons_test_set_termios(CONS_ICANON | CONS_ECHO);   // cooked + echo, no ONLCR
+    cons_test_echo_capture(true);
+
+    // Type "ab", backspace (erase 'b'), "c", Enter.
+    cons_rx_input((u8)'a', false);
+    cons_rx_input((u8)'b', false);
+    cons_rx_input(0x08u, false);                      // BS erases 'b'
+    cons_rx_input((u8)'c', false);
+    cons_rx_input((u8)'\n', false);                   // deliver "ac\n"
+
+    // Echo = 'a' 'b' ['\b' ' ' '\b'] 'c' '\n' = 7 bytes (no ONLCR -> bare NL).
+    u8 cap[32];
+    u32 got = cons_test_echo_captured(cap, sizeof(cap));
+    TEST_EXPECT_EQ((long)got, 7L, "echo: a,b,erase(3),c,NL");
+    const u8 want_echo[7] = { 'a','b','\b',' ','\b','c','\n' };
+    bool echo_ok = true;
+    for (int i = 0; i < 7; i++) if (cap[i] != want_echo[i]) echo_ok = false;
+    TEST_ASSERT(echo_ok, "echo bytes match a,b,\\b,space,\\b,c,NL");
+    cons_test_echo_capture(false);
+
+    // The ring holds the EDITED line including the terminating newline.
+    u8 buf[16];
+    long n = cons_drain(buf, sizeof(buf));
+    TEST_EXPECT_EQ(n, 3L, "canonical delivers the edited line + NL");
+    TEST_ASSERT(buf[0]=='a' && buf[1]=='c' && buf[2]=='\n', "line is \"ac\\n\" (b erased)");
+    cons_settle_mgr();
+}
+
+// LS-8b: the ECHO-off HARD guarantee -- with ECHO clear, NO input byte reaches
+// console output (the password mask). The line still assembles + delivers; only
+// the echo is suppressed.
+void test_cons_cook_echo_off_no_output(void) {
+    cons_test_reset();
+    sched();
+    cons_test_set_termios(CONS_ICANON);               // cooked, ECHO CLEAR
+    cons_test_echo_capture(true);
+
+    const char *secret = "hunter2";
+    for (int i = 0; secret[i]; i++) cons_rx_input((u8)secret[i], false);
+    cons_rx_input((u8)'\n', false);
+
+    u8 cap[32];
+    TEST_EXPECT_EQ((long)cons_test_echo_captured(cap, sizeof(cap)), 0L,
+                   "ECHO-off: NOT ONE byte reaches the output (password mask)");
+    cons_test_echo_capture(false);
+
+    // The masked line is still delivered to the reader.
+    u8 buf[16];
+    long n = cons_drain(buf, sizeof(buf));
+    TEST_EXPECT_EQ(n, 8L, "the masked line still delivers (hunter2 + NL)");
+    bool ok = (buf[0]=='h' && buf[6]=='2' && buf[7]=='\n');
+    TEST_ASSERT(ok, "delivered bytes are the secret + NL");
+    cons_settle_mgr();
+}
+
+// LS-8b: ISIG gates the Ctrl-C cooking. Set -> 0x03 is the interrupt note (not
+// ring data). Clear -> 0x03 is an ordinary data byte (no note).
+void test_cons_cook_isig_toggle(void) {
+    cons_test_reset();
+    sched();
+
+    // ISIG set (raw + ISIG): 0x03 cooked to the note, not enqueued.
+    cons_test_set_termios(CONS_ISIG);
+    cons_rx_input(0x03u, false);
+    cons_rx_input((u8)'x', false);
+    TEST_ASSERT(cons_test_intr_pending(), "ISIG set: Ctrl-C -> interrupt note");
+    u8 buf[8];
+    long n = cons_drain(buf, sizeof(buf));
+    TEST_EXPECT_EQ(n, 1L, "ISIG set: only the data byte 'x' in the ring");
+    TEST_EXPECT_EQ((long)buf[0], (long)'x', "ring byte is 'x', not 0x03");
+    cons_settle_mgr();
+
+    // ISIG clear (fully raw): 0x03 is a data byte, no note.
+    cons_test_set_termios(0u);
+    cons_rx_input(0x03u, false);
+    TEST_ASSERT(!cons_test_intr_pending(), "ISIG clear: Ctrl-C is NOT a note");
+    n = cons_drain(buf, sizeof(buf));
+    TEST_EXPECT_EQ(n, 1L, "ISIG clear: 0x03 is enqueued as data");
+    TEST_EXPECT_EQ((long)buf[0], 3L, "the ring byte is the literal 0x03");
+    cons_settle_mgr();
+}
+
+// LS-8b: ICRNL translates an input CR (0x0d) to NL (0x0a). Tested in raw mode so
+// the translated byte lands directly in the ring.
+void test_cons_cook_icrnl(void) {
+    cons_test_reset();
+    sched();
+
+    cons_test_set_termios(CONS_ICRNL);                // raw + ICRNL
+    cons_rx_input((u8)'\r', false);
+    u8 buf[8];
+    long n = cons_drain(buf, sizeof(buf));
+    TEST_EXPECT_EQ(n, 1L, "ICRNL set: CR enqueued");
+    TEST_EXPECT_EQ((long)buf[0], (long)'\n', "ICRNL translated CR -> NL");
+    cons_settle_mgr();
+
+    cons_test_set_termios(0u);                         // raw, ICRNL clear
+    cons_rx_input((u8)'\r', false);
+    n = cons_drain(buf, sizeof(buf));
+    TEST_EXPECT_EQ(n, 1L, "ICRNL clear: CR enqueued verbatim");
+    TEST_EXPECT_EQ((long)buf[0], (long)'\r', "ICRNL clear: byte stays CR");
+    cons_settle_mgr();
+}
+
+// LS-8b: ONLCR translates an OUTPUT NL to CR NL (cons_output_write). Default
+// clear -> bare LF forwarded (the pre-LS-8b behavior).
+void test_cons_cook_onlcr_output(void) {
+    cons_test_reset();
+    sched();
+
+    // ONLCR set: "a\nb" -> "a\r\nb".
+    cons_test_set_termios(CONS_ONLCR);
+    cons_test_echo_capture(true);
+    TEST_EXPECT_EQ(cons_output_write("a\nb", 3), 3L, "write returns the input count");
+    u8 cap[16];
+    u32 got = cons_test_echo_captured(cap, sizeof(cap));
+    TEST_EXPECT_EQ((long)got, 4L, "ONLCR set: NL expands to CR NL (a,CR,NL,b)");
+    bool ok = (cap[0]=='a' && cap[1]=='\r' && cap[2]=='\n' && cap[3]=='b');
+    TEST_ASSERT(ok, "output is a,\\r,\\n,b");
+
+    // ONLCR clear: bare LF forwarded.
+    cons_test_set_termios(0u);
+    cons_test_echo_capture(true);
+    TEST_EXPECT_EQ(cons_output_write("a\nb", 3), 3L, "write returns the input count");
+    got = cons_test_echo_captured(cap, sizeof(cap));
+    TEST_EXPECT_EQ((long)got, 3L, "ONLCR clear: bare LF (a,NL,b)");
+    ok = (cap[0]=='a' && cap[1]=='\n' && cap[2]=='b');
+    TEST_ASSERT(ok, "output is a,\\n,b");
+    cons_test_echo_capture(false);
+    cons_settle_mgr();
+}
+
+// LS-8b: the /dev/consctl parse. "+name"/"-name" tokens set/clear a flag; a
+// malformed token rejects the whole write (-1) with no change.
+void test_cons_consctl_parse(void) {
+    cons_test_reset();
+    TEST_EXPECT_EQ((long)cons_test_termios(), (long)CONS_ISIG, "start at the default");
+
+    TEST_EXPECT_EQ(cons_set_mode_cmd("+echo", 5), 5L, "+echo accepted");
+    TEST_EXPECT_EQ((long)cons_test_termios(), (long)(CONS_ISIG | CONS_ECHO), "+echo set ECHO");
+
+    TEST_EXPECT_EQ(cons_set_mode_cmd("-isig", 5), 5L, "-isig accepted");
+    TEST_EXPECT_EQ((long)cons_test_termios(), (long)CONS_ECHO, "-isig cleared ISIG");
+
+    TEST_EXPECT_EQ(cons_set_mode_cmd("+icanon +echo", 13), 13L, "two tokens accepted");
+    TEST_EXPECT_EQ((long)cons_test_termios(), (long)(CONS_ICANON | CONS_ECHO),
+                   "atomic multi-flag set");
+
+    // Malformed commands reject (-1) and leave the mode unchanged.
+    u32 before = cons_test_termios();
+    TEST_EXPECT_EQ(cons_set_mode_cmd("+bogus", 6), -1L, "unknown name -> -1");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("echo", 4), -1L, "missing +/- sign -> -1");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("+", 1), -1L, "empty name -> -1");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("", 0), -1L, "empty command -> -1");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("+echo +bad", 10), -1L, "one bad token rejects the batch");
+    TEST_EXPECT_EQ((long)cons_test_termios(), (long)before,
+                   "a rejected command leaves the mode unchanged");
+    cons_test_reset();
+}
+
+// LS-8b: the /dev/consctl read-back render. Symmetric grammar with the write:
+// five "+name"/"-name" tokens + '\n'.
+void test_cons_consctl_render(void) {
+    cons_test_reset();                                 // default = ISIG only
+    char buf[40];
+    long n = cons_render_mode(buf, (long)sizeof(buf));
+    const char *want_default = "-icanon -echo +isig -icrnl -onlcr\n";
+    TEST_EXPECT_EQ(n, 34L, "default render length");
+    bool ok = (n == 34);
+    for (long i = 0; ok && i < n; i++) if (buf[i] != want_default[i]) ok = false;
+    TEST_ASSERT(ok, "default renders -icanon -echo +isig -icrnl -onlcr");
+
+    cons_test_set_termios(CONS_TERMIOS_ALL);
+    n = cons_render_mode(buf, (long)sizeof(buf));
+    const char *want_all = "+icanon +echo +isig +icrnl +onlcr\n";
+    ok = (n == 34);
+    for (long i = 0; ok && i < n; i++) if (buf[i] != want_all[i]) ok = false;
+    TEST_ASSERT(ok, "all-set renders every flag with '+'");
+
+    // A too-small buffer renders nothing (never a partial line).
+    TEST_EXPECT_EQ(cons_render_mode(buf, 10), 0L, "too-small buffer -> 0");
+    cons_test_reset();
+}
+
+// LS-8b: the canonical line buffer is BOUNDED -- a pathologically long line
+// (CONS_LINE_MAX + extra) drops the overflow, never corrupting memory. Enter
+// still delivers what fits (the ring then caps it too).
+void test_cons_cook_line_overflow(void) {
+    cons_test_reset();
+    sched();
+    cons_test_set_termios(CONS_ICANON);               // cooked, no echo
+
+    for (int i = 0; i < 300; i++) cons_rx_input((u8)'A', false);   // > CONS_LINE_MAX (256)
+    cons_rx_input((u8)'\n', false);                                // deliver
+
+    // The ring caps at its capacity (256); every delivered byte is 'A' (the line
+    // buffer never overflowed past CONS_LINE_MAX, and the ring never overflowed).
+    static u8 buf[512];
+    long n = cons_drain(buf, (long)sizeof(buf));
+    TEST_ASSERT(n > 0 && n <= 256, "bounded delivery (<= ring capacity)");
+    bool all_a = true;
+    for (long i = 0; i < n; i++) if (buf[i] != 'A') all_a = false;
+    TEST_ASSERT(all_a, "every delivered byte is 'A' -- no overflow corruption");
+    cons_settle_mgr();
 }

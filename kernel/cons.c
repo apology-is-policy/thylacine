@@ -46,6 +46,12 @@
 _Static_assert((CONS_RING_SIZE & (CONS_RING_SIZE - 1u)) == 0u,
                "CONS_RING_SIZE must be a power of two (the ring is mask-indexed)");
 
+// LS-8b: the canonical line-assembly buffer (cooked mode). Bounded -- a line
+// longer than this drops the overflow (like the ring); Enter still delivers
+// what fits. The echo staging per input byte is at most 3 ("\b \b" erase).
+#define CONS_LINE_MAX     256u
+#define CONS_ECHO_MAX     8u    // max echo bytes one cons_rx_input byte produces
+
 struct cons_input {
     spin_lock_t lock;                  // ring + head/tail + reader_busy; taken irqsave
     u8          ring[CONS_RING_SIZE];
@@ -56,6 +62,16 @@ struct cons_input {
     bool        intr_pending;          // mutated under lock; read locklessly in cond -- cons_intr_*
     bool        sak_pending;           // A-4c-2: a serial BREAK (SAK) awaits console_mgr -- cons_sak_*
     bool        poll_wake_pending;     // LS-8a: a POLLIN edge awaits console_mgr's hook walk -- cons_pollwake_*
+
+    // LS-8b: the line discipline. `termios` holds the five cooking flags
+    // (CONS_ICANON|ECHO|ISIG|ICRNL|ONLCR), mutated + read under g_cons.lock
+    // (cons_termios_* are RELAXED-atomic for consistency with the sibling
+    // flags + so any future lockless read is well-defined). `line`/`line_len`
+    // are the cooked-mode line-assembly buffer (canonical mode only), mutated
+    // under g_cons.lock; a completed line is flushed to `ring` on Enter.
+    u32         termios;
+    u8          line[CONS_LINE_MAX];
+    u32         line_len;
 
     // LS-8a: the poll-hook list for /dev/cons. The SYS_CONSOLE_OPEN fd (devcons)
     // AND the namespace /dev/cons leaf (devdev) share it -- #57b single-impl, so
@@ -71,7 +87,11 @@ struct cons_input {
     struct poll_waiter_list poll_list;
 };
 
-static struct cons_input g_cons = { .lock = SPIN_LOCK_INIT, .poll_list = POLL_WAITER_LIST_INIT };
+static struct cons_input g_cons = {
+    .lock      = SPIN_LOCK_INIT,
+    .termios   = CONS_TERMIOS_DEFAULT,   // LS-8b: boot default == pre-LS-8b behavior
+    .poll_list = POLL_WAITER_LIST_INIT,
+};
 static struct Rendez g_cons_data_rendez = RENDEZ_INIT;   // a reader parks here
 static struct Rendez g_cons_mgr_rendez  = RENDEZ_INIT;   // console_mgr parks here
 
@@ -96,54 +116,137 @@ static inline void cons_sak_store(bool v)  { __atomic_store_n(&g_cons.sak_pendin
 static inline bool cons_pollwake_load(void)   { return __atomic_load_n(&g_cons.poll_wake_pending, __ATOMIC_RELAXED); }
 static inline void cons_pollwake_store(bool v) { __atomic_store_n(&g_cons.poll_wake_pending, v, __ATOMIC_RELAXED); }
 
+// LS-8b: the termios word. Read + written under g_cons.lock (cooking reads it,
+// consctl writes it); RELAXED-atomic for consistency with the sibling flags.
+static inline u32  cons_termios_load(void)   { return __atomic_load_n(&g_cons.termios, __ATOMIC_RELAXED); }
+static inline void cons_termios_store(u32 v) { __atomic_store_n(&g_cons.termios, v, __ATOMIC_RELAXED); }
+
+// LS-8b: the echo / output sink. Console echo (cons_rx_input) AND program output
+// (cons_output_write) emit one cooked byte through cons_emit. In production it is
+// uart_putc; a test enables capture (cons_test_echo_capture) to buffer the bytes
+// instead -- so a test can assert EXACTLY what was echoed AND the ECHO-off
+// no-output property. g_cons_echo_capture is ALWAYS false in production (only the
+// test hook sets it), so the production emit is a single never-taken branch then
+// uart_putc; the capture buffer is single-threaded test state (the UP test
+// harness drives it), never touched concurrently.
+static u8   g_cons_echo_cap[128];
+static u32  g_cons_echo_cap_len;
+static bool g_cons_echo_capture;
+
+static void cons_emit(u8 b) {
+    if (g_cons_echo_capture) {
+        if (g_cons_echo_cap_len < sizeof(g_cons_echo_cap))
+            g_cons_echo_cap[g_cons_echo_cap_len++] = b;
+        return;
+    }
+    uart_putc((char)b);
+}
+
+// Stage one echoed/output byte into `echo[*necho]`, applying ONLCR (NL -> CR NL).
+// Bounded by CONS_ECHO_MAX at every call site (a NL stages 2, a plain byte 1).
+static void cons_echo_stage(u8 b, u32 tio, u8 *echo, int *necho) {
+    if (b == (u8)'\n' && (tio & CONS_ONLCR)) {
+        echo[(*necho)++] = (u8)'\r';
+        echo[(*necho)++] = (u8)'\n';
+    } else {
+        echo[(*necho)++] = b;
+    }
+}
+
+// Enqueue one byte to the RX ring under g_cons.lock. Returns true iff a byte was
+// actually enqueued (-> a data-Rendez wake is owed). On the empty->non-empty
+// edge it arms the LS-8a deferred poll-wake (poll_wake_pending) and sets
+// *wake_mgr (the console_mgr walks the hook list in process context). Bounded:
+// drops silently when the ring is full (never overflows).
+static bool cons_ring_push(u8 byte, bool *wake_mgr) {
+    u32 c = cons_count_load();
+    if (c >= CONS_RING_SIZE) return false;
+    g_cons.ring[g_cons.tail] = byte;
+    g_cons.tail = (g_cons.tail + 1u) & (CONS_RING_SIZE - 1u);
+    cons_count_store(c + 1u);
+    if (c == 0u) {                 // empty -> non-empty: arm the deferred poll-wake
+        cons_pollwake_store(true);
+        *wake_mgr = true;
+    }
+    return true;
+}
+
 void cons_rx_input(u8 byte, bool is_break) {
     bool wake_data = false, wake_mgr = false;
+    u8   echo[CONS_ECHO_MAX];
+    int  necho = 0;
+
     irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+    u32 tio = cons_termios_load();
+
     if (is_break) {
         // A-4c-2 SAK: a serial BREAK is a PL011 line condition (DR.BE), not a
         // data byte -- EL0-written bytes cannot forge it, and the accompanying
-        // DR byte (0x00) is never enqueued. Set sak-pending + defer the
-        // privileged revoke/re-grant to console_mgr's process context
-        // (proc_console_sak takes g_proc_table_lock to revoke + re-grant the
-        // console-attach bit -- not IRQ-safe). The recognizer is stateless: one flag, no multi-byte state
-        // machine to starve or partially-spoof (the I-27 "cannot be
-        // starved/spoofed by crafted input" obligation is thus structural).
+        // DR byte (0x00) is never enqueued. Recognized UNCONDITIONALLY of
+        // termios (the I-27 trusted-path line condition must not be gated by a
+        // mode flag). Set sak-pending + defer the privileged revoke/re-grant to
+        // console_mgr's process context (proc_console_sak takes g_proc_table_lock
+        // -- not IRQ-safe). The recognizer is stateless: one flag, no multi-byte
+        // state machine to starve or partially-spoof.
         cons_sak_store(true);
         wake_mgr = true;
-    } else if (byte == 0x03u) {         // Ctrl-C: cooked-consume -> interrupt note
-        cons_intr_store(true);
-        wake_mgr = true;
     } else {
-        u32 c = cons_count_load();
-        if (c < CONS_RING_SIZE) {
-            g_cons.ring[g_cons.tail] = byte;
-            g_cons.tail = (g_cons.tail + 1u) & (CONS_RING_SIZE - 1u);
-            cons_count_store(c + 1u);
-            wake_data = true;
-            // LS-8a: relay the POLLIN readiness edge to pollers. Only the
-            // empty->non-empty transition needs a wake -- a poller that sampled
-            // count>0 returned POLLIN without sleeping, so the only sleeping
-            // pollers sampled count==0, and this byte (c==0) is the edge that
-            // makes them ready. poll_waiter_list_wake is NOT IRQ-safe, so set
-            // the flag + wake console_mgr (which walks the hook list in process
-            // context). The flag is set under g_cons.lock, the SAME lock as the
-            // count store, so the mgr's deferred drain+walk is causally after
-            // this mutation -> any poller that registered before it is found
-            // (register-then-observe; cons_poll.tla NoMissedConsPoll).
-            if (c == 0u) {
-                cons_pollwake_store(true);
-                wake_mgr = true;
+        // LS-8b: ICRNL -- translate an input CR to NL BEFORE ISIG / canon /
+        // echo see the byte (so Enter-as-CR terminates a canonical line + echoes
+        // as a newline).
+        if (byte == (u8)'\r' && (tio & CONS_ICRNL)) byte = (u8)'\n';
+
+        if (byte == 0x03u && (tio & CONS_ISIG)) {
+            // ISIG: Ctrl-C is cooked-consumed -> the deferred `interrupt` note
+            // (the LS-5 path). ISIG clear -> 0x03 falls through as a data byte.
+            cons_intr_store(true);
+            wake_mgr = true;
+        } else if (tio & CONS_ICANON) {
+            // Canonical (cooked) mode: assemble a line; deliver it on NL.
+            if (byte == 0x7fu || byte == 0x08u) {     // DEL / BS: erase one char
+                if (g_cons.line_len > 0u) {
+                    g_cons.line_len--;
+                    if (tio & CONS_ECHO) {            // visually erase: back, space, back
+                        echo[necho++] = (u8)'\b';
+                        echo[necho++] = (u8)' ';
+                        echo[necho++] = (u8)'\b';
+                    }
+                }
+                // empty line + erase: nothing to erase, nothing echoed (never
+                // back over the prompt).
+            } else if (byte == (u8)'\n') {            // terminator: deliver line + NL
+                // POSIX canonical: the read returns the line INCLUDING its
+                // terminating newline. Flush line[0..len) then the NL to the ring
+                // (the empty->non-empty poll-edge is handled inside cons_ring_push).
+                for (u32 i = 0; i < g_cons.line_len; i++)
+                    if (cons_ring_push(g_cons.line[i], &wake_mgr)) wake_data = true;
+                if (cons_ring_push((u8)'\n', &wake_mgr)) wake_data = true;
+                g_cons.line_len = 0u;
+                if (tio & CONS_ECHO) cons_echo_stage((u8)'\n', tio, echo, &necho);
+            } else {                                  // ordinary char: buffer it
+                if (g_cons.line_len < CONS_LINE_MAX) {
+                    g_cons.line[g_cons.line_len++] = byte;
+                    if (tio & CONS_ECHO) cons_echo_stage(byte, tio, echo, &necho);
+                }
+                // else: line buffer full -> drop (bounded; Enter still delivers
+                // what fits). A dropped byte is NOT echoed.
             }
+        } else {
+            // Raw / cbreak mode: byte-at-a-time to the ring (the pre-LS-8b path).
+            if (cons_ring_push(byte, &wake_mgr)) wake_data = true;
+            if (tio & CONS_ECHO) cons_echo_stage(byte, tio, echo, &necho);
         }
-        // else: ring full -> drop (bounded; never overflows).
     }
     spin_unlock_irqrestore(&g_cons.lock, s);
 
-    // wakeup() is IRQ-safe (irqsave); a wake with no waiter is a no-op. The
-    // producer set the condition under g_cons.lock and the wakeup takes the
-    // Rendez lock the sleeper's cond-check + sleep-transition hold -> no lost
-    // wakeup (the register-then-observe / I-9 pairing; see the cons_count_* /
-    // cons_intr_* rationale above for why the cond's lockless read is sound).
+    // Echo is emitted with the lock RELEASED: cons_emit -> uart_putc is lock-free
+    // (it polls TXFF; no lock/sleep), so the staged bytes go out without holding
+    // g_cons.lock across the UART busy-wait. wakeup() is IRQ-safe (irqsave); a
+    // wake with no waiter is a no-op. The producer set the condition under
+    // g_cons.lock and the wakeup takes the Rendez lock the sleeper's cond-check +
+    // sleep-transition hold -> no lost wakeup (I-9; cons_poll.tla for the
+    // poll-edge relay).
+    for (int i = 0; i < necho; i++) cons_emit(echo[i]);
     if (wake_data) wakeup(&g_cons_data_rendez);
     if (wake_mgr)  wakeup(&g_cons_mgr_rendez);
 }
@@ -223,6 +326,8 @@ void cons_test_reset(void) {
     cons_intr_store(false);
     cons_sak_store(false);
     cons_pollwake_store(false);
+    cons_termios_store(CONS_TERMIOS_DEFAULT);   // LS-8b: back to the boot default
+    g_cons.line_len = 0u;
     spin_unlock_irqrestore(&g_cons.lock, s);
 }
 
@@ -246,6 +351,28 @@ void cons_test_set_reader_busy(bool busy) {
     irq_state_t s = spin_lock_irqsave(&g_cons.lock);
     g_cons.reader_busy = busy;
     spin_unlock_irqrestore(&g_cons.lock, s);
+}
+
+u32 cons_test_termios(void) {
+    return cons_termios_load();
+}
+
+void cons_test_set_termios(u32 v) {
+    irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+    cons_termios_store(v & CONS_TERMIOS_ALL);
+    g_cons.line_len = 0u;                        // a mode flip starts a fresh line
+    spin_unlock_irqrestore(&g_cons.lock, s);
+}
+
+void cons_test_echo_capture(bool on) {
+    g_cons_echo_cap_len = 0u;
+    g_cons_echo_capture = on;
+}
+
+u32 cons_test_echo_captured(u8 *out, u32 max) {
+    u32 k = (g_cons_echo_cap_len < max) ? g_cons_echo_cap_len : max;
+    for (u32 i = 0; i < k; i++) out[i] = g_cons_echo_cap[i];
+    return g_cons_echo_cap_len;                  // true count (caller detects overflow)
 }
 
 static void devcons_reset(void)    { /* no-op */ }
@@ -355,9 +482,14 @@ static struct Block *devcons_bread(struct Spoor *c, long n, s64 off) {
     return NULL;
 }
 
-// Writes forward each byte to the PL011 UART via uart_putc. Plan 9
+// Writes forward each byte to the PL011 UART via cons_emit (-> uart_putc). Plan 9
 // idiom: writes don't persist — the byte IS the message. Returns the
 // number of bytes accepted (== n at v1.0; UART can't fail short).
+//
+// LS-8b: ONLCR -- an output NL is translated to CR NL when the flag is set
+// (default clear, so the pre-LS-8b behavior is unchanged: bare LF forwarded).
+// The termios read is lockless (RELAXED atomic; a mode flip racing a write just
+// switches translation mid-buffer -- cosmetic, never torn).
 //
 // #57b: the ONE console-output implementation, shared by devcons (the syscall
 // path) and devdev's /dev/cons leaf (the namespace path).
@@ -366,9 +498,15 @@ long cons_output_write(const void *buf, long n) {
     if (n < 0) return -1;
     if (n == 0) return 0;
 
+    u32 tio = cons_termios_load();
     const u8 *bytes = (const u8 *)buf;
     for (long i = 0; i < n; i++) {
-        uart_putc((char)bytes[i]);
+        if (bytes[i] == (u8)'\n' && (tio & CONS_ONLCR)) {
+            cons_emit((u8)'\r');
+            cons_emit((u8)'\n');
+        } else {
+            cons_emit(bytes[i]);
+        }
     }
     return n;
 }
@@ -395,6 +533,92 @@ static int devcons_wstat(struct Spoor *c, u8 *dp, int n) {
 static struct Spoor *devcons_power(struct Spoor *c, int on) {
     (void)c; (void)on;
     return NULL;
+}
+
+// =============================================================================
+// LS-8b: the /dev/consctl control surface (parse + render).
+// =============================================================================
+//
+// The wire grammar: whitespace-separated "+name"/"-name" tokens; the names below
+// are the five flags, in render order. NOT ioctl -- the Plan 9 consctl-file
+// idiom (capability-microkernel SOTA agrees: a control channel). Phase-8 Pouch
+// maps tcsetattr/tcgetattr <-> these strings at the boundary-line.
+struct cons_flag_name { const char *name; u32 bit; };
+static const struct cons_flag_name g_cons_flag_names[] = {
+    { "icanon", CONS_ICANON },
+    { "echo",   CONS_ECHO   },
+    { "isig",   CONS_ISIG   },
+    { "icrnl",  CONS_ICRNL  },
+    { "onlcr",  CONS_ONLCR  },
+};
+#define CONS_FLAG_COUNT (sizeof(g_cons_flag_names) / sizeof(g_cons_flag_names[0]))
+
+static bool cons_is_space(u8 c) {
+    return c == (u8)' ' || c == (u8)'\t' || c == (u8)'\n' || c == (u8)'\r';
+}
+
+// Match buf[start..end) (the chars AFTER the +/- sign) against a flag name.
+// Returns the bit, or 0 on no match (unknown name OR an empty token).
+static u32 cons_flag_lookup(const u8 *buf, long start, long end) {
+    for (size_t f = 0; f < CONS_FLAG_COUNT; f++) {
+        const char *nm = g_cons_flag_names[f].name;
+        long i = start;
+        size_t j = 0;
+        while (i < end && nm[j] != '\0' && (u8)nm[j] == buf[i]) { i++; j++; }
+        if (i == end && nm[j] == '\0') return g_cons_flag_names[f].bit;
+    }
+    return 0u;
+}
+
+long cons_set_mode_cmd(const void *buf, long n) {
+    if (!buf || n < 0) return -1;
+    const u8 *b = (const u8 *)buf;
+
+    // Parse ALL tokens first (atomic apply): a single malformed token rejects
+    // the whole write with no change (the tcsetattr-is-atomic seam).
+    u32 set_mask = 0u, clear_mask = 0u;
+    int tokens = 0;
+    long i = 0;
+    while (i < n) {
+        while (i < n && cons_is_space(b[i])) i++;            // skip whitespace
+        if (i >= n) break;
+        u8 sign = b[i];
+        if (sign != (u8)'+' && sign != (u8)'-') return -1;   // malformed token
+        long name_start = i + 1;
+        long j = name_start;
+        while (j < n && !cons_is_space(b[j])) j++;            // token end
+        u32 bit = cons_flag_lookup(b, name_start, j);
+        if (bit == 0u) return -1;                            // unknown / empty name
+        if (sign == (u8)'+') { set_mask |= bit;   clear_mask &= ~bit; }
+        else                 { clear_mask |= bit; set_mask   &= ~bit; }
+        tokens++;
+        i = j;
+    }
+    if (tokens == 0) return -1;                               // empty command
+
+    irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+    u32 cur = cons_termios_load();
+    cons_termios_store((cur | set_mask) & ~clear_mask);
+    spin_unlock_irqrestore(&g_cons.lock, s);
+    return n;
+}
+
+long cons_render_mode(void *buf, long n) {
+    if (!buf || n < 0) return 0;
+    u32 tio = cons_termios_load();                           // atomic snapshot
+    u8 *out = (u8 *)buf;
+    long off = 0;
+    for (size_t f = 0; f < CONS_FLAG_COUNT; f++) {
+        const char *nm = g_cons_flag_names[f].name;
+        long namelen = 0;
+        while (nm[namelen]) namelen++;
+        long need = 1 + namelen + 1;                         // sign + name + sep
+        if (off + need > n) return 0;                        // too small -> nothing
+        out[off++] = (tio & g_cons_flag_names[f].bit) ? (u8)'+' : (u8)'-';
+        for (long k = 0; k < namelen; k++) out[off++] = (u8)nm[k];
+        out[off++] = (f + 1 == CONS_FLAG_COUNT) ? (u8)'\n' : (u8)' ';
+    }
+    return off;
 }
 
 // LS-8a: the ONE console poll implementation, shared by devcons (the
