@@ -356,6 +356,7 @@ void test_devctl_read_procs_format(void);
 void test_devctl_read_memory_format(void);
 void test_devctl_read_devices_format(void);
 void test_devctl_read_kernel_base_format(void);
+void test_devctl_kernel_base_gated(void);
 void test_devctl_read_sched_format(void);
 void test_devctl_write_rejected(void);
 void test_devctl_read_dir_returns_neg1(void);
@@ -1310,6 +1311,7 @@ struct test_case g_tests[] = {
     { "devctl.read_devices_format",    test_devctl_read_devices_format,    false, NULL },
     { "devctl.read_kernel_base_format",
                                        test_devctl_read_kernel_base_format, false, NULL },
+    { "devctl.kernel_base_gated",      test_devctl_kernel_base_gated,      false, NULL },
     { "devctl.read_sched_format",      test_devctl_read_sched_format,      false, NULL },
     { "devctl.write_rejected",         test_devctl_write_rejected,         false, NULL },
     { "devctl.read_dir_returns_neg1",  test_devctl_read_dir_returns_neg1,  false, NULL },

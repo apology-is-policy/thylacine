@@ -55,6 +55,8 @@ Becoming reachable through `stalk` required fixing `devproc_walk` to honor the *
 
 `devproc.perm_enforced == false`, so `/proc` is world-walkable (Plan 9 all-pids-visible introspection); the per-pid `ctl` **kill** authority stays I-26 two-axis-gated at the write site, independent of namespace reachability — the mount widens *visibility*, never *authority*. Per-namespace `/proc` filtering (a container sees only its own pids) is the container runner (#70).
 
+**Read-path lifetime (#57a focused-audit F2).** `devproc_read` and `devproc_stat_native` find the target Proc and read its fields (`format_status`/`format_ns` / the uid+gid) **inside a `proc_for_each` callback — under `g_proc_table_lock`** (the kill-path shape), early-stopping at the matched pid. Before #57a devproc was unmounted, so these ran single-threaded only; they used `proc_find_by_pid` (which locks, walks, **unlocks**, returns the bare pointer) and then dereferenced it *outside* the lock. Once the mount makes `/proc` cross-Proc reachable (Proc A reading `/proc/<B>` by path or `SYS_FSTAT`), a concurrent reap (`wait_pid` on another CPU) could `kmem_cache_free(B)` in the lookup→deref window — a **UAF** (info leak or a wild `p->territory` deref → extinction). Holding `g_proc_table_lock` across the find+read closes it: a reaped Proc is unlinked-under-the-lock (`proc_unlink_child`'s precondition) *before* it is freed, so under the lock a Proc is either linked-and-alive (safe to deref) or already-unlinked-and-not-found. `format_ns`'s `territory_nbinds(p->territory)` is a lockless plain int read of a valid-because-locked territory — no nested lock, no sleep under the spinlock.
+
 ---
 
 ## File contents (v1.0)

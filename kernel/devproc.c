@@ -392,9 +392,28 @@ static u32 devproc_mode_for_kind(u32 kind) {
 // ctl kill-authority (devproc_kill_authorized) enforces directly. Root (the
 // dev apex) has no single owner -> -1.
 //
-// proc_find_by_pid here is lockless — the documented v1.0 "no concurrent
-// reap" window, identical to devproc_read. The KILL path does NOT use this;
-// it resolves the target under g_proc_table_lock via proc_for_each.
+// #57a F2: the owner snapshot runs INSIDE a proc_for_each callback (under
+// g_proc_table_lock, the kill-path shape), so the target Proc cannot be
+// unlinked + freed between the find and the field reads (proc_unlink_child
+// requires the lock). Pre-#57a devproc was unmounted -> reachable only
+// single-threaded; the mount + SYS_FSTAT on /proc/<pid> make this cross-Proc +
+// concurrently-reapable, so the old "no concurrent reap" claim was FALSE for
+// the cross-Proc case the mount enables (the bare-pointer-after-unlock deref
+// was a UAF). A non-zero callback return early-stops at the matched pid.
+struct devproc_stat_ctx {
+    int  pid;
+    bool found;
+    u32  uid;
+    u32  gid;
+};
+static int devproc_stat_cb(struct Proc *p, void *arg) {
+    struct devproc_stat_ctx *s = (struct devproc_stat_ctx *)arg;
+    if (p->pid != s->pid) return 0;          // continue
+    s->found = true;
+    s->uid   = p->principal_id;
+    s->gid   = p->primary_gid;
+    return 1;                                 // matched -> stop
+}
 static int devproc_stat_native(struct Spoor *c, struct t_stat *out) {
     if (!c || !out)                  return -1;
     u64 path = c->qid.path;
@@ -402,13 +421,14 @@ static int devproc_stat_native(struct Spoor *c, struct t_stat *out) {
     u32 kind = proc_qid_kind(path);
     int pid  = proc_qid_pid(path);
 
-    struct Proc *p = proc_find_by_pid(pid);
-    if (!p)                          return -1;   // gone since walk
+    struct devproc_stat_ctx s = { .pid = pid, .found = false, .uid = 0, .gid = 0 };
+    proc_for_each(devproc_stat_cb, &s);           // snapshot the owner under the lock
+    if (!s.found)                    return -1;   // gone since walk
 
     u8 *z = (u8 *)out;
     for (size_t i = 0; i < sizeof(*out); i++) z[i] = 0;
-    out->uid      = p->principal_id;
-    out->gid      = p->primary_gid;
+    out->uid      = s.uid;
+    out->gid      = s.gid;
     out->mode     = devproc_mode_for_kind(kind);
     out->qid_path = path;
     out->qid_type = (kind == PQS_PID_DIR) ? QTDIR : QTFILE;
@@ -436,6 +456,41 @@ static void devproc_close(struct Spoor *c) {
 // even with longest pid; cmdline + ns are smaller). 256 B is generous.
 #define DEVPROC_READ_BUF 256
 
+// #57a F2: format under g_proc_table_lock (the kill-path shape) so the target
+// Proc cannot be unlinked + freed between the lookup and the field deref
+// (proc_unlink_child requires the lock; under it a Proc is either linked-alive
+// or already unlinked-not-found). A non-zero callback return early-stops at the
+// matched pid (also bounding the lock-hold). format_ns reads p->territory->nbinds
+// LOCKLESSLY -- territory_nbinds is a bare `return p->nbinds`, an aligned-int
+// single-copy-atomic read that takes NO ns_lock, so there is no
+// g_proc_table_lock -> ns_lock edge; the read is safe only because
+// g_proc_table_lock keeps p (and thus p->territory) alive, and a marginally
+// stale count is fine for a "binds: N" display. No sleep / no allocation runs
+// under the lock. Pre-#57a devproc was unmounted, so this read was
+// single-threaded only; the mount makes it cross-Proc + concurrently-reapable,
+// so the old "no concurrent reap" comment was FALSE for the cross-Proc case --
+// the bare-pointer-after-unlock deref was a UAF.
+struct devproc_read_ctx {
+    int     pid;
+    u32     kind;
+    char   *buf;
+    size_t  cap;
+    size_t  total;
+    bool    found;
+};
+static int devproc_read_cb(struct Proc *p, void *arg) {
+    struct devproc_read_ctx *r = (struct devproc_read_ctx *)arg;
+    if (p->pid != r->pid) return 0;          // continue
+    r->found = true;
+    switch (r->kind) {
+    case PQS_STATUS:  r->total = format_status(p, r->buf, r->cap);  break;
+    case PQS_CMDLINE: r->total = format_cmdline(p, r->buf, r->cap); break;
+    case PQS_NS:      r->total = format_ns(p, r->buf, r->cap);      break;
+    case PQS_CTL:     r->total = 0;                                 break;  // write-only: empty read
+    default:          break;                  // kind pre-validated by the caller
+    }
+    return 1;                                 // matched -> stop
+}
 static long devproc_read(struct Spoor *c, void *buf, long n, s64 off) {
     if (!c || !buf) return -1;
     if (n < 0) return -1;
@@ -445,40 +500,24 @@ static long devproc_read(struct Spoor *c, void *buf, long n, s64 off) {
     u32 kind = proc_qid_kind(c->qid.path);
     int  pid = proc_qid_pid(c->qid.path);
 
+    // Root + pid_dir reads return -1 (directories -- readdir lands with 9P
+    // readdir). ctl is write-only at v1.0 (reads return empty; Plan 9: ctl is
+    // for commands). Validate the kind BEFORE the lookup so the callback only
+    // formats the readable file kinds.
+    if (c->qid.path == PROC_QID_ROOT_PATH || kind == PQS_PID_DIR) return -1;
+    if (kind != PQS_STATUS && kind != PQS_CMDLINE && kind != PQS_NS &&
+        kind != PQS_CTL) return -1;
+
     char content[DEVPROC_READ_BUF];
-    size_t total = 0;
+    struct devproc_read_ctx r = {
+        .pid = pid, .kind = kind, .buf = content, .cap = sizeof(content),
+        .total = 0, .found = false,
+    };
+    proc_for_each(devproc_read_cb, &r);
+    if (!r.found) return -1;                  // process gone since walk
 
-    // Root + pid_dir reads return 0 (directories — readdir lands at
-    // P4-D / 9P readdir). At v1.0 P4-C we don't synthesize directory
-    // listings; reads on a directory qid get -1 to signal "not a
-    // file". The future readdir path will replace this with a 9P
-    // stat-record stream.
-    if (c->qid.path == PROC_QID_ROOT_PATH || kind == PQS_PID_DIR) {
-        return -1;
-    }
-
-    struct Proc *p = proc_find_by_pid(pid);
-    if (!p) return -1;            // process gone since walk
-
-    switch (kind) {
-    case PQS_STATUS:
-        total = format_status(p, content, sizeof(content));
-        break;
-    case PQS_CMDLINE:
-        total = format_cmdline(p, content, sizeof(content));
-        break;
-    case PQS_NS:
-        total = format_ns(p, content, sizeof(content));
-        break;
-    case PQS_CTL:
-        // ctl is write-only at v1.0. Reads return empty (Plan 9: ctl is
-        // for commands; no readable state).
-        return 0;
-    default:
-        return -1;
-    }
-
-    if ((size_t)off >= total) return 0;            // EOF
+    size_t total = r.total;
+    if ((size_t)off >= total) return 0;       // EOF
     size_t avail = total - (size_t)off;
     size_t copy = avail > (size_t)n ? (size_t)n : avail;
 

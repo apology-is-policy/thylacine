@@ -4,8 +4,11 @@
 
 #include "test.h"
 
+#include <thylacine/caps.h>
 #include <thylacine/dev.h>
+#include <thylacine/proc.h>
 #include <thylacine/spoor.h>
+#include <thylacine/thread.h>
 #include <thylacine/types.h>
 
 void test_devctl_bestiary_smoke(void);
@@ -16,6 +19,7 @@ void test_devctl_read_procs_format(void);
 void test_devctl_read_memory_format(void);
 void test_devctl_read_devices_format(void);
 void test_devctl_read_kernel_base_format(void);
+void test_devctl_kernel_base_gated(void);
 void test_devctl_read_sched_format(void);
 void test_devctl_write_rejected(void);
 void test_devctl_read_dir_returns_neg1(void);
@@ -156,18 +160,55 @@ void test_devctl_read_devices_format(void) {
 }
 
 void test_devctl_read_kernel_base_format(void) {
-    struct Spoor *c = open_ctl_leaf("kernel-base");
-    TEST_ASSERT(c != NULL, "open /ctl/kernel-base");
+    // #57a F1: /ctl/kernel-base is CAP_HOSTOWNER-gated (the KASLR slide, an
+    // I-16 secret; CAP_HOSTOWNER is elevation-only -- not even kproc holds it
+    // by default). Temporarily elevate the in-kernel test thread to exercise
+    // the format through the REAL gated read path (an elevated admin reading
+    // the slide). Restore BEFORE the content asserts so a failing assert can
+    // never leave kproc elevated. The deny path is test_devctl_kernel_base_gated.
+    struct Thread *t = current_thread();
+    u64 saved = __atomic_load_n(&t->proc->caps, __ATOMIC_ACQUIRE);
+    __atomic_store_n(&t->proc->caps, saved | CAP_HOSTOWNER, __ATOMIC_RELEASE);
 
+    struct Spoor *c = open_ctl_leaf("kernel-base");
     char buf[256];
-    long got = devctl.read(c, buf, 256, 0);
-    TEST_ASSERT(got > 0, "kernel-base read positive");
+    long got = c ? devctl.read(c, buf, 256, 0) : -1;
+
+    __atomic_store_n(&t->proc->caps, saved, __ATOMIC_RELEASE);  // restore first
+
+    TEST_ASSERT(c != NULL, "open /ctl/kernel-base");
+    TEST_ASSERT(got > 0, "kernel-base read positive (elevated)");
     TEST_ASSERT(contains(buf, (size_t)got, "kernel_base:"),  "has kernel_base:");
     TEST_ASSERT(contains(buf, (size_t)got, "kaslr_offset:"), "has kaslr_offset:");
     TEST_ASSERT(contains(buf, (size_t)got, "seed_source:"),  "has seed_source:");
     TEST_ASSERT(contains(buf, (size_t)got, "0x"),            "uses 0x hex prefix");
 
-    spoor_clunk(c);
+    if (c) spoor_clunk(c);
+}
+
+// #57a F1: /ctl/kernel-base discloses the live KASLR slide (I-16). Now that
+// /ctl is world-reachable, that ONE leaf is gated on CAP_HOSTOWNER -- an
+// unprivileged caller (a logged-in user, stripped of the elevation-only caps
+// at rfork) cannot read it and defeat KASLR. The predicate is leaf-specific;
+// the coarse procs/memory/devices/sched stats stay world-readable.
+// (The format test above passes only because it temporarily elevates the test
+// thread to CAP_HOSTOWNER; kproc's CAP_ALL does NOT include the elevation-only
+// CAP_HOSTOWNER -- caps.h pins CAP_ALL & CAP_ELEVATION_ONLY == 0.)
+void test_devctl_kernel_base_gated(void) {
+    extern bool devctl_kernel_base_readable(const struct Proc *caller);
+
+    struct Proc admin, user;
+    for (size_t i = 0; i < sizeof(admin); i++) ((u8 *)&admin)[i] = 0;
+    for (size_t i = 0; i < sizeof(user);  i++) ((u8 *)&user)[i]  = 0;
+    admin.caps = CAP_HOSTOWNER;
+    user.caps  = CAP_NONE;
+
+    TEST_ASSERT(devctl_kernel_base_readable(&admin),
+                "CAP_HOSTOWNER reads /ctl/kernel-base");
+    TEST_ASSERT(!devctl_kernel_base_readable(&user),
+                "F1: an unprivileged caller is denied the KASLR slide");
+    TEST_ASSERT(!devctl_kernel_base_readable(NULL),
+                "NULL caller denied");
 }
 
 void test_devctl_read_sched_format(void) {

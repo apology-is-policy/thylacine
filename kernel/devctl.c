@@ -20,11 +20,13 @@
 // per-leaf format generator, offset-aware read. The format generators
 // are static per-leaf functions producing into a 512-byte stack buffer.
 
+#include <thylacine/caps.h>
 #include <thylacine/dev.h>
 #include <thylacine/extinction.h>
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
 #include <thylacine/spoor.h>
+#include <thylacine/thread.h>
 #include <thylacine/types.h>
 
 #include "../arch/arm64/kaslr.h"
@@ -135,50 +137,50 @@ static int format_procs_cb(struct Proc *p, void *arg) {
     size_t n;
 
     n = fmt_sdec(s->buf, s->cap, s->off, p->pid);
-    if (!n && p->pid != 0) { s->overflow = true; return 0; }
+    if (!n && p->pid != 0) { s->overflow = true; return 1; }
     s->off += n;
 
     n = fmt_str(s->buf, s->cap, s->off, "    ");
-    if (!n) { s->overflow = true; return 0; }
+    if (!n) { s->overflow = true; return 1; }
     s->off += n;
 
     n = fmt_str(s->buf, s->cap, s->off, state_name(p->state));
-    if (!n) { s->overflow = true; return 0; }
+    if (!n) { s->overflow = true; return 1; }
     s->off += n;
 
     n = fmt_str(s->buf, s->cap, s->off, "    ");
-    if (!n) { s->overflow = true; return 0; }
+    if (!n) { s->overflow = true; return 1; }
     s->off += n;
 
     int tc = __atomic_load_n(&p->thread_count, __ATOMIC_ACQUIRE);  // #65 F6
     n = fmt_sdec(s->buf, s->cap, s->off, tc);
-    if (!n && tc != 0) { s->overflow = true; return 0; }
+    if (!n && tc != 0) { s->overflow = true; return 1; }
     s->off += n;
 
     // #65 (I-32): the resource-floor counters as two trailing columns (the SEAM
     // counters). Atomic loads -- a cross-Proc reader holds no per-Proc lock.
     n = fmt_str(s->buf, s->cap, s->off, "    ");
-    if (!n) { s->overflow = true; return 0; }
+    if (!n) { s->overflow = true; return 1; }
     s->off += n;
     {
         u32 pages = __atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE);
         n = fmt_sdec(s->buf, s->cap, s->off, (int)pages);
-        if (!n && pages != 0) { s->overflow = true; return 0; }
+        if (!n && pages != 0) { s->overflow = true; return 1; }
         s->off += n;
     }
 
     n = fmt_str(s->buf, s->cap, s->off, "    ");
-    if (!n) { s->overflow = true; return 0; }
+    if (!n) { s->overflow = true; return 1; }
     s->off += n;
     {
         u32 kids = __atomic_load_n(&p->child_count, __ATOMIC_ACQUIRE);
         n = fmt_sdec(s->buf, s->cap, s->off, (int)kids);
-        if (!n && kids != 0) { s->overflow = true; return 0; }
+        if (!n && kids != 0) { s->overflow = true; return 1; }
         s->off += n;
     }
 
     n = fmt_str(s->buf, s->cap, s->off, "\n");
-    if (!n) { s->overflow = true; return 0; }
+    if (!n) { s->overflow = true; return 1; }
     s->off += n;
 
     return 0;        // continue iteration
@@ -191,6 +193,14 @@ static size_t format_procs(char *buf, size_t cap) {
     if (!n) return 0;
     off += n;
 
+    // #57a F3: format_procs_cb now early-returns (non-zero = STOP) on the first
+    // overflow, so proc_for_each stops walking once the DEVCTL_READ_BUF fills
+    // instead of visiting every Proc under g_proc_table_lock with IRQs off.
+    // Now that /ctl/procs is EL0-reachable (the mount), this bounds an
+    // unprivileged tight-loop read's lock-hold to O(buffer) rather than
+    // O(total-procs). The remaining O(N)-worst-case proc-table walk under the
+    // global IRQ-off lock (find/kill) is the pre-existing scalability pattern
+    // tracked to the #62 perf backlog (per-Proc locks / RCU).
     struct procs_fmt_state s = { buf, cap, off, false };
     proc_for_each(format_procs_cb, &s);
     return s.off;
@@ -288,6 +298,20 @@ static const struct ctl_leaf *leaf_for_kind(u32 kind) {
         if (g_ctl_leaves[i].kind == kind) return &g_ctl_leaves[i];
     }
     return NULL;
+}
+
+// #57a F1: only /ctl/kernel-base is read-gated -- it discloses the live KASLR
+// slide (kernel_base + kaslr_offset), an I-16 secret. Now that /ctl is
+// world-reachable in the boot namespace, gate THAT leaf on CAP_HOSTOWNER (the
+// unified admin authority; a logged-in user is stripped of the elevation-only
+// caps at rfork, so it cannot read the slide and defeat KASLR). The coarse
+// procs/memory/devices/sched stats stay world-readable (Plan 9 introspection).
+// Non-static so the deny/allow regression test can drive it with synthetic
+// callers (devctl.perm_enforced is false -- the gate is at the read site, the
+// devproc kill-gate idiom). `caller` is the reading Proc; NULL -> deny.
+bool devctl_kernel_base_readable(const struct Proc *caller) {
+    if (!caller) return false;
+    return (__atomic_load_n(&caller->caps, __ATOMIC_ACQUIRE) & CAP_HOSTOWNER) != 0;
 }
 
 // =============================================================================
@@ -417,6 +441,14 @@ static long devctl_read(struct Spoor *c, void *buf, long n, s64 off) {
     u32 kind = (u32)c->qid.path;
     const struct ctl_leaf *leaf = leaf_for_kind(kind);
     if (!leaf) return -1;
+
+    // #57a F1: gate /ctl/kernel-base (the KASLR slide, an I-16 secret) on
+    // CAP_HOSTOWNER now that /ctl is world-reachable (see devctl_kernel_base_-
+    // readable). The other leaves stay world-readable Plan 9 introspection.
+    if (kind == CTL_KIND_KERNEL_BASE) {
+        struct Thread *t = current_thread();
+        if (!devctl_kernel_base_readable(t ? t->proc : NULL)) return -1;
+    }
 
     char content[DEVCTL_READ_BUF];
     size_t total = leaf->fmt(content, sizeof(content));

@@ -49,7 +49,11 @@ Single-level layout — no per-pid axis (unlike devproc). Subkind enum values 1.
 
 devctl is **mounted at `/ctl`** in the boot namespace (`kernel/joey.c::joey_mount_static_dev`, the /srv idiom), grafted onto a synthetic devramfs `/ctl` mount-point dir and re-grafted onto the pivoted disk root by the long-running init. Before #57a devctl was kernel-internal — unreachable by a path.
 
-`/ctl` is **read-only** (`devctl_write` returns -1) and `devctl.perm_enforced` is unset (false), so it is world-readable introspection — the mount widens *visibility*, never *authority*. Reaching it through `stalk` required the same **reuse-`nc` walk fix** as devproc (see `docs/reference/32-devproc.md`, "Namespace residence"): `devctl_walk` now returns the caller's pre-clone `nc` as `wq->spoor` (0-element walk → `nqid == 0`), the shape `clone_walk_zero`'s mount-cross needs, with the `nc == NULL` legacy path preserved for the direct-call kernel tests.
+`/ctl` is **read-only** (`devctl_write` returns -1) and `devctl.perm_enforced` is unset (false), so it is world-readable introspection — **with one exception**: `/ctl/kernel-base` discloses the live KASLR slide (`kernel_base` + `kaslr_offset`), an I-16 secret, so that ONE leaf is gated on **`CAP_HOSTOWNER`** at the `devctl_read` site (`devctl_kernel_base_readable(caller)`; the #57a focused-audit F1 fix). `CAP_HOSTOWNER` is elevation-only (not even kproc holds it by default — only corvus's ADMIN_ELEVATE grants it), so the slide is **admin-only-via-elevation**; an unprivileged user or container cannot read it and defeat KASLR. The coarse procs/memory/devices/sched leaves stay world-readable.
+
+The #57a focused audit also closed two pre-existing read-path latents the mount activates: a cross-Proc **UAF** (`devproc_read`/`devproc_stat_native` dereferenced a `Proc` after the proc-table lock was released — see `docs/reference/32-devproc.md`; the same fix applies to devctl's `proc_for_each` consumers) and the unbounded `/ctl/procs` IRQ-off proc-table walk (`format_procs_cb` now stops once the read buffer fills, bounding an EL0 tight-loop's lock-hold; the residual O(N) global-lock walk is the #62 scalability seam).
+
+Reaching `/ctl` through `stalk` required the same **reuse-`nc` walk fix** as devproc (see `docs/reference/32-devproc.md`, "Namespace residence"): `devctl_walk` now returns the caller's pre-clone `nc` as `wq->spoor` (0-element walk → `nqid == 0`), the shape `clone_walk_zero`'s mount-cross needs, with the `nc == NULL` legacy path preserved for the direct-call kernel tests.
 
 ---
 
