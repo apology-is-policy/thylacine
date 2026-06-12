@@ -64,9 +64,12 @@ struct Path *path_parent(const struct Path *p) {
 
 struct Path *path_addelem(const struct Path *parent, const char *name, u64 namelen) {
     if (!parent || !name) return NULL;
-    // A single component cannot exceed the whole-path bound; reject early so the
-    // newlen arithmetic below cannot overflow (namelen is otherwise unbounded).
-    if (namelen > SYS_OPEN_PATH_MAX) return NULL;
+    // An empty component would build a trailing-slash path ("/a" + "" -> "/a/").
+    // The kernel never reaches here with namelen == 0 (stalk guarantees clen >= 1;
+    // the walk-open / walk-create handlers reject name_len == 0), but reject it so
+    // the helper is total. A single component also cannot exceed the whole-path
+    // bound; reject early so the newlen arithmetic below cannot overflow.
+    if (namelen == 0 || namelen > SYS_OPEN_PATH_MAX) return NULL;
 
     // "." -- a no-op step: a fresh copy of parent (the child sits at the same
     // place + name). stalk never reaches here with "." (the resolver handles

@@ -1127,7 +1127,9 @@ static inline long t_walk_open(long spoor_fd, const char *name,
 // (excluding NUL), 0 if the name is unknown (a real path begins with '/', so 0
 // unambiguously means unknown), or -1 if `fd` is not a held KOBJ_SPOOR handle or
 // `buf` is too small. No access RIGHT is required. The name is best-effort
-// introspection metadata, never load-bearing (ARCHITECTURE.md I-33).
+// introspection metadata, never load-bearing (ARCHITECTURE.md I-33): it may be
+// unknown OR stale (the path the fd was reached by, not a live lookup) -- do not
+// use it as a re-open key.
 __attribute__((always_inline))
 static inline long t_fd2path(long fd, char *buf, size_t buf_len) {
     register long x0 __asm__("x0") = fd;

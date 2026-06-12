@@ -307,6 +307,14 @@ struct Spoor *stalk(struct Proc *p, struct Spoor *start,
         struct Spoor *opened = quarry->dev->open(quarry, (int)omode);
         if (!opened) goto fail;
         if (opened != quarry) {
+            // #66 (audit F2): the replacement (devsrv open=connect's connection
+            // endpoint) is born with its OWN name ("/" for a 9P-mode conn root,
+            // unknown for a byte conn). It was reached by the user under the
+            // quarry's name (e.g. /srv/corvus), so transplant that name onto it --
+            // fd2path must report the path the caller opened, not the conn root's
+            // "/". `opened` is thread-local (not yet installed), so this stays
+            // within the set-before-publish discipline (I-33). Non-load-bearing.
+            spoor_path_transplant(opened, quarry);
             spoor_clunk(quarry);
             quarry = opened;
         }

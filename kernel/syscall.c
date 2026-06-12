@@ -1638,6 +1638,11 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
             return -1;
         }
         if (opened != nc) {
+            // #66 (audit F2): transplant the walked name onto the connection
+            // endpoint (mirrors the stalk adoption arm) so fd2path reports the
+            // path the caller opened, not the conn root's "/". `opened` is
+            // thread-local pre-install (I-33 set-before-publish). Non-load-bearing.
+            spoor_path_transplant(opened, nc);
             spoor_clunk(nc);   // the old nc (service-ref) is spent; open did not consume it
             nc = opened;       // adopt the connection endpoint (one owned ref)
         }
@@ -2062,6 +2067,19 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
     struct Spoor *opened = nc->dev->create(nc, name_scratch, (int)omode_raw,
                                             perm, p->primary_gid);
     if (!opened) {
+        spoor_clunk(nc);
+        return -1;
+    }
+    // #66 audit F5: the generic create path installs `nc` (handle_alloc below), so
+    // it relies on create returning nc opened in place. dev9p does; devramfs's
+    // create stub returns NULL (handled above); the /srv post branched earlier.
+    // A FUTURE Dev whose create returns a DIFFERENT Spoor (the devsrv-open
+    // precedent shows the shape exists) would leak `opened` + install the wrong
+    // node -- the exact open-side asymmetry that produced #957-F1. Reject it (the
+    // generic path cannot correctly adopt a non-nc create result). Unreachable at
+    // v1.0; defensive symmetry with the open arm.
+    if (opened != nc) {
+        spoor_clunk(opened);
         spoor_clunk(nc);
         return -1;
     }

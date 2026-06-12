@@ -2470,6 +2470,8 @@ int main(void) {
     // root + the /srv synthetic mount).
     {
         char p66[64];
+        p66[0] = '\0';   // #66 audit F6: a failure branch prints p66; keep it a
+                         // defined empty string if t_fd2path never writes it.
         // (a) "/" -- the devramfs attach-root seed. Opening "/" resolves zero
         // components, so the quarry inherits root's "/" name.
         long r66 = t_open(T_WALK_OPEN_FROM_ROOT, "/", 1, T_OPATH);

@@ -121,11 +121,13 @@ struct Spoor *dev9p_attach_client(struct p9_client *client, u32 root_fid) {
     // #66: a 9P attach root is a filesystem root, named "/" (the namespace name
     // it carries when pivoted to OR before a cross overwrites it). Seeded HERE,
     // at birth, before the Spoor is published -> immutable thereafter (the I-33
-    // set-before-publish discipline; no lock). When this root is instead used as
-    // a mount SOURCE, stalk_cross_mounts transplants the mount-point's name onto
-    // the crossed clone, so this "/" is only ever seen when the root IS the
-    // namespace root (joey's pivot target). path_make_root NULL (OOM) -> "unknown",
-    // never fatal.
+    // set-before-publish discipline; no lock). This "/" is overwritten by a
+    // transplant wherever the root is reached under another name: as a mount
+    // SOURCE (stalk_cross_mounts stamps the mount-point name onto the crossed
+    // clone) and as a devsrv open=connect endpoint (the stalk / walk_open
+    // adoption arms stamp the opened path -- audit F2). So the raw "/" surfaces
+    // only when the root IS the namespace root (joey's pivot target).
+    // path_make_root NULL (OOM) -> "unknown", never fatal.
     c->path = path_make_root();
     return c;
 }

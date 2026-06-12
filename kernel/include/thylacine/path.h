@@ -62,8 +62,8 @@ struct Path *path_make_root(void);
 // it need not be NUL-terminated.
 struct Path *path_addelem(const struct Path *parent, const char *name, u64 namelen);
 
-// path_parent: allocate a NEW Path = `p` with its last element popped (the "..""
-// case, factored for spoor_path_walked). NULL -> NULL.
+// path_parent: allocate a NEW Path = `p` with its last element popped (the ".."
+// case, factored for spoor_path_extend). NULL -> NULL.
 struct Path *path_parent(const struct Path *p);
 
 // path_ref / path_unref: atomic refcount. unref frees the storage at 0. Both

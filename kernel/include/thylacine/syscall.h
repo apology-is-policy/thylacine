@@ -1352,8 +1352,11 @@ enum {
     //   from a nameless fd) returns 0 (an empty result -- "unknown"); a real
     //   path always begins with '/', so len == 0 unambiguously means unknown.
     //   No access RIGHT is required (the name is of something the caller already
-    //   holds). The name is best-effort introspection metadata, NEVER
-    //   load-bearing (ARCHITECTURE.md I-33): it can be unknown but is never wrong.
+    //   holds -- or, for an inherited fd, something the spawner walked). The name
+    //   is best-effort introspection metadata, NEVER load-bearing (ARCHITECTURE.md
+    //   I-33): it may be unknown (empty) OR STALE -- it is the path the Spoor was
+    //   reached by, not a live lookup, so a later rename / unmount of a component
+    //   can leave it naming a different object. Do NOT use it as a re-open key.
     SYS_FD2PATH = 71,  // arg: fd (x0), buf_va (x1), buf_len (x2)
 };
 

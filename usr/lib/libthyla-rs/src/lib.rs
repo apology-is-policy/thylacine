@@ -1617,7 +1617,8 @@ pub unsafe fn t_getcwd(buf: *mut u8, buf_len: usize) -> i64 {
 // (excluding NUL), or 0 if the name is unknown (a real path always begins with
 // '/', so 0 unambiguously means unknown), or -1 if `fd` is not a held Spoor
 // handle or `buf` is too small. The name is best-effort metadata, never
-// load-bearing (ARCHITECTURE.md I-33).
+// load-bearing (ARCHITECTURE.md I-33): it may be unknown OR stale (the path the
+// fd was reached by, not a live lookup) -- do not use it as a re-open key.
 #[inline(always)]
 pub unsafe fn t_fd2path(fd: i32, buf: *mut u8, buf_len: usize) -> i64 {
     let mut x0: i64 = fd as i64;

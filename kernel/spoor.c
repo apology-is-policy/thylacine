@@ -177,7 +177,7 @@ struct Spoor *spoor_clone(struct Spoor *c) {
     // #66: SHARE the parent's namespace-name Path (Plan 9 cclone -- O(1) incref,
     // copies no string; the hot walk path runs this on every hop, including the
     // ones that fail + unwind). A successful resolution step then REPLACES this
-    // shared Path with an extended private one via spoor_path_walked; a mount
+    // shared Path with an extended private one via spoor_path_extend; a mount
     // cross replaces it via spoor_path_transplant; a clone that is neither (the
     // "/" quarry, the clone_walk_zero cross source) inherits the parent's name.
     // path_ref is NULL-safe (a NULL parent Path == "unknown" stays unknown).
