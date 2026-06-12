@@ -454,7 +454,10 @@ never talks to a backing directly):
 - **open**: **R** and/or **W** on the walked target per `omode` (OREAD→R, OWRITE→W,
   ORDWR→R|W). `O_PATH` (`SYS_WALK_OPEN_OPATH`) is **exempt** from the R/W gate
   (§9.4: a walk-only handle has no access semantics) — the **X-search on the path
-  to reach it still applies**.
+  to reach it still applies**. **The exemption is sound only because an O_PATH
+  handle cannot do byte I/O** — the `CWALKONLY` flag rejects `read`/`write`/`readdir`
+  on it (§9.4 #81); otherwise the open-time-gate exemption would be a perm-check
+  bypass for reads (a non-owner O_PATH-opens a perm-restricted file, then reads it).
 - **create** (`SYS_WALK_CREATE`): **W and X** on the parent directory.
 - **read/write are NOT re-checked**: POSIX open-time snapshot — a later `chmod`
   does not retroactively revoke an open fd.
@@ -1340,6 +1343,45 @@ O_PATH path is reviewed with A-1.7 (its consumer) -- the no-open path must still
 bound the name, reject `..`/`/`/`\0`, stamp rights identically, and leave no
 half-walked Spoor on error. **No new spec** per the 2026-05-23 spec-to-code
 broadening. Lands BEFORE A-1.7.
+
+**#81 (2026-06-12) -- the "NOT opened for byte I/O" intent above was UNENFORCED;
+the `CWALKONLY` flag enforces it.** The design states a `T_OPATH` handle "is NOT
+opened for byte I/O" (above), but the impl never enforced it: `sys_read` /
+`sys_write` / `sys_readdir` gate only on the handle RIGHT (`RIGHT_READ` /
+`RIGHT_WRITE`), not on whether the Spoor was actually opened, and an O_PATH handle
+is born `R|W` -- so `read`/`write`/`readdir` on an O_PATH handle reached
+`dev->read`/`write`/`readdir` and served CONTENT. Because `T_OPATH` ALSO skips the
+A-2d `perm_check` (a navigation base is exempt from the open-time R/W gate -- §9.4
++ the A-2d row), this was a **perm-check bypass for reads**: a non-owner who can
+X-search to a perm-restricted file could `SYS_WALK_OPEN(..., T_OPATH)` it (skipping
+`perm_check`) then `SYS_READ` it (born `RIGHT_READ`, no open required) and read
+content the normal path denies. The live instance: the 0400 SYSTEM-owned
+`/system.key` (the Stratum pool master key), reachable post-pivot via
+`/bin/system.key` (the `/bin` MREPL-bind is the devramfs root), readable by any
+logged-in non-SYSTEM Proc -- surfaced by the #57b self-audit (SA-2). (devramfs
+only; dev9p is safe -- 9P requires `Tlopen` before `Tread`, so an un-opened O_PATH
+fid's read fails at the server.)
+
+**Fix (the Linux `O_PATH` -> EBADF model; user-voted minimal scope 2026-06-12).**
+A new Spoor flag `CWALKONLY` (in the Spoor's `flag` field, alongside `COPEN` --
+`struct Handle` is a 24-byte pinned invariant with no spare field, so the flag is
+Spoor-side) is set at the two O_PATH handle-creation sites (`sys_walk_open` +
+`sys_open`, the `T_OPATH` branch) and REJECTED (-1) at the three content-I/O
+syscalls -- `sys_read`, `sys_write`, `sys_readdir` -- BEFORE they reach
+`dev->read`/`write`/`readdir`. This enforces the documented "navigation base, no
+byte I/O" semantic. A COPEN-required check was rejected (it breaks
+`SYS_CONSOLE_OPEN`, which legitimately serves a non-COPEN-but-readable handle);
+rights-removal was rejected (A-1.7 needs the O_PATH handle born `R|W` as a
+create/walk target -- §3.6). `fstat` stays ALLOWED on O_PATH (Linux allows it;
+type/navigation checks need it); `lseek` (harmless) + `wstat` (already re-runs
+`perm_check`, not a bypass) are unchanged -- the full Linux-`O_PATH` intent
+alignment (reject all but fstat/navigation) is a v1.x completeness item, not
+security. **Safety:** the five legitimate O_PATH consumers (chroot, walk_create,
+mount, pivot_root, the joey `/bin`+`/srv`+`/proc`+`/ctl`+`/dev` re-graft) use the
+handle as a navigation base via `sys_lookup_spoor` -- none read/write/readdir it
+-- so the gate does not regress them. Scripture-first; audit-bearing (the
+walk-open + read surface, ARCH §25.4). `docs/reference/104-stalk.md` +
+`99-fs-permission.md` updated. Closes #81 (the #57b self-audit SA-2).
 
 ### 9.5 A-2a -- file metadata: owner/group + chmod/chown (RESOLVED 2026-05-30)
 
