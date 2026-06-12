@@ -2427,8 +2427,34 @@ int main(void) {
             return 1;
         }
         (void)t_close(sk_fd);
+        // #81: the O_PATH read-bypass is CLOSED. An O_PATH (T_OPATH) handle is a
+        // navigation base, NOT a byte-I/O channel -- t_read on it MUST return -1
+        // (CWALKONLY). Pre-#81 this LEAKED /system.key's content (T_OPATH skips
+        // perm_check and the born-R|W handle was readable). joey is the OWNER here,
+        // so this proves the gate is identity-independent (navigation-only for all);
+        // the real exploit was a logged-in non-owner via /bin/system.key.
+        {
+            static const char sk2[] = "system.key";
+            long op_fd = t_walk_open(T_WALK_OPEN_FROM_ROOT, sk2,
+                                     sizeof(sk2) - 1, T_OPATH);
+            if (op_fd < 0) {
+                t_putstr("joey: probe #81 /system.key T_OPATH open FAILED\n");
+                return 1;
+            }
+            unsigned char op_buf[16];
+            long op_rd = t_read(op_fd, op_buf, sizeof(op_buf));
+            if (op_rd != -1) {
+                t_putstr("joey: #81 LEAK -- T_OPATH read of /system.key NOT denied (got ");
+                t_putstr(itoa_dec(op_rd, buf, sizeof(buf)));
+                t_putstr(")\n");
+                (void)t_close(op_fd);
+                return 1;
+            }
+            (void)t_close(op_fd);
+        }
         t_putstr("joey: probe /system.key lseek SEEK_END/SEEK_SET OK\n");
         t_putstr("joey: probe A-2a owner=system + SYS_WSTAT reject paths OK\n");
+        t_putstr("joey: probe #81 T_OPATH-read of /system.key DENIED (-1) OK\n");
     }
 #endif /* THYLA_BOOT_PROBES (pre-pivot boot-test probe ladder) */
 

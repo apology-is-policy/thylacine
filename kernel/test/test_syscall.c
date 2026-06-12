@@ -28,11 +28,17 @@
 
 #include "../../arch/arm64/exception.h"
 
+#include <thylacine/dev.h>
 #include <thylacine/extinction.h>
+#include <thylacine/handle.h>
 #include <thylacine/proc.h>
+#include <thylacine/spoor.h>
 #include <thylacine/syscall.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
+
+s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len);
+s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len);
 
 void test_syscall_dispatch_unknown(void);
 void test_syscall_dispatch_puts_smoke(void);
@@ -40,6 +46,7 @@ void test_syscall_dispatch_exits_ok(void);
 void test_syscall_dispatch_exits_fail(void);
 void test_syscall_dispatch_args_in_x0_to_x5(void);
 void test_syscall_dispatch_set_tid_address(void);
+void test_syscall_opath_walkonly_no_byte_io(void);
 
 void test_syscall_dispatch_unknown(void) {
     struct exception_context ctx;
@@ -238,4 +245,41 @@ void test_syscall_dispatch_set_tid_address(void) {
     syscall_dispatch(&ctx);
     TEST_EXPECT_EQ((s64)ctx.regs[0], expect_tid,
         "NULL tidptr is accepted (clear-child-tid deferred — §12.4)");
+}
+
+// #81: a T_OPATH (O_PATH) navigation handle carries CWALKONLY and must reject
+// byte I/O -- sys_read/sys_write return -1 -- so the perm_check-exempt O_PATH
+// open cannot be a read-bypass (it once leaked the 0400 /system.key). Drives the
+// inner sys_*_for_proc (kernel-buf) directly: a normal devzero handle reads/writes,
+// a CWALKONLY one is denied (the flag set on the Spoor before handle_alloc, exactly
+// as the T_OPATH walk-open path does). The E2E (t_open(O_PATH)+t_read on
+// /system.key -> -1) is the joey boot probe.
+void test_syscall_opath_walkonly_no_byte_io(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t != NULL && t->proc != NULL, "test thread has a proc");
+    struct Proc *p = t->proc;
+    u8 buf[4] = { 0, 0, 0, 0 };
+
+    // Baseline: a normal devzero handle reads + writes (the gate is OFF).
+    struct Spoor *z = devzero.attach("");
+    TEST_ASSERT(z != NULL, "devzero attach (normal)");
+    hidx_t fd = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, z);
+    TEST_ASSERT(fd >= 0, "alloc normal handle");
+    TEST_EXPECT_EQ(sys_read_for_proc(p, fd, buf, 4), (s64)4, "normal handle reads");
+    TEST_EXPECT_EQ(sys_write_for_proc(p, fd, buf, 4), (s64)4, "normal handle writes");
+    handle_close(p, fd);
+
+    // #81: a CWALKONLY (T_OPATH) handle rejects read + write + zero-length read.
+    struct Spoor *zw = devzero.attach("");
+    TEST_ASSERT(zw != NULL, "devzero attach (walkonly)");
+    zw->flag |= CWALKONLY;
+    hidx_t wfd = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, zw);
+    TEST_ASSERT(wfd >= 0, "alloc walkonly handle");
+    TEST_EXPECT_EQ(sys_read_for_proc(p, wfd, buf, 4), (s64)-1,
+                   "#81: O_PATH (CWALKONLY) read DENIED");
+    TEST_EXPECT_EQ(sys_write_for_proc(p, wfd, buf, 4), (s64)-1,
+                   "#81: O_PATH (CWALKONLY) write DENIED");
+    TEST_EXPECT_EQ(sys_read_for_proc(p, wfd, buf, 0), (s64)-1,
+                   "#81: O_PATH zero-length read DENIED (gate precedes len==0)");
+    handle_close(p, wfd);
 }

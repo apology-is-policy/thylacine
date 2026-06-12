@@ -185,6 +185,7 @@ void test_syscall_dispatch_exits_ok(void);
 void test_syscall_dispatch_exits_fail(void);
 void test_syscall_dispatch_args_in_x0_to_x5(void);
 void test_syscall_dispatch_set_tid_address(void);
+void test_syscall_opath_walkonly_no_byte_io(void);
 void test_uaccess_fixup_table_well_formed(void);
 void test_uaccess_fixup_lookup_known(void);
 void test_uaccess_fixup_lookup_unknown_returns_zero(void);
@@ -1120,6 +1121,9 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "syscall.dispatch_set_tid_address",
                                        test_syscall_dispatch_set_tid_address,
+                                                                           false, NULL },
+    { "syscall.opath_walkonly_no_byte_io",
+                                       test_syscall_opath_walkonly_no_byte_io,
                                                                            false, NULL },
     { "uaccess.fixup_table_well_formed",
                                        test_uaccess_fixup_table_well_formed,

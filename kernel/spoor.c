@@ -144,7 +144,12 @@ struct Spoor *spoor_clone(struct Spoor *c) {
     //   - qid: the position the new Spoor inherits (walks update this
     //     in-place on the new Spoor afterwards).
     //   - flag / mode: pre-open flags carry over so a walk of a CMSG
-    //     parent inherits message-style semantics.
+    //     parent inherits message-style semantics. EXCEPT CWALKONLY (#81): it
+    //     is a per-final-handle "navigation-only, no byte I/O" marker, set
+    //     EXPLICITLY at the two T_OPATH handle-creation sites -- it must NOT be
+    //     inherited, or a child CREATED or normally-opened from a T_OPATH parent
+    //     (the FS-delta create-from-O_PATH base pattern) would inherit it and
+    //     reject its own legitimate read/write.
     //   - offset: 0 by default; cloning a positioned Spoor and the
     //     caller wanting the cursor preserved sets it explicitly. We
     //     copy here to match Plan 9 cclone behavior; tests verify.
@@ -152,7 +157,7 @@ struct Spoor *spoor_clone(struct Spoor *c) {
     //     MUST take their own ref in dev->walk before populating the
     //     new Spoor's aux; spoor_clone does not interpret aux.
     nc->qid    = c->qid;
-    nc->flag   = c->flag;
+    nc->flag   = c->flag & ~CWALKONLY;   // #81: never inherit the nav-only marker
     nc->mode   = c->mode;
     nc->offset = c->offset;
     nc->aux    = c->aux;

@@ -753,6 +753,10 @@ s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len) {
     // spoor_clunk on EVERY exit after the lookup.
     struct Spoor *c = sys_lookup_rw_handle(p, h, RIGHT_WRITE);
     if (!c)                                          return -1;
+    // #81: a T_OPATH navigation handle is NOT a byte-I/O channel (it is born R|W
+    // for create/walk-target use but perm_check-exempt at open). Reject every
+    // write, including len 0, so it cannot serve content (IDENTITY-DESIGN 9.4 #81).
+    if (c->flag & CWALKONLY)                       { spoor_clunk(c); return -1; }
     if (len == 0)                                  { spoor_clunk(c); return 0; }
     if (!c->dev || !c->dev->write)                 { spoor_clunk(c); return -1; }
     long n = c->dev->write(c, kbuf, (long)len, c->offset);
@@ -777,6 +781,10 @@ s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len) {
     // dev->read even if a sibling closes the fd. spoor_clunk on EVERY exit.
     struct Spoor *c = sys_lookup_rw_handle(p, h, RIGHT_READ);
     if (!c)                                          return -1;
+    // #81: a T_OPATH navigation handle is NOT a byte-I/O channel -- reject every
+    // read (the perm_check-exempt O_PATH open would otherwise be a read-bypass,
+    // e.g. the 0400 /system.key via /bin/system.key). IDENTITY-DESIGN 9.4 #81.
+    if (c->flag & CWALKONLY)                       { spoor_clunk(c); return -1; }
     if (len == 0)                                  { spoor_clunk(c); return 0; }
     if (!c->dev || !c->dev->read)                  { spoor_clunk(c); return -1; }
     long n = c->dev->read(c, kbuf, (long)len, c->offset);
@@ -1636,10 +1644,14 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     // navigation / capability base, not a byte-I/O channel -- born R|W (it
     // must be a valid create/walk target for a confined storage-root cap) with
     // NO RIGHT_TRANSFER (it cannot be 9P-transferred once that surface lands).
-    // This is the one case NOT derived from omode & 3.
+    // This is the one case NOT derived from omode & 3. #81: "not a byte-I/O
+    // channel" is now ENFORCED -- the CWALKONLY flag (set below) makes
+    // sys_read/write/readdir reject it, so the perm_check-exempt O_PATH open
+    // cannot be a read-bypass (it once leaked the 0400 /system.key).
     rights_t r;
     if (omode_raw & SYS_WALK_OPEN_OPATH) {
         r = RIGHT_READ | RIGHT_WRITE;
+        nc->flag |= CWALKONLY;   // #81: a navigation handle -- sys_read/write/readdir reject it
     } else {
         r = rights_for_omode((u32)omode_raw) | RIGHT_TRANSFER;
     }
@@ -1813,6 +1825,7 @@ static s64 sys_open_handler(u64 start_fd_raw, u64 path_va,
     rights_t r;
     if (omode_raw & SYS_WALK_OPEN_OPATH) {
         r = RIGHT_READ | RIGHT_WRITE;
+        quarry->flag |= CWALKONLY;   // #81: a navigation handle -- sys_read/write/readdir reject it
     } else {
         r = rights_for_omode((u32)omode_raw) | RIGHT_TRANSFER;
     }
@@ -2059,6 +2072,10 @@ static s64 sys_readdir_handler(u64 fd_raw, u64 buf_va, u64 buf_len_raw) {
     // #844: c is REF-HELD (borrow); spoor_clunk on every exit (readdir blocks).
     struct Spoor *c = sys_lookup_spoor(p, (hidx_t)fd_raw, RIGHT_READ);
     if (!c)                                          return -1;
+    // #81: a T_OPATH navigation handle is NOT a byte-I/O channel -- reject readdir
+    // too (listing a dir's entries is content the perm_check-exempt O_PATH open
+    // would otherwise leak for a non-readable dir). IDENTITY-DESIGN 9.4 #81.
+    if (c->flag & CWALKONLY)                       { spoor_clunk(c); return -1; }
     if (!c->dev || !c->dev->readdir)               { spoor_clunk(c); return -1; }
 
     u8 scratch[SYS_RW_MAX];
