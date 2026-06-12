@@ -642,6 +642,94 @@ pub extern "C" fn rs_main() -> i64 {
         return fail("fg-defer: deferred `pipe` handler did not fire post-wait");
     }
 
+    // ----- LS-8c: the async note bool + Repl::on_notes_ready (idle-prompt) -----
+    //
+    // 20. `deliver_pending_notes` returns TRUE iff an UNHANDLED `interrupt` was
+    //     drained -- the reactive-Ctrl-C-mid-edit signal the LS-8c idle poll
+    //     loop reads. A `child_exit` (false) and a HANDLED interrupt (false) do
+    //     NOT signal a cancel. Driven through the real per-Proc note queue.
+    let mut env_a = Env::new();
+    env_a.interactive = true;
+    match notes::Notes::open_self() {
+        Ok(nq) => env_a.set_notes(Some(nq)),
+        Err(_) => return fail("ls8c: could not open the self note queue"),
+    }
+    deliver_pending_notes(&mut env_a); // clear any leftover notes
+    if notes::send(NoteTarget::SelfProc, "interrupt").is_err() {
+        return fail("ls8c: self-post of `interrupt` failed");
+    }
+    if !deliver_pending_notes(&mut env_a) {
+        return fail("ls8c: an unhandled `interrupt` did not report the cancel signal");
+    }
+    if notes::send(NoteTarget::SelfProc, "child_exit").is_err() {
+        return fail("ls8c: self-post of `child_exit` failed");
+    }
+    if deliver_pending_notes(&mut env_a) {
+        return fail("ls8c: a `child_exit` wrongly reported the cancel signal");
+    }
+    if eval_source(&mut env_a, "on note 'interrupt' { let caught = yes }").is_err() {
+        return fail("ls8c: registering the interrupt handler errored");
+    }
+    if notes::send(NoteTarget::SelfProc, "interrupt").is_err() {
+        return fail("ls8c: self-post of the handled `interrupt` failed");
+    }
+    if deliver_pending_notes(&mut env_a) {
+        return fail("ls8c: a HANDLED `interrupt` wrongly reported the cancel signal");
+    }
+    if env_a.get("caught").as_scalar() != "yes" {
+        return fail("ls8c: the interrupt handler did not fire on delivery");
+    }
+
+    // 21. `Repl::on_notes_ready` -- the idle-prompt wake. An UNHANDLED
+    //     `interrupt` posted while a partial line is in the editor cancels the
+    //     edit (the note-path analogue of the editor's 0x03 Cancel): a fresh
+    //     line then evaluates cleanly, proving the buffer was reset.
+    {
+        let mut repl = Repl::new();
+        let mut sink: Vec<u8> = Vec::new();
+        repl.open_notes();
+        let _ = repl.deliver_notes(); // clear any leftover queue entry
+        if repl.feed(b"let before = bad", &mut sink).is_some() {
+            return fail("ls8c: typing the partial line unexpectedly ended the session");
+        }
+        if notes::send(NoteTarget::SelfProc, "interrupt").is_err() {
+            return fail("ls8c: self-post of the mid-edit `interrupt` failed");
+        }
+        repl.on_notes_ready(&mut sink);
+        if repl.feed(b"let after = ok\n", &mut sink).is_some() {
+            return fail("ls8c: the post-cancel line unexpectedly ended the session");
+        }
+        if repl.env().get("after").as_scalar() != "ok" {
+            return fail("ls8c: editor did not recover after the reactive interrupt");
+        }
+        if repl.env().defined("before") {
+            return fail("ls8c: the mid-edit interrupt did not discard the in-progress line");
+        }
+    }
+
+    // 22. `Repl::on_notes_ready` PRESERVES the in-progress edit on a
+    //     non-interrupt wake (`child_exit` -- a finished bg job): a partial line
+    //     survives the async job-done service + completes on the next keystrokes.
+    {
+        let mut repl = Repl::new();
+        let mut sink: Vec<u8> = Vec::new();
+        repl.open_notes();
+        let _ = repl.deliver_notes();
+        if repl.feed(b"let kept = ye", &mut sink).is_some() {
+            return fail("ls8c: typing the partial line unexpectedly ended the session (preserve)");
+        }
+        if notes::send(NoteTarget::SelfProc, "child_exit").is_err() {
+            return fail("ls8c: self-post of `child_exit` failed (preserve)");
+        }
+        repl.on_notes_ready(&mut sink);
+        if repl.feed(b"s\n", &mut sink).is_some() {
+            return fail("ls8c: the completing keystrokes unexpectedly ended the session");
+        }
+        if repl.env().get("kept").as_scalar() != "yes" {
+            return fail("ls8c: on_notes_ready discarded the in-progress edit on a child_exit");
+        }
+    }
+
     t_putstr("u-job-test: all OK\n");
     0
 }

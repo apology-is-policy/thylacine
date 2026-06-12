@@ -168,10 +168,12 @@ impl Repl {
                     // the fresh prompt.
                     self.reap_jobs();
                     // U-7c: drain the shell's note queue + fire any `on note`
-                    // handlers whose note arrived since the last prompt cycle.
-                    // The cons fd is not pollable at v1.0 (the line-edit read
-                    // stays blocking until U-PTY), so notes are delivered at
-                    // this sync point rather than asynchronously mid-edit.
+                    // handlers whose note arrived during the just-run command.
+                    // LS-8c also delivers notes ASYNCHRONOUSLY while idle at the
+                    // prompt (`on_notes_ready`); this post-command sync-point
+                    // drain still catches notes that arrived while a foreground
+                    // command held the loop. An idle interrupt drained here is
+                    // discarded (benign at a sync point) -- the bool is ignored.
                     self.deliver_notes();
                     self.emit_prompt(out);
                 }
@@ -282,13 +284,46 @@ impl Repl {
     }
 
     /// Drain the shell's note queue + fire any `on note` handler whose note
-    /// arrived since the last prompt cycle (U-7c). Sits beside `reap_jobs`
-    /// in the prompt cycle: notes are delivered at this sync point because
-    /// the cons fd is not pollable at v1.0 (the interactive line-edit read
-    /// stays blocking until U-PTY). No-op until `open_notes` runs. Public so
-    /// a probe can drive delivery directly.
-    pub fn deliver_notes(&mut self) {
-        deliver_pending_notes(&mut self.env);
+    /// arrived since the last prompt cycle (U-7c). Returns true iff an
+    /// unhandled `interrupt` was drained (the LS-8c reactive-cancel signal):
+    /// the sync-point callers in `feed` ignore it; `on_notes_ready` uses it.
+    /// No-op until `open_notes` runs. Public so a probe can drive delivery
+    /// directly.
+    pub fn deliver_notes(&mut self) -> bool {
+        deliver_pending_notes(&mut self.env)
+    }
+
+    /// The raw note-fd index, if the shell's note queue is open (`open_notes`).
+    /// The `ut` binary adds this to its poll set (LS-8c) so an async note -- a
+    /// finished background job, a Ctrl-C while idle -- wakes the loop. `None` on
+    /// the bare-spawn boot check / host paths that never opened the queue.
+    pub fn notes_fd(&self) -> Option<i32> {
+        use libthyla_rs::poll::AsFd;
+        self.env.notes().map(|n| n.as_raw_fd())
+    }
+
+    /// Service an async wake of the shell's note fd while idle at the prompt
+    /// (LS-8c). The `ut` binary's multi-fd poll loop calls this when poll()
+    /// reports the note fd ready and no foreground command is running (that
+    /// path is `wait_pids_interruptible`, which forwards interrupts to the
+    /// child). It reaps any finished background job (`[N]+ Done`), drains the
+    /// note queue (firing `on note` handlers), and on an UNHANDLED `interrupt`
+    /// abandons the in-progress edit -- the same disposition as the editor's
+    /// own 0x03 Cancel -- before repainting the prompt + preserved buffer. A
+    /// caught interrupt (an `on note interrupt` body) fires the handler and
+    /// leaves the edit intact (the LS-5 catchable-interrupt semantics). The
+    /// leading `\r\n` mirrors the Cancel/Accept idiom: it moves off the
+    /// in-progress line so the notification + fresh prompt land cleanly.
+    pub fn on_notes_ready(&mut self, out: &mut dyn IoWrite) {
+        let _ = out.write_all(b"\r\n");
+        // Reap finished bg jobs first (so an `on note child_exit` handler, if
+        // any, observes current job state), matching the prompt-cycle order.
+        self.reap_jobs();
+        let interrupted = self.deliver_notes();
+        if interrupted {
+            self.editor.reset();
+        }
+        self.emit_prompt(out);
     }
 }
 
@@ -379,5 +414,45 @@ mod tests {
         let (repl, exit, _) = drive(&[b")\n", b"let recovered = yes\n"]);
         assert_eq!(exit, None);
         assert_eq!(repl.env().get("recovered").as_scalar(), "yes");
+    }
+
+    // LS-8c: `on_notes_ready` is the idle-prompt wake of the multi-fd poll loop.
+    // Driven on the host via the deferred-note path (no kernel queue), the
+    // canonical in-QEMU coverage is u-job-test (real per-Proc note queue).
+    fn note(name: &str) -> libthyla_rs::notes::Note {
+        libthyla_rs::notes::Note {
+            name: alloc::string::String::from(name),
+            arg: 0,
+            from: None,
+            timestamp_ns: 0,
+        }
+    }
+
+    #[test]
+    fn on_notes_ready_interrupt_cancels_the_edit() {
+        // The note-path analogue of ctrl_c_discards_line_and_recovers: an
+        // UNHANDLED `interrupt` delivered while a partial line is in the editor
+        // cancels the edit; a fresh line then evaluates cleanly.
+        let mut repl = Repl::new();
+        let mut sink: Vec<u8> = Vec::new();
+        let _ = repl.feed(b"let before = bad", &mut sink);
+        repl.env_mut().defer_note(note("interrupt"));
+        repl.on_notes_ready(&mut sink);
+        let _ = repl.feed(b"let after = ok\n", &mut sink);
+        assert_eq!(repl.env().get("after").as_scalar(), "ok");
+        assert!(!repl.env().defined("before"));
+    }
+
+    #[test]
+    fn on_notes_ready_child_exit_preserves_the_edit() {
+        // A non-interrupt async wake (`child_exit` -- a finished bg job) leaves
+        // the in-progress edit intact: the partial line completes normally.
+        let mut repl = Repl::new();
+        let mut sink: Vec<u8> = Vec::new();
+        let _ = repl.feed(b"let kept = ye", &mut sink);
+        repl.env_mut().defer_note(note("child_exit"));
+        repl.on_notes_ready(&mut sink);
+        let _ = repl.feed(b"s\n", &mut sink);
+        assert_eq!(repl.env().get("kept").as_scalar(), "yes");
     }
 }

@@ -6,17 +6,17 @@
 // editor (U-4) + parser (U-5) + evaluator (U-6), and loops. The U-* arc
 // still fills in:
 //
-//   U-7    fd-notes job control (Ctrl-C / Ctrl-Z / & / jobs / fg / bg) --
-//          the MULTI-fd poll() across the notes fds; predicated on the
-//          U-PTY line discipline (UTOPIA-SHELL-DESIGN.md section 10.2).
+//   U-7    fd-notes job control (Ctrl-C / Ctrl-Z / & / jobs / fg / bg).
 //   U-8    Thylacine builtins (bind / mount / unmount / pivot_root /
 //          rfork / cap / note)
 //   U-9..N native coreutils, one or two per chunk
-//   U-PTY  PTY substrate (/dev/ptmx + /dev/pts/<n> + /dev/consctl) --
-//          a pollable line-discipline slave + termios + per-Proc fd
-//          0/1/2. Until then /dev/cons is blocking-read-only (no .poll
-//          hook), so the loop below blocks in read(); the single-fd
-//          poll() is the U-7 seam.
+//   LS-8   the line-discipline substrate: LS-8a made /dev/cons pollable
+//          (a `.poll` hook + the deferred poll-wake), LS-8b added termios
+//          via /dev/consctl, and LS-8c (HERE) is the MULTI-fd poll loop --
+//          the shell polls /dev/cons AND its own note fd together, so a
+//          finished bg job / an idle Ctrl-C is serviced asynchronously
+//          (UTOPIA-SHELL-DESIGN.md section 10.2). The PTY master/slave pair
+//          (/dev/ptmx + /dev/pts/<n>) + per-Proc fd 0/1/2 stay Phase-8.
 //   U-Z    bring-up integration test
 //
 // Per the Plan 9 native-vs-ported split (ARCHITECTURE.md section 3.5):
@@ -41,7 +41,7 @@ extern crate alloc;
 use alloc::string::String;
 use libthyla_rs::alloc::ThylaAlloc;
 use libthyla_rs::io::{self, Read};
-use libthyla_rs::poll::{PollEvents, PollSet, PollTimeout};
+use libthyla_rs::poll::{AsFd, PollEvents, PollSet, PollTimeout};
 use libthyla_rs::t_putstr;
 use libutopia::repl::Repl;
 use libutopia::{ansi, palette, GLYPH};
@@ -50,10 +50,12 @@ use libutopia::{ansi, palette, GLYPH};
 static GLOBAL_ALLOCATOR: ThylaAlloc = ThylaAlloc;
 
 /// The current `ut` version. Bumped at every U-* chunk that expands the
-/// shell's surface. `0.7-dev` == U-7a: the U-6 evaluator arc (read-parse-eval
-/// REPL; built-ins; pipes; redirection; substitution) plus background jobs
-/// (`&` + the job table + prompt-cycle `[N]+ Done` reaping).
-const UT_VERSION: &str = "0.7-dev";
+/// shell's surface. `0.8-dev` == LS-8c: the multi-fd poll loop -- the shell
+/// polls /dev/cons (made pollable by LS-8a) AND its own note fd together, so a
+/// background job finishing or a Ctrl-C pressed while idle at the prompt is
+/// serviced asynchronously (`[N]+ Done` mid-idle; reactive line-cancel
+/// mid-edit) instead of waiting for the next Enter.
+const UT_VERSION: &str = "0.8-dev";
 
 /// Emit the Pale Fire version banner. Three composed segments per
 /// UTOPIA-VISUAL.md section 3: the glyph-orange right-tack, white version
@@ -88,28 +90,12 @@ pub extern "C" fn rs_main() -> i64 {
     // Draw the first prompt (no-op to the UART if fd 1 is absent).
     repl.draw_prompt(&mut out);
 
-    // The poll()+read main loop. At v1.0 the only polled fd is stdin
-    // (fd 0). /dev/cons has no .poll hook (always-ready), so poll() is a
-    // no-op wrapper there and the blocking read is what waits; on a pipe
-    // poll() is real readiness. U-7 extends THIS PollSet with the notes
-    // fds for job control; U-PTY makes cons pollable + adds line
-    // discipline. PollSet::add extracts the raw fd, so the borrow ends at
-    // the call -- the read below uses a fresh (zero-sized) Stdin handle.
-    let mut poll = PollSet::new();
-    poll.add(&io::stdin(), PollEvents::READ);
-
-    let mut buf = [0u8; 256];
-    // U-7c: the shell's own note queue (for `on note` / `mask note` handlers,
-    // delivered at each prompt cycle). The cons fd has no `.poll` hook until
-    // U-PTY, so notes stay sync-point delivered -- the note fd is NOT added to
-    // this poll set.
-    //
-    // LS-5 / Holotype RW-0 F1: open it EAGERLY for a real session. A session
-    // `ut` is the console OWNER (LS-5a), so until it is self-managing (has
-    // opened its note queue) an uncaught `interrupt` default-terminates it
-    // (LS-5b/c) -- which means a Ctrl-C at a FRESH prompt, before the first
-    // keystroke, would terminate the shell and log the user out. Opening the
-    // queue here makes the shell self-managing from its very first prompt.
+    // LS-5 / Holotype RW-0 F1: open the shell's own note queue EAGERLY for a
+    // real session. A session `ut` is the console OWNER (LS-5a), so until it is
+    // self-managing (has opened its note queue) an uncaught `interrupt`
+    // default-terminates it (LS-5b/c) -- a Ctrl-C at a FRESH prompt, before the
+    // first keystroke, would terminate the shell and log the user out. Opening
+    // the queue here makes the shell self-managing from its very first prompt.
     // `stdout_is_live()` (a zero-length write to fd 1) is the session-vs-boot-
     // check discriminator already used for set_stdio_inherit above: login hands
     // a session `ut` fd 0/1/2 together, so a live fd 1 implies a live fd 0 and
@@ -121,17 +107,76 @@ pub extern "C" fn rs_main() -> i64 {
     if io::stdout_is_live() {
         repl.open_notes();
     }
+
+    // LS-8c: the multi-fd poll loop. LS-8a made /dev/cons pollable (a `.poll`
+    // hook + the deferred poll-wake relay), so the shell now polls stdin (fd 0)
+    // AND its own note fd together: a finished background job (`child_exit`) or
+    // a Ctrl-C while idle (`interrupt`) wakes the loop the instant it arrives
+    // and is serviced WITHOUT waiting for the next Enter (`[N]+ Done` mid-idle;
+    // reactive line-cancel mid-edit). Pre-LS-8c the single-fd loop blocked in
+    // read() and notes were delivered only at the prompt cycle. A foreground
+    // command's interrupt forwarding stays in `wait_pids_interruptible` (the
+    // shell is not in THIS loop while a child runs).
+    let cons_fd = io::stdin().as_raw_fd();
+    let mut notes_fd = repl.notes_fd();
+    let mut poll = PollSet::new();
+    poll.add_raw(cons_fd, PollEvents::READ);
+    if let Some(nfd) = notes_fd {
+        poll.add_raw(nfd, PollEvents::READ);
+    }
+
+    let mut buf = [0u8; 256];
     let exit_code: i32 = loop {
-        // A poll error (e.g. no fd 0 on the bare-spawn boot check) is
-        // ignored; the read below then surfaces the same EOF/error and
-        // breaks. This cannot spin: read() returns Ok(0)/Err -> break, or
-        // Ok(n>0) -> progress.
-        let _ = poll.poll(PollTimeout::Block);
-        match io::stdin().read(&mut buf) {
-            Ok(0) | Err(_) => break repl.exit_code(),
-            Ok(n) => {
-                if let Some(code) = repl.feed(&buf[..n], &mut out) {
-                    break code;
+        let mut cons_ready = false;
+        let mut notes_ready = false;
+        let mut notes_dead = false;
+        match poll.poll(PollTimeout::Block) {
+            Ok(results) => {
+                for ev in results {
+                    if ev.fd == cons_fd {
+                        // Any cons event (READ / HUP / ERR) -> attempt the read,
+                        // which resolves data (feed) or EOF/error (break). A bare
+                        // HUP MUST set this or a closed stdin would spin the loop.
+                        cons_ready = true;
+                    } else if Some(ev.fd) == notes_fd {
+                        if ev.is_readable() {
+                            notes_ready = true;
+                        } else {
+                            // The shell's own note fd should never err/hangup; if
+                            // it does, mark it dead (removed below, outside the
+                            // `results` borrow) so a stuck error cannot spin the
+                            // loop -- notes then degrade to sync-point delivery.
+                            notes_dead = true;
+                        }
+                    }
+                }
+            }
+            // A poll error (e.g. no fd 0 on the bare-spawn boot check, where the
+            // set holds an invalid fd 0) -> fall through to the read, which
+            // surfaces the same EOF/error and breaks. Cannot spin: the read
+            // returns Ok(0)/Err -> break.
+            Err(_) => cons_ready = true,
+        }
+        if notes_dead {
+            // `results` (which borrowed `poll`) has dropped -- safe to mutate.
+            if let Some(nfd) = notes_fd {
+                poll.remove_raw(nfd);
+            }
+            notes_fd = None;
+        }
+        // Service the async note wake FIRST: a finished bg job (`[N]+ Done`) or
+        // a reactive Ctrl-C (line-cancel). A simultaneous cons keystroke then
+        // repaints over the notification via feed's editor render.
+        if notes_ready {
+            repl.on_notes_ready(&mut out);
+        }
+        if cons_ready {
+            match io::stdin().read(&mut buf) {
+                Ok(0) | Err(_) => break repl.exit_code(),
+                Ok(n) => {
+                    if let Some(code) = repl.feed(&buf[..n], &mut out) {
+                        break code;
+                    }
                 }
             }
         }

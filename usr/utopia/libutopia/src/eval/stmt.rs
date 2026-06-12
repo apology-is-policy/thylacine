@@ -1963,28 +1963,36 @@ fn note_class_for_name(name: &str) -> Option<NoteClass> {
 
 /// Drain + dispatch every immediately-available note from the shell's own
 /// queue (U-7c; scripture 10.7). Called at each REPL sync point (the prompt
-/// cycle) and at a `mask note` block exit. Bounded + non-blocking:
+/// cycle), at a `mask note` block exit, and -- LS-8c -- on an async idle-prompt
+/// wake of the note fd (`Repl::on_notes_ready`). Bounded + non-blocking:
 /// `Notes::try_read` polls with timeout 0, so an empty (or masked-only)
 /// queue returns `None` and the drain stops -- this never blocks and never
 /// spins. A registered `on note` handler fires synchronously here (main-loop
 /// context, no async-signal constraints); an unhandled note takes its
 /// built-in disposition. No-op until the consumer opens the note fd
 /// (`Repl::open_notes`); the host + bare-spawn paths leave it inert.
-pub fn deliver_pending_notes(env: &mut Env) {
+///
+/// Returns true iff an UNHANDLED `interrupt` was drained -- the reactive-Ctrl-C
+/// signal the LS-8c idle poll loop uses to cancel the in-progress line. The
+/// sync-point callers (the prompt cycle, the `mask note` exit) ignore the
+/// return: an idle interrupt drained between commands is discarded there
+/// (benign), exactly as before LS-8c.
+pub fn deliver_pending_notes(env: &mut Env) -> bool {
     // Notes deferred during an interruptible foreground wait (U-7c-b) fire
     // first: they arrived before anything still sitting in the live queue.
     // Always drained -- even with the fd closed -- so a prior wait's residue
     // is never stranded.
     let deferred = env.take_deferred_notes();
     if deferred.is_empty() && env.notes().is_none() {
-        return;
+        return false;
     }
     // Note delivery is transparent to `$status` (bash saves `$?` around a
     // trap): a handler firing between commands must not clobber the status
     // the next prompt reports. Capture + restore around the whole drain.
     let saved_status = env.status();
+    let mut unhandled_interrupt = false;
     for note in &deferred {
-        dispatch_note(env, note);
+        unhandled_interrupt |= dispatch_note(env, note);
     }
     loop {
         // The immutable borrow of `env` for `notes()` lives only across the
@@ -1994,13 +2002,16 @@ pub fn deliver_pending_notes(env: &mut Env) {
             None => break,
         };
         match next {
-            Ok(Some(note)) => dispatch_note(env, &note),
+            Ok(Some(note)) => {
+                unhandled_interrupt |= dispatch_note(env, &note);
+            }
             // Empty/masked-only queue (Ok(None)) or a transient read error
             // -> stop draining; the next sync point retries.
             _ => break,
         }
     }
     env.status_set(saved_status);
+    unhandled_interrupt
 }
 
 /// How often (in iterations) `eval_while` / `eval_for` poll the note queue for
@@ -2198,7 +2209,13 @@ fn drain_fg_wait_notes(env: &mut Env, pids: &[i32], reaped: &[bool]) {
 /// point no foreground job is running, so an unhandled `interrupt` is benign
 /// (the running-foreground forward is U-7c-b); `child_exit` is informational
 /// (the WNOHANG reaper is the reap ground truth); other classes are ignored.
-fn dispatch_note(env: &mut Env, note: &Note) {
+/// Dispatch one drained note. A registered `on note <name>` handler fires
+/// (best-effort, like a bash trap). Returns true iff this was an UNHANDLED
+/// `interrupt` -- the LS-8c reactive-Ctrl-C-mid-edit signal the idle poll loop
+/// reads to cancel the in-progress line edit. Every other unhandled note takes
+/// its built-in disposition (a `child_exit` is reaped by `reap_jobs`; a
+/// `pipe`/user note is a benign discard at this drain point).
+fn dispatch_note(env: &mut Env, note: &Note) -> bool {
     if let Some(body) = env.note_handler_get(&note.name).cloned() {
         // A handler is best-effort, like an rc `on note` body / a bash trap:
         // evaluate it for its side effects, swallowing a body error (the
@@ -2207,6 +2224,11 @@ fn dispatch_note(env: &mut Env, note: &Note) {
         // distinct notes never interleave (N-3-style serialization at the
         // shell layer).
         let _ = eval_block(env, &body);
+        false
+    } else {
+        // A caught interrupt would have fired a handler above; an UNHANDLED
+        // interrupt is the shell's own reactive-cancel signal (LS-8c).
+        note.name == "interrupt"
     }
 }
 

@@ -1,0 +1,44 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-8c.exp -- the LS-8c (multi-fd poll loop) regression net.
+#
+# Proves, over a real PTY, that the shell services its note fd ASYNCHRONOUSLY
+# while idle at the prompt (LS-8c, docs/LIFE-SUPPORT.md). LS-8a made /dev/cons
+# pollable (a `.poll` hook + the deferred poll-wake relay); LS-8c polls cons AND
+# the shell's own note fd together, so a background job that finishes while the
+# user is idle is reported (`[N]+ Done`) the instant it exits -- WITHOUT waiting
+# for the next Enter.
+#
+#   (A) ASYNC [N]+ Done while idle: `sleep 2 &` backgrounds; the prompt returns;
+#       the user types NOTHING. After ~2s the sleep exits, posts `child_exit`,
+#       and the shell's idle poll wakes + prints `[N]+ Done  sleep 2`. Pre-LS-8c
+#       the single-fd loop blocked in read() after poll(), so the notification
+#       waited for the next Enter -- the Done appearing with NO intervening
+#       keystroke IS the assertion: a regressed single-fd loop never prints it
+#       while idle -> timeout fail.
+#   (B) Session survives + recovers: a probe command after the async report runs
+#       cleanly, proving the loop returned to servicing cons normally.
+
+source [file join [file dirname [info script]] lib.exp]
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# (A) Background a short sleep, then wait for the async job-done notification
+# with NO further input. The Done line can appear before the next Enter ONLY if
+# the shell is polling its note fd while idle (the LS-8c multi-fd loop); the
+# single-fd predecessor blocked in the cons read until a keystroke. "Done" is
+# unambiguous here -- nothing else in the boot/login/session stream prints it,
+# and the `[1] <pid>` job-start line carries no "Done".
+lc_send "sleep 2 &"
+lc_expect "Done" "async \[N\]+ Done reported while idle, no keystroke (LS-8c multi-fd poll)"
+lc_pass "LS-8c(A): a finished background job is reported asynchronously while idle"
+
+# (B) The session is still live + responsive after the async report -- the loop
+# resumed servicing cons. An upper-cased token cannot appear in the typed line.
+lc_send "echo holo-async | tr a-z A-Z"
+lc_expect "HOLO-ASYNC" "session live after the async job report"
+lc_pass "LS-8c(B): the shell resumes servicing the console after an async note"
+
+lc_quit
+lc_pass "LS-CI ls-8c: async \[N\]+ Done while idle (multi-fd poll loop) verified"
+exit 0
