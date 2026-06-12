@@ -64,7 +64,7 @@ const RECOVERY_SENTINEL: &[u8] = b"!recover";
 const FD_IN: i64 = 0; // the tty (or seeded creds pipe)
 const FD_OUT: i64 = 1; // the tty (or capture pipe)
 const MAX_LINE: usize = 256;
-const SHELL: &str = "ut";
+const SHELL: &str = "/bin/ut";  // #58: resolved via joey's post-pivot /bin bind
 
 // The user shell runs as the authenticated user with NO elevation/identity/grant
 // caps -- a shell is not an identity-stamper. It keeps the two benign
@@ -738,7 +738,7 @@ unsafe fn bind_home(user: &[u8], pid: u32, gid: u32, supp: &[u32]) -> Option<Hom
     // the proxy->coordinator SO_PEERCRED is the user; --datasets-allowed scopes
     // the Tattach to users/<user> (the I-1 boundary). stderr is captured for
     // boot-log diagnostics; stdin/stdout inherit login's.
-    let mut cmd = Command::new("stratumd");
+    let mut cmd = Command::new("/bin/stratumd");  // #58: post-pivot /bin bind
     cmd.identity(pid, gid, supp)
         .caps(T_CAP_CSPRNG_READ)
         .perm(T_SPAWN_PERM_MAY_POST_SERVICE)

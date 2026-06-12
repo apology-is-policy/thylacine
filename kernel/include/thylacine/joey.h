@@ -37,6 +37,12 @@
 // Extincts on any failure (so tools/test.sh observes EXTINCTION:).
 void joey_run(void);
 
+// #58: root the boot Proc's Territory at the devramfs root (idempotent). Called
+// by joey_run before rforking joey, AND by the kernel test harness before the
+// spawn-resolution tests (which post-#58 resolve the binary through the caller's
+// namespace, so the test Proc needs a root_spoor).
+void joey_root_kproc_at_devramfs(void);
+
 // A-5a: print the "Thylacine boot OK" banner (TOOLING.md section 10 ABI)
 // exactly once. Called from the SYS_BOOT_COMPLETE handler when init (joey)
 // signals its boot-test asserts passed -- joey now persists as the session

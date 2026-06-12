@@ -41,13 +41,15 @@
 //
 // When a SimpleCommand's argv[0] does not resolve to a defined fn,
 // `exec_external` spawns the binary via libthyla_rs::process. The
-// kernel does name lookup (single component, no `/`) against
-// devramfs OR the pivoted root. Stdio inherits (pipes wire at
+// kernel resolves the spawn name through the caller's namespace
+// (#58: stalk + per-component X-search); the shell does the `$path`
+// search via `resolve_command` (a bare command -> `/bin/<name>`, a
+// `/`-bearing name as-is). Stdio inherits (pipes wire at
 // U-6d). The child is reaped synchronously via Child::wait; the
 // resulting raw exit status becomes $status.
 //
-// Spawn failure semantics: any error (name too long, name with
-// `/`, NotFound, kernel rejection) sets $status = 127 (bash
+// Spawn failure semantics: any error (name too long, NotFound on
+// `$path`, kernel rejection) sets $status = 127 (bash
 // "command not found" convention) + populates $errstr with a
 // description. The eval call itself returns Ok(Normal) so
 // implicit-fail discipline (see below) can take it from there --
@@ -517,6 +519,35 @@ fn out_stdio(inherit: bool) -> Stdio {
     }
 }
 
+/// Resolve an external command name to a path for spawning (#58). The kernel
+/// resolves the spawn name through the caller's namespace (stalk + X-search),
+/// so the shell does the `$path` search. A name containing `/` is used as-is
+/// (absolute or relative). A bare command is searched on `$path = ["/bin", "/"]`:
+/// `/bin` is the post-pivot installed location (joey binds the initrd binary
+/// tree there); `/` is the pre-pivot initrd root (where the boot-test shell
+/// runs). The first existing candidate wins; a miss defaults to `/bin/<name>`
+/// for a clean spawn error. (The Plan 9 / Unix split -- the kernel resolves a
+/// path, the shell does `$path`; a multi-entry user-settable `$path` is v1.x.)
+fn resolve_command(name: &str) -> String {
+    if name.contains('/') {
+        return String::from(name);
+    }
+    for dir in ["/bin/", "/"] {
+        let mut cand = String::with_capacity(dir.len() + name.len());
+        cand.push_str(dir);
+        cand.push_str(name);
+        // O-read existence probe (binaries are 0755 = readable): resolves the
+        // candidate through the namespace without spawning; File drops/closes.
+        if libthyla_rs::fs::File::open(&cand).is_ok() {
+            return cand;
+        }
+    }
+    let mut p = String::with_capacity(5 + name.len());
+    p.push_str("/bin/");
+    p.push_str(name);
+    p
+}
+
 /// Spawn an external command with redirects applied. Non-redirected
 /// stdout/stderr inherit the console when the shell holds one
 /// (`env.stdio_inherit`, LS-2); otherwise the U-6c `Stdio::Piped` +
@@ -545,7 +576,7 @@ fn exec_external_redirected(
         trace_echo(argv);
     }
 
-    let mut spawn_cmd = libthyla_rs::process::Command::new(argv[0].clone());
+    let mut spawn_cmd = libthyla_rs::process::Command::new(resolve_command(&argv[0]));
     if argv.len() > 1 {
         spawn_cmd.args(argv[1..].iter().cloned());
     }
@@ -802,7 +833,7 @@ fn spawn_pipeline_elements(env: &mut Env, p: &Pipeline) -> EvalResult<PipelineSp
     let mut heredoc_writes: Vec<(File, String)> = Vec::new();
     for i in 0..n {
         let argv = &argvs[i];
-        let mut spawn_cmd = libthyla_rs::process::Command::new(argv[0].clone());
+        let mut spawn_cmd = libthyla_rs::process::Command::new(resolve_command(&argv[0]));
         if argv.len() > 1 {
             spawn_cmd.args(argv[1..].iter().cloned());
         }
@@ -1172,7 +1203,7 @@ fn exec_external(
         trace_echo(argv);
     }
 
-    let mut spawn_cmd = libthyla_rs::process::Command::new(argv[0].clone());
+    let mut spawn_cmd = libthyla_rs::process::Command::new(resolve_command(&argv[0]));
     if argv.len() > 1 {
         spawn_cmd.args(argv[1..].iter().cloned());
     }
@@ -1597,7 +1628,7 @@ fn capture_external_pipeline(
     let mut spawn_failed = false;
     for i in 0..n {
         let argv = &argvs[i];
-        let mut spawn_cmd = libthyla_rs::process::Command::new(argv[0].clone());
+        let mut spawn_cmd = libthyla_rs::process::Command::new(resolve_command(&argv[0]));
         if argv.len() > 1 {
             spawn_cmd.args(argv[1..].iter().cloned());
         }

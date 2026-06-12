@@ -3637,6 +3637,82 @@ static int sys_bump_inherit_fds(struct Proc *p, const u32 *fds, u32 fd_count,
     return 0;
 }
 
+// exec_load_from_namespace (#58) -- resolve the program `name` in the CALLER's
+// namespace and slurp the ELF into a fresh 8-aligned kmalloc'd blob, replacing
+// the flat boot-cpio `devramfs_lookup`. Realizes I-28 + I-1 for the exec path:
+// a binary in a mounted FS (a container root, the disk-backed Stratum FS) is
+// now executable, and a confined Proc can exec ONLY what its namespace names
+// (the reverse-visibility leak closes -- a `stalk` miss is -1, never a flat
+// fallback). Resolution mirrors SYS_OPEN exactly: an absolute path from the
+// Territory `root_spoor`, a relative name via the LS-4 cwd-join; OEXEC gates a
+// per-component X-search on every directory hop and PERM_R|PERM_X on the final
+// file (RW-3 R3-F1), and the A-3 OEXEC->RIGHT_READ open yields a readable Spoor
+// to load the bytes. The whole binary is read into kernel memory and handed
+// UNCHANGED to exec_setup -- the same shape the cpio path used (it memcpy'd the
+// whole blob), so the audited ELF loader / W^X reject / segment map are
+// byte-identical. Runs in the parent's context (its Territory), like Unix exec.
+// Returns the blob (caller kfree) + *size_out, or NULL on any failure.
+// Exported for the kernel-internal #58 tests.
+void *exec_load_from_namespace(struct Proc *p, const char *name,
+                               size_t name_len, size_t *size_out) {
+    if (!p || !name || !size_out)                  return NULL;
+    *size_out = 0;
+    if (name_len == 0 || name_len > SYS_OPEN_PATH_MAX) return NULL;
+
+    // start = the Territory root (atomic ref under ns_lock, RW-4 SA-F1). An
+    // absolute name resolves from it directly; a relative name is cwd-joined
+    // (territory_resolve_cwd) into an absolute path first -- exactly SYS_OPEN.
+    struct Spoor *start = territory_root_ref(p->territory);
+    if (!start)                                    return NULL;
+
+    char joined[SYS_OPEN_PATH_MAX + 1];
+    const char *rpath = name;
+    u64 rlen = (u64)name_len;
+    if (name[0] != '/') {
+        int jl = territory_resolve_cwd(p->territory, name, (u64)name_len,
+                                       joined, sizeof(joined));
+        if (jl < 0)                                { spoor_clunk(start); return NULL; }
+        rpath = joined;
+        rlen  = (u64)jl;
+    }
+
+    struct Spoor *quarry = stalk(p, start, rpath, rlen, STALK_OPEN, 3u /* OEXEC */);
+    spoor_clunk(start);   // borrowed by stalk; release the ref we took
+    if (!quarry)                                   return NULL;
+    if (!quarry->dev || !quarry->dev->read)        { spoor_clunk(quarry); return NULL; }
+
+    // Size from stat; bound by SYS_SPAWN_BLOB_MAX (the same cap the cpio path
+    // enforced -- no regression; a > cap binary already failed before #58).
+    struct t_stat st;
+    if (spoor_stat_native(quarry, &st) != 0)       { spoor_clunk(quarry); return NULL; }
+    if (st.size <= 0 || (u64)st.size > SYS_SPAWN_BLOB_MAX) { spoor_clunk(quarry); return NULL; }
+    size_t sz = (size_t)st.size;
+
+    void *blob = kmalloc(sz, 0);
+    if (!blob)                                     { spoor_clunk(quarry); return NULL; }
+    if (((uintptr_t)blob & 0x7) != 0)              { kfree(blob); spoor_clunk(quarry); return NULL; }
+
+    // Read the whole file via dev->read (a short read is legal -- loop). For a
+    // devramfs Spoor (the /bin bind) this is an in-memory copy; for dev9p it is
+    // Tread round-trips (#811-death-interruptible if the parent dies). A read
+    // that ends before st.size (truncated file) fails cleanly -> no partial map.
+    u8 *dst = (u8 *)blob;
+    s64 off = 0;
+    size_t got = 0;
+    while (got < sz) {
+        long n = quarry->dev->read(quarry, dst + got, (long)(sz - got), off);
+        if (n < 0)                                 { kfree(blob); spoor_clunk(quarry); return NULL; }
+        if (n == 0)                                break;   // EOF before st.size
+        got += (size_t)n;
+        off += n;
+    }
+    spoor_clunk(quarry);
+    if (got != sz)                                 { kfree(blob); return NULL; }
+
+    *size_out = sz;
+    return blob;
+}
+
 // Kernel-side body: takes a kernel-resident NUL-terminated name and the
 // caller's Proc (used for context; the rfork creates a fresh child Proc
 // regardless of the caller). Exported (non-static) for kernel-internal
@@ -3652,25 +3728,11 @@ int sys_spawn_for_proc(struct Proc *p, const char *name, size_t name_len) {
     }
     if (name[name_len] != '\0')                         return -1;
 
-    const void *cpio_blob = NULL;
-    size_t      cpio_size = 0;
-    if (devramfs_lookup(name, &cpio_blob, &cpio_size) != 0) return -1;
-    if (cpio_size == 0 || cpio_size > SYS_SPAWN_BLOB_MAX)   return -1;
-
-    // 8-aligned copy of the cpio bytes. The cpio data is 4-aligned but
-    // elf_load demands 8 (R5-G F61). kmalloc returns naturally aligned
-    // memory for power-of-two requests; >2 KiB routes through alloc_pages,
-    // which is page-aligned (4096 → 8-aligned).
-    void *blob_copy = kmalloc(cpio_size, 0);
+    // #58: resolve + slurp the ELF from the caller's namespace (was the flat
+    // devramfs_lookup). The blob is 8-aligned, <= SYS_SPAWN_BLOB_MAX, kmalloc'd.
+    size_t cpio_size = 0;
+    void *blob_copy = exec_load_from_namespace(p, name, name_len, &cpio_size);
     if (!blob_copy)                                    return -1;
-    if (((uintptr_t)blob_copy & 0x7) != 0) {
-        // Shouldn't happen given kmalloc's contract, but assert defensively.
-        kfree(blob_copy);
-        return -1;
-    }
-    const u8 *src = (const u8 *)cpio_blob;
-    u8 *dst = (u8 *)blob_copy;
-    for (size_t i = 0; i < cpio_size; i++) dst[i] = src[i];
 
     struct spawn_args *sa = kmalloc(sizeof(*sa), KP_ZERO);
     if (!sa) {
@@ -3838,30 +3900,13 @@ int sys_spawn_with_fds_for_proc(struct Proc *p, const char *name, size_t name_le
     if (sys_bump_inherit_fds(p, fds, fd_count, bumped, bumped_rights) != 0)
         return -1;
 
-    const void *cpio_blob = NULL;
-    size_t      cpio_size = 0;
-    if (devramfs_lookup(name, &cpio_blob, &cpio_size) != 0) {
-        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
-        return -1;
-    }
-    if (cpio_size == 0 || cpio_size > SYS_SPAWN_BLOB_MAX) {
-        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
-        return -1;
-    }
-
-    void *blob_copy = kmalloc(cpio_size, 0);
+    // #58: resolve + slurp from the caller's namespace (was devramfs_lookup).
+    size_t cpio_size = 0;
+    void *blob_copy = exec_load_from_namespace(p, name, name_len, &cpio_size);
     if (!blob_copy) {
         for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
         return -1;
     }
-    if (((uintptr_t)blob_copy & 0x7) != 0) {
-        kfree(blob_copy);
-        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
-        return -1;
-    }
-    const u8 *src = (const u8 *)cpio_blob;
-    u8 *dst = (u8 *)blob_copy;
-    for (size_t i = 0; i < cpio_size; i++) dst[i] = src[i];
 
     struct spawn_with_fds_args *sa = kmalloc(sizeof(*sa), KP_ZERO);
     if (!sa) {
@@ -3908,20 +3953,11 @@ int sys_spawn_with_caps_for_proc(struct Proc *p, const char *name, size_t name_l
     }
     if (name[name_len] != '\0')                         return -1;
 
-    const void *cpio_blob = NULL;
-    size_t      cpio_size = 0;
-    if (devramfs_lookup(name, &cpio_blob, &cpio_size) != 0) return -1;
-    if (cpio_size == 0 || cpio_size > SYS_SPAWN_BLOB_MAX)   return -1;
-
-    void *blob_copy = kmalloc(cpio_size, 0);
+    // #58: resolve + slurp the ELF from the caller's namespace (was the flat
+    // devramfs_lookup).
+    size_t cpio_size = 0;
+    void *blob_copy = exec_load_from_namespace(p, name, name_len, &cpio_size);
     if (!blob_copy)                                    return -1;
-    if (((uintptr_t)blob_copy & 0x7) != 0) {
-        kfree(blob_copy);
-        return -1;
-    }
-    const u8 *src = (const u8 *)cpio_blob;
-    u8 *dst = (u8 *)blob_copy;
-    for (size_t i = 0; i < cpio_size; i++) dst[i] = src[i];
 
     struct spawn_args *sa = kmalloc(sizeof(*sa), KP_ZERO);
     if (!sa) {
@@ -4009,30 +4045,13 @@ static int sys_spawn_full_with_perms_for_proc(struct Proc *p,
     if (sys_bump_inherit_fds(p, fds, fd_count, bumped, bumped_rights) != 0)
         return -1;
 
-    const void *cpio_blob = NULL;
-    size_t      cpio_size = 0;
-    if (devramfs_lookup(name, &cpio_blob, &cpio_size) != 0) {
-        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
-        return -1;
-    }
-    if (cpio_size == 0 || cpio_size > SYS_SPAWN_BLOB_MAX) {
-        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
-        return -1;
-    }
-
-    void *blob_copy = kmalloc(cpio_size, 0);
+    // #58: resolve + slurp from the caller's namespace (was devramfs_lookup).
+    size_t cpio_size = 0;
+    void *blob_copy = exec_load_from_namespace(p, name, name_len, &cpio_size);
     if (!blob_copy) {
         for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
         return -1;
     }
-    if (((uintptr_t)blob_copy & 0x7) != 0) {
-        kfree(blob_copy);
-        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
-        return -1;
-    }
-    const u8 *src = (const u8 *)cpio_blob;
-    u8 *dst = (u8 *)blob_copy;
-    for (size_t i = 0; i < cpio_size; i++) dst[i] = src[i];
 
     struct spawn_with_fds_args *sa = kmalloc(sizeof(*sa), KP_ZERO);
     if (!sa) {
@@ -4441,31 +4460,12 @@ static int sys_spawn_full_argv_with_perms_for_proc(
     if (sys_bump_inherit_fds(p, fds, fd_count, bumped, bumped_rights) != 0)
         return -1;
 
-    const void *cpio_blob = NULL;
-    size_t      cpio_size = 0;
-    if (devramfs_lookup(name, &cpio_blob, &cpio_size) != 0) {
-        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
-        return -1;
-    }
-    if (cpio_size == 0 || cpio_size > SYS_SPAWN_BLOB_MAX) {
-        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
-        return -1;
-    }
-
-    void *blob_copy = kmalloc(cpio_size, 0);
+    // #58: resolve + slurp from the caller's namespace (was devramfs_lookup).
+    size_t cpio_size = 0;
+    void *blob_copy = exec_load_from_namespace(p, name, name_len, &cpio_size);
     if (!blob_copy) {
         for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
         return -1;
-    }
-    if (((uintptr_t)blob_copy & 0x7) != 0) {
-        kfree(blob_copy);
-        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
-        return -1;
-    }
-    {
-        const u8 *src = (const u8 *)cpio_blob;
-        u8 *dst = (u8 *)blob_copy;
-        for (size_t i = 0; i < cpio_size; i++) dst[i] = src[i];
     }
 
     // Kernel-side argv copy. Lifetime: owned by the spawn_args struct

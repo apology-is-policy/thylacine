@@ -656,6 +656,11 @@ void boot_main(void) {
     // ourselves to evolving subsystem layouts. Future host-side
     // sanitizer matrix lands at P1-I.
 #ifdef KERNEL_TESTS
+    // #58: the spawn tests resolve the binary through the caller's namespace
+    // (exec_load_from_namespace -> stalk), so the test Proc (kproc) needs a
+    // root_spoor. Root it at devramfs BEFORE the suite; joey_run idempotently
+    // re-roots it later for the boot chain.
+    joey_root_kproc_at_devramfs();
     uart_puts("  tests:\n");
     test_run_all();
     uart_puts("  tests: ");

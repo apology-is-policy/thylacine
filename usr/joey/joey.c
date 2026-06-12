@@ -909,7 +909,7 @@ static int do_corvus_bringup(long storage_dup_fd) {
     // so corvus can call SYS_POST_SERVICE("corvus") at startup. The
     // perm bit is stamped on the child by the kernel atomically inside
     // the spawn thunk (BEFORE exec_setup; P5-corvus-srv-impl-b3a).
-    const char corvus_name[] = "corvus";
+    const char corvus_name[] = "/bin/corvus";  // #58: resolved via the post-pivot /bin bind
     unsigned int corvus_fds[1] = { (unsigned int)storage_dup_fd };
     // P5-hostowner-b-b: joey grants corvus T_CAP_GRANT_HOSTOWNER so
     // corvus may write /cap/grant on ADMIN_ELEVATE (the kernel cap
@@ -1665,7 +1665,7 @@ static int do_login_e2e(void) {
     (void)t_close(cr_wr);
 
     static const char login_argv[] = "login\0";
-    const char login_name[] = "login";
+    const char login_name[] = "/bin/login";  // #58: resolved via the post-pivot /bin bind
     unsigned int login_fds[3] = { (unsigned int)cr_rd, (unsigned int)cr_rd,
                                   (unsigned int)cr_rd };
     struct t_sys_spawn_args lreq = {
@@ -1744,7 +1744,7 @@ static int do_recover_e2e(void) {
     (void)t_close(cr_wr);
 
     static const char login_argv[] = "login\0";
-    const char login_name[] = "login";
+    const char login_name[] = "/bin/login";  // #58: resolved via the post-pivot /bin bind
     unsigned int login_fds[3] = { (unsigned int)cr_rd, (unsigned int)cr_rd,
                                   (unsigned int)cr_rd };
     struct t_sys_spawn_args lreq = {
@@ -1835,7 +1835,7 @@ static void reap_adopted_orphans(void) {
 #define GETTY_RESPAWN_BACKOFF_US 250000L /* 250 ms -> respawns bounded to ~4/sec */
 static void session_getty_loop(long cfd) {
     static const char login_argv[] = "login\0";
-    const char login_name[] = "login";
+    const char login_name[] = "/bin/login";  // #58: resolved via the post-pivot /bin bind
     unsigned int fds[3] = { (unsigned int)cfd, (unsigned int)cfd, (unsigned int)cfd };
     unsigned int getty_pacer = 0; /* never-woken pacer word for the backoff */
     for (;;) {
@@ -2725,6 +2725,18 @@ int main(void) {
                 return 1;
             }
 
+            // #58: grab a handle to the (pre-pivot) devramfs root NOW so its flat
+            // binary tree can be re-grafted onto /bin AFTER the pivot -- the boot
+            // medium bound into the namespace (Plan 9), so post-pivot spawns of the
+            // system binaries (corvus, login, legate-prover) resolve /bin/<prog>
+            // through stalk. The disk root holds user data only; same pre-pivot-
+            // handle + post-pivot-MREPL idiom as the /srv re-graft above.
+            long bin_src_h = t_open(T_WALK_OPEN_FROM_ROOT, "/", 1, T_OPATH);
+            if (bin_src_h < 0) {
+                t_putstr("joey: #58 pre-pivot t_open(/) for the /bin bind FAILED\n");
+                return 1;
+            }
+
             if (t_pivot_root(sd_attach_fd) != 0) {
                 t_putstr("joey: stratumd-boot t_pivot_root FAILED\n");
                 return 1;
@@ -2749,6 +2761,22 @@ int main(void) {
                 }
             }
             (void)t_close(srv_devsrv_h);
+
+            // #58: re-establish /bin on the pivoted root -- bind the pre-pivot
+            // devramfs binary tree onto it so /bin/<prog> resolves post-pivot
+            // (the system binaries live once, in the initrd). mkdir /bin is
+            // idempotent (the Stratum pool persists across reboots); the MREPL
+            // mount takes its own spoor_ref, so the pre-pivot handle closes after.
+            {
+                long mkbin = t_walk_create(T_WALK_OPEN_FROM_ROOT, "bin", 3, T_OREAD,
+                                           T_WALK_CREATE_DMDIR | 0755u);
+                if (mkbin >= 0) (void)t_close(mkbin);
+                if (t_mount("/bin", 4, bin_src_h, T_MREPL) != 0) {
+                    t_putstr("joey: #58 post-pivot t_mount(/bin) FAILED\n");
+                    return 1;
+                }
+            }
+            (void)t_close(bin_src_h);
 
             long post_fd = t_walk_open(T_WALK_OPEN_FROM_ROOT, sentinel_name,
                                         sentinel_len, T_OREAD);
@@ -2890,7 +2918,7 @@ int main(void) {
             // ci-smp-gate multi-boot under -smp 4/8 is the real concurrency
             // assertion.
             {
-                const char ls_name[] = "loom-stress";
+                const char ls_name[] = "/bin/loom-stress";  // #58: post-pivot /bin bind
                 long ls_pid = t_spawn(ls_name, sizeof(ls_name) - 1);
                 if (ls_pid <= 0) {
                     t_putstr("joey: t_spawn(\"loom-stress\") FAILED\n");
@@ -2913,7 +2941,7 @@ int main(void) {
             // boot UART; joey gates only on status 0 (the Loom batches must reap
             // correctly). Runs post-pivot (dev9p live), loaded from the ramfs.
             {
-                const char lb_name[] = "loom-bench";
+                const char lb_name[] = "/bin/loom-bench";  // #58: post-pivot /bin bind
                 long lb_pid = t_spawn(lb_name, sizeof(lb_name) - 1);
                 if (lb_pid <= 0) {
                     t_putstr("joey: t_spawn(\"loom-bench\") FAILED\n");
@@ -3209,7 +3237,7 @@ int main(void) {
             // from the devramfs cpio regardless of pivot) and writes
             // /u-redir-out on the post-pivot root.
             {
-                const char urt_name[] = "u-redir-test";
+                const char urt_name[] = "/bin/u-redir-test";  // #58: post-pivot /bin bind
                 long urt_pid = t_spawn(urt_name, sizeof(urt_name) - 1);
                 if (urt_pid <= 0) {
                     t_putstr("joey: t_spawn(\"u-redir-test\") FAILED\n");
@@ -3232,7 +3260,7 @@ int main(void) {
             // regression for the layer the LS-3b coreutils call; idempotent
             // (it reclaims a stale scratch tree before building a fresh one).
             {
-                const char fms_name[] = "fs-mut-smoke";
+                const char fms_name[] = "/bin/fs-mut-smoke";  // #58: post-pivot /bin bind
                 long fms_pid = t_spawn(fms_name, sizeof(fms_name) - 1);
                 if (fms_pid <= 0) {
                     t_putstr("joey: t_spawn(\"fs-mut-smoke\") FAILED\n");
@@ -3297,7 +3325,7 @@ int main(void) {
         // strict wait_pid). The prover needs no fds/caps (it t_putstrs to the
         // console + connects to corvus itself). Success marker: "legate E2E OK".
         {
-            const char prover_name[] = "legate-prover";
+            const char prover_name[] = "/bin/legate-prover";  // #58: post-pivot /bin bind
             long lp_pid = t_spawn(prover_name, sizeof(prover_name) - 1);
             if (lp_pid <= 0) {
                 t_putstr("joey: t_spawn(\"legate-prover\") FAILED\n");

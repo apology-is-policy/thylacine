@@ -368,6 +368,14 @@ allocation in the resolver beyond the Spoor clones, which are SLUB).
   mechanism). Kernel tests `territory.cwd_lexical` + `territory.cwd_dot`. The
   userspace wiring (libthyla-rs `chdir`/`getcwd` + the shell `cd` + the LS-CI
   relative-`cat` E2E) is LS-4b.
+- **#58 exec-from-namespace (landed)**: the `SYS_SPAWN_*` family resolves the
+  binary via the new `exec_load_from_namespace` -> `stalk(STALK_OPEN, OEXEC)`
+  (+ slurp via `dev->read`) instead of the flat `devramfs_lookup`; joey
+  MREPL-binds the cpio binary tree onto `/bin` post-pivot so the disk-rooted
+  service chain resolves `/bin/<prog>`. Realizes I-28 + I-1 for the exec path
+  (per-component X-search + `OEXEC` PERM_R|PERM_X gate + no flat-table fallback).
+  Kernel tests `exec_ns.*`; boot OK + login E2E + 838/838. See
+  `docs/reference/14-process-model.md` "Exec from the namespace".
 
 ## Known caveats / footguns
 

@@ -152,6 +152,32 @@ static void joey_thunk(void *arg) {
     // userland_enter is __noreturn; control transfers to EL0 atomically.
 }
 
+// joey_root_kproc_at_devramfs -- stamp the boot Proc's Territory with a
+// root_spoor pointing at the devramfs root. The child Territory clone inherits
+// it (territory_clone deep-copies + spoor_refs), so joey + every descendant has
+// a sane FROM_ROOT base AND (post-#58) a namespace for SYS_SPAWN binary
+// resolution (exec_load_from_namespace -> stalk). Idempotent: an already-rooted
+// Territory is left as-is -- the kernel test harness calls this before the
+// spawn-resolution tests, so joey_run's later call finds it done. devramfs.
+// attach returns ref=1; territory_chroot takes its own ref; we unref to leave
+// the territory's ref only.
+void joey_root_kproc_at_devramfs(void) {
+    struct Thread *kt = current_thread();
+    if (!kt || !kt->proc || !kt->proc->territory)
+        extinction("joey: no kproc territory to root at devramfs");
+    struct Spoor *existing = territory_root_ref(kt->proc->territory);
+    if (existing) {                 // already rooted -- idempotent no-op
+        spoor_clunk(existing);
+        return;
+    }
+    struct Spoor *ramfs_root = devramfs.attach(NULL);
+    if (!ramfs_root) extinction("joey: devramfs.attach for root_spoor failed");
+    if (territory_chroot(kt->proc->territory, ramfs_root) != 0)
+        extinction("joey: territory_chroot to devramfs root failed");
+    spoor_unref(ramfs_root);
+    uart_puts("  joey: kproc territory rooted at devramfs (FROM_ROOT walks live)\n");
+}
+
 void joey_run(void) {
     // One-call guard. v1.0 invariant — joey_run is called exactly once
     // per boot from boot_main. The guard catches accidental double-call
@@ -200,15 +226,12 @@ void joey_run(void) {
     // Territory destruction the ref is released; for the long-lived
     // kproc Territory at v1.0 this happens at shutdown.
     {
-        struct Spoor *ramfs_root = devramfs.attach(NULL);
-        if (!ramfs_root) extinction("joey: devramfs.attach for root_spoor failed");
+        // #58: root kproc at devramfs (idempotent; the kernel test harness roots
+        // it earlier so the post-#58 SYS_SPAWN resolution tests have a namespace).
+        joey_root_kproc_at_devramfs();
         struct Thread *kt = current_thread();
         if (!kt || !kt->proc || !kt->proc->territory)
             extinction("joey: no kproc territory");
-        if (territory_chroot(kt->proc->territory, ramfs_root) != 0)
-            extinction("joey: territory_chroot to devramfs root failed");
-        spoor_unref(ramfs_root);
-        uart_puts("  joey: kproc territory rooted at devramfs (FROM_ROOT walks live)\n");
 
         // stalk-3a: mount the boot service registry's /srv root on the
         // kproc territory's /srv synthetic dir. joey + every descendant

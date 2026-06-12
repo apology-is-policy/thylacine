@@ -439,6 +439,43 @@ A tombstone-rebind protection (CORVUS-DESIGN.md §6.1) leverages the same bit: w
 
 ---
 
+### Exec from the namespace (#58)
+
+Since #58 the `SYS_SPAWN_*` family resolves the binary through the **caller's
+namespace**, not the flat boot-cpio table. `exec_load_from_namespace(p, name,
+name_len, &size)` (`kernel/syscall.c`) mirrors `SYS_OPEN`: an absolute path from
+the Territory `root_spoor`, a relative name via the LS-4 cwd-join, through
+`stalk(p, start, path, len, STALK_OPEN, OEXEC)`; it then slurps the whole ELF from
+the resolved Spoor via `dev->read` into an 8-aligned `kmalloc` blob (bounded by
+`SYS_SPAWN_BLOB_MAX`) and hands it UNCHANGED to `exec_setup` — the same shape the
+cpio path used (it `memcpy`-d the whole binary), so the audited ELF loader / W^X
+reject / segment map are byte-identical. The five spawn bodies (`sys_spawn_for_proc`
+/ `_with_fds_` / `_with_caps_` / `_full_with_perms_` / `_full_argv_with_perms_`)
+call it in place of `devramfs_lookup`. Resolution runs in the **parent's** context
+(its Territory), like Unix `exec`.
+
+This realizes **I-28 + I-1 for the exec path** (no new invariant): per-component
+X-search gates every directory hop and `perm_want_for_omode(OEXEC) = PERM_R|PERM_X`
+gates the file (so a 0644 data file is unspawnable even by its SYSTEM owner), and a
+name the namespace cannot reach returns `-1` with no flat-table fallback — a
+confined Proc can exec ONLY what its namespace names (closing the pre-#58 reverse
+leak where any cpio binary was spawnable). `devramfs_lookup` survives ONLY for the
+kproc init-load (`/joey`, before any namespace) and kernel tests — neither is
+EL0-reachable, so the userspace-spawn leak surface is fully closed.
+
+**Boot bootstrap — the `/bin` bind (option B, user-voted 2026-06-12).** joey
+pivots to the disk root before it spawns the service chain (corvus, login), so
+post-pivot those resolve in the disk namespace. joey MREPL-binds the cpio binary
+tree onto `/bin` (the Plan 9 idiom — the boot medium bound into the namespace —
+reusing its `/srv` re-graft pattern), so post-pivot spawns name `/bin/<prog>`; the
+shell (`ut`) resolves a bare command through `$path = ["/bin", "/"]` (the post-pivot
+installed location, then the pre-pivot initrd root). The system binaries live once,
+in the initrd; the disk pool stays for user data. `tools/mkcpio.py` preserves the
+source mode bits (was a hardcoded 0644) so a 0755 binary carries the execute bit
+the X-search requires. Kernel tests: `exec_ns.resolve_absolute_ok` / `_relative_ok`
+/ `_miss_returns_null` / `_non_executable_denied`. v1.x: a disk-installed `/bin`
+(the real installer) + spawn-from-fd.
+
 ### Per-Proc identity tag (`stripes`) (P5-corvus-srv-impl-a1)
 
 Every Proc carries a `stripes` value (`<thylacine/proc.h>`, `struct Proc`, `u64`) — the kernel's per-Proc identity tag (the thylacine's stripe pattern; every animal's is unique). It is the kernel's unforgeable answer to "is this the same Proc?", read by `SYS_SRV_PEER` (P5-corvus-srv-impl-a3) to stamp a `/srv/corvus` connection's peer identity (CORVUS-DESIGN.md §6.3; `specs/corvus.tla` `ConnRecord.peer`).

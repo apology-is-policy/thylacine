@@ -444,9 +444,10 @@ pub extern "C" fn rs_main() -> i64 {
         t_putstr("alloc-smoke: Metadata::is_file/is_dir FAILED\n");
         return 1;
     }
-    // mode should be 0o100644 per the joey boot probe. permissions()
-    // masks off the type bits, leaving 0o644.
-    if md.permissions() != 0o644 {
+    // /system.key is chmod 0400 (a keyfile: read-only, owner-only). Since #58,
+    // mkcpio preserves the source mode (was a hardcoded 0644), so permissions()
+    // (type bits masked off) is 0o400.
+    if md.permissions() != 0o400 {
         t_putstr("alloc-smoke: Metadata::permissions FAILED\n");
         return 1;
     }

@@ -97,6 +97,11 @@ void test_resource_child_cap_ok(void);
 void test_resource_child_count_tracks_list(void);
 void test_resource_child_count_rfork_reap(void);
 void test_resource_page_cap_attach_enforced(void);
+
+void test_exec_ns_resolve_absolute_ok(void);
+void test_exec_ns_resolve_relative_ok(void);
+void test_exec_ns_miss_returns_null(void);
+void test_exec_ns_non_executable_denied(void);
 void test_proc_identity_kproc_is_system(void);
 void test_proc_identity_rfork_inherits(void);
 void test_proc_identity_apply_sets_fields(void);
@@ -981,6 +986,10 @@ struct test_case g_tests[] = {
                                        test_resource_child_count_tracks_list, false, NULL },
     { "resource.child_count_rfork_reap",
                                        test_resource_child_count_rfork_reap, false, NULL },
+    { "exec_ns.resolve_absolute_ok",   test_exec_ns_resolve_absolute_ok,   false, NULL },
+    { "exec_ns.resolve_relative_ok",   test_exec_ns_resolve_relative_ok,   false, NULL },
+    { "exec_ns.miss_returns_null",     test_exec_ns_miss_returns_null,     false, NULL },
+    { "exec_ns.non_executable_denied", test_exec_ns_non_executable_denied, false, NULL },
     { "resource.page_cap_attach_enforced",
                                        test_resource_page_cap_attach_enforced, false, NULL },
     { "proc_identity.kproc_is_system", test_proc_identity_kproc_is_system, false, NULL },

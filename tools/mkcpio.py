@@ -12,9 +12,12 @@
 # Subdirectories are NOT recursed at v1.0 — flat layout only.
 # Special files (sockets, devices, FIFOs) are skipped.
 #
-# Each entry's mode is set to 0100644 (regular file, mode 644);
-# uid/gid/mtime/inode all zero. Per-file `c_check` field is zero
-# (newc doesn't compute a checksum; see crc format if needed).
+# Each entry's mode preserves the SOURCE file's permission bits
+# (S_IFREG | the low-9 rwx bits) so a chmod 0755 binary is marked
+# executable -- the kernel's exec-from-namespace X-search (#58) reads
+# this mode via devramfs_stat_native, and a 0644 (no-x) binary would
+# be unspawnable. setuid/setgid/sticky are dropped. uid/gid/mtime/
+# inode all zero; per-file `c_check` is zero (newc has no checksum).
 
 import os
 import sys
@@ -81,11 +84,15 @@ def main() -> int:
             continue
         with open(path, "rb") as f:
             data = f.read()
-        entries.append((fname, data))
+        # #58: preserve the source's permission bits so a chmod 0755 binary
+        # carries the execute bit the kernel's exec X-search requires (a 0644
+        # binary would be unspawnable). S_IFREG | low-9 perm bits.
+        mode = 0o100000 | (os.stat(path).st_mode & 0o777)
+        entries.append((fname, data, mode))
 
     with open(outpath, "wb") as out:
-        for name, data in entries:
-            emit_entry(out, name, data)
+        for name, data, mode in entries:
+            emit_entry(out, name, data, mode)
         emit_trailer(out)
 
     print(f"mkcpio: wrote {len(entries)} entries to {outpath}")
