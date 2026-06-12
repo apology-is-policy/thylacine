@@ -73,6 +73,8 @@ void test_cons_cook_onlcr_output(void);               // LS-8b (output NL -> CR 
 void test_cons_consctl_parse(void);                   // LS-8b (+/-flag parse + malformed)
 void test_cons_consctl_render(void);                  // LS-8b (read-back render)
 void test_cons_cook_line_overflow(void);              // LS-8b (bounded line buffer)
+void test_cons_cook_mode_flip_fresh_line(void);       // LS-8b audit F1 (consctl flip discards the fragment)
+void test_cons_cook_canonical_poll_edge(void);        // LS-8b audit F2a (whole-line poll edge)
 
 // cons.c test hooks + the extern Dev (read slot ignores the Spoor arg, so the
 // tests pass NULL). proc.c test helpers (the test_proc.c / test_devproc.c pattern).
@@ -954,5 +956,87 @@ void test_cons_cook_line_overflow(void) {
     bool all_a = true;
     for (long i = 0; i < n; i++) if (buf[i] != 'A') all_a = false;
     TEST_ASSERT(all_a, "every delivered byte is 'A' -- no overflow corruption");
+    cons_settle_mgr();
+}
+
+// LS-8b audit F1: a consctl mode change starts a FRESH canonical line (the
+// TCSAFLUSH discipline) -- a half-assembled line[] is DISCARDED by any
+// cons_set_mode_cmd write, so a flip can never strand a fragment that then
+// prepends the next line. Drives the PRODUCTION cons_set_mode_cmd (NOT the
+// cons_test_set_termios hook), the path the cooking tests otherwise never take:
+// pre-fix the fragment survived (this delivered "abc\n", n == 4); post-fix only
+// the post-flip line delivers (n == 1).
+void test_cons_cook_mode_flip_fresh_line(void) {
+    cons_test_reset();
+    sched();
+    cons_test_set_termios(CONS_ICANON | CONS_ISIG);   // cooked
+    cons_test_echo_capture(true);                     // swallow the +echo NL echo (no stray UART byte)
+
+    // Buffer a partial line (no Enter): "abc" sits in line[], the ring is empty.
+    cons_rx_input((u8)'a', false);
+    cons_rx_input((u8)'b', false);
+    cons_rx_input((u8)'c', false);
+
+    // A production consctl write (turns ECHO on + stays canonical) MUST discard
+    // the fragment -- the flip itself is what resets the line, regardless of flags.
+    TEST_EXPECT_EQ(cons_set_mode_cmd("+echo", 5), 5L, "consctl +echo accepted");
+
+    // Deliver: only the bare NL arrives -- the "abc" fragment was discarded by
+    // the mode change (pre-fix it would prepend, delivering "abc\n").
+    cons_rx_input((u8)'\n', false);
+    u8 buf[8];
+    long n = cons_drain(buf, sizeof(buf));
+    TEST_EXPECT_EQ(n, 1L, "mode flip discarded the fragment: only the NL delivered");
+    TEST_EXPECT_EQ((long)buf[0], (long)'\n', "the delivered byte is the bare NL");
+    cons_settle_mgr();
+}
+
+// LS-8b audit F2a: the canonical WHOLE-LINE poll edge. Ordinary chars buffer in
+// line[] with the ring EMPTY (no poll edge while the line assembles); Enter
+// flushes the whole line to the ring in ONE cons_rx_input call, arming the
+// empty->non-empty edge exactly once + waking console_mgr, whose deferred walk
+// makes the hook ready (the cons_poll.tla I-9 relay, driven by a multi-byte
+// flush rather than the single-byte 8a path).
+void test_cons_cook_canonical_poll_edge(void) {
+    cons_test_reset();
+    sched();                                            // console_mgr to SLEEPING
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "console_mgr SLEEPING at entry");
+    cons_test_set_termios(CONS_ICANON | CONS_ISIG);     // cooked, no echo
+
+    struct Rendez r; rendez_init(&r);
+    struct poll_waiter pw; poll_waiter_init(&pw, &r);
+    short rev = cons_poll(POLLIN, &pw);
+    TEST_EXPECT_EQ((int)(rev & POLLIN), 0, "empty cons: no POLLIN at register");
+    TEST_ASSERT(!pw.ready, "poll_waiter not ready before any line");
+
+    // Buffer "hi": canonical mode holds it in line[]; the ring stays EMPTY, so
+    // there is NO poll edge and console_mgr is NOT woken (the bytes have not
+    // entered the ring -- POSIX canonical: a poller waits for a full line).
+    cons_rx_input((u8)'h', false);
+    cons_rx_input((u8)'i', false);
+    TEST_ASSERT(!cons_test_pollwake_pending(), "buffered chars: no ring edge yet");
+    TEST_ASSERT(!pw.ready, "no poll wake while the line is still assembling");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "console_mgr still SLEEPING (no edge)");
+
+    // Enter: the whole line ("hi" + NL) flushes to the ring in ONE call, arming
+    // the empty->non-empty edge once + waking console_mgr (deferred -- the IRQ
+    // producer does NOT walk the hook).
+    cons_rx_input((u8)'\n', false);
+    TEST_ASSERT(cons_test_pollwake_pending(), "Enter flushed the line -> poll edge armed");
+    TEST_ASSERT(!pw.ready, "the IRQ producer did NOT walk the hook (deferred)");
+    TEST_EXPECT_EQ(sched_runnable_count(), 1u, "console_mgr RUNNABLE post-line");
+
+    sched();                                            // mgr walks the hook list
+    TEST_ASSERT(pw.ready, "console_mgr's deferred walk set the hook ready");
+    TEST_ASSERT(!cons_test_pollwake_pending(), "console_mgr consumed poll_wake_pending");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "console_mgr re-SLEEPING after the walk");
+
+    // The ring holds the whole delivered line.
+    u8 buf[8];
+    long n = cons_drain(buf, sizeof(buf));
+    TEST_EXPECT_EQ(n, 3L, "the ring holds the delivered line hi+NL");
+    TEST_ASSERT(buf[0]=='h' && buf[1]=='i' && buf[2]=='\n', "line is hi\\n");
+
+    poll_waiter_list_unregister(&pw);                   // NoStaleHook (stack waiter)
     cons_settle_mgr();
 }

@@ -367,6 +367,8 @@ void test_cons_cook_onlcr_output(void);          // LS-8b
 void test_cons_consctl_parse(void);              // LS-8b
 void test_cons_consctl_render(void);             // LS-8b
 void test_cons_cook_line_overflow(void);         // LS-8b
+void test_cons_cook_mode_flip_fresh_line(void);  // LS-8b audit F1
+void test_cons_cook_canonical_poll_edge(void);   // LS-8b audit F2a
 void test_devctl_bestiary_smoke(void);
 void test_devctl_attach_returns_dir(void);
 void test_devctl_walk_to_each_leaf(void);
@@ -1360,6 +1362,8 @@ struct test_case g_tests[] = {
     { "cons.consctl_parse",            test_cons_consctl_parse,            false, NULL },
     { "cons.consctl_render",           test_cons_consctl_render,           false, NULL },
     { "cons.cook_line_overflow",       test_cons_cook_line_overflow,       false, NULL },
+    { "cons.cook_mode_flip_fresh_line", test_cons_cook_mode_flip_fresh_line, false, NULL },
+    { "cons.cook_canonical_poll_edge", test_cons_cook_canonical_poll_edge, false, NULL },
     { "devctl.bestiary_smoke",         test_devctl_bestiary_smoke,         false, NULL },
     { "devctl.attach_returns_dir",     test_devctl_attach_returns_dir,     false, NULL },
     { "devctl.walk_to_each_leaf",      test_devctl_walk_to_each_leaf,      false, NULL },

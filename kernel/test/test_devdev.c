@@ -11,6 +11,7 @@
 #include "test.h"
 
 #include <thylacine/dev.h>
+#include <thylacine/poll.h>
 #include <thylacine/proc.h>
 #include <thylacine/spoor.h>
 #include <thylacine/thread.h>
@@ -172,11 +173,29 @@ void test_devdev_cons_gate(void) {
     bool cons_read_deny  = (cons_d != NULL) && (devdev.read(cons_d, gbuf, sizeof(gbuf), 0) < 0);
     bool cons_write_deny = (cons_d != NULL) && (devdev.write(cons_d, "x", 1, 0) < 0);
 
+    // 8b: consctl read/write are now LIVE (cons_render_mode / cons_set_mode_cmd,
+    // replacing the v1.0 read->0/write->-1 stub), so the I/O gate must cover them
+    // too. The denied write is rejected AT THE GATE (before cons_set_mode_cmd), so
+    // it cannot mutate the global termios. And the poll gate (devdev_poll ->
+    // POLLNVAL) for BOTH console leaves -- an O_PATH walk-open skips devdev_open,
+    // so a non-attached poller could otherwise learn console-input timing.
+    bool cc_read_deny   = (cc_d != NULL)   && (devdev.read(cc_d, gbuf, sizeof(gbuf), 0) < 0);
+    bool cc_write_deny  = (cc_d != NULL)   && (devdev.write(cc_d, "+echo", 5, 0) < 0);
+    bool cons_poll_deny = (cons_d != NULL) && (devdev.poll(cons_d, POLLIN, NULL) == POLLNVAL);
+    bool cc_poll_deny   = (cc_d != NULL)   && (devdev.poll(cc_d, POLLIN, NULL) == POLLNVAL);
+
     // ALLOW: console-attached -> open succeeds.
     proc_mark_console_attached(p);
     struct Spoor *cons_a = walk_to("cons");
     struct Spoor *cons_a_open = cons_a ? devdev.open(cons_a, 0) : NULL;
     bool cons_allow = (cons_a_open != NULL);
+
+    // Attached: consctl read renders the mode line (> 0) and poll passes (consctl
+    // is always-ready, never POLLNVAL). Read-only here -- a consctl WRITE would
+    // mutate the global termios; the parse itself is cons.consctl_parse.
+    struct Spoor *cc_a = walk_to("consctl");
+    bool cc_allow_read = (cc_a != NULL) && (devdev.read(cc_a, gbuf, sizeof(gbuf), 0) > 0);
+    bool cc_poll_allow = (cc_a != NULL) && (devdev.poll(cc_a, POLLIN, NULL) != POLLNVAL);
 
     // Restore BEFORE asserting (so a failing assert cannot strand the attach bit).
     if (cons_a_open) devdev.close(cons_a);
@@ -189,10 +208,17 @@ void test_devdev_cons_gate(void) {
     TEST_ASSERT(cc_deny, "I-27: non-attached open of /dev/consctl DENIED");
     TEST_ASSERT(cons_read_deny, "I-27: non-attached read of /dev/cons DENIED (O_PATH bypass)");
     TEST_ASSERT(cons_write_deny, "I-27: non-attached write of /dev/cons DENIED (O_PATH bypass)");
+    TEST_ASSERT(cc_read_deny, "I-27: non-attached read of /dev/consctl DENIED (8b live I/O)");
+    TEST_ASSERT(cc_write_deny, "I-27: non-attached write of /dev/consctl DENIED (8b live I/O)");
+    TEST_ASSERT(cons_poll_deny, "I-27: non-attached poll of /dev/cons -> POLLNVAL");
+    TEST_ASSERT(cc_poll_deny, "I-27: non-attached poll of /dev/consctl -> POLLNVAL");
     TEST_ASSERT(cons_a != NULL, "walk /dev/cons (attached)");
     TEST_ASSERT(cons_allow, "console-attached open of /dev/cons ALLOWED");
+    TEST_ASSERT(cc_allow_read, "console-attached read of /dev/consctl renders the mode line");
+    TEST_ASSERT(cc_poll_allow, "console-attached poll of /dev/consctl passes (always ready)");
 
     if (cons_d) spoor_unref(cons_d);
     if (cc_d) spoor_unref(cc_d);
     if (cons_a) spoor_unref(cons_a);
+    if (cc_a) spoor_unref(cc_a);
 }

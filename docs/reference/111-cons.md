@@ -187,6 +187,14 @@ tokens + `'\n'` (34 bytes; the symmetric `tcgetattr` seam). Phase-8 Pouch maps
 `/dev/consctl` leaf routes its write→`cons_set_mode_cmd` and read→`cons_render_mode`
 (offset-sliced for read-to-EOF), still behind the I-27 console-attach gate.
 
+A consctl write that applies a mode also **discards any half-assembled canonical
+line** (resets `g_cons.line_len` under `g_cons.lock` — the `tcsetattr` TCSAFLUSH
+discipline). So a `canonical → raw → canonical` flip can never strand a fragment
+that then prepends the next line, and the production path matches the test hook
+`cons_test_set_termios` ("a mode flip starts a fresh line"). No v1.0 consumer
+flips mid-line (login flips between completed reads; `ut` at prompt boundaries),
+but the kernel is unambiguous against any consctl writer (LS-8 audit F1).
+
 ## State machines
 
 - **The poller** (`cons_poll.tla` `Poller`): `start` → `registered` (hook
@@ -229,6 +237,17 @@ tokens + `'\n'` (34 bytes; the symmetric `tcgetattr` seam). Phase-8 Pouch maps
   too-small buffer renders nothing.
 - (LS-8b) `cons.cook_line_overflow` — a pathologically long line is bounded (the
   line buffer never overflows past `CONS_LINE_MAX`; ASAN-clean).
+- (LS-8 audit F1) `cons.cook_mode_flip_fresh_line` — drives the **production**
+  `cons_set_mode_cmd`: a buffered fragment is discarded by a mode change, so only
+  the post-flip line delivers (pre-fix it prepended `"abc\n"`).
+- (LS-8 audit F2a) `cons.cook_canonical_poll_edge` — a multi-byte canonical line
+  arms the empty→non-empty poll edge **once** on the Enter flush (the chars buffer
+  with the ring empty → no edge while assembling); the deferred mgr walk then makes
+  the hook ready.
+- (LS-8 audit F2b) `devdev.cons_gate` (extended) — the I-27 gate on the **namespace**
+  path now also covers the live consctl I/O + the poll site: non-attached consctl
+  read/write → `-1`, cons/consctl `poll` → `POLLNVAL`; attached consctl read renders
+  + poll passes.
 - (A-4c) `cons.blocking_read_wakeup`, `cons.ctrlc_consumed`,
   `cons.break_sets_sak`, `cons.sak_via_console_mgr`, the SAK/owner role-split set.
 

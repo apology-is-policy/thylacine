@@ -128,7 +128,11 @@ static inline void cons_termios_store(u32 v) { __atomic_store_n(&g_cons.termios,
 // no-output property. g_cons_echo_capture is ALWAYS false in production (only the
 // test hook sets it), so the production emit is a single never-taken branch then
 // uart_putc; the capture buffer is single-threaded test state (the UP test
-// harness drives it), never touched concurrently.
+// harness drives it), never touched concurrently. CAVEAT (audit F3): the capture
+// buffer is NOT lock-protected -- a test must never enable capture while a live
+// UART RX IRQ could fire cons_rx_input -> cons_emit on another CPU (the LS-CI
+// interactive harness in particular). At v1.0 capture is strictly UP test-time,
+// so this cannot arise; the guard is the discipline, not a lock.
 static u8   g_cons_echo_cap[128];
 static u32  g_cons_echo_cap_len;
 static bool g_cons_echo_capture;
@@ -599,6 +603,15 @@ long cons_set_mode_cmd(const void *buf, long n) {
     irq_state_t s = spin_lock_irqsave(&g_cons.lock);
     u32 cur = cons_termios_load();
     cons_termios_store((cur | set_mask) & ~clear_mask);
+    // A mode change starts a FRESH canonical line (the TCSAFLUSH discipline):
+    // discard any half-assembled line[] so a canonical->raw->canonical flip can
+    // never strand a fragment that then prepends the next line. This matches the
+    // test hook (cons_test_set_termios) -- without it the production consctl
+    // path and the test path diverge (the cooking tests would not catch a
+    // fragment-survival regression). No current consumer flips mid-line (login
+    // flips between completed reads; ut at prompt boundaries), but the kernel
+    // must be unambiguous against any consctl writer.
+    g_cons.line_len = 0u;
     spin_unlock_irqrestore(&g_cons.lock, s);
     return n;
 }
