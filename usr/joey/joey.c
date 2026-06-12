@@ -2450,6 +2450,14 @@ int main(void) {
                 (void)t_close(op_fd);
                 return 1;
             }
+            // #81 F1 (the syscall-entry len==0 fast-path): a 0-length SYS_READ on
+            // an O_PATH handle must ALSO return -1 (the handler short-circuits
+            // before the gated inner sys_read_for_proc). Drives the real syscall.
+            if (t_read(op_fd, op_buf, 0) != -1) {
+                t_putstr("joey: #81 F1 -- zero-length T_OPATH read NOT denied at the syscall\n");
+                (void)t_close(op_fd);
+                return 1;
+            }
             (void)t_close(op_fd);
         }
         t_putstr("joey: probe /system.key lseek SEEK_END/SEEK_SET OK\n");

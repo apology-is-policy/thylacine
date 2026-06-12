@@ -156,7 +156,13 @@ rwx triple):
 Chokepoints (`kernel/syscall.c`), each gated on `src->dev->perm_enforced`:
 - `sys_walk_open_handler`: **X** on `src` (search) before the walk; **R/W** per
   `omode` on the walked target before `dev->open` (skipped for `O_PATH`, which has
-  no access semantics — the X-search still applies).
+  no access semantics — the X-search still applies). **The `O_PATH` R/W exemption
+  is sound only because an `O_PATH` handle does NO byte I/O (#81):** the walk-open
+  sites set the `CWALKONLY` Spoor flag, and `sys_read`/`sys_write`/`sys_readdir`
+  reject it (-1). Without that, the `perm_check`-exempt `O_PATH` open would be a
+  read-bypass — a non-owner could `O_PATH`-open a perm-restricted file (X-search
+  to it, the final R-check skipped) then read it (it once leaked the 0400
+  `/system.key`). See IDENTITY-DESIGN.md section 9.4 (#81) + 104-stalk.md.
 - `sys_walk_create_handler`: **W|X** on the parent dir before the create.
 - `sys_wstat_handler`: `perm_wstat_check` against the file's current owner, before
   the `dev->wstat_native` call.

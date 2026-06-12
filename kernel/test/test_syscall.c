@@ -280,6 +280,7 @@ void test_syscall_opath_walkonly_no_byte_io(void) {
     TEST_EXPECT_EQ(sys_write_for_proc(p, wfd, buf, 4), (s64)-1,
                    "#81: O_PATH (CWALKONLY) write DENIED");
     TEST_EXPECT_EQ(sys_read_for_proc(p, wfd, buf, 0), (s64)-1,
-                   "#81: O_PATH zero-length read DENIED (gate precedes len==0)");
+                   "#81: O_PATH zero-length read DENIED in the inner helper "
+                   "(the syscall-entry len==0 fast-path is covered by the joey E2E -- #81 F1)");
     handle_close(p, wfd);
 }

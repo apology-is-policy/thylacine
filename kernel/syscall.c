@@ -809,6 +809,9 @@ static s64 sys_write_handler(u64 hraw, u64 buf_va, u64 len) {
         // (validation only -- no I/O on a zero-length write).
         struct Spoor *c0 = sys_lookup_rw_handle(p, (hidx_t)hraw, RIGHT_WRITE);
         if (!c0)                                     return -1;
+        // #81 F1: the gate must cover the len==0 fast-path too (it short-circuits
+        // before sys_write_for_proc) -- an O_PATH handle does NO byte I/O, incl. 0.
+        if (c0->flag & CWALKONLY)                  { spoor_clunk(c0); return -1; }
         spoor_clunk(c0);
         return 0;
     }
@@ -833,6 +836,9 @@ static s64 sys_read_handler(u64 hraw, u64 buf_va, u64 len) {
     if (len == 0) {
         struct Spoor *c0 = sys_lookup_rw_handle(p, (hidx_t)hraw, RIGHT_READ);
         if (!c0)                                     return -1;   // #844: validate + release
+        // #81 F1: the gate must cover the len==0 fast-path too (it short-circuits
+        // before sys_read_for_proc) -- an O_PATH handle does NO byte I/O, incl. 0.
+        if (c0->flag & CWALKONLY)                  { spoor_clunk(c0); return -1; }
         spoor_clunk(c0);
         return 0;
     }

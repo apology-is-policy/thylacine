@@ -984,6 +984,17 @@ static void loom_submit_payload(struct Loom *l, const struct loom_sqe *sqe,
     // from the opcode above.
     if (!(rt & need1))                { err = -(s32)T_E_ACCES; goto fail; }
     if (has_second && !(rt2 & need2)) { err = -(s32)T_E_ACCES; goto fail; }
+    // #81 F2: an O_PATH (CWALKONLY) handle does NO byte/dir-content I/O. Reject the
+    // content opcodes (READ/WRITE/READDIR) on a CWALKONLY-pinned Spoor -- mirrors the
+    // syscall-path gate. The metadata opcodes (GETATTR/STATFS/READLINK) are the
+    // fstat-equivalent class, allowed on O_PATH; the mutation opcodes (MKDIR/SETATTR/
+    // ...) are the create-from-O_PATH-base pattern, legitimately allowed like
+    // SYS_WALK_CREATE. Defense-in-depth: today an O_PATH dev9p fid is un-Tlopen'd so
+    // the server rejects Tread/Treaddir, but this makes the block in-kernel.
+    if ((sqe->opcode == LOOM_OP_READ || sqe->opcode == LOOM_OP_WRITE ||
+         sqe->opcode == LOOM_OP_READDIR) && (sp->flag & CWALKONLY)) {
+        err = -(s32)T_E_INVAL; goto fail;
+    }
     if (dev9p_client_fid(sp, &cl, &fid) != 0) { err = -(s32)T_E_INVAL; goto fail; }   // not a dev9p Spoor
     if (has_second) {
         struct p9_client *cl2; u32 f2;

@@ -132,6 +132,21 @@ must be re-walked to be opened directly).
 unopened (exempt from R/W, matching the single-hop walk-open's O_PATH carve-out).
 Finally `stalk_unwind` clunks every trail ancestor, and the quarry is returned.
 
+**O_PATH is a navigation base, not a byte-I/O channel (#81).** Because `STALK_WALK`
+(O_PATH) skips BOTH the R/W `perm_check` AND `Dev.open`, an O_PATH handle is born
+`R|W` (a valid create/walk target) yet was never perm-checked for reads. The
+walk-open sites therefore set the **`CWALKONLY`** Spoor flag on the returned
+handle, and `sys_read` / `sys_write` / `sys_readdir` reject a `CWALKONLY` handle
+(-1) before reaching `dev->read`/`write`/`readdir`. So `open(path, O_PATH)` +
+`read` is denied -- otherwise the `perm_check`-exempt O_PATH open would be a
+read-bypass (it once leaked the 0400 `/system.key`). `CWALKONLY` is set ONLY at
+the two O_PATH handle-creation sites and is NEVER inherited by `spoor_clone` (a
+child CREATED or normally-opened from an O_PATH parent -- the FS-delta
+create-from-O_PATH-base pattern -- must do its own legitimate I/O). `fstat` /
+navigation (chroot / walk_create / mount / pivot_root base) stay allowed; only
+byte/dir-content I/O is blocked. See IDENTITY-DESIGN.md section 9.4 (the #81
+addendum) + 99-fs-permission.md.
+
 `Dev.open` returns EITHER the same Spoor opened in place (dev9p / devramfs: a
 read/write cursor over the walked node, ref unchanged) OR a DIFFERENT owned Spoor
 that REPLACES the quarry (stalk-3b-β: devsrv open=connect consumes the resolved
