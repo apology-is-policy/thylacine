@@ -235,6 +235,30 @@ return quarry
   it, since it would require `..` to become a device parent-walk rather than the
   trail-pop above).
 
+### 4.4 Name retention along the trail (Spoor.path — #66)
+
+`stalk` is also where each resolved Spoor accrues its **namespace name** — the
+Plan 9 `Chan.path`, a refcounted copy-on-walk string the introspection surface
+reads back (`fd2path`, `/proc/<pid>/fd`, `/proc/<pid>/ns`). The full design is
+ARCH §9.6.9 + invariant I-33; what matters *here* is that the accumulation rides
+the existing trail and the resolver stays **write-only** to it:
+
+- The base seed comes free: `spoor_clone(start)` shares `start`'s Path (the
+  `root_spoor` is seeded `/`). Each successful walk step replaces the freshly
+  cloned `nc`'s shared Path with `addelem(parent->path, name)`. The trail-pop that
+  implements `..` needs **no** Path op — each trail entry already carries its own
+  correct Path, and popping reveals the parent's shorter one. This is exactly why
+  Thylacine's Path can drop Plan 9's `mtpt` history: `..` is resolved against the
+  trail, never against the Path.
+- A mount **cross** transplants the *mount-point's* Path onto the crossed clone
+  (the user is "at `/mnt`" no matter what device the mount stacks), so the
+  namespace name is the path the user named, not the source's internal name.
+- The resolver **never reads** `->path` to decide anything (resolution, the
+  per-component X-search, `domount`, and every `perm_check` consult only
+  `(dc, devno, qid.path)` + `stat_native`). So I-28 is untouched: a Path bug can
+  misreport a name but can never mis-resolve, and an OOM that leaves a Path NULL
+  lets the walk **succeed** with an "unknown" name rather than failing.
+
 ---
 
 ## 5. The `/srv` consumer (namespace-resident service registry)
