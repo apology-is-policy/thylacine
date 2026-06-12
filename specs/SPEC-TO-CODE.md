@@ -734,6 +734,45 @@ cfgs run with `-deadlock`; `poll.tla`'s `Done` self-loop keeps a
 legitimate terminal state from tripping the deadlock check. See
 ARCH §23.3.
 
+## cons_poll.tla — P7-LS-8a (the pollable-console deferred poll-wake; spec-first re-enabled)
+
+Status: **spec landed at LS-8 scripture; the mechanism lands at LS-8a
+(source map filled then).** Models the LS-8a DEFERRED poll-wake: the
+console RX IRQ cannot walk the non-IRQ-safe `poll_waiter_list` (a plain
+non-irqsave lock + a nested `wakeup`), so it sets `poll_wake_pending`
+under `g_cons.lock` and wakes the `console_mgr` kthread, which drains the
+flag and walks the hook list in *process* context (Linux's tty
+`flush_to_ldisc` model). `poll.tla` owns the poller-side
+register-then-observe + the N-fd fan; `cons_poll.tla` adds the SECOND
+register-then-observe the relay introduces — the mgr's own sleep on
+`poll_wake_pending` must be register-then-observe
+(`sleep(&mgr_rendez, cons_mgr_pending)`), or a flag set as the mgr heads
+back to sleep is lost. I-9 across the IRQ→mgr→hook-list chain.
+
+State universe: one poller, one console, one console_mgr, one benign
+extra mgr waker (`SpuriousWake`, capped once — the Ctrl-C/SAK path that
+puts the mgr in the "awake, about to re-sleep" state where the relay race
+opens). CONSTANT: `BUGGY_MGR_LOST_WAKE` (the mgr's go-to-sleep as a
+hand-rolled check-then-sleep instead of register-then-observe).
+
+| Config | Flags | Checked | Result | Distinct |
+|---|---|---|---|---|
+| `cons_poll.cfg`                 | `BUGGY_MGR_LOST_WAKE=FALSE` | `Invariants` | clean | 31 |
+| `cons_poll_liveness.cfg`        | `Spec_Live`, all FALSE      | `PollerEventuallyServed` | clean | 31 |
+| `cons_poll_buggy_lost_wake.cfg` | `BUGGY_MGR_LOST_WAKE`       | `NoMissedConsPoll` | violation (depth 9) | — |
+
+Spec action ↔ impl mapping: **filled at LS-8a** — the intended map is
+`kernel/cons.c::cons_rx_input` = `DataArrives`; `console_mgr_main` =
+`MgrDrainWalk` + the register-then-observe `MgrSleep`; the `.poll` impl on
+devcons/devdev = `PollerRegister`; `poll_waiter_list_wake` from the mgr =
+the walk inside `MgrDrainWalk`; the `g_cons_mgr_rendez` non-poll wakers
+(Ctrl-C/SAK) = `SpuriousWake`. The `BUGGY_MGR_LOST_WAKE` counterexample is
+the durable regression for the mgr-relay register-then-observe.
+
+cfgs run with `-deadlock`; the `Done` self-loop keeps the legitimate
+terminal state from tripping the deadlock check (the lost-wake stuck state
+is PRE-terminal, so it is still caught). See ARCH §23.5.1 + I-9.
+
 ## futex.tla — DROPPED (2026-05-23 spec-to-code suspension)
 
 Never written. The `torpor` wait-on-address primitive (Phase 6) is
@@ -746,11 +785,14 @@ Never written. The kernel notes substrate (Phase 6, sub-chunk 13a) is
 prose-validated: design + N-1..N-5 invariants in ARCH §7.6.1-§7.6.8, the
 4-round 13a audit, and the `notes.*` test suite (I-19).
 
-## pty.tla — DEFERRED (mechanism unbuilt)
+## pty.tla — DEFERRED (the PTY master/slave mechanism unbuilt; Phase 8)
 
-The PTY surface itself is not yet built (LS-8, task #952; `kernel/cons.c`
-records the deferral). Spec-or-prose validation lands with the mechanism
-(I-20 is RESERVED in ARCH §28 until then).
+The PTY *master/slave* pair (`/dev/ptmx` + `/dev/pts/<n>`, per-fd termios,
+I-20) is Phase-8; `pty.tla` lands with that server. NOTE: LS-8's
+*single-console* line discipline does NOT wait on this — its load-bearing
+invariant is I-9's deferred poll-wake, specced by `cons_poll.tla` (above),
+not I-20. `kernel/cons.c` records the master/slave deferral; I-20 is
+RESERVED in ARCH §28 until the Phase-8 server lands.
 
 ---
 

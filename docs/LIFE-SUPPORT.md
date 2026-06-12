@@ -442,17 +442,15 @@ Proc fields) + the `ls-k` LS-CI (`id` -> `uid=…`, `whoami` -> the principal,
 
 ### LS-8 — U-PTY: the line-discipline substrate [KERNEL + audit-bearing]
 
-**The depth chunk.** Everything async/raw/secure converges here. **Spec-first
-re-enabled for this surface** (`specs/pty.tla`, the ARCH 25.2 gate-9 module —
-not yet written; write it FIRST). Splittable:
+**The depth chunk.** Everything async/raw/secure converges here. **Design RESOLVED 2026-06-12** (research-collapsed; one user vote on the termios granularity; canonical statement ARCH §23.5.1). **Spec-first re-enabled for this surface** — but the LS-8 spec is **`specs/cons_poll.tla`** (the LS-8a deferred poll-wake, filed under **I-9**), NOT `pty.tla`: ARCH §28 I-20 / §23.5 reserve `pty.tla` for the Phase-8 PTY *master/slave* atomicity, which LS-8 excludes. The naming reconciles a scripture inconsistency (this section formerly said "write pty.tla FIRST"; the load-bearing LS-8 invariant is I-9's deferred wake, not I-20's master/slave). `cons_poll.tla` is TLC-green (clean + liveness + the `BUGGY_MGR_LOST_WAKE` counterexample); written FIRST (done). Splittable:
 
-- **LS-8a — pollable cons**: a `.poll` hook on `/dev/cons`. The blocker is IRQ-safety — `poll_waiter_list_wake` is not IRQ-safe (only `wakeup()` on a `Rendez` is), so the IRQ handler currently can only wake the data Rendez. Design an IRQ-safe poll-waiter wake (defer to the `console_mgr` kthread, or a poll-on-Rendez bridge). Audit-bearing (poll wait/wake missing-wakeup, `specs/poll.tla` family). Unblocks async multi-fd poll.
-- **LS-8b — termios / consctl**: raw vs cooked, `ECHO` (real enforced password masking, supersedes LS-6's interim), `ISIG`, `ICRNL`/`ONLCR`. Via `/dev/consctl` writes or a cons ioctl. Audit-bearing (termios state machine, `specs/pty.tla`).
+- **LS-8a — pollable cons (the deferred poll-wake).** A `.poll` hook on `/dev/cons`. The blocker was IRQ-safety: `poll_waiter_list_wake` is not IRQ-safe (a plain non-irqsave lock + a nested `wakeup`); only `wakeup()` on a `Rendez` is. **Resolved: defer to the `console_mgr` kthread** (Linux's tty `flush_to_ldisc` model — NOT lock-widening `poll_waiter_list_wake`, which would widen IRQ-off windows across every pipe/notes producer for a console-only need). The RX IRQ sets `poll_wake_pending` under `g_cons.lock` + wakes `g_cons_mgr_rendez`; `console_mgr` drains it + walks the hook list in process context. Audit-bearing (the I-9 deferred wake; `cons_poll.tla` is the gate). Unblocks async multi-fd poll.
+- **LS-8b — termios / consctl (B, fine-grained).** The kernel-side line discipline (cooking in the cons layer — kernel-owned for the I-27 trusted path, NOT a userspace `consd`), toggled by stty-style `/dev/consctl` writes — **not a cons ioctl** (Thylacine has no ioctl; Plan 9 lineage + the modern capability-microkernel SOTA both use a control channel, not ioctl). **Five independent flags** (granularity B, user-voted 2026-06-12 over the Plan 9 coarse `rawon/rawoff`): `ICANON`, `ECHO` (the enforced password mask, a hard kernel guarantee — supersedes LS-6's interim), `ISIG` (Ctrl-C → the `interrupt` note vs a `0x03` byte), `ICRNL`, `ONLCR`. Independent bits make cbreak representable + the Phase-8 Pouch `tcsetattr` mapping 1:1. Accepted cost: icrnl/onlcr-independence + cbreak have no native v1.0 consumer (unit-tested; driven when Pouch lands). Audit-bearing (the termios state machine; prose + unit-tested per the suspension).
 - **LS-8c — the shell multi-fd poll loop**: `ut` polls cons + the notes fd simultaneously -> async `[N]+ Done` while idle + reactive Ctrl-C mid-edit. Userspace, rides LS-8a.
 
 Deferred to **Phase 8** (beyond LS): process groups + controlling terminal +
 Ctrl-Z (stopped thread state) + SIGWINCH + `/dev/ptmx`+`/dev/pts` -> full job
-control + helix/nora/bash via Pouch.
+control + helix/nora/bash via Pouch. (That is I-20 / `pty.tla`.)
 
 ### LS-test — Arc-close cumulative interactive workflow probe
 
