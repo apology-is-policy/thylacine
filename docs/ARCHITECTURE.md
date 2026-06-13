@@ -1031,11 +1031,16 @@ target (the EEVDF lift). What v1.0 DOES guarantee:
   closes it: a same-CPU wake sets `need_resched` when the wakee outranks the
   current thread (a CPU running its idle yields to any real wake; a strictly-
   higher band always preempts; same band stays EEVDF-fair). It is consumed at the
-  next preempt point -- `preempt_check_irq` after every IRQ AND, since RW-11, at
-  the *syscall-return tail* (the SOTA return-to-user preempt point; Linux/seL4/
-  Fuchsia all do it) so a wake during a syscall yields as the waker returns to
-  EL0, not at the next tick. The cross-CPU analog (`need_resched` on the target +
-  a kick) is the #866 F1 half.
+  next preempt point -- `preempt_check_irq` after every IRQ + the timer tick.
+  (A *syscall-return-tail* preempt point shipped in RW-11 SA-1b but was REMOVED in
+  #104: a `preempt_check_irq` from inside the C exception handler let a RUNNING
+  thread be preempted -> RUNNABLE -> stolen + resumed mid-handler on a peer CPU,
+  which reliably leaked a per-CPU run-queue lock under SMP -- `sched()` spun
+  forever on QEMU TCG `-smp 4` through stratumd's mount IRQ-wait. The vector-level
+  IRQ-return preempt -- a *clean* saved frame -- does the same yield without the
+  hazard, so the wake-set `need_resched` is consumed there + at the tick, <=1 ms.
+  A safe syscall-return preempt + the exact handoff-race root cause are owed.) The
+  cross-CPU analog (`need_resched` on the target + a kick) is the #866 F1 half.
 - **Cross-band starvation is NOT bounded** (see 8.3): bands are strict fixed
   priority with no cross-band aging at v1.0, so a CPU-bound INTERACTIVE thread
   starves NORMAL on its CPU. The realized INTERACTIVE set is deliberately narrow

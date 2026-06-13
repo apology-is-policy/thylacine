@@ -645,12 +645,20 @@ protocol / I-8 / I-21.
   `need_resched` (the half that was missing). Verified by
   `scheduler.wake_preempt_same_cpu` (an INTERACTIVE wake sets the flag; a NORMAL
   wake does not).
-- **The syscall-return preempt point** (`arch/arm64/exception.c`, the SVC tail)
-  consumes a wake-set `need_resched` as the waker returns to EL0 — so a wake
-  during a syscall (a pipe reader, a 9P reply, a torpor wake) yields promptly,
-  not at the next tick. Symmetric with the IRQ-return paths (`vectors.S` already
-  `bl preempt_check_irq`); ordered preempt-then-die-check so the I-24 die-check
-  stays the freshest exit gate.
+- **The syscall-return preempt point was REMOVED (#104 — it deadlocked SMP).**
+  As shipped in RW-11 SA-1b it `bl preempt_check_irq`'d at the SVC tail to consume
+  a wake-set `need_resched` as the waker returned to EL0. But that call preempts a
+  RUNNING thread from *inside* the C exception handler (`exception_sync_lower_el`,
+  mid-exception between `halls_enter/leave_frame`): the thread goes RUNNABLE, is
+  stolen by a peer CPU, and resumes mid-handler there — which reliably leaks a
+  per-CPU run-queue lock (`sched()` then spins forever acquiring `cs->lock`;
+  reproduced 100% on QEMU TCG `-smp 4` through stratumd's mount IRQ-wait load).
+  The vector-level IRQ-return preempt (`vectors.S`, a *clean* saved frame) does
+  the same RUNNING→RUNNABLE→steal and does NOT deadlock, so a wake-set
+  `need_resched` is consumed there + at the timer tick (≤1 ms) instead. The
+  wake-preempt DECISION above is RETAINED — only the immediate syscall-return
+  consumption is deferred. Owed: a safe syscall-return preempt + the exact
+  mid-handler steal/handoff-race root cause (a spec-modeled SMP follow-up).
 - **`void sched_mark_interactive(struct Thread *t)`** realizes the INTERACTIVE
   band (ARCH §8.3): a USER thread blocking in `kobj_irq_wait` (a device-IRQ
   driver) or `devcons_read` (the console session reader) is promoted
