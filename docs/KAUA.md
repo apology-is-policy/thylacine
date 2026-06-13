@@ -414,7 +414,7 @@ audit-bearing, the rest is pure userspace:
 | **T-2 — widgets + layout + event** | `layout` (Rect split), `widget` (the trait + Text/Block/List/StatusLine), `event` (KeyEvent + the `EventSource` seam + `PollSource`). |
 | **T-3 — nora** | `usr/nora`: the modal core (from `editor.rs`) + `nora::buffer` (the native text engine) + standalone file I/O, on Kaua. |
 | **T-4 — the ut dance + integration** | `Repl::console_raw`/`console_cooked` + the `is_raw_command` spawn path + the restore-on-exit backstop (`stmt.rs`); the `ls-7` LS-CI E2E (open a file, edit, save, `cat` shows the edit). *Audit-bearing* (the dance touches I-27). |
-| **audit** | one focused Opus-4.8-max round over T-1's backend + T-4's dance (the I-27 surface) + a self-audit; the buffer/widget layers are covered by unit tests. |
+| **audit** | one focused round via the holotype-reviewer agent (Fable on max, Opus fallback) over T-1's backend + T-4's dance (the I-27 surface) + a self-audit; the buffer/widget layers are covered by unit tests. |
 
 **Test posture**: the buffer/widget/layout/event layers are pure and unit-tested
 (cell-diff correctness, layout splits, the input-parser truth table, the editor
