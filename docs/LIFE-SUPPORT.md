@@ -374,16 +374,44 @@ the capability). No hand-rolled echo interim was needed. Tests: the kernel
 the seeded `do_login_e2e` boot-log witness `login: consctl ok` + the `ls-6` LS-CI
 (username echoes; password masked).
 
-### LS-7 — A minimal native editor
+### LS-7 — `nora`, on the `Kaua` console-TUI substrate [scripture SIGNED OFF 2026-06-13; canonical: `docs/KAUA.md`]
 
-**Userspace** (~300 LOC, native libthyla-rs). A small editor so a human can edit
-an existing file interactively without U-PTY. Wrap `libutopia::line_editor`
-(battle-tested: UTF-8, history, multi-line) in a load -> edit-buffer -> save
-loop. Line-mode (`ed`-style) OR a simple full-screen editor that works in the
-cooked-ish v1.0 console (no raw mode needed). Full editors (helix via Pouch,
-`nora` native ratatui-fork) need U-PTY raw mode -> deferred. Name it
-thematically. Tests: LS-CI (open a file, edit a line, save, `cat` shows the
-edit).
+**Reshaped (2026-06-13, user-directed).** The original "minimal cooked editor /
+deferred raw `nora`" plan is superseded: U-PTY (LS-8) *landed* — pollable cons
+(LS-8a) + termios/`consctl` (LS-8b) — and the #94-B-b dance shipped the
+controlling-terminal model, so a **full-screen, raw-mode** editor is now
+buildable. And rather than a one-off editor, the user voted to build the editor's
+substrate **once, well, as a reusable native TUI library** (`Kaua`), since
+building `nora` properly already forces ~90% of one.
+
+**`Kaua`** (`usr/lib/kaua`, native libthyla-rs) is a console TUI substrate — an
+immediate-mode + double-buffered cell-diff library (the ratatui *model*, brought
+native) over `/dev/cons` + `/dev/consctl`, themed with the committed *Bonfire*
+palette (`UTOPIA-VISUAL.md`). It is the **text** member of the weave family
+(`Loom` instrument → `Tapestry` graphics weave → Kaua text presentation), named
+for the Kauaʻi ʻōʻō (the last of family Mohoidae); it stands *outside* the
+Loom-woven names because a v1.0 console has no verified need for Loom (the
+console is not 9P-backed; perf is human-speed; LS-8c poll suffices) — its event
+loop is left behind a seam so it *can* move onto Loom later, at which point the
+reserved name `Weft` is earned. Full rationale + architecture: **`docs/KAUA.md`**.
+
+**`nora`** (`usr/nora`) is Kaua's first consumer: a modal full-screen editor
+whose modal logic is adapted ~1:1 from Stratum's `tui/src/editor.rs`
+(vim/helix-style Normal/Insert/Visual/Command) on a native text-buffer engine,
+with standalone file open/`:w`-save + a few fitting extras (line numbers, `/`
+search, `:e`). The **ut raw-mode dance** (ut, which owns the consctl fd since
+#94-B-b, sets raw before spawning a TUI child via `Repl::console_raw` and
+restores cooked + the screen on the child's exit/death — the crash backstop) is
+the I-27-preserving LS-7 half; `nora` never holds consctl and is never
+console-attached.
+
+**Arc** (KAUA.md §9): T-0 scripture (this; `docs/KAUA.md` + ARCH §23.12/§25.4 +
+this section + memory; no code) → T-1 Kaua core (buffer + cons/consctl backend) →
+T-2 widgets/layout/event → T-3 nora → T-4 the ut dance + the `ls-7` LS-CI → one
+focused Opus-4.8-max audit over the backend + dance (the I-27 surface). No new
+ARCH §28 invariant (consumes I-27 + I-9 + the LS-8b consctl mechanism). Tests:
+the pure layers unit-tested without a terminal; the `ls-7` LS-CI (open a file,
+edit, save, `cat` shows the edit).
 
 ### LS-K — Kernel introspection syscalls (id / whoami / date) [done; KERNEL + audit-light; scripture ARCH §22.6]
 
