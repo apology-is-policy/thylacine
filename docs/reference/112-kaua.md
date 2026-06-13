@@ -3,11 +3,16 @@
 **Status:** as-built through **T-2** (the core + the widget/layout/event-source
 layer); Kaua itself is unchanged since. Its first consumer, the **`nora`**
 editor, landed at **T-3** and proves the substrate against a real full-screen
-app (`docs/reference/113-nora.md`). The `ut` raw-mode dance + the `ls-7` LS-CI
-is **T-4**; the focused I-27 audit (the Kaua backend + the dance) is the arc's
-close. Design scripture: `docs/KAUA.md` (binding); this is the as-built
-complement. Audit-trigger row: ARCH §25.4 / CLAUDE.md ("Kaua console-TUI
-substrate").
+app (`docs/reference/113-nora.md`). The `ut` raw-mode dance landed at **T-4**
+(@77386f7), and the focused I-27 audit (the Kaua backend + the dance) is
+**closed** — Opus-4.8-max, 0 P0 / 0 P1 / 0 P2 / 3 P3: I-27 preserved (the dance
+spawns the child with fd_list `[0,1,2]` only, never re-forwarding consctl or
+conferring console-attach), the restore-on-every-exit backstop is complete on
+the dance path, and the VT input parser is memory-safe (O(1) state, CSI-overflow
+latch, total `feed`); the 3 P3 robustness notes (incl. a `>256`-byte-paste
+split-sequence mis-key) are tracked #106. Design scripture: `docs/KAUA.md`
+(binding); this is the as-built complement. Audit-trigger row: ARCH §25.4 /
+CLAUDE.md ("Kaua console-TUI substrate").
 
 ## Purpose
 

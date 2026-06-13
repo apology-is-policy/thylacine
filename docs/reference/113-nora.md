@@ -1,11 +1,22 @@
 # 113 — nora, the native modal editor (`usr/nora`)
 
-**Status:** as-built through **T-3** (the editor — engine + modal core +
-renderer + binary). `nora` is the first consumer of the Kaua console-TUI
-substrate (`docs/reference/112-kaua.md`); it proves the substrate by being a
-real full-screen application. The `ut` raw-mode dance that launches it + the
-`ls-7` LS-CI is **T-4**; the focused I-27 audit (the Kaua backend + the dance)
-is the arc's close. Design scripture: `docs/KAUA.md` §3/§9 (binding).
+**Status:** as-built through **T-4** (the editor + the `ut` raw-mode dance that
+launches it, committed @77386f7). `nora` is the first consumer of the Kaua
+console-TUI substrate (`docs/reference/112-kaua.md`); it proves the substrate by
+being a real full-screen application. The focused I-27 audit (the Kaua backend +
+the dance) is **closed** (Opus-4.8-max, 0 P0 / 0 P1 / 0 P2 / 3 P3 robustness
+notes, tracked #106). The live `ls-7` LS-CI run is **owed** — the interactive
+harness can't reach a login shell yet (a TCG stratumd-mount regression #104; an
+HVF PTY-exit #105), both pre-existing infra unrelated to the editor; the kernel
+poll path `nora` takes is proven deterministically by
+`poll.cons_deferred_block_then_wake` (b7b14d3). Design scripture: `docs/KAUA.md`
+§3/§9 (binding).
+
+**Known caveats** (T-4 audit P3, tracked #106): a `>256`-byte paste containing
+escape sequences can mis-key at a console read boundary (the input parser flushes
+per read; benign for interactive typing — never UB). Launching a raw child
+without a forwarded `consctl` fd (a non-login `ut`) degrades to best-effort
+screen restore.
 
 ## Purpose
 

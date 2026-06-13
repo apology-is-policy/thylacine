@@ -734,39 +734,46 @@ happy-path of this sub-chunk's test. The override lands as a
 defensive measure for future pouch programs that DO assert/abort
 on the mount path.
 
-### Joey reap workaround
+### Joey waits on a deterministic readiness handshake
 
-The original `joey/joey.c` failure-branch `t_wait_pid` blocked
-unconditionally, which deadlocked if stratumd was alive doing
-slow mount work. The workaround restructures the retry loop +
-failure branch:
+**As-built (Thylacine `joey.c` 9e0d00d + Stratum `serve.c` 997339e).**
+The ORIGINAL joey waited for stratumd's `/srv/stratum-fs` bind with a
+fixed-count `t_open`/`t_srv_connect` retry loop (600 -> 6000 retries x
+~1 ms) -- a wall-clock GUESS at how long stratumd's crypto-heavy
+`stm_fs_mount` takes. Fast enough under HVF; under TCG emulation the
+guess raced a HEALTHY stratumd and FATAL'd it mid-mount. A boot must be
+deterministic and oblivious to host speed, so joey now waits on an EVENT,
+not a duration:
 
-- **6000 retries** (up from 600) of `t_srv_connect(srv_name, ...)`.
-  Gives stratumd time to complete mount.
-- **Per-retry non-blocking pipe drain**: each retry calls
-  `t_poll(sd_rd, timeout=0)` and reads available bytes into the
-  boot log via `t_puts`. Keeps the pipe buffer from filling and
-  blocking stratumd's stderr writes.
-- **Failure-branch bounded drain**: 200 iter x 10 ms poll to
-  capture any final diagnostic msg before reap.
-- **Failure-branch wait_pid**: after the drain, reap stratumd
-  to prevent the unreparented-zombie / kproc-wait_pid `wrong pid`
-  extinction race. The race: if stratumd exits before
-  joey-userspace, the zombie reparents to kproc on joey-userspace's
-  exit; kproc-joey_run's `wait_pid` is unfiltered (returns any
-  zombie child) so it can return stratumd's pid instead of
-  joey-userspace's pid, triggering the `wrong pid` extinction in
-  `kernel/joey.c:204`. With this reap in place, stratumd's zombie
-  is collected by joey-userspace before joey-userspace exits.
+- stratumd emits a single `stratumd: bound and ready` line to its
+  stdout/stderr (== joey's pipe) the instant every fallible step has
+  succeeded -- FS mounted, listen socket bound + posted to `/srv`, `/ctl`
+  up, workers spawned -- right before `stm_stratumd_accept_loop`
+  (Stratum `stm_stratumd_run`). The earlier `serving` line in `run.c` is
+  printed BEFORE the mount/bind and is OPTIMISTIC -- it is NOT the signal.
+- joey **blocks** reading the pipe until it sees that token (-> proceed
+  via one `t_open`, now guaranteed) OR until EOF. joey already dropped
+  its own wr ref after the spawn, so EOF == stratumd's last wr ref
+  dropped == stratumd died before readiness (-> FATAL). The blocking read
+  also drains the pipe, so stratumd never stalls on a full stderr buffer.
+- No timer anywhere; the LS-CI 180 s boot timeout is the only outer
+  backstop, for a stratumd that hangs ALIVE without ever signaling (a
+  stratumd bug, not a host-speed race).
 
-The 6000-retry + per-retry drain pair are coupled: without the
-drain, stratumd's stderr writes would block once the pipe buffer
-fills (typically after a few hundred bytes); without the bumped
-retry count, joey times out before mount completes.
+The FAILURE branch (EOF == death) keeps the bounded stderr drain + the
+reap discipline: it drains any final diagnostic, then `wait_pid`s
+stratumd to prevent the unreparented-zombie / kproc-`wait_pid` `wrong
+pid` extinction race (if stratumd exits before joey-userspace, the zombie
+reparents to kproc, whose unfiltered `wait_pid` could return stratumd's
+pid instead of joey-userspace's -> the `wrong pid` extinction in
+`kernel/joey.c`). With the reap in place, stratumd's zombie is collected
+before joey-userspace exits.
 
-This is the v1.0 stratumd-boot probe shape. The probe will be
-revisited when the joey-probe-flips-FATAL flip lands (queued for
-the next sub-chunk after the downstream mount path is fixed).
+> **Known issue (#104):** under TCG, `stm_fs_mount` no longer completes
+> in practical time -- a regression (emulation booted with Stratum ~1
+> week prior). The handshake EXPOSES it (joey blocks; the old retry
+> budget MASKED it by FATAL-ing early); prime suspect Stratum `bf0cde0`
+> (the `bdev_thylacine` latch-on-error). HVF mounts fine.
 
 ### What works end-to-end this checkpoint
 
