@@ -1,0 +1,23 @@
+# kaua -- the native console TUI substrate (LS-7; docs/KAUA.md).
+#
+# The text member of the weave family (Loom -> Tapestry graphics weave ->
+# Kaua text weave); named for the Kaua'i 'o'o, the last of family Mohoidae.
+# Immediate-mode + double-buffered cell-diff (the ratatui model brought
+# native) over /dev/cons + /dev/consctl, themed with Bonfire
+# (docs/UTOPIA-VISUAL.md). First consumer: usr/nora.
+#
+# T-1a (this) is the pure cell-buffer foundation -- style/rect/buffer, zero
+# deps, host-testable (`cargo test --target <host>`). The cons/consctl
+# backend (kaua::term, T-1b) adds the libthyla-rs dependency + is the only
+# no_std/audit-bearing layer.
+
+[package]
+name = "kaua"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lib]
+name = "kaua"
+path = "src/lib.rs"
