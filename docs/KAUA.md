@@ -412,7 +412,7 @@ audit-bearing, the rest is pure userspace:
 | **T-0 — scripture** (this doc) | `docs/KAUA.md` + ARCH §23.12 pointer + §25.4 audit row + LIFE-SUPPORT LS-7 reconciliation + memory. No code. |
 | **T-1 — the core** | `usr/lib/kaua` `buffer` (Cell/Style/Buffer/diff) + `term` (cons/consctl backend: input parse, escape emit, the double-buffer `Terminal`). Hello-world: a styled bordered box + text, flicker-free. *Audit-bearing* (the backend; but no dance yet — driven by a test harness). |
 | **T-2 — widgets + layout + event** | `layout` (Rect split), `widget` (the trait + Text/Block/List/StatusLine), `event` (KeyEvent + the `EventSource` seam + `PollSource`). |
-| **T-3 — nora** | `usr/nora`: the modal core (from `editor.rs`) + `nora::buffer` (the native text engine) + standalone file I/O, on Kaua. |
+| **T-3 — nora** | `usr/nora`: the modal core (`editor`, from `editor.rs`) + `nora::text` (the native text engine, replacing tui-textarea) + `view` (the renderer) + standalone file I/O, on Kaua. **Landed** -- 41 host tests; `docs/reference/113-nora.md`. |
 | **T-4 — the ut dance + integration** | `Repl::console_raw`/`console_cooked` + the `is_raw_command` spawn path + the restore-on-exit backstop (`stmt.rs`); the `ls-7` LS-CI E2E (open a file, edit, save, `cat` shows the edit). *Audit-bearing* (the dance touches I-27). |
 | **audit** | one focused Opus-4.8-max round over T-1's backend + T-4's dance (the I-27 surface) + a self-audit; the buffer/widget layers are covered by unit tests. |
 
@@ -472,7 +472,7 @@ from the aux `libtapestry` POC, which is the *graphics* weave (Tapestry,
 | T-0 scripture | this doc (SIGNED OFF 2026-06-13) |
 | T-1 core | **landed** -- `style`/`rect`/`buffer`/`event`/`input`/`encode` (pure, host-tested) + `term` (the cons backend); `docs/reference/112-kaua.md` |
 | T-2 widgets + layout + event-source | **landed** -- `layout`/`widget`/`source` + `Event` (pure layers host-tested; `source` is the backend input half + the Loom seam); input split out of `term` into `source`; `docs/reference/112-kaua.md` |
-| T-3 nora | not started |
+| T-3 nora | **landed** -- `text` (engine) + `editor` (modal core) + `view` (renderer) + the binary (Kaua backend + file I/O); 41 host tests; `docs/reference/113-nora.md` |
 | T-4 dance + LS-CI | not started |
 | audit | not started |
 

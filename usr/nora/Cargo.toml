@@ -1,0 +1,42 @@
+# nora -- a native modal text editor on Kaua (LS-7; docs/KAUA.md).
+#
+# First consumer of the Kaua console-TUI substrate. A library half (the pure,
+# host-testable editor engine: text / editor / view / theme) plus a binary half
+# (src/main.rs: the Kaua backend + file I/O), split exactly as kaua splits its
+# pure layers from its `backend`. The lib uses only kaua's pure layers; the bin
+# uses kaua's backend (Terminal + PollSource) + libthyla-rs, behind the
+# `backend` feature.
+#
+# Per the Plan 9 native-vs-ported split (ARCHITECTURE.md 3.5): nora is a native
+# libthyla-rs binary, like `ut`. NO musl, NO Pouch.
+#
+# Build (device):  cargo build -p nora            (backend on -> bin compiles)
+# Host-test (lib): cargo test -p nora --no-default-features --lib \
+#                       --target <host-triple>    (libthyla-rs is aarch64-only,
+#                                                  so drop backend + scope --lib)
+
+[package]
+name = "nora"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lib]
+name = "nora"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nora"
+path = "src/main.rs"
+
+[features]
+# `backend` pulls kaua's fd-0/1 layers (Terminal + PollSource) + libthyla-rs --
+# everything the binary needs. On by default for the device build; host tests of
+# the pure engine drop it (and scope to --lib so the bin is not compiled).
+default = ["backend"]
+backend = ["kaua/backend", "dep:libthyla-rs"]
+
+[dependencies]
+kaua = { path = "../lib/kaua", default-features = false }
+libthyla-rs = { path = "../lib/libthyla-rs", optional = true }

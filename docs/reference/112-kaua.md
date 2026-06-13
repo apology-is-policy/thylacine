@@ -1,10 +1,13 @@
 # 112 — Kaua, the native console TUI substrate (`usr/lib/kaua`)
 
 **Status:** as-built through **T-2** (the core + the widget/layout/event-source
-layer). The `nora` editor is **T-3**; the `ut` raw-mode dance + the `ls-7`
-LS-CI is **T-4**; the focused I-27 audit is the arc's close. Design scripture:
-`docs/KAUA.md` (binding); this is the as-built complement. Audit-trigger row:
-ARCH §25.4 / CLAUDE.md ("Kaua console-TUI substrate").
+layer); Kaua itself is unchanged since. Its first consumer, the **`nora`**
+editor, landed at **T-3** and proves the substrate against a real full-screen
+app (`docs/reference/113-nora.md`). The `ut` raw-mode dance + the `ls-7` LS-CI
+is **T-4**; the focused I-27 audit (the Kaua backend + the dance) is the arc's
+close. Design scripture: `docs/KAUA.md` (binding); this is the as-built
+complement. Audit-trigger row: ARCH §25.4 / CLAUDE.md ("Kaua console-TUI
+substrate").
 
 ## Purpose
 
@@ -386,8 +389,8 @@ thin glue over the host-tested pure layers and are validated end-to-end by the
 | Item | State |
 |---|---|
 | T-1 core | landed — `style`/`rect`/`buffer`/`event`/`input`/`encode` + `term` |
-| T-2 widgets + layout + event-source (this) | landed — `layout`/`widget`/`source` + `Event`; input split out of `term` into `source` |
-| T-3 `nora` | not started |
+| T-2 widgets + layout + event-source | landed — `layout`/`widget`/`source` + `Event`; input split out of `term` into `source` |
+| T-3 `nora` (first consumer; `113-nora.md`) | landed — proves the substrate; no change to Kaua itself |
 | T-4 ut dance + `ls-7` LS-CI | not started |
 | audit | not started |
 
