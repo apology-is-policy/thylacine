@@ -329,16 +329,6 @@ void notes_deliver_at_el0_return(struct exception_context *ctx);
 // IRQ-from-EL0 tail (vectors.S 0x480 -> bl el0_return_die_check).
 void el0_return_die_check(void);
 
-// RW-11 SA-1b: the EL0-return preempt point (defined in kernel/sched.c). A wake
-// during a syscall (a pipe reader, a 9P reply, a torpor wake) sets need_resched
-// but, without this, it is consumed only at the NEXT timer tick -- up to ~1 ms.
-// Consuming it HERE, at the syscall-return tail, yields to the woken thread as
-// the waker returns to EL0 (the SOTA return-to-user preempt point; Linux/seL4/
-// Fuchsia all do it). Symmetric with the IRQ-return paths (vectors.S already
-// `bl preempt_check_irq` there). Cheap fast-path: an internal need_resched check
-// returns immediately when nothing is pending.
-void preempt_check_irq(void);
-
 static void exception_sync_lower_el_impl(struct exception_context *ctx) {
     u64 esr = ctx->esr;
     u64 far = ctx->far;
@@ -407,22 +397,28 @@ static void exception_sync_lower_el_impl(struct exception_context *ctx) {
         // pick another thread). All other syscalls return normally;
         // vectors.S ERETs to EL0 with the result in x0.
         syscall_dispatch(ctx);
-        // EL0-return tail. Order mirrors the IRQ-from-EL0 path (vectors.S
-        // 0x480: preempt_check_irq THEN die-check):
-        //   1. RW-11 SA-1b: consume a wake-set need_resched -- yield to a
-        //      higher-band thread this syscall just woke (a pipe reader, a 9P
-        //      reply) before we return to EL0, rather than at the next tick.
-        //      If it switches away and resumes, the die-check below is the
-        //      FRESHEST exit gate (a Proc that group-terminated while we were
-        //      descheduled is caught here, not after an EL0 round trip) -- so
-        //      preempt MUST precede die-check (I-24).
-        //   2. I-24: a woken torpor_wait, or any syscall returning while this
+        // EL0-return tail.
+        //   1. I-24: a woken torpor_wait, or any syscall returning while this
         //      Proc is group-terminating (SYS_EXIT_GROUP / kill), self-exits
         //      here (noreturn) before resuming userspace.
-        //   3. P6-pouch-signals: after regs[0] is written, deliver a pending
+        //   2. P6-pouch-signals: after regs[0] is written, deliver a pending
         //      note by rewriting ctx to the registered handler (the async
         //      path; the fd-read path consumes queued notes independently).
-        preempt_check_irq();
+        //
+        // NO syscall-return preempt point here (#104). The RW-11 SA-1b wake-
+        // preemption decision is RETAINED (ready_on still sets need_resched on a
+        // higher-band wake), but it is consumed at the vector-level IRQ-return
+        // preempt (vectors.S) + the timer tick -- NOT here. A preempt_check_irq()
+        // at this site preempts a RUNNING thread from INSIDE this C handler
+        // (mid-exception, between halls_enter/leave_frame): the thread goes
+        // RUNNABLE, is stolen by a peer CPU, and resumes mid-handler there --
+        // which under SMP reliably leaks a per-CPU run-queue lock (sched() then
+        // spins forever acquiring cs->lock; reproduced 100% on QEMU TCG -smp4
+        // through the stratumd-mount IRQ-wait load). The vector-level IRQ-return
+        // preempt preempts at a CLEAN saved frame and does not, so wake-preemption
+        // keeps its <=1ms-to-next-tick latency without the mid-handler hazard.
+        // Re-adding a safe syscall-return preempt + the exact handoff-race root
+        // cause are owed (spec-modeled SMP follow-up).
         el0_return_die_check();
         notes_deliver_at_el0_return(ctx);
         return;
