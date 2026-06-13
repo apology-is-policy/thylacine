@@ -6,10 +6,14 @@
 # native) over /dev/cons + /dev/consctl, themed with Bonfire
 # (docs/UTOPIA-VISUAL.md). First consumer: usr/nora.
 #
-# T-1a (this) is the pure cell-buffer foundation -- style/rect/buffer, zero
-# deps, host-testable (`cargo test --target <host>`). The cons/consctl
-# backend (kaua::term, T-1b) adds the libthyla-rs dependency + is the only
-# no_std/audit-bearing layer.
+# T-1a was the pure cell-buffer foundation (style/rect/buffer). T-1b adds the
+# pure event/input/encode layers (still host-testable) + the cons backend
+# (kaua::term), the only libthyla-rs + audit-bearing layer, behind the
+# `backend` feature.
+#
+# Build (device): `cargo build -p kaua` (default features -> term compiled).
+# Host tests (pure layers): `cargo test -p kaua --no-default-features
+#   --target <host-triple>` (libthyla-rs does not build on the host).
 
 [package]
 name = "kaua"
@@ -21,3 +25,12 @@ license.workspace = true
 [lib]
 name = "kaua"
 path = "src/lib.rs"
+
+[features]
+# `backend` compiles kaua::term (the fd-0/1 Terminal), which needs libthyla-rs.
+# On by default for the device build; host tests drop it.
+default = ["backend"]
+backend = ["dep:libthyla-rs"]
+
+[dependencies]
+libthyla-rs = { path = "../libthyla-rs", optional = true }

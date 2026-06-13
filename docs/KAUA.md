@@ -470,7 +470,7 @@ from the aux `libtapestry` POC, which is the *graphics* weave (Tapestry,
 | Item | State |
 |---|---|
 | T-0 scripture | this doc (SIGNED OFF 2026-06-13) |
-| T-1 core | not started |
+| T-1 core | **landed** -- `style`/`rect`/`buffer`/`event`/`input`/`encode` (pure, host-tested) + `term` (the cons backend); `docs/reference/112-kaua.md` |
 | T-2 widgets | not started |
 | T-3 nora | not started |
 | T-4 dance + LS-CI | not started |

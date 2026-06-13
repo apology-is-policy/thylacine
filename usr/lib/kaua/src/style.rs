@@ -6,16 +6,11 @@
 
 /// A cell colour. `Reset` is the terminal's default; `Rgb` is truecolor,
 /// emitted as an SGR `38;2;r;g;b` (fg) / `48;2;r;g;b` (bg) sequence.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Color {
+    #[default]
     Reset,
     Rgb(u8, u8, u8),
-}
-
-impl Default for Color {
-    fn default() -> Self {
-        Color::Reset
-    }
 }
 
 /// Text attributes as an OR-able bitset; the backend emits the matching SGR.
