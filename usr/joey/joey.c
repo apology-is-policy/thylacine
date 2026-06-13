@@ -2710,53 +2710,61 @@ int main(void) {
         // t_attach_9p_srv (retargeted to KOBJ_SPOOR) wraps below.
         static const char srv_path[] = "/srv/stratum-fs";
         long sd_srv_fd = -1;
-        // 16c: between retries joey sleeps on torpor with a 1 ms timeout
-        // (a never-woken local-stack u32 + expected-value 0). This
-        // (a) yields the vCPU back to the scheduler so stratumd's worker
-        // threads make progress instead of fighting joey's busy-spin under
-        // QEMU TCG emulation; (b) gives a real, kernel-timed pacing that
-        // is consistent across hosts. Pre-fix joey ran a 1 M-nop volatile
-        // loop per retry which clocked ~30 ms wall under TCG (so 170
-        // retries -> ~5.1 s wall, while real work would be sub-second).
-        // 3000 retries * 1 ms = ~3 s outer bound; typical bind observed
-        // well under retry 500 with the yielding pattern.
-        // R1 F12 close: this is a sleep-only sentinel for torpor_wait's
-        // wait-on-address contract; not a signaling word. The pacer name
-        // documents intent so a future grepper doesn't confuse it with
-        // an actual sync primitive. Never read by t_torpor_wake; the
-        // wait always times out after 1 ms and the retry loops.
-        unsigned int joey_retry_pacer_dummy = 0;
-        for (int i = 0; i < 3000; i++) {
+        // Deterministic boot-readiness handshake. This REPLACES a wall-clock
+        // retry budget that polled /srv with a fixed iteration count -- which
+        // was really a GUESS at how long stratumd's crypto-heavy mount takes:
+        // fast enough on HVF, but under TCG emulation the guess raced a HEALTHY
+        // stratumd and FATAL'd it mid-mount. A boot must be deterministic and
+        // oblivious to host speed (M-series HVF or a potato), so joey waits on
+        // an EVENT, never a duration.
+        //
+        // stratumd emits ONE readiness line to its stdout/stderr (== this pipe)
+        // the instant every fallible step has succeeded -- FS mounted, listen
+        // socket bound + posted to /srv, /ctl up, workers spawned -- right
+        // before it enters accept(). joey BLOCKS reading the pipe until it sees
+        // that token, OR until EOF. joey already dropped its own wr ref above,
+        // so EOF means stratumd's last wr ref dropped == stratumd died before
+        // readiness. (stratumd's earlier "serving" line is OPTIMISTIC -- printed
+        // before the mount + bind -- so it is NOT the signal; "bound and ready"
+        // is the truthful post-bind one.) The blocking read also drains the
+        // pipe, so stratumd never stalls on a full buffer. The harness 180 s
+        // boot timeout is the only outer backstop, for a stratumd that hangs
+        // ALIVE without ever signaling (a stratumd bug, not a host-speed race).
+        static const char ready_token[] = "bound and ready";
+        const long rtlen = (long)sizeof(ready_token) - 1;
+        unsigned char carry[sizeof(ready_token)];   // last (rtlen-1) bytes across reads
+        long carry_len = 0;
+        int  sd_ready = 0;                           // freestanding joey: no <stdbool.h>
+        for (;;) {
+            unsigned char rd_buf[256];
+            long n = t_read(sd_rd, rd_buf, sizeof(rd_buf));
+            if (n <= 0) break;                              // EOF == stratumd died
+            (void)t_puts((const char *)rd_buf, (size_t)n);  // surface to the boot log
+            // Search (carried tail ++ this chunk) so the token is found even
+            // when it straddles a read boundary.
+            unsigned char scan[256 + sizeof(ready_token)];
+            long sl = 0;
+            for (long k = 0; k < carry_len; k++) scan[sl++] = carry[k];
+            for (long k = 0; k < n; k++)         scan[sl++] = rd_buf[k];
+            for (long i = 0; !sd_ready && i + rtlen <= sl; i++) {
+                long j = 0;
+                while (j < rtlen && scan[i + j] == (unsigned char)ready_token[j]) j++;
+                if (j == rtlen) sd_ready = 1;
+            }
+            if (sd_ready) break;
+            carry_len = (sl < rtlen - 1) ? sl : (rtlen - 1);
+            for (long k = 0; k < carry_len; k++) carry[k] = scan[sl - carry_len + k];
+        }
+        if (sd_ready) {
             sd_srv_fd = t_open(T_WALK_OPEN_FROM_ROOT, srv_path,
                                sizeof(srv_path) - 1, T_ORDWR);
-            if (sd_srv_fd >= 0) {
-                t_putstr("joey: stratumd-boot /srv/stratum-fs bound after retry ");
-                t_putstr(itoa_dec(i, buf, sizeof(buf)));
-                t_putstr(" (pool mounted via bdev_thylacine)\n");
-                break;
-            }
-            // Drain stratumd's stderr pipe each retry (non-blocking
-            // poll). Two purposes: (1) surface stratumd's diagnostics
-            // (assertion msgs, libsodium init traces, bdev errors) in
-            // the boot log; (2) keep the pipe buffer from filling --
-            // a full pipe buffer would block stratumd's next stderr
-            // write, which would in turn keep stratumd from progressing
-            // toward bind. The poll timeout of 0 makes this strictly
-            // non-blocking; an empty pipe returns immediately.
-            for (;;) {
-                struct pollfd pfd = { .fd = (int)sd_rd, .events = POLLIN, .revents = 0 };
-                long pr = t_poll(&pfd, 1, 0);
-                if (pr <= 0 || !(pfd.revents & POLLIN)) break;
-                unsigned char rd_buf[256];
-                long n = t_read(sd_rd, rd_buf, sizeof(rd_buf));
-                if (n <= 0) break;
-                (void)t_puts((const char *)rd_buf, (size_t)n);
-            }
-            (void)t_torpor_wait(&joey_retry_pacer_dummy, 0, 1000); // sleep 1 ms
+            if (sd_srv_fd >= 0)
+                t_putstr("joey: stratumd-boot /srv/stratum-fs bound + ready "
+                         "(deterministic readiness handshake)\n");
         }
 
         if (sd_srv_fd < 0) {
-            t_putstr("joey: stratumd-boot /srv/stratum-fs not bound after retries (FATAL at 16c)\n");
+            t_putstr("joey: stratumd-boot /srv/stratum-fs: stratumd died before signaling readiness (FATAL at 16c)\n");
             // Bounded-drain stratumd's stderr so any final diagnostic
             // msg lands in the boot log. No t_wait_pid here: stratumd
             // is a long-running daemon (16c+) and never zombifies, so
