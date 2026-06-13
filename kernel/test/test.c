@@ -761,6 +761,7 @@ void test_poll_timeout_zero_not_ready(void);
 void test_poll_timeout_positive_fires(void);
 void test_poll_block_then_wake_pollin(void);
 void test_poll_pollhup_on_close_write_end(void);
+void test_poll_cons_deferred_block_then_wake(void);   // #103
 void test_poll_multi_fd_one_ready(void);
 void test_poll_bad_fd_revents_pollnval(void);
 void test_poll_bad_args_rejected(void);
@@ -1880,6 +1881,7 @@ struct test_case g_tests[] = {
     { "poll.timeout_positive_fires",            test_poll_timeout_positive_fires,            false, NULL },
     { "poll.block_then_wake_pollin",            test_poll_block_then_wake_pollin,            false, NULL },
     { "poll.pollhup_on_close_write_end",        test_poll_pollhup_on_close_write_end,        false, NULL },
+    { "poll.cons_deferred_block_then_wake",     test_poll_cons_deferred_block_then_wake,     false, NULL },
     { "poll.multi_fd_one_ready",                test_poll_multi_fd_one_ready,                false, NULL },
     { "poll.bad_fd_revents_pollnval",           test_poll_bad_fd_revents_pollnval,           false, NULL },
     { "poll.bad_args_rejected",                 test_poll_bad_args_rejected,                 false, NULL },

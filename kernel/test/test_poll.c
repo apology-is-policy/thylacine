@@ -21,6 +21,7 @@
 
 #include "test.h"
 
+#include <thylacine/cons.h>
 #include <thylacine/dev.h>
 #include <thylacine/devsrv.h>
 #include <thylacine/handle.h>
@@ -40,6 +41,11 @@ extern s64 sys_poll_for_proc(struct Proc *p, struct pollfd *kfds,
 // SYS_SRV_ACCEPT syscall + the test-only registry reset.
 extern int sys_srv_accept_for_proc(struct Proc *p, hidx_t service_h);
 extern void srv_registry_reset(void);
+
+// #103: the console Dev + its IRQ-side input hook + the test drive of the
+// deferred-wake relay -- to exercise a real sys_poll_for_proc-blocked thread
+// woken through the cons deferred path (nora's exact path).
+extern struct Dev devcons;
 
 void test_poll_ready_immediately_pollin(void);
 void test_poll_ready_immediately_pollout(void);
@@ -289,6 +295,78 @@ void test_poll_pollhup_on_close_write_end(void) {
         "consumer's revents includes POLLHUP (POSIX hang-up)");
 
     thread_free(consumer);          // reap the parked poll helper (see block_then_wake)
+    drop_test_proc(p);
+}
+
+// #103 regression: a REAL sys_poll_for_proc-blocked thread woken through the
+// cons DEFERRED relay -- nora's exact path (a non-owner child blocking in poll
+// on an INHERITED /dev/cons fd, woken when a key arrives). This composes the
+// two halves the existing tests cover only SEPARATELY:
+//   - test_cons_poll_deferred_wake exercises the relay (cons_rx_input ->
+//     poll_wake_pending -> cons_service_deferred -> poll_waiter_list_wake) but
+//     against a SYNTHETIC waiter whose rendez has no sleeper (the wakeup is a
+//     no-op -- it never proves a real thread resumes);
+//   - test_poll_block_then_wake exercises a real sys_poll_for_proc-blocked
+//     thread but woken by a pipe's SYNCHRONOUS poll_waiter_list_wake.
+// Neither tests the relay reaching a genuinely-tsleep'd poller. A lost relay
+// (the #103 symptom) leaves the poller SLEEPING forever.
+void test_poll_cons_deferred_block_then_wake(void) {
+    cons_test_reset();
+    sched();                                   // settle console_mgr to SLEEPING
+
+    struct Proc *p = make_test_proc();
+    TEST_ASSERT(p != NULL, "test proc");
+
+    // A devcons Spoor handle -- the same object nora inherits as fd 0 (the
+    // inherit copies the handle; it does not re-open/re-gate). poll dispatches
+    // sp->dev->poll == devcons_poll == cons_poll, no console-attach gate.
+    struct Spoor *cs = devcons.attach(NULL);
+    TEST_ASSERT(cs != NULL, "devcons attach");
+    hidx_t hc = install_spoor(p, cs, RIGHT_READ);
+    TEST_ASSERT(hc >= 0, "cons fd installed");
+
+    g_pollee_proc  = p;
+    g_pollee_fd    = hc;
+    g_poll_result  = -999;
+    g_poll_revents = 0;
+
+    struct Thread *consumer = thread_create(kproc(), consumer_poll_forever_entry);
+    TEST_ASSERT(consumer != NULL, "thread_create");
+    ready(consumer);
+
+    // Consumer enters sys_poll_for_proc on the cons fd: cons_poll registers a
+    // waiter on g_cons.poll_list; the empty ring is not POLLIN-ready; tsleep.
+    sched();
+    TEST_EXPECT_EQ(consumer->state, THREAD_SLEEPING,
+        "consumer SLEEPING in poll on /dev/cons");
+
+    // Producer (the IRQ side): a data byte arms poll_wake_pending + wakes
+    // console_mgr -- but does NOT walk the hook list (deferred, not IRQ-safe).
+    // The real blocked poller MUST still be SLEEPING here.
+    cons_rx_input((u8)'k', false);
+    TEST_ASSERT(cons_test_pollwake_pending(), "data byte armed poll_wake_pending");
+    TEST_EXPECT_EQ(consumer->state, THREAD_SLEEPING,
+        "the IRQ producer did NOT wake the real poller (deferred)");
+
+    // The deferred relay (what console_mgr runs in process context), driven
+    // synchronously so the wake is independent of scheduler order. THIS is the
+    // #103 crux: the relay must reach the sys_poll_for_proc-blocked thread, not
+    // merely flip a synthetic flag.
+    cons_test_service_deferred();
+    TEST_EXPECT_EQ(consumer->state, THREAD_RUNNABLE,
+        "the deferred relay woke the real /dev/cons poller (the #103 assertion)");
+    TEST_ASSERT(!cons_test_pollwake_pending(), "relay consumed poll_wake_pending");
+
+    // Let the consumer resume + record. console_mgr is also RUNNABLE (the
+    // cons_rx_input wake) but re-sleeps on the now-drained cond; a bounded yield
+    // loop runs both regardless of order.
+    for (int i = 0; i < 4 && g_poll_result == -999; i++) sched();
+    TEST_EXPECT_EQ(g_poll_result, 1L, "consumer's poll returns 1");
+    TEST_EXPECT_EQ((s64)g_poll_revents, (s64)POLLIN, "consumer's revents = POLLIN");
+
+    thread_free(consumer);
+    cons_test_reset();
+    sched();                                   // re-settle console_mgr
     drop_test_proc(p);
 }
 
