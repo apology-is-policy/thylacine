@@ -81,10 +81,13 @@
 //     followed by an immediate drop of the parent-side pipe end. The
 //     child gets a (functionally inert) pipe; native binaries write via
 //     their fd 1 and don't read fd 0.
-// stdin stays Piped-drop in BOTH modes at LS-2 -- a foreground external
-// does not yet read the console (interactive child stdin is LS-5/LS-8);
-// the shell's wait loop owns fd 0. Command substitution ($(cmd)) keeps
-// its captured stdout Piped regardless (the shell reads it).
+// stdin stays Piped-drop for an ordinary foreground external -- it does not
+// read the console; the shell's wait loop owns fd 0. The ONE exception
+// (LS-7 / Kaua T-4) is a full-screen TUI child (`console::is_raw_command`,
+// e.g. nora): `exec_external_raw` hands it fd 0/1/2 via Inherit + flips the
+// console to RAW for its lifetime + restores on exit -- see `exec_external_raw`.
+// Command substitution ($(cmd)) keeps its captured stdout Piped regardless
+// (the shell reads it).
 //
 // === StatementFlow ===
 //
@@ -147,6 +150,7 @@ use libthyla_rs::poll::{PollEvents, PollSet, PollTimeout};
 use libthyla_rs::{t_putstr, t_wait_pid_for, T_WAIT_WNOHANG};
 
 use super::builtin;
+use super::console;
 use super::env::Env;
 use super::error::{EvalError, EvalErrorKind, EvalResult};
 use super::expr::eval_expr;
@@ -1199,6 +1203,19 @@ fn exec_external(
     argv: &[String],
     _span: Span,
 ) -> EvalResult<StatementFlow> {
+    // LS-7 / Kaua T-4: a full-screen TUI child (nora) needs the console in RAW
+    // mode + its OWN fd 0/1/2 (Inherit), and the shell must NOT forward Ctrl-C to
+    // it (Ctrl-C is the child's keystroke, not a terminate). The dance requires
+    // BOTH a console to inherit (stdio_inherit) AND the consctl fd to flip the
+    // discipline; a fd-less harness (neither) falls through to the normal path,
+    // where nora's Piped-drop fd 0 reads EOF and it exits at once -- a graceful
+    // degrade, never a wrong result.
+    if env.stdio_inherit && console::is_raw_command(&argv[0]) {
+        if let Some(fd) = env.consctl_fd {
+            return exec_external_raw(env, argv, fd);
+        }
+    }
+
     if env.trace_depth > 0 {
         trace_echo(argv);
     }
@@ -1241,6 +1258,75 @@ fn exec_external(
             Ok(StatementFlow::Normal)
         }
         Err(e) => {
+            let mut s = String::new();
+            let _ = write!(&mut s, "spawn failed: {:?}", e);
+            env.errstr_set(s);
+            env.status_set(127);
+            Ok(StatementFlow::Normal)
+        }
+    }
+}
+
+/// Run a full-screen TUI child (nora) under the LS-7 raw-mode dance (Kaua T-4).
+/// `consctl_fd` is the caller's already-validated `/dev/consctl` fd. Four steps:
+/// RAW the console (ISIG off -> Ctrl-C is the child's keystroke), hand it fd
+/// 0/1/2 (Inherit), wait by pid, then -- on EVERY exit path -- restore ut's
+/// PROMPT mode + re-emit the screen-restore escapes (the crash backstop). I-27:
+/// ut stays the sole consctl writer; the child never touches the discipline and
+/// is never console-attached, so the SAK / elevation gate is untouched.
+fn exec_external_raw(
+    env: &mut Env,
+    argv: &[String],
+    consctl_fd: i32,
+) -> EvalResult<StatementFlow> {
+    if env.trace_depth > 0 {
+        trace_echo(argv);
+    }
+
+    // 1. RAW the console BEFORE the spawn so the child's first read sees raw
+    //    bytes. A rejected consctl write (bad fd / pre-LS-8b kernel) still lets
+    //    the child run -- in whatever mode the console held -- a graceful degrade.
+    console::set_mode(consctl_fd, console::RAW_MODE);
+
+    let mut spawn_cmd = libthyla_rs::process::Command::new(resolve_command(&argv[0]));
+    if argv.len() > 1 {
+        spawn_cmd.args(argv[1..].iter().cloned());
+    }
+    // 2. The child gets the console on all three slots (Inherit): a TUI reads fd
+    //    0 + draws fd 1, and stderr shares the screen. This is the Piped->Inherit
+    //    switch the normal path does NOT do for stdin.
+    spawn_cmd.stdin(Stdio::Inherit);
+    spawn_cmd.stdout(Stdio::Inherit);
+    spawn_cmd.stderr(Stdio::Inherit);
+
+    match spawn_cmd.spawn() {
+        Ok(child) => {
+            // 3. A plain by-pid wait -- NOT wait_pids_interruptible. With ISIG off
+            //    the kernel posts no `interrupt` for this child (Ctrl-C is a raw
+            //    byte it reads), so there is nothing to forward; the child owns the
+            //    console until it exits. Under all-Inherit the parent holds no pipe
+            //    ends, so `child` carries nothing to close (Child::Drop does not
+            //    reap) -- reading its pid then letting it drop is clean.
+            let pid = child.pid();
+            let mut st: i32 = 0;
+            // SAFETY: SVC wrapper; &mut st is a valid writable i32. A vanished /
+            // not-our-child pid yields rc < 0 -> status 0 (matches the reap loops).
+            let rc = unsafe { t_wait_pid_for(pid, 0, &mut st as *mut i32) };
+            // 4. Restore on EVERY exit path (clean, error, OR death): ut's prompt
+            //    mode + the screen escapes. The child's own Drop emitted the same
+            //    escapes on a clean exit (idempotent); on a CRASH (panic=abort, no
+            //    Drop) this is the sole restore, so a crashed TUI never wedges the
+            //    console in the alt-screen with a raw, non-echoing discipline.
+            console::set_mode(consctl_fd, console::PROMPT_MODE);
+            console::restore_screen();
+            env.status_set(if rc < 0 { 0 } else { st });
+            Ok(StatementFlow::Normal)
+        }
+        Err(e) => {
+            // The child never spawned -> never entered the alt-screen, so only the
+            // line discipline needs restoring (we already RAW'd it); no screen
+            // escapes. Report the failure like the normal spawn-fail path.
+            console::set_mode(consctl_fd, console::PROMPT_MODE);
             let mut s = String::new();
             let _ = write!(&mut s, "spawn failed: {:?}", e);
             env.errstr_set(s);

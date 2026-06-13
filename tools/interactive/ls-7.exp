@@ -1,0 +1,91 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-7.exp -- LS-7 / Kaua T-4: the nora editor + the ut
+# raw-mode dance, over a real PTY.
+#
+# Proves the whole console-TUI path end to end -- the gap no host test can reach
+# (nora's file I/O + the Terminal/PollSource wiring + ut's raw-mode dance are all
+# fd-bound):
+#   1. ut detects a raw command (`console::is_raw_command("nora")`), flips the
+#      console to RAW via its private consctl fd, and hands nora fd 0/1/2 (Inherit)
+#      -- so nora launches, ACQUIRES THE SCREEN, and READS KEYSTROKES. If the dance
+#      failed (stdin left Piped-drop), nora's fd 0 would be a dead pipe -> it would
+#      exit at once, never create the file, and step (3) would time out.
+#   2. nora edits in raw mode (modal keys reach it as raw bytes, NOT cooked into
+#      `interrupt` notes -- ISIG is off) and SAVES durably (:w + t_fsync).
+#   3. ut RESTORES the prompt mode + the screen on nora's exit, so the session is
+#      usable again: the post-quit `cat` runs at a clean prompt and its output
+#      reaches the console.
+#
+# Echo-ambiguity-proof assertion (lib.exp "Echo discipline"): we type the edit in
+# LOWERCASE into nora (which draws it lowercase on the alt-screen), then read it
+# back via `cat ... | tr a-z A-Z`. The UPPER-CASED token appears ONLY in the tr
+# output -- never in nora's draw nor any echo -- so a single exact match is
+# unambiguous proof the bytes made the full round trip THROUGH the editor to disk
+# and back.
+#
+# Timing (the TUI is driven blind): kaua's input parser resolves a LONE Esc to
+# KeyCode::Esc only at a read boundary; an Esc followed by a printable IN THE SAME
+# read becomes Alt+char (input.rs). So the Esc that leaves insert mode is sent
+# ISOLATED, with sleeps on both sides, guaranteeing it lands in its own kernel
+# read before `:wq` arrives. The LS-CI wrapper retries the whole scenario up to 3x,
+# absorbing host-timing jitter.
+
+source [file join [file dirname [info script]] lib.exp]
+
+set ::nora_file "/home/michael/nora-ls7.txt"
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# Pre-create the target as an empty file so nora opens an EXISTING file (the
+# common "edit a file" case). We do NOT exercise nora's open-a-not-yet-existent
+# path here because of a SEPARATE, tracked, user-gated gap: at v1.0 the kernel
+# returns generic -1 for a walk-miss (syscall.c's -1 convention), which
+# libthyla maps to Error::Io, NOT Error::NotFound -- so nora (correctly, to avoid
+# clobbering a transiently-unreadable file) refuses to start a fresh buffer.
+# nora's `NotFound -> empty buffer` logic is right; `nora /newfile` on a
+# Stratum-backed FS Just Works once the -T_E_* errno-fidelity rollout lands
+# (the user-gated decision; see the T-4 notes + 113-nora.md "Known caveats").
+# Editing an existing file exercises the WHOLE raw-mode dance regardless, so the
+# pre-create isolates the dance proof from that orthogonal gap.
+lc_send "echo > $::nora_file"
+sleep 1
+
+# Launch nora on the now-existing file.
+lc_send "nora $::nora_file"
+# Let nora launch: spawn -> ut RAWs the console + Inherits fd 0/1/2 -> nora enters
+# the alt-screen + starts reading fd 0. A generous settle so the first keystrokes
+# are not raced against bring-up.
+sleep 2
+
+# Insert mode + the edit, in one burst: `i` enters insert (nora is in Normal at
+# launch), then the lowercase token is typed character-by-character into the
+# buffer. (All in one read is fine -- handle_key runs per key in order.)
+lc_step "nora: insert + type edit"
+send "inora-ls7-line"
+sleep 1
+
+# Esc ISOLATED (its own read) so kaua resolves it to KeyCode::Esc at the read
+# boundary -- leaving insert mode -- rather than Alt+char (Esc+printable-in-one-read).
+lc_step "nora: Esc to normal mode"
+send "\x1b"
+sleep 1
+
+# Save + quit. `:` enters command mode, `wq` writes (durable: :w + t_fsync) and
+# quits; CR executes it (raw mode: ICRNL off, so CR reaches nora as 0x0d = Enter).
+lc_step "nora: :wq (save + quit)"
+send ":wq\r"
+# nora exits -> ut restores the prompt mode + re-emits the screen escapes (the
+# crash backstop) -> the session prompt returns.
+sleep 2
+
+# The round-trip proof: read the saved file back, upper-cased. NORA-LS7-LINE
+# appears ONLY here (we typed lowercase), so the match proves nora launched under
+# the dance, received the raw keystrokes, saved the edit, AND ut restored a usable
+# console (this command runs + prints at a clean prompt).
+lc_run_expect "cat $::nora_file | tr a-z A-Z" "NORA-LS7-LINE"
+lc_pass "LS-7: nora raw-mode dance -- launch + edit + durable save + restore"
+
+lc_quit
+lc_pass "LS-CI ls-7: nora editor + ut raw-mode dance verified end to end"
+exit 0

@@ -65,6 +65,7 @@
 // to its Status section.
 
 pub mod builtin;
+pub mod console;
 pub mod env;
 pub mod error;
 pub mod expr;

@@ -57,26 +57,6 @@ use crate::eval::{builtin, deliver_pending_notes, eval_source, Env};
 use crate::line_editor::{EditorAction, LineEditor};
 use crate::palette::Role;
 
-/// ut's prompt-mode console line discipline (the LS-8b `/dev/consctl` ABI,
-/// absolute form -- every flag named, so the result is independent of the
-/// prior state): no canonical line assembly + no kernel echo (the line editor
-/// draws its own) + ISIG so Ctrl-C cooks to the `interrupt` note the shell
-/// services + no CR/NL translation (the editor handles CR). Matches
-/// `/sbin/login`'s MODE_DEFAULT; unifying the consctl mode vocabulary across
-/// login + ut is a later cosmetic cleanup. LS-7 adds the cooked/raw variants
-/// for the foreground-child dance.
-const CONSOLE_MODE_DEFAULT: &[u8] = b"-icanon -echo +isig -icrnl -onlcr";
-
-/// Apply a console mode by writing the absolute flag string to a consctl fd
-/// (`cons_set_mode_cmd` applies one write atomically). Best-effort: true iff
-/// the whole command was accepted (n == len). A pre-#94-B kernel (or a bad fd)
-/// rejects the I/O -> false -> the shell runs without driving the discipline
-/// (no regression: it keeps whatever mode it was started in).
-fn console_set_mode(fd: i32, cmd: &[u8]) -> bool {
-    let w = unsafe { libthyla_rs::t_write(fd as i64, cmd.as_ptr(), cmd.len()) };
-    w == cmd.len() as i64
-}
-
 /// The Utopia read-parse-eval loop driver.
 pub struct Repl {
     env: Env,
@@ -130,7 +110,10 @@ impl Repl {
     /// forwarded -- the shell simply runs in whatever mode login left.
     pub fn console_apply_default(&self) -> bool {
         match self.env.consctl_fd {
-            Some(fd) => console_set_mode(fd, CONSOLE_MODE_DEFAULT),
+            // The ONE prompt-mode vocabulary lives in `eval::console` (shared with
+            // the LS-7 raw-mode dance, whose restore must be byte-identical to this
+            // -- defining it once removes the drift hazard).
+            Some(fd) => crate::eval::console::set_mode(fd, crate::eval::console::PROMPT_MODE),
             None => false,
         }
     }
