@@ -660,23 +660,29 @@ void ready_on(unsigned target_cpu, struct Thread *t) {
     if (t->band >= SCHED_BAND_COUNT)
                                   extinction("ready: invalid band");
 
+    // #107/F1: mask IRQs BEFORE reading the per-CPU index. `self` and the
+    // `target_cpu == self` placement/preempt decisions below are a TOCTOU on the
+    // CPU identity, exactly the sched() #104 bug class: a migration between this
+    // read and the run-tree-lock acquire would enqueue `t` onto -- and poke -- the
+    // WRONG CPU's slot. Mask-only form (spin_lock_irqsave(NULL)); `s` restored at
+    // the unlock below. (Sound even pre-fix because every live caller already masks
+    // -- wakeup holds g_timerwait.lock irqsave, the SVC spawners are hardware-
+    // masked -- but a future IRQ-enabled kthread caller would reintroduce it;
+    // mask-first closes the class rather than rely on an unstated precondition.)
+    irq_state_t s = spin_lock_irqsave(NULL);
     unsigned self = smp_cpu_idx_self();
-    // #866 F4: restore the this_cpu_sched() OOB contract the pre-#864 ready()
-    // had -- a clean extinction (not an OOB g_cpu_sched[] access) if THIS CPU's
-    // index is out of range. The target-fallback below only guards `target_cpu`;
-    // if `self` itself is bad, `target_cpu = self` would still index OOB.
+    // #866 F4: a clean extinction (not an OOB g_cpu_sched[] access) if THIS CPU's
+    // index is out of range -- the target-fallback below only guards `target_cpu`.
     if (self >= DTB_MAX_CPUS) extinction("ready_on: cpu idx out of range");
-    // Safety: fall back to the caller's CPU for an out-of-range or
-    // uninitialized target. select_target_cpu already guards this; belt for
-    // any other ready_on caller.
+    // Safety: fall back to the caller's CPU for an out-of-range or uninitialized
+    // target. select_target_cpu already guards this; belt for any other caller.
     if (target_cpu >= DTB_MAX_CPUS || !g_cpu_sched[target_cpu].initialized)
         target_cpu = self;
 
-    // IRQ-mask discipline + the target CPU's run-tree lock. Disable IRQs first
-    // (own-CPU re-entry) then take the lock (cross-CPU contention against
-    // work-stealing peers / a peer's own sched).
+    // The target CPU's run-tree lock (IRQs already masked above; cross-CPU
+    // contention against work-stealing peers / a peer's own sched).
     struct CpuSched *cs = &g_cpu_sched[target_cpu];
-    irq_state_t s = spin_lock_irqsave(&cs->lock);
+    spin_lock(&cs->lock);
 
     if (in_run_tree(cs, t))       extinction("ready of already-runnable Thread");
 
@@ -741,6 +747,11 @@ void ready(struct Thread *t) {
     // MECHANISM. select_target_cpu chooses the run tree; on a uniform topology
     // (v1.0) it returns the caller's own CPU, so ready() == ready_on(self, t)
     // == the pre-#864 "enqueue on the CPU that woke you" behavior, exactly.
+    // #107/F1: the smp_cpu_idx_self() here is a stale-tolerant placement HINT, not
+    // a lock key -- ready_on re-reads the running CPU under its entry mask and
+    // validates `target`, so a migration between this read and ready_on only
+    // affects WHICH valid CPU's tree `t` lands on (benign on a uniform topology),
+    // never which lock is taken.
     unsigned target = select_target_cpu(t, smp_cpu_idx_self());
     ready_on(target, t);
 }
@@ -976,8 +987,30 @@ static struct Thread *balance_pull(struct CpuSched *cs, bool *contended_out) {
 }
 
 void sched(void) {
-    // P2-Cd: read THIS CPU's sched state. All run-tree access goes
-    // through `cs`.
+    // #104/#107: MASK IRQs BEFORE resolving the per-CPU sched state. `cs` is
+    // named by this_cpu_sched() = &g_cpu_sched[smp_cpu_idx_self()] (MPIDR). Read
+    // with IRQs ENABLED this is a TOCTOU on the CPU identity: a timer-IRQ preempt
+    // between the read and the run-tree-lock acquire can switch this thread out,
+    // let a peer steal it, and resume it on ANOTHER CPU still inside this sched()
+    // call -- with `cs` left pointing at the ORIGIN CPU's slot. sched() would then
+    // acquire the origin CPU's lock while running elsewhere, breaking the per-CPU
+    // pending_release_lock handoff and LEAKING that lock (the #104 SMP deadlock:
+    // a later sched() on the origin CPU spins forever on the orphaned lock). The
+    // bug is exposed under heavy migration churn -- which #60's syscall-return
+    // preempt produced (every syscall return), so #104 first masked it by
+    // removing that preempt; this is the real root-cause fix. Masking first pins
+    // the CPU so smp_cpu_idx_self()/`cs` cannot go stale before cpu_switch_context
+    // (after which the resume path re-reads this_cpu_sched() as `cs_now`). `s`
+    // (the caller's DAIF) is restored on the resume + early-return paths. This is
+    // `spin_lock_irqsave(NULL)` -- the mask-only form -- kept right here so the
+    // per-CPU read below sits strictly inside the mask. Masking only I (not
+    // A/SError) is intentional + sufficient: the sole migration vector in the
+    // window is a taken IRQ (FIQ has no online source; an SError routes to
+    // extinction, never a switch-out + steal).
+    irq_state_t s = spin_lock_irqsave(NULL);
+
+    // P2-Cd: read THIS CPU's sched state (migration-safe now -- IRQs masked).
+    // All run-tree access goes through `cs`.
     struct CpuSched *cs = this_cpu_sched();
     if (!cs->initialized) extinction("sched() before this CPU's sched_init");
 
@@ -985,21 +1018,24 @@ void sched(void) {
     // preempt_check_irq already clears before calling, so this is a no-op
     // on the IRQ-driven path. For voluntary sched() callers (sleep,
     // exits, explicit yield), this absorbs a stale flag set by sched_tick
-    // since the last preempt_check_irq — preventing a redundant
-    // preempt_check_irq → sched() spin on the next IRQ. Safe at this
-    // location because g_need_resched is per-CPU; only this CPU writes
-    // its own slot (sched_tick + this clear), and the fetch is monotonic
-    // (set TRUE → cleared FALSE → set TRUE again on next slice expiry).
+    // since the last preempt_check_irq -- preventing a redundant
+    // preempt_check_irq -> sched() spin on the next IRQ. Under the entry mask
+    // above, smp_cpu_idx_self() here names the same CPU as `cs`.
     need_resched_clear(smp_cpu_idx_self());
 
-    // P2-Bc/Ce: IRQ-mask + per-CPU run-tree lock. sched() mutates
-    // shared state (run tree, current_thread via TPIDR_EL1, vd_t
-    // counter) — a timer IRQ firing inside this critical section
-    // would re-enter preempt_check_irq → sched(), corrupting the
-    // run tree. The per-CPU lock additionally protects against
-    // cross-CPU work-stealing: a peer's try_steal will fail to acquire
-    // and move on rather than walk our tree mid-mutation.
-    irq_state_t s = spin_lock_irqsave(&cs->lock);
+    // P2-Bc/Ce: per-CPU run-tree lock (IRQs already masked above). sched()
+    // mutates shared state (run tree, current_thread via TPIDR_EL1, the vd_t
+    // counter); the lock protects against a re-entrant preempt_check_irq ->
+    // sched() AND a peer's try_steal (which try_locks and moves on if held).
+    spin_lock(&cs->lock);
+
+    // #107 loud-fail guard (the durable regression for a timing-only SMP race):
+    // with the entry mask above, the per-CPU slot we just locked MUST belong to
+    // the running CPU. A mismatch means a future change reintroduced the
+    // read-before-mask TOCTOU -- fail loud here instead of silently leaking a
+    // foreign CPU's run-queue lock (the #104 deadlock).
+    ASSERT_OR_DIE((unsigned)(cs - g_cpu_sched) == smp_cpu_idx_self(),
+                  "sched: per-CPU cs mismatches the running CPU (read-before-mask?)");
 
     struct Thread *prev = current_thread();
     if (!prev) extinction("sched() with no current thread");

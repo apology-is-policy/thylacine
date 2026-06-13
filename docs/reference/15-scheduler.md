@@ -353,6 +353,8 @@ static volatile bool   g_need_resched[DTB_MAX_CPUS];   // per-CPU IRQ flag
 
 `smp_cpu_idx_self()` returns this CPU's index from `MPIDR_EL1.Aff0`. All sched.c entry points fan in through `this_cpu_sched()` to read/write the appropriate slot.
 
+> **#107 invariant — read the per-CPU slot under the IRQ mask.** `this_cpu_sched()` is a per-CPU pointer keyed on the *live* CPU; reading it and then acting on it (acquiring `cs->lock`, advancing `cs->vd_counter`, …) is a TOCTOU on the CPU identity if the thread can migrate in between. `sched()` therefore masks IRQs (`msr daifset, #2`) **before** `cs = this_cpu_sched()`: with IRQs masked there is no preempt → no switch-out → no work-steal, so the CPU is pinned and `cs` stays valid until `cpu_switch_context` (after which the resume path deliberately re-reads `this_cpu_sched()` as `cs_now`). Reading `cs` with IRQs enabled was the #104 SMP deadlock (a `sched()` entered unmasked — e.g. a kthread yield — migrated mid-call and then acquired the *origin* CPU's run-queue lock while running elsewhere, leaking it via the `pending_release_lock` handoff).
+
 ### sched_init takes a cpu_idx
 
 `sched_init(cpu_idx)` is called once per CPU:
@@ -645,20 +647,33 @@ protocol / I-8 / I-21.
   `need_resched` (the half that was missing). Verified by
   `scheduler.wake_preempt_same_cpu` (an INTERACTIVE wake sets the flag; a NORMAL
   wake does not).
-- **The syscall-return preempt point was REMOVED (#104 — it deadlocked SMP).**
-  As shipped in RW-11 SA-1b it `bl preempt_check_irq`'d at the SVC tail to consume
-  a wake-set `need_resched` as the waker returned to EL0. But that call preempts a
-  RUNNING thread from *inside* the C exception handler (`exception_sync_lower_el`,
-  mid-exception between `halls_enter/leave_frame`): the thread goes RUNNABLE, is
-  stolen by a peer CPU, and resumes mid-handler there — which reliably leaks a
-  per-CPU run-queue lock (`sched()` then spins forever acquiring `cs->lock`;
-  reproduced 100% on QEMU TCG `-smp 4` through stratumd's mount IRQ-wait load).
-  The vector-level IRQ-return preempt (`vectors.S`, a *clean* saved frame) does
-  the same RUNNING→RUNNABLE→steal and does NOT deadlock, so a wake-set
-  `need_resched` is consumed there + at the timer tick (≤1 ms) instead. The
-  wake-preempt DECISION above is RETAINED — only the immediate syscall-return
-  consumption is deferred. Owed: a safe syscall-return preempt + the exact
-  mid-handler steal/handoff-race root cause (a spec-modeled SMP follow-up).
+- **The syscall-return preempt point: removed (#104), root-caused + re-added
+  safely (#107).** As shipped in RW-11 SA-1b it `bl preempt_check_irq`'d at the SVC
+  tail to consume a wake-set `need_resched` as the waker returned to EL0. Under
+  QEMU TCG `-smp 4` through stratumd's mount IRQ-wait load it reliably deadlocked
+  SMP (`sched()` spins forever acquiring a leaked `cs->lock`); #104 removed the
+  preempt as the mitigation. **#107 root-caused it: NOT a mid-handler-specific
+  steal, but a per-CPU `cs` TOCTOU in `sched()` itself.** `sched()` read
+  `cs = this_cpu_sched()` (= `&g_cpu_sched[smp_cpu_idx_self()]`, MPIDR-derived)
+  *before* masking IRQs; for a `sched()` entered with IRQs enabled (e.g. a kthread
+  yield), a timer-IRQ preempt in the `cs`-read..lock-acquire window switched the
+  thread out, a peer stole it, and it resumed on ANOTHER CPU still inside the same
+  `sched()` call with `cs` pointing at the ORIGIN CPU — so it acquired the origin
+  CPU's lock while running elsewhere, breaking the `pending_release_lock` handoff
+  and leaking that lock. The syscall-return preempt merely cranked migration churn
+  (every syscall return) high enough to hit the window; the bug was latent under
+  the timer-tick-only preempt. Caught red-handed by an in-kernel "sched() holds a
+  foreign CPU's lock" assertion (`STALE-CS sched(): cs_idx=0 running_cpu=1`).
+  **Fix (root cause):** mask IRQs at the TOP of `sched()`, before `this_cpu_sched()`
+  — pinning the CPU so `cs` cannot go stale before `cpu_switch_context` (after
+  which the resume path already re-reads `cs_now`). **Re-add (safe):** the
+  syscall/fault-return preempt now fires at the VECTOR level (`vectors.S`
+  `.Lel0_sync_return`, reached after `exception_sync_lower_el` returns and its
+  halls frame closes) — a *clean* saved frame structurally identical to the proven
+  0x480 IRQ slot, so #60's wake-preempt latency win returns with no mid-handler
+  hazard. The wake-preempt DECISION above is unchanged. Verified: 14/14 clean boots
+  with the prior buggy placement + the fix (was ~30-50% deadlock pre-fix) + the SMP
+  gate. See `docs/reference/08-exception.md` (the EL0 sync-return tail).
 - **`void sched_mark_interactive(struct Thread *t)`** realizes the INTERACTIVE
   band (ARCH §8.3): a USER thread blocking in `kobj_irq_wait` (a device-IRQ
   driver) or `devcons_read` (the console session reader) is promoted

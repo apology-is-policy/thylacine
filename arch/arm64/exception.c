@@ -318,15 +318,18 @@ static void exception_irq_curr_el_impl(struct exception_context *ctx) {
 // EC_PC_ALIGN / EC_SP_ALIGN / EC_BTI / EC_BRK from EL0 also terminate
 // via proc_fault_terminate (snare:align / snare:bti / snare:brk
 // respectively).
-// P6-pouch-signals-impl (sub-chunk 13a): forward-declare the EL0-return-
-// tail note-delivery hook (defined in kernel/notes.c).
+// P6-pouch-signals-impl (sub-chunk 13a): the EL0-return-tail note-delivery hook
+// (defined in kernel/notes.c). As of #107 it is invoked from the vector tails
+// (vectors.S .Lel0_sync_return for sync-from-EL0, 0x480 for IRQ-from-EL0), not
+// from the C handlers here; the decl is retained for documentation.
 void notes_deliver_at_el0_return(struct exception_context *ctx);
 
 // SYS_EXIT_GROUP / kill cross-thread shootdown (ARCH §7.9.1, I-24): the
 // EL0-return-tail die-check (defined in kernel/proc.c). If the calling
 // Thread's Proc is group-terminating, the Thread self-exits here (noreturn);
-// otherwise returns. Called at the sync-from-EL0 tails below + the
-// IRQ-from-EL0 tail (vectors.S 0x480 -> bl el0_return_die_check).
+// otherwise returns. As of #107 invoked from the vector tails (vectors.S
+// .Lel0_sync_return + 0x480), AFTER preempt_check_irq -- so a group-terminate
+// landing during the preempt is caught before any EL0 instruction runs.
 void el0_return_die_check(void);
 
 static void exception_sync_lower_el_impl(struct exception_context *ctx) {
@@ -343,19 +346,15 @@ static void exception_sync_lower_el_impl(struct exception_context *ctx) {
 
         switch (r) {
         case FAULT_HANDLED:
-            // P6-pouch-signals-impl: check for pending note delivery at
-            // every EL0-return tail. Page-fault-return path: the faulting
-            // instruction will re-execute, which is fine — the handler
-            // will see the same fault on its return if it didn't fix the
-            // mapping (the in_handler guard prevents a delivery loop on
-            // a handler-side fault).
-            //
-            // I-24: the EL0-return die-check runs FIRST -- if this Proc is
-            // group-terminating (SYS_EXIT_GROUP / kill), the Thread self-exits
-            // here (noreturn) instead of resuming the faulting instruction.
-            el0_return_die_check();
-            notes_deliver_at_el0_return(ctx);
-            return;          // ERET resumes the faulting EL0 instruction.
+            // #107: the EL0-return tail -- preempt_check_irq ->
+            // el0_return_die_check (I-24) -> notes_deliver_at_el0_return -- now
+            // runs at the VECTOR level (vectors.S .Lel0_sync_return), AFTER this
+            // handler returns and its halls frame is closed. That clean-frame
+            // preempt mirrors the 0x480 IRQ slot and avoids the mid-handler steal
+            // hazard (#104). The fault was resolved; ERET (via KERNEL_EXIT)
+            // resumes the faulting EL0 instruction, with the die-check + any
+            // pending note applied on the way out.
+            return;
         case FAULT_UNHANDLED_USER:
             // P6 hardening #3a (scripture e45a571): terminate the
             // faulting Proc with the snare:segv tag; the kernel does
@@ -397,30 +396,18 @@ static void exception_sync_lower_el_impl(struct exception_context *ctx) {
         // pick another thread). All other syscalls return normally;
         // vectors.S ERETs to EL0 with the result in x0.
         syscall_dispatch(ctx);
-        // EL0-return tail.
-        //   1. I-24: a woken torpor_wait, or any syscall returning while this
-        //      Proc is group-terminating (SYS_EXIT_GROUP / kill), self-exits
-        //      here (noreturn) before resuming userspace.
-        //   2. P6-pouch-signals: after regs[0] is written, deliver a pending
-        //      note by rewriting ctx to the registered handler (the async
-        //      path; the fd-read path consumes queued notes independently).
-        //
-        // NO syscall-return preempt point here (#104). The RW-11 SA-1b wake-
-        // preemption decision is RETAINED (ready_on still sets need_resched on a
-        // higher-band wake), but it is consumed at the vector-level IRQ-return
-        // preempt (vectors.S) + the timer tick -- NOT here. A preempt_check_irq()
-        // at this site preempts a RUNNING thread from INSIDE this C handler
-        // (mid-exception, between halls_enter/leave_frame): the thread goes
-        // RUNNABLE, is stolen by a peer CPU, and resumes mid-handler there --
-        // which under SMP reliably leaks a per-CPU run-queue lock (sched() then
-        // spins forever acquiring cs->lock; reproduced 100% on QEMU TCG -smp4
-        // through the stratumd-mount IRQ-wait load). The vector-level IRQ-return
-        // preempt preempts at a CLEAN saved frame and does not, so wake-preemption
-        // keeps its <=1ms-to-next-tick latency without the mid-handler hazard.
-        // Re-adding a safe syscall-return preempt + the exact handoff-race root
-        // cause are owed (spec-modeled SMP follow-up).
-        el0_return_die_check();
-        notes_deliver_at_el0_return(ctx);
+        // EL0-return tail runs at the VECTOR level now (vectors.S
+        // .Lel0_sync_return), AFTER this handler returns + its halls frame is
+        // closed: (1) preempt_check_irq -- the #107 syscall-return preempt, the
+        // RW-11 SA-1b wake-preemption consumer, re-added at a CLEAN saved frame
+        // mirroring the 0x480 IRQ slot (the #104 deadlock was a per-CPU `cs`
+        // TOCTOU in sched(), fixed at the root by masking IRQs before the
+        // this_cpu_sched() read -- so this preempt no longer risks the
+        // mid-handler steal/leak); (2) el0_return_die_check -- I-24, AFTER the
+        // preempt so a Proc group-terminated during the preempt-switch is caught
+        // before any EL0 instruction runs; (3) notes_deliver_at_el0_return -- the
+        // P6-pouch-signals async note delivery. SYS_EXITS / a die path do not
+        // return here (kernel exits() + sched()).
         return;
 
     case EC_PC_ALIGN:

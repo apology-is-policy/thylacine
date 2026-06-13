@@ -356,6 +356,21 @@ The macro was dead code at P1-F. P1-G factors it into a labeled symbol after the
 
 Future: when Phase 2 makes SP_EL0 / lower-EL entries live, those will also `b .Lexception_return` for return-to-userspace. The trampoline doesn't care which EL it returns to — it restores `ELR_EL1` + `SPSR_EL1` from the saved context, and `eret` derives the target EL from `SPSR.M`.
 
+### EL0 sync-return tail: `.Lel0_sync_return` (#107)
+
+The live `0x400` slot (sync from EL0 — SVC + EL0 faults) branches to `.Lel0_sync_return` instead of straight to `.Lexception_return`. The trampoline runs the EL0-return tail **at the vector level, after `exception_sync_lower_el` has returned and its HX-1 halls frame is closed** — a *clean* saved frame with no live C handler on the stack:
+
+```asm
+.Lel0_sync_return:
+    bl  preempt_check_irq          // #107: syscall/fault-return wake-preempt (RW-11 SA-1b)
+    bl  el0_return_die_check       // I-24: group-terminate self-exit (after the preempt)
+    mov x0, sp                     // ctx = the KERNEL_ENTRY trapframe
+    bl  notes_deliver_at_el0_return// P6-pouch-signals async note delivery
+    b   .Lexception_return
+```
+
+This re-adds the syscall-return wake-preempt that #104 had removed, but at a clean frame structurally identical to the proven `0x480` IRQ slot — so a `sched()` invoked by `preempt_check_irq` here saves *this trampoline's* frame, and a thread preempted + work-stolen resumes at a clean frame, never mid-C-handler. The ordering (preempt → die-check) matches `0x480`: a Proc group-terminated during the preempt-switch is caught by `el0_return_die_check` before any EL0 instruction runs (I-24). The handler `exception_sync_lower_el_impl` no longer calls the die-check / note-delivery itself; they moved here. (`notes_deliver_at_el0_return` previously ran on both the SVC-return and `FAULT_HANDLED` paths inside the handler; both now reach it once via this single tail.) The deadlock that motivated the removal was a per-CPU-`cs` TOCTOU in `sched()`, fixed at the root by masking IRQs before the `this_cpu_sched()` read — see `docs/reference/15-scheduler.md` (#107) — so the preempt itself was never the bug.
+
 ### `exception_unexpected` strings live in `.rodata`
 
 They're accessed via PC-relative `adrp+add` from the handler — works through TTBR1 high-VA. No special handling required for the names lookup. If a future audit tightens the diagnostic to include ESR/FAR alongside the vector name, the same approach extends.

@@ -247,7 +247,7 @@ _exception_vectors:
     KERNEL_ENTRY
     mov     x0, sp
     bl      exception_sync_lower_el
-    b       .Lexception_return           /* ERET to EL0 on FAULT_HANDLED */
+    b       .Lel0_sync_return            /* #107: clean-frame preempt + die-check + notes, then ERET */
 
     .org _exception_vectors + 0x480      /* IRQ from EL0 */
     KERNEL_ENTRY
@@ -304,5 +304,33 @@ _exception_vectors:
 // KERNEL_ENTRY saved, then ERETs to ELR_EL1 with SPSR_EL1.
 // ---------------------------------------------------------------------------
 .section ".text", "ax"
+
+// ---------------------------------------------------------------------------
+// .Lel0_sync_return — #107: EL0 sync-exception return tail. The 0x400 slot
+// branches here AFTER exception_sync_lower_el returns and its HX-1 halls frame
+// is closed (the wrapper ran halls_leave_frame), so this is a CLEAN saved frame
+// with no live C handler on the stack — structurally identical to the 0x480 IRQ
+// slot. It is reached ONLY from the recoverable EL0-sync returns (SVC-return,
+// FAULT_HANDLED); the terminating fault paths are noreturn and never arrive.
+//
+// Ordering mirrors 0x480 (preempt BEFORE die-check):
+//   1. preempt_check_irq — the syscall/fault-return wake-preempt (RW-11 SA-1b,
+//      the #60 latency win). A sched() inside it saves THIS trampoline's frame,
+//      so a thread preempted + stolen here resumes at a clean frame (never
+//      mid-C-handler) and sched() reads its per-CPU state under the entry mask
+//      (#107 sched.c fix) — no stale-cs handoff leak (the #104 deadlock).
+//   2. el0_return_die_check — I-24 group-terminate self-exit (noreturn if so),
+//      AFTER the preempt so a Proc group-terminated during the preempt-switch is
+//      caught before any EL0 instruction runs.
+//   3. notes_deliver_at_el0_return(ctx = sp) — P6-pouch-signals async delivery;
+//      sp still points at the KERNEL_ENTRY trapframe here.
+// ---------------------------------------------------------------------------
+.Lel0_sync_return:
+    bl      preempt_check_irq
+    bl      el0_return_die_check
+    mov     x0, sp
+    bl      notes_deliver_at_el0_return
+    b       .Lexception_return
+
 .Lexception_return:
     KERNEL_EXIT
