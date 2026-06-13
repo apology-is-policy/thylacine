@@ -574,9 +574,7 @@ mod tests {
         // it overflows the fixed buffer and is consumed at the final byte.
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"\x1b[");
-        for _ in 0..10_000 {
-            bytes.push(b'9');
-        }
+        bytes.resize(bytes.len() + 10_000, b'9'); // a pathological param run
         bytes.push(b'C'); // final
         let v = run(&bytes);
         assert!(

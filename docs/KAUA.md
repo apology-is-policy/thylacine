@@ -414,7 +414,7 @@ audit-bearing, the rest is pure userspace:
 | **T-2 — widgets + layout + event** | `layout` (Rect split), `widget` (the trait + Text/Block/List/StatusLine), `event` (KeyEvent + the `EventSource` seam + `PollSource`). |
 | **T-3 — nora** | `usr/nora`: the modal core (from `editor.rs`) + `nora::buffer` (the native text engine) + standalone file I/O, on Kaua. |
 | **T-4 — the ut dance + integration** | `Repl::console_raw`/`console_cooked` + the `is_raw_command` spawn path + the restore-on-exit backstop (`stmt.rs`); the `ls-7` LS-CI E2E (open a file, edit, save, `cat` shows the edit). *Audit-bearing* (the dance touches I-27). |
-| **audit** | one focused round via the holotype-reviewer agent (Fable on max, Opus fallback) over T-1's backend + T-4's dance (the I-27 surface) + a self-audit; the buffer/widget layers are covered by unit tests. |
+| **audit** | one focused Opus-4.8-max round over T-1's backend + T-4's dance (the I-27 surface) + a self-audit; the buffer/widget layers are covered by unit tests. |
 
 **Test posture**: the buffer/widget/layout/event layers are pure and unit-tested
 (cell-diff correctness, layout splits, the input-parser truth table, the editor
@@ -471,7 +471,7 @@ from the aux `libtapestry` POC, which is the *graphics* weave (Tapestry,
 |---|---|
 | T-0 scripture | this doc (SIGNED OFF 2026-06-13) |
 | T-1 core | **landed** -- `style`/`rect`/`buffer`/`event`/`input`/`encode` (pure, host-tested) + `term` (the cons backend); `docs/reference/112-kaua.md` |
-| T-2 widgets | not started |
+| T-2 widgets + layout + event-source | **landed** -- `layout`/`widget`/`source` + `Event` (pure layers host-tested; `source` is the backend input half + the Loom seam); input split out of `term` into `source`; `docs/reference/112-kaua.md` |
 | T-3 nora | not started |
 | T-4 dance + LS-CI | not started |
 | audit | not started |

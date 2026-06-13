@@ -114,6 +114,17 @@ impl KeyEvent {
     }
 }
 
+/// The event-loop message (KAUA.md sections 3.4 / 4.1). `Key` is what the
+/// `EventSource` (kaua::source) produces from the VT parser. `Resize` + `Tick`
+/// are v1.0 seams -- there is no winsize signal nor a timer source yet -- kept
+/// in the type for the loop's match and the future.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Event {
+    Key(KeyEvent),
+    Resize(u16, u16),
+    Tick,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
