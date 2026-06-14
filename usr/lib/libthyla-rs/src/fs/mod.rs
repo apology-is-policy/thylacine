@@ -40,6 +40,27 @@ pub fn metadata<P: AsRef<Path>>(path: P) -> Result<Metadata> {
     file.metadata()
 }
 
+/// Set `path`'s permission bits (chmod). Opens with `T_OPATH` -- a navigation
+/// handle, born R|W (so the SYS_WSTAT `RIGHT_WRITE` gate is satisfied) and exempt
+/// from the open-time R/W perm check (so it works on a file you own but cannot
+/// write, matching POSIX chmod) -- then writes only the mode (`T_WSTAT_MODE`).
+/// The kernel re-runs the owner perm_check. `mode` is masked to the 9 rwx bits.
+pub fn chmod<P: AsRef<Path>>(path: P, mode: u32) -> Result<()> {
+    let f = File::open_stalk(path.as_ref(), crate::T_OPATH)?;
+    // SAFETY: t_wstat is the SYS_WSTAT SVC wrapper; f.as_raw_fd() is a live
+    // KOBJ_SPOOR; uid/gid are ignored when only T_WSTAT_MODE is set.
+    let rc = unsafe {
+        crate::t_wstat(
+            f.as_raw_fd() as i64,
+            crate::T_WSTAT_MODE,
+            mode & crate::T_WSTAT_MODE_MASK,
+            0,
+            0,
+        )
+    };
+    Error::from_syscall_return(rc).map(|_| ())
+}
+
 /// `true` iff `path` exists and is reachable to the caller (open
 /// succeeds with read access). Returns `false` if any error occurs
 /// during the probe (not just `NotFound` -- a permission failure also

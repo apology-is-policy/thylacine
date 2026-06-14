@@ -84,6 +84,17 @@ fn run(args: Args) -> i64 {
     let mut out = io::OutSink::new();
     let mut first = true;
     for dir in dirs {
+        // A regular-file operand lists just that file (no `dir:` header); a
+        // directory -- or an unstattable path, preserving the old error -- lists
+        // its contents.
+        if matches!(fs::metadata(dir), Ok(m) if !m.is_dir()) {
+            if let Err(e) = list_file(&mut out, dir, long) {
+                eprintln!("ls: {}: {}", dir, e);
+                status = 1;
+            }
+            first = false;
+            continue;
+        }
         if multi {
             if !first {
                 out.put(b"\n");
@@ -101,6 +112,18 @@ fn run(args: Args) -> i64 {
         return 1;
     }
     status
+}
+
+/// List a single regular-file operand, shown by its path as given.
+fn list_file(out: &mut io::OutSink, path: &str, long: bool) -> Result<()> {
+    if long {
+        let m = fs::metadata(path)?;
+        print_long(out, &m, path);
+    } else {
+        out.put(path.as_bytes());
+        out.put(b"\n");
+    }
+    Ok(())
 }
 
 fn list_dir(out: &mut io::OutSink, dir: &str, all: bool, long: bool) -> Result<()> {
