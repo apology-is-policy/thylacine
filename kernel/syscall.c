@@ -2577,7 +2577,7 @@ static s64 sys_set_tid_address_handler(u64 tidptr_raw) {
 // the very fact that kproc threads never execute SVC instructions; the
 // pgtable_root == 0 check is a defense-in-depth catch.
 static s64 sys_thread_spawn_handler(u64 entry_va, u64 sp_va,
-                                    u64 arg_va, u64 tls_va) {
+                                    u64 arg_va, u64 tls_va, u64 ptid_va) {
     struct Thread *t = current_thread();
     if (!t)                                          return -T_E_INVAL;
     struct Proc *p = t->proc;
@@ -2622,6 +2622,16 @@ static s64 sys_thread_spawn_handler(u64 entry_va, u64 sp_va,
     // alignment requirement — TLS layout is libc-defined.
     if (tls_va != 0 && tls_va >= UACCESS_USER_VA_TOP) return -T_E_INVAL;
 
+    // ptid_va (#112, CLONE_PARENT_SETTID): 0 opts out of the publish.
+    // Non-zero must be 4-byte aligned + within user VA — the same gate as
+    // SYS_SET_TID_ADDRESS's tidptr, because the publish below uses
+    // uaccess_store_u32 and a misaligned STR faults. A bad ptid is a clean
+    // -EINVAL at the gate, before any Thread is created.
+    if (ptid_va != 0) {
+        if ((ptid_va & 0x3u) != 0)                   return -T_E_INVAL;
+        if (ptid_va >= UACCESS_USER_VA_TOP)          return -T_E_INVAL;
+    }
+
     // #65 (I-32): the per-Proc thread cap. A non-TCB Proc at PROC_THREAD_MAX is
     // refused -EAGAIN (the POSIX RLIMIT_NPROC convention) before the kstack
     // alloc -- bounding a thread bomb (each thread pins unswappable kernel
@@ -2631,6 +2641,36 @@ static s64 sys_thread_spawn_handler(u64 entry_va, u64 sp_va,
 
     struct Thread *nt = thread_create_user(p, entry_va, sp_va, arg_va, tls_va);
     if (!nt)                                         return -T_E_NOMEM;
+
+    // CLONE_PARENT_SETTID (#112): publish the new tid into the parent-
+    // supplied user word BEFORE the child is made runnable. Parent and
+    // child share the address space (one pgtable_root), so this single
+    // store serves both; ready()'s run-queue lock release is the
+    // happens-before edge that carries it to whichever CPU first picks up
+    // the child, so the child can never observe a 0 tid -- closing the
+    // #111 window at its ROOT (the child no longer depends on a racing
+    // parent-side store), not merely from the child side. nt->tid is read
+    // HERE, before ready(), so the load cannot race the child's first
+    // dispatch + eventual thread_free.
+    //
+    // Best-effort BY CONTRACT (not merely "in practice"): ptid_va is a
+    // NATIVE surface (t_thread_spawn / spawn_raw) any EL0 program can call
+    // with an arbitrary align+bound-legal address. The alignment gate above
+    // is load-bearing -- an UNaligned STR would extinct, since the EL1 fixup
+    // table catches only translation/permission/access-flag faults, not
+    // alignment -- but a mapped-RO or unmapped in-bound aligned target
+    // routes through the demand-page write path, returns -1, and is
+    // SWALLOWED: NOT a spawn failure and NOT an extinction, because (a) the
+    // tid is returned authoritatively in x0 regardless, and (b) it matches
+    // the exit-time clear_child_tid store's best-effort discipline
+    // (kernel/proc.c::thread_clear_child_tid_handoff). Tolerating it also
+    // keeps the new Thread off any rollback path (no thread_free of a
+    // never-readied Thread on a transient uaccess fault). The pouch consumer
+    // passes &new->tid -- always writable -- so the swallow is never taken
+    // there; it exists only so a buggy/hostile native ptid is neither a
+    // spawn failure nor an extinction.
+    if (ptid_va != 0)
+        (void)uaccess_store_u32(ptid_va, (u32)nt->tid);
 
     // ready() inserts the new RUNNABLE Thread into the run-tree. From
     // here it can be picked by any CPU on the next sched() tick.
@@ -5760,7 +5800,8 @@ void syscall_dispatch(struct exception_context *ctx) {
         ctx->regs[0] = (u64)sys_thread_spawn_handler(ctx->regs[0],
                                                      ctx->regs[1],
                                                      ctx->regs[2],
-                                                     ctx->regs[3]);
+                                                     ctx->regs[3],
+                                                     ctx->regs[4]);
         return;
 
     case SYS_THREAD_EXIT:

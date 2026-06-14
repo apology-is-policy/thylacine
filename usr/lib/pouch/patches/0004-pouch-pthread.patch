@@ -54,15 +54,16 @@ Eight files, one mechanical retarget:
   src/thread/pthread_create.c  The lifecycle retarget. Three sites:
 
       __pthread_create()'s clone call  __clone() is replaced by
-          SYS_THREAD_SPAWN(entry, sp_top, arg, tls). The new->tid that
-          musl previously set via CLONE_PARENT_SETTID is assigned from
-          the syscall return; the start-args struct lives on the new
-          thread's stack exactly as before; TP_ADJ(new) becomes the tls
-          arg directly (the kernel writes TPIDR_EL0 at thread eret).
-          `stack` is 8-aligned post struct-subtraction; `sp_arg =
-          stack & ~0xFL` aligns it DOWN to 16 bytes for the kernel's
-          strict-16-alignment gate at SYS_THREAD_SPAWN. The clone
-          flags arg is unused
+          SYS_THREAD_SPAWN(entry, sp_top, arg, tls, ptid). #112 restores
+          musl's original CLONE_PARENT_SETTID: ptid = &new->tid, and the
+          kernel publishes the child tid into new->tid BEFORE making the
+          child runnable -- so the racy post-spawn `new->tid = ret` store
+          is GONE. The start-args struct lives on the new thread's stack
+          exactly as before; TP_ADJ(new) becomes the tls arg directly
+          (the kernel writes TPIDR_EL0 at thread eret). `stack` is
+          8-aligned post struct-subtraction; `sp_arg = stack & ~0xFL`
+          aligns it DOWN to 16 bytes for the kernel's strict-16-alignment
+          gate at SYS_THREAD_SPAWN. The clone flags arg is unused
           (Thylacine has no clone-flag dispatch; all pthreads share VM /
           FS / FILES / SIGHAND / THREAD group by construction; CLONE_
           DETACHED is purely userspace bookkeeping).
@@ -70,15 +71,18 @@ Eight files, one mechanical retarget:
       start()'s body  Registers &__thread_list_lock as this Thread's
           clear_child_tid address via SYS_SET_TID_ADDRESS at thread
           entry, AND captures that syscall's return -- the child's tid --
-          into self->tid before any __tl_lock can run (#111). The parent
-          assigns new->tid only AFTER SYS_THREAD_SPAWN has already made
-          the child runnable, so at -smp>1 the child could otherwise
-          reach __pthread_exit's __tl_lock with new->tid still 0; the
-          recursive fast-path (lock==tid, 0==0 when the lock is free)
-          then skips the acquire, the child unlinks itself holding no
-          lock, and __pthread_exit crashes on self->prev==NULL. Capturing
-          the kernel-authoritative tid restores the CLONE_PARENT_SETTID
-          ordering Linux provides at clone() time. SYS_THREAD_EXIT
+          into self->tid before any __tl_lock can run (#111). With #112's
+          kernel-side CLONE_PARENT_SETTID, new->tid is already published by
+          the kernel before this child runs, so this self-set now writes
+          the SAME value the kernel did -- it is RETAINED as a second,
+          independent guarantee (defense-in-depth). The #111 self-set
+          closed the original race on its own: pre-#112 the parent assigned
+          new->tid only AFTER SYS_THREAD_SPAWN had made the child runnable,
+          so at -smp>1 the child could reach __pthread_exit's __tl_lock
+          with new->tid still 0; the recursive fast-path (lock==tid, 0==0
+          when the lock is free) then skipped the acquire, the child
+          unlinked itself holding no lock, and __pthread_exit crashed on
+          self->prev==NULL. SYS_THREAD_EXIT
           atomically zeroes that word and torpor-
           wakes UINT32_MAX threads on it, mirroring Linux's
           CLONE_CHILD_CLEARTID applied to the __thread_list_lock
@@ -392,20 +396,26 @@ CLAUDE.md 'Audit-triggering changes'.
  		}
  	}
  	__syscall(SYS_rt_sigprocmask, SIG_SETMASK, &args->sig_mask, 0, _NSIG/8);
-@@ -352,14 +378,37 @@
+@@ -352,14 +378,43 @@
  
  	__tl_lock();
  	if (!libc.threads_minus_1++) libc.need_locks = 1;
 -	ret = __clone((c11 ? start_c11 : start), stack, flags, args, &new->tid, TP_ADJ(new), &__thread_list_lock);
-+	/* pouch: SYS_THREAD_SPAWN(entry, sp_top, arg, tls) replaces the
-+	 * Linux clone path. The kernel's thread_user_trampoline (see
++	/* pouch: SYS_THREAD_SPAWN(entry, sp_top, arg, tls, ptid) replaces
++	 * the Linux clone path. The kernel's thread_user_trampoline (see
 +	 * arch/arm64/context.S) erets into EL0 with x0 = arg (the args
-+	 * struct pointer) and TPIDR_EL0 = tls. new->tid is assigned from
-+	 * the syscall return (Linux CLONE_PARENT_SETTID counterpart);
-+	 * the clear_child_tid wiring happens inside start() via
-+	 * SYS_SET_TID_ADDRESS, not at spawn time. The clone flags arg is
++	 * struct pointer) and TPIDR_EL0 = tls. The clone flags arg is
 +	 * unused — Thylacine has no clone-flag dispatch; all pthreads
 +	 * share VM / FS / FILES / SIGHAND / THREAD group by construction.
++	 *
++	 * #112: the 5th arg ptid = &new->tid restores Linux's CLONE_PARENT_-
++	 * SETTID at its ROOT -- the kernel publishes the child tid into
++	 * new->tid BEFORE making the child runnable, so neither the parent
++	 * (this thread) nor the child ever observes new->tid == 0. This
++	 * RETIRES the racy post-spawn `new->tid = ret` store; start()'s
++	 * #111 self-set (SYS_SET_TID_ADDRESS's return) stays as a second,
++	 * independent guarantee writing the identical value. clear_child_tid
++	 * is still wired inside start() via SYS_SET_TID_ADDRESS.
 +	 *
 +	 * F7 audit close: `stack` is 8-aligned at this point (post
 +	 * start_args subtraction; sizeof(start_args) is 8-aligned but
@@ -418,8 +428,8 @@ CLAUDE.md 'Audit-triggering changes'.
 +		long sp_arg = ((long)(uintptr_t)stack) & ~0xFL;
 +		ret = __syscall(SYS_thread_spawn,
 +			(c11 ? (long)(uintptr_t)start_c11 : (long)(uintptr_t)start),
-+			sp_arg, (long)(uintptr_t)args, (long)(uintptr_t)TP_ADJ(new));
-+		if (ret >= 0) new->tid = ret;
++			sp_arg, (long)(uintptr_t)args, (long)(uintptr_t)TP_ADJ(new),
++			(long)(uintptr_t)&new->tid);
 +	}
  
 -	/* All clone failures translate to EAGAIN. If explicit scheduling

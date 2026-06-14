@@ -1409,11 +1409,19 @@ static inline long t_thread_spawn(void (*entry)(void *), void *sp_top,
     register long x1 __asm__("x1") = (long)(unsigned long)sp_top;
     register long x2 __asm__("x2") = (long)(unsigned long)arg;
     register long x3 __asm__("x3") = (long)(unsigned long)tls;
+    /* #112: SYS_THREAD_SPAWN gained x4 = ptid (CLONE_PARENT_SETTID). libt's
+     * C callers (thread-probe / thread-fault-probe) read the new tid from
+     * the syscall return and have no parent-side tid word to publish, so x4
+     * is pinned to 0 (no publish) -- but it MUST be set explicitly, or the
+     * SVC would pass whatever garbage x4 held and the kernel would try to
+     * write the tid to a random user VA. A C caller wanting PARENT_SETTID
+     * would add the parameter then. */
+    register long x4 __asm__("x4") = 0;
     register long x8 __asm__("x8") = T_SYS_THREAD_SPAWN;
     __asm__ volatile (
         "svc #0"
         : "+r"(x0)
-        : "r"(x1), "r"(x2), "r"(x3), "r"(x8)
+        : "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x8)
         : "memory", "cc"
     );
     return x0;

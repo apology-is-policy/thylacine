@@ -664,7 +664,7 @@ enum {
     // thread-exit pair. The substrate over which pouch's pthread_create
     // / pthread_exit / pthread_join run. POUCH-DESIGN.md §7 [RESOLVED 7.3].
     //
-    // SYS_THREAD_SPAWN(entry_va, sp_va, arg, tls_va) → tid / -errno
+    // SYS_THREAD_SPAWN(entry_va, sp_va, arg, tls_va, ptid_va) → tid / -errno
     //   x0 = entry_va   user-VA of the entry function (EL0 PC)
     //   x1 = sp_va      user-VA of the new thread's user stack TOP (the
     //                   address that will be installed into SP_EL0; must
@@ -675,6 +675,16 @@ enum {
     //                   permitted (no TLS yet — musl's __pthread_self is
     //                   then a faulting deref until the entry function
     //                   does its own TLS setup).
+    //   x4 = ptid_va    CLONE_PARENT_SETTID (#112): user-VA of a 4-byte
+    //                   word the kernel publishes the new tid into BEFORE
+    //                   the child is made runnable. 0 opts out (no
+    //                   publish). Non-zero must be 4-byte aligned + within
+    //                   user VA (same gate as SYS_SET_TID_ADDRESS's
+    //                   tidptr); a bad ptid is -EINVAL. Because parent and
+    //                   child share the address space, this one write
+    //                   serves both — pouch passes &new->tid so neither
+    //                   the parent nor the child ever observes new->tid==0
+    //                   (retires the #111 tid==0 window at its root).
     //
     // Allocates a new Thread + 16 KiB kstack in the CALLING Proc (same
     // pgtable_root + ASID — the new thread shares the caller's address
@@ -686,14 +696,19 @@ enum {
     // negative -errno on failure (Linux/musl-numeric; pouch's
     // syscall_ret.c decodes [-4095, -2]):
     //   -EINVAL  bad alignment / out-of-bound entry_va / out-of-bound
-    //            sp_va / out-of-bound tls_va / caller is kproc
+    //            sp_va / out-of-bound tls_va / bad ptid_va / caller is kproc
+    //   -EAGAIN  per-Proc thread cap (PROC_THREAD_MAX) reached (#65, I-32)
     //   -ENOMEM  kstack alloc fail / Thread cache alloc fail
+    // The ptid publish is best-effort: a fault writing *ptid_va (a buggy
+    // caller; the address passed align+bound but is unmapped) is tolerated
+    // -- the spawn still succeeds and the tid is returned in x0 -- mirroring
+    // the exit-time clear_child_tid store's discipline.
     //
     // The new Thread inherits no user state from the caller — the entry
     // function is the responsible adult. fd inheritance is implicit
     // (single handle table per Proc); register state is the four parked
     // args + zeros.
-    SYS_THREAD_SPAWN = 41,   // arg: entry_va, sp_va, arg, tls_va
+    SYS_THREAD_SPAWN = 41,   // arg: entry_va, sp_va, arg, tls_va, ptid_va
 
     // SYS_THREAD_EXIT — terminate the calling Thread. NEVER returns.
     //   (no args)

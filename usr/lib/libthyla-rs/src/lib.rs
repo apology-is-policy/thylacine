@@ -1039,8 +1039,13 @@ pub unsafe fn t_torpor_wake(addr_va: *const u32, count: u32) -> i64 {
 // `entry_va`, `sp_va`, `tls_va` must point to user-VA memory the
 // caller controls (the caller owns the stack lifetime; libthyla-rs
 // does not allocate or free the stack).
+// x4 = ptid_va (#112, CLONE_PARENT_SETTID): user-VA of a 4-byte word the
+// kernel publishes the new tid into before the child runs, or 0 to opt out.
+// Native callers that read the tid from the return value (see spawn_raw)
+// pass 0; the pouch pthread layer passes &new->tid.
 #[inline(always)]
-pub unsafe fn t_thread_spawn(entry_va: u64, sp_va: u64, arg: u64, tls_va: u64) -> i64 {
+pub unsafe fn t_thread_spawn(entry_va: u64, sp_va: u64, arg: u64, tls_va: u64,
+                            ptid_va: u64) -> i64 {
     let mut x0: i64 = entry_va as i64;
     asm!(
         "svc #0",
@@ -1048,6 +1053,7 @@ pub unsafe fn t_thread_spawn(entry_va: u64, sp_va: u64, arg: u64, tls_va: u64) -
         in("x1") sp_va,
         in("x2") arg,
         in("x3") tls_va,
+        in("x4") ptid_va,
         in("x8") T_SYS_THREAD_SPAWN,
         options(nostack)
     );

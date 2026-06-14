@@ -85,7 +85,15 @@ pub type Tid = i32;
 pub unsafe fn spawn_raw(entry_va: u64, sp_va: u64, arg: u64, tls_va: u64) -> Result<Tid> {
     // SAFETY: forwarded to the kernel; correctness preconditions are
     // the caller's responsibility (see Safety above).
-    let rc = unsafe { t_thread_spawn(entry_va, sp_va, arg, tls_va) };
+    //
+    // ptid = 0: native callers read the new Tid from THIS call's return
+    // value, not from a child-visible shared word, so the CLONE_PARENT_-
+    // SETTID publish (#112) is unnecessary here. The native join protocol
+    // (see set_tid_address below) is set_tid_address + torpor, which the
+    // child wires for itself -- there is no racy parent-side tid store to
+    // close. The pouch pthread layer, which DOES have a child-read new->tid,
+    // passes &new->tid instead.
+    let rc = unsafe { t_thread_spawn(entry_va, sp_va, arg, tls_va, 0) };
     if rc < 0 {
         return Err(Error::from_syscall_return(rc).err().unwrap_or(Error::Io));
     }

@@ -78,12 +78,94 @@ static void worker_entry(void *arg) {
     t_thread_exit();
 }
 
+// --- #112 (CLONE_PARENT_SETTID) coverage --------------------------------
+//
+// The libt t_thread_spawn wrapper pins x4 = 0 (no publish), so a RAW 5-arg
+// SVC is needed to drive the ptid arg. This is the only in-tree test that
+// isolates the kernel publish from #111's child-side self-set: the pouch
+// E2E (pouch-hello-threads) keeps the #111 `start()` self-set, which MASKS
+// a broken kernel publish (the child sets its own tid regardless). Here,
+// `publish_worker` never touches `publish_word`, so ONLY the kernel's
+// pre-ready() store can change it from the sentinel.
+static long thread_spawn_raw5(void *entry, void *sp_top, void *arg,
+                              void *tls, void *ptid) {
+    register long x0 __asm__("x0") = (long)(unsigned long)entry;
+    register long x1 __asm__("x1") = (long)(unsigned long)sp_top;
+    register long x2 __asm__("x2") = (long)(unsigned long)arg;
+    register long x3 __asm__("x3") = (long)(unsigned long)tls;
+    register long x4 __asm__("x4") = (long)(unsigned long)ptid;
+    register long x8 __asm__("x8") = T_SYS_THREAD_SPAWN;
+    __asm__ volatile ("svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x8)
+        : "memory", "cc");
+    return x0;
+}
+
+static unsigned char publish_stack[WORKER_STACK_SIZE]
+    __attribute__((aligned(16)));
+static volatile unsigned int publish_word;   // #112 ptid target (kernel-written)
+static volatile unsigned int publish_join;   // clear_child_tid join word
+
+__attribute__((noreturn))
+static void publish_worker(void *arg) {
+    (void)arg;                             // never touches publish_word
+    (void)t_set_tid_address((void *)&publish_join);
+    t_thread_exit();
+}
+
 int main(void) {
     __atomic_store_n(&worker_tidptr,   TIDPTR_SENTINEL, __ATOMIC_RELEASE);
     __atomic_store_n(&shared_counter,  0u,              __ATOMIC_RELEASE);
 
     wa.tidptr_va  = &worker_tidptr;
     wa.counter_va = &shared_counter;
+
+    // --- #112 gate: a misaligned / out-of-bound ptid is rejected -EINVAL
+    // BEFORE any Thread is created. The alignment gate is load-bearing --
+    // without it the kernel would issue an UNaligned uaccess STR, which the
+    // EL1 fixup table does NOT catch -> kernel extinction. (-EINVAL ==
+    // -T_E_INVAL == -22.) These spawns are rejected, so they create no
+    // Thread and leave publish_stack untouched.
+    void *gsp = (void *)(publish_stack + WORKER_STACK_SIZE);
+    long grc = thread_spawn_raw5((void *)publish_worker, gsp, (void *)0,
+                                 (void *)0, (void *)0x100001ul);  // & 3 != 0
+    if (grc != -22) {
+        t_putstr("thread-probe: misaligned ptid not rejected -EINVAL (#112 gate)\n");
+        t_exits(1);
+    }
+    grc = thread_spawn_raw5((void *)publish_worker, gsp, (void *)0,
+                            (void *)0, (void *)0x800000000000ul); // >= 2^47
+    if (grc != -22) {
+        t_putstr("thread-probe: out-of-bound ptid not rejected -EINVAL (#112 gate)\n");
+        t_exits(1);
+    }
+
+    // --- #112 publish: the kernel writes the new tid into *ptid BEFORE
+    // ready(), so it is already set by the time the SVC returns -- regardless
+    // of whether the child has run. publish_worker never touches publish_word.
+    __atomic_store_n(&publish_word, 0xFFFFFFFFu,    __ATOMIC_RELEASE);
+    __atomic_store_n(&publish_join, TIDPTR_SENTINEL, __ATOMIC_RELEASE);
+    void *psp = (void *)(publish_stack + WORKER_STACK_SIZE);
+    long ptid_tid = thread_spawn_raw5((void *)publish_worker, psp, (void *)0,
+                                      (void *)0, (void *)&publish_word);
+    if (ptid_tid < 0) {
+        t_putstr("thread-probe: #112 ptid spawn failed\n");
+        t_exits(1);
+    }
+    if (__atomic_load_n(&publish_word, __ATOMIC_ACQUIRE) != (unsigned int)ptid_tid) {
+        t_putstr("thread-probe: kernel did NOT publish tid via ptid (#112)\n");
+        t_exits(1);
+    }
+    // Reap the publish worker via its clear_child_tid join word.
+    for (;;) {
+        long rc = t_torpor_wait((unsigned int *)&publish_join, TIDPTR_SENTINEL, -1);
+        if (rc != T_TORPOR_OK) {
+            t_putstr("thread-probe: #112 publish-worker join failed\n");
+            t_exits(1);
+        }
+        if (__atomic_load_n(&publish_join, __ATOMIC_ACQUIRE) == 0u) break;
+    }
 
     void *sp_top = (void *)(worker_stack + WORKER_STACK_SIZE);
     long tid = t_thread_spawn(worker_entry, sp_top, &wa, (void *)0);
@@ -115,6 +197,7 @@ int main(void) {
         t_exits(1);
     }
 
-    t_putstr("thread-probe: ok (spawn + tid_address + exit + join verified)\n");
+    t_putstr("thread-probe: ok (spawn + tid_address + exit + join + "
+             "#112 ptid publish/gate verified)\n");
     t_exits(0);
 }

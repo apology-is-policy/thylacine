@@ -30,7 +30,7 @@ SYS_THREAD_SPAWN = 41
 SYS_THREAD_EXIT  = 42
 ```
 
-### `SYS_THREAD_SPAWN(entry_va, sp_va, arg, tls_va) → tid / -errno`
+### `SYS_THREAD_SPAWN(entry_va, sp_va, arg, tls_va, ptid_va) → tid / -errno`
 
 | Register | Meaning |
 |---|---|
@@ -38,6 +38,7 @@ SYS_THREAD_EXIT  = 42
 | `x1` | `sp_va` — user-VA of the new Thread's user stack TOP. Non-zero; 16-byte aligned (AAPCS64); below `USER_VA_TOP`. |
 | `x2` | `arg` — opaque value passed as x0 (AAPCS64 arg-0) to `entry`. The kernel never dereferences it. |
 | `x3` | `tls_va` — initial `TPIDR_EL0` value (TLS base). `0` permitted (no TLS — entry must install one before any TLS deref). Non-zero values must be below `USER_VA_TOP`. |
+| `x4` | `ptid_va` — **CLONE_PARENT_SETTID (#112)**: user-VA of a 4-byte word the kernel publishes the new tid into BEFORE the child is made runnable. `0` opts out (no publish). Non-zero must be 4-byte aligned + below `USER_VA_TOP` (the `SYS_SET_TID_ADDRESS` tidptr gate). Because parent and child share the address space, this one store serves both — pouch passes `&new->tid` so neither side ever observes `new->tid == 0` (retires the #111 race at its root). The publish is best-effort: a fault writing `*ptid_va` is tolerated (the tid is still returned in x0), mirroring the exit-time `clear_child_tid` store. |
 | `x8` | syscall number = 41 |
 
 **Returns** (Linux/musl-numeric, decoded by pouch's `syscall_ret.c` as `-errno`):
@@ -45,7 +46,8 @@ SYS_THREAD_EXIT  = 42
 | Return | Meaning |
 |---|---|
 | `> 0` | new Thread's tid |
-| `-22 (-EINVAL)` | bad alignment / out-of-bound `entry_va` / out-of-bound `sp_va` / out-of-bound `tls_va` / caller is `kproc` |
+| `-22 (-EINVAL)` | bad alignment / out-of-bound `entry_va` / out-of-bound `sp_va` / out-of-bound `tls_va` / bad `ptid_va` (misaligned or out-of-bound) / caller is `kproc` |
+| `-11 (-EAGAIN)` | per-Proc thread cap (`PROC_THREAD_MAX`) reached (#65, I-32) |
 | `-12 (-ENOMEM)` | Thread cache alloc fail / kstack alloc fail |
 
 ### `SYS_THREAD_EXIT() → never returns`
@@ -123,14 +125,17 @@ SP_EL0 install at EL1h: the kernel runs uniformly at EL1h (SPSel=1, invariant I-
 
 ### `sys_thread_spawn_handler` (`kernel/syscall.c`)
 
-Validates the four args, calls `thread_create_user`, `ready()`s the new Thread, returns the tid. Argument validation:
+Validates the five args, calls `thread_create_user`, publishes the tid into `*ptid_va` (#112), `ready()`s the new Thread, returns the tid. Argument validation:
 
 - `entry_va`: non-NULL; below `UACCESS_USER_VA_TOP` (= `1 << 47`). No alignment requirement.
 - `sp_va`: non-NULL; 16-byte aligned (AAPCS64); below `UACCESS_USER_VA_TOP`.
 - `tls_va`: `0` permitted; non-zero must be below `UACCESS_USER_VA_TOP`. No alignment requirement (TLS layout is libc-defined).
+- `ptid_va` (#112): `0` permitted (no CLONE_PARENT_SETTID publish); non-zero must be 4-byte aligned + below `UACCESS_USER_VA_TOP` (the publish uses `uaccess_store_u32`, which faults on a misaligned target — same gate as `SYS_SET_TID_ADDRESS`'s tidptr).
 - Caller must NOT be `kproc()` and must have `pgtable_root != 0` (i.e. a userspace Proc with an installed address space). Defense-in-depth: kproc threads never execute SVC, but the check fail-closes if somehow a kproc thread reaches the handler.
 
-On any validation failure: `-EINVAL` (`-22`). On `thread_create_user` returning NULL (Thread cache or kstack alloc fail): `-ENOMEM` (`-12`).
+On any validation failure: `-EINVAL` (`-22`). At `PROC_THREAD_MAX` for a non-SYSTEM Proc (#65, I-32): `-EAGAIN` (`-11`). On `thread_create_user` returning NULL (Thread cache or kstack alloc fail): `-ENOMEM` (`-12`).
+
+**The CLONE_PARENT_SETTID publish (#112).** After `thread_create_user` succeeds and BEFORE `ready(nt)`, if `ptid_va != 0` the handler does `uaccess_store_u32(ptid_va, (u32)nt->tid)`. Parent and child share the address space (one `pgtable_root`), so this single store serves both; `ready()`'s run-queue lock release is the happens-before edge that carries it to whichever CPU first picks up the child, so **the child can never observe a 0 tid**. This retires the #111 tid==0 race at its root — the child no longer depends on a racing parent-side `new->tid = ret` store (pouch's, now removed); pouch passes `&new->tid`. `nt->tid` is read for the store BEFORE `ready()`, so the load cannot race the child's first dispatch + eventual `thread_free`. The store is **best-effort**: a fault (a `ptid_va` that passed align+bound but is unmapped — a buggy caller; the live `pthread_t` the parent just allocated is always mapped) is tolerated — not a spawn failure, not an extinction — because the tid is returned authoritatively in x0 regardless. This matches the exit-time `clear_child_tid` store's discipline and keeps the new Thread off any rollback path (no `thread_free` of a never-readied Thread on a transient uaccess fault).
 
 ### `thread_exit_self` (`kernel/proc.c`)
 
@@ -170,7 +175,7 @@ Alignment is NOT validated in the asm; the C caller (here `thread_clear_child_ti
 
 ### Spawn-to-exit per-Thread
 
-1. **Userspace**: pouch's `pthread_create` (or any caller via `t_thread_spawn`) allocates a stack region (via `SYS_BURROW_ATTACH`) + a `pthread_t` struct containing the tid storage + any per-pthread state. Calls `SYS_THREAD_SPAWN(entry, sp_top, arg, tls)`. Returns the new Thread's tid.
+1. **Userspace**: pouch's `pthread_create` (or any caller via `t_thread_spawn`) allocates a stack region (via `SYS_BURROW_ATTACH`) + a `pthread_t` struct containing the tid storage + any per-pthread state. Calls `SYS_THREAD_SPAWN(entry, sp_top, arg, tls, &new->tid)` — passing `&new->tid` as the `ptid_va` arg so the kernel publishes the tid there before the child runs (#112, CLONE_PARENT_SETTID). Native libthyla-rs callers (`spawn_raw`) pass `ptid_va = 0` and read the tid from the syscall return instead. Returns the new Thread's tid.
 
 2. **Kernel**: `sys_thread_spawn_handler` validates → `thread_create_user` allocates Thread + kstack + lays out ctx → `ready()` inserts in run-tree → returns tid.
 
@@ -290,6 +295,8 @@ joey's main runs this on every boot via a small `t_spawn("thread-probe")` + `t_w
 ## Status
 
 **Implemented at P6-pouch-threads sub-chunk 9a** (2026-05-23). Audit-bearing — focused opus-prosecutor round complete: **0 P0 / 3 P1 / 3 P2 / 7 P3, all dispositioned**. The three P1s — F1 list-mutation race, F2 entry_va misalignment ELE, F3 clear_child_tid handoff ordering race — were the audit's load-bearing surface; each is fixed in the close commit with documentation, defensive code, and (for F2) a deterministic regression. Closed-list: `memory/audit_p6_pouch_threads_9a_closed_list.md`.
+
+**`ptid_va` / CLONE_PARENT_SETTID added at #112** (2026-06-14). The 5th arg `x4 = ptid_va` — the kernel-side counterpart of Linux's `CLONE_PARENT_SETTID`. It is the defense-in-depth follow-up to #111 (the SMP-only `new->tid == 0` pthread race, closed from the child side by `start()`'s self-set): the kernel now publishes the tid into `*ptid_va` before `ready(nt)`, so the child can never observe 0 and the racy parent-side store is removed. ABI change — every `SYS_THREAD_SPAWN` caller now sets x4 explicitly (pouch → `&new->tid`; native libthyla-rs `spawn_raw` + the libt `t_thread_spawn` wrapper → `0`). Verified: default 880/880 + boot OK + 0 EXTINCTION + `pouch-hello-threads` 5000/5000 (joined) + the SMP gate (default+UBSan × smp4/smp8, N=10) **PASS, 0 corruption**. Audit closed-list: `memory/audit_112_closed_list.md`.
 
 `SYS_THREAD_SPAWN` (= 41) and `SYS_THREAD_EXIT` (= 42) live alongside `SYS_TORPOR_WAIT` / `SYS_TORPOR_WAKE` (39 / 40) as the four kernel-side primitives Thylacine's pthread implementation needs. POUCH-DESIGN.md §13's "Multithreaded test (N threads, shared mutex-protected counter, join) passes" exit criterion is partially closed by 9a (`/thread-probe` proves spawn + exit + clear-tid join); the full pthread mutex/condvar layer lands at 9b; the multi-thread proving binary with TSan validation lands at 9c.
 
