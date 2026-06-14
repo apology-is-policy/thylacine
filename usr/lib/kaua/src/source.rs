@@ -45,10 +45,21 @@ pub struct PollSource {
     parser: Parser,
     inbuf: [u8; READ_CHUNK],
     eof: bool,
+    /// Bytes already pulled from fd 0 before the loop began (the launch
+    /// size-probe's pre-reply type-ahead, kaua::query #117-F2) -- fed through
+    /// the parser on the first `poll` so a keystroke typed at launch is not lost.
+    pending: Vec<u8>,
 }
 
 impl PollSource {
     pub fn new() -> Self {
+        Self::with_pending(Vec::new())
+    }
+
+    /// Construct a source that first replays `pending` (bytes read from fd 0
+    /// before this source existed -- e.g. `kaua::query::terminal_size`'s
+    /// pre-reply type-ahead) through the VT parser, then reads fd 0 as usual.
+    pub fn with_pending(pending: Vec<u8>) -> Self {
         let mut poll = PollSet::new();
         poll.add(&stdin(), PollEvents::READ);
         PollSource {
@@ -57,6 +68,7 @@ impl PollSource {
             parser: Parser::new(),
             inbuf: [0; READ_CHUNK],
             eof: false,
+            pending,
         }
     }
 }
@@ -69,6 +81,26 @@ impl Default for PollSource {
 
 impl EventSource for PollSource {
     fn poll(&mut self, timeout: PollTimeout) -> Result<Vec<Event>> {
+        // Replay any pre-loop type-ahead (kaua::query #117-F2) through the same
+        // parser before touching fd 0. If it decodes to keys, return them this
+        // round; if it decodes to nothing (a terminal-volunteered sequence),
+        // fall through to a normal blocking poll (never return spuriously empty).
+        if !self.pending.is_empty() {
+            let mut out = Vec::new();
+            let bytes = core::mem::take(&mut self.pending);
+            for b in bytes {
+                if let Some(e) = self.parser.feed(b) {
+                    out.push(Event::Key(e));
+                }
+            }
+            if let Some(e) = self.parser.flush() {
+                out.push(Event::Key(e));
+            }
+            if !out.is_empty() {
+                return Ok(out);
+            }
+        }
+
         let mut out = Vec::new();
         let mut readable = false;
         for ev in self.poll.poll(timeout)? {

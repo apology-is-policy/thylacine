@@ -9,36 +9,55 @@
 // the cursor. The clamped position IS the screen size. A caller (nora) uses it
 // to size the viewport, falling back to a fixed default on no reply.
 //
-// SPLIT: `parse_cpr` is pure (a byte-slice parser) and host-tested; only the
-// fd-0/fd-1 I/O (`terminal_size`) needs libthyla-rs and is backend-gated.
+// SPLIT: `parse_cpr`/`parse_cpr_at` are pure (byte-slice parsers) and
+// host-tested; only the fd-0/fd-1 I/O (`terminal_size`) needs libthyla-rs and is
+// backend-gated.
 //
 // CAPABILITY DISCIPLINE (KAUA.md 3.5 / 5; I-27): like kaua::term + kaua::source
 // this touches ONLY fd 0 (read) and fd 1 (write) -- never the line discipline
 // (consctl), never console-attach. The probe is a bounded request/reply, not a
 // steady-state input path: it is the launch handshake the binary runs ONCE,
-// before the PollSource loop. Bytes are read one at a time and the read stops at
-// the `R` terminator, so any input typed during the launch window stays in the
-// kernel fd buffer for the steady-state PollSource (no lost keystroke). The read
-// is deadline-bounded (a dumb terminal / the non-interactive harness never
-// replies -> the first poll times out -> fallback) and the staging buffer is
-// fixed-size (no unbounded growth on a garbage stream). The poll + read are #811
-// death-interruptible, so a dying app unwinds during the handshake.
+// before the PollSource loop, with the console already raw (the caller's job).
+//
+// LOSSLESS (the #117-audit F2 fix): every byte read from fd 0 that is NOT part
+// of the CPR reply -- a keystroke the user typed during the launch window -- is
+// returned in `ProbeResult.pending` and fed to the steady-state PollSource
+// (`PollSource::with_pending`), so type-ahead at launch is preserved, not
+// dropped. The read also STOPS at the `R` terminator, so any byte arriving after
+// the reply stays in the kernel ring for the PollSource. Nothing is lost.
+//
+// BOUNDED (the #117-audit F1 fix): the FIRST poll waits the full `timeout_ms`
+// (the reply may not have started); once a byte has arrived the rest of the
+// reply is already in the ring (the local console delivers a logical input in
+// one drain, KAUA.md 3.5), so subsequent polls are non-blocking -- the TOTAL
+// wait is ~timeout_ms regardless of byte cadence (a dribbling peer cannot
+// multiply the budget by CPR_BUF_CAP). A reply split across ring drains by a
+// non-local terminal simply falls back to the default. The staging buffer is a
+// fixed `[u8; 32]`; the poll + read are #811 death-interruptible.
 
 /// Largest reply we stage before giving up. A CPR reply is `ESC[` + <=5 rows
 /// digits + `;` + <=5 cols digits + `R` = at most 14 bytes; 32 tolerates minor
-/// leading noise (a stray sequence) and bounds the read.
+/// leading noise (a stray sequence or a type-ahead keystroke) and bounds the
+/// read.
 const CPR_BUF_CAP: usize = 32;
 
 /// Parse a Cursor-Position-Report `ESC[<rows>;<cols>R` out of `buf`, returning
 /// `(cols, rows)` = `(width, height)`. Tolerates bytes before the `ESC` (scans
-/// for the first well-formed report) and after the `R` (the caller stops
-/// reading at `R`). Returns `None` if no well-formed, non-zero report is found.
+/// for the first well-formed report) and after the `R`. `None` if no
+/// well-formed, non-zero report is found.
 pub fn parse_cpr(buf: &[u8]) -> Option<(u16, u16)> {
+    parse_cpr_at(buf).map(|(cols, rows, _)| (cols, rows))
+}
+
+/// Like `parse_cpr` but also returns the byte index of the matched report's
+/// `ESC` -- so the caller can split the bytes BEFORE the report (type-ahead
+/// keystrokes) from the report itself. `(cols, rows, esc_index)`.
+pub fn parse_cpr_at(buf: &[u8]) -> Option<(u16, u16, usize)> {
     let mut i = 0;
     while i + 1 < buf.len() {
         if buf[i] == 0x1b && buf[i + 1] == b'[' {
-            if let Some(res) = parse_cpr_body(&buf[i + 2..]) {
-                return Some(res);
+            if let Some((cols, rows)) = parse_cpr_body(&buf[i + 2..]) {
+                return Some((cols, rows, i));
             }
         }
         i += 1;
@@ -88,16 +107,26 @@ fn parse_num(s: &[u8], idx: &mut usize) -> Option<u16> {
     Some(n as u16)
 }
 
-/// Query the terminal size via a CPR round-trip, waiting up to `timeout_ms` for
-/// the reply. Returns `(cols, rows)` = `(width, height)`, or `None` on timeout /
-/// EOF / no reply / a malformed reply -- the caller then uses a fixed default.
-///
-/// Must be called with the console already in raw mode (the caller's job -- for
-/// nora, `ut` sets raw via consctl before the spawn) and before entering the
-/// alternate screen; the cursor is saved/restored so the visible screen is
-/// undisturbed.
+/// The result of a size probe: the parsed size (or `None` to fall back) plus any
+/// bytes read from fd 0 that were NOT part of the reply (type-ahead keystrokes
+/// the caller must feed to the steady-state reader -- `PollSource::with_pending`
+/// -- so they are not lost).
 #[cfg(feature = "backend")]
-pub fn terminal_size(timeout_ms: u32) -> Option<(u16, u16)> {
+pub struct ProbeResult {
+    pub size: Option<(u16, u16)>,
+    pub pending: alloc::vec::Vec<u8>,
+}
+
+/// Query the terminal size via a CPR round-trip, waiting up to `timeout_ms` for
+/// the reply to START (then non-blocking; see the module header). Returns the
+/// parsed `(cols, rows)` (or `None` on timeout / EOF / a malformed reply -- the
+/// caller then uses a fixed default) plus any pre-reply type-ahead bytes.
+///
+/// Must be called with the console already in raw mode (the caller's job) and
+/// before entering the alternate screen; the cursor is saved/restored so the
+/// visible screen is undisturbed.
+#[cfg(feature = "backend")]
+pub fn terminal_size(timeout_ms: u32) -> ProbeResult {
     use crate::encode::{PARK_CURSOR_FAR, REQUEST_CURSOR_POS, RESTORE_CURSOR, SAVE_CURSOR};
     use libthyla_rs::io::{stdout, Write};
 
@@ -108,17 +137,28 @@ pub fn terminal_size(timeout_ms: u32) -> Option<(u16, u16)> {
         && out.write_all(PARK_CURSOR_FAR).is_ok()
         && out.write_all(REQUEST_CURSOR_POS).is_ok()
         && out.flush().is_ok();
-    let result = if sent { read_cpr(timeout_ms) } else { None };
+    let result = if sent {
+        read_cpr(timeout_ms)
+    } else {
+        ProbeResult {
+            size: None,
+            pending: alloc::vec::Vec::new(),
+        }
+    };
     let _ = out.write_all(RESTORE_CURSOR);
     let _ = out.flush();
     result
 }
 
-/// Read the CPR reply from fd 0 within the deadline. Polls before each byte so
-/// a read never blocks; stops at the `R` terminator (leaving any later bytes in
-/// the kernel buffer for the steady-state PollSource); fixed-size staging.
+/// Read the CPR reply from fd 0. Polls before each byte (a read never blocks),
+/// the first poll on the full deadline and the rest non-blocking (F1: the reply
+/// is already in the ring once the first byte lands -- bounded total wait).
+/// Stops at the `R` terminator (post-reply bytes stay in the kernel ring for
+/// PollSource). Returns the parsed size plus any pre-reply bytes (F2: type-ahead
+/// is preserved, not dropped). Drains on `readable` even if HUP is co-reported
+/// (F3).
 #[cfg(feature = "backend")]
-fn read_cpr(timeout_ms: u32) -> Option<(u16, u16)> {
+fn read_cpr(timeout_ms: u32) -> ProbeResult {
     use libthyla_rs::io::{stdin, Read};
     use libthyla_rs::poll::{PollEvents, PollSet, PollTimeout};
 
@@ -128,44 +168,58 @@ fn read_cpr(timeout_ms: u32) -> Option<(u16, u16)> {
 
     let mut buf = [0u8; CPR_BUF_CAP];
     let mut len = 0usize;
-    // At most CPR_BUF_CAP bytes; the loop bound == the buffer bound, so each
-    // write `buf[len]` is in range and a reply with no `R` terminates as None.
+    let mut first = true;
+    // The loop bound == the buffer bound, so each `buf[len]` write is in range
+    // and a reply with no `R` terminates by falling through to the None return.
     while len < CPR_BUF_CAP {
+        let to = if first {
+            PollTimeout::Millis(timeout_ms)
+        } else {
+            PollTimeout::Zero
+        };
         let mut readable = false;
-        match poll.poll(PollTimeout::Millis(timeout_ms)) {
+        match poll.poll(to) {
             Ok(results) => {
                 for ev in results {
-                    if ev.fd == 0 {
-                        if ev.is_readable() {
-                            readable = true;
-                        }
-                        if ev.is_hup() || ev.is_err() {
-                            return None;
-                        }
+                    if ev.fd == 0 && ev.is_readable() {
+                        readable = true;
                     }
                 }
             }
-            Err(_) => return None,
+            Err(_) => break,
         }
+        // Not readable: the deadline elapsed (no reply / an incomplete split
+        // reply / a bare HUP) -> stop. Reading on `readable` even when HUP is
+        // co-reported (F3) drains a fully-buffered reply before honoring a HUP.
         if !readable {
-            // The deadline elapsed with no byte: a terminal that does not answer
-            // CPR (dumb terminal / the non-interactive harness) -> fall back.
-            return None;
+            break;
         }
+        first = false;
         let mut b = [0u8; 1];
         match inp.read(&mut b) {
-            Ok(0) => return None, // EOF
+            Ok(0) => break, // EOF
             Ok(_) => {
                 buf[len] = b[0];
                 len += 1;
                 if b[0] == b'R' {
-                    return parse_cpr(&buf[..len]);
+                    if let Some((cols, rows, esc)) = parse_cpr_at(&buf[..len]) {
+                        return ProbeResult {
+                            size: Some((cols, rows)),
+                            pending: buf[..esc].to_vec(), // bytes before the report
+                        };
+                    }
+                    // An 'R' that does not complete a CPR (a stray keystroke):
+                    // keep reading for the real reply.
                 }
             }
-            Err(_) => return None,
+            Err(_) => break,
         }
     }
-    None
+    // No usable reply: every byte read is type-ahead to preserve.
+    ProbeResult {
+        size: None,
+        pending: buf[..len].to_vec(),
+    }
 }
 
 #[cfg(test)]
@@ -211,5 +265,15 @@ mod tests {
         // A digit flood cannot overflow; it saturates (the caller bounds it
         // further to a sane viewport).
         assert_eq!(parse_cpr(b"\x1b[99999;99999R"), Some((65535, 65535)));
+    }
+
+    #[test]
+    fn parse_cpr_at_reports_the_report_offset() {
+        // The esc index lets the reader split pre-reply type-ahead (F2). With no
+        // leading bytes the report starts at 0; with a typed 'i' before it, at 1.
+        assert_eq!(parse_cpr_at(b"\x1b[24;80R"), Some((80, 24, 0)));
+        assert_eq!(parse_cpr_at(b"i\x1b[24;80R"), Some((80, 24, 1)));
+        // -> the caller takes buf[..1] = "i" as pending type-ahead.
+        assert_eq!(parse_cpr_at(b"abc\x1b[5;5R"), Some((5, 5, 3)));
     }
 }

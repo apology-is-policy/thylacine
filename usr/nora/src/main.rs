@@ -101,7 +101,9 @@ pub extern "C" fn rs_main() -> i64 {
     // when the terminal does not answer. The console is already raw (ut set it
     // before the spawn) and we have not yet entered the alt-screen, so the probe
     // saves/restores the cursor and leaves the visible screen undisturbed.
-    let (cols, rows) = kaua::query::terminal_size(SIZE_QUERY_TIMEOUT_MS)
+    let probe = kaua::query::terminal_size(SIZE_QUERY_TIMEOUT_MS);
+    let (cols, rows) = probe
+        .size
         .map(|(c, r)| (c.clamp(MIN_DIM, MAX_DIM), r.clamp(MIN_DIM, MAX_DIM)))
         .unwrap_or((COLS, ROWS));
 
@@ -112,7 +114,9 @@ pub extern "C" fn rs_main() -> i64 {
             return 1;
         }
     };
-    let mut src = PollSource::new();
+    // Replay any keystroke typed during the launch probe so type-ahead is not
+    // lost (kaua::query #117-audit F2).
+    let mut src = PollSource::with_pending(probe.pending);
 
     let code = run(&mut term, &mut src, &mut ed);
     // Explicit restore (Drop also runs it; both are idempotent).

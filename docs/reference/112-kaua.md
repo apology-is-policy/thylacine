@@ -198,27 +198,40 @@ size; a live mid-edit resize (no winsize signal over UART) is still a seam, and
 ### `kaua::query`
 
 ```rust
-fn parse_cpr(buf: &[u8]) -> Option<(u16, u16)>     // pure: (cols, rows)
+fn parse_cpr(buf: &[u8]) -> Option<(u16, u16)>           // pure: (cols, rows)
+fn parse_cpr_at(buf: &[u8]) -> Option<(u16, u16, usize)> // + the report's ESC index
 #[cfg(feature = "backend")]
-fn terminal_size(timeout_ms: u32) -> Option<(u16, u16)>   // (cols, rows) or None
+struct ProbeResult { size: Option<(u16, u16)>, pending: Vec<u8> }
+#[cfg(feature = "backend")]
+fn terminal_size(timeout_ms: u32) -> ProbeResult
 ```
 
 The launch-time terminal-size handshake (#117): `terminal_size` writes
 `ESC[s ESC[9999;9999H ESC[6n` to fd 1 (save cursor, park it far so the terminal
 clamps it to the bottom-right, request its position), reads the reply
-`ESC[<rows>;<cols>R` from fd 0 within `timeout_ms`, restores the cursor, and
-returns `(cols, rows)`. `None` on timeout / EOF / a malformed reply — the caller
-then uses a fixed default (nora: 80×24). The reply parse is the pure,
-host-tested `parse_cpr`; only the fd I/O is backend-gated.
+`ESC[<rows>;<cols>R` from fd 0, restores the cursor, and returns the parsed
+`(cols, rows)` (or `None` on timeout / EOF / a malformed reply — the caller then
+uses a fixed default, nora: 80×24). The reply parse is the pure, host-tested
+`parse_cpr`/`parse_cpr_at`; only the fd I/O is backend-gated.
 
 **Capability + I-27** (like `term`/`source`): touches only fd 0 (read) + fd 1
 (write), never consctl, never console-attach. It is a one-shot bounded
 request/reply run *before* the `PollSource` loop and with the console already
-raw (the caller's job). Bytes are read one at a time and the read **stops at the
-`R` terminator**, so any keystroke typed during the launch window stays in the
-kernel fd buffer for the steady-state `PollSource` (no lost input); the staging
-buffer is a fixed `[u8; 32]` (no unbounded growth on a garbage stream); the poll
-+ read are #811 death-interruptible.
+raw (the caller's job); the staging buffer is a fixed `[u8; 32]`; the poll +
+read are #811 death-interruptible.
+
+**Bounded (the #117-audit F1 fix):** the FIRST poll waits the full `timeout_ms`;
+once a byte arrives the rest of the reply is already in the ring (the local
+console delivers a logical input in one drain, §3.5), so subsequent polls are
+non-blocking — the *total* wait is ~`timeout_ms` regardless of byte cadence (a
+dribbling peer cannot multiply the budget by 32×).
+
+**Lossless (the #117-audit F2 fix):** the read **stops at the `R` terminator**
+(post-reply bytes stay in the kernel ring for `PollSource`), and any bytes read
+*before* the report — a keystroke typed during the launch window — are returned
+in `ProbeResult.pending`. The caller hands them to `PollSource::with_pending`,
+which replays them through the same VT parser on the first `poll`, so launch
+type-ahead is preserved (not dropped) and in wire order.
 
 ### The v1.0 event loop
 
@@ -379,7 +392,7 @@ The `input::Parser` (file header is authoritative):
 
 ## Tests (`cargo test -p kaua --no-default-features --target <host>`)
 
-68 host unit tests over the pure layers:
+69 host unit tests over the pure layers:
 
 - `style` (3) — the `Attr` bitset, `Style` builders, the `Reset/Reset/None`
   default.
@@ -400,9 +413,11 @@ The `input::Parser` (file header is authoritative):
 - `layout` (8) — editor body + status line, Pct→Fill, two-Fill remainder split,
   fixed-only trailing space, over-subscribed clamp, margin, empty, Min floor
   grows.
-- `query` (5) — `parse_cpr`: a well-formed report → `(cols, rows)`, leading
+- `query` (6) — `parse_cpr`: a well-formed report → `(cols, rows)`, leading
   noise + trailing bytes tolerated, a non-CPR CSI skipped before the report,
-  malformed reports rejected, a digit flood saturates (no overflow).
+  malformed reports rejected, a digit flood saturates (no overflow); plus
+  `parse_cpr_at` reporting the report's ESC offset (so the reader can split
+  pre-report type-ahead into `pending`).
 - `widget` (12) — Block border+title+inner / no-border / too-small-skips,
   Paragraph clip / hard-wrap / scroll / blank lines, List selection highlight /
   offset scroll, StatusLine three segments / fill bg, Span constructors.
