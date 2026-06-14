@@ -26,6 +26,7 @@ pub mod encode;
 pub mod event;
 pub mod input;
 pub mod layout;
+pub mod query;
 pub mod rect;
 pub mod style;
 pub mod widget;
@@ -43,6 +44,8 @@ pub use rect::Rect;
 pub use style::{Attr, Color, Style};
 pub use widget::{Block, List, Paragraph, Span, StatusLine, Widget};
 
+#[cfg(feature = "backend")]
+pub use query::terminal_size;
 #[cfg(feature = "backend")]
 pub use source::{EventSource, PollSource};
 #[cfg(feature = "backend")]

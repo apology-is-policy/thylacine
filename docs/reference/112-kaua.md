@@ -45,6 +45,7 @@ not build on the host).
 | `widget` | `Widget` + Paragraph/Block/List/StatusLine | always | yes | no |
 | `source` | `EventSource` + `PollSource` (fd-0 input) | `backend` | no (device) | **yes** (fd discipline) |
 | `term` | the fd-1 `Terminal` (screen output) | `backend` | no (device) | **yes** (fd discipline) |
+| `query` | CPR size handshake: `parse_cpr` (pure) + `terminal_size` (fd 0/1) | parser always; I/O `backend` | parser only | **yes** (fd discipline) |
 
 The pure layers (everything but `source`/`term`) are terminal-free values — a
 bug there corrupts only the app's own screen, never a privilege/safety boundary
@@ -189,9 +190,35 @@ fn leave(&mut self) -> Result<()>                 // restore (also via Drop)
 
 `Result` is `libthyla_rs::err::Result`. `Terminal` is **output only** — input
 moved to `kaua::source` (the Loom-seam split); pair a `Terminal` with a
-`PollSource` in the loop. The console size is fixed at `enter()` (no
-winsize-query syscall at v1.0 — a CPR round-trip + a resize note is a seam;
-`resize()` is the future signal's entry point).
+`PollSource` in the loop. The console size is fixed at `enter()` — the caller
+measures it first via `kaua::query::terminal_size` (below) and passes the real
+size; a live mid-edit resize (no winsize signal over UART) is still a seam, and
+`resize()` is its future entry point.
+
+### `kaua::query`
+
+```rust
+fn parse_cpr(buf: &[u8]) -> Option<(u16, u16)>     // pure: (cols, rows)
+#[cfg(feature = "backend")]
+fn terminal_size(timeout_ms: u32) -> Option<(u16, u16)>   // (cols, rows) or None
+```
+
+The launch-time terminal-size handshake (#117): `terminal_size` writes
+`ESC[s ESC[9999;9999H ESC[6n` to fd 1 (save cursor, park it far so the terminal
+clamps it to the bottom-right, request its position), reads the reply
+`ESC[<rows>;<cols>R` from fd 0 within `timeout_ms`, restores the cursor, and
+returns `(cols, rows)`. `None` on timeout / EOF / a malformed reply — the caller
+then uses a fixed default (nora: 80×24). The reply parse is the pure,
+host-tested `parse_cpr`; only the fd I/O is backend-gated.
+
+**Capability + I-27** (like `term`/`source`): touches only fd 0 (read) + fd 1
+(write), never consctl, never console-attach. It is a one-shot bounded
+request/reply run *before* the `PollSource` loop and with the console already
+raw (the caller's job). Bytes are read one at a time and the read **stops at the
+`R` terminator**, so any keystroke typed during the launch window stays in the
+kernel fd buffer for the steady-state `PollSource` (no lost input); the staging
+buffer is a fixed `[u8; 32]` (no unbounded growth on a garbage stream); the poll
++ read are #811 death-interruptible.
 
 ### The v1.0 event loop
 
@@ -352,7 +379,7 @@ The `input::Parser` (file header is authoritative):
 
 ## Tests (`cargo test -p kaua --no-default-features --target <host>`)
 
-63 host unit tests over the pure layers:
+68 host unit tests over the pure layers:
 
 - `style` (3) — the `Attr` bitset, `Style` builders, the `Reset/Reset/None`
   default.
@@ -373,6 +400,9 @@ The `input::Parser` (file header is authoritative):
 - `layout` (8) — editor body + status line, Pct→Fill, two-Fill remainder split,
   fixed-only trailing space, over-subscribed clamp, margin, empty, Min floor
   grows.
+- `query` (5) — `parse_cpr`: a well-formed report → `(cols, rows)`, leading
+  noise + trailing bytes tolerated, a non-CPR CSI skipped before the report,
+  malformed reports rejected, a digit flood saturates (no overflow).
 - `widget` (12) — Block border+title+inner / no-border / too-small-skips,
   Paragraph clip / hard-wrap / scroll / blank lines, List selection highlight /
   offset scroll, StatusLine three segments / fill bg, Span constructors.
@@ -401,9 +431,11 @@ thin glue over the host-tested pure layers and are validated end-to-end by the
 
 ## Known caveats / seams
 
-- **No winsize query** — size is fixed at `enter()`; `resize()` exists for a
-  future signal. A CPR (`ESC[6n` → `ESC[<r>;<c>R`, which the parser already
-  consumes safely) round-trip is the seam.
+- **Winsize: query-at-launch only** — `kaua::query::terminal_size` (#117)
+  measures the size at launch via the CPR round-trip; `enter()` then takes the
+  measured size. A live mid-edit *resize* still has no signal source (no SIGWINCH
+  over UART) — `resize()` is its entry point; a re-query keybind / periodic poll
+  is the v1.x answer.
 - **Width-1 cells** — wide CJK / combining clusters are a documented seam (the
   full `unicode-width` table); v1.0 assumes one column per `char`.
 - **Default `backend` feature** — host tests MUST pass `--no-default-features`

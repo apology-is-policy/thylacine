@@ -21,6 +21,16 @@ pub const ENABLE_AUTOWRAP: &[u8] = b"\x1b[?7h";
 pub const CLEAR_SCREEN: &[u8] = b"\x1b[2J";
 pub const RESET_SGR: &[u8] = b"\x1b[0m";
 
+// Cursor save/restore + the size-probe request (driven by kaua::query). SAVE /
+// RESTORE are the ANSI SCO sequences (widely supported by xterm/Ghostty); the
+// probe parks the cursor at a far corner -- the terminal clamps it to the
+// bottom-right -- then asks for its position via DSR. The reply,
+// `ESC[<rows>;<cols>R`, reports the screen size (see `kaua::query::parse_cpr`).
+pub const SAVE_CURSOR: &[u8] = b"\x1b[s";
+pub const RESTORE_CURSOR: &[u8] = b"\x1b[u";
+pub const PARK_CURSOR_FAR: &[u8] = b"\x1b[9999;9999H";
+pub const REQUEST_CURSOR_POS: &[u8] = b"\x1b[6n";
+
 /// Append a decimal `u16` (no `alloc::format!` -- a tiny manual encoder).
 pub fn push_num(out: &mut Vec<u8>, mut n: u16) {
     if n == 0 {

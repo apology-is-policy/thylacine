@@ -13,9 +13,12 @@
 // clean exit Terminal::Drop restores the screen; `no_std` panic = abort means
 // Drop does NOT run on a crash, so `ut`'s post-reap restore is the backstop.
 //
-// SIZE: there is no winsize-query syscall at v1.0 (a CPR round-trip + resize
-// note is a KAUA.md seam), so the console is assumed 80x24 -- the size the
-// ls-7 LS-CI pins its PTY to. A `--size CxR` override is a later nicety.
+// SIZE: there is no winsize-query syscall, so nora measures the console at
+// launch via a CPR round-trip (kaua::query::terminal_size, #117) and sizes the
+// viewport to fill the real terminal -- falling back to 80x24 (the size the
+// ls-7 LS-CI pins its PTY to) when the terminal does not answer (a dumb terminal
+// / the non-interactive harness). Live resize mid-edit (no winsize signal over
+// UART) stays a KAUA.md seam -- a re-query keybind is the v1.x answer.
 
 #![no_std]
 #![no_main]
@@ -44,9 +47,19 @@ use nora::view;
 #[global_allocator]
 static GLOBAL_ALLOCATOR: ThylaAlloc = ThylaAlloc;
 
-/// Assumed console geometry (see the module header's SIZE note).
+/// Fallback console geometry when the terminal does not answer CPR (see the
+/// module header's SIZE note).
 const COLS: u16 = 80;
 const ROWS: u16 = 24;
+/// Viewport bounds applied to a queried size: reject a 0 (parse already does)
+/// and cap the max so a garbled reply can't drive a huge buffer allocation. A
+/// real terminal is far under 1000 cells per side.
+const MIN_DIM: u16 = 1;
+const MAX_DIM: u16 = 1000;
+/// How long to wait for the CPR reply before falling back. A real round-trip is
+/// sub-millisecond; this is generous headroom, paid once at launch and only in
+/// full when the terminal never answers.
+const SIZE_QUERY_TIMEOUT_MS: u32 = 50;
 /// The largest file nora will load (matches the Stratum POC's 2 MiB cap and
 /// leaves headroom under the userspace heap for the editor's working set).
 const MAX_FILE: usize = 2 * 1024 * 1024;
@@ -84,7 +97,15 @@ pub extern "C" fn rs_main() -> i64 {
 
     let mut ed = Editor::new(filename, &content, readonly);
 
-    let mut term = match Terminal::enter(Rect::new(0, 0, COLS, ROWS)) {
+    // Measure the real console (CPR round-trip) and fill it; fall back to 80x24
+    // when the terminal does not answer. The console is already raw (ut set it
+    // before the spawn) and we have not yet entered the alt-screen, so the probe
+    // saves/restores the cursor and leaves the visible screen undisturbed.
+    let (cols, rows) = kaua::query::terminal_size(SIZE_QUERY_TIMEOUT_MS)
+        .map(|(c, r)| (c.clamp(MIN_DIM, MAX_DIM), r.clamp(MIN_DIM, MAX_DIM)))
+        .unwrap_or((COLS, ROWS));
+
+    let mut term = match Terminal::enter(Rect::new(0, 0, cols, rows)) {
         Ok(t) => t,
         Err(_) => {
             t_putstr("nora: cannot acquire the console screen\n");

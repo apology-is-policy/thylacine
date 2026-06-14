@@ -226,9 +226,13 @@ open / edit / `:w` / `cat`).
 
 ## Known caveats / seams
 
-- **Console size** is assumed 80×24 — there is no winsize-query syscall at v1.0
-  (a CPR round-trip + a resize note is a Kaua seam). T-4 pins the LS-CI PTY to
-  80×24 to match.
+- **Console size** is measured at launch via a CPR round-trip
+  (`kaua::query::terminal_size`, #117) so nora fills the real terminal; it falls
+  back to **80×24** when the terminal does not answer (a dumb terminal / the
+  non-interactive harness — the size T-4 pins the LS-CI PTY to). The queried size
+  is clamped to `[1, 1000]` per side (bounds a garbled reply's buffer alloc).
+  Live *resize* mid-edit (no winsize signal over UART) stays a Kaua seam — a
+  re-query keybind / periodic poll is the v1.x answer.
 - **Tabs** display as a single space (control chars are sanitized to space to
   keep the 1-cell-per-char model); the real char round-trips to disk. Insert-Tab
   inserts 4 soft spaces. Tab-to-tabstop expansion + a configurable tabstop is a
