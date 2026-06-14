@@ -11,9 +11,11 @@
 // plus `/` search and `:e`.
 
 use alloc::string::{String, ToString};
-use kaua::event::{KeyCode, KeyEvent};
+use alloc::vec::Vec;
+use kaua::event::{KeyCode, KeyEvent, Mods};
 
 use crate::text::{Pos, TextBuffer};
+use crate::wrap;
 
 /// The editor mode. `Command(buf)` holds the in-progress command/search line
 /// (the leading `:` or `/` distinguishes the two on Enter).
@@ -23,6 +25,9 @@ pub enum Mode {
     Insert,
     Visual,
     Command(String),
+    /// The `[Space]` command palette, open over Normal; `sel` is the highlighted
+    /// entry index.
+    Palette { sel: usize },
 }
 
 /// A file operation the editor requests but does not perform; the binary
@@ -44,8 +49,14 @@ pub struct Editor {
     pub filename: Option<String>,
     pub readonly: bool,
     pub modified: bool,
-    /// First visible row (vertical scroll); maintained by `scroll_to`.
+    /// First visible logical row (vertical scroll); maintained by `scroll_to`.
     pub top: usize,
+    /// First visible VISUAL sub-row within `top`'s logical line (soft-wrap only;
+    /// always 0 when `wrap` is off). Maintained by `scroll_to`.
+    pub top_sub: usize,
+    /// Soft-wrap mode: wrap long logical lines at the viewport width vs. clip
+    /// them at the right edge. Toggled at runtime via the `[Space]` palette.
+    pub wrap: bool,
     /// A transient one-line message (cleared at the next key).
     pub status: Option<String>,
     /// Set when the editor wants to terminate (the binary breaks its loop).
@@ -71,6 +82,8 @@ impl Editor {
             readonly,
             modified: false,
             top: 0,
+            top_sub: 0,
+            wrap: false,
             status: None,
             quit: false,
             anchor: None,
@@ -83,7 +96,8 @@ impl Editor {
     /// The short mode tag for the status line.
     pub fn mode_str(&self) -> &'static str {
         match self.mode {
-            Mode::Normal => {
+            // The palette overlays Normal -- show the underlying chip.
+            Mode::Normal | Mode::Palette { .. } => {
                 if self.readonly {
                     "VIEW"
                 } else {
@@ -100,6 +114,19 @@ impl Editor {
     pub fn command_buf(&self) -> Option<&str> {
         match &self.mode {
             Mode::Command(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// The `[Space]` palette entry labels (for the view to render).
+    pub fn palette_labels(&self) -> Vec<&'static str> {
+        PALETTE.iter().map(|p| p.label).collect()
+    }
+
+    /// The highlighted palette entry index, if the palette is open.
+    pub fn palette_sel(&self) -> Option<usize> {
+        match self.mode {
+            Mode::Palette { sel } => Some(sel),
             _ => None,
         }
     }
@@ -137,6 +164,7 @@ impl Editor {
         self.filename = path;
         self.modified = false;
         self.top = 0;
+        self.top_sub = 0;
         self.mode = Mode::Normal;
         self.anchor = None;
         self.status = Some("opened".to_string());
@@ -147,17 +175,69 @@ impl Editor {
         self.status = Some(msg);
     }
 
-    /// Adjust `top` so the cursor row is within a `height`-row viewport.
-    pub fn scroll_to(&mut self, height: usize) {
+    /// Adjust the scroll anchor so the cursor stays within a `height`-row
+    /// viewport of text width `tw`. Without wrap this is a logical-row scroll
+    /// (`tw` unused); with wrap it scrolls in VISUAL rows so a long wrapped line
+    /// never pushes the cursor off screen.
+    pub fn scroll_to(&mut self, tw: u16, height: usize) {
         if height == 0 {
             return;
         }
-        let row = self.text.cursor().0;
-        if row < self.top {
-            self.top = row;
-        } else if row >= self.top + height {
-            self.top = row + 1 - height;
+        if !self.wrap {
+            self.top_sub = 0;
+            let row = self.text.cursor().0;
+            if row < self.top {
+                self.top = row;
+            } else if row >= self.top + height {
+                self.top = row + 1 - height;
+            }
+            return;
         }
+
+        let cur = wrap::cursor_visual(&self.text, tw);
+        let anchor = (self.top, self.top_sub);
+        // Cursor visually above the anchor (incl. a stale anchor past a delete)
+        // -> top-align to it.
+        if cur.0 < anchor.0 || (cur.0 == anchor.0 && cur.1 < anchor.1) {
+            self.top = cur.0;
+            self.top_sub = cur.1;
+            return;
+        }
+        // Forward-walk up to `height` visual rows from the anchor; if the cursor
+        // is reached it is visible (no change), else scroll down so the cursor
+        // sits on the last visible row.
+        let mut p = anchor;
+        let mut steps = 0;
+        loop {
+            if p == cur {
+                return; // visible at screen row `steps`
+            }
+            if steps == height - 1 {
+                break;
+            }
+            match wrap::forward(&self.text, p, tw) {
+                Some(q) => {
+                    p = q;
+                    steps += 1;
+                }
+                // cur unreachable forward (shouldn't happen for a valid cursor
+                // >= anchor) -> top-align defensively.
+                None => {
+                    self.top = cur.0;
+                    self.top_sub = cur.1;
+                    return;
+                }
+            }
+        }
+        let (tr, ts) = wrap::back_n(&self.text, cur, height - 1, tw);
+        self.top = tr;
+        self.top_sub = ts;
+    }
+
+    /// Toggle soft-wrap (the `[Space]` palette entry), re-anchoring cleanly.
+    pub fn toggle_wrap(&mut self) {
+        self.wrap = !self.wrap;
+        self.top_sub = 0;
     }
 
     /// Dispatch one key by mode.
@@ -168,6 +248,7 @@ impl Editor {
             Mode::Insert => self.insert(key),
             Mode::Visual => self.visual(key),
             Mode::Command(_) => self.command(key),
+            Mode::Palette { .. } => self.palette(key),
         }
     }
 
@@ -203,6 +284,7 @@ impl Editor {
             }
             KeyCode::Char(':') => self.mode = Mode::Command(":".to_string()),
             KeyCode::Char('/') => self.mode = Mode::Command("/".to_string()),
+            KeyCode::Char(' ') => self.mode = Mode::Palette { sel: 0 },
             KeyCode::Char('n') if !self.last_search.is_empty() => {
                 self.search(&self.last_search.clone());
             }
@@ -350,6 +432,63 @@ impl Editor {
         }
     }
 
+    fn palette(&mut self, key: KeyEvent) {
+        let sel = match self.mode {
+            Mode::Palette { sel } => sel,
+            _ => return,
+        };
+        let n = PALETTE.len();
+        match key.code {
+            KeyCode::Esc | KeyCode::Char(' ') => self.mode = Mode::Normal,
+            KeyCode::Down | KeyCode::Char('j') => self.mode = Mode::Palette { sel: (sel + 1) % n },
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.mode = Mode::Palette { sel: (sel + n - 1) % n }
+            }
+            KeyCode::Char('n') if key.mods.contains(Mods::CTRL) => {
+                self.mode = Mode::Palette { sel: (sel + 1) % n }
+            }
+            KeyCode::Char('p') if key.mods.contains(Mods::CTRL) => {
+                self.mode = Mode::Palette { sel: (sel + n - 1) % n }
+            }
+            KeyCode::Enter => {
+                self.mode = Mode::Normal;
+                self.run_palette(sel);
+            }
+            _ => {}
+        }
+    }
+
+    fn run_palette(&mut self, sel: usize) {
+        let action = match PALETTE.get(sel) {
+            Some(p) => p.action,
+            None => return,
+        };
+        match action {
+            PaletteAction::ToggleWrap => {
+                self.toggle_wrap();
+                self.status = Some(if self.wrap {
+                    "soft-wrap: on".to_string()
+                } else {
+                    "soft-wrap: off".to_string()
+                });
+            }
+            PaletteAction::Save => {
+                if self.readonly {
+                    self.status = Some("read-only".to_string());
+                } else {
+                    self.request = Some(Request::Save(None));
+                }
+            }
+            PaletteAction::Quit => {
+                if self.modified {
+                    self.status = Some("unsaved changes (:q! to discard)".to_string());
+                } else {
+                    self.quit = true;
+                }
+            }
+        }
+    }
+
     // -- command + search execution ---------------------------------------
 
     fn run_command(&mut self, buf: &str) {
@@ -420,6 +559,37 @@ impl Editor {
 /// Lines moved per PageUp/PageDown (a fixed step; viewport-relative paging is a
 /// nicety deferred -- the editor does not know the viewport height).
 const PAGE: usize = 20;
+
+/// One `[Space]` command-palette entry.
+#[derive(Clone, Copy)]
+struct PaletteItem {
+    label: &'static str,
+    action: PaletteAction,
+}
+
+#[derive(Clone, Copy)]
+enum PaletteAction {
+    ToggleWrap,
+    Save,
+    Quit,
+}
+
+/// The fixed palette entries (a real menu mechanism; user aliases / a richer set
+/// accrete later -- T3 adds the buffer entries on this list).
+const PALETTE: &[PaletteItem] = &[
+    PaletteItem {
+        label: "toggle soft-wrap",
+        action: PaletteAction::ToggleWrap,
+    },
+    PaletteItem {
+        label: "save",
+        action: PaletteAction::Save,
+    },
+    PaletteItem {
+        label: "quit",
+        action: PaletteAction::Quit,
+    },
+];
 
 /// `""` -> `None`, else `Some(trimmed)`. For an optional command argument.
 fn opt(arg: &str) -> Option<String> {
@@ -655,14 +825,71 @@ mod tests {
     #[test]
     fn scroll_follows_cursor() {
         let mut ed = Editor::new(None, "0\n1\n2\n3\n4\n5\n6\n7", false);
-        // viewport 3 rows; move to row 5.
+        // viewport 3 rows; move to row 5. (wrap off -> width is irrelevant.)
         for _ in 0..5 {
             ed.handle_key(ch('j'));
         }
-        ed.scroll_to(3);
+        ed.scroll_to(80, 3);
         assert_eq!(ed.top, 3); // rows 3,4,5 visible
         ed.handle_key(ch('g')); // back to top
-        ed.scroll_to(3);
+        ed.scroll_to(80, 3);
         assert_eq!(ed.top, 0);
+    }
+
+    #[test]
+    fn space_opens_palette_and_esc_closes() {
+        let mut ed = Editor::new(None, "x", false);
+        ed.handle_key(ch(' '));
+        assert_eq!(ed.mode, Mode::Palette { sel: 0 });
+        assert_eq!(ed.palette_sel(), Some(0));
+        ed.handle_key(code(KeyCode::Esc));
+        assert_eq!(ed.mode, Mode::Normal);
+        assert_eq!(ed.palette_sel(), None);
+    }
+
+    #[test]
+    fn palette_toggles_wrap_via_enter() {
+        let mut ed = Editor::new(None, "x", false);
+        assert!(!ed.wrap);
+        ed.handle_key(ch(' ')); // open palette (sel 0 == "toggle soft-wrap")
+        ed.handle_key(code(KeyCode::Enter));
+        assert!(ed.wrap);
+        assert_eq!(ed.mode, Mode::Normal);
+        // toggle back off
+        ed.handle_key(ch(' '));
+        ed.handle_key(code(KeyCode::Enter));
+        assert!(!ed.wrap);
+    }
+
+    #[test]
+    fn palette_navigates_to_quit_and_guards_unsaved() {
+        let mut ed = Editor::new(None, "", false);
+        ed.handle_key(ch('i'));
+        type_str(&mut ed, "z");
+        ed.handle_key(code(KeyCode::Esc)); // modified
+        ed.handle_key(ch(' ')); // palette sel 0
+        ed.handle_key(ch('j')); // sel 1 (save)
+        ed.handle_key(ch('j')); // sel 2 (quit)
+        assert_eq!(ed.palette_sel(), Some(2));
+        ed.handle_key(code(KeyCode::Enter));
+        assert!(!ed.quit); // blocked: unsaved
+        assert_eq!(ed.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn wrap_scroll_keeps_cursor_on_a_long_line() {
+        // One 200-char line; wrap on; tw 10, height 5.
+        let line: String = core::iter::repeat('a').take(200).collect();
+        let mut ed = Editor::new(None, &line, false);
+        ed.toggle_wrap();
+        ed.text.set_cursor(0, 150); // visual sub 15
+        ed.scroll_to(10, 5);
+        // cursor sub 15 placed on the last of 5 visible rows -> top_sub 11.
+        assert_eq!(ed.top, 0);
+        assert_eq!(ed.top_sub, 11);
+        // moving home re-anchors to the top.
+        ed.text.set_cursor(0, 0);
+        ed.scroll_to(10, 5);
+        assert_eq!(ed.top_sub, 0);
     }
 }

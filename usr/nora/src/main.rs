@@ -168,9 +168,9 @@ fn run(term: &mut Terminal, src: &mut PollSource, ed: &mut Editor) -> i32 {
 /// cursor, and flush one diff frame to fd 1.
 fn redraw(term: &mut Terminal, ed: &mut Editor) -> Result<()> {
     let area = term.area();
-    // One row is the status/command line; the rest is the text viewport.
-    let text_h = area.height.saturating_sub(1) as usize;
-    ed.scroll_to(text_h);
+    // The text region (above the one-row status line); soft-wrap needs the width.
+    let (_, tw, text_h) = view::text_metrics(area, ed.text.line_count());
+    ed.scroll_to(tw, text_h);
     let cur;
     {
         let buf = term.back_mut();

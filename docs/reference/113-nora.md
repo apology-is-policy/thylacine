@@ -85,17 +85,26 @@ yank/cut payload, with `'\n'` between lines.
 ### `nora::editor` — the modal core (`Editor`)
 
 ```rust
-enum Mode { Normal, Insert, Visual, Command(String) }   // Command holds ":"/"/" + text
+enum Mode { Normal, Insert, Visual, Command(String), Palette { sel: usize } }
 enum Request { Save(Option<String>), Open(String) }     // file op for the binary
-struct Editor { text, mode, filename, readonly, modified, top, status, quit, ... }
+struct Editor { text, mode, filename, readonly, modified, top, top_sub, wrap, status, quit, ... }
 
 fn new(filename: Option<String>, content: &str, readonly: bool) -> Editor
 fn handle_key(&mut self, key: kaua::KeyEvent)           // the dispatch
 fn take_request(&mut self) -> Option<Request>           // the binary executes it
 fn mark_saved(&mut self, path, bytes) / load(path, content) / set_status(msg)
-fn scroll_to(&mut self, height)                         // adjust `top` to the cursor
+fn scroll_to(&mut self, tw, height)                     // adjust the anchor to the cursor
+fn toggle_wrap(&mut self)                               // the [Space] palette wrap entry
+fn palette_labels(&self) -> Vec<&str> / palette_sel(&self) -> Option<usize>
 fn selection(&self) -> Option<(Pos, Pos)>               // visual span (for the view)
 ```
+
+`Mode::Palette { sel }` is the `[Space]` command palette (T2), open over Normal.
+Soft-wrap (`wrap`) scrolls in VISUAL rows: the anchor is `(top, top_sub)` (a
+logical line + its visual sub-row) and `scroll_to` walks visual rows so a long
+wrapped line never pushes the cursor off screen; the math lives in `nora::wrap`
+(pure, host-tested). `tw` (text width) is computed once via `view::text_metrics`
+and shared by `scroll_to` + `render` so they agree on the geometry.
 
 File I/O is **not** done in the editor: `:w` / `:e` raise a `Request` the binary
 executes against `libthyla-rs::fs`, keeping the core terminal-free and testable.
@@ -116,19 +125,23 @@ reads Kaua's pure layers only.
 
 ### `nora::theme` — the Bonfire palette
 
-The four committed Bonfire roles (BG/FG/PATH/GLYPH, mirroring
-`libutopia::palette`) plus three mode-chip accents (green/violet/gold), as
-`kaua::style::Style` builders. `nora` carries its own copies rather than depend
-on the whole shell library.
+The Bonfire (U-2) roles as `kaua::style::Style` builders: `bg` `#0e0c0c` / `fg`
+`#e4ddd8` / `fg_muted` `#9a8f8a` / `ember` `#e07840` / `surface` `#180f0e` /
+`border` `#3a2a26`, plus the mode-chip accents drawn from Bonfire's syntax hues
+(`moss`/`dusk`/`sand`) and the `[Space]` palette popup styles. `nora` carries its
+own copies rather than depend on the whole shell library. *(#124: pre-T2 these
+held the retired U-1 "Pale Fire" cold values — `#0e1018`/`#d8e4f4`/`#8898b4`, the
+exact residue UTOPIA-VISUAL.md §8 flags; corrected to Bonfire with T2.)*
 
 ## Keybindings (the modal grammar)
 
 | Mode | Keys |
 |---|---|
-| Normal | `i`/`a`/`o`/`A` → Insert; `v` → Visual; `:` / `/` → Command; `h j k l` + arrows, `0`/`$`/`g`/`G`/`w`/`b`/PageUp/PageDown nav; `x` delete char; `d` delete line; `u` undo; `p` paste register; `n` repeat search |
+| Normal | `i`/`a`/`o`/`A` → Insert; `v` → Visual; `:` / `/` → Command; `Space` → Palette; `h j k l` + arrows, `0`/`$`/`g`/`G`/`w`/`b`/PageUp/PageDown nav; `x` delete char; `d` delete line; `u` undo; `p` paste register; `n` repeat search |
 | Insert | printable → insert; Enter → split; Backspace/Delete; Tab → 4 spaces (soft tab); Esc → Normal |
 | Visual | `h j k l 0 $ g G w b` extend the selection; `y` yank; `d`/`x` cut; Esc → cancel |
 | Command | type the line; Enter runs it; Backspace (erasing `:`/`/` exits); Esc → Normal |
+| Palette (`[Space]`) | `j`/`k` + arrows / `Ctrl-n`/`Ctrl-p` move; Enter runs the entry; `Space`/Esc close. Entries: **toggle soft-wrap**, save, quit. |
 
 Ex commands: `:w` / `:w <name>` (save / save-as), `:q` (guarded on unsaved),
 `:q!`, `:wq` / `:wq <name>`, `:e <name>` (guarded), `:e! <name>`. `/<pat>` Enter
@@ -187,13 +200,19 @@ client over them.
   motion clamp/wrap, word forward/back (incl. cross-line), range text + delete
   (single + multi line + reversed endpoints), find + wrap, undo + cap, cursor
   clamp.
-- `editor` (16): insert/escape, Enter split, `o` open-below, hjkl nav, `x`+undo,
+- `editor` (20): insert/escape, Enter split, `o` open-below, hjkl nav, `x`+undo,
   `dd`, visual yank/paste + cut, `:w`/`:w name`/`:wq`/`:e` raise the right
   `Request`, `:q` guards unsaved, command backspace exits, `/`+`n` search,
-  read-only blocks edits, scroll follows cursor.
-- `view` (6): gutter + text + cursor placement, tilde past end, mode chip + bg,
+  read-only blocks edits, scroll follows cursor, `Space` opens/Esc closes the
+  palette, palette Enter toggles wrap, palette nav reaches quit + guards unsaved,
+  wrap-scroll keeps the cursor on a long line.
+- `view` (8): gutter + text + cursor placement, tilde past end, mode chip + bg,
   command line on the status row, control chars → space, selection paints the
-  violet bg, digit widths.
+  violet bg, digit widths, soft-wrap splits a long line, the palette overlay
+  renders a highlighted menu.
+- `wrap` (4): `line_rows` ceil-div (blank = 1), `cursor_visual` clamps a
+  full-line end to the last sub-row, forward/backward visual walks, `back_n`
+  clamps at the document start.
 
 Coverage NOT here (a terminal / file I/O needed): the `Terminal`/`PollSource`
 wiring and the on-disk save/open path — exercised by the `ls-7` LS-CI (T-4:
@@ -237,8 +256,10 @@ open / edit / `:w` / `cat`).
   keep the 1-cell-per-char model); the real char round-trips to disk. Insert-Tab
   inserts 4 soft spaces. Tab-to-tabstop expansion + a configurable tabstop is a
   v1.x nicety.
-- **No horizontal scroll** — a line longer than the text width clips at the
-  right edge (vertical scroll only). Horizontal scroll / soft-wrap is a seam.
+- **Long lines: clip or soft-wrap** — by default a line longer than the text
+  width clips at the right edge (vertical scroll only); the `[Space]` palette's
+  *toggle soft-wrap* (T2, #119) reflows long lines live (scrolling in visual
+  rows). Horizontal scroll (a third mode) stays a seam.
 - **Undo marks `modified`** even when undo returns to the saved state (a precise
   saved-state diff is a v1.x refinement).
 - **Word motion** is WORD-granularity (whitespace-delimited); punctuation-class

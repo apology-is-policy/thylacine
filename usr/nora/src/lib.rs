@@ -20,6 +20,7 @@ pub mod editor;
 pub mod text;
 pub mod theme;
 pub mod view;
+pub mod wrap;
 
 pub use editor::{Editor, Mode, Request};
 pub use text::TextBuffer;

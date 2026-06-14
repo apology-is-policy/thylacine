@@ -14,27 +14,59 @@ use kaua::buffer::{Buffer, Cell};
 use kaua::layout::{Constraint, Layout};
 use kaua::rect::Rect;
 use kaua::style::Color;
-use kaua::widget::{Span, StatusLine, Widget};
+use kaua::widget::{Block, List, Span, StatusLine, Widget};
 
 use crate::editor::{Editor, Mode};
 use crate::theme;
+use crate::wrap;
+
+/// The text-region layout for `area`: `(gutter_w, text_width, text_height)`.
+/// The single source of geometry shared by `render` and `Editor::scroll_to`
+/// (they must agree on the text width or the wrapped cursor desyncs).
+pub fn text_metrics(area: Rect, line_count: usize) -> (u16, u16, usize) {
+    let parts = Layout::vertical(&[Constraint::Min(1), Constraint::Length(1)]).split(area);
+    let text_area = parts[0];
+    let gutter_w = digits(line_count).max(3) + 1;
+    let tw = text_area.width.saturating_sub(gutter_w);
+    let th = text_area.height as usize;
+    (gutter_w, tw, th)
+}
 
 /// Render `ed` into `buf` over `area`; returns the cursor `(x, y)`.
 pub fn render(ed: &Editor, area: Rect, buf: &mut Buffer) -> (u16, u16) {
     let parts = Layout::vertical(&[Constraint::Min(1), Constraint::Length(1)]).split(area);
     let text_area = parts[0];
     let status_area = parts.get(1).copied().unwrap_or(text_area);
+    let (gutter_w, tw, th) = text_metrics(area, ed.text.line_count());
 
     fill(buf, text_area, theme::blank());
 
-    let total = ed.text.line_count();
-    let num_w = digits(total).max(3);
-    let gutter_w = num_w + 1;
-    let tx = text_area.x + gutter_w;
-    let tw = text_area.width.saturating_sub(gutter_w);
-    let th = text_area.height as usize;
-    let sel = ed.selection();
+    if ed.wrap {
+        render_wrapped(ed, text_area, gutter_w, tw, th, buf);
+    } else {
+        render_plain(ed, text_area, gutter_w, tw, th, buf);
+    }
 
+    render_status(ed, status_area, buf);
+
+    // The palette overlays the text; its cursor sits on the selected entry.
+    if ed.palette_sel().is_some() {
+        return render_palette(ed, text_area, buf);
+    }
+
+    if ed.wrap {
+        cursor_wrapped(ed, text_area, gutter_w, tw, th)
+    } else {
+        cursor(ed, text_area, status_area, gutter_w)
+    }
+}
+
+/// One logical line per screen row, clipped at the right edge (no wrap).
+fn render_plain(ed: &Editor, text_area: Rect, gutter_w: u16, tw: u16, th: usize, buf: &mut Buffer) {
+    let total = ed.text.line_count();
+    let num_w = gutter_w.saturating_sub(1);
+    let tx = text_area.x + gutter_w;
+    let sel = ed.selection();
     for r in 0..th {
         let y = text_area.y + r as u16;
         let row = ed.top + r;
@@ -49,9 +81,37 @@ pub fn render(ed: &Editor, area: Rect, buf: &mut Buffer) -> (u16, u16) {
             paint_selection(buf, tx, y, tx + tw, ed.text.line(row), row, span);
         }
     }
+}
 
-    render_status(ed, status_area, buf);
-    cursor(ed, text_area, status_area, gutter_w)
+/// Soft-wrap: each logical line occupies ceil(len/tw) visual rows. The gutter
+/// number shows on a line's first visual row, blank on continuations.
+fn render_wrapped(ed: &Editor, text_area: Rect, gutter_w: u16, tw: u16, th: usize, buf: &mut Buffer) {
+    let total = ed.text.line_count();
+    let num_w = gutter_w.saturating_sub(1);
+    let tx = text_area.x + gutter_w;
+    let sel = ed.selection();
+    let mut pos = Some((ed.top, ed.top_sub));
+    for r in 0..th {
+        let y = text_area.y + r as u16;
+        let (row, sub) = match pos {
+            Some(p) if p.0 < total => p,
+            _ => {
+                buf.set_str(text_area.x, y, "~", theme::tilde());
+                pos = None;
+                continue;
+            }
+        };
+        if sub == 0 {
+            let num = format!("{:>w$} ", row + 1, w = num_w as usize);
+            buf.set_str(text_area.x, y, &num, theme::gutter());
+        }
+        let line = ed.text.line(row);
+        draw_text_slice(buf, tx, y, tx + tw, line, sub * tw as usize, tw as usize, theme::text());
+        if let Some(span) = sel {
+            paint_selection_window(buf, tx, y, tx + tw, line, row, sub, tw, span);
+        }
+        pos = wrap::forward(&ed.text, (row, sub), tw);
+    }
 }
 
 /// Fill `area` with `style` blanks.
@@ -109,6 +169,131 @@ fn paint_selection(
         let glyph = buf.get(x, y).map(|c| c.symbol).unwrap_or(' ');
         buf.set_cell(x, y, Cell::new(glyph, theme::selection()));
     }
+}
+
+/// Like `draw_text` but draws the visual window `[skip, skip+take)` characters
+/// of `s` (one soft-wrap sub-row).
+fn draw_text_slice(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    max_x: u16,
+    s: &str,
+    skip: usize,
+    take: usize,
+    style: kaua::style::Style,
+) {
+    let mut cx = x;
+    for ch in s.chars().skip(skip).take(take) {
+        if cx >= max_x {
+            break;
+        }
+        let glyph = if ch.is_control() { ' ' } else { ch };
+        buf.set_cell(cx, y, Cell::new(glyph, style));
+        cx = cx.saturating_add(1);
+    }
+}
+
+/// Paint the selection within one wrapped sub-row's window `[sub*tw, sub*tw+tw)`
+/// of line `row`.
+fn paint_selection_window(
+    buf: &mut Buffer,
+    tx: u16,
+    y: u16,
+    max_x: u16,
+    line: &str,
+    row: usize,
+    sub: usize,
+    tw: u16,
+    span: ((usize, usize), (usize, usize)),
+) {
+    let (lo, hi) = span;
+    if row < lo.0 || row > hi.0 {
+        return;
+    }
+    let len = line.chars().count();
+    let sel_start = if row == lo.0 { lo.1 } else { 0 };
+    let sel_end = if row == hi.0 { (hi.1 + 1).min(len) } else { len };
+    let win_start = sub * tw as usize;
+    let win_end = win_start + tw as usize;
+    let a = sel_start.max(win_start);
+    let b = sel_end.min(win_end);
+    let mut cc = a;
+    while cc < b {
+        let x = tx.saturating_add((cc - win_start) as u16);
+        if x >= max_x {
+            break;
+        }
+        let glyph = buf.get(x, y).map(|c| c.symbol).unwrap_or(' ');
+        buf.set_cell(x, y, Cell::new(glyph, theme::selection()));
+        cc += 1;
+    }
+}
+
+/// The on-screen cursor in soft-wrap mode: walk visual rows from the scroll
+/// anchor to the cursor's visual position (bounded by the viewport height --
+/// `scroll_to` guarantees the cursor is within it).
+fn cursor_wrapped(ed: &Editor, text_area: Rect, gutter_w: u16, tw: u16, th: usize) -> (u16, u16) {
+    let tx = text_area.x + gutter_w;
+    let cur = wrap::cursor_visual(&ed.text, tw);
+    let mut p = (ed.top, ed.top_sub);
+    let mut sy = 0usize;
+    let mut steps = 0;
+    while p != cur && steps < th {
+        match wrap::forward(&ed.text, p, tw) {
+            Some(q) => {
+                p = q;
+                sy += 1;
+                steps += 1;
+            }
+            None => break,
+        }
+    }
+    let (_, col) = ed.text.cursor();
+    let vcol = col.saturating_sub(cur.1 * tw as usize) as u16;
+    let y = text_area
+        .y
+        .saturating_add(sy.min(th.saturating_sub(1)) as u16);
+    let x = tx
+        .saturating_add(vcol)
+        .min(text_area.right().saturating_sub(1));
+    (x, y)
+}
+
+/// Draw the `[Space]` command palette as a popup at the text area's bottom-left;
+/// returns the cursor position on the selected entry.
+fn render_palette(ed: &Editor, text_area: Rect, buf: &mut Buffer) -> (u16, u16) {
+    let labels = ed.palette_labels();
+    let sel = ed.palette_sel();
+    let title = " Space ";
+    let inner_w = labels
+        .iter()
+        .map(|s| s.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(title.chars().count()) as u16;
+    let box_w = (inner_w + 4).min(text_area.width.max(1)); // 2 border + 2 pad
+    let box_h = (labels.len() as u16 + 2).min(text_area.height.max(1)); // 2 border
+    let by = text_area.bottom().saturating_sub(box_h);
+    let box_area = Rect::new(text_area.x, by, box_w, box_h);
+    fill(buf, box_area, theme::palette_surface());
+    let block = Block::new()
+        .title(title)
+        .borders(true)
+        .border_style(theme::palette_border())
+        .title_style(theme::palette_title());
+    let inner = block.inner(box_area);
+    block.render(box_area, buf);
+    List::new(&labels)
+        .select(sel)
+        .style(theme::palette_surface())
+        .selected_style(theme::palette_selected())
+        .render(inner, buf);
+    let cy = inner
+        .y
+        .saturating_add(sel.unwrap_or(0) as u16)
+        .min(inner.bottom().saturating_sub(1));
+    (inner.x, cy)
 }
 
 /// Draw the status row: the command/search line in command mode, else the
@@ -171,7 +356,7 @@ fn cursor(ed: &Editor, text_area: Rect, status_area: Rect, gutter_w: u16) -> (u1
 
 fn mode_color(mode: &Mode) -> Color {
     match mode {
-        Mode::Normal => theme::EMBER,
+        Mode::Normal | Mode::Palette { .. } => theme::EMBER,
         Mode::Insert => theme::GREEN,
         Mode::Visual => theme::VIOLET,
         Mode::Command(_) => theme::GOLD,
@@ -281,5 +466,35 @@ mod tests {
         assert_eq!(digits(10), 2);
         assert_eq!(digits(999), 3);
         assert_eq!(digits(1000), 4);
+    }
+
+    #[test]
+    fn wrap_render_splits_a_long_line() {
+        // area 20x5 -> text width 16 (gutter_w 4). A 20-char line wraps: chars
+        // 0..16 on visual row 0, 16..20 on row 1 (a blank gutter).
+        let mut ed = Editor::new(None, "abcdefghijklmnopqrst", false);
+        ed.toggle_wrap();
+        let mut b = Buffer::empty(area());
+        render(&ed, area(), &mut b);
+        assert_eq!(sym(&b, 2, 0), '1'); // gutter "  1 " on the first visual row
+        assert_eq!(sym(&b, 4, 0), 'a'); // text after the 4-wide gutter
+        assert_eq!(sym(&b, 19, 0), 'p'); // char 15 at the right edge (tw=16)
+        assert_eq!(sym(&b, 2, 1), ' '); // continuation row: blank gutter
+        assert_eq!(sym(&b, 4, 1), 'q'); // char 16 wrapped onto row 1
+        assert_eq!(sym(&b, 7, 1), 't'); // char 19
+    }
+
+    #[test]
+    fn palette_overlay_renders_a_highlighted_menu() {
+        let big = Rect::new(0, 0, 40, 12);
+        let mut ed = Editor::new(None, "x", false);
+        ed.handle_key(KeyEvent::char(' ')); // open palette, sel 0
+        let mut b = Buffer::empty(big);
+        render(&ed, big, &mut b);
+        // Box bottom-aligned (height 5, inner rows 7..10); entry 0 selected.
+        assert_eq!(sym(&b, 1, 7), 't'); // "toggle soft-wrap"
+        assert_eq!(b.get(1, 7).unwrap().style.bg, theme::EMBER); // selected bar
+        assert_eq!(sym(&b, 1, 8), 's'); // "save" (not selected)
+        assert_ne!(b.get(1, 8).unwrap().style.bg, theme::EMBER);
     }
 }
