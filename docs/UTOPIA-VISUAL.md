@@ -203,7 +203,10 @@ Programs refer to colours by role, not hex. The role table is the single source
 of truth. The Utopia discipline roles (`bg`, `fg`, `path`, `glyph`) are the
 only roles that Utopia's own programs use; the extended palette roles
 (§1.4–1.5) are exposed in `libutopia::palette` for third-party and host-editor
-integration but are not introduced into the Utopia shell surface.
+integration but are not introduced into the Utopia shell surface. The **one
+exception** (added for `ut` at #115c) is the shell's command-line *validity*
+coloring — a live typing affordance, distinct from error output — which renders
+a resolvable command in `fen` and an unresolvable one in `cinnabar` (see §8).
 
 | Role name | Constant in `libutopia::palette` | Hex |
 |---|---|---|
@@ -335,6 +338,10 @@ Bullet list for fast review:
   programs; everything else is `fg` except the `⊢` glyph.
 - The `⊢` glyph is the only `ember`-coloured text in disciplined programs.
 - Errors are not colour-coded in disciplined programs. They are context-coded.
+  The one exception is the shell's command-line *validity* coloring (#115c): a
+  resolvable command token renders `fen`, an unresolvable one `cinnabar`. This
+  is a live typing affordance (computed before the command runs), not error
+  output — it is the sole disciplined-surface use of the diagnostic palette.
 - Continuations use `⋮` in `fg_muted`.
 - Programs reach the palette via `libutopia::palette` (Rust) or the `palette`
   shell builtin.

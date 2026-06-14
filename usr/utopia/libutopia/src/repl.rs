@@ -196,6 +196,8 @@ impl Repl {
         names.extend(self.bin_commands.iter().cloned());
         names.sort();
         names.dedup();
+        // #115c: the SAME sorted index drives command-line validity coloring.
+        self.editor.set_known_commands(names.clone());
         self.editor
             .set_completion_source(Box::new(ShellCompletionSource::new(names)));
     }

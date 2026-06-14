@@ -517,6 +517,11 @@ pub struct LineEditor {
     /// Plugged via `set_completion_source`; the shell main loop
     /// installs a real source at U-6.
     completion_source: Option<alloc::boxed::Box<dyn CompletionSource>>,
+    /// #115c: the command index for command-line validity coloring (the
+    /// SAME sorted set the shell gives the completion source). Empty (the
+    /// default) disables coloring -- render emits the buffer verbatim, so
+    /// host tests + the bare-spawn boot check stay byte-identical.
+    known_commands: Vec<String>,
 }
 
 impl Default for LineEditor {
@@ -538,6 +543,7 @@ impl LineEditor {
             mode: LineEditorMode::Normal,
             desired_col: None,
             completion_source: None,
+            known_commands: Vec::new(),
         }
     }
 
@@ -555,6 +561,16 @@ impl LineEditor {
     /// no-op.
     pub fn clear_completion_source(&mut self) {
         self.completion_source = None;
+    }
+
+    /// #115c: install the command index used for command-line validity
+    /// coloring. `cmds` must be sorted (the shell's `refresh_command_index`
+    /// guarantees it -- it is the SAME index handed to the completion
+    /// source). An empty set (the default) disables coloring: `render` emits
+    /// the buffer verbatim, so callers that never install an index (host
+    /// tests, the bare-spawn boot check) get byte-identical output.
+    pub fn set_known_commands(&mut self, cmds: Vec<String>) {
+        self.known_commands = cmds;
     }
 
     /// Clear the current edit + reset the parser. Used by the main
@@ -711,7 +727,11 @@ impl LineEditor {
         let mut line_iter = self.buffer.split('\n');
         if let Some(first) = line_iter.next() {
             out.push_str(prompt);
-            out.push_str(first);
+            // #115c: colour line 0's command token (fen if it resolves,
+            // cinnabar if not). The inserted SGR escapes are zero-width
+            // (ansi::visible_width strips them), so the cursor math below --
+            // computed from the PLAIN buffer -- is unaffected.
+            out.push_str(&self.colorize_line0(first));
         }
         let mut total_lines = 1usize;
         for line in line_iter {
@@ -751,6 +771,40 @@ impl LineEditor {
             out.push_str(&format!("\x1b[{}C", target_col));
         }
 
+        out
+    }
+
+    /// #115c: colour line 0's first token (the command) -- `fen` if it
+    /// resolves in the installed command index, `cinnabar` if not. Returns the
+    /// line VERBATIM when coloring is disabled (empty index -> host tests + the
+    /// bare-spawn boot check stay byte-identical), when the line has no command
+    /// token (blank / whitespace-only), or when the token contains `/` (a
+    /// command-by-path the name index cannot speak to -- left default rather
+    /// than mis-flagged red). The rest of the line is emitted unchanged.
+    fn colorize_line0(&self, line: &str) -> String {
+        if self.known_commands.is_empty() {
+            return String::from(line);
+        }
+        let lead = line.len() - line.trim_start().len(); // leading-whitespace bytes
+        let rest = &line[lead..];
+        let tok_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let token = &rest[..tok_end];
+        if token.is_empty() || token.contains('/') {
+            return String::from(line);
+        }
+        let known = self
+            .known_commands
+            .binary_search_by(|c| c.as_str().cmp(token))
+            .is_ok();
+        let role = if known {
+            crate::palette::Role::Fen
+        } else {
+            crate::palette::Role::Cinnabar
+        };
+        let mut out = String::with_capacity(line.len() + 16);
+        out.push_str(&line[..lead]); // leading whitespace, uncoloured
+        out.push_str(&crate::ansi::fg(role, token)); // the coloured command + reset
+        out.push_str(&rest[tok_end..]); // the remainder verbatim
         out
     }
 
@@ -2522,5 +2576,63 @@ mod tests {
         le.feed_byte(0x7f);
         assert_eq!(le.buffer(), "{x");
         assert_eq!(le.cursor(), 1);
+    }
+
+    // =========================================================================
+    // #115c tests -- command-line validity coloring (Bonfire fen / cinnabar).
+    // =========================================================================
+
+    // The Bonfire diagnostic SGR runs (UTOPIA-VISUAL.md section 4.1):
+    //   fen      = #6a9a6a = 106,154,106 (a resolvable command)
+    //   cinnabar = #c06050 = 192,96,80   (an unresolvable command)
+    const FEN_SGR: &str = "38;2;106;154;106";
+    const CINNABAR_SGR: &str = "38;2;192;96;80";
+
+    #[test]
+    fn colorize_known_command_is_fen() {
+        let mut le = LineEditor::new();
+        le.set_known_commands(vec![String::from("cat"), String::from("ls")]);
+        feed(&mut le, b"ls -la");
+        let s = le.render("> ");
+        assert!(s.contains(FEN_SGR), "a known command should render fen: {:?}", s);
+        assert!(!s.contains(CINNABAR_SGR));
+    }
+
+    #[test]
+    fn colorize_unknown_command_is_cinnabar() {
+        let mut le = LineEditor::new();
+        le.set_known_commands(vec![String::from("ls")]);
+        feed(&mut le, b"lx -la");
+        let s = le.render("> ");
+        assert!(
+            s.contains(CINNABAR_SGR),
+            "an unknown command should render cinnabar: {:?}",
+            s
+        );
+        assert!(!s.contains(FEN_SGR));
+    }
+
+    #[test]
+    fn colorize_disabled_when_index_empty() {
+        // No set_known_commands -> coloring off -> the command renders plain
+        // (the byte-identical-to-pre-#115c property host tests rely on).
+        let mut le = LineEditor::new();
+        feed(&mut le, b"ls");
+        let s = le.render("> ");
+        assert!(!s.contains(FEN_SGR));
+        assert!(!s.contains(CINNABAR_SGR));
+        assert!(s.contains("> ls"));
+    }
+
+    #[test]
+    fn colorize_skips_command_by_path() {
+        // A '/'-bearing token is a command-by-path the name index cannot
+        // speak to -- left default rather than mis-flagged cinnabar.
+        let mut le = LineEditor::new();
+        le.set_known_commands(vec![String::from("ls")]);
+        feed(&mut le, b"./script");
+        let s = le.render("> ");
+        assert!(!s.contains(FEN_SGR));
+        assert!(!s.contains(CINNABAR_SGR));
     }
 }

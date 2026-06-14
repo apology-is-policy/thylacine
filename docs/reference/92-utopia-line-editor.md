@@ -526,6 +526,31 @@ is pure userspace logic over the audited `fs::read_dir` (RW-8); the
 audit-bearing raw-mode editor + consctl surface it rides was discharged
 at the Kaua T-4 audit (#101).
 
+### Command-line validity coloring (#115c)
+
+`render` colours line 0's first token (the command) using the SAME command
+index, installed via `LineEditor::set_known_commands` (the shell's
+`refresh_command_index` hands it the identical sorted set it gives the
+completion source). `colorize_line0`:
+
+- returns the line **verbatim** when the index is empty (the default) — so a
+  caller that never installs an index (host tests, the bare-spawn boot check)
+  gets byte-identical output, preserving every pre-#115c render assertion;
+- finds the first whitespace-delimited token; skips coloring a blank line or a
+  token containing `/` (a command-by-path the name index cannot speak to —
+  left default rather than mis-flagged);
+- `binary_search`es the token in the sorted index and wraps it in the Bonfire
+  diagnostic colour — `fen` (`#6a9a6a`) if resolvable, `cinnabar` (`#c06050`)
+  if not (UTOPIA-VISUAL.md §4.1/§8, the one disciplined-surface use of the
+  diagnostic palette: a live typing affordance, not error output).
+
+The inserted SGR runs are **zero visible width** (`ansi::visible_width` strips
+them), and `render` computes cursor columns from the PLAIN buffer and
+repositions absolutely (`\r` + `\x1b[<col>C`), so coloring never disturbs the
+cursor. `ansi::fg` self-resets, so the colour does not bleed into the
+arguments. Only line 0 is coloured (the command is there); continuation lines
+emit plain. Search-mode render (`render_search`) is untouched.
+
 ### Per-buffer cap
 
 `MAX_BUFFER_LEN = 64 * 1024` -- a defensive cap so a runaway paste

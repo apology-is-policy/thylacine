@@ -159,6 +159,30 @@ pub extern "C" fn rs_main() -> i64 {
         }
     }
 
+    // 9. #115c: command-line validity coloring. Pure logic (no syscall), but
+    //    exercised in-guest as belt-and-suspenders over the host #[cfg(test)]
+    //    contract. A known command renders the Bonfire `fen` SGR
+    //    (#6a9a6a = 106,154,106); an unknown one `cinnabar` (#c06050 =
+    //    192,96,80); an empty index renders the buffer verbatim.
+    {
+        use alloc::string::String;
+        use libutopia::line_editor::LineEditor;
+        let mut le = LineEditor::new();
+        le.set_known_commands(["cat", "ls"].iter().map(|s| String::from(*s)).collect());
+        let _ = le.feed_bytes(b"ls -la");
+        let s = le.render("> ");
+        if !s.contains("38;2;106;154;106") {
+            return fail("a known command did not render the fen colour");
+        }
+        // A fresh editor with no index colours nothing.
+        let mut plain = LineEditor::new();
+        let _ = plain.feed_bytes(b"ls");
+        let s = plain.render("> ");
+        if s.contains("38;2;106;154;106") || s.contains("38;2;192;96;80") {
+            return fail("coloring should be disabled with an empty command index");
+        }
+    }
+
     t_putstr("u-repl-test: all OK\n");
     0
 }

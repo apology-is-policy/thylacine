@@ -246,7 +246,9 @@ prompt-cycle sync point, never mid-command.
 set, static for the session) and calls `refresh_command_index`. The latter
 merges that cache with the live builtins + `Env::alias_names()` +
 `Env::fn_names()` into a sorted, deduped command index and installs a fresh
-`completion::ShellCompletionSource` into the editor. `feed` re-runs
+`completion::ShellCompletionSource` into the editor — and hands the SAME index
+to `editor.set_known_commands` for #115c command-line validity coloring. `feed`
+re-runs
 `refresh_command_index` after every accepted line so an interactively-defined
 `fn`/alias is completable at the next prompt; it is a no-op until
 `install_completion` has run (`completion_installed` gate), so host tests + the
