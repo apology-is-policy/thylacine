@@ -98,6 +98,14 @@ struct attach_probe_responder_ctx {
 static struct attach_probe_responder_ctx g_responder_ctx;
 static volatile bool                     g_responder_finished;
 static volatile u32                      g_responder_msgs_handled;
+// #108: release flag for the responder's EXITING-handshake reap (the loom_sqpoll
+// join idiom). The responder sets it RELEASE after marking itself EXITING; the
+// boot joiner observes it ACQUIRE then thread_free()s the responder. Replaces a
+// leaked `for(;;) sched()` busy-spin that pinned every CPU at idle. NOTE the
+// two flags differ on purpose: g_responder_finished (above, volatile) is a
+// liveness HINT (the responder drained EOF); g_responder_exited is the reap
+// SYNCHRONIZATION edge (its ACQUIRE/RELEASE is what orders the thread_free).
+static bool                              g_responder_exited;
 
 // Helper: write `n` bytes to a Spoor, looping over short writes.
 // Returns 0 on success, -1 on any error.
@@ -238,11 +246,22 @@ static void responder_thread_entry(void) {
     spoor_clunk(tx);
     g_responder_finished = true;
 
-    // Park forever: kproc kthreads can't call exits() (extincts from
-    // kproc), and a bare return runs the trampoline's WFE-spin which
-    // wedges the CPU. Cooperative sched-loop yields each tick so
-    // boot keeps the chance to run + observe g_responder_finished.
-    for (;;) sched();
+    // Terminal EXITING handshake (the loom_sqpoll_main idiom, kernel/loom.c):
+    // mask preempt across the state=EXITING write + the g_responder_exited
+    // RELEASE so no preempt fires between them; the boot joiner, on observing
+    // g_responder_exited (ACQUIRE), is guaranteed to see state==EXITING and so
+    // thread_free's not-RUNNING gate holds. sched() then switches away
+    // PERMANENTLY (EXITING is never re-enqueued); the joiner's thread_free spins
+    // on on_cpu before reclaiming. This is the wait_pid reap terminal minus the
+    // Proc-zombie bookkeeping a kproc kthread cannot run (exits()/
+    // thread_exit_self extinct from kproc). #108: the prior `for(;;) sched()`
+    // park left this thread RUNNABLE forever -- the scheduler ran it on every
+    // CPU (work-steal bounced it), pinning all cores at idle.
+    (void)spin_lock_irqsave(NULL);
+    current_thread()->state = THREAD_EXITING;
+    __atomic_store_n(&g_responder_exited, true, __ATOMIC_RELEASE);
+    sched();
+    extinction("responder_thread_entry: returned from terminal sched");
 }
 
 // =============================================================================
@@ -375,6 +394,7 @@ void test_attach_probe_round_trip(void) {
     g_responder_ctx.tx       = s2c_wr;
     g_responder_finished     = false;
     g_responder_msgs_handled = 0;
+    __atomic_store_n(&g_responder_exited, false, __ATOMIC_RELAXED);
 
     struct Thread *responder = thread_create(kproc(), responder_thread_entry);
     TEST_ASSERT(responder != NULL, "thread_create responder");
@@ -402,8 +422,8 @@ void test_attach_probe_round_trip(void) {
     //    propagated EOF to the c2s ring (write_eof set on the c2s
     //    ring at probe's t_close(tx_fd) since that was the LAST ref).
     //    The responder's next dev_read returns 0 → sets
-    //    g_responder_finished + parks in a yield loop. Sched() until
-    //    we observe the flag.
+    //    g_responder_finished then runs its terminal EXITING handshake.
+    //    Sched() until we observe the flag.
     for (int i = 0; i < 256 && !g_responder_finished; i++) sched();
     if (!g_responder_finished) {
         uart_puts("    boot: responder not finished after 256 scheds; "
@@ -413,6 +433,17 @@ void test_attach_probe_round_trip(void) {
     }
     TEST_ASSERT(g_responder_finished,
         "responder thread finished after probe exit");
+
+    // #108: reap the responder kthread (the loom_free join idiom). It has set
+    // g_responder_finished then run its EXITING handshake; wait for the RELEASE
+    // flag (pairs with the responder's store -> state==EXITING visible so
+    // thread_free's not-RUNNING gate passes; thread_free then spins on on_cpu --
+    // cleared by the next thread's finish-task-switch -- so the kstack reclaim
+    // waits until the responder is physically off its CPU, #788), then free it.
+    // Without this the responder leaked as a runnable thread the scheduler spun
+    // on every CPU forever -- the #108 idle-CPU burn.
+    while (!__atomic_load_n(&g_responder_exited, __ATOMIC_ACQUIRE)) sched();
+    thread_free(responder);
 
     // No boot-side spoor_clunks needed — all 4 Spoor refs were
     // transferred (responder owns 2; probe's handle table owned 2;
