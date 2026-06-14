@@ -186,10 +186,7 @@ impl Terminal {
         }
         self.entered = false;
         let mut out = Vec::with_capacity(32);
-        out.extend_from_slice(encode::RESET_SGR);
-        out.extend_from_slice(encode::ENABLE_AUTOWRAP);
-        out.extend_from_slice(encode::SHOW_CURSOR);
-        out.extend_from_slice(encode::LEAVE_ALT_SCREEN);
+        encode::restore_screen(&mut out);
         self.out.write_all(&out)?;
         self.out.flush()
     }

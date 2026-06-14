@@ -26,6 +26,13 @@ use crate::input::Parser;
 /// escape sequence within one read.
 const READ_CHUNK: usize = 1024;
 
+/// Max fd-0 reads drained into the parser within ONE `poll` -- a livelock bound
+/// against an unbounded writer. On the cap we return WITHOUT flushing, so a
+/// sequence still mid-assembly stays in the retained parser for the next `poll`
+/// (never mis-keyed; #106-F2). 64 * READ_CHUNK = 64 KiB/round, far above any
+/// real paste (the cons ring is 256 B).
+const DRAIN_MAX: usize = 64;
+
 /// The loop's event producer. One `poll` returns every Event decoded from the
 /// bytes available this round (a single read can carry many keys). A future
 /// `LoomSource` is the other implementation; the trait is the substitution seam.
@@ -81,54 +88,74 @@ impl Default for PollSource {
 
 impl EventSource for PollSource {
     fn poll(&mut self, timeout: PollTimeout) -> Result<Vec<Event>> {
+        let mut out = Vec::new();
+
         // Replay any pre-loop type-ahead (kaua::query #117-F2) through the same
-        // parser before touching fd 0. If it decodes to keys, return them this
-        // round; if it decodes to nothing (a terminal-volunteered sequence),
-        // fall through to a normal blocking poll (never return spuriously empty).
+        // retained parser FIRST, but do NOT flush here: a VT sequence split
+        // between the type-ahead tail and the first fd-0 read is assembled by the
+        // one parser across both. The flush happens once, after the drain below.
         if !self.pending.is_empty() {
-            let mut out = Vec::new();
             let bytes = core::mem::take(&mut self.pending);
             for b in bytes {
                 if let Some(e) = self.parser.feed(b) {
                     out.push(Event::Key(e));
                 }
             }
-            if let Some(e) = self.parser.flush() {
-                out.push(Event::Key(e));
-            }
-            if !out.is_empty() {
-                return Ok(out);
-            }
         }
 
-        let mut out = Vec::new();
-        let mut readable = false;
-        for ev in self.poll.poll(timeout)? {
-            if ev.fd == 0 {
-                if ev.is_readable() {
-                    readable = true;
-                }
-                if ev.is_hup() || ev.is_err() {
-                    self.eof = true;
+        // Drain every byte immediately available on fd 0 into the single retained
+        // parser before deciding a dangling ESC is a real Escape. A paste larger
+        // than the 256 B cons ring arrives across several reads; flushing between
+        // them would mis-key a sequence straddling a read boundary (#106-F2). The
+        // first sweep blocks for `timeout` UNLESS the type-ahead already produced
+        // events (then we only collect what is instantly ready -- never block on
+        // top of work in hand). Later sweeps are non-blocking; `drained_dry` marks
+        // a clean end (fd 0 not readable / EOF), the only point a lone ESC is real.
+        let mut drained_dry = false;
+        for i in 0..DRAIN_MAX {
+            let t = if i == 0 && out.is_empty() {
+                timeout
+            } else {
+                PollTimeout::Zero
+            };
+            let mut readable = false;
+            for ev in self.poll.poll(t)? {
+                if ev.fd == 0 {
+                    if ev.is_readable() {
+                        readable = true;
+                    }
+                    if ev.is_hup() || ev.is_err() {
+                        self.eof = true;
+                    }
                 }
             }
-        }
-        if readable {
+            if !readable {
+                drained_dry = true;
+                break;
+            }
             let n = self.inp.read(&mut self.inbuf)?;
             if n == 0 {
                 self.eof = true;
+                drained_dry = true;
+                break;
             }
             for &b in &self.inbuf[..n] {
                 if let Some(e) = self.parser.feed(b) {
                     out.push(Event::Key(e));
                 }
             }
-            // The local console delivers each logical input within one ring
-            // drain, so a dangling ESC at the chunk end is a real Escape key.
+        }
+
+        // Resolve a dangling lone ESC to an Escape key ONLY once fd 0 is fully
+        // drained -- no continuation byte is waiting, so it cannot be the head of
+        // a split sequence. If the drain stopped on DRAIN_MAX (input still ready),
+        // keep the parser's partial state for the next `poll` instead of guessing.
+        if drained_dry {
             if let Some(e) = self.parser.flush() {
                 out.push(Event::Key(e));
             }
         }
+
         Ok(out)
     }
 

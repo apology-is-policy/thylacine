@@ -95,6 +95,27 @@ const MODE_COOKED_ECHO: &[u8] = b"+icanon +echo +isig +icrnl +onlcr";
 const MODE_COOKED_NOECHO: &[u8] = b"+icanon -echo +isig +icrnl +onlcr";
 const MODE_DEFAULT: &[u8] = b"-icanon -echo +isig -icrnl -onlcr";
 
+// #106-F3 drift guard: login's restore-before-shell discipline MUST equal ut's
+// prompt mode (libutopia::eval::console::PROMPT_MODE) so the login->ut boundary
+// does not flip the console. Both are const-asserted to the SAME literal, here on
+// the no_std device build, so a drift on either side fails its own build.
+const _: () = {
+    const fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
+        if a.len() != b.len() {
+            return false;
+        }
+        let mut i = 0;
+        while i < a.len() {
+            if a[i] != b[i] {
+                return false;
+            }
+            i += 1;
+        }
+        true
+    }
+    assert!(bytes_eq(MODE_DEFAULT, b"-icanon -echo +isig -icrnl -onlcr"));
+};
+
 // Parse "--consctl-fd N" from argv -> the consctl fd, or -1 if absent/malformed.
 // N is the child fd the inherited handle landed at (always 3 in the trusted
 // joey->login chain, but parsed generically).

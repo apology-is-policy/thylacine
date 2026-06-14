@@ -55,6 +55,33 @@ pub(crate) const RAW_MODE: &[u8] = b"-icanon -echo -isig -icrnl -onlcr";
 /// tables).
 pub(crate) const RESTORE_SCREEN: &[u8] = b"\x1b[0m\x1b[?7h\x1b[?25h\x1b[?1049l";
 
+/// Compile-time byte-slice equality (`==` on `&[u8]` is not `const`).
+const fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+// The #106-F3 drift guards, as COMPILE-TIME asserts that fire on the no_std
+// device build -- libutopia has no host test harness (the crate is unconditionally
+// `#![no_std]`), so the `#[cfg(test)]` literal asserts below never run. These do.
+// PROMPT/RAW are the single-bit isig flip; RESTORE_SCREEN is the cross-crate
+// mirror of `kaua::term::Terminal::leave`, pinned to the SAME literal on the kaua
+// side by `kaua::encode::tests::restore_screen_is_the_pinned_sequence`, so a drift
+// on either side fails its own build. login's MODE_DEFAULT carries the matching
+// PROMPT-mode assert (it must equal PROMPT_MODE so the login->ut boundary is flat).
+const _: () = assert!(bytes_eq(PROMPT_MODE, b"-icanon -echo +isig -icrnl -onlcr"));
+const _: () = assert!(bytes_eq(RAW_MODE, b"-icanon -echo -isig -icrnl -onlcr"));
+const _: () = assert!(bytes_eq(RESTORE_SCREEN, b"\x1b[0m\x1b[?7h\x1b[?25h\x1b[?1049l"));
+
 /// Write an absolute consctl mode command to `fd` (the kernel applies one write
 /// atomically -- the TCSAFLUSH discipline, `cons_set_mode_cmd`). Best-effort:
 /// returns true iff the whole command was accepted (n == len). A bad fd / a

@@ -38,7 +38,8 @@
 /// Largest reply we stage before giving up. A CPR reply is `ESC[` + <=5 rows
 /// digits + `;` + <=5 cols digits + `R` = at most 14 bytes; 32 tolerates minor
 /// leading noise (a stray sequence or a type-ahead keystroke) and bounds the
-/// read.
+/// read. Only `read_cpr` consumes it, so it is backend-gated like that path.
+#[cfg(feature = "backend")]
 const CPR_BUF_CAP: usize = 32;
 
 /// Parse a Cursor-Position-Report `ESC[<rows>;<cols>R` out of `buf`, returning

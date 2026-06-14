@@ -10,7 +10,10 @@ spawns the child with fd_list `[0,1,2]` only, never re-forwarding consctl or
 conferring console-attach), the restore-on-every-exit backstop is complete on
 the dance path, and the VT input parser is memory-safe (O(1) state, CSI-overflow
 latch, total `feed`); the 3 P3 robustness notes (incl. a `>256`-byte-paste
-split-sequence mis-key) are tracked #106. Design scripture: `docs/KAUA.md`
+split-sequence mis-key) were closed at #106 (drain-before-flush input in
+`source`, the consctl-less degrade now keeps the crash backstop, and a `const`
+assert + a kaua host test pin the cross-crate restore-sequence mirror). Design
+scripture: `docs/KAUA.md`
 (binding); this is the as-built complement. Audit-trigger row: ARCH §25.4 /
 CLAUDE.md ("Kaua console-TUI substrate").
 

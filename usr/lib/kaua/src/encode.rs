@@ -21,6 +21,21 @@ pub const ENABLE_AUTOWRAP: &[u8] = b"\x1b[?7h";
 pub const CLEAR_SCREEN: &[u8] = b"\x1b[2J";
 pub const RESET_SGR: &[u8] = b"\x1b[0m";
 
+/// Append the screen-restore sequence -- reset SGR, re-enable autowrap, show the
+/// cursor, leave the alt-screen, in that order. The SINGLE source of truth for
+/// the bytes `term::Terminal::leave` emits; `ut`'s crash backstop
+/// (`libutopia::eval::console::RESTORE_SCREEN`) is a hand-maintained cross-crate
+/// mirror of this exact sequence. Both are pinned to the same literal -- here by
+/// `restore_screen_is_the_pinned_sequence`, there by a `const` assert -- so a
+/// drift on either side fails its own build/test (#106-F3, the T-4 audit mirror
+/// guard).
+pub fn restore_screen(out: &mut Vec<u8>) {
+    out.extend_from_slice(RESET_SGR);
+    out.extend_from_slice(ENABLE_AUTOWRAP);
+    out.extend_from_slice(SHOW_CURSOR);
+    out.extend_from_slice(LEAVE_ALT_SCREEN);
+}
+
 // Cursor save/restore + the size-probe request (driven by kaua::query). SAVE /
 // RESTORE are the ANSI SCO sequences (widely supported by xterm/Ghostty); the
 // probe parks the cursor at a far corner -- the terminal clamps it to the
@@ -263,5 +278,17 @@ mod tests {
             s(&o),
             "\x1b[1;1H\x1b[0;38;2;255;0;0;49mr\x1b[0;38;2;0;255;0;49mg"
         );
+    }
+
+    #[test]
+    fn restore_screen_is_the_pinned_sequence() {
+        // The cross-crate drift guard (#106-F3). This EXACT literal is also
+        // const-asserted in libutopia::eval::console::RESTORE_SCREEN (ut's crash
+        // backstop). Editing an escape constant or reordering `restore_screen`
+        // (hence `term::leave`) breaks THIS; changing the libutopia mirror breaks
+        // ITS const assert -- the lockstep is now enforced, not just documented.
+        let mut o = Vec::new();
+        restore_screen(&mut o);
+        assert_eq!(o, b"\x1b[0m\x1b[?7h\x1b[?25h\x1b[?1049l");
     }
 }

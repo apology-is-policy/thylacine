@@ -615,4 +615,33 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn csi_split_across_reads_assembles_when_flush_is_deferred() {
+        // The invariant the PollSource drain relies on (#106-F2): a CSI split
+        // across two reads is one key IF flush() is deferred to the true end.
+        // `ESC [` lands in read 1 (parser mid-CSI, no key), `A` in read 2.
+        let mut p = Parser::new();
+        assert_eq!(p.feed(0x1b), None);
+        assert_eq!(p.feed(b'['), None); // end of read 1: parser holds a partial CSI
+        let k = p.feed(b'A'); // read 2 completes it
+        assert_eq!(k, Some(KeyEvent::new(KeyCode::Up)));
+        assert_eq!(p.flush(), None); // dry: nothing dangling
+
+        // And the bug the deferral avoids, in BOTH split positions:
+        // (a) split after `ESC[` -- a premature flush DROPS the partial CSI (the
+        //     arrow is destroyed) and the tail `A` then mis-keys as a literal char.
+        let mut q = Parser::new();
+        assert_eq!(q.feed(0x1b), None);
+        assert_eq!(q.feed(b'['), None);
+        assert_eq!(q.flush(), None); // partial CSI dropped (premature!)
+        assert_eq!(q.feed(b'A'), Some(KeyEvent::char('A')));
+        // (b) split after the lone `ESC` -- a premature flush emits a SPURIOUS Esc
+        //     and the tail `[A` then parses as two literal chars.
+        let mut r = Parser::new();
+        assert_eq!(r.feed(0x1b), None);
+        assert_eq!(r.flush(), Some(KeyEvent::new(KeyCode::Esc))); // spurious!
+        assert_eq!(r.feed(b'['), Some(KeyEvent::char('[')));
+        assert_eq!(r.feed(b'A'), Some(KeyEvent::char('A')));
+    }
 }

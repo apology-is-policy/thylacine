@@ -474,7 +474,7 @@ from the aux `libtapestry` POC, which is the *graphics* weave (Tapestry,
 | T-2 widgets + layout + event-source | **landed** -- `layout`/`widget`/`source` + `Event` (pure layers host-tested; `source` is the backend input half + the Loom seam); input split out of `term` into `source`; `docs/reference/112-kaua.md` |
 | T-3 nora | **landed** -- `text` (engine) + `editor` (modal core) + `view` (renderer) + the binary (Kaua backend + file I/O); 41 host tests; `docs/reference/113-nora.md` |
 | T-4 dance + LS-CI | dance **landed** @77386f7 (component-proven: the kernel poll path is proven by `poll.cons_deferred_block_then_wake` b7b14d3; I-27-safe by review). The live `ls-7` run is OWED -- the interactive harness can't reach a login shell (TCG stratumd-mount regression #104; HVF PTY-exit #105), both pre-existing infra, not the dance |
-| audit | **closed** @77386f7 -- Opus-4.8-max, 0 P0 / 0 P1 / 0 P2 / 3 P3 (I-27 preserved + restore backstop complete on the dance path + VT-parser memory-safe; the 3 P3 robustness notes tracked #106) |
+| audit | **closed** @77386f7 -- Opus-4.8-max, 0 P0 / 0 P1 / 0 P2 / 3 P3 (I-27 preserved + restore backstop complete on the dance path + VT-parser memory-safe; the 3 P3 robustness notes closed at #106: drain-before-flush input, consctl-less degrade keeps the backstop, const-assert + host-test pin the restore mirror) |
 
 The `Weft` name is reserved (§1.1). The full-`unicode-width` table, the richer
 layout solver, `Resize`/`SIGWINCH`, an indexed-color fallback, the Loom event

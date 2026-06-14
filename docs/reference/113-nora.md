@@ -5,18 +5,21 @@ launches it, committed @77386f7). `nora` is the first consumer of the Kaua
 console-TUI substrate (`docs/reference/112-kaua.md`); it proves the substrate by
 being a real full-screen application. The focused I-27 audit (the Kaua backend +
 the dance) is **closed** (Opus-4.8-max, 0 P0 / 0 P1 / 0 P2 / 3 P3 robustness
-notes, tracked #106). The live `ls-7` LS-CI run is **owed** — the interactive
+notes, all closed at #106). The live `ls-7` LS-CI run is **owed** — the interactive
 harness can't reach a login shell yet (a TCG stratumd-mount regression #104; an
 HVF PTY-exit #105), both pre-existing infra unrelated to the editor; the kernel
 poll path `nora` takes is proven deterministically by
 `poll.cons_deferred_block_then_wake` (b7b14d3). Design scripture: `docs/KAUA.md`
 §3/§9 (binding).
 
-**Known caveats** (T-4 audit P3, tracked #106): a `>256`-byte paste containing
-escape sequences can mis-key at a console read boundary (the input parser flushes
-per read; benign for interactive typing — never UB). Launching a raw child
-without a forwarded `consctl` fd (a non-login `ut`) degrades to best-effort
-screen restore.
+**Resolved at #106** (the T-4 audit's 3 P3 robustness notes): the input source
+now drains every byte available on fd 0 into one retained parser before resolving
+a dangling ESC, so a `>256`-byte paste split across console reads no longer
+mis-keys at a read boundary; launching a raw child without a forwarded `consctl`
+fd (a non-login `ut`) now keeps the screen crash-restore backstop (it skips only
+the raw-mode discipline flips); and the cross-crate restore-sequence mirror is
+pinned by a `const` assert (libutopia) + a kaua host test against one shared
+literal, so a drift on either side fails its own build.
 
 ## Purpose
 

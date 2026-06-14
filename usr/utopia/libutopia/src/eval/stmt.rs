@@ -1206,15 +1206,20 @@ fn exec_external(
 ) -> EvalResult<StatementFlow> {
     // LS-7 / Kaua T-4: a full-screen TUI child (nora) needs the console in RAW
     // mode + its OWN fd 0/1/2 (Inherit), and the shell must NOT forward Ctrl-C to
-    // it (Ctrl-C is the child's keystroke, not a terminate). The dance requires
-    // BOTH a console to inherit (stdio_inherit) AND the consctl fd to flip the
-    // discipline; a fd-less harness (neither) falls through to the normal path,
-    // where nora's Piped-drop fd 0 reads EOF and it exits at once -- a graceful
-    // degrade, never a wrong result.
+    // it (Ctrl-C is the child's keystroke, not a terminate). This requires a
+    // console to inherit (stdio_inherit); the consctl fd is optional and threaded
+    // into the dance:
+    //   Some(fd): the full dance -- flip the discipline to RAW and restore it.
+    //   None:     a non-login ut whose console was never consctl-forwarded. Still
+    //             hand the child the inherited console and bracket it with the
+    //             screen crash backstop, just without the raw-mode flips (the
+    //             console keeps its current discipline). #106-F1: this path used
+    //             to fall through to the normal spawn with NO restore_screen, so a
+    //             TUI crash there wedged the alt-screen.
+    // The fd-less harness (stdio_inherit == false) never reaches here and keeps
+    // its Piped-drop-EOF degrade.
     if env.stdio_inherit && console::is_raw_command(&argv[0]) {
-        if let Some(fd) = env.consctl_fd {
-            return exec_external_raw(env, argv, fd);
-        }
+        return exec_external_raw(env, argv, env.consctl_fd);
     }
 
     if env.trace_depth > 0 {
@@ -1269,16 +1274,20 @@ fn exec_external(
 }
 
 /// Run a full-screen TUI child (nora) under the LS-7 raw-mode dance (Kaua T-4).
-/// `consctl_fd` is the caller's already-validated `/dev/consctl` fd. Four steps:
-/// RAW the console (ISIG off -> Ctrl-C is the child's keystroke), hand it fd
-/// 0/1/2 (Inherit), wait by pid, then -- on EVERY exit path -- restore ut's
-/// PROMPT mode + re-emit the screen-restore escapes (the crash backstop). I-27:
-/// ut stays the sole consctl writer; the child never touches the discipline and
-/// is never console-attached, so the SAK / elevation gate is untouched.
+/// `consctl_fd` is the caller's already-validated `/dev/consctl` fd, or `None`
+/// for the consctl-less degrade (a non-login ut). Steps: when a consctl fd is
+/// held, RAW the console (ISIG off -> Ctrl-C is the child's keystroke); hand the
+/// child fd 0/1/2 (Inherit); wait by pid; then -- on EVERY exit path -- re-emit
+/// the screen-restore escapes (the crash backstop, ALWAYS) and, when held,
+/// restore ut's PROMPT mode. Without a consctl fd the discipline flips are
+/// skipped (the console keeps its mode) but the screen backstop still runs, so a
+/// crashed TUI never wedges the alt-screen (#106-F1). I-27: ut stays the sole
+/// consctl writer; the child never touches the discipline and is never
+/// console-attached, so the SAK / elevation gate is untouched.
 fn exec_external_raw(
     env: &mut Env,
     argv: &[String],
-    consctl_fd: i32,
+    consctl_fd: Option<i32>,
 ) -> EvalResult<StatementFlow> {
     if env.trace_depth > 0 {
         trace_echo(argv);
@@ -1287,7 +1296,13 @@ fn exec_external_raw(
     // 1. RAW the console BEFORE the spawn so the child's first read sees raw
     //    bytes. A rejected consctl write (bad fd / pre-LS-8b kernel) still lets
     //    the child run -- in whatever mode the console held -- a graceful degrade.
-    console::set_mode(consctl_fd, console::RAW_MODE);
+    //    With no consctl fd (the degrade) the console keeps its current mode (ut's
+    //    PROMPT discipline: raw, no-echo, but +isig -- so Ctrl-C terminates the
+    //    child rather than reaching it as a keystroke; acceptable for a non-login
+    //    ut, and strictly better than the old no-backstop fall-through).
+    if let Some(fd) = consctl_fd {
+        console::set_mode(fd, console::RAW_MODE);
+    }
 
     let mut spawn_cmd = libthyla_rs::process::Command::new(resolve_command(&argv[0]));
     if argv.len() > 1 {
@@ -1302,32 +1317,40 @@ fn exec_external_raw(
 
     match spawn_cmd.spawn() {
         Ok(child) => {
-            // 3. A plain by-pid wait -- NOT wait_pids_interruptible. With ISIG off
-            //    the kernel posts no `interrupt` for this child (Ctrl-C is a raw
-            //    byte it reads), so there is nothing to forward; the child owns the
-            //    console until it exits. Under all-Inherit the parent holds no pipe
-            //    ends, so `child` carries nothing to close (Child::Drop does not
+            // 3. A plain by-pid wait -- NOT wait_pids_interruptible. With a consctl
+            //    fd the discipline is RAW (ISIG off) so the kernel posts no
+            //    `interrupt` for this child; in the consctl-less degrade ISIG is on,
+            //    so a Ctrl-C terminates the child, which this same wait then reaps --
+            //    either way the child owns the console until it exits and there is
+            //    nothing for ut to forward. Under all-Inherit the parent holds no
+            //    pipe ends, so `child` carries nothing to close (Child::Drop does not
             //    reap) -- reading its pid then letting it drop is clean.
             let pid = child.pid();
             let mut st: i32 = 0;
             // SAFETY: SVC wrapper; &mut st is a valid writable i32. A vanished /
             // not-our-child pid yields rc < 0 -> status 0 (matches the reap loops).
             let rc = unsafe { t_wait_pid_for(pid, 0, &mut st as *mut i32) };
-            // 4. Restore on EVERY exit path (clean, error, OR death): ut's prompt
-            //    mode + the screen escapes. The child's own Drop emitted the same
+            // 4. Restore on EVERY exit path (clean, error, OR death): re-emit the
+            //    screen escapes (ALWAYS -- the crash backstop) and, when a consctl
+            //    fd is held, ut's PROMPT mode. The child's own Drop emitted the same
             //    escapes on a clean exit (idempotent); on a CRASH (panic=abort, no
             //    Drop) this is the sole restore, so a crashed TUI never wedges the
-            //    console in the alt-screen with a raw, non-echoing discipline.
-            console::set_mode(consctl_fd, console::PROMPT_MODE);
+            //    console in the alt-screen with a hidden cursor.
+            if let Some(fd) = consctl_fd {
+                console::set_mode(fd, console::PROMPT_MODE);
+            }
             console::restore_screen();
             env.status_set(if rc < 0 { 0 } else { st });
             Ok(StatementFlow::Normal)
         }
         Err(e) => {
             // The child never spawned -> never entered the alt-screen, so only the
-            // line discipline needs restoring (we already RAW'd it); no screen
-            // escapes. Report the failure like the normal spawn-fail path.
-            console::set_mode(consctl_fd, console::PROMPT_MODE);
+            // line discipline needs restoring (and only if we held a consctl fd to
+            // RAW it); no screen escapes. Report the failure like the normal
+            // spawn-fail path.
+            if let Some(fd) = consctl_fd {
+                console::set_mode(fd, console::PROMPT_MODE);
+            }
             let mut s = String::new();
             let _ = write!(&mut s, "spawn failed: {:?}", e);
             env.errstr_set(s);
