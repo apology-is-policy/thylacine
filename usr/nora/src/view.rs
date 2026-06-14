@@ -23,8 +23,9 @@ use crate::wrap;
 /// The text-region layout for `area`: `(gutter_w, text_width, text_height)`.
 /// The single source of geometry shared by `render` and `Editor::scroll_to`
 /// (they must agree on the text width or the wrapped cursor desyncs).
-pub fn text_metrics(area: Rect, line_count: usize) -> (u16, u16, usize) {
-    let parts = Layout::vertical(&[Constraint::Min(1), Constraint::Length(1)]).split(area);
+pub fn text_metrics(area: Rect, line_count: usize, tabs: bool) -> (u16, u16, usize) {
+    let body = body_area(area, tabs);
+    let parts = Layout::vertical(&[Constraint::Min(1), Constraint::Length(1)]).split(body);
     let text_area = parts[0];
     let gutter_w = digits(line_count).max(3) + 1;
     let tw = text_area.width.saturating_sub(gutter_w);
@@ -32,12 +33,31 @@ pub fn text_metrics(area: Rect, line_count: usize) -> (u16, u16, usize) {
     (gutter_w, tw, th)
 }
 
+/// The region below the optional top buffer-tab strip (the whole area when no
+/// tabs). Shared by `render` and `text_metrics` so they agree on the geometry.
+fn body_area(area: Rect, tabs: bool) -> Rect {
+    if tabs {
+        Layout::vertical(&[Constraint::Length(1), Constraint::Min(1)]).split(area)[1]
+    } else {
+        area
+    }
+}
+
 /// Render `ed` into `buf` over `area`; returns the cursor `(x, y)`.
 pub fn render(ed: &Editor, area: Rect, buf: &mut Buffer) -> (u16, u16) {
-    let parts = Layout::vertical(&[Constraint::Min(1), Constraint::Length(1)]).split(area);
+    let tabs = ed.show_tabs();
+    let body = body_area(area, tabs);
+    let parts = Layout::vertical(&[Constraint::Min(1), Constraint::Length(1)]).split(body);
     let text_area = parts[0];
     let status_area = parts.get(1).copied().unwrap_or(text_area);
-    let (gutter_w, tw, th) = text_metrics(area, ed.text.line_count());
+    let (gutter_w, tw, th) = text_metrics(area, ed.text.line_count(), tabs);
+
+    // The buffer-tab strip occupies the top row when more than one buffer is open.
+    if tabs {
+        let tab_area =
+            Layout::vertical(&[Constraint::Length(1), Constraint::Min(1)]).split(area)[0];
+        render_tabs(ed, tab_area, buf);
+    }
 
     fill(buf, text_area, theme::blank());
 
@@ -54,10 +74,48 @@ pub fn render(ed: &Editor, area: Rect, buf: &mut Buffer) -> (u16, u16) {
         return render_palette(ed, text_area, buf);
     }
 
-    if ed.wrap {
+    let cur = if ed.wrap {
         cursor_wrapped(ed, text_area, gutter_w, tw, th)
     } else {
         cursor(ed, text_area, status_area, gutter_w)
+    };
+    // The mode-coloured block cursor. The binary hides the real terminal cursor
+    // in text modes (`block_cursor`), so this painted block IS the cursor; on the
+    // command line the real cursor shows instead and no block is drawn.
+    if ed.block_cursor() {
+        let accent = mode_color(&ed.mode);
+        let glyph = buf.get(cur.0, cur.1).map(|c| c.symbol).unwrap_or(' ');
+        buf.set_cell(cur.0, cur.1, Cell::new(glyph, theme::cursor_block(accent)));
+    }
+    cur
+}
+
+/// Draw the top buffer-tab strip (Helix-style) over the slate background: each
+/// open buffer as a ` name ` segment, the active one an ember chip.
+fn render_tabs(ed: &Editor, area: Rect, buf: &mut Buffer) {
+    if area.is_empty() {
+        return;
+    }
+    fill(buf, area, theme::tab_strip());
+    let mut x = area.x;
+    for (name, active) in ed.buffer_tabs() {
+        let style = if active {
+            theme::tab_active()
+        } else {
+            theme::tab_inactive()
+        };
+        for ch in format!(" {} ", name).chars() {
+            if x >= area.right() {
+                return;
+            }
+            buf.set_cell(x, area.y, Cell::new(ch, style));
+            x = x.saturating_add(1);
+        }
+        // A one-cell slate gap separates adjacent tabs.
+        if x < area.right() {
+            buf.set_cell(x, area.y, Cell::new(' ', theme::tab_strip()));
+            x = x.saturating_add(1);
+        }
     }
 }
 
@@ -67,6 +125,7 @@ fn render_plain(ed: &Editor, text_area: Rect, gutter_w: u16, tw: u16, th: usize,
     let num_w = gutter_w.saturating_sub(1);
     let tx = text_area.x + gutter_w;
     let sel = ed.selection();
+    let cur_row = ed.text.cursor().0;
     for r in 0..th {
         let y = text_area.y + r as u16;
         let row = ed.top + r;
@@ -74,19 +133,22 @@ fn render_plain(ed: &Editor, text_area: Rect, gutter_w: u16, tw: u16, th: usize,
             buf.set_str(text_area.x, y, "~", theme::tilde());
             continue;
         }
+        let on_cur = row == cur_row;
+        let (txt_style, gut_style) = if on_cur {
+            (theme::current_line(), theme::current_gutter())
+        } else {
+            (theme::text(), theme::gutter())
+        };
+        if on_cur {
+            // Lift the whole row so the highlight extends past the line's end.
+            for x in text_area.x..text_area.right() {
+                buf.set_cell(x, y, Cell::new(' ', theme::current_line()));
+            }
+        }
         let num = format!("{:>w$} ", row + 1, w = num_w as usize);
-        buf.set_str(text_area.x, y, &num, theme::gutter());
+        buf.set_str(text_area.x, y, &num, gut_style);
         // Horizontal scroll: draw the window [left, left+tw) of the line.
-        draw_text_slice(
-            buf,
-            tx,
-            y,
-            tx + tw,
-            ed.text.line(row),
-            ed.left,
-            tw as usize,
-            theme::text(),
-        );
+        draw_text_slice(buf, tx, y, tx + tw, ed.text.line(row), ed.left, tw as usize, txt_style);
         if let Some(span) = sel {
             paint_selection(buf, tx, y, tx + tw, ed.text.line(row), row, ed.left, span);
         }
@@ -100,6 +162,7 @@ fn render_wrapped(ed: &Editor, text_area: Rect, gutter_w: u16, tw: u16, th: usiz
     let num_w = gutter_w.saturating_sub(1);
     let tx = text_area.x + gutter_w;
     let sel = ed.selection();
+    let cur_row = ed.text.cursor().0;
     let mut pos = Some((ed.top, ed.top_sub));
     for r in 0..th {
         let y = text_area.y + r as u16;
@@ -111,12 +174,23 @@ fn render_wrapped(ed: &Editor, text_area: Rect, gutter_w: u16, tw: u16, th: usiz
                 continue;
             }
         };
+        let on_cur = row == cur_row;
+        let (txt_style, gut_style) = if on_cur {
+            (theme::current_line(), theme::current_gutter())
+        } else {
+            (theme::text(), theme::gutter())
+        };
+        if on_cur {
+            for x in text_area.x..text_area.right() {
+                buf.set_cell(x, y, Cell::new(' ', theme::current_line()));
+            }
+        }
         if sub == 0 {
             let num = format!("{:>w$} ", row + 1, w = num_w as usize);
-            buf.set_str(text_area.x, y, &num, theme::gutter());
+            buf.set_str(text_area.x, y, &num, gut_style);
         }
         let line = ed.text.line(row);
-        draw_text_slice(buf, tx, y, tx + tw, line, sub * tw as usize, tw as usize, theme::text());
+        draw_text_slice(buf, tx, y, tx + tw, line, sub * tw as usize, tw as usize, txt_style);
         if let Some(span) = sel {
             paint_selection_window(buf, tx, y, tx + tw, line, row, sub, tw, span);
         }
@@ -532,5 +606,48 @@ mod tests {
         assert_eq!(ed.left, 5);
         assert_eq!(sym(&b, 4, 0), '5'); // line index 5 drawn first, after the gutter
         assert_eq!(cur.0, 19); // col 20 -> x = 4 + (20-5), clamped to the edge
+    }
+
+    #[test]
+    fn current_line_is_highlighted() {
+        // B1: the cursor's row carries the lifted surface background; other rows
+        // keep the plain editor background.
+        let ed = Editor::new(Some("f".into()), "hello\nworld", false); // cursor (0,0)
+        let mut b = Buffer::empty(area());
+        render(&ed, area(), &mut b);
+        assert_eq!(b.get(5, 0).unwrap().style.bg, theme::BAR); // 'e', current line
+        assert_eq!(b.get(4, 1).unwrap().style.bg, theme::BG); // 'w', other line
+    }
+
+    #[test]
+    fn cursor_block_takes_the_mode_colour() {
+        // B2: the cursor cell is a block in the active mode's accent (the glyph
+        // is preserved); Normal = ember, Insert = moss.
+        let mut ed = Editor::new(Some("f".into()), "hi", false);
+        let mut b = Buffer::empty(area());
+        let cur = render(&ed, area(), &mut b);
+        assert_eq!(cur, (4, 0));
+        assert_eq!(b.get(4, 0).unwrap().style.bg, theme::EMBER);
+        assert_eq!(b.get(4, 0).unwrap().symbol, 'h');
+        ed.handle_key(KeyEvent::char('i')); // -> Insert
+        let mut b2 = Buffer::empty(area());
+        render(&ed, area(), &mut b2);
+        assert_eq!(b2.get(4, 0).unwrap().style.bg, theme::GREEN);
+    }
+
+    #[test]
+    fn buffer_tabs_strip_renders_on_two_buffers() {
+        // B3: a slate top strip with one segment per buffer; the active one is an
+        // ember chip; the text region shifts down by the strip row.
+        let big = Rect::new(0, 0, 40, 10);
+        let mut ed = Editor::new(Some("alpha".into()), "x", false);
+        ed.open_buffer(Some("beta".into()), "y"); // 2 buffers, active = beta (1)
+        let mut b = Buffer::empty(big);
+        render(&ed, big, &mut b);
+        assert_eq!(b.get(0, 0).unwrap().style.bg, theme::SLATE); // strip / inactive tab
+        assert_eq!(sym(&b, 1, 0), 'a'); // " alpha "
+        assert_eq!(sym(&b, 9, 0), 'b'); // " beta " after the 7-cell tab + 1 gap
+        assert_eq!(b.get(9, 0).unwrap().style.bg, theme::EMBER); // active = ember
+        assert_eq!(sym(&b, 2, 1), '1'); // text region starts on row 1 now
     }
 }

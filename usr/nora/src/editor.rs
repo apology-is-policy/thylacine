@@ -259,6 +259,39 @@ impl Editor {
         }
     }
 
+    /// Show the top buffer-tab strip when more than one buffer is open (Helix
+    /// `bufferline = "multiple"`).
+    pub fn show_tabs(&self) -> bool {
+        self.bufs.len() > 1
+    }
+
+    /// Each open buffer as `(basename, is_active)` for the tab strip. The active
+    /// buffer's name comes from the live field (its parked copy is stale until a
+    /// switch-away); the rest from their parked state.
+    pub fn buffer_tabs(&self) -> Vec<(String, bool)> {
+        self.bufs
+            .iter()
+            .enumerate()
+            .map(|(i, d)| {
+                let name = if i == self.active {
+                    self.filename.as_deref()
+                } else {
+                    d.filename.as_deref()
+                }
+                .unwrap_or("[No Name]");
+                let base = name.rsplit('/').next().unwrap_or(name);
+                (base.to_string(), i == self.active)
+            })
+            .collect()
+    }
+
+    /// Whether the cursor is drawn as a mode-coloured block (text modes) vs. the
+    /// terminal cursor on the command line (Command). The block IS the cursor in
+    /// text modes, so the binary hides the real one there.
+    pub fn block_cursor(&self) -> bool {
+        matches!(self.mode, Mode::Normal | Mode::Insert | Mode::Visual)
+    }
+
     /// Switch the active buffer to index `i` (parking the current one). Resets
     /// to Normal mode for a clean cross-buffer state.
     fn switch_to(&mut self, i: usize) {

@@ -29,6 +29,41 @@ pub const GREEN: Color = Color::Rgb(0xb8, 0xd0, 0x98);
 pub const VIOLET: Color = Color::Rgb(0xa8, 0x98, 0xc8);
 /// Command-mode chip -- Bonfire `sand` (amber).
 pub const GOLD: Color = Color::Rgb(0xc8, 0xa8, 0x82);
+/// Buffer-tab strip -- Bonfire `slate` (keyword / blue ANSI; UTOPIA-VISUAL U-2).
+pub const SLATE: Color = Color::Rgb(0x8a, 0x9a, 0xc8);
+
+/// The cursor's line gets a subtly lifted background (Bonfire `surface`) so the
+/// active row stands out without a loud bar.
+pub fn current_line() -> Style {
+    Style::new().fg(FG).bg(BAR)
+}
+
+/// The gutter number on the cursor's line -- brighter (ember) than the dim
+/// furniture, over the current-line background.
+pub fn current_gutter() -> Style {
+    Style::new().fg(EMBER).bg(BAR).attr(Attr::BOLD)
+}
+
+/// The block cursor cell: the glyph under the cursor inverted onto the active
+/// mode's accent colour (Normal ember / Insert moss / Visual dusk / Command sand).
+pub fn cursor_block(accent: Color) -> Style {
+    Style::new().fg(BG).bg(accent)
+}
+
+/// The buffer-tab strip fill (and inactive tabs sit on it): Bonfire slate.
+pub fn tab_strip() -> Style {
+    Style::new().fg(BG).bg(SLATE)
+}
+
+/// The active buffer tab -- an ember chip on the slate strip, bold.
+pub fn tab_active() -> Style {
+    Style::new().fg(BG).bg(EMBER).attr(Attr::BOLD)
+}
+
+/// An inactive buffer tab -- dark text on the slate strip.
+pub fn tab_inactive() -> Style {
+    Style::new().fg(BG).bg(SLATE)
+}
 
 /// Body text over the editor background.
 pub fn text() -> Style {

@@ -168,8 +168,9 @@ fn run(term: &mut Terminal, src: &mut PollSource, ed: &mut Editor) -> i32 {
 /// cursor, and flush one diff frame to fd 1.
 fn redraw(term: &mut Terminal, ed: &mut Editor) -> Result<()> {
     let area = term.area();
-    // The text region (above the one-row status line); soft-wrap needs the width.
-    let (_, tw, text_h) = view::text_metrics(area, ed.text.line_count());
+    // The text region (above the one-row status line, below the optional tab
+    // strip); soft-wrap needs the width.
+    let (_, tw, text_h) = view::text_metrics(area, ed.text.line_count(), ed.show_tabs());
     ed.scroll_to(tw, text_h);
     let cur;
     {
@@ -177,7 +178,9 @@ fn redraw(term: &mut Terminal, ed: &mut Editor) -> Result<()> {
         buf.reset();
         cur = view::render(ed, area, buf);
     }
-    term.set_cursor(Some(cur));
+    // In text modes the painted block (mode colour) IS the cursor, so hide the
+    // real terminal cursor; on the command line show the real cursor instead.
+    term.set_cursor(if ed.block_cursor() { None } else { Some(cur) });
     term.flush()
 }
 
