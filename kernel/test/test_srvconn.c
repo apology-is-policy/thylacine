@@ -226,12 +226,13 @@ static struct SrvConn   *g_sc_conn;
 static volatile u32      g_sc_ran;
 static volatile long     g_sc_ret;
 static u8                g_sc_buf[64];
+static volatile bool     g_sc_exited;   // #109: terminal-park reap handshake
 
 static void sc_recv_consumer(void) {
     g_sc_ran++;                                          // → 1: pre-recv
     g_sc_ret = srvconn_client_recv(g_sc_conn, g_sc_buf, sizeof g_sc_buf);
     g_sc_ran++;                                          // → 2: post-recv
-    for (;;) sched();                                    // park safely
+    test_kthread_park_terminal(&g_sc_exited);            // #109: EXITING park
 }
 
 // ---------------------------------------------------------------------------
@@ -245,6 +246,7 @@ void test_srvconn_recv_blocks_then_wakes(void) {
     g_sc_conn = cn;
     g_sc_ran  = 0;
     g_sc_ret  = -999;
+    g_sc_exited = false;
 
     TEST_EXPECT_EQ(sched_runnable_count(), 0u,
         "run tree must be empty at test entry");
@@ -274,7 +276,7 @@ void test_srvconn_recv_blocks_then_wakes(void) {
     TEST_ASSERT(check_pattern(g_sc_buf, 16, 0x55),
         "the woken consumer read the server's bytes intact");
 
-    thread_free(consumer);
+    test_kthread_join_free(consumer, &g_sc_exited);
     srvconn_unref(cn);
 }
 
@@ -365,6 +367,7 @@ void test_srvconn_teardown_wakes_blocked(void) {
     g_sc_conn = cn;
     g_sc_ran  = 0;
     g_sc_ret  = -999;
+    g_sc_exited = false;
 
     TEST_EXPECT_EQ(sched_runnable_count(), 0u,
         "run tree must be empty at test entry");
@@ -387,6 +390,6 @@ void test_srvconn_teardown_wakes_blocked(void) {
     TEST_EXPECT_EQ(g_sc_ran, 2u, "teardown released the blocked consumer");
     TEST_EXPECT_EQ(g_sc_ret, 0L, "the woken consumer read EOF (0)");
 
-    thread_free(consumer);
+    test_kthread_join_free(consumer, &g_sc_exited);
     srvconn_unref(cn);
 }

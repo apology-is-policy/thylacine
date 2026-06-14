@@ -94,4 +94,23 @@ unsigned test_soft_warns(void);
         if (!(cond)) test_soft_warn(msg); \
     } while (0)
 
+// Terminal park + reap for in-kernel test kthreads (#108/#109). A helper
+// kthread that has finished its work cannot exits()/thread_exit_self (those
+// extinct from kproc) and must not bare-return (the trampoline WFE-spins).
+//
+//   test_kthread_park_terminal: the kthread parks TERMINALLY -- it transitions
+//   to THREAD_EXITING (never re-enqueued -> never RUNNABLE -> never work-stolen
+//   -> never busy-spins a CPU; replaces the leak-prone `for (;;) sched()`),
+//   publishes *exited (RELEASE), then sched()s away permanently. Never returns.
+//   `*exited` must be reset to false before the kthread is run.
+//
+//   test_kthread_join_free: the joiner waits until *exited is published
+//   (ACQUIRE pairs with the park's RELEASE -> thread_free's not-RUNNING gate is
+//   guaranteed), then reclaims t (its on_cpu spin covers the switch-away).
+//
+// Bodies in kernel/test/test.c.
+struct Thread;
+void test_kthread_park_terminal(volatile bool *exited);
+void test_kthread_join_free(struct Thread *t, volatile bool *exited);
+
 #endif // THYLACINE_KERNEL_TEST_H

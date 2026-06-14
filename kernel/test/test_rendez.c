@@ -191,6 +191,7 @@ static volatile u32   g_death_run_cnt;
 static volatile int   g_death_sleep_rc;
 static struct Rendez  g_death_rendez;
 static struct Proc   *g_death_proc;
+static volatile bool  g_death_exited;   // #109: terminal-park reap handshake
 
 static int death_cond_false(void *arg) {
     (void)arg;
@@ -205,15 +206,15 @@ static void death_consumer_entry(void) {
     // returns SLEEP_INTR (do NOT loop on a false cond -- that is the point).
     g_death_sleep_rc = sleep(&g_death_rendez, death_cond_false, NULL);
     g_death_run_cnt++;                           // → 2: post-INTR run
-    // Park forever (never fall off entry; mirrors test_torpor's consumer). A
-    // RUNNABLE-but-parked thread is safe for boot to thread_free under the
-    // deterministic single-CPU harness (secondaries stay idle -> not stolen).
-    for (;;) sched();
+    // #109: terminal EXITING park (was a RUNNABLE for(;;)sched()); the joiner
+    // reaps via test_kthread_join_free.
+    test_kthread_park_terminal(&g_death_exited);
 }
 
 void test_rendez_death_interrupts_sleep(void) {
     g_death_run_cnt  = 0;
     g_death_sleep_rc = 0x7fffffff;               // sentinel: sleep never returned
+    g_death_exited   = false;
     rendez_init(&g_death_rendez);
 
     TEST_EXPECT_EQ(sched_runnable_count(), 0u,
@@ -271,7 +272,7 @@ void test_rendez_death_interrupts_sleep(void) {
     TEST_ASSERT(consumer->rendez_blocked_on == NULL,
         "consumer cleared its backref on the death-interrupted resume");
 
-    thread_free(consumer);
+    test_kthread_join_free(consumer, &g_death_exited);
     g_death_proc->state = PROC_STATE_ZOMBIE;     // proc_free precondition
     proc_free(g_death_proc);
     g_death_proc = NULL;
@@ -313,12 +314,13 @@ static volatile u32   g_intr_run_cnt;
 static volatile int   g_intr_sleep_rc;
 static struct Rendez  g_intr_rendez;
 static struct Proc   *g_intr_proc;
+static volatile bool  g_intr_exited;    // #109: terminal-park handshake (shared by the intr_* consumers)
 
 static void intr_consumer_entry(void) {
     g_intr_run_cnt++;                            // -> 1: pre-sleep run
     g_intr_sleep_rc = sleep(&g_intr_rendez, death_cond_false, NULL);
     g_intr_run_cnt++;                            // -> 2: post-INTR run
-    for (;;) sched();
+    test_kthread_park_terminal(&g_intr_exited);  // #109: EXITING park
 }
 
 // The blocked-sleeper leg: consumer parks SLEEPING; boot posts a REAL
@@ -328,6 +330,7 @@ static void intr_consumer_entry(void) {
 void test_rendez_intr_terminate_interrupts_sleep(void) {
     g_intr_run_cnt  = 0;
     g_intr_sleep_rc = 0x7fffffff;
+    g_intr_exited   = false;
     rendez_init(&g_intr_rendez);
 
     TEST_EXPECT_EQ(sched_runnable_count(), 0u,
@@ -366,7 +369,7 @@ void test_rendez_intr_terminate_interrupts_sleep(void) {
     TEST_ASSERT(consumer->rendez_blocked_on == NULL,
         "consumer cleared its backref on the interrupted resume");
 
-    thread_free(consumer);
+    test_kthread_join_free(consumer, &g_intr_exited);
     g_intr_proc->state = PROC_STATE_ZOMBIE;
     proc_free(g_intr_proc);
     g_intr_proc = NULL;
@@ -381,6 +384,7 @@ void test_rendez_intr_terminate_interrupts_sleep(void) {
 void test_rendez_intr_terminate_register_observe(void) {
     g_intr_run_cnt  = 0;
     g_intr_sleep_rc = 0x7fffffff;
+    g_intr_exited   = false;
     rendez_init(&g_intr_rendez);
 
     g_intr_proc = proc_alloc();
@@ -405,7 +409,7 @@ void test_rendez_intr_terminate_register_observe(void) {
     TEST_ASSERT(g_intr_rendez.waiter == NULL,
         "the undone registration left the rendez empty");
 
-    thread_free(consumer);
+    test_kthread_join_free(consumer, &g_intr_exited);
     g_intr_proc->state = PROC_STATE_ZOMBIE;
     proc_free(g_intr_proc);
     g_intr_proc = NULL;
@@ -421,12 +425,13 @@ static void intr_masked_consumer_entry(void) {
     current_thread()->note_mask |= (1u << NOTE_BIT_INTERRUPT);
     g_intr_sleep_rc = sleep(&g_intr_rendez, death_cond_false, NULL);
     g_intr_run_cnt++;                            // -> 2: post-INTR run
-    for (;;) sched();
+    test_kthread_park_terminal(&g_intr_exited);  // #109: EXITING park
 }
 
 void test_rendez_intr_terminate_masked_sleeps_through(void) {
     g_intr_run_cnt  = 0;
     g_intr_sleep_rc = 0x7fffffff;
+    g_intr_exited   = false;
     rendez_init(&g_intr_rendez);
 
     g_intr_proc = proc_alloc();
@@ -471,7 +476,7 @@ void test_rendez_intr_terminate_masked_sleeps_through(void) {
     TEST_EXPECT_EQ(g_intr_sleep_rc, SLEEP_INTR,
         "death overrides the interrupt mask (SLEEP_INTR)");
 
-    thread_free(consumer);
+    test_kthread_join_free(consumer, &g_intr_exited);
     g_intr_proc->state = PROC_STATE_ZOMBIE;
     proc_free(g_intr_proc);
     g_intr_proc = NULL;
@@ -486,12 +491,13 @@ static void intr_tsleep_consumer_entry(void) {
     g_intr_sleep_rc = tsleep(&g_intr_rendez, death_cond_false, NULL,
                              timer_now_ns() + 60ull * 1000000000ull);
     g_intr_run_cnt++;                            // -> 2: post-INTR run
-    for (;;) sched();
+    test_kthread_park_terminal(&g_intr_exited);  // #109: EXITING park
 }
 
 void test_rendez_intr_terminate_interrupts_tsleep(void) {
     g_intr_run_cnt  = 0;
     g_intr_sleep_rc = 0x7fffffff;
+    g_intr_exited   = false;
     rendez_init(&g_intr_rendez);
 
     g_intr_proc = proc_alloc();
@@ -520,7 +526,7 @@ void test_rendez_intr_terminate_interrupts_tsleep(void) {
     TEST_ASSERT(consumer->rendez_blocked_on == NULL,
         "consumer cleared its backref on the interrupted resume");
 
-    thread_free(consumer);
+    test_kthread_join_free(consumer, &g_intr_exited);
     g_intr_proc->state = PROC_STATE_ZOMBIE;
     proc_free(g_intr_proc);
     g_intr_proc = NULL;

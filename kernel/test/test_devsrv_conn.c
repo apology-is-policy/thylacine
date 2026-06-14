@@ -505,12 +505,13 @@ static struct Proc *g_da_corvus;
 static hidx_t       g_da_svc_h;
 static volatile u32 g_da_ran;
 static volatile s64 g_da_ret;
+static volatile bool g_da_exited;   // #109: terminal-park reap handshake
 
 static void devsrv_accept_worker(void) {
     g_da_ran++;                                          // → 1: pre-accept
     g_da_ret = sys_srv_accept_for_proc(g_da_corvus, g_da_svc_h);
     g_da_ran++;                                          // → 2: post-accept
-    for (;;) sched();                                    // park safely
+    test_kthread_park_terminal(&g_da_exited);            // #109: EXITING park
 }
 
 void test_devsrv_accept_blocks_then_wakes(void) {
@@ -530,6 +531,7 @@ void test_devsrv_accept_blocks_then_wakes(void) {
     g_da_svc_h  = (hidx_t)svc_h;
     g_da_ran    = 0;
     g_da_ret    = -999;
+    g_da_exited = false;
 
     TEST_EXPECT_EQ(sched_runnable_count(), 0u,
         "run tree must be empty at test entry");
@@ -566,7 +568,7 @@ void test_devsrv_accept_blocks_then_wakes(void) {
     TEST_EXPECT_EQ(cn_srv, cn_cli,
         "the accept woke onto the client's connection");
 
-    thread_free(worker);
+    test_kthread_join_free(worker, &g_da_exited);
     srv_registry_reset();
     drop_test_proc(client);
     drop_test_proc(corvus);

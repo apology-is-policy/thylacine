@@ -130,15 +130,15 @@ static volatile u32  g_tsl_ran;
 static volatile int  g_tsl_ret;
 static u64           g_tsl_deadline;
 static struct Rendez g_tsl_rendez;
+static volatile bool g_tsl_exited;   // #109: terminal-park reap handshake
 
 static void tsl_consumer_entry(void) {
     g_tsl_ran++;                                         // → 1: pre-tsleep
     g_tsl_ret = tsleep(&g_tsl_rendez, tsl_cond_check, NULL, g_tsl_deadline);
     g_tsl_ran++;                                         // → 2: post-tsleep
-    // Park safely: yield forever rather than returning from the entry
-    // function (a return WFE-halts the trampoline). boot frees this
-    // thread once it observes g_tsl_ran == 2.
-    for (;;) sched();
+    // #109: terminal EXITING park (was for(;;)sched()); boot reaps via
+    // test_kthread_join_free once it observes g_tsl_ran == 2.
+    test_kthread_park_terminal(&g_tsl_exited);
 }
 
 // ---------------------------------------------------------------------------
@@ -149,6 +149,7 @@ void test_tsleep_woken_before_deadline(void) {
     g_tsl_cond     = 0;
     g_tsl_ran      = 0;
     g_tsl_ret      = -1;
+    g_tsl_exited   = false;
     rendez_init(&g_tsl_rendez);
     // A far deadline — the wakeup must win this race.
     g_tsl_deadline = timer_now_ns() + 60ull * 1000000000ull;   // +60 s
@@ -198,7 +199,7 @@ void test_tsleep_woken_before_deadline(void) {
     TEST_ASSERT(consumer->rendez_blocked_on == NULL,
         "consumer rendez backref cleared on the owner's tsleep-resume (#811)");
 
-    thread_free(consumer);
+    test_kthread_join_free(consumer, &g_tsl_exited);
     TEST_EXPECT_EQ(sched_runnable_count(), 0u,
         "run tree empty after consumer freed");
 }
@@ -211,6 +212,7 @@ void test_tsleep_timeout_via_tick(void) {
     g_tsl_cond     = 0;
     g_tsl_ran      = 0;
     g_tsl_ret      = -1;
+    g_tsl_exited   = false;
     rendez_init(&g_tsl_rendez);
     // A short deadline; boot never wakes the consumer — the scheduler-
     // tick scan must.
@@ -250,7 +252,7 @@ void test_tsleep_timeout_via_tick(void) {
     TEST_ASSERT(consumer->rendez_blocked_on == NULL,
         "consumer rendez backref must be cleared after the timeout wake");
 
-    thread_free(consumer);
+    test_kthread_join_free(consumer, &g_tsl_exited);
     TEST_EXPECT_EQ(sched_runnable_count(), 0u,
         "run tree empty after consumer freed");
 }
@@ -271,13 +273,14 @@ static struct Rendez g_tsl_herd_rendez[TSL_HERD_N];
 static volatile int  g_tsl_herd_ret[TSL_HERD_N];
 static volatile u32  g_tsl_herd_done;
 static u64           g_tsl_herd_deadline;
+static volatile bool g_tsl_herd_exited[TSL_HERD_N];  // #109: per-consumer terminal-park handshake
 
 static void tsl_herd_consumer(void *arg) {
     unsigned i = (unsigned)(uintptr_t)arg;
     g_tsl_herd_ret[i] = tsleep(&g_tsl_herd_rendez[i], tsl_cond_false, NULL,
                                g_tsl_herd_deadline);
     __atomic_fetch_add(&g_tsl_herd_done, 1u, __ATOMIC_RELAXED);
-    for (;;) sched();                                  // park safely
+    test_kthread_park_terminal(&g_tsl_herd_exited[i]);  // #109: EXITING park
 }
 
 void test_tsleep_herd_timeout(void) {
@@ -285,6 +288,7 @@ void test_tsleep_herd_timeout(void) {
     for (unsigned i = 0; i < TSL_HERD_N; i++) {
         rendez_init(&g_tsl_herd_rendez[i]);
         g_tsl_herd_ret[i] = -1;
+        g_tsl_herd_exited[i] = false;
     }
     g_tsl_herd_deadline = timer_now_ns() + 10ull * 1000000ull;   // +10 ms
 
@@ -317,7 +321,7 @@ void test_tsleep_herd_timeout(void) {
     }
 
     for (unsigned i = 0; i < TSL_HERD_N; i++) {
-        thread_free(c[i]);
+        test_kthread_join_free(c[i], &g_tsl_herd_exited[i]);
     }
     TEST_EXPECT_EQ(sched_runnable_count(), 0u,
         "run tree empty after the herd is freed");

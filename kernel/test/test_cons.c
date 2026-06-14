@@ -125,6 +125,7 @@ static bool name_eq(const char *name, const char *lit) {
 static volatile int  g_cbr_ran;     // 0 -> 1 (pre-read) -> 2 (post-read)
 static volatile long g_cbr_ret;     // devcons_read return value
 static volatile int  g_cbr_byte;    // first byte read, or -1
+static volatile bool g_cbr_exited;  // #109: terminal-park reap handshake
 
 static void cbr_consumer_entry(void) {
     g_cbr_ran = 1;
@@ -133,12 +134,12 @@ static void cbr_consumer_entry(void) {
     g_cbr_ret  = got;
     g_cbr_byte = (got > 0) ? (int)buf[0] : -1;
     g_cbr_ran  = 2;
-    for (;;) sched();   // park; the main thread frees us after observing ran == 2
+    test_kthread_park_terminal(&g_cbr_exited);   // #109: EXITING park (was for(;;)sched())
 }
 
 void test_cons_blocking_read_wakeup(void) {
     cons_test_reset();
-    g_cbr_ran = 0; g_cbr_ret = -1; g_cbr_byte = -1;
+    g_cbr_ran = 0; g_cbr_ret = -1; g_cbr_byte = -1; g_cbr_exited = false;
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty at test entry");
 
     struct Thread *consumer = thread_create(kproc(), cbr_consumer_entry);
@@ -162,7 +163,7 @@ void test_cons_blocking_read_wakeup(void) {
     TEST_EXPECT_EQ(g_cbr_ret, 1L, "devcons_read returned exactly 1 byte");
     TEST_EXPECT_EQ((long)g_cbr_byte, (long)'q', "the woken read returned 'q'");
 
-    thread_free(consumer);
+    test_kthread_join_free(consumer, &g_cbr_exited);
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after consumer freed");
     cons_test_reset();
 }

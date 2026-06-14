@@ -186,6 +186,7 @@ static u32           g_torpor_expected;
 static s64           g_torpor_timeout;
 static volatile u32  g_torpor_done;
 static volatile s64  g_torpor_wait_rc;
+static volatile bool g_torpor_exited;   // #109: terminal-park reap handshake
 
 static void torpor_consumer_entry(void) {
     g_torpor_done++;       // → 1: pre-wait
@@ -194,8 +195,8 @@ static void torpor_consumer_entry(void) {
                                                 g_torpor_expected,
                                                 g_torpor_timeout);
     g_torpor_done++;       // → 2: post-wait
-    // Park forever — a return from entry WFE-halts the trampoline.
-    for (;;) sched();
+    // #109: terminal EXITING park (was for(;;)sched()); reaped by the teardown.
+    test_kthread_park_terminal(&g_torpor_exited);
 }
 
 // Set up the per-test consumer fixture. Returns 0 on success, -1 on a
@@ -206,6 +207,7 @@ static int torpor_consumer_setup(u32 expected, s64 timeout_us) {
     g_torpor_expected  = expected;
     g_torpor_timeout   = timeout_us;
     g_torpor_done      = 0;
+    g_torpor_exited    = false;
     g_torpor_wait_rc   = (s64)-999;
 
     g_torpor_proc = proc_alloc();
@@ -225,7 +227,7 @@ static int torpor_consumer_setup(u32 expected, s64 timeout_us) {
 // Tear down: free the consumer thread, then free the proc (which drains
 // its VMAs). Caller passes the consumer thread; safe to pass NULL.
 static void torpor_consumer_teardown(struct Thread *consumer) {
-    if (consumer) thread_free(consumer);
+    if (consumer) test_kthread_join_free(consumer, &g_torpor_exited);
     if (g_torpor_proc) {
         g_torpor_proc->state = 2;            // ZOMBIE
         proc_free(g_torpor_proc);
@@ -376,6 +378,8 @@ static volatile u32  g_torpor_done_a;
 static volatile u32  g_torpor_done_b;
 static volatile s64  g_torpor_rc_a;
 static volatile s64  g_torpor_rc_b;
+static volatile bool g_torpor_exited_a;  // #109: terminal-park reap handshake (consumer A)
+static volatile bool g_torpor_exited_b;  // #109: terminal-park reap handshake (consumer B)
 
 static void torpor_consumer_a_entry(void) {
     g_torpor_done_a++;
@@ -383,7 +387,7 @@ static void torpor_consumer_a_entry(void) {
                                              /*expected=*/0,
                                              /*timeout_us=*/60ll * 1000000ll);
     g_torpor_done_a++;
-    for (;;) sched();
+    test_kthread_park_terminal(&g_torpor_exited_a);  // #109: EXITING park
 }
 
 static void torpor_consumer_b_entry(void) {
@@ -392,12 +396,12 @@ static void torpor_consumer_b_entry(void) {
                                              /*expected=*/0,
                                              /*timeout_us=*/60ll * 1000000ll);
     g_torpor_done_b++;
-    for (;;) sched();
+    test_kthread_park_terminal(&g_torpor_exited_b);  // #109: EXITING park
 }
 
 void test_torpor_wake_two_waiters_count_bound(void) {
-    g_torpor_done_a = 0; g_torpor_rc_a = (s64)-999;
-    g_torpor_done_b = 0; g_torpor_rc_b = (s64)-999;
+    g_torpor_done_a = 0; g_torpor_rc_a = (s64)-999; g_torpor_exited_a = false;
+    g_torpor_done_b = 0; g_torpor_rc_b = (s64)-999; g_torpor_exited_b = false;
     g_torpor_proc   = NULL;
     g_torpor_vaddr  = 0;
 
@@ -472,8 +476,8 @@ void test_torpor_wake_two_waiters_count_bound(void) {
     TEST_EXPECT_EQ(wake3, (s64)0,
         "third WAKE on emptied bucket returns 0");
 
-    thread_free(ca);
-    thread_free(cb);
+    test_kthread_join_free(ca, &g_torpor_exited_a);
+    test_kthread_join_free(cb, &g_torpor_exited_b);
     g_torpor_proc->state = 2;        // ZOMBIE
     proc_free(g_torpor_proc);
     g_torpor_proc = NULL;

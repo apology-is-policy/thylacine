@@ -18,8 +18,48 @@
 
 #include "../../arch/arm64/uart.h"
 
+#include <thylacine/extinction.h>   // #109: terminal-park safety net
 #include <thylacine/sched.h>   // DEBUG (#857): sched_dump_runnable on any test failure
+#include <thylacine/spinlock.h>     // #109: preempt-mask across the terminal-park handshake
+#include <thylacine/thread.h>       // #109: THREAD_EXITING / current_thread / thread_free
 #include <thylacine/types.h>
+
+// ---------------------------------------------------------------------------
+// Terminal park + reap for in-kernel test kthreads (#108/#109).
+//
+// A helper kthread created with thread_create()/thread_create_with_arg() in
+// kproc CANNOT exits()/thread_exit_self (those extinct from kproc) and must not
+// bare-return (the trampoline WFE-spins). The historical park was
+// `for (;;) sched()` -- but that leaves the thread RUNNABLE forever: if the
+// test forgets to reap it (the #108 bug) the scheduler runs it on every CPU
+// (work-steal bounces it), pinning all cores at idle; even when reaped it
+// churns the SMP run trees up to the free and leans on thread_free's
+// RUNNABLE-removal race machinery. These two helpers are the loom_sqpoll_main /
+// #108 idiom: the kthread goes THREAD_EXITING (never re-enqueued -> never
+// RUNNABLE -> never stolen -> never spins) before the joiner reclaims it, so a
+// forgotten reap degrades from an idle-spin to a bounded (leak-checked) slot
+// leak.
+// ---------------------------------------------------------------------------
+
+void test_kthread_park_terminal(volatile bool *exited) {
+    // Mask preempt across the state-set..RELEASE..sched window so no IRQ-driven
+    // reschedule fires between marking EXITING and switching away. The masked
+    // DAIF is discarded when sched() resumes the next thread (it restores its
+    // own DAIF) -- this kthread never runs again, so there is nothing to undo.
+    (void)spin_lock_irqsave(NULL);
+    current_thread()->state = THREAD_EXITING;
+    __atomic_store_n(exited, true, __ATOMIC_RELEASE);   // joiner's ACQUIRE pair
+    sched();                                            // switch away permanently
+    extinction("test_kthread_park_terminal: returned from terminal sched");
+}
+
+void test_kthread_join_free(struct Thread *t, volatile bool *exited) {
+    // ACQUIRE pairs with the park's RELEASE: once observed, t is provably
+    // THREAD_EXITING (not RUNNING), so thread_free's not-RUNNING gate holds; its
+    // on_cpu spin covers the in-flight switch-away.
+    while (!__atomic_load_n(exited, __ATOMIC_ACQUIRE)) sched();
+    thread_free(t);
+}
 
 // ---------------------------------------------------------------------------
 // Forward declarations of every test. Bodies live in kernel/test/test_*.c.
