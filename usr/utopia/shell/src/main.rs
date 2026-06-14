@@ -39,6 +39,7 @@
 extern crate alloc;
 
 use alloc::string::String;
+use alloc::vec::Vec;
 use libthyla_rs::alloc::ThylaAlloc;
 use libthyla_rs::env;
 use libthyla_rs::io::{self, Read};
@@ -127,8 +128,82 @@ fn parse_u64(s: &[u8]) -> Option<u64> {
     Some(v)
 }
 
+/// D2: parse argv for a script-file operand -- the first operand that is not a
+/// recognized flag (`--consctl-fd N` / `--home PATH`, whose values are
+/// skipped). Returns `(script_path, script_args)` for `ut SCRIPT [args...]`, or
+/// `None` for an interactive session (login spawns `ut` with only flags; the
+/// bare-spawn boot check has no operands). A `#!/bin/ut` shebang spawn invokes
+/// `ut <script> <args...>` with no flags, so the script is the first operand.
+fn parse_script() -> Option<(String, Vec<String>)> {
+    let mut it = env::args().operands();
+    while let Some(a) = it.next() {
+        match a {
+            b"--consctl-fd" | b"--home" => {
+                // A flag that takes a value; skip the value too.
+                let _ = it.next();
+            }
+            _ => {
+                let path = String::from(core::str::from_utf8(a).ok()?);
+                let mut args: Vec<String> = Vec::new();
+                while let Some(rest) = it.next() {
+                    if let Ok(s) = core::str::from_utf8(rest) {
+                        args.push(String::from(s));
+                    }
+                }
+                return Some((path, args));
+            }
+        }
+    }
+    None
+}
+
+/// D2: run a script file non-interactively then return its exit status. Reads
+/// the whole file, builds a fresh `Repl` in script mode, and evaluates it. A
+/// child command inherits the console if one is held (a shebang-spawned `ut`
+/// inherits its parent shell's fd 1/2). An unreadable script is a 127 (the
+/// shell "command not found" convention).
+fn run_script_file(path: &str, args: &[String]) -> i64 {
+    let src = match read_file(path) {
+        Some(s) => s,
+        None => {
+            let mut m = String::from("ut: cannot open script: ");
+            m.push_str(path);
+            m.push('\n');
+            t_putstr(&m);
+            return 127;
+        }
+    };
+    let mut repl = Repl::new();
+    repl.set_stdio_inherit(io::stdout_is_live());
+    // A direct `ut --home <path> script.ut` honors --home; a shebang spawn
+    // passes none, leaving $home unset (fine for a script).
+    if let Some(home) = parse_home_arg() {
+        repl.set_home(home);
+    }
+    repl.run_script(path, args, &src) as i64
+}
+
+/// Slurp a file to a String (best-effort). `None` on open/read failure.
+fn read_file(path: &str) -> Option<String> {
+    let mut f = libthyla_rs::fs::File::open(path).ok()?;
+    let mut s = String::new();
+    f.read_to_string(&mut s).ok()?;
+    Some(s)
+}
+
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
+    // D2: `ut SCRIPT [args...]` -- non-interactive script execution. A script
+    // path operand (the first non-flag arg; e.g. from a `#!/bin/ut` shebang
+    // spawn, or a direct `ut prog.ut`) runs the file then exits with its
+    // status -- and prints NO version banner (a script is not an interactive
+    // session). login spawns `ut` with only flags -> no script -> the
+    // interactive REPL below; the bare-spawn boot check has no operands ->
+    // also interactive (and still prints the banner).
+    if let Some((path, args)) = parse_script() {
+        return run_script_file(&path, &args);
+    }
+
     print_banner();
 
     let mut repl = Repl::new();

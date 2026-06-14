@@ -409,6 +409,46 @@ impl Repl {
         self.env.exit_requested().unwrap_or_else(|| self.env.status())
     }
 
+    /// Evaluate a whole script `src` non-interactively (the `ut SCRIPT` mode,
+    /// D2). Binds the positional parameters ($0 = `arg0`, $1.. = `args`, $* =
+    /// all args) at the script's global scope, switches the Env to script mode
+    /// (fail-fast on a non-zero $status, scripture 8.9), evaluates the source,
+    /// and returns the exit code: an explicit `exit N` wins, else the last
+    /// statement's $status. A parse/eval error is reported to the UART and
+    /// yields a non-zero code (the script's `$status` if it already failed,
+    /// else 1). No line editor / prompt / notes loop -- a script reads no fd 0.
+    pub fn run_script(&mut self, arg0: &str, args: &[String], src: &str) -> i32 {
+        self.env.interactive = false;
+        self.bind_positionals(arg0, args);
+        if let Err(e) = eval_source(&mut self.env, src) {
+            let mut msg = String::from("ut: ");
+            if self.env.errstr().is_empty() {
+                let _ = core::fmt::write(&mut FmtSink(&mut msg), format_args!("{:?}", e.kind));
+            } else {
+                msg.push_str(self.env.errstr());
+            }
+            msg.push('\n');
+            t_putstr(&msg);
+            if self.env.status() == 0 {
+                self.env.status_set(1);
+            }
+        }
+        self.exit_code()
+    }
+
+    /// Bind a script's positional parameters at the current (global) scope,
+    /// mirroring `invoke_function`'s function-scope binding: $0 = the script
+    /// path, $1..$N = `args`, $* = the whole args list.
+    fn bind_positionals(&mut self, arg0: &str, args: &[String]) {
+        self.env.let_set("0", Value::scalar(String::from(arg0)));
+        for (i, a) in args.iter().enumerate() {
+            let mut name = String::new();
+            let _ = core::fmt::write(&mut FmtSink(&mut name), format_args!("{}", i + 1));
+            self.env.let_set(name, Value::scalar(a.clone()));
+        }
+        self.env.let_set("*", Value::list(args.to_vec()));
+    }
+
     fn emit_prompt(&self, out: &mut dyn IoWrite) {
         let _ = out.write_all(self.editor.render(&self.prompt()).as_bytes());
         let _ = out.flush();
@@ -686,5 +726,48 @@ mod tests {
         repl.on_notes_ready(&mut sink);
         let _ = repl.feed(b"s\n", &mut sink);
         assert_eq!(repl.env().get("kept").as_scalar(), "yes");
+    }
+
+    // ----- D2: `ut SCRIPT` non-interactive execution --------------------
+
+    #[test]
+    fn run_script_binds_positional_params() {
+        // $0 = script path, $1.. = args -- bound at the script's global scope
+        // (read directly, independent of the `$1` reference syntax).
+        let mut repl = Repl::new();
+        let code = repl.run_script(
+            "/s.ut",
+            &[String::from("foo"), String::from("bar")],
+            "let x = ok\n",
+        );
+        assert_eq!(code, 0);
+        assert_eq!(repl.env().get("0").as_scalar(), "/s.ut");
+        assert_eq!(repl.env().get("1").as_scalar(), "foo");
+        assert_eq!(repl.env().get("2").as_scalar(), "bar");
+    }
+
+    #[test]
+    fn run_script_returns_exit_builtin_code() {
+        // An explicit `exit N` wins the script's exit code.
+        let mut repl = Repl::new();
+        assert_eq!(repl.run_script("/s.ut", &[], "exit 7\n"), 7);
+    }
+
+    #[test]
+    fn run_script_switches_to_script_mode() {
+        // Script mode (fail-fast on a non-zero $status, scripture 8.9) is the
+        // opposite of the interactive REPL's policy.
+        let mut repl = Repl::new();
+        let _ = repl.run_script("/s.ut", &[], "let x = 1\n");
+        assert!(!repl.env().interactive);
+    }
+
+    #[test]
+    fn run_script_parse_error_is_nonzero_without_panic() {
+        // A malformed script reports + yields a non-zero code; it must not
+        // panic (no_std panic=abort would kill the shell).
+        let mut repl = Repl::new();
+        let code = repl.run_script("/s.ut", &[], ")\n");
+        assert_ne!(code, 0);
     }
 }

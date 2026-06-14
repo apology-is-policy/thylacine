@@ -66,6 +66,9 @@ pub extern "C" fn rs_main() -> i64 {
     if let Err(rc) = flow_repl_recovery() {
         return rc;
     }
+    if let Err(rc) = flow_script_mode() {
+        return rc;
+    }
 
     t_putstr("u-6-test: all OK\n");
     0
@@ -169,6 +172,45 @@ fn flow_builtin_branch() -> Result<(), i64> {
         return fail("flow 4: $status branch / $cwd Dq-interp did not compose");
     }
     t_putstr("u-6-test: builtin + special-vars + if + Dq OK\n");
+    Ok(())
+}
+
+// Flow 8 (D2) -- `ut SCRIPT` non-interactive execution: Repl::run_script binds
+// the positional parameters (the names "0"/"1"/"2"/"*") at the script's global
+// scope, switches to script mode (fail-fast, scripture 8.9), and returns the
+// exit code (an explicit `exit N` wins). The positionals are bound for parity
+// with invoke_function; the `$N` / `$*` *reference* syntax is a separate Utopia
+// language item (the lexer's var-name-start is [a-zA-Z_], so a digit cannot
+// start a `$`-reference today -- functions use named args, not `$1`), tracked
+// as a follow-up. The shebang FS-peek half is covered by host unit tests
+// (parse_shebang_line) + the interactive `./script.ut` E2E; here we prove the
+// script-mode evaluator path runs in QEMU.
+fn flow_script_mode() -> Result<(), i64> {
+    let mut repl = Repl::new();
+    let code = repl.run_script(
+        "/s.ut",
+        &[String::from("foo"), String::from("bar")],
+        "exit 9\n",
+    );
+    if code != 9 {
+        return fail("flow 8: run_script did not propagate `exit 9`");
+    }
+    if repl.env().interactive {
+        return fail("flow 8: run_script did not switch to script mode");
+    }
+    if repl.env().get("0").as_scalar() != "/s.ut"
+        || repl.env().get("1").as_scalar() != "foo"
+        || repl.env().get("2").as_scalar() != "bar"
+    {
+        return fail("flow 8: run_script did not bind $0/$1/$2 positionals");
+    }
+    // A script that runs statements + completes with status 0 returns 0.
+    let mut r2 = Repl::new();
+    let rc = r2.run_script("/s.ut", &[], "let a = 1\nlet b = 2\n");
+    if rc != 0 || r2.env().get("b").as_scalar() != "2" {
+        return fail("flow 8: a clean script did not evaluate + return 0");
+    }
+    t_putstr("u-6-test: ut SCRIPT mode (positional + script-mode + exit) OK\n");
     Ok(())
 }
 

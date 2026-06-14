@@ -75,6 +75,14 @@ impl Repl {
     /// `exit`: the last command's $status.
     pub fn exit_code(&self) -> i32;
 
+    /// D2: evaluate a whole script `src` non-interactively (`ut SCRIPT`).
+    /// Binds the positionals (names "0"/"1"/"2"/"*") at the global scope,
+    /// sets script mode (interactive=false -> fail-fast, scripture 8.9),
+    /// eval_sources the source, returns the exit code (`exit N` wins, else
+    /// the last $status). No line editor / prompt / notes loop. See
+    /// 94-utopia-eval.md §13.3.
+    pub fn run_script(&mut self, arg0: &str, args: &[String], src: &str) -> i32;
+
     /// #115a: install namespace-driven Tab completion. Scans /bin once and
     /// installs the production ShellCompletionSource into the editor. Called
     /// ON-TARGET (gated on a live console, like open_notes); new() stays

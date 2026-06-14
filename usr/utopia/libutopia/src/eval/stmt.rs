@@ -552,6 +552,119 @@ fn resolve_command(name: &str) -> String {
     p
 }
 
+/// Build a `Command` for `argv`: resolve `argv[0]` through `$path` (`/bin`)
+/// and expand a `#!` interpreter line if the resolved program is a text
+/// script. The single chokepoint for every external-spawn site (foreground,
+/// raw-mode, redirected, pipeline element, background), so a script runs
+/// identically in each. The caller configures stdio + spawns.
+fn build_command(argv: &[String]) -> libthyla_rs::process::Command {
+    let mut spawn_argv = prepare_argv(argv).into_iter();
+    // prepare_argv always yields >= 1 element; fall back defensively rather
+    // than panic (no_std panic=abort) if it ever did not.
+    let prog = spawn_argv
+        .next()
+        .unwrap_or_else(|| resolve_command(&argv[0]));
+    let mut cmd = libthyla_rs::process::Command::new(prog);
+    cmd.args(spawn_argv);
+    cmd
+}
+
+/// Resolve `argv[0]` to a concrete program and expand a `#!` interpreter
+/// line, returning the effective argv to spawn (`[program, args...]`).
+///
+/// The kernel exec loads ELF only (ARCH 9.6.8). A text file beginning with
+/// `#!interp [arg]` is a script; the shell -- Plan 9 lineage keeps `#!` out
+/// of the kernel -- reads that line and rewrites the command to run the
+/// interpreter with the script path as its argument. A file that is not a
+/// shebang script (an ELF, or unreadable) passes through unchanged; the
+/// kernel then loads it (or fails) as before.
+fn prepare_argv(argv: &[String]) -> Vec<String> {
+    let prog = resolve_command(&argv[0]);
+    match peek_shebang(&prog) {
+        Some((interp, maybe_arg)) => {
+            let mut out: Vec<String> = Vec::with_capacity(argv.len() + 2);
+            // $path-resolve the interpreter too, so `#!ut` works as well as
+            // `#!/bin/ut`.
+            out.push(resolve_command(&interp));
+            if let Some(a) = maybe_arg {
+                out.push(a);
+            }
+            out.push(prog); // the script path, as the interpreter's argument
+            out.extend(argv[1..].iter().cloned()); // then the user's args
+            out
+        }
+        None => {
+            let mut out: Vec<String> = Vec::with_capacity(argv.len());
+            out.push(prog);
+            out.extend(argv[1..].iter().cloned());
+            out
+        }
+    }
+}
+
+/// Peek `path`'s first line for a `#!interp [arg]` shebang. Reads only the
+/// first 128 bytes (the conventional shebang bound) and delegates to the pure
+/// `parse_shebang_line`. An unreadable file (or one not starting with `#!`) is
+/// `None` -- it then passes through to the kernel ELF loader unchanged.
+fn peek_shebang(path: &str) -> Option<(String, Option<String>)> {
+    let mut f = File::open(path).ok()?;
+    let mut buf = [0u8; 128];
+    let n = f.read(&mut buf).ok()?;
+    parse_shebang_line(&buf[..n])
+}
+
+/// Parse a file's leading bytes as a `#!interp [arg]` shebang. Returns
+/// `(interpreter, optional single argument)`. `None` if `head` does not start
+/// with `#!`, the interpreter is empty, or either field is not valid UTF-8. At
+/// most ONE argument after the interpreter is recognized (the Linux/BSD
+/// convention) -- the trimmed remainder of the first line verbatim, no further
+/// word-splitting. Pure (no I/O) so it is host-testable.
+fn parse_shebang_line(head: &[u8]) -> Option<(String, Option<String>)> {
+    let rest = head.strip_prefix(b"#!")?;
+    let line_end = rest
+        .iter()
+        .position(|&b| b == b'\n' || b == b'\r')
+        .unwrap_or(rest.len());
+    let line = trim_ascii_ws(&rest[..line_end]);
+    if line.is_empty() {
+        return None;
+    }
+    let (interp_b, arg_b) = match line.iter().position(|&b| b == b' ' || b == b'\t') {
+        Some(i) => (&line[..i], trim_ascii_ws(&line[i + 1..])),
+        None => (line, &b""[..]),
+    };
+    let interp = core::str::from_utf8(interp_b).ok()?;
+    if interp.is_empty() {
+        return None;
+    }
+    let arg = if arg_b.is_empty() {
+        None
+    } else {
+        Some(String::from(core::str::from_utf8(arg_b).ok()?))
+    };
+    Some((String::from(interp), arg))
+}
+
+/// Trim leading + trailing ASCII spaces/tabs from a byte slice (no_std; the
+/// stable `[u8]::trim_ascii` is too new for this toolchain).
+fn trim_ascii_ws(mut b: &[u8]) -> &[u8] {
+    while let [first, rest @ ..] = b {
+        if *first == b' ' || *first == b'\t' {
+            b = rest;
+        } else {
+            break;
+        }
+    }
+    while let [rest @ .., last] = b {
+        if *last == b' ' || *last == b'\t' {
+            b = rest;
+        } else {
+            break;
+        }
+    }
+    b
+}
+
 /// Spawn an external command with redirects applied. Non-redirected
 /// stdout/stderr inherit the console when the shell holds one
 /// (`env.stdio_inherit`, LS-2); otherwise the U-6c `Stdio::Piped` +
@@ -580,10 +693,7 @@ fn exec_external_redirected(
         trace_echo(argv);
     }
 
-    let mut spawn_cmd = libthyla_rs::process::Command::new(resolve_command(&argv[0]));
-    if argv.len() > 1 {
-        spawn_cmd.args(argv[1..].iter().cloned());
-    }
+    let mut spawn_cmd = build_command(argv);
     match stdin {
         Some(s) => {
             spawn_cmd.stdin(s);
@@ -837,10 +947,7 @@ fn spawn_pipeline_elements(env: &mut Env, p: &Pipeline) -> EvalResult<PipelineSp
     let mut heredoc_writes: Vec<(File, String)> = Vec::new();
     for i in 0..n {
         let argv = &argvs[i];
-        let mut spawn_cmd = libthyla_rs::process::Command::new(resolve_command(&argv[0]));
-        if argv.len() > 1 {
-            spawn_cmd.args(argv[1..].iter().cloned());
-        }
+        let mut spawn_cmd = build_command(argv);
         // stdin: a per-element redirect (`< f` / `<<`) wins over the pipe
         // read end (which is dropped so the upstream sees the right EOF
         // behaviour). Otherwise the pipe read end (Some for i in 1..n) or
@@ -1226,10 +1333,7 @@ fn exec_external(
         trace_echo(argv);
     }
 
-    let mut spawn_cmd = libthyla_rs::process::Command::new(resolve_command(&argv[0]));
-    if argv.len() > 1 {
-        spawn_cmd.args(argv[1..].iter().cloned());
-    }
+    let mut spawn_cmd = build_command(argv);
     // stdout/stderr inherit the console when the shell holds one
     // (env.stdio_inherit, LS-2) so output is visible; else the U-6c
     // Piped + immediate-drop convention (a fd-less harness has nothing
@@ -1304,10 +1408,7 @@ fn exec_external_raw(
         console::set_mode(fd, console::RAW_MODE);
     }
 
-    let mut spawn_cmd = libthyla_rs::process::Command::new(resolve_command(&argv[0]));
-    if argv.len() > 1 {
-        spawn_cmd.args(argv[1..].iter().cloned());
-    }
+    let mut spawn_cmd = build_command(argv);
     // 2. The child gets the console on all three slots (Inherit): a TUI reads fd
     //    0 + draws fd 1, and stderr shares the screen. This is the Piped->Inherit
     //    switch the normal path does NOT do for stdin.
@@ -1746,10 +1847,7 @@ fn capture_external_pipeline(
     let mut spawn_failed = false;
     for i in 0..n {
         let argv = &argvs[i];
-        let mut spawn_cmd = libthyla_rs::process::Command::new(resolve_command(&argv[0]));
-        if argv.len() > 1 {
-            spawn_cmd.args(argv[1..].iter().cloned());
-        }
+        let mut spawn_cmd = build_command(argv);
         match stdin_files[i].take() {
             Some(f) => {
                 spawn_cmd.stdin(Stdio::File(f));
@@ -2372,4 +2470,72 @@ pub fn eval_source(env: &mut Env, src: &str) -> EvalResult<StatementFlow> {
         EvalError::new(EvalErrorKind::Internal("parse failed"), e.span)
     })?;
     eval_script(env, &script)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trim_ascii_ws_strips_both_ends() {
+        assert_eq!(trim_ascii_ws(b"  hi \t"), b"hi");
+        assert_eq!(trim_ascii_ws(b"hi"), b"hi");
+        assert_eq!(trim_ascii_ws(b"   "), b"");
+        assert_eq!(trim_ascii_ws(b""), b"");
+        assert_eq!(trim_ascii_ws(b"\t a b \t"), b"a b");
+    }
+
+    #[test]
+    fn shebang_interp_only() {
+        // D2: the common case -- `#!/bin/ut\n`.
+        let (interp, arg) = parse_shebang_line(b"#!/bin/ut\necho hi\n").unwrap();
+        assert_eq!(interp, "/bin/ut");
+        assert_eq!(arg, None);
+    }
+
+    #[test]
+    fn shebang_interp_with_one_arg() {
+        // A single optional argument (Linux/BSD convention) is the trimmed
+        // remainder of the line verbatim.
+        let (interp, arg) = parse_shebang_line(b"#!/bin/awk -f\nBEGIN{}\n").unwrap();
+        assert_eq!(interp, "/bin/awk");
+        assert_eq!(arg.as_deref(), Some("-f"));
+    }
+
+    #[test]
+    fn shebang_tolerates_leading_ws_and_crlf() {
+        // Leading spaces after `#!` are skipped; a CR ends the line (CRLF file).
+        let (interp, arg) = parse_shebang_line(b"#!   /bin/ut\r\n").unwrap();
+        assert_eq!(interp, "/bin/ut");
+        assert_eq!(arg, None);
+    }
+
+    #[test]
+    fn shebang_arg_is_not_word_split() {
+        // Everything after the interpreter + one space is ONE argument
+        // (no further splitting), matching the kernel exec convention.
+        let (interp, arg) = parse_shebang_line(b"#!/bin/ut --flag a b\n").unwrap();
+        assert_eq!(interp, "/bin/ut");
+        assert_eq!(arg.as_deref(), Some("--flag a b"));
+    }
+
+    #[test]
+    fn not_a_shebang_is_none() {
+        // An ELF (or any non-`#!` file) is not a script -> passes through.
+        assert!(parse_shebang_line(b"\x7fELF\x02\x01\x01\x00").is_none());
+        assert!(parse_shebang_line(b"echo hi\n").is_none());
+        assert!(parse_shebang_line(b"").is_none());
+        // `#!` with an empty interpreter line is not a script.
+        assert!(parse_shebang_line(b"#!\n").is_none());
+        assert!(parse_shebang_line(b"#!   \n").is_none());
+    }
+
+    #[test]
+    fn shebang_without_trailing_newline() {
+        // A file that is exactly the shebang line with no `\n` still parses
+        // (the whole 128-byte read is the line).
+        let (interp, arg) = parse_shebang_line(b"#!/bin/ut").unwrap();
+        assert_eq!(interp, "/bin/ut");
+        assert_eq!(arg, None);
+    }
 }
