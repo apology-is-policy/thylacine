@@ -80,6 +80,12 @@ pub fn render(ed: &Editor, area: Rect, buf: &mut Buffer) -> (u16, u16) {
         return render_file_picker(ed, text_area, query, sel, buf);
     }
 
+    // The ':' command popup lists matching commands above the command line. It is
+    // a non-cursor help overlay -- the cursor stays on the command line itself.
+    if ed.command_buf().is_some() {
+        render_command_popup(ed, text_area, buf);
+    }
+
     let cur = if ed.wrap {
         cursor_wrapped(ed, text_area, gutter_w, tw, th)
     } else {
@@ -450,6 +456,24 @@ fn render_file_picker(
     (cx, inner.y)
 }
 
+/// The `:` command popup (C2): the ex-commands matching what is typed, each with
+/// its description, above the command line. A help overlay -- it does not own the
+/// cursor (that stays on the command line where you keep typing).
+fn render_command_popup(ed: &Editor, text_area: Rect, buf: &mut Buffer) {
+    let comps = ed.command_completions();
+    if comps.is_empty() {
+        return;
+    }
+    let rows: alloc::vec::Vec<String> = comps
+        .iter()
+        .map(|(n, d)| format!(":{}  {}", n, d))
+        .collect();
+    let refs: alloc::vec::Vec<&str> = rows.iter().map(|s| s.as_str()).collect();
+    let title = " commands ";
+    let inner = popup(text_area, title, widest(&refs, title), rows.len() as u16, buf);
+    List::new(&refs).style(theme::palette_surface()).render(inner, buf);
+}
+
 /// Draw the status row: the command/search line in command mode, else the
 /// mode chip + filename + position bar.
 fn render_status(ed: &Editor, area: Rect, buf: &mut Buffer) {
@@ -738,5 +762,25 @@ mod tests {
         assert_eq!(sym(&b, 9, 0), 'b'); // " beta " after the 7-cell tab + 1 gap
         assert_eq!(b.get(9, 0).unwrap().style.bg, theme::EMBER); // active = ember
         assert_eq!(sym(&b, 2, 1), '1'); // text region starts on row 1 now
+    }
+
+    #[test]
+    fn command_popup_lists_matching_commands() {
+        // C2: typing ":b" pops up the b-prefixed ex-commands above the command
+        // line; the cursor stays on the command line itself.
+        let big = Rect::new(0, 0, 50, 14);
+        let mut ed = Editor::new(None, "x", false);
+        ed.handle_key(KeyEvent::char(':'));
+        ed.handle_key(KeyEvent::char('b')); // ":b" -> bn, bp, bd, bd!
+        let mut b = Buffer::empty(big);
+        let cur = render(&ed, big, &mut b);
+        // 4 matches -> box_h 6; by = 13-6 = 7; inner.y = 8; row 0 = ":bn  ...".
+        assert_eq!(sym(&b, 1, 8), ':');
+        assert_eq!(sym(&b, 2, 8), 'b');
+        assert_eq!(sym(&b, 3, 8), 'n');
+        // the command line still shows ":b" on the status row and owns the cursor.
+        assert_eq!(sym(&b, 0, 13), ':');
+        assert_eq!(sym(&b, 1, 13), 'b');
+        assert_eq!(cur, (2, 13)); // cursor after ":b" on the command line
     }
 }

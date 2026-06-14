@@ -238,6 +238,27 @@ impl Editor {
         };
     }
 
+    /// The `:` ex-commands matching what is typed, as `(name, description)` for
+    /// the live command popup (empty unless in `:` command mode). The verb is the
+    /// first token after `:`; an empty verb lists every command.
+    pub fn command_completions(&self) -> Vec<(&'static str, &'static str)> {
+        let line = match &self.mode {
+            Mode::Command(b) => b.as_str(),
+            _ => return Vec::new(),
+        };
+        // Only the ':' command line gets completions, not '/' search.
+        let rest = match line.strip_prefix(':') {
+            Some(r) => r,
+            None => return Vec::new(),
+        };
+        let verb = rest.split_whitespace().next().unwrap_or("");
+        COMMANDS
+            .iter()
+            .filter(|c| c.0.starts_with(verb))
+            .copied()
+            .collect()
+    }
+
     /// The visual selection span `(lo, hi)` inclusive, if in visual mode.
     pub fn selection(&self) -> Option<(Pos, Pos)> {
         match (self.mode.clone(), self.anchor) {
@@ -1030,6 +1051,22 @@ fn fuzzy_match(query: &str, candidate: &str) -> bool {
     false
 }
 
+/// The `:` ex-commands as `(name, description)`, for the live command popup
+/// (C2). Mirrors the verbs handled in `run_command`; a drift here is cosmetic
+/// (the popup is help text, not the dispatcher).
+const COMMANDS: &[(&str, &str)] = &[
+    ("w", "write the buffer (:w <name> to save-as)"),
+    ("wq", "write the buffer and quit"),
+    ("q", "quit (blocked if there are unsaved changes)"),
+    ("q!", "quit, discarding unsaved changes"),
+    ("e", "open a file in a new buffer (:e <name>)"),
+    ("e!", "open a file, discarding unsaved changes"),
+    ("bn", "next buffer"),
+    ("bp", "previous buffer"),
+    ("bd", "close the current buffer"),
+    ("bd!", "close the buffer, discarding changes"),
+];
+
 /// `""` -> `None`, else `Some(trimmed)`. For an optional command argument.
 fn opt(arg: &str) -> Option<String> {
     if arg.is_empty() {
@@ -1485,5 +1522,20 @@ mod tests {
         assert!(fuzzy_match("MRS", "main.rs"));
         assert!(!fuzzy_match("xyz", "main.rs"));
         assert!(!fuzzy_match("rsm", "main.rs")); // order matters
+    }
+
+    #[test]
+    fn command_completions_filter_by_prefix() {
+        // C2: the ':' command popup lists matching ex-commands; '/' search has none.
+        let mut ed = Editor::new(None, "x", false);
+        ed.handle_key(ch(':')); // ":" lists every command
+        assert_eq!(ed.command_completions().len(), COMMANDS.len());
+        ed.handle_key(ch('w')); // ":w" -> w, wq
+        let names: alloc::vec::Vec<&str> = ed.command_completions().iter().map(|c| c.0).collect();
+        assert_eq!(names, alloc::vec!["w", "wq"]);
+        // '/' search gets no command list.
+        let mut s = Editor::new(None, "x", false);
+        s.handle_key(ch('/'));
+        assert!(s.command_completions().is_empty());
     }
 }
