@@ -25,9 +25,15 @@ pub enum Mode {
     Insert,
     Visual,
     Command(String),
-    /// The `[Space]` command palette, open over Normal; `sel` is the highlighted
-    /// entry index.
-    Palette { sel: usize },
+    /// The `[Space]` which-key menu, open over Normal: the next key invokes the
+    /// matching entry (Helix-style), not an arrow-navigated selection.
+    Menu,
+    /// The buffer picker (Space-b): an arrow-selectable list of open buffers;
+    /// Enter switches. `sel` is the highlighted buffer index.
+    BufferPicker { sel: usize },
+    /// The fuzzy file picker (Space-f): a `query` line over the cwd's files; the
+    /// filtered list is arrow-selectable, Enter opens the file in a new buffer.
+    FilePicker { query: String, sel: usize },
 }
 
 /// A file operation the editor requests but does not perform; the binary
@@ -38,8 +44,11 @@ pub enum Request {
     /// Write the buffer. `Some(path)` is a save-as; `None` saves to the
     /// current filename.
     Save(Option<String>),
-    /// Replace the buffer with the contents of `path` (`:e`).
+    /// Open `path` in a new buffer (`:e` and the file picker).
     Open(String),
+    /// List `path`'s files to populate the fuzzy file picker (Space-f). The
+    /// binary reads the directory and calls `open_file_picker` back.
+    ListDir(String),
 }
 
 /// A backgrounded buffer's parked state -- the per-buffer half of `Editor`. The
@@ -94,7 +103,7 @@ pub struct Editor {
     /// Maintained by `scroll_to`.
     pub left: usize,
     /// Soft-wrap mode: wrap long logical lines at the viewport width vs. clip
-    /// them at the right edge. Toggled at runtime via the `[Space]` palette.
+    /// them at the right edge. Toggled at runtime via the `[Space]` menu.
     pub wrap: bool,
     /// A transient one-line message (cleared at the next key).
     pub status: Option<String>,
@@ -118,6 +127,9 @@ pub struct Editor {
     /// before the next render; 0 until the first frame (the initial redraw runs
     /// before any key, so this is set before the first movement).
     vp_tw: u16,
+    /// Fuzzy-file-picker candidates (the cwd's file names), set by the binary
+    /// when the picker opens (Space-f -> Request::ListDir -> open_file_picker).
+    file_entries: Vec<String>,
 }
 
 impl Editor {
@@ -144,6 +156,7 @@ impl Editor {
             bufs: Vec::new(),
             active: 0,
             vp_tw: 0,
+            file_entries: Vec::new(),
         };
         ed.bufs.push(d.clone());
         ed.load_active(d);
@@ -153,8 +166,8 @@ impl Editor {
     /// The short mode tag for the status line.
     pub fn mode_str(&self) -> &'static str {
         match self.mode {
-            // The palette overlays Normal -- show the underlying chip.
-            Mode::Normal | Mode::Palette { .. } => {
+            // The menu + pickers overlay Normal -- show the underlying chip.
+            Mode::Normal | Mode::Menu | Mode::BufferPicker { .. } | Mode::FilePicker { .. } => {
                 if self.readonly {
                     "VIEW"
                 } else {
@@ -175,17 +188,54 @@ impl Editor {
         }
     }
 
-    /// The `[Space]` palette entry labels (for the view to render).
-    pub fn palette_labels(&self) -> Vec<&'static str> {
-        PALETTE.iter().map(|p| p.label).collect()
+    /// The `[Space]` which-key menu entries as `(key, label)` (for the view).
+    pub fn menu_entries(&self) -> Vec<(char, &'static str)> {
+        MENU.iter().map(|m| (m.key, m.label)).collect()
     }
 
-    /// The highlighted palette entry index, if the palette is open.
-    pub fn palette_sel(&self) -> Option<usize> {
+    /// Whether the `[Space]` which-key menu is open.
+    pub fn menu_open(&self) -> bool {
+        matches!(self.mode, Mode::Menu)
+    }
+
+    /// The buffer-picker's highlighted index, if it is open.
+    pub fn buffer_picker_sel(&self) -> Option<usize> {
         match self.mode {
-            Mode::Palette { sel } => Some(sel),
+            Mode::BufferPicker { sel } => Some(sel),
             _ => None,
         }
+    }
+
+    /// The file-picker's `(query, sel)`, if it is open.
+    pub fn file_picker_state(&self) -> Option<(&str, usize)> {
+        match &self.mode {
+            Mode::FilePicker { query, sel } => Some((query.as_str(), *sel)),
+            _ => None,
+        }
+    }
+
+    /// The file-picker candidates filtered by the current query (a fuzzy
+    /// subsequence match), in the original (sorted) order.
+    pub fn file_picker_filtered(&self) -> Vec<String> {
+        let q = match &self.mode {
+            Mode::FilePicker { query, .. } => query.as_str(),
+            _ => return Vec::new(),
+        };
+        self.file_entries
+            .iter()
+            .filter(|n| fuzzy_match(q, n))
+            .cloned()
+            .collect()
+    }
+
+    /// Populate + open the fuzzy file picker (the binary calls this in response
+    /// to a `Request::ListDir`, passing the directory's file names).
+    pub fn open_file_picker(&mut self, entries: Vec<String>) {
+        self.file_entries = entries;
+        self.mode = Mode::FilePicker {
+            query: String::new(),
+            sel: 0,
+        };
     }
 
     /// The visual selection span `(lo, hi)` inclusive, if in visual mode.
@@ -443,7 +493,7 @@ impl Editor {
         self.top_sub = ts;
     }
 
-    /// Toggle soft-wrap (the `[Space]` palette entry), re-anchoring cleanly.
+    /// Toggle soft-wrap (the `[Space]` menu entry), re-anchoring cleanly.
     pub fn toggle_wrap(&mut self) {
         self.wrap = !self.wrap;
         self.top_sub = 0;
@@ -501,7 +551,9 @@ impl Editor {
             Mode::Insert => self.insert(key),
             Mode::Visual => self.visual(key),
             Mode::Command(_) => self.command(key),
-            Mode::Palette { .. } => self.palette(key),
+            Mode::Menu => self.menu(key),
+            Mode::BufferPicker { .. } => self.buffer_picker(key),
+            Mode::FilePicker { .. } => self.file_picker(key),
         }
     }
 
@@ -537,7 +589,7 @@ impl Editor {
             }
             KeyCode::Char(':') => self.mode = Mode::Command(":".to_string()),
             KeyCode::Char('/') => self.mode = Mode::Command("/".to_string()),
-            KeyCode::Char(' ') => self.mode = Mode::Palette { sel: 0 },
+            KeyCode::Char(' ') => self.mode = Mode::Menu,
             KeyCode::Char('n') if !self.last_search.is_empty() => {
                 self.search(&self.last_search.clone());
             }
@@ -695,39 +747,35 @@ impl Editor {
         }
     }
 
-    fn palette(&mut self, key: KeyEvent) {
-        let sel = match self.mode {
-            Mode::Palette { sel } => sel,
-            _ => return,
-        };
-        let n = PALETTE.len();
+    fn menu(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc | KeyCode::Char(' ') => self.mode = Mode::Normal,
-            KeyCode::Down | KeyCode::Char('j') => self.mode = Mode::Palette { sel: (sel + 1) % n },
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.mode = Mode::Palette { sel: (sel + n - 1) % n }
-            }
-            KeyCode::Char('n') if key.mods.contains(Mods::CTRL) => {
-                self.mode = Mode::Palette { sel: (sel + 1) % n }
-            }
-            KeyCode::Char('p') if key.mods.contains(Mods::CTRL) => {
-                self.mode = Mode::Palette { sel: (sel + n - 1) % n }
-            }
-            KeyCode::Enter => {
+            KeyCode::Char(c) => {
+                // Which-key: a bound key runs its action; any other key dismisses
+                // the menu (Helix-style -- no arrow navigation, no selection).
+                let action = MENU.iter().find(|m| m.key == c).map(|m| m.action);
                 self.mode = Mode::Normal;
-                self.run_palette(sel);
+                if let Some(a) = action {
+                    self.run_menu(a);
+                }
             }
             _ => {}
         }
     }
 
-    fn run_palette(&mut self, sel: usize) {
-        let action = match PALETTE.get(sel) {
-            Some(p) => p.action,
-            None => return,
-        };
+    fn run_menu(&mut self, action: MenuAction) {
         match action {
-            PaletteAction::ToggleWrap => {
+            MenuAction::FilePicker => {
+                // Ask the binary to list the cwd; it calls open_file_picker back.
+                self.request = Some(Request::ListDir(".".to_string()));
+            }
+            MenuAction::BufferPicker => {
+                self.mode = Mode::BufferPicker { sel: self.active };
+            }
+            MenuAction::NextBuffer => self.next_buffer(),
+            MenuAction::PrevBuffer => self.prev_buffer(),
+            MenuAction::CloseBuffer => self.close_buffer(false),
+            MenuAction::ToggleWrap => {
                 self.toggle_wrap();
                 self.status = Some(if self.wrap {
                     "soft-wrap: on".to_string()
@@ -735,17 +783,14 @@ impl Editor {
                     "soft-wrap: off".to_string()
                 });
             }
-            PaletteAction::NextBuffer => self.next_buffer(),
-            PaletteAction::PrevBuffer => self.prev_buffer(),
-            PaletteAction::CloseBuffer => self.close_buffer(false),
-            PaletteAction::Save => {
+            MenuAction::Save => {
                 if self.readonly {
                     self.status = Some("read-only".to_string());
                 } else {
                     self.request = Some(Request::Save(None));
                 }
             }
-            PaletteAction::Quit => {
+            MenuAction::Quit => {
                 if self.modified {
                     self.status = Some("unsaved changes (:q! to discard)".to_string());
                 } else {
@@ -753,6 +798,76 @@ impl Editor {
                 }
             }
         }
+    }
+
+    fn buffer_picker(&mut self, key: KeyEvent) {
+        let (sel, n) = match self.mode {
+            Mode::BufferPicker { sel } => (sel, self.bufs.len()),
+            _ => return,
+        };
+        match key.code {
+            KeyCode::Esc => self.mode = Mode::Normal,
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.mode = Mode::BufferPicker {
+                    sel: (sel + n - 1) % n,
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.mode = Mode::BufferPicker {
+                    sel: (sel + 1) % n,
+                }
+            }
+            KeyCode::Enter => {
+                self.mode = Mode::Normal;
+                self.switch_to(sel);
+            }
+            _ => {}
+        }
+    }
+
+    fn file_picker(&mut self, key: KeyEvent) {
+        let (mut query, mut sel) = match &self.mode {
+            Mode::FilePicker { query, sel } => (query.clone(), *sel),
+            _ => return,
+        };
+        // The list reflects the CURRENT (pre-key) query; an arrow / Enter acts on
+        // what is displayed. A char / Backspace re-filters and resets the cursor.
+        let count = self.file_picker_filtered().len();
+        match key.code {
+            KeyCode::Esc => {
+                self.mode = Mode::Normal;
+                return;
+            }
+            KeyCode::Enter => {
+                if let Some(name) = self.file_picker_filtered().into_iter().nth(sel) {
+                    self.request = Some(Request::Open(name)); // opens in a new buffer
+                }
+                self.mode = Mode::Normal;
+                return;
+            }
+            KeyCode::Up => sel = sel.saturating_sub(1),
+            KeyCode::Down => {
+                if sel + 1 < count {
+                    sel += 1;
+                }
+            }
+            KeyCode::Char('p') if key.mods.contains(Mods::CTRL) => sel = sel.saturating_sub(1),
+            KeyCode::Char('n') if key.mods.contains(Mods::CTRL) => {
+                if sel + 1 < count {
+                    sel += 1;
+                }
+            }
+            KeyCode::Backspace => {
+                query.pop();
+                sel = 0;
+            }
+            KeyCode::Char(c) => {
+                query.push(c);
+                sel = 0;
+            }
+            _ => {}
+        }
+        self.mode = Mode::FilePicker { query, sel };
     }
 
     // -- command + search execution ---------------------------------------
@@ -830,51 +945,90 @@ impl Editor {
 /// nicety deferred -- the editor does not know the viewport height).
 const PAGE: usize = 20;
 
-/// One `[Space]` command-palette entry.
+/// One `[Space]` which-key menu entry: a single key + a description (rendered
+/// like a `:` command line), invoked by pressing the key.
 #[derive(Clone, Copy)]
-struct PaletteItem {
+struct MenuItem {
+    key: char,
     label: &'static str,
-    action: PaletteAction,
+    action: MenuAction,
 }
 
 #[derive(Clone, Copy)]
-enum PaletteAction {
-    ToggleWrap,
+enum MenuAction {
+    FilePicker,
+    BufferPicker,
     NextBuffer,
     PrevBuffer,
     CloseBuffer,
+    ToggleWrap,
     Save,
     Quit,
 }
 
-/// The fixed palette entries (a real menu mechanism; user aliases / a richer set
-/// accrete later).
-const PALETTE: &[PaletteItem] = &[
-    PaletteItem {
-        label: "toggle soft-wrap",
-        action: PaletteAction::ToggleWrap,
+/// The fixed `[Space]` menu (Helix bindings where they map; nora-specific where
+/// they don't). A richer / user-extensible set accretes later.
+const MENU: &[MenuItem] = &[
+    MenuItem {
+        key: 'f',
+        label: "open file picker",
+        action: MenuAction::FilePicker,
     },
-    PaletteItem {
+    MenuItem {
+        key: 'b',
+        label: "open buffer picker",
+        action: MenuAction::BufferPicker,
+    },
+    MenuItem {
+        key: 'n',
         label: "next buffer",
-        action: PaletteAction::NextBuffer,
+        action: MenuAction::NextBuffer,
     },
-    PaletteItem {
-        label: "prev buffer",
-        action: PaletteAction::PrevBuffer,
+    MenuItem {
+        key: 'p',
+        label: "previous buffer",
+        action: MenuAction::PrevBuffer,
     },
-    PaletteItem {
+    MenuItem {
+        key: 'c',
         label: "close buffer",
-        action: PaletteAction::CloseBuffer,
+        action: MenuAction::CloseBuffer,
     },
-    PaletteItem {
-        label: "save",
-        action: PaletteAction::Save,
+    MenuItem {
+        key: 'w',
+        label: "toggle soft-wrap",
+        action: MenuAction::ToggleWrap,
     },
-    PaletteItem {
+    MenuItem {
+        key: 's',
+        label: "save file",
+        action: MenuAction::Save,
+    },
+    MenuItem {
+        key: 'q',
         label: "quit",
-        action: PaletteAction::Quit,
+        action: MenuAction::Quit,
     },
 ];
+
+/// A fuzzy subsequence match (case-insensitive): every char of `query` appears in
+/// `candidate` in order. An empty query matches everything.
+fn fuzzy_match(query: &str, candidate: &str) -> bool {
+    let mut q = query.chars().map(|c| c.to_ascii_lowercase());
+    let mut want = match q.next() {
+        Some(c) => c,
+        None => return true,
+    };
+    for cc in candidate.chars().map(|c| c.to_ascii_lowercase()) {
+        if cc == want {
+            want = match q.next() {
+                Some(c) => c,
+                None => return true,
+            };
+        }
+    }
+    false
+}
 
 /// `""` -> `None`, else `Some(trimmed)`. For an optional command argument.
 fn opt(arg: &str) -> Option<String> {
@@ -1131,42 +1285,24 @@ mod tests {
     }
 
     #[test]
-    fn space_opens_palette_and_esc_closes() {
+    fn space_menu_esc_closes() {
         let mut ed = Editor::new(None, "x", false);
         ed.handle_key(ch(' '));
-        assert_eq!(ed.mode, Mode::Palette { sel: 0 });
-        assert_eq!(ed.palette_sel(), Some(0));
+        assert!(ed.menu_open());
         ed.handle_key(code(KeyCode::Esc));
         assert_eq!(ed.mode, Mode::Normal);
-        assert_eq!(ed.palette_sel(), None);
+        assert!(!ed.menu_open());
     }
 
     #[test]
-    fn palette_toggles_wrap_via_enter() {
-        let mut ed = Editor::new(None, "x", false);
-        assert!(!ed.wrap);
-        ed.handle_key(ch(' ')); // open palette (sel 0 == "toggle soft-wrap")
-        ed.handle_key(code(KeyCode::Enter));
-        assert!(ed.wrap);
-        assert_eq!(ed.mode, Mode::Normal);
-        // toggle back off
-        ed.handle_key(ch(' '));
-        ed.handle_key(code(KeyCode::Enter));
-        assert!(!ed.wrap);
-    }
-
-    #[test]
-    fn palette_navigates_to_quit_and_guards_unsaved() {
+    fn space_menu_quit_guards_unsaved() {
         let mut ed = Editor::new(None, "", false);
         ed.handle_key(ch('i'));
         type_str(&mut ed, "z");
         ed.handle_key(code(KeyCode::Esc)); // modified
-        ed.handle_key(ch(' ')); // palette sel 0
-        ed.handle_key(ch('j')); // sel 1 (save)
-        ed.handle_key(ch('j')); // sel 2 (quit)
-        assert_eq!(ed.palette_sel(), Some(2));
-        ed.handle_key(code(KeyCode::Enter));
-        assert!(!ed.quit); // blocked: unsaved
+        ed.handle_key(ch(' ')); // menu
+        ed.handle_key(ch('q')); // 'q' = quit
+        assert!(!ed.quit); // blocked: unsaved changes
         assert_eq!(ed.mode, Mode::Normal);
     }
 
@@ -1286,5 +1422,68 @@ mod tests {
         ed.text.move_home();
         ed.scroll_to(10, 5);
         assert_eq!(ed.left, 0);
+    }
+
+    #[test]
+    fn space_menu_is_which_key() {
+        // C1: Space opens a which-key menu; a bound key runs its action + closes;
+        // an unbound key just dismisses (no arrow navigation, no selection).
+        let mut ed = Editor::new(None, "hello", false);
+        ed.handle_key(ch(' '));
+        assert!(ed.menu_open());
+        ed.handle_key(ch('w')); // 'w' = toggle soft-wrap
+        assert!(!ed.menu_open());
+        assert!(ed.wrap);
+        ed.handle_key(ch(' '));
+        assert!(ed.menu_open());
+        ed.handle_key(ch('z')); // unbound
+        assert!(!ed.menu_open());
+        assert!(ed.wrap); // unchanged
+    }
+
+    #[test]
+    fn buffer_picker_navigates_and_switches() {
+        // C3: Space-b opens an arrow-selectable buffer list; Enter switches.
+        let mut ed = Editor::new(Some("alpha".to_string()), "x", false);
+        ed.open_buffer(Some("beta".to_string()), "y"); // active = beta (1)
+        ed.handle_key(ch(' '));
+        ed.handle_key(ch('b'));
+        assert_eq!(ed.buffer_picker_sel(), Some(1)); // starts at the active buffer
+        ed.handle_key(code(KeyCode::Up));
+        assert_eq!(ed.buffer_picker_sel(), Some(0));
+        ed.handle_key(code(KeyCode::Enter));
+        assert_eq!(ed.buffer_picker_sel(), None);
+        assert_eq!(ed.buffer_indicator(), Some("[1/2]".to_string())); // active now alpha
+    }
+
+    #[test]
+    fn file_picker_fuzzy_filters_and_opens_in_a_new_buffer() {
+        // C3: Space-f -> a fuzzy filter over the cwd files; Enter raises Open.
+        let mut ed = Editor::new(None, "", false);
+        ed.open_file_picker(alloc::vec![
+            String::from("main.rs"),
+            String::from("lib.rs"),
+            String::from("Cargo.toml"),
+        ]);
+        assert!(ed.file_picker_state().is_some());
+        assert_eq!(ed.file_picker_filtered().len(), 3); // empty query matches all
+        ed.handle_key(ch('r'));
+        ed.handle_key(ch('s')); // fuzzy "rs" -> main.rs, lib.rs (subsequence)
+        assert_eq!(
+            ed.file_picker_filtered(),
+            alloc::vec![String::from("main.rs"), String::from("lib.rs")]
+        );
+        ed.handle_key(code(KeyCode::Enter)); // open sel 0
+        assert_eq!(ed.take_request(), Some(Request::Open("main.rs".to_string())));
+        assert!(ed.file_picker_state().is_none());
+    }
+
+    #[test]
+    fn fuzzy_match_is_case_insensitive_subsequence() {
+        assert!(fuzzy_match("", "anything"));
+        assert!(fuzzy_match("mrs", "main.rs"));
+        assert!(fuzzy_match("MRS", "main.rs"));
+        assert!(!fuzzy_match("xyz", "main.rs"));
+        assert!(!fuzzy_match("rsm", "main.rs")); // order matters
     }
 }

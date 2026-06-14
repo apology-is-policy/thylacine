@@ -27,6 +27,7 @@ extern crate alloc;
 
 use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use libthyla_rs::alloc::ThylaAlloc;
 use libthyla_rs::env;
@@ -219,7 +220,26 @@ fn handle_request(ed: &mut Editor, req: Request) {
             };
             ed.open_buffer(Some(p), &content);
         }
+        Request::ListDir(dir) => match list_dir_files(&dir) {
+            Ok(names) => ed.open_file_picker(names),
+            Err(e) => ed.set_status(format!("{}: {}", dir, e)),
+        },
     }
+}
+
+/// List `dir`'s file entries (names, sorted; directories skipped) for the fuzzy
+/// file picker (Space-f). A flat cwd listing -- a recursive walk and directory
+/// navigation in the picker are documented v1.x niceties (KAUA.md seam).
+fn list_dir_files(dir: &str) -> Result<Vec<String>> {
+    let mut names = Vec::new();
+    for ent in fs::read_dir(dir)? {
+        let ent = ent?;
+        if !ent.is_dir() {
+            names.push(String::from(ent.file_name()));
+        }
+    }
+    names.sort();
+    Ok(names)
 }
 
 /// Read `path` as UTF-8 text, bounded by `MAX_FILE`. A non-UTF-8 or oversized

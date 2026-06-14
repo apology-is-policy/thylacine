@@ -69,9 +69,15 @@ pub fn render(ed: &Editor, area: Rect, buf: &mut Buffer) -> (u16, u16) {
 
     render_status(ed, status_area, buf);
 
-    // The palette overlays the text; its cursor sits on the selected entry.
-    if ed.palette_sel().is_some() {
-        return render_palette(ed, text_area, buf);
+    // The menu + pickers overlay the text and own the cursor.
+    if ed.menu_open() {
+        return render_menu(ed, text_area, buf);
+    }
+    if let Some(sel) = ed.buffer_picker_sel() {
+        return render_buffer_picker(ed, text_area, sel, buf);
+    }
+    if let Some((query, sel)) = ed.file_picker_state() {
+        return render_file_picker(ed, text_area, query, sel, buf);
     }
 
     let cur = if ed.wrap {
@@ -348,20 +354,12 @@ fn cursor_wrapped(ed: &Editor, text_area: Rect, gutter_w: u16, tw: u16, th: usiz
     (x, y)
 }
 
-/// Draw the `[Space]` command palette as a popup at the text area's bottom-left;
-/// returns the cursor position on the selected entry.
-fn render_palette(ed: &Editor, text_area: Rect, buf: &mut Buffer) -> (u16, u16) {
-    let labels = ed.palette_labels();
-    let sel = ed.palette_sel();
-    let title = " Space ";
-    let inner_w = labels
-        .iter()
-        .map(|s| s.chars().count())
-        .max()
-        .unwrap_or(0)
-        .max(title.chars().count()) as u16;
-    let box_w = (inner_w + 4).min(text_area.width.max(1)); // 2 border + 2 pad
-    let box_h = (labels.len() as u16 + 2).min(text_area.height.max(1)); // 2 border
+/// A bordered popup at the text area's bottom-left, sized to `content_w` x
+/// `content_h` (plus border + padding), returning its inner content rect. Shared
+/// by the menu + both pickers.
+fn popup(text_area: Rect, title: &str, content_w: u16, content_h: u16, buf: &mut Buffer) -> Rect {
+    let box_w = (content_w + 4).min(text_area.width.max(1)); // 2 border + 2 pad
+    let box_h = (content_h + 2).min(text_area.height.max(1)); // 2 border
     let by = text_area.bottom().saturating_sub(box_h);
     let box_area = Rect::new(text_area.x, by, box_w, box_h);
     fill(buf, box_area, theme::palette_surface());
@@ -372,16 +370,84 @@ fn render_palette(ed: &Editor, text_area: Rect, buf: &mut Buffer) -> (u16, u16) 
         .title_style(theme::palette_title());
     let inner = block.inner(box_area);
     block.render(box_area, buf);
-    List::new(&labels)
-        .select(sel)
+    inner
+}
+
+/// Widest of the given rows' char counts and the title (for sizing a popup).
+fn widest(rows: &[&str], title: &str) -> u16 {
+    rows.iter()
+        .map(|s| s.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(title.chars().count()) as u16
+}
+
+/// The `[Space]` which-key menu: one `key  description` row per entry, no
+/// selection (it is keypress-driven). The cursor parks at the list's top-left.
+fn render_menu(ed: &Editor, text_area: Rect, buf: &mut Buffer) -> (u16, u16) {
+    let rows: alloc::vec::Vec<String> = ed
+        .menu_entries()
+        .iter()
+        .map(|(k, l)| format!("{}  {}", k, l))
+        .collect();
+    let refs: alloc::vec::Vec<&str> = rows.iter().map(|s| s.as_str()).collect();
+    let title = " <space> ";
+    let inner = popup(text_area, title, widest(&refs, title), rows.len() as u16, buf);
+    List::new(&refs).style(theme::palette_surface()).render(inner, buf);
+    (inner.x, inner.y)
+}
+
+/// The buffer picker (Space-b): an arrow-selectable list of open buffers.
+fn render_buffer_picker(ed: &Editor, text_area: Rect, sel: usize, buf: &mut Buffer) -> (u16, u16) {
+    let rows: alloc::vec::Vec<String> = ed.buffer_tabs().into_iter().map(|(n, _)| n).collect();
+    let refs: alloc::vec::Vec<&str> = rows.iter().map(|s| s.as_str()).collect();
+    let title = " buffers ";
+    let inner = popup(text_area, title, widest(&refs, title), rows.len() as u16, buf);
+    List::new(&refs)
+        .select(Some(sel))
         .style(theme::palette_surface())
         .selected_style(theme::palette_selected())
         .render(inner, buf);
     let cy = inner
         .y
-        .saturating_add(sel.unwrap_or(0) as u16)
+        .saturating_add(sel as u16)
         .min(inner.bottom().saturating_sub(1));
     (inner.x, cy)
+}
+
+/// The fuzzy file picker (Space-f): a `> query` line above the filtered file
+/// list. The cursor sits on the query line (you type to filter).
+fn render_file_picker(
+    ed: &Editor,
+    text_area: Rect,
+    query: &str,
+    sel: usize,
+    buf: &mut Buffer,
+) -> (u16, u16) {
+    let matches = ed.file_picker_filtered();
+    let refs: alloc::vec::Vec<&str> = matches.iter().map(|s| s.as_str()).collect();
+    let title = " open file ";
+    let prompt = format!("> {}", query);
+    let content_w = widest(&refs, title).max(prompt.chars().count() as u16).max(20);
+    let content_h = (refs.len() as u16).saturating_add(1); // query row + list
+    let inner = popup(text_area, title, content_w, content_h, buf);
+    buf.set_str(inner.x, inner.y, &prompt, theme::status_msg());
+    let list_area = Rect::new(
+        inner.x,
+        inner.y.saturating_add(1),
+        inner.width,
+        inner.height.saturating_sub(1),
+    );
+    List::new(&refs)
+        .select(Some(sel))
+        .style(theme::palette_surface())
+        .selected_style(theme::palette_selected())
+        .render(list_area, buf);
+    let cx = inner
+        .x
+        .saturating_add(prompt.chars().count() as u16)
+        .min(inner.right().saturating_sub(1));
+    (cx, inner.y)
 }
 
 /// Draw the status row: the command/search line in command mode, else the
@@ -447,7 +513,9 @@ fn cursor(ed: &Editor, text_area: Rect, status_area: Rect, gutter_w: u16) -> (u1
 
 fn mode_color(mode: &Mode) -> Color {
     match mode {
-        Mode::Normal | Mode::Palette { .. } => theme::EMBER,
+        Mode::Normal | Mode::Menu | Mode::BufferPicker { .. } | Mode::FilePicker { .. } => {
+            theme::EMBER
+        }
         Mode::Insert => theme::GREEN,
         Mode::Visual => theme::VIOLET,
         Mode::Command(_) => theme::GOLD,
@@ -576,18 +644,39 @@ mod tests {
     }
 
     #[test]
-    fn palette_overlay_renders_a_highlighted_menu() {
-        let big = Rect::new(0, 0, 40, 12);
+    fn space_menu_renders_which_key_rows() {
+        // C1: Space opens a which-key popup of "key  description" rows, no
+        // selection bar (it is keypress-driven, not arrow-navigated).
+        let big = Rect::new(0, 0, 40, 14);
         let mut ed = Editor::new(None, "x", false);
-        ed.handle_key(KeyEvent::char(' ')); // open palette, sel 0
+        ed.handle_key(KeyEvent::char(' ')); // open the menu
         let mut b = Buffer::empty(big);
         render(&ed, big, &mut b);
-        // 6 entries -> box height 8, bottom-aligned (by=3), inner rows 4..9;
-        // entry 0 "toggle soft-wrap" selected, entry 1 "next buffer" not.
-        assert_eq!(sym(&b, 1, 4), 't');
-        assert_eq!(b.get(1, 4).unwrap().style.bg, theme::EMBER); // selected bar
-        assert_eq!(sym(&b, 1, 5), 'n'); // "next buffer"
-        assert_ne!(b.get(1, 5).unwrap().style.bg, theme::EMBER);
+        // 8 entries -> box height 10, bottom-aligned (by=3), inner.y=4; row 0 is
+        // "f  open file picker".
+        assert_eq!(sym(&b, 1, 4), 'f'); // the key
+        assert_eq!(sym(&b, 4, 4), 'o'); // "open file picker" after "f  "
+        assert_ne!(b.get(1, 4).unwrap().style.bg, theme::EMBER); // no selection bar
+    }
+
+    #[test]
+    fn file_picker_renders_query_and_filtered_list() {
+        // C3: Space-f shows a `> query` line above the fuzzy-filtered files.
+        let big = Rect::new(0, 0, 40, 14);
+        let mut ed = Editor::new(None, "x", false);
+        ed.open_file_picker(alloc::vec![
+            String::from("main.rs"),
+            String::from("lib.rs"),
+        ]);
+        ed.handle_key(KeyEvent::char('l')); // filter -> "lib.rs" only
+        let mut b = Buffer::empty(big);
+        let cur = render(&ed, big, &mut b);
+        // content_h = 1 (filtered) + 1 (query) = 2 -> box_h 4; by = 13-4 = 9;
+        // inner.y = 10; the query row "> l" then the list row "lib.rs".
+        assert_eq!(sym(&b, 1, 10), '>'); // prompt
+        assert_eq!(sym(&b, 3, 10), 'l'); // the typed query char
+        assert_eq!(sym(&b, 1, 11), 'l'); // "lib.rs" on the list row
+        assert_eq!(cur, (4, 10)); // cursor after "> l" on the query line
     }
 
     #[test]
