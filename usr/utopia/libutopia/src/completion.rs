@@ -42,7 +42,7 @@ use crate::line_editor::{Completions, CompletionSource};
 
 /// Cap on the candidates returned from one Tab (the design's `LISTMAX`). A
 /// directory of thousands of entries must not flood the completion menu; the
-/// cap bounds both the work and the `ShowCompletions` payload.
+/// cap bounds both the work and the `MenuShow` cycle payload.
 const MAX_CANDIDATES: usize = 256;
 
 /// The production Tab-completion source. Owns a precomputed command index

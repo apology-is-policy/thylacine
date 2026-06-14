@@ -104,13 +104,19 @@ pub enum EditorAction {
     /// Ctrl-L. The main loop should clear the screen and redraw the
     /// prompt + buffer. The engine's state is unchanged.
     ClearScreen,
-    /// U-4d: Tab with multiple candidates AND no further common-prefix
-    /// extension possible. The main loop should display the candidate
-    /// list (typically newline-separated below the current prompt, then
-    /// redraw the prompt + buffer). The editor's buffer + cursor are
-    /// unchanged from before the Tab. The Vec is in source order (NOT
-    /// sorted) so the source's natural ordering propagates.
-    ShowCompletions(Vec<String>),
+    /// D4: zsh-style menu completion. Tab with multiple candidates (after the
+    /// shared prefix is exhausted) enters a cycling menu: the editor has
+    /// applied `candidates[selected]` to the buffer, and the main loop should
+    /// render a one-line candidate strip below the prompt with `selected`
+    /// highlighted, then restore the cursor to the prompt. Each subsequent Tab
+    /// re-emits this with the next `selected` (the buffer is re-applied); Enter
+    /// finalizes (dismiss the strip, keep the selection, no submit); any other
+    /// key dismisses the menu and is processed normally. The Vec is in source
+    /// order (NOT sorted) so the source's natural ordering propagates.
+    MenuShow {
+        candidates: Vec<String>,
+        selected: usize,
+    },
 }
 
 // =============================================================================
@@ -287,8 +293,8 @@ fn continuation_prefix(prompt_width: usize) -> alloc::string::String {
 // table, the function table, the cap registry, etc.). U-4d defines
 // the trait the shell implements + the editor-side machinery (Tab
 // key dispatches to the source; the source returns a structured
-// Completions; the editor inserts the common-prefix extension or
-// emits ShowCompletions for the main loop).
+// Completions; the editor inserts the common-prefix extension, then
+// opens the D4 cycling menu (MenuShow) when the prefix is exhausted).
 //
 // At U-4d, the engine ships a `StaticCompletionSource` that wraps a
 // fixed candidate list -- used by tests and as a placeholder until
@@ -488,6 +494,17 @@ enum LineEditorMode {
         /// Saved buffer + cursor to restore on Cancel.
         saved_buffer: String,
         saved_cursor: usize,
+    },
+    /// D4: zsh-style cycling completion menu. Entered from a Tab with multiple
+    /// candidates whose shared prefix is exhausted. `candidates[selected]` is
+    /// currently APPLIED to the buffer, occupying `[anchor, anchor +
+    /// candidates[selected].len())` with the cursor just after it. Tab cycles
+    /// `selected`; Enter finalizes; any other key dismisses + redispatches.
+    Menu {
+        candidates: Vec<String>,
+        selected: usize,
+        /// Buffer byte offset where the completed word begins.
+        anchor: usize,
     },
 }
 
@@ -1077,6 +1094,12 @@ impl LineEditor {
         if self.is_searching() {
             return self.apply_in_search(action);
         }
+        // D4: in the cycling completion menu, Tab advances + a few keys are
+        // special; everything else dismisses the menu and is re-dispatched in
+        // Normal mode (so typing after a completion appends to it).
+        if matches!(self.mode, LineEditorMode::Menu { .. }) {
+            return self.apply_in_menu(action);
+        }
         // Most actions reset desired_col (the column-preserving Up/Down
         // tracker). Up/Down preserve it; only ascending/descending
         // through lines should sticky-stick to the same column.
@@ -1601,15 +1624,98 @@ impl LineEditor {
             let cand = comp.candidates[0].clone();
             return self.apply_completion(comp.replace_range, &cand);
         }
-        // Multiple candidates: find common prefix. If it extends the
-        // current word, apply that extension (Redraw). Else, emit
-        // ShowCompletions for the main loop to display.
+        // Multiple candidates: first extend to the shared prefix if it grows
+        // the word (zsh: complete the common part). When the prefix is already
+        // exhausted, enter the D4 cycling menu -- apply candidate[0] and let
+        // the main loop draw the highlighted strip.
         let common = longest_common_prefix(&comp.candidates);
         let current_word_len = comp.replace_range.end - comp.replace_range.start;
         if common.len() > current_word_len {
             return self.apply_completion(comp.replace_range, &common);
         }
-        EditorAction::ShowCompletions(comp.candidates)
+        let anchor = comp.replace_range.start;
+        let cand0 = comp.candidates[0].clone();
+        // Apply candidate[0]; if it cannot be applied (would exceed the buffer
+        // cap), do not enter menu mode.
+        if matches!(
+            self.apply_completion(comp.replace_range, &cand0),
+            EditorAction::NoChange
+        ) {
+            return EditorAction::NoChange;
+        }
+        let candidates = comp.candidates;
+        self.mode = LineEditorMode::Menu {
+            candidates: candidates.clone(),
+            selected: 0,
+            anchor,
+        };
+        EditorAction::MenuShow {
+            candidates,
+            selected: 0,
+        }
+    }
+
+    /// D4: action dispatch while the completion menu is open. Tab cycles to the
+    /// next candidate; Enter finalizes (dismiss + keep the selection, NO
+    /// submit -- "ready for more typing"); Cancel clears the line; an unknown
+    /// byte is ignored (stays in the menu); any other action dismisses the menu
+    /// (keeping the applied selection) and is re-dispatched in Normal mode.
+    fn apply_in_menu(&mut self, action: Action) -> EditorAction {
+        match action {
+            Action::Complete => self.menu_cycle(),
+            Action::Accept => {
+                self.mode = LineEditorMode::Normal;
+                EditorAction::Redraw
+            }
+            Action::Cancel => {
+                self.mode = LineEditorMode::Normal;
+                self.do_cancel()
+            }
+            Action::Ignore => EditorAction::NoChange,
+            other => {
+                self.mode = LineEditorMode::Normal;
+                self.apply(other)
+            }
+        }
+    }
+
+    /// D4: replace the applied candidate with the next one in the cycle, wrap at
+    /// the end, and re-emit MenuShow. Bounds-defensive: if the applied span no
+    /// longer fits the buffer (it always should -- only menu actions mutate it
+    /// while open), or the next candidate would exceed the buffer cap, bail out
+    /// of menu mode cleanly.
+    fn menu_cycle(&mut self) -> EditorAction {
+        let (anchor, old_len, next, candidates) = match &self.mode {
+            LineEditorMode::Menu {
+                candidates,
+                selected,
+                anchor,
+            } => {
+                let next = (*selected + 1) % candidates.len();
+                (*anchor, candidates[*selected].len(), next, candidates.clone())
+            }
+            _ => return EditorAction::NoChange,
+        };
+        let end = anchor + old_len;
+        if end > self.buffer.len() || !self.buffer.is_char_boundary(anchor) || !self.buffer.is_char_boundary(end) {
+            self.mode = LineEditorMode::Normal;
+            return EditorAction::Redraw;
+        }
+        let new_cand = candidates[next].clone();
+        if self.buffer.len() - old_len + new_cand.len() > MAX_BUFFER_LEN {
+            return EditorAction::NoChange; // cannot grow; stay on the current pick
+        }
+        self.buffer.replace_range(anchor..end, &new_cand);
+        self.cursor = anchor + new_cand.len();
+        self.mode = LineEditorMode::Menu {
+            candidates: candidates.clone(),
+            selected: next,
+            anchor,
+        };
+        EditorAction::MenuShow {
+            candidates,
+            selected: next,
+        }
     }
 
     fn apply_completion(
@@ -2505,7 +2611,9 @@ mod tests {
     }
 
     #[test]
-    fn tab_multi_candidate_no_extension_emits_show_completions() {
+    fn tab_multi_candidate_no_extension_enters_menu() {
+        // D4: when the shared prefix is exhausted, Tab enters the cycling menu,
+        // applies candidate[0], and emits MenuShow{selected: 0}.
         let mut le = LineEditor::new();
         le.set_completion_source(alloc::boxed::Box::new(StaticCompletionSource::new(
             vec![
@@ -2517,17 +2625,79 @@ mod tests {
         feed(&mut le, b"app");
         let r = le.feed_byte(0x09);
         match r {
-            EditorAction::ShowCompletions(cands) => {
-                assert_eq!(cands.len(), 3);
-                assert!(cands.contains(&String::from("apple")));
-                assert!(cands.contains(&String::from("application")));
-                assert!(cands.contains(&String::from("apparatus")));
+            EditorAction::MenuShow {
+                candidates,
+                selected,
+            } => {
+                assert_eq!(candidates.len(), 3);
+                assert_eq!(selected, 0);
             }
-            other => panic!("expected ShowCompletions; got {:?}", other),
+            other => panic!("expected MenuShow; got {:?}", other),
         }
-        // Buffer unchanged.
-        assert_eq!(le.buffer(), "app");
-        assert_eq!(le.cursor(), 3);
+        // candidate[0] ("apple") is applied to the buffer.
+        assert_eq!(le.buffer(), "apple");
+        assert_eq!(le.cursor(), 5);
+    }
+
+    #[test]
+    fn tab_menu_cycles_and_wraps() {
+        // D4: each subsequent Tab applies the next candidate; the cycle wraps.
+        let mut le = LineEditor::new();
+        le.set_completion_source(alloc::boxed::Box::new(StaticCompletionSource::new(
+            vec![
+                String::from("apple"),
+                String::from("application"),
+                String::from("apparatus"),
+            ],
+        )));
+        feed(&mut le, b"app");
+        let _ = le.feed_byte(0x09); // -> apple (selected 0)
+        assert_eq!(le.buffer(), "apple");
+        let r = le.feed_byte(0x09); // -> application (selected 1)
+        assert!(matches!(r, EditorAction::MenuShow { selected: 1, .. }));
+        assert_eq!(le.buffer(), "application");
+        assert_eq!(le.cursor(), "application".len());
+        let _ = le.feed_byte(0x09); // -> apparatus (selected 2)
+        assert_eq!(le.buffer(), "apparatus");
+        let r = le.feed_byte(0x09); // wraps -> apple (selected 0)
+        assert!(matches!(r, EditorAction::MenuShow { selected: 0, .. }));
+        assert_eq!(le.buffer(), "apple");
+    }
+
+    #[test]
+    fn tab_menu_enter_finalizes_without_submitting() {
+        // D4: Enter while the menu is open dismisses it + keeps the selection,
+        // but does NOT submit (Redraw, not Accept) -- "ready for more typing".
+        let mut le = LineEditor::new();
+        le.set_completion_source(alloc::boxed::Box::new(StaticCompletionSource::new(
+            vec![String::from("apple"), String::from("apricot")],
+        )));
+        feed(&mut le, b"ap");
+        let _ = le.feed_byte(0x09); // common prefix is "ap"; already there -> menu, apply "apple"
+        assert_eq!(le.buffer(), "apple");
+        let r = le.feed_byte(b'\r'); // Enter finalizes
+        assert_eq!(r, EditorAction::Redraw);
+        assert_eq!(le.buffer(), "apple");
+        // A subsequent Enter now submits (normal mode).
+        let r2 = le.feed_byte(b'\r');
+        assert_eq!(r2, EditorAction::Accept(String::from("apple")));
+    }
+
+    #[test]
+    fn tab_menu_typing_dismisses_and_appends() {
+        // D4: any non-menu key dismisses the menu (keeping the applied pick)
+        // and is processed in Normal mode -- a char appends after the word.
+        let mut le = LineEditor::new();
+        le.set_completion_source(alloc::boxed::Box::new(StaticCompletionSource::new(
+            vec![String::from("apple"), String::from("apricot")],
+        )));
+        feed(&mut le, b"ap");
+        let _ = le.feed_byte(0x09); // menu -> "apple"
+        assert_eq!(le.buffer(), "apple");
+        let r = le.feed_byte(b'X'); // dismisses + appends
+        assert_eq!(r, EditorAction::Redraw);
+        assert_eq!(le.buffer(), "appleX");
+        assert_eq!(le.cursor(), 6);
     }
 
     #[test]

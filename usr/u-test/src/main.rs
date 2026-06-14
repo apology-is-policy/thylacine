@@ -988,10 +988,10 @@ fn flow_line_editor() -> Result<(), i64> {
         t_putstr("u-test: flow_line_editor: search Cancel restore FAILED\n");
         return Err(1);
     }
-    // Probe 14 -- U-4d: Tab completion via the shipped
+    // Probe 14 -- U-4d + D4: Tab completion via the shipped
     // StaticCompletionSource. Three candidates with common prefix
-    // "app": single-Tab extends to common prefix; second-Tab with
-    // buffer="app" emits ShowCompletions for the main loop.
+    // "app": single-Tab extends to the common prefix; second-Tab with
+    // buffer="app" opens the D4 cycling menu at candidate[0].
     let mut le = LineEditor::new();
     le.set_completion_source(alloc::boxed::Box::new(StaticCompletionSource::new(
         alloc::vec![
@@ -1013,23 +1013,24 @@ fn flow_line_editor() -> Result<(), i64> {
         t_putstr("u-test: flow_line_editor: Tab common-prefix extension FAILED\n");
         return Err(1);
     }
-    // Second Tab from "app" -- all three candidates equally match;
-    // no further common-prefix extension -> ShowCompletions.
+    // Second Tab from "app" -- all three candidates equally match; no further
+    // common-prefix extension -> the D4 cycling menu opens at candidate[0]
+    // ("apple", source order) and applies it to the buffer.
     let r = le.feed_byte(0x09);
     match r {
-        EditorAction::ShowCompletions(cands) => {
-            if cands.len() != 3 {
-                t_putstr("u-test: flow_line_editor: Tab ShowCompletions count FAILED\n");
+        EditorAction::MenuShow { candidates, selected } => {
+            if candidates.len() != 3 || selected != 0 {
+                t_putstr("u-test: flow_line_editor: Tab MenuShow count/selected FAILED\n");
                 return Err(1);
             }
         }
         _ => {
-            t_putstr("u-test: flow_line_editor: Tab ShowCompletions FAILED\n");
+            t_putstr("u-test: flow_line_editor: Tab MenuShow FAILED\n");
             return Err(1);
         }
     }
-    if le.buffer() != "app" {
-        t_putstr("u-test: flow_line_editor: Tab ShowCompletions buffer unchanged FAILED\n");
+    if le.buffer() != "apple" {
+        t_putstr("u-test: flow_line_editor: Tab menu apply candidate[0] FAILED\n");
         return Err(1);
     }
     // Probe 15 -- U-4d: Tab with single matching candidate completes it.

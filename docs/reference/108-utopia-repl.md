@@ -149,7 +149,11 @@ so the loop body may freely take `&mut self`) and dispatches each action:
 | `Cancel` (Ctrl-C) | `\r\n` + fresh prompt (the editor already reset its buffer) |
 | `Eof` (Ctrl-D, empty buffer) | `\r\n`; return `Some(env.status())` |
 | `ClearScreen` (Ctrl-L) | `\x1b[2J\x1b[H` + render |
-| `ShowCompletions(cands)` | newline-separated candidates + render |
+| `MenuShow { candidates, selected }` (D4) | redraw prompt+buffer, then a one-line `render_menu_strip` candidate strip below (reverse-video on `selected`), cursor restored to the prompt via DECSC/DECRC; `menu_shown = true` |
+
+(D4) Any action OTHER than `MenuShow`/`NoChange`, when `menu_shown`, first clears
+the strip line below the prompt (`\x1b7\r\n\x1b[K\x1b8`) and clears `menu_shown`,
+so a completion strip never lingers under a fresh prompt or accepted line.
 
 `exit` short-circuits the whole input batch: the first `Accept` whose
 `run_line` sets the exit request returns immediately, skipping any later

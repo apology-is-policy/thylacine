@@ -134,10 +134,15 @@ impl LineEditor {
 }
 ```
 
-And the new `EditorAction::ShowCompletions(Vec<String>)` variant: emitted
-when Tab dispatches with 2+ candidates and NO further common-prefix
-extension is possible. The main loop displays the candidate list
-(typically newline-separated below the prompt) then redraws.
+And (D4) the `EditorAction::MenuShow { candidates, selected }` variant: emitted
+when Tab dispatches with 2+ candidates and the common prefix is already
+exhausted. The editor enters a cycling menu (`LineEditorMode::Menu`), applies
+`candidates[selected]` to the buffer, and the main loop draws a one-line
+candidate strip below the prompt with `selected` highlighted. Each subsequent
+Tab cycles `selected` (wrapping); Enter finalizes (dismiss + keep the
+selection, NO submit -- zsh `menu-select`); any other key dismisses the menu
+and is processed in Normal mode. (This replaced the pre-D4
+`ShowCompletions(Vec<String>)` static-list variant.)
 
 ### `LineEditor` -- new U-4c accessors
 
@@ -477,8 +482,16 @@ do_complete:
       // common prefix extends the current word -> apply
       replace buffer[comp.replace_range] with common -> Redraw
     else:
-      // no extension possible -> hand list to main loop
-      ShowCompletions(comp.candidates)
+      // (D4) prefix exhausted -> open the cycling menu, apply candidate[0]
+      mode = Menu { candidates, selected: 0, anchor: replace_range.start }
+      MenuShow { candidates, selected: 0 }
+
+// (D4) while mode == Menu:
+//   Tab    -> menu_cycle: replace the applied word with candidates[(sel+1)%N];
+//             MenuShow { selected: sel+1 }
+//   Enter  -> finalize: mode = Normal; Redraw (keep selection, do NOT submit)
+//   Ctrl-C -> mode = Normal; Cancel (clear line)
+//   other  -> mode = Normal; re-dispatch the key in Normal mode
 ```
 
 `longest_common_prefix` is UTF-8 safe: the returned byte length is
@@ -626,7 +639,7 @@ U-4a; probes 7-10 are U-4b.
 11. **Smart Up nav** (U-4c): multi-line `{\n  body` + Ctrl-P → cursor-up to line 0 (column-preserving); Ctrl-P again from line 0 → fall-through to history-prev.
 12. **Ctrl-R incremental search** (U-4c): push 3 history entries; Ctrl-R + "ap" → match newest "ap" entry; Ctrl-R again → step back to older match; Enter → Accept the matched line; exit search mode.
 13. **Search Cancel restores** (U-4c): type "draft", Ctrl-R, type "hello" (matches history), Ctrl-C → exit search; buffer restored to "draft"; cursor restored to column 5.
-14. **Tab common-prefix extend + ShowCompletions** (U-4d): plug a StaticCompletionSource with ["apple", "application", "apparatus"]; type "a" + Tab → buffer becomes "app" (common prefix). Second Tab → `ShowCompletions([apple, application, apparatus])` and buffer unchanged at "app".
+14. **Tab common-prefix extend + menu** (U-4d + D4): plug a StaticCompletionSource with ["apple", "application", "apparatus"]; type "a" + Tab → buffer becomes "app" (common prefix). Second Tab → `MenuShow { selected: 0 }` and the buffer becomes "apple" (candidate[0] applied; the D4 cycling menu opens). Subsequent Tabs cycle ("application" → "apparatus" → wrap); Enter finalizes without submitting; a typed char dismisses + appends (covered by the `tab_menu_*` host tests + `/u-repl-test` block 10).
 15. **Tab single-candidate completes** (U-4d): source with ["uniqueword"]; type "uniq" + Tab → buffer "uniqueword", cursor 10.
 16. **Tab with no source is NoChange** (U-4d): no source registered; Tab returns NoChange + buffer unchanged.
 
@@ -697,10 +710,21 @@ small `[u32; 4]` CSI parameter array.
 - **U-4a LANDED** (commit `eccbf0f`).
 - **U-4b LANDED** (commit `28276a7`).
 - **U-4c LANDED** (commit `a80908a`).
-- **U-4d LANDED** (commit pending) — adds CompletionSource trait +
+- **U-4d LANDED** (commit `9a3a4fb`) — adds CompletionSource trait +
   StaticCompletionSource + Completions struct + Tab key dispatch +
-  EditorAction::ShowCompletions variant + set/clear_completion_source.
-  **The U-4 line editor arc is COMPLETE.**
+  set/clear_completion_source. (At U-4d the no-extension Tab emitted a
+  static `ShowCompletions(Vec<String>)`; **D4 replaced it** with the cycling
+  menu below.) **The U-4 line editor arc is COMPLETE.**
+- **D4 LANDED** (UX-polish batch) — zsh-style menu completion. The
+  `ShowCompletions` variant is replaced by `MenuShow { candidates, selected }`
+  + the `LineEditorMode::Menu` state: a no-extension Tab opens a cycling menu
+  (apply candidate[0]); each Tab cycles `selected` (wrapping); Enter finalizes
+  without submitting; any other key dismisses + re-dispatches. The REPL draws a
+  one-line reverse-video candidate strip below the prompt (`render_menu_strip`,
+  windowed around `selected` with `<`/`>` markers). PURE USERSPACE / cosmetic.
+  Host tests: `tab_menu_cycles_and_wraps` / `tab_menu_enter_finalizes_without_submitting`
+  / `tab_menu_typing_dismisses_and_appends` / `menu_strip_*`; in-QEMU
+  `/u-repl-test` block 10 + `/u-test` probe 14.
 - `libutopia::line_editor` — ~1620 LOC engine (U-4a 640 + U-4b 230 +
   U-4c 560 + U-4d 190) + ~760 LOC `#[cfg(test)]` unit tests (U-4a 290
   + U-4b 180 + U-4c 180 + U-4d 110).

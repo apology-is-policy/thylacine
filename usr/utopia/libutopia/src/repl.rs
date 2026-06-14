@@ -77,6 +77,10 @@ pub struct Repl {
     /// from `$home`. `None` keeps history in-memory only (a bare-spawned `ut`
     /// with no home, host tests) -- no append happens.
     history_path: Option<String>,
+    /// D4: whether a completion-menu candidate strip is currently drawn below
+    /// the prompt. Set on `MenuShow`; any other editor action first clears the
+    /// strip line, so a stale strip never lingers below the prompt.
+    menu_shown: bool,
 }
 
 impl Default for Repl {
@@ -97,6 +101,7 @@ impl Repl {
             bin_commands: Vec::new(),
             completion_installed: false,
             history_path: None,
+            menu_shown: false,
         }
     }
 
@@ -323,6 +328,22 @@ impl Repl {
     /// (`None`) means "read more input".
     pub fn feed(&mut self, input: &[u8], out: &mut dyn IoWrite) -> Option<i32> {
         for action in self.editor.feed_bytes(input) {
+            // D4: a completion-menu strip is drawn on the line BELOW the prompt.
+            // Any action that leaves the menu must clear that strip first, so it
+            // never lingers under a fresh prompt / accepted line. Save cursor
+            // (DECSC) -> down + clear line -> restore (DECRC), leaving the cursor
+            // on the prompt line. MenuShow redraws it in place; NoChange means
+            // the editor stayed in the menu (e.g. an unknown CSI byte) -- both
+            // keep the strip.
+            if self.menu_shown
+                && !matches!(
+                    action,
+                    EditorAction::MenuShow { .. } | EditorAction::NoChange
+                )
+            {
+                let _ = out.write_all(b"\x1b7\r\n\x1b[K\x1b8");
+                self.menu_shown = false;
+            }
             match action {
                 EditorAction::NoChange => {}
                 EditorAction::Redraw => {
@@ -389,14 +410,23 @@ impl Repl {
                     let _ = out.write_all(b"\x1b[2J\x1b[H");
                     self.emit_prompt(out);
                 }
-                EditorAction::ShowCompletions(cands) => {
-                    let _ = out.write_all(b"\r\n");
-                    for c in &cands {
-                        let _ = out.write_all(c.as_bytes());
-                        let _ = out.write_all(b"  ");
-                    }
-                    let _ = out.write_all(b"\r\n");
+                EditorAction::MenuShow {
+                    candidates,
+                    selected,
+                } => {
+                    // D4: the editor has applied candidates[selected] to the
+                    // buffer. Redraw the prompt+buffer line, then draw a
+                    // one-line candidate strip below it (selected highlighted),
+                    // restoring the cursor to the prompt line. On the next
+                    // MenuShow (cycle) this redraws in place; on any other
+                    // action the strip is cleared (above).
                     self.emit_prompt(out);
+                    let strip = render_menu_strip(&candidates, selected);
+                    let _ = out.write_all(b"\x1b7\r\n\x1b[K");
+                    let _ = out.write_all(strip.as_bytes());
+                    let _ = out.write_all(b"\x1b8");
+                    let _ = out.flush();
+                    self.menu_shown = true;
                 }
             }
         }
@@ -560,6 +590,61 @@ impl Repl {
         }
         self.emit_prompt(out);
     }
+}
+
+/// D4: render the completion-menu candidate strip (one line, below the prompt).
+/// The `selected` candidate is reverse-video highlighted. Candidates join with
+/// two spaces; if they would exceed a conservative column budget, a contiguous
+/// window AROUND `selected` is shown with `<`/`>` truncation markers so the
+/// current pick is always visible (the editor/REPL do not know the real
+/// terminal width -- 80-col is the safe assumption).
+fn render_menu_strip(cands: &[String], selected: usize) -> String {
+    const BUDGET: usize = 76;
+    if cands.is_empty() {
+        return String::new();
+    }
+    let sel = selected.min(cands.len() - 1);
+    let widths: Vec<usize> = cands.iter().map(|c| ansi::visible_width(c)).collect();
+    // Grow a window [lo, hi) outward from `sel` while it fits the budget.
+    let mut lo = sel;
+    let mut hi = sel + 1;
+    let mut used = widths[sel];
+    loop {
+        let mut grew = false;
+        if hi < cands.len() && used + 2 + widths[hi] <= BUDGET {
+            used += 2 + widths[hi];
+            hi += 1;
+            grew = true;
+        }
+        if lo > 0 && used + 2 + widths[lo - 1] <= BUDGET {
+            lo -= 1;
+            used += 2 + widths[lo];
+            grew = true;
+        }
+        if !grew {
+            break;
+        }
+    }
+    let mut out = String::new();
+    if lo > 0 {
+        out.push_str("< ");
+    }
+    for (n, i) in (lo..hi).enumerate() {
+        if n > 0 {
+            out.push_str("  ");
+        }
+        if i == sel {
+            out.push_str("\x1b[7m"); // reverse video
+            out.push_str(&cands[i]);
+            out.push_str("\x1b[0m"); // reset (self-contained so DECRC is clean)
+        } else {
+            out.push_str(&cands[i]);
+        }
+    }
+    if hi < cands.len() {
+        out.push_str(" >");
+    }
+    out
 }
 
 // core::fmt::Write adapter so run_line can format an EvalErrorKind (Debug)
@@ -769,5 +854,45 @@ mod tests {
         let mut repl = Repl::new();
         let code = repl.run_script("/s.ut", &[], ")\n");
         assert_ne!(code, 0);
+    }
+
+    // ----- D4: the completion-menu candidate strip --------------------------
+
+    #[test]
+    fn menu_strip_highlights_selected() {
+        let c = [
+            String::from("apple"),
+            String::from("application"),
+            String::from("apparatus"),
+        ];
+        let r = render_menu_strip(&c, 1);
+        assert!(r.contains("\x1b[7mapplication\x1b[0m"), "highlight: {:?}", r);
+        assert!(r.contains("apple") && r.contains("apparatus"));
+        // All three fit the budget -> no truncation markers.
+        assert!(!r.starts_with("< ") && !r.ends_with(" >"));
+    }
+
+    #[test]
+    fn menu_strip_windows_around_selected_when_overflowing() {
+        // Many wide candidates: the selected one stays visible + markers appear.
+        let c: Vec<String> = (0..20)
+            .map(|i| {
+                let mut s = String::from("candidate-number-");
+                if i < 10 {
+                    s.push('0');
+                }
+                let mut n = String::new();
+                let _ = core::fmt::write(&mut FmtSink(&mut n), format_args!("{}", i));
+                s.push_str(&n);
+                s
+            })
+            .collect();
+        let r = render_menu_strip(&c, 15);
+        assert!(
+            r.contains("\x1b[7mcandidate-number-15\x1b[0m"),
+            "selected visible: {:?}",
+            r
+        );
+        assert!(r.starts_with("< "), "left truncation marker: {:?}", r);
     }
 }

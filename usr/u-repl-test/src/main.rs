@@ -183,6 +183,71 @@ pub extern "C" fn rs_main() -> i64 {
         }
     }
 
+    // 10. D4: zsh-style menu completion -- cycle + finalize + dismiss, driven
+    //     on the live LineEditor in-guest (the host #[cfg(test)] tab_menu_*
+    //     contract). The terminal strip rendering (render_menu_strip) is host-
+    //     tested; here we prove the editor STATE MACHINE in QEMU.
+    {
+        use alloc::boxed::Box;
+        use alloc::string::String;
+        use alloc::vec;
+        use libutopia::line_editor::{EditorAction, LineEditor, StaticCompletionSource};
+
+        let mut le = LineEditor::new();
+        le.set_completion_source(Box::new(StaticCompletionSource::new(vec![
+            String::from("apple"),
+            String::from("application"),
+            String::from("apparatus"),
+        ])));
+        let _ = le.feed_bytes(b"app");
+        // Tab: the shared prefix "app" is already typed -> enter the menu and
+        // apply candidate[0].
+        match le.feed_byte(0x09) {
+            EditorAction::MenuShow { selected: 0, .. } => {}
+            _ => return fail("D4: first Tab did not enter the menu at candidate 0"),
+        }
+        if le.buffer() != "apple" {
+            return fail("D4: menu did not apply candidate[0]");
+        }
+        // Tab again: cycle to candidate[1].
+        match le.feed_byte(0x09) {
+            EditorAction::MenuShow { selected: 1, .. } => {}
+            _ => return fail("D4: second Tab did not cycle to candidate 1"),
+        }
+        if le.buffer() != "application" {
+            return fail("D4: cycle did not apply candidate[1]");
+        }
+        // Enter: finalize -- keep the selection, do NOT submit (Redraw).
+        if le.feed_byte(b'\r') != EditorAction::Redraw {
+            return fail("D4: Enter in the menu did not finalize as Redraw");
+        }
+        if le.buffer() != "application" {
+            return fail("D4: finalize lost the applied selection");
+        }
+        // A subsequent Enter submits (Normal mode).
+        match le.feed_byte(b'\r') {
+            EditorAction::Accept(line) if line == "application" => {}
+            _ => return fail("D4: Enter after finalize did not submit the line"),
+        }
+
+        // Dismiss-and-append: Tab into the menu, then a char dismisses + appends.
+        let mut le2 = LineEditor::new();
+        le2.set_completion_source(Box::new(StaticCompletionSource::new(vec![
+            String::from("apple"),
+            String::from("apricot"),
+        ])));
+        let _ = le2.feed_bytes(b"ap");
+        let _ = le2.feed_byte(0x09); // -> apple
+        if le2.buffer() != "apple" {
+            return fail("D4: le2 menu did not apply apple");
+        }
+        let _ = le2.feed_byte(b'X');
+        if le2.buffer() != "appleX" {
+            return fail("D4: typing did not dismiss the menu + append");
+        }
+        t_putstr("u-repl-test: D4 menu completion OK\n");
+    }
+
     t_putstr("u-repl-test: all OK\n");
     0
 }
