@@ -76,9 +76,19 @@ fn render_plain(ed: &Editor, text_area: Rect, gutter_w: u16, tw: u16, th: usize,
         }
         let num = format!("{:>w$} ", row + 1, w = num_w as usize);
         buf.set_str(text_area.x, y, &num, theme::gutter());
-        draw_text(buf, tx, y, tx + tw, ed.text.line(row), theme::text());
+        // Horizontal scroll: draw the window [left, left+tw) of the line.
+        draw_text_slice(
+            buf,
+            tx,
+            y,
+            tx + tw,
+            ed.text.line(row),
+            ed.left,
+            tw as usize,
+            theme::text(),
+        );
         if let Some(span) = sel {
-            paint_selection(buf, tx, y, tx + tw, ed.text.line(row), row, span);
+            paint_selection(buf, tx, y, tx + tw, ed.text.line(row), row, ed.left, span);
         }
     }
 }
@@ -147,6 +157,7 @@ fn paint_selection(
     max_x: u16,
     line: &str,
     row: usize,
+    left: usize,
     span: ((usize, usize), (usize, usize)),
 ) {
     let (lo, hi) = span;
@@ -162,7 +173,10 @@ fn paint_selection(
         len
     };
     for cc in start..end {
-        let x = tx.saturating_add(cc as u16);
+        if cc < left {
+            continue; // scrolled off the left edge
+        }
+        let x = tx.saturating_add((cc - left) as u16);
         if x >= max_x {
             break;
         }
@@ -352,7 +366,7 @@ fn cursor(ed: &Editor, text_area: Rect, status_area: Rect, gutter_w: u16) -> (u1
     let x = text_area
         .x
         .saturating_add(gutter_w)
-        .saturating_add(col as u16)
+        .saturating_add(col.saturating_sub(ed.left) as u16)
         .min(text_area.right().saturating_sub(1));
     (x, y)
 }
@@ -500,5 +514,23 @@ mod tests {
         assert_eq!(b.get(1, 4).unwrap().style.bg, theme::EMBER); // selected bar
         assert_eq!(sym(&b, 1, 5), 'n'); // "next buffer"
         assert_ne!(b.get(1, 5).unwrap().style.bg, theme::EMBER);
+    }
+
+    #[test]
+    fn horizontal_scroll_renders_window_and_shifts_cursor() {
+        // A1: area 20x5 -> tw 16 (gutter 4). A 30-char line; cursor at col 20 ->
+        // left = 20+1-16 = 5, so the first drawn char is index 5 and the cursor
+        // sits at the right edge.
+        let mut ed = Editor::new(None, "0123456789ABCDEFGHIJKLMNOPQRST", false);
+        for _ in 0..20 {
+            ed.text.move_right();
+        }
+        let a = Rect::new(0, 0, 20, 5);
+        ed.scroll_to(16, 4);
+        let mut b = Buffer::empty(a);
+        let cur = render(&ed, a, &mut b);
+        assert_eq!(ed.left, 5);
+        assert_eq!(sym(&b, 4, 0), '5'); // line index 5 drawn first, after the gutter
+        assert_eq!(cur.0, 19); // col 20 -> x = 4 + (20-5), clamped to the edge
     }
 }

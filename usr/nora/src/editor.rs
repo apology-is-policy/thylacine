@@ -54,6 +54,7 @@ struct DocState {
     modified: bool,
     top: usize,
     top_sub: usize,
+    left: usize,
     anchor: Option<Pos>,
     last_search: String,
 }
@@ -67,6 +68,7 @@ impl DocState {
             modified: false,
             top: 0,
             top_sub: 0,
+            left: 0,
             anchor: None,
             last_search: String::new(),
         }
@@ -87,6 +89,10 @@ pub struct Editor {
     /// First visible VISUAL sub-row within `top`'s logical line (soft-wrap only;
     /// always 0 when `wrap` is off). Maintained by `scroll_to`.
     pub top_sub: usize,
+    /// First visible column (horizontal scroll). Non-wrap only -- a clipped long
+    /// line scrolls sideways to keep the cursor visible; always 0 in wrap mode.
+    /// Maintained by `scroll_to`.
+    pub left: usize,
     /// Soft-wrap mode: wrap long logical lines at the viewport width vs. clip
     /// them at the right edge. Toggled at runtime via the `[Space]` palette.
     pub wrap: bool,
@@ -107,6 +113,11 @@ pub struct Editor {
     bufs: Vec<DocState>,
     /// Index of the active buffer within `bufs`.
     active: usize,
+    /// Cached text-region width from the last `scroll_to` (the binary's
+    /// viewport). Wrap-aware vertical movement needs the wrap width at key time,
+    /// before the next render; 0 until the first frame (the initial redraw runs
+    /// before any key, so this is set before the first movement).
+    vp_tw: u16,
 }
 
 impl Editor {
@@ -122,6 +133,7 @@ impl Editor {
             modified: false,
             top: 0,
             top_sub: 0,
+            left: 0,
             wrap: false,
             status: None,
             quit: false,
@@ -131,6 +143,7 @@ impl Editor {
             request: None,
             bufs: Vec::new(),
             active: 0,
+            vp_tw: 0,
         };
         ed.bufs.push(d.clone());
         ed.load_active(d);
@@ -213,6 +226,7 @@ impl Editor {
             modified: self.modified,
             top: self.top,
             top_sub: self.top_sub,
+            left: self.left,
             anchor: self.anchor,
             last_search: self.last_search.clone(),
         }
@@ -226,6 +240,7 @@ impl Editor {
         self.modified = d.modified;
         self.top = d.top;
         self.top_sub = d.top_sub;
+        self.left = d.left;
         self.anchor = d.anchor;
         self.last_search = d.last_search;
     }
@@ -333,16 +348,27 @@ impl Editor {
         if height == 0 {
             return;
         }
+        // Cache the wrap width so wrap-aware vertical movement -- which runs at key
+        // time, before the next render -- knows the wrap geometry.
+        self.vp_tw = tw;
         if !self.wrap {
             self.top_sub = 0;
-            let row = self.text.cursor().0;
+            let (row, col) = self.text.cursor();
             if row < self.top {
                 self.top = row;
             } else if row >= self.top + height {
                 self.top = row + 1 - height;
             }
+            // Horizontal scroll: keep the cursor column within [left, left+tw).
+            let twc = tw.max(1) as usize;
+            if col < self.left {
+                self.left = col;
+            } else if col >= self.left + twc {
+                self.left = col + 1 - twc;
+            }
             return;
         }
+        self.left = 0;
 
         let cur = wrap::cursor_visual(&self.text, tw);
         let anchor = (self.top, self.top_sub);
@@ -388,6 +414,50 @@ impl Editor {
     pub fn toggle_wrap(&mut self) {
         self.wrap = !self.wrap;
         self.top_sub = 0;
+        self.left = 0;
+    }
+
+    /// Move the cursor down one row. In soft-wrap mode this is one VISUAL row, so
+    /// a long wrapped line is traversed sub-row by sub-row (the cursor keeps its
+    /// column within the row); otherwise one logical line. The wrap walk uses the
+    /// cached viewport width `vp_tw`.
+    pub fn move_down(&mut self) {
+        if !(self.wrap && self.vp_tw > 0) {
+            self.text.move_down();
+            return;
+        }
+        let tw = self.vp_tw as usize;
+        let (row, col) = self.text.cursor();
+        let sub = col / tw;
+        let vcol = col - sub * tw; // preferred column within the visual row
+        if sub + 1 < wrap::row_rows(&self.text, row, self.vp_tw) {
+            let new = (sub + 1) * tw + vcol;
+            self.text.set_cursor(row, new.min(self.text.char_len(row)));
+        } else if row + 1 < self.text.line_count() {
+            self.text
+                .set_cursor(row + 1, vcol.min(self.text.char_len(row + 1)));
+        }
+    }
+
+    /// Move the cursor up one row (one VISUAL row in soft-wrap mode, else one
+    /// logical line).
+    pub fn move_up(&mut self) {
+        if !(self.wrap && self.vp_tw > 0) {
+            self.text.move_up();
+            return;
+        }
+        let tw = self.vp_tw as usize;
+        let (row, col) = self.text.cursor();
+        let sub = col / tw;
+        let vcol = col - sub * tw;
+        if sub > 0 {
+            self.text.set_cursor(row, (sub - 1) * tw + vcol);
+        } else if row > 0 {
+            let prow = row - 1;
+            let last_sub = wrap::row_rows(&self.text, prow, self.vp_tw) - 1;
+            let new = last_sub * tw + vcol;
+            self.text.set_cursor(prow, new.min(self.text.char_len(prow)));
+        }
     }
 
     /// Dispatch one key by mode.
@@ -448,8 +518,8 @@ impl Editor {
 
             // Navigation.
             KeyCode::Char('h') | KeyCode::Left => self.text.move_left(),
-            KeyCode::Char('j') | KeyCode::Down => self.text.move_down(),
-            KeyCode::Char('k') | KeyCode::Up => self.text.move_up(),
+            KeyCode::Char('j') | KeyCode::Down => self.move_down(),
+            KeyCode::Char('k') | KeyCode::Up => self.move_up(),
             KeyCode::Char('l') | KeyCode::Right => self.text.move_right(),
             KeyCode::Char('0') | KeyCode::Home => self.text.move_home(),
             KeyCode::Char('$') | KeyCode::End => self.text.move_end(),
@@ -499,6 +569,16 @@ impl Editor {
                 self.text.delete_char();
                 self.modified = true;
             }
+            // Helix allows cursor motion in every mode -- arrows (and Home/End/
+            // PageUp/Down) navigate without leaving Insert.
+            KeyCode::Left => self.text.move_left(),
+            KeyCode::Right => self.text.move_right(),
+            KeyCode::Up => self.move_up(),
+            KeyCode::Down => self.move_down(),
+            KeyCode::Home => self.text.move_home(),
+            KeyCode::End => self.text.move_end(),
+            KeyCode::PageUp => self.page(true),
+            KeyCode::PageDown => self.page(false),
             KeyCode::Tab => {
                 // Soft tab: spaces keep the 1-cell-per-char model intact (a
                 // literal tab read from disk still round-trips -- see text.rs).
@@ -540,8 +620,8 @@ impl Editor {
 
             // Navigation extends the selection (the anchor stays put).
             KeyCode::Char('h') | KeyCode::Left => self.text.move_left(),
-            KeyCode::Char('j') | KeyCode::Down => self.text.move_down(),
-            KeyCode::Char('k') | KeyCode::Up => self.text.move_up(),
+            KeyCode::Char('j') | KeyCode::Down => self.move_down(),
+            KeyCode::Char('k') | KeyCode::Up => self.move_up(),
             KeyCode::Char('l') | KeyCode::Right => self.text.move_right(),
             KeyCode::Char('0') | KeyCode::Home => self.text.move_home(),
             KeyCode::Char('$') | KeyCode::End => self.text.move_end(),
@@ -705,9 +785,9 @@ impl Editor {
     fn page(&mut self, up: bool) {
         for _ in 0..PAGE {
             if up {
-                self.text.move_up();
+                self.move_up();
             } else {
-                self.text.move_down();
+                self.move_down();
             }
         }
     }
@@ -1126,5 +1206,52 @@ mod tests {
         assert_eq!(ed.buffer_indicator(), Some("[2/2]".to_string()));
         ed.prev_buffer();
         assert_eq!(ed.buffer_indicator(), Some("[1/2]".to_string()));
+    }
+
+    #[test]
+    fn insert_mode_arrows_navigate_without_leaving_insert() {
+        // A2: Helix-style -- arrows move the cursor in Insert mode.
+        let mut ed = Editor::new(None, "abc\ndef", false);
+        ed.handle_key(ch('i')); // Insert at (0,0)
+        ed.handle_key(code(KeyCode::Right));
+        assert_eq!(ed.text.cursor(), (0, 1));
+        ed.handle_key(code(KeyCode::Down));
+        assert_eq!(ed.text.cursor(), (1, 1));
+        ed.handle_key(code(KeyCode::Home));
+        assert_eq!(ed.text.cursor(), (1, 0));
+        assert_eq!(ed.mode, Mode::Insert); // arrows do not exit Insert
+    }
+
+    #[test]
+    fn wrap_vertical_move_steps_visual_rows() {
+        // A3: in soft-wrap, Down moves one VISUAL row (staying on the long logical
+        // line) before crossing to the next line; Up reverses it.
+        let mut ed = Editor::new(None, "0123456789abcdefghij\nxyz", false); // line 0 = 20 chars
+        ed.toggle_wrap();
+        ed.scroll_to(10, 5); // tw=10 -> line 0 spans 2 visual rows; caches vp_tw
+        assert_eq!(ed.text.cursor(), (0, 0));
+        ed.move_down(); // visual row 1 of line 0 (same logical line)
+        assert_eq!(ed.text.cursor(), (0, 10));
+        ed.move_down(); // now cross to line 1
+        assert_eq!(ed.text.cursor(), (1, 0));
+        ed.move_up(); // back to the last visual row of line 0
+        assert_eq!(ed.text.cursor(), (0, 10));
+    }
+
+    #[test]
+    fn horizontal_scroll_anchor_tracks_the_cursor() {
+        // A1: a long line, cursor past the viewport width -> `left` advances so the
+        // cursor column stays within [left, left+tw).
+        let mut ed = Editor::new(None, "0123456789abcdefghijKLMNOP", false);
+        assert_eq!(ed.left, 0);
+        for _ in 0..15 {
+            ed.text.move_right();
+        }
+        ed.scroll_to(10, 5); // tw=10, cursor at col 15 -> left = 15+1-10 = 6
+        assert_eq!(ed.left, 6);
+        // Move back to the start -> left re-anchors to 0.
+        ed.text.move_home();
+        ed.scroll_to(10, 5);
+        assert_eq!(ed.left, 0);
     }
 }
