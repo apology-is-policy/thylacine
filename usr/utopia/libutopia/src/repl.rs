@@ -51,6 +51,7 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use libthyla_rs::io::Read as IoRead;
 use libthyla_rs::io::Write as IoWrite;
 use libthyla_rs::t_putstr;
 
@@ -72,6 +73,10 @@ pub struct Repl {
     /// no-op until then, so host tests + the bare-spawn boot check (which never
     /// install) keep the inert-Tab behaviour.
     completion_installed: bool,
+    /// #115b: the `~/.ut_history` path once `install_history` has resolved it
+    /// from `$home`. `None` keeps history in-memory only (a bare-spawned `ut`
+    /// with no home, host tests) -- no append happens.
+    history_path: Option<String>,
 }
 
 impl Default for Repl {
@@ -91,6 +96,7 @@ impl Repl {
             editor: LineEditor::new(),
             bin_commands: Vec::new(),
             completion_installed: false,
+            history_path: None,
         }
     }
 
@@ -194,6 +200,78 @@ impl Repl {
             .set_completion_source(Box::new(ShellCompletionSource::new(names)));
     }
 
+    /// #115b: load + enable on-disk command history at `~/.ut_history` (the
+    /// per-user encrypted home, A-5b -- private by construction). Reads any
+    /// existing file into the editor's in-memory history (capped at the
+    /// editor's HISTORY_CAP via `push_history` eviction, newest kept) and
+    /// records the path so subsequent accepted lines are appended. Called
+    /// ON-TARGET after `set_home` (gated on a live console, like
+    /// `install_completion`); a home that is unset or unreadable leaves history
+    /// in-memory only (no path recorded -> no append) and never fails startup.
+    pub fn install_history(&mut self) {
+        let path = match self.history_file_path() {
+            Some(p) => p,
+            None => return,
+        };
+        // Load existing entries (best-effort; an absent file = empty history).
+        if let Ok(mut f) = libthyla_rs::fs::File::open(&path) {
+            let mut text = String::new();
+            if f.read_to_string(&mut text).is_ok() {
+                for line in text.lines() {
+                    if !line.is_empty() {
+                        self.editor.push_history(String::from(line));
+                    }
+                }
+            }
+        }
+        self.history_path = Some(path);
+    }
+
+    /// The history file path (`$home/.ut_history`), or `None` when `$home` is
+    /// unset (a bare-spawned `ut`).
+    fn history_file_path(&self) -> Option<String> {
+        let mut p = self.env.get("home").as_scalar();
+        if p.is_empty() {
+            return None;
+        }
+        if !p.ends_with('/') {
+            p.push('/');
+        }
+        p.push_str(".ut_history");
+        Some(p)
+    }
+
+    /// #115b: append one accepted command line to the history file. Single-line
+    /// commands only -- a multi-line command's embedded newlines would split
+    /// into separate entries on reload (v1.x escapes them). A missing path
+    /// (history disabled / no home) or any write failure is silently ignored:
+    /// history is a convenience, never load-bearing. Append-only, so a torn
+    /// write loses at most the trailing line (the file is never rewritten).
+    fn append_history(&mut self, line: &str) {
+        if line.contains('\n') {
+            return;
+        }
+        let path = match &self.history_path {
+            Some(p) => p,
+            None => return,
+        };
+        if let Ok(mut f) = libthyla_rs::fs::OpenOptions::new()
+            .write(true)
+            .append(true)
+            .create(true)
+            // Owner-only (0600): command history can contain sensitive args
+            // (matches bash's HISTFILE). The encrypted home (A-5b) already
+            // gates access, but a per-file 0600 is the defense-in-depth norm.
+            .mode(0o600)
+            .open(path)
+        {
+            let mut buf = String::with_capacity(line.len() + 1);
+            buf.push_str(line);
+            buf.push('\n');
+            let _ = f.write_all(buf.as_bytes());
+        }
+    }
+
     /// Borrow the evaluator state (tests + callers that inspect `$status`).
     pub fn env(&self) -> &Env {
         &self.env
@@ -263,6 +341,9 @@ impl Repl {
                     self.deliver_notes();
                     if !line.trim().is_empty() {
                         self.editor.push_history(line.clone());
+                        // #115b: persist to ~/.ut_history (no-op until
+                        // install_history; single-line commands only).
+                        self.append_history(&line);
                     }
                     self.run_line(&line, out);
                     // #115a: a `fn` / alias the line just defined should be

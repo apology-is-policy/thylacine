@@ -174,6 +174,9 @@ pub extern "C" fn rs_main() -> i64 {
     // check has no session namespace + exits on the fd-0 read before the loop.
     if io::stdout_is_live() {
         repl.install_completion();
+        // #115b: load + enable ~/.ut_history persistence (after set_home, so
+        // $home resolves the path). Session-only, same gate as completion.
+        repl.install_history();
     }
 
     let mut out = io::stdout();

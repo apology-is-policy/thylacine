@@ -80,6 +80,11 @@ impl Repl {
     /// ON-TARGET (gated on a live console, like open_notes); new() stays
     /// syscall-free so host tests + the bare-spawn boot check pay nothing.
     pub fn install_completion(&mut self);
+
+    /// #115b: load + enable ~/.ut_history persistence (after set_home). Reads
+    /// any existing file into the editor's history; records the path so
+    /// accepted lines append. No-op + in-memory-only when $home is unset.
+    pub fn install_history(&mut self);
 }
 ```
 
@@ -247,6 +252,27 @@ merges that cache with the live builtins + `Env::alias_names()` +
 `install_completion` has run (`completion_installed` gate), so host tests + the
 bare-spawn boot check keep the inert-Tab behaviour. See `92-utopia-line-editor.md`
 "Production source: `ShellCompletionSource`" for the per-context completion logic.
+
+### 3.9 History persistence (#115b)
+
+`install_history` (called once by `ut` after `set_home`, same session-only gate)
+resolves `$home/.ut_history` (`None` when `$home` is unset → in-memory-only),
+reads any existing file via `File::open` + `read_to_string`, and replays its
+non-empty lines through `editor.push_history` (capped at the editor's
+`HISTORY_CAP` by eviction, newest kept). It records the path; `feed` then
+appends each accepted non-empty line via `append_history` —
+`OpenOptions::new().write().append().create().mode(0o600)` + `write_all`. The
+file is **append-only** (never rewritten), so a torn write loses at most the
+trailing line, and **0600** keeps history owner-only (it can carry sensitive
+command args; the encrypted home already gates access — this is
+defense-in-depth). v1.0 persists **single-line commands only** (`append_history`
+skips a line containing `\n`, which would split into separate entries on
+reload); multi-line commands stay in-memory for the session. The file grows
+unbounded (in-memory is capped, the file is not) — a v1.x atomic trim
+(write-temp + rename) bounds it. The cross-session round-trip (type → logout →
+login → Up) is covered by the interactive LS-CI harness (blocked by #105, the
+same posture as the Phase-1 visible-ergonomics); build + boot proves
+`install_history` runs non-crashing against the real `/home/<user>`.
 
 ## 4. Exit semantics
 
