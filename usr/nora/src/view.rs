@@ -321,7 +321,10 @@ fn render_status(ed: &Editor, area: Rect, buf: &mut Buffer) {
         }
     };
     let (r, c) = ed.text.cursor();
-    let right = format!("{}:{} ", r + 1, c + 1);
+    let right = match ed.buffer_indicator() {
+        Some(b) => format!("{} {}:{} ", b, r + 1, c + 1),
+        None => format!("{}:{} ", r + 1, c + 1),
+    };
 
     StatusLine::new()
         .fill(theme::statusbar())
@@ -491,10 +494,11 @@ mod tests {
         ed.handle_key(KeyEvent::char(' ')); // open palette, sel 0
         let mut b = Buffer::empty(big);
         render(&ed, big, &mut b);
-        // Box bottom-aligned (height 5, inner rows 7..10); entry 0 selected.
-        assert_eq!(sym(&b, 1, 7), 't'); // "toggle soft-wrap"
-        assert_eq!(b.get(1, 7).unwrap().style.bg, theme::EMBER); // selected bar
-        assert_eq!(sym(&b, 1, 8), 's'); // "save" (not selected)
-        assert_ne!(b.get(1, 8).unwrap().style.bg, theme::EMBER);
+        // 6 entries -> box height 8, bottom-aligned (by=3), inner rows 4..9;
+        // entry 0 "toggle soft-wrap" selected, entry 1 "next buffer" not.
+        assert_eq!(sym(&b, 1, 4), 't');
+        assert_eq!(b.get(1, 4).unwrap().style.bg, theme::EMBER); // selected bar
+        assert_eq!(sym(&b, 1, 5), 'n'); // "next buffer"
+        assert_ne!(b.get(1, 5).unwrap().style.bg, theme::EMBER);
     }
 }

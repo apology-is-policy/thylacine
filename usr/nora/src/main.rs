@@ -198,10 +198,24 @@ fn handle_request(ed: &mut Editor, req: Request) {
                 None => ed.set_status(String::from("no file name (use :w <name>)")),
             }
         }
-        Request::Open(p) => match read_file(&p) {
-            Ok(c) => ed.load(Some(p), &c),
-            Err(e) => ed.set_status(format!("{}: {}", p, e)),
-        },
+        Request::Open(p) => {
+            // Open in a new buffer (T3). Mirror the launch new-file handling
+            // (#114): an unresolvable path opens an empty buffer (created on
+            // `:w`); a real read error is surfaced, not masked.
+            let content = if !fs::exists(&p) {
+                String::new()
+            } else {
+                match read_file(&p) {
+                    Ok(c) => c,
+                    Err(Error::NotFound) => String::new(),
+                    Err(e) => {
+                        ed.set_status(format!("{}: {}", p, e));
+                        return;
+                    }
+                }
+            };
+            ed.open_buffer(Some(p), &content);
+        }
     }
 }
 

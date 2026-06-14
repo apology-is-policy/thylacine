@@ -42,13 +42,16 @@ enum Class {
     End,
 }
 
+#[derive(Clone)]
 struct Snapshot {
     lines: Vec<String>,
     row: usize,
     col: usize,
 }
 
-/// The editable text buffer.
+/// The editable text buffer. `Clone` parks a backgrounded buffer's full state
+/// (lines + cursor + undo stack) when nora holds multiple open buffers.
+#[derive(Clone)]
 pub struct TextBuffer {
     lines: Vec<String>,
     row: usize,

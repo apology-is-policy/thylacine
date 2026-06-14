@@ -42,7 +42,40 @@ pub enum Request {
     Open(String),
 }
 
-/// The editor state.
+/// A backgrounded buffer's parked state -- the per-buffer half of `Editor`. The
+/// ACTIVE buffer lives in the Editor's own fields (so the per-mode handlers are
+/// unchanged by multi-buffer); a buffer is saved here on switch-away and loaded
+/// back on switch-to.
+#[derive(Clone)]
+struct DocState {
+    text: TextBuffer,
+    filename: Option<String>,
+    readonly: bool,
+    modified: bool,
+    top: usize,
+    top_sub: usize,
+    anchor: Option<Pos>,
+    last_search: String,
+}
+
+impl DocState {
+    fn new(filename: Option<String>, content: &str, readonly: bool) -> Self {
+        DocState {
+            text: TextBuffer::new(content),
+            filename,
+            readonly,
+            modified: false,
+            top: 0,
+            top_sub: 0,
+            anchor: None,
+            last_search: String::new(),
+        }
+    }
+}
+
+/// The editor state. The first block of fields is the ACTIVE buffer (mirrored
+/// into `bufs[active]` on switch-away); `mode`/`wrap`/`register`/`status` etc.
+/// are editor-global (shared across buffers).
 pub struct Editor {
     pub text: TextBuffer,
     pub mode: Mode,
@@ -69,17 +102,23 @@ pub struct Editor {
     last_search: String,
     /// A pending file op for the binary to execute.
     request: Option<Request>,
+    /// All open buffers' parked state. `bufs[active]` mirrors the live fields
+    /// above (refreshed on switch-away); `bufs.len() >= 1` always.
+    bufs: Vec<DocState>,
+    /// Index of the active buffer within `bufs`.
+    active: usize,
 }
 
 impl Editor {
     /// A new editor over `content`. `filename` is the save target (`None` for
     /// an unnamed buffer); `readonly` disables edits (a `nora -R` view).
     pub fn new(filename: Option<String>, content: &str, readonly: bool) -> Self {
-        Editor {
-            text: TextBuffer::new(content),
+        let d = DocState::new(filename, content, readonly);
+        let mut ed = Editor {
+            text: TextBuffer::new(""),
             mode: Mode::Normal,
-            filename,
-            readonly,
+            filename: None,
+            readonly: false,
             modified: false,
             top: 0,
             top_sub: 0,
@@ -90,7 +129,12 @@ impl Editor {
             register: String::new(),
             last_search: String::new(),
             request: None,
-        }
+            bufs: Vec::new(),
+            active: 0,
+        };
+        ed.bufs.push(d.clone());
+        ed.load_active(d);
+        ed
     }
 
     /// The short mode tag for the status line.
@@ -158,16 +202,122 @@ impl Editor {
         self.modified = false;
     }
 
-    /// Replace the buffer with freshly-loaded content (`:e` success).
-    pub fn load(&mut self, path: Option<String>, content: &str) {
-        self.text = TextBuffer::new(content);
-        self.filename = path;
-        self.modified = false;
-        self.top = 0;
-        self.top_sub = 0;
+    // -- multiple buffers (T3) --------------------------------------------
+
+    /// Snapshot the live (active) fields into a `DocState`.
+    fn save_active(&self) -> DocState {
+        DocState {
+            text: self.text.clone(),
+            filename: self.filename.clone(),
+            readonly: self.readonly,
+            modified: self.modified,
+            top: self.top,
+            top_sub: self.top_sub,
+            anchor: self.anchor,
+            last_search: self.last_search.clone(),
+        }
+    }
+
+    /// Load a `DocState` into the live (active) fields.
+    fn load_active(&mut self, d: DocState) {
+        self.text = d.text;
+        self.filename = d.filename;
+        self.readonly = d.readonly;
+        self.modified = d.modified;
+        self.top = d.top;
+        self.top_sub = d.top_sub;
+        self.anchor = d.anchor;
+        self.last_search = d.last_search;
+    }
+
+    /// The number of open buffers.
+    pub fn buffer_count(&self) -> usize {
+        self.bufs.len()
+    }
+
+    /// `[active/count]` when more than one buffer is open (for the status bar).
+    pub fn buffer_indicator(&self) -> Option<String> {
+        if self.bufs.len() > 1 {
+            Some(string_fmt_buffers(self.active + 1, self.bufs.len()))
+        } else {
+            None
+        }
+    }
+
+    /// Switch the active buffer to index `i` (parking the current one). Resets
+    /// to Normal mode for a clean cross-buffer state.
+    fn switch_to(&mut self, i: usize) {
+        if i == self.active || i >= self.bufs.len() {
+            return;
+        }
+        self.bufs[self.active] = self.save_active();
+        let d = self.bufs[i].clone();
+        self.load_active(d);
+        self.active = i;
         self.mode = Mode::Normal;
-        self.anchor = None;
-        self.status = Some("opened".to_string());
+        self.status = self.buffer_indicator();
+    }
+
+    /// Switch to the next / previous open buffer (cyclic). A single buffer is a
+    /// no-op with a hint.
+    pub fn next_buffer(&mut self) {
+        let n = self.bufs.len();
+        if n > 1 {
+            self.switch_to((self.active + 1) % n);
+        } else {
+            self.status = Some("only one buffer".to_string());
+        }
+    }
+
+    pub fn prev_buffer(&mut self) {
+        let n = self.bufs.len();
+        if n > 1 {
+            self.switch_to((self.active + n - 1) % n);
+        } else {
+            self.status = Some("only one buffer".to_string());
+        }
+    }
+
+    /// Open `content` in a buffer (`:e` success). Replaces a lone, pristine,
+    /// unnamed buffer in place (vim-like); otherwise adds a new buffer and makes
+    /// it active.
+    pub fn open_buffer(&mut self, filename: Option<String>, content: &str) {
+        let d = DocState::new(filename, content, false);
+        let pristine = self.bufs.len() == 1
+            && !self.modified
+            && self.filename.is_none()
+            && self.text.content().is_empty();
+        if pristine {
+            self.bufs[0] = d.clone();
+        } else {
+            self.bufs[self.active] = self.save_active();
+            self.bufs.push(d.clone());
+            self.active = self.bufs.len() - 1;
+        }
+        self.load_active(d);
+        self.mode = Mode::Normal;
+        self.status = self.buffer_indicator().or(Some("opened".to_string()));
+    }
+
+    /// Close the active buffer (`:bd`). Refuses to discard unsaved changes
+    /// unless `force`; the last buffer cannot be closed.
+    pub fn close_buffer(&mut self, force: bool) {
+        if self.bufs.len() <= 1 {
+            self.status = Some("only one buffer".to_string());
+            return;
+        }
+        if self.modified && !force {
+            self.status = Some("unsaved changes (:bd! to discard)".to_string());
+            return;
+        }
+        self.bufs.remove(self.active);
+        if self.active >= self.bufs.len() {
+            self.active = self.bufs.len() - 1;
+        }
+        let d = self.bufs[self.active].clone();
+        self.load_active(d);
+        self.mode = Mode::Normal;
+        self.status = self.buffer_indicator();
     }
 
     /// Set the transient status message (the binary reports errors here).
@@ -472,6 +622,9 @@ impl Editor {
                     "soft-wrap: off".to_string()
                 });
             }
+            PaletteAction::NextBuffer => self.next_buffer(),
+            PaletteAction::PrevBuffer => self.prev_buffer(),
+            PaletteAction::CloseBuffer => self.close_buffer(false),
             PaletteAction::Save => {
                 if self.readonly {
                     self.status = Some("read-only".to_string());
@@ -531,6 +684,10 @@ impl Editor {
             }
             "e!" if arg.is_empty() => self.status = Some(":e! needs a filename".to_string()),
             "e!" => self.request = Some(Request::Open(arg.to_string())),
+            "bn" => self.next_buffer(),
+            "bp" => self.prev_buffer(),
+            "bd" => self.close_buffer(false),
+            "bd!" => self.close_buffer(true),
             _ => self.status = Some(string_fmt_unknown(cmd)),
         }
     }
@@ -570,16 +727,31 @@ struct PaletteItem {
 #[derive(Clone, Copy)]
 enum PaletteAction {
     ToggleWrap,
+    NextBuffer,
+    PrevBuffer,
+    CloseBuffer,
     Save,
     Quit,
 }
 
 /// The fixed palette entries (a real menu mechanism; user aliases / a richer set
-/// accrete later -- T3 adds the buffer entries on this list).
+/// accrete later).
 const PALETTE: &[PaletteItem] = &[
     PaletteItem {
         label: "toggle soft-wrap",
         action: PaletteAction::ToggleWrap,
+    },
+    PaletteItem {
+        label: "next buffer",
+        action: PaletteAction::NextBuffer,
+    },
+    PaletteItem {
+        label: "prev buffer",
+        action: PaletteAction::PrevBuffer,
+    },
+    PaletteItem {
+        label: "close buffer",
+        action: PaletteAction::CloseBuffer,
     },
     PaletteItem {
         label: "save",
@@ -620,6 +792,15 @@ fn string_fmt_unknown(cmd: &str) -> String {
 fn string_fmt_not_found(pat: &str) -> String {
     let mut s = String::from("not found: ");
     s.push_str(pat);
+    s
+}
+
+fn string_fmt_buffers(idx: usize, total: usize) -> String {
+    let mut s = String::from("[");
+    s.push_str(&itoa(idx));
+    s.push('/');
+    s.push_str(&itoa(total));
+    s.push(']');
     s
 }
 
@@ -891,5 +1072,59 @@ mod tests {
         ed.text.set_cursor(0, 0);
         ed.scroll_to(10, 5);
         assert_eq!(ed.top_sub, 0);
+    }
+
+    #[test]
+    fn open_buffer_replaces_pristine_then_adds() {
+        let mut ed = Editor::new(None, "", false); // pristine (empty, unnamed)
+        assert_eq!(ed.buffer_count(), 1);
+        ed.open_buffer(Some("a".to_string()), "AAA");
+        assert_eq!(ed.buffer_count(), 1); // replaced in place
+        assert_eq!(ed.text.content(), "AAA");
+        assert_eq!(ed.filename.as_deref(), Some("a"));
+        ed.open_buffer(Some("b".to_string()), "BBB");
+        assert_eq!(ed.buffer_count(), 2); // added (no longer pristine)
+        assert_eq!(ed.text.content(), "BBB");
+    }
+
+    #[test]
+    fn buffer_edits_persist_across_switch() {
+        let mut ed = Editor::new(Some("a".to_string()), "AAA", false);
+        ed.open_buffer(Some("b".to_string()), "BBB"); // active b
+        ed.handle_key(ch('i'));
+        type_str(&mut ed, "Z");
+        ed.handle_key(code(KeyCode::Esc));
+        assert_eq!(ed.text.content(), "ZBBB");
+        ed.prev_buffer(); // -> a
+        assert_eq!(ed.text.content(), "AAA");
+        ed.next_buffer(); // -> b
+        assert_eq!(ed.text.content(), "ZBBB"); // b's edit preserved
+    }
+
+    #[test]
+    fn close_buffer_guards_unsaved_and_removes() {
+        let mut ed = Editor::new(Some("a".to_string()), "AAA", false);
+        ed.open_buffer(Some("b".to_string()), "BBB");
+        ed.handle_key(ch('i'));
+        type_str(&mut ed, "Z");
+        ed.handle_key(code(KeyCode::Esc));
+        assert!(ed.modified);
+        ed.close_buffer(false); // guarded
+        assert_eq!(ed.buffer_count(), 2);
+        ed.close_buffer(true); // forced
+        assert_eq!(ed.buffer_count(), 1);
+        assert_eq!(ed.text.content(), "AAA");
+        ed.close_buffer(true); // last buffer can't close
+        assert_eq!(ed.buffer_count(), 1);
+    }
+
+    #[test]
+    fn buffer_indicator_shows_only_when_multiple() {
+        let mut ed = Editor::new(None, "x", false);
+        assert_eq!(ed.buffer_indicator(), None);
+        ed.open_buffer(Some("b".to_string()), "y");
+        assert_eq!(ed.buffer_indicator(), Some("[2/2]".to_string()));
+        ed.prev_buffer();
+        assert_eq!(ed.buffer_indicator(), Some("[1/2]".to_string()));
     }
 }

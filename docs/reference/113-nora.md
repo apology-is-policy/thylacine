@@ -87,17 +87,29 @@ yank/cut payload, with `'\n'` between lines.
 ```rust
 enum Mode { Normal, Insert, Visual, Command(String), Palette { sel: usize } }
 enum Request { Save(Option<String>), Open(String) }     // file op for the binary
-struct Editor { text, mode, filename, readonly, modified, top, top_sub, wrap, status, quit, ... }
+struct Editor { /* active buffer: */ text, filename, readonly, modified, top, top_sub, anchor, last_search,
+                /* global: */ mode, wrap, register, status, quit, request, bufs: Vec<DocState>, active }
 
 fn new(filename: Option<String>, content: &str, readonly: bool) -> Editor
 fn handle_key(&mut self, key: kaua::KeyEvent)           // the dispatch
 fn take_request(&mut self) -> Option<Request>           // the binary executes it
-fn mark_saved(&mut self, path, bytes) / load(path, content) / set_status(msg)
+fn mark_saved(&mut self, path, bytes) / set_status(msg)
 fn scroll_to(&mut self, tw, height)                     // adjust the anchor to the cursor
 fn toggle_wrap(&mut self)                               // the [Space] palette wrap entry
 fn palette_labels(&self) -> Vec<&str> / palette_sel(&self) -> Option<usize>
+fn open_buffer(&mut self, filename, content)            // :e -> a new buffer (T3)
+fn next_buffer / prev_buffer / close_buffer(force)      // switch / close (T3)
+fn buffer_count(&self) -> usize / buffer_indicator(&self) -> Option<String>
 fn selection(&self) -> Option<(Pos, Pos)>               // visual span (for the view)
 ```
+
+**Multiple buffers (T3):** the ACTIVE buffer lives in the Editor's own fields
+(so the per-mode handlers are unchanged by multi-buffer); each backgrounded
+buffer is parked as a `DocState` in `bufs` and swapped in/out on switch. `:e`
+opens a file in a new buffer (replacing a lone pristine unnamed buffer in place);
+`:bn`/`:bp`/`:bd[!]` and the `[Space]` palette switch / close. `register` (yank)
+and `wrap` are editor-global (cross-buffer); `modified`/`last_search`/scroll are
+per-buffer.
 
 `Mode::Palette { sel }` is the `[Space]` command palette (T2), open over Normal.
 Soft-wrap (`wrap`) scrolls in VISUAL rows: the anchor is `(top, top_sub)` (a
@@ -141,12 +153,13 @@ exact residue UTOPIA-VISUAL.md §8 flags; corrected to Bonfire with T2.)*
 | Insert | printable → insert; Enter → split; Backspace/Delete; Tab → 4 spaces (soft tab); Esc → Normal |
 | Visual | `h j k l 0 $ g G w b` extend the selection; `y` yank; `d`/`x` cut; Esc → cancel |
 | Command | type the line; Enter runs it; Backspace (erasing `:`/`/` exits); Esc → Normal |
-| Palette (`[Space]`) | `j`/`k` + arrows / `Ctrl-n`/`Ctrl-p` move; Enter runs the entry; `Space`/Esc close. Entries: **toggle soft-wrap**, save, quit. |
+| Palette (`[Space]`) | `j`/`k` + arrows / `Ctrl-n`/`Ctrl-p` move; Enter runs the entry; `Space`/Esc close. Entries: **toggle soft-wrap**, next/prev/close buffer, save, quit. |
 
 Ex commands: `:w` / `:w <name>` (save / save-as), `:q` (guarded on unsaved),
-`:q!`, `:wq` / `:wq <name>`, `:e <name>` (guarded), `:e! <name>`. `/<pat>` Enter
-searches forward (wrapping); `n` repeats. `nora -R <file>` opens read-only (a
-viewer): edits are inert and `q`/Esc quit.
+`:q!`, `:wq` / `:wq <name>`, `:e <name>` (opens a new buffer), `:e! <name>`,
+`:bn` / `:bp` (next / prev buffer), `:bd` / `:bd!` (close buffer, guarded /
+forced). `/<pat>` Enter searches forward (wrapping); `n` repeats. `nora -R
+<file>` opens read-only (a viewer): edits are inert and `q`/Esc quit.
 
 ## Implementation notes
 
@@ -200,12 +213,14 @@ client over them.
   motion clamp/wrap, word forward/back (incl. cross-line), range text + delete
   (single + multi line + reversed endpoints), find + wrap, undo + cap, cursor
   clamp.
-- `editor` (20): insert/escape, Enter split, `o` open-below, hjkl nav, `x`+undo,
+- `editor` (24): insert/escape, Enter split, `o` open-below, hjkl nav, `x`+undo,
   `dd`, visual yank/paste + cut, `:w`/`:w name`/`:wq`/`:e` raise the right
   `Request`, `:q` guards unsaved, command backspace exits, `/`+`n` search,
   read-only blocks edits, scroll follows cursor, `Space` opens/Esc closes the
   palette, palette Enter toggles wrap, palette nav reaches quit + guards unsaved,
-  wrap-scroll keeps the cursor on a long line.
+  wrap-scroll keeps the cursor on a long line, open-buffer replaces-pristine /
+  adds, buffer edits persist across switch, close-buffer guards + removes, the
+  buffer indicator shows only when multiple.
 - `view` (8): gutter + text + cursor placement, tilde past end, mode chip + bg,
   command line on the status row, control chars → space, selection paints the
   violet bg, digit widths, soft-wrap splits a long line, the palette overlay
