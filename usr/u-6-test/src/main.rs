@@ -210,6 +210,13 @@ fn flow_script_mode() -> Result<(), i64> {
     if rc != 0 || r2.env().get("b").as_scalar() != "2" {
         return fail("flow 8: a clean script did not evaluate + return 0");
     }
+    // run_script syncs $cwd to the real kernel cwd (so a `#!`-spawned script,
+    // which gets no --home, reports the inherited cwd, not the unset `/`).
+    if let Ok(cwd) = libthyla_rs::env::current_dir() {
+        if r2.env().cwd() != cwd {
+            return fail("flow 8: run_script did not sync $cwd to the kernel cwd");
+        }
+    }
     t_putstr("u-6-test: ut SCRIPT mode (positional + script-mode + exit) OK\n");
     Ok(())
 }

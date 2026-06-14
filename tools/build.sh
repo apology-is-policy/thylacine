@@ -294,6 +294,45 @@ let sourced_var = ok
 fn sourced_fn { true }
 EOF
 
+    # D2 demo: a `#!/bin/ut` field-report script, baked 0755 so a logged-in
+    # user can run it as a bare `fun.ut` (the cpio root binds at /bin post-
+    # pivot). Exercises the shebang + `ut SCRIPT` execution path. The heredoc
+    # is QUOTED so `$cwd` / `$(...)` stay literal for the script to interpret.
+    cat > "$ramfs_src/fun.ut" <<'EOF'
+#!/bin/ut
+# A little Thylacine field report -- a demo of script execution.
+#   fun.ut      (it lives in /bin; runs from anywhere)
+
+echo 'A thylacine field report:'
+date
+
+# Count the stripes on the pelt with a for-loop + arithmetic.
+let stripes = $(seq 1 16)
+let n = 0
+for (s in $stripes) {
+    let n = (( $n + 1 ))
+}
+echo "stripes on the pelt: $n"
+
+# Shout the project creed through a pipe (echo | tr).
+let creed = $(echo the thylacine is real | tr a-z A-Z)
+echo "the creed: $creed"
+
+# Sort the night's quarry by how its name ends, with case.
+let quarry = $(echo wallaby potoroo eucalypt spinifex)
+for (q in $quarry) {
+    case $q {
+        *oo => { echo "  hunt:  $q" }
+        *by => { echo "  hunt:  $q" }
+        *   => { echo "  graze: $q" }
+    }
+}
+
+echo "the lair is at: $cwd"
+echo 'the thylacine yips, and is gone.'
+EOF
+    chmod 0755 "$ramfs_src/fun.ut"
+
     # P4-Ia1: copy any built C-side userspace binaries from build/usr
     # into the cpio root. The list is curated below (not glob) so an
     # accidental CMake byproduct doesn't get shipped. Each binary's

@@ -449,6 +449,15 @@ impl Repl {
     /// else 1). No line editor / prompt / notes loop -- a script reads no fd 0.
     pub fn run_script(&mut self, arg0: &str, args: &[String], src: &str) -> i32 {
         self.env.interactive = false;
+        // Sync `$cwd` to the real (inherited) kernel cwd. A script reads `$cwd`
+        // for its working directory, but unlike a login shell it gets no
+        // `--home` to seed it (a `#!` spawn passes none), so without this it
+        // would report the unset default `/` even though the spawned `ut`
+        // inherited the parent's cwd. This only syncs the shell variable; it
+        // does not chdir.
+        if let Ok(cwd) = libthyla_rs::env::current_dir() {
+            self.env.cwd_set(cwd);
+        }
         self.bind_positionals(arg0, args);
         if let Err(e) = eval_source(&mut self.env, src) {
             let mut msg = String::from("ut: ");
