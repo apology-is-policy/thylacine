@@ -69,7 +69,17 @@ Eight files, one mechanical retarget:
 
       start()'s body  Registers &__thread_list_lock as this Thread's
           clear_child_tid address via SYS_SET_TID_ADDRESS at thread
-          entry. SYS_THREAD_EXIT atomically zeroes that word and torpor-
+          entry, AND captures that syscall's return -- the child's tid --
+          into self->tid before any __tl_lock can run (#111). The parent
+          assigns new->tid only AFTER SYS_THREAD_SPAWN has already made
+          the child runnable, so at -smp>1 the child could otherwise
+          reach __pthread_exit's __tl_lock with new->tid still 0; the
+          recursive fast-path (lock==tid, 0==0 when the lock is free)
+          then skips the acquire, the child unlinks itself holding no
+          lock, and __pthread_exit crashes on self->prev==NULL. Capturing
+          the kernel-authoritative tid restores the CLONE_PARENT_SETTID
+          ordering Linux provides at clone() time. SYS_THREAD_EXIT
+          atomically zeroes that word and torpor-
           wakes UINT32_MAX threads on it, mirroring Linux's
           CLONE_CHILD_CLEARTID applied to the __thread_list_lock
           spinlock. The sched-failure early-exit path (args->control ==
@@ -336,7 +346,7 @@ CLAUDE.md 'Audit-triggering changes'.
  }
  
  void __do_cleanup_push(struct __ptcb *cb)
-@@ -194,13 +200,33 @@
+@@ -194,13 +200,44 @@
  static int start(void *p)
  {
  	struct start_args *args = p;
@@ -354,7 +364,18 @@ CLAUDE.md 'Audit-triggering changes'.
 +	 * change that lands the symbol at a misaligned address would
 +	 * silently disable the clear_child_tid handoff and hang
 +	 * pthread_join. Defense-in-depth crash on negative return. */
-+	if (__syscall(SYS_set_tid_address, &__thread_list_lock) < 0) a_crash();
++	/* #111: capture the kernel-authoritative tid (SYS_SET_TID_ADDRESS returns
++	 * it) into self->tid HERE, before any __tl_lock -- the parent assigns
++	 * new->tid only AFTER SYS_THREAD_SPAWN has already made this child
++	 * runnable, so at -smp>1 the child can reach __pthread_exit's __tl_lock
++	 * with new->tid still 0; __tl_lock's recursive fast-path (lock==tid, with
++	 * 0==0 when the lock is momentarily free) then returns WITHOUT acquiring,
++	 * so the child unlinks itself from the thread list holding no lock ->
++	 * self->prev==NULL crash in __pthread_exit. Restores the
++	 * CLONE_PARENT_SETTID ordering Linux provides at clone() time. */
++	int _pouch_tid = __syscall(SYS_set_tid_address, &__thread_list_lock);
++	if (_pouch_tid < 0) a_crash();
++	__pthread_self()->tid = _pouch_tid;
  	int state = args->control;
  	if (state) {
  		if (a_cas(&args->control, 1, 2)==1)

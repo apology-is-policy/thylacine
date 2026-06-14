@@ -33,12 +33,18 @@ Linux/musl uses `CLONE_CHILD_CLEARTID` to wire the new thread's `&__thread_list_
 
 pouch replicates this exactly, in two steps:
 
-1. `start()` (the new thread's entry trampoline) calls `__syscall(SYS_set_tid_address, &__thread_list_lock)` at thread entry. This registers the shared `__thread_list_lock` word as the new Thread's `clear_child_tid` (kernel side: `t->clear_child_tid` per `81-sys-thread.md`).
+1. `start()` (the new thread's entry trampoline) calls `__syscall(SYS_set_tid_address, &__thread_list_lock)` at thread entry. This registers the shared `__thread_list_lock` word as the new Thread's `clear_child_tid` (kernel side: `t->clear_child_tid` per `81-sys-thread.md`) **and captures the syscall's return — the child's tid — into `__pthread_self()->tid` before any `__tl_lock` can run** (the #111 fix; see "The `new->tid` post-spawn race" below).
 2. `__pthread_exit`'s tail calls `__syscall(SYS_thread_exit)` (no args). The kernel atomically: (a) `uaccess_store_u32(t->clear_child_tid, 0)` — zero the lock word, (b) `sys_torpor_wake_for_proc(p, t->clear_child_tid, UINT32_MAX)` — wake every spinner, (c) marks the Thread `EXITING`, (d) if last live Thread, transitions the Proc to `ZOMBIE` with status 0.
 
 The race-freedom invariant (kernel side, I-9 specialized): the lock-zero + wake pair is a single atomic transition from the spinner's perspective. The spinner's loop is `while ((val = a_cas(&__thread_list_lock, 0, tid))) __wait(&__thread_list_lock, &tl_lock_waiters, val, 0);` — `__wait` checks `*addr == val` AFTER registering the waiter with the kernel, so even if the wake fires between the value-check and the sleep, the value-check observes the new (zero) value and bypasses the sleep. No lost wakeup.
 
 The Linux-equivalent invariant is enforced symmetrically on the pouch side: every non-main thread's exit path passes through `__pthread_exit`, which holds `__thread_list_lock` at SYS_THREAD_EXIT time (acquired via `__tl_lock` just before the linked-list manipulation). The kernel's zero-the-lock action only happens at exit; no other path zeros it.
+
+### The `new->tid` post-spawn race (#111, fixed)
+
+The "holds `__thread_list_lock` at the linked-list manipulation" invariant above depends on `__tl_lock` *actually acquiring* — which depends on the child's tid being valid. The original lifecycle retarget broke this at `-smp > 1`. `__pthread_create` assigns `new->tid = ret` in **userspace, after** `SYS_THREAD_SPAWN` has already made the child runnable — unlike Linux's `clone()`, which writes the child tid (CLONE_PARENT_SETTID) **before** the child runs. So the child could run `start()` → user routine → `__pthread_exit` → `__tl_lock` before the parent's `new->tid = ret` store, reading `new->tid == 0` (zero-filled `MAP_ANON` TLS). `__tl_lock`'s recursive fast-path `if (__thread_list_lock == tid)` with `tid == 0` then returns **without acquiring** whenever the lock is momentarily free — so the child unlinks itself from the thread list holding no lock, races the parent's link, and `__pthread_exit`'s `self->prev->next = self->next` faults on `self->prev == NULL` (a `str` to `0x8`).
+
+Reproduced reliably at `-smp 8` (~50% of boots; 900 clean passes after the fix); absent at `-smp 1` (a true parallel race, not preemptive). It affected **any** multi-threaded pouch program, not just `/pouch-hello-threads`. The fix (step 1 above): `start()` captures `SYS_SET_TID_ADDRESS`'s return — the child's kernel-authoritative tid (the syscall returns the caller's tid, Linux-compatible, per `kernel/syscall.c`) — into `__pthread_self()->tid` before any `__tl_lock` can run, restoring the CLONE_PARENT_SETTID ordering. A defense-in-depth kernel alternative (a real CLONE_PARENT_SETTID write before `ready()`) is recorded but unbuilt — the pouch-side capture is complete for the current code.
 
 ### The sched-failure early-exit path
 
