@@ -131,6 +131,34 @@ pub extern "C" fn rs_main() -> i64 {
         }
     }
 
+    // 8. #115a: the namespace-driven Tab completion source. Command-position
+    //    completion is pure (filters the index); argument-position completion
+    //    reads the LIVE filesystem -- the in-QEMU proof of the read_dir path
+    //    that the host unit tests (libutopia cannot host-test) cannot exercise.
+    {
+        use alloc::string::String;
+        use libutopia::completion::ShellCompletionSource;
+        use libutopia::line_editor::CompletionSource;
+        let cmds: Vec<String> = ["cat", "la", "ls"].iter().map(|s| String::from(*s)).collect();
+        let src = ShellCompletionSource::new(cmds);
+        // Command position: "l" -> the index entries starting "l", each
+        // terminated with a trailing space, in sorted order.
+        let c = src.complete("l", 1);
+        if c.candidates != [String::from("la "), String::from("ls ")] {
+            return fail("command-position completion returned the wrong candidates");
+        }
+        // Argument position over the live root: `ls /<TAB>` must read_dir "/"
+        // and return its entries (bin / srv / proc / ... -- never empty), with
+        // the directory entries terminated by '/'.
+        let c = src.complete("ls /", 4);
+        if c.candidates.is_empty() {
+            return fail("path completion of the root returned no entries");
+        }
+        if !c.candidates.iter().any(|e| e.ends_with('/')) {
+            return fail("path completion did not mark any root entry as a directory");
+        }
+    }
+
     t_putstr("u-repl-test: all OK\n");
     0
 }

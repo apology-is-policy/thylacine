@@ -168,6 +168,14 @@ pub extern "C" fn rs_main() -> i64 {
         repl.set_home(home);
     }
 
+    // #115a: install namespace-driven Tab completion for a real session -- it
+    // scans /bin (the #58 exec namespace) for the external-command set. Gated on
+    // a live console (session-only), like open_notes below: the bare-spawn boot
+    // check has no session namespace + exits on the fd-0 read before the loop.
+    if io::stdout_is_live() {
+        repl.install_completion();
+    }
+
     let mut out = io::stdout();
     // Draw the first prompt (no-op to the UART if fd 1 is absent).
     repl.draw_prompt(&mut out);

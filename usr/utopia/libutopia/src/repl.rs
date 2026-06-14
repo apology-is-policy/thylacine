@@ -47,12 +47,15 @@
 // builtin / spawned child directly; on a real terminal `out` IS fd 1 so the
 // rendering and the eval output interleave correctly.
 
+use alloc::boxed::Box;
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use libthyla_rs::io::Write as IoWrite;
 use libthyla_rs::t_putstr;
 
 use crate::ansi;
+use crate::completion::ShellCompletionSource;
 use crate::eval::{builtin, deliver_pending_notes, eval_source, Env, Value};
 use crate::line_editor::{EditorAction, LineEditor};
 use crate::palette::Role;
@@ -61,6 +64,14 @@ use crate::palette::Role;
 pub struct Repl {
     env: Env,
     editor: LineEditor,
+    /// #115a: the cached `/bin` external-command scan (the #58 exec namespace,
+    /// static for the session). Merged with the live builtins / aliases / funcs
+    /// to form the Tab-completion command index. Empty until `install_completion`.
+    bin_commands: Vec<String>,
+    /// #115a: whether `install_completion` has run. `refresh_command_index` is a
+    /// no-op until then, so host tests + the bare-spawn boot check (which never
+    /// install) keep the inert-Tab behaviour.
+    completion_installed: bool,
 }
 
 impl Default for Repl {
@@ -78,6 +89,8 @@ impl Repl {
         Repl {
             env,
             editor: LineEditor::new(),
+            bin_commands: Vec::new(),
+            completion_installed: false,
         }
     }
 
@@ -131,6 +144,54 @@ impl Repl {
         if libthyla_rs::env::set_current_dir(&path).is_ok() {
             self.env.cwd_set(path);
         }
+    }
+
+    /// #115a: install namespace-driven Tab completion. Scans `/bin` ONCE (the
+    /// #58 exec namespace -- the external-command set, static for a session) and
+    /// builds the initial command index, then installs the production
+    /// `ShellCompletionSource` into the editor. Called by the consumer ON-TARGET
+    /// (gated on a live console, like `open_notes`) -- `new()` stays syscall-free
+    /// so host tests + the bare-spawn boot check pay nothing. A failed `/bin`
+    /// scan degrades to builtins + aliases + funcs only (Tab still completes
+    /// those); it never fails startup. Idempotent (a re-call re-scans).
+    pub fn install_completion(&mut self) {
+        self.bin_commands.clear();
+        if let Ok(rd) = libthyla_rs::fs::read_dir("/bin") {
+            for ent in rd.flatten() {
+                if ent.is_file() {
+                    self.bin_commands.push(ent.into_file_name());
+                }
+            }
+        }
+        self.completion_installed = true;
+        self.refresh_command_index();
+    }
+
+    /// Rebuild the Tab-completion command index (builtins + aliases + funcs +
+    /// the cached `/bin` scan) and re-install it into the editor's completion
+    /// source. Cheap -- no syscall (the `/bin` scan is cached in `bin_commands`),
+    /// just two small map walks + a sort. Run after each accepted line so an
+    /// interactively-defined `fn` / alias becomes completable at the next prompt.
+    /// A no-op until `install_completion` has run.
+    fn refresh_command_index(&mut self) {
+        if !self.completion_installed {
+            return;
+        }
+        let mut names: Vec<String> = Vec::new();
+        for b in builtin::builtin_names() {
+            names.push(String::from(*b));
+        }
+        for a in self.env.alias_names() {
+            names.push(String::from(a));
+        }
+        for f in self.env.fn_names() {
+            names.push(String::from(f));
+        }
+        names.extend(self.bin_commands.iter().cloned());
+        names.sort();
+        names.dedup();
+        self.editor
+            .set_completion_source(Box::new(ShellCompletionSource::new(names)));
     }
 
     /// Borrow the evaluator state (tests + callers that inspect `$status`).
@@ -204,6 +265,10 @@ impl Repl {
                         self.editor.push_history(line.clone());
                     }
                     self.run_line(&line, out);
+                    // #115a: a `fn` / alias the line just defined should be
+                    // completable at the next prompt -- rebuild the index (cheap;
+                    // no-op until completion is installed).
+                    self.refresh_command_index();
                     // `exit` (directly, or via a function / sourced / eval'd
                     // sub-script) sets the exit request; honour it now.
                     if let Some(code) = self.env.exit_requested() {

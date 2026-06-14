@@ -489,6 +489,43 @@ back from the cursor to whitespace or buffer start. Filters its
 candidate list to entries starting with the current word's prefix.
 Preserves source order (does NOT sort).
 
+### Production source: `ShellCompletionSource` (#115a)
+
+`StaticCompletionSource` is the test/bring-up stand-in; the production
+source the shell installs is `libutopia::completion::ShellCompletionSource`
+(`usr/utopia/libutopia/src/completion.rs`). It classifies the token under
+the cursor and completes from one of two namespaces:
+
+- **Command position** (token-0, or the token after a `| ; & { (`
+  operator) with a bare name -> the **command index**: builtins +
+  aliases + functions + the `/bin` scan (the #58 exec namespace, the
+  same set `resolve_command` searches). The index is precomputed by the
+  shell -- `Repl::install_completion` scans `/bin` once at session start
+  (`fs::read_dir`, regular files only), and `Repl::refresh_command_index`
+  re-merges it with the live alias/function tables after every accepted
+  line (so an interactively-defined `fn`/alias becomes completable).
+- **Argument position**, or a command-by-path (a token containing `/`)
+  -> **path completion**: the token is split at its last `/` into a
+  directory prefix + a file prefix; `fs::read_dir` reads the directory
+  live and offers the entries whose name extends the prefix. A relative
+  directory resolves against the per-Proc cwd (LS-4 `SYS_CHDIR`, which
+  `cd` keeps synced), so `read_dir(".")` is correct. `cd <TAB>`
+  restricts to directories.
+
+Each candidate carries a terminator -- a trailing space for a command or
+file, a trailing `/` for a directory (so a directory can be drilled with
+a second Tab) -- the readline convention. The terminator never perturbs
+the engine's longest-common-prefix math because it always falls AFTER
+the first differing character of two distinct candidates (two entries
+cannot share a name). `MAX_CANDIDATES = 256` caps each result; a
+`read_dir` failure yields no candidates (Tab is then inert, never an
+error). The command-position classification + path-split are pure
+(unit-tested in `completion.rs`); only the directory read is a syscall,
+taken solely on Tab. Per UTOPIA-SHELL-DESIGN.md section 11.2 the source
+is pure userspace logic over the audited `fs::read_dir` (RW-8); the
+audit-bearing raw-mode editor + consctl surface it rides was discharged
+at the Kaua T-4 audit (#101).
+
 ### Per-buffer cap
 
 `MAX_BUFFER_LEN = 64 * 1024` -- a defensive cap so a runaway paste

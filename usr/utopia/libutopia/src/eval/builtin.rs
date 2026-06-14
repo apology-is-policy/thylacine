@@ -101,25 +101,22 @@ use super::value::Value;
 /// Whether `name` is a built-in the shell intercepts (the implemented
 /// set). Used by `type`/`whence` and by the redirect/pipeline guards
 /// in `stmt.rs`.
+/// The built-in command names -- the single source of truth that `is_builtin`
+/// tests membership of and that the #115a Tab-completion / coloring command
+/// index enumerates (`builtin_names`). Keep aligned with `try_builtin`'s
+/// dispatch arms.
+pub const BUILTIN_NAMES: &[&str] = &[
+    "cd", "pwd", "exit", "true", "false", "unset", "eval", "source", ".", "type",
+    "whence", "jobs", "fg", "bg", "wait", "kill",
+];
+
+/// The built-in names, for the #115a completion command index.
+pub fn builtin_names() -> &'static [&'static str] {
+    BUILTIN_NAMES
+}
+
 pub fn is_builtin(name: &str) -> bool {
-    matches!(
-        name,
-        "cd" | "pwd"
-            | "exit"
-            | "true"
-            | "false"
-            | "unset"
-            | "eval"
-            | "source"
-            | "."
-            | "type"
-            | "whence"
-            | "jobs"
-            | "fg"
-            | "bg"
-            | "wait"
-            | "kill"
-    )
+    BUILTIN_NAMES.contains(&name)
 }
 
 /// Try to run argv[0] as a built-in. Returns `Some(result)` if argv[0]

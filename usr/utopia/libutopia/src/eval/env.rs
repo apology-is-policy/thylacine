@@ -385,6 +385,16 @@ impl Env {
         self.fns.contains_key(name)
     }
 
+    /// The defined function names (#115a completion / coloring command index).
+    pub fn fn_names(&self) -> Vec<&str> {
+        self.fns.keys().map(String::as_str).collect()
+    }
+
+    /// The defined alias names (#115a completion / coloring command index).
+    pub fn alias_names(&self) -> Vec<&str> {
+        self.aliases.keys().map(String::as_str).collect()
+    }
+
     // === Note handler registry ===
 
     /// Register a `on note 'name' { body }` handler. Last registration

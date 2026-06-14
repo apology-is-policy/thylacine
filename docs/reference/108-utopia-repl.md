@@ -74,6 +74,12 @@ impl Repl {
     /// The exit code when the input stream ends (EOF) without an explicit
     /// `exit`: the last command's $status.
     pub fn exit_code(&self) -> i32;
+
+    /// #115a: install namespace-driven Tab completion. Scans /bin once and
+    /// installs the production ShellCompletionSource into the editor. Called
+    /// ON-TARGET (gated on a live console, like open_notes); new() stays
+    /// syscall-free so host tests + the bare-spawn boot check pay nothing.
+    pub fn install_completion(&mut self);
 }
 ```
 
@@ -226,6 +232,21 @@ an interruptible foreground wait (a handler-bearing note that arrived while a
 foreground command ran — `94-utopia-eval.md` §9.7) — drained FIFO, before the
 live queue. So a `pipe`/user note arriving mid-command runs its handler at this
 prompt-cycle sync point, never mid-command.
+
+### 3.8 Tab completion install (#115a)
+
+`install_completion` (called once by `ut` after `set_home`, gated on
+`io::stdout_is_live()` like `open_notes`) scans `/bin` into the cached
+`bin_commands` (regular files only — the #58 exec-namespace external command
+set, static for the session) and calls `refresh_command_index`. The latter
+merges that cache with the live builtins + `Env::alias_names()` +
+`Env::fn_names()` into a sorted, deduped command index and installs a fresh
+`completion::ShellCompletionSource` into the editor. `feed` re-runs
+`refresh_command_index` after every accepted line so an interactively-defined
+`fn`/alias is completable at the next prompt; it is a no-op until
+`install_completion` has run (`completion_installed` gate), so host tests + the
+bare-spawn boot check keep the inert-Tab behaviour. See `92-utopia-line-editor.md`
+"Production source: `ShellCompletionSource`" for the per-context completion logic.
 
 ## 4. Exit semantics
 
