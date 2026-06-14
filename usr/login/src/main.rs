@@ -1109,6 +1109,15 @@ pub extern "C" fn rs_main() -> i64 {
         .stdin(Stdio::Inherit)
         .stdout(Stdio::Inherit)
         .stderr(Stdio::Inherit);
+    // #113: tell the shell its home (there is no kernel envp for $HOME). The
+    // shell sets $home -- which `cd` with no argument and the prompt's ~ resolve
+    // -- and chdirs into /home/<user> at startup, the same path bound above.
+    let mut home_path: Vec<u8> = Vec::with_capacity(6 + user.len());
+    home_path.extend_from_slice(b"/home/");
+    home_path.extend_from_slice(&user);
+    if let Ok(h) = core::str::from_utf8(&home_path) {
+        shell_cmd.arg("--home").arg(h);
+    }
     // #94-B-b: forward the inherited /dev/consctl fd to the session shell so the
     // shell -- not login -- owns the console line discipline (the controlling-
     // terminal termios) for the session. It lands at the child's fd 3 (the first

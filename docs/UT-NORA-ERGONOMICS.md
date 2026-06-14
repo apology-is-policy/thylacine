@@ -1,6 +1,12 @@
 # UT + Nora ergonomics arc — "from works to feels-pro"
 
-**Status: DESIGN (intent), user-approved 2026-06-14, for execution by a subsequent session.** No code lands with this doc (the design-conversation → scripture-commit pattern, CLAUDE.md). It references + extends the canonical scripture: `docs/UTOPIA-SHELL-DESIGN.md` (the shell), `docs/KAUA.md` + `docs/reference/112-kaua.md` (the console-TUI substrate), `docs/reference/113-nora.md` (the editor), `docs/LIFE-SUPPORT.md` (LS-4 per-Proc cwd, LS-8 termios/consctl).
+**Status: DESIGN (intent), user-approved 2026-06-14. Phase 1 LANDED 2026-06-14; Phases 2-3 pending.** It references + extends the canonical scripture: `docs/UTOPIA-SHELL-DESIGN.md` (the shell), `docs/KAUA.md` + `docs/reference/112-kaua.md` (the console-TUI substrate), `docs/reference/113-nora.md` (the editor), `docs/LIFE-SUPPORT.md` (LS-4 per-Proc cwd, LS-8 termios/consctl).
+
+## Execution status
+
+- **Phase 1 — LANDED (2026-06-14):** #113 (`cd`→`$home` + ut-starts-in-home via login `--home`), #114 (nora open-missing→new buffer, via a `fs::exists` precheck), #116 (the `Env` alias table + `la`/`ll`, folded into `evaluate_argv` for every command position), #118 (the `~`-abbreviated prompt, reusing `path::abbreviate_home`). Two design-doc assumptions were already true in the tree (the prompt was cwd-aware; nora had the `NotFound`→new-buffer arm but the kernel's flat `-1` never triggered it — the precheck is what makes it real). Verified: device userspace build clean, kernel suite 880/880, boot OK, login→ut(`--home`) non-interactive E2E clean, eval-path probes (u-builtin/glob/6/redir-test) all status=0. Pure userspace (kernel byte-identical → no SMP gate / formal audit, the U-6g/Kaua precedent). `tools/interactive/ergo-1.exp` is the standing LS-CI regression (blocked today by the pre-existing #105 HVF-PTY-exit-before-login, proven environmental by the test.sh contrast). ut → `v0.9-dev`.
+- **Phase 2 — pending:** #115 (the Kaua `LineEditor` keystone). NOTE: `usr/utopia/libutopia/src/line_editor.rs` + `palette.rs` already exist and back the current prompt — the keystone is to grow the raw-mode editor into the completion/history/Ctrl-R/coloring host, not to build it from zero. Re-survey before starting.
+- **Phase 3 — pending:** #117 (ANSI size handshake), #119 (nora runtime soft-wrap), #120 (nora multi-buffer).
 
 ## 0. Why
 

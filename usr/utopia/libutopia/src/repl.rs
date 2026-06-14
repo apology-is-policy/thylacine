@@ -53,7 +53,7 @@ use libthyla_rs::io::Write as IoWrite;
 use libthyla_rs::t_putstr;
 
 use crate::ansi;
-use crate::eval::{builtin, deliver_pending_notes, eval_source, Env};
+use crate::eval::{builtin, deliver_pending_notes, eval_source, Env, Value};
 use crate::line_editor::{EditorAction, LineEditor};
 use crate::palette::Role;
 
@@ -118,6 +118,21 @@ impl Repl {
         }
     }
 
+    /// #113: record the session user's home directory (login forwards it via
+    /// `--home <path>`, since there is no kernel envp). Sets `$home` -- which
+    /// `cd` with no argument resolves to, and the prompt abbreviates to `~` --
+    /// and chdirs into it so a session `ut` starts in the user's home, syncing
+    /// `$cwd` to the kernel cwd on success. A home that cannot be entered
+    /// (absent / no search permission) leaves `ut` at `/` rather than failing
+    /// startup; a bare-spawned `ut` (the boot check) is given no `--home` and
+    /// never calls this, so it runs unchanged at `/`.
+    pub fn set_home(&mut self, path: String) {
+        self.env.assign("home", Value::scalar(path.clone()));
+        if libthyla_rs::env::set_current_dir(&path).is_ok() {
+            self.env.cwd_set(path);
+        }
+    }
+
     /// Borrow the evaluator state (tests + callers that inspect `$status`).
     pub fn env(&self) -> &Env {
         &self.env
@@ -141,7 +156,12 @@ impl Repl {
     fn prompt(&self) -> String {
         let cwd = self.env.cwd();
         let cwd = if cwd.is_empty() { "/" } else { cwd };
-        let mut p = ansi::fg(Role::Path, cwd);
+        // #118: abbreviate a leading $home to `~` (the canonical Pale Fire
+        // display, UTOPIA-VISUAL.md 3.1). `$home` is empty for a bare-spawned
+        // `ut` (no `--home`), where abbreviate_home returns the cwd unchanged.
+        let home = self.env.get("home").as_scalar();
+        let shown = crate::path::abbreviate_home(cwd, &home);
+        let mut p = ansi::fg(Role::Path, &shown);
         p.push_str(&ansi::fg(Role::Glyph, " \u{22a2} ")); // RIGHT TACK
         p
     }
@@ -455,6 +475,29 @@ mod tests {
         let (repl, exit, _) = drive(&[b")\n", b"let recovered = yes\n"]);
         assert_eq!(exit, None);
         assert_eq!(repl.env().get("recovered").as_scalar(), "yes");
+    }
+
+    #[test]
+    fn prompt_abbreviates_home_to_tilde() {
+        // #118: with $home set, the prompt's path segment renders ~-relative
+        // (the Pale Fire display, UTOPIA-VISUAL.md 3.1), not the literal cwd.
+        let mut repl = Repl::new();
+        repl.env_mut()
+            .assign("home", Value::scalar(String::from("/home/cora")));
+        repl.env_mut().cwd_set("/home/cora/src");
+        let p = repl.prompt();
+        assert!(p.contains("~/src"), "prompt should abbreviate $home: {:?}", p);
+        assert!(!p.contains("/home/cora/src"));
+    }
+
+    #[test]
+    fn prompt_without_home_shows_cwd() {
+        // A bare-spawned ut has no $home: the cwd renders verbatim (no ~).
+        let mut repl = Repl::new();
+        repl.env_mut().cwd_set("/etc");
+        let p = repl.prompt();
+        assert!(p.contains("/etc"));
+        assert!(!p.contains('~'));
     }
 
     // LS-8c: `on_notes_ready` is the idle-prompt wake of the multi-fd poll loop.

@@ -1,0 +1,48 @@
+#!/usr/bin/expect -f
+# tools/interactive/ergo-1.exp -- Phase-1 ut ergonomics over a real PTY.
+#
+# Proves the Phase-1 ergonomics quick-wins resolve from the session shell:
+#   #113  ut starts in the user's home -- `pwd` right after login prints
+#         "/home/michael" (login forwards --home; ut chdirs into it). The prompt
+#         itself shows "~" (#118), so "/home/michael" appears ONLY in pwd OUTPUT.
+#   #116  hardwired aliases -- `type la` reports it is aliased to `ls -la`, and
+#         running `la` in / actually executes `ls -la` (the listing shows the
+#         "srv" mount entry). The expansion target ("ls -la") and the listing
+#         ("srv") are OUTPUT and cannot appear in the typed line.
+#   #113  `cd` with no argument returns to $home -- after `cd /`, a bare `cd`
+#         then `pwd` prints "/home/michael" again (not "/").
+#
+# Honors the three LS-CI portability facts (lib.exp): run under script(1), global
+# spawn_id (lc_boot), match OUTPUT not typed input.
+
+source [file join [file dirname [info script]] lib.exp]
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# #113: a session ut starts in the user's home. pwd prints the literal cwd
+# (/home/michael); the prompt shows the ~-abbreviation, so this token is
+# unambiguously pwd's output.
+lc_run_expect "pwd" "/home/michael"
+lc_pass "ergo-1(a): ut starts in the user's home (#113)"
+
+# #116: the hardwired `la` alias resolves to `ls -la` (the alias table). `type`
+# reports the expansion; "ls -la" is output, never the typed "type la".
+lc_run_expect "type la" "ls -la"
+lc_pass "ergo-1(b): `la` is aliased to `ls -la` (#116)"
+
+# #116: `la` actually executes `ls -la`. In / the listing includes the "srv"
+# mount entry -- proof the alias rewrote argv and ran ls, not a no-op.
+lc_send "cd /"
+lc_run_expect "la" "srv"
+lc_pass "ergo-1(c): `la` executes ls in the cwd (#116)"
+
+# #113: `cd` with no argument returns to $home. We are in / from the step above;
+# a bare `cd` then `pwd` prints the home path again.
+lc_send "cd"
+lc_run_expect "pwd" "/home/michael"
+lc_pass "ergo-1(d): bare `cd` returns to \$home (#113)"
+
+lc_quit
+lc_pass "LS-CI ergo-1: ut Phase-1 ergonomics (home + aliases) verified"
+exit 0

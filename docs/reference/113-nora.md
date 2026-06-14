@@ -201,9 +201,14 @@ open / edit / `:w` / `cat`).
 
 ## Error paths
 
-- Initial file: `NotFound` → start empty (a new file; `:w` creates it); any
-  other read error → message to the cooked console + exit 1 (before the screen
-  is touched). Non-UTF-8 or `> 2 MiB` → reported, never partially loaded.
+- Initial file: an absent path → start empty (a new file; `:w` creates it); a
+  path that resolves but fails to read → message to the cooked console + exit 1
+  (before the screen is touched). "Absent" is decided by a `fs::exists` (stat)
+  precheck, NOT the open errno (#114): the kernel returns a flat `-1` (→ `Io`,
+  not `NotFound`) for a missing open today (#102, gated on the #20 errno
+  re-vote), so a stat is what distinguishes absent from a real read error.
+  Until #102, an existing-but-unstattable path is the interim conflation (opens
+  as a new buffer). Non-UTF-8 or `> 2 MiB` → reported, never partially loaded.
 - `:w` with no filename → status `no file name (use :w <name>)`. A write error →
   the kernel errno on the status line; the editor stays open (no data lost).
 - `:e` of a missing/unreadable file → status with the errno; the current buffer

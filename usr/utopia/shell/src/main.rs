@@ -51,12 +51,11 @@ use libutopia::{ansi, palette, GLYPH};
 static GLOBAL_ALLOCATOR: ThylaAlloc = ThylaAlloc;
 
 /// The current `ut` version. Bumped at every U-* chunk that expands the
-/// shell's surface. `0.8-dev` == LS-8c: the multi-fd poll loop -- the shell
-/// polls /dev/cons (made pollable by LS-8a) AND its own note fd together, so a
-/// background job finishing or a Ctrl-C pressed while idle at the prompt is
-/// serviced asynchronously (`[N]+ Done` mid-idle; reactive line-cancel
-/// mid-edit) instead of waiting for the next Enter.
-const UT_VERSION: &str = "0.8-dev";
+/// shell's surface. `0.9-dev` == the Phase-1 ergonomics: the session shell
+/// starts in the user's home (`--home`), `cd` with no argument and the
+/// `~`-abbreviated prompt resolve `$home`, and the `la`/`ll` aliases expand in
+/// command position. (0.8-dev was LS-8c: the multi-fd poll loop.)
+const UT_VERSION: &str = "0.9-dev";
 
 /// Emit the Pale Fire version banner. Three composed segments per
 /// UTOPIA-VISUAL.md section 3: the glyph-orange right-tack, white version
@@ -95,6 +94,23 @@ fn parse_consctl_fd() -> i64 {
         }
     }
     -1
+}
+
+/// #113: parse "--home PATH" from argv -> the session user's home directory, or
+/// None if absent. login forwards it (`--home /home/<user>`) because there is no
+/// kernel envp to carry $HOME; a bare-spawned `ut` (the boot check) is given no
+/// such arg -> None -> the shell runs at "/" unchanged.
+fn parse_home_arg() -> Option<String> {
+    let mut it = env::args().operands();
+    while let Some(a) = it.next() {
+        if a == b"--home" {
+            return it
+                .next()
+                .and_then(|p| core::str::from_utf8(p).ok())
+                .map(String::from);
+        }
+    }
+    None
 }
 
 fn parse_u64(s: &[u8]) -> Option<u64> {
@@ -142,6 +158,14 @@ pub extern "C" fn rs_main() -> i64 {
         } else {
             t_putstr("ut: consctl unavailable (mode-set rejected)\n");
         }
+    }
+
+    // #113: a session ut learns its home from login (--home <path>) -- set $home
+    // and chdir into it, so the shell starts in the user's home and the first
+    // prompt below already shows ~ (a bare-spawned ut gets no --home: skipped,
+    // runs at /). Before draw_prompt so the initial prompt reflects the home.
+    if let Some(home) = parse_home_arg() {
+        repl.set_home(home);
     }
 
     let mut out = io::stdout();

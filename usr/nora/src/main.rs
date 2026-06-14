@@ -28,7 +28,7 @@ use alloc::string::String;
 use libthyla_rs::alloc::ThylaAlloc;
 use libthyla_rs::env;
 use libthyla_rs::err::{Error, Result};
-use libthyla_rs::fs::File;
+use libthyla_rs::fs::{self, File};
 use libthyla_rs::io::{slurp_capped, Write};
 use libthyla_rs::poll::PollTimeout;
 use libthyla_rs::{t_fsync, t_putstr};
@@ -58,9 +58,21 @@ pub extern "C" fn rs_main() -> i64 {
     // Load the initial buffer. A named-but-absent file starts empty -- `:w`
     // creates it (the new-file case); any other read error aborts before we
     // touch the screen, so the message reaches the cooked console.
+    //
+    // #114: the kernel returns a flat -1 for a missing open today (-> Error::Io,
+    // NOT NotFound; the clean -T_E_NOENT errno is #102, gated on the #20 errno
+    // re-vote), so the NotFound arm below cannot fire for "absent" yet. A stat
+    // precheck (fs::exists) is what actually distinguishes absent from a genuine
+    // read error: an unresolvable path is the new-file case; a path that resolves
+    // but fails to read is a real error worth surfacing (not silently masked as
+    // an empty new buffer that would overwrite on save). The interim conflation
+    // of "absent" with "exists-but-unstattable" is the documented #102 gap.
     let content = match &filename {
+        Some(p) if !fs::exists(p) => String::new(),
         Some(p) => match read_file(p) {
             Ok(c) => c,
+            // #102 forward-compat + the stat/open TOCTOU (deleted between the
+            // precheck and the open): treat a clean NotFound as the new file too.
             Err(Error::NotFound) => String::new(),
             Err(e) => {
                 t_putstr(&format!("nora: {}: {}\n", p, e));

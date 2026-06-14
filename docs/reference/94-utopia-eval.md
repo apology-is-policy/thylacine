@@ -143,6 +143,12 @@ Dedicated accessors so that command-exit handling is a single point of contact r
 
 - `Env::exit_requested() -> Option<i32>` / `request_exit(code)`: the `exit` builtin's pending-exit one-shot. `eval_block` short-circuits the whole statement stack to `Return` once it is set (U-6e-a; §9 of `eval::builtin`).
 
+### 4.5 Command aliases (Phase-1 ergonomics)
+
+`Env` carries an `aliases: BTreeMap<String, Vec<String>>` table, seeded at construction with the hardwired `la` → `ls -la` and `ll` → `ls -l` (#116). It is a real mechanism, not a special-case: a future `alias`/`unalias` builtin (and a `~/.utrc`) mutate it via `alias_set`. `Env::expand_alias(argv)` splices the expansion in for `argv[0]` (operands preserved), unchanged when `argv[0]` is not an alias. It is folded into `evaluate_argv` — the single command-argv builder shared by *every* command position (bare, redirect, pipeline element, background) — so aliases work wherever a command runs, not just at the bare prompt. One pass (the baked set targets `ls`, itself not an alias); the result then flows through the caller's `fn → builtin → external` resolution, so an alias expands *before* function/builtin lookup (bash precedence). Because it keys on the resolved `argv[0]`, a `$var`/glob that yields an alias name also expands (benign; the literal-first-word refinement lands with the `alias` builtin). `type`/`whence` reports an alias as `<name> is aliased to \`...\``.
+
+`$home` is an ordinary global binding (not a special variable) set by `Repl::set_home` from login's `--home` (#113); `cd` with no argument resolves to it (falling back to `/`), and the prompt abbreviates a leading `$home` to `~` (reference `108`, §3.4).
+
 ---
 
 ## 5. `eval_expr` — the recursive walker

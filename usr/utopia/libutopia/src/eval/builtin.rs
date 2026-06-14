@@ -64,8 +64,12 @@
 //   set / export        -- envp passing to children does not exist
 //                          (SYS_SPAWN carries argv only); export is
 //                          meaningless until it does.
-//   alias / unalias     -- needs an alias table + pre-dispatch
-//                          expansion (a later U-6 sub-chunk).
+//   alias / unalias     -- the alias TABLE + pre-dispatch expansion now
+//                          exist (Env::aliases, seeded `la`/`ll`; expanded
+//                          in eval_command). The `alias`/`unalias` BUILTINS
+//                          that let a user define their own (+ a `~/.utrc`
+//                          to seed them, + recursive-expansion loop guards)
+//                          are the remaining later sub-chunk.
 //   read                -- needs a terminal-backed fd 0 (U-6g/PTY).
 //   history             -- needs the line editor's history (U-6g).
 //   note                -- `note send/list/wait`, the richer notes argv
@@ -370,7 +374,9 @@ fn bi_source(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
 fn bi_type(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
     for name in args {
         let mut line = String::new();
-        if is_builtin(name) {
+        if let Some(exp) = env.alias_lookup(name) {
+            let _ = write!(&mut line, "{} is aliased to `{}`\n", name, exp.join(" "));
+        } else if is_builtin(name) {
             let _ = write!(&mut line, "{} is a shell builtin\n", name);
         } else if env.fn_defined(name) {
             let _ = write!(&mut line, "{} is a function\n", name);

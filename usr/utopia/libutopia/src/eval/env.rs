@@ -192,6 +192,23 @@ pub struct Env {
     /// shell to the prompt. The REPL clears it (and sets `$status = 130`)
     /// once the command has unwound.
     interrupt_pending: bool,
+    /// Command aliases: argv[0] -> its expansion tokens. The pre-dispatch step
+    /// in `eval_command` splices the expansion in for argv[0] BEFORE the
+    /// fn -> builtin -> external resolution (rc has no aliases; ut bakes the
+    /// `la`/`ll` convenience set). A real table, not a special-case: the future
+    /// `alias`/`unalias` builtins mutate it, and a `~/.utrc` seeds it.
+    aliases: BTreeMap<String, Vec<String>>,
+}
+
+/// The hardwired alias set every shell starts with (Phase-1 ergonomics). `la`
+/// and `ll` are the ubiquitous `ls` shortcuts; both flags (`-l`/`-a`) the `ls`
+/// coreutil already supports, so no `ls` change is needed. Seeded into every
+/// `Env` (including subshells) so the shell's baked config is uniform.
+fn default_aliases() -> BTreeMap<String, Vec<String>> {
+    let mut m = BTreeMap::new();
+    m.insert("la".to_string(), vec!["ls".to_string(), "-la".to_string()]);
+    m.insert("ll".to_string(), vec!["ls".to_string(), "-l".to_string()]);
+    m
 }
 
 /// Maximum eval-stack recursion depth (function calls / command-substitution
@@ -226,6 +243,7 @@ impl Env {
             deferred_notes: Vec::new(),
             eval_depth: Cell::new(0),
             interrupt_pending: false,
+            aliases: default_aliases(),
         }
     }
 
@@ -554,6 +572,39 @@ impl Env {
         core::mem::replace(&mut self.interrupt_pending, false)
     }
 
+    // === Command aliases (Phase-1 ergonomics) ===
+
+    /// Look up `name`'s alias expansion. `None` if `name` is not an alias.
+    /// The dispatch step (`expand_alias`) and `type`/`whence` consult it.
+    pub fn alias_lookup(&self, name: &str) -> Option<&[String]> {
+        self.aliases.get(name).map(Vec::as_slice)
+    }
+
+    /// Define / replace an alias (the future `alias` builtin; the `la`/`ll`
+    /// defaults are seeded at construction).
+    pub fn alias_set(&mut self, name: impl Into<String>, expansion: Vec<String>) {
+        self.aliases.insert(name.into(), expansion);
+    }
+
+    /// Expand argv[0] through the alias table -- the pre-dispatch step. Returns
+    /// argv with the alias's tokens spliced in for argv[0] (operands preserved),
+    /// unchanged when argv[0] is not an alias or argv is empty. ONE pass: the
+    /// baked `la`/`ll` target `ls` (not itself an alias), so a single
+    /// substitution fully resolves; recursive alias-of-alias -- and its loop
+    /// hazard -- lands with the `alias` builtin.
+    pub fn expand_alias(&self, argv: Vec<String>) -> Vec<String> {
+        if argv.is_empty() {
+            return argv;
+        }
+        let expansion = match self.aliases.get(&argv[0]) {
+            Some(e) => e.clone(),
+            None => return argv,
+        };
+        let mut out = expansion;
+        out.extend_from_slice(&argv[1..]);
+        out
+    }
+
     // === Background jobs (U-7a) ===
 
     /// Borrow the background-job table (the `jobs` builtin + the reaper's
@@ -572,5 +623,66 @@ impl Env {
 impl Default for Env {
     fn default() -> Self {
         Env::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_aliases_seeded() {
+        let env = Env::new();
+        assert_eq!(
+            env.alias_lookup("la"),
+            Some(&[String::from("ls"), String::from("-la")][..])
+        );
+        assert_eq!(
+            env.alias_lookup("ll"),
+            Some(&[String::from("ls"), String::from("-l")][..])
+        );
+        assert_eq!(env.alias_lookup("ls"), None);
+    }
+
+    #[test]
+    fn expand_alias_splices_operands() {
+        let env = Env::new();
+        let argv = vec![
+            String::from("la"),
+            String::from("foo"),
+            String::from("bar"),
+        ];
+        assert_eq!(
+            env.expand_alias(argv),
+            vec![
+                String::from("ls"),
+                String::from("-la"),
+                String::from("foo"),
+                String::from("bar"),
+            ]
+        );
+    }
+
+    #[test]
+    fn expand_alias_passthrough_for_non_alias() {
+        let env = Env::new();
+        let argv = vec![String::from("echo"), String::from("hi")];
+        assert_eq!(env.expand_alias(argv.clone()), argv);
+    }
+
+    #[test]
+    fn expand_alias_empty_is_noop() {
+        let env = Env::new();
+        assert!(env.expand_alias(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn alias_set_then_lookup() {
+        let mut env = Env::new();
+        env.alias_set("g", vec![String::from("grep"), String::from("-n")]);
+        assert_eq!(
+            env.alias_lookup("g"),
+            Some(&[String::from("grep"), String::from("-n")][..])
+        );
     }
 }

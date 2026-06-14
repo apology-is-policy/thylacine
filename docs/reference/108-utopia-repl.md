@@ -155,10 +155,21 @@ the fresh prompt).
 
 `Repl::prompt()` builds the default prompt each call from `env.cwd()`:
 path-coloured cwd + glyph-orange ` ⊢ ` (the §11.1 default `prompt` function's
-output shape). `render` strips the SGR escapes for width
-(`ansi::visible_width`), so the colour does not disturb cursor positioning.
-Capturing the user's own `prompt` shell function's stdout is deferred to a
-later chunk (it needs rc loading + function-output capture).
+output shape). The cwd segment is HOME-abbreviated to `~`/`~/...` via
+`path::abbreviate_home(cwd, $home)` (#118) — so `/home/cora/src` renders
+`~/src`; an empty `$home` (a bare-spawned `ut`) leaves the cwd verbatim.
+`render` strips the SGR escapes for width (`ansi::visible_width`), so the
+colour does not disturb cursor positioning. Capturing the user's own `prompt`
+shell function's stdout is deferred to a later chunk (it needs rc loading +
+function-output capture).
+
+`$home` itself is established by `Repl::set_home(path)` (#113): a session `ut`
+learns its home from login's `--home <path>` argument (there is no kernel
+envp), sets `$home` (which `cd` with no argument resolves to, and the prompt
+abbreviates), and `chdir`s into it so the shell starts in the user's home,
+syncing `$cwd` on success. A home that cannot be entered leaves `ut` at `/`
+rather than failing startup; a bare-spawned `ut` gets no `--home` and runs at
+`/` unchanged.
 
 ### 3.5 The input substrate
 

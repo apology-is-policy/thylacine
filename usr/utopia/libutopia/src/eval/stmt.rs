@@ -1071,9 +1071,10 @@ fn eval_command(env: &mut Env, cmd: &Command) -> EvalResult<StatementFlow> {
             if argv.is_empty() {
                 return Ok(StatementFlow::Normal);
             }
-            // Resolution order (scripture 9.1): fn -> builtin ->
-            // external. Look up argv[0] in fns first; clone the FnDecl
-            // so we don't hold an Env borrow across mutation.
+            // argv[0] is already alias-expanded (evaluate_argv folds it in for
+            // every command position). Resolution order (scripture 9.1): fn ->
+            // builtin -> external. Look up argv[0] in fns first; clone the
+            // FnDecl so we don't hold an Env borrow across mutation.
             if let Some(decl) = env.fn_get(&argv[0]).cloned() {
                 return invoke_function(env, &decl, &argv);
             }
@@ -1384,7 +1385,15 @@ fn evaluate_argv(env: &Env, words: &[Word]) -> EvalResult<Vec<String>> {
         let v = eval_word(env, w)?;
         argv.extend(v.0);
     }
-    Ok(argv)
+    // Aliases expand argv[0] here, the single command-argv builder shared by
+    // every command position (bare, redirect, pipeline element, background) --
+    // so `la`/`ll` work uniformly wherever a command runs, not just at the bare
+    // prompt. One pass (the baked set targets `ls`, not an alias); the result
+    // then flows through the caller's fn -> builtin -> external resolution.
+    // (Unlike bash, this keys on the resolved argv[0], so a $var/glob that
+    // yields an alias name expands too -- benign; the literal-first-word
+    // refinement lands with the `alias` builtin.)
+    Ok(env.expand_alias(argv))
 }
 
 /// If `w` is a bare unquoted word carrying a glob meta char, return its
