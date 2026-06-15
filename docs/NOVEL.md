@@ -29,6 +29,20 @@ The goal is to make `ARCHITECTURE.md` easier to write: each angle becomes a know
 | 8 | Formal verification cadence: 17 TLA+ modules pinning §28 invariants | Low-medium | 4–6 KLOC TLA+ | Continuous |
 | 9 | Designed-not-implemented v2.0 contracts | Low | ~0 KLOC (specifications only) | Phase 0 |
 | 10 | Capability-scoped service storage | Low | ~0.5-1 KLOC userspace + FS-delta O_PATH primitive (small kernel) | Convergence detour: FS-delta -> A-1.7, before A-1b |
+| 11 | Capability-sandboxed third-party drivers (Menagerie) | Medium | small kernel (the allowance + `devhw`) + ~6-10 KLOC Rust (warden + libdriver + sources) | The Menagerie arc (after pci, before net-2); `docs/MENAGERIE.md` |
+
+**Angle #11 — capability-sandboxed third-party drivers (the Menagerie inversion).**
+Angle #2 made userspace drivers *possible*; Menagerie makes a **stable third-party
+driver ABI *desirable*** — the inversion a monolithic kernel structurally cannot
+offer. A driver is an isolated Proc holding only its device's **narrowed,
+non-transferable hardware allowance** (I-34, reserved), so its entire blast radius
+is its own device: it cannot crash the kernel, touch another device's MMIO, see
+another process, or escalate. *Because* of that confinement, the driver ABI can be
+frozen and public (no in-tree requirement, no recompile-per-kernel) — the opposite
+of Linux's deliberately-unstable in-kernel ABI. The full per-angle treatment lives
+in `docs/MENAGERIE.md` (the discovery-source/warden model + the hardware-allowance
+kernel lift + the RPi4/5 grounding); it composes I-1 + I-5 + I-2/I-25 + I-15 +
+I-29/I-30 + pci-1b, inventing only the one allowance mechanism.
 
 **Total novel-angle code**: ~50-70 KLOC of C99 (kernel + compat) + ~16-24 KLOC of Rust (drivers + Halcyon) + ~4-6 KLOC of TLA+. Within the ~100-130 KLOC total budget for a complete v1.0.
 

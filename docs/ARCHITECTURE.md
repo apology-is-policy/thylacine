@@ -3332,9 +3332,16 @@ arch/arm64/
 
 `arch/arm64/common/` is the investment. It runs unmodified on all platforms.
 
-### 22.4 First bare metal target: Raspberry Pi 5 (post-v1.0)
+### 22.4 First bare metal target: Raspberry Pi 4 / 5 (in v1.0 scope — the Menagerie arc)
 
-Per VISION §4.4. Delta from QEMU `virt`: EL2→EL1 drop, mailbox framebuffer, RP1 Ethernet. Estimated: one focused sprint after v1.0 release.
+**Scope shift (2026-06-15): RPi4/RPi5 bring-up is now in-v1.0 scope**, via the
+Menagerie driver framework (§22.7, `docs/MENAGERIE.md`) — not the post-v1.0 sprint
+this section originally scoped. The delta from QEMU `virt` (mailbox/clock chain,
+the brcmstb PCIe host bridge + MSI, RP1 behind PCIe, GENET/SDHCI/USB, non-coherent
+DMA, board identity) is absorbed by the discovery-source/warden model rather than
+special-cased — adding a board is adding a BSP entry + drivers, not editing the
+boot path. QEMU `virt` is a peer board in the universal image, so the model proves
+out there first with zero real-hardware risk. See §22.7 + MENAGERIE.md.
 
 ### 22.5 Apple Silicon bare metal (v2.0+)
 
@@ -3365,13 +3372,59 @@ Thylacine exposes two clocks through a single POSIX-shaped `SYS_CLOCK_GETTIME(cl
 - **Name resolution** — `whoami` / `id` render the numeric `principal_id` / `primary_gid` at v1.0; the uid→name map (a corvus `NAME_LOOKUP` verb or a kernel `principal_name` stamped at `CAP_SET_IDENTITY`) is the v1.x enhancement. `getgroups` (the supplementary-group set for a complete `id`) is the same class — the field exists (`supp_gids`); the syscall is the seam.
 - **The pouch boundary-line** — a ported (musl) program's `getpid` / `getuid` / `clock_gettime` map onto these syscall numbers via `usr/lib/pouch/patches/*` when a port needs them (v1.x; LS-K's consumers are native libthyla-rs coreutils).
 
-### 22.7 Open design questions
+### 22.7 The driver framework (Menagerie)
+
+Canonical: `docs/MENAGERIE.md`. The **binding layer** into which drivers drop, so
+that supporting new hardware is *adding a driver*, not *editing the boot path*. It
+realizes ROADMAP §3.5 (no in-kernel drivers, bounded exceptions) for real hardware
+and unlocks the RPi4/RPi5 track (§22.4).
+
+The model: pluggable **discovery sources** (DTB / PCIe / USB / SDIO-MMC /
+overlay-EEPROM) reduce all hardware — static on-die fabric and self-enumerating
+buses alike — to one stream of `{ DeviceAdded(node) | DeviceRemoved(node) }`. A
+single trusted broker, the **warden** (a native `libthyla-rs` Proc in the TCB,
+spawned by joey), matches each node's `compatible` against a bind DB, computes a
+**narrowed hardware allowance** (the node's resources ∩ the driver manifest's
+declared needs), and spawns the driver as an isolated, capability-sandboxed
+userspace Proc that serves a file into the namespace. The model is recursive — a
+bound bus driver *becomes* a discovery source — so the entire RPi5 bring-up (RP1
+behind PCIe) falls out of "a driver can be a source." Deferred probe is
+wait-on-a-file in the namespace; teardown (`DeviceRemoved` / crash) is the I-25
+group-terminate; supervision restarts a crasher.
+
+**The one kernel lift** is the **hardware allowance** (§4 of MENAGERIE.md;
+**reserves I-34**, §28): `CAP_HW_CREATE` is coarse today (a flat gate at the three
+`SYS_MMIO/IRQ/DMA_CREATE` handlers); the lift scopes it per-Proc to a bounded
+resource set, checked at those gates, so a driver can mint a handle *only* within
+its device's allowance. It preserves I-5 (handles stay created-in-Proc +
+non-transferable — we pass down the bounded *authority to create*, not pre-minted
+handles), generalizes pci-1b (a PCI device's allowance *is* its claimed BARs), and
+makes every grant auditable (a small explicit set, not "anything unreserved"). The
+kernel also gains `devhw` (the DTB published to userspace as a walkable tree — the
+I-15 enforcement point) and a Loom **device-gone** terminal CQE for
+surprise-removal. Audit-bearing — see §25.4.
+
+**Ratified postures (2026-06-15):** third-party driver authorization is
+**convenience** (try-bind, ask once on the trusted path, remember; paranoid
+lockdown is an opt-in hostowner toggle); the **board self-identifies** from the DTB
+root `compatible` (never a user prompt); a **universal image** carries multi-board
+support and the DTB selects at boot (the pool is portable, the board is read fresh
+each boot). Third-party drivers as capability-sandboxed Procs are a NOVEL position
+(NOVEL.md) — a stable driver ABI becomes *desirable* precisely because a driver's
+blast radius is its own device, which a monolithic kernel structurally cannot
+offer.
+
+### 22.8 Open design questions
 
 None at Gate 3.
 
-### 22.8 Summary
+### 22.9 Summary
 
-DTB-driven hardware discovery; platform layers under `arch/arm64/<platform>/`; first bare metal target Pi 5 post-v1.0. Wall clock + monotonic time via the PL031 RTC boot-anchor (§22.6).
+DTB-driven hardware discovery; the Menagerie driver framework (§22.7) binds
+discovered devices to capability-sandboxed userspace driver Procs (the hardware
+allowance, I-34); platform layers under `arch/arm64/<platform>/`; RPi4/RPi5 in v1.0
+scope via Menagerie (§22.4). Wall clock + monotonic time via the PL031 RTC
+boot-anchor (§22.6).
 
 ---
 
@@ -4005,6 +4058,8 @@ These are the project's promises. Every one has a spec or a runtime check or a c
 **Reserved invariants (graphics phase; land at impl, per the T-1 precedent in `docs/TAPESTRY.md` §6).** The compositor + agentic-enablement design (TAPESTRY.md §13-17 + ARCH §17, added 2026-06-08) *reserves* — but does not yet enumerate as enforced — a small set that takes its §28 numbers when the graphics phase builds (the way Loom deferred I-29/I-30's §28 edit to its impl, and Tapestry deferred T-1): **T-1** no torn scanout (the framebuffer Burrow stays backed from present-submit to its terminal CQE; TAPESTRY.md §6); **placement-transparency** (a surface's placement — inline / split / tab / pinned — is invisible to and unforgeable by its client; TAPESTRY.md D5); **layout-tree integrity** (the `/dev/halcyon` 9P tree is the single source of layout truth — control is 9P, pixels are Loom, the two transports never crossed); **agentic-capture gating** (the in-band screen-readback / input-injection files are dev/test-build-only — the #880 strip-for-production class). Reserving (not enumerating) keeps Phase-10 detail at vision-sketch altitude; the audit-trigger rows (`tapestryd`, `netd`, the agentic capture/inject surface) join §25.4 the same way, at impl.
 
 **The network arc (`NET-DESIGN.md`, the #68 charter) adds NO new §28 invariant** — network soundness composes existing ones: **I-1** (a Proc's reach is bounded by its `/net` view = the firewall), **I-5** (netd's NIC handles non-transferable), **I-9** (the `dev9p.poll`->netd readiness wake loses no edge; reserved `net_poll.tla`), **I-10/I-11** (netd connection-`N` / fid identity), **I-23** (netd's authority bounded by its endowed NIC capability), **I-28** (`/net` path-containment + per-component X-search), **I-29/I-30** (network I/O riding Loom inherits its completion integrity + submit-time pin). Its audit-trigger surfaces (`netd`, `dev9p.poll`, the socket-compat pouch patch, the virtio-net RX+TX driver, `cs`/`dns`, `ipconfig`/DHCP, a settable-clock `SYS_CLOCK_SETTIME` if pulled forward) join §25.4 at the sub-chunk that lands each, per NET-DESIGN.md §15.2. **net-1 LANDED + audited the virtio-net RX+TX driver surface** (`usr/lib/netdev` — the reusable `VirtioNet` frame transport; the virtio DMA/IRQ/ring memory-safety class, Opus-4.8 focused audit 0 P0/0 P1/1 P2/4 P3 all fixed-or-closed); see `docs/reference/114-netdev.md` + the net-1 closed list.
+
+**The Menagerie arc (`MENAGERIE.md`, the driver framework; scripture adopted 2026-06-15) RESERVES one new invariant — I-34 — to be enumerated-as-enforced when the hardware allowance lands** (the Loom I-29/I-30 + graphics-phase precedent: reserve the number now, enumerate the row at impl). Everything else composes existing invariants: **I-1** (drivers are isolated Procs), **I-5** (their MMIO/IRQ/DMA handles non-transferable), **I-2/I-25** (the allowance grant + the `DeviceRemoved` scope-teardown lifecycle), **I-15** (hardware view from DTB — *enforced* by `devhw`), **I-29/I-30** (the driver data path rides Loom), and **pci-1b's exclusive claim** (the per-`(bus,dev,fn)` BAR-bounded claim is the first instance of I-34). **I-34 (driver authority bound, RESERVED)**: a driver's hardware authority is exactly its warden-granted allowance — a subset of its bound node's resources, declared in its manifest, granted only by the warden, never widened, and fully revoked on unbind/removal/crash; the I-25 analog for hardware. It is enforced at `SYS_MMIO/IRQ/DMA_CREATE` (the three coarse `CAP_HW_CREATE` gates today, `kernel/syscall.c:216/368/458`) by a per-Proc allowance check, and modeled by `specs/allowance.tla` (extends the I-25 scope model + generalizes pci-1b). Its audit-trigger surfaces (the allowance check, the warden's grant decision, `devhw`, the discovery-source trust boundary, the Loom device-gone terminal CQE) join §25.4 at the sub-chunk that lands each, per MENAGERIE.md §15-16.
 
 ---
 

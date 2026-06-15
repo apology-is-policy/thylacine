@@ -1,0 +1,582 @@
+# MENAGERIE.md — the runtime driver framework: discovery, binding, third-party drivers
+
+**Binding scripture.** Adopted 2026-06-15 (the aux architecture session;
+user-ratified). This is the canonical design for Thylacine's driver framework —
+the *binding layer* into which drivers drop — and for the real-hardware track
+(RPi4 / RPi5) it unlocks. The kernel lift it requires (the **hardware
+allowance** — a per-Proc scoping of `CAP_HW_CREATE`) introduces **invariant I-34**
+(ARCH §28) and is audit-bearing (ARCH §25.4). Everything above the kernel line —
+the **warden** (device manager), the `libdriver` framework, the manifest format,
+and every non-DTB discovery source — is native `libthyla-rs` userspace.
+
+Builds on the COMPLETE substrate: `KObj_MMIO` / `KObj_IRQ` / `KObj_DMA` /
+`KObj_PCI` (the pci-1b exclusive claim is the first instance of the rule this
+generalizes), the namespace (territory + `/srv` + `stalk`), Loom, and the
+identity / clearance / imperium arc. The hardware reality (RPi4 BCM2711, RPi5
+BCM2712 / RP1) is grounded against vendor datasheets + the brcmstb PCIe
+upstreaming; citations in §12.
+
+Cross-refs: ARCH §22 (hardware platform model) + §22.7 (this framework) + §28
+(I-34) + §25.4 (audit triggers); ROADMAP §3.5 (no-in-kernel-drivers, the posture
+this realizes) + the real-hardware track; `docs/TRUSTED-PATH.md` (the SAK the
+third-party authorization prompt rides) + `docs/INSTALLER.md` (the first consumer
+of the driver framework on a real disk).
+
+---
+
+## 1. Thesis: a binding *layer*, not a pile of drivers
+
+The goal is not "write the RPi drivers." It is to build the **binding layer** into
+which drivers drop — so that supporting new hardware is *adding a driver*, not
+*editing the boot path*. Today every userspace driver hardcodes its world:
+`usr/lib/netdev/src/virtio.rs:51` bakes in `VIRTIO_MMIO_BASE_PA = 0x0a00_0000` and
+`intid = VIRTIO_MMIO_GIC_INTID_BASE + slot`. That works because there is exactly
+one board (QEMU virt). The instant a second board exists, that constant is a lie,
+and there is no channel through which a driver could *discover* the right value.
+The binding layer is that missing channel, plus the policy engine that turns a
+discovered device into a running, sandboxed driver serving a file. (This is the
+structural blocker logged as gap G19.)
+
+One model serves the whole range — a fixed on-die UART, a hot-plugged USB stick, a
+third-party HAT — because we reduce them all to a single event stream and a single
+bind decision.
+
+---
+
+## 2. The core fact: discoverability is a property of the *bus*, not the board
+
+The question "can devices be detected and added at runtime on a SoC?" has a
+layered, honest answer, and the layering is the whole architecture:
+
+- **The on-die static fabric** (memory-mapped peripheral blocks; the I2C / SPI /
+  MIPI / platform-bus controllers) is **non-discoverable** — fixed addresses,
+  hard-wired interrupts; the OS must be *told* it exists, via the **DTB**. You
+  cannot hot-plug a UART block onto silicon — but that fabric is also the part
+  that *never changes*, so "no runtime detection" costs nothing.
+- **Self-enumerating buses** — **PCIe, USB, SDIO/MMC** — give genuine runtime
+  probe + hotplug. You walk the bus, query each device's identity, and bind. USB
+  is built for surprise add/remove; PCIe hot-plugs where the controller supports
+  it; MMC has card-detect.
+- **The bridge for SoC-bus add-ons**: a HAT/cape carries an **EEPROM that
+  self-describes**, and firmware loads a matching **device-tree overlay** so the
+  new I2C/SPI device *appears to the OS at overlay-load time* — a runtime
+  `DeviceAdded` even on a non-enumerable bus (`dtoverlay` does this live).
+
+So **runtime detection is possible exactly where the hardware provides an
+enumeration or a self-description mechanism.** The architecture's job is to model
+the static and the dynamic as the *same* thing, so the binder never cares which it
+faces.
+
+The board choice helps: on **RPi5 the entire I/O complex — USB, Gigabit Ethernet,
+GPIO, UART, I2C, SPI — lives in the RP1 chip behind a PCIe 2.0 ×4 link**, so the
+enumerable path is the *main* path, not an edge case; RP1 bring-up is "enumerate
+PCIe, then enumerate RP1's sub-functions."
+
+---
+
+## 3. The unifying model: discovery sources → events → the warden → bind + serve
+
+Reduce every kind of hardware to a stream of two events, produced by a pluggable
+set of **discovery sources**:
+
+```
+  DTB source        (static)   -> DeviceAdded for every `compatible` node, once, at boot
+  PCIe source       (dynamic)  -> config-space scan; hotplug where supported; owns MSI routing
+  USB source        (dynamic)  -> descriptor enumeration; surprise add/remove
+  SDIO/MMC source   (dynamic)  -> card-detect -> enumerate
+  overlay/EEPROM    (runtime)  -> HAT self-describes -> apply DT overlay -> DeviceAdded
+        |
+        v   one uniform stream:  { DeviceAdded(node) | DeviceRemoved(node) }
+   [  WARDEN  ]  match compatible -> bind DB -> mint a NARROWED hardware allowance
+   ( devmgr  )  -> spawn the driver Proc -> driver serves /dev/net/0 into the namespace
+```
+
+A `node` carries: the `compatible` strings, the `reg` MMIO window(s) (PA + size),
+the interrupt(s) (wired INTID + trigger, or an MSI capability), the parent-bus
+path, and a bus-specific identity (PCIe `vid:did`, USB `vid:pid`, the DTB
+phandle). The warden consumes the stream and never distinguishes static from
+dynamic: the DTB source fires *all* its events at boot; USB fires them as you plug.
+
+**The model is naturally recursive: a bound bus driver *becomes* a discovery
+source.** Bind the PCIe host bridge → it enumerates → emits RP1 → bind the RP1
+driver → it exposes USB/eth/GPIO as a child bus → emits those → bind their
+drivers. The entire RPi5 bring-up falls out of one rule — "a driver can be a
+source" — which is how Fuchsia DFv2 and Genode's platform-driver compose. (Which
+sources/drivers the warden starts from is the board's BSP, read at boot from the
+DTB root `compatible` — §17.)
+
+Two refinements make it impeccable, and both substrates already exist in
+Thylacine:
+
+- **Deferred probe via the namespace.** A peripheral needs its clock/mailbox
+  provider bound first (the BCM mailbox → clock → peripheral chain). Rather than
+  Linux's retry-list, a driver simply **waits on `/dev/clk0` to appear** — the
+  dependency is a *file*, and the bind/serve substrate already blocks on it
+  (death-interruptibly, #811).
+- **Teardown via I-25.** `DeviceRemoved` → the warden group-terminates the driver
+  Proc (the #809/#811 cascade) → its allowance + handles drop → its service file
+  vanishes from the namespace. The exact mechanism imperium uses to de-escalate a
+  legate scope; restart-on-crash is the same primitive run forward.
+
+---
+
+## 4. The kernel lift: the hardware allowance (the one new mechanism) — I-34
+
+This is the load-bearing addition — the equivalent of imperium's
+fork-propagating scope. Everything else reuses existing primitives.
+
+**Today `CAP_HW_CREATE` is coarse** (verified against the tree): at
+`sys_mmio_create_handler` / `sys_irq_create_handler` / `sys_dma_create_handler`
+(`kernel/syscall.c:216 / 368 / 458`) the gate is a flat
+`(p->caps & CAP_HW_CREATE) == 0 -> reject`. A holder may then create a
+`KObj_MMIO`/`IRQ`/`DMA` handle for *any* range the kernel has not I-5-reserved.
+That is fine for three trusted system servers (stratumd, netd, tapestryd); it is
+unacceptable for a fleet of per-device drivers, where a GPIO driver must not be
+able to mint a handle over the disk controller's registers.
+
+**The lift: scope `CAP_HW_CREATE` with a per-Proc *allowance*** — a set of
+permitted `(PA window | IRQ/MSI | DMA pool)` resources. The three create syscalls
+gain a check: *the requested resource must lie within the calling Proc's
+allowance.* The warden holds the broad allowance (everything not kernel-reserved);
+when it spawns a driver it confers a **narrowed allowance = the bound node's own
+resources, intersected with the manifest's declared needs** — so a driver can
+never ask for more than its device physically has. The three create-handler
+gates (above) are the exact, confirmed insertion points.
+
+Why this shape (not the obvious alternatives):
+
+- **It preserves I-5.** Handles are still *created in-Proc* and remain
+  non-transferable. We do NOT pre-mint handles in the warden and pass them down
+  (I-5 forbids transferring MMIO/IRQ/DMA handles); we pass down the *authority to
+  create*, bounded — the correct capability-theoretic move.
+- **It generalizes pci-1b.** pci-1b already enforces an *exclusive*
+  per-`(bus,dev,fn)` claim with BAR-bounded MMIO (`SYS_PCI_MAP_BAR` maps only the
+  claimed BARs). The allowance is that idea lifted to the whole device space: a
+  PCI device's allowance *is* its claimed BARs; a platform device's allowance *is*
+  its DTB node's `reg` ranges. pci-1b becomes the first instance of the general
+  rule.
+- **It makes the grant auditable.** A driver's authority is a small, explicit,
+  inspectable set — exactly what the manifest declared — not "anything unreserved."
+
+**Invariant I-34 (driver authority bound)**: *a driver's hardware authority is
+exactly its warden-granted allowance — a subset of its bound node's resources,
+declared in its manifest, granted only by the warden, never widened, and fully
+revoked on unbind, removal, or crash.* The I-25 analog for hardware. This is the
+surface to model formally (it extends I-25 + generalizes pci-1b) and prosecute
+hard (§11).
+
+---
+
+## 5. The warden (device manager)
+
+A native `libthyla-rs` Proc, spawned by joey (init) with the broad allowance — the
+single trusted broker, the Genode platform-driver analog. It is part of the system
+TCB; the drivers under it are not. Responsibilities:
+
+- **The bind database**: `compatible[] -> { driver binary, declared needs, the
+  served service, restart policy, ABI version, signature }`, populated from the
+  system driver set's manifests + any installed third-party manifests.
+- **On `DeviceAdded(node)`**: match `compatible` (most-specific wins) → resolve the
+  driver → compute the narrowed allowance (node resources ∩ manifest needs) → apply
+  the authorization policy (§9) → spawn the driver Proc with that allowance → the
+  driver serves its file into the namespace.
+- **On `DeviceRemoved(node)`**: revoke the allowance + group-terminate the driver
+  (I-25) → its service file disappears → consumers observe the close and re-bind
+  (Plan 9 reconnect semantics).
+- **Deferred probe**: a driver whose dependency service is not yet present blocks
+  on it in the namespace; the warden need not sequence — the filesystem does.
+- **Supervision**: a crashed driver is restarted per its manifest policy; the
+  service file blinks. Bounded restart (back-off + a give-up threshold) so a
+  crash-looping driver does not spin.
+
+The warden owns **all** grant decisions — one auditable chokepoint. Bus drivers are
+*sources that report to it*, never spawners of their own children (which would
+scatter the privilege decision across N places).
+
+---
+
+## 6. Anatomy of a driver + the manifest
+
+A driver is a native `libthyla-rs` Proc built on **`libdriver`** (the framework
+crate): a small probe/bind/serve scaffold so a new driver is a `probe()` + the
+device logic + a served file, not boilerplate. It receives its narrowed allowance
++ the bound node's resource descriptors at spawn, mints its `KObj_MMIO`/`IRQ`/`DMA`
+handles via the existing `libthyla_rs::hardware` RAII wrappers (now
+allowance-bounded), drives the device, and serves a file (`/dev/net/0`,
+`/dev/mmc0`, `/srv/...`). High-throughput drivers (net, block, GPU) ride **Loom**
+for the data path (the seL4 sDDF lock-free-queue model Thylacine already has).
+
+The **manifest** is the declarative contract — the thing that makes a driver
+*droppable* and its grant *auditable*:
+
+```
+driver "rp1-eth" {
+    abi      = 1                                  # framework ABI it targets
+    binds    = ["raspberrypi,rp1-eth", "brcm,genet-v5"]
+    needs {
+        mmio = "node:reg"        # its bus node's own reg window(s) -- never more
+        irq  = "msi:1"           # one MSI vector  (or "node:interrupts" for wired)
+        dma  = "pool: 2 MiB"
+    }
+    serves   = "/dev/net/%instance"
+    restart  = on-crash          # supervisor policy
+    sig      = "<ed25519 over the package>"        # optional; drives section 9
+}
+```
+
+`needs` is bounded by the node: the warden intersects the asks with the actual node
+resources, so a manifest cannot widen a driver's reach beyond its device. That
+intersection is the auditable-grant property (I-34) in one line.
+
+---
+
+## 7. The discovery sources
+
+Each source is itself a driver (bound first — the recursion), except the DTB
+source, the kernel-exported bootstrap root.
+
+- **DTB source (kernel `devhw`)**: the *only* source the kernel provides — a
+  synthetic device (Plan 9 `#H` shape) publishing the parsed DTB as a **walkable
+  tree**: each node a directory exposing `reg`, `interrupts`, `compatible`,
+  `clocks`. This is the honest enforcement of I-15 ("hardware view derives entirely
+  from DTB"). **Scope note (ground-truthed):** the kernel already holds the FDT
+  blob and parses it, but the *exported* API today is point-lookup-by-compatible
+  (`dtb_get_compat_reg{,_n}`, `dtb_for_each_compat_reg`, `dtb_get_compat_prop` in
+  `kernel/include/thylacine/dtb.h`) — **not** a node tree. `devhw` therefore needs
+  a tree-walk publish layer over the FDT (a Dev exposing the node hierarchy), which
+  is a modest real addition, not "merely re-export an existing call." The data is
+  all present; the surface is new. Every other source lives in userspace, keeping
+  the TCB minimal.
+- **PCIe source**: the brcmstb host-bridge driver. Scans config space, emits a node
+  per function, and **owns MSI routing** (controller-specific on Broadcom — not a
+  generic GIC ITS; §12). On RPi5 this is the spine — RP1 and everything behind it
+  arrives here.
+- **USB source**: the XHCI host driver. Descriptor enumeration; the canonical
+  hotplug source.
+- **SDIO/MMC source**: card-detect → enumerate.
+- **overlay/EEPROM source** (designed seam, deferred past first-boot): a HAT/cape
+  EEPROM self-describes; the source applies a DT overlay and emits the new nodes.
+  Real but RPi-firmware-quirky (no overlay-parameter passing today), so the source
+  *interface* admits it while the implementation waits.
+
+The minimal **kernel-resident driver set** (the TCB floor, never userspace): the
+GIC, the timer, the console UART (the A-4c / trusted-path floor depends on it), the
+CSPRNG seed source, and the DTB source itself. Everything else the warden binds in
+userspace.
+
+---
+
+## 8. Third-party drivers — the capability-sandbox inversion
+
+This is where the model stops being "as good as Linux" and becomes *categorically
+better* (and a NOVEL position — NOVEL.md).
+
+In a monolithic kernel a driver runs in ring 0 with total power — which is
+precisely *why* Linux keeps its in-kernel driver ABI deliberately **unstable**: to
+force drivers in-tree where they can be reviewed. Out-of-tree third-party drivers
+are a permanent security and stability wound. Thylacine inverts every term:
+
+1. **A driver is a userspace Proc holding only its device's narrowed,
+   non-transferable allowance.** A third-party driver therefore *cannot* crash the
+   kernel, touch another device's MMIO, see another process, or escalate — its
+   entire blast radius is its own device. (I-1 isolation + I-5 non-transferability
+   + the §4 allowance/I-34 + pci-1b's exclusive claim.) A property Linux
+   structurally cannot offer.
+2. **So a stable driver ABI becomes *desirable*, not a liability** — and one already
+   exists: the `KObj_MMIO`/`IRQ`/`DMA`/`PCI` syscalls + `libthyla_rs::hardware` +
+   Loom + the serve-a-file (9P) protocol + the manifest. Third parties target a
+   frozen public ABI; no in-tree requirement, no recompile-per-kernel.
+3. **A driver package = binary + manifest** (§6). The manifest's `needs` make the
+   capability grant bounded and *readable*; the user sees exactly what a driver
+   will be allowed to touch before authorizing it.
+4. **Authorization reuses the imperium/clearance arc verbatim** (§9).
+5. **Conflict, versioning, restart** are already solved: exclusive claims (pci-1b)
+   stop two drivers grabbing one device; the bind DB resolves specificity; the
+   manifest's `abi` lets the warden refuse a stale driver; supervision restarts a
+   crasher.
+
+The tell that this is the *right* design for this codebase: it invents almost no
+new invariant. It is I-1 + I-5 + I-2/I-25 + I-15 + I-29/I-30 + pci-1b's claim,
+wired together by the warden, plus the one §4 allowance lift (I-34).
+
+---
+
+## 9. Authorization — the convenience ladder (ratified posture: convenience)
+
+Granting a driver its allowance is a privilege decision. The posture (user-chosen)
+is **convenience**: the default is "try to make it work, ask once on the trusted
+path, remember the answer" — not "refuse unless pre-authorized."
+
+```
+  system driver set            -> trusted, auto-bound, no prompt
+  third-party, trusted-signed  -> auto-authorized, no prompt
+                                  (install a vendor signing key once -> all their drivers just work)
+  third-party, unsigned/new    -> the warden ATTEMPTS the bind and surfaces a
+                                  trusted-path prompt (SAK -> corvus shows the
+                                  *provincia*: "driver X wants device Y [USB vid:pid],
+                                  gets MMIO window W + IRQ N, serves /dev/foo --
+                                  allow once / always / deny") and REMEMBERS "always"
+```
+
+Unsigned third-party drivers are **allowed** — with a single, remembered,
+trusted-path prompt — not locked out. That prompt is the *lex curiata* applied to
+hardware: the SAK + corvus show the exact device + the exact allowance on the
+unspoofable channel (`docs/TRUSTED-PATH.md`) before you consent, so no program can
+trick you into a wider grant than you read. A third-party driver is just another
+clearance grant.
+
+A **paranoid mode** (require a trusted signature; refuse unsigned) is a single
+hostowner toggle — opt-*in* to lockdown, never the default.
+
+---
+
+## 10. Hotplug + surprise removal — the one real teardown hazard
+
+A driver mid-DMA when its device is yanked (USB) is the sharp edge. The capability
+model already makes it *safe* (an MMIO access to a revoked window faults the
+driver, never corrupts the kernel — `proc_fault_terminate`), but two things must be
+deliberate:
+
+- **The data path needs a terminal "device gone."** When the warden processes
+  `DeviceRemoved`, an in-flight Loom op against the vanished device must complete
+  with a **device-gone terminal CQE**, not hang — so the consumer unwinds cleanly.
+  This extends the Loom completion-integrity invariant (I-29) to "the backing
+  device disappeared," and wants an explicit terminal error code
+  (`T_E_DEVGONE`-class).
+- **The allowance must be revocable, and in-flight DMA fenced.** `DeviceRemoved`
+  revokes the allowance + tears down the driver (I-25); any outstanding DMA
+  descriptor pointing at the gone device is abandoned by the same teardown. The
+  driver Proc dies; its pages return through the normal path.
+
+Surprise-removal correctness is the part of this design that most wants a spec + a
+focused audit when it is implemented.
+
+---
+
+## 11. Invariants + audit surface
+
+**Composes** (invents almost nothing): I-1 (per-Proc namespace isolation — drivers
+are isolated Procs), I-5 (hardware handles non-transferable), I-2/I-25 (capability
+narrowing + scope teardown — the allowance grant + the unbind lifecycle), I-15
+(hardware view from DTB — now *enforced* by `devhw` + the source model), I-29/I-30
+(Loom completion integrity + submit-time pin — the driver data path), and pci-1b's
+exclusive claim (conflict resolution).
+
+**The genuinely new surfaces to prosecute** (audit-bearing — the privilege spine of
+every future driver; ARCH §25.4):
+
+- **The hardware allowance / I-34** (§4): a driver can mint a handle ONLY within its
+  allowance; the allowance is a subset of its bound node's resources; it is never
+  widened; it is fully revoked on unbind/removal/crash. *Prosecute*: an
+  allowance-bypass on `SYS_*_CREATE`; an allowance that outlives its device; an
+  intersection bug that grants a superset; the SMP race between a concurrent
+  `DeviceRemoved` revocation and an in-flight `SYS_*_CREATE`.
+- **The warden's grant decision** (§§5, 9): the provincia displayed equals the
+  allowance conferred; no path widens a grant past the manifest; the authorization
+  ladder cannot be skipped.
+- **Discovery-source trust**: a malicious or buggy source must not be able to
+  *fabricate* a device node that lures a driver into claiming real silicon it
+  should not, nor forge a `compatible` to bind the wrong (more-privileged) driver.
+  Sources are themselves bound drivers, so this reduces to the allowance + the
+  bind-DB integrity — but it is the subtle one.
+
+**I-34** is the candidate invariant, numbered here (ARCH §28).
+
+---
+
+## 12. RPi4 / RPi5 bring-up: what the model forces (and the grounding)
+
+Each requirement maps onto a discovery source or a driver — the model absorbs them
+rather than special-casing. Verified facts cited.
+
+| Requirement | Why QEMU virt hid it | Lands as |
+|---|---|---|
+| **Clocks / power / resets + the BCM mailbox** | virtio is always-on; no firmware mailbox | A mailbox driver + the deferred-probe-via-namespace chain (§3). Most BCM peripherals do not respond until a clock is enabled via the VideoCore mailbox. |
+| **brcmstb PCIe host bridge** | QEMU uses generic ECAM | A PCIe *source* driver; pci-1b's claim/BAR/cap-walk core is reusable, but link-training + window setup is controller-specific (`brcm,bcm2711-pcie` / `bcm2712`). |
+| **MSI / MSI-X** | virtio-mmio uses wired INTx | Owned by the PCIe source. BCM2711's PCIe does INTx-A + MSI; BCM2712 ships a dedicated MSI-X controller for the RP1 endpoint, in the brcmstb driver — so MSI is a *property of the host-bridge driver*, not a generic GIC ITS/v2m. On RPi5 mandatory: RP1 is the whole I/O complex. (This is the home for the pci-arc's recorded MSI-X v1.x seam.) |
+| **Interrupt-controller chaining** | flat GIC on virt | RPi4 has the legacy ARMCTRL behind the GIC-400; RP1 has its own MSI domain. A source/driver registers as an IRQ demuxer. |
+| **Non-virtio SoC drivers** | everything was virtio | GENET gigabit eth (RPi4, SoC MAC); SDHCI/EMMC2 (boot medium); **bcm2835/iproc-rng200** (the CSPRNG seed — virtio-rng is *gone*, so the W3 seed path needs a board RNG driver or fails closed); USB XHCI (behind PCIe — VL805 on RPi4, RP1 on RPi5); GPIO/pinmux; thermal; watchdog. |
+| **DMA cache coherence** | virtio on virt was coherent | RPi peripherals are frequently non-coherent; the DMA-handle model needs an explicit cacheable-vs-device contract + clean/invalidate. netdev's `prewarm()` hints this is partly handled; real boards make it load-bearing. |
+| **Per-board BSP + early console** | one DTB, one PL011 | `chosen/stdout-path` parse for the early console (RPi is mini-UART *or* PL011 by config) + a per-board default driver-set + quirks. Small (the board ships its DTB), but the difference between "boots silent" and "boots with a log." Board identity + the universal image: §17. |
+
+Grounding: RP1 connects to BCM2712 over PCIe 2.0 ×4 and aggregates USB2/3, GbE,
+GPIO, UART, I2C, SPI, MIPI behind an AXI→PCIe device controller
+([raspberrypi.com/news: RP1](https://www.raspberrypi.com/news/rp1-the-silicon-controlling-raspberry-pi-5-i-o-designed-here-at-raspberry-pi/),
+[RP1 peripherals datasheet](https://datasheets.raspberrypi.com/rp1/rp1-peripherals.pdf)).
+BCM2711 = GIC-400, PCIe INTx-A + MSI
+([DeepWiki BCM2711](https://deepwiki.com/raspberrypi/linux/2.2-bcm2711-soc-(raspberry-pi-4))).
+BCM2712 MSI-X controller for the RP1 endpoint in the brcmstb driver
+([LWN: PCIe for bcm2712](https://lwn.net/Articles/979758/)). HAT EEPROM →
+auto-loaded DT overlay
+([Quorten](https://quorten.github.io/quorten-blog1/blog/2020/10/22/rpi-dto-auto-eeprom)).
+Bus discoverability dichotomy
+([bootlin/Petazzoni](https://bootlin.com/pub/conferences/2014/elc/petazzoni-device-tree-dummies/petazzoni-device-tree-dummies.pdf)).
+
+---
+
+## 13. Resolved forks
+
+1. **Discovery-source placement** → the kernel exports only the raw DTB inventory
+   (`devhw`); every other source is a userspace driver registered with the warden.
+   Minimal TCB (the Genode posture).
+2. **Warden topology** → one central broker owns the bind DB + all grant decisions;
+   bus drivers are sources, not spawners. One auditable chokepoint.
+3. **Third-party default** → **convenience** (§9): try-bind, ask once on the trusted
+   path, remember; paranoid lockdown is an opt-in toggle.
+4. **Overlay/EEPROM** → a designed seam in the source interface; implementation
+   deferred past first-boot.
+5. **Board selection** → auto-detect from the DTB root `compatible` (never a user
+   prompt); a **universal image** (one medium, multi-board, the DTB selects at
+   boot); unknown board → fail-soft generic profile + loud log (halt is an opt-in
+   lockdown). §17.
+
+---
+
+## 14. Thematic naming (proposed)
+
+The existing `bestiary[]` (`dev.h`) is the Plan 9 `devtab` — the catalog of device
+*types*. The live, bound, running drivers are the **menagerie** (the captured
+beasts), and the broker that keeps them is the **warden**. A discovery source
+brings new specimens into the menagerie. Load-bearing terms stay plain (`driver`,
+`bind`, `compatible`, `allowance`); the color is **menagerie / warden**, on-brand
+with the bestiary.
+
+---
+
+## 15. Dependencies / lane split / unblock order
+
+**Kernel owes (main track):**
+1. `devhw` — the DTB inventory published to userspace as a walkable tree (the
+   bootstrap source; the I-15 enforcement point).
+2. The **hardware allowance / I-34** — scope `CAP_HW_CREATE` per-Proc; bound at
+   `SYS_MMIO/IRQ/DMA_CREATE` (§4). The one new mechanism; spec-modeled (extends
+   I-25 + generalizes pci-1b). **Audit-bearing.**
+3. MSI inside the brcmstb PCIe host-bridge driver path; IRQ-demux registration
+   (the real-hardware sub-track — the pci-arc MSI-X seam lands here).
+4. A Loom **device-gone** terminal completion (§10).
+
+**Userspace (native `libthyla-rs`):**
+5. **`libdriver`** — the probe/bind/serve framework crate + the manifest schema.
+6. The **warden** — bind DB, the match→allowance→spawn→serve engine, deferred
+   probe, supervision.
+7. The userspace discovery sources (PCIe, USB, ... as drivers).
+8. Retrofit `netdev` to *discover* its base (retire `virtio.rs:51`) once `devhw`
+   lands.
+
+**Order**: `devhw` + the allowance are the gate; with them, `libdriver` + the
+warden + the DTB-source path can bind the existing virtio drivers on QEMU virt
+(proving the whole loop with zero real-hardware risk) before the PCIe/USB sources +
+the RPi drivers arrive. **net-2 lands after the Menagerie spine, so `netd` is born
+discovery-driven and narrowed to just its NIC** (rather than holding coarse
+`CAP_HW_CREATE` + a hardcoded base, then being retrofitted) — the sequencing
+rationale ratified 2026-06-15.
+
+---
+
+## 16. Build sequence (main track)
+
+Scripture-first, model-first for the allowance:
+
+1. **This scripture commit** — `docs/MENAGERIE.md` + ARCH §22.7 + I-34 + the audit
+   triggers + ROADMAP. No code.
+2. **`devhw`** (the DTB tree-walk publish Dev) — a Dev surface; reference-doc'd.
+3. **The hardware allowance / I-34** — the per-Proc allowance + the three
+   create-handler checks; **model-first** (a `specs/allowance.tla` extending the
+   I-25 scope model), audit-bearing.
+4. **The Loom device-gone terminal CQE** (§10).
+5. The warden + `libdriver` + the DTB-source path bind the existing virtio drivers
+   on QEMU virt — the whole loop proven with zero real-hardware risk.
+6. The PCIe/USB sources + the RPi driver set + the real-hardware bring-up.
+
+---
+
+## 17. Board identity and the universal image
+
+The board is the one thing the system must know *before* any of the above runs —
+which BSP, which sources, which early console — and the one thing it must **never
+ask the user.** The board self-identifies; we read it, we do not prompt. This is
+I-15 taken to its conclusion: even "which board am I" derives from the DTB.
+
+### 17.1 The board self-identifies (the DTB root)
+
+```
+RPi4:  compatible = "raspberrypi,4-model-b", "brcm,bcm2711";  model = "Raspberry Pi 4 Model B"
+RPi5:  compatible = "raspberrypi,5-model-b", "brcm,bcm2712";  model = "Raspberry Pi 5 Model B"
+QEMU:  compatible = "linux,dummy-virt"
+```
+
+On RPi the VideoCore firmware reads the board's OTP revision, loads the *matching*
+`.dtb`, and hands it to us in `x0`; QEMU generates a virt-correct DTB the same way.
+By the time `_start` runs we already hold a board-correct tree (`_saved_dtb_ptr`,
+consumed in `kernel/main.c`). Reading the root `compatible` *is* the board ID — no
+mailbox call, no config file, no prompt.
+
+### 17.2 The BSP is a board-ID → profile map
+
+The board ID keys the **BSP**: `compatible -> { default driver set, quirks,
+early-console choice }`, applied before the warden's first bind (the
+`of_machine_is_compatible()` analog). Adding a board is adding a BSP entry — the
+same extensibility property as adding a driver.
+
+### 17.3 The bootstrap is self-consistent — there is no human in it
+
+```
+  DTB -> early console (chosen/stdout-path) -> board ID (root compatible) -> BSP -> warden -> drivers
+```
+
+A prompt is not merely unnecessary, it is *impossible and wrong*: it would need a
+console to display it, but which console (mini-UART vs PL011, where) is itself
+DTB-derived — chicken-and-egg. It would re-ask a fact we already hold, and
+introduce a failure mode that cannot otherwise exist (a human picking the *wrong*
+board → a mismatched driver set → a brick). Auto-detection cannot be "wrong" the
+way a person can. Every comparable system converges here: Linux ships one arm64
+kernel for all boards; Raspberry Pi OS boots every Pi from one image; Fuchsia takes
+the board from the bootloader's ZBI. None prompt.
+
+### 17.4 The universal image (resolved: universal)
+
+**One image carries RPi4 + RPi5 + QEMU-virt support; the DTB selects at boot.** QEMU
+virt is a board like any other here — detected by the same root `compatible`
+(`linux,dummy-virt`), its BSP simply *being* the virtio-mmio driver set already in
+the tree — which is why the entire model proves out on QEMU, with zero
+real-hardware risk, before the first RPi driver exists (§15). Write it to any
+supported medium, boot it on any supported board, it adapts. The DTB detection
+makes this nearly free, and it has the property that matters most for a
+Stratum-backed OS: **the pool is portable and the board is detected live, so moving
+the SD card to a different Pi just boots and re-adapts.** The board is emphatically
+*not* baked into the install — the install is the pool contents; the board is read
+fresh each boot. (Per-board images were the alternative: simpler to assemble, but
+they push a "pick the right file" choice to download time and lose the
+move-the-medium property. Rejected.)
+
+### 17.5 Unknown board → fail soft (mirrors the §9 posture)
+
+If the root `compatible` is not in the BSP table, boot a **generic DTB-only
+profile** — UART, timer, GIC, memory all come from the DTB, so a generic ARM64
+board comes up from its device tree alone — and **log loudly** (`unknown board
+"vendor,xyz" -- running generic arm64 from DTB`). A halt-on-unknown is the opt-in
+lockdown toggle. Detection is **stateless + per-boot**: the live DTB is the single
+source of truth (I-15); never persist a board record that could later fight the
+medium it boots on.
+
+### 17.6 First boot is a confirmation, not a selection
+
+Show the detected board as information, never a question: `Thylacine: detected
+Raspberry Pi 5 Model B (bcm2712)`. The only board-adjacent prompts a user ever sees
+are the §9 third-party / HAT-overlay authorizations — never the board itself.
+
+### 17.7 Lane note
+
+The board-ID read + the BSP map + the generic fallback are warden/BSP logic (off
+the `devhw` root `compatible`). The **universal-image assembly** — one boot medium
+carrying multi-board support + the per-board DTBs the firmware chooses among — is a
+build/boot-medium concern (main-track tooling; `docs/INSTALLER.md`). The
+early-console `chosen/stdout-path` selection is kernel.
+
+---
+
+## 18. Status
+
+- **2026-06-15**: scripture adopted (this doc + ARCH §22.7 + I-34 + the audit
+  triggers + ROADMAP). No code yet. The build sequence (§16) is the next arc, after
+  which **net-2 resumes** on the Menagerie substrate.

@@ -128,7 +128,17 @@ The `virt` machine gives:
 
 The gap between `virt` and Apple Silicon bare metal is real and deferred. Bare-metal Apple Silicon is a v2.0 goal (dependent on Asahi Linux's work for the AGX GPU and AIC interrupt controller).
 
-### 4.3 First bare-metal target (post-v1.0)
+### 4.3 First bare-metal target (RPi4/RPi5 — IN v1.0 scope as of 2026-06-15)
+
+**Scope shift (2026-06-15, user-ratified): RPi4/RPi5 bare metal is now in v1.0
+scope**, not the post-v1.0 sprint this section originally scoped. It is delivered
+by the **Menagerie driver framework** (`docs/MENAGERIE.md`; ARCH §22.7; ROADMAP
+§2.2) — a binding layer (discovery sources → the warden → a narrowed hardware
+allowance → capability-sandboxed userspace driver Procs) into which the RPi driver
+set drops, rather than a hand-coded board sprint. QEMU `virt` is a peer board in a
+universal image (the DTB selects at boot), so the model proves out on `virt` with
+zero real-hardware risk before the first RPi driver exists. The original "one
+focused sprint after v1.0" framing below is superseded.
 
 **Raspberry Pi 5.** Chosen because:
 - GIC-400, PL011 UART, ARM generic timer all transfer directly from QEMU `virt` — no driver rewrite.
