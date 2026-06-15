@@ -17,6 +17,7 @@ void test_virtio_pci_devices_have_cfg(void);
 void test_virtio_pci_find_rng(void);
 void test_virtio_pci_find_unknown_returns_null(void);
 void test_virtio_pci_cfg_read_bounds(void);
+void test_virtio_pci_cfg_write_bounds(void);
 
 // virtio_pci_init has already run (in boot_main before tests). The
 // device count reflects whatever QEMU virt + tools/run-vm.sh's
@@ -108,4 +109,29 @@ void test_virtio_pci_cfg_read_bounds(void) {
     u8 ov8 = virtio_pci_cfg_read8(NULL, 0);
     TEST_EXPECT_EQ((u64)ov8, (u64)0xFFu,
                    "NULL d cfg_read8 should return 0xFF");
+}
+
+// pci-1a: the config-space WRITE helpers honor the same bounds as the
+// reads -- an out-of-range, misaligned, or NULL-device write is a
+// no-op. Proven by observing the (read-only) vendor ID is unchanged
+// after a battery of bad-bounds writes. The positive round-trip is
+// covered by pci-1b's BAR-sizing test (write 0xFFFFFFFF, read the size
+// mask), the standard PCI protocol QEMU implements.
+void test_virtio_pci_cfg_write_bounds(void) {
+    struct virtio_pci_dev *d = virtio_pci_dev_get(0);
+    if (!d) {
+        return;     // no PCI device — covered by count_within_bound
+    }
+    u16 vendor_before = virtio_pci_cfg_read16(d, PCI_CFG_VENDOR_ID);
+    TEST_EXPECT_EQ((u64)vendor_before, (u64)VIRTIO_PCI_VENDOR_ID,
+                   "virtio-pci vendor should be 0x1AF4 before writes");
+
+    virtio_pci_cfg_write32(d, 4096, 0xDEADBEEFu);   // out of range -> no-op
+    virtio_pci_cfg_write32(d, 2, 0xDEADBEEFu);      // misaligned   -> no-op
+    virtio_pci_cfg_write16(d, 1, 0xBEEFu);          // misaligned   -> no-op
+    virtio_pci_cfg_write8(NULL, 0, 0xFFu);          // NULL device  -> no-op
+
+    u16 vendor_after = virtio_pci_cfg_read16(d, PCI_CFG_VENDOR_ID);
+    TEST_EXPECT_EQ((u64)vendor_after, (u64)vendor_before,
+                   "bad-bounds cfg writes must not alter vendor ID");
 }

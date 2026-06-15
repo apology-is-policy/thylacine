@@ -584,6 +584,189 @@ bool dtb_has_compat(const char *compat) {
     return false;
 }
 
+// =============================================================================
+// Generic named-property reader + PCI INTx routing / MMIO window (pci-1a).
+// =============================================================================
+
+bool dtb_get_compat_prop(const char *compat, const char *prop,
+                         const uint8_t **out_data, uint32_t *out_len) {
+    if (!g_dtb.ready || !compat || !prop || !out_data || !out_len) return false;
+
+    struct fdt_walker w;
+    walker_start(&w);
+
+    // Depth-stack mirror of dtb_get_compat_reg_n: per node, capture both
+    // the compat match AND the target prop (the prop may precede
+    // "compatible"); emit on END_NODE when both are present.
+    struct {
+        bool           compat_matched;
+        const uint8_t *prop_data;
+        uint32_t       prop_len;
+        bool           prop_present;
+    } stack[DTB_MAX_DEPTH];
+    int sp = 0;
+
+    for (;;) {
+        const char *name = NULL, *propname = NULL;
+        const uint8_t *propdata = NULL;
+        uint32_t proplen = 0;
+        uint32_t tok = walker_next(&w, &name, &propname, &propdata, &proplen);
+        if (tok == FDT_END) break;
+
+        if (tok == FDT_BEGIN_NODE) {
+            if (sp < DTB_MAX_DEPTH) {
+                stack[sp].compat_matched = false;
+                stack[sp].prop_data = NULL;
+                stack[sp].prop_len = 0;
+                stack[sp].prop_present = false;
+            }
+            sp++;
+            continue;
+        }
+        if (tok == FDT_END_NODE) {
+            if (sp > 0) {
+                sp--;
+                if (sp < DTB_MAX_DEPTH &&
+                    stack[sp].compat_matched && stack[sp].prop_present) {
+                    *out_data = stack[sp].prop_data;
+                    *out_len  = stack[sp].prop_len;
+                    return true;
+                }
+            }
+            continue;
+        }
+        if (tok == FDT_PROP && sp > 0 && sp <= DTB_MAX_DEPTH) {
+            int si = sp - 1;
+            if (k_streq(propname, "compatible")) {
+                if (stringlist_contains((const char *)propdata, proplen, compat)) {
+                    stack[si].compat_matched = true;
+                }
+            } else if (k_streq(propname, prop)) {
+                stack[si].prop_data    = propdata;
+                stack[si].prop_len     = proplen;
+                stack[si].prop_present = true;
+            }
+        }
+    }
+    return false;
+}
+
+#define DTB_PCI_COMPAT       "pci-host-ecam-generic"
+#define DTB_PCI_CHILD_MAX    8u      // sane cap on interrupt-map-mask cells
+#define DTB_GIC_INT_CELLS    3u      // GIC <type intid flags> (universal)
+#define DTB_GIC_SPI_TYPE     0u      // first interrupt cell: 0 = SPI
+#define DTB_GIC_SPI_BASE     32u     // GIC INTID = 32 + SPI number
+
+bool dtb_pci_intx_route(u8 pci_dev, u8 pin, u32 *out_gic_intid) {
+    if (!out_gic_intid) return false;
+
+    const uint8_t *mask_d, *map_d;
+    uint32_t mask_len, map_len;
+    if (!dtb_get_compat_prop(DTB_PCI_COMPAT, "interrupt-map-mask",
+                             &mask_d, &mask_len))
+        return false;
+    if (!dtb_get_compat_prop(DTB_PCI_COMPAT, "interrupt-map",
+                             &map_d, &map_len))
+        return false;
+
+    // child_cells = #address-cells + #interrupt-cells of the PCI node,
+    // which is exactly interrupt-map-mask's cell count.
+    if (mask_len == 0 || (mask_len % 4) != 0) return false;
+    uint32_t child_cells = mask_len / 4;
+    if (child_cells < 1 || child_cells > DTB_PCI_CHILD_MAX) return false;
+
+    if (map_len == 0 || (map_len % 4) != 0) return false;
+    uint32_t total_cells = map_len / 4;
+    if (total_cells < child_cells + 1 + DTB_GIC_INT_CELLS) return false;
+
+    // Derive the per-row stride: the parent phandle (the first cell after
+    // the child specifier) recurs at the head of every row's parent
+    // specifier. The first clean recurrence that divides the table gives
+    // the stride. Fallback: the documented QEMU-virt/ARM layout
+    // (phandle + 2 parent-addr + 3 parent-int = 6 parent cells).
+    uint32_t phandle = be32_load(map_d + (size_t)child_cells * 4);
+    uint32_t stride = 0;
+    if (phandle != 0) {
+        for (uint32_t i = child_cells + 1; i < total_cells; i++) {
+            if (be32_load(map_d + (size_t)i * 4) != phandle) continue;
+            uint32_t s = i - child_cells;
+            if (s >= child_cells + 1 + DTB_GIC_INT_CELLS &&
+                (total_cells % s) == 0) {
+                stride = s;
+                break;
+            }
+        }
+    }
+    if (stride == 0) {
+        stride = child_cells + 1u + 2u + DTB_GIC_INT_CELLS;   // = child + 6
+        if ((total_cells % stride) != 0) return false;
+    }
+
+    // The masked child spec for (pci_dev, pin): phys.hi = dev << 11 (bus 0,
+    // fn 0), phys.mid/lo = 0, and the trailing #interrupt-cells cell = pin.
+    uint32_t want[DTB_PCI_CHILD_MAX];
+    for (uint32_t j = 0; j < child_cells; j++) {
+        uint32_t m = be32_load(mask_d + (size_t)j * 4);
+        uint32_t cv;
+        if (j == 0)                       cv = (uint32_t)pci_dev << 11;
+        else if (j == child_cells - 1)    cv = (uint32_t)pin;
+        else                              cv = 0;
+        want[j] = cv & m;
+    }
+
+    uint32_t nrows = total_cells / stride;
+    for (uint32_t r = 0; r < nrows; r++) {
+        const uint8_t *row = map_d + (size_t)r * stride * 4;
+        bool match = true;
+        for (uint32_t j = 0; j < child_cells; j++) {
+            uint32_t m  = be32_load(mask_d + (size_t)j * 4);
+            uint32_t rv = be32_load(row + (size_t)j * 4) & m;
+            if (rv != want[j]) { match = false; break; }
+        }
+        if (!match) continue;
+        // Parent interrupt specifier = the last DTB_GIC_INT_CELLS cells of
+        // the row: <type intid flags>. SPI type == 0; GIC INTID = 32 + intid.
+        uint32_t itype = be32_load(row + (size_t)(stride - 3) * 4);
+        uint32_t intid = be32_load(row + (size_t)(stride - 2) * 4);
+        if (itype != DTB_GIC_SPI_TYPE) return false;
+        if (intid > 1019u - DTB_GIC_SPI_BASE) return false;   // GIC INTID range
+        *out_gic_intid = DTB_GIC_SPI_BASE + intid;
+        return true;
+    }
+    return false;
+}
+
+bool dtb_pci_mem_window(u64 *out_base, u64 *out_size) {
+    if (!out_base || !out_size) return false;
+    const uint8_t *d;
+    uint32_t len;
+    if (!dtb_get_compat_prop(DTB_PCI_COMPAT, "ranges", &d, &len)) return false;
+
+    // Each PCI `ranges` entry is 7 cells (28 bytes): child phys.hi/mid/lo
+    // (3) + parent address (root #address-cells = 2) + size (2). phys.hi
+    // bits [25:24] encode the space: 0b01 = I/O, 0b10 = 32-bit MMIO, 0b11
+    // = 64-bit MMIO. Return the 32-bit MMIO window (where virtio-pci BARs
+    // land on QEMU virt).
+    const uint32_t ENTRY_CELLS = 7u;
+    if (len == 0 || (len % 4) != 0) return false;
+    uint32_t cells = len / 4;
+    if (cells < ENTRY_CELLS) return false;
+    uint32_t nentries = cells / ENTRY_CELLS;
+    for (uint32_t e = 0; e < nentries; e++) {
+        const uint8_t *ent = d + (size_t)e * ENTRY_CELLS * 4;
+        uint32_t phys_hi = be32_load(ent);
+        if (((phys_hi >> 24) & 0x3u) != 0x2u) continue;       // want 32-bit MMIO
+        uint32_t p_hi = be32_load(ent + 12);
+        uint32_t p_lo = be32_load(ent + 16);
+        uint32_t s_hi = be32_load(ent + 20);
+        uint32_t s_lo = be32_load(ent + 24);
+        *out_base = ((u64)p_hi << 32) | p_lo;
+        *out_size = ((u64)s_hi << 32) | s_lo;
+        return true;
+    }
+    return false;
+}
+
 // Walk /chosen for a single property. Returns the property data bounds
 // via *out_data / *out_len if found; returns false if the chosen node
 // or named property is absent.

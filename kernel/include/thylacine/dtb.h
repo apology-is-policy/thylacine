@@ -126,6 +126,41 @@ bool dtb_has_compat(const char *compat);
 typedef int (*dtb_compat_cb)(u32 match_idx, u64 reg_base, u64 reg_size, void *arg);
 u32 dtb_for_each_compat_reg(const char *compat, dtb_compat_cb cb, void *arg);
 
+// Read a named property's raw bytes from the FIRST node whose "compatible"
+// contains `compat`. Returns the property data pointer + length via
+// *out_data / *out_len (pointing into the DTB blob, valid for the kernel's
+// lifetime). Returns false if no matching node has the property. Like
+// dtb_get_compat_reg_n it tolerates "compatible" appearing after the target
+// property within the node (depth-stack walk). (pci-1a.)
+bool dtb_get_compat_prop(const char *compat, const char *prop,
+                         const u8 **out_data, u32 *out_len);
+
+// PCI INTx -> GIC INTID routing (pci-1a, the virtio-PCI transport).
+//
+// Parse the PCIe host bridge's `interrupt-map` (compatible =
+// "pci-host-ecam-generic") to resolve the GIC INTID a device at PCI
+// device-number `pci_dev` (bus 0, function 0) raises on legacy INTx pin
+// `pin` (1 = INTA .. 4 = INTD). Honors I-15: the routing DATA comes from
+// the DTB interrupt-map, not a hardcoded base. The child cell-count is
+// taken from `interrupt-map-mask`; the per-row stride is DERIVED from the
+// repeated parent phandle (falling back to the documented QEMU-virt/ARM
+// layout: GIC #address-cells=2 + #interrupt-cells=3); only the universal
+// GIC #interrupt-cells=3 specifier (`<type intid flags>`, type 0 = SPI) is
+// assumed -- the same "assume the universal cell layout" house style as
+// dtb_get_memory.
+//
+// Returns true + *out_gic_intid (an ABSOLUTE GIC SPI INTID, >= 32) on a
+// clean SPI match; false if the node/property is absent or malformed, the
+// matched entry is not a GIC SPI, or no row matches (pin out of range).
+bool dtb_pci_intx_route(u8 pci_dev, u8 pin, u32 *out_gic_intid);
+
+// PCIe 32-bit non-prefetchable MMIO window (pci-1a) -- the CPU-PA range
+// from the host bridge's `ranges` from which the kernel assigns BARs (we
+// boot bare, so no UEFI/firmware assigns them). Returns true + *out_base /
+// *out_size (on QEMU virt: 0x10000000 / ~768 MiB); false if the node or
+// `ranges` is absent or has no 32-bit-MMIO entry.
+bool dtb_pci_mem_window(u64 *out_base, u64 *out_size);
+
 // Read /chosen/kaslr-seed as 64 bits (the property is two u32 cells in
 // the DTB; we concatenate them in the FDT-cell order). Returns 0 if the
 // node or property is absent.

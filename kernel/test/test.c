@@ -67,6 +67,8 @@ void test_kthread_join_free(struct Thread *t, volatile bool *exited) {
 
 void test_kaslr_mix64_avalanche(void);
 void test_dtb_chosen_kaslr_seed_present(void);
+void test_dtb_pci_intx_route(void);
+void test_dtb_pci_mem_window(void);
 void test_phys_alloc_smoke(void);
 void test_phys_leak_10k(void);
 void test_slub_kmem_smoke(void);
@@ -577,6 +579,7 @@ void test_virtio_pci_devices_have_cfg(void);
 void test_virtio_pci_find_rng(void);
 void test_virtio_pci_find_unknown_returns_null(void);
 void test_virtio_pci_cfg_read_bounds(void);
+void test_virtio_pci_cfg_write_bounds(void);
 void test_userspace_first_iteration(void);
 void test_userspace_second_iteration(void);
 void test_userspace_ramfs_hello(void);
@@ -954,6 +957,8 @@ void test_mmio_map_proc_free_releases_kobj(void);
 struct test_case g_tests[] = {
     { "kaslr.mix64_avalanche",         test_kaslr_mix64_avalanche,         false, NULL },
     { "dtb.chosen_kaslr_seed_present", test_dtb_chosen_kaslr_seed_present, false, NULL },
+    { "dtb.pci_intx_route",            test_dtb_pci_intx_route,            false, NULL },
+    { "dtb.pci_mem_window",            test_dtb_pci_mem_window,            false, NULL },
     { "phys.alloc_smoke",              test_phys_alloc_smoke,              false, NULL },
     { "phys.leak_10k",                 test_phys_leak_10k,                 false, NULL },
     { "slub.kmem_smoke",               test_slub_kmem_smoke,               false, NULL },
@@ -1566,6 +1571,7 @@ struct test_case g_tests[] = {
     { "virtio_pci.find_unknown_returns_null",
                                        test_virtio_pci_find_unknown_returns_null, false, NULL },
     { "virtio_pci.cfg_read_bounds",    test_virtio_pci_cfg_read_bounds,    false, NULL },
+    { "virtio_pci.cfg_write_bounds",   test_virtio_pci_cfg_write_bounds,   false, NULL },
     { "userspace.first_iteration",     test_userspace_first_iteration,     false, NULL },
     { "userspace.second_iteration",    test_userspace_second_iteration,    false, NULL },
     { "userspace.ramfs_hello",         test_userspace_ramfs_hello,         false, NULL },

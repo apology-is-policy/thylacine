@@ -143,4 +143,13 @@ u8  virtio_pci_cfg_read8 (const struct virtio_pci_dev *d, u32 off);
 u16 virtio_pci_cfg_read16(const struct virtio_pci_dev *d, u32 off);
 u32 virtio_pci_cfg_read32(const struct virtio_pci_dev *d, u32 off);
 
+// PCI config-space WRITE helpers (pci-1a) -- mirror the reads. Same
+// bounds: offset within [0, 4096) and naturally aligned to the access
+// width; a misaligned or out-of-range write is a silent no-op. The kernel
+// drives these only from the pci-1b claim path (BAR sizing + assignment +
+// command-register enable); config space is never mapped to userspace.
+void virtio_pci_cfg_write8 (const struct virtio_pci_dev *d, u32 off, u8  val);
+void virtio_pci_cfg_write16(const struct virtio_pci_dev *d, u32 off, u16 val);
+void virtio_pci_cfg_write32(const struct virtio_pci_dev *d, u32 off, u32 val);
+
 #endif  // THYLACINE_VIRTIO_PCI_H

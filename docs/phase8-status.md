@@ -21,6 +21,7 @@ socket-compat, dev9p.poll, TLS/NTP, exit criteria) resume on the PCI NIC.
 | `54a6bf6` | **net-0**: the #68 network charter (`docs/NET-DESIGN.md`) — scripture, no code; the 3 votes (shared netd + view-narrowing; pouch socket-compat; ns-restriction firewall) | n/a (scripture) |
 | `ff3a621` (+audit-close) | **net-1**: `usr/lib/netdev` — the reusable `VirtioNet` RX+TX frame driver (send/poll_rx/recycle/quiesce) + host-tested `ring` + the `netdev-test` boot probe | 7 host ring tests + `netdev-test: PASS 24/24` + boot OK + SMP gate 0 corruption + Opus-4.8 audit 0/0/1/4 (F1 P2 + F2/F3 P3 fixed; F4/F5 closed) |
 | `378c667` | **pci-0**: the virtio-PCI transport scripture (`docs/VIRTIO-PCI-DESIGN.md` + ARCH §13.2/§25.4/I-5 + NET-DESIGN §17 + ROADMAP) — the #140 DFS fork; net-only, INTx | n/a (scripture) |
+| `<pending>` | **pci-1a**: the DTB/config primitives — `dtb_pci_intx_route` (interrupt-map → GIC INTID), `dtb_pci_mem_window`, `dtb_get_compat_prop`, `virtio_pci_cfg_write{8,16,32}`; no ABI/kobj change | 883/883 (+3: `dtb.pci_intx_route` full swizzle + `dtb.pci_mem_window` + `virtio_pci.cfg_write_bounds`) + boot OK; SMP-inert (gate at pci-1b) |
 
 ## Remaining work
 
@@ -38,9 +39,13 @@ construction. net-only scope; INTx interrupts; blk→PCI + MSI-X are v1.x seams.
 
 - **pci-0** the transport scripture (this doc + ARCH §13.2/§25.4/I-5 +
   NET-DESIGN §17 + ROADMAP). **LANDED.**
-- **pci-1** kernel: `KObj_PCI` (exclusive per-function claim, non-transferable)
+- **pci-1a** DTB/config primitives: `dtb_pci_intx_route` + `dtb_pci_mem_window`
+  + `dtb_get_compat_prop` + `virtio_pci_cfg_write*`. **LANDED** (883/883;
+  SMP-inert).
+- **pci-1b** kernel `KObj_PCI` (exclusive per-function claim, non-transferable)
   + `SYS_PCI_CLAIM`/`MAP_BAR`/`INFO` + BAR assignment + `VIRTIO_PCI_CAP_*`
-  resolve + the DTB `interrupt-map` INTx swizzle. **Audit-bearing.**
+  resolve + the DTB `interrupt-map` INTx swizzle. **Audit-bearing** (the SMP
+  gate runs here — the claim table is the first shared state).
 - **pci-2** userspace: `libthyla-rs::hardware::PciDev` + virtio-pci-modern +
   port netdev's transport half (reuse `ring`); `netdev-test` over PCI;
   `run-vm.sh` `virtio-net-device` → `virtio-net-pci`.

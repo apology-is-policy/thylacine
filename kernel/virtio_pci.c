@@ -85,6 +85,10 @@ static inline u32 mmio_read32(const void *p) {
     return *(const volatile u32 *)p;
 }
 
+static inline void mmio_write8 (void *p, u8  v) { *(volatile u8  *)p = v; }
+static inline void mmio_write16(void *p, u16 v) { *(volatile u16 *)p = v; }
+static inline void mmio_write32(void *p, u32 v) { *(volatile u32 *)p = v; }
+
 u8 virtio_pci_cfg_read8(const struct virtio_pci_dev *d, u32 off) {
     if (!d || !d->cfg)      return 0xFFu;
     if (off >= 4096)        return 0xFFu;
@@ -103,6 +107,26 @@ u32 virtio_pci_cfg_read32(const struct virtio_pci_dev *d, u32 off) {
     if (off >= 4096)        return 0xFFFFFFFFu;
     if (off & 3)            return 0xFFFFFFFFu;
     return mmio_read32((const u8 *)d->cfg + off);
+}
+
+void virtio_pci_cfg_write8(const struct virtio_pci_dev *d, u32 off, u8 val) {
+    if (!d || !d->cfg)      return;
+    if (off >= 4096)        return;
+    mmio_write8((u8 *)d->cfg + off, val);
+}
+
+void virtio_pci_cfg_write16(const struct virtio_pci_dev *d, u32 off, u16 val) {
+    if (!d || !d->cfg)      return;
+    if (off >= 4096)        return;
+    if (off & 1)            return;
+    mmio_write16((u8 *)d->cfg + off, val);
+}
+
+void virtio_pci_cfg_write32(const struct virtio_pci_dev *d, u32 off, u32 val) {
+    if (!d || !d->cfg)      return;
+    if (off >= 4096)        return;
+    if (off & 3)            return;
+    mmio_write32((u8 *)d->cfg + off, val);
 }
 
 // =============================================================================
