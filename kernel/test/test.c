@@ -439,6 +439,18 @@ void test_devhw_prop_read(void);
 void test_devhw_stat_native(void);
 void test_devhw_readdir_cookie_contract(void);
 void test_devhw_iter_api(void);
+
+void test_allowance_null_is_broad(void);
+void test_allowance_mmio_containment(void);
+void test_allowance_irq_membership(void);
+void test_allowance_dma_cap(void);
+void test_allowance_revoked_permits_nothing(void);
+void test_allowance_confer_rejects_overcap(void);
+void test_allowance_handle_alloc_broad(void);
+void test_allowance_handle_alloc_revoked_aborts(void);
+void test_allowance_clone_inherit(void);
+void test_allowance_free_null_tolerant(void);
+
 void test_cpio_is_valid_recognizes_magic(void);
 void test_cpio_iter_empty_archive(void);
 void test_cpio_iter_single_entry(void);
@@ -1458,6 +1470,18 @@ struct test_case g_tests[] = {
     { "devhw.stat_native",             test_devhw_stat_native,             false, NULL },
     { "devhw.readdir_cookie_contract", test_devhw_readdir_cookie_contract, false, NULL },
     { "devhw.iter_api",                test_devhw_iter_api,                false, NULL },
+
+    { "allowance.null_is_broad",            test_allowance_null_is_broad,            false, NULL },
+    { "allowance.mmio_containment",         test_allowance_mmio_containment,         false, NULL },
+    { "allowance.irq_membership",           test_allowance_irq_membership,           false, NULL },
+    { "allowance.dma_cap",                  test_allowance_dma_cap,                  false, NULL },
+    { "allowance.revoked_permits_nothing",  test_allowance_revoked_permits_nothing,  false, NULL },
+    { "allowance.confer_rejects_overcap",   test_allowance_confer_rejects_overcap,   false, NULL },
+    { "allowance.handle_alloc_broad",       test_allowance_handle_alloc_broad,       false, NULL },
+    { "allowance.handle_alloc_revoked_aborts", test_allowance_handle_alloc_revoked_aborts, false, NULL },
+    { "allowance.clone_inherit",            test_allowance_clone_inherit,            false, NULL },
+    { "allowance.free_null_tolerant",       test_allowance_free_null_tolerant,       false, NULL },
+
     { "cpio.is_valid_recognizes_magic",
                                        test_cpio_is_valid_recognizes_magic, false, NULL },
     { "cpio.iter_empty_archive",       test_cpio_iter_empty_archive,       false, NULL },

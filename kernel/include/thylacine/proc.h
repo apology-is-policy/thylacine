@@ -59,6 +59,7 @@ _Static_assert(PROC_STATE_INVALID == 0,
 struct Territory;
 struct HandleTable;
 struct Vma;
+struct Allowance;   // I-34 hardware allowance (<thylacine/allowance.h>)
 
 // A-1a: identity model (docs/IDENTITY-DESIGN.md §3.3 + §9.1; ARCH §28 I-22).
 //
@@ -422,6 +423,19 @@ struct Proc {
     // (proc_resource_exempt).
     u32                page_count;
     u32                child_count;
+
+    // I-34 (ARCH section 28; docs/MENAGERIE.md section 4; specs/allowance.tla):
+    // the per-Proc hardware allowance -- the narrowing of CAP_HW_CREATE the
+    // warden confers when it spawns a per-device driver. NULL = BROAD (the
+    // warden + the existing trusted servers, bounded only by the I-5 kernel
+    // reservation -- the as-built v1.0 behavior). Non-NULL = NARROWED: the
+    // driver may create KObj_MMIO/IRQ/DMA only within the conferred set, and
+    // only while not revoked. Heap-allocated by proc_confer_allowance; deep-
+    // copied across rfork by allowance_clone_into (a narrowed parent's child
+    // is equally narrowed -- the hardware-axis analog of caps' monotonic
+    // reduction, I-2); freed by proc_free (allowance_free). KP_ZERO inits it
+    // NULL (broad/none). See <thylacine/allowance.h>.
+    struct Allowance  *allowance;
 };
 
 #define PROC_FLAG_NODUMP            (1u << 0)
@@ -466,17 +480,21 @@ struct Proc {
 // thread, and an armed kproc would *_INTR every kernel-thread sleep).
 #define PROC_FLAG_INTR_TERMINATE_PENDING (1u << 7)
 
-_Static_assert(sizeof(struct Proc) == 272,
-               "struct Proc size pinned at 272 bytes (the A-4a 264 baseline + "
-               "the #65 resource-floor block: page_count u32 + child_count u32 "
-               "= 8 -> 272). Adding a field grows the SLUB cache; update this "
-               "assert deliberately so the change is intentional.");
+_Static_assert(sizeof(struct Proc) == 280,
+               "struct Proc size pinned at 280 bytes (the #65 272 baseline + "
+               "the I-34 hardware-allowance pointer = 8 -> 280). Adding a field "
+               "grows the SLUB cache; update this assert deliberately so the "
+               "change is intentional.");
 _Static_assert(__builtin_offsetof(struct Proc, page_count) == 264,
                "#65 resource-floor counters append after the A-4a legate "
                "block; existing offsets stay stable (KP_ZERO inits them 0).");
 _Static_assert(__builtin_offsetof(struct Proc, child_count) == 268,
                "child_count follows page_count in the #65 resource-floor "
                "block (offset 268).");
+_Static_assert(__builtin_offsetof(struct Proc, allowance) == 272,
+               "I-34 hardware-allowance pointer appends after the #65 "
+               "resource-floor block (offset 272, 8-byte aligned); existing "
+               "offsets stay stable (KP_ZERO inits it NULL = broad).");
 _Static_assert(__builtin_offsetof(struct Proc, principal_id) == 168,
                "A-1a identity block appends after handler_va; existing "
                "offsets must stay stable (KP_ZERO inits the new tail).");

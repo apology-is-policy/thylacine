@@ -19,6 +19,7 @@
 #include <thylacine/dma_handle.h>
 #include <thylacine/elf.h>
 #include <thylacine/errno.h>
+#include <thylacine/allowance.h>
 #include <thylacine/exec.h>
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
@@ -220,12 +221,21 @@ static s64 sys_mmio_create_handler(u64 pa, u64 size, u64 rights) {
     // we'll have to immediately free.
     if (rights == 0 || (rights & ~(u64)RIGHT_ALL))   return -1;
 
+    // I-34 CreateBegin (specs/allowance.tla): if the caller carries a NARROWED
+    // hardware allowance, [pa, pa+size) must lie within it. A broad (NULL)
+    // allowance -- the warden + the existing trusted servers -- passes here;
+    // the kobj_mmio_create I-5 reservation below still bounds it.
+    if (!allowance_permits(p, HW_RES_MMIO, pa, size))  return -1;
+
     // P4-Ib HwResourceExclusive enforced by kobj_mmio_create: returns
     // NULL on overlap, bad alignment, size 0, OOM, or table-full.
     struct KObj_MMIO *k = kobj_mmio_create(pa, (size_t)size);
     if (!k)                                          return -1;
 
-    hidx_t h = handle_alloc(p, KOBJ_MMIO, (rights_t)rights, k);
+    // I-34 CreateCommit: install under the allowance re-check, so a concurrent
+    // proc_revoke_allowance (DeviceRemoved) aborts this create instead of
+    // leaking a handle through a being-revoked allowance.
+    hidx_t h = allowance_handle_alloc(p, KOBJ_MMIO, (rights_t)rights, k);
     if (h < 0) {
         // Rollback the kobj_mmio_create. The PA-range claim is held
         // until kobj_mmio_unref drops the refcount; we MUST release
@@ -271,13 +281,19 @@ static s64 sys_irq_create_handler(u64 intid, u64 rights) {
     // restriction explicit at the API boundary.
     if (intid < 32)                                  return -1;
 
+    // I-34 CreateBegin (specs/allowance.tla): a NARROWED allowance must list
+    // this INTID. A broad (NULL) allowance -- the warden + the trusted servers
+    // -- passes; the kobj_irq_create reservation below still bounds it.
+    if (!allowance_permits(p, HW_RES_IRQ, intid, 0))   return -1;
+
     // INTID exclusivity enforced by kobj_irq_create's intid_try_claim
     // (P4-Ib addition); returns NULL on already-claimed / OOM /
     // gic_attach failure.
     struct KObj_IRQ *k = kobj_irq_create((u32)intid);
     if (!k)                                          return -1;
 
-    hidx_t h = handle_alloc(p, KOBJ_IRQ, (rights_t)rights, k);
+    // I-34 CreateCommit: install under the allowance re-check (revoke race).
+    hidx_t h = allowance_handle_alloc(p, KOBJ_IRQ, (rights_t)rights, k);
     if (h < 0) {
         kobj_irq_unref(k);
         return -1;
@@ -468,10 +484,20 @@ static s64 sys_dma_create_handler(u64 size, u64 rights) {
     // aarch64; the comparison is safe.
     if (size == 0)                                   return -1;
 
+    // I-34 CreateBegin (specs/allowance.tla): a NARROWED allowance bounds the
+    // per-buffer DMA size (dma_max; 0 = no DMA permitted). A broad (NULL)
+    // allowance -- the warden + the trusted servers -- passes (bounded by
+    // KOBJ_DMA_MAX_SIZE below). The cumulative per-driver DMA-pool budget is a
+    // documented v1.x refinement composing with the #65 resource floor: it is
+    // the resource-DoS axis, not the I-34 cross-device-authority axis (DMA
+    // buffers are the driver's OWN kernel memory, never another device's regs).
+    if (!allowance_permits(p, HW_RES_DMA, size, 0))  return -1;
+
     struct KObj_DMA *k = kobj_dma_create((size_t)size);
     if (!k)                                          return -1;
 
-    hidx_t h = handle_alloc(p, KOBJ_DMA, (rights_t)rights, k);
+    // I-34 CreateCommit: install under the allowance re-check (revoke race).
+    hidx_t h = allowance_handle_alloc(p, KOBJ_DMA, (rights_t)rights, k);
     if (h < 0) {
         // Rollback: release the page chunk back to buddy. Mirrors the
         // sys_mmio_create rollback for the same reason — the proc never

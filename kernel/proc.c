@@ -16,6 +16,7 @@
 //   2. proc_init      — kproc (PID 0) appears
 //   3. thread_init    — kthread (TID 0) appears, parented to kproc
 
+#include <thylacine/allowance.h>
 #include <thylacine/burrow.h>
 #include <thylacine/caps.h>
 #include <thylacine/devcap.h>
@@ -527,6 +528,10 @@ void proc_free(struct Proc *p) {
         p->notes = NULL;
     }
 
+    // I-34: release the per-Proc hardware allowance (NULL-tolerant). A plain
+    // heap struct, independent of the handle/notes/VMA frees above.
+    allowance_free(p);
+
     // RW-1 B-F1: release the per-Proc page table. There is NO per-Proc ASID
     // free in the rolling-ASID model -- the Proc's context_id is simply
     // dropped; its hardware ASID value stays reserved in the current
@@ -854,6 +859,24 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     child->legate_scope_id    = parent->legate_scope_id;
     child->legate_session_id  = parent->legate_session_id;
     child->legate_valid_until = parent->legate_valid_until;
+
+    // I-34 (specs/allowance.tla): inherit the hardware allowance. A NARROWED
+    // parent's child is equally narrowed -- the hardware-axis analog of caps'
+    // monotonic reduction (a child can never reach a BROADER hardware
+    // authority than its parent; the same I-2 spirit the `& ~CAP_ELEVATION_-
+    // ONLY` strip enforces for caps). A BROAD parent (allowance == NULL) ->
+    // child stays NULL (broad), but a plain-rfork child holds CAP_NONE so the
+    // broad path is unreachable for it -- only the warden/TCB (broad +
+    // CAP_HW_CREATE) spawns broad hw-capable children, and it does so via the
+    // confer path, not inheritance. allowance_clone_into leaves child->-
+    // allowance NULL on its own failure, so the proc_free rollback's
+    // allowance_free is a clean no-op there; a LATER failure (territory_clone
+    // / thread_create) frees the just-cloned allowance via the same path.
+    if (allowance_clone_into(child, parent) != 0) {
+        child->state = PROC_STATE_ZOMBIE;
+        proc_free(child);
+        return -1;
+    }
 
     // P5-hostowner-a: child->proc_flags stays 0 (KP_ZERO from
     // proc_alloc) — deliberately NOT copied from the parent. In

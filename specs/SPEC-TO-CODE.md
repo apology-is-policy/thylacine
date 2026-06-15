@@ -1081,3 +1081,31 @@ on_cpu handoff, stealing, and `Place`. TLC-green (2-CPU + 3-CPU cfgs).
 
 Pre-commit gate: `sched_alpha.cfg` + `sched_alpha_3cpu.cfg` clean on any
 change to the on_cpu protocol, the pinned-idle dispatch, or `try_steal`.
+
+## allowance.tla — Menagerie build-arc 2 (the hardware allowance; spec-first re-enabled, model-first)
+
+The per-Proc hardware allowance that scopes `CAP_HW_CREATE` (I-34;
+MENAGERIE.md §4). Spec-first RE-ENABLED for this surface (user-voted
+2026-06-15) because the central hazard is an SMP race (the
+capability-revocation-vs-in-flight-create class). Written + TLC-green BEFORE
+the impl (spec `1602e37`; the impl follows in the next commit). The model is
+the KERNEL mechanism; the warden is the implicit actor driving Confer/Revoke.
+
+| Spec action | Code site | Invariant pinned |
+|---|---|---|
+| `Confer(d, N, A)` | `kernel/allowance.c::proc_confer_allowance` (the warden's set-once-at-spawn grant) | the conferred set ⊆ node (ConferredWithinNode — the warden's grant policy) |
+| `CreateBegin(d, r)` | `kernel/allowance.c::allowance_permits` (the lock-free gate) at `kernel/syscall.c::sys_{mmio,irq,dma}_create_handler` | the gate check: r ∈ allowance |
+| `CreateCommit(d)` | `kernel/allowance.c::allowance_handle_alloc` (re-check `revoked` under `allowance->lock` then `handle_alloc`) | HandlesWithinAllowance — the revoke-vs-create race loses nothing |
+| `Revoke(d)` | `kernel/allowance.c::proc_revoke_allowance` (set `revoked`) + the caller's `proc_group_terminate` | RevokedFullyCleared — the handle-axis teardown |
+| (rfork inherit) | `kernel/allowance.c::allowance_clone_into` (in `rfork_internal`) | AllowanceWithinConferred — a child is never broader than its parent |
+
+Invariants: HandlesWithinAllowance (the gate + the race), AllowanceWithinConferred
+(never widened), ConferredWithinNode (the grant ⊆ node), RevokedFullyCleared
+(fully revoked on teardown) + the `EventuallyResolves` liveness witness (the
+re-check gate cannot wedge an in-flight `SYS_*_CREATE` against a concurrent revoke).
+
+Pre-commit gate: `allowance.cfg` clean GREEN + the 4 buggy cfgs
+(`allowance_buggy_revoke_race` [the headline SMP race -> HandlesWithinAllowance]
+/ `allowance_buggy_revoke_leak` / `allowance_buggy_confer_widen` /
+`allowance_buggy_self_widen`) confirmed failing on any change to the gate
+protocol, the confer/revoke path, or the clone-inherit.

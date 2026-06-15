@@ -24,6 +24,7 @@ set(KERNEL_SRCS
     fault_test.c
     proc.c
     perm.c
+    allowance.c
     thread.c
     sched.c
     smp.c
@@ -150,6 +151,7 @@ set(KERNEL_TEST_SRCS
     test/test_devctl.c
     test/test_devdev.c
     test/test_devhw.c
+    test/test_allowance.c
     test/test_cpio.c
     test/test_devramfs.c
     test/test_devsrv.c

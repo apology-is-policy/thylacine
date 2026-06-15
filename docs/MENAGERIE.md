@@ -603,3 +603,28 @@ early-console `chosen/stdout-path` selection is kernel.
   boot OK + login prompt, 0 corruption). **Next**: the hardware allowance
   (build-sequence step 3 -- audit-bearing + SMP-race-bearing; the spec-first
   re-enablement for `specs/allowance.tla` is a user decision).
+- **2026-06-15 (the hardware allowance / I-34, build-sequence step 3)**: the
+  per-Proc scoping of `CAP_HW_CREATE` landed. **Model-first** (spec-first
+  RE-ENABLED, user-voted 2026-06-15): `specs/allowance.tla` (the clean cfg +
+  the 4 buggy cfgs `revoke_race` / `revoke_leak` / `confer_widen` /
+  `self_widen`) was written + TLC-green FIRST (commit `1602e37`), then the
+  impl. NEW `kernel/allowance.{c,h}`: `struct Allowance` { the conferred MMIO
+  PA windows + IRQ INTIDs + a DMA per-buffer cap + the atomic `revoked` flag +
+  a `lock` }; `allowance_permits` (CreateBegin, the lock-free gate) /
+  `allowance_handle_alloc` (CreateCommit, the under-lock `revoked` re-check) /
+  `proc_confer_allowance` (the warden's set-once-at-spawn grant) /
+  `proc_revoke_allowance` (DeviceRemoved) / `allowance_clone_into` (rfork
+  inherit) / `allowance_free`. The per-Proc `struct Allowance *allowance` field
+  is NULL = **broad** (the warden + the existing trusted servers, the as-built
+  v1.0 behavior unchanged) or non-NULL = **narrowed**; the three create gates
+  at `sys_{mmio,irq,dma}_create_handler` (`kernel/syscall.c` 228/287/494) run
+  the CreateBegin check then the CreateCommit install. The central
+  revoke-vs-create SMP race is closed by the two-step gate (the lock-free
+  permits check, then the install under a `revoked` re-check under the same
+  lock `proc_revoke_allowance` takes -- so an in-flight create racing a
+  `DeviceRemoved` revoke aborts). Reference doc
+  `docs/reference/117-allowance.md`. 912/912 PASS (+10 `allowance.*`, incl.
+  `handle_alloc_revoked_aborts` = the race regression); boot OK (the broad path
+  preserves the existing virtio drivers). The warden's confer-at-spawn syscall
+  wiring + the bind DB + `libdriver` are the **step-5** consumer. **Next**: the
+  Loom device-gone terminal CQE (step 4) + the warden + `libdriver` (step 5).
