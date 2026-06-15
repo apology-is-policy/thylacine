@@ -2795,7 +2795,7 @@ musl port (Tier 1 native); Linux syscall shim (Tier 2 static); container-as-terr
 
 ---
 
-## 17. Halcyon integration
+## 17. Halcyon integration (and Aurora, the textual sibling)
 
 **STATUS**: COMMITTED (EVOLVED 2026-06-08 — the compositor / client architecture)
 
@@ -2806,6 +2806,23 @@ musl port (Tier 1 native); Linux syscall shim (Tier 2 static); container-as-terr
 > evolved Halcyon into an anti-window tiling environment. This section records the
 > *foundational decisions* at ARCH altitude; the full model is **`docs/TAPESTRY.md`
 > §13-17** + **`NOVEL.md` Angle #4**.
+>
+> **Two first-class environments (scope extension 2026-06-15; `docs/AURORA.md`,
+> VISION §3.3).** Thylacine ships **Aurora** (textual) + **Halcyon** (graphical) and
+> the user chooses. **Aurora** is the textual environment — a baked-font text grid
+> blit to a real framebuffer (the screen-side of the VT protocol) + session
+> multiplexing + a status surface, hosting Utopia + the Kaua TUI suite. It is *not* a
+> Halcyon precursor: it is a complete, shippable environment, and the v1.0-rc.1
+> textual fallback (§10/§11 of ROADMAP) *is* the Aurora environment — so the
+> highest-risk Halcyon phase is not load-bearing for a beautiful v1.0. Both share the
+> substrate: the **Tapestry** present-path, the framebuffer (`simplefb` / virtio-gpu),
+> the **Menagerie** drivers (scanout + the trusted-tier USB keyboard), and the
+> **trusted path** (`docs/TRUSTED-PATH.md` — a renderer is fully suspended during a
+> SAK episode). The boundary between them is the **swappable `/dev/cons` backend**:
+> UART-backed on serial/QEMU, Aurora-backed on a graphical board, so Utopia + the
+> installer run on either *unchanged*. When Halcyon lands it hosts Aurora terminals as
+> windows. Aurora adds **no new §28 invariant** (it inherits T-1 + the I-27 renderer
+> obligation).
 
 ### 17.1 The compositor / client architecture
 

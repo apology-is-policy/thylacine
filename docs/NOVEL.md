@@ -22,7 +22,7 @@ The goal is to make `ARCHITECTURE.md` easier to write: each angle becomes a know
 | 1 | 9P as universal composition, totalized | Low | 6–8 KLOC C99 | Continuous, foundational |
 | 2 | Userspace drivers via typed handles + BURROW zero-copy | Medium | 7–10 KLOC C99 + 8–12 KLOC Rust | Phase 2-3 |
 | 3 | Pipelined 9P client with out-of-order completion | Low-medium | 3–5 KLOC C99 | Phase 4 (foundational for 4+) |
-| 4 | Halcyon: shell as the graphical environment | Medium-high | 8–12 KLOC Rust | Phase 8 (final) |
+| 4 | Halcyon: shell as the graphical environment (+ **Aurora**, the textual sibling — two first-class environments, VISION §3.3 / `docs/AURORA.md`) | Medium-high | 8–12 KLOC Rust | Phase 8 (final) |
 | 5 | Stratum as native FS with territory coupling | Low | 4–6 KLOC C99 (kernel side) | Phase 5 |
 | 6 | EEVDF scheduler on Plan 9-heritage kernel | Medium | 4–6 KLOC C99 | Phase 2 |
 | 7 | SOTA security hardening from day one | Low-medium | 3–5 KLOC C99 (mostly compiler/linker config + targeted code) | Phase 1-2 |

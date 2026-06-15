@@ -29,7 +29,8 @@ Names in this project share an emotional register: words that carry longing for 
 |---|---|---|---|
 | Operating system | **Thylacine** | The lost animal; the unlived future | *thigh-luh-syne* |
 | Filesystem | **Stratum** | A record of a different time, preserved in layers | *strah-tum* |
-| Shell | **Halcyon** | The calm before; the impossible return | *hal-see-on* |
+| Textual environment | **Aurora** | The first light; aurora australis, the southern (Tasmanian) sky; a glow | *uh-ror-uh* |
+| Graphical environment | **Halcyon** | The calm before; the impossible return | *hal-see-on* |
 | Key agent | **janus** | Two-faced; the boundary between worlds (inherited from Stratum) | *jay-nus* |
 
 Naming is load-bearing. A project that can articulate what it is and why in three words has a soul; a project that can't, drifts.
@@ -64,11 +65,34 @@ A "container" in Thylacine is a process with:
 
 There is no separate container runtime, no cgroups, no territories-as-kernel-feature beyond the per-process territory. Linux container images run via territory construction, not via any new kernel mechanism. This is the Plan 9 / per-connection-9P-territory model that Stratum already commits to (Stratum's NOVEL angle #8); the OS extends it to per-process.
 
-### 3.3 The shell is the graphical environment
+### 3.3 The shell is the environment — two first-class lights (Aurora + Halcyon)
 
-Halcyon is not a terminal emulator running inside a window manager. It is the graphical environment. The display surface is a scroll buffer where each entry is either a text region or a pixel-addressable graphical region. Images render inline. Video plays inline. Halcyon controls scroll, history, focus, and command launching.
+**Thylacine ships two first-class user environments, and the user chooses** (scope
+extension 2026-06-15; `docs/AURORA.md`):
 
-There is no compositor. There is no scene graph. There is no window manager. There is Halcyon.
+- **Aurora — the textual environment** (the *first light*). The purest expression of
+  "the shell is sufficient as a UI" (§1.2): a complete, beautiful environment that is
+  *only* the shell + Utopia + the native TUI suite — no window system, no compositor,
+  no concession. Aurora is the *renderer* (a baked-font text grid blit to a real
+  framebuffer via Tapestry, the screen-side of the VT protocol) **and** the
+  *environment* (session multiplexing, a status surface, login hand-off). It serves a
+  permanent audience (servers, headless-with-a-screen, power users, the
+  security-conscious — no compositor is a smaller TCB), and it **de-risks the ship**:
+  the v1.0-rc.1 textual fallback (§10/§11 of ROADMAP) *is* the Aurora environment — a
+  designed product that ships whether or not Halcyon lands.
+
+- **Halcyon — the graphical environment** (the *full calm day*). Not a terminal
+  emulator running inside a window manager. It is the graphical environment. The
+  display surface is a scroll buffer where each entry is either a text region or a
+  pixel-addressable graphical region. Images render inline. Video plays inline.
+  Halcyon controls scroll, history, focus, and command launching. There is no
+  compositor. There is no scene graph. There is no window manager. There is Halcyon.
+
+Both are names for serene, beautiful times — the dawn and the halcyon days — so the
+choice is "which light," never "the cut-down one vs the real one." They share the
+substrate (Tapestry, the framebuffer, the Menagerie drivers, the trusted path); when
+Halcyon lands it hosts Aurora terminals as windows. The choice is offered at install
+and switchable later.
 
 This is a deliberate scope choice with explicit consequences. Some applications cannot be built on this model — multi-pane IDEs, web browsers, side-by-side document editors. Those applications are out of scope (§9 non-goals). The scroll-buffer-with-inline-graphics model handles every workflow Thylacine targets: image viewing, video playback, code editing, REPL-driven development, file management, system administration, monitoring.
 
