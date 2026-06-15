@@ -22,6 +22,7 @@ socket-compat, dev9p.poll, TLS/NTP, exit criteria) resume on the PCI NIC.
 | `ff3a621` (+audit-close) | **net-1**: `usr/lib/netdev` — the reusable `VirtioNet` RX+TX frame driver (send/poll_rx/recycle/quiesce) + host-tested `ring` + the `netdev-test` boot probe | 7 host ring tests + `netdev-test: PASS 24/24` + boot OK + SMP gate 0 corruption + Opus-4.8 audit 0/0/1/4 (F1 P2 + F2/F3 P3 fixed; F4/F5 closed) |
 | `378c667` | **pci-0**: the virtio-PCI transport scripture (`docs/VIRTIO-PCI-DESIGN.md` + ARCH §13.2/§25.4/I-5 + NET-DESIGN §17 + ROADMAP) — the #140 DFS fork; net-only, INTx | n/a (scripture) |
 | `5a1b36c` | **pci-1a**: the DTB/config primitives — `dtb_pci_intx_route` (interrupt-map → GIC INTID), `dtb_pci_mem_window`, `dtb_get_compat_prop`, `virtio_pci_cfg_write{8,16,32}`; no ABI/kobj change | 883/883 (+3: `dtb.pci_intx_route` full swizzle + `dtb.pci_mem_window` + `virtio_pci.cfg_write_bounds`) + boot OK; SMP-inert (gate at pci-1b) |
+| _(pending)_ | **pci-1b**: the `KObj_PCI` kernel object — `kernel/pci_handle.{c,h}` (exclusive `g_pci_claims` per-(bus,dev,fn) claim; bump-assign BARs from `dtb_pci_mem_window` with width-correct 32/64-bit sizing; `VIRTIO_PCI_CAP_*` cap-walk into `regions[]`, bounded + OOB-validated; INTx swizzle; quiesce-before-free) + `KOBJ_PCI=11` joining `KOBJ_KIND_HW_MASK` (I-5 non-transferable + NoHwDup for free) + `kobj_pci_init` at boot | 889/889 (+6: `pci.bar_decode_size` + `pci.claim_rng`/`claim_unknown`/`claim_exclusive`/`unref_releases_bars`/`live_count_balances`, claiming the live idle rng-pci) + boot OK + SMP gate; **self-found+fixed**: 32-bit BAR size mask must invert in 32-bit width (a 64-bit invert yields a bogus exabyte size) |
 
 ## Remaining work
 
@@ -43,9 +44,12 @@ construction. net-only scope; INTx interrupts; blk→PCI + MSI-X are v1.x seams.
   + `dtb_get_compat_prop` + `virtio_pci_cfg_write*`. **LANDED** (883/883;
   SMP-inert).
 - **pci-1b** kernel `KObj_PCI` (exclusive per-function claim, non-transferable)
-  + `SYS_PCI_CLAIM`/`MAP_BAR`/`INFO` + BAR assignment + `VIRTIO_PCI_CAP_*`
-  resolve + the DTB `interrupt-map` INTx swizzle. **Audit-bearing** (the SMP
-  gate runs here — the claim table is the first shared state).
+  + BAR assignment + `VIRTIO_PCI_CAP_*` resolve + the DTB `interrupt-map` INTx
+  swizzle. **Audit-bearing** (the claim table is the first shared state).
+  **LANDED** (kobj-only; the 3 syscalls split out to pci-1c). 889/889 + boot OK.
+- **pci-1c** the 3 syscalls: `SYS_PCI_CLAIM=76` / `MAP_BAR=77` / `INFO=78` +
+  `struct t_pci_info` ABI + libt/libthyla-rs wrappers + syscall tests. The SMP
+  concurrency gate's adversarial value (concurrent claims) lands here.
 - **pci-2** userspace: `libthyla-rs::hardware::PciDev` + virtio-pci-modern +
   port netdev's transport half (reuse `ring`); `netdev-test` over PCI;
   `run-vm.sh` `virtio-net-device` → `virtio-net-pci`.
@@ -62,21 +66,32 @@ construction. net-only scope; INTx interrupts; blk→PCI + MSI-X are v1.x seams.
 - **net-7** TLS root bundle + SNTP + `SYS_CLOCK_SETTIME` + observability.
 - **net-8** server + soak exit criteria + one focused audit over the arc.
 
-## Ground truth (the DTB, read 2026-06-15)
+## Ground truth (the DTB + the live device, read 2026-06-15)
 
-`qemu-system-aarch64 -machine virt,gic-version={2,3},dumpdtb` + `dtc` decode of
-the `pcie@10000000` node (identical for both GIC versions):
+The DTB dump (`qemu-system-aarch64 -machine virt,... ,dumpdtb` + `dtc`) of the
+`pcie` node, reconciled with the **actual** in-boot enumeration (the kobj is
+DTB-derived at runtime, so it is config-agnostic):
 
-- **ECAM** PA `0x40_1000_0000`, 256 MiB (already reserved + bus-0 mapped, P4-H).
+- **ECAM** PA varies by machine: `0x3f00_0000` (16 MiB) on the **default
+  `gic-version=2`** machine that `tools/test.sh` boots; `0x40_1000_0000`
+  (256 MiB, highmem) on the `gic-version=3` variant my pci-1a manual dump used.
+  The kobj never hardcodes it — `kernel/virtio_pci.c` maps it from the DTB.
 - **BAR window** PA `0x1000_0000`, ~768 MiB (32-bit, page-aligned, not reserved
-  → a per-device BAR is page-aligned + userspace-claimable).
+  → a per-device BAR is page-aligned + userspace-claimable). Stable across both
+  machines (`dtb.pci_mem_window` asserts the base).
 - **INTx** swizzle `SPI = 3 + ((slot + pin − 1) mod 4)` → GIC INTID **35–38**.
   A single PCI device (net-only) lands on **one unshared INTID** → no irqfwd
-  multi-waiter needed.
-- **MSI** present in HW (GICv3 ITS / GICv2 v2m + the pcie `msi-map`) but
-  **undriven** → INTx is the v1.0 path; MSI-X is a v1.x seam.
+  multi-waiter needed. The live rng-pci at bdf 0:1.0 routes to INTID 36.
+- **MSI** present in HW but **undriven** → INTx is the v1.0 path; MSI-X v1.x.
 - **BARs start unassigned** (no UEFI) → the kernel assigns them from the BAR
-  window (pci-1).
+  window (pci-1b).
+- **The live test device (rng-pci) is TRANSITIONAL**: it presents the *legacy*
+  device_id `0x1005` (`is_modern=0`) but carries the *full* modern interface —
+  a 32-bit legacy MMIO BAR1 (4 KiB) **and** a 64-bit modern BAR4 (16 KiB) with
+  all four `VIRTIO_PCI_CAP_*` structures (common/notify/isr/device) packed into
+  BAR4. So `pci.claim_rng` exercises BOTH BAR widths + the full cap-walk. **For
+  pci-2/net-2**: prefer `virtio-net-pci,disable-legacy=on` for a clean
+  modern-only NIC (device_id `0x1041`, no I/O BAR) — the kobj handles either.
 
 ## Exit criteria (refined per W4-F8; see NET-DESIGN §16)
 

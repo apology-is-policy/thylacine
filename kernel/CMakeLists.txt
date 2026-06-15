@@ -82,6 +82,7 @@ set(KERNEL_SRCS
     virtio_pci.c
     irqfwd.c
     mmio_handle.c
+    pci_handle.c
     dma_handle.c
     9p_wire.c
     9p_session.c
@@ -160,6 +161,7 @@ set(KERNEL_TEST_SRCS
     test/test_caps.c
     test/test_mmio_handle.c
     test/test_dma_handle.c
+    test/test_pci_handle.c
     test/test_handle_hw.c
     test/test_burrow_mmio.c
     test/test_mmio_map.c

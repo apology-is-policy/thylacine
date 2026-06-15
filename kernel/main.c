@@ -39,6 +39,7 @@
 #include <thylacine/irqfwd.h>           // irqfwd_init (P4-Ib R9 F142)
 #include <thylacine/joey.h>     // joey_run (P3-F)
 #include <thylacine/mmio_handle.h>      // kobj_mmio_init (P4-Ib)
+#include <thylacine/pci_handle.h>       // kobj_pci_init (pci-1b)
 #include <thylacine/dma_handle.h>       // kobj_dma_init (P4-Ic5b1b)
 #include <thylacine/page.h>
 #include <thylacine/territory.h>
@@ -510,6 +511,11 @@ void boot_main(void) {
     // VirtIO PCI device (vendor 0x1AF4 + device IDs 0x1000..0x107F).
     // Silent skip when no PCIe root is present in DTB.
     virtio_pci_init();
+
+    // pci-1b: the KObj_PCI claim subsystem. Must follow virtio_pci_init (it
+    // claims from the enumerated g_virtio_pci_devs[]). No DTB/HW access of its
+    // own -- BARs are assigned lazily from dtb_pci_mem_window on the first claim.
+    kobj_pci_init();
 
     // W1.5: boot-time LSE alternatives-patching. Rewrites the LL/SC atomic
     // sites (the spinlock test-and-set, the Spoor/SrvConn refcounts, the

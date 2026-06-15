@@ -45,6 +45,7 @@
 #include <thylacine/irqfwd.h>
 #include <thylacine/loom.h>
 #include <thylacine/mmio_handle.h>
+#include <thylacine/pci_handle.h>
 #include <thylacine/proc.h>
 #include <thylacine/spoor.h>
 #include <thylacine/srvconn.h>
@@ -211,6 +212,14 @@ static void handle_release_obj(enum kobj_kind kind, void *obj) {
         // mapping_count independently keeps the pages until its VMA tears down).
         loom_unref((struct Loom *)obj);
         break;
+    case KOBJ_PCI:
+        // pci-1b: the last handle drop releases the claimed PCI function --
+        // kobj_pci_unref's last ref quiesces the device + drops each assigned
+        // BAR's KObj_MMIO ref (a live user mapping's burrow ref independently
+        // keeps that BAR's pages alive until its VMA tears down -- #847 dual
+        // lifetime) + frees the (bus,dev,fn) exclusivity slot.
+        kobj_pci_unref((struct KObj_PCI *)obj);
+        break;
     default:
         extinction("handle_release_obj: out-of-enum kobj_kind (memory corruption?)");
     }
@@ -277,6 +286,15 @@ static void handle_acquire_obj(enum kobj_kind kind, void *obj) {
         // handle_put's loom_unref. So this MUST bump (a no-op would underflow
         // the refcount on the get/put pairing and free the ring early).
         loom_ref((struct Loom *)obj);
+        break;
+    case KOBJ_PCI:
+        // pci-1b: KObj_PCI is non-dup-able (in HW_MASK, so handle_dup rejects
+        // it), but handle_GET acquires -- it holds a ref so the snapshot's obj
+        // stays alive across the borrow (esp. the pci-1c MAP_BAR / INFO paths),
+        // paired with handle_put's kobj_pci_unref. MUST bump (a no-op would
+        // underflow the get/put refcount and free the claim early), exactly like
+        // KOBJ_LOOM (both name ref-counted objects).
+        kobj_pci_ref((struct KObj_PCI *)obj);
         break;
     default:
         extinction("handle_acquire_obj: out-of-enum kobj_kind (memory corruption?)");

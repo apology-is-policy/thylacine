@@ -580,6 +580,12 @@ void test_virtio_pci_find_rng(void);
 void test_virtio_pci_find_unknown_returns_null(void);
 void test_virtio_pci_cfg_read_bounds(void);
 void test_virtio_pci_cfg_write_bounds(void);
+void test_pci_bar_decode_size(void);
+void test_pci_claim_rng(void);
+void test_pci_claim_unknown(void);
+void test_pci_claim_exclusive(void);
+void test_pci_unref_releases_bars(void);
+void test_pci_live_count_balances(void);
 void test_userspace_first_iteration(void);
 void test_userspace_second_iteration(void);
 void test_userspace_ramfs_hello(void);
@@ -1572,6 +1578,12 @@ struct test_case g_tests[] = {
                                        test_virtio_pci_find_unknown_returns_null, false, NULL },
     { "virtio_pci.cfg_read_bounds",    test_virtio_pci_cfg_read_bounds,    false, NULL },
     { "virtio_pci.cfg_write_bounds",   test_virtio_pci_cfg_write_bounds,   false, NULL },
+    { "pci.bar_decode_size",           test_pci_bar_decode_size,           false, NULL },
+    { "pci.claim_rng",                 test_pci_claim_rng,                 false, NULL },
+    { "pci.claim_unknown",             test_pci_claim_unknown,             false, NULL },
+    { "pci.claim_exclusive",           test_pci_claim_exclusive,           false, NULL },
+    { "pci.unref_releases_bars",       test_pci_unref_releases_bars,       false, NULL },
+    { "pci.live_count_balances",       test_pci_live_count_balances,       false, NULL },
     { "userspace.first_iteration",     test_userspace_first_iteration,     false, NULL },
     { "userspace.second_iteration",    test_userspace_second_iteration,    false, NULL },
     { "userspace.ramfs_hello",         test_userspace_ramfs_hello,         false, NULL },

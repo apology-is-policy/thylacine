@@ -60,14 +60,15 @@ enum kobj_kind {
     KOBJ_INTERRUPT  = 8,    // an eventfd-like interrupt, non-transferable
     KOBJ_SRV        = 9,    // a /srv service or connection object, non-transferable (P5-corvus-srv)
     KOBJ_LOOM       = 10,   // a Loom ring (KObj_Loom), non-transferable (Loom-2a)
-    KOBJ_KIND_COUNT = 11,
+    KOBJ_PCI        = 11,   // a claimed VirtIO-PCI function (KObj_PCI), hardware, non-transferable (pci-1b)
+    KOBJ_KIND_COUNT = 12,
 };
 
 // _Static_assert pins KIND_COUNT — adding a new kind requires bumping
 // this constant + extending the transferable/hw/srv/loom masks below +
 // reviewing every switch over kobj_kind in the kernel (per ARCH §18.3 typed
 // transferability).
-_Static_assert(KOBJ_KIND_COUNT == 11,
+_Static_assert(KOBJ_KIND_COUNT == 12,
                "kobj_kind drift: when adding a new kind, update "
                "KOBJ_KIND_TRANSFERABLE_MASK / KOBJ_KIND_HW_MASK / "
                "KOBJ_KIND_SRV_MASK / KOBJ_KIND_LOOM_MASK + every switch over "
@@ -88,9 +89,13 @@ _Static_assert(KOBJ_KIND_COUNT == 11,
     ((1u << KOBJ_PROCESS) | (1u << KOBJ_THREAD) | \
      (1u << KOBJ_BURROW)     | (1u << KOBJ_SPOOR))
 
+// pci-1b: KObj_PCI (a claimed VirtIO-PCI function) is hardware — a driver holds
+// exactly one handle per PCI function, pinned to the claiming Proc. Joining the
+// HW mask gives I-5 non-transferability + NoHwDup for free (no per-kind code in
+// handle_dup / the 9P transfer path).
 #define KOBJ_KIND_HW_MASK \
     ((1u << KOBJ_MMIO) | (1u << KOBJ_IRQ) | \
-     (1u << KOBJ_DMA)  | (1u << KOBJ_INTERRUPT))
+     (1u << KOBJ_DMA)  | (1u << KOBJ_INTERRUPT) | (1u << KOBJ_PCI))
 
 // P5-corvus-srv: KObj_Srv is non-transferable but NOT hardware — a
 // distinct third partition. A /srv connection Spoor is pinned to the
