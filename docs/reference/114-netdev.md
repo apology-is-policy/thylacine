@@ -1,7 +1,11 @@
-# 114 — netdev (the net-1 virtio-net frame transport)
+# 114 — netdev (the virtio-net frame transport: MMIO + PCI)
 
-**Status**: net-1 LANDED. The reusable NIC driver layer net-2's `netd` owns and
-smoltcp wraps (charter `docs/NET-DESIGN.md` §13/§17). Crate: `usr/lib/netdev`.
+**Status**: net-1 (MMIO `VirtioNet`) + pci-2 (PCI `VirtioNetPci`) LANDED. The
+reusable NIC driver layer net-2's `netd` owns and smoltcp wraps (charter
+`docs/NET-DESIGN.md` §13/§17). Crate: `usr/lib/netdev`. net-2 resumes on the
+**PCI** transport (`VirtioNetPci`) — the #140 resolution: a PCI function carries
+its own page-aligned BAR, so a long-lived `netd` and stratumd no longer contend
+for one virtio-mmio page (`docs/VIRTIO-PCI-DESIGN.md`).
 
 ## Purpose
 
@@ -21,6 +25,13 @@ embeds this driver; smoltcp's `phy::Device` wraps `send`/`poll_rx`.
 - **`virtio`** (feature `driver`, default) — `VirtioNet`, the device glue over
   the libthyla-rs MMIO/IRQ/DMA substrate. The only libthyla-rs + audit-bearing
   layer; built for aarch64-thylacine, not the host.
+- **`virtio_pci`** (feature `driver`) — `VirtioNetPci`, the PCI sibling of
+  `virtio` over the libthyla-rs `PciDev` substrate (the #140 transport). Reuses
+  `ring` VERBATIM; the same `send`/`poll_rx` API + audit hardenings. The transport
+  diverges only in register access (BAR-mapped `virtio_pci_common_cfg` / notify /
+  isr / device-cfg regions vs the flat mmio bank), queue notification, and ISR
+  acknowledgement. `virtio.rs` is left byte-identical (its net-1 audit + boot
+  proof intact); the PCI driver is a fresh, independently-auditable surface (pci-3).
 
 ## Public API
 
@@ -39,6 +50,11 @@ VirtioNet::open() -> Result<VirtioNet, OpenError>   // probe + claim net page + 
   .drain_tx()                                       // reclaim completed TX descriptors
   .wait_irq() -> bool                               // block on IRQ; true if used-ring progress
   // Drop: quiesce (QUEUE_READY=0 both queues + device reset) before DMA pages free
+
+// virtio_pci (driver feature) — same API surface, PCI transport
+VirtioNetPci::open() -> Result<VirtioNetPci, PciOpenError>  // claim PCI fn + map BARs + modern init + DRIVER_OK
+  .mac() / .mtu() / .link_up() / .send(&[u8]) / .poll_rx(&mut [u8]) / .drain_tx() / .wait_irq()
+  // identical contracts to VirtioNet; Drop: device reset (device_status=0) before DMA pages free
 
 pub const MTU: usize = 1500;
 pub const MAX_FRAME: usize = 1514;                  // 14 (Eth hdr) + MTU
@@ -87,12 +103,43 @@ pub const VIRTIO_NET_HDR_LEN: usize = 12;
   reset BEFORE the DMA pages release, so the device cannot DMA into freed memory
   (RW-7 R3-F1 — the discipline the single-shot probes skip).
 
+## PCI transport (`VirtioNetPci`, pci-2)
+
+The split-virtqueue DMA discipline + every audit hardening above are identical
+(same `ring`, same RX/TX memory ops, same `desc_id` bound / `used.len` clamp /
+`virtio_rmb` placement / back-pressure). The transport diverges only in:
+
+- **Registers.** `virtio_pci_common_cfg` (VIRTIO 1.2 §4.1.4.3) in the BAR-mapped
+  `Common` region: `device_feature[_select]` / `driver_feature[_select]` /
+  `device_status` (a **u8**, not the mmio u32) / per-queue `queue_select` /
+  `queue_size` / `queue_desc` / `queue_driver` / `queue_device` (le64 ring PAs) /
+  `queue_enable` / `queue_notify_off`. `VirtioNetPci::open` claims the function
+  via `PciDev::claim(virtio_device_id=1, bar_window)`, resolves the four regions
+  (`Common`/`Notify`/`Isr`/`Device`), and parks every MSI-X vector at
+  `NO_VECTOR` (INTx only — MSI-X is undriven at v1.0).
+- **Notification.** Per queue, read `queue_notify_off` after `queue_select`; the
+  doorbell VA is `notify_base + queue_notify_off * notify_off_multiplier`. `send`
+  / `recycle_rx` write the queue index (u16) there (vs the mmio `REG_QUEUE_NOTIFY`).
+- **ISR.** `wait_irq` reads the `Isr` region byte (read-to-clear, bit 0 = queue
+  IRQ) — no separate ACK register.
+- **Device-config.** The MAC + link status live in the `Device` region (vs the
+  mmio `REG_CONFIG_BASE`). `open` guards `CCFG_MIN_LEN` (0x38) on `Common` and
+  `DEVICE_CFG_MIN_LEN` (8) on `Device` so a malformed/undersized region is a
+  clean open error rather than a read past the resolved region.
+- **Quiesce.** `Drop` resets the device (`device_status = 0`) before the DMA
+  pages free (the modern-transport equivalent of the mmio `QUEUE_READY=0` + reset).
+
+`open` maps DMA + BARs at a distinct VA window from the mmio path
+(`BAR_WINDOW_VA = 0x0080_0000`, DMA from `0x0100_0000`), so a future `netd` could
+hold both transports without a VA collision.
+
 ## Capability
 
 `VirtioNet::open()` calls `SYS_MMIO_CREATE` / `SYS_IRQ_CREATE` / `SYS_DMA_CREATE`,
-all gated on **`CAP_HW_CREATE`**. A driver Proc MUST be spawned with that cap
-(`t_spawn_with_caps(name, len, T_CAP_HW_CREATE)` / `rfork_with_caps`); without it
-the create is rejected at the capability gate before `kobj_mmio_create`.
+and `VirtioNetPci::open()` calls `SYS_PCI_CLAIM` / `SYS_PCI_MAP_BAR` (+ `IRQ` /
+`DMA`) — all gated on **`CAP_HW_CREATE`**. A driver Proc MUST be spawned with that
+cap (`t_spawn_with_caps(name, len, T_CAP_HW_CREATE)` / `rfork_with_caps`); without
+it the create/claim is rejected at the capability gate.
 
 ## Tests
 
@@ -103,24 +150,39 @@ the create is rejected at the capability gate before `kobj_mmio_create`.
   24 ARP round-trips against QEMU's slirp gateway through `send`/`poll_rx`
   (> `QUEUE_SIZE`, so the RX descriptors recycle past one full ring and the TX
   descriptors wrap). Verifies `PASS -- 24/24 ARP replies via VirtioNet`.
+- **PCI boot E2E** (`usr/netdev-pci-test`, same ladder, PRE-stratumd, spawned
+  WITH `CAP_HW_CREATE`): the identical 24-ARP round-trip through `VirtioNetPci`
+  over a `virtio-net-pci,disable-legacy=on` NIC (its own slirp backend `net1`).
+  Verifies `PASS -- 24/24 ARP replies via VirtioNetPci`. Both probes run every
+  boot — the MMIO net-1 proof + the PCI pci-2 proof, independently.
 
 ## Error paths
 
-`OpenError`: `BankClaim`, `NoNetDevice` (no DeviceID=1 / net page held),
+`OpenError` (MMIO): `BankClaim`, `NoNetDevice` (no DeviceID=1 / net page held),
 `LegacyDevice` (v1 MMIO), `NoVersion1`, `FeaturesRejected`, `QueueTooSmall`,
 `IrqClaim`, `DmaAlloc`. `send` → `false` (empty / oversize / ring full).
 `poll_rx` → `None` (no frame / bogus desc_id).
 
+`PciOpenError` (PCI): `NoNetDevice` (claim failed — treated as SKIP by the
+probe), `BarMap` (info/map-bar failed or a BAR exceeds the VA stride),
+`MissingRegion` (no/undersized `Common`/`Notify`/`Isr` region), `NoIntid`,
+`NoVersion1`, `FeaturesRejected`, `QueueTooSmall`, `IrqClaim`, `DmaAlloc`.
+
 ## Known caveats / the net-2 refinement
 
-- **MMIO page co-residency (net-2 prerequisite).** QEMU packs 8 virtio-mmio
-  slots per 4 KiB page; net + blk currently share one page. The page-exclusive
-  `KObj_MMIO` claim means a long-lived `netd` (net) and stratumd (blk) cannot
-  both hold that page. net-1 does NOT hit it (its probe runs and exits PRE-
-  stratumd). net-2 must resolve it (a kernel sub-page MMIO claim, or device-page
-  separation) — tracked.
-- **Fixed user VAs.** `open()` maps at fixed VAs (`0x0050_0000` etc.); net-2's
-  `netd` may parameterize.
+- **MMIO page co-residency (#140) — RESOLVED by the PCI transport.** QEMU packs
+  8 virtio-mmio slots per 4 KiB page; net + blk share one page, and the page-
+  exclusive `KObj_MMIO` claim cannot give a long-lived `netd` (net) and stratumd
+  (blk) sound co-residency. The MMIO `VirtioNet` does NOT hit it (its probe runs
+  + exits PRE-stratumd), but a persistent `netd` would. **pci-2 dissolves it**:
+  `VirtioNetPci` runs on a PCI function whose BAR is page-aligned, so the existing
+  page-exclusive claim isolates net from blk at the MMU granule. net-2 builds on
+  `VirtioNetPci`. (Retiring the MMIO `virtio-net-device` from the boot config is
+  a trivial v1.x cleanup once `netd`-on-PCI lands; it is kept now so net-1's
+  `netdev-test` keeps its proof.)
+- **Fixed user VAs.** Both transports map at fixed VAs (`VirtioNet` at
+  `0x0050_0000`+; `VirtioNetPci` at `0x0080_0000`/`0x0100_0000`+); net-2's `netd`
+  may parameterize.
 - **IPv4/ARP frames at v1.0.** `MAX_FRAME = 1514` (no VLAN / jumbo).
 
 ## Spec cross-reference

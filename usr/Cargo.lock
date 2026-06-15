@@ -364,6 +364,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "netdev-pci-test"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+ "netdev",
+]
+
+[[package]]
 name = "netdev-test"
 version = "0.1.0"
 dependencies = [

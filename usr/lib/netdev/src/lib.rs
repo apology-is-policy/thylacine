@@ -15,6 +15,9 @@
 //!   - `virtio` (feature `driver`, on by default) -- `VirtioNet`, the device
 //!     glue over the libthyla-rs MMIO/IRQ/DMA substrate. The only libthyla-rs +
 //!     audit-bearing layer; built for aarch64-thylacine, not the host.
+//!   - `virtio_pci` (feature `driver`) -- `VirtioNetPci`, the PCI sibling of
+//!     `virtio` over the libthyla-rs `PciDev` substrate (the #140 transport).
+//!     Reuses `ring` verbatim; the same RX/TX API + audit hardenings.
 //!
 //! `#![cfg_attr(not(test), no_std)]`: no_std for the userspace target; builds
 //! against std under `cargo test` so the pure `ring` layer runs on the host.
@@ -27,4 +30,10 @@ pub mod ring;
 pub mod virtio;
 
 #[cfg(feature = "driver")]
+pub mod virtio_pci;
+
+#[cfg(feature = "driver")]
 pub use virtio::{OpenError, VirtioNet, MAX_FRAME, MTU, VIRTIO_NET_HDR_LEN};
+
+#[cfg(feature = "driver")]
+pub use virtio_pci::{PciOpenError, VirtioNetPci};

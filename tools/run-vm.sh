@@ -176,6 +176,17 @@ if [[ "${THYLACINE_NO_NET:-0}" != "1" ]]; then
     net_flags=(
         -netdev "user,id=net0"
         -device "virtio-net-device,netdev=net0,mac=52:54:00:12:34:56"
+        # pci-2: the virtio-net-pci NIC on its own page-aligned BAR (the #140
+        # resolution). A SEPARATE slirp backend (net1) -- one -netdev binds one
+        # device, and each user-mode net is its own 10.0.2.0/24 with its own
+        # 10.0.2.2 gateway, so both ARP probes round-trip independently.
+        # disable-legacy=on -> modern-only (device_id 0x1041, no legacy I/O BAR),
+        # which the VirtioNetPci modern-common-cfg driver requires. netdev-pci-
+        # test claims it (virtio_device_id=1); netdev-test still claims the mmio
+        # net above. The PCI function is not a virtio-mmio slot (like rng-pci),
+        # so the mmio slot map below is unchanged.
+        -netdev "user,id=net1"
+        -device "virtio-net-pci,netdev=net1,disable-legacy=on,mac=52:54:00:12:34:57"
     )
 fi
 if [[ -n "${THYLACINE_NET_DUMP:-}" ]]; then

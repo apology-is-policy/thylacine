@@ -10,9 +10,12 @@ The #68 network charter (net-0) is bound scripture; net-1 (the reusable
 virtio-net frame-transport driver) is landed + proven. net-1 surfaced **#140**
 (two persistent userspace drivers cannot soundly share a 4 KiB virtio-mmio
 page), so net-2 is **preempted** by the **virtio-PCI transport sub-arc**
-(pci-0..pci-3, `docs/VIRTIO-PCI-DESIGN.md`, the user-voted DFS fork 2026-06-15;
-pci-0 scripture landed). net-2..net-8 (netd + smoltcp, listen/accept, cs/dns,
-socket-compat, dev9p.poll, TLS/NTP, exit criteria) resume on the PCI NIC.
+(pci-0..pci-3, `docs/VIRTIO-PCI-DESIGN.md`, the user-voted DFS fork 2026-06-15).
+**pci-0..pci-2 are LANDED** — the scripture, the kernel `KObj_PCI` + the 3
+syscalls, and the userspace `PciDev` + `VirtioNetPci` driver (a PCI virtio-net
+ARP round-trip passes on its own page-aligned BAR); **pci-3** (the focused audit)
+is next. net-2..net-8 (netd + smoltcp, listen/accept, cs/dns, socket-compat,
+dev9p.poll, TLS/NTP, exit criteria) then resume on the PCI NIC.
 
 ## Landed chunks
 
@@ -24,6 +27,7 @@ socket-compat, dev9p.poll, TLS/NTP, exit criteria) resume on the PCI NIC.
 | `5a1b36c` | **pci-1a**: the DTB/config primitives — `dtb_pci_intx_route` (interrupt-map → GIC INTID), `dtb_pci_mem_window`, `dtb_get_compat_prop`, `virtio_pci_cfg_write{8,16,32}`; no ABI/kobj change | 883/883 (+3: `dtb.pci_intx_route` full swizzle + `dtb.pci_mem_window` + `virtio_pci.cfg_write_bounds`) + boot OK; SMP-inert (gate at pci-1b) |
 | `89a6c69` | **pci-1b**: the `KObj_PCI` kernel object — `kernel/pci_handle.{c,h}` (exclusive `g_pci_claims` per-(bus,dev,fn) claim; bump-assign BARs from `dtb_pci_mem_window` with width-correct 32/64-bit sizing; `VIRTIO_PCI_CAP_*` cap-walk into `regions[]`, bounded + OOB-validated; INTx swizzle; quiesce-before-free) + `KOBJ_PCI=11` joining `KOBJ_KIND_HW_MASK` (I-5 non-transferable + NoHwDup for free) + `kobj_pci_init` at boot | 889/889 (+6: `pci.bar_decode_size` + `pci.claim_rng`/`claim_unknown`/`claim_exclusive`/`unref_releases_bars`/`live_count_balances`, claiming the live idle rng-pci) + boot OK + SMP gate; **self-found+fixed**: 32-bit BAR size mask must invert in 32-bit width (a 64-bit invert yields a bogus exabyte size) |
 | `11eb559` | **pci-1c**: the 3 syscalls — `SYS_PCI_CLAIM=76` / `SYS_PCI_MAP_BAR=77` / `SYS_PCI_INFO=78` (`kernel/syscall.c` handlers + dispatch) + the 208-byte `struct t_pci_info` ABI (`_Static_assert`-pinned in the kernel header, the libt mirror, and the libthyla-rs `TPciInfo` with `offset_of!` asserts) + libt (`t_pci_claim`/`t_pci_map_bar`/`t_pci_info`) + libthyla-rs raw wrappers. CLAIM: `CAP_HW_CREATE` gate → `kobj_pci_claim` → mint fixed R\|W\|MAP (no TRANSFER). MAP_BAR: mirrors `sys_mmio_map` via the `kobj_pci_bar_mmio` seam (bar_index `>= 6` rejected before the u32 narrowing). INFO: zero-init + fill + byte copy-out (no implicit padding → no stack leak). | 891/891 (+2: `pci.syscall_reject` + `pci.syscall_claim_info`) + boot OK + SMP gate |
+| `_(pending)_` | **pci-2**: the userspace PCI transport. `libthyla-rs::hardware::PciDev` (claim + info + map-BARs over the pci-1c syscalls; per-BAR VA window `PCI_BAR_VA_STRIDE`; `region()` bounds each cap-region within its BAR; non-transferable I-5 like Mmio/Irq/Dma) + `netdev::virtio_pci::VirtioNetPci` (the PCI sibling of `VirtioNet`: reuses `ring` VERBATIM + the same RX/TX API + audit hardenings; the virtio-pci-modern `common`/`notify`/`isr`/`device` register transport; `CCFG_MIN_LEN`/`DEVICE_CFG_MIN_LEN` region-size guards [self-audit]; device-reset quiesce-on-drop) + `usr/netdev-pci-test` boot probe + `run-vm.sh` adds `virtio-net-pci,disable-legacy=on` (separate `net1` slirp; the MMIO net + `netdev-test` kept). `virtio.rs` left byte-identical (net-1 proof intact). | host ring 7/7 + 891/891 + boot OK (both `netdev-test` + `netdev-pci-test` PASS 24/24) + 0 EXTINCTION + login E2E + SMP gate |
 
 ## Remaining work
 
@@ -55,9 +59,13 @@ construction. net-only scope; INTx interrupts; blk→PCI + MSI-X are v1.x seams.
   buffer + address space, so they are proven by the pci-2 userspace probe; the
   in-kernel tests cover the cap gate / mint / rights / reject paths.
 - **pci-2** userspace: `libthyla-rs::hardware::PciDev` + virtio-pci-modern +
-  port netdev's transport half (reuse `ring`); `netdev-test` over PCI;
-  `run-vm.sh` `virtio-net-device` → `virtio-net-pci`.
-- **pci-3** focused audit (§7 of the design doc) + SMP gate + reference docs.
+  port netdev's transport half (reuse `ring`); `netdev-pci-test` over PCI;
+  `run-vm.sh` adds `virtio-net-pci`. **LANDED** (`VirtioNetPci` PASS 24/24
+  alongside the kept MMIO `netdev-test`; host ring 7/7 + 891/891 + boot OK).
+- **pci-3** focused audit (§7 of the design doc — KObj_PCI lifecycle / I-5 /
+  exclusive-claim / BAR-assign bounds / config-space mediation / cap-walk / INTx;
+  the `VirtioNetPci` driver + the hostile-device region-size/notify residual) +
+  SMP gate + the kernel reference docs (`37-virtio_pci.md` + new `115-pci-claim.md`).
   Then **net-2 resumes** on the PCI NIC.
 
 ### the net arc (resumes on the PCI NIC, after pci-3)

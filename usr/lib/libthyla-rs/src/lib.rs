@@ -629,6 +629,26 @@ const _: () = assert!(core::mem::offset_of!(TPciInfo, regions) == 144);
 const _: () = assert!(core::mem::offset_of!(TPciInfo, intid) == 196);
 const _: () = assert!(core::mem::offset_of!(TPciInfo, virtio_device_id) == 204);
 
+impl TPciInfo {
+    /// An all-zero `TPciInfo` to hand to `t_pci_info` for fill. All fields are
+    /// POD integers, so zero is a valid bit pattern; the syscall overwrites
+    /// every byte on success (the caller reads it only after a 0 return).
+    pub const fn zeroed() -> Self {
+        Self {
+            bars: [TPciBar { pa: 0, size: 0, present: 0, is_64: 0, _pad: [0; 6] }; 6],
+            regions: [TPciRegion { offset: 0, length: 0, bar: 0, present: 0, _pad: [0; 2] }; 4],
+            notify_off_multiplier: 0,
+            intid: 0,
+            intid_valid: 0,
+            bus: 0,
+            dev: 0,
+            fn_: 0,
+            virtio_device_id: 0,
+            _pad: [0; 2],
+        }
+    }
+}
+
 // t_pci_claim — claim the first VirtIO-PCI function matching `virtio_device_id`
 // (1 = net, 4 = rng, ...). Returns a non-negative KOBJ_PCI handle (fixed rights
 // R|W|MAP, non-transferable) on success, -1 on cap-missing / not-found /

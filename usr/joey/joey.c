@@ -2393,6 +2393,30 @@ int main(void) {
         t_putstr("joey: netdev-test ok (net-1 VirtioNet send/poll_rx round-trip or skip)\n");
     }
 
+    // === /netdev-pci-test -- pci-2 virtio-net-pci frame transport (#140) ===
+    // The same ARP round-trip as netdev-test, but through netdev::VirtioNetPci
+    // over the virtio-pci-modern transport: PciDev claims the net PCI function,
+    // maps its BARs, and drives the common/notify/isr/device-cfg registers. The
+    // PCI NIC sits on its own page-aligned BAR (the #140 resolution), so it does
+    // not share the virtio-mmio page; the probe still runs PRE-stratumd + exits.
+    // Exits 0 on PASS or SKIP (no net-PCI device); 1 FAIL.
+    {
+        // CAP_HW_CREATE: a PCI driver claims KObj_PCI + KObj_IRQ + KObj_DMA.
+        const char np_name[] = "netdev-pci-test";
+        long np_pid = t_spawn_with_caps(np_name, sizeof(np_name) - 1, T_CAP_HW_CREATE);
+        if (np_pid <= 0) {
+            t_putstr("joey: t_spawn(\"netdev-pci-test\") FAILED\n");
+            return 1;
+        }
+        int np_status = -1;
+        long np_reaped = t_wait_pid_for((int)np_pid, 0, &np_status);
+        if (np_reaped != np_pid || np_status != 0) {
+            t_putstr("joey: /netdev-pci-test FAILED (pci-2 VirtioNetPci round-trip)\n");
+            return 1;
+        }
+        t_putstr("joey: netdev-pci-test ok (pci-2 VirtioNetPci send/poll_rx round-trip or skip)\n");
+    }
+
     // === /sbin/corvus spawn + E2E ===
     // Moved to do_corvus_bringup() (defined above main) and called
     // POST-PIVOT below, so corvus lands on the persistent Stratum root

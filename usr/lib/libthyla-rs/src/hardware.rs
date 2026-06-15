@@ -74,7 +74,8 @@ use crate::err::{Error, Result};
 use crate::handle::{Handle, Rights};
 use crate::poll::AsFd;
 use crate::{
-    t_dma_create, t_dma_map, t_irq_create, t_irq_wait, t_mmio_create, t_mmio_map,
+    t_dma_create, t_dma_map, t_irq_create, t_irq_wait, t_mmio_create, t_mmio_map, t_pci_claim,
+    t_pci_info, t_pci_map_bar, TPciInfo, T_PROT_READ, T_PROT_WRITE,
 };
 
 // =============================================================================
@@ -601,5 +602,179 @@ impl Dma {
         // `&mut self` ensures exclusive access.
         unsafe { core::ptr::write_volatile(self.base_va.add(offset) as *mut u32, value) };
         compiler_fence(Ordering::Release);
+    }
+}
+
+// =============================================================================
+// PciDev -- a claimed + BAR-mapped VirtIO-PCI function.
+// =============================================================================
+//
+// The PCI sibling of `Mmio` (pci-2, the virtio-PCI transport). `PciDev::claim`
+// composes the three pci-1c syscalls -- SYS_PCI_CLAIM (claim a function by its
+// virtio_device_id), SYS_PCI_INFO (read its resolved BAR + capability-region +
+// INTID topology), and SYS_PCI_MAP_BAR (map each present memory BAR into user
+// VA) -- so the returned object exposes the four virtio_pci capability regions
+// (common / notify / isr / device config) as mapped VAs a driver pokes through
+// the ISV-safe `mmio_*` primitives.
+//
+// WHY PCI rather than the virtio-mmio bank: on PCIe each function carries its
+// own page-aligned BAR, so the existing page-exclusive KObj claim isolates two
+// persistent userspace drivers (netd vs stratumd) at the MMU granule -- the #140
+// resolution the virtio-mmio bank could not give (8 device slots / 4 KiB page).
+//
+// Lifetime + I-5: like `Mmio`, `Drop` closes the KObj_PCI handle; the BAR
+// mappings survive the close (the kernel-side Burrow holds an independent ref --
+// the #847 dual lifetime) until proc exit. KObj_PCI joins KOBJ_KIND_HW_MASK, so
+// the kernel rejects SYS_TRANSFER + handle_dup; this type adds no Transfer trait.
+
+/// The four VirtIO-PCI capability-structure kinds (VIRTIO 1.2 section 4.1.4.1),
+/// the index into the kernel-resolved `TPciInfo.regions` (`cfg_type - 1`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PciRegion {
+    /// `virtio_pci_common_cfg` -- feature negotiation + per-queue config.
+    Common = 0,
+    /// Notify region -- the per-queue doorbell base.
+    Notify = 1,
+    /// ISR status byte (read-to-clear).
+    Isr = 2,
+    /// Device-specific config (the virtio-net MAC + link status).
+    Device = 3,
+}
+
+/// `PciDev::claim` failure causes (the bare PCI syscalls return -1 without
+/// errno discrimination, so claim/info/map collapse to one variant each).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PciError {
+    /// `SYS_PCI_CLAIM` failed: no matching function, already claimed, BAR
+    /// assignment failed, or the caller lacks `CAP_HW_CREATE`.
+    Claim,
+    /// `SYS_PCI_INFO` failed (bad handle -- should not happen post-claim).
+    Info,
+    /// `SYS_PCI_MAP_BAR` failed for a present BAR (overlap / bad VA / prot).
+    MapBar,
+    /// A present BAR's decoded size exceeds the per-BAR VA window stride
+    /// (`PCI_BAR_VA_STRIDE`). A virtio function's BARs are KiB-scale, so this
+    /// signals a misconfigured device, not a real virtio NIC.
+    BarTooLarge,
+}
+
+/// Per-BAR user-VA window stride: `PciDev::claim` maps BAR `i` at
+/// `bar_window + i * PCI_BAR_VA_STRIDE`. 1 MiB dwarfs any virtio function's
+/// BARs (common+notify+isr+device pack into a single <= 16 KiB BAR) while
+/// keeping the six-BAR window (6 MiB) a trivial slice of the 48-bit user AS.
+pub const PCI_BAR_VA_STRIDE: u64 = 0x10_0000;
+
+/// A claimed VirtIO-PCI function with its memory BARs mapped into user VA.
+///
+/// Created by [`PciDev::claim`]. Register access goes through [`PciDev::region`]
+/// (which yields the mapped VA + length of a capability region) + the crate's
+/// `mmio_*` ISV-safe primitives. Non-transferable per invariant I-5.
+pub struct PciDev {
+    #[allow(dead_code)] // Drop fires on the handle.
+    handle: Handle,
+    info: TPciInfo,
+    bar_va: [Option<u64>; 6],
+}
+
+impl PciDev {
+    /// Claim the first VirtIO-PCI function whose `virtio_device_id` matches
+    /// (1 = net, 4 = rng, ...), read its topology, and map every present memory
+    /// BAR into user VA. BAR `i` lands at `bar_window + i * PCI_BAR_VA_STRIDE`.
+    ///
+    /// Required capability: `CAP_HW_CREATE`. The minted handle carries the
+    /// kernel-fixed `R | W | MAP` rights (no `TRANSFER`).
+    ///
+    /// # Safety
+    ///
+    /// `bar_window` must name a free user-VA region of at least
+    /// `6 * PCI_BAR_VA_STRIDE` bytes; the kernel rejects overlaps, but only
+    /// after trusting the caller chose an unmapped window.
+    pub unsafe fn claim(virtio_device_id: u32, bar_window: u64) -> core::result::Result<Self, PciError> {
+        let rc = t_pci_claim(u64::from(virtio_device_id));
+        if rc < 0 {
+            return Err(PciError::Claim);
+        }
+        let handle = Handle::from_raw(rc as i32, Rights::READ | Rights::WRITE | Rights::MAP);
+
+        let mut info = TPciInfo::zeroed();
+        if t_pci_info(i64::from(handle.raw()), &mut info) < 0 {
+            // Drop closes the handle; the kernel releases the claim + BARs.
+            return Err(PciError::Info);
+        }
+
+        let prot = T_PROT_READ | T_PROT_WRITE;
+        let mut bar_va: [Option<u64>; 6] = [None; 6];
+        for (i, bar) in info.bars.iter().enumerate() {
+            if bar.present == 0 {
+                continue;
+            }
+            if bar.size > PCI_BAR_VA_STRIDE {
+                return Err(PciError::BarTooLarge);
+            }
+            let va = bar_window + (i as u64) * PCI_BAR_VA_STRIDE;
+            if t_pci_map_bar(i64::from(handle.raw()), va, i as u64, prot) < 0 {
+                return Err(PciError::MapBar);
+            }
+            bar_va[i] = Some(va);
+        }
+
+        Ok(Self { handle, info, bar_va })
+    }
+
+    /// The mapped VA + byte length of a resolved VirtIO-PCI capability region,
+    /// or `None` if the region (or its backing BAR) is absent. The returned VA
+    /// is bounded to `length` bytes; every register access a driver makes off it
+    /// stays inside the region.
+    #[must_use]
+    pub fn region(&self, kind: PciRegion) -> Option<(u64, u32)> {
+        let r = self.info.regions[kind as usize];
+        if r.present == 0 {
+            return None;
+        }
+        let base = (*self.bar_va.get(r.bar as usize)?)?;
+        // Defensive re-bound: the kernel already validated offset+length <=
+        // bar.size at claim, but re-check so a malformed ABI read can never hand
+        // out a VA past the mapped BAR.
+        let bar = self.info.bars.get(r.bar as usize)?;
+        let end = u64::from(r.offset).checked_add(u64::from(r.length))?;
+        if end > bar.size {
+            return None;
+        }
+        Some((base + u64::from(r.offset), r.length))
+    }
+
+    /// The function's swizzled GIC INTID (the INTx line), or `None` if the DTB
+    /// interrupt-map did not resolve one.
+    #[inline]
+    #[must_use]
+    pub fn intid(&self) -> Option<u32> {
+        if self.info.intid_valid != 0 {
+            Some(self.info.intid)
+        } else {
+            None
+        }
+    }
+
+    /// The NOTIFY_CFG capability's `notify_off_multiplier` (the per-queue
+    /// doorbell stride: a queue's notify address is
+    /// `notify_base + queue_notify_off * multiplier`).
+    #[inline]
+    #[must_use]
+    pub fn notify_off_multiplier(&self) -> u32 {
+        self.info.notify_off_multiplier
+    }
+
+    /// The VirtIO device id (1 = net, 4 = rng, ...).
+    #[inline]
+    #[must_use]
+    pub fn virtio_device_id(&self) -> u16 {
+        self.info.virtio_device_id
+    }
+
+    /// The function's PCI bus / device / function numbers.
+    #[inline]
+    #[must_use]
+    pub fn bdf(&self) -> (u8, u8, u8) {
+        (self.info.bus, self.info.dev, self.info.fn_)
     }
 }

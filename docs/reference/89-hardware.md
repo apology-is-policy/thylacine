@@ -73,11 +73,33 @@ impl Dma {
     pub fn read_u32(&self, offset: usize) -> u32;          // normal memory; compiler_fence(Acquire) before
     pub fn write_u32(&mut self, offset: usize, value: u32); // normal memory; compiler_fence(Release) after
 }
+
+// PCI (pci-2 — the virtio-PCI transport; the #140 resolution).
+
+pub enum PciRegion { Common = 0, Notify = 1, Isr = 2, Device = 3 } // cfg_type - 1
+pub enum PciError  { Claim, Info, MapBar, BarTooLarge }
+pub const PCI_BAR_VA_STRIDE: u64 = 0x10_0000;  // per-BAR user-VA window
+
+pub struct PciDev { /* opaque */ }
+
+impl PciDev {
+    // Compose SYS_PCI_CLAIM + SYS_PCI_INFO + SYS_PCI_MAP_BAR: claim the first
+    // virtio function matching `virtio_device_id` (1 = net, 4 = rng) and map
+    // every present BAR `i` at `bar_window + i * PCI_BAR_VA_STRIDE`.
+    pub unsafe fn claim(virtio_device_id: u32, bar_window: u64)
+        -> core::result::Result<Self, PciError>;
+
+    pub fn region(&self, kind: PciRegion) -> Option<(u64, u32)>; // (mapped VA, length)
+    pub fn intid(&self) -> Option<u32>;                          // INTx GIC INTID
+    pub fn notify_off_multiplier(&self) -> u32;
+    pub fn virtio_device_id(&self) -> u16;
+    pub fn bdf(&self) -> (u8, u8, u8);
+}
 ```
 
 ## Implementation
 
-`usr/lib/libthyla-rs/src/hardware.rs` (~360 LOC).
+`usr/lib/libthyla-rs/src/hardware.rs` (~560 LOC).
 
 ### Combined create + map
 
@@ -167,6 +189,7 @@ Every accessor (`read_u32`, `write_u32`) panics on bounds-overflow or misalignme
 ## Status
 
 - **U-2h-hardware LANDED**: `t::hardware::{Mmio, Irq, Dma}` available; the bare SVC wrappers remain.
+- **pci-2 LANDED**: `t::hardware::PciDev` over the pci-1c syscalls (`t_pci_claim` / `t_pci_info` / `t_pci_map_bar`). First consumer: `netdev::VirtioNetPci`. Non-transferable (I-5) like the other three; the kernel-side focused audit is pci-3.
 - **Consumers migrated**: mmio-probe, irq-probe, irq-bench (the 3 simple probes). The migrations validate the positive paths on real hardware (PL031 RTC) and real GIC (SPI 96).
 - **Consumers NOT YET migrated**: virtio-blk-probe, virtio-blk-rw, virtio-gpu, virtio-input, virtio-net-arp, virtio-net-loop, virtio-net-probe (7 binaries). They continue to use the bare SVC wrappers; their migration is mechanical and can land incrementally as their authors prefer. The bare wrappers remain exported — there is no "must migrate before X" deadline.
 
@@ -180,6 +203,8 @@ Every accessor (`read_u32`, `write_u32`) panics on bounds-overflow or misalignme
 - **No `Mmio::read_u8 / u16 / u64` methods**: the typed `Mmio` struct exposes only the u32 accessor methods at v1.0 (most VirtIO and ARM MMIO surfaces use 32-bit registers). Callers needing other widths use the module-level `mmio_read8`/`16`/`64` + `mmio_write8`/`16`/`64` primitives on `base_va() + offset` -- NOT `read_volatile` on a raw pointer, which can compile to an ISV=0 form and trip HVF (see "ISV-safe MMIO accesses" above). The native virtio-* drivers do exactly this through their local helper wrappers.
 - **No `Mmio::write_u32` exclusivity**: the method takes `&self`, not `&mut self`. MMIO write is a side-effect at the device; multiple `&Mmio` references can concurrently write (Rust borrow checker allows it because there's no aliasable in-memory state). If a future driver wants to enforce "only one writer at a time" at the type level, it can wrap `Mmio` in a `Mutex` (single-threaded today). The kernel-side rights gating already prevents cross-Proc concurrent access (the handle is non-transferable).
 - **Compiler fence vs hardware barrier**: `Dma::read_u32` / `write_u32` insert compiler fences but NOT hardware barriers. Drivers interacting with VirtIO devices MUST use `virtio_rmb()` (from `lib.rs`) for cross-CPU + cross-device-visibility ordering. The compiler fence prevents compiler reorderings but is not sufficient on its own.
+- **`PciDev::claim` partial-map on error**: if `claim` maps BAR 0 then BAR 1's map fails (or a later BAR exceeds `PCI_BAR_VA_STRIDE`), the handle is dropped (closing the KObj_PCI), but BAR 0's user-VA mapping persists via its independent Burrow ref until proc exit — the same "Drop does not unmap" characteristic the `Mmio` wrapper carries. Every `claim` error is fatal to the driver (it cannot run without the device), so the driver Proc exits and `proc_free` reclaims the window; the leak is bounded by proc lifetime. A long-running `netd` that wants to retry a different function would need an explicit detach path (a v1.x `PciDev::create_unmapped`/`map` split, deferred with the `Mmio` one).
+- **`PciDev::region` bounds the region within its BAR, NOT the driver's field offsets within the region**: `region()` guarantees `[VA, VA+length)` lies inside the mapped (page-rounded) BAR, so no access escapes the mapping. But a driver that reads a fixed register offset (e.g. `common_cfg + 0x30`) trusts the resolved region is large enough; `VirtioNetPci` adds explicit `CCFG_MIN_LEN`/`DEVICE_CFG_MIN_LEN` guards for that. Hostile-device region-size / `notify_off`-multiplier bounding (a device reporting a tiny region or a huge notify offset, both unreachable with trusted QEMU at v1.0) is a pci-3 prosecution target.
 
 ## References
 
