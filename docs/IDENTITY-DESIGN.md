@@ -1716,6 +1716,18 @@ runtime tests.
 
 ### 9.8 A-4 -- clearance + legate elevation + CAP_KILL + trusted path (RESOLVED 2026-06-01)
 
+> **Trusted-path generalization (scripture 2026-06-15): `docs/TRUSTED-PATH.md`.**
+> The A-4c serial trusted path described below is *lifted off the serial substrate*
+> -- the same SAK + ATTACH-to-corvus structure (the owner/attach split, RW-7 R2-F1)
+> rides any renderer (serial / Aurora / Halcyon). On a framebuffer, corvus emits a
+> medium-independent cell grid that a kernel **trusted sink** rasterizes (the sole
+> painter; the renderer fully suspended), and the graphical SAK is a kernel-scanned
+> key-combo via the MENAGERIE trusted-tier keyboard. Production trusted path is
+> framebuffer-only; serial interactive/trusted-path is off-by-default in production
+> (a per-image flag). I-27 generalizes (no new number); the framebuffer enforcement
+> is reserved-then-enforced (lands with the Aurora renderer + the MENAGERIE board
+> input path). The serial path below is live today (A-4c). Full design: TRUSTED-PATH.md.
+
 The highest-stakes privilege surface of the arc. Two user votes 2026-06-01, taken
 after a Plan 9 + capability-microkernel + trusted-path prior-art pass (Plan 9
 `/proc`-ctl, seL4/Zircon/Genode derived authority, NT/AIX SAK, Genode Nitpicker):
