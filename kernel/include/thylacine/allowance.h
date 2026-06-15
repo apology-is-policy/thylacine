@@ -89,6 +89,17 @@ enum hw_res_kind { HW_RES_MMIO, HW_RES_IRQ, HW_RES_DMA };
 // ACQUIRE). The authoritative re-check is allowance_handle_alloc at commit.
 bool allowance_permits(struct Proc *p, enum hw_res_kind kind, u64 a, u64 b);
 
+// True iff p carries a NARROWED allowance (p->allowance != NULL). The
+// fail-closed gate for hw-handle-minting paths the allowance does NOT yet
+// model a resource axis for -- at v1.0 that is SYS_PCI_CLAIM (KObj_PCI): the
+// allowance has MMIO/IRQ/DMA axes but no per-(bus,dev,fn) PCI axis, so a
+// narrowed driver is denied PCI claims OUTRIGHT (it cannot reach a device its
+// allowance does not bound). A broad Proc (the warden + the trusted servers)
+// is unaffected. The per-device PCI allowance ("a PCI device's allowance IS
+// its claimed BARs", MENAGERIE.md §4) replaces this blanket reject when the
+// PCIe discovery source lands (build-arc step 6). The complement of "broad".
+bool allowance_is_narrowed(struct Proc *p);
+
 // CreateCommit (specs/allowance.tla): install a hw handle, re-checking the
 // allowance UNDER its lock so a concurrent proc_revoke_allowance is observed.
 // A NULL allowance bypasses the re-check (broad) and calls handle_alloc

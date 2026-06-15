@@ -26,7 +26,10 @@
 // kobj_*_create I-5 reservation (the as-built v1.0 path).
 bool allowance_permits(struct Proc *p, enum hw_res_kind kind, u64 a, u64 b) {
     if (!p) return false;
-    struct Allowance *al = p->allowance;
+    // ACQUIRE-load the allowance pointer (audit F4): pairs with the RELEASE
+    // publish in proc_confer_allowance so the conferred-set writes are visible
+    // before any gate read, independent of the warden's spawn-ordering.
+    struct Allowance *al = __atomic_load_n(&p->allowance, __ATOMIC_ACQUIRE);
     if (!al) return true;   // BROAD
 
     // A revoked allowance permits nothing (the spec's allowance[d] = {}).
@@ -60,6 +63,16 @@ bool allowance_permits(struct Proc *p, enum hw_res_kind kind, u64 a, u64 b) {
     return false;   // unknown kind -> fail closed
 }
 
+// The fail-closed gate for hw-handle-minting paths with no allowance axis yet
+// (SYS_PCI_CLAIM at v1.0). True iff p is NARROWED; a narrowed driver is denied
+// outright there (it cannot reach a device its allowance does not bound). The
+// allowance pointer is set-once-at-spawn (stable for the calling thread's own
+// Proc -- no atomic needed); the per-device PCI axis at build-arc step 6
+// replaces the blanket reject.
+bool allowance_is_narrowed(struct Proc *p) {
+    return p && __atomic_load_n(&p->allowance, __ATOMIC_ACQUIRE) != NULL;
+}
+
 // CreateCommit (specs/allowance.tla): install the hw handle, re-checking the
 // allowance UNDER the lock proc_revoke_allowance takes so a concurrent
 // DeviceRemoved revocation is observed. handle_alloc is spinlock-only (never
@@ -69,7 +82,7 @@ bool allowance_permits(struct Proc *p, enum hw_res_kind kind, u64 a, u64 b) {
 hidx_t allowance_handle_alloc(struct Proc *p, enum kobj_kind kind,
                               rights_t rights, void *obj) {
     if (!p) return -1;
-    struct Allowance *al = p->allowance;
+    struct Allowance *al = __atomic_load_n(&p->allowance, __ATOMIC_ACQUIRE);
     if (!al) return handle_alloc(p, kind, rights, obj);   // BROAD
 
     spin_lock(&al->lock);
@@ -105,8 +118,12 @@ int proc_confer_allowance(struct Proc *p,
     al->dma_max = dma_max;
     al->revoked = 0;
 
-    struct Allowance *old = p->allowance;
-    p->allowance = al;
+    // Publish RELEASE (audit F4): the conferred-set writes above happen-before
+    // this store, so a gate read on another CPU that observes the new pointer
+    // also observes the windows -- independent of the warden's spawn ordering.
+    // The old read is RELAXED (set-once-at-spawn: no concurrent writer).
+    struct Allowance *old = __atomic_load_n(&p->allowance, __ATOMIC_RELAXED);
+    __atomic_store_n(&p->allowance, al, __ATOMIC_RELEASE);
     if (old) kfree(old);
     return 0;
 }
@@ -131,8 +148,11 @@ void proc_revoke_allowance(struct Proc *p) {
 // A-1a supp_gid_count clamp) so a corrupt source count can never leave a
 // garbage tail.
 int allowance_clone_into(struct Proc *child, struct Proc *parent) {
-    if (!parent || !parent->allowance) return 0;   // broad parent -> child NULL
-    struct Allowance *src = parent->allowance;
+    if (!parent) return 0;
+    // ACQUIRE the parent's allowance (audit F4): a coherent snapshot of the
+    // pointer + (via the release pairing) the immutable conferred set.
+    struct Allowance *src = __atomic_load_n(&parent->allowance, __ATOMIC_ACQUIRE);
+    if (!src) return 0;   // broad parent -> child stays NULL
     struct Allowance *dst = kmalloc(sizeof(*dst), KP_ZERO);
     if (!dst) return -1;
     spin_lock_init(&dst->lock);
@@ -144,7 +164,10 @@ int allowance_clone_into(struct Proc *child, struct Proc *parent) {
     for (u32 i = 0; i < dst->irq_count; i++) dst->irq[i] = src->irq[i];
     dst->dma_max = src->dma_max;
     dst->revoked = __atomic_load_n(&src->revoked, __ATOMIC_ACQUIRE);
-    child->allowance = dst;
+    // RELEASE-publish into the (not-yet-running) child for consistency with the
+    // confer publish; the child has no concurrent reader yet, but the edge is
+    // recorded in code, not only in the spawn-ordering contract (audit F4).
+    __atomic_store_n(&child->allowance, dst, __ATOMIC_RELEASE);
     return 0;
 }
 

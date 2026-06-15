@@ -202,6 +202,30 @@ and a retry — or another driver's create — can succeed (`kernel/syscall.c:23
 the allowance never grants: a Proc with no cap is rejected before the allowance
 is ever consulted.
 
+### The fourth door: `SYS_PCI_CLAIM` (fail-closed at v1.0 — audit F1)
+
+`KObj_PCI` is the **fourth** hardware-authority handle (a claimed PCI function
+exposes its BARs as mappable MMIO, its config space, INTx, DMA — all in
+`KOBJ_KIND_HW_MASK`, non-transferable). `sys_pci_claim_handler`
+(`kernel/syscall.c:634`) is therefore a hardware-handle-minting path I-34 must
+govern — but the v1.0 allowance struct has **no per-`(bus,dev,fn)` PCI axis**
+(only MMIO windows / IRQ INTIDs / a DMA cap). Left ungated, a driver the warden
+narrowed to one device's MMIO could `SYS_PCI_CLAIM` *another* device's PCI
+function — the exact cross-device-authority leak I-34 forbids, through the PCI
+door. This is the **primary device path on RPi5** (RP1 — GPIO/UART/USB/GbE —
+lives behind PCIe), so it is not an edge case once the warden binds PCI drivers.
+
+The v1.0 close is **fail-closed**: a *narrowed* Proc is denied `SYS_PCI_CLAIM`
+outright (`if (allowance_is_narrowed(p)) return -1;`, `kernel/syscall.c`, after
+the `CAP_HW_CREATE` check). A narrowed driver cannot claim PCI at all — it
+cannot reach a device its allowance does not bound. A **broad** Proc (the warden
++ the trusted servers, `allowance == NULL`) is unaffected, so v1.0 (where every
+PCI-claimer is broad — the netdev-pci-test probe) does not regress. The
+per-device PCI allowance — "a PCI device's allowance IS its claimed BARs"
+(`docs/MENAGERIE.md` §4) — replaces this blanket reject when the PCIe discovery
+source lands (**build-arc step 6**); the fail-closed gate is the sound v1.0
+floor until then, not a deferral of the soundness.
+
 ---
 
 ## Implementation notes
@@ -395,6 +419,19 @@ the re-check-under-lock gate cannot wedge a `SYS_*_CREATE` against a concurrent
 revoke. The runtime analog is that `allowance_handle_alloc` never blocks
 indefinitely (it takes `al->lock`, does a bounded `handle_alloc`, returns).
 
+**Protocol-faithful, predicate-abstracted (audit F3).** The spec models the
+resource universe as opaque tokens in a flat set (`CreateBegin` is `r \in
+allowance[d]`), so the model proves the *protocol* sound — the gate→commit→revoke
+serialization, the no-handle-past-revoke property — but it proves nothing about
+the *per-kind gate predicate* the impl actually evaluates: MMIO **full-window
+containment** with two-sided overflow hardening (`kernel/allowance.c:36`), IRQ
+exact membership, DMA a scalar `0 < size <= dma_max` ceiling. That arithmetic —
+the real bounds-safety surface — is verified by the runtime tests
+(`allowance.mmio_containment` exercises the straddle / outside / zero-size /
+overflow cases), **not** the spec. The correspondence is therefore
+protocol-faithful + predicate-abstracted: trust the model for the lock protocol,
+trust the tests for the containment arithmetic.
+
 ### The buggy cfgs (executable counterexamples)
 
 Each buggy flag enables a `Buggy*` action that violates one leg; the cfg is a
@@ -504,16 +541,43 @@ caller's `proc_group_terminate` — no nesting with `g_proc_table_lock`.
 ## Known caveats / footguns
 
 - **Confer is set-once-at-spawn — the no-concurrent-reader contract is load-
-  bearing.** `proc_confer_allowance` swaps `p->allowance` and frees the old one
-  with **no lock** (`kernel/allowance.c:108`). This is sound *only* because the
-  caller (the warden's spawn path) guarantees the conferred-upon Proc has not yet
-  entered EL0, so nothing reads `p->allowance` concurrently. Calling
-  `proc_confer_allowance` on a *running* driver (one whose threads are executing
-  the create gate) would be a UAF — a CreateBegin reader could dereference the
-  just-`kfree`d old allowance. The warden never does this (it spawns a fresh Proc
-  per device); the contract is the discipline that keeps the swap lock-free. A
-  future "re-confer a running driver" need would require routing the swap through
-  `al->lock` (and an RCU-style grace for the old struct), a deliberate addition.
+  bearing.** `proc_confer_allowance` publishes `p->allowance` with an
+  `__ATOMIC_RELEASE` store and frees the old one (audit F4: the publish pairs
+  with the gate reads' `__ATOMIC_ACQUIRE`, so the conferred-set writes are
+  guaranteed visible before any gate read — the *visibility* edge is now in code,
+  not only the spawn-ordering contract). The `kfree(old)`, however, is still
+  lock-free, sound *only* because the caller (the warden's spawn path) guarantees
+  the conferred-upon Proc has not yet entered EL0, so nothing reads
+  `p->allowance` concurrently. Calling `proc_confer_allowance` on a *running*
+  driver (one whose threads are executing the create gate) would be a UAF — a
+  CreateBegin reader could dereference the just-`kfree`d old allowance. The warden
+  never does this (it spawns a fresh Proc per device); the contract is the
+  discipline that keeps the *free* lock-free. A future "re-confer a running
+  driver" need would require routing the free through `al->lock` + an RCU-style
+  grace for the old struct, a deliberate addition.
+- **Revoke is a two-step the warden orchestrates — and the handle-sweep is
+  deferred (audit F2).** `proc_revoke_allowance` sets `revoked` and returns; it
+  does **not** drop the driver's handles. The warden's `DeviceRemoved` handler
+  MUST pair it with `proc_group_terminate(driver)` — `proc_revoke_allowance`
+  closes the *gate* (no new handle slips through); the #809/#811 cascade then
+  drops the *existing* handles at reap. So `RevokedFullyCleared` (revoked ⇒ no
+  handle) holds only **after** the cascade completes, not at the instant
+  `revoked` is set. The spec models `Revoke` as one atomic step (empty the
+  allowance AND the handles) because the handle-sweep is the death-wake cascade's
+  province (`death_wake.tla`, separately verified) — the allowance spec captures
+  the *end* state, not the transient. **In the window** between `revoked` and
+  reap, the driver's flagged-to-die threads still hold their already-minted
+  handles and can touch the gone device through an *already-mapped* BAR; this is
+  bounded-safe by construction — the threads die at the EL0-return checkpoint
+  before executing further EL0 instructions, and an MMIO access to a revoked
+  window faults the driver (`proc_fault_terminate`), never corrupts the kernel
+  (`docs/MENAGERIE.md` §10). The explicit **DMA fence** for in-flight DMA against
+  a yanked device is the Loom device-gone terminal CQE (build-arc step 4). A
+  warden that calls `proc_revoke_allowance` but *forgets* the
+  `proc_group_terminate` leaves the driver `revoked` with live handles — that
+  pairing is the warden's prosecution obligation (the audit-bearing step-5
+  consumer); the kernel mechanism cannot enforce it without conflating the
+  allowance layer with the proc-teardown layer.
 - **The forked-child scope-teardown is a v1.x seam.** Today `allowance_clone_into`
   makes a child equally narrowed, but the child's allowance is an *independent*
   copy — revoking the parent's device (`proc_revoke_allowance(parent)`) does **not**

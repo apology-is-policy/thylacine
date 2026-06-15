@@ -450,6 +450,7 @@ void test_allowance_handle_alloc_broad(void);
 void test_allowance_handle_alloc_revoked_aborts(void);
 void test_allowance_clone_inherit(void);
 void test_allowance_free_null_tolerant(void);
+void test_allowance_pci_claim_gate(void);
 
 void test_cpio_is_valid_recognizes_magic(void);
 void test_cpio_iter_empty_archive(void);
@@ -1481,6 +1482,7 @@ struct test_case g_tests[] = {
     { "allowance.handle_alloc_revoked_aborts", test_allowance_handle_alloc_revoked_aborts, false, NULL },
     { "allowance.clone_inherit",            test_allowance_clone_inherit,            false, NULL },
     { "allowance.free_null_tolerant",       test_allowance_free_null_tolerant,       false, NULL },
+    { "allowance.pci_claim_gate",           test_allowance_pci_claim_gate,           false, NULL },
 
     { "cpio.is_valid_recognizes_magic",
                                        test_cpio_is_valid_recognizes_magic, false, NULL },

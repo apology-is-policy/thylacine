@@ -643,6 +643,17 @@ s64 sys_pci_claim_handler(u64 virtio_device_id, u64 a1) {
     if ((__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_HW_CREATE) == 0)
         return -1;
 
+    // I-34 (specs/allowance.tla): SYS_PCI_CLAIM is the fourth hw-handle-minting
+    // path, but the v1.0 allowance has no per-(bus,dev,fn) PCI axis -- only
+    // MMIO/IRQ/DMA. A NARROWED driver is therefore denied a PCI claim OUTRIGHT
+    // (fail-closed: it cannot reach a device its allowance does not bound),
+    // closing the bypass where a driver narrowed to one device's MMIO could
+    // SYS_PCI_CLAIM another's PCI function. A broad Proc (the warden + the
+    // trusted servers, allowance == NULL) is unaffected. The per-device PCI
+    // allowance ("a PCI device's allowance IS its claimed BARs", MENAGERIE.md
+    // §4) replaces this blanket reject when the PCIe source lands (step 6).
+    if (allowance_is_narrowed(p))                    return -1;
+
     // A VIRTIO device id is a u16 on the wire; reject anything wider so the
     // (u32) narrowing below cannot alias a real id.
     if (virtio_device_id > (u64)0xFFFFFFFFu)         return -1;

@@ -27,6 +27,7 @@ void test_allowance_handle_alloc_broad(void);
 void test_allowance_handle_alloc_revoked_aborts(void);
 void test_allowance_clone_inherit(void);
 void test_allowance_free_null_tolerant(void);
+void test_allowance_pci_claim_gate(void);
 
 // Mirror the test_handle.c proc make/drop: proc_alloc gives a fresh Proc with
 // an empty handle table + a NULL (broad) allowance; test_proc_drop ZOMBIEs +
@@ -200,5 +201,27 @@ void test_allowance_free_null_tolerant(void) {
     TEST_ASSERT(p->allowance != NULL, "conferred");
     allowance_free(p);
     TEST_ASSERT(p->allowance == NULL, "freed -> NULL");
+    adrop(p);
+}
+
+void test_allowance_pci_claim_gate(void) {
+    // I-34 audit F1: SYS_PCI_CLAIM is fail-closed for a NARROWED Proc -- the
+    // v1.0 allowance has no per-(bus,dev,fn) PCI axis, so a narrowed driver
+    // cannot claim PCI at all (closing the bypass where a driver narrowed to
+    // one device's MMIO could SYS_PCI_CLAIM another's PCI function). The gate
+    // predicate is allowance_is_narrowed: broad -> false (claim allowed),
+    // narrowed -> true (claim rejected). The per-device PCI axis lands with
+    // the PCIe source (build-arc step 6).
+    struct Proc *p = amk();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    TEST_ASSERT(!allowance_is_narrowed(p), "broad Proc -> not narrowed (PCI claim allowed)");
+    TEST_ASSERT(!allowance_is_narrowed(NULL), "NULL Proc -> not narrowed (defensive)");
+    u32 irq[1] = { 40 };
+    TEST_ASSERT(proc_confer_allowance(p, NULL, 0, irq, 1, 0) == 0, "confer");
+    TEST_ASSERT(allowance_is_narrowed(p), "narrowed Proc -> narrowed (PCI claim rejected)");
+    // A revoked-but-not-yet-reaped narrowed Proc is STILL narrowed (the pointer
+    // is non-NULL until allowance_free at reap) -> still PCI-rejected.
+    proc_revoke_allowance(p);
+    TEST_ASSERT(allowance_is_narrowed(p), "revoked-narrowed Proc -> still narrowed (still rejected)");
     adrop(p);
 }
