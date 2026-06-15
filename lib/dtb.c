@@ -1043,3 +1043,163 @@ dtb_psci_method_t dtb_psci_method(void) {
     }
     return result;
 }
+
+// =============================================================================
+// Tree-walk API (Menagerie devhw). The node tree exposed by structure-block
+// offsets. See dtb.h for the contract. Every entry point bounds-checks its
+// caller-supplied offset before forming a pointer, so a forged / stale offset
+// is rejected rather than followed into arbitrary memory.
+// =============================================================================
+
+// Bounded strlen — stops at `max` even with no NUL. The names below live in
+// the (trusted-but-validated-at-init) DTB blob; bounding the scan to the
+// remaining block bytes turns a malformed unterminated string into a clean
+// rejection instead of a runaway read off the end of the blob.
+static inline size_t k_strnlen(const char *s, size_t max) {
+    size_t n = 0;
+    while (n < max && s[n]) n++;
+    return n;
+}
+
+bool dtb_node_at(u32 node_off, const char **out_name, u32 *out_namelen) {
+    if (!g_dtb.ready) return false;
+    // Need the 4-byte token + at least the name's NUL within the block.
+    if ((u64)node_off + 4 > g_dtb.size_struct) return false;
+
+    const uint8_t *base = dtb_struct_base();
+    if (be32_load(base + node_off) != FDT_BEGIN_NODE) return false;
+
+    const char *nm  = (const char *)(base + node_off + 4);
+    size_t maxn     = g_dtb.size_struct - (node_off + 4u);
+    size_t l        = k_strnlen(nm, maxn);
+    if (l >= maxn) return false;          // no NUL within bounds -> malformed
+
+    if (out_name)    *out_name    = nm;
+    if (out_namelen) *out_namelen = (u32)l;
+    return true;
+}
+
+bool dtb_node_iter(u32 node_off, u32 *cursor, struct dtb_node_entry *out) {
+    if (!g_dtb.ready || !cursor || !out) return false;
+
+    const uint8_t *base = dtb_struct_base();
+
+    struct fdt_walker w;
+    w.end = base + g_dtb.size_struct;
+
+    if (*cursor == 0) {
+        // Fresh start: validate node_off, then position just past its
+        // BEGIN_NODE token + (4-aligned) unit-name.
+        const char *nm; u32 nl;
+        if (!dtb_node_at(node_off, &nm, &nl)) return false;
+        w.cur = base + node_off + 4 + align4(nl + 1u);
+    } else {
+        if ((u64)*cursor > g_dtb.size_struct) return false;
+        w.cur = base + *cursor;
+    }
+    // depth is RELATIVE to the node body: 0 = a direct child / property of the
+    // iterated node. A resumed cursor always points at a depth-0 entry.
+    w.depth = 0;
+
+    const uint8_t *entry_start = w.cur;
+    const char *name = NULL, *propname = NULL;
+    const uint8_t *propdata = NULL;
+    uint32_t proplen = 0;
+    uint32_t tok = walker_next(&w, &name, &propname, &propdata, &proplen);
+
+    if (tok == FDT_PROP) {
+        out->is_node = false;
+        out->off     = (u32)(entry_start - base);
+        out->name    = propname;
+        out->namelen = (u32)k_strlen(propname);
+        out->data    = propdata;
+        out->datalen = proplen;
+        *cursor = (u32)(w.cur - base);
+        return true;
+    }
+    if (tok == FDT_BEGIN_NODE) {
+        // A direct child. walker_next pushed depth to 1; skip its whole
+        // subtree so the resume cursor lands on the next depth-0 entry. The
+        // FDT_END break guards a malformed/truncated child against spinning.
+        u32 child_off = (u32)(entry_start - base);
+        const char *child_name = name;
+        while (w.depth > 0) {
+            if (walker_next(&w, NULL, NULL, NULL, NULL) == FDT_END) break;
+        }
+        out->is_node = true;
+        out->off     = child_off;
+        out->name    = child_name;
+        out->namelen = (u32)k_strlen(child_name);
+        out->data    = NULL;
+        out->datalen = 0;
+        *cursor = (u32)(w.cur - base);
+        return true;
+    }
+    // FDT_END_NODE (closes the iterated node) or FDT_END (exhausted/malformed):
+    // no more direct content. (FDT_NOP is consumed inside walker_next.)
+    return false;
+}
+
+bool dtb_prop_at(u32 prop_off, const char **out_name,
+                 const u8 **out_data, u32 *out_len) {
+    if (!g_dtb.ready) return false;
+    // FDT_PROP header = token(4) + len(4) + nameoff(4) = 12 bytes.
+    if ((u64)prop_off + 12 > g_dtb.size_struct) return false;
+
+    const uint8_t *base = dtb_struct_base();
+    const uint8_t *p = base + prop_off;
+    if (be32_load(p) != FDT_PROP) return false;
+
+    uint32_t len     = be32_load(p + 4);
+    uint32_t nameoff = be32_load(p + 8);
+
+    // Data must lie wholly within the structure block.
+    if ((u64)prop_off + 12 + len > g_dtb.size_struct) return false;
+    // Name offset must lie within the strings block, NUL-terminated there.
+    if (nameoff >= g_dtb.size_strings) return false;
+    const char *nm = dtb_strings_base() + nameoff;
+    if (k_strnlen(nm, g_dtb.size_strings - nameoff) >= g_dtb.size_strings - nameoff)
+        return false;
+
+    if (out_name) *out_name = nm;
+    if (out_data) *out_data = p + 12;
+    if (out_len)  *out_len  = len;
+    return true;
+}
+
+bool dtb_node_parent(u32 node_off, u32 *out_parent_off) {
+    if (!g_dtb.ready || !out_parent_off) return false;
+    if (node_off == DTB_NODE_ROOT) { *out_parent_off = DTB_NODE_ROOT; return true; }
+
+    const uint8_t *base = dtb_struct_base();
+
+    struct fdt_walker w;
+    walker_start(&w);
+
+    // Stack of node offsets keyed by nesting depth (walker_next sets the root
+    // at depth 1). When we reach the target node, its parent is the entry one
+    // level up — or the root if the target is itself a depth-1 node.
+    u32 stack[DTB_MAX_DEPTH];
+
+    for (;;) {
+        const uint8_t *entry_start = w.cur;
+        uint32_t tok = walker_next(&w, NULL, NULL, NULL, NULL);
+        if (tok == FDT_END) break;
+        if (tok != FDT_BEGIN_NODE) continue;
+
+        int d = w.depth;                       // post-increment: root = 1
+        u32 off = (u32)(entry_start - base);
+        if (d >= 1 && d <= DTB_MAX_DEPTH) stack[d - 1] = off;
+        if (off == node_off) {
+            if (d <= 1) {
+                *out_parent_off = DTB_NODE_ROOT;
+            } else if (d - 2 < DTB_MAX_DEPTH) {
+                *out_parent_off = stack[d - 2];
+            } else {
+                return false;                  // too deep to have tracked the parent
+            }
+            return true;
+        }
+    }
+    return false;
+}

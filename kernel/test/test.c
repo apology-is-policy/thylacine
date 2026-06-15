@@ -429,6 +429,16 @@ void test_devdev_walk_to_each_leaf(void);
 void test_devdev_walk_unknown_misses(void);
 void test_devdev_trivial_leaves(void);
 void test_devdev_cons_gate(void);
+void test_devhw_bestiary_smoke(void);
+void test_devhw_attach_returns_root(void);
+void test_devhw_walk_node_and_prop(void);
+void test_devhw_walk_deep_and_dotdot(void);
+void test_devhw_walk_miss(void);
+void test_devhw_walk_reuse_nc(void);
+void test_devhw_prop_read(void);
+void test_devhw_stat_native(void);
+void test_devhw_readdir_cookie_contract(void);
+void test_devhw_iter_api(void);
 void test_cpio_is_valid_recognizes_magic(void);
 void test_cpio_iter_empty_archive(void);
 void test_cpio_iter_single_entry(void);
@@ -1438,6 +1448,16 @@ struct test_case g_tests[] = {
     { "devdev.walk_unknown_misses",    test_devdev_walk_unknown_misses,    false, NULL },
     { "devdev.trivial_leaves",         test_devdev_trivial_leaves,         false, NULL },
     { "devdev.cons_gate",              test_devdev_cons_gate,              false, NULL },
+    { "devhw.bestiary_smoke",          test_devhw_bestiary_smoke,          false, NULL },
+    { "devhw.attach_returns_root",     test_devhw_attach_returns_root,     false, NULL },
+    { "devhw.walk_node_and_prop",      test_devhw_walk_node_and_prop,      false, NULL },
+    { "devhw.walk_deep_and_dotdot",    test_devhw_walk_deep_and_dotdot,    false, NULL },
+    { "devhw.walk_miss",               test_devhw_walk_miss,               false, NULL },
+    { "devhw.walk_reuse_nc",           test_devhw_walk_reuse_nc,           false, NULL },
+    { "devhw.prop_read",               test_devhw_prop_read,               false, NULL },
+    { "devhw.stat_native",             test_devhw_stat_native,             false, NULL },
+    { "devhw.readdir_cookie_contract", test_devhw_readdir_cookie_contract, false, NULL },
+    { "devhw.iter_api",                test_devhw_iter_api,                false, NULL },
     { "cpio.is_valid_recognizes_magic",
                                        test_cpio_is_valid_recognizes_magic, false, NULL },
     { "cpio.iter_empty_archive",       test_cpio_iter_empty_archive,       false, NULL },

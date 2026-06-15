@@ -243,4 +243,65 @@ typedef enum dtb_psci_method {
 
 dtb_psci_method_t dtb_psci_method(void);
 
+// =============================================================================
+// Tree-walk API (Menagerie devhw — the DTB published as a walkable tree).
+// =============================================================================
+//
+// The point-lookup API above (dtb_get_compat_reg, ...) answers "where is the
+// node matching compatible X?" — sufficient for the kernel's own driver
+// discovery, but it cannot ENUMERATE the tree the way the warden + userspace
+// drivers must (walk the node hierarchy, read arbitrary properties). This
+// layer exposes the FDT structure block as a navigable node tree without
+// copying it: a node is identified by the structure-block byte offset of its
+// FDT_BEGIN_NODE token (the root node is offset 0 — DTB_NODE_ROOT); a property
+// by the offset of its FDT_PROP token. These offsets are stable for the
+// kernel's lifetime (the relocated DTB buffer is immutable) and fit the
+// devhw qid encoding (docs/reference). Every entry point is a no-op returning
+// false if dtb_init has not run, and bounds-checks its offset against the
+// structure/strings block before dereferencing — a malformed offset is
+// rejected, never followed into arbitrary memory.
+
+#define DTB_NODE_ROOT 0u
+
+// One direct child of a node — either a sub-node (a directory in the devhw
+// view) or a property (a file). `off` is the structure-block offset of the
+// child's FDT_BEGIN_NODE token (when is_node) or its FDT_PROP token (when a
+// property). `name` / `data` point into the DTB blob (kernel-lifetime, never
+// freed); the caller must not write through them.
+struct dtb_node_entry {
+    bool          is_node;     // true: a sub-node (directory); false: a property (file)
+    u32           off;         // struct-block offset of the child's BEGIN_NODE / FDT_PROP token
+    const char   *name;        // unit-name (sub-node) or property name; NUL-terminated
+    u32           namelen;     // strlen(name)
+    const u8     *data;        // property value (NULL for a sub-node)
+    u32           datalen;     // property length (0 for a sub-node)
+};
+
+// Validate that `node_off` names a BEGIN_NODE; return its unit-name. The root
+// node's name is "" (empty). Returns false on a malformed / out-of-range
+// offset. `out_name` / `out_namelen` are optional (NULL to ignore — use it as
+// a pure validity probe).
+bool dtb_node_at(u32 node_off, const char **out_name, u32 *out_namelen);
+
+// Iterate a node's DIRECT contents (sub-nodes + properties) in document order.
+// Start with *cursor = 0; each call fills *out, advances *cursor past the
+// entry, and returns true while entries remain; returns false at end-of-node
+// (or on a malformed / out-of-range node_off). The cursor is an OPAQUE resume
+// position (a structure-block offset, NEVER 0 after the first entry, strictly
+// increasing) — the caller passes it back unchanged; it doubles as the devhw
+// readdir cookie. Single-entry-per-call (the readdir/walk drivers loop).
+bool dtb_node_iter(u32 node_off, u32 *cursor, struct dtb_node_entry *out);
+
+// Read a property given the structure-block offset of its FDT_PROP token
+// (the offset an iter / walk handed out). Writes name / data / len. Returns
+// false on a malformed / out-of-range offset. Optional out-params (NULL ok).
+bool dtb_prop_at(u32 prop_off, const char **out_name,
+                 const u8 **out_data, u32 *out_len);
+
+// Parent node offset (for ".."). The root (DTB_NODE_ROOT) is its own parent.
+// Returns false on a malformed / not-found node_off. O(tree) — the FDT stores
+// no parent pointer, so this re-walks; ".." is resolver-handled in the common
+// path (stalk pops the trail) so this is a robustness / direct-call fallback.
+bool dtb_node_parent(u32 node_off, u32 *out_parent_off);
+
 #endif // THYLACINE_DTB_H

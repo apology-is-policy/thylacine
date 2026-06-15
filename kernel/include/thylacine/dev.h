@@ -245,6 +245,7 @@ extern struct Dev devproc;        // dc='p'  — /proc/<pid>/{status,cmdline,ctl
 extern struct Dev devctl;         // dc='C'  — /ctl/{procs,memory,devices,kernel-base,sched}
 extern struct Dev devramfs;       // dc='m'  — /ramfs/<file> from cpio newc initrd
 extern struct Dev devdev;         // dc='d'  — /dev char-device directory (#57b)
+extern struct Dev devhw;          // dc='H'  — DTB hardware inventory tree (Menagerie devhw)
 
 // devramfs diagnostics (used by tests).
 int  devramfs_file_count(void);

@@ -580,3 +580,16 @@ early-console `chosen/stdout-path` selection is kernel.
 - **2026-06-15**: scripture adopted (this doc + ARCH §22.7 + I-34 + the audit
   triggers + ROADMAP). No code yet. The build sequence (§16) is the next arc, after
   which **net-2 resumes** on the Menagerie substrate.
+- **2026-06-15 (devhw-1, build-sequence step 2)**: the DTB tree-walk publish Dev
+  landed. `lib/dtb.c` gains the enumeration API (`dtb_node_at` / `dtb_node_iter`
+  / `dtb_prop_at` / `dtb_node_parent`, structure-block-offset-keyed, bounds-
+  checked); `kernel/devhw.c` is the Dev (`dc='H'`, read-only, `perm_enforced =
+  false`, non-seekable) mapping the FDT node hierarchy onto a walkable namespace
+  (nodes = directories, properties = raw-byte files). Reference doc
+  `docs/reference/116-devhw.md`. 11 kernel tests (the load-bearing one:
+  `readdir_cookie_contract` -- strictly-monotonic non-zero dirent cookies);
+  902/902 PASS, boot OK. **Not yet mounted** (`/hw` graft = devhw-2). No new
+  invariant (composes I-15); self-audit only -- the formal audit is owed at the
+  allowance (I-34) + the mount. **Next**: the hardware allowance (build-sequence
+  step 3 -- audit-bearing + SMP-race-bearing; the spec-first re-enablement for
+  `specs/allowance.tla` is a user decision).
