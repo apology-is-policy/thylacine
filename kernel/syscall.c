@@ -28,6 +28,7 @@
 #include <thylacine/notes.h>
 #include <thylacine/page.h>
 #include <thylacine/path.h>    // struct Path (SYS_FD2PATH reads ->s/->len; #66)
+#include <thylacine/pci_handle.h>   // KObj_PCI (SYS_PCI_CLAIM/MAP_BAR/INFO; pci-1c)
 #include <thylacine/pipe.h>
 #include <thylacine/poll.h>
 #include <thylacine/perm.h>
@@ -583,6 +584,187 @@ static s64 sys_dma_map_handler(u64 hraw, u64 vaddr, u64 prot_raw) {
     s64 pa = (s64)kd->pa;
     handle_put(&hh);
     return pa;
+}
+
+// Forward decl: the common user-VA range check (defined below) -- SYS_PCI_INFO
+// copies a struct out, so it needs the bound check before its definition site.
+static bool sys_validate_user_buf(u64 buf_va, u64 len);
+
+// =============================================================================
+// SYS_PCI_CLAIM — claim a VirtIO-PCI function as a KObj_PCI handle (pci-1c).
+// =============================================================================
+//
+// AArch64 ABI: x0 = virtio_device_id.
+//
+// Cap-gated (CAP_HW_CREATE) + (bus,dev,fn)-exclusive, exactly like
+// SYS_MMIO_CREATE. Mints a KOBJ_PCI handle with FIXED rights R|W|MAP -- a
+// device owner always needs read + write + map, and KObj_PCI is
+// non-transferable (I-5; KOBJ_KIND_HW_MASK), so the claimer IS the driver and
+// there is no partial-rights / transfer use case. (This is the deliberate
+// asymmetry vs SYS_MMIO_CREATE, whose rights are caller-supplied because a
+// future 9P transfer path could narrow them.) Returns hidx_t (>= 0) on
+// success, -1 on EPERM / device-not-found / already-claimed / BAR-assign
+// failure / malformed-cap-list / OOM / table-full.
+s64 sys_pci_claim_handler(u64 virtio_device_id, u64 a1) {
+    (void)a1;
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+
+    // CAP_HW_CREATE, ACQUIRE-load (proc_become_legate is a cross-thread caps
+    // writer; mirrors sys_mmio_create_handler).
+    if ((__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_HW_CREATE) == 0)
+        return -1;
+
+    // A VIRTIO device id is a u16 on the wire; reject anything wider so the
+    // (u32) narrowing below cannot alias a real id.
+    if (virtio_device_id > (u64)0xFFFFFFFFu)         return -1;
+
+    struct KObj_PCI *k = kobj_pci_claim((u32)virtio_device_id);
+    if (!k)                                          return -1;
+
+    // Fixed R|W|MAP, NO TRANSFER. We never request TRANSFER; and even a holder
+    // that somehow had it could not move the handle -- KOBJ_PCI is in
+    // KOBJ_KIND_HW_MASK, so handle_dup + the 9P path reject it (I-5).
+    hidx_t h = handle_alloc(p, KOBJ_PCI,
+                            (rights_t)(RIGHT_READ | RIGHT_WRITE | RIGHT_MAP), k);
+    if (h < 0) {
+        // Roll back the claim so the (bus,dev,fn) slot + BAR PA claims free for
+        // a retry / another driver (mirrors the SYS_MMIO_CREATE rollback).
+        kobj_pci_unref(k);
+        return -1;
+    }
+    return (s64)h;
+}
+
+// =============================================================================
+// SYS_PCI_MAP_BAR — map a KObj_PCI handle's BAR into user VA (pci-1c).
+// =============================================================================
+//
+// AArch64 ABI: x0 = handle, x1 = vaddr, x2 = bar_index, x3 = prot.
+//
+// Mirrors SYS_MMIO_MAP: validates the handle (KOBJ_PCI + RIGHT_MAP), bounds
+// prot by the handle rights (R+W needs RIGHT_WRITE; EXEC rejected; W-without-R
+// rejected -- AArch64 has no W-only AP), resolves bar_index -> the BAR's
+// KObj_MMIO, wraps it in a BURROW_TYPE_MMIO Burrow, installs the VMA under
+// p->vma_lock, and drops the construction ref. Returns 0 / -1.
+s64 sys_pci_map_bar_handler(u64 hraw, u64 vaddr, u64 bar_index, u64 prot_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+
+    if ((__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_HW_CREATE) == 0)
+        return -1;
+
+    // #844: handle_get snapshots the slot + HOLDS a ref on the KObj_PCI (k) under
+    // the handle-table lock, so a sibling handle_close cannot free k between the
+    // read and burrow_create_mmio. The held k keeps its bars[].mmio alive (k owns
+    // that kobj_mmio ref); burrow_create_mmio takes its OWN ref (#847 dual
+    // lifetime), so the mapping survives even after handle_put drops k's snapshot.
+    struct Handle hh;
+    if (handle_get(p, (hidx_t)hraw, &hh) < 0)        return -1;
+    if (hh.kind != KOBJ_PCI)              { handle_put(&hh); return -1; }
+    if ((hh.rights & RIGHT_MAP) == 0)     { handle_put(&hh); return -1; }
+
+    // Bound prot by the handle rights; reject EXEC and the W-without-R construct
+    // (identical to sys_mmio_map -- device memory, no W-only AP encoding).
+    u32 prot = (u32)prot_raw;
+    if (prot == 0)                                   { handle_put(&hh); return -1; }
+    if (prot & ~(u32)(VMA_PROT_READ | VMA_PROT_WRITE)) { handle_put(&hh); return -1; }
+    if ((prot & VMA_PROT_WRITE) && !(hh.rights & RIGHT_WRITE)) { handle_put(&hh); return -1; }
+    if ((prot & VMA_PROT_READ)  && !(hh.rights & RIGHT_READ))  { handle_put(&hh); return -1; }
+    if ((prot & VMA_PROT_WRITE) && !(prot & VMA_PROT_READ)) { handle_put(&hh); return -1; }
+
+    struct KObj_PCI *k = (struct KObj_PCI *)hh.obj;
+    if (!k)                               { handle_put(&hh); return -1; }
+    if (k->magic != KOBJ_PCI_MAGIC)       { handle_put(&hh); return -1; }
+
+    // Bound bar_index in u64 width BEFORE the u32 narrowing: a bar_index >= 2^32
+    // whose low dword is a valid index would otherwise alias a real BAR. >= 6 is
+    // rejected here; kobj_pci_bar_mmio re-checks (defense in depth) + rejects an
+    // absent BAR.
+    if (bar_index >= PCI_BAR_COUNT)       { handle_put(&hh); return -1; }
+    struct KObj_MMIO *km = kobj_pci_bar_mmio(k, (u32)bar_index);
+    if (!km)                              { handle_put(&hh); return -1; }
+    if (km->magic != KOBJ_MMIO_MAGIC)     { handle_put(&hh); return -1; }
+
+    struct Burrow *b = burrow_create_mmio(km);
+    if (!b)                               { handle_put(&hh); return -1; }
+
+    // burrow_map walks + splices p->vmas, so it holds p->vma_lock (the #713
+    // discipline). Lock order vma_lock -> buddy zone->lock holds. km->size is the
+    // full decoded BAR size; the user maps the whole BAR and indexes the
+    // VIRTIO_PCI_CAP regions within it.
+    spin_lock(&p->vma_lock);
+    int rc = burrow_map(p, b, vaddr, km->size, prot);
+    if (rc < 0) {
+        burrow_unref(b);
+        spin_unlock(&p->vma_lock);
+        handle_put(&hh);
+        return -1;
+    }
+    burrow_unref(b);
+    spin_unlock(&p->vma_lock);
+    handle_put(&hh);
+    return 0;
+}
+
+// =============================================================================
+// SYS_PCI_INFO — copy a KObj_PCI handle's resolved topology to user (pci-1c).
+// =============================================================================
+//
+// AArch64 ABI: x0 = handle, x1 = info_va.
+//
+// Validates the handle (KOBJ_PCI + RIGHT_READ), builds a zero-initialized
+// struct t_pci_info (no uninitialized padding leaked -- the RW-8 R2-F1 class),
+// and copies it out byte-by-byte (the fd2path / getcwd idiom; uaccess has no
+// bulk copy + no alignment requirement on uaccess_store_u8). Returns 0 / -1.
+s64 sys_pci_info_handler(u64 hraw, u64 info_va) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+
+    if (!sys_validate_user_buf(info_va, sizeof(struct t_pci_info))) return -1;
+
+    struct Handle hh;
+    if (handle_get(p, (hidx_t)hraw, &hh) < 0)        return -1;
+    if (hh.kind != KOBJ_PCI)              { handle_put(&hh); return -1; }
+    if ((hh.rights & RIGHT_READ) == 0)    { handle_put(&hh); return -1; }
+
+    struct KObj_PCI *k = (struct KObj_PCI *)hh.obj;
+    if (!k)                               { handle_put(&hh); return -1; }
+    if (k->magic != KOBJ_PCI_MAGIC)       { handle_put(&hh); return -1; }
+
+    struct t_pci_info info = {0};   // zeroes every field incl. pad -> no leak
+    for (u32 i = 0; i < PCI_BAR_COUNT; i++) {
+        info.bars[i].pa      = k->bars[i].pa;
+        info.bars[i].size    = k->bars[i].size;
+        info.bars[i].present = k->bars[i].present ? 1u : 0u;
+        info.bars[i].is_64   = k->bars[i].is_64   ? 1u : 0u;
+    }
+    for (u32 i = 0; i < VIRTIO_PCI_CAP_REGION_COUNT; i++) {
+        info.regions[i].offset  = k->regions[i].offset;
+        info.regions[i].length  = k->regions[i].length;
+        info.regions[i].bar     = k->regions[i].bar;
+        info.regions[i].present = k->regions[i].present ? 1u : 0u;
+    }
+    info.notify_off_multiplier = k->notify_off_multiplier;
+    info.intid                 = k->intid;
+    info.intid_valid           = k->intid_valid ? 1u : 0u;
+    info.bus                   = k->bus;
+    info.dev                   = k->dev;
+    info.fn                    = k->fn;
+    info.virtio_device_id      = k->virtio_device_id;
+
+    const u8 *src = (const u8 *)&info;
+    for (u64 i = 0; i < sizeof(struct t_pci_info); i++) {
+        if (uaccess_store_u8(info_va + i, src[i]) != 0) { handle_put(&hh); return -1; }
+    }
+    handle_put(&hh);
+    return 0;
 }
 
 // =============================================================================
@@ -5474,6 +5656,23 @@ void syscall_dispatch(struct exception_context *ctx) {
         ctx->regs[0] = (u64)sys_dma_map_handler(ctx->regs[0],
                                                 ctx->regs[1],
                                                 ctx->regs[2]);
+        return;
+
+    case SYS_PCI_CLAIM:
+        ctx->regs[0] = (u64)sys_pci_claim_handler(ctx->regs[0],
+                                                  ctx->regs[1]);
+        return;
+
+    case SYS_PCI_MAP_BAR:
+        ctx->regs[0] = (u64)sys_pci_map_bar_handler(ctx->regs[0],
+                                                    ctx->regs[1],
+                                                    ctx->regs[2],
+                                                    ctx->regs[3]);
+        return;
+
+    case SYS_PCI_INFO:
+        ctx->regs[0] = (u64)sys_pci_info_handler(ctx->regs[0],
+                                                 ctx->regs[1]);
         return;
 
     case SYS_PIPE: {

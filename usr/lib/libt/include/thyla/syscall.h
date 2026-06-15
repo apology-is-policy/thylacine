@@ -98,6 +98,10 @@ enum {
     T_SYS_CONSOLE_OPEN      = 64,  // A-5a: open /dev/cons -> R|W KOBJ_SPOOR fd
     T_SYS_OPEN              = 65,  // A-5b-0/stalk-1: multi-component pathname open
     T_SYS_FD2PATH           = 71,  // #66: fd -> namespace name (Plan 9 fd2path)
+    // 72..75 = getpid/uid/gid + clock_gettime (native libthyla-rs only).
+    T_SYS_PCI_CLAIM         = 76,  // pci-1c: claim a VirtIO-PCI function -> KOBJ_PCI
+    T_SYS_PCI_MAP_BAR       = 77,  // pci-1c: map a KObj_PCI BAR into user VA
+    T_SYS_PCI_INFO          = 78,  // pci-1c: read a KObj_PCI's resolved topology
 };
 
 // SYS_UNLINK flags: rmdir an empty directory (vs unlink a non-directory).
@@ -1033,6 +1037,99 @@ static inline long t_dma_map(long h, unsigned long vaddr, unsigned long prot) {
         "svc #0"
         : "+r"(x0)
         : "r"(x1), "r"(x2), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// struct t_pci_info — userspace mirror of the kernel's struct t_pci_info from
+// <thylacine/syscall.h> (pci-1c). 208 bytes; field offsets pinned by the
+// _Static_asserts below. Filled by t_pci_info (SYS_PCI_INFO). On LP64 aarch64
+// `unsigned long` = u64, `unsigned int` = u32, `unsigned short` = u16,
+// `unsigned char` = u8 -- matching the kernel fixed-width fields.
+struct t_pci_bar {
+    unsigned long pa;        //  0
+    unsigned long size;      //  8
+    unsigned char present;   // 16
+    unsigned char is_64;     // 17
+    unsigned char _pad[6];   // 18
+};
+struct t_pci_region {
+    unsigned int  offset;    //  0
+    unsigned int  length;    //  4
+    unsigned char bar;       //  8
+    unsigned char present;   //  9
+    unsigned char _pad[2];   // 10
+};
+struct t_pci_info {
+    struct t_pci_bar    bars[6];     //   0
+    struct t_pci_region regions[4];  // 144
+    unsigned int   notify_off_multiplier;  // 192
+    unsigned int   intid;            // 196
+    unsigned char  intid_valid;      // 200
+    unsigned char  bus;              // 201
+    unsigned char  dev;              // 202
+    unsigned char  fn;               // 203
+    unsigned short virtio_device_id; // 204
+    unsigned char  _pad[2];          // 206
+};
+_Static_assert(sizeof(struct t_pci_bar) == 24, "libt t_pci_bar ABI size 24");
+_Static_assert(sizeof(struct t_pci_region) == 12, "libt t_pci_region ABI size 12");
+_Static_assert(sizeof(struct t_pci_info) == 208, "libt t_pci_info ABI size 208");
+_Static_assert(__builtin_offsetof(struct t_pci_info, regions) == 144, "t_pci_info.regions @144");
+_Static_assert(__builtin_offsetof(struct t_pci_info, intid)   == 196, "t_pci_info.intid @196");
+_Static_assert(__builtin_offsetof(struct t_pci_info, virtio_device_id) == 204,
+               "t_pci_info.virtio_device_id @204");
+
+// t_pci_claim — claim the first VirtIO-PCI function matching `virtio_device_id`
+// (1 = net, 4 = rng, ...). Returns a non-negative KOBJ_PCI handle (fixed rights
+// R|W|MAP, non-transferable) on success, -1 on cap-missing / not-found /
+// already-claimed / BAR-assign failure / OOM. Requires T_RIGHT_HW_CREATE.
+__attribute__((always_inline))
+static inline long t_pci_claim(unsigned long virtio_device_id) {
+    register long x0 __asm__("x0") = (long)virtio_device_id;
+    register long x8 __asm__("x8") = T_SYS_PCI_CLAIM;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_pci_map_bar — map BAR `bar_index` of a KOBJ_PCI handle at `vaddr`. `prot`
+// is bounded by the handle rights; EXEC + W-without-R are rejected. Returns 0
+// on success, -1 on bad handle / out-of-range BAR / prot violation / overlap.
+__attribute__((always_inline))
+static inline long t_pci_map_bar(long h, unsigned long vaddr,
+                                 unsigned long bar_index, unsigned long prot) {
+    register long x0 __asm__("x0") = h;
+    register long x1 __asm__("x1") = (long)vaddr;
+    register long x2 __asm__("x2") = (long)bar_index;
+    register long x3 __asm__("x3") = (long)prot;
+    register long x8 __asm__("x8") = T_SYS_PCI_MAP_BAR;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x2), "r"(x3), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_pci_info — fill `*out` with the KOBJ_PCI handle's resolved BAR + region map
+// + INTID + bdf. Returns 0 on success, -1 on bad handle / bad pointer. `out`
+// must be a writable buffer of at least sizeof(struct t_pci_info) bytes.
+__attribute__((always_inline))
+static inline long t_pci_info(long h, struct t_pci_info *out) {
+    register long x0 __asm__("x0") = h;
+    register long x1 __asm__("x1") = (long)(unsigned long)out;
+    register long x8 __asm__("x8") = T_SYS_PCI_INFO;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x8)
         : "memory", "cc"
     );
     return x0;

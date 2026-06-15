@@ -18,6 +18,10 @@
 #include <thylacine/pci_handle.h>
 #include <thylacine/virtio.h>          // VIRTIO_DEVICE_ID_RNG
 #include <thylacine/virtio_pci.h>      // virtio_pci_find_by_device_id
+#include <thylacine/handle.h>          // handle_get/put/close, RIGHT_*, KOBJ_PCI
+#include <thylacine/sched.h>           // current_thread
+#include <thylacine/thread.h>          // struct Thread / Proc
+#include <thylacine/vma.h>             // VMA_PROT_*
 
 void test_pci_bar_decode_size(void);
 void test_pci_claim_rng(void);
@@ -25,6 +29,17 @@ void test_pci_claim_unknown(void);
 void test_pci_claim_exclusive(void);
 void test_pci_unref_releases_bars(void);
 void test_pci_live_count_balances(void);
+void test_pci_syscall_reject(void);
+void test_pci_syscall_claim_info(void);
+
+// The pci-1c syscall handlers (non-static, like sys_clock_gettime_handler) --
+// driven directly to exercise the cap gate / handle mint / validation paths.
+// The SUCCESS copy-out (SYS_PCI_INFO) + the BAR burrow-map (SYS_PCI_MAP_BAR)
+// need a real user buffer + user address space, which the in-kernel kproc
+// context cannot supply, so those are proven by the pci-2 userspace probe.
+extern s64 sys_pci_claim_handler(u64 virtio_device_id, u64 a1);
+extern s64 sys_pci_map_bar_handler(u64 hraw, u64 vaddr, u64 bar_index, u64 prot_raw);
+extern s64 sys_pci_info_handler(u64 hraw, u64 info_va);
 
 // Deterministic (no-hardware) regression for the BAR-size decode. A 32-bit
 // BAR's size mask occupies only the low 32 bits, so it MUST be inverted in
@@ -194,4 +209,69 @@ void test_pci_live_count_balances(void) {
     TEST_ASSERT(k != NULL, "rng-pci claim failed");
     TEST_ASSERT(during == base + 1, "live count did not increase by 1 on claim");
     TEST_ASSERT(after == base, "live count did not return to baseline on unref (leak)");
+}
+
+// SYS_PCI_* validation paths that need no minted handle (always clean -- no
+// claim slot taken, no handle leaked). Runs in kproc, which holds CAP_HW_CREATE,
+// so the cap gate passes and these reject on the *argument* checks.
+void test_pci_syscall_reject(void) {
+    // device_id wider than u32 -> rejected before any claim (no slot taken).
+    TEST_ASSERT(sys_pci_claim_handler(0x100000000ull, 0) < 0,
+                "SYS_PCI_CLAIM device_id > u32 must be rejected");
+    // an absent device-id -> no matching function -> -1 (kobj_pci_claim NULLs).
+    TEST_ASSERT(sys_pci_claim_handler(PCI_TEST_ABSENT_DEVICE_ID, 0) < 0,
+                "SYS_PCI_CLAIM of an absent device-id must fail");
+    // MAP_BAR / INFO with a bad fd -> handle_get fails -> -1.
+    TEST_ASSERT(sys_pci_map_bar_handler(99999, 0x40000000ull, 0, VMA_PROT_READ) < 0,
+                "SYS_PCI_MAP_BAR with a bad fd must fail");
+    TEST_ASSERT(sys_pci_info_handler(99999, 0x40000000ull) < 0,
+                "SYS_PCI_INFO with a bad fd must fail");
+}
+
+// The CLAIM -> mint -> inspect -> validation round-trip through the syscall
+// handlers. kproc holds CAP_HW_CREATE, so the claim mints a real KOBJ_PCI fd;
+// we inspect its kind + rights, exercise the MAP_BAR / INFO reject paths (all
+// of which return BEFORE any burrow-map / copy-out, so no kproc address-space
+// pollution + no user buffer needed), then RELEASE before asserting (TEST_ASSERT
+// returns on failure -- releasing first never strands the live claim).
+void test_pci_syscall_claim_info(void) {
+    if (!rng_pci_present()) return;
+
+    struct Proc *p = current_thread()->proc;
+
+    s64  fd     = sys_pci_claim_handler(VIRTIO_DEVICE_ID_RNG, 0);
+    bool minted = (fd >= 0);
+
+    bool got    = false;
+    int  kind   = -1;
+    u64  rights = 0;
+    if (minted) {
+        struct Handle hh;
+        if (handle_get(p, (hidx_t)fd, &hh) == 0) {
+            got    = true;
+            kind   = (int)hh.kind;
+            rights = (u64)hh.rights;
+            handle_put(&hh);
+        }
+    }
+
+    // All four reject before touching a BAR mapping / the user buffer.
+    s64 info_badva = minted ? sys_pci_info_handler((u64)fd, 0) : -1;                 // NULL info_va
+    s64 map_oob    = minted ? sys_pci_map_bar_handler((u64)fd, 0x40000000ull,
+                                                      PCI_BAR_COUNT, VMA_PROT_READ) : -1;  // OOB bar
+    s64 map_prot0  = minted ? sys_pci_map_bar_handler((u64)fd, 0x40000000ull, 0, 0) : -1;  // prot==0
+    s64 map_wonly  = minted ? sys_pci_map_bar_handler((u64)fd, 0x40000000ull, 0,
+                                                      VMA_PROT_WRITE) : -1;          // W without R
+
+    if (minted) handle_close(p, (hidx_t)fd);   // release BEFORE asserting
+
+    TEST_ASSERT(minted, "SYS_PCI_CLAIM(rng) must mint a handle (kproc holds CAP_HW_CREATE)");
+    TEST_ASSERT(got, "the minted fd must resolve to a live handle");
+    TEST_EXPECT_EQ(kind, (int)KOBJ_PCI, "minted handle must be KOBJ_PCI");
+    TEST_EXPECT_EQ(rights, (u64)(RIGHT_READ | RIGHT_WRITE | RIGHT_MAP),
+                   "PCI claim mints exactly R|W|MAP (no TRANSFER -- I-5)");
+    TEST_ASSERT(info_badva < 0, "SYS_PCI_INFO with a NULL info_va must fail");
+    TEST_ASSERT(map_oob   < 0, "SYS_PCI_MAP_BAR with an out-of-range bar index must fail");
+    TEST_ASSERT(map_prot0 < 0, "SYS_PCI_MAP_BAR with prot==0 must fail");
+    TEST_ASSERT(map_wonly < 0, "SYS_PCI_MAP_BAR with W-without-R must fail");
 }

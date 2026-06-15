@@ -1389,6 +1389,42 @@ enum {
     //   bad timespec_va. The clk_id is validated FIRST, so a bad id never reads
     //   the buffer. See ARCH §22.6.
     SYS_CLOCK_GETTIME = 75,  // arg: clk_id (x0), timespec_va (x1)
+
+    // virtio-PCI transport (pci-1c; docs/VIRTIO-PCI-DESIGN.md). The userspace
+    // half of the KObj_PCI mechanism: a CAP_HW_CREATE driver claims a PCI
+    // function, maps its BARs, and reads its resolved topology. KObj_PCI is
+    // non-transferable (I-5) -- the claimer is always the driver.
+
+    // SYS_PCI_CLAIM(virtio_device_id) -> handle / -1  (pci-1c)
+    //   Claim the first VirtIO-PCI function matching virtio_device_id (the
+    //   VIRTIO device id: 1 = net, 4 = rng, ...). The kernel assigns + enables
+    //   the function's memory BARs, walks the VIRTIO_PCI_CAP_* list into the
+    //   region map, and resolves the INTx GIC INTID. On success mints a
+    //   KOBJ_PCI handle with FIXED rights R|W|MAP (never TRANSFER -- I-5): a
+    //   device owner always needs read + write + map, and the handle cannot be
+    //   passed, so there is no partial-rights use case. Requires CAP_HW_CREATE
+    //   (like SYS_MMIO_CREATE). Returns -1 on: cap-missing / device-not-found /
+    //   already-claimed / BAR-assign failure / malformed cap list / OOM.
+    SYS_PCI_CLAIM = 76,    // arg: virtio_device_id (x0)
+
+    // SYS_PCI_MAP_BAR(handle, vaddr, bar_index, prot) -> 0 / -1  (pci-1c)
+    //   Install a user-VA mapping at `vaddr` for BAR `bar_index` of a KOBJ_PCI
+    //   handle. `prot` is bounded by the handle rights (R|W|MAP); EXEC is
+    //   rejected (device memory is not executable) and W-without-R is rejected
+    //   (AArch64 has no W-only AP encoding). The mapping spans the full decoded
+    //   BAR size; the driver indexes the VIRTIO_PCI_CAP_* regions within it by
+    //   the offsets SYS_PCI_INFO reports. Requires RIGHT_MAP + CAP_HW_CREATE.
+    //   Returns -1 on: bad handle / wrong kind / missing RIGHT_MAP / out-of-range
+    //   or absent BAR / prot exceeds rights / EXEC / prot == 0 / W-without-R /
+    //   OOM / VMA overlap.
+    SYS_PCI_MAP_BAR = 77,  // arg: handle (x0), vaddr (x1), bar_index (x2), prot (x3)
+
+    // SYS_PCI_INFO(handle, info_va) -> 0 / -1  (pci-1c)
+    //   Copy a struct t_pci_info (the resolved BAR + VIRTIO_PCI_CAP_* region map
+    //   + the swizzled INTID + bdf) for a KOBJ_PCI handle into the user buffer
+    //   at info_va. Requires RIGHT_READ (the fixed claim always has it). Returns
+    //   -1 on: bad handle / wrong kind / missing RIGHT_READ / bad info_va.
+    SYS_PCI_INFO = 78,     // arg: handle (x0), info_va (x1)
 };
 
 // SYS_CLOCK_GETTIME clock ids. Values match Linux clockid_t so a future pouch
@@ -1412,6 +1448,65 @@ _Static_assert(__builtin_offsetof(struct t_timespec, tv_sec)  == 0,
                "t_timespec.tv_sec at ABI offset 0");
 _Static_assert(__builtin_offsetof(struct t_timespec, tv_nsec) == 8,
                "t_timespec.tv_nsec at ABI offset 8");
+
+// SYS_PCI_INFO record (pci-1c). The kernel copies a zero-initialized,
+// fully-filled t_pci_info out (no uninitialized padding -> no info leak); the
+// _Static_asserts pin every field offset so libt / libthyla-rs / a future pouch
+// patch decode a fixed layout. All fields are fixed-width + naturally aligned;
+// explicit _pad makes the layout deterministic. The PA/size fields name the
+// device's own BAR window (the owner already controls it) -- no kernel-VA /
+// RAM-PA leak (the BAR window is the host-bridge MMIO aperture, not RAM).
+struct t_pci_bar {
+    u64 pa;        // 0:  assigned device PA (page-aligned); 0 if !present
+    u64 size;      // 8:  decoded BAR size (power of 2); 0 if !present
+    u8  present;   // 16: 1 if an implemented, assigned MEM BAR
+    u8  is_64;     // 17: 1 if a 64-bit BAR (consumes the following slot)
+    u8  _pad[6];   // 18: pad to 24
+};
+_Static_assert(sizeof(struct t_pci_bar) == 24, "t_pci_bar ABI size 24");
+_Static_assert(__builtin_offsetof(struct t_pci_bar, pa)      == 0,  "t_pci_bar.pa @0");
+_Static_assert(__builtin_offsetof(struct t_pci_bar, size)    == 8,  "t_pci_bar.size @8");
+_Static_assert(__builtin_offsetof(struct t_pci_bar, present) == 16, "t_pci_bar.present @16");
+_Static_assert(__builtin_offsetof(struct t_pci_bar, is_64)   == 17, "t_pci_bar.is_64 @17");
+
+struct t_pci_region {
+    u32 offset;    // 0: byte offset of the cap structure within bars[bar]
+    u32 length;    // 4: byte length (offset + length <= bars[bar].size)
+    u8  bar;       // 8: which BAR holds it (< 6, present)
+    u8  present;   // 9: 1 if this VIRTIO_PCI_CAP region was resolved
+    u8  _pad[2];   // 10: pad to 12
+};
+_Static_assert(sizeof(struct t_pci_region) == 12, "t_pci_region ABI size 12");
+_Static_assert(__builtin_offsetof(struct t_pci_region, offset)  == 0, "t_pci_region.offset @0");
+_Static_assert(__builtin_offsetof(struct t_pci_region, length)  == 4, "t_pci_region.length @4");
+_Static_assert(__builtin_offsetof(struct t_pci_region, bar)     == 8, "t_pci_region.bar @8");
+_Static_assert(__builtin_offsetof(struct t_pci_region, present) == 9, "t_pci_region.present @9");
+
+struct t_pci_info {
+    struct t_pci_bar    bars[6];     // 0:   the assigned memory BARs
+    struct t_pci_region regions[4];  // 144: VIRTIO_PCI_CAP regions, (cfg_type - 1):
+                                     //      [0]=COMMON [1]=NOTIFY [2]=ISR [3]=DEVICE
+    u32 notify_off_multiplier;       // 192: from the NOTIFY_CFG cap
+    u32 intid;                       // 196: swizzled GIC INTID (valid iff intid_valid)
+    u8  intid_valid;                 // 200: 1 if the DTB interrupt-map resolved
+    u8  bus;                         // 201
+    u8  dev;                         // 202
+    u8  fn;                          // 203
+    u16 virtio_device_id;            // 204
+    u8  _pad[2];                     // 206: pad to 208
+};
+_Static_assert(sizeof(struct t_pci_info) == 208, "t_pci_info ABI size 208");
+_Static_assert(__builtin_offsetof(struct t_pci_info, bars)    == 0,   "t_pci_info.bars @0");
+_Static_assert(__builtin_offsetof(struct t_pci_info, regions) == 144, "t_pci_info.regions @144");
+_Static_assert(__builtin_offsetof(struct t_pci_info, notify_off_multiplier) == 192,
+               "t_pci_info.notify_off_multiplier @192");
+_Static_assert(__builtin_offsetof(struct t_pci_info, intid)       == 196, "t_pci_info.intid @196");
+_Static_assert(__builtin_offsetof(struct t_pci_info, intid_valid) == 200, "t_pci_info.intid_valid @200");
+_Static_assert(__builtin_offsetof(struct t_pci_info, bus)         == 201, "t_pci_info.bus @201");
+_Static_assert(__builtin_offsetof(struct t_pci_info, dev)         == 202, "t_pci_info.dev @202");
+_Static_assert(__builtin_offsetof(struct t_pci_info, fn)          == 203, "t_pci_info.fn @203");
+_Static_assert(__builtin_offsetof(struct t_pci_info, virtio_device_id) == 204,
+               "t_pci_info.virtio_device_id @204");
 
 // SYS_WALK_OPEN's FROM_ROOT sentinel: when passed as the spoor_fd, the
 // kernel uses the caller's Territory's root_spoor as the walk source

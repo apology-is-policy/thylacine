@@ -225,6 +225,9 @@ pub const T_SYS_GETPID: u64           = 72;     // LS-K identity: pid
 pub const T_SYS_GETUID: u64           = 73;     // LS-K identity: principal_id
 pub const T_SYS_GETGID: u64           = 74;     // LS-K identity: primary_gid
 pub const T_SYS_CLOCK_GETTIME: u64    = 75;     // LS-K clock: realtime/monotonic
+pub const T_SYS_PCI_CLAIM: u64        = 76;     // pci-1c: claim a VirtIO-PCI function
+pub const T_SYS_PCI_MAP_BAR: u64      = 77;     // pci-1c: map a KObj_PCI BAR
+pub const T_SYS_PCI_INFO: u64         = 78;     // pci-1c: read KObj_PCI topology
 // SYS_CLOCK_GETTIME clock ids (match Linux clockid_t).
 pub const T_CLOCK_REALTIME: u64       = 0;
 pub const T_CLOCK_MONOTONIC: u64      = 1;
@@ -578,6 +581,107 @@ pub unsafe fn t_mmio_map(handle: i64, vaddr: u64, prot: u32) -> i64 {
         in("x1") vaddr,
         in("x2") prot as u64,
         in("x8") T_SYS_MMIO_MAP,
+        options(nostack)
+    );
+    x0
+}
+
+// TPciInfo — mirror of the kernel struct t_pci_info (pci-1c). `#[repr(C)]`
+// pins the byte layout; the const asserts pin size + offsets against the
+// kernel header. Filled by t_pci_info (SYS_PCI_INFO). The rich `PciDev` safe
+// wrapper lands in hardware.rs at pci-2; pci-1c ships the ABI surface.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct TPciBar {
+    pub pa: u64,        // 0
+    pub size: u64,      // 8
+    pub present: u8,    // 16
+    pub is_64: u8,      // 17
+    pub _pad: [u8; 6],  // 18
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct TPciRegion {
+    pub offset: u32,    // 0
+    pub length: u32,    // 4
+    pub bar: u8,        // 8
+    pub present: u8,    // 9
+    pub _pad: [u8; 2],  // 10
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct TPciInfo {
+    pub bars: [TPciBar; 6],         // 0
+    pub regions: [TPciRegion; 4],   // 144
+    pub notify_off_multiplier: u32, // 192
+    pub intid: u32,                 // 196
+    pub intid_valid: u8,            // 200
+    pub bus: u8,                    // 201
+    pub dev: u8,                    // 202
+    pub fn_: u8,                    // 203 ('fn' is a Rust keyword)
+    pub virtio_device_id: u16,      // 204
+    pub _pad: [u8; 2],              // 206
+}
+const _: () = assert!(core::mem::size_of::<TPciBar>() == 24);
+const _: () = assert!(core::mem::size_of::<TPciRegion>() == 12);
+const _: () = assert!(core::mem::size_of::<TPciInfo>() == 208);
+const _: () = assert!(core::mem::offset_of!(TPciInfo, regions) == 144);
+const _: () = assert!(core::mem::offset_of!(TPciInfo, intid) == 196);
+const _: () = assert!(core::mem::offset_of!(TPciInfo, virtio_device_id) == 204);
+
+// t_pci_claim — claim the first VirtIO-PCI function matching `virtio_device_id`
+// (1 = net, 4 = rng, ...). Returns a non-negative KOBJ_PCI handle (fixed rights
+// R|W|MAP, non-transferable) on success, -1 on cap-missing / not-found /
+// already-claimed / BAR-assign failure. Requires CAP_HW_CREATE.
+//
+// Safety: claiming a function gives the caller exclusive control of a real
+// device; the kernel does every check (cap, exclusivity, BAR assignment).
+#[inline(always)]
+pub unsafe fn t_pci_claim(virtio_device_id: u64) -> i64 {
+    let mut x0: i64 = virtio_device_id as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x8") T_SYS_PCI_CLAIM,
+        options(nostack)
+    );
+    x0
+}
+
+// t_pci_map_bar — map BAR `bar_index` of a KOBJ_PCI handle at `vaddr`. `prot`
+// is bounded by the handle rights; EXEC + W-without-R are rejected. Returns 0
+// on success, -1 on bad handle / out-of-range BAR / prot violation / overlap.
+//
+// Safety: `vaddr` must be a page-aligned user-VA region the caller has chosen
+// and is not currently mapped; the kernel rejects overlaps + bad alignment.
+#[inline(always)]
+pub unsafe fn t_pci_map_bar(handle: i64, vaddr: u64, bar_index: u64, prot: u32) -> i64 {
+    let mut x0: i64 = handle;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") vaddr,
+        in("x2") bar_index,
+        in("x3") prot as u64,
+        in("x8") T_SYS_PCI_MAP_BAR,
+        options(nostack)
+    );
+    x0
+}
+
+// t_pci_info — fill `*out` with the KOBJ_PCI handle's resolved BAR + region
+// map + INTID + bdf. Returns 0 on success, -1 on bad handle / bad pointer.
+//
+// Safety: `out` must point to a writable, properly-aligned TPciInfo the kernel
+// may fill (208 bytes).
+#[inline(always)]
+pub unsafe fn t_pci_info(handle: i64, out: *mut TPciInfo) -> i64 {
+    let mut x0: i64 = handle;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") out as u64,
+        in("x8") T_SYS_PCI_INFO,
         options(nostack)
     );
     x0

@@ -22,7 +22,8 @@ socket-compat, dev9p.poll, TLS/NTP, exit criteria) resume on the PCI NIC.
 | `ff3a621` (+audit-close) | **net-1**: `usr/lib/netdev` — the reusable `VirtioNet` RX+TX frame driver (send/poll_rx/recycle/quiesce) + host-tested `ring` + the `netdev-test` boot probe | 7 host ring tests + `netdev-test: PASS 24/24` + boot OK + SMP gate 0 corruption + Opus-4.8 audit 0/0/1/4 (F1 P2 + F2/F3 P3 fixed; F4/F5 closed) |
 | `378c667` | **pci-0**: the virtio-PCI transport scripture (`docs/VIRTIO-PCI-DESIGN.md` + ARCH §13.2/§25.4/I-5 + NET-DESIGN §17 + ROADMAP) — the #140 DFS fork; net-only, INTx | n/a (scripture) |
 | `5a1b36c` | **pci-1a**: the DTB/config primitives — `dtb_pci_intx_route` (interrupt-map → GIC INTID), `dtb_pci_mem_window`, `dtb_get_compat_prop`, `virtio_pci_cfg_write{8,16,32}`; no ABI/kobj change | 883/883 (+3: `dtb.pci_intx_route` full swizzle + `dtb.pci_mem_window` + `virtio_pci.cfg_write_bounds`) + boot OK; SMP-inert (gate at pci-1b) |
-| _(pending)_ | **pci-1b**: the `KObj_PCI` kernel object — `kernel/pci_handle.{c,h}` (exclusive `g_pci_claims` per-(bus,dev,fn) claim; bump-assign BARs from `dtb_pci_mem_window` with width-correct 32/64-bit sizing; `VIRTIO_PCI_CAP_*` cap-walk into `regions[]`, bounded + OOB-validated; INTx swizzle; quiesce-before-free) + `KOBJ_PCI=11` joining `KOBJ_KIND_HW_MASK` (I-5 non-transferable + NoHwDup for free) + `kobj_pci_init` at boot | 889/889 (+6: `pci.bar_decode_size` + `pci.claim_rng`/`claim_unknown`/`claim_exclusive`/`unref_releases_bars`/`live_count_balances`, claiming the live idle rng-pci) + boot OK + SMP gate; **self-found+fixed**: 32-bit BAR size mask must invert in 32-bit width (a 64-bit invert yields a bogus exabyte size) |
+| `89a6c69` | **pci-1b**: the `KObj_PCI` kernel object — `kernel/pci_handle.{c,h}` (exclusive `g_pci_claims` per-(bus,dev,fn) claim; bump-assign BARs from `dtb_pci_mem_window` with width-correct 32/64-bit sizing; `VIRTIO_PCI_CAP_*` cap-walk into `regions[]`, bounded + OOB-validated; INTx swizzle; quiesce-before-free) + `KOBJ_PCI=11` joining `KOBJ_KIND_HW_MASK` (I-5 non-transferable + NoHwDup for free) + `kobj_pci_init` at boot | 889/889 (+6: `pci.bar_decode_size` + `pci.claim_rng`/`claim_unknown`/`claim_exclusive`/`unref_releases_bars`/`live_count_balances`, claiming the live idle rng-pci) + boot OK + SMP gate; **self-found+fixed**: 32-bit BAR size mask must invert in 32-bit width (a 64-bit invert yields a bogus exabyte size) |
+| _(pending)_ | **pci-1c**: the 3 syscalls — `SYS_PCI_CLAIM=76` / `SYS_PCI_MAP_BAR=77` / `SYS_PCI_INFO=78` (`kernel/syscall.c` handlers + dispatch) + the 208-byte `struct t_pci_info` ABI (`_Static_assert`-pinned in the kernel header, the libt mirror, and the libthyla-rs `TPciInfo` with `offset_of!` asserts) + libt (`t_pci_claim`/`t_pci_map_bar`/`t_pci_info`) + libthyla-rs raw wrappers. CLAIM: `CAP_HW_CREATE` gate → `kobj_pci_claim` → mint fixed R\|W\|MAP (no TRANSFER). MAP_BAR: mirrors `sys_mmio_map` via the `kobj_pci_bar_mmio` seam (bar_index `>= 6` rejected before the u32 narrowing). INFO: zero-init + fill + byte copy-out (no implicit padding → no stack leak). | 891/891 (+2: `pci.syscall_reject` + `pci.syscall_claim_info`) + boot OK + SMP gate |
 
 ## Remaining work
 
@@ -48,8 +49,11 @@ construction. net-only scope; INTx interrupts; blk→PCI + MSI-X are v1.x seams.
   swizzle. **Audit-bearing** (the claim table is the first shared state).
   **LANDED** (kobj-only; the 3 syscalls split out to pci-1c). 889/889 + boot OK.
 - **pci-1c** the 3 syscalls: `SYS_PCI_CLAIM=76` / `MAP_BAR=77` / `INFO=78` +
-  `struct t_pci_info` ABI + libt/libthyla-rs wrappers + syscall tests. The SMP
-  concurrency gate's adversarial value (concurrent claims) lands here.
+  `struct t_pci_info` ABI + libt/libthyla-rs wrappers + syscall tests.
+  **LANDED** (891/891; the syscall envelope over the pci-1b kobj). The success
+  copy-out (SYS_PCI_INFO) + the BAR burrow-map (SYS_PCI_MAP_BAR) need a user
+  buffer + address space, so they are proven by the pci-2 userspace probe; the
+  in-kernel tests cover the cap gate / mint / rights / reject paths.
 - **pci-2** userspace: `libthyla-rs::hardware::PciDev` + virtio-pci-modern +
   port netdev's transport half (reuse `ring`); `netdev-test` over PCI;
   `run-vm.sh` `virtio-net-device` → `virtio-net-pci`.
