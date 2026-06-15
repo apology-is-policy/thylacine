@@ -622,11 +622,29 @@ pub struct TPciInfo {
     pub virtio_device_id: u16,      // 204
     pub _pad: [u8; 2],              // 206
 }
+// Pin EVERY field offset against the kernel header (syscall.h:1466-1509), not
+// just size + a sample -- a future kernel field reorder must fail this compile,
+// the Loom 6d-F1 drift-defense (a sample-only assert silently accepts a reorder
+// that lands a field outside the sampled set).
 const _: () = assert!(core::mem::size_of::<TPciBar>() == 24);
+const _: () = assert!(core::mem::offset_of!(TPciBar, pa) == 0);
+const _: () = assert!(core::mem::offset_of!(TPciBar, size) == 8);
+const _: () = assert!(core::mem::offset_of!(TPciBar, present) == 16);
+const _: () = assert!(core::mem::offset_of!(TPciBar, is_64) == 17);
 const _: () = assert!(core::mem::size_of::<TPciRegion>() == 12);
+const _: () = assert!(core::mem::offset_of!(TPciRegion, offset) == 0);
+const _: () = assert!(core::mem::offset_of!(TPciRegion, length) == 4);
+const _: () = assert!(core::mem::offset_of!(TPciRegion, bar) == 8);
+const _: () = assert!(core::mem::offset_of!(TPciRegion, present) == 9);
 const _: () = assert!(core::mem::size_of::<TPciInfo>() == 208);
+const _: () = assert!(core::mem::offset_of!(TPciInfo, bars) == 0);
 const _: () = assert!(core::mem::offset_of!(TPciInfo, regions) == 144);
+const _: () = assert!(core::mem::offset_of!(TPciInfo, notify_off_multiplier) == 192);
 const _: () = assert!(core::mem::offset_of!(TPciInfo, intid) == 196);
+const _: () = assert!(core::mem::offset_of!(TPciInfo, intid_valid) == 200);
+const _: () = assert!(core::mem::offset_of!(TPciInfo, bus) == 201);
+const _: () = assert!(core::mem::offset_of!(TPciInfo, dev) == 202);
+const _: () = assert!(core::mem::offset_of!(TPciInfo, fn_) == 203);
 const _: () = assert!(core::mem::offset_of!(TPciInfo, virtio_device_id) == 204);
 
 impl TPciInfo {

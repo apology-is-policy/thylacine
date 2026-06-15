@@ -23,7 +23,10 @@
 #include <thylacine/thread.h>          // struct Thread / Proc
 #include <thylacine/vma.h>             // VMA_PROT_*
 
+#include "../../mm/slub.h"             // kmalloc / kfree / KP_ZERO
+
 void test_pci_bar_decode_size(void);
+void test_pci_walk_caps_hostile(void);
 void test_pci_claim_rng(void);
 void test_pci_claim_unknown(void);
 void test_pci_claim_exclusive(void);
@@ -71,6 +74,141 @@ void test_pci_bar_decode_size(void) {
                    "unimplemented 32-bit mask must decode to 0");
     TEST_EXPECT_EQ(pci_bar_decode_size(0x00000000u, 0u, true), 0x0ull,
                    "full-width 64-bit mask (2^64) must decode to 0");
+}
+
+// --- pci_walk_caps hostile-layout rejection (deterministic, no hardware) -----
+//
+// Drives pci_walk_caps over a synthetic in-RAM config-space buffer (the cfg
+// reads are mmio_read*, which work on plain RAM). Exercises the
+// config-space-mediation rejections a real device cap walk must enforce: a
+// capability-pointer loop (bounded, not hung), an out-of-range BAR index, a
+// reference to an unassigned BAR, and a region exceeding the BAR's decoded size.
+// pci_walk_caps is declared in <thylacine/pci_handle.h> (included above).
+
+static void cfg_put16(u8 *cfg, u32 off, u16 v) {
+    cfg[off]     = (u8)(v & 0xFFu);
+    cfg[off + 1] = (u8)((v >> 8) & 0xFFu);
+}
+static void cfg_put32(u8 *cfg, u32 off, u32 v) {
+    cfg[off]     = (u8)(v & 0xFFu);
+    cfg[off + 1] = (u8)((v >> 8) & 0xFFu);
+    cfg[off + 2] = (u8)((v >> 16) & 0xFFu);
+    cfg[off + 3] = (u8)((v >> 24) & 0xFFu);
+}
+// Write a VIRTIO_PCI vendor capability at `at`: next pointer, cfg_type, bar
+// index, region offset, region length (notify_off_multiplier left 0).
+static void cfg_put_vcap(u8 *cfg, u32 at, u8 next, u8 cfg_type, u8 bar,
+                         u32 offset, u32 length) {
+    cfg[at + 0] = PCI_CAP_ID_VNDR;
+    cfg[at + 1] = next;
+    cfg[at + 2] = 0x10;          // cap_len (unread by the walk)
+    cfg[at + 3] = cfg_type;
+    cfg[at + 4] = bar;
+    cfg_put32(cfg, at + 8, offset);
+    cfg_put32(cfg, at + 12, length);
+    cfg_put32(cfg, at + 16, 0);  // notify_off_multiplier
+}
+
+// Allocate a zeroed 0x80-byte synthetic config buffer + a KObj_PCI (BAR 0
+// present, 4 KiB) via kmalloc(KP_ZERO) -- the kernel has no `memset` symbol, so a
+// large stack `= {0}` would emit an undefined memset call. Binds `d` to the
+// config + pre-sets the cap-list status bit and the first-cap pointer (0x40).
+// Returns false on OOM (frees any partial allocation). The 0x80 buffer covers
+// every offset these cases read (the caps live at 0x40 / 0x48; max read 0x58).
+static bool walk_setup(u8 **cfg, struct KObj_PCI **k, struct virtio_pci_dev *d) {
+    *cfg = kmalloc(0x80, KP_ZERO);
+    *k   = kmalloc(sizeof(**k), KP_ZERO);
+    if (!*cfg || !*k) {
+        kfree(*cfg);
+        kfree(*k);
+        *cfg = NULL;
+        *k = NULL;
+        return false;
+    }
+    (*k)->magic = KOBJ_PCI_MAGIC;
+    (*k)->bars[0].present = true;
+    (*k)->bars[0].size = 0x1000;
+    d->cfg = *cfg;
+    cfg_put16(*cfg, PCI_CFG_STATUS, PCI_STATUS_CAP_LIST);
+    (*cfg)[PCI_CFG_CAP_PTR] = 0x40;
+    return true;
+}
+
+void test_pci_walk_caps_hostile(void) {
+    const u8 COMMON = (u8)VIRTIO_PCI_CAP_COMMON_CFG;
+
+    // A: a cap-pointer loop must TERMINATE (the 48-hop guard) and return 0, not
+    // hang. cfg_type 5 (PCI_CFG) is outside [1,4], so no region resolve runs --
+    // this isolates the loop-termination property.
+    {
+        u8 *cfg;
+        struct KObj_PCI *k;
+        struct virtio_pci_dev d = {0};
+        TEST_ASSERT(walk_setup(&cfg, &k, &d), "case A alloc");
+        cfg_put_vcap(cfg, 0x40, 0x48, 5, 0, 0, 0);
+        cfg_put_vcap(cfg, 0x48, 0x40, 5, 0, 0, 0);   // 0x48 -> 0x40 -> loop
+        int r = pci_walk_caps(k, &d);
+        kfree(cfg);
+        kfree(k);
+        TEST_ASSERT(r == 0,
+                    "a cap-pointer loop must terminate via the 48-hop guard (no hang)");
+    }
+
+    // B: a cap with an out-of-range BAR index must be rejected.
+    {
+        u8 *cfg;
+        struct KObj_PCI *k;
+        struct virtio_pci_dev d = {0};
+        TEST_ASSERT(walk_setup(&cfg, &k, &d), "case B alloc");
+        cfg_put_vcap(cfg, 0x40, 0x00, COMMON, PCI_BAR_COUNT, 0, 0x10);   // bar == 6
+        int r = pci_walk_caps(k, &d);
+        kfree(cfg);
+        kfree(k);
+        TEST_ASSERT(r < 0, "an out-of-range cap BAR index must be rejected");
+    }
+
+    // C: a cap referencing an unassigned (not-present) BAR must be rejected.
+    {
+        u8 *cfg;
+        struct KObj_PCI *k;
+        struct virtio_pci_dev d = {0};
+        TEST_ASSERT(walk_setup(&cfg, &k, &d), "case C alloc");   // only BAR 0 present
+        cfg_put_vcap(cfg, 0x40, 0x00, COMMON, 1, 0, 0x10);   // BAR 1 not present
+        int r = pci_walk_caps(k, &d);
+        kfree(cfg);
+        kfree(k);
+        TEST_ASSERT(r < 0, "a cap referencing an unassigned BAR must be rejected");
+    }
+
+    // D: a region whose offset+length exceeds the BAR's decoded size must be
+    // rejected (the OOB-region guard; the integer math is u64-widened).
+    {
+        u8 *cfg;
+        struct KObj_PCI *k;
+        struct virtio_pci_dev d = {0};
+        TEST_ASSERT(walk_setup(&cfg, &k, &d), "case D alloc");
+        cfg_put_vcap(cfg, 0x40, 0x00, COMMON, 0, 0x800, 0x1000);   // 0x1800 > 0x1000
+        int r = pci_walk_caps(k, &d);
+        kfree(cfg);
+        kfree(k);
+        TEST_ASSERT(r < 0, "a region exceeding the BAR's decoded size must be rejected");
+    }
+
+    // E: control -- a well-formed common-cfg cap resolves cleanly + records the
+    // region (proves the rejections above are not vacuously failing every input).
+    {
+        u8 *cfg;
+        struct KObj_PCI *k;
+        struct virtio_pci_dev d = {0};
+        TEST_ASSERT(walk_setup(&cfg, &k, &d), "case E alloc");
+        cfg_put_vcap(cfg, 0x40, 0x00, COMMON, 0, 0, 0x38);   // valid common region
+        int r = pci_walk_caps(k, &d);
+        bool present = k->regions[COMMON - 1].present;
+        kfree(cfg);
+        kfree(k);
+        TEST_ASSERT(r == 0, "a well-formed common-cfg cap must resolve");
+        TEST_ASSERT(present, "the resolved common region must be recorded present");
+    }
 }
 
 // A device-id that is never present on the v1.0 VirtIO device set.

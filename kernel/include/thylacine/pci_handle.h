@@ -159,6 +159,13 @@ struct KObj_MMIO *kobj_pci_bar_mmio(struct KObj_PCI *k, u32 bar_index);
 // full-width BAR.
 u64 pci_bar_decode_size(u32 lo_mask, u32 hi_rb, bool is64);
 
+// Resolve the VIRTIO_PCI_CAP_* regions from d's config-space capability list
+// into k->regions[], validating each region's BAR index + extent against the
+// assigned BAR sizes. Returns 0 (resolved + validated) or -1 (malformed: cap
+// loop / out-of-range BAR / unassigned BAR / region past the BAR size). Exposed
+// for a deterministic hostile-cap-layout unit test over a synthetic config.
+int pci_walk_caps(struct KObj_PCI *k, struct virtio_pci_dev *d);
+
 // Diagnostics — cumulative claim counter + currently-live count.
 u64 kobj_pci_total_created(void);
 u64 kobj_pci_live_count(void);

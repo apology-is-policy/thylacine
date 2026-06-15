@@ -214,6 +214,9 @@ pub enum PciOpenError {
     FeaturesRejected,
     /// `queue_size` is below `QUEUE_SIZE` on a required queue.
     QueueTooSmall,
+    /// A queue's `queue_notify_off * notify_off_multiplier` doorbell would land
+    /// past the notify region's reported length (a malformed / hostile device).
+    NotifyRegionTooSmall,
     /// `SYS_IRQ_CREATE` for the device INTID failed.
     IrqClaim,
     /// `SYS_DMA_CREATE` / `MAP` for a ring or pool failed.
@@ -270,7 +273,7 @@ impl VirtioNetPci {
         if common_len < CCFG_MIN_LEN {
             return Err(PciOpenError::MissingRegion);
         }
-        let (notify_base, _notify_len) = pci.region(PciRegion::Notify).ok_or(PciOpenError::MissingRegion)?;
+        let (notify_base, notify_len) = pci.region(PciRegion::Notify).ok_or(PciOpenError::MissingRegion)?;
         let isr_va = pci.region(PciRegion::Isr).ok_or(PciOpenError::MissingRegion)?.0;
         // Device-config is optional; treat a too-small region as absent so the
         // MAC/status reads never run past it. Without it we fall back to a
@@ -302,6 +305,7 @@ impl VirtioNetPci {
             common_va,
             notify_base,
             notify_mul,
+            u64::from(notify_len),
             device_cfg_va,
             ring.base_va() as u64,
             ring.paddr(),
@@ -562,6 +566,7 @@ fn init_device(
     common: u64,
     notify_base: u64,
     notify_mul: u64,
+    notify_len: u64,
     device_cfg: Option<u64>,
     ring_va: u64,
     ring_pa: u64,
@@ -629,6 +634,16 @@ fn init_device(
                 return Err(PciOpenError::QueueTooSmall);
             }
         };
+        // Bound each device-supplied doorbell offset within the notify region
+        // (pci-3 F2): a hostile queue_notify_off * multiplier must not place the
+        // 2-byte doorbell write past the region. Same posture as the CCFG_MIN_LEN
+        // / DEVICE_CFG_MIN_LEN region guards; off*mul is u16*u32 -> no u64 wrap.
+        for off in [rx_off, tx_off] {
+            if u64::from(off) * notify_mul + 2 > notify_len {
+                w8(common + CCFG_DEVICE_STATUS, STATUS_FAILED);
+                return Err(PciOpenError::NotifyRegionTooSmall);
+            }
+        }
         *rx_notify_va = notify_base + u64::from(rx_off) * notify_mul;
         *tx_notify_va = notify_base + u64::from(tx_off) * notify_mul;
 

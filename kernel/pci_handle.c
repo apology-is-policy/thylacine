@@ -258,8 +258,10 @@ static int pci_assign_bars(struct KObj_PCI *k, struct virtio_pci_dev *d) {
 // guard breaks any loop). Validates each region's BAR index + extent against the
 // assigned BAR's decoded size (a region into an unassigned BAR or past its size
 // is hostile/malformed → reject the claim). Returns 0 (resolved what was
-// present, validated) or -1 (malformed).
-static int pci_walk_caps(struct KObj_PCI *k, struct virtio_pci_dev *d) {
+// present, validated) or -1 (malformed). Non-static + header-declared so a
+// deterministic unit test drives the hostile-layout rejection branches (cap
+// loop / OOB bar / unassigned bar / oversized region) over a synthetic config.
+int pci_walk_caps(struct KObj_PCI *k, struct virtio_pci_dev *d) {
     u16 status = virtio_pci_cfg_read16(d, PCI_CFG_STATUS);
     if (!(status & PCI_STATUS_CAP_LIST)) return 0;   // no caps (non-modern) — not an error
 

@@ -141,8 +141,8 @@ Banner emission is one UART write per device + one summary line.
 ### Known caveats / footguns
 
 - **Bus 0 only.** Multi-bus support requires either an L2 block descriptor for the full 256 MiB ECAM (consuming 1 L2 entry but bypassing vmalloc's L3 page-grain mapping) or extending vmalloc to multiple L3 tables. QEMU virt's default config has no bridges, so bus 0 enumeration captures everything. Lands when a target needs more.
-- **No BAR mapping.** `struct virtio_pci_dev` has no `bar[]` field. Drivers must read BARs directly via `cfg_read32(d, PCI_CFG_BAR0..5)` and map what they need via `mmu_map_mmio`. The VirtIO 1.2 §4.1.4 capability list (which says which BARs hold common-cfg / notify / ISR / device-cfg regions) is also unwalked; the first driver chunk that uses PCI implements it.
-- **No INTx wiring.** PCI legacy interrupts arrive through the DTB `interrupt-map` (which maps `(bus,dev,fn) × INTA-D` to GIC INTIDs). `irqfwd` (P4-G) handles INTIDs but the map walk isn't wired. The first PCI driver chunk that wants IRQs adds this.
+- **BAR mapping + cap-walk: now in `KObj_PCI`** (pci-1b, `docs/reference/115-pci-claim.md`). The enumerator deliberately keeps `struct virtio_pci_dev` BAR-free; `kobj_pci_claim` (built on this enumerator's config-space accessors) assigns the BARs from the host-bridge window, walks the VirtIO 1.2 §4.1.4 capability list into resolved common/notify/ISR/device regions, and hands BAR mappings to userspace via `SYS_PCI_MAP_BAR`.
+- **INTx wiring: now in `KObj_PCI`** (pci-1b). `dtb_pci_intx_route` (pci-1a) walks the DTB `interrupt-map` to swizzle `(dev) × INTA` to a GIC SPI; `kobj_pci_claim` resolves it into the claim's `intid`, forwarded to a userspace driver via `KObj_IRQ`. The GIC distributor stays kernel-reserved.
 - **No MSI/MSI-X enable.** Modern transport prefers MSI/MSI-X; we don't yet program the MSI capability. Same defer-to-first-driver story.
 - **No bridge / Type 1 header handling.** PCI-to-PCI bridges (header_type 1) are skipped — we don't walk their secondary bus. Adding bridge support requires the per-bridge bus-number programming + secondary bus mapping.
 - **Vmalloc pressure.** 256 of 512 vmalloc pages consumed by ECAM mapping; future vmalloc-heavy chunks (Phase 5+ Stratum 9P transport buffers, Phase 6+ network buffers) may need vmalloc expansion. Documented as a Phase 4 trip-hazard.
@@ -157,5 +157,6 @@ We keep "virtio_pci" / "BAR" / "ECAM" / "BDF" verbatim from PCI/PCIe spec becaus
 - PCI Local Bus Specification, Rev 3.0
 - PCI Express Base Specification, Rev 6.0 §7.2.2 (ECAM)
 - `docs/reference/35-virtio.md` — sibling MMIO transport reference.
+- `docs/reference/115-pci-claim.md` — `KObj_PCI`, the claim layer built on this enumerator (BAR-assign + cap-walk + INTx + the 3 PCI syscalls).
 - `docs/reference/23-direct-map.md` — `mmu_map_mmio` semantics and vmalloc layout.
 - `docs/ARCHITECTURE.md §13` — VirtIO transport mix rationale.

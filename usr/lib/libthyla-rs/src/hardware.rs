@@ -702,6 +702,17 @@ impl PciDev {
             return Err(PciError::Info);
         }
 
+        // pci-3 F1: a mid-loop failure here leaves the BARs already mapped at
+        // bar_va[j&lt;i] in place until proc exit -- the handle Drop releases the
+        // claim but a live BAR mapping holds an independent kobj_mmio ref (#847).
+        // This is NOT explicitly unwound because there is no v1.0 detach path for
+        // it: SYS_BURROW_DETACH is confined to the burrow-attach window
+        // (EXEC_USER_BURROW_BASE = 4 GiB+), and the driver-VA windows (BAR + DMA,
+        // mirroring the byte-identical mmio VirtioNet) live below it by design, so
+        // the proc-exit-bounded posture is shared by every virtio driver mapping
+        // (MMIO / DMA / BAR), not a PCI-specific gap. claim() is one-shot at driver
+        // startup + a single-BAR virtio-net-pci never maps a second BAR, so the
+        // partial-map path is unreachable in practice. See docs/reference/115.
         let prot = T_PROT_READ | T_PROT_WRITE;
         let mut bar_va: [Option<u64>; 6] = [None; 6];
         for (i, bar) in info.bars.iter().enumerate() {

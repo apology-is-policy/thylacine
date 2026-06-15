@@ -166,7 +166,9 @@ it the create/claim is rejected at the capability gate.
 `PciOpenError` (PCI): `NoNetDevice` (claim failed — treated as SKIP by the
 probe), `BarMap` (info/map-bar failed or a BAR exceeds the VA stride),
 `MissingRegion` (no/undersized `Common`/`Notify`/`Isr` region), `NoIntid`,
-`NoVersion1`, `FeaturesRejected`, `QueueTooSmall`, `IrqClaim`, `DmaAlloc`.
+`NoVersion1`, `FeaturesRejected`, `QueueTooSmall`, `NotifyRegionTooSmall`
+(pci-3 F2: a queue's `queue_notify_off * notify_off_multiplier` doorbell would
+land past the notify region — a malformed/hostile device), `IrqClaim`, `DmaAlloc`.
 
 ## Known caveats / the net-2 refinement
 
