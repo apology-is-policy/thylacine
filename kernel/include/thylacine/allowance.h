@@ -111,13 +111,33 @@ hidx_t allowance_handle_alloc(struct Proc *p, enum kobj_kind kind,
 
 // Confer a narrowed allowance on a freshly-spawned driver Proc (the warden
 // path; specs/allowance.tla Confer). Deep-copies the descriptor into a heap
-// Allowance. The caller guarantees a fresh child (p->allowance == NULL).
-// Returns 0 on success, -1 on OOM / bad descriptor (count over the cap).
-// The warden ensures the conferred set is a subset of the bound node
-// (ConferredWithinNode -- the warden's grant policy, MENAGERIE section 11).
+// Allowance, freeing any prior allowance (an rfork-inherited clone). Called in
+// the child's spawn thunk BEFORE it enters EL0, so there is no concurrent
+// reader (the proc_confer_allowance set-once contract). Returns 0 on success,
+// -1 on OOM / bad descriptor (count over the cap). The warden ensures the
+// conferred set is a subset of the bound node (ConferredWithinNode -- the
+// warden's grant policy, MENAGERIE section 11); the kernel additionally gates
+// it as a NARROWING vs the spawning Proc's own allowance (see
+// allowance_confer_within_parent) so a narrowed driver cannot confer a wider
+// reach on a child (I-2's hardware-axis analog).
 int proc_confer_allowance(struct Proc *p,
                           const struct hw_window *mmio, u32 mmio_count,
                           const u32 *irq, u32 irq_count, u64 dma_max);
+
+// True iff `parent` may CONFER the described allowance -- i.e. the requested
+// set is within the parent's OWN allowance, so the confer is a NARROWING and
+// never a widening (I-2's hardware-axis analog; specs/allowance.tla, the
+// monotonic-reduction property allowance_clone_into enforces for plain rfork).
+// A BROAD parent (allowance == NULL) may confer anything (allowance_permits is
+// true for every resource). A NARROWED parent may confer only a subset of its
+// own: each requested MMIO window must lie within one parent window, each IRQ
+// must be in the parent's set, and dma_max must not exceed the parent's. An
+// empty axis (count 0, a size-0 window, or dma_max 0) confers nothing and is
+// trivially within. A REVOKED parent confers nothing (allowance_permits is
+// false while revoked). The spawn path rejects the spawn with -1 on false.
+bool allowance_confer_within_parent(struct Proc *parent,
+                                    const struct hw_window *mmio, u32 mmio_count,
+                                    const u32 *irq, u32 irq_count, u64 dma_max);
 
 // Revoke a driver's allowance on DeviceRemoved (specs/allowance.tla Revoke).
 // Sets revoked under the lock -- closing the gate for in-flight AND future
@@ -137,5 +157,14 @@ int allowance_clone_into(struct Proc *child, struct Proc *parent);
 
 // Free a Proc's allowance at reap (proc_free). NULL-tolerant.
 void allowance_free(struct Proc *p);
+
+// Install a new allowance pointer on p under g_proc_table_lock, returning the
+// displaced one for the caller to free OUTSIDE the lock (audit F1). Implemented
+// in proc.c (g_proc_table_lock is file-static there). proc_confer_allowance uses
+// it so a confer in the child's spawn thunk -- which runs AFTER the child is
+// proc-tree-linked and thus reachable by a concurrent proc_group_terminate ->
+// proc_revoke_allowance -- serializes its swap+free against that revoke's
+// lock-of-the-old-allowance, closing the narrowed-parent-spawns-child UAF.
+struct Allowance *proc_allowance_install_locked(struct Proc *p, struct Allowance *na);
 
 #endif

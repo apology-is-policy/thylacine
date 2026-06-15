@@ -1983,10 +1983,45 @@ void thread_exit_self(void) {
 // group-termination, so the CAS below only guards idempotency for a serialized
 // second caller (exit_group racing a kill).
 
+// Menagerie step 5a / audit F1: install a new allowance pointer on p UNDER
+// g_proc_table_lock, returning the displaced one for the caller to free OUTSIDE
+// the lock. proc_confer_allowance runs in the child's spawn thunk, AFTER the
+// child is proc-tree-linked (proc_link_child + ready) and thus reachable by a
+// concurrent killer's proc_group_terminate -> proc_revoke_allowance, which locks
+// the OLD allowance. A lockless swap+free there raced that revoke's
+// spin_lock(&old->lock) -> UAF (on the narrowed-parent-spawns-child path, where
+// the child inherits a non-NULL clone). Serializing the swap on g_proc_table_lock
+// -- the same lock the revoke runs under (via proc_group_terminate) -- closes it:
+// post-swap, the displaced pointer is unreferenced (any concurrent revoke either
+// completed before the swap, done with old, or now reads the new pointer), so the
+// caller's kfree outside the lock is safe. g_proc_table_lock is file-static here,
+// so the swap must live in proc.c. The RELEASE store preserves the gate-read
+// ACQUIRE pairing (allowance.c F4).
+struct Allowance *proc_allowance_install_locked(struct Proc *p, struct Allowance *na) {
+    if (!p) return NULL;
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    struct Allowance *old = p->allowance;
+    __atomic_store_n(&p->allowance, na, __ATOMIC_RELEASE);
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return old;
+}
+
 void proc_group_terminate(struct Proc *p, const char *msg) {
     if (!p || p->magic != PROC_MAGIC) return;   // fail-safe; caller validates
     if (p == g_kproc) return;   // #809 P3a: kproc runs at EL1 + never group-exits
     if (!msg) msg = "killed";
+
+    // Menagerie build-arc step 5 / #160: revoke this Proc's hardware allowance
+    // as the FIRST teardown step (I-34). For a warden-spawned driver this is
+    // the DeviceRemoved revoke -- folding it here makes "killgrp the driver"
+    // revoke-then-terminate atomically, so an in-flight SYS_*_CREATE racing the
+    // removal observes `revoked` at its CreateCommit re-check and aborts
+    // (allowance.tla revoke_race), rather than slipping a fresh MMIO/IRQ/DMA
+    // handle through onto a device that is gone. NULL-safe (a non-driver Proc
+    // has no allowance -> no-op), so this is universal + harmless. Lock order:
+    // we hold g_proc_table_lock here; proc_revoke_allowance takes al->lock (a
+    // near-leaf), so g_proc_table_lock -> al->lock is the new, acyclic edge.
+    proc_revoke_allowance(p);
 
     // Flag the Proc for group termination. Set-once via CAS: the first
     // caller's msg wins; a racing second group-terminate (two threads both

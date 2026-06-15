@@ -16,14 +16,18 @@
 #include <thylacine/types.h>
 
 // Defined in kernel/syscall.c; identity passed as scalars so this test needs
-// no kernel-internal struct spawn_identity.
+// no kernel-internal struct spawn_identity. The trailing want_allowance
+// (Menagerie step 5) is the hardware-allowance bundle; these identity tests
+// pass NULL (the broad/inherit path), needing only a forward declaration.
+struct spawn_allowance;
 extern int sys_spawn_full_argv_identity_for_proc(
         struct Proc *p, const char *name, size_t name_len,
         const char *argv_data, u32 argv_data_len, u32 argc,
         const u32 *fds, u32 fd_count,
         caps_t cap_mask, u32 perm_flags,
         bool set_identity, u32 principal_id, u32 primary_gid,
-        const u32 *supp_gids, u32 supp_gid_count);
+        const u32 *supp_gids, u32 supp_gid_count,
+        const struct spawn_allowance *want_allowance);
 
 void test_proc_identity_kproc_is_system(void);
 void test_proc_identity_rfork_inherits(void);
@@ -144,7 +148,8 @@ static void reject_child_thunk(void *arg) {
     // p has CAP_NONE; request a set identity -> must be -1.
     reject_rc = sys_spawn_full_argv_identity_for_proc(
         p, "hello", 5, NULL, 0u, 0u, NULL, 0u,
-        CAP_NONE, 0u, /*set=*/true, 1000u, 1000u, NULL, 0u);
+        CAP_NONE, 0u, /*set=*/true, 1000u, 1000u, NULL, 0u,
+        /*want_allowance=*/NULL);
     exits("ok");
 }
 void test_proc_identity_spawn_set_rejected_without_cap(void) {
@@ -172,7 +177,8 @@ void test_proc_identity_spawn_set_accepted_with_cap(void) {
                 "kproc context lacks CAP_SET_IDENTITY");
     int pid = sys_spawn_full_argv_identity_for_proc(
         t->proc, "hello", 5, NULL, 0u, 0u, NULL, 0u,
-        CAP_NONE, 0u, /*set=*/true, 1000u, 1000u, NULL, 0u);
+        CAP_NONE, 0u, /*set=*/true, 1000u, 1000u, NULL, 0u,
+        /*want_allowance=*/NULL);
     TEST_ASSERT(pid > 0, "capped SET spawn did not return positive pid");
     int status = -1;
     TEST_EXPECT_EQ(wait_pid(&status), pid, "wait_pid reaps the child");
@@ -188,15 +194,18 @@ void test_proc_identity_set_rejects_reserved(void) {
     struct Proc *p = t->proc;
     int rc_invalid = sys_spawn_full_argv_identity_for_proc(
         p, "hello", 5, NULL, 0u, 0u, NULL, 0u,
-        CAP_NONE, 0u, /*set=*/true, PRINCIPAL_INVALID, 1000u, NULL, 0u);
+        CAP_NONE, 0u, /*set=*/true, PRINCIPAL_INVALID, 1000u, NULL, 0u,
+        /*want_allowance=*/NULL);
     TEST_EXPECT_EQ(rc_invalid, -1, "SET principal_id=INVALID not rejected");
     int rc_system = sys_spawn_full_argv_identity_for_proc(
         p, "hello", 5, NULL, 0u, 0u, NULL, 0u,
-        CAP_NONE, 0u, /*set=*/true, PRINCIPAL_SYSTEM, 1000u, NULL, 0u);
+        CAP_NONE, 0u, /*set=*/true, PRINCIPAL_SYSTEM, 1000u, NULL, 0u,
+        /*want_allowance=*/NULL);
     TEST_EXPECT_EQ(rc_system, -1, "SET principal_id=SYSTEM not rejected");
     int rc_gid = sys_spawn_full_argv_identity_for_proc(
         p, "hello", 5, NULL, 0u, 0u, NULL, 0u,
-        CAP_NONE, 0u, /*set=*/true, 1000u, GID_SYSTEM, NULL, 0u);
+        CAP_NONE, 0u, /*set=*/true, 1000u, GID_SYSTEM, NULL, 0u,
+        /*want_allowance=*/NULL);
     TEST_EXPECT_EQ(rc_gid, -1, "SET primary_gid=SYSTEM not rejected");
     // No grandchildren were spawned (all rejected); nothing to reap.
 }
@@ -213,12 +222,14 @@ void test_proc_identity_set_rejects_system_supp_gid(void) {
     u32 sys_supp[1] = { GID_SYSTEM };
     int rc_sys = sys_spawn_full_argv_identity_for_proc(
         p, "hello", 5, NULL, 0u, 0u, NULL, 0u,
-        CAP_NONE, 0u, /*set=*/true, 1000u, 1000u, sys_supp, 1u);
+        CAP_NONE, 0u, /*set=*/true, 1000u, 1000u, sys_supp, 1u,
+        /*want_allowance=*/NULL);
     TEST_EXPECT_EQ(rc_sys, -1, "SET supp_gid=SYSTEM not rejected");
     u32 inv_supp[1] = { GID_INVALID };
     int rc_inv = sys_spawn_full_argv_identity_for_proc(
         p, "hello", 5, NULL, 0u, 0u, NULL, 0u,
-        CAP_NONE, 0u, /*set=*/true, 1000u, 1000u, inv_supp, 1u);
+        CAP_NONE, 0u, /*set=*/true, 1000u, 1000u, inv_supp, 1u,
+        /*want_allowance=*/NULL);
     TEST_EXPECT_EQ(rc_inv, -1, "SET supp_gid=INVALID not rejected");
 }
 

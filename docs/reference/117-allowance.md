@@ -1,13 +1,14 @@
 # 117 — allowance: the per-Proc hardware allowance (I-34)
 
-**Status**: landed this chunk (the Menagerie build-arc step 3). The spec
-(`specs/allowance.tla`) landed first, TLC-green, at `1602e37` — **spec-first
-re-enabled for this surface** (user-voted 2026-06-15; CLAUDE.md's 4th
-"RE-ENABLED for ..." entry); the impl (`kernel/allowance.{c,h}` + the three
-create-gate insertions + the rfork/reap sites) follows, validated against the
-model. This is the **one new kernel mechanism** the Menagerie driver framework
-needs; it introduces **invariant I-34** (ARCHITECTURE.md §28) and is
-audit-bearing (ARCH §25.4).
+**Status**: the mechanism landed at build-arc **step 3**; the confer-at-spawn
+syscall ABI + the #160 revoke-on-terminate fold-in landed at **step 5a** (see
+"The confer-at-spawn syscall" below). The spec (`specs/allowance.tla`) landed
+first, TLC-green, at `1602e37` — **spec-first re-enabled for this surface**
+(user-voted 2026-06-15; CLAUDE.md's 4th "RE-ENABLED for ..." entry); the impl
+(`kernel/allowance.{c,h}` + the three create-gate insertions + the rfork/reap
+sites) follows, validated against the model. This is the **one new kernel
+mechanism** the Menagerie driver framework needs; it introduces **invariant
+I-34** (ARCHITECTURE.md §28) and is audit-bearing (ARCH §25.4).
 
 Scripture: `docs/MENAGERIE.md` §4 (the design rationale) + §11 (the warden's
 grant policy — the one I-34 leg the warden owns) + ARCHITECTURE.md §28 (I-34)
@@ -146,10 +147,11 @@ void proc_revoke_allowance(struct Proc *p);
 ```
 
 Revoke a driver's allowance on `DeviceRemoved`. Sets `revoked` under `al->lock`
-— closing the gate for in-flight **and** future creates. The **caller** then
-`proc_group_terminate`s the driver; the #809/#811 cascade drops the live handles
-at reap (the handle-axis teardown). A `NULL` allowance is a no-op
-(`kernel/allowance.c:117`).
+— closing the gate for in-flight **and** future creates. **Since build-arc step
+5a (#160) this is folded into `proc_group_terminate` as its first step**, so the
+warden's killgrp of a removed driver is revoke-then-terminate atomically; the
+#809/#811 cascade then drops the live handles at reap (the handle-axis
+teardown). A `NULL` allowance is a no-op (`kernel/allowance.c:117`).
 
 ### `allowance_clone_into` — the rfork inherit
 
@@ -225,6 +227,117 @@ per-device PCI allowance — "a PCI device's allowance IS its claimed BARs"
 (`docs/MENAGERIE.md` §4) — replaces this blanket reject when the PCIe discovery
 source lands (**build-arc step 6**); the fail-closed gate is the sound v1.0
 floor until then, not a deferral of the soundness.
+
+---
+
+## The confer-at-spawn syscall (build-arc step 5a)
+
+Step 3 (above) landed the *mechanism* (`proc_confer_allowance` + the gate);
+**step 5a wires it to userspace** so the warden can actually confer a narrowed
+allowance when it spawns a driver. The narrowing rides the existing rich spawn
+primitive `SYS_SPAWN_FULL_ARGV` — appended as one more spawn-time grant axis
+next to `cap_mask` / `perm_flags` / the A-1a identity block (the same
+append-only pattern A-1a used), so no new syscall number and every existing
+caller (who zero-fills the struct) keeps the broad/inherit default.
+
+### The ABI extension
+
+`struct sys_spawn_args` grows **80 → 96 bytes**
+(`kernel/include/thylacine/syscall.h`), appending:
+
+| Field | Offset | Meaning |
+|---|---|---|
+| `allowance_va` | 80 | user-VA of a `struct t_allowance_desc` (0 unless SET) |
+| `allowance_flags` | 88 | `SPAWN_ALLOWANCE_SET` (bit 0); unknown bits → `-1` |
+| `_pad_allow` | 92 | must be 0 at v1.0 (8-align + forward-compat slot) |
+
+The descriptor is a fixed **176-byte** ABI type (`struct t_allowance_desc`):
+`mmio[8]{base,size}` (128) + `mmio_count` (@128) + `irq_count` (@132) + `irq[8]`
+(@136) + `dma_max` (@168). The `[8]` arrays mirror `ALLOWANCE_MMIO_MAX` /
+`ALLOWANCE_IRQ_MAX` (a `_Static_assert` in `kernel/syscall.c` pins the equality).
+Both layouts are offset-pinned identically across the kernel, the libt C mirror
+(`struct t_sys_spawn_args` / `struct t_allowance_desc`), and the libthyla-rs
+`TSpawnArgs` / `TAllowanceDesc` (`offset_of!` asserts) — so `sys_load_spawn_args`
+(which copies `sizeof` = 96) reads exactly what every caller wrote.
+
+### The grant flow — gated in the parent, conferred in the child before EL0
+
+The flow mirrors the A-1a identity stamp exactly:
+
+```
+warden (parent)                          driver (child, in the spawn thunk)
+  SYS_SPAWN_FULL_ARGV ----------------->
+  handler: copy + count-bound the                        |
+    t_allowance_desc (mmio_count/irq_count <= 8)          |
+  identity entry: allowance_confer_within_parent(p,...)   |
+    -- the I-2 NARROWING gate (below); too-wide -> -1     |
+    BEFORE rfork (no child created on a too-wide ask)     |
+  rfork_with_caps ------------------------------------->  thunk runs (pre-EL0):
+                                                            proc_confer_allowance(self, ...)
+                                                            -- set-once, no peer thread,
+                                                               no concurrent reader
+                                                            -> install + fd + exec + EL0
+```
+
+The confer lands in the child thunk **after** the identity stamp and **before**
+any fd install / `exec_setup` / `userland_enter`, so it satisfies the
+`proc_confer_allowance` set-once-before-EL0 contract (the freshly-rfork'd child
+has a single thread → no concurrent gate reader). On a confer OOM the thunk
+fails closed (`exits("fail-allowance")` after freeing the still-owned blob +
+argv) — the parent reaps the failure exactly as for a `fail-exec`. The common
+failure (a too-wide ask) is caught **in the parent before the fork**, so it is a
+clean pre-fork `-1` with no child created.
+
+### `allowance_confer_within_parent` — the I-2 narrowing gate
+
+```c
+bool allowance_confer_within_parent(struct Proc *parent,
+                                    const struct hw_window *mmio, u32 mmio_count,
+                                    const u32 *irq, u32 irq_count, u64 dma_max);
+```
+
+True iff the requested set is within the **parent's own** allowance — so a
+confer is a NARROWING, never a widening (I-2's hardware-axis analog, the runtime
+companion to `allowance_clone_into`'s rfork enforcement). It **reuses
+`allowance_permits` per resource**: a BROAD parent (the warden, `allowance ==
+NULL`) permits everything → may confer anything; a NARROWED parent (a bus driver
+spawning a sub-driver) permits only its conferred set → may confer only a subset.
+An empty axis (count 0, a size-0 window, or `dma_max == 0`) confers nothing on
+that axis and is trivially within; a **revoked** parent confers nothing
+(`allowance_permits` is false while revoked). No capability is required to
+narrow — you cannot gain authority by restricting — so this is a perm/identity-
+shaped spawn-time grant, never an rfork-propagated cap bit (`kernel/allowance.c`).
+
+For v1.0 the only conferrer is the broad warden, so the gate is trivially
+satisfied — but it is load-bearing for the recursive bus-driver case (a bound bus
+driver becoming a source that spawns its children) and for soundness: a future
+narrowed driver must not be able to spawn a child with a *wider* hardware reach.
+
+### #160 — revoke folded into `proc_group_terminate`
+
+`proc_group_terminate` now calls `proc_revoke_allowance(p)` as its **first
+step** (`kernel/proc.c`), so the warden's `DeviceRemoved` handler is just
+"killgrp the driver" and gets **revoke-then-terminate atomically**: an in-flight
+`SYS_*_CREATE` racing the removal observes `revoked` at its CreateCommit re-check
+and aborts (`allowance.tla` `revoke_race`), rather than slipping a fresh handle
+onto a gone device. It is NULL-safe (a non-driver Proc has no allowance → no-op),
+so the fold-in is universal + harmless — a self-exiting or faulting driver also
+gets its allowance revoked first, closing any in-flight peer-thread create during
+its own death cascade. The new lock edge is `g_proc_table_lock → al->lock` (via
+the leaf `proc_revoke_allowance`), which stays acyclic: `al->lock`'s only other
+holders are `allowance_handle_alloc` (which nests the handle-table lock *under*
+it) and `proc_revoke_allowance` (which takes nothing else) — nothing nests
+`g_proc_table_lock` under `al->lock`. This **supersedes** the step-3 "the warden
+must remember to pair revoke + terminate" caveat: the pairing is now structural.
+
+### The userspace affordance
+
+`libthyla-rs` exposes `Command::allowance(TAllowanceDesc)` + the
+`TAllowanceDesc::{empty, push_mmio, push_irq, set_dma_max}` builder; the warden
+computes a driver's `node INTERSECT manifest` allowance, builds the descriptor,
+and passes it to the spawn. The libt C mirror exposes `struct t_allowance_desc`
++ `T_SPAWN_ALLOWANCE_SET` for a C driver-spawner. The kernel gates + confers; a
+buggy descriptor is a clean `-1`, never a wider grant.
 
 ---
 
@@ -529,12 +642,16 @@ caller's `proc_group_terminate` — no nesting with `g_proc_table_lock`.
   stratumd, netd) stays broad (`allowance == NULL`) and is unaffected — the gate
   on a NULL allowance is `true`, deferring to the unchanged `CAP_HW_CREATE` +
   I-5-reservation checks. No existing boot path confers a narrowed allowance.
-- **The warden's confer-at-spawn wiring is the step-5 consumer.** The mechanism
-  is complete and tested in isolation; the warden (the native-userspace device
-  manager) that actually *drives* `proc_confer_allowance` at driver spawn and
-  `proc_revoke_allowance` on `DeviceRemoved` lands later in the Menagerie
-  build-arc (`docs/MENAGERIE.md` §5/§11). Until then, the allowance is dormant
-  (every Proc is broad) but ready.
+- **The confer-at-spawn ABI landed at step 5a.** `SYS_SPAWN_FULL_ARGV` now
+  carries an optional `t_allowance_desc` (gated by `allowance_confer_within_parent`
+  + conferred in the child thunk before EL0), and `proc_group_terminate` revokes
+  the allowance as its first step (#160) — so the kernel grant + revoke paths are
+  complete and wired to userspace (`Command::allowance`). The **warden itself**
+  (the native-userspace device manager that *computes* `node INTERSECT manifest`
+  and drives the spawn/killgrp) lands at step 5c, with `libdriver` (5b) and the
+  netdev retrofit (5d). Until the warden runs, the allowance is dormant (every
+  boot Proc is still spawned broad) but the full grant/revoke pipeline is in
+  place and tested.
 
 ---
 
@@ -555,14 +672,16 @@ caller's `proc_group_terminate` — no nesting with `g_proc_table_lock`.
   discipline that keeps the *free* lock-free. A future "re-confer a running
   driver" need would require routing the free through `al->lock` + an RCU-style
   grace for the old struct, a deliberate addition.
-- **Revoke is a two-step the warden orchestrates — and the handle-sweep is
-  deferred (audit F2).** `proc_revoke_allowance` sets `revoked` and returns; it
-  does **not** drop the driver's handles. The warden's `DeviceRemoved` handler
-  MUST pair it with `proc_group_terminate(driver)` — `proc_revoke_allowance`
-  closes the *gate* (no new handle slips through); the #809/#811 cascade then
-  drops the *existing* handles at reap. So `RevokedFullyCleared` (revoked ⇒ no
-  handle) holds only **after** the cascade completes, not at the instant
-  `revoked` is set. The spec models `Revoke` as one atomic step (empty the
+- **Revoke + terminate is now atomic (step 5a / #160) — but the handle-sweep is
+  still deferred (audit F2).** `proc_revoke_allowance` sets `revoked` and
+  returns; it does **not** drop the driver's handles. Step 5a folded
+  `proc_revoke_allowance` into `proc_group_terminate`'s first step, so the warden
+  can no longer *forget* the pairing — a killgrp of the driver revokes-then-
+  terminates atomically (the step-3 "the warden MUST remember to pair them"
+  obligation is now structural). `proc_revoke_allowance` closes the *gate* (no
+  new handle slips through); the #809/#811 cascade then drops the *existing*
+  handles at reap. So `RevokedFullyCleared` (revoked ⇒ no handle) holds only
+  **after** the cascade completes, not at the instant `revoked` is set. The spec models `Revoke` as one atomic step (empty the
   allowance AND the handles) because the handle-sweep is the death-wake cascade's
   province (`death_wake.tla`, separately verified) — the allowance spec captures
   the *end* state, not the transient. **In the window** between `revoked` and

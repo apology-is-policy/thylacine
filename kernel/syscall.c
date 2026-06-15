@@ -4746,6 +4746,46 @@ static bool spawn_identity_value_ok(const struct spawn_identity *id) {
     return true;
 }
 
+// Menagerie build-arc step 5: the parent-vetted hardware allowance carried
+// from the SYS_SPAWN_FULL_ARGV handler into the child thunk (mirrors struct
+// spawn_identity). When `set`, the thunk confers it via proc_confer_allowance
+// before EL0; the arrays mirror struct Allowance's conferred set. The handler
+// builds it (copy-in + count bound); the identity entry gates it as a narrowing
+// vs the parent's allowance (allowance_confer_within_parent) before the body
+// carries it here.
+struct spawn_allowance {
+    bool             set;
+    struct hw_window mmio[ALLOWANCE_MMIO_MAX];
+    u32              mmio_count;
+    u32              irq[ALLOWANCE_IRQ_MAX];
+    u32              irq_count;
+    u64              dma_max;
+};
+
+// The user-ABI struct t_allowance_desc uses fixed [8] arrays; pin them equal to
+// the kernel allowance caps so the handler's copy-in cannot overflow the bundle
+// (a future cap bump must bump the ABI struct + its asserts in lockstep).
+_Static_assert(ALLOWANCE_MMIO_MAX == 8,
+               "t_allowance_desc.mmio[8] mirrors ALLOWANCE_MMIO_MAX");
+_Static_assert(ALLOWANCE_IRQ_MAX == 8,
+               "t_allowance_desc.irq[8] mirrors ALLOWANCE_IRQ_MAX");
+
+// Field-by-field copy of the allowance bundle. The kernel has no memcpy, so a
+// whole-struct assignment (180 bytes) would emit an undefined memcpy -- copy
+// only the live entries [0..count) explicitly (each hw_window is a 16-byte
+// copy clang inlines). Leaves dst's tail [count..MAX) untouched (never read).
+static void spawn_allowance_copy(struct spawn_allowance *dst,
+                                 const struct spawn_allowance *src) {
+    dst->set        = src->set;
+    dst->mmio_count = src->mmio_count;
+    for (u32 i = 0; i < src->mmio_count && i < ALLOWANCE_MMIO_MAX; i++)
+        dst->mmio[i] = src->mmio[i];
+    dst->irq_count  = src->irq_count;
+    for (u32 i = 0; i < src->irq_count && i < ALLOWANCE_IRQ_MAX; i++)
+        dst->irq[i] = src->irq[i];
+    dst->dma_max    = src->dma_max;
+}
+
 // Kernel-side spawn args for SYS_SPAWN_FULL_ARGV. Mirrors
 // spawn_with_fds_args but adds argv_data ownership.
 struct spawn_full_argv_args {
@@ -4767,6 +4807,10 @@ struct spawn_full_argv_args {
     // A-1a: optional identity override (applied in the thunk before exec
     // when identity.set; else the child keeps rfork's inherited identity).
     struct spawn_identity identity;
+    // Menagerie step 5: optional narrowed hardware allowance (conferred in the
+    // thunk before exec when allowance.set; else the child keeps rfork's
+    // inherited allowance -- NULL for a broad parent's child).
+    struct spawn_allowance allowance;
 };
 
 __attribute__((noreturn))
@@ -4780,6 +4824,8 @@ static void sys_spawn_full_argv_thunk(void *arg) {
     u32     argv_data_len = sa->argv_data_len;
     u32     argc          = sa->argc;
     struct spawn_identity identity = sa->identity;   // A-1a: copy before kfree
+    struct spawn_allowance allowance;                // step 5: copy before kfree
+    spawn_allowance_copy(&allowance, &sa->allowance);
     struct Spoor *spoors_local[SYS_SPAWN_MAX_FDS];
     rights_t      rights_local[SYS_SPAWN_MAX_FDS];
     for (u32 i = 0; i < fd_count; i++) {
@@ -4808,6 +4854,28 @@ static void sys_spawn_full_argv_thunk(void *arg) {
     if (identity.set) {
         proc_apply_identity(p, identity.principal_id, identity.primary_gid,
                             identity.supp_gids, identity.supp_gid_count);
+    }
+
+    // Menagerie step 5: confer the parent-vetted narrowed hardware allowance
+    // BEFORE any hw-handle create and before EL0 -- the proc_confer_allowance
+    // set-once-before-EL0 contract holds (the child has no peer thread yet, so
+    // no concurrent reader). The parent already gated it as a narrowing vs its
+    // own allowance (allowance_confer_within_parent), so this only installs.
+    // proc_confer_allowance frees any rfork-inherited clone. Fail-closed on OOM
+    // (mirror the fd-install failure path: free the still-owned blob + argv).
+    if (allowance.set) {
+        if (proc_confer_allowance(p, allowance.mmio, allowance.mmio_count,
+                                  allowance.irq, allowance.irq_count,
+                                  allowance.dma_max) != 0) {
+            // audit F2: no inherited fd is installed yet (the install loop is
+            // below), so the bumped spoor refs in spoors_local[] would leak --
+            // clunk all of them, mirroring the fail-fd-install arm's clunk of
+            // its un-installed range.
+            for (u32 j = 0; j < fd_count; j++) spoor_clunk(spoors_local[j]);
+            kfree(blob);
+            kfree(argv_data);
+            exits("fail-allowance");
+        }
     }
 
     // Install inherited fds (same pattern as sys_spawn_with_fds_thunk).
@@ -4847,7 +4915,8 @@ static int sys_spawn_full_argv_with_perms_for_proc(
         const char *argv_data, u32 argv_data_len, u32 argc,
         const u32 *fds, u32 fd_count,
         caps_t cap_mask, u32 perm_flags,
-        const struct spawn_identity *id) {
+        const struct spawn_identity *id,
+        const struct spawn_allowance *want_allowance) {
     if (!p)                                            return -1;
     if (!name)                                         return -1;
     if (name_len == 0 || name_len > SYS_SPAWN_NAME_MAX) return -1;
@@ -4924,6 +4993,9 @@ static int sys_spawn_full_argv_with_perms_for_proc(
     // false, so a NULL `id` means inherit). The parent already gated +
     // validated it; the thunk stamps it before exec.
     if (id) sa->identity = *id;
+    // Menagerie step 5: carry the parent-vetted allowance bundle (NULL ->
+    // KP_ZERO left allowance.set false -> the child inherits via rfork).
+    if (want_allowance) spawn_allowance_copy(&sa->allowance, want_allowance);
     for (u32 i = 0; i < fd_count; i++) {
         sa->spoors[i] = bumped[i];
         sa->rights[i] = bumped_rights[i];
@@ -4952,9 +5024,25 @@ int sys_spawn_full_argv_identity_for_proc(struct Proc *p,
         const u32 *fds, u32 fd_count,
         caps_t cap_mask, u32 perm_flags,
         bool set_identity, u32 principal_id, u32 primary_gid,
-        const u32 *supp_gids, u32 supp_gid_count) {
+        const u32 *supp_gids, u32 supp_gid_count,
+        const struct spawn_allowance *want_allowance) {
     if (!p)                                             return -1;
     if (spawn_perm_grant_check(p, perm_flags) != 0)     return -1;
+
+    // Menagerie step 5: gate a conferred allowance as a NARROWING vs the
+    // caller's OWN allowance (I-2's hardware-axis analog; allowance.tla). A
+    // broad caller (the warden) may confer anything; a narrowed caller only a
+    // subset of its own. No capability is needed to narrow. The thunk then
+    // installs it (proc_confer_allowance) in the child before EL0. Runs in the
+    // PARENT context, so `p` is the spawning Proc whose allowance bounds it.
+    if (want_allowance && want_allowance->set) {
+        if (!allowance_confer_within_parent(p, want_allowance->mmio,
+                                            want_allowance->mmio_count,
+                                            want_allowance->irq,
+                                            want_allowance->irq_count,
+                                            want_allowance->dma_max))
+            return -1;
+    }
 
     struct spawn_identity id = {0};
     const struct spawn_identity *eff_id = NULL;
@@ -4982,7 +5070,8 @@ int sys_spawn_full_argv_identity_for_proc(struct Proc *p,
     return sys_spawn_full_argv_with_perms_for_proc(p, name, name_len,
                                                    argv_data, argv_data_len,
                                                    argc, fds, fd_count,
-                                                   cap_mask, perm_flags, eff_id);
+                                                   cap_mask, perm_flags, eff_id,
+                                                   want_allowance);
 }
 
 // Back-compat entry: inherit identity (no SET). Unchanged signature for
@@ -5000,7 +5089,8 @@ int sys_spawn_full_argv_for_proc(struct Proc *p,
                                                  perm_flags,
                                                  /*set_identity=*/false,
                                                  PRINCIPAL_INVALID, GID_INVALID,
-                                                 NULL, 0u);
+                                                 NULL, 0u,
+                                                 /*want_allowance=*/NULL);
 }
 
 // uaccess-loader helper: copy the struct sys_spawn_args from user memory
@@ -5054,6 +5144,16 @@ int sys_spawn_full_argv_validate_req(const struct sys_spawn_args *req) {
     if (req->identity_flags & ~(u32)SPAWN_IDENTITY_FLAGS_ALL) return -1;
     if ((req->identity_flags & SPAWN_IDENTITY_SET) &&
         req->supp_gid_count > PROC_SUPP_GIDS_MAX)      return -1;
+    // Menagerie step 5: allowance_flags must carry no unknown bits (forward-
+    // compat, same rationale as _pad_envp); _pad_allow must be 0; a SET request
+    // requires a non-NULL descriptor VA (the handler then copies + count-bounds
+    // it). The mmio/irq count bounds + the narrowing gate are checked after the
+    // copy-in / in the identity entry (so an over-count or a too-wide ask is a
+    // clean -1, never a buffer overrun).
+    if (req->allowance_flags & ~(u32)SPAWN_ALLOWANCE_FLAGS_ALL) return -1;
+    if (req->_pad_allow != 0)                          return -1;
+    if ((req->allowance_flags & SPAWN_ALLOWANCE_SET) &&
+        req->allowance_va == 0)                        return -1;
     return 0;
 }
 
@@ -5146,13 +5246,49 @@ static s64 sys_spawn_full_argv_handler(u64 req_va) {
         }
     }
 
+    // Menagerie step 5: copy + count-bound the allowance descriptor when a SET
+    // is requested (validate_req already checked allowance_va != 0). Bound the
+    // counts BEFORE the copy loops so an over-count is a clean -1, never a
+    // bundle overrun. The narrowing gate (vs the parent's allowance) runs in
+    // the identity entry; here we only marshal the bytes.
+    // Declared without a large {0} initializer (no memset in the kernel); the
+    // SET path fills every field read downstream, the non-SET path passes NULL.
+    struct spawn_allowance allow_kbuf;
+    allow_kbuf.set = false;
+    bool set_allowance = (req.allowance_flags & SPAWN_ALLOWANCE_SET) != 0;
+    if (set_allowance) {
+        if (!sys_validate_user_buf(req.allowance_va,
+                                   sizeof(struct t_allowance_desc)))
+            return -1;
+        struct t_allowance_desc desc;
+        u8 *ddst = (u8 *)&desc;
+        for (u64 i = 0; i < sizeof(desc); i++) {
+            u8 b = 0;
+            if (uaccess_load_u8(req.allowance_va + i, &b) != 0) return -1;
+            ddst[i] = b;
+        }
+        if (desc.mmio_count > ALLOWANCE_MMIO_MAX)      return -1;
+        if (desc.irq_count > ALLOWANCE_IRQ_MAX)        return -1;
+        allow_kbuf.set        = true;
+        allow_kbuf.mmio_count = desc.mmio_count;
+        for (u32 i = 0; i < desc.mmio_count; i++) {
+            allow_kbuf.mmio[i].base = desc.mmio[i].base;
+            allow_kbuf.mmio[i].size = desc.mmio[i].size;
+        }
+        allow_kbuf.irq_count = desc.irq_count;
+        for (u32 i = 0; i < desc.irq_count; i++)
+            allow_kbuf.irq[i] = desc.irq[i];
+        allow_kbuf.dma_max = desc.dma_max;
+    }
+
     return (s64)sys_spawn_full_argv_identity_for_proc(
         p, name, (size_t)req.name_len,
         req.argv_data_len > 0 ? argv_kbuf : NULL, req.argv_data_len, req.argc,
         fds_kbuf, req.fd_count,
         (caps_t)req.cap_mask, req.perm_flags,
         set_identity, req.principal_id, req.primary_gid,
-        supp_kbuf, supp_count);
+        supp_kbuf, supp_count,
+        set_allowance ? &allow_kbuf : NULL);
 }
 
 static s64 sys_spawn_with_fds_handler(u64 name_va, u64 name_len_raw,

@@ -28,6 +28,8 @@ void test_allowance_handle_alloc_revoked_aborts(void);
 void test_allowance_clone_inherit(void);
 void test_allowance_free_null_tolerant(void);
 void test_allowance_pci_claim_gate(void);
+void test_allowance_confer_within_parent(void);
+void test_allowance_revoke_on_group_terminate(void);
 
 // Mirror the test_handle.c proc make/drop: proc_alloc gives a fresh Proc with
 // an empty handle table + a NULL (broad) allowance; test_proc_drop ZOMBIEs +
@@ -224,4 +226,98 @@ void test_allowance_pci_claim_gate(void) {
     proc_revoke_allowance(p);
     TEST_ASSERT(allowance_is_narrowed(p), "revoked-narrowed Proc -> still narrowed (still rejected)");
     adrop(p);
+}
+
+void test_allowance_confer_within_parent(void) {
+    // Menagerie step 5: the confer gate (I-2's hardware-axis analog). A confer
+    // must be a NARROWING of the spawning Proc's OWN allowance: a broad parent
+    // (the warden) may confer anything; a narrowed parent only a subset of its
+    // own (a bus driver spawning a sub-driver). Maps to specs/allowance.tla's
+    // monotonic-reduction (the property allowance_clone_into enforces for rfork).
+
+    // A BROAD parent confers anything.
+    struct Proc *bp = amk();
+    TEST_ASSERT(bp && bp->allowance == NULL, "broad parent");
+    struct hw_window any[1] = { { .base = 0x9999000, .size = 0x1000 } };
+    u32 anyirq[1] = { 200 };
+    TEST_ASSERT(allowance_confer_within_parent(bp, any, 1, anyirq, 1, 0x100000),
+        "broad parent confers any mmio/irq/dma");
+    TEST_ASSERT(allowance_confer_within_parent(bp, NULL, 0, NULL, 0, 0),
+        "broad parent confers the empty allowance");
+    adrop(bp);
+
+    // A NARROWED parent: [0x1000,0x3000) MMIO, irq {40,41}, dma <= 0x1000.
+    struct Proc *np = amk();
+    TEST_ASSERT(np != NULL, "proc_alloc");
+    struct hw_window pw[1] = { { .base = 0x1000, .size = 0x2000 } };
+    u32 pirq[2] = { 40, 41 };
+    TEST_ASSERT(proc_confer_allowance(np, pw, 1, pirq, 2, 0x1000) == 0, "confer parent");
+
+    // Subset / exact / empty -> conferrable.
+    struct hw_window sub[1] = { { .base = 0x1400, .size = 0x400 } };
+    u32 subirq[1] = { 40 };
+    TEST_ASSERT(allowance_confer_within_parent(np, sub, 1, subirq, 1, 0x800),
+        "strict subset -> ok");
+    TEST_ASSERT(allowance_confer_within_parent(np, pw, 1, pirq, 2, 0x1000),
+        "exact parent set -> ok");
+    TEST_ASSERT(allowance_confer_within_parent(np, NULL, 0, NULL, 0, 0),
+        "empty allowance -> ok");
+
+    // Wider on ANY axis -> rejected (the monotonic-reduction violation).
+    struct hw_window wide_mmio[1] = { { .base = 0x1000, .size = 0x4000 } };
+    TEST_ASSERT(!allowance_confer_within_parent(np, wide_mmio, 1, NULL, 0, 0),
+        "wider mmio window -> reject");
+    struct hw_window out_mmio[1] = { { .base = 0x9000, .size = 0x100 } };
+    TEST_ASSERT(!allowance_confer_within_parent(np, out_mmio, 1, NULL, 0, 0),
+        "mmio window outside parent -> reject");
+    u32 wide_irq[1] = { 99 };
+    TEST_ASSERT(!allowance_confer_within_parent(np, NULL, 0, wide_irq, 1, 0),
+        "irq not in parent -> reject");
+    TEST_ASSERT(!allowance_confer_within_parent(np, NULL, 0, NULL, 0, 0x2000),
+        "dma over parent cap -> reject");
+
+    // A size-0 conferred window confers nothing on that axis -> skipped -> ok.
+    struct hw_window zero_w[1] = { { .base = 0x99999, .size = 0 } };
+    TEST_ASSERT(allowance_confer_within_parent(np, zero_w, 1, NULL, 0, 0),
+        "size-0 window confers nothing -> within");
+
+    // A REVOKED parent confers nothing (allowance_permits is false post-revoke).
+    proc_revoke_allowance(np);
+    TEST_ASSERT(!allowance_confer_within_parent(np, sub, 1, subirq, 1, 0),
+        "revoked parent confers nothing");
+    adrop(np);
+}
+
+void test_allowance_revoke_on_group_terminate(void) {
+    // Menagerie step 5 / #160: proc_group_terminate revokes the Proc's
+    // allowance as its first step, so the warden's killgrp of a removed driver
+    // is revoke-then-terminate atomically -- an in-flight SYS_*_CREATE racing
+    // the removal aborts at its CreateCommit re-check rather than slipping a
+    // handle onto a gone device (allowance.tla revoke_race, universalized).
+    struct Proc *p = amk();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    u32 irq[1] = { 40 };
+    TEST_ASSERT(proc_confer_allowance(p, NULL, 0, irq, 1, 0) == 0, "confer");
+    TEST_ASSERT(allowance_permits(p, HW_RES_IRQ, 40, 0), "permits pre-terminate");
+    // The fold-in: group_terminate revokes the allowance (struct survives until
+    // reap; only `revoked` flips). audit F4: production's proc_group_terminate
+    // runs UNDER g_proc_table_lock, but that lock is file-static in proc.c
+    // (untakeable from a test TU); the bare call is sound HERE because this test
+    // Proc has no threads (the peer-walk + wake + IPI machinery no-op) and the
+    // single-threaded test context has no concurrent killer or confer -- so the
+    // lock guards nothing reachable. The locked path is exercised in production
+    // (the warden's killgrp) + by the SMP gate.
+    proc_group_terminate(p, "test-devremoved");
+    TEST_ASSERT(p->allowance != NULL, "allowance struct survives terminate (freed at reap)");
+    TEST_ASSERT(!allowance_permits(p, HW_RES_IRQ, 40, 0), "revoked by group_terminate");
+    hidx_t h = allowance_handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL);
+    TEST_ASSERT(h < 0, "in-flight create aborts after the group_terminate revoke");
+    adrop(p);
+
+    // A broad (NULL allowance) Proc terminate is a safe no-op for the revoke.
+    struct Proc *b = amk();
+    TEST_ASSERT(b && b->allowance == NULL, "broad proc");
+    proc_group_terminate(b, "test-broad");
+    TEST_ASSERT(b->allowance == NULL, "broad terminate: no allowance, no crash");
+    adrop(b);
 }

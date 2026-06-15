@@ -118,22 +118,73 @@ int proc_confer_allowance(struct Proc *p,
     al->dma_max = dma_max;
     al->revoked = 0;
 
-    // Publish RELEASE (audit F4): the conferred-set writes above happen-before
-    // this store, so a gate read on another CPU that observes the new pointer
-    // also observes the windows -- independent of the warden's spawn ordering.
-    // The old read is RELAXED (set-once-at-spawn: no concurrent writer).
-    struct Allowance *old = __atomic_load_n(&p->allowance, __ATOMIC_RELAXED);
-    __atomic_store_n(&p->allowance, al, __ATOMIC_RELEASE);
+    // Install the new allowance UNDER g_proc_table_lock (audit F1): the confer
+    // runs in the child's spawn thunk, AFTER the child is proc-tree-linked + thus
+    // reachable by a concurrent proc_group_terminate -> proc_revoke_allowance
+    // (which locks the OLD allowance). The lockless swap+free here raced that
+    // revoke's spin_lock(&old->lock) -> UAF on the narrowed-parent-spawns-child
+    // path (where `old` is the inherited clone). proc_allowance_install_locked
+    // serializes the swap on g_proc_table_lock -- the lock the revoke runs under;
+    // post-swap, `old` is unreferenced, so the kfree OUTSIDE the lock is safe.
+    // The RELEASE store inside the helper preserves the gate-read ACQUIRE pairing
+    // (the conferred-set writes above happen-before it).
+    struct Allowance *old = proc_allowance_install_locked(p, al);
     if (old) kfree(old);
     return 0;
 }
 
-// Revoke (specs/allowance.tla): on DeviceRemoved, close the gate. The CALLER
-// then proc_group_terminate's the driver -- the #809/#811 cascade drops the
-// live handles at reap. NULL allowance -> no-op.
+// CONFER GATE (specs/allowance.tla, the monotonic-reduction property): may
+// `parent` confer the described allowance? True iff every requested resource
+// is within the parent's OWN allowance, so a confer is a NARROWING and never a
+// widening (I-2's hardware-axis analog). Reuses allowance_permits per resource:
+// a BROAD parent (allowance == NULL) permits everything -> any narrowed set is
+// conferrable (the warden); a NARROWED parent permits only its conferred set ->
+// only a subset is conferrable (a bus driver spawning a sub-driver). An empty
+// axis (count 0, a size-0 window, or dma_max 0) confers nothing and is within.
+// A revoked parent confers nothing (allowance_permits is false while revoked).
+bool allowance_confer_within_parent(struct Proc *parent,
+                                    const struct hw_window *mmio, u32 mmio_count,
+                                    const u32 *irq, u32 irq_count, u64 dma_max) {
+    if (!parent)                          return false;
+    if (mmio_count > ALLOWANCE_MMIO_MAX)  return false;
+    if (irq_count > ALLOWANCE_IRQ_MAX)    return false;
+    if (mmio_count > 0 && !mmio)          return false;
+    if (irq_count > 0 && !irq)            return false;
+
+    for (u32 i = 0; i < mmio_count; i++) {
+        if (mmio[i].size == 0) continue;   // empty window confers nothing
+        if (!allowance_permits(parent, HW_RES_MMIO, mmio[i].base, mmio[i].size))
+            return false;
+    }
+    for (u32 i = 0; i < irq_count; i++) {
+        if (!allowance_permits(parent, HW_RES_IRQ, irq[i], 0))
+            return false;
+    }
+    // dma_max == 0 confers no DMA (within trivially); allowance_permits rejects
+    // size 0, so the empty grant must be special-cased rather than queried.
+    if (dma_max > 0 && !allowance_permits(parent, HW_RES_DMA, dma_max, 0))
+        return false;
+    return true;
+}
+
+// Revoke (specs/allowance.tla): on DeviceRemoved, close the gate. Folded into
+// proc_group_terminate (Menagerie build-arc step 5 / #160) so the warden's
+// killgrp of a removed driver IS revoke-then-terminate atomically -- closing
+// the in-flight-create race universally (allowance.tla revoke_race): a
+// SYS_*_CREATE racing the removal observes `revoked` at the CreateCommit
+// re-check and aborts. The #809/#811 cascade then drops the live handles at
+// reap (the handle-axis teardown). Lock note: proc_group_terminate holds
+// g_proc_table_lock when it calls this, so the live lock order gains the edge
+// g_proc_table_lock -> al->lock. al->lock is a near-leaf (allowance_handle_alloc
+// nests only the handle-table lock under it; nothing nests g_proc_table_lock
+// under al->lock), so the order stays acyclic. NULL allowance -> no-op.
 void proc_revoke_allowance(struct Proc *p) {
     if (!p) return;
-    struct Allowance *al = p->allowance;
+    // ACQUIRE-load (audit F3): uniform with every other p->allowance reader
+    // (allowance_permits / handle_alloc / is_narrowed / clone_into), pairing
+    // with the RELEASE publish. Sound today (set-once, read under
+    // g_proc_table_lock via proc_group_terminate), but the asymmetry was a trap.
+    struct Allowance *al = __atomic_load_n(&p->allowance, __ATOMIC_ACQUIRE);
     if (!al) return;
     spin_lock(&al->lock);
     __atomic_store_n(&al->revoked, 1u, __ATOMIC_RELEASE);

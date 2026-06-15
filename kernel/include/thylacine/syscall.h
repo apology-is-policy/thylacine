@@ -1556,6 +1556,64 @@ _Static_assert(__builtin_offsetof(struct t_pci_info, virtio_device_id) == 204,
 #define SPAWN_IDENTITY_SET           (1u << 0)
 #define SPAWN_IDENTITY_FLAGS_ALL     (SPAWN_IDENTITY_SET)
 
+// Menagerie build-arc step 5 (docs/MENAGERIE.md §4; ARCH §28 I-34):
+// sys_spawn_args.allowance_flags bits. SPAWN_ALLOWANCE_SET requests that the
+// child be born with the NARROWED hardware allowance described by the
+// t_allowance_desc at allowance_va (instead of inheriting the parent's), so a
+// warden-spawned driver may create KObj_MMIO/IRQ/DMA handles ONLY within its
+// device's resources. The grant is a NARROWING: the kernel rejects (-1) a
+// conferred set not within the *parent's* own allowance (I-2's hardware-axis
+// analog -- a broad parent, allowance == NULL, may confer anything; a narrowed
+// parent only a subset of its own). Clear -> the child inherits the parent's
+// allowance (the default; the as-built broad-server path). No capability is
+// required to NARROW (you cannot gain authority by restricting), so this is a
+// perm/identity-shaped spawn-time grant, never an rfork-propagated cap bit.
+#define SPAWN_ALLOWANCE_SET          (1u << 0)
+#define SPAWN_ALLOWANCE_FLAGS_ALL    (SPAWN_ALLOWANCE_SET)
+
+// SYS_SPAWN_FULL_ARGV hardware-allowance descriptor (Menagerie build-arc step
+// 5). The warden fills this in user memory and points sys_spawn_args.
+// allowance_va at it with SPAWN_ALLOWANCE_SET; the kernel uaccess-copies it,
+// validates the counts, gates it against the parent's allowance, and confers
+// it on the child Proc before the child enters EL0 (the proc_confer_allowance
+// set-once-before-EL0 contract). The mmio[]/irq[] caps mirror the kernel
+// struct Allowance's ALLOWANCE_MMIO_MAX / ALLOWANCE_IRQ_MAX (both 8; a
+// _Static_assert in kernel/syscall.c pins the equality). A binding ABI type:
+// the layout is offset-pinned below.
+//
+//   mmio[8]      8 x { u64 base; u64 size; }  -- permitted MMIO PA windows
+//   mmio_count   u32  -- 0..8; entries [mmio_count..8) ignored
+//   irq_count    u32  -- 0..8; entries [irq_count..8) ignored
+//   irq[8]       8 x u32                       -- permitted IRQ INTIDs (SPI>=32)
+//   dma_max      u64  -- max bytes per KObj_DMA; 0 = no DMA permitted
+struct t_hw_window {
+    u64 base;
+    u64 size;
+};
+
+struct t_allowance_desc {
+    struct t_hw_window mmio[8];
+    u32 mmio_count;
+    u32 irq_count;
+    u32 irq[8];
+    u64 dma_max;
+};
+
+_Static_assert(sizeof(struct t_allowance_desc) == 176,
+               "struct t_allowance_desc is a SYS_SPAWN_FULL_ARGV ABI type "
+               "-- pinned at 176 bytes (mmio[8] 128 + mmio_count 4 + "
+               "irq_count 4 + irq[8] 32 + dma_max 8); no implicit padding");
+_Static_assert(__builtin_offsetof(struct t_allowance_desc, mmio) == 0,
+               "t_allowance_desc.mmio at ABI offset 0");
+_Static_assert(__builtin_offsetof(struct t_allowance_desc, mmio_count) == 128,
+               "t_allowance_desc.mmio_count at ABI offset 128");
+_Static_assert(__builtin_offsetof(struct t_allowance_desc, irq_count) == 132,
+               "t_allowance_desc.irq_count at ABI offset 132");
+_Static_assert(__builtin_offsetof(struct t_allowance_desc, irq) == 136,
+               "t_allowance_desc.irq at ABI offset 136");
+_Static_assert(__builtin_offsetof(struct t_allowance_desc, dma_max) == 168,
+               "t_allowance_desc.dma_max at ABI offset 168");
+
 // SYS_SRV_PEER result — the kernel-stamped peer identity of a /srv
 // connection (CORVUS-DESIGN.md §6.3). The kernel writes one of these to
 // the SYS_SRV_PEER out_va buffer. A syscall-ABI type: the layout is
@@ -1849,13 +1907,23 @@ struct sys_spawn_args {
     u64 supp_gids_va;   // user-VA of supp_gid_count u32 gids (0 → none)
     u32 supp_gid_count; // 0..PROC_SUPP_GIDS_MAX (15)
     u32 identity_flags; // SPAWN_IDENTITY_* bits; outside SPAWN_IDENTITY_FLAGS_ALL → -1
+    // Menagerie build-arc step 5 (I-34; append-only, 80 -> 96). Honored only
+    // when allowance_flags & SPAWN_ALLOWANCE_SET; the child is conferred the
+    // narrowed allowance at allowance_va before it enters EL0. Gated as a
+    // NARROWING vs the caller's own allowance (no cap needed). Clear (0) ->
+    // the child inherits the parent's allowance (every existing caller, who
+    // zero-fills this struct, gets the as-built broad behavior).
+    u64 allowance_va;    // user-VA of a struct t_allowance_desc (0 unless SET)
+    u32 allowance_flags; // SPAWN_ALLOWANCE_* bits; outside SPAWN_ALLOWANCE_FLAGS_ALL → -1
+    u32 _pad_allow;      // must be 0 at v1.0 (8-alignment + forward-compat slot)
 };
 
-_Static_assert(sizeof(struct sys_spawn_args) == 80,
+_Static_assert(sizeof(struct sys_spawn_args) == 96,
                "struct sys_spawn_args is a SYS_SPAWN_FULL_ARGV ABI type "
-               "— pinned at 80 bytes (A-1a appended the identity block: "
-               "principal_id 4 + primary_gid 4 + supp_gids_va 8 + "
-               "supp_gid_count 4 + identity_flags 4); no implicit padding");
+               "— pinned at 96 bytes (A-1a appended the identity block at "
+               "56..80; the Menagerie step-5 allowance block appended at "
+               "80..96: allowance_va 8 + allowance_flags 4 + _pad_allow 4); "
+               "no implicit padding");
 _Static_assert(__builtin_offsetof(struct sys_spawn_args, name_va) == 0,
                "sys_spawn_args.name_va at ABI offset 0");
 _Static_assert(__builtin_offsetof(struct sys_spawn_args, argv_data_va) == 8,
@@ -1886,6 +1954,12 @@ _Static_assert(__builtin_offsetof(struct sys_spawn_args, supp_gid_count) == 72,
                "sys_spawn_args.supp_gid_count at ABI offset 72");
 _Static_assert(__builtin_offsetof(struct sys_spawn_args, identity_flags) == 76,
                "sys_spawn_args.identity_flags at ABI offset 76");
+_Static_assert(__builtin_offsetof(struct sys_spawn_args, allowance_va) == 80,
+               "sys_spawn_args.allowance_va at ABI offset 80");
+_Static_assert(__builtin_offsetof(struct sys_spawn_args, allowance_flags) == 88,
+               "sys_spawn_args.allowance_flags at ABI offset 88");
+_Static_assert(__builtin_offsetof(struct sys_spawn_args, _pad_allow) == 92,
+               "sys_spawn_args._pad_allow at ABI offset 92");
 
 struct exception_context;
 

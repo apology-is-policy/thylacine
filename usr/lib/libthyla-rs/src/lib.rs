@@ -326,12 +326,89 @@ pub struct TSpawnArgs {
     pub supp_gids_va:   u64, // 64 — A-1a (user-VA of supp_gid_count u32s)
     pub supp_gid_count: u32, // 72 — A-1a (0..15)
     pub identity_flags: u32, // 76 — A-1a (T_SPAWN_IDENTITY_SET)
+    // Menagerie step 5 (append-only, 80 -> 96): the hardware-allowance grant.
+    // Leave allowance_flags == 0 to inherit the parent's allowance (broad).
+    pub allowance_va:    u64, // 80 — user-VA of a TAllowanceDesc
+    pub allowance_flags: u32, // 88 — T_SPAWN_ALLOWANCE_SET
+    pub _pad_allow:      u32, // 92 — must be 0 at v1.0
 }
-// Compile-time pin matching kernel's _Static_assert(sizeof(...) == 80).
-const _: () = assert!(core::mem::size_of::<TSpawnArgs>() == 80);
+// Compile-time pin matching kernel's _Static_assert(sizeof(...) == 96).
+const _: () = assert!(core::mem::size_of::<TSpawnArgs>() == 96);
+const _: () = assert!(core::mem::offset_of!(TSpawnArgs, allowance_va) == 80);
+const _: () = assert!(core::mem::offset_of!(TSpawnArgs, allowance_flags) == 88);
 
 // A-1a: identity_flags bits (mirror SPAWN_IDENTITY_* in the kernel header).
 pub const T_SPAWN_IDENTITY_SET: u32 = 1 << 0;
+
+// Menagerie step 5: allowance_flags bits (mirror SPAWN_ALLOWANCE_* in the
+// kernel header) + the hardware-allowance descriptor (mirror struct
+// t_allowance_desc). A warden fills a TAllowanceDesc, points allowance_va at
+// it, and sets allowance_flags |= T_SPAWN_ALLOWANCE_SET; the kernel gates the
+// conferred set as a narrowing of the caller's own allowance and confers it on
+// the child before EL0. ALLOWANCE_MMIO_MAX / ALLOWANCE_IRQ_MAX are both 8.
+pub const T_SPAWN_ALLOWANCE_SET: u32 = 1 << 0;
+pub const T_ALLOWANCE_MMIO_MAX: usize = 8;
+pub const T_ALLOWANCE_IRQ_MAX: usize = 8;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct THwWindow {
+    pub base: u64,
+    pub size: u64,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct TAllowanceDesc {
+    pub mmio: [THwWindow; T_ALLOWANCE_MMIO_MAX],
+    pub mmio_count: u32,
+    pub irq_count: u32,
+    pub irq: [u32; T_ALLOWANCE_IRQ_MAX],
+    pub dma_max: u64,
+}
+const _: () = assert!(core::mem::size_of::<TAllowanceDesc>() == 176);
+const _: () = assert!(core::mem::offset_of!(TAllowanceDesc, mmio) == 0);
+const _: () = assert!(core::mem::offset_of!(TAllowanceDesc, mmio_count) == 128);
+const _: () = assert!(core::mem::offset_of!(TAllowanceDesc, irq_count) == 132);
+const _: () = assert!(core::mem::offset_of!(TAllowanceDesc, irq) == 136);
+const _: () = assert!(core::mem::offset_of!(TAllowanceDesc, dma_max) == 168);
+
+impl TAllowanceDesc {
+    /// An empty descriptor (no MMIO/IRQ/DMA conferred). Build one, push the
+    /// device's resources, then pass it to `Command::allowance`.
+    pub const fn empty() -> Self {
+        TAllowanceDesc {
+            mmio: [THwWindow { base: 0, size: 0 }; T_ALLOWANCE_MMIO_MAX],
+            mmio_count: 0,
+            irq_count: 0,
+            irq: [0; T_ALLOWANCE_IRQ_MAX],
+            dma_max: 0,
+        }
+    }
+    /// Add a permitted MMIO window. Returns false if the 8-window cap is full.
+    pub fn push_mmio(&mut self, base: u64, size: u64) -> bool {
+        let i = self.mmio_count as usize;
+        if i >= T_ALLOWANCE_MMIO_MAX {
+            return false;
+        }
+        self.mmio[i] = THwWindow { base, size };
+        self.mmio_count += 1;
+        true
+    }
+    /// Add a permitted IRQ INTID. Returns false if the 8-IRQ cap is full.
+    pub fn push_irq(&mut self, intid: u32) -> bool {
+        let i = self.irq_count as usize;
+        if i >= T_ALLOWANCE_IRQ_MAX {
+            return false;
+        }
+        self.irq[i] = intid;
+        self.irq_count += 1;
+        true
+    }
+    /// Set the per-DMA-buffer byte ceiling (0 = no DMA permitted).
+    pub fn set_dma_max(&mut self, dma_max: u64) {
+        self.dma_max = dma_max;
+    }
+}
 
 // A-1a: reserved principal-id / gid sentinels (mirror <thylacine/proc.h>).
 // None is privileged (I-22); real ids are corvus-assigned in [1, 0xFFFFFFFD].

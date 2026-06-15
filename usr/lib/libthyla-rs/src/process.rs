@@ -50,8 +50,9 @@ use crate::err::{Error, Result};
 use crate::fs::File;
 use crate::handle::{Handle, Rights};
 use crate::{
-    t_pipe, t_spawn_full_argv, t_wait_pid_for, TSpawnArgs, T_SPAWN_IDENTITY_SET, T_SPAWN_MAX_FDS,
-    T_SPAWN_NAME_MAX, T_SYS_SPAWN_ARGV_DATA_MAX, T_SYS_SPAWN_ARGV_MAX, T_WAIT_WNOHANG,
+    t_pipe, t_spawn_full_argv, t_wait_pid_for, TAllowanceDesc, TSpawnArgs, T_SPAWN_ALLOWANCE_SET,
+    T_SPAWN_IDENTITY_SET, T_SPAWN_MAX_FDS, T_SPAWN_NAME_MAX, T_SYS_SPAWN_ARGV_DATA_MAX,
+    T_SYS_SPAWN_ARGV_MAX, T_WAIT_WNOHANG,
 };
 use alloc_crate::string::String;
 use alloc_crate::vec::Vec;
@@ -205,6 +206,13 @@ pub struct Command {
     // /dev/consctl fd to the session shell (so the shell, not login, owns the
     // console line discipline). Total fd_list (3 stdio + these) <= MAX_FDS.
     inherit_fds: Vec<i32>,
+    // Menagerie step 5: when Some, confer this NARROWED hardware allowance on
+    // the child (SPAWN_ALLOWANCE_SET) instead of inheriting the caller's. The
+    // warden is the v1.0 consumer: it computes a driver's allowance (the bound
+    // node's resources INTERSECT the manifest needs) and confers it so the
+    // driver may create KObj_MMIO/IRQ/DMA handles ONLY within its device. The
+    // kernel gates it as a narrowing of the caller's own allowance.
+    allowance: Option<TAllowanceDesc>,
 }
 
 impl Command {
@@ -223,6 +231,7 @@ impl Command {
             identity: None,  // A-5a: inherit the caller's identity by default
             perm_flags: 0,   // A-5b: grant no SPAWN_PERM_* bits by default
             inherit_fds: Vec::new(), // #94-B-b: no extra inherited fds by default
+            allowance: None, // step 5: inherit the caller's allowance by default
         }
     }
 
@@ -330,6 +339,20 @@ impl Command {
         self
     }
 
+    /// Menagerie step 5: confer a NARROWED hardware allowance on the child
+    /// (`SPAWN_ALLOWANCE_SET`) instead of inheriting the caller's. Build a
+    /// `TAllowanceDesc` (push the device's MMIO windows / IRQ INTIDs / DMA cap),
+    /// then pass it here. The kernel gates the conferred set as a *narrowing* of
+    /// the caller's OWN allowance -- a broad caller (the warden) may confer
+    /// anything; a narrowed caller only a subset of its own -- and confers it on
+    /// the child before EL0, so the driver may create `KObj_MMIO`/`IRQ`/`DMA`
+    /// handles only within it. The warden is the v1.0 consumer.
+    #[inline]
+    pub fn allowance(&mut self, desc: TAllowanceDesc) -> &mut Command {
+        self.allowance = Some(desc);
+        self
+    }
+
     /// Spawn the child. Returns a `Child` handle; the parent retains
     /// any `Stdio::Piped` ends as `Child::stdin` / `stdout` / `stderr`.
     pub fn spawn(&mut self) -> Result<Child> {
@@ -396,6 +419,16 @@ impl Command {
         let supp_count = supp_arr.len() as u32;
         let supp_va = if supp_count > 0 { supp_arr.as_ptr() as u64 } else { 0 };
 
+        // Menagerie step 5: the allowance block. allow_desc is an OWNED Copy
+        // local -> alive through the t_spawn_full_argv SVC below; allowance_va
+        // points at it iff a narrowed allowance was set (else 0 = inherit/broad).
+        let allow_desc: Option<TAllowanceDesc> = self.allowance;
+        let allow_va = match &allow_desc {
+            Some(d) => d as *const TAllowanceDesc as u64,
+            None => 0,
+        };
+        let allow_flags = if allow_desc.is_some() { T_SPAWN_ALLOWANCE_SET } else { 0 };
+
         let args_record = TSpawnArgs {
             name_va: self.name.as_ptr() as u64,
             argv_data_va: argv_buf.as_ptr() as u64,
@@ -412,13 +445,17 @@ impl Command {
             supp_gids_va: supp_va,
             supp_gid_count: supp_count,
             identity_flags: id_flags,
+            allowance_va: allow_va,
+            allowance_flags: allow_flags,
+            _pad_allow: 0,
         };
 
         // SAFETY: every pointer in args_record points into a buffer
-        // owned by this scope (name, argv_buf, fd_list); each is alive
-        // until the syscall returns. PreparedStdio's keep_through_syscall
-        // Files hold any child-end fds alive across the SVC. The
-        // kernel copies all data before returning.
+        // owned by this scope (name, argv_buf, fd_list, supp_arr, and the
+        // step-5 allow_desc); each is alive until the syscall returns
+        // (allow_desc is a Copy/no-Drop local whose storage lives to scope
+        // end). PreparedStdio's keep_through_syscall Files hold any child-end
+        // fds alive across the SVC. The kernel copies all data before returning.
         let rc = unsafe { t_spawn_full_argv(&args_record as *const _) };
         let pid_or_err = Error::from_syscall_return(rc);
 

@@ -667,3 +667,39 @@ early-console `chosen/stdout-path` selection is kernel.
   smp4/smp8, N=10): PASS, 0 corruption (the 19 timing exits ground-truth-verified to
   reach boot OK + 915/915 + login prompt). **Next**: the warden + `libdriver` bind the
   existing virtio drivers on QEMU virt (step 5).
+- **2026-06-15 (the warden confer-at-spawn allowance ABI + #160 revoke-on-terminate
+  fold-in, build-sequence step 5a)**: the I-34 grant path wired to userspace. The
+  warden's narrowing rides the existing rich spawn primitive `SYS_SPAWN_FULL_ARGV`
+  (the A-1a append-only pattern): `struct sys_spawn_args` grows 80 -> 96 bytes
+  (`allowance_va` / `allowance_flags` / `_pad_allow`) + a fixed 176-byte
+  `struct t_allowance_desc` (mmio[8] windows + counts + irq[8] + dma_max), pinned
+  identically across the kernel header, the libt mirror, and the libthyla-rs
+  `TSpawnArgs` / `TAllowanceDesc` (`offset_of!` asserts). The grant is gated in the
+  PARENT by `allowance_confer_within_parent` (the I-2 hardware-axis narrowing check,
+  reusing `allowance_permits`: a broad warden may confer anything, a narrowed parent
+  only a subset of its own) and conferred in the child spawn thunk BEFORE EL0 (the
+  `proc_confer_allowance` set-once contract); a too-wide ask is a clean pre-fork
+  `-1`. **#160**: `proc_revoke_allowance` folded into `proc_group_terminate`'s first
+  step, so the warden's killgrp of a removed driver IS revoke-then-terminate
+  atomically (the in-flight-create race closes universally; the step-3 "the warden
+  must remember to pair them" caveat becomes structural). Userspace:
+  `Command::allowance(TAllowanceDesc)` + the `push_mmio`/`push_irq`/`set_dma_max`
+  builder. 917/917 PASS (+2 `allowance.{confer_within_parent,revoke_on_group_terminate}`);
+  boot OK + 0 EXTINCTION. Reference `docs/reference/117-allowance.md` (the
+  confer-at-spawn section). **Focused audit (one Opus-4.8-max prosecutor + a
+  concurrent self-audit; MODEL start == end, no fallback) CLEAN after fixes -- 0 P0
+  / 1 P1 / 1 P2 / 2 P3, ALL FIXED.** F1 [P1] the #160 fold-in broke
+  `proc_confer_allowance`'s lockless `kfree(old)` "no concurrent reader" contract
+  (a killer reaches the proc-tree-linked child in the spawn window ->
+  `proc_revoke_allowance` locks the OLD inherited clone while the thunk frees it ->
+  SMP UAF, on the narrowed-parent path; the v1.0 broad warden is safe via
+  `old==NULL`) -> FIXED by `proc_allowance_install_locked` (the swap under
+  `g_proc_table_lock`, the lock the revoke runs under; `kfree` outside). F2 [P2] the
+  `fail-allowance` thunk arm leaked the inherited fds' spoor refs -> FIXED (clunk
+  them, mirroring the fail-fd-install arm). F3/F4 [P3] non-atomic revoke load +
+  test lock-doc -> FIXED. The spec is structurally blind to F1 (it models Confer as
+  a set-assignment, no malloc/free) -- the class specs miss + audits catch. NOT a
+  dirty close (0 P0, P1+P2 < 6, localized fixes). Closed list
+  `memory/audit_5a_allowance_confer_closed_list.md`. SMP gate (default+UBSan x
+  smp4/smp8, N=10): PASS, 0 corruption (pre-fix + a post-F1 re-run, the proc.c
+  death-path witness). **Next**: 5b -- the `libdriver` framework crate.

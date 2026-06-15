@@ -240,10 +240,17 @@ struct t_sys_spawn_args {
     unsigned long  supp_gids_va;     // 64 — A-1a (user-VA of supp_gid_count u32s)
     unsigned int   supp_gid_count;   // 72 — A-1a (0..15)
     unsigned int   identity_flags;   // 76 — A-1a (T_SPAWN_IDENTITY_SET)
+    // Menagerie step 5 (append-only, 80 -> 96): the hardware-allowance grant.
+    // Leave allowance_flags == 0 (zeroed struct) to inherit the parent's
+    // allowance (the broad default for every non-warden caller).
+    unsigned long  allowance_va;     // 80 — user-VA of a struct t_allowance_desc
+    unsigned int   allowance_flags;  // 88 — T_SPAWN_ALLOWANCE_SET
+    unsigned int   _pad_allow;       // 92 — must be 0 at v1.0
 };
-_Static_assert(sizeof(struct t_sys_spawn_args) == 80,
+_Static_assert(sizeof(struct t_sys_spawn_args) == 96,
                "struct t_sys_spawn_args must mirror the kernel's "
-               "struct sys_spawn_args 80-byte ABI (A-1a identity block)");
+               "struct sys_spawn_args 96-byte ABI (A-1a identity block + "
+               "the Menagerie step-5 allowance block)");
 // R1 F8 fix: per-field offsetof asserts (mirror the kernel struct's
 // asserts) so a reordering on either side that leaves total size
 // unchanged still fails at compile time.
@@ -277,6 +284,43 @@ _Static_assert(__builtin_offsetof(struct t_sys_spawn_args, supp_gid_count) == 72
                "t_sys_spawn_args.supp_gid_count at ABI offset 72");
 _Static_assert(__builtin_offsetof(struct t_sys_spawn_args, identity_flags) == 76,
                "t_sys_spawn_args.identity_flags at ABI offset 76");
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_args, allowance_va) == 80,
+               "t_sys_spawn_args.allowance_va at ABI offset 80");
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_args, allowance_flags) == 88,
+               "t_sys_spawn_args.allowance_flags at ABI offset 88");
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_args, _pad_allow) == 92,
+               "t_sys_spawn_args._pad_allow at ABI offset 92");
+
+// Menagerie step 5: T_SPAWN_ALLOWANCE_SET (mirror SPAWN_ALLOWANCE_SET) + the
+// hardware-allowance descriptor (mirror struct t_allowance_desc). A C caller
+// that wants to confer a narrowed allowance fills a t_allowance_desc, points
+// allowance_va at it, and sets allowance_flags |= T_SPAWN_ALLOWANCE_SET. The
+// kernel gates the conferred set as a narrowing of the caller's own allowance.
+#define T_SPAWN_ALLOWANCE_SET  (1u << 0)
+
+struct t_hw_window {
+    unsigned long base;
+    unsigned long size;
+};
+struct t_allowance_desc {
+    struct t_hw_window mmio[8];
+    unsigned int       mmio_count;
+    unsigned int       irq_count;
+    unsigned int       irq[8];
+    unsigned long      dma_max;
+};
+_Static_assert(sizeof(struct t_allowance_desc) == 176,
+               "struct t_allowance_desc must mirror the kernel's 176-byte ABI");
+_Static_assert(__builtin_offsetof(struct t_allowance_desc, mmio) == 0,
+               "t_allowance_desc.mmio at ABI offset 0");
+_Static_assert(__builtin_offsetof(struct t_allowance_desc, mmio_count) == 128,
+               "t_allowance_desc.mmio_count at ABI offset 128");
+_Static_assert(__builtin_offsetof(struct t_allowance_desc, irq_count) == 132,
+               "t_allowance_desc.irq_count at ABI offset 132");
+_Static_assert(__builtin_offsetof(struct t_allowance_desc, irq) == 136,
+               "t_allowance_desc.irq at ABI offset 136");
+_Static_assert(__builtin_offsetof(struct t_allowance_desc, dma_max) == 168,
+               "t_allowance_desc.dma_max at ABI offset 168");
 
 // A-1a: identity_flags bits (mirror SPAWN_IDENTITY_* in the kernel header).
 #define T_SPAWN_IDENTITY_SET   (1u << 0)
