@@ -82,17 +82,19 @@
 // failure. POSIX: EIO.
 #define T_E_IO         5
 
-// No such device -- the BACKING DEVICE/SERVICE disappeared. The Loom
-// device-gone terminal CQE (MENAGERIE.md section 10, the "T_E_DEVGONE"
-// class): when an in-flight Loom op's 9P session dies because the
-// server/driver endpoint vanished (a DeviceRemoved group-terminates the
-// driver, so its served endpoint tears down and the consumer's rings
-// EOF), the op completes with -T_E_NODEV -- distinct from a generic
-// transport -T_E_IO -- so the consumer can tell "device removed" from a
-// transport hiccup. The reliable signal is the peer-gone EOF the removal
-// causes (a clean recv 0 = the server endpoint torn down), threaded to
-// the terminal CQE as the death reason. Extends I-29 (Loom completion
-// integrity) to "the backing device disappeared." POSIX: ENODEV.
+// No such device -- the BACKING SERVICE/DEVICE ENDPOINT disappeared. The
+// Loom device-gone terminal CQE (MENAGERIE.md section 10, the
+// "T_E_DEVGONE" class): when an in-flight Loom op's 9P session dies
+// because the served endpoint vanished -- a CLEAN peer-gone EOF (any
+// `recv` returning 0 = the server/driver side closed) -- the op completes
+// with -T_E_NODEV, distinct from a generic transport -T_E_IO (a recv
+// error / malformed frame), so the consumer can tell "the thing serving
+// me went away" from a transport hiccup. The trigger is BROADER than
+// strict device-removal: any clean server-endpoint close qualifies; for
+// the Menagerie warden path that close IS a DeviceRemoved group-
+// terminating the driver (audit F4). The signal is threaded to the
+// terminal CQE as the death reason. Extends I-29 (Loom completion
+// integrity) to "the backing endpoint disappeared." POSIX: ENODEV.
 #define T_E_NODEV      19
 
 // Bad handle / fd. Use when a syscall references a handle table slot

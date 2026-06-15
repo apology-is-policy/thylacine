@@ -652,5 +652,18 @@ early-console `chosen/stdout-path` selection is kernel.
   915/915 PASS (+2 `9p_client.async_{peer_gone,mark_devgone}_posts_nodev_cqe`; the
   existing `async_session_death_posts_error_cqe` re-confirms the transport-error
   `-EIO` leg); boot OK. Reference `docs/reference/107-loom.md` (Device-gone
-  terminal). **Next**: the warden + `libdriver` bind the existing virtio drivers on
-  QEMU virt (step 5).
+  terminal). **Focused audit (one Opus-4.8-max prosecutor + a concurrent self-audit;
+  MODEL start == end, no fallback) CLEAN 0 P0 / 0 P1 / 0 P2 / 4 P3** -- the two
+  prosecutions cross-confirmed clean on misclassification (a clean EOF can never be
+  misread as idle: the deadline backends reset `timed_out` on arm + return `-1`+
+  timed_out never `0`+timed_out), the reply-vs-death exactly-once race (untouched
+  discipline), lifetime (pure parameter), ABI (pinned, collision-free), the sync-path
+  no-regression, and spec fidelity. The 4 P3s are all doc/coverage (F1 the explicit
+  `p9_client_mark_devgone` has no production caller yet -> the warden #160 is the
+  intended first; F2/F3 the spec abstracts the recv-classification + the per-site bool
+  -> a `SPEC SCOPE` note + the 3-reader/10-transport site-count regression anchor; F4
+  the trigger is broader than strict device-removal -> the `errno.h` doc broadened);
+  closed list `memory/audit_loom_devgone_closed_list.md`. SMP gate (default+UBSan x
+  smp4/smp8, N=10): PASS, 0 corruption (the 19 timing exits ground-truth-verified to
+  reach boot OK + 915/915 + login prompt). **Next**: the warden + `libdriver` bind the
+  existing virtio drivers on QEMU virt (step 5).
