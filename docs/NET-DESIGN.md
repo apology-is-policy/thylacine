@@ -446,12 +446,16 @@ prose-validated per the 2026-05-23 broadening.
 netd owns the NIC via the userspace-driver model already proven for virtio-blk
 and exercised by the `usr/virtio-net-*` probes:
 
-- **Transport**: the virtio-net device's RX + TX virtqueues, driven through
-  `KObj_MMIO` (the device registers), `KObj_IRQ` (RX/TX completion), and
-  `KObj_DMA` (the frame buffers) — all held by netd, non-transferable (I-5).
-  The existing probes proved TX + the IRQ-completion handshake; the net arc adds
-  the RX path (the field-wide convergence is a shared-memory ring + a signal —
-  the virtio virtqueue is exactly that).
+- **Transport**: the virtio-net device's RX + TX virtqueues. Since the pci
+  sub-arc (`docs/VIRTIO-PCI-DESIGN.md`) net is a virtio-**PCI** device — its
+  per-function, page-aligned BAR is claimed + mapped via `KObj_PCI`
+  (`SYS_PCI_MAP_BAR`), with `KObj_IRQ` (the swizzled INTx INTID) for RX/TX
+  completion and `KObj_DMA` for the frame buffers — all held by netd,
+  non-transferable (I-5). The existing probes proved TX + the IRQ-completion
+  handshake (over the mmio transport); net-1 added the RX path + the reusable
+  driver; the pci sub-arc re-homes the transport on a per-device BAR (the
+  field-wide convergence is a shared-memory ring + a signal — the virtio
+  virtqueue is exactly that).
 - **The probes generalize, the scripted device retires.** W4-F15 noted the
   `usr/virtio-net-*` probes built but the scripted `/dev/ether0` never landed,
   its blocker (no FS namespace) dissolved at stalk. Resolution: **netd owns the
@@ -556,7 +560,7 @@ its own status row + audit where audit-bearing):
 |---|---|
 | **net-0** | This charter (scripture; no code). |
 | **net-1** | virtio-net RX path + the frame transport (generalize the probes to RX+TX under netd's NIC ownership). |
-| **net-2** | netd skeleton: embed smoltcp, serve `/net`, the `/net/tcp` `clone`/`connect`/`data` client path + the §3.4 fid state machine. |
+| **net-2** | netd skeleton: embed smoltcp, serve `/net`, the `/net/tcp` `clone`/`connect`/`data` client path + the §3.4 fid state machine. **Rides the virtio-PCI transport** (preempted by the pci sub-arc below; resumes on the PCI NIC). |
 | **net-3** | server side: `announce`/`listen`/`accept` + `/net/udp` + `/net/icmp` (ping). |
 | **net-4** | naming + config: `cs`/`dns`/`ndb` (§5) + `ipconfig`/DHCP (§6). |
 | **net-5** | the socket-compat pouch boundary-line (§7) — Linux/pouch binaries reach `/net`. |
@@ -564,9 +568,21 @@ its own status row + audit where audit-bearing):
 | **net-7** | TLS root bundle (§9) + SNTP + `SYS_CLOCK_SETTIME` (§10) + observability (`/ctl/net`, `netstat`, §11). |
 | **net-8** | exit criteria: the server + soak proofs (§16) + one focused audit over the reserved surfaces. |
 
-Sequencing note: the net arc precedes the container runner (#70) and the
-on-system toolchain (#67) in Phase 8 (ROADMAP §2.2). net-1..net-3 are the
-critical path (a working client); net-4..net-8 complete the surface.
+**Preempt — the virtio-PCI transport (pci-0..pci-3, `docs/VIRTIO-PCI-DESIGN.md`).**
+net-1 surfaced **#140**: virtio-net (slot 30) and the Stratum-pool virtio-blk
+(slot 31) share one 4 KiB virtio-mmio page, and the page-exclusive `KObj_MMIO`
+claim (over a hard 4 KiB MMU granule) cannot give two *persistent* userspace
+drivers (`netd` + `stratumd`) sound, isolated co-residency. Per the
+depth-first-dependencies principle (user-voted 2026-06-15), net-2 is **preempted**
+to build the future-proof virtio-PCI transport — net moves to its own
+page-aligned PCI BAR, dissolving the contention by construction. **net-only**
+scope (blk → PCI is a v1.x seam); **INTx** interrupts (MSI-X needs GIC ITS/v2m →
+seam). net-2 resumes on the PCI NIC once pci-3 closes.
+
+Sequencing note: the net arc (now: pci-0..pci-3 → net-2..net-8) precedes the
+container runner (#70) and the on-system toolchain (#67) in Phase 8
+(ROADMAP §2.2). pci-0..pci-3 + net-2..net-3 are the critical path (a working
+client); net-4..net-8 complete the surface.
 
 ---
 
