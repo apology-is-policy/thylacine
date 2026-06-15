@@ -66,8 +66,13 @@ impl TxRing {
     /// Returns the count reaped (frees that many in-flight slots).
     #[inline]
     pub fn reap(&mut self, cur_used: u16, cap: u16) -> u16 {
+        // Never advance seen_used past avail_idx: a hostile/buggy device that
+        // reports used.idx far ahead of what we posted must not drive in_flight
+        // to underflow (which would wedge can_post forever -- audit F2). Reap at
+        // most the genuinely-outstanding count.
+        let reapable = self.in_flight().min(cap);
         let mut n = 0u16;
-        while self.seen_used != cur_used && n < cap {
+        while self.seen_used != cur_used && n < reapable {
             self.seen_used = self.seen_used.wrapping_add(1);
             n = n.wrapping_add(1);
         }
@@ -165,6 +170,23 @@ mod tests {
         let reaped = tx.reap(SZ, 4);
         assert_eq!(reaped, 4, "drain loop honors the cap");
         assert_eq!(tx.in_flight(), SZ - 4);
+    }
+
+    #[test]
+    fn tx_reap_clamped_to_in_flight_on_lying_used_idx() {
+        // audit F2: a hostile/buggy device reports used.idx far ahead of what we
+        // posted; reap must clamp to the genuine in-flight count and never drive
+        // in_flight to underflow (which would wedge can_post forever).
+        let mut tx = TxRing::new(SZ);
+        for _ in 0..4 {
+            tx.commit_post();
+        }
+        assert_eq!(tx.in_flight(), 4);
+        let lying = tx.avail_idx().wrapping_add(30000);
+        let reaped = tx.reap(lying, SZ);
+        assert_eq!(reaped, 4, "clamped to the 4 genuinely outstanding");
+        assert_eq!(tx.in_flight(), 0, "seen_used did not cross avail_idx");
+        assert!(tx.can_post(), "send is not wedged");
     }
 
     #[test]

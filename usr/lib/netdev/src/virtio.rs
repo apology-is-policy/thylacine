@@ -418,14 +418,21 @@ impl VirtioNet {
         // desc_id is device-controlled: reject out-of-range before it scales the
         // RX-pool base (the critical OOB guard).
         if desc_id >= QUEUE_SIZE as u32 {
-            // A bogus id cannot index a buffer; recycle the slot anyway so the
-            // queue does not run dry, then report "no frame".
-            self.recycle_rx(desc_id & (QUEUE_SIZE as u32 - 1));
+            // A bogus, out-of-range id means the device misbehaved: which buffer
+            // it actually filled is unknowable, so we must NOT republish a
+            // fabricated descriptor -- that could double-post a still-live buffer
+            // (audit F1). The used entry is already consumed (take_used advanced
+            // seen_used); drop it without recycling. A device that keeps lying
+            // starves its OWN rx (the avail ring shrinks) -- safe: no double-post,
+            // no OOB. Trusted QEMU never emits this.
             return None;
         }
-        // Clamp the device-reported length to the posted buffer size before any
-        // read, then strip the net header.
-        let len = (raw_len as usize).min(BUF_LEN);
+        // Clamp the device-reported length to the largest legal frame (header +
+        // MTU, <= BUF_LEN) before any read, then strip the net header. The clamp
+        // is the memory-safety bound -- any raw_len, including a lying
+        // 0xFFFF_FFFF, is pinned inside buffer desc_id; the copy is then further
+        // bounded by out.len().
+        let len = (raw_len as usize).min(VIRTIO_NET_HDR_LEN + MAX_FRAME);
         let frame_len = len.saturating_sub(VIRTIO_NET_HDR_LEN);
         let n = frame_len.min(out.len());
 
