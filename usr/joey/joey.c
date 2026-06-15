@@ -2367,6 +2367,32 @@ int main(void) {
         t_putstr("joey: thread-fault-probe ok (multi-thread Proc fault terminated cleanly; kernel did NOT extinct)\n");
     }
 
+    // === /netdev-test -- net-1 virtio-net frame transport (NET-DESIGN.md 13/17) ===
+    // The reusable netdev::VirtioNet driver proves an ARP round-trip through its
+    // send/poll_rx API (the virtio-net-loop proof, generalized + recycled past
+    // one ring + quiesced on drop). Runs PRE-stratumd so the net device's MMIO
+    // page (shared with virtio-blk at slot 31 -- the net-2 co-residency note) is
+    // free; the probe claims it, round-trips, and exits (quiesce + claim release)
+    // before stratumd needs it. Exits 0 on PASS or SKIP (no net device); 1 FAIL.
+    {
+        // CAP_HW_CREATE: a virtio driver claims MMIO/IRQ/DMA (like stratumd).
+        // joey holds the cap and grants the subset; without it SYS_MMIO_CREATE
+        // is rejected at the capability gate (before kobj_mmio_create).
+        const char nt_name[] = "netdev-test";
+        long nt_pid = t_spawn_with_caps(nt_name, sizeof(nt_name) - 1, T_CAP_HW_CREATE);
+        if (nt_pid <= 0) {
+            t_putstr("joey: t_spawn(\"netdev-test\") FAILED\n");
+            return 1;
+        }
+        int nt_status = -1;
+        long nt_reaped = t_wait_pid_for((int)nt_pid, 0, &nt_status);
+        if (nt_reaped != nt_pid || nt_status != 0) {
+            t_putstr("joey: /netdev-test FAILED (net-1 VirtioNet round-trip)\n");
+            return 1;
+        }
+        t_putstr("joey: netdev-test ok (net-1 VirtioNet send/poll_rx round-trip or skip)\n");
+    }
+
     // === /sbin/corvus spawn + E2E ===
     // Moved to do_corvus_bringup() (defined above main) and called
     // POST-PIVOT below, so corvus lands on the persistent Stratum root

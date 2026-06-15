@@ -1,0 +1,15 @@
+# netdev-test -- net-1 boot probe: an ARP round-trip through the reusable
+# netdev::VirtioNet driver (the virtio-net-loop proof, now via the send/poll_rx
+# API). Spawned in joey's THYLA_BOOT_PROBES ladder PRE-stratumd, so the net
+# device's MMIO page is free (see the net-2 co-residency note in netdev).
+
+[package]
+name = "netdev-test"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+libthyla-rs = { path = "../lib/libthyla-rs" }
+netdev = { path = "../lib/netdev" }

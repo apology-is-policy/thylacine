@@ -1,0 +1,33 @@
+# netdev -- native Thylacine NIC drivers (the net-1 frame transport).
+#
+# The reusable VirtioNet RX+TX Ethernet frame driver that net-2's `netd` owns
+# and smoltcp wraps (docs/NET-DESIGN.md section 13/17). Generalizes the proven
+# virtio-net-loop probe (RX recycling + TX reuse + the audit hardenings) into a
+# send(&[u8]) / poll_rx(&mut[u8]) API + the device-death quiesce the single-shot
+# probes skip (RW-7 R3-F1).
+#
+# Build (device): `cargo build -p netdev` (default features -> the driver).
+# Host tests (pure ring arithmetic): `cargo test -p netdev --no-default-features
+#   --target <host-triple>` (libthyla-rs does not build on the host).
+
+[package]
+name = "netdev"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lib]
+name = "netdev"
+path = "src/lib.rs"
+
+[features]
+# `driver` compiles `netdev::virtio` (the on-target VirtioNet over the
+# libthyla-rs MMIO/IRQ/DMA substrate). On by default for the device build; host
+# tests of the pure `ring` arithmetic drop it (libthyla-rs is aarch64-thylacine
+# only).
+default = ["driver"]
+driver = ["dep:libthyla-rs"]
+
+[dependencies]
+libthyla-rs = { path = "../libthyla-rs", optional = true }
