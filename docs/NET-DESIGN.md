@@ -1,0 +1,625 @@
+# NET-DESIGN.md — the Thylacine network charter (#68)
+
+Binding scripture for the Phase-8 network arc. This document is the design
+pass the HOLOTYPE RW-13 vote (ROADMAP §2.2 D1, 2026-06-11) called for: the
+`/net`-via-`netd` shape was already committed; this charter fills the eleven
+undesigned holes inside it (the `#68` register cluster) and binds the three
+load-bearing decisions taken in the 2026-06-15 design conversation.
+
+It is **scripture before code**: no network code is written against a hole
+this charter has not closed. The Phase-8 impl sub-chunks cite this document's
+section numbers the way the Loom impl cited `LOOM.md`.
+
+---
+
+## 1. What was already settled, and what this charter decides
+
+### 1.1 The committed shape (do not re-litigate)
+
+Three pieces of recent, voted scripture fixed the architecture before this
+charter:
+
+- **ROADMAP §2.2 D1** (HOLOTYPE RW-13, 2026-06-11): *"Networking is IN v1.0
+  (Phase 8). The Plan 9 `/net`-via-`netd` shape stands."*
+- **ARCHITECTURE.md §10.1**: *"The network is 9P too… a userspace `/net` 9P
+  server (`netd`, the stratumd-as-driver precedent — a `CAP_HW_CREATE` Proc
+  owning virtio-net)… network I/O rides Loom with no socket opcodes… the
+  native remote-access story is `import`/`exportfs` over authenticated 9P."*
+- **NOVEL.md Angle #1**: *"The network is a 9P filesystem"* — the last big
+  surface to totalize.
+
+So the network is **file/namespace-shaped** (`/net/tcp/clone` + `ctl`/`data`,
+the pure Plan 9 model), served by a **userspace** stack, riding **Loom** for
+async I/O, with **no socket syscalls in the kernel**. The SOTA survey confirms
+this is the right fork: of the capability-microkernel field, **Genode**
+(`socket_fs` — sockets as directories) and **Hurd** (`pfinet` translator on
+`/servers/socket/N`) independently chose the file/namespace shape and are the
+two closest precedents to a Plan 9 `/net`. Fuchsia (BSD-socket FIDL) and seL4
+(link-the-library) took the other fork, which our scripture already declined.
+
+### 1.2 The three decisions this charter binds (2026-06-15 votes)
+
+| # | Decision | Choice | Rationale | Rejected alternative |
+|---|---|---|---|---|
+| **D-net-1** | netd locality | **Shared `netd` + namespace-narrowed views** | One netd Proc owns virtio-net and serves `/net`; per-Proc isolation comes from narrowing each territory's `/net` view (the Plan 9 model: no `/net` = no network, narrowed `/net` = restricted reach). One stack to harden; isolation without N×memory; matches the stratumd-as-driver precedent + the single `import`/`exportfs` story. | Per-territory stack instances (Genode/LionsOS) — maximal fault isolation but N copies of TCP state + a `nic_router`-style mux; heavier, less aligned with single-`/net`. |
+| **D-net-2** | BSD-socket compat locality | **Pouch-userspace translation** | A pouch boundary-line patch maps `socket()`/`connect()`/`bind()`/`listen()`/`accept()` onto `/net/tcp/clone` file ops (Genode's `socket_fs`-in-libc precedent). Keeps the kernel socket-syscall-free (ARCH §11.5 / NOVEL #1 intact); the Plan-9-heritage answer; rides the existing audit-bearing pouch discipline. | Kernel socket-shim syscalls (Fuchsia fdio→zxio) — reintroduces the socket ABI the "network is 9P" commitment deliberately excluded; reopens a settled scripture decision. |
+| **D-net-3** | v1.0 firewall scope | **Namespace-restriction only** | A Proc's firewall IS its `/net` view; zero new filter mechanism; the isolation is structural and composes with territory/capability scoping. Sufficient for the container/confinement story; the explicit L3/L4 packet filter is a clean v1.x add. | A basic stateful filter in netd at v1.0 — real per-port/per-address policy now, but a new config + observability + audit surface and more Phase-8 scope. |
+
+### 1.3 Relationship to other scripture
+
+- **ARCH §10.1** is the one-paragraph architectural statement; this charter is
+  its expansion. Where they overlap, this charter is authoritative for the
+  as-designed Phase-8 detail.
+- **ROADMAP §9** carries the Phase-8 deliverable list + exit criteria; this
+  charter refines them (W4-F8: the criteria gain server-side + soak).
+- **LOOM.md** owns the ring transport; this charter consumes it (network I/O
+  rides Loom; the listen-multishot accept loop is `loom_multishot.tla`'s
+  generality realized, no new Loom core).
+- **POUCH-DESIGN.md §11** owns the boundary-line discipline; the socket-compat
+  patch (§7) is a new pouch surface under that discipline (P-1..P-4 hold).
+- **STALK-DESIGN.md** owns path resolution; the `/net` view narrowing (§8) is
+  exactly the per-territory mount/bind machinery, no new mechanism.
+
+---
+
+## 2. Architecture: one `netd`, many narrowed views
+
+`netd` is a userspace Proc, spawned by joey at boot with `CAP_HW_CREATE`,
+exactly as stratumd is spawned to own the disk. It:
+
+1. **Owns the NIC.** It creates `KObj_MMIO` / `KObj_IRQ` / `KObj_DMA` handles
+   over the virtio-net device (the existing `usr/virtio-net-*` probe transport
+   generalized to RX+TX). By **I-5** these handles are non-transferable, so no
+   other Proc can touch the live device.
+2. **Runs the stack.** It embeds the smoltcp TCP/IP stack (§14) in its own
+   address space — the single shared stack instance (D-net-1).
+3. **Serves `/net` as a 9P server.** It posts itself into the boot namespace's
+   `/srv` and is mounted at `/net` (the joey `joey_mount_static_dev` idiom,
+   the same one that mounts `/proc`, `/ctl`, `/dev`). Every read/write/walk on
+   `/net/...` routes through the kernel 9P client (`dev9p`) to netd's request
+   handlers — netd is *just another 9P server*, indistinguishable to a client
+   from stratumd.
+
+**Isolation = view narrowing, not stack duplication.** A Proc's only access to
+the network is the `/net` subtree in *its* territory. The kernel grants or
+withholds that subtree with the existing mount/bind machinery:
+
+- **No `/net` in the namespace → no network at all.** Not a capability bit, not
+  a filter rule — the resource is simply unnamed, so it cannot be opened. This
+  is the Plan 9 §4.4 property and it falls out of **I-1** (territory isolation)
+  + **I-28** (path-resolution containment) with *zero new mechanism*.
+- **A narrowed `/net` → a restricted network.** A confined Proc can be given a
+  territory whose `/net` contains only `/net/tcp` (no UDP), or only a bind of a
+  single pre-opened connection directory, or a `/net` imported over 9P from a
+  filtering gateway Proc. The set of things it can dial is exactly the set of
+  `clone` files it can walk to (§8).
+
+**The remote story.** `import host /net` 9P-mounts another machine's `/net`
+into the local namespace; thereafter opening `/net/tcp/clone` locally opens a
+connection *originating on `host`*. Because `/net` is files, the standard 9P
+import IS remote network access — governed by the same handle/rights/corvus-auth
+path as importing any other tree (the Plan 9 `cpu(1)` model; ARCH §10.1).
+
+---
+
+## 3. The `/net` schema and the netd fid state machine (closes W4-F7)
+
+### 3.1 The directory tree
+
+```
+/net/
+    cs                      # connection server — name→address (§5)
+    dns                     # DNS resolver       (§5)
+    ndb                     # network database (read view; §5)
+    ipifc/                  # IP interface config (§6)
+        0/ctl  0/status  0/local  ...
+        clone               # mint a new logical interface
+    tcp/                    # TCP protocol directory
+        clone               # the connection factory
+        stats               # protocol-wide counters (§11)
+        0/  1/  2/ ... N/    # one directory per live connection
+    udp/                    # UDP — same clone+N/ shape
+        clone  stats  0/ ...
+    icmp/                   # for ping (§16)
+        clone  0/ ...
+```
+
+Adding a protocol adds a directory with the same `clone` + numbered-connection
+shape; it adds no API. (IL — the Plan 9 9P-carrier datagram protocol — is **not**
+ported: Thylacine carries 9P over Loom/SrvConn/Unix-socket transports already,
+so IL has no role. Recorded as a deliberate non-port.)
+
+### 3.2 The connection directory `/net/tcp/N/`
+
+Each live connection is a directory of **ASCII** files (ASCII deliberately —
+byte-order-free and remotely accessible, the §1.1 import property):
+
+| File | Mode | Semantics |
+|---|---|---|
+| `ctl` | rw | Read once → the connection number `N` (ASCII). Write command strings to drive the state machine (§3.3). |
+| `data` | rw | The byte stream. Reading/writing `data` *is* recv/send. Opening `data` after a `connect` write is what establishes the connection. |
+| `listen` | r | Server accept. `open()` **blocks** until an inbound call arrives, then returns a fd onto the **`ctl` of a fresh connection directory** for that call. |
+| `local` | r | Local endpoint, ASCII `ip!port`. |
+| `remote` | r | Remote endpoint, ASCII `ip!port`. |
+| `status` | r | Human-readable TCP state (`Established`, `Listen`, window) — `cat`-able introspection (§11). |
+| `err` | r | The out-of-band reason a read/write failed or the stream hit EOF. |
+
+### 3.3 The `ctl` verb vocabulary (TCP)
+
+The Plan 9 `ip(3)` set, parsed by netd's `ctl`-write handler:
+
+- `connect ip!port[!r] [local]` — active open; `!r` requests a restricted
+  (<1024) local port; trailing `local` pins the local address.
+- `announce ip!port` (or `*!port`, `*!service`) — bind a local port to listen.
+- `bind ip!port` — set only the local address (BSD `bind()` separability, §7).
+- `hangup` — active close.
+- `keepalive [ms]`, `ttl n`, `tos n` — per-connection options.
+
+### 3.4 The netd-internal fid state machine
+
+This is the part W4-F7 named as undesigned, and the part that is **distinct
+from smoltcp** (smoltcp is the wire/protocol state machine; this is the 9P-fid
+lifecycle netd maintains *on top of* a smoltcp socket). Each `clone`-minted
+connection fid moves through:
+
+```
+            open(clone)
+   ─────────────────────────►  ALLOCATED   (smoltcp socket reserved; N assigned)
+   write ctl "connect a!p"  ►  CONNECTING   (smoltcp active-open issued)
+   smoltcp established       ►  ESTABLISHED  (data I/O live)
+   write ctl "announce ..."  ►  ANNOUNCED    (smoltcp listen socket bound)
+   open(listen) + inbound    ►  (mints a NEW fid in ESTABLISHED; the listen
+                                  fid stays ANNOUNCED for the next call)
+   hangup / peer FIN / err   ►  CLOSING ──► CLOSED  (fid clunk frees N + the
+                                                     smoltcp socket)
+```
+
+Invariants the impl must uphold (the audit prosecutes these):
+- **One fid ↔ one smoltcp socket** for its open lifetime (I-11 fid identity,
+  generalized to the netd session). A `clunk` is the *only* path that frees the
+  smoltcp socket; a half-open `data` read after `CLOSED` returns the `err`
+  reason, never a stale or reused socket's bytes.
+- **`N` reuse is gated on clunk** (I-10-style: the connection number is not
+  reusable until its directory is fully torn down), so a late reply on an old
+  `N` is never mis-attributed.
+- **A connection fid is per-session state**; multi-thread-Proc sharing of a
+  `/net` fd is governed by the existing handle-table lock (#844) — netd sees
+  one 9P session per attach and serializes its own connection table.
+
+---
+
+## 4. The connection lifecycle as 9P operations
+
+**Client** (the four Plan 9 steps, realized over `dev9p`):
+
+```
+fd  = open("/net/tcp/clone")        # → ALLOCATED, fd onto ctl
+N   = read(fd)                      # ASCII connection number
+write(fd, "connect 1.1.1.1!443")    # → CONNECTING
+d   = open("/net/tcp/N/data")       # blocks to ESTABLISHED; d is the stream
+read(d)/write(d)                    # recv/send
+```
+
+**Server**:
+
+```
+a   = open("/net/tcp/clone"); N = read(a)
+write(a, "announce *!80")           # → ANNOUNCED
+l   = open("/net/tcp/N/listen")     # blocks for a call → fd onto a NEW conn's ctl
+M   = read(l)
+d   = open("/net/tcp/M/data")       # the accepted stream
+```
+
+**Native libthyla-rs** wraps this as a thin `net::TcpStream` / `net::TcpListener`
+(string-format + file-op, no privileged syscall underneath — the Plan 9 `dial(2)`
+library is thin by construction). **Pouch/Linux** binaries reach the same files
+through the socket-compat boundary-line (§7). **Async** native clients drive the
+lifecycle through Loom (§12) instead of blocking opens.
+
+---
+
+## 5. Naming: `cs`, `dns`, `ndb` (closes W4-F3)
+
+- **`/net/cs`** — the connection server. Write a dial string
+  (`tcp!host!port`, `net!host!service`), read back one line per reachable path
+  in preference order, each `clonefile message` (the path of the `clone` to
+  open and the string to write to its `ctl`). `cs` collapses host-name
+  resolution, service-name resolution, and network/route selection into one
+  file read. The native `dial()` library calls `cs` then performs §4.
+- **`/net/dns`** — the recursive resolver as a file. Write `name type`
+  (`example.com a`), read back one line per resource record. `cs` delegates
+  Internet domain names to `dns`; `dns` performs the recursive query and caches.
+- **`ndb`** — the network database (static config): host/network/service
+  definitions, indented `attr=value` entries (the Plan 9 `ndb(6)` format).
+  Location: **`/lib/ndb/local`** + `/lib/ndb/global`, read live (no caching
+  daemon — single source of truth, the Plan 9 consistency property).
+
+**Locality decision (v1.0):** `cs` and `dns` are served **by netd itself**,
+under `/net/cs` and `/net/dns`, rather than as separate daemons. Rationale: one
+Proc, no extra IPC, and netd already holds the smoltcp UDP socket `dns` needs.
+**v1.x seam:** splitting `cs`/`dns` into independent daemons (the Plan 9 purity
+— so a confined Proc can be given a `dns`-less `/net`, or a custom resolver
+bound over `/net/dns`) is a clean later refactor; the file interface is
+identical whether netd or a separate daemon backs it, so nothing downstream
+changes. Recorded in §18.
+
+---
+
+## 6. IP configuration (closes W4-F10)
+
+Interface configuration is `ctl` writes on `/net/ipifc/N/`, the Plan 9 idiom:
+
+- `add ip mask [gw]` — assign a static address.
+- `bind ether <devpath>` — bind the interface to the NIC.
+- `unbind`, `remove ip` — teardown.
+
+Two config sources, both native libthyla-rs tools:
+
+- **`ipconfig`** — applies static config (from a config file or argv) by
+  writing `/net/ipifc/N/ctl`. The boot path runs it for any static address.
+- **DHCP client** — smoltcp ships a DHCPv4 client; netd drives it on an
+  interface marked dynamic, writing the leased address into `ipifc` and the
+  resolver into `ndb`/`dns`. A `dhcpctl`-style native tool starts/stops it.
+
+QEMU user-mode networking (`slirp`, the default dev loop) hands out a lease via
+DHCP, so the DHCP path is the primary dev-loop config; static is the
+bridged/production path. (W4-F10's "v1.1 board can't hardcode slirp" is closed:
+config is data-driven, not slirp-assumed.)
+
+---
+
+## 7. BSD-socket compatibility (binds D-net-2; closes W4-F2)
+
+The kernel has **no** socket syscalls, by commitment (ARCH §11.5 lists zero;
+NOVEL #1; P-1 "no foreign syscall number ever enters the kernel"). Linux/pouch
+binaries that call `socket()`/`connect()`/`bind()`/`listen()`/`accept()`/
+`send()`/`recv()`/`getsockname()`/`setsockopt()` are served by a **pouch
+boundary-line patch** that translates each to `/net` file operations — the
+Genode `socket_fs`-in-libc model:
+
+| BSD call | `/net` realization |
+|---|---|
+| `socket(AF_INET, SOCK_STREAM)` | `open("/net/tcp/clone")`; remember the fd + `N`. |
+| `connect(fd, a)` | write `connect a!p` to `ctl`; `open` `data`; dup `data` onto the socket fd. |
+| `bind(fd, a)` | write `bind a!p` to `ctl`. |
+| `listen(fd, backlog)` | write `announce` to `ctl`; the backlog is netd's accept queue depth. |
+| `accept(fd)` | `open` `listen` (blocking) or Loom-multishot (non-blocking); return the new conn's `data` fd. |
+| `send`/`recv` | `write`/`read` on `data`. |
+| `getsockname`/`getpeername` | read `local`/`remote`. |
+| `setsockopt(SO_*, TCP_*)` | write the matching `ctl` verb (`keepalive`, `ttl`, …); unsupported options return a documented errno (P-3 "no silently-wrong surface"). |
+
+**This reconciles W4-F2** (ARCH §11.5/§16 vs ROADMAP §9.1): the socket calls
+are **libc-level translations, not kernel syscalls**. ARCH §11.5 is correct to
+list zero socket syscalls; the "socket shim" is the pouch boundary-line above,
+not a kernel surface. The patch is audit-bearing under the existing pouch
+discipline (a new `usr/lib/pouch/patches/00NN-pouch-net-sockets.patch`).
+
+**Native libthyla-rs** programs do **not** go through this — they use `/net`
+directly via `net::TcpStream`/`net::TcpListener` (§4). The split is the
+standard native-vs-ported boundary (CLAUDE.md "Native vs ported userspace").
+
+**`AF_UNIX` is unaffected**: the existing `/srv` SrvConn path (the
+`0006-pouch-sockets.patch`) already serves Unix-domain sockets and is a
+*different* surface from this network-socket patch — both can coexist (a binary
+that opens an `AF_UNIX` socket and an `AF_INET` socket hits the two patches
+independently).
+
+---
+
+## 8. Firewall: namespace restriction is the network sandbox (binds D-net-3; closes W4-F1)
+
+There is **no explicit packet filter at v1.0**. A Proc's firewall IS its `/net`
+view, enforced by the existing path-resolution machinery (no new code):
+
+- **Deny-all**: a territory with no `/net` mount. The Proc cannot name any
+  network resource. This is the container/confinement default.
+- **Allow-scoped**: a territory whose `/net` is narrowed — only `/net/tcp`, or
+  only a bind of specific pre-dialed connection directories, or a `/net`
+  imported from a gateway Proc that itself filters. The reachable dial set =
+  the walkable `clone` set.
+- **Per-component X-search** (I-28) governs every `/net` walk: a Proc that
+  lacks search permission on a `/net` subtree cannot traverse into it.
+
+This is sufficient for the v1.0 container story (a container is a territory;
+its network reach is the `/net` its territory grants — exactly the "containers
+are territories" model, ROADMAP §9.1). It composes with capability scoping with
+zero net-specific authority surface, so it adds **no new §28 invariant** (it is
+I-1 + I-28 + I-23 specialized to `/net`).
+
+**v1.x seam (§18):** an explicit stateful packet filter — per-interface /
+per-connection allow/deny rules served as a `/net/filter` ctl surface (the
+Genode `nic_router` precedent) — layers *on top of* namespace restriction
+without changing it. Recorded as deferred; the namespace firewall is the
+primary mechanism, the packet filter is the fine-grained add.
+
+---
+
+## 9. TLS and the root-cert bundle (closes W4-F4)
+
+- **Native clients** use **rustls** (pure-Rust TLS, `alloc`-based — libthyla-rs
+  provides `alloc`). It is the native `https`/`wget`-as-fetcher path.
+- **Pouch/Linux clients** (curl, wget, openssl) use their bundled TLS (OpenSSL/
+  mbedTLS as ported), reading the **system root-cert bundle** at the canonical
+  path **`/etc/ssl/certs/ca-certificates.crt`** (+ the hashed `/etc/ssl/certs/`
+  dir for OpenSSL). The bundle is baked into the image at build time (the
+  host-bake idiom, like the pool corpus) and is a normal Stratum-FS file.
+- TLS is a **userspace library concern**, not a kernel or netd surface — netd
+  serves raw TCP `data`; the TLS handshake runs in the client over that stream.
+  This keeps the cert-trust policy in userspace where it belongs.
+
+W4-F4 is closed: the root bundle has a designed home (a baked file at a canonical
+path), not just an exit-criterion mention.
+
+---
+
+## 10. NTP / clock synchronization (closes W4-F11)
+
+- An **SNTP client** (native libthyla-rs tool, `ntpdate`-shaped) queries an NTP
+  server over UDP (`/net/udp`) and computes the offset against the LS-K
+  monotonic clock.
+- **Stepping the wall clock** requires a runtime-settable `CLOCK_REALTIME`.
+  LS-K shipped `timer_set_wallclock_anchor()` as **write-once-before-`smp_init`**
+  and recorded settability as a v1.x seam. The charter's resolution: **pull a
+  minimal `SYS_CLOCK_SETTIME` forward into the net arc** (the depth-first
+  dependency default, CLAUDE.md "pull dependencies forward") — a
+  `CAP_HOSTOWNER`-gated syscall that re-anchors `epoch_anchor_ns` (re-anchor
+  only; MONOTONIC is untouched). This is a small, bounded ABI addition.
+  - **ABI-confirm at impl:** a new syscall is an ABI surface; the impl sub-chunk
+    surfaces `SYS_CLOCK_SETTIME` for confirmation before landing (the standing
+    "syscall interface changes" escalation). If the user prefers, the fallback
+    is an SNTP client that *reports* offset only (display/`date`-check), with
+    stepping deferred to v1.x — but the recommended path is the small settable
+    clock, so NTP actually synchronizes.
+
+---
+
+## 11. Observability (closes W4-F5)
+
+Network introspection is **9P-native and mostly free** (the Plan 9 property —
+`netstat` is a walk of `/net`):
+
+- **Per-connection** `/net/tcp/N/status` (+ `local`/`remote`) — the live TCP
+  state, `cat`-able. This exists by §3.2 at no extra cost.
+- **Per-protocol** `/net/tcp/stats`, `/net/udp/stats` — counters.
+- **Per-interface** `/net/ipifc/N/status` — address, link state, packet/byte
+  counters.
+- **A `/ctl/net` summary** — the devctl precedent (the `/ctl` introspection
+  surface, #57a): a read-only aggregate (interfaces, routes, the connection
+  table) for one-shot `cat /ctl/net`. Like all of `/ctl`, it is
+  **visibility, not authority** (`perm_enforced = false`, read-only), and it
+  reports only what the reader's `/net` view already exposes.
+- A native **`netstat`** tool is a thin walk of `/net`.
+
+W4-F5 is closed: observability has a designed surface (per-connection status +
+protocol/interface stats + the `/ctl/net` summary), not just a charter mention.
+
+---
+
+## 12. Poll-readiness over 9P, and the Loom path (closes W4-F6)
+
+This is the subtlest hole. `dev9p` has **no `.poll` slot** today, and a NULL
+poll slot degenerates to "always ready" — wrong for a network fd. Two readiness
+paths, by client kind:
+
+### 12.1 Async native — Loom multishot (the committed path)
+
+Network I/O **rides Loom with no socket opcodes** (ARCH §10.1):
+- A `LOOM_OP_READ` on `/net/tcp/N/data` *is* a recv; its completion CQE carries
+  the bytes. A **multishot** read streams recv CQEs as data arrives.
+- A **multishot read on `/net/tcp/N/listen`** *is* an async accept loop — each
+  inbound call posts a CQE naming the new connection's `N`. This is exactly
+  `loom_multishot.tla`'s generality (one SQE → many CQEs, exactly-one-terminal,
+  the I-30 pin held across shots) realized for networking, with **zero new Loom
+  core** and no `LOOM_OP_ACCEPT`/`SEND`.
+
+This is the primary native readiness mechanism and needs no new kernel surface.
+
+### 12.2 Synchronous `poll()`/`select()` — the `dev9p.poll` bridge
+
+Pouch/Linux binaries call `poll()`/`select()`/`pselect6` over `/net` fds. The
+design:
+- **`dev9p` gains a `.poll` slot** that forwards a readiness query to netd over
+  the 9P session and registers a kernel poll-hook (the `poll_waiter_list`
+  machinery).
+- **netd signals readiness** when a connection becomes readable/writable, waking
+  the registered hook. The signal path is the deferred-wake pattern (the LS-8a
+  `console_mgr` precedent): netd's readiness notification crosses into the
+  kernel and walks the `poll_waiter_list` in process context, never from an
+  interrupt.
+- The pouch `poll()` translation drives this `dev9p.poll` per fd.
+
+**The I-9 hazard, and a reserved spec.** The netd→kernel readiness wake is a
+register-then-observe surface: a `poll()` caller must not miss a readiness edge
+that lands between its readiness-check and its sleep. This is **I-9 generalized**
+(exactly the `cons_poll.tla` / `poll.tla` shape). Per the per-surface spec-first
+re-enablement precedent (SMP/ASID/death-wake/Loom/cons-poll), the net arc
+**reserves a `specs/net_poll.tla`** (clean + a `BUGGY_LOST_READY` counterexample)
+to be written **before** the `dev9p.poll` impl if the impl confirms the wake
+crosses the userspace→kernel boundary the way the sketch expects. This is the
+one net sub-area flagged for possible spec-first re-enable; the rest is
+prose-validated per the 2026-05-23 broadening.
+
+---
+
+## 13. Driver model: the userspace virtio-net NIC (closes W4-F15)
+
+netd owns the NIC via the userspace-driver model already proven for virtio-blk
+and exercised by the `usr/virtio-net-*` probes:
+
+- **Transport**: the virtio-net device's RX + TX virtqueues, driven through
+  `KObj_MMIO` (the device registers), `KObj_IRQ` (RX/TX completion), and
+  `KObj_DMA` (the frame buffers) — all held by netd, non-transferable (I-5).
+  The existing probes proved TX + the IRQ-completion handshake; the net arc adds
+  the RX path (the field-wide convergence is a shared-memory ring + a signal —
+  the virtio virtqueue is exactly that).
+- **The probes generalize, the scripted device retires.** W4-F15 noted the
+  `usr/virtio-net-*` probes built but the scripted `/dev/ether0` never landed,
+  its blocker (no FS namespace) dissolved at stalk. Resolution: **netd owns the
+  NIC and serves `/net`**; there is no separate `/dev/ether0` device — the raw
+  frame interface, if ever exposed, is a `/net/ether0` file under netd (the
+  Plan 9 `#l` shape), not a kernel char device. ROADMAP:375's `/dev/ether0`
+  note is amended accordingly.
+
+---
+
+## 14. The TCP/IP stack: smoltcp
+
+- **smoltcp** (Rust, `no_std`, `alloc`-based) is the stack, embedded in netd.
+  It is the native libthyla-rs fit (no musl, no pouch) and was already named in
+  ROADMAP §9.1. It provides Ethernet/ARP/IPv4/IPv6/ICMP/TCP/UDP + a DHCPv4
+  client.
+- netd's fid state machine (§3.4) wraps smoltcp sockets; smoltcp owns the wire
+  protocol correctness (its authors spec'd it — ROADMAP §9.3's "protocol
+  correctness is smoltcp's responsibility" stands).
+- **Fallback** (ROADMAP §9.5 risk): if smoltcp can't cover a needed surface, a
+  Plan 9 IP-stack port is the recorded fallback; the fid state machine (§3.4) is
+  stack-agnostic by design (it wraps *a* socket abstraction), so the fallback
+  does not change `/net`.
+
+---
+
+## 15. Invariants and audit-trigger surfaces
+
+### 15.1 No new §28 invariant
+
+The network arc adds **no new numbered §28 invariant** (the A-5 precedent — a
+capstone integration that composes existing invariants). Network soundness is
+governed by:
+
+| Invariant | How the network arc is bound by it |
+|---|---|
+| **I-1** | A Proc's network reach is bounded by its `/net` territory view (the firewall, §8). |
+| **I-5** | netd's NIC handles (`KObj_MMIO`/`IRQ`/`DMA`) are non-transferable — the device can't leak. |
+| **I-9** | The `dev9p.poll`→netd readiness wake loses no edge (§12.2; reserved `net_poll.tla`). |
+| **I-10/I-11** | netd's connection-`N` reuse + fid identity (§3.4) — no stale/reused connection. |
+| **I-23** | netd's authority is bounded by its endowed NIC capability (the service-FS-authority property — netd owns exactly its NIC, nothing more). |
+| **I-28** | `/net` navigation is path-contained + per-component X-searched (the firewall mechanism, §8). |
+| **I-29/I-30** | Network I/O riding Loom inherits Loom's completion integrity + submit-time capability pin (§12.1). |
+
+### 15.2 Reserved audit-trigger surfaces (enumerate at impl)
+
+Per the Tapestry §28 / Loom precedent (reserve now, enumerate in §25.4 +
+CLAUDE.md at impl), the net arc reserves these audit-bearing surfaces; each
+joins the ARCH §25.4 + CLAUDE.md audit-trigger table in the sub-chunk that
+lands it:
+
+- **`netd`** — the stack server: the fid state machine, the smoltcp embedding,
+  the connection table SMP-safety, the NIC ownership.
+- **`dev9p.poll`** — the new readiness bridge (the I-9 surface).
+- **the socket-compat pouch boundary-line** (`00NN-pouch-net-sockets.patch`) —
+  the BSD→`/net` translation (the existing pouch audit discipline).
+- **the virtio-net userspace driver** (RX+TX) — the DMA/IRQ/ring memory safety
+  (the virtio-blk audit class).
+- **`cs`/`dns`/`ndb`** — the resolver (hostile-response bounds, cache safety).
+- **`ipconfig`/DHCP** — the lease-handling + `ipifc` ctl surface.
+- **`SYS_CLOCK_SETTIME`** (if pulled forward, §10) — the settable-clock ABI.
+
+---
+
+## 16. Exit criteria (refines ROADMAP §9.2; closes W4-F8)
+
+W4-F8: the existing criteria were 100% client-side, never proving the
+listen/accept/soak shape that defines the network workload. The refined set:
+
+**Client (existing, kept):**
+- [ ] `ping 1.1.1.1` works (ICMP via `/net/icmp`).
+- [ ] `curl`/`wget https://example.com` fetches a URL (TLS via the root bundle, §9).
+- [ ] `ssh` from Thylacine to an external host works (bridged QEMU networking).
+- [ ] A native libthyla-rs client (`net::TcpStream`) connects + round-trips.
+
+**Server (NEW, W4-F8):**
+- [ ] A native libthyla-rs **echo server** (`net::TcpListener`, the §4 server
+      lifecycle) accepts ≥2 concurrent connections and echoes correctly.
+- [ ] The **Loom-multishot accept loop** (§12.1) accepts a stream of inbound
+      connections (the async server path proven, not just blocking accept).
+- [ ] A ported server (sshd-server or a Pouch echo server) accepts a connection
+      (the socket-compat `listen`/`accept` path, §7).
+
+**Soak (NEW, W4-F8):**
+- [ ] A sustained-throughput soak: N connections × M seconds of bidirectional
+      traffic, asserting **no fd/connection/Burrow leak** (the connection table
+      returns to baseline) and no corruption — run under the SMP gate
+      (default+UBSan × smp4/smp8).
+
+**Posture:**
+- [ ] No regressions in Utopia.
+- [ ] No P0/P1 audit findings on the reserved surfaces (§15.2).
+
+---
+
+## 17. Sub-chunk phasing
+
+The net arc splits into focused, independently-landable sub-chunks (each with
+its own status row + audit where audit-bearing):
+
+| Sub-chunk | Scope |
+|---|---|
+| **net-0** | This charter (scripture; no code). |
+| **net-1** | virtio-net RX path + the frame transport (generalize the probes to RX+TX under netd's NIC ownership). |
+| **net-2** | netd skeleton: embed smoltcp, serve `/net`, the `/net/tcp` `clone`/`connect`/`data` client path + the §3.4 fid state machine. |
+| **net-3** | server side: `announce`/`listen`/`accept` + `/net/udp` + `/net/icmp` (ping). |
+| **net-4** | naming + config: `cs`/`dns`/`ndb` (§5) + `ipconfig`/DHCP (§6). |
+| **net-5** | the socket-compat pouch boundary-line (§7) — Linux/pouch binaries reach `/net`. |
+| **net-6** | `dev9p.poll` + the readiness bridge (§12.2, reserved `net_poll.tla`); Loom-multishot accept (§12.1). |
+| **net-7** | TLS root bundle (§9) + SNTP + `SYS_CLOCK_SETTIME` (§10) + observability (`/ctl/net`, `netstat`, §11). |
+| **net-8** | exit criteria: the server + soak proofs (§16) + one focused audit over the reserved surfaces. |
+
+Sequencing note: the net arc precedes the container runner (#70) and the
+on-system toolchain (#67) in Phase 8 (ROADMAP §2.2). net-1..net-3 are the
+critical path (a working client); net-4..net-8 complete the surface.
+
+---
+
+## 18. Recorded v1.x seams (deferred, by design)
+
+- **Explicit stateful packet filter** (§8) — per-interface/per-connection
+  allow/deny rules (the `nic_router` precedent), layered on namespace
+  restriction. The v1.0 firewall is namespace-restriction (D-net-3).
+- **`cs`/`dns` as independent daemons** (§5) — the Plan 9 purity; v1.0 folds
+  them into netd. The file interface is identical, so the split is a clean
+  refactor.
+- **Per-territory stack instances** (D-net-1 rejected alternative) — if a future
+  workload needs per-component stack fault-isolation (the Genode model), the
+  shared-netd design does not preclude adding a per-territory mode behind a
+  `nic_router`-style mux. Not v1.0.
+- **IPv6 hardening, IL, raw `/net/ether0`** — smoltcp provides IPv6; the net arc
+  proves IPv4 first. IL is a deliberate non-port (§3.1). A raw frame file is a
+  netd `/net/ether0` (§13), exposed only if a use case appears.
+- **`epoll`-shaped readiness** — out at v1.0 (ARCH §11.5); `poll`/`select`
+  (§12.2) + Loom (§12.1) are the v1.0 readiness surfaces.
+
+---
+
+## 19. The #68 hole-resolution ledger
+
+Every RW-13 `#68` register finding, and where this charter closes it:
+
+| Finding | Hole | Closed by |
+|---|---|---|
+| W4-F1 | packet filter designed nowhere | §8 (namespace-restriction; explicit filter → v1.x §18) — **D-net-3** |
+| W4-F2 | socket-shim claimed vs ARCH §11.5 zero socket syscalls | §7 (pouch-userspace translation; reconciled — not kernel syscalls) — **D-net-2** |
+| W4-F3 | DNS/`cs` mechanism designed by nothing | §5 (`cs`/`dns`/`ndb`, netd-served) |
+| W4-F4 | TLS/root-cert-bundle only in an exit criterion | §9 (rustls native + baked root bundle at a canonical path) |
+| W4-F5 | network observability undesigned | §11 (per-conn status + stats + `/ctl/net` + `netstat`) |
+| W4-F6 | poll-readiness over 9P undesigned (`dev9p` no `.poll`) | §12 (Loom-multishot async + `dev9p.poll` bridge + reserved `net_poll.tla`) |
+| W4-F7 | `/net` schema + fid state machine pre-design; §9.3 waiver mis-scoped | §3 (the schema + the netd fid state machine, distinct from smoltcp) |
+| W4-F8 | exit criteria 100% client-side | §16 (server + soak criteria added) |
+| W4-F10 | IP config (DHCP/static) undesigned | §6 (`ipconfig` static + smoltcp DHCP; data-driven, not slirp-assumed) |
+| W4-F11 | NTP/clock-sync designed nowhere | §10 (SNTP client + `SYS_CLOCK_SETTIME` pull-forward) |
+| W4-F15 | virtio-net probes built; `/dev/ether0` never landed | §13 (netd owns the NIC; no `/dev/ether0`; ROADMAP:375 amended) |
+
+(W4-F9 → #64 reconciliation, already closed; W4-F12 → wait_pid_for, separate;
+W4-F13 daemon-logging → record-only; W4-F14 import/exportfs → acceptable depth,
+named in §2.)
+
+---
+
+## 20. Status
+
+- **net-0 (this charter): LANDED** — the design conversation (2026-06-15, three
+  user votes) is bound; the eleven `#68` holes are closed at design level; the
+  v1.x seams are recorded.
+- **net-1..net-8: not started.** Phase-8 work, sequenced after the LS line and
+  before the container runner (#70) per ROADMAP §2.2.
+
+The thylacine is real. So is its network — and it is, of course, a filesystem.

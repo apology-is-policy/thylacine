@@ -354,7 +354,7 @@ set; the four v1.0 scope forks were voted 2026-06-11:
 | **v1.0-pull, container keystone (D2)** | HT10.F9/HT12.W5-F1/#58, HT12.W5-F3/#66, HT10.F8/#57 | pulled forward (pre-LS) |
 | **v1.0-pull, reconciliation (#64, first emerge chunk)** | HT12.W4-F9, W1-F1..F4, W6-F1/F2, the nine-specs fossil | the doc-hygiene pass (section 2.1 authoritative) |
 | **LS line (Phase-7 completion)** | HT12.W2-F4/W3-F2/F3 -> LS-K; W6-F2/F3/F4/F5 -> LS-8; W6-F1 -> LS-7; W3-F1 -> LS-6; #69 sub-seams | re-sequenced, section 3.2 |
-| **Phase 8 (D1 net + D2 containers + D3 toolchain)** | HT12.W4-* -> #68; HT12.W5-F4/F5/F6/#70; HT12.W2-F1/#67 (NEW v1.0 scope) | section 3.3 |
+| **Phase 8 (D1 net + D2 containers + D3 toolchain)** | HT12.W4-* -> #68 (**charter `docs/NET-DESIGN.md` LANDED 2026-06-15**: closes W4-F1..F8/F10/F11/F15; 3 votes bound); HT12.W5-F4/F5/F6/#70; HT12.W2-F1/#67 (NEW v1.0 scope) | section 3.3 |
 | **Phase 9 (hardening -> rc)** | HT11 #62 budget-gating items | section 3.4 |
 | **v1.x (recorded re-entry)** | #23/#26/#28/#46/#54, union mounts, LS-9 cluster, #20 (errno, owed vote) | section 3.5 |
 | **rejected-with-rationale (H4)** | HT12.W5-F10 (seccomp non-goal), W6-F7 (mouse/OSC52 -> Halcyon), W4-F13 (daemon-logging) | record-only |

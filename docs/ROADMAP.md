@@ -95,7 +95,7 @@ When in doubt, the **execution phase** in this table is authoritative — it is 
 The thirteen-part whole-system deep review (`docs/HOLOTYPE.md`, RW-0..RW-13) closed 2026-06-11. It found the specimen **sound** (0 P0 across the tree; ~15 P1 + ~40 P2 all fixed in-arc; the three cross-cuts returned 0 soundness) and re-planned the road to a maximal-coherent v1.0. The full triage + the four voted scope decisions live in `docs/holotype/13-consolidation.md`; this subsection is the roadmap-facing summary.
 
 **The four v1.0 scope decisions (voted 2026-06-11):**
-- **D1 — Networking is IN v1.0** (Phase 8). The Plan 9 `/net`-via-`netd` shape stands; the net design pass fills the 7 holes inside section 9.1 (packet filter, DNS/`/net/cs` mechanism, `/ctl/net` observability, poll-over-9P readiness, IP config, server-side acceptance criteria, the section 9.3 spec-waiver re-scope).
+- **D1 — Networking is IN v1.0** (Phase 8). The Plan 9 `/net`-via-`netd` shape stands; the net design pass is **`docs/NET-DESIGN.md`** (the #68 charter, **LANDED 2026-06-15**) — it fills the eleven holes in section 9.1 (schema + fid state machine, DNS/`cs`, `/ctl/net` observability, poll-over-9P readiness, IP config, packet filter, TLS, NTP, server-side acceptance, the spec-waiver re-scope, the virtio-net/`/dev/ether0` reconcile) and binds three decisions: shared `netd` + namespace-narrowed views; pouch-userspace BSD-socket compat (no kernel socket syscalls); namespace-restriction firewall (explicit packet filter -> v1.x).
 - **D2 — Containers: build the tractable core** for v1.0. exec-from-namespace (route the 5 spawn variants through stalk + per-component X-search, retiring the flat `devramfs_lookup`) + the namespace-introspection substrate (Spoor name-retention so the Plan 9 `ns` tool renders) build now; **union mounts move to v1.x** (COMPARISON `✓` -> `○`, fail-loud the no-op `bind_before/after`).
 - **D3 — The on-system toolchain is IN v1.0** (NEW Phase-8 scope). clang/lld + make + git ported via Pouch; the self-hosting / build-storm (W2) story is part of v1.0. This makes VISION section 397 "no subset" + the Phase-9 "parallel make" criterion coherent — and is the single largest Phase-8 pole.
 - **D4 — Pre-rc hardening lands FIRST** (scope-independent): the 6 ms wake-preemption slice cliff fix (the latency-budget gate cannot pass without it), a production `KERNEL_TESTS=OFF` boot configuration + gated joey ladder, and the Resource/DoS floor (per-Proc page/thread/child caps — a fork/thread/memory bomb currently extincts the box).
@@ -962,7 +962,7 @@ No new formal specs. Per the 2026-05-23 spec-to-code suspension (`CLAUDE.md`), t
 - clang/lld + make + git ported via Pouch — the self-hosting / build-storm (W2) story. Cross-compile-from-host remains the primary build path; the on-system toolchain is the additive v1.0 deliverable that makes VISION §11's full-developer-expectation userland coherent (`gcc`/`make`/`git` had no phase home before this vote — HOLOTYPE RW-12 W2-F1).
 - The single largest Phase-8 pole; sequenced after the net arc + the container runner.
 
-**Network stack**:
+**Network stack** (binding design: `docs/NET-DESIGN.md` — the #68 charter, 2026-06-15; the bullets below are the index, refined there):
 - `net/` (userspace 9P server): TCP/IP stack via smoltcp Rust port.
 - VirtIO-net driver in userspace (Phase 3 deliverable, validated here under load).
 - Exposes `/net/tcp/`, `/net/udp/`, `/net/ipifc/<n>/` for compatibility with Plan 9-style network access.
@@ -983,12 +983,14 @@ No new formal specs. Per the 2026-05-23 spec-to-code suspension (`CLAUDE.md`), t
 - [ ] **Network**: `ping 1.1.1.1` works from inside Thylacine (ICMP via VirtIO-net).
 - [ ] `wget https://example.com` works from Utopia (TLS via system root cert bundle).
 - [ ] `ssh` from Thylacine to an external host works (assuming bridged QEMU networking).
+- [ ] **Server (W4-F8)**: a native `net::TcpListener` echo server accepts >=2 concurrent connections + echoes; the Loom-multishot accept loop accepts a stream; a ported `listen`/`accept` server (socket-compat) accepts a connection.
+- [ ] **Soak (W4-F8)**: N connections x M seconds bidirectional traffic — no fd/connection/Burrow leak (the table returns to baseline), no corruption, under the SMP gate.
 - [ ] No regressions in Utopia.
 - [ ] No P0/P1 audit findings.
 
 ### 9.3 Specs landing this phase
 
-None mandatory. Network protocol correctness is smoltcp's responsibility (it's been spec'd by smoltcp's authors).
+One reserved net spec: **`net_poll.tla`** (clean + `BUGGY_LOST_READY`) — the I-9 register-then-observe over the `dev9p.poll`->netd readiness wake, written before the net-6 `dev9p.poll` impl per the per-surface spec-first re-enablement (NET-DESIGN.md §12.2). Otherwise none mandatory: network protocol correctness is smoltcp's responsibility (spec'd by smoltcp's authors), and the netd fid state machine + the rest are prose-validated per the 2026-05-23 broadening (W4-F7: the §9.3 waiver is now correctly scoped — smoltcp != the netd fid machine, which is designed in NET-DESIGN.md §3.4).
 
 ### 9.4 Audit-trigger surfaces introduced or modified
 
