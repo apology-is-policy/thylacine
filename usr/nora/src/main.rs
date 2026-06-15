@@ -60,7 +60,13 @@ const MAX_DIM: u16 = 1000;
 /// How long to wait for the CPR reply before falling back. A real round-trip is
 /// sub-millisecond; this is generous headroom, paid once at launch and only in
 /// full when the terminal never answers.
-const SIZE_QUERY_TIMEOUT_MS: u32 = 50;
+// The launch CPR-probe budget. Generous enough for a hypervisor (HVF) serial
+// round-trip, which is slower + dribbled vs the local console; the deadline-based
+// probe (kaua::query) returns as soon as the reply lands, so this only bounds the
+// wait when the terminal does NOT answer (a one-time launch cost). A late reply
+// past this budget is still caught by the steady-state resize backstop
+// (bug_nora_hvf_cpr_handshake).
+const SIZE_QUERY_TIMEOUT_MS: u32 = 150;
 /// The largest file nora will load (matches the Stratum POC's 2 MiB cap and
 /// leaves headroom under the userspace heap for the editor's working set).
 const MAX_FILE: usize = 2 * 1024 * 1024;
@@ -145,15 +151,30 @@ fn run(term: &mut Terminal, src: &mut PollSource, ed: &mut Editor) -> i32 {
         // unwinds here rather than wedging.
         let mut dirty = false;
         for ev in events {
-            if let Event::Key(k) = ev {
-                ed.handle_key(k);
-                dirty = true;
-                if let Some(req) = ed.take_request() {
-                    handle_request(ed, req);
+            match ev {
+                Event::Key(k) => {
+                    ed.handle_key(k);
+                    dirty = true;
+                    if let Some(req) = ed.take_request() {
+                        handle_request(ed, req);
+                    }
+                    if ed.quit {
+                        break;
+                    }
                 }
-                if ed.quit {
-                    break;
+                // A late CPR the launch probe missed under HVF (the slow serial
+                // answered after the deadline): resize to the real console,
+                // swapping the 80x24 fallback for fullscreen + repainting
+                // (bug_nora_hvf_cpr_handshake -- the steady-state backstop).
+                Event::Resize(c, r) => {
+                    let c = c.clamp(MIN_DIM, MAX_DIM);
+                    let r = r.clamp(MIN_DIM, MAX_DIM);
+                    if (c, r) != (term.area().width, term.area().height) {
+                        term.resize(Rect::new(0, 0, c, r));
+                        dirty = true;
+                    }
                 }
+                _ => {}
             }
         }
         if ed.quit {

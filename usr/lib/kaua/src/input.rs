@@ -63,6 +63,13 @@ pub struct Parser {
     utf8: [u8; 4],
     utf8_have: usize,
     utf8_need: usize,
+    // A recognized cursor-position report (CPR) `ESC[<rows>;<cols>R` -- the
+    // launch size handshake's reply, or a LATE one that the slow/dribbled HVF
+    // serial leaked past the probe into the steady state. Surfaced as an
+    // `Event::Resize` by the source (NEVER a key), so a late reply RESIZES the
+    // app instead of mis-keying as `<digits>;<digits>R` (bug_nora_hvf_cpr_
+    // handshake). `(cols, rows)`; taken via `take_resize`.
+    resize: Option<(u16, u16)>,
 }
 
 impl Default for Parser {
@@ -81,7 +88,15 @@ impl Parser {
             utf8: [0; 4],
             utf8_have: 0,
             utf8_need: 0,
+            resize: None,
         }
+    }
+
+    /// Take a recognized cursor-position report (a resize), if `feed` just
+    /// completed one. `(cols, rows)`. The source calls this after each `feed`
+    /// and emits an `Event::Resize`; a CPR never surfaces as a key.
+    pub fn take_resize(&mut self) -> Option<(u16, u16)> {
+        self.resize.take()
     }
 
     /// Feed one byte. Returns `Some(event)` when a byte completes a key.
@@ -95,17 +110,28 @@ impl Parser {
         }
     }
 
-    /// End-of-chunk: resolve a dangling lone `ESC` to `KeyCode::Esc`, and drop a
-    /// truncated UTF-8 / CSI run (bounded, never an event). Call once after
-    /// feeding each read's bytes.
+    /// End-of-drain: resolve a dangling lone `ESC` to `KeyCode::Esc`. A
+    /// half-collected CSI/SS3/UTF-8 is RETAINED for the next poll, NOT dropped:
+    /// under a slow/dribbled console (HVF) a sequence can straddle a poll
+    /// boundary, and dropping the partial here would mis-key the tail as literal
+    /// chars (bug_nora_hvf_cpr_handshake -- the launch CPR reply split across
+    /// poll-drains). The local console delivers each sequence whole, so a
+    /// dangling CSI/SS3/UTF-8 never occurs there at drain end -- retention is
+    /// inert for it and only assembles the HVF-split case. The parser holds O(1)
+    /// state, so retaining is bounded; a real sequence completes on the next
+    /// poll's bytes. Call once per poll, after the drain's bytes.
     pub fn flush(&mut self) -> Option<KeyEvent> {
-        let pending = self.state;
-        self.reset_ground();
-        match pending {
-            State::Esc => Some(KeyEvent::new(KeyCode::Esc)),
-            // A half-collected CSI/SS3/UTF-8 at chunk end is a truncated
-            // sequence -> dropped (the local console delivers sequences whole).
-            _ => None,
+        match self.state {
+            // A lone ESC with nothing after it at the true end of the drain is a
+            // real Escape keypress (the local-console disambiguation; a split
+            // ESC-led sequence whose head arrives alone is the documented
+            // residual -- the ESC-timeout fix is a separate, larger change).
+            State::Esc => {
+                self.reset_ground();
+                Some(KeyEvent::new(KeyCode::Esc))
+            }
+            // Ground: nothing pending. Csi/Ss3/Utf8: retain across the poll.
+            State::Ground | State::Csi | State::Ss3 | State::Utf8 => None,
         }
     }
 
@@ -191,6 +217,19 @@ impl Parser {
             0x40..=0x7e => {
                 let ev = if self.csi_overflow {
                     None // malformed (too long) -> consumed, no event
+                } else if b == b'R' {
+                    // A cursor-position report `ESC[<rows>;<cols>R` -- the launch
+                    // size handshake's reply (or a late one leaked into the
+                    // steady state). Recognize it as a RESIZE, never a key: the
+                    // params are <rows>;<cols>, so (cols, rows) = (n2, n1). A
+                    // non-CPR `R` (no two non-zero params) is just consumed.
+                    let (n1, n2) = parse_two(&self.csi[..self.csi_len]);
+                    if let (Some(rows), Some(cols)) = (n1, n2) {
+                        if rows > 0 && cols > 0 {
+                            self.resize = Some((cols, rows));
+                        }
+                    }
+                    None
                 } else {
                     dispatch_csi(&self.csi[..self.csi_len], b)
                 };
@@ -284,8 +323,10 @@ fn ascii_key(b: u8) -> Option<KeyEvent> {
 
 /// Decode a complete CSI: `params` is the bytes between `ESC[` and the final
 /// `b` (a final in 0x40..=0x7e). Recognizes arrows, navigation, `~`-keys,
-/// BackTab, and modifier params; consumes-without-event for anything unknown
-/// (including a cursor-position report `R`, so it never surfaces as a key).
+/// BackTab, and modifier params; consumes-without-event for anything unknown.
+/// The cursor-position report (`R`) is intercepted in `feed_csi` BEFORE this
+/// (it becomes a resize, not a key), so `R` never reaches here; the trailing
+/// `_ => None` would consume it harmlessly even if it did.
 fn dispatch_csi(params: &[u8], final_byte: u8) -> Option<KeyEvent> {
     let (n1, n2) = parse_two(params);
 
@@ -525,9 +566,44 @@ mod tests {
     }
 
     #[test]
-    fn cursor_position_report_is_consumed_not_a_key() {
-        // ESC[24;80R (a CPR) must not surface as a bogus key.
+    fn cursor_position_report_is_a_resize_not_a_key() {
+        // ESC[24;80R (a CPR) must not surface as a bogus key -- it is recognized
+        // as a resize (cols, rows) = (80, 24) and taken via take_resize.
+        let mut p = Parser::new();
+        for &b in b"\x1b[24;80R" {
+            assert_eq!(p.feed(b), None, "no CPR byte is a key");
+        }
+        assert_eq!(p.take_resize(), Some((80, 24)));
+        assert_eq!(p.take_resize(), None, "taken once, then cleared");
+        // The keys-only run() helper sees nothing.
         assert!(run(b"\x1b[24;80R").is_empty());
+    }
+
+    #[test]
+    fn split_cpr_across_flush_assembles_as_resize() {
+        // The launch CPR reply split across poll-drains by the slow/dribbled HVF
+        // serial: `ESC[` drains, the poll goes dry (flush), then `24;80R` drains.
+        // With flush-RETENTION the partial CSI survives and completes as a
+        // resize -- NO phantom keys (bug_nora_hvf_cpr_handshake).
+        let mut p = Parser::new();
+        assert_eq!(p.feed(0x1b), None);
+        assert_eq!(p.feed(b'['), None);
+        assert_eq!(p.flush(), None); // dry mid-sequence: retain, do not drop
+        for &b in b"24;80R" {
+            assert_eq!(p.feed(b), None, "no tail byte is a phantom key");
+        }
+        assert_eq!(p.take_resize(), Some((80, 24)));
+    }
+
+    #[test]
+    fn non_cpr_r_final_is_consumed_not_a_resize() {
+        // An `R` with no two non-zero params is a plain unknown CSI final --
+        // consumed, no key AND no resize.
+        let mut p = Parser::new();
+        for &b in b"\x1b[R" {
+            let _ = p.feed(b);
+        }
+        assert_eq!(p.take_resize(), None);
     }
 
     #[test]
@@ -628,19 +704,25 @@ mod tests {
         assert_eq!(k, Some(KeyEvent::new(KeyCode::Up)));
         assert_eq!(p.flush(), None); // dry: nothing dangling
 
-        // And the bug the deferral avoids, in BOTH split positions:
-        // (a) split after `ESC[` -- a premature flush DROPS the partial CSI (the
-        //     arrow is destroyed) and the tail `A` then mis-keys as a literal char.
+        // Flush-RETENTION now also survives a PREMATURE flush mid-CSI (the
+        // HVF-split case the drain's deferral cannot cover when the poll goes dry
+        // mid-sequence -- bug_nora_hvf_cpr_handshake):
+        // (a) split after `ESC[` -- the premature flush KEEPS the partial CSI, so
+        //     the tail `A` completes the arrow instead of mis-keying as a char.
         let mut q = Parser::new();
         assert_eq!(q.feed(0x1b), None);
         assert_eq!(q.feed(b'['), None);
-        assert_eq!(q.flush(), None); // partial CSI dropped (premature!)
-        assert_eq!(q.feed(b'A'), Some(KeyEvent::char('A')));
-        // (b) split after the lone `ESC` -- a premature flush emits a SPURIOUS Esc
-        //     and the tail `[A` then parses as two literal chars.
+        assert_eq!(q.flush(), None); // retains the partial CSI (NOT dropped)
+        assert_eq!(q.feed(b'A'), Some(KeyEvent::new(KeyCode::Up))); // completes it
+        // (b) split after the lone `ESC` is the DOCUMENTED RESIDUAL: a dangling
+        //     lone ESC still resolves to a (possibly spurious) Escape, because it
+        //     is indistinguishable from a real Escape keypress without an
+        //     ESC-timeout (a separate, larger change). The CPR/arrow leak this
+        //     bug is about splits AFTER `ESC[`, which (a) covers; a split AT the
+        //     ESC is rare (ESC and `[` are adjacent in the reply burst).
         let mut r = Parser::new();
         assert_eq!(r.feed(0x1b), None);
-        assert_eq!(r.flush(), Some(KeyEvent::new(KeyCode::Esc))); // spurious!
+        assert_eq!(r.flush(), Some(KeyEvent::new(KeyCode::Esc))); // residual
         assert_eq!(r.feed(b'['), Some(KeyEvent::char('[')));
         assert_eq!(r.feed(b'A'), Some(KeyEvent::char('A')));
     }

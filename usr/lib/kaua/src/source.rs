@@ -100,6 +100,9 @@ impl EventSource for PollSource {
                 if let Some(e) = self.parser.feed(b) {
                     out.push(Event::Key(e));
                 }
+                if let Some((c, r)) = self.parser.take_resize() {
+                    out.push(Event::Resize(c, r));
+                }
             }
         }
 
@@ -142,6 +145,12 @@ impl EventSource for PollSource {
             for &b in &self.inbuf[..n] {
                 if let Some(e) = self.parser.feed(b) {
                     out.push(Event::Key(e));
+                }
+                // A recognized CPR (the launch size reply, or a late one the HVF
+                // serial leaked past the probe) surfaces as a resize, never a key
+                // (bug_nora_hvf_cpr_handshake).
+                if let Some((c, r)) = self.parser.take_resize() {
+                    out.push(Event::Resize(c, r));
                 }
             }
         }

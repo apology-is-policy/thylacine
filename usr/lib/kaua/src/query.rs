@@ -26,14 +26,19 @@
 // dropped. The read also STOPS at the `R` terminator, so any byte arriving after
 // the reply stays in the kernel ring for the PollSource. Nothing is lost.
 //
-// BOUNDED (the #117-audit F1 fix): the FIRST poll waits the full `timeout_ms`
-// (the reply may not have started); once a byte has arrived the rest of the
-// reply is already in the ring (the local console delivers a logical input in
-// one drain, KAUA.md 3.5), so subsequent polls are non-blocking -- the TOTAL
-// wait is ~timeout_ms regardless of byte cadence (a dribbling peer cannot
-// multiply the budget by CPR_BUF_CAP). A reply split across ring drains by a
-// non-local terminal simply falls back to the default. The staging buffer is a
-// fixed `[u8; 32]`; the poll + read are #811 death-interruptible.
+// BOUNDED (the #117-audit F1 fix, hardened for HVF): a TOTAL deadline bounds the
+// probe -- it polls the REMAINING budget for each byte, so a slow/dribbled reply
+// (the HVF serial round-trip; the ring empties BETWEEN reply bytes, not a
+// one-drain delivery) is still assembled within `timeout_ms`, while a dribbling
+// peer cannot multiply the budget by CPR_BUF_CAP (the TOTAL wait is
+// <= timeout_ms regardless of byte cadence). The earlier first-poll-then-Zero
+// assumed one-drain delivery (true for the local console, KAUA.md 3.5) and gave
+// up the instant the ring went empty mid-reply under HVF -- fallback size + a
+// late reply leaking into the steady state (bug_nora_hvf_cpr_handshake). A reply
+// slower than the whole budget falls back here, but the steady-state parser
+// recognizes a LATER CPR as a resize (the backstop), so the size still arrives
+// and never mis-keys. The staging buffer is a fixed `[u8; 32]`; the poll + read
+// are #811 death-interruptible.
 
 /// Largest reply we stage before giving up. A CPR reply is `ESC[` + <=5 rows
 /// digits + `;` + <=5 cols digits + `R` = at most 14 bytes; 32 tolerates minor
@@ -162,6 +167,7 @@ pub fn terminal_size(timeout_ms: u32) -> ProbeResult {
 fn read_cpr(timeout_ms: u32) -> ProbeResult {
     use libthyla_rs::io::{stdin, Read};
     use libthyla_rs::poll::{PollEvents, PollSet, PollTimeout};
+    use libthyla_rs::time::{Duration, Instant};
 
     let mut poll = PollSet::new();
     let mut inp = stdin();
@@ -169,17 +175,28 @@ fn read_cpr(timeout_ms: u32) -> ProbeResult {
 
     let mut buf = [0u8; CPR_BUF_CAP];
     let mut len = 0usize;
-    let mut first = true;
-    // The loop bound == the buffer bound, so each `buf[len]` write is in range
-    // and a reply with no `R` terminates by falling through to the None return.
+    // A TOTAL deadline, not a first-byte timeout (the #117-F1 fix, hardened for
+    // HVF): poll the REMAINING budget for EACH byte. Under a hypervisor the
+    // serial round-trip (fd 1 -> HVF serial -> host TTY -> fd 0) is slow and
+    // DRIBBLED -- the kernel ring is momentarily empty BETWEEN reply bytes, not
+    // a one-drain delivery -- so the old first-poll-then-Zero gave up the instant
+    // the ring went empty mid-reply (-> fallback size + a late reply leaking into
+    // the steady state as phantom keys; bug_nora_hvf_cpr_handshake). The deadline
+    // keeps polling within the budget so a dribbled reply is assembled, while the
+    // F1 anti-dribble bound still holds: the TOTAL wait is <= timeout_ms
+    // regardless of byte cadence (a slow peer cannot multiply the budget by
+    // CPR_BUF_CAP). The loop bound == the buffer bound, so each `buf[len]` write
+    // is in range and a reply with no `R` falls through to the None return.
+    let start = Instant::now();
+    let budget = Duration::from_millis(timeout_ms as u64);
     while len < CPR_BUF_CAP {
-        let to = if first {
-            PollTimeout::Millis(timeout_ms)
-        } else {
-            PollTimeout::Zero
-        };
+        let elapsed = start.elapsed();
+        if elapsed >= budget {
+            break; // the total budget is spent
+        }
+        let remaining_ms = (budget - elapsed).as_millis().min(u32::MAX as u128) as u32;
         let mut readable = false;
-        match poll.poll(to) {
+        match poll.poll(PollTimeout::Millis(remaining_ms.max(1))) {
             Ok(results) => {
                 for ev in results {
                     if ev.fd == 0 && ev.is_readable() {
@@ -189,13 +206,12 @@ fn read_cpr(timeout_ms: u32) -> ProbeResult {
             }
             Err(_) => break,
         }
-        // Not readable: the deadline elapsed (no reply / an incomplete split
+        // Not readable: the remaining budget elapsed with no further byte (no
         // reply / a bare HUP) -> stop. Reading on `readable` even when HUP is
         // co-reported (F3) drains a fully-buffered reply before honoring a HUP.
         if !readable {
             break;
         }
-        first = false;
         let mut b = [0u8; 1];
         match inp.read(&mut b) {
             Ok(0) => break, // EOF
@@ -210,13 +226,16 @@ fn read_cpr(timeout_ms: u32) -> ProbeResult {
                         };
                     }
                     // An 'R' that does not complete a CPR (a stray keystroke):
-                    // keep reading for the real reply.
+                    // keep reading for the real reply within the budget.
                 }
             }
             Err(_) => break,
         }
     }
-    // No usable reply: every byte read is type-ahead to preserve.
+    // No usable reply: every byte read is type-ahead to preserve. The
+    // steady-state parser also recognizes a LATER CPR as a resize (the backstop),
+    // so even a reply slower than the whole budget still fixes the size + never
+    // mis-keys (bug_nora_hvf_cpr_handshake).
     ProbeResult {
         size: None,
         pending: buf[..len].to_vec(),
