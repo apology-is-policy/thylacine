@@ -44,6 +44,8 @@ void test_9p_client_op_before_handshake_returns_ebusy(void);
 void test_9p_client_lock_released_between_ops(void);
 void test_9p_client_async_op_posts_cqe(void);
 void test_9p_client_async_session_death_posts_error_cqe(void);
+void test_9p_client_async_peer_gone_posts_nodev_cqe(void);
+void test_9p_client_async_mark_devgone_posts_nodev_cqe(void);
 void test_9p_client_async_handoff_skips_async(void);
 void test_9p_client_pump_deadline_idle(void);
 void test_9p_client_pump_deadline_data_ready_progresses(void);
@@ -750,18 +752,106 @@ void test_9p_client_async_session_death_posts_error_cqe(void) {
     TEST_EXPECT_EQ(rc, 0, "submit_async succeeds (op in flight)");
     TEST_ASSERT(!g_async_op.completed, "not yet completed");
 
-    // Break the transport: destroy clears the loopback magic, so the next recv
-    // returns -1 -> the reader marks the session dead -> the in-flight async op
-    // completes with -EIO (no staged reply is consumed).
+    // The TRANSPORT-ERROR death leg (MENAGERIE.md section 10): destroy closes the
+    // loopback, so the next recv returns -1 (an error, NOT a clean EOF) -> the
+    // reader marks the session dead with the TRANSPORT reason -> the in-flight
+    // async op completes with the generic -EIO. (The device-gone leg, a clean
+    // peer-gone EOF, is the two tests below; they yield -ENODEV.)
     p9_loopback_destroy(&g_loopback);
     int pumped = p9_client_reader_pump_once(&g_client);
     TEST_EXPECT_EQ(pumped, -P9_E_IO, "pump sees the dead transport");
     TEST_ASSERT(g_async_op.completed, "async op completed on session death");
     TEST_EXPECT_EQ((u64)(s64)g_async_op.last_result, (u64)(s64)(-P9_E_IO),
-                    "error CQE result = -EIO");
+                    "transport-error CQE result = -EIO (not device-gone)");
     TEST_EXPECT_EQ((u64)h->cq_tail, (u64)1, "exactly one (error) CQE posted");
 
     p9_client_destroy(&g_client);   // loopback already destroyed
+    loom_unref(l);
+}
+
+// Device-gone leg 1 (MENAGERIE.md section 10): a PEER-GONE EOF -- the server /
+// driver endpoint closed cleanly (recv 0), the automatic path a DeviceRemoved
+// drives -- completes the in-flight async op with the device-gone -ENODEV
+// terminal CQE, distinct from the transport -EIO above. force_eof drops the
+// staged reply WITHOUT closing the transport, so the next recv returns 0.
+void test_9p_client_async_peer_gone_posts_nodev_cqe(void) {
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create(8,16)");
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    drive_client_open(&g_client, &g_loopback);
+    p9_client_walk_one(&g_client, 0, 23, (const u8 *)"f", 1, NULL);
+
+    g_async_op.loom        = l;
+    g_async_op.user_data   = 0xD00DFEED;
+    g_async_op.last_result = 0x7fffffff;
+    g_async_op.completed   = false;
+    g_async_op.rpc.on_complete = test_async_on_complete;
+
+    u32 fid = 23;
+    int rc = p9_client_submit_async(&g_client, &g_async_op.rpc, test_build_clunk, &fid);
+    TEST_EXPECT_EQ(rc, 0, "submit_async succeeds (op in flight)");
+    TEST_ASSERT(!g_async_op.completed, "not yet completed");
+
+    // The server endpoint vanishes cleanly: drop the staged reply so the pump's
+    // recv returns 0 (a clean EOF = peer gone), NOT -1 (an error). The reader
+    // classifies this device-gone -> the op gets a -ENODEV CQE.
+    p9_loopback_force_eof(&g_loopback);
+    int pumped = p9_client_reader_pump_once(&g_client);
+    TEST_EXPECT_EQ(pumped, -P9_E_IO, "pump returns DEAD (a control signal)");
+    TEST_ASSERT(g_async_op.completed, "async op completed on the peer-gone EOF");
+    TEST_EXPECT_EQ((u64)(s64)g_async_op.last_result, (u64)(s64)(-P9_E_NODEV),
+                    "device-gone CQE result = -ENODEV (not -EIO)");
+    TEST_EXPECT_EQ((u64)h->cq_tail, (u64)1, "exactly one (device-gone) CQE posted");
+    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)(s64)(-P9_E_NODEV),
+                    "the posted CQE carries -ENODEV");
+
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+    loom_unref(l);
+}
+
+// Device-gone leg 2 (MENAGERIE.md section 10): the EXPLICIT entry point. A holder
+// of the client (a device-teardown / warden-removal hook) calls
+// p9_client_mark_devgone to proactively fail every in-flight async op with the
+// device-gone -ENODEV terminal -- no transport interaction, fully deterministic.
+void test_9p_client_async_mark_devgone_posts_nodev_cqe(void) {
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create(8,16)");
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    drive_client_open(&g_client, &g_loopback);
+    p9_client_walk_one(&g_client, 0, 24, (const u8 *)"f", 1, NULL);
+
+    g_async_op.loom        = l;
+    g_async_op.user_data   = 0xFEEDFACE;
+    g_async_op.last_result = 0x7fffffff;
+    g_async_op.completed   = false;
+    g_async_op.rpc.on_complete = test_async_on_complete;
+
+    u32 fid = 24;
+    int rc = p9_client_submit_async(&g_client, &g_async_op.rpc, test_build_clunk, &fid);
+    TEST_EXPECT_EQ(rc, 0, "submit_async succeeds (op in flight)");
+    TEST_ASSERT(!g_async_op.completed, "not yet completed");
+
+    // The explicit device-gone mark: complete the in-flight op NOW with -ENODEV.
+    p9_client_mark_devgone(&g_client);
+    TEST_ASSERT(g_async_op.completed, "mark_devgone completed the in-flight op");
+    TEST_EXPECT_EQ((u64)(s64)g_async_op.last_result, (u64)(s64)(-P9_E_NODEV),
+                    "explicit mark_devgone -> -ENODEV CQE");
+    TEST_EXPECT_EQ((u64)h->cq_tail, (u64)1, "exactly one CQE posted");
+    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)(s64)(-P9_E_NODEV),
+                    "the posted CQE carries -ENODEV");
+
+    // Idempotent: a second mark on the already-dead session is a no-op (the
+    // in-flight slot was cleared), so no second CQE is posted.
+    p9_client_mark_devgone(&g_client);
+    TEST_EXPECT_EQ((u64)h->cq_tail, (u64)1, "mark_devgone idempotent -- still one CQE");
+
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
     loom_unref(l);
 }
 

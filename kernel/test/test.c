@@ -738,6 +738,8 @@ void test_9p_client_op_before_handshake_returns_ebusy(void);
 void test_9p_client_lock_released_between_ops(void);
 void test_9p_client_async_op_posts_cqe(void);
 void test_9p_client_async_session_death_posts_error_cqe(void);
+void test_9p_client_async_peer_gone_posts_nodev_cqe(void);
+void test_9p_client_async_mark_devgone_posts_nodev_cqe(void);
 void test_9p_client_async_handoff_skips_async(void);
 void test_9p_client_pump_deadline_idle(void);
 void test_9p_client_pump_deadline_data_ready_progresses(void);
@@ -1858,6 +1860,12 @@ struct test_case g_tests[] = {
     { "9p_client.async_op_posts_cqe",  test_9p_client_async_op_posts_cqe,  false, NULL },
     { "9p_client.async_session_death_posts_error_cqe",
                                        test_9p_client_async_session_death_posts_error_cqe,
+                                                                           false, NULL },
+    { "9p_client.async_peer_gone_posts_nodev_cqe",
+                                       test_9p_client_async_peer_gone_posts_nodev_cqe,
+                                                                           false, NULL },
+    { "9p_client.async_mark_devgone_posts_nodev_cqe",
+                                       test_9p_client_async_mark_devgone_posts_nodev_cqe,
                                                                            false, NULL },
     { "9p_client.async_handoff_skips_async",
                                        test_9p_client_async_handoff_skips_async,

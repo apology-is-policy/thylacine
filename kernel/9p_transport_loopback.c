@@ -47,6 +47,15 @@ void p9_loopback_set_chunk_size(struct p9_loopback *lb, size_t chunk_size) {
     lb->chunk_size = chunk_size;
 }
 
+void p9_loopback_force_eof(struct p9_loopback *lb) {
+    if (!lb) return;
+    if (lb->magic != P9_LOOPBACK_MAGIC) return;
+    // Drop any staged reply so the next recv sees an empty ring and returns 0
+    // (a clean EOF = peer gone). NOT closed -> recv returns 0, not -1.
+    lb->response_len = 0;
+    lb->response_pos = 0;
+}
+
 // =============================================================================
 // Backend vtable thunks.
 //

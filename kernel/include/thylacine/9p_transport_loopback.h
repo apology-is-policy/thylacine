@@ -78,6 +78,14 @@ void p9_loopback_destroy(struct p9_loopback *lb);
 // 0 = no limit. Used by partial-read tests.
 void p9_loopback_set_chunk_size(struct p9_loopback *lb, size_t chunk_size);
 
+// Clear any staged-but-unread response WITHOUT closing the transport: the next
+// recv finds an empty ring and returns 0 = a CLEAN EOF (the peer/server endpoint
+// closed cleanly). The peer-gone simulator -- distinct from p9_loopback_destroy,
+// which closes the transport so recv returns -1 = a transport ERROR. The two map
+// to the 9P client's two death reasons (clean EOF -> device-gone -P9_E_NODEV; an
+// error -> generic -P9_E_IO). Tests the MENAGERIE.md section-10 device-gone leg.
+void p9_loopback_force_eof(struct p9_loopback *lb);
+
 // Build a transport_ops vtable that delegates to this loopback.
 struct p9_transport_ops p9_loopback_ops_for(struct p9_loopback *lb);
 

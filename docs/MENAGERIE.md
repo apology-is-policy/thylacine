@@ -626,5 +626,31 @@ early-console `chosen/stdout-path` selection is kernel.
   `docs/reference/117-allowance.md`. 912/912 PASS (+10 `allowance.*`, incl.
   `handle_alloc_revoked_aborts` = the race regression); boot OK (the broad path
   preserves the existing virtio drivers). The warden's confer-at-spawn syscall
-  wiring + the bind DB + `libdriver` are the **step-5** consumer. **Next**: the
-  Loom device-gone terminal CQE (step 4) + the warden + `libdriver` (step 5).
+  wiring + the bind DB + `libdriver` are the **step-5** consumer.
+- **2026-06-15 (the Loom device-gone terminal CQE, build-sequence step 4)**: the
+  §10 device-gone teardown landed. **Model-first** (spec-first re-enabled for the
+  Loom surface, LOOM.md §7): `specs/loom_devgone.tla` (clean + liveness + 3 buggy
+  cfgs `drops_reason` / `leaks_inflight` / `double`) was written + TLC-green FIRST,
+  then the impl -- a focused module (the `loom_multishot` / `loom_order` precedent;
+  the audited `loom.tla` + its cfgs untouched). The mechanism is a **session-death
+  reason** threaded to the terminal CQE: the transport recv already distinguishes a
+  clean EOF (`0` = the peer/server endpoint vanished = the device/service gone)
+  from an error (`< 0`), but the 9P client's reader collapsed both to `-1` and
+  always fired `-P9_E_IO`. Now `kernel/9p_client.c::reader_recv_frame` preserves
+  the EOF-vs-error split and `client_mark_dead_locked(c, devgone)` threads it: a
+  peer-gone EOF -> the device-gone `-P9_E_NODEV` terminal CQE (`T_E_NODEV` = POSIX
+  ENODEV, the §10 `T_E_DEVGONE`-class, appended to `errno.h`), a transport error ->
+  the unchanged `-P9_E_IO`. The Loom side is **unchanged** -- `loom_async_complete`
+  already propagates the status to the CQE. So the device-gone terminal falls out
+  of the SrvConn teardown for free: a driver group-terminated by a `DeviceRemoved`
+  (step 5) EOFs its consumers' rings, and their in-flight Loom ops complete with
+  `-ENODEV` -- **no warden pre-marking needed**. The explicit
+  `p9_client_mark_devgone(c)` entry point is the secondary affordance (a
+  device-teardown hook that HOLDS the client can proactively fail a doomed session;
+  the deterministic test vehicle). Only the **async** path carries the reason -- the
+  audited #841 sync surface + the boot path keep `-P9_E_IO`, zero regression.
+  915/915 PASS (+2 `9p_client.async_{peer_gone,mark_devgone}_posts_nodev_cqe`; the
+  existing `async_session_death_posts_error_cqe` re-confirms the transport-error
+  `-EIO` leg); boot OK. Reference `docs/reference/107-loom.md` (Device-gone
+  terminal). **Next**: the warden + `libdriver` bind the existing virtio drivers on
+  QEMU virt (step 5).

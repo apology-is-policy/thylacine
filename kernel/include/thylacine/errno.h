@@ -82,6 +82,19 @@
 // failure. POSIX: EIO.
 #define T_E_IO         5
 
+// No such device -- the BACKING DEVICE/SERVICE disappeared. The Loom
+// device-gone terminal CQE (MENAGERIE.md section 10, the "T_E_DEVGONE"
+// class): when an in-flight Loom op's 9P session dies because the
+// server/driver endpoint vanished (a DeviceRemoved group-terminates the
+// driver, so its served endpoint tears down and the consumer's rings
+// EOF), the op completes with -T_E_NODEV -- distinct from a generic
+// transport -T_E_IO -- so the consumer can tell "device removed" from a
+// transport hiccup. The reliable signal is the peer-gone EOF the removal
+// causes (a clean recv 0 = the server endpoint torn down), threaded to
+// the terminal CQE as the death reason. Extends I-29 (Loom completion
+// integrity) to "the backing device disappeared." POSIX: ENODEV.
+#define T_E_NODEV      19
+
 // Bad handle / fd. Use when a syscall references a handle table slot
 // that is empty, magic-corrupted, or holds the wrong KOBJ type for
 // the operation. POSIX: EBADF.
@@ -158,6 +171,7 @@ _Static_assert(T_E_OK        == 0,   "T_E_OK ABI pin");
 _Static_assert(T_E_PERM      == 1,   "T_E_PERM ABI pin (POSIX EPERM)");
 _Static_assert(T_E_NOENT     == 2,   "T_E_NOENT ABI pin (POSIX ENOENT)");
 _Static_assert(T_E_IO        == 5,   "T_E_IO ABI pin (POSIX EIO)");
+_Static_assert(T_E_NODEV     == 19,  "T_E_NODEV ABI pin (POSIX ENODEV)");
 _Static_assert(T_E_BADF      == 9,   "T_E_BADF ABI pin (POSIX EBADF)");
 _Static_assert(T_E_AGAIN     == 11,  "T_E_AGAIN ABI pin (POSIX EAGAIN)");
 _Static_assert(T_E_NOMEM     == 12,  "T_E_NOMEM ABI pin (POSIX ENOMEM)");

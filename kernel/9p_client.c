@@ -155,10 +155,18 @@ static void client_copy(u8 *dst, const u8 *src, size_t n) {
     for (size_t i = 0; i < n; i++) dst[i] = src[i];
 }
 
-// Mark the whole session dead: latch c->dead, fail every in-flight rpc with
-// -P9_E_IO, wake its waiter. Transport EOF / recv error / send failure.
-// c->lock HELD.
-static void client_mark_dead_locked(struct p9_client *c) {
+// Mark the whole session dead: latch c->dead, fail every in-flight rpc, wake
+// its waiter. Transport EOF / recv error / send failure. c->lock HELD.
+//
+// `devgone` is the death REASON (MENAGERIE.md section 10): true when the death
+// is a clean peer-gone EOF -- the server/driver endpoint vanished (recv 0 = the
+// device/service gone) -- so an in-flight ASYNC (Loom) op completes with the
+// device-gone -P9_E_NODEV terminal CQE, distinct from a generic transport -EIO.
+// Only the async (POST_CQE) path carries the reason: the sync (WAKE_RENDEZ)
+// front-end keeps its audited -P9_E_IO return (client_run's CLIENT_WAIT_DEAD),
+// so this change does not touch the #841 synchronous surface or the boot path.
+static void client_mark_dead_locked(struct p9_client *c, bool devgone) {
+    int async_status = devgone ? -P9_E_NODEV : -P9_E_IO;
     c->dead = true;
     for (u32 tag = 0; tag < P9_SESSION_MAX_OUTSTANDING; tag++) {
         struct p9_rpc *r = c->inflight[tag];
@@ -166,10 +174,10 @@ static void client_mark_dead_locked(struct p9_client *c) {
         r->dead = true;
         if (r->on_complete) {
             // Async (POST_CQE, Loom): there is no submitter to wake. Clear the
-            // slot + complete the op with an error CQE. The callback runs under
-            // c->lock and MUST NOT sleep (the seam contract in 9p_client.h).
+            // slot + complete the op with an error CQE carrying the reason. The
+            // callback runs under c->lock and MUST NOT sleep (seam contract).
             c->inflight[tag] = NULL;
-            r->on_complete(r, -P9_E_IO, NULL);
+            r->on_complete(r, async_status, NULL);
         } else {
             wakeup(&r->rendez);
         }
@@ -201,12 +209,19 @@ static void client_handoff_reader_locked(struct p9_client *c,
 // Read ONE complete 9P frame into c->transport.recv_buf, mirroring
 // 9p_transport.c::do_recv's framing (header -> peek size -> body) but calling
 // ops.recv DIRECTLY: it must NOT latch transport.state=ERROR (a death-interrupt
-// has to leave the transport reusable by the next reader). Returns the frame
-// length (>0) or -1 on EOF / truncation / malformed / death-interrupt / idle
-// deadline -- the caller calls client_self_dying() to tell a death-interrupt
-// (unwind) from a genuine error (mark dead). c->lock NOT held (this blocks);
-// the single-reader election guarantees only one thread is here at a time, so
-// the shared recv_buf is safe.
+// has to leave the transport reusable by the next reader). Returns:
+//   > 0  the frame length;
+//   0    a clean PEER-GONE EOF -- the transport recv returned 0: the server /
+//        driver endpoint torn down (the device/service vanished). The caller
+//        maps this to the device-gone death reason (MENAGERIE.md section 10);
+//   -1   a transport error / idle deadline / malformed-or-oversize frame --
+//        the generic transport death (the caller checks *idle for the idle
+//        case and client_self_dying() for a death-interrupt unwind).
+// The EOF-vs-error split is exactly the transport recv contract (0 = peer
+// closed, < 0 = error) -- before, both collapsed to -1; preserving it is what
+// lets a device-gone session post -ENODEV instead of a generic -EIO. c->lock
+// NOT held (this blocks); the single-reader election guarantees only one thread
+// is here at a time, so the shared recv_buf is safe.
 //
 // Loom-4 (LOOM.md §8.6): when `deadline_ns != 0`, the FIRST recv (the frame
 // boundary, got==0) is deadline-bounded; a timeout THERE consumes no bytes, so
@@ -233,7 +248,12 @@ static int reader_recv_frame(struct p9_client *c, u64 deadline_ns, bool *idle) {
             if (n <= 0 && idle && p9_transport_recv_timed_out(t)) *idle = true;
             p9_transport_set_recv_deadline(t, 0);
         }
-        if (n <= 0) return -1;
+        // A clean EOF (recv 0) is a peer-gone close -> the device/service is
+        // gone; a recv error / armed-deadline timeout is < 0. The idle case is
+        // < 0 + *idle set (the backends return -1 + timed_out, never 0, on a
+        // deadline), so 0 is unambiguously the peer-gone EOF.
+        if (n == 0) return 0;              // peer gone (device-gone reason)
+        if (n < 0)  return -1;             // transport error / idle deadline
         if ((size_t)n > P9_HDR_LEN - got) return -1;
         got += (size_t)n;
     }
@@ -243,7 +263,8 @@ static int reader_recv_frame(struct p9_client *c, u64 deadline_ns, bool *idle) {
     if ((size_t)size > cap) return -1;
     while (got < (size_t)size) {
         int n = t->ops.recv(t->ops.ctx, buf + got, (size_t)size - got);
-        if (n <= 0) return -1;
+        if (n == 0) return 0;              // mid-frame EOF: peer vanished mid-reply (device-gone)
+        if (n < 0)  return -1;             // transport error
         if ((size_t)n > (size_t)size - got) return -1;
         got += (size_t)n;
     }
@@ -263,13 +284,13 @@ static int reader_recv_frame(struct p9_client *c, u64 deadline_ns, bool *idle) {
 static void demux_frame_locked(struct p9_client *c, size_t len) {
     u32 size; u8 type; u16 tag;
     if (p9_peek_header(c->transport.recv_buf, len, &size, &type, &tag) < 0) {
-        client_mark_dead_locked(c);
+        client_mark_dead_locked(c, false);
         return;
     }
     if (tag >= P9_SESSION_MAX_OUTSTANDING) {
         // Steady-state replies carry tags 0..MAX-1; NOTAG (Tversion) is only on
         // the serial handshake path, never demuxed here.
-        client_mark_dead_locked(c);
+        client_mark_dead_locked(c, false);
         return;
     }
     struct p9_rpc *owner = c->inflight[tag];
@@ -296,10 +317,10 @@ static void demux_frame_locked(struct p9_client *c, size_t len) {
             // remaining in-flight op fails closed. owner may be freed by the
             // callback above; mark_dead touches only the OTHER inflight[] slots
             // (this tag was NULLed before dispatch).
-            if (drc < 0) client_mark_dead_locked(c);
+            if (drc < 0) client_mark_dead_locked(c, false);
             return;
         }
-        if (len > c->recv_cap) { client_mark_dead_locked(c); return; }  // defensive
+        if (len > c->recv_cap) { client_mark_dead_locked(c, false); return; }  // defensive
         client_copy(owner->reply_buf, c->transport.recv_buf, len);
         owner->reply_len = (int)len;
         owner->done = true;
@@ -350,7 +371,9 @@ static int client_wait(struct p9_client *c, struct p9_rpc *rpc) {
                 } else if (client_self_dying()) {
                     break;                              // death-interrupt: unwind
                 } else {
-                    client_mark_dead_locked(c);         // EOF / error: session gone
+                    // rr == 0 (clean EOF = peer/server endpoint gone) -> device-
+                    // gone; rr < 0 (recv error / malformed) -> transport.
+                    client_mark_dead_locked(c, rr == 0);
                 }
             }
             c->reader_active = false;
@@ -423,7 +446,7 @@ static int client_run(struct p9_client *c, size_t built_len,
     if (src < 0) {
         c->inflight[tag] = NULL;
         kfree(rpc.reply_buf);
-        client_mark_dead_locked(c);
+        client_mark_dead_locked(c, false);
         return -P9_E_IO;
     }
 
@@ -451,7 +474,7 @@ static int client_run(struct p9_client *c, size_t built_len,
                                          sizeof(c->out_buf), (u16)tag);
         if (flen > 0) {
             if (p9_transport_send(&c->transport, c->out_buf, (size_t)flen) < 0)
-                client_mark_dead_locked(c);
+                client_mark_dead_locked(c, false);
         }
         return -P9_E_IO;
     }
@@ -477,7 +500,7 @@ static int client_run(struct p9_client *c, size_t built_len,
     // slot exhausts the 64-tag pool after <=64 such replies (a session wedge),
     // and a later well-formed reply on the still-active tag dispatches
     // ownerlessly + can spuriously mutate fid state.
-    if (drc < 0) client_mark_dead_locked(c);
+    if (drc < 0) client_mark_dead_locked(c, false);
     // Do NOT free rpc.reply_buf here: dispatch set the read/readdir/readlink
     // zero-copy aliases (out->read_data etc.) pointing INTO it, and the public
     // op copies those out AFTER this returns. Keep it as the client's
@@ -530,7 +553,7 @@ int p9_client_submit_async(struct p9_client *c, struct p9_rpc *rpc,
         // so latch the session dead -- fail closed; the orphaned outstanding tag
         // is then moot (the session is unusable) -- and complete this op. `rpc`
         // is not yet registered, so mark_dead does not double-fire it.
-        client_mark_dead_locked(c);
+        client_mark_dead_locked(c, false);
         spin_unlock(&c->lock);
         rpc->on_complete(rpc, -P9_E_IO, NULL);
         return -P9_E_IO;
@@ -548,7 +571,7 @@ int p9_client_submit_async(struct p9_client *c, struct p9_rpc *rpc,
     if (src < 0) {
         // The byte stream is broken: latch dead + complete every in-flight op.
         // `rpc` is registered, so mark_dead fires its on_complete (error CQE).
-        client_mark_dead_locked(c);
+        client_mark_dead_locked(c, false);
         spin_unlock(&c->lock);
         return -P9_E_IO;
     }
@@ -577,7 +600,9 @@ int p9_client_reader_pump_once(struct p9_client *c) {
         // session dead (it serves survivors). Unwind after handing the role on.
         ret = -P9_E_IO;
     } else {
-        client_mark_dead_locked(c);   // EOF / recv error: session gone
+        // rr == 0 (clean EOF = peer/server endpoint gone) -> device-gone
+        // (-P9_E_NODEV CQEs); rr < 0 (recv error) -> transport (-P9_E_IO).
+        client_mark_dead_locked(c, rr == 0);
         ret = -P9_E_IO;
     }
     c->reader_active = false;
@@ -622,7 +647,9 @@ int p9_client_reader_pump_once_deadline(struct p9_client *c, u64 deadline_ns) {
         // session dead (it serves survivors). Unwind after handing the role on.
         ret = P9_PUMP_DEAD;
     } else {
-        client_mark_dead_locked(c);   // EOF / recv error: session gone
+        // rr == 0 (clean EOF = peer/server endpoint gone) -> device-gone
+        // (-P9_E_NODEV CQEs); rr < 0 (recv error) -> transport (-P9_E_IO).
+        client_mark_dead_locked(c, rr == 0);
         ret = P9_PUMP_DEAD;
     }
     c->reader_active = false;
@@ -677,10 +704,25 @@ void p9_client_abandon_async(struct p9_client *c, struct p9_rpc *rpc) {
                                              sizeof(c->out_buf), tag);
             if (flen > 0) {
                 if (p9_transport_send(&c->transport, c->out_buf, (size_t)flen) < 0)
-                    client_mark_dead_locked(c);
+                    client_mark_dead_locked(c, false);
             }
         }
     }
+    spin_unlock(&c->lock);
+}
+
+// Mark the session DEVICE-GONE (MENAGERIE.md section 10): the explicit entry
+// point for a holder of the client (a device-teardown / warden-removal hook)
+// to proactively fail every in-flight ASYNC (Loom) op with a -P9_E_NODEV
+// terminal CQE. Idempotent: on an already-dead session the in-flight slots are
+// cleared, so the mark_dead loop is a no-op (the FIRST death's reason stands).
+// The AUTOMATIC path -- a peer-gone EOF the reader classifies device-gone --
+// needs no caller, so a driver group-terminated by a DeviceRemoved already
+// yields device-gone CQEs without this.
+void p9_client_mark_devgone(struct p9_client *c) {
+    if (!c || c->magic != P9_CLIENT_MAGIC) return;
+    spin_lock(&c->lock);
+    client_mark_dead_locked(c, true);
     spin_unlock(&c->lock);
 }
 

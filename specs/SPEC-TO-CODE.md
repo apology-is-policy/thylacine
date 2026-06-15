@@ -1109,3 +1109,35 @@ Pre-commit gate: `allowance.cfg` clean GREEN + the 4 buggy cfgs
 / `allowance_buggy_revoke_leak` / `allowance_buggy_confer_widen` /
 `allowance_buggy_self_widen`) confirmed failing on any change to the gate
 protocol, the confer/revoke path, or the clone-inherit.
+
+## loom_devgone.tla — Menagerie build-arc 4 (the Loom device-gone terminal CQE; spec-first re-enabled, model-first)
+
+The I-29 device-gone extension (MENAGERIE.md §10): a 9P session death completes
+every in-flight Loom op with a reason-tagged terminal CQE -- a backing-device-gone
+session (a clean peer-gone EOF) yields the device-gone `-P9_E_NODEV` terminal,
+distinct from a generic transport `-P9_E_IO`. A FOCUSED module (the
+`loom_multishot` / `loom_order` precedent; the audited `loom.tla` core untouched --
+`loom.tla`'s `Teardown` is the RING destroy [abandon, no CQE], this is the
+orthogonal SESSION death [complete WITH a reason-tagged CQE]). Written + TLC-green
+BEFORE the impl (spec `6db71fa`).
+
+| Spec action | Code site | Invariant pinned |
+|---|---|---|
+| `Admit(o)` | `kernel/loom.c::loom_submit_one` -> `p9_client_submit_async` (an async op goes in-flight) | (the op holds a tag; only on a live session) |
+| `ReplyComplete(o)` | `kernel/9p_client.c::demux_frame_locked` -> `loom_async_complete` -> `loom_post_cqe` (the #841 demux + the CQE post, one `c->lock` step) | (the ok terminal) |
+| `SessionDies(devgone)` | `kernel/9p_client.c::client_mark_dead_locked(c, true)` (each in-flight async op `on_complete(-P9_E_NODEV)`) -- reached automatically via `reader_recv_frame` returning `0` (peer-gone EOF) at the 3 reader sites, or explicitly via `p9_client_mark_devgone` | DeathResultFaithful (the devgone reason -> `err_devgone`), SessionDeathCompletes (no op left in-flight) |
+| `SessionDies(transport)` | `client_mark_dead_locked(c, false)` (the existing ~8 protocol/error sites + `reader_recv_frame` returning `-1`) | DeathResultFaithful (a transport death -> `err_transport`, the unchanged `-EIO`) |
+| `LateReply(o)` (buggy double) | the impl forecloses it: `demux_frame_locked` clears `inflight[tag]` BEFORE completing, so a late reply on a death-completed op dispatches OWNERLESS (no 2nd CQE) | NoDoubleTerminal |
+| `Reap(o)` | userspace advances `cq_head` | (drains the CQ) |
+
+Invariants: DeathResultFaithful (the headline -- a death-completed op carries its
+session's reason), SessionDeathCompletes (the §10 no-hang), NoDoubleTerminal (the
+reply-vs-death race), DevgoneOnlyFromDevgoneSession, ResultSetIffTerminal,
+ViaDeathImpliesDead + the `EventuallyTerminates` liveness witness.
+
+Pre-commit gate: `loom_devgone.cfg` clean GREEN + `loom_devgone_liveness.cfg` +
+the 3 buggy cfgs (`loom_devgone_buggy_drops_reason` [-> DeathResultFaithful: the
+pre-step-4 behavior masking devgone] / `loom_devgone_buggy_leaks_inflight` [->
+SessionDeathCompletes: an op hangs past removal] / `loom_devgone_buggy_double` [->
+NoDoubleTerminal]) confirmed failing on any change to the death-reason threading,
+the `reader_recv_frame` EOF-vs-error split, or the `loom_async_complete` terminal.

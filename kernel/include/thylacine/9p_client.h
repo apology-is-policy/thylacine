@@ -415,6 +415,19 @@ void p9_client_handoff_reader(struct p9_client *c);
 // reclaim). The caller must NOT touch the engine for `rpc` afterward.
 void p9_client_abandon_async(struct p9_client *c, struct p9_rpc *rpc);
 
+// Mark the whole session DEVICE-GONE (MENAGERIE.md section 10): latch it dead
+// and complete every in-flight ASYNC (Loom) op with a -P9_E_NODEV terminal CQE
+// -- the device-gone result, distinct from the generic -P9_E_IO a transport
+// error fires. The explicit entry point for a device-teardown path that HOLDS
+// the client (the dev9p layer; a warden / driver-removal hook) and wants to
+// proactively fail a doomed session. The AUTOMATIC path needs no caller: a
+// peer-gone EOF (the server endpoint torn down -- recv 0) is classified
+// device-gone by the reader, so a driver group-terminated by a DeviceRemoved
+// already yields device-gone CQEs to its consumers without this call. Idempotent
+// (a no-op on an already-dead session: its in-flight slots are cleared). Under
+// c->lock internally. NULL / magic-mismatch safe.
+void p9_client_mark_devgone(struct p9_client *c);
+
 // =============================================================================
 // Errno convention.
 //
@@ -428,6 +441,12 @@ void p9_client_abandon_async(struct p9_client *c, struct p9_rpc *rpc);
 //   -EBUSY  — session not OPEN (handshake hasn't run).
 //   -EIO    — lower-layer failure: send/recv error, frame malformed,
 //             tag pool full, fid bookkeeping conflict, etc.
+//   -ENODEV — the backing device/service disappeared: the session died
+//             because the SERVER endpoint vanished (a clean peer-gone
+//             EOF), distinct from a generic -EIO transport error. The
+//             Loom device-gone terminal (MENAGERIE.md section 10); maps
+//             to the CQE -T_E_NODEV. Only the async (POST_CQE) completion
+//             path carries it -- the sync front-end keeps -EIO.
 //   -<n>    — Rlerror surface: n = the Linux errno the server returned.
 // =============================================================================
 
@@ -435,5 +454,6 @@ void p9_client_abandon_async(struct p9_client *c, struct p9_rpc *rpc);
 #define P9_E_INVAL   22       // EINVAL
 #define P9_E_BUSY    16       // EBUSY
 #define P9_E_IO       5       // EIO
+#define P9_E_NODEV   19       // ENODEV (the device-gone terminal; T_E_NODEV)
 
 #endif  // THYLACINE_9P_CLIENT_H

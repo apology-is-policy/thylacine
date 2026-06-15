@@ -238,9 +238,11 @@ branch on `on_complete`:
   state, as `client_run` does for a sync op), `map_error`, then `on_complete`
   with the result + the dispatch result (`dr` aliases the recv buffer, valid
   only for the callback). Sync → the existing copy-into-`reply_buf` + `wakeup`.
-- **`client_mark_dead_locked`** (transport EOF / error): async → clear
-  `inflight[tag]` + `on_complete(rpc, -P9_E_IO, NULL)` (an error CQE — there is
-  no rendez to wake). Sync → `dead = true` + `wakeup`.
+- **`client_mark_dead_locked(c, devgone)`** (session death): async → clear
+  `inflight[tag]` + `on_complete(rpc, devgone ? -P9_E_NODEV : -P9_E_IO, NULL)`
+  (an error CQE — there is no rendez to wake). Sync → `dead = true` + `wakeup`
+  (the sync front-end keeps `-P9_E_IO`; the reason is async-only). The `devgone`
+  reason carries the **device-gone terminal** (below).
 - **`client_handoff_reader_locked`**: **skips** async ops as handoff targets —
   an async op has no thread to run the reader loop. Its reply is demuxed by the
   reap caller (`p9_client_reader_pump_once` / `SYS_LOOM_ENTER` / SQPOLL),
@@ -285,6 +287,56 @@ Lock order: `c->lock → l->lock` (the only direction; `loom.c` never calls into
 `p9_client_*`, so it is acyclic). The Loom-3 reap sweep + quiesce respect it: the
 reap takes only `l->lock`; the quiesce releases the loom list lock-free (at
 refcount 0) before taking each op's `c->lock` via `p9_client_abandon_async`.
+
+### The device-gone terminal (Menagerie build-arc step 4; `specs/loom_devgone.tla`)
+
+When the backing 9P session of an in-flight Loom op dies, the op completes with a
+terminal CQE — it never hangs. That was already true (`client_mark_dead_locked`
+fires every in-flight async op's `on_complete`). Step 4 (MENAGERIE.md §10) adds
+the missing distinction: a session that died because the **server/driver endpoint
+vanished** (the backing *device* gone) completes its ops with the device-gone
+`-T_E_NODEV` terminal (POSIX ENODEV, the §10 `T_E_DEVGONE`-class), distinct from a
+generic transport `-T_E_IO`. This is the **I-29 device-gone extension** — a
+consumer can tell "device removed" from a transport hiccup and unwind cleanly.
+
+**The reliable signal is the peer-gone EOF the removal causes**, not a warden
+pre-marking. The transport `recv` contract already distinguishes a clean EOF
+(returns `0` — the peer/server endpoint torn down, the orderly-close convention)
+from an error (`< 0` — a recv failure / armed-deadline timeout / malformed frame).
+`reader_recv_frame` preserves it (before step 4, both collapsed to `-1`):
+
+| `reader_recv_frame` returns | cause | reason → result |
+|---|---|---|
+| `> 0` | a complete frame | (demuxed; not a death) |
+| `0` | a clean EOF (any backend's `recv` returned 0) — the peer/server endpoint vanished | **device-gone** → `-T_E_NODEV` |
+| `-1` | a recv error / idle deadline / malformed-or-oversize frame | transport → `-T_E_IO` |
+
+The three reader sites (`client_wait`'s elected-reader loop, `p9_client_reader_pump_once`,
+`p9_client_reader_pump_once_deadline`) call `client_mark_dead_locked(c, rr == 0)`.
+So a driver group-terminated by a `DeviceRemoved` (step 5) tears down its served
+endpoint → the consumer's rings EOF → its reader sees `recv 0` → its in-flight Loom
+ops complete with `-ENODEV` — **the whole chain is automatic**, no warden code on the
+consumer's client. The **Loom side is unchanged**: `loom_async_complete` already
+passes `status` through `loom_payload_result` (`(s32)status` for an error), so the
+CQE carries `-19` (ENODEV) verbatim.
+
+**`p9_client_mark_devgone(c)`** is the explicit secondary entry point: a device-
+teardown hook that *holds* the client (the dev9p layer; a future driver-removal
+path) can proactively fail every in-flight async op with `-ENODEV`. Idempotent (a
+no-op on an already-dead session — its in-flight slots were cleared, so the FIRST
+death's reason stands). It is the deterministic test vehicle too
+(`9p_client.async_mark_devgone_posts_nodev_cqe`).
+
+**Scope**: only the **async** (POST_CQE / Loom) path carries the reason. The sync
+(WAKE_RENDEZ) `p9_client_*` front-end and the boot path keep `-P9_E_IO` on every
+session death — the audited #841 synchronous surface is untouched (no regression),
+since the device-gone distinction is an I-29 (Loom-completion) property the sync
+ABI does not expose. Exactly-once is the existing discipline: the demux clears
+`inflight[tag]` *before* completing, so a reply and a death never both complete one
+op (a late reply on a death-completed op dispatches **ownerless** — discarded, no
+second CQE). The spec models this race (`BUGGY_DOUBLE_ON_DEATH` → `NoDoubleTerminal`
+counterexample); `DeathResultFaithful` pins the reason fidelity and
+`SessionDeathCompletes` the no-hang.
 
 ---
 
