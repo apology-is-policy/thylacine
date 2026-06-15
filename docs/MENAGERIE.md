@@ -590,6 +590,16 @@ early-console `chosen/stdout-path` selection is kernel.
   `readdir_cookie_contract` -- strictly-monotonic non-zero dirent cookies);
   902/902 PASS, boot OK. **Not yet mounted** (`/hw` graft = devhw-2). No new
   invariant (composes I-15); self-audit only -- the formal audit is owed at the
-  allowance (I-34) + the mount. **Next**: the hardware allowance (build-sequence
-  step 3 -- audit-bearing + SMP-race-bearing; the spec-first re-enablement for
-  `specs/allowance.tla` is a user decision).
+  allowance (I-34) + the mount.
+- **2026-06-15 (devhw-2)**: `/hw` mounted in the boot namespace. A 0555
+  SYSTEM-owned `hw` synth mount-point dir in devramfs +
+  `joey_mount_static_dev(kt, &devhw, "hw", 2)` in the kproc namespace + the
+  userspace pre-pivot `O_PATH` grab + post-pivot `MREPL` re-graft (the
+  `/srv`/`/proc`/`/dev` idiom). A boot probe (`/hw/cpus/cpu@0/reg`) proves the
+  full chain -- stalk cross-mount -> devhw reuse-`nc` walk -> property read --
+  every boot. The brittle "files + 4 synth dirs" devramfs test fixed at the
+  source (a `devramfs_synth_dir_count()` accessor; the count is now derived).
+  902/902 PASS + SMP gate 40/40 (1 ground-truth-verified timing exit: reached
+  boot OK + login prompt, 0 corruption). **Next**: the hardware allowance
+  (build-sequence step 3 -- audit-bearing + SMP-race-bearing; the spec-first
+  re-enablement for `specs/allowance.tla` is a user decision).

@@ -2604,6 +2604,27 @@ int main(void) {
         }
         t_putstr("joey: probe #66b /proc/0/ns mount-list OK\n");
     }
+    // Menagerie devhw: prove /hw is reachable + walkable through the REAL
+    // namespace -- the load-bearing path the kernel tests cannot exercise
+    // (stalk crosses the /hw mount, devhw's reuse-nc walk descends multiple
+    // levels, then a property reads end-to-end). /hw/cpus/cpu@0/reg is the
+    // cpu's MPIDR cell, present on every ARM64 DTB (QEMU virt: 4 bytes).
+    // T_OREAD (a real read -- #81 blocks byte I/O on an O_PATH handle).
+    {
+        long hf = t_open(T_WALK_OPEN_FROM_ROOT, "/hw/cpus/cpu@0/reg", 18, T_OREAD);
+        if (hf < 0) {
+            t_putstr("joey: probe devhw open /hw/cpus/cpu@0/reg FAILED\n");
+            return 1;
+        }
+        unsigned char hwbuf[16];
+        long hn = t_read(hf, hwbuf, sizeof(hwbuf));
+        (void)t_close(hf);
+        if (hn <= 0) {
+            t_putstr("joey: probe devhw read /hw/cpus/cpu@0/reg empty\n");
+            return 1;
+        }
+        t_putstr("joey: probe devhw /hw/cpus/cpu@0/reg OK (DTB inventory walkable)\n");
+    }
 #endif /* THYLA_BOOT_PROBES (pre-pivot boot-test probe ladder) */
 
     // === stratumd boot pool mount (P6-pouch-stratumd-boot sub-chunk 16b-gamma) ===
@@ -2941,6 +2962,14 @@ int main(void) {
                 t_putstr("joey: #57b pre-pivot t_open(/dev) FAILED\n");
                 return 1;
             }
+            // Menagerie devhw: /hw (devhw: the DTB hardware inventory tree).
+            // O_PATH crosses the mount, yielding the devhw root (the FDT root
+            // node), re-grafted onto the pivoted root below.
+            long hw_dev_h = t_open(T_WALK_OPEN_FROM_ROOT, "/hw", 3, T_OPATH);
+            if (hw_dev_h < 0) {
+                t_putstr("joey: devhw pre-pivot t_open(/hw) FAILED\n");
+                return 1;
+            }
 
             if (t_pivot_root(sd_attach_fd) != 0) {
                 t_putstr("joey: stratumd-boot t_pivot_root FAILED\n");
@@ -3024,6 +3053,17 @@ int main(void) {
                 }
             }
             (void)t_close(dev_dev_h);
+            // Menagerie devhw: re-establish /hw on the pivoted root (mirror /dev).
+            {
+                long mk = t_walk_create(T_WALK_OPEN_FROM_ROOT, "hw", 2, T_OREAD,
+                                        T_WALK_CREATE_DMDIR | 0755u);
+                if (mk >= 0) (void)t_close(mk);
+                if (t_mount("/hw", 3, hw_dev_h, T_MREPL) != 0) {
+                    t_putstr("joey: devhw post-pivot t_mount(/hw) FAILED\n");
+                    return 1;
+                }
+            }
+            (void)t_close(hw_dev_h);
 
             long post_fd = t_walk_open(T_WALK_OPEN_FROM_ROOT, sentinel_name,
                                         sentinel_len, T_OREAD);

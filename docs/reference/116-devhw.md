@@ -1,7 +1,7 @@
 # 116 — devhw: the DTB hardware inventory, as a walkable tree
 
-**Status**: devhw-1 landed (the Dev + the `lib/dtb.c` tree-walk API + kernel
-tests). The namespace mount (`/hw`) + boot reachability is devhw-2. The privilege
+**Status**: devhw-1 (the Dev + the `lib/dtb.c` tree-walk API + kernel tests) and
+devhw-2 (the `/hw` namespace mount + boot reachability) landed. The privilege
 layer that gates *acting* on what this tree reveals — the hardware allowance
 (invariant I-34) — is the next Menagerie build-arc chunk; devhw itself adds no
 new invariant.
@@ -242,7 +242,12 @@ allocation on the hot path; no locks (the DTB buffer is immutable post-boot).
   resolved in document order by `walk` (first match wins). FDT names make this
   effectively impossible (properties are lowercase-dashed; nodes are
   `name@addr`); it is noted, not defended.
-- **Not yet mounted.** devhw-1 registers the Dev but does not graft `/hw` into
-  the boot namespace — that is devhw-2 (the `/srv`/`/proc`/`/dev` mount idiom +
-  the post-pivot re-graft). Until then `devhw` is reachable only by the kernel
-  tests (direct `attach`/`walk`).
+- **Mounted at `/hw`** (devhw-2). joey grafts devhw onto the synthetic `/hw`
+  mount-point dir (the `/srv`/`/proc`/`/dev` idiom: a 0555 SYSTEM-owned synth
+  dir in devramfs + `joey_mount_static_dev` in the kproc boot namespace + the
+  pre-pivot `O_PATH` grab + the post-pivot `MREPL` re-graft). The boot probe
+  (`/hw/cpus/cpu@0/reg`) proves the full chain — stalk crosses the mount,
+  devhw's reuse-`nc` walk descends, a property reads — every boot. The `/hw`
+  synth mount-point is 0555 SYSTEM-owned (world-r/x), so its per-component
+  X-search passes for any principal; once crossed into devhw (`perm_enforced =
+  false`) no further X-search applies (visibility, not authority).

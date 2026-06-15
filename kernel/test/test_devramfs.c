@@ -394,7 +394,8 @@ void test_devramfs_readdir_paginates_no_dup_no_skip(void) {
     s64 off = 0;                 // start cookie
     u64 prev_last = 0;           // last cookie seen (monotonic check)
     int  count = 0;
-    bool saw_welcome = false, saw_srv = false, saw_ctl = false, saw_dev = false;
+    bool saw_welcome = false, saw_srv = false, saw_ctl = false, saw_dev = false,
+         saw_hw = false;
     bool monotonic = true, well_formed = true;
 
     for (int guard = 0; guard < 4096; guard++) {  // guard against a non-advancing bug
@@ -414,6 +415,7 @@ void test_devramfs_readdir_paginates_no_dup_no_skip(void) {
             if (name_eq(name, "srv"))     saw_srv = true;
             if (name_eq(name, "ctl"))     saw_ctl = true;
             if (name_eq(name, "dev"))     saw_dev = true;
+            if (name_eq(name, "hw"))      saw_hw = true;
             count++;
             in_run++;
             pos += len;
@@ -428,9 +430,12 @@ void test_devramfs_readdir_paginates_no_dup_no_skip(void) {
     TEST_ASSERT(saw_srv, "paginated walk still finds the 'srv' synth dir");
     TEST_ASSERT(saw_ctl, "paginated walk still finds the 'ctl' synth dir");
     TEST_ASSERT(saw_dev, "paginated walk still finds the 'dev' synth dir (#57b)");
-    // Total enumerated == files + the four synthetic dirs (srv, proc, ctl, dev).
-    TEST_EXPECT_EQ((u64)count, (u64)(devramfs_file_count() + 4),
-                   "paginated count == files + 4 synth dirs (no skip, no dup)");
+    TEST_ASSERT(saw_hw, "paginated walk still finds the 'hw' synth dir (devhw)");
+    // Total enumerated == files + the synthetic mount-point dirs. Derive the
+    // synth count (devramfs_synth_dir_count) rather than hardcode it, so adding
+    // a future synth dir does not silently break this no-skip/no-dup assertion.
+    TEST_EXPECT_EQ((u64)count, (u64)(devramfs_file_count() + devramfs_synth_dir_count()),
+                   "paginated count == files + synth dirs (no skip, no dup)");
 
     spoor_clunk(root);
 }

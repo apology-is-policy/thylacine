@@ -334,6 +334,15 @@ void joey_run(void) {
         if (joey_mount_static_dev(kt, &devdev, "dev", 3) != 0)
             extinction("joey: /dev mount (devdev) failed");
         uart_puts("  joey: /dev mounted (kernel char devices)\n");
+
+        // Menagerie devhw: graft the DTB hardware inventory at /hw (devhw: the
+        // FDT node tree as a walkable namespace -- the one discovery source the
+        // kernel provides; the warden + userspace drivers enumerate hardware
+        // here). Read-only + perm_enforced=false -> visibility, not authority
+        // (the privilege boundary is the allowance/I-34, not this tree).
+        if (joey_mount_static_dev(kt, &devhw, "hw", 2) != 0)
+            extinction("joey: /hw mount (devhw) failed");
+        uart_puts("  joey: /hw mounted (DTB hardware inventory)\n");
     }
 
     uart_puts("  joey: rforking child for /joey (");

@@ -249,6 +249,7 @@ extern struct Dev devhw;          // dc='H'  — DTB hardware inventory tree (Me
 
 // devramfs diagnostics (used by tests).
 int  devramfs_file_count(void);
+int  devramfs_synth_dir_count(void);   // count of synthetic mount-point dirs (srv/proc/ctl/dev/hw)
 bool devramfs_initialized(void);
 
 // =============================================================================

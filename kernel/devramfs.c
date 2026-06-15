@@ -84,6 +84,7 @@ static bool              g_ramfs_initialized;
 #define RAMFS_QID_SYNTH_PROC  (RAMFS_QID_SYNTH_BASE + 2ULL)   // /proc
 #define RAMFS_QID_SYNTH_CTL   (RAMFS_QID_SYNTH_BASE + 3ULL)   // /ctl
 #define RAMFS_QID_SYNTH_DEV   (RAMFS_QID_SYNTH_BASE + 4ULL)   // /dev (#57b)
+#define RAMFS_QID_SYNTH_HW    (RAMFS_QID_SYNTH_BASE + 5ULL)   // /hw (Menagerie devhw)
 
 struct ramfs_synth_dir {
     const char *name;
@@ -95,6 +96,7 @@ static const struct ramfs_synth_dir g_ramfs_synth_dirs[] = {
     { "proc", RAMFS_QID_SYNTH_PROC },
     { "ctl",  RAMFS_QID_SYNTH_CTL  },
     { "dev",  RAMFS_QID_SYNTH_DEV  },
+    { "hw",   RAMFS_QID_SYNTH_HW   },
 };
 
 static inline bool ramfs_qid_is_synth(u64 path) {
@@ -598,4 +600,6 @@ struct Dev devramfs = {
 
 // Diagnostic accessors for tests.
 int  devramfs_file_count(void)              { return g_ramfs_count; }
+int  devramfs_synth_dir_count(void)         { return (int)(sizeof(g_ramfs_synth_dirs) /
+                                                           sizeof(g_ramfs_synth_dirs[0])); }
 bool devramfs_initialized(void)             { return g_ramfs_initialized; }
