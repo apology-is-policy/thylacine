@@ -29,20 +29,15 @@
 
 extern crate alloc;
 
-use alloc::format;
-use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use libthyla_rs::fs;
 use libthyla_rs::fs::OpenOptions;
-use libthyla_rs::io::Read;
 use libthyla_rs::process::{Command, Stdio};
 use libthyla_rs::T_CAP_HW_CREATE;
 
 use libdriver::driver::to_allowance;
-use libdriver::dtb::{ARM64_ADDR_CELLS, ARM64_SIZE_CELLS, GIC_INTERRUPT_CELLS};
-use libdriver::{resolve, BoundResources, Manifest, NodeResources};
+use libdriver::{best_match, resolve, BoundResources, DiscoverySource, DtbSource, Manifest};
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
@@ -89,7 +84,9 @@ pub extern "C" fn rs_main() -> i64 {
         }
     }
 
-    let nodes = discover_hw();
+    // Discovery: the DTB source publishes the static fabric (MENAGERIE section 7).
+    // The virtio-mmio bus source -- the typed virtio:<id> nodes -- is added in 5d-2.
+    let nodes = DtbSource::new().enumerate();
     say!("warden: /hw discovered {} device nodes", nodes.len());
 
     // A per-manifest instance counter so each bound device of a driver gets a
@@ -98,7 +95,7 @@ pub extern "C" fn rs_main() -> i64 {
     let mut bound = 0u32;
     let mut up = 0u32;
 
-    for (name, node) in &nodes {
+    for node in &nodes {
         let Some(idx) = best_match(&db, node) else {
             continue;
         };
@@ -106,13 +103,18 @@ pub extern "C" fn rs_main() -> i64 {
         let grant = match resolve(&db[idx], node, inst) {
             Ok(g) => g,
             Err(e) => {
-                say!("warden: resolve {} ({}) failed {:?}", db[idx].name, name, e);
+                say!(
+                    "warden: resolve {} ({}) failed {:?}",
+                    db[idx].name,
+                    node.label,
+                    e
+                );
                 continue;
             }
         };
         instance[idx] += 1;
         bound += 1;
-        if bind_and_run(&db[idx], &grant, name) {
+        if bind_and_run(&db[idx], &grant, &node.label) {
             up += 1;
         }
     }
@@ -123,86 +125,6 @@ pub extern "C" fn rs_main() -> i64 {
     } else {
         0
     }
-}
-
-/// Enumerate `/hw` and build a `NodeResources` for each device node (a child
-/// directory that exposes a `compatible`). Top-level only -- every bindable
-/// device on the v1.0 targets (QEMU-virt, RPi4/5) is a direct child of the FDT
-/// root; descending nested buses is a v1.x refinement.
-fn discover_hw() -> Vec<(alloc::string::String, NodeResources)> {
-    let mut out = Vec::new();
-    let rd = match fs::read_dir("/hw") {
-        Ok(r) => r,
-        Err(e) => {
-            say!("warden: read_dir(/hw) failed {:?}", e);
-            return out;
-        }
-    };
-    for ent in rd {
-        let ent = match ent {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        if !ent.is_dir() {
-            continue; // skip the root-level property files (compatible, #*-cells)
-        }
-        let name = ent.file_name();
-        let node = read_node(name);
-        if !node.compatible.is_empty() {
-            out.push((name.to_string(), node));
-        }
-    }
-    out
-}
-
-/// Read a node's `compatible`/`reg`/`interrupts` property files and decode them.
-fn read_node(name: &str) -> NodeResources {
-    NodeResources::from_dtb(
-        &read_prop(name, "compatible"),
-        &read_prop(name, "reg"),
-        &read_prop(name, "interrupts"),
-        ARM64_ADDR_CELLS,
-        ARM64_SIZE_CELLS,
-        GIC_INTERRUPT_CELLS,
-    )
-}
-
-/// Read one `/hw/<node>/<prop>` property file into bytes. A missing property
-/// (the node does not have it) yields an empty buffer -- the decoder treats that
-/// as an absent axis.
-fn read_prop(node: &str, prop: &str) -> Vec<u8> {
-    let path = format!("/hw/{}/{}", node, prop);
-    let mut f = match fs::File::open(&path) {
-        Ok(f) => f,
-        Err(_) => return Vec::new(),
-    };
-    let mut buf = Vec::new();
-    if f.read_to_end(&mut buf).is_err() {
-        return Vec::new();
-    }
-    buf
-}
-
-/// Find the database manifest that binds this node at the most-specific
-/// `compatible` (the earliest entry in the node's most-specific-first list).
-/// Returns the manifest index, or `None` if no manifest binds the node.
-fn best_match(db: &[Manifest], node: &NodeResources) -> Option<usize> {
-    let mut best: Option<(usize, usize)> = None; // (db index, node-compatible position)
-    for (i, m) in db.iter().enumerate() {
-        for (pos, c) in node.compatible.iter().enumerate() {
-            if m.binds.iter().any(|b| b == c) {
-                let better = match best {
-                    None => true,
-                    Some((_, bp)) => pos < bp,
-                };
-                if better {
-                    best = Some((i, pos));
-                }
-                break; // the node's first hit is this manifest's most-specific match
-            }
-        }
-    }
-    best.map(|(i, _)| i)
 }
 
 /// Spawn the driver for a computed grant -- the confer step. Encodes the grant

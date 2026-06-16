@@ -1,0 +1,538 @@
+// The discovery-source layer -- MENAGERIE.md sections 3 + 7.
+//
+// A `DiscoverySource` owns a discovery domain (the DTB, a virtio-mmio bank, a
+// PCIe bus) and turns it into a list of typed `DeviceNode`s. The warden binds
+// each node by its IDENTITY (a `DeviceId`), never by its transport, and never
+// reads a device register itself: a bus whose device type is only knowable at
+// runtime (a virtio-mmio slot's `DeviceID`, a PCIe function's class) is
+// enumerated by ITS source, which claims the raw transport nodes and re-emits
+// **typed** children the warden binds by id. (MENAGERIE section 3: "the warden
+// binds on the identity, not the transport, and never reads a device register.")
+//
+// This module is PURE (no libthyla-rs): the `DeviceId` / `DeviceNode` types, the
+// node-record codec (the source -> warden channel), and the bind matching are
+// host-tested. The concrete `DtbSource` (which reads /hw) is feature-gated to the
+// `driver` build at the bottom of the file.
+
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
+use crate::manifest::Manifest;
+use crate::resource::{parse_irqs, parse_windows, push_hex, NodeResources};
+use crate::Error;
+
+/// The node-record wire-format version (the source -> warden channel). Bumped only
+/// on an incompatible record change; the warden rejects an unknown version
+/// (fail-closed on a source/warden build skew).
+pub const NODE_RECORD_VERSION: u32 = 1;
+
+/// A device's match identity -- the key the warden binds on. A node carries an
+/// ordered list, most-specific first. Extensible: PCIe `vid:did` and USB
+/// `vid:pid` join as those bus sources land (each a new variant + a `bus:`-prefix
+/// string form).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DeviceId {
+    /// A DTB `compatible` string (e.g. `"arm,pl061"`) -- the static-fabric identity.
+    Compatible(String),
+    /// A virtio device-id (e.g. `1` = net), from a virtio-mmio / virtio-pci bus
+    /// source. String form `"virtio:<n>"`.
+    Virtio(u16),
+}
+
+impl DeviceId {
+    /// Parse a `binds` / record identity string into a typed id. `"virtio:<n>"`
+    /// (n a u16) -> `Virtio`; anything else -> a literal `Compatible`. An
+    /// unrecognized `bus:`-style prefix therefore stays `Compatible`, so it simply
+    /// never matches a typed node -- fail-closed forward-compat (an old libdriver
+    /// does not choke on a new bus id, it just declines it). A DTB `compatible`
+    /// never contains `:`, so the typed namespace cannot collide with one.
+    pub fn parse(s: &str) -> DeviceId {
+        if let Some(rest) = s.strip_prefix("virtio:") {
+            if let Ok(n) = rest.parse::<u16>() {
+                return DeviceId::Virtio(n);
+            }
+        }
+        DeviceId::Compatible(s.to_string())
+    }
+
+    /// The canonical string form -- the inverse of `parse` for the typed variants;
+    /// the manifest `binds` form, the `BoundResources.compatible` field, and the
+    /// wire record all use it.
+    pub fn as_string(&self) -> String {
+        match self {
+            DeviceId::Compatible(s) => s.clone(),
+            DeviceId::Virtio(n) => {
+                let mut s = String::from("virtio:");
+                s.push_str(&n.to_string());
+                s
+            }
+        }
+    }
+
+    /// Does this node identity satisfy a manifest `binds` entry? The `binds` string
+    /// is parsed to a typed id and compared, so `"virtio:1"` matches `Virtio(1)`
+    /// and `"arm,pl061"` matches `Compatible("arm,pl061")`, but a raw
+    /// `Compatible("virtio,mmio")` transport node never matches a `"virtio:1"`
+    /// bind (the source re-emits the typed node the driver actually binds).
+    pub fn matches_bind(&self, bind: &str) -> bool {
+        DeviceId::parse(bind) == *self
+    }
+}
+
+/// One discovered device: its match identities (most-specific first), its physical
+/// resources, and a diagnostic label (provenance -- the /hw node name, a bus slot
+/// id). The label is never matched on; it is for logging + `/proc`-style
+/// introspection only.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceNode {
+    /// Provenance label (diagnostic only).
+    pub label: String,
+    /// Match identities, most-specific first.
+    pub ids: Vec<DeviceId>,
+    /// The node's physical resources (reg windows + wired INTIDs). For a
+    /// bus-source node `resources.compatible` is empty -- the identity is in `ids`.
+    pub resources: NodeResources,
+}
+
+impl DeviceNode {
+    /// Build a DTB-style node from a compatible list + resources (the `DtbSource`
+    /// shape -- ids are the compatibles, most-specific first).
+    pub fn from_compatible(label: &str, resources: NodeResources) -> DeviceNode {
+        let ids = resources
+            .compatible
+            .iter()
+            .map(|c| DeviceId::Compatible(c.clone()))
+            .collect();
+        DeviceNode {
+            label: label.to_string(),
+            ids,
+            resources,
+        }
+    }
+
+    /// Encode for the source -> warden channel (one line, newline-terminated by the
+    /// caller). Form:
+    ///   `v1;label=<l>;id=<id>,<id>;reg=<base>:<size>,...;intid=<hex>,...`
+    /// (numbers bare lowercase hex; `reg`/`intid` lists may be empty). Rejects a
+    /// `label` containing `;`, or an `id` containing `;`/`,` (a bus id never does;
+    /// a DTB `Compatible` can carry a comma, but DTB nodes are enumerated
+    /// IN-PROCESS by the warden's `DtbSource` and never cross this channel -- only
+    /// bus-source nodes do). Fail-closed on a delimiter, mirroring the descriptor.
+    pub fn to_record(&self) -> Result<String, Error> {
+        if self.label.contains(';') {
+            return Err(Error::BadField);
+        }
+        if self.ids.is_empty() {
+            return Err(Error::BadField);
+        }
+        let mut s = String::new();
+        s.push('v');
+        s.push_str(&NODE_RECORD_VERSION.to_string());
+        s.push_str(";label=");
+        s.push_str(&self.label);
+        s.push_str(";id=");
+        for (i, id) in self.ids.iter().enumerate() {
+            if i != 0 {
+                s.push(',');
+            }
+            let ids = id.as_string();
+            if ids.contains(';') || ids.contains(',') {
+                return Err(Error::BadField);
+            }
+            s.push_str(&ids);
+        }
+        s.push_str(";reg=");
+        for (i, (base, size)) in self.resources.reg.iter().enumerate() {
+            if i != 0 {
+                s.push(',');
+            }
+            push_hex(&mut s, *base);
+            s.push(':');
+            push_hex(&mut s, *size);
+        }
+        s.push_str(";intid=");
+        for (i, intid) in self.resources.interrupts.iter().enumerate() {
+            if i != 0 {
+                s.push(',');
+            }
+            push_hex(&mut s, *intid as u64);
+        }
+        Ok(s)
+    }
+
+    /// Decode a node record the warden read from a source's pipe. The inverse of
+    /// `to_record`. Strict + bounded (the discovery-source trust boundary): an
+    /// unknown/duplicate key, a bad number, an unknown version, an empty id list,
+    /// or a `reg`/`intid` count over the allowance caps all reject -- a hostile or
+    /// buggy source cannot make the warden allocate unboundedly or mis-grant.
+    pub fn parse_record(line: &str) -> Result<DeviceNode, Error> {
+        let mut fields = line.split(';');
+
+        let v = fields.next().ok_or(Error::BadVersion)?;
+        let vnum = v.strip_prefix('v').ok_or(Error::BadVersion)?;
+        let vnum: u32 = vnum.parse().map_err(|_| Error::BadVersion)?;
+        if vnum != NODE_RECORD_VERSION {
+            return Err(Error::BadVersion);
+        }
+
+        let mut label: Option<String> = None;
+        let mut ids: Option<Vec<DeviceId>> = None;
+        let mut reg: Option<Vec<(u64, u64)>> = None;
+        let mut intids: Option<Vec<u32>> = None;
+
+        for field in fields {
+            if field.is_empty() {
+                continue; // tolerate a stray trailing ';'
+            }
+            let (key, val) = field.split_once('=').ok_or(Error::BadField)?;
+            match key {
+                "label" => {
+                    if label.is_some() {
+                        return Err(Error::BadField);
+                    }
+                    label = Some(val.to_string());
+                }
+                "id" => {
+                    if ids.is_some() {
+                        return Err(Error::BadField);
+                    }
+                    let mut v = Vec::new();
+                    for part in val.split(',') {
+                        if part.is_empty() {
+                            continue;
+                        }
+                        v.push(DeviceId::parse(part));
+                    }
+                    if v.is_empty() {
+                        return Err(Error::BadField);
+                    }
+                    ids = Some(v);
+                }
+                "reg" => {
+                    if reg.is_some() {
+                        return Err(Error::BadField);
+                    }
+                    reg = Some(parse_windows(val)?);
+                }
+                "intid" => {
+                    if intids.is_some() {
+                        return Err(Error::BadField);
+                    }
+                    intids = Some(parse_irqs(val)?);
+                }
+                _ => return Err(Error::BadField),
+            }
+        }
+
+        Ok(DeviceNode {
+            label: label.unwrap_or_default(),
+            ids: ids.ok_or(Error::BadField)?,
+            resources: NodeResources {
+                compatible: Vec::new(),
+                reg: reg.unwrap_or_default(),
+                interrupts: intids.unwrap_or_default(),
+            },
+        })
+    }
+}
+
+/// A source of typed device nodes. The warden runs each source's `enumerate` and
+/// binds the union. Best-effort: a source logs + skips a malformed node and
+/// returns what it found (a fatal source error yields an empty `Vec`), so one bad
+/// node never sinks the whole discovery pass.
+pub trait DiscoverySource {
+    fn enumerate(&mut self) -> Vec<DeviceNode>;
+}
+
+/// Find the bind-database manifest that binds this node at its most-specific
+/// identity (the earliest id in the node's most-specific-first list). Returns the
+/// manifest index, or `None` if no manifest binds the node. (The warden's match
+/// step -- generalized off `compatible`-strings to typed `DeviceId`s.)
+pub fn best_match(db: &[Manifest], node: &DeviceNode) -> Option<usize> {
+    let mut best: Option<(usize, usize)> = None; // (db index, node-id position)
+    for (i, m) in db.iter().enumerate() {
+        for (pos, id) in node.ids.iter().enumerate() {
+            if m.binds.iter().any(|b| id.matches_bind(b)) {
+                let better = match best {
+                    None => true,
+                    Some((_, bp)) => pos < bp,
+                };
+                if better {
+                    best = Some((i, pos));
+                }
+                break; // the node's first hit is this manifest's most-specific match
+            }
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
+// =============================================================================
+// DtbSource -- the concrete /hw source (feature `driver`; needs libthyla-rs).
+// =============================================================================
+
+#[cfg(feature = "driver")]
+mod dtb_source {
+    use alloc::string::{String, ToString};
+    use alloc::vec::Vec;
+
+    use libthyla_rs::fs;
+    use libthyla_rs::io::Read;
+
+    use super::{DeviceNode, DiscoverySource};
+    use crate::dtb::{ARM64_ADDR_CELLS, ARM64_SIZE_CELLS, GIC_INTERRUPT_CELLS};
+    use crate::resource::NodeResources;
+
+    /// The DTB discovery source (MENAGERIE section 7): enumerates `/hw` (the devhw
+    /// DTB tree) and emits one `DeviceNode` per node that exposes a `compatible`,
+    /// identified by its `Compatible` ids. The static-fabric source + the
+    /// bootstrap root every other source layers on. Top-level only -- every
+    /// bindable device on the v1.0 targets (QEMU-virt, RPi4/5) is a direct child
+    /// of the FDT root; descending nested buses is a v1.x refinement.
+    pub struct DtbSource {
+        root: String,
+    }
+
+    impl DtbSource {
+        /// A source rooted at the conventional `/hw` mount.
+        pub fn new() -> Self {
+            DtbSource {
+                root: String::from("/hw"),
+            }
+        }
+
+        /// A source rooted at an arbitrary path (for an alternate devhw mount).
+        pub fn at(root: &str) -> Self {
+            DtbSource {
+                root: root.to_string(),
+            }
+        }
+    }
+
+    impl Default for DtbSource {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl DiscoverySource for DtbSource {
+        fn enumerate(&mut self) -> Vec<DeviceNode> {
+            let mut out = Vec::new();
+            let rd = match fs::read_dir(&self.root) {
+                Ok(r) => r,
+                Err(_) => return out, // no /hw -> no DTB nodes (best-effort)
+            };
+            for ent in rd {
+                let ent = match ent {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                if !ent.is_dir() {
+                    continue; // skip the root-level property files
+                }
+                let name = ent.file_name();
+                let res = read_node(&self.root, name);
+                if res.compatible.is_empty() {
+                    continue; // a node with no `compatible` is not a bindable device
+                }
+                out.push(DeviceNode::from_compatible(name, res));
+            }
+            out
+        }
+    }
+
+    /// Read + decode a node's `compatible`/`reg`/`interrupts` property files.
+    fn read_node(root: &str, name: &str) -> NodeResources {
+        NodeResources::from_dtb(
+            &read_prop(root, name, "compatible"),
+            &read_prop(root, name, "reg"),
+            &read_prop(root, name, "interrupts"),
+            ARM64_ADDR_CELLS,
+            ARM64_SIZE_CELLS,
+            GIC_INTERRUPT_CELLS,
+        )
+    }
+
+    /// Read one `/hw/<node>/<prop>` property file into bytes. A missing property
+    /// yields an empty buffer -- the decoder treats that as an absent axis.
+    fn read_prop(root: &str, node: &str, prop: &str) -> Vec<u8> {
+        let path = alloc::format!("{}/{}/{}", root, node, prop);
+        let mut f = match fs::File::open(&path) {
+            Ok(f) => f,
+            Err(_) => return Vec::new(),
+        };
+        let mut buf = Vec::new();
+        if f.read_to_end(&mut buf).is_err() {
+            return Vec::new();
+        }
+        buf
+    }
+}
+
+#[cfg(feature = "driver")]
+pub use dtb_source::DtbSource;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manifest::Manifest;
+
+    fn vnode(label: &str, virtio_id: u16, reg: (u64, u64), intid: u32) -> DeviceNode {
+        DeviceNode {
+            label: label.to_string(),
+            ids: alloc::vec![DeviceId::Virtio(virtio_id)],
+            resources: NodeResources {
+                compatible: Vec::new(),
+                reg: alloc::vec![reg],
+                interrupts: alloc::vec![intid],
+            },
+        }
+    }
+
+    fn manifest(binds: &str, name: &str) -> Manifest {
+        let src = alloc::format!(
+            "driver \"{name}\" {{ abi = 1 binds = [{binds}] \
+             needs {{ mmio = \"node:reg\" irq = \"node:interrupts\" }} \
+             serves = \"/dev/{name}/%instance\" }}"
+        );
+        Manifest::parse(&src).unwrap()
+    }
+
+    #[test]
+    fn device_id_parse_and_string() {
+        assert_eq!(DeviceId::parse("virtio:1"), DeviceId::Virtio(1));
+        assert_eq!(DeviceId::parse("virtio:65535"), DeviceId::Virtio(65535));
+        // out-of-range / non-numeric virtio suffix falls back to a literal compatible
+        assert_eq!(
+            DeviceId::parse("virtio:99999"),
+            DeviceId::Compatible("virtio:99999".to_string())
+        );
+        assert_eq!(
+            DeviceId::parse("arm,pl061"),
+            DeviceId::Compatible("arm,pl061".to_string())
+        );
+        assert_eq!(DeviceId::Virtio(1).as_string(), "virtio:1");
+        assert_eq!(DeviceId::Compatible("arm,pl061".to_string()).as_string(), "arm,pl061");
+    }
+
+    #[test]
+    fn matches_bind_typed_vs_literal() {
+        assert!(DeviceId::Virtio(1).matches_bind("virtio:1"));
+        assert!(!DeviceId::Virtio(1).matches_bind("virtio:2"));
+        assert!(DeviceId::Compatible("arm,pl061".to_string()).matches_bind("arm,pl061"));
+        // a raw transport-node compatible never matches a typed bus bind
+        assert!(!DeviceId::Compatible("virtio,mmio".to_string()).matches_bind("virtio:1"));
+        // and a typed id never matches the raw transport compatible
+        assert!(!DeviceId::Virtio(1).matches_bind("virtio,mmio"));
+    }
+
+    #[test]
+    fn node_record_round_trip_virtio() {
+        let n = vnode("virtio-slot-31", 1, (0x0a00_3e00, 0x200), 0x2f);
+        let rec = n.to_record().unwrap();
+        assert_eq!(
+            rec,
+            "v1;label=virtio-slot-31;id=virtio:1;reg=a003e00:200;intid=2f"
+        );
+        let n2 = DeviceNode::parse_record(&rec).unwrap();
+        assert_eq!(n, n2);
+    }
+
+    #[test]
+    fn node_record_empty_resource_axes() {
+        let n = DeviceNode {
+            label: "x".to_string(),
+            ids: alloc::vec![DeviceId::Virtio(4)],
+            resources: NodeResources::default(),
+        };
+        let rec = n.to_record().unwrap();
+        let n2 = DeviceNode::parse_record(&rec).unwrap();
+        assert_eq!(n, n2);
+        assert!(n2.resources.reg.is_empty());
+        assert!(n2.resources.interrupts.is_empty());
+    }
+
+    #[test]
+    fn node_record_rejects_bad_input() {
+        assert_eq!(
+            DeviceNode::parse_record("v2;id=virtio:1"),
+            Err(Error::BadVersion)
+        );
+        assert_eq!(
+            DeviceNode::parse_record("id=virtio:1"),
+            Err(Error::BadVersion) // no v-prefix
+        );
+        assert_eq!(
+            DeviceNode::parse_record("v1;label=x;reg=1000:1000"),
+            Err(Error::BadField) // no id
+        );
+        assert_eq!(
+            DeviceNode::parse_record("v1;id=virtio:1;id=virtio:2"),
+            Err(Error::BadField) // duplicate id key
+        );
+        assert_eq!(
+            DeviceNode::parse_record("v1;id=virtio:1;reg=deadbeef"),
+            Err(Error::BadNumber) // window without :size
+        );
+        assert_eq!(
+            DeviceNode::parse_record("v1;id=virtio:1;bogus=1"),
+            Err(Error::BadField) // unknown key
+        );
+    }
+
+    #[test]
+    fn node_record_bounds_resource_counts() {
+        // a hostile source over-reporting windows is rejected at parse (the
+        // discovery-source trust boundary), not silently truncated.
+        let mut rec = String::from("v1;id=virtio:1;reg=");
+        for i in 0..(crate::resource::MAX_MMIO + 1) {
+            if i != 0 {
+                rec.push(',');
+            }
+            rec.push_str("1000:1000");
+        }
+        assert_eq!(
+            DeviceNode::parse_record(&rec),
+            Err(Error::TooManyResources)
+        );
+    }
+
+    #[test]
+    fn to_record_rejects_delimiter_in_label() {
+        let mut n = vnode("ev;il", 1, (0x1000, 0x100), 5);
+        assert_eq!(n.to_record(), Err(Error::BadField));
+        n.label = "ok".to_string();
+        assert!(n.to_record().is_ok());
+    }
+
+    #[test]
+    fn best_match_picks_most_specific_and_typed() {
+        let db = alloc::vec![manifest("\"virtio:1\"", "netdev"), manifest("\"virtio:2\"", "blkdev")];
+        // a virtio:1 node binds netdev (index 0)
+        let net = vnode("slot", 1, (0x0a00_3e00, 0x200), 0x2f);
+        assert_eq!(best_match(&db, &net), Some(0));
+        // a virtio:2 node binds blkdev (index 1)
+        let blk = vnode("slot", 2, (0x0a00_3c00, 0x200), 0x2e);
+        assert_eq!(best_match(&db, &blk), Some(1));
+        // an unbound virtio id matches nothing
+        let rng = vnode("slot", 4, (0x0a00_3a00, 0x200), 0x2d);
+        assert_eq!(best_match(&db, &rng), None);
+    }
+
+    #[test]
+    fn best_match_most_specific_id_wins() {
+        // a manifest binding the LESS specific id still binds, but a node whose
+        // most-specific id is bound by an earlier-listed manifest prefers that.
+        let db = alloc::vec![manifest("\"specific\"", "a"), manifest("\"generic\"", "b")];
+        let node = DeviceNode {
+            label: "n".to_string(),
+            ids: alloc::vec![
+                DeviceId::Compatible("specific".to_string()),
+                DeviceId::Compatible("generic".to_string()),
+            ],
+            resources: NodeResources::default(),
+        };
+        // "specific" is the node's most-specific id (position 0) -> manifest a.
+        assert_eq!(best_match(&db, &node), Some(0));
+    }
+}

@@ -24,6 +24,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::manifest::{DmaNeed, IrqNeed, Manifest, MmioNeed};
+use crate::source::DeviceNode;
 use crate::Error;
 
 /// The spawn-descriptor format version (the `v1` prefix). Bumped only on an
@@ -75,43 +76,46 @@ pub struct BoundResources {
 /// *supplies* the values, so the grant never exceeds the device's physical
 /// resources. A manifest cannot widen its reach; it can only decline an axis.
 ///
+/// The node is matched on its typed identities (`node.ids`, most-specific first);
+/// the matched id's string form is recorded in `BoundResources.compatible` (a DTB
+/// compatible string, or a bus id like `"virtio:1"`).
+///
 /// - MMIO: `MmioNeed::Node` grants every `reg` window; `None` grants nothing.
 /// - IRQ:  `IrqNeed::Node` grants every wired INTID; `Msi(_)` is resolved by the
 ///   PCIe source (not a DTB node) so it grants nothing here; `None` grants nothing.
 /// - DMA:  the manifest's `Pool(bytes)` budget (DMA is allocated memory, not a
 ///   node resource), or 0.
 ///
-/// Errors: `NoMatch` (no node compatible is in `binds`), `TooManyWindows` /
+/// Errors: `NoMatch` (no node id is in `binds`), `TooManyWindows` /
 /// `TooManyIrqs` (the node exposes more than the allowance can carry).
 pub fn resolve(
     manifest: &Manifest,
-    node: &NodeResources,
+    node: &DeviceNode,
     instance: u32,
 ) -> Result<BoundResources, Error> {
-    let compatible = node
-        .compatible
+    let matched = node
+        .ids
         .iter()
-        .find(|c| manifest.binds.iter().any(|b| b == *c))
-        .cloned()
+        .find(|id| manifest.binds.iter().any(|b| id.matches_bind(b)))
         .ok_or(Error::NoMatch)?;
 
     let mmio = match manifest.needs.mmio {
         MmioNeed::None => Vec::new(),
         MmioNeed::Node => {
-            if node.reg.len() > MAX_MMIO {
+            if node.resources.reg.len() > MAX_MMIO {
                 return Err(Error::TooManyWindows);
             }
-            node.reg.clone()
+            node.resources.reg.clone()
         }
     };
 
     let irq = match manifest.needs.irq {
         IrqNeed::None => Vec::new(),
         IrqNeed::Node => {
-            if node.interrupts.len() > MAX_IRQ {
+            if node.resources.interrupts.len() > MAX_IRQ {
                 return Err(Error::TooManyIrqs);
             }
-            node.interrupts.clone()
+            node.resources.interrupts.clone()
         }
         // MSI vectors are provided by the PCIe source, not a DTB node. The grant
         // carries the count via the manifest; the source fills the INTIDs at the
@@ -126,7 +130,7 @@ pub fn resolve(
 
     Ok(BoundResources {
         instance,
-        compatible,
+        compatible: matched.as_string(),
         serves: expand_instance(&manifest.serves, instance),
         mmio,
         irq,
@@ -273,7 +277,7 @@ impl BoundResources {
 // codec helpers
 // =============================================================================
 
-fn push_hex(s: &mut String, v: u64) {
+pub(crate) fn push_hex(s: &mut String, v: u64) {
     // bare lowercase hex, no "0x" prefix (the decoder strips an optional prefix).
     if v == 0 {
         s.push('0');
@@ -303,7 +307,7 @@ fn parse_hex(s: &str) -> Result<u64, Error> {
     u64::from_str_radix(s, 16).map_err(|_| Error::BadNumber)
 }
 
-fn parse_windows(val: &str) -> Result<Vec<(u64, u64)>, Error> {
+pub(crate) fn parse_windows(val: &str) -> Result<Vec<(u64, u64)>, Error> {
     let mut out = Vec::new();
     for win in val.split(',') {
         if win.is_empty() {
@@ -318,7 +322,7 @@ fn parse_windows(val: &str) -> Result<Vec<(u64, u64)>, Error> {
     Ok(out)
 }
 
-fn parse_irqs(val: &str) -> Result<Vec<u32>, Error> {
+pub(crate) fn parse_irqs(val: &str) -> Result<Vec<u32>, Error> {
     let mut out = Vec::new();
     for id in val.split(',') {
         if id.is_empty() {
@@ -338,6 +342,23 @@ fn parse_irqs(val: &str) -> Result<Vec<u32>, Error> {
 mod tests {
     use super::*;
     use crate::manifest::Manifest;
+    use crate::source::{DeviceId, DeviceNode};
+
+    /// A DTB-style node (ids = the compatibles, most-specific first) for the
+    /// resolve tests -- the `DtbSource` shape.
+    fn dtb_node(compatible: &[&str], reg: Vec<(u64, u64)>, interrupts: Vec<u32>) -> DeviceNode {
+        let compat: Vec<String> = compatible.iter().map(|s| s.to_string()).collect();
+        let ids = compat.iter().map(|c| DeviceId::Compatible(c.clone())).collect();
+        DeviceNode {
+            label: "test".to_string(),
+            ids,
+            resources: NodeResources {
+                compatible: compat,
+                reg,
+                interrupts,
+            },
+        }
+    }
 
     fn example_manifest() -> Manifest {
         Manifest::parse(
@@ -368,14 +389,11 @@ mod tests {
     #[test]
     fn resolve_msi_manifest_grants_node_mmio_no_dtb_irq() {
         let m = example_manifest();
-        let node = NodeResources {
-            compatible: vec![
-                "raspberrypi,rp1-eth".to_string(),
-                "brcm,genet-v5".to_string(),
-            ],
-            reg: vec![(0x1f00_100000, 0x10000)],
-            interrupts: vec![],
-        };
+        let node = dtb_node(
+            &["raspberrypi,rp1-eth", "brcm,genet-v5"],
+            vec![(0x1f00_100000, 0x10000)],
+            vec![],
+        );
         let b = resolve(&m, &node, 3).unwrap();
         assert_eq!(b.instance, 3);
         assert_eq!(b.compatible, "raspberrypi,rp1-eth"); // most-specific match
@@ -388,11 +406,7 @@ mod tests {
     #[test]
     fn resolve_wired_manifest_grants_node_interrupts() {
         let m = wired_manifest();
-        let node = NodeResources {
-            compatible: vec!["virtio,mmio".to_string()],
-            reg: vec![(0x0a00_3000, 0x1000)],
-            interrupts: vec![0x2a],
-        };
+        let node = dtb_node(&["virtio,mmio"], vec![(0x0a00_3000, 0x1000)], vec![0x2a]);
         let b = resolve(&m, &node, 0).unwrap();
         assert_eq!(b.mmio, [(0x0a00_3000u64, 0x1000u64)]);
         assert_eq!(b.irq, [0x2a]);
@@ -403,28 +417,27 @@ mod tests {
     fn resolve_grant_never_exceeds_node() {
         // the auditable I-34 property: every granted window is a node window.
         let m = wired_manifest();
-        let node = NodeResources {
-            compatible: vec!["virtio,mmio".to_string()],
-            reg: vec![(0x1000, 0x100), (0x2000, 0x200)],
-            interrupts: vec![5, 6],
-        };
+        let node = dtb_node(
+            &["virtio,mmio"],
+            vec![(0x1000, 0x100), (0x2000, 0x200)],
+            vec![5, 6],
+        );
         let b = resolve(&m, &node, 0).unwrap();
         for w in &b.mmio {
-            assert!(node.reg.contains(w), "granted window {w:?} not in node");
+            assert!(node.resources.reg.contains(w), "granted window {w:?} not in node");
         }
         for i in &b.irq {
-            assert!(node.interrupts.contains(i), "granted irq {i} not in node");
+            assert!(
+                node.resources.interrupts.contains(i),
+                "granted irq {i} not in node"
+            );
         }
     }
 
     #[test]
     fn resolve_no_match() {
         let m = wired_manifest();
-        let node = NodeResources {
-            compatible: vec!["acme,widget".to_string()],
-            reg: vec![(0x1000, 0x100)],
-            interrupts: vec![5],
-        };
+        let node = dtb_node(&["acme,widget"], vec![(0x1000, 0x100)], vec![5]);
         assert_eq!(resolve(&m, &node, 0), Err(Error::NoMatch));
     }
 
@@ -434,11 +447,7 @@ mod tests {
         let reg: Vec<(u64, u64)> = (0..(MAX_MMIO as u64 + 1))
             .map(|i| (i * 0x1000, 0x1000))
             .collect();
-        let node = NodeResources {
-            compatible: vec!["virtio,mmio".to_string()],
-            reg,
-            interrupts: vec![],
-        };
+        let node = dtb_node(&["virtio,mmio"], reg, vec![]);
         assert_eq!(resolve(&m, &node, 0), Err(Error::TooManyWindows));
     }
 
@@ -568,11 +577,7 @@ mod tests {
     fn end_to_end_resolve_then_codec() {
         // the live path: warden resolves -> encodes -> driver decodes -> same grant.
         let m = wired_manifest();
-        let node = NodeResources {
-            compatible: vec!["virtio,mmio".to_string()],
-            reg: vec![(0x0a00_3000, 0x1000)],
-            interrupts: vec![0x2a],
-        };
+        let node = dtb_node(&["virtio,mmio"], vec![(0x0a00_3000, 0x1000)], vec![0x2a]);
         let warden_grant = resolve(&m, &node, 7).unwrap();
         let desc = warden_grant.to_descriptor().unwrap();
         let driver_grant = BoundResources::parse_descriptor(&desc).unwrap();

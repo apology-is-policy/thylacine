@@ -1,8 +1,11 @@
 # 118 - libdriver: the Menagerie driver framework crate
 
-**Status**: as-built at Menagerie build-sequence step 5b (2026-06-16). Pure
-userspace; no kernel ABI. The first consumer is the warden (step 5c); the first
-real `impl Driver` is the netdev retrofit (step 5d).
+**Status**: as-built through Menagerie build-sequence step 5d-1 (2026-06-16). Pure
+userspace; no kernel ABI. The first consumer is the warden (step 5c); step 5d-1
+added the **discovery-source layer** (`source`): the typed `DeviceId` / `DeviceNode`,
+the `DiscoverySource` trait, the `DtbSource`, the source -> warden node-record
+codec, and bind-by-id (`best_match` over typed identities). The first real
+`impl Driver` is the netdev retrofit (step 5d-3).
 
 Crate: `usr/lib/libdriver` (native `libthyla-rs`, `no_std` + `alloc`). Design:
 `docs/MENAGERIE.md` §6 (anatomy of a driver + the manifest), §4 (the hardware
@@ -21,12 +24,13 @@ in one host-tested place.
 
 It sits between two roles:
 
-- **The warden** (the device-manager TCB Proc, step 5c) reads a device node's
-  resources from `/hw`, matches the node's `compatible` against the manifests in
-  its bind database, calls `resolve` to compute the narrowed grant, derives both
-  the kernel allowance (`to_allowance` -> `Command::allowance`) and the spawn
-  descriptor (`to_descriptor` -> `Command::arg`) from that one grant, and spawns
-  the driver.
+- **The warden** (the device-manager TCB Proc, step 5c) enumerates device nodes
+  from its discovery sources (`DtbSource` over `/hw`; the virtio-mmio bus source
+  added in step 5d-2), matches each node's typed identity (`DeviceId`) against the
+  manifests in its bind database (`best_match`), calls `resolve` to compute the
+  narrowed grant, derives both the kernel allowance (`to_allowance` ->
+  `Command::allowance`) and the spawn descriptor (`to_descriptor` ->
+  `Command::arg`) from that one grant, and spawns the driver.
 - **The driver** (built on the framework) decodes the descriptor in `bind`,
   mints its `KObj_MMIO`/`IRQ`/`DMA` handles from the grant (the helpers), and
   serves a file.
@@ -46,11 +50,14 @@ Mirrors the kaua/netdev split (pure host-testable core + a thin device layer):
 | `manifest` | always | `alloc` only | the §6 brace-block manifest schema + parser + `to_text` |
 | `resource` | always | `alloc` only | `NodeResources`, `BoundResources`, `resolve`, the descriptor codec |
 | `dtb` | always | `alloc` only | decode raw devhw `/hw` property bytes (compatible/reg/interrupts) into a `NodeResources` |
+| `source` | always (+ `DtbSource` under `driver`) | `alloc` (+ `libthyla-rs` for `DtbSource`) | the discovery-source abstraction: typed `DeviceId` / `DeviceNode`, `DiscoverySource`, `best_match`, the source -> warden node-record codec; `DtbSource` (the `/hw` source) |
 | `driver` | `driver` (default) | `libthyla-rs` | the `Driver` trait, `run`, the handle-mint helpers, `to_allowance` |
 
-`manifest` + `resource` + `dtb` carry no `libthyla-rs` dependency, so the grant
-logic + codec + the endianness/cell-width DTB decode run under `cargo test` on
-the host. `driver` is the only `libthyla-rs` surface; it is compiled for
+`manifest` + `resource` + `dtb` + the `source` *types* (`DeviceId` / `DeviceNode` /
+the codec / `best_match`) carry no `libthyla-rs` dependency, so the grant logic +
+the codecs + the endianness/cell-width DTB decode + the bind matching run under
+`cargo test` on the host. The `driver` surface + the concrete `DtbSource` (gated
+inside `source`) are the only `libthyla-rs` code; they are compiled for
 `aarch64-unknown-none` only.
 
 ```
@@ -170,6 +177,53 @@ types (e.g. the PMU/timer affinity rows) are skipped. The cell counts are passed
 in (v1.0 uses the universal ARM64 values; reading them from the DTB root + the
 interrupt-parent is a v1.x refinement). Decode is best-effort: a malformed
 property yields a short/empty axis rather than a panic.
+
+### `source`
+
+The discovery-source abstraction (MENAGERIE §3 + §7) -- the layer the warden binds
+*through*. A `DiscoverySource` turns a discovery domain into a list of typed
+`DeviceNode`s; the warden matches each node's identity (`DeviceId`) against the
+bind DB (`best_match`) and never reads a device register itself. Pure except the
+concrete `DtbSource` (gated under `driver`).
+
+```rust
+pub enum DeviceId {
+    Compatible(String),  // a DTB compatible string, e.g. "arm,pl061"
+    Virtio(u16),         // a virtio device-id; string form "virtio:<n>"
+}
+impl DeviceId {
+    pub fn parse(s: &str) -> DeviceId;     // "virtio:N" -> Virtio; else Compatible
+    pub fn as_string(&self) -> String;     // the canonical (binds / record) form
+    pub fn matches_bind(&self, bind: &str) -> bool;
+}
+
+pub struct DeviceNode { pub label: String, pub ids: Vec<DeviceId>, pub resources: NodeResources }
+impl DeviceNode {
+    pub fn from_compatible(label: &str, resources: NodeResources) -> DeviceNode;
+    pub fn to_record(&self) -> Result<String, Error>;             // source -> warden line
+    pub fn parse_record(line: &str) -> Result<DeviceNode, Error>; // strict + bounded
+}
+
+pub trait DiscoverySource { fn enumerate(&mut self) -> Vec<DeviceNode>; }
+pub fn best_match(db: &[Manifest], node: &DeviceNode) -> Option<usize>; // most-specific id wins
+
+#[cfg(feature = "driver")]
+pub struct DtbSource { /* enumerate /hw -> Compatible nodes */ }
+```
+
+`DeviceId` is extensible: PCIe `vid:did` and USB `vid:pid` join as those bus
+sources land (each a new variant + a `bus:`-prefixed string form). A DTB
+`compatible` never contains `:`, so the typed namespace cannot collide with one;
+an unrecognized `bus:` prefix stays `Compatible` (fail-closed forward-compat).
+
+The **node record** is the source -> warden wire form
+(`v1;label=..;id=virtio:1;reg=base:size,..;intid=hex,..`), used when a source runs
+as a separate Proc (the virtio-mmio source, step 5d-2) and reports nodes over a
+pipe. `parse_record` is strict + bounds the resource counts to the allowance caps
+(`MAX_MMIO` / `MAX_IRQ`) -- the discovery-source trust boundary, so a hostile or
+buggy source cannot make the warden over-allocate or mis-grant. `DtbSource` runs
+*in-process* in the warden, so its `Compatible` nodes (which carry commas) never
+cross the record channel; the encoder rejects a comma/`;` in an id, fail-closed.
 
 ### `driver` (feature `driver`)
 
@@ -301,7 +355,7 @@ maps cannot drift.
 
 ## Tests
 
-27 host tests (`cargo test -p libdriver --no-default-features --target <host>`):
+36 host tests (`cargo test -p libdriver --no-default-features --target <host>`):
 
 - **manifest** (7): parse the §6 example; `to_text` round-trip; wired-IRQ +
   no-DMA; defaults when optional fields absent; the size-unit parser
@@ -320,6 +374,13 @@ maps cannot drift.
   double-NUL tolerance; `reg` decode in 2/2 cells (the real pl061 + virtio bytes)
   and 1/1 cells + multi-entry + trailing-partial ignore; `interrupts` SPI -> +32
   and PPI -> +16 with unknown-type skip; `from_dtb` building the full pl061 node.
+- **source** (9): `DeviceId` parse + `as_string` (typed `virtio:N` + the
+  out-of-range / literal-compatible fallback); `matches_bind` (typed vs literal,
+  and a raw `virtio,mmio` transport node never matching a `virtio:1` bind); the
+  node-record round-trip (virtio + empty axes) + strict rejection (bad version,
+  no id, duplicate key, bad number, unknown key) + the resource-count bound + the
+  delimiter-in-label guard; `best_match` (most-specific id wins, typed binds,
+  unbound id -> None).
 
 The device layer (`driver`) is proven to compile by the whole-workspace device
 build + `example::nop_entry`, which instantiates `run::<NopDriver>` so the entire

@@ -25,18 +25,22 @@ extern crate alloc;
 pub mod dtb;
 pub mod manifest;
 pub mod resource;
+pub mod source;
 
 #[cfg(feature = "driver")]
 pub mod driver;
 
 pub use manifest::{DmaNeed, IrqNeed, Manifest, MmioNeed, Needs, Restart, MANIFEST_ABI};
 pub use resource::{resolve, BoundResources, NodeResources, DESCRIPTOR_VERSION, MAX_IRQ, MAX_MMIO};
+pub use source::{best_match, DeviceId, DeviceNode, DiscoverySource, NODE_RECORD_VERSION};
 
 #[cfg(feature = "driver")]
 pub use driver::{
     alloc_dma, bind, claim_irq, map_mmio, run, to_allowance, Driver, DriverVa, EXIT_BIND, EXIT_OK,
     EXIT_PROBE, EXIT_SERVE,
 };
+#[cfg(feature = "driver")]
+pub use source::DtbSource;
 
 /// Every fallible operation in the framework reports one of these. Flat + `Copy`
 /// so it prints under `{:?}` (the `run` scaffold logs it) and the pure layers
