@@ -35,7 +35,7 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use libthyla_rs::fs::{File, OpenOptions};
+use libthyla_rs::fs::OpenOptions;
 use libthyla_rs::io::{slurp_capped, Read};
 use libthyla_rs::poll::{PollEvents, PollSet, PollTimeout};
 use libthyla_rs::process::{Child, Command, ExitStatus, Stdio};
@@ -44,8 +44,9 @@ use libthyla_rs::T_CAP_HW_CREATE;
 
 use libdriver::driver::to_allowance;
 use libdriver::{
-    best_match, next_step, reconcile_reported_node, resolve, BoundResources, DeviceId, DeviceNode,
-    DiscoverySource, Disposition, DtbSource, Manifest, RunOutcome, SuperviseStep, RESTART_LIMIT,
+    best_match, feed_ready_line, next_step, reconcile_reported_node, resolve, BoundResources,
+    DeviceId, DeviceNode, DiscoverySource, Disposition, DtbSource, Manifest, ReadyLine, RunOutcome,
+    SuperviseStep, READY_LINE_MAX, RESTART_LIMIT,
 };
 
 #[global_allocator]
@@ -346,36 +347,6 @@ fn run_virtio_mmio_source(bank: (u64, u64), trusted: &[DeviceNode]) -> Vec<Devic
     out_nodes
 }
 
-/// The maximum length of a driver's readiness line (`READY`); a longer line
-/// without a newline is a garbled/hostile signal -- the driver is non-TCB.
-const READY_LINE_MAX: usize = 64;
-
-/// Read one newline-terminated readiness line off a driver's stdout pipe.
-/// Blocks until '\n', EOF, or the cap. Returns the line (without the trailing
-/// '\n') on success; `None` on EOF before a newline (the driver exited without
-/// signalling) or an over-long line. Reads byte-by-byte so it stops exactly at
-/// the newline and never blocks waiting past it -- a long-lived driver keeps
-/// its stdout open after the line.
-fn read_ready_line(f: &mut File) -> Option<String> {
-    let mut buf: Vec<u8> = Vec::new();
-    let mut b = [0u8; 1];
-    loop {
-        match f.read(&mut b) {
-            Ok(0) => return None, // EOF before a newline
-            Ok(_) => {
-                if b[0] == b'\n' {
-                    return core::str::from_utf8(&buf).ok().map(|s| s.to_string());
-                }
-                if buf.len() >= READY_LINE_MAX {
-                    return None; // over-long -> garbled
-                }
-                buf.push(b[0]);
-            }
-            Err(_) => return None, // read error
-        }
-    }
-}
-
 /// The outcome of waiting for a freshly-spawned driver to declare itself.
 enum Readiness {
     /// The driver wrote a readiness line ("READY" = up) and is still alive.
@@ -414,6 +385,11 @@ fn await_readiness(child: &mut Child) -> Readiness {
     };
     let mut ps = PollSet::with_capacity(1);
     ps.add(&pipe, PollEvents::READ);
+    let mut acc: Vec<u8> = Vec::new();
+    // Once the pipe yields no more usable readiness data (EOF, a read error, or
+    // a garbled over-long line) we stop reading it and only watch for the exit,
+    // so a hostile stream cannot keep us busy past the give-up budget.
+    let mut pipe_done = false;
     for _ in 0..READY_WAIT_TRIES {
         // Catch an exit independent of the pipe (it will not EOF until reap).
         match child.try_wait() {
@@ -421,7 +397,13 @@ fn await_readiness(child: &mut Child) -> Readiness {
             Ok(None) => {}
             Err(_) => return Readiness::Untracked,
         }
-        // Poll the pipe for the readiness line (data), bounded.
+        if pipe_done {
+            // No readiness line is coming; pace the exit-poll so we neither spin
+            // nor block, still bounded by READY_WAIT_TRIES -> Timeout -> kill.
+            let _ = sleep(Duration::from_millis(READY_POLL_MS as u64));
+            continue;
+        }
+        // Poll the pipe for readiness data, bounded.
         let mut readable = false;
         if let Ok(results) = ps.poll(PollTimeout::Millis(READY_POLL_MS)) {
             for ev in results {
@@ -431,13 +413,23 @@ fn await_readiness(child: &mut Child) -> Readiness {
             }
         }
         if readable {
-            // The driver writes "READY\n" atomically (one small write_all, well
-            // under PIPE_BUF), so a readable pipe carries the whole line --
-            // read_ready_line stops at the '\n' and does not block.
-            if let Some(line) = read_ready_line(&mut pipe) {
-                return Readiness::Signalled(line);
+            // ONE bounded read: poll guaranteed >= 1 byte, and a single read
+            // returns the AVAILABLE bytes without blocking for a full buffer, so
+            // a PARTIAL line never stalls us mid-line (the F1 fix -- the old
+            // per-byte blocking read could hang forever on a driver that wrote a
+            // partial readiness line and held, escaping this loop's give-up
+            // budget). feed_ready_line accumulates across polls and scans for
+            // the line; the accumulator is capped at READY_LINE_MAX.
+            let mut chunk = [0u8; READY_LINE_MAX];
+            match pipe.read(&mut chunk) {
+                Ok(0) => pipe_done = true, // EOF (write end closed) -- try_wait catches the exit
+                Ok(n) => match feed_ready_line(&mut acc, &chunk[..n]) {
+                    ReadyLine::Line(line) => return Readiness::Signalled(line),
+                    ReadyLine::NeedMore => {} // keep polling
+                    ReadyLine::Garbled => pipe_done = true,
+                },
+                Err(_) => pipe_done = true, // read error
             }
-            // EOF / garbled: keep looping; try_wait catches the eventual exit.
         }
     }
     Readiness::Timeout
@@ -530,7 +522,16 @@ fn run_once(m: &Manifest, grant: &BoundResources) -> RunOutcome {
     // stderr are /dev/null; stdout is a PIPE: a driver writes one readiness line
     // ("READY") to it once it is up (the section-5 "serves its file" readiness
     // analog), so the warden can tell a long-lived service from a one-shot
-    // proof. All other driver diagnostics go to the console (t_putstr), not fds.
+    // proof.
+    //
+    // THE READINESS CONTRACT (5e-4 audit F3): a long-lived driver's FIRST stdout
+    // line MUST be exactly "READY". All other driver diagnostics go to the
+    // CONSOLE (t_putstr), never to stdout -- as netdev/crash-probe/menagerie-probe
+    // do. A driver whose first stdout line is anything else is treated as
+    // misbehaving (terminated + restarted per policy, bounded by RESTART_LIMIT --
+    // the await_readiness/Signalled arm), since a chatty driver that races a log
+    // line onto stdout would otherwise be misread as up. A finer "bad readiness
+    // token" vs "crash" distinction is a v1.x nicety; the bound makes it safe.
     let open_null = || OpenOptions::new().read(true).write(true).open("/dev/null");
     let (Ok(nin), Ok(nerr)) = (open_null(), open_null()) else {
         say!("warden: /dev/null open failed; cannot spawn {}", m.name);

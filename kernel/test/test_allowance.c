@@ -30,6 +30,7 @@ void test_allowance_free_null_tolerant(void);
 void test_allowance_pci_claim_gate(void);
 void test_allowance_confer_within_parent(void);
 void test_allowance_revoke_on_group_terminate(void);
+void test_allowance_narrowed_proc_cannot_spawn(void);
 
 // Mirror the test_handle.c proc make/drop: proc_alloc gives a fresh Proc with
 // an empty handle table + a NULL (broad) allowance; test_proc_drop ZOMBIEs +
@@ -320,4 +321,56 @@ void test_allowance_revoke_on_group_terminate(void) {
     proc_group_terminate(b, "test-broad");
     TEST_ASSERT(b->allowance == NULL, "broad terminate: no allowance, no crash");
     adrop(b);
+}
+
+// F2 (5e-4 audit) thunk: a child that exits cleanly. Used only by the control
+// (broad-parent) spawns -- the narrowed-parent spawn is denied BEFORE any child
+// is created, so this never runs on the denied path.
+static void aspawn_thunk(void *arg) { (void)arg; exits("ok"); }
+
+void test_allowance_narrowed_proc_cannot_spawn(void) {
+    // F2 / MENAGERIE section 13.2 + section 5: "bus drivers are sources, not
+    // spawners; one auditable chokepoint." rfork_internal denies a child Proc to
+    // a hardware-allowance-NARROWED parent. Without the gate, the child inherits
+    // a CLONE of the narrowed allowance (or is conferred a subset) as an
+    // INDEPENDENT allowance (revoked == 0) that survives the parent's
+    // DeviceRemoved (per-Proc revoke + thread-group-scoped terminate -> the child
+    // reparents to init), leaving a surviving hw-capable Proc the warden never
+    // tracks. The gate keys on the ALLOWANCE, not the identity: a SYSTEM-identity
+    // driver is still a sandboxed leaf, so there is NO SYSTEM exemption (unlike
+    // the #65 resource caps).
+    //
+    // Driven through a REAL rfork from the current (kproc) Proc, temporarily
+    // narrowed: with the gate, rfork returns -1 BEFORE proc_alloc (no child, no
+    // side effect); pre-fix, a real child would spawn (pid > 0) -- the
+    // regression. kproc is SYSTEM, so the #65 child cap is exempt and never masks
+    // the allowance gate; kproc is restored to broad before return.
+    struct Proc *me = kproc();
+    TEST_ASSERT(me != NULL, "kproc");
+    TEST_ASSERT(me->allowance == NULL, "kproc starts broad (allowance NULL)");
+
+    // Control: a BROAD parent spawns fine -- the gate must not break normal
+    // spawning (the entire non-driver process tree is broad).
+    int cpid = rfork(RFPROC, aspawn_thunk, NULL);
+    TEST_ASSERT(cpid > 0, "broad parent spawns a child");
+    int cst = -1;
+    TEST_EXPECT_EQ(wait_pid_for(cpid, 0, &cst), cpid, "reap the control child");
+
+    // Narrow self, then attempt to spawn -> denied (the F2 gate).
+    u32 irq[1] = { 40 };
+    TEST_ASSERT(proc_confer_allowance(me, NULL, 0, irq, 1, 0) == 0, "narrow self");
+    TEST_ASSERT(allowance_is_narrowed(me), "self is now narrowed");
+    int npid = rfork(RFPROC, aspawn_thunk, NULL);
+    TEST_EXPECT_EQ(npid, -1, "narrowed parent denied a child (MENAGERIE 13.2)");
+
+    // Restore broad so the live kproc + subsequent tests are unaffected.
+    proc_revoke_allowance(me);
+    allowance_free(me);
+    TEST_ASSERT(me->allowance == NULL, "kproc restored to broad");
+
+    // Broad-spawn works again after the restore.
+    int rpid = rfork(RFPROC, aspawn_thunk, NULL);
+    TEST_ASSERT(rpid > 0, "broad spawn works again after restore");
+    int rst = -1;
+    TEST_EXPECT_EQ(wait_pid_for(rpid, 0, &rst), rpid, "reap the post-restore child");
 }

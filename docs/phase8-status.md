@@ -187,8 +187,35 @@ to be retrofitted later. The full per-chunk status (SHAs, tests, audits) lives i
   transport with no production code change (`canonical_responder` is shared —
   un-static'd — to pre-stage the handshake replies). Tests 918 → 920/920; boot
   OK + 0 EXTINCTION; the SMP gate. Ref `107-loom.md` (device-gone). **LANDED**.
-  **5e-4** composed focused audit over the whole 5e arc + SMP gate + close. →
-  step 6 (PCIe/USB sources + the per-(bus,dev,fn) PCI allowance axis #159).
+  **5e-4** (`PENDING`) **composed focused audit over the whole 5e arc + close**:
+  one Opus-4.8-max prosecutor (MODEL start==end, no fallback) + a concurrent
+  self-audit, **0 P0 / 2 P1 / 0 P2 / 1 P3, all fixed; NOT a dirty close**.
+  **F1 [P1]** (both passes, independent) — `read_ready_line` read the driver
+  readiness pipe ONE BYTE AT A TIME with *blocking* reads, so a non-TCB driver
+  that wrote a partial line (`"READ"`, no newline) and held would stall the
+  warden FOREVER, escaping the give-up budget — a boot-availability DoS on the
+  TCB warden (the untrusted-driver model the framework exists to sandbox). Fixed:
+  the line assembly moved to a pure host-tested `libdriver::readyline::feed_ready_line`
+  (accumulator + scan, capped at `READY_LINE_MAX`); the warden does ONE bounded
+  read per poll-readable event (returns the available bytes without blocking),
+  feeding chunks across the poll loop. **F2 [P1]** (prosecutor) — DeviceRemoved
+  did not fully revoke a driver that spawned an allowance-bearing **child Proc**:
+  `proc_group_terminate` is thread-group-scoped, so a grandchild inheriting a
+  clone of the narrowed allowance (`revoked==0`) survives reparented to init with
+  live MMIO/IRQ/DMA the warden never tracks (I-34 "fully revoked" violated under
+  an untrusted *spawning* driver). The fork was already **resolved in scripture**
+  (MENAGERIE §13.2 "drivers are sources, not spawners; one auditable chokepoint"),
+  so the fix *implements* it fail-closed: `rfork_internal` denies a child Proc to
+  a hardware-allowance-narrowed parent (closes both the confer + clone-inherit
+  paths; does not block step-6 recursive sources, which *report* to the warden).
+  Regression `allowance.narrowed_proc_cannot_spawn`. **F3 [P3]** — documented the
+  readiness contract (a driver's first stdout line MUST be exactly "READY";
+  diagnostics → the console). libdriver host tests 51 → **61** (+10 readyline);
+  kernel suite 920 → **921**; boot OK (`warden: 3 bound, 2 up, 1 gave up, 0
+  failed`) + 0 EXTINCTION; SMP gate 0 corruption. Refs `117-allowance.md`
+  ("Drivers are leaves"), `118-libdriver.md` (readyline), `119-warden.md` (F1+F3),
+  `memory/audit_5e_closed_list.md`. **LANDED**. THE 5e ARC IS COMPLETE. → step 6
+  (PCIe/USB sources + the per-(bus,dev,fn) PCI allowance axis #159).
 
 ### the net arc (resumes on the PCI NIC, after the Menagerie spine)
 

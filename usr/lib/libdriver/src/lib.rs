@@ -24,6 +24,7 @@ extern crate alloc;
 
 pub mod dtb;
 pub mod manifest;
+pub mod readyline;
 pub mod resource;
 pub mod source;
 pub mod supervise;
@@ -32,6 +33,7 @@ pub mod supervise;
 pub mod driver;
 
 pub use manifest::{DmaNeed, IrqNeed, Manifest, MmioNeed, Needs, Restart, MANIFEST_ABI};
+pub use readyline::{feed_ready_line, ReadyLine, READY_LINE_MAX};
 pub use supervise::{
     backoff_ms, next_step, Disposition, RunOutcome, SuperviseStep, BACKOFF_MAX_MS, RESTART_LIMIT,
 };

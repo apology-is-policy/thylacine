@@ -799,6 +799,24 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // code, not the TCB). The graceful-OOM backstop bounds the recursive case.
     if (!proc_child_cap_ok(parent)) return -1;
 
+    // MENAGERIE section 13.2 (resolved fork) + section 5 / I-34: "bus drivers
+    // are sources, not spawners -- one auditable chokepoint." A hardware-
+    // allowance-NARROWED Proc (a sandboxed driver/source) may not create a child
+    // Proc. The child would inherit a CLONE of the narrowed allowance
+    // (allowance_clone_into below) -- or be conferred a subset -- as an
+    // INDEPENDENT allowance (revoked == 0) that SURVIVES the parent's
+    // DeviceRemoved: proc_revoke_allowance is per-Proc and proc_group_terminate
+    // is thread-group-scoped, so a child Proc is reparented to init, not torn
+    // down -- leaving a hw-capable grandchild holding live MMIO/IRQ/DMA the
+    // warden never tracks, scattering the privilege decision off the warden's
+    // sole chokepoint. The gate keys on the ALLOWANCE, not the identity: a
+    // SYSTEM-identity driver is still a sandboxed leaf, so -- unlike the #65
+    // resource caps -- there is NO SYSTEM exemption here. The broad warden/TCB
+    // (allowance == NULL) is unaffected: it is the only spawner of hw-capable
+    // children, via the deliberate confer path. Fail-closed -- drivers serve
+    // files; they are leaves. (5e-4 audit F2.)
+    if (allowance_is_narrowed(parent)) return -1;
+
     struct Proc *child = proc_alloc();
     if (!child) return -1;
 

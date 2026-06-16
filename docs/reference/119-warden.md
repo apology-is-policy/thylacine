@@ -88,6 +88,18 @@ sound:
   detects an exit with `try_wait` (off the pipe) and polls the pipe only for the
   `READY` data line, bounded by a give-up (~10s). A long-lived service signals
   `READY` (data); a one-shot proof or a bring-up crash is caught by `try_wait`.
+  - **The read is bounded, not byte-blocking (5e-4 audit F1).** Each poll-readable
+    event does ONE bounded `read(up to READY_LINE_MAX)` -- which returns the
+    *available* bytes without blocking for a full buffer -- and feeds the chunk
+    into a persistent accumulator via the pure `libdriver::readyline::feed_ready_line`
+    (scan for '\n', capped at `READY_LINE_MAX`). The original read the pipe ONE
+    BYTE AT A TIME with *blocking* reads; a non-TCB driver that wrote a PARTIAL
+    line (`"READ"`, no newline) and then held would stall the warden on the next
+    byte FOREVER, escaping the give-up budget (which lives in the poll loop, not
+    the inner read) -- a boot-availability DoS on the TCB warden by a misbehaving
+    driver (the untrusted-3rd-party-driver model the framework exists to sandbox).
+    A garbled (over-long) or EOF'd pipe now stops being read; the loop only
+    watches `try_wait` for the exit, still bounded -> Timeout -> kill.
 - **The teardown is the I-25/#160 mechanism.** `Child::kill` ->
   `/proc/<pid>/ctl` `killgrp` -> `proc_group_terminate`, which revokes the
   allowance as its first step (atomic with the death-wake). The warden is

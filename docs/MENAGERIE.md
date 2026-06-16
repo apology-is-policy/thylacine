@@ -197,7 +197,12 @@ TCB; the drivers under it are not. Responsibilities:
 
 The warden owns **all** grant decisions — one auditable chokepoint. Bus drivers are
 *sources that report to it*, never spawners of their own children (which would
-scatter the privilege decision across N places).
+scatter the privilege decision across N places). **As-built (build-arc 5e-4, audit
+F2):** the kernel *enforces* this — `rfork_internal` denies a child Proc to any
+hardware-allowance-narrowed Proc (a driver/source), so a driver cannot spawn a
+hw-capable grandchild that would survive its `DeviceRemoved` revoke + terminate.
+The broad warden/TCB spawns; drivers are leaves. See `docs/reference/117-allowance.md`
+("Drivers are leaves").
 
 ---
 

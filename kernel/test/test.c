@@ -454,6 +454,7 @@ void test_allowance_free_null_tolerant(void);
 void test_allowance_pci_claim_gate(void);
 void test_allowance_confer_within_parent(void);
 void test_allowance_revoke_on_group_terminate(void);
+void test_allowance_narrowed_proc_cannot_spawn(void);
 
 void test_cpio_is_valid_recognizes_magic(void);
 void test_cpio_iter_empty_archive(void);
@@ -1493,6 +1494,7 @@ struct test_case g_tests[] = {
     { "allowance.pci_claim_gate",           test_allowance_pci_claim_gate,           false, NULL },
     { "allowance.confer_within_parent",     test_allowance_confer_within_parent,     false, NULL },
     { "allowance.revoke_on_group_terminate", test_allowance_revoke_on_group_terminate, false, NULL },
+    { "allowance.narrowed_proc_cannot_spawn", test_allowance_narrowed_proc_cannot_spawn, false, NULL },
 
     { "cpio.is_valid_recognizes_magic",
                                        test_cpio_is_valid_recognizes_magic, false, NULL },

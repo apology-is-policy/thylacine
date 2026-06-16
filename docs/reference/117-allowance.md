@@ -228,6 +228,38 @@ per-device PCI allowance — "a PCI device's allowance IS its claimed BARs"
 source lands (**build-arc step 6**); the fail-closed gate is the sound v1.0
 floor until then, not a deferral of the soundness.
 
+### Drivers are leaves: a narrowed Proc may not spawn (5e-4 audit F2)
+
+`rfork_internal` (`kernel/proc.c`, the single Proc-creation chokepoint — every
+`SYS_SPAWN_*` routes through it) denies a child Proc to a hardware-allowance-
+**narrowed** Proc: `if (allowance_is_narrowed(parent)) return -1;`, right after
+the #65 child-cap check. This enforces **MENAGERIE §13.2** (a *resolved* fork:
+"one central broker owns the bind DB + all grant decisions; bus drivers are
+sources, **not spawners** — one auditable chokepoint") and §5 ("never spawners
+of their own children, which would scatter the privilege decision across N
+places").
+
+The gap it closes (the 5e DeviceRemoved teardown made it reachable): a child Proc
+of a narrowed driver inherits a **clone** of the narrowed allowance via
+`allowance_clone_into` (or is conferred a subset), as an **independent**
+`Allowance` with `revoked == 0`. DeviceRemoved is `proc_revoke_allowance` (per-
+Proc) + `proc_group_terminate` (thread-group-scoped) — neither reaches a child
+*Proc*, which is reparented to init. So absent this gate a driver could spawn a
+grandchild holding live MMIO/IRQ/DMA that **survives** the device's removal — a
+hw-capable Proc the warden never tracks, the I-34 "fully revoked on removal"
+property violated. The gate closes **both** escape paths (explicit confer *and*
+clone-inherit) by construction.
+
+The gate keys on the **allowance**, not the identity: a `PRINCIPAL_SYSTEM`-
+identity driver is still a sandboxed leaf, so — unlike the #65 resource caps —
+there is **no SYSTEM exemption**. The **broad** warden/TCB (`allowance == NULL`)
+is unaffected: it is the only spawner of hw-capable children, via the deliberate
+confer path. Step-6 recursive bus sources are **not** blocked — a source
+*reports* discovered nodes to the warden (the warden, broad, spawns the sub-
+driver); it never spawns its own children. Regression:
+`allowance.narrowed_proc_cannot_spawn` (a real `rfork` from a temporarily-
+narrowed kproc returns `-1` before `proc_alloc`).
+
 ---
 
 ## The confer-at-spawn syscall (build-arc step 5a)
