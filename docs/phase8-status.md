@@ -171,7 +171,7 @@ to be retrofitted later. The full per-chunk status (SHAs, tests, audits) lives i
   kernel collapses non-"ok" exits to 1 (`sys_exits_handler`), so the supervisor
   reads clean-vs-crashed only, not specific exit codes (the finer policy lands
   with the structured 64-bit exit_status, docs/ERRORS.md). Refs `118`/`119`.
-  **LANDED**. **5e-3** *(pending)* **device-gone `-ENODEV` CQE proven over the
+  **LANDED**. **5e-3** (`0d486c2`) **device-gone `-ENODEV` CQE proven over the
   production SrvConn transport**: a kernel test
   (`9p_srvconn_transport.devgone_posts_nodev_cqe`) stands up a real byte-mode
   `SrvConn` pair, handshakes a 9P client over the production
