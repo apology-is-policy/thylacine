@@ -187,7 +187,7 @@ to be retrofitted later. The full per-chunk status (SHAs, tests, audits) lives i
   transport with no production code change (`canonical_responder` is shared —
   un-static'd — to pre-stage the handshake replies). Tests 918 → 920/920; boot
   OK + 0 EXTINCTION; the SMP gate. Ref `107-loom.md` (device-gone). **LANDED**.
-  **5e-4** (`PENDING`) **composed focused audit over the whole 5e arc + close**:
+  **5e-4** (`367c2c8`) **composed focused audit over the whole 5e arc + close**:
   one Opus-4.8-max prosecutor (MODEL start==end, no fallback) + a concurrent
   self-audit, **0 P0 / 2 P1 / 0 P2 / 1 P3, all fixed; NOT a dirty close**.
   **F1 [P1]** (both passes, independent) — `read_ready_line` read the driver
