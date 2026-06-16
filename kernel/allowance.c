@@ -59,16 +59,23 @@ bool allowance_permits(struct Proc *p, enum hw_res_kind kind, u64 a, u64 b) {
         u64 size = a;
         return (size > 0 && size <= al->dma_max);
     }
+    case HW_RES_PCI: {
+        u32 bdf = (u32)a;
+        for (u32 i = 0; i < al->pci_count && i < ALLOWANCE_PCI_MAX; i++)
+            if (al->pci[i] == bdf) return true;
+        return false;
+    }
     }
     return false;   // unknown kind -> fail closed
 }
 
-// The fail-closed gate for hw-handle-minting paths with no allowance axis yet
-// (SYS_PCI_CLAIM at v1.0). True iff p is NARROWED; a narrowed driver is denied
-// outright there (it cannot reach a device its allowance does not bound). The
-// allowance pointer is set-once-at-spawn (stable for the calling thread's own
-// Proc -- no atomic needed); the per-device PCI axis at build-arc step 6
-// replaces the blanket reject.
+// The "drivers are leaves" gate (MENAGERIE section 13.2): rfork_internal denies
+// a NARROWED driver a child Proc, so no hw-capable grandchild can inherit a
+// clone of the allowance that survives the per-Proc revoke + thread-group-scoped
+// DeviceRemoved terminate (5e-4 F2). True iff p carries a narrowed allowance.
+// SYS_PCI_CLAIM no longer uses this -- since build-arc step 6 it gates on the
+// per-(bus,dev,fn) PCI axis (HW_RES_PCI). The allowance pointer is read ACQUIRE
+// (uniform with every other p->allowance reader).
 bool allowance_is_narrowed(struct Proc *p) {
     return p && __atomic_load_n(&p->allowance, __ATOMIC_ACQUIRE) != NULL;
 }
@@ -101,12 +108,15 @@ hidx_t allowance_handle_alloc(struct Proc *p, enum kobj_kind kind,
 // free-old is race-free. mmio[]/irq[]/dma_max become immutable here.
 int proc_confer_allowance(struct Proc *p,
                           const struct hw_window *mmio, u32 mmio_count,
-                          const u32 *irq, u32 irq_count, u64 dma_max) {
+                          const u32 *irq, u32 irq_count, u64 dma_max,
+                          const u32 *pci, u32 pci_count) {
     if (!p) return -1;
     if (mmio_count > ALLOWANCE_MMIO_MAX) return -1;
     if (irq_count > ALLOWANCE_IRQ_MAX)   return -1;
+    if (pci_count > ALLOWANCE_PCI_MAX)   return -1;
     if (mmio_count > 0 && !mmio) return -1;
     if (irq_count > 0 && !irq)   return -1;
+    if (pci_count > 0 && !pci)   return -1;
 
     struct Allowance *al = kmalloc(sizeof(*al), KP_ZERO);
     if (!al) return -1;
@@ -116,6 +126,8 @@ int proc_confer_allowance(struct Proc *p,
     al->irq_count = irq_count;
     for (u32 i = 0; i < irq_count; i++) al->irq[i] = irq[i];
     al->dma_max = dma_max;
+    al->pci_count = pci_count;
+    for (u32 i = 0; i < pci_count; i++) al->pci[i] = pci[i];
     al->revoked = 0;
 
     // Install the new allowance UNDER g_proc_table_lock (audit F1): the confer
@@ -144,12 +156,15 @@ int proc_confer_allowance(struct Proc *p,
 // A revoked parent confers nothing (allowance_permits is false while revoked).
 bool allowance_confer_within_parent(struct Proc *parent,
                                     const struct hw_window *mmio, u32 mmio_count,
-                                    const u32 *irq, u32 irq_count, u64 dma_max) {
+                                    const u32 *irq, u32 irq_count, u64 dma_max,
+                                    const u32 *pci, u32 pci_count) {
     if (!parent)                          return false;
     if (mmio_count > ALLOWANCE_MMIO_MAX)  return false;
     if (irq_count > ALLOWANCE_IRQ_MAX)    return false;
+    if (pci_count > ALLOWANCE_PCI_MAX)    return false;
     if (mmio_count > 0 && !mmio)          return false;
     if (irq_count > 0 && !irq)            return false;
+    if (pci_count > 0 && !pci)            return false;
 
     for (u32 i = 0; i < mmio_count; i++) {
         if (mmio[i].size == 0) continue;   // empty window confers nothing
@@ -158,6 +173,10 @@ bool allowance_confer_within_parent(struct Proc *parent,
     }
     for (u32 i = 0; i < irq_count; i++) {
         if (!allowance_permits(parent, HW_RES_IRQ, irq[i], 0))
+            return false;
+    }
+    for (u32 i = 0; i < pci_count; i++) {
+        if (!allowance_permits(parent, HW_RES_PCI, pci[i], 0))
             return false;
     }
     // dma_max == 0 confers no DMA (within trivially); allowance_permits rejects
@@ -214,6 +233,9 @@ int allowance_clone_into(struct Proc *child, struct Proc *parent) {
                    ? ALLOWANCE_IRQ_MAX : src->irq_count;
     for (u32 i = 0; i < dst->irq_count; i++) dst->irq[i] = src->irq[i];
     dst->dma_max = src->dma_max;
+    dst->pci_count = src->pci_count > ALLOWANCE_PCI_MAX
+                   ? ALLOWANCE_PCI_MAX : src->pci_count;
+    for (u32 i = 0; i < dst->pci_count; i++) dst->pci[i] = src->pci[i];
     dst->revoked = __atomic_load_n(&src->revoked, __ATOMIC_ACQUIRE);
     // RELEASE-publish into the (not-yet-running) child for consistency with the
     // confer publish; the child has no concurrent reader yet, but the edge is

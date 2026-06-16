@@ -349,6 +349,14 @@ pub const T_SPAWN_IDENTITY_SET: u32 = 1 << 0;
 pub const T_SPAWN_ALLOWANCE_SET: u32 = 1 << 0;
 pub const T_ALLOWANCE_MMIO_MAX: usize = 8;
 pub const T_ALLOWANCE_IRQ_MAX: usize = 8;
+pub const T_ALLOWANCE_PCI_MAX: usize = 8;
+
+/// Pack a PCI (bus, dev, fn) into the u32 token the PCI allowance axis stores
+/// (the warden's mirror of the kernel `PCI_BDF_PACK`). Disjoint bit ranges
+/// (bus 16..23, dev 8..15, fn 0..7), so the pack is injective.
+pub const fn t_pci_bdf_pack(bus: u8, dev: u8, fname: u8) -> u32 {
+    ((bus as u32) << 16) | ((dev as u32) << 8) | (fname as u32)
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -364,16 +372,21 @@ pub struct TAllowanceDesc {
     pub irq_count: u32,
     pub irq: [u32; T_ALLOWANCE_IRQ_MAX],
     pub dma_max: u64,
+    pub pci_count: u32,
+    pub pci: [u32; T_ALLOWANCE_PCI_MAX], // packed bus<<16 | dev<<8 | fn
+    pub _pad_pci: u32,
 }
-const _: () = assert!(core::mem::size_of::<TAllowanceDesc>() == 176);
+const _: () = assert!(core::mem::size_of::<TAllowanceDesc>() == 216);
 const _: () = assert!(core::mem::offset_of!(TAllowanceDesc, mmio) == 0);
 const _: () = assert!(core::mem::offset_of!(TAllowanceDesc, mmio_count) == 128);
 const _: () = assert!(core::mem::offset_of!(TAllowanceDesc, irq_count) == 132);
 const _: () = assert!(core::mem::offset_of!(TAllowanceDesc, irq) == 136);
 const _: () = assert!(core::mem::offset_of!(TAllowanceDesc, dma_max) == 168);
+const _: () = assert!(core::mem::offset_of!(TAllowanceDesc, pci_count) == 176);
+const _: () = assert!(core::mem::offset_of!(TAllowanceDesc, pci) == 180);
 
 impl TAllowanceDesc {
-    /// An empty descriptor (no MMIO/IRQ/DMA conferred). Build one, push the
+    /// An empty descriptor (no MMIO/IRQ/DMA/PCI conferred). Build one, push the
     /// device's resources, then pass it to `Command::allowance`.
     pub const fn empty() -> Self {
         TAllowanceDesc {
@@ -382,6 +395,9 @@ impl TAllowanceDesc {
             irq_count: 0,
             irq: [0; T_ALLOWANCE_IRQ_MAX],
             dma_max: 0,
+            pci_count: 0,
+            pci: [0; T_ALLOWANCE_PCI_MAX],
+            _pad_pci: 0,
         }
     }
     /// Add a permitted MMIO window. Returns false if the 8-window cap is full.
@@ -407,6 +423,18 @@ impl TAllowanceDesc {
     /// Set the per-DMA-buffer byte ceiling (0 = no DMA permitted).
     pub fn set_dma_max(&mut self, dma_max: u64) {
         self.dma_max = dma_max;
+    }
+    /// Add a permitted PCI function (bus, dev, fn). Returns false if the 8-slot
+    /// cap is full. The driver may then SYS_PCI_CLAIM a device id that resolves
+    /// to this (bus,dev,fn) -- "a PCI device's allowance IS its claimed BARs".
+    pub fn push_pci(&mut self, bus: u8, dev: u8, fname: u8) -> bool {
+        let i = self.pci_count as usize;
+        if i >= T_ALLOWANCE_PCI_MAX {
+            return false;
+        }
+        self.pci[i] = t_pci_bdf_pack(bus, dev, fname);
+        self.pci_count += 1;
+        true
     }
 }
 

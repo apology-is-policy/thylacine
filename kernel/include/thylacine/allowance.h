@@ -22,8 +22,8 @@
 //
 // Spec mapping (specs/allowance.tla -- the KERNEL mechanism; the warden is
 // the implicit privileged actor that drives Confer/Revoke):
-//   the mmio/irq/dma fields  <-> conferred == allowance (the live gate set);
-//                                IMMUTABLE after confer, so the spec's
+//   the mmio/irq/dma/pci      <-> conferred == allowance (the live gate set);
+//   fields                       IMMUTABLE after confer, so the spec's
 //                                AllowanceWithinConferred (never widened)
 //                                holds structurally.
 //   revoked                   <-> allowance[d] = {} on Revoke.
@@ -44,6 +44,16 @@ struct Proc;
 
 #define ALLOWANCE_MMIO_MAX  8   // permitted MMIO PA windows
 #define ALLOWANCE_IRQ_MAX   8   // permitted IRQ INTIDs (SPIs >= 32)
+#define ALLOWANCE_PCI_MAX   8   // permitted PCI functions (packed bus,dev,fn)
+
+// Pack a PCI (bus, dev, fn) triple into the u32 token the HW_RES_PCI axis
+// stores + allowance_permits matches on. The three byte fields occupy disjoint
+// bit ranges (bus 16..23, dev 8..15, fn 0..7), so the pack is injective over
+// (u8,u8,u8) and a real bus/dev/fn (bus 0..255, dev 0..31, fn 0..7) round-trips
+// with no aliasing. "A PCI device's allowance IS its claimed BARs"
+// (docs/MENAGERIE.md section 4) -- this is the per-(bus,dev,fn) token.
+#define PCI_BDF_PACK(bus, dev, fn) \
+    (((u32)(u8)(bus) << 16) | ((u32)(u8)(dev) << 8) | (u32)(u8)(fn))
 
 // A permitted MMIO PA window: [base, base + size).
 struct hw_window { u64 base; u64 size; };
@@ -57,6 +67,13 @@ struct Allowance {
     u32              irq[ALLOWANCE_IRQ_MAX];
     u32              irq_count;
     u64              dma_max;       // max bytes per KObj_DMA; 0 = no DMA permitted
+
+    // The permitted PCI functions, each a PCI_BDF_PACK(bus,dev,fn). A NARROWED
+    // driver may SYS_PCI_CLAIM only a (bus,dev,fn) listed here -- the per-device
+    // PCI axis ("a PCI device's allowance IS its claimed BARs", MENAGERIE.md
+    // section 4). IMMUTABLE after confer, like the other axes.
+    u32              pci[ALLOWANCE_PCI_MAX];
+    u32              pci_count;
 
     // Set on DeviceRemoved (proc_revoke_allowance) -- the spec's Revoke
     // emptying allowance[d]. Once set, the allowance permits nothing. Written
@@ -79,7 +96,8 @@ struct Allowance {
 //   HW_RES_MMIO: a = PA base, b = byte size  -> [a, a+b) within one window.
 //   HW_RES_IRQ:  a = INTID,   b = 0          -> a in the irq set.
 //   HW_RES_DMA:  a = byte size, b = 0        -> a in (0, dma_max].
-enum hw_res_kind { HW_RES_MMIO, HW_RES_IRQ, HW_RES_DMA };
+//   HW_RES_PCI:  a = PCI_BDF_PACK(b,d,f), b = 0 -> a in the pci set.
+enum hw_res_kind { HW_RES_MMIO, HW_RES_IRQ, HW_RES_DMA, HW_RES_PCI };
 
 // CreateBegin's gate check (specs/allowance.tla). True iff p may create the
 // requested resource. A NULL allowance is BROAD -> true (subject to the
@@ -90,14 +108,13 @@ enum hw_res_kind { HW_RES_MMIO, HW_RES_IRQ, HW_RES_DMA };
 bool allowance_permits(struct Proc *p, enum hw_res_kind kind, u64 a, u64 b);
 
 // True iff p carries a NARROWED allowance (p->allowance != NULL). The
-// fail-closed gate for hw-handle-minting paths the allowance does NOT yet
-// model a resource axis for -- at v1.0 that is SYS_PCI_CLAIM (KObj_PCI): the
-// allowance has MMIO/IRQ/DMA axes but no per-(bus,dev,fn) PCI axis, so a
-// narrowed driver is denied PCI claims OUTRIGHT (it cannot reach a device its
-// allowance does not bound). A broad Proc (the warden + the trusted servers)
-// is unaffected. The per-device PCI allowance ("a PCI device's allowance IS
-// its claimed BARs", MENAGERIE.md §4) replaces this blanket reject when the
-// PCIe discovery source lands (build-arc step 6). The complement of "broad".
+// "drivers are leaves" gate (MENAGERIE.md section 13.2): rfork_internal denies
+// a narrowed driver a child Proc, so no hw-capable grandchild can inherit a
+// clone of the allowance that would survive the parent's per-Proc revoke +
+// thread-group-scoped DeviceRemoved terminate (5e-4 F2). A broad Proc (the
+// warden + the trusted servers, allowance == NULL) is unaffected. SYS_PCI_CLAIM
+// no longer uses this -- it gates on the per-(bus,dev,fn) PCI axis (HW_RES_PCI)
+// since build-arc step 6. The complement of "broad".
 bool allowance_is_narrowed(struct Proc *p);
 
 // CreateCommit (specs/allowance.tla): install a hw handle, re-checking the
@@ -122,7 +139,8 @@ hidx_t allowance_handle_alloc(struct Proc *p, enum kobj_kind kind,
 // reach on a child (I-2's hardware-axis analog).
 int proc_confer_allowance(struct Proc *p,
                           const struct hw_window *mmio, u32 mmio_count,
-                          const u32 *irq, u32 irq_count, u64 dma_max);
+                          const u32 *irq, u32 irq_count, u64 dma_max,
+                          const u32 *pci, u32 pci_count);
 
 // True iff `parent` may CONFER the described allowance -- i.e. the requested
 // set is within the parent's OWN allowance, so the confer is a NARROWING and
@@ -131,13 +149,15 @@ int proc_confer_allowance(struct Proc *p,
 // A BROAD parent (allowance == NULL) may confer anything (allowance_permits is
 // true for every resource). A NARROWED parent may confer only a subset of its
 // own: each requested MMIO window must lie within one parent window, each IRQ
-// must be in the parent's set, and dma_max must not exceed the parent's. An
-// empty axis (count 0, a size-0 window, or dma_max 0) confers nothing and is
-// trivially within. A REVOKED parent confers nothing (allowance_permits is
-// false while revoked). The spawn path rejects the spawn with -1 on false.
+// must be in the parent's set, each PCI (bus,dev,fn) must be in the parent's
+// pci set, and dma_max must not exceed the parent's. An empty axis (count 0, a
+// size-0 window, or dma_max 0) confers nothing and is trivially within. A
+// REVOKED parent confers nothing (allowance_permits is false while revoked).
+// The spawn path rejects the spawn with -1 on false.
 bool allowance_confer_within_parent(struct Proc *parent,
                                     const struct hw_window *mmio, u32 mmio_count,
-                                    const u32 *irq, u32 irq_count, u64 dma_max);
+                                    const u32 *irq, u32 irq_count, u64 dma_max,
+                                    const u32 *pci, u32 pci_count);
 
 // Revoke a driver's allowance on DeviceRemoved (specs/allowance.tla Revoke).
 // Sets revoked under the lock -- closing the gate for in-flight AND future

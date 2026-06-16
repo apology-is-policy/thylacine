@@ -127,7 +127,8 @@ holding `al->lock` across it is sound (`kernel/allowance.c:69`).
 ```c
 int proc_confer_allowance(struct Proc *p,
                           const struct hw_window *mmio, u32 mmio_count,
-                          const u32 *irq, u32 irq_count, u64 dma_max);
+                          const u32 *irq, u32 irq_count, u64 dma_max,
+                          const u32 *pci, u32 pci_count);  // pci = PCI_BDF_PACK tokens
 ```
 
 Confer a narrowed allowance on a freshly-spawned driver Proc. Deep-copies the
@@ -204,29 +205,56 @@ and a retry — or another driver's create — can succeed (`kernel/syscall.c:23
 the allowance never grants: a Proc with no cap is rejected before the allowance
 is ever consulted.
 
-### The fourth door: `SYS_PCI_CLAIM` (fail-closed at v1.0 — audit F1)
+### The fourth door: `SYS_PCI_CLAIM` — the per-`(bus,dev,fn)` PCI axis (build-arc step 6a, #159)
 
 `KObj_PCI` is the **fourth** hardware-authority handle (a claimed PCI function
 exposes its BARs as mappable MMIO, its config space, INTx, DMA — all in
 `KOBJ_KIND_HW_MASK`, non-transferable). `sys_pci_claim_handler`
-(`kernel/syscall.c:634`) is therefore a hardware-handle-minting path I-34 must
-govern — but the v1.0 allowance struct has **no per-`(bus,dev,fn)` PCI axis**
-(only MMIO windows / IRQ INTIDs / a DMA cap). Left ungated, a driver the warden
-narrowed to one device's MMIO could `SYS_PCI_CLAIM` *another* device's PCI
-function — the exact cross-device-authority leak I-34 forbids, through the PCI
-door. This is the **primary device path on RPi5** (RP1 — GPIO/UART/USB/GbE —
+(`kernel/syscall.c`) is therefore a hardware-handle-minting path I-34 must
+govern. This is the **primary device path on RPi5** (RP1 — GPIO/UART/USB/GbE —
 lives behind PCIe), so it is not an edge case once the warden binds PCI drivers.
 
-The v1.0 close is **fail-closed**: a *narrowed* Proc is denied `SYS_PCI_CLAIM`
-outright (`if (allowance_is_narrowed(p)) return -1;`, `kernel/syscall.c`, after
-the `CAP_HW_CREATE` check). A narrowed driver cannot claim PCI at all — it
-cannot reach a device its allowance does not bound. A **broad** Proc (the warden
-+ the trusted servers, `allowance == NULL`) is unaffected, so v1.0 (where every
-PCI-claimer is broad — the netdev-pci-test probe) does not regress. The
-per-device PCI allowance — "a PCI device's allowance IS its claimed BARs"
-(`docs/MENAGERIE.md` §4) — replaces this blanket reject when the PCIe discovery
-source lands (**build-arc step 6**); the fail-closed gate is the sound v1.0
-floor until then, not a deferral of the soundness.
+The allowance carries a fourth axis: `pci[ALLOWANCE_PCI_MAX]` + `pci_count`,
+each entry a `PCI_BDF_PACK(bus, dev, fn)` token (the three byte-fields in
+disjoint bit ranges — bus 16..23, dev 8..15, fn 0..7 — so the pack is injective
+over `(u8,u8,u8)`). `HW_RES_PCI` is the matching `allowance_permits` kind. "A
+PCI device's allowance IS its claimed BARs" (`docs/MENAGERIE.md` §4): the warden
+confers the specific function(s) the driver may claim, and `SYS_PCI_CLAIM` gates
+on the **resolved** `(bus,dev,fn)`, replacing the v1.0 fail-closed reject (the
+I-34 round's F1, which denied a narrowed Proc *any* PCI claim — sound but
+crude).
+
+The handler runs the same **two-step** create as the other three axes, with a
+resolve step in front:
+
+1. `CAP_HW_CREATE` gate (unchanged — the allowance never grants).
+2. **Resolve** `virtio_device_id → (bus,dev,fn)` read-only via
+   `kobj_pci_resolve_bdf` (`kernel/pci_handle.c`) — the **same first match**
+   `kobj_pci_claim` will pick (the device table is boot-built + immutable, so
+   the resolution is deterministic; the gated bdf == the claimed bdf, no TOCTOU).
+3. **CreateBegin**: `allowance_permits(p, HW_RES_PCI, PCI_BDF_PACK(bus,dev,fn),
+   0)`. A **broad** Proc (`allowance == NULL`) passes (so the netdev-pci-test
+   probe + the trusted servers are unaffected); a **narrowed** driver passes
+   only for a conferred function. Gating **before** the claim means a
+   not-permitted device is never enabled (MEM-decode + bus-master) only to be
+   rolled back.
+4. `kobj_pci_claim` (the exclusivity-enforcing constructor).
+5. **CreateCommit**: `allowance_handle_alloc(p, KOBJ_PCI, R|W|MAP, k)` — the
+   install re-checks `revoked` under `allowance->lock`, so a `DeviceRemoved`
+   racing the claim aborts here (the in-flight create loses the race) rather
+   than leaving a live `KObj_PCI` over a revoked allowance. On `-1`,
+   `kobj_pci_unref(k)` rolls back (quiesce + free the bdf slot + BARs).
+
+A driver that conferred **no** PCI bdf (`pci_count == 0`) is still denied every
+PCI claim — identical to the old fail-closed reject for that case — so the
+change is a strict *relaxation* for drivers that confer a function and identical
+for those that do not. The warden's confer of the bdf lands at **build-arc step
+6b** (the PCIe discovery source enumerates config space → typed `(bus,dev,fn)`
+nodes → the warden binds netdev-pci narrowed). **v1.x seam**: `SYS_PCI_CLAIM`
+claims by `virtio_device_id` (the kernel resolves the *first* match), so a
+multi-function device with two functions of the same id needs a claim-by-bdf
+ABI to disambiguate; with one NET function on QEMU-virt the resolution is
+unambiguous.
 
 ### Drivers are leaves: a narrowed Proc may not spawn (5e-4 audit F2)
 
@@ -283,10 +311,14 @@ caller (who zero-fills the struct) keeps the broad/inherit default.
 | `allowance_flags` | 88 | `SPAWN_ALLOWANCE_SET` (bit 0); unknown bits → `-1` |
 | `_pad_allow` | 92 | must be 0 at v1.0 (8-align + forward-compat slot) |
 
-The descriptor is a fixed **176-byte** ABI type (`struct t_allowance_desc`):
+The descriptor is a fixed **216-byte** ABI type (`struct t_allowance_desc`):
 `mmio[8]{base,size}` (128) + `mmio_count` (@128) + `irq_count` (@132) + `irq[8]`
-(@136) + `dma_max` (@168). The `[8]` arrays mirror `ALLOWANCE_MMIO_MAX` /
-`ALLOWANCE_IRQ_MAX` (a `_Static_assert` in `kernel/syscall.c` pins the equality).
+(@136) + `dma_max` (@168) + `pci_count` (@176) + `pci[8]` (@180, each a
+`PCI_BDF_PACK(bus,dev,fn)`) + `_pad_pci` (@212, explicit so the 216 stays
+8-aligned with no implicit padding). The PCI axis (build-arc step 6a) is
+**appended**, so every prior offset is unchanged. The `[8]` arrays mirror
+`ALLOWANCE_MMIO_MAX` / `ALLOWANCE_IRQ_MAX` / `ALLOWANCE_PCI_MAX` (a
+`_Static_assert` in `kernel/syscall.c` pins each equality).
 Both layouts are offset-pinned identically across the kernel, the libt C mirror
 (`struct t_sys_spawn_args` / `struct t_allowance_desc`), and the libthyla-rs
 `TSpawnArgs` / `TAllowanceDesc` (`offset_of!` asserts) — so `sys_load_spawn_args`
@@ -325,7 +357,8 @@ clean pre-fork `-1` with no child created.
 ```c
 bool allowance_confer_within_parent(struct Proc *parent,
                                     const struct hw_window *mmio, u32 mmio_count,
-                                    const u32 *irq, u32 irq_count, u64 dma_max);
+                                    const u32 *irq, u32 irq_count, u64 dma_max,
+                                    const u32 *pci, u32 pci_count);
 ```
 
 True iff the requested set is within the **parent's own** allowance — so a
@@ -365,7 +398,8 @@ must remember to pair revoke + terminate" caveat: the pairing is now structural.
 ### The userspace affordance
 
 `libthyla-rs` exposes `Command::allowance(TAllowanceDesc)` + the
-`TAllowanceDesc::{empty, push_mmio, push_irq, set_dma_max}` builder; the warden
+`TAllowanceDesc::{empty, push_mmio, push_irq, set_dma_max, push_pci}` builder
+(`push_pci(bus, dev, fn)` packs the `(bus,dev,fn)` via `t_pci_bdf_pack`); the warden
 computes a driver's `node INTERSECT manifest` allowance, builds the descriptor,
 and passes it to the spawn. The libt C mirror exposes `struct t_allowance_desc`
 + `T_SPAWN_ALLOWANCE_SET` for a C driver-spawner. The kernel gates + confers; a
@@ -595,7 +629,7 @@ revoke-vs-create race the scripture names; its runtime regression is
 
 ---
 
-## Tests (`kernel/test/test_allowance.c`, 10 cases)
+## Tests (`kernel/test/test_allowance.c`, 15 cases)
 
 | Test | Covers |
 |---|---|
@@ -609,6 +643,11 @@ revoke-vs-create race the scripture names; its runtime regression is
 | **`allowance.handle_alloc_revoked_aborts`** | **THE revoke-vs-create race regression** (the spec's `BUGGY_COMMIT_NO_RECHECK`): a narrowed non-revoked install succeeds; after `proc_revoke_allowance`, the commit aborts (`-1`). The buggy variant (no re-check) would install here and violate `HandlesWithinAllowance` |
 | `allowance.clone_inherit` | broad parent → child NULL; narrowed parent → child gets an equally-narrow **own** deep copy (not the same pointer) inheriting the conferred set but never broader; revoked parent → child **born revoked** (permits nothing) |
 | `allowance.free_null_tolerant` | `allowance_free` on a NULL allowance → no-op; confer-then-free → NULLs the pointer |
+| `allowance.pci_membership` (6a) | the per-`(bus,dev,fn)` PCI axis: the conferred bdf permits, a different bus/dev/fn denies, a never-conferred kind denies, revoked denies; `PCI_BDF_PACK` injectivity; the live rng-pci resolve leg (`kobj_pci_resolve_bdf`, conferred-own permits / conferred-other denies) |
+| **`allowance.pci_claim_handler_gate`** (6a) | **the end-to-end `SYS_PCI_CLAIM` gate** (audit F2): drives the live `sys_pci_claim_handler` on a narrowed kproc — narrowed-to-other-fn is DENIED with no claim leak (`kobj_pci_live_count` unchanged); narrowed-to-own-bdf is ALLOWED (count +1), released on close. Guards against a refactor that drops the gate call (the predicate test would still pass) |
+| `allowance.confer_within_parent` (5a) | the I-2 hardware-axis narrowing gate: broad parent confers anything; narrowed parent confers only a subset (mmio/irq/dma/**pci**); wider-on-any-axis / outside / revoked-parent all reject |
+| `allowance.revoke_on_group_terminate` (#160) | `proc_group_terminate` revokes the allowance as its first step (the warden's killgrp is revoke-then-terminate atomically); a broad Proc terminate is a safe no-op |
+| `allowance.narrowed_proc_cannot_spawn` (5e-4 F2) | "drivers are leaves": a real `rfork` from a temporarily-narrowed kproc returns `-1` before `proc_alloc`; broad spawning is unaffected before + after |
 
 The tests use the `test_handle.c` Proc make/drop idiom: `proc_alloc` gives a
 fresh Proc with an empty handle table + a NULL (broad) allowance; the drop

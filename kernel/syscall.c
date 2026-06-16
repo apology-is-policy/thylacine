@@ -643,28 +643,37 @@ s64 sys_pci_claim_handler(u64 virtio_device_id, u64 a1) {
     if ((__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_HW_CREATE) == 0)
         return -1;
 
-    // I-34 (specs/allowance.tla): SYS_PCI_CLAIM is the fourth hw-handle-minting
-    // path, but the v1.0 allowance has no per-(bus,dev,fn) PCI axis -- only
-    // MMIO/IRQ/DMA. A NARROWED driver is therefore denied a PCI claim OUTRIGHT
-    // (fail-closed: it cannot reach a device its allowance does not bound),
-    // closing the bypass where a driver narrowed to one device's MMIO could
-    // SYS_PCI_CLAIM another's PCI function. A broad Proc (the warden + the
-    // trusted servers, allowance == NULL) is unaffected. The per-device PCI
-    // allowance ("a PCI device's allowance IS its claimed BARs", MENAGERIE.md
-    // §4) replaces this blanket reject when the PCIe source lands (step 6).
-    if (allowance_is_narrowed(p))                    return -1;
-
     // A VIRTIO device id is a u16 on the wire; reject anything wider so the
     // (u32) narrowing below cannot alias a real id.
     if (virtio_device_id > (u64)0xFFFFFFFFu)         return -1;
 
+    // I-34 CreateBegin (specs/allowance.tla; build-arc step 6): SYS_PCI_CLAIM is
+    // the fourth hw-handle-minting path. Resolve the device id -> (bus,dev,fn)
+    // read-only (the SAME first match kobj_pci_claim will pick), then gate it
+    // against the calling Proc's per-(bus,dev,fn) PCI allowance axis. A broad
+    // Proc (the warden + the trusted servers, allowance == NULL) passes; a
+    // NARROWED driver may claim only a function the warden conferred -- closing
+    // the bypass where a driver narrowed to one device could claim another's PCI
+    // function ("a PCI device's allowance IS its claimed BARs", MENAGERIE.md §4).
+    // Gating on the resolved bdf BEFORE the claim means a not-permitted device
+    // is never enabled (MEM-decode + bus-master) only to be rolled back.
+    u8 bus, dev, fn;
+    if (kobj_pci_resolve_bdf((u32)virtio_device_id, &bus, &dev, &fn) != 0)
+        return -1;
+    if (!allowance_permits(p, HW_RES_PCI, PCI_BDF_PACK(bus, dev, fn), 0))
+        return -1;
+
     struct KObj_PCI *k = kobj_pci_claim((u32)virtio_device_id);
     if (!k)                                          return -1;
 
-    // Fixed R|W|MAP, NO TRANSFER. We never request TRANSFER; and even a holder
-    // that somehow had it could not move the handle -- KOBJ_PCI is in
-    // KOBJ_KIND_HW_MASK, so handle_dup + the 9P path reject it (I-5).
-    hidx_t h = handle_alloc(p, KOBJ_PCI,
+    // I-34 CreateCommit: install through the allowance gate, re-checking the
+    // `revoked` flag UNDER the allowance lock proc_revoke_allowance takes -- so a
+    // DeviceRemoved racing the claim aborts here (the in-flight create loses the
+    // race) rather than leaving a live KObj_PCI handle over a revoked allowance
+    // (allowance.tla revoke_race / BUGGY_COMMIT_NO_RECHECK). A broad Proc's
+    // allowance_handle_alloc is plain handle_alloc. Fixed R|W|MAP, NO TRANSFER:
+    // KOBJ_PCI is in KOBJ_KIND_HW_MASK, so handle_dup + the 9P path reject it (I-5).
+    hidx_t h = allowance_handle_alloc(p, KOBJ_PCI,
                             (rights_t)(RIGHT_READ | RIGHT_WRITE | RIGHT_MAP), k);
     if (h < 0) {
         // Roll back the claim so the (bus,dev,fn) slot + BAR PA claims free for
@@ -4760,6 +4769,8 @@ struct spawn_allowance {
     u32              irq[ALLOWANCE_IRQ_MAX];
     u32              irq_count;
     u64              dma_max;
+    u32              pci[ALLOWANCE_PCI_MAX];
+    u32              pci_count;
 };
 
 // The user-ABI struct t_allowance_desc uses fixed [8] arrays; pin them equal to
@@ -4769,11 +4780,13 @@ _Static_assert(ALLOWANCE_MMIO_MAX == 8,
                "t_allowance_desc.mmio[8] mirrors ALLOWANCE_MMIO_MAX");
 _Static_assert(ALLOWANCE_IRQ_MAX == 8,
                "t_allowance_desc.irq[8] mirrors ALLOWANCE_IRQ_MAX");
+_Static_assert(ALLOWANCE_PCI_MAX == 8,
+               "t_allowance_desc.pci[8] mirrors ALLOWANCE_PCI_MAX");
 
 // Field-by-field copy of the allowance bundle. The kernel has no memcpy, so a
-// whole-struct assignment (180 bytes) would emit an undefined memcpy -- copy
-// only the live entries [0..count) explicitly (each hw_window is a 16-byte
-// copy clang inlines). Leaves dst's tail [count..MAX) untouched (never read).
+// whole-struct assignment would emit an undefined memcpy -- copy only the live
+// entries [0..count) explicitly (each hw_window is a 16-byte copy clang
+// inlines). Leaves dst's tail [count..MAX) untouched (never read).
 static void spawn_allowance_copy(struct spawn_allowance *dst,
                                  const struct spawn_allowance *src) {
     dst->set        = src->set;
@@ -4784,6 +4797,9 @@ static void spawn_allowance_copy(struct spawn_allowance *dst,
     for (u32 i = 0; i < src->irq_count && i < ALLOWANCE_IRQ_MAX; i++)
         dst->irq[i] = src->irq[i];
     dst->dma_max    = src->dma_max;
+    dst->pci_count  = src->pci_count;
+    for (u32 i = 0; i < src->pci_count && i < ALLOWANCE_PCI_MAX; i++)
+        dst->pci[i] = src->pci[i];
 }
 
 // Kernel-side spawn args for SYS_SPAWN_FULL_ARGV. Mirrors
@@ -4866,7 +4882,8 @@ static void sys_spawn_full_argv_thunk(void *arg) {
     if (allowance.set) {
         if (proc_confer_allowance(p, allowance.mmio, allowance.mmio_count,
                                   allowance.irq, allowance.irq_count,
-                                  allowance.dma_max) != 0) {
+                                  allowance.dma_max,
+                                  allowance.pci, allowance.pci_count) != 0) {
             // audit F2: no inherited fd is installed yet (the install loop is
             // below), so the bumped spoor refs in spoors_local[] would leak --
             // clunk all of them, mirroring the fail-fd-install arm's clunk of
@@ -5040,7 +5057,9 @@ int sys_spawn_full_argv_identity_for_proc(struct Proc *p,
                                             want_allowance->mmio_count,
                                             want_allowance->irq,
                                             want_allowance->irq_count,
-                                            want_allowance->dma_max))
+                                            want_allowance->dma_max,
+                                            want_allowance->pci,
+                                            want_allowance->pci_count))
             return -1;
     }
 
@@ -5269,6 +5288,7 @@ static s64 sys_spawn_full_argv_handler(u64 req_va) {
         }
         if (desc.mmio_count > ALLOWANCE_MMIO_MAX)      return -1;
         if (desc.irq_count > ALLOWANCE_IRQ_MAX)        return -1;
+        if (desc.pci_count > ALLOWANCE_PCI_MAX)        return -1;
         allow_kbuf.set        = true;
         allow_kbuf.mmio_count = desc.mmio_count;
         for (u32 i = 0; i < desc.mmio_count; i++) {
@@ -5279,6 +5299,9 @@ static s64 sys_spawn_full_argv_handler(u64 req_va) {
         for (u32 i = 0; i < desc.irq_count; i++)
             allow_kbuf.irq[i] = desc.irq[i];
         allow_kbuf.dma_max = desc.dma_max;
+        allow_kbuf.pci_count = desc.pci_count;
+        for (u32 i = 0; i < desc.pci_count; i++)
+            allow_kbuf.pci[i] = desc.pci[i];
     }
 
     return (s64)sys_spawn_full_argv_identity_for_proc(

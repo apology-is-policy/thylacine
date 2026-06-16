@@ -531,6 +531,15 @@ Scripture-first, model-first for the allowance:
    needs the source.)
 6. The PCIe/USB sources + the RPi driver set + the real-hardware bring-up — each
    PCIe/USB source is *the same `DiscoverySource` abstraction*, one per bus.
+   - **6a (landed, #159)**: the kernel half — the **per-`(bus,dev,fn)` PCI
+     allowance axis** (`HW_RES_PCI`; `§4`'s "a PCI device's allowance IS its
+     claimed BARs"). `SYS_PCI_CLAIM` now gates on the resolved `(bus,dev,fn)`,
+     replacing the I-34-round fail-closed reject, so a warden-narrowed PCI driver
+     can claim exactly its function. See `docs/reference/117-allowance.md` §"The
+     fourth door".
+   - **6b**: the userspace half — a PCIe bus-enumerator source Proc (config-space
+     scan → typed `(bus,dev,fn)` nodes) + the warden binds netdev-pci narrowed
+     (the live I-34-on-PCI proof). Then **net-2** resumes on the PCI NIC.
 
 ---
 

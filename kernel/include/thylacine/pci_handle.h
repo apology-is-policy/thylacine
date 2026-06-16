@@ -136,6 +136,13 @@ void kobj_pci_init(void);
 // until the last unref.
 struct KObj_PCI *kobj_pci_claim(u32 virtio_device_id);
 
+// Read-only (bus,dev,fn) resolution for a virtio_device_id -- the same first
+// match kobj_pci_claim picks (the device table is boot-built + immutable, so
+// it is deterministic). Returns 0 + fills bus/dev/fn on a match; -1 otherwise.
+// The SYS_PCI_CLAIM allowance gate (I-34 / HW_RES_PCI) resolves the function
+// here, before claiming, so it checks the exact (bus,dev,fn) the claim resolves.
+int kobj_pci_resolve_bdf(u32 virtio_device_id, u8 *bus, u8 *dev, u8 *fn);
+
 // Refcount ops. Mirror kobj_mmio_ref / kobj_mmio_unref.
 void kobj_pci_ref(struct KObj_PCI *k);
 

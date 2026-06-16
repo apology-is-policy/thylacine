@@ -383,6 +383,23 @@ struct KObj_MMIO *kobj_pci_bar_mmio(struct KObj_PCI *k, u32 bar_index) {
     return k->bars[bar_index].mmio;
 }
 
+// Read-only (bus,dev,fn) resolution for a virtio_device_id -- the SAME first
+// match kobj_pci_claim will pick (the device table is built once at boot +
+// never mutated, so this is deterministic and agrees with the subsequent
+// claim). The SYS_PCI_CLAIM allowance gate resolves the function HERE, before
+// claiming, so it checks the EXACT (bus,dev,fn) the claim resolves -- and so a
+// not-permitted device is never enabled (bus-master) only to be rolled back.
+// Returns 0 + fills bus/dev/fn on a match; -1 if no such device / not inited.
+int kobj_pci_resolve_bdf(u32 virtio_device_id, u8 *bus, u8 *dev, u8 *fn) {
+    if (!g_pci_initialized) return -1;
+    struct virtio_pci_dev *d = virtio_pci_find_by_device_id(virtio_device_id);
+    if (!d || !d->cfg) return -1;
+    if (bus) *bus = d->bus;
+    if (dev) *dev = d->dev;
+    if (fn)  *fn  = d->fn;
+    return 0;
+}
+
 struct KObj_PCI *kobj_pci_claim(u32 virtio_device_id) {
     if (!g_pci_initialized) return NULL;
 

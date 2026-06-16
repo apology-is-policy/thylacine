@@ -1586,6 +1586,9 @@ _Static_assert(__builtin_offsetof(struct t_pci_info, virtio_device_id) == 204,
 //   irq_count    u32  -- 0..8; entries [irq_count..8) ignored
 //   irq[8]       8 x u32                       -- permitted IRQ INTIDs (SPI>=32)
 //   dma_max      u64  -- max bytes per KObj_DMA; 0 = no DMA permitted
+//   pci_count    u32  -- 0..8; entries [pci_count..8) ignored
+//   pci[8]       8 x u32 (packed bus<<16|dev<<8|fn) -- permitted PCI functions
+//   _pad_pci     u32  -- explicit tail pad (216 = 8-aligned; no implicit pad)
 struct t_hw_window {
     u64 base;
     u64 size;
@@ -1597,12 +1600,16 @@ struct t_allowance_desc {
     u32 irq_count;
     u32 irq[8];
     u64 dma_max;
+    u32 pci_count;
+    u32 pci[8];
+    u32 _pad_pci;
 };
 
-_Static_assert(sizeof(struct t_allowance_desc) == 176,
+_Static_assert(sizeof(struct t_allowance_desc) == 216,
                "struct t_allowance_desc is a SYS_SPAWN_FULL_ARGV ABI type "
-               "-- pinned at 176 bytes (mmio[8] 128 + mmio_count 4 + "
-               "irq_count 4 + irq[8] 32 + dma_max 8); no implicit padding");
+               "-- pinned at 216 bytes (mmio[8] 128 + mmio_count 4 + "
+               "irq_count 4 + irq[8] 32 + dma_max 8 + pci_count 4 + pci[8] 32 "
+               "+ _pad_pci 4); no implicit padding");
 _Static_assert(__builtin_offsetof(struct t_allowance_desc, mmio) == 0,
                "t_allowance_desc.mmio at ABI offset 0");
 _Static_assert(__builtin_offsetof(struct t_allowance_desc, mmio_count) == 128,
@@ -1613,6 +1620,10 @@ _Static_assert(__builtin_offsetof(struct t_allowance_desc, irq) == 136,
                "t_allowance_desc.irq at ABI offset 136");
 _Static_assert(__builtin_offsetof(struct t_allowance_desc, dma_max) == 168,
                "t_allowance_desc.dma_max at ABI offset 168");
+_Static_assert(__builtin_offsetof(struct t_allowance_desc, pci_count) == 176,
+               "t_allowance_desc.pci_count at ABI offset 176");
+_Static_assert(__builtin_offsetof(struct t_allowance_desc, pci) == 180,
+               "t_allowance_desc.pci at ABI offset 180");
 
 // SYS_SRV_PEER result — the kernel-stamped peer identity of a /srv
 // connection (CORVUS-DESIGN.md §6.3). The kernel writes one of these to

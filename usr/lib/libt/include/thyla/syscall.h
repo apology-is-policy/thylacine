@@ -308,9 +308,12 @@ struct t_allowance_desc {
     unsigned int       irq_count;
     unsigned int       irq[8];
     unsigned long      dma_max;
+    unsigned int       pci_count;
+    unsigned int       pci[8];   // packed bus<<16 | dev<<8 | fn
+    unsigned int       _pad_pci;
 };
-_Static_assert(sizeof(struct t_allowance_desc) == 176,
-               "struct t_allowance_desc must mirror the kernel's 176-byte ABI");
+_Static_assert(sizeof(struct t_allowance_desc) == 216,
+               "struct t_allowance_desc must mirror the kernel's 216-byte ABI");
 _Static_assert(__builtin_offsetof(struct t_allowance_desc, mmio) == 0,
                "t_allowance_desc.mmio at ABI offset 0");
 _Static_assert(__builtin_offsetof(struct t_allowance_desc, mmio_count) == 128,
@@ -321,6 +324,10 @@ _Static_assert(__builtin_offsetof(struct t_allowance_desc, irq) == 136,
                "t_allowance_desc.irq at ABI offset 136");
 _Static_assert(__builtin_offsetof(struct t_allowance_desc, dma_max) == 168,
                "t_allowance_desc.dma_max at ABI offset 168");
+_Static_assert(__builtin_offsetof(struct t_allowance_desc, pci_count) == 176,
+               "t_allowance_desc.pci_count at ABI offset 176");
+_Static_assert(__builtin_offsetof(struct t_allowance_desc, pci) == 180,
+               "t_allowance_desc.pci at ABI offset 180");
 
 // A-1a: identity_flags bits (mirror SPAWN_IDENTITY_* in the kernel header).
 #define T_SPAWN_IDENTITY_SET   (1u << 0)
