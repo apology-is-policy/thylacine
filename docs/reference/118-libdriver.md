@@ -351,11 +351,22 @@ passes to `Command::allowance` -- `push_mmio` each window, `push_irq` each INTID
 `BoundResources`, the authority the kernel enforces and the resources the driver
 maps cannot drift.
 
+Each MMIO window is **page-rounded** (`resource::page_round`, a pure `pub` helper)
+before it goes into the allowance: MMIO is mapped page-granular, so the kernel
+I-34 gate checks the driver's *page*-sized `SYS_MMIO_CREATE` against the allowance,
+and a sub-page device register (a virtio-mmio slot is 0x200) is only reachable by
+mapping its whole 4 KiB page. The descriptor keeps the exact (sub-page) window, so
+the driver still learns its precise slot address; the allowance covers the page so
+the map is admitted. For a virtio-mmio net slot this grants the page shared with an
+adjacent blk slot -- the documented #140 / net-2 co-residency over-grant. (5d-3:
+the bug this fixes is that a sub-page slot grant is unmappable -- the driver's
+page-map exceeds the slot window and the gate, correctly, rejects it.)
+
 ---
 
 ## Tests
 
-36 host tests (`cargo test -p libdriver --no-default-features --target <host>`):
+37 host tests (`cargo test -p libdriver --no-default-features --target <host>`):
 
 - **manifest** (7): parse the §6 example; `to_text` round-trip; wired-IRQ +
   no-DMA; defaults when optional fields absent; the size-unit parser
@@ -369,7 +380,9 @@ maps cannot drift.
   round-trip (full + empty axes); the exact descriptor shape; strict rejection
   (bad version, missing required field, duplicate/unknown key, bad number,
   missing window colon); the over-cap rejection; the delimiter-injection guard;
-  the end-to-end resolve -> encode -> decode equality.
+  the end-to-end resolve -> encode -> decode equality; `page_round` covering a
+  sub-page slot, a page-straddling window, an already-aligned window, and zero
+  size (the 5d-3 allowance page-rounding).
 - **dtb** (8): `compatible` NUL-split (most-specific first) + empty/unterminated/
   double-NUL tolerance; `reg` decode in 2/2 cells (the real pl061 + virtio bytes)
   and 1/1 cells + multi-entry + trailing-partial ignore; `interrupts` SPI -> +32

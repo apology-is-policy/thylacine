@@ -45,17 +45,13 @@ use libthyla_rs::{virtio_rmb, T_PROT_READ, T_PROT_WRITE};
 use crate::ring::{RxRing, TxRing};
 
 // =============================================================================
-// virtio-mmio bank (QEMU virt machine).
+// virtio-mmio slot geometry. The bank base / slot stride / INTID base are no
+// longer hardcoded (5d-3 retired the old `virtio.rs:51` `VIRTIO_MMIO_BASE_PA`):
+// the warden's virtio-mmio bus source enumerates the bank and grants this driver
+// its exact slot window + INTID, passed to `open_slot`.
 // =============================================================================
 
-const VIRTIO_MMIO_BASE_PA: u64 = 0x0a00_0000;
-const VIRTIO_MMIO_SLOT_STRIDE: u64 = 0x200;
-const VIRTIO_MMIO_NUM_SLOTS: u64 = 32;
 const PAGE_SIZE: u64 = 0x1000;
-const VIRTIO_MMIO_BANK_SIZE: u64 = VIRTIO_MMIO_NUM_SLOTS * VIRTIO_MMIO_SLOT_STRIDE; // 0x4000
-const VIRTIO_MMIO_BANK_PAGES: u64 = VIRTIO_MMIO_BANK_SIZE / PAGE_SIZE; // 4
-const SLOTS_PER_PAGE: u64 = PAGE_SIZE / VIRTIO_MMIO_SLOT_STRIDE; // 8
-const VIRTIO_MMIO_GIC_INTID_BASE: u32 = 32 + 16; // 48
 
 // User-VA layout (fixed for net-1; net-2's netd may parameterize).
 const MMIO_USER_VA: u64 = 0x0050_0000;
@@ -247,52 +243,37 @@ pub struct VirtioNet {
 }
 
 impl VirtioNet {
-    /// Claim the virtio-mmio bank, locate the net device, allocate its rings +
-    /// frame pools, run the VIRTIO 1.2 init handshake, pre-post the RX buffers,
-    /// and arm the device (`DRIVER_OK`).
-    pub fn open() -> Result<Self, OpenError> {
+    /// Bring up the virtio-net device at the warden-granted slot. `slot_pa` is the
+    /// slot's MMIO base (the grant's `mmio[0]` window base) and `intid` its wired
+    /// GIC INTID (the grant's `irq[0]`); the warden's virtio-mmio bus source has
+    /// already identified this slot as `DeviceID == 1`, so there is no bank-probe
+    /// loop -- the driver is *told* its exact slot. Maps the slot's page, allocates
+    /// the rings + frame pools, runs the VIRTIO 1.2 init handshake, pre-posts the
+    /// RX buffers, and arms the device (`DRIVER_OK`).
+    pub fn open_slot(slot_pa: u64, intid: u32) -> Result<Self, OpenError> {
         let rw_map = Rights::READ | Rights::WRITE | Rights::MAP;
         let prot = T_PROT_READ | T_PROT_WRITE;
 
-        // Find + claim ONLY the net device's MMIO page (not the whole bank).
-        // Probe each page in turn: claim it, scan its slots for DeviceID=1, keep
-        // the page that holds the net device, release the rest. Claiming one
-        // page -- not the bank -- avoids conflicting with unrelated virtio-mmio
-        // claims in OTHER pages (the late-boot failure the whole-bank claim hit),
-        // and is the minimal claim net-2's netd needs. A page already held by
-        // another claimant is skipped, so a net device whose page is held (the
-        // net-2 co-residency case vs stratumd) yields NoNetDevice / SKIP, never a
-        // hard failure.
-        let mut found: Option<(Mmio, u32, u64)> = None;
-        for p in 0..VIRTIO_MMIO_BANK_PAGES {
-            let pa = VIRTIO_MMIO_BASE_PA + p * PAGE_SIZE;
-            let va = MMIO_USER_VA + p * PAGE_SIZE;
-            let m = match unsafe { Mmio::new(pa, PAGE_SIZE as usize, rw_map, va, prot) } {
-                Ok(m) => m,
-                Err(_) => continue, // page held / unmappable -- skip it
-            };
-            let mut hit: Option<(u32, u64)> = None;
-            for s in 0..SLOTS_PER_PAGE {
-                let slot_va = va + s * VIRTIO_MMIO_SLOT_STRIDE;
-                if unsafe { r32(slot_va + REG_MAGIC_VALUE) } != VIRTIO_MMIO_MAGIC {
-                    continue;
-                }
-                if unsafe { r32(slot_va + REG_DEVICE_ID) } == VIRTIO_DEVICE_ID_NET {
-                    hit = Some(((p * SLOTS_PER_PAGE + s) as u32, slot_va));
-                    break;
-                }
-            }
-            if let Some((slot, slot_va)) = hit {
-                found = Some((m, slot, slot_va));
-                break;
-            }
-            // No net device in this page; `m` drops here, releasing the claim.
+        // Map the granted slot's MMIO page (device MMIO is page-granular; the slot's
+        // window lies within one page). A claim failure means the page is held by
+        // another claimant (the net-2 co-residency case vs stratumd) or unmappable.
+        let page_pa = slot_pa & !(PAGE_SIZE - 1);
+        let slot_off = slot_pa - page_pa;
+        let mmio = unsafe { Mmio::new(page_pa, PAGE_SIZE as usize, rw_map, MMIO_USER_VA, prot) }
+            .map_err(|_| OpenError::BankClaim)?;
+        let slot_va = MMIO_USER_VA + slot_off;
+
+        // Defensive re-validation: the bus source already identified this slot, but
+        // the driver confirms a modern virtio-net transport before driving it (the
+        // grant is information; the device registers are ground truth).
+        if unsafe { r32(slot_va + REG_MAGIC_VALUE) } != VIRTIO_MMIO_MAGIC
+            || unsafe { r32(slot_va + REG_DEVICE_ID) } != VIRTIO_DEVICE_ID_NET
+        {
+            return Err(OpenError::NoNetDevice);
         }
-        let (mmio, slot, slot_va) = found.ok_or(OpenError::NoNetDevice)?;
         if unsafe { r32(slot_va + REG_VERSION) } != VIRTIO_MMIO_VERSION_MODERN {
             return Err(OpenError::LegacyDevice);
         }
-        let intid = VIRTIO_MMIO_GIC_INTID_BASE + slot;
 
         let irq = Irq::new(intid, Rights::SIGNAL).map_err(|_| OpenError::IrqClaim)?;
 

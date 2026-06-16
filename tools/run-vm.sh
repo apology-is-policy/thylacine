@@ -182,9 +182,9 @@ if [[ "${THYLACINE_NO_NET:-0}" != "1" ]]; then
         # 10.0.2.2 gateway, so both ARP probes round-trip independently.
         # disable-legacy=on -> modern-only (device_id 0x1041, no legacy I/O BAR),
         # which the VirtioNetPci modern-common-cfg driver requires. netdev-pci-
-        # test claims it (virtio_device_id=1); netdev-test still claims the mmio
-        # net above. The PCI function is not a virtio-mmio slot (like rng-pci),
-        # so the mmio slot map below is unchanged.
+        # test claims it (virtio_device_id=1); the warden-bound netdev-driver
+        # claims the mmio net above (MENAGERIE 5d-3). The PCI function is not a
+        # virtio-mmio slot (like rng-pci), so the mmio slot map below is unchanged.
         -netdev "user,id=net1"
         -device "virtio-net-pci,netdev=net1,disable-legacy=on,mac=52:54:00:12:34:57"
     )

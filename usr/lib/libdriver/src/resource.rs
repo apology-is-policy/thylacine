@@ -338,6 +338,25 @@ pub(crate) fn parse_irqs(val: &str) -> Result<Vec<u32>, Error> {
     Ok(out)
 }
 
+/// Round an MMIO window out to 4 KiB page boundaries. MMIO is mapped page-granular,
+/// so an allowance window (the authority the kernel enforces at `SYS_MMIO_CREATE`,
+/// where the driver's *page*-sized map request is checked) must be page-granular
+/// too -- a sub-page device register (a virtio-mmio slot is 0x200) is only
+/// reachable by mapping its whole page. Returns `(page_base, page_len)` covering
+/// `[base, base+size)`; a zero-size window yields a zero-length window at the page
+/// base. Used by `to_allowance` (the device-side allowance mirror); public so the
+/// warden / tests can page-round a window directly.
+pub fn page_round(base: u64, size: u64) -> (u64, u64) {
+    const PAGE: u64 = 0x1000;
+    let lo = base & !(PAGE - 1);
+    if size == 0 {
+        return (lo, 0);
+    }
+    let end = base.saturating_add(size);
+    let hi = end.saturating_add(PAGE - 1) & !(PAGE - 1);
+    (lo, hi.saturating_sub(lo))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -582,5 +601,17 @@ mod tests {
         let desc = warden_grant.to_descriptor().unwrap();
         let driver_grant = BoundResources::parse_descriptor(&desc).unwrap();
         assert_eq!(warden_grant, driver_grant);
+    }
+
+    #[test]
+    fn page_round_covers_sub_page() {
+        // a virtio-mmio slot (0x200, non-page-aligned) -> its whole 4 KiB page
+        assert_eq!(page_round(0x0a00_3a00, 0x200), (0x0a00_3000, 0x1000));
+        // a window straddling a page boundary -> both pages
+        assert_eq!(page_round(0x0a00_3f00, 0x200), (0x0a00_3000, 0x2000));
+        // an already page-aligned/sized window is unchanged (the pl061 case)
+        assert_eq!(page_round(0x0903_0000, 0x1000), (0x0903_0000, 0x1000));
+        // zero size -> zero length at the page base
+        assert_eq!(page_round(0x0a00_3a00, 0), (0x0a00_3000, 0));
     }
 }

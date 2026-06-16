@@ -83,10 +83,12 @@ source reports the 6 populated QEMU-virt slots (`virtio:1` net, `virtio:2` blk x
 node, and -- because the bank is released -- stratumd still claims its virtio-blk
 device post-pivot.
 
-### The bind database (5c)
+### The bind database (5c + 5d-3)
 
-One manifest, the pl061 GPIO proof target (a single-instance, undriven,
-unreserved QEMU-virt device with `reg` + `interrupts`):
+Two manifests: the pl061 GPIO (a single-instance, undriven, unreserved QEMU-virt
+device) -> `menagerie-probe`, proving the I-34 grant on a trivial device; and the
+`virtio:1` net device -> `netdev-driver` (5d-3), the first *useful* driver, bound
+through the bus source's typed identity:
 
 ```
 driver "menagerie-probe" {
@@ -96,7 +98,24 @@ driver "menagerie-probe" {
     serves  = "/dev/gpio/%instance"
     restart = on-crash
 }
+driver "netdev-driver" {
+    abi   = 1
+    binds = ["virtio:1"]
+    needs { mmio = "node:reg"  irq = "node:interrupts"  dma = "pool: 64 KiB" }
+    serves  = "/dev/net/%instance"
+    restart = on-crash
+}
 ```
+
+At boot the warden binds both (`2 bound, 2 up`): pl061 -> `menagerie-probe`
+(grant + allowance enforced); `virtio:1` -> `netdev-driver`, which maps the
+granted slot via `VirtioNet::open_slot` and runs the 24-ARP net-1 proof. A
+virtio-mmio slot's `reg` is **sub-page** (0x200), so `libdriver::to_allowance`
+page-rounds the MMIO grant out to the slot's 4 KiB page (MMIO is mapped
+page-granular -- a sub-page allowance is unmappable); the descriptor keeps the
+exact sub-page window so the driver still learns its precise slot address. The
+page-rounded grant spans the shared net/blk page -- the documented #140 / net-2
+co-residency over-grant, released when the one-shot driver exits.
 
 `resolve` against the pl061 node yields `mmio = [(0x9030000, 0x1000)]`,
 `irq = [39]` (SPI 7 + 32), `dma_max = 65536`.

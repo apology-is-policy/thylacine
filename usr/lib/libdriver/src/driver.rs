@@ -133,8 +133,18 @@ pub fn run<D: Driver>() -> ! {
 pub fn to_allowance(res: &BoundResources) -> TAllowanceDesc {
     let mut d = TAllowanceDesc::empty();
     for (base, size) in &res.mmio {
+        // MMIO is mapped page-granular, so the allowance window MUST be page-
+        // granular -- the kernel I-34 gate checks the driver's *page*-sized
+        // `SYS_MMIO_CREATE` against the allowance, and a sub-page device register
+        // (a virtio-mmio slot is 0x200) is only reachable by mapping its whole
+        // page. `page_round` rounds the window out so the page map is covered. For
+        // a virtio-mmio net slot this grants the shared page, which also spans an
+        // adjacent blk slot -- the documented #140 / net-2 co-residency over-grant;
+        // sub-page separation is the net-2 seam. (The descriptor keeps the exact
+        // sub-page window, so the driver still learns its precise slot address.)
         // capacities mirror MAX_MMIO/MAX_IRQ; resolve/codec already bound them.
-        let _ = d.push_mmio(*base, *size);
+        let (lo, len) = crate::resource::page_round(*base, *size);
+        let _ = d.push_mmio(lo, len);
     }
     for intid in &res.irq {
         let _ = d.push_irq(*intid);

@@ -1,0 +1,11 @@
+[package]
+name = "netdev-driver"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+libdriver = { path = "../lib/libdriver" }
+libthyla-rs = { path = "../lib/libthyla-rs" }
+netdev = { path = "../lib/netdev" }

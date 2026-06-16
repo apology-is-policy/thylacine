@@ -58,9 +58,13 @@ macro_rules! say {
 }
 
 /// The compiled-in bind database (v1.0). Each entry is a section-6 manifest; the
-/// driver's binary is `<manifest.name>` (resolved in the namespace by name). 5c
-/// ships one driver -- the pl061 GPIO proof. v1.x reads `/lib/driver/*.manifest`.
-const BUILTIN_MANIFESTS: &[&str] = &[r#"
+/// driver's binary is `<manifest.name>` (resolved in the namespace by name). The
+/// pl061 GPIO -> `menagerie-probe` proves the I-34 grant on a trivial device; the
+/// `virtio:1` -> `netdev-driver` bind (5d-3) is the first useful driver, bound
+/// through the virtio-mmio bus source's typed identity. v1.x reads
+/// `/lib/driver/*.manifest`.
+const BUILTIN_MANIFESTS: &[&str] = &[
+    r#"
 driver "menagerie-probe" {
     abi   = 1
     binds = ["arm,pl061"]
@@ -72,7 +76,21 @@ driver "menagerie-probe" {
     serves  = "/dev/gpio/%instance"
     restart = on-crash
 }
-"#];
+"#,
+    r#"
+driver "netdev-driver" {
+    abi   = 1
+    binds = ["virtio:1"]
+    needs {
+        mmio = "node:reg"
+        irq  = "node:interrupts"
+        dma  = "pool: 64 KiB"
+    }
+    serves  = "/dev/net/%instance"
+    restart = on-crash
+}
+"#,
+];
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {

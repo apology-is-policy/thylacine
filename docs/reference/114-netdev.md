@@ -1,6 +1,8 @@
 # 114 — netdev (the virtio-net frame transport: MMIO + PCI)
 
-**Status**: net-1 (MMIO `VirtioNet`) + pci-2 (PCI `VirtioNetPci`) LANDED. The
+**Status**: net-1 (MMIO `VirtioNet`) + pci-2 (PCI `VirtioNetPci`) LANDED; 5d-3
+retrofitted `VirtioNet` to the warden-bound, grant-driven `open_slot` (the MMIO
+driver is now `usr/netdev-driver`, bound by `virtio:1`). The
 reusable NIC driver layer net-2's `netd` owns and smoltcp wraps (charter
 `docs/NET-DESIGN.md` §13/§17). Crate: `usr/lib/netdev`. net-2 resumes on the
 **PCI** transport (`VirtioNetPci`) — the #140 resolution: a PCI function carries
@@ -41,7 +43,7 @@ TxRing::new(size) / in_flight() / can_post() / next_slot() / commit_post() / rea
 RxRing::new(size) / has_used(cur_used) / take_used(cur_used) -> Option<slot> / recycle_slot() / avail_idx()
 
 // virtio (driver feature)
-VirtioNet::open() -> Result<VirtioNet, OpenError>   // probe + claim net page + init + DRIVER_OK
+VirtioNet::open_slot(slot_pa, intid) -> Result<VirtioNet, OpenError>  // map the warden-granted slot + init + DRIVER_OK
   .mac() -> [u8; 6]
   .mtu() -> usize                                   // 1500
   .link_up() -> bool
@@ -63,11 +65,15 @@ pub const VIRTIO_NET_HDR_LEN: usize = 12;
 
 ## Implementation
 
-- **MMIO claim scope.** `open()` claims only the net device's MMIO **page**
-  (probes each of the 4 bank pages, keeps the one holding `DeviceID == 1`,
-  releases the rest), NOT the whole bank — a whole-bank claim conflicts with any
-  unrelated virtio-mmio claim in another page. A page held by another claimant is
-  skipped (→ `NoNetDevice`).
+- **MMIO claim scope (5d-3: grant-driven).** `open_slot(slot_pa, intid)` claims
+  only the **page** holding the warden-granted net slot — there is no bank-probe
+  loop (the warden's virtio-mmio bus source already identified the slot and
+  conferred its window + INTID; 5d retired the old hardcoded `VIRTIO_MMIO_BASE_PA`
+  + the page scan). `open_slot` re-validates `MAGIC` + `DeviceID == 1` + modern
+  version at the granted slot before driving it. A page held by another claimant
+  fails `BankClaim`. The conferred MMIO allowance is page-rounded (`libdriver::
+  to_allowance`), so the page map is covered even though the slot is sub-page; the
+  shared net/blk page is the documented #140 / net-2 co-residency over-grant.
 - **Geometry.** `QUEUE_SIZE = 16`; one 4 KiB ring DMA page (TX/RX desc+avail+used)
   + two 32 KiB frame pools (16 × `BUF_LEN = 2048`, holding hdr + a full MTU
   frame). Compile-time `_Static_assert`-style `const _` checks pin the ring
@@ -135,7 +141,7 @@ hold both transports without a VA collision.
 
 ## Capability
 
-`VirtioNet::open()` calls `SYS_MMIO_CREATE` / `SYS_IRQ_CREATE` / `SYS_DMA_CREATE`,
+`VirtioNet::open_slot()` calls `SYS_MMIO_CREATE` / `SYS_IRQ_CREATE` / `SYS_DMA_CREATE`,
 and `VirtioNetPci::open()` calls `SYS_PCI_CLAIM` / `SYS_PCI_MAP_BAR` (+ `IRQ` /
 `DMA`) — all gated on **`CAP_HW_CREATE`**. A driver Proc MUST be spawned with that
 cap (`t_spawn_with_caps(name, len, T_CAP_HW_CREATE)` / `rfork_with_caps`); without
@@ -146,10 +152,13 @@ it the create/claim is rejected at the capability gate.
 - **Host (pure ring)**: 6 tests — TX back-pressure, capped reap, slot-in-range
   across u16 wrap; RX stop-at-cur_used, recycle-in-range, drain+recycle across
   wrap. `cargo test -p netdev --no-default-features --target aarch64-apple-darwin`.
-- **Boot E2E** (`usr/netdev-test`, joey's THYLA_BOOT_PROBES ladder, PRE-stratumd):
-  24 ARP round-trips against QEMU's slirp gateway through `send`/`poll_rx`
-  (> `QUEUE_SIZE`, so the RX descriptors recycle past one full ring and the TX
-  descriptors wrap). Verifies `PASS -- 24/24 ARP replies via VirtioNet`.
+- **Boot E2E** (`usr/netdev-driver`, the warden-bound `virtio:1` driver, MENAGERIE
+  5d-3 — in joey's THYLA_BOOT_PROBES ladder PRE-stratumd, bound NARROWED by the
+  warden rather than a standalone probe): 24 ARP round-trips against QEMU's slirp
+  gateway through `send`/`poll_rx` (> `QUEUE_SIZE`, so the RX descriptors recycle
+  past one full ring and the TX descriptors wrap). Verifies `PASS -- 24/24 ARP
+  replies via VirtioNet (grant-driven open_slot)`. Retires the old standalone
+  `netdev-test`.
 - **PCI boot E2E** (`usr/netdev-pci-test`, same ladder, PRE-stratumd, spawned
   WITH `CAP_HW_CREATE`): the identical 24-ARP round-trip through `VirtioNetPci`
   over a `virtio-net-pci,disable-legacy=on` NIC (its own slirp backend `net1`).
@@ -180,8 +189,10 @@ land past the notify region — a malformed/hostile device), `IrqClaim`, `DmaAll
   `VirtioNetPci` runs on a PCI function whose BAR is page-aligned, so the existing
   page-exclusive claim isolates net from blk at the MMU granule. net-2 builds on
   `VirtioNetPci`. (Retiring the MMIO `virtio-net-device` from the boot config is
-  a trivial v1.x cleanup once `netd`-on-PCI lands; it is kept now so net-1's
-  `netdev-test` keeps its proof.)
+  a trivial v1.x cleanup once `netd`-on-PCI lands; it is kept now so the
+  warden-bound `netdev-driver` (5d-3) keeps the MMIO proof. The MMIO net-1 driver
+  still runs + exits PRE-stratumd, so the page-rounded grant over the shared
+  net/blk page is released before stratumd claims its blk.)
 - **Fixed user VAs.** Both transports map at fixed VAs (`VirtioNet` at
   `0x0050_0000`+; `VirtioNetPci` at `0x0080_0000`/`0x0100_0000`+); net-2's `netd`
   may parameterize.
