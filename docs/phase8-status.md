@@ -155,8 +155,23 @@ to be retrofitted later. The full per-chunk status (SHAs, tests, audits) lives i
   virtio-blk slot post-pivot. Device build + clippy clean + the SMP gate. The
   live-DMA-at-forced-teardown is the documented MENAGERIE section-10 hazard (an
   IOMMU / cooperative-quiesce fix owed net-2/real-hw). Ref `119-warden.md`.
-  **LANDED**. Then **5e-2** bounded restart-on-crash (manifest `restart` +
-  back-off + give-up); **5e-3** device-gone terminal CQE → a consumer (SrvConn
+  **LANDED**. **5e-2** (`*(pending)*`) **bounded restart-on-crash supervision**:
+  the warden's `bind_and_run` is refactored into `run_once` (confer + one attempt
+  → a `RunOutcome`) + `supervise` (the restart loop) driving the new PURE,
+  host-tested `libdriver::supervise::next_step` (restart-vs-settle per the
+  manifest `restart` policy, exponential back-off 50/100/200ms capped at 500,
+  give-up after `RESTART_LIMIT`=3). Accounting splits three ways: **Up** /
+  **GaveUp** (crashed + restarts exhausted — SOFT, does NOT fail the boot) /
+  **Failed** (structural — HARD, exit 1). Proven by a new `crash-probe` driver
+  (binds the undriven `virtio:16` GPU id; `probe` always `Err`s BEFORE any HW
+  claim → its page-rounded allowance is never a live claim, benign vs netdev's
+  shared-page bind). Boot: `crash-probe` restarts 3× (50/100/200ms) → gives up →
+  `3 bound, 2 up, 1 gave up, 0 failed` → netdev still up → boot OK + 0 EXTINCTION.
+  10 `supervise` host tests + device/clippy clean + the SMP gate. v1.0 SEAM: the
+  kernel collapses non-"ok" exits to 1 (`sys_exits_handler`), so the supervisor
+  reads clean-vs-crashed only, not specific exit codes (the finer policy lands
+  with the structured 64-bit exit_status, docs/ERRORS.md). Refs `118`/`119`.
+  **LANDED**. Then **5e-3** device-gone terminal CQE → a consumer (SrvConn
   vehicle); **5e-4** composed focused audit + SMP gate + close. → step 6
   (PCIe/USB sources + the per-(bus,dev,fn) PCI allowance axis #159).
 

@@ -54,12 +54,13 @@ Mirrors the kaua/netdev split (pure host-testable core + a thin device layer):
 | `resource` | always | `alloc` only | `NodeResources`, `BoundResources`, `resolve`, the descriptor codec |
 | `dtb` | always | `alloc` only | decode raw devhw `/hw` property bytes (compatible/reg/interrupts) into a `NodeResources` |
 | `source` | always (+ `DtbSource` under `driver`) | `alloc` (+ `libthyla-rs` for `DtbSource`) | the discovery-source abstraction: typed `DeviceId` / `DeviceNode`, `DiscoverySource`, `best_match`, the source -> warden node-record codec; `DtbSource` (the `/hw` source) |
+| `supervise` | always | nothing (Copy enums + `Restart`) | the warden's restart-loop *decision*: `RunOutcome` / `Disposition` / `SuperviseStep`, `next_step` (restart-vs-settle per `Restart` policy), `backoff_ms` -- the impure loop (spawn/reap/sleep) lives in the warden |
 | `driver` | `driver` (default) | `libthyla-rs` | the `Driver` trait, `run`, the handle-mint helpers, `to_allowance` |
 
-`manifest` + `resource` + `dtb` + the `source` *types* (`DeviceId` / `DeviceNode` /
-the codec / `best_match`) carry no `libthyla-rs` dependency, so the grant logic +
-the codecs + the endianness/cell-width DTB decode + the bind matching run under
-`cargo test` on the host. The `driver` surface + the concrete `DtbSource` (gated
+`manifest` + `resource` + `dtb` + `supervise` + the `source` *types* (`DeviceId` /
+`DeviceNode` / the codec / `best_match`) carry no `libthyla-rs` dependency, so the
+grant logic + the codecs + the endianness/cell-width DTB decode + the bind matching
++ the supervision state machine run under `cargo test` on the host. The `driver` surface + the concrete `DtbSource` (gated
 inside `source`) are the only `libthyla-rs` code; they are compiled for
 `aarch64-unknown-none` only.
 

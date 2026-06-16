@@ -14,10 +14,11 @@
 // the virtio-mmio bank; it reads each slot's DeviceID and reports typed
 // `virtio:<id>` nodes back over a pipe, so the DeviceID-poke stays out of the TCB.
 //
-// What is not yet built: long-lived supervision + restart + DeviceRemoved revoke
-// (5e); the netdev bind (5d-3 adds the `virtio:1` manifest + the grant-driven
-// driver -- so a discovered virtio node is logged-but-unbound at 5d-2); the other
-// bus sources (PCIe/USB) + a manifest-file database. v1.0 compiles the bind DB in.
+// Built through 5e-2: long-lived serve + DeviceRemoved revoke+terminate (5e-1);
+// bounded restart-on-crash supervision (5e-2 -- the `crash-probe` bind exercises
+// it: restart with back-off up to the bound, then give up SOFT). What remains:
+// the device-gone CQE reaching a consumer (5e-3); the other bus sources
+// (PCIe/USB) + a manifest-file database. v1.0 compiles the bind DB in.
 //
 // The warden holds CAP_HW_CREATE + the broad allowance (joey spawns it without a
 // narrowing), so it can confer a narrowed allowance + CAP_HW_CREATE on each driver
@@ -38,12 +39,13 @@ use libthyla_rs::fs::{File, OpenOptions};
 use libthyla_rs::io::{slurp_capped, Read};
 use libthyla_rs::poll::{PollEvents, PollSet, PollTimeout};
 use libthyla_rs::process::{Child, Command, ExitStatus, Stdio};
+use libthyla_rs::time::{sleep, Duration};
 use libthyla_rs::T_CAP_HW_CREATE;
 
 use libdriver::driver::to_allowance;
 use libdriver::{
-    best_match, reconcile_reported_node, resolve, BoundResources, DeviceId, DeviceNode,
-    DiscoverySource, DtbSource, Manifest,
+    best_match, next_step, reconcile_reported_node, resolve, BoundResources, DeviceId, DeviceNode,
+    DiscoverySource, Disposition, DtbSource, Manifest, RunOutcome, SuperviseStep, RESTART_LIMIT,
 };
 
 #[global_allocator]
@@ -63,8 +65,11 @@ macro_rules! say {
 /// driver's binary is `<manifest.name>` (resolved in the namespace by name). The
 /// pl061 GPIO -> `menagerie-probe` proves the I-34 grant on a trivial device; the
 /// `virtio:1` -> `netdev-driver` bind (5d-3) is the first useful driver, bound
-/// through the virtio-mmio bus source's typed identity. v1.x reads
-/// `/lib/driver/*.manifest`.
+/// through the virtio-mmio bus source's typed identity; the `virtio:16` (GPU id,
+/// undriven) -> `crash-probe` bind (5e-2) exercises bounded restart supervision
+/// -- a driver that always fails `probe`, restarted with back-off up to the bound
+/// then given up on (a SOFT per-device failure that does not fail the boot).
+/// v1.x reads `/lib/driver/*.manifest`.
 const BUILTIN_MANIFESTS: &[&str] = &[
     r#"
 driver "menagerie-probe" {
@@ -89,6 +94,19 @@ driver "netdev-driver" {
         dma  = "pool: 64 KiB"
     }
     serves  = "/dev/net/%instance"
+    restart = on-crash
+}
+"#,
+    r#"
+driver "crash-probe" {
+    abi   = 1
+    binds = ["virtio:16"]
+    needs {
+        mmio = "node:reg"
+        irq  = "node:interrupts"
+        dma  = "pool: 64 KiB"
+    }
+    serves  = "/dev/gpu/%instance"
     restart = on-crash
 }
 "#,
@@ -158,6 +176,8 @@ pub extern "C" fn rs_main() -> i64 {
     let mut instance = vec![0u32; db.len()];
     let mut bound = 0u32;
     let mut up = 0u32;
+    let mut gave_up = 0u32;
+    let mut failed = 0u32;
 
     for node in &discovered {
         let Some(idx) = best_match(&db, node) else {
@@ -178,13 +198,25 @@ pub extern "C" fn rs_main() -> i64 {
         };
         instance[idx] += 1;
         bound += 1;
-        if bind_and_run(&db[idx], &grant, &node.label) {
-            up += 1;
+        match supervise(&db[idx], &grant, &node.label) {
+            Disposition::Up => up += 1,
+            Disposition::GaveUp => gave_up += 1,
+            Disposition::Failed => failed += 1,
         }
     }
 
-    say!("warden: {} bound, {} up", bound, up);
-    if up != bound {
+    // A device that crashed and exhausted its restarts (`gave_up`) is a SOFT
+    // failure -- the device is unavailable but the system is fine -- so it does
+    // NOT fail the boot. Only a structural `failed` (the warden could not spawn a
+    // bound driver, e.g. a missing binary) is hard.
+    say!(
+        "warden: {} bound, {} up, {} gave up, {} failed",
+        bound,
+        up,
+        gave_up,
+        failed
+    );
+    if failed > 0 {
         1
     } else {
         0
@@ -261,7 +293,7 @@ fn run_virtio_mmio_source(bank: (u64, u64), trusted: &[DeviceNode]) -> Vec<Devic
     let mut cmd = Command::new(VIRTIO_MMIO_SOURCE_BIN);
     cmd.arg(desc).caps(T_CAP_HW_CREATE).allowance(allow);
     // The source has no stdio of its own (the boot-probe-no-fds gap; see
-    // bind_and_run): /dev/null for stdin + stderr, a PIPE for stdout -- the warden
+    // run_once): /dev/null for stdin + stderr, a PIPE for stdout -- the warden
     // reads its node records off the pipe.
     let open_null = || OpenOptions::new().read(true).write(true).open("/dev/null");
     let (Ok(nin), Ok(nerr)) = (open_null(), open_null()) else {
@@ -411,32 +443,77 @@ fn await_readiness(child: &mut Child) -> Readiness {
     Readiness::Timeout
 }
 
-/// Spawn the driver for a computed grant -- the confer step. Encodes the grant
-/// into the argv descriptor + the kernel allowance (both from one
-/// `BoundResources`), spawns the driver narrowed, then reads its readiness
-/// line: a long-lived service (`READY`) is brought up and then torn down via
-/// DeviceRemoved (revoke + group-terminate) to prove the teardown lifecycle; a
-/// one-shot proof (EOF, no line) is reaped for its exit code. Returns whether
-/// the driver came up cleanly.
-fn bind_and_run(m: &Manifest, grant: &BoundResources, node_name: &str) -> bool {
-    let desc = match grant.to_descriptor() {
-        Ok(d) => d,
-        Err(e) => {
-            say!("warden: descriptor encode for {} failed {:?}", m.name, e);
-            return false;
-        }
-    };
-    let allow = to_allowance(grant);
+/// Supervise one bound device: spawn its driver, watch it come up or crash, and
+/// restart it (with back-off, bounded) per the manifest's restart policy until it
+/// settles. The pure restart-vs-settle decision lives in
+/// `libdriver::supervise::next_step` (host-tested); this owns the impure half --
+/// the confer (grant -> allowance + descriptor), spawn, readiness, reap, sleep.
+/// Returns the device's terminal disposition for the warden's tally.
+fn supervise(m: &Manifest, grant: &BoundResources, node_name: &str) -> Disposition {
     say!(
-        "warden: bind {} ({}) -> {} inst={} [mmio={} irq={} dma={:#x}]",
+        "warden: bind {} ({}) -> {} inst={} [mmio={} irq={} dma={:#x}] restart={:?}",
         grant.compatible,
         node_name,
         m.name,
         grant.instance,
         grant.mmio.len(),
         grant.irq.len(),
-        grant.dma_max
+        grant.dma_max,
+        m.restart
     );
+
+    let mut restarts = 0u32;
+    loop {
+        let outcome = run_once(m, grant);
+        match next_step(outcome, m.restart, restarts) {
+            SuperviseStep::Settle(d) => {
+                match d {
+                    Disposition::Up => {} // run_once already logged the bring-up
+                    Disposition::GaveUp => say!(
+                        "warden: {} gave up after {} restart(s) -- device unavailable (soft)",
+                        m.name,
+                        restarts
+                    ),
+                    Disposition::Failed => {
+                        say!("warden: {} failed structurally (hard)", m.name)
+                    }
+                }
+                return d;
+            }
+            SuperviseStep::Restart { delay_ms } => {
+                restarts += 1;
+                say!(
+                    "warden: {} crashed -> restart {}/{} after {}ms",
+                    m.name,
+                    restarts,
+                    RESTART_LIMIT,
+                    delay_ms
+                );
+                // A timed torpor sleep; death-interruptible, but the warden is not
+                // being terminated here, so it always runs the full back-off.
+                let _ = sleep(Duration::from_millis(delay_ms as u64));
+            }
+        }
+    }
+}
+
+/// Spawn the driver once for a conferred grant and watch it declare itself --
+/// the confer + one run attempt. Encodes the grant into the argv descriptor + the
+/// kernel allowance (both from one `BoundResources`), spawns the driver narrowed,
+/// then reads its readiness line: a long-lived service (`READY`) is brought up and
+/// then torn down via DeviceRemoved (revoke + group-terminate); a one-shot proof
+/// (EOF, no line) is reaped for its exit code. Returns the run's outcome;
+/// `supervise` applies the restart policy. The confer inputs are recomputed each
+/// attempt (pure functions of the grant -- cheap; a restart re-confers cleanly).
+fn run_once(m: &Manifest, grant: &BoundResources) -> RunOutcome {
+    let desc = match grant.to_descriptor() {
+        Ok(d) => d,
+        Err(e) => {
+            say!("warden: descriptor encode for {} failed {:?}", m.name, e);
+            return RunOutcome::HardFail;
+        }
+    };
+    let allow = to_allowance(grant);
 
     // The boot-probe warden runs PRE-pivot, where the driver binaries live at the
     // devramfs root; spawn by ABSOLUTE path (resolved from root_spoor, the same
@@ -457,7 +534,7 @@ fn bind_and_run(m: &Manifest, grant: &BoundResources, node_name: &str) -> bool {
     let open_null = || OpenOptions::new().read(true).write(true).open("/dev/null");
     let (Ok(nin), Ok(nerr)) = (open_null(), open_null()) else {
         say!("warden: /dev/null open failed; cannot spawn {}", m.name);
-        return false;
+        return RunOutcome::HardFail;
     };
     cmd.stdin(Stdio::File(nin))
         .stdout(Stdio::Piped)
@@ -467,7 +544,7 @@ fn bind_and_run(m: &Manifest, grant: &BoundResources, node_name: &str) -> bool {
         Ok(c) => c,
         Err(e) => {
             say!("warden: spawn {} failed {:?}", m.name, e);
-            return false;
+            return RunOutcome::HardFail;
         }
     };
     let pid = child.pid();
@@ -479,14 +556,16 @@ fn bind_and_run(m: &Manifest, grant: &BoundResources, node_name: &str) -> bool {
     // await_readiness detects the exit via try_wait and polls only for the data.
     match await_readiness(&mut child) {
         Readiness::Exited(status) => {
-            // One-shot proof completed (or a bring-up crash); already reaped.
+            // One-shot proof completed (or a bring-up crash); already reaped. The
+            // code distinguishes a clean exit (Up) from a crash (GaveUp/restart),
+            // decided by the supervisor.
             say!(
                 "warden: {} pid={} exited code={:?}",
                 m.name,
                 pid,
                 status.code()
             );
-            status.success()
+            RunOutcome::Exited(status.code())
         }
         Readiness::Signalled(line) => {
             // A long-lived service still holding its device. Demonstrate
@@ -495,8 +574,9 @@ fn bind_and_run(m: &Manifest, grant: &BoundResources, node_name: &str) -> bool {
             // blocked in a death-interruptible wait, unwinds cleanly; the reap
             // frees the slot's exclusive MMIO/IRQ/DMA claims (so a later
             // claimant -- stratumd's virtio-blk post-pivot -- finds the bank
-            // free). Only "READY" is a clean bring-up; any other line is a
-            // misbehaving driver, still torn down.
+            // free). Only "READY" is a clean bring-up (Served); any other line is
+            // a misbehaving driver, torn down + treated as a crash so the
+            // supervisor restarts it per policy.
             let up = line == "READY";
             if up {
                 say!(
@@ -521,7 +601,11 @@ fn bind_and_run(m: &Manifest, grant: &BoundResources, node_name: &str) -> bool {
                         pid,
                         status.code()
                     );
-                    up
+                    if up {
+                        RunOutcome::Served
+                    } else {
+                        RunOutcome::Exited(None)
+                    }
                 }
                 Err(e) => {
                     say!(
@@ -530,11 +614,14 @@ fn bind_and_run(m: &Manifest, grant: &BoundResources, node_name: &str) -> bool {
                         pid,
                         e
                     );
-                    false
+                    RunOutcome::HardFail
                 }
             }
         }
         Readiness::Timeout => {
+            // A hung driver (neither signalled nor exited): terminate it and treat
+            // it as a crash so the supervisor restarts it per policy (a hang may
+            // be transient), bounded by the give-up limit.
             say!(
                 "warden: {} pid={} gave no readiness/exit signal -> terminating",
                 m.name,
@@ -542,12 +629,13 @@ fn bind_and_run(m: &Manifest, grant: &BoundResources, node_name: &str) -> bool {
             );
             let _ = child.kill();
             let _ = child.wait();
-            false
+            RunOutcome::Exited(None)
         }
         Readiness::Untracked => {
             // Unreachable while every driver is spawned with a piped stdout, but
             // kill-then-reap defensively: a bare wait() on a long-lived driver
-            // we cannot observe would block the warden forever.
+            // we cannot observe would block the warden forever. Structural -- not
+            // a restart candidate.
             say!(
                 "warden: {} pid={} could not be tracked for readiness -> terminating",
                 m.name,
@@ -555,7 +643,7 @@ fn bind_and_run(m: &Manifest, grant: &BoundResources, node_name: &str) -> bool {
             );
             let _ = child.kill();
             let _ = child.wait();
-            false
+            RunOutcome::HardFail
         }
     }
 }

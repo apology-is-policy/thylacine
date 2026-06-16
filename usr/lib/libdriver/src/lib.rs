@@ -26,11 +26,15 @@ pub mod dtb;
 pub mod manifest;
 pub mod resource;
 pub mod source;
+pub mod supervise;
 
 #[cfg(feature = "driver")]
 pub mod driver;
 
 pub use manifest::{DmaNeed, IrqNeed, Manifest, MmioNeed, Needs, Restart, MANIFEST_ABI};
+pub use supervise::{
+    backoff_ms, next_step, Disposition, RunOutcome, SuperviseStep, BACKOFF_MAX_MS, RESTART_LIMIT,
+};
 pub use resource::{resolve, BoundResources, NodeResources, DESCRIPTOR_VERSION, MAX_IRQ, MAX_MMIO};
 pub use source::{
     best_match, reconcile_reported_node, DeviceId, DeviceNode, DiscoverySource, MAX_IDS,

@@ -132,6 +132,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "crash-probe"
+version = "0.1.0"
+dependencies = [
+ "libdriver",
+ "libthyla-rs",
+]
+
+[[package]]
 name = "crypto-common"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

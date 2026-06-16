@@ -46,25 +46,30 @@ hardware-free.
    node, find the database manifest that binds its most-specific identity (the
    earliest in the node's most-specific-first `ids` list), then `resolve` the
    grant (`BoundResources`). A per-manifest instance counter feeds `%instance`.
-4. **Confer + spawn** (`bind_and_run`): encode the grant into the argv descriptor
+4. **Confer + run** (`run_once`): encode the grant into the argv descriptor
    (`to_descriptor`) AND the kernel allowance (`to_allowance`) -- both from the
    one `BoundResources`, so the authority the kernel enforces and the resources
    the driver maps cannot drift -- then spawn the driver `/<name>` with the
-   descriptor as argv[1], `CAP_HW_CREATE`, and the narrowed allowance.
-5. **Supervise + tear down** (`bind_and_run` + `await_readiness`, 5e-1): the
-   driver is spawned with a piped stdout; the warden waits for it to either
-   signal readiness (`READY`, a long-lived service still holding its device) or
-   exit (a one-shot proof). A long-lived service is then torn down via
-   **DeviceRemoved** -- `Child::kill` writes `killgrp` to `/proc/<pid>/ctl`,
-   which revokes the driver's allowance FIRST (atomic, #160) then
-   group-terminates it; the driver, blocked in a death-interruptible
-   `Irq::wait`, unwinds cleanly and the reap frees the slot's exclusive claims.
-   A one-shot proof (menagerie-probe) is reaped for its exit code. **Bounded
-   restart-on-crash** (the manifest's `restart` policy + back-off + give-up) is
-   5e-2; the **device-gone terminal CQE to a consumer** is 5e-3.
+   descriptor as argv[1], `CAP_HW_CREATE`, and the narrowed allowance, and watch
+   it declare itself (`await_readiness`). Returns one `RunOutcome` (Served /
+   Exited / HardFail).
+5. **Supervise** (`supervise`, 5e): loop `run_once` under the pure
+   `libdriver::supervise::next_step` decision (host-tested) -- restart a crash
+   with back-off, bounded, per the manifest's `restart` policy, until the device
+   settles. A long-lived service that signals `READY` is brought up and then torn
+   down via **DeviceRemoved** -- `Child::kill` writes `killgrp` to
+   `/proc/<pid>/ctl`, which revokes the driver's allowance FIRST (atomic, #160)
+   then group-terminates it; the driver, blocked in a death-interruptible
+   `Irq::wait`, unwinds cleanly and the reap frees the slot's exclusive claims. A
+   one-shot proof (menagerie-probe) is reaped for its exit code. A driver that
+   crashes is restarted with back-off and given up on after the bound (5e-2,
+   below). The **device-gone terminal CQE to a consumer** is 5e-3.
 
-Exit 0 iff every bound driver came up (or nothing matched); exit 1 if a bound
-driver failed to come up.
+Each bound device settles to one of three dispositions: **Up** (came up, or
+served then removed), **GaveUp** (crashed + restarts exhausted -- a SOFT
+per-device failure), or **Failed** (a structural failure -- the warden could not
+spawn it). Exit 1 iff any device is `Failed`; a `GaveUp` device does NOT fail the
+boot (the device is unavailable, the system is fine).
 
 ### Long-lived serve + the DeviceRemoved teardown (5e-1)
 
@@ -96,6 +101,49 @@ sound:
   fencing (an IOMMU, or a cooperative quiesce-on-remove) is owed to net-2 / real
   hardware. The data path itself -- serving `/dev/net/0` -- is also net-2; 5e
   proves the LIFECYCLE.
+
+### Bounded restart-on-crash supervision (5e-2)
+
+A driver that crashes during bring-up must not wedge the boot ladder, nor be
+restarted forever. `supervise` (the impure loop) drives the **pure**
+`libdriver::supervise::next_step` decision: given one run's `RunOutcome`, the
+manifest's `restart` policy, and the restarts already spent, decide *restart with
+back-off* or *settle*. The split mirrors `manifest`/`resource`/`source` -- the
+state machine (with the subtle edges: crash-vs-clean, the give-up bound, the
+policy cross-product) is host-tested (`supervise::tests`), and the warden owns
+only the mechanism (spawn / readiness / reap / `time::sleep`).
+
+The mapping `run_once` -> `RunOutcome`:
+
+- `READY` then torn down -> **Served** (a clean bring-up; never a restart
+  candidate -- the removal was deliberate).
+- exited on its own -> **Exited(code)**; crash iff `code != Some(0)`.
+- a garbled readiness line, or a hung driver (`Timeout`) -> treated as a crash
+  (`Exited(None)`) so the supervisor restarts it per policy.
+- could not spawn / track -> **HardFail** (structural -> `Failed`, no restart).
+
+`next_step` then settles or restarts. The back-off is exponential from
+`BACKOFF_BASE_MS` (50ms), doubling, capped at `BACKOFF_MAX_MS` (500ms); the
+give-up bound is `RESTART_LIMIT` (3 restarts -> 4 spawns total). A crash that
+exhausts the restarts settles **GaveUp** -- a SOFT per-device failure, logged but
+not boot-failing; only a `HardFail` (e.g. a missing binary) is **Failed** (HARD).
+
+The proof is the `crash-probe` driver, bound to the undriven `virtio:16` (GPU id).
+Its `probe` always returns `Err` (`EXIT_PROBE`) -- *before any hardware claim*, so
+its page-rounded allowance is never a live exclusive claim and cannot contend with
+the netdev driver that shares the rounded MMIO page (the #140 co-residency
+over-grant). At boot the warden restarts it three times (50/100/200ms) then gives
+up; the boot stays green (`3 bound, 2 up, 1 gave up, 0 failed`) and netdev still
+comes up on the next bind.
+
+**v1.0 exit-code SEAM.** The kernel collapses every non-"ok" exit to status `1`
+(`sys_exits_handler`; the structured 64-bit exit_status is a v1.x lift per
+`docs/ERRORS.md`), so the warden only ever observes `Some(0)` (clean) or `Some(1)`
+(crashed) -- the supervisor distinguishes clean-vs-crashed, **not** specific exit
+codes. A finer policy (e.g. do-not-restart `EXIT_BIND`, a warden bug, vs restart
+`EXIT_PROBE`, a device-init failure) needs the structured status and lands with
+it. `next_step` already accepts arbitrary codes, so only the warden's `RunOutcome`
+mapping changes when it arrives.
 
 ### The virtio-mmio bus source (5d-2)
 
@@ -226,10 +274,14 @@ joey: warden ok (5c Menagerie bind-loop: discover -> grant -> spawn narrowed)
 ## Tests / proof
 
 - **Pure logic** is host-tested in libdriver (the `dtb` decode against the real
-  QEMU-virt bytes; `resolve` + the descriptor codec) -- `118-libdriver.md`.
-- **Live end-to-end** is the boot-probe proof above: discovery (45 `/hw` nodes),
-  match (pl061), grant (`mmio=1 irq=1 dma=0x10000`), spawn narrowed, the driver's
-  positive map + negative reject, reap (`1 bound, 1 up`), `joey: warden ok`,
+  QEMU-virt bytes; `resolve` + the descriptor codec; the `supervise` state machine
+  -- the restart-vs-settle decision across every policy + the back-off schedule)
+  -- `118-libdriver.md`.
+- **Live end-to-end** is the boot-probe proof above: discovery (45 `/hw` nodes +
+  the 6 typed virtio slots), match + grant + spawn narrowed for three drivers,
+  menagerie-probe's positive map + negative reject (Up), netdev's 24-ARP +
+  `READY` + DeviceRemoved teardown (Up), crash-probe's 3 restarts (50/100/200ms) +
+  give-up (GaveUp), the tally `3 bound, 2 up, 1 gave up, 0 failed`,
   `Thylacine boot OK`, 0 EXTINCTION. Gated additionally by the SMP gate
   (default + UBSan x smp4/smp8).
 
@@ -237,13 +289,16 @@ joey: warden ok (5c Menagerie bind-loop: discover -> grant -> spawn narrowed)
 
 ## Status / known caveats
 
-- **Long-lived serve + DeviceRemoved (5e-1).** A long-lived service is brought
-  up and then torn down (revoke + group-terminate) to prove the teardown
-  lifecycle; a one-shot proof is reaped for its exit code. Still owed: **bounded
-  restart-on-crash** (the manifest `restart` policy + back-off + give-up, 5e-2)
-  and the **device-gone terminal CQE to a consumer** (5e-3). The persistent
-  post-pivot warden (drivers kept up, not torn down at boot) is the deployment
-  shape; the boot-probe warden demonstrates the full lifecycle in bounded form.
+- **Long-lived serve + DeviceRemoved (5e-1) + bounded supervision (5e-2).** A
+  long-lived service is brought up and then torn down (revoke + group-terminate)
+  to prove the teardown lifecycle; a one-shot proof is reaped for its exit code; a
+  crashing driver is restarted with back-off, bounded, then given up on (SOFT).
+  Still owed: the **device-gone terminal CQE to a consumer** (5e-3). The
+  persistent post-pivot warden (drivers kept up, not torn down at boot) is the
+  deployment shape; the boot-probe warden demonstrates the full lifecycle in
+  bounded form. v1.0 SEAM: the supervisor distinguishes clean-vs-crashed only
+  (not specific exit codes -- the kernel collapses non-"ok" to 1; the structured
+  status is a v1.x lift, see the 5e-2 section).
 - **DTB + virtio-mmio sources (5d-2).** The DTB source + the virtio-mmio bus
   source are built; PCIe/USB/SDIO sources are MENAGERIE §3/§7 seams that plug into
   the same `DiscoverySource` slot (the step-6 per-(bus,dev,fn) PCI allowance axis,
