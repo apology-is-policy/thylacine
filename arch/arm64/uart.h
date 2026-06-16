@@ -71,6 +71,14 @@ bool uart_rx_path_enabled(void);
 // flag, and hands each to cons_rx_input. Clears the RX interrupts on exit.
 void uart_rx_handler(uint32_t intid, void *arg);
 
+// #174 backpressure resume. The cons reader calls this AFTER draining ring
+// bytes (freeing space). If RX was paused (the ring filled and the handler
+// masked RX, leaving bytes in the FIFO -- no loss), this drains the FIFO into
+// the freed ring space and unmasks RX once the FIFO empties. A no-op (one
+// atomic read) when not paused. Reader-driven resumption -- NEVER relies on the
+// QEMU PL011 int_level re-fire (the #172 wedge trap). Runs in process context.
+void uart_rx_pump(void);
+
 // Print an unsigned 64-bit integer in hexadecimal, prefixed with "0x" and
 // zero-padded to 16 hex digits (i.e. "0x0000000040080000"). Used for the
 // boot banner's address fields.

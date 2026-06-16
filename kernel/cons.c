@@ -175,6 +175,17 @@ static bool cons_ring_push(u8 byte, bool *wake_mgr) {
     return true;
 }
 
+// #174: true iff the RX ring can accept at least one more byte. The PL011 drain
+// (uart_rx_handler / uart_rx_pump) checks this BEFORE reading a byte out of the
+// FIFO and pauses RX (leaving the byte in the FIFO -- no loss) instead of letting
+// cons_ring_push drop it. Lockless RELAXED-atomic read (see the cons_count_*
+// rationale): a stale value only shifts the pause boundary by one byte, never
+// corrupts (a stale "true" lets cons_ring_push do its existing one-byte drop; a
+// stale "false" pauses one byte early).
+bool cons_rx_can_accept(void) {
+    return cons_count_load() < CONS_RING_SIZE;
+}
+
 void cons_rx_input(u8 byte, bool is_break) {
     bool wake_data = false, wake_mgr = false;
     u8   echo[CONS_ECHO_MAX];
@@ -466,6 +477,14 @@ long cons_input_read(void *buf, long n) {
         }
         cons_count_store(c);
         spin_unlock_irqrestore(&g_cons.lock, s);
+        // #174: having freed ring space, resume RX backpressure -- drain any FIFO
+        // bytes the handler held while the ring was full + unmask RX. No-op (one
+        // atomic read) when RX is not paused. Runs with g_cons.lock RELEASED:
+        // uart_rx_pump takes g_uart_rx_lock then re-enters cons_rx_input
+        // (g_cons.lock), so the lock order g_uart_rx_lock -> g_cons.lock holds and
+        // there is no g_cons.lock -> g_uart_rx_lock edge. The cons single-reader
+        // guard (reader_busy) means at most one pump runs at a time.
+        uart_rx_pump();
         if (got > 0) break;            // read() returns as soon as >= 1 byte is ready
         if (sleep(&g_cons_data_rendez, cons_data_ready, NULL) == SLEEP_INTR) break;
     }

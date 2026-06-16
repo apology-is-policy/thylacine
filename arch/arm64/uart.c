@@ -28,6 +28,7 @@
 #include <thylacine/cons.h>
 #include <thylacine/extinction.h>
 #include <thylacine/page.h>
+#include <thylacine/spinlock.h>
 
 #define PL011_DR    0x000
 #define PL011_FR    0x018
@@ -87,6 +88,32 @@ static inline uint32_t mmio_read32(uintptr_t base, uintptr_t off) {
     return *(volatile uint32_t *)(base + off);
 }
 
+// #174 RX backpressure state. g_uart_rx_lock serializes the RX FIFO drain, the
+// IMSC.RXIM/RTIM mask/unmask, and g_rx_paused -- so the IRQ handler (which
+// pauses on a full cons ring) and the cons reader's uart_rx_pump (which resumes)
+// never race on the FIFO or the mask register. Lock order: g_uart_rx_lock ->
+// g_cons.lock (cons_rx_input, called under the RX lock, takes g_cons.lock);
+// the cons reader RELEASES g_cons.lock before calling uart_rx_pump, so there is
+// no g_cons.lock -> g_uart_rx_lock edge -- the order is acyclic. g_rx_paused is
+// additionally an ACQUIRE/RELEASE atomic so uart_rx_pump's fast path (not
+// paused) needs no lock.
+static spin_lock_t g_uart_rx_lock = SPIN_LOCK_INIT;
+static bool        g_rx_paused;            // true: RX masked, bytes held in FIFO
+
+// Mask or unmask the PL011 RX + RX-timeout interrupts. Caller holds
+// g_uart_rx_lock. Masking (not clearing ICR) is what makes resumption
+// wedge-safe: it gates the GIC line without touching int_level, so nothing is
+// stranded by the QEMU "RXRIS is receive-set, not level-recomputed" quirk that
+// caused #172 -- resumption is driven by uart_rx_pump reading the FIFO, never by
+// hoping the interrupt re-fires.
+static void uart_rx_set_enabled(bool en) {
+    uintptr_t base = pl011_base;
+    uint32_t imsc = mmio_read32(base, PL011_IMSC);
+    if (en) imsc |= (PL011_IMSC_RXIM | PL011_IMSC_RTIM);
+    else    imsc &= ~(uint32_t)(PL011_IMSC_RXIM | PL011_IMSC_RTIM);
+    mmio_write32(base, PL011_IMSC, imsc);
+}
+
 void uart_putc(char c) {
     uintptr_t base = pl011_base;
     // Spin until TX FIFO has room (TXFF clear).
@@ -134,45 +161,86 @@ bool uart_rx_path_enabled(void) {
 // one IRQ, the worst-case IRQ-masked window stays well under a 1ms timer tick.
 #define UART_RX_DRAIN_MAX  64u
 
-// A-4c-1: PL011 RX IRQ handler. Runs in IRQ context (IRQs masked at PSTATE).
-// Clears the RX + RX-timeout interrupts FIRST, then drains up to
-// UART_RX_DRAIN_MAX bytes from the RX FIFO, splitting each 12-bit DR read into
-// the data byte (bits 7:0) and the break flag (bit 10 BE), and hands each entry
-// to the console layer. cons_rx_input is wakeup-only (no IRQ-unsafe work); the
-// privileged/blocking work is deferred to the console_mgr kthread. Two coupled
-// #172 fixes live here: the clear-FIRST ordering (the FIFO-wedge freeze -- see
-// the inline note) and the UART_RX_DRAIN_MAX bound (the unbounded-drain
-// livelock). After the handler returns + the GIC EOIs, the exception-return
-// window lets the lower-INTID timer (27 < the UART SPI 33, equal GIC priority
-// -> the timer wins the tie + is delivered first) interleave so the scheduler
-// runs.
-void uart_rx_handler(uint32_t intid, void *arg) {
-    (void)intid;
-    (void)arg;
+// The shared PL011 RX FIFO drain core. Caller holds g_uart_rx_lock. Clears the
+// RX + RX-timeout interrupts FIRST, then drains the FIFO into the console -- but
+// BEFORE reading each byte it checks cons_rx_can_accept(): when the cons ring is
+// full it STOPS, leaving the byte in the FIFO (it is NOT read out, so NOT lost),
+// masks RX, and latches g_rx_paused (#174 backpressure). The FIFO then fills,
+// QEMU's can_receive goes 0, and the host serial buffers the overflow -- nothing
+// is dropped. uart_rx_pump (the reader-side resume) drains the held bytes once
+// ring space frees.
+//
+// Clear-FIRST is the #172 fix: the QEMU PL011 RX interrupt is RECEIVE-driven and
+// NOT recomputed from the FIFO level on an ICR clear (confirmed via gdb: FIFO
+// FULL yet RXRIS clear), so clearing AFTER the drain would strand a byte
+// arriving in the post-drain window and wedge the FIFO. Clearing first re-arms
+// for any drain-window arrival; the drain reads every byte already latched.
+// UART_RX_DRAIN_MAX is the separate unbounded-drain livelock bound; both stay.
+//
+// Returns true iff it reached FIFO-empty (RXFE). false means either backpressure
+// (g_rx_paused now set + RX masked) OR budget-hit with the FIFO non-empty -- the
+// pump treats both as "stay paused / retry", the handler ignores it (a budget-hit
+// re-fires per #172; a backpressure-pause is resumed by the reader's pump).
+static bool uart_rx_drain_locked(void) {
     uintptr_t base = pl011_base;
-
-    // Clear the RX + RX-timeout interrupts BEFORE draining (#172 freeze ROOT
-    // CAUSE). The PL011 RX interrupt is RECEIVE-driven (set when a byte lands;
-    // NOT recomputed from the FIFO level on an ICR clear -- confirmed against the
-    // live QEMU model: FIFO FULL [FR.RXFF] yet RXRIS clear). Clearing AFTER the
-    // drain therefore races a byte that arrives in the post-final-RXFE-check
-    // window: that byte's interrupt is cleared by the ICR write, and because
-    // can_receive goes 0 the instant the FIFO fills, NO later receive ever
-    // re-raises it -> the FIFO wedges FULL with no RX IRQ -> the line
-    // back-pressures -> input dies forever (the whole-OS "freeze under fast
-    // input"). Clearing FIRST means any byte arriving during/after the drain
-    // re-raises the interrupt (serviced on the next handler entry) instead of
-    // being stranded -- and the drain below reads every byte already latched, so
-    // none is lost. (The UART_RX_DRAIN_MAX bound below is the SEPARATE livelock
-    // fix; both are required.)
-    mmio_write32(base, PL011_ICR, PL011_ICR_RXIC | PL011_ICR_RTIC);
+    mmio_write32(base, PL011_ICR, PL011_ICR_RXIC | PL011_ICR_RTIC);   // #172 clear-first
 
     unsigned budget = UART_RX_DRAIN_MAX;
-    while (budget != 0u && !(mmio_read32(base, PL011_FR) & PL011_FR_RXFE)) {
+    while (budget != 0u) {
+        if (mmio_read32(base, PL011_FR) & PL011_FR_RXFE) return true;   // FIFO drained
+        if (!cons_rx_can_accept()) {
+            // #174: cons ring full -> backpressure. Leave the byte in the FIFO
+            // (do NOT read DR), mask RX so the IRQ neither re-fires nor
+            // livelocks, latch paused. uart_rx_pump resumes from the reader side.
+            uart_rx_set_enabled(false);
+            __atomic_store_n(&g_rx_paused, true, __ATOMIC_RELEASE);
+            return false;
+        }
         budget--;
         uint32_t dr = mmio_read32(base, PL011_DR);
         cons_rx_input((uint8_t)(dr & 0xffu), (dr & PL011_DR_BE) != 0u);
     }
+    return false;   // budget hit, FIFO non-empty: re-fire (#172) / pump-retry
+}
+
+// A-4c-1: PL011 RX IRQ handler (GIC dispatch target; IRQ context, IRQs masked at
+// PSTATE). Drains the FIFO under g_uart_rx_lock via the shared core; on a full
+// cons ring it pauses RX (#174) rather than dropping bytes. After the handler
+// returns + the GIC EOIs, the exception-return window lets the lower-INTID timer
+// (27 < the UART SPI 33, equal GIC priority -> the timer wins the tie) interleave
+// so the scheduler runs.
+void uart_rx_handler(uint32_t intid, void *arg) {
+    (void)intid;
+    (void)arg;
+    irq_state_t s = spin_lock_irqsave(&g_uart_rx_lock);
+    (void)uart_rx_drain_locked();
+    spin_unlock_irqrestore(&g_uart_rx_lock, s);
+}
+
+// #174 backpressure resume (process context; the cons reader calls this after it
+// frees ring space). No-op unless RX is paused. While paused, RX is masked so the
+// IRQ handler cannot run -- this pump is then the SOLE FIFO drainer (and the cons
+// single-reader guard means at most one pump runs at a time), so there is no FIFO
+// race. It drains held bytes into the freed ring space; when the FIFO empties it
+// unmasks RX and clears paused (resumption is reader-driven, never int_level-
+// driven -> no #172 wedge). If the ring refills mid-pump it re-pauses; if the
+// budget is hit with the FIFO still non-empty (a sustained HVF refill) it stays
+// paused for the next reader read -- never stranding a byte.
+void uart_rx_pump(void) {
+    if (!__atomic_load_n(&g_rx_paused, __ATOMIC_ACQUIRE)) return;   // fast path: not paused
+    irq_state_t s = spin_lock_irqsave(&g_uart_rx_lock);
+    if (g_rx_paused) {
+        if (uart_rx_drain_locked()) {
+            // FIFO drained with ring space remaining -> resume normal IRQ-driven
+            // RX. Unmask BEFORE clearing paused so a fresh arrival re-fires the
+            // (now-unmasked) IRQ instead of waiting for the next pump.
+            uart_rx_set_enabled(true);
+            __atomic_store_n(&g_rx_paused, false, __ATOMIC_RELEASE);
+        }
+        // else: ring refilled (drain re-latched paused) or budget hit -> stay
+        // paused; the next reader read pumps again. No byte stranded.
+    }
+    spin_unlock_irqrestore(&g_uart_rx_lock, s);
 }
 
 void uart_puts(const char *s) {

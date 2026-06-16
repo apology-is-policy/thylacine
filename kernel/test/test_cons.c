@@ -46,6 +46,7 @@
 void test_cons_blocking_read_wakeup(void);
 void test_cons_ring_fill_drain(void);
 void test_cons_ring_overflow_drop(void);
+void test_cons_rx_can_accept_boundary(void);
 void test_cons_ctrlc_consumed(void);
 void test_cons_break_sets_sak(void);
 void test_cons_read_busy_guard(void);
@@ -197,6 +198,24 @@ void test_cons_ring_overflow_drop(void) {
     TEST_EXPECT_EQ((long)buf[0],   (long)(0x80u | 0u),     "first retained = first pushed");
     TEST_EXPECT_EQ((long)buf[255], (long)(0x80u | 0x7fu),  "last retained = 256th pushed (drop-newest)");
     cons_test_reset();
+}
+
+// #174 backpressure predicate: cons_rx_can_accept() is what the PL011 RX drain
+// checks BEFORE reading a byte out of the FIFO -- on false it leaves the byte in
+// the FIFO and masks RX (no loss) rather than letting cons_ring_push drop it.
+// Must be true up to and including the 255->256 fill, false exactly at capacity.
+void test_cons_rx_can_accept_boundary(void) {
+    cons_test_reset();
+    TEST_ASSERT(cons_rx_can_accept(), "empty ring accepts");
+    for (int i = 0; i < 255; i++) {
+        TEST_ASSERT(cons_rx_can_accept(), "ring below capacity accepts");
+        cons_rx_input((u8)(0x80u | (i & 0x7fu)), false);
+    }
+    TEST_ASSERT(cons_rx_can_accept(), "255 bytes -> still room for the 256th (the boundary)");
+    cons_rx_input((u8)(0x80u | 0x7fu), false);   // the 256th byte fills the ring
+    TEST_ASSERT(!cons_rx_can_accept(), "full ring (256) refuses -> the drain pauses RX, no drop");
+    cons_test_reset();
+    TEST_ASSERT(cons_rx_can_accept(), "reset frees the ring");
 }
 
 void test_cons_ctrlc_consumed(void) {

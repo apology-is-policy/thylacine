@@ -75,6 +75,15 @@ void cons_rx_input(u8 byte, bool is_break);
 long cons_input_read(void *buf, long n);
 long cons_output_write(const void *buf, long n);
 
+// #174 backpressure: true iff the RX ring can accept at least one more byte
+// (count < CONS_RING_SIZE). The PL011 RX drain (uart_rx_handler / uart_rx_pump)
+// checks this BEFORE reading a byte out of the FIFO -- when the ring is full it
+// leaves the byte in the FIFO and pauses RX instead of dropping it. Lockless
+// (a RELAXED-atomic count read); a stale "true" at worst pushes one byte that
+// cons_ring_push then drops (the pre-#174 behavior for that one byte), a stale
+// "false" at worst pauses one byte early -- neither corrupts.
+bool cons_rx_can_accept(void);
+
 // LS-8a: the shared console poll. Register-then-observe under the cons lock:
 // POLLIN iff the RX ring is non-empty; POLLOUT always (the UART never blocks);
 // if `pw` is non-NULL, install it on the console poll-hook list. The IRQ

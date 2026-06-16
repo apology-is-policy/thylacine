@@ -1,0 +1,44 @@
+#!/usr/bin/expect -f
+# #174 regression: RX backpressure under an instantaneous input flood. The
+# 256-byte cons ring used to drop bytes when a flood (a fast trackpad-scroll
+# mapped to arrow keys) filled it faster than the reader drained. The fix
+# (arch/arm64/uart.c) pauses RX -- the PL011 RX drain checks cons_rx_can_accept()
+# BEFORE reading each FIFO byte; on a full ring it leaves the byte in the FIFO,
+# masks RX, and the cons reader (uart_rx_pump) drains + unmasks later. No byte is
+# lost on the raw path, and the box does NOT wedge.
+#
+# This bursts 300 arrow-downs (900 bytes, 3.5x the ring) at the ut prompt and
+# asserts the shell still responds (backpressure absorbed the flood; no wedge).
+# The byte-level no-loss was proven during bring-up via a transient kernel drop
+# counter (in_drain=0 => the only ring drop is the kernel self-test
+# test_cons.c::ring_overflow_drop, NOT the UART path). Hand-run diagnostic
+# (SKIPs without `expect`); THYLACINE_ACCEL=tcg by default (a single large burst
+# is the reliable trigger under TCG's serialized vCPU + main loop).
+
+source [file join [file dirname [info script]] lib.exp]
+
+set timeout $::lc_boot_timeout
+spawn env THYLACINE_ACCEL=tcg [file join $::lc_repo tools run-vm.sh]
+
+expect {
+    -re {KASLR offset (0x[0-9a-f]+)} {}
+    timeout {}
+}
+lc_login michael correct-horse-battery-staple-v1
+
+set N 300
+set burst ""
+for {set i 0} {$i < $N} {incr i} { append burst "\x1b\[B" }
+lc_step "BURST: $N fast arrow-downs at the ut prompt (900 bytes, 3.5x the ring)"
+send -- $burst
+
+after 900
+lc_step "PROBE: echo Z174ALIVE (the shell must still respond -- no wedge, no loss)"
+send -- "echo Z174ALIVE\r"
+set timeout 15
+expect {
+    -ex "Z174ALIVE"   { send_user "\n#174 RESULT: ALIVE (flood absorbed by backpressure)\n"; lc_quit; exit 0 }
+    -re {EXTINCTION:} { send_user "\n#174 RESULT: EXTINCTION\n"; lc_quit; exit 2 }
+    timeout           { send_user "\n#174 RESULT: HUNG (wedge -- backpressure regression)\n"; exit 1 }
+    eof               { send_user "\n#174 RESULT: EOF (harness)\n"; exit 3 }
+}

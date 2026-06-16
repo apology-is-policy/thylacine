@@ -347,3 +347,38 @@ but the kernel is unambiguous against any consctl writer (LS-8 audit F1).
   drain is the separate fix for the unbounded-loop livelock (an IRQ that never
   returns under HVF's concurrent FIFO refill). Verified by
   `tools/interactive/freeze-172.exp`.
+- **RX backpressure: a full cons ring pauses RX, it does not drop (#174).** The
+  shared drain (`uart_rx_drain_locked`, used by both the IRQ handler and the
+  reader-side `uart_rx_pump`) checks `cons_rx_can_accept()` *before* reading each
+  byte out of the FIFO. When the ring is full it leaves the byte in the FIFO,
+  masks `IMSC.RXIM|RTIM`, and latches `g_rx_paused` — so the PL011 FIFO fills,
+  QEMU's `can_receive` goes 0, and the host serial buffers the overflow. **No byte
+  is lost on the raw byte-to-ring path** (the #172/#174 case — ut's line editor
+  and nora, where each input byte is one ring slot) under an instantaneous input
+  flood (e.g. a fast trackpad-scroll mapped to arrow keys). Resumption is
+  **reader-driven**, never int_level-driven (the #172 wedge trap):
+  `cons_input_read`, after draining ring bytes (freeing space), calls
+  `uart_rx_pump`, which drains the held FIFO bytes into the freed space and
+  unmasks RX once the FIFO empties. Lock order `g_uart_rx_lock -> g_cons.lock`;
+  handler-vs-pump are mutually exclusive (paused ⇒ RX masked ⇒ no handler), and
+  the single-reader guard means at most one pump runs. Predicate verified by
+  `cons.rx_can_accept_boundary`; the end-to-end no-loss/no-wedge by an
+  instantaneous-flood repro (`tools/interactive/flood-174.exp`).
+  - **Scope of "no loss" (#174-audit F1).** `cons_rx_can_accept()` gates on the
+    **ring**, so the no-loss guarantee covers the raw path. In **canonical**
+    (cooked) mode an ordinary input byte is routed to the line buffer
+    `g_cons.line[]` (`CONS_LINE_MAX`), not the ring — so a single line longer than
+    `CONS_LINE_MAX` still **truncates** (the LS-8b bound; the byte is read from the
+    FIFO and dropped at the line-buffer-full check, not held by backpressure).
+    Extending backpressure to the cooked line buffer is deliberately NOT done: it
+    would strand the line's terminating Enter behind a full buffer (the Enter
+    could never terminate the line). A 256-char single line is pathological for
+    interactive cooked input (login reads short username/passphrase lines); the
+    raw-path flood is the real loss vector and is the one #174 closes.
+  - **RX resume is gated on the console reader (#174-audit F3).** `uart_rx_pump`
+    runs only from `cons_input_read`, so a paused RX resumes only when *some* Proc
+    re-enters the console read. A console holder that stops reading (e.g. a
+    foreground child that never reads stdin) parks RX paused — input is **buffered
+    in the FIFO + host, never lost**, and flows the instant a reader returns. This
+    is correct backpressure, not the #172 wedge (the kernel is not stuck; only the
+    paused console waits on its consumer).

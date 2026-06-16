@@ -382,6 +382,7 @@ void test_devproc_write_ctl_kill_dispatch(void);
 void test_cons_blocking_read_wakeup(void);
 void test_cons_ring_fill_drain(void);
 void test_cons_ring_overflow_drop(void);
+void test_cons_rx_can_accept_boundary(void);
 void test_cons_ctrlc_consumed(void);
 void test_cons_break_sets_sak(void);
 void test_cons_read_busy_guard(void);
@@ -1415,6 +1416,7 @@ struct test_case g_tests[] = {
     { "cons.blocking_read_wakeup",     test_cons_blocking_read_wakeup,     false, NULL },
     { "cons.ring_fill_drain",          test_cons_ring_fill_drain,          false, NULL },
     { "cons.ring_overflow_drop",       test_cons_ring_overflow_drop,       false, NULL },
+    { "cons.rx_can_accept_boundary",   test_cons_rx_can_accept_boundary,   false, NULL },
     { "cons.ctrlc_consumed",           test_cons_ctrlc_consumed,           false, NULL },
     { "cons.break_sets_sak",           test_cons_break_sets_sak,           false, NULL },
     { "cons.read_busy_guard",          test_cons_read_busy_guard,          false, NULL },
