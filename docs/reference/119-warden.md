@@ -1,9 +1,10 @@
 # 119 - warden: the Menagerie hardware broker
 
-> As-built reference for `usr/warden` + `usr/menagerie-probe` (Menagerie
-> build-arc step 5c). Design: `docs/MENAGERIE.md` §4-6, §16, §18. Invariant
-> **I-34** (the hardware allowance). No new kernel ABI -- pure userspace over the
-> frozen 5a `Command::allowance` + the libdriver crate (`118-libdriver.md`).
+> As-built reference for `usr/warden` + `usr/menagerie-probe` +
+> `usr/virtio-mmio-source` (Menagerie build-arc steps 5c + 5d-2). Design:
+> `docs/MENAGERIE.md` §3-6, §16, §18. Invariant **I-34** (the hardware allowance).
+> No new kernel ABI -- pure userspace over the frozen 5a `Command::allowance` + the
+> libdriver crate (`118-libdriver.md`).
 
 ---
 
@@ -21,7 +22,9 @@ the I-34 gate, not by the warden).
 
 5c proves the loop end to end on QEMU-virt with the DTB discovery source (the
 devhw `/hw` tree) and a one-entry built-in bind database (the pl061 GPIO ->
-`menagerie-probe`).
+`menagerie-probe`). 5d-2 adds the **virtio-mmio bus source** (below): the warden
+discovers the typed `virtio:<id>` nodes through a sandboxed enumerator, staying
+hardware-free.
 
 ---
 
@@ -32,15 +35,16 @@ devhw `/hw` tree) and a one-entry built-in bind database (the pl061 GPIO ->
 1. **Parse the built-in bind database** (`BUILTIN_MANIFESTS`, a compiled-in
    `&[&str]` of §6 manifests). A malformed built-in is a build bug -> fail loud
    (exit 1). v1.x reads `/lib/driver/*.manifest`.
-2. **Discover** (`discover_hw`): `fs::read_dir("/hw")`, and for each child
-   *directory* read its `compatible`/`reg`/`interrupts` property files
-   (`read_prop`) and decode them into a `NodeResources` via
-   `libdriver::dtb::NodeResources::from_dtb`. Only nodes that expose a
-   `compatible` are kept. Top-level only (every bindable device on the v1.0
-   targets is a direct FDT-root child; nested-bus descent is a v1.x refinement).
-3. **Match + grant** (`best_match` + `libdriver::resolve`): for each node, find
-   the database manifest that binds it at the most-specific `compatible` (the
-   earliest entry in the node's most-specific-first list), then `resolve` the
+2. **Discover via the sources** (MENAGERIE §3/§7): the **DTB source**
+   (`libdriver::DtbSource`) enumerates `/hw` -> `Compatible` nodes (the static
+   fabric); the **virtio-mmio bus source** (`run_virtio_mmio_source`, below)
+   enumerates the bank -> typed `virtio:<id>` nodes. The raw `virtio,mmio`
+   transport nodes are suppressed (`is_virtio_mmio`, claimed by the bus source).
+   The warden binds on a node's typed IDENTITY (`DeviceId`), never the transport,
+   and never reads a device register itself.
+3. **Match + grant** (`libdriver::best_match` + `resolve`): for each discovered
+   node, find the database manifest that binds its most-specific identity (the
+   earliest in the node's most-specific-first `ids` list), then `resolve` the
    grant (`BoundResources`). A per-manifest instance counter feeds `%instance`.
 4. **Confer + spawn** (`bind_and_run`): encode the grant into the argv descriptor
    (`to_descriptor`) AND the kernel allowance (`to_allowance`) -- both from the
@@ -53,6 +57,31 @@ devhw `/hw` tree) and a one-entry built-in bind database (the pl061 GPIO ->
 
 Exit 0 iff every bound driver came up (or nothing matched); exit 1 if a bound
 driver failed to come up.
+
+### The virtio-mmio bus source (5d-2)
+
+QEMU-virt exposes ~32 identical `virtio,mmio` transport slots; the DTB cannot say
+which device is in which slot -- only each slot's runtime `DeviceID` register can.
+The warden does **not** read that register (it stays hardware-free); instead it
+spawns a separate, capability-sandboxed enumerator, `/virtio-mmio-source`
+(`usr/virtio-mmio-source`), granted an allowance narrowed to **only** the
+virtio-mmio bank (`bank_window` = the page-aligned union of the slots' `reg`; one
+MMIO window, no IRQ). The source maps the bank, reads each slot's `DeviceID`, and
+writes one typed `DeviceNode::to_record` line per *populated* slot to its stdout --
+a **pipe** the warden reads (`Stdio::Piped` -> `child.stdout`). The warden reads to
+EOF (`read_to_end`) then reaps, and `DeviceNode::parse_record`s each line; the
+parse is strict + bounds the resource counts (the **discovery-source trust
+boundary**). The source releases the bank before exiting, so the warden can later
+grant an individual slot to a driver (the exclusive MMIO claim must be free).
+
+This realizes the §3 "the warden never reads a device register" property: the
+`DeviceID`-poke is isolated in the sandboxed source, and the warden binds the
+typed `virtio:<id>` children by id (e.g. `virtio:1` -> netdev, 5d-3). It is the
+template every self-enumerating-bus source (PCIe/USB) follows. Proven at boot: the
+source reports the 6 populated QEMU-virt slots (`virtio:1` net, `virtio:2` blk x2,
+`virtio:4` rng, `virtio:16` gpu, `virtio:18` input), the warden logs each typed
+node, and -- because the bank is released -- stratumd still claims its virtio-blk
+device post-pivot.
 
 ### The bind database (5c)
 
@@ -143,14 +172,19 @@ joey: warden ok (5c Menagerie bind-loop: discover -> grant -> spawn narrowed)
 - **One-shot, not supervised (5c).** The warden reaps each bound driver. Long-
   lived supervision (restart policy from the manifest, back-off, give-up) +
   `DeviceRemoved` revoke + the device-gone CQE to a consumer is **5e**.
-- **DTB source only.** PCIe/USB/SDIO discovery sources are MENAGERIE §3 seams
-  (the step-6 per-(bus,dev,fn) PCI allowance axis, #159, is the first).
+- **DTB + virtio-mmio sources (5d-2).** The DTB source + the virtio-mmio bus
+  source are built; PCIe/USB/SDIO sources are MENAGERIE §3/§7 seams that plug into
+  the same `DiscoverySource` slot (the step-6 per-(bus,dev,fn) PCI allowance axis,
+  #159, is the first). The virtio-mmio source enumerates once at boot; the live
+  `DeviceRemoved` hotplug stream is 5e.
 - **Compiled-in bind DB.** Manifest files under `/lib/driver` are a v1.x
   ergonomic; the `sig` authorization ladder (try-bind / ask-once / remember,
   MENAGERIE §9) is unbuilt.
-- **No useful driver yet.** `menagerie-probe` proves the mechanics; the first
-  real driver the warden binds NARROWED is the netdev retrofit (**5d**), which
-  retires `usr/lib/netdev`'s hardcoded `virtio.rs:51` base.
+- **No useful driver yet (through 5d-2).** `menagerie-probe` proves the mechanics
+  and the virtio-mmio source proves the discovery channel; the first real driver
+  the warden binds NARROWED (by `virtio:1`) is the netdev retrofit (**5d-3**),
+  which retires `usr/lib/netdev`'s hardcoded `virtio.rs:51` base. At 5d-2 the
+  discovered `virtio:<id>` nodes are logged-but-unbound (no virtio manifest yet).
 - **The boot probe is `THYLA_BOOT_PROBES`-gated** (off in `--production`), like
   the netdev probes. The persistent warden is a 5e+ service.
 

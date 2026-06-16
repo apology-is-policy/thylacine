@@ -1,43 +1,48 @@
-// /warden -- the Menagerie hardware broker (MENAGERIE.md sections 4-6), build-arc
-// step 5c. The warden is the TCB component that turns the raw discovery sources
-// into capability-sandboxed driver Procs: it reads the device inventory, matches
-// each node against a driver-manifest database, intersects the node's resources
+// /warden -- the Menagerie hardware broker (MENAGERIE.md sections 3-6), build-arc
+// steps 5c + 5d. The warden is the TCB component that turns the discovery sources
+// into capability-sandboxed driver Procs: it enumerates device nodes (the DTB
+// source over /hw + the virtio-mmio bus source), matches each node's typed
+// identity against a driver-manifest database, intersects the node's resources
 // with the matched manifest's needs to compute the narrowed allowance (the
 // auditable I-34 grant), and spawns the driver with exactly that allowance plus a
 // descriptor of what it was granted.
 //
-// 5c proves the loop end to end on QEMU-virt with the DTB discovery source (the
-// devhw /hw tree) and a one-entry built-in bind database (the pl061 GPIO ->
-// menagerie-probe). The engine is general; what 5c does not yet build:
-//   - long-lived supervision + restart + DeviceRemoved revoke (5e). 5c reaps each
-//     bound driver and reads its lifecycle status -- the probe is a one-shot.
-//   - the other discovery sources (PCIe/USB) + the manifest-file database
-//     (/lib/driver/*.manifest). v1.0 compiles the bind DB in.
-//   - retrofitting the real virtio drivers to be warden-bound (5d).
+// The warden binds on a node's IDENTITY, never the transport, and NEVER reads a
+// device register itself (MENAGERIE section 3): a bus whose device type is only
+// knowable at runtime is enumerated by ITS source. 5d-2 adds the virtio-mmio bus
+// source -- a separate, capability-sandboxed Proc the warden spawns granted only
+// the virtio-mmio bank; it reads each slot's DeviceID and reports typed
+// `virtio:<id>` nodes back over a pipe, so the DeviceID-poke stays out of the TCB.
+//
+// What is not yet built: long-lived supervision + restart + DeviceRemoved revoke
+// (5e); the netdev bind (5d-3 adds the `virtio:1` manifest + the grant-driven
+// driver -- so a discovered virtio node is logged-but-unbound at 5d-2); the other
+// bus sources (PCIe/USB) + a manifest-file database. v1.0 compiles the bind DB in.
 //
 // The warden holds CAP_HW_CREATE + the broad allowance (joey spawns it without a
-// narrowing), so it can confer a narrowed allowance + CAP_HW_CREATE on each
-// driver. It reads /hw for *information* only; the allowance it confers is the
-// *authority*, and the kernel enforces it.
-//
-// Runs in joey's THYLA_BOOT_PROBES ladder, PRE-pivot (so /menagerie-probe
-// resolves in devramfs by bare name). Exit 0 = every bound driver came up (or
-// nothing matched); exit 1 = a bound driver failed to come up.
+// narrowing), so it can confer a narrowed allowance + CAP_HW_CREATE on each driver
+// AND on the bus source. Runs in joey's THYLA_BOOT_PROBES ladder, PRE-pivot (so
+// the driver + source binaries resolve in devramfs by absolute path). Exit 0 =
+// every bound driver came up (or nothing matched); exit 1 = a bound driver failed.
 
 #![no_std]
 #![no_main]
 
 extern crate alloc;
 
+use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
 use libthyla_rs::fs::OpenOptions;
+use libthyla_rs::io::Read;
 use libthyla_rs::process::{Command, Stdio};
 use libthyla_rs::T_CAP_HW_CREATE;
 
 use libdriver::driver::to_allowance;
-use libdriver::{best_match, resolve, BoundResources, DiscoverySource, DtbSource, Manifest};
+use libdriver::{
+    best_match, resolve, BoundResources, DeviceId, DeviceNode, DiscoverySource, DtbSource, Manifest,
+};
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
@@ -84,10 +89,45 @@ pub extern "C" fn rs_main() -> i64 {
         }
     }
 
-    // Discovery: the DTB source publishes the static fabric (MENAGERIE section 7).
-    // The virtio-mmio bus source -- the typed virtio:<id> nodes -- is added in 5d-2.
-    let nodes = DtbSource::new().enumerate();
-    say!("warden: /hw discovered {} device nodes", nodes.len());
+    // Discovery. The DTB source publishes the static fabric (MENAGERIE section 7);
+    // the virtio-mmio bus source enumerates the bank and re-emits typed virtio:<id>
+    // nodes. The warden suppresses the raw `virtio,mmio` transport nodes (claimed
+    // by the source) and binds the typed children by id.
+    let dtb_nodes = DtbSource::new().enumerate();
+    say!("warden: /hw discovered {} device nodes", dtb_nodes.len());
+
+    let mut discovered: Vec<DeviceNode> = Vec::new();
+    let mut virtio_slots: Vec<&DeviceNode> = Vec::new();
+    for n in &dtb_nodes {
+        if is_virtio_mmio(n) {
+            virtio_slots.push(n);
+        } else {
+            discovered.push(n.clone());
+        }
+    }
+    if !virtio_slots.is_empty() {
+        match bank_window(&virtio_slots) {
+            Some(bank) => {
+                say!(
+                    "warden: virtio-mmio bank {:#x}/{:#x} ({} slots) -> spawning bus source",
+                    bank.0,
+                    bank.1,
+                    virtio_slots.len()
+                );
+                let typed = run_virtio_mmio_source(bank);
+                say!(
+                    "warden: virtio-mmio source reported {} typed node(s)",
+                    typed.len()
+                );
+                for n in &typed {
+                    let id = n.ids.first().map(|i| i.as_string()).unwrap_or_default();
+                    say!("warden: discovered {} ({})", id, n.label);
+                }
+                discovered.extend(typed);
+            }
+            None => say!("warden: virtio-mmio slots present but no reg window; skipping source"),
+        }
+    }
 
     // A per-manifest instance counter so each bound device of a driver gets a
     // distinct %instance in its served path.
@@ -95,7 +135,7 @@ pub extern "C" fn rs_main() -> i64 {
     let mut bound = 0u32;
     let mut up = 0u32;
 
-    for node in &nodes {
+    for node in &discovered {
         let Some(idx) = best_match(&db, node) else {
             continue;
         };
@@ -125,6 +165,118 @@ pub extern "C" fn rs_main() -> i64 {
     } else {
         0
     }
+}
+
+const PAGE: u64 = 0x1000;
+const VIRTIO_MMIO_COMPATIBLE: &str = "virtio,mmio";
+const VIRTIO_MMIO_SOURCE_BIN: &str = "/virtio-mmio-source";
+
+/// Is this a raw virtio-mmio transport node (a `virtio,mmio` DTB slot)? Such nodes
+/// are claimed by the virtio-mmio bus source, which re-emits typed `virtio:<id>`
+/// children, so the warden suppresses the raw nodes from its bind set.
+fn is_virtio_mmio(node: &DeviceNode) -> bool {
+    node.ids
+        .iter()
+        .any(|id| matches!(id, DeviceId::Compatible(c) if c == VIRTIO_MMIO_COMPATIBLE))
+}
+
+/// The page-aligned MMIO window spanning every virtio-mmio slot -- the bank the
+/// source is granted (one window: the ~32 slots cannot fit as separate allowance
+/// windows, and the source needs all of them to read each slot's DeviceID).
+/// Returns `None` if no slot exposes a reg window.
+fn bank_window(slots: &[&DeviceNode]) -> Option<(u64, u64)> {
+    let mut lo = u64::MAX;
+    let mut hi = 0u64;
+    for s in slots {
+        for (base, size) in &s.resources.reg {
+            lo = lo.min(*base);
+            hi = hi.max(base.saturating_add(*size));
+        }
+    }
+    if lo == u64::MAX || hi <= lo {
+        return None;
+    }
+    let lo = lo & !(PAGE - 1); // round the base down to a page
+    let hi = hi.saturating_add(PAGE - 1) & !(PAGE - 1); // round the end up to a page
+    Some((lo, hi - lo))
+}
+
+/// Spawn the virtio-mmio bus source granted ONLY the bank, read its typed
+/// `DeviceNode` records off the pipe (to EOF), reap it, and return the typed
+/// nodes. The source -- not the warden -- reads the slot DeviceID registers, so
+/// the warden never touches a device register (MENAGERIE section 3). A source
+/// failure is non-fatal: the warden returns an empty set and binds whatever else
+/// it found.
+fn run_virtio_mmio_source(bank: (u64, u64)) -> Vec<DeviceNode> {
+    let mut out_nodes = Vec::new();
+
+    // The source's grant: the bank MMIO window, no IRQ, no DMA. Both the kernel
+    // allowance (the authority) and the argv descriptor (the information) come from
+    // this one BoundResources, so they cannot drift -- the driver-bind discipline.
+    let source_grant = BoundResources {
+        instance: 0,
+        compatible: "virtio-mmio-bank".to_string(),
+        serves: String::new(),
+        mmio: vec![bank],
+        irq: Vec::new(),
+        dma_max: 0,
+    };
+    let desc = match source_grant.to_descriptor() {
+        Ok(d) => d,
+        Err(e) => {
+            say!("warden: virtio-mmio-source descriptor encode failed {:?}", e);
+            return out_nodes;
+        }
+    };
+    let allow = to_allowance(&source_grant);
+
+    let mut cmd = Command::new(VIRTIO_MMIO_SOURCE_BIN);
+    cmd.arg(desc).caps(T_CAP_HW_CREATE).allowance(allow);
+    // The source has no stdio of its own (the boot-probe-no-fds gap; see
+    // bind_and_run): /dev/null for stdin + stderr, a PIPE for stdout -- the warden
+    // reads its node records off the pipe.
+    let open_null = || OpenOptions::new().read(true).write(true).open("/dev/null");
+    let (Ok(nin), Ok(nerr)) = (open_null(), open_null()) else {
+        say!("warden: /dev/null open failed; skipping virtio-mmio source");
+        return out_nodes;
+    };
+    cmd.stdin(Stdio::File(nin))
+        .stdout(Stdio::Piped)
+        .stderr(Stdio::File(nerr));
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            say!("warden: spawn virtio-mmio-source failed {:?}", e);
+            return out_nodes;
+        }
+    };
+
+    // Read the records to EOF (the source closes stdout on exit) BEFORE reaping --
+    // read_to_end drains the pipe concurrently, so the small (<= ~32 records)
+    // output never deadlocks on a full pipe.
+    let mut buf = Vec::new();
+    if let Some(mut so) = child.stdout.take() {
+        let _ = so.read_to_end(&mut buf);
+    }
+    let _ = child.wait();
+
+    // Parse each newline-delimited record into a typed DeviceNode. parse_record is
+    // strict + bounds the resource counts -- the discovery-source trust boundary.
+    match core::str::from_utf8(&buf) {
+        Ok(text) => {
+            for line in text.lines() {
+                if line.is_empty() {
+                    continue;
+                }
+                match DeviceNode::parse_record(line) {
+                    Ok(n) => out_nodes.push(n),
+                    Err(e) => say!("warden: bad virtio-mmio-source record {:?} ({})", e, line),
+                }
+            }
+        }
+        Err(_) => say!("warden: virtio-mmio-source emitted non-UTF8 records"),
+    }
+    out_nodes
 }
 
 /// Spawn the driver for a computed grant -- the confer step. Encodes the grant
