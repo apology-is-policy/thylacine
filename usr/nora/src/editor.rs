@@ -14,6 +14,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use kaua::event::{KeyCode, KeyEvent, Mods};
 
+use crate::syntax::Lang;
 use crate::text::{Pos, TextBuffer};
 use crate::wrap;
 
@@ -49,6 +50,110 @@ pub enum Request {
     /// List `path`'s files to populate the fuzzy file picker (Space-f). The
     /// binary reads the directory and calls `open_file_picker` back.
     ListDir(String),
+}
+
+/// A selection: a range from `anchor` to `head` (the caret). The rendered span
+/// is `[min(anchor, head), max(anchor, head)]` inclusive. Multi-cursor
+/// (`Editor::carets`) is a `Vec` of these; a match selected by `s` has its head
+/// at the match's last char.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Sel {
+    pub anchor: Pos,
+    pub head: Pos,
+}
+
+impl Sel {
+    /// The ordered inclusive range `(lo, hi)`.
+    pub fn range(&self) -> (Pos, Pos) {
+        if self.anchor <= self.head {
+            (self.anchor, self.head)
+        } else {
+            (self.head, self.anchor)
+        }
+    }
+}
+
+/// One simultaneous multi-cursor edit (applied at every caret per keystroke).
+#[derive(Clone, Copy)]
+enum MultiEdit {
+    Char(char),
+    Newline,
+    Backspace,
+}
+
+/// Shift a caret position `p` that lies AFTER an edit applied at `at`, so the
+/// not-yet-processed carets stay valid as the buffer mutates (the multi-cursor
+/// "apply, then shift the later markers" discipline -- the correctness pivot).
+fn shift_after(p: Pos, at: Pos, edit: MultiEdit) -> Pos {
+    match edit {
+        MultiEdit::Char(_) => {
+            if p.0 == at.0 && p.1 >= at.1 {
+                (p.0, p.1 + 1)
+            } else {
+                p
+            }
+        }
+        MultiEdit::Newline => {
+            if p.0 == at.0 && p.1 >= at.1 {
+                (p.0 + 1, p.1 - at.1)
+            } else if p.0 > at.0 {
+                (p.0 + 1, p.1)
+            } else {
+                p
+            }
+        }
+        MultiEdit::Backspace => {
+            // A backspace deleted the char before `at` (when at.1 > 0); same-line
+            // positions after `at` shift left by one. A col-0 line-join does not
+            // shift other carets at v1 (rare in a multi-insert).
+            if at.1 > 0 && p.0 == at.0 && p.1 >= at.1 {
+                (p.0, p.1 - 1)
+            } else {
+                p
+            }
+        }
+    }
+}
+
+/// Shift `p` after a single-line inclusive delete of `[lo, hi]` (matches from
+/// `s` are single-line, so `lo.0 == hi.0`).
+fn shift_after_delete(p: Pos, lo: Pos, hi: Pos) -> Pos {
+    if p.0 == lo.0 && p.1 > hi.1 {
+        (p.0, p.1 - (hi.1 - lo.1 + 1))
+    } else {
+        p
+    }
+}
+
+/// A find-char motion (`f`/`F`/`t`/`T`), repeatable by `;` / `,`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FindKind {
+    Forward,      // f: onto the next <char>
+    ForwardTill,  // t: just before the next <char>
+    Backward,     // F: onto the previous <char>
+    BackwardTill, // T: just after the previous <char>
+}
+
+impl FindKind {
+    /// The opposite direction (`,` repeats reversed).
+    fn reversed(self) -> FindKind {
+        match self {
+            FindKind::Forward => FindKind::Backward,
+            FindKind::Backward => FindKind::Forward,
+            FindKind::ForwardTill => FindKind::BackwardTill,
+            FindKind::BackwardTill => FindKind::ForwardTill,
+        }
+    }
+}
+
+/// A prefix awaiting its next key: a find-char target; the match-mode selector
+/// (`m` -> `m` matches the bracket, `i`/`a` open a text object); or a text
+/// object awaiting its object char (`mi(` / `ma{` / `miw`).
+#[derive(Clone, Copy)]
+enum Pending {
+    FindChar(FindKind),
+    Match,
+    TextObject { around: bool },
 }
 
 /// A backgrounded buffer's parked state -- the per-buffer half of `Editor`. The
@@ -113,6 +218,21 @@ pub struct Editor {
     anchor: Option<Pos>,
     /// The internal yank/paste register (replaces the system clipboard).
     register: String,
+    /// Multi-cursor selections (Helix `%`/`s`/`,`). Empty == single-cursor mode
+    /// (the `TextBuffer` cursor + `anchor`), so single-cursor paths are
+    /// untouched; non-empty == multi, with `carets[0]` the primary (synced to
+    /// the `TextBuffer` cursor). Transient -- cleared on a buffer switch.
+    carets: Vec<Sel>,
+    /// The in-progress `s` (select-within) literal pattern; `Some` routes keys
+    /// to the prompt and renders a `select:` line.
+    split_buf: Option<String>,
+    /// A one-key prefix awaiting its next key (`f`/`F`/`t`/`T` target, or `m`).
+    pending: Option<Pending>,
+    /// The numeric count prefix being typed (`3w`, `5j`); `None` until a digit
+    /// starts it. Consumed (reset to `None`) by the next motion / edit.
+    count: Option<usize>,
+    /// The last find-char motion, repeated by `;` (same) / `,` (reversed).
+    last_find: Option<(FindKind, char)>,
     /// Last `/` pattern, repeated by `n`.
     last_search: String,
     /// A pending file op for the binary to execute.
@@ -151,6 +271,11 @@ impl Editor {
             quit: false,
             anchor: None,
             register: String::new(),
+            carets: Vec::new(),
+            split_buf: None,
+            pending: None,
+            count: None,
+            last_find: None,
             last_search: String::new(),
             request: None,
             bufs: Vec::new(),
@@ -274,6 +399,23 @@ impl Editor {
         }
     }
 
+    /// The syntax-highlight language for the active buffer, from its filename
+    /// (the renderer asks per frame; no stored state to keep in sync).
+    pub fn lang(&self) -> Lang {
+        Lang::from_filename(self.filename.as_deref())
+    }
+
+    /// Whether to show the new-user `:help` nudge in the corner: a pristine,
+    /// unnamed, unmodified buffer with no overlay open (it fades the moment you
+    /// type, open, or name a file -- the "I'm just exploring" moment only).
+    pub fn show_hint(&self) -> bool {
+        self.filename.is_none()
+            && !self.modified
+            && self.text.content().is_empty()
+            && self.carets.is_empty()
+            && matches!(self.mode, Mode::Normal)
+    }
+
     /// Take the pending file request (the binary calls this after each key).
     pub fn take_request(&mut self) -> Option<Request> {
         self.request.take()
@@ -314,6 +456,11 @@ impl Editor {
         self.left = d.left;
         self.anchor = d.anchor;
         self.last_search = d.last_search;
+        // Multi-cursor + any half-typed prefix are transient; a switch drops them.
+        self.carets.clear();
+        self.split_buf = None;
+        self.pending = None;
+        self.count = None;
     }
 
     /// The number of open buffers.
@@ -360,7 +507,7 @@ impl Editor {
     /// terminal cursor on the command line (Command). The block IS the cursor in
     /// text modes, so the binary hides the real one there.
     pub fn block_cursor(&self) -> bool {
-        matches!(self.mode, Mode::Normal | Mode::Insert | Mode::Visual)
+        self.split_buf.is_none() && matches!(self.mode, Mode::Normal | Mode::Insert | Mode::Visual)
     }
 
     /// Switch the active buffer to index `i` (parking the current one). Resets
@@ -416,6 +563,30 @@ impl Editor {
         self.load_active(d);
         self.mode = Mode::Normal;
         self.status = self.buffer_indicator().or(Some("opened".to_string()));
+    }
+
+    /// Open the built-in manual in a read-only scratch buffer (`:help`). Always
+    /// ADDS a buffer (never replaces a pristine one) so closing it returns to the
+    /// user's work; re-focuses an already-open help buffer instead of stacking.
+    pub fn open_help(&mut self) {
+        if self.filename.as_deref() == Some(HELP_NAME) {
+            return; // already viewing help
+        }
+        if let Some(i) = self
+            .bufs
+            .iter()
+            .position(|d| d.filename.as_deref() == Some(HELP_NAME))
+        {
+            self.switch_to(i);
+            return;
+        }
+        let d = DocState::new(Some(HELP_NAME.to_string()), HELP_TEXT, true);
+        self.bufs[self.active] = self.save_active();
+        self.bufs.push(d.clone());
+        self.active = self.bufs.len() - 1;
+        self.load_active(d);
+        self.mode = Mode::Normal;
+        self.status = Some("help -- press q to close".to_string());
     }
 
     /// Close the active buffer (`:bd`). Refuses to discard unsaved changes
@@ -567,6 +738,14 @@ impl Editor {
     /// Dispatch one key by mode.
     pub fn handle_key(&mut self, key: KeyEvent) {
         self.status = None;
+        if self.split_buf.is_some() {
+            self.split_prompt(key);
+            return;
+        }
+        if let Some(p) = self.pending.take() {
+            self.resolve_pending(p, key);
+            return;
+        }
         match &self.mode {
             Mode::Normal => self.normal(key),
             Mode::Insert => self.insert(key),
@@ -581,6 +760,30 @@ impl Editor {
     // -- per-mode handlers ------------------------------------------------
 
     fn normal(&mut self, key: KeyEvent) {
+        // Multi-cursor (after Esc from a multi-insert): `,` collapses to the
+        // primary; any other key collapses first (no stuck multi-state), then
+        // acts as a single cursor.
+        if !self.carets.is_empty() {
+            self.collapse_carets();
+            if key.code == KeyCode::Char(',') {
+                return;
+            }
+        }
+        // Numeric count prefix (3w, 5j, 2d): a digit accumulates; `0` is a digit
+        // only mid-count (else it is the move-home motion). The count echoes in
+        // the status and is consumed by the next motion / edit.
+        if let KeyCode::Char(c) = key.code {
+            if c.is_ascii_digit() && (c != '0' || self.count.is_some()) {
+                let d = c as usize - '0' as usize;
+                let acc = self.count.unwrap_or(0).saturating_mul(10).saturating_add(d);
+                let acc = acc.min(COUNT_MAX);
+                self.count = Some(acc);
+                self.status = Some(itoa(acc));
+                return;
+            }
+        }
+        let explicit = self.count.is_some();
+        let n = self.count.take().unwrap_or(1);
         let editable = !self.readonly;
         match key.code {
             KeyCode::Char('i') if editable => {
@@ -608,6 +811,13 @@ impl Editor {
                 self.anchor = Some(self.text.cursor());
                 self.mode = Mode::Visual;
             }
+            KeyCode::Char('%') => {
+                // Select the whole buffer (Helix `%`).
+                self.anchor = Some((0, 0));
+                self.text.move_bottom();
+                self.text.move_end();
+                self.mode = Mode::Visual;
+            }
             KeyCode::Char(':') => self.mode = Mode::Command(":".to_string()),
             KeyCode::Char('/') => self.mode = Mode::Command("/".to_string()),
             KeyCode::Char(' ') => self.mode = Mode::Menu,
@@ -617,34 +827,60 @@ impl Editor {
             KeyCode::Char('p') if editable => {
                 if !self.register.is_empty() {
                     self.text.checkpoint();
-                    self.text.insert_str(&self.register);
+                    for _ in 0..n {
+                        self.text.insert_str(&self.register);
+                    }
                     self.modified = true;
                 }
             }
 
-            // Navigation.
-            KeyCode::Char('h') | KeyCode::Left => self.text.move_left(),
-            KeyCode::Char('j') | KeyCode::Down => self.move_down(),
-            KeyCode::Char('k') | KeyCode::Up => self.move_up(),
-            KeyCode::Char('l') | KeyCode::Right => self.text.move_right(),
+            // Navigation. A count repeats a motion; on g/G it is a go-to-line.
+            KeyCode::Char('h') | KeyCode::Left => self.repeat(n, |t| t.move_left()),
+            KeyCode::Char('j') | KeyCode::Down => {
+                for _ in 0..n {
+                    self.move_down();
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                for _ in 0..n {
+                    self.move_up();
+                }
+            }
+            KeyCode::Char('l') | KeyCode::Right => self.repeat(n, |t| t.move_right()),
             KeyCode::Char('0') | KeyCode::Home => self.text.move_home(),
             KeyCode::Char('$') | KeyCode::End => self.text.move_end(),
+            KeyCode::Char('g') if explicit => self.goto_line(n),
+            KeyCode::Char('G') if explicit => self.goto_line(n),
             KeyCode::Char('g') => self.text.move_top(),
             KeyCode::Char('G') => self.text.move_bottom(),
-            KeyCode::Char('w') => self.text.move_word_forward(),
-            KeyCode::Char('b') => self.text.move_word_back(),
+            KeyCode::Char('w') => self.repeat(n, |t| t.move_word_forward()),
+            KeyCode::Char('W') => self.repeat(n, |t| t.move_long_word_forward()),
+            KeyCode::Char('e') => self.repeat(n, |t| t.move_word_end()),
+            KeyCode::Char('b') => self.repeat(n, |t| t.move_word_back()),
+            KeyCode::Char('f') => self.pending = Some(Pending::FindChar(FindKind::Forward)),
+            KeyCode::Char('F') => self.pending = Some(Pending::FindChar(FindKind::Backward)),
+            KeyCode::Char('t') => self.pending = Some(Pending::FindChar(FindKind::ForwardTill)),
+            KeyCode::Char('T') => self.pending = Some(Pending::FindChar(FindKind::BackwardTill)),
+            KeyCode::Char('m') => self.pending = Some(Pending::Match),
+            KeyCode::Char(';') => self.repeat_find(false),
+            KeyCode::Char(',') => self.repeat_find(true),
             KeyCode::PageUp => self.page(true),
             KeyCode::PageDown => self.page(false),
 
-            // Editing.
+            // Editing. A count multiplies under ONE checkpoint (one undo reverts
+            // the whole 3x / 2d).
             KeyCode::Char('x') if editable => {
                 self.text.checkpoint();
-                self.text.delete_char();
+                for _ in 0..n {
+                    self.text.delete_char();
+                }
                 self.modified = true;
             }
             KeyCode::Char('d') if editable => {
                 self.text.checkpoint();
-                self.text.delete_line();
+                for _ in 0..n {
+                    self.text.delete_line();
+                }
                 self.modified = true;
             }
             KeyCode::Char('u') if editable => {
@@ -655,12 +891,25 @@ impl Editor {
                 }
             }
 
-            KeyCode::Char('q') | KeyCode::Esc if self.readonly => self.quit = true,
+            KeyCode::Char('q') | KeyCode::Esc if self.readonly => {
+                // A read-only buffer in a multi-buffer session (e.g. :help opened
+                // over your work) closes on q/Esc and returns you to it; a lone
+                // view (nora -R) has nothing to return to, so it quits.
+                if self.bufs.len() > 1 {
+                    self.close_buffer(true);
+                } else {
+                    self.quit = true;
+                }
+            }
             _ => {}
         }
     }
 
     fn insert(&mut self, key: KeyEvent) {
+        if !self.carets.is_empty() {
+            self.multi_insert(key);
+            return;
+        }
         match key.code {
             KeyCode::Esc => self.mode = Mode::Normal,
             KeyCode::Enter => {
@@ -703,8 +952,12 @@ impl Editor {
         match key.code {
             KeyCode::Esc => {
                 self.anchor = None;
+                self.carets.clear();
                 self.mode = Mode::Normal;
             }
+            KeyCode::Char('s') => self.split_buf = Some(String::new()),
+            KeyCode::Char('c') if !self.readonly => self.change(),
+            KeyCode::Char(',') if !self.carets.is_empty() => self.collapse_carets(),
             KeyCode::Char('y') => {
                 if let Some((lo, hi)) = self.selection() {
                     self.register = self.text.range_text(lo, hi);
@@ -713,16 +966,7 @@ impl Editor {
                 self.mode = Mode::Normal;
                 self.status = Some("yanked".to_string());
             }
-            KeyCode::Char('d') | KeyCode::Char('x') if !self.readonly => {
-                if let Some((lo, hi)) = self.selection() {
-                    self.register = self.text.range_text(lo, hi);
-                    self.text.checkpoint();
-                    self.text.delete_range(lo, hi);
-                    self.modified = true;
-                }
-                self.anchor = None;
-                self.mode = Mode::Normal;
-            }
+            KeyCode::Char('d') | KeyCode::Char('x') if !self.readonly => self.delete(),
 
             // Navigation extends the selection (the anchor stays put).
             KeyCode::Char('h') | KeyCode::Left => self.text.move_left(),
@@ -734,11 +978,452 @@ impl Editor {
             KeyCode::Char('g') => self.text.move_top(),
             KeyCode::Char('G') => self.text.move_bottom(),
             KeyCode::Char('w') => self.text.move_word_forward(),
+            KeyCode::Char('W') => self.text.move_long_word_forward(),
+            KeyCode::Char('e') => self.text.move_word_end(),
             KeyCode::Char('b') => self.text.move_word_back(),
             KeyCode::PageUp => self.page(true),
             KeyCode::PageDown => self.page(false),
             _ => {}
         }
+    }
+
+    /// The `s` (select-within) pattern prompt: collect the literal pattern;
+    /// Enter splits the buffer's matches into carets, Esc cancels.
+    fn split_prompt(&mut self, key: KeyEvent) {
+        let mut buf = match self.split_buf.take() {
+            Some(b) => b,
+            None => return,
+        };
+        match key.code {
+            KeyCode::Esc => {}
+            KeyCode::Enter => self.run_split(&buf),
+            KeyCode::Backspace => {
+                buf.pop();
+                self.split_buf = Some(buf);
+            }
+            KeyCode::Char(c) => {
+                buf.push(c);
+                self.split_buf = Some(buf);
+            }
+            _ => self.split_buf = Some(buf),
+        }
+    }
+
+    /// Split every literal match of `pat` into its own selection (Helix `s`).
+    fn run_split(&mut self, pat: &str) {
+        if pat.is_empty() {
+            self.status = Some("empty pattern".to_string());
+            return;
+        }
+        let matches = self.text.find_all(pat);
+        if matches.is_empty() {
+            self.status = Some("no matches".to_string());
+            return;
+        }
+        self.carets = matches
+            .iter()
+            .map(|&(anchor, head)| Sel { anchor, head })
+            .collect();
+        // The primary caret drives scrolling + the block cursor.
+        let head = self.carets[0].head;
+        self.text.set_cursor(head.0, head.1);
+        self.anchor = None;
+        self.mode = Mode::Visual;
+        self.status = Some(alloc::format!("{} cursors", self.carets.len()));
+    }
+
+    /// Collapse multi-cursor to the primary selection's caret (Helix `,`).
+    fn collapse_carets(&mut self) {
+        if let Some(primary) = self.carets.first().copied() {
+            self.text.set_cursor(primary.head.0, primary.head.1);
+        }
+        self.carets.clear();
+        self.split_buf = None;
+        self.anchor = None;
+        self.mode = Mode::Normal;
+        self.status = Some("single cursor".to_string());
+    }
+
+    /// The multi-cursor selections (empty in single-cursor mode); the renderer
+    /// paints each head as a caret.
+    pub fn carets(&self) -> &[Sel] {
+        &self.carets
+    }
+
+    /// Every selection range to paint: the carets' ranges in multi-cursor mode,
+    /// else the single visual selection (or none).
+    pub fn selection_ranges(&self) -> Vec<(Pos, Pos)> {
+        if !self.carets.is_empty() {
+            self.carets.iter().map(|s| s.range()).collect()
+        } else if let Some(s) = self.selection() {
+            alloc::vec![s]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// The in-progress `s` pattern (for the `select:` prompt line), if any.
+    pub fn split_buf(&self) -> Option<&str> {
+        self.split_buf.as_deref()
+    }
+
+    /// Change (Helix `c`): delete every selection and drop into Insert. Multi
+    /// (carets non-empty) changes at every caret; otherwise the single visual
+    /// selection. The deletes run ascending with the later carets shifted back,
+    /// so positions stay valid (match spans are single-line).
+    fn change(&mut self) {
+        if self.readonly {
+            return;
+        }
+        if self.carets.is_empty() {
+            if let Some((lo, hi)) = self.selection() {
+                self.text.checkpoint();
+                self.text.delete_range(lo, hi);
+                self.anchor = None;
+                self.mode = Mode::Insert;
+                self.modified = true;
+            }
+            return;
+        }
+        self.delete_all_carets();
+        self.mode = Mode::Insert;
+    }
+
+    /// Delete every caret's selection range, collapsing each caret to its start
+    /// (ascending, shifting the later carets back). Shared by `c` (change ->
+    /// Insert) and `d` (delete -> stay in Normal). Match spans are single-line.
+    fn delete_all_carets(&mut self) {
+        self.text.checkpoint();
+        let n = self.carets.len();
+        for i in 0..n {
+            let (lo, hi) = self.carets[i].range();
+            self.text.delete_range(lo, hi);
+            self.carets[i].anchor = lo;
+            self.carets[i].head = lo;
+            for j in (i + 1)..n {
+                // Shift anchor + head independently -- collapsing both to the
+                // head would destroy a multi-char selection's range.
+                self.carets[j].head = shift_after_delete(self.carets[j].head, lo, hi);
+                self.carets[j].anchor = shift_after_delete(self.carets[j].anchor, lo, hi);
+            }
+        }
+        let h = self.carets[0].head;
+        self.text.set_cursor(h.0, h.1);
+        self.anchor = None;
+        self.modified = true;
+    }
+
+    /// Delete (Helix `d`): remove every selection. Multi (carets) deletes at
+    /// every caret and stays in multi-Normal (carets collapse to the deletion
+    /// points, ready for `,`); a single visual selection cuts (yank + delete).
+    fn delete(&mut self) {
+        if self.readonly {
+            return;
+        }
+        if self.carets.is_empty() {
+            if let Some((lo, hi)) = self.selection() {
+                self.register = self.text.range_text(lo, hi);
+                self.text.checkpoint();
+                self.text.delete_range(lo, hi);
+                self.modified = true;
+            }
+            self.anchor = None;
+            self.mode = Mode::Normal;
+            return;
+        }
+        let count = self.carets.len();
+        self.delete_all_carets();
+        self.mode = Mode::Normal;
+        self.status = Some(alloc::format!("deleted {} selections", count));
+    }
+
+    /// Apply one edit at every caret simultaneously: edit at the caret, then
+    /// shift the later carets by its delta so they stay valid (ascending).
+    fn multi_apply(&mut self, edit: MultiEdit) {
+        let n = self.carets.len();
+        for i in 0..n {
+            let at = self.carets[i].head;
+            self.text.set_cursor(at.0, at.1);
+            match edit {
+                MultiEdit::Char(c) => self.text.insert_char(c),
+                MultiEdit::Newline => self.text.insert_newline(),
+                MultiEdit::Backspace => self.text.backspace(),
+            }
+            let np = self.text.cursor();
+            self.carets[i].head = np;
+            self.carets[i].anchor = np;
+            for j in (i + 1)..n {
+                let s = shift_after(self.carets[j].head, at, edit);
+                self.carets[j].head = s;
+                self.carets[j].anchor = s;
+            }
+        }
+        // The primary caret drives scrolling + the block cursor.
+        let h = self.carets[0].head;
+        self.text.set_cursor(h.0, h.1);
+        self.modified = true;
+    }
+
+    /// Insert-mode keys with carets active: edit at every caret. Esc commits
+    /// (carets preserved -> multi-Normal); in-insert movement is a v1.x add.
+    fn multi_insert(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.mode = Mode::Normal,
+            KeyCode::Enter => self.multi_apply(MultiEdit::Newline),
+            KeyCode::Backspace => self.multi_apply(MultiEdit::Backspace),
+            KeyCode::Tab => {
+                for _ in 0..4 {
+                    self.multi_apply(MultiEdit::Char(' '));
+                }
+            }
+            KeyCode::Char(c) => self.multi_apply(MultiEdit::Char(c)),
+            _ => {}
+        }
+    }
+
+    /// Resolve a one-key prefix with its follow key.
+    fn resolve_pending(&mut self, p: Pending, key: KeyEvent) {
+        match p {
+            Pending::FindChar(kind) => {
+                if let KeyCode::Char(c) = key.code {
+                    self.last_find = Some((kind, c));
+                    self.find_char(kind, c);
+                }
+            }
+            // `m` opens match-mode: `m` matches the bracket, `i`/`a` begin a text
+            // object (then the object char selects it).
+            Pending::Match => match key.code {
+                KeyCode::Char('m') => self.match_bracket(),
+                KeyCode::Char('i') => self.pending = Some(Pending::TextObject { around: false }),
+                KeyCode::Char('a') => self.pending = Some(Pending::TextObject { around: true }),
+                _ => {}
+            },
+            Pending::TextObject { around } => {
+                if let KeyCode::Char(c) = key.code {
+                    self.select_text_object(around, c);
+                }
+            }
+        }
+    }
+
+    /// Repeat the last find-char motion (`;` same direction, `,` reversed).
+    fn repeat_find(&mut self, reverse: bool) {
+        if let Some((k, c)) = self.last_find {
+            let kind = if reverse { k.reversed() } else { k };
+            self.find_char(kind, c);
+        }
+    }
+
+    /// Move the cursor to a `<char>` on the current line per the find kind. A
+    /// `t` repeat may not advance past an immediately-adjacent target at v1
+    /// (vim's `;`-after-`t` skip is a v1.x refinement).
+    fn find_char(&mut self, kind: FindKind, ch: char) {
+        let (row, col) = self.text.cursor();
+        let line: Vec<char> = self.text.line(row).chars().collect();
+        let n = line.len();
+        let forward = matches!(kind, FindKind::Forward | FindKind::ForwardTill);
+        let till = matches!(kind, FindKind::ForwardTill | FindKind::BackwardTill);
+        let found = if forward {
+            (col + 1..n).find(|&i| line[i] == ch)
+        } else {
+            (0..col).rev().find(|&i| line[i] == ch)
+        };
+        if let Some(i) = found {
+            let dest = if till {
+                if forward {
+                    i - 1
+                } else {
+                    i + 1
+                }
+            } else {
+                i
+            };
+            self.text.set_cursor(row, dest);
+        }
+    }
+
+    /// Jump to the bracket matching the one under the cursor (Helix `mm`),
+    /// nesting-aware and across lines.
+    fn match_bracket(&mut self) {
+        let (row, col) = self.text.cursor();
+        let here = match self.text.char_at(row, col) {
+            Some(c) => c,
+            None => return,
+        };
+        let dest = match here {
+            '(' => self.scan_forward_match('(', ')', (row, col)),
+            ')' => self.scan_backward_match('(', ')', (row, col)),
+            '[' => self.scan_forward_match('[', ']', (row, col)),
+            ']' => self.scan_backward_match('[', ']', (row, col)),
+            '{' => self.scan_forward_match('{', '}', (row, col)),
+            '}' => self.scan_backward_match('{', '}', (row, col)),
+            _ => None,
+        };
+        if let Some(p) = dest {
+            self.text.set_cursor(p.0, p.1);
+        }
+    }
+
+    /// From an OPEN bracket at `from`, the matching close (nesting-aware, across
+    /// lines), or `None` if unbalanced.
+    fn scan_forward_match(&self, open: char, close: char, from: Pos) -> Option<Pos> {
+        let mut depth = 0i32;
+        for r in from.0..self.text.line_count() {
+            let line: Vec<char> = self.text.line(r).chars().collect();
+            let start = if r == from.0 { from.1 } else { 0 };
+            for (i, &c) in line.iter().enumerate().skip(start) {
+                if c == open {
+                    depth += 1;
+                } else if c == close {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some((r, i));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// From a CLOSE bracket at `from`, the matching open.
+    fn scan_backward_match(&self, open: char, close: char, from: Pos) -> Option<Pos> {
+        let mut depth = 0i32;
+        for r in (0..=from.0).rev() {
+            let line: Vec<char> = self.text.line(r).chars().collect();
+            let upto = if r == from.0 { from.1 + 1 } else { line.len() };
+            for i in (0..upto).rev() {
+                if line[i] == close {
+                    depth += 1;
+                } else if line[i] == open {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some((r, i));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// The nearest UNMATCHED open before `from` -- the enclosing pair's open when
+    /// the cursor sits strictly inside it. Walks char by char across lines.
+    fn scan_back_enclosing_open(&self, open: char, close: char, from: Pos) -> Option<Pos> {
+        let mut depth = 0i32;
+        let mut p = self.text.pos_before(from)?;
+        loop {
+            if let Some(c) = self.text.char_at(p.0, p.1) {
+                if c == close {
+                    depth += 1;
+                } else if c == open {
+                    if depth == 0 {
+                        return Some(p);
+                    }
+                    depth -= 1;
+                }
+            }
+            p = self.text.pos_before(p)?;
+        }
+    }
+
+    /// The bracket pair enclosing (or under) the cursor: on the open -> its
+    /// close; on the close -> its open; otherwise the nearest enclosing pair.
+    fn find_enclosing_pair(&self, open: char, close: char) -> Option<(Pos, Pos)> {
+        let cur = self.text.cursor();
+        match self.text.char_at(cur.0, cur.1) {
+            Some(c) if c == open => Some((cur, self.scan_forward_match(open, close, cur)?)),
+            Some(c) if c == close => Some((self.scan_backward_match(open, close, cur)?, cur)),
+            _ => {
+                let op = self.scan_back_enclosing_open(open, close, cur)?;
+                Some((op, self.scan_forward_match(open, close, op)?))
+            }
+        }
+    }
+
+    /// Select a text object (`mi<o>` / `ma<o>`): the range of object `obj`,
+    /// `around` including its delimiters. Found -> enter Visual over it.
+    fn select_text_object(&mut self, around: bool, obj: char) {
+        let range = match obj {
+            '(' | ')' | 'b' => self.pair_object('(', ')', around),
+            '[' | ']' => self.pair_object('[', ']', around),
+            '{' | '}' | 'B' => self.pair_object('{', '}', around),
+            '"' => self.quote_object('"', around),
+            '\'' => self.quote_object('\'', around),
+            'w' => self.word_object(around),
+            _ => None,
+        };
+        if let Some((lo, hi)) = range {
+            self.anchor = Some(lo);
+            self.text.set_cursor(hi.0, hi.1);
+            self.mode = Mode::Visual;
+        }
+    }
+
+    /// A bracket-pair object. `around` selects the brackets too; inside selects
+    /// between them (`None` for an empty pair, nothing to act on).
+    fn pair_object(&self, open: char, close: char, around: bool) -> Option<(Pos, Pos)> {
+        let (op, cp) = self.find_enclosing_pair(open, close)?;
+        if around {
+            return Some((op, cp));
+        }
+        let lo = self.text.pos_after(op)?;
+        let hi = self.text.pos_before(cp)?;
+        if (lo.0, lo.1) <= (hi.0, hi.1) {
+            Some((lo, hi))
+        } else {
+            None
+        }
+    }
+
+    /// A quote object on the cursor's line (quotes do not nest). Picks the pair
+    /// ending at or after the cursor (inside it, or the next string on the line).
+    fn quote_object(&self, q: char, around: bool) -> Option<(Pos, Pos)> {
+        let (row, col) = self.text.cursor();
+        let line: Vec<char> = self.text.line(row).chars().collect();
+        let quotes: Vec<usize> = line
+            .iter()
+            .enumerate()
+            .filter(|(_, &c)| c == q)
+            .map(|(i, _)| i)
+            .collect();
+        let mut i = 0;
+        while i + 1 < quotes.len() {
+            let (a, b) = (quotes[i], quotes[i + 1]);
+            if col <= b {
+                return if around {
+                    Some(((row, a), (row, b)))
+                } else if b > a + 1 {
+                    Some(((row, a + 1), (row, b - 1)))
+                } else {
+                    None // empty "" -> nothing inside
+                };
+            }
+            i += 2;
+        }
+        None
+    }
+
+    /// A word object: inside (`iw`) is the same-class run; around (`aw`) adds the
+    /// trailing whitespace, or the leading whitespace when there is no trailing.
+    fn word_object(&self, around: bool) -> Option<(Pos, Pos)> {
+        let cur = self.text.cursor();
+        let (mut lo, mut hi) = self.text.word_span_at(cur)?;
+        if around {
+            let len = self.text.char_len(cur.0);
+            let mut end = hi.1;
+            while end + 1 < len && self.text.char_at(cur.0, end + 1).is_some_and(char_ws) {
+                end += 1;
+            }
+            if end > hi.1 {
+                hi = (hi.0, end);
+            } else {
+                let mut start = lo.1;
+                while start > 0 && self.text.char_at(cur.0, start - 1).is_some_and(char_ws) {
+                    start -= 1;
+                }
+                lo = (lo.0, start);
+            }
+        }
+        Some((lo, hi))
     }
 
     fn command(&mut self, key: KeyEvent) {
@@ -937,6 +1622,7 @@ impl Editor {
             "bp" => self.prev_buffer(),
             "bd" => self.close_buffer(false),
             "bd!" => self.close_buffer(true),
+            "help" => self.open_help(),
             _ => self.status = Some(string_fmt_unknown(cmd)),
         }
     }
@@ -960,11 +1646,30 @@ impl Editor {
             }
         }
     }
+
+    /// Run a `TextBuffer` motion `n` times -- the count-prefix repeater for the
+    /// buffer-level motions (wrap-aware j/k loop on `self` directly instead).
+    fn repeat(&mut self, n: usize, f: impl Fn(&mut TextBuffer)) {
+        for _ in 0..n {
+            f(&mut self.text);
+        }
+    }
+
+    /// Jump to 1-based line `n` (clamped), column 0 -- the `{count}G` / `{count}g`
+    /// go-to-line form.
+    fn goto_line(&mut self, n: usize) {
+        self.text.set_cursor(n.saturating_sub(1), 0);
+    }
 }
 
 /// Lines moved per PageUp/PageDown (a fixed step; viewport-relative paging is a
 /// nicety deferred -- the editor does not know the viewport height).
 const PAGE: usize = 20;
+
+/// Upper bound on a typed count prefix -- a guard against an absurd `9999999w`
+/// spinning the motion loop (motions clamp at the buffer edge, but the loop
+/// still runs; this caps it).
+const COUNT_MAX: usize = 100_000;
 
 /// One `[Space]` which-key menu entry: a single key + a description (rendered
 /// like a `:` command line), invoked by pressing the key.
@@ -1065,7 +1770,103 @@ const COMMANDS: &[(&str, &str)] = &[
     ("bp", "previous buffer"),
     ("bd", "close the current buffer"),
     ("bd!", "close the buffer, discarding changes"),
+    ("help", "open the manual in a new buffer"),
 ];
+
+/// The scratch-buffer name of the built-in manual (`:help`); also the sentinel
+/// `open_help` checks to avoid stacking duplicates.
+const HELP_NAME: &str = "*help*";
+
+/// The built-in manual shown by `:help`. Kept accurate to the bindings in
+/// `normal`/`insert`/`visual`, the `:` commands, and the `[Space]` menu -- a
+/// drift here misleads a new user, so update it alongside any binding change.
+/// Lines stay within ~70 columns so an 80-wide console reads them without wrap.
+const HELP_TEXT: &str = r#"                       Nora -- Quick Reference
+
+Nora is a MODAL editor: a key does different things in each mode. Press
+Esc to return to NORMAL at any time. Close this help with q (or :bd, or
+Space then c) to return to your work.
+
+  MODES
+    NORMAL   navigate + run operators (the resting mode)
+    INSERT   type text                   enter from NORMAL: i a o A
+    VISUAL   select a range              enter from NORMAL: v  or  %
+    COMMAND  the : command or / search line  enter: :  or  /
+    VIEW     a read-only buffer (this one)
+
+  NORMAL -- moving
+    1-9 <key>     a count repeats the next motion / edit (5j, 3w, 2d, 3x);
+                    {n}G or {n}g jumps to line n
+    h j k l       left / down / up / right (or the arrow keys)
+    0  $          start / end of line (or Home / End)
+    g  G          top / bottom of the buffer
+    w  b  e       next-word / prev-word / word-end (punctuation-aware)
+    W             next WORD (whitespace-delimited; spans punctuation)
+    f<c> F<c>     jump onto the next / previous <c> on the line
+    t<c> T<c>     jump just before / after the next / prev <c>
+    ;  ,          repeat the last f/F/t/T -- same / reversed
+    m m           jump to the matching bracket  ( ) [ ] { }
+    mi<o> ma<o>   select inside / around an object <o>:
+                    ( ) [ ] { } " '  or  w (the word)
+    PageUp/Down   scroll a page
+
+  NORMAL -- editing
+    i  a          insert before / after the cursor
+    o             open a new line below and insert
+    A             append at the end of the line
+    x             delete the character under the cursor
+    d             delete the current line
+    p             paste the yank register
+    u             undo
+    v             start a visual selection
+    %             select the whole buffer
+    /  then  n    search forward, then repeat
+    :             run a command (see below)
+    Space         open the which-key menu (see below)
+
+  INSERT
+    type to insert text        Esc        return to NORMAL
+    Enter new line             Backspace  delete back
+    Delete delete forward      Tab        four spaces
+    arrows / Home / End        move without leaving INSERT
+
+  VISUAL -- the selection extends as you move (h j k l w b g G 0 $)
+    y    yank (copy) the selection        d / x  delete (cut) it
+    c    change: delete it and drop to INSERT
+    s    select within: type a word, Enter puts a cursor per match
+    Esc  clear the selection
+
+  MULTI-CURSOR (Helix-style) -- edit many places at once
+    %               select the whole buffer
+    s <word> Enter  put a cursor on every match of <word>
+    c               delete the matches and drop to INSERT
+    ...type...      your edit lands at every cursor at once
+    Esc             commit (the cursors stay, ready for more)
+    d               instead of c: just delete every match
+    ,               collapse back to a single cursor
+
+  COMMAND  (press :, type the command, Enter to run)
+    :w [name]   write the buffer (:w name = save-as)
+    :wq         write and quit         :q   quit (warns if unsaved)
+    :q!         quit, discarding unsaved changes
+    :e <name>   open a file in a new buffer    :e! discard + open
+    :bn  :bp    next / previous buffer
+    :bd  :bd!   close the buffer ( ! discards unsaved changes )
+    :help       open this manual
+
+  THE Space MENU  (press Space, then one key)
+    f  open file picker        b  open buffer picker
+    n  next buffer             p  previous buffer
+    c  close buffer            w  toggle soft-wrap
+    s  save file               q  quit
+
+That's everything. Happy editing!
+"#;
+
+/// Whitespace test as a free fn (for `Option::is_some_and` in `word_object`).
+fn char_ws(c: char) -> bool {
+    c.is_whitespace()
+}
 
 /// `""` -> `None`, else `Some(trimmed)`. For an optional command argument.
 fn opt(arg: &str) -> Option<String> {
@@ -1537,5 +2338,410 @@ mod tests {
         let mut s = Editor::new(None, "x", false);
         s.handle_key(ch('/'));
         assert!(s.command_completions().is_empty());
+    }
+
+    // -- multi-cursor (Helix %, s, ,) -------------------------------------
+
+    #[test]
+    fn percent_selects_whole_buffer() {
+        let mut ed = Editor::new(None, "ab\ncd", false);
+        ed.handle_key(ch('%'));
+        assert_eq!(ed.mode, Mode::Visual);
+        assert_eq!(ed.selection(), Some(((0, 0), (1, 2)))); // (0,0)..(last row, end)
+    }
+
+    #[test]
+    fn s_splits_matches_into_carets() {
+        let mut ed = Editor::new(None, "foo foo foo", false);
+        ed.handle_key(ch('%'));
+        ed.handle_key(ch('s'));
+        type_str(&mut ed, "foo");
+        ed.handle_key(code(KeyCode::Enter));
+        assert_eq!(ed.carets().len(), 3);
+        assert_eq!(ed.selection_ranges().len(), 3);
+        assert_eq!(ed.mode, Mode::Visual);
+        assert_eq!(ed.text.cursor(), (0, 2)); // primary head = first match's last char
+    }
+
+    #[test]
+    fn s_no_match_keeps_single_cursor() {
+        let mut ed = Editor::new(None, "abc", false);
+        ed.handle_key(ch('%'));
+        ed.handle_key(ch('s'));
+        type_str(&mut ed, "zzz");
+        ed.handle_key(code(KeyCode::Enter));
+        assert!(ed.carets().is_empty());
+        assert_eq!(ed.status.as_deref(), Some("no matches"));
+    }
+
+    #[test]
+    fn comma_collapses_to_primary() {
+        let mut ed = Editor::new(None, "a a a", false);
+        ed.handle_key(ch('%'));
+        ed.handle_key(ch('s'));
+        type_str(&mut ed, "a");
+        ed.handle_key(code(KeyCode::Enter));
+        assert_eq!(ed.carets().len(), 3);
+        ed.handle_key(ch(','));
+        assert!(ed.carets().is_empty());
+        assert_eq!(ed.mode, Mode::Normal);
+        assert_eq!(ed.text.cursor(), (0, 0)); // primary head
+    }
+
+    #[test]
+    fn split_prompt_collects_then_escape_cancels() {
+        let mut ed = Editor::new(None, "foo", false);
+        ed.handle_key(ch('%'));
+        ed.handle_key(ch('s'));
+        ed.handle_key(ch('f'));
+        ed.handle_key(ch('o'));
+        assert_eq!(ed.split_buf(), Some("fo"));
+        ed.handle_key(code(KeyCode::Esc));
+        assert_eq!(ed.split_buf(), None); // cancelled, no carets
+        assert!(ed.carets().is_empty());
+    }
+
+    #[test]
+    fn change_then_multi_insert_edits_all_carets() {
+        // The full flow: foo foo foo -> %, s "foo" Enter -> c -> "bar" -> Esc -> ,
+        let mut ed = Editor::new(None, "foo foo foo", false);
+        ed.handle_key(ch('%'));
+        ed.handle_key(ch('s'));
+        type_str(&mut ed, "foo");
+        ed.handle_key(code(KeyCode::Enter));
+        assert_eq!(ed.carets().len(), 3);
+        ed.handle_key(ch('c'));
+        assert_eq!(ed.mode, Mode::Insert);
+        assert_eq!(ed.text.content(), "  "); // the three "foo" removed
+        type_str(&mut ed, "bar");
+        assert_eq!(ed.text.content(), "bar bar bar"); // inserted at every caret
+        ed.handle_key(code(KeyCode::Esc));
+        assert_eq!(ed.mode, Mode::Normal);
+        ed.handle_key(ch(','));
+        assert!(ed.carets().is_empty());
+        assert_eq!(ed.text.content(), "bar bar bar");
+    }
+
+    #[test]
+    fn multi_insert_backspace_at_every_caret() {
+        let mut ed = Editor::new(None, "a a a", false);
+        ed.handle_key(ch('%'));
+        ed.handle_key(ch('s'));
+        type_str(&mut ed, "a");
+        ed.handle_key(code(KeyCode::Enter));
+        ed.handle_key(ch('c'));
+        type_str(&mut ed, "xy");
+        assert_eq!(ed.text.content(), "xy xy xy");
+        ed.handle_key(code(KeyCode::Backspace));
+        assert_eq!(ed.text.content(), "x x x"); // a backspace at each caret
+    }
+
+    #[test]
+    fn change_on_a_single_selection() {
+        // `c` with a single visual selection (no carets) deletes it -> Insert.
+        let mut ed = Editor::new(None, "hello", false);
+        ed.handle_key(ch('v'));
+        ed.handle_key(ch('l')); // select "he" (0,0)..(0,1)
+        ed.handle_key(ch('c'));
+        assert_eq!(ed.mode, Mode::Insert);
+        assert_eq!(ed.text.content(), "llo");
+        ed.handle_key(ch('X'));
+        assert_eq!(ed.text.content(), "Xllo");
+    }
+
+    #[test]
+    fn stray_key_collapses_multi_normal() {
+        let mut ed = Editor::new(None, "a a a", false);
+        ed.handle_key(ch('%'));
+        ed.handle_key(ch('s'));
+        type_str(&mut ed, "a");
+        ed.handle_key(code(KeyCode::Enter));
+        ed.handle_key(ch('c'));
+        type_str(&mut ed, "z");
+        ed.handle_key(code(KeyCode::Esc)); // multi-Normal, 3 carets
+        assert_eq!(ed.carets().len(), 3);
+        ed.handle_key(ch('l')); // a stray key collapses to the primary, then acts
+        assert!(ed.carets().is_empty());
+        assert_eq!(ed.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn d_deletes_all_selections() {
+        let mut ed = Editor::new(None, "foo bar foo", false);
+        ed.handle_key(ch('%'));
+        ed.handle_key(ch('s'));
+        type_str(&mut ed, "foo");
+        ed.handle_key(code(KeyCode::Enter));
+        assert_eq!(ed.carets().len(), 2);
+        ed.handle_key(ch('d')); // delete every selection, stay in multi-Normal
+        assert_eq!(ed.text.content(), " bar ");
+        assert_eq!(ed.mode, Mode::Normal);
+        assert_eq!(ed.carets().len(), 2); // carets preserved at the deletion points
+        ed.handle_key(ch(',')); // collapse to single
+        assert!(ed.carets().is_empty());
+    }
+
+    // -- find-char + match-bracket ---------------------------------------
+
+    #[test]
+    fn find_char_forward_then_repeat() {
+        let mut ed = Editor::new(None, "abcabc", false);
+        ed.handle_key(ch('f'));
+        ed.handle_key(ch('c'));
+        assert_eq!(ed.text.cursor(), (0, 2));
+        ed.handle_key(ch(';')); // repeat forward
+        assert_eq!(ed.text.cursor(), (0, 5));
+        ed.handle_key(ch(',')); // repeat reversed
+        assert_eq!(ed.text.cursor(), (0, 2));
+    }
+
+    #[test]
+    fn find_till_and_backward() {
+        let mut ed = Editor::new(None, "a.b.c", false);
+        ed.handle_key(ch('t'));
+        ed.handle_key(ch('.')); // just before the first '.' (col 1) -> col 0
+        assert_eq!(ed.text.cursor(), (0, 0));
+        ed.text.move_end();
+        ed.handle_key(ch('F'));
+        ed.handle_key(ch('a')); // back onto 'a' at col 0
+        assert_eq!(ed.text.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn match_bracket_jumps_both_ways() {
+        let mut ed = Editor::new(None, "(a (b) c)", false);
+        ed.handle_key(ch('m'));
+        ed.handle_key(ch('m'));
+        assert_eq!(ed.text.cursor(), (0, 8)); // '(' at 0 -> matching ')' at 8
+        ed.handle_key(ch('m'));
+        ed.handle_key(ch('m'));
+        assert_eq!(ed.text.cursor(), (0, 0)); // ')' at 8 -> '(' at 0
+    }
+
+    #[test]
+    fn match_bracket_across_lines() {
+        let mut ed = Editor::new(None, "{\n  x\n}", false);
+        ed.handle_key(ch('m'));
+        ed.handle_key(ch('m'));
+        assert_eq!(ed.text.cursor(), (2, 0)); // '{' (0,0) -> '}' (2,0)
+    }
+
+    // -- word motions (w / W / e / b) -------------------------------------
+
+    #[test]
+    fn word_motions_are_punctuation_aware() {
+        let mut ed = Editor::new(None, "foo.bar baz", false);
+        ed.handle_key(ch('w'));
+        assert_eq!(ed.text.cursor(), (0, 3)); // small w stops at "."
+        ed.handle_key(ch('e'));
+        assert_eq!(ed.text.cursor(), (0, 6)); // e -> end of "bar"
+        ed.handle_key(ch('W'));
+        assert_eq!(ed.text.cursor(), (0, 8)); // W (WORD) -> "baz"
+        ed.handle_key(ch('b'));
+        assert_eq!(ed.text.cursor(), (0, 4)); // b -> start of "bar"
+    }
+
+    #[test]
+    fn visual_e_extends_to_word_end() {
+        let mut ed = Editor::new(None, "foo bar", false);
+        ed.handle_key(ch('v'));
+        ed.handle_key(ch('e'));
+        assert_eq!(ed.selection(), Some(((0, 0), (0, 2)))); // "foo"
+    }
+
+    // -- text objects (mi<o> / ma<o>) -------------------------------------
+
+    #[test]
+    fn text_object_inside_parens() {
+        let mut ed = Editor::new(None, "foo(bar)baz", false);
+        ed.text.set_cursor(0, 5); // inside, on 'a'
+        ed.handle_key(ch('m'));
+        ed.handle_key(ch('i'));
+        ed.handle_key(ch('('));
+        assert_eq!(ed.mode, Mode::Visual);
+        assert_eq!(ed.selection(), Some(((0, 4), (0, 6)))); // "bar"
+    }
+
+    #[test]
+    fn text_object_around_braces() {
+        let mut ed = Editor::new(None, "a{bc}d", false);
+        ed.text.set_cursor(0, 2); // inside
+        ed.handle_key(ch('m'));
+        ed.handle_key(ch('a'));
+        ed.handle_key(ch('{'));
+        assert_eq!(ed.selection(), Some(((0, 1), (0, 4)))); // "{bc}"
+    }
+
+    #[test]
+    fn text_object_inside_word() {
+        let mut ed = Editor::new(None, "foo bar", false);
+        ed.text.set_cursor(0, 5); // in "bar"
+        ed.handle_key(ch('m'));
+        ed.handle_key(ch('i'));
+        ed.handle_key(ch('w'));
+        assert_eq!(ed.selection(), Some(((0, 4), (0, 6)))); // "bar"
+    }
+
+    #[test]
+    fn text_object_quotes() {
+        let mut ed = Editor::new(None, "say \"hi\" now", false);
+        ed.text.set_cursor(0, 6); // inside the quotes
+        ed.handle_key(ch('m'));
+        ed.handle_key(ch('i'));
+        ed.handle_key(ch('"'));
+        assert_eq!(ed.selection(), Some(((0, 5), (0, 6)))); // "hi"
+    }
+
+    #[test]
+    fn text_object_change_replaces_inside() {
+        // mi( then c replaces the parens content (the headline use).
+        let mut ed = Editor::new(None, "f(xy)", false);
+        ed.text.set_cursor(0, 2); // on 'x'
+        ed.handle_key(ch('m'));
+        ed.handle_key(ch('i'));
+        ed.handle_key(ch('('));
+        ed.handle_key(ch('c')); // change selection -> Insert
+        assert_eq!(ed.mode, Mode::Insert);
+        assert_eq!(ed.text.content(), "f()");
+        type_str(&mut ed, "Z");
+        assert_eq!(ed.text.content(), "f(Z)");
+    }
+
+    #[test]
+    fn text_object_empty_pair_is_a_noop() {
+        let mut ed = Editor::new(None, "f()", false);
+        ed.text.set_cursor(0, 1); // on '('
+        ed.handle_key(ch('m'));
+        ed.handle_key(ch('i'));
+        ed.handle_key(ch('(')); // nothing inside -> no selection, stays Normal
+        assert_eq!(ed.mode, Mode::Normal);
+        assert_eq!(ed.selection(), None);
+    }
+
+    // -- count prefix (3w / 5j / 2d / {n}G) -------------------------------
+
+    #[test]
+    fn count_repeats_a_motion() {
+        let mut ed = Editor::new(None, "alpha beta gamma delta", false);
+        ed.handle_key(ch('3'));
+        ed.handle_key(ch('w')); // 3 words forward
+        assert_eq!(ed.text.cursor(), (0, 17)); // "delta"
+    }
+
+    #[test]
+    fn count_resets_after_use() {
+        let mut ed = Editor::new(None, "abcdefghij", false);
+        ed.handle_key(ch('3'));
+        ed.handle_key(ch('l')); // (0,3)
+        ed.handle_key(ch('l')); // count was consumed -> +1 -> (0,4)
+        assert_eq!(ed.text.cursor(), (0, 4));
+    }
+
+    #[test]
+    fn multi_digit_count_and_zero_is_a_digit_mid_count() {
+        let mut ed = Editor::new(None, "0123456789abc", false);
+        ed.handle_key(ch('1'));
+        ed.handle_key(ch('0')); // count = 10 (0 is a digit mid-count)
+        ed.handle_key(ch('l'));
+        assert_eq!(ed.text.cursor(), (0, 10));
+    }
+
+    #[test]
+    fn bare_zero_is_move_home() {
+        let mut ed = Editor::new(None, "hello", false);
+        ed.handle_key(ch('$')); // end
+        ed.handle_key(ch('0')); // home (no count in progress)
+        assert_eq!(ed.text.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn count_deletes_n_lines_one_undo() {
+        let mut ed = Editor::new(None, "a\nb\nc\nd", false);
+        ed.handle_key(ch('2'));
+        ed.handle_key(ch('d')); // delete 2 lines
+        assert_eq!(ed.text.content(), "c\nd");
+        ed.handle_key(ch('u')); // one undo reverts both
+        assert_eq!(ed.text.content(), "a\nb\nc\nd");
+    }
+
+    #[test]
+    fn count_x_deletes_n_chars() {
+        let mut ed = Editor::new(None, "abcdef", false);
+        ed.handle_key(ch('3'));
+        ed.handle_key(ch('x'));
+        assert_eq!(ed.text.content(), "def");
+    }
+
+    #[test]
+    fn count_g_jumps_to_line_else_top_bottom() {
+        let mut ed = Editor::new(None, "1\n2\n3\n4\n5", false);
+        ed.handle_key(ch('3'));
+        ed.handle_key(ch('G')); // -> line 3
+        assert_eq!(ed.text.cursor(), (2, 0));
+        ed.handle_key(ch('G')); // bare -> bottom
+        assert_eq!(ed.text.cursor().0, 4);
+        ed.handle_key(ch('g')); // bare -> top
+        assert_eq!(ed.text.cursor().0, 0);
+    }
+
+    // -- :help manual buffer + the corner hint ----------------------------
+
+    #[test]
+    fn help_command_opens_readonly_manual() {
+        let mut ed = Editor::new(None, "", false); // pristine
+        type_str(&mut ed, ":help");
+        ed.handle_key(code(KeyCode::Enter));
+        // Added a buffer (never replaced the pristine one), now read-only.
+        assert_eq!(ed.buffer_count(), 2);
+        assert!(ed.readonly);
+        assert_eq!(ed.mode_str(), "VIEW");
+        assert!(ed.text.content().contains("Quick Reference"));
+        assert!(ed.text.content().contains("MULTI-CURSOR"));
+    }
+
+    #[test]
+    fn help_is_not_duplicated() {
+        let mut ed = Editor::new(None, "", false);
+        type_str(&mut ed, ":help");
+        ed.handle_key(code(KeyCode::Enter));
+        assert_eq!(ed.buffer_count(), 2);
+        // ':' + command mode work in a read-only buffer; a second :help no-ops.
+        type_str(&mut ed, ":help");
+        ed.handle_key(code(KeyCode::Enter));
+        assert_eq!(ed.buffer_count(), 2);
+    }
+
+    #[test]
+    fn readonly_q_closes_buffer_when_multiple() {
+        let mut ed = Editor::new(Some("work".to_string()), "my work", false);
+        type_str(&mut ed, ":help");
+        ed.handle_key(code(KeyCode::Enter));
+        assert_eq!(ed.buffer_count(), 2);
+        ed.handle_key(ch('q')); // close help, return to work (do NOT quit nora)
+        assert!(!ed.quit);
+        assert_eq!(ed.buffer_count(), 1);
+        assert!(!ed.readonly);
+        assert_eq!(ed.text.content(), "my work");
+    }
+
+    #[test]
+    fn readonly_q_quits_a_lone_view() {
+        let mut ed = Editor::new(None, "abc", true); // nora -R, single buffer
+        ed.handle_key(ch('q'));
+        assert!(ed.quit);
+    }
+
+    #[test]
+    fn show_hint_only_on_a_pristine_buffer() {
+        let mut ed = Editor::new(None, "", false);
+        assert!(ed.show_hint()); // pristine: unnamed, empty, unmodified, Normal
+        ed.handle_key(ch('i'));
+        assert!(!ed.show_hint()); // Insert mode -- you are working now
+        type_str(&mut ed, "z");
+        ed.handle_key(code(KeyCode::Esc));
+        assert!(!ed.show_hint()); // modified
+        // A named buffer never shows it.
+        let named = Editor::new(Some("f".to_string()), "", false);
+        assert!(!named.show_hint());
     }
 }

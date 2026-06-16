@@ -11,6 +11,8 @@
 
 use kaua::style::{Attr, Color, Style};
 
+use crate::syntax::HlClass;
+
 /// Editor background -- Bonfire `bg` (warm near-black).
 pub const BG: Color = Color::Rgb(0x0e, 0x0c, 0x0c);
 /// Body text -- Bonfire `fg` (warm off-white).
@@ -70,6 +72,21 @@ pub fn text() -> Style {
     Style::new().fg(FG).bg(BG)
 }
 
+/// The foreground colour for a syntax-highlight class (the native lexer
+/// highlighter, docs/KAUA.md section 12), drawn from Bonfire's syntax hues. The
+/// caller composes it over the line's background (current-line / normal). Text
+/// and (the not-yet-emitted) Operator fall back to the body `fg`.
+pub fn syntax(class: HlClass) -> Color {
+    match class {
+        HlClass::Text | HlClass::Operator => FG,
+        HlClass::Keyword => SLATE,
+        HlClass::Str => GREEN,
+        HlClass::Var => VIOLET,
+        HlClass::Comment => DIM,
+        HlClass::Number => GOLD,
+    }
+}
+
 /// A blank editor cell (the background fill).
 pub fn blank() -> Style {
     Style::new().bg(BG)
@@ -82,6 +99,12 @@ pub fn gutter() -> Style {
 
 /// The `~` past-end-of-buffer markers (vim style).
 pub fn tilde() -> Style {
+    Style::new().fg(DIM).bg(BG)
+}
+
+/// The faint bottom-right `:help` nudge on a pristine buffer -- dim furniture
+/// colour so it reads as a hint, never as content.
+pub fn hint() -> Style {
     Style::new().fg(DIM).bg(BG)
 }
 

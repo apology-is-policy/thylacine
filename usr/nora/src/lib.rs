@@ -17,10 +17,12 @@
 extern crate alloc;
 
 pub mod editor;
+pub mod syntax;
 pub mod text;
 pub mod theme;
 pub mod view;
 pub mod wrap;
 
 pub use editor::{Editor, Mode, Request};
+pub use syntax::{HlClass, HlSpan, Lang};
 pub use text::TextBuffer;

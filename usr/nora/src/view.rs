@@ -17,6 +17,7 @@ use kaua::style::Color;
 use kaua::widget::{Block, List, Span, StatusLine, Widget};
 
 use crate::editor::{Editor, Mode};
+use crate::syntax::HlClass;
 use crate::theme;
 use crate::wrap;
 
@@ -69,6 +70,12 @@ pub fn render(ed: &Editor, area: Rect, buf: &mut Buffer) -> (u16, u16) {
 
     render_status(ed, status_area, buf);
 
+    // A faint corner nudge toward the manual on the pristine initial buffer
+    // (gated to Mode::Normal in `show_hint`, so no overlay is up to fight it).
+    if ed.show_hint() {
+        render_hint(text_area, buf);
+    }
+
     // The menu + pickers overlay the text and own the cursor.
     if ed.menu_open() {
         return render_menu(ed, text_area, buf);
@@ -86,6 +93,15 @@ pub fn render(ed: &Editor, area: Rect, buf: &mut Buffer) -> (u16, u16) {
         render_command_popup(ed, text_area, buf);
     }
 
+    // The `s` select prompt owns the cursor on the status row (no block cursor).
+    if let Some(pat) = ed.split_buf() {
+        let col = "select: ".chars().count() + pat.chars().count();
+        let x = status_area
+            .x
+            .saturating_add(col as u16)
+            .min(status_area.right().saturating_sub(1));
+        return (x, status_area.y);
+    }
     let cur = if ed.wrap {
         cursor_wrapped(ed, text_area, gutter_w, tw, th)
     } else {
@@ -98,6 +114,16 @@ pub fn render(ed: &Editor, area: Rect, buf: &mut Buffer) -> (u16, u16) {
         let accent = mode_color(&ed.mode);
         let glyph = buf.get(cur.0, cur.1).map(|c| c.symbol).unwrap_or(' ');
         buf.set_cell(cur.0, cur.1, Cell::new(glyph, theme::cursor_block(accent)));
+        // Extra carets (multi-cursor): a block at each non-primary head (plain
+        // mode; in wrap they show as highlighted ranges only at v1).
+        if !ed.wrap {
+            for sel in ed.carets().iter().skip(1) {
+                if let Some((cx, cy)) = caret_screen(ed, text_area, gutter_w, sel.head) {
+                    let g = buf.get(cx, cy).map(|c| c.symbol).unwrap_or(' ');
+                    buf.set_cell(cx, cy, Cell::new(g, theme::cursor_block(accent)));
+                }
+            }
+        }
     }
     cur
 }
@@ -136,8 +162,9 @@ fn render_plain(ed: &Editor, text_area: Rect, gutter_w: u16, tw: u16, th: usize,
     let total = ed.text.line_count();
     let num_w = gutter_w.saturating_sub(1);
     let tx = text_area.x + gutter_w;
-    let sel = ed.selection();
+    let ranges = ed.selection_ranges();
     let cur_row = ed.text.cursor().0;
+    let lang = ed.lang();
     for r in 0..th {
         let y = text_area.y + r as u16;
         let row = ed.top + r;
@@ -160,9 +187,11 @@ fn render_plain(ed: &Editor, text_area: Rect, gutter_w: u16, tw: u16, th: usize,
         let num = format!("{:>w$} ", row + 1, w = num_w as usize);
         buf.set_str(text_area.x, y, &num, gut_style);
         // Horizontal scroll: draw the window [left, left+tw) of the line.
-        draw_text_slice(buf, tx, y, tx + tw, ed.text.line(row), ed.left, tw as usize, txt_style);
-        if let Some(span) = sel {
-            paint_selection(buf, tx, y, tx + tw, ed.text.line(row), row, ed.left, span);
+        let line = ed.text.line(row);
+        let classes = lang.line_classes(line);
+        draw_text_slice(buf, tx, y, tx + tw, line, ed.left, tw as usize, txt_style, &classes);
+        for &span in &ranges {
+            paint_selection(buf, tx, y, tx + tw, line, row, ed.left, span);
         }
     }
 }
@@ -173,8 +202,9 @@ fn render_wrapped(ed: &Editor, text_area: Rect, gutter_w: u16, tw: u16, th: usiz
     let total = ed.text.line_count();
     let num_w = gutter_w.saturating_sub(1);
     let tx = text_area.x + gutter_w;
-    let sel = ed.selection();
+    let ranges = ed.selection_ranges();
     let cur_row = ed.text.cursor().0;
+    let lang = ed.lang();
     let mut pos = Some((ed.top, ed.top_sub));
     for r in 0..th {
         let y = text_area.y + r as u16;
@@ -202,8 +232,9 @@ fn render_wrapped(ed: &Editor, text_area: Rect, gutter_w: u16, tw: u16, th: usiz
             buf.set_str(text_area.x, y, &num, gut_style);
         }
         let line = ed.text.line(row);
-        draw_text_slice(buf, tx, y, tx + tw, line, sub * tw as usize, tw as usize, txt_style);
-        if let Some(span) = sel {
+        let classes = lang.line_classes(line);
+        draw_text_slice(buf, tx, y, tx + tw, line, sub * tw as usize, tw as usize, txt_style, &classes);
+        for &span in &ranges {
             paint_selection_window(buf, tx, y, tx + tw, line, row, sub, tw, span);
         }
         pos = wrap::forward(&ed.text, (row, sub), tw);
@@ -272,7 +303,9 @@ fn paint_selection(
 }
 
 /// Like `draw_text` but draws the visual window `[skip, skip+take)` characters
-/// of `s` (one soft-wrap sub-row).
+/// of `s` (one soft-wrap sub-row), colouring each cell by its syntax class
+/// (`classes`, indexed by absolute char position) over the `base` style's
+/// background. `classes` shorter than the window paints the gap as `Text`.
 fn draw_text_slice(
     buf: &mut Buffer,
     x: u16,
@@ -281,15 +314,17 @@ fn draw_text_slice(
     s: &str,
     skip: usize,
     take: usize,
-    style: kaua::style::Style,
+    base: kaua::style::Style,
+    classes: &[HlClass],
 ) {
     let mut cx = x;
-    for ch in s.chars().skip(skip).take(take) {
+    for (j, ch) in s.chars().skip(skip).take(take).enumerate() {
         if cx >= max_x {
             break;
         }
         let glyph = if ch.is_control() { ' ' } else { ch };
-        buf.set_cell(cx, y, Cell::new(glyph, style));
+        let class = classes.get(skip + j).copied().unwrap_or(HlClass::Text);
+        buf.set_cell(cx, y, Cell::new(glyph, base.fg(theme::syntax(class))));
         cx = cx.saturating_add(1);
     }
 }
@@ -474,10 +509,31 @@ fn render_command_popup(ed: &Editor, text_area: Rect, buf: &mut Buffer) {
     List::new(&refs).style(theme::palette_surface()).render(inner, buf);
 }
 
+/// A faint right-aligned `hint: type :help` on the text area's last row, drawn
+/// only for the pristine initial buffer (`Editor::show_hint`) to point new users
+/// at the manual. Skipped if the area is too small to hold it clear of the
+/// top-left cursor.
+fn render_hint(text_area: Rect, buf: &mut Buffer) {
+    let hint = "hint: type :help";
+    let w = hint.chars().count() as u16;
+    if text_area.height < 2 || text_area.width < w {
+        return;
+    }
+    let y = text_area.bottom().saturating_sub(1);
+    let x = text_area.right().saturating_sub(w);
+    buf.set_str(x, y, hint, theme::hint());
+}
+
 /// Draw the status row: the command/search line in command mode, else the
 /// mode chip + filename + position bar.
 fn render_status(ed: &Editor, area: Rect, buf: &mut Buffer) {
     if area.is_empty() {
+        return;
+    }
+    if let Some(pat) = ed.split_buf() {
+        fill(buf, area, theme::cmdline());
+        let line = format!("select: {}", pat);
+        draw_text(buf, area.x, area.y, area.right(), &line, theme::cmdline());
         return;
     }
     if let Some(cmd) = ed.command_buf() {
@@ -533,6 +589,20 @@ fn cursor(ed: &Editor, text_area: Rect, status_area: Rect, gutter_w: u16) -> (u1
         .saturating_add(col.saturating_sub(ed.left) as u16)
         .min(text_area.right().saturating_sub(1));
     (x, y)
+}
+
+/// Screen `(x, y)` for a buffer position `p` in plain (non-wrap) mode, or `None`
+/// if it is scrolled out of `text_area`.
+fn caret_screen(ed: &Editor, text_area: Rect, gutter_w: u16, p: (usize, usize)) -> Option<(u16, u16)> {
+    if p.0 < ed.top || p.1 < ed.left {
+        return None;
+    }
+    let y = text_area.y + (p.0 - ed.top) as u16;
+    let x = text_area.x + gutter_w + (p.1 - ed.left) as u16;
+    if y >= text_area.bottom() || x >= text_area.right() {
+        return None;
+    }
+    Some((x, y))
 }
 
 fn mode_color(mode: &Mode) -> Color {
@@ -782,5 +852,81 @@ mod tests {
         assert_eq!(sym(&b, 0, 13), ':');
         assert_eq!(sym(&b, 1, 13), 'b');
         assert_eq!(cur, (2, 13)); // cursor after ":b" on the command line
+    }
+
+    #[test]
+    fn ut_keyword_gets_syntax_colour() {
+        // A `.ut` buffer highlights `if` as a keyword (Bonfire slate). The 'f'
+        // (col 1) is not under the cursor (col 0), so it shows the syntax fg.
+        let ed = Editor::new(Some("x.ut".into()), "if x", false);
+        let mut b = Buffer::empty(area());
+        render(&ed, area(), &mut b);
+        assert_eq!(sym(&b, 5, 0), 'f');
+        assert_eq!(b.get(5, 0).unwrap().style.fg, theme::SLATE);
+    }
+
+    #[test]
+    fn non_ut_buffer_is_not_highlighted() {
+        // The same text in a non-`.ut` buffer keeps the body fg (no language).
+        let ed = Editor::new(Some("plain".into()), "if x", false);
+        let mut b = Buffer::empty(area());
+        render(&ed, area(), &mut b);
+        assert_eq!(sym(&b, 5, 0), 'f');
+        assert_eq!(b.get(5, 0).unwrap().style.fg, theme::FG);
+    }
+
+    #[test]
+    fn multi_select_paints_all_matches() {
+        // %, s, "b", Enter -> every 'b' (not the gap) carries the selection bg.
+        let mut ed = Editor::new(None, "b b", false);
+        ed.handle_key(KeyEvent::char('%'));
+        ed.handle_key(KeyEvent::char('s'));
+        ed.handle_key(KeyEvent::char('b'));
+        ed.handle_key(KeyEvent::new(KeyCode::Enter));
+        let mut b = Buffer::empty(area());
+        render(&ed, area(), &mut b);
+        // gutter 4: 'b'@4, ' '@5, 'b'@6.
+        assert_eq!(b.get(6, 0).unwrap().style.bg, theme::VIOLET); // the 2nd match is selected
+        assert_ne!(b.get(5, 0).unwrap().style.bg, theme::VIOLET); // the gap is not
+    }
+
+    #[test]
+    fn hint_renders_on_a_pristine_buffer() {
+        // The faint `hint: type :help` (16 chars) is right-aligned on the text
+        // area's last row (y=3 in a 20x5 area): x = 20 - 16 = 4.
+        let ed = Editor::new(None, "", false);
+        let mut b = Buffer::empty(area());
+        render(&ed, area(), &mut b);
+        assert_eq!(sym(&b, 4, 3), 'h');
+        assert_eq!(sym(&b, 5, 3), 'i');
+        assert_eq!(b.get(4, 3).unwrap().style.fg, theme::DIM);
+    }
+
+    #[test]
+    fn hint_hidden_once_modified() {
+        let mut ed = Editor::new(None, "", false);
+        ed.handle_key(KeyEvent::char('i'));
+        ed.handle_key(KeyEvent::char('z'));
+        ed.handle_key(KeyEvent::new(KeyCode::Esc)); // modified -> no hint
+        let mut b = Buffer::empty(area());
+        render(&ed, area(), &mut b);
+        assert_ne!(sym(&b, 4, 3), 'h');
+    }
+
+    #[test]
+    fn multi_carets_paint_blocks_during_insert() {
+        // %, s "a", Enter, c, "X" -> "X X" with a caret block at each head.
+        let mut ed = Editor::new(None, "a a", false);
+        ed.handle_key(KeyEvent::char('%'));
+        ed.handle_key(KeyEvent::char('s'));
+        ed.handle_key(KeyEvent::char('a'));
+        ed.handle_key(KeyEvent::new(KeyCode::Enter));
+        ed.handle_key(KeyEvent::char('c'));
+        ed.handle_key(KeyEvent::char('X'));
+        let mut b = Buffer::empty(area());
+        render(&ed, area(), &mut b);
+        // "X X": carets at (0,1) and (0,3). The non-primary caret paints a moss
+        // (Insert accent) block at col 3 -> x = gutter(4) + 3 = 7.
+        assert_eq!(b.get(7, 0).unwrap().style.bg, theme::GREEN);
     }
 }

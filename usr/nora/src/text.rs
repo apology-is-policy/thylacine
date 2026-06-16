@@ -33,11 +33,14 @@ pub type Pos = (usize, usize);
 /// cap bounds the editor's worst-case memory at roughly UNDO_CAP * file_size.
 const UNDO_CAP: usize = 64;
 
-/// Character class for word motion. A "word" is a maximal run of non-
-/// whitespace (vim's WORD); whitespace and line breaks separate words.
+/// Character class for word motion. A small-word (`w`/`b`/`e`) is a maximal run
+/// of ONE class -- WORD chars (alphanumeric + `_`) OR punctuation; a big-WORD
+/// (`W`) is any maximal run of non-whitespace. `Space` (whitespace + line
+/// breaks) separates words; `End` is the end of the document.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Class {
     Word,
+    Punct,
     Space,
     End,
 }
@@ -113,6 +116,12 @@ impl TextBuffer {
         self.lines.get(row).map(|s| s.chars().count()).unwrap_or(0)
     }
 
+    /// The character at `(row, col)`, or `None` past the end of the line.
+    #[inline]
+    pub fn char_at(&self, row: usize, col: usize) -> Option<char> {
+        self.lines.get(row).and_then(|l| l.chars().nth(col))
+    }
+
     /// Set the cursor, clamping `row` to a valid line and `col` to that line's
     /// `[0, char_len]`.
     pub fn set_cursor(&mut self, row: usize, col: usize) {
@@ -182,42 +191,56 @@ impl TextBuffer {
         self.col = self.col.min(self.char_len(self.row));
     }
 
-    /// Forward to the start of the next WORD (whitespace-delimited), crossing
-    /// line breaks; stops at end of document.
+    /// Forward to the start of the next small-word (`w`): skip the current
+    /// class-run (WORD chars OR punctuation), then any whitespace / line breaks.
     pub fn move_word_forward(&mut self) {
-        let (mut r, mut c) = (self.row, self.col);
-        // Skip the current word, if the cursor is on one.
-        while self.class(r, c) == Class::Word {
-            match self.next_pos(r, c) {
-                Some(p) => {
-                    r = p.0;
-                    c = p.1;
-                }
-                None => break,
-            }
-        }
-        // Skip the whitespace run (and line breaks) to the next word start.
+        self.word_forward(false);
+    }
+
+    /// Forward to the start of the next big-WORD (`W`): whitespace-delimited
+    /// only -- punctuation does not break a WORD.
+    pub fn move_long_word_forward(&mut self) {
+        self.word_forward(true);
+    }
+
+    /// Forward to the END of the next small-word (`e`): the last char of the run.
+    pub fn move_word_end(&mut self) {
+        let (mut r, mut c) = match self.next_pos(self.row, self.col) {
+            Some(p) => p,
+            None => return,
+        };
         while self.class(r, c) == Class::Space {
             match self.next_pos(r, c) {
                 Some(p) => {
                     r = p.0;
                     c = p.1;
                 }
-                None => break,
+                None => {
+                    self.set_cursor(r, c);
+                    return;
+                }
+            }
+        }
+        let run = self.class(r, c);
+        while let Some(p) = self.next_pos(r, c) {
+            if in_run(self.class(p.0, p.1), run, false) {
+                r = p.0;
+                c = p.1;
+            } else {
+                break;
             }
         }
         self.set_cursor(r, c);
     }
 
-    /// Backward to the start of the current-or-previous WORD; stops at start
-    /// of document.
+    /// Backward to the start of the current-or-previous small-word (`b`); stops
+    /// at start of document.
     pub fn move_word_back(&mut self) {
         // Step back once: 'b' moves off the current position before scanning.
         let (mut r, mut c) = match self.prev_pos(self.row, self.col) {
             Some(p) => p,
             None => return,
         };
-        // Skip whitespace / line breaks backward.
         while self.class(r, c) == Class::Space {
             match self.prev_pos(r, c) {
                 Some(p) => {
@@ -230,17 +253,83 @@ impl TextBuffer {
                 }
             }
         }
-        // On a word char: walk to the start of this word.
-        while self.class(r, c) == Class::Word {
-            match self.prev_pos(r, c) {
-                Some(p) if self.class(p.0, p.1) == Class::Word => {
-                    r = p.0;
-                    c = p.1;
-                }
-                _ => break,
+        let run = self.class(r, c);
+        while let Some(p) = self.prev_pos(r, c) {
+            if in_run(self.class(p.0, p.1), run, false) {
+                r = p.0;
+                c = p.1;
+            } else {
+                break;
             }
         }
         self.set_cursor(r, c);
+    }
+
+    /// Skip the current class-run then whitespace, forward. `big` collapses
+    /// WORD + punctuation into one run (the `W` motion).
+    fn word_forward(&mut self, big: bool) {
+        let (mut r, mut c) = (self.row, self.col);
+        let start = self.class(r, c);
+        if start == Class::Word || start == Class::Punct {
+            while in_run(self.class(r, c), start, big) {
+                match self.next_pos(r, c) {
+                    Some(p) => {
+                        r = p.0;
+                        c = p.1;
+                    }
+                    None => break,
+                }
+            }
+        }
+        while self.class(r, c) == Class::Space {
+            match self.next_pos(r, c) {
+                Some(p) => {
+                    r = p.0;
+                    c = p.1;
+                }
+                None => break,
+            }
+        }
+        self.set_cursor(r, c);
+    }
+
+    // -- position helpers (text-object range math) ------------------------
+
+    /// The position immediately after `p` (the next char, or the start of the
+    /// next line at a line end), or `None` at end of document. The public face
+    /// of the internal stepper, for the editor's text-object range math.
+    #[inline]
+    pub fn pos_after(&self, p: Pos) -> Option<Pos> {
+        self.next_pos(p.0, p.1)
+    }
+
+    /// The position immediately before `p` (the previous char, or the end of the
+    /// previous line at column 0), or `None` at start of document.
+    #[inline]
+    pub fn pos_before(&self, p: Pos) -> Option<Pos> {
+        self.prev_pos(p.0, p.1)
+    }
+
+    /// The inclusive span of the same-class run under `pos` on its own line --
+    /// the `iw` text object. `None` only on an empty line. Whitespace is its own
+    /// run (so `iw` on a gap selects the gap, vim-style); words do not span lines.
+    pub fn word_span_at(&self, pos: Pos) -> Option<(Pos, Pos)> {
+        let (r, _) = pos;
+        let len = self.char_len(r);
+        if len == 0 {
+            return None;
+        }
+        let c = pos.1.min(len - 1); // clamp a just-past-end cursor onto the last char
+        let target = self.class(r, c);
+        let mut lo = c;
+        while lo > 0 && self.class(r, lo - 1) == target {
+            lo -= 1;
+        }
+        let mut hi = c;
+        while hi + 1 < len && self.class(r, hi + 1) == target {
+            hi += 1;
+        }
+        Some(((r, lo), (r, hi)))
     }
 
     // -- editing (mutation) -----------------------------------------------
@@ -355,6 +444,24 @@ impl TextBuffer {
 
     /// Find `pat` starting just after the cursor, wrapping to the top. Returns
     /// the match-start position. An empty pattern finds nothing.
+    /// All non-overlapping literal matches of `pat` across the buffer, each as
+    /// an inclusive char span `(start, end)`. Single-line only (a pattern is not
+    /// matched across a newline). The multi-cursor select (`s`) substrate.
+    pub fn find_all(&self, pat: &str) -> Vec<(Pos, Pos)> {
+        let mut out = Vec::new();
+        if pat.is_empty() {
+            return out;
+        }
+        let plen = pat.chars().count();
+        for (r, line) in self.lines.iter().enumerate() {
+            for (byte, _) in line.match_indices(pat) {
+                let start = char_col_of(line, byte);
+                out.push(((r, start), (r, start + plen - 1)));
+            }
+        }
+        out
+    }
+
     pub fn find(&self, pat: &str) -> Option<Pos> {
         if pat.is_empty() {
             return None;
@@ -427,7 +534,8 @@ impl TextBuffer {
         if c < len {
             match self.lines[r].chars().nth(c) {
                 Some(ch) if ch.is_whitespace() => Class::Space,
-                Some(_) => Class::Word,
+                Some(ch) if is_word_char(ch) => Class::Word,
+                Some(_) => Class::Punct,
                 None => Class::Space,
             }
         } else if r + 1 < self.lines.len() {
@@ -459,6 +567,23 @@ impl TextBuffer {
         } else {
             None
         }
+    }
+}
+
+/// A WORD-class character (alphanumeric or underscore); the small-word motions
+/// treat a run of these as one word and a run of other punctuation as another.
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Whether class `cur` continues the run that began with `start`. `Space`/`End`
+/// never continue; in `big` (WORD) mode any non-space continues; otherwise the
+/// class must match (WORD vs punctuation stay distinct runs).
+fn in_run(cur: Class, start: Class, big: bool) -> bool {
+    match cur {
+        Class::Space | Class::End => false,
+        _ if big => true,
+        _ => cur == start,
     }
 }
 
@@ -602,6 +727,56 @@ mod tests {
     }
 
     #[test]
+    fn small_word_stops_at_punctuation() {
+        let mut t = TextBuffer::new("foo.bar baz");
+        t.set_cursor(0, 0);
+        t.move_word_forward();
+        assert_eq!(t.cursor(), (0, 3)); // the "." is its own small-word
+        t.move_word_forward();
+        assert_eq!(t.cursor(), (0, 4)); // "bar"
+        t.move_word_forward();
+        assert_eq!(t.cursor(), (0, 8)); // "baz"
+    }
+
+    #[test]
+    fn long_word_spans_punctuation() {
+        let mut t = TextBuffer::new("foo.bar baz");
+        t.set_cursor(0, 0);
+        t.move_long_word_forward();
+        assert_eq!(t.cursor(), (0, 8)); // WORD skips "foo.bar" whole -> "baz"
+    }
+
+    #[test]
+    fn word_end_lands_on_last_char() {
+        let mut t = TextBuffer::new("foo bar");
+        t.set_cursor(0, 0);
+        t.move_word_end();
+        assert_eq!(t.cursor(), (0, 2)); // end of "foo"
+        t.move_word_end();
+        assert_eq!(t.cursor(), (0, 6)); // end of "bar"
+    }
+
+    #[test]
+    fn small_word_back_stops_at_punctuation() {
+        let mut t = TextBuffer::new("foo.bar");
+        t.set_cursor(0, 6); // on the last "r"
+        t.move_word_back();
+        assert_eq!(t.cursor(), (0, 4)); // start of "bar"
+        t.move_word_back();
+        assert_eq!(t.cursor(), (0, 3)); // the "."
+        t.move_word_back();
+        assert_eq!(t.cursor(), (0, 0)); // start of "foo"
+    }
+
+    #[test]
+    fn word_span_at_covers_the_run() {
+        let t = TextBuffer::new("foo bar");
+        assert_eq!(t.word_span_at((0, 5)), Some(((0, 4), (0, 6)))); // "bar"
+        assert_eq!(t.word_span_at((0, 3)), Some(((0, 3), (0, 3)))); // the gap
+        assert_eq!(TextBuffer::new("").word_span_at((0, 0)), None); // empty line
+    }
+
+    #[test]
     fn range_text_and_delete_same_line() {
         let mut t = TextBuffer::new("hello");
         let s = t.range_text((0, 1), (0, 3)); // 'e','l','l' inclusive
@@ -665,5 +840,25 @@ mod tests {
         let mut t = TextBuffer::new("ab\nc");
         t.set_cursor(99, 99);
         assert_eq!(t.cursor(), (1, 1)); // last line, end
+    }
+
+    #[test]
+    fn find_all_single_char_inclusive() {
+        let t = TextBuffer::new("a ba a\nxa");
+        assert_eq!(
+            t.find_all("a"),
+            alloc::vec![((0, 0), (0, 0)), ((0, 3), (0, 3)), ((0, 5), (0, 5)), ((1, 1), (1, 1))]
+        );
+    }
+
+    #[test]
+    fn find_all_multichar_end_is_inclusive() {
+        let t = TextBuffer::new("foo foo");
+        assert_eq!(t.find_all("foo"), alloc::vec![((0, 0), (0, 2)), ((0, 4), (0, 6))]);
+    }
+
+    #[test]
+    fn find_all_empty_pattern_is_empty() {
+        assert!(TextBuffer::new("abc").find_all("").is_empty());
     }
 }
