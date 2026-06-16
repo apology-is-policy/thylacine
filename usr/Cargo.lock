@@ -665,6 +665,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "virtio-mmio-source"
+version = "0.1.0"
+dependencies = [
+ "libdriver",
+ "libthyla-rs",
+]
+
+[[package]]
 name = "virtio-net-arp"
 version = "0.1.0"
 dependencies = [
