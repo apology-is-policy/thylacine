@@ -2417,6 +2417,32 @@ int main(void) {
         t_putstr("joey: netdev-pci-test ok (pci-2 VirtioNetPci send/poll_rx round-trip or skip)\n");
     }
 
+    // === /warden -- Menagerie build-arc 5c (MENAGERIE.md 4-6, I-34) ===
+    // The hardware broker reads the devhw /hw DTB inventory, matches each node
+    // against its built-in bind database, intersects the node's resources with
+    // the matched manifest (the auditable I-34 grant), and spawns each matched
+    // driver with exactly that narrowed allowance. 5c proves the loop on the
+    // QEMU-virt pl061 GPIO -> menagerie-probe, which maps its granted MMIO and
+    // confirms an out-of-grant create is rejected. Runs PRE-pivot so
+    // /menagerie-probe resolves in devramfs by name. CAP_HW_CREATE: the warden
+    // confers a narrowed slice of it (+ a narrowed allowance) on each driver.
+    // Exit 0 = every bound driver came up (or nothing matched); 1 FAIL.
+    {
+        const char wd_name[] = "warden";
+        long wd_pid = t_spawn_with_caps(wd_name, sizeof(wd_name) - 1, T_CAP_HW_CREATE);
+        if (wd_pid <= 0) {
+            t_putstr("joey: t_spawn(\"warden\") FAILED\n");
+            return 1;
+        }
+        int wd_status = -1;
+        long wd_reaped = t_wait_pid_for((int)wd_pid, 0, &wd_status);
+        if (wd_reaped != wd_pid || wd_status != 0) {
+            t_putstr("joey: /warden FAILED (5c bind-loop: pl061 -> menagerie-probe)\n");
+            return 1;
+        }
+        t_putstr("joey: warden ok (5c Menagerie bind-loop: discover -> grant -> spawn narrowed)\n");
+    }
+
     // === /sbin/corvus spawn + E2E ===
     // Moved to do_corvus_bringup() (defined above main) and called
     // POST-PIVOT below, so corvus lands on the persistent Stratum root

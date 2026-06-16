@@ -737,3 +737,32 @@ early-console `chosen/stdout-path` selection is kernel.
   warden (the DTB source over /hw + the bind DB + the match -> `resolve` ->
   `Command::allowance` -> spawn engine), which is the first consumer of every
   `libdriver` surface.
+- **2026-06-16 (the warden + the bind-loop proof, build-sequence step 5c)**: the
+  hardware broker, `usr/warden` (native `libthyla-rs`), and the first live
+  `impl libdriver::Driver`, `usr/menagerie-probe`. **No new kernel ABI** -- pure
+  userspace over the frozen 5a `Command::allowance` + libdriver. The engine reads
+  `/hw` (the devhw DTB tree) via the new pure `libdriver::dtb` decode (compatible/
+  reg/interrupts -> `NodeResources`, host-tested against the real QEMU-virt
+  bytes), matches a compiled-in bind database (`best_match`, most-specific
+  `compatible` wins), `resolve`s the I-34 grant, and spawns the driver `/<name>`
+  with the descriptor (`to_descriptor` -> argv) + the narrowed allowance
+  (`to_allowance` -> `Command::allowance`) + `CAP_HW_CREATE`, both derived from the
+  one `BoundResources` so authority and information cannot drift. The 5c bind DB
+  is the pl061 GPIO (a single-instance, undriven, unreserved QEMU-virt device);
+  `menagerie-probe` proves the loop -- it maps its granted MMIO (the allowance
+  permits the grant) AND verifies an out-of-grant create is rejected (I-34
+  enforced) -- then exits, and the warden reaps it. Proven in joey's
+  `THYLA_BOOT_PROBES` ladder: `45 /hw nodes discovered -> bind arm,pl061 ->
+  1 bound, 1 up -> joey: warden ok -> Thylacine boot OK`, 0 EXTINCTION, + the SMP
+  gate (default + UBSan x smp4/smp8). One notable bring-up find: a boot-probe Proc
+  has no stdio fds, so `Command`'s default `Stdio::Inherit` (which bumps the
+  parent's fd 0/1/2) fails before the kernel even resolves the binary -- the
+  warden hands each driver `/dev/null` for the three slots (the driver logs via
+  the console-direct `t_putstr`). Reference docs `docs/reference/119-warden.md`
+  (new) + `118-libdriver.md` (the `dtb` module). **Audit-light** (no kernel
+  privilege surface; the kernel validates every `SYS_*_CREATE`): self-audit + 27
+  host tests + the boot-probe E2E + the SMP gate; the composed focused audit
+  (grant path + warden grant-decision + discovery-source trust) is **5f**.
+  **Next**: 5d -- retrofit `usr/lib/netdev` to be a spawnable `impl Driver` the
+  warden binds NARROWED (the live I-34 exercise; retires `virtio.rs:51`'s
+  hardcoded base).

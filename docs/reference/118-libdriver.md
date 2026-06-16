@@ -45,11 +45,13 @@ Mirrors the kaua/netdev split (pure host-testable core + a thin device layer):
 |---|---|---|---|
 | `manifest` | always | `alloc` only | the §6 brace-block manifest schema + parser + `to_text` |
 | `resource` | always | `alloc` only | `NodeResources`, `BoundResources`, `resolve`, the descriptor codec |
+| `dtb` | always | `alloc` only | decode raw devhw `/hw` property bytes (compatible/reg/interrupts) into a `NodeResources` |
 | `driver` | `driver` (default) | `libthyla-rs` | the `Driver` trait, `run`, the handle-mint helpers, `to_allowance` |
 
-`manifest` + `resource` carry no `libthyla-rs` dependency, so the grant logic +
-codec run under `cargo test` on the host. `driver` is the only `libthyla-rs`
-surface; it is compiled for `aarch64-unknown-none` only.
+`manifest` + `resource` + `dtb` carry no `libthyla-rs` dependency, so the grant
+logic + codec + the endianness/cell-width DTB decode run under `cargo test` on
+the host. `driver` is the only `libthyla-rs` surface; it is compiled for
+`aarch64-unknown-none` only.
 
 ```
 Build (device): cargo build -p libdriver               # default features -> driver
@@ -138,6 +140,36 @@ impl BoundResources {
     pub fn parse_descriptor(desc: &str) -> Result<BoundResources, Error>;
 }
 ```
+
+### `dtb`
+
+The warden's DTB discovery-source decode -- it reads each `/hw/<node>/<prop>`
+file (the devhw tree publishes every FDT property verbatim, big-endian on-wire)
+and turns the raw bytes into the typed `NodeResources` that `resolve` intersects.
+Pure (no `libthyla-rs`), so the endianness + cell-width + SPI-mapping logic is
+host-tested against the real QEMU-virt bytes.
+
+```rust
+pub const ARM64_ADDR_CELLS: u32 = 2;     // FDT root #address-cells (ARM64)
+pub const ARM64_SIZE_CELLS: u32 = 2;     // FDT root #size-cells
+pub const GIC_INTERRUPT_CELLS: u32 = 3;  // GIC #interrupt-cells: <type number flags>
+
+pub fn parse_compatible(bytes: &[u8]) -> Vec<String>;  // NUL-separated, most-specific first
+pub fn parse_reg(bytes: &[u8], addr_cells: u32, size_cells: u32) -> Vec<(u64, u64)>;
+pub fn parse_interrupts(bytes: &[u8], interrupt_cells: u32) -> Vec<u32>;  // -> absolute INTIDs
+
+impl NodeResources {
+    pub fn from_dtb(compatible: &[u8], reg: &[u8], interrupts: &[u8],
+                    addr_cells: u32, size_cells: u32, interrupt_cells: u32) -> NodeResources;
+}
+```
+
+`parse_interrupts` maps the GIC 3-cell form to absolute INTIDs (SPI = number+32,
+PPI = number+16 -- matching the kernel `lib/dtb.c` convention); unknown interrupt
+types (e.g. the PMU/timer affinity rows) are skipped. The cell counts are passed
+in (v1.0 uses the universal ARM64 values; reading them from the DTB root + the
+interrupt-parent is a v1.x refinement). Decode is best-effort: a malformed
+property yields a short/empty axis rather than a panic.
 
 ### `driver` (feature `driver`)
 
@@ -269,7 +301,7 @@ maps cannot drift.
 
 ## Tests
 
-19 host tests (`cargo test -p libdriver --no-default-features --target <host>`):
+27 host tests (`cargo test -p libdriver --no-default-features --target <host>`):
 
 - **manifest** (7): parse the §6 example; `to_text` round-trip; wired-IRQ +
   no-DMA; defaults when optional fields absent; the size-unit parser
@@ -284,12 +316,16 @@ maps cannot drift.
   (bad version, missing required field, duplicate/unknown key, bad number,
   missing window colon); the over-cap rejection; the delimiter-injection guard;
   the end-to-end resolve -> encode -> decode equality.
+- **dtb** (8): `compatible` NUL-split (most-specific first) + empty/unterminated/
+  double-NUL tolerance; `reg` decode in 2/2 cells (the real pl061 + virtio bytes)
+  and 1/1 cells + multi-entry + trailing-partial ignore; `interrupts` SPI -> +32
+  and PPI -> +16 with unknown-type skip; `from_dtb` building the full pl061 node.
 
 The device layer (`driver`) is proven to compile by the whole-workspace device
 build + `example::nop_entry`, which instantiates `run::<NopDriver>` so the entire
-scaffold monomorphizes. A live `impl Driver` over a real device lands at step 5d
-(the netdev retrofit); the warden's use of `resolve`/`to_allowance`/`to_descriptor`
-lands at step 5c.
+scaffold monomorphizes. The warden (5c) is the live consumer of
+`dtb`/`resolve`/`to_allowance`/`to_descriptor`; `menagerie-probe` (5c) is the
+first live `impl Driver` (the netdev retrofit at 5d is the first *useful* one).
 
 ---
 
@@ -326,10 +362,12 @@ lands at step 5c.
 - **`sig` is carried, not verified.** The section-9 authorization ladder
   (try-bind / ask-once / remember) is the warden's concern (step 5c+); libdriver
   round-trips the field only.
-- **No native consumer yet.** libdriver ships as a library with no binary
-  depending on it at 5b; the warden (5c) is its first consumer and the netdev
-  retrofit (5d) its first `impl Driver`. It is compiled (whole-workspace device
-  build + `nop_entry`) but not yet exercised on-device.
+- **Live since 5c.** The warden (`usr/warden`, ref `119-warden.md`) consumes
+  `dtb` + `resolve` + `to_allowance` + `to_descriptor`; `menagerie-probe`
+  (`usr/menagerie-probe`) is the first live `impl Driver`. The whole loop --
+  discover `/hw` -> match a manifest -> grant -> spawn narrowed -> the driver
+  maps its granted MMIO + an out-of-grant create is rejected -- runs in joey's
+  boot-probe ladder. The netdev retrofit (5d) is the first *useful* driver.
 
 ---
 

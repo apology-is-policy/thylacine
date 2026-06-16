@@ -22,6 +22,7 @@
 
 extern crate alloc;
 
+pub mod dtb;
 pub mod manifest;
 pub mod resource;
 
@@ -29,7 +30,7 @@ pub mod resource;
 pub mod driver;
 
 pub use manifest::{DmaNeed, IrqNeed, Manifest, MmioNeed, Needs, Restart, MANIFEST_ABI};
-pub use resource::{BoundResources, NodeResources, DESCRIPTOR_VERSION, MAX_IRQ, MAX_MMIO};
+pub use resource::{resolve, BoundResources, NodeResources, DESCRIPTOR_VERSION, MAX_IRQ, MAX_MMIO};
 
 #[cfg(feature = "driver")]
 pub use driver::{

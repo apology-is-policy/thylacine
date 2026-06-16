@@ -100,10 +100,21 @@ to be retrofitted later. The full per-chunk status (SHAs, tests, audits) lives i
   + `run` scaffold + handle-mint helpers + `to_allowance`. Pure userspace, no kernel
   ABI; audit-light (the kernel validates every `SYS_*_CREATE`). **LANDED** (19 host
   tests + device build + whole-workspace build + clippy-clean; ref `118-libdriver.md`).
-- **5c** the warden (DTB source over `/hw` + bind DB + match→`resolve`→
-  `Command::allowance`→spawn) → **5d** retrofit `netdev` to discover its base (the
-  live narrowed-allowance proof) → **5e** `DeviceRemoved` revoke+terminate +
-  supervision → **5f** the composed focused audit. **NEXT.** Then step 6
+- **5c** the warden (`usr/warden`) + the first live `impl Driver`
+  (`usr/menagerie-probe`) + `libdriver::dtb` (the `/hw` property decode, +8 host
+  tests → 27). The full bind-loop — discover `/hw` (45 nodes) → match the pl061
+  GPIO bind DB → `resolve` the grant → spawn `/menagerie-probe` with the
+  descriptor + narrowed allowance + `CAP_HW_CREATE` → the driver maps its granted
+  MMIO (allowance permits) + an out-of-grant create is rejected (I-34 enforced) →
+  reap → `joey: warden ok`. Pure userspace, no kernel ABI; audit-light. **LANDED**
+  (27 host tests + boot-probe E2E `1 bound, 1 up` + 0 EXTINCTION + the SMP gate;
+  refs `119-warden.md` (new) + `118-libdriver.md`). Bring-up find: a boot-probe
+  Proc has no stdio fds → the warden gives each driver `/dev/null` for the 3 slots
+  (Command's default `Stdio::Inherit` bumps the parent's fd 0/1/2, which fails
+  pre-resolution).
+- **5d** retrofit `netdev` to discover its base (the live narrowed-allowance
+  proof; retires `virtio.rs:51`) → **5e** `DeviceRemoved` revoke+terminate +
+  supervision → **5f** the composed focused audit. **NEXT (5d).** Then step 6
   (PCIe/USB sources + the per-(bus,dev,fn) PCI allowance axis #159).
 
 ### the net arc (resumes on the PCI NIC, after the Menagerie spine)
