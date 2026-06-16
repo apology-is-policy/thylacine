@@ -274,10 +274,28 @@ source, the kernel-exported bootstrap root.
   enumerate the identical way (config-space class / USB descriptor → typed node).
   On real boards there is no virtio-mmio source — its slot in the architecture is
   the PCIe source.
-- **PCIe source**: the brcmstb host-bridge driver. Scans config space, emits a node
-  per function, and **owns MSI routing** (controller-specific on Broadcom — not a
-  generic GIC ITS; §12). On RPi5 this is the spine — RP1 and everything behind it
-  arrives here.
+- **PCIe source** — *two realizations of the one `DiscoverySource` slot, split by
+  who owns config space:*
+  - **Mediated (QEMU-virt; the v1.0 / 6b form)**: on a platform where the **kernel**
+    owns the PCIe config space (QEMU-virt's ECAM is `mmu_map`-enumerated at boot into
+    `g_virtio_pci_devs[]` and **I-5-reserved** — the pci-3 "userspace never gets raw
+    ECAM" property), the source does **not** scan config space. The kernel publishes
+    its already-enumerated topology as the **`devpci` Dev** at **`/hw/pci`** (the Plan
+    9 `#$`/devpci idiom: a directory of `<bus.dev.fn>/ctl` files reporting
+    vendor/device → derived `virtio` id + the INTx-routed INTID; **read-only**, never
+    raw ECAM, no config-space *write* surface). The warden reads `/hw/pci` with an
+    **in-process `PciSource`** — the **`DtbSource` analog**: both read a *kernel-
+    mediated trusted view*, so (unlike the virtio-mmio source) there is **no separate
+    poking Proc and no `reconcile_reported_node` step** — the kernel's enumeration
+    *is* the trusted view, so a conferred `(bus,dev,fn)` is trusted by construction.
+    The warden binds `netdev-pci` to the typed `virtio-pci:1` node, narrowed to that
+    function's bdf + routed INTID + DMA budget — the live I-34-on-PCI proof.
+  - **Self-scanning (brcmstb; real-hardware, §12)**: on a board where a **userspace**
+    host-bridge driver owns ECAM (RPi5's brcmstb), *that driver* is the PCIe source —
+    it scans config space, emits a node per function, and **owns MSI routing**
+    (controller-specific on Broadcom — not a generic GIC ITS; §12). On RPi5 this is
+    the spine — RP1 and everything behind it arrives here. (Deferred to RPi
+    bring-up; the mediated form proves the bind loop on QEMU first, zero HW risk.)
 - **USB source**: the XHCI host driver. Descriptor enumeration; the canonical
   hotplug source.
 - **SDIO/MMC source**: card-detect → enumerate.
@@ -537,9 +555,39 @@ Scripture-first, model-first for the allowance:
      replacing the I-34-round fail-closed reject, so a warden-narrowed PCI driver
      can claim exactly its function. See `docs/reference/117-allowance.md` §"The
      fourth door".
-   - **6b**: the userspace half — a PCIe bus-enumerator source Proc (config-space
-     scan → typed `(bus,dev,fn)` nodes) + the warden binds netdev-pci narrowed
-     (the live I-34-on-PCI proof). Then **net-2** resumes on the PCI NIC.
+   - **6b**: the userspace half — the **mediated PCIe source** (the §7 QEMU-virt
+     form). Four pieces: (i) the kernel **`devpci` Dev** (`dc='P'`, mounted at
+     `/hw/pci` via a synthetic `pci` mount-point child of `devhw`) serving
+     `g_virtio_pci_devs[]` as read-only `<bus.dev.fn>/ctl` topology — never raw
+     ECAM, no config-space write; (ii) the `libdriver` **PCI axis** — a
+     `pci: Option<(u8,u8,u8)>` resource threaded through
+     `NodeResources`/`BoundResources`/`resolve`/`to_allowance`/the descriptor codec,
+     a `pci = "node"` manifest need, and a new `DeviceId::VirtioPci(u16)` identity
+     (`"virtio-pci:N"` — the documented `DeviceId` extension point; distinct from the
+     MMIO `Virtio(1)` so `best_match` cannot collide the two transports); (iii) the
+     warden's **in-process `PciSource`** reading `/hw/pci` (the `DtbSource` sibling —
+     no source Proc, no reconcile); (iv) **`netdev-pci-driver`** (an `impl Driver`,
+     long-lived serve like `netdev-driver`) bound `virtio-pci:1` **narrowed** to that
+     function's bdf + routed INTID + DMA — **retiring the broad `netdev-pci-test`**
+     (as 5d-3 retired `netdev-test`). The live **positive** proof is the narrowed
+     end-to-end bind (warden confers `pci=[bdf]` → driver claims its function → READY
+     → DeviceRemoved); the deterministic **negative** (narrowed-to-a-different-bdf
+     → DENIED) is the 6a `allowance.pci_claim_handler_gate` kernel test.
+
+     **Design resolved 2026-06-16 (user-voted: the `devpci` Dev over a `SYS_PCI_ENUM`
+     syscall or extending `devhw`'s tree).** The fork was *how* the kernel exposes its
+     boot-enumerated PCI functions: ECAM is I-5-reserved and no userspace enumeration
+     exists, so a sandboxed config-space-scanning source is impossible without
+     un-reserving ECAM (rejected — it breaks the pci-3 "userspace never gets raw
+     ECAM" property) or hardcoding the bdf (rejected — the type-blind-transport
+     wartiness the 5d source-layer resequence exists to avoid). Both Plan 9 (devpci
+     serves `/dev/pci/B.D.F/ctl`) and the capability-µkernel SOTA (Fuchsia/Genode/seL4
+     all have one trusted component own config space and mediate) converge on
+     "kernel/TCB mediates topology; never hand a driver raw ECAM." Since the kernel
+     already enumerated at boot, the source reads that mediated view — making it the
+     `DtbSource` analog (in-process). The post-pivot re-graft of the nested `/hw/pci`
+     mount is a v1.x seam (only the pre-pivot warden reads it at v1.0). Then **net-2**
+     resumes on the PCI NIC.
 
 ---
 
