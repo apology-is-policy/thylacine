@@ -343,6 +343,16 @@ void joey_run(void) {
         if (joey_mount_static_dev(kt, &devhw, "hw", 2) != 0)
             extinction("joey: /hw mount (devhw) failed");
         uart_puts("  joey: /hw mounted (DTB hardware inventory)\n");
+
+        // Menagerie 6b devpci: graft the kernel-mediated PCI topology at /hw/pci
+        // (the read-only <bus.dev.fn>/ctl tree -- the warden's in-process PciSource
+        // reads it, never raw ECAM). MUST mount AFTER /hw: "hw/pci" resolves by
+        // crossing the /hw mount into devhw, then STALK_MOUNT-resolving devhw's
+        // synthetic `pci` child (the mount-point). The v1.0 warden reads /hw/pci
+        // PRE-pivot; the post-pivot re-graft of this nested mount is a v1.x seam.
+        if (joey_mount_static_dev(kt, &devpci, "hw/pci", 6) != 0)
+            extinction("joey: /hw/pci mount (devpci) failed");
+        uart_puts("  joey: /hw/pci mounted (mediated PCI topology)\n");
     }
 
     uart_puts("  joey: rforking child for /joey (");

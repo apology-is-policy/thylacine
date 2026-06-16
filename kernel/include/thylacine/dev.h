@@ -246,6 +246,7 @@ extern struct Dev devctl;         // dc='C'  — /ctl/{procs,memory,devices,kern
 extern struct Dev devramfs;       // dc='m'  — /ramfs/<file> from cpio newc initrd
 extern struct Dev devdev;         // dc='d'  — /dev char-device directory (#57b)
 extern struct Dev devhw;          // dc='H'  — DTB hardware inventory tree (Menagerie devhw)
+extern struct Dev devpci;         // dc='P'  — /hw/pci mediated PCI topology (Menagerie 6b)
 
 // devramfs diagnostics (used by tests).
 int  devramfs_file_count(void);

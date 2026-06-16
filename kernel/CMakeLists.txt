@@ -79,6 +79,7 @@ set(KERNEL_SRCS
     devcap.c
     devdev.c
     devhw.c
+    devpci.c
     cpio.c
     virtio.c
     virtio_pci.c
@@ -151,6 +152,7 @@ set(KERNEL_TEST_SRCS
     test/test_devctl.c
     test/test_devdev.c
     test/test_devhw.c
+    test/test_devpci.c
     test/test_allowance.c
     test/test_cpio.c
     test/test_devramfs.c

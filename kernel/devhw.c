@@ -51,6 +51,16 @@ static inline u32  hw_qid_off(u64 path)     { return (u32)(path & HW_OFF_MASK); 
 static inline u64  hw_qid_for_node(u32 off) { return (u64)off; }
 static inline u64  hw_qid_for_prop(u32 off) { return HW_PROP_BIT | (u64)off; }
 
+// The synthetic /hw/pci mount-point child (Menagerie 6b). devpci mounts over it
+// (kernel/joey.c). Bit 62 marks it -- distinct from every FDT node/prop offset
+// (those are < 2^31) -- while bit 63 stays 0 so hw_qid_is_prop() reports false
+// (it is a directory, never byte-read as a property). Special-cased in walk /
+// stat / readdir BEFORE the FDT-offset logic so its qid is never decoded as an
+// FDT offset.
+#define HW_SYNTH_BIT  (1ULL << 62)
+#define HW_SYNTH_PCI  (HW_SYNTH_BIT | 1ULL)
+static inline bool hw_qid_is_synth(u64 path) { return (path & HW_SYNTH_BIT) != 0; }
+
 // =============================================================================
 // Walk.
 // =============================================================================
@@ -69,6 +79,20 @@ static bool walk_one(struct Qid cur, const char *name, struct Qid *out) {
     out->path = 0; out->vers = 0; out->type = 0;
     out->pad[0] = out->pad[1] = out->pad[2] = 0;
 
+    // The synthetic /hw/pci mount-point (Menagerie 6b): an empty directory until
+    // devpci mounts over it. `.` -> self; `..` -> the FDT root; no real children
+    // (devpci serves /hw/pci/<bdf> via the mount-cross). Handled BEFORE the FDT
+    // decode so its sentinel qid is never passed to dtb_node_iter as an offset.
+    if (hw_qid_is_synth(cur.path)) {
+        if (name[0] == '.' && name[1] == '\0') { *out = cur; return true; }
+        if (name[0] == '.' && name[1] == '.' && name[2] == '\0') {
+            out->path = hw_qid_for_node(0);    // parent is the FDT root
+            out->type = QTDIR;
+            return true;
+        }
+        return false;
+    }
+
     // A property file is a leaf -- no walk descends from it.
     if (hw_qid_is_prop(cur.path)) return false;
     u32 node_off = hw_qid_off(cur.path);
@@ -79,6 +103,15 @@ static bool walk_one(struct Qid cur, const char *name, struct Qid *out) {
         u32 parent;
         if (!dtb_node_parent(node_off, &parent)) return false;
         out->path = hw_qid_for_node(parent);
+        out->type = QTDIR;
+        return true;
+    }
+
+    // The synthetic /hw/pci mount-point child (Menagerie 6b) -- only at the FDT
+    // root. devpci mounts over it. No real FDT node is named "pci" (QEMU-virt /
+    // RPi expose "pcie@..."), so this shadows nothing.
+    if (node_off == 0 && name_eq("pci", name)) {
+        out->path = HW_SYNTH_PCI;
         out->type = QTDIR;
         return true;
     }
@@ -157,6 +190,18 @@ static int devhw_stat(struct Spoor *c, u8 *dp, int n) {
 static int devhw_stat_native(struct Spoor *c, struct t_stat *out) {
     if (!c || !out) return -1;
     for (size_t i = 0; i < sizeof(*out); i++) ((u8 *)out)[i] = 0;
+
+    // The synthetic /hw/pci mount-point (Menagerie 6b): a directory.
+    if (hw_qid_is_synth(c->qid.path)) {
+        out->mode     = T_S_IFDIR | 0555u;
+        out->nlink    = 1;
+        out->qid_path = c->qid.path;
+        out->qid_type = QTDIR;
+        out->blksize  = 4096;
+        out->uid      = PRINCIPAL_SYSTEM;
+        out->gid      = GID_SYSTEM;
+        return 0;
+    }
 
     if (hw_qid_is_prop(c->qid.path)) {
         u32 prop_off = hw_qid_off(c->qid.path);
@@ -254,6 +299,10 @@ static long devhw_bwrite(struct Spoor *c, struct Block *bp, s64 off) {
 static long devhw_readdir(struct Spoor *c, void *buf, long n, s64 off) {
     if (!c || !buf) return -1;
     if (n <= 0) return 0;
+
+    // The synthetic /hw/pci mount-point is an empty directory pre-mount (devpci
+    // serves it post-mount via the cross). EOD.
+    if (hw_qid_is_synth(c->qid.path)) return 0;
 
     // Only a node directory enumerates; a property file does not.
     if (hw_qid_is_prop(c->qid.path)) return -1;

@@ -63,11 +63,14 @@ struct Path;   // <thylacine/path.h> -- #66 namespace name retention (I-33)
 // 9 live entries (#57b). The pre-pivot kernel mounts ORPHAN after pivot (their
 // devramfs mount points become unreachable from the disk root) but remain in the
 // table, so the count is pre+post per re-grafted dir; a pivot-time GC of dead
-// mounts is the tracked seam (would halve joey's count). 12 leaves headroom for
-// /net (Phase 8) without another bump. The proc.rfork stress test clones
-// Territories en masse; each clone deep-copies mounts[] + bumps a spoor_ref per
-// entry, so the cap stays modest to hold the per-clone cost in check.
-#define PGRP_MAX_MOUNTS  12
+// mounts is the tracked seam (#80; would halve joey's count). 16 accommodates the
+// Menagerie 6b /hw/pci mediated-PCI mount (a pre-pivot orphan -- mounted in the
+// kproc boot namespace so the pre-pivot warden's PciSource reads it, dropped-but-
+// uncollected at pivot) plus restored headroom for /net (Phase 8); the pivot-time
+// GC (#80) is the real fix. The proc.rfork stress test clones Territories en
+// masse; each clone deep-copies mounts[] + bumps a spoor_ref per entry, so the cap
+// stays modest to hold the per-clone cost in check.
+#define PGRP_MAX_MOUNTS  16
 
 // Path identifier. At v1.0 abstract `u32` — bind/mount take whatever
 // numeric ID the caller decides on (tests pick small integers). The

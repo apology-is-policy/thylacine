@@ -124,6 +124,7 @@ void dev_init(void) {
     dev_register(&devcap);          // P5-hostowner-b: /cap elevation device (dc='k')
     dev_register(&devdev);          // #57b: /dev char-device directory (dc='d')
     dev_register(&devhw);           // Menagerie devhw: DTB inventory tree (dc='H')
+    dev_register(&devpci);          // Menagerie 6b: /hw/pci mediated PCI topology (dc='P')
 
     // Walk bestiary: dev->init() may itself dev_register additional
     // devs (e.g., a virtio probe that fans out to multiple instances).

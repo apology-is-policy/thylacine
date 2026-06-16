@@ -325,3 +325,36 @@ void test_devhw_iter_api(void) {
     TEST_ASSERT(!dtb_node_at(0x7fffffffu, NULL, NULL), "out-of-range node offset rejected");
     TEST_ASSERT(!dtb_prop_at(0x7fffffffu, NULL, NULL, NULL), "out-of-range prop offset rejected");
 }
+
+// Menagerie 6b: the synthetic /hw/pci mount-point child. devpci mounts over it,
+// but the underlying mount-point must be walkable + stat-able as a directory (no
+// real FDT node is named "pci" -- QEMU-virt / RPi expose "pcie@..."). This proves
+// the devhw surgery the /hw/pci mount-cross depends on; the live mount + cross is
+// proven by the boot (joey mounts devpci -> the warden reads /hw/pci).
+void test_devhw_synth_pci_child(void) {
+    struct Spoor *root = devhw.attach("");
+    TEST_ASSERT(root != NULL, "attach root");
+
+    struct Spoor *pci = walk1(root, "pci");
+    TEST_ASSERT(pci != NULL, "walk root/pci resolves the synthetic child");
+    TEST_EXPECT_EQ(pci->qid.type, QTDIR, "/hw/pci is a directory");
+    TEST_ASSERT(pci->qid.path != 0, "synth pci qid != root");
+
+    // A directory: stat_native QTDIR, no byte-read, an empty (pre-mount) readdir.
+    struct t_stat st;
+    TEST_EXPECT_EQ(devhw.stat_native(pci, &st), 0, "stat /hw/pci OK");
+    TEST_ASSERT((st.mode & T_S_IFDIR) != 0, "/hw/pci mode IFDIR");
+    u8 buf[64];
+    TEST_EXPECT_EQ(devhw.read(pci, buf, sizeof(buf), 0), (long)-1, "/hw/pci dir read -> -1");
+    TEST_EXPECT_EQ(devhw.readdir(pci, buf, sizeof(buf), 0), (long)0, "/hw/pci empty pre-mount (EOD)");
+
+    // ".." climbs back to the FDT root; no real children pre-mount.
+    struct Spoor *up = walk1(pci, "..");
+    TEST_ASSERT(up != NULL, "/hw/pci/.. resolves");
+    TEST_EXPECT_EQ(up->qid.path, (u64)0, "/hw/pci/.. == FDT root");
+    TEST_ASSERT(walk1(pci, "anything") == NULL, "no real child of /hw/pci pre-mount");
+
+    spoor_unref(up);
+    spoor_unref(pci);
+    spoor_unref(root);
+}

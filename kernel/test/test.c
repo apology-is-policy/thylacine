@@ -440,6 +440,13 @@ void test_devhw_prop_read(void);
 void test_devhw_stat_native(void);
 void test_devhw_readdir_cookie_contract(void);
 void test_devhw_iter_api(void);
+void test_devhw_synth_pci_child(void);
+void test_devpci_bestiary_smoke(void);
+void test_devpci_attach_root(void);
+void test_devpci_walk_read_ctl(void);
+void test_devpci_readonly(void);
+void test_devpci_readdir(void);
+void test_devpci_walk_reuse_nc(void);
 
 void test_allowance_null_is_broad(void);
 void test_allowance_mmio_containment(void);
@@ -1482,6 +1489,13 @@ struct test_case g_tests[] = {
     { "devhw.stat_native",             test_devhw_stat_native,             false, NULL },
     { "devhw.readdir_cookie_contract", test_devhw_readdir_cookie_contract, false, NULL },
     { "devhw.iter_api",                test_devhw_iter_api,                false, NULL },
+    { "devhw.synth_pci_child",         test_devhw_synth_pci_child,         false, NULL },
+    { "devpci.bestiary_smoke",         test_devpci_bestiary_smoke,         false, NULL },
+    { "devpci.attach_root",            test_devpci_attach_root,            false, NULL },
+    { "devpci.walk_read_ctl",          test_devpci_walk_read_ctl,          false, NULL },
+    { "devpci.readonly",               test_devpci_readonly,               false, NULL },
+    { "devpci.readdir",                test_devpci_readdir,                false, NULL },
+    { "devpci.walk_reuse_nc",          test_devpci_walk_reuse_nc,          false, NULL },
 
     { "allowance.null_is_broad",            test_allowance_null_is_broad,            false, NULL },
     { "allowance.mmio_containment",         test_allowance_mmio_containment,         false, NULL },
