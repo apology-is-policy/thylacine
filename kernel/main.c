@@ -476,13 +476,26 @@ void boot_main(void) {
     // pool keeps the DTB seed and this prints "unavailable".
     {
         size_t rng_bytes = random_seed_from_virtio();
+        u64 rng_spin = 0;
+        const char *rng_reason = kern_random_pull_diag(&rng_spin);
         uart_puts("  random: virtio-rng reseed ");
         if (rng_bytes) {
             uart_puts("OK (");
             uart_putdec((u64)rng_bytes);
-            uart_puts(" bytes mixed)\n");
+            uart_puts(" bytes mixed, polled ");
+            uart_putdec(rng_spin);
+            uart_puts(" iters)\n");
         } else {
-            uart_puts("unavailable (no RNG device; chacha keeps the boot seed)\n");
+            // #188: report WHICH site failed -- the historic "no RNG device"
+            // text was misleading (the device is usually present; a transient
+            // poll-timeout is the real mode). The chacha pool keeps the boot
+            // DTB/cntpct seed; on a target with no RNDR this means readiness
+            // (kern_random_seeded) stays false -- the fail-closed cascade.
+            uart_puts("FAILED: ");
+            uart_puts(rng_reason);
+            uart_puts(" (polled ");
+            uart_putdec(rng_spin);
+            uart_puts(" iters; chacha keeps the boot seed)\n");
         }
     }
 

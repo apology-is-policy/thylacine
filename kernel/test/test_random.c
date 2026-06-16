@@ -19,6 +19,7 @@ void test_chacha20_keystream_continuity(void);
 void test_kern_random_two_reads_differ(void);
 void test_kern_random_large_read_nonzero(void);
 void test_kern_random_virtio_reseed(void);
+void test_kern_random_virtio_deadline_ticks(void);
 
 static bool bytes_eq(const u8 *a, const u8 *b, u32 n) {
     for (u32 i = 0; i < n; i++) if (a[i] != b[i]) return false;
@@ -108,4 +109,26 @@ void test_kern_random_virtio_reseed(void) {
     u8 buf[32] = {0};
     TEST_EXPECT_EQ(kern_random_bytes(buf, (long)sizeof(buf)), (long)sizeof(buf),
                    "CSPRNG serves after a virtio reseed");
+}
+
+// #188: the virtio-rng poll budget is WALL-CLOCK (CNTPCT ticks), not a
+// fixed iteration count -- a CPU-speed-dependent count could expire before
+// the device's async completion landed under HVF host contention. This pins
+// the wall-clock conversion + the load-bearing freq==0 fallback.
+void test_kern_random_virtio_deadline_ticks(void) {
+    // CNTFRQ unprogrammed (0) -> 0: the poll then has no deadline and the
+    // unconditional RNG_VIRTIO_POLL_MAX backstop bounds it. (The live kernel
+    // never hits this -- timer_init extincts on CNTFRQ==0 -- but the helper
+    // must still return 0 so a hypothetical pre-timer_init caller stays bounded.)
+    TEST_EXPECT_EQ((long)kern_random_virtio_deadline_ticks(0), 0L,
+                   "freq==0 -> 0 (no deadline; iteration backstop bounds it)");
+
+    // A present counter -> a non-zero deadline that scales linearly with the
+    // frequency (the wall-clock span is frequency-independent: 2x the ticks
+    // at 2x the frequency is the same real time). Freqs are multiples of
+    // 1000 so the `freq/1000` integer division is exact.
+    u64 d1 = kern_random_virtio_deadline_ticks(1000000ull);   // 1 MHz
+    u64 d2 = kern_random_virtio_deadline_ticks(2000000ull);   // 2 MHz
+    TEST_ASSERT(d1 > 0, "present counter -> non-zero wall-clock deadline");
+    TEST_EXPECT_EQ((long)d2, (long)(2 * d1), "deadline scales with CNTFRQ");
 }

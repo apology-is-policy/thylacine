@@ -893,6 +893,7 @@ void test_chacha20_keystream_continuity(void);
 void test_kern_random_two_reads_differ(void);
 void test_kern_random_large_read_nonzero(void);
 void test_kern_random_virtio_reseed(void);
+void test_kern_random_virtio_deadline_ticks(void);
 void test_sys_spawn_happy_path(void);
 void test_sys_spawn_rejects_null_name(void);
 void test_sys_spawn_rejects_zero_len(void);
@@ -2060,6 +2061,7 @@ struct test_case g_tests[] = {
     { "kern_random.two_reads_differ",                  test_kern_random_two_reads_differ,                  false, NULL },
     { "kern_random.large_read_nonzero",                test_kern_random_large_read_nonzero,                false, NULL },
     { "kern_random.virtio_reseed",                     test_kern_random_virtio_reseed,                     false, NULL },
+    { "kern_random.virtio_deadline_ticks",             test_kern_random_virtio_deadline_ticks,             false, NULL },
     { "sys_spawn.happy_path",                          test_sys_spawn_happy_path,                          false, NULL },
     { "sys_spawn.rejects_null_name",                   test_sys_spawn_rejects_null_name,                   false, NULL },
     { "sys_spawn.rejects_zero_len",                    test_sys_spawn_rejects_zero_len,                    false, NULL },

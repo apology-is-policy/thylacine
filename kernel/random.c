@@ -50,11 +50,28 @@
 // backtracking resistance independent of this.
 #define RNG_RESEED_BYTES (1u << 20)
 
-// Bounded poll budget for a virtio-rng completion (no IRQ path on the
-// kernel virtio substrate). The device fills near-instantly under QEMU/
-// HVF; the cap bounds a wedged device -- on timeout the CSPRNG keeps its
-// prior state (never blocks, never serves stale-but-still-secure bytes).
-#define RNG_VIRTIO_POLL_MAX (1u << 22)
+// Wall-clock poll budget for a virtio-rng completion (no IRQ path on the
+// kernel virtio substrate). The budget is REAL TIME, not a fixed iteration
+// count: under HVF the boot vCPU spins NATIVELY (a fixed count elapses in
+// sub-millisecond on a fast core -- a normal success polls ~80k iters),
+// while QEMU delivers virtio-rng entropy via a bottom-half on a SEPARATE
+// host thread, so a CPU-speed-dependent budget can expire before the
+// completion lands under host contention (#188: ~1/N smp8 boots missed the
+// boot pull -> g_rng_seeded stayed false -> the whole CSPRNG failed closed
+// -> the 6 fail-closed random tests + EXTINCTION). A real-time deadline is
+// CPU-speed-independent and still bounds a genuinely-dead device.
+#define RNG_VIRTIO_POLL_MS  250u           // wall-clock poll budget (the primary bound)
+#define RNG_VIRTIO_PULL_TRIES 3            // re-arm + re-poll on a missed completion
+// Unconditional hard iteration backstop, checked EVERY poll iteration so the
+// loop ALWAYS terminates -- even if CNTPCT is frozen or advancing far slower
+// than the reported CNTFRQ claims, in which case the wall-clock deadline would
+// never fire (#188 audit F1). Set far above the iteration count a 250 ms
+// native spin reaches (tens of millions on a fast core), so the wall-clock
+// deadline ALWAYS wins on a healthy counter and this only bounds a pathological
+// one. Also serves as the budget when no deadline can be computed (CNTFRQ == 0)
+// -- though timer_init(), run before any pull, extincts on CNTFRQ == 0, so the
+// live pull never observes that.
+#define RNG_VIRTIO_POLL_MAX (1u << 30)
 
 static spin_lock_t   g_random_lock = SPIN_LOCK_INIT;
 static struct chacha_ctx g_rng;            // BSS-zero until the first stir
@@ -72,6 +89,20 @@ static bool          g_rndr_available;     // FEAT_RNG present (atomic: set at i
 // g_random_lock separately).
 static spin_lock_t   g_rng_dev_lock = SPIN_LOCK_INIT;
 static bool          g_rng_virtio_ok;      // a virtio-rng pull has ever succeeded
+
+// #188 diagnostic: which site the most recent virtio-rng pull resolved at,
+// + the used-ring poll iteration count reached. Set on every pull (success
+// and each failure path); read by the boot reporter via kern_random_pull_diag.
+// ADVISORY/best-effort -- never a control-flow input. The only consumer is
+// the single-CPU pre-smp boot reporter (main.c), right after the boot pull
+// (program order -> a consistent snapshot of its OWN pull); a post-boot
+// threshold reseed on another CPU may overwrite it but nothing reads it
+// there. The two fields are NOT written as an atomic pair (spin under
+// g_rng_dev_lock, reason partly after the unlock), so a hypothetical future
+// cross-CPU reader could observe a torn (reason,spin) -- purely cosmetic; such
+// a reader would need both fields written under the lock first (#188 audit F3).
+static const char   *g_rng_pull_reason = "ok";
+static volatile u64  g_rng_pull_spin;
 
 // =============================================================================
 // Low-level entropy sources.
@@ -92,6 +123,24 @@ static u64 read_cntpct(void) {
     u64 v;
     __asm__ __volatile__("mrs %0, cntpct_el0" : "=r"(v));
     return v;
+}
+
+// Counter frequency (Hz), as programmed by firmware. 0 means unprogrammed
+// -- the caller falls back to the fixed-iteration poll cap.
+static u64 read_cntfrq(void) {
+    u64 v;
+    __asm__ __volatile__("mrs %0, cntfrq_el0" : "=r"(v));
+    return v;
+}
+
+// Convert the wall-clock virtio-rng poll budget to CNTPCT ticks. freq==0
+// (CNTFRQ unprogrammed) returns 0 -- then the poll has no deadline and the
+// unconditional RNG_VIRTIO_POLL_MAX iteration backstop bounds it. Exposed for
+// the unit test. NB: timer_init() (run before any pull) extincts on CNTFRQ==0,
+// so the live pull never observes freq==0 -- this leg is defensive (it covers
+// the unit test + any hypothetical caller ordered before timer_init).
+u64 kern_random_virtio_deadline_ticks(u64 freq) {
+    return freq ? (freq / 1000u) * RNG_VIRTIO_POLL_MS : 0;
 }
 
 // ID_AA64ISAR0_EL1.RNDR is bits[63:60]; >= 1 means RNDR/RNDRRS present.
@@ -273,11 +322,12 @@ static size_t random_virtio_pull(u8 *out, size_t want) {
     spin_lock(&g_rng_dev_lock);
 
     struct virtio_mmio_dev *dev = virtio_mmio_find_by_device_id(VIRTIO_DEVICE_ID_RNG);
-    if (!dev) { spin_unlock(&g_rng_dev_lock); return 0; }
+    if (!dev) { g_rng_pull_reason = "no-device"; spin_unlock(&g_rng_dev_lock); return 0; }
 
     // VIRTIO 1.2 §3.1.1 steps 1-6 (reset -> ACK -> DRIVER -> features ->
     // FEATURES_OK). virtio-rng negotiates no required features (mask 0).
     if (!virtio_negotiate_features(dev, 0)) {
+        g_rng_pull_reason = "negotiate-failed";
         virtio_reset(dev);
         spin_unlock(&g_rng_dev_lock);
         return 0;
@@ -285,6 +335,7 @@ static size_t random_virtio_pull(u8 *out, size_t want) {
 
     struct virtio_virtqueue *vq = virtio_virtqueue_create(dev, 0);
     if (!vq) {
+        g_rng_pull_reason = "vq-create-failed";
         virtio_reset(dev);
         spin_unlock(&g_rng_dev_lock);
         return 0;
@@ -296,6 +347,7 @@ static size_t random_virtio_pull(u8 *out, size_t want) {
 
     struct page *pg = alloc_pages(0, KP_ZERO);
     if (!pg) {
+        g_rng_pull_reason = "alloc-failed";
         virtio_virtqueue_destroy(vq);
         virtio_reset(dev);
         spin_unlock(&g_rng_dev_lock);
@@ -320,8 +372,20 @@ static size_t random_virtio_pull(u8 *out, size_t want) {
 
     virtio_vq_notify(vq);
 
+    // Poll the used ring on a WALL-CLOCK budget (#188): RNG_VIRTIO_POLL_MS via a
+    // CNTPCT deadline, with `spin < RNG_VIRTIO_POLL_MAX` an UNCONDITIONAL
+    // termination backstop (audit F1 -- a frozen/misconfigured counter, where
+    // the deadline would never fire, must not hang the loop). The
+    // `read_cntpct() - start` delta is wraparound-safe (the counter is >=56
+    // bits; 250 ms at any plausible CNTFRQ is far below a wrap) and a BACKWARD
+    // CNTPCT jump fails SAFE (a huge unsigned delta -> early timeout -> the
+    // caller re-arms, never a hang).
+    u64 freq           = read_cntfrq();
+    u64 deadline_ticks = kern_random_virtio_deadline_ticks(freq);
+    u64 start          = read_cntpct();
     size_t got = 0;
-    for (u64 spin = 0; spin < RNG_VIRTIO_POLL_MAX; spin++) {
+    u64 spin = 0;
+    for (; spin < RNG_VIRTIO_POLL_MAX; spin++) {
         if (vq->used->idx != 0) {
             // Order the used-ring observation before the buffer read.
             __asm__ __volatile__("dsb sy" ::: "memory");
@@ -331,8 +395,10 @@ static size_t random_virtio_pull(u8 *out, size_t want) {
             got = wrote;
             break;
         }
+        if (deadline_ticks && (read_cntpct() - start >= deadline_ticks)) break;
         __asm__ __volatile__("yield" ::: "memory");
     }
+    g_rng_pull_spin = spin;
 
     // Reset the device (full halt) BEFORE freeing any ring or buffer page.
     // virtio_virtqueue_destroy frees the ring pages, so reset must precede
@@ -345,20 +411,26 @@ static size_t random_virtio_pull(u8 *out, size_t want) {
 
     spin_unlock(&g_rng_dev_lock);
 
+    if (got == 0) { g_rng_pull_reason = "poll-timeout"; return 0; }
+
     // An all-zero pull is a coherency-miss / dead-device signal, not
     // entropy -- reject it so a non-coherent transport fails SAFE (the
     // CSPRNG keeps its prior seed) rather than silently mixing zero. This
     // is a guard, not a live path: virtio-rng is a QEMU-only, dma-coherent
     // device (the `dsb` ordering above suffices there); bare-metal entropy
     // is the BCM2711 HW RNG register read (no DMA) -- W4.
-    if (got) {
-        u8 acc = 0;
-        for (size_t i = 0; i < got; i++) acc |= out[i];
-        if (acc == 0) got = 0;
-    }
+    u8 acc = 0;
+    for (size_t i = 0; i < got; i++) acc |= out[i];
+    if (acc == 0) { g_rng_pull_reason = "all-zero-coherency-miss"; return 0; }
 
-    if (got) __atomic_store_n(&g_rng_virtio_ok, true, __ATOMIC_RELEASE);
+    g_rng_pull_reason = "ok";
+    __atomic_store_n(&g_rng_virtio_ok, true, __ATOMIC_RELEASE);
     return got;
+}
+
+const char *kern_random_pull_diag(u64 *spin_out) {
+    if (spin_out) *spin_out = g_rng_pull_spin;
+    return g_rng_pull_reason;
 }
 
 // Strong reseed: pull virtio-rng entropy (the real source) + a fresh
@@ -366,9 +438,23 @@ static size_t random_virtio_pull(u8 *out, size_t want) {
 // g_random_lock; the absorb takes it. A successful virtio pull marks the
 // pool seeded even on a target with no DTB seed and no RNDR. Returns the
 // virtio byte count (0 if the device was unavailable).
-static size_t random_reseed_strong(void) {
+//
+// `pull_tries` bounds the virtio re-arm retry (#188). The BOOT reseed passes
+// RNG_VIRTIO_PULL_TRIES because its failure leaves the pool unseeded -> the
+// whole CSPRNG fails closed; the per-1MiB THRESHOLD reseed passes 1 because a
+// miss there falls back to a cheap stir (the pool keeps serving), so it must
+// not stall a kern_random_bytes caller on a (theoretically) wedged device.
+static size_t random_reseed_strong(int pull_tries) {
     u8 vbuf[RNG_SEEDSZ];
-    size_t vn = random_virtio_pull(vbuf, sizeof(vbuf));
+    // The device is best-effort but, when present, deterministically
+    // functional -- a single attempt can still miss the async completion
+    // under host contention (#188). Retry the full pull (each attempt fully
+    // re-arms the device + carries its own wall-clock deadline); a no-device
+    // target returns 0 immediately every attempt, so this stays bounded.
+    size_t vn = 0;
+    for (int t = 0; t < pull_tries && vn == 0; t++) {
+        vn = random_virtio_pull(vbuf, sizeof(vbuf));
+    }
 
     u8 cbuf[RNG_SEEDSZ];
     bool cheap_unobserved = false;
@@ -387,7 +473,7 @@ static size_t random_reseed_strong(void) {
 }
 
 size_t random_seed_from_virtio(void) {
-    return random_reseed_strong();
+    return random_reseed_strong(RNG_VIRTIO_PULL_TRIES);
 }
 
 bool kern_random_virtio_contributed(void) {
@@ -414,7 +500,9 @@ long kern_random_bytes(void *buf, long n) {
     spin_lock(&g_random_lock);
     want_reseed = (g_rng_count <= (u64)n);
     spin_unlock(&g_random_lock);
-    if (want_reseed) random_reseed_strong();
+    // Single attempt on the threshold path: a miss falls through to the cheap
+    // stir below (the pool keeps serving), so it must not retry-stall here.
+    if (want_reseed) random_reseed_strong(1);
 
     spin_lock(&g_random_lock);
     // If the strong reseed was skipped or the device was unavailable and

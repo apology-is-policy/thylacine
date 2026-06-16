@@ -52,4 +52,21 @@ size_t random_seed_from_virtio(void);
 // True iff a virtio-rng pull has ever contributed entropy to the pool.
 bool kern_random_virtio_contributed(void);
 
+// Diagnostic: the outcome of the most recent virtio-rng pull. Returns a
+// short reason string ("ok" / "no-device" / "negotiate-failed" /
+// "vq-create-failed" / "alloc-failed" / "poll-timeout" /
+// "all-zero-coherency-miss") and, via *spin_out, the used-ring poll
+// iteration count reached. Lets the boot path report WHICH site a failed
+// pull hit instead of the historically-misleading "no RNG device" (the
+// device is usually present; a transient async-completion miss is the
+// real failure mode -- #188).
+const char *kern_random_pull_diag(u64 *spin_out);
+
+// Convert the wall-clock virtio-rng poll budget to CNTPCT ticks for the
+// given counter frequency. freq == 0 (CNTFRQ unprogrammed) returns 0 -- the
+// poll then has no deadline and the unconditional RNG_VIRTIO_POLL_MAX
+// iteration backstop bounds it. Exposed for the unit test (#188); the live
+// pull never observes freq == 0 because timer_init() extincts on CNTFRQ == 0.
+u64 kern_random_virtio_deadline_ticks(u64 freq);
+
 #endif // THYLACINE_RANDOM_H

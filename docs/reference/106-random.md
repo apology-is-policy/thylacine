@@ -79,8 +79,28 @@ caller to do a real virtqueue data transfer. Steps (VIRTIO 1.2 §3.1.1):
 4. Alloc one `KP_ZERO` page; descriptor 0 = `{addr=pa, len=want,
    flags=VRING_DESC_F_WRITE}`; publish into the avail ring (`ring[0]=0`, `dsb`,
    `idx++`, `dsb`); `virtio_vq_notify`.
-5. Bounded-poll `used->idx != 0` (cap `RNG_VIRTIO_POLL_MAX = 1<<22`); on
-   completion `dsb`, copy `min(used.len, want)` bytes out.
+5. Wall-clock-bounded poll `used->idx != 0` (a `RNG_VIRTIO_POLL_MS = 250` ms
+   CNTPCT deadline -- `kern_random_virtio_deadline_ticks(read_cntfrq())`; with
+   `spin < RNG_VIRTIO_POLL_MAX = 1<<30` an **unconditional** termination
+   backstop -- audit F1 -- so a frozen/misconfigured counter, where the deadline
+   would never fire, cannot hang the loop; set far above the iters a 250 ms
+   native spin reaches, so the deadline always wins on a healthy counter); on
+   completion `dsb`, copy `min(used.len, want)`
+   bytes out. The budget is REAL TIME, not an iteration count: under HVF the
+   boot vCPU spins **natively** (a normal success polls only ~tens of
+   thousands of iters in sub-ms -- observed 3 to 82k) while QEMU delivers the
+   entropy via a bottom-half on a **separate host thread**, so a
+   CPU-speed-dependent count could expire before the async completion landed
+   under host contention (#188: ~1/N smp8 boots missed the boot pull ->
+   `g_rng_seeded` stayed false -> the whole CSPRNG failed closed -> the 6
+   fail-closed random tests + `EXTINCTION: kernel test suite failed`).
+   `random_reseed_strong` additionally retries the whole pull (a fresh
+   re-arm, each with its own deadline) up to `RNG_VIRTIO_PULL_TRIES = 3`
+   times on a 0 return -- the device is proven functional, so a transient
+   completion miss recovers. The boot reporter (`main.c`) prints the precise
+   outcome (`reseed OK (N bytes mixed, polled S iters)` / `FAILED: <site>
+   (polled S iters)`) via `kern_random_pull_diag` -- the historic
+   "unavailable (no RNG device)" text was misleading (the device is present).
 6. **All-zero guard**: if the copied bytes are all zero, treat as failure
    (`got = 0`) — a coherency miss or a dead device must not pass as entropy.
 7. Stop the device fully — `virtio_reset(dev)` **then** `virtio_virtqueue_destroy(vq)`
@@ -150,5 +170,15 @@ cadence). 721/721 kernel tests; 0 EXTINCTION. Audit: see
 - **Reseed latency**: a single consumer pulling > 1 MiB triggers a virtio device
   round-trip (a few µs, bounded, non-blocking) from syscall context every 1 MiB.
   corvus/login draw far less and never hit it.
+- **Wedged-present virtio-rng cost** (#188 audit F4): on the (anomalous) host
+  where the rng device is present but never completes, the threshold reseed
+  (`SYS_GETRANDOM` over the 1 MiB cadence) polls the full `RNG_VIRTIO_POLL_MS`
+  (250 ms) once, then falls through to a cheap stir -- so the worst case is
+  **≤ 250 ms per ~1 MiB** of getrandom output, amortized, while holding
+  `g_rng_dev_lock` (a second over-threshold caller waits on that lock). Bounded
+  and non-compounding; the boot pull may take up to `RNG_VIRTIO_PULL_TRIES ×
+  250 ms` but only on a genuinely-wedged device (the healthy case returns in
+  sub-ms). A wedged-from-boot device fails the boot pull and the system runs
+  fail-closed (`kern_random_bytes -> -1`), which is the intended safe posture.
 - **`g_random_lock` is process-context only** — no IRQ-context caller takes it
   (it would self-deadlock against a preempted holder; none exists today).

@@ -332,11 +332,15 @@ stir source, not the gate. As-built:
 - **The kernel virtio-rng driver** (`random_virtio_pull`): the first kernel
   consumer of the P4-F virtio substrate to do a real virtqueue transfer (find
   device-id RNG, negotiate features=0, create queue 0, DRIVER_OK, submit one
-  device-writable descriptor, notify, bounded-poll the used ring, copy, then
-  reset + destroy to dormant). Serialized by `g_rng_dev_lock`, run OUTSIDE the
-  chacha lock. An **all-zero pull is rejected** (treated as a coherency/failure
-  signal -> the pool keeps its prior DTB seed), so a non-coherent DMA transport
-  fails *safe* (weaker-but-seeded), never silently to zero entropy.
+  device-writable descriptor, notify, **wall-clock-bounded-poll** the used ring
+  (a `RNG_VIRTIO_POLL_MS = 250` ms CNTPCT deadline -- NOT a fixed iteration
+  count, since under HVF the native vCPU spin can outrun QEMU's bottom-half
+  entropy delivery on a separate host thread; #188), copy, then reset + destroy
+  to dormant). `random_reseed_strong` retries the whole pull up to 3 times on a
+  transient miss. Serialized by `g_rng_dev_lock`, run OUTSIDE the chacha lock.
+  An **all-zero pull is rejected** (treated as a coherency/failure signal ->
+  the pool keeps its prior DTB seed), so a non-coherent DMA transport fails
+  *safe* (weaker-but-seeded), never silently to zero entropy.
 - **I-5**: the kernel now drives the virtio-rng MMIO slot transiently
   (reset-to-dormant between pulls). It is not page-reserved -- the slot shares a
   4 KiB page with up to 7 sibling slots userspace drives -- so it inherits the
@@ -351,9 +355,11 @@ cache-invalidate; until then the all-zero guard makes a coherency miss fail safe
 rather than silently weak.
 
 **Validation**: default (TCG) 721/721 + UBSan 721/721 (+ `chacha20.block_vector`
-against the RFC vector + `kern_random.virtio_reseed` driving the device); boot
-log shows `random: virtio-rng reseed OK (40 bytes mixed)`; the SMP soundness gate
-(default + UBSan x smp4/smp8) clean / 0 corruption; 0 EXTINCTION. **HVF**: the
+against the RFC vector + `kern_random.virtio_reseed` driving the device +
+`kern_random.virtio_deadline_ticks` pinning the #188 wall-clock-deadline math);
+boot log shows `random: virtio-rng reseed OK (40 bytes mixed, polled N iters)`;
+the SMP soundness gate (default + UBSan x smp4/smp8) clean / 0 corruption; 0
+EXTINCTION. **HVF**: the
 kernel virtio-rng pull is confirmed working under HVF on M-series (`primed...
 awaiting` -> `reseed OK`, since `-cpu host` has no RNDR) and every kernel virtio
 test passes; the full-green HVF boot is gated only by the pre-existing #890
