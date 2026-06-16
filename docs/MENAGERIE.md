@@ -91,11 +91,17 @@ set of **discovery sources**:
    ( devmgr  )  -> spawn the driver Proc -> driver serves /dev/net/0 into the namespace
 ```
 
-A `node` carries: the `compatible` strings, the `reg` MMIO window(s) (PA + size),
-the interrupt(s) (wired INTID + trigger, or an MSI capability), the parent-bus
-path, and a bus-specific identity (PCIe `vid:did`, USB `vid:pid`, the DTB
-phandle). The warden consumes the stream and never distinguishes static from
-dynamic: the DTB source fires *all* its events at boot; USB fires them as you plug.
+A `node` carries: an ordered list of **match identities** (most-specific first —
+`compatible` strings for DTB nodes; a bus identity like a PCIe `vid:did`, a USB
+`vid:pid`, or a virtio device-id for bus-enumerated nodes), the `reg` MMIO
+window(s) (PA + size), the interrupt(s) (wired INTID + trigger, or an MSI
+capability), and the parent-bus path. **The warden binds on the identity, not the
+transport, and never reads a device register itself.** So a bus whose device type
+is only knowable at runtime — a virtio-mmio slot's `DeviceID`, a PCIe function's
+class — is enumerated by *its source*, which claims the raw transport nodes and
+re-emits **typed** child nodes the warden binds by id. The warden consumes the
+stream and never distinguishes static from dynamic: the DTB source fires *all* its
+events at boot; USB fires them as you plug.
 
 **The model is naturally recursive: a bound bus driver *becomes* a discovery
 source.** Bind the PCIe host bridge → it enumerates → emits RP1 → bind the RP1
@@ -247,6 +253,22 @@ source, the kernel-exported bootstrap root.
   is a modest real addition, not "merely re-export an existing call." The data is
   all present; the surface is new. Every other source lives in userspace, keeping
   the TCB minimal.
+- **virtio-mmio source (QEMU-virt's bus enumerator)**: the first concrete
+  userspace source, and the template every self-enumerating-bus source follows.
+  QEMU's virt machine exposes ~32 *identical* `virtio,mmio` transport slots whose
+  DTB nodes (all `compatible = "virtio,mmio"`) cannot say which device sits in
+  which slot — only each slot's runtime `DeviceID` register can. The source is
+  granted *only* the virtio-mmio bank (one MMIO window; **no IRQ** — it reads, it
+  does not service), reads each slot's `DeviceID`, **suppresses** the raw
+  `virtio,mmio` transport nodes, and re-emits one **typed** `virtio:<device-id>`
+  node per *populated* slot carrying that slot's exact `reg` + wired INTID. The
+  warden then binds `netdev` to the `virtio:1` node, granting exactly that slot's
+  window + IRQ — the tightest possible allowance, with the warden never touching a
+  device register. This is *why* the whole loop proves out on QEMU with zero
+  real-hardware risk: virtio-mmio is the stand-in for the PCIe/USB sources, which
+  enumerate the identical way (config-space class / USB descriptor → typed node).
+  On real boards there is no virtio-mmio source — its slot in the architecture is
+  the PCIe source.
 - **PCIe source**: the brcmstb host-bridge driver. Scans config space, emits a node
   per function, and **owns MSI routing** (controller-specific on Broadcom — not a
   generic GIC ITS; §12). On RPi5 this is the spine — RP1 and everything behind it
@@ -459,17 +481,27 @@ with the bestiary.
 5. **`libdriver`** — the probe/bind/serve framework crate + the manifest schema.
 6. The **warden** — bind DB, the match→allowance→spawn→serve engine, deferred
    probe, supervision.
-7. The userspace discovery sources (PCIe, USB, ... as drivers).
-8. Retrofit `netdev` to *discover* its base (retire `virtio.rs:51`) once `devhw`
-   lands.
+7. **The discovery-source layer** — the `DiscoverySource` / `DeviceNode`
+   abstraction (libdriver) + the **virtio-mmio source** (the QEMU-virt bus
+   enumerator, §7). This is the *proper* realization of §3's pluggable-source model
+   and the warden's true discovery surface; 5c's static DTB-walk is just the
+   `DtbSource`'s first form. **Pulled forward into the QEMU-virt proof** (resequenced
+   2026-06-16): the DTB is type-blind to a virtio-mmio slot's device, so binding the
+   existing virtio drivers *correctly* requires the source layer now — not a
+   warden-side DeviceID hack deferred to "later." The PCIe/USB sources are then the
+   same abstraction, one slot each, added with the real-hardware track.
+8. Retrofit `netdev` to a grant-driven `impl Driver` the warden binds by `virtio:1`
+   through the source layer (retire `virtio.rs:51` + the bank-probe loop).
 
 **Order**: `devhw` + the allowance are the gate; with them, `libdriver` + the
-warden + the DTB-source path can bind the existing virtio drivers on QEMU virt
-(proving the whole loop with zero real-hardware risk) before the PCIe/USB sources +
-the RPi drivers arrive. **net-2 lands after the Menagerie spine, so `netd` is born
-discovery-driven and narrowed to just its NIC** (rather than holding coarse
-`CAP_HW_CREATE` + a hardcoded base, then being retrofitted) — the sequencing
-rationale ratified 2026-06-15.
+warden realize the **§3 discovery-source layer** (the source abstraction + the
+`DtbSource` + the virtio-mmio source) and bind the existing virtio drivers on QEMU
+virt **by typed id** (proving the whole loop with zero real-hardware risk) before
+the PCIe/USB sources + the RPi drivers arrive. **net-2 lands after the Menagerie
+spine, so `netd` is born discovery-driven and narrowed to just its NIC** (rather
+than holding coarse `CAP_HW_CREATE` + a hardcoded base, then being retrofitted) —
+the sequencing rationale ratified 2026-06-15; the discovery-source-layer
+pull-forward ratified 2026-06-16.
 
 ---
 
@@ -484,9 +516,16 @@ Scripture-first, model-first for the allowance:
    create-handler checks; **model-first** (a `specs/allowance.tla` extending the
    I-25 scope model), audit-bearing.
 4. **The Loom device-gone terminal CQE** (§10).
-5. The warden + `libdriver` + the DTB-source path bind the existing virtio drivers
-   on QEMU virt — the whole loop proven with zero real-hardware risk.
-6. The PCIe/USB sources + the RPi driver set + the real-hardware bring-up.
+5. The warden + `libdriver` realize the **§3 discovery-source layer** — the
+   `DiscoverySource` / `DeviceNode` abstraction, the `DtbSource` (5c's DTB-walk
+   refactored), and the **virtio-mmio source** (the bus enumerator that re-emits
+   typed `virtio:<id>` nodes) — and bind the existing virtio drivers on QEMU virt
+   **by typed id**, the whole loop proven with zero real-hardware risk. (Resequenced
+   2026-06-16: the source layer is built *here*, as the proper form of discovery,
+   not deferred — the DTB cannot identify a virtio-mmio device, so a correct bind
+   needs the source.)
+6. The PCIe/USB sources + the RPi driver set + the real-hardware bring-up — each
+   PCIe/USB source is *the same `DiscoverySource` abstraction*, one per bus.
 
 ---
 
@@ -766,3 +805,26 @@ early-console `chosen/stdout-path` selection is kernel.
   **Next**: 5d -- retrofit `usr/lib/netdev` to be a spawnable `impl Driver` the
   warden binds NARROWED (the live I-34 exercise; retires `virtio.rs:51`'s
   hardcoded base).
+- **2026-06-16 (the discovery-source layer pulled forward; build-sequence
+  resequence -- design decision, no code)**: the proper realization of §3 promoted
+  into step 5. 5c's warden does *static DTB-walk* discovery; binding the QEMU-virt
+  virtio-net device exposed that the DTB is **type-blind** to a virtio-mmio slot's
+  device (all ~32 slots are `compatible = "virtio,mmio"`; only the runtime
+  `DeviceID` register identifies the net device). Rather than hack the
+  type-blindness into the warden (read `DeviceID` in the TCB, or spray ~32
+  self-selecting driver spawns), the proper fix is to build §3's pluggable-source
+  layer *now* (the depth-first dependency: build the foundation, don't hack the
+  parent around its absence; user-directed 2026-06-16, "pull it forward without
+  hesitation"). The resequenced **5d** is the **discovery-source layer**: **(5d-1)**
+  the `DiscoverySource` / `DeviceNode` / typed-`DeviceId` abstraction in `libdriver`
+  + the `DtbSource` refactor + bind-by-id; **(5d-2)** the **virtio-mmio source** as
+  a *separate, capability-sandboxed Proc* (granted only the bank, reads `DeviceID`,
+  re-emits typed `virtio:<id>` nodes to the warden over a pipe -- so the warden
+  stays **hardware-free** and the `DeviceID`-poke is isolated in a single-purpose
+  enumerator); **(5d-3)** `netdev` -> a grant-driven `impl Driver` the warden binds
+  by `virtio:1` (retire `virtio.rs:51` + the bank-probe loop); **(5d-4)** the
+  composed focused audit (the source-trust boundary joins §25.4) + close.
+  **Foundational, not throwaway**: the source-Proc + reporting-channel
+  infrastructure is exactly what the PCIe/USB sources (step 6) reuse, and net-2's
+  `netd` is then born discovery-driven. §3/§5/§7/§15/§16 + ARCH §22.7 updated to
+  match. **Next**: 5d-1.

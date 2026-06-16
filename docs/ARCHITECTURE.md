@@ -3400,10 +3400,13 @@ The model: pluggable **discovery sources** (DTB / PCIe / USB / SDIO-MMC /
 overlay-EEPROM) reduce all hardware — static on-die fabric and self-enumerating
 buses alike — to one stream of `{ DeviceAdded(node) | DeviceRemoved(node) }`. A
 single trusted broker, the **warden** (a native `libthyla-rs` Proc in the TCB,
-spawned by joey), matches each node's `compatible` against a bind DB, computes a
-**narrowed hardware allowance** (the node's resources ∩ the driver manifest's
-declared needs), and spawns the driver as an isolated, capability-sandboxed
-userspace Proc that serves a file into the namespace. The model is recursive — a
+spawned by joey), matches each node's **identity** (the `compatible` strings for
+DTB nodes, or a bus identity — e.g. a virtio device-id, a PCIe `vid:did` — for
+bus-enumerated nodes; a bus source reads the runtime identity and re-emits **typed**
+child nodes, so the warden binds by id and never reads a device register itself)
+against a bind DB, computes a **narrowed hardware allowance** (the node's
+resources ∩ the driver manifest's declared needs), and spawns the driver as an
+isolated, capability-sandboxed userspace Proc that serves a file into the namespace. The model is recursive — a
 bound bus driver *becomes* a discovery source — so the entire RPi5 bring-up (RP1
 behind PCIe) falls out of "a driver can be a source." Deferred probe is
 wait-on-a-file in the namespace; teardown (`DeviceRemoved` / crash) is the I-25
