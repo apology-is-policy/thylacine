@@ -1,11 +1,14 @@
 # 118 - libdriver: the Menagerie driver framework crate
 
-**Status**: as-built through Menagerie build-sequence step 5d-1 (2026-06-16). Pure
+**Status**: as-built through Menagerie build-sequence step 5d-4 (2026-06-16). Pure
 userspace; no kernel ABI. The first consumer is the warden (step 5c); step 5d-1
 added the **discovery-source layer** (`source`): the typed `DeviceId` / `DeviceNode`,
 the `DiscoverySource` trait, the `DtbSource`, the source -> warden node-record
 codec, and bind-by-id (`best_match` over typed identities). The first real
-`impl Driver` is the netdev retrofit (step 5d-3).
+`impl Driver` is the netdev retrofit (step 5d-3). Step 5d-4 (the focused audit)
+added the trust-boundary enforcement `reconcile_reported_node` (the warden
+constrains a source's reported resources to its own trusted view) + the `MAX_IDS`
+record bound.
 
 Crate: `usr/lib/libdriver` (native `libthyla-rs`, `no_std` + `alloc`). Design:
 `docs/MENAGERIE.md` §6 (anatomy of a driver + the manifest), §4 (the hardware
@@ -197,6 +200,8 @@ impl DeviceId {
     pub fn matches_bind(&self, bind: &str) -> bool;
 }
 
+pub const MAX_IDS: usize = 16;   // a node record's id-list bound (trust boundary)
+
 pub struct DeviceNode { pub label: String, pub ids: Vec<DeviceId>, pub resources: NodeResources }
 impl DeviceNode {
     pub fn from_compatible(label: &str, resources: NodeResources) -> DeviceNode;
@@ -206,6 +211,13 @@ impl DeviceNode {
 
 pub trait DiscoverySource { fn enumerate(&mut self) -> Vec<DeviceNode>; }
 pub fn best_match(db: &[Manifest], node: &DeviceNode) -> Option<usize>; // most-specific id wins
+
+/// Constrain a source-reported node to the warden's trusted device view: match it
+/// to a trusted slot by reg base + rebuild its resources from that slot. The
+/// discovery-source trust boundary ENFORCED -- a non-TCB source supplies identity,
+/// the warden supplies resources, so a source can mis-identify (caught downstream)
+/// but never fabricate a reg/INTID. None if the reported node names no trusted slot.
+pub fn reconcile_reported_node(reported: &DeviceNode, trusted: &[DeviceNode]) -> Option<DeviceNode>;
 
 #[cfg(feature = "driver")]
 pub struct DtbSource { /* enumerate /hw -> Compatible nodes */ }
@@ -219,11 +231,23 @@ an unrecognized `bus:` prefix stays `Compatible` (fail-closed forward-compat).
 The **node record** is the source -> warden wire form
 (`v1;label=..;id=virtio:1;reg=base:size,..;intid=hex,..`), used when a source runs
 as a separate Proc (the virtio-mmio source, step 5d-2) and reports nodes over a
-pipe. `parse_record` is strict + bounds the resource counts to the allowance caps
-(`MAX_MMIO` / `MAX_IRQ`) -- the discovery-source trust boundary, so a hostile or
-buggy source cannot make the warden over-allocate or mis-grant. `DtbSource` runs
-*in-process* in the warden, so its `Compatible` nodes (which carry commas) never
-cross the record channel; the encoder rejects a comma/`;` in an id, fail-closed.
+pipe. `parse_record` is strict + bounds every list -- the resource counts to the
+allowance caps (`MAX_MMIO` / `MAX_IRQ`) and the id list to `MAX_IDS` -- the
+discovery-source trust boundary, so a hostile or buggy source cannot make the
+warden over-allocate. `DtbSource` runs *in-process* in the warden, so its
+`Compatible` nodes (which carry commas) never cross the record channel; the encoder
+rejects a comma/`;` in an id, fail-closed.
+
+Parsing a record is not the same as trusting it. `reconcile_reported_node` (step
+5d-4) is the warden's **enforced** containment: the warden matches each reported
+node to a slot in its OWN trusted DTB view (by reg base) and rebuilds the node's
+reg/INTID from that trusted slot -- so a source supplies only the device IDENTITY
+(its DeviceID -> a typed `Virtio(n)`), never the resources. A compromised source
+can at most mis-identify a real slot (the driver's own device re-validation catches
+a wrong device) or name a non-existent slot (rejected, `None`); it can never
+fabricate a reg/INTID to inflate a peer driver's conferred allowance. This
+generalizes to the recursive PCIe/USB sources, where the parent's granted slot
+table is always the containment bound.
 
 ### `driver` (feature `driver`)
 
@@ -366,7 +390,7 @@ page-map exceeds the slot window and the gate, correctly, rejects it.)
 
 ## Tests
 
-37 host tests (`cargo test -p libdriver --no-default-features --target <host>`):
+41 host tests (`cargo test -p libdriver --no-default-features --target <host>`):
 
 - **manifest** (7): parse the §6 example; `to_text` round-trip; wired-IRQ +
   no-DMA; defaults when optional fields absent; the size-unit parser
@@ -387,13 +411,17 @@ page-map exceeds the slot window and the gate, correctly, rejects it.)
   double-NUL tolerance; `reg` decode in 2/2 cells (the real pl061 + virtio bytes)
   and 1/1 cells + multi-entry + trailing-partial ignore; `interrupts` SPI -> +32
   and PPI -> +16 with unknown-type skip; `from_dtb` building the full pl061 node.
-- **source** (9): `DeviceId` parse + `as_string` (typed `virtio:N` + the
+- **source** (13): `DeviceId` parse + `as_string` (typed `virtio:N` + the
   out-of-range / literal-compatible fallback); `matches_bind` (typed vs literal,
   and a raw `virtio,mmio` transport node never matching a `virtio:1` bind); the
   node-record round-trip (virtio + empty axes) + strict rejection (bad version,
   no id, duplicate key, bad number, unknown key) + the resource-count bound + the
-  delimiter-in-label guard; `best_match` (most-specific id wins, typed binds,
-  unbound id -> None).
+  id-count bound (`MAX_IDS`) + the delimiter-in-label guard; `best_match`
+  (most-specific id wins, typed binds, unbound id -> None); `reconcile_reported_node`
+  (5d-4 trust boundary -- an honest node keeps its identity + takes the trusted
+  reg/INTID; a fabricated address -> `None`; the security-proving case: a reported
+  REAL slot with an inflated window + lying INTID is reconciled to the TRUSTED
+  reg/INTID, so the source cannot inflate the conferred allowance).
 
 The device layer (`driver`) is proven to compile by the whole-workspace device
 build + `example::nop_entry`, which instantiates `run::<NopDriver>` so the entire

@@ -69,10 +69,20 @@ virtio-mmio bank (`bank_window` = the page-aligned union of the slots' `reg`; on
 MMIO window, no IRQ). The source maps the bank, reads each slot's `DeviceID`, and
 writes one typed `DeviceNode::to_record` line per *populated* slot to its stdout --
 a **pipe** the warden reads (`Stdio::Piped` -> `child.stdout`). The warden reads to
-EOF (`read_to_end`) then reaps, and `DeviceNode::parse_record`s each line; the
-parse is strict + bounds the resource counts (the **discovery-source trust
-boundary**). The source releases the bank before exiting, so the warden can later
-grant an individual slot to a driver (the exclusive MMIO claim must be free).
+EOF then reaps, and `DeviceNode::parse_record`s each line; the read is **bounded**
+(`slurp_capped`, 64 KiB -- a runaway/hostile source cannot OOM the warden, the TCB)
+and the parse is strict + count-bounded.
+
+The source is **non-TCB**, so the warden does not trust what it reports. It uses
+the source only for the slot IDENTITY and reconciles each reported node against its
+OWN trusted DTB view (`reconcile_reported_node`): match the reported node to a
+trusted slot by reg base, then rebuild its reg/INTID from that trusted slot. So a
+compromised source can at most mis-identify a real slot (the driver's device
+re-validation catches a wrong device) or name a non-existent slot (rejected) -- it
+can **never** fabricate a reg/INTID to inflate a driver's conferred allowance (the
+5d-4 trust-boundary fix; the I-34 "grant exactly that slot" property is enforced,
+not merely trusted). The source releases the bank before exiting, so the warden can
+later grant an individual slot to a driver (the exclusive MMIO claim must be free).
 
 This realizes the §3 "the warden never reads a device register" property: the
 `DeviceID`-poke is isolated in the sandboxed source, and the warden binds the

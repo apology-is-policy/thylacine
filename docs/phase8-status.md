@@ -112,10 +112,35 @@ to be retrofitted later. The full per-chunk status (SHAs, tests, audits) lives i
   Proc has no stdio fds → the warden gives each driver `/dev/null` for the 3 slots
   (Command's default `Stdio::Inherit` bumps the parent's fd 0/1/2, which fails
   pre-resolution).
-- **5d** retrofit `netdev` to discover its base (the live narrowed-allowance
-  proof; retires `virtio.rs:51`) → **5e** `DeviceRemoved` revoke+terminate +
-  supervision → **5f** the composed focused audit. **NEXT (5d).** Then step 6
-  (PCIe/USB sources + the per-(bus,dev,fn) PCI allowance axis #159).
+- **5d** the **discovery-source layer** — user-directed (2026-06-16) "pull it
+  forward without hesitation": the MENAGERIE §3 proper architecture, where the
+  warden binds by typed IDENTITY and **never reads a device register**; a sandboxed
+  bus-enumerator Proc does the DeviceID-poke (the type-blind DTB cannot tell which
+  of ~32 identical `virtio,mmio` slots holds the NIC). Kernel BYTE-UNCHANGED.
+  **5d-0** (`7d9d6f5`) scripture resequence (no code). **5d-1** (`8468c24`)
+  `libdriver::source` — typed `DeviceId`/`DeviceNode` + the source→warden
+  node-record codec (strict + bounded = the trust boundary) +
+  `DiscoverySource`/`best_match` + `DtbSource`. **5d-2** (`4b3bd07`+`8b7c686`)
+  `usr/virtio-mmio-source` — a separate Proc granted ONLY the bank; reads each
+  slot's DeviceID, pipes typed `virtio:<id>` records to the warden. **5d-3**
+  (`1264673`) netdev → grant-driven `open_slot` (retires `virtio.rs:51` + the
+  bank-probe) + `usr/netdev-driver` (`impl Driver`, the 24-ARP proof) bound by
+  `virtio:1`; retired `netdev-test`. Self-found at 5d-3: a sub-page slot grant is
+  unmappable (MMIO is page-granular) → `to_allowance` page-rounds each window.
+  **5d-4** (`<HASH>`) the **composed focused audit close** (Opus-4.8-max prosecutor
+  + concurrent self-audit, independently converged): **0 P0 / 1 P1 / 2 P2 / 2 P3,
+  all fixed/dispositioned**. F1 [P1] the warden conferred a source's reported
+  reg/INTID unchecked against the granted bank (a non-TCB source could inflate a
+  peer driver's allowance) → FIXED by `reconcile_reported_node` (the source supplies
+  IDENTITY, the warden supplies RESOURCES from its own trusted DTB view — enforced,
+  not trusted); F2/F3 [P2] unbounded id-list + `read_to_end` DoS → bounded
+  (`MAX_IDS` + `slurp_capped`); F5 [P3] source slot-read extent gate; F4 [P3] the
+  page-round co-residency over-grant is the documented #140/net-2 I-34-deviation (no
+  code). 41 libdriver host tests + boot `2 bound, 2 up` + `netdev-driver: PASS
+  24/24` + 0 EXTINCTION + the SMP gate. **LANDED** (`memory/audit_5d_closed_list.md`;
+  refs `118-libdriver.md` + `119-warden.md`). Then **5e** `DeviceRemoved`
+  revoke+terminate + supervision → step 6 (PCIe/USB sources + the per-(bus,dev,fn)
+  PCI allowance axis #159).
 
 ### the net arc (resumes on the PCI NIC, after the Menagerie spine)
 

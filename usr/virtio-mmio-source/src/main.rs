@@ -130,9 +130,14 @@ pub extern "C" fn rs_main() -> i64 {
         let Some((slot_pa, _)) = slot.resources.reg.first().copied() else {
             continue;
         };
-        // The slot must lie within the granted bank (defensive: a /hw node outside
-        // the granted window is skipped, never read).
-        if slot_pa < bank_pa || slot_pa >= bank_pa.saturating_add(bank_size) {
+        // The slot's whole read extent (through REG_DEVICE_ID + 4) must lie within
+        // the granted bank (defensive: a /hw node outside the granted window is
+        // skipped, never read). Gating on the base alone would let a slot in the
+        // last < 0xc bytes of the mapped region read past it -- not reachable with
+        // the page-rounded bank + 0x200-aligned slots, but the gate bounds the
+        // access, not just the base.
+        let read_end = slot_pa.saturating_add(REG_DEVICE_ID + 4);
+        if slot_pa < bank_pa || read_end > bank_pa.saturating_add(bank_size) {
             continue;
         }
         let slot_va = BANK_VA + (slot_pa - bank_pa);

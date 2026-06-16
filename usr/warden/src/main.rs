@@ -35,13 +35,14 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use libthyla_rs::fs::OpenOptions;
-use libthyla_rs::io::Read;
+use libthyla_rs::io::slurp_capped;
 use libthyla_rs::process::{Command, Stdio};
 use libthyla_rs::T_CAP_HW_CREATE;
 
 use libdriver::driver::to_allowance;
 use libdriver::{
-    best_match, resolve, BoundResources, DeviceId, DeviceNode, DiscoverySource, DtbSource, Manifest,
+    best_match, reconcile_reported_node, resolve, BoundResources, DeviceId, DeviceNode,
+    DiscoverySource, DtbSource, Manifest,
 };
 
 #[global_allocator]
@@ -132,7 +133,11 @@ pub extern "C" fn rs_main() -> i64 {
                     bank.1,
                     virtio_slots.len()
                 );
-                let typed = run_virtio_mmio_source(bank);
+                // The warden's OWN trusted view of the slots -- the source supplies
+                // identity, the warden supplies resources (reconcile_reported_node).
+                let trusted: Vec<DeviceNode> =
+                    virtio_slots.iter().map(|n| (*n).clone()).collect();
+                let typed = run_virtio_mmio_source(bank, &trusted);
                 say!(
                     "warden: virtio-mmio source reported {} typed node(s)",
                     typed.len()
@@ -220,12 +225,16 @@ fn bank_window(slots: &[&DeviceNode]) -> Option<(u64, u64)> {
 }
 
 /// Spawn the virtio-mmio bus source granted ONLY the bank, read its typed
-/// `DeviceNode` records off the pipe (to EOF), reap it, and return the typed
+/// `DeviceNode` records off the pipe (bounded, to EOF), reap it, reconcile each
+/// reported node against the warden's `trusted` DTB view, and return the typed
 /// nodes. The source -- not the warden -- reads the slot DeviceID registers, so
-/// the warden never touches a device register (MENAGERIE section 3). A source
-/// failure is non-fatal: the warden returns an empty set and binds whatever else
-/// it found.
-fn run_virtio_mmio_source(bank: (u64, u64)) -> Vec<DeviceNode> {
+/// the warden never touches a device register (MENAGERIE section 3); but the
+/// source is non-TCB, so the warden does NOT trust its reported resources: it uses
+/// the source only for the slot identity and rebuilds reg/INTID from its own
+/// trusted view (`reconcile_reported_node`), so a source can never fabricate a
+/// resource or inflate a driver's allowance. A source failure is non-fatal: the
+/// warden returns an empty set and binds whatever else it found.
+fn run_virtio_mmio_source(bank: (u64, u64), trusted: &[DeviceNode]) -> Vec<DeviceNode> {
     let mut out_nodes = Vec::new();
 
     // The source's grant: the bank MMIO window, no IRQ, no DMA. Both the kernel
@@ -270,12 +279,13 @@ fn run_virtio_mmio_source(bank: (u64, u64)) -> Vec<DeviceNode> {
     };
 
     // Read the records to EOF (the source closes stdout on exit) BEFORE reaping --
-    // read_to_end drains the pipe concurrently, so the small (<= ~32 records)
-    // output never deadlocks on a full pipe.
-    let mut buf = Vec::new();
-    if let Some(mut so) = child.stdout.take() {
-        let _ = so.read_to_end(&mut buf);
-    }
+    // the bounded read drains the pipe concurrently, so the small (<= ~32 records)
+    // output never deadlocks on a full pipe; the 64 KiB cap stops a runaway/hostile
+    // source from OOMing the warden (the TCB) -- the source is non-TCB.
+    let buf = match child.stdout.take() {
+        Some(mut so) => slurp_capped(&mut so, 64 * 1024).unwrap_or_default(),
+        None => Vec::new(),
+    };
     let _ = child.wait();
 
     // Parse each newline-delimited record into a typed DeviceNode. parse_record is
@@ -287,7 +297,13 @@ fn run_virtio_mmio_source(bank: (u64, u64)) -> Vec<DeviceNode> {
                     continue;
                 }
                 match DeviceNode::parse_record(line) {
-                    Ok(n) => out_nodes.push(n),
+                    Ok(n) => match reconcile_reported_node(&n, trusted) {
+                        Some(node) => out_nodes.push(node),
+                        None => say!(
+                            "warden: virtio-mmio-source reported out-of-domain node {:?}; rejected",
+                            n.ids.first().map(|i| i.as_string())
+                        ),
+                    },
                     Err(e) => say!("warden: bad virtio-mmio-source record {:?} ({})", e, line),
                 }
             }

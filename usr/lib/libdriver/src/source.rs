@@ -26,6 +26,12 @@ use crate::Error;
 /// (fail-closed on a source/warden build skew).
 pub const NODE_RECORD_VERSION: u32 = 1;
 
+/// Max match identities a node record may carry. A real device node has 1-4
+/// (a short, most-specific-first compatible list); the cap bounds the
+/// trust-boundary parser's allocation the same way the reg/intid caps do, so a
+/// hostile source cannot make the warden build an unbounded id Vec.
+pub const MAX_IDS: usize = 16;
+
 /// A device's match identity -- the key the warden binds on. A node carries an
 /// ordered list, most-specific first. Extensible: PCIe `vid:did` and USB
 /// `vid:pid` join as those bus sources land (each a new variant + a `bus:`-prefix
@@ -202,6 +208,9 @@ impl DeviceNode {
                             continue;
                         }
                         v.push(DeviceId::parse(part));
+                        if v.len() > MAX_IDS {
+                            return Err(Error::TooManyResources);
+                        }
                     }
                     if v.is_empty() {
                         return Err(Error::BadField);
@@ -265,6 +274,34 @@ pub fn best_match(db: &[Manifest], node: &DeviceNode) -> Option<usize> {
         }
     }
     best.map(|(i, _)| i)
+}
+
+/// Constrain a source-reported node to the warden's trusted device view -- the
+/// discovery-source trust boundary, ENFORCED rather than trusted. A bus source is
+/// non-TCB (MENAGERIE section 3): the warden trusts it to *identify* a slot (read
+/// its DeviceID -> a typed id), never to *describe* one. This matches the reported
+/// node to a trusted slot by its reg base and rebuilds the node's resources (reg +
+/// INTID) from that trusted slot, so a source can only mis-identify a real slot
+/// (caught downstream by the driver's own device re-validation) -- it can never
+/// fabricate a reg/INTID outside the domain the warden granted it, nor inflate a
+/// peer driver's conferred allowance. Returns the reconciled node (the reported
+/// identity + the trusted resources), or `None` if the reported node names no
+/// trusted slot (a fabricated address). Generalizes to the recursive PCIe/USB
+/// sources: the parent's granted slot table is always the containment bound.
+pub fn reconcile_reported_node(reported: &DeviceNode, trusted: &[DeviceNode]) -> Option<DeviceNode> {
+    let base = reported.resources.reg.first().map(|(b, _)| *b)?;
+    let slot = trusted
+        .iter()
+        .find(|s| s.resources.reg.first().map(|(b, _)| *b) == Some(base))?;
+    Some(DeviceNode {
+        label: reported.label.clone(),
+        ids: reported.ids.clone(),
+        resources: NodeResources {
+            compatible: Vec::new(),
+            reg: slot.resources.reg.clone(),
+            interrupts: slot.resources.interrupts.clone(),
+        },
+    })
 }
 
 // =============================================================================
@@ -534,5 +571,64 @@ mod tests {
         };
         // "specific" is the node's most-specific id (position 0) -> manifest a.
         assert_eq!(best_match(&db, &node), Some(0));
+    }
+
+    fn trusted_slot(base: u64, intid: u32) -> DeviceNode {
+        // a raw virtio,mmio DTB slot as the warden holds it (the trusted view).
+        DeviceNode {
+            label: "virtio_mmio".to_string(),
+            ids: alloc::vec![DeviceId::Compatible("virtio,mmio".to_string())],
+            resources: NodeResources {
+                compatible: alloc::vec!["virtio,mmio".to_string()],
+                reg: alloc::vec![(base, 0x200)],
+                interrupts: alloc::vec![intid],
+            },
+        }
+    }
+
+    #[test]
+    fn reconcile_honest_node_keeps_identity_takes_trusted_resources() {
+        let trusted = alloc::vec![trusted_slot(0x0a00_3a00, 0x2f), trusted_slot(0x0a00_3c00, 0x2e)];
+        // an honest source reports the real slot's reg + intid
+        let reported = vnode("net", 1, (0x0a00_3a00, 0x200), 0x2f);
+        let r = reconcile_reported_node(&reported, &trusted).unwrap();
+        assert_eq!(r.ids, alloc::vec![DeviceId::Virtio(1)]); // identity preserved
+        assert_eq!(r.resources.reg, alloc::vec![(0x0a00_3a00u64, 0x200u64)]);
+        assert_eq!(r.resources.interrupts, alloc::vec![0x2f]);
+    }
+
+    #[test]
+    fn reconcile_rejects_fabricated_address() {
+        let trusted = alloc::vec![trusted_slot(0x0a00_3a00, 0x2f)];
+        // a hostile source reports a typed node at a PA outside its granted domain
+        let forged = vnode("evil", 1, (0xdead_0000, 0x1000), 0x2f);
+        assert_eq!(reconcile_reported_node(&forged, &trusted), None);
+    }
+
+    #[test]
+    fn reconcile_discards_fabricated_resources_for_a_real_slot() {
+        // the security-proving case: a source reports a REAL slot base but inflates
+        // the window + lies about the intid. The reconciled node MUST carry the
+        // trusted slot's reg/intid, never the source's fabrication -- so the warden
+        // cannot be made to confer a wider allowance than the slot.
+        let trusted = alloc::vec![trusted_slot(0x0a00_3a00, 0x2f)];
+        let inflated = vnode("greedy", 1, (0x0a00_3a00, 0x10_0000), 0x07);
+        let r = reconcile_reported_node(&inflated, &trusted).unwrap();
+        assert_eq!(r.resources.reg, alloc::vec![(0x0a00_3a00u64, 0x200u64)]); // trusted size, not 0x100000
+        assert_eq!(r.resources.interrupts, alloc::vec![0x2f]); // trusted intid, not 0x07
+    }
+
+    #[test]
+    fn parse_record_bounds_id_count() {
+        // a hostile source over-reporting ids is rejected at parse (the id list got
+        // the same count-bound the reg/intid lists have).
+        let mut rec = String::from("v1;id=");
+        for i in 0..(MAX_IDS + 1) {
+            if i != 0 {
+                rec.push(',');
+            }
+            rec.push_str("virtio:1");
+        }
+        assert_eq!(DeviceNode::parse_record(&rec), Err(Error::TooManyResources));
     }
 }

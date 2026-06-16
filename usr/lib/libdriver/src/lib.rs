@@ -32,7 +32,10 @@ pub mod driver;
 
 pub use manifest::{DmaNeed, IrqNeed, Manifest, MmioNeed, Needs, Restart, MANIFEST_ABI};
 pub use resource::{resolve, BoundResources, NodeResources, DESCRIPTOR_VERSION, MAX_IRQ, MAX_MMIO};
-pub use source::{best_match, DeviceId, DeviceNode, DiscoverySource, NODE_RECORD_VERSION};
+pub use source::{
+    best_match, reconcile_reported_node, DeviceId, DeviceNode, DiscoverySource, MAX_IDS,
+    NODE_RECORD_VERSION,
+};
 
 #[cfg(feature = "driver")]
 pub use driver::{
