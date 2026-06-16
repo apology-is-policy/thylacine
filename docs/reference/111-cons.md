@@ -335,3 +335,15 @@ but the kernel is unambiguous against any consctl writer (LS-8 audit F1).
   false in production (the emit path is then one never-taken branch + `uart_putc`).
   It is always-compiled, consistent with the other `cons_test_*` hooks; #71 gates
   the file's test-support uniformly under `KERNEL_TESTS` later.
+- **The PL011 RX IRQ handler MUST clear ICR *before* draining the FIFO (#172).**
+  `arch/arm64/uart.c::uart_rx_handler` clears `RXIC|RTIC` at entry, then drains
+  (bounded by `UART_RX_DRAIN_MAX=64`). QEMU's PL011 sets RXRIS on *receive* and
+  does **not** recompute it from the FIFO level on an ICR clear, so clearing
+  *after* the drain races a byte arriving in the post-drain window: its interrupt
+  is cleared and — once the FIFO fills, `can_receive` goes 0 — never re-raised, so
+  the FIFO wedges full and console RX dies (the whole-OS "freeze under fast
+  input"). Clearing first means any byte arriving during/after the drain re-raises
+  the interrupt for the next handler entry instead of being stranded. The bounded
+  drain is the separate fix for the unbounded-loop livelock (an IRQ that never
+  returns under HVF's concurrent FIFO refill). Verified by
+  `tools/interactive/freeze-172.exp`.

@@ -1,0 +1,41 @@
+#!/usr/bin/expect -f
+# #172 regression: the whole-OS freeze under fast console input. The PL011 RX
+# handler used to clear its interrupt AFTER draining the FIFO; QEMU's PL011 sets
+# RXRIS on receive and does NOT recompute it from the FIFO level on an ICR clear,
+# so a byte arriving in the post-drain window had its interrupt cleared and --
+# once can_receive went 0 at a full FIFO -- never re-raised: the FIFO wedged full,
+# RX died, the box froze. Fixed by clearing ICR BEFORE the drain (+ a bounded
+# drain for the separate unbounded-loop livelock). This bursts fast arrow-downs at
+# the ut prompt and asserts the shell still responds.
+#
+# Hand-run diagnostic (SKIPs without `expect`); THYLACINE_ACCEL=tcg by default.
+# TCG serializes the vCPU + QEMU main loop, so a single large burst is the
+# reliable trigger; HVF (the human-repro path) wedges on a mere held key.
+
+source [file join [file dirname [info script]] lib.exp]
+
+set timeout $::lc_boot_timeout
+spawn env THYLACINE_ACCEL=tcg [file join $::lc_repo tools run-vm.sh]
+
+expect {
+    -re {KASLR offset (0x[0-9a-f]+)} { send_user "\n#172 KASLR=$expect_out(1,string)\n" }
+    timeout {}
+}
+lc_login michael correct-horse-battery-staple-v1
+
+set N 80
+set burst ""
+for {set i 0} {$i < $N} {incr i} { append burst "\x1b\[B" }
+lc_step "BURST: $N fast arrow-downs at the ut prompt"
+send -- $burst
+
+after 700
+lc_step "PROBE: echo Z172ALIVE"
+send -- "echo Z172ALIVE\r"
+set timeout 12
+expect {
+    -ex "Z172ALIVE"   { send_user "\n#172 RESULT: ALIVE (no freeze)\n"; lc_quit; exit 0 }
+    -re {EXTINCTION:} { send_user "\n#172 RESULT: EXTINCTION\n"; lc_quit; exit 2 }
+    timeout           { send_user "\n#172 RESULT: HUNG (freeze not fixed)\n"; exit 1 }
+    eof               { send_user "\n#172 RESULT: EOF\n"; exit 3 }
+}

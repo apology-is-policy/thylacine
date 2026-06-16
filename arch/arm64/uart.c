@@ -122,21 +122,57 @@ bool uart_rx_path_enabled(void) {
     return (cr & PL011_CR_UARTEN) != 0u && (cr & PL011_CR_RXE) != 0u;
 }
 
+// Max bytes drained per RX IRQ. BOUNDED to break the freeze (#172): an
+// unbounded `while (!RXFE)` drain livelocked the CPU under sustained input.
+// QEMU's chardev refills the PL011 RX FIFO as fast as the guest drains it --
+// especially under HVF, where QEMU's main loop runs on a PARALLEL host thread
+// and tops the FIFO up concurrently with the guest's drain, so RXFE never
+// became true and the handler never returned (IRQs masked -> no timer tick, no
+// preempt -> whole-OS freeze; reproduced holding an arrow key in nora AND in
+// the cooked ut shell, both accels -- TCG needs faster input since its vCPU +
+// main loop are serialized). 64 = 4 PL011 FIFO depths: a normal burst drains in
+// one IRQ, the worst-case IRQ-masked window stays well under a 1ms timer tick.
+#define UART_RX_DRAIN_MAX  64u
+
 // A-4c-1: PL011 RX IRQ handler. Runs in IRQ context (IRQs masked at PSTATE).
-// Drains the RX FIFO until empty, splitting each 12-bit DR read into the data
-// byte (bits 7:0) and the break flag (bit 10 BE), and hands each entry to the
-// console layer. cons_rx_input is wakeup-only (it does no IRQ-unsafe work);
-// the privileged/blocking work is deferred to the console_mgr kthread. Clears
-// the RX + RX-timeout interrupts before returning so the line de-asserts.
+// Clears the RX + RX-timeout interrupts FIRST, then drains up to
+// UART_RX_DRAIN_MAX bytes from the RX FIFO, splitting each 12-bit DR read into
+// the data byte (bits 7:0) and the break flag (bit 10 BE), and hands each entry
+// to the console layer. cons_rx_input is wakeup-only (no IRQ-unsafe work); the
+// privileged/blocking work is deferred to the console_mgr kthread. Two coupled
+// #172 fixes live here: the clear-FIRST ordering (the FIFO-wedge freeze -- see
+// the inline note) and the UART_RX_DRAIN_MAX bound (the unbounded-drain
+// livelock). After the handler returns + the GIC EOIs, the exception-return
+// window lets the lower-INTID timer (27 < the UART SPI 33, equal GIC priority
+// -> the timer wins the tie + is delivered first) interleave so the scheduler
+// runs.
 void uart_rx_handler(uint32_t intid, void *arg) {
     (void)intid;
     (void)arg;
     uintptr_t base = pl011_base;
-    while (!(mmio_read32(base, PL011_FR) & PL011_FR_RXFE)) {
+
+    // Clear the RX + RX-timeout interrupts BEFORE draining (#172 freeze ROOT
+    // CAUSE). The PL011 RX interrupt is RECEIVE-driven (set when a byte lands;
+    // NOT recomputed from the FIFO level on an ICR clear -- confirmed against the
+    // live QEMU model: FIFO FULL [FR.RXFF] yet RXRIS clear). Clearing AFTER the
+    // drain therefore races a byte that arrives in the post-final-RXFE-check
+    // window: that byte's interrupt is cleared by the ICR write, and because
+    // can_receive goes 0 the instant the FIFO fills, NO later receive ever
+    // re-raises it -> the FIFO wedges FULL with no RX IRQ -> the line
+    // back-pressures -> input dies forever (the whole-OS "freeze under fast
+    // input"). Clearing FIRST means any byte arriving during/after the drain
+    // re-raises the interrupt (serviced on the next handler entry) instead of
+    // being stranded -- and the drain below reads every byte already latched, so
+    // none is lost. (The UART_RX_DRAIN_MAX bound below is the SEPARATE livelock
+    // fix; both are required.)
+    mmio_write32(base, PL011_ICR, PL011_ICR_RXIC | PL011_ICR_RTIC);
+
+    unsigned budget = UART_RX_DRAIN_MAX;
+    while (budget != 0u && !(mmio_read32(base, PL011_FR) & PL011_FR_RXFE)) {
+        budget--;
         uint32_t dr = mmio_read32(base, PL011_DR);
         cons_rx_input((uint8_t)(dr & 0xffu), (dr & PL011_DR_BE) != 0u);
     }
-    mmio_write32(base, PL011_ICR, PL011_ICR_RXIC | PL011_ICR_RTIC);
 }
 
 void uart_puts(const char *s) {
