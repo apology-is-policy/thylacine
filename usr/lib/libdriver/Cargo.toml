@@ -1,0 +1,47 @@
+# libdriver -- the native Menagerie driver framework crate (MENAGERIE.md section 6).
+#
+# The probe/bind/serve scaffold + the manifest schema a Thylacine driver is built
+# on, so a new driver is a `probe()` + the device logic + a served file rather
+# than spawn/argv/handle boilerplate. The warden (the device-manager TCB Proc)
+# matches a node's `compatible` against a manifest's `binds`, computes the
+# narrowed allowance (node resources INTERSECT manifest needs -- the auditable
+# I-34 grant), and spawns the driver with that allowance + a resource descriptor;
+# the driver decodes the descriptor and mints its KObj_MMIO/IRQ/DMA handles via
+# the (now allowance-bounded) `libthyla_rs::hardware` wrappers.
+#
+# No new kernel ABI: pure userspace over the frozen step-5a `Command::allowance`
+# path + argv. The kernel is the authoritative gate (the allowance bounds every
+# SYS_*_CREATE), so a buggy or hostile driver can only touch its own device.
+#
+# Layering (the kaua/netdev pattern):
+#   - `manifest` + `resource` -- the pure schema, the node-INTERSECT-needs
+#     intersection (`resolve`), and the spawn-descriptor codec. Terminal-free +
+#     HOST-TESTABLE (the auditable grant logic in isolation).
+#   - `driver` (feature `driver`, on by default) -- the `Driver` trait + `run`
+#     scaffold + the allowance/handle-mint helpers. The only libthyla-rs layer;
+#     built for aarch64-unknown-none, not the host.
+#
+# Build (device): `cargo build -p libdriver` (default features -> `driver`).
+# Host tests (pure layers): `cargo test -p libdriver --no-default-features
+#   --target <host-triple>` (libthyla-rs does not build on the host).
+
+[package]
+name = "libdriver"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lib]
+name = "libdriver"
+path = "src/lib.rs"
+
+[features]
+# `driver` compiles `libdriver::driver` (the `run` scaffold + the hardware-mint
+# helpers), which needs libthyla-rs. On by default for the device build; host
+# tests of the pure `manifest` + `resource` layers drop it.
+default = ["driver"]
+driver = ["dep:libthyla-rs"]
+
+[dependencies]
+libthyla-rs = { path = "../libthyla-rs", optional = true }

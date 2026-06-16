@@ -703,3 +703,37 @@ early-console `chosen/stdout-path` selection is kernel.
   `memory/audit_5a_allowance_confer_closed_list.md`. SMP gate (default+UBSan x
   smp4/smp8, N=10): PASS, 0 corruption (pre-fix + a post-F1 re-run, the proc.c
   death-path witness). **Next**: 5b -- the `libdriver` framework crate.
+- **2026-06-16 (the `libdriver` framework crate, build-sequence step 5b)**: the
+  probe/bind/serve scaffold + the manifest schema (§6) landed as a native
+  `libthyla-rs` crate, `usr/lib/libdriver`. **No new kernel ABI** -- pure userspace
+  over the frozen 5a `Command::allowance` path + argv. Three layers (the
+  kaua/netdev split): `manifest` (the §6 brace-block schema -- `Manifest` /
+  `Needs` / `MmioNeed` / `IrqNeed` / `DmaNeed` / `Restart` + a tokenizer +
+  recursive-descent parser + a binary-unit size parser + a `to_text` round-trip)
+  and `resource` (`NodeResources` = what the warden reads from /hw; `BoundResources`
+  = the narrowed grant; `resolve(manifest, node, instance)` = the node-INTERSECT-needs
+  intersection, **the auditable I-34 grant in one function** -- the node *supplies*
+  the MMIO/IRQ values, the manifest *selects* the axes, so a grant can never exceed
+  the device; plus the single-argv-slot descriptor codec `to_descriptor` /
+  `parse_descriptor`) are PURE and **host-tested** (19 tests: the §6 example parse +
+  round-trip, malformed-manifest rejection, the resolve intersection incl. the
+  grant-never-exceeds-node property + `NoMatch` + `TooManyWindows`, the descriptor
+  round-trip + strict rejection + the delimiter-injection guard). The `driver`
+  layer (feature-gated, the only libthyla-rs surface) is the `Driver` trait + the
+  `run::<D>()` entry (bind -> probe -> serve -> a lifecycle exit code the
+  supervisor reads) + the handle-mint helpers (`DriverVa` bump allocator over a
+  private device-VA region clear of the netdev/PCI fixed VAs; `map_mmio` /
+  `claim_irq` / `alloc_dma`, each drawing from the conferred, kernel-gated grant) +
+  `to_allowance` (the warden's mirror: a `BoundResources` -> the `TAllowanceDesc`
+  for `Command::allowance`, so the authority the kernel enforces and the resources
+  the driver maps are one value) + a reference `NopDriver` (the compile-proof that
+  `run::<D>` monomorphizes end to end in the device build). The conferred allowance
+  is the authority; the descriptor only *informs* -- a driver that fabricated a PA
+  outside its allowance is rejected by the kernel I-34 gate, not the codec.
+  Reference doc `docs/reference/118-libdriver.md`. **Audit-light** (no kernel
+  privilege surface -- the kernel validates every `SYS_*_CREATE`; a buggy driver or
+  warden corrupts only its own view): self-audit + the 19 host tests + the device
+  build + the whole-workspace device build + clippy-clean. **Next**: 5c -- the
+  warden (the DTB source over /hw + the bind DB + the match -> `resolve` ->
+  `Command::allowance` -> spawn engine), which is the first consumer of every
+  `libdriver` surface.

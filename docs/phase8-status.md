@@ -71,10 +71,42 @@ construction. net-only scope; INTx interrupts; blk→PCI + MSI-X are v1.x seams.
   cap-walk / INTx); the 4 P3s: F1 partial-map leak tracked (no v1.0 detach path —
   proc-exit-bounded by design), F2 notify-doorbell bound fixed, F3 ABI asserts
   completed, F4 `pci.walk_caps_hostile` test added. New `115-pci-claim.md` +
-  `37-virtio_pci.md` cross-reference. **The pci sub-arc is COMPLETE → net-2
-  resumes** on the PCI NIC.
+  `37-virtio_pci.md` cross-reference. **The pci sub-arc is COMPLETE.**
 
-### the net arc (resumes on the PCI NIC, after pci-3)
+### the Menagerie build arc (preempts net-2; authoritative status: `docs/MENAGERIE.md` §18)
+
+After pci-3, the user voted (2026-06-15) to **preempt net-2 with the Menagerie
+driver framework** (`docs/MENAGERIE.md`), so `netd` is born discovery-driven +
+allowance-narrowed rather than holding coarse `CAP_HW_CREATE` + a hardcoded base
+to be retrofitted later. The full per-chunk status (SHAs, tests, audits) lives in
+**MENAGERIE.md §18**; the compact ledger:
+
+- **devhw-1/2** (`4d3950d`/`85921fe`) — the DTB tree-walk publish Dev + `/hw`
+  mounted in the boot namespace. **LANDED** (902/902; ref `116-devhw.md`).
+- **the hardware allowance / I-34** (`1602e37` spec + `ad814b0` impl + `30f062c`
+  audit) — per-Proc scoping of `CAP_HW_CREATE` at the 3 create gates; **model-first**
+  (`specs/allowance.tla` clean + 4 buggy cfgs); audit CLEAN 0/1/1/2. **LANDED**
+  (913/913; ref `117-allowance.md`).
+- **the Loom device-gone terminal CQE** (`6db71fa` spec + `ad74e39` impl +
+  `d5d52ca` audit) — §10 surprise-removal; `T_E_NODEV` async terminal; audit CLEAN
+  0/0/0/4. **LANDED** (915/915).
+- **5a** confer-at-spawn allowance ABI + #160 revoke-on-terminate fold-in
+  (`fea1e7d`) — the I-34 grant path wired to userspace (`Command::allowance` over
+  `SYS_SPAWN_FULL_ARGV`); audit CLEAN 0/1/1/2 (the #160 fold-in SMP-UAF F1 fixed).
+  **LANDED** (917/917).
+- **5b** the `libdriver` framework crate (`usr/lib/libdriver`) — the §6 manifest
+  schema + parser, the `resolve` node-INTERSECT-needs grant (the auditable I-34
+  property, host-tested), the single-argv descriptor codec, and the `Driver` trait
+  + `run` scaffold + handle-mint helpers + `to_allowance`. Pure userspace, no kernel
+  ABI; audit-light (the kernel validates every `SYS_*_CREATE`). **LANDED** (19 host
+  tests + device build + whole-workspace build + clippy-clean; ref `118-libdriver.md`).
+- **5c** the warden (DTB source over `/hw` + bind DB + match→`resolve`→
+  `Command::allowance`→spawn) → **5d** retrofit `netdev` to discover its base (the
+  live narrowed-allowance proof) → **5e** `DeviceRemoved` revoke+terminate +
+  supervision → **5f** the composed focused audit. **NEXT.** Then step 6
+  (PCIe/USB sources + the per-(bus,dev,fn) PCI allowance axis #159).
+
+### the net arc (resumes on the PCI NIC, after the Menagerie spine)
 
 - **net-2** netd skeleton: embed smoltcp, serve `/net`, the `/net/tcp`
   clone/connect/data client path + the fid state machine (NET-DESIGN §3.4).
