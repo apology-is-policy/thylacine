@@ -1,0 +1,34 @@
+#!/usr/bin/expect -f
+# #173 deterministic proof of the kaua ESC-disambiguation holdoff. Dribbles a
+# Left-arrow as ESC | (15ms gap) | [D at the ut prompt -- exactly the split that
+# made flush() mis-resolve the lone ESC to Escape. With the holdoff the Left
+# arrow assembles (cursor moves between X and Y, so Z lands between -> "XZY");
+# without it ESC resolves and the [D / Z mis-key -> the line is NOT "XZY".
+# Deterministic under TCG (the dribble forces the split regardless of accel).
+
+source [file join [file dirname [info script]] lib.exp]
+
+set timeout $::lc_boot_timeout
+spawn env THYLACINE_ACCEL=tcg [file join $::lc_repo tools run-vm.sh]
+expect {
+    -re {KASLR offset (0x[0-9a-f]+)} {}
+    timeout {}
+}
+lc_login michael correct-horse-battery-staple-v1
+after 400
+
+lc_step "type echo XY, then a DRIBBLED Left arrow (ESC, 15ms gap, CSI-D), then Z"
+send -- "echo XY"
+after 200
+send -- "\x1b"
+after 15
+send -- "\[D"
+after 250
+send -- "Z\r"
+
+set timeout 12
+expect {
+    -ex "XZY"  { send_user "\n#173 RESULT: HOLDOFF-OK (split Left arrow assembled -> XZY)\n"; lc_quit; exit 0 }
+    timeout    { send_user "\n#173 RESULT: FAIL/INCONCLUSIVE (no XZY -- split not assembled or harness flake)\n"; lc_quit; exit 1 }
+    eof        { send_user "\n#173 RESULT: EOF (harness)\n"; exit 3 }
+}

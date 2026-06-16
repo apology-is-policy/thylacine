@@ -14,14 +14,18 @@
 // run then resets. `feed` is total and never panics. A garbage byte stream
 // produces at most one event per byte and bounded memory.
 //
-// LOCAL-CONSOLE ASSUMPTION: the kernel console (LS-8a) delivers each logical
-// input -- a keypress or a pasted escape sequence -- within one ring drain, so a
-// complete escape sequence arrives inside one `feed` chunk and a lone Escape
-// keypress arrives as a single 0x1b with nothing after it in that chunk. That is
-// why `flush` (end of chunk) resolves a pending ESC to `KeyCode::Esc`. A
-// sequence split across two reads (theoretically possible, not produced by a
-// local console) would mis-resolve its leading ESC to `Esc` -- a documented
-// benign edge, never a crash.
+// SPLIT-SEQUENCE HANDLING: a logical input -- a keypress or escape sequence --
+// usually arrives within one ring drain, and a lone Escape arrives as a single
+// 0x1b with nothing after it. But under a slow/dribbled console (HVF) or a
+// #172-batched RX IRQ, an escape sequence CAN split across two reads. CSI/SS3/
+// UTF-8 partials are RETAINED by `flush` across polls and assemble on the next
+// drain; the bare-ESC head case (an `ESC | [B` split, which would otherwise
+// mis-resolve the lone ESC to `Esc` and mis-key the tail) is bridged by the
+// source's ESC-disambiguation holdoff (#173, kaua::source::pending_escape) --
+// it waits a bounded window for the tail before letting `flush` resolve a
+// pending ESC. So when `flush` does resolve a bare ESC to Escape, the holdoff
+// has already confirmed no continuation was coming. `feed`/`flush` stay pure;
+// the timing lives in the source.
 //
 // MALFORMED-INPUT POLICY: exotic/malformed sequences are *consumed safely*, not
 // recovered byte-perfectly. Specifically a byte may be dropped in three rare
@@ -99,6 +103,19 @@ impl Parser {
         self.resize.take()
     }
 
+    /// True iff the parser holds only a bare `ESC` (`State::Esc`) -- the one
+    /// state where `flush` would resolve to a real Escape key. The source uses
+    /// this to apply a brief ESC-disambiguation holdoff: a split `ESC | [...`
+    /// arrow/function-key sequence (a slow/dribbled HVF console -- or a #172-
+    /// batched RX IRQ -- delivering the ESC head alone in one read) needs its
+    /// continuation byte before `flush` guesses Escape, else the lone ESC
+    /// mis-resolves to Escape and the tail mis-keys (the documented residual in
+    /// this file's header). CSI/SS3/UTF-8 partials are already retained across
+    /// polls by `flush`, so only the bare-ESC head needs the holdoff.
+    pub fn pending_escape(&self) -> bool {
+        self.state == State::Esc
+    }
+
     /// Feed one byte. Returns `Some(event)` when a byte completes a key.
     pub fn feed(&mut self, b: u8) -> Option<KeyEvent> {
         match self.state {
@@ -123,9 +140,11 @@ impl Parser {
     pub fn flush(&mut self) -> Option<KeyEvent> {
         match self.state {
             // A lone ESC with nothing after it at the true end of the drain is a
-            // real Escape keypress (the local-console disambiguation; a split
-            // ESC-led sequence whose head arrives alone is the documented
-            // residual -- the ESC-timeout fix is a separate, larger change).
+            // real Escape keypress. The source applies an ESC-disambiguation
+            // holdoff (#173, kaua::source) BEFORE this flush: a split ESC-led
+            // sequence whose head arrived alone gets a bounded window for its
+            // `[..` tail, so by the time flush() runs a still-bare ESC is
+            // genuinely a lone Escape, not the head of a split arrow.
             State::Esc => {
                 self.reset_ground();
                 Some(KeyEvent::new(KeyCode::Esc))
@@ -523,6 +542,56 @@ mod tests {
         assert_eq!(one(b"\x1b[D").code, KeyCode::Left);
         assert_eq!(one(b"\x1b[H").code, KeyCode::Home);
         assert_eq!(one(b"\x1b[F").code, KeyCode::End);
+    }
+
+    // #173: pending_escape() drives the source's ESC-disambiguation holdoff. It
+    // is true ONLY at a bare ESC (the one state flush() would resolve to a real
+    // Escape) -- so the source holds off there, but never wastes the wait once
+    // past the ESC head (CSI/SS3 are retained by flush instead).
+    #[test]
+    fn pending_escape_only_at_bare_esc() {
+        let mut p = Parser::new();
+        assert!(!p.pending_escape(), "Ground: nothing pending");
+        assert_eq!(p.feed(0x1b), None);
+        assert!(p.pending_escape(), "bare ESC -> holdoff window");
+        assert_eq!(p.feed(b'['), None);
+        assert!(!p.pending_escape(), "past the ESC head (Csi) -> no holdoff");
+        let ev = p.feed(b'B').expect("arrow completes");
+        assert_eq!(ev.code, KeyCode::Down);
+        assert!(!p.pending_escape(), "Ground again after completion");
+    }
+
+    // #173: an arrow split `ESC | [B` across two reads -- the HVF/dribbled-console
+    // case. With the source's holdoff bridging the gap (no flush between the
+    // halves, exactly what the bridged drain does), the parser assembles the
+    // arrow; it NEVER yields a stray Escape + literal '[','B'.
+    #[test]
+    fn split_arrow_assembles_when_holdoff_bridges() {
+        let mut p = Parser::new();
+        let mut out = Vec::new();
+        for &b in b"\x1b" {
+            if let Some(e) = p.feed(b) { out.push(e); }
+        }
+        // The source sees pending_escape() and holds off (does NOT flush here).
+        assert!(p.pending_escape());
+        for &b in b"[B" {
+            if let Some(e) = p.feed(b) { out.push(e); }
+        }
+        if let Some(e) = p.flush() { out.push(e); }
+        assert_eq!(out.len(), 1, "one event (the arrow), got {:?}", out);
+        assert_eq!(out[0].code, KeyCode::Down);
+    }
+
+    // #173 contrast: flushing AT the bare ESC (the pre-holdoff behavior) mis-
+    // resolves to Escape -- the exact spurious mode-switch the holdoff prevents
+    // by waiting for the tail before flush() guesses. Documents why the holdoff
+    // is load-bearing, not cosmetic.
+    #[test]
+    fn flush_at_bare_esc_would_misresolve() {
+        let mut p = Parser::new();
+        assert_eq!(p.feed(0x1b), None);
+        let ev = p.flush().expect("bare ESC at flush -> Escape");
+        assert_eq!(ev.code, KeyCode::Esc);
     }
 
     #[test]

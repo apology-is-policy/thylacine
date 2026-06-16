@@ -33,6 +33,16 @@ const READ_CHUNK: usize = 1024;
 /// real paste (the cons ring is 256 B).
 const DRAIN_MAX: usize = 64;
 
+/// ESC-disambiguation holdoff (#173). When a drain sweep leaves the parser
+/// holding a bare ESC, the NEXT sweep waits up to this long (instead of polling
+/// non-blocking) for the continuation byte -- so a split arrow `ESC | [B` (a
+/// slow/dribbled HVF console, or a #172-batched RX IRQ, delivering the ESC head
+/// alone in one read) assembles instead of mis-resolving the lone ESC to an
+/// Escape key and mis-keying the tail (input.rs's documented residual). A true
+/// lone Escape press pays this once before registering -- the standard terminal
+/// ESC timeout (cf. vim ttimeoutlen). Bounded by the DRAIN_MAX sweep cap.
+const ESC_HOLDOFF_MS: u32 = 50;
+
 /// The loop's event producer. One `poll` returns every Event decoded from the
 /// bytes available this round (a single read can carry many keys). A future
 /// `LoomSource` is the other implementation; the trait is the substitution seam.
@@ -118,6 +128,12 @@ impl EventSource for PollSource {
         for i in 0..DRAIN_MAX {
             let t = if i == 0 && out.is_empty() {
                 timeout
+            } else if self.parser.pending_escape() {
+                // A bare ESC is pending -- it may be the head of a split arrow/
+                // function-key sequence whose `[..` tail is still in transit.
+                // Hold off briefly for it instead of declaring the drain dry and
+                // letting flush() mis-resolve the ESC to an Escape key (#173).
+                PollTimeout::Millis(ESC_HOLDOFF_MS)
             } else {
                 PollTimeout::Zero
             };
