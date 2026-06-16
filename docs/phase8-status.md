@@ -138,9 +138,27 @@ to be retrofitted later. The full per-chunk status (SHAs, tests, audits) lives i
   page-round co-residency over-grant is the documented #140/net-2 I-34-deviation (no
   code). 41 libdriver host tests + boot `2 bound, 2 up` + `netdev-driver: PASS
   24/24` + 0 EXTINCTION + the SMP gate. **LANDED** (`memory/audit_5d_closed_list.md`;
-  refs `118-libdriver.md` + `119-warden.md`). Then **5e** `DeviceRemoved`
-  revoke+terminate + supervision → step 6 (PCIe/USB sources + the per-(bus,dev,fn)
-  PCI allowance axis #159).
+  refs `118-libdriver.md` + `119-warden.md`).
+- **5e** `DeviceRemoved` revoke+terminate + supervision — the driver-lifecycle
+  half of the Menagerie spine. **5e-1** (`<HASH>`) **long-lived serve +
+  DeviceRemoved teardown**: `netdev-driver` goes long-lived (24-ARP proof →
+  `READY` → quiesce → block in `Irq::wait` until removed, never self-exiting);
+  the warden's `bind_and_run` reads a readiness line via `await_readiness` (a
+  `try_wait` + bounded poll — a libdriver driver's pipe does NOT EOF on exit
+  because a single-thread Proc's `SYS_EXIT_GROUP` defers the handle-close to
+  reap, the #926 asymmetry), then group-terminates a long-lived service via
+  `Child::kill` → `/proc/<pid>/ctl` `killgrp` (revoke FIRST, atomic #160). New:
+  `libthyla-rs Child::kill`; `VirtioNet::quiesce` made `pub` (explicit
+  quiesce-before-block keeps the forced teardown DMA-safe). Boot: `netdev-driver`
+  up → `PASS 24/24` → `serving` → warden `DeviceRemoved` → `torn down` → `2
+  bound, 2 up` → boot OK + 0 EXTINCTION; stratumd claims the freed (page-shared)
+  virtio-blk slot post-pivot. Device build + clippy clean + the SMP gate. The
+  live-DMA-at-forced-teardown is the documented MENAGERIE section-10 hazard (an
+  IOMMU / cooperative-quiesce fix owed net-2/real-hw). Ref `119-warden.md`.
+  **LANDED**. Then **5e-2** bounded restart-on-crash (manifest `restart` +
+  back-off + give-up); **5e-3** device-gone terminal CQE → a consumer (SrvConn
+  vehicle); **5e-4** composed focused audit + SMP gate + close. → step 6
+  (PCIe/USB sources + the per-(bus,dev,fn) PCI allowance axis #159).
 
 ### the net arc (resumes on the PCI NIC, after the Menagerie spine)
 

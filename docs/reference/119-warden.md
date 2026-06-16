@@ -51,12 +51,51 @@ hardware-free.
    one `BoundResources`, so the authority the kernel enforces and the resources
    the driver maps cannot drift -- then spawn the driver `/<name>` with the
    descriptor as argv[1], `CAP_HW_CREATE`, and the narrowed allowance.
-5. **Supervise** (5c: reap): the boot-probe driver is a one-shot; the warden
-   `wait()`s it and reads the lifecycle status. 5e replaces the reap with
-   long-lived supervision + restart + `DeviceRemoved` revoke.
+5. **Supervise + tear down** (`bind_and_run` + `await_readiness`, 5e-1): the
+   driver is spawned with a piped stdout; the warden waits for it to either
+   signal readiness (`READY`, a long-lived service still holding its device) or
+   exit (a one-shot proof). A long-lived service is then torn down via
+   **DeviceRemoved** -- `Child::kill` writes `killgrp` to `/proc/<pid>/ctl`,
+   which revokes the driver's allowance FIRST (atomic, #160) then
+   group-terminates it; the driver, blocked in a death-interruptible
+   `Irq::wait`, unwinds cleanly and the reap frees the slot's exclusive claims.
+   A one-shot proof (menagerie-probe) is reaped for its exit code. **Bounded
+   restart-on-crash** (the manifest's `restart` policy + back-off + give-up) is
+   5e-2; the **device-gone terminal CQE to a consumer** is 5e-3.
 
 Exit 0 iff every bound driver came up (or nothing matched); exit 1 if a bound
 driver failed to come up.
+
+### Long-lived serve + the DeviceRemoved teardown (5e-1)
+
+A real driver is a long-lived service: `netdev-driver` runs the net-1 24-ARP
+proof, signals `READY`, quiesces its device, and then blocks in `Irq::wait`
+indefinitely -- it never exits on its own. The warden brings it up and then
+demonstrates **DeviceRemoved** by group-terminating it. Three things make this
+sound:
+
+- **Readiness without EOF (`await_readiness`).** The warden cannot learn a
+  driver came up by reading its stdout pipe to EOF: a libdriver driver exits via
+  `SYS_EXIT_GROUP`, and a single-thread Proc defers its handle-table close --
+  including the pipe write end -- to *reap*, not exit (the #926 asymmetry). So a
+  silent exit never EOFs the pipe while the warden holds the only reader and has
+  not reaped, and a blocking read would deadlock. `await_readiness` instead
+  detects an exit with `try_wait` (off the pipe) and polls the pipe only for the
+  `READY` data line, bounded by a give-up (~10s). A long-lived service signals
+  `READY` (data); a one-shot proof or a bring-up crash is caught by `try_wait`.
+- **The teardown is the I-25/#160 mechanism.** `Child::kill` ->
+  `/proc/<pid>/ctl` `killgrp` -> `proc_group_terminate`, which revokes the
+  allowance as its first step (atomic with the death-wake). The warden is
+  authorized as the driver's owner (both `PRINCIPAL_SYSTEM`); `/proc` is reached
+  through the boot namespace the warden inherits. The freed slot is observable:
+  stratumd claims the (page-shared) virtio-blk slot post-pivot.
+- **The teardown is DMA-safe.** The driver quiesces its device *before* it
+  blocks, so a forced group-terminate (which does NOT run `Drop`) leaves no live
+  queue to DMA into the pages the reap frees. A driver torn down *mid-DMA* with a
+  still-live device is the MENAGERIE section-10 surprise-removal hazard; its full
+  fencing (an IOMMU, or a cooperative quiesce-on-remove) is owed to net-2 / real
+  hardware. The data path itself -- serving `/dev/net/0` -- is also net-2; 5e
+  proves the LIFECYCLE.
 
 ### The virtio-mmio bus source (5d-2)
 
@@ -198,9 +237,13 @@ joey: warden ok (5c Menagerie bind-loop: discover -> grant -> spawn narrowed)
 
 ## Status / known caveats
 
-- **One-shot, not supervised (5c).** The warden reaps each bound driver. Long-
-  lived supervision (restart policy from the manifest, back-off, give-up) +
-  `DeviceRemoved` revoke + the device-gone CQE to a consumer is **5e**.
+- **Long-lived serve + DeviceRemoved (5e-1).** A long-lived service is brought
+  up and then torn down (revoke + group-terminate) to prove the teardown
+  lifecycle; a one-shot proof is reaped for its exit code. Still owed: **bounded
+  restart-on-crash** (the manifest `restart` policy + back-off + give-up, 5e-2)
+  and the **device-gone terminal CQE to a consumer** (5e-3). The persistent
+  post-pivot warden (drivers kept up, not torn down at boot) is the deployment
+  shape; the boot-probe warden demonstrates the full lifecycle in bounded form.
 - **DTB + virtio-mmio sources (5d-2).** The DTB source + the virtio-mmio bus
   source are built; PCIe/USB/SDIO sources are MENAGERIE §3/§7 seams that plug into
   the same `DiscoverySource` slot (the step-6 per-(bus,dev,fn) PCI allowance axis,

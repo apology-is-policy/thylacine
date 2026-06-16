@@ -462,7 +462,13 @@ impl VirtioNet {
 
     /// Stop the device: QUEUE_READY=0 on both queues + a device reset. After
     /// this the device performs no further DMA, so its buffers are safe to free.
-    fn quiesce(&self) {
+    ///
+    /// `Drop` calls this for a clean exit, but a forced group-terminate (the
+    /// allowance-revoke teardown) does NOT run `Drop` -- so a driver that holds
+    /// the device across a long-lived block must call this explicitly before
+    /// blocking, or a torn-down driver leaves the device DMA-ing into pages the
+    /// reap then frees.
+    pub fn quiesce(&self) {
         unsafe {
             w32(self.slot_va + REG_QUEUE_SEL, NET_QUEUE_RX);
             w32(self.slot_va + REG_QUEUE_READY, 0);

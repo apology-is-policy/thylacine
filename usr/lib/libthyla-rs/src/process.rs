@@ -47,8 +47,9 @@
 //     them lands then.
 
 use crate::err::{Error, Result};
-use crate::fs::File;
+use crate::fs::{File, OpenOptions};
 use crate::handle::{Handle, Rights};
+use crate::io::Write;
 use crate::{
     t_pipe, t_spawn_full_argv, t_wait_pid_for, TAllowanceDesc, TSpawnArgs, T_SPAWN_ALLOWANCE_SET,
     T_SPAWN_IDENTITY_SET, T_SPAWN_MAX_FDS, T_SPAWN_NAME_MAX, T_SYS_SPAWN_ARGV_DATA_MAX,
@@ -541,6 +542,24 @@ impl Child {
         }
         let _reaped = Error::from_syscall_return(rc)?;
         Ok(Some(ExitStatus(status)))
+    }
+
+    /// Forcibly terminate this child's thread-group via the cross-Proc control
+    /// channel: write `killgrp` to `/proc/<pid>/ctl` (A-4b, I-26). The kernel's
+    /// `proc_group_terminate` revokes the child's hardware allowance FIRST
+    /// (atomic, #160) then cascades the death-wake, so a child blocked in a
+    /// death-interruptible wait (`Irq::wait`, poll, ...) unwinds cleanly at its
+    /// EL0-return checkpoint rather than hanging. Authorized by owner identity
+    /// (same `principal_id` -- a parent terminating its own same-identity child)
+    /// OR `CAP_KILL` / `CAP_HOSTOWNER`.
+    ///
+    /// Does NOT reap -- call `wait()` afterwards to collect the zombie. Returns
+    /// `Err` if the target is already gone (no ALIVE Proc at this pid) or the
+    /// caller lacks authority.
+    pub fn kill(&self) -> Result<()> {
+        let path = alloc_crate::format!("/proc/{}/ctl", self.pid);
+        let mut ctl = OpenOptions::new().write(true).open(&path)?;
+        ctl.write_all(b"killgrp")
     }
 }
 

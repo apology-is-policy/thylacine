@@ -34,9 +34,10 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use libthyla_rs::fs::OpenOptions;
-use libthyla_rs::io::slurp_capped;
-use libthyla_rs::process::{Command, Stdio};
+use libthyla_rs::fs::{File, OpenOptions};
+use libthyla_rs::io::{slurp_capped, Read};
+use libthyla_rs::poll::{PollEvents, PollSet, PollTimeout};
+use libthyla_rs::process::{Child, Command, ExitStatus, Stdio};
 use libthyla_rs::T_CAP_HW_CREATE;
 
 use libdriver::driver::to_allowance;
@@ -313,11 +314,110 @@ fn run_virtio_mmio_source(bank: (u64, u64), trusted: &[DeviceNode]) -> Vec<Devic
     out_nodes
 }
 
+/// The maximum length of a driver's readiness line (`READY`); a longer line
+/// without a newline is a garbled/hostile signal -- the driver is non-TCB.
+const READY_LINE_MAX: usize = 64;
+
+/// Read one newline-terminated readiness line off a driver's stdout pipe.
+/// Blocks until '\n', EOF, or the cap. Returns the line (without the trailing
+/// '\n') on success; `None` on EOF before a newline (the driver exited without
+/// signalling) or an over-long line. Reads byte-by-byte so it stops exactly at
+/// the newline and never blocks waiting past it -- a long-lived driver keeps
+/// its stdout open after the line.
+fn read_ready_line(f: &mut File) -> Option<String> {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut b = [0u8; 1];
+    loop {
+        match f.read(&mut b) {
+            Ok(0) => return None, // EOF before a newline
+            Ok(_) => {
+                if b[0] == b'\n' {
+                    return core::str::from_utf8(&buf).ok().map(|s| s.to_string());
+                }
+                if buf.len() >= READY_LINE_MAX {
+                    return None; // over-long -> garbled
+                }
+                buf.push(b[0]);
+            }
+            Err(_) => return None, // read error
+        }
+    }
+}
+
+/// The outcome of waiting for a freshly-spawned driver to declare itself.
+enum Readiness {
+    /// The driver wrote a readiness line ("READY" = up) and is still alive.
+    Signalled(String),
+    /// The driver exited on its own (a one-shot proof, or a bring-up crash) and
+    /// has been reaped; its status is attached.
+    Exited(ExitStatus),
+    /// The driver neither signalled nor exited within the bound -- misbehaving.
+    Timeout,
+    /// The child could not be tracked for readiness (no stdout pipe, or it is
+    /// no longer ours).
+    Untracked,
+}
+
+/// Milliseconds per readiness poll -- the cadence at which the warden re-checks
+/// whether a still-silent driver has exited (the pipe cannot report that; see
+/// `await_readiness`).
+const READY_POLL_MS: u32 = 100;
+/// Readiness give-up bound (`READY_POLL_MS * READY_WAIT_TRIES` total, ~10s). A
+/// driver that neither signals nor exits within this is torn down.
+const READY_WAIT_TRIES: u32 = 100;
+
+/// Wait for a freshly-spawned driver to either signal readiness on its stdout
+/// pipe ("READY") or exit.
+///
+/// A driver's stdout pipe does NOT EOF when the driver exits: a libdriver
+/// driver exits via SYS_EXIT_GROUP, and a single-thread Proc defers its
+/// handle-table close -- including the pipe write end -- to REAP, not exit (the
+/// #926 asymmetry). So the warden cannot block reading the pipe to detect an
+/// exit; it would deadlock (it holds the only reader and cannot reap while
+/// blocked in the read). Instead it detects an exit with `try_wait` (off the
+/// pipe) and polls the pipe only for the readiness DATA, bounded by a give-up.
+fn await_readiness(child: &mut Child) -> Readiness {
+    let Some(mut pipe) = child.stdout.take() else {
+        return Readiness::Untracked;
+    };
+    let mut ps = PollSet::with_capacity(1);
+    ps.add(&pipe, PollEvents::READ);
+    for _ in 0..READY_WAIT_TRIES {
+        // Catch an exit independent of the pipe (it will not EOF until reap).
+        match child.try_wait() {
+            Ok(Some(status)) => return Readiness::Exited(status),
+            Ok(None) => {}
+            Err(_) => return Readiness::Untracked,
+        }
+        // Poll the pipe for the readiness line (data), bounded.
+        let mut readable = false;
+        if let Ok(results) = ps.poll(PollTimeout::Millis(READY_POLL_MS)) {
+            for ev in results {
+                if ev.fd == pipe.as_raw_fd() && (ev.is_readable() || ev.is_hup()) {
+                    readable = true;
+                }
+            }
+        }
+        if readable {
+            // The driver writes "READY\n" atomically (one small write_all, well
+            // under PIPE_BUF), so a readable pipe carries the whole line --
+            // read_ready_line stops at the '\n' and does not block.
+            if let Some(line) = read_ready_line(&mut pipe) {
+                return Readiness::Signalled(line);
+            }
+            // EOF / garbled: keep looping; try_wait catches the eventual exit.
+        }
+    }
+    Readiness::Timeout
+}
+
 /// Spawn the driver for a computed grant -- the confer step. Encodes the grant
 /// into the argv descriptor + the kernel allowance (both from one
-/// `BoundResources`), spawns the driver narrowed, and (5c) reaps it as a
-/// one-shot, returning whether it came up cleanly. 5e makes a long-lived driver
-/// supervised rather than reaped.
+/// `BoundResources`), spawns the driver narrowed, then reads its readiness
+/// line: a long-lived service (`READY`) is brought up and then torn down via
+/// DeviceRemoved (revoke + group-terminate) to prove the teardown lifecycle; a
+/// one-shot proof (EOF, no line) is reaped for its exit code. Returns whether
+/// the driver came up cleanly.
 fn bind_and_run(m: &Manifest, grant: &BoundResources, node_name: &str) -> bool {
     let desc = match grant.to_descriptor() {
         Ok(d) => d,
@@ -349,16 +449,20 @@ fn bind_and_run(m: &Manifest, grant: &BoundResources, node_name: &str) -> bool {
     cmd.arg(desc).caps(T_CAP_HW_CREATE).allowance(allow);
     // The boot-probe warden has no stdio fds of its own (joey spawns it without
     // any), so Command's default Stdio::Inherit -- which bumps the parent's fd
-    // 0/1/2 -- would fail before the kernel even resolves the binary. The driver
-    // logs via the console-direct path, not fds; hand it /dev/null for the three
-    // stdio slots so the spawn has real fds to install. (The post-pivot warden,
-    // 5e, will give drivers a proper log sink.)
+    // 0/1/2 -- would fail before the kernel even resolves the binary. stdin +
+    // stderr are /dev/null; stdout is a PIPE: a driver writes one readiness line
+    // ("READY") to it once it is up (the section-5 "serves its file" readiness
+    // analog), so the warden can tell a long-lived service from a one-shot
+    // proof. All other driver diagnostics go to the console (t_putstr), not fds.
     let open_null = || OpenOptions::new().read(true).write(true).open("/dev/null");
-    if let (Ok(i), Ok(o), Ok(e)) = (open_null(), open_null(), open_null()) {
-        cmd.stdin(Stdio::File(i))
-            .stdout(Stdio::File(o))
-            .stderr(Stdio::File(e));
-    }
+    let (Ok(nin), Ok(nerr)) = (open_null(), open_null()) else {
+        say!("warden: /dev/null open failed; cannot spawn {}", m.name);
+        return false;
+    };
+    cmd.stdin(Stdio::File(nin))
+        .stdout(Stdio::Piped)
+        .stderr(Stdio::File(nerr));
+
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -367,8 +471,15 @@ fn bind_and_run(m: &Manifest, grant: &BoundResources, node_name: &str) -> bool {
         }
     };
     let pid = child.pid();
-    match child.wait() {
-        Ok(status) => {
+
+    // Wait for the driver to declare itself: "READY" (a long-lived service still
+    // holding its device) or an exit (a one-shot proof, or a bring-up crash).
+    // We must NOT block reading the pipe to EOF -- a driver's fds close at reap,
+    // not exit (#926), so a silent exit would deadlock the reader.
+    // await_readiness detects the exit via try_wait and polls only for the data.
+    match await_readiness(&mut child) {
+        Readiness::Exited(status) => {
+            // One-shot proof completed (or a bring-up crash); already reaped.
             say!(
                 "warden: {} pid={} exited code={:?}",
                 m.name,
@@ -377,8 +488,73 @@ fn bind_and_run(m: &Manifest, grant: &BoundResources, node_name: &str) -> bool {
             );
             status.success()
         }
-        Err(e) => {
-            say!("warden: wait {} (pid={}) failed {:?}", m.name, pid, e);
+        Readiness::Signalled(line) => {
+            // A long-lived service still holding its device. Demonstrate
+            // DeviceRemoved: a forced group-terminate that revokes the allowance
+            // FIRST (atomic, #160) then cascades the death-wake. The driver,
+            // blocked in a death-interruptible wait, unwinds cleanly; the reap
+            // frees the slot's exclusive MMIO/IRQ/DMA claims (so a later
+            // claimant -- stratumd's virtio-blk post-pivot -- finds the bank
+            // free). Only "READY" is a clean bring-up; any other line is a
+            // misbehaving driver, still torn down.
+            let up = line == "READY";
+            if up {
+                say!(
+                    "warden: {} pid={} up (READY) -> DeviceRemoved (revoke + terminate)",
+                    m.name,
+                    pid
+                );
+            } else {
+                say!(
+                    "warden: {} pid={} signalled {:?} (expected READY) -> terminating",
+                    m.name,
+                    pid,
+                    line
+                );
+            }
+            let _ = child.kill();
+            match child.wait() {
+                Ok(status) => {
+                    say!(
+                        "warden: {} pid={} torn down (status={:?})",
+                        m.name,
+                        pid,
+                        status.code()
+                    );
+                    up
+                }
+                Err(e) => {
+                    say!(
+                        "warden: reap {} (pid={}) after teardown failed {:?}",
+                        m.name,
+                        pid,
+                        e
+                    );
+                    false
+                }
+            }
+        }
+        Readiness::Timeout => {
+            say!(
+                "warden: {} pid={} gave no readiness/exit signal -> terminating",
+                m.name,
+                pid
+            );
+            let _ = child.kill();
+            let _ = child.wait();
+            false
+        }
+        Readiness::Untracked => {
+            // Unreachable while every driver is spawned with a piped stdout, but
+            // kill-then-reap defensively: a bare wait() on a long-lived driver
+            // we cannot observe would block the warden forever.
+            say!(
+                "warden: {} pid={} could not be tracked for readiness -> terminating",
+                m.name,
+                pid
+            );
+            let _ = child.kill();
+            let _ = child.wait();
             false
         }
     }

@@ -24,6 +24,7 @@ static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::Th
 use libdriver::driver::{run, Driver};
 use libdriver::resource::BoundResources;
 use libdriver::Error;
+use libthyla_rs::io::Write;
 use netdev::{VirtioNet, MAX_FRAME};
 
 /// Console-direct diagnostics (T_SYS_PUTS) -- visible regardless of fd wiring.
@@ -175,9 +176,37 @@ impl Driver for NetDriver {
             validated,
             N_TARGET
         );
-        Ok(())
-        // self.nic drops here -> quiesce-on-drop resets the device + releases the
-        // slot's MMIO/IRQ/DMA claims, so a later claimant (5e re-bind) finds it free.
+
+        // A driver is a long-lived service, not a one-shot. Signal bring-up
+        // success to the warden -- one line on stdout, the warden's readiness
+        // pipe -- then hold the device until DeviceRemoved.
+        //
+        // Quiesce FIRST: the warden's teardown is a forced group-terminate
+        // (revoke + kill) that skips Drop, so the device is reset here -- while
+        // this driver still runs -- leaving no live queue to DMA into the pages
+        // the reap then frees. A driver torn down mid-DMA with a still-live
+        // device is the MENAGERIE section-10 surprise-removal hazard; its full
+        // fencing (an IOMMU, or a cooperative quiesce-on-remove) is owed to
+        // net-2 / real hardware. The data path itself -- actually serving
+        // /dev/net/0 -- is also net-2; this proves the LIFECYCLE: a driver that
+        // is long-lived, supervised, and cleanly torn down on DeviceRemoved.
+        // Quiesce + announce on the console FIRST, then signal readiness LAST:
+        // the READY line is what wakes the warden, so emitting all console
+        // output before it keeps the warden's reaction from interleaving with
+        // this driver's logging on the shared console.
+        self.nic.quiesce();
+        say!("netdev-driver: serving (long-lived; awaiting DeviceRemoved)");
+        let mut out = libthyla_rs::io::stdout();
+        let _ = out.write_all(b"READY\n");
+
+        // Block until the warden's DeviceRemoved (a /proc/<pid>/ctl killgrp).
+        // wait_irq is a death-interruptible sleep (#811): on the group-terminate
+        // the Thread unwinds at its EL0-return checkpoint, so this never returns
+        // to its caller -- the Proc dies here. The device is quiesced, so no IRQ
+        // fires; the loop only re-blocks past any stale pending count.
+        loop {
+            let _ = self.nic.wait_irq();
+        }
     }
 }
 
