@@ -140,7 +140,7 @@ to be retrofitted later. The full per-chunk status (SHAs, tests, audits) lives i
   24/24` + 0 EXTINCTION + the SMP gate. **LANDED** (`memory/audit_5d_closed_list.md`;
   refs `118-libdriver.md` + `119-warden.md`).
 - **5e** `DeviceRemoved` revoke+terminate + supervision — the driver-lifecycle
-  half of the Menagerie spine. **5e-1** (`<HASH>`) **long-lived serve +
+  half of the Menagerie spine. **5e-1** (`8874ec5`) **long-lived serve +
   DeviceRemoved teardown**: `netdev-driver` goes long-lived (24-ARP proof →
   `READY` → quiesce → block in `Irq::wait` until removed, never self-exiting);
   the warden's `bind_and_run` reads a readiness line via `await_readiness` (a
