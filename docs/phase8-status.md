@@ -155,7 +155,7 @@ to be retrofitted later. The full per-chunk status (SHAs, tests, audits) lives i
   virtio-blk slot post-pivot. Device build + clippy clean + the SMP gate. The
   live-DMA-at-forced-teardown is the documented MENAGERIE section-10 hazard (an
   IOMMU / cooperative-quiesce fix owed net-2/real-hw). Ref `119-warden.md`.
-  **LANDED**. **5e-2** (`*(pending)*`) **bounded restart-on-crash supervision**:
+  **LANDED**. **5e-2** (`ac400df`) **bounded restart-on-crash supervision**:
   the warden's `bind_and_run` is refactored into `run_once` (confer + one attempt
   → a `RunOutcome`) + `supervise` (the restart loop) driving the new PURE,
   host-tested `libdriver::supervise::next_step` (restart-vs-settle per the
