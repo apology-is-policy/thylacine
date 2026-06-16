@@ -127,7 +127,7 @@ to be retrofitted later. The full per-chunk status (SHAs, tests, audits) lives i
   bank-probe) + `usr/netdev-driver` (`impl Driver`, the 24-ARP proof) bound by
   `virtio:1`; retired `netdev-test`. Self-found at 5d-3: a sub-page slot grant is
   unmappable (MMIO is page-granular) → `to_allowance` page-rounds each window.
-  **5d-4** (`<HASH>`) the **composed focused audit close** (Opus-4.8-max prosecutor
+  **5d-4** (`1535ad8`) the **composed focused audit close** (Opus-4.8-max prosecutor
   + concurrent self-audit, independently converged): **0 P0 / 1 P1 / 2 P2 / 2 P3,
   all fixed/dispositioned**. F1 [P1] the warden conferred a source's reported
   reg/INTID unchecked against the granted bank (a non-TCB source could inflate a
