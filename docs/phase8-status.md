@@ -171,9 +171,24 @@ to be retrofitted later. The full per-chunk status (SHAs, tests, audits) lives i
   kernel collapses non-"ok" exits to 1 (`sys_exits_handler`), so the supervisor
   reads clean-vs-crashed only, not specific exit codes (the finer policy lands
   with the structured 64-bit exit_status, docs/ERRORS.md). Refs `118`/`119`.
-  **LANDED**. Then **5e-3** device-gone terminal CQE → a consumer (SrvConn
-  vehicle); **5e-4** composed focused audit + SMP gate + close. → step 6
-  (PCIe/USB sources + the per-(bus,dev,fn) PCI allowance axis #159).
+  **LANDED**. **5e-3** *(pending)* **device-gone `-ENODEV` CQE proven over the
+  production SrvConn transport**: a kernel test
+  (`9p_srvconn_transport.devgone_posts_nodev_cqe`) stands up a real byte-mode
+  `SrvConn` pair, handshakes a 9P client over the production
+  `p9_srvconn_transport`, leaves a `Tfsync` in flight, then calls the actual
+  `srvconn_teardown` (the path a `DeviceRemoved` group-terminate drives) and
+  pumps the reader — proving the real `SrvConn` returns recv-0 on teardown (not
+  recv-`-1`), so the device-gone reason reaches a real Loom CQ as `-ENODEV`. Its
+  companion `transport_err_posts_eio_cqe` arms a past recv deadline on the same
+  setup so the recv returns `-1` → `-EIO`, pinning the distinction over the wire
+  a driver's Loom rides (neither passes unless the classifier discriminates).
+  Step-4 (#162-165) landed the production path + the loopback proof (`force_eof`
+  *synthesizes* the recv-0); 5e-3 closes the gap end-to-end over the production
+  transport with no production code change (`canonical_responder` is shared —
+  un-static'd — to pre-stage the handshake replies). Tests 918 → 920/920; boot
+  OK + 0 EXTINCTION; the SMP gate. Ref `107-loom.md` (device-gone). **LANDED**.
+  **5e-4** composed focused audit over the whole 5e arc + SMP gate + close. →
+  step 6 (PCIe/USB sources + the per-(bus,dev,fn) PCI allowance axis #159).
 
 ### the net arc (resumes on the PCI NIC, after the Menagerie spine)
 

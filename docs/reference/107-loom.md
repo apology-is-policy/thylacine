@@ -320,6 +320,20 @@ consumer's client. The **Loom side is unchanged**: `loom_async_complete` already
 passes `status` through `loom_payload_result` (`(s32)status` for an error), so the
 CQE carries `-19` (ENODEV) verbatim.
 
+**Proven over the production transport (Menagerie 5e-3).** The step-4 tests
+established the distinction over the single-slot loopback, where `force_eof`
+*synthesizes* the recv-0. `9p_srvconn_transport.devgone_posts_nodev_cqe`
+(`kernel/test/test_9p_srvconn_transport.c`) closes the gap end-to-end over the
+**real `p9_srvconn_transport`**: it stands up a byte-mode `SrvConn` pair, hand-
+shakes a 9P client over it, leaves a `Tfsync` in flight, then calls the actual
+`srvconn_teardown` (the path a `DeviceRemoved` group-terminate drives) and pumps
+the reader — proving the production `SrvConn` genuinely returns recv-0 on
+teardown (not recv-`-1`), so the device-gone reason reaches a real Loom CQ as
+`-ENODEV`. Its companion `transport_err_posts_eio_cqe` arms a past recv deadline
+on the *same* setup so the recv returns `-1` instead, yielding `-EIO` — the pair
+pins the distinction over the wire a driver's Loom rides (neither can pass unless
+the classifier discriminates).
+
 **`p9_client_mark_devgone(c)`** is the explicit secondary entry point: a device-
 teardown hook that *holds* the client (the dev9p layer; a future driver-removal
 path) can proactively fail every in-flight async op with `-ENODEV`. Idempotent (a

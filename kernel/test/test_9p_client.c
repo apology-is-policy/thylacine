@@ -76,8 +76,11 @@ static u8 g_loopback_resp[4096];
 
 // Reusable responder that handles every Tmsg type with a sensible
 // canned response. Tests choose which fid path / qid the server
-// returns by reading the request opcode + tag.
-static int canonical_responder(void *ctx, const u8 *req, size_t req_len,
+// returns by reading the request opcode + tag. Non-static: the
+// SrvConn-vehicle device-gone tests (test_9p_srvconn_transport.c)
+// pre-stage handshake replies through it -- the single source of
+// truth for the canonical 9P2000.L reply byte layouts.
+int canonical_responder(void *ctx, const u8 *req, size_t req_len,
                                  u8 *resp, size_t resp_cap) {
     (void)ctx;
     if (req_len < P9_HDR_LEN) return -1;

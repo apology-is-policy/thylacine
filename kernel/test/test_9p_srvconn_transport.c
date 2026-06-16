@@ -28,11 +28,15 @@
 
 #include "test.h"
 
+#include <thylacine/9p_client.h>
+#include <thylacine/9p_session.h>
 #include <thylacine/9p_srvconn_transport.h>
 #include <thylacine/9p_transport.h>
+#include <thylacine/9p_wire.h>
 #include <thylacine/dev.h>
 #include <thylacine/devsrv.h>
 #include <thylacine/handle.h>
+#include <thylacine/loom.h>
 #include <thylacine/proc.h>
 #include <thylacine/spoor.h>
 #include <thylacine/srvconn.h>
@@ -41,6 +45,13 @@
 // Test-support registry wipe (non-static; defined in kernel/devsrv.c).
 extern void srv_registry_reset(void);
 extern u64 timer_now_ns(void);
+
+// The shared 9P2000.L canned-reply builder (non-static; defined in
+// test_9p_client.c). The SrvConn-vehicle device-gone tests pre-stage their
+// handshake replies through it -- one source of truth for the reply byte
+// layouts, so a future wire change cannot silently desync this file.
+int canonical_responder(void *ctx, const u8 *req, size_t req_len,
+                        u8 *resp, size_t resp_cap);
 
 // Forward decls for the registered test entries (suppress -Wmissing-
 // prototypes; matches the rest of the kernel test corpus pattern).
@@ -52,6 +63,8 @@ void test_9p_srvconn_transport_close_drops_srvconn_ref(void);
 void test_9p_srvconn_transport_kernel_attached_skips_teardown_on_handle_close(void);
 void test_9p_srvconn_transport_send_preserves_caller_deadline(void);
 void test_9p_srvconn_transport_deadline_vtable_routes(void);
+void test_9p_srvconn_transport_devgone_posts_nodev_cqe(void);
+void test_9p_srvconn_transport_transport_err_posts_eio_cqe(void);
 
 // =============================================================================
 // Helpers (mirror test_srv_client.c's pattern).
@@ -622,4 +635,200 @@ void test_9p_srvconn_transport_kernel_attached_skips_teardown_on_handle_close(vo
         drop_test_proc(server);
         drop_test_proc(client);
     }
+}
+
+// =============================================================================
+// 9p_srvconn_transport.devgone_posts_nodev_cqe       (Menagerie 5e-3)
+// 9p_srvconn_transport.transport_err_posts_eio_cqe
+//
+// Step-4 (#162-165) threaded the death REASON through the async (Loom) 9P
+// completion path: a clean peer-gone EOF (recv 0) completes an in-flight async
+// op with the device-gone -P9_E_NODEV CQE; a transport error (recv -1) keeps
+// the generic -P9_E_IO. Until now that distinction was proven only over the
+// single-slot loopback test transport, where force_eof SYNTHESIZES the recv-0.
+// These two tests prove it END-TO-END over the PRODUCTION p9_srvconn_transport:
+// a real srvconn_teardown (the path a DeviceRemoved drives) latches s2c EOF, so
+// the kernel client's recv returns 0 -> -ENODEV reaches a real Loom consumer,
+// while a real deadline-elapsed recv returns -1 -> -EIO. The load-bearing claim
+// is that the production SrvConn ACTUALLY produces recv-0-on-teardown (not -1),
+// so the device-gone reason reaches the CQE consumer over the wire a driver's
+// Loom rides -- the gap the loopback's synthetic force_eof cannot close.
+// =============================================================================
+
+struct sc_async_op {
+    struct p9_rpc rpc;          // MUST be first: on_complete casts rpc -> op
+    struct Loom  *loom;
+    u64           user_data;
+    s32           last_result;
+    bool          completed;
+};
+_Static_assert(__builtin_offsetof(struct sc_async_op, rpc) == 0,
+               "rpc must be first for the on_complete container cast");
+
+static struct p9_client    g_sc_client;
+static u8                  g_sc_recv_buf[8192];
+static struct sc_async_op  g_sc_async;
+
+static void sc_async_on_complete(struct p9_rpc *rpc, int status,
+                                 struct p9_dispatch_result *dr) {
+    struct sc_async_op *op = (struct sc_async_op *)rpc;   // rpc is first
+    (void)dr;
+    op->last_result = (s32)status;
+    op->completed   = true;
+    (void)loom_post_cqe(op->loom, op->user_data, (s32)status, 0);
+}
+
+// Build thunk: a Tfsync on the fid passed via ctx. send_fsync permits the
+// attach-bound root fid (unlike send_clunk), so the test needs no walk -- one
+// fewer pre-staged reply.
+static int sc_build_fsync(struct p9_session *s, u8 *out, size_t cap, void *ctx) {
+    u32 fid = *(u32 *)ctx;
+    return p9_session_send_fsync(s, out, cap, fid, /*datasync=*/0);
+}
+
+// Build the canonical reply for a request of `type` + `tag` and stage it into
+// the SrvConn's s2c ring (server -> kernel client). A unit test has no live
+// server thread to produce replies, so the handshake replies are pre-positioned
+// here; do_recv is framed (size-prefixed) so each phase consumes exactly one.
+static int sc_stage_reply(struct SrvConn *cn, u8 type, u16 tag) {
+    u8 req[P9_HDR_LEN];
+    req[0] = P9_HDR_LEN; req[1] = 0; req[2] = 0; req[3] = 0;   // size = header-only
+    req[4] = type;
+    req[5] = (u8)(tag & 0xff); req[6] = (u8)((tag >> 8) & 0xff);
+    u8 resp[64];
+    int rlen = canonical_responder(NULL, req, sizeof(req), resp, sizeof(resp));
+    if (rlen <= 0) return -1;
+    long n = srvconn_server_send(cn, resp, (long)rlen);
+    return (n == (long)rlen) ? 0 : -1;
+}
+
+// Stand up an OPEN 9P client (g_sc_client) over a real byte-mode SrvConn: wrap
+// the client end in the production adapter, pre-stage Rversion (NOTAG) then
+// Rattach (tag 0 -- the first alloc_tag on a fresh session; Tversion is NOTAG +
+// reserves no slot), and run the real handshake to OPEN (binding root fid 0).
+// *out_st is the adapter storage the caller keeps live until cleanup; *out_ops
+// is its vtable (for the close that drops the adapter's srvconn_ref).
+static int sc_open_handshaked(struct SrvConn *cn,
+                              struct p9_srvconn_transport *out_st,
+                              struct p9_transport_ops *out_ops) {
+    if (p9_srvconn_transport_init(out_st, cn) != 0) return -1;
+    *out_ops = p9_srvconn_transport_ops(out_st);
+
+    srvconn_set_client_deadline(cn, 0);   // present data -> recv returns at once
+    if (sc_stage_reply(cn, P9_TVERSION, P9_NOTAG) != 0) return -1;
+    if (sc_stage_reply(cn, P9_TATTACH, 0) != 0)         return -1;
+
+    if (p9_client_init(&g_sc_client, /*root_fid=*/0, /*msize=*/8192, *out_ops,
+                       g_sc_recv_buf, sizeof(g_sc_recv_buf)) != 0)
+        return -1;
+    const u8 uname[] = { 'r','o','o','t' };
+    const u8 aname[] = { '/' };
+    return p9_client_handshake(&g_sc_client, uname, sizeof(uname),
+                               aname, sizeof(aname), 0);
+}
+
+void test_9p_srvconn_transport_devgone_posts_nodev_cqe(void) {
+    srv_registry_reset();
+
+    struct Proc *server = NULL, *client = NULL;
+    int svc_h = -1, conn_h = -1;
+    struct SrvConn *cn = open_byte_mode_pair(&server, &client, &svc_h, &conn_h);
+    TEST_ASSERT(cn != NULL, "open_byte_mode_pair");
+
+    struct p9_srvconn_transport st;
+    struct p9_transport_ops ops;
+    TEST_EXPECT_EQ(sc_open_handshaked(cn, &st, &ops), 0,
+        "handshake -> OPEN over the real srvconn");
+
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create(8,16)");
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    // In-flight async op over the real transport: a Tfsync on the attach-bound
+    // root fid 0. No reply is staged, so it stays registered in c->inflight[]
+    // until device-gone completes it.
+    g_sc_async.loom        = l;
+    g_sc_async.user_data   = 0x5E3D00DFEEDULL;
+    g_sc_async.last_result = 0x7fffffff;
+    g_sc_async.completed   = false;
+    g_sc_async.rpc.on_complete = sc_async_on_complete;
+    u32 fid = 0;
+    int rc = p9_client_submit_async(&g_sc_client, &g_sc_async.rpc, sc_build_fsync, &fid);
+    TEST_EXPECT_EQ(rc, 0, "submit_async(fsync) over srvconn -- op in flight");
+    TEST_ASSERT(!g_sc_async.completed, "not completed before device-gone");
+
+    // DEVICE GONE: tear down the real SrvConn (the production path a
+    // DeviceRemoved drives). This latches s2c EOF, so the kernel client's next
+    // recv returns 0 -- a CLEAN peer-gone EOF, NOT a -1 transport error. THE
+    // LOAD-BEARING DISTINCTION: a real srvconn_teardown yields recv-0, which the
+    // reader classifies device-gone -> -ENODEV. The loopback peer-gone test only
+    // SYNTHESIZES the recv-0 (force_eof); this proves the production transport
+    // actually produces it over the wire a driver's Loom rides.
+    srvconn_teardown(cn);
+
+    int pumped = p9_client_reader_pump_once(&g_sc_client);
+    TEST_EXPECT_EQ(pumped, -P9_E_IO, "pump returns DEAD (a control signal)");
+    TEST_ASSERT(g_sc_async.completed, "async op completed on the device-gone EOF");
+    TEST_EXPECT_EQ((u64)(s64)g_sc_async.last_result, (u64)(s64)(-P9_E_NODEV),
+        "device-gone CQE = -ENODEV (NOT -EIO) over the real srvconn");
+    TEST_EXPECT_EQ((u64)h->cq_tail, (u64)1, "exactly one CQE reached the consumer");
+    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)(s64)(-P9_E_NODEV),
+        "the consumer's CQE carries -ENODEV");
+    TEST_EXPECT_EQ(cqes[0].user_data, 0x5E3D00DFEEDULL,
+        "CQE user_data echoed to the consumer");
+
+    p9_client_destroy(&g_sc_client);
+    (void)ops.close(ops.ctx);            // teardown (idempotent) + drop adapter ref
+    p9_srvconn_transport_destroy(&st);
+    loom_unref(l);
+    cleanup_byte_mode_pair(server, client, conn_h);
+}
+
+void test_9p_srvconn_transport_transport_err_posts_eio_cqe(void) {
+    srv_registry_reset();
+
+    struct Proc *server = NULL, *client = NULL;
+    int svc_h = -1, conn_h = -1;
+    struct SrvConn *cn = open_byte_mode_pair(&server, &client, &svc_h, &conn_h);
+    TEST_ASSERT(cn != NULL, "open_byte_mode_pair");
+
+    struct p9_srvconn_transport st;
+    struct p9_transport_ops ops;
+    TEST_EXPECT_EQ(sc_open_handshaked(cn, &st, &ops), 0,
+        "handshake -> OPEN over the real srvconn");
+
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create(8,16)");
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    g_sc_async.loom        = l;
+    g_sc_async.user_data   = 0x5E3E10C0DEULL;
+    g_sc_async.last_result = 0x7fffffff;
+    g_sc_async.completed   = false;
+    g_sc_async.rpc.on_complete = sc_async_on_complete;
+    u32 fid = 0;
+    int rc = p9_client_submit_async(&g_sc_client, &g_sc_async.rpc, sc_build_fsync, &fid);
+    TEST_EXPECT_EQ(rc, 0, "submit_async(fsync) over srvconn -- op in flight");
+
+    // TRANSPORT ERROR (not device-gone): arm a PAST recv deadline. The next recv
+    // on the empty -- but NOT torn -- s2c times out and returns -1 (an error),
+    // NOT 0 (a clean EOF). The reader classifies this transport, not device-gone
+    // -> the in-flight op gets the generic -EIO. The contrast proves the SrvConn
+    // distinguishes the two reasons: the -ENODEV companion above is not an
+    // accident of the transport always returning 0.
+    srvconn_set_client_deadline(cn, timer_now_ns());   // already elapsed -> -1
+    int pumped = p9_client_reader_pump_once(&g_sc_client);
+    TEST_EXPECT_EQ(pumped, -P9_E_IO, "pump returns DEAD");
+    TEST_ASSERT(g_sc_async.completed, "async op completed on the transport error");
+    TEST_EXPECT_EQ((u64)(s64)g_sc_async.last_result, (u64)(s64)(-P9_E_IO),
+        "transport-error CQE = -EIO (NOT device-gone) over the real srvconn");
+    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)(s64)(-P9_E_IO),
+        "the consumer's CQE carries -EIO");
+
+    p9_client_destroy(&g_sc_client);
+    (void)ops.close(ops.ctx);
+    p9_srvconn_transport_destroy(&st);
+    loom_unref(l);
+    cleanup_byte_mode_pair(server, client, conn_h);
 }
