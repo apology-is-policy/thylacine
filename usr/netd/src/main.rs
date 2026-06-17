@@ -33,6 +33,7 @@ static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::Th
 use libdriver::driver::{run, Driver};
 use libdriver::resource::BoundResources;
 use libdriver::{DeviceId, Error};
+use libthyla_rs::io::Write;
 use libthyla_rs::time::{sleep, Duration, Instant};
 use netdev::{VirtioNetPci, MAX_FRAME};
 
@@ -63,6 +64,15 @@ const ETHERNET_HEADER: usize = 14;
 /// converges in a few polls; the bound (~5s) is the fail-closed backstop.
 const POLL_MS: u64 = 10;
 const MAX_POLLS: u32 = 500;
+
+/// The resident loop's idle poll bounds (ms). netd honors smoltcp's poll-delay
+/// hint clamped to [MIN, MAX]: the MIN floor forecloses a 0ms spin if the stack
+/// ever asks for an immediate re-poll (no busy-spin, #108); the MAX ceiling keeps
+/// netd responsive and bounds the idle-wakeup rate. Post-lease with no active
+/// sockets the hint is the DHCP renew deadline (minutes), so idle netd wakes
+/// ~once/sec. net-2b-2 replaces this loop with the IRQ + 9P-accept event loop.
+const IDLE_POLL_MIN_MS: u64 = 50;
+const IDLE_POLL_MAX_MS: u64 = 1000;
 
 // =============================================================================
 // smoltcp phy::Device over the virtio-net-pci NIC.
@@ -212,45 +222,74 @@ impl Driver for NetD {
         let dhcp = dhcpv4::Socket::new();
         let dhcp_handle = sockets.add(dhcp);
 
+        // Bring-up: poll the stack until the DHCP client leases an address. A
+        // bounded sleep-poll loop (not an IRQ wait) -- it cannot hang, the right
+        // shape for a boot bring-up. slirp answers immediately, so it converges in
+        // a few polls; the bound (~5s) is the fail-closed backstop.
+        let mut leased = false;
         for _ in 0..MAX_POLLS {
             let ts = now(&base);
             iface.poll(ts, &mut device, &mut sockets);
 
-            if let Some(ev) = sockets.get_mut::<dhcpv4::Socket>(dhcp_handle).poll() {
-                match ev {
-                    dhcpv4::Event::Configured(cfg) => {
-                        iface.update_ip_addrs(|addrs| {
-                            addrs.clear();
-                            let _ = addrs.push(IpCidr::Ipv4(cfg.address));
-                        });
-                        if let Some(router) = cfg.router {
-                            let _ = iface.routes_mut().add_default_ipv4_route(router);
-                        }
-                        // The MTU sanity check: the L2 frame minus the Ethernet
-                        // header is the IP MTU smoltcp will use.
-                        say!(
-                            "netd: DHCP lease addr={} router={:?} dns={} ip-mtu={}",
-                            cfg.address,
-                            cfg.router,
-                            cfg.dns_servers.len(),
-                            MAX_FRAME - ETHERNET_HEADER
-                        );
-                        say!("netd: PASS -- smoltcp brought the link up via the PCI NIC (DHCP)");
-                        return Ok(());
-                    }
-                    dhcpv4::Event::Deconfigured => {}
+            if let Some(dhcpv4::Event::Configured(cfg)) =
+                sockets.get_mut::<dhcpv4::Socket>(dhcp_handle).poll()
+            {
+                iface.update_ip_addrs(|addrs| {
+                    addrs.clear();
+                    let _ = addrs.push(IpCidr::Ipv4(cfg.address));
+                });
+                if let Some(router) = cfg.router {
+                    let _ = iface.routes_mut().add_default_ipv4_route(router);
                 }
+                // The IP MTU is the L2 frame minus the Ethernet header.
+                say!(
+                    "netd: DHCP lease addr={} router={:?} dns={} ip-mtu={}",
+                    cfg.address,
+                    cfg.router,
+                    cfg.dns_servers.len(),
+                    MAX_FRAME - ETHERNET_HEADER
+                );
+                leased = true;
+                break;
             }
 
             let _ = sleep(Duration::from_millis(POLL_MS));
         }
 
-        say!(
-            "netd: FAIL -- no DHCP lease after {} polls (~{}s)",
-            MAX_POLLS,
-            MAX_POLLS as u64 * POLL_MS / 1000
-        );
-        Err(Error::Hardware)
+        if !leased {
+            say!(
+                "netd: FAIL -- no DHCP lease after {} polls (~{}s)",
+                MAX_POLLS,
+                MAX_POLLS as u64 * POLL_MS / 1000
+            );
+            return Err(Error::Hardware);
+        }
+
+        // A persistent service, not a one-shot. Announce success on the console,
+        // then signal readiness LAST: the READY line is what the warden's
+        // readiness pipe waits on, so all console output precedes it (the
+        // netdev-driver ordering discipline). The manifest's `lifecycle =
+        // persistent` then has the warden LEAVE netd running. net-2b-2 stands the
+        // /net 9P server up here, in the same loop.
+        say!("netd: PASS -- smoltcp brought the link up via the PCI NIC (DHCP)");
+        say!("netd: serving (persistent; /net 9P server lands at net-2b-2)");
+        let mut out = libthyla_rs::io::stdout();
+        let _ = out.write_all(b"READY\n");
+
+        // The resident loop: keep servicing the stack (DHCP renew, ARP) until the
+        // Proc dies. Honoring smoltcp's poll-delay hint (clamped) keeps an idle
+        // netd from busy-spinning (#108); net-2b-2 replaces it with the IRQ +
+        // 9P-accept multiplexed event loop.
+        loop {
+            let ts = now(&base);
+            iface.poll(ts, &mut device, &mut sockets);
+            let ms = iface
+                .poll_delay(ts, &sockets)
+                .map(|d| d.total_millis())
+                .unwrap_or(IDLE_POLL_MAX_MS)
+                .clamp(IDLE_POLL_MIN_MS, IDLE_POLL_MAX_MS);
+            let _ = sleep(Duration::from_millis(ms));
+        }
     }
 }
 

@@ -89,16 +89,18 @@ pub struct Manifest {
     pub abi: u32,
     pub binds: Vec<String>,   // compatible strings, most-specific first
     pub needs: Needs,
-    pub serves: String,       // path template; "%instance" expands per bind
+    pub serves: String,        // path template; "%instance" expands per bind
     pub restart: Restart,
-    pub sig: Option<String>,  // section-9 authorization input; carried verbatim
+    pub lifecycle: Lifecycle,  // Persistent (left running on READY) | Transient (default)
+    pub sig: Option<String>,   // section-9 authorization input; carried verbatim
 }
 pub struct Needs { pub mmio: MmioNeed, pub irq: IrqNeed, pub dma: DmaNeed, pub pci: PciNeed }
-pub enum MmioNeed { None, Node }                  // "node:reg"
-pub enum IrqNeed  { None, Node, Msi(u32) }        // "node:interrupts" | "msi:N"
-pub enum DmaNeed  { None, Pool(u64) }             // "pool: N" bytes
-pub enum PciNeed  { None, Node }                  // "node" -- the bound function's (bus,dev,fn)
-pub enum Restart  { Never, OnCrash, Always }
+pub enum MmioNeed  { None, Node }                 // "node:reg"
+pub enum IrqNeed   { None, Node, Msi(u32) }       // "node:interrupts" | "msi:N"
+pub enum DmaNeed   { None, Pool(u64) }            // "pool: N" bytes
+pub enum PciNeed   { None, Node }                 // "node" -- the bound function's (bus,dev,fn)
+pub enum Restart   { Never, OnCrash, Always }
+pub enum Lifecycle { Transient, Persistent }      // warden owns teardown | leave running on READY
 
 impl Manifest {
     pub fn parse(text: &str) -> Result<Manifest, Error>;  // the section-6 brace block
@@ -117,14 +119,16 @@ driver "rp1-eth" {
         irq  = "msi:1"           # one MSI vector  (or "node:interrupts" for wired)
         dma  = "pool: 2 MiB"
     }
-    serves   = "/dev/net/%instance"
-    restart  = on-crash
-    sig      = "<ed25519 over the package>"   # optional
+    serves    = "/dev/net/%instance"
+    restart   = on-crash
+    lifecycle = persistent                    # a standing NIC service (default: transient)
+    sig       = "<ed25519 over the package>"  # optional
 }
 ```
 
 Required keys: `abi`, `binds` (non-empty), `serves`. Optional: `needs` (defaults
-to all-`None`), `restart` (defaults to `OnCrash`), `sig`. `#` starts a
+to all-`None`), `restart` (defaults to `OnCrash`), `lifecycle` (defaults to
+`Transient`), `sig`. `#` starts a
 line-comment. Sizes accept binary units (`2 MiB`, `512 KiB`, `1 GiB`, `64 B`, or
 a bare byte count).
 

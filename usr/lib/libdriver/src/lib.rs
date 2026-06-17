@@ -32,15 +32,17 @@ pub mod supervise;
 #[cfg(feature = "driver")]
 pub mod driver;
 
-pub use manifest::{DmaNeed, IrqNeed, Manifest, MmioNeed, Needs, PciNeed, Restart, MANIFEST_ABI};
-pub use readyline::{feed_ready_line, ReadyLine, READY_LINE_MAX};
-pub use supervise::{
-    backoff_ms, next_step, Disposition, RunOutcome, SuperviseStep, BACKOFF_MAX_MS, RESTART_LIMIT,
+pub use manifest::{
+    DmaNeed, IrqNeed, Lifecycle, Manifest, MmioNeed, Needs, PciNeed, Restart, MANIFEST_ABI,
 };
+pub use readyline::{feed_ready_line, ReadyLine, READY_LINE_MAX};
 pub use resource::{resolve, BoundResources, NodeResources, DESCRIPTOR_VERSION, MAX_IRQ, MAX_MMIO};
 pub use source::{
     best_match, parse_pci_ctl, reconcile_reported_node, DeviceId, DeviceNode, DiscoverySource,
     MAX_IDS, NODE_RECORD_VERSION,
+};
+pub use supervise::{
+    backoff_ms, next_step, Disposition, RunOutcome, SuperviseStep, BACKOFF_MAX_MS, RESTART_LIMIT,
 };
 
 #[cfg(feature = "driver")]

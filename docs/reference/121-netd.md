@@ -32,8 +32,9 @@ driver "netd" {
         irq = "node:interrupts"   # the swizzled INTx INTID
         dma = "pool: 64 KiB"      # the ring + frame pools (4 KiB ring + 2×32 KiB)
     }
-    serves  = "/dev/net/%instance"
-    restart = on-crash
+    serves    = "/net"            # the 9P /net tree (served from net-2b-2)
+    restart   = on-crash
+    lifecycle = persistent        # a standing service -- the warden leaves it running
 }
 ```
 
@@ -51,12 +52,16 @@ spawn/grant/readiness protocol identically to every other bound driver:
 - **`probe(grant)`** — verify `DeviceId::parse(grant.compatible) == VirtioPci(1)`,
   then `VirtioNetPci::open()` (claim the function, map BARs, run the VIRTIO 1.2
   modern-PCI init, arm the device). A non-net grant or an open failure → `Err`.
-- **`serve(self, grant)`** — own the device and run the stack. At net-2a this is
-  the one-shot DHCP proof (below). net-2b makes it the persistent 9P serve loop.
+- **`serve(self, grant)`** — own the device and run the stack. It brings the link
+  up (the DHCP proof, below), then — since net-2b-1 — signals `READY` and stays
+  resident in a stack-poll loop (the warden's `lifecycle = persistent` leaves it
+  running). net-2b-2 turns that loop into the 9P `/net` serve loop.
 
 Diagnostics go to the **console** (`t_putstr`): a warden-spawned driver's stderr
-is `/dev/null`, and a one-shot signals completion by **exiting** (the warden's
-`try_wait`), never by a `READY` line (which is the long-lived-service contract).
+is `/dev/null`. netd is a **persistent** service, so it signals bring-up success
+with a `READY` line on stdout (the warden's readiness pipe) and then stays
+resident — the long-lived-service contract, as opposed to a one-shot that signals
+completion by **exiting**.
 
 ## The smoltcp stack
 
@@ -110,9 +115,37 @@ netd: DHCP lease addr=10.0.2.15/24 router=Some(10.0.2.2) dns=1 ip-mtu=1500
 netd: PASS -- smoltcp brought the link up via the PCI NIC (DHCP)
 ```
 
-The warden reaps netd `code=Some(0)` → `Disposition::Up`. On DHCP failure netd
-exits non-zero → the warden restarts it (bounded) then gives up SOFT — the boot
-still completes.
+On DHCP failure netd exits non-zero → the warden restarts it (bounded) then gives
+up SOFT — the boot still completes. **On success** netd no longer exits: since
+net-2b-1 it signals `READY` and stays resident (below).
+
+## net-2b-1: the persistent lifecycle
+
+net-2a's `serve` exited after the lease (a one-shot); net-2b-1 makes netd a
+**resident service**. After the DHCP lease it announces success on the console,
+signals `READY` on stdout, and enters a resident stack-poll loop that never
+returns — keeping the link up (DHCP renew, ARP) until the Proc dies:
+
+```
+netd: PASS -- smoltcp brought the link up via the PCI NIC (DHCP)
+netd: serving (persistent; /net 9P server lands at net-2b-2)
+warden: netd pid=… up (READY) -> serving (persistent; left running)
+```
+
+The warden's `lifecycle = persistent` manifest field (libdriver `Lifecycle`,
+[118-libdriver.md](118-libdriver.md); MENAGERIE.md §5) is what makes the warden
+*leave netd running* on `READY` instead of tearing it down via `DeviceRemoved`
+(the transient path the `netdev-driver` MMIO demo still exercises). The warden
+drops netd's `Child` un-waited (no kill-on-drop), so netd reparents to the
+orphan-adopter when the warden exits; its I-34 allowance is bound to its own Proc
+(confer-at-spawn, #160), so the warden's exit neither revokes the NIC nor reaps
+the daemon.
+
+The resident loop honors smoltcp's `poll_delay` hint, clamped to `[50 ms, 1 s]`:
+a floor that forecloses a 0 ms busy-spin (the #108 idle-spin class), a ceiling
+that keeps netd responsive and bounds the idle-wakeup rate. With no active
+sockets the hint is the DHCP renew deadline, so an idle netd wakes ~once/second.
+net-2b-2 replaces this loop with the IRQ + 9P-accept multiplexed event loop.
 
 ## Data structures
 
@@ -146,9 +179,12 @@ still completes.
   the DHCP-lease boot proof; netd is the warden-bound `virtio-pci:1` driver
   (retiring the `netdev-pci-driver` ARP demo it subsumes). The kernel is
   byte-unchanged (pure userspace).
-- **net-2b**: netd becomes a persistent 9P server (the corvus precedent +
-  `libthyla_rs::ninep`) — posts to `/srv`, serves the NET-DESIGN.md §3.1 `/net`
-  schema, mounted at `/net`; the warden leaves it running.
+- **net-2b-1 (LANDED)**: the persistent lifecycle — the libdriver `Lifecycle`
+  manifest field + the warden's leave-running-on-`READY` policy; netd signals
+  `READY` and stays resident in the stack-poll loop. The kernel is byte-unchanged.
+- **net-2b-2**: the 9P `/net` server (the corvus precedent + `libthyla_rs::ninep`)
+  — posts to `/srv/net`, serves the NET-DESIGN.md §3.1 `/net` directory schema,
+  joey mounts it at `/net`; the resident loop multiplexes the NIC IRQ + 9P accept.
 - **net-2c**: the `/net/tcp` `clone`/`connect`/`data` client path + the §3.4 fid
   state machine (one fid ↔ one smoltcp socket; N reuse gated on clunk).
 - **net-2d**: the focused audit over the netd surface + the ARCH §25.4 /
@@ -156,11 +192,14 @@ still completes.
 
 ## Known caveats / seams
 
-- **One-shot at net-2a.** netd exits after the DHCP proof (the NIC is released);
-  it is not yet a persistent service. net-2b makes it long-lived.
-- **The sleep-poll loop** is deliberately not IRQ-driven (it cannot hang — the
-  one-shot proof bar); net-2b's serve loop integrates `wait_irq` + the smoltcp
-  `poll_delay` timer for an efficient persistent event loop.
+- **No 9P server until net-2b-2.** net-2b-1 makes netd resident (it holds the link
+  + signals `READY`), but it does not yet post `/srv/net` or serve the `/net` tree
+  — `serves = "/net"` is the declared (not-yet-realized) path. net-2b-2 lands the
+  9P server + the joey mount.
+- **The resident loop is sleep-poll, not IRQ-driven** (net-2b-1): it honors
+  smoltcp's `poll_delay` (clamped `[50 ms, 1 s]`), idle-light but not woken
+  promptly by RX. net-2b-2's serve loop integrates the NIC IRQ + the 9P accept
+  poll for a properly event-driven persistent loop.
 - **smoltcp owns wire-protocol correctness** (its authors spec'd it); netd's
   state machine (net-2c) wraps *a* socket abstraction, so the recorded fallback
   (a Plan 9 IP-stack port, NET-DESIGN.md §14) would not change `/net`.

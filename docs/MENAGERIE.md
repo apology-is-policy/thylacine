@@ -194,6 +194,16 @@ TCB; the drivers under it are not. Responsibilities:
 - **Supervision**: a crashed driver is restarted per its manifest policy; the
   service file blinks. Bounded restart (back-off + a give-up threshold) so a
   crash-looping driver does not spin.
+- **Lifecycle (persistent vs transient)**: a manifest's `lifecycle` declares
+  whether the warden leaves a brought-up driver *resident*. A `persistent`
+  service (e.g. `netd`) signals `READY` and the warden leaves it running past the
+  bind phase — it reparents to the orphan-adopter when the warden exits, and its
+  allowance is bound to its own Proc, so the warden's exit neither revokes the
+  device nor reaps the service. A `transient` driver (the default) is one the
+  warden's lifecycle governs end-to-end: on `READY` it is torn down via
+  `DeviceRemoved`, on a self-exit it is reaped. `DeviceRemoved` is thus the
+  *transient* teardown and the crash-restart primitive run forward — a persistent
+  service reaches it only on a real removal, crash, or shutdown.
 
 The warden owns **all** grant decisions — one auditable chokepoint. Bus drivers are
 *sources that report to it*, never spawners of their own children (which would
@@ -229,15 +239,19 @@ driver "rp1-eth" {
         irq  = "msi:1"           # one MSI vector  (or "node:interrupts" for wired)
         dma  = "pool: 2 MiB"
     }
-    serves   = "/dev/net/%instance"
-    restart  = on-crash          # supervisor policy
-    sig      = "<ed25519 over the package>"        # optional; drives section 9
+    serves    = "/dev/net/%instance"
+    restart   = on-crash          # supervisor policy (section 5)
+    lifecycle = persistent        # standing service; default: transient (section 5)
+    sig       = "<ed25519 over the package>"       # optional; drives section 9
 }
 ```
 
 `needs` is bounded by the node: the warden intersects the asks with the actual node
 resources, so a manifest cannot widen a driver's reach beyond its device. That
-intersection is the auditable-grant property (I-34) in one line.
+intersection is the auditable-grant property (I-34) in one line. `lifecycle`
+(optional, default `transient`) declares whether the warden leaves the driver
+resident on `READY` — `persistent` for a standing service like `netd`, `transient`
+for a one-shot/demo the warden tears down (§5).
 
 ---
 

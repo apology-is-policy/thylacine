@@ -55,6 +55,9 @@ pub struct Manifest {
     pub serves: String,
     /// The supervisor restart policy on a driver crash.
     pub restart: Restart,
+    /// Whether the warden leaves the brought-up driver resident (`Persistent`) or
+    /// owns its teardown (`Transient`, the default).
+    pub lifecycle: Lifecycle,
     /// An optional package signature -- the section-9 authorization input. Carried
     /// verbatim; this crate neither produces nor verifies it (a warden/policy
     /// concern), it only round-trips the field.
@@ -142,6 +145,28 @@ pub enum Restart {
     Always,
 }
 
+/// Whether the warden leaves a brought-up driver resident or owns its teardown
+/// (MENAGERIE.md section 5 -- supervision).
+///
+/// The same `serve()` blocks either way after signalling READY; the difference is
+/// a deployment policy, so it lives in the manifest (the grant DB), not the driver
+/// binary. A `transient` bring-up is a proof the warden owns end-to-end; a
+/// `persistent` one is a standing service the warden stands up and walks away from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lifecycle {
+    /// The warden owns the lifecycle. On READY it tears the driver down via
+    /// DeviceRemoved (the section-10 revoke + group-terminate -- the audited
+    /// surprise-removal path); on a self-exit it reaps. The default: a bring-up
+    /// is a proof, not a standing service.
+    Transient,
+    /// A standing service (e.g. `netd`). On READY the warden leaves it running and
+    /// continues the bind ladder, so the driver serves past the bind phase
+    /// (reparented to the orphan-adopter when the warden exits). Its hardware
+    /// allowance is tied to its own Proc, not the warden's, so the warden's exit
+    /// neither revokes the device nor reaps the service.
+    Persistent,
+}
+
 impl Manifest {
     /// Parse a manifest from its section-6 brace-block text. Returns
     /// `Error::Parse` on any malformed input -- the warden treats a bad manifest
@@ -192,6 +217,8 @@ impl Manifest {
         s.push_str(&self.serves);
         s.push_str("\"\n    restart = ");
         s.push_str(restart_str(self.restart));
+        s.push_str("\n    lifecycle = ");
+        s.push_str(lifecycle_str(self.lifecycle));
         s.push('\n');
         if let Some(sig) = &self.sig {
             s.push_str("    sig = \"");
@@ -255,6 +282,13 @@ fn restart_str(r: Restart) -> &'static str {
         Restart::Never => "never",
         Restart::OnCrash => "on-crash",
         Restart::Always => "always",
+    }
+}
+
+fn lifecycle_str(l: Lifecycle) -> &'static str {
+    match l {
+        Lifecycle::Transient => "transient",
+        Lifecycle::Persistent => "persistent",
     }
 }
 
@@ -412,6 +446,7 @@ impl<'a> Parser<'a> {
         let mut needs: Option<Needs> = None;
         let mut serves: Option<String> = None;
         let mut restart: Option<Restart> = None;
+        let mut lifecycle: Option<Lifecycle> = None;
         let mut sig: Option<String> = None;
 
         loop {
@@ -459,6 +494,13 @@ impl<'a> Parser<'a> {
                     self.expect(&Tok::Eq)?;
                     restart = Some(self.parse_restart()?);
                 }
+                "lifecycle" => {
+                    if lifecycle.is_some() {
+                        return Err(Error::Parse);
+                    }
+                    self.expect(&Tok::Eq)?;
+                    lifecycle = Some(self.parse_lifecycle()?);
+                }
                 "sig" => {
                     if sig.is_some() {
                         return Err(Error::Parse);
@@ -481,6 +523,7 @@ impl<'a> Parser<'a> {
             needs: needs.unwrap_or(Needs::NONE),
             serves: serves.ok_or(Error::Parse)?,
             restart: restart.unwrap_or(Restart::OnCrash),
+            lifecycle: lifecycle.unwrap_or(Lifecycle::Transient),
             sig,
         })
     }
@@ -577,6 +620,17 @@ impl<'a> Parser<'a> {
                 "never" => Ok(Restart::Never),
                 "on-crash" => Ok(Restart::OnCrash),
                 "always" => Ok(Restart::Always),
+                _ => Err(Error::Parse),
+            },
+            _ => Err(Error::Parse),
+        }
+    }
+
+    fn parse_lifecycle(&mut self) -> Result<Lifecycle, Error> {
+        match self.next()? {
+            Tok::Ident(s) => match s.as_str() {
+                "transient" => Ok(Lifecycle::Transient),
+                "persistent" => Ok(Lifecycle::Persistent),
                 _ => Err(Error::Parse),
             },
             _ => Err(Error::Parse),
@@ -722,7 +776,32 @@ driver "rp1-eth" {
         assert_eq!(m.needs, Needs::NONE);
         assert_eq!(m.needs.pci, PciNeed::None); // explicit: the new axis defaults off
         assert_eq!(m.restart, Restart::OnCrash);
+        assert_eq!(m.lifecycle, Lifecycle::Transient); // a bring-up is a proof by default
         assert_eq!(m.sig, None);
+    }
+
+    #[test]
+    fn lifecycle_persistent_parses_and_round_trips() {
+        // netd's manifest: a standing service the warden leaves running on READY.
+        let src = r#"driver "netd" {
+            abi = 1
+            binds = ["virtio-pci:1"]
+            needs { irq = "node:interrupts" dma = "pool: 64 KiB" pci = "node" }
+            serves = "/dev/net/%instance"
+            restart = on-crash
+            lifecycle = persistent
+        }"#;
+        let m = Manifest::parse(src).expect("parse");
+        assert_eq!(m.lifecycle, Lifecycle::Persistent);
+        // round-trips through the canonical text (emits + re-parses lifecycle)
+        let m2 = Manifest::parse(&m.to_text()).expect("re-parse");
+        assert_eq!(m, m2);
+    }
+
+    #[test]
+    fn lifecycle_rejects_bad_value() {
+        let src = r#"driver "x" { abi=1 binds=["a"] serves="/x" lifecycle=forever }"#;
+        assert!(Manifest::parse(src).is_err());
     }
 
     #[test]

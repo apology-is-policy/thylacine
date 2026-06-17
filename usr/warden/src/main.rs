@@ -45,8 +45,8 @@ use libthyla_rs::T_CAP_HW_CREATE;
 use libdriver::driver::to_allowance;
 use libdriver::{
     best_match, feed_ready_line, next_step, reconcile_reported_node, resolve, BoundResources,
-    DeviceId, DeviceNode, DiscoverySource, Disposition, DtbSource, Manifest, PciSource, ReadyLine,
-    RunOutcome, SuperviseStep, READY_LINE_MAX, RESTART_LIMIT,
+    DeviceId, DeviceNode, DiscoverySource, Disposition, DtbSource, Lifecycle, Manifest, PciSource,
+    ReadyLine, RunOutcome, SuperviseStep, READY_LINE_MAX, RESTART_LIMIT,
 };
 
 #[global_allocator]
@@ -124,8 +124,9 @@ driver "netd" {
         irq = "node:interrupts"
         dma = "pool: 64 KiB"
     }
-    serves  = "/dev/net/%instance"
-    restart = on-crash
+    serves    = "/net"
+    restart   = on-crash
+    lifecycle = persistent
 }
 "#,
 ];
@@ -172,8 +173,7 @@ pub extern "C" fn rs_main() -> i64 {
                 );
                 // The warden's OWN trusted view of the slots -- the source supplies
                 // identity, the warden supplies resources (reconcile_reported_node).
-                let trusted: Vec<DeviceNode> =
-                    virtio_slots.iter().map(|n| (*n).clone()).collect();
+                let trusted: Vec<DeviceNode> = virtio_slots.iter().map(|n| (*n).clone()).collect();
                 let typed = run_virtio_mmio_source(bank, &trusted);
                 say!(
                     "warden: virtio-mmio source reported {} typed node(s)",
@@ -202,7 +202,10 @@ pub extern "C" fn rs_main() -> i64 {
     // identity -- the conferred PCI allowance axis (the function's bdf) is what the
     // kernel SYS_PCI_CLAIM gate then enforces (I-34).
     let pci_nodes = PciSource::new().enumerate();
-    say!("warden: /hw/pci discovered {} PCI function(s)", pci_nodes.len());
+    say!(
+        "warden: /hw/pci discovered {} PCI function(s)",
+        pci_nodes.len()
+    );
     for n in &pci_nodes {
         let id = n.ids.first().map(|i| i.as_string()).unwrap_or_default();
         say!("warden: discovered {} ({})", id, n.label);
@@ -323,7 +326,10 @@ fn run_virtio_mmio_source(bank: (u64, u64), trusted: &[DeviceNode]) -> Vec<Devic
     let desc = match source_grant.to_descriptor() {
         Ok(d) => d,
         Err(e) => {
-            say!("warden: virtio-mmio-source descriptor encode failed {:?}", e);
+            say!(
+                "warden: virtio-mmio-source descriptor encode failed {:?}",
+                e
+            );
             return out_nodes;
         }
     };
@@ -531,9 +537,10 @@ fn supervise(m: &Manifest, grant: &BoundResources, node_name: &str) -> Dispositi
 /// Spawn the driver once for a conferred grant and watch it declare itself --
 /// the confer + one run attempt. Encodes the grant into the argv descriptor + the
 /// kernel allowance (both from one `BoundResources`), spawns the driver narrowed,
-/// then reads its readiness line: a long-lived service (`READY`) is brought up and
-/// then torn down via DeviceRemoved (revoke + group-terminate); a one-shot proof
-/// (EOF, no line) is reaped for its exit code. Returns the run's outcome;
+/// then reads its readiness line: a `persistent` service (`READY`) is left running
+/// past the bind phase; a `transient` service (`READY`) is brought up then torn
+/// down via DeviceRemoved (revoke + group-terminate); a one-shot proof (EOF, no
+/// line) is reaped for its exit code. Returns the run's outcome;
 /// `supervise` applies the restart policy. The confer inputs are recomputed each
 /// attempt (pure functions of the grant -- cheap; a restart re-confers cleanly).
 fn run_once(m: &Manifest, grant: &BoundResources) -> RunOutcome {
@@ -608,53 +615,70 @@ fn run_once(m: &Manifest, grant: &BoundResources) -> RunOutcome {
             RunOutcome::Exited(status.code())
         }
         Readiness::Signalled(line) => {
-            // A long-lived service still holding its device. Demonstrate
-            // DeviceRemoved: a forced group-terminate that revokes the allowance
-            // FIRST (atomic, #160) then cascades the death-wake. The driver,
-            // blocked in a death-interruptible wait, unwinds cleanly; the reap
-            // frees the slot's exclusive MMIO/IRQ/DMA claims (so a later
-            // claimant -- stratumd's virtio-blk post-pivot -- finds the bank
-            // free). Only "READY" is a clean bring-up (Served); any other line is
-            // a misbehaving driver, torn down + treated as a crash so the
+            // A bring-up declared itself. Only "READY" is clean; any other line is
+            // a misbehaving driver -- terminate + treat as a crash so the
             // supervisor restarts it per policy.
-            let up = line == "READY";
-            if up {
-                say!(
-                    "warden: {} pid={} up (READY) -> DeviceRemoved (revoke + terminate)",
-                    m.name,
-                    pid
-                );
-            } else {
+            if line != "READY" {
                 say!(
                     "warden: {} pid={} signalled {:?} (expected READY) -> terminating",
                     m.name,
                     pid,
                     line
                 );
+                let _ = child.kill();
+                let _ = child.wait();
+                return RunOutcome::Exited(None);
             }
-            let _ = child.kill();
-            match child.wait() {
-                Ok(status) => {
+            match m.lifecycle {
+                Lifecycle::Persistent => {
+                    // A standing service (netd): leave it RUNNING and walk away.
+                    // The Child is dropped un-waited -- Child::drop neither reaps
+                    // nor kills (process.rs) -- so the service keeps serving past
+                    // the bind phase and reparents to the orphan-adopter when the
+                    // warden exits. Its hardware allowance is bound to its own Proc
+                    // (confer-at-spawn, #160), not the warden's, so the warden's
+                    // exit neither revokes the device nor reaps the service.
                     say!(
-                        "warden: {} pid={} torn down (status={:?})",
+                        "warden: {} pid={} up (READY) -> serving (persistent; left running)",
                         m.name,
-                        pid,
-                        status.code()
+                        pid
                     );
-                    if up {
-                        RunOutcome::Served
-                    } else {
-                        RunOutcome::Exited(None)
-                    }
+                    RunOutcome::Served
                 }
-                Err(e) => {
+                Lifecycle::Transient => {
+                    // The warden owns this driver's lifecycle: demonstrate
+                    // DeviceRemoved -- a forced group-terminate that revokes the
+                    // allowance FIRST (atomic, #160) then cascades the death-wake.
+                    // The driver, blocked in a death-interruptible wait, unwinds
+                    // cleanly; the reap frees the slot's exclusive MMIO/IRQ/DMA
+                    // claims (so a later claimant -- stratumd's virtio-blk
+                    // post-pivot -- finds the bank free).
                     say!(
-                        "warden: reap {} (pid={}) after teardown failed {:?}",
+                        "warden: {} pid={} up (READY) -> DeviceRemoved (revoke + terminate)",
                         m.name,
-                        pid,
-                        e
+                        pid
                     );
-                    RunOutcome::HardFail
+                    let _ = child.kill();
+                    match child.wait() {
+                        Ok(status) => {
+                            say!(
+                                "warden: {} pid={} torn down (status={:?})",
+                                m.name,
+                                pid,
+                                status.code()
+                            );
+                            RunOutcome::Served
+                        }
+                        Err(e) => {
+                            say!(
+                                "warden: reap {} (pid={}) after teardown failed {:?}",
+                                m.name,
+                                pid,
+                                e
+                            );
+                            RunOutcome::HardFail
+                        }
+                    }
                 }
             }
         }
