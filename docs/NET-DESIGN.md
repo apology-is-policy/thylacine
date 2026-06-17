@@ -332,6 +332,14 @@ Genode `nic_router` precedent) — layers *on top of* namespace restriction
 without changing it. Recorded as deferred; the namespace firewall is the
 primary mechanism, the packet filter is the fine-grained add.
 
+**Realized incrementally by the mandate arc (`docs/MANDATE-DESIGN.md` §5):** the
+*per-principal* form of this seam -- netd enforcing a connecting principal's
+allow-list (`connect tcp *!80` etc.) in the connect/announce verb handler, driven
+by that user's mandate -- is the network granularity the post-net Imperium/
+Authority arc delivers (the user's "grant a citizen standing TCP:80"). Keep this
+seam reserved + netd `srv_peer`-principal-aware through net-3..net-8 so it slots
+in without a netd rewrite; the full *stateful* packet filter remains the v1.x add.
+
 ---
 
 ## 9. TLS and the root-cert bundle (closes W4-F4)

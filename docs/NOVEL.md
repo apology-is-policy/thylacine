@@ -30,6 +30,7 @@ The goal is to make `ARCHITECTURE.md` easier to write: each angle becomes a know
 | 9 | Designed-not-implemented v2.0 contracts | Low | ~0 KLOC (specifications only) | Phase 0 |
 | 10 | Capability-scoped service storage | Low | ~0.5-1 KLOC userspace + FS-delta O_PATH primitive (small kernel) | Convergence detour: FS-delta -> A-1.7, before A-1b |
 | 11 | Capability-sandboxed third-party drivers (Menagerie) | Medium | small kernel (the allowance + `devhw`) + ~6-10 KLOC Rust (warden + libdriver + sources) | The Menagerie arc (after pci, before net-2); `docs/MENAGERIE.md` |
+| 12 | Unified runtime authority: self-elevation (imperium) + persistent attenuated delegation (mandate) + medium-independent trusted path, on one `cap ∩ namespace ∩ time` substrate | Medium | small kernel (fork-propagating scope + the v1.x scoped-cap table) + ~4-8 KLOC Rust (corvus album + `censor` + netd enforcement) | Phase 8, post-net (the Imperium/Authority arc); `docs/MANDATE-DESIGN.md` + `docs/IMPERIUM-DESIGN.md` + `docs/TRUSTED-PATH.md` |
 
 **Angle #11 — capability-sandboxed third-party drivers (the Menagerie inversion).**
 Angle #2 made userspace drivers *possible*; Menagerie makes a **stable third-party
@@ -43,6 +44,28 @@ of Linux's deliberately-unstable in-kernel ABI. The full per-angle treatment liv
 in `docs/MENAGERIE.md` (the discovery-source/warden model + the hardware-allowance
 kernel lift + the RPi4/5 grounding); it composes I-1 + I-5 + I-2/I-25 + I-15 +
 I-29/I-30 + pci-1b, inventing only the one allowance mechanism.
+
+**Angle #12 — unified runtime authority (imperium + mandate + the trusted path).**
+One OS unifying **JIT self-elevation** (imperium — a fork-propagating legate scope
+for your own shell, SAK-gated, atomically de-escalated), **persistent attenuated
+delegation** (the mandate — a *censor* grants a citizen a bounded, standing,
+revocable-by-key-rotation subset of its own authority, redeemed silently at
+login), and a **medium-independent trusted path** (the SAK episode below every
+renderer), all on a single `capability ∩ namespace ∩ time` substrate — and with
+**network authority expressed as namespace-shaped mandates** (a narrowed `/net`
+view + a netd per-principal policy) rather than packet-filter rules. Each peer
+holds only a fragment: cloud PIM (AWS STS / Azure PIM) has elevation but no
+namespace axis; macaroons/biscuit have attenuatable tokens but no kernel
+enforcement; seL4 has capability mint/revoke but no identity or persistence;
+Fuchsia routes capabilities but at build time, not runtime-delegatable; Plan 9 has
+namespace restriction but no scoped-cap delegation. The fusion — runtime,
+kernel-enforced, identity-bearing, namespace-AND-capability,
+self-elevation-AND-delegation, with the Roman public-law vocabulary
+(*imperium* / *legate* / *mandatum* / *censor* / *edictum*) naming the mechanism
+exactly — is new. Designed in `docs/IMPERIUM-DESIGN.md` (self-elevation, ACCEPTED)
++ `docs/MANDATE-DESIGN.md` (delegation, ACCEPTED) + `docs/TRUSTED-PATH.md` (the
+SAK); composes I-1/I-2/I-22/I-25/I-27/I-28 + the new I-35; v1.0 ships the
+namespace tier (imperium + mandate-namespace), the cap-resource-scope tier is v1.x.
 
 **Total novel-angle code**: ~50-70 KLOC of C99 (kernel + compat) + ~16-24 KLOC of Rust (drivers + Halcyon) + ~4-6 KLOC of TLA+. Within the ~100-130 KLOC total budget for a complete v1.0.
 

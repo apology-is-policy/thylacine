@@ -177,7 +177,9 @@ passphrase" → "levels declare how hard they are," avoiding passphrase-fatigue.
 - **Execution scope (v1.0) = the legate Proc + its descendants + an optional time
   bound.** Caps stamp on the legate Proc, attenuate to children (I-2), gone on
   exit. *Resource-scoped* caps ("write only this file / MMIO only this device")
-  are a **v1.x** refinement. **The differentiator to design carefully: scope =
+  are a **v1.x** refinement (realized by the mandate's scoped caps + the
+  per-Proc scoped-cap table — `docs/MANDATE-DESIGN.md` §4; the *namespace*-scoped
+  half, e.g. network, is the v1.0 mandate-namespace tier). **The differentiator to design carefully: scope =
   capability ∩ namespace ∩ time** — tighter containment than cloud PIM (which has
   no namespace axis).
 
