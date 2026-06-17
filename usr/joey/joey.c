@@ -3054,7 +3054,7 @@ int main(void) {
             }
             (void)t_close(hw_dev_h);
 
-            // net-2b-2: mount netd's /net on the pivoted root. netd (warden-
+            // net-2c-1: mount netd's /net on the pivoted root. netd (warden-
             // spawned, persistent) posted /srv/net (9P-mode) pre-pivot; the
             // immortal boot registry (re-grafted as /srv above) carries it across
             // the pivot, and netd stays alive past the warden's exit (its NIC
@@ -3070,36 +3070,90 @@ int main(void) {
                                             T_WALK_CREATE_DMDIR | 0755u);
                     if (mk >= 0) (void)t_close(mk);
                     if (t_mount("/net", 4, net_root, T_MREPL) != 0) {
-                        t_putstr("joey: net-2b-2 t_mount(/net) FAILED\n");
+                        t_putstr("joey: net-2c-1 t_mount(/net) FAILED\n");
                         return 1;
                     }
                     (void)t_close(net_root);
-                    t_putstr("joey: net-2b-2 /net mounted (netd 9P server)\n");
+                    t_putstr("joey: net-2c-1 /net mounted (netd 9P server)\n");
 #if THYLA_BOOT_PROBES
-                    // Walk + read /net/tcp/stats: prove the dev9p-mounted netd
-                    // tree resolves multi-component (cross /net -> tcp -> stats)
-                    // and serves a file through the 9P session.
+                    // net-2c-1: exercise the /net/tcp clone fid state machine
+                    // (section 3.4) end-to-end through the dev9p-mounted 9P
+                    // session. The static-file path (/net/tcp/stats) and the
+                    // dynamic clone/N machine + Treaddir all cross /net -> tcp.
                     {
+                        // (0) the static stats file still resolves + reads.
                         long sf = t_open(T_WALK_OPEN_FROM_ROOT, "/net/tcp/stats",
                                          14, T_OREAD);
-                        if (sf < 0) {
-                            t_putstr("joey: net-2b-2 PROBE open(/net/tcp/stats) FAILED\n");
-                            return 1;
-                        }
                         unsigned char sbuf[128];
-                        long sn = t_read(sf, sbuf, sizeof(sbuf));
-                        (void)t_close(sf);
+                        long sn = (sf >= 0) ? t_read(sf, sbuf, sizeof(sbuf)) : -1;
+                        if (sf >= 0) (void)t_close(sf);
                         if (sn <= 0) {
-                            t_putstr("joey: net-2b-2 PROBE read(/net/tcp/stats) FAILED\n");
+                            t_putstr("joey: net-2c-1 PROBE read(/net/tcp/stats) FAILED\n");
                             return 1;
                         }
-                        t_putstr("joey: net-2b-2 PROBE /net/tcp/stats OK (");
-                        t_putstr(itoa_dec(sn, buf, sizeof(buf)));
-                        t_putstr(" bytes)\n");
+
+                        // (a) Treaddir /net/tcp BEFORE any clone: clone + stats.
+                        unsigned char dbuf[256];
+                        long td0 = t_open(T_WALK_OPEN_FROM_ROOT, "/net/tcp", 8, T_OREAD);
+                        long n0 = (td0 >= 0) ? t_readdir(td0, dbuf, sizeof(dbuf)) : -1;
+                        if (td0 >= 0) (void)t_close(td0);
+
+                        // (b) open /net/tcp/clone -> MINTS connection N; the fid
+                        //     rebinds onto its ctl (Plan 9 clone idiom), so the
+                        //     read yields N. A fresh netd hands out N == 0.
+                        unsigned char nb[16];
+                        long cl = t_open(T_WALK_OPEN_FROM_ROOT, "/net/tcp/clone",
+                                         14, T_OREAD);
+                        if (cl < 0) {
+                            t_putstr("joey: net-2c-1 PROBE open(clone) FAILED\n");
+                            return 1;
+                        }
+                        long nn = t_read(cl, nb, sizeof(nb) - 1);
+                        if (nn != 1 || nb[0] != '0') {
+                            t_putstr("joey: net-2c-1 PROBE clone -> N expected 0 FAILED\n");
+                            return 1;
+                        }
+
+                        // (c) the /net/tcp/0/ directory is live (a 2nd fid into
+                        //     it): its ctl reads back the connection number.
+                        long ctl = t_open(T_WALK_OPEN_FROM_ROOT, "/net/tcp/0/ctl",
+                                          14, T_OREAD);
+                        unsigned char cb[16];
+                        long cn = (ctl >= 0) ? t_read(ctl, cb, sizeof(cb) - 1) : -1;
+                        if (ctl >= 0) (void)t_close(ctl);
+                        if (cn != 1 || cb[0] != '0') {
+                            t_putstr("joey: net-2c-1 PROBE read(/net/tcp/0/ctl) FAILED\n");
+                            return 1;
+                        }
+
+                        // (d) Treaddir /net/tcp AFTER the clone: the live "0"
+                        //     directory is now listed (more bytes than n0).
+                        long td1 = t_open(T_WALK_OPEN_FROM_ROOT, "/net/tcp", 8, T_OREAD);
+                        long n1 = (td1 >= 0) ? t_readdir(td1, dbuf, sizeof(dbuf)) : -1;
+                        if (td1 >= 0) (void)t_close(td1);
+                        if (n0 <= 0 || n1 <= n0) {
+                            t_putstr("joey: net-2c-1 PROBE readdir did not grow after clone\n");
+                            return 1;
+                        }
+
+                        // (e) the LAST clunk frees N (the only free path): close
+                        //     cl, then a re-clone REUSES N == 0 (proves the free;
+                        //     a leak would hand out 1).
+                        (void)t_close(cl);
+                        long cl2 = t_open(T_WALK_OPEN_FROM_ROOT, "/net/tcp/clone",
+                                          14, T_OREAD);
+                        long rn = (cl2 >= 0) ? t_read(cl2, nb, sizeof(nb) - 1) : -1;
+                        if (cl2 >= 0) (void)t_close(cl2);
+                        if (rn != 1 || nb[0] != '0') {
+                            t_putstr("joey: net-2c-1 PROBE re-clone reuse FAILED\n");
+                            return 1;
+                        }
+                        t_putstr("joey: net-2c-1 PROBE OK (clone->0, 0/ctl->0, "
+                                 "readdir grew, clunk frees+reuses 0)\n");
                     }
 #endif
                 } else {
-                    t_putstr("joey: net-2b-2 /srv/net absent -- /net not mounted (netd down?)\n");
+                    t_putstr("joey: net-2c-1 /srv/net absent -- /net not mounted (netd down?)\n");
                 }
             }
 

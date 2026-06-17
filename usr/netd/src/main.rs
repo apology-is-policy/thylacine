@@ -12,12 +12,14 @@
 // (10.0.2.15) -- exercising the whole lower stack (Ethernet TX/RX over the
 // BAR-mapped virtqueues, ARP, UDP, and the DHCP client state machine) end-to-end
 // through smoltcp (net-2a). net-2b-1 made it a PERSISTENT service (the warden
-// leaves it running on READY, via `lifecycle = persistent`). net-2b-2 (this
-// sub-chunk) stands the /net 9P server up: after the lease, netd posts /srv/net
-// (9P-mode), then runs a combined event loop that multiplexes the 9P server (the
-// static `tcp/udp/icmp` skeleton from `server.rs`) with the smoltcp stack. joey
-// mounts /srv/net at /net so the namespace inherits it. The clone->socket fid
-// machine + live data path land at net-2c.
+// leaves it running on READY, via `lifecycle = persistent`). net-2b-2 stood the
+// /net 9P server up: after the lease, netd posts /srv/net (9P-mode), then runs a
+// combined event loop that multiplexes the 9P server with the smoltcp stack;
+// joey mounts /srv/net at /net so the namespace inherits it. net-2c-1 (this
+// sub-chunk) grows the static skeleton into the live TCP fid state machine
+// (section 3.4): /net/tcp/clone mints a refcounted connection N, the /net/tcp/N/
+// directory + its files appear, Treaddir lists them, and the last clunk frees N.
+// The smoltcp socket reservation + the live connect/data path land at net-2c-2.
 //
 // Diagnostics go to the console (`t_putstr`): a warden-spawned driver's stderr
 // is /dev/null. A long-lived service signals readiness by writing exactly one
@@ -306,6 +308,10 @@ impl Driver for NetD {
         // latency during an idle poll is fine; net-2c adds the NIC IRQ fd to the
         // poll set for RX-driven wakeups once TCP/UDP data flows.
         let mut conns: Vec<server::Conn> = Vec::new();
+        // The global /net connection table (the section-3.4 fid state machine),
+        // shared across every 9P session netd accepts. net-2c-2 grows it to hold
+        // the smoltcp sockets (folding `sockets`/`iface` in alongside it).
+        let mut net = server::Net::new();
         let mut pollfds = [TPollFd::default(); 1 + server::MAX_CONNS];
         loop {
             let ts = now(&base);
@@ -358,13 +364,17 @@ impl Driver for NetD {
                 i -= 1;
                 let pf = pollfds[1 + i];
                 let mut close = false;
-                if pf.revents & T_POLLIN != 0 && !conns[i].service() {
+                if pf.revents & T_POLLIN != 0 && !conns[i].service(&mut net) {
                     close = true;
                 }
                 if pf.revents & T_POLLHUP != 0 {
                     close = true;
                 }
                 if close {
+                    // Drop this session's connection refs before the Conn dies,
+                    // so any /net/tcp/N/ it alone held open is freed (the only
+                    // free path besides an explicit clunk).
+                    conns[i].teardown(&mut net);
                     let _ = unsafe { t_close(conns[i].handle()) };
                     conns.remove(i);
                 }

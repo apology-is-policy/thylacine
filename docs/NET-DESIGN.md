@@ -655,8 +655,18 @@ named in §2.)
   `MAY_POST_SERVICE`, conferred joey→warden→netd (gated on the persistent
   lifecycle). The `clone`→socket fid machine (§3.4) + live counters are net-2c.
   See `docs/reference/121-netd.md`.
-- **net-2c..net-8: not started.** Phase-8 work per §17 (net-2c adds the
-  `/net/tcp` `clone`/`connect`/`data` path + the §3.4 fid state machine),
-  sequenced before the container runner (#70) per ROADMAP §2.2.
+- **net-2c-1: LANDED** — the `/net/tcp` `clone` fid state machine (§3.4): the
+  dynamic qid-encoded tree, the clone-mints-`N` Plan 9 idiom (the kernel dev9p
+  client accepts the rebound-fid `Rlopen` qid), the refcounted connection slots
+  (the *last* clunk frees `N` — the only free path, the I-10/I-11 invariant), and
+  the `libthyla_rs::ninep` `Treaddir` codec (`/net/tcp` lists its live `N/`
+  directories). A slot is "N assigned" — no smoltcp socket yet (`MAX_SLOTS = 16`,
+  a #65 DoS floor). Boot proof: `clone`→0, `/net/tcp/0/ctl`→0, `Treaddir` grows
+  with the live entry, the clunk frees + reuses 0. Pure userspace — kernel
+  byte-unchanged. See `docs/reference/121-netd.md`.
+- **net-2c-2..net-8: not started.** Phase-8 work per §17 (net-2c-2 adds the
+  `socket-tcp` feature + the live `connect`/`data` path + the `ctl` verb parser +
+  the NIC-IRQ poll fd; net-2d the focused audit), sequenced before the container
+  runner (#70) per ROADMAP §2.2.
 
 The thylacine is real. So is its network — and it is, of course, a filesystem.

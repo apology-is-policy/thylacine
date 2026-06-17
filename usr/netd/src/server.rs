@@ -1,21 +1,31 @@
 // The /net 9P2000.L server (NET-DESIGN.md section 3).
 //
-// net-2b-2 serves the STATIC directory skeleton -- the `tcp/`, `udp/`, `icmp/`
-// protocol directories, each with a read-only `stats` file -- reachable by walk
-// over the dev9p-mounted /net. The `clone`->socket fid state machine (section
-// 3.4) and the live per-protocol counters land at net-2c; serving a half-built
-// `clone` now would be a fid machine with no socket behind it, so the skeleton
-// deliberately stops at walkable dirs + a readable file (the proof of the mount
-// path), and net-2c grows it.
+// net-2c-1 grows the net-2b-2 static skeleton into the live fid state machine
+// (section 3.4) for TCP: opening `/net/tcp/clone` MINTS a connection N, assigns
+// it a `/net/tcp/N/` directory (`ctl`/`data`/`local`/`remote`/`status`/`err`),
+// and rebinds the opened fid onto that connection's `ctl` (the Plan 9 clone
+// idiom -- the kernel dev9p client accepts an Rlopen qid that differs from the
+// walked qid). Reading `ctl` yields N. A connection is reference-counted by the
+// fids that name its subtree; the LAST clunk frees N (the only free path, the
+// I-10/I-11 invariant). Treaddir lists the live N directories.
+//
+// At net-2c-1 a connection slot is "N assigned" -- it carries NO smoltcp socket
+// yet (ALLOCATED-without-wire). The smoltcp socket reservation, the `ctl` verb
+// parser (connect/announce/hangup), and live `data` recv/send land at net-2c-2,
+// where the slot grows a SocketHandle and the iface folds into this context. So
+// at net-2c-1 `data`/`local`/`remote`/`err` read empty and `status` reads
+// "Closed"; only `ctl` (-> N) and the tree/refcount machine are live.
+//
+// netd is single-threaded (one Proc, one serve() loop): every 9P frame across
+// every session is processed sequentially, so the global connection table (the
+// `Net` slot array) needs no lock -- the refcount is single-threaded-safe by
+// construction (the section-3.4 "netd serializes its own connection table").
 //
 // netd posts /srv/net 9P-mode (perm=0; requires PROC_FLAG_MAY_POST_SERVICE,
 // conferred warden->netd because netd's manifest is `lifecycle = persistent`).
 // joey's open=connect mount (t_open(/srv/net, OREAD) -> dev9p root -> t_mount)
 // drives ONE kernel dev9p-client 9P session over which every /net access from
-// every Proc in the namespace is multiplexed -- so the connection table is
-// effectively single-session at v1.0 (net-2c/2d revisit when sockets are
-// per-fid). The codec is libthyla_rs::ninep (the corvus-lifted server-side
-// 9P2000.L parse/build).
+// every Proc in the namespace is multiplexed. The codec is libthyla_rs::ninep.
 
 use alloc::vec::Vec;
 use libthyla_rs::ninep as p9;
@@ -29,131 +39,433 @@ use libthyla_rs::{
 /// open=connect consumer (a native /net client that does not cross the mount).
 pub const MAX_CONNS: usize = 8;
 
-/// Per-connection fid-table size. The static /net tree is shallow; net-2c sizes
-/// this to the live-connection fan-out (one fid per open connection directory).
+/// Per-connection fid-table size: one fid per open file/dir the client holds.
 const MAX_FIDS: usize = 32;
 
-/// Server-negotiated msize. Bounds every frame; the per-conn read/out buffers
-/// are sized to it. 8 KiB comfortably holds the skeleton's largest reply (a
-/// stats read or an Rgetattr).
+/// Max live `/net/tcp/N/` connection slots. A bound, not headroom: an unbounded
+/// connection table is a DoS vector (#65 resource floor), so clone-minting fails
+/// (ENFILE) past this. Raise as the workload demands.
+const MAX_SLOTS: usize = 16;
+
+/// Server-negotiated msize. Bounds every frame; the per-conn buffers are sized
+/// to it. 8 KiB holds the largest reply (a stats read, an Rgetattr, or a full
+/// Treaddir page of the shallow /net tree).
 const SRV_MSIZE: u32 = 8192;
 const SRV_MSIZE_USIZE: usize = SRV_MSIZE as usize;
 
 const P9_VERSION_9P2000_L: &[u8] = b"9P2000.L";
 
-// Linux mode bits. The /net nodes are SYSTEM-owned but WORLD r-x (dirs) / r
-// (files): the kernel's A-3 dev9p enforcement runs a per-component X-search
-// against the accessing principal, so a non-`other`-searchable /net would deny
-// every logged-in user. World r-x keeps /net usable by any session.
+// Linux mode bits. The /net nodes are SYSTEM-owned but WORLD-accessible (dirs
+// r-x; the rw control/data files rw; the read-only introspection files r): the
+// kernel's A-3 dev9p enforcement runs a per-component X-search against the
+// accessing principal, and the /net firewall is namespace reachability (section
+// 8), NOT file mode -- so a Proc that can name /net can dial. World-rw on
+// clone/ctl/data is the intended "anyone with /net dials" semantics.
 const S_IFDIR: u32 = 0o040000;
 const S_IFREG: u32 = 0o100000;
 const DIR_MODE: u32 = S_IFDIR | 0o555;
-const FILE_MODE: u32 = S_IFREG | 0o444;
+const FILE_RW: u32 = S_IFREG | 0o666;
+const FILE_RO: u32 = S_IFREG | 0o444;
 
 /// Tgetattr request-mask: size. ninep exports MODE/NLINK/UID/GID; STATX_SIZE is
-/// 0x200 (Linux v9fs), filled so a stat of a stats file reports its length.
+/// 0x200 (Linux v9fs), filled so a stat reports a file's length.
 const P9_GETATTR_SIZE: u64 = 0x200;
 
-// The static /net node table. The array index IS the qid.path. A node's
-// `parent` is its containing directory's path (the root is its own parent, used
-// as the `..`-from-root fixpoint). `content` is the file body (empty for dirs).
-struct Node {
-    name: &'static [u8],
-    dir: bool,
-    parent: u64,
-    content: &'static [u8],
+// =============================================================================
+// The /net tree. qid.path encodes the node identity in two disjoint ranges:
+//
+//   - Static skeleton nodes occupy the small fixed range [0, STATIC_MAX).
+//   - A live connection N under protocol `proto` encodes as
+//       CONN_FLAG | (proto << PROTO_SHIFT) | (n << FILE_BITS) | filekind
+//     so a connection's directory and its files are each one stable qid.
+//
+// The ranges never collide (CONN_FLAG is bit 40; STATIC_MAX is small). A walk
+// only resolves a connection node when its slot is LIVE, so a stale/forged
+// connection qid is unreachable.
+// =============================================================================
+
+const P_ROOT: u64 = 0; //       /net
+const P_TCP: u64 = 1; //        /net/tcp
+const P_UDP: u64 = 2; //        /net/udp
+const P_ICMP: u64 = 3; //       /net/icmp
+const P_TCP_CLONE: u64 = 4; //  /net/tcp/clone
+const P_TCP_STATS: u64 = 5; //  /net/tcp/stats
+const P_UDP_STATS: u64 = 6; //  /net/udp/stats
+const P_ICMP_STATS: u64 = 7; // /net/icmp/stats
+
+const CONN_FLAG: u64 = 1 << 40;
+const PROTO_SHIFT: u64 = 32;
+const FILE_BITS: u64 = 8;
+const FILE_MASK: u64 = 0xff;
+const N_MASK: u64 = 0x00ff_ffff; // 24-bit connection number
+
+// Protocols (only TCP mints connections at net-2c-1; the field is kept so udp/
+// icmp connections slot in without a qid re-encode).
+const PROTO_TCP: u64 = 0;
+
+// Per-connection file kinds (the filekind low byte). FK_LISTEN (the server
+// accept file) lands at net-2c-2 with the announce/accept path.
+const FK_DIR: u64 = 0; //    /net/tcp/N/
+const FK_CTL: u64 = 1; //    /net/tcp/N/ctl
+const FK_DATA: u64 = 2; //   /net/tcp/N/data
+const FK_LOCAL: u64 = 3; //  /net/tcp/N/local
+const FK_REMOTE: u64 = 4; // /net/tcp/N/remote
+const FK_STATUS: u64 = 5; // /net/tcp/N/status
+const FK_ERR: u64 = 6; //    /net/tcp/N/err
+
+fn is_conn(path: u64) -> bool {
+    path & CONN_FLAG != 0
 }
 
-// net-2b-2 static counters -- honestly zero (no live connections until net-2c
-// stands up the clone->socket machinery, which fills these live).
-const TCP_STATS: &[u8] = b"tcp\n  active 0\n  passive 0\n  established 0\n";
-const UDP_STATS: &[u8] = b"udp\n  ports 0\n";
-const ICMP_STATS: &[u8] = b"icmp\n  echo 0\n";
-
-const NODES: &[Node] = &[
-    Node {
-        name: b"",
-        dir: true,
-        parent: 0,
-        content: b"",
-    }, //          0  /net
-    Node {
-        name: b"tcp",
-        dir: true,
-        parent: 0,
-        content: b"",
-    }, //       1  /net/tcp
-    Node {
-        name: b"udp",
-        dir: true,
-        parent: 0,
-        content: b"",
-    }, //       2  /net/udp
-    Node {
-        name: b"icmp",
-        dir: true,
-        parent: 0,
-        content: b"",
-    }, //      3  /net/icmp
-    Node {
-        name: b"stats",
-        dir: false,
-        parent: 1,
-        content: TCP_STATS,
-    }, //  4 /net/tcp/stats
-    Node {
-        name: b"stats",
-        dir: false,
-        parent: 2,
-        content: UDP_STATS,
-    }, //  5 /net/udp/stats
-    Node {
-        name: b"stats",
-        dir: false,
-        parent: 3,
-        content: ICMP_STATS,
-    }, // 6 /net/icmp/stats
-];
-
-const ROOT_PATH: u64 = 0;
-
-fn node(path: u64) -> Option<&'static Node> {
-    NODES.get(path as usize)
+fn make_conn(proto: u64, n: u32, filekind: u64) -> u64 {
+    CONN_FLAG | (proto << PROTO_SHIFT) | ((n as u64) << FILE_BITS) | filekind
 }
 
-fn qid_of(path: u64) -> p9::Qid {
-    let n = &NODES[path as usize];
-    p9::Qid {
-        kind: if n.dir { p9::P9_QTDIR } else { p9::P9_QTFILE },
-        version: 0,
-        path,
+fn conn_proto(path: u64) -> u64 {
+    (path >> PROTO_SHIFT) & 0xff
+}
+
+fn conn_n(path: u64) -> u32 {
+    ((path >> FILE_BITS) & N_MASK) as u32
+}
+
+fn conn_filekind(path: u64) -> u64 {
+    path & FILE_MASK
+}
+
+/// The connection number a path belongs to (any node in its subtree), or None
+/// for a static node. The refcount key: every fid bound here holds slot N live.
+fn path_conn_n(path: u64) -> Option<u32> {
+    if is_conn(path) {
+        Some(conn_n(path))
+    } else {
+        None
     }
 }
 
-// Resolve one walk component from `dir` (which must be a directory path) to a
-// child path. "." stays; ".." goes to the parent; otherwise the named child.
-// None == ENOENT.
-fn walk_one(dir: u64, name: &[u8]) -> Option<u64> {
-    if name == b"." {
-        return Some(dir);
+fn proto_dir(proto: u64) -> u64 {
+    match proto {
+        PROTO_TCP => P_TCP,
+        _ => P_TCP,
     }
-    if name == b".." {
-        return node(dir).map(|n| n.parent);
-    }
-    for (i, n) in NODES.iter().enumerate() {
-        let p = i as u64;
-        if p != ROOT_PATH && n.parent == dir && n.name == name {
-            return Some(p);
+}
+
+// =============================================================================
+// Net -- the global connection table + live counters. Shared across all 9P
+// connections (the /net namespace is one tree); passed &mut to Conn::service.
+// =============================================================================
+
+#[derive(Copy, Clone)]
+struct Slot {
+    used: bool,
+    refs: u32,
+    // net-2c-2 adds: socket: SocketHandle, state: SlotState.
+}
+
+impl Slot {
+    const fn empty() -> Slot {
+        Slot {
+            used: false,
+            refs: 0,
         }
     }
-    None
+}
+
+pub struct Net {
+    slots: [Slot; MAX_SLOTS],
+    tcp_active: u32, // currently-live TCP connections (the `active` stat)
+    tcp_opened: u32, // total TCP connections ever minted
+}
+
+impl Net {
+    pub fn new() -> Net {
+        Net {
+            slots: [Slot::empty(); MAX_SLOTS],
+            tcp_active: 0,
+            tcp_opened: 0,
+        }
+    }
+
+    /// Mint a TCP connection: claim a free slot, refs=0 (the opener takes the
+    /// first ref). Returns the connection number N, or None if the table is
+    /// full. The slot is NOT yet freeable -- only slot_unref frees, and the
+    /// caller refs it before any unref can occur.
+    fn tcp_clone(&mut self) -> Option<u32> {
+        let n = self.slots.iter().position(|s| !s.used)?;
+        self.slots[n] = Slot {
+            used: true,
+            refs: 0,
+        };
+        self.tcp_active += 1;
+        self.tcp_opened += 1;
+        Some(n as u32)
+    }
+
+    fn slot_live(&self, n: u32) -> bool {
+        (n as usize) < MAX_SLOTS && self.slots[n as usize].used
+    }
+
+    fn slot_ref(&mut self, n: u32) {
+        if self.slot_live(n) {
+            self.slots[n as usize].refs += 1;
+        }
+    }
+
+    /// Drop one reference to connection N. When the last reference goes, the
+    /// connection is freed (the I-10/I-11 invariant: clunk is the only free
+    /// path; N is not reusable until fully torn down). net-2c-2 removes the
+    /// smoltcp socket here.
+    fn slot_unref(&mut self, n: u32) {
+        let i = n as usize;
+        if i < MAX_SLOTS && self.slots[i].used && self.slots[i].refs > 0 {
+            self.slots[i].refs -= 1;
+            if self.slots[i].refs == 0 {
+                self.slots[i].used = false;
+                self.tcp_active = self.tcp_active.saturating_sub(1);
+            }
+        }
+    }
+
+    fn is_dir(&self, path: u64) -> bool {
+        if is_conn(path) {
+            conn_filekind(path) == FK_DIR
+        } else {
+            matches!(path, P_ROOT | P_TCP | P_UDP | P_ICMP)
+        }
+    }
+
+    fn parent_of(&self, path: u64) -> u64 {
+        if is_conn(path) {
+            if conn_filekind(path) == FK_DIR {
+                proto_dir(conn_proto(path))
+            } else {
+                make_conn(conn_proto(path), conn_n(path), FK_DIR)
+            }
+        } else {
+            match path {
+                P_TCP | P_UDP | P_ICMP => P_ROOT,
+                P_TCP_CLONE | P_TCP_STATS => P_TCP,
+                P_UDP_STATS => P_UDP,
+                P_ICMP_STATS => P_ICMP,
+                _ => P_ROOT, // P_ROOT is its own parent (the `..`-from-root fixpoint)
+            }
+        }
+    }
+
+    /// Resolve one walk component from `dir` (which must be a directory) to a
+    /// child path. None == ENOENT. A numeric name under /net/tcp resolves to a
+    /// connection directory only if that slot is live.
+    fn walk_child(&self, dir: u64, name: &[u8]) -> Option<u64> {
+        if !self.is_dir(dir) {
+            return None;
+        }
+        if name == b"." {
+            return Some(dir);
+        }
+        if name == b".." {
+            return Some(self.parent_of(dir));
+        }
+        if is_conn(dir) {
+            // Inside /net/tcp/N/: the fixed file set.
+            let (proto, n) = (conn_proto(dir), conn_n(dir));
+            let fk = match name {
+                b"ctl" => FK_CTL,
+                b"data" => FK_DATA,
+                b"local" => FK_LOCAL,
+                b"remote" => FK_REMOTE,
+                b"status" => FK_STATUS,
+                b"err" => FK_ERR,
+                _ => return None,
+            };
+            return Some(make_conn(proto, n, fk));
+        }
+        match dir {
+            P_ROOT => match name {
+                b"tcp" => Some(P_TCP),
+                b"udp" => Some(P_UDP),
+                b"icmp" => Some(P_ICMP),
+                _ => None,
+            },
+            P_TCP => match name {
+                b"clone" => Some(P_TCP_CLONE),
+                b"stats" => Some(P_TCP_STATS),
+                _ => parse_dec(name)
+                    .filter(|&n| self.slot_live(n))
+                    .map(|n| make_conn(PROTO_TCP, n, FK_DIR)),
+            },
+            P_UDP => match name {
+                b"stats" => Some(P_UDP_STATS),
+                _ => None,
+            },
+            P_ICMP => match name {
+                b"stats" => Some(P_ICMP_STATS),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Enumerate `dir`'s children, calling `push(name, qid_path, is_dir)` for
+    /// each in a stable order. The order is fixed (the static names first, then
+    /// live slots ascending), so the Treaddir resume cookie (an ordinal) is
+    /// stable across a paginated read as long as no slot is freed mid-walk.
+    fn for_each_child<F: FnMut(&[u8], u64, bool)>(&self, dir: u64, mut push: F) {
+        if is_conn(dir) && conn_filekind(dir) == FK_DIR {
+            let (proto, n) = (conn_proto(dir), conn_n(dir));
+            push(b"ctl", make_conn(proto, n, FK_CTL), false);
+            push(b"data", make_conn(proto, n, FK_DATA), false);
+            push(b"local", make_conn(proto, n, FK_LOCAL), false);
+            push(b"remote", make_conn(proto, n, FK_REMOTE), false);
+            push(b"status", make_conn(proto, n, FK_STATUS), false);
+            push(b"err", make_conn(proto, n, FK_ERR), false);
+            return;
+        }
+        match dir {
+            P_ROOT => {
+                push(b"tcp", P_TCP, true);
+                push(b"udp", P_UDP, true);
+                push(b"icmp", P_ICMP, true);
+            }
+            P_TCP => {
+                push(b"clone", P_TCP_CLONE, false);
+                push(b"stats", P_TCP_STATS, false);
+                for i in 0..MAX_SLOTS {
+                    if self.slots[i].used {
+                        let mut name = DecName::new();
+                        name.set(i as u32);
+                        push(
+                            name.as_slice(),
+                            make_conn(PROTO_TCP, i as u32, FK_DIR),
+                            true,
+                        );
+                    }
+                }
+            }
+            P_UDP => push(b"stats", P_UDP_STATS, false),
+            P_ICMP => push(b"stats", P_ICMP_STATS, false),
+            _ => {}
+        }
+    }
+
+    /// The byte content of a readable file node. Connection files other than
+    /// `ctl`/`status` are empty at net-2c-1 (the live socket lands at net-2c-2).
+    fn file_content(&self, path: u64) -> Content {
+        let mut c = Content::new();
+        if is_conn(path) {
+            match conn_filekind(path) {
+                FK_CTL => c.push_dec(conn_n(path)),
+                FK_STATUS => c.push(b"Closed"),
+                _ => {} // data/local/remote/err: empty until net-2c-2
+            }
+            return c;
+        }
+        match path {
+            P_TCP_STATS => {
+                c.push(b"tcp\n  active ");
+                c.push_dec(self.tcp_active);
+                c.push(b"\n  opened ");
+                c.push_dec(self.tcp_opened);
+                c.push(b"\n");
+            }
+            P_UDP_STATS => c.push(b"udp\n  ports 0\n"),
+            P_ICMP_STATS => c.push(b"icmp\n  echo 0\n"),
+            // clone is never read as content (its open rebinds the fid to ctl).
+            _ => {}
+        }
+        c
+    }
+}
+
+impl Default for Net {
+    fn default() -> Net {
+        Net::new()
+    }
+}
+
+/// Parse a non-empty all-ASCII-decimal name into a connection number, bounded
+/// to the slot range. None on any non-digit, empty, or out-of-range name.
+fn parse_dec(name: &[u8]) -> Option<u32> {
+    if name.is_empty() || name.len() > 8 {
+        return None;
+    }
+    let mut v: u32 = 0;
+    for &b in name {
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        v = v.checked_mul(10)?.checked_add((b - b'0') as u32)?;
+    }
+    if (v as usize) < MAX_SLOTS {
+        Some(v)
+    } else {
+        None
+    }
+}
+
+// A small fixed-cap content buffer: file bodies are short (a number, a few-line
+// stats block, a status word), so reads never allocate.
+struct Content {
+    buf: [u8; 128],
+    len: usize,
+}
+
+impl Content {
+    fn new() -> Content {
+        Content {
+            buf: [0; 128],
+            len: 0,
+        }
+    }
+    fn as_slice(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
+    fn push(&mut self, b: &[u8]) {
+        let n = b.len().min(self.buf.len() - self.len);
+        self.buf[self.len..self.len + n].copy_from_slice(&b[..n]);
+        self.len += n;
+    }
+    fn push_dec(&mut self, v: u32) {
+        let mut d = DecName::new();
+        d.set(v);
+        self.push(d.as_slice());
+    }
+}
+
+// Decimal formatter for a u32 into a stack buffer (a connection number / slot
+// index), no allocation.
+struct DecName {
+    buf: [u8; 10],
+    start: usize,
+}
+
+impl DecName {
+    fn new() -> DecName {
+        DecName {
+            buf: [0; 10],
+            start: 10,
+        }
+    }
+    fn set(&mut self, mut v: u32) {
+        self.start = self.buf.len();
+        loop {
+            self.start -= 1;
+            self.buf[self.start] = b'0' + (v % 10) as u8;
+            v /= 10;
+            if v == 0 {
+                break;
+            }
+        }
+    }
+    fn as_slice(&self) -> &[u8] {
+        &self.buf[self.start..]
+    }
 }
 
 /// Post the /net 9P service (9P-mode) into the boot namespace's /srv. Returns
 /// the listener handle. The boot /srv is the immortal registry joey re-grafts
 /// across the pivot, so a service posted here is reachable by joey for the
-/// mount. perm=0 = 9P-mode (vs DMSRVBYTE byte-mode); netd serves /net as a 9P
-/// tree. Err(()) on a post failure (most likely a missing MAY_POST_SERVICE).
+/// mount. perm=0 = 9P-mode (vs DMSRVBYTE byte-mode). Err(()) on a post failure
+/// (most likely a missing MAY_POST_SERVICE).
 pub fn post_srv_net() -> Result<i64, ()> {
     // O_PATH = a navigation base (9P forbids create from an opened fid).
     let srv = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv".as_ptr(), 4, T_OPATH) };
@@ -175,7 +487,9 @@ struct Fid {
     opened: bool,
 }
 
-/// One accepted 9P connection. Owns its fid table + framing buffers.
+/// One accepted 9P connection. Owns its fid table + framing buffers. The fid
+/// lifecycle is refcounted against the shared `Net`: binding a fid into a
+/// connection's subtree refs the slot, clunking/rebinding-away unrefs it.
 pub struct Conn {
     handle: i64,
     version_done: bool,
@@ -201,27 +515,57 @@ impl Conn {
         self.handle
     }
 
+    /// Drop all this connection's references before the connection is closed
+    /// (the serve() loop calls this before removing a dead Conn), so a session
+    /// teardown frees any connections only this session held open.
+    pub fn teardown(&mut self, net: &mut Net) {
+        for slot in self.fids.iter_mut() {
+            if let Some(f) = slot.take() {
+                if let Some(n) = path_conn_n(f.path) {
+                    net.slot_unref(n);
+                }
+            }
+        }
+    }
+
     fn fid_find(&self, fid: u32) -> Option<usize> {
         self.fids
             .iter()
             .position(|f| matches!(f, Some(e) if e.fid == fid))
     }
 
-    fn fid_bind(&mut self, fid: u32, path: u64, opened: bool) -> bool {
+    /// Bind `fid` -> `path`. Adjusts connection refs: refs the NEW connection
+    /// first, then unrefs the OLD (so a within-connection rebind never transits
+    /// refs==0 and frees the slot out from under the fid). Returns false only if
+    /// the fid table is full (a fresh bind with no free slot).
+    fn fid_set(&mut self, net: &mut Net, fid: u32, path: u64, opened: bool) -> bool {
         if let Some(i) = self.fid_find(fid) {
+            let old = self.fids[i].unwrap().path;
+            if let Some(n) = path_conn_n(path) {
+                net.slot_ref(n);
+            }
             self.fids[i] = Some(Fid { fid, path, opened });
+            if let Some(n) = path_conn_n(old) {
+                net.slot_unref(n);
+            }
             return true;
         }
         if let Some(i) = self.fids.iter().position(|f| f.is_none()) {
+            if let Some(n) = path_conn_n(path) {
+                net.slot_ref(n);
+            }
             self.fids[i] = Some(Fid { fid, path, opened });
             return true;
         }
         false
     }
 
-    fn fid_clunk(&mut self, fid: u32) -> bool {
+    fn fid_clunk(&mut self, net: &mut Net, fid: u32) -> bool {
         if let Some(i) = self.fid_find(fid) {
-            self.fids[i] = None;
+            let f = self.fids[i].take().unwrap();
+            if let Some(n) = path_conn_n(f.path) {
+                net.slot_unref(n);
+            }
             return true;
         }
         false
@@ -231,7 +575,7 @@ impl Conn {
     /// to close the connection (EOF, framing violation, or write failure). One
     /// `t_read` per call (the caller re-enters via the poll loop), so a partial
     /// frame waits for the next readable event rather than blocking mid-frame.
-    pub fn service(&mut self) -> bool {
+    pub fn service(&mut self, net: &mut Net) -> bool {
         let cur = self.in_buf.len();
         if cur >= SRV_MSIZE_USIZE {
             // A full msize buffered with no complete frame -> oversized/malformed.
@@ -263,7 +607,7 @@ impl Conn {
                 return true; // incomplete frame; wait for more
             }
             let frame: Vec<u8> = self.in_buf[..size].to_vec();
-            let rlen = self.dispatch(&frame, hdr);
+            let rlen = self.dispatch(net, &frame, hdr);
             if rlen == 0 {
                 return false; // unrecoverable build failure
             }
@@ -281,19 +625,20 @@ impl Conn {
         }
     }
 
-    fn dispatch(&mut self, tmsg: &[u8], hdr: p9::Header) -> usize {
+    fn dispatch(&mut self, net: &mut Net, tmsg: &[u8], hdr: p9::Header) -> usize {
         let tag = hdr.tag;
         self.out_buf.clear();
         self.out_buf.resize(SRV_MSIZE_USIZE, 0);
         let r = match hdr.mtype {
-            p9::P9_TVERSION => self.h_version(tmsg, tag),
+            p9::P9_TVERSION => self.h_version(net, tmsg, tag),
             p9::P9_TATTACH => self.h_attach(tmsg, tag),
-            p9::P9_TWALK => self.h_walk(tmsg, tag),
-            p9::P9_TLOPEN => self.h_lopen(tmsg, tag),
-            p9::P9_TREAD => self.h_read(tmsg, tag),
-            p9::P9_TGETATTR => self.h_getattr(tmsg, tag),
-            p9::P9_TCLUNK => self.h_clunk(tmsg, tag),
-            // Tauth/Twrite/Treaddir/... are not served by the read-only skeleton.
+            p9::P9_TWALK => self.h_walk(net, tmsg, tag),
+            p9::P9_TLOPEN => self.h_lopen(net, tmsg, tag),
+            p9::P9_TREAD => self.h_read(net, tmsg, tag),
+            p9::P9_TREADDIR => self.h_readdir(net, tmsg, tag),
+            p9::P9_TGETATTR => self.h_getattr(net, tmsg, tag),
+            p9::P9_TCLUNK => self.h_clunk(net, tmsg, tag),
+            // Tauth/Twrite/Tsetattr/... land with the net-2c-2 ctl-write path.
             _ => self.err(tag, p9::E_NOSYS),
         };
         r.unwrap_or_else(|_| {
@@ -309,14 +654,27 @@ impl Conn {
         p9::build_rlerror(&mut self.out_buf, tag, code)
     }
 
-    fn h_version(&mut self, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
+    fn qid_of(&self, net: &Net, path: u64) -> p9::Qid {
+        p9::Qid {
+            kind: if net.is_dir(path) {
+                p9::P9_QTDIR
+            } else {
+                p9::P9_QTFILE
+            },
+            version: 0,
+            path,
+        }
+    }
+
+    fn h_version(&mut self, net: &mut Net, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
         let a = match p9::parse_tversion(tmsg) {
             Ok(a) => a,
             Err(_) => return self.err(tag, p9::E_PROTO),
         };
         let negotiated = a.msize.min(SRV_MSIZE);
-        // Tversion resets all session state (the 9P "clunk every fid" semantics).
-        self.fids = [None; MAX_FIDS];
+        // Tversion resets all session state (the 9P "clunk every fid"
+        // semantics) -- drop every fid's connection ref first.
+        self.drop_all_fids(net);
         self.msize = negotiated;
         let ver: &[u8] = if a.version == P9_VERSION_9P2000_L {
             self.version_done = true;
@@ -326,6 +684,16 @@ impl Conn {
             b"unknown"
         };
         p9::build_rversion(&mut self.out_buf, tag, negotiated, ver)
+    }
+
+    fn drop_all_fids(&mut self, net: &mut Net) {
+        for slot in self.fids.iter_mut() {
+            if let Some(f) = slot.take() {
+                if let Some(n) = path_conn_n(f.path) {
+                    net.slot_unref(n);
+                }
+            }
+        }
     }
 
     fn h_attach(&mut self, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
@@ -339,13 +707,28 @@ impl Conn {
         if a.afid != p9::P9_NOFID {
             return self.err(tag, p9::E_OPNOTSUPP); // no auth fid (trusted local transport)
         }
-        if !self.fid_bind(a.fid, ROOT_PATH, false) {
+        // The root is a static node (no connection ref); bind directly.
+        if self.fid_find(a.fid).is_some() {
+            return self.err(tag, p9::E_INVAL);
+        }
+        if let Some(i) = self.fids.iter().position(|f| f.is_none()) {
+            self.fids[i] = Some(Fid {
+                fid: a.fid,
+                path: P_ROOT,
+                opened: false,
+            });
+        } else {
             return self.err(tag, p9::E_NOMEM);
         }
-        p9::build_rattach(&mut self.out_buf, tag, &qid_of(ROOT_PATH))
+        let q = p9::Qid {
+            kind: p9::P9_QTDIR,
+            version: 0,
+            path: P_ROOT,
+        };
+        p9::build_rattach(&mut self.out_buf, tag, &q)
     }
 
-    fn h_walk(&mut self, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
+    fn h_walk(&mut self, net: &mut Net, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
         let a = match p9::parse_twalk(tmsg) {
             Ok(a) => a,
             Err(_) => return self.err(tag, p9::E_PROTO),
@@ -366,15 +749,10 @@ impl Conn {
         let mut qids: [p9::Qid; p9::P9_MAX_WALK] = [p9::Qid::default(); p9::P9_MAX_WALK];
         let mut nwalked = 0usize;
         for i in 0..(a.nwname as usize) {
-            // Each component requires `cur` to be a directory.
-            match node(cur) {
-                Some(n) if n.dir => {}
-                _ => break,
-            }
-            match walk_one(cur, a.names[i]) {
+            match net.walk_child(cur, a.names[i]) {
                 Some(next) => {
                     cur = next;
-                    qids[nwalked] = qid_of(next);
+                    qids[nwalked] = self.qid_of(net, next);
                     nwalked += 1;
                 }
                 None => break,
@@ -384,16 +762,17 @@ impl Conn {
         if a.nwname > 0 && nwalked == 0 {
             return self.err(tag, p9::E_NOENT);
         }
-        // Per 9P: newfid is set to the last walked element ONLY on a full walk
-        // (nwqid == nwname). A partial walk leaves newfid untouched; the client
-        // sees nwqid < nwname and reissues. nwname==0 is a clone (newfid -> fid).
-        if nwalked == a.nwname as usize && !self.fid_bind(a.newfid, cur, false) {
+        // Per 9P: newfid binds to the last walked element ONLY on a full walk
+        // (nwqid == nwname). A partial walk leaves newfid untouched. nwname==0
+        // is a clone (newfid -> the same node as fid). The refcount moves with
+        // the bind (fid_set refs the new connection / unrefs the old).
+        if nwalked == a.nwname as usize && !self.fid_set(net, a.newfid, cur, false) {
             return self.err(tag, p9::E_NOMEM);
         }
         p9::build_rwalk(&mut self.out_buf, tag, &qids[..nwalked])
     }
 
-    fn h_lopen(&mut self, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
+    fn h_lopen(&mut self, net: &mut Net, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
         let a = match p9::parse_tlopen(tmsg) {
             Ok(a) => a,
             Err(_) => return self.err(tag, p9::E_PROTO),
@@ -402,17 +781,48 @@ impl Conn {
             Some(i) => i,
             None => return self.err(tag, p9::E_BADF),
         };
-        let mut f = self.fids[i].unwrap();
+        let f = self.fids[i].unwrap();
         if f.opened {
             return self.err(tag, p9::E_PROTO);
         }
-        let _ = a.flags; // read-only tree: write modes are ignored (reads only)
-        f.opened = true;
-        self.fids[i] = Some(f);
-        p9::build_rlopen(&mut self.out_buf, tag, &qid_of(f.path), 0)
+        let _ = a.flags; // read-only-at-2c-1 tree: write modes accepted, no effect yet
+
+        // The Plan 9 clone idiom: opening `clone` MINTS a connection and rebinds
+        // THIS fid onto the new connection's `ctl` (the kernel dev9p client
+        // accepts the differing Rlopen qid). Ref-before-build so a build failure
+        // rolls the mint back cleanly.
+        if f.path == P_TCP_CLONE {
+            let n = match net.tcp_clone() {
+                Some(n) => n,
+                None => return self.err(tag, p9::E_NOMEM), // table full (ENFILE-class)
+            };
+            net.slot_ref(n); // refs 0 -> 1 (this fid owns the connection)
+            let ctl = make_conn(PROTO_TCP, n, FK_CTL);
+            let q = self.qid_of(net, ctl);
+            match p9::build_rlopen(&mut self.out_buf, tag, &q, 0) {
+                Ok(len) => {
+                    self.fids[i] = Some(Fid {
+                        fid: a.fid,
+                        path: ctl,
+                        opened: true,
+                    });
+                    Ok(len)
+                }
+                Err(()) => {
+                    net.slot_unref(n); // refs 1 -> 0 -> freed; fid stays at clone
+                    Err(())
+                }
+            }
+        } else {
+            let mut nf = f;
+            nf.opened = true;
+            self.fids[i] = Some(nf);
+            let q = self.qid_of(net, f.path);
+            p9::build_rlopen(&mut self.out_buf, tag, &q, 0)
+        }
     }
 
-    fn h_read(&mut self, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
+    fn h_read(&mut self, net: &mut Net, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
         let a = match p9::parse_tread(tmsg) {
             Ok(a) => a,
             Err(_) => return self.err(tag, p9::E_PROTO),
@@ -425,24 +835,72 @@ impl Conn {
         if !f.opened {
             return self.err(tag, p9::E_PROTO);
         }
-        let n = &NODES[f.path as usize];
-        if n.dir {
-            // Directory listing is Treaddir (net-2c). A Tread on a dir is EISDIR.
+        if net.is_dir(f.path) {
+            // Directory listing is Treaddir. A Tread on a dir is EISDIR.
             return self.err(tag, p9::E_ISDIR);
         }
-        let content = n.content;
+        let content = net.file_content(f.path);
+        let body = content.as_slice();
         let off = a.offset as usize;
-        let avail: &[u8] = if off >= content.len() {
-            &[]
-        } else {
-            &content[off..]
-        };
+        let avail: &[u8] = if off >= body.len() { &[] } else { &body[off..] };
         let cap = (self.msize as usize).saturating_sub(p9::P9_HDR_LEN + 4);
         let want = (a.count as usize).min(cap).min(avail.len());
         p9::build_rread(&mut self.out_buf, tag, &avail[..want])
     }
 
-    fn h_getattr(&mut self, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
+    fn h_readdir(&mut self, net: &mut Net, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
+        let a = match p9::parse_treaddir(tmsg) {
+            Ok(a) => a,
+            Err(_) => return self.err(tag, p9::E_PROTO),
+        };
+        let i = match self.fid_find(a.fid) {
+            Some(i) => i,
+            None => return self.err(tag, p9::E_BADF),
+        };
+        let f = self.fids[i].unwrap();
+        if !f.opened {
+            return self.err(tag, p9::E_PROTO);
+        }
+        if !net.is_dir(f.path) {
+            return self.err(tag, p9::E_NOTDIR);
+        }
+        // Assemble the dirent stream for entries AFTER `offset` (an ordinal
+        // resume cookie: entry K carries next_offset K+1, never 0), bounded by
+        // the Treaddir count and msize. A directory's child order is stable, so
+        // the ordinal is a valid resume point across a paginated read.
+        let budget = (a.count as usize)
+            .min(self.msize as usize)
+            .min(SRV_MSIZE_USIZE);
+        let mut data: Vec<u8> = Vec::new();
+        let mut ord: u64 = 0;
+        let mut full = false;
+        net.for_each_child(f.path, |name, child, is_dir| {
+            ord += 1;
+            if full || ord <= a.offset {
+                return; // already delivered in a prior page (or past the budget)
+            }
+            let entry_len = p9::dirent_len(name.len());
+            if data.len() + entry_len > budget {
+                full = true;
+                return;
+            }
+            let mut scratch = [0u8; 64 + p9::P9_QID_LEN + 8 + 1 + 2];
+            let q = p9::Qid {
+                kind: if is_dir { p9::P9_QTDIR } else { p9::P9_QTFILE },
+                version: 0,
+                path: child,
+            };
+            let dtype = if is_dir { p9::DT_DIR } else { p9::DT_REG };
+            if let Ok(used) = p9::pack_dirent(&mut scratch, 0, &q, ord, dtype, name) {
+                data.extend_from_slice(&scratch[..used]);
+            } else {
+                full = true;
+            }
+        });
+        p9::build_rreaddir(&mut self.out_buf, tag, &data)
+    }
+
+    fn h_getattr(&mut self, net: &mut Net, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
         let fid = match p9::parse_tgetattr(tmsg) {
             Ok(f) => f,
             Err(_) => return self.err(tag, p9::E_PROTO),
@@ -452,25 +910,33 @@ impl Conn {
             None => return self.err(tag, p9::E_BADF),
         };
         let f = self.fids[i].unwrap();
-        let n = &NODES[f.path as usize];
-        let (mode, nlink, size) = if n.dir {
+        let (mode, nlink, size) = if net.is_dir(f.path) {
             (DIR_MODE, 2u64, 0u64)
         } else {
-            (FILE_MODE, 1u64, n.content.len() as u64)
+            let m = match f.path {
+                P_TCP_CLONE => FILE_RW,
+                _ if is_conn(f.path) => match conn_filekind(f.path) {
+                    FK_CTL | FK_DATA => FILE_RW,
+                    _ => FILE_RO,
+                },
+                _ => FILE_RO, // stats
+            };
+            (m, 1u64, net.file_content(f.path).as_slice().len() as u64)
         };
         // The security trio (mode/uid/gid) MUST be filled: the kernel's A-3
-        // dev9p per-component X-search reads them, and an unfilled trio
-        // fails closed -> the /net walk is DENIED (ninep build_rgetattr doc).
+        // dev9p per-component X-search reads them, and an unfilled trio fails
+        // closed -> the /net walk is DENIED (ninep build_rgetattr doc).
         let valid = p9::P9_GETATTR_MODE
             | p9::P9_GETATTR_NLINK
             | p9::P9_GETATTR_UID
             | p9::P9_GETATTR_GID
             | P9_GETATTR_SIZE;
+        let q = self.qid_of(net, f.path);
         p9::build_rgetattr(
             &mut self.out_buf,
             tag,
             valid,
-            &qid_of(f.path),
+            &q,
             mode,
             T_PRINCIPAL_SYSTEM,
             T_GID_SYSTEM,
@@ -479,12 +945,12 @@ impl Conn {
         )
     }
 
-    fn h_clunk(&mut self, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
+    fn h_clunk(&mut self, net: &mut Net, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
         let a = match p9::parse_tclunk(tmsg) {
             Ok(a) => a,
             Err(_) => return self.err(tag, p9::E_PROTO),
         };
-        if !self.fid_clunk(a.fid) {
+        if !self.fid_clunk(net, a.fid) {
             return self.err(tag, p9::E_BADF);
         }
         p9::build_rclunk(&mut self.out_buf, tag)

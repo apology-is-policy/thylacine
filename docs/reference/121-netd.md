@@ -195,6 +195,66 @@ joey: net-2b-2 /net mounted (netd 9P server)
 joey: net-2b-2 PROBE /net/tcp/stats OK (43 bytes)
 ```
 
+## net-2c-1: the `/net/tcp` clone fid state machine
+
+net-2c-1 grows the net-2b-2 static skeleton into the **live TCP fid state
+machine** (NET-DESIGN.md §3.4), the `clone`-minted numbered-connection half of
+the tree, plus the `Treaddir` codec a dynamic directory needs. It is still pure
+userspace — the kernel is byte-unchanged.
+
+**The dynamic tree.** The static node table is replaced by a qid encoding with
+two disjoint ranges: the static skeleton occupies small fixed paths (`/net`=0,
+`tcp`=1, …, `tcp/clone`=4, `tcp/stats`=5, …), and a live connection `N` under a
+protocol encodes as `CONN_FLAG(1<<40) | (proto<<32) | (N<<8) | filekind`, so the
+connection's directory and each of its files (`ctl`/`data`/`local`/`remote`/
+`status`/`err`) is one stable qid. A walk resolves a connection node **only while
+its slot is live**, so a stale or forged connection qid is unreachable.
+
+**The clone idiom.** Opening `/net/tcp/clone` (`Tlopen`) **mints** a connection:
+it claims a free slot `N`, then *rebinds the opened fid onto that connection's
+`ctl`* and returns the `ctl` qid — the Plan 9 clone idiom. The kernel dev9p
+client accepts an `Rlopen` qid that differs from the walked qid (verified:
+`kernel/9p_session.c` stores the open qid without comparing it to the walk qid),
+so the rebind is legal. Reading the clone-opened fid therefore yields `N`
+(ASCII). A second fid can reach the same connection by walking `/net/tcp/N/…`.
+
+**The refcount (the I-10/I-11 invariant).** A connection is reference-counted by
+the fids that name its subtree. Every fid bound into `/net/tcp/N/` refs slot `N`;
+a clunk (or a walk that moves the fid out, or a session teardown, or a Tversion
+reset) unrefs it. The **last** unref frees `N` — the *only* free path — so `N` is
+not reusable until the directory is fully torn down (a late reply on an old `N`
+is never mis-attributed). `fid_set` refs the new connection *before* unreffing
+the old, so a within-connection rebind never transits refs==0 and frees the slot
+out from under the fid. Minting is bounded at `MAX_SLOTS = 16` (a DoS floor,
+#65); past it, `clone` open returns `ENOMEM`.
+
+**`Treaddir`.** `libthyla_rs::ninep` gains the readdir codec (`parse_treaddir` +
+`build_rreaddir` + `pack_dirent`; dirent = `qid(13)│next_offset(8)│type(1)│
+name`). netd serves it: a directory's children are enumerated in a stable order
+(static names, then live slots ascending), each dirent's `next_offset` is a
+strictly-increasing ordinal cookie (never 0), and the page is bounded by the
+Treaddir `count` and msize. So `/net/tcp` lists `clone`, `stats`, and every live
+`N/` directory — and the kernel's dev9p readdir issues `Treaddir`, not a legacy
+`Tread` stream, so this codec is required for `ls /net` to list at all.
+
+**Not yet (net-2c-2):** a slot carries *no smoltcp socket* at net-2c-1 — it is
+"N assigned" (`ALLOCATED`-without-wire). The smoltcp socket reservation, the
+`ctl` verb parser (`connect`/`announce`/`hangup`), live `data` recv/send, the
+`local`/`remote`/`status`/`err` content, and the NIC-IRQ poll fd land at
+net-2c-2, where the slot grows a `SocketHandle` and the iface folds into the
+shared `Net` context. So at net-2c-1 `data`/`local`/`remote`/`err` read empty and
+`status` reads `Closed`; only `ctl`(→`N`) + the tree/refcount machine are live.
+
+**netd is single-threaded** (one Proc, one `serve()` loop): every 9P frame across
+every session is processed sequentially, so the global connection table (`Net`)
+needs no lock — the refcount is single-threaded-safe by construction (§3.4 "netd
+serializes its own connection table").
+
+```
+joey: net-2c-1 /net mounted (netd 9P server)
+joey: net-2c-1 PROBE OK (clone->0, 0/ctl->0, readdir grew, clunk frees+reuses 0)
+```
+
 ## Data structures
 
 | Type | Role |
@@ -204,21 +264,28 @@ joey: net-2b-2 PROBE /net/tcp/stats OK (43 bytes)
 | `NicRxToken { frame: Vec<u8> }` | owns one received frame (no device borrow) |
 | `NicTxToken<'a> { nic: &'a mut VirtioNetPci }` | the single `&mut nic` TX borrow |
 | `server::Conn` | one accepted 9P connection: fid table + `in_buf`/`out_buf` |
-| `server::NODES` | the static `/net` node table (index == qid path) |
+| `server::Net` | the global connection table (`Slot[MAX_SLOTS]`) + live stats; shared `&mut` across all sessions (net-2c-2 folds in `iface`/`device`/`sockets`) |
+| `server::Slot { used, refs }` | one `/net/tcp/N/` connection: the refcount key (net-2c-2 adds the `SocketHandle` + state) |
 
 ## Tests
 
 - **Boot proof** (the live path): `tools/test.sh` → the warden binds netd → the
   `netd: PASS … (DHCP)` line + lease `10.0.2.15/24` + `netd: serving /net` +
-  `4 bound, 3 up` + `joey: net-2b-2 /net mounted` + `PROBE /net/tcp/stats OK
-  (43 bytes)` (the multi-component walk + file read through the live 9P session) +
-  930/930 + boot OK + 0 EXTINCTION.
+  `4 bound, 3 up` + `joey: net-2c-1 /net mounted` + `net-2c-1 PROBE OK (clone->0,
+  0/ctl->0, readdir grew, clunk frees+reuses 0)` — the full §3.4 fid machine
+  exercised through the live dev9p 9P session: `clone` mints `N`, the dynamic
+  `/net/tcp/0/ctl` is reachable, `Treaddir` lists the dynamic entry (the kernel
+  parses netd's `Rreaddir`), and the clunk frees + reuses `N` — plus 930/930 +
+  boot OK + 0 EXTINCTION.
 - **SMP gate**: `tools/ci-smp-gate.sh` (default+UBSan × smp4/smp8) — netd is
-  single-threaded; the new boot mount exercises the (already-gated) kernel dev9p
-  client + mount path under SMP.
-- The smoltcp glue (the phy tokens) is exercised by the live DHCP exchange; the
-  9P server is exercised by joey's mount + probe; host-level unit tests for the
-  fid state machine arrive with net-2c (the deterministic clone/connect coverage).
+  single-threaded; the boot probe exercises the (already-gated) kernel dev9p
+  client + the 9P clone/readdir/clunk traffic under SMP.
+- The ninep readdir codec + the fid machine are validated by the boot probe as an
+  **integration test** — netd builds the wire, the kernel dev9p client parses it,
+  joey reads it back (two independent implementations cross-checking end-to-end),
+  the same discipline as net-2b-2 + corvus (libthyla-rs is no_std with no host
+  test harness). The deterministic clone/connect coverage matures with net-2c-2's
+  live data path.
 
 ## Error paths
 
@@ -244,22 +311,33 @@ joey: net-2b-2 PROBE /net/tcp/stats OK (43 bytes)
   (joey→warden→netd, gated on the persistent lifecycle) is the only new privilege
   surface; the kernel is byte-unchanged (pure userspace). Boot proof: `/net`
   mounted + `/net/tcp/stats` walked+read (43 bytes).
-- **net-2c**: the `/net/tcp` `clone`/`connect`/`data` client path + the §3.4 fid
-  state machine (one fid ↔ one smoltcp socket; N reuse gated on clunk).
-- **net-2d**: the focused audit over the netd surface + the ARCH §25.4 /
-  CLAUDE.md audit-trigger enumeration + the SMP gate + close.
+- **net-2c-1 (LANDED)**: the `/net/tcp` `clone` fid state machine (§3.4) — the
+  dynamic qid-encoded tree, the clone-mints-`N` Plan 9 idiom, the refcounted
+  connection slots (last clunk frees `N`, the only free path), and the ninep
+  `Treaddir` codec (`/net/tcp` lists its live `N/` directories). A slot is
+  "N assigned" — no smoltcp socket yet. The kernel is byte-unchanged.
+- **net-2c-2**: the live data path — the `socket-tcp` feature, the smoltcp socket
+  reserved at clone, the `ctl` verb parser (`connect`/`announce`/`hangup`), `data`
+  recv/send, `local`/`remote`/`status`/`err`, and the NIC-IRQ poll fd.
+- **net-2d**: the focused audit over the netd surface (the fid machine +
+  connection-table SMP-safety + NIC ownership) + the ARCH §25.4 / CLAUDE.md
+  audit-trigger enumeration + the SMP gate + close.
 
 ## Known caveats / seams
 
-- **No `readdir` yet** (net-2b-2): the skeleton dirs are walkable-by-name but a
-  `Tread`/`Treaddir` on a directory returns `EISDIR`/`ENOSYS`, so `ls /net` does
-  not list yet. `readdir` pairs with net-2c's `clone`-minted numbered connection
-  directories (which need listing) — it lands there, not as a half-feature now.
+- **`readdir` lands at net-2c-1**: `/net` directories now list via `Treaddir`
+  (the ninep readdir codec). A `Tread` on a directory still returns `EISDIR` (the
+  9P2000.L convention — directory enumeration is `Treaddir`, and the kernel dev9p
+  client issues exactly that).
+- **udp/icmp `clone` is deferred** (net-2c-1): the `clone`-minted machine is TCP
+  only; `udp/`/`icmp/` keep just their `stats` file. The qid encoding reserves a
+  `proto` field so udp/icmp connections slot in without a re-encode, but their
+  sockets land with the protocol surface (post-net-2c).
 - **The 9P accept is poll-timeout-driven, not NIC-IRQ-woken** (net-2b-2): the
   combined loop's `t_poll` timeout is smoltcp's `poll_delay` (clamped
-  `[50 ms, 1 s]`), so an RX frame during an idle poll waits ≤ 1 s. At net-2b-2 the
-  only socket is DHCP (no data path), so this is fine; net-2c adds the NIC IRQ fd
-  to the poll set for RX-driven wakeups once TCP/UDP data flows.
+  `[50 ms, 1 s]`), so an RX frame during an idle poll waits ≤ 1 s. Through
+  net-2c-1 the only socket is DHCP (no data path), so this is fine; net-2c-2 adds
+  the NIC IRQ fd to the poll set for RX-driven wakeups once TCP data flows.
 - **The connection table is bounded at `MAX_CONNS = 8`** and effectively
   single-session at v1.0 (joey's one `/net` mount drives one kernel dev9p-client
   session multiplexing all callers). Excess connections pend in the kernel; the

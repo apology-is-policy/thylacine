@@ -67,12 +67,20 @@ pub const P9_TCLUNK: u8   = 120;
 pub const P9_RCLUNK: u8   = 121;
 pub const P9_TGETATTR: u8 = 24;
 pub const P9_RGETATTR: u8 = 25;
+pub const P9_TREADDIR: u8 = 40;
+pub const P9_RREADDIR: u8 = 41;
 pub const P9_RLERROR: u8  = 7;
 
 // QID type bits (the v1.0 surface -- corvus's namespace is one dir +
 // one file, no symlinks/temp).
 pub const P9_QTDIR: u8  = 0x80;
 pub const P9_QTFILE: u8 = 0x00;
+
+// Linux dirent type byte (the `d_type` of a Treaddir entry). The kernel
+// dev9p client passes this through verbatim to the userspace readdir
+// consumer; only DIR vs REG matter for the /net tree.
+pub const DT_DIR: u8 = 4;
+pub const DT_REG: u8 = 8;
 
 // Sentinels.
 pub const P9_NOFID: u32 = 0xFFFF_FFFF;
@@ -346,6 +354,23 @@ pub fn parse_tclunk(buf: &[u8]) -> Result<TclunkArgs, ()> {
     Ok(TclunkArgs { fid })
 }
 
+/// Treaddir body: `[fid: u32][offset: u64][count: u32]`. `offset` is the
+/// opaque resume cookie from a prior Rreaddir entry (0 = from the start);
+/// `count` bounds the dirent bytes the server may return.
+#[derive(Copy, Clone)]
+pub struct TreaddirArgs {
+    pub fid: u32,
+    pub offset: u64,
+    pub count: u32,
+}
+
+pub fn parse_treaddir(buf: &[u8]) -> Result<TreaddirArgs, ()> {
+    let (fid, p) = unpack_u32(buf, P9_HDR_LEN)?;
+    let (offset, p) = unpack_u64(buf, p)?;
+    let (count, _) = unpack_u32(buf, p)?;
+    Ok(TreaddirArgs { fid, offset, count })
+}
+
 // =============================================================================
 // Rmsg builders -- server-side output. Each writes a full framed Rmsg
 // into `out`; returns the byte count written. The `size` field in the
@@ -500,4 +525,47 @@ pub fn build_rgetattr(out: &mut [u8], tag: u16, valid: u64, qid: &Qid,
     let p = pack_u64(out, p, 0)?;        // data_version
     patch_header_size(out, p)?;
     Ok(p)
+}
+
+// =============================================================================
+// Treaddir / Rreaddir (9P2000.L directory enumeration).
+//
+// A Rreaddir body is `[count: u32][data: count]` where `data` is a packed
+// sequence of dirent records, each:
+//   [qid: 13][next_offset: u64][type: u8][name: str]
+// `next_offset` is the opaque cookie the client echoes in the FOLLOWING
+// Treaddir to resume AFTER this entry (so it must be strictly increasing and
+// never 0 -- the kernel readdir-cookie convention). The server assembles the
+// dirent stream with `pack_dirent` (bounding the total by the Treaddir count
+// and msize), then frames it with `build_rreaddir`.
+// =============================================================================
+
+/// Byte length of one packed dirent with a `name_len`-byte name. Lets a server
+/// check that the next entry fits the remaining budget before packing it.
+pub fn dirent_len(name_len: usize) -> usize {
+    P9_QID_LEN + 8 + 1 + 2 + name_len
+}
+
+/// Pack one dirent record at `out[off..]`. `next_offset` is the resume cookie
+/// for the entry AFTER this one. Returns the new offset.
+pub fn pack_dirent(out: &mut [u8], off: usize, qid: &Qid, next_offset: u64,
+                   dtype: u8, name: &[u8]) -> Result<usize, ()> {
+    let off = pack_qid(out, off, qid)?;
+    let off = pack_u64(out, off, next_offset)?;
+    let off = pack_u8(out, off, dtype)?;
+    pack_str(out, off, name)
+}
+
+/// Frame an assembled dirent stream as a Rreaddir. `data` is the packed dirent
+/// records (built with `pack_dirent`); it is COPIED into `out`. The caller
+/// bounds `data.len()` by the Treaddir count and `msize - P9_HDR_LEN - 4`.
+pub fn build_rreaddir(out: &mut [u8], tag: u16, data: &[u8]) -> Result<usize, ()> {
+    if data.len() > u32::MAX as usize { return Err(()); }
+    let p = build_header(out, P9_RREADDIR, tag)?;
+    let p = pack_u32(out, p, data.len() as u32)?;
+    if out.len() < p + data.len() { return Err(()); }
+    out[p..p + data.len()].copy_from_slice(data);
+    let total = p + data.len();
+    patch_header_size(out, total)?;
+    Ok(total)
 }
