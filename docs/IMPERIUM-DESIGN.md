@@ -111,6 +111,50 @@ michael@thylacine$ imperium --request chown dac kill
   shell's stripes; the shell redeems it (`SYS_CAP_USE`) and becomes the
   fork-propagating legate root.
 
+### 3.1 The `imperium` tool's workflow (a thin trigger; the TUI is corvus's)
+
+The `imperium` tool (native `ut` / libutopia) is **untrusted and thin** -- it
+posts an intent to corvus and tells you to hit the SAK. *Everything trusted --
+the browse, the select, the provincia display, the per-cap-key auth -- is rendered
+by **corvus** on the trusted path* (the cell-grid -> the kernel sink,
+`TRUSTED-PATH.md` section 7), **never by the tool.** This is the section-3 property
+generalized (TRUSTED-PATH section 4): if the tool drew the "authorize CAP_KILL?"
+surface, a hostile program in your namespace could draw an identical fake and
+harvest your confirmation or your cap-key. So the tool never renders the
+authorization surface.
+
+Two forms, both SAK-gated, both corvus-rendered:
+
+- **`imperium` (no args) -- browse.** Posts a browse intent; you hit the SAK;
+  corvus renders the **cursus-honorum browser** (your eligible levels + their
+  caps, from `clearance.db`); you select; corvus shows the resulting provincia +
+  term; you confirm + authenticate. The discovery form.
+- **`imperium <caps...>` (the *lex curiata* above) -- direct.** Names the cap-set;
+  the SAK; corvus shows the named provincia directly (skips the browse); confirm +
+  auth. The expert/muscle-memory form.
+
+**Elevation is human-only by construction, and the gate is the SAK, not the TUI:**
+the SAK is a physical key the kernel catches, so no program can press it.
+`imperium kill` invoked by a *script* merely posts a request that does nothing
+until a human hits the SAK -- so both forms are equally script-safe; the browse
+TUI is a usability choice, not the security boundary. (Belt-and-suspenders: the
+tool may detect a non-interactive invocation -- no controlling tty -- and fail
+fast with a helpful message, but that is UX, not the gate.)
+
+**`imperium --list` (or `edict`) is the read-only sibling** -- "what do I hold /
+what could I become" -- a *normal untrusted tool* reading the `/proc/self`
+imperium flag + querying corvus read-only. Like the fasces prompt (section 4), it
+is a convenience mirror, never the source of truth; the authoritative browse + the
+grant are the trusted episode.
+
+**The delegation companion.** Imperium is *self*-elevation. Its standing-delegation
+sibling -- a *censor* persisting a bounded, revocable subset of its own imperium to
+another citizen -- is the **mandate** (`docs/MANDATE-DESIGN.md`, invariant I-35),
+the third leg of the authority system. Mandate *issuance* is the same trusted-path
+episode from the censor's side (a SAK *lex curiata*); mandate *redemption* is the
+silent login-time install -- the asymmetry that lets a citizen hold standing scoped
+authority (e.g. network TCP:80) without a SAK per act.
+
 ## 4. The fasces -- the scale indicator
 
 A magistrate's imperium was legible at a glance by the lictors before him: a
