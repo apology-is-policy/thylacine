@@ -40,19 +40,34 @@ pub const MAX_IDS: usize = 16;
 pub enum DeviceId {
     /// A DTB `compatible` string (e.g. `"arm,pl061"`) -- the static-fabric identity.
     Compatible(String),
-    /// A virtio device-id (e.g. `1` = net), from a virtio-mmio / virtio-pci bus
-    /// source. String form `"virtio:<n>"`.
+    /// A virtio device-id (e.g. `1` = net) behind a virtio-MMIO transport, from the
+    /// virtio-mmio bus source. String form `"virtio:<n>"`.
     Virtio(u16),
+    /// A virtio device-id (e.g. `1` = net) behind a virtio-PCI function, from the
+    /// PCIe source (devpci). String form `"virtio-pci:<n>"`. Deliberately DISTINCT
+    /// from `Virtio`: the two transports have different claim paths (a virtio-PCI
+    /// driver claims its function via `SYS_PCI_CLAIM` + maps BARs; a virtio-mmio
+    /// driver mints an MMIO handle over its allowance window), so a manifest binds
+    /// exactly one and never collides the two.
+    VirtioPci(u16),
 }
 
 impl DeviceId {
-    /// Parse a `binds` / record identity string into a typed id. `"virtio:<n>"`
-    /// (n a u16) -> `Virtio`; anything else -> a literal `Compatible`. An
-    /// unrecognized `bus:`-style prefix therefore stays `Compatible`, so it simply
-    /// never matches a typed node -- fail-closed forward-compat (an old libdriver
-    /// does not choke on a new bus id, it just declines it). A DTB `compatible`
-    /// never contains `:`, so the typed namespace cannot collide with one.
+    /// Parse a `binds` / record identity string into a typed id. `"virtio-pci:<n>"`
+    /// -> `VirtioPci`; `"virtio:<n>"` (n a u16) -> `Virtio`; anything else -> a
+    /// literal `Compatible`. An unrecognized `bus:`-style prefix therefore stays
+    /// `Compatible`, so it simply never matches a typed node -- fail-closed
+    /// forward-compat (an old libdriver does not choke on a new bus id, it just
+    /// declines it). A DTB `compatible` never contains `:`, so the typed namespace
+    /// cannot collide with one. (`"virtio-pci:"` is checked first, but the two
+    /// prefixes are disjoint anyway -- `"virtio-pci:1"` does not start with
+    /// `"virtio:"`.)
     pub fn parse(s: &str) -> DeviceId {
+        if let Some(rest) = s.strip_prefix("virtio-pci:") {
+            if let Ok(n) = rest.parse::<u16>() {
+                return DeviceId::VirtioPci(n);
+            }
+        }
         if let Some(rest) = s.strip_prefix("virtio:") {
             if let Ok(n) = rest.parse::<u16>() {
                 return DeviceId::Virtio(n);
@@ -69,6 +84,11 @@ impl DeviceId {
             DeviceId::Compatible(s) => s.clone(),
             DeviceId::Virtio(n) => {
                 let mut s = String::from("virtio:");
+                s.push_str(&n.to_string());
+                s
+            }
+            DeviceId::VirtioPci(n) => {
+                let mut s = String::from("virtio-pci:");
                 s.push_str(&n.to_string());
                 s
             }
@@ -124,12 +144,21 @@ impl DeviceNode {
     /// a DTB `Compatible` can carry a comma, but DTB nodes are enumerated
     /// IN-PROCESS by the warden's `DtbSource` and never cross this channel -- only
     /// bus-source nodes do). Fail-closed on a delimiter, mirroring the descriptor.
+    ///
+    /// The record does NOT carry a PCI `pci` bdf: the only PCI source (`PciSource`)
+    /// is in-process and never pipes through this channel, so a node with a bdf has
+    /// no business being recorded. Rather than SILENTLY drop the bdf (which would
+    /// degrade to a no-PCI grant downstream), `to_record` rejects it LOUDLY -- a
+    /// future out-of-process PCIe source must extend the record format first.
     pub fn to_record(&self) -> Result<String, Error> {
         if self.label.contains(';') {
             return Err(Error::BadField);
         }
         if self.ids.is_empty() {
             return Err(Error::BadField);
+        }
+        if self.resources.pci.is_some() {
+            return Err(Error::BadField); // the record cannot represent a PCI bdf (forward seam)
         }
         let mut s = String::new();
         s.push('v');
@@ -240,6 +269,11 @@ impl DeviceNode {
                 compatible: Vec::new(),
                 reg: reg.unwrap_or_default(),
                 interrupts: intids.unwrap_or_default(),
+                // The wire record does not carry a PCI bdf: the only PCI source
+                // (devpci) is enumerated IN-PROCESS by the warden's `PciSource`
+                // and never crosses this source->warden pipe. A v1.x out-of-process
+                // PCIe source extends the record then; today it is a forward seam.
+                pci: None,
             },
         })
     }
@@ -300,6 +334,85 @@ pub fn reconcile_reported_node(reported: &DeviceNode, trusted: &[DeviceNode]) ->
             compatible: Vec::new(),
             reg: slot.resources.reg.clone(),
             interrupts: slot.resources.interrupts.clone(),
+            // Take the trusted slot's bdf, never the reported one -- same discipline
+            // as reg/INTID. (reconcile keys on the reg base, so it is the virtio-mmio
+            // path; a PCI source is the in-process `PciSource`, which is itself the
+            // kernel-trusted view and bypasses reconcile.)
+            pci: slot.resources.pci,
+        },
+    })
+}
+
+/// Parse one devpci `ctl` line into a typed virtio-PCI device node. The line is
+/// the kernel-mediated topology channel (`docs/reference/120-devpci.md`):
+///
+///   `v1 bus=<hex> dev=<hex> fn=<hex> vendor=<hex> device=<hex> virtio=<dec> intid=<hex|none>`
+///
+/// `label` is the source's provenance tag (the `<bdf>` directory name). Numbers
+/// are bare lowercase hex EXCEPT `virtio`, which is DECIMAL (matching the
+/// `virtio-pci:<n>` id convention). `intid=none` (or an absent intid) yields no
+/// wired IRQ -- the function declares no INTx pin, and MSI is a v1.x path.
+///
+/// Returns `None` on any malformed line (wrong/absent version token, a missing
+/// required field, a bad number) OR a `virtio=0` (no virtio identity): the source
+/// logs + skips, best-effort like every source, and devpci lists only virtio
+/// functions today. devpci is the KERNEL (the TCB), so this parser is lenient --
+/// it tolerates an unknown appended field (the forward-compat the `v1` contract
+/// promises) rather than the hostile-source-hardened strictness of `parse_record`
+/// (which is the non-TCB bus-source boundary).
+pub fn parse_pci_ctl(label: &str, line: &str) -> Option<DeviceNode> {
+    let mut it = line.split_whitespace();
+    if it.next()? != "v1" {
+        return None; // version token absent or not v1
+    }
+
+    let mut bus: Option<u8> = None;
+    let mut dev: Option<u8> = None;
+    let mut func: Option<u8> = None;
+    let mut virtio: Option<u16> = None;
+    let mut intid: Option<u32> = None; // Some only when a real INTID is present
+
+    for field in it {
+        let (key, val) = field.split_once('=')?;
+        match key {
+            "bus" => bus = Some(u8::from_str_radix(val, 16).ok()?),
+            "dev" => dev = Some(u8::from_str_radix(val, 16).ok()?),
+            "fn" => func = Some(u8::from_str_radix(val, 16).ok()?),
+            // vendor/device are informational; validate them as a light integrity
+            // gate (they are genuinely u16) but do not carry them into the node.
+            "vendor" | "device" => {
+                u16::from_str_radix(val, 16).ok()?;
+            }
+            "virtio" => virtio = Some(val.parse::<u16>().ok()?), // DECIMAL
+            "intid" => {
+                if val != "none" {
+                    intid = Some(u32::from_str_radix(val, 16).ok()?);
+                }
+            }
+            _ => {} // tolerate an unknown appended field (the v1 forward-compat)
+        }
+    }
+
+    let bus = bus?;
+    let dev = dev?;
+    let func = func?;
+    let virtio = virtio?;
+    if virtio == 0 {
+        return None; // not a virtio function -> not bound by a virtio-PCI manifest
+    }
+
+    let interrupts = match intid {
+        Some(id) => alloc::vec![id],
+        None => Vec::new(),
+    };
+    Some(DeviceNode {
+        label: label.to_string(),
+        ids: alloc::vec![DeviceId::VirtioPci(virtio)],
+        resources: NodeResources {
+            compatible: Vec::new(),
+            reg: Vec::new(), // a virtio-PCI function exposes BARs, not DTB reg windows
+            interrupts,
+            pci: Some((bus, dev, func)),
         },
     })
 }
@@ -409,6 +522,96 @@ mod dtb_source {
 #[cfg(feature = "driver")]
 pub use dtb_source::DtbSource;
 
+// =============================================================================
+// PciSource -- the in-process /hw/pci source (feature `driver`; needs libthyla-rs).
+// =============================================================================
+
+#[cfg(feature = "driver")]
+mod pci_source {
+    use alloc::string::{String, ToString};
+    use alloc::vec::Vec;
+
+    use libthyla_rs::fs;
+    use libthyla_rs::io::Read;
+
+    use super::{parse_pci_ctl, DeviceNode, DiscoverySource};
+
+    /// The PCIe discovery source (MENAGERIE section 7, the mediated realization):
+    /// enumerates `/hw/pci` (the kernel-mediated [devpci](../../../docs/reference/120-devpci.md)
+    /// topology) and emits one `VirtioPci` `DeviceNode` per function. The DtbSource
+    /// sibling for the PCI bus: on QEMU-virt the kernel owns ECAM and re-publishes
+    /// the enumerated functions at `/hw/pci/<bdf>/ctl`, so this source is itself the
+    /// kernel-TRUSTED view -- it reads the mediated result IN-PROCESS, never poking
+    /// config space, never spawning a poking Proc, and (unlike the non-TCB
+    /// virtio-mmio bus source) needs no `reconcile_reported_node` step. Best-effort:
+    /// a malformed `ctl` line is logged + skipped; a missing `/hw/pci` yields no
+    /// nodes. Top-level only (every QEMU-virt virtio-PCI function is a direct child
+    /// of the root bridge); nested-bridge descent is a v1.x refinement.
+    pub struct PciSource {
+        root: String,
+    }
+
+    impl PciSource {
+        /// A source rooted at the conventional `/hw/pci` mount.
+        pub fn new() -> Self {
+            PciSource {
+                root: String::from("/hw/pci"),
+            }
+        }
+
+        /// A source rooted at an arbitrary path (for an alternate devpci mount).
+        pub fn at(root: &str) -> Self {
+            PciSource {
+                root: root.to_string(),
+            }
+        }
+    }
+
+    impl Default for PciSource {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl DiscoverySource for PciSource {
+        fn enumerate(&mut self) -> Vec<DeviceNode> {
+            let mut out = Vec::new();
+            let rd = match fs::read_dir(&self.root) {
+                Ok(r) => r,
+                Err(_) => return out, // no /hw/pci -> no PCI nodes (best-effort)
+            };
+            for ent in rd {
+                let ent = match ent {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                if !ent.is_dir() {
+                    continue; // the root holds only <bdf> directories
+                }
+                let bdf = ent.file_name();
+                if let Some(node) = read_function(&self.root, bdf) {
+                    out.push(node);
+                }
+            }
+            out
+        }
+    }
+
+    /// Read + parse one function's `<bdf>/ctl` line into a typed node. The provenance
+    /// label is the `<bdf>` directory name (e.g. `"0.1.0"`).
+    fn read_function(root: &str, bdf: &str) -> Option<DeviceNode> {
+        let path = alloc::format!("{}/{}/ctl", root, bdf);
+        let mut f = fs::File::open(&path).ok()?;
+        let mut buf = Vec::new();
+        f.read_to_end(&mut buf).ok()?;
+        let line = core::str::from_utf8(&buf).ok()?;
+        parse_pci_ctl(bdf, line)
+    }
+}
+
+#[cfg(feature = "driver")]
+pub use pci_source::PciSource;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,6 +625,7 @@ mod tests {
                 compatible: Vec::new(),
                 reg: alloc::vec![reg],
                 interrupts: alloc::vec![intid],
+                pci: None,
             },
         }
     }
@@ -582,6 +786,7 @@ mod tests {
                 compatible: alloc::vec!["virtio,mmio".to_string()],
                 reg: alloc::vec![(base, 0x200)],
                 interrupts: alloc::vec![intid],
+                pci: None,
             },
         }
     }
@@ -630,5 +835,116 @@ mod tests {
             rec.push_str("virtio:1");
         }
         assert_eq!(DeviceNode::parse_record(&rec), Err(Error::TooManyResources));
+    }
+
+    // -------------------------------------------------------------------------
+    // virtio-PCI identity + the devpci ctl-line parser (6b-2)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn device_id_virtio_pci_parse_and_string() {
+        assert_eq!(DeviceId::parse("virtio-pci:1"), DeviceId::VirtioPci(1));
+        assert_eq!(DeviceId::parse("virtio-pci:65535"), DeviceId::VirtioPci(65535));
+        // out-of-range suffix -> a literal compatible (fail-closed forward-compat)
+        assert_eq!(
+            DeviceId::parse("virtio-pci:99999"),
+            DeviceId::Compatible("virtio-pci:99999".to_string())
+        );
+        assert_eq!(DeviceId::VirtioPci(1).as_string(), "virtio-pci:1");
+        // round-trip
+        assert_eq!(DeviceId::parse(&DeviceId::VirtioPci(2).as_string()), DeviceId::VirtioPci(2));
+    }
+
+    #[test]
+    fn virtio_pci_distinct_from_virtio_transport() {
+        // the load-bearing separation: the MMIO and PCI virtio transports never
+        // collide, so a manifest binds exactly one.
+        assert_ne!(DeviceId::VirtioPci(1), DeviceId::Virtio(1));
+        assert!(DeviceId::VirtioPci(1).matches_bind("virtio-pci:1"));
+        assert!(!DeviceId::VirtioPci(1).matches_bind("virtio:1"));
+        assert!(!DeviceId::Virtio(1).matches_bind("virtio-pci:1"));
+        // "virtio:1" still parses to the MMIO id even now that the longer prefix exists
+        assert_eq!(DeviceId::parse("virtio:1"), DeviceId::Virtio(1));
+    }
+
+    #[test]
+    fn parse_pci_ctl_happy_path() {
+        // a full devpci line for a virtio-net (id 1) function at bdf 0.1.0, INTID 0x23.
+        let line = "v1 bus=0 dev=1 fn=0 vendor=1af4 device=1041 virtio=1 intid=23";
+        let n = parse_pci_ctl("0.1.0", line).expect("parse");
+        assert_eq!(n.label, "0.1.0");
+        assert_eq!(n.ids, alloc::vec![DeviceId::VirtioPci(1)]);
+        assert_eq!(n.resources.pci, Some((0u8, 1u8, 0u8)));
+        assert_eq!(n.resources.interrupts, alloc::vec![0x23u32]);
+        assert!(n.resources.reg.is_empty()); // PCI BARs are not DTB reg windows
+    }
+
+    #[test]
+    fn parse_pci_ctl_intid_none_yields_no_irq() {
+        let line = "v1 bus=2 dev=a fn=1 vendor=1af4 device=1041 virtio=1 intid=none";
+        let n = parse_pci_ctl("2.a.1", line).expect("parse");
+        assert_eq!(n.resources.pci, Some((2u8, 0x0au8, 1u8)));
+        assert!(n.resources.interrupts.is_empty());
+    }
+
+    #[test]
+    fn parse_pci_ctl_tolerates_unknown_appended_field() {
+        // the v1 forward-compat contract: an unknown appended key is ignored, not
+        // a rejection (devpci is the kernel/TCB; the parser is lenient).
+        let line = "v1 bus=0 dev=1 fn=0 vendor=1af4 device=1041 virtio=1 intid=23 future=xyz";
+        let n = parse_pci_ctl("0.1.0", line).expect("parse");
+        assert_eq!(n.ids, alloc::vec![DeviceId::VirtioPci(1)]);
+    }
+
+    #[test]
+    fn parse_pci_ctl_rejects_malformed() {
+        // wrong version token
+        assert!(parse_pci_ctl("0.1.0", "v2 bus=0 dev=1 fn=0 virtio=1").is_none());
+        // absent version token
+        assert!(parse_pci_ctl("0.1.0", "bus=0 dev=1 fn=0 virtio=1").is_none());
+        // missing a required bdf component
+        assert!(parse_pci_ctl("0.1.0", "v1 bus=0 fn=0 virtio=1").is_none());
+        // missing virtio
+        assert!(parse_pci_ctl("0.1.0", "v1 bus=0 dev=1 fn=0").is_none());
+        // garbled hex
+        assert!(parse_pci_ctl("0.1.0", "v1 bus=zz dev=1 fn=0 virtio=1").is_none());
+        // a field with no '='
+        assert!(parse_pci_ctl("0.1.0", "v1 bus=0 dev 1 fn=0 virtio=1").is_none());
+        // virtio must be decimal -- "1a" hex is not a decimal u16
+        assert!(parse_pci_ctl("0.1.0", "v1 bus=0 dev=1 fn=0 virtio=1a").is_none());
+        // empty line
+        assert!(parse_pci_ctl("0.1.0", "").is_none());
+    }
+
+    #[test]
+    fn parse_pci_ctl_skips_non_virtio_function() {
+        // a virtio=0 function (no virtio identity) is not bound by a virtio-PCI
+        // manifest -> skipped (devpci lists only virtio functions today anyway).
+        let line = "v1 bus=0 dev=2 fn=0 vendor=1234 device=5678 virtio=0 intid=none";
+        assert!(parse_pci_ctl("0.2.0", line).is_none());
+    }
+
+    #[test]
+    fn best_match_binds_virtio_pci_node() {
+        let db = alloc::vec![manifest("\"virtio-pci:1\"", "netpci"), manifest("\"virtio:1\"", "netmmio")];
+        let line = "v1 bus=0 dev=1 fn=0 vendor=1af4 device=1041 virtio=1 intid=23";
+        let node = parse_pci_ctl("0.1.0", line).unwrap();
+        // binds the PCI manifest (index 0), NOT the MMIO one
+        assert_eq!(best_match(&db, &node), Some(0));
+    }
+
+    #[test]
+    fn to_record_rejects_a_pci_node() {
+        // the record (the source->warden PIPE) cannot represent a PCI bdf; encoding
+        // a VirtioPci node must fail LOUDLY rather than silently drop the bdf (the
+        // in-process PciSource never pipes; a future out-of-process source extends
+        // the record first).
+        let node = parse_pci_ctl(
+            "0.1.0",
+            "v1 bus=0 dev=1 fn=0 vendor=1af4 device=1041 virtio=1 intid=23",
+        )
+        .unwrap();
+        assert!(node.resources.pci.is_some());
+        assert_eq!(node.to_record(), Err(Error::BadField));
     }
 }

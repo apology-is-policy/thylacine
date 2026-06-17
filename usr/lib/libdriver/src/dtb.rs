@@ -131,6 +131,7 @@ impl NodeResources {
             compatible: parse_compatible(compatible),
             reg: parse_reg(reg, addr_cells, size_cells),
             interrupts: parse_interrupts(interrupts, interrupt_cells),
+            pci: None, // a DTB node has no PCI bdf; the PCI axis is the PciSource's
         }
     }
 }

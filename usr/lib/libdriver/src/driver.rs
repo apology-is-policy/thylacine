@@ -150,6 +150,12 @@ pub fn to_allowance(res: &BoundResources) -> TAllowanceDesc {
         let _ = d.push_irq(*intid);
     }
     d.set_dma_max(res.dma_max);
+    if let Some((bus, dev, fun)) = res.pci {
+        // The PCI allowance axis (I-34, 6a): the bdf the kernel will check at
+        // SYS_PCI_CLAIM. The driver's BAR maps are then handle-gated (SYS_PCI_MAP_BAR
+        // over the KObj_PCI), not allowance windows -- so PCI adds no `mmio` entry.
+        let _ = d.push_pci(bus, dev, fun);
+    }
     d
 }
 

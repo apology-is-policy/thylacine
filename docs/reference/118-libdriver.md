@@ -1,6 +1,6 @@
 # 118 - libdriver: the Menagerie driver framework crate
 
-**Status**: as-built through Menagerie build-sequence step 5d-4 (2026-06-16). Pure
+**Status**: as-built through Menagerie build-sequence step 6b-2 (2026-06-17). Pure
 userspace; no kernel ABI. The first consumer is the warden (step 5c); step 5d-1
 added the **discovery-source layer** (`source`): the typed `DeviceId` / `DeviceNode`,
 the `DiscoverySource` trait, the `DtbSource`, the source -> warden node-record
@@ -8,7 +8,12 @@ codec, and bind-by-id (`best_match` over typed identities). The first real
 `impl Driver` is the netdev retrofit (step 5d-3). Step 5d-4 (the focused audit)
 added the trust-boundary enforcement `reconcile_reported_node` (the warden
 constrains a source's reported resources to its own trusted view) + the `MAX_IDS`
-record bound.
+record bound. Step **6b-2** added the **PCI axis**: a `DeviceId::VirtioPci(u16)`
+identity (distinct from the MMIO `Virtio`), a `PciNeed` manifest axis + a
+`NodeResources`/`BoundResources` `pci: Option<(u8,u8,u8)>` bdf carried through
+`resolve` + the descriptor codec + `to_allowance` (`push_pci`, the 6a I-34 PCI
+allowance axis), the `parse_pci_ctl` devpci ctl-line parser, and the in-process
+`PciSource` over `/hw/pci` ([devpci](120-devpci.md), the DtbSource sibling).
 
 Crate: `usr/lib/libdriver` (native `libthyla-rs`, `no_std` + `alloc`). Design:
 `docs/MENAGERIE.md` §6 (anatomy of a driver + the manifest), §4 (the hardware
@@ -88,10 +93,11 @@ pub struct Manifest {
     pub restart: Restart,
     pub sig: Option<String>,  // section-9 authorization input; carried verbatim
 }
-pub struct Needs { pub mmio: MmioNeed, pub irq: IrqNeed, pub dma: DmaNeed }
+pub struct Needs { pub mmio: MmioNeed, pub irq: IrqNeed, pub dma: DmaNeed, pub pci: PciNeed }
 pub enum MmioNeed { None, Node }                  // "node:reg"
 pub enum IrqNeed  { None, Node, Msi(u32) }        // "node:interrupts" | "msi:N"
 pub enum DmaNeed  { None, Pool(u64) }             // "pool: N" bytes
+pub enum PciNeed  { None, Node }                  // "node" -- the bound function's (bus,dev,fn)
 pub enum Restart  { Never, OnCrash, Always }
 
 impl Manifest {
@@ -129,10 +135,11 @@ pub const DESCRIPTOR_VERSION: u32 = 1;
 pub const MAX_MMIO: usize = 8;   // mirrors T_ALLOWANCE_MMIO_MAX
 pub const MAX_IRQ:  usize = 8;   // mirrors T_ALLOWANCE_IRQ_MAX
 
-pub struct NodeResources {       // what the warden reads from /hw
+pub struct NodeResources {       // what the warden reads from /hw (or /hw/pci)
     pub compatible: Vec<String>, // most-specific first
     pub reg: Vec<(u64, u64)>,    // (base, size) MMIO windows
     pub interrupts: Vec<u32>,    // wired GIC INTIDs
+    pub pci: Option<(u8,u8,u8)>, // a virtio-PCI node's (bus,dev,fn); None for a DTB node
 }
 pub struct BoundResources {      // the narrowed grant (the shared currency)
     pub instance: u32,
@@ -141,9 +148,10 @@ pub struct BoundResources {      // the narrowed grant (the shared currency)
     pub mmio: Vec<(u64, u64)>,   // <= MAX_MMIO, a subset of the node's reg
     pub irq: Vec<u32>,           // <= MAX_IRQ, a subset of the node's interrupts
     pub dma_max: u64,
+    pub pci: Option<(u8,u8,u8)>, // the granted function bdf (== node's), or None
 }
 
-pub fn resolve(manifest: &Manifest, node: &NodeResources, instance: u32)
+pub fn resolve(manifest: &Manifest, node: &DeviceNode, instance: u32)
     -> Result<BoundResources, Error>;
 pub fn expand_instance(template: &str, instance: u32) -> String;
 
@@ -194,10 +202,11 @@ concrete `DtbSource` (gated under `driver`).
 ```rust
 pub enum DeviceId {
     Compatible(String),  // a DTB compatible string, e.g. "arm,pl061"
-    Virtio(u16),         // a virtio device-id; string form "virtio:<n>"
+    Virtio(u16),         // a virtio-MMIO device-id;  string form "virtio:<n>"
+    VirtioPci(u16),      // a virtio-PCI  device-id;  string form "virtio-pci:<n>"
 }
 impl DeviceId {
-    pub fn parse(s: &str) -> DeviceId;     // "virtio:N" -> Virtio; else Compatible
+    pub fn parse(s: &str) -> DeviceId;     // "virtio-pci:N"->VirtioPci; "virtio:N"->Virtio; else Compatible
     pub fn as_string(&self) -> String;     // the canonical (binds / record) form
     pub fn matches_bind(&self, bind: &str) -> bool;
 }
@@ -221,14 +230,40 @@ pub fn best_match(db: &[Manifest], node: &DeviceNode) -> Option<usize>; // most-
 /// but never fabricate a reg/INTID. None if the reported node names no trusted slot.
 pub fn reconcile_reported_node(reported: &DeviceNode, trusted: &[DeviceNode]) -> Option<DeviceNode>;
 
+/// Parse one devpci `ctl` line (`v1 bus=.. dev=.. fn=.. vendor=.. device=.. virtio=.. intid=..`)
+/// into a typed `VirtioPci` node. Pure (host-tested). None on a malformed line or
+/// a virtio=0 function. Lenient (tolerates an unknown appended field) -- devpci is
+/// the kernel/TCB, not the non-TCB bus-source boundary `parse_record` guards.
+pub fn parse_pci_ctl(label: &str, line: &str) -> Option<DeviceNode>;
+
 #[cfg(feature = "driver")]
-pub struct DtbSource { /* enumerate /hw -> Compatible nodes */ }
+pub struct DtbSource { /* enumerate /hw      -> Compatible nodes */ }
+#[cfg(feature = "driver")]
+pub struct PciSource { /* enumerate /hw/pci  -> VirtioPci nodes  */ }  // 6b-2
 ```
 
-`DeviceId` is extensible: PCIe `vid:did` and USB `vid:pid` join as those bus
-sources land (each a new variant + a `bus:`-prefixed string form). A DTB
-`compatible` never contains `:`, so the typed namespace cannot collide with one;
-an unrecognized `bus:` prefix stays `Compatible` (fail-closed forward-compat).
+`DeviceId` is extensible: `VirtioPci(u16)` (step 6b-2) is the first bus id added
+after `Virtio`; USB `vid:pid` joins as that source lands (each a new variant + a
+`bus:`-prefixed string form). A DTB `compatible` never contains `:`, so the typed
+namespace cannot collide with one; an unrecognized `bus:` prefix stays
+`Compatible` (fail-closed forward-compat). **`VirtioPci` is deliberately distinct
+from `Virtio`**: the two virtio transports have different claim paths (a
+virtio-PCI driver claims its function via `SYS_PCI_CLAIM` + maps BARs over the
+`KObj_PCI`; a virtio-mmio driver mints an MMIO handle over its allowance window),
+so a manifest binds exactly one (`"virtio-pci:1"` vs `"virtio:1"`) and the two
+never collide. The prefixes are disjoint -- `"virtio-pci:1"` does not start with
+`"virtio:"` -- so `parse` cannot confuse them.
+
+**The PCI axis (step 6b-2).** A virtio-PCI node carries no `reg`/`interrupts`
+windows the way a DTB node does -- its identity + resources are its `(bus,dev,fn)`
+bdf (the `pci` field) plus the INTx-routed INTID. The manifest selects it with
+`pci = "node"` (the `PciNeed::Node` axis), and `resolve` confers the node's bdf
+verbatim into `BoundResources.pci` (the I-34 grant property on the PCI axis: the
+granted bdf is the node's, never fabricated). The grant carries **no MMIO**: a
+virtio-PCI driver's BARs are handle-gated (`SYS_PCI_MAP_BAR` over the `KObj_PCI`
+the driver `SYS_PCI_CLAIM`s), not allowance windows, so the PCI axis adds a bdf to
+the allowance (`to_allowance` -> `push_pci`, the 6a kernel gate) and nothing to
+`mmio`.
 
 The **node record** is the source -> warden wire form
 (`v1;label=..;id=virtio:1;reg=base:size,..;intid=hex,..`), used when a source runs
@@ -315,10 +350,15 @@ values, so the grant can never exceed the device's physical resources:
   DTB node); `None` -> nothing.
 - `DmaNeed::Pool(n)` -> a budget of `n` bytes (DMA is allocated memory, not a node
   resource); `None` -> 0.
+- `PciNeed::Node` -> the bound node's `(bus,dev,fn)` bdf verbatim (the driver
+  `SYS_PCI_CLAIM`s it); `None` -> no bdf. A `PciNeed::Node` manifest against a node
+  with no bdf (a DTB node) yields `None` -- fail-closed, the same lenience the
+  MMIO/IRQ axes have when the node supplies nothing.
 
 A manifest cannot widen its reach -- it can only decline an axis. The
-host test `resolve_grant_never_exceeds_node` asserts every granted window/INTID is
-a member of the node's set (the I-34 property in a test).
+host tests `resolve_grant_never_exceeds_node` (MMIO/IRQ) and
+`resolve_pci_grant_equals_node_bdf` (PCI) assert every granted resource is a
+member of the node's set (the I-34 property in a test).
 
 ### The descriptor codec -- one argv slot
 
@@ -332,12 +372,16 @@ v1;inst=0;compat=virtio,mmio;serve=/dev/net/0;mmio=a003000:1000,a004000:200;irq=
 
 Fields are `;`-delimited `key=value`; numbers are hex except `inst` (decimal);
 `mmio`/`irq` are comma-separated lists, omitted when empty; `dma` is always
-present. `compat` is taken verbatim (its internal commas, e.g.
-`raspberrypi,rp1-eth`, are not list separators -- only `mmio`/`irq` values are
-comma-split). `parse_descriptor` is strict: an unknown/duplicate key, a bad
-number, a window missing its `base:size` colon, an unknown version, or a count
-over the caps all reject. `to_descriptor` rejects a `compat`/`serve` containing
-the field delimiter `;` (fail-closed against a malformed node).
+present. A `pci=<bus>.<dev>.<fn>` field (bare hex, the devpci form) is appended
+when the grant carries a bdf, omitted otherwise -- so a virtio-PCI grant looks
+like `v1;inst=0;compat=virtio-pci:1;serve=/dev/net/0;irq=23;dma=10000;pci=0.1.0`
+(no `mmio`, the BARs being handle-gated). `compat` is taken verbatim (its internal
+commas, e.g. `raspberrypi,rp1-eth`, are not list separators -- only `mmio`/`irq`
+values are comma-split). `parse_descriptor` is strict: an unknown/duplicate key, a
+bad number, a window missing its `base:size` colon, a bdf with the wrong component
+count or an out-of-u8 component, an unknown version, or a count over the caps all
+reject. `to_descriptor` rejects a `compat`/`serve` containing the field delimiter
+`;` (fail-closed against a malformed node).
 
 ### `run` -- the lifecycle
 
@@ -373,9 +417,10 @@ a kernel privilege surface: the kernel validates everything.
 
 `to_allowance(res)` turns a `BoundResources` into the `TAllowanceDesc` the warden
 passes to `Command::allowance` -- `push_mmio` each window, `push_irq` each INTID,
-`set_dma_max`. Because both the allowance and the descriptor come from the same
-`BoundResources`, the authority the kernel enforces and the resources the driver
-maps cannot drift.
+`set_dma_max`, and (6b-2) `push_pci` the bdf when `res.pci` is `Some` (the 6a I-34
+PCI allowance axis the kernel checks at `SYS_PCI_CLAIM`). Because both the
+allowance and the descriptor come from the same `BoundResources`, the authority
+the kernel enforces and the resources the driver maps cannot drift.
 
 Each MMIO window is **page-rounded** (`resource::page_round`, a pure `pub` helper)
 before it goes into the allowance: MMIO is mapped page-granular, so the kernel
@@ -388,19 +433,43 @@ adjacent blk slot -- the documented #140 / net-2 co-residency over-grant. (5d-3:
 the bug this fixes is that a sub-page slot grant is unmappable -- the driver's
 page-map exceeds the slot window and the gate, correctly, rejects it.)
 
+### `PciSource` -- the in-process /hw/pci source (6b-2)
+
+`PciSource` is the `DtbSource` sibling for the PCI bus: it `read_dir`s `/hw/pci`
+(the kernel-mediated [devpci](120-devpci.md) topology), opens each `<bdf>/ctl`,
+and feeds the line to `parse_pci_ctl` to build a `VirtioPci` node. On QEMU-virt the
+kernel owns ECAM and re-publishes the enumerated functions at `/hw/pci/<bdf>/ctl`,
+so the source is itself the kernel-TRUSTED view -- it reads the mediated result
+**in-process** (no poking Proc, never touching config space) and (unlike the
+non-TCB virtio-mmio bus source) needs **no** `reconcile_reported_node` step. The
+node record codec (`to_record`/`parse_record`, the source -> warden *pipe* form) is
+**not** extended with a PCI bdf: the only PCI source is in-process and never
+crosses that pipe, so a bdf on the wire is a forward seam for a future
+out-of-process PCIe source. Best-effort like every source: a malformed `ctl` line
+is skipped; a missing `/hw/pci` yields no nodes.
+
+The split mirrors the DtbSource: `parse_pci_ctl` is the **pure** line parser
+(host-tested -- the devpci -> source channel is the input surface), and `PciSource`
+is the thin `driver`-gated fs-reading shell over it. `parse_pci_ctl` is lenient
+(it tolerates an unknown appended field, honoring the devpci `v1` forward-compat
+promise) because devpci is the kernel/TCB -- distinct from `parse_record`'s
+hostile-source-hardened strictness, since that codec IS the non-TCB bus-source
+boundary.
+
 ---
 
 ## Tests
 
-41 host tests (`cargo test -p libdriver --no-default-features --target <host>`):
+80 host tests (`cargo test -p libdriver --no-default-features --target <host>`):
 
-- **manifest** (7): parse the §6 example; `to_text` round-trip; wired-IRQ +
+- **manifest** (9): parse the §6 example; `to_text` round-trip; wired-IRQ +
   no-DMA; defaults when optional fields absent; the size-unit parser
   (`MiB`/`KiB`/`GiB`/`B` + overflow + bad-unit rejection); malformed-manifest
   rejection (unterminated block, unquoted name, missing/duplicate/unknown key,
   empty binds, bad need value, bad restart, trailing garbage); comment +
-  whitespace tolerance.
-- **resource** (12): `resolve` for the MSI manifest (node MMIO granted, no DTB
+  whitespace tolerance; **the `pci = "node"` axis** parses + round-trips (a
+  virtio-PCI manifest with `pci`/`irq`/`dma` and no `mmio`) + rejects a bad value.
+- **resource** (20): `resolve` for the MSI manifest (node MMIO granted, no DTB
   IRQ) and the wired manifest (node interrupts granted); the
   grant-never-exceeds-node property; `NoMatch`; `TooManyWindows`; the descriptor
   round-trip (full + empty axes); the exact descriptor shape; strict rejection
@@ -408,12 +477,16 @@ page-map exceeds the slot window and the gate, correctly, rejects it.)
   missing window colon); the over-cap rejection; the delimiter-injection guard;
   the end-to-end resolve -> encode -> decode equality; `page_round` covering a
   sub-page slot, a page-straddling window, an already-aligned window, and zero
-  size (the 5d-3 allowance page-rounding).
+  size (the 5d-3 allowance page-rounding); **the PCI axis** (6b-2): a PCI node
+  grants its bdf + INTID and no MMIO; the grant bdf equals the node's; a node with
+  no bdf yields None (fail-closed); a no-PCI-need manifest ignores a node bdf; the
+  descriptor pci round-trip + exact shape (`;pci=0.a.1`) + rejection (too few/many
+  components, non-hex, out-of-u8, duplicate); the end-to-end PCI resolve -> codec.
 - **dtb** (8): `compatible` NUL-split (most-specific first) + empty/unterminated/
   double-NUL tolerance; `reg` decode in 2/2 cells (the real pl061 + virtio bytes)
   and 1/1 cells + multi-entry + trailing-partial ignore; `interrupts` SPI -> +32
   and PPI -> +16 with unknown-type skip; `from_dtb` building the full pl061 node.
-- **source** (13): `DeviceId` parse + `as_string` (typed `virtio:N` + the
+- **source** (22): `DeviceId` parse + `as_string` (typed `virtio:N` + the
   out-of-range / literal-compatible fallback); `matches_bind` (typed vs literal,
   and a raw `virtio,mmio` transport node never matching a `virtio:1` bind); the
   node-record round-trip (virtio + empty axes) + strict rejection (bad version,
@@ -423,7 +496,15 @@ page-map exceeds the slot window and the gate, correctly, rejects it.)
   (5d-4 trust boundary -- an honest node keeps its identity + takes the trusted
   reg/INTID; a fabricated address -> `None`; the security-proving case: a reported
   REAL slot with an inflated window + lying INTID is reconciled to the TRUSTED
-  reg/INTID, so the source cannot inflate the conferred allowance).
+  reg/INTID, so the source cannot inflate the conferred allowance); **the PCI
+  identity + ctl-line parser** (6b-2): `VirtioPci` parse + `as_string` + the
+  out-of-range fallback; `VirtioPci(1)` distinct from `Virtio(1)` and the two
+  binds never collide; `parse_pci_ctl` happy path (bdf + INTID + no reg),
+  `intid=none` -> no IRQ, unknown-appended-field tolerated, malformed rejected
+  (wrong/absent version, missing component, garbled hex, no `=`, hex virtio,
+  empty), `virtio=0` skipped; `best_match` binds a `VirtioPci` node to its
+  `virtio-pci:1` manifest not the `virtio:1` one; `to_record` rejects a PCI node
+  (the pipe codec cannot carry a bdf -- fail-closed, the forward seam).
 
 The device layer (`driver`) is proven to compile by the whole-workspace device
 build + `example::nop_entry`, which instantiates `run::<NopDriver>` so the entire
@@ -456,10 +537,17 @@ first live `impl Driver` (the netdev retrofit at 5d is the first *useful* one).
 
 ## Status / known caveats
 
+- **The PCI axis is the wired-INTx path (6b-2).** `PciNeed::Node` + `PciSource`
+  resolve a virtio-PCI function to its bdf + its INTx-routed INTID (`node:interrupts`
+  over the devpci-reported intid). The warden-side `PciSource` enumeration + the
+  `netdev-pci-driver` bind (the live I-34-on-PCI proof) are step **6b-3**; this
+  step (6b-2) lands the libdriver mechanism + the host tests. MSI is still carried,
+  not resolved (next bullet).
 - **MSI is carried, not resolved.** `IrqNeed::Msi(n)` is parsed + round-tripped
   but yields no INTIDs from a DTB node; MSI vectors are the PCIe source's job on
   real hardware (MENAGERIE §12 -- the brcmstb host-bridge owns MSI). v1.0 on QEMU
-  virt exercises only the wired (`node:interrupts`) path.
+  virt exercises the wired (`node:interrupts`) path, for both virtio-mmio (DTB) and
+  virtio-PCI (devpci INTx).
 - **Whole-node MMIO selection.** `MmioNeed::Node` grants every `reg` window;
   per-window selection (e.g. "only reg[1]") is a v1.x manifest refinement. The
   auditable property (grant <= node) holds either way.
@@ -483,6 +571,9 @@ first live `impl Driver` (the netdev retrofit at 5d is the first *useful* one).
   confer-at-spawn ABI (`Command::allowance` / `TAllowanceDesc`) libdriver builds on.
 - `docs/reference/116-devhw.md` -- the `/hw` DTB tree the warden reads
   `NodeResources` from (step 5c).
+- `docs/reference/120-devpci.md` -- the kernel-mediated `/hw/pci` topology the
+  `PciSource` reads `VirtioPci` nodes from (step 6b-2); the source <-> kernel `ctl`
+  wire contract `parse_pci_ctl` consumes.
 - `docs/reference/89-hardware.md` -- the `libthyla_rs::hardware` `Mmio`/`Irq`/`Dma`
   wrappers the helpers mint.
 - ARCH §28 I-34 -- the driver-authority-bound invariant the grant model enforces.

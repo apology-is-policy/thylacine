@@ -23,7 +23,7 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use crate::manifest::{DmaNeed, IrqNeed, Manifest, MmioNeed};
+use crate::manifest::{DmaNeed, IrqNeed, Manifest, MmioNeed, PciNeed};
 use crate::source::DeviceNode;
 use crate::Error;
 
@@ -48,6 +48,9 @@ pub struct NodeResources {
     pub reg: Vec<(u64, u64)>,
     /// The node's wired GIC INTIDs (from `interrupts`, mapped to absolute INTID).
     pub interrupts: Vec<u32>,
+    /// The node's PCI `(bus, dev, fn)`, for a virtio-PCI source node (from devpci).
+    /// `None` for a DTB node (it has no bdf). The PCI allowance axis (I-34, 6a).
+    pub pci: Option<(u8, u8, u8)>,
 }
 
 /// The narrowed resources conferred on a driver at spawn -- the auditable I-34
@@ -68,6 +71,10 @@ pub struct BoundResources {
     pub irq: Vec<u32>,
     /// The per-buffer DMA byte ceiling (0 = no DMA).
     pub dma_max: u64,
+    /// The granted PCI function `(bus, dev, fn)` the driver may `SYS_PCI_CLAIM`, or
+    /// `None`. Equals the bound node's `pci` (never fabricated -- the I-34 grant
+    /// property), or `None` when the manifest declines PCI or the node supplies none.
+    pub pci: Option<(u8, u8, u8)>,
 }
 
 /// Compute the narrowed grant for a matched (manifest, node) pair.
@@ -128,6 +135,15 @@ pub fn resolve(
         DmaNeed::Pool(bytes) => bytes,
     };
 
+    // PCI: the bound node's own bdf (never fabricated -- the I-34 grant property).
+    // A manifest asking `PciNeed::Node` against a node with no bdf (a DTB node)
+    // gets None -- fail-closed, the same lenience the MMIO/IRQ axes have when the
+    // node supplies nothing.
+    let pci = match manifest.needs.pci {
+        PciNeed::None => None,
+        PciNeed::Node => node.resources.pci,
+    };
+
     Ok(BoundResources {
         instance,
         compatible: matched.as_string(),
@@ -135,6 +151,7 @@ pub fn resolve(
         mmio,
         irq,
         dma_max,
+        pci,
     })
 }
 
@@ -192,6 +209,15 @@ impl BoundResources {
         }
         s.push_str(";dma=");
         push_hex(&mut s, self.dma_max);
+        if let Some((bus, dev, fun)) = self.pci {
+            // bdf in the same bare-hex `<bus>.<dev>.<fn>` form devpci uses.
+            s.push_str(";pci=");
+            push_hex(&mut s, bus as u64);
+            s.push('.');
+            push_hex(&mut s, dev as u64);
+            s.push('.');
+            push_hex(&mut s, fun as u64);
+        }
         Ok(s)
     }
 
@@ -215,6 +241,8 @@ impl BoundResources {
         let mut mmio: Option<Vec<(u64, u64)>> = None;
         let mut irq: Option<Vec<u32>> = None;
         let mut dma_max: Option<u64> = None;
+        let mut pci: Option<(u8, u8, u8)> = None;
+        let mut pci_seen = false; // distinguishes "absent" (-> None) from a dup
 
         for field in fields {
             if field.is_empty() {
@@ -258,6 +286,13 @@ impl BoundResources {
                     }
                     dma_max = Some(parse_hex(val)?);
                 }
+                "pci" => {
+                    if pci_seen {
+                        return Err(Error::BadField);
+                    }
+                    pci_seen = true;
+                    pci = Some(parse_bdf(val)?);
+                }
                 _ => return Err(Error::BadField), // unknown key
             }
         }
@@ -269,6 +304,7 @@ impl BoundResources {
             mmio: mmio.unwrap_or_default(),
             irq: irq.unwrap_or_default(),
             dma_max: dma_max.ok_or(Error::BadField)?,
+            pci, // absent => None (the field is optional, like mmio/irq)
         })
     }
 }
@@ -320,6 +356,24 @@ pub(crate) fn parse_windows(val: &str) -> Result<Vec<(u64, u64)>, Error> {
         }
     }
     Ok(out)
+}
+
+/// Parse a `<bus>.<dev>.<fn>` bdf (bare hex, each component a u8) -- the descriptor
+/// + devpci form. Exactly three dot-separated components; any malformed shape (too
+/// few/many, a non-hex or out-of-u8 component) rejects.
+fn parse_bdf(val: &str) -> Result<(u8, u8, u8), Error> {
+    let mut it = val.split('.');
+    let bus = it.next().ok_or(Error::BadNumber)?;
+    let dev = it.next().ok_or(Error::BadNumber)?;
+    let fun = it.next().ok_or(Error::BadNumber)?;
+    if it.next().is_some() {
+        return Err(Error::BadNumber); // more than three components
+    }
+    Ok((parse_hex_u8(bus)?, parse_hex_u8(dev)?, parse_hex_u8(fun)?))
+}
+
+fn parse_hex_u8(s: &str) -> Result<u8, Error> {
+    u8::try_from(parse_hex(s)?).map_err(|_| Error::BadNumber)
 }
 
 pub(crate) fn parse_irqs(val: &str) -> Result<Vec<u32>, Error> {
@@ -375,6 +429,22 @@ mod tests {
                 compatible: compat,
                 reg,
                 interrupts,
+                pci: None,
+            },
+        }
+    }
+
+    /// A virtio-PCI node (the `PciSource` shape): id = `VirtioPci(virtio_id)`,
+    /// resources = a bdf + an optional wired INTID, no reg windows.
+    fn pci_node(label: &str, virtio_id: u16, bdf: (u8, u8, u8), intid: Option<u32>) -> DeviceNode {
+        DeviceNode {
+            label: label.to_string(),
+            ids: alloc::vec![DeviceId::VirtioPci(virtio_id)],
+            resources: NodeResources {
+                compatible: Vec::new(),
+                reg: Vec::new(),
+                interrupts: intid.into_iter().collect(),
+                pci: Some(bdf),
             },
         }
     }
@@ -479,6 +549,7 @@ mod tests {
             mmio: vec![(0x0a00_3000, 0x1000), (0x0a00_4000, 0x200)],
             irq: vec![0x2a, 0x2b],
             dma_max: 0x20_0000,
+            pci: None,
         };
         let desc = b.to_descriptor().unwrap();
         let b2 = BoundResources::parse_descriptor(&desc).unwrap();
@@ -494,11 +565,13 @@ mod tests {
             mmio: vec![],
             irq: vec![],
             dma_max: 0,
+            pci: None,
         };
         let desc = b.to_descriptor().unwrap();
-        // empty mmio/irq omitted; dma=0 present
+        // empty mmio/irq/pci omitted; dma=0 present
         assert!(!desc.contains("mmio="));
         assert!(!desc.contains("irq="));
+        assert!(!desc.contains("pci="));
         assert!(desc.contains("dma=0"));
         assert_eq!(BoundResources::parse_descriptor(&desc).unwrap(), b);
     }
@@ -512,6 +585,7 @@ mod tests {
             mmio: vec![(0xa003000, 0x1000)],
             irq: vec![0x2a],
             dma_max: 0x100000,
+            pci: None,
         };
         assert_eq!(
             b.to_descriptor().unwrap(),
@@ -588,6 +662,7 @@ mod tests {
             mmio: vec![],
             irq: vec![],
             dma_max: 0,
+            pci: None,
         };
         assert_eq!(b.to_descriptor(), Err(Error::BadField));
     }
@@ -601,6 +676,164 @@ mod tests {
         let desc = warden_grant.to_descriptor().unwrap();
         let driver_grant = BoundResources::parse_descriptor(&desc).unwrap();
         assert_eq!(warden_grant, driver_grant);
+    }
+
+    // -------------------------------------------------------------------------
+    // PCI axis (6b-2): the resolve grant + the descriptor codec
+    // -------------------------------------------------------------------------
+
+    /// A virtio-PCI driver manifest: claims its function (`pci = "node"`), takes
+    /// its INTID + a DMA pool, and -- crucially -- NO mmio (the BARs are
+    /// handle-gated via SYS_PCI_MAP_BAR, not allowance windows; pci-3).
+    fn pci_manifest() -> Manifest {
+        Manifest::parse(
+            r#"driver "netdev-pci" {
+                abi = 1
+                binds = ["virtio-pci:1"]
+                needs { irq = "node:interrupts" dma = "pool: 64 KiB" pci = "node" }
+                serves = "/dev/net/%instance"
+                restart = on-crash
+            }"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn resolve_pci_node_grants_bdf_and_intid_no_mmio() {
+        let m = pci_manifest();
+        let node = pci_node("0.1.0", 1, (0, 1, 0), Some(0x23));
+        let b = resolve(&m, &node, 4).unwrap();
+        assert_eq!(b.compatible, "virtio-pci:1");
+        assert_eq!(b.serves, "/dev/net/4");
+        assert_eq!(b.pci, Some((0, 1, 0))); // node bdf conferred
+        assert_eq!(b.irq, [0x23]); // node INTID conferred
+        assert!(b.mmio.is_empty()); // BARs are NOT allowance MMIO
+        assert_eq!(b.dma_max, 64 * 1024);
+    }
+
+    #[test]
+    fn resolve_pci_grant_equals_node_bdf() {
+        // the auditable I-34 property on the PCI axis: the granted bdf is exactly
+        // the node's, never fabricated.
+        let m = pci_manifest();
+        let node = pci_node("3.5.1", 1, (3, 5, 1), None);
+        let b = resolve(&m, &node, 0).unwrap();
+        assert_eq!(b.pci, node.resources.pci);
+        assert!(b.irq.is_empty()); // no INTID on the node -> none granted
+    }
+
+    #[test]
+    fn resolve_pci_none_when_node_lacks_bdf() {
+        // defensive fail-closed: a (degenerate) virtio-PCI node carrying no bdf
+        // yields no PCI grant rather than a fabricated one. devpci never emits such
+        // a node, but resolve must not invent authority.
+        let m = pci_manifest();
+        let node = DeviceNode {
+            label: "degenerate".to_string(),
+            ids: alloc::vec![DeviceId::VirtioPci(1)],
+            resources: NodeResources {
+                compatible: Vec::new(),
+                reg: Vec::new(),
+                interrupts: Vec::new(),
+                pci: None,
+            },
+        };
+        let b = resolve(&m, &node, 0).unwrap();
+        assert_eq!(b.pci, None);
+    }
+
+    #[test]
+    fn resolve_no_pci_need_ignores_node_bdf() {
+        // a manifest that does not ask for PCI gets no bdf even from a PCI node.
+        // (wired_manifest binds "virtio,mmio", so give it a matching id but a bdf;
+        // it declines the PCI axis -> no grant.)
+        let m = wired_manifest();
+        let node = DeviceNode {
+            label: "x".to_string(),
+            ids: alloc::vec![DeviceId::Compatible("virtio,mmio".to_string())],
+            resources: NodeResources {
+                compatible: alloc::vec!["virtio,mmio".to_string()],
+                reg: alloc::vec![(0x0a00_3000, 0x1000)],
+                interrupts: alloc::vec![0x2a],
+                pci: Some((0, 1, 0)),
+            },
+        };
+        let b = resolve(&m, &node, 0).unwrap();
+        assert_eq!(b.pci, None); // manifest declined pci -> not conferred
+    }
+
+    #[test]
+    fn descriptor_round_trip_with_pci() {
+        let b = BoundResources {
+            instance: 4,
+            compatible: "virtio-pci:1".to_string(),
+            serves: "/dev/net/4".to_string(),
+            mmio: vec![],
+            irq: vec![0x23],
+            dma_max: 0x1_0000,
+            pci: Some((0, 1, 0)),
+        };
+        let desc = b.to_descriptor().unwrap();
+        assert_eq!(BoundResources::parse_descriptor(&desc).unwrap(), b);
+    }
+
+    #[test]
+    fn descriptor_shape_pci() {
+        let b = BoundResources {
+            instance: 0,
+            compatible: "virtio-pci:1".to_string(),
+            serves: "/dev/net/0".to_string(),
+            mmio: vec![],
+            irq: vec![0x23],
+            dma_max: 0x1_0000,
+            pci: Some((0, 0xa, 1)),
+        };
+        assert_eq!(
+            b.to_descriptor().unwrap(),
+            "v1;inst=0;compat=virtio-pci:1;serve=/dev/net/0;irq=23;dma=10000;pci=0.a.1"
+        );
+    }
+
+    #[test]
+    fn descriptor_rejects_bad_pci() {
+        // too few components
+        assert_eq!(
+            BoundResources::parse_descriptor("v1;inst=0;compat=x;serve=/x;dma=0;pci=0.1"),
+            Err(Error::BadNumber)
+        );
+        // too many components
+        assert_eq!(
+            BoundResources::parse_descriptor("v1;inst=0;compat=x;serve=/x;dma=0;pci=0.1.0.0"),
+            Err(Error::BadNumber)
+        );
+        // non-hex component
+        assert_eq!(
+            BoundResources::parse_descriptor("v1;inst=0;compat=x;serve=/x;dma=0;pci=g.0.0"),
+            Err(Error::BadNumber)
+        );
+        // a component out of u8 range
+        assert_eq!(
+            BoundResources::parse_descriptor("v1;inst=0;compat=x;serve=/x;dma=0;pci=100.0.0"),
+            Err(Error::BadNumber)
+        );
+        // duplicate pci field
+        assert_eq!(
+            BoundResources::parse_descriptor("v1;inst=0;compat=x;serve=/x;dma=0;pci=0.1.0;pci=0.1.0"),
+            Err(Error::BadField)
+        );
+    }
+
+    #[test]
+    fn end_to_end_resolve_then_codec_pci() {
+        // the live PCI path: warden resolves a devpci node -> encodes -> driver
+        // decodes -> identical grant (the bdf the driver SYS_PCI_CLAIMs).
+        let m = pci_manifest();
+        let node = pci_node("0.1.0", 1, (0, 1, 0), Some(0x23));
+        let warden_grant = resolve(&m, &node, 7).unwrap();
+        let desc = warden_grant.to_descriptor().unwrap();
+        let driver_grant = BoundResources::parse_descriptor(&desc).unwrap();
+        assert_eq!(warden_grant, driver_grant);
+        assert_eq!(driver_grant.pci, Some((0, 1, 0)));
     }
 
     #[test]

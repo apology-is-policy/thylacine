@@ -281,6 +281,7 @@ fn run_virtio_mmio_source(bank: (u64, u64), trusted: &[DeviceNode]) -> Vec<Devic
         mmio: vec![bank],
         irq: Vec::new(),
         dma_max: 0,
+        pci: None, // the bus source takes only its MMIO bank, no PCI
     };
     let desc = match source_grant.to_descriptor() {
         Ok(d) => d,

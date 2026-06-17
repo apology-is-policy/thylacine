@@ -62,13 +62,14 @@ pub struct Manifest {
 }
 
 /// The hardware a driver declares it needs. Each axis is a *selection*: the
-/// warden supplies the concrete values from the bound node (MMIO/IRQ) or grants
-/// a budget (DMA), never more than the axis names.
+/// warden supplies the concrete values from the bound node (MMIO/IRQ/PCI) or
+/// grants a budget (DMA), never more than the axis names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Needs {
     pub mmio: MmioNeed,
     pub irq: IrqNeed,
     pub dma: DmaNeed,
+    pub pci: PciNeed,
 }
 
 impl Needs {
@@ -76,6 +77,7 @@ impl Needs {
         mmio: MmioNeed::None,
         irq: IrqNeed::None,
         dma: DmaNeed::None,
+        pci: PciNeed::None,
     };
 }
 
@@ -111,6 +113,21 @@ pub enum DmaNeed {
     None,
     /// `"pool: N"` -- a per-buffer DMA ceiling of N bytes.
     Pool(u64),
+}
+
+/// What PCI authority a driver needs. Unlike MMIO/IRQ (sub-resources the warden
+/// selects FROM the node), PCI is the node's identity itself: the bound
+/// function's `(bus, dev, fn)`, which the driver claims via `SYS_PCI_CLAIM` (the
+/// transport BARs are then handle-gated, not allowance-listed -- pci-3). So the
+/// grant carries the single bdf the warden read from the bound virtio-PCI node;
+/// the I-34 PCI allowance axis (6a). A DTB node supplies no bdf, so `Node`
+/// against one grants nothing (fail-closed).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PciNeed {
+    /// No PCI claim.
+    None,
+    /// `"node"` -- the bound node's own `(bus, dev, fn)`.
+    Node,
 }
 
 /// The supervisor restart policy (MENAGERIE.md section 5 -- supervision).
@@ -168,6 +185,8 @@ impl Manifest {
         push_irq_need_str(&mut s, self.needs.irq);
         s.push_str("\"\n        dma = \"");
         push_dma_need_str(&mut s, self.needs.dma);
+        s.push_str("\"\n        pci = \"");
+        s.push_str(pci_need_str(self.needs.pci));
         s.push_str("\"\n    }\n");
         s.push_str("    serves = \"");
         s.push_str(&self.serves);
@@ -221,6 +240,13 @@ fn push_dma_need_str(s: &mut String, n: DmaNeed) {
             s.push_str("pool:");
             s.push_str(&bytes.to_string());
         }
+    }
+}
+
+fn pci_need_str(n: PciNeed) -> &'static str {
+    match n {
+        PciNeed::None => "none",
+        PciNeed::Node => "node",
     }
 }
 
@@ -464,6 +490,7 @@ impl<'a> Parser<'a> {
         let mut mmio: Option<MmioNeed> = None;
         let mut irq: Option<IrqNeed> = None;
         let mut dma: Option<DmaNeed> = None;
+        let mut pci: Option<PciNeed> = None;
         loop {
             match self.peek() {
                 Some(Tok::RBrace) => {
@@ -495,6 +522,12 @@ impl<'a> Parser<'a> {
                     }
                     dma = Some(parse_dma_need(&val)?);
                 }
+                "pci" => {
+                    if pci.is_some() {
+                        return Err(Error::Parse);
+                    }
+                    pci = Some(parse_pci_need(&val)?);
+                }
                 _ => return Err(Error::Parse),
             }
         }
@@ -502,6 +535,7 @@ impl<'a> Parser<'a> {
             mmio: mmio.unwrap_or(MmioNeed::None),
             irq: irq.unwrap_or(IrqNeed::None),
             dma: dma.unwrap_or(DmaNeed::None),
+            pci: pci.unwrap_or(PciNeed::None),
         })
     }
 
@@ -592,6 +626,14 @@ fn parse_dma_need(s: &str) -> Result<DmaNeed, Error> {
     Err(Error::Parse)
 }
 
+fn parse_pci_need(s: &str) -> Result<PciNeed, Error> {
+    match s.trim() {
+        "none" => Ok(PciNeed::None),
+        "node" => Ok(PciNeed::Node),
+        _ => Err(Error::Parse),
+    }
+}
+
 /// Parse a byte count with an optional binary unit: `2097152`, `"2 MiB"`,
 /// `"2MiB"`, `"512 KiB"`, `"1 GiB"`. Units are binary (1 KiB = 1024). Overflow
 /// rejects.
@@ -678,8 +720,37 @@ driver "rp1-eth" {
         let src = r#"driver "x" { abi = 1 binds = ["a"] serves = "/dev/x" }"#;
         let m = Manifest::parse(src).expect("parse");
         assert_eq!(m.needs, Needs::NONE);
+        assert_eq!(m.needs.pci, PciNeed::None); // explicit: the new axis defaults off
         assert_eq!(m.restart, Restart::OnCrash);
         assert_eq!(m.sig, None);
+    }
+
+    #[test]
+    fn pci_need_parses_and_round_trips() {
+        // a virtio-PCI driver: claims its function (pci = "node"), takes its INTID,
+        // a DMA pool, and -- crucially -- NO mmio (the BARs are handle-gated, pci-3).
+        let src = r#"driver "netdev-pci" {
+            abi = 1
+            binds = ["virtio-pci:1"]
+            needs { irq = "node:interrupts" dma = "pool: 64 KiB" pci = "node" }
+            serves = "/dev/net/%instance"
+            restart = on-crash
+        }"#;
+        let m = Manifest::parse(src).expect("parse");
+        assert_eq!(m.binds, ["virtio-pci:1"]);
+        assert_eq!(m.needs.pci, PciNeed::Node);
+        assert_eq!(m.needs.mmio, MmioNeed::None); // BARs are not allowance MMIO
+        assert_eq!(m.needs.irq, IrqNeed::Node);
+        assert_eq!(m.needs.dma, DmaNeed::Pool(64 * 1024));
+        // round-trips through the canonical text (emits + re-parses pci = "node")
+        let m2 = Manifest::parse(&m.to_text()).expect("re-parse");
+        assert_eq!(m, m2);
+    }
+
+    #[test]
+    fn pci_need_rejects_bad_value() {
+        let src = r#"driver "x" { abi=1 binds=["a"] serves="/x" needs { pci="bogus" } }"#;
+        assert!(Manifest::parse(src).is_err());
     }
 
     #[test]

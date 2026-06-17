@@ -165,6 +165,7 @@ pub extern "C" fn rs_main() -> i64 {
                 compatible: Vec::new(),
                 reg: slot.resources.reg.clone(),
                 interrupts: slot.resources.interrupts.clone(),
+                pci: None, // a virtio-mmio slot has no PCI bdf
             },
         };
         match node.to_record() {

@@ -32,15 +32,15 @@ pub mod supervise;
 #[cfg(feature = "driver")]
 pub mod driver;
 
-pub use manifest::{DmaNeed, IrqNeed, Manifest, MmioNeed, Needs, Restart, MANIFEST_ABI};
+pub use manifest::{DmaNeed, IrqNeed, Manifest, MmioNeed, Needs, PciNeed, Restart, MANIFEST_ABI};
 pub use readyline::{feed_ready_line, ReadyLine, READY_LINE_MAX};
 pub use supervise::{
     backoff_ms, next_step, Disposition, RunOutcome, SuperviseStep, BACKOFF_MAX_MS, RESTART_LIMIT,
 };
 pub use resource::{resolve, BoundResources, NodeResources, DESCRIPTOR_VERSION, MAX_IRQ, MAX_MMIO};
 pub use source::{
-    best_match, reconcile_reported_node, DeviceId, DeviceNode, DiscoverySource, MAX_IDS,
-    NODE_RECORD_VERSION,
+    best_match, parse_pci_ctl, reconcile_reported_node, DeviceId, DeviceNode, DiscoverySource,
+    MAX_IDS, NODE_RECORD_VERSION,
 };
 
 #[cfg(feature = "driver")]
@@ -49,7 +49,7 @@ pub use driver::{
     EXIT_PROBE, EXIT_SERVE,
 };
 #[cfg(feature = "driver")]
-pub use source::DtbSource;
+pub use source::{DtbSource, PciSource};
 
 /// Every fallible operation in the framework reports one of these. Flat + `Copy`
 /// so it prints under `{:?}` (the `run` scaffold logs it) and the pure layers
