@@ -635,7 +635,17 @@ named in §2.)
 - **net-0 (this charter): LANDED** — the design conversation (2026-06-15, three
   user votes) is bound; the eleven `#68` holes are closed at design level; the
   v1.x seams are recorded.
-- **net-1..net-8: not started.** Phase-8 work, sequenced after the LS line and
-  before the container runner (#70) per ROADMAP §2.2.
+- **net-1: LANDED** — the reusable virtio-net frame-transport driver
+  (`usr/lib/netdev`); the virtio-PCI transport sub-arc (pci-0..pci-3) re-homed it
+  on a per-device BAR (`VirtioNetPci`).
+- **net-2a: LANDED** — `netd` (`usr/netd`) embeds smoltcp on the PCI NIC (the
+  Menagerie warden binds `virtio-pci:1` narrowed — the live I-34-on-PCI proof,
+  evolved from the 6b-3 ARP demo) and acquires a DHCP lease (`10.0.2.15/24`),
+  proving the whole lower stack (Ethernet/ARP/UDP/DHCP) end-to-end. The NIC owner
+  *is* the stack Proc (I-5 non-transferable handles). See
+  `docs/reference/121-netd.md`.
+- **net-2b..net-8: not started.** Phase-8 work per §17 (net-2b adds the
+  persistent 9P `/net` server + the §3.4 fid state machine), sequenced before the
+  container runner (#70) per ROADMAP §2.2.
 
 The thylacine is real. So is its network — and it is, of course, a filesystem.

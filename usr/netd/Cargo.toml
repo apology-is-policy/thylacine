@@ -1,0 +1,20 @@
+[package]
+name = "netd"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+libdriver = { path = "../lib/libdriver" }
+libthyla-rs = { path = "../lib/libthyla-rs" }
+netdev = { path = "../lib/netdev" }
+# The TCP/IP stack (NET-DESIGN.md section 14). no_std + alloc (libthyla-rs
+# provides the global allocator + the monotonic clock smoltcp needs); no std,
+# no log/defmt -- the minimal feature set for the net-2 surface.
+smoltcp = { version = "0.12", default-features = false, features = [
+    "alloc",
+    "medium-ethernet",
+    "proto-ipv4",
+    "socket-dhcpv4",
+] }

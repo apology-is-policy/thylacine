@@ -70,10 +70,11 @@ macro_rules! say {
 /// undriven) -> `crash-probe` bind (5e-2) exercises bounded restart supervision
 /// -- a driver that always fails `probe`, restarted with back-off up to the bound
 /// then given up on (a SOFT per-device failure that does not fail the boot); the
-/// `virtio-pci:1` -> `netdev-pci-driver` bind (6b-3) is the live I-34-on-PCI proof
-/// -- the same NIC over the PCI transport, narrowed to its (bus,dev,fn) + INTID +
-/// DMA pool (no MMIO axis: a PCI function's registers are in BARs, mapped off the
-/// claimed KObj_PCI). v1.x reads `/lib/driver/*.manifest`.
+/// `virtio-pci:1` -> `netd` bind (net-2) is the network daemon -- it owns the NIC
+/// over the PCI transport, narrowed to its (bus,dev,fn) + INTID + DMA pool (no
+/// MMIO axis: a PCI function's registers are in BARs, mapped off the claimed
+/// KObj_PCI), and runs the TCP/IP stack (the live I-34-on-PCI proof, evolved from
+/// the 6b-3 ARP demo). v1.x reads `/lib/driver/*.manifest`.
 const BUILTIN_MANIFESTS: &[&str] = &[
     r#"
 driver "menagerie-probe" {
@@ -115,7 +116,7 @@ driver "crash-probe" {
 }
 "#,
     r#"
-driver "netdev-pci-driver" {
+driver "netd" {
     abi   = 1
     binds = ["virtio-pci:1"]
     needs {
