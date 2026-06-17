@@ -360,6 +360,14 @@ pub fn reconcile_reported_node(reported: &DeviceNode, trusted: &[DeviceNode]) ->
 /// it tolerates an unknown appended field (the forward-compat the `v1` contract
 /// promises) rather than the hostile-source-hardened strictness of `parse_record`
 /// (which is the non-TCB bus-source boundary).
+///
+/// CONTRACT: apply this ONLY to a kernel-mediated devpci read (the in-process
+/// `PciSource`). Its leniency is sound exactly because the reporter is the TCB; a
+/// future OUT-OF-PROCESS PCIe source carrying untrusted pipe bytes MUST instead go
+/// through `parse_record`'s strict, count-bounded codec (and `to_record` already
+/// LOUD-rejects a PCI node for the same reason -- a bdf cannot ride the pipe until
+/// the record format is extended). It is memory-safe on any input regardless (only
+/// `?`/`.ok()?`, no `unsafe`), so a misuse degrades to `None`, never to a hole.
 pub fn parse_pci_ctl(label: &str, line: &str) -> Option<DeviceNode> {
     let mut it = line.split_whitespace();
     if it.next()? != "v1" {
@@ -938,7 +946,9 @@ mod tests {
         // the record (the source->warden PIPE) cannot represent a PCI bdf; encoding
         // a VirtioPci node must fail LOUDLY rather than silently drop the bdf (the
         // in-process PciSource never pipes; a future out-of-process source extends
-        // the record first).
+        // the record first). The non-regression witness that the PCI gate did NOT
+        // break the live virtio-mmio producer is `node_record_round_trip_virtio`
+        // (a non-PCI node still encodes + round-trips after this gate landed).
         let node = parse_pci_ctl(
             "0.1.0",
             "v1 bus=0 dev=1 fn=0 vendor=1af4 device=1041 virtio=1 intid=23",

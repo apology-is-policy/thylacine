@@ -147,9 +147,11 @@ No new ARCHITECTURE.md section-28 invariant. Composes:
 - `pci.bar_decode_size` — the width-correct inversion vectors (32-bit + 64-bit).
 - `pci.claim_*` — claim / double-claim reject / table-full / cap-resolve.
 - `pci.syscall_reject` / `pci.syscall_claim_info` — the cap-gate + the INFO copy-out.
-- Boot probes: `netdev-pci-test` drives a full ARP round-trip over `VirtioNetPci`
-  (claim + map BARs + send + poll_rx + recycle + quiesce), spawned WITH
-  `CAP_HW_CREATE`; runs every boot alongside the MMIO `netdev-test`.
+- Boot probe: `netdev-pci-driver` (warden-bound, MENAGERIE 6b-3) drives a full ARP
+  round-trip over `VirtioNetPci` (claim + map BARs + send + poll_rx + recycle +
+  quiesce), narrowed to its `(bus,dev,fn)` PCI allowance axis; runs every boot
+  alongside the warden-bound MMIO `netdev-driver`. (Retires the broad-cap
+  standalone `netdev-pci-test`.)
 
 ## Error paths
 
@@ -173,7 +175,8 @@ the virtio-mmio bank.
 - **pci-1c** (`11eb559`): the three syscalls + the 208 B `t_pci_info` ABI +
   libt / libthyla-rs wrappers + syscall tests.
 - **pci-2** (`2908e0e`): userspace `PciDev` + `netdev::VirtioNetPci` (reuses the
-  audited `crate::ring`) + the `netdev-pci-test` boot probe.
+  audited `crate::ring`) + the `netdev-pci-test` boot probe (retired at 6b-3 for
+  the warden-bound `netdev-pci-driver`).
 - **pci-3**: the focused soundness audit (this round) + SMP gate + these docs.
 
 ## Known caveats / footguns

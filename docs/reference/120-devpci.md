@@ -131,16 +131,25 @@ mounted` + 0 EXTINCTION.
 
 ## Status
 
-Landed at Menagerie build-arc **6b-1**. The PciSource consumer + the
-`netdev-pci-driver` bind (the live I-34-on-PCI proof) land at 6b-2 / 6b-3; the
-focused audit + SMP gate at 6b-4.
+Landed at Menagerie build-arc **6b-1**. The `PciSource` consumer (6b-2) + the
+`netdev-pci-driver` bind (6b-3, the live I-34-on-PCI proof) have landed: the
+warden enumerates `/hw/pci` in-process and binds the NIC narrowed to its
+`(bus,dev,fn)` -- `PASS -- 24/24 ARP ... grant-narrowed PCI claim` at boot. The
+focused audit + SMP gate over the complete surface is 6b-4.
 
 ## Known caveats / seams
 
 - **`/hw` does not list `pci` in its readdir.** The synthetic child is walkable +
   mountable but not enumerated in `ls /hw` (the readdir-cookie injection was
   deliberately skipped — the warden walks `/hw/pci` directly; the PciSource never
-  readdir's `/hw` to find it). Cosmetic; a v1.x nicety.
+  readdir's `/hw` to find it). Cosmetic — no v1.0 consumer enumerates `/hw` to
+  reach `/hw/pci` (it is named directly). The fix (a synthetic `pci` QTDIR dirent
+  in `devhw_readdir`, with a cookie kept strictly-monotonic-and-never-0 against the
+  FDT-offset cursors — the #955 readdir-cookie discipline) is deferred to the first
+  `/hw`-enumerating consumer (a `lspci`-style tool); **tracked** so a future
+  `ls /hw` shows the mount point. Re-surfaced by the 6b-4 audit (F1, P3) and
+  dispositioned document-and-track (the audited readdir's cookie scheme is not
+  worth churning for zero live benefit).
 - **Post-pivot re-graft.** `/hw/pci` is mounted in the kproc boot namespace and read
   by the pre-pivot warden; the nested mount is dropped (uncollected — #80) at pivot
   and **not** re-grafted post-pivot. A post-pivot `lspci`-style consumer is a v1.x

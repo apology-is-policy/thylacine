@@ -233,10 +233,11 @@ resolve step in front:
    `kobj_pci_claim` will pick (the device table is boot-built + immutable, so
    the resolution is deterministic; the gated bdf == the claimed bdf, no TOCTOU).
 3. **CreateBegin**: `allowance_permits(p, HW_RES_PCI, PCI_BDF_PACK(bus,dev,fn),
-   0)`. A **broad** Proc (`allowance == NULL`) passes (so the netdev-pci-test
-   probe + the trusted servers are unaffected); a **narrowed** driver passes
-   only for a conferred function. Gating **before** the claim means a
-   not-permitted device is never enabled (MEM-decode + bus-master) only to be
+   0)`. A **broad** Proc (`allowance == NULL`) passes (so the warden + the
+   trusted servers are unaffected); a **narrowed** driver -- e.g. the warden-bound
+   `netdev-pci-driver` (6b-3) -- passes only for its conferred function. Gating
+   **before** the claim means a not-permitted device is never enabled (MEM-decode
+   + bus-master) only to be
    rolled back.
 4. `kobj_pci_claim` (the exclusivity-enforcing constructor).
 5. **CreateCommit**: `allowance_handle_alloc(p, KOBJ_PCI, R|W|MAP, k)` — the

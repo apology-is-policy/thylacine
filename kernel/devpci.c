@@ -411,6 +411,7 @@ static long emit_dirent(u8 *out, long cap, long pos, u64 qpath, u8 qtype,
 static long devpci_readdir(struct Spoor *c, void *buf, long n, s64 off) {
     if (!c || !buf) return -1;
     if (n <= 0) return 0;
+    if (off < 0) return -1;     // an invalid resume cursor (symmetric with devpci_read)
 
     u64 path = c->qid.path;
     if (pci_qid_is_ctl(path)) return -1;   // a file does not enumerate
