@@ -727,8 +727,23 @@ named in §2.)
   only new dependency; pure userspace — kernel byte-unchanged. The deterministic
   UDP-via-9P data round-trip E2E is owed to net-3d (the loopback interface). See
   `docs/reference/121-netd.md`.
-- **net-3c, net-3d, net-4..net-8: not started.** net-3c (ICMP ping), net-3d (the
-  focused net-3 audit + the inbound-accept + UDP-loopback E2E); then net-4..net-8
-  per §17, sequenced before the container runner (#70) per ROADMAP §2.2.
+- **net-3c: LANDED** — ICMP: `/net/icmp` clone/connect/data (ping). The third
+  `proto` along the `Slot` discriminator. `/net/icmp/clone` mints an `icmp::Socket`
+  bound to a rotated Echo identifier (smoltcp routes EchoReplies back by ident);
+  `connect` is portless — a bare IPv4 — and only records the ping target; a `data`
+  write wraps the payload into an `EchoRequest` (smoltcp's own encoder), a `data`
+  read returns the matching `EchoReply` payload; there is no `listen` file, and
+  `hangup` is a no-op (connectionless). Boot proof: joey's deterministic
+  `/net/icmp` machinery probe (clone → portless connect → bare-address readback →
+  `Open` → readdir → no-listen → free+reuse) + netd's best-effort gateway-ping demo
+  through the live data path (logged, not a gate — whether slirp answers a guest
+  echo internally vs proxying it to a host ping is host-dependent; on the dev host
+  it did not answer, vindicating the best-effort framing). The `socket-icmp` Cargo
+  feature is the only new dependency; pure userspace — kernel byte-unchanged. The
+  deterministic in-guest ICMP round-trip E2E is owed to net-3d (the loopback iface
+  auto-replies to an echo to its own IP). See `docs/reference/121-netd.md`.
+- **net-3d, net-4..net-8: not started.** net-3d (the focused net-3 audit + the
+  inbound-accept + UDP/ICMP-loopback E2E via a netd loopback interface); then
+  net-4..net-8 per §17, sequenced before the container runner (#70) per ROADMAP §2.2.
 
 The thylacine is real. So is its network — and it is, of course, a filesystem.

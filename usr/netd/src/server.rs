@@ -40,9 +40,10 @@ use libthyla_rs::{
     T_WALK_OPEN_FROM_ROOT,
 };
 use smoltcp::iface::{Interface, SocketHandle, SocketSet};
-use smoltcp::socket::{tcp, udp};
+use smoltcp::phy::ChecksumCapabilities;
+use smoltcp::socket::{icmp, tcp, udp};
 use smoltcp::time::Instant as SmolInstant;
-use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint};
+use smoltcp::wire::{Icmpv4Packet, Icmpv4Repr, IpAddress, IpEndpoint, IpListenEndpoint};
 
 /// Max concurrent 9P connections the accept loop tracks. In practice the dev9p
 /// mount drives ONE kernel-client session; the headroom covers a future direct
@@ -83,6 +84,13 @@ const UDP_META_SLOTS: usize = 8;
 const UDP_RX_BUF: usize = 4096;
 const UDP_TX_BUF: usize = 4096;
 
+/// Per-connection smoltcp ICMP socket buffer sizes (net-3c). Like UDP, an ICMP
+/// PacketBuffer stores whole packets (an echo request/reply) with per-packet
+/// metadata (the peer IP). A ping is tiny, so 4 slots x 2 KiB is ample.
+const ICMP_META_SLOTS: usize = 4;
+const ICMP_RX_BUF: usize = 2048;
+const ICMP_TX_BUF: usize = 2048;
+
 /// The largest `data` chunk a single Tread drains from a socket's rx buffer.
 const DATA_CHUNK: usize = 4096;
 
@@ -102,6 +110,24 @@ const DNS_PROBE_POLLS: u32 = 30; // ~300ms worst case
 const DNS_PROBE_POLL_MS: u64 = 10;
 const DNS_PROBE_SERVER: [u8; 4] = [10, 0, 2, 3]; // QEMU slirp's DNS forwarder
 const DNS_PROBE_QNAME: &[u8] = b"example.com";
+
+/// net-3c ICMP ping round-trip demo (an echo request to slirp's gateway).
+/// BEST-EFFORT, logged, never asserted -- whether QEMU slirp answers a guest
+/// ICMP echo to the gateway internally (vs proxying it to a host ping socket,
+/// which the host environment may or may not permit) is host-dependent, so a
+/// round-trip is NOT a sound boot gate ([[feedback-no-host-load]]). The
+/// deterministic proof is joey's /net/icmp machinery probe; the deterministic
+/// in-guest ICMP round-trip E2E is owed to net-3d (the loopback interface, where
+/// smoltcp auto-replies to an echo request addressed to its own IP).
+const PING_PROBE_POLLS: u32 = 30; // ~300ms worst case
+const PING_PROBE_POLL_MS: u64 = 10;
+const PING_PROBE_GATEWAY: [u8; 4] = [10, 0, 2, 2]; // QEMU slirp's virtual gateway
+const PING_PROBE_PAYLOAD: &[u8] = b"thylacine-net-3c";
+
+/// The base Echo identifier netd's ICMP sockets rotate from. Each /net/icmp
+/// connection binds a distinct ident so smoltcp routes EchoReplies back to the
+/// connection that sent the matching EchoRequest.
+const ICMP_IDENT_BASE: u16 = 0x7c00;
 
 const P9_VERSION_9P2000_L: &[u8] = b"9P2000.L";
 
@@ -143,6 +169,7 @@ const P_TCP_STATS: u64 = 5; //  /net/tcp/stats
 const P_UDP_STATS: u64 = 6; //  /net/udp/stats
 const P_ICMP_STATS: u64 = 7; // /net/icmp/stats
 const P_UDP_CLONE: u64 = 8; //  /net/udp/clone (net-3b)
+const P_ICMP_CLONE: u64 = 9; // /net/icmp/clone (net-3c)
 
 const CONN_FLAG: u64 = 1 << 40;
 const PROTO_SHIFT: u64 = 32;
@@ -155,6 +182,7 @@ const N_MASK: u64 = 0x00ff_ffff; // 24-bit connection number
 // Socket>` is always matched to the slot (a mismatch panics in smoltcp).
 const PROTO_TCP: u64 = 0;
 const PROTO_UDP: u64 = 1; // net-3b
+const PROTO_ICMP: u64 = 2; // net-3c
 
 // Per-connection file kinds (the filekind low byte).
 const FK_DIR: u64 = 0; //    /net/tcp/N/
@@ -199,6 +227,7 @@ fn path_conn_n(path: u64) -> Option<u32> {
 fn proto_dir(proto: u64) -> u64 {
     match proto {
         PROTO_UDP => P_UDP,
+        PROTO_ICMP => P_ICMP,
         _ => P_TCP,
     }
 }
@@ -226,6 +255,10 @@ struct Slot {
     // listen): the listener N re-arms a fresh socket on this endpoint after each
     // accept, so N stays ANNOUNCED for the next call (NET-DESIGN 3.4). TCP only.
     listen_ep: Option<IpListenEndpoint>,
+    // The ICMP Echo identifier this slot's socket is bound to (net-3c): an echo
+    // request carries it so the matching reply routes back to this slot.
+    // Meaningless unless proto == PROTO_ICMP.
+    icmp_ident: u16,
 }
 
 impl Slot {
@@ -239,6 +272,7 @@ impl Slot {
             remote: None,
             err: None,
             listen_ep: None,
+            icmp_ident: 0,
         }
     }
 }
@@ -290,16 +324,33 @@ pub enum DnsProbe {
     MintFailed,
 }
 
+/// The outcome of the net-3c best-effort ICMP ping demo (an echo to the gateway).
+/// The serve loop logs it; it is never a boot gate (whether slirp answers a
+/// guest echo internally is host-dependent).
+pub enum PingProbe {
+    /// An echo reply came back (`reply_len` payload bytes).
+    Ok { reply_len: usize },
+    /// No reply within the bound (slirp proxied the echo to a host ping the host
+    /// did not permit, most likely).
+    NoResponse,
+    /// Could not even mint the probe socket (the slot table was full).
+    MintFailed,
+}
+
 pub struct Net {
     iface: Interface,
     sockets: SocketSet<'static>,
     base: Instant,
     next_local_port: u16,
     slots: [Slot; MAX_SLOTS],
-    tcp_active: u32, // currently-live TCP connections (the `active` stat)
-    tcp_opened: u32, // total TCP connections ever minted
-    udp_active: u32, // currently-live UDP connections (net-3b)
-    udp_opened: u32, // total UDP connections ever minted
+    tcp_active: u32,      // currently-live TCP connections (the `active` stat)
+    tcp_opened: u32,      // total TCP connections ever minted
+    udp_active: u32,      // currently-live UDP connections (net-3b)
+    udp_opened: u32,      // total UDP connections ever minted
+    icmp_active: u32,     // currently-live ICMP connections (net-3c)
+    icmp_opened: u32,     // total ICMP connections ever minted
+    next_icmp_ident: u16, // rotating Echo identifier for the next icmp_clone
+    icmp_seq: u16,        // rotating echo sequence number across all icmp sends
     // Deferred accepts: held listen Rlopens awaiting an inbound call (net-3a).
     pending: Vec<PendingAccept>,
 }
@@ -319,6 +370,10 @@ impl Net {
             tcp_opened: 0,
             udp_active: 0,
             udp_opened: 0,
+            icmp_active: 0,
+            icmp_opened: 0,
+            next_icmp_ident: ICMP_IDENT_BASE,
+            icmp_seq: 0,
             pending: Vec::new(),
         }
     }
@@ -391,6 +446,40 @@ impl Net {
         result
     }
 
+    /// net-3c boot demo: a self-contained ICMP echo round-trip through the live
+    /// /net/icmp data path (icmp_clone -> connect -> data_send -> poll ->
+    /// data_recv), bounded-polled in its own loop. BEST-EFFORT: whether QEMU
+    /// slirp answers a guest echo to the gateway internally (vs proxying it to a
+    /// host ping socket) is host-dependent, so the caller logs the outcome and
+    /// never gates the boot on it (the /net/icmp machinery is the deterministic
+    /// proof, via joey; the in-guest ICMP round-trip E2E is owed to net-3d). The
+    /// probe connection is minted + freed entirely within this call (no leak).
+    pub fn icmp_ping_probe(&mut self, device: &mut NicDevice) -> PingProbe {
+        let n = match self.icmp_clone() {
+            Some(n) => n,
+            None => return PingProbe::MintFailed,
+        };
+        if self.icmp_connect(n, PING_PROBE_GATEWAY).is_err() {
+            self.free_orphan_mint(n);
+            return PingProbe::NoResponse;
+        }
+        let _ = self.data_send(n, PING_PROBE_PAYLOAD);
+
+        let mut buf = [0u8; 256];
+        let mut result = PingProbe::NoResponse;
+        for _ in 0..PING_PROBE_POLLS {
+            self.poll(device);
+            let k = self.data_recv(n, &mut buf);
+            if k > 0 {
+                result = PingProbe::Ok { reply_len: k };
+                break;
+            }
+            let _ = sleep(Duration::from_millis(PING_PROBE_POLL_MS));
+        }
+        self.free_orphan_mint(n);
+        result
+    }
+
     /// Mint a TCP connection: claim a free slot, refs=0 (the opener takes the
     /// first ref). Returns the connection number N, or None if the table is
     /// full. The slot is NOT yet freeable -- only slot_unref frees, and the
@@ -412,6 +501,7 @@ impl Net {
             remote: None,
             err: None,
             listen_ep: None,
+            icmp_ident: 0,
         };
         self.tcp_active += 1;
         self.tcp_opened += 1;
@@ -441,9 +531,49 @@ impl Net {
             remote: None,
             err: None,
             listen_ep: None,
+            icmp_ident: 0,
         };
         self.udp_active += 1;
         self.udp_opened += 1;
+        Some(n as u32)
+    }
+
+    /// Mint an ICMP connection (net-3c): an icmp::Socket bound to a unique Echo
+    /// identifier, so EchoReplies for this connection's pings route back to it
+    /// (smoltcp's accepts filter incoming ICMP by the bound ident). The Plan 9
+    /// /net/icmp shape: `connect ip` records the target, a `data` write is an
+    /// echo-request payload, a `data` read is the echo-reply payload.
+    fn icmp_clone(&mut self) -> Option<u32> {
+        let n = self.slots.iter().position(|s| !s.used)?;
+        let rx = icmp::PacketBuffer::new(
+            alloc::vec![icmp::PacketMetadata::EMPTY; ICMP_META_SLOTS],
+            alloc::vec![0u8; ICMP_RX_BUF],
+        );
+        let tx = icmp::PacketBuffer::new(
+            alloc::vec![icmp::PacketMetadata::EMPTY; ICMP_META_SLOTS],
+            alloc::vec![0u8; ICMP_TX_BUF],
+        );
+        let ident = self.next_icmp_ident;
+        let mut sock = icmp::Socket::new(rx, tx);
+        // Bind BEFORE adding to the set, so a bind failure leaks nothing.
+        if sock.bind(icmp::Endpoint::Ident(ident)).is_err() {
+            return None;
+        }
+        self.next_icmp_ident = self.next_icmp_ident.wrapping_add(1);
+        let h = self.sockets.add(sock);
+        self.slots[n] = Slot {
+            used: true,
+            refs: 0,
+            proto: PROTO_ICMP,
+            socket: Some(h),
+            local: None,
+            remote: None,
+            err: None,
+            listen_ep: None,
+            icmp_ident: ident,
+        };
+        self.icmp_active += 1;
+        self.icmp_opened += 1;
         Some(n as u32)
     }
 
@@ -492,6 +622,7 @@ impl Net {
     fn dec_active(&mut self, proto: u64) {
         match proto {
             PROTO_UDP => self.udp_active = self.udp_active.saturating_sub(1),
+            PROTO_ICMP => self.icmp_active = self.icmp_active.saturating_sub(1),
             _ => self.tcp_active = self.tcp_active.saturating_sub(1),
         }
     }
@@ -508,6 +639,7 @@ impl Net {
         self.slot_unref(n);
         match proto {
             Some(PROTO_UDP) => self.udp_opened = self.udp_opened.saturating_sub(1),
+            Some(PROTO_ICMP) => self.icmp_opened = self.icmp_opened.saturating_sub(1),
             _ => self.tcp_opened = self.tcp_opened.saturating_sub(1),
         }
     }
@@ -528,8 +660,23 @@ impl Net {
         match self.slot_proto(n) {
             Some(PROTO_UDP) => self.udp_connect(n, ip, port),
             Some(PROTO_TCP) => self.tcp_connect(n, ip, port),
+            Some(PROTO_ICMP) => self.icmp_connect(n, ip),
             _ => Err(()),
         }
+    }
+
+    /// ICMP `connect` (net-3c): record the ping target. ICMP is portless and has
+    /// no handshake (the socket was bound to its Echo ident at clone), so this
+    /// only fixes the destination subsequent `data` echo-requests are sent to.
+    fn icmp_connect(&mut self, n: u32, ip: [u8; 4]) -> Result<(), ()> {
+        if self.slot_proto(n) != Some(PROTO_ICMP) {
+            return Err(());
+        }
+        let la = self.iface_ipv4().unwrap_or([0, 0, 0, 0]);
+        self.slots[n as usize].local = Some((la, 0)); // ICMP has no local port
+        self.slots[n as usize].remote = Some((ip, 0));
+        self.slots[n as usize].err = None;
+        Ok(())
     }
 
     /// The first IPv4 address bound on the interface, or None (pre-lease). UDP
@@ -626,6 +773,9 @@ impl Net {
         };
         match self.slot_proto(n) {
             Some(PROTO_UDP) => self.sockets.get_mut::<udp::Socket>(h).close(),
+            // ICMP is connectionless (no close/unbind on smoltcp's icmp socket):
+            // the fid clunk frees the slot + removes the socket. Nothing to do.
+            Some(PROTO_ICMP) => {}
             _ => self.sockets.get_mut::<tcp::Socket>(h).close(),
         }
     }
@@ -745,6 +895,7 @@ impl Net {
             remote: re.map(endpoint_octets),
             err: None,
             listen_ep: None,
+            icmp_ident: 0,
         };
         self.tcp_active += 1;
         self.tcp_opened += 1;
@@ -840,6 +991,39 @@ impl Net {
                     }
                 }
             }
+            Some(PROTO_ICMP) => {
+                let (ip, _) = match self.slots[n as usize].remote {
+                    Some(r) => r,
+                    None => return 0, // no target: `connect` first
+                };
+                let ident = self.slots[n as usize].icmp_ident;
+                let seq = self.icmp_seq;
+                self.icmp_seq = self.icmp_seq.wrapping_add(1);
+                // Build the echo-request packet from `data` (the payload). The
+                // socket re-parses the queued bytes and the iface recomputes the
+                // checksum on egress, so emit with default caps; the packet only
+                // needs valid EchoRequest structure.
+                let repr = Icmpv4Repr::EchoRequest {
+                    ident,
+                    seq_no: seq,
+                    data,
+                };
+                let mut pkt_buf = alloc::vec![0u8; repr.buffer_len()];
+                let mut pkt = Icmpv4Packet::new_unchecked(&mut pkt_buf[..]);
+                repr.emit(&mut pkt, &ChecksumCapabilities::default());
+                let dst = IpAddress::v4(ip[0], ip[1], ip[2], ip[3]);
+                match self
+                    .sockets
+                    .get_mut::<icmp::Socket>(h)
+                    .send_slice(&pkt_buf, dst)
+                {
+                    Ok(()) => data.len(),
+                    Err(_) => {
+                        self.slots[n as usize].err = Some("icmp send failed");
+                        0
+                    }
+                }
+            }
             _ => self
                 .sockets
                 .get_mut::<tcp::Socket>(h)
@@ -864,6 +1048,33 @@ impl Net {
                 Ok((k, _meta)) => k,
                 Err(_) => 0,
             },
+            Some(PROTO_ICMP) => {
+                // recv_slice gives a whole ICMP packet (smoltcp already filtered
+                // it to this socket's bound ident and verified the checksum on
+                // ingress). Parse it; on an EchoReply, copy the reply payload
+                // into `out`. A non-reply or parse error -> 0.
+                let mut pkt_buf = [0u8; ICMP_RX_BUF];
+                let k = match self
+                    .sockets
+                    .get_mut::<icmp::Socket>(h)
+                    .recv_slice(&mut pkt_buf)
+                {
+                    Ok((k, _from)) => k,
+                    Err(_) => return 0,
+                };
+                let pkt = match Icmpv4Packet::new_checked(&pkt_buf[..k]) {
+                    Ok(p) => p,
+                    Err(_) => return 0,
+                };
+                match Icmpv4Repr::parse(&pkt, &ChecksumCapabilities::ignored()) {
+                    Ok(Icmpv4Repr::EchoReply { data, .. }) => {
+                        let m = data.len().min(out.len());
+                        out[..m].copy_from_slice(&data[..m]);
+                        m
+                    }
+                    _ => 0,
+                }
+            }
             _ => self
                 .sockets
                 .get_mut::<tcp::Socket>(h)
@@ -882,6 +1093,13 @@ impl Net {
         };
         if self.slot_proto(n) == Some(PROTO_UDP) {
             return if self.sockets.get::<udp::Socket>(h).is_open() {
+                "Open"
+            } else {
+                "Closed"
+            };
+        }
+        if self.slot_proto(n) == Some(PROTO_ICMP) {
+            return if self.sockets.get::<icmp::Socket>(h).is_open() {
                 "Open"
             } else {
                 "Closed"
@@ -941,7 +1159,7 @@ impl Net {
                 P_TCP | P_UDP | P_ICMP => P_ROOT,
                 P_TCP_CLONE | P_TCP_STATS => P_TCP,
                 P_UDP_CLONE | P_UDP_STATS => P_UDP,
-                P_ICMP_STATS => P_ICMP,
+                P_ICMP_CLONE | P_ICMP_STATS => P_ICMP,
                 _ => P_ROOT, // P_ROOT is its own parent (the `..`-from-root fixpoint)
             }
         }
@@ -999,8 +1217,11 @@ impl Net {
                     .map(|n| make_conn(PROTO_UDP, n, FK_DIR)),
             },
             P_ICMP => match name {
+                b"clone" => Some(P_ICMP_CLONE),
                 b"stats" => Some(P_ICMP_STATS),
-                _ => None,
+                _ => parse_dec(name)
+                    .filter(|&n| self.slot_proto(n) == Some(PROTO_ICMP))
+                    .map(|n| make_conn(PROTO_ICMP, n, FK_DIR)),
             },
             _ => None,
         }
@@ -1041,7 +1262,11 @@ impl Net {
                 push(b"stats", P_UDP_STATS, false);
                 self.push_conn_slots(PROTO_UDP, &mut push);
             }
-            P_ICMP => push(b"stats", P_ICMP_STATS, false),
+            P_ICMP => {
+                push(b"clone", P_ICMP_CLONE, false);
+                push(b"stats", P_ICMP_STATS, false);
+                self.push_conn_slots(PROTO_ICMP, &mut push);
+            }
             _ => {}
         }
     }
@@ -1069,12 +1294,21 @@ impl Net {
                 FK_STATUS => c.push(self.state_str(n).as_bytes()),
                 FK_LOCAL => {
                     if let Some((ip, port)) = self.slot_endpoint(n, true) {
-                        c.push_endpoint(ip, port);
+                        // ICMP is portless: report just the address.
+                        if self.slot_proto(n) == Some(PROTO_ICMP) {
+                            c.push_ip(ip);
+                        } else {
+                            c.push_endpoint(ip, port);
+                        }
                     }
                 }
                 FK_REMOTE => {
                     if let Some((ip, port)) = self.slot_endpoint(n, false) {
-                        c.push_endpoint(ip, port);
+                        if self.slot_proto(n) == Some(PROTO_ICMP) {
+                            c.push_ip(ip);
+                        } else {
+                            c.push_endpoint(ip, port);
+                        }
                     }
                 }
                 FK_ERR => {
@@ -1102,7 +1336,13 @@ impl Net {
                 c.push_dec(self.udp_opened);
                 c.push(b"\n");
             }
-            P_ICMP_STATS => c.push(b"icmp\n  echo 0\n"),
+            P_ICMP_STATS => {
+                c.push(b"icmp\n  active ");
+                c.push_dec(self.icmp_active);
+                c.push(b"\n  opened ");
+                c.push_dec(self.icmp_opened);
+                c.push(b"\n");
+            }
             // clone is never read as content (its open rebinds the fid to ctl).
             _ => {}
         }
@@ -1299,6 +1539,12 @@ impl Content {
     }
     /// Format `ip!port` (the Plan 9 dial notation the `local`/`remote` files use).
     fn push_endpoint(&mut self, ip: [u8; 4], port: u16) {
+        self.push_ip(ip);
+        self.push(b"!");
+        self.push_dec(port as u32);
+    }
+    /// Format a bare dotted-quad address (the portless ICMP `local`/`remote`).
+    fn push_ip(&mut self, ip: [u8; 4]) {
         self.push_dec(ip[0] as u32);
         self.push(b".");
         self.push_dec(ip[1] as u32);
@@ -1306,8 +1552,6 @@ impl Content {
         self.push_dec(ip[2] as u32);
         self.push(b".");
         self.push_dec(ip[3] as u32);
-        self.push(b"!");
-        self.push_dec(port as u32);
     }
 }
 
@@ -1776,13 +2020,14 @@ impl Conn {
         let clone_proto = match f.path {
             P_TCP_CLONE => Some(PROTO_TCP),
             P_UDP_CLONE => Some(PROTO_UDP),
+            P_ICMP_CLONE => Some(PROTO_ICMP),
             _ => None,
         };
         if let Some(proto) = clone_proto {
-            let minted = if proto == PROTO_UDP {
-                net.udp_clone()
-            } else {
-                net.tcp_clone()
+            let minted = match proto {
+                PROTO_UDP => net.udp_clone(),
+                PROTO_ICMP => net.icmp_clone(),
+                _ => net.tcp_clone(),
             };
             let n = match minted {
                 Some(n) => n,
@@ -1917,7 +2162,7 @@ impl Conn {
             (DIR_MODE, 2u64, 0u64)
         } else {
             let m = match f.path {
-                P_TCP_CLONE | P_UDP_CLONE => FILE_RW,
+                P_TCP_CLONE | P_UDP_CLONE | P_ICMP_CLONE => FILE_RW,
                 _ if is_conn(f.path) => match conn_filekind(f.path) {
                     FK_CTL | FK_DATA => FILE_RW,
                     _ => FILE_RO,
@@ -2024,11 +2269,21 @@ impl Conn {
                     Some(a) => a,
                     None => return self.err(tag, p9::E_INVAL),
                 };
-                let (ip, port) = match parse_dial(arg) {
-                    Some(v) => v,
-                    None => return self.err(tag, p9::E_INVAL),
+                // ICMP is portless: dial a bare IPv4 (any `!suffix` is ignored).
+                // TCP/UDP dial the full `ip!port`.
+                let r = if net.slot_proto(n) == Some(PROTO_ICMP) {
+                    let ipbytes = arg.split(|&b| b == b'!').next().unwrap_or(arg);
+                    match parse_ipv4(ipbytes) {
+                        Some(ip) => net.ctl_connect(n, ip, 0),
+                        None => return self.err(tag, p9::E_INVAL),
+                    }
+                } else {
+                    match parse_dial(arg) {
+                        Some((ip, port)) => net.ctl_connect(n, ip, port),
+                        None => return self.err(tag, p9::E_INVAL),
+                    }
                 };
-                match net.ctl_connect(n, ip, port) {
+                match r {
                     Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, count),
                     Err(()) => self.err(tag, p9::E_INVAL),
                 }

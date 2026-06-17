@@ -19,4 +19,5 @@ smoltcp = { version = "0.12", default-features = false, features = [
     "socket-dhcpv4",
     "socket-tcp",
     "socket-udp",
+    "socket-icmp",
 ] }

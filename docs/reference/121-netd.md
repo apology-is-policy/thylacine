@@ -429,6 +429,52 @@ connect → endpoint readback → `status` Open → readdir → no-listen → fr
 loopback interface that proves the TCP accept also round-trips a UDP datagram to
 `127.0.0.1` in-guest, with no host-resolver coupling.
 
+## net-3c: ICMP — `/net/icmp` ping
+
+net-3c adds the third protocol along the same `proto` axis. `/net/icmp` grows a
+`clone` file: opening it mints a connection backed by a smoltcp `icmp::Socket`
+bound to a unique Echo **identifier** (rotated per clone from `ICMP_IDENT_BASE`),
+so smoltcp routes EchoReplies for this connection's pings back to it (its
+`accepts` filters incoming ICMP by the bound ident). `PROTO_ICMP` joins the slot
+discriminator; the connection tree / refcounted fid machine / Treaddir listing
+are the §3.4 machinery, unchanged.
+
+**`connect` is portless.** ICMP has no ports and no handshake (the bind happened
+at clone), so `ctl_connect` dispatches to `icmp_connect`, which only records the
+ping target. The `ctl` verb parser accepts a **bare IPv4** for an ICMP slot
+(`connect 10.0.2.2`; any `!suffix` is ignored), where TCP/UDP require the full
+`ip!port`. `remote`/`local` report just the dotted-quad address (no `!port` —
+`Content::push_ip`). `status` reads `Open` (the bound echo socket) / `Closed`.
+
+**`data` is the Plan 9 ping shape.** A `data` write is an ICMP echo-request
+*payload*: netd wraps it into an `Icmpv4Repr::EchoRequest { ident, seq_no, data }`
+(smoltcp's own encoder; the iface recomputes the checksum on egress) and sends it
+to the recorded target. A `data` read dequeues a whole ICMP packet smoltcp already
+filtered to the bound ident, parses it, and returns the EchoReply's payload (a
+non-reply or parse error → 0). There is **no `listen` file** under an ICMP conn
+dir, and `hangup` is a no-op (a connectionless socket has nothing to close — the
+fid clunk frees the slot + removes the socket).
+
+**The boot demo is a self-contained gateway ping** through the live `/net/icmp`
+data path (`icmp_clone → connect → data_send → poll → data_recv`), bounded-polled
+inside netd. It is **best-effort, logged, never a boot gate**: whether QEMU slirp
+answers a guest echo to the gateway *internally* (vs proxying it to a host ping
+socket the host may not permit) is host-dependent — so a round-trip is not a sound
+boot gate. (On the dev host slirp did *not* answer it — which is exactly why the
+round-trip is best-effort and the machinery probe is the proof.)
+
+```
+netd: net-3c ICMP round-trip best-effort: no echo reply (slirp host-ping?) -- /net/icmp machinery proven via joey
+joey: net-3c PROBE OK (icmp clone->0, connect 10.0.2.2, remote readback, no listen, frees+reuses 0)
+```
+
+The deterministic, asserted proof is joey's `/net/icmp` machinery probe (clone →
+portless connect → bare-address readback → `status` Open → readdir → no-listen →
+free + reuse). **The deterministic in-guest ICMP round-trip E2E is owed to
+net-3d** — the loopback interface auto-replies to an echo request addressed to its
+own IP, so a `127.0.0.1` ping round-trips in-guest with no slirp/host coupling
+(joining the owed TCP-accept + UDP-datagram E2Es).
+
 ## Data structures
 
 | Type | Role |
@@ -439,11 +485,12 @@ loopback interface that proves the TCP accept also round-trips a UDP datagram to
 | `NicTxToken<'a> { nic: &'a mut VirtioNetPci }` | the single `&mut nic` TX borrow |
 | `server::Conn` | one accepted 9P connection: fid table + `in_buf`/`out_buf` |
 | `server::Net` | the global connection table (`Slot[MAX_SLOTS]`) + the smoltcp `iface`/`sockets` (folded in post-DHCP) + the ephemeral-port cursor + live stats; shared `&mut` across all sessions |
-| `server::Slot { used, refs, proto, socket, local, remote, err, listen_ep }` | one `/net/<proto>/N/` connection: the refcount key + its protocol (TCP/UDP — the `get::<T>()` discriminator) + its reserved `SocketHandle` + the recorded endpoints / err reason + the announce endpoint (TCP-only; Some once listening; re-arm key) |
+| `server::Slot { used, refs, proto, socket, local, remote, err, listen_ep, icmp_ident }` | one `/net/<proto>/N/` connection: the refcount key + its protocol (TCP/UDP/ICMP — the `get::<T>()` discriminator) + its reserved `SocketHandle` + the recorded endpoints / err reason + the announce endpoint (TCP-only; re-arm key) + the bound Echo ident (ICMP-only) |
 | `server::PendingAccept { conn_id, tag, fid, listening_n }` | a held `listen` Rlopen awaiting an inbound call (the deferred-reply state); bounded by `MAX_PENDING_ACCEPTS = 16` |
 | `server::AcceptDone { conn_id, tag, fid, new_n, ctl_qid_path }` | a completed accept the serve loop delivers (opaque to `main.rs`, routed by `conn_id()`) |
 | `enum Disp { Reply(usize), Deferred, Fatal }` | the per-request dispatch outcome — `Deferred` holds the reply (a blocking listen) |
 | `enum DnsProbe { Ok{resp_len,ancount}, NoResponse, MintFailed }` | the net-3b best-effort UDP-round-trip demo outcome (logged, never a boot gate) |
+| `enum PingProbe { Ok{reply_len}, NoResponse, MintFailed }` | the net-3c best-effort ICMP-ping demo outcome (logged, never a boot gate) |
 
 ## Tests
 
@@ -541,6 +588,18 @@ loopback interface that proves the TCP accept also round-trips a UDP datagram to
   probe (deterministic) + netd's best-effort DNS round-trip demo (logged). The
   deterministic UDP-via-9P data round-trip E2E is owed to net-3d (the loopback
   interface, alongside the TCP accept). The focused audit is net-3d.
+- **net-3c (LANDED)**: ICMP — `/net/icmp` clone/connect/data (ping). The third
+  `proto` along the slot discriminator; `/net/icmp/clone` mints an `icmp::Socket`
+  bound to a rotated Echo ident; `connect` is **portless** (a bare IPv4) and only
+  records the target; `data` write wraps the payload into an `EchoRequest`, `data`
+  read returns the matching `EchoReply` payload; no `listen` file; `hangup` is a
+  no-op (connectionless). The `socket-icmp` Cargo feature is the only new
+  dependency; the kernel is byte-unchanged (pure userspace). Boot proof: joey's
+  `/net/icmp` machinery probe (deterministic) + netd's best-effort gateway-ping
+  demo (logged — slirp did not answer it on the dev host, vindicating the
+  best-effort framing). The deterministic in-guest ICMP round-trip E2E is owed to
+  net-3d (the loopback interface auto-replies to an echo to its own IP). The
+  focused audit over the whole net-3 surface is net-3d.
 
 ## Known caveats / seams
 
@@ -557,10 +616,10 @@ loopback interface that proves the TCP accept also round-trips a UDP datagram to
   (the ninep readdir codec). A `Tread` on a directory still returns `EISDIR` (the
   9P2000.L convention — directory enumeration is `Treaddir`, and the kernel dev9p
   client issues exactly that).
-- **udp/icmp `clone` is deferred** (net-2c-1): the `clone`-minted machine is TCP
-  only; `udp/`/`icmp/` keep just their `stats` file. The qid encoding reserves a
-  `proto` field so udp/icmp connections slot in without a re-encode, but their
-  sockets land with the protocol surface (post-net-2c).
+- **udp/icmp `clone` landed** (net-3b/net-3c): `/net/udp` and `/net/icmp` now each
+  have a live `clone` (a `udp::Socket` at net-3b, an `icmp::Socket` at net-3c)
+  along the shared `proto` discriminator — the qid encoding's reserved `proto`
+  field slotted them in without a re-encode.
 - **The poll is timeout-driven, not NIC-IRQ-woken**: the combined loop's `t_poll`
   timeout is smoltcp's `poll_delay` (clamped `[50 ms, 1 s]`). With an active TCP
   socket smoltcp's hint is short, so the clamp floor governs (≤ 50 ms RX latency

@@ -3347,6 +3347,83 @@ int main(void) {
                         t_putstr("joey: net-3b PROBE OK (udp clone->0, connect "
                                  "10.0.2.3!53, remote readback, no listen, frees+reuses 0)\n");
                     }
+
+                    // === net-3c: ICMP (clone/connect + the ping tree) ===
+                    // Deterministic + self-contained (no peer needed): /net/icmp/
+                    // clone mints an ICMP connection, `connect` records the ping
+                    // target (PORTLESS -- a bare IPv4), the `remote` file reads it
+                    // back (no `!port`), `status` reads "Open", the conn readdir
+                    // lists the ping files, and there is NO `listen` file. The last
+                    // clunk frees + reuses the slot. The live echo round-trip is
+                    // netd's own best-effort gateway-ping demo (logged) + owed net-3d.
+                    {
+                        // (a) clone /net/icmp -> ICMP connection 0 (net-3b freed it).
+                        long ica = t_open(T_WALK_OPEN_FROM_ROOT, "/net/icmp/clone",
+                                          15, T_ORDWR);
+                        unsigned char icb[16];
+                        long icn = (ica >= 0) ? t_read(ica, icb, sizeof(icb) - 1) : -1;
+                        if (ica < 0 || icn != 1 || icb[0] != '0') {
+                            t_putstr("joey: net-3c PROBE icmp clone -> 0 FAILED\n");
+                            return 1;
+                        }
+                        // (b) connect 10.0.2.2 -> record the ping target (portless;
+                        //     no packet sent here). slirp's gateway is the target.
+                        static const char iconn[] = "connect 10.0.2.2";
+                        if (t_write(ica, iconn, sizeof(iconn) - 1) != (long)(sizeof(iconn) - 1)) {
+                            t_putstr("joey: net-3c PROBE icmp connect write FAILED\n");
+                            return 1;
+                        }
+                        // (c) remote reads back the bare address (no `!port`).
+                        unsigned char ireb[64];
+                        long irf = t_open(T_WALK_OPEN_FROM_ROOT, "/net/icmp/0/remote",
+                                          18, T_OREAD);
+                        long irn = (irf >= 0) ? t_read(irf, ireb, sizeof(ireb)) : -1;
+                        if (irf >= 0) (void)t_close(irf);
+                        if (irn <= 0 || !mem_contains(ireb, (size_t)irn, "10.0.2.2", 8)) {
+                            t_putstr("joey: net-3c PROBE icmp remote != 10.0.2.2 FAILED\n");
+                            return 1;
+                        }
+                        // (d) status reads "Open" (a bound echo socket).
+                        unsigned char isb[32];
+                        long isf = t_open(T_WALK_OPEN_FROM_ROOT, "/net/icmp/0/status",
+                                          18, T_OREAD);
+                        long isn = (isf >= 0) ? t_read(isf, isb, sizeof(isb)) : -1;
+                        if (isf >= 0) (void)t_close(isf);
+                        if (isn <= 0 || !mem_contains(isb, (size_t)isn, "Open", 4)) {
+                            t_putstr("joey: net-3c PROBE icmp status != Open FAILED\n");
+                            return 1;
+                        }
+                        // (e) the conn readdir lists the ping files (`data`).
+                        unsigned char idb[256];
+                        long idd = t_open(T_WALK_OPEN_FROM_ROOT, "/net/icmp/0", 11, T_OREAD);
+                        long iddn = (idd >= 0) ? t_readdir(idd, idb, sizeof(idb)) : -1;
+                        if (idd >= 0) (void)t_close(idd);
+                        if (iddn <= 0 || !mem_contains(idb, (size_t)iddn, "data", 4)) {
+                            t_putstr("joey: net-3c PROBE icmp readdir (data) FAILED\n");
+                            return 1;
+                        }
+                        // (f) ICMP has no `listen` file: opening it fails.
+                        long ilj = t_open(T_WALK_OPEN_FROM_ROOT, "/net/icmp/0/listen",
+                                          18, T_OREAD);
+                        if (ilj >= 0) {
+                            (void)t_close(ilj);
+                            t_putstr("joey: net-3c PROBE icmp listen file should not exist\n");
+                            return 1;
+                        }
+                        // (g) the last clunk frees slot 0; a re-clone reuses it.
+                        (void)t_close(ica);
+                        long ica2 = t_open(T_WALK_OPEN_FROM_ROOT, "/net/icmp/clone",
+                                           15, T_ORDWR);
+                        unsigned char icb2[16];
+                        long icn2 = (ica2 >= 0) ? t_read(ica2, icb2, sizeof(icb2) - 1) : -1;
+                        if (ica2 < 0 || icn2 != 1 || icb2[0] != '0') {
+                            t_putstr("joey: net-3c PROBE icmp re-clone reuse FAILED\n");
+                            return 1;
+                        }
+                        (void)t_close(ica2);
+                        t_putstr("joey: net-3c PROBE OK (icmp clone->0, connect "
+                                 "10.0.2.2, remote readback, no listen, frees+reuses 0)\n");
+                    }
 #endif
                 } else {
                     t_putstr("joey: net-2c-1 /srv/net absent -- /net not mounted (netd down?)\n");

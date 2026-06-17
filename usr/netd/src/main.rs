@@ -302,6 +302,23 @@ impl Driver for NetD {
             server::DnsProbe::MintFailed => say!("netd: net-3b UDP probe: udp_clone failed"),
         }
 
+        // net-3c: a best-effort ICMP ping through the live /net/icmp data path
+        // (an echo request to slirp's gateway), bounded + logged, NEVER a boot
+        // gate -- whether slirp answers a guest echo internally is host-
+        // dependent. The deterministic /net/icmp machinery proof is joey's
+        // probe; the deterministic in-guest round-trip E2E is owed to net-3d
+        // (the loopback interface).
+        match net.icmp_ping_probe(&mut device) {
+            server::PingProbe::Ok { reply_len } => say!(
+                "netd: net-3c ICMP round-trip OK (echo reply {} bytes from gateway)",
+                reply_len
+            ),
+            server::PingProbe::NoResponse => say!(
+                "netd: net-3c ICMP round-trip best-effort: no echo reply (slirp host-ping?) -- /net/icmp machinery proven via joey"
+            ),
+            server::PingProbe::MintFailed => say!("netd: net-3c ICMP probe: icmp_clone failed"),
+        }
+
         // Post the /net 9P service (9P-mode) into the boot namespace's /srv
         // BEFORE signaling READY: the warden's READY -> "left running" then also
         // means "/srv/net is posted", so joey (after its warden wait) is
