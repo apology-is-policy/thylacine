@@ -320,10 +320,36 @@ impl Driver for NetD {
         let mut pollfds = [TPollFd::default(); 1 + server::MAX_CONNS];
         loop {
             net.poll(&mut device);
-            let delay = net
-                .poll_delay_ms()
-                .unwrap_or(IDLE_POLL_MAX_MS)
-                .clamp(IDLE_POLL_MIN_MS, IDLE_POLL_MAX_MS);
+
+            // Deliver any deferred accepts whose inbound call has landed: rebind
+            // the blocked listen fid onto the accepted connection's ctl and send
+            // the held Rlopen (NET-DESIGN 3.4 server side). A write failure means
+            // the issuing session died -> tear that connection down.
+            for d in net.poll_accepts() {
+                match conns.iter().position(|c| c.handle() == d.conn_id()) {
+                    Some(idx) => {
+                        if !conns[idx].complete_accept(&mut net, d) {
+                            conns[idx].teardown(&mut net);
+                            let _ = unsafe { t_close(conns[idx].handle()) };
+                            conns.remove(idx);
+                        }
+                    }
+                    // The issuing connection already closed: free the minted
+                    // connection (it has no owner).
+                    None => net.discard_accept(d),
+                }
+            }
+
+            // With a pending accept, the inbound SYN arrives on the NIC (not a
+            // pollable fd), so only a timeout-driven net.poll catches it: clamp to
+            // the floor to keep accept latency <= IDLE_POLL_MIN_MS.
+            let delay = if net.has_pending_accepts() {
+                IDLE_POLL_MIN_MS
+            } else {
+                net.poll_delay_ms()
+                    .unwrap_or(IDLE_POLL_MAX_MS)
+                    .clamp(IDLE_POLL_MIN_MS, IDLE_POLL_MAX_MS)
+            };
 
             pollfds[0] = TPollFd {
                 fd: listener as i32,

@@ -694,7 +694,26 @@ named in §2.)
   sentinel accepted as a live fid), F3 [P3] (a rejected re-`connect` burned an
   ephemeral port + a rolled-back clone over-counted `opened`); F4/F5 + the
   cross-session liveness closed-justified. Kernel byte-unchanged.
-- **net-3..net-8: not started.** Phase-8 work per §17, sequenced before the
-  container runner (#70) per ROADMAP §2.2.
+- **net-3a: LANDED** — the server side: `announce` + the blocking `listen`/accept.
+  `announce *!port` puts a connection's socket into LISTEN; the blocking
+  `open(listen)` is a **deferred 9P reply** — netd *holds* the Rlopen (registering
+  a pending accept) and keeps polling, since a single-threaded server cannot block
+  in the handler (it must keep polling the NIC to receive the very SYN that would
+  unblock it). When the listener establishes, a socket-swap mints the accepted
+  connection `M` (taking the established socket) + re-arms the listener, and the
+  held `Rlopen(tag, M/ctl)` is sent, unblocking the client's open. This is the
+  committed-blocking realization of §3.4 over the existing dev9p client (match-by-
+  tag, no per-op deadline, death-interruptible) — **no kernel surface** (§12's
+  readiness multiplexing via `dev9p.poll`/Loom is the separate net-6 leg). The
+  client-death path is handled: a `Tflush(oldtag)` cancels the pending accept +
+  replies `Rflush` (also closing a pre-existing net-2c-2 outstanding-tag leak; the
+  only shared-crate change is the `ninep` Tflush/Rflush codec). Boot proof
+  (deterministic): `announce *!7777 → Listen` + the `listen` file in the readdir +
+  the not-announced gate. The full inbound-accept E2E is owed to net-3d (a
+  deterministic in-guest inbound path — a netd loopback interface). Pure userspace
+  — kernel byte-unchanged. See `docs/reference/121-netd.md`.
+- **net-3b..net-3d, net-4..net-8: not started.** net-3b (UDP), net-3c (ICMP ping),
+  net-3d (the focused net-3 audit + the inbound-accept E2E); then net-4..net-8 per
+  §17, sequenced before the container runner (#70) per ROADMAP §2.2.
 
 The thylacine is real. So is its network — and it is, of course, a filesystem.

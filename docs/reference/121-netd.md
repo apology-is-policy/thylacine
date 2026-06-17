@@ -303,6 +303,88 @@ proving the whole ctl→socket→iface→endpoint path. Each endpoint fid refs+u
 joey: net-2c-2 PROBE OK (clone->0, connect 10.0.2.2!9, local 10.0.2.15!, frees+reuses 0)
 ```
 
+## net-3a: the server side (announce + the blocking `listen` via a deferred 9P reply)
+
+net-3a adds the server half of §3.4 — `announce` + `listen`/accept — over the
+net-2c-1 fid machine (which reserved the `ANNOUNCED` state + the `listen` file).
+Still pure userspace; the kernel is byte-unchanged. The only shared-crate change
+is the `libthyla_rs::ninep` **Tflush/Rflush** codec (the cancellation path needs
+it), mirroring net-2c-1's readdir-codec addition.
+
+**`announce` puts the socket into LISTEN.** Writing `announce *!port` (or
+`announce a.b.c.d!port`) on a connection's `ctl` calls `socket.listen(ep)` (smoltcp)
+and records the endpoint in the slot (`listen_ep`). The connection is now
+`ANNOUNCED`; `status` reads `Listen`. `*` is the any-address listen.
+
+**The blocking `listen` open is a *deferred 9P reply* — the load-bearing
+mechanism.** netd is a single-threaded 9P server: if `h_lopen` on a `listen` file
+*blocked* waiting for an inbound call, the whole serve loop would stall and never
+poll the NIC to *receive* the very SYN that would unblock it (a self-deadlock).
+The fix is the 9P-native one — netd **holds the Rlopen**:
+
+1. `open(/net/tcp/N/listen)` arrives as a `Tlopen`. `h_lopen` registers a
+   `PendingAccept { conn_id, tag, fid, listening_n }` in `Net` and returns the
+   `Disp::Deferred` sentinel: dispatch emits **no reply** for this frame. The
+   client's `open()` syscall stays blocked on the outstanding tag (the kernel
+   dev9p client matches replies purely by tag, with no per-op deadline, and the
+   sleep is #811-death-interruptible — `kernel/9p_client.c`).
+2. The serve loop, after `net.poll`, calls `Net::poll_accepts()`: for each pending
+   whose listener's socket left LISTEN for an established connection
+   (`accept_ready` = `is_active() && state ≠ SynReceived`), it **swaps** —
+   `accept_swap` mints a NEW connection `M` that takes `N`'s now-established
+   `SocketHandle`, and re-arms `N` with a *fresh* listening socket on `listen_ep`
+   (so `N` stays `ANNOUNCED` for the next call). It emits an `AcceptDone`.
+3. The serve loop finds the issuing `Conn` by `conn_id`, calls `complete_accept`:
+   rebind the blocked listen fid onto `M`'s `ctl` (the refcount moves from `N` to
+   `M`; `N` stays alive via the announce fid), build the held `Rlopen(tag, M/ctl
+   qid)`, and write it — unblocking the client's `open()`, which returns a fd onto
+   `M`'s ctl (the Plan 9 `listen` contract: open(listen) → a fresh connection's
+   ctl). If the issuing session already closed, the unowned mint is freed.
+
+This is the **committed-blocking** realization of §3.4. It is distinct from §12's
+*readiness multiplexing* (`poll()`/`select()` via `dev9p.poll`, and async via
+Loom) — both are net-6. A `listen` open *commits* to one accept (deferred reply
+handles it natively over the existing client); `poll()` multiplexes N fds without
+committing (needs the readiness bridge). They are complementary, not the same
+surface — so net-3a needs **no kernel surface** and no `net_poll.tla`.
+
+**Tflush cancels a dead deferred accept.** A `listen` Rlopen can be held for a
+long time, so a client that dies on its blocked open is reachable: the kernel
+client sends `Tflush(oldtag=T)` (`client_run` on a death-interrupt). `h_flush`
+cancels the pending accept for `T` (no late Rlopen, no connection minted for the
+dead op) and replies `Rflush` — which is what frees the kernel's `awaiting_flush`
+reservation on `T` (per 9P, `oldtag` is reusable only after the Rflush). This
+also closes a **pre-existing net-2c-2 latent**: an ignored Tflush leaked the
+kernel's outstanding tag; net-3a is the first deferred op that makes the window
+wide, and it owns the fix. A Tversion session reset + a Conn teardown likewise
+cancel any pending accepts the session held.
+
+**Accept latency.** The inbound SYN arrives on the NIC (not a pollable fd), so
+only a timeout-driven `net.poll` catches it; with a pending accept the serve loop
+clamps the idle-poll delay to the floor (`IDLE_POLL_MIN_MS = 50 ms`).
+
+**Backlog-of-1.** Between an accept and the swap re-arming `N`, a second inbound
+SYN finds `N` mid-establish (no listener) → RST. A proper listen backlog (several
+listening sockets per announce) is a documented v1.x refinement.
+
+**Boot proof** (deterministic + self-contained — no inbound peer needed): the joey
+probe `clone`s A, writes `announce *!7777` (→ `status` reads `Listen`), confirms
+the `listen` file appears in the connection readdir, and confirms that opening
+`listen` on a **non-announced** connection is rejected immediately (`E_INVAL`,
+proving the gate without blocking).
+
+```
+joey: net-3a PROBE OK (announce *!7777 -> Listen; listen file + readdir; listen gated on announce)
+```
+
+**The full inbound-accept E2E is owed to net-3d.** A real call → a held Rlopen → a
+fresh connection needs a deterministic in-guest inbound path (QEMU slirp does not
+loop a guest→self connection back, and there is no host actor at boot). net-3d
+adds one — the recommended path is a netd **loopback interface** (`127.0.0.0/8`, a
+real feature every stack has), giving a deterministic in-guest accept proof
+without host-injection timing fragility; the deferred-reply + swap + Tflush
+mechanism is reasoned + audited there.
+
 ## Data structures
 
 | Type | Role |
@@ -313,7 +395,10 @@ joey: net-2c-2 PROBE OK (clone->0, connect 10.0.2.2!9, local 10.0.2.15!, frees+r
 | `NicTxToken<'a> { nic: &'a mut VirtioNetPci }` | the single `&mut nic` TX borrow |
 | `server::Conn` | one accepted 9P connection: fid table + `in_buf`/`out_buf` |
 | `server::Net` | the global connection table (`Slot[MAX_SLOTS]`) + the smoltcp `iface`/`sockets` (folded in post-DHCP) + the ephemeral-port cursor + live stats; shared `&mut` across all sessions |
-| `server::Slot { used, refs, socket, local, remote, err }` | one `/net/tcp/N/` connection: the refcount key + its reserved `SocketHandle` + the recorded endpoints / err reason |
+| `server::Slot { used, refs, socket, local, remote, err, listen_ep }` | one `/net/tcp/N/` connection: the refcount key + its reserved `SocketHandle` + the recorded endpoints / err reason + the announce endpoint (Some once listening; re-arm key) |
+| `server::PendingAccept { conn_id, tag, fid, listening_n }` | a held `listen` Rlopen awaiting an inbound call (the deferred-reply state); bounded by `MAX_PENDING_ACCEPTS = 16` |
+| `server::AcceptDone { conn_id, tag, fid, new_n, ctl_qid_path }` | a completed accept the serve loop delivers (opaque to `main.rs`, routed by `conn_id()`) |
+| `enum Disp { Reply(usize), Deferred, Fatal }` | the per-request dispatch outcome — `Deferred` holds the reply (a blocking listen) |
 
 ## Tests
 
@@ -391,9 +476,28 @@ joey: net-2c-2 PROBE OK (clone->0, connect 10.0.2.2!9, local 10.0.2.15!, frees+r
   large-msize kernel dev9p mount; /net is 9P-mode; netd has no host-test harness)
   → owed to a netd pure-protocol host-test module (net-3+). The kernel is
   byte-unchanged. (`memory/audit_net2d_closed_list.md`.)
+- **net-3a (LANDED)**: the server side — `announce` + the blocking `listen` via a
+  **deferred 9P reply** (netd holds the Rlopen until an inbound call lands; the
+  socket-swap mints the accepted connection + re-arms the listener) + the
+  **Tflush/Rflush** cancellation path (also closing the pre-existing net-2c-2
+  outstanding-tag leak). Pure userspace; the kernel is byte-unchanged; the only
+  shared-crate change is the `ninep` Tflush/Rflush codec. Boot proof: `announce
+  *!7777 → Listen` + the `listen` file + the not-announced gate (deterministic).
+  The full inbound-accept E2E is owed to net-3d (a deterministic in-guest inbound
+  path — a netd loopback interface). The focused audit over the net-3 surface is
+  net-3d.
 
 ## Known caveats / seams
 
+- **The `listen` backlog is 1** (net-3a): between an accept and the swap re-arming
+  the listener, a second inbound SYN finds the announce connection mid-establish
+  (no listener) → RST. A proper backlog (several listening sockets per announce,
+  the Plan 9 listen queue) is a v1.x refinement.
+- **The inbound-accept E2E is owed to net-3d** (net-3a): the announce + listen
+  *gate* is boot-proven deterministically, but a real call → a held Rlopen → a
+  fresh connection needs a deterministic in-guest inbound path (slirp does not loop
+  a guest→self connection back; there is no host actor at boot). net-3d adds one —
+  the recommended path is a netd loopback interface (`127.0.0.0/8`).
 - **`readdir` lands at net-2c-1**: `/net` directories now list via `Treaddir`
   (the ninep readdir codec). A `Tread` on a directory still returns `EISDIR` (the
   9P2000.L convention — directory enumeration is `Treaddir`, and the kernel dev9p

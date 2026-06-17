@@ -57,6 +57,11 @@ const MAX_FIDS: usize = 32;
 /// (ENFILE) past this. Raise as the workload demands.
 const MAX_SLOTS: usize = 16;
 
+/// Max deferred accepts in flight (one held listen Rlopen per entry). Bounds the
+/// pending-accept table (#65 resource floor); a listen open past this is rejected
+/// (ENOMEM) rather than deferred.
+const MAX_PENDING_ACCEPTS: usize = MAX_SLOTS;
+
 /// Server-negotiated msize. Bounds every frame; the per-conn buffers are sized
 /// to it. 8 KiB holds the largest reply (a stats read, an Rgetattr, or a full
 /// Treaddir page of the shallow /net tree).
@@ -127,8 +132,7 @@ const N_MASK: u64 = 0x00ff_ffff; // 24-bit connection number
 // icmp connections slot in without a qid re-encode).
 const PROTO_TCP: u64 = 0;
 
-// Per-connection file kinds (the filekind low byte). FK_LISTEN (the server
-// accept file) lands at net-2c-2 with the announce/accept path.
+// Per-connection file kinds (the filekind low byte).
 const FK_DIR: u64 = 0; //    /net/tcp/N/
 const FK_CTL: u64 = 1; //    /net/tcp/N/ctl
 const FK_DATA: u64 = 2; //   /net/tcp/N/data
@@ -136,6 +140,7 @@ const FK_LOCAL: u64 = 3; //  /net/tcp/N/local
 const FK_REMOTE: u64 = 4; // /net/tcp/N/remote
 const FK_STATUS: u64 = 5; // /net/tcp/N/status
 const FK_ERR: u64 = 6; //    /net/tcp/N/err
+const FK_LISTEN: u64 = 7; // /net/tcp/N/listen (the server accept file; net-3a)
 
 fn is_conn(path: u64) -> bool {
     path & CONN_FLAG != 0
@@ -184,11 +189,16 @@ struct Slot {
     used: bool,
     refs: u32,
     socket: Option<SocketHandle>,
-    // The endpoints recorded at `connect` time (netd-side), so `local`/`remote`
-    // report a stable tuple regardless of the live socket's later transitions.
+    // The endpoints recorded at `connect`/accept time (netd-side), so
+    // `local`/`remote` report a stable tuple regardless of the live socket's
+    // later transitions.
     local: Option<([u8; 4], u16)>,
     remote: Option<([u8; 4], u16)>,
     err: Option<&'static str>,
+    // The announce endpoint (Some once `announce` made this connection's socket
+    // listen): the listener N re-arms a fresh socket on this endpoint after each
+    // accept, so N stays ANNOUNCED for the next call (NET-DESIGN 3.4).
+    listen_ep: Option<IpListenEndpoint>,
 }
 
 impl Slot {
@@ -200,7 +210,43 @@ impl Slot {
             local: None,
             remote: None,
             err: None,
+            listen_ep: None,
         }
+    }
+}
+
+/// A deferred accept: a client's blocking `open(/net/tcp/N/listen)` whose Rlopen
+/// netd is HOLDING until an inbound call lands on listener N. The client's open()
+/// stays blocked on the outstanding 9P tag; netd replies (rebinding the fid onto
+/// the accepted connection's ctl) when `listening_n`'s socket establishes. This
+/// is the committed-blocking realization of NET-DESIGN 3.4 over the existing
+/// dev9p client (match-by-tag, no per-op deadline, death-interruptible) -- no
+/// kernel surface; 12's readiness multiplexing (poll/Loom) is the separate net-6
+/// leg.
+#[derive(Copy, Clone)]
+struct PendingAccept {
+    conn_id: i64,     // the 9P connection (Conn handle) that issued the listen
+    tag: u16,         // the held Tlopen tag to reply to
+    fid: u32,         // the fid to rebind onto the accepted connection's ctl
+    listening_n: u32, // the ANNOUNCED connection whose socket accepts the call
+}
+
+/// A completed accept ready to deliver: the serve loop rebinds `fid` onto the
+/// new connection's ctl and sends the held Rlopen on `conn_id`. Opaque to the
+/// serve loop (main.rs) -- it only routes the token by `conn_id()`.
+#[derive(Copy, Clone)]
+pub struct AcceptDone {
+    conn_id: i64,
+    tag: u16,
+    fid: u32,
+    new_n: u32,
+    ctl_qid_path: u64,
+}
+
+impl AcceptDone {
+    /// The 9P connection that issued the (now-completed) blocking listen.
+    pub fn conn_id(&self) -> i64 {
+        self.conn_id
     }
 }
 
@@ -212,6 +258,8 @@ pub struct Net {
     slots: [Slot; MAX_SLOTS],
     tcp_active: u32, // currently-live TCP connections (the `active` stat)
     tcp_opened: u32, // total TCP connections ever minted
+    // Deferred accepts: held listen Rlopens awaiting an inbound call (net-3a).
+    pending: Vec<PendingAccept>,
 }
 
 impl Net {
@@ -227,6 +275,7 @@ impl Net {
             slots: [Slot::empty(); MAX_SLOTS],
             tcp_active: 0,
             tcp_opened: 0,
+            pending: Vec::new(),
         }
     }
 
@@ -273,6 +322,7 @@ impl Net {
             local: None,
             remote: None,
             err: None,
+            listen_ep: None,
         };
         self.tcp_active += 1;
         self.tcp_opened += 1;
@@ -378,6 +428,168 @@ impl Net {
         if let Some(h) = self.slot_socket(n) {
             self.sockets.get_mut::<tcp::Socket>(h).close();
         }
+    }
+
+    /// The `announce` ctl verb (NET-DESIGN 3.3): put the connection's socket into
+    /// LISTEN on `ep`. The connection becomes ANNOUNCED, so `open(listen)` blocks
+    /// for an inbound call. The endpoint is recorded so the listener re-arms a
+    /// fresh socket after each accept (it stays ANNOUNCED for the next call).
+    fn ctl_announce(&mut self, n: u32, ep: IpListenEndpoint) -> Result<(), ()> {
+        let h = match self.slot_socket(n) {
+            Some(h) => h,
+            None => return Err(()),
+        };
+        match self.sockets.get_mut::<tcp::Socket>(h).listen(ep) {
+            Ok(()) => {
+                self.slots[n as usize].listen_ep = Some(ep);
+                self.slots[n as usize].err = None;
+                Ok(())
+            }
+            Err(_) => {
+                // Already open/connected, or port 0: cannot listen.
+                self.slots[n as usize].err = Some("announce rejected");
+                Err(())
+            }
+        }
+    }
+
+    fn slot_listen_ep(&self, n: u32) -> Option<IpListenEndpoint> {
+        if self.slot_live(n) {
+            self.slots[n as usize].listen_ep
+        } else {
+            None
+        }
+    }
+
+    pub fn has_pending_accepts(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    /// Register a deferred accept: the blocking `open(listen)` whose Rlopen is
+    /// held until a call lands on `listening_n`. False if the table is full (the
+    /// caller rejects the open with ENOMEM rather than deferring unboundedly).
+    fn register_accept(&mut self, conn_id: i64, tag: u16, fid: u32, listening_n: u32) -> bool {
+        if self.pending.len() >= MAX_PENDING_ACCEPTS {
+            return false;
+        }
+        self.pending.push(PendingAccept {
+            conn_id,
+            tag,
+            fid,
+            listening_n,
+        });
+        true
+    }
+
+    /// Cancel a deferred accept abandoned by a Tflush (the client died on its
+    /// blocked open): no late Rlopen, no connection minted for the dead op. The
+    /// fid stays bound to /net/tcp/N/listen (refs N) until the session clunks it.
+    fn cancel_accept_tag(&mut self, conn_id: i64, oldtag: u16) {
+        self.pending
+            .retain(|p| !(p.conn_id == conn_id && p.tag == oldtag));
+    }
+
+    /// Drop every deferred accept a closing connection held (its listen fids go
+    /// away with it): called from Conn teardown + the Tversion session reset.
+    fn cancel_accepts_for_conn(&mut self, conn_id: i64) {
+        self.pending.retain(|p| p.conn_id != conn_id);
+    }
+
+    /// A call landed on listener N: mint a NEW connection M that takes N's now-
+    /// established socket, and re-arm N with a fresh listening socket on its
+    /// announced endpoint (N stays ANNOUNCED for the next call). M is born
+    /// refs==0; the caller refs it immediately by rebinding the listen fid onto
+    /// M's ctl. None if the slot table is full (the call stays buffered in N's
+    /// socket) or the re-arm fails (N keeps the call; the accept retries).
+    fn accept_swap(&mut self, n: u32) -> Option<u32> {
+        let m = self.slots.iter().position(|s| !s.used)?;
+        let established = self.slots[n as usize].socket?;
+        let ep = self.slots[n as usize].listen_ep?;
+        let rx = tcp::SocketBuffer::new(alloc::vec![0u8; TCP_RX_BUF]);
+        let tx = tcp::SocketBuffer::new(alloc::vec![0u8; TCP_TX_BUF]);
+        let fresh = self.sockets.add(tcp::Socket::new(rx, tx));
+        if self.sockets.get_mut::<tcp::Socket>(fresh).listen(ep).is_err() {
+            // Re-arm failed: drop the fresh socket, leave N holding the call so
+            // the accept retries next poll (no socket leaked; N still active).
+            let _ = self.sockets.remove(fresh);
+            return None;
+        }
+        let le = self.sockets.get::<tcp::Socket>(established).local_endpoint();
+        let re = self.sockets.get::<tcp::Socket>(established).remote_endpoint();
+        // N takes the fresh listener; M takes the established socket.
+        self.slots[n as usize].socket = Some(fresh);
+        self.slots[m] = Slot {
+            used: true,
+            refs: 0,
+            socket: Some(established),
+            local: le.map(endpoint_octets),
+            remote: re.map(endpoint_octets),
+            err: None,
+            listen_ep: None,
+        };
+        self.tcp_active += 1;
+        self.tcp_opened += 1;
+        Some(m as u32)
+    }
+
+    /// Scan the deferred accepts; for each whose listener has established an
+    /// inbound call, mint the accepted connection (accept_swap) and emit an
+    /// AcceptDone for the serve loop to deliver. Removes the completed entries.
+    pub fn poll_accepts(&mut self) -> Vec<AcceptDone> {
+        let mut done: Vec<AcceptDone> = Vec::new();
+        let mut i = 0;
+        while i < self.pending.len() {
+            let pa = self.pending[i];
+            let ready = match self.slot_socket(pa.listening_n) {
+                Some(h) => accept_ready(self.sockets.get::<tcp::Socket>(h)),
+                None => {
+                    // The listener vanished (should not happen: the listen fid
+                    // refs it). Drop defensively so it cannot spin.
+                    self.pending.remove(i);
+                    continue;
+                }
+            };
+            if !ready {
+                i += 1;
+                continue;
+            }
+            match self.accept_swap(pa.listening_n) {
+                Some(m) => {
+                    done.push(AcceptDone {
+                        conn_id: pa.conn_id,
+                        tag: pa.tag,
+                        fid: pa.fid,
+                        new_n: m,
+                        ctl_qid_path: make_conn(PROTO_TCP, m, FK_CTL),
+                    });
+                    self.pending.remove(i);
+                    // do not advance i: remove() shifted the next entry into i.
+                }
+                None => i += 1, // slot table full: leave pending, retry next poll
+            }
+        }
+        done
+    }
+
+    /// Free a just-minted accepted connection whose delivery could not complete
+    /// (its 9P connection vanished, or the listen fid was clunked mid-accept).
+    /// Only frees a slot still at refs==0 (an unowned mint) -- a slot the listen
+    /// fid already rebound onto is owned and must not be freed here.
+    fn free_orphan_mint(&mut self, n: u32) {
+        let i = n as usize;
+        if i < MAX_SLOTS && self.slots[i].used && self.slots[i].refs == 0 {
+            if let Some(h) = self.slots[i].socket.take() {
+                let _ = self.sockets.remove(h);
+            }
+            self.slots[i] = Slot::empty();
+            self.tcp_active = self.tcp_active.saturating_sub(1);
+        }
+    }
+
+    /// Discard a completed accept the serve loop could not deliver (its 9P
+    /// connection had already closed): free the unowned minted connection.
+    pub fn discard_accept(&mut self, d: AcceptDone) {
+        self.free_orphan_mint(d.new_n);
     }
 
     /// Write `data` to the connection's send stream. Returns bytes accepted (0
@@ -497,6 +709,7 @@ impl Net {
                 b"remote" => FK_REMOTE,
                 b"status" => FK_STATUS,
                 b"err" => FK_ERR,
+                b"listen" => FK_LISTEN,
                 _ => return None,
             };
             return Some(make_conn(proto, n, fk));
@@ -536,6 +749,7 @@ impl Net {
             let (proto, n) = (conn_proto(dir), conn_n(dir));
             push(b"ctl", make_conn(proto, n, FK_CTL), false);
             push(b"data", make_conn(proto, n, FK_DATA), false);
+            push(b"listen", make_conn(proto, n, FK_LISTEN), false);
             push(b"local", make_conn(proto, n, FK_LOCAL), false);
             push(b"remote", make_conn(proto, n, FK_REMOTE), false);
             push(b"status", make_conn(proto, n, FK_STATUS), false);
@@ -724,6 +938,35 @@ fn ephemeral_after(p: u16) -> u16 {
     }
 }
 
+/// "An inbound call has landed and the handshake completed": the listening
+/// socket left LISTEN for an active connection past the SYN exchange (so its
+/// local/remote endpoints are set and `data` is immediately usable). SynSent/
+/// SynReceived are excluded; is_active() already excludes Closed/TimeWait/Listen.
+fn accept_ready(s: &tcp::Socket) -> bool {
+    s.is_active() && !matches!(s.state(), tcp::State::SynSent | tcp::State::SynReceived)
+}
+
+/// Parse a Plan 9 announce string `addr!port`, where `addr` is `*` (any local
+/// address) or a dotted IPv4, into a smoltcp listen endpoint. None on any
+/// malformation or a zero port (a listener needs a concrete port).
+fn parse_announce(arg: &[u8]) -> Option<IpListenEndpoint> {
+    let bang = arg.iter().position(|&b| b == b'!')?;
+    let addr_s = &arg[..bang];
+    let rest = &arg[bang + 1..];
+    let pend = rest.iter().position(|&b| b == b'!').unwrap_or(rest.len());
+    let port = parse_u16(&rest[..pend])?;
+    if port == 0 {
+        return None;
+    }
+    let addr = if addr_s == b"*" {
+        None
+    } else {
+        let ip = parse_ipv4(addr_s)?;
+        Some(IpAddress::v4(ip[0], ip[1], ip[2], ip[3]))
+    };
+    Some(IpListenEndpoint { addr, port })
+}
+
 // A small fixed-cap content buffer: file bodies are short (a number, a few-line
 // stats block, a status word), so reads never allocate.
 struct Content {
@@ -821,6 +1064,17 @@ struct Fid {
     opened: bool,
 }
 
+/// The outcome of dispatching one request frame.
+enum Disp {
+    /// A complete reply of `len` bytes is in out_buf; send it.
+    Reply(usize),
+    /// The reply is HELD (a blocking listen open): emit nothing now; the Rlopen
+    /// is sent later by complete_accept when the inbound call lands.
+    Deferred,
+    /// Unrecoverable build failure: tear the connection down.
+    Fatal,
+}
+
 /// One accepted 9P connection. Owns its fid table + framing buffers. The fid
 /// lifecycle is refcounted against the shared `Net`: binding a fid into a
 /// connection's subtree refs the slot, clunking/rebinding-away unrefs it.
@@ -831,6 +1085,9 @@ pub struct Conn {
     fids: [Option<Fid>; MAX_FIDS],
     in_buf: Vec<u8>,
     out_buf: Vec<u8>,
+    // Set by a handler that holds its reply (a blocking listen open); read +
+    // cleared by dispatch to return Disp::Deferred.
+    defer: bool,
 }
 
 impl Conn {
@@ -842,6 +1099,7 @@ impl Conn {
             fids: [None; MAX_FIDS],
             in_buf: Vec::new(),
             out_buf: Vec::new(),
+            defer: false,
         }
     }
 
@@ -853,6 +1111,9 @@ impl Conn {
     /// (the serve() loop calls this before removing a dead Conn), so a session
     /// teardown frees any connections only this session held open.
     pub fn teardown(&mut self, net: &mut Net) {
+        // Drop any deferred accepts this session held (their held Rlopens die
+        // with the connection) before unref'ing its fids.
+        net.cancel_accepts_for_conn(self.handle);
         for slot in self.fids.iter_mut() {
             if let Some(f) = slot.take() {
                 if let Some(n) = path_conn_n(f.path) {
@@ -941,25 +1202,20 @@ impl Conn {
                 return true; // incomplete frame; wait for more
             }
             let frame: Vec<u8> = self.in_buf[..size].to_vec();
-            let rlen = self.dispatch(net, &frame, hdr);
-            if rlen == 0 {
-                return false; // unrecoverable build failure
-            }
-            let mut sent = 0usize;
-            while sent < rlen {
-                let w = unsafe {
-                    libthyla_rs::t_write(self.handle, self.out_buf.as_ptr().add(sent), rlen - sent)
-                };
-                if w <= 0 {
-                    return false;
+            match self.dispatch(net, &frame, hdr) {
+                Disp::Fatal => return false, // unrecoverable build failure
+                Disp::Deferred => {}         // reply held (a blocking listen open)
+                Disp::Reply(rlen) => {
+                    if !self.send_all(rlen) {
+                        return false;
+                    }
                 }
-                sent += w as usize;
             }
             self.in_buf.drain(..size);
         }
     }
 
-    fn dispatch(&mut self, net: &mut Net, tmsg: &[u8], hdr: p9::Header) -> usize {
+    fn dispatch(&mut self, net: &mut Net, tmsg: &[u8], hdr: p9::Header) -> Disp {
         let tag = hdr.tag;
         self.out_buf.clear();
         self.out_buf.resize(SRV_MSIZE_USIZE, 0);
@@ -973,16 +1229,75 @@ impl Conn {
             p9::P9_TREADDIR => self.h_readdir(net, tmsg, tag),
             p9::P9_TGETATTR => self.h_getattr(net, tmsg, tag),
             p9::P9_TCLUNK => self.h_clunk(net, tmsg, tag),
+            p9::P9_TFLUSH => self.h_flush(net, tmsg, tag),
             // Tauth/Tsetattr/... are unused on the /net tree (read-only metadata).
             _ => self.err(tag, p9::E_NOSYS),
         };
-        r.unwrap_or_else(|_| {
+        // A blocking listen open held its reply (NET-DESIGN 3.4): emit nothing
+        // now; the Rlopen is sent later when the inbound call lands.
+        if self.defer {
+            self.defer = false;
+            return Disp::Deferred;
+        }
+        let len = r.unwrap_or_else(|_| {
             // A build/parse error mid-reply: re-clear (a partial build may have
             // written into out_buf) and emit Rlerror(EPROTO).
             self.out_buf.clear();
             self.out_buf.resize(SRV_MSIZE_USIZE, 0);
             p9::build_rlerror(&mut self.out_buf, tag, p9::E_PROTO).unwrap_or(0)
-        })
+        });
+        if len == 0 {
+            Disp::Fatal
+        } else {
+            Disp::Reply(len)
+        }
+    }
+
+    /// Write `rlen` bytes from out_buf to the 9P connection. False on a write
+    /// failure (the session is dead -> tear the connection down). Used by both
+    /// the inline reply path and the deferred-accept Rlopen.
+    fn send_all(&mut self, rlen: usize) -> bool {
+        let mut sent = 0usize;
+        while sent < rlen {
+            let w = unsafe {
+                libthyla_rs::t_write(self.handle, self.out_buf.as_ptr().add(sent), rlen - sent)
+            };
+            if w <= 0 {
+                return false;
+            }
+            sent += w as usize;
+        }
+        true
+    }
+
+    /// Deliver a completed accept (called from the serve loop): rebind the
+    /// blocked listen fid onto the accepted connection's ctl -- the refcount
+    /// moves from the listener to the new connection -- and send the held
+    /// Rlopen, unblocking the client's open(). False on a write failure (tear
+    /// the connection down).
+    pub fn complete_accept(&mut self, net: &mut Net, d: AcceptDone) -> bool {
+        // The listen fid must still exist: it is bound to /net/tcp/N/listen and
+        // refs the listener, so a clunk cannot remove it while the accept is
+        // pending, and a Tversion reset would have cancelled the pending entry.
+        // If it somehow vanished, the mint is unowned -> free it.
+        if self.fid_find(d.fid).is_none() {
+            net.free_orphan_mint(d.new_n);
+            return true;
+        }
+        // Rebind onto M's ctl (refs M, unrefs the listener). The fid exists, so
+        // fid_set takes the existing-slot path and cannot fail.
+        let _ = self.fid_set(net, d.fid, d.ctl_qid_path, true);
+        let q = p9::Qid {
+            kind: p9::P9_QTFILE,
+            version: 0,
+            path: d.ctl_qid_path,
+        };
+        self.out_buf.clear();
+        self.out_buf.resize(SRV_MSIZE_USIZE, 0);
+        match p9::build_rlopen(&mut self.out_buf, d.tag, &q, 0) {
+            Ok(rlen) => self.send_all(rlen),
+            Err(()) => false,
+        }
     }
 
     fn err(&mut self, tag: u16, code: u32) -> Result<usize, ()> {
@@ -1022,6 +1337,9 @@ impl Conn {
     }
 
     fn drop_all_fids(&mut self, net: &mut Net) {
+        // A Tversion resets all session state -- abandon any deferred accepts
+        // this connection held (their held Rlopens are dropped) too.
+        net.cancel_accepts_for_conn(self.handle);
         for slot in self.fids.iter_mut() {
             if let Some(f) = slot.take() {
                 if let Some(n) = path_conn_n(f.path) {
@@ -1128,7 +1446,25 @@ impl Conn {
         if f.opened {
             return self.err(tag, p9::E_PROTO);
         }
-        let _ = a.flags; // open is non-blocking; ctl/data drive the connection
+        let _ = a.flags; // open is non-blocking EXCEPT listen (a deferred reply)
+
+        // The server accept file: opening it is a BLOCKING accept. Register a
+        // deferred 9P reply (NET-DESIGN 3.4) -- hold the Rlopen until an inbound
+        // call lands on this connection's listening socket. The client's open()
+        // stays blocked on the outstanding tag; complete_accept rebinds this fid
+        // onto the accepted connection's ctl and sends the held Rlopen. The
+        // connection must be ANNOUNCED (its socket put into LISTEN by `announce`).
+        if is_conn(f.path) && conn_filekind(f.path) == FK_LISTEN {
+            let n = conn_n(f.path);
+            if net.slot_listen_ep(n).is_none() {
+                return self.err(tag, p9::E_INVAL); // not announced -> cannot listen
+            }
+            if !net.register_accept(self.handle, tag, a.fid, n) {
+                return self.err(tag, p9::E_NOMEM); // too many deferred accepts
+            }
+            self.defer = true; // dispatch emits no reply for this frame
+            return Ok(0); // the 0 is ignored (defer is set)
+        }
 
         // The Plan 9 clone idiom: opening `clone` MINTS a connection and rebinds
         // THIS fid onto the new connection's `ctl` (the kernel dev9p client
@@ -1310,6 +1646,21 @@ impl Conn {
         p9::build_rclunk(&mut self.out_buf, tag)
     }
 
+    /// Tflush: the kernel client abandoned an in-flight request (a death-
+    /// interrupt on a thread blocked in a `listen` open). Cancel any deferred
+    /// accept held under `oldtag` -- no late Rlopen, no connection minted for
+    /// the dead op -- then Rflush. Per 9P the client reuses `oldtag` only after
+    /// this Rflush, so the held listen tag is reclaimed cleanly (no tag leak in
+    /// the kernel's outstanding-table, the latent net-2c-2 closes here).
+    fn h_flush(&mut self, net: &mut Net, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
+        let a = match p9::parse_tflush(tmsg) {
+            Ok(a) => a,
+            Err(_) => return self.err(tag, p9::E_PROTO),
+        };
+        net.cancel_accept_tag(self.handle, a.oldtag);
+        p9::build_rflush(&mut self.out_buf, tag)
+    }
+
     fn h_write(&mut self, net: &mut Net, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
         let a = match p9::parse_twrite(tmsg) {
             Ok(a) => a,
@@ -1339,9 +1690,9 @@ impl Conn {
     }
 
     /// Parse + apply one `ctl` command (section 3.3). On success the whole write
-    /// is consumed (Rwrite count). connect/hangup are live at net-2c-2;
-    /// announce/bind/keepalive/ttl/tos are the server-side + options surface
-    /// (net-3+), rejected honestly (EOPNOTSUPP) rather than silently accepted.
+    /// is consumed (Rwrite count). connect/hangup (net-2c-2) + announce (net-3a)
+    /// are live; bind/keepalive/ttl/tos are the options surface (net-4+), rejected
+    /// honestly (EOPNOTSUPP) rather than silently accepted.
     fn ctl_write(
         &mut self,
         net: &mut Net,
@@ -1372,6 +1723,20 @@ impl Conn {
             b"hangup" => {
                 net.ctl_hangup(n);
                 p9::build_rwrite(&mut self.out_buf, tag, count)
+            }
+            b"announce" => {
+                let arg = match it.next() {
+                    Some(a) => a,
+                    None => return self.err(tag, p9::E_INVAL),
+                };
+                let ep = match parse_announce(arg) {
+                    Some(e) => e,
+                    None => return self.err(tag, p9::E_INVAL),
+                };
+                match net.ctl_announce(n, ep) {
+                    Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, count),
+                    Err(()) => self.err(tag, p9::E_INVAL),
+                }
             }
             _ => self.err(tag, p9::E_OPNOTSUPP),
         }

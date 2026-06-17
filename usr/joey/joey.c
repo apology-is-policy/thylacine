@@ -3197,6 +3197,77 @@ int main(void) {
                         t_putstr("joey: net-2c-2 PROBE OK (clone->0, connect "
                                  "10.0.2.2!9, local 10.0.2.15!, frees+reuses 0)\n");
                     }
+
+                    // === net-3a: the server side (announce + listen gate) ===
+                    // Deterministic + self-contained (no inbound peer needed): the
+                    // announce verb puts a connection's socket into LISTEN, status
+                    // reflects it, the `listen` file resolves + lists, and opening
+                    // listen on a non-announced connection is rejected immediately
+                    // (proving the gate without blocking). The full inbound-accept
+                    // round-trip (a real call -> a held Rlopen -> a fresh conn) is
+                    // owed to net-3d, which adds a deterministic in-guest inbound
+                    // path; the deferred-reply + socket-swap mechanism is reasoned
+                    // + audited there.
+                    {
+                        // (j) clone A -> 0 (the net-2c-2 re-clone freed slot 0).
+                        long la = t_open(T_WALK_OPEN_FROM_ROOT, "/net/tcp/clone",
+                                         14, T_ORDWR);
+                        unsigned char ab[16];
+                        long an = (la >= 0) ? t_read(la, ab, sizeof(ab) - 1) : -1;
+                        if (la < 0 || an != 1 || ab[0] != '0') {
+                            t_putstr("joey: net-3a PROBE clone A -> 0 FAILED\n");
+                            return 1;
+                        }
+                        // (k) announce *!7777 -> the socket enters LISTEN.
+                        static const char ann[] = "announce *!7777";
+                        if (t_write(la, ann, sizeof(ann) - 1) != (long)(sizeof(ann) - 1)) {
+                            t_putstr("joey: net-3a PROBE announce write FAILED\n");
+                            return 1;
+                        }
+                        // (l) status reads "Listen" -- the live socket is listening.
+                        unsigned char stb[32];
+                        long staf = t_open(T_WALK_OPEN_FROM_ROOT, "/net/tcp/0/status",
+                                           17, T_OREAD);
+                        long stan = (staf >= 0) ? t_read(staf, stb, sizeof(stb)) : -1;
+                        if (staf >= 0) (void)t_close(staf);
+                        if (stan <= 0 || !mem_contains(stb, (size_t)stan, "Listen", 6)) {
+                            t_putstr("joey: net-3a PROBE announce -> Listen FAILED\n");
+                            return 1;
+                        }
+                        // (m) the `listen` file appears in the connection readdir.
+                        unsigned char ddb[256];
+                        long dd = t_open(T_WALK_OPEN_FROM_ROOT, "/net/tcp/0", 10, T_OREAD);
+                        long ddn = (dd >= 0) ? t_readdir(dd, ddb, sizeof(ddb)) : -1;
+                        if (dd >= 0) (void)t_close(dd);
+                        if (ddn <= 0 || !mem_contains(ddb, (size_t)ddn, "listen", 6)) {
+                            t_putstr("joey: net-3a PROBE listen not in conn readdir FAILED\n");
+                            return 1;
+                        }
+                        // (n) clone B -> 1; opening its listen WITHOUT announcing is
+                        //     rejected (E_INVAL) and returns immediately (no hang),
+                        //     proving the gate + that the listen file resolves.
+                        long lb = t_open(T_WALK_OPEN_FROM_ROOT, "/net/tcp/clone",
+                                         14, T_ORDWR);
+                        unsigned char bb[16];
+                        long bn = (lb >= 0) ? t_read(lb, bb, sizeof(bb) - 1) : -1;
+                        if (lb < 0 || bn != 1 || bb[0] != '1') {
+                            t_putstr("joey: net-3a PROBE clone B -> 1 FAILED\n");
+                            return 1;
+                        }
+                        long lj = t_open(T_WALK_OPEN_FROM_ROOT, "/net/tcp/1/listen",
+                                         17, T_OREAD);
+                        if (lj >= 0) {
+                            (void)t_close(lj);
+                            t_putstr("joey: net-3a PROBE listen-on-unannounced should fail\n");
+                            return 1;
+                        }
+                        // Free slots 1 + 0 (the announce socket is removed on the
+                        // last clunk -- the only free path).
+                        (void)t_close(lb);
+                        (void)t_close(la);
+                        t_putstr("joey: net-3a PROBE OK (announce *!7777 -> Listen; "
+                                 "listen file + readdir; listen gated on announce)\n");
+                    }
 #endif
                 } else {
                     t_putstr("joey: net-2c-1 /srv/net absent -- /net not mounted (netd down?)\n");

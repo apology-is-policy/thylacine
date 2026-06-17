@@ -70,6 +70,8 @@ pub const P9_RGETATTR: u8 = 25;
 pub const P9_TREADDIR: u8 = 40;
 pub const P9_RREADDIR: u8 = 41;
 pub const P9_RLERROR: u8  = 7;
+pub const P9_TFLUSH: u8   = 108;
+pub const P9_RFLUSH: u8   = 109;
 
 // QID type bits (the v1.0 surface -- corvus's namespace is one dir +
 // one file, no symlinks/temp).
@@ -354,6 +356,20 @@ pub fn parse_tclunk(buf: &[u8]) -> Result<TclunkArgs, ()> {
     Ok(TclunkArgs { fid })
 }
 
+#[derive(Copy, Clone)]
+pub struct TflushArgs {
+    pub oldtag: u16,
+}
+
+/// Tflush body: `[oldtag: u16]` -- the tag of the in-flight request the client
+/// abandons (sent by the kernel 9P client on a death-interrupt). A server must
+/// stop processing `oldtag` and reply Rflush; per 9P the client reuses `oldtag`
+/// only after the Rflush (I-10), so the Rflush is what frees the abandoned tag.
+pub fn parse_tflush(buf: &[u8]) -> Result<TflushArgs, ()> {
+    let (oldtag, _) = unpack_u16(buf, P9_HDR_LEN)?;
+    Ok(TflushArgs { oldtag })
+}
+
 /// Treaddir body: `[fid: u32][offset: u64][count: u32]`. `offset` is the
 /// opaque resume cookie from a prior Rreaddir entry (0 = from the start);
 /// `count` bounds the dirent bytes the server may return.
@@ -462,6 +478,14 @@ pub fn build_rwrite(out: &mut [u8], tag: u16, count: u32) -> Result<usize, ()> {
 
 pub fn build_rclunk(out: &mut [u8], tag: u16) -> Result<usize, ()> {
     let p = build_header(out, P9_RCLUNK, tag)?;
+    patch_header_size(out, p)?;
+    Ok(p)
+}
+
+/// Rflush has no body: it acknowledges that the Tflush `oldtag` is abandoned, so
+/// the client may reuse it. Header-only, like Rclunk.
+pub fn build_rflush(out: &mut [u8], tag: u16) -> Result<usize, ()> {
+    let p = build_header(out, P9_RFLUSH, tag)?;
     patch_header_size(out, p)?;
     Ok(p)
 }
