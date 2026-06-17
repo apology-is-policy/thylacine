@@ -537,12 +537,13 @@ first live `impl Driver` (the netdev retrofit at 5d is the first *useful* one).
 
 ## Status / known caveats
 
-- **The PCI axis is the wired-INTx path (6b-2).** `PciNeed::Node` + `PciSource`
-  resolve a virtio-PCI function to its bdf + its INTx-routed INTID (`node:interrupts`
-  over the devpci-reported intid). The warden-side `PciSource` enumeration + the
-  `netdev-pci-driver` bind (the live I-34-on-PCI proof) are step **6b-3**; this
-  step (6b-2) lands the libdriver mechanism + the host tests. MSI is still carried,
-  not resolved (next bullet).
+- **The PCI axis is the wired-INTx path (6b-2 / 6b-3).** `PciNeed::Node` +
+  `PciSource` resolve a virtio-PCI function to its bdf + its INTx-routed INTID
+  (`node:interrupts` over the devpci-reported intid). The warden now enumerates
+  `PciSource` in-process and binds `netdev-pci-driver` to `virtio-pci:1` narrowed
+  to that bdf (step **6b-3**, the live I-34-on-PCI proof -- see
+  [119-warden.md](119-warden.md)); this crate (6b-2) lands the mechanism + the host
+  tests. MSI is still carried, not resolved (next bullet).
 - **MSI is carried, not resolved.** `IrqNeed::Msi(n)` is parsed + round-tripped
   but yields no INTIDs from a DTB node; MSI vectors are the PCIe source's job on
   real hardware (MENAGERIE §12 -- the brcmstb host-bridge owns MSI). v1.0 on QEMU

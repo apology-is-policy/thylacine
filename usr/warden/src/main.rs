@@ -45,8 +45,8 @@ use libthyla_rs::T_CAP_HW_CREATE;
 use libdriver::driver::to_allowance;
 use libdriver::{
     best_match, feed_ready_line, next_step, reconcile_reported_node, resolve, BoundResources,
-    DeviceId, DeviceNode, DiscoverySource, Disposition, DtbSource, Manifest, ReadyLine, RunOutcome,
-    SuperviseStep, READY_LINE_MAX, RESTART_LIMIT,
+    DeviceId, DeviceNode, DiscoverySource, Disposition, DtbSource, Manifest, PciSource, ReadyLine,
+    RunOutcome, SuperviseStep, READY_LINE_MAX, RESTART_LIMIT,
 };
 
 #[global_allocator]
@@ -69,8 +69,11 @@ macro_rules! say {
 /// through the virtio-mmio bus source's typed identity; the `virtio:16` (GPU id,
 /// undriven) -> `crash-probe` bind (5e-2) exercises bounded restart supervision
 /// -- a driver that always fails `probe`, restarted with back-off up to the bound
-/// then given up on (a SOFT per-device failure that does not fail the boot).
-/// v1.x reads `/lib/driver/*.manifest`.
+/// then given up on (a SOFT per-device failure that does not fail the boot); the
+/// `virtio-pci:1` -> `netdev-pci-driver` bind (6b-3) is the live I-34-on-PCI proof
+/// -- the same NIC over the PCI transport, narrowed to its (bus,dev,fn) + INTID +
+/// DMA pool (no MMIO axis: a PCI function's registers are in BARs, mapped off the
+/// claimed KObj_PCI). v1.x reads `/lib/driver/*.manifest`.
 const BUILTIN_MANIFESTS: &[&str] = &[
     r#"
 driver "menagerie-probe" {
@@ -108,6 +111,19 @@ driver "crash-probe" {
         dma  = "pool: 64 KiB"
     }
     serves  = "/dev/gpu/%instance"
+    restart = on-crash
+}
+"#,
+    r#"
+driver "netdev-pci-driver" {
+    abi   = 1
+    binds = ["virtio-pci:1"]
+    needs {
+        pci = "node"
+        irq = "node:interrupts"
+        dma = "pool: 64 KiB"
+    }
+    serves  = "/dev/net/%instance"
     restart = on-crash
 }
 "#,
@@ -171,6 +187,26 @@ pub extern "C" fn rs_main() -> i64 {
             None => say!("warden: virtio-mmio slots present but no reg window; skipping source"),
         }
     }
+
+    // PCI fabric. The kernel mediates PCIe topology at /hw/pci (devpci, 6b-1): it
+    // boot-enumerates the functions and re-publishes each as a read-only <bdf>/ctl
+    // node -- no raw ECAM and no config-space write reaches userspace (the pci-3
+    // I-5 property). PciSource reads that mediated view IN-PROCESS (the DtbSource
+    // analog), NOT via a spawned source Proc, and -- crucially -- with NO
+    // reconcile step: the kernel enumeration IS the trusted view, so a reported
+    // (bus,dev,fn) + INTID is sound by construction. There is no non-TCB reporter
+    // to vet here, unlike the virtio-mmio bus source (whose DeviceID-poke runs in
+    // a sandboxed Proc and whose resources the warden therefore rebuilds from its
+    // own trusted DTB view). The warden binds these typed virtio-pci:<id> nodes by
+    // identity -- the conferred PCI allowance axis (the function's bdf) is what the
+    // kernel SYS_PCI_CLAIM gate then enforces (I-34).
+    let pci_nodes = PciSource::new().enumerate();
+    say!("warden: /hw/pci discovered {} PCI function(s)", pci_nodes.len());
+    for n in &pci_nodes {
+        let id = n.ids.first().map(|i| i.as_string()).unwrap_or_default();
+        say!("warden: discovered {} ({})", id, n.label);
+    }
+    discovered.extend(pci_nodes);
 
     // A per-manifest instance counter so each bound device of a driver gets a
     // distinct %instance in its served path.
@@ -444,7 +480,7 @@ fn await_readiness(child: &mut Child) -> Readiness {
 /// Returns the device's terminal disposition for the warden's tally.
 fn supervise(m: &Manifest, grant: &BoundResources, node_name: &str) -> Disposition {
     say!(
-        "warden: bind {} ({}) -> {} inst={} [mmio={} irq={} dma={:#x}] restart={:?}",
+        "warden: bind {} ({}) -> {} inst={} [mmio={} irq={} dma={:#x} pci={:?}] restart={:?}",
         grant.compatible,
         node_name,
         m.name,
@@ -452,6 +488,7 @@ fn supervise(m: &Manifest, grant: &BoundResources, node_name: &str) -> Dispositi
         grant.mmio.len(),
         grant.irq.len(),
         grant.dma_max,
+        grant.pci,
         m.restart
     );
 

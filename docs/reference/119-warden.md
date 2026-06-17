@@ -192,7 +192,28 @@ source reports the 6 populated QEMU-virt slots (`virtio:1` net, `virtio:2` blk x
 node, and -- because the bank is released -- stratumd still claims its virtio-blk
 device post-pivot.
 
-### The bind database (5c + 5d-3)
+### The PCI fabric source (6b-3)
+
+PCIe is the second self-enumerating bus, but its source is **structurally
+different** from the virtio-mmio one: the kernel mediates PCIe topology at
+`/hw/pci` ([devpci](120-devpci.md), 6b-1). The kernel boot-enumerates the
+functions and re-publishes each as a read-only `<bus.dev.fn>/ctl` node -- no raw
+ECAM, and no config-space write, ever reaches userspace (the pci-3 I-5 property).
+So there is **no device register for an enumerator to poke**: the privileged scan
+already happened, in the kernel, and `/hw/pci` is its mediated result.
+
+The warden therefore reads `/hw/pci` with `PciSource` **in-process** -- it is the
+`DtbSource` analog, not the virtio-mmio-source analog: no spawned source Proc, and
+crucially **no `reconcile_reported_node` step**. The virtio-mmio source is
+*non-TCB* (it pokes `DeviceID` registers in a sandbox), so the warden rebuilds its
+reported resources from its own trusted DTB view; the PCI source reads a view the
+**kernel** built, which is trusted by construction, so a reported `(bus,dev,fn)` +
+INTID is taken directly. The warden binds the typed `virtio-pci:<id>` nodes by
+identity, exactly as it binds the `virtio:<id>` MMIO children -- and the conferred
+PCI allowance axis (the function's bdf) is what the kernel's `SYS_PCI_CLAIM` gate
+then enforces (I-34, the 6a kernel half).
+
+### The bind database (5c + 5d-3 + 6b-3)
 
 Two manifests: the pl061 GPIO (a single-instance, undriven, unreserved QEMU-virt
 device) -> `menagerie-probe`, proving the I-34 grant on a trivial device; and the
@@ -214,17 +235,38 @@ driver "netdev-driver" {
     serves  = "/dev/net/%instance"
     restart = on-crash
 }
+driver "netdev-pci-driver" {
+    abi   = 1
+    binds = ["virtio-pci:1"]
+    needs { pci = "node"  irq = "node:interrupts"  dma = "pool: 64 KiB" }
+    serves  = "/dev/net/%instance"
+    restart = on-crash
+}
 ```
 
-At boot the warden binds both (`2 bound, 2 up`): pl061 -> `menagerie-probe`
-(grant + allowance enforced); `virtio:1` -> `netdev-driver`, which maps the
-granted slot via `VirtioNet::open_slot` and runs the 24-ARP net-1 proof. A
-virtio-mmio slot's `reg` is **sub-page** (0x200), so `libdriver::to_allowance`
-page-rounds the MMIO grant out to the slot's 4 KiB page (MMIO is mapped
-page-granular -- a sub-page allowance is unmappable); the descriptor keeps the
-exact sub-page window so the driver still learns its precise slot address. The
-page-rounded grant spans the shared net/blk page -- the documented #140 / net-2
-co-residency over-grant, released when the one-shot driver exits.
+At boot the warden binds them (`menagerie-probe` + `netdev-driver` +
+`netdev-pci-driver`, plus the `crash-probe` supervision exercise): pl061 ->
+`menagerie-probe` (grant + allowance enforced); `virtio:1` -> `netdev-driver`,
+which maps the granted slot via `VirtioNet::open_slot` and runs the 24-ARP net-1
+proof. A virtio-mmio slot's `reg` is **sub-page** (0x200), so
+`libdriver::to_allowance` page-rounds the MMIO grant out to the slot's 4 KiB page
+(MMIO is mapped page-granular -- a sub-page allowance is unmappable); the
+descriptor keeps the exact sub-page window so the driver still learns its precise
+slot address. The page-rounded grant spans the shared net/blk page -- the
+documented #140 / net-2 co-residency over-grant, released when the one-shot driver
+exits.
+
+`virtio-pci:1` -> `netdev-pci-driver` is **the live I-34-on-PCI proof** (6b-3,
+[#159]): the same NIC over the PCI transport, narrowed to **just** its
+`(bus,dev,fn)` (the PCI allowance axis) + its INTID + a DMA pool -- and **no MMIO
+axis**, because a PCI function's registers live in its BARs, mapped through
+`SYS_PCI_MAP_BAR` off the claimed `KObj_PCI`, not through an MMIO window. The
+driver's `probe` claims the net function (`SYS_PCI_CLAIM` by virtio device-id; the
+kernel resolves the id to a `(bus,dev,fn)` and gates it against the conferred PCI
+axis), maps its BARs, and runs the modern-PCI init; the kernel admits each step
+*only because the grant permits it*. The deterministic negative -- a driver
+narrowed to a different function's bdf is **denied** -- is the 6a
+`allowance.pci_claim_handler_gate` kernel test.
 
 `resolve` against the pl061 node yields `mmio = [(0x9030000, 0x1000)]`,
 `irq = [39]` (SPI 7 + 32), `dma_max = 65536`.
@@ -290,10 +332,12 @@ joey: warden ok (5c Menagerie bind-loop: discover -> grant -> spawn narrowed)
   -- the restart-vs-settle decision across every policy + the back-off schedule)
   -- `118-libdriver.md`.
 - **Live end-to-end** is the boot-probe proof above: discovery (45 `/hw` nodes +
-  the 6 typed virtio slots), match + grant + spawn narrowed for three drivers,
-  menagerie-probe's positive map + negative reject (Up), netdev's 24-ARP +
-  `READY` + DeviceRemoved teardown (Up), crash-probe's 3 restarts (50/100/200ms) +
-  give-up (GaveUp), the tally `3 bound, 2 up, 1 gave up, 0 failed`,
+  the 6 typed virtio-mmio slots + the 3 `/hw/pci` functions), match + grant +
+  spawn narrowed for four drivers, menagerie-probe's positive map + negative reject
+  (Up), netdev's 24-ARP + `READY` + DeviceRemoved teardown (Up), netdev-pci-driver's
+  24-ARP over the grant-narrowed PCI claim (`pci=Some((0,1,0))`, no MMIO axis) +
+  `READY` + teardown (Up -- the live I-34-on-PCI proof), crash-probe's 3 restarts
+  (50/100/200ms) + give-up (GaveUp), the tally `4 bound, 3 up, 1 gave up, 0 failed`,
   `Thylacine boot OK`, 0 EXTINCTION. Gated additionally by the SMP gate
   (default + UBSan x smp4/smp8).
 
@@ -311,11 +355,13 @@ joey: warden ok (5c Menagerie bind-loop: discover -> grant -> spawn narrowed)
   bounded form. v1.0 SEAM: the supervisor distinguishes clean-vs-crashed only
   (not specific exit codes -- the kernel collapses non-"ok" to 1; the structured
   status is a v1.x lift, see the 5e-2 section).
-- **DTB + virtio-mmio sources (5d-2).** The DTB source + the virtio-mmio bus
-  source are built; PCIe/USB/SDIO sources are MENAGERIE §3/§7 seams that plug into
-  the same `DiscoverySource` slot (the step-6 per-(bus,dev,fn) PCI allowance axis,
-  #159, is the first). The virtio-mmio source enumerates once at boot; the live
-  `DeviceRemoved` hotplug stream is 5e.
+- **DTB + virtio-mmio + PCI sources (5d-2 / 6b-3).** Three `DiscoverySource`s are
+  built: the DTB source (the static fabric), the virtio-mmio bus source (the
+  sandboxed `DeviceID`-poke Proc), and the in-process `PciSource` over the
+  kernel-mediated `/hw/pci` (6b-3, the first PCIe source -- no Proc, no reconcile,
+  since the kernel view is trusted). USB/SDIO sources remain MENAGERIE §3/§7 seams
+  on the same slot. The sources enumerate once at boot; the live `DeviceRemoved`
+  hotplug stream is 5e.
 - **Compiled-in bind DB.** Manifest files under `/lib/driver` are a v1.x
   ergonomic; the `sig` authorization ladder (try-bind / ask-once / remember,
   MENAGERIE §9) is unbuilt.

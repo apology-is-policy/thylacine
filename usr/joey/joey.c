@@ -2367,35 +2367,12 @@ int main(void) {
         t_putstr("joey: thread-fault-probe ok (multi-thread Proc fault terminated cleanly; kernel did NOT extinct)\n");
     }
 
-    // The MMIO virtio-net frame transport (the old /netdev-test, net-1) is now
-    // bound by the warden as /netdev-driver (virtio:1, MENAGERIE 5d-3); its ARP
-    // round-trip runs inside the warden's bind loop below, not as a standalone
-    // boot probe. The PCI sibling keeps its own probe (a distinct device).
-
-    // === /netdev-pci-test -- pci-2 virtio-net-pci frame transport (#140) ===
-    // The same ARP round-trip as the warden-bound MMIO netdev-driver (5d-3), but
-    // through netdev::VirtioNetPci
-    // over the virtio-pci-modern transport: PciDev claims the net PCI function,
-    // maps its BARs, and drives the common/notify/isr/device-cfg registers. The
-    // PCI NIC sits on its own page-aligned BAR (the #140 resolution), so it does
-    // not share the virtio-mmio page; the probe still runs PRE-stratumd + exits.
-    // Exits 0 on PASS or SKIP (no net-PCI device); 1 FAIL.
-    {
-        // CAP_HW_CREATE: a PCI driver claims KObj_PCI + KObj_IRQ + KObj_DMA.
-        const char np_name[] = "netdev-pci-test";
-        long np_pid = t_spawn_with_caps(np_name, sizeof(np_name) - 1, T_CAP_HW_CREATE);
-        if (np_pid <= 0) {
-            t_putstr("joey: t_spawn(\"netdev-pci-test\") FAILED\n");
-            return 1;
-        }
-        int np_status = -1;
-        long np_reaped = t_wait_pid_for((int)np_pid, 0, &np_status);
-        if (np_reaped != np_pid || np_status != 0) {
-            t_putstr("joey: /netdev-pci-test FAILED (pci-2 VirtioNetPci round-trip)\n");
-            return 1;
-        }
-        t_putstr("joey: netdev-pci-test ok (pci-2 VirtioNetPci send/poll_rx round-trip or skip)\n");
-    }
+    // Both virtio-net transports are now warden-bound, not standalone probes:
+    // the MMIO NIC (the old /netdev-test, net-1) as /netdev-driver (virtio:1,
+    // 5d-3) and the PCI NIC (the old /netdev-pci-test, pci-2) as
+    // /netdev-pci-driver (virtio-pci:1, 6b-3 -- the live I-34-on-PCI proof). Both
+    // ARP round-trips run inside the warden's bind loop below, each narrowed to
+    // its conferred allowance, not as broad-CAP_HW_CREATE boot probes.
 
     // === /warden -- Menagerie build-arc 5c (MENAGERIE.md 4-6, I-34) ===
     // The hardware broker reads the devhw /hw DTB inventory, matches each node

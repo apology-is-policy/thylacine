@@ -468,7 +468,12 @@ impl VirtioNetPci {
 
     /// Stop the device: a full reset (`device_status = 0`). After this the
     /// device performs no further DMA, so its buffers are safe to free.
-    fn quiesce(&self) {
+    ///
+    /// Public so a long-lived driver can quiesce BEFORE its DMA pages are
+    /// reclaimed: the warden's `DeviceRemoved` is a forced group-terminate that
+    /// skips `Drop`, so a warden-bound driver resets the device itself while it
+    /// still runs (mirrors the MMIO `VirtioNet::quiesce`).
+    pub fn quiesce(&self) {
         unsafe {
             w8(self.common_va + CCFG_DEVICE_STATUS, 0);
             dsb_sy();

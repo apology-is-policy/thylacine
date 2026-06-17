@@ -56,7 +56,8 @@ VirtioNet::open_slot(slot_pa, intid) -> Result<VirtioNet, OpenError>  // map the
 // virtio_pci (driver feature) — same API surface, PCI transport
 VirtioNetPci::open() -> Result<VirtioNetPci, PciOpenError>  // claim PCI fn + map BARs + modern init + DRIVER_OK
   .mac() / .mtu() / .link_up() / .send(&[u8]) / .poll_rx(&mut [u8]) / .drain_tx() / .wait_irq()
-  // identical contracts to VirtioNet; Drop: device reset (device_status=0) before DMA pages free
+  .quiesce()  // device reset; pub so a long-lived driver resets before a forced teardown skips Drop (6b-3)
+  // identical contracts to VirtioNet; Drop also calls quiesce (device_status=0) before DMA pages free
 
 pub const MTU: usize = 1500;
 pub const MAX_FRAME: usize = 1514;                  // 14 (Eth hdr) + MTU
@@ -159,11 +160,15 @@ it the create/claim is rejected at the capability gate.
   past one full ring and the TX descriptors wrap). Verifies `PASS -- 24/24 ARP
   replies via VirtioNet (grant-driven open_slot)`. Retires the old standalone
   `netdev-test`.
-- **PCI boot E2E** (`usr/netdev-pci-test`, same ladder, PRE-stratumd, spawned
-  WITH `CAP_HW_CREATE`): the identical 24-ARP round-trip through `VirtioNetPci`
-  over a `virtio-net-pci,disable-legacy=on` NIC (its own slirp backend `net1`).
-  Verifies `PASS -- 24/24 ARP replies via VirtioNetPci`. Both probes run every
-  boot — the MMIO net-1 proof + the PCI pci-2 proof, independently.
+- **PCI boot E2E** (`usr/netdev-pci-driver`, the warden-bound `virtio-pci:1`
+  driver, MENAGERIE 6b-3 — bound NARROWED by the warden through the in-process
+  `PciSource` over `/hw/pci`, rather than a standalone probe): the identical 24-ARP
+  round-trip through `VirtioNetPci` over a `virtio-net-pci,disable-legacy=on` NIC
+  (its own slirp backend `net1`). Verifies `PASS -- 24/24 ARP replies via
+  VirtioNetPci (grant-narrowed PCI claim)`, then holds the device long-lived until
+  the warden's `DeviceRemoved`. This is the live I-34-on-PCI proof. Retires the old
+  standalone `netdev-pci-test`. The MMIO net-1 proof + the PCI proof both run every
+  boot, each warden-bound and narrowed to its own allowance.
 
 ## Error paths
 

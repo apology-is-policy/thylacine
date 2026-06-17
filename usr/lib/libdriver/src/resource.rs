@@ -358,9 +358,9 @@ pub(crate) fn parse_windows(val: &str) -> Result<Vec<(u64, u64)>, Error> {
     Ok(out)
 }
 
-/// Parse a `<bus>.<dev>.<fn>` bdf (bare hex, each component a u8) -- the descriptor
-/// + devpci form. Exactly three dot-separated components; any malformed shape (too
-/// few/many, a non-hex or out-of-u8 component) rejects.
+/// Parse a `<bus>.<dev>.<fn>` bdf (bare hex, each component a u8) -- the shared
+/// descriptor and devpci form. Exactly three dot-separated components; any
+/// malformed shape (too few/many, or a non-hex / out-of-u8 component) rejects.
 fn parse_bdf(val: &str) -> Result<(u8, u8, u8), Error> {
     let mut it = val.split('.');
     let bus = it.next().ok_or(Error::BadNumber)?;
