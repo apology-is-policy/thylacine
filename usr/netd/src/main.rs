@@ -279,6 +279,29 @@ impl Driver for NetD {
 
         say!("netd: PASS -- smoltcp brought the link up via the PCI NIC (DHCP)");
 
+        // Build the connection table around the now-configured stack (it takes
+        // ownership of iface + sockets). The DHCP socket stays in the set and
+        // keeps renewing the lease.
+        let mut net = server::Net::new(iface, sockets, base);
+
+        // net-3b: a best-effort UDP round-trip through the live /net/udp data
+        // path (a DNS query to slirp's resolver), bounded + logged, NEVER a boot
+        // gate -- slirp forwards DNS to the host resolver, so a response is
+        // environment-dependent. The deterministic /net/udp machinery proof is
+        // joey's probe; the deterministic UDP-via-9P round-trip E2E is owed to
+        // net-3d (the loopback interface).
+        match net.udp_dns_probe(&mut device) {
+            server::DnsProbe::Ok { resp_len, ancount } => say!(
+                "netd: net-3b UDP round-trip OK (DNS resp {} bytes, ancount={})",
+                resp_len,
+                ancount
+            ),
+            server::DnsProbe::NoResponse => say!(
+                "netd: net-3b UDP round-trip best-effort: no DNS response (host resolver?) -- /net/udp machinery proven via joey"
+            ),
+            server::DnsProbe::MintFailed => say!("netd: net-3b UDP probe: udp_clone failed"),
+        }
+
         // Post the /net 9P service (9P-mode) into the boot namespace's /srv
         // BEFORE signaling READY: the warden's READY -> "left running" then also
         // means "/srv/net is posted", so joey (after its warden wait) is
@@ -312,11 +335,9 @@ impl Driver for NetD {
         // wakeups would need a kernel ABI surface (SYS_IRQ_WAIT blocks; it is not
         // pollable) -- deferred; the timeout poll is correct, just not minimal.
         let mut conns: Vec<server::Conn> = Vec::new();
-        // The global /net connection table (the section-3.4 fid state machine),
-        // shared across every 9P session netd accepts. It now OWNS the smoltcp
-        // interface + socket set (moved in here, post-DHCP) so the 9P data path
-        // reaches them; `device` stays local (only `net.poll` borrows it).
-        let mut net = server::Net::new(iface, sockets, base);
+        // `net` (the section-3.4 fid state machine, owning the smoltcp interface
+        // + socket set) was built above, after DHCP, so the net-3b UDP probe
+        // could run through it; `device` stays local (only `net.poll` borrows it).
         let mut pollfds = [TPollFd::default(); 1 + server::MAX_CONNS];
         loop {
             net.poll(&mut device);

@@ -34,13 +34,13 @@
 use crate::NicDevice;
 use alloc::vec::Vec;
 use libthyla_rs::ninep as p9;
-use libthyla_rs::time::Instant;
+use libthyla_rs::time::{sleep, Duration, Instant};
 use libthyla_rs::{
     t_close, t_open, t_walk_create, T_GID_SYSTEM, T_OPATH, T_OREAD, T_PRINCIPAL_SYSTEM,
     T_WALK_OPEN_FROM_ROOT,
 };
 use smoltcp::iface::{Interface, SocketHandle, SocketSet};
-use smoltcp::socket::tcp;
+use smoltcp::socket::{tcp, udp};
 use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint};
 
@@ -74,6 +74,15 @@ const SRV_MSIZE_USIZE: usize = SRV_MSIZE as usize;
 const TCP_RX_BUF: usize = 4096;
 const TCP_TX_BUF: usize = 4096;
 
+/// Per-connection smoltcp UDP socket buffer sizes (net-3b). A UDP PacketBuffer
+/// stores whole datagrams WITH per-packet metadata (sender endpoint), unlike
+/// TCP's byte stream: UDP_META_SLOTS datagrams each up to UDP_*_BUF payload
+/// bytes. 8 slots x 4 KiB holds a burst of small datagrams (DNS, NTP) plus a
+/// full-MTU packet.
+const UDP_META_SLOTS: usize = 8;
+const UDP_RX_BUF: usize = 4096;
+const UDP_TX_BUF: usize = 4096;
+
 /// The largest `data` chunk a single Tread drains from a socket's rx buffer.
 const DATA_CHUNK: usize = 4096;
 
@@ -81,6 +90,18 @@ const DATA_CHUNK: usize = 4096;
 /// `connect` requires a non-zero local port (it auto-selects only the local
 /// ADDRESS), so netd assigns one from this range, rotating per active open.
 const EPHEMERAL_LO: u16 = 49152;
+
+/// net-3b UDP round-trip demo (a DNS query to slirp's resolver). BEST-EFFORT,
+/// logged, never asserted: slirp FORWARDS DNS to the host's resolver (unlike its
+/// internal DHCP), so a response is host-environment-dependent. The bound is
+/// tight -- on a resolver-equipped host the round-trip returns in a few polls;
+/// otherwise it gives up fast and netd proceeds (the /net/udp machinery is the
+/// deterministic proof, via joey; the UDP-via-9P round-trip E2E is owed net-3d).
+const DNS_PROBE_ID: u16 = 0x7a51;
+const DNS_PROBE_POLLS: u32 = 30; // ~300ms worst case
+const DNS_PROBE_POLL_MS: u64 = 10;
+const DNS_PROBE_SERVER: [u8; 4] = [10, 0, 2, 3]; // QEMU slirp's DNS forwarder
+const DNS_PROBE_QNAME: &[u8] = b"example.com";
 
 const P9_VERSION_9P2000_L: &[u8] = b"9P2000.L";
 
@@ -121,6 +142,7 @@ const P_TCP_CLONE: u64 = 4; //  /net/tcp/clone
 const P_TCP_STATS: u64 = 5; //  /net/tcp/stats
 const P_UDP_STATS: u64 = 6; //  /net/udp/stats
 const P_ICMP_STATS: u64 = 7; // /net/icmp/stats
+const P_UDP_CLONE: u64 = 8; //  /net/udp/clone (net-3b)
 
 const CONN_FLAG: u64 = 1 << 40;
 const PROTO_SHIFT: u64 = 32;
@@ -128,9 +150,11 @@ const FILE_BITS: u64 = 8;
 const FILE_MASK: u64 = 0xff;
 const N_MASK: u64 = 0x00ff_ffff; // 24-bit connection number
 
-// Protocols (only TCP mints connections at net-2c-1; the field is kept so udp/
-// icmp connections slot in without a qid re-encode).
+// Protocols. The qid `proto` field selects the per-slot socket type (TCP stream
+// vs UDP datagram), so the type-recovering `get::<tcp::Socket>` / `get::<udp::
+// Socket>` is always matched to the slot (a mismatch panics in smoltcp).
 const PROTO_TCP: u64 = 0;
+const PROTO_UDP: u64 = 1; // net-3b
 
 // Per-connection file kinds (the filekind low byte).
 const FK_DIR: u64 = 0; //    /net/tcp/N/
@@ -174,7 +198,7 @@ fn path_conn_n(path: u64) -> Option<u32> {
 
 fn proto_dir(proto: u64) -> u64 {
     match proto {
-        PROTO_TCP => P_TCP,
+        PROTO_UDP => P_UDP,
         _ => P_TCP,
     }
 }
@@ -188,6 +212,9 @@ fn proto_dir(proto: u64) -> u64 {
 struct Slot {
     used: bool,
     refs: u32,
+    // Which smoltcp socket type backs this slot (TCP vs UDP): the type the
+    // get::<T>() recovery must match. Meaningless when !used.
+    proto: u64,
     socket: Option<SocketHandle>,
     // The endpoints recorded at `connect`/accept time (netd-side), so
     // `local`/`remote` report a stable tuple regardless of the live socket's
@@ -197,7 +224,7 @@ struct Slot {
     err: Option<&'static str>,
     // The announce endpoint (Some once `announce` made this connection's socket
     // listen): the listener N re-arms a fresh socket on this endpoint after each
-    // accept, so N stays ANNOUNCED for the next call (NET-DESIGN 3.4).
+    // accept, so N stays ANNOUNCED for the next call (NET-DESIGN 3.4). TCP only.
     listen_ep: Option<IpListenEndpoint>,
 }
 
@@ -206,6 +233,7 @@ impl Slot {
         Slot {
             used: false,
             refs: 0,
+            proto: PROTO_TCP,
             socket: None,
             local: None,
             remote: None,
@@ -250,6 +278,18 @@ impl AcceptDone {
     }
 }
 
+/// The outcome of the net-3b best-effort UDP round-trip demo (a DNS query). The
+/// serve loop logs it; it is never a boot gate (the round-trip is host-resolver-
+/// dependent).
+pub enum DnsProbe {
+    /// A DNS response came back (id matched, QR set); `ancount` answer records.
+    Ok { resp_len: usize, ancount: u16 },
+    /// No response within the bound (a host with no resolver, most likely).
+    NoResponse,
+    /// Could not even mint the probe socket (the slot table was full).
+    MintFailed,
+}
+
 pub struct Net {
     iface: Interface,
     sockets: SocketSet<'static>,
@@ -258,6 +298,8 @@ pub struct Net {
     slots: [Slot; MAX_SLOTS],
     tcp_active: u32, // currently-live TCP connections (the `active` stat)
     tcp_opened: u32, // total TCP connections ever minted
+    udp_active: u32, // currently-live UDP connections (net-3b)
+    udp_opened: u32, // total UDP connections ever minted
     // Deferred accepts: held listen Rlopens awaiting an inbound call (net-3a).
     pending: Vec<PendingAccept>,
 }
@@ -275,6 +317,8 @@ impl Net {
             slots: [Slot::empty(); MAX_SLOTS],
             tcp_active: 0,
             tcp_opened: 0,
+            udp_active: 0,
+            udp_opened: 0,
             pending: Vec::new(),
         }
     }
@@ -303,6 +347,50 @@ impl Net {
             .map(|d| d.total_millis())
     }
 
+    /// net-3b boot demo: a self-contained DNS round-trip through the live
+    /// /net/udp data path (udp_clone -> connect -> data_send -> poll ->
+    /// data_recv), bounded-polled like the DHCP bring-up so it is deterministic
+    /// in its own loop (no host-timing race). BEST-EFFORT: slirp forwards DNS to
+    /// the host resolver, so a response is environment-dependent; the caller logs
+    /// the outcome and never gates the boot on it. The probe connection is minted
+    /// + freed entirely within this call (no slot leak across it).
+    pub fn udp_dns_probe(&mut self, device: &mut NicDevice) -> DnsProbe {
+        let n = match self.udp_clone() {
+            Some(n) => n,
+            None => return DnsProbe::MintFailed,
+        };
+        if self.udp_connect(n, DNS_PROBE_SERVER, 53).is_err() {
+            self.free_orphan_mint(n);
+            return DnsProbe::NoResponse;
+        }
+        let query = build_dns_query(DNS_PROBE_ID, DNS_PROBE_QNAME);
+        let _ = self.data_send(n, &query);
+
+        let mut buf = [0u8; 512];
+        let mut result = DnsProbe::NoResponse;
+        for _ in 0..DNS_PROBE_POLLS {
+            self.poll(device);
+            let k = self.data_recv(n, &mut buf);
+            // A DNS response: >= a 12-byte header, matching id, QR bit set.
+            if k >= 12
+                && buf[0] == (DNS_PROBE_ID >> 8) as u8
+                && buf[1] == (DNS_PROBE_ID & 0xff) as u8
+                && (buf[2] & 0x80) != 0
+            {
+                let ancount = u16::from_be_bytes([buf[6], buf[7]]);
+                result = DnsProbe::Ok {
+                    resp_len: k,
+                    ancount,
+                };
+                break;
+            }
+            let _ = sleep(Duration::from_millis(DNS_PROBE_POLL_MS));
+        }
+        // The probe connection has refs==0 (never bound to a fid): free it.
+        self.free_orphan_mint(n);
+        result
+    }
+
     /// Mint a TCP connection: claim a free slot, refs=0 (the opener takes the
     /// first ref). Returns the connection number N, or None if the table is
     /// full. The slot is NOT yet freeable -- only slot_unref frees, and the
@@ -318,6 +406,7 @@ impl Net {
         self.slots[n] = Slot {
             used: true,
             refs: 0,
+            proto: PROTO_TCP,
             socket: Some(h),
             local: None,
             remote: None,
@@ -329,8 +418,46 @@ impl Net {
         Some(n as u32)
     }
 
+    /// Mint a UDP connection (net-3b): the datagram analog of tcp_clone. A UDP
+    /// socket buffers whole datagrams with per-packet metadata (sender endpoint),
+    /// so its PacketBuffer carries metadata slots alongside the payload bytes.
+    fn udp_clone(&mut self) -> Option<u32> {
+        let n = self.slots.iter().position(|s| !s.used)?;
+        let rx = udp::PacketBuffer::new(
+            alloc::vec![udp::PacketMetadata::EMPTY; UDP_META_SLOTS],
+            alloc::vec![0u8; UDP_RX_BUF],
+        );
+        let tx = udp::PacketBuffer::new(
+            alloc::vec![udp::PacketMetadata::EMPTY; UDP_META_SLOTS],
+            alloc::vec![0u8; UDP_TX_BUF],
+        );
+        let h = self.sockets.add(udp::Socket::new(rx, tx));
+        self.slots[n] = Slot {
+            used: true,
+            refs: 0,
+            proto: PROTO_UDP,
+            socket: Some(h),
+            local: None,
+            remote: None,
+            err: None,
+            listen_ep: None,
+        };
+        self.udp_active += 1;
+        self.udp_opened += 1;
+        Some(n as u32)
+    }
+
     fn slot_live(&self, n: u32) -> bool {
         (n as usize) < MAX_SLOTS && self.slots[n as usize].used
+    }
+
+    /// The protocol backing a live slot (the get::<T>() type discriminator).
+    fn slot_proto(&self, n: u32) -> Option<u64> {
+        if self.slot_live(n) {
+            Some(self.slots[n as usize].proto)
+        } else {
+            None
+        }
     }
 
     fn slot_ref(&mut self, n: u32) {
@@ -351,24 +478,38 @@ impl Net {
                 // Last reference gone: free the connection AND its smoltcp
                 // socket (the only free path -- I-10/I-11). remove() returns the
                 // Socket, dropped here, releasing its rx/tx buffers.
+                let proto = self.slots[i].proto;
                 if let Some(h) = self.slots[i].socket.take() {
                     let _ = self.sockets.remove(h);
                 }
                 self.slots[i] = Slot::empty();
-                self.tcp_active = self.tcp_active.saturating_sub(1);
+                self.dec_active(proto);
             }
         }
     }
 
+    /// Decrement the per-protocol live-connection counter (the `active` stat).
+    fn dec_active(&mut self, proto: u64) {
+        match proto {
+            PROTO_UDP => self.udp_active = self.udp_active.saturating_sub(1),
+            _ => self.tcp_active = self.tcp_active.saturating_sub(1),
+        }
+    }
+
     /// Undo a just-minted clone whose Rlopen build failed: drop the opener's ref
-    /// (frees the slot + removes its socket + decrements tcp_active via
+    /// (frees the slot + removes its socket + decrements the active counter via
     /// slot_unref) AND uncount the mint, so a rolled-back clone does not inflate
-    /// the `opened` stat. The ephemeral allocator is liveness-unchecked (49152..=
-    /// 65535 rotation); at MAX_SLOTS connections a post-wrap collision is
-    /// astronomically unlikely (a liveness-checked allocator is a v1.x refinement).
-    fn tcp_clone_rollback(&mut self, n: u32) {
+    /// the `opened` stat. Reads the slot's protocol BEFORE slot_unref frees it.
+    /// The ephemeral allocator is liveness-unchecked (49152..=65535 rotation); at
+    /// MAX_SLOTS connections a post-wrap collision is astronomically unlikely (a
+    /// liveness-checked allocator is a v1.x refinement).
+    fn clone_rollback(&mut self, n: u32) {
+        let proto = self.slot_proto(n);
         self.slot_unref(n);
-        self.tcp_opened = self.tcp_opened.saturating_sub(1);
+        match proto {
+            Some(PROTO_UDP) => self.udp_opened = self.udp_opened.saturating_sub(1),
+            _ => self.tcp_opened = self.tcp_opened.saturating_sub(1),
+        }
     }
 
     fn slot_socket(&self, n: u32) -> Option<SocketHandle> {
@@ -379,11 +520,65 @@ impl Net {
         }
     }
 
-    /// The `connect` ctl verb (section 3.3): active-open the connection's socket
-    /// to `(ip, port)`. Records the resolved local + remote endpoints in the
-    /// slot, so `local`/`remote` report a stable tuple regardless of the live
-    /// socket's later transitions. Err on a smoltcp connect rejection.
+    /// The `connect` ctl verb (section 3.3): dial `(ip, port)` on the connection.
+    /// TCP active-opens (CONNECTING); UDP binds a local port + records the remote
+    /// for subsequent `data` sends. Dispatched on the slot's protocol so the
+    /// type-recovering socket access matches.
     fn ctl_connect(&mut self, n: u32, ip: [u8; 4], port: u16) -> Result<(), ()> {
+        match self.slot_proto(n) {
+            Some(PROTO_UDP) => self.udp_connect(n, ip, port),
+            Some(PROTO_TCP) => self.tcp_connect(n, ip, port),
+            _ => Err(()),
+        }
+    }
+
+    /// The first IPv4 address bound on the interface, or None (pre-lease). UDP
+    /// reports it as the connection's `local` address (the source the stack will
+    /// select); TCP reads its selected source straight off the socket post-connect.
+    fn iface_ipv4(&self) -> Option<[u8; 4]> {
+        self.iface
+            .ip_addrs()
+            .iter()
+            .find_map(|c| match c.address() {
+                IpAddress::Ipv4(v4) => Some(v4.octets()),
+                #[allow(unreachable_patterns)]
+                _ => None,
+            })
+    }
+
+    /// UDP `connect` (net-3b): bind a local ephemeral port (smoltcp requires a
+    /// bound socket before send/recv) and record the remote for `data` sends. A
+    /// datagram socket is connectionless, so this only fixes the default
+    /// destination; a re-dial on an already-bound socket just updates the remote.
+    fn udp_connect(&mut self, n: u32, ip: [u8; 4], port: u16) -> Result<(), ()> {
+        let h = match self.slot_socket(n) {
+            Some(h) => h,
+            None => return Err(()),
+        };
+        if !self.sockets.get::<udp::Socket>(h).is_open() {
+            let local_port = self.next_local_port;
+            let ep = IpListenEndpoint {
+                addr: None,
+                port: local_port,
+            };
+            if self.sockets.get_mut::<udp::Socket>(h).bind(ep).is_err() {
+                self.slots[n as usize].err = Some("udp bind rejected");
+                return Err(());
+            }
+            self.next_local_port = ephemeral_after(local_port);
+            let la = self.iface_ipv4().unwrap_or([0, 0, 0, 0]);
+            self.slots[n as usize].local = Some((la, local_port));
+        }
+        self.slots[n as usize].remote = Some((ip, port));
+        self.slots[n as usize].err = None;
+        Ok(())
+    }
+
+    /// TCP `connect`: active-open the connection's socket to `(ip, port)`. Records
+    /// the resolved local + remote endpoints in the slot, so `local`/`remote`
+    /// report a stable tuple regardless of the live socket's later transitions.
+    /// Err on a smoltcp connect rejection.
+    fn tcp_connect(&mut self, n: u32, ip: [u8; 4], port: u16) -> Result<(), ()> {
         let h = match self.slot_socket(n) {
             Some(h) => h,
             None => return Err(()),
@@ -422,11 +617,16 @@ impl Net {
         }
     }
 
-    /// The `hangup` ctl verb: active-close the connection's socket (it drains +
-    /// FINs; the fid clunk later frees N and the socket).
+    /// The `hangup` ctl verb: close the connection's socket. TCP drains + FINs;
+    /// UDP just unbinds. The fid clunk later frees N and removes the socket.
     fn ctl_hangup(&mut self, n: u32) {
-        if let Some(h) = self.slot_socket(n) {
-            self.sockets.get_mut::<tcp::Socket>(h).close();
+        let h = match self.slot_socket(n) {
+            Some(h) => h,
+            None => return,
+        };
+        match self.slot_proto(n) {
+            Some(PROTO_UDP) => self.sockets.get_mut::<udp::Socket>(h).close(),
+            _ => self.sockets.get_mut::<tcp::Socket>(h).close(),
         }
     }
 
@@ -435,6 +635,12 @@ impl Net {
     /// for an inbound call. The endpoint is recorded so the listener re-arms a
     /// fresh socket after each accept (it stays ANNOUNCED for the next call).
     fn ctl_announce(&mut self, n: u32, ep: IpListenEndpoint) -> Result<(), ()> {
+        // Only TCP accepts inbound connections; a UDP slot has no listen socket
+        // (and get::<tcp::Socket> on a UDP handle would panic). UDP receive-from-
+        // any (bind without a remote) is a net-3c+ refinement.
+        if self.slot_proto(n) != Some(PROTO_TCP) {
+            return Err(());
+        }
         let h = match self.slot_socket(n) {
             Some(h) => h,
             None => return Err(()),
@@ -508,19 +714,32 @@ impl Net {
         let rx = tcp::SocketBuffer::new(alloc::vec![0u8; TCP_RX_BUF]);
         let tx = tcp::SocketBuffer::new(alloc::vec![0u8; TCP_TX_BUF]);
         let fresh = self.sockets.add(tcp::Socket::new(rx, tx));
-        if self.sockets.get_mut::<tcp::Socket>(fresh).listen(ep).is_err() {
+        if self
+            .sockets
+            .get_mut::<tcp::Socket>(fresh)
+            .listen(ep)
+            .is_err()
+        {
             // Re-arm failed: drop the fresh socket, leave N holding the call so
             // the accept retries next poll (no socket leaked; N still active).
             let _ = self.sockets.remove(fresh);
             return None;
         }
-        let le = self.sockets.get::<tcp::Socket>(established).local_endpoint();
-        let re = self.sockets.get::<tcp::Socket>(established).remote_endpoint();
-        // N takes the fresh listener; M takes the established socket.
+        let le = self
+            .sockets
+            .get::<tcp::Socket>(established)
+            .local_endpoint();
+        let re = self
+            .sockets
+            .get::<tcp::Socket>(established)
+            .remote_endpoint();
+        // N takes the fresh listener; M takes the established socket. Accept is
+        // TCP-only (UDP never announces), so M is a TCP slot.
         self.slots[n as usize].socket = Some(fresh);
         self.slots[m] = Slot {
             used: true,
             refs: 0,
+            proto: PROTO_TCP,
             socket: Some(established),
             local: le.map(endpoint_octets),
             remote: re.map(endpoint_octets),
@@ -578,11 +797,12 @@ impl Net {
     fn free_orphan_mint(&mut self, n: u32) {
         let i = n as usize;
         if i < MAX_SLOTS && self.slots[i].used && self.slots[i].refs == 0 {
+            let proto = self.slots[i].proto;
             if let Some(h) = self.slots[i].socket.take() {
                 let _ = self.sockets.remove(h);
             }
             self.slots[i] = Slot::empty();
-            self.tcp_active = self.tcp_active.saturating_sub(1);
+            self.dec_active(proto);
         }
     }
 
@@ -592,40 +812,81 @@ impl Net {
         self.free_orphan_mint(d.new_n);
     }
 
-    /// Write `data` to the connection's send stream. Returns bytes accepted (0
-    /// if the socket cannot send: not established / tx-buffer full). Non-blocking.
+    /// Write `data` to the connection. TCP enqueues onto the byte stream
+    /// (returns bytes accepted). UDP sends one datagram to the recorded remote
+    /// (all-or-nothing: returns data.len() on success, 0 if it could not send).
+    /// Non-blocking.
     fn data_send(&mut self, n: u32, data: &[u8]) -> usize {
-        match self.slot_socket(n) {
-            Some(h) => self
+        let h = match self.slot_socket(n) {
+            Some(h) => h,
+            None => return 0,
+        };
+        match self.slot_proto(n) {
+            Some(PROTO_UDP) => {
+                let (ip, port) = match self.slots[n as usize].remote {
+                    Some(r) => r,
+                    None => return 0, // no destination: `connect` first
+                };
+                let remote = IpEndpoint::new(IpAddress::v4(ip[0], ip[1], ip[2], ip[3]), port);
+                match self
+                    .sockets
+                    .get_mut::<udp::Socket>(h)
+                    .send_slice(data, remote)
+                {
+                    Ok(()) => data.len(),
+                    Err(_) => {
+                        self.slots[n as usize].err = Some("udp send failed");
+                        0
+                    }
+                }
+            }
+            _ => self
                 .sockets
                 .get_mut::<tcp::Socket>(h)
                 .send_slice(data)
                 .unwrap_or(0),
-            None => 0,
         }
     }
 
-    /// Read up to `out.len()` bytes from the connection's recv stream. Returns
-    /// bytes dequeued (0 if none available or the stream is closed). Non-
-    /// blocking: a 0-return is ambiguous between "no data yet" and EOF at
-    /// net-2c-2 -- proper readiness/blocking is the dev9p.poll leg (net-6).
+    /// Read up to `out.len()` bytes from the connection. TCP dequeues from the
+    /// byte stream; UDP dequeues one whole datagram (the sender endpoint is
+    /// dropped at net-3b -- the connected client knows its remote; receive-from-
+    /// any with sender attribution is net-3c+). Returns bytes dequeued (0 if none
+    /// available / closed). Non-blocking: a 0-return is ambiguous between "no
+    /// data yet" and EOF -- proper readiness/blocking is the dev9p.poll leg (net-6).
     fn data_recv(&mut self, n: u32, out: &mut [u8]) -> usize {
-        match self.slot_socket(n) {
-            Some(h) => self
+        let h = match self.slot_socket(n) {
+            Some(h) => h,
+            None => return 0,
+        };
+        match self.slot_proto(n) {
+            Some(PROTO_UDP) => match self.sockets.get_mut::<udp::Socket>(h).recv_slice(out) {
+                Ok((k, _meta)) => k,
+                Err(_) => 0,
+            },
+            _ => self
                 .sockets
                 .get_mut::<tcp::Socket>(h)
                 .recv_slice(out)
                 .unwrap_or(0),
-            None => 0,
         }
     }
 
-    /// The live TCP state of a connection (the `status` file).
+    /// The live state of a connection (the `status` file). TCP reports its TCP
+    /// state machine; UDP reports Open (bound) / Closed (a datagram socket has no
+    /// connection state).
     fn state_str(&self, n: u32) -> &'static str {
         let h = match self.slot_socket(n) {
             Some(h) => h,
             None => return "Closed",
         };
+        if self.slot_proto(n) == Some(PROTO_UDP) {
+            return if self.sockets.get::<udp::Socket>(h).is_open() {
+                "Open"
+            } else {
+                "Closed"
+            };
+        }
         match self.sockets.get::<tcp::Socket>(h).state() {
             tcp::State::Closed => "Closed",
             tcp::State::Listen => "Listen",
@@ -679,7 +940,7 @@ impl Net {
             match path {
                 P_TCP | P_UDP | P_ICMP => P_ROOT,
                 P_TCP_CLONE | P_TCP_STATS => P_TCP,
-                P_UDP_STATS => P_UDP,
+                P_UDP_CLONE | P_UDP_STATS => P_UDP,
                 P_ICMP_STATS => P_ICMP,
                 _ => P_ROOT, // P_ROOT is its own parent (the `..`-from-root fixpoint)
             }
@@ -700,7 +961,8 @@ impl Net {
             return Some(self.parent_of(dir));
         }
         if is_conn(dir) {
-            // Inside /net/tcp/N/: the fixed file set.
+            // Inside /net/<proto>/N/: the fixed file set. `listen` is TCP-only
+            // (UDP has no accept), so it is unresolvable under a UDP conn dir.
             let (proto, n) = (conn_proto(dir), conn_n(dir));
             let fk = match name {
                 b"ctl" => FK_CTL,
@@ -709,7 +971,7 @@ impl Net {
                 b"remote" => FK_REMOTE,
                 b"status" => FK_STATUS,
                 b"err" => FK_ERR,
-                b"listen" => FK_LISTEN,
+                b"listen" if proto == PROTO_TCP => FK_LISTEN,
                 _ => return None,
             };
             return Some(make_conn(proto, n, fk));
@@ -724,13 +986,17 @@ impl Net {
             P_TCP => match name {
                 b"clone" => Some(P_TCP_CLONE),
                 b"stats" => Some(P_TCP_STATS),
+                // A numeric name resolves only if that slot is a live TCP conn.
                 _ => parse_dec(name)
-                    .filter(|&n| self.slot_live(n))
+                    .filter(|&n| self.slot_proto(n) == Some(PROTO_TCP))
                     .map(|n| make_conn(PROTO_TCP, n, FK_DIR)),
             },
             P_UDP => match name {
+                b"clone" => Some(P_UDP_CLONE),
                 b"stats" => Some(P_UDP_STATS),
-                _ => None,
+                _ => parse_dec(name)
+                    .filter(|&n| self.slot_proto(n) == Some(PROTO_UDP))
+                    .map(|n| make_conn(PROTO_UDP, n, FK_DIR)),
             },
             P_ICMP => match name {
                 b"stats" => Some(P_ICMP_STATS),
@@ -749,7 +1015,10 @@ impl Net {
             let (proto, n) = (conn_proto(dir), conn_n(dir));
             push(b"ctl", make_conn(proto, n, FK_CTL), false);
             push(b"data", make_conn(proto, n, FK_DATA), false);
-            push(b"listen", make_conn(proto, n, FK_LISTEN), false);
+            // `listen` (the accept file) exists only on a TCP conn dir.
+            if proto == PROTO_TCP {
+                push(b"listen", make_conn(proto, n, FK_LISTEN), false);
+            }
             push(b"local", make_conn(proto, n, FK_LOCAL), false);
             push(b"remote", make_conn(proto, n, FK_REMOTE), false);
             push(b"status", make_conn(proto, n, FK_STATUS), false);
@@ -765,21 +1034,27 @@ impl Net {
             P_TCP => {
                 push(b"clone", P_TCP_CLONE, false);
                 push(b"stats", P_TCP_STATS, false);
-                for i in 0..MAX_SLOTS {
-                    if self.slots[i].used {
-                        let mut name = DecName::new();
-                        name.set(i as u32);
-                        push(
-                            name.as_slice(),
-                            make_conn(PROTO_TCP, i as u32, FK_DIR),
-                            true,
-                        );
-                    }
-                }
+                self.push_conn_slots(PROTO_TCP, &mut push);
             }
-            P_UDP => push(b"stats", P_UDP_STATS, false),
+            P_UDP => {
+                push(b"clone", P_UDP_CLONE, false);
+                push(b"stats", P_UDP_STATS, false);
+                self.push_conn_slots(PROTO_UDP, &mut push);
+            }
             P_ICMP => push(b"stats", P_ICMP_STATS, false),
             _ => {}
+        }
+    }
+
+    /// Push the live connection-directory entries for one protocol (ascending
+    /// slot index, a stable order for the readdir resume cookie).
+    fn push_conn_slots<F: FnMut(&[u8], u64, bool)>(&self, proto: u64, push: &mut F) {
+        for i in 0..MAX_SLOTS {
+            if self.slots[i].used && self.slots[i].proto == proto {
+                let mut name = DecName::new();
+                name.set(i as u32);
+                push(name.as_slice(), make_conn(proto, i as u32, FK_DIR), true);
+            }
         }
     }
 
@@ -820,7 +1095,13 @@ impl Net {
                 c.push_dec(self.tcp_opened);
                 c.push(b"\n");
             }
-            P_UDP_STATS => c.push(b"udp\n  ports 0\n"),
+            P_UDP_STATS => {
+                c.push(b"udp\n  active ");
+                c.push_dec(self.udp_active);
+                c.push(b"\n  opened ");
+                c.push_dec(self.udp_opened);
+                c.push(b"\n");
+            }
             P_ICMP_STATS => c.push(b"icmp\n  echo 0\n"),
             // clone is never read as content (its open rebinds the fid to ctl).
             _ => {}
@@ -965,6 +1246,28 @@ fn parse_announce(arg: &[u8]) -> Option<IpListenEndpoint> {
         Some(IpAddress::v4(ip[0], ip[1], ip[2], ip[3]))
     };
     Some(IpListenEndpoint { addr, port })
+}
+
+/// Build a minimal DNS A-record query (RFC 1035) for `qname` (dotted, e.g.
+/// b"example.com"): a 12-byte header (id + RD flag + qdcount=1) followed by the
+/// question (length-prefixed labels + qtype=A + qclass=IN). Used only by the
+/// net-3b boot demo.
+fn build_dns_query(id: u16, qname: &[u8]) -> Vec<u8> {
+    let mut q = Vec::new();
+    q.extend_from_slice(&id.to_be_bytes());
+    q.extend_from_slice(&0x0100u16.to_be_bytes()); // flags: RD (recursion desired)
+    q.extend_from_slice(&1u16.to_be_bytes()); // qdcount
+    q.extend_from_slice(&0u16.to_be_bytes()); // ancount
+    q.extend_from_slice(&0u16.to_be_bytes()); // nscount
+    q.extend_from_slice(&0u16.to_be_bytes()); // arcount
+    for label in qname.split(|&b| b == b'.') {
+        q.push(label.len() as u8);
+        q.extend_from_slice(label);
+    }
+    q.push(0); // the root label terminates the name
+    q.extend_from_slice(&1u16.to_be_bytes()); // qtype A
+    q.extend_from_slice(&1u16.to_be_bytes()); // qclass IN
+    q
 }
 
 // A small fixed-cap content buffer: file bodies are short (a number, a few-line
@@ -1466,17 +1769,27 @@ impl Conn {
             return Ok(0); // the 0 is ignored (defer is set)
         }
 
-        // The Plan 9 clone idiom: opening `clone` MINTS a connection and rebinds
-        // THIS fid onto the new connection's `ctl` (the kernel dev9p client
-        // accepts the differing Rlopen qid). Ref-before-build so a build failure
-        // rolls the mint back cleanly.
-        if f.path == P_TCP_CLONE {
-            let n = match net.tcp_clone() {
+        // The Plan 9 clone idiom: opening `clone` (TCP or UDP) MINTS a connection
+        // and rebinds THIS fid onto the new connection's `ctl` (the kernel dev9p
+        // client accepts the differing Rlopen qid). Ref-before-build so a build
+        // failure rolls the mint back cleanly.
+        let clone_proto = match f.path {
+            P_TCP_CLONE => Some(PROTO_TCP),
+            P_UDP_CLONE => Some(PROTO_UDP),
+            _ => None,
+        };
+        if let Some(proto) = clone_proto {
+            let minted = if proto == PROTO_UDP {
+                net.udp_clone()
+            } else {
+                net.tcp_clone()
+            };
+            let n = match minted {
                 Some(n) => n,
                 None => return self.err(tag, p9::E_NOMEM), // table full (ENFILE-class)
             };
             net.slot_ref(n); // refs 0 -> 1 (this fid owns the connection)
-            let ctl = make_conn(PROTO_TCP, n, FK_CTL);
+            let ctl = make_conn(proto, n, FK_CTL);
             let q = self.qid_of(net, ctl);
             match p9::build_rlopen(&mut self.out_buf, tag, &q, 0) {
                 Ok(len) => {
@@ -1488,7 +1801,7 @@ impl Conn {
                     Ok(len)
                 }
                 Err(()) => {
-                    net.tcp_clone_rollback(n); // refs 1 -> 0 -> freed; fid stays at clone
+                    net.clone_rollback(n); // refs 1 -> 0 -> freed; fid stays at clone
                     Err(())
                 }
             }
@@ -1604,7 +1917,7 @@ impl Conn {
             (DIR_MODE, 2u64, 0u64)
         } else {
             let m = match f.path {
-                P_TCP_CLONE => FILE_RW,
+                P_TCP_CLONE | P_UDP_CLONE => FILE_RW,
                 _ if is_conn(f.path) => match conn_filekind(f.path) {
                     FK_CTL | FK_DATA => FILE_RW,
                     _ => FILE_RO,

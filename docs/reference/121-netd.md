@@ -385,6 +385,50 @@ real feature every stack has), giving a deterministic in-guest accept proof
 without host-injection timing fragility; the deferred-reply + swap + Tflush
 mechanism is reasoned + audited there.
 
+## net-3b: UDP — `/net/udp` clone/connect/data (datagrams)
+
+net-3b adds the datagram protocol. `/net/udp` grows a `clone` file mirroring
+`/net/tcp/clone`: opening it mints a connection backed by a smoltcp `udp::Socket`
+(a `PacketBuffer` of whole datagrams *with* per-packet metadata — the sender
+endpoint — unlike TCP's byte stream). The connection tree, the refcounted fid
+machine, the qid encoding, and the Treaddir listing are all the §3.4 machinery,
+now generalized over a `proto` axis.
+
+**The shared slot carries a `proto`.** `Slot` gains a `proto` field (`PROTO_TCP`
+/ `PROTO_UDP`); it is the discriminator for the type-recovering socket access
+(`sockets.get::<tcp::Socket>` vs `get::<udp::Socket>` — a mismatch *panics* in
+smoltcp, so every socket touch is dispatched on `slot_proto(n)`). The slot pool is
+shared across protocols, so a TCP conn `N` and a UDP conn `N` cannot coexist (one
+slot index); `walk_child`/`for_each_child` filter the numeric children of
+`/net/tcp` and `/net/udp` to slots of the matching protocol.
+
+**`connect` is the datagram setup, not a handshake.** `ctl_connect` dispatches:
+TCP active-opens (CONNECTING); UDP `bind`s a local ephemeral port (smoltcp
+requires a bound socket before send/recv) and records the remote, so subsequent
+`data` writes default to it. `status` reads `Open` (bound) / `Closed`. `data`
+write `send_slice(data, remote)` (one datagram, all-or-nothing); `data` read
+`recv_slice → (n, meta)` dequeues one datagram (the sender endpoint is dropped at
+net-3b — the connected client knows its remote). There is **no `listen` file**
+under a UDP conn dir (datagrams have no accept) — `walk_child` rejects `listen`
+for a UDP conn, so opening it fails.
+
+**The boot demo is a self-contained DNS round-trip** through the live `/net/udp`
+data path (`udp_clone → connect → data_send → poll → data_recv`), bounded-polled
+inside netd like the DHCP bring-up so it is deterministic in its own loop. It is
+**best-effort, logged, never a boot gate**: slirp *forwards* DNS to the host
+resolver (unlike its internal DHCP server), so a response is environment-dependent.
+
+```
+netd: net-3b UDP round-trip OK (DNS resp 61 bytes, ancount=2)
+joey: net-3b PROBE OK (udp clone->0, connect 10.0.2.3!53, remote readback, no listen, frees+reuses 0)
+```
+
+The deterministic, asserted proof is joey's `/net/udp` machinery probe (clone →
+connect → endpoint readback → `status` Open → readdir → no-listen → free + reuse).
+**The deterministic UDP-via-9P data round-trip E2E is owed to net-3d** — the same
+loopback interface that proves the TCP accept also round-trips a UDP datagram to
+`127.0.0.1` in-guest, with no host-resolver coupling.
+
 ## Data structures
 
 | Type | Role |
@@ -395,10 +439,11 @@ mechanism is reasoned + audited there.
 | `NicTxToken<'a> { nic: &'a mut VirtioNetPci }` | the single `&mut nic` TX borrow |
 | `server::Conn` | one accepted 9P connection: fid table + `in_buf`/`out_buf` |
 | `server::Net` | the global connection table (`Slot[MAX_SLOTS]`) + the smoltcp `iface`/`sockets` (folded in post-DHCP) + the ephemeral-port cursor + live stats; shared `&mut` across all sessions |
-| `server::Slot { used, refs, socket, local, remote, err, listen_ep }` | one `/net/tcp/N/` connection: the refcount key + its reserved `SocketHandle` + the recorded endpoints / err reason + the announce endpoint (Some once listening; re-arm key) |
+| `server::Slot { used, refs, proto, socket, local, remote, err, listen_ep }` | one `/net/<proto>/N/` connection: the refcount key + its protocol (TCP/UDP — the `get::<T>()` discriminator) + its reserved `SocketHandle` + the recorded endpoints / err reason + the announce endpoint (TCP-only; Some once listening; re-arm key) |
 | `server::PendingAccept { conn_id, tag, fid, listening_n }` | a held `listen` Rlopen awaiting an inbound call (the deferred-reply state); bounded by `MAX_PENDING_ACCEPTS = 16` |
 | `server::AcceptDone { conn_id, tag, fid, new_n, ctl_qid_path }` | a completed accept the serve loop delivers (opaque to `main.rs`, routed by `conn_id()`) |
 | `enum Disp { Reply(usize), Deferred, Fatal }` | the per-request dispatch outcome — `Deferred` holds the reply (a blocking listen) |
+| `enum DnsProbe { Ok{resp_len,ancount}, NoResponse, MintFailed }` | the net-3b best-effort UDP-round-trip demo outcome (logged, never a boot gate) |
 
 ## Tests
 
@@ -486,6 +531,16 @@ mechanism is reasoned + audited there.
   The full inbound-accept E2E is owed to net-3d (a deterministic in-guest inbound
   path — a netd loopback interface). The focused audit over the net-3 surface is
   net-3d.
+- **net-3b (LANDED)**: UDP — `/net/udp` clone/connect/data. The shared `Slot`
+  carries a `proto` (the `get::<tcp::Socket>` vs `get::<udp::Socket>`
+  discriminator; every socket touch dispatched on it); `/net/udp/clone` mints a
+  `udp::Socket`; `connect` binds a local port + records the remote; `data` is
+  `send_slice`/`recv_slice` of whole datagrams; no `listen` file (UDP has no
+  accept). The `socket-udp` Cargo feature is the only new dependency; the kernel
+  is byte-unchanged (pure userspace). Boot proof: joey's `/net/udp` machinery
+  probe (deterministic) + netd's best-effort DNS round-trip demo (logged). The
+  deterministic UDP-via-9P data round-trip E2E is owed to net-3d (the loopback
+  interface, alongside the TCP accept). The focused audit is net-3d.
 
 ## Known caveats / seams
 

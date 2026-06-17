@@ -3268,6 +3268,85 @@ int main(void) {
                         t_putstr("joey: net-3a PROBE OK (announce *!7777 -> Listen; "
                                  "listen file + readdir; listen gated on announce)\n");
                     }
+
+                    // === net-3b: UDP (clone/connect/data + the datagram tree) ===
+                    // Deterministic + self-contained (no peer needed): /net/udp/
+                    // clone mints a UDP connection, `connect` binds a local port +
+                    // records the remote synchronously (peer-independent), the
+                    // `remote` file reads it back, `status` reads "Open" (bound),
+                    // the conn readdir lists the datagram files, and there is NO
+                    // `listen` file (UDP has no accept -- opening it fails). The
+                    // last clunk frees + reuses the slot. The live datagram round-
+                    // trip is netd's own best-effort DNS demo (logged) + owed net-3d.
+                    {
+                        // (o) clone /net/udp -> UDP connection 0 (net-3a freed it).
+                        long ua = t_open(T_WALK_OPEN_FROM_ROOT, "/net/udp/clone",
+                                         14, T_ORDWR);
+                        unsigned char ub[16];
+                        long un = (ua >= 0) ? t_read(ua, ub, sizeof(ub) - 1) : -1;
+                        if (ua < 0 || un != 1 || ub[0] != '0') {
+                            t_putstr("joey: net-3b PROBE udp clone -> 0 FAILED\n");
+                            return 1;
+                        }
+                        // (p) connect 10.0.2.3!53 -> bind a local port + record the
+                        //     remote (slirp's DNS resolver; no packet sent here).
+                        static const char uconn[] = "connect 10.0.2.3!53";
+                        if (t_write(ua, uconn, sizeof(uconn) - 1) != (long)(sizeof(uconn) - 1)) {
+                            t_putstr("joey: net-3b PROBE udp connect write FAILED\n");
+                            return 1;
+                        }
+                        // (q) remote reads back the recorded endpoint.
+                        unsigned char ueb[64];
+                        long urf = t_open(T_WALK_OPEN_FROM_ROOT, "/net/udp/0/remote",
+                                          17, T_OREAD);
+                        long urn = (urf >= 0) ? t_read(urf, ueb, sizeof(ueb)) : -1;
+                        if (urf >= 0) (void)t_close(urf);
+                        if (urn <= 0 || !mem_contains(ueb, (size_t)urn, "10.0.2.3!53", 11)) {
+                            t_putstr("joey: net-3b PROBE udp remote != 10.0.2.3!53 FAILED\n");
+                            return 1;
+                        }
+                        // (r) status reads "Open" (a bound datagram socket).
+                        unsigned char usb[32];
+                        long usf = t_open(T_WALK_OPEN_FROM_ROOT, "/net/udp/0/status",
+                                          17, T_OREAD);
+                        long usn = (usf >= 0) ? t_read(usf, usb, sizeof(usb)) : -1;
+                        if (usf >= 0) (void)t_close(usf);
+                        if (usn <= 0 || !mem_contains(usb, (size_t)usn, "Open", 4)) {
+                            t_putstr("joey: net-3b PROBE udp status != Open FAILED\n");
+                            return 1;
+                        }
+                        // (s) the conn readdir lists the datagram files (`data`).
+                        unsigned char udb[256];
+                        long udd = t_open(T_WALK_OPEN_FROM_ROOT, "/net/udp/0", 10, T_OREAD);
+                        long uddn = (udd >= 0) ? t_readdir(udd, udb, sizeof(udb)) : -1;
+                        if (udd >= 0) (void)t_close(udd);
+                        if (uddn <= 0 || !mem_contains(udb, (size_t)uddn, "data", 4)) {
+                            t_putstr("joey: net-3b PROBE udp readdir (data) FAILED\n");
+                            return 1;
+                        }
+                        // (s2) UDP has no `listen` file: opening it fails (the walk
+                        //      rejects `listen` under a UDP conn dir).
+                        long ulj = t_open(T_WALK_OPEN_FROM_ROOT, "/net/udp/0/listen",
+                                          17, T_OREAD);
+                        if (ulj >= 0) {
+                            (void)t_close(ulj);
+                            t_putstr("joey: net-3b PROBE udp listen file should not exist\n");
+                            return 1;
+                        }
+                        // (t) the last clunk frees slot 0; a re-clone reuses it.
+                        (void)t_close(ua);
+                        long ua2 = t_open(T_WALK_OPEN_FROM_ROOT, "/net/udp/clone",
+                                          14, T_ORDWR);
+                        unsigned char ub2[16];
+                        long un2 = (ua2 >= 0) ? t_read(ua2, ub2, sizeof(ub2) - 1) : -1;
+                        if (ua2 < 0 || un2 != 1 || ub2[0] != '0') {
+                            t_putstr("joey: net-3b PROBE udp re-clone reuse FAILED\n");
+                            return 1;
+                        }
+                        (void)t_close(ua2);
+                        t_putstr("joey: net-3b PROBE OK (udp clone->0, connect "
+                                 "10.0.2.3!53, remote readback, no listen, frees+reuses 0)\n");
+                    }
 #endif
                 } else {
                     t_putstr("joey: net-2c-1 /srv/net absent -- /net not mounted (netd down?)\n");

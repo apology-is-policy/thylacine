@@ -712,8 +712,23 @@ named in §2.)
   the not-announced gate. The full inbound-accept E2E is owed to net-3d (a
   deterministic in-guest inbound path — a netd loopback interface). Pure userspace
   — kernel byte-unchanged. See `docs/reference/121-netd.md`.
-- **net-3b..net-3d, net-4..net-8: not started.** net-3b (UDP), net-3c (ICMP ping),
-  net-3d (the focused net-3 audit + the inbound-accept E2E); then net-4..net-8 per
-  §17, sequenced before the container runner (#70) per ROADMAP §2.2.
+- **net-3b: LANDED** — UDP: `/net/udp` clone/connect/data (datagrams). The shared
+  `Slot` carries a `proto` (TCP/UDP — the `get::<tcp::Socket>` vs `get::<udp::
+  Socket>` discriminator; every socket touch is dispatched on it, since a mismatch
+  panics in smoltcp). `/net/udp/clone` mints a `udp::Socket` (a `PacketBuffer` of
+  whole datagrams with per-packet sender metadata); `connect ip!port` binds a local
+  port + records the remote; `data` is `send_slice`/`recv_slice` of datagrams;
+  there is no `listen` file (UDP has no accept). The slot pool is shared, so
+  `walk_child`/`for_each_child` filter the numeric children of each protocol dir.
+  Boot proof: joey's deterministic `/net/udp` machinery probe (clone → connect →
+  endpoint readback → `Open` → readdir → no-listen → free+reuse) + netd's
+  best-effort DNS round-trip demo through the live data path (logged, not a gate —
+  slirp forwards DNS to the host resolver). The `socket-udp` Cargo feature is the
+  only new dependency; pure userspace — kernel byte-unchanged. The deterministic
+  UDP-via-9P data round-trip E2E is owed to net-3d (the loopback interface). See
+  `docs/reference/121-netd.md`.
+- **net-3c, net-3d, net-4..net-8: not started.** net-3c (ICMP ping), net-3d (the
+  focused net-3 audit + the inbound-accept + UDP-loopback E2E); then net-4..net-8
+  per §17, sequenced before the container runner (#70) per ROADMAP §2.2.
 
 The thylacine is real. So is its network — and it is, of course, a filesystem.
