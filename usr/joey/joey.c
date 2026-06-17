@@ -3076,10 +3076,10 @@ int main(void) {
                     (void)t_close(net_root);
                     t_putstr("joey: net-2c-1 /net mounted (netd 9P server)\n");
 #if THYLA_BOOT_PROBES
-                    // net-2c-1: exercise the /net/tcp clone fid state machine
-                    // (section 3.4) end-to-end through the dev9p-mounted 9P
-                    // session. The static-file path (/net/tcp/stats) and the
-                    // dynamic clone/N machine + Treaddir all cross /net -> tcp.
+                    // net-2c-2: exercise the /net/tcp clone fid state machine
+                    // (section 3.4) end-to-end -- the clone/N machine + Treaddir
+                    // (net-2c-1) PLUS the live connect/endpoint path (net-2c-2),
+                    // all through the dev9p-mounted 9P session.
                     {
                         // (0) the static stats file still resolves + reads.
                         long sf = t_open(T_WALK_OPEN_FROM_ROOT, "/net/tcp/stats",
@@ -3088,7 +3088,7 @@ int main(void) {
                         long sn = (sf >= 0) ? t_read(sf, sbuf, sizeof(sbuf)) : -1;
                         if (sf >= 0) (void)t_close(sf);
                         if (sn <= 0) {
-                            t_putstr("joey: net-2c-1 PROBE read(/net/tcp/stats) FAILED\n");
+                            t_putstr("joey: net-2c-2 PROBE read(/net/tcp/stats) FAILED\n");
                             return 1;
                         }
 
@@ -3098,19 +3098,19 @@ int main(void) {
                         long n0 = (td0 >= 0) ? t_readdir(td0, dbuf, sizeof(dbuf)) : -1;
                         if (td0 >= 0) (void)t_close(td0);
 
-                        // (b) open /net/tcp/clone -> MINTS connection N; the fid
-                        //     rebinds onto its ctl (Plan 9 clone idiom), so the
-                        //     read yields N. A fresh netd hands out N == 0.
+                        // (b) open /net/tcp/clone ORDWR -> MINTS connection N; the
+                        //     fid rebinds onto its ctl (Plan 9 clone idiom), so it
+                        //     reads N and writes verbs. A fresh netd hands out 0.
                         unsigned char nb[16];
                         long cl = t_open(T_WALK_OPEN_FROM_ROOT, "/net/tcp/clone",
-                                         14, T_OREAD);
+                                         14, T_ORDWR);
                         if (cl < 0) {
-                            t_putstr("joey: net-2c-1 PROBE open(clone) FAILED\n");
+                            t_putstr("joey: net-2c-2 PROBE open(clone) FAILED\n");
                             return 1;
                         }
                         long nn = t_read(cl, nb, sizeof(nb) - 1);
                         if (nn != 1 || nb[0] != '0') {
-                            t_putstr("joey: net-2c-1 PROBE clone -> N expected 0 FAILED\n");
+                            t_putstr("joey: net-2c-2 PROBE clone -> N expected 0 FAILED\n");
                             return 1;
                         }
 
@@ -3122,7 +3122,7 @@ int main(void) {
                         long cn = (ctl >= 0) ? t_read(ctl, cb, sizeof(cb) - 1) : -1;
                         if (ctl >= 0) (void)t_close(ctl);
                         if (cn != 1 || cb[0] != '0') {
-                            t_putstr("joey: net-2c-1 PROBE read(/net/tcp/0/ctl) FAILED\n");
+                            t_putstr("joey: net-2c-2 PROBE read(/net/tcp/0/ctl) FAILED\n");
                             return 1;
                         }
 
@@ -3132,24 +3132,70 @@ int main(void) {
                         long n1 = (td1 >= 0) ? t_readdir(td1, dbuf, sizeof(dbuf)) : -1;
                         if (td1 >= 0) (void)t_close(td1);
                         if (n0 <= 0 || n1 <= n0) {
-                            t_putstr("joey: net-2c-1 PROBE readdir did not grow after clone\n");
+                            t_putstr("joey: net-2c-2 PROBE readdir did not grow after clone\n");
                             return 1;
                         }
 
-                        // (e) the LAST clunk frees N (the only free path): close
-                        //     cl, then a re-clone REUSES N == 0 (proves the free;
-                        //     a leak would hand out 1).
+                        // (e) net-2c-2: drive the live `connect` verb on ctl (cl).
+                        //     smoltcp accepts the active-open synchronously (sets
+                        //     the tuple + SynSent before any wire reply), so the
+                        //     write returns the full count regardless of slirp.
+                        static const char dial[] = "connect 10.0.2.2!9";
+                        long wl = t_write(cl, dial, sizeof(dial) - 1);
+                        if (wl != (long)(sizeof(dial) - 1)) {
+                            t_putstr("joey: net-2c-2 PROBE ctl connect write FAILED\n");
+                            return 1;
+                        }
+
+                        // (f) `remote` reports the dialed target -- netd records
+                        //     it at connect, so this is deterministic and peer-
+                        //     independent (it does not depend on slirp replying).
+                        unsigned char eb[64];
+                        long rf = t_open(T_WALK_OPEN_FROM_ROOT, "/net/tcp/0/remote",
+                                         17, T_OREAD);
+                        long rl = (rf >= 0) ? t_read(rf, eb, sizeof(eb)) : -1;
+                        if (rf >= 0) (void)t_close(rf);
+                        if (rl <= 0 || !mem_contains(eb, (size_t)rl, "10.0.2.2!9", 10)) {
+                            t_putstr("joey: net-2c-2 PROBE remote != 10.0.2.2!9 FAILED\n");
+                            return 1;
+                        }
+
+                        // (g) `local` reports the source address + ephemeral port
+                        //     connect() assigned via the live iface -- proving the
+                        //     smoltcp stack folded into the connection table.
+                        long lf = t_open(T_WALK_OPEN_FROM_ROOT, "/net/tcp/0/local",
+                                         16, T_OREAD);
+                        long ll = (lf >= 0) ? t_read(lf, eb, sizeof(eb)) : -1;
+                        if (lf >= 0) (void)t_close(lf);
+                        if (ll <= 0 || !mem_contains(eb, (size_t)ll, "10.0.2.15!", 10)) {
+                            t_putstr("joey: net-2c-2 PROBE local != 10.0.2.15! FAILED\n");
+                            return 1;
+                        }
+
+                        // (h) `status` reads the live TCP state (exercise only --
+                        //     the exact state races slirp's reply, so not asserted).
+                        long stf = t_open(T_WALK_OPEN_FROM_ROOT, "/net/tcp/0/status",
+                                          17, T_OREAD);
+                        if (stf >= 0) {
+                            (void)t_read(stf, eb, sizeof(eb));
+                            (void)t_close(stf);
+                        }
+
+                        // (i) the LAST clunk frees N (the only free path): each
+                        //     endpoint fid above ref'd + unref'd N, leaving cl the
+                        //     sole holder. Close cl -> N freed; a re-clone REUSES 0
+                        //     (a refcount leak would hand out 1).
                         (void)t_close(cl);
                         long cl2 = t_open(T_WALK_OPEN_FROM_ROOT, "/net/tcp/clone",
                                           14, T_OREAD);
                         long rn = (cl2 >= 0) ? t_read(cl2, nb, sizeof(nb) - 1) : -1;
                         if (cl2 >= 0) (void)t_close(cl2);
                         if (rn != 1 || nb[0] != '0') {
-                            t_putstr("joey: net-2c-1 PROBE re-clone reuse FAILED\n");
+                            t_putstr("joey: net-2c-2 PROBE re-clone reuse FAILED\n");
                             return 1;
                         }
-                        t_putstr("joey: net-2c-1 PROBE OK (clone->0, 0/ctl->0, "
-                                 "readdir grew, clunk frees+reuses 0)\n");
+                        t_putstr("joey: net-2c-2 PROBE OK (clone->0, connect "
+                                 "10.0.2.2!9, local 10.0.2.15!, frees+reuses 0)\n");
                     }
 #endif
                 } else {

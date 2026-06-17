@@ -664,9 +664,22 @@ named in §2.)
   a #65 DoS floor). Boot proof: `clone`→0, `/net/tcp/0/ctl`→0, `Treaddir` grows
   with the live entry, the clunk frees + reuses 0. Pure userspace — kernel
   byte-unchanged. See `docs/reference/121-netd.md`.
-- **net-2c-2..net-8: not started.** Phase-8 work per §17 (net-2c-2 adds the
-  `socket-tcp` feature + the live `connect`/`data` path + the `ctl` verb parser +
-  the NIC-IRQ poll fd; net-2d the focused audit), sequenced before the container
-  runner (#70) per ROADMAP §2.2.
+- **net-2c-2: LANDED** — the live TCP data path. The `socket-tcp` smoltcp
+  feature; the `Net` table now owns the `Interface` + `SocketSet` (moved in
+  post-DHCP) so the 9P dispatch reaches the stack; `clone` reserves a real
+  `tcp::Socket` (freed at the last clunk — the §3.4 `ALLOCATED` state). The `ctl`
+  verb parser drives `connect a.b.c.d!port` (active-open: `socket.connect`, an
+  ephemeral local port since smoltcp requires a non-zero one) and `hangup`;
+  `announce`/options are honestly `EOPNOTSUPP` (net-3+). `status`/`local`/`remote`/
+  `err` report the live socket; `data` read/write is `recv_slice`/`send_slice`
+  (non-blocking — blocking/readiness is the net-6 dev9p.poll leg). Boot proof
+  (deterministic, peer-independent): `connect 10.0.2.2!9` → `remote 10.0.2.2!9` +
+  `local 10.0.2.15!…` + the multi-fid clunk frees + reuses `N`. The NIC-IRQ poll
+  fd is deferred (a pollable IRQ fd is a kernel ABI surface; the `poll_delay`-
+  clamped timeout poll is correct, ≤ 50 ms under load). Pure userspace — kernel
+  byte-unchanged. See `docs/reference/121-netd.md`.
+- **net-2d..net-8: not started.** Phase-8 work per §17 (net-2d the focused audit
+  over the netd surface), sequenced before the container runner (#70) per
+  ROADMAP §2.2.
 
 The thylacine is real. So is its network — and it is, of course, a filesystem.

@@ -15,11 +15,14 @@
 // leaves it running on READY, via `lifecycle = persistent`). net-2b-2 stood the
 // /net 9P server up: after the lease, netd posts /srv/net (9P-mode), then runs a
 // combined event loop that multiplexes the 9P server with the smoltcp stack;
-// joey mounts /srv/net at /net so the namespace inherits it. net-2c-1 (this
-// sub-chunk) grows the static skeleton into the live TCP fid state machine
-// (section 3.4): /net/tcp/clone mints a refcounted connection N, the /net/tcp/N/
-// directory + its files appear, Treaddir lists them, and the last clunk frees N.
-// The smoltcp socket reservation + the live connect/data path land at net-2c-2.
+// joey mounts /srv/net at /net so the namespace inherits it. net-2c-1 grew the
+// static skeleton into the live TCP fid state machine (section 3.4):
+// /net/tcp/clone mints a refcounted connection N, the /net/tcp/N/ directory +
+// its files appear, Treaddir lists them, and the last clunk frees N. net-2c-2
+// (this sub-chunk) makes it LIVE: clone reserves a real smoltcp TCP socket, the
+// Net table owns the interface + socket set, writing `ctl` "connect a!p"
+// active-opens, status/local/remote report the live socket, and data read/write
+// is recv/send. The last clunk frees N AND its socket.
 //
 // Diagnostics go to the console (`t_putstr`): a warden-spawned driver's stderr
 // is /dev/null. A long-lived service signals readiness by writing exactly one
@@ -303,22 +306,22 @@ impl Driver for NetD {
         // The resident event loop multiplexes the stack with the /net 9P server.
         // `t_poll` over [listener] + connections wakes on a 9P request; its
         // timeout is smoltcp's poll-delay hint (clamped), so on an idle tick the
-        // stack is still serviced (DHCP renew, ARP) at least that often. At
-        // net-2b-2 the only socket is DHCP (no data sockets), so a <=1s RX
-        // latency during an idle poll is fine; net-2c adds the NIC IRQ fd to the
-        // poll set for RX-driven wakeups once TCP/UDP data flows.
+        // stack is still serviced (DHCP renew, ARP) at least that often. With an
+        // active TCP socket smoltcp's hint is short, so the clamp floor governs
+        // (<=50ms RX latency under load). A pollable NIC-IRQ fd for RX-driven
+        // wakeups would need a kernel ABI surface (SYS_IRQ_WAIT blocks; it is not
+        // pollable) -- deferred; the timeout poll is correct, just not minimal.
         let mut conns: Vec<server::Conn> = Vec::new();
         // The global /net connection table (the section-3.4 fid state machine),
-        // shared across every 9P session netd accepts. net-2c-2 grows it to hold
-        // the smoltcp sockets (folding `sockets`/`iface` in alongside it).
-        let mut net = server::Net::new();
+        // shared across every 9P session netd accepts. It now OWNS the smoltcp
+        // interface + socket set (moved in here, post-DHCP) so the 9P data path
+        // reaches them; `device` stays local (only `net.poll` borrows it).
+        let mut net = server::Net::new(iface, sockets, base);
         let mut pollfds = [TPollFd::default(); 1 + server::MAX_CONNS];
         loop {
-            let ts = now(&base);
-            iface.poll(ts, &mut device, &mut sockets);
-            let delay = iface
-                .poll_delay(ts, &sockets)
-                .map(|d| d.total_millis())
+            net.poll(&mut device);
+            let delay = net
+                .poll_delay_ms()
                 .unwrap_or(IDLE_POLL_MAX_MS)
                 .clamp(IDLE_POLL_MIN_MS, IDLE_POLL_MAX_MS);
 
@@ -379,6 +382,11 @@ impl Driver for NetD {
                     conns.remove(i);
                 }
             }
+
+            // Flush any connect/send the dispatch just enqueued before sleeping,
+            // so a SYN/data egresses this tick rather than waiting for the next
+            // poll timeout.
+            net.poll(&mut device);
         }
     }
 }

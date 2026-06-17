@@ -237,13 +237,11 @@ Treaddir `count` and msize. So `/net/tcp` lists `clone`, `stats`, and every live
 `N/` directory — and the kernel's dev9p readdir issues `Treaddir`, not a legacy
 `Tread` stream, so this codec is required for `ls /net` to list at all.
 
-**Not yet (net-2c-2):** a slot carries *no smoltcp socket* at net-2c-1 — it is
-"N assigned" (`ALLOCATED`-without-wire). The smoltcp socket reservation, the
-`ctl` verb parser (`connect`/`announce`/`hangup`), live `data` recv/send, the
-`local`/`remote`/`status`/`err` content, and the NIC-IRQ poll fd land at
-net-2c-2, where the slot grows a `SocketHandle` and the iface folds into the
-shared `Net` context. So at net-2c-1 `data`/`local`/`remote`/`err` read empty and
-`status` reads `Closed`; only `ctl`(→`N`) + the tree/refcount machine are live.
+At net-2c-1 a slot carried *no smoltcp socket* — it was "N assigned"
+(`ALLOCATED`-without-wire), so `data`/`local`/`remote`/`err` read empty and
+`status` read `Closed`. **net-2c-2 made the connection live** (next section): the
+slot grows a real `SocketHandle`, the `ctl` verb parser drives `connect`, and the
+endpoint/status/data files report the live socket.
 
 **netd is single-threaded** (one Proc, one `serve()` loop): every 9P frame across
 every session is processed sequentially, so the global connection table (`Net`)
@@ -255,6 +253,56 @@ joey: net-2c-1 /net mounted (netd 9P server)
 joey: net-2c-1 PROBE OK (clone->0, 0/ctl->0, readdir grew, clunk frees+reuses 0)
 ```
 
+## net-2c-2: the live TCP data path
+
+net-2c-2 makes the net-2c-1 connection *live*. It is still pure userspace — the
+kernel is byte-unchanged; the only build change is the `socket-tcp` smoltcp
+feature.
+
+**The `Net` table owns the stack.** After the DHCP bring-up, `serve()` moves the
+smoltcp `Interface` + `SocketSet` into the `Net` table (which the 9P dispatch
+already holds `&mut`), so a `ctl`/`data` handler reaches both as disjoint fields.
+The `device` (the `phy::Device` over `VirtioNetPci`) stays a `serve()` local —
+`Net::poll(&mut device)` borrows it per call. The serve loop drives the stack
+through `net.poll` at the top of each iteration *and* again after dispatching a
+batch of 9P requests, so a just-enqueued SYN/data egresses that tick instead of
+waiting for the poll timeout.
+
+**The socket reserved at clone.** `clone` now reserves a real `tcp::Socket` (rx/tx
+`SocketBuffer`s, 4 KiB each) and stores its `SocketHandle` in the slot — the
+faithful §3.4 `ALLOCATED` state (one socket bound to the connection for its open
+lifetime). The last clunk (`slot_unref` → refs 0) `SocketSet::remove`s it, the
+*sole* free path, so the socket lifetime is exactly the connection's.
+
+**The `ctl` verb parser (§3.3).** Writing `ctl` parses one command:
+- `connect a.b.c.d!port` — active-open: `socket.connect(iface.context(), remote,
+  local)`. The local endpoint uses a rotating ephemeral port (49152..=65535;
+  smoltcp requires a non-zero local port — it auto-selects only the local
+  *address*). `connect()` sets the tuple + `SynSent` **synchronously**, so netd
+  records the resolved `local`/`remote` in the slot immediately (peer-independent).
+- `hangup` — active-close (`socket.close()`).
+- `announce`/`bind`/`keepalive`/`ttl`/`tos` — the server side + per-connection
+  options, rejected honestly (`EOPNOTSUPP`) not silently accepted; they land net-3+.
+
+**The connection files.** `status` reports the live `socket.state()` (`Syn-Sent`/
+`Established`/…); `local`/`remote` report the recorded `ip!port`; `err` reports a
+recorded failure reason. `data` is the byte stream: a write is `send_slice`, a
+read is `recv_slice` of available bytes. `data` I/O is **non-blocking** at
+net-2c-2 (a 0-length read is ambiguous between "no data yet" and EOF); blocking /
+readiness is the dev9p.poll leg (net-6).
+
+**Boot proof** (deterministic + peer-independent — it does not depend on slirp
+replying): the joey probe `clone`s, writes `connect 10.0.2.2!9` on the ctl fid
+(the write returns the full count → smoltcp accepted the active-open), then reads
+back `remote == 10.0.2.2!9` (the dialed target) and `local == 10.0.2.15!…` (the
+source address `connect()` selected via the live iface + the ephemeral port),
+proving the whole ctl→socket→iface→endpoint path. Each endpoint fid refs+unrefs
+`N`, and the final clunk frees + reuses `N` (the multi-fid refcount).
+
+```
+joey: net-2c-2 PROBE OK (clone->0, connect 10.0.2.2!9, local 10.0.2.15!, frees+reuses 0)
+```
+
 ## Data structures
 
 | Type | Role |
@@ -264,28 +312,30 @@ joey: net-2c-1 PROBE OK (clone->0, 0/ctl->0, readdir grew, clunk frees+reuses 0)
 | `NicRxToken { frame: Vec<u8> }` | owns one received frame (no device borrow) |
 | `NicTxToken<'a> { nic: &'a mut VirtioNetPci }` | the single `&mut nic` TX borrow |
 | `server::Conn` | one accepted 9P connection: fid table + `in_buf`/`out_buf` |
-| `server::Net` | the global connection table (`Slot[MAX_SLOTS]`) + live stats; shared `&mut` across all sessions (net-2c-2 folds in `iface`/`device`/`sockets`) |
-| `server::Slot { used, refs }` | one `/net/tcp/N/` connection: the refcount key (net-2c-2 adds the `SocketHandle` + state) |
+| `server::Net` | the global connection table (`Slot[MAX_SLOTS]`) + the smoltcp `iface`/`sockets` (folded in post-DHCP) + the ephemeral-port cursor + live stats; shared `&mut` across all sessions |
+| `server::Slot { used, refs, socket, local, remote, err }` | one `/net/tcp/N/` connection: the refcount key + its reserved `SocketHandle` + the recorded endpoints / err reason |
 
 ## Tests
 
 - **Boot proof** (the live path): `tools/test.sh` → the warden binds netd → the
   `netd: PASS … (DHCP)` line + lease `10.0.2.15/24` + `netd: serving /net` +
-  `4 bound, 3 up` + `joey: net-2c-1 /net mounted` + `net-2c-1 PROBE OK (clone->0,
-  0/ctl->0, readdir grew, clunk frees+reuses 0)` — the full §3.4 fid machine
-  exercised through the live dev9p 9P session: `clone` mints `N`, the dynamic
-  `/net/tcp/0/ctl` is reachable, `Treaddir` lists the dynamic entry (the kernel
-  parses netd's `Rreaddir`), and the clunk frees + reuses `N` — plus 930/930 +
-  boot OK + 0 EXTINCTION.
-- **SMP gate**: `tools/ci-smp-gate.sh` (default+UBSan × smp4/smp8) — netd is
+  `4 bound, 3 up` + `joey: net-2c-2 PROBE OK (clone->0, connect 10.0.2.2!9, local
+  10.0.2.15!, frees+reuses 0)` — the full §3.4 fid machine + the live data path
+  exercised through the live dev9p 9P session: `clone` mints `N` (reserving a
+  smoltcp socket), the `ctl` `connect` verb drives `socket.connect` (the write
+  returns the full count), `remote`/`local` read back the recorded endpoints, and
+  the multi-fid clunk frees + reuses `N` — plus 930/930 + boot OK + 0 EXTINCTION.
+- **SMP gate**: `tools/ci-smp-gate.sh` (default+UBSan × smp4/smp8, N=10) — netd is
   single-threaded; the boot probe exercises the (already-gated) kernel dev9p
-  client + the 9P clone/readdir/clunk traffic under SMP.
-- The ninep readdir codec + the fid machine are validated by the boot probe as an
+  client + the 9P clone/connect/readdir/clunk traffic + netd's live-socket path
+  under SMP. PASS, 0 corruption; every "timing"-classified boot is ground-truthed
+  guest-clean (boot OK + the net-2c-2 probe + 930/930 + 0 EXTINCTION, at login —
+  the harness post-marker exit artifact, not a guest defect).
+- The fid machine + the live connect path are validated by the boot probe as an
   **integration test** — netd builds the wire, the kernel dev9p client parses it,
   joey reads it back (two independent implementations cross-checking end-to-end),
   the same discipline as net-2b-2 + corvus (libthyla-rs is no_std with no host
-  test harness). The deterministic clone/connect coverage matures with net-2c-2's
-  live data path.
+  test harness). A `data` round-trip needs a real peer (deferred — see caveats).
 
 ## Error paths
 
@@ -316,9 +366,13 @@ joey: net-2c-1 PROBE OK (clone->0, 0/ctl->0, readdir grew, clunk frees+reuses 0)
   connection slots (last clunk frees `N`, the only free path), and the ninep
   `Treaddir` codec (`/net/tcp` lists its live `N/` directories). A slot is
   "N assigned" — no smoltcp socket yet. The kernel is byte-unchanged.
-- **net-2c-2**: the live data path — the `socket-tcp` feature, the smoltcp socket
-  reserved at clone, the `ctl` verb parser (`connect`/`announce`/`hangup`), `data`
-  recv/send, `local`/`remote`/`status`/`err`, and the NIC-IRQ poll fd.
+- **net-2c-2 (LANDED)**: the live TCP data path — the `socket-tcp` feature, the
+  smoltcp socket reserved at clone (freed at the last clunk), the `Net` table
+  owning the iface + socket set, the `ctl` verb parser (`connect`/`hangup` live;
+  `announce`/options → `EOPNOTSUPP`, net-3+), `data` recv/send (non-blocking), and
+  `status`/`local`/`remote`/`err`. The boot probe drives a live `connect` +
+  endpoint readback. The kernel is byte-unchanged. (The NIC-IRQ poll fd is
+  deferred — see the caveats.)
 - **net-2d**: the focused audit over the netd surface (the fid machine +
   connection-table SMP-safety + NIC ownership) + the ARCH §25.4 / CLAUDE.md
   audit-trigger enumeration + the SMP gate + close.
@@ -333,11 +387,22 @@ joey: net-2c-1 PROBE OK (clone->0, 0/ctl->0, readdir grew, clunk frees+reuses 0)
   only; `udp/`/`icmp/` keep just their `stats` file. The qid encoding reserves a
   `proto` field so udp/icmp connections slot in without a re-encode, but their
   sockets land with the protocol surface (post-net-2c).
-- **The 9P accept is poll-timeout-driven, not NIC-IRQ-woken** (net-2b-2): the
-  combined loop's `t_poll` timeout is smoltcp's `poll_delay` (clamped
-  `[50 ms, 1 s]`), so an RX frame during an idle poll waits ≤ 1 s. Through
-  net-2c-1 the only socket is DHCP (no data path), so this is fine; net-2c-2 adds
-  the NIC IRQ fd to the poll set for RX-driven wakeups once TCP data flows.
+- **The poll is timeout-driven, not NIC-IRQ-woken**: the combined loop's `t_poll`
+  timeout is smoltcp's `poll_delay` (clamped `[50 ms, 1 s]`). With an active TCP
+  socket smoltcp's hint is short, so the clamp floor governs (≤ 50 ms RX latency
+  under load). A *pollable* NIC-IRQ fd would need a kernel ABI surface
+  (`SYS_IRQ_WAIT` blocks; it is not pollable) — deferred; the timeout poll is
+  correct, just not minimal, and the post-dispatch `net.poll` flush keeps TX
+  prompt.
+- **`data` I/O is non-blocking** (net-2c-2): a `data` read returns the available
+  rx bytes, and a 0-length read is ambiguous between "no data yet" and EOF;
+  blocking/readiness is the dev9p.poll leg (net-6). A `data` round-trip needs a
+  real peer (QEMU slirp has no general TCP listener) — the net-2c-2 boot proof
+  covers the deterministic connect + endpoint readback; a round-trip is a manual
+  hostfwd test (or net-3's announce/listen loopback).
+- **The ephemeral local-port allocator is a rotating cursor** (49152..=65535), not
+  liveness-checked — at `MAX_SLOTS = 16` connections a collision after wrap is
+  astronomically unlikely; a checked allocator is a v1.x refinement.
 - **The connection table is bounded at `MAX_CONNS = 8`** and effectively
   single-session at v1.0 (joey's one `/net` mount drives one kernel dev9p-client
   session multiplexing all callers). Excess connections pend in the kernel; the
