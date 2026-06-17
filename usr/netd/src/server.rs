@@ -39,11 +39,14 @@ use libthyla_rs::{
     t_close, t_open, t_walk_create, T_GID_SYSTEM, T_OPATH, T_OREAD, T_PRINCIPAL_SYSTEM,
     T_WALK_OPEN_FROM_ROOT,
 };
-use smoltcp::iface::{Interface, SocketHandle, SocketSet};
-use smoltcp::phy::ChecksumCapabilities;
+use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
+use smoltcp::phy::{ChecksumCapabilities, Device, Loopback, Medium};
 use smoltcp::socket::{icmp, tcp, udp};
 use smoltcp::time::Instant as SmolInstant;
-use smoltcp::wire::{Icmpv4Packet, Icmpv4Repr, IpAddress, IpEndpoint, IpListenEndpoint};
+use smoltcp::wire::{
+    EthernetAddress, HardwareAddress, Icmpv4Packet, Icmpv4Repr, IpAddress, IpCidr, IpEndpoint,
+    IpListenEndpoint,
+};
 
 /// Max concurrent 9P connections the accept loop tracks. In practice the dev9p
 /// mount drives ONE kernel-client session; the headroom covers a future direct
@@ -128,6 +131,18 @@ const PING_PROBE_PAYLOAD: &[u8] = b"thylacine-net-3c";
 /// connection binds a distinct ident so smoltcp routes EchoReplies back to the
 /// connection that sent the matching EchoRequest.
 const ICMP_IDENT_BASE: u16 = 0x7c00;
+
+/// net-3d loopback E2E: a DETERMINISTIC in-guest round-trip self-test over an
+/// ISOLATED loopback stack (127.0.0.1/8) -- no NIC, no host. Unlike the gateway/
+/// DNS probes (host-coupled, best-effort), this is fully in-guest, so it is
+/// ASSERTED (a PASS/FAIL line in the boot log). LO_LOOPBACK_PORT is the fixed TCP
+/// listen port; LO_POLLS x LO_POLL_MS bounds each round-trip's poll loop (the
+/// loopback device loops synchronously, but smoltcp's ms-clock must advance for
+/// the TCP handshake timers, so a small per-poll sleep is used).
+const LO_LOOPBACK_PORT: u16 = 7711;
+const LO_POLLS: u32 = 200;
+const LO_POLL_MS: u64 = 2;
+const LO_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
 
 const P9_VERSION_9P2000_L: &[u8] = b"9P2000.L";
 
@@ -259,6 +274,13 @@ struct Slot {
     // request carries it so the matching reply routes back to this slot.
     // Meaningless unless proto == PROTO_ICMP.
     icmp_ident: u16,
+    // A monotonic mint generation (net-3d): every mint of this slot index stamps
+    // a fresh value from `Net.mint_seq`. A deferred accept records its listener's
+    // gen at registration; poll_accepts drops the pending if the slot's CURRENT
+    // gen differs (the slot was freed + re-minted out from under the pending), so
+    // a re-used index can never type-confuse the listener's `get::<tcp::Socket>`.
+    // 0 == a free / never-minted slot (next_gen never returns 0).
+    gen: u32,
 }
 
 impl Slot {
@@ -273,6 +295,7 @@ impl Slot {
             err: None,
             listen_ep: None,
             icmp_ident: 0,
+            gen: 0,
         }
     }
 }
@@ -291,6 +314,10 @@ struct PendingAccept {
     tag: u16,         // the held Tlopen tag to reply to
     fid: u32,         // the fid to rebind onto the accepted connection's ctl
     listening_n: u32, // the ANNOUNCED connection whose socket accepts the call
+    listening_gen: u32, // the listener slot's mint generation at registration;
+                      // poll_accepts drops the pending if it no longer matches
+                      // (the slot was freed + re-minted), so a re-used index
+                      // cannot type-confuse the listener's get::<tcp::Socket>.
 }
 
 /// A completed accept ready to deliver: the serve loop rebinds `fid` onto the
@@ -351,6 +378,8 @@ pub struct Net {
     icmp_opened: u32,     // total ICMP connections ever minted
     next_icmp_ident: u16, // rotating Echo identifier for the next icmp_clone
     icmp_seq: u16,        // rotating echo sequence number across all icmp sends
+    mint_seq: u32,        // monotonic slot mint generation (net-3d; stamped at
+    // every clone/accept_swap; the deferred-accept guard)
     // Deferred accepts: held listen Rlopens awaiting an inbound call (net-3a).
     pending: Vec<PendingAccept>,
 }
@@ -374,8 +403,20 @@ impl Net {
             icmp_opened: 0,
             next_icmp_ident: ICMP_IDENT_BASE,
             icmp_seq: 0,
+            mint_seq: 0,
             pending: Vec::new(),
         }
+    }
+
+    /// Stamp the next monotonic mint generation (net-3d). Never 0 (0 marks a free
+    /// / never-minted slot), so a freed slot's gen can never match a pending's
+    /// recorded generation by accident.
+    fn next_gen(&mut self) -> u32 {
+        self.mint_seq = self.mint_seq.wrapping_add(1);
+        if self.mint_seq == 0 {
+            self.mint_seq = 1;
+        }
+        self.mint_seq
     }
 
     /// smoltcp's monotonic timestamp (ms since `base`).
@@ -388,7 +429,7 @@ impl Net {
     /// batch of 9P requests, so a just-enqueued connect/send egresses this tick
     /// rather than waiting for the next poll timeout. `device` stays owned by
     /// the serve loop (only `iface.poll` borrows it).
-    pub fn poll(&mut self, device: &mut NicDevice) {
+    pub fn poll<D: Device + ?Sized>(&mut self, device: &mut D) {
         let ts = self.now();
         self.iface.poll(ts, device, &mut self.sockets);
     }
@@ -491,6 +532,7 @@ impl Net {
         // removed only when the last fid clunks (slot_unref -> refs 0).
         let rx = tcp::SocketBuffer::new(alloc::vec![0u8; TCP_RX_BUF]);
         let tx = tcp::SocketBuffer::new(alloc::vec![0u8; TCP_TX_BUF]);
+        let gen = self.next_gen();
         let h = self.sockets.add(tcp::Socket::new(rx, tx));
         self.slots[n] = Slot {
             used: true,
@@ -502,6 +544,7 @@ impl Net {
             err: None,
             listen_ep: None,
             icmp_ident: 0,
+            gen,
         };
         self.tcp_active += 1;
         self.tcp_opened += 1;
@@ -521,6 +564,7 @@ impl Net {
             alloc::vec![udp::PacketMetadata::EMPTY; UDP_META_SLOTS],
             alloc::vec![0u8; UDP_TX_BUF],
         );
+        let gen = self.next_gen();
         let h = self.sockets.add(udp::Socket::new(rx, tx));
         self.slots[n] = Slot {
             used: true,
@@ -532,6 +576,7 @@ impl Net {
             err: None,
             listen_ep: None,
             icmp_ident: 0,
+            gen,
         };
         self.udp_active += 1;
         self.udp_opened += 1;
@@ -560,6 +605,7 @@ impl Net {
             return None;
         }
         self.next_icmp_ident = self.next_icmp_ident.wrapping_add(1);
+        let gen = self.next_gen();
         let h = self.sockets.add(sock);
         self.slots[n] = Slot {
             used: true,
@@ -571,6 +617,7 @@ impl Net {
             err: None,
             listen_ep: None,
             icmp_ident: ident,
+            gen,
         };
         self.icmp_active += 1;
         self.icmp_opened += 1;
@@ -828,11 +875,24 @@ impl Net {
         if self.pending.len() >= MAX_PENDING_ACCEPTS {
             return false;
         }
+        // Record the listener's CURRENT mint generation: if the slot is freed +
+        // re-minted before the call lands, poll_accepts will see the gen differ
+        // and drop the pending rather than type-confuse the re-used index.
+        // listening_n is always a live in-range slot here (it is conn_n of a
+        // FK_LISTEN fid, parse_dec-bounded < MAX_SLOTS); the else is a fail-safe
+        // for an impossible input -- gen 0 is never a live slot's gen, so a stray
+        // pending recorded that way is dropped by poll_accepts, never a panic.
+        let listening_gen = if (listening_n as usize) < MAX_SLOTS {
+            self.slots[listening_n as usize].gen
+        } else {
+            0
+        };
         self.pending.push(PendingAccept {
             conn_id,
             tag,
             fid,
             listening_n,
+            listening_gen,
         });
         true
     }
@@ -843,6 +903,15 @@ impl Net {
     fn cancel_accept_tag(&mut self, conn_id: i64, oldtag: u16) {
         self.pending
             .retain(|p| !(p.conn_id == conn_id && p.tag == oldtag));
+    }
+
+    /// Cancel any deferred accept held by `fid` on `conn_id` (the fid is being
+    /// clunked). Without this, clunking the half-open listen fid would strand its
+    /// PendingAccept -- the entry would survive the fid that owned it, then resolve
+    /// against a re-minted slot (net-3d F1). A no-op if the fid holds no pending.
+    fn cancel_accept_fid(&mut self, conn_id: i64, fid: u32) {
+        self.pending
+            .retain(|p| !(p.conn_id == conn_id && p.fid == fid));
     }
 
     /// Drop every deferred accept a closing connection held (its listen fids go
@@ -884,7 +953,10 @@ impl Net {
             .get::<tcp::Socket>(established)
             .remote_endpoint();
         // N takes the fresh listener; M takes the established socket. Accept is
-        // TCP-only (UDP never announces), so M is a TCP slot.
+        // TCP-only (UDP never announces), so M is a TCP slot. N keeps its gen (it
+        // is the same listener, re-armed); only M, a freshly-minted slot, stamps
+        // a new one.
+        let mgen = self.next_gen();
         self.slots[n as usize].socket = Some(fresh);
         self.slots[m] = Slot {
             used: true,
@@ -896,6 +968,7 @@ impl Net {
             err: None,
             listen_ep: None,
             icmp_ident: 0,
+            gen: mgen,
         };
         self.tcp_active += 1;
         self.tcp_opened += 1;
@@ -910,11 +983,27 @@ impl Net {
         let mut i = 0;
         while i < self.pending.len() {
             let pa = self.pending[i];
+            // The listener must still be the SAME live TCP slot the pending
+            // registered against (net-3d F1/F2): the proto must be TCP (else the
+            // typed get::<tcp::Socket> below would PANIC on a re-minted UDP/ICMP
+            // slot) AND the mint generation must match (else the slot was freed +
+            // re-minted out from under a stranded pending). Either mismatch drops
+            // the pending. The deferred-listen fid is held busy (opened +
+            // clunk-cancel) AND pins N's refcount for the pending's whole
+            // lifetime, so a strand cannot arise today -- the proto arm makes the
+            // typed get::<tcp::Socket> below locally sound regardless, and the gen
+            // arm is the belt against a FUTURE refcount-pin regression.
+            if self.slot_proto(pa.listening_n) != Some(PROTO_TCP)
+                || self.slots[pa.listening_n as usize].gen != pa.listening_gen
+            {
+                self.pending.remove(i);
+                continue;
+            }
             let ready = match self.slot_socket(pa.listening_n) {
                 Some(h) => accept_ready(self.sockets.get::<tcp::Socket>(h)),
                 None => {
-                    // The listener vanished (should not happen: the listen fid
-                    // refs it). Drop defensively so it cannot spin.
+                    // Unreachable after the TCP+gen guard (a live TCP slot always
+                    // has a socket); drop defensively so it cannot spin.
                     self.pending.remove(i);
                     continue;
                 }
@@ -1350,6 +1439,161 @@ impl Net {
     }
 }
 
+/// The outcome of the net-3d loopback E2E (each leg deterministic, in-guest).
+pub struct LoopbackResult {
+    pub icmp: bool,
+    pub udp: bool,
+    pub tcp: bool,
+}
+
+impl LoopbackResult {
+    pub fn all_ok(&self) -> bool {
+        self.icmp && self.udp && self.tcp
+    }
+}
+
+/// net-3d: the DETERMINISTIC in-guest loopback E2E. Builds an ISOLATED loopback
+/// stack -- a smoltcp `Loopback` device (TX queue -> own RX) + an `Interface`
+/// (127.0.0.1/8) + its OWN `SocketSet` -- and runs three round-trips through the
+/// REAL `Net` methods (the proto-dispatch, the data path, and the net-3a
+/// deferred-accept `poll_accepts`/`accept_swap`). It is ISOLATED on purpose: a
+/// loopback iface sharing the live NIC `SocketSet` mis-routes (the NIC's default
+/// route steals the 127.0.0.1 egress -- proven from smoltcp source), so the
+/// self-test runs over a dedicated `Net`. No NIC, no host -> fully deterministic,
+/// so the caller ASSERTS it (a PASS/FAIL boot line), unlike the host-coupled
+/// gateway/DNS probes. Runs once at bring-up, then the lo `Net` is dropped.
+pub fn loopback_e2e(base: Instant) -> LoopbackResult {
+    // Ethernet medium (netd builds with medium-ethernet, like the NIC): the
+    // loopback ARPs for 127.0.0.1 (its own addr) and the request loops straight
+    // back to a reply, so the handshake completes -- the smoltcp loopback example
+    // shape. A locally-administered dummy MAC (02:..).
+    let mut device = Loopback::new(Medium::Ethernet);
+    let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress([
+        0x02, 0x00, 0x00, 0x00, 0x00, 0x01,
+    ])));
+    config.random_seed = LO_SEED;
+    let ts0 = SmolInstant::from_millis(base.elapsed().as_millis() as i64);
+    let mut iface = Interface::new(config, &mut device, ts0);
+    iface.update_ip_addrs(|a| {
+        let _ = a.push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8));
+    });
+    let mut lo = Net::new(iface, SocketSet::new(Vec::new()), base);
+    LoopbackResult {
+        icmp: lo_icmp_roundtrip(&mut lo, &mut device),
+        udp: lo_udp_roundtrip(&mut lo, &mut device),
+        tcp: lo_tcp_accept(&mut lo, &mut device),
+    }
+}
+
+/// Drive `lo` until `ready(lo)` or the poll budget is spent. The loopback device
+/// loops synchronously within `poll`, but smoltcp's ms-clock must advance for the
+/// TCP handshake timers, so a small per-poll sleep advances the real monotonic
+/// clock `now()` reads.
+fn lo_drive<F: FnMut(&mut Net) -> bool>(lo: &mut Net, device: &mut Loopback, mut ready: F) -> bool {
+    for _ in 0..LO_POLLS {
+        lo.poll(device);
+        if ready(lo) {
+            return true;
+        }
+        let _ = sleep(Duration::from_millis(LO_POLL_MS));
+    }
+    false
+}
+
+/// ICMP echo round-trip: a single icmp socket pings 127.0.0.1; the lo iface
+/// auto-replies to an echo to its own address, and routes the reply back by ident.
+fn lo_icmp_roundtrip(lo: &mut Net, device: &mut Loopback) -> bool {
+    let n = match lo.icmp_clone() {
+        Some(n) => n,
+        None => return false,
+    };
+    let _ = lo.icmp_connect(n, [127, 0, 0, 1]);
+    let _ = lo.data_send(n, b"thylacine-lo-icmp");
+    let mut buf = [0u8; 64];
+    let ok = lo_drive(lo, device, |lo| lo.data_recv(n, &mut buf) > 0);
+    lo.free_orphan_mint(n);
+    ok
+}
+
+/// UDP datagram round-trip: a udp socket bound to an ephemeral port re-points its
+/// remote at its OWN bound port and sends -- a self-addressed datagram loops back
+/// and is delivered to the same socket.
+fn lo_udp_roundtrip(lo: &mut Net, device: &mut Loopback) -> bool {
+    let n = match lo.udp_clone() {
+        Some(n) => n,
+        None => return false,
+    };
+    if lo.udp_connect(n, [127, 0, 0, 1], 9).is_err() {
+        lo.free_orphan_mint(n);
+        return false;
+    }
+    let pa = lo.slot_endpoint(n, true).map(|(_, p)| p).unwrap_or(0);
+    if pa == 0 {
+        lo.free_orphan_mint(n);
+        return false;
+    }
+    let _ = lo.udp_connect(n, [127, 0, 0, 1], pa); // re-point remote -> self
+    let _ = lo.data_send(n, b"thylacine-lo-udp");
+    let mut buf = [0u8; 64];
+    let ok = lo_drive(lo, device, |lo| lo.data_recv(n, &mut buf) > 0);
+    lo.free_orphan_mint(n);
+    ok
+}
+
+/// TCP inbound-accept round-trip: a listener (announce) + a client (connect to
+/// 127.0.0.1:port). The SYN loops back, the listener establishes, and a synthetic
+/// deferred accept resolves through the REAL net-3a path (poll_accepts ->
+/// accept_swap mints M) -- the F1-fixed code, exercised in-guest. The Conn-level
+/// fid rebind (complete_accept) is covered by the live /net mount; here we drive
+/// the Net half (no Conn fids).
+fn lo_tcp_accept(lo: &mut Net, device: &mut Loopback) -> bool {
+    let ln = match lo.tcp_clone() {
+        Some(n) => n,
+        None => return false,
+    };
+    let ep = IpListenEndpoint {
+        addr: None,
+        port: LO_LOOPBACK_PORT,
+    };
+    if lo.ctl_announce(ln, ep).is_err() {
+        lo.free_orphan_mint(ln);
+        return false;
+    }
+    let cn = match lo.tcp_clone() {
+        Some(n) => n,
+        None => {
+            lo.free_orphan_mint(ln);
+            return false;
+        }
+    };
+    if lo
+        .tcp_connect(cn, [127, 0, 0, 1], LO_LOOPBACK_PORT)
+        .is_err()
+    {
+        lo.free_orphan_mint(cn);
+        lo.free_orphan_mint(ln);
+        return false;
+    }
+    // Synthetic deferred accept (conn_id/tag/fid = 0): drives poll_accepts +
+    // accept_swap without a Conn fid table.
+    lo.register_accept(0, 0, 0, ln);
+    let ok = lo_drive(lo, device, |lo| {
+        let done = lo.poll_accepts();
+        if done.is_empty() {
+            return false;
+        }
+        // The inbound call was accepted (accept_swap minted M). Free the unowned
+        // mints (no Conn to deliver to).
+        for d in done {
+            lo.discard_accept(d);
+        }
+        true
+    });
+    lo.free_orphan_mint(cn);
+    lo.free_orphan_mint(ln);
+    ok
+}
+
 /// Parse a non-empty all-ASCII-decimal name into a connection number, bounded
 /// to the slot range. None on any non-digit, empty, or out-of-range name.
 fn parse_dec(name: &[u8]) -> Option<u32> {
@@ -1705,6 +1949,9 @@ impl Conn {
     fn fid_clunk(&mut self, net: &mut Net, fid: u32) -> bool {
         if let Some(i) = self.fid_find(fid) {
             let f = self.fids[i].take().unwrap();
+            // Cancel any deferred accept this fid held: clunking the half-open
+            // listen fid must not strand its PendingAccept (net-3d F1).
+            net.cancel_accept_fid(self.handle, fid);
             if let Some(n) = path_conn_n(f.path) {
                 net.slot_unref(n);
             }
@@ -2008,6 +2255,15 @@ impl Conn {
             }
             if !net.register_accept(self.handle, tag, a.fid, n) {
                 return self.err(tag, p9::E_NOMEM); // too many deferred accepts
+            }
+            // Mark the fid busy (net-3d F1): a committed-pending listen fid must
+            // not be walked-from or re-opened (h_walk/h_lopen reject opened fids),
+            // which would otherwise strand the PendingAccept. A clunk is handled
+            // separately by fid_clunk -> cancel_accept_fid. complete_accept's
+            // fid_set rebinds this fid onto the accepted ctl (fid_set ignores
+            // opened), so the busy mark does not block the legitimate completion.
+            if let Some(slot) = self.fids[i].as_mut() {
+                slot.opened = true;
             }
             self.defer = true; // dispatch emits no reply for this frame
             return Ok(0); // the 0 is ignored (defer is set)

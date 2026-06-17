@@ -319,6 +319,23 @@ impl Driver for NetD {
             server::PingProbe::MintFailed => say!("netd: net-3c ICMP probe: icmp_clone failed"),
         }
 
+        // net-3d: the DETERMINISTIC in-guest loopback E2E -- three round-trips
+        // (TCP inbound-accept, UDP datagram, ICMP echo) over an isolated 127.0.0.1
+        // stack. Unlike the host-coupled gateway/DNS probes above, this has NO host
+        // coupling, so it is ASSERTED: the PASS line is the boot proof that the
+        // net-3a deferred-accept path + the net-3b/c data paths round-trip in-guest.
+        let lo = server::loopback_e2e(base);
+        if lo.all_ok() {
+            say!("netd: net-3d loopback E2E PASS (tcp-accept + udp + icmp, in-guest 127.0.0.1)");
+        } else {
+            say!(
+                "netd: net-3d loopback E2E FAIL (tcp={} udp={} icmp={})",
+                lo.tcp,
+                lo.udp,
+                lo.icmp
+            );
+        }
+
         // Post the /net 9P service (9P-mode) into the boot namespace's /srv
         // BEFORE signaling READY: the warden's READY -> "left running" then also
         // means "/srv/net is posted", so joey (after its warden wait) is

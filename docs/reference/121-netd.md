@@ -475,6 +475,71 @@ net-3d** — the loopback interface auto-replies to an echo request addressed to
 own IP, so a `127.0.0.1` ping round-trips in-guest with no slirp/host coupling
 (joining the owed TCP-accept + UDP-datagram E2Es).
 
+## net-3d: the focused net-3 audit + the loopback E2E + the deferred-accept hardening
+
+net-3d closes net-3 with the focused audit (one Opus-4.8-max prosecutor + a
+concurrent self-audit) and delivers the three owed deterministic in-guest E2Es.
+
+**The audit found one real soundness hole (F1, P1):** a deferred-`listen` fid was
+left **half-open** (`opened == false`) with a committed `PendingAccept`. A native
+`/net` client could **clunk** it (clunk does not gate on `opened`) without
+removing the pending; the slot then frees and `clone` re-mints that index
+**cross-proto**, leaving a stranded `PendingAccept{listening_n=N}` with no
+generation guard → `poll_accepts` does `get::<tcp::Socket>` on a now-UDP/ICMP
+handle → a smoltcp **type-mismatch panic** → netd (the sole NIC owner, I-5
+non-transferable) aborts → a whole-network DoS (plus walk-from / double-defer /
+connection-hijack facets). Latent in-VM (the trusted kernel dev9p client abandons
+only via Tflush, which `h_flush` handles), but reachable from the open=connect
+native client the `MAX_CONNS` headroom anticipates — so, soundness-bar P1.
+
+**The fix is four complementary layers:**
+
+1. **A per-slot mint generation.** `Slot.gen` is stamped from a monotonic
+   `Net.mint_seq` (`next_gen()`, never 0) at every mint (`tcp_clone`/`udp_clone`/
+   `icmp_clone`, and `accept_swap` for the new `M`; the listener `N` keeps its gen
+   on re-arm — it is the same listener). `PendingAccept.listening_gen` records the
+   listener's gen at `register_accept`.
+2. **The `poll_accepts` guard.** Before the typed `get::<tcp::Socket>`, drop the
+   pending unless `slot_proto(listening_n) == Some(PROTO_TCP) && slots[listening_n]
+   .gen == pa.listening_gen`. A cross-proto re-mint fails the proto check; a
+   same-proto re-mint fails the gen check. Either way the panic becomes a harmless
+   drop, making the typed recovery **locally sound** regardless of the fid-pinning
+   invariant.
+3. **`cancel_accept_fid` on clunk.** `fid_clunk` cancels any pending the clunked
+   fid held, so clunking the half-open listen fid cannot strand its pending.
+4. **The listen fid is marked `opened = true`.** This blocks walk-from (`h_walk`)
+   and re-open / double-defer (`h_lopen`) via the existing `opened` gates;
+   `complete_accept`'s `fid_set` rebind ignores `opened`, so the legitimate
+   completion still works.
+
+**The loopback E2E (`server::loopback_e2e`)** delivers the three owed
+deterministic in-guest round-trips and serves as the **runtime regression** for
+the F1 fix. It builds an **isolated** loopback stack — a smoltcp `Loopback` device
+(TX queue → own RX) + an `Interface` (`127.0.0.1/8`) + its **own** `SocketSet` —
+and drives the **real** `Net` methods over it. The isolation is load-bearing: a
+loopback iface sharing the live NIC `SocketSet` mis-routes, because the NIC's
+default route steals the `127.0.0.1` egress (smoltcp's `tcp::Socket::dispatch`
+builds the IP repr from the socket's own tuple with no iface-address-ownership
+gate, then `route()` falls to the default route — verified in the smoltcp 0.12
+source). The three legs:
+
+- **TCP inbound-accept**: announce a listener + connect a client to
+  `127.0.0.1:port`; the SYN loops back, the listener establishes, and a synthetic
+  `register_accept` resolves through the real `poll_accepts` → `accept_swap` (the
+  F1-fixed path).
+- **UDP datagram**: a udp socket re-points its remote at its own bound port and
+  sends — a self-addressed datagram loops back to the same socket.
+- **ICMP echo**: a single icmp socket pings `127.0.0.1`; the iface auto-replies to
+  an echo to its own address and routes the reply back by ident.
+
+With no host coupling the E2E is **asserted** (a PASS/FAIL boot line), unlike the
+host-coupled gateway/DNS probes. `Net::poll` was made generic over the device so
+the lo self-test can poll a `Loopback`; the live NIC path is unchanged.
+
+```
+netd: net-3d loopback E2E PASS (tcp-accept + udp + icmp, in-guest 127.0.0.1)
+```
+
 ## Data structures
 
 | Type | Role |
@@ -485,12 +550,13 @@ own IP, so a `127.0.0.1` ping round-trips in-guest with no slirp/host coupling
 | `NicTxToken<'a> { nic: &'a mut VirtioNetPci }` | the single `&mut nic` TX borrow |
 | `server::Conn` | one accepted 9P connection: fid table + `in_buf`/`out_buf` |
 | `server::Net` | the global connection table (`Slot[MAX_SLOTS]`) + the smoltcp `iface`/`sockets` (folded in post-DHCP) + the ephemeral-port cursor + live stats; shared `&mut` across all sessions |
-| `server::Slot { used, refs, proto, socket, local, remote, err, listen_ep, icmp_ident }` | one `/net/<proto>/N/` connection: the refcount key + its protocol (TCP/UDP/ICMP — the `get::<T>()` discriminator) + its reserved `SocketHandle` + the recorded endpoints / err reason + the announce endpoint (TCP-only; re-arm key) + the bound Echo ident (ICMP-only) |
-| `server::PendingAccept { conn_id, tag, fid, listening_n }` | a held `listen` Rlopen awaiting an inbound call (the deferred-reply state); bounded by `MAX_PENDING_ACCEPTS = 16` |
+| `server::Slot { used, refs, proto, socket, local, remote, err, listen_ep, icmp_ident, gen }` | one `/net/<proto>/N/` connection: the refcount key + its protocol (TCP/UDP/ICMP — the `get::<T>()` discriminator) + its reserved `SocketHandle` + the recorded endpoints / err reason + the announce endpoint (TCP-only; re-arm key) + the bound Echo ident (ICMP-only) + the monotonic mint `gen` (net-3d; the deferred-accept slot-reuse guard) |
+| `server::PendingAccept { conn_id, tag, fid, listening_n, listening_gen }` | a held `listen` Rlopen awaiting an inbound call (the deferred-reply state); bounded by `MAX_PENDING_ACCEPTS = 16`; `listening_gen` (net-3d) pins the listener slot's mint generation so a freed+re-minted index can never type-confuse `poll_accepts` |
 | `server::AcceptDone { conn_id, tag, fid, new_n, ctl_qid_path }` | a completed accept the serve loop delivers (opaque to `main.rs`, routed by `conn_id()`) |
 | `enum Disp { Reply(usize), Deferred, Fatal }` | the per-request dispatch outcome — `Deferred` holds the reply (a blocking listen) |
 | `enum DnsProbe { Ok{resp_len,ancount}, NoResponse, MintFailed }` | the net-3b best-effort UDP-round-trip demo outcome (logged, never a boot gate) |
 | `enum PingProbe { Ok{reply_len}, NoResponse, MintFailed }` | the net-3c best-effort ICMP-ping demo outcome (logged, never a boot gate) |
+| `server::LoopbackResult { icmp, udp, tcp }` | the net-3d in-guest loopback E2E outcome (each leg deterministic, ASSERTED via the PASS/FAIL boot line) |
 
 ## Tests
 
@@ -600,6 +666,21 @@ own IP, so a `127.0.0.1` ping round-trips in-guest with no slirp/host coupling
   best-effort framing). The deterministic in-guest ICMP round-trip E2E is owed to
   net-3d (the loopback interface auto-replies to an echo to its own IP). The
   focused audit over the whole net-3 surface is net-3d.
+- **net-3d (LANDED)**: the focused net-3 audit (Opus-4.8-max prosecutor +
+  concurrent self-audit) + the deterministic in-guest loopback E2E. The audit
+  found **F1 [P1]** — a half-open deferred-`listen` fid stranded a
+  generation-less `PendingAccept`, so a clunk + cross-proto slot re-mint drove a
+  wrong-proto `get::<tcp::Socket>` panic (a whole-network DoS) — fixed by a
+  per-slot mint generation + the `poll_accepts` proto+gen guard + a
+  `cancel_accept_fid`-on-clunk + marking the listen fid `opened` (the panic and
+  every strand facet — walk-from / double-defer / hijack — closed). **F2 [P2]**
+  (poll_accepts gated on liveness not proto) folds into the same guard; **F3/F4**
+  + SA-2/SA-3 are P3 doc caveats below. The **loopback E2E** (an isolated
+  `127.0.0.1` stack driving the real `Net` methods) delivers the three owed
+  deterministic in-guest round-trips (TCP inbound-accept, UDP datagram, ICMP echo)
+  — the TCP leg is the runtime regression for the F1 fix. The kernel is
+  byte-unchanged (pure userspace). Boot proof: `net-3d loopback E2E PASS` + 930/930
+  + boot OK + 0 EXTINCTION; SMP gate clean. (`memory/audit_net3_closed_list.md`.)
 
 ## Known caveats / seams
 
@@ -607,11 +688,33 @@ own IP, so a `127.0.0.1` ping round-trips in-guest with no slirp/host coupling
   the listener, a second inbound SYN finds the announce connection mid-establish
   (no listener) → RST. A proper backlog (several listening sockets per announce,
   the Plan 9 listen queue) is a v1.x refinement.
-- **The inbound-accept E2E is owed to net-3d** (net-3a): the announce + listen
-  *gate* is boot-proven deterministically, but a real call → a held Rlopen → a
-  fresh connection needs a deterministic in-guest inbound path (slirp does not loop
-  a guest→self connection back; there is no host actor at boot). net-3d adds one —
-  the recommended path is a netd loopback interface (`127.0.0.0/8`).
+- **The inbound-accept E2E landed at net-3d** (was owed by net-3a): the
+  deterministic in-guest inbound path is the netd loopback interface
+  (`127.0.0.1/8`) — the `loopback_e2e` TCP leg announces + connects + resolves a
+  synthetic deferred accept through the real `poll_accepts`/`accept_swap`. The lo
+  stack is **isolated** (its own `SocketSet`) because a loopback iface sharing the
+  live NIC socket set mis-routes (the NIC default route steals the `127.0.0.1`
+  egress — verified in the smoltcp source).
+- **The ICMP Echo-ident allocator is liveness-unchecked** (net-3c; net-3d F3): a
+  collision needs 65536 `icmp_clone`s to wrap onto a live slot's ident
+  (`MAX_SLOTS = 16`), and is benign if hit (a ping reply mis-delivered to the wrong
+  `/net/icmp` conn — smoltcp's `bind(Ident)` does not reject a duplicate — never a
+  panic/UAF). A liveness-checked allocator is the v1.x refinement, parallel to the
+  ephemeral-port one.
+- **A full-table deferred accept buffers the inbound call** (net-3d F4): when an
+  accept lands but the slot table is full (`MAX_SLOTS = 16` live connections),
+  `poll_accepts` leaves the pending and retries — the established call sits in the
+  listener's socket until a slot frees. Liveness, not safety (the pending is
+  bounded by `MAX_PENDING_ACCEPTS`; no leak/panic). Tracked with the #65
+  resource-floor seam.
+- **An oversize ICMP `data` payload fails closed** (net-3c; net-3d SA-2): a write
+  whose payload + 8-byte header exceeds `ICMP_TX_BUF` returns 0 (`send_slice` Err),
+  never a panic/OOB — a ping payload is normally tiny.
+- **The announce/ctl fid keeps the listener alive** (net-3d SA-3): a completed
+  accept rebinds the `listen` fid onto the accepted connection, so a client that
+  clunked its announce/ctl fid (holding only the listen fid) frees the re-armed
+  listener on accept. The Plan 9 idiom — keep the announce fd open to keep
+  listening.
 - **`readdir` lands at net-2c-1**: `/net` directories now list via `Treaddir`
   (the ninep readdir codec). A `Tread` on a directory still returns `EISDIR` (the
   9P2000.L convention — directory enumeration is `Treaddir`, and the kernel dev9p

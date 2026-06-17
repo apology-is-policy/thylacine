@@ -742,8 +742,23 @@ named in §2.)
   feature is the only new dependency; pure userspace — kernel byte-unchanged. The
   deterministic in-guest ICMP round-trip E2E is owed to net-3d (the loopback iface
   auto-replies to an echo to its own IP). See `docs/reference/121-netd.md`.
-- **net-3d, net-4..net-8: not started.** net-3d (the focused net-3 audit + the
-  inbound-accept + UDP/ICMP-loopback E2E via a netd loopback interface); then
-  net-4..net-8 per §17, sequenced before the container runner (#70) per ROADMAP §2.2.
+- **net-3d: LANDED** — the focused net-3 audit (one Opus-4.8-max prosecutor + a
+  concurrent self-audit) + the deterministic in-guest loopback E2E. The audit
+  found **F1 [P1]**: a half-open deferred-`listen` fid stranded a generation-less
+  `PendingAccept`, so a clunk + cross-proto slot re-mint drove a wrong-proto
+  `get::<tcp::Socket>` panic (a whole-network DoS) — fixed by a per-slot mint
+  generation + the `poll_accepts` proto+gen guard + a `cancel_accept_fid`-on-clunk
+  + marking the listen fid `opened` (every strand facet closed). **F2 [P2]** folds
+  into the guard; **F3/F4** are P3 doc caveats. The **loopback E2E** (an isolated
+  `127.0.0.1` stack driving the real `Net` methods) delivers the three owed
+  deterministic in-guest round-trips (TCP inbound-accept, UDP datagram, ICMP echo)
+  — the TCP leg is the runtime regression for the F1 fix. The isolation is
+  load-bearing: a loopback iface sharing the live NIC socket set mis-routes (the
+  NIC default route steals the `127.0.0.1` egress, verified in the smoltcp source).
+  Pure userspace; the kernel is byte-unchanged. `memory/audit_net3_closed_list.md`.
+- **net-4..net-8: not started.** net-4 (cs/dns/ndb + ipconfig/DHCP), net-5
+  (socket-compat pouch boundary-line), net-6 (`dev9p.poll` + `net_poll.tla` — ABI),
+  net-7 (TLS + SNTP + `SYS_CLOCK_SETTIME` — ABI), net-8 (exit criteria + audit),
+  per §17, sequenced before the container runner (#70) per ROADMAP §2.2.
 
 The thylacine is real. So is its network — and it is, of course, a filesystem.
