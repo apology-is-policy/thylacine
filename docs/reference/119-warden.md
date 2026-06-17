@@ -51,8 +51,15 @@ hardware-free.
    one `BoundResources`, so the authority the kernel enforces and the resources
    the driver maps cannot drift -- then spawn the driver `/<name>` with the
    descriptor as argv[1], `CAP_HW_CREATE`, and the narrowed allowance, and watch
-   it declare itself (`await_readiness`). Returns one `RunOutcome` (Served /
-   Exited / HardFail).
+   it declare itself (`await_readiness`). A **persistent** driver additionally
+   gets `cmd.perm(MAY_POST_SERVICE)` (net-2b-2): a persistent service serves a
+   namespace -- it posts a `/srv` listener (`netd` posts `/srv/net`), which the
+   kernel gates on `PROC_FLAG_MAY_POST_SERVICE`. The warden may confer it because
+   joey grants the warden the bit at spawn (`t_spawn_with_perms`), and the
+   kernel's per-bit grant gate (console-attached OR already-holds) lets a
+   bit-holder re-confer it -- the one-hop delegation joey -> warden -> driver. A
+   transient driver serves no namespace and is conferred nothing. Returns one
+   `RunOutcome` (Served / Exited / HardFail).
 5. **Supervise** (`supervise`, 5e): loop `run_once` under the pure
    `libdriver::supervise::next_step` decision (host-tested) -- restart a crash
    with back-off, bounded, per the manifest's `restart` policy, until the device

@@ -40,7 +40,7 @@ use libthyla_rs::io::{slurp_capped, Read};
 use libthyla_rs::poll::{PollEvents, PollSet, PollTimeout};
 use libthyla_rs::process::{Child, Command, ExitStatus, Stdio};
 use libthyla_rs::time::{sleep, Duration};
-use libthyla_rs::T_CAP_HW_CREATE;
+use libthyla_rs::{T_CAP_HW_CREATE, T_SPAWN_PERM_MAY_POST_SERVICE};
 
 use libdriver::driver::to_allowance;
 use libdriver::{
@@ -562,6 +562,19 @@ fn run_once(m: &Manifest, grant: &BoundResources) -> RunOutcome {
 
     let mut cmd = Command::new(bin.as_str());
     cmd.arg(desc).caps(T_CAP_HW_CREATE).allowance(allow);
+    // A persistent service serves a namespace -- it posts a /srv listener (netd
+    // posts /srv/net for joey to mount at /net), which requires
+    // PROC_FLAG_MAY_POST_SERVICE. The warden confers it here, one hop: joey
+    // grants the warden the bit at spawn (joey is console-attached + holds it),
+    // so the kernel's per-bit grant gate (console-attached OR already-holds)
+    // lets the warden confer it without being console-attached itself (the
+    // #827b one-hop delegation, extended joey->warden->netd). Gated on the
+    // persistent lifecycle: a transient driver (the DeviceRemoved demo) serves
+    // no namespace and is conferred nothing -- the grant is exactly as narrow as
+    // the service that needs it.
+    if m.lifecycle == Lifecycle::Persistent {
+        cmd.perm(T_SPAWN_PERM_MAY_POST_SERVICE);
+    }
     // The boot-probe warden has no stdio fds of its own (joey spawns it without
     // any), so Command's default Stdio::Inherit -- which bumps the parent's fd
     // 0/1/2 -- would fail before the kernel even resolves the binary. stdin +

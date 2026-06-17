@@ -145,7 +145,55 @@ The resident loop honors smoltcp's `poll_delay` hint, clamped to `[50 ms, 1 s]`:
 a floor that forecloses a 0 ms busy-spin (the #108 idle-spin class), a ceiling
 that keeps netd responsive and bounds the idle-wakeup rate. With no active
 sockets the hint is the DHCP renew deadline, so an idle netd wakes ~once/second.
-net-2b-2 replaces this loop with the IRQ + 9P-accept multiplexed event loop.
+net-2b-2 folds the 9P accept into this loop.
+
+## net-2b-2: the 9P /net server
+
+net-2b-2 stands the `/net` server up. After the lease, netd **posts `/srv/net`**
+(9P-mode) and then runs a **combined event loop** that multiplexes the static
+`/net` 9P tree (`server.rs`) with the smoltcp stack — `READY` is signalled
+*after* the post, so the warden's "left running" also means "the service is up".
+
+**The directory skeleton** (NET-DESIGN.md §3.1, the read-only subset): `/net`
+root → `tcp/`, `udp/`, `icmp/` directories, each with a `stats` file (honestly
+zeroed counters at net-2b-2). It is served by a static node table (`server.rs`),
+where the array index is the qid path. The `clone`→socket fid machine (§3.4) and
+live counters are net-2c — serving a `clone` with no socket behind it would be a
+half-built fid machine, so the skeleton deliberately stops at walkable dirs + a
+readable file (the proof the mount path works), and net-2c grows it.
+
+**Posting the service requires `PROC_FLAG_MAY_POST_SERVICE`** (the kernel
+`devsrv_post_listener` gate), which a warden-spawned driver does not inherit. The
+warden confers it — gated on `lifecycle = persistent` (a persistent service is
+exactly the one that serves a namespace) — and the warden may confer it because
+joey grants the warden the bit at spawn (`t_spawn_with_perms`; joey is
+console-attached *and* holds the bit, so the kernel's per-bit grant gate
+[console-attached OR already-holds] passes). This is the #827b one-hop delegation
+extended one hop: **joey → warden → netd**. A transient driver serves no
+namespace and is conferred nothing.
+
+**The combined loop**: `t_poll` over `[listener] + connections` with the
+poll-delay hint as the timeout. A 9P request wakes the loop immediately; on an
+idle timeout the stack is still serviced (DHCP renew, ARP) at least that often.
+Each accepted connection is a `server::Conn` (a fid table + framing buffers); a
+read drains every complete frame and dispatches it (Tversion / Tattach / Twalk /
+Tlopen / Tread / Tgetattr / Tclunk). **`Tgetattr` is load-bearing**: it reports
+the security trio (mode `0555`/`0444`, uid/gid `SYSTEM`) the kernel's A-3 dev9p
+per-component X-search reads — an unfilled trio fails closed and denies the walk,
+and the world-`r-x` mode keeps `/net` usable by every logged-in session.
+
+**joey mounts it**: post-pivot (after the `/srv` re-graft, before logins inherit
+the namespace), `t_open("/srv/net", OREAD)` (9P-mode open=connect → a dev9p root)
++ `t_mount("/net", …, MREPL)`. `t_mount` bumps the root's refcount, so the 9P
+session to netd stays alive after joey closes its connect fd. A missing
+`/srv/net` (netd gave up / no NIC) is non-fatal — `/net` is simply absent.
+
+```
+netd: serving /net (9P over /srv/net)
+warden: netd pid=… up (READY) -> serving (persistent; left running)
+joey: net-2b-2 /net mounted (netd 9P server)
+joey: net-2b-2 PROBE /net/tcp/stats OK (43 bytes)
+```
 
 ## Data structures
 
@@ -155,15 +203,22 @@ net-2b-2 replaces this loop with the IRQ + 9P-accept multiplexed event loop.
 | `NicDevice { nic: VirtioNetPci }` | the smoltcp `phy::Device` adapter |
 | `NicRxToken { frame: Vec<u8> }` | owns one received frame (no device borrow) |
 | `NicTxToken<'a> { nic: &'a mut VirtioNetPci }` | the single `&mut nic` TX borrow |
+| `server::Conn` | one accepted 9P connection: fid table + `in_buf`/`out_buf` |
+| `server::NODES` | the static `/net` node table (index == qid path) |
 
 ## Tests
 
 - **Boot proof** (the live path): `tools/test.sh` → the warden binds netd → the
-  `netd: PASS … (DHCP)` line + lease `10.0.2.15/24` + `4 bound, 3 up` + boot OK.
+  `netd: PASS … (DHCP)` line + lease `10.0.2.15/24` + `netd: serving /net` +
+  `4 bound, 3 up` + `joey: net-2b-2 /net mounted` + `PROBE /net/tcp/stats OK
+  (43 bytes)` (the multi-component walk + file read through the live 9P session) +
+  930/930 + boot OK + 0 EXTINCTION.
 - **SMP gate**: `tools/ci-smp-gate.sh` (default+UBSan × smp4/smp8) — netd is
-  single-threaded over the already-gated kernel PCI/IRQ/DMA surface.
-- The smoltcp glue (the phy tokens) is exercised by the live DHCP exchange;
-  host-level unit tests for the fid state machine arrive with net-2c.
+  single-threaded; the new boot mount exercises the (already-gated) kernel dev9p
+  client + mount path under SMP.
+- The smoltcp glue (the phy tokens) is exercised by the live DHCP exchange; the
+  9P server is exercised by joey's mount + probe; host-level unit tests for the
+  fid state machine arrive with net-2c (the deterministic clone/connect coverage).
 
 ## Error paths
 
@@ -182,9 +237,13 @@ net-2b-2 replaces this loop with the IRQ + 9P-accept multiplexed event loop.
 - **net-2b-1 (LANDED)**: the persistent lifecycle — the libdriver `Lifecycle`
   manifest field + the warden's leave-running-on-`READY` policy; netd signals
   `READY` and stays resident in the stack-poll loop. The kernel is byte-unchanged.
-- **net-2b-2**: the 9P `/net` server (the corvus precedent + `libthyla_rs::ninep`)
-  — posts to `/srv/net`, serves the NET-DESIGN.md §3.1 `/net` directory schema,
-  joey mounts it at `/net`; the resident loop multiplexes the NIC IRQ + 9P accept.
+- **net-2b-2 (LANDED)**: the 9P `/net` server (`server.rs`, the corvus precedent +
+  `libthyla_rs::ninep`) — posts `/srv/net`, serves the NET-DESIGN.md §3.1 directory
+  skeleton (`tcp/udp/icmp` + `stats`), joey mounts it at `/net`; the resident loop
+  multiplexes the 9P accept with the stack. The MAY_POST_SERVICE conferral
+  (joey→warden→netd, gated on the persistent lifecycle) is the only new privilege
+  surface; the kernel is byte-unchanged (pure userspace). Boot proof: `/net`
+  mounted + `/net/tcp/stats` walked+read (43 bytes).
 - **net-2c**: the `/net/tcp` `clone`/`connect`/`data` client path + the §3.4 fid
   state machine (one fid ↔ one smoltcp socket; N reuse gated on clunk).
 - **net-2d**: the focused audit over the netd surface + the ARCH §25.4 /
@@ -192,14 +251,20 @@ net-2b-2 replaces this loop with the IRQ + 9P-accept multiplexed event loop.
 
 ## Known caveats / seams
 
-- **No 9P server until net-2b-2.** net-2b-1 makes netd resident (it holds the link
-  + signals `READY`), but it does not yet post `/srv/net` or serve the `/net` tree
-  — `serves = "/net"` is the declared (not-yet-realized) path. net-2b-2 lands the
-  9P server + the joey mount.
-- **The resident loop is sleep-poll, not IRQ-driven** (net-2b-1): it honors
-  smoltcp's `poll_delay` (clamped `[50 ms, 1 s]`), idle-light but not woken
-  promptly by RX. net-2b-2's serve loop integrates the NIC IRQ + the 9P accept
-  poll for a properly event-driven persistent loop.
+- **No `readdir` yet** (net-2b-2): the skeleton dirs are walkable-by-name but a
+  `Tread`/`Treaddir` on a directory returns `EISDIR`/`ENOSYS`, so `ls /net` does
+  not list yet. `readdir` pairs with net-2c's `clone`-minted numbered connection
+  directories (which need listing) — it lands there, not as a half-feature now.
+- **The 9P accept is poll-timeout-driven, not NIC-IRQ-woken** (net-2b-2): the
+  combined loop's `t_poll` timeout is smoltcp's `poll_delay` (clamped
+  `[50 ms, 1 s]`), so an RX frame during an idle poll waits ≤ 1 s. At net-2b-2 the
+  only socket is DHCP (no data path), so this is fine; net-2c adds the NIC IRQ fd
+  to the poll set for RX-driven wakeups once TCP/UDP data flows.
+- **The connection table is bounded at `MAX_CONNS = 8`** and effectively
+  single-session at v1.0 (joey's one `/net` mount drives one kernel dev9p-client
+  session multiplexing all callers). Excess connections pend in the kernel; the
+  only connectors are trusted (the kernel dev9p client + joey's mount). net-2d
+  prosecutes the connection-table + fid-machine SMP-safety.
 - **smoltcp owns wire-protocol correctness** (its authors spec'd it); netd's
   state machine (net-2c) wraps *a* socket abstraction, so the recorded fallback
   (a Plan 9 IP-stack port, NET-DESIGN.md §14) would not change `/net`.

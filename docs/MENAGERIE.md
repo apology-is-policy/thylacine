@@ -203,7 +203,15 @@ TCB; the drivers under it are not. Responsibilities:
   warden's lifecycle governs end-to-end: on `READY` it is torn down via
   `DeviceRemoved`, on a self-exit it is reaped. `DeviceRemoved` is thus the
   *transient* teardown and the crash-restart primitive run forward — a persistent
-  service reaches it only on a real removal, crash, or shutdown.
+  service reaches it only on a real removal, crash, or shutdown. A persistent
+  service also serves a namespace — it posts a `/srv` listener (e.g. `netd` posts
+  `/srv/net` for joey to mount at `/net`), which requires
+  `PROC_FLAG_MAY_POST_SERVICE`. The warden confers it **only on a persistent
+  driver** (`cmd.perm(MAY_POST_SERVICE)`), and may do so because the warden was
+  itself granted the bit by joey at spawn — the kernel's per-bit grant gate
+  (console-attached OR already-holds) lets a bit-holder re-confer it. This is the
+  one-hop service-post delegation joey → warden → driver; a transient driver
+  serves no namespace and is conferred nothing.
 
 The warden owns **all** grant decisions — one auditable chokepoint. Bus drivers are
 *sources that report to it*, never spawners of their own children (which would

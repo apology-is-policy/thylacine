@@ -644,8 +644,19 @@ named in §2.)
   proving the whole lower stack (Ethernet/ARP/UDP/DHCP) end-to-end. The NIC owner
   *is* the stack Proc (I-5 non-transferable handles). See
   `docs/reference/121-netd.md`.
-- **net-2b..net-8: not started.** Phase-8 work per §17 (net-2b adds the
-  persistent 9P `/net` server + the §3.4 fid state machine), sequenced before the
-  container runner (#70) per ROADMAP §2.2.
+- **net-2b-1: LANDED** — `netd` is a *persistent* service: the libdriver
+  `Lifecycle` manifest field + the warden's leave-running-on-`READY` policy keep
+  it resident past the bind phase (the transient `netdev-driver` MMIO demo still
+  exercises the `DeviceRemoved` teardown).
+- **net-2b-2: LANDED** — the 9P `/net` server. `netd` posts `/srv/net` (9P-mode)
+  and serves the §3.1 directory skeleton (`tcp/udp/icmp` + a read-only `stats`
+  file each) over a combined accept/stack event loop; joey mounts it at `/net`
+  (post-pivot, so every login inherits it). Posting requires
+  `MAY_POST_SERVICE`, conferred joey→warden→netd (gated on the persistent
+  lifecycle). The `clone`→socket fid machine (§3.4) + live counters are net-2c.
+  See `docs/reference/121-netd.md`.
+- **net-2c..net-8: not started.** Phase-8 work per §17 (net-2c adds the
+  `/net/tcp` `clone`/`connect`/`data` path + the §3.4 fid state machine),
+  sequenced before the container runner (#70) per ROADMAP §2.2.
 
 The thylacine is real. So is its network — and it is, of course, a filesystem.

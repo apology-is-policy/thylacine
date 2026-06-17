@@ -8,17 +8,21 @@
 // warden-binds-narrowed model: netd is just the netdev-pci-driver evolved from
 // the ARP-proof demo into the real daemon, conferred exactly the NIC.
 //
-// net-2a (THIS sub-chunk) proves smoltcp lives on the PCI NIC: it brings the
-// link up by acquiring a DHCP lease from QEMU's slirp (10.0.2.15) -- exercising
-// the whole lower stack (Ethernet TX/RX over the BAR-mapped virtqueues, ARP,
-// UDP, and the DHCP client state machine) end-to-end through smoltcp. It is a
-// ONE-SHOT proof: on a lease it prints PASS and exits 0, so the warden reaps it
-// as Up with NO teardown logic involved. net-2b makes netd a persistent 9P
-// server for /net.
+// netd brings the link up by acquiring a DHCP lease from QEMU's slirp
+// (10.0.2.15) -- exercising the whole lower stack (Ethernet TX/RX over the
+// BAR-mapped virtqueues, ARP, UDP, and the DHCP client state machine) end-to-end
+// through smoltcp (net-2a). net-2b-1 made it a PERSISTENT service (the warden
+// leaves it running on READY, via `lifecycle = persistent`). net-2b-2 (this
+// sub-chunk) stands the /net 9P server up: after the lease, netd posts /srv/net
+// (9P-mode), then runs a combined event loop that multiplexes the 9P server (the
+// static `tcp/udp/icmp` skeleton from `server.rs`) with the smoltcp stack. joey
+// mounts /srv/net at /net so the namespace inherits it. The clone->socket fid
+// machine + live data path land at net-2c.
 //
 // Diagnostics go to the console (`t_putstr`): a warden-spawned driver's stderr
-// is /dev/null, and a one-shot signals completion by EXITING (the warden's
-// `try_wait`), never by a "READY" line (which is the long-lived-service contract).
+// is /dev/null. A long-lived service signals readiness by writing exactly one
+// "READY" line to stdout (the warden's readiness pipe) AFTER all console output
+// and AFTER posting its service -- so READY also means "/srv/net is up".
 
 #![no_std]
 #![no_main]
@@ -35,7 +39,10 @@ use libdriver::resource::BoundResources;
 use libdriver::{DeviceId, Error};
 use libthyla_rs::io::Write;
 use libthyla_rs::time::{sleep, Duration, Instant};
+use libthyla_rs::{t_close, t_poll, t_srv_accept, TPollFd, T_POLLHUP, T_POLLIN};
 use netdev::{VirtioNetPci, MAX_FRAME};
+
+mod server;
 
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
@@ -265,30 +272,103 @@ impl Driver for NetD {
             return Err(Error::Hardware);
         }
 
-        // A persistent service, not a one-shot. Announce success on the console,
-        // then signal readiness LAST: the READY line is what the warden's
-        // readiness pipe waits on, so all console output precedes it (the
-        // netdev-driver ordering discipline). The manifest's `lifecycle =
-        // persistent` then has the warden LEAVE netd running. net-2b-2 stands the
-        // /net 9P server up here, in the same loop.
         say!("netd: PASS -- smoltcp brought the link up via the PCI NIC (DHCP)");
-        say!("netd: serving (persistent; /net 9P server lands at net-2b-2)");
+
+        // Post the /net 9P service (9P-mode) into the boot namespace's /srv
+        // BEFORE signaling READY: the warden's READY -> "left running" then also
+        // means "/srv/net is posted", so joey (after its warden wait) is
+        // guaranteed to find it for the mount. A post failure (most likely a
+        // missing MAY_POST_SERVICE -- conferred warden->netd via the persistent
+        // lifecycle) is fail-closed: netd does NOT signal READY, the warden logs
+        // it as gave-up, and the box still boots (just no /net).
+        let listener = match server::post_srv_net() {
+            Ok(l) => l,
+            Err(()) => {
+                say!("netd: FAIL -- could not post /srv/net (MAY_POST_SERVICE?)");
+                return Err(Error::Hardware);
+            }
+        };
+
+        // A persistent service, not a one-shot. Signal readiness LAST: the READY
+        // line is what the warden's readiness pipe waits on, so all console
+        // output precedes it (the netdev-driver ordering discipline). The
+        // manifest's `lifecycle = persistent` then has the warden LEAVE netd
+        // running.
+        say!("netd: serving /net (9P over /srv/net)");
         let mut out = libthyla_rs::io::stdout();
         let _ = out.write_all(b"READY\n");
 
-        // The resident loop: keep servicing the stack (DHCP renew, ARP) until the
-        // Proc dies. Honoring smoltcp's poll-delay hint (clamped) keeps an idle
-        // netd from busy-spinning (#108); net-2b-2 replaces it with the IRQ +
-        // 9P-accept multiplexed event loop.
+        // The resident event loop multiplexes the stack with the /net 9P server.
+        // `t_poll` over [listener] + connections wakes on a 9P request; its
+        // timeout is smoltcp's poll-delay hint (clamped), so on an idle tick the
+        // stack is still serviced (DHCP renew, ARP) at least that often. At
+        // net-2b-2 the only socket is DHCP (no data sockets), so a <=1s RX
+        // latency during an idle poll is fine; net-2c adds the NIC IRQ fd to the
+        // poll set for RX-driven wakeups once TCP/UDP data flows.
+        let mut conns: Vec<server::Conn> = Vec::new();
+        let mut pollfds = [TPollFd::default(); 1 + server::MAX_CONNS];
         loop {
             let ts = now(&base);
             iface.poll(ts, &mut device, &mut sockets);
-            let ms = iface
+            let delay = iface
                 .poll_delay(ts, &sockets)
                 .map(|d| d.total_millis())
                 .unwrap_or(IDLE_POLL_MAX_MS)
                 .clamp(IDLE_POLL_MIN_MS, IDLE_POLL_MAX_MS);
-            let _ = sleep(Duration::from_millis(ms));
+
+            pollfds[0] = TPollFd {
+                fd: listener as i32,
+                events: T_POLLIN,
+                revents: 0,
+            };
+            let nc = conns.len().min(server::MAX_CONNS);
+            for i in 0..nc {
+                pollfds[1 + i] = TPollFd {
+                    fd: conns[i].handle() as i32,
+                    events: T_POLLIN,
+                    revents: 0,
+                };
+            }
+            let nfds = 1 + nc;
+            let rc = unsafe { t_poll(pollfds.as_mut_ptr(), nfds, delay as i32) };
+            if rc < 0 {
+                // Unexpected poll error on otherwise-valid fds: back off so a
+                // persistent error cannot become a busy-spin (#108 discipline).
+                let _ = sleep(Duration::from_millis(IDLE_POLL_MAX_MS));
+                continue;
+            }
+            if rc == 0 {
+                continue; // timeout: re-service the stack
+            }
+
+            // Accept a new connection (one per tick is enough; the listener
+            // re-fires next iteration if more are pending).
+            if pollfds[0].revents & T_POLLIN != 0 && conns.len() < server::MAX_CONNS {
+                let h = unsafe { t_srv_accept(listener) };
+                if h >= 0 {
+                    conns.push(server::Conn::new(h));
+                }
+            }
+
+            // Service ready connections backward, so a remove() of a closed
+            // connection does not shift an unvisited lower index (the accept
+            // above only appended, leaving [0, nc) stable for this pass).
+            let mut i = nc;
+            while i > 0 {
+                i -= 1;
+                let pf = pollfds[1 + i];
+                let mut close = false;
+                if pf.revents & T_POLLIN != 0 && !conns[i].service() {
+                    close = true;
+                }
+                if pf.revents & T_POLLHUP != 0 {
+                    close = true;
+                }
+                if close {
+                    let _ = unsafe { t_close(conns[i].handle()) };
+                    conns.remove(i);
+                }
+            }
         }
     }
 }

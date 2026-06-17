@@ -2386,7 +2386,13 @@ int main(void) {
     // Exit 0 = every bound driver came up (or nothing matched); 1 FAIL.
     {
         const char wd_name[] = "warden";
-        long wd_pid = t_spawn_with_caps(wd_name, sizeof(wd_name) - 1, T_CAP_HW_CREATE);
+        // net-2b-2: grant the warden MAY_POST_SERVICE so it can confer the bit
+        // on a persistent driver that serves a namespace (netd posts /srv/net).
+        // joey is console-attached here (pre-relinquish) AND holds the bit, so
+        // the kernel grant gate passes; the warden then re-confers it one hop to
+        // netd (the #827b delegation). No fds (the warden runs with none).
+        long wd_pid = t_spawn_with_perms(wd_name, sizeof(wd_name) - 1, NULL, 0,
+                                         T_CAP_HW_CREATE, T_SPAWN_PERM_MAY_POST_SERVICE);
         if (wd_pid <= 0) {
             t_putstr("joey: t_spawn(\"warden\") FAILED\n");
             return 1;
@@ -3047,6 +3053,55 @@ int main(void) {
                 }
             }
             (void)t_close(hw_dev_h);
+
+            // net-2b-2: mount netd's /net on the pivoted root. netd (warden-
+            // spawned, persistent) posted /srv/net (9P-mode) pre-pivot; the
+            // immortal boot registry (re-grafted as /srv above) carries it across
+            // the pivot, and netd stays alive past the warden's exit (its NIC
+            // allowance is bound to its own Proc, #160). Connect (9P-mode
+            // open=connect -> a dev9p root; t_mount keeps the 9P session alive via
+            // its own ref) + mkdir + MREPL at /net, so every login inherits the
+            // network namespace. A missing /srv/net (netd gave up / no NIC) is
+            // NON-FATAL: /net is simply absent, the box still boots.
+            {
+                long net_root = t_open(T_WALK_OPEN_FROM_ROOT, "/srv/net", 8, T_OREAD);
+                if (net_root >= 0) {
+                    long mk = t_walk_create(T_WALK_OPEN_FROM_ROOT, "net", 3, T_OREAD,
+                                            T_WALK_CREATE_DMDIR | 0755u);
+                    if (mk >= 0) (void)t_close(mk);
+                    if (t_mount("/net", 4, net_root, T_MREPL) != 0) {
+                        t_putstr("joey: net-2b-2 t_mount(/net) FAILED\n");
+                        return 1;
+                    }
+                    (void)t_close(net_root);
+                    t_putstr("joey: net-2b-2 /net mounted (netd 9P server)\n");
+#if THYLA_BOOT_PROBES
+                    // Walk + read /net/tcp/stats: prove the dev9p-mounted netd
+                    // tree resolves multi-component (cross /net -> tcp -> stats)
+                    // and serves a file through the 9P session.
+                    {
+                        long sf = t_open(T_WALK_OPEN_FROM_ROOT, "/net/tcp/stats",
+                                         14, T_OREAD);
+                        if (sf < 0) {
+                            t_putstr("joey: net-2b-2 PROBE open(/net/tcp/stats) FAILED\n");
+                            return 1;
+                        }
+                        unsigned char sbuf[128];
+                        long sn = t_read(sf, sbuf, sizeof(sbuf));
+                        (void)t_close(sf);
+                        if (sn <= 0) {
+                            t_putstr("joey: net-2b-2 PROBE read(/net/tcp/stats) FAILED\n");
+                            return 1;
+                        }
+                        t_putstr("joey: net-2b-2 PROBE /net/tcp/stats OK (");
+                        t_putstr(itoa_dec(sn, buf, sizeof(buf)));
+                        t_putstr(" bytes)\n");
+                    }
+#endif
+                } else {
+                    t_putstr("joey: net-2b-2 /srv/net absent -- /net not mounted (netd down?)\n");
+                }
+            }
 
             long post_fd = t_walk_open(T_WALK_OPEN_FROM_ROOT, sentinel_name,
                                         sentinel_len, T_OREAD);
