@@ -373,9 +373,24 @@ joey: net-2c-2 PROBE OK (clone->0, connect 10.0.2.2!9, local 10.0.2.15!, frees+r
   `status`/`local`/`remote`/`err`. The boot probe drives a live `connect` +
   endpoint readback. The kernel is byte-unchanged. (The NIC-IRQ poll fd is
   deferred — see the caveats.)
-- **net-2d**: the focused audit over the netd surface (the fid machine +
-  connection-table SMP-safety + NIC ownership) + the ARCH §25.4 / CLAUDE.md
-  audit-trigger enumeration + the SMP gate + close.
+- **net-2d (LANDED)**: the focused audit over the netd surface (Opus-4.8-max
+  prosecutor + concurrent self-audit) — **CLEAN: 0 P0 / 0 P1 / 1 P2 / 4 P3, NOT
+  dirty**. The fid-machine refcount, the socket reservation/free balance, the
+  disjoint borrow, the parser bounds, the fail-closed non-live ops, the
+  single-threadedness, the I-5 probe gate, the MAY_POST_SERVICE persistent gate,
+  malformed-frame safety, and the Tgetattr trio all held. Fixed: **F1 [P2]**
+  `h_readdir`'s budget omitted the 11-byte Rreaddir frame overhead (`P9_HDR_LEN +
+  4`) that `h_read` reserves — a populated directory read by a small-msize client
+  overran its negotiated msize — fixed by a `rreaddir_budget` parity helper;
+  **F2 [P3]** `h_attach`/`h_walk` accepted the `P9_NOFID` sentinel as a live fid
+  → fail-closed reject; **F3 [P3]** a rejected re-`connect` burned an ephemeral
+  port + a rolled-back clone over-counted `opened` → peek-then-commit port +
+  `tcp_clone_rollback`. F4/F5 + the cross-session liveness closed-justified (see
+  caveats). The deterministic small-msize/NOFID/failed-connect regressions are
+  architecturally unreachable in-VM (the only /net client is the trusted
+  large-msize kernel dev9p mount; /net is 9P-mode; netd has no host-test harness)
+  → owed to a netd pure-protocol host-test module (net-3+). The kernel is
+  byte-unchanged. (`memory/audit_net2d_closed_list.md`.)
 
 ## Known caveats / seams
 
@@ -402,12 +417,30 @@ joey: net-2c-2 PROBE OK (clone->0, connect 10.0.2.2!9, local 10.0.2.15!, frees+r
   hostfwd test (or net-3's announce/listen loopback).
 - **The ephemeral local-port allocator is a rotating cursor** (49152..=65535), not
   liveness-checked — at `MAX_SLOTS = 16` connections a collision after wrap is
-  astronomically unlikely; a checked allocator is a v1.x refinement.
+  astronomically unlikely; a checked allocator is a v1.x refinement. net-2d (F3)
+  made it peek-then-commit, so a rejected `connect` no longer burns a port; a
+  post-wrap same-4-tuple collision → smoltcp rejects → `EINVAL` (fail-closed).
 - **The connection table is bounded at `MAX_CONNS = 8`** and effectively
   single-session at v1.0 (joey's one `/net` mount drives one kernel dev9p-client
   session multiplexing all callers). Excess connections pend in the kernel; the
   only connectors are trusted (the kernel dev9p client + joey's mount). net-2d
-  prosecutes the connection-table + fid-machine SMP-safety.
+  closed CLEAN on the connection-table + fid-machine SMP-safety (single-threaded
+  → the lockless `Net` is sound by construction; no `thread_spawn`).
+- **Cross-call `Treaddir` coherency** (net-2d F4): within one `Treaddir` the slot
+  array is a single-threaded snapshot (no stale-slot dirent), but a slot freed
+  *between* two paginated reads renumbers entries; no UAF / no stale resolution
+  (the qid re-validates `slot_live`). Matches the kernel readdir-cookie tolerance;
+  a stable per-connection iteration snapshot is a v1.x item.
+- **The deterministic netd-protocol regressions are owed** (net-2d): the F1
+  small-msize readdir-budget overrun, the F2 `P9_NOFID` reject, and the F3
+  failed-connect port are architecturally unreachable in-VM (the only /net client
+  is the trusted large-msize kernel dev9p mount; /net is 9P-mode → no native
+  small-msize / malformed client; netd has no host-test harness — libthyla-rs is
+  no_std + aarch64-asm). The owed vehicle (net-3+, when the server side grows more
+  pure logic) is a netd pure-protocol host-test module on the `netdev`
+  `cfg_attr(not(test), no_std)` pattern; the fixes meanwhile rest on data-path
+  parity (`h_read`) + the ninep `build_rreaddir` length guard + fail-closed
+  correctness.
 - **smoltcp owns wire-protocol correctness** (its authors spec'd it); netd's
   state machine (net-2c) wraps *a* socket abstraction, so the recorded fallback
   (a Plan 9 IP-stack port, NET-DESIGN.md §14) would not change `/net`.

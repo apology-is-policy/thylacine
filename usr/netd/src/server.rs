@@ -310,14 +310,15 @@ impl Net {
         }
     }
 
-    /// Allocate the next rotating ephemeral local port (49152..=65535). smoltcp
-    /// requires a non-zero local port on connect; at MAX_SLOTS connections a
-    /// collision after wrap is astronomically unlikely (a liveness-checked
-    /// allocator is a v1.x refinement).
-    fn next_ephemeral(&mut self) -> u16 {
-        let p = self.next_local_port;
-        self.next_local_port = if p == u16::MAX { EPHEMERAL_LO } else { p + 1 };
-        p
+    /// Undo a just-minted clone whose Rlopen build failed: drop the opener's ref
+    /// (frees the slot + removes its socket + decrements tcp_active via
+    /// slot_unref) AND uncount the mint, so a rolled-back clone does not inflate
+    /// the `opened` stat. The ephemeral allocator is liveness-unchecked (49152..=
+    /// 65535 rotation); at MAX_SLOTS connections a post-wrap collision is
+    /// astronomically unlikely (a liveness-checked allocator is a v1.x refinement).
+    fn tcp_clone_rollback(&mut self, n: u32) {
+        self.slot_unref(n);
+        self.tcp_opened = self.tcp_opened.saturating_sub(1);
     }
 
     fn slot_socket(&self, n: u32) -> Option<SocketHandle> {
@@ -337,7 +338,10 @@ impl Net {
             Some(h) => h,
             None => return Err(()),
         };
-        let local_port = self.next_ephemeral();
+        // Peek the next ephemeral port; commit the rotation only if connect
+        // succeeds, so a rejected open (e.g. an already-open socket) does not
+        // burn a port out of the 16k-wide pool.
+        let local_port = self.next_local_port;
         let remote = IpEndpoint::new(IpAddress::v4(ip[0], ip[1], ip[2], ip[3]), port);
         let local = IpListenEndpoint {
             addr: None, // smoltcp selects the source address from the route
@@ -351,6 +355,7 @@ impl Net {
             .connect(self.iface.context(), remote, local);
         match r {
             Ok(()) => {
+                self.next_local_port = ephemeral_after(local_port);
                 // connect() set the tuple synchronously: remote is what we
                 // dialed; local is the selected source addr + our ephemeral port.
                 let le = self.sockets.get::<tcp::Socket>(h).local_endpoint();
@@ -699,6 +704,26 @@ fn parse_u16(s: &[u8]) -> Option<u16> {
     u16::try_from(v).ok()
 }
 
+/// The max dirent-stream byte budget for an Rreaddir reply: bounded by the
+/// client's `count` AND by `msize` minus the Rreaddir frame overhead
+/// (`P9_HDR_LEN` + the 4-byte `count` field), so the built reply NEVER exceeds
+/// the negotiated msize. Parity with `h_read`'s data cap (the data path already
+/// reserves this overhead via the same `saturating_sub`); the directory path
+/// must too -- otherwise a populated directory read by a small-msize client
+/// yields an Rreaddir frame larger than the client negotiated.
+fn rreaddir_budget(count: u32, msize: u32) -> usize {
+    (count as usize).min((msize as usize).saturating_sub(p9::P9_HDR_LEN + 4))
+}
+
+/// The next rotating ephemeral local port after `p` (49152..=65535 wrap).
+fn ephemeral_after(p: u16) -> u16 {
+    if p == u16::MAX {
+        EPHEMERAL_LO
+    } else {
+        p + 1
+    }
+}
+
 // A small fixed-cap content buffer: file bodies are short (a number, a few-line
 // stats block, a status word), so reads never allocate.
 struct Content {
@@ -1017,6 +1042,11 @@ impl Conn {
         if a.afid != p9::P9_NOFID {
             return self.err(tag, p9::E_OPNOTSUPP); // no auth fid (trusted local transport)
         }
+        if a.fid == p9::P9_NOFID {
+            // NOFID is the 9P "no fid" sentinel, never a live fid -- binding it
+            // would let a later op address it as a real fid.
+            return self.err(tag, p9::E_INVAL);
+        }
         // The root is a static node (no connection ref); bind directly.
         if self.fid_find(a.fid).is_some() {
             return self.err(tag, p9::E_INVAL);
@@ -1050,6 +1080,9 @@ impl Conn {
         let src_fid = self.fids[src].unwrap();
         if src_fid.opened {
             return self.err(tag, p9::E_PROTO); // 9P forbids walking from an opened fid
+        }
+        if a.newfid == p9::P9_NOFID {
+            return self.err(tag, p9::E_INVAL); // newfid must be a real fid to bind
         }
         if a.newfid != a.fid && self.fid_find(a.newfid).is_some() {
             return self.err(tag, p9::E_INVAL); // newfid already in use
@@ -1119,7 +1152,7 @@ impl Conn {
                     Ok(len)
                 }
                 Err(()) => {
-                    net.slot_unref(n); // refs 1 -> 0 -> freed; fid stays at clone
+                    net.tcp_clone_rollback(n); // refs 1 -> 0 -> freed; fid stays at clone
                     Err(())
                 }
             }
@@ -1191,9 +1224,7 @@ impl Conn {
         // resume cookie: entry K carries next_offset K+1, never 0), bounded by
         // the Treaddir count and msize. A directory's child order is stable, so
         // the ordinal is a valid resume point across a paginated read.
-        let budget = (a.count as usize)
-            .min(self.msize as usize)
-            .min(SRV_MSIZE_USIZE);
+        let budget = rreaddir_budget(a.count, self.msize);
         let mut data: Vec<u8> = Vec::new();
         let mut ord: u64 = 0;
         let mut full = false;

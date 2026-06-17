@@ -678,8 +678,15 @@ named in §2.)
   fd is deferred (a pollable IRQ fd is a kernel ABI surface; the `poll_delay`-
   clamped timeout poll is correct, ≤ 50 ms under load). Pure userspace — kernel
   byte-unchanged. See `docs/reference/121-netd.md`.
-- **net-2d..net-8: not started.** Phase-8 work per §17 (net-2d the focused audit
-  over the netd surface), sequenced before the container runner (#70) per
-  ROADMAP §2.2.
+- **net-2d: LANDED** — the focused audit over the netd surface (the central
+  audit-bearing surface, §15.2): an Opus-4.8-max prosecutor + a concurrent
+  self-audit, **CLEAN 0 P0 / 0 P1 / 1 P2 / 4 P3, NOT dirty**. Fixed F1 [P2] (the
+  `h_readdir` budget omitted the 11-byte Rreaddir frame overhead → a populated
+  dir read by a small-msize client overran its msize), F2 [P3] (the `P9_NOFID`
+  sentinel accepted as a live fid), F3 [P3] (a rejected re-`connect` burned an
+  ephemeral port + a rolled-back clone over-counted `opened`); F4/F5 + the
+  cross-session liveness closed-justified. Kernel byte-unchanged.
+- **net-3..net-8: not started.** Phase-8 work per §17, sequenced before the
+  container runner (#70) per ROADMAP §2.2.
 
 The thylacine is real. So is its network — and it is, of course, a filesystem.
