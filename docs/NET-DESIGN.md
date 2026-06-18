@@ -791,7 +791,21 @@ named in §2.)
   daemon split's live source); the resolver/router are read live from the DHCP
   lease. Pure userspace; the kernel is byte-unchanged. Boot proof: `net-4a PROBE OK`
   + `/lib/ndb/local readable` + 930/930 + SMP gate clean. See `docs/reference/121-netd.md`.
-- **net-4b..net-8: not started.** net-4b (`/net/dns` resolver + cs→dns delegation),
+- **net-4b: LANDED** — `/net/dns` (the resolver) + cs→dns delegation. One shared
+  `dns::Socket` seeded from the DHCP resolver multiplexes every `/net/dns` + cs→dns
+  query; the net-4a `CsSession` generalizes into the deferred-capable per-fid
+  `Query`. A name resolves **numeric → ndb → DNS**: numeric/ndb fill synchronously;
+  a DNS name starts a query and the read **defers** (the net-3a held-Rread
+  mechanism, completed by `poll_dns`). The central hazard — smoltcp's
+  `get_query_result` frees the slot on a result + panics on a free slot — is closed
+  by keeping the handle in one place (`Query.query`) nulled on every result, never
+  double-polled (a netd panic = a whole-network DoS). v1.0 is IPv4-A only. Pure
+  userspace (the only new dependency is `socket-dns`); the kernel is byte-unchanged.
+  Boot proof: `net-4b PROBE OK (dns 10.0.2.2 → 10.0.2.2; localhost ip → 127.0.0.1;
+  aaaa → empty)` + the best-effort live `net-4b DNS live query OK` + 930/930 + SMP
+  gate clean. The deterministic in-guest E2E of the 9P deferred-read plumbing is
+  owed to net-4d (a loopback DNS responder). See `docs/reference/121-netd.md`.
+- **net-4c..net-8: not started.**
   net-4c (`/net/ipifc` + `ipconfig` + DHCP-lease-into-ipifc), net-4d (the focused
   net-4 audit + close), net-5 (socket-compat pouch boundary-line), net-6
   (`dev9p.poll` + `net_poll.tla` — ABI), net-7 (TLS + SNTP + `SYS_CLOCK_SETTIME` —

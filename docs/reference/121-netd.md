@@ -588,6 +588,64 @@ embedded file's size with no heap.
 joey: net-4a PROBE OK (cs tcp!127.0.0.1!80 + net!localhost!http -> /net/tcp/clone 127.0.0.1!80; unresolved -> empty; /lib/ndb/local readable)
 ```
 
+## net-4b: `/net/dns` (the resolver) + cs→dns delegation
+
+`/net/dns` is the **DNS resolver**: a client writes `name [type]`, reads back the
+resolved address(es). It is backed by one shared `smoltcp::socket::dns::Socket`
+seeded from the DHCP-learned resolver (`Net::new(.., dns_servers)`); if the lease
+carried no resolver the socket is absent (`Net.dns == None`) and every name fails
+closed to the empty answer (never a hung read).
+
+**The unified request/response session (net-4a + net-4b).** `/net/cs` and
+`/net/dns` are the same shape — write a query, read the answer — so net-4b
+generalizes net-4a's `CsSession` into one per-fid `server::Query`:
+
+- The **write** begins the resolution (`query_begin`). The host resolves
+  **numeric → static ndb → DNS**: a numeric or ndb host fills the answer
+  *synchronously* (`resp` set, no query); a name that needs DNS starts a query
+  (`query = Some(handle)`, `resp = None`). A malformed request or a resolver-less
+  DNS name fills the empty answer. The write always returns `Rwrite` immediately.
+- The **read** (`query_read`) drains `resp` via a per-fid cursor if the answer is
+  ready. If a DNS query is still in flight it **defers**: the held `Rread` is sent
+  later by `poll_dns` (the serve-loop analog of `poll_accepts`), exactly the
+  net-3a deferred-reply mechanism (the client's `read()` blocks on the outstanding
+  tag — the dev9p client matches by tag, no per-op deadline, #811-death-
+  interruptible). This is the committed-blocking realization of a blocking
+  resolver over a single-threaded server (it cannot block in `h_read` — it must
+  keep polling the NIC to receive the very DNS reply that unblocks it).
+- **cs→dns delegation** is automatic: a cs dial whose host is not numeric and not
+  in the ndb is exactly the "delegate to DNS" branch of `query_begin` with
+  `kind = Cs` — the resolved address is formatted into the `<clone-file>
+  <ip>!<port>` line instead of a bare address.
+
+**The load-bearing query-lifetime invariant.** smoltcp's `get_query_result`
+**frees the query slot on a result** (Resolved/Failed) and **panics on a free
+slot** — so a handle must be polled at-most-once-to-completion and never reused.
+The handle lives in **exactly one place** (the issuing fid's `Query.query`), which
+is nulled the instant `dns_poll` returns a result, so it is never double-polled
+(a panic in netd, the sole NIC owner, would be a whole-network DoS). `dns_cancel`
+(on clunk / teardown / Tversion / Tflush / rewrite) is called only while
+`query == Some` — i.e. on a still-occupied slot — so it never panics. Every
+in-flight query is cancelled on session drop, so no smoltcp query slot leaks.
+
+The v1.0 resolution is IPv4-A-record only (`proto-ipv4`): a `name aaaa` (or any
+non-`ip`/`a`/`ipv4` type) yields the empty answer; `/net/dns` returns the bare
+dotted-quad (a v1.x refinement returns the full ndb-style attribute line).
+
+```
+joey: net-4b PROBE OK (dns 10.0.2.2 -> 10.0.2.2; localhost ip -> 127.0.0.1; aaaa -> empty)
+netd: net-4b DNS live query OK (example.com -> 172.66.147.243)   # best-effort, logged, not a gate
+```
+
+The deterministic joey probe asserts only the **synchronous** fast paths (numeric
++ ndb); a live DNS query is host-coupled (slirp forwards DNS to the host
+resolver), so the live resolver path is netd's **best-effort, logged** probe
+(`dns_live_probe`, which exercises the Net-level `dns_query_start`/`dns_poll`
+lifecycle end-to-end on the real NIC) — never a boot gate ([[feedback-no-host-load]]).
+The deterministic in-guest E2E of the **9P deferred-read plumbing**
+(`query_read`-defer → `poll_dns` → the held `Rread`) is **owed to net-4d** (a
+loopback DNS responder, the net-3d loopback analog).
+
 ## Data structures
 
 | Type | Role |
@@ -605,7 +663,11 @@ joey: net-4a PROBE OK (cs tcp!127.0.0.1!80 + net!localhost!http -> /net/tcp/clon
 | `enum DnsProbe { Ok{resp_len,ancount}, NoResponse, MintFailed }` | the net-3b best-effort UDP-round-trip demo outcome (logged, never a boot gate) |
 | `enum PingProbe { Ok{reply_len}, NoResponse, MintFailed }` | the net-3c best-effort ICMP-ping demo outcome (logged, never a boot gate) |
 | `server::LoopbackResult { icmp, udp, tcp }` | the net-3d in-guest loopback E2E outcome (each leg deterministic, ASSERTED via the PASS/FAIL boot line) |
-| `server::CsSession { fid, resp, cursor }` | a per-fid `/net/cs` request/response session (net-4a); the write resolves the dial into `resp`, the read drains it via `cursor`; dropped on clunk/teardown/Tversion |
+| `server::Query { fid, kind, query, resp, cursor, deferred }` | a per-fid `/net/cs` + `/net/dns` request/response session (net-4a/4b); `kind` (`Cs{clone_tcp,port}` / `Dns`) selects the answer format; `query` is the in-flight `dns::QueryHandle` (nulled the instant it resolves — the single-completion discipline); `resp`/`cursor` drain the ready answer; `deferred = (tag, cap)` holds a blocked read; dropped (cancelling any in-flight query) on clunk/teardown/Tversion |
+| `enum server::QueryKind { Cs{clone_tcp,port}, Dns }` | how a resolved address is formatted: `Cs` → `<clone-file> <ip>!<port>\n`; `Dns` → `<ip>\n` |
+| `enum DnsPoll { Pending, Resolved([u8;4]), Failed }` | the state of a started DNS query (net-4b); `Resolved`/`Failed` free the smoltcp slot |
+| `enum DnsProbeResult { Ok([u8;4]), NoResponse, NoServer }` | the net-4b best-effort live-query demo outcome (logged, never a boot gate) |
+| `Net.dns: Option<SocketHandle>` | the shared DNS resolver socket (net-4b); seeded from the DHCP resolver; `None` if the lease carried none (queries fail closed fast) |
 | `ndb` module (`NDB_LOCAL` + `lookup_host` + `lookup_service`) | the compiled-in network database (NET-DESIGN §5); `include_bytes!("../ndb/local")` — the byte-identical copy baked to `/lib/ndb/local`; a stateless ndb(6)-subset parser, no heap |
 
 ## Tests
@@ -744,6 +806,22 @@ joey: net-4a PROBE OK (cs tcp!127.0.0.1!80 + net!localhost!http -> /net/tcp/clon
   930/930 + boot OK + 0 EXTINCTION; SMP gate clean (0 corruption across 60 boots,
   every "timing" boot ground-truthed guest-clean). The focused net-4 audit is
   net-4d.
+- **net-4b (LANDED)**: `/net/dns` (the resolver) + cs→dns delegation. One shared
+  `dns::Socket` seeded from the DHCP resolver multiplexes every `/net/dns` +
+  cs→dns query; the net-4a `CsSession` generalizes into the deferred-capable
+  per-fid `Query`. A name resolves **numeric → ndb → DNS**: numeric/ndb fill
+  synchronously; a DNS name starts a query and the read **defers** (the net-3a
+  held-Rread mechanism, completed by `poll_dns`). The smoltcp query-lifetime
+  hazard (`get_query_result` frees on a result + panics on a free slot) is closed
+  by keeping the handle in one place (`Query.query`) nulled on every result, so it
+  is never double-polled (a netd panic = a whole-network DoS); `dns_cancel` runs
+  only on an occupied slot. v1.0 is IPv4-A-record only. The kernel is byte-unchanged
+  (pure userspace; the only new dependency is the `socket-dns` smoltcp feature).
+  Boot proof: `net-4b PROBE OK (dns 10.0.2.2 → 10.0.2.2; localhost ip → 127.0.0.1;
+  aaaa → empty)` (the deterministic synchronous paths) + `net-4b DNS live query OK`
+  (the best-effort live resolver, logged) + 930/930 + boot OK + 0 EXTINCTION; SMP
+  gate clean. The deterministic in-guest E2E of the **9P deferred-read plumbing** is
+  owed to net-4d (a loopback DNS responder). The focused net-4 audit is net-4d.
 
 ## Known caveats / seams
 
@@ -778,10 +856,17 @@ joey: net-4a PROBE OK (cs tcp!127.0.0.1!80 + net!localhost!http -> /net/tcp/clon
   clunked its announce/ctl fid (holding only the listen fid) frees the re-armed
   listener on accept. The Plan 9 idiom — keep the announce fd open to keep
   listening.
-- **cs resolves no Internet names yet** (net-4a): a non-numeric host that is not in
-  the static ndb yields an empty cs response. The DNS resolver (`/net/dns`, a
-  smoltcp `dns::Socket` seeded from the DHCP resolver) + the cs→dns delegation land
-  at **net-4b**.
+- **DNS is IPv4-A-record only** (net-4b): `/net/dns` + cs→dns resolve only A
+  records (`proto-ipv4`); a `name aaaa` / IPv6 query yields the empty answer. AAAA
+  + the full ndb-style attribute-line response are v1.x refinements.
+- **The 9P deferred-resolve E2E is owed to net-4d** (net-4b): the synchronous
+  `/net/dns` paths are asserted (joey) and the Net-level dns query lifecycle is
+  proven live (best-effort), but the **9P deferred-read plumbing** (`query_read`
+  defer → `poll_dns` → the held `Rread`) has no deterministic in-guest test yet — a
+  real 9P deferred resolve needs an in-guest DNS responder on the live stack
+  (host-coupled otherwise). The net-4d loopback DNS responder (the net-3d loopback
+  analog) closes it. The plumbing is structurally identical to the net-3d-audited
+  `PendingAccept`→`complete_accept` and is self-audited + net-4d-prosecuted.
 - **`net!host!service` maps to tcp only** (net-4a): the Plan 9 `net!` (any-proto)
   prefix emits the tcp clone line at v1.0; the tcp+udp fan-out (cs returning both a
   tcp and a udp line for a service registered on both) is a v1.x refinement.

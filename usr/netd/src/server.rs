@@ -41,11 +41,11 @@ use libthyla_rs::{
 };
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{ChecksumCapabilities, Device, Loopback, Medium};
-use smoltcp::socket::{icmp, tcp, udp};
+use smoltcp::socket::{dns, icmp, tcp, udp};
 use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{
-    EthernetAddress, HardwareAddress, Icmpv4Packet, Icmpv4Repr, IpAddress, IpCidr, IpEndpoint,
-    IpListenEndpoint,
+    DnsQueryType, EthernetAddress, HardwareAddress, Icmpv4Packet, Icmpv4Repr, IpAddress, IpCidr,
+    IpEndpoint, IpListenEndpoint,
 };
 
 /// Max concurrent 9P connections the accept loop tracks. In practice the dev9p
@@ -113,6 +113,14 @@ const DNS_PROBE_POLLS: u32 = 30; // ~300ms worst case
 const DNS_PROBE_POLL_MS: u64 = 10;
 const DNS_PROBE_SERVER: [u8; 4] = [10, 0, 2, 3]; // QEMU slirp's DNS forwarder
 const DNS_PROBE_QNAME: &[u8] = b"example.com";
+
+/// net-4b live DNS resolver demo (an A-record query through the shared dns
+/// socket). BEST-EFFORT, logged, never asserted -- slirp forwards DNS to the
+/// host resolver, so a response is host-dependent (the net-3b lesson). The
+/// /net/dns machinery's deterministic proof is joey's numeric + ndb probe.
+const DNS_LIVE_POLLS: u32 = 40; // ~400ms worst case
+const DNS_LIVE_POLL_MS: u64 = 10;
+const DNS_LIVE_NAME: &[u8] = b"example.com";
 
 /// net-3c ICMP ping round-trip demo (an echo request to slirp's gateway).
 /// BEST-EFFORT, logged, never asserted -- whether QEMU slirp answers a guest
@@ -186,6 +194,7 @@ const P_ICMP_STATS: u64 = 7; // /net/icmp/stats
 const P_UDP_CLONE: u64 = 8; //  /net/udp/clone (net-3b)
 const P_ICMP_CLONE: u64 = 9; // /net/icmp/clone (net-3c)
 const P_CS: u64 = 10; //        /net/cs (net-4a: the connection server)
+const P_DNS: u64 = 11; //       /net/dns (net-4b: the resolver)
 
 const CONN_FLAG: u64 = 1 << 40;
 const PROTO_SHIFT: u64 = 32;
@@ -365,6 +374,26 @@ pub enum PingProbe {
     MintFailed,
 }
 
+/// The state of a started DNS query (net-4b). Resolved carries the first A
+/// record; Failed covers SERVFAIL/NXDOMAIN/no-A-record/timeout (all map to the
+/// empty answer at the cs/dns layer).
+enum DnsPoll {
+    Pending,
+    Resolved([u8; 4]),
+    Failed,
+}
+
+/// The outcome of the net-4b best-effort live DNS query demo. The serve loop
+/// logs it; it is never a boot gate (the response is host-resolver-dependent).
+pub enum DnsProbeResult {
+    /// An A record came back.
+    Ok([u8; 4]),
+    /// No usable response within the bound (the host has no/blocked resolver).
+    NoResponse,
+    /// No resolver was learned from the lease (the dns socket is absent).
+    NoServer,
+}
+
 pub struct Net {
     iface: Interface,
     sockets: SocketSet<'static>,
@@ -383,13 +412,33 @@ pub struct Net {
     // every clone/accept_swap; the deferred-accept guard)
     // Deferred accepts: held listen Rlopens awaiting an inbound call (net-3a).
     pending: Vec<PendingAccept>,
+    // The shared DNS resolver socket (net-4b): one smoltcp dns::Socket seeded
+    // from the DHCP-provided resolver, multiplexing every /net/dns + cs->dns
+    // query across its growable query-slot table. None if the lease carried no
+    // resolver (then a DNS query fails closed to an empty answer, never hangs).
+    dns: Option<SocketHandle>,
 }
 
 impl Net {
     /// Build the connection table around the already-configured smoltcp
     /// interface + socket set (moved in after DHCP bring-up). `base` is the
-    /// monotonic anchor for smoltcp's millisecond clock.
-    pub fn new(iface: Interface, sockets: SocketSet<'static>, base: Instant) -> Net {
+    /// monotonic anchor for smoltcp's millisecond clock. `dns_servers` is the
+    /// DHCP-learned resolver list (net-4b): a non-empty list installs the shared
+    /// DNS socket; an empty list leaves `dns` None (queries fail closed fast).
+    pub fn new(
+        iface: Interface,
+        mut sockets: SocketSet<'static>,
+        base: Instant,
+        dns_servers: &[IpAddress],
+    ) -> Net {
+        // The DNS socket holds DNS_MAX_SERVER_COUNT (=1) servers; smoltcp
+        // truncates a longer list. A growable (alloc) query-slot table backs the
+        // per-fid queries, so start_query never fails for "no free slot".
+        let dns = if dns_servers.is_empty() {
+            None
+        } else {
+            Some(sockets.add(dns::Socket::new(dns_servers, Vec::new())))
+        };
         Net {
             iface,
             sockets,
@@ -406,6 +455,7 @@ impl Net {
             icmp_seq: 0,
             mint_seq: 0,
             pending: Vec::new(),
+            dns,
         }
     }
 
@@ -442,6 +492,90 @@ impl Net {
         self.iface
             .poll_delay(ts, &self.sockets)
             .map(|d| d.total_millis())
+    }
+
+    // -------------------------------------------------------------------------
+    // The DNS resolver (net-4b). One shared dns::Socket multiplexes every query.
+    //
+    // The smoltcp query lifetime is the central correctness hazard:
+    // get_query_result FREES the slot on a result (Resolved/Failed) and PANICS
+    // on an already-free slot. So a started query handle MUST be polled at most
+    // once-to-completion and never touched again after a result. The handle
+    // lives in exactly one place -- the issuing fid's `Query` (server side) --
+    // which nulls it the instant dns_poll returns Resolved/Failed, so it is
+    // never double-polled; dns_cancel is called only on a still-pending handle
+    // (an abandoned query), where the slot is occupied and cancel is safe.
+    // -------------------------------------------------------------------------
+
+    /// Start an A-record query for `name`. None if there is no resolver, `name`
+    /// is not valid UTF-8, or smoltcp rejects it (bad/too-long name). The query
+    /// is queued; the next iface.poll sends it. The caller owns the returned
+    /// handle and must poll it to completion (dns_poll) or cancel it (dns_cancel).
+    fn dns_query_start(&mut self, name: &[u8]) -> Option<dns::QueryHandle> {
+        let h = self.dns?;
+        let name = core::str::from_utf8(name).ok()?;
+        // Disjoint-field borrows: the socket (self.sockets) and the iface
+        // context (self.iface) are separate fields of self, like tcp_connect.
+        self.sockets
+            .get_mut::<dns::Socket>(h)
+            .start_query(self.iface.context(), name, DnsQueryType::A)
+            .ok()
+    }
+
+    /// Poll a started DNS query. On Resolved/Failed smoltcp frees the query
+    /// slot, so the caller MUST null its handle and never poll it again (a
+    /// re-poll of a freed slot panics). Pending leaves the slot intact (safe to
+    /// re-poll). A resolve with no A record (e.g. an AAAA-only name) is Failed.
+    fn dns_poll(&mut self, q: dns::QueryHandle) -> DnsPoll {
+        let h = match self.dns {
+            Some(h) => h,
+            None => return DnsPoll::Failed,
+        };
+        match self.sockets.get_mut::<dns::Socket>(h).get_query_result(q) {
+            Ok(addrs) => match addrs.iter().find_map(first_ipv4) {
+                Some(ip) => DnsPoll::Resolved(ip),
+                None => DnsPoll::Failed,
+            },
+            Err(dns::GetQueryResultError::Pending) => DnsPoll::Pending,
+            Err(dns::GetQueryResultError::Failed) => DnsPoll::Failed,
+        }
+    }
+
+    /// Cancel a STILL-PENDING DNS query, freeing its slot. Called only on a
+    /// handle dns_poll has not yet completed (clunk / teardown / Tversion /
+    /// Tflush / rewrite). Cancelling an already-collected slot would panic; the
+    /// single-completion discipline (the handle is nulled on a result) prevents it.
+    fn dns_cancel(&mut self, q: dns::QueryHandle) {
+        if let Some(h) = self.dns {
+            self.sockets.get_mut::<dns::Socket>(h).cancel_query(q);
+        }
+    }
+
+    /// net-4b boot demo: a self-contained live A-record query through the shared
+    /// resolver, bounded-polled in its own loop. BEST-EFFORT, logged, never a
+    /// boot gate -- QEMU slirp FORWARDS DNS to the host's resolver, so a response
+    /// is host-environment-dependent (the net-3b lesson). The deterministic proof
+    /// of the /net/dns machinery is joey's probe (the numeric + ndb fast paths);
+    /// the deterministic in-guest deferred-resolution E2E is owed to net-4d.
+    pub fn dns_live_probe(&mut self, device: &mut NicDevice) -> DnsProbeResult {
+        let q = match self.dns_query_start(DNS_LIVE_NAME) {
+            Some(q) => q,
+            None => return DnsProbeResult::NoServer,
+        };
+        for _ in 0..DNS_LIVE_POLLS {
+            self.poll(device);
+            match self.dns_poll(q) {
+                DnsPoll::Pending => {}
+                DnsPoll::Resolved(ip) => return DnsProbeResult::Ok(ip),
+                // A result frees the slot; the handle is dead now -- return
+                // without cancelling (cancel would panic on the freed slot).
+                DnsPoll::Failed => return DnsProbeResult::NoResponse,
+            }
+            let _ = sleep(Duration::from_millis(DNS_LIVE_POLL_MS));
+        }
+        // Timed out still pending: cancel the live query to free its slot.
+        self.dns_cancel(q);
+        DnsProbeResult::NoResponse
     }
 
     /// net-3b boot demo: a self-contained DNS round-trip through the live
@@ -1246,7 +1380,7 @@ impl Net {
             }
         } else {
             match path {
-                P_TCP | P_UDP | P_ICMP | P_CS => P_ROOT,
+                P_TCP | P_UDP | P_ICMP | P_CS | P_DNS => P_ROOT,
                 P_TCP_CLONE | P_TCP_STATS => P_TCP,
                 P_UDP_CLONE | P_UDP_STATS => P_UDP,
                 P_ICMP_CLONE | P_ICMP_STATS => P_ICMP,
@@ -1290,6 +1424,7 @@ impl Net {
                 b"udp" => Some(P_UDP),
                 b"icmp" => Some(P_ICMP),
                 b"cs" => Some(P_CS),
+                b"dns" => Some(P_DNS),
                 _ => None,
             },
             P_TCP => match name {
@@ -1343,6 +1478,7 @@ impl Net {
                 push(b"udp", P_UDP, true);
                 push(b"icmp", P_ICMP, true);
                 push(b"cs", P_CS, false);
+                push(b"dns", P_DNS, false);
             }
             P_TCP => {
                 push(b"clone", P_TCP_CLONE, false);
@@ -1480,7 +1616,7 @@ pub fn loopback_e2e(base: Instant) -> LoopbackResult {
     iface.update_ip_addrs(|a| {
         let _ = a.push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8));
     });
-    let mut lo = Net::new(iface, SocketSet::new(Vec::new()), base);
+    let mut lo = Net::new(iface, SocketSet::new(Vec::new()), base, &[]);
     LoopbackResult {
         icmp: lo_icmp_roundtrip(&mut lo, &mut device),
         udp: lo_udp_roundtrip(&mut lo, &mut device),
@@ -1624,6 +1760,16 @@ fn endpoint_octets(e: IpEndpoint) -> ([u8; 4], u16) {
         IpAddress::Ipv4(v4) => (v4.octets(), e.port),
         #[allow(unreachable_patterns)]
         _ => ([0, 0, 0, 0], e.port),
+    }
+}
+
+/// The IPv4 octets of a resolved address (net-4b), or None for a non-IPv4
+/// result (smoltcp only yields IPv4 with proto-ipv4 alone, but match defensively).
+fn first_ipv4(addr: &IpAddress) -> Option<[u8; 4]> {
+    match addr {
+        IpAddress::Ipv4(v4) => Some(v4.octets()),
+        #[allow(unreachable_patterns)]
+        _ => None,
     }
 }
 
@@ -1771,59 +1917,89 @@ fn trim_ws(s: &[u8]) -> &[u8] {
     &s[a..b]
 }
 
-/// Resolve a cs dial string (`proto!host!service`, the Plan 9 dial notation)
-/// into its `<clone-file> <ip>!<port>` line -- NET-DESIGN s5. A native `dial()`
-/// opens the clone-file, reads the connection number, opens its `ctl`, and
-/// writes "connect <ip>!<port>" -- exactly the arg netd's `connect` verb parses.
-///
-/// `host` resolves numerically first, then via the static ndb (`localhost`,
-/// etc.); a non-numeric non-ndb name yields no line at v1.0 (DNS delegation is
-/// net-4b). `service` resolves numerically first, then via the ndb services
-/// table. `net!...` maps to tcp (the v1.0 default; a tcp+udp fan-out is a v1.x
-/// refinement). An unparseable or unresolvable dial returns empty -- cs's
-/// "no reachable path" signal (the reader sees 0 bytes), never an error frame.
-fn cs_resolve(dial: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    let dial = trim_ws(dial);
+/// What a resolved address becomes in a /net/cs or /net/dns response (net-4b).
+#[derive(Copy, Clone)]
+enum QueryKind {
+    /// /net/cs: format `<clone-file> <ip>!<port>\n` (NET-DESIGN s5). The dial's
+    /// proto picks the clone-file; the service is pre-resolved to `port` here.
+    Cs { clone_tcp: bool, port: u16 },
+    /// /net/dns: format `<ip>\n` (the bare resolved address; the v1.0 minimal
+    /// form -- a v1.x refinement returns the full ndb-style attribute line).
+    Dns,
+}
+
+/// Parse + partially resolve a cs dial string (`proto!host!service`, the Plan 9
+/// dial notation). Resolves proto -> clone-file and service -> port
+/// SYNCHRONOUSLY (neither needs DNS), returning (kind, host) and leaving only
+/// the host for resolution (numeric -> ndb -> DNS, by the caller). `net!...`
+/// maps to tcp (the v1.0 default; a tcp+udp fan-out is a v1.x refinement). None
+/// on any malformation or an unknown proto/service -- cs's "no reachable path"
+/// signal (the caller fills the empty answer; the reader sees 0 bytes).
+fn cs_parse(dial: &[u8]) -> Option<(QueryKind, &[u8])> {
     let mut it = dial.split(|&b| b == b'!');
-    let proto = match it.next() {
-        Some(p) => p,
-        None => return out,
-    };
-    let host = match it.next() {
-        Some(h) => h,
-        None => return out, // a dial needs at least proto!host
-    };
+    let proto = it.next()?;
+    let host = it.next()?; // a dial needs at least proto!host
     let service = it.next().unwrap_or(b"");
     if it.next().is_some() {
-        return out; // more than three '!'-separated fields
+        return None; // more than three '!'-separated fields
     }
-    let clone_file: &[u8] = match proto {
-        b"tcp" | b"net" => b"/net/tcp/clone",
-        b"udp" => b"/net/udp/clone",
-        _ => return out, // unknown protocol
-    };
-    let ip = match parse_ipv4(host) {
-        Some(ip) => ip,
-        None => match crate::ndb::lookup_host(host) {
-            Some(ip) => ip,
-            None => return out, // unresolved host (DNS delegation is net-4b)
-        },
+    let clone_tcp = match proto {
+        b"tcp" | b"net" => true,
+        b"udp" => false,
+        _ => return None, // unknown protocol
     };
     let port = match parse_u16(service) {
         Some(p) if p != 0 => p,
-        _ => match crate::ndb::lookup_service(service) {
-            Some(p) => p,
-            None => return out, // unknown service / zero port
-        },
+        _ => crate::ndb::lookup_service(service)?, // unknown service / zero port
     };
+    Some((QueryKind::Cs { clone_tcp, port }, host))
+}
+
+/// Parse a /net/dns request line (`name [type]`, net-4b). v1.0 resolves only A
+/// (IPv4) records: an explicit `ip`/`a`/`ipv4` type is accepted; any other type
+/// (e.g. `aaaa`) yields None (no IPv6 at v1.0 -> the empty answer). Returns the
+/// name to resolve (numeric -> ndb -> DNS, by the caller).
+fn dns_parse(line: &[u8]) -> Option<&[u8]> {
+    let mut it = line
+        .split(|&b| b == b' ' || b == b'\t')
+        .filter(|t| !t.is_empty());
+    let name = it.next()?;
+    if let Some(ty) = it.next() {
+        if !eq_ascii_lower(ty, b"ip") && !eq_ascii_lower(ty, b"a") && !eq_ascii_lower(ty, b"ipv4") {
+            return None;
+        }
+    }
+    Some(name)
+}
+
+/// Format a resolved address per the request's kind (net-4b).
+fn format_resolved(kind: QueryKind, ip: [u8; 4]) -> Vec<u8> {
     let mut c = Content::new();
-    c.push(clone_file);
-    c.push(b" ");
-    c.push_endpoint(ip, port);
-    c.push(b"\n");
+    match kind {
+        QueryKind::Cs { clone_tcp, port } => {
+            let clone: &[u8] = if clone_tcp {
+                b"/net/tcp/clone"
+            } else {
+                b"/net/udp/clone"
+            };
+            c.push(clone);
+            c.push(b" ");
+            c.push_endpoint(ip, port);
+            c.push(b"\n");
+        }
+        QueryKind::Dns => {
+            c.push_ip(ip);
+            c.push(b"\n");
+        }
+    }
+    let mut out = Vec::new();
     out.extend_from_slice(c.as_slice());
     out
+}
+
+/// ASCII case-insensitive equality (for the dns type token).
+fn eq_ascii_lower(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_ascii_lowercase() == *y)
 }
 
 // A small fixed-cap content buffer: file bodies are short (a number, a few-line
@@ -1927,15 +2103,28 @@ struct Fid {
     opened: bool,
 }
 
-/// A per-fid /net/cs request/response session (net-4a). The write resolves the
-/// dial string into `resp`; the read(s) drain it via `cursor` (offset-agnostic,
-/// like the FK_DATA stream). One per open cs fid, dropped on clunk / teardown /
-/// Tversion -- so it is bounded by the connection's fid table (no unbounded
-/// growth: a re-write replaces the same fid's session; MAX_FIDS bounds the rest).
-struct CsSession {
+/// A per-fid /net/cs or /net/dns request/response session (net-4a; deferred-
+/// capable at net-4b). The write begins the resolution: a numeric/ndb host fills
+/// `resp` synchronously (query None); a name that needs DNS starts a query
+/// (query Some, resp None). The read drains `resp` via `cursor` (offset-agnostic,
+/// like FK_DATA); if a query is still in flight it DEFERS (the held Rread is sent
+/// by poll_dns when the query resolves). One per open cs/dns fid, dropped on
+/// clunk / teardown / Tversion (cancelling any in-flight query) -- bounded by the
+/// connection's fid table (a re-write replaces the same fid's session; MAX_FIDS
+/// bounds the rest).
+struct Query {
     fid: u32,
-    resp: Vec<u8>,
+    kind: QueryKind,
+    // Some while a DNS query is in flight (resp is None until it resolves). The
+    // smoltcp query slot is freed the instant dns_poll returns a result, so this
+    // is nulled then and never polled again (the single-completion discipline).
+    query: Option<dns::QueryHandle>,
+    // The formatted answer, ready to drain. None iff a DNS query is in flight.
+    resp: Option<Vec<u8>>,
     cursor: usize,
+    // Set when a read deferred on this query: the held Tread (tag, cap) to answer
+    // when the query resolves. None = no read awaiting a deferred completion.
+    deferred: Option<(u16, usize)>,
 }
 
 /// The outcome of dispatching one request frame.
@@ -1959,11 +2148,11 @@ pub struct Conn {
     fids: [Option<Fid>; MAX_FIDS],
     in_buf: Vec<u8>,
     out_buf: Vec<u8>,
-    // Set by a handler that holds its reply (a blocking listen open); read +
-    // cleared by dispatch to return Disp::Deferred.
+    // Set by a handler that holds its reply (a blocking listen open or a deferred
+    // cs/dns read); read + cleared by dispatch to return Disp::Deferred.
     defer: bool,
-    // Per-fid /net/cs request/response sessions (net-4a).
-    cs: Vec<CsSession>,
+    // Per-fid /net/cs + /net/dns request/response sessions (net-4a/4b).
+    queries: Vec<Query>,
 }
 
 impl Conn {
@@ -1976,43 +2165,216 @@ impl Conn {
             in_buf: Vec::new(),
             out_buf: Vec::new(),
             defer: false,
-            cs: Vec::new(),
+            queries: Vec::new(),
         }
     }
 
-    /// Stash the resolved /net/cs response for `fid` (net-4a), replacing any
-    /// prior query on the same fid and rewinding its read cursor.
-    fn cs_set(&mut self, fid: u32, resp: Vec<u8>) {
-        if let Some(s) = self.cs.iter_mut().find(|s| s.fid == fid) {
-            s.resp = resp;
-            s.cursor = 0;
-        } else {
-            self.cs.push(CsSession {
-                fid,
-                resp,
-                cursor: 0,
-            });
-        }
-    }
-
-    /// Drain up to `cap` bytes of the /net/cs response for `fid` from its
-    /// cursor. A read before any write (no session) yields 0 bytes.
-    fn cs_read(&mut self, fid: u32, cap: usize, tag: u16) -> Result<usize, ()> {
-        let chunk: Vec<u8> = match self.cs.iter_mut().find(|s| s.fid == fid) {
-            Some(s) => {
-                let end = (s.cursor + cap).min(s.resp.len());
-                let out = s.resp[s.cursor..end].to_vec();
-                s.cursor = end;
-                out
+    /// Begin a /net/cs or /net/dns resolution for `fid` (the write IS the query).
+    /// Replaces any prior session on the same fid (cancelling its in-flight query
+    /// first, so no smoltcp query slot leaks). `file` is P_CS or P_DNS. A
+    /// numeric/ndb host fills the answer synchronously; a name that needs DNS
+    /// starts a query (the subsequent read defers). A malformed request or a
+    /// resolver-less DNS name fills the empty answer (cs's "no path" signal).
+    fn query_begin(&mut self, net: &mut Net, fid: u32, file: u64, data: &[u8]) {
+        // Drop any prior session for this fid (cancels its in-flight query +
+        // any deferred read), so a re-write never leaks a smoltcp query slot.
+        self.query_drop(net, fid);
+        let dial = trim_ws(data);
+        let (kind, host) = if file == P_CS {
+            match cs_parse(dial) {
+                Some(kh) => kh,
+                None => return self.query_fill(fid, QueryKind::Dns, Vec::new()),
             }
-            None => Vec::new(),
+        } else {
+            match dns_parse(dial) {
+                Some(name) => (QueryKind::Dns, name),
+                None => return self.query_fill(fid, QueryKind::Dns, Vec::new()),
+            }
         };
+        // Resolve the host: numeric -> static ndb -> DNS.
+        if let Some(ip) = parse_ipv4(host) {
+            return self.query_fill(fid, kind, format_resolved(kind, ip));
+        }
+        if let Some(ip) = crate::ndb::lookup_host(host) {
+            return self.query_fill(fid, kind, format_resolved(kind, ip));
+        }
+        // Delegate to DNS. A start failure (no resolver, bad name) fills empty
+        // -- fail closed fast, never a hung read on an unanswerable query.
+        match net.dns_query_start(host) {
+            Some(q) => self.queries.push(Query {
+                fid,
+                kind,
+                query: Some(q),
+                resp: None,
+                cursor: 0,
+                deferred: None,
+            }),
+            None => self.query_fill(fid, kind, Vec::new()),
+        }
+    }
+
+    /// Install a synchronously-resolved answer for `fid` (query None).
+    fn query_fill(&mut self, fid: u32, kind: QueryKind, resp: Vec<u8>) {
+        self.queries.push(Query {
+            fid,
+            kind,
+            query: None,
+            resp: Some(resp),
+            cursor: 0,
+            deferred: None,
+        });
+    }
+
+    /// Read up to `cap` bytes of the /net/cs|dns answer for `fid`. If the answer
+    /// is ready, drain from the cursor. If a DNS query is still in flight, poll
+    /// it: a result formats + drains; Pending DEFERS (holds the Rread, sent by
+    /// poll_dns on resolution). A read before any write (no session) yields 0.
+    fn query_read(&mut self, net: &mut Net, fid: u32, cap: usize, tag: u16) -> Result<usize, ()> {
+        let idx = match self.queries.iter().position(|q| q.fid == fid) {
+            Some(i) => i,
+            None => return p9::build_rread(&mut self.out_buf, tag, &[]),
+        };
+        // If a query is in flight, check whether it has resolved since the write.
+        if let Some(h) = self.queries[idx].query {
+            match net.dns_poll(h) {
+                DnsPoll::Pending => {
+                    // Hold the Rread; poll_dns completes it when the query lands.
+                    self.queries[idx].deferred = Some((tag, cap));
+                    self.defer = true;
+                    return Ok(0); // ignored (defer set)
+                }
+                DnsPoll::Resolved(ip) => {
+                    let kind = self.queries[idx].kind;
+                    self.queries[idx].query = None; // slot freed by dns_poll
+                    self.queries[idx].resp = Some(format_resolved(kind, ip));
+                }
+                DnsPoll::Failed => {
+                    self.queries[idx].query = None; // slot freed by dns_poll
+                    self.queries[idx].resp = Some(Vec::new()); // unresolved -> empty
+                }
+            }
+        }
+        let chunk = self.query_drain(idx, cap);
         p9::build_rread(&mut self.out_buf, tag, &chunk)
     }
 
-    /// Drop the /net/cs session for `fid` (on clunk).
-    fn cs_drop(&mut self, fid: u32) {
-        self.cs.retain(|s| s.fid != fid);
+    /// Drain up to `cap` bytes of query `idx`'s ready answer from its cursor.
+    fn query_drain(&mut self, idx: usize, cap: usize) -> Vec<u8> {
+        let q = &mut self.queries[idx];
+        match &q.resp {
+            Some(resp) => {
+                let end = (q.cursor + cap).min(resp.len());
+                let out = resp[q.cursor..end].to_vec();
+                q.cursor = end;
+                out
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// Complete any deferred cs/dns reads whose DNS query has resolved (net-4b):
+    /// the serve-loop analog of poll_accepts. For each session awaiting a result,
+    /// poll the query; on a result, format the answer + send the held Rread.
+    /// Returns false if a held-Rread write failed (the session is dead -> the
+    /// serve loop tears this connection down).
+    pub fn poll_dns(&mut self, net: &mut Net) -> bool {
+        for idx in 0..self.queries.len() {
+            let (tag, cap) = match self.queries[idx].deferred {
+                Some(d) => d,
+                None => continue,
+            };
+            let h = match self.queries[idx].query {
+                Some(h) => h,
+                None => {
+                    // A resolved/empty answer with a stuck deferred marker
+                    // (defensive): deliver it now.
+                    self.queries[idx].deferred = None;
+                    if !self.deliver_deferred(idx, tag, cap) {
+                        return false;
+                    }
+                    continue;
+                }
+            };
+            match net.dns_poll(h) {
+                DnsPoll::Pending => {} // still waiting; check again next tick
+                DnsPoll::Resolved(ip) => {
+                    let kind = self.queries[idx].kind;
+                    self.queries[idx].query = None;
+                    self.queries[idx].resp = Some(format_resolved(kind, ip));
+                    self.queries[idx].deferred = None;
+                    if !self.deliver_deferred(idx, tag, cap) {
+                        return false;
+                    }
+                }
+                DnsPoll::Failed => {
+                    self.queries[idx].query = None;
+                    self.queries[idx].resp = Some(Vec::new());
+                    self.queries[idx].deferred = None;
+                    if !self.deliver_deferred(idx, tag, cap) {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// Build + send the held Rread for a now-ready deferred query. False on a
+    /// write failure (tear the connection down).
+    fn deliver_deferred(&mut self, idx: usize, tag: u16, cap: usize) -> bool {
+        let chunk = self.query_drain(idx, cap);
+        self.out_buf.clear();
+        self.out_buf.resize(SRV_MSIZE_USIZE, 0);
+        match p9::build_rread(&mut self.out_buf, tag, &chunk) {
+            Ok(rlen) => self.send_all(rlen),
+            Err(()) => false,
+        }
+    }
+
+    /// Any session holding a deferred read (the serve loop clamps its poll delay
+    /// to the floor so an in-flight DNS query completes promptly).
+    pub fn has_pending_dns(&self) -> bool {
+        self.queries.iter().any(|q| q.deferred.is_some())
+    }
+
+    /// Drop the cs/dns session for `fid` (on clunk / rewrite): cancels any
+    /// in-flight DNS query (freeing its smoltcp slot) before removing the entry.
+    fn query_drop(&mut self, net: &mut Net, fid: u32) {
+        if let Some(i) = self.queries.iter().position(|q| q.fid == fid) {
+            if let Some(h) = self.queries[i].query {
+                net.dns_cancel(h); // still-pending: cancel is safe (slot occupied)
+            }
+            self.queries.remove(i);
+        }
+    }
+
+    /// Drop EVERY cs/dns session (on teardown / Tversion), cancelling each
+    /// in-flight DNS query so no smoltcp query slot leaks.
+    fn query_clear_all(&mut self, net: &mut Net) {
+        for q in self.queries.drain(..) {
+            if let Some(h) = q.query {
+                net.dns_cancel(h);
+            }
+        }
+    }
+
+    /// Cancel a deferred cs/dns read abandoned by a Tflush (the client died on a
+    /// blocked dns read): the session whose deferred tag == oldtag has its query
+    /// cancelled + its deferred marker cleared, so poll_dns never sends a late
+    /// Rread for the flushed tag. A no-op if no session holds that tag.
+    fn cancel_dns_flush(&mut self, net: &mut Net, oldtag: u16) {
+        if let Some(i) = self
+            .queries
+            .iter()
+            .position(|q| q.deferred.map(|(t, _)| t) == Some(oldtag))
+        {
+            if let Some(h) = self.queries[i].query {
+                net.dns_cancel(h);
+            }
+            self.queries[i].query = None;
+            self.queries[i].deferred = None;
+            self.queries[i].resp = Some(Vec::new());
+        }
     }
 
     pub fn handle(&self) -> i64 {
@@ -2033,7 +2395,7 @@ impl Conn {
                 }
             }
         }
-        self.cs.clear(); // free this session's /net/cs response buffers (net-4a)
+        self.query_clear_all(net); // free cs/dns sessions + cancel queries (net-4b)
     }
 
     fn fid_find(&self, fid: u32) -> Option<usize> {
@@ -2074,7 +2436,7 @@ impl Conn {
             // Cancel any deferred accept this fid held: clunking the half-open
             // listen fid must not strand its PendingAccept (net-3d F1).
             net.cancel_accept_fid(self.handle, fid);
-            self.cs_drop(fid); // free any /net/cs session this fid held (net-4a)
+            self.query_drop(net, fid); // free cs/dns session + cancel query (net-4b)
             if let Some(n) = path_conn_n(f.path) {
                 net.slot_unref(n);
             }
@@ -2264,7 +2626,7 @@ impl Conn {
                 }
             }
         }
-        self.cs.clear(); // a Tversion also resets /net/cs sessions (net-4a)
+        self.query_clear_all(net); // a Tversion also resets cs/dns sessions (net-4b)
     }
 
     fn h_attach(&mut self, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
@@ -2469,14 +2831,15 @@ impl Conn {
             let k = net.data_recv(n, &mut scratch[..cap]);
             return p9::build_rread(&mut self.out_buf, tag, &scratch[..k]);
         }
-        if f.path == P_CS {
-            // cs response (net-4a): drain the per-fid resolved buffer via a
-            // per-fid cursor (the Tread offset is ignored, like the FK_DATA
-            // stream). A read before any write yields 0 bytes.
+        if f.path == P_CS || f.path == P_DNS {
+            // cs/dns response (net-4a/4b): drain the per-fid answer via a per-fid
+            // cursor (the Tread offset is ignored, like the FK_DATA stream). If a
+            // DNS query is still in flight the read DEFERS (held until resolved).
+            // A read before any write yields 0 bytes.
             let cap = (self.msize as usize)
                 .saturating_sub(p9::P9_HDR_LEN + 4)
                 .min(a.count as usize);
-            return self.cs_read(a.fid, cap, tag);
+            return self.query_read(net, a.fid, cap, tag);
         }
         let content = net.file_content(f.path);
         let body = content.as_slice();
@@ -2551,7 +2914,7 @@ impl Conn {
             (DIR_MODE, 2u64, 0u64)
         } else {
             let m = match f.path {
-                P_TCP_CLONE | P_UDP_CLONE | P_ICMP_CLONE | P_CS => FILE_RW,
+                P_TCP_CLONE | P_UDP_CLONE | P_ICMP_CLONE | P_CS | P_DNS => FILE_RW,
                 _ if is_conn(f.path) => match conn_filekind(f.path) {
                     FK_CTL | FK_DATA => FILE_RW,
                     _ => FILE_RO,
@@ -2594,17 +2957,18 @@ impl Conn {
     }
 
     /// Tflush: the kernel client abandoned an in-flight request (a death-
-    /// interrupt on a thread blocked in a `listen` open). Cancel any deferred
-    /// accept held under `oldtag` -- no late Rlopen, no connection minted for
-    /// the dead op -- then Rflush. Per 9P the client reuses `oldtag` only after
-    /// this Rflush, so the held listen tag is reclaimed cleanly (no tag leak in
-    /// the kernel's outstanding-table, the latent net-2c-2 closes here).
+    /// interrupt on a thread blocked in a `listen` open or a deferred dns read).
+    /// Cancel any deferred accept OR deferred dns read held under `oldtag` -- no
+    /// late Rlopen/Rread, no connection minted, no dns slot leaked -- then Rflush.
+    /// Per 9P the client reuses `oldtag` only after this Rflush, so the held tag
+    /// is reclaimed cleanly (no tag leak in the kernel's outstanding-table).
     fn h_flush(&mut self, net: &mut Net, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
         let a = match p9::parse_tflush(tmsg) {
             Ok(a) => a,
             Err(_) => return self.err(tag, p9::E_PROTO),
         };
         net.cancel_accept_tag(self.handle, a.oldtag);
+        self.cancel_dns_flush(net, a.oldtag); // net-4b: drop a deferred dns read
         p9::build_rflush(&mut self.out_buf, tag)
     }
 
@@ -2621,13 +2985,14 @@ impl Conn {
         if !f.opened {
             return self.err(tag, p9::E_PROTO);
         }
-        if f.path == P_CS {
-            // cs is a request/response file (net-4a): the write IS the dial
-            // query. Resolve it now and stash the per-fid response for the
-            // subsequent read(s). The whole write is consumed even when
-            // unresolvable -- an unresolved name yields an empty response, the
-            // Plan 9 "no reachable path" signal (the reader sees 0 bytes).
-            self.cs_set(a.fid, cs_resolve(a.data));
+        if f.path == P_CS || f.path == P_DNS {
+            // cs/dns are request/response files (net-4a/4b): the write IS the
+            // query. Begin the resolution now (numeric/ndb fill the answer
+            // synchronously; a name needing DNS starts a query the read defers
+            // on). The whole write is consumed even when unresolvable -- an
+            // unresolved name yields an empty answer, the Plan 9 "no reachable
+            // path" signal (the reader sees 0 bytes), never an error frame.
+            self.query_begin(net, a.fid, f.path, a.data);
             return p9::build_rwrite(&mut self.out_buf, tag, a.count);
         }
         if !is_conn(f.path) {

@@ -3467,10 +3467,14 @@ int main(void) {
                             t_putstr("joey: net-4a PROBE cs ndb resolve FAILED\n");
                             return 1;
                         }
-                        // (c) an unresolvable host (not numeric, not in ndb, no DNS
-                        //     yet) -> an empty response (cs's "no path" signal).
+                        // (c) a synchronous "no path": a numeric host (no DNS) with
+                        //     an unknown service -> an empty response (cs's "no
+                        //     reachable path" signal). A numeric host keeps this
+                        //     deterministic; an unresolvable HOST now delegates to
+                        //     DNS (a deferred, host-coupled read -- not a boot gate;
+                        //     net-4b's best-effort probe covers the live DNS path).
                         long cs3 = t_open(T_WALK_OPEN_FROM_ROOT, "/net/cs", 7, T_ORDWR);
-                        static const char q3[] = "tcp!nonesuch.invalid!80";
+                        static const char q3[] = "tcp!1.2.3.4!nosuchsvc";
                         if (cs3 < 0 ||
                             t_write(cs3, q3, sizeof(q3) - 1) != (long)(sizeof(q3) - 1)) {
                             t_putstr("joey: net-4a PROBE cs open/write (unresolved) FAILED\n");
@@ -3503,6 +3507,64 @@ int main(void) {
                         t_putstr("joey: net-4a PROBE OK (cs tcp!127.0.0.1!80 + "
                                  "net!localhost!http -> /net/tcp/clone 127.0.0.1!80; "
                                  "unresolved -> empty; /lib/ndb/local readable)\n");
+                    }
+                    // === net-4b: dns (the resolver: name -> address) ===
+                    // Deterministic, self-contained: /net/dns resolves a name to
+                    // its address via the SYNCHRONOUS fast paths (numeric, then
+                    // the static ndb) -- no network query needed. A name that
+                    // needs a live DNS query DEFERS (host-coupled), so it is NOT
+                    // asserted here; netd's best-effort live probe (logged) +
+                    // net-4d's loopback-resolver E2E cover the deferred path.
+                    {
+                        // (a) a numeric name reads back verbatim (no query).
+                        long dn = t_open(T_WALK_OPEN_FROM_ROOT, "/net/dns", 8, T_ORDWR);
+                        static const char d1[] = "10.0.2.2";
+                        if (dn < 0 ||
+                            t_write(dn, d1, sizeof(d1) - 1) != (long)(sizeof(d1) - 1)) {
+                            t_putstr("joey: net-4b PROBE dns open/write (numeric) FAILED\n");
+                            return 1;
+                        }
+                        unsigned char dr1[64];
+                        long dr1n = t_read(dn, dr1, sizeof(dr1));
+                        (void)t_close(dn);
+                        if (dr1n <= 0 || !mem_contains(dr1, (size_t)dr1n, "10.0.2.2", 8)) {
+                            t_putstr("joey: net-4b PROBE dns numeric resolve FAILED\n");
+                            return 1;
+                        }
+                        // (b) an ndb host resolves synchronously (localhost ->
+                        //     127.0.0.1); the optional `ip` type token is accepted.
+                        long dn2 = t_open(T_WALK_OPEN_FROM_ROOT, "/net/dns", 8, T_ORDWR);
+                        static const char d2[] = "localhost ip";
+                        if (dn2 < 0 ||
+                            t_write(dn2, d2, sizeof(d2) - 1) != (long)(sizeof(d2) - 1)) {
+                            t_putstr("joey: net-4b PROBE dns open/write (ndb) FAILED\n");
+                            return 1;
+                        }
+                        unsigned char dr2[64];
+                        long dr2n = t_read(dn2, dr2, sizeof(dr2));
+                        (void)t_close(dn2);
+                        if (dr2n <= 0 || !mem_contains(dr2, (size_t)dr2n, "127.0.0.1", 9)) {
+                            t_putstr("joey: net-4b PROBE dns ndb resolve FAILED\n");
+                            return 1;
+                        }
+                        // (c) an unsupported record type (no IPv6 at v1.0) -> empty,
+                        //     synchronously (no query started).
+                        long dn3 = t_open(T_WALK_OPEN_FROM_ROOT, "/net/dns", 8, T_ORDWR);
+                        static const char d3[] = "localhost aaaa";
+                        if (dn3 < 0 ||
+                            t_write(dn3, d3, sizeof(d3) - 1) != (long)(sizeof(d3) - 1)) {
+                            t_putstr("joey: net-4b PROBE dns open/write (aaaa) FAILED\n");
+                            return 1;
+                        }
+                        unsigned char dr3[64];
+                        long dr3n = t_read(dn3, dr3, sizeof(dr3));
+                        (void)t_close(dn3);
+                        if (dr3n != 0) {
+                            t_putstr("joey: net-4b PROBE dns aaaa should be empty\n");
+                            return 1;
+                        }
+                        t_putstr("joey: net-4b PROBE OK (dns 10.0.2.2 -> 10.0.2.2; "
+                                 "localhost ip -> 127.0.0.1; aaaa -> empty)\n");
                     }
 #endif
                 } else {

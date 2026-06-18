@@ -54,7 +54,7 @@ use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
 use smoltcp::socket::dhcpv4;
 use smoltcp::time::Instant as SmolInstant;
-use smoltcp::wire::{EthernetAddress, HardwareAddress, IpCidr};
+use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr};
 
 /// Console-direct diagnostics (T_SYS_PUTS) -- visible regardless of fd wiring.
 macro_rules! say {
@@ -240,6 +240,10 @@ impl Driver for NetD {
         // shape for a boot bring-up. slirp answers immediately, so it converges in
         // a few polls; the bound (~5s) is the fail-closed backstop.
         let mut leased = false;
+        // The DHCP-learned resolver list (net-4b): seeds the /net/dns socket so
+        // cs/dns can resolve non-numeric, non-ndb names. Captured here because
+        // the lease `cfg` is a transient borrow of the dhcp socket.
+        let mut dns_servers: Vec<IpAddress> = Vec::new();
         for _ in 0..MAX_POLLS {
             let ts = now(&base);
             iface.poll(ts, &mut device, &mut sockets);
@@ -253,6 +257,9 @@ impl Driver for NetD {
                 });
                 if let Some(router) = cfg.router {
                     let _ = iface.routes_mut().add_default_ipv4_route(router);
+                }
+                for s in cfg.dns_servers.iter() {
+                    dns_servers.push(IpAddress::Ipv4(*s));
                 }
                 // The IP MTU is the L2 frame minus the Ethernet header.
                 say!(
@@ -283,7 +290,7 @@ impl Driver for NetD {
         // Build the connection table around the now-configured stack (it takes
         // ownership of iface + sockets). The DHCP socket stays in the set and
         // keeps renewing the lease.
-        let mut net = server::Net::new(iface, sockets, base);
+        let mut net = server::Net::new(iface, sockets, base, &dns_servers);
 
         // net-3b: a best-effort UDP round-trip through the live /net/udp data
         // path (a DNS query to slirp's resolver), bounded + logged, NEVER a boot
@@ -318,6 +325,29 @@ impl Driver for NetD {
                 "netd: net-3c ICMP round-trip best-effort: no echo reply (slirp host-ping?) -- /net/icmp machinery proven via joey"
             ),
             server::PingProbe::MintFailed => say!("netd: net-3c ICMP probe: icmp_clone failed"),
+        }
+
+        // net-4b: a best-effort live A-record query through the shared resolver
+        // (the same dns socket /net/dns + cs->dns drive), bounded + logged, NEVER
+        // a boot gate -- slirp forwards DNS to the host resolver, so a response is
+        // environment-dependent (the net-3b/3c lesson). The deterministic proof of
+        // the /net/dns machinery is joey's numeric + ndb probe; the deterministic
+        // in-guest deferred-resolution E2E is owed to net-4d (a loopback resolver).
+        match net.dns_live_probe(&mut device) {
+            server::DnsProbeResult::Ok(ip) => say!(
+                "netd: net-4b DNS live query OK ({} -> {}.{}.{}.{})",
+                "example.com",
+                ip[0],
+                ip[1],
+                ip[2],
+                ip[3]
+            ),
+            server::DnsProbeResult::NoResponse => say!(
+                "netd: net-4b DNS live query best-effort: no answer (host resolver?) -- /net/dns machinery proven via joey"
+            ),
+            server::DnsProbeResult::NoServer => {
+                say!("netd: net-4b DNS live query: no resolver in the lease")
+            }
         }
 
         // net-3d: the DETERMINISTIC in-guest loopback E2E -- three round-trips
@@ -396,10 +426,27 @@ impl Driver for NetD {
                 }
             }
 
-            // With a pending accept, the inbound SYN arrives on the NIC (not a
-            // pollable fd), so only a timeout-driven net.poll catches it: clamp to
-            // the floor to keep accept latency <= IDLE_POLL_MIN_MS.
-            let delay = if net.has_pending_accepts() {
+            // Deliver any deferred cs/dns reads whose DNS query has resolved
+            // (net-4b): send the held Rread. A write failure means the issuing
+            // session died -> tear it down. Iterate backward so a remove() does
+            // not shift an unvisited lower index.
+            {
+                let mut i = conns.len();
+                while i > 0 {
+                    i -= 1;
+                    if !conns[i].poll_dns(&mut net) {
+                        conns[i].teardown(&mut net);
+                        let _ = unsafe { t_close(conns[i].handle()) };
+                        conns.remove(i);
+                    }
+                }
+            }
+
+            // With a pending accept OR a deferred DNS read, the event that
+            // unblocks it (an inbound SYN / a DNS reply) arrives on the NIC, not
+            // a pollable fd -- only a timeout-driven net.poll catches it. Clamp to
+            // the floor to keep accept/resolve latency <= IDLE_POLL_MIN_MS.
+            let delay = if net.has_pending_accepts() || conns.iter().any(|c| c.has_pending_dns()) {
                 IDLE_POLL_MIN_MS
             } else {
                 net.poll_delay_ms()
