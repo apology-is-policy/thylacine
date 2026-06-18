@@ -224,6 +224,22 @@ const FK_REMOTE: u64 = 4; // /net/tcp/N/remote
 const FK_STATUS: u64 = 5; // /net/tcp/N/status
 const FK_ERR: u64 = 6; //    /net/tcp/N/err
 const FK_LISTEN: u64 = 7; // /net/tcp/N/listen (the server accept file; net-3a)
+const FK_READY: u64 = 8; //  /net/tcp/N/ready (the dev9p.poll readiness file; net-6b)
+
+// The poll event bits the `ready` file speaks (net-6b). A read on
+// /net/<proto>/N/ready carries the requested mask in its Tread OFFSET (POLLIN |
+// POLLOUT -- the only requestable bits) and returns the satisfied `revents` (the
+// requested readable/writable subset PLUS the always-reported POLLERR/POLLHUP) as
+// a u32 LE, WITHOUT consuming socket data. The bit values mirror the kernel
+// poll.h ABI -- dev9p.poll (NET-DESIGN 12.2) is the only client, passing its
+// `events` as the read offset. A non-zero revents replies at once; a zero revents
+// DEFERS (park a PendingReady; poll_ready delivers when the socket becomes ready
+// per the mask), so a poll(POLLIN) on a writable-but-empty socket waits for data
+// rather than busy-looping -- the offset names the SPECIFIC events to wait for.
+const POLLIN: u16 = 0x001;
+const POLLOUT: u16 = 0x004;
+const POLLERR: u16 = 0x008;
+const POLLHUP: u16 = 0x010;
 
 fn is_conn(path: u64) -> bool {
     path & CONN_FLAG != 0
@@ -350,6 +366,25 @@ struct PendingRead {
     slot_n: u32, // the connection slot to recv from when ready
     tag: u16,    // the held Tread tag (cancelled by a Tflush on it)
     cap: usize,  // the negotiated max bytes to return
+}
+
+/// A deferred readiness probe (net-6b): a `read(/net/<proto>/N/ready)` whose
+/// requested poll mask (the Tread OFFSET) is not yet satisfied. netd HOLDS the
+/// Rread until the socket becomes ready for the mask (or an always-reported
+/// POLLERR/POLLHUP fires), then poll_ready sends the 4-byte revents bitmap. The
+/// kernel dev9p.poll bridge (NET-DESIGN 12.2) is the sole client: it keeps one
+/// outstanding readiness read per polled fd, so a poller parks until the socket
+/// transitions -- the probe-then-observe of net_poll.tla, with no busy loop
+/// (the mask names the specific events to wait for). Non-consuming (it reports
+/// readiness, never dequeues). Cancelled by the fid's clunk / a Tflush on its
+/// tag / teardown / Tversion, exactly like PendingRead. Bounded by MAX_FIDS per
+/// connection (#65 floor).
+#[derive(Copy, Clone)]
+struct PendingReady {
+    fid: u32,    // the fid the read is on (cancelled on its clunk)
+    slot_n: u32, // the connection slot whose readiness to report
+    tag: u16,    // the held Tread tag (cancelled by a Tflush on it)
+    mask: u16,   // the requested poll events (POLLIN | POLLOUT) from the offset
 }
 
 /// The result of a non-blocking dequeue from a connection's rx (net-6a). The
@@ -1480,6 +1515,102 @@ impl Net {
         }
     }
 
+    /// Non-consuming POLLIN readiness (net-6b): would a `read` on connection `n`
+    /// return WITHOUT blocking -- data available OR end-of-stream? The poll twin
+    /// of data_recv_outcome (net-6a), but NON-consuming via can_recv + the TCP
+    /// state machine. (peek_slice cannot see EOF -- it returns Ok(0) for BOTH an
+    /// empty-but-open socket and a drained-FIN one, unlike recv_slice's Finished;
+    /// the state is the only non-consuming EOF signal.) A read returns Data when
+    /// can_recv, and EOF (recv -> 0, no block) once the recv side is finished --
+    /// the peer closed (CloseWait/Closing/LastAck/TimeWait) or the socket is
+    /// Closed. While connecting (SynSent/SynReceived) or open with an empty rx
+    /// (Established/FinWait, where the peer may still send), a recv WOULD block,
+    /// so it is NOT readable. EOF counts as readable so a poller waiting on a peer
+    /// disconnect wakes. UDP/ICMP readability is a queued datagram (can_recv).
+    fn slot_poll_readable(&self, n: u32) -> bool {
+        let h = match self.slot_socket(n) {
+            Some(h) => h,
+            None => return false,
+        };
+        match self.slot_proto(n) {
+            Some(PROTO_UDP) => self.sockets.get::<udp::Socket>(h).can_recv(),
+            Some(PROTO_ICMP) => self.sockets.get::<icmp::Socket>(h).can_recv(),
+            _ => {
+                let s = self.sockets.get::<tcp::Socket>(h);
+                if s.can_recv() {
+                    return true; // buffered data -> a read returns it (Data)
+                }
+                // No data buffered: readable iff a recv would return EOF (not
+                // block). These terminal/closing states have a finished recv
+                // side; Established/FinWait may still receive (block), and a
+                // connecting socket's recv is InvalidState (block).
+                matches!(
+                    s.state(),
+                    tcp::State::CloseWait
+                        | tcp::State::Closing
+                        | tcp::State::LastAck
+                        | tcp::State::TimeWait
+                        | tcp::State::Closed
+                )
+            }
+        }
+    }
+
+    /// Non-consuming POLLOUT readiness (net-6b): can connection `n` accept bytes
+    /// to send right now? TCP can_send (established with send-buffer room);
+    /// UDP/ICMP are writable whenever the socket is open (datagram sends never
+    /// block in smoltcp). A connecting/closed TCP socket is not writable.
+    fn slot_can_send(&self, n: u32) -> bool {
+        let h = match self.slot_socket(n) {
+            Some(h) => h,
+            None => return false,
+        };
+        match self.slot_proto(n) {
+            Some(PROTO_UDP) => self.sockets.get::<udp::Socket>(h).is_open(),
+            Some(PROTO_ICMP) => self.sockets.get::<icmp::Socket>(h).is_open(),
+            _ => self.sockets.get::<tcp::Socket>(h).can_send(),
+        }
+    }
+
+    /// Non-consuming POLLHUP readiness (net-6b; an always-reported output-only
+    /// bit): the TCP connection is fully closed (the socket left the active set
+    /// for good). A peer half-close (CloseWait) is NOT a HUP -- it reads EOF
+    /// (POLLIN via slot_poll_readable) while the local side can still send; HUP
+    /// fires once the socket is Closed. UDP/ICMP are connectionless -> never HUP.
+    fn slot_is_hup(&self, n: u32) -> bool {
+        let h = match self.slot_socket(n) {
+            Some(h) => h,
+            None => return false,
+        };
+        match self.slot_proto(n) {
+            Some(PROTO_TCP) => !self.sockets.get::<tcp::Socket>(h).is_open(),
+            _ => false,
+        }
+    }
+
+    /// The net-6b readiness computation: the satisfied poll `revents` for
+    /// connection `n` against the requested `mask`. POLLIN/POLLOUT are gated by
+    /// the request (so a poll(POLLIN) on a writable-but-empty socket reports
+    /// nothing -> DEFER, never a busy loop); POLLERR/POLLHUP are always reported
+    /// (the output-only bits). A non-zero result satisfies the read at once;
+    /// zero means DEFER (park a PendingReady).
+    fn check_ready(&self, n: u32, mask: u16) -> u16 {
+        let mut revents: u16 = 0;
+        if mask & POLLIN != 0 && self.slot_poll_readable(n) {
+            revents |= POLLIN;
+        }
+        if mask & POLLOUT != 0 && self.slot_can_send(n) {
+            revents |= POLLOUT;
+        }
+        if self.slot_err(n).is_some() {
+            revents |= POLLERR;
+        }
+        if self.slot_is_hup(n) {
+            revents |= POLLHUP;
+        }
+        revents
+    }
+
     /// Dequeue up to `out.len()` bytes from the connection, distinguishing "no
     /// data yet" (WouldBlock -> the caller may defer = block) from end-of-stream
     /// (Eof -> the read returns 0). TCP dequeues from the byte stream; UDP/ICMP
@@ -1671,6 +1802,7 @@ impl Net {
                 b"remote" => FK_REMOTE,
                 b"status" => FK_STATUS,
                 b"err" => FK_ERR,
+                b"ready" => FK_READY, // the dev9p.poll readiness file (net-6b)
                 b"listen" if proto == PROTO_TCP => FK_LISTEN,
                 _ => return None,
             };
@@ -1740,6 +1872,7 @@ impl Net {
             push(b"remote", make_conn(proto, n, FK_REMOTE), false);
             push(b"status", make_conn(proto, n, FK_STATUS), false);
             push(b"err", make_conn(proto, n, FK_ERR), false);
+            push(b"ready", make_conn(proto, n, FK_READY), false); // net-6b dev9p.poll
             return;
         }
         match dir {
@@ -2647,6 +2780,125 @@ fn recv_blocking_legs(
     }
 }
 
+/// net-6b: the readiness substrate (check_ready) over an established loopback
+/// connection. Asserts the dev9p.poll bridge's netd half deterministically
+/// in-guest -- a fresh established socket is WRITABLE (POLLOUT) but not READABLE
+/// (POLLIN defers); after the peer sends it is READABLE; after the peer closes +
+/// the FIN drains the recv side reports READABLE (a read returns EOF, so a poller
+/// waiting on a disconnect wakes). The recv_blocking_e2e pattern; the loopback
+/// isolation is load-bearing (net-3d -- a shared-NIC SocketSet mis-routes lo).
+pub fn ready_e2e(base: Instant) -> &'static str {
+    let mut device = Loopback::new(Medium::Ethernet);
+    let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress([
+        0x02, 0x00, 0x00, 0x00, 0x00, 0x07,
+    ])));
+    config.random_seed = LO_SEED;
+    let ts0 = SmolInstant::from_millis(base.elapsed().as_millis() as i64);
+    let mut iface = Interface::new(config, &mut device, ts0);
+    iface.update_ip_addrs(|a| {
+        let _ = a.push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8));
+    });
+    let mut lo = Net::new(iface, SocketSet::new(Vec::new()), base, IfConfig::empty());
+    let (m, cn, ln) = match lo_establish_pair(&mut lo, &mut device) {
+        Some(t) => t,
+        None => return "establish",
+    };
+    let stage = ready_legs(&mut lo, &mut device, m, cn);
+    lo.free_orphan_mint(m);
+    lo.free_orphan_mint(cn);
+    lo.free_orphan_mint(ln);
+    stage
+}
+
+/// Establish a loopback TCP connection for the net-6 selftests: announce a
+/// listener `ln`, connect a client `cn`, drive the accept to mint the server
+/// side `m`. Returns (m, cn, ln) -- the caller frees all three via
+/// free_orphan_mint -- or None (with the orphan mints freed) on any stage
+/// failure. (recv_blocking_e2e inlines the same sequence; ready_e2e shares it.)
+fn lo_establish_pair(lo: &mut Net, device: &mut Loopback) -> Option<(u32, u32, u32)> {
+    let ln = lo.tcp_clone()?;
+    let ep = IpListenEndpoint {
+        addr: None,
+        port: LO_LOOPBACK_PORT,
+    };
+    if lo.ctl_announce(ln, ep).is_err() {
+        lo.free_orphan_mint(ln);
+        return None;
+    }
+    let cn = match lo.tcp_clone() {
+        Some(n) => n,
+        None => {
+            lo.free_orphan_mint(ln);
+            return None;
+        }
+    };
+    if lo
+        .tcp_connect(cn, [127, 0, 0, 1], LO_LOOPBACK_PORT)
+        .is_err()
+    {
+        lo.free_orphan_mint(cn);
+        lo.free_orphan_mint(ln);
+        return None;
+    }
+    lo.register_accept(0, 0, 0, ln);
+    let mut server: Option<u32> = None;
+    let accepted = lo_drive(lo, device, |lo| {
+        let done = lo.poll_accepts();
+        if done.is_empty() {
+            return false;
+        }
+        for d in done {
+            server = Some(d.new_n);
+        }
+        true
+    });
+    match (accepted, server) {
+        (true, Some(m)) => Some((m, cn, ln)),
+        _ => {
+            lo.free_orphan_mint(cn);
+            lo.free_orphan_mint(ln);
+            None
+        }
+    }
+}
+
+/// The readiness legs over an established loopback connection (server `m`, client
+/// `cn`). Established yields POLLOUT set and POLLIN clear; after the peer sends,
+/// POLLIN sets; after the peer closes and the FIN drains, POLLIN stays set (EOF
+/// reads as readable). Returns "ok" or the failing stage (so a FAIL boot line
+/// pinpoints where readiness broke).
+fn ready_legs(lo: &mut Net, device: &mut Loopback, m: u32, cn: u32) -> &'static str {
+    // (1) Established, rx empty: POLLOUT satisfied (writable); POLLIN NOT (no
+    //     data) -> a poll(POLLIN) would DEFER, a poll(POLLOUT) returns at once.
+    if lo.check_ready(m, POLLOUT) & POLLOUT == 0 {
+        return "leg1-writable";
+    }
+    if lo.check_ready(m, POLLIN) & POLLIN != 0 {
+        return "leg1-not-readable";
+    }
+    // (2) Client sends; once the segment lands, the server is READABLE.
+    if lo.data_send(cn, b"hi") != 2 {
+        return "leg2-send";
+    }
+    if !lo_drive(lo, device, |lo| lo.check_ready(m, POLLIN) & POLLIN != 0) {
+        return "leg2-readable";
+    }
+    // (3) Drain the buffered "hi", then the client closes. Once the FIN drains
+    //     and the rx is empty, the server's recv side is at EOF -- still POLLIN
+    //     (a read returns 0), so a poller waiting on a peer disconnect wakes.
+    let mut buf = [0u8; 8];
+    let _ = lo.data_recv_outcome(m, &mut buf);
+    lo.ctl_hangup(cn);
+    if lo_drive(lo, device, |lo| {
+        matches!(lo.data_recv_outcome(m, &mut [0u8; 1]), RecvOutcome::Eof)
+            && lo.check_ready(m, POLLIN) & POLLIN != 0
+    }) {
+        "ok"
+    } else {
+        "leg3-eof-readable"
+    }
+}
+
 /// Parse a non-empty all-ASCII-decimal name into a connection number, bounded
 /// to the slot range. None on any non-digit, empty, or out-of-range name.
 fn parse_dec(name: &[u8]) -> Option<u32> {
@@ -3126,6 +3378,10 @@ pub struct Conn {
     // Blocking `data` reads holding their Rread (net-6a): each parked on an empty
     // rx, completed by poll_data when bytes arrive (or 0 on EOF).
     pending_reads: Vec<PendingRead>,
+    // Deferred `ready` readiness probes holding their Rread (net-6b): each parked
+    // on a not-yet-satisfied poll mask, completed by poll_ready when the socket
+    // becomes ready per the mask. The dev9p.poll bridge's netd half.
+    pending_ready: Vec<PendingReady>,
 }
 
 impl Conn {
@@ -3140,6 +3396,7 @@ impl Conn {
             defer: false,
             queries: Vec::new(),
             pending_reads: Vec::new(),
+            pending_ready: Vec::new(),
         }
     }
 
@@ -3372,6 +3629,40 @@ impl Conn {
         !self.pending_reads.is_empty()
     }
 
+    /// Complete any deferred readiness probes whose socket now satisfies the mask
+    /// (the net-6b analog of poll_data): the serve-loop pass, called per-Conn
+    /// after net.poll() (so a transition this tick is visible). For each parked
+    /// probe, re-run check_ready(mask): a non-zero revents sends the held Rread
+    /// (the 4-byte bitmap) and removes the pending; a still-zero revents keeps
+    /// waiting. Returns false if a held-Rread write failed (the session is dead
+    /// -> the serve loop tears this connection down). I-9: the single-threaded
+    /// loop runs net.poll() BEFORE this, so a readiness edge cannot be lost
+    /// between h_read's check and the park (the poll_data/poll_dns reasoning).
+    pub fn poll_ready(&mut self, net: &mut Net) -> bool {
+        let mut i = 0;
+        while i < self.pending_ready.len() {
+            let pr = self.pending_ready[i];
+            let revents = net.check_ready(pr.slot_n, pr.mask);
+            if revents != 0 {
+                self.pending_ready.remove(i);
+                let bytes = (revents as u32).to_le_bytes();
+                if !self.deliver_read(pr.tag, &bytes) {
+                    return false;
+                }
+            } else {
+                i += 1; // still not ready for the mask; check next tick
+            }
+        }
+        true
+    }
+
+    /// Any deferred readiness probe is parked (the serve loop clamps its poll
+    /// delay to the floor so a socket transition driven by NIC RX -- not a
+    /// pollable 9P fd -- completes the held readiness read promptly).
+    pub fn has_pending_ready(&self) -> bool {
+        !self.pending_ready.is_empty()
+    }
+
     /// Whether the cs/dns session for `fid` currently holds a deferred (in-flight)
     /// read. h_write consults this to REJECT a re-write that would otherwise drop
     /// the held tag (the F1 re-write facet, net-4d): a held read completes
@@ -3442,6 +3733,7 @@ impl Conn {
         }
         self.query_clear_all(net); // free cs/dns sessions + cancel queries (net-4b)
         self.pending_reads.clear(); // the held Rreads die with the connection (net-6a)
+        self.pending_ready.clear(); // ... and the held readiness Rreads (net-6b)
     }
 
     fn fid_find(&self, fid: u32) -> Option<usize> {
@@ -3484,6 +3776,7 @@ impl Conn {
             net.cancel_accept_fid(self.handle, fid);
             self.query_drop(net, fid); // free cs/dns session + cancel query (net-4b)
             self.pending_reads.retain(|pr| pr.fid != fid); // drop blocked reads (net-6a)
+            self.pending_ready.retain(|pr| pr.fid != fid); // drop readiness probes (net-6b)
             if let Some(n) = path_conn_n(f.path) {
                 net.slot_unref(n);
             }
@@ -3675,6 +3968,7 @@ impl Conn {
         }
         self.query_clear_all(net); // a Tversion also resets cs/dns sessions (net-4b)
         self.pending_reads.clear(); // ... and drops any blocked data reads (net-6a)
+        self.pending_ready.clear(); // ... and any deferred readiness probes (net-6b)
     }
 
     fn h_attach(&mut self, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
@@ -3909,6 +4203,38 @@ impl Conn {
                 }
             }
         }
+        // The `ready` file is the net-6b dev9p.poll readiness probe: report the
+        // satisfied poll revents for the mask carried in the Tread OFFSET, WITHOUT
+        // consuming socket data. A non-zero revents replies at once (the socket is
+        // ready for the requested events); a zero revents DEFERS -- park a
+        // PendingReady, poll_ready sends the held Rread when the socket becomes
+        // ready per the mask (so a poll(POLLIN) on a writable-but-empty socket
+        // waits for data, never busy-loops). The reply is the revents as a u32 LE
+        // (the kernel reads 4 bytes). Bounded per connection (#65 floor).
+        if is_conn(f.path) && conn_filekind(f.path) == FK_READY {
+            let n = conn_n(f.path);
+            let mask = a.offset as u16; // the requested poll events (POLLIN|POLLOUT)
+            let revents = net.check_ready(n, mask);
+            if revents != 0 {
+                let bytes = (revents as u32).to_le_bytes();
+                let want = (self.msize as usize)
+                    .saturating_sub(p9::P9_HDR_LEN + 4)
+                    .min(a.count as usize)
+                    .min(4);
+                return p9::build_rread(&mut self.out_buf, tag, &bytes[..want]);
+            }
+            if self.pending_ready.len() >= MAX_FIDS {
+                return self.err(tag, p9::E_PROTO);
+            }
+            self.pending_ready.push(PendingReady {
+                fid: a.fid,
+                slot_n: n,
+                tag,
+                mask,
+            });
+            self.defer = true;
+            return Ok(0); // ignored: dispatch returns Disp::Deferred
+        }
         if f.path == P_CS || f.path == P_DNS {
             // cs/dns response (net-4a/4b): drain the per-fid answer via a per-fid
             // cursor (the Tread offset is ignored, like the FK_DATA stream). If a
@@ -4048,6 +4374,7 @@ impl Conn {
         net.cancel_accept_tag(self.handle, a.oldtag);
         self.cancel_dns_flush(net, a.oldtag); // net-4b: drop a deferred dns read
         self.pending_reads.retain(|pr| pr.tag != a.oldtag); // net-6a: drop a blocked read
+        self.pending_ready.retain(|pr| pr.tag != a.oldtag); // net-6b: drop a readiness probe
         p9::build_rflush(&mut self.out_buf, tag)
     }
 

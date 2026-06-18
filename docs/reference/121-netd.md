@@ -861,6 +861,43 @@ lands at net-8 (the inbound-accept + soak exit criteria, which own a live
 in-guest peer). The synchronous `poll()`/`select()` *readiness* multiplex over
 `/net` — distinct from a blocking read — is the `dev9p.poll` bridge (net-6b).
 
+## net-6b (2a): the `ready` readiness file (the dev9p.poll netd half)
+
+net-6b adds a non-consuming per-connection **`/net/<proto>/N/ready`** file — the
+netd half of the kernel `dev9p.poll` readiness bridge (NET-DESIGN §12.2; the
+kernel `.poll` slot + the poll-pump kthread are net-6b-2b). A `read` on it
+carries the requested poll event-mask in its **Tread offset** (`POLLIN | POLLOUT`
+— the requestable bits; their values mirror the kernel `poll.h` ABI, since
+`dev9p.poll` is the only client) and returns the satisfied `revents` as a **u32
+LE**, *without consuming socket data*:
+
+- `check_ready(n, mask)` computes `revents`: `POLLIN` iff `mask & POLLIN` and the
+  socket is readable (`slot_poll_readable` — data buffered OR end-of-stream, so a
+  read would not block; non-consuming, computed from `can_recv` + the TCP state
+  machine, since `peek_slice` cannot see EOF); `POLLOUT` iff `mask & POLLOUT` and
+  writable (`slot_can_send`); `POLLERR`/`POLLHUP` always (the output-only bits).
+- A **non-zero** `revents` replies the 4-byte bitmap at once. A **zero** `revents`
+  **DEFERS** — `h_read` parks a `PendingReady { fid, slot_n, tag, mask }` and
+  `poll_ready` (the serve-loop pass, after `net.poll()`) re-checks each tick,
+  sending the held Rread when the socket becomes ready *for that mask*. So a
+  `poll(POLLIN)` on a writable-but-empty socket waits for **data**, never
+  busy-loops — the offset names the specific events to wait for (the net-6b
+  motivation). Bounded by `MAX_FIDS` per connection (#65 floor); cancelled on the
+  fid's clunk / a Tflush on its tag / teardown / Tversion (the net-6a
+  PendingRead discipline).
+
+```
+netd: net-6b ready E2E PASS (POLLOUT/POLLIN/EOF-readable, in-guest 127.0.0.1)
+```
+
+The `ready_e2e` selftest asserts `check_ready` deterministically over an isolated
+127.0.0.1 loopback connection (the net-3d pattern): established → `POLLOUT` set /
+`POLLIN` clear; peer sends → `POLLIN` set; peer closes + drains → `POLLIN` set
+(EOF reads as readable). The full `poll()`/`select()` round-trip (a kernel
+`dev9p.poll` registering a hook, eliciting the readiness read, and waking on the
+held Rread) lands at net-6b-2b (the kernel ABI) + net-6b-3 (the pouch
+translation).
+
 ## Data structures
 
 | Type | Role |
@@ -875,6 +912,7 @@ in-guest peer). The synchronous `poll()`/`select()` *readiness* multiplex over
 | `server::PendingAccept { conn_id, tag, fid, listening_n, listening_gen }` | a held `listen` Rlopen awaiting an inbound call (the deferred-reply state); bounded by `MAX_PENDING_ACCEPTS = 16`; `listening_gen` (net-3d) pins the listener slot's mint generation so a freed+re-minted index can never type-confuse `poll_accepts` |
 | `server::AcceptDone { conn_id, tag, fid, new_n, ctl_qid_path }` | a completed accept the serve loop delivers (opaque to `main.rs`, routed by `conn_id()`) |
 | `server::PendingRead { fid, slot_n, tag, cap }` | a blocking `data` read holding its Rread (net-6a); parked on an empty-but-open rx, completed by `poll_data` when bytes arrive (or 0 on EOF); a flat `Vec` (FIFO over the slot), bounded by `MAX_FIDS`; cancelled on the fid's clunk / connection teardown / Tversion / Tflush |
+| `server::PendingReady { fid, slot_n, tag, mask }` | a deferred `ready` readiness probe holding its Rread (net-6b); parked when `check_ready(mask) == 0`, completed by `poll_ready` when the socket becomes ready for `mask` (the dev9p.poll netd half; non-consuming); a flat `Vec`, bounded by `MAX_FIDS`; cancelled on the fid's clunk / teardown / Tversion / Tflush |
 | `enum server::RecvOutcome { Data(usize), WouldBlock, Eof }` | the result of a non-blocking dequeue (net-6a): bytes / no-data-yet-defer / end-of-stream — the distinction `data_recv_outcome` adds over the older `data_recv`'s collapsed `usize` |
 | `enum Disp { Reply(usize), Deferred, Fatal }` | the per-request dispatch outcome — `Deferred` holds the reply (a blocking listen) |
 | `enum DnsProbe { Ok{resp_len,ancount}, NoResponse, MintFailed }` | the net-3b best-effort UDP-round-trip demo outcome (logged, never a boot gate) |

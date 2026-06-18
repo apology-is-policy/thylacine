@@ -406,6 +406,19 @@ impl Driver for NetD {
             say!("netd: net-6a-3 echo E2E FAIL");
         }
 
+        // net-6b: the DETERMINISTIC in-guest readiness self-test -- the netd half
+        // of the dev9p.poll bridge (check_ready). Over an established loopback
+        // connection: established -> POLLOUT set / POLLIN clear (a poll(POLLIN)
+        // would defer, not busy-loop); peer sends -> POLLIN set; peer closes +
+        // drains -> POLLIN set (EOF reads as readable, so a poller wakes on a
+        // disconnect). No host coupling -> ASSERTED.
+        let rd = server::ready_e2e(base);
+        if rd == "ok" {
+            say!("netd: net-6b ready E2E PASS (POLLOUT/POLLIN/EOF-readable, in-guest 127.0.0.1)");
+        } else {
+            say!("netd: net-6b ready E2E FAIL ({})", rd);
+        }
+
         // net-4c: the DETERMINISTIC in-guest ipifc self-test -- exercises the
         // /net/ipifc/0/ctl add/remove verbs + the status/local/ndb renders on a
         // throwaway Net (never the live config). No host coupling -> ASSERTED.
@@ -506,7 +519,10 @@ impl Driver for NetD {
                 let mut i = conns.len();
                 while i > 0 {
                     i -= 1;
-                    if !conns[i].poll_dns(&mut net) || !conns[i].poll_data(&mut net) {
+                    if !conns[i].poll_dns(&mut net)
+                        || !conns[i].poll_data(&mut net)
+                        || !conns[i].poll_ready(&mut net)
+                    {
                         conns[i].teardown(&mut net);
                         let _ = unsafe { t_close(conns[i].handle()) };
                         conns.remove(i);
@@ -522,7 +538,7 @@ impl Driver for NetD {
             let delay = if net.has_pending_accepts()
                 || conns
                     .iter()
-                    .any(|c| c.has_pending_dns() || c.has_pending_reads())
+                    .any(|c| c.has_pending_dns() || c.has_pending_reads() || c.has_pending_ready())
             {
                 IDLE_POLL_MIN_MS
             } else {
