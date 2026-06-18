@@ -3625,6 +3625,28 @@ int main(void) {
                                  "dhcp gw=10.0.2.2; ndb ip=10.0.2.15 dns; local addr; "
                                  "ctl rejects malformed)\n");
                     }
+
+                    // === net-5: AF_INET socket-compat (0016-pouch-net-sockets) ===
+                    // Spawn the pouch prover /bin/pouch-hello-net (built against
+                    // the patched musl). It runs the deterministic control-surface
+                    // AF_INET dance -- socket / family+proto reject / setsockopt /
+                    // bind / listen->announce / getsockname / close -- against
+                    // netd's /net, then a best-effort logged live round-trip. The
+                    // control surface is the gate: "pouch-hello-net: exit 0" prints
+                    // only if every BSD->/net translation held; pouch_smoke_one
+                    // relays the child's output to the boot log and checks the
+                    // marker. The first POSIX socket() program Thylacine runs.
+                    {
+                        const char pn_name[]   = "/bin/pouch-hello-net";
+                        const char pn_expect[] = "pouch-hello-net: exit 0";
+                        if (pouch_smoke_one(pn_name, sizeof(pn_name) - 1,
+                                            pn_expect, sizeof(pn_expect) - 1) != 0) {
+                            t_putstr("joey: net-5 PROBE pouch-hello-net FAILED\n");
+                            return 1;
+                        }
+                        t_putstr("joey: net-5 PROBE OK (pouch AF_INET socket-compat over "
+                                 "/net: socket/reject/setsockopt/bind/listen/getsockname/close)\n");
+                    }
 #endif
                 } else {
                     t_putstr("joey: net-2c-1 /srv/net absent -- /net not mounted (netd down?)\n");

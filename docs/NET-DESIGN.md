@@ -828,9 +828,30 @@ named in §2.)
   proof: `net-4d proto selftest PASS` + `net-4d dns defer-guard PASS` + `net-4d dns
   loopback E2E PASS` + 930/930 + SMP gate clean. **The net-4 arc is COMPLETE.** See
   `docs/reference/121-netd.md`.
-- **net-5..net-8: not started.**
-  net-5 (socket-compat pouch boundary-line), net-6 (`dev9p.poll` + `net_poll.tla` —
-  ABI), net-7 (TLS + SNTP + `SYS_CLOCK_SETTIME` — ABI), net-8 (exit criteria +
-  audit), per §17, sequenced before the container runner (#70) per ROADMAP §2.2.
+- **net-5: LANDED** — the BSD-socket compatibility boundary-line (§7). A new
+  pouch patch `usr/lib/pouch/patches/0016-pouch-net-sockets.patch` translates
+  AF_INET `socket()`/`connect()`/`bind()`/`listen()`/`accept()`/`send()`/`recv()`/
+  `getsockname()`/`getpeername()`/`setsockopt()`/`getsockopt()` into operations on
+  netd's `/net` 9P files — the Genode `socket_fs`-in-libc model. It **stacks on**
+  `0006-pouch-sockets.patch` (the AF_UNIX-over-`/srv` layer): a slot carries
+  `family` FAM_UNIX (the 0006 path) or FAM_INET (`/net`); each call gains an
+  AF_INET arm. **NO new kernel surface** (only `SYS_open`/`read`/`write`/`close`,
+  already seamed — reconciling W4-F2). The **blocking** subset only; non-blocking
+  + `poll`/`select` need the `dev9p.poll` readiness bridge (net-6), so
+  `SOCK_NONBLOCK` → `EOPNOTSUPP` (P-3). Proving binary `/pouch-hello-net` (the
+  first POSIX `socket()` program Thylacine runs): the deterministic control-surface
+  AF_INET dance (socket / family+proto reject / setsockopt / bind /
+  listen→announce / getsockname / close) against `/net`, plus a best-effort logged
+  live `connect`+round-trip. Boot proof: `net-5 PROBE OK` + `pouch-hello-net:
+  control surface OK` + 930/930 + boot OK + 0 EXT + the net-2c/3/4 probes
+  unregressed. The live `recv` returns 0 (netd's data read is non-blocking — the
+  net-2c-2 documented behavior; blocking-until-data is the net-6 readiness leg).
+  Pure userspace — kernel byte-unchanged. The full deterministic in-guest data
+  round-trip + the ported-server/soak E2E are net-8's exit criteria (§16).
+  See `docs/reference/78-pouch.md` (the AF_INET socket backend).
+- **net-6..net-8: not started.**
+  net-6 (`dev9p.poll` + `net_poll.tla` + Loom-multishot accept — ABI), net-7 (TLS
+  + SNTP + `SYS_CLOCK_SETTIME` — ABI), net-8 (exit criteria + the arc audit), per
+  §17, sequenced before the container runner (#70) per ROADMAP §2.2.
 
 The thylacine is real. So is its network — and it is, of course, a filesystem.

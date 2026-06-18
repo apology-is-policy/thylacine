@@ -1,0 +1,900 @@
+pouch boundary-line patch 0016 - AF_INET sockets over /net (net-5)
+
+NET-DESIGN.md section 7 (binds D-net-2, closes W4-F2). The kernel has NO
+socket syscalls by commitment (ARCH 11.5; NOVEL #1). Linux/pouch binaries
+that call socket()/connect()/bind()/listen()/accept()/send()/recv()/
+getsockname()/getpeername()/setsockopt() over AF_INET are served by this
+boundary-line patch, which translates each to operations on netd's /net 9P
+files -- the Genode socket_fs-in-libc model. NO new kernel surface: the
+translation uses only SYS_open / SYS_read / SYS_write / SYS_close, all
+already seamed by 0001/0006. (syscall.h.in is intentionally unchanged.)
+
+This STACKS on 0006-pouch-sockets.patch (the AF_UNIX-over-/srv layer): the
+musl socket calls are single functions 0006 already overrides, so net-5
+extends each with a family dispatch rather than adding parallel files. A
+slot carries family POUCH_SOCK_FAM_UNIX (the 0006 /srv path, family 0 so a
+zeroed slot defaults to it) or POUCH_SOCK_FAM_INET (the /net path); the two
+never mix. The blocking subset only -- non-blocking I/O + poll()/select()
+over /net fds need the dev9p.poll readiness bridge (net-6), so SOCK_NONBLOCK
+returns EOPNOTSUPP (P-3: no silently-wrong POSIX).
+
+The translation table (NET-DESIGN.md section 7; ground truth = netd's
+server.rs):
+  socket(AF_INET, SOCK_STREAM|DGRAM)  open("/net/{tcp,udp}/clone") -- the
+                                      Plan 9 connection factory (3.2/4);
+                                      the opened fid is the new conn's ctl,
+                                      reading it yields N. ctl + N held in
+                                      the slot for its lifetime.
+  connect(fd, sockaddr_in)            write "connect a.b.c.d!port" to ctl,
+                                      then open(/net/<proto>/N/data) (blocks
+                                      to ESTABLISHED for TCP). data fd ->
+                                      slot kernel_fd (the I/O target).
+  bind(fd, sockaddr_in)               stash the local addr pouch-side; netd
+                                      has no `bind` ctl verb (NET-DESIGN 3.3
+                                      design, unwired). listen() announces
+                                      lport; getsockname() reports it.
+  listen(fd, backlog)                 write "announce *!port" (or
+                                      "announce a.b.c.d!port") to ctl. TCP
+                                      only; backlog is netd's (net-3a).
+  accept(fd)                          open(/net/tcp/N/listen) (blocks) ->
+                                      the new conn M's ctl; read M; open
+                                      M/data; mint a fresh tagged slot for
+                                      it. Peer addr from M/remote. The
+                                      listener slot stays LISTENING.
+  send/recv, read/write               the 0006 dispatch is unchanged: a
+                                      tagged fd routes through the slot's
+                                      kernel_fd (the data fd) to SYS_write/
+                                      SYS_read.
+  getsockname/getpeername             read /net/<proto>/N/local | /remote
+                                      (or, for getsockname pre-connect, the
+                                      bind()-stashed addr).
+  setsockopt                          SO_REUSEADDR/SO_REUSEPORT/TCP_NODELAY
+                                      -> benign no-op (netd already
+                                      satisfies the semantic); the rest ->
+                                      ENOPROTOOPT (the keepalive/ttl/tos ctl
+                                      verbs are a documented net-5 seam).
+  getsockopt                          SO_ERROR (0; blocking) / SO_TYPE; the
+                                      rest -> ENOPROTOOPT.
+  close                               the 0006 path also closes the held
+                                      ctl fd for a FAM_INET slot.
+
+Invariants (NET-DESIGN.md section 15.1 -- composes existing section-28
+invariants, adds none): I-1/I-23/I-28 (a Proc reaches only the /net its
+territory grants -- the namespace firewall, section 8); I-5 (netd owns the
+NIC; pouch never touches hardware). The slot table's thread-safety is 0006's
+(g_lock around every structural change; pthread peers share it). A FAM_INET
+slot holds two kernel fds -- ctl (lifetime) + data (post-connect) -- both
+closed at close().
+
+Files (all stack on the post-0015 tree):
+  src/internal/_pouch_socket.h   family/proto fields + /net constants +
+                                 the pouch_net_* helper decls.
+  src/network/_pouch_socket.c    reset the net fields at alloc; close the
+                                 ctl fd at close; the pouch_net_* helpers
+                                 (clone/open-conn-file/read-dec/cmd-build/
+                                 read-endpoint).
+  src/network/socket.c           AF_INET arm: open clone, read N.
+  src/network/connect.c          AF_INET arm: ctl "connect", open data.
+  src/network/bind.c             AF_INET arm: stash local addr.
+  src/network/listen.c           AF_INET arm: ctl "announce".
+  src/network/accept.c           AF_INET arm: open listen, read M, open
+                                 M/data, mint a slot, fill peer addr.
+  src/network/getsockname.c      AF_INET local endpoint (new override).
+  src/network/getpeername.c      AF_INET peer endpoint (new override).
+  src/network/setsockopt.c       AF_INET option dispatch (new override).
+  src/network/getsockopt.c       AF_INET SO_ERROR/SO_TYPE arm (extends the
+                                 0006 SO_PEERCRED handler).
+
+Binding design: NET-DESIGN.md section 7; docs/reference/121-netd.md (the
+/net schema netd serves) + docs/reference/78-pouch.md. Invariants P-1, P-3,
+P-4. Proving binary: /pouch-hello-net -- the deterministic control-surface
+AF_INET dance (socket / family + proto reject / setsockopt / bind / listen
+-> announce / getsockname / close) against netd's /net, plus a best-effort
+logged live connect+round-trip (host-coupled, NOT a gate).
+--- a/src/internal/_pouch_socket.h
++++ b/src/internal/_pouch_socket.h
+@@ -30,8 +30,11 @@
+  * Constraints accepted at v1.0:
+  *   - /srv connection count is bounded by the global kernel registry
+  *     (SRV_MAX_CONNS); the per-Proc cap was retired in stalk-3b.
+- *   - AF_INET / AF_INET6 unsupported (EAFNOSUPPORT — network phase).
+- *   - SOCK_DGRAM / SOCK_SEQPACKET unsupported (EPROTONOSUPPORT).
++ *   - AF_INET (net-5, NET-DESIGN section 7): SOCK_STREAM -> /net/tcp,
++ *     SOCK_DGRAM -> /net/udp, translated to netd's /net 9P file ops.
++ *     A net slot carries family POUCH_SOCK_FAM_INET. AF_INET6 is
++ *     unsupported (EAFNOSUPPORT). The two families never mix in a slot.
++ *   - SOCK_SEQPACKET unsupported (EPROTONOSUPPORT).
+  *   - SOCK_NONBLOCK / O_NONBLOCK silently no-op (v1.0 sockets are
+  *     blocking; nonblocking sockets need POLLOUT plumbing in SYS_POLL,
+  *     deferred).
+@@ -70,6 +73,17 @@
+ #define POUCH_SRV_OPATH      0x80u
+ #define POUCH_SRV_DMSRVBYTE  0x02000000u
+ 
++/* net-5 (AF_INET over /net): a slot is either an AF_UNIX /srv byte-stream
++ * (family FAM_UNIX, the 0006 path) or an AF_INET /net connection (family
++ * FAM_INET). family is set once at socket() and never changes; the two
++ * never mix. FAM_UNIX is 0 so a freshly-claimed (zeroed) slot defaults to
++ * the existing /srv behavior. */
++#define POUCH_SOCK_FAM_UNIX  0
++#define POUCH_SOCK_FAM_INET  1
++
++#define POUCH_NET_TCP        0
++#define POUCH_NET_UDP        1
++
+ enum pouch_sock_state {
+     POUCH_SOCK_FRESH = 0,        /* socket() returned; no bind/connect yet  */
+     POUCH_SOCK_LISTENING,        /* bind() + listen() done; kernel_fd is    */
+@@ -81,7 +95,18 @@
+ struct pouch_sock_slot {
+     int                       in_use;
+     enum pouch_sock_state     state;
+-    int                       kernel_fd;  /* -1 in FRESH */
++    int                       kernel_fd;  /* I/O fd; -1 until CONNECTED       */
++    /* net-5 AF_INET fields. Zero/-1 for AF_UNIX slots (FAM_UNIX). For a
++     * FAM_INET slot: ctl_fd is the connection's /net/<proto>/N/ctl fd held
++     * for the socket's lifetime, conn_n is N, and kernel_fd becomes the
++     * /net/<proto>/N/data fd at connect()/accept(). */
++    int                       family;     /* POUCH_SOCK_FAM_*                 */
++    int                       net_proto;  /* POUCH_NET_TCP | POUCH_NET_UDP    */
++    int                       ctl_fd;     /* /net/<proto>/N/ctl fd; -1 if none */
++    int                       conn_n;     /* connection number N; -1 if none  */
++    unsigned int              laddr;      /* bound local IPv4 host-order; 0=ANY */
++    unsigned short            lport;      /* bound local port host-order; 0=unbound */
++    unsigned char             bound;      /* bind() recorded a local addr     */
+ };
+ 
+ /* pouch_sock_alloc — claim a fresh slot.
+@@ -120,4 +145,40 @@
+  * pass straight through to SYS_close. */
+ int pouch_sock_close(int fd);
+ 
++/* ---- net-5: AF_INET over /net helpers (impl in _pouch_socket.c) ------ *
++ *
++ * These translate the BSD calls to netd's /net 9P files. proto is
++ * POUCH_NET_TCP | POUCH_NET_UDP; ip4 is the four address octets in
++ * network order (a.b.c.d); ports are host order. They build absolute
++ * "/net/<proto>/..." paths and drive SYS_open / SYS_read / SYS_write,
++ * adding no kernel surface (NET-DESIGN section 7: libc-level translation). */
++
++/* Open /net/<proto>/clone (ORDWR), read the ASCII connection number into
++ * *out_n. The opened clone fid IS the new connection's ctl (NET-DESIGN
++ * 3.2); reading it yields N. Returns the ctl fd (>= 0) or -1 (errno set). */
++int pouch_net_clone(int proto, int *out_n);
++
++/* Open /net/<proto>/<n>/<file> ("data" | "listen") with omode. Returns the
++ * fd or -1 (errno is left for the caller to set to the POSIX-appropriate
++ * value, since the file's meaning -- data vs listen -- decides it). */
++int pouch_net_open_conn_file(int proto, int n, const char *file, int omode);
++
++/* Read the ASCII connection number from an already-open fd (the accept-side
++ * listen fid, now the new connection's ctl). Returns 0 + *out_n, or -1. */
++int pouch_net_read_dec(int fd, int *out_n);
++
++/* Build a ctl command into cmd (>= 48 bytes). _ipport builds
++ * "<verb> a.b.c.d!port"; _anyport builds "announce *!port". Returns the
++ * length written (no NUL needed -- netd's ctl parser is whitespace/length
++ * bounded). */
++int pouch_net_cmd_ipport(char *cmd, const char *verb,
++                         const unsigned char ip4[4], unsigned int port);
++int pouch_net_cmd_anyport(char *cmd, unsigned int port);
++
++/* Open + read /net/<proto>/<n>/<file> ("local" | "remote") and parse the
++ * "a.b.c.d!port" line into out_ip4 (network-order octets) + *out_port (host
++ * order). Returns 0 on a clean parse, -1 otherwise. */
++int pouch_net_read_endpoint(int proto, int n, const char *file,
++                            unsigned char out_ip4[4], unsigned int *out_port);
++
+ #endif /* _POUCH_SOCKET_H */
+--- a/src/network/_pouch_socket.c
++++ b/src/network/_pouch_socket.c
+@@ -36,6 +36,15 @@
+             g_table[i].in_use    = 1;
+             g_table[i].state     = POUCH_SOCK_FRESH;
+             g_table[i].kernel_fd = -1;
++            /* net-5: reset the AF_INET fields so a slot reused after a
++             * prior FAM_INET socket defaults cleanly to FAM_UNIX. */
++            g_table[i].family    = POUCH_SOCK_FAM_UNIX;
++            g_table[i].net_proto = POUCH_NET_TCP;
++            g_table[i].ctl_fd    = -1;
++            g_table[i].conn_n    = -1;
++            g_table[i].laddr     = 0;
++            g_table[i].lport     = 0;
++            g_table[i].bound     = 0;
+             UNLOCK(g_lock);
+             return POUCH_SOCK_TAG | i;
+         }
+@@ -102,9 +111,14 @@
+         return -1;
+     }
+     int k = g_table[i].kernel_fd;
++    /* net-5: a FAM_INET slot also holds the connection's ctl fd
++     * (/net/<proto>/N/ctl) for its lifetime; close it too. For AF_UNIX
++     * ctl_fd is -1, so the second close is a no-op. */
++    int c = (g_table[i].family == POUCH_SOCK_FAM_INET) ? g_table[i].ctl_fd : -1;
+     g_table[i].in_use    = 0;
+     g_table[i].state     = POUCH_SOCK_FRESH;
+     g_table[i].kernel_fd = -1;
++    g_table[i].ctl_fd    = -1;
+     UNLOCK(g_lock);
+ 
+     /* The kernel handle outlives the slot release for one instant — a
+@@ -113,5 +127,164 @@
+      * return is not surfaced to the user: POSIX close() returns 0 even
+      * on a kernel-side teardown error (errno-on-close is advisory). */
+     if (k >= 0) __syscall(SYS_close, k);
++    if (c >= 0) __syscall(SYS_close, c);
+     return 0;
+ }
++
++/* ---- net-5: AF_INET over /net helpers ------------------------------- *
++ *
++ * All paths are absolute "/net/<proto>/..." resolved by the kernel's stalk
++ * against the Proc's namespace (where joey mounts netd's /net). No new
++ * syscall: SYS_open / SYS_read / SYS_write / SYS_close only. */
++
++/* Append the decimal of v to buf at pos; returns the new pos. The callers
++ * size their buffers for the worst case (a connection number < 2^24 = 8
++ * digits, ports <= 5 digits, octets <= 3). */
++static int net_put_dec(char *buf, int pos, unsigned int v)
++{
++    char tmp[10];
++    int  t = 0;
++    if (v == 0) { buf[pos++] = '0'; return pos; }
++    while (v > 0 && t < 10) { tmp[t++] = (char)('0' + (v % 10u)); v /= 10u; }
++    while (t > 0) buf[pos++] = tmp[--t];
++    return pos;
++}
++
++/* Write "/net/tcp/" or "/net/udp/" into buf; returns the byte count (9). */
++static int net_proto_prefix(char *buf, int proto)
++{
++    const char *p = (proto == POUCH_NET_UDP) ? "/net/udp/" : "/net/tcp/";
++    int i = 0;
++    while (p[i]) { buf[i] = p[i]; i++; }
++    return i;
++}
++
++/* Build "/net/<proto>/<n>/<file>" into buf (cap bytes), NUL-terminated.
++ * Returns the length (excluding NUL) or -1 on overflow. */
++static int net_conn_path(char *buf, int cap, int proto, int n, const char *file)
++{
++    int pos = net_proto_prefix(buf, proto);
++    pos = net_put_dec(buf, pos, (unsigned int)n);
++    if (pos >= cap - 1) return -1;
++    buf[pos++] = '/';
++    for (int i = 0; file[i]; i++) {
++        if (pos >= cap - 1) return -1;
++        buf[pos++] = file[i];
++    }
++    buf[pos] = '\0';
++    return pos;
++}
++
++int pouch_net_read_dec(int fd, int *out_n)
++{
++    char b[16];
++    long r = __syscall(SYS_read, fd, b, (size_t)(sizeof b - 1));
++    if (r <= 0) return -1;
++    unsigned int v = 0;
++    int any = 0;
++    for (long i = 0; i < r; i++) {
++        if (b[i] < '0' || b[i] > '9') break;
++        v = v * 10u + (unsigned int)(b[i] - '0');
++        any = 1;
++        if (v >= (1u << 24)) return -1;   /* netd N_MASK bound; reject garbage */
++    }
++    if (!any) return -1;
++    *out_n = (int)v;
++    return 0;
++}
++
++int pouch_net_clone(int proto, int *out_n)
++{
++    char path[24];
++    int  pos = net_proto_prefix(path, proto);
++    const char *c = "clone";
++    for (int i = 0; c[i]; i++) path[pos++] = c[i];
++    path[pos] = '\0';
++    long fd = __syscall(SYS_open, (long)-1, path, (size_t)pos, (long)POUCH_SRV_ORDWR);
++    if (fd < 0) { errno = ENETDOWN; return -1; }
++    if (pouch_net_read_dec((int)fd, out_n) < 0) {
++        __syscall(SYS_close, fd);
++        errno = ENETDOWN;
++        return -1;
++    }
++    return (int)fd;
++}
++
++int pouch_net_open_conn_file(int proto, int n, const char *file, int omode)
++{
++    char path[64];
++    int  pos = net_conn_path(path, (int)sizeof path, proto, n, file);
++    if (pos < 0) { errno = EINVAL; return -1; }
++    long fd = __syscall(SYS_open, (long)-1, path, (size_t)pos, (long)omode);
++    if (fd < 0) return -1;   /* caller sets the POSIX errno (data vs listen) */
++    return (int)fd;
++}
++
++int pouch_net_cmd_ipport(char *cmd, const char *verb,
++                         const unsigned char ip4[4], unsigned int port)
++{
++    int pos = 0;
++    for (int i = 0; verb[i]; i++) cmd[pos++] = verb[i];
++    cmd[pos++] = ' ';
++    for (int i = 0; i < 4; i++) {
++        pos = net_put_dec(cmd, pos, ip4[i]);
++        if (i < 3) cmd[pos++] = '.';
++    }
++    cmd[pos++] = '!';
++    pos = net_put_dec(cmd, pos, port);
++    return pos;
++}
++
++int pouch_net_cmd_anyport(char *cmd, unsigned int port)
++{
++    const char *v = "announce *!";
++    int pos = 0;
++    for (int i = 0; v[i]; i++) cmd[pos++] = v[i];
++    pos = net_put_dec(cmd, pos, port);
++    return pos;
++}
++
++int pouch_net_read_endpoint(int proto, int n, const char *file,
++                            unsigned char out_ip4[4], unsigned int *out_port)
++{
++    int fd = pouch_net_open_conn_file(proto, n, file, (int)POUCH_SRV_OREAD);
++    if (fd < 0) return -1;
++    char b[40];
++    long r = __syscall(SYS_read, fd, b, (size_t)(sizeof b - 1));
++    __syscall(SYS_close, fd);
++    if (r <= 0) return -1;
++
++    /* Parse "a.b.c.d!port". */
++    long pos = 0;
++    unsigned int oct[4];
++    for (int oi = 0; oi < 4; oi++) {
++        unsigned int v = 0;
++        int any = 0;
++        while (pos < r && b[pos] >= '0' && b[pos] <= '9') {
++            v = v * 10u + (unsigned int)(b[pos] - '0');
++            any = 1;
++            pos++;
++            if (v > 255) return -1;
++        }
++        if (!any) return -1;
++        oct[oi] = v;
++        if (oi < 3) {
++            if (pos >= r || b[pos] != '.') return -1;
++            pos++;
++        }
++    }
++    if (pos >= r || b[pos] != '!') return -1;
++    pos++;
++    unsigned int port = 0;
++    int any = 0;
++    while (pos < r && b[pos] >= '0' && b[pos] <= '9') {
++        port = port * 10u + (unsigned int)(b[pos] - '0');
++        any = 1;
++        pos++;
++        if (port > 65535u) return -1;
++    }
++    if (!any) return -1;
++    for (int i = 0; i < 4; i++) out_ip4[i] = (unsigned char)oct[i];
++    *out_port = port;
++    return 0;
++}
+--- a/src/network/socket.c
++++ b/src/network/socket.c
+@@ -16,9 +16,58 @@
+ #include <sys/socket.h>
+ #include <errno.h>
+ #include "_pouch_socket.h"
++#include "syscall.h"
+ 
+ int socket(int domain, int type, int protocol)
+ {
++	/* net-5: AF_INET over /net (NET-DESIGN section 7). SOCK_STREAM ->
++	 * /net/tcp, SOCK_DGRAM -> /net/udp. socket() eagerly opens the
++	 * protocol's clone file (the Plan 9 connection factory, NET-DESIGN
++	 * 3.2/4): the opened fid is the connection's ctl, reading it yields
++	 * the connection number N. ctl + N are held in the slot for the
++	 * socket's lifetime; connect()/accept() open the data stream. */
++	if (domain == AF_INET) {
++		int nbase = type & ~(SOCK_CLOEXEC | SOCK_NONBLOCK);
++		int proto;
++		if (nbase == SOCK_STREAM)     proto = POUCH_NET_TCP;
++		else if (nbase == SOCK_DGRAM) proto = POUCH_NET_UDP;
++		else { errno = EPROTONOSUPPORT; return -1; }
++
++		/* protocol 0 = the family default; accept the explicit
++		 * IPPROTO_TCP(6)/IPPROTO_UDP(17) matching the type, reject the
++		 * rest (P-3: no silently-wrong POSIX). */
++		if (protocol != 0
++		    && !(proto == POUCH_NET_TCP && protocol == 6)
++		    && !(proto == POUCH_NET_UDP && protocol == 17)) {
++			errno = EPROTONOSUPPORT;
++			return -1;
++		}
++
++		/* Blocking-only at v1.0 -- non-blocking sockets need the
++		 * dev9p.poll readiness bridge (net-6). EOPNOTSUPP rather than a
++		 * silent no-op (P-3), matching the AF_UNIX disposition. */
++		if (type & SOCK_NONBLOCK) {
++			errno = EOPNOTSUPP;
++			return -1;
++		}
++
++		int n;
++		int ctl = pouch_net_clone(proto, &n);
++		if (ctl < 0) return -1;            /* errno set (ENETDOWN) */
++
++		int fd = pouch_sock_alloc();
++		if (fd < 0) {
++			__syscall(SYS_close, ctl);
++			return -1;                 /* errno = EMFILE from alloc */
++		}
++		struct pouch_sock_slot *slot = pouch_sock_resolve(fd);
++		slot->family    = POUCH_SOCK_FAM_INET;
++		slot->net_proto = proto;
++		slot->ctl_fd    = ctl;
++		slot->conn_n    = n;
++		return fd;
++	}
++
+ 	if (domain != AF_UNIX) {
+ 		errno = EAFNOSUPPORT;
+ 		return -1;
+--- a/src/network/connect.c
++++ b/src/network/connect.c
+@@ -16,6 +16,7 @@
+  */
+ #include <sys/socket.h>
+ #include <sys/un.h>
++#include <netinet/in.h>
+ #include <errno.h>
+ #include <string.h>
+ #include "_pouch_socket.h"
+@@ -103,6 +104,60 @@
+ 		errno = EBADF;
+ 		return -1;
+ 	}
++
++	/* net-5: AF_INET active open. Write "connect a.b.c.d!port" to the held
++	 * ctl fd, then open the data stream (the open blocks to ESTABLISHED for
++	 * TCP -- NET-DESIGN 4). The data fd becomes the slot's I/O target. */
++	if (slot->family == POUCH_SOCK_FAM_INET) {
++		if (slot->state == POUCH_SOCK_CONNECTED) {
++			errno = EISCONN;
++			return -1;
++		}
++		if (slot->state != POUCH_SOCK_FRESH) {
++			errno = EINVAL;
++			return -1;
++		}
++		if (!addr) {
++			errno = EFAULT;
++			return -1;
++		}
++		if (addr->sa_family != AF_INET) {
++			errno = EAFNOSUPPORT;
++			return -1;
++		}
++		if (len < (socklen_t)sizeof(struct sockaddr_in)) {
++			errno = EINVAL;
++			return -1;
++		}
++		const struct sockaddr_in *in = (const struct sockaddr_in *)addr;
++		/* sin_addr.s_addr + sin_port are network order: the address bytes
++		 * are a.b.c.d in memory, the port is hi.lo -- read directly, no
++		 * ntoh dependency. */
++		const unsigned char *ab = (const unsigned char *)&in->sin_addr.s_addr;
++		const unsigned char *pb = (const unsigned char *)&in->sin_port;
++		unsigned int port = ((unsigned int)pb[0] << 8) | (unsigned int)pb[1];
++		if (port == 0) {            /* netd parse_dial rejects port 0 */
++			errno = EINVAL;
++			return -1;
++		}
++		char cmd[48];
++		int  cl = pouch_net_cmd_ipport(cmd, "connect", ab, port);
++		long w  = __syscall(SYS_write, slot->ctl_fd, cmd, (size_t)cl);
++		if (w < 0) {
++			errno = ECONNREFUSED;
++			return -1;
++		}
++		int d = pouch_net_open_conn_file(slot->net_proto, slot->conn_n,
++		                                 "data", (int)POUCH_SRV_ORDWR);
++		if (d < 0) {
++			errno = ECONNREFUSED;
++			return -1;
++		}
++		slot->kernel_fd = d;
++		slot->state     = POUCH_SOCK_CONNECTED;
++		return 0;
++	}
++
+ 	if (slot->state != POUCH_SOCK_FRESH) {
+ 		errno = EISCONN;
+ 		return -1;
+--- a/src/network/bind.c
++++ b/src/network/bind.c
+@@ -25,6 +25,7 @@
+  */
+ #include <sys/socket.h>
+ #include <sys/un.h>
++#include <netinet/in.h>
+ #include <errno.h>
+ #include <string.h>
+ #include "_pouch_socket.h"
+@@ -83,6 +84,41 @@
+ 		errno = EBADF;
+ 		return -1;
+ 	}
++
++	/* net-5: AF_INET bind. netd has no `bind` ctl verb (NET-DESIGN 3.3
++	 * lists it as design; only connect/announce/hangup are wired), so the
++	 * local address is recorded pouch-side: listen() announces lport,
++	 * getsockname() reports it. The slot stays FRESH so a subsequent
++	 * connect() (a client binding a local addr) or listen() (a server)
++	 * follows. A client bind to a specific local addr is recorded but
++	 * netd auto-selects the connect source (a documented v1.0 seam). */
++	if (slot->family == POUCH_SOCK_FAM_INET) {
++		if (slot->state != POUCH_SOCK_FRESH) {
++			errno = EINVAL;
++			return -1;
++		}
++		if (!addr) {
++			errno = EFAULT;
++			return -1;
++		}
++		if (addr->sa_family != AF_INET) {
++			errno = EAFNOSUPPORT;
++			return -1;
++		}
++		if (len < (socklen_t)sizeof(struct sockaddr_in)) {
++			errno = EINVAL;
++			return -1;
++		}
++		const struct sockaddr_in *in = (const struct sockaddr_in *)addr;
++		const unsigned char *ab = (const unsigned char *)&in->sin_addr.s_addr;
++		const unsigned char *pb = (const unsigned char *)&in->sin_port;
++		slot->laddr = ((unsigned int)ab[0] << 24) | ((unsigned int)ab[1] << 16)
++		            | ((unsigned int)ab[2] << 8)  | (unsigned int)ab[3];
++		slot->lport = (unsigned short)(((unsigned int)pb[0] << 8) | (unsigned int)pb[1]);
++		slot->bound = 1;
++		return 0;
++	}
++
+ 	if (slot->state != POUCH_SOCK_FRESH) {
+ 		errno = EINVAL;
+ 		return -1;
+--- a/src/network/listen.c
++++ b/src/network/listen.c
+@@ -8,15 +8,53 @@
+ #include <sys/socket.h>
+ #include <errno.h>
+ #include "_pouch_socket.h"
++#include "syscall.h"
+ 
+ int listen(int fd, int backlog)
+ {
+-	(void)backlog;
++	(void)backlog;   /* netd owns the accept queue depth (net-3a) */
+ 	struct pouch_sock_slot *slot = pouch_sock_resolve(fd);
+ 	if (!slot) {
+ 		errno = EBADF;
+ 		return -1;
+ 	}
++
++	/* net-5: AF_INET listen -> the `announce` ctl verb (NET-DESIGN 3.3),
++	 * which puts netd's smoltcp socket into LISTEN on the bound port. Only
++	 * TCP listens; a concrete bound port is required (netd's announce
++	 * parser rejects port 0). */
++	if (slot->family == POUCH_SOCK_FAM_INET) {
++		if (slot->state == POUCH_SOCK_LISTENING) return 0;   /* idempotent */
++		if (slot->net_proto != POUCH_NET_TCP) {
++			errno = EOPNOTSUPP;
++			return -1;
++		}
++		if (slot->state != POUCH_SOCK_FRESH || !slot->bound || slot->lport == 0) {
++			errno = EINVAL;            /* must bind a concrete port first */
++			return -1;
++		}
++		char cmd[48];
++		int  cl;
++		if (slot->laddr == 0) {
++			cl = pouch_net_cmd_anyport(cmd, slot->lport);
++		} else {
++			unsigned char ip4[4] = {
++				(unsigned char)(slot->laddr >> 24),
++				(unsigned char)(slot->laddr >> 16),
++				(unsigned char)(slot->laddr >> 8),
++				(unsigned char)(slot->laddr),
++			};
++			cl = pouch_net_cmd_ipport(cmd, "announce", ip4, slot->lport);
++		}
++		long w = __syscall(SYS_write, slot->ctl_fd, cmd, (size_t)cl);
++		if (w < 0) {
++			errno = EADDRINUSE;
++			return -1;
++		}
++		slot->state = POUCH_SOCK_LISTENING;
++		return 0;
++	}
++
+ 	if (slot->state != POUCH_SOCK_LISTENING) {
+ 		errno = EOPNOTSUPP;
+ 		return -1;
+--- a/src/network/accept.c
++++ b/src/network/accept.c
+@@ -14,6 +14,7 @@
+  */
+ #include <sys/socket.h>
+ #include <sys/un.h>
++#include <netinet/in.h>
+ #include <errno.h>
+ #include <string.h>
+ #include "_pouch_socket.h"
+@@ -27,6 +28,75 @@
+ 		errno = EBADF;
+ 		return -1;
+ 	}
++
++	/* net-5: AF_INET accept. open(listen) blocks until an inbound call;
++	 * the returned fid is the NEW connection M's ctl (NET-DESIGN 4). Read
++	 * it for M, open M's data stream, and hand back a fresh pouch-tagged
++	 * slot for the accepted connection. The listener slot stays LISTENING
++	 * -- netd re-arms N for the next accept (net-3a). */
++	if (slot->family == POUCH_SOCK_FAM_INET) {
++		if (slot->state != POUCH_SOCK_LISTENING) {
++			errno = EINVAL;
++			return -1;
++		}
++		int lfd = pouch_net_open_conn_file(slot->net_proto, slot->conn_n,
++		                                   "listen", (int)POUCH_SRV_ORDWR);
++		if (lfd < 0) {
++			errno = ECONNABORTED;
++			return -1;
++		}
++		int m;
++		if (pouch_net_read_dec(lfd, &m) < 0) {
++			__syscall(SYS_close, lfd);
++			errno = ECONNABORTED;
++			return -1;
++		}
++		int d = pouch_net_open_conn_file(slot->net_proto, m, "data",
++		                                 (int)POUCH_SRV_ORDWR);
++		if (d < 0) {
++			__syscall(SYS_close, lfd);
++			errno = ECONNABORTED;
++			return -1;
++		}
++		int nfd = pouch_sock_alloc();
++		if (nfd < 0) {
++			__syscall(SYS_close, lfd);
++			__syscall(SYS_close, d);
++			return -1;            /* errno = EMFILE from alloc */
++		}
++		struct pouch_sock_slot *ns = pouch_sock_resolve(nfd);
++		ns->family    = POUCH_SOCK_FAM_INET;
++		ns->net_proto = slot->net_proto;
++		ns->ctl_fd    = lfd;      /* M's ctl, held for the accepted socket */
++		ns->conn_n    = m;
++		ns->kernel_fd = d;        /* M's data -> the I/O target */
++		ns->state     = POUCH_SOCK_CONNECTED;
++
++		if (addr && len && *len >= (socklen_t)sizeof(sa_family_t)) {
++			struct sockaddr_in sin;
++			memset(&sin, 0, sizeof(sin));
++			sin.sin_family = AF_INET;
++			unsigned char rip[4];
++			unsigned int  rport;
++			if (pouch_net_read_endpoint(slot->net_proto, m, "remote",
++			                            rip, &rport) == 0) {
++				unsigned char *sb = (unsigned char *)&sin.sin_addr.s_addr;
++				sb[0] = rip[0]; sb[1] = rip[1];
++				sb[2] = rip[2]; sb[3] = rip[3];
++				unsigned char *pp = (unsigned char *)&sin.sin_port;
++				pp[0] = (unsigned char)(rport >> 8);
++				pp[1] = (unsigned char)(rport & 0xffu);
++			}
++			socklen_t cl = (*len < (socklen_t)sizeof(sin))
++				? *len : (socklen_t)sizeof(sin);
++			memcpy(addr, &sin, (size_t)cl);
++			*len = (socklen_t)sizeof(sin);
++		} else if (len) {
++			*len = 0;
++		}
++		return nfd;
++	}
++
+ 	if (slot->state != POUCH_SOCK_LISTENING) {
+ 		errno = EINVAL;
+ 		return -1;
+--- a/src/network/getsockname.c
++++ b/src/network/getsockname.c
+@@ -1,7 +1,53 @@
++/* pouch -- getsockname(2) (net-5). For an AF_INET pouch socket, report the
++ * local endpoint: netd's /net/<proto>/N/local once CONNECTED, else the
++ * bind()-stashed local addr. An AF_UNIX pouch socket has no network name
++ * (peer identity is SO_PEERCRED) -> EOPNOTSUPP. Untagged fds fall through
++ * to the original socketcall (the 0xFFFF ENOSYS sentinel). */
+ #include <sys/socket.h>
++#include <netinet/in.h>
++#include <errno.h>
++#include <string.h>
++#include "_pouch_socket.h"
+ #include "syscall.h"
+ 
+ int getsockname(int fd, struct sockaddr *restrict addr, socklen_t *restrict len)
+ {
++	struct pouch_sock_slot *slot = pouch_sock_resolve(fd);
++	if (slot && slot->family == POUCH_SOCK_FAM_INET) {
++		if (!addr || !len) {
++			errno = EFAULT;
++			return -1;
++		}
++		struct sockaddr_in sin;
++		memset(&sin, 0, sizeof(sin));
++		sin.sin_family = AF_INET;
++		unsigned char ip[4] = {0, 0, 0, 0};
++		unsigned int  port  = 0;
++		if (slot->state == POUCH_SOCK_CONNECTED) {
++			/* best-effort: a failed/empty local leaves 0.0.0.0:0 */
++			pouch_net_read_endpoint(slot->net_proto, slot->conn_n,
++			                        "local", ip, &port);
++		} else if (slot->bound) {
++			ip[0] = (unsigned char)(slot->laddr >> 24);
++			ip[1] = (unsigned char)(slot->laddr >> 16);
++			ip[2] = (unsigned char)(slot->laddr >> 8);
++			ip[3] = (unsigned char)(slot->laddr);
++			port  = slot->lport;
++		}
++		unsigned char *sb = (unsigned char *)&sin.sin_addr.s_addr;
++		sb[0] = ip[0]; sb[1] = ip[1]; sb[2] = ip[2]; sb[3] = ip[3];
++		unsigned char *pp = (unsigned char *)&sin.sin_port;
++		pp[0] = (unsigned char)(port >> 8);
++		pp[1] = (unsigned char)(port & 0xffu);
++		socklen_t cl = (*len < (socklen_t)sizeof(sin))
++			? *len : (socklen_t)sizeof(sin);
++		memcpy(addr, &sin, (size_t)cl);
++		*len = (socklen_t)sizeof(sin);
++		return 0;
++	}
++	if ((fd & POUCH_SOCK_TAG) != 0) {   /* AF_UNIX pouch socket: no name */
++		errno = EOPNOTSUPP;
++		return -1;
++	}
+ 	return socketcall(getsockname, fd, addr, len, 0, 0, 0);
+ }
+--- a/src/network/getpeername.c
++++ b/src/network/getpeername.c
+@@ -1,7 +1,51 @@
++/* pouch -- getpeername(2) (net-5). For a CONNECTED AF_INET pouch socket,
++ * report the peer endpoint from netd's /net/<proto>/N/remote. A non-
++ * connected socket -> ENOTCONN; an AF_UNIX pouch socket has no network peer
++ * name (peer identity is SO_PEERCRED) -> EOPNOTSUPP. Untagged fds fall
++ * through to the original socketcall. */
+ #include <sys/socket.h>
++#include <netinet/in.h>
++#include <errno.h>
++#include <string.h>
++#include "_pouch_socket.h"
+ #include "syscall.h"
+ 
+ int getpeername(int fd, struct sockaddr *restrict addr, socklen_t *restrict len)
+ {
++	struct pouch_sock_slot *slot = pouch_sock_resolve(fd);
++	if (slot && slot->family == POUCH_SOCK_FAM_INET) {
++		if (!addr || !len) {
++			errno = EFAULT;
++			return -1;
++		}
++		if (slot->state != POUCH_SOCK_CONNECTED) {
++			errno = ENOTCONN;
++			return -1;
++		}
++		unsigned char ip[4];
++		unsigned int  port;
++		if (pouch_net_read_endpoint(slot->net_proto, slot->conn_n,
++		                            "remote", ip, &port) != 0) {
++			errno = ENOTCONN;
++			return -1;
++		}
++		struct sockaddr_in sin;
++		memset(&sin, 0, sizeof(sin));
++		sin.sin_family = AF_INET;
++		unsigned char *sb = (unsigned char *)&sin.sin_addr.s_addr;
++		sb[0] = ip[0]; sb[1] = ip[1]; sb[2] = ip[2]; sb[3] = ip[3];
++		unsigned char *pp = (unsigned char *)&sin.sin_port;
++		pp[0] = (unsigned char)(port >> 8);
++		pp[1] = (unsigned char)(port & 0xffu);
++		socklen_t cl = (*len < (socklen_t)sizeof(sin))
++			? *len : (socklen_t)sizeof(sin);
++		memcpy(addr, &sin, (size_t)cl);
++		*len = (socklen_t)sizeof(sin);
++		return 0;
++	}
++	if ((fd & POUCH_SOCK_TAG) != 0) {   /* AF_UNIX pouch socket: no peer name */
++		errno = EOPNOTSUPP;
++		return -1;
++	}
+ 	return socketcall(getpeername, fd, addr, len, 0, 0, 0);
+ }
+--- a/src/network/setsockopt.c
++++ b/src/network/setsockopt.c
+@@ -1,6 +1,9 @@
+ #include <sys/socket.h>
+ #include <sys/time.h>
++#include <netinet/in.h>
++#include <netinet/tcp.h>
+ #include <errno.h>
++#include "_pouch_socket.h"
+ #include "syscall.h"
+ 
+ #define IS32BIT(x) !((x)+0x80000000ULL>>32)
+@@ -12,6 +15,25 @@
+ 	time_t s;
+ 	suseconds_t us;
+ 
++	/* net-5: a pouch-tagged fd is not a kernel fd -- it must never reach
++	 * __socketcall. For AF_INET, accept the options whose semantics
++	 * smoltcp/netd already satisfy (SO_REUSEADDR/SO_REUSEPORT -- no
++	 * bind-conflict model; TCP_NODELAY -- smoltcp has no Nagle) as benign
++	 * no-ops; the keepalive/ttl/tos ctl-verb wiring (NET-DESIGN 3.3) is a
++	 * documented net-5 seam, so those + every AF_UNIX option return
++	 * ENOPROTOOPT (P-3: no silently-wrong POSIX). */
++	if ((fd & POUCH_SOCK_TAG) != 0) {
++		struct pouch_sock_slot *pslot = pouch_sock_resolve(fd);
++		if (pslot && pslot->family == POUCH_SOCK_FAM_INET
++		    && ((level == SOL_SOCKET
++		         && (optname == SO_REUSEADDR || optname == SO_REUSEPORT))
++		        || (level == IPPROTO_TCP && optname == TCP_NODELAY))) {
++			return 0;
++		}
++		errno = ENOPROTOOPT;
++		return -1;
++	}
++
+ 	int r = __socketcall(setsockopt, fd, level, optname, optval, optlen, 0);
+ 
+ 	if (r==-ENOPROTOOPT) switch (level) {
+--- a/src/network/getsockopt.c
++++ b/src/network/getsockopt.c
+@@ -49,6 +49,36 @@
+ int getsockopt(int fd, int level, int optname,
+                void *restrict optval, socklen_t *restrict optlen)
+ {
++	/* net-5: AF_INET options. SO_ERROR / SO_TYPE are answerable from
++	 * pouch-side state (blocking sockets have no pending async error at
++	 * v1.0); the rest -- including SO_PEERCRED, which has no meaning on a
++	 * /net connection -- are ENOPROTOOPT. This also keeps an AF_INET
++	 * tagged fd out of the SO_PEERCRED -> SYS_srv_peer path below. */
++	if ((fd & POUCH_SOCK_TAG) != 0) {
++		struct pouch_sock_slot *islot = pouch_sock_resolve(fd);
++		if (islot && islot->family == POUCH_SOCK_FAM_INET) {
++			if (!optval || !optlen) {
++				errno = EFAULT;
++				return -1;
++			}
++			int val;
++			if (level == SOL_SOCKET && optname == SO_ERROR) {
++				val = 0;
++			} else if (level == SOL_SOCKET && optname == SO_TYPE) {
++				val = (islot->net_proto == POUCH_NET_UDP)
++					? SOCK_DGRAM : SOCK_STREAM;
++			} else {
++				errno = ENOPROTOOPT;
++				return -1;
++			}
++			socklen_t want = (socklen_t)sizeof(int);
++			socklen_t give = (*optlen < want) ? *optlen : want;
++			memcpy(optval, &val, (size_t)give);
++			*optlen = give;
++			return 0;
++		}
++	}
++
+ 	if (level != SOL_SOCKET) {
+ 		errno = ENOPROTOOPT;
+ 		return -1;

@@ -51,14 +51,18 @@ static int               g_server_ok = 0;
 
 static int test_family_refusals(void)
 {
-    int s = socket(2 /* AF_INET */, SOCK_STREAM, 0);
+    /* net-5 (0016-pouch-net-sockets): AF_INET is now a valid /net socket
+     * (pouch-hello-net proves it). AF_INET6 stays unsupported, so it is the
+     * family-refusal case here -- this subtest still asserts a refused
+     * family, just no longer AF_INET. */
+    int s = socket(10 /* AF_INET6 */, SOCK_STREAM, 0);
     if (s >= 0 || errno != EAFNOSUPPORT) {
-        fprintf(stderr, "test: AF_INET should have refused with "
+        fprintf(stderr, "test: AF_INET6 should have refused with "
                 "EAFNOSUPPORT, got s=%d errno=%d\n", s, errno);
         if (s >= 0) close(s);
         return -1;
     }
-    printf("test: socket(AF_INET) refused EAFNOSUPPORT ok\n");
+    printf("test: socket(AF_INET6) refused EAFNOSUPPORT ok\n");
 
     s = socket(AF_UNIX, SOCK_DGRAM, 0);
     if (s >= 0 || errno != EPROTONOSUPPORT) {
