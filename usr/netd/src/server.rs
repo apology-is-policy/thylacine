@@ -185,6 +185,7 @@ const P_UDP_STATS: u64 = 6; //  /net/udp/stats
 const P_ICMP_STATS: u64 = 7; // /net/icmp/stats
 const P_UDP_CLONE: u64 = 8; //  /net/udp/clone (net-3b)
 const P_ICMP_CLONE: u64 = 9; // /net/icmp/clone (net-3c)
+const P_CS: u64 = 10; //        /net/cs (net-4a: the connection server)
 
 const CONN_FLAG: u64 = 1 << 40;
 const PROTO_SHIFT: u64 = 32;
@@ -1245,7 +1246,7 @@ impl Net {
             }
         } else {
             match path {
-                P_TCP | P_UDP | P_ICMP => P_ROOT,
+                P_TCP | P_UDP | P_ICMP | P_CS => P_ROOT,
                 P_TCP_CLONE | P_TCP_STATS => P_TCP,
                 P_UDP_CLONE | P_UDP_STATS => P_UDP,
                 P_ICMP_CLONE | P_ICMP_STATS => P_ICMP,
@@ -1288,6 +1289,7 @@ impl Net {
                 b"tcp" => Some(P_TCP),
                 b"udp" => Some(P_UDP),
                 b"icmp" => Some(P_ICMP),
+                b"cs" => Some(P_CS),
                 _ => None,
             },
             P_TCP => match name {
@@ -1340,6 +1342,7 @@ impl Net {
                 push(b"tcp", P_TCP, true);
                 push(b"udp", P_UDP, true);
                 push(b"icmp", P_ICMP, true);
+                push(b"cs", P_CS, false);
             }
             P_TCP => {
                 push(b"clone", P_TCP_CLONE, false);
@@ -1754,6 +1757,75 @@ fn build_dns_query(id: u16, qname: &[u8]) -> Vec<u8> {
     q
 }
 
+/// Trim leading/trailing ASCII whitespace (a cs write often carries a trailing
+/// newline; the dial string itself has no internal spaces).
+fn trim_ws(s: &[u8]) -> &[u8] {
+    let mut a = 0;
+    let mut b = s.len();
+    while a < b && s[a].is_ascii_whitespace() {
+        a += 1;
+    }
+    while b > a && s[b - 1].is_ascii_whitespace() {
+        b -= 1;
+    }
+    &s[a..b]
+}
+
+/// Resolve a cs dial string (`proto!host!service`, the Plan 9 dial notation)
+/// into its `<clone-file> <ip>!<port>` line -- NET-DESIGN s5. A native `dial()`
+/// opens the clone-file, reads the connection number, opens its `ctl`, and
+/// writes "connect <ip>!<port>" -- exactly the arg netd's `connect` verb parses.
+///
+/// `host` resolves numerically first, then via the static ndb (`localhost`,
+/// etc.); a non-numeric non-ndb name yields no line at v1.0 (DNS delegation is
+/// net-4b). `service` resolves numerically first, then via the ndb services
+/// table. `net!...` maps to tcp (the v1.0 default; a tcp+udp fan-out is a v1.x
+/// refinement). An unparseable or unresolvable dial returns empty -- cs's
+/// "no reachable path" signal (the reader sees 0 bytes), never an error frame.
+fn cs_resolve(dial: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let dial = trim_ws(dial);
+    let mut it = dial.split(|&b| b == b'!');
+    let proto = match it.next() {
+        Some(p) => p,
+        None => return out,
+    };
+    let host = match it.next() {
+        Some(h) => h,
+        None => return out, // a dial needs at least proto!host
+    };
+    let service = it.next().unwrap_or(b"");
+    if it.next().is_some() {
+        return out; // more than three '!'-separated fields
+    }
+    let clone_file: &[u8] = match proto {
+        b"tcp" | b"net" => b"/net/tcp/clone",
+        b"udp" => b"/net/udp/clone",
+        _ => return out, // unknown protocol
+    };
+    let ip = match parse_ipv4(host) {
+        Some(ip) => ip,
+        None => match crate::ndb::lookup_host(host) {
+            Some(ip) => ip,
+            None => return out, // unresolved host (DNS delegation is net-4b)
+        },
+    };
+    let port = match parse_u16(service) {
+        Some(p) if p != 0 => p,
+        _ => match crate::ndb::lookup_service(service) {
+            Some(p) => p,
+            None => return out, // unknown service / zero port
+        },
+    };
+    let mut c = Content::new();
+    c.push(clone_file);
+    c.push(b" ");
+    c.push_endpoint(ip, port);
+    c.push(b"\n");
+    out.extend_from_slice(c.as_slice());
+    out
+}
+
 // A small fixed-cap content buffer: file bodies are short (a number, a few-line
 // stats block, a status word), so reads never allocate.
 struct Content {
@@ -1855,6 +1927,17 @@ struct Fid {
     opened: bool,
 }
 
+/// A per-fid /net/cs request/response session (net-4a). The write resolves the
+/// dial string into `resp`; the read(s) drain it via `cursor` (offset-agnostic,
+/// like the FK_DATA stream). One per open cs fid, dropped on clunk / teardown /
+/// Tversion -- so it is bounded by the connection's fid table (no unbounded
+/// growth: a re-write replaces the same fid's session; MAX_FIDS bounds the rest).
+struct CsSession {
+    fid: u32,
+    resp: Vec<u8>,
+    cursor: usize,
+}
+
 /// The outcome of dispatching one request frame.
 enum Disp {
     /// A complete reply of `len` bytes is in out_buf; send it.
@@ -1879,6 +1962,8 @@ pub struct Conn {
     // Set by a handler that holds its reply (a blocking listen open); read +
     // cleared by dispatch to return Disp::Deferred.
     defer: bool,
+    // Per-fid /net/cs request/response sessions (net-4a).
+    cs: Vec<CsSession>,
 }
 
 impl Conn {
@@ -1891,7 +1976,43 @@ impl Conn {
             in_buf: Vec::new(),
             out_buf: Vec::new(),
             defer: false,
+            cs: Vec::new(),
         }
+    }
+
+    /// Stash the resolved /net/cs response for `fid` (net-4a), replacing any
+    /// prior query on the same fid and rewinding its read cursor.
+    fn cs_set(&mut self, fid: u32, resp: Vec<u8>) {
+        if let Some(s) = self.cs.iter_mut().find(|s| s.fid == fid) {
+            s.resp = resp;
+            s.cursor = 0;
+        } else {
+            self.cs.push(CsSession {
+                fid,
+                resp,
+                cursor: 0,
+            });
+        }
+    }
+
+    /// Drain up to `cap` bytes of the /net/cs response for `fid` from its
+    /// cursor. A read before any write (no session) yields 0 bytes.
+    fn cs_read(&mut self, fid: u32, cap: usize, tag: u16) -> Result<usize, ()> {
+        let chunk: Vec<u8> = match self.cs.iter_mut().find(|s| s.fid == fid) {
+            Some(s) => {
+                let end = (s.cursor + cap).min(s.resp.len());
+                let out = s.resp[s.cursor..end].to_vec();
+                s.cursor = end;
+                out
+            }
+            None => Vec::new(),
+        };
+        p9::build_rread(&mut self.out_buf, tag, &chunk)
+    }
+
+    /// Drop the /net/cs session for `fid` (on clunk).
+    fn cs_drop(&mut self, fid: u32) {
+        self.cs.retain(|s| s.fid != fid);
     }
 
     pub fn handle(&self) -> i64 {
@@ -1912,6 +2033,7 @@ impl Conn {
                 }
             }
         }
+        self.cs.clear(); // free this session's /net/cs response buffers (net-4a)
     }
 
     fn fid_find(&self, fid: u32) -> Option<usize> {
@@ -1952,6 +2074,7 @@ impl Conn {
             // Cancel any deferred accept this fid held: clunking the half-open
             // listen fid must not strand its PendingAccept (net-3d F1).
             net.cancel_accept_fid(self.handle, fid);
+            self.cs_drop(fid); // free any /net/cs session this fid held (net-4a)
             if let Some(n) = path_conn_n(f.path) {
                 net.slot_unref(n);
             }
@@ -2141,6 +2264,7 @@ impl Conn {
                 }
             }
         }
+        self.cs.clear(); // a Tversion also resets /net/cs sessions (net-4a)
     }
 
     fn h_attach(&mut self, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
@@ -2345,6 +2469,15 @@ impl Conn {
             let k = net.data_recv(n, &mut scratch[..cap]);
             return p9::build_rread(&mut self.out_buf, tag, &scratch[..k]);
         }
+        if f.path == P_CS {
+            // cs response (net-4a): drain the per-fid resolved buffer via a
+            // per-fid cursor (the Tread offset is ignored, like the FK_DATA
+            // stream). A read before any write yields 0 bytes.
+            let cap = (self.msize as usize)
+                .saturating_sub(p9::P9_HDR_LEN + 4)
+                .min(a.count as usize);
+            return self.cs_read(a.fid, cap, tag);
+        }
         let content = net.file_content(f.path);
         let body = content.as_slice();
         let off = a.offset as usize;
@@ -2418,7 +2551,7 @@ impl Conn {
             (DIR_MODE, 2u64, 0u64)
         } else {
             let m = match f.path {
-                P_TCP_CLONE | P_UDP_CLONE | P_ICMP_CLONE => FILE_RW,
+                P_TCP_CLONE | P_UDP_CLONE | P_ICMP_CLONE | P_CS => FILE_RW,
                 _ if is_conn(f.path) => match conn_filekind(f.path) {
                     FK_CTL | FK_DATA => FILE_RW,
                     _ => FILE_RO,
@@ -2488,8 +2621,17 @@ impl Conn {
         if !f.opened {
             return self.err(tag, p9::E_PROTO);
         }
+        if f.path == P_CS {
+            // cs is a request/response file (net-4a): the write IS the dial
+            // query. Resolve it now and stash the per-fid response for the
+            // subsequent read(s). The whole write is consumed even when
+            // unresolvable -- an unresolved name yields an empty response, the
+            // Plan 9 "no reachable path" signal (the reader sees 0 bytes).
+            self.cs_set(a.fid, cs_resolve(a.data));
+            return p9::build_rwrite(&mut self.out_buf, tag, a.count);
+        }
         if !is_conn(f.path) {
-            return self.err(tag, p9::E_INVAL); // static nodes (stats/clone) are read-only
+            return self.err(tag, p9::E_INVAL); // other static nodes (stats/clone) are read-only
         }
         let n = conn_n(f.path);
         match conn_filekind(f.path) {

@@ -47,6 +47,7 @@ use libthyla_rs::time::{sleep, Duration, Instant};
 use libthyla_rs::{t_close, t_poll, t_srv_accept, TPollFd, T_POLLHUP, T_POLLIN};
 use netdev::{VirtioNetPci, MAX_FRAME};
 
+mod ndb;
 mod server;
 
 use smoltcp::iface::{Config, Interface, SocketSet};

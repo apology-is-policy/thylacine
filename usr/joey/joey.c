@@ -3424,6 +3424,86 @@ int main(void) {
                         t_putstr("joey: net-3c PROBE OK (icmp clone->0, connect "
                                  "10.0.2.2, remote readback, no listen, frees+reuses 0)\n");
                     }
+
+                    // === net-4a: cs (the connection server: dial -> clonefile) ===
+                    // Deterministic + self-contained (no network needed): /net/cs
+                    // resolves a dial string to a "<clone-file> <ip>!<port>" line a
+                    // native dial() opens + connects. (a) numeric host + port;
+                    // (b) ndb static host + named service (localhost->127.0.0.1,
+                    // http->80); (c) an unresolvable name yields an empty response
+                    // (cs's "no reachable path" signal -- DNS delegation is net-4b).
+                    {
+                        // (a) numeric dial -> the tcp clone line with the literal addr.
+                        long cs = t_open(T_WALK_OPEN_FROM_ROOT, "/net/cs", 7, T_ORDWR);
+                        static const char q1[] = "tcp!127.0.0.1!80";
+                        if (cs < 0 ||
+                            t_write(cs, q1, sizeof(q1) - 1) != (long)(sizeof(q1) - 1)) {
+                            t_putstr("joey: net-4a PROBE cs open/write (numeric) FAILED\n");
+                            return 1;
+                        }
+                        unsigned char r1[128];
+                        long r1n = t_read(cs, r1, sizeof(r1));
+                        (void)t_close(cs);
+                        if (r1n <= 0 ||
+                            !mem_contains(r1, (size_t)r1n, "/net/tcp/clone", 14) ||
+                            !mem_contains(r1, (size_t)r1n, "127.0.0.1!80", 12)) {
+                            t_putstr("joey: net-4a PROBE cs numeric resolve FAILED\n");
+                            return 1;
+                        }
+                        // (b) ndb host + service: net!localhost!http -> 127.0.0.1!80.
+                        long cs2 = t_open(T_WALK_OPEN_FROM_ROOT, "/net/cs", 7, T_ORDWR);
+                        static const char q2[] = "net!localhost!http";
+                        if (cs2 < 0 ||
+                            t_write(cs2, q2, sizeof(q2) - 1) != (long)(sizeof(q2) - 1)) {
+                            t_putstr("joey: net-4a PROBE cs open/write (ndb) FAILED\n");
+                            return 1;
+                        }
+                        unsigned char r2[128];
+                        long r2n = t_read(cs2, r2, sizeof(r2));
+                        (void)t_close(cs2);
+                        if (r2n <= 0 ||
+                            !mem_contains(r2, (size_t)r2n, "/net/tcp/clone", 14) ||
+                            !mem_contains(r2, (size_t)r2n, "127.0.0.1!80", 12)) {
+                            t_putstr("joey: net-4a PROBE cs ndb resolve FAILED\n");
+                            return 1;
+                        }
+                        // (c) an unresolvable host (not numeric, not in ndb, no DNS
+                        //     yet) -> an empty response (cs's "no path" signal).
+                        long cs3 = t_open(T_WALK_OPEN_FROM_ROOT, "/net/cs", 7, T_ORDWR);
+                        static const char q3[] = "tcp!nonesuch.invalid!80";
+                        if (cs3 < 0 ||
+                            t_write(cs3, q3, sizeof(q3) - 1) != (long)(sizeof(q3) - 1)) {
+                            t_putstr("joey: net-4a PROBE cs open/write (unresolved) FAILED\n");
+                            return 1;
+                        }
+                        unsigned char r3[64];
+                        long r3n = t_read(cs3, r3, sizeof(r3));
+                        (void)t_close(cs3);
+                        if (r3n != 0) {
+                            t_putstr("joey: net-4a PROBE cs unresolved should be empty\n");
+                            return 1;
+                        }
+                        // (d) the baked ndb is reachable + readable post-pivot.
+                        //     netd serves cs from a COMPILED-IN copy (NET-DESIGN
+                        //     s5: a confined leaf driver cannot read /lib); this
+                        //     /lib/ndb/local is the user-readable canonical file +
+                        //     the v1.x cs/dns-daemon-split live source. The data
+                        //     lines follow a comment header, so read the whole file.
+                        long ndbf = t_open(T_WALK_OPEN_FROM_ROOT, "/lib/ndb/local",
+                                           14, T_OREAD);
+                        unsigned char ndbb[2048];
+                        long ndbn = (ndbf >= 0) ? t_read(ndbf, ndbb, sizeof(ndbb)) : -1;
+                        if (ndbf >= 0) (void)t_close(ndbf);
+                        if (ndbn <= 0 ||
+                            !mem_contains(ndbb, (size_t)ndbn, "sys=localhost", 13) ||
+                            !mem_contains(ndbb, (size_t)ndbn, "service=http", 12)) {
+                            t_putstr("joey: net-4a PROBE /lib/ndb/local read FAILED\n");
+                            return 1;
+                        }
+                        t_putstr("joey: net-4a PROBE OK (cs tcp!127.0.0.1!80 + "
+                                 "net!localhost!http -> /net/tcp/clone 127.0.0.1!80; "
+                                 "unresolved -> empty; /lib/ndb/local readable)\n");
+                    }
 #endif
                 } else {
                     t_putstr("joey: net-2c-1 /srv/net absent -- /net not mounted (netd down?)\n");

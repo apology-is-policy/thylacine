@@ -780,9 +780,22 @@ named in §2.)
   load-bearing: a loopback iface sharing the live NIC socket set mis-routes (the
   NIC default route steals the `127.0.0.1` egress, verified in the smoltcp source).
   Pure userspace; the kernel is byte-unchanged. `memory/audit_net3_closed_list.md`.
-- **net-4..net-8: not started.** net-4 (cs/dns/ndb + ipconfig/DHCP), net-5
-  (socket-compat pouch boundary-line), net-6 (`dev9p.poll` + `net_poll.tla` — ABI),
-  net-7 (TLS + SNTP + `SYS_CLOCK_SETTIME` — ABI), net-8 (exit criteria + audit),
-  per §17, sequenced before the container runner (#70) per ROADMAP §2.2.
+- **net-4a: LANDED** — `/net/cs` (the connection server: dial → clonefile line) +
+  the compiled-in ndb (§5). cs resolves a numeric IPv4, an ndb static host
+  (`localhost`), and a numeric/named service (`http` → 80); a non-numeric non-ndb
+  name yields an empty response (DNS delegation is net-4b). Per the **net-4
+  ndb-source decision** (user-voted 2026-06-18; §5/§18 refinement): netd, a confined
+  leaf driver (I-34), cannot read `/lib`, so it compiles in `ndb/local` and serves
+  cs from it (the config-at-construction idiom) — the byte-identical
+  `/lib/ndb/local` is baked into the post-pivot FS (user-readable; the v1.x cs/dns
+  daemon split's live source); the resolver/router are read live from the DHCP
+  lease. Pure userspace; the kernel is byte-unchanged. Boot proof: `net-4a PROBE OK`
+  + `/lib/ndb/local readable` + 930/930 + SMP gate clean. See `docs/reference/121-netd.md`.
+- **net-4b..net-8: not started.** net-4b (`/net/dns` resolver + cs→dns delegation),
+  net-4c (`/net/ipifc` + `ipconfig` + DHCP-lease-into-ipifc), net-4d (the focused
+  net-4 audit + close), net-5 (socket-compat pouch boundary-line), net-6
+  (`dev9p.poll` + `net_poll.tla` — ABI), net-7 (TLS + SNTP + `SYS_CLOCK_SETTIME` —
+  ABI), net-8 (exit criteria + audit), per §17, sequenced before the container
+  runner (#70) per ROADMAP §2.2.
 
 The thylacine is real. So is its network — and it is, of course, a filesystem.

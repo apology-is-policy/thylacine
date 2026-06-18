@@ -1442,6 +1442,25 @@ populate_stratum_pool() {
     rm -rf "$cm_out"
     echo "==> populate pool: system identity baked + readback-verified at /var/lib/corvus (system-wrap + system-recovery-wrap, SYSTEM-owned)"
 
+    # --- net-4a: bake the network database at /lib/ndb/local ---
+    # netd (a confined warden-bound leaf driver, I-34) compiles in a
+    # byte-identical copy and serves /net/cs from it (NET-DESIGN s5: it cannot
+    # read /lib, so the live read is the v1.x cs/dns daemon split). This
+    # user-readable SYSTEM-owned copy is the canonical ndb(6) file + that v1.x
+    # split's live source. mkdir is single-level (no -p); /lib then /lib/ndb.
+    local ndb_src="$REPO_ROOT/usr/netd/ndb/local"
+    for d in /lib /lib/ndb; do
+        "$stratum_fs_bin" -s "$sock_path" mkdir "$d" \
+            || { echo "==> populate pool: mkdir $d FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    done
+    "$stratum_fs_bin" -s "$sock_path" write /lib/ndb/local < "$ndb_src" \
+        || { echo "==> populate pool: write /lib/ndb/local FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    "$stratum_fs_bin" -s "$sock_path" sync \
+        || { echo "==> populate pool: sync (ndb) FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    "$stratum_fs_bin" -s "$sock_path" read /lib/ndb/local | cmp -s - "$ndb_src" \
+        || { echo "==> populate pool: /lib/ndb/local readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    echo "==> populate pool: /lib/ndb/local baked + readback-verified (NET-DESIGN s5 ndb)"
+
     # Clean stratumd shutdown: SIGTERM then wait. stratumd unmounts the
     # pool + flushes on its way out, so the pool.img bytes after this
     # wait are the steady state joey will see when it mounts via 9P.

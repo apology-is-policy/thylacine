@@ -1,0 +1,34 @@
+# /lib/ndb/local -- Thylacine network database (ndb(6) subset).
+#
+# Static host + service definitions, the single source of truth for name
+# resolution that does NOT require a DNS query. netd compiles this file in at
+# v1.0 (NET-DESIGN s5: a confined warden-bound leaf driver, I-34, cannot reach
+# /lib; widening its namespace would fight I-28/I-34) and serves /net/cs from
+# it; the byte-identical copy lives here so a user can read it and the v1.x
+# cs/dns daemon split reads it live.
+#
+# The DYNAMIC entries -- the DNS resolver, the default router, and this host's
+# leased address -- are NOT in this file: they come from DHCP and are read
+# live from the lease (never stale).
+#
+# Format (a line-based ndb subset): one record per non-comment line, a record
+# is space-separated attr=value tokens. A host record carries ip= plus sys=
+# and/or dom=. A service record carries service= plus port=. '#' begins a
+# comment. Proto-specific services (a tcp/udp split) are a v1.x refinement.
+
+# Loopback.
+ip=127.0.0.1 sys=localhost dom=localhost
+
+# Well-known services (a subset of the IANA registry; port is the same for
+# tcp and udp at this granularity).
+service=ftp port=21
+service=ssh port=22
+service=telnet port=23
+service=smtp port=25
+service=domain port=53
+service=dns port=53
+service=http port=80
+service=https port=443
+service=ntp port=123
+service=imap port=143
+service=imaps port=993

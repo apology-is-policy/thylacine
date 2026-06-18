@@ -540,6 +540,54 @@ the lo self-test can poll a `Loopback`; the live NIC path is unchanged.
 netd: net-3d loopback E2E PASS (tcp-accept + udp + icmp, in-guest 127.0.0.1)
 ```
 
+## net-4a: `/net/cs` + the compiled-in ndb (the dial front door)
+
+`/net/cs` is the **connection server** (Plan 9 `cs(8)`): a client opens it, writes
+a dial string, and reads back one `<clone-file> <ctl-arg>` line per reachable path.
+A native `dial()` opens the clone-file, reads the connection number, opens its
+`ctl`, and writes `connect <ctl-arg>` — exactly the arg netd's `connect` verb
+already parses (`<ip>!<port>`). cs collapses host-name + service-name resolution
+into one file read.
+
+**Resolution (net-4a):**
+
+- **proto** — `tcp` / `udp` / `net` (the `proto!host!service` first field). `net`
+  maps to tcp (the v1.0 default; the tcp+udp fan-out is a v1.x refinement).
+- **host** — a numeric IPv4 is used verbatim; otherwise the static ndb
+  (`sys=`/`dom=` → `ip=`, e.g. `localhost` → `127.0.0.1`). A non-numeric non-ndb
+  name yields no line at v1.0 (DNS delegation is **net-4b**).
+- **service** — a numeric port is used verbatim; otherwise the ndb services table
+  (`service=` → `port=`, e.g. `http` → `80`).
+- **unresolvable / malformed** → an **empty** response (cs's "no reachable path"
+  signal; the reader sees 0 bytes, never an error frame).
+
+`/net/cs` is a request/response file: the write IS the query (`cs_set` resolves it
+via `cs_resolve` + stashes the per-fid response), the read drains that response via
+a per-fid cursor (offset-agnostic, like the `data` stream). The session is dropped
+on clunk / teardown / Tversion, so it is bounded by the connection's fid table (no
+unbounded growth — a re-write replaces the same fid's session). cs is `FILE_RW`
+(opened `ORDWR`); an opened cs fid cannot be walked-from, so a stale session cannot
+be rebound under a different path.
+
+**The ndb (`/lib/ndb/local`) — the netd-confinement refinement (NET-DESIGN §5).**
+netd is a confined warden-bound leaf driver (I-34): it cannot read `/lib`, and
+widening its namespace would fight its I-28/I-34 confinement. So at v1.0 netd
+serves cs from a **compiled-in ndb** (`include_bytes!("../ndb/local")`, parsed by
+`ndb.rs` — the static `localhost` host + a services table) plus the DHCP-learned
+dynamic entries read live (net-4b/4c). The **byte-identical `/lib/ndb/local`** file
+is baked into the post-pivot FS (user-readable; the real ndb(6) format; the source
+the v1.x cs/dns daemon split reads live — NET-DESIGN §18). This is the
+capability-microkernel config-at-construction idiom (Fuchsia/Genode), not the Plan
+9 full-namespace read a confined driver cannot adopt. The `ndb.rs` parser is a
+line-based ndb subset: each non-comment line is space-separated `attr=value`
+tokens; a host record carries `ip=` + `sys=`/`dom=`, a service record `service=` +
+`port=`; a malformed entry resolves to nothing (never a crash), bounded by the
+embedded file's size with no heap.
+
+```
+joey: net-4a PROBE OK (cs tcp!127.0.0.1!80 + net!localhost!http -> /net/tcp/clone 127.0.0.1!80; unresolved -> empty; /lib/ndb/local readable)
+```
+
 ## Data structures
 
 | Type | Role |
@@ -557,6 +605,8 @@ netd: net-3d loopback E2E PASS (tcp-accept + udp + icmp, in-guest 127.0.0.1)
 | `enum DnsProbe { Ok{resp_len,ancount}, NoResponse, MintFailed }` | the net-3b best-effort UDP-round-trip demo outcome (logged, never a boot gate) |
 | `enum PingProbe { Ok{reply_len}, NoResponse, MintFailed }` | the net-3c best-effort ICMP-ping demo outcome (logged, never a boot gate) |
 | `server::LoopbackResult { icmp, udp, tcp }` | the net-3d in-guest loopback E2E outcome (each leg deterministic, ASSERTED via the PASS/FAIL boot line) |
+| `server::CsSession { fid, resp, cursor }` | a per-fid `/net/cs` request/response session (net-4a); the write resolves the dial into `resp`, the read drains it via `cursor`; dropped on clunk/teardown/Tversion |
+| `ndb` module (`NDB_LOCAL` + `lookup_host` + `lookup_service`) | the compiled-in network database (NET-DESIGN §5); `include_bytes!("../ndb/local")` — the byte-identical copy baked to `/lib/ndb/local`; a stateless ndb(6)-subset parser, no heap |
 
 ## Tests
 
@@ -681,6 +731,19 @@ netd: net-3d loopback E2E PASS (tcp-accept + udp + icmp, in-guest 127.0.0.1)
   — the TCP leg is the runtime regression for the F1 fix. The kernel is
   byte-unchanged (pure userspace). Boot proof: `net-3d loopback E2E PASS` + 930/930
   + boot OK + 0 EXTINCTION; SMP gate clean. (`memory/audit_net3_closed_list.md`.)
+- **net-4a (LANDED)**: `/net/cs` (the connection server — dial → clonefile line) +
+  the compiled-in ndb (NET-DESIGN §5 — `ndb.rs` parses the embedded `ndb/local`;
+  the byte-identical `/lib/ndb/local` baked into the post-pivot FS, user-readable).
+  cs resolves a numeric IPv4, an ndb static host (`localhost`), and a numeric or
+  named service (`http` → 80); a non-numeric non-ndb name yields an empty response
+  (DNS delegation is net-4b). A confined leaf driver cannot read `/lib`, so the
+  live-`/lib/ndb` read is the v1.x cs/dns daemon split (§18); the dynamic
+  resolver/router are read live from the DHCP lease (net-4b/4c). The kernel is
+  byte-unchanged (pure userspace). Boot proof: `net-4a PROBE OK (cs … →
+  /net/tcp/clone 127.0.0.1!80; unresolved → empty; /lib/ndb/local readable)` +
+  930/930 + boot OK + 0 EXTINCTION; SMP gate clean (0 corruption across 60 boots,
+  every "timing" boot ground-truthed guest-clean). The focused net-4 audit is
+  net-4d.
 
 ## Known caveats / seams
 
@@ -715,6 +778,26 @@ netd: net-3d loopback E2E PASS (tcp-accept + udp + icmp, in-guest 127.0.0.1)
   clunked its announce/ctl fid (holding only the listen fid) frees the re-armed
   listener on accept. The Plan 9 idiom — keep the announce fd open to keep
   listening.
+- **cs resolves no Internet names yet** (net-4a): a non-numeric host that is not in
+  the static ndb yields an empty cs response. The DNS resolver (`/net/dns`, a
+  smoltcp `dns::Socket` seeded from the DHCP resolver) + the cs→dns delegation land
+  at **net-4b**.
+- **`net!host!service` maps to tcp only** (net-4a): the Plan 9 `net!` (any-proto)
+  prefix emits the tcp clone line at v1.0; the tcp+udp fan-out (cs returning both a
+  tcp and a udp line for a service registered on both) is a v1.x refinement.
+- **netd uses a compiled-in ndb; the live `/lib/ndb` read is a v1.x seam** (net-4a;
+  NET-DESIGN §5/§18): a confined warden-bound leaf driver (I-34) cannot reach
+  `/lib`, so netd compiles in `ndb/local` and serves cs from it (the
+  config-at-construction idiom), with the byte-identical `/lib/ndb/local` baked for
+  the user + the v1.x cs/dns daemon split (which *does* have a namespace) to read
+  live. Only the static host/service half is compiled-in; the resolver/router are
+  read live from the lease.
+- **The netd pure-protocol host-test module is still owed** (since net-2d): net-4a
+  adds two more deterministically host-testable pure parsers (the cs dial-string
+  resolver + the ndb(6) parser). They are validated by the boot probe at v1.0
+  (netd is no_std aarch64 with no host harness); the `cfg_attr(not(test), no_std)`
+  host-test module that lets `cargo test` drive them with edge cases is carried to
+  net-4d (its documented home across the net closed lists).
 - **`readdir` lands at net-2c-1**: `/net` directories now list via `Treaddir`
   (the ninep readdir codec). A `Tread` on a directory still returns `EISDIR` (the
   9P2000.L convention — directory enumeration is `Treaddir`, and the kernel dev9p
