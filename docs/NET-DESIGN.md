@@ -865,17 +865,22 @@ named in §2.)
   Pure userspace — kernel byte-unchanged. The full deterministic in-guest data
   round-trip + the ported-server/soak E2E are net-8's exit criteria (§16).
   See `docs/reference/78-pouch.md` (the AF_INET socket backend).
-- **net-6: DESIGN BOUND (2026-06-18 user vote), not yet built.** The §12.2
+- **net-6: IN PROGRESS (design bound 2026-06-18 user vote).** The §12.2
   synchronous-readiness fork was surfaced with prior-art attached (Plan 9's
   one-proc-per-fd + blocking-read idiom; Linux v9fs has *no* real 9P `.poll`;
   Fuchsia/Genode converge on server-driven readiness the poller waits on) and the
   user **voted the kernel `dev9p.poll` bridge** over a pouch-thread-per-fd shim
   and over deferring `poll()` to v1.x — the system-best real readiness primitive
   (the charter's committed §12.2 direction, realized 9P-natively via the existing
-  read completion). Decomposed: **net-6a** (autonomy — blocking sockets + the
-  Loom async path + a native echo server; closes the net-5 #209 seam; no new ABI)
-  lands first; **net-6b** (the `dev9p.poll` bridge — spec-first `net_poll.tla` +
-  impl + focused audit; the one ABI surface) lands second. §12.2 + §17 refined.
+  read completion). Decomposed: **net-6a** (autonomy, no new ABI), split into:
+  **net-6a-1 — LANDED** (netd blocking `data` reads — closes the net-5 F2
+  `recv`-returns-0 seam: `data_recv_outcome` Data/WouldBlock/Eof + `h_read` park +
+  `poll_data` deliver, the net-3a/4b deferred-reply pattern; the
+  `recv_blocking_e2e` in-guest proof; a pouch `recv()` blocks automatically);
+  **net-6a-2** (the pouch `shutdown`/`sendto`/`recvfrom` completion, closes net-5
+  F1); **net-6a-3** (the Loom-multishot async path + a native echo server, §16).
+  Then **net-6b** (the `dev9p.poll` bridge — spec-first `net_poll.tla` + impl +
+  focused audit; the one ABI surface). §12.2 + §17 refined.
 - **net-7..net-8: not started.**
   net-7 (TLS + SNTP + `SYS_CLOCK_SETTIME` — ABI), net-8 (exit criteria + the arc
   audit), per §17, sequenced before the container runner (#70) per ROADMAP §2.2.

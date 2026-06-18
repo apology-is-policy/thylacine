@@ -287,9 +287,11 @@ lifetime). The last clunk (`slot_unref` → refs 0) `SocketSet::remove`s it, the
 **The connection files.** `status` reports the live `socket.state()` (`Syn-Sent`/
 `Established`/…); `local`/`remote` report the recorded `ip!port`; `err` reports a
 recorded failure reason. `data` is the byte stream: a write is `send_slice`, a
-read is `recv_slice` of available bytes. `data` I/O is **non-blocking** at
-net-2c-2 (a 0-length read is ambiguous between "no data yet" and EOF); blocking /
-readiness is the dev9p.poll leg (net-6).
+read is `recv_slice` of available bytes. `data` I/O was **non-blocking** at
+net-2c-2 (a 0-length read was ambiguous between "no data yet" and EOF);
+**net-6a makes the read blocking** (a parked-and-completed deferred reply — see
+below). The synchronous `poll()`/`select()` *readiness* bridge — distinct from a
+blocking read — is the `dev9p.poll` leg (net-6b).
 
 **Boot proof** (deterministic + peer-independent — it does not depend on slirp
 replying): the joey probe `clone`s, writes `connect 10.0.2.2!9` on the ctl fid
@@ -788,6 +790,77 @@ netd: net-4d dns defer-guard PASS (no lost held-Rread on a 2nd read)
 netd: net-4d dns loopback E2E PASS (deferred resolve in-guest 127.0.0.1)
 ```
 
+## net-6a: blocking `data` reads (the deferred-read completion)
+
+net-6a makes the `data` recv **blocking** (POSIX socket semantics): a `read` on
+`/net/<proto>/N/data` that finds the socket's rx buffer empty no longer returns 0
+— it *blocks* until bytes arrive or the stream ends. This closes the net-5 audit
+F2 seam (`recv()` returning 0 on transient no-data). Pure userspace — the kernel
+is byte-unchanged. A pouch `recv()` → `read()` blocks **automatically**; no shim
+change is needed for the read path (net-6a-2 is only the *other* BSD calls).
+
+**The EOF-vs-no-data distinction.** The older `data_recv` returned a single
+`usize` (bytes, 0 if none), collapsing "no data yet, connection open" and "end of
+stream" — the ambiguity that made a blocking read impossible. net-6a adds
+`data_recv_outcome` returning `RecvOutcome::{Data(n), WouldBlock, Eof}`, grounded
+in smoltcp 0.12's `recv_error_check` (tcp.rs:1212):
+
+| smoltcp `recv_slice` result | `RecvOutcome` | meaning |
+|---|---|---|
+| TCP `Ok(k>0)` | `Data(k)` | bytes dequeued |
+| TCP `Ok(0)` | `WouldBlock` | established/half-open, rx empty |
+| TCP `Err(Finished)` | `Eof` | peer FIN received + rx drained |
+| TCP `Err(InvalidState)` + `is_active()` | `WouldBlock` | still connecting (SynSent/SynReceived) |
+| TCP `Err(InvalidState)` + `!is_active()` | `Eof` | closed / aborted |
+| UDP/ICMP `Err(Exhausted)` | `WouldBlock` | no datagram / packet queued |
+| UDP `Ok((k,_))` | `Data(k)` | one datagram (k may be 0) |
+
+UDP/ICMP never `Eof` (connectionless — a blocked datagram/ping read waits for a
+packet or its fid's clunk/flush). The old `data_recv` is retained as a thin
+wrapper (`Data(k) → k`, else `0`) for the best-effort net-3 demos + the loopback
+E2Es, which want the non-blocking shape.
+
+**The deferral.** When `h_read(FK_DATA)` sees `WouldBlock`, it parks a
+`PendingRead { fid, slot_n, tag, cap }` and returns `Disp::Deferred` (no reply
+emitted; the client's `read()` stays blocked on the outstanding 9P tag — the
+kernel dev9p client matches by tag, no per-op deadline, #811-death-interruptible).
+The serve loop's `poll_data` (the analog of `poll_dns`/`poll_accepts`, run
+per-Conn after `net.poll()`) re-attempts the dequeue: `Data` sends the held
+`Rread` with the bytes; `Eof` sends a 0-byte `Rread`; `WouldBlock` keeps waiting.
+This is the **exact** deferred-reply mechanism net-3a (accept) and net-4b (dns)
+use, applied to the data stream — the most bug-prone lineage in netd, so the same
+lifecycle discipline holds: a parked read is cancelled on its fid's **clunk**, the
+connection's **teardown**, a **Tversion** reset, and a **Tflush** on its tag.
+Multiple parked reads on one fd (a multi-thread Proc reading a shared fd) are
+FIFO-delivered; `pending_reads` is bounded by `MAX_FIDS` per connection (a client
+cannot pin unbounded reads — the #65 DoS floor; an over-cap read is `E_PROTO`).
+
+**I-9 (no lost wake).** netd is single-threaded, and `net.poll()` (which delivers
+RX) runs in the serve loop *before* `poll_data`, so a data edge between
+`h_read`'s empty dequeue and the park cannot be lost — the next `poll_data`
+observes it (the `poll_dns`/`poll_accepts` reasoning). The poll-delay clamp folds
+`has_pending_reads()` in (alongside `has_pending_accepts` / `has_pending_dns`) so
+RX-driven completion stays prompt — RX arrives on the NIC, not a pollable 9P fd,
+so only a timeout-driven `net.poll` catches it.
+
+**Boot proof** (`recv_blocking_e2e`, deterministic in-guest, asserted): an
+isolated 127.0.0.1 loopback stack (the net-3d pattern) establishes a TCP
+connection through the real net-3a accept path, then drives the three states
+through `data_recv_outcome` — empty → `WouldBlock`, client-sent `"hi"` →
+`Data(2)` with the exact bytes (via the non-consuming `slot_can_recv` to wait),
+client-close → `Eof`. No host coupling.
+
+```
+netd: net-6a recv-blocking E2E PASS (WouldBlock/Data/Eof, in-guest 127.0.0.1)
+```
+
+The full 9P-level blocking round-trip (a kernel dev9p client reading a `/net`
+data fd that blocks then completes) is structurally identical to the
+net-3a/net-4b-audited deferred-reply path; its deterministic end-to-end proof
+lands at net-8 (the inbound-accept + soak exit criteria, which own a live
+in-guest peer). The synchronous `poll()`/`select()` *readiness* multiplex over
+`/net` — distinct from a blocking read — is the `dev9p.poll` bridge (net-6b).
+
 ## Data structures
 
 | Type | Role |
@@ -801,6 +874,8 @@ netd: net-4d dns loopback E2E PASS (deferred resolve in-guest 127.0.0.1)
 | `server::Slot { used, refs, proto, socket, local, remote, err, listen_ep, icmp_ident, gen }` | one `/net/<proto>/N/` connection: the refcount key + its protocol (TCP/UDP/ICMP — the `get::<T>()` discriminator) + its reserved `SocketHandle` + the recorded endpoints / err reason + the announce endpoint (TCP-only; re-arm key) + the bound Echo ident (ICMP-only) + the monotonic mint `gen` (net-3d; the deferred-accept slot-reuse guard) |
 | `server::PendingAccept { conn_id, tag, fid, listening_n, listening_gen }` | a held `listen` Rlopen awaiting an inbound call (the deferred-reply state); bounded by `MAX_PENDING_ACCEPTS = 16`; `listening_gen` (net-3d) pins the listener slot's mint generation so a freed+re-minted index can never type-confuse `poll_accepts` |
 | `server::AcceptDone { conn_id, tag, fid, new_n, ctl_qid_path }` | a completed accept the serve loop delivers (opaque to `main.rs`, routed by `conn_id()`) |
+| `server::PendingRead { fid, slot_n, tag, cap }` | a blocking `data` read holding its Rread (net-6a); parked on an empty-but-open rx, completed by `poll_data` when bytes arrive (or 0 on EOF); a flat `Vec` (FIFO over the slot), bounded by `MAX_FIDS`; cancelled on the fid's clunk / connection teardown / Tversion / Tflush |
+| `enum server::RecvOutcome { Data(usize), WouldBlock, Eof }` | the result of a non-blocking dequeue (net-6a): bytes / no-data-yet-defer / end-of-stream — the distinction `data_recv_outcome` adds over the older `data_recv`'s collapsed `usize` |
 | `enum Disp { Reply(usize), Deferred, Fatal }` | the per-request dispatch outcome — `Deferred` holds the reply (a blocking listen) |
 | `enum DnsProbe { Ok{resp_len,ancount}, NoResponse, MintFailed }` | the net-3b best-effort UDP-round-trip demo outcome (logged, never a boot gate) |
 | `enum PingProbe { Ok{reply_len}, NoResponse, MintFailed }` | the net-3c best-effort ICMP-ping demo outcome (logged, never a boot gate) |
@@ -992,6 +1067,19 @@ netd: net-4d dns loopback E2E PASS (deferred resolve in-guest 127.0.0.1)
   Boot proof: `net-4d proto selftest PASS` + `net-4d dns defer-guard PASS` + `net-4d
   dns loopback E2E PASS` + 930/930 + boot OK + 0 EXTINCTION; SMP gate clean. **The
   net-4 arc is COMPLETE.**
+- **net-6a (LANDED)**: blocking `data` reads (closes the net-5 audit F2 seam —
+  `recv()` returning 0 on transient no-data). `data_recv_outcome` distinguishes
+  `Data`/`WouldBlock`/`Eof` (smoltcp-grounded); `h_read(FK_DATA)` parks a
+  `PendingRead` on `WouldBlock` (returns `Disp::Deferred`); `poll_data` delivers
+  the held `Rread` on data/EOF — the net-3a/net-4b deferred-reply pattern applied
+  to the data stream, with the same clunk/teardown/Tversion/Tflush cancel
+  discipline + a `MAX_FIDS` bound. A pouch `recv()` → `read()` blocks
+  automatically (no shim change). A self-audit caught + fixed a `count==0`-read
+  park (a 0-length dequeue is `Ok(0)` even on a readable socket → would have
+  blocked forever; guarded to return 0). Kernel byte-unchanged. Boot proof:
+  `net-6a recv-blocking E2E PASS` (the in-guest WouldBlock/Data/Eof loopback
+  selftest) + 930/930 + boot OK + 0 EXTINCTION; SMP gate clean. The synchronous
+  `poll()`/`select()` readiness bridge is the separate net-6b (`dev9p.poll`).
 
 ## Known caveats / seams
 

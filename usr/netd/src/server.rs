@@ -336,6 +336,37 @@ struct PendingAccept {
                       // cannot type-confuse the listener's get::<tcp::Socket>.
 }
 
+/// A blocking `data` read holding its Rread (net-6a). A `read` on `/net/tcp/N/
+/// data` that finds the socket's rx buffer empty but the connection still open
+/// DEFERS instead of returning 0: it parks a PendingRead and the serve loop's
+/// poll_data sends the held Rread when bytes arrive (or 0 on EOF). This makes
+/// `recv()` block (the net-5 audit F2 seam) over the existing dev9p client
+/// (match-by-tag, no per-op deadline, death-interruptible) -- no kernel surface.
+/// One per outstanding blocked read; multiple on one fid (a multi-thread Proc
+/// reading a shared fd) are FIFO-delivered. Bounded by MAX_FIDS per connection.
+#[derive(Copy, Clone)]
+struct PendingRead {
+    fid: u32,   // the fid the read is on (cancelled on its clunk)
+    slot_n: u32, // the connection slot to recv from when ready
+    tag: u16,   // the held Tread tag (cancelled by a Tflush on it)
+    cap: usize, // the negotiated max bytes to return
+}
+
+/// The result of a non-blocking dequeue from a connection's rx (net-6a). The
+/// blocking read path needs to distinguish "no data yet, the connection is open"
+/// (DEFER) from "end of stream" (return 0) -- a distinction the older `data_recv`
+/// collapsed to 0 (the net-5 F2 ambiguity). Mapped from smoltcp 0.12: TCP
+/// Ok(k>0)=Data, Ok(0)/connecting=WouldBlock, Err(Finished)=Eof (peer FIN +
+/// drained), Err(InvalidState)+!is_active=Eof (closed); UDP/ICMP Err(Exhausted)=
+/// WouldBlock (connectionless -- never Eof; a blocked datagram/ping read waits
+/// for a packet or its fid's clunk/flush).
+enum RecvOutcome {
+    Data(usize), // `n` bytes copied into the caller's buffer (n may be 0: a real
+    // empty UDP datagram)
+    WouldBlock, // no data yet, the connection is open -- the caller may defer
+    Eof,        // end of stream (TCP FIN drained / socket gone) -- read returns 0
+}
+
 /// A completed accept ready to deliver: the serve loop rebinds `fid` onto the
 /// new connection's ctl and sends the held Rlopen on `conn_id`. Opaque to the
 /// serve loop (main.rs) -- it only routes the token by `conn_id()`.
@@ -1433,27 +1464,52 @@ impl Net {
         }
     }
 
-    /// Read up to `out.len()` bytes from the connection. TCP dequeues from the
-    /// byte stream; UDP dequeues one whole datagram (the sender endpoint is
-    /// dropped at net-3b -- the connected client knows its remote; receive-from-
-    /// any with sender attribution is net-3c+). Returns bytes dequeued (0 if none
-    /// available / closed). Non-blocking: a 0-return is ambiguous between "no
-    /// data yet" and EOF -- proper readiness/blocking is the dev9p.poll leg (net-6).
-    fn data_recv(&mut self, n: u32, out: &mut [u8]) -> usize {
+    /// Non-consuming readiness: are bytes ready to recv on connection `n`? (TCP
+    /// can_recv / a queued UDP/ICMP packet.) Lets a caller wait for data without
+    /// dequeuing it -- used by the net-6a recv-blocking selftest, and the
+    /// readiness substrate the net-6b dev9p.poll bridge will query.
+    fn slot_can_recv(&self, n: u32) -> bool {
         let h = match self.slot_socket(n) {
             Some(h) => h,
-            None => return 0,
+            None => return false,
+        };
+        match self.slot_proto(n) {
+            Some(PROTO_UDP) => self.sockets.get::<udp::Socket>(h).can_recv(),
+            Some(PROTO_ICMP) => self.sockets.get::<icmp::Socket>(h).can_recv(),
+            _ => self.sockets.get::<tcp::Socket>(h).can_recv(),
+        }
+    }
+
+    /// Dequeue up to `out.len()` bytes from the connection, distinguishing "no
+    /// data yet" (WouldBlock -> the caller may defer = block) from end-of-stream
+    /// (Eof -> the read returns 0). TCP dequeues from the byte stream; UDP/ICMP
+    /// dequeue one whole datagram/packet (the sender endpoint is dropped -- the
+    /// connected client knows its remote). The mapping is grounded in smoltcp
+    /// 0.12 (recv_error_check, tcp.rs): may_recv-false + rx_fin_received =>
+    /// Finished (EOF); may_recv-false + !fin => InvalidState (connecting if
+    /// is_active, else closed). Non-blocking at the smoltcp layer; the BLOCKING
+    /// semantics live in h_read/poll_data (net-6a), which park a PendingRead on
+    /// WouldBlock.
+    fn data_recv_outcome(&mut self, n: u32, out: &mut [u8]) -> RecvOutcome {
+        let h = match self.slot_socket(n) {
+            Some(h) => h,
+            None => return RecvOutcome::Eof, // no socket: nothing will ever arrive
         };
         match self.slot_proto(n) {
             Some(PROTO_UDP) => match self.sockets.get_mut::<udp::Socket>(h).recv_slice(out) {
-                Ok((k, _meta)) => k,
-                Err(_) => 0,
+                Ok((k, _meta)) => RecvOutcome::Data(k), // a datagram (k may be 0)
+                Err(udp::RecvError::Exhausted) => RecvOutcome::WouldBlock, // none queued
+                // Truncated: the datagram exceeded `out` (unreachable with the
+                // DATA_CHUNK buffer); deliver an empty read (v1.x: large datagrams).
+                Err(_) => RecvOutcome::Data(0),
             },
             Some(PROTO_ICMP) => {
                 // recv_slice gives a whole ICMP packet (smoltcp already filtered
-                // it to this socket's bound ident and verified the checksum on
-                // ingress). Parse it; on an EchoReply, copy the reply payload
-                // into `out`. A non-reply or parse error -> 0.
+                // it to this socket's bound ident + verified the checksum). On an
+                // EchoReply, copy the payload. A non-reply / parse error consumed
+                // a non-matching packet -> WouldBlock (keep waiting for the reply;
+                // ICMP is connectionless -- a blocked ping read never EOFs, it
+                // waits for a reply or the fid's clunk/flush).
                 let mut pkt_buf = [0u8; ICMP_RX_BUF];
                 let k = match self
                     .sockets
@@ -1461,26 +1517,49 @@ impl Net {
                     .recv_slice(&mut pkt_buf)
                 {
                     Ok((k, _from)) => k,
-                    Err(_) => return 0,
+                    Err(icmp::RecvError::Exhausted) => return RecvOutcome::WouldBlock,
+                    Err(_) => return RecvOutcome::WouldBlock,
                 };
                 let pkt = match Icmpv4Packet::new_checked(&pkt_buf[..k]) {
                     Ok(p) => p,
-                    Err(_) => return 0,
+                    Err(_) => return RecvOutcome::WouldBlock,
                 };
                 match Icmpv4Repr::parse(&pkt, &ChecksumCapabilities::ignored()) {
                     Ok(Icmpv4Repr::EchoReply { data, .. }) => {
                         let m = data.len().min(out.len());
                         out[..m].copy_from_slice(&data[..m]);
-                        m
+                        RecvOutcome::Data(m)
                     }
-                    _ => 0,
+                    _ => RecvOutcome::WouldBlock,
                 }
             }
-            _ => self
-                .sockets
-                .get_mut::<tcp::Socket>(h)
-                .recv_slice(out)
-                .unwrap_or(0),
+            _ => {
+                let sock = self.sockets.get_mut::<tcp::Socket>(h);
+                match sock.recv_slice(out) {
+                    Ok(0) => RecvOutcome::WouldBlock, // established/half-open, rx empty
+                    Ok(k) => RecvOutcome::Data(k),
+                    Err(tcp::RecvError::Finished) => RecvOutcome::Eof, // peer FIN + drained
+                    // Not established: connecting (is_active: SynSent/SynReceived)
+                    // -> WouldBlock; otherwise closed/aborted -> Eof.
+                    Err(tcp::RecvError::InvalidState) => {
+                        if sock.is_active() {
+                            RecvOutcome::WouldBlock
+                        } else {
+                            RecvOutcome::Eof
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Non-blocking dequeue: bytes available now, 0 if none / EOF. The
+    /// best-effort net-3 demos + the loopback E2E use this; the blocking 9P
+    /// `data` read path uses data_recv_outcome directly (net-6a).
+    fn data_recv(&mut self, n: u32, out: &mut [u8]) -> usize {
+        match self.data_recv_outcome(n, out) {
+            RecvOutcome::Data(k) => k,
+            RecvOutcome::WouldBlock | RecvOutcome::Eof => 0,
         }
     }
 
@@ -2295,6 +2374,131 @@ fn lo_tcp_accept(lo: &mut Net, device: &mut Loopback) -> bool {
     ok
 }
 
+/// net-6a: a DETERMINISTIC in-guest self-test of the blocking-read OUTCOME
+/// distinction -- the heart of net-6a. `data_recv_outcome` must tell "no data
+/// yet, the connection is open" (WouldBlock -> h_read PARKS, recv blocks) from
+/// "end of stream" (Eof -> recv returns 0) -- the very distinction the older
+/// `data_recv` collapsed (the net-5 F2 ambiguity). An isolated 127.0.0.1 stack
+/// (the net-3d loopback pattern) establishes a TCP connection through the REAL
+/// net-3a accept path, then drives the three states (empty -> sent -> peer-close)
+/// through `data_recv_outcome` -- the method h_read/poll_data dispatch on. No
+/// NIC, no host -> fully deterministic, asserted by the caller (a PASS/FAIL line).
+pub fn recv_blocking_e2e(base: Instant) -> &'static str {
+    let mut device = Loopback::new(Medium::Ethernet);
+    let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress([
+        0x02, 0x00, 0x00, 0x00, 0x00, 0x03,
+    ])));
+    config.random_seed = LO_SEED;
+    let ts0 = SmolInstant::from_millis(base.elapsed().as_millis() as i64);
+    let mut iface = Interface::new(config, &mut device, ts0);
+    // The iface MUST carry 127.0.0.1/8 -- tcp_connect selects a source address
+    // from it, so without an address the active-open fails (the loopback_e2e
+    // does this; ipifc_e2e omits it because it never connects).
+    iface.update_ip_addrs(|a| {
+        let _ = a.push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8));
+    });
+    let mut lo = Net::new(iface, SocketSet::new(Vec::new()), base, IfConfig::empty());
+
+    // Establish a connection (announce + connect + the deferred accept), KEEPING
+    // the server side M (lo_tcp_accept discards it; here we recv on it).
+    let ln = match lo.tcp_clone() {
+        Some(n) => n,
+        None => return "clone-ln",
+    };
+    let ep = IpListenEndpoint {
+        addr: None,
+        port: LO_LOOPBACK_PORT,
+    };
+    if lo.ctl_announce(ln, ep).is_err() {
+        lo.free_orphan_mint(ln);
+        return "announce";
+    }
+    let cn = match lo.tcp_clone() {
+        Some(n) => n,
+        None => {
+            lo.free_orphan_mint(ln);
+            return "clone-cn";
+        }
+    };
+    if lo
+        .tcp_connect(cn, [127, 0, 0, 1], LO_LOOPBACK_PORT)
+        .is_err()
+    {
+        lo.free_orphan_mint(cn);
+        lo.free_orphan_mint(ln);
+        return "connect";
+    }
+    lo.register_accept(0, 0, 0, ln);
+    let mut server: Option<u32> = None;
+    let accepted = lo_drive(&mut lo, &mut device, |lo| {
+        let done = lo.poll_accepts();
+        if done.is_empty() {
+            return false;
+        }
+        for d in done {
+            server = Some(d.new_n); // the unowned synthetic mint -- the server side
+        }
+        true
+    });
+    let m = match (accepted, server) {
+        (true, Some(m)) => m,
+        _ => {
+            lo.free_orphan_mint(cn);
+            lo.free_orphan_mint(ln);
+            return "accept";
+        }
+    };
+    let mut buf = [0u8; 64];
+    let stage = recv_blocking_legs(&mut lo, &mut device, m, cn, &mut buf);
+    lo.free_orphan_mint(m);
+    lo.free_orphan_mint(cn);
+    lo.free_orphan_mint(ln);
+    stage
+}
+
+/// The three blocking-read legs over an established loopback connection (server
+/// side `m`, client side `cn`): empty -> WouldBlock; sent -> Data(exact bytes);
+/// peer-close -> Eof. Returns "ok" on pass, else the failing stage name (so a
+/// FAIL boot line pinpoints where the distinction broke).
+fn recv_blocking_legs(
+    lo: &mut Net,
+    device: &mut Loopback,
+    m: u32,
+    cn: u32,
+    buf: &mut [u8],
+) -> &'static str {
+    // (1) Server rx empty, connection open -> WouldBlock (h_read would PARK).
+    if !matches!(lo.data_recv_outcome(m, buf), RecvOutcome::WouldBlock) {
+        return "leg1-wouldblock";
+    }
+    // (2) Client sends; once the segment lands (non-consuming can_recv), the
+    //     server's data_recv_outcome returns the exact bytes (Data).
+    if lo.data_send(cn, b"hi") != 2 {
+        return "leg2-send";
+    }
+    if !lo_drive(lo, device, |lo| lo.slot_can_recv(m)) {
+        return "leg2-canrecv";
+    }
+    match lo.data_recv_outcome(m, buf) {
+        RecvOutcome::Data(2) if &buf[..2] == b"hi" => {}
+        _ => return "leg2-data",
+    }
+    // Drained again -> WouldBlock (the connection is still open).
+    if !matches!(lo.data_recv_outcome(m, buf), RecvOutcome::WouldBlock) {
+        return "leg2-redrain";
+    }
+    // (3) Client closes; once the FIN drains, the server's read sees EOF (recv
+    //     returns 0), NOT a perpetual block.
+    lo.ctl_hangup(cn);
+    if lo_drive(lo, device, |lo| {
+        matches!(lo.data_recv_outcome(m, &mut [0u8; 1]), RecvOutcome::Eof)
+    }) {
+        "ok"
+    } else {
+        "leg3-eof"
+    }
+}
+
 /// Parse a non-empty all-ASCII-decimal name into a connection number, bounded
 /// to the slot range. None on any non-digit, empty, or out-of-range name.
 fn parse_dec(name: &[u8]) -> Option<u32> {
@@ -2771,6 +2975,9 @@ pub struct Conn {
     defer: bool,
     // Per-fid /net/cs + /net/dns request/response sessions (net-4a/4b).
     queries: Vec<Query>,
+    // Blocking `data` reads holding their Rread (net-6a): each parked on an empty
+    // rx, completed by poll_data when bytes arrive (or 0 on EOF).
+    pending_reads: Vec<PendingRead>,
 }
 
 impl Conn {
@@ -2784,6 +2991,7 @@ impl Conn {
             out_buf: Vec::new(),
             defer: false,
             queries: Vec::new(),
+            pending_reads: Vec::new(),
         }
     }
 
@@ -2964,6 +3172,58 @@ impl Conn {
         self.queries.iter().any(|q| q.deferred.is_some())
     }
 
+    /// Complete any blocking `data` reads whose socket now has bytes (or EOF):
+    /// the serve-loop analog of poll_dns/poll_accepts, called per-Conn after
+    /// net.poll() (so RX delivered this tick is visible). For each parked read,
+    /// re-attempt the dequeue: Data/Eof sends the held Rread (removing the
+    /// pending); WouldBlock keeps waiting. FIFO over the slot, so two reads on one
+    /// fd drain in order. Returns false if a held-Rread write failed (the session
+    /// is dead -> the serve loop tears this connection down). I-9: the
+    /// single-threaded loop runs net.poll() BEFORE this, so a data edge cannot be
+    /// lost between h_read's empty dequeue and the park (the poll_dns reasoning).
+    pub fn poll_data(&mut self, net: &mut Net) -> bool {
+        let mut i = 0;
+        while i < self.pending_reads.len() {
+            let pr = self.pending_reads[i];
+            let mut scratch = [0u8; DATA_CHUNK];
+            let cap = pr.cap.min(DATA_CHUNK);
+            match net.data_recv_outcome(pr.slot_n, &mut scratch[..cap]) {
+                RecvOutcome::WouldBlock => i += 1, // still empty; check next tick
+                RecvOutcome::Data(k) => {
+                    self.pending_reads.remove(i);
+                    if !self.deliver_read(pr.tag, &scratch[..k]) {
+                        return false;
+                    }
+                }
+                RecvOutcome::Eof => {
+                    self.pending_reads.remove(i);
+                    if !self.deliver_read(pr.tag, &[]) {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// Build + send the held Rread for a now-ready blocking data read. False on a
+    /// write failure (tear the connection down). Mirrors deliver_deferred.
+    fn deliver_read(&mut self, tag: u16, data: &[u8]) -> bool {
+        self.out_buf.clear();
+        self.out_buf.resize(SRV_MSIZE_USIZE, 0);
+        match p9::build_rread(&mut self.out_buf, tag, data) {
+            Ok(rlen) => self.send_all(rlen),
+            Err(()) => false,
+        }
+    }
+
+    /// Any blocking data read is parked (the serve loop clamps its poll delay to
+    /// the floor so RX-driven completion stays prompt -- RX arrives on the NIC,
+    /// not a pollable 9P fd, so only a timeout-driven net.poll catches it).
+    pub fn has_pending_reads(&self) -> bool {
+        !self.pending_reads.is_empty()
+    }
+
     /// Whether the cs/dns session for `fid` currently holds a deferred (in-flight)
     /// read. h_write consults this to REJECT a re-write that would otherwise drop
     /// the held tag (the F1 re-write facet, net-4d): a held read completes
@@ -3033,6 +3293,7 @@ impl Conn {
             }
         }
         self.query_clear_all(net); // free cs/dns sessions + cancel queries (net-4b)
+        self.pending_reads.clear(); // the held Rreads die with the connection (net-6a)
     }
 
     fn fid_find(&self, fid: u32) -> Option<usize> {
@@ -3074,6 +3335,7 @@ impl Conn {
             // listen fid must not strand its PendingAccept (net-3d F1).
             net.cancel_accept_fid(self.handle, fid);
             self.query_drop(net, fid); // free cs/dns session + cancel query (net-4b)
+            self.pending_reads.retain(|pr| pr.fid != fid); // drop blocked reads (net-6a)
             if let Some(n) = path_conn_n(f.path) {
                 net.slot_unref(n);
             }
@@ -3264,6 +3526,7 @@ impl Conn {
             }
         }
         self.query_clear_all(net); // a Tversion also resets cs/dns sessions (net-4b)
+        self.pending_reads.clear(); // ... and drops any blocked data reads (net-6a)
     }
 
     fn h_attach(&mut self, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
@@ -3456,17 +3719,47 @@ impl Conn {
             return self.err(tag, p9::E_ISDIR);
         }
         // The `data` file is the live recv stream, not static content: dequeue
-        // from the socket's rx buffer (non-blocking; 0 = no data / closed). A
-        // stream has no seekable offset, so the Tread offset is ignored.
+        // from the socket's rx buffer. BLOCKING (net-6a): bytes return at once;
+        // an empty-but-open socket DEFERS (park a PendingRead, poll_data sends
+        // the held Rread when data arrives); EOF returns 0. A stream has no
+        // seekable offset, so the Tread offset is ignored.
         if is_conn(f.path) && conn_filekind(f.path) == FK_DATA {
             let n = conn_n(f.path);
             let cap = (self.msize as usize)
                 .saturating_sub(p9::P9_HDR_LEN + 4)
                 .min(a.count as usize)
                 .min(DATA_CHUNK);
+            // A 0-count read returns 0 at once (POSIX); never park it -- a
+            // 0-length dequeue is Ok(0) even on a readable socket, which would
+            // otherwise look like WouldBlock and block forever.
+            if cap == 0 {
+                return p9::build_rread(&mut self.out_buf, tag, &[]);
+            }
             let mut scratch = [0u8; DATA_CHUNK];
-            let k = net.data_recv(n, &mut scratch[..cap]);
-            return p9::build_rread(&mut self.out_buf, tag, &scratch[..k]);
+            match net.data_recv_outcome(n, &mut scratch[..cap]) {
+                // Data now: the fast path -- a recv that finds bytes never blocks.
+                RecvOutcome::Data(k) => {
+                    return p9::build_rread(&mut self.out_buf, tag, &scratch[..k])
+                }
+                // Genuine end of stream: recv() returns 0.
+                RecvOutcome::Eof => return p9::build_rread(&mut self.out_buf, tag, &[]),
+                // Open but empty: BLOCK. Park the read; poll_data delivers the
+                // held Rread when bytes arrive (or 0 on EOF). Bounded per
+                // connection so a client cannot pin unbounded reads (#65 floor).
+                RecvOutcome::WouldBlock => {
+                    if self.pending_reads.len() >= MAX_FIDS {
+                        return self.err(tag, p9::E_PROTO);
+                    }
+                    self.pending_reads.push(PendingRead {
+                        fid: a.fid,
+                        slot_n: n,
+                        tag,
+                        cap,
+                    });
+                    self.defer = true;
+                    return Ok(0); // ignored: dispatch returns Disp::Deferred
+                }
+            }
         }
         if f.path == P_CS || f.path == P_DNS {
             // cs/dns response (net-4a/4b): drain the per-fid answer via a per-fid
@@ -3606,6 +3899,7 @@ impl Conn {
         };
         net.cancel_accept_tag(self.handle, a.oldtag);
         self.cancel_dns_flush(net, a.oldtag); // net-4b: drop a deferred dns read
+        self.pending_reads.retain(|pr| pr.tag != a.oldtag); // net-6a: drop a blocked read
         p9::build_rflush(&mut self.out_buf, tag)
     }
 

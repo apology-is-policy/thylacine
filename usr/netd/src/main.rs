@@ -380,6 +380,19 @@ impl Driver for NetD {
             );
         }
 
+        // net-6a: the DETERMINISTIC in-guest blocking-read self-test -- a TCP
+        // connection over the isolated loopback stack, then the three
+        // data_recv_outcome states (empty -> WouldBlock [h_read parks], sent ->
+        // Data [exact bytes], peer-close -> Eof [recv returns 0]). Proves the
+        // EOF-vs-no-data-yet distinction that makes recv() block (net-5 F2). No
+        // host coupling -> ASSERTED.
+        let rb = server::recv_blocking_e2e(base);
+        if rb == "ok" {
+            say!("netd: net-6a recv-blocking E2E PASS (WouldBlock/Data/Eof, in-guest 127.0.0.1)");
+        } else {
+            say!("netd: net-6a recv-blocking E2E FAIL ({})", rb);
+        }
+
         // net-4c: the DETERMINISTIC in-guest ipifc self-test -- exercises the
         // /net/ipifc/0/ctl add/remove verbs + the status/local/ndb renders on a
         // throwaway Net (never the live config). No host coupling -> ASSERTED.
@@ -470,15 +483,17 @@ impl Driver for NetD {
                 }
             }
 
-            // Deliver any deferred cs/dns reads whose DNS query has resolved
-            // (net-4b): send the held Rread. A write failure means the issuing
-            // session died -> tear it down. Iterate backward so a remove() does
-            // not shift an unvisited lower index.
+            // Deliver any deferred cs/dns reads whose DNS query resolved (net-4b)
+            // + any blocking `data` reads whose bytes arrived (net-6a): send the
+            // held Rread. A write failure means the issuing session died -> tear
+            // it down. Iterate backward so a remove() does not shift an unvisited
+            // lower index. The `||` short-circuits, so poll_data never runs on a
+            // conn poll_dns already condemned.
             {
                 let mut i = conns.len();
                 while i > 0 {
                     i -= 1;
-                    if !conns[i].poll_dns(&mut net) {
+                    if !conns[i].poll_dns(&mut net) || !conns[i].poll_data(&mut net) {
                         conns[i].teardown(&mut net);
                         let _ = unsafe { t_close(conns[i].handle()) };
                         conns.remove(i);
@@ -486,11 +501,16 @@ impl Driver for NetD {
                 }
             }
 
-            // With a pending accept OR a deferred DNS read, the event that
-            // unblocks it (an inbound SYN / a DNS reply) arrives on the NIC, not
-            // a pollable fd -- only a timeout-driven net.poll catches it. Clamp to
-            // the floor to keep accept/resolve latency <= IDLE_POLL_MIN_MS.
-            let delay = if net.has_pending_accepts() || conns.iter().any(|c| c.has_pending_dns()) {
+            // With a pending accept OR a deferred DNS read OR a blocking data
+            // read, the event that unblocks it (an inbound SYN / a DNS reply /
+            // RX data) arrives on the NIC, not a pollable fd -- only a
+            // timeout-driven net.poll catches it. Clamp to the floor to keep
+            // accept/resolve/recv latency <= IDLE_POLL_MIN_MS.
+            let delay = if net.has_pending_accepts()
+                || conns
+                    .iter()
+                    .any(|c| c.has_pending_dns() || c.has_pending_reads())
+            {
                 IDLE_POLL_MIN_MS
             } else {
                 net.poll_delay_ms()
