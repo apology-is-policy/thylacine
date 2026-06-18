@@ -298,8 +298,11 @@ impl Driver for NetD {
 
         // Build the connection table around the now-configured stack (it takes
         // ownership of iface + sockets). The DHCP socket stays in the set and
-        // keeps renewing the lease. `ifc` carries the lease into the ipifc/ndb
-        // views and seeds the resolver socket.
+        // keeps its lease alive at L3, but the resident loop does NOT re-drain
+        // the dhcp Configured event, so the iface address AND the `ifc` snapshot
+        // are both pinned at THIS bring-up lease -- they stay coherent (a DHCP
+        // renewal re-application is a v1.x seam). `ifc` carries the lease into
+        // the ipifc/ndb views and seeds the resolver socket.
         let mut net = server::Net::new(iface, sockets, base, ifc);
 
         // net-3b: a best-effort UDP round-trip through the live /net/udp data
@@ -384,6 +387,28 @@ impl Driver for NetD {
             say!("netd: net-4c ipifc E2E PASS (add/remove static + status + ndb, in-guest)");
         } else {
             say!("netd: net-4c ipifc E2E FAIL");
+        }
+
+        // net-4d: deterministic in-guest proofs of the net-4 surface (no host
+        // coupling -> ASSERTED PASS lines, like the loopback/ipifc selftests).
+        // (1) the cs/dns/ndb/mask parser battery; (2) the F1 deferred-read guard
+        // regression (a second concurrent read never strands the held tag); (3)
+        // the net-4b DNS resolution path round-tripping in-guest via a loopback
+        // responder (closes the owed deferred-read E2E).
+        if server::proto_selftest() {
+            say!("netd: net-4d proto selftest PASS (cs/dns/ndb/mask parsers)");
+        } else {
+            say!("netd: net-4d proto selftest FAIL");
+        }
+        if server::dns_defer_guard_selftest(base) {
+            say!("netd: net-4d dns defer-guard PASS (no lost held-Rread on a 2nd read)");
+        } else {
+            say!("netd: net-4d dns defer-guard FAIL");
+        }
+        if server::dns_loopback_e2e(base) {
+            say!("netd: net-4d dns loopback E2E PASS (deferred resolve in-guest 127.0.0.1)");
+        } else {
+            say!("netd: net-4d dns loopback E2E FAIL");
         }
 
         // Post the /net 9P service (9P-mode) into the boot namespace's /srv

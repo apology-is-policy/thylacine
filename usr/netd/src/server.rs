@@ -412,11 +412,11 @@ pub struct IfConfig {
     pub mac: [u8; 6],
     pub mtu: usize,
     pub addr: [u8; 4],
-    pub prefix: u8,         // CIDR prefix length (24 == /24 == 255.255.255.0)
+    pub prefix: u8, // CIDR prefix length (24 == /24 == 255.255.255.0)
     pub gw: Option<[u8; 4]>,
     pub dns: Option<[u8; 4]>, // the primary resolver (the dynamic ndb `dns=`)
-    pub up: bool,           // has an address (false before config / after remove)
-    pub dynamic: bool,      // DHCP-leased (true) vs static `ipconfig add` (false)
+    pub up: bool,             // has an address (false before config / after remove)
+    pub dynamic: bool,        // DHCP-leased (true) vs static `ipconfig add` (false)
 }
 
 impl IfConfig {
@@ -472,7 +472,12 @@ impl Net {
     /// interface-config snapshot (net-4c): its `dns` field (the DHCP-learned
     /// primary resolver) installs the shared DNS socket -- None leaves `dns`
     /// None, so a DNS query fails closed to an empty answer (never hangs).
-    pub fn new(iface: Interface, mut sockets: SocketSet<'static>, base: Instant, ifc: IfConfig) -> Net {
+    pub fn new(
+        iface: Interface,
+        mut sockets: SocketSet<'static>,
+        base: Instant,
+        ifc: IfConfig,
+    ) -> Net {
         // The DNS socket holds DNS_MAX_SERVER_COUNT (=1) server; the lease's
         // primary resolver is it. A growable (alloc) query-slot table backs the
         // per-fid queries, so start_query never fails for "no free slot".
@@ -1857,16 +1862,24 @@ pub fn ipifc_e2e(base: Instant) -> bool {
     };
 
     // add: static address + mask (dotted-quad) + gateway.
-    if net.ipifc_ctl(b"add 192.168.7.5 255.255.255.0 192.168.7.1").is_err() {
+    if net
+        .ipifc_ctl(b"add 192.168.7.5 255.255.255.0 192.168.7.1")
+        .is_err()
+    {
         return false;
     }
     let st = net.file_content(P_IPIFC_0_STATUS);
-    if !has(&st, b"addr 192.168.7.5/24") || !has(&st, b"gw 192.168.7.1") || !has(&st, b"mode static")
+    if !has(&st, b"addr 192.168.7.5/24")
+        || !has(&st, b"gw 192.168.7.1")
+        || !has(&st, b"mode static")
     {
         return false;
     }
     let ndb = net.file_content(P_NDB);
-    if !has(&ndb, b"ip=192.168.7.5") || !has(&ndb, b"ipmask=255.255.255.0") || !has(&ndb, b"ipgw=192.168.7.1") {
+    if !has(&ndb, b"ip=192.168.7.5")
+        || !has(&ndb, b"ipmask=255.255.255.0")
+        || !has(&ndb, b"ipgw=192.168.7.1")
+    {
         return false;
     }
     let local = net.file_content(P_IPIFC_0_LOCAL);
@@ -1913,6 +1926,264 @@ pub fn ipifc_e2e(base: Instant) -> bool {
         return false;
     }
     true
+}
+
+/// Build a minimal DNS A-record response for a received query (the net-4d
+/// loopback responder): echo the transaction id + the single question, set the
+/// response flags, and append one A answer (a compression-pointer name -> the
+/// question + the given IP). Empty on a malformed/short query (the dns socket
+/// then ignores it). Parses the qname explicitly so a trailing EDNS OPT in the
+/// query's additional section is not echoed as part of the question.
+fn build_dns_response(query: &[u8], ip: [u8; 4]) -> Vec<u8> {
+    if query.len() < 12 {
+        return Vec::new();
+    }
+    // Walk the qname labels to the 0x00 root, then +4 for qtype + qclass.
+    let mut p = 12usize;
+    loop {
+        match query.get(p) {
+            None => return Vec::new(),
+            Some(0) => {
+                p += 1;
+                break;
+            }
+            Some(&len) if len >= 0xc0 => return Vec::new(), // a pointer in a question
+            Some(&len) => p += 1 + len as usize,
+        }
+    }
+    let qend = p + 4; // qtype(2) + qclass(2)
+    if qend > query.len() {
+        return Vec::new();
+    }
+    let mut r = Vec::new();
+    r.extend_from_slice(&query[0..2]); // id (echo)
+    r.extend_from_slice(&[0x81, 0x80]); // flags: QR=1 RD=1 RA=1 rcode=0
+    r.extend_from_slice(&[0x00, 0x01]); // qdcount = 1
+    r.extend_from_slice(&[0x00, 0x01]); // ancount = 1
+    r.extend_from_slice(&[0x00, 0x00]); // nscount = 0
+    r.extend_from_slice(&[0x00, 0x00]); // arcount = 0
+    r.extend_from_slice(&query[12..qend]); // the question (echo)
+    r.extend_from_slice(&[0xc0, 0x0c]); // answer name: pointer -> offset 12
+    r.extend_from_slice(&[0x00, 0x01]); // type A
+    r.extend_from_slice(&[0x00, 0x01]); // class IN
+    r.extend_from_slice(&[0x00, 0x00, 0x00, 0x3c]); // ttl 60
+    r.extend_from_slice(&[0x00, 0x04]); // rdlength 4
+    r.extend_from_slice(&ip); // the A record
+    r
+}
+
+/// net-4d: a DETERMINISTIC in-guest E2E of the net-4b DNS resolution path -- a
+/// mock DNS responder on an ISOLATED 127.0.0.1 loopback stack answers a fixed A
+/// query, so the shared dns::Socket resolves a name in-guest with NO host
+/// coupling (the net-3d loopback analog; closes the net-4b OWED deferred-read
+/// E2E). The resolver IS our own responder bound to 127.0.0.1:53; the round-trip
+/// drives the REAL Net dns methods (dns_query_start -> poll -> dns_poll) -- the
+/// same methods a /net/dns fid's query_read/poll_dns drive -- so the PASS proves
+/// the resolution plumbing resolves deterministically.
+pub fn dns_loopback_e2e(base: Instant) -> bool {
+    let mut device = Loopback::new(Medium::Ethernet);
+    let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress([
+        0x02, 0x00, 0x00, 0x00, 0x00, 0x04,
+    ])));
+    config.random_seed = LO_SEED;
+    let ts0 = SmolInstant::from_millis(base.elapsed().as_millis() as i64);
+    let mut iface = Interface::new(config, &mut device, ts0);
+    iface.update_ip_addrs(|a| {
+        let _ = a.push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8));
+    });
+    // The resolver IS our loopback responder (127.0.0.1).
+    let mut ifc = IfConfig::empty();
+    ifc.dns = Some([127, 0, 0, 1]);
+    let mut net = Net::new(iface, SocketSet::new(Vec::new()), base, ifc);
+
+    // The mock resolver: a udp socket bound to 127.0.0.1:53 that answers any A
+    // query with `answer`. On the same iface + SocketSet, so the loopback device
+    // loops the dns query to it and its reply back (the lo_udp_roundtrip path).
+    let rx = udp::PacketBuffer::new(
+        alloc::vec![udp::PacketMetadata::EMPTY; 4],
+        alloc::vec![0u8; 1024],
+    );
+    let tx = udp::PacketBuffer::new(
+        alloc::vec![udp::PacketMetadata::EMPTY; 4],
+        alloc::vec![0u8; 1024],
+    );
+    let mut responder = udp::Socket::new(rx, tx);
+    if responder
+        .bind(IpListenEndpoint {
+            addr: None,
+            port: 53,
+        })
+        .is_err()
+    {
+        return false;
+    }
+    let rh = net.sockets.add(responder);
+    let answer = [203, 0, 113, 7]; // TEST-NET-3: a fixed, deterministic A record.
+
+    let q = match net.dns_query_start(b"lo.thylacine") {
+        Some(q) => q,
+        None => return false,
+    };
+
+    for _ in 0..LO_POLLS {
+        net.poll(&mut device);
+        // The responder: answer any query that has landed on :53.
+        let mut qbuf = [0u8; 512];
+        let got = match net.sockets.get_mut::<udp::Socket>(rh).recv_slice(&mut qbuf) {
+            Ok((n, meta)) => Some((n, meta.endpoint)),
+            Err(_) => None,
+        };
+        if let Some((n, dst)) = got {
+            let resp = build_dns_response(&qbuf[..n], answer);
+            if !resp.is_empty() {
+                let _ = net
+                    .sockets
+                    .get_mut::<udp::Socket>(rh)
+                    .send_slice(&resp, dst);
+            }
+        }
+        net.poll(&mut device); // flush the response back to the dns socket
+        match net.dns_poll(q) {
+            DnsPoll::Pending => {}
+            DnsPoll::Resolved(ip) => return ip == answer, // slot freed; no cancel
+            DnsPoll::Failed => return false,              // slot freed; no cancel
+        }
+        let _ = sleep(Duration::from_millis(LO_POLL_MS));
+    }
+    net.dns_cancel(q); // timed out still pending: free the slot
+    false
+}
+
+/// net-4d: a DETERMINISTIC in-guest battery over the pure cs/dns/ndb/mask
+/// parsers (the parser COVERAGE the OWED-since-net-2d host-test module would
+/// give -- delivered in-guest, since netd is a no_std + aarch64 bin crate that
+/// does not host-`cargo test`). Each malformed input must fail closed; each
+/// valid input must resolve as documented.
+pub fn proto_selftest() -> bool {
+    // cs_parse: proto -> clone-file, service -> port (numeric or ndb), host left.
+    if !matches!(
+        cs_parse(b"tcp!1.2.3.4!80"),
+        Some((
+            QueryKind::Cs {
+                clone_tcp: true,
+                port: 80
+            },
+            b"1.2.3.4"
+        ))
+    ) || !matches!(
+        cs_parse(b"net!example!http"), // net -> tcp; http -> ndb port 80
+        Some((
+            QueryKind::Cs {
+                clone_tcp: true,
+                port: 80
+            },
+            b"example"
+        ))
+    ) || !matches!(
+        cs_parse(b"udp!h!53"),
+        Some((
+            QueryKind::Cs {
+                clone_tcp: false,
+                port: 53
+            },
+            b"h"
+        ))
+    ) {
+        return false;
+    }
+    // cs_parse rejects: >3 fields, unknown proto, empty, missing host/service.
+    if cs_parse(b"tcp!h!80!x").is_some()
+        || cs_parse(b"sctp!h!80").is_some()
+        || cs_parse(b"").is_some()
+        || cs_parse(b"tcp").is_some()
+        || cs_parse(b"tcp!h!nosuchsvc").is_some()
+    {
+        return false;
+    }
+    // dns_parse: bare name; A-type variants accepted (case-insensitive); else None.
+    if !matches!(dns_parse(b"example.com"), Some(b"example.com"))
+        || !matches!(dns_parse(b"host a"), Some(b"host"))
+        || !matches!(dns_parse(b"host ipv4"), Some(b"host"))
+        || !matches!(dns_parse(b"host IP"), Some(b"host"))
+        || dns_parse(b"host aaaa").is_some()
+        || dns_parse(b"").is_some()
+    {
+        return false;
+    }
+    // parse_mask: dotted (contiguous only) / /N / bare N; non-contiguous + >32 reject.
+    if parse_mask(b"255.255.255.0") != Some(24)
+        || parse_mask(b"/16") != Some(16)
+        || parse_mask(b"8") != Some(8)
+        || parse_mask(b"0.0.0.0") != Some(0)
+        || parse_mask(b"255.255.255.255") != Some(32)
+        || parse_mask(b"255.0.255.0").is_some() // a hole -> rejected
+        || parse_mask(b"33").is_some()
+        || parse_mask(b"/40").is_some()
+    {
+        return false;
+    }
+    if mask_octets(24) != [255, 255, 255, 0]
+        || mask_octets(0) != [0, 0, 0, 0]
+        || mask_octets(32) != [255, 255, 255, 255]
+        || mask_octets(16) != [255, 255, 0, 0]
+    {
+        return false;
+    }
+    // ndb: a known host/service hits; an unknown misses.
+    crate::ndb::lookup_host(b"localhost") == Some([127, 0, 0, 1])
+        && crate::ndb::lookup_host(b"nonesuch.invalid").is_none()
+        && crate::ndb::lookup_service(b"http") == Some(80)
+        && crate::ndb::lookup_service(b"nosuchsvc").is_none()
+}
+
+/// net-4d: a DETERMINISTIC in-guest regression for the F1 deferred-read guard. A
+/// throwaway Net with a resolver but no device poll keeps a started query
+/// Pending forever, so a read DEFERS. Asserts: (1) the first read defers (holds
+/// tag 10), (2) a SECOND concurrent read on the same fid does NOT clobber the
+/// held tag (it gets an empty reply, the first stays deferred), (3)
+/// fid_has_deferred reports the in-flight read (so h_write rejects a racing
+/// re-write). On the PRE-fix code the second read overwrote `deferred` to tag 11
+/// -> assertion (2) fails. Closes I-9 for the cs/dns deferred-read path.
+pub fn dns_defer_guard_selftest(base: Instant) -> bool {
+    let mut device = Loopback::new(Medium::Ethernet);
+    let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress([
+        0x02, 0x00, 0x00, 0x00, 0x00, 0x05,
+    ])));
+    config.random_seed = LO_SEED;
+    let ts0 = SmolInstant::from_millis(base.elapsed().as_millis() as i64);
+    let mut iface = Interface::new(config, &mut device, ts0);
+    iface.update_ip_addrs(|a| {
+        let _ = a.push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8));
+    });
+    let mut ifc = IfConfig::empty();
+    ifc.dns = Some([10, 0, 0, 1]); // a resolver (never polled -> the query stays Pending)
+    let mut net = Net::new(iface, SocketSet::new(Vec::new()), base, ifc);
+    let mut conn = Conn::new(0);
+
+    // A DNS name resolution begins; the first read defers (Pending, no poll).
+    conn.query_begin(&mut net, 1, P_DNS, b"defer.test");
+    let _ = conn.query_read(&mut net, 1, 128, 10);
+    let first_deferred = conn
+        .queries
+        .iter()
+        .any(|q| q.fid == 1 && q.deferred == Some((10, 128)));
+    let first_set_defer = conn.defer;
+    conn.defer = false; // observe the second read's defer decision independently
+
+    // F1 facet 1: the SECOND concurrent read must NOT clobber the held tag.
+    let _ = conn.query_read(&mut net, 1, 128, 11);
+    let held_intact = conn
+        .queries
+        .iter()
+        .any(|q| q.fid == 1 && q.deferred == Some((10, 128)));
+    let second_not_deferred = !conn.defer;
+
+    // F1 facet 2 predicate: the fid reports an in-flight deferred read.
+    let predicate = conn.fid_has_deferred(1);
+
+    conn.query_clear_all(&mut net); // cancel the pending query (no smoltcp slot leak)
+
+    first_deferred && first_set_defer && held_intact && second_not_deferred && predicate
 }
 
 /// Drive `lo` until `ready(lo)` or the poll budget is spent. The loopback device
@@ -2100,11 +2371,18 @@ fn parse_ipv4(s: &[u8]) -> Option<[u8; 4]> {
 /// `/N`-form, or a bare prefix length `N`. None on a malformed / >32 / non-
 /// contiguous mask.
 fn parse_mask(s: &[u8]) -> Option<u8> {
-    let body = if !s.is_empty() && s[0] == b'/' { &s[1..] } else { s };
+    let body = if !s.is_empty() && s[0] == b'/' {
+        &s[1..]
+    } else {
+        s
+    };
     // A dotted-quad netmask -> count the leading ones (and verify contiguity).
     if body.contains(&b'.') {
         let m = parse_ipv4(body)?;
-        let bits = (u32::from(m[0]) << 24) | (u32::from(m[1]) << 16) | (u32::from(m[2]) << 8) | u32::from(m[3]);
+        let bits = (u32::from(m[0]) << 24)
+            | (u32::from(m[1]) << 16)
+            | (u32::from(m[2]) << 8)
+            | u32::from(m[3]);
         let ones = bits.leading_ones();
         // Contiguous iff the mask is exactly `ones` leading 1s (no holes).
         let expect = if ones == 0 { 0 } else { !0u32 << (32 - ones) };
@@ -2328,16 +2606,19 @@ fn eq_ascii_lower(a: &[u8], b: &[u8]) -> bool {
 }
 
 // A small fixed-cap content buffer: file bodies are short (a number, a few-line
-// stats block, a status word), so reads never allocate.
+// stats block, a status word), so reads never allocate. 256 holds the widest
+// render (the ipifc/0 status block ~120 B) with comfortable headroom; `push`
+// min-clamps, so an over-long body truncates (never an OOB), but no current
+// render approaches the cap.
 struct Content {
-    buf: [u8; 128],
+    buf: [u8; 256],
     len: usize,
 }
 
 impl Content {
     fn new() -> Content {
         Content {
-            buf: [0; 128],
+            buf: [0; 256],
             len: 0,
         }
     }
@@ -2571,6 +2852,15 @@ impl Conn {
             Some(i) => i,
             None => return p9::build_rread(&mut self.out_buf, tag, &[]),
         };
+        // F1 guard (net-4d): a read is ALREADY deferred on this fid (a second
+        // concurrent read on a shared fd -- legal for a multi-thread Proc, which
+        // the kernel client multiplexes by tag). Do NOT clobber the held tag --
+        // answer the new read with an empty Rread; the first read stays deferred
+        // and is delivered by poll_dns when the query lands. (Preserves I-9: no
+        // held Rread is silently lost; the older read keeps its real answer.)
+        if self.queries[idx].deferred.is_some() {
+            return p9::build_rread(&mut self.out_buf, tag, &[]);
+        }
         // If a query is in flight, check whether it has resolved since the write.
         if let Some(h) = self.queries[idx].query {
             match net.dns_poll(h) {
@@ -2672,6 +2962,16 @@ impl Conn {
     /// to the floor so an in-flight DNS query completes promptly).
     pub fn has_pending_dns(&self) -> bool {
         self.queries.iter().any(|q| q.deferred.is_some())
+    }
+
+    /// Whether the cs/dns session for `fid` currently holds a deferred (in-flight)
+    /// read. h_write consults this to REJECT a re-write that would otherwise drop
+    /// the held tag (the F1 re-write facet, net-4d): a held read completes
+    /// normally instead of being silently superseded.
+    fn fid_has_deferred(&self, fid: u32) -> bool {
+        self.queries
+            .iter()
+            .any(|q| q.fid == fid && q.deferred.is_some())
     }
 
     /// Drop the cs/dns session for `fid` (on clunk / rewrite): cancels any
@@ -3323,6 +3623,16 @@ impl Conn {
             return self.err(tag, p9::E_PROTO);
         }
         if f.path == P_CS || f.path == P_DNS {
+            // F1 guard (net-4d): a re-write while a read is deferred on this fid
+            // would drop the held tag (query_begin -> query_drop discards the
+            // Query incl. its deferred marker). Reject it instead, so the
+            // deferred read completes normally (I-9: no held Rread is lost). The
+            // single-threaded normal flow (write -> read -> the read completes ->
+            // re-write) never trips this; only a concurrent thread2-write while
+            // thread1's read blocks does.
+            if self.fid_has_deferred(a.fid) {
+                return self.err(tag, p9::E_PROTO);
+            }
             // cs/dns are request/response files (net-4a/4b): the write IS the
             // query. Begin the resolution now (numeric/ndb fill the answer
             // synchronously; a name needing DNS starts a query the read defers

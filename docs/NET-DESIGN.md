@@ -803,8 +803,8 @@ named in §2.)
   userspace (the only new dependency is `socket-dns`); the kernel is byte-unchanged.
   Boot proof: `net-4b PROBE OK (dns 10.0.2.2 → 10.0.2.2; localhost ip → 127.0.0.1;
   aaaa → empty)` + the best-effort live `net-4b DNS live query OK` + 930/930 + SMP
-  gate clean. The deterministic in-guest E2E of the 9P deferred-read plumbing is
-  owed to net-4d (a loopback DNS responder). See `docs/reference/121-netd.md`.
+  gate clean. The deterministic in-guest E2E of the 9P deferred-read plumbing
+  landed at net-4d (a loopback DNS responder). See `docs/reference/121-netd.md`.
 - **net-4c: LANDED** — `/net/ipifc/0` (the interface-config tree) + `/net/ndb` (the
   live dynamic database) + the native `ipconfig` tool (§6). The DHCP lease folds
   into an `IfConfig` snapshot at bring-up (the dynamic path) and is surfaced
@@ -816,10 +816,21 @@ named in §2.)
   status/ndb selftest) + `net-4c PROBE OK (ipifc status addr=10.0.2.15 dhcp
   gw=10.0.2.2; ndb ip=10.0.2.15 dns; local addr; ctl rejects malformed)` + 930/930 +
   SMP gate clean. See `docs/reference/121-netd.md`.
-- **net-4d..net-8: not started.**
-  net-4d (the focused net-4 audit + close), net-5 (socket-compat pouch
-  boundary-line), net-6 (`dev9p.poll` + `net_poll.tla` — ABI), net-7 (TLS + SNTP +
-  `SYS_CLOCK_SETTIME` — ABI), net-8 (exit criteria + audit), per §17, sequenced
-  before the container runner (#70) per ROADMAP §2.2.
+- **net-4d: LANDED** — the focused net-4 audit + close (Opus-4.8-max prosecutor +
+  self-audit; **0 P0 / 0 P1 / 1 P2 / 3 P3, NOT dirty**, + a precautionary round-2 on
+  the deferred-reply fix, CLEAN). **F1 [P2]** closed a cs/dns held-`Rread` loss (a
+  2nd concurrent read / a re-write while a read is deferred could drop the held tag,
+  I-9) with two minimal guards. Three deterministic in-guest proofs landed:
+  `proto_selftest` (the cs/dns/ndb/mask parser battery — the OWED-since-net-2d
+  host-test coverage, in-guest), `dns_defer_guard_selftest` (the F1 regression), and
+  `dns_loopback_e2e` (the OWED net-4b deferred-read E2E — a mock DNS responder on an
+  isolated `127.0.0.1` stack). Pure userspace; the kernel is byte-unchanged. Boot
+  proof: `net-4d proto selftest PASS` + `net-4d dns defer-guard PASS` + `net-4d dns
+  loopback E2E PASS` + 930/930 + SMP gate clean. **The net-4 arc is COMPLETE.** See
+  `docs/reference/121-netd.md`.
+- **net-5..net-8: not started.**
+  net-5 (socket-compat pouch boundary-line), net-6 (`dev9p.poll` + `net_poll.tla` —
+  ABI), net-7 (TLS + SNTP + `SYS_CLOCK_SETTIME` — ABI), net-8 (exit criteria +
+  audit), per §17, sequenced before the container runner (#70) per ROADMAP §2.2.
 
 The thylacine is real. So is its network — and it is, of course, a filesystem.

@@ -727,6 +727,67 @@ rejected — a guaranteed no-op — so the live config stays intact). The combin
 proves the whole surface: the ctl logic (e2e), the read render through 9P (joey),
 and the write path through 9P (joey reject).
 
+## net-4d: the focused net-4 audit + the deferred-read guard + the loopback DNS E2E
+
+net-4d is the focused audit over the cumulative net-4 surface (net-4a `/net/cs` +
+ndb, net-4b `/net/dns` + cs→dns, net-4c `/net/ipifc` + `/net/ndb`) — one
+Opus-4.8-max prosecutor + a concurrent self-audit — and the close. It is pure
+userspace; the kernel is byte-unchanged.
+
+**Close: 0 P0 / 0 P1 / 1 P2 / 3 P3, NOT dirty** (then a precautionary round-2 on
+the fix — the deferred-reply lineage is the tree's most bug-prone family — CLEAN).
+The `get_query_result` single-completion (a double-poll of a freed slot panics →
+a whole-network DoS, I-5), the no-query-slot-leak across every abandonment path,
+the cs/dns/ndb/mask parsers' fail-closed bounds, the iface↔snapshot coherence, the
+single-threadedness, and the isolation all held (verified against the real smoltcp
+0.12 source).
+
+- **F1 [P2] — a held deferred cs/dns read tag could be lost (I-9).** `Query.deferred`
+  is a single `(tag, cap)` slot; a *second concurrent read* on one fid (legal for a
+  multi-thread Proc — the kernel dev9p client multiplexes by tag, so two `Tread`s on
+  one fid are both outstanding) overwrote it, and a *re-write while a read was
+  deferred* (`query_begin` → `query_drop`) dropped it — either way the first held
+  `Rread` was never delivered (the reader hangs until the Proc dies; no crash, no
+  cross-Proc effect, death-recoverable → P2, not P1). **Fixed with two minimal
+  guards** (not a wait/wake restructure): `query_read` returns an empty `Rread` for a
+  second read when one is already deferred (the first keeps its real answer); and
+  `h_write` rejects (`E_PROTO`) a re-write while `fid_has_deferred(fid)`. The
+  *bare-clunk-while-deferred* facet is mitigated on the trusted mount (the kernel
+  abandons via `Tflush` → `cancel_dns_flush`) and is a client protocol violation
+  otherwise — dispositioned consistently with the net-3 listen-clunk close.
+- **F2 [P3]** the `Content` buffer was `[u8; 128]` (the net-4c commit message wrongly
+  claimed 256); the worst-case status render is ~120 B (safe — `push` min-clamps, no
+  OOB) but tight → bumped to `[u8; 256]`.
+- **F3 [P3]** the shared dns socket's `queries` `Vec` is a bounded, reused
+  high-water (≤ `MAX_CONNS × MAX_FIDS`), not a leak → documented (caveats).
+- **SA-3 [P3, doc]** clarified the DHCP-renewal comment (the iface + `ifc` are both
+  pinned at bring-up → coherent; renewal re-application is the v1.x seam).
+
+Three new **deterministic in-guest proofs** (asserted PASS lines, the
+`loopback_e2e`/`ipifc_e2e` pattern):
+
+- `proto_selftest` — a battery over the pure `cs_parse`/`dns_parse`/`parse_mask`/
+  `mask_octets`/`ndb` parsers (valid + every malformed-rejects-closed case). This
+  is the parser COVERAGE the OWED-since-net-2d host-test module would give; netd is
+  a `no_std` + aarch64 **bin** crate (unlike the netdev **lib** that
+  `cargo test`s its pure `ring`), so the true host-test module needs a
+  bin → feature-gated refactor that would risk the green device build — carried as a
+  named seam, with the in-guest battery as the rigor floor.
+- `dns_defer_guard_selftest` — the F1 regression: a throwaway `Net` whose query
+  stays `Pending` (never polled) defers a read, then a second concurrent read must
+  not clobber the held tag (fails on the pre-fix code by construction).
+- `dns_loopback_e2e` — closes the net-4b OWED deferred-read E2E: an isolated
+  `127.0.0.1/8` stack whose resolver IS a mock DNS responder bound to `:53` (a udp
+  socket answering a fixed A query via `build_dns_response`), so the shared
+  `dns::Socket` resolves a name **in-guest, deterministically** through the real
+  `dns_query_start`→poll→`dns_poll` methods (the net-3d loopback analog).
+
+```
+netd: net-4d proto selftest PASS (cs/dns/ndb/mask parsers)
+netd: net-4d dns defer-guard PASS (no lost held-Rread on a 2nd read)
+netd: net-4d dns loopback E2E PASS (deferred resolve in-guest 127.0.0.1)
+```
+
 ## Data structures
 
 | Type | Role |
@@ -744,7 +805,7 @@ and the write path through 9P (joey reject).
 | `enum DnsProbe { Ok{resp_len,ancount}, NoResponse, MintFailed }` | the net-3b best-effort UDP-round-trip demo outcome (logged, never a boot gate) |
 | `enum PingProbe { Ok{reply_len}, NoResponse, MintFailed }` | the net-3c best-effort ICMP-ping demo outcome (logged, never a boot gate) |
 | `server::LoopbackResult { icmp, udp, tcp }` | the net-3d in-guest loopback E2E outcome (each leg deterministic, ASSERTED via the PASS/FAIL boot line) |
-| `server::Query { fid, kind, query, resp, cursor, deferred }` | a per-fid `/net/cs` + `/net/dns` request/response session (net-4a/4b); `kind` (`Cs{clone_tcp,port}` / `Dns`) selects the answer format; `query` is the in-flight `dns::QueryHandle` (nulled the instant it resolves — the single-completion discipline); `resp`/`cursor` drain the ready answer; `deferred = (tag, cap)` holds a blocked read; dropped (cancelling any in-flight query) on clunk/teardown/Tversion |
+| `server::Query { fid, kind, query, resp, cursor, deferred }` | a per-fid `/net/cs` + `/net/dns` request/response session (net-4a/4b); `kind` (`Cs{clone_tcp,port}` / `Dns`) selects the answer format; `query` is the in-flight `dns::QueryHandle` (nulled the instant it resolves — the single-completion discipline); `resp`/`cursor` drain the ready answer; `deferred = (tag, cap)` holds a blocked read — a *single* slot, so net-4d's F1 guards (a 2nd concurrent read gets an empty `Rread`; a re-write while deferred is `E_PROTO`) keep the held tag from being clobbered/dropped (I-9); dropped (cancelling any in-flight query) on clunk/teardown/Tversion |
 | `enum server::QueryKind { Cs{clone_tcp,port}, Dns }` | how a resolved address is formatted: `Cs` → `<clone-file> <ip>!<port>\n`; `Dns` → `<ip>\n` |
 | `enum DnsPoll { Pending, Resolved([u8;4]), Failed }` | the state of a started DNS query (net-4b); `Resolved`/`Failed` free the smoltcp slot |
 | `enum DnsProbeResult { Ok([u8;4]), NoResponse, NoServer }` | the net-4b best-effort live-query demo outcome (logged, never a boot gate) |
@@ -917,6 +978,20 @@ and the write path through 9P (joey reject).
   addr=10.0.2.15 dhcp gw=10.0.2.2; ndb ip=10.0.2.15 dns; local addr; ctl rejects
   malformed)` + 930/930 + boot OK + 0 EXTINCTION; SMP gate clean. The focused net-4
   audit is net-4d.
+- **net-4d (LANDED)**: the focused net-4 audit + close — **0 P0 / 0 P1 / 1 P2 /
+  3 P3, NOT dirty** (+ a precautionary round-2 on the deferred-reply fix, CLEAN).
+  **F1 [P2]** closed the cs/dns held-`Rread` loss (a 2nd concurrent read / a re-write
+  while deferred could drop the held tag, I-9) with two minimal guards (`query_read`
+  empty-reply + `h_write` `E_PROTO` reject); **F2 [P3]** bumped `Content` 128→256;
+  **F3 [P3]** documented the dns `queries` `Vec` high-water; **SA-3 [P3]** clarified
+  the DHCP-renewal comment. Added three deterministic in-guest proofs:
+  `proto_selftest` (the cs/dns/ndb/mask parser battery — the OWED-since-net-2d
+  host-test coverage, delivered in-guest), `dns_defer_guard_selftest` (the F1
+  regression), and `dns_loopback_e2e` (the OWED net-4b deferred-read E2E — a mock
+  DNS responder on an isolated `127.0.0.1` stack). The kernel is byte-unchanged.
+  Boot proof: `net-4d proto selftest PASS` + `net-4d dns defer-guard PASS` + `net-4d
+  dns loopback E2E PASS` + 930/930 + boot OK + 0 EXTINCTION; SMP gate clean. **The
+  net-4 arc is COMPLETE.**
 
 ## Known caveats / seams
 
@@ -974,14 +1049,27 @@ and the write path through 9P (joey reject).
   (multi-NIC minting) at v1.0. `add`/`remove` cover the address axis; `bind ether
   <dev>` / `unbind`-the-device are rejected honestly (`unbind` is accepted as the
   `remove` alias). Multi-interface + `bind ether` land with the multi-NIC seam.
-- **The 9P deferred-resolve E2E is owed to net-4d** (net-4b): the synchronous
-  `/net/dns` paths are asserted (joey) and the Net-level dns query lifecycle is
-  proven live (best-effort), but the **9P deferred-read plumbing** (`query_read`
-  defer → `poll_dns` → the held `Rread`) has no deterministic in-guest test yet — a
-  real 9P deferred resolve needs an in-guest DNS responder on the live stack
-  (host-coupled otherwise). The net-4d loopback DNS responder (the net-3d loopback
-  analog) closes it. The plumbing is structurally identical to the net-3d-audited
-  `PendingAccept`→`complete_accept` and is self-audited + net-4d-prosecuted.
+- **The 9P deferred-resolve E2E landed at net-4d** (was owed by net-4b): the
+  synchronous `/net/dns` paths are asserted (joey) and the Net-level dns query
+  lifecycle is proven live (best-effort); net-4d's `dns_loopback_e2e` adds the
+  deterministic in-guest proof — a mock DNS responder bound to `127.0.0.1:53` on an
+  isolated stack (the net-3d loopback analog) answers a fixed A query, so the shared
+  `dns::Socket` resolves a name in-guest through the real `dns_query_start`→poll→
+  `dns_poll` methods.
+- **A bare `Tclunk` of a deferred cs/dns read drops the held tag** (net-4d F1
+  facet 3): the two F1 guards close the *second-concurrent-read* + *re-write-while-
+  deferred* facets, but a hostile client that clunks a fid mid-deferred-read without
+  a prior `Tflush` abandons that read's tag (an I-9 loss for that client only).
+  Mitigated on the trusted kernel mount (it abandons a blocked op via `Tflush` →
+  `cancel_dns_flush`, never a bare clunk), and a bare clunk-with-outstanding-read is
+  a client protocol violation — dispositioned consistently with the net-3 close
+  (clunking a blocked `listen` fid likewise drops the held `Rlopen`).
+- **The shared dns socket's `queries` Vec is a sticky high-water** (net-4d F3): the
+  smoltcp `dns::Socket` grows its query-slot backing `Vec` when every slot is
+  in-flight and never shrinks it; the high-water is bounded by total concurrent
+  in-flight queries (≤ `MAX_CONNS × MAX_FIDS`) and the slots are *reused* (completed
+  slots become free), so it is not a leak — just a non-trivial sticky footprint a
+  v1.x per-driver memory cap (the #65 resource-floor analog) would bound.
 - **`net!host!service` maps to tcp only** (net-4a): the Plan 9 `net!` (any-proto)
   prefix emits the tcp clone line at v1.0; the tcp+udp fan-out (cs returning both a
   tcp and a udp line for a service registered on both) is a v1.x refinement.
