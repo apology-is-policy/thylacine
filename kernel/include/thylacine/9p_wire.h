@@ -188,6 +188,15 @@ struct p9_qid {
 #define P9_QTSYMLINK    0x02u
 #define P9_QTAUTH       0x08u
 #define P9_QTTMP        0x04u         // O_TMPFILE-shape
+// Thylacine extension (net-6b-2b; NET-DESIGN section 12.2): a "pollable" file --
+// one whose server (netd's per-connection `ready` file) serves a non-consuming
+// readiness probe (a Tread whose offset is the poll event-mask, deferred until
+// satisfiable). 0x01 is unused in 9P2000.L. dev9p.poll probes ONLY a file whose
+// cached qid.type carries this bit; an unmarked file is POSIX always-ready (a
+// regular file is never read by poll()). Additive; no server that omits it is
+// affected. dev9p_poll fails SAFE (unmarked -> always-ready, never an unsound
+// probe).
+#define P9_QTPOLL       0x01u
 
 // =============================================================================
 // Primitive packers — write a value at `out`, return bytes written, or

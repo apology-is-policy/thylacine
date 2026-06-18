@@ -58,6 +58,12 @@ static struct dev9p_priv *priv_of(struct Spoor *c) {
     return p;
 }
 
+// Exposed for kernel/dev9p_poll.c (the `.poll` bridge needs p->poll + p->client +
+// p->fid). Same dc + magic gate as priv_of.
+struct dev9p_priv *dev9p_priv_of(struct Spoor *c) {
+    return priv_of(c);
+}
+
 // Map a 9P qid type to a Plan 9 QT* bit. The wire constants
 // (P9_QT*) and the in-kernel constants (QT*) happen to share the
 // same numeric values for the bits we care about (DIR=0x80, FILE=0x00,
@@ -75,6 +81,10 @@ static u8 qid_type_p9_to_kernel(u8 p9) {
     if (p9 & P9_QTDIR)     out |= QTDIR;
     if (p9 & P9_QTAUTH)    out |= QTAUTH;
     if (p9 & P9_QTTMP)     out |= QTTMP;
+    // net-6b-2b: carry the readiness marker through so dev9p_poll's QTPOLL gate
+    // (on the cached qid) sees it. A server that never sets it -> dev9p_poll is
+    // POSIX always-ready (fail-safe). P9_QTPOLL == QTPOLL == 0x01.
+    if (p9 & P9_QTPOLL)    out |= QTPOLL;
     return out;
 }
 
@@ -418,6 +428,12 @@ static void dev9p_close(struct Spoor *c) {
     struct dev9p_priv *p = priv_of(c);
     if (!p) return;
 
+    // net-6b-2b: free the readiness poll-state (if this was a netd `ready` file).
+    // Safe here: dev9p_close runs only at the Spoor's LAST ref, and an outstanding
+    // readiness op pins the Spoor (a ref) while a registered poller holds the
+    // handle's obj ref -- so at close there is neither a live op nor a poller.
+    dev9p_poll_priv_release(p);
+
     // F2 (F236 close) discipline — order matters:
     //
     //   1. fid_owned: clunk the walked-fid via the client BEFORE the
@@ -665,6 +681,7 @@ struct Dev dev9p = {
     .bread    = dev9p_bread,
     .write    = dev9p_write,
     .bwrite   = dev9p_bwrite,
+    .poll     = dev9p_poll,    // net-6b-2b: readiness bridge (QTPOLL files only)
     .fsync    = dev9p_fsync,
     .readdir  = dev9p_readdir,
     .rename   = dev9p_rename,

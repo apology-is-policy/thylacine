@@ -456,6 +456,10 @@ void boot_main(void) {
     // (codec / session / transport / client) needs no init — each
     // p9_client is caller-allocated and initialized per-mount.
     dev9p_init();
+    // net-6b-2b: the dev9p.poll readiness registry + lock + kthread rendez. Just
+    // initializes state here; the poll-pump kthread is spawned later (after
+    // sched + kproc are up, alongside console_mgr).
+    dev9p_poll_init();
 
     // P5-pipe: register devpipe + allocate SLUB caches for the pipe
     // ring + endpoint structs. After dev9p_init for grouping with the
@@ -665,6 +669,15 @@ void boot_main(void) {
         struct Thread *console_mgr = thread_create(kproc(), console_mgr_main);
         if (!console_mgr) extinction("boot_main: console_mgr alloc failed");
         ready(console_mgr);
+    }
+    // net-6b-2b: the global dev9p.poll-pump kthread. Drives the 9P elected reader
+    // for outstanding readiness probes (a poll() caller parks, so nothing else
+    // pumps the reader) + walks the poll hook lists in process context. Parked
+    // until the first /net poll submits a probe; no cost when nothing polls.
+    {
+        struct Thread *poll_pump = thread_create(kproc(), dev9p_poll_pump_main);
+        if (!poll_pump) extinction("boot_main: dev9p_poll_pump alloc failed");
+        ready(poll_pump);
     }
     uart_puts("  cons:  UART RX live (INTID ");
     uart_putdec((u64)UART_INTID_PL011);

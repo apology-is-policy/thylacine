@@ -1184,15 +1184,17 @@ installs the hook + samples but never ensures a probe).
 | `net_poll_liveness.cfg`         | `Spec_Live`, all FALSE   | `PollerEventuallyServed` | clean | 10 |
 | `net_poll_buggy_lost_ready.cfg` | `BUGGY_LOST_READY=TRUE`  | `NoMissedNetPoll` | violation (depth 4) | 6 |
 
-Spec action ↔ impl mapping: **filled at net-6b-2** — the intended map is
-the `dev9p_poll` vtable impl (install the hook + ensure the probe outstanding +
-sample the cached revents, one fid-poll-lock step) = `PollerRegister`;
-`kernel/9p_client.c::demux_frame_locked` firing the readiness op's `on_complete`
-(record the bitmap + set the relay-pending flag under `c->lock`) = `NetdReplyDemux`;
-the poll-pump kthread's post-pump `poll_waiter_list_wake` (process context,
+Spec action ↔ impl mapping (filled at net-6b-2b, `kernel/dev9p_poll.c`):
+`kernel/dev9p_poll.c::dev9p_poll` (register the hook on the Spoor's poll-state +
+`dev9p_poll_submit_locked` ensures a non-terminal readiness probe is outstanding +
+sample `ps->cached_revents`, one `g_dev9p_poll_lock` step) = `PollerRegister`;
+`kernel/dev9p_poll.c::dev9p_poll_complete` (fired by `kernel/9p_client.c::demux_frame_locked`
+under `c->lock`; record the bitmap into `ps->cached_revents` + set the op terminal,
+atomics only) = `NetdReplyDemux`; the poll-pump kthread's
+(`dev9p_poll_service_once`) post-pump `poll_waiter_list_wake` (process context,
 `c->lock` released) = `KthreadWalk`; netd serving the `ready` file's deferred
-reply = the `SocketReady`→reply edge; `sys_poll_for_proc`'s evaluate/sleep =
-`PollerCommit`. The kthread's own go-to-sleep register-then-observe is
+reply = the `SocketReady`→reply edge; `kernel/poll.c::sys_poll_for_proc`'s
+evaluate/sleep = `PollerCommit`. The kthread's own go-to-sleep register-then-observe is
 `cons_poll.tla::MgrSleep` (the same `sleep(&rendez, cond)` contract). The
 `BUGGY_LOST_READY` counterexample is the durable regression for the
 probe-then-observe order.

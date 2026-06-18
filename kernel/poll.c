@@ -119,6 +119,20 @@ void poll_waiter_list_unregister(struct poll_waiter *pw) {
     extinction("pw_unregister: pw->list set but pw not on list (corruption)");
 }
 
+// Whether the list currently has no registered hooks. Under the list lock (a
+// momentary snapshot). The dev9p_poll GC (net-6b-2b) calls this while holding
+// g_dev9p_poll_lock to decide, atomically with the unlink, whether an outstanding
+// readiness op is stranded (no poller cares) -- so the check + the unlink + the
+// ps->op clear are one critical section vs a concurrent reuse that registers its
+// hook BEFORE taking g_dev9p_poll_lock.
+bool poll_waiter_list_empty(struct poll_waiter_list *l) {
+    if (!l) return true;
+    spin_lock(&l->lock);
+    bool empty = (l->head == NULL);
+    spin_unlock(&l->lock);
+    return empty;
+}
+
 void poll_waiter_list_wake(struct poll_waiter_list *l) {
     if (!l) return;
 

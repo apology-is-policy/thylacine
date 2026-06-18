@@ -898,6 +898,35 @@ The `ready_e2e` selftest asserts `check_ready` deterministically over an isolate
 held Rread) lands at net-6b-2b (the kernel ABI) + net-6b-3 (the pouch
 translation).
 
+## net-6b (2b): the kernel `dev9p.poll` consumer of the `ready` file
+
+The kernel half of the readiness bridge is **`kernel/dev9p_poll.c`** (the
+audit-bearing surface; the full design is NET-DESIGN §12.2 + that file's header +
+the ARCH §25.4 / CLAUDE.md audit-trigger row). From netd's side, three contracts
+matter:
+
+- **The `ready` file carries qid.type `P9_QTPOLL` (`0x01`).** `qid_of` sets it on
+  every `FK_READY` qid (walk / lopen / getattr), so the kernel's cached qid has
+  the bit. `dev9p.poll` probes **only** a Spoor whose qid carries `QTPOLL`; a
+  regular dev9p file (Stratum, corvus) is POSIX always-ready and never probed
+  (the fail-safe distinguisher — netd is the only server that sets the bit).
+- **The probe is a `Tread` whose offset is the poll event-mask, count 4.** This
+  is exactly the net-6b-2a `ready`-file read: `check_ready(mask)` replies the
+  satisfied `revents` (u32 LE) immediately, or **DEFERS** (parks a `PendingReady`)
+  until the socket is ready for that mask. The kernel issues it as an *async* op
+  driven by a poll-pump kthread (a `poll()` caller parks, so nothing else pumps
+  the shared `/net` 9P reader); the held Rread wakes the parked poller.
+- **A re-mask abandons via `Tflush`.** When a broader poller widens the mask, the
+  kernel `Tflush`es the in-flight readiness read (the net-3a/4b `cancel_dns_flush`
+  / `h_flush` path) and resubmits the union — so netd's `PendingReady` for the
+  narrower mask is cancelled, never stranded. A timed-out poll likewise `Tflush`es
+  its stranded readiness read (the GC), which netd's `h_flush` cancels.
+
+The deterministic proof is the joey `net-6b` boot probe: a bound UDP socket is
+polled `POLLOUT` (deterministically ready → the full submit → kthread-pump →
+`check_ready(POLLOUT)` → completion → wake path) then `POLLIN` (no datagram →
+netd defers → the poll parks then times out → the kthread GCs the stranded read).
+
 ## Data structures
 
 | Type | Role |

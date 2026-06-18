@@ -92,6 +92,7 @@ set(KERNEL_SRCS
     9p_transport.c
     9p_client.c
     dev9p.c
+    dev9p_poll.c
     9p_attach.c
     9p_spoor_transport.c
     9p_srvconn_transport.c

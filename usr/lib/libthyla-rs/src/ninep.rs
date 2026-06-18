@@ -77,6 +77,11 @@ pub const P9_RFLUSH: u8   = 109;
 // one file, no symlinks/temp).
 pub const P9_QTDIR: u8  = 0x80;
 pub const P9_QTFILE: u8 = 0x00;
+/// Thylacine 9P extension (net-6b-2b; NET-DESIGN section 12.2): a "pollable" file
+/// -- one whose server (netd's per-connection `ready` file) serves a non-consuming
+/// readiness probe. The kernel dev9p.poll probes ONLY a file whose qid.type carries
+/// this bit; an unmarked file is POSIX always-ready. 0x01 is unused in 9P2000.L.
+pub const P9_QTPOLL: u8 = 0x01;
 
 // Linux dirent type byte (the `d_type` of a Treaddir entry). The kernel
 // dev9p client passes this through verbatim to the userspace readdir

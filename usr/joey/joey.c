@@ -3679,6 +3679,76 @@ int main(void) {
                         t_putstr("joey: net-6a-3 PROBE OK (native net::TcpListener bind/"
                                  "announce/local + Loom async /net read)\n");
                     }
+
+                    // === net-6b: the dev9p.poll readiness bridge (the kernel half) ===
+                    // The E2E proof of the kernel dev9p_poll path. Clone a UDP
+                    // connection, connect (bind a local port -> sendable), open its
+                    // `ready` file (qid.type QTPOLL -> the kernel dev9p.poll PROBES
+                    // it, not always-ready) and SYS_POLL it. POLLOUT is
+                    // deterministically ready (a bound UDP socket is always sendable;
+                    // no peer) -> the full path runs: dev9p.poll submits the readiness
+                    // Tread -> the poll-pump kthread drives the 9P reader -> netd's
+                    // check_ready(POLLOUT) replies immediately -> the completion wakes
+                    // the parked poller. POLLIN is deterministically NOT ready (no
+                    // datagram) -> netd defers, the poll TIMES OUT (proving the park +
+                    // no-lost-wakeup + the stranded-op GC, never a hang). LAST net
+                    // probe: a poll leaves an op pending the kthread's async reap (the
+                    // ready Spoor's pin defers its fid clunk), so the connection slot
+                    // frees slightly later -- harmless here (nothing after asserts a
+                    // slot; the slot number is opaque in real use). Slot-agnostic.
+                    {
+                        struct jpollfd { int fd; short events; short revents; };
+                        const short P_IN = 0x001, P_OUT = 0x004;
+                        long pa = t_open(T_WALK_OPEN_FROM_ROOT, "/net/udp/clone",
+                                         14, T_ORDWR);
+                        char nb[8];
+                        long pn = (pa >= 0) ? t_read(pa, nb, sizeof(nb) - 1) : -1;
+                        if (pa < 0 || pn < 1 || pn > 2) {
+                            t_putstr("joey: net-6b PROBE udp clone FAILED\n");
+                            return 1;
+                        }
+                        static const char pconn[] = "connect 10.0.2.2!9";
+                        if (t_write(pa, pconn, sizeof(pconn) - 1) != (long)(sizeof(pconn) - 1)) {
+                            t_putstr("joey: net-6b PROBE udp connect FAILED\n");
+                            return 1;
+                        }
+                        // Build "/net/udp/<N>/ready" (N = the just-minted slot).
+                        char rpath[24];
+                        int rl = 0;
+                        const char *pfx = "/net/udp/";
+                        for (int i = 0; pfx[i]; i++) rpath[rl++] = pfx[i];
+                        for (long i = 0; i < pn; i++) rpath[rl++] = nb[i];
+                        const char *sfx = "/ready";
+                        for (int i = 0; sfx[i]; i++) rpath[rl++] = sfx[i];
+                        rpath[rl] = '\0';
+                        long rf = t_open(T_WALK_OPEN_FROM_ROOT, rpath,
+                                         (unsigned long)rl, T_OREAD);
+                        if (rf < 0) {
+                            t_putstr("joey: net-6b PROBE open ready FAILED\n");
+                            return 1;
+                        }
+                        // (a) POLLOUT: a bound UDP socket is sendable -> the probe
+                        //     completes POLLOUT (3s slack; it returns in ms).
+                        struct jpollfd pf = { (int)rf, P_OUT, 0 };
+                        long pr = t_poll(&pf, 1, 3000);
+                        if (pr != 1 || (pf.revents & P_OUT) == 0) {
+                            t_putstr("joey: net-6b PROBE poll(POLLOUT) not ready FAILED\n");
+                            return 1;
+                        }
+                        // (b) POLLIN: no datagram -> netd defers -> the poll parks then
+                        //     TIMES OUT (returns 0). Proves the park + no-lost-wakeup +
+                        //     the stranded-op GC, never a hang.
+                        struct jpollfd pf2 = { (int)rf, P_IN, 0 };
+                        long pr2 = t_poll(&pf2, 1, 150);
+                        if (pr2 != 0) {
+                            t_putstr("joey: net-6b PROBE poll(POLLIN) should time out FAILED\n");
+                            return 1;
+                        }
+                        (void)t_close(rf);
+                        (void)t_close(pa);
+                        t_putstr("joey: net-6b PROBE OK (dev9p.poll: udp ready "
+                                 "POLLOUT-ready + POLLIN-times-out, no hang)\n");
+                    }
                 } else {
                     t_putstr("joey: net-2c-1 /srv/net absent -- /net not mounted (netd down?)\n");
                 }

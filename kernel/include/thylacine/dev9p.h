@@ -54,6 +54,8 @@ struct p9_attached;
 struct p9_spoor_transport;
 struct Spoor;
 struct Dev;
+struct poll_waiter;
+struct dev9p_poll_state;   // net-6b-2b: lazily-allocated per-Spoor poll state (dev9p_poll.c)
 
 // Device character for dev9p — '9'. Distinct from all kernel-Dev
 // characters (-, c, 0, z, r, p, C, m).
@@ -92,6 +94,11 @@ struct dev9p_priv {
     // derived from a SYS_ATTACH_9P session (root + walks). Each non-NULL
     // owner contributes one p9_attached_ref; dev9p_close drops it.
     struct p9_attached       *attached_owner;
+    // net-6b-2b: lazily-allocated poll state for a QTPOLL (netd `ready`) Spoor;
+    // NULL for every regular dev9p file (the common path). Allocated by dev9p_poll
+    // on the first poll of a readiness file; freed by dev9p_close. Owned by THIS
+    // priv (not shared across walks -- each walked Spoor gets its own priv).
+    struct dev9p_poll_state  *poll;
 };
 
 #define DEV9P_PRIV_MAGIC 0x44395050u   // "D9PP" little-endian
@@ -125,5 +132,39 @@ struct Spoor *dev9p_attach_client(struct p9_client *client, u32 root_fid);
 // The returned client pointer is valid only while the caller holds a ref on `c`
 // (a live dev9p Spoor implies a live client -- dev9p's lifecycle invariant).
 int dev9p_client_fid(struct Spoor *c, struct p9_client **out_client, u32 *out_fid);
+
+// Resolve a dev9p-backed Spoor to its `struct dev9p_priv *` (dc + magic gated;
+// NULL if `c` is not a live dev9p Spoor). Exposed for kernel/dev9p_poll.c (the
+// `.poll` bridge reads p->poll + p->client + p->fid) + the dev9p_poll tests.
+struct dev9p_priv *dev9p_priv_of(struct Spoor *c);
+
+// =============================================================================
+// dev9p.poll -- the readiness bridge (net-6b-2b; NET-DESIGN section 12.2,
+// specs/net_poll.tla). Defined in kernel/dev9p_poll.c.
+// =============================================================================
+
+// The Dev `.poll` slot. For a netd `ready` file (cached qid.type carries QTPOLL)
+// it registers `pw` on the Spoor's poll-state hook list + ensures an outstanding
+// async readiness Tread (offset = the event mask) is in flight, then samples the
+// last-known revents; for any other (regular) dev9p file it is POSIX always-ready
+// (`events & POLL_REQUESTABLE`, the prior NULL-slot behavior). Returns the ready
+// `revents` subset (>= 0). `pw == NULL` is the sample-only re-scan (no register).
+short dev9p_poll(struct Spoor *c, short events, struct poll_waiter *pw);
+
+// Initialize the global poll-pump registry + lock + kthread rendez. Idempotent.
+// Call once at boot, before spawning the pump kthread.
+void dev9p_poll_init(void);
+
+// The global poll-pump kthread entry (the cons_poll console_mgr + Loom-4 SQPOLL
+// analog). Spawned once at boot via thread_create(kproc(), dev9p_poll_pump_main).
+// Drives the 9P elected reader for outstanding readiness ops (borrowing the
+// client from a live op's pin), walks the poll-state hook lists on completion (in
+// process context), reaps terminal ops, and garbage-collects stranded ops.
+void dev9p_poll_pump_main(void);
+
+// Release a priv's poll state at dev9p_close (frees p->poll if allocated). Safe
+// because the Spoor's last ref cannot drop while an op holds a pin on it, so at
+// close there is no outstanding op + no registered poller.
+void dev9p_poll_priv_release(struct dev9p_priv *p);
 
 #endif  // THYLACINE_DEV9P_H

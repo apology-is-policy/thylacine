@@ -16,6 +16,7 @@
 #include <thylacine/9p_wire.h>
 #include <thylacine/dev.h>
 #include <thylacine/dev9p.h>
+#include <thylacine/poll.h>
 #include <thylacine/spoor.h>
 #include <thylacine/syscall.h>
 #include <thylacine/types.h>
@@ -36,6 +37,7 @@ void test_dev9p_create_file(void);
 void test_dev9p_create_dir(void);
 void test_dev9p_fsync(void);
 void test_dev9p_readdir(void);
+void test_dev9p_poll_regular_file_always_ready(void);
 
 // File-scope buffers — client is ~12 KiB, won't fit on the 16 KiB test
 // thread stack alongside a few smaller locals.
@@ -661,5 +663,29 @@ void test_dev9p_perm_enforced_deny_allow(void) {
     TEST_EXPECT_EQ(perm_check(&other, &st, PERM_W), -1, "dev9p other W denied");
     TEST_EXPECT_EQ(perm_check(&sys,   &st, PERM_W), -1,
                    "dev9p PRINCIPAL_SYSTEM W denied (I-22: no identity bypass)");
+    teardown(root);
+}
+
+// net-6b-2b: the dev9p.poll QTPOLL gate -- the soundness-critical distinguisher.
+// A regular dev9p file (no QTPOLL on its cached qid; the root is QTDIR) is POSIX
+// always-ready and must NEVER be probed: dev9p_poll returns events & requestable
+// WITHOUT allocating a poll-state or submitting a readiness Tread. (The QTPOLL
+// PROBE path -- submit -> poll-pump kthread -> netd reply -> wake -- is exercised
+// end-to-end by the joey net-6b in-guest probe against netd's real `ready` file;
+// a unit test would drive the live poll-pump kthread against this loopback client.)
+void test_dev9p_poll_regular_file_always_ready(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    // root->qid.type is QTDIR -- no QTPOLL. The gate -> POSIX always-ready.
+    short rv = dev9p_poll(root, (short)(POLLIN | POLLOUT), NULL);
+    TEST_EXPECT_EQ((u64)(rv & (POLLIN | POLLOUT)), (u64)(POLLIN | POLLOUT),
+                   "non-QTPOLL dev9p file is always-ready (POLLIN|POLLOUT)");
+    struct dev9p_priv *p = dev9p_priv_of(root);
+    TEST_ASSERT(p != NULL && p->poll == NULL,
+                "no poll-state allocated for a regular (non-QTPOLL) file");
+    // priv_release on a NULL-poll priv is a safe no-op (idempotent with the
+    // dev9p_close call teardown() triggers).
+    dev9p_poll_priv_release(p);
+    TEST_ASSERT(p->poll == NULL, "priv_release on NULL poll is a no-op");
     teardown(root);
 }

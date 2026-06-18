@@ -64,6 +64,8 @@ _Static_assert(sizeof(struct Qid) == 16,
 #define QTEXCL    0x20      // exclusive use (only one open allowed)
 #define QTAUTH    0x08      // authentication file
 #define QTTMP     0x04      // not-backed-up temporary file
+#define QTPOLL    0x01      // Thylacine ext (net-6b-2b): pollable file -- dev9p.poll
+                            // probes it (a netd `ready` file); P9_QTPOLL on the wire
 #define QTFILE    0x00      // plain file
 
 // Spoor flag bits.

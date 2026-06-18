@@ -3924,12 +3924,21 @@ impl Conn {
     }
 
     fn qid_of(&self, net: &Net, path: u64) -> p9::Qid {
+        // net-6b-2b: mark the per-connection `ready` file QTPOLL so the kernel
+        // dev9p.poll probes it (a regular file is POSIX always-ready; only a
+        // readiness file is probed). This is the central qid builder -- h_walk
+        // (Rwalk qids), h_lopen (non-clone Rlopen qid), and h_getattr all route
+        // through it, so the kernel's CACHED qid (set on walk + open) carries the
+        // bit. P9_QTPOLL == 0x01 (additive; unmarked files unaffected).
+        let kind = if net.is_dir(path) {
+            p9::P9_QTDIR
+        } else if is_conn(path) && conn_filekind(path) == FK_READY {
+            p9::P9_QTFILE | p9::P9_QTPOLL
+        } else {
+            p9::P9_QTFILE
+        };
         p9::Qid {
-            kind: if net.is_dir(path) {
-                p9::P9_QTDIR
-            } else {
-                p9::P9_QTFILE
-            },
+            kind,
             version: 0,
             path,
         }

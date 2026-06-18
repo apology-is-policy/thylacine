@@ -246,6 +246,12 @@ void poll_waiter_list_unregister(struct poll_waiter *pw);
 // Extincts on a corrupted `pw->magic` mid-walk (UAF on a stale hook).
 void poll_waiter_list_wake(struct poll_waiter_list *l);
 
+// Whether `l` has no registered hooks (a momentary snapshot under l->lock). Used
+// by the dev9p_poll GC (net-6b-2b) to detect a stranded readiness op (no poller
+// cares) while holding g_dev9p_poll_lock -- so the check is atomic with the
+// op unlink vs a concurrent poller that registers its hook before reusing the op.
+bool poll_waiter_list_empty(struct poll_waiter_list *l);
+
 // =============================================================================
 // The SYS_POLL testable core. The user-VA wrapper sys_poll_handler
 // lives in kernel/syscall.c.
