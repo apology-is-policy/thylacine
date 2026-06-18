@@ -458,6 +458,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "net-echo"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
 name = "netd"
 version = "0.1.0"
 dependencies = [

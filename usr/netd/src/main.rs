@@ -393,6 +393,19 @@ impl Driver for NetD {
             say!("netd: net-6a recv-blocking E2E FAIL ({})", rb);
         }
 
+        // net-6a-3: the DETERMINISTIC in-guest >=2-concurrent echo SERVER-LOGIC
+        // self-test -- announce one listener, accept TWO concurrent clients (the
+        // real poll_accepts/accept_swap), echo each client's payload, and verify
+        // each client reads back its OWN bytes. The server-side half of what the
+        // native net::TcpListener echo server drives. No host coupling -> ASSERTED.
+        if server::echo_e2e(base) {
+            say!(
+                "netd: net-6a-3 echo E2E PASS (2 concurrent accept + bidirectional echo, in-guest)"
+            );
+        } else {
+            say!("netd: net-6a-3 echo E2E FAIL");
+        }
+
         // net-4c: the DETERMINISTIC in-guest ipifc self-test -- exercises the
         // /net/ipifc/0/ctl add/remove verbs + the status/local/ndb renders on a
         // throwaway Net (never the live config). No host coupling -> ASSERTED.

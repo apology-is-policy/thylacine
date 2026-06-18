@@ -346,10 +346,10 @@ struct PendingAccept {
 /// reading a shared fd) are FIFO-delivered. Bounded by MAX_FIDS per connection.
 #[derive(Copy, Clone)]
 struct PendingRead {
-    fid: u32,   // the fid the read is on (cancelled on its clunk)
+    fid: u32,    // the fid the read is on (cancelled on its clunk)
     slot_n: u32, // the connection slot to recv from when ready
-    tag: u16,   // the held Tread tag (cancelled by a Tflush on it)
-    cap: usize, // the negotiated max bytes to return
+    tag: u16,    // the held Tread tag (cancelled by a Tflush on it)
+    cap: usize,  // the negotiated max bytes to return
 }
 
 /// The result of a non-blocking dequeue from a connection's rx (net-6a). The
@@ -1916,6 +1916,154 @@ pub fn loopback_e2e(base: Instant) -> LoopbackResult {
         udp: lo_udp_roundtrip(&mut lo, &mut device),
         tcp: lo_tcp_accept(&mut lo, &mut device),
     }
+}
+
+/// net-6a-3: a DETERMINISTIC in-guest E2E of the >=2-concurrent TCP echo SERVER
+/// LOGIC -- the accept + bidirectional data path netd serves, which the native
+/// `net::TcpListener` echo server drives. Over an ISOLATED 127.0.0.1 loopback
+/// stack (the net-3d pattern): announce ONE listener, connect TWO clients,
+/// accept BOTH (the real `poll_accepts`/`accept_swap`), then each server
+/// connection echoes its client's payload and each client verifies it gets its
+/// OWN bytes back -- so the proof is independent of the accept order / the
+/// client<->server pairing (each server connection is bound to exactly one
+/// client and echoes that client's bytes). No NIC, no host -> the caller
+/// ASSERTS it. The live cross-Proc native-API round-trip is net-8's (it owns the
+/// in-guest peer mechanism netd's NIC-only live stack lacks).
+pub fn echo_e2e(base: Instant) -> bool {
+    let mut device = Loopback::new(Medium::Ethernet);
+    let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress([
+        0x02, 0x00, 0x00, 0x00, 0x00, 0x03,
+    ])));
+    config.random_seed = LO_SEED;
+    let ts0 = SmolInstant::from_millis(base.elapsed().as_millis() as i64);
+    let mut iface = Interface::new(config, &mut device, ts0);
+    iface.update_ip_addrs(|a| {
+        let _ = a.push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8));
+    });
+    let mut lo = Net::new(iface, SocketSet::new(Vec::new()), base, IfConfig::empty());
+    echo_e2e_inner(&mut lo, &mut device)
+}
+
+fn echo_e2e_inner(lo: &mut Net, device: &mut Loopback) -> bool {
+    let port = LO_LOOPBACK_PORT;
+    let ln = match lo.tcp_clone() {
+        Some(n) => n,
+        None => return false,
+    };
+    let ep = IpListenEndpoint { addr: None, port };
+    if lo.ctl_announce(ln, ep).is_err() {
+        lo.free_orphan_mint(ln);
+        return false;
+    }
+    // netd's listener backlog is 1 (net-3d): a 2nd SYN arriving before the first
+    // is accepted + the listener re-armed is RST'd. So accept the two clients
+    // SEQUENTIALLY -- connect, accept (the listener re-arms), then the next
+    // connects. Both accepted connections then stay open simultaneously, which
+    // is exactly what ">=2 concurrent connections" means (accept() inherently
+    // returns one connection at a time). A backlog > 1 is a documented netd
+    // seam (net-8).
+    let (cn1, m1) = match lo_connect_accept(lo, device, ln, port) {
+        Some(p) => p,
+        None => {
+            lo.free_orphan_mint(ln);
+            return false;
+        }
+    };
+    let (cn2, m2) = match lo_connect_accept(lo, device, ln, port) {
+        Some(p) => p,
+        None => {
+            for n in [m1, cn1, ln] {
+                lo.free_orphan_mint(n);
+            }
+            return false;
+        }
+    };
+
+    // Both connections are now concurrently ESTABLISHED. Each client sends a
+    // DISTINCT payload; each server echoes whatever it received; each client
+    // must read back exactly its OWN payload (so the proof is independent of the
+    // accept order / the client<->server pairing).
+    let p1: &[u8] = b"echo-payload-alpha";
+    let p2: &[u8] = b"echo-payload-bravo";
+    let mut got1 = [0u8; 64];
+    let mut got2 = [0u8; 64];
+    let verified = lo.data_send(cn1, p1) == p1.len()
+        && lo.data_send(cn2, p2) == p2.len()
+        && lo_echo_one(lo, device, m1)
+        && lo_echo_one(lo, device, m2)
+        && lo_recv_n(lo, device, cn1, p1.len(), &mut got1) == p1.len()
+        && lo_recv_n(lo, device, cn2, p2.len(), &mut got2) == p2.len()
+        && &got1[..p1.len()] == p1
+        && &got2[..p2.len()] == p2;
+
+    for n in [m1, m2, cn1, cn2, ln] {
+        lo.free_orphan_mint(n);
+    }
+    verified
+}
+
+/// Dial the loopback listener `ln` with a fresh client and drive until the
+/// inbound call is accepted (the real `poll_accepts`/`accept_swap`). Returns the
+/// `(client_n, accepted_server_n)` pair, or `None` (freeing the client) on
+/// failure. The listener re-arms after the accept, so a subsequent call accepts
+/// the next connection.
+fn lo_connect_accept(
+    lo: &mut Net,
+    device: &mut Loopback,
+    ln: u32,
+    port: u16,
+) -> Option<(u32, u32)> {
+    let cn = lo.tcp_clone()?;
+    if lo.tcp_connect(cn, [127, 0, 0, 1], port).is_err() {
+        lo.free_orphan_mint(cn);
+        return None;
+    }
+    lo.register_accept(0, 0, 0, ln);
+    let mut m: Option<u32> = None;
+    lo_drive(lo, device, |lo| {
+        for d in lo.poll_accepts() {
+            m = Some(d.new_n);
+        }
+        m.is_some()
+    });
+    match m {
+        Some(mm) => Some((cn, mm)),
+        None => {
+            lo.free_orphan_mint(cn);
+            None
+        }
+    }
+}
+
+/// Read whatever a just-accepted server connection received and write it
+/// straight back (the echo). Bounded by the loopback drive; the small loopback
+/// payload arrives in one segment.
+fn lo_echo_one(lo: &mut Net, device: &mut Loopback, m: u32) -> bool {
+    let mut buf = [0u8; 64];
+    let mut got = 0usize;
+    let ok = lo_drive(lo, device, |lo| {
+        let k = lo.data_recv(m, &mut buf);
+        if k > 0 {
+            got = k;
+            true
+        } else {
+            false
+        }
+    });
+    ok && got > 0 && lo.data_send(m, &buf[..got]) == got
+}
+
+/// Drive until `want` bytes have accumulated from connection `n` into `out`
+/// (across however many segments smoltcp delivers); returns the byte count.
+fn lo_recv_n(lo: &mut Net, device: &mut Loopback, n: u32, want: usize, out: &mut [u8]) -> usize {
+    let mut got = 0usize;
+    lo_drive(lo, device, |lo| {
+        if got < out.len() {
+            got += lo.data_recv(n, &mut out[got..]);
+        }
+        got >= want
+    });
+    got
 }
 
 /// net-4c: a DETERMINISTIC in-guest self-test of the interface-config path

@@ -882,8 +882,28 @@ named in §2.)
   shutdown(SHUT_WR) -> netd `hangup`, sendto's dest re-points an AF_INET UDP
   datagram, recvfrom blocks [net-6a-1] + fills src; `sendmsg`/`recvmsg`/
   `socketpair` stay a fail-closed ENOSYS seam; the `/pouch-hello-net` control
-  surface proves it; PURE userspace, kernel byte-unchanged); **net-6a-3** (the
-  Loom-multishot async path + a native echo server, §16).
+  surface proves it; PURE userspace, kernel byte-unchanged); **net-6a-3 —
+  LANDED** (the native `net::TcpStream`/`TcpListener` API +
+  `usr/net-echo` + the Loom async composition; §16; PURE userspace, kernel
+  byte-unchanged). The native `net` module (`libthyla_rs::net`) is the
+  Plan 9-shaped client of `/net` (the libthyla-rs analog of the pouch AF_INET
+  boundary-line: `clone`→`ctl`→`connect`/`announce`, `data`, `listen`-accept).
+  A native echo server (`net-echo serve`) is the §16 server-lifecycle artifact.
+  The deterministic in-guest proofs: netd's isolated-loopback `echo_e2e`
+  (≥2-concurrent accept + bidirectional echo — the server LOGIC, the net-3d
+  pattern) + the `/net-echo` boot probe (the native API's parse/bind/announce/
+  local over the live `/net`, + the **Loom async witness**: a Loom READ on a
+  `/net` fid completes via the kernel dev9p async client, proving network I/O
+  rides Loom with **zero new Loom core** — §12.1). The composition verified:
+  a Loom READ on `/net/tcp/N/data` composes with net-6a-1's `poll_data` (the
+  recv stream), and a Loom LOPEN on `/net/tcp/N/listen` composes with net-3a's
+  `PendingAccept` (the async accept) — both ride the existing deferred-reply
+  mechanism. **Seams (net-8, which owns the in-guest peer):** the live
+  cross-Proc native-API ≥2-concurrent round-trip (netd's live stack is NIC-only
+  — no loopback route — so an in-guest peer can't reach a native server) and the
+  literal §12.1 multishot-*read*-on-`listen` accept loop (which wants a netd
+  listen-read-defer; net-3a defers the *open*). The netd listener backlog is 1
+  (net-3d) — a backlog > 1 is also a net-8 seam.
   Then **net-6b** (the `dev9p.poll` bridge — spec-first `net_poll.tla` + impl +
   focused audit; the one ABI surface). §12.2 + §17 refined.
 - **net-7..net-8: not started.**

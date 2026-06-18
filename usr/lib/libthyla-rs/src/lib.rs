@@ -79,6 +79,7 @@ pub mod hardware;
 pub mod identity;
 pub mod io;
 pub mod loom;
+pub mod net;
 pub mod ninep;
 pub mod notes;
 pub mod poll;

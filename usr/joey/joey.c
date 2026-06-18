@@ -3649,6 +3649,36 @@ int main(void) {
                                  "shutdown/sendto/recvfrom/close)\n");
                     }
 #endif
+
+                    // === net-6a-3: native libthyla-rs TCP stack + Loom async ===
+                    // Spawn /bin/net-echo (native, no pouch): it exercises the
+                    // net::TcpListener/TcpStream API over the live /net mount --
+                    // the parsing round-trips, the server-side `announce` passive
+                    // open + `local_addr`, and the Loom async witness (a Loom READ
+                    // on a /net fid completes via the kernel dev9p async client,
+                    // proving network I/O rides Loom with zero new Loom core,
+                    // NET-DESIGN 12.1). Deterministic + peer-independent: it does
+                    // NOT call accept (that blocks with no in-guest peer; the live
+                    // >=2-concurrent echo round-trip is net-8's, which owns the
+                    // peer mechanism). The deterministic >=2-concurrent echo
+                    // SERVER LOGIC is netd's isolated-loopback echo_e2e (run at
+                    // netd bring-up).
+                    {
+                        const char ne_name[] = "/bin/net-echo";
+                        long ne_pid = t_spawn(ne_name, sizeof(ne_name) - 1);
+                        if (ne_pid <= 0) {
+                            t_putstr("joey: t_spawn(\"net-echo\") FAILED\n");
+                            return 1;
+                        }
+                        int ne_status = -1;
+                        long ne_reaped = t_wait_pid_for((int)ne_pid, 0, &ne_status);
+                        if (ne_reaped != ne_pid || ne_status != 0) {
+                            t_putstr("joey: net-6a-3 PROBE net-echo FAILED\n");
+                            return 1;
+                        }
+                        t_putstr("joey: net-6a-3 PROBE OK (native net::TcpListener bind/"
+                                 "announce/local + Loom async /net read)\n");
+                    }
                 } else {
                     t_putstr("joey: net-2c-1 /srv/net absent -- /net not mounted (netd down?)\n");
                 }
