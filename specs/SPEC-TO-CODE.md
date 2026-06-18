@@ -1141,3 +1141,62 @@ pre-step-4 behavior masking devgone] / `loom_devgone_buggy_leaks_inflight` [->
 SessionDeathCompletes: an op hangs past removal] / `loom_devgone_buggy_double` [->
 NoDoubleTerminal]) confirmed failing on any change to the death-reason threading,
 the `reader_recv_frame` EOF-vs-error split, or the `loom_async_complete` terminal.
+
+---
+
+## net_poll.tla — net-6b (the dev9p.poll readiness bridge; spec-first re-enabled, model-first)
+
+Status: **spec landed model-first at net-6b-1; the mechanism lands at
+net-6b-2 (source map filled then).** Models the `dev9p.poll` PROBE-then-observe
+bridge (NET-DESIGN.md §12.2). Unlike the console (`cons_poll.tla`), whose
+readiness is a LOCAL edge an RX IRQ produces, a 9P socket's readiness lives in
+netd and must be ELICITED: the kernel issues a readiness READ (a deferred 9P
+Tread on a non-consuming netd `ready` file, the offset carrying the requested
+event mask) that netd answers only when the socket is ready per that mask. The
+reply is demuxed by the kernel 9P client's #841 elected reader — driven, because
+a `poll()` caller parks (it is precisely not doing a blocking read), by a
+per-client poll-pump kthread (the Loom-4 SQPOLL analog). The reader's demux
+fires the async op's `on_complete` UNDER `c->lock`, which RECORDS the readiness
+bitmap into the dev9p fid and sets a relay flag — it does NOT walk the hook list
+there (illegal under `c->lock`); the kthread walks it after the pump, `c->lock`
+released, in PROCESS context (the LS-8a `console_mgr` deferred-wake discipline).
+
+`poll.tla` owns the poller-side register-then-observe + the N-fd fan;
+`cons_poll.tla` owns the kthread-relayed deferred wake (the relay's own
+register-then-observe sleep, reused verbatim for the poll-pump kthread's sleep).
+`net_poll.tla` adds the one thing neither covers: readiness here is not produced
+spontaneously — it must be PROBED. The load-bearing discipline is
+PROBE-then-observe: `dev9p.poll` must ensure a readiness read is OUTSTANDING
+(atomically with installing the hook and sampling the cached bitmap) BEFORE the
+poller observes not-ready and parks; else the readiness edge fires in netd with
+no request to answer, the reader demuxes nothing, the relay never runs, and the
+poller sleeps forever on a ready socket. I-9 generalized to the elicited-
+readiness relay.
+
+State universe: one poller, one fd, the poll-pump relay (NetdReplyDemux =
+the reader's demux + `on_complete` record under `c->lock`; KthreadWalk = the
+post-pump process-context walk). CONSTANT: `BUGGY_LOST_READY` (the register step
+installs the hook + samples but never ensures a probe).
+
+| Config | Flags | Checked | Result | Distinct |
+|---|---|---|---|---|
+| `net_poll.cfg`                  | `BUGGY_LOST_READY=FALSE` | `Invariants` | clean | 10 |
+| `net_poll_liveness.cfg`         | `Spec_Live`, all FALSE   | `PollerEventuallyServed` | clean | 10 |
+| `net_poll_buggy_lost_ready.cfg` | `BUGGY_LOST_READY=TRUE`  | `NoMissedNetPoll` | violation (depth 4) | 6 |
+
+Spec action ↔ impl mapping: **filled at net-6b-2** — the intended map is
+the `dev9p_poll` vtable impl (install the hook + ensure the probe outstanding +
+sample the cached revents, one fid-poll-lock step) = `PollerRegister`;
+`kernel/9p_client.c::demux_frame_locked` firing the readiness op's `on_complete`
+(record the bitmap + set the relay-pending flag under `c->lock`) = `NetdReplyDemux`;
+the poll-pump kthread's post-pump `poll_waiter_list_wake` (process context,
+`c->lock` released) = `KthreadWalk`; netd serving the `ready` file's deferred
+reply = the `SocketReady`→reply edge; `sys_poll_for_proc`'s evaluate/sleep =
+`PollerCommit`. The kthread's own go-to-sleep register-then-observe is
+`cons_poll.tla::MgrSleep` (the same `sleep(&rendez, cond)` contract). The
+`BUGGY_LOST_READY` counterexample is the durable regression for the
+probe-then-observe order.
+
+cfgs run with `-deadlock`; the `Done` self-loop keeps the legitimate terminal
+state from tripping the deadlock check (the lost-ready stuck state is
+PRE-terminal, so it is still caught). See NET-DESIGN.md §12.2 + ARCH §28 I-9.
