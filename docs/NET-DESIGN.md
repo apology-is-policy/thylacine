@@ -243,6 +243,26 @@ bound over `/net/dns`) is a clean later refactor; the file interface is
 identical whether netd or a separate daemon backs it, so nothing downstream
 changes. Recorded in §18.
 
+**ndb source at v1.0 — the netd-confinement refinement (user-voted 2026-06-18).**
+netd is a Menagerie warden-bound *leaf driver* (I-34), spawned pre-pivot, so it
+inherits the warden's devramfs Territory and **cannot reach `/lib/ndb`** (which
+lives in the post-pivot Stratum FS) — and widening netd's namespace to read
+`/lib` would fight its I-28/I-34 confinement (the deliberate "drivers are
+leaves" posture, MENAGERIE §13.2). The two §5 statements above ("cs/dns served
+by netd" + "ndb read live from /lib/ndb") are therefore jointly unsatisfiable
+*as written* at v1.0. Resolution: at v1.0 netd serves `cs`/`dns` from a
+**compiled-in ndb** — the static `localhost` host + a builtin services table —
+**plus the DHCP-learned entries read live** from the lease (the resolver, the
+default router, the interface address: never stale). This is the
+capability-microkernel idiom (config-at-construction; Fuchsia/Genode), which
+*preserves* netd's confinement, rather than the Plan 9 full-namespace-service
+idiom (a `cs`/`dns` process with `/lib` mounted) that a confined leaf driver
+cannot adopt. The canonical **`/lib/ndb/local` file is baked into the post-pivot
+FS** (user-readable, real ndb(6) format) — it is the source the v1.x cs/dns
+daemon split reads live; only the live-from-`/lib` read is deferred, the file
+and its format are real at v1.0. The dynamic half (resolver/router/my-address)
+is genuinely live; only the static host/service half is compiled-in.
+
 ---
 
 ## 6. IP configuration (closes W4-F10)
@@ -599,9 +619,13 @@ client); net-4..net-8 complete the surface.
 - **Explicit stateful packet filter** (§8) — per-interface/per-connection
   allow/deny rules (the `nic_router` precedent), layered on namespace
   restriction. The v1.0 firewall is namespace-restriction (D-net-3).
-- **`cs`/`dns` as independent daemons** (§5) — the Plan 9 purity; v1.0 folds
-  them into netd. The file interface is identical, so the split is a clean
-  refactor.
+- **`cs`/`dns` as independent daemons + the live `/lib/ndb` read** (§5) — the
+  Plan 9 purity; v1.0 folds them into netd, which (as a confined warden-bound
+  leaf driver, I-34) sources a **compiled-in ndb + the live DHCP entries**, not
+  a live `/lib/ndb` read (it cannot reach `/lib`). The v1.x split into a
+  post-pivot daemon WITH a namespace is what reads the baked `/lib/ndb/local`
+  live (the file already exists at v1.0, the real ndb(6) format). The file
+  interface is identical, so the split is a clean refactor.
 - **Per-territory stack instances** (D-net-1 rejected alternative) — if a future
   workload needs per-component stack fault-isolation (the Genode model), the
   shared-netd design does not preclude adding a per-territory mode behind a
