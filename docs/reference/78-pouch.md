@@ -940,13 +940,13 @@ Explicit POSIX errnos rather than ENOSYS at the 0xFFFF sentinel:
 
 | Call shape | errno | Why |
 |---|---|---|
-| `socket(AF_INET, ...)` | `EAFNOSUPPORT` | Network phase, not v1.0 |
+| `socket(AF_INET6, ...)` | `EAFNOSUPPORT` | IPv6 deferred (`AF_INET` is served by the `/net` backend below, net-5) |
 | `socket(AF_UNIX, SOCK_DGRAM, 0)` | `EPROTONOSUPPORT` | Datagram sockets deferred |
 | `socket(AF_UNIX, SOCK_STREAM, 42)` | `EPROTONOSUPPORT` | Non-zero protocol unsupported |
 | `bind(fd, "/usr/foo", ...)` | `EINVAL` | Paths outside `/srv/` aren't AF_UNIX-backed at v1.0 |
 | `bind(fd, ...)` without `PROC_FLAG_MAY_POST_SERVICE` | `EACCES` | Kernel post-gate (corvus.tla `PostService` precondition) |
 | `connect(fd, "/srv/unposted", ...)` | `ECONNREFUSED` | Service not posted (or unknown name) |
-| `socketpair(...)`, `shutdown(...)`, `recv*/send*` other than passthrough, `getsockname/getpeername` | `EIO` (from the 0xFFFF sentinel) at v1.0 — deferred |
+| `socketpair(...)`, `sendmsg(...)`, `recvmsg(...)` | `EIO`/`ENOSYS` (from the 0xFFFF sentinel) at v1.0 — deferred. `shutdown` / `sendto` / `recvfrom` / `getsockname` / `getpeername` are tag-aware for `AF_INET` (net-5/6a-2, the `/net` backend below); on `AF_UNIX` they are no-ops/`EOPNOTSUPP`. |
 
 ### What v1.0 doesn't do
 
@@ -1002,6 +1002,9 @@ slot; `pouch_sock_close` closes `ctl_fd` (in addition to `kernel_fd`) for a
 | `listen(fd, backlog)` | write `announce *!port` (or `announce a.b.c.d!port`) to `ctl`. TCP only; the backlog is netd's accept-queue depth (net-3a). |
 | `accept(fd)` | open `/net/tcp/N/listen` (blocks) → the fid is the new connection `M`'s `ctl`; read `M`; open `M/data`; mint a fresh tagged slot (CONNECTED) for it. Peer addr from `M/remote`. The listener slot stays LISTENING (netd re-arms `N`). |
 | `send`/`recv`, `read`/`write` | the 0006 dispatch — a tagged fd routes through the slot's `kernel_fd` (the data fd) to `SYS_write`/`SYS_read`. |
+| `shutdown(fd, how)` (net-6a-2) | `SHUT_WR`/`SHUT_RDWR` → write `hangup` to `ctl` (netd's TCP hangup is smoltcp `tcp::close` — a FIN on the send side; the socket keeps receiving until the peer FINs, exactly SHUT_WR). `SHUT_RD` → local no-op (no netd receive-disable verb). Not connected → `ENOTCONN`; bad `how` → `EINVAL`. `AF_UNIX` → no-op `0` (no half-close model). |
+| `sendto(...)` (net-6a-2) | no dest → plain send on the data fd. `AF_INET` TCP + dest → connection-mode (dest ignored, POSIX). `AF_INET` UDP + dest → write `connect a.b.c.d!port` to `ctl` (netd `udp_connect` re-points the remote every call → a per-datagram dest works), lazily open the data stream, write the datagram. `AF_UNIX` + dest → `EOPNOTSUPP`. Flags beyond `MSG_NOSIGNAL` → `EOPNOTSUPP`. |
+| `recvfrom(...)` (net-6a-2) | read the data fd (blocking until bytes/EOF since net-6a-1); if `src` requested, fill it from `/net/<proto>/N/remote` (the sender for a connected socket or the UDP request/reply idiom; a promiscuous UDP receiver sees the connected remote — netd does not expose the per-datagram sender, a v1.0 limit). |
 | `getsockname`/`getpeername` | read `/net/<proto>/N/local` / `/remote` (or, for `getsockname` pre-connect, the `bind()`-stashed addr). |
 | `setsockopt` | `SO_REUSEADDR`/`SO_REUSEPORT`/`TCP_NODELAY` → benign no-op (netd already satisfies the semantic); everything else → `ENOPROTOOPT` (P-3 — the keepalive/ttl/tos ctl-verb wiring is a documented net-5 seam). |
 | `getsockopt` | `SO_ERROR` (0; blocking) / `SO_TYPE`; the rest → `ENOPROTOOPT`. `SO_PEERCRED` is AF_UNIX-only (no meaning on a `/net` connection). |
@@ -1018,19 +1021,19 @@ net-5 is the **blocking** subset. Non-blocking I/O and `poll()`/`select()` over
 `/net` fds need the `dev9p.poll` readiness bridge (net-6), so `SOCK_NONBLOCK` →
 `EOPNOTSUPP` (P-3 — no silently-wrong POSIX).
 
-**v1.0 data-call scope (net-5 audit F1/F2 → net-6).** The data calls are
-`read`/`write`/`send`/`recv` only. `shutdown` / `sendto` / `recvfrom` / `sendmsg`
-/ `recvmsg` are **not** tag-aware — on an AF_INET socket they fall through to the
-`0xFFFF` syscall seam → `ENOSYS` (fail-closed: the tag bits never reach a kernel
-syscall, so no garbage-fd / UAF / privilege issue; the failure is loud, not
-silently-wrong). And a `recv()` on a connected socket with no data ready returns
-**0**, because netd's `data` read is non-blocking (the net-2c-2 documented
-behavior) — so a 0-return is ambiguous (no-data-yet vs EOF). The **complete
-usable** TCP layer — `shutdown(SHUT_WR)` for graceful close, the remaining socket
-calls, and blocking-until-data reads — lands with the **net-6** readiness bridge
-(`dev9p.poll`); building it over a still-non-blocking read path at net-5 would be
-a half-feature. A v1.0 port should use `send`/`recv`/`read`/`write` only and
-treat a 0-read as "retry after net-6 readiness," not EOF.
+**v1.0 data-call scope (net-5 audit F1/F2 → net-6a closed).** net-6a-1 made
+netd's `/net` data read **block** until bytes or EOF (`RecvOutcome`
+Data/WouldBlock/Eof + a deferred 9P reply), closing the F2 recv-returns-0
+ambiguity — a `recv()`/`read()` on a connected socket now blocks like POSIX.
+net-6a-2 made `shutdown` / `sendto` / `recvfrom` **tag-aware** (the rows above),
+closing F1. So the v1.0 data-call surface is `read`/`write`/`send`/`recv` +
+`shutdown`/`sendto`/`recvfrom`, all blocking. The remaining gap is
+`sendmsg` / `recvmsg` / `socketpair` — still `ENOSYS` at the `0xFFFF` seam
+(fail-closed: the tag bits never reach a kernel syscall). The scatter-gather +
+ancillary-data (`cmsg`) surface is a documented **net-6a-2 seam** (#214); no
+v1.0 in-VM consumer needs it, and a single-iovec/no-cmsg half-version bolted on
+now would be the very half-feature net-5 warned against. Non-blocking I/O and
+`poll()`/`select()` over `/net` fds remain the **net-6b** `dev9p.poll` bridge.
 
 ### Verifying live — `/pouch-hello-net`
 
@@ -1038,13 +1041,17 @@ The proving binary (the first POSIX `socket()` program Thylacine runs) does the
 deterministic, host-decoupled control-surface dance — `socket` / family+proto
 reject (`AF_INET6` → `EAFNOSUPPORT`, `SOCK_RAW` → `EPROTONOSUPPORT`) /
 `setsockopt` (SO_REUSEADDR ok, SO_KEEPALIVE → `ENOPROTOOPT`) / `bind` /
-`listen`→announce / `getsockname` (the bound port reads back) / `close` — against
-netd's `/net` (the joey `net-5 PROBE` gate), plus a best-effort logged live
-`connect`+round-trip to a public endpoint (host-coupled, never a gate). The full
-deterministic in-guest data round-trip + the ported-server/soak E2E are net-8's
-exit criteria (NET-DESIGN §16). `pouch-hello-sockets.c` subtest A was updated to
-assert `AF_INET6` (not `AF_INET`) is the refused family, since net-5 makes
-`AF_INET` valid.
+`listen`→announce / `getsockname` (the bound port reads back) / `close` — and
+(net-6a-2) the data-call control surface: `shutdown` bad-`how`→`EINVAL` /
+fresh→`ENOTCONN`, `sendto`/`recvfrom` bad-flag→`EOPNOTSUPP` / fresh→`ENOTCONN`,
+a UDP `sendto` to the on-link gateway 10.0.2.2:9 (egresses without a peer) →
+`getpeername` reads the dest back → `shutdown(SHUT_WR)` drives the real `hangup`
+ctl write — all against netd's `/net` (the joey `net-5/6a-2 PROBE` gate), plus a
+best-effort logged live `connect`+round-trip to a public endpoint (host-coupled,
+never a gate). The full deterministic in-guest data round-trip + the
+ported-server/soak E2E are net-8's exit criteria (NET-DESIGN §16).
+`pouch-hello-sockets.c` subtest A was updated to assert `AF_INET6` (not
+`AF_INET`) is the refused family, since net-5 makes `AF_INET` valid.
 
 ---
 

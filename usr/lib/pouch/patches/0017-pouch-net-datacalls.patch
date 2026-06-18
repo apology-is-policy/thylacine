@@ -1,0 +1,310 @@
+pouch boundary-line patch 0017 - AF_INET data-call completion (net-6a-2)
+
+NET-DESIGN.md section 7 + section 12; closes net-5 audit F1. net-5
+(0016-pouch-net-sockets) left shutdown / sendto / recvfrom NOT tag-aware:
+on an AF_INET pouch socket they fell through to the syscall seam's 0xFFFF
+sentinel -> ENOSYS (fail-closed, but a usable TCP/UDP client needs them).
+The net-5 disposition phased the completion to net-6 because the data read
+path was non-blocking until then (building shutdown over a still-broken read
+would have been a half-feature). net-6a-1 made netd's /net data read BLOCK
+(RecvOutcome Data/WouldBlock/Eof + deferred reply), so the read path is now
+correct and these three calls land cleanly on top.
+
+This STACKS on 0016 (the AF_INET family dispatch) + 0006 (the slot table).
+It adds NO kernel surface -- every translation rides SYS_open / SYS_read /
+SYS_write / SYS_close, already seamed (ARCH 11.5's zero-socket-syscalls
+commitment holds). All three reuse 0016's helpers (pouch_net_cmd_ipport /
+pouch_net_open_conn_file / pouch_net_read_endpoint) + 0006's slot accessors
+(pouch_sock_resolve / pouch_sock_kernel_fd); no new helper, no header decl.
+
+The mappings (ground truth = netd's server.rs):
+  shutdown(fd, how)   AF_INET: SHUT_WR / SHUT_RDWR -> write "hangup" to ctl
+                      (netd TCP hangup = smoltcp tcp::close = FIN on the send
+                      side; the socket keeps RECEIVING until the peer FINs --
+                      exactly SHUT_WR, so read-the-response survives). SHUT_RD
+                      -> local no-op (no netd receive-disable verb). Not
+                      connected -> ENOTCONN; bad how -> EINVAL. AF_UNIX /srv
+                      stream -> no-op 0 (no half-close model; close() tears
+                      down). Untagged -> the original socketcall.
+  sendto(...)         no dest -> plain send on the connected data fd. AF_INET
+                      TCP + dest -> connection-mode (dest ignored, POSIX).
+                      AF_INET UDP + dest -> write "connect a.b.c.d!port" to
+                      ctl (netd udp_connect re-points the remote every call,
+                      so a per-datagram dest works), lazily open the data
+                      stream, write the datagram. AF_UNIX + dest -> EOPNOTSUPP
+                      (a /srv stream has no network address). flags beyond
+                      MSG_NOSIGNAL -> EOPNOTSUPP (P-3).
+  recvfrom(...)       read the connected data fd (blocking since net-6a-1);
+                      if src requested, fill it from the connection's recorded
+                      remote (/net/<proto>/N/remote -- the sender for a
+                      connected socket or the UDP request/reply idiom; a
+                      promiscuous UDP receiver sees the connected remote, a
+                      documented v1.0 limit since netd does not expose the
+                      per-datagram sender). flags beyond MSG_NOSIGNAL ->
+                      EOPNOTSUPP.
+
+sendmsg / recvmsg / socketpair stay ENOSYS (fail-closed): the scatter-gather
++ ancillary-data (cmsg) surface is a documented net-6a-2 seam (#214); no v1.0
+in-VM consumer needs them, and a half-version (single-iovec, no cmsg) bolted
+on now would be the very half-feature net-5 warned against.
+
+Invariants (NET-DESIGN.md section 15.1 -- composes existing section-28
+invariants, adds none): I-1/I-23/I-28 (a Proc reaches only the /net its
+territory grants); I-5 (netd owns the NIC; pouch never touches hardware).
+The slot table's thread-safety is 0006's (g_lock + the per-socket single-user
+discipline the net-5 connect()/accept() arms already rely on for direct slot
+writes -- the UDP lazy-open mirrors it).
+
+Files (all stack on the post-0016 tree):
+  src/internal/_pouch_socket.h   the socket-call coverage comment (now-true).
+  src/network/shutdown.c         tag-aware: AF_INET -> hangup; AF_UNIX no-op.
+  src/network/sendto.c           tag-aware: connected send + UDP per-datagram.
+  src/network/recvfrom.c         tag-aware: blocking recv + src readback.
+
+Binding design: NET-DESIGN.md section 7 + section 12; docs/reference/78-pouch.md
+(the AF_INET backend). Invariants P-1, P-3, P-4. Proving binary:
+/pouch-hello-net -- extended with the deterministic control surface for the
+three calls (shutdown EINVAL/ENOTCONN, sendto/recvfrom EOPNOTSUPP/ENOTCONN,
+and a UDP sendto-to-dest egress, none needing a live peer).
+--- a/src/internal/_pouch_socket.h
++++ b/src/internal/_pouch_socket.h
+@@ -38,12 +38,14 @@
+  *   - SOCK_NONBLOCK / O_NONBLOCK silently no-op (v1.0 sockets are
+  *     blocking; nonblocking sockets need POLLOUT plumbing in SYS_POLL,
+  *     deferred).
+- *   - send / recv are dispatch shims (A-5b #827a-login): a tagged
+- *     socket fd maps to the slot's kernel write / read (flags == 0 or
+- *     MSG_NOSIGNAL; other flags EOPNOTSUPP). sendto / recvfrom /
+- *     sendmsg / recvmsg / socketpair / shutdown / getpeername /
+- *     getsockname still fall through to the syscall-seam 0xFFFF
+- *     sentinel -- ENOSYS at v1.0 (POUCH-DESIGN.md section 6.2).
++ *   - send / recv / sendto / recvfrom / shutdown are tag-aware dispatch
++ *     shims: a tagged socket fd maps to the slot's kernel write / read
++ *     (flags beyond MSG_NOSIGNAL -> EOPNOTSUPP). sendto's dest re-points an
++ *     AF_INET UDP datagram (net-6a-2); shutdown(SHUT_WR) -> netd `hangup`.
++ *     getsockname / getpeername read the /net endpoint files (net-5).
++ *     sendmsg / recvmsg / socketpair still fall through to the syscall-seam
++ *     0xFFFF sentinel -- ENOSYS at v1.0 (the scatter-gather + ancillary-data
++ *     surface is a documented net-6a-2 seam; no v1.0 consumer needs it).
+  *
+  * Naming: the leading underscore marks this header as pouch-internal
+  * (not for POSIX programs to include).
+--- a/src/network/shutdown.c
++++ b/src/network/shutdown.c
+@@ -1,7 +1,50 @@
++/* pouch -- shutdown(2) (net-6a-2, NET-DESIGN section 7; closes net-5 audit F1).
++ *
++ * A pouch-tagged fd must never reach the syscall seam (the tag bits are not a
++ * kernel fd). For an AF_INET socket a half-close maps to netd's `hangup` ctl
++ * verb: netd's TCP hangup is smoltcp `tcp::Socket::close()` -- a FIN on the
++ * send side, after which the socket keeps RECEIVING until the peer FINs, which
++ * is exactly SHUT_WR semantics (the read-the-response idiom survives a
++ * shutdown(SHUT_WR)). UDP hangup unbinds. SHUT_RD has no netd receive-disable
++ * verb, so it is a local no-op (subsequent reads still drain buffered data --
++ * a documented v1.0 deviation). An AF_UNIX /srv byte-stream has no half-close
++ * model (close() does the full teardown), so shutdown on one is a no-op.
++ * Untagged fds fall through to the original socketcall (the 0xFFFF ENOSYS
++ * sentinel). */
+ #include <sys/socket.h>
++#include <errno.h>
++#include "_pouch_socket.h"
+ #include "syscall.h"
+ 
+ int shutdown(int fd, int how)
+ {
++	if ((fd & POUCH_SOCK_TAG) != 0) {
++		if (how != SHUT_RD && how != SHUT_WR && how != SHUT_RDWR) {
++			errno = EINVAL;
++			return -1;
++		}
++		struct pouch_sock_slot *slot = pouch_sock_resolve(fd);
++		if (!slot) {
++			errno = EBADF;
++			return -1;
++		}
++		if (slot->family != POUCH_SOCK_FAM_INET) {
++			return 0;   /* AF_UNIX /srv stream: no half-close; close() tears down */
++		}
++		if (slot->state != POUCH_SOCK_CONNECTED) {
++			errno = ENOTCONN;
++			return -1;
++		}
++		if (how == SHUT_RD) {
++			return 0;   /* no netd receive-disable verb; local no-op */
++		}
++		/* SHUT_WR / SHUT_RDWR -> the `hangup` ctl verb (TCP FIN / UDP unbind). */
++		static const char cmd[] = "hangup";
++		if (__syscall(SYS_write, slot->ctl_fd, cmd, sizeof(cmd) - 1) < 0) {
++			errno = ENOTCONN;
++			return -1;
++		}
++		return 0;
++	}
+ 	return socketcall(shutdown, fd, how, 0, 0, 0, 0);
+ }
+--- a/src/network/sendto.c
++++ b/src/network/sendto.c
+@@ -1,7 +1,97 @@
++/* pouch -- sendto(2) (net-6a-2, NET-DESIGN section 7; closes net-5 audit F1).
++ *
++ * A pouch-tagged fd must never reach __socketcall (the tag bits are not a
++ * kernel fd). flags beyond MSG_NOSIGNAL are EOPNOTSUPP (P-3, like send). The
++ * destination handling, per POSIX:
++ *   - no dest (addr == NULL)            plain send on the connected data fd
++ *                                       (ENOTCONN if the socket is FRESH).
++ *   - AF_INET TCP, dest given           connection-mode: dest is ignored, sent
++ *                                       on the connected data fd (POSIX).
++ *   - AF_INET UDP, dest given           the datagram target: write
++ *                                       "connect a.b.c.d!port" to ctl (netd
++ *                                       udp_connect re-points the remote on
++ *                                       every call, so a per-datagram dest
++ *                                       works), lazily open the data stream,
++ *                                       then write the datagram.
++ *   - AF_UNIX, dest given               EOPNOTSUPP (a /srv stream has no
++ *                                       network address).
++ * Untagged fds fall through to the original socketcall_cp (0xFFFF ENOSYS). */
+ #include <sys/socket.h>
++#include <netinet/in.h>
++#include <errno.h>
++#include "_pouch_socket.h"
+ #include "syscall.h"
+ 
+-ssize_t sendto(int fd, const void *buf, size_t len, int flags, const struct sockaddr *addr, socklen_t alen)
++ssize_t sendto(int fd, const void *buf, size_t len, int flags,
++               const struct sockaddr *addr, socklen_t alen)
+ {
+-	return socketcall_cp(sendto, fd, buf, len, flags, addr, alen);
++	if ((fd & POUCH_SOCK_TAG) == 0) {
++		return socketcall_cp(sendto, fd, buf, len, flags, addr, alen);
++	}
++	if ((flags & ~MSG_NOSIGNAL) != 0) {
++		errno = EOPNOTSUPP;
++		return -1;
++	}
++	struct pouch_sock_slot *slot = pouch_sock_resolve(fd);
++	if (!slot) {
++		errno = EBADF;
++		return -1;
++	}
++
++	int has_dest = (addr != 0 && alen != 0);
++
++	/* The only dest-honoring path: an AF_INET UDP datagram to a target. */
++	if (has_dest && slot->family == POUCH_SOCK_FAM_INET
++	    && slot->net_proto == POUCH_NET_UDP) {
++		if (alen < (socklen_t)sizeof(struct sockaddr_in)) {
++			errno = EINVAL;
++			return -1;
++		}
++		if (addr->sa_family != AF_INET) {
++			errno = EAFNOSUPPORT;
++			return -1;
++		}
++		const struct sockaddr_in *in = (const struct sockaddr_in *)addr;
++		const unsigned char *ab = (const unsigned char *)&in->sin_addr.s_addr;
++		const unsigned char *pb = (const unsigned char *)&in->sin_port;
++		unsigned int port = ((unsigned int)pb[0] << 8) | (unsigned int)pb[1];
++		if (port == 0) {            /* netd parse_dial rejects port 0 */
++			errno = EINVAL;
++			return -1;
++		}
++		char cmd[48];
++		int  cl = pouch_net_cmd_ipport(cmd, "connect", ab, port);
++		if (__syscall(SYS_write, slot->ctl_fd, cmd, (size_t)cl) < 0) {
++			errno = ENETUNREACH;
++			return -1;
++		}
++		int d = slot->kernel_fd;
++		if (d < 0) {
++			/* Lazily open the datagram I/O stream on first send. The
++			 * direct slot writes follow net-5 connect()'s discipline (the
++			 * per-socket single-user invariant; concurrent first-sends on
++			 * one fd are the same inherited race). */
++			d = pouch_net_open_conn_file(slot->net_proto, slot->conn_n,
++			                             "data", (int)POUCH_SRV_ORDWR);
++			if (d < 0) {
++				errno = ENETUNREACH;
++				return -1;
++			}
++			slot->kernel_fd = d;
++			slot->state     = POUCH_SOCK_CONNECTED;
++		}
++		return syscall_cp(SYS_write, d, buf, len);
++	}
++
++	/* AF_UNIX with an explicit dest: a /srv byte-stream has no network dest. */
++	if (has_dest && slot->family != POUCH_SOCK_FAM_INET) {
++		errno = EOPNOTSUPP;
++		return -1;
++	}
++
++	/* Plain send: no dest, or connection-mode TCP (dest ignored, POSIX), or a
++	 * connected UDP/AF_UNIX socket. Routes through the slot's data fd. */
++	int kfd = pouch_sock_kernel_fd(fd);
++	if (kfd < 0) return -1;   /* ENOTCONN/EBADF set by pouch_sock_kernel_fd */
++	return syscall_cp(SYS_write, kfd, buf, len);
+ }
+--- a/src/network/recvfrom.c
++++ b/src/network/recvfrom.c
+@@ -1,7 +1,59 @@
++/* pouch -- recvfrom(2) (net-6a-2, NET-DESIGN section 7; closes net-5 audit F1).
++ *
++ * The recv() twin of the sendto() shim: a pouch-tagged fd reads the connected
++ * data fd (blocking until bytes or EOF since net-6a-1), then -- if the caller
++ * asked for the source -- fills it from the connection's recorded remote
++ * (netd's /net/<proto>/N/remote). For a connected socket or the UDP
++ * request/reply idiom (the reply comes from the same peer we sent to) that
++ * remote IS the datagram's sender; a promiscuous UDP receiver getting
++ * datagrams from arbitrary senders sees the connected/last remote (netd does
++ * not expose the per-datagram sender to the 9P client -- a documented v1.0
++ * limitation). flags beyond MSG_NOSIGNAL are EOPNOTSUPP (P-3). Untagged fds
++ * fall through to the original socketcall_cp (0xFFFF ENOSYS). */
+ #include <sys/socket.h>
++#include <netinet/in.h>
++#include <errno.h>
++#include <string.h>
++#include "_pouch_socket.h"
+ #include "syscall.h"
+ 
+-ssize_t recvfrom(int fd, void *restrict buf, size_t len, int flags, struct sockaddr *restrict addr, socklen_t *restrict alen)
++ssize_t recvfrom(int fd, void *restrict buf, size_t len, int flags,
++                 struct sockaddr *restrict addr, socklen_t *restrict alen)
+ {
+-	return socketcall_cp(recvfrom, fd, buf, len, flags, addr, alen);
++	if ((fd & POUCH_SOCK_TAG) == 0) {
++		return socketcall_cp(recvfrom, fd, buf, len, flags, addr, alen);
++	}
++	if ((flags & ~MSG_NOSIGNAL) != 0) {
++		errno = EOPNOTSUPP;
++		return -1;
++	}
++	int kfd = pouch_sock_kernel_fd(fd);
++	if (kfd < 0) return -1;   /* ENOTCONN/EBADF set by pouch_sock_kernel_fd */
++	ssize_t r = syscall_cp(SYS_read, kfd, buf, len);
++
++	if (r >= 0 && addr != 0 && alen != 0) {
++		struct pouch_sock_slot *slot = pouch_sock_resolve(fd);
++		if (slot && slot->family == POUCH_SOCK_FAM_INET) {
++			struct sockaddr_in sin;
++			memset(&sin, 0, sizeof(sin));
++			sin.sin_family = AF_INET;
++			unsigned char ip[4] = {0, 0, 0, 0};
++			unsigned int  port  = 0;
++			/* best-effort: a failed/empty remote leaves 0.0.0.0:0 */
++			pouch_net_read_endpoint(slot->net_proto, slot->conn_n,
++			                        "remote", ip, &port);
++			unsigned char *sb = (unsigned char *)&sin.sin_addr.s_addr;
++			sb[0] = ip[0]; sb[1] = ip[1]; sb[2] = ip[2]; sb[3] = ip[3];
++			unsigned char *pp = (unsigned char *)&sin.sin_port;
++			pp[0] = (unsigned char)(port >> 8);
++			pp[1] = (unsigned char)(port & 0xffu);
++			socklen_t cl = (*alen < (socklen_t)sizeof(sin))
++				? *alen : (socklen_t)sizeof(sin);
++			memcpy(addr, &sin, (size_t)cl);
++			*alen = (socklen_t)sizeof(sin);
++		} else {
++			*alen = 0;   /* AF_UNIX / unknown: no network source */
++		}
++	}
++	return r;
+ }

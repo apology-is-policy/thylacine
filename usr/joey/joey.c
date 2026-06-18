@@ -3644,8 +3644,9 @@ int main(void) {
                             t_putstr("joey: net-5 PROBE pouch-hello-net FAILED\n");
                             return 1;
                         }
-                        t_putstr("joey: net-5 PROBE OK (pouch AF_INET socket-compat over "
-                                 "/net: socket/reject/setsockopt/bind/listen/getsockname/close)\n");
+                        t_putstr("joey: net-5/6a-2 PROBE OK (pouch AF_INET socket-compat over "
+                                 "/net: socket/reject/setsockopt/bind/listen/getsockname/"
+                                 "shutdown/sendto/recvfrom/close)\n");
                     }
 #endif
                 } else {

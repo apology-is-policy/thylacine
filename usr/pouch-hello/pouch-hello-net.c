@@ -125,8 +125,56 @@ int main(void)
 	/* 6. close frees the slot + the held ctl fd + clunks the conn */
 	CHECK(close(fd) == 0, "close listener");
 
+	/* 7. data-call control surface (net-6a-2): shutdown / sendto / recvfrom.
+	 * All deterministic + host-decoupled -- the error paths need no peer, and
+	 * a UDP sendto to the on-link gateway egresses without a listener. */
+	int tfd = socket(AF_INET, SOCK_STREAM, 0);
+	CHECK(tfd >= 0, "socket(AF_INET,STREAM) #2");
+	char rb[8];
+	errno = 0;
+	CHECK(shutdown(tfd, 99) < 0 && errno == EINVAL, "shutdown bad-how EINVAL");
+	errno = 0;
+	CHECK(shutdown(tfd, SHUT_WR) < 0 && errno == ENOTCONN, "shutdown fresh ENOTCONN");
+	errno = 0;
+	CHECK(sendto(tfd, "x", 1, MSG_OOB, 0, 0) < 0 && errno == EOPNOTSUPP,
+	      "sendto bad-flag EOPNOTSUPP");
+	errno = 0;
+	CHECK(sendto(tfd, "x", 1, 0, 0, 0) < 0 && errno == ENOTCONN,
+	      "sendto no-dest fresh ENOTCONN");
+	errno = 0;
+	CHECK(recvfrom(tfd, rb, sizeof rb, MSG_OOB, 0, 0) < 0 && errno == EOPNOTSUPP,
+	      "recvfrom bad-flag EOPNOTSUPP");
+	errno = 0;
+	CHECK(recvfrom(tfd, rb, sizeof rb, 0, 0, 0) < 0 && errno == ENOTCONN,
+	      "recvfrom fresh ENOTCONN");
+	CHECK(close(tfd) == 0, "close tfd");
+
+	/* UDP per-datagram sendto: targets the on-link DHCP gateway 10.0.2.2:9
+	 * (discard). netd binds a local port + records the remote + egresses the
+	 * datagram -- no peer needed (UDP is fire-and-forget). The send then
+	 * leaves the socket connected, so getpeername reads the dest back and
+	 * shutdown(SHUT_WR) drives the real `hangup` ctl write. */
+	int ufd = socket(AF_INET, SOCK_DGRAM, 0);
+	CHECK(ufd >= 0, "socket(AF_INET,DGRAM)");
+	struct sockaddr_in gw;
+	memset(&gw, 0, sizeof(gw));
+	gw.sin_family = AF_INET;
+	gw.sin_port   = htons(9);
+	gw.sin_addr.s_addr = htonl(0x0a000202u);   /* 10.0.2.2 */
+	CHECK(sendto(ufd, "ping", 4, 0, (struct sockaddr *)&gw, sizeof(gw)) == 4,
+	      "udp sendto egress");
+	struct sockaddr_in pg;
+	socklen_t plen = sizeof(pg);
+	memset(&pg, 0, sizeof(pg));
+	CHECK(getpeername(ufd, (struct sockaddr *)&pg, &plen) == 0, "udp getpeername");
+	CHECK(pg.sin_addr.s_addr == htonl(0x0a000202u) && pg.sin_port == htons(9),
+	      "udp peer readback (10.0.2.2:9)");
+	CHECK(shutdown(ufd, SHUT_WR) == 0, "udp shutdown(SHUT_WR) -> hangup");
+	CHECK(close(ufd) == 0, "close ufd");
+
 	printf("pouch-hello-net: control surface OK "
-	       "(socket/reject/setsockopt/bind/listen/getsockname/close)\n");
+	       "(socket/reject/setsockopt/bind/listen/getsockname/"
+	       "shutdown/sendto/recvfrom/close)\n");
 
 	best_effort_live();
 

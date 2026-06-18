@@ -877,8 +877,13 @@ named in §2.)
   `recv`-returns-0 seam: `data_recv_outcome` Data/WouldBlock/Eof + `h_read` park +
   `poll_data` deliver, the net-3a/4b deferred-reply pattern; the
   `recv_blocking_e2e` in-guest proof; a pouch `recv()` blocks automatically);
-  **net-6a-2** (the pouch `shutdown`/`sendto`/`recvfrom` completion, closes net-5
-  F1); **net-6a-3** (the Loom-multishot async path + a native echo server, §16).
+  **net-6a-2 — LANDED** (the pouch `shutdown`/`sendto`/`recvfrom` completion,
+  closes net-5 F1: `0017-pouch-net-datacalls.patch` makes the three tag-aware --
+  shutdown(SHUT_WR) -> netd `hangup`, sendto's dest re-points an AF_INET UDP
+  datagram, recvfrom blocks [net-6a-1] + fills src; `sendmsg`/`recvmsg`/
+  `socketpair` stay a fail-closed ENOSYS seam; the `/pouch-hello-net` control
+  surface proves it; PURE userspace, kernel byte-unchanged); **net-6a-3** (the
+  Loom-multishot async path + a native echo server, §16).
   Then **net-6b** (the `dev9p.poll` bridge — spec-first `net_poll.tla` + impl +
   focused audit; the one ABI surface). §12.2 + §17 refined.
 - **net-7..net-8: not started.**
