@@ -1154,6 +1154,14 @@ netd defers → the poll parks then times out → the kthread GCs the stranded r
   the listener, a second inbound SYN finds the announce connection mid-establish
   (no listener) → RST. A proper backlog (several listening sockets per announce,
   the Plan 9 listen queue) is a v1.x refinement.
+- **`check_ready` does not report a listener POLLIN-ready on a pending accept**
+  (net-6b-3; #220): `slot_poll_readable` reports `can_recv()`, which is false for a
+  TCP listener, so a `poll(listener, POLLIN)` (the pouch/`select()`-server
+  multiplex pattern) never wakes when an inbound call lands — the blocking accept
+  via `open(listen)` (net-3a) is the working path, and no v1.0 in-VM consumer polls
+  a listener. Candidate fix: `check_ready` reports `accept_ready(listener_socket)`
+  (server.rs `accept_ready`) for an `ANNOUNCED` TCP slot, proven via a loopback
+  E2E (the `loopback_e2e` pattern); weighed at the net-6b-4 audit.
 - **The inbound-accept E2E landed at net-3d** (was owed by net-3a): the
   deterministic in-guest inbound path is the netd loopback interface
   (`127.0.0.1/8`) — the `loopback_e2e` TCP leg announces + connects + resolves a

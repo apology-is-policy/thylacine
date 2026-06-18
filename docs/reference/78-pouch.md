@@ -1017,9 +1017,11 @@ read from netd is bounded to `< 2^24` (netd's `N_MASK`).
 
 ### Blocking-only; the net-6 seam
 
-net-5 is the **blocking** subset. Non-blocking I/O and `poll()`/`select()` over
-`/net` fds need the `dev9p.poll` readiness bridge (net-6), so `SOCK_NONBLOCK` →
-`EOPNOTSUPP` (P-3 — no silently-wrong POSIX).
+net-5 is the **blocking** subset. Non-blocking I/O still needs the kernel
+`dev9p.poll` readiness bridge, so `SOCK_NONBLOCK` → `EOPNOTSUPP` (P-3 — no
+silently-wrong POSIX). `poll()`/`select()` over `/net` fds **landed at net-6b-3**
+(below); `SOCK_NONBLOCK` is the remaining piece (it needs a non-blocking
+`read`/`write` path, distinct from the readiness `poll()`).
 
 **v1.0 data-call scope (net-5 audit F1/F2 → net-6a closed).** net-6a-1 made
 netd's `/net` data read **block** until bytes or EOF (`RecvOutcome`
@@ -1032,8 +1034,45 @@ closing F1. So the v1.0 data-call surface is `read`/`write`/`send`/`recv` +
 (fail-closed: the tag bits never reach a kernel syscall). The scatter-gather +
 ancillary-data (`cmsg`) surface is a documented **net-6a-2 seam** (#214); no
 v1.0 in-VM consumer needs it, and a single-iovec/no-cmsg half-version bolted on
-now would be the very half-feature net-5 warned against. Non-blocking I/O and
-`poll()`/`select()` over `/net` fds remain the **net-6b** `dev9p.poll` bridge.
+now would be the very half-feature net-5 warned against.
+
+### `poll()`/`select()` over `/net` — the readiness fd (net-6b-3)
+
+`0018-pouch-net-poll.patch` makes `poll()`/`select()`/`pselect`/`ppoll` work over
+an `AF_INET` socket fd. The hazard: a tagged socket fd's `kernel_fd` is the
+`/net/<proto>/N/data` fd — a **regular** dev9p file, which the kernel `dev9p.poll`
+slot treats as POSIX **always-ready** (it probes only a Spoor whose qid carries
+`QTPOLL`). So the 0015 tag-dispatch (which polls `kernel_fd`) would report a
+`/net` socket ready unconditionally — `poll(POLLIN)` returns instantly instead of
+blocking, and `select()` multiplexing reports every `/net` fd ready always.
+
+The fix: a new slot helper `pouch_sock_poll_fd(fd)` resolves the **poll target**
+(distinct from `pouch_sock_kernel_fd`, the I/O target):
+
+| fd kind | poll target |
+|---|---|
+| untagged | the fd itself (a raw kernel handle) |
+| `FAM_UNIX` tagged | the slot's `kernel_fd` (the `/srv` byte stream, pollable via the kernel `devsrv` `.poll` slot) — the 0015 behavior, unchanged |
+| `FAM_INET` tagged | the `/net/<proto>/N/ready` fd — netd's per-connection readiness file, whose qid carries `QTPOLL`, opened **lazily** on the first `poll()` and held for the socket's lifetime (closed at `close()` alongside `ctl_fd`) |
+
+`src/select/poll.c` routes its tagged-fd dispatch through `pouch_sock_poll_fd`;
+the caller's `pollfd.events` (`POLLIN`/`POLLOUT`) pass straight through — the
+kernel threads them to `dev9p.poll` as the readiness `Tread` offset, and netd's
+`check_ready` reads them as the requested mask (`POLLIN=0x001`/`POLLOUT=0x004`
+align across pouch, the kernel, and netd). `select`/`pselect`/`ppoll` inherit the
+fix (they route through `poll()` per 0005). A concurrent `poll()` of the *same*
+fd or a `close()` racing the lazy open is reconciled under the slot lock (keep one
+ready fd, close the loser), matching the inherited single-user-per-socket
+discipline. **No new kernel surface** — the only added operation is a `SYS_open`
+of the readiness file.
+
+**v1.0 limit — listener-poll.** netd's `check_ready` reports `can_recv()`, which
+is false for a TCP **listener**, so `poll(listener, POLLIN)` does not wake on a
+pending accept; a `select()`-based server multiplexing accept + connections would
+block. The blocking accept via `open(listen)` (net-3a) works, and no v1.0 in-VM
+consumer polls a listener. Recorded as a net-6b-3 seam (NET-DESIGN §12.2; #220) —
+the candidate fix is `check_ready` reporting `accept_ready` for an `ANNOUNCED`
+TCP slot, weighed at the net-6b-4 audit.
 
 ### Verifying live — `/pouch-hello-net`
 
@@ -1046,7 +1085,11 @@ reject (`AF_INET6` → `EAFNOSUPPORT`, `SOCK_RAW` → `EPROTONOSUPPORT`) /
 fresh→`ENOTCONN`, `sendto`/`recvfrom` bad-flag→`EOPNOTSUPP` / fresh→`ENOTCONN`,
 a UDP `sendto` to the on-link gateway 10.0.2.2:9 (egresses without a peer) →
 `getpeername` reads the dest back → `shutdown(SHUT_WR)` drives the real `hangup`
-ctl write — all against netd's `/net` (the joey `net-5/6a-2 PROBE` gate), plus a
+ctl write — and (net-6b-3) a `poll()` surface: a connected UDP socket reads
+`POLLOUT`-ready (writable) but `poll(POLLIN)` **times out** (no datagram queued —
+the load-bearing assertion that `poll()` actually *waited* on the `ready` file
+rather than the always-ready data fd) — all against netd's `/net` (the joey
+`net-5/6a-2 PROBE` gate), plus a
 best-effort logged live `connect`+round-trip to a public endpoint (host-coupled,
 never a gate). The full deterministic in-guest data round-trip + the
 ported-server/soak E2E are net-8's exit criteria (NET-DESIGN §16).

@@ -13,6 +13,9 @@
  *   listen                     -> "announce *!7701" to netd (Err -> listen() -1)
  *   getsockname                -> the bound addr reads back
  *   close                      -> slot freed, ctl/data fds closed, conn clunked
+ *   poll() over /net (net-6b-3)-> a connected UDP socket is POLLOUT-ready but
+ *                                 POLLIN times out (the shim targets the QTPOLL
+ *                                 `ready` sibling, not the always-ready data fd)
  *
  * The live connect+send+recv round-trip is BEST-EFFORT (host-coupled: it
  * egresses the real NIC through slirp to the host network) -- LOGGED, never a
@@ -27,6 +30,7 @@
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -172,9 +176,32 @@ int main(void)
 	CHECK(shutdown(ufd, SHUT_WR) == 0, "udp shutdown(SHUT_WR) -> hangup");
 	CHECK(close(ufd) == 0, "close ufd");
 
+	/* 8. poll() readiness over /net (net-6b-3): the pouch poll() shim must
+	 *    target the QTPOLL /net/<proto>/N/ready sibling, NOT the always-ready
+	 *    data fd. A UDP socket connected to the gateway is immediately
+	 *    WRITABLE (POLLOUT, no peer needed -- a datagram send never blocks)
+	 *    but has NO datagram queued, so POLLIN must DEFER and time out. The
+	 *    POLLIN-timeout is the load-bearing assertion: it proves poll()
+	 *    actually WAITED on the readiness file. Were the shim still polling
+	 *    the data fd (a regular dev9p file = always-ready), POLLIN would
+	 *    return ready instantly and this would fail. */
+	int pfd = socket(AF_INET, SOCK_DGRAM, 0);
+	CHECK(pfd >= 0, "socket(AF_INET,DGRAM) #poll");
+	CHECK(sendto(pfd, "p", 1, 0, (struct sockaddr *)&gw, sizeof(gw)) == 1,
+	      "udp connect-for-poll (binds local port -> writable)");
+	struct pollfd po;
+	po.fd = pfd; po.events = POLLOUT; po.revents = 0;
+	int pr = poll(&po, 1, 2000);
+	CHECK(pr == 1 && (po.revents & POLLOUT),
+	      "poll(POLLOUT) ready on a writable udp socket");
+	po.fd = pfd; po.events = POLLIN; po.revents = 0;
+	pr = poll(&po, 1, 150);
+	CHECK(pr == 0, "poll(POLLIN) times out on an empty udp socket (waited)");
+	CHECK(close(pfd) == 0, "close pfd");
+
 	printf("pouch-hello-net: control surface OK "
 	       "(socket/reject/setsockopt/bind/listen/getsockname/"
-	       "shutdown/sendto/recvfrom/close)\n");
+	       "shutdown/sendto/recvfrom/poll/close)\n");
 
 	best_effort_live();
 

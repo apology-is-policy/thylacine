@@ -1,0 +1,282 @@
+pouch boundary-line patch 0018 - poll()/select() readiness over /net (net-6b-3)
+
+NET-DESIGN.md section 12.2; closes the net-5 SOCK_NONBLOCK -> EOPNOTSUPP
+poll-readiness seam. net-5 (0016) and net-6a-2 (0017) made the AF_INET
+socket calls (connect/send/recv/shutdown/...) work over netd's /net 9P
+files, but poll()/select() over a /net socket fd were still wrong: the
+0015 tag-dispatch shim translates a tagged socket fd to the slot's
+kernel_fd, which for an AF_INET slot is the /net/<proto>/N/data fd -- a
+REGULAR dev9p file. The kernel dev9p.poll slot (net-6b-2b) treats a
+regular 9P file as POSIX always-ready (it probes only a Spoor whose qid
+carries QTPOLL), so polling the data fd reports ready unconditionally and
+defeats the wait: a poll(POLLIN) returns immediately instead of blocking
+until data, and select()-style multiplexing reports every /net fd ready
+always.
+
+This STACKS on 0015 (the poll tag-dispatch) + 0016 (the AF_INET family) +
+0006 (the slot table). It adds NO kernel surface: the only new operation
+is a SYS_open of the readiness file (read/write/close + SYS_poll are all
+already seamed; ARCH 11.5's zero-socket-syscalls commitment holds).
+
+The mechanism: netd serves a per-connection readiness file
+/net/<proto>/N/ready whose qid carries the reserved 9P bit QTPOLL
+(net-6b-2a/2b). dev9p.poll probes ONLY a QTPOLL Spoor; a SYS_poll on it
+issues a non-consuming readiness Tread (offset = the event mask) that the
+#841 elected reader drives, returning the satisfied revents (POLLIN/
+POLLOUT/POLLERR/POLLHUP) without consuming data. So the pouch poll() must
+target the ready sibling, not the data fd. A NEW slot helper resolves the
+poll target:
+
+  pouch_sock_poll_fd(fd)
+    UNTAGGED fd        -> fd unchanged (poll a raw kernel handle).
+    FAM_UNIX tagged fd -> the slot's kernel_fd (the /srv byte stream,
+                          pollable via the kernel devsrv .poll slot) --
+                          the 0015 behavior, unchanged.
+    FAM_INET tagged fd -> the /net/<proto>/N/ready fd, opened lazily on
+                          the first poll and held for the socket's
+                          lifetime (closed at close()). -1 (POLLNVAL) if
+                          the slot is vacant or the ready file cannot be
+                          opened.
+
+The poll() shim (src/select/poll.c) routes its tagged-fd dispatch through
+pouch_sock_poll_fd instead of pouch_sock_kernel_fd; the caller's pollfd
+.events (POLLIN/POLLOUT) pass straight through -- the kernel threads them
+to dev9p.poll as the Tread offset, and netd's check_ready reads them as
+the requested mask (POLLIN=0x001/POLLOUT=0x004 align across pouch, the
+kernel, and netd). select()/pselect()/ppoll() inherit the fix: they all
+route through poll() (0005). The readiness fd lifecycle is reset at slot
+alloc and torn down at close(), alongside the ctl fd; a peer thread
+poll()ing the SAME fd or a close racing the lazy open is reconciled under
+the slot lock (keep one ready fd, close the loser), matching the inherited
+single-user-per-socket discipline.
+
+Invariants (NET-DESIGN.md section 15.1 -- composes existing section-28
+invariants, adds none): I-1/I-23/I-28 (a Proc reaches only the /net its
+territory grants); I-5 (netd owns the NIC; pouch never touches hardware);
+I-9 (the readiness wake is the dev9p.poll register-then-observe -- the
+kernel half, net_poll.tla). The pouch side carries no wait/wake state of
+its own: it opens the ready fd and parks in SYS_poll, exactly like any
+other pollable object.
+
+Files (all stack on the post-0017 tree):
+  src/internal/_pouch_socket.h   the ready_fd slot field + pouch_sock_poll_fd
+                                 decl + the now-true poll coverage note.
+  src/network/_pouch_socket.c    reset ready_fd at alloc; close it at close;
+                                 the pouch_sock_poll_fd helper (lazy open).
+  src/select/poll.c              route tagged-fd dispatch through
+                                 pouch_sock_poll_fd; update the header doc.
+
+Binding design: NET-DESIGN.md section 12.2; docs/reference/121-netd.md (the
+net-6b kernel half) + docs/reference/78-pouch.md (the AF_INET backend).
+Invariants P-1, P-3, P-4. Proving binary: /pouch-hello-net -- extended with
+the deterministic poll() control surface over a connected /net socket
+(POLLOUT-ready on a writable socket; POLLIN times out with no data; both
+through the real ready-fd translation).
+--- a/src/internal/_pouch_socket.h
++++ b/src/internal/_pouch_socket.h
+@@ -106,6 +106,7 @@
+     int                       net_proto;  /* POUCH_NET_TCP | POUCH_NET_UDP    */
+     int                       ctl_fd;     /* /net/<proto>/N/ctl fd; -1 if none */
+     int                       conn_n;     /* connection number N; -1 if none  */
++    int                       ready_fd;   /* net-6b: lazily-opened /net/<proto>/N/ready fd (the QTPOLL poll target); -1 until first poll() */
+     unsigned int              laddr;      /* bound local IPv4 host-order; 0=ANY */
+     unsigned short            lport;      /* bound local port host-order; 0=unbound */
+     unsigned char             bound;      /* bind() recorded a local addr     */
+@@ -140,6 +141,26 @@
+  */
+ int pouch_sock_kernel_fd(int fd);
+ 
++/* pouch_sock_poll_fd -- fd to the slot's POLL TARGET (net-6b). Distinct
++ * from pouch_sock_kernel_fd (the I/O fd): a poll()/select() over an
++ * AF_INET socket must target the QTPOLL-marked /net/<proto>/N/ready
++ * sibling, NOT the data fd. A regular dev9p file is POSIX always-ready
++ * (the kernel dev9p.poll slot probes only a Spoor whose qid carries
++ * QTPOLL -- which netd sets on the `ready` file alone), so polling the
++ * data fd would report ready unconditionally and defeat the wait. The
++ * ready file is opened lazily on the first poll and held for the
++ * socket's lifetime (closed at close()).
++ *
++ *   UNTAGGED fd            -> returned unchanged (poll a raw kernel fd).
++ *   FAM_UNIX tagged fd     -> the slot's kernel_fd (the /srv byte stream,
++ *                             pollable via the kernel devsrv .poll slot) --
++ *                             the 0015 behavior, unchanged.
++ *   FAM_INET tagged fd     -> the ready fd (>= 0); -1 if the slot is vacant
++ *                             or the ready file cannot be opened (the caller
++ *                             surfaces POLLNVAL).
++ */
++int pouch_sock_poll_fd(int fd);
++
+ /* pouch_sock_close — close a tagged fd's slot. Closes the kernel
+  * handle (if any) via SYS_close and marks the slot vacant. Returns
+  * 0 on success, -1 with errno set on bad fd. The caller (close in
+--- a/src/network/_pouch_socket.c
++++ b/src/network/_pouch_socket.c
+@@ -42,6 +42,7 @@
+             g_table[i].net_proto = POUCH_NET_TCP;
+             g_table[i].ctl_fd    = -1;
+             g_table[i].conn_n    = -1;
++            g_table[i].ready_fd  = -1;   /* net-6b: lazily opened on first poll() */
+             g_table[i].laddr     = 0;
+             g_table[i].lport     = 0;
+             g_table[i].bound     = 0;
+@@ -94,6 +95,83 @@
+ 
+     if (k < 0) errno = in_use ? ENOTCONN : EBADF;
+     return k;
++}
++
++int pouch_sock_poll_fd(int fd)
++{
++    /* Untagged fd: poll it directly (a raw kernel handle). */
++    if ((fd & POUCH_SOCK_TAG) == 0) return fd;
++
++    int i = slot_idx(fd);
++    if (i < 0) {
++        errno = EBADF;
++        return -1;
++    }
++
++    /* Capture the poll-relevant fields under the lock (the locked-read
++     * discipline of pouch_sock_kernel_fd). For FAM_UNIX the poll target is
++     * kernel_fd (the /srv byte stream); for FAM_INET it is the readiness fd,
++     * which may need a lazy open below. */
++    LOCK(g_lock);
++    int in_use  = g_table[i].in_use;
++    int is_inet = in_use && g_table[i].family == POUCH_SOCK_FAM_INET;
++    int rfd     = in_use ? g_table[i].ready_fd : -1;
++    int kfd     = (in_use && g_table[i].state != POUCH_SOCK_FRESH)
++                      ? g_table[i].kernel_fd : -1;
++    int proto   = g_table[i].net_proto;
++    int n       = g_table[i].conn_n;
++    UNLOCK(g_lock);
++
++    if (!in_use) {
++        errno = EBADF;
++        return -1;
++    }
++
++    if (!is_inet) {
++        /* AF_UNIX: poll the /srv byte stream (kernel devsrv .poll). A FRESH
++         * slot has no kernel_fd yet -> -1 (POLLNVAL), the 0015 behavior. */
++        if (kfd < 0) errno = ENOTCONN;
++        return kfd;
++    }
++
++    /* AF_INET: the poll target is the QTPOLL-marked /net/<proto>/N/ready
++     * sibling, NOT the data fd (a regular dev9p file is POSIX always-ready).
++     * The ready file exists for any cloned connection N (socket() always
++     * sets conn_n), so it is openable in every state -- netd's readiness
++     * reflects the connection's state. Open it lazily, once. */
++    if (rfd >= 0) return rfd;
++    if (n < 0) {
++        errno = EBADF;   /* a FAM_INET slot always has conn_n; defensive */
++        return -1;
++    }
++
++    int opened = pouch_net_open_conn_file(proto, n, "ready",
++                                          (int)POUCH_SRV_OREAD);
++    if (opened < 0) {
++        errno = ENETDOWN;
++        return -1;
++    }
++
++    /* Publish under the lock. Single-user-per-socket is the inherited
++     * discipline (0006/0016/0017's direct slot writes), but a peer thread
++     * legitimately poll()ing the SAME fd may have won the open race, or the
++     * socket may have closed while we held no lock -- reconcile both. */
++    LOCK(g_lock);
++    if (!g_table[i].in_use) {
++        UNLOCK(g_lock);
++        __syscall(SYS_close, opened);
++        errno = EBADF;
++        return -1;
++    }
++    if (g_table[i].ready_fd >= 0) {
++        int winner = g_table[i].ready_fd;
++        UNLOCK(g_lock);
++        __syscall(SYS_close, opened);
++        return winner;
++    }
++    g_table[i].ready_fd = opened;
++    UNLOCK(g_lock);
++    return opened;
+ }
+ 
+ int pouch_sock_close(int fd)
+@@ -115,10 +193,15 @@
+      * (/net/<proto>/N/ctl) for its lifetime; close it too. For AF_UNIX
+      * ctl_fd is -1, so the second close is a no-op. */
+     int c = (g_table[i].family == POUCH_SOCK_FAM_INET) ? g_table[i].ctl_fd : -1;
++    /* net-6b: a FAM_INET slot may also hold a lazily-opened readiness fd
++     * (/net/<proto>/N/ready); close it too. -1 for AF_UNIX or a socket that
++     * was never poll()ed. */
++    int r = (g_table[i].family == POUCH_SOCK_FAM_INET) ? g_table[i].ready_fd : -1;
+     g_table[i].in_use    = 0;
+     g_table[i].state     = POUCH_SOCK_FRESH;
+     g_table[i].kernel_fd = -1;
+     g_table[i].ctl_fd    = -1;
++    g_table[i].ready_fd  = -1;
+     UNLOCK(g_lock);
+ 
+     /* The kernel handle outlives the slot release for one instant — a
+@@ -128,6 +211,7 @@
+      * on a kernel-side teardown error (errno-on-close is advisory). */
+     if (k >= 0) __syscall(SYS_close, k);
+     if (c >= 0) __syscall(SYS_close, c);
++    if (r >= 0) __syscall(SYS_close, r);
+     return 0;
+ }
+ 
+--- a/src/select/poll.c
++++ b/src/select/poll.c
+@@ -12,21 +12,23 @@
+  * pollable-listener consumer) bails immediately.
+  *
+  * This shim mirrors the read/write dispatch shape: for any tagged fd
+- * in the input pollfd[] array, look up the slot's kernel handle and
+- * pass THAT to SYS_poll. Untagged fds pass through unchanged. The
+- * caller's fd identifiers are preserved across the call -- the
+- * translation lives in a stack-bounded scratch array.
++ * in the input pollfd[] array, look up the slot's POLL TARGET (via
++ * pouch_sock_poll_fd) and pass THAT to SYS_poll. Untagged fds pass
++ * through unchanged. The caller's fd identifiers are preserved across
++ * the call -- the translation lives in a stack-bounded scratch array.
+  *
+- *   tagged LISTENING/CONNECTED slot -> kernel_fd (a valid Spoor/Srv
+- *                                       handle in [0, PROC_HANDLE_MAX))
+- *   tagged FRESH slot              -> -1 in the kfds[i] entry (kernel's
++ *   tagged FAM_INET slot           -> the QTPOLL /net/<proto>/N/ready fd
++ *                                       (net-6b: the data fd is a regular
++ *                                       dev9p file = always-ready, so the
++ *                                       readiness file is the real target;
++ *                                       opened lazily on first poll)
++ *   tagged FAM_UNIX LIST/CONN slot -> kernel_fd (the /srv byte stream, a
++ *                                       valid Spoor/Srv handle pollable via
++ *                                       the kernel devsrv .poll slot)
++ *   tagged FRESH / vacant slot     -> -1 in the kfds[i] entry (kernel's
+  *                                       poll_scan_one fast-paths fd<0 to
+- *                                       POLLNVAL, the correct POSIX
+- *                                       answer for an unconnected socket)
+- *   tagged but unallocated slot    -> -1 in the kfds[i] entry (same:
+- *                                       POLLNVAL surfaces the EBADF
+- *                                       state without entering the
+- *                                       kernel with a bogus fd value)
++ *                                       POLLNVAL, the correct POSIX answer
++ *                                       for an unconnected/invalid socket)
+  *
+  * Stack-bounded scratch: PROC_HANDLE_MAX = 64 entries (~ 1 KiB).
+  * nfds > 64 returns -EINVAL pre-syscall (the kernel rejects the same
+@@ -110,7 +112,12 @@
+ 		}
+ 		int kfd;
+ 		if ((fds[i].fd & POUCH_SOCK_TAG) != 0) {
+-			kfd = pouch_sock_kernel_fd(fds[i].fd);
++			/* net-6b: pouch_sock_poll_fd (NOT pouch_sock_kernel_fd)
++			 * resolves the POLL TARGET: an AF_INET socket polls its
++			 * QTPOLL-marked /net/<proto>/N/ready sibling (the data fd
++			 * is a regular dev9p file = always-ready), an AF_UNIX
++			 * socket polls its /srv stream kernel_fd (unchanged). */
++			kfd = pouch_sock_poll_fd(fds[i].fd);
+ 			/* FRESH/vacant tagged slot is a genuinely-invalid fd:
+ 			 * keep it (kfd = -1) so the kernel reports POLLNVAL, the
+ 			 * POSIX EBADF surface. Unlike a caller-disabled negative

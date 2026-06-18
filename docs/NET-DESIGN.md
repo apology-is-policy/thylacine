@@ -529,6 +529,30 @@ poll-state-lock (walk/reap) **separately**, never nested. The spec
 action↔impl map (`PollerRegister` / `NetdReplyDemux` / `KthreadWalk`) is in
 `specs/SPEC-TO-CODE.md`.
 
+**As-built (net-6b-3): the pouch `poll()` translation.** `0018-pouch-net-poll.patch`
+makes pouch/Linux `poll()`/`select()`/`pselect`/`ppoll` work over an `AF_INET`
+`/net` socket. The hazard: a tagged socket fd's `kernel_fd` is the
+`/net/<proto>/N/data` fd — a *regular* dev9p file, which `dev9p.poll` treats as
+always-ready, so polling it reports a socket ready unconditionally. The fix is a
+new slot helper `pouch_sock_poll_fd` that resolves the **poll target**: a
+`FAM_INET` socket polls its `/net/<proto>/N/ready` sibling (the `QTPOLL`-marked
+readiness file), opened lazily on the first `poll()` and held for the socket's
+lifetime; a `FAM_UNIX` socket keeps polling its `/srv`-stream `kernel_fd`
+(unchanged); the events bits pass straight through (the kernel threads them as the
+readiness `Tread` offset). **No new kernel surface** — only a `SYS_open` of the
+readiness file. Proven by `/pouch-hello-net`: a connected UDP socket reads
+`POLLOUT`-ready but `poll(POLLIN)` times out (the load-bearing assertion — `poll()`
+*waited* on the `ready` file, not the always-ready data fd). Reference:
+`docs/reference/78-pouch.md` (the AF_INET backend).
+
+**v1.0 seam — listener-poll (#220).** netd's `check_ready` reports `can_recv()`,
+false for a TCP listener, so `poll(listener, POLLIN)` does not wake on a pending
+accept — a `select()`-based server multiplexing accept + connections would block.
+The blocking accept via `open(listen)` (§12.1's net-3a path) works, and no v1.0
+in-VM consumer polls a listener. Candidate fix: `check_ready` reports
+`accept_ready` for an `ANNOUNCED` TCP slot, proven via a netd loopback E2E; weighed
+at the net-6b-4 audit.
+
 ---
 
 ## 13. Driver model: the userspace virtio-net NIC (closes W4-F15)
