@@ -445,27 +445,42 @@ This is the primary native readiness mechanism and needs no new kernel surface.
 ### 12.2 Synchronous `poll()`/`select()` — the `dev9p.poll` bridge
 
 Pouch/Linux binaries call `poll()`/`select()`/`pselect6` over `/net` fds. The
-design:
-- **`dev9p` gains a `.poll` slot** that forwards a readiness query to netd over
-  the 9P session and registers a kernel poll-hook (the `poll_waiter_list`
-  machinery).
-- **netd signals readiness** when a connection becomes readable/writable, waking
-  the registered hook. The signal path is the deferred-wake pattern (the LS-8a
-  `console_mgr` precedent): netd's readiness notification crosses into the
-  kernel and walks the `poll_waiter_list` in process context, never from an
-  interrupt.
-- The pouch `poll()` translation drives this `dev9p.poll` per fd.
+mechanism is **BOUND** (user-voted 2026-06-18, the kernel-bridge — below — over a
+pouch-thread-per-fd shim and over deferring `poll()` to v1.x; the system-best
+real readiness primitive). The design:
 
-**The I-9 hazard, and a reserved spec.** The netd→kernel readiness wake is a
-register-then-observe surface: a `poll()` caller must not miss a readiness edge
-that lands between its readiness-check and its sleep. This is **I-9 generalized**
-(exactly the `cons_poll.tla` / `poll.tla` shape). Per the per-surface spec-first
-re-enablement precedent (SMP/ASID/death-wake/Loom/cons-poll), the net arc
-**reserves a `specs/net_poll.tla`** (clean + a `BUGGY_LOST_READY` counterexample)
-to be written **before** the `dev9p.poll` impl if the impl confirms the wake
-crosses the userspace→kernel boundary the way the sketch expects. This is the
-one net sub-area flagged for possible spec-first re-enable; the rest is
-prose-validated per the 2026-05-23 broadening.
+- **`dev9p` gains a real `.poll` slot.** `dev9p` has none today (a NULL slot
+  degenerates to "always ready" — wrong for a network fd); this is the one new
+  kernel surface in the net arc.
+- **Readiness rides the existing 9P read completion — no new 9P wire message, no
+  new userspace→kernel signal syscall, no new authority surface.** netd serves a
+  **non-consuming per-connection readiness file** (a `ready` file; the accept
+  case reuses the already-deferred `listen`); a `read` on it **blocks** (the
+  net-3a/4b deferred-reply machinery) until smoltcp reports the socket
+  readable/writable per the requested events, then returns the readiness bitmap
+  **without consuming data**. `dev9p.poll` registers a kernel poll-hook (the
+  `poll_waiter_list` machinery) and ensures an outstanding readiness read is in
+  flight; the kernel's #841 **elected reader**, on that readiness `Rread`, marks
+  the hook ready and walks the `poll_waiter_list` **in process context** (never
+  from an interrupt — the LS-8a `console_mgr` deferred-wake discipline). The
+  whole path rides the existing 9P read authority (the client already holds the
+  connection's fids).
+- The pouch `poll()`/`select()` translation drives this `dev9p.poll` per fd.
+
+**The I-9 hazard, and the spec (spec-first RE-ENABLED for this surface).** The
+readiness wake is a register-then-observe surface: a `poll()` caller must not
+miss a readiness edge that lands between its readiness-check and its sleep — the
+outstanding readiness read must be in flight *before* the caller observes
+not-ready, else an edge between is lost. This is **I-9 generalized** (exactly the
+`cons_poll.tla` / `poll.tla` shape). The vote confirms the wake crosses the
+userspace→kernel boundary, so per the per-surface spec-first re-enablement
+precedent (SMP/ASID/death-wake/Loom/cons-poll), **`specs/net_poll.tla`** (clean +
+a `BUGGY_LOST_READY` counterexample = the edge dropped when the probe is not
+outstanding before the observe) is written + TLC-green **before** the
+`dev9p.poll` impl. `dev9p.poll` (the new vtable slot) **and** the 9P-client
+reply-dispatch change (waking the hook on the readiness `Rread`) join the ARCH
+§25.4 + CLAUDE.md audit-trigger table at the net-6b impl. The rest of the net arc
+stays prose-validated per the 2026-05-23 broadening.
 
 ---
 
@@ -592,7 +607,8 @@ its own status row + audit where audit-bearing):
 | **net-3** | server side: `announce`/`listen`/`accept` + `/net/udp` + `/net/icmp` (ping). |
 | **net-4** | naming + config: `cs`/`dns`/`ndb` (§5) + `ipconfig`/DHCP (§6). |
 | **net-5** | the socket-compat pouch boundary-line (§7) — Linux/pouch binaries reach `/net`. |
-| **net-6** | `dev9p.poll` + the readiness bridge (§12.2, reserved `net_poll.tla`); Loom-multishot accept (§12.1). |
+| **net-6a** | blocking sockets: netd deferred-reply data reads + the pouch `shutdown`/`sendto`/`recvfrom` completion (closes the net-5 audit seam #209) + the Loom-multishot async path (§12.1, zero new Loom core) + a native echo server (§16). Userspace + the already-built kernel Loom — **no new ABI** (autonomy). |
+| **net-6b** | the synchronous `poll()`/`select()` bridge (§12.2): the kernel `dev9p.poll` slot + the netd readiness file + the I-9 wake. **ABI surface — spec-first `net_poll.tla`, then impl, then focused audit** (user-voted 2026-06-18: the kernel-bridge over the pouch-thread-per-fd shim). |
 | **net-7** | TLS root bundle (§9) + SNTP + `SYS_CLOCK_SETTIME` (§10) + observability (`/ctl/net`, `netstat`, §11). |
 | **net-8** | exit criteria: the server + soak proofs (§16) + one focused audit over the reserved surfaces. |
 
@@ -849,9 +865,19 @@ named in §2.)
   Pure userspace — kernel byte-unchanged. The full deterministic in-guest data
   round-trip + the ported-server/soak E2E are net-8's exit criteria (§16).
   See `docs/reference/78-pouch.md` (the AF_INET socket backend).
-- **net-6..net-8: not started.**
-  net-6 (`dev9p.poll` + `net_poll.tla` + Loom-multishot accept — ABI), net-7 (TLS
-  + SNTP + `SYS_CLOCK_SETTIME` — ABI), net-8 (exit criteria + the arc audit), per
-  §17, sequenced before the container runner (#70) per ROADMAP §2.2.
+- **net-6: DESIGN BOUND (2026-06-18 user vote), not yet built.** The §12.2
+  synchronous-readiness fork was surfaced with prior-art attached (Plan 9's
+  one-proc-per-fd + blocking-read idiom; Linux v9fs has *no* real 9P `.poll`;
+  Fuchsia/Genode converge on server-driven readiness the poller waits on) and the
+  user **voted the kernel `dev9p.poll` bridge** over a pouch-thread-per-fd shim
+  and over deferring `poll()` to v1.x — the system-best real readiness primitive
+  (the charter's committed §12.2 direction, realized 9P-natively via the existing
+  read completion). Decomposed: **net-6a** (autonomy — blocking sockets + the
+  Loom async path + a native echo server; closes the net-5 #209 seam; no new ABI)
+  lands first; **net-6b** (the `dev9p.poll` bridge — spec-first `net_poll.tla` +
+  impl + focused audit; the one ABI surface) lands second. §12.2 + §17 refined.
+- **net-7..net-8: not started.**
+  net-7 (TLS + SNTP + `SYS_CLOCK_SETTIME` — ABI), net-8 (exit criteria + the arc
+  audit), per §17, sequenced before the container runner (#70) per ROADMAP §2.2.
 
 The thylacine is real. So is its network — and it is, of course, a filesystem.
