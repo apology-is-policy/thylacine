@@ -45,7 +45,7 @@ use smoltcp::socket::{dns, icmp, tcp, udp};
 use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{
     DnsQueryType, EthernetAddress, HardwareAddress, Icmpv4Packet, Icmpv4Repr, IpAddress, IpCidr,
-    IpEndpoint, IpListenEndpoint,
+    IpEndpoint, IpListenEndpoint, Ipv4Address, Ipv4Cidr,
 };
 
 /// Max concurrent 9P connections the accept loop tracks. In practice the dev9p
@@ -195,6 +195,12 @@ const P_UDP_CLONE: u64 = 8; //  /net/udp/clone (net-3b)
 const P_ICMP_CLONE: u64 = 9; // /net/icmp/clone (net-3c)
 const P_CS: u64 = 10; //        /net/cs (net-4a: the connection server)
 const P_DNS: u64 = 11; //       /net/dns (net-4b: the resolver)
+const P_IPIFC: u64 = 12; //     /net/ipifc (net-4c: the interface-config dir)
+const P_NDB: u64 = 13; //       /net/ndb (net-4c: the live dynamic network database)
+const P_IPIFC_0: u64 = 14; //   /net/ipifc/0 (the one interface dir; the NIC)
+const P_IPIFC_0_CTL: u64 = 15; //    /net/ipifc/0/ctl (add/remove static config)
+const P_IPIFC_0_STATUS: u64 = 16; // /net/ipifc/0/status (the live config view)
+const P_IPIFC_0_LOCAL: u64 = 17; //  /net/ipifc/0/local (the interface address)
 
 const CONN_FLAG: u64 = 1 << 40;
 const PROTO_SHIFT: u64 = 32;
@@ -394,6 +400,42 @@ pub enum DnsProbeResult {
     NoServer,
 }
 
+/// The live interface configuration snapshot (net-4c, NET-DESIGN section 6).
+/// Built from the DHCP lease at bring-up (the dynamic path) or overwritten by an
+/// `ipconfig add` ctl write (the static path), and surfaced read-only through
+/// `/net/ipifc/0` + `/net/ndb`. `mac`/`mtu` are fixed NIC facts; the address /
+/// gateway / resolver are the live lease (or static) facts. The snapshot is kept
+/// coherent with the smoltcp iface by `ifc_set_static`/`ifc_clear` (they mutate
+/// both), so a reader never sees an address the iface is not actually using.
+#[derive(Clone, Copy)]
+pub struct IfConfig {
+    pub mac: [u8; 6],
+    pub mtu: usize,
+    pub addr: [u8; 4],
+    pub prefix: u8,         // CIDR prefix length (24 == /24 == 255.255.255.0)
+    pub gw: Option<[u8; 4]>,
+    pub dns: Option<[u8; 4]>, // the primary resolver (the dynamic ndb `dns=`)
+    pub up: bool,           // has an address (false before config / after remove)
+    pub dynamic: bool,      // DHCP-leased (true) vs static `ipconfig add` (false)
+}
+
+impl IfConfig {
+    /// An unconfigured interface (no address; used as the pre-lease seed and by
+    /// the ipifc_e2e selftest's throwaway Net).
+    pub fn empty() -> IfConfig {
+        IfConfig {
+            mac: [0; 6],
+            mtu: 0,
+            addr: [0; 4],
+            prefix: 0,
+            gw: None,
+            dns: None,
+            up: false,
+            dynamic: false,
+        }
+    }
+}
+
 pub struct Net {
     iface: Interface,
     sockets: SocketSet<'static>,
@@ -417,28 +459,27 @@ pub struct Net {
     // query across its growable query-slot table. None if the lease carried no
     // resolver (then a DNS query fails closed to an empty answer, never hangs).
     dns: Option<SocketHandle>,
+    // The live interface-config snapshot (net-4c): the lease (or static) facts,
+    // surfaced read-only through /net/ipifc/0 + /net/ndb. Kept coherent with the
+    // iface by ifc_set_static / ifc_clear.
+    ifc: IfConfig,
 }
 
 impl Net {
     /// Build the connection table around the already-configured smoltcp
     /// interface + socket set (moved in after DHCP bring-up). `base` is the
-    /// monotonic anchor for smoltcp's millisecond clock. `dns_servers` is the
-    /// DHCP-learned resolver list (net-4b): a non-empty list installs the shared
-    /// DNS socket; an empty list leaves `dns` None (queries fail closed fast).
-    pub fn new(
-        iface: Interface,
-        mut sockets: SocketSet<'static>,
-        base: Instant,
-        dns_servers: &[IpAddress],
-    ) -> Net {
-        // The DNS socket holds DNS_MAX_SERVER_COUNT (=1) servers; smoltcp
-        // truncates a longer list. A growable (alloc) query-slot table backs the
+    /// monotonic anchor for smoltcp's millisecond clock. `ifc` is the live
+    /// interface-config snapshot (net-4c): its `dns` field (the DHCP-learned
+    /// primary resolver) installs the shared DNS socket -- None leaves `dns`
+    /// None, so a DNS query fails closed to an empty answer (never hangs).
+    pub fn new(iface: Interface, mut sockets: SocketSet<'static>, base: Instant, ifc: IfConfig) -> Net {
+        // The DNS socket holds DNS_MAX_SERVER_COUNT (=1) server; the lease's
+        // primary resolver is it. A growable (alloc) query-slot table backs the
         // per-fid queries, so start_query never fails for "no free slot".
-        let dns = if dns_servers.is_empty() {
-            None
-        } else {
-            Some(sockets.add(dns::Socket::new(dns_servers, Vec::new())))
-        };
+        let dns = ifc.dns.map(|d| {
+            let server = IpAddress::Ipv4(Ipv4Address::new(d[0], d[1], d[2], d[3]));
+            sockets.add(dns::Socket::new(&[server], Vec::new()))
+        });
         Net {
             iface,
             sockets,
@@ -456,6 +497,7 @@ impl Net {
             mint_seq: 0,
             pending: Vec::new(),
             dns,
+            ifc,
         }
     }
 
@@ -873,6 +915,136 @@ impl Net {
                 #[allow(unreachable_patterns)]
                 _ => None,
             })
+    }
+
+    // -------------------------------------------------------------------------
+    // Interface configuration (net-4c, NET-DESIGN section 6). The /net/ipifc/0
+    // ctl verbs apply static config onto BOTH the live smoltcp iface AND the
+    // IfConfig snapshot, so the read-only /net/ipifc/0/status + /net/ndb views
+    // always reflect what the iface is actually using.
+    // -------------------------------------------------------------------------
+
+    /// Apply one `/net/ipifc/0/ctl` command. Err on a malformed verb/operand
+    /// (the handler maps it to Rlerror(EINVAL)); Ok consumes the whole write.
+    ///   add <ip> <mask> [gw]  -- static address (mask = dotted-quad or a /N or
+    ///                            bare prefix length); replaces any current addr.
+    ///   remove | unbind       -- clear the address + default route.
+    /// `bind ether <dev>` is a v1.x seam (the single NIC is bound at probe), so
+    /// it (and any other verb) is rejected honestly rather than silently dropped.
+    fn ipifc_ctl(&mut self, data: &[u8]) -> Result<(), ()> {
+        let mut it = data
+            .split(|&b| b == b' ' || b == b'\t' || b == b'\r' || b == b'\n')
+            .filter(|t| !t.is_empty());
+        let verb = it.next().ok_or(())?;
+        match verb {
+            b"add" => {
+                let ip = parse_ipv4(it.next().ok_or(())?).ok_or(())?;
+                let prefix = parse_mask(it.next().ok_or(())?).ok_or(())?;
+                let gw = match it.next() {
+                    Some(g) => Some(parse_ipv4(g).ok_or(())?),
+                    None => None,
+                };
+                self.ifc_set_static(ip, prefix, gw);
+                Ok(())
+            }
+            b"remove" | b"unbind" => {
+                self.ifc_clear();
+                Ok(())
+            }
+            _ => Err(()),
+        }
+    }
+
+    /// Install a static address onto the iface + the snapshot. The resolver
+    /// (ifc.dns) is retained -- a static address change does not by itself
+    /// change the DNS server (a v1.x `/net/ndb` write would).
+    fn ifc_set_static(&mut self, ip: [u8; 4], prefix: u8, gw: Option<[u8; 4]>) {
+        let cidr = Ipv4Cidr::new(Ipv4Address::new(ip[0], ip[1], ip[2], ip[3]), prefix);
+        self.iface.update_ip_addrs(|a| {
+            a.clear();
+            let _ = a.push(IpCidr::Ipv4(cidr));
+        });
+        let _ = self.iface.routes_mut().remove_default_ipv4_route();
+        if let Some(g) = gw {
+            let _ = self
+                .iface
+                .routes_mut()
+                .add_default_ipv4_route(Ipv4Address::new(g[0], g[1], g[2], g[3]));
+        }
+        self.ifc.addr = ip;
+        self.ifc.prefix = prefix;
+        self.ifc.gw = gw;
+        self.ifc.up = true;
+        self.ifc.dynamic = false;
+    }
+
+    /// Clear the interface address + default route (the `remove`/`unbind` verb).
+    fn ifc_clear(&mut self) {
+        self.iface.update_ip_addrs(|a| a.clear());
+        let _ = self.iface.routes_mut().remove_default_ipv4_route();
+        self.ifc.up = false;
+        self.ifc.gw = None;
+        self.ifc.dynamic = false;
+    }
+
+    /// Render `/net/ipifc/0/status` (one `key value` line per fact -- easy to
+    /// parse + assert; the Plan 9 ipifc status is terser columns).
+    fn push_ifc_status(&self, c: &mut Content) {
+        c.push(b"device ether0\n");
+        c.push(b"mac ");
+        c.push_mac(self.ifc.mac);
+        c.push(b"\nmtu ");
+        c.push_dec(self.ifc.mtu as u32);
+        c.push(b"\n");
+        if self.ifc.up {
+            c.push(b"addr ");
+            c.push_ip(self.ifc.addr);
+            c.push(b"/");
+            c.push_dec(self.ifc.prefix as u32);
+            c.push(b"\n");
+            if let Some(gw) = self.ifc.gw {
+                c.push(b"gw ");
+                c.push_ip(gw);
+                c.push(b"\n");
+            }
+        } else {
+            c.push(b"addr none\n");
+        }
+        if let Some(dns) = self.ifc.dns {
+            c.push(b"dns ");
+            c.push_ip(dns);
+            c.push(b"\n");
+        }
+        c.push(if self.ifc.dynamic {
+            b"mode dhcp\n".as_slice()
+        } else if self.ifc.up {
+            b"mode static\n".as_slice()
+        } else {
+            b"mode down\n".as_slice()
+        });
+    }
+
+    /// Render `/net/ndb` -- the live dynamic network database in ndb(6) format
+    /// (the DHCP-learned `ip`/`ipmask`/`ipgw`/`dns` facts, NET-DESIGN section 5's
+    /// "dynamic half"). Empty when the interface has no address.
+    fn push_ndb(&self, c: &mut Content) {
+        if !self.ifc.up {
+            return;
+        }
+        c.push(b"ip=");
+        c.push_ip(self.ifc.addr);
+        c.push(b" ipmask=");
+        c.push_ip(mask_octets(self.ifc.prefix));
+        if let Some(gw) = self.ifc.gw {
+            c.push(b" ipgw=");
+            c.push_ip(gw);
+        }
+        c.push(b"\n");
+        if let Some(dns) = self.ifc.dns {
+            c.push(b"\tdns=");
+            c.push_ip(dns);
+            c.push(b"\n");
+        }
     }
 
     /// UDP `connect` (net-3b): bind a local ephemeral port (smoltcp requires a
@@ -1367,7 +1539,7 @@ impl Net {
         if is_conn(path) {
             conn_filekind(path) == FK_DIR
         } else {
-            matches!(path, P_ROOT | P_TCP | P_UDP | P_ICMP)
+            matches!(path, P_ROOT | P_TCP | P_UDP | P_ICMP | P_IPIFC | P_IPIFC_0)
         }
     }
 
@@ -1380,10 +1552,12 @@ impl Net {
             }
         } else {
             match path {
-                P_TCP | P_UDP | P_ICMP | P_CS | P_DNS => P_ROOT,
+                P_TCP | P_UDP | P_ICMP | P_CS | P_DNS | P_IPIFC | P_NDB => P_ROOT,
                 P_TCP_CLONE | P_TCP_STATS => P_TCP,
                 P_UDP_CLONE | P_UDP_STATS => P_UDP,
                 P_ICMP_CLONE | P_ICMP_STATS => P_ICMP,
+                P_IPIFC_0 => P_IPIFC,
+                P_IPIFC_0_CTL | P_IPIFC_0_STATUS | P_IPIFC_0_LOCAL => P_IPIFC_0,
                 _ => P_ROOT, // P_ROOT is its own parent (the `..`-from-root fixpoint)
             }
         }
@@ -1425,6 +1599,18 @@ impl Net {
                 b"icmp" => Some(P_ICMP),
                 b"cs" => Some(P_CS),
                 b"dns" => Some(P_DNS),
+                b"ipifc" => Some(P_IPIFC),
+                b"ndb" => Some(P_NDB),
+                _ => None,
+            },
+            P_IPIFC => match name {
+                b"0" => Some(P_IPIFC_0), // the single interface (the NIC)
+                _ => None,
+            },
+            P_IPIFC_0 => match name {
+                b"ctl" => Some(P_IPIFC_0_CTL),
+                b"status" => Some(P_IPIFC_0_STATUS),
+                b"local" => Some(P_IPIFC_0_LOCAL),
                 _ => None,
             },
             P_TCP => match name {
@@ -1479,6 +1665,8 @@ impl Net {
                 push(b"icmp", P_ICMP, true);
                 push(b"cs", P_CS, false);
                 push(b"dns", P_DNS, false);
+                push(b"ipifc", P_IPIFC, true);
+                push(b"ndb", P_NDB, false);
             }
             P_TCP => {
                 push(b"clone", P_TCP_CLONE, false);
@@ -1494,6 +1682,14 @@ impl Net {
                 push(b"clone", P_ICMP_CLONE, false);
                 push(b"stats", P_ICMP_STATS, false);
                 self.push_conn_slots(PROTO_ICMP, &mut push);
+            }
+            P_IPIFC => {
+                push(b"0", P_IPIFC_0, true);
+            }
+            P_IPIFC_0 => {
+                push(b"ctl", P_IPIFC_0_CTL, false);
+                push(b"status", P_IPIFC_0_STATUS, false);
+                push(b"local", P_IPIFC_0_LOCAL, false);
             }
             _ => {}
         }
@@ -1571,6 +1767,20 @@ impl Net {
                 c.push_dec(self.icmp_opened);
                 c.push(b"\n");
             }
+            // net-4c: the interface-config + dynamic-database views.
+            P_IPIFC_0_CTL => c.push(b"0\n"), // the interface number (Plan 9 idiom)
+            P_IPIFC_0_STATUS => self.push_ifc_status(&mut c),
+            P_IPIFC_0_LOCAL => {
+                if self.ifc.up {
+                    c.push_ip(self.ifc.addr);
+                    c.push(b"/");
+                    c.push_dec(self.ifc.prefix as u32);
+                    c.push(b"\n");
+                } else {
+                    c.push(b"none\n");
+                }
+            }
+            P_NDB => self.push_ndb(&mut c),
             // clone is never read as content (its open rebinds the fid to ctl).
             _ => {}
         }
@@ -1616,12 +1826,93 @@ pub fn loopback_e2e(base: Instant) -> LoopbackResult {
     iface.update_ip_addrs(|a| {
         let _ = a.push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8));
     });
-    let mut lo = Net::new(iface, SocketSet::new(Vec::new()), base, &[]);
+    let mut lo = Net::new(iface, SocketSet::new(Vec::new()), base, IfConfig::empty());
     LoopbackResult {
         icmp: lo_icmp_roundtrip(&mut lo, &mut device),
         udp: lo_udp_roundtrip(&mut lo, &mut device),
         tcp: lo_tcp_accept(&mut lo, &mut device),
     }
+}
+
+/// net-4c: a DETERMINISTIC in-guest self-test of the interface-config path
+/// (the `/net/ipifc/0/ctl` add/remove verbs + the status/local/ndb renders),
+/// run on a THROWAWAY Net so it never disturbs the live (DHCP-leased) config.
+/// Exercises: a static `add` (the iface + IfConfig mutation), the status/ndb/
+/// local content (the lease-into-view render in reverse -- a static fact in,
+/// the rendered bytes out), `remove`, and the malformed-input rejects. No NIC,
+/// no host -> fully deterministic, so the caller ASSERTS it (a PASS/FAIL line).
+pub fn ipifc_e2e(base: Instant) -> bool {
+    let mut device = Loopback::new(Medium::Ethernet);
+    let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress([
+        0x02, 0x00, 0x00, 0x00, 0x00, 0x02,
+    ])));
+    config.random_seed = LO_SEED;
+    let ts0 = SmolInstant::from_millis(base.elapsed().as_millis() as i64);
+    let iface = Interface::new(config, &mut device, ts0);
+    let mut net = Net::new(iface, SocketSet::new(Vec::new()), base, IfConfig::empty());
+
+    let has = |c: &Content, needle: &[u8]| {
+        let s = c.as_slice();
+        needle.len() <= s.len() && s.windows(needle.len()).any(|w| w == needle)
+    };
+
+    // add: static address + mask (dotted-quad) + gateway.
+    if net.ipifc_ctl(b"add 192.168.7.5 255.255.255.0 192.168.7.1").is_err() {
+        return false;
+    }
+    let st = net.file_content(P_IPIFC_0_STATUS);
+    if !has(&st, b"addr 192.168.7.5/24") || !has(&st, b"gw 192.168.7.1") || !has(&st, b"mode static")
+    {
+        return false;
+    }
+    let ndb = net.file_content(P_NDB);
+    if !has(&ndb, b"ip=192.168.7.5") || !has(&ndb, b"ipmask=255.255.255.0") || !has(&ndb, b"ipgw=192.168.7.1") {
+        return false;
+    }
+    let local = net.file_content(P_IPIFC_0_LOCAL);
+    if local.as_slice() != b"192.168.7.5/24\n" {
+        return false;
+    }
+
+    // A bare-prefix mask resolves identically (the /N + N forms).
+    if net.ipifc_ctl(b"add 10.1.2.3 16").is_err() {
+        return false;
+    }
+    let st2 = net.file_content(P_IPIFC_0_STATUS);
+    if !has(&st2, b"addr 10.1.2.3/16") {
+        return false;
+    }
+    // The prior gateway is cleared by the gateway-less add (no stale route).
+    if has(&st2, b"gw ") {
+        return false;
+    }
+
+    // remove: the address + route go away; the ndb dynamic half empties.
+    if net.ipifc_ctl(b"remove").is_err() {
+        return false;
+    }
+    let st3 = net.file_content(P_IPIFC_0_STATUS);
+    if !has(&st3, b"addr none") || !has(&st3, b"mode down") {
+        return false;
+    }
+    if net.file_content(P_IPIFC_0_LOCAL).as_slice() != b"none\n" {
+        return false;
+    }
+    if !net.file_content(P_NDB).as_slice().is_empty() {
+        return false;
+    }
+
+    // Malformed inputs fail closed (a bad octet, a non-contiguous mask, an
+    // unknown verb, a missing operand) -- never silently accepted.
+    if net.ipifc_ctl(b"add 999.1.1.1 255.255.255.0").is_ok()
+        || net.ipifc_ctl(b"add 10.0.0.1 255.0.255.0").is_ok()
+        || net.ipifc_ctl(b"add 10.0.0.1").is_ok()
+        || net.ipifc_ctl(b"bogus").is_ok()
+        || net.ipifc_ctl(b"").is_ok()
+    {
+        return false;
+    }
+    true
 }
 
 /// Drive `lo` until `ready(lo)` or the poll budget is spent. The loopback device
@@ -1802,6 +2093,40 @@ fn parse_ipv4(s: &[u8]) -> Option<[u8; 4]> {
     } else {
         None
     }
+}
+
+/// Parse an ipifc `add` mask operand into a CIDR prefix length (net-4c). Accepts
+/// a dotted-quad netmask (`255.255.255.0` -> 24, contiguous masks only), a
+/// `/N`-form, or a bare prefix length `N`. None on a malformed / >32 / non-
+/// contiguous mask.
+fn parse_mask(s: &[u8]) -> Option<u8> {
+    let body = if !s.is_empty() && s[0] == b'/' { &s[1..] } else { s };
+    // A dotted-quad netmask -> count the leading ones (and verify contiguity).
+    if body.contains(&b'.') {
+        let m = parse_ipv4(body)?;
+        let bits = (u32::from(m[0]) << 24) | (u32::from(m[1]) << 16) | (u32::from(m[2]) << 8) | u32::from(m[3]);
+        let ones = bits.leading_ones();
+        // Contiguous iff the mask is exactly `ones` leading 1s (no holes).
+        let expect = if ones == 0 { 0 } else { !0u32 << (32 - ones) };
+        if bits != expect {
+            return None;
+        }
+        return Some(ones as u8);
+    }
+    // A bare prefix length.
+    let p = parse_u8(body)?;
+    if p <= 32 {
+        Some(p)
+    } else {
+        None
+    }
+}
+
+/// Render a CIDR prefix length as a dotted-quad netmask (net-4c ndb `ipmask=`).
+fn mask_octets(prefix: u8) -> [u8; 4] {
+    let p = prefix.min(32);
+    let bits: u32 = if p == 0 { 0 } else { !0u32 << (32 - p as u32) };
+    bits.to_be_bytes()
 }
 
 fn parse_u8(s: &[u8]) -> Option<u8> {
@@ -2044,6 +2369,18 @@ impl Content {
         self.push_dec(ip[2] as u32);
         self.push(b".");
         self.push_dec(ip[3] as u32);
+    }
+    /// Format a colon-separated lowercase-hex MAC (net-4c ipifc status).
+    fn push_mac(&mut self, mac: [u8; 6]) {
+        for (i, &b) in mac.iter().enumerate() {
+            if i != 0 {
+                self.push(b":");
+            }
+            let hi = b >> 4;
+            let lo = b & 0xf;
+            let nib = |n: u8| if n < 10 { b'0' + n } else { b'a' + (n - 10) };
+            self.push(&[nib(hi), nib(lo)]);
+        }
     }
 }
 
@@ -2914,7 +3251,7 @@ impl Conn {
             (DIR_MODE, 2u64, 0u64)
         } else {
             let m = match f.path {
-                P_TCP_CLONE | P_UDP_CLONE | P_ICMP_CLONE | P_CS | P_DNS => FILE_RW,
+                P_TCP_CLONE | P_UDP_CLONE | P_ICMP_CLONE | P_CS | P_DNS | P_IPIFC_0_CTL => FILE_RW,
                 _ if is_conn(f.path) => match conn_filekind(f.path) {
                     FK_CTL | FK_DATA => FILE_RW,
                     _ => FILE_RO,
@@ -2994,6 +3331,14 @@ impl Conn {
             // path" signal (the reader sees 0 bytes), never an error frame.
             self.query_begin(net, a.fid, f.path, a.data);
             return p9::build_rwrite(&mut self.out_buf, tag, a.count);
+        }
+        if f.path == P_IPIFC_0_CTL {
+            // net-4c: the interface-config ctl (add/remove static config). A
+            // malformed verb/operand is a hard EINVAL (not silently accepted).
+            return match net.ipifc_ctl(a.data) {
+                Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
+                Err(()) => self.err(tag, p9::E_INVAL),
+            };
         }
         if !is_conn(f.path) {
             return self.err(tag, p9::E_INVAL); // other static nodes (stats/clone) are read-only

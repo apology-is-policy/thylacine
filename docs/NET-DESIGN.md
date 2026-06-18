@@ -805,11 +805,21 @@ named in §2.)
   aaaa → empty)` + the best-effort live `net-4b DNS live query OK` + 930/930 + SMP
   gate clean. The deterministic in-guest E2E of the 9P deferred-read plumbing is
   owed to net-4d (a loopback DNS responder). See `docs/reference/121-netd.md`.
-- **net-4c..net-8: not started.**
-  net-4c (`/net/ipifc` + `ipconfig` + DHCP-lease-into-ipifc), net-4d (the focused
-  net-4 audit + close), net-5 (socket-compat pouch boundary-line), net-6
-  (`dev9p.poll` + `net_poll.tla` — ABI), net-7 (TLS + SNTP + `SYS_CLOCK_SETTIME` —
-  ABI), net-8 (exit criteria + audit), per §17, sequenced before the container
-  runner (#70) per ROADMAP §2.2.
+- **net-4c: LANDED** — `/net/ipifc/0` (the interface-config tree) + `/net/ndb` (the
+  live dynamic database) + the native `ipconfig` tool (§6). The DHCP lease folds
+  into an `IfConfig` snapshot at bring-up (the dynamic path) and is surfaced
+  read-only through `status`/`local`/`ndb`; `ipconfig add IP MASK [GW]`/`remove`
+  applies static config (the bridged path) onto both the live iface and the
+  snapshot. The resolver socket (net-4b) is seeded from `ifc.dns`, so cs→dns and the
+  ndb `dns=` line are one source of truth. Pure userspace; the kernel is
+  byte-unchanged. Boot proof: `net-4c ipifc E2E PASS` (the in-guest add/remove/
+  status/ndb selftest) + `net-4c PROBE OK (ipifc status addr=10.0.2.15 dhcp
+  gw=10.0.2.2; ndb ip=10.0.2.15 dns; local addr; ctl rejects malformed)` + 930/930 +
+  SMP gate clean. See `docs/reference/121-netd.md`.
+- **net-4d..net-8: not started.**
+  net-4d (the focused net-4 audit + close), net-5 (socket-compat pouch
+  boundary-line), net-6 (`dev9p.poll` + `net_poll.tla` — ABI), net-7 (TLS + SNTP +
+  `SYS_CLOCK_SETTIME` — ABI), net-8 (exit criteria + audit), per §17, sequenced
+  before the container runner (#70) per ROADMAP §2.2.
 
 The thylacine is real. So is its network — and it is, of course, a filesystem.

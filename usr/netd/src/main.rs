@@ -54,7 +54,7 @@ use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
 use smoltcp::socket::dhcpv4;
 use smoltcp::time::Instant as SmolInstant;
-use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr};
+use smoltcp::wire::{EthernetAddress, HardwareAddress, IpCidr};
 
 /// Console-direct diagnostics (T_SYS_PUTS) -- visible regardless of fd wiring.
 macro_rules! say {
@@ -240,10 +240,13 @@ impl Driver for NetD {
         // shape for a boot bring-up. slirp answers immediately, so it converges in
         // a few polls; the bound (~5s) is the fail-closed backstop.
         let mut leased = false;
-        // The DHCP-learned resolver list (net-4b): seeds the /net/dns socket so
-        // cs/dns can resolve non-numeric, non-ndb names. Captured here because
-        // the lease `cfg` is a transient borrow of the dhcp socket.
-        let mut dns_servers: Vec<IpAddress> = Vec::new();
+        // The live interface-config snapshot (net-4c): mac + mtu are fixed NIC
+        // facts known now; the address / gateway / resolver are filled from the
+        // lease below. It seeds the /net/dns socket (ifc.dns, net-4b) and backs
+        // the read-only /net/ipifc/0 + /net/ndb views.
+        let mut ifc = server::IfConfig::empty();
+        ifc.mac = mac;
+        ifc.mtu = MAX_FRAME - ETHERNET_HEADER;
         for _ in 0..MAX_POLLS {
             let ts = now(&base);
             iface.poll(ts, &mut device, &mut sockets);
@@ -258,9 +261,15 @@ impl Driver for NetD {
                 if let Some(router) = cfg.router {
                     let _ = iface.routes_mut().add_default_ipv4_route(router);
                 }
-                for s in cfg.dns_servers.iter() {
-                    dns_servers.push(IpAddress::Ipv4(*s));
-                }
+                // Fold the lease into the ipifc/ndb snapshot (the dynamic path):
+                // address/mask/gateway + the primary resolver, read live, never
+                // stale (NET-DESIGN section 6, the DHCP-into-config path).
+                ifc.addr = cfg.address.address().octets();
+                ifc.prefix = cfg.address.prefix_len();
+                ifc.gw = cfg.router.map(|r| r.octets());
+                ifc.dns = cfg.dns_servers.first().map(|d| d.octets());
+                ifc.up = true;
+                ifc.dynamic = true;
                 // The IP MTU is the L2 frame minus the Ethernet header.
                 say!(
                     "netd: DHCP lease addr={} router={:?} dns={} ip-mtu={}",
@@ -289,8 +298,9 @@ impl Driver for NetD {
 
         // Build the connection table around the now-configured stack (it takes
         // ownership of iface + sockets). The DHCP socket stays in the set and
-        // keeps renewing the lease.
-        let mut net = server::Net::new(iface, sockets, base, &dns_servers);
+        // keeps renewing the lease. `ifc` carries the lease into the ipifc/ndb
+        // views and seeds the resolver socket.
+        let mut net = server::Net::new(iface, sockets, base, ifc);
 
         // net-3b: a best-effort UDP round-trip through the live /net/udp data
         // path (a DNS query to slirp's resolver), bounded + logged, NEVER a boot
@@ -365,6 +375,15 @@ impl Driver for NetD {
                 lo.udp,
                 lo.icmp
             );
+        }
+
+        // net-4c: the DETERMINISTIC in-guest ipifc self-test -- exercises the
+        // /net/ipifc/0/ctl add/remove verbs + the status/local/ndb renders on a
+        // throwaway Net (never the live config). No host coupling -> ASSERTED.
+        if server::ipifc_e2e(base) {
+            say!("netd: net-4c ipifc E2E PASS (add/remove static + status + ndb, in-guest)");
+        } else {
+            say!("netd: net-4c ipifc E2E FAIL");
         }
 
         // Post the /net 9P service (9P-mode) into the boot namespace's /srv

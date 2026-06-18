@@ -646,6 +646,87 @@ The deterministic in-guest E2E of the **9P deferred-read plumbing**
 (`query_read`-defer → `poll_dns` → the held `Rread`) is **owed to net-4d** (a
 loopback DNS responder, the net-3d loopback analog).
 
+## net-4c: `/net/ipifc` + `/net/ndb` (interface config + the dynamic database)
+
+net-4c closes the IP-configuration half of NET-DESIGN §6: the interface-config
+tree, the live dynamic network database, and the `ipconfig` tool — all pure
+userspace over the existing 9P (no kernel surface).
+
+**The `/net/ipifc/0` tree** is the per-interface config view (the Plan 9 `ipifc`
+idiom). There is one interface at v1.0 (the NIC), so the tree is fixed:
+
+```
+/net/ipifc/        (dir)
+/net/ipifc/0/      (dir — interface 0, the NIC)
+  ctl              (RW)  write config verbs; read returns "0" (the if number)
+  status           (RO)  the live config, one `key value` line per fact
+  local            (RO)  the address as `addr/prefix` (or `none`)
+/net/ndb           (RO)  the live dynamic network database, ndb(6) format
+```
+
+`status` renders the live `IfConfig`:
+
+```
+device ether0
+mac 52:54:00:12:34:56
+mtu 1500
+addr 10.0.2.15/24
+gw 10.0.2.2
+dns 10.0.2.3
+mode dhcp
+```
+
+`/net/ndb` renders the same facts in ndb(6) format — the **dynamic half** of the
+network database (NET-DESIGN §5: "the resolver, the default router, the interface
+address: never stale"), complementing the compiled-in static half (`/net/cs`'s
+`localhost`/services):
+
+```
+ip=10.0.2.15 ipmask=255.255.255.0 ipgw=10.0.2.2
+	dns=10.0.2.3
+```
+
+**DHCP-lease-into-ipifc (the dynamic path).** The lease facts (address/mask,
+router, resolver) are captured at bring-up in `main.rs` and folded into
+`IfConfig` (`addr`/`prefix`/`gw`/`dns`/`up`/`dynamic=true`); `mac`/`mtu` are the
+fixed NIC facts. `Net::new` seeds the `/net/dns` resolver socket (net-4b) from
+`ifc.dns` — the same lease resolver `/net/ndb` reports, so cs→dns and the ndb
+`dns=` line are one source of truth.
+
+**`ipconfig add`/`remove` (the static path).** A `ctl` write applies static
+config (NET-DESIGN §6's bridged/production path) onto **both** the live smoltcp
+iface and the `IfConfig` snapshot, so a reader never sees an address the iface is
+not using:
+
+- `add <ip> <mask> [gw]` — `mask` is a dotted-quad (`255.255.255.0`), a `/N`, or a
+  bare prefix length; a non-contiguous mask, an out-of-range octet, or an
+  oversized prefix is rejected (`EINVAL`). Replaces the current address; clears +
+  re-adds the default route (a gateway-less `add` leaves no stale route).
+  Marks `dynamic = false` (`mode static`); the resolver is retained.
+- `remove` (alias `unbind`) — clears the address + default route (`mode down`);
+  the ndb dynamic half empties.
+- `bind ether <dev>` is a **v1.x seam** (the single NIC is bound at probe), so it
+  is rejected honestly rather than silently accepted.
+
+**`ipconfig`** (`usr/coreutils/src/bin/ipconfig.rs`) is the native client: no
+args prints `/net/ipifc/0/status` + `/net/ndb` (the `ip addr` equivalent);
+`ipconfig add IP MASK [GW]` / `ipconfig remove` write the ctl. It is a thin 9P
+client — the `/net/ipifc` tree is the mechanism.
+
+```
+netd: net-4c ipifc E2E PASS (add/remove static + status + ndb, in-guest)
+joey: net-4c PROBE OK (ipifc status addr=10.0.2.15 dhcp gw=10.0.2.2; ndb ip=10.0.2.15 dns; local addr; ctl rejects malformed)
+```
+
+The `ipifc_e2e` (a throwaway `Net`, the loopback-E2E pattern) asserts the static
+`add`/`remove` ctl path + the status/ndb/local renders + the malformed-input
+rejects deterministically, **without disturbing the live config**. The joey probe
+asserts the **read** side of the lease-into-ipifc fold (status/ndb/local reflect
+the live slirp lease) plus the **9P ctl-write** path (a malformed write is
+rejected — a guaranteed no-op — so the live config stays intact). The combination
+proves the whole surface: the ctl logic (e2e), the read render through 9P (joey),
+and the write path through 9P (joey reject).
+
 ## Data structures
 
 | Type | Role |
@@ -667,8 +748,10 @@ loopback DNS responder, the net-3d loopback analog).
 | `enum server::QueryKind { Cs{clone_tcp,port}, Dns }` | how a resolved address is formatted: `Cs` → `<clone-file> <ip>!<port>\n`; `Dns` → `<ip>\n` |
 | `enum DnsPoll { Pending, Resolved([u8;4]), Failed }` | the state of a started DNS query (net-4b); `Resolved`/`Failed` free the smoltcp slot |
 | `enum DnsProbeResult { Ok([u8;4]), NoResponse, NoServer }` | the net-4b best-effort live-query demo outcome (logged, never a boot gate) |
-| `Net.dns: Option<SocketHandle>` | the shared DNS resolver socket (net-4b); seeded from the DHCP resolver; `None` if the lease carried none (queries fail closed fast) |
-| `ndb` module (`NDB_LOCAL` + `lookup_host` + `lookup_service`) | the compiled-in network database (NET-DESIGN §5); `include_bytes!("../ndb/local")` — the byte-identical copy baked to `/lib/ndb/local`; a stateless ndb(6)-subset parser, no heap |
+| `Net.dns: Option<SocketHandle>` | the shared DNS resolver socket (net-4b); seeded from `ifc.dns` (the DHCP resolver); `None` if the lease carried none (queries fail closed fast) |
+| `server::IfConfig { mac, mtu, addr, prefix, gw, dns, up, dynamic }` | the live interface-config snapshot (net-4c); `mac`/`mtu` are fixed NIC facts, the rest are the DHCP-lease (`dynamic`) or static `ipconfig add` facts; surfaced read-only through `/net/ipifc/0` + `/net/ndb`; kept coherent with the smoltcp iface by `ifc_set_static`/`ifc_clear` |
+| `Net.ifc: IfConfig` | the one interface's config snapshot (net-4c); mutated only in the single-threaded serve loop (DHCP at bring-up; `ipifc_ctl` on a ctl write) |
+| `ndb` module (`NDB_LOCAL` + `lookup_host` + `lookup_service`) | the compiled-in network database (NET-DESIGN §5, the static half); `include_bytes!("../ndb/local")` — the byte-identical copy baked to `/lib/ndb/local`; a stateless ndb(6)-subset parser, no heap. The **dynamic half** (resolver/router/address) is `Net.ifc`, rendered live at `/net/ndb` (net-4c) |
 
 ## Tests
 
@@ -822,6 +905,18 @@ loopback DNS responder, the net-3d loopback analog).
   (the best-effort live resolver, logged) + 930/930 + boot OK + 0 EXTINCTION; SMP
   gate clean. The deterministic in-guest E2E of the **9P deferred-read plumbing** is
   owed to net-4d (a loopback DNS responder). The focused net-4 audit is net-4d.
+- **net-4c (LANDED)**: `/net/ipifc/0` (the interface-config tree) + `/net/ndb` (the
+  live dynamic database) + the native `ipconfig` tool. The DHCP lease is folded into
+  an `IfConfig` snapshot at bring-up (the dynamic path) and surfaced read-only
+  through `status`/`local`/`ndb`; an `ipconfig add IP MASK [GW]`/`remove` ctl write
+  applies static config (the bridged/production path) onto both the live iface and
+  the snapshot. The resolver socket (net-4b) is seeded from `ifc.dns`, so cs→dns and
+  the ndb `dns=` line are one source of truth. The kernel is byte-unchanged (pure
+  userspace; no new dependency). Boot proof: `net-4c ipifc E2E PASS` (the in-guest
+  add/remove/status/ndb selftest on a throwaway Net) + `net-4c PROBE OK (ipifc status
+  addr=10.0.2.15 dhcp gw=10.0.2.2; ndb ip=10.0.2.15 dns; local addr; ctl rejects
+  malformed)` + 930/930 + boot OK + 0 EXTINCTION; SMP gate clean. The focused net-4
+  audit is net-4d.
 
 ## Known caveats / seams
 
@@ -859,6 +954,26 @@ loopback DNS responder, the net-3d loopback analog).
 - **DNS is IPv4-A-record only** (net-4b): `/net/dns` + cs→dns resolve only A
   records (`proto-ipv4`); a `name aaaa` / IPv6 query yields the empty answer. AAAA
   + the full ndb-style attribute-line response are v1.x refinements.
+- **The DHCP lease is snapshotted at bring-up, not re-applied on renewal** (net-4c;
+  pre-existing since net-2a): `IfConfig` (and the iface addresses) are set once when
+  the lease is `Configured`; the serve loop keeps the lease *alive* (smoltcp renews
+  inside `iface.poll`) but does not re-handle a `Configured` event, so a renewal that
+  *changed* the address/router/resolver would not update `/net/ipifc` + `/net/ndb`.
+  Dormant for slirp (the lease is stable); the renewal-event re-application (update
+  iface + `IfConfig` + the dns socket on every `Configured`) is a v1.x refinement.
+  It is untestable in-guest with slirp (the lease never changes), so it stays a
+  documented seam rather than unverified code.
+- **`ipconfig add` does not stop the DHCP client** (net-4c): a static `add` over a
+  DHCP-leased interface overrides the address but leaves the dhcpv4 socket running
+  in the background (it would try to renew the prior lease). The DHCP-vs-static
+  arbitration (mutually-exclusive per interface, the Plan 9 model) is a v1.x
+  refinement; at v1.0 the boot path is DHCP and `add` is the bridged/production path,
+  so the two never collide in the tested configuration.
+- **`/net/ipifc` is single-interface; `bind ether`/`clone` are v1.x** (net-4c): the
+  NIC is bound at probe, so there is exactly one interface (`0`) and no `ipifc/clone`
+  (multi-NIC minting) at v1.0. `add`/`remove` cover the address axis; `bind ether
+  <dev>` / `unbind`-the-device are rejected honestly (`unbind` is accepted as the
+  `remove` alias). Multi-interface + `bind ether` land with the multi-NIC seam.
 - **The 9P deferred-resolve E2E is owed to net-4d** (net-4b): the synchronous
   `/net/dns` paths are asserted (joey) and the Net-level dns query lifecycle is
   proven live (best-effort), but the **9P deferred-read plumbing** (`query_read`

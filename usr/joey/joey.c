@@ -3566,6 +3566,65 @@ int main(void) {
                         t_putstr("joey: net-4b PROBE OK (dns 10.0.2.2 -> 10.0.2.2; "
                                  "localhost ip -> 127.0.0.1; aaaa -> empty)\n");
                     }
+                    // === net-4c: ipifc + ndb (interface config + dynamic db) ===
+                    // Read-only assertions that the DHCP lease folded into the
+                    // /net/ipifc/0 + /net/ndb views: status reports the live
+                    // slirp lease (addr 10.0.2.15, gw 10.0.2.2, mode dhcp), the
+                    // ndb dynamic half carries ip=/dns=, and local is the addr.
+                    // NOT mutated here -- the add/remove ctl path is proven by
+                    // netd's in-guest ipifc E2E (a throwaway Net), so the live
+                    // config stays intact for the rest of the boot.
+                    {
+                        long st = t_open(T_WALK_OPEN_FROM_ROOT,
+                                         "/net/ipifc/0/status", 19, T_OREAD);
+                        unsigned char sb[256];
+                        long sn = (st >= 0) ? t_read(st, sb, sizeof(sb)) : -1;
+                        if (st >= 0) (void)t_close(st);
+                        if (sn <= 0 ||
+                            !mem_contains(sb, (size_t)sn, "10.0.2.15", 9) ||
+                            !mem_contains(sb, (size_t)sn, "mode dhcp", 9) ||
+                            !mem_contains(sb, (size_t)sn, "gw 10.0.2.2", 11)) {
+                            t_putstr("joey: net-4c PROBE ipifc status FAILED\n");
+                            return 1;
+                        }
+                        long nb = t_open(T_WALK_OPEN_FROM_ROOT, "/net/ndb", 8, T_OREAD);
+                        unsigned char nbuf[256];
+                        long nn = (nb >= 0) ? t_read(nb, nbuf, sizeof(nbuf)) : -1;
+                        if (nb >= 0) (void)t_close(nb);
+                        if (nn <= 0 ||
+                            !mem_contains(nbuf, (size_t)nn, "ip=10.0.2.15", 12) ||
+                            !mem_contains(nbuf, (size_t)nn, "dns=", 4)) {
+                            t_putstr("joey: net-4c PROBE ndb FAILED\n");
+                            return 1;
+                        }
+                        long lf = t_open(T_WALK_OPEN_FROM_ROOT,
+                                         "/net/ipifc/0/local", 18, T_OREAD);
+                        unsigned char lb[64];
+                        long ln = (lf >= 0) ? t_read(lf, lb, sizeof(lb)) : -1;
+                        if (lf >= 0) (void)t_close(lf);
+                        if (ln <= 0 || !mem_contains(lb, (size_t)ln, "10.0.2.15", 9)) {
+                            t_putstr("joey: net-4c PROBE ipifc local FAILED\n");
+                            return 1;
+                        }
+                        // The 9P ctl-write path: a malformed verb is REJECTED
+                        // (a guaranteed no-op -- ipifc_ctl rejects the verb before
+                        // any mutation, so the live config is untouched). This
+                        // exercises the wire write -> netd h_write -> ipifc_ctl ->
+                        // Rlerror path without disturbing networking; a real
+                        // `add`/`remove` is proven by netd's in-guest E2E.
+                        long cf = t_open(T_WALK_OPEN_FROM_ROOT,
+                                         "/net/ipifc/0/ctl", 16, T_ORDWR);
+                        static const char bogus[] = "bogus-verb";
+                        long cw = (cf >= 0) ? t_write(cf, bogus, sizeof(bogus) - 1) : 0;
+                        if (cf >= 0) (void)t_close(cf);
+                        if (cf < 0 || cw >= 0) {
+                            t_putstr("joey: net-4c PROBE ipifc ctl reject FAILED\n");
+                            return 1;
+                        }
+                        t_putstr("joey: net-4c PROBE OK (ipifc status addr=10.0.2.15 "
+                                 "dhcp gw=10.0.2.2; ndb ip=10.0.2.15 dns; local addr; "
+                                 "ctl rejects malformed)\n");
+                    }
 #endif
                 } else {
                     t_putstr("joey: net-2c-1 /srv/net absent -- /net not mounted (netd down?)\n");
