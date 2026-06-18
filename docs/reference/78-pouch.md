@@ -969,6 +969,85 @@ the tagged-fd encoding.
 
 ---
 
+## The AF_INET socket backend (net-5)
+
+`0016-pouch-net-sockets.patch` extends the AF_UNIX slot dispatch above with an
+**AF_INET family** that translates the BSD network-socket calls into operations
+on **netd's `/net` 9P files** (NET-DESIGN §7; the Genode `socket_fs`-in-libc
+model). It adds **no kernel surface** — every translation rides
+`SYS_open`/`SYS_read`/`SYS_write`/`SYS_close`, already seamed — so ARCH §11.5's
+"zero socket syscalls" commitment holds and W4-F2 is reconciled (the shim is
+libc-level, not a kernel syscall). It is the ported-program twin of the native
+`net::TcpStream` path (which reaches the same `/net` files directly).
+
+### The family dispatch
+
+The slot (`struct pouch_sock_slot`) gains a `family` field: `FAM_UNIX` (= 0, the
+0006 `/srv` byte-stream path — a zeroed slot defaults to it) or `FAM_INET` (the
+`/net` path). The two never mix in a slot; `family` is set once at `socket()`.
+A `FAM_INET` slot additionally holds `net_proto` (TCP/UDP), `ctl_fd` (the
+connection's `/net/<proto>/N/ctl`, opened at `socket()` and held for the socket's
+life), `conn_n` (the connection number `N`), and `laddr`/`lport`/`bound` (the
+`bind()`-stashed local address). `pouch_sock_alloc` resets these for a reused
+slot; `pouch_sock_close` closes `ctl_fd` (in addition to `kernel_fd`) for a
+`FAM_INET` slot.
+
+### The translation table
+
+| BSD call | `/net` realization |
+|---|---|
+| `socket(AF_INET, SOCK_STREAM\|DGRAM)` | open `/net/{tcp,udp}/clone` (the Plan 9 connection factory, NET-DESIGN 3.2/4): the opened fid IS the new connection's `ctl`; read it for `N`. `ctl` + `N` are held in the slot. |
+| `connect(fd, sockaddr_in)` | write `connect a.b.c.d!port` to `ctl`, then open `/net/<proto>/N/data` (blocks to ESTABLISHED for TCP). The data fd becomes the slot's `kernel_fd` — so the 0006 read/write/send/recv dispatch routes the byte stream unchanged. |
+| `bind(fd, sockaddr_in)` | stash the local addr pouch-side. netd has **no `bind` ctl verb** (NET-DESIGN 3.3 lists it as design; only `connect`/`announce`/`hangup` are wired), so the addr is held until `listen()` announces it / `getsockname()` reports it. A client bind to a specific local addr is recorded but netd auto-selects the connect source (a v1.0 seam). |
+| `listen(fd, backlog)` | write `announce *!port` (or `announce a.b.c.d!port`) to `ctl`. TCP only; the backlog is netd's accept-queue depth (net-3a). |
+| `accept(fd)` | open `/net/tcp/N/listen` (blocks) → the fid is the new connection `M`'s `ctl`; read `M`; open `M/data`; mint a fresh tagged slot (CONNECTED) for it. Peer addr from `M/remote`. The listener slot stays LISTENING (netd re-arms `N`). |
+| `send`/`recv`, `read`/`write` | the 0006 dispatch — a tagged fd routes through the slot's `kernel_fd` (the data fd) to `SYS_write`/`SYS_read`. |
+| `getsockname`/`getpeername` | read `/net/<proto>/N/local` / `/remote` (or, for `getsockname` pre-connect, the `bind()`-stashed addr). |
+| `setsockopt` | `SO_REUSEADDR`/`SO_REUSEPORT`/`TCP_NODELAY` → benign no-op (netd already satisfies the semantic); everything else → `ENOPROTOOPT` (P-3 — the keepalive/ttl/tos ctl-verb wiring is a documented net-5 seam). |
+| `getsockopt` | `SO_ERROR` (0; blocking) / `SO_TYPE`; the rest → `ENOPROTOOPT`. `SO_PEERCRED` is AF_UNIX-only (no meaning on a `/net` connection). |
+| `close` | the 0006 path also closes the held `ctl_fd` for a `FAM_INET` slot. |
+
+The string builders (`pouch_net_cmd_ipport`/`_anyport`) and the `local`/`remote`
+parser (`pouch_net_read_endpoint`) are bounded stack-buffer routines (the ctl
+command ≤ 48 B, the endpoint read ≤ 40 B, octet/port range-checked); `conn_n`
+read from netd is bounded to `< 2^24` (netd's `N_MASK`).
+
+### Blocking-only; the net-6 seam
+
+net-5 is the **blocking** subset. Non-blocking I/O and `poll()`/`select()` over
+`/net` fds need the `dev9p.poll` readiness bridge (net-6), so `SOCK_NONBLOCK` →
+`EOPNOTSUPP` (P-3 — no silently-wrong POSIX).
+
+**v1.0 data-call scope (net-5 audit F1/F2 → net-6).** The data calls are
+`read`/`write`/`send`/`recv` only. `shutdown` / `sendto` / `recvfrom` / `sendmsg`
+/ `recvmsg` are **not** tag-aware — on an AF_INET socket they fall through to the
+`0xFFFF` syscall seam → `ENOSYS` (fail-closed: the tag bits never reach a kernel
+syscall, so no garbage-fd / UAF / privilege issue; the failure is loud, not
+silently-wrong). And a `recv()` on a connected socket with no data ready returns
+**0**, because netd's `data` read is non-blocking (the net-2c-2 documented
+behavior) — so a 0-return is ambiguous (no-data-yet vs EOF). The **complete
+usable** TCP layer — `shutdown(SHUT_WR)` for graceful close, the remaining socket
+calls, and blocking-until-data reads — lands with the **net-6** readiness bridge
+(`dev9p.poll`); building it over a still-non-blocking read path at net-5 would be
+a half-feature. A v1.0 port should use `send`/`recv`/`read`/`write` only and
+treat a 0-read as "retry after net-6 readiness," not EOF.
+
+### Verifying live — `/pouch-hello-net`
+
+The proving binary (the first POSIX `socket()` program Thylacine runs) does the
+deterministic, host-decoupled control-surface dance — `socket` / family+proto
+reject (`AF_INET6` → `EAFNOSUPPORT`, `SOCK_RAW` → `EPROTONOSUPPORT`) /
+`setsockopt` (SO_REUSEADDR ok, SO_KEEPALIVE → `ENOPROTOOPT`) / `bind` /
+`listen`→announce / `getsockname` (the bound port reads back) / `close` — against
+netd's `/net` (the joey `net-5 PROBE` gate), plus a best-effort logged live
+`connect`+round-trip to a public endpoint (host-coupled, never a gate). The full
+deterministic in-guest data round-trip + the ported-server/soak E2E are net-8's
+exit criteria (NET-DESIGN §16). `pouch-hello-sockets.c` subtest A was updated to
+assert `AF_INET6` (not `AF_INET`) is the refused family, since net-5 makes
+`AF_INET` valid.
+
+---
+
 ## The `/dev/full` Dev + the `getrandom` proving path
 
 Sub-chunk 11 (`pouch-devnodes`) lands the third member of the trivial

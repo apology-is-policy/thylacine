@@ -18,6 +18,16 @@ never mix. The blocking subset only -- non-blocking I/O + poll()/select()
 over /net fds need the dev9p.poll readiness bridge (net-6), so SOCK_NONBLOCK
 returns EOPNOTSUPP (P-3: no silently-wrong POSIX).
 
+v1.0 data-call scope (net-5 audit F1/F2 -> net-6): the data calls are
+read/write/send/recv only. shutdown/sendto/recvfrom/sendmsg/recvmsg are NOT
+tag-aware (they fall through to the 0xFFFF seam -> ENOSYS -- fail-closed, the
+tag never reaches a kernel syscall); and a recv() on a connected socket with
+no data ready returns 0 because netd's data read is non-blocking (net-2c-2),
+so a 0-return is ambiguous (no-data-yet vs EOF). The COMPLETE usable TCP layer
+(shutdown + the remaining socket calls + blocking-until-data reads) lands with
+the net-6 readiness bridge; building it over a non-blocking read path now would
+be a half-feature.
+
 The translation table (NET-DESIGN.md section 7; ground truth = netd's
 server.rs):
   socket(AF_INET, SOCK_STREAM|DGRAM)  open("/net/{tcp,udp}/clone") -- the
