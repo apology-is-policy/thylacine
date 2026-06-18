@@ -482,6 +482,53 @@ reply-dispatch change (waking the hook on the readiness `Rread`) join the ARCH
 §25.4 + CLAUDE.md audit-trigger table at the net-6b impl. The rest of the net arc
 stays prose-validated per the 2026-05-23 broadening.
 
+**As-built refinement (net-6b-2b): the readiness-file marker `QTPOLL` (user-voted
+2026-06-18).** `dev9p` is generic — it backs *every* 9P mount (Stratum, corvus,
+netd), not just `/net` — and a native `SYS_POLL` on a regular dev9p file is
+reachable (`libthyla_rs::poll::Poller` exists). A `poll()` on a regular file is
+POSIX **always-ready** (it never reads the file); only a netd readiness file
+should issue the blocking readiness `Tread` *probe*. So `dev9p.poll` must
+distinguish the two, and dev9p has no a-priori knowledge of which 9P files speak
+the readiness protocol (Plan 9 has no `poll()` over 9P; Linux v9fs treats 9P
+files as always-ready — there is no prior art to inherit; the distinguisher is
+Thylacine-novel). The signal is carried by a **reserved 9P `qid.type` bit
+`QTPOLL` (`0x01`, unused in 9P2000.L)**: netd sets it on the `ready` file's qid;
+`dev9p.poll` probes **only** a Spoor whose cached `qid.type` has `QTPOLL`, and
+returns POSIX always-ready (`events & POLL_REQUESTABLE` — the exact prior
+NULL-slot behavior) otherwise. The design **fails safe**: an unmarked file (any
+non-netd server, or a netd→dev9p plumbing slip) degenerates to always-ready —
+never to an unsound probe of a regular file (which would misread the file's bytes
+as a poll bitmap). The file *declares its nature*, exactly as `qid.type` already
+signals `QTDIR`/`QTSYMLINK`; this is an **additive** 9P semantic (one unused bit,
+no new message, no version bump), squarely within the bound "readiness rides the
+existing 9P read completion" mechanism. Chosen over a kernel poll-events bit
+(which fails *unsafe* — a caller that omits it busy-loops on a never-ready
+socket) and over always-probe (unsound for the reachable regular-file-poll path).
+
+**As-built realization (net-6b-2b): the global poll-pump kthread.** A `poll()`
+caller *parks* (it does not block-read), so no synchronous reader drives the 9P
+elected reader for the outstanding readiness `Tread`. A boot-spawned **global
+poll-pump kthread** (the `cons_poll` `console_mgr` + Loom-4 SQPOLL analog) drives
+it: the readiness op is an async `p9_client_submit_async` (a `Tread` whose offset
+carries the event mask); the kthread *borrows* the netd client from a live op via
+`spoor_ref` (the Loom `loom_first_inflight_client` borrow-guard — it never owns
+the client lifetime) and pumps the elected reader (`p9_client_reader_pump_once_deadline`);
+the op's `on_complete` (firing under `c->lock` in `demux_frame_locked` — the
+seam contract: no sleep, no re-enter, atomics only) records the bitmap into the
+Spoor's per-poll-state `cached_revents` + flags a deferred poll-wake + wakes the
+kthread, which walks that Spoor's `poll_waiter_list` **in process context**
+(`KthreadWalk`) and reaps the terminal op (releasing the `spoor_ref`). The per-op
+mask = the polling caller's `events`; a broader concurrent poller widens it by
+abandoning + resubmitting the union (`p9_client_abandon_async`, #845 Tflush); a
+completion that satisfies one poller's events but not another's is a benign
+spurious wake the second poller re-arms on its next `poll()` (no busy loop — the
+non-satisfying poller's next call re-defers). Lock order: `dev9p_poll`
+poll-state-lock → (submit) `c->lock`; `on_complete` is `c->lock` → atomics-only
+(no poll-state-lock → no cycle); the kthread takes `c->lock` (pump) and the
+poll-state-lock (walk/reap) **separately**, never nested. The spec
+action↔impl map (`PollerRegister` / `NetdReplyDemux` / `KthreadWalk`) is in
+`specs/SPEC-TO-CODE.md`.
+
 ---
 
 ## 13. Driver model: the userspace virtio-net NIC (closes W4-F15)
