@@ -35,9 +35,10 @@
 //       context) + release the spoor_ref pin;
 //     - GC stranded ops (non-terminal, empty poll_list -> the poll() that needed
 //       it ended; abandon via Tflush so it does not leak the pinned Spoor);
-//     - pump the elected reader of a client with a remaining outstanding op
-//       (borrow the client from the live op's pin -- the Loom borrow-guard,
-//       NEVER owning the client lifetime);
+//     - pump the elected reader of EVERY distinct client with a remaining
+//       outstanding op (borrow each client from a live op's pin -- the Loom
+//       borrow-guard, NEVER owning the client lifetime; F1: fairness across
+//       clients -- pumping only one would starve a second QTPOLL client's reply);
 //     - park when the registry is empty.
 //
 // LOCK ORDER (verified acyclic):
@@ -105,6 +106,18 @@ struct dev9p_poll_state {
 #define DEV9P_POLL_VALID    0x00010000u   // cached_revents bit 16: a completion recorded
 #define DEV9P_POLL_RV_MASK  0x0000ffffu   // the revents bits (POLLIN/OUT/ERR/HUP fit in 16)
 #define DEV9P_POLL_IDLE_NS  (20ull * 1000ull * 1000ull)   // 20ms reader-pump idle deadline
+// Distinct QTPOLL clients the kthread pumps per cycle (F1: the global pump must be
+// FAIR across clients -- pumping only one would starve a second client's pending
+// reply). v1.0 has exactly ONE QTPOLL client (the single netd /net mount); the
+// per-user-netd v1.x config has a handful. With MORE than this many simultaneous
+// QTPOLL clients each holding a perpetually-parked op, the cap is NOT graceful: the
+// registry is LIFO and the collect always walks from the head with no rotation, so
+// the >MAX clients nearest the head are pumped every cycle and a TAIL client is
+// STARVED outright (its reply never demuxed -> its pollers hang), not merely delayed
+// (R2-F1). The v1.x close (the per-client work-queue / a fair round-robin cursor)
+// must use a fair start, not this head-anchored scan. Unreachable below the cap, far
+// above the realistic per-user-netd count.
+#define DEV9P_POLL_MAX_PUMP 16
 
 static spin_lock_t            g_dev9p_poll_lock;
 static struct dev9p_poll_op  *g_dev9p_poll_ops;       // the registry (under g_lock)
@@ -231,7 +244,12 @@ short dev9p_poll(struct Spoor *c, short events, struct poll_waiter *pw) {
 
     // Lazily allocate the poll-state. Alloc the candidate OUTSIDE g_lock (no
     // kmalloc under the lock); publish under g_lock, freeing the loser of a race.
-    struct dev9p_poll_state *ps = p->poll;
+    // ACQUIRE-load the lazily-published poll-state (paired with the RELEASE store
+    // at publish below): the fast-path read is lockless, so it must synchronize-with
+    // the publish to observe the initialized poll_list (F5). Pointer loads are
+    // tear-free on aarch64 and poll_waiter_list_init is KP_ZERO-equivalent, so this
+    // is hygiene + future-proofing of the double-checked lock, not a live bug today.
+    struct dev9p_poll_state *ps = __atomic_load_n(&p->poll, __ATOMIC_ACQUIRE);
     if (!ps) {
         struct dev9p_poll_state *cand = kmalloc(sizeof(*cand), KP_ZERO);
         if (!cand) {
@@ -241,8 +259,11 @@ short dev9p_poll(struct Spoor *c, short events, struct poll_waiter *pw) {
         }
         poll_waiter_list_init(&cand->poll_list);
         spin_lock(&g_dev9p_poll_lock);
-        if (!p->poll) p->poll = cand;     // win: publish
-        ps = p->poll;
+        // RELEASE-publish so the lockless fast-path ACQUIRE-load above observes the
+        // initialized poll_list (F5). The re-reads here are serialized by g_lock.
+        if (!__atomic_load_n(&p->poll, __ATOMIC_RELAXED))
+            __atomic_store_n(&p->poll, cand, __ATOMIC_RELEASE);   // win: publish
+        ps = __atomic_load_n(&p->poll, __ATOMIC_RELAXED);
         spin_unlock(&g_dev9p_poll_lock);
         if (ps != cand) kfree(cand);       // lost the race: free the candidate
     }
@@ -300,9 +321,21 @@ short dev9p_poll(struct Spoor *c, short events, struct poll_waiter *pw) {
             ready_now = (cached & DEV9P_POLL_VALID)
                       ? (u16)(cached & DEV9P_POLL_RV_MASK & want) : 0u;
         }
-        // cand_op == NULL on OOM: no fresh probe. The hook is still registered; a
-        // live op (if any) still wakes us; else this poll falls through not-ready
-        // and the caller re-polls (degraded, never unsound).
+        // cand_op == NULL on OOM: no fresh probe. The hook is still registered.
+        //
+        // F2 (+ R2-F2): degrade to always-ready when this poll has NO path to a
+        // COVERING completion -- OOM left no fresh probe (cand_op was NULL, so !woke)
+        // AND either there is no live op (live_usable false) OR the live op does not
+        // cover this poller's events ((wanted_mask & ~live->mask) != 0, so its
+        // completion carries bits this poller masks back to 0). Without the degrade an
+        // infinite-timeout poll parks UNWAKEABLY (no live op) or, with a NARROWER live
+        // op under SUSTAINED OOM, spurious-wakes-and-reparks forever -- never a hang of
+        // the machine, but no forward progress. always-ready is a safe spurious wake
+        // the app re-checks. A COVERING live op (or a submit, woke) does make progress
+        // -> no degrade there. The `||` short-circuits, guarding the live->mask deref.
+        if (!woke && ready_now == 0u &&
+            (!live_usable || (ps->wanted_mask & ~live->mask) != 0u))
+            ready_now = (u16)(events & POLL_REQUESTABLE);
     }
     // Consume: returning ready invalidates the bitmap so the NEXT poll() re-probes
     // CURRENT readiness -- the cache is a one-shot bridge between the async
@@ -331,24 +364,39 @@ short dev9p_poll(struct Spoor *c, short events, struct poll_waiter *pw) {
 // The global poll-pump kthread (KthreadWalk).
 // =============================================================================
 
-// Borrow the client of the first non-terminal op (the Loom loom_first_inflight_client
-// pattern): take an EXTRA spoor_ref on its pin so the Spoor (=> client) stays alive
-// past the unlock + across the blocking pump, even if a concurrent reaper frees the
-// op. *pin_out is always written (NULL when none). Under g_dev9p_poll_lock.
-static struct p9_client *dev9p_poll_borrow_client(struct Spoor **pin_out) {
-    struct p9_client *cl = NULL;
-    *pin_out = NULL;
+// Collect the DISTINCT clients of the non-terminal ops -- the elected readers the
+// kthread must drive this cycle (the Loom loom_first_inflight_client pattern, fanned
+// out across clients). F1: pumping only ONE client per cycle (the head's) would
+// starve a SECOND client's pending reply -- a perpetually-parked op on client CX
+// (non-terminal, non-empty poll_list -> never reaped/GC'd) would pin the pump to CX
+// forever, so client CY's ready socket never gets demuxed and CY's poller hangs. The
+// global pump must be FAIR. Dedup by client pointer; take an EXTRA spoor_ref on each
+// client's pin (the borrow-guard: the Spoor => client stays alive past the unlock +
+// across the blocking pump, even if a concurrent reaper frees the op). out_cl[i] /
+// out_pin[i] are paired; returns the count (<= max). Under g_dev9p_poll_lock.
+//
+// v1.0 has exactly ONE QTPOLL client (the single netd /net mount) -> collects 1; the
+// per-user-netd v1.x config a handful. With MORE than `max` distinct clients this
+// head-anchored LIFO scan STARVES the tail (R2-F1; see the DEV9P_POLL_MAX_PUMP note)
+// -- the v1.x per-client-work-queue close must use a fair start, not this scan.
+static u32 dev9p_poll_collect_clients(struct p9_client **out_cl,
+                                      struct Spoor **out_pin, u32 max) {
+    u32 n = 0;
     spin_lock(&g_dev9p_poll_lock);
-    for (struct dev9p_poll_op *op = g_dev9p_poll_ops; op; op = op->next) {
-        if (!__atomic_load_n(&op->terminal, __ATOMIC_ACQUIRE)) {
-            cl = op->client;
-            *pin_out = op->pinned;
-            spoor_ref(op->pinned);   // borrow-guard
-            break;
-        }
+    for (struct dev9p_poll_op *op = g_dev9p_poll_ops; op && n < max; op = op->next) {
+        if (__atomic_load_n(&op->terminal, __ATOMIC_ACQUIRE))
+            continue;
+        bool seen = false;
+        for (u32 i = 0; i < n; i++)
+            if (out_cl[i] == op->client) { seen = true; break; }
+        if (seen) continue;
+        out_cl[n]  = op->client;
+        out_pin[n] = op->pinned;
+        spoor_ref(op->pinned);   // borrow-guard (=> Spoor + client alive)
+        n++;
     }
     spin_unlock(&g_dev9p_poll_lock);
-    return cl;
+    return n;
 }
 
 static int dev9p_poll_park_cond(void *arg) {
@@ -411,28 +459,35 @@ static void dev9p_poll_service_once(void) {
         abandon = next;
     }
 
-    // Phase 3: pump the elected reader of a client with a remaining live op, else
-    // park. Borrow the client from the live op (the Spoor pin keeps it alive past
-    // the unlock + across the blocking pump).
-    struct Spoor *pin = NULL;
-    struct p9_client *cl = dev9p_poll_borrow_client(&pin);
-    if (cl) {
-        u64 deadline = timer_now_ns() + DEV9P_POLL_IDLE_NS;
-        int rc = p9_client_reader_pump_once_deadline(cl, deadline);
-        spoor_clunk(pin);                  // release the borrow-guard
-        if (rc == P9_PUMP_BUSY) sched();    // a sync reader holds the role -- yield
-        // PROGRESS: demuxed a frame (a completion may have set an op terminal).
-        // IDLE: the boundary deadline lapsed, stream synced. DEAD:
-        // client_mark_dead_locked already error-completed every async op (each
-        // dev9p_poll_complete fired -P9_E_IO -> POLLERR cached + terminal), so the
-        // next cycle reaps them (waking pollers POLLERR) + parks. All cases: loop.
-    } else {
+    // Phase 3: pump the elected reader of EVERY distinct client with a remaining
+    // live op (F1 -- fairness; pumping only one would starve a second client), else
+    // park. Each pin keeps its client alive past the unlock + across the blocking
+    // pump; clunk each after its pump.
+    struct p9_client *clients[DEV9P_POLL_MAX_PUMP];
+    struct Spoor     *pins[DEV9P_POLL_MAX_PUMP];
+    u32 npump = dev9p_poll_collect_clients(clients, pins, DEV9P_POLL_MAX_PUMP);
+    if (npump == 0) {
         // Nothing outstanding -> park. The cond re-checks the registry count under
         // the rendez lock (register-then-observe vs a concurrent submit's wake).
         // kproc never group-terminates, so SLEEP_INTR (a defensive death-interrupt)
         // just re-loops -- there is no caller state to unwind.
         (void)sleep(&g_dev9p_poll_rendez, dev9p_poll_park_cond, NULL);
+        return;
     }
+    bool any_busy = false;
+    for (u32 i = 0; i < npump; i++) {
+        u64 deadline = timer_now_ns() + DEV9P_POLL_IDLE_NS;
+        int rc = p9_client_reader_pump_once_deadline(clients[i], deadline);
+        spoor_clunk(pins[i]);              // release this client's borrow-guard
+        if (rc == P9_PUMP_BUSY) any_busy = true;
+        // PROGRESS: demuxed a frame (a completion may have set an op terminal).
+        // IDLE: the boundary deadline lapsed, stream synced. DEAD:
+        // client_mark_dead_locked already error-completed every async op of THIS
+        // client (each dev9p_poll_complete fired -P9_E_IO -> POLLERR cached +
+        // terminal), so the next cycle reaps them (waking pollers POLLERR). A DEAD
+        // client's ops drop out of the next collect (terminal). All cases: loop.
+    }
+    if (any_busy) sched();   // some client's reader role is held by a sync reader -- yield
 }
 
 void dev9p_poll_pump_main(void) {

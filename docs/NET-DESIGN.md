@@ -510,9 +510,13 @@ caller *parks* (it does not block-read), so no synchronous reader drives the 9P
 elected reader for the outstanding readiness `Tread`. A boot-spawned **global
 poll-pump kthread** (the `cons_poll` `console_mgr` + Loom-4 SQPOLL analog) drives
 it: the readiness op is an async `p9_client_submit_async` (a `Tread` whose offset
-carries the event mask); the kthread *borrows* the netd client from a live op via
-`spoor_ref` (the Loom `loom_first_inflight_client` borrow-guard — it never owns
-the client lifetime) and pumps the elected reader (`p9_client_reader_pump_once_deadline`);
+carries the event mask); the kthread *borrows* the netd client(s) from the live
+ops via `spoor_ref` (the Loom `loom_first_inflight_client` borrow-guard — it never
+owns the client lifetime) and pumps the elected reader of **every distinct client**
+with a non-terminal op each cycle (`p9_client_reader_pump_once_deadline`; the
+net-6b-4 multi-client fairness fix — pumping only the head client would starve a
+second QTPOLL client's pending reply, a hang latent under the v1.x per-user-netd
+config, v1.0-safe with the single netd → single `dev9p` client);
 the op's `on_complete` (firing under `c->lock` in `demux_frame_locked` — the
 seam contract: no sleep, no re-enter, atomics only) records the bitmap into the
 Spoor's per-poll-state `cached_revents` + flags a deferred poll-wake + wakes the
