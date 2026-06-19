@@ -1,0 +1,27 @@
+# usr/lib/tls -- native TLS for libthyla-rs clients (NET-DESIGN section 9).
+#
+# rustls (pure Rust) + the RustCrypto CryptoProvider, no_std on
+# aarch64-unknown-none. The kernel CSPRNG backs getrandom; the LS-K wall clock
+# backs cert-validity checks. TLS is a userspace library concern -- netd serves
+# raw TCP `data`, the handshake runs here over that stream (NET-DESIGN section 9).
+[package]
+name = "tls"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lib]
+name = "tls"
+path = "src/lib.rs"
+
+[dependencies]
+libthyla-rs = { path = "../libthyla-rs" }
+# rustls core, no built-in provider (custom-provider) -> we supply RustCrypto.
+rustls = { version = "0.23", default-features = false, features = ["custom-provider"] }
+# The pure-Rust provider (aes-gcm / chacha20poly1305 / p256+p384 / rsa / x25519 /
+# sha2). default-features=false drops its `std` (which would pull getrandom/std).
+rustls-rustcrypto = { version = "0.0.2-alpha", default-features = false, features = ["alloc", "zeroize"] }
+rustls-pki-types = { version = "1", default-features = false, features = ["alloc"] }
+# getrandom has no bare-metal backend; `custom` lets us route it to SYS_GETRANDOM.
+getrandom = { version = "0.2", features = ["custom"] }

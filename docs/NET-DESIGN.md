@@ -378,6 +378,50 @@ in without a netd rewrite; the full *stateful* packet filter remains the v1.x ad
 W4-F4 is closed: the root bundle has a designed home (a baked file at a canonical
 path), not just an exit-criterion mention.
 
+### 9.1 As-built: the native rustls feasibility (net-7c-1)
+
+The feasibility spike proved native rustls TLS runs on Thylacine. The as-built
+recipe (`usr/lib/tls`):
+
+- **rustls 0.23** `default-features = false`, feature `custom-provider` (no
+  built-in aws-lc-rs/ring -- those compile C/asm and do not build bare-metal).
+- **`rustls-rustcrypto`** as the pure-Rust `CryptoProvider` (aes-gcm /
+  chacha20poly1305 / p256+p384 ecdsa / rsa / x25519 / sha2), `default-features =
+  false` (its default pulls `std`, which cascades `getrandom/std`).
+- **`getrandom` 0.2 + `custom`** with `register_custom_getrandom!` routed to the
+  kernel CSPRNG (`SYS_GETRANDOM`). The provider draws the client random + the
+  ECDHE ephemeral key share through getrandom, which has no bare-metal backend.
+- A **`TimeProvider`** reading LS-K `CLOCK_REALTIME` -- no_std rustls has no
+  built-in clock, and webpki needs the wall time to bound a server cert's
+  validity. This is why TLS follows net-7a (the clock work): a native TLS client
+  cannot validate a certificate without a real wall clock.
+- The **unbuffered connection API** (`UnbufferedClientConnection`) -- the no_std
+  rustls connection type, driven over a `/net` `TcpStream` (the transport glue
+  lands with its loopback E2E in net-7c-2).
+
+Two as-built constraints the spike surfaced:
+
+- **`CAP_CSPRNG_READ` is required.** A native TLS tool must be spawned WITH
+  `CAP_CSPRNG_READ` (the spawning authority -- the warden / login / joey --
+  confers it, exactly as joey does for corvus). Without it the handshake cannot
+  generate its key share. This is a real conferral requirement, not an option.
+- **Binary size sits at the `SYS_SPAWN_BLOB_MAX` (1 MiB) ceiling.** The TLS-1.3
+  client smoke is ~1.0 MiB (TLS 1.2 + RSA-kx pushes it ~60 KiB OVER, so v1.0 is
+  **TLS 1.3-only** for the native client -- a sound modern posture; the
+  pouch/curl path still does 1.2 via its own TLS). The full https tool
+  (net-7c-2: + the transport + the PEM root loader + the GET) will exceed 1 MiB.
+  The recorded size strategy is to **strip the TLS binaries** (no userspace tool
+  consumes their symbols -- only the kernel's own addr2line uses the kernel
+  symtab; a build-time strip keeps an unstripped copy under `build/` for manual
+  fault-PC resolution). This is pure build config -- no kernel change. A
+  `SYS_SPAWN_BLOB_MAX` bump is the fallback if stripping proves insufficient.
+
+The roots-source decision: the native client reads the baked
+`/etc/ssl/certs/ca-certificates.crt` at runtime (one source of truth with the
+pouch/curl path), NOT a compiled-in `webpki-roots` -- which would be a second
+copy of ~150 certs and add hundreds of KiB toward the cap. net-7c-2 lands the
+PEM loader + the baked bundle.
+
 ---
 
 ## 10. NTP / clock synchronization (closes W4-F11)

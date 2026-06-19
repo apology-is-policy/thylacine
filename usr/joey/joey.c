@@ -3778,6 +3778,45 @@ int main(void) {
                                  "/net/summary rollup)\n");
                     }
 
+                    // === net-7c-1: native rustls TLS feasibility (runtime) ===
+                    // Spawn /bin/tls-smoke (native, no pouch): it builds a real
+                    // rustls ClientConfig (the RustCrypto provider + the LS-K
+                    // wall clock) and drives the unbuffered handshake to emit a
+                    // ClientHello -- exercising the pure-Rust crypto provider,
+                    // the kernel CSPRNG (client random + ECDHE key share), and
+                    // the TLS record layer ON the aarch64 target, in-guest. A
+                    // clean exit proves native rustls RUNS, not just links
+                    // (compile + link + the 772 KiB binary < the 1 MiB spawn
+                    // blob cap were proven at build time). The TlsStream
+                    // transport + a full handshake over /net (loopback E2E) +
+                    // the https fetch tool are net-7c-2. tls-smoke prints via
+                    // the console-direct t_putstr (no fd 1 -- like net-echo/
+                    // sntp), but a TLS client legitimately needs the kernel
+                    // CSPRNG (the client random + the ECDHE ephemeral key
+                    // share), so it is spawned WITH CAP_CSPRNG_READ -- the real
+                    // design requirement for any native TLS tool (the spawning
+                    // authority confers it, as joey does for corvus).
+                    {
+                        const char tls_name[] = "/bin/tls-smoke";
+                        long tls_pid = t_spawn_with_caps(tls_name,
+                                                         sizeof(tls_name) - 1,
+                                                         T_CAP_CSPRNG_READ);
+                        if (tls_pid <= 0) {
+                            t_putstr("joey: t_spawn(\"tls-smoke\") FAILED\n");
+                            return 1;
+                        }
+                        int tls_status = -1;
+                        long tls_reaped =
+                            t_wait_pid_for((int)tls_pid, 0, &tls_status);
+                        if (tls_reaped != tls_pid || tls_status != 0) {
+                            t_putstr("joey: net-7c PROBE tls-smoke FAILED\n");
+                            return 1;
+                        }
+                        t_putstr("joey: net-7c PROBE OK (native rustls "
+                                 "ClientHello: RustCrypto provider + CSPRNG + "
+                                 "record layer on aarch64)\n");
+                    }
+
                     // === net-6b: the dev9p.poll readiness bridge (the kernel half) ===
                     // The E2E proof of the kernel dev9p_poll path. Clone a UDP
                     // connection, connect (bind a local port -> sendable), open its
