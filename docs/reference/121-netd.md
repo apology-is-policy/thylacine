@@ -1445,6 +1445,47 @@ egresses the wire, not internally).
     boot gate (exit-0 + `net-8b loopback E2E PASS`), so it cannot ship silently. v1.x:
     fail-closed at netd's own layer (return `Err` on non-`PASS`, like `post_srv_net`).
 
+## #257: the deferred connect — `data` open blocks to ESTABLISHED
+
+The fourth deferred-reply leg (after the net-3a `listen` accept, the net-4b
+cs/dns read, and the net-6a `data` read): opening a TCP connection's `data` file
+holds its `Rlopen` until the **handshake completes**.
+
+**The bug it closes.** `TcpStream::connect` writes `connect a.b.c.d!p` to `ctl`
+(which `smoltcp::connect` turns into a SYN — the socket enters **SynSent**), then
+opens `data`. Before #257, `h_lopen` replied `Rlopen` on `data` *immediately*
+("open is non-blocking EXCEPT listen"), so `connect` returned while the socket
+was still SynSent. At loopback's ~0 RTT the handshake finished within a serve-loop
+poll, so the first write landed on an ESTABLISHED socket — every TCP E2E was
+loopback, which **masked the bug entirely**. A real outbound connection over the
+NIC has RTT: the client's first write (or TLS handshake) hit a still-SynSent
+socket, `tcp::Socket::send_slice` failed, and the tool reported `write request
+failed` / `tls transport io error`. (Surfaced live by `curl http(s)://example.com`
+when the host had verified internet — so a guest bug, not the environment.)
+
+**The fix.** `h_lopen` on a `data` file whose slot is `ConnectState::Pending`
+(`is_active() && SynSent/SynReceived`) registers a `PendingConnect { fid, slot_n,
+tag, path, deadline_ms }` and defers (no `Rlopen` this frame); the client's
+`open(data)` blocks on the outstanding tag. The serve loop's `poll_connects`
+(after `net.poll`, alongside `poll_data`/`poll_ready`/`poll_dns`) resolves it:
+
+- **ESTABLISHED** (`accept_ready`) → send the held `Rlopen` → `data` is live.
+- **Failed** (Closed/aborted — a RST/refusal) → `Rlerror ECONNREFUSED`.
+- still **Pending** past `deadline_ms` (`CONNECT_TIMEOUT_MS = 15 s`) → abort the
+  socket → `Rlerror ETIMEDOUT`, so a SYN to an unreachable host cannot hold the
+  open forever (the silent-peer bound; a RST fails fast).
+
+This makes the long-standing `TcpStream::connect` "blocks to ESTABLISHED" comment
+*true*. One fix covers the native client (`TcpStream`/curl/wget) and the pouch
+AF_INET path (both open `data` after `connect`). UDP/ICMP have no handshake
+(`ConnectState::Ready` → reply immediately), and an accepted TCP `M` is already
+ESTABLISHED, so neither defers. Cancelled by the fid's clunk / a Tflush on its
+tag / teardown / Tversion (like `PendingRead`); the poll delay clamps to the
+floor while a connect is pending (the SYN-ACK arrives on the NIC, not a pollable
+fd). **Owed (#257):** a deterministic outbound-TCP-over-NIC regression (a host
+server reached via a slirp `guestfwd`) — the gap the loopback-only E2Es left; the
+live `example.com` fetch is the interim real-world proof.
+
 ## References
 
 - `docs/NET-DESIGN.md` (the #68 charter) — §2 (one netd, narrowed views), §13

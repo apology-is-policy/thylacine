@@ -397,6 +397,41 @@ struct PendingRead {
     cap: usize,  // the negotiated max bytes to return
 }
 
+/// The connect state of a TCP slot's socket, for the deferred `data` open.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum ConnectState {
+    Pending, // SynSent/SynReceived -- the handshake is in flight
+    Ready,   // ESTABLISHED (or a non-TCP slot) -- `data` is usable
+    Failed,  // Closed/aborted -- the connect was refused/reset/gave up
+}
+
+/// A deferred TCP `data` open held until the connection reaches ESTABLISHED
+/// (the net-3a/net-6a deferred-reply pattern applied to the outbound connect).
+/// A real outbound connection has RTT, so `data` is NOT usable the instant
+/// `connect` is issued (the socket is SynSent); replying Rlopen immediately lets
+/// the client write into a SynSent socket, where `send_slice` fails -- the
+/// outbound-connect bug the loopback-only E2Es (0 RTT -> established within a
+/// poll) masked. netd HOLDS the Rlopen until the handshake completes (deliver
+/// the held Rlopen -> `data` is live), the connect fails (RST/reset -> Rlerror
+/// ECONNREFUSED), or the deadline expires (abort -> Rlerror ETIMEDOUT, so a SYN
+/// to an unreachable host cannot hang the open forever). Loopback establishes
+/// within a poll, so it resolves on the first poll there (the E2Es are
+/// behavior-identical). Cancelled by the fid's clunk / a Tflush on its tag /
+/// teardown / Tversion, exactly like PendingRead. Bounded by MAX_FIDS (#65).
+#[derive(Copy, Clone)]
+struct PendingConnect {
+    fid: u32,         // the data fid (cancelled on its clunk)
+    slot_n: u32,      // the connection slot whose handshake we await
+    tag: u16,         // the held Tlopen tag (cancelled by a Tflush on it)
+    path: u64,        // the data file path (to compute the held Rlopen's qid)
+    deadline_ms: u64, // abort + Rlerror ETIMEDOUT if still Pending past this
+}
+
+/// How long netd holds a deferred `data` open before giving up on an
+/// unreachable peer (a SYN that never gets a SYN-ACK). A refusal (RST) fails
+/// immediately via ConnectState::Failed; this bounds only the silent case.
+const CONNECT_TIMEOUT_MS: u64 = 15_000;
+
 /// A deferred readiness probe (net-6b): a `read(/net/<proto>/N/ready)` whose
 /// requested poll mask (the Tread OFFSET) is not yet satisfied. netd HOLDS the
 /// Rread until the socket becomes ready for the mask (or an always-reported
@@ -764,6 +799,44 @@ impl Net {
     /// smoltcp's monotonic timestamp (ms since `base`).
     pub fn now(&self) -> SmolInstant {
         SmolInstant::from_millis(self.base.elapsed().as_millis() as i64)
+    }
+
+    /// Monotonic ms since `base` (for deferred-connect deadlines).
+    pub fn now_ms(&self) -> u64 {
+        self.base.elapsed().as_millis() as u64
+    }
+
+    /// The connect state of a TCP slot, for the deferred `data` open: Pending
+    /// while the handshake is in flight (SynSent/SynReceived), Ready once
+    /// ESTABLISHED (`accept_ready` = is_active past the SYN exchange), Failed
+    /// once Closed/aborted. A non-TCP slot (UDP/ICMP) has no handshake -> Ready.
+    fn tcp_connect_state(&self, n: u32) -> ConnectState {
+        let h = match self.slot_socket(n) {
+            Some(h) => h,
+            None => return ConnectState::Failed,
+        };
+        if self.slot_proto(n) != Some(PROTO_TCP) {
+            return ConnectState::Ready;
+        }
+        let s = self.set_ref(n).get::<tcp::Socket>(h);
+        if accept_ready(s) {
+            ConnectState::Ready
+        } else if s.is_active() {
+            ConnectState::Pending
+        } else {
+            ConnectState::Failed
+        }
+    }
+
+    /// Abort a TCP slot's in-flight connect (on a deadline expiry) so the socket
+    /// leaves SynSent -> the next poll_connects sees Failed and replies Rlerror.
+    fn tcp_abort_connect(&mut self, n: u32) {
+        if self.slot_proto(n) != Some(PROTO_TCP) {
+            return;
+        }
+        if let Some(h) = self.slot_socket(n) {
+            self.set_mut(n).get_mut::<tcp::Socket>(h).abort();
+        }
     }
 
     /// Service the stack once: TX flush + RX drain across every socket. Called
@@ -3830,6 +3903,11 @@ pub struct Conn {
     // on a not-yet-satisfied poll mask, completed by poll_ready when the socket
     // becomes ready per the mask. The dev9p.poll bridge's netd half.
     pending_ready: Vec<PendingReady>,
+    // Deferred TCP `data` opens holding their Rlopen (#257): each parked on a
+    // still-connecting socket, completed by poll_connects when the handshake
+    // reaches ESTABLISHED (or fails / times out). Makes the data open block to
+    // ESTABLISHED, as TcpStream::connect documents -- the outbound NIC path.
+    pending_connects: Vec<PendingConnect>,
 }
 
 impl Conn {
@@ -3845,6 +3923,7 @@ impl Conn {
             queries: Vec::new(),
             pending_reads: Vec::new(),
             pending_ready: Vec::new(),
+            pending_connects: Vec::new(),
         }
     }
 
@@ -4077,6 +4156,71 @@ impl Conn {
         !self.pending_reads.is_empty()
     }
 
+    /// Complete any deferred TCP `data` opens whose handshake has resolved (#257;
+    /// the serve-loop pass, called per-Conn after net.poll so a transition this
+    /// tick is visible). ESTABLISHED -> send the held Rlopen (the data stream is
+    /// now live); Failed (RST/reset/timeout-abort) -> send Rlerror; still Pending
+    /// past the deadline -> abort the socket + Rlerror ETIMEDOUT (so a SYN to an
+    /// unreachable host cannot hold the open forever). False on a write failure
+    /// (tear the connection down). Mirrors poll_data.
+    pub fn poll_connects(&mut self, net: &mut Net) -> bool {
+        let mut i = 0;
+        while i < self.pending_connects.len() {
+            let pc = self.pending_connects[i];
+            match net.tcp_connect_state(pc.slot_n) {
+                ConnectState::Pending => {
+                    if net.now_ms() >= pc.deadline_ms {
+                        net.tcp_abort_connect(pc.slot_n);
+                        self.pending_connects.remove(i);
+                        if !self.deliver_connect_err(pc.tag, p9::E_TIMEDOUT) {
+                            return false;
+                        }
+                    } else {
+                        i += 1; // still handshaking; check next tick
+                    }
+                }
+                ConnectState::Ready => {
+                    self.pending_connects.remove(i);
+                    let q = self.qid_of(net, pc.path);
+                    if !self.deliver_connect(pc.tag, &q) {
+                        return false;
+                    }
+                }
+                ConnectState::Failed => {
+                    self.pending_connects.remove(i);
+                    if !self.deliver_connect_err(pc.tag, p9::E_CONNREFUSED) {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// Build + send the held Rlopen for a now-ESTABLISHED deferred data open.
+    fn deliver_connect(&mut self, tag: u16, qid: &p9::Qid) -> bool {
+        self.out_buf.clear();
+        self.out_buf.resize(SRV_MSIZE_USIZE, 0);
+        match p9::build_rlopen(&mut self.out_buf, tag, qid, 0) {
+            Ok(rlen) => self.send_all(rlen),
+            Err(()) => false,
+        }
+    }
+
+    /// Build + send the held Rlerror for a failed/timed-out deferred data open.
+    fn deliver_connect_err(&mut self, tag: u16, code: u32) -> bool {
+        self.out_buf.clear();
+        self.out_buf.resize(SRV_MSIZE_USIZE, 0);
+        match p9::build_rlerror(&mut self.out_buf, tag, code) {
+            Ok(rlen) => self.send_all(rlen),
+            Err(()) => false,
+        }
+    }
+
+    pub fn has_pending_connects(&self) -> bool {
+        !self.pending_connects.is_empty()
+    }
+
     /// Complete any deferred readiness probes whose socket now satisfies the mask
     /// (the net-6b analog of poll_data): the serve-loop pass, called per-Conn
     /// after net.poll() (so a transition this tick is visible). For each parked
@@ -4182,6 +4326,7 @@ impl Conn {
         self.query_clear_all(net); // free cs/dns sessions + cancel queries (net-4b)
         self.pending_reads.clear(); // the held Rreads die with the connection (net-6a)
         self.pending_ready.clear(); // ... and the held readiness Rreads (net-6b)
+        self.pending_connects.clear(); // ... and the held connect Rlopens (#257)
     }
 
     fn fid_find(&self, fid: u32) -> Option<usize> {
@@ -4225,6 +4370,7 @@ impl Conn {
             self.query_drop(net, fid); // free cs/dns session + cancel query (net-4b)
             self.pending_reads.retain(|pr| pr.fid != fid); // drop blocked reads (net-6a)
             self.pending_ready.retain(|pr| pr.fid != fid); // drop readiness probes (net-6b)
+            self.pending_connects.retain(|pc| pc.fid != fid); // drop deferred connects (#257)
             if let Some(n) = path_conn_n(f.path) {
                 net.slot_unref(n);
             }
@@ -4426,6 +4572,7 @@ impl Conn {
         self.query_clear_all(net); // a Tversion also resets cs/dns sessions (net-4b)
         self.pending_reads.clear(); // ... and drops any blocked data reads (net-6a)
         self.pending_ready.clear(); // ... and any deferred readiness probes (net-6b)
+        self.pending_connects.clear(); // ... and any deferred connect opens (#257)
     }
 
     fn h_attach(&mut self, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
@@ -4592,6 +4739,35 @@ impl Conn {
                 }
             }
         } else {
+            // Opening a TCP `data` file on a still-connecting socket DEFERS the
+            // Rlopen until the handshake reaches ESTABLISHED (#257): the data
+            // stream is unusable while the socket is SynSent, and a real outbound
+            // connection has RTT, so an immediate Rlopen lets the client write
+            // into a SynSent socket (send fails). poll_connects sends the held
+            // Rlopen on ESTABLISHED (or Rlerror on failure/timeout). Loopback
+            // establishes within a poll -> resolves on the first poll. UDP/ICMP
+            // have no handshake (ConnectState::Ready), and an accepted TCP M is
+            // already ESTABLISHED -> both reply immediately below.
+            if is_conn(f.path)
+                && conn_filekind(f.path) == FK_DATA
+                && net.tcp_connect_state(conn_n(f.path)) == ConnectState::Pending
+            {
+                if self.pending_connects.len() >= MAX_FIDS {
+                    return self.err(tag, p9::E_NOMEM);
+                }
+                let mut nf = f;
+                nf.opened = true; // bind the data fid now; the Rlopen is held
+                self.fids[i] = Some(nf);
+                self.pending_connects.push(PendingConnect {
+                    fid: a.fid,
+                    slot_n: conn_n(f.path),
+                    tag,
+                    path: f.path,
+                    deadline_ms: net.now_ms() + CONNECT_TIMEOUT_MS,
+                });
+                self.defer = true; // dispatch emits no reply for this frame
+                return Ok(0); // the 0 is ignored (defer is set)
+            }
             let mut nf = f;
             nf.opened = true;
             self.fids[i] = Some(nf);
@@ -4859,6 +5035,7 @@ impl Conn {
         self.cancel_dns_flush(net, a.oldtag); // net-4b: drop a deferred dns read
         self.pending_reads.retain(|pr| pr.tag != a.oldtag); // net-6a: drop a blocked read
         self.pending_ready.retain(|pr| pr.tag != a.oldtag); // net-6b: drop a readiness probe
+        self.pending_connects.retain(|pc| pc.tag != a.oldtag); // #257: drop a deferred connect
         p9::build_rflush(&mut self.out_buf, tag)
     }
 

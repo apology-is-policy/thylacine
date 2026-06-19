@@ -51,31 +51,31 @@
 
 pub const P9_TVERSION: u8 = 100;
 pub const P9_RVERSION: u8 = 101;
-pub const P9_TAUTH: u8    = 102;
-pub const P9_RAUTH: u8    = 103;
-pub const P9_TATTACH: u8  = 104;
-pub const P9_RATTACH: u8  = 105;
-pub const P9_TWALK: u8    = 110;
-pub const P9_RWALK: u8    = 111;
-pub const P9_TLOPEN: u8   = 12;
-pub const P9_RLOPEN: u8   = 13;
-pub const P9_TREAD: u8    = 116;
-pub const P9_RREAD: u8    = 117;
-pub const P9_TWRITE: u8   = 118;
-pub const P9_RWRITE: u8   = 119;
-pub const P9_TCLUNK: u8   = 120;
-pub const P9_RCLUNK: u8   = 121;
+pub const P9_TAUTH: u8 = 102;
+pub const P9_RAUTH: u8 = 103;
+pub const P9_TATTACH: u8 = 104;
+pub const P9_RATTACH: u8 = 105;
+pub const P9_TWALK: u8 = 110;
+pub const P9_RWALK: u8 = 111;
+pub const P9_TLOPEN: u8 = 12;
+pub const P9_RLOPEN: u8 = 13;
+pub const P9_TREAD: u8 = 116;
+pub const P9_RREAD: u8 = 117;
+pub const P9_TWRITE: u8 = 118;
+pub const P9_RWRITE: u8 = 119;
+pub const P9_TCLUNK: u8 = 120;
+pub const P9_RCLUNK: u8 = 121;
 pub const P9_TGETATTR: u8 = 24;
 pub const P9_RGETATTR: u8 = 25;
 pub const P9_TREADDIR: u8 = 40;
 pub const P9_RREADDIR: u8 = 41;
-pub const P9_RLERROR: u8  = 7;
-pub const P9_TFLUSH: u8   = 108;
-pub const P9_RFLUSH: u8   = 109;
+pub const P9_RLERROR: u8 = 7;
+pub const P9_TFLUSH: u8 = 108;
+pub const P9_RFLUSH: u8 = 109;
 
 // QID type bits (the v1.0 surface -- corvus's namespace is one dir +
 // one file, no symlinks/temp).
-pub const P9_QTDIR: u8  = 0x80;
+pub const P9_QTDIR: u8 = 0x80;
 pub const P9_QTFILE: u8 = 0x00;
 /// Thylacine 9P extension (net-6b-2b; NET-DESIGN section 12.2): a "pollable" file
 /// -- one whose server (netd's per-connection `ready` file) serves a non-consuming
@@ -107,18 +107,20 @@ pub const P9_NAME_MAX: usize = 255;
 // Selected Linux errnos used in Rlerror responses. Match POSIX values
 // (and Thylacine's T_E_* registry per docs/ERRORS.md -- the Rlerror
 // numeric is what musl + glibc translate to errno on the client).
-pub const E_PERM: u32     = 1;
-pub const E_NOENT: u32    = 2;
-pub const E_BADF: u32     = 9;
-pub const E_NOMEM: u32    = 12;
-pub const E_FAULT: u32    = 14;
-pub const E_EXIST: u32    = 17;
-pub const E_NOTDIR: u32   = 20;
-pub const E_ISDIR: u32    = 21;
-pub const E_INVAL: u32    = 22;
+pub const E_PERM: u32 = 1;
+pub const E_NOENT: u32 = 2;
+pub const E_BADF: u32 = 9;
+pub const E_NOMEM: u32 = 12;
+pub const E_FAULT: u32 = 14;
+pub const E_EXIST: u32 = 17;
+pub const E_NOTDIR: u32 = 20;
+pub const E_ISDIR: u32 = 21;
+pub const E_INVAL: u32 = 22;
 pub const E_OPNOTSUPP: u32 = 95;
-pub const E_PROTO: u32    = 71;
-pub const E_NOSYS: u32    = 38;
+pub const E_PROTO: u32 = 71;
+pub const E_NOSYS: u32 = 38;
+pub const E_TIMEDOUT: u32 = 110; // POSIX ETIMEDOUT (a connect that got no SYN-ACK)
+pub const E_CONNREFUSED: u32 = 111; // POSIX ECONNREFUSED (a connect RST/reset)
 
 // =============================================================================
 // Qid -- in-memory shape of the 13-byte wire qid.
@@ -128,7 +130,7 @@ pub const E_NOSYS: u32    = 38;
 /// is `[kind: u8][version: u32][path: u64]` = 13 bytes.
 #[derive(Copy, Clone, Default, Debug)]
 pub struct Qid {
-    pub kind: u8,    // P9_QT*
+    pub kind: u8, // P9_QT*
     pub version: u32,
     pub path: u64,
 }
@@ -138,27 +140,35 @@ pub struct Qid {
 // =============================================================================
 
 pub fn unpack_u8(buf: &[u8], off: usize) -> Result<(u8, usize), ()> {
-    if buf.len() < off + 1 { return Err(()); }
+    if buf.len() < off + 1 {
+        return Err(());
+    }
     Ok((buf[off], off + 1))
 }
 
 pub fn unpack_u16(buf: &[u8], off: usize) -> Result<(u16, usize), ()> {
-    if buf.len() < off + 2 { return Err(()); }
+    if buf.len() < off + 2 {
+        return Err(());
+    }
     let v = (buf[off] as u16) | ((buf[off + 1] as u16) << 8);
     Ok((v, off + 2))
 }
 
 pub fn unpack_u32(buf: &[u8], off: usize) -> Result<(u32, usize), ()> {
-    if buf.len() < off + 4 { return Err(()); }
+    if buf.len() < off + 4 {
+        return Err(());
+    }
     let v = (buf[off] as u32)
-          | ((buf[off + 1] as u32) << 8)
-          | ((buf[off + 2] as u32) << 16)
-          | ((buf[off + 3] as u32) << 24);
+        | ((buf[off + 1] as u32) << 8)
+        | ((buf[off + 2] as u32) << 16)
+        | ((buf[off + 3] as u32) << 24);
     Ok((v, off + 4))
 }
 
 pub fn unpack_u64(buf: &[u8], off: usize) -> Result<(u64, usize), ()> {
-    if buf.len() < off + 8 { return Err(()); }
+    if buf.len() < off + 8 {
+        return Err(());
+    }
     let mut v: u64 = 0;
     for i in 0..8 {
         v |= (buf[off + i] as u64) << (8 * i);
@@ -171,7 +181,9 @@ pub fn unpack_u64(buf: &[u8], off: usize) -> Result<(u64, usize), ()> {
 pub fn unpack_str<'a>(buf: &'a [u8], off: usize) -> Result<(&'a [u8], usize), ()> {
     let (len, p) = unpack_u16(buf, off)?;
     let end = p + len as usize;
-    if buf.len() < end { return Err(()); }
+    if buf.len() < end {
+        return Err(());
+    }
     Ok((&buf[p..end], end))
 }
 
@@ -180,21 +192,27 @@ pub fn unpack_str<'a>(buf: &'a [u8], off: usize) -> Result<(&'a [u8], usize), ()
 // =============================================================================
 
 pub fn pack_u8(out: &mut [u8], off: usize, v: u8) -> Result<usize, ()> {
-    if out.len() < off + 1 { return Err(()); }
+    if out.len() < off + 1 {
+        return Err(());
+    }
     out[off] = v;
     Ok(off + 1)
 }
 
 pub fn pack_u16(out: &mut [u8], off: usize, v: u16) -> Result<usize, ()> {
-    if out.len() < off + 2 { return Err(()); }
-    out[off]     = (v & 0xff) as u8;
+    if out.len() < off + 2 {
+        return Err(());
+    }
+    out[off] = (v & 0xff) as u8;
     out[off + 1] = ((v >> 8) & 0xff) as u8;
     Ok(off + 2)
 }
 
 pub fn pack_u32(out: &mut [u8], off: usize, v: u32) -> Result<usize, ()> {
-    if out.len() < off + 4 { return Err(()); }
-    out[off]     = (v & 0xff) as u8;
+    if out.len() < off + 4 {
+        return Err(());
+    }
+    out[off] = (v & 0xff) as u8;
     out[off + 1] = ((v >> 8) & 0xff) as u8;
     out[off + 2] = ((v >> 16) & 0xff) as u8;
     out[off + 3] = ((v >> 24) & 0xff) as u8;
@@ -202,7 +220,9 @@ pub fn pack_u32(out: &mut [u8], off: usize, v: u32) -> Result<usize, ()> {
 }
 
 pub fn pack_u64(out: &mut [u8], off: usize, v: u64) -> Result<usize, ()> {
-    if out.len() < off + 8 { return Err(()); }
+    if out.len() < off + 8 {
+        return Err(());
+    }
     for i in 0..8 {
         out[off + i] = ((v >> (8 * i)) & 0xff) as u8;
     }
@@ -210,9 +230,13 @@ pub fn pack_u64(out: &mut [u8], off: usize, v: u64) -> Result<usize, ()> {
 }
 
 pub fn pack_str(out: &mut [u8], off: usize, s: &[u8]) -> Result<usize, ()> {
-    if s.len() > u16::MAX as usize { return Err(()); }
+    if s.len() > u16::MAX as usize {
+        return Err(());
+    }
     let off = pack_u16(out, off, s.len() as u16)?;
-    if out.len() < off + s.len() { return Err(()); }
+    if out.len() < off + s.len() {
+        return Err(());
+    }
     out[off..off + s.len()].copy_from_slice(s);
     Ok(off + s.len())
 }
@@ -238,7 +262,9 @@ pub struct Header {
 
 /// Read the 7-byte common header from `buf[0..7]`.
 pub fn peek_header(buf: &[u8]) -> Result<Header, ()> {
-    if buf.len() < P9_HDR_LEN { return Err(()); }
+    if buf.len() < P9_HDR_LEN {
+        return Err(());
+    }
     let (size, p) = unpack_u32(buf, 0)?;
     let (mtype, p) = unpack_u8(buf, p)?;
     let (tag, _) = unpack_u16(buf, p)?;
@@ -280,7 +306,13 @@ pub fn parse_tattach(buf: &[u8]) -> Result<TattachArgs<'_>, ()> {
     let (uname, p) = unpack_str(buf, p)?;
     let (aname, p) = unpack_str(buf, p)?;
     let (n_uname, _) = unpack_u32(buf, p)?;
-    Ok(TattachArgs { fid, afid, uname, aname, n_uname })
+    Ok(TattachArgs {
+        fid,
+        afid,
+        uname,
+        aname,
+        n_uname,
+    })
 }
 
 /// Twalk -- variable-length wname array. Names are zero-copy slices
@@ -297,15 +329,24 @@ pub fn parse_twalk(buf: &[u8]) -> Result<TwalkArgs<'_>, ()> {
     let (fid, p) = unpack_u32(buf, P9_HDR_LEN)?;
     let (newfid, p) = unpack_u32(buf, p)?;
     let (nwname, mut p) = unpack_u16(buf, p)?;
-    if nwname as usize > P9_MAX_WALK { return Err(()); }
+    if nwname as usize > P9_MAX_WALK {
+        return Err(());
+    }
     let mut names: [&[u8]; P9_MAX_WALK] = [&[][..]; P9_MAX_WALK];
     for i in 0..(nwname as usize) {
         let (name, np) = unpack_str(buf, p)?;
-        if name.len() > P9_NAME_MAX { return Err(()); }
+        if name.len() > P9_NAME_MAX {
+            return Err(());
+        }
         names[i] = name;
         p = np;
     }
-    Ok(TwalkArgs { fid, newfid, nwname, names })
+    Ok(TwalkArgs {
+        fid,
+        newfid,
+        nwname,
+        names,
+    })
 }
 
 #[derive(Copy, Clone)]
@@ -347,8 +388,15 @@ pub fn parse_twrite(buf: &[u8]) -> Result<TwriteArgs<'_>, ()> {
     let (offset, p) = unpack_u64(buf, p)?;
     let (count, p) = unpack_u32(buf, p)?;
     let end = p + count as usize;
-    if buf.len() < end { return Err(()); }
-    Ok(TwriteArgs { fid, offset, count, data: &buf[p..end] })
+    if buf.len() < end {
+        return Err(());
+    }
+    Ok(TwriteArgs {
+        fid,
+        offset,
+        count,
+        data: &buf[p..end],
+    })
 }
 
 #[derive(Copy, Clone)]
@@ -411,7 +459,9 @@ fn build_header(out: &mut [u8], mtype: u8, tag: u16) -> Result<usize, ()> {
 }
 
 fn patch_header_size(out: &mut [u8], total_len: usize) -> Result<(), ()> {
-    if out.len() < 4 || total_len > u32::MAX as usize { return Err(()); }
+    if out.len() < 4 || total_len > u32::MAX as usize {
+        return Err(());
+    }
     let v = total_len as u32;
     out[0] = (v & 0xff) as u8;
     out[1] = ((v >> 8) & 0xff) as u8;
@@ -442,7 +492,9 @@ pub fn build_rattach(out: &mut [u8], tag: u16, qid: &Qid) -> Result<usize, ()> {
 /// prefix that succeeded; corvus at v1.0 either walks completely or
 /// fails the whole Twalk with Rlerror(ENOENT).
 pub fn build_rwalk(out: &mut [u8], tag: u16, qids: &[Qid]) -> Result<usize, ()> {
-    if qids.len() > P9_MAX_WALK { return Err(()); }
+    if qids.len() > P9_MAX_WALK {
+        return Err(());
+    }
     let p = build_header(out, P9_RWALK, tag)?;
     let mut p = pack_u16(out, p, qids.len() as u16)?;
     for q in qids {
@@ -464,10 +516,14 @@ pub fn build_rlopen(out: &mut [u8], tag: u16, qid: &Qid, iounit: u32) -> Result<
 /// output buffer. Caller bounds `data.len()` by negotiated `msize -
 /// P9_HDR_LEN - 4` (the Rread header + count overhead).
 pub fn build_rread(out: &mut [u8], tag: u16, data: &[u8]) -> Result<usize, ()> {
-    if data.len() > u32::MAX as usize { return Err(()); }
+    if data.len() > u32::MAX as usize {
+        return Err(());
+    }
     let p = build_header(out, P9_RREAD, tag)?;
     let p = pack_u32(out, p, data.len() as u32)?;
-    if out.len() < p + data.len() { return Err(()); }
+    if out.len() < p + data.len() {
+        return Err(());
+    }
     out[p..p + data.len()].copy_from_slice(data);
     let total = p + data.len();
     patch_header_size(out, total)?;
@@ -528,9 +584,17 @@ pub fn parse_tgetattr(buf: &[u8]) -> Result<u32, ()> {
 ///   blksize(8) blocks(8) atime{s,ns}(16) mtime{s,ns}(16) ctime{s,ns}(16)
 ///   btime{s,ns}(16) gen(8) data_version(8).
 #[allow(clippy::too_many_arguments)]
-pub fn build_rgetattr(out: &mut [u8], tag: u16, valid: u64, qid: &Qid,
-                      mode: u32, uid: u32, gid: u32, nlink: u64,
-                      size: u64) -> Result<usize, ()> {
+pub fn build_rgetattr(
+    out: &mut [u8],
+    tag: u16,
+    valid: u64,
+    qid: &Qid,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    nlink: u64,
+    size: u64,
+) -> Result<usize, ()> {
     let p = build_header(out, P9_RGETATTR, tag)?;
     let p = pack_u64(out, p, valid)?;
     let p = pack_qid(out, p, qid)?;
@@ -538,20 +602,20 @@ pub fn build_rgetattr(out: &mut [u8], tag: u16, valid: u64, qid: &Qid,
     let p = pack_u32(out, p, uid)?;
     let p = pack_u32(out, p, gid)?;
     let p = pack_u64(out, p, nlink)?;
-    let p = pack_u64(out, p, 0)?;        // rdev
-    let p = pack_u64(out, p, size)?;     // size
-    let p = pack_u64(out, p, 0)?;        // blksize (0 -> dev9p default 4096)
-    let p = pack_u64(out, p, 0)?;        // blocks
-    let p = pack_u64(out, p, 0)?;        // atime_sec
-    let p = pack_u64(out, p, 0)?;        // atime_nsec
-    let p = pack_u64(out, p, 0)?;        // mtime_sec
-    let p = pack_u64(out, p, 0)?;        // mtime_nsec
-    let p = pack_u64(out, p, 0)?;        // ctime_sec
-    let p = pack_u64(out, p, 0)?;        // ctime_nsec
-    let p = pack_u64(out, p, 0)?;        // btime_sec
-    let p = pack_u64(out, p, 0)?;        // btime_nsec
-    let p = pack_u64(out, p, 0)?;        // gen
-    let p = pack_u64(out, p, 0)?;        // data_version
+    let p = pack_u64(out, p, 0)?; // rdev
+    let p = pack_u64(out, p, size)?; // size
+    let p = pack_u64(out, p, 0)?; // blksize (0 -> dev9p default 4096)
+    let p = pack_u64(out, p, 0)?; // blocks
+    let p = pack_u64(out, p, 0)?; // atime_sec
+    let p = pack_u64(out, p, 0)?; // atime_nsec
+    let p = pack_u64(out, p, 0)?; // mtime_sec
+    let p = pack_u64(out, p, 0)?; // mtime_nsec
+    let p = pack_u64(out, p, 0)?; // ctime_sec
+    let p = pack_u64(out, p, 0)?; // ctime_nsec
+    let p = pack_u64(out, p, 0)?; // btime_sec
+    let p = pack_u64(out, p, 0)?; // btime_nsec
+    let p = pack_u64(out, p, 0)?; // gen
+    let p = pack_u64(out, p, 0)?; // data_version
     patch_header_size(out, p)?;
     Ok(p)
 }
@@ -577,8 +641,14 @@ pub fn dirent_len(name_len: usize) -> usize {
 
 /// Pack one dirent record at `out[off..]`. `next_offset` is the resume cookie
 /// for the entry AFTER this one. Returns the new offset.
-pub fn pack_dirent(out: &mut [u8], off: usize, qid: &Qid, next_offset: u64,
-                   dtype: u8, name: &[u8]) -> Result<usize, ()> {
+pub fn pack_dirent(
+    out: &mut [u8],
+    off: usize,
+    qid: &Qid,
+    next_offset: u64,
+    dtype: u8,
+    name: &[u8],
+) -> Result<usize, ()> {
     let off = pack_qid(out, off, qid)?;
     let off = pack_u64(out, off, next_offset)?;
     let off = pack_u8(out, off, dtype)?;
@@ -589,10 +659,14 @@ pub fn pack_dirent(out: &mut [u8], off: usize, qid: &Qid, next_offset: u64,
 /// records (built with `pack_dirent`); it is COPIED into `out`. The caller
 /// bounds `data.len()` by the Treaddir count and `msize - P9_HDR_LEN - 4`.
 pub fn build_rreaddir(out: &mut [u8], tag: u16, data: &[u8]) -> Result<usize, ()> {
-    if data.len() > u32::MAX as usize { return Err(()); }
+    if data.len() > u32::MAX as usize {
+        return Err(());
+    }
     let p = build_header(out, P9_RREADDIR, tag)?;
     let p = pack_u32(out, p, data.len() as u32)?;
-    if out.len() < p + data.len() { return Err(()); }
+    if out.len() < p + data.len() {
+        return Err(());
+    }
     out[p..p + data.len()].copy_from_slice(data);
     let total = p + data.len();
     patch_header_size(out, total)?;

@@ -539,6 +539,7 @@ impl Driver for NetD {
                     if !conns[i].poll_dns(&mut net)
                         || !conns[i].poll_data(&mut net)
                         || !conns[i].poll_ready(&mut net)
+                        || !conns[i].poll_connects(&mut net)
                     {
                         conns[i].teardown(&mut net);
                         let _ = unsafe { t_close(conns[i].handle()) };
@@ -548,15 +549,18 @@ impl Driver for NetD {
             }
 
             // With a pending accept OR a deferred DNS read OR a blocking data
-            // read, the event that unblocks it (an inbound SYN / a DNS reply /
-            // RX data) arrives on the NIC, not a pollable fd -- only a
-            // timeout-driven net.poll catches it. Clamp to the floor to keep
-            // accept/resolve/recv latency <= IDLE_POLL_MIN_MS.
+            // read OR a deferred connect, the event that unblocks it (an inbound
+            // SYN / a DNS reply / RX data / a connect SYN-ACK) arrives on the
+            // NIC, not a pollable fd -- only a timeout-driven net.poll catches
+            // it. Clamp to the floor to keep accept/resolve/recv/connect latency
+            // <= IDLE_POLL_MIN_MS.
             let delay = if net.has_pending_accepts()
-                || conns
-                    .iter()
-                    .any(|c| c.has_pending_dns() || c.has_pending_reads() || c.has_pending_ready())
-            {
+                || conns.iter().any(|c| {
+                    c.has_pending_dns()
+                        || c.has_pending_reads()
+                        || c.has_pending_ready()
+                        || c.has_pending_connects()
+                }) {
                 IDLE_POLL_MIN_MS
             } else {
                 net.poll_delay_ms()
