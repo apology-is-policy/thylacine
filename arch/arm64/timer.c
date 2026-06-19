@@ -220,13 +220,43 @@ u64 timer_wallclock_offset_ns(u64 epoch_seconds, u64 mono_now_ns) {
     return epoch_ns - mono_now_ns;
 }
 
+// Publish a fresh wall-clock offset from a full-nanosecond epoch. The boot
+// anchor (write-once before smp_init) and the runtime re-anchor
+// (SYS_CLOCK_SETTIME) both land here. The offset is a single aligned u64, so the
+// store is atomic on aarch64: a concurrent timer_realtime_ns on another CPU
+// reads either the old or the new offset, each internally consistent. A clock
+// step is a deliberate discontinuity, so the sub-microsecond skew between a
+// reader's timer_now_ns() and a racing publish is semantically irrelevant --
+// there is no second field to tear against, so no seqlock is needed (the LS-K
+// single-u64 design is what makes the runtime setter SMP-safe by construction).
+// Fail-soft (offset 0 -> realtime == monotonic) on a 0 epoch or the implausible
+// epoch_ns < mono (which would underflow), mirroring timer_wallclock_offset_ns.
+static void wallclock_publish_ns(u64 epoch_ns) {
+    u64 mono = timer_now_ns();
+    u64 off  = (epoch_ns == 0 || epoch_ns < mono) ? 0 : (epoch_ns - mono);
+    __atomic_store_n(&g_wallclock_offset_ns, off, __ATOMIC_RELAXED);
+}
+
 void timer_set_wallclock_anchor(u64 epoch_seconds) {
-    g_wallclock_offset_ns =
-        timer_wallclock_offset_ns(epoch_seconds, timer_now_ns());
+    // Byte-equivalent to the prior timer_wallclock_offset_ns(epoch_seconds, now)
+    // path: the helper computed epoch_seconds*1e9 - now with the same fail-soft.
+    // epoch_seconds comes from the RTC (0 or >= the 2020 floor), so the multiply
+    // stays well inside u64.
+    wallclock_publish_ns(epoch_seconds * 1000000000ull);
+}
+
+// Runtime re-anchor (SYS_CLOCK_SETTIME, net-7a) at full-nanosecond granularity.
+// A distinct name from the boot anchor gives the audit-trigger surface a clean
+// hook; the publish is the same single atomic store. CLOCK_MONOTONIC
+// (timer_now_ns) is untouched. The caller (sys_clock_settime_handler) bounds
+// epoch_ns so the seconds*1e9 + nsec composition cannot overflow.
+void timer_reset_wallclock_anchor_ns(u64 epoch_ns) {
+    wallclock_publish_ns(epoch_ns);
 }
 
 u64 timer_realtime_ns(void) {
-    return timer_now_ns() + g_wallclock_offset_ns;
+    return timer_now_ns()
+         + __atomic_load_n(&g_wallclock_offset_ns, __ATOMIC_RELAXED);
 }
 
 void timer_busy_wait_ticks(u64 n) {

@@ -120,6 +120,15 @@ u64 timer_wallclock_offset_ns(u64 epoch_seconds, u64 mono_now_ns);
 // timer_wallclock_offset_ns(epoch_seconds, timer_now_ns()).
 void timer_set_wallclock_anchor(u64 epoch_seconds);
 
+// Re-anchor the wall clock at runtime (SYS_CLOCK_SETTIME, net-7a) from a
+// full-nanosecond epoch. Same single atomic-u64 publish as the boot anchor, but
+// callable after smp_init: a concurrent timer_realtime_ns on another CPU reads
+// the old or the new offset, each coherent (the single-u64 design needs no
+// seqlock). CLOCK_MONOTONIC is untouched. The caller (sys_clock_settime_handler)
+// enforces the CAP_HOSTOWNER gate + clk_id == REALTIME + bounds epoch_ns so the
+// seconds*1e9 + nsec composition cannot overflow.
+void timer_reset_wallclock_anchor_ns(u64 epoch_ns);
+
 // Current CLOCK_REALTIME in nanoseconds since the Unix epoch:
 // timer_now_ns() + the wall-clock offset. Before timer_set_wallclock_anchor (or
 // after anchoring a 0 epoch) this equals timer_now_ns() (== 1970 + uptime).

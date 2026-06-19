@@ -1093,6 +1093,38 @@ static int do_corvus_bringup(long storage_dup_fd) {
     }
     t_putstr("joey: t_cap_use(CAP_HOSTOWNER) ok (joey now hostowner)\n");
 
+    // === net-7a: SYS_CLOCK_SETTIME round-trip (the elevated in-guest proof) ===
+    // joey holds CAP_HOSTOWNER here, so it is the one Proc that can exercise the
+    // full clock-step path: real EL0->EL1 dispatch + uaccess_load_u32 reading a
+    // VALID user timespec + the cap present -- coverage neither the kernel test
+    // (va=0 -> EFAULT) nor the non-elevated SNTP tool (-> EACCES) can give. Step
+    // CLOCK_REALTIME forward by a known delta, confirm it jumped, then restore
+    // (project the saved wall time forward by the elapsed monotonic so the wall
+    // clock stays coherent for the rest of bringup). RAM-only -- nothing persists,
+    // so it is safe to run every boot, incl. cross-reboot / smp-multiboot.
+    {
+        struct t_timespec mono0, real0;
+        if (t_clock_gettime(T_CLOCK_MONOTONIC, &mono0) == 0 &&
+            t_clock_gettime(T_CLOCK_REALTIME, &real0) == 0) {
+            struct t_timespec step = { real0.tv_sec + 1000, real0.tv_nsec };
+            long src = t_clock_settime(T_CLOCK_REALTIME, &step);
+            struct t_timespec after;
+            (void)t_clock_gettime(T_CLOCK_REALTIME, &after);
+            struct t_timespec mono1;
+            (void)t_clock_gettime(T_CLOCK_MONOTONIC, &mono1);
+            struct t_timespec restore = { real0.tv_sec + (mono1.tv_sec - mono0.tv_sec),
+                                          real0.tv_nsec };
+            (void)t_clock_settime(T_CLOCK_REALTIME, &restore);
+            if (src == 0 && after.tv_sec >= step.tv_sec &&
+                after.tv_sec < step.tv_sec + 5) {
+                t_putstr("joey: net-7a SYS_CLOCK_SETTIME round-trip OK\n");
+            } else {
+                t_putstr("joey: net-7a SYS_CLOCK_SETTIME round-trip FAILED\n");
+                return 1;
+            }
+        }
+    }
+
     // === A-5c-c: live RECOVER(system) === The OWED item: prove
     // handle_recover_system runs LIVE end-to-end (wire dispatch + console gate +
     // seed-derived phrase opens the baked system-recovery-wrap + the re-wrap

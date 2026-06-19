@@ -11,6 +11,7 @@
 #include "test.h"
 
 #include "../../arch/arm64/timer.h"
+#include <thylacine/caps.h>
 #include <thylacine/errno.h>
 #include <thylacine/proc.h>
 #include <thylacine/syscall.h>
@@ -22,6 +23,7 @@ extern s64 sys_getpid_handler(u64, u64, u64, u64);
 extern s64 sys_getuid_handler(u64, u64, u64, u64);
 extern s64 sys_getgid_handler(u64, u64, u64, u64);
 extern s64 sys_clock_gettime_handler(u64, u64, u64, u64);
+extern s64 sys_clock_settime_handler(u64, u64, u64, u64);   // net-7a
 
 void test_clock_monotonic_advances(void) {
     u64 a = timer_now_ns();
@@ -98,4 +100,59 @@ void test_clock_gettime_errors(void) {
         "SYS_CLOCK_GETTIME MONOTONIC with a NULL buffer must return -EFAULT");
     TEST_ASSERT(sys_clock_gettime_handler(T_CLOCK_REALTIME, 0, 0, 0) == -T_E_FAULT,
         "SYS_CLOCK_GETTIME REALTIME with a NULL buffer must return -EFAULT");
+}
+
+// net-7a: the runtime re-anchor (timer level -- no syscall/uaccess/cap). Steps
+// CLOCK_REALTIME to a known epoch + verifies it lands there, then restores the
+// boot anchor (projected forward by the elapsed monotonic so the original offset
+// is preserved within ns, not frozen) so the later realtime-plausibility checks
+// hold regardless of test order. MONOTONIC must not move.
+void test_clock_settime_reanchors(void) {
+    u64 mono0 = timer_now_ns();
+    u64 real0 = timer_realtime_ns();
+
+    // Step to ~2033 (distinct from the boot anchor) and read it back.
+    u64 target_sec = 2000000000ull;
+    timer_reset_wallclock_anchor_ns(target_sec * 1000000000ull);
+    u64 r_sec = timer_realtime_ns() / 1000000000ull;
+    TEST_ASSERT(r_sec >= target_sec && r_sec < target_sec + 5,
+        "SYS_CLOCK_SETTIME re-anchor did not step CLOCK_REALTIME to the target");
+
+    // A re-anchor must not perturb CLOCK_MONOTONIC.
+    u64 m1 = timer_now_ns();
+    timer_reset_wallclock_anchor_ns(1ull * 1000000000ull);   // step to ~1970
+    u64 m2 = timer_now_ns();
+    TEST_ASSERT(m2 >= m1, "re-anchor must not move CLOCK_MONOTONIC");
+
+    // Restore the original wall clock (preserve the offset, do not freeze it).
+    timer_reset_wallclock_anchor_ns(real0 + (timer_now_ns() - mono0));
+    TEST_ASSERT(timer_realtime_ns() >= timer_now_ns(),
+        "restored CLOCK_REALTIME underflowed below MONOTONIC");
+}
+
+// net-7a: the SYS_CLOCK_SETTIME cap + clk_id gate, ordered cap-then-buffer. With
+// CAP_HOSTOWNER cleared, REALTIME is rejected at the cap gate (-EACCES) BEFORE
+// any buffer read (a NULL va never faults first); with it set, the same NULL va
+// now faults (-EFAULT) -- proving the cap actually gates and is checked first.
+// clk_id is validated before the cap, so MONOTONIC stays EINVAL either way.
+void test_clock_settime_cap_gate(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t != (void *)0 && t->proc != (void *)0,
+        "no current Proc in the test context");
+    struct Proc *p = t->proc;
+    caps_t saved = __atomic_load_n(&p->caps, __ATOMIC_ACQUIRE);
+
+    __atomic_store_n(&p->caps, saved & ~(caps_t)CAP_HOSTOWNER, __ATOMIC_RELEASE);
+    TEST_ASSERT(sys_clock_settime_handler(T_CLOCK_REALTIME, 0, 0, 0) == -T_E_ACCES,
+        "SYS_CLOCK_SETTIME without CAP_HOSTOWNER must return -EACCES");
+    TEST_ASSERT(sys_clock_settime_handler(T_CLOCK_MONOTONIC, 0, 0, 0) == -T_E_INVAL,
+        "SYS_CLOCK_SETTIME MONOTONIC must be EINVAL (checked before the cap)");
+
+    __atomic_store_n(&p->caps, saved | CAP_HOSTOWNER, __ATOMIC_RELEASE);
+    TEST_ASSERT(sys_clock_settime_handler(T_CLOCK_REALTIME, 0, 0, 0) == -T_E_FAULT,
+        "SYS_CLOCK_SETTIME with CAP_HOSTOWNER + NULL buffer must return -EFAULT");
+    TEST_ASSERT(sys_clock_settime_handler(T_CLOCK_MONOTONIC, 0, 0, 0) == -T_E_INVAL,
+        "SYS_CLOCK_SETTIME MONOTONIC must be EINVAL even with CAP_HOSTOWNER");
+
+    __atomic_store_n(&p->caps, saved, __ATOMIC_RELEASE);
 }

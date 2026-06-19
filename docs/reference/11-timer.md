@@ -285,6 +285,7 @@ built on this timer plus a one-shot PL031 RTC read.
 ```c
 u64 timer_wallclock_offset_ns(u64 epoch_seconds, u64 mono_now_ns);  // pure; epoch 0 -> 0
 void timer_set_wallclock_anchor(u64 epoch_seconds);                 // write-once, boot CPU
+void timer_reset_wallclock_anchor_ns(u64 epoch_ns);                 // runtime (SYS_CLOCK_SETTIME)
 u64 timer_realtime_ns(void);                                        // mono + offset
 ```
 
@@ -296,6 +297,18 @@ and the SMP bring-up barrier orders the single write before any secondary's
 first read — so the read is always a coherent snapshot with no lock. A `0` epoch
 (no RTC) yields a `0` offset, so `CLOCK_REALTIME == CLOCK_MONOTONIC` (1970 +
 uptime) — the honest "no wall clock" signal, never a fabricated time.
+
+**Runtime re-anchor (net-7a).** `timer_reset_wallclock_anchor_ns(epoch_ns)`
+re-publishes `g_wallclock_offset_ns` after boot for `SYS_CLOCK_SETTIME`. Because
+the offset is a *single* aligned `u64`, the publish is one `__atomic_store_n`
+(`RELAXED`) and the GETTIME read is one `__atomic_load_n` — a concurrent
+`timer_realtime_ns` on another CPU reads either the old or the new offset, each
+internally consistent, so no seqlock is needed even though a runtime setter races
+readers (the LS-K single-`u64` design is what makes the setter SMP-safe by
+construction; the only skew is ns-scale at the instant of a deliberate step, which
+is itself a discontinuity). The boot anchor now routes through the same
+ns-granular publish (`timer_set_wallclock_anchor(secs)` → `wallclock_publish_ns(
+secs·1e9)`), byte-equivalent to the prior path. `CLOCK_MONOTONIC` is untouched.
 
 The offset math cannot underflow for any plausible epoch: `epoch_ns` (~1.6e18
 for 2020+) dominates the boot-early `mono_at_anchor` (< ~1e10), and
@@ -325,6 +338,7 @@ is harmless). A settable clock / re-read is the recorded v1.x seam.
 | `SYS_GETUID` | 73 | `current->proc->principal_id` |
 | `SYS_GETGID` | 74 | `current->proc->primary_gid` |
 | `SYS_CLOCK_GETTIME` | 75 | `0` / `-EINVAL` (bad clk_id) / `-EFAULT` (bad va) |
+| `SYS_CLOCK_SETTIME` | 79 | `0` / `-EINVAL` / `-EFAULT` / `-EACCES` (not host owner) |
 
 The three identity reads carry no capability and mutate nothing; the field
 values are `< 2^32`, so the `s64` return is never negative (no error-aliasing).
@@ -335,6 +349,16 @@ four `uaccess_store_u32` writes (low/high of each `i64`, little-endian) — any
 fault routes to `-EFAULT`. `T_CLOCK_REALTIME = 0` / `T_CLOCK_MONOTONIC = 1` match
 Linux `clockid_t`.
 
+`SYS_CLOCK_SETTIME` (net-7a) steps `CLOCK_REALTIME` to a `t_timespec` read with
+four `uaccess_load_u32` reads. It gates in order: `clk_id == T_CLOCK_REALTIME`
+(MONOTONIC is non-settable → `-EINVAL`); then **`CAP_HOSTOWNER`** (a clock step is
+system-global — the host owner's authority, never an identity's, I-22 →
+`-EACCES`) — both checked *before* the buffer is touched, so a non-elevated caller
+never reads through `ts_va`; then the buffer (`-EFAULT`), `tv_sec ≥ 0` /
+`tv_nsec ∈ [0,1e9)` / `tv_sec ≤ 1e10` (the `tv_sec·1e9 + tv_nsec` overflow guard,
+~year 2286) → `-EINVAL`. It calls `timer_reset_wallclock_anchor_ns`. The handler
+is the *only* re-anchor entry from EL0; `CLOCK_MONOTONIC` is never affected.
+
 ### Tests (`kernel/test/test_clock.c`)
 
 `clock.monotonic_advances` (timer_now_ns strictly advances across a busy-wait),
@@ -343,13 +367,23 @@ clock on the QEMU-virt test target — a 0 here would be a real RTC regression, 
 the fail-soft path, which is for RTC-less bare metal), `clock.wallclock_offset_math`
 (the pure offset helper: fail-soft 0 and `E·1e9 − M`), `clock.identity_syscalls`
 (getpid/getuid/getgid return the calling Proc's own fields), `clock.gettime_errors`
-(bad clk_id → `-EINVAL`; NULL buffer → `-EFAULT`). The RTC hardware read is
-covered transitively (the boot anchor feeds the realtime-plausibility assertion);
-the success copy-out path is covered by the `id`/`whoami`/`date` LS-CI E2E.
+(bad clk_id → `-EINVAL`; NULL buffer → `-EFAULT`), `clock.settime_reanchors`
+(the runtime re-anchor steps `CLOCK_REALTIME` to a target and leaves
+`CLOCK_MONOTONIC` unmoved, then restores), `clock.settime_cap_gate` (the
+cap-then-buffer ordering: no `CAP_HOSTOWNER` → `-EACCES`; with it + a NULL buffer
+→ `-EFAULT`; MONOTONIC → `-EINVAL` either way). The RTC hardware read is covered
+transitively (the boot anchor feeds the realtime-plausibility assertion); the
+gettime success copy-out is covered by the `id`/`whoami`/`date` LS-CI E2E; the
+**settime** end-to-end path (real dispatch + `uaccess_load_u32` from a valid
+buffer + a live `CAP_HOSTOWNER` — unreachable from the kernel test [va=0] or a
+non-elevated tool [`-EACCES`]) is covered by joey's elevated round-trip probe
+(`joey: net-7a SYS_CLOCK_SETTIME round-trip OK`).
 
 ### v1.x seams (recorded in ARCH §22.6)
 
-Settable wall clock + a timekeeper / NTP; a vDSO `clock_gettime` (EL0 CNTVCT is
+A continuous timekeeper that *slews* rather than steps (the `SYS_CLOCK_SETTIME`
+step primitive landed net-7a; the userspace UTC-clock-object discipline is the
+v1.x refinement); a vDSO `clock_gettime` (EL0 CNTVCT is
 already enabled, see `timer_enable_el0_counter_access`); a 64-bit RTC (the 32-bit
 `RTCDR` wraps in 2106); uid→name resolution + `getgroups` (whoami/id are numeric
 at v1.0); the pouch boundary-line mapping musl `getpid`/`clock_gettime` onto these

@@ -398,6 +398,12 @@ path), not just an exit-criterion mention.
     is an SNTP client that *reports* offset only (display/`date`-check), with
     stepping deferred to v1.x — but the recommended path is the small settable
     clock, so NTP actually synchronizes.
+  - **CONFIRMED (net-7a, 2026-06-19 vote):** the recommended path — the
+    `SYS_CLOCK_SETTIME` syscall (`= 79`), `CAP_HOSTOWNER`-gated, re-anchoring the
+    single wall-clock offset (`g_wallclock_offset_ns`) at full-nanosecond
+    granularity via one atomic `u64` store; `CLOCK_MONOTONIC` untouched. The
+    report-only fallback was declined. Landed net-7a-1 (the ABI surface +
+    bindings + joey's elevated round-trip proof); the SNTP client is net-7a-2.
 
 ---
 

@@ -229,6 +229,7 @@ pub const T_SYS_CLOCK_GETTIME: u64    = 75;     // LS-K clock: realtime/monotoni
 pub const T_SYS_PCI_CLAIM: u64        = 76;     // pci-1c: claim a VirtIO-PCI function
 pub const T_SYS_PCI_MAP_BAR: u64      = 77;     // pci-1c: map a KObj_PCI BAR
 pub const T_SYS_PCI_INFO: u64         = 78;     // pci-1c: read KObj_PCI topology
+pub const T_SYS_CLOCK_SETTIME: u64    = 79;     // net-7a: step CLOCK_REALTIME (CAP_HOSTOWNER)
 // SYS_CLOCK_GETTIME clock ids (match Linux clockid_t).
 pub const T_CLOCK_REALTIME: u64       = 0;
 pub const T_CLOCK_MONOTONIC: u64      = 1;
@@ -1931,6 +1932,24 @@ pub unsafe fn t_clock_gettime(clk_id: u64, ts_va: u64) -> i64 {
         inlateout("x0") x0,
         in("x1") ts_va,
         in("x8") T_SYS_CLOCK_GETTIME,
+        options(nostack)
+    );
+    x0
+}
+
+// t_clock_settime -- step CLOCK_REALTIME to the struct t_timespec at `ts_va`
+// (net-7a). clk_id must be T_CLOCK_REALTIME (MONOTONIC is non-settable).
+// Requires CAP_HOSTOWNER. Returns 0 / -EINVAL (bad clk_id or out-of-range time) /
+// -EFAULT (bad va) / -EACCES (not the host owner). See the `time` module for the
+// safe setter.
+#[inline(always)]
+pub unsafe fn t_clock_settime(clk_id: u64, ts_va: u64) -> i64 {
+    let mut x0: i64 = clk_id as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") ts_va,
+        in("x8") T_SYS_CLOCK_SETTIME,
         options(nostack)
     );
     x0

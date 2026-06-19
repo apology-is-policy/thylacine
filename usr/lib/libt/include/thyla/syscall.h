@@ -98,11 +98,23 @@ enum {
     T_SYS_CONSOLE_OPEN      = 64,  // A-5a: open /dev/cons -> R|W KOBJ_SPOOR fd
     T_SYS_OPEN              = 65,  // A-5b-0/stalk-1: multi-component pathname open
     T_SYS_FD2PATH           = 71,  // #66: fd -> namespace name (Plan 9 fd2path)
-    // 72..75 = getpid/uid/gid + clock_gettime (native libthyla-rs only).
+    // 72..74 = getpid/uid/gid (native libthyla-rs only).
+    T_SYS_CLOCK_GETTIME     = 75,  // LS-K: read CLOCK_REALTIME / CLOCK_MONOTONIC
     T_SYS_PCI_CLAIM         = 76,  // pci-1c: claim a VirtIO-PCI function -> KOBJ_PCI
     T_SYS_PCI_MAP_BAR       = 77,  // pci-1c: map a KObj_PCI BAR into user VA
     T_SYS_PCI_INFO          = 78,  // pci-1c: read a KObj_PCI's resolved topology
+    T_SYS_CLOCK_SETTIME     = 79,  // net-7a: step CLOCK_REALTIME (CAP_HOSTOWNER)
 };
+
+// SYS_CLOCK_*TIME clock ids (match Linux clockid_t) + the 16-byte timespec.
+#define T_CLOCK_REALTIME    0
+#define T_CLOCK_MONOTONIC   1
+struct t_timespec {
+    long tv_sec;    // 0: seconds (since the Unix epoch for REALTIME; since boot
+                    //    for MONOTONIC)
+    long tv_nsec;   // 8: nanoseconds within the second, [0, 1000000000)
+};
+_Static_assert(sizeof(struct t_timespec) == 16, "t_timespec is the 16-byte ABI record");
 
 // SYS_UNLINK flags: rmdir an empty directory (vs unlink a non-directory).
 // Mirrors the kernel's SYS_UNLINK_REMOVEDIR / wire P9_UNLINK_AT_REMOVEDIR.
@@ -481,6 +493,37 @@ static inline long t_irq_wait(long h) {
         "svc #0"
         : "+r"(x0)
         : "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_clock_gettime — fill `*ts` for `clk_id` (T_CLOCK_REALTIME/MONOTONIC) (LS-K).
+// Returns 0 / -EINVAL (bad clk_id) / -EFAULT (bad va).
+static inline long t_clock_gettime(unsigned long clk_id, struct t_timespec *ts) {
+    register long x0 __asm__("x0") = (long)clk_id;
+    register long x1 __asm__("x1") = (long)(unsigned long)ts;
+    register long x8 __asm__("x8") = T_SYS_CLOCK_GETTIME;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_clock_settime — step CLOCK_REALTIME to `*ts` (net-7a). clk_id must be
+// T_CLOCK_REALTIME; requires CAP_HOSTOWNER. Returns 0 / -EINVAL / -EFAULT /
+// -EACCES.
+static inline long t_clock_settime(unsigned long clk_id, const struct t_timespec *ts) {
+    register long x0 __asm__("x0") = (long)clk_id;
+    register long x1 __asm__("x1") = (long)(unsigned long)ts;
+    register long x8 __asm__("x8") = T_SYS_CLOCK_SETTIME;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x8)
         : "memory", "cc"
     );
     return x0;

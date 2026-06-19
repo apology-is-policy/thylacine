@@ -82,6 +82,8 @@ void test_clock_realtime_anchored(void);
 void test_clock_wallclock_offset_math(void);
 void test_clock_identity_syscalls(void);
 void test_clock_gettime_errors(void);
+void test_clock_settime_reanchors(void);
+void test_clock_settime_cap_gate(void);
 void test_hardening_detect_smoke(void);
 void test_alternatives_patch_applied(void);
 void test_alternatives_atomics_correct(void);
@@ -1022,6 +1024,8 @@ struct test_case g_tests[] = {
     { "clock.wallclock_offset_math",   test_clock_wallclock_offset_math,   false, NULL },
     { "clock.identity_syscalls",       test_clock_identity_syscalls,       false, NULL },
     { "clock.gettime_errors",          test_clock_gettime_errors,          false, NULL },
+    { "clock.settime_reanchors",       test_clock_settime_reanchors,       false, NULL },
+    { "clock.settime_cap_gate",        test_clock_settime_cap_gate,        false, NULL },
     { "hardening.detect_smoke",        test_hardening_detect_smoke,        false, NULL },
     { "alternatives.patch_applied",    test_alternatives_patch_applied,    false, NULL },
     { "alternatives.atomics_correct",  test_alternatives_atomics_correct,  false, NULL },

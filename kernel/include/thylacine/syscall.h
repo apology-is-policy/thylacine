@@ -1425,6 +1425,19 @@ enum {
     //   at info_va. Requires RIGHT_READ (the fixed claim always has it). Returns
     //   -1 on: bad handle / wrong kind / missing RIGHT_READ / bad info_va.
     SYS_PCI_INFO = 78,     // arg: handle (x0), info_va (x1)
+
+    // SYS_CLOCK_SETTIME(clk_id, timespec_va) -> 0 / -EINVAL / -EFAULT / -EACCES
+    //   (net-7a; NET-DESIGN section 10). Step CLOCK_REALTIME to the wall time at
+    //   timespec_va. clk_id MUST be T_CLOCK_REALTIME -- MONOTONIC is non-settable
+    //   (-T_E_INVAL), the Linux/POSIX rule. Re-anchors the single wall-clock
+    //   offset (g_wallclock_offset_ns) at runtime; MONOTONIC is untouched. Gated
+    //   on CAP_HOSTOWNER (the fs/clock-admin authority; -T_E_ACCES otherwise) --
+    //   a clock step is system-global, so it is the host owner's, never an
+    //   identity's. Validates clk_id + the cap BEFORE reading the buffer; a bad
+    //   timespec_va -> -T_E_FAULT, a tv_nsec outside [0,1e9) or tv_sec < 0 ->
+    //   -T_E_INVAL. The SNTP client (net-7a) is the consumer. See ARCH section
+    //   22.6 + the audit-trigger row.
+    SYS_CLOCK_SETTIME = 79,  // arg: clk_id (x0), timespec_va (x1)
 };
 
 // SYS_CLOCK_GETTIME clock ids. Values match Linux clockid_t so a future pouch

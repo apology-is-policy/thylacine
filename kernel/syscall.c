@@ -2106,6 +2106,60 @@ s64 sys_clock_gettime_handler(u64 clk_id, u64 ts_va, u64 a2, u64 a3) {
     return 0;
 }
 
+// SYS_CLOCK_SETTIME(clk_id, timespec_va) -- step CLOCK_REALTIME (net-7a). The
+// SNTP client's clock-step path. Re-anchors the single wall-clock offset;
+// MONOTONIC is untouched. CAP_HOSTOWNER-gated (a clock step is system-global, so
+// it is the host owner's authority, never an identity's -- I-22). The clk_id +
+// the cap are validated BEFORE any buffer read.
+s64 sys_clock_settime_handler(u64 clk_id, u64 ts_va, u64 a2, u64 a3) {
+    (void)a2; (void)a3;
+    // Only CLOCK_REALTIME is settable. MONOTONIC is the boot-counter timebase and
+    // cannot be stepped (the Linux/POSIX rule); an unknown id is also EINVAL.
+    if (clk_id != T_CLOCK_REALTIME)
+        return -T_E_INVAL;
+
+    struct Thread *t = current_thread();
+    if (!t) return -1;
+    struct Proc *p = t->proc;
+    if (!p) return -1;
+    // p->caps has a cross-thread writer since A-4a -> an atomic acquire load.
+    if ((__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_HOSTOWNER) == 0)
+        return -T_E_ACCES;
+
+    if (!sys_validate_user_buf(ts_va, sizeof(struct t_timespec)))
+        return -T_E_FAULT;
+    // uaccess_load_u32 reads sit at ts_va + {0,4,8,12}; require 4-byte alignment
+    // so each LDR is aligned (an unaligned LDR alignment-faults once SCTLR_EL1.A
+    // is set, which the uaccess fixup table does NOT catch -> extinction). A
+    // conformant struct t_timespec is 8-aligned. Mirrors SYS_CLOCK_GETTIME.
+    if (ts_va & 0x3u)
+        return -T_E_FAULT;
+
+    // struct t_timespec { s64 tv_sec @0; s64 tv_nsec @8 }. aarch64 is
+    // little-endian: each i64 is [low u32, high u32]. No uaccess_load_u64 exists.
+    u32 sec_lo, sec_hi, nsec_lo, nsec_hi;
+    if (uaccess_load_u32(ts_va + 0,  &sec_lo)  != 0) return -T_E_FAULT;
+    if (uaccess_load_u32(ts_va + 4,  &sec_hi)  != 0) return -T_E_FAULT;
+    if (uaccess_load_u32(ts_va + 8,  &nsec_lo) != 0) return -T_E_FAULT;
+    if (uaccess_load_u32(ts_va + 12, &nsec_hi) != 0) return -T_E_FAULT;
+    s64 tv_sec  = (s64)(((u64)sec_hi  << 32) | sec_lo);
+    s64 tv_nsec = (s64)(((u64)nsec_hi << 32) | nsec_lo);
+
+    // POSIX clock_settime(CLOCK_REALTIME): reject a negative time and an
+    // out-of-range nanosecond. Bound tv_sec so tv_sec*1e9 + tv_nsec cannot
+    // overflow u64 (CLOCK_SETTIME_SEC_MAX*1e9 ~= 1e19 < 1.8e19; year ~2286, far
+    // past any realistic step). A small-but-valid epoch is accepted -- the timer
+    // publish fail-soft-floors a degenerate epoch_ns < mono to offset 0.
+    if (tv_sec < 0 || tv_nsec < 0 || tv_nsec >= 1000000000)
+        return -T_E_INVAL;
+    if ((u64)tv_sec > 10000000000ull)   // ~year 2286; guards the multiply below
+        return -T_E_INVAL;
+
+    u64 epoch_ns = (u64)tv_sec * 1000000000ull + (u64)tv_nsec;
+    timer_reset_wallclock_anchor_ns(epoch_ns);
+    return 0;
+}
+
 static s64 sys_open_handler(u64 start_fd_raw, u64 path_va,
                             u64 path_len_raw, u64 omode_raw) {
     struct Thread *t = current_thread();
@@ -6104,6 +6158,11 @@ void syscall_dispatch(struct exception_context *ctx) {
 
     case SYS_CLOCK_GETTIME:
         ctx->regs[0] = (u64)sys_clock_gettime_handler(ctx->regs[0], ctx->regs[1],
+                                                      ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_CLOCK_SETTIME:
+        ctx->regs[0] = (u64)sys_clock_settime_handler(ctx->regs[0], ctx->regs[1],
                                                       ctx->regs[2], ctx->regs[3]);
         return;
 

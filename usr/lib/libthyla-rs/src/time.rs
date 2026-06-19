@@ -23,7 +23,7 @@ use core::sync::atomic::AtomicU32;
 
 use crate::err::{Error, Result};
 use crate::torpor;
-use crate::{T_CLOCK_MONOTONIC, T_CLOCK_REALTIME, t_clock_gettime};
+use crate::{T_CLOCK_MONOTONIC, T_CLOCK_REALTIME, t_clock_gettime, t_clock_settime};
 
 /// Block the calling Thread for at least `dur`.
 ///
@@ -135,6 +135,18 @@ impl SystemTime {
         SystemTime(read_clock(T_CLOCK_REALTIME))
     }
 
+    /// A wall-clock time `secs`.`nsecs` after the Unix epoch (`nsecs` clamped to
+    /// [0, 1e9)). The SNTP client builds its computed time this way before
+    /// stepping the clock.
+    pub fn from_unix(secs: u64, nsecs: u32) -> SystemTime {
+        SystemTime(Duration::new(secs, nsecs.min(999_999_999)))
+    }
+
+    /// The Duration since the Unix epoch.
+    pub fn since_epoch(&self) -> Duration {
+        self.0
+    }
+
     /// The Duration from `earlier` to `self`; `Err` (carrying the back-step
     /// amount) if `earlier` is later. Like std's `duration_since`, with the
     /// `SystemTimeError` collapsed to the Duration it would carry.
@@ -145,4 +157,20 @@ impl SystemTime {
             Err(earlier.0 - self.0)
         }
     }
+}
+
+/// Step `CLOCK_REALTIME` to `t` (net-7a; the SNTP client's clock-step path).
+/// Requires `CAP_HOSTOWNER` -- a clock step is system-global, so it is the host
+/// owner's authority. `CLOCK_MONOTONIC` is unaffected.
+///
+/// Errors:
+///   - `Error::PermissionDenied`: the caller lacks `CAP_HOSTOWNER` (the common,
+///     expected case for a non-elevated tool).
+///   - `Error::InvalidArgument`: the time is out of range (only reachable for an
+///     epoch beyond ~year 2286; `SystemTime::now`/`from_unix` stay well within).
+///   - `Error::BadAddress` / `Error::Io`: defense-in-depth on the kernel return.
+pub fn set_realtime(t: SystemTime) -> Result<()> {
+    let ts = TimeSpec { tv_sec: t.0.as_secs() as i64, tv_nsec: t.0.subsec_nanos() as i64 };
+    let rc = unsafe { t_clock_settime(T_CLOCK_REALTIME, &ts as *const TimeSpec as u64) };
+    Error::from_syscall_return(rc).map(|_| ())
 }
