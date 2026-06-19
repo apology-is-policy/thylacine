@@ -427,18 +427,30 @@ Network introspection is **9P-native and mostly free** (the Plan 9 property —
 
 - **Per-connection** `/net/tcp/N/status` (+ `local`/`remote`) — the live TCP
   state, `cat`-able. This exists by §3.2 at no extra cost.
-- **Per-protocol** `/net/tcp/stats`, `/net/udp/stats` — counters.
+- **Per-protocol** `/net/tcp/stats`, `/net/udp/stats`, `/net/icmp/stats` —
+  counters (`active`/`opened`).
 - **Per-interface** `/net/ipifc/N/status` — address, link state, packet/byte
   counters.
-- **A `/ctl/net` summary** — the devctl precedent (the `/ctl` introspection
-  surface, #57a): a read-only aggregate (interfaces, routes, the connection
-  table) for one-shot `cat /ctl/net`. Like all of `/ctl`, it is
-  **visibility, not authority** (`perm_enforced = false`, read-only), and it
-  reports only what the reader's `/net` view already exposes.
-- A native **`netstat`** tool is a thin walk of `/net`.
+- **A `/net/summary` rollup** — a read-only aggregate (interfaces + per-protocol
+  stats + the live connection table) for one-shot `cat /net/summary`. It is
+  **visibility, not authority** (read-only, world-readable, mints nothing) and
+  reports only what the reader's `/net` view already exposes — it is *in* `/net`,
+  so per-territory by construction. **netd serves it** (the data — the connection
+  table — is netd-held; the kernel holds no network state), modelled on the `/ctl`
+  introspection precedent (#57a) but located where its data lives rather than
+  under the kernel's devctl mount. (Reconciled from the charter's original
+  `/ctl/net` path, user-voted 2026-06-19: a kernel `/ctl/net` would have to reach
+  up into a userspace service from a devctl read — a layering inversion — for
+  state the kernel does not own; `/net/summary` is the Plan-9-clean home and needs
+  no kernel change.)
+- A native **`netstat`** tool is a thin walk of `/net` (it reads the per-protocol
+  `stats`, enumerates the live `/net/<proto>/N` connection dirs, and reads each
+  one's `status`/`local`/`remote`) — the one-shot aggregate as a client-side walk,
+  independent of `/net/summary`.
 
 W4-F5 is closed: observability has a designed surface (per-connection status +
-protocol/interface stats + the `/ctl/net` summary), not just a charter mention.
+protocol/interface stats + the `/net/summary` rollup + the native `netstat`),
+not just a charter mention.
 
 ---
 
@@ -703,7 +715,7 @@ its own status row + audit where audit-bearing):
 | **net-5** | the socket-compat pouch boundary-line (§7) — Linux/pouch binaries reach `/net`. |
 | **net-6a** | blocking sockets: netd deferred-reply data reads + the pouch `shutdown`/`sendto`/`recvfrom` completion (closes the net-5 audit seam #209) + the Loom-multishot async path (§12.1, zero new Loom core) + a native echo server (§16). Userspace + the already-built kernel Loom — **no new ABI** (autonomy). |
 | **net-6b** | the synchronous `poll()`/`select()` bridge (§12.2): the kernel `dev9p.poll` slot + the netd readiness file + the I-9 wake. **ABI surface — spec-first `net_poll.tla`, then impl, then focused audit** (user-voted 2026-06-18: the kernel-bridge over the pouch-thread-per-fd shim). |
-| **net-7** | TLS root bundle (§9) + SNTP + `SYS_CLOCK_SETTIME` (§10) + observability (`/ctl/net`, `netstat`, §11). |
+| **net-7** | TLS root bundle (§9) + SNTP + `SYS_CLOCK_SETTIME` (§10) + observability (`/net/summary`, `netstat`, §11). |
 | **net-8** | exit criteria: the server + soak proofs (§16) + one focused audit over the reserved surfaces. |
 
 **Preempt — the virtio-PCI transport (pci-0..pci-3, `docs/VIRTIO-PCI-DESIGN.md`).**
@@ -758,7 +770,7 @@ Every RW-13 `#68` register finding, and where this charter closes it:
 | W4-F2 | socket-shim claimed vs ARCH §11.5 zero socket syscalls | §7 (pouch-userspace translation; reconciled — not kernel syscalls) — **D-net-2** |
 | W4-F3 | DNS/`cs` mechanism designed by nothing | §5 (`cs`/`dns`/`ndb`, netd-served) |
 | W4-F4 | TLS/root-cert-bundle only in an exit criterion | §9 (rustls native + baked root bundle at a canonical path) |
-| W4-F5 | network observability undesigned | §11 (per-conn status + stats + `/ctl/net` + `netstat`) |
+| W4-F5 | network observability undesigned | §11 (per-conn status + stats + `/net/summary` + `netstat`) |
 | W4-F6 | poll-readiness over 9P undesigned (`dev9p` no `.poll`) | §12 (Loom-multishot async + `dev9p.poll` bridge + reserved `net_poll.tla`) |
 | W4-F7 | `/net` schema + fid state machine pre-design; §9.3 waiver mis-scoped | §3 (the schema + the netd fid state machine, distinct from smoltcp) |
 | W4-F8 | exit criteria 100% client-side | §16 (server + soak criteria added) |
