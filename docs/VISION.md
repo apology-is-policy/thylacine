@@ -452,7 +452,7 @@ The minimum-viable Utopia surface is enumerated in `ARCHITECTURE.md §23.2`:
 - **TPIDR_EL0 save/restore** for TLS.
 - **`/etc/{passwd,group,hostname,resolv.conf,localtime}`** as ordinary Stratum files.
 - **`/tmp`, `/run`** as tmpfs.
-- **Dynamic linker** (`ld-thylacine.so` — musl's, relinked).
+- **Dynamic linker** (`ld-thylacine.so` — musl's, relinked) — **confined to this Linux-binary-compat tier, sandboxed Fuchsia-style (libraries supplied as capabilities, no ambient `LD_*` search; full-RELRO + BIND_NOW + PIE).** Native Thylacine userspace is **statically linked**, and dynamic linking is **refused for native programs — a permanent conviction** (REVENANT / `docs/EXEC-LOAD-DESIGN.md` §7): Stratum's content-addressing already dissolves the disk argument, the only surviving RAM argument is small, and the sole mechanism that would capture it without a linker is KSM — an ASLR-defeating dedup side channel (CVE-2015-2877, *Dedup Est Machina*) that a hardening-first OS must not adopt. This compat tier is the *sole* home for a dynamic linker, inside the explicitly-degraded foreign-binary blast radius.
 
 Once Utopia ships at Phase 5 exit, the substrate is already *useful*. Linux compat (Phase 6) and hardening (Phase 7) extend the practical working OS while Halcyon's design risk is held at arm's length. Halcyon (Phase 8) inherits a hardened, audited, network-capable, Linux-binary-compatible substrate. Halcyon adds graphics; everything else proves the rest works first.
 
