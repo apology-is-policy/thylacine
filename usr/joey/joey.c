@@ -3815,6 +3815,38 @@ int main(void) {
                                  "127.0.0.1 via /net/cs)\n");
                     }
 
+                    // === net-util: ping the in-guest loopback over /net/icmp ===
+                    // `ping -c 1 127.0.0.1` over net::IcmpSocket. The 127.x target
+                    // migrates the icmp socket onto netd's resident loopback stack
+                    // (net-8a), which auto-answers the echo in-guest -- a
+                    // DETERMINISTIC, slirp-independent round-trip (an external ping
+                    // is host-dependent, never asserted here). ping exits 0 iff a
+                    // reply arrived (pouch_smoke_one_argv requires status 0), so
+                    // this proves the full echo path: clone -> connect -> data
+                    // write (EchoRequest) -> ready poll -> data read (EchoReply).
+                    // The argv literal is split at each '\0'-before-digit boundary
+                    // so the octal escape ('\0' + '1') cannot fold into '\001'.
+                    {
+                        static const char png_name[] = "/bin/ping";
+                        static const char png_argv[] = "ping\0-c\0" "1\0" "127.0.0.1";
+                        static const char png_m1[] = "icmp_seq=0";
+                        static const char png_m2[] = "1 received";
+                        const struct argv_marker png_markers[] = {
+                            { png_m1, sizeof(png_m1) - 1 },
+                            { png_m2, sizeof(png_m2) - 1 },
+                        };
+                        if (pouch_smoke_one_argv(
+                                png_name, sizeof(png_name) - 1, png_argv,
+                                sizeof(png_argv), /*argc=*/4u, png_markers,
+                                sizeof(png_markers) / sizeof(png_markers[0]),
+                                /*cap_mask=*/0ul, /*perm_flags=*/0ul) != 0) {
+                            t_putstr("joey: net-util PROBE ping FAILED\n");
+                            return 1;
+                        }
+                        t_putstr("joey: net-util PROBE OK (ping 127.0.0.1 -> "
+                                 "EchoReply via /net/icmp loopback)\n");
+                    }
+
                     // === net-7c-1: native rustls TLS feasibility (runtime) ===
                     // Spawn /bin/tls-smoke (native, no pouch): it builds a real
                     // rustls ClientConfig (the RustCrypto provider + the LS-K

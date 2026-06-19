@@ -435,6 +435,68 @@ impl UdpSocket {
     }
 }
 
+/// A connected ICMP echo (ping) socket over netd's `/net/icmp` tree (net-3c).
+/// ICMP is portless and connectionless: `connect` records the ping target (the
+/// socket was bound to a rotating Echo identifier at clone), a `data` write
+/// sends one EchoRequest carrying the payload, a `data` read returns the
+/// matching EchoReply's payload (smoltcp filters replies to the socket's bound
+/// ident). Holds the `ctl` (lifetime) + `data` (the echo channel) fids; both
+/// close on drop. A 127.x target migrates the socket onto the in-guest loopback
+/// stack (net-8a), which auto-answers an echo to its own address -- the
+/// deterministic in-guest round-trip.
+///
+/// `recv` BLOCKS until a reply arrives. For a bounded wait -- the only sane mode
+/// for `ping`, since a host that never answers must not hang -- poll `ready_fd()`
+/// (the QTPOLL readiness sibling, net-6b) with a timeout first, then `recv` only
+/// when POLLIN fired. `ping` is the first consumer.
+pub struct IcmpSocket {
+    #[allow(dead_code)]
+    ctl: File,
+    data: File,
+    n: u32,
+}
+
+impl IcmpSocket {
+    /// Dial `/net/icmp` and `connect` to `target` (records the ping target; ICMP
+    /// is portless so the ctl verb is a bare dotted-quad). A subsequent `send`
+    /// emits an EchoRequest to `target`.
+    pub fn connect(target: Ipv4Addr) -> Result<IcmpSocket> {
+        let (mut ctl, n) = clone_conn("icmp")?;
+        ctl.write_all(format!("connect {}", target).as_bytes())?;
+        let data = open_conn_file("icmp", n, "data", true, true)?;
+        Ok(IcmpSocket { ctl, data, n })
+    }
+
+    /// Send one EchoRequest carrying `payload`. netd wraps it (the bound ident +
+    /// a rotating sequence) and the iface computes the checksum on egress.
+    /// Returns the payload bytes accepted.
+    pub fn send(&mut self, payload: &[u8]) -> Result<usize> {
+        self.data.write(payload)
+    }
+
+    /// Receive the matching EchoReply's payload into `buf` (its length). BLOCKS
+    /// until a reply arrives; poll `ready_fd()` first for a bounded wait.
+    pub fn recv(&mut self, buf: &mut [u8]) -> Result<usize> {
+        self.data.read(buf)
+    }
+
+    /// Open the QTPOLL `ready` sibling (`/net/icmp/N/ready`) for a bounded poll
+    /// on receive (POLLIN fires when an EchoReply is queued).
+    pub fn ready_fd(&self) -> Result<File> {
+        open_conn_file("icmp", self.n, "ready", true, false)
+    }
+
+    /// The connection number N (its `/net/icmp/N` directory).
+    pub fn conn_n(&self) -> u32 {
+        self.n
+    }
+
+    /// The raw `data` fd (for `poll`/Loom registration).
+    pub fn as_raw_fd(&self) -> i32 {
+        self.data.as_raw_fd()
+    }
+}
+
 /// The minimal single-threaded echo-server lifecycle (NET-DESIGN 4): bind, then
 /// accept-and-echo each connection in turn. Two clients that each send-then-recv
 /// are both served correctly (the connections are concurrently ESTABLISHED;
@@ -508,9 +570,6 @@ pub fn resolve(host: &str, port: u16) -> Result<SocketAddrV4> {
         .rsplit_once(WIRE_SEP as char)
         .ok_or(Error::InvalidArgument)?;
     let ip = Ipv4Addr::parse(ip_s)?;
-    let rport: u16 = port_s
-        .trim()
-        .parse()
-        .map_err(|_| Error::InvalidArgument)?;
+    let rport: u16 = port_s.trim().parse().map_err(|_| Error::InvalidArgument)?;
     Ok(SocketAddrV4::new(ip, rport))
 }
