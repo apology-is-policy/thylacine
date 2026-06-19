@@ -482,3 +482,35 @@ pub fn read_to_vec(stream: &mut TcpStream, cap: usize) -> Result<Vec<u8>> {
     }
     Ok(out)
 }
+
+/// Resolve `host` to a `SocketAddrV4` on `port` via netd's connection server
+/// `/net/cs` -- the Plan 9 name-resolution front door (numeric -> ndb-static ->
+/// DNS; NET-DESIGN 5). A dotted-quad `host` resolves locally with no round-trip;
+/// a name is dialed as `tcp!<host>!<port>` and the reply's `<clone> <ip>!<port>`
+/// second field gives the address. `NotFound` on an empty / unresolvable reply,
+/// `InvalidArgument` on a malformed one. The single resolution path every native
+/// `/net` client (curl, wget, ping, https, nslookup) shares.
+pub fn resolve(host: &str, port: u16) -> Result<SocketAddrV4> {
+    if let Ok(ip) = Ipv4Addr::parse(host) {
+        return Ok(SocketAddrV4::new(ip, port));
+    }
+    let mut cs = OpenOptions::new().read(true).write(true).open("/net/cs")?;
+    cs.write_all(format!("tcp!{}!{}", host, port).as_bytes())?;
+    let mut buf = [0u8; 128];
+    let k = cs.read(&mut buf)?;
+    if k == 0 {
+        return Err(Error::NotFound);
+    }
+    let line = core::str::from_utf8(&buf[..k]).map_err(|_| Error::InvalidArgument)?;
+    // Reply line: `<clone-file> <ip>!<port>`. The dial field carries ip!port.
+    let dial = line.split_whitespace().nth(1).ok_or(Error::NotFound)?;
+    let (ip_s, port_s) = dial
+        .rsplit_once(WIRE_SEP as char)
+        .ok_or(Error::InvalidArgument)?;
+    let ip = Ipv4Addr::parse(ip_s)?;
+    let rport: u16 = port_s
+        .trim()
+        .parse()
+        .map_err(|_| Error::InvalidArgument)?;
+    Ok(SocketAddrV4::new(ip, rport))
+}

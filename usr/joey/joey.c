@@ -3787,6 +3787,34 @@ int main(void) {
                                  "/net/summary rollup)\n");
                     }
 
+                    // === net-util: nslookup resolves a name via /net/cs ===
+                    // The native net-utils (nslookup/ping/curl/...) are /net
+                    // clients of netd's connection server. nslookup over
+                    // net::resolve (/net/cs: numeric -> ndb-static -> DNS). Spawn
+                    // it (post-net, so /net is in the namespace) with `localhost`
+                    // -- the static ndb maps it to 127.0.0.1, deterministic +
+                    // slirp-independent -- and assert the address in its stdout.
+                    // Routed through pouch_smoke_one_argv (it writes io::stdout,
+                    // the shell-tool path) like netstat.
+                    {
+                        static const char nsl_name[] = "/bin/nslookup";
+                        static const char nsl_argv[] = "nslookup\0localhost";
+                        static const char nsl_m1[] = "127.0.0.1";
+                        const struct argv_marker nsl_markers[] = {
+                            { nsl_m1, sizeof(nsl_m1) - 1 },
+                        };
+                        if (pouch_smoke_one_argv(
+                                nsl_name, sizeof(nsl_name) - 1, nsl_argv,
+                                sizeof(nsl_argv), /*argc=*/2u, nsl_markers,
+                                sizeof(nsl_markers) / sizeof(nsl_markers[0]),
+                                /*cap_mask=*/0ul, /*perm_flags=*/0ul) != 0) {
+                            t_putstr("joey: net-util PROBE nslookup FAILED\n");
+                            return 1;
+                        }
+                        t_putstr("joey: net-util PROBE OK (nslookup localhost -> "
+                                 "127.0.0.1 via /net/cs)\n");
+                    }
+
                     // === net-7c-1: native rustls TLS feasibility (runtime) ===
                     // Spawn /bin/tls-smoke (native, no pouch): it builds a real
                     // rustls ClientConfig (the RustCrypto provider + the LS-K
