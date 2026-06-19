@@ -112,6 +112,24 @@ These are not v1.0 angles — they're recorded so a future direction isn't lost.
   software-Quake acceptance gate -> Halcyon; GL = Mesa via Pouch, v1.1+, off the
   critical path). Angle #4 (§3.4) evolves in step.
 
+- **JIT-as-a-capability on strict W^X** (`docs/JIT-ON-WX-DESIGN.md`, adopted
+  2026-06-19 via the aux-merge intermezzo). A managed-runtime-era lead position:
+  make just-in-time CODE COMPILATION (V8 / LuaJIT / PyPy / wasm-JIT / HotSpot) a
+  capability-gated, auditable OS feature on top of I-12 (W^X), rather than the
+  policy hole every other OS leaves. The mechanism is a **dual-mapped code
+  Burrow**: one anonymous Burrow whose physical pages are mapped RW at VA_w (the
+  JIT writes code) AND RX at VA_x (it executes) — so no single PTE is ever W+X and
+  I-12 holds at page granularity (the kernel's own Lazarus W1.5 LSE
+  alternatives-patcher already does exactly this transient dual-alias of `.text`
+  internally). Exposed as a new code-Burrow kind + `SYS_ICACHE_SYNC(range)` (the
+  W1.5 `dc cvau`/`ic ivau`/`dsb`/`isb` sequence) + a `CAP_JIT` capability
+  (elevation-only, non-rfork-grantable, the `CAP_HW_CREATE` class). NO v1.0
+  consumer (Go + Rust are AOT + W^X-clean), so DEFERRED — and distinct from the
+  imperium "just-in-time elevation" of Angle #12 (that is *privilege*; this is
+  *code generation*). When the managed-runtime era is in scope, the kernel
+  primitive folds into ARCH §6.6 (whose post-v1.0 pkey-shaped-syscall note now
+  points here). Audit-bearing (W^X + the `CAP_*` system).
+
 ---
 
 ## 3. Per-angle scope
