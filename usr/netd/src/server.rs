@@ -151,6 +151,17 @@ const LO_LOOPBACK_PORT: u16 = 7711;
 const LO_POLLS: u32 = 200;
 const LO_POLL_MS: u64 = 2;
 const LO_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
+// The ISN seed for the RESIDENT loopback stack (net-8a). A fixed seed is sound
+// for loopback (no off-path attacker on the wire), like LO_SEED for the E2Es; a
+// distinct value keeps the two stacks' sequence spaces independent in a boot
+// that runs both (the selftest + a live 127.x user).
+const LO_RESIDENT_SEED: u64 = 0xd1b5_4a32_d192_ed03;
+
+/// An IPv4 address in the loopback block 127.0.0.0/8 (RFC 1122) -- routed to the
+/// resident lo stack (net-8a) rather than the NIC.
+fn is_loopback_v4(ip: [u8; 4]) -> bool {
+    ip[0] == 127
+}
 
 const P9_VERSION_9P2000_L: &[u8] = b"9P2000.L";
 
@@ -322,6 +333,14 @@ struct Slot {
     // a re-used index can never type-confuse the listener's `get::<tcp::Socket>`.
     // 0 == a free / never-minted slot (next_gen never returns 0).
     gen: u32,
+    // Which smoltcp stack this slot's socket lives in (net-8a). false == the NIC
+    // stack (`Net.sockets`/`Net.iface`, the default at clone); true == the
+    // resident loopback stack (`Net.lo`), set by ensure_lo_stack when a 127.x
+    // dial/announce migrates the fresh socket there. The set a slot's
+    // SocketHandle is valid in -- `set_ref`/`set_mut` route every socket access
+    // by it, since a handle is set-specific (a get on the wrong set panics). Only
+    // ever true when `Net.lo` is Some, so the lo-branch unwrap is unreachable.
+    lo: bool,
 }
 
 impl Slot {
@@ -337,6 +356,7 @@ impl Slot {
             listen_ep: None,
             icmp_ident: 0,
             gen: 0,
+            lo: false,
         }
     }
 }
@@ -511,6 +531,19 @@ impl IfConfig {
     }
 }
 
+/// The resident loopback stack (net-8a): a second, isolated smoltcp interface on
+/// a `Loopback` device, addressed `127.0.0.1/8`, so an in-guest client dialing
+/// `127.x` reaches an in-guest server over the REAL `/net` 9P path (the owed
+/// in-guest peer the NIC-only live stack could not give: slirp does not loop a
+/// guest-to-own-IP packet deterministically). A loopback socket CANNOT share the
+/// NIC iface+set -- the NIC default route steals `127.x` egress (net-3d) -- so it
+/// gets its OWN iface + device + set, polled alongside the NIC each tick.
+struct LoStack {
+    iface: Interface,
+    sockets: SocketSet<'static>,
+    device: Loopback,
+}
+
 pub struct Net {
     iface: Interface,
     sockets: SocketSet<'static>,
@@ -538,6 +571,10 @@ pub struct Net {
     // surfaced read-only through /net/ipifc/0 + /net/ndb. Kept coherent with the
     // iface by ifc_set_static / ifc_clear.
     ifc: IfConfig,
+    // The resident loopback stack (net-8a). None until enable_loopback (the
+    // resident netd opts in; the E2E selftests leave it None). A slot's socket
+    // lives here iff its `lo` flag is set (a 127.x dial migrated it).
+    lo: Option<LoStack>,
 }
 
 impl Net {
@@ -578,6 +615,138 @@ impl Net {
             pending: Vec::new(),
             dns,
             ifc,
+            lo: None,
+        }
+    }
+
+    /// Stand up the resident loopback stack (net-8a): a second isolated smoltcp
+    /// interface on a `Loopback` device, addressed `127.0.0.1/8`. Idempotent. The
+    /// resident netd opts in (main.rs, after `new`); the E2E selftests do NOT (they
+    /// pass a loopback-configured iface as the PRIMARY stack + leave `lo` None, so
+    /// their 127.x dials stay on `self.sockets` and `set_*` is behavior-identical
+    /// for them -- the audited E2E paths are untouched). A fixed seed is sound for
+    /// loopback (no off-path attacker on the wire to predict an ISN), matching the
+    /// E2E precedent.
+    pub fn enable_loopback(&mut self) {
+        if self.lo.is_some() {
+            return;
+        }
+        let mut device = Loopback::new(Medium::Ethernet);
+        let mut cfg = Config::new(HardwareAddress::Ethernet(EthernetAddress([
+            0x02, 0x00, 0x00, 0x00, 0x00, 0x01,
+        ])));
+        cfg.random_seed = LO_RESIDENT_SEED;
+        let ts0 = self.now();
+        let mut iface = Interface::new(cfg, &mut device, ts0);
+        iface.update_ip_addrs(|a| {
+            let _ = a.push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8));
+        });
+        self.lo = Some(LoStack {
+            iface,
+            sockets: SocketSet::new(Vec::new()),
+            device,
+        });
+    }
+
+    /// Migrate a fresh connection slot onto the loopback stack (net-8a) -- a
+    /// dial/announce to `127.x`. The slot's socket is fresh (clone reserved it on
+    /// the NIC set; only status/check_ready have read it, never connected it), and
+    /// the smoltcp `Socket` enum is not re-`add`able (AnySocket is impl'd only for
+    /// the concrete types), so we DROP the NIC-set socket and mint an equivalent
+    /// one on the lo set -- a never-connected socket carries no state worth
+    /// preserving. No-op (returns true) if already on lo. Returns TRUE with no
+    /// migration when there is no resident lo stack: that is the single-stack E2E
+    /// config, where the PRIMARY stack already IS a 127.0.0.1/8 loopback (so a 127.x
+    /// dial stays on `self.sockets` and works) -- the resident netd always has a lo
+    /// stack (enable_loopback), so a 127.x dial there migrates. Returns false only
+    /// on a dead slot or an ICMP rebind failure (fail-closed). The per-protocol
+    /// buffer shapes MUST mirror the clone sites.
+    fn ensure_lo_stack(&mut self, n: u32) -> bool {
+        let i = n as usize;
+        if !self.slot_live(n) {
+            return false;
+        }
+        if self.slots[i].lo {
+            return true;
+        }
+        let lo = match self.lo.as_mut() {
+            Some(l) => l,
+            // No resident lo stack: the primary stack serves 127.x (the E2E config).
+            None => return true,
+        };
+        let proto = self.slots[i].proto;
+        // Drop the NIC-set socket (fresh -- nothing to preserve). Done before the
+        // lo borrow so the two field borrows do not overlap.
+        let nh = match proto {
+            PROTO_UDP => {
+                let rx = udp::PacketBuffer::new(
+                    alloc::vec![udp::PacketMetadata::EMPTY; UDP_META_SLOTS],
+                    alloc::vec![0u8; UDP_RX_BUF],
+                );
+                let tx = udp::PacketBuffer::new(
+                    alloc::vec![udp::PacketMetadata::EMPTY; UDP_META_SLOTS],
+                    alloc::vec![0u8; UDP_TX_BUF],
+                );
+                lo.sockets.add(udp::Socket::new(rx, tx))
+            }
+            PROTO_ICMP => {
+                let rx = icmp::PacketBuffer::new(
+                    alloc::vec![icmp::PacketMetadata::EMPTY; ICMP_META_SLOTS],
+                    alloc::vec![0u8; ICMP_RX_BUF],
+                );
+                let tx = icmp::PacketBuffer::new(
+                    alloc::vec![icmp::PacketMetadata::EMPTY; ICMP_META_SLOTS],
+                    alloc::vec![0u8; ICMP_TX_BUF],
+                );
+                let mut sock = icmp::Socket::new(rx, tx);
+                if sock
+                    .bind(icmp::Endpoint::Ident(self.slots[i].icmp_ident))
+                    .is_err()
+                {
+                    return false;
+                }
+                lo.sockets.add(sock)
+            }
+            _ => {
+                let rx = tcp::SocketBuffer::new(alloc::vec![0u8; TCP_RX_BUF]);
+                let tx = tcp::SocketBuffer::new(alloc::vec![0u8; TCP_TX_BUF]);
+                lo.sockets.add(tcp::Socket::new(rx, tx))
+            }
+        };
+        // Drop the old NIC-set socket now that the lo socket is in hand.
+        if let Some(oldh) = self.slots[i].socket.take() {
+            let _ = self.sockets.remove(oldh);
+        }
+        self.slots[i].socket = Some(nh);
+        self.slots[i].lo = true;
+        true
+    }
+
+    /// The socket set a live slot's socket lives in: the loopback stack iff the
+    /// slot was migrated by a 127.x dial (net-8a), else the NIC stack. A handle is
+    /// set-specific (a typed get on the wrong set panics), so EVERY socket access
+    /// routes through `set_ref`/`set_mut`. `slot.lo` is set true only by
+    /// ensure_lo_stack, which runs only when `self.lo` is Some, so the lo-branch
+    /// access is unreachable when `slot.lo` is false.
+    fn set_ref(&self, n: u32) -> &SocketSet<'static> {
+        if (n as usize) < MAX_SLOTS && self.slots[n as usize].lo {
+            &self.lo.as_ref().unwrap().sockets
+        } else {
+            &self.sockets
+        }
+    }
+
+    /// Whether a live slot's socket lives on the loopback stack (net-8a) -- the
+    /// resident_lo_selftest's migration assertion.
+    fn slot_on_lo(&self, n: u32) -> bool {
+        self.slot_live(n) && self.slots[n as usize].lo
+    }
+
+    fn set_mut(&mut self, n: u32) -> &mut SocketSet<'static> {
+        if (n as usize) < MAX_SLOTS && self.slots[n as usize].lo {
+            &mut self.lo.as_mut().unwrap().sockets
+        } else {
+            &mut self.sockets
         }
     }
 
@@ -605,15 +774,31 @@ impl Net {
     pub fn poll<D: Device + ?Sized>(&mut self, device: &mut D) {
         let ts = self.now();
         self.iface.poll(ts, device, &mut self.sockets);
+        // Service the resident loopback stack on its own device/iface/set
+        // (net-8a). Disjoint fields of `lo`, so no aliasing with the NIC poll.
+        if let Some(lo) = self.lo.as_mut() {
+            lo.iface.poll(ts, &mut lo.device, &mut lo.sockets);
+        }
     }
 
     /// smoltcp's poll-delay hint (ms): how long until the stack next needs
-    /// servicing. None == idle (no deadline). The serve loop clamps it.
+    /// servicing -- the SOONER of the NIC and loopback stacks (net-8a). None ==
+    /// both idle (no deadline). The serve loop clamps it.
     pub fn poll_delay_ms(&mut self) -> Option<u64> {
         let ts = self.now();
-        self.iface
+        let nic = self
+            .iface
             .poll_delay(ts, &self.sockets)
-            .map(|d| d.total_millis())
+            .map(|d| d.total_millis());
+        let lo = self
+            .lo
+            .as_mut()
+            .and_then(|l| l.iface.poll_delay(ts, &l.sockets).map(|d| d.total_millis()));
+        match (nic, lo) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, b) => b,
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -802,6 +987,7 @@ impl Net {
             listen_ep: None,
             icmp_ident: 0,
             gen,
+            lo: false,
         };
         self.tcp_active += 1;
         self.tcp_opened += 1;
@@ -834,6 +1020,7 @@ impl Net {
             listen_ep: None,
             icmp_ident: 0,
             gen,
+            lo: false,
         };
         self.udp_active += 1;
         self.udp_opened += 1;
@@ -875,6 +1062,7 @@ impl Net {
             listen_ep: None,
             icmp_ident: ident,
             gen,
+            lo: false,
         };
         self.icmp_active += 1;
         self.icmp_opened += 1;
@@ -914,7 +1102,9 @@ impl Net {
                 // Socket, dropped here, releasing its rx/tx buffers.
                 let proto = self.slots[i].proto;
                 if let Some(h) = self.slots[i].socket.take() {
-                    let _ = self.sockets.remove(h);
+                    // Remove from the slot's stack (lo or NIC); set_mut still reads
+                    // the slot's `lo` flag (only `socket` was taken). net-8a.
+                    let _ = self.set_mut(n).remove(h);
                 }
                 self.slots[i] = Slot::empty();
                 self.dec_active(proto);
@@ -976,25 +1166,35 @@ impl Net {
         if self.slot_proto(n) != Some(PROTO_ICMP) {
             return Err(());
         }
-        let la = self.iface_ipv4().unwrap_or([0, 0, 0, 0]);
+        // A 127.x ping migrates this slot's socket onto the loopback stack (net-8a)
+        // so the echo loops in-guest; the lo iface auto-answers an echo-request to
+        // its own 127.0.0.1.
+        if is_loopback_v4(ip) && !self.ensure_lo_stack(n) {
+            return Err(());
+        }
+        let la = self.iface_ipv4_for(n).unwrap_or([0, 0, 0, 0]);
         self.slots[n as usize].local = Some((la, 0)); // ICMP has no local port
         self.slots[n as usize].remote = Some((ip, 0));
         self.slots[n as usize].err = None;
         Ok(())
     }
 
-    /// The first IPv4 address bound on the interface, or None (pre-lease). UDP
-    /// reports it as the connection's `local` address (the source the stack will
-    /// select); TCP reads its selected source straight off the socket post-connect.
-    fn iface_ipv4(&self) -> Option<[u8; 4]> {
-        self.iface
-            .ip_addrs()
-            .iter()
-            .find_map(|c| match c.address() {
-                IpAddress::Ipv4(v4) => Some(v4.octets()),
-                #[allow(unreachable_patterns)]
-                _ => None,
-            })
+    /// The first IPv4 address bound on the stack a slot's socket lives on (net-8a):
+    /// the loopback iface's `127.0.0.1` for a migrated slot, else the NIC iface's
+    /// leased address (None pre-lease). UDP/ICMP report it as the connection's
+    /// `local` address (the source the stack will select); TCP reads its selected
+    /// source straight off the socket post-connect.
+    fn iface_ipv4_for(&self, n: u32) -> Option<[u8; 4]> {
+        let iface = if (n as usize) < MAX_SLOTS && self.slots[n as usize].lo {
+            &self.lo.as_ref().unwrap().iface
+        } else {
+            &self.iface
+        };
+        iface.ip_addrs().iter().find_map(|c| match c.address() {
+            IpAddress::Ipv4(v4) => Some(v4.octets()),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        })
     }
 
     // -------------------------------------------------------------------------
@@ -1132,23 +1332,44 @@ impl Net {
     /// datagram socket is connectionless, so this only fixes the default
     /// destination; a re-dial on an already-bound socket just updates the remote.
     fn udp_connect(&mut self, n: u32, ip: [u8; 4], port: u16) -> Result<(), ()> {
+        // A 127.x destination migrates this slot's socket onto the loopback stack
+        // (net-8a) BEFORE the bind, so the datagram loops in-guest.
+        if is_loopback_v4(ip) && !self.ensure_lo_stack(n) {
+            return Err(());
+        }
         let h = match self.slot_socket(n) {
             Some(h) => h,
             None => return Err(()),
         };
-        if !self.sockets.get::<udp::Socket>(h).is_open() {
-            let local_port = self.next_local_port;
+        let local_port = self.next_local_port;
+        // Bind on the slot's stack (lo or NIC) if not already open. Block-scoped so
+        // the set_mut borrow ends before we mutate self.slots / self.next_local_port.
+        // Some(true)=newly bound, Some(false)=already open, None=bind rejected.
+        let bound = {
             let ep = IpListenEndpoint {
                 addr: None,
                 port: local_port,
             };
-            if self.sockets.get_mut::<udp::Socket>(h).bind(ep).is_err() {
+            let set = self.set_mut(n);
+            if set.get::<udp::Socket>(h).is_open() {
+                Some(false)
+            } else if set.get_mut::<udp::Socket>(h).bind(ep).is_err() {
+                None
+            } else {
+                Some(true)
+            }
+        };
+        match bound {
+            None => {
                 self.slots[n as usize].err = Some("udp bind rejected");
                 return Err(());
             }
-            self.next_local_port = ephemeral_after(local_port);
-            let la = self.iface_ipv4().unwrap_or([0, 0, 0, 0]);
-            self.slots[n as usize].local = Some((la, local_port));
+            Some(true) => {
+                self.next_local_port = ephemeral_after(local_port);
+                let la = self.iface_ipv4_for(n).unwrap_or([0, 0, 0, 0]);
+                self.slots[n as usize].local = Some((la, local_port));
+            }
+            Some(false) => {}
         }
         self.slots[n as usize].remote = Some((ip, port));
         self.slots[n as usize].err = None;
@@ -1160,6 +1381,13 @@ impl Net {
     /// report a stable tuple regardless of the live socket's later transitions.
     /// Err on a smoltcp connect rejection.
     fn tcp_connect(&mut self, n: u32, ip: [u8; 4], port: u16) -> Result<(), ()> {
+        // A 127.x destination migrates this slot's socket onto the loopback stack
+        // (net-8a) BEFORE the open, so the connect routes via the lo iface (whose
+        // 127.0.0.1/8 is on-link) -- the NIC iface would route 127.x to the default
+        // gateway with the wrong source address (net-3d).
+        if is_loopback_v4(ip) && !self.ensure_lo_stack(n) {
+            return Err(());
+        }
         let h = match self.slot_socket(n) {
             Some(h) => h,
             None => return Err(()),
@@ -1173,25 +1401,40 @@ impl Net {
             addr: None, // smoltcp selects the source address from the route
             port: local_port,
         };
-        // Disjoint-field borrows: the socket (from self.sockets) and the iface
-        // context (from self.iface) are separate fields of self.
-        let r = self
-            .sockets
-            .get_mut::<tcp::Socket>(h)
-            .connect(self.iface.context(), remote, local);
-        match r {
-            Ok(()) => {
+        let lo = self.slots[n as usize].lo;
+        // Connect + read back the tuple on the slot's stack (lo or NIC). Block-
+        // scoped so the (set, iface) borrow ends before we mutate self.slots. The
+        // socket + the iface context are disjoint fields within each stack.
+        let endpoints = {
+            let (set, iface): (&mut SocketSet<'static>, &mut Interface) = if lo {
+                let l = self.lo.as_mut().unwrap();
+                (&mut l.sockets, &mut l.iface)
+            } else {
+                (&mut self.sockets, &mut self.iface)
+            };
+            match set
+                .get_mut::<tcp::Socket>(h)
+                .connect(iface.context(), remote, local)
+            {
+                Ok(()) => {
+                    // connect() set the tuple synchronously: remote is what we
+                    // dialed; local is the selected source addr + our ephemeral port.
+                    let le = set.get::<tcp::Socket>(h).local_endpoint();
+                    let re = set.get::<tcp::Socket>(h).remote_endpoint();
+                    Some((le, re))
+                }
+                Err(_) => None,
+            }
+        };
+        match endpoints {
+            Some((le, re)) => {
                 self.next_local_port = ephemeral_after(local_port);
-                // connect() set the tuple synchronously: remote is what we
-                // dialed; local is the selected source addr + our ephemeral port.
-                let le = self.sockets.get::<tcp::Socket>(h).local_endpoint();
-                let re = self.sockets.get::<tcp::Socket>(h).remote_endpoint();
                 self.slots[n as usize].local = le.map(endpoint_octets);
                 self.slots[n as usize].remote = re.map(endpoint_octets);
                 self.slots[n as usize].err = None;
                 Ok(())
             }
-            Err(_) => {
+            None => {
                 self.slots[n as usize].err = Some("connect rejected");
                 Err(())
             }
@@ -1206,11 +1449,11 @@ impl Net {
             None => return,
         };
         match self.slot_proto(n) {
-            Some(PROTO_UDP) => self.sockets.get_mut::<udp::Socket>(h).close(),
+            Some(PROTO_UDP) => self.set_mut(n).get_mut::<udp::Socket>(h).close(),
             // ICMP is connectionless (no close/unbind on smoltcp's icmp socket):
             // the fid clunk frees the slot + removes the socket. Nothing to do.
             Some(PROTO_ICMP) => {}
-            _ => self.sockets.get_mut::<tcp::Socket>(h).close(),
+            _ => self.set_mut(n).get_mut::<tcp::Socket>(h).close(),
         }
     }
 
@@ -1225,21 +1468,30 @@ impl Net {
         if self.slot_proto(n) != Some(PROTO_TCP) {
             return Err(());
         }
+        // An announce on an EXPLICIT loopback address migrates the listener onto
+        // the lo stack (net-8a), so a 127.x client reaches it. A `*` announce
+        // (addr None = any local) stays on the NIC -- a `*` listener does NOT span
+        // loopback at v1.0 (a loopback server binds 127.0.0.1 explicitly; the
+        // wildcard-spans-both refinement is a v1.x seam).
+        if let Some(IpAddress::Ipv4(a)) = ep.addr {
+            if is_loopback_v4(a.octets()) && !self.ensure_lo_stack(n) {
+                self.slots[n as usize].err = Some("announce rejected");
+                return Err(());
+            }
+        }
         let h = match self.slot_socket(n) {
             Some(h) => h,
             None => return Err(()),
         };
-        match self.sockets.get_mut::<tcp::Socket>(h).listen(ep) {
-            Ok(()) => {
-                self.slots[n as usize].listen_ep = Some(ep);
-                self.slots[n as usize].err = None;
-                Ok(())
-            }
-            Err(_) => {
-                // Already open/connected, or port 0: cannot listen.
-                self.slots[n as usize].err = Some("announce rejected");
-                Err(())
-            }
+        let listened = self.set_mut(n).get_mut::<tcp::Socket>(h).listen(ep).is_ok();
+        if listened {
+            self.slots[n as usize].listen_ep = Some(ep);
+            self.slots[n as usize].err = None;
+            Ok(())
+        } else {
+            // Already open/connected, or port 0: cannot listen.
+            self.slots[n as usize].err = Some("announce rejected");
+            Err(())
         }
     }
 
@@ -1317,28 +1569,33 @@ impl Net {
         let m = self.slots.iter().position(|s| !s.used)?;
         let established = self.slots[n as usize].socket?;
         let ep = self.slots[n as usize].listen_ep?;
+        // N's stack (lo or NIC): the established + re-armed sockets all live here.
+        // M inherits it -- a loopback listener accepts loopback calls (net-8a).
+        let nlo = self.slots[n as usize].lo;
         let rx = tcp::SocketBuffer::new(alloc::vec![0u8; TCP_RX_BUF]);
         let tx = tcp::SocketBuffer::new(alloc::vec![0u8; TCP_TX_BUF]);
-        let fresh = self.sockets.add(tcp::Socket::new(rx, tx));
-        if self
-            .sockets
-            .get_mut::<tcp::Socket>(fresh)
-            .listen(ep)
-            .is_err()
-        {
-            // Re-arm failed: drop the fresh socket, leave N holding the call so
-            // the accept retries next poll (no socket leaked; N still active).
-            let _ = self.sockets.remove(fresh);
-            return None;
-        }
-        let le = self
-            .sockets
-            .get::<tcp::Socket>(established)
-            .local_endpoint();
-        let re = self
-            .sockets
-            .get::<tcp::Socket>(established)
-            .remote_endpoint();
+        // Mint the re-arm listener + read the established endpoints on N's set.
+        // Block-scoped so the set borrow ends before we mutate self.slots. None ==
+        // the re-arm listen failed (the fresh socket is dropped; N keeps the call).
+        let swap = {
+            let set = if nlo {
+                &mut self.lo.as_mut().unwrap().sockets
+            } else {
+                &mut self.sockets
+            };
+            let fresh = set.add(tcp::Socket::new(rx, tx));
+            if set.get_mut::<tcp::Socket>(fresh).listen(ep).is_err() {
+                let _ = set.remove(fresh);
+                None
+            } else {
+                let le = set.get::<tcp::Socket>(established).local_endpoint();
+                let re = set.get::<tcp::Socket>(established).remote_endpoint();
+                Some((fresh, le, re))
+            }
+        };
+        // Re-arm failed: leave N holding the call so the accept retries next poll
+        // (no socket leaked; N still active).
+        let (fresh, le, re) = swap?;
         // N takes the fresh listener; M takes the established socket. Accept is
         // TCP-only (UDP never announces), so M is a TCP slot. N keeps its gen (it
         // is the same listener, re-armed); only M, a freshly-minted slot, stamps
@@ -1356,6 +1613,7 @@ impl Net {
             listen_ep: None,
             icmp_ident: 0,
             gen: mgen,
+            lo: nlo,
         };
         self.tcp_active += 1;
         self.tcp_opened += 1;
@@ -1387,7 +1645,7 @@ impl Net {
                 continue;
             }
             let ready = match self.slot_socket(pa.listening_n) {
-                Some(h) => accept_ready(self.sockets.get::<tcp::Socket>(h)),
+                Some(h) => accept_ready(self.set_ref(pa.listening_n).get::<tcp::Socket>(h)),
                 None => {
                     // Unreachable after the TCP+gen guard (a live TCP slot always
                     // has a socket); drop defensively so it cannot spin.
@@ -1426,7 +1684,7 @@ impl Net {
         if i < MAX_SLOTS && self.slots[i].used && self.slots[i].refs == 0 {
             let proto = self.slots[i].proto;
             if let Some(h) = self.slots[i].socket.take() {
-                let _ = self.sockets.remove(h);
+                let _ = self.set_mut(n).remove(h); // the slot's stack (net-8a)
             }
             self.slots[i] = Slot::empty();
             self.dec_active(proto);
@@ -1456,7 +1714,7 @@ impl Net {
                 };
                 let remote = IpEndpoint::new(IpAddress::v4(ip[0], ip[1], ip[2], ip[3]), port);
                 match self
-                    .sockets
+                    .set_mut(n)
                     .get_mut::<udp::Socket>(h)
                     .send_slice(data, remote)
                 {
@@ -1489,7 +1747,7 @@ impl Net {
                 repr.emit(&mut pkt, &ChecksumCapabilities::default());
                 let dst = IpAddress::v4(ip[0], ip[1], ip[2], ip[3]);
                 match self
-                    .sockets
+                    .set_mut(n)
                     .get_mut::<icmp::Socket>(h)
                     .send_slice(&pkt_buf, dst)
                 {
@@ -1501,7 +1759,7 @@ impl Net {
                 }
             }
             _ => self
-                .sockets
+                .set_mut(n)
                 .get_mut::<tcp::Socket>(h)
                 .send_slice(data)
                 .unwrap_or(0),
@@ -1517,10 +1775,11 @@ impl Net {
             Some(h) => h,
             None => return false,
         };
+        let set = self.set_ref(n);
         match self.slot_proto(n) {
-            Some(PROTO_UDP) => self.sockets.get::<udp::Socket>(h).can_recv(),
-            Some(PROTO_ICMP) => self.sockets.get::<icmp::Socket>(h).can_recv(),
-            _ => self.sockets.get::<tcp::Socket>(h).can_recv(),
+            Some(PROTO_UDP) => set.get::<udp::Socket>(h).can_recv(),
+            Some(PROTO_ICMP) => set.get::<icmp::Socket>(h).can_recv(),
+            _ => set.get::<tcp::Socket>(h).can_recv(),
         }
     }
 
@@ -1541,11 +1800,12 @@ impl Net {
             Some(h) => h,
             None => return false,
         };
+        let set = self.set_ref(n);
         match self.slot_proto(n) {
-            Some(PROTO_UDP) => self.sockets.get::<udp::Socket>(h).can_recv(),
-            Some(PROTO_ICMP) => self.sockets.get::<icmp::Socket>(h).can_recv(),
+            Some(PROTO_UDP) => set.get::<udp::Socket>(h).can_recv(),
+            Some(PROTO_ICMP) => set.get::<icmp::Socket>(h).can_recv(),
             _ => {
-                let s = self.sockets.get::<tcp::Socket>(h);
+                let s = set.get::<tcp::Socket>(h);
                 if s.can_recv() {
                     return true; // buffered data -> a read returns it (Data)
                 }
@@ -1574,10 +1834,11 @@ impl Net {
             Some(h) => h,
             None => return false,
         };
+        let set = self.set_ref(n);
         match self.slot_proto(n) {
-            Some(PROTO_UDP) => self.sockets.get::<udp::Socket>(h).is_open(),
-            Some(PROTO_ICMP) => self.sockets.get::<icmp::Socket>(h).is_open(),
-            _ => self.sockets.get::<tcp::Socket>(h).can_send(),
+            Some(PROTO_UDP) => set.get::<udp::Socket>(h).is_open(),
+            Some(PROTO_ICMP) => set.get::<icmp::Socket>(h).is_open(),
+            _ => set.get::<tcp::Socket>(h).can_send(),
         }
     }
 
@@ -1592,7 +1853,7 @@ impl Net {
             None => return false,
         };
         match self.slot_proto(n) {
-            Some(PROTO_TCP) => !self.sockets.get::<tcp::Socket>(h).is_open(),
+            Some(PROTO_TCP) => !self.set_ref(n).get::<tcp::Socket>(h).is_open(),
             _ => false,
         }
     }
@@ -1636,7 +1897,7 @@ impl Net {
             None => return RecvOutcome::Eof, // no socket: nothing will ever arrive
         };
         match self.slot_proto(n) {
-            Some(PROTO_UDP) => match self.sockets.get_mut::<udp::Socket>(h).recv_slice(out) {
+            Some(PROTO_UDP) => match self.set_mut(n).get_mut::<udp::Socket>(h).recv_slice(out) {
                 Ok((k, _meta)) => RecvOutcome::Data(k), // a datagram (k may be 0)
                 Err(udp::RecvError::Exhausted) => RecvOutcome::WouldBlock, // none queued
                 // Truncated: the datagram exceeded `out` (unreachable with the
@@ -1652,7 +1913,7 @@ impl Net {
                 // waits for a reply or the fid's clunk/flush).
                 let mut pkt_buf = [0u8; ICMP_RX_BUF];
                 let k = match self
-                    .sockets
+                    .set_mut(n)
                     .get_mut::<icmp::Socket>(h)
                     .recv_slice(&mut pkt_buf)
                 {
@@ -1674,7 +1935,7 @@ impl Net {
                 }
             }
             _ => {
-                let sock = self.sockets.get_mut::<tcp::Socket>(h);
+                let sock = self.set_mut(n).get_mut::<tcp::Socket>(h);
                 match sock.recv_slice(out) {
                     Ok(0) => RecvOutcome::WouldBlock, // established/half-open, rx empty
                     Ok(k) => RecvOutcome::Data(k),
@@ -1712,20 +1973,20 @@ impl Net {
             None => return "Closed",
         };
         if self.slot_proto(n) == Some(PROTO_UDP) {
-            return if self.sockets.get::<udp::Socket>(h).is_open() {
+            return if self.set_ref(n).get::<udp::Socket>(h).is_open() {
                 "Open"
             } else {
                 "Closed"
             };
         }
         if self.slot_proto(n) == Some(PROTO_ICMP) {
-            return if self.sockets.get::<icmp::Socket>(h).is_open() {
+            return if self.set_ref(n).get::<icmp::Socket>(h).is_open() {
                 "Open"
             } else {
                 "Closed"
             };
         }
-        match self.sockets.get::<tcp::Socket>(h).state() {
+        match self.set_ref(n).get::<tcp::Socket>(h).state() {
             tcp::State::Closed => "Closed",
             tcp::State::Listen => "Listen",
             tcp::State::SynSent => "Syn-Sent",
@@ -2118,6 +2379,124 @@ pub fn loopback_e2e(base: Instant) -> LoopbackResult {
         udp: lo_udp_roundtrip(&mut lo, &mut device),
         tcp: lo_tcp_accept(&mut lo, &mut device),
     }
+}
+
+/// net-8a: a DETERMINISTIC proof of the RESIDENT loopback interface -- the
+/// dual-stack the live netd runs, NOT an isolated single-stack lo Net like
+/// loopback_e2e. The primary "NIC" stack is addressed 10.0.0.1/24 (NOT 127), so a
+/// 127.x dial CANNOT route there: it MUST migrate to the resident lo stack to
+/// work. A successful announce-127 + connect-127 + accept + data round-trip
+/// therefore PROVES ensure_lo_stack migration + the dual-poll (net.poll services
+/// BOTH the primary device AND the owned lo device) + clean teardown (the
+/// connection table returns to baseline -- no leak). The caller ASSERTS the
+/// returned PASS/stage string (no NIC, no host -> fully deterministic).
+pub fn resident_lo_selftest(base: Instant) -> &'static str {
+    let mut nic = Loopback::new(Medium::Ethernet);
+    let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress([
+        0x02, 0x00, 0x00, 0x00, 0x00, 0x02,
+    ])));
+    config.random_seed = LO_SEED;
+    let ts0 = SmolInstant::from_millis(base.elapsed().as_millis() as i64);
+    let mut iface = Interface::new(config, &mut nic, ts0);
+    // A non-loopback primary address: 127.x has no route here -> a 127.x dial only
+    // succeeds via the resident lo stack (the whole point of the proof).
+    iface.update_ip_addrs(|a| {
+        let _ = a.push(IpCidr::new(IpAddress::v4(10, 0, 0, 1), 24));
+    });
+    let mut net = Net::new(iface, SocketSet::new(Vec::new()), base, IfConfig::empty());
+    net.enable_loopback();
+
+    // announce 127.0.0.1!port -> the listener migrates to the lo stack.
+    let ln = match net.tcp_clone() {
+        Some(n) => n,
+        None => return "clone-listen",
+    };
+    net.slot_ref(ln);
+    let ep = IpListenEndpoint {
+        addr: Some(IpAddress::v4(127, 0, 0, 1)),
+        port: LO_LOOPBACK_PORT,
+    };
+    if net.ctl_announce(ln, ep).is_err() {
+        return "announce";
+    }
+    if !net.slot_on_lo(ln) {
+        return "listener-not-migrated";
+    }
+
+    // connect 127.0.0.1!port -> the client migrates to the lo stack.
+    let cn = match net.tcp_clone() {
+        Some(n) => n,
+        None => return "clone-conn",
+    };
+    net.slot_ref(cn);
+    if net
+        .ctl_connect(cn, [127, 0, 0, 1], LO_LOOPBACK_PORT)
+        .is_err()
+    {
+        return "connect";
+    }
+    if !net.slot_on_lo(cn) {
+        return "client-not-migrated";
+    }
+
+    // Drive the deferred accept over the dual-poll, KEEPING the server side M so we
+    // can recv on it (synthetic conn_id/tag/fid = 0, like lo_tcp_accept).
+    net.register_accept(0, 0, 0, ln);
+    let mut mslot: Option<u32> = None;
+    let accepted = lo_drive(&mut net, &mut nic, |net| {
+        let done = net.poll_accepts();
+        if done.is_empty() {
+            return false;
+        }
+        for d in done {
+            mslot = Some(d.new_n);
+            net.slot_ref(d.new_n); // own M (the serve loop's complete_accept would)
+        }
+        true
+    });
+    if !accepted {
+        return "accept";
+    }
+    let m = match mslot {
+        Some(m) => m,
+        None => return "no-server-slot",
+    };
+    if !net.slot_on_lo(m) {
+        return "server-not-migrated";
+    }
+
+    // client -> server data over the loopback (the live data path: data_send +
+    // dual-poll + data_recv_outcome).
+    let payload = b"net8a-lo";
+    if net.data_send(cn, payload) != payload.len() {
+        return "send";
+    }
+    let mut buf = [0u8; 32];
+    let mut got = 0usize;
+    let received = lo_drive(&mut net, &mut nic, |net| {
+        match net.data_recv_outcome(m, &mut buf) {
+            RecvOutcome::Data(k) if k > 0 => {
+                got = k;
+                true
+            }
+            _ => false,
+        }
+    });
+    if !received {
+        return "recv";
+    }
+    if &buf[..got] != payload {
+        return "data-mismatch";
+    }
+
+    // Teardown -> the connection table returns to baseline (no fd/socket leak).
+    net.slot_unref(cn);
+    net.slot_unref(ln);
+    net.slot_unref(m);
+    if net.tcp_active != 0 {
+        return "leak";
+    }
+    "PASS"
 }
 
 /// net-6a-3: a DETERMINISTIC in-guest E2E of the >=2-concurrent TCP echo SERVER

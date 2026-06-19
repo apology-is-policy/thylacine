@@ -1371,6 +1371,53 @@ net-7d.
   state machine (net-2c) wraps *a* socket abstraction, so the recorded fallback
   (a Plan 9 IP-stack port, NET-DESIGN.md §14) would not change `/net`.
 
+## The resident loopback interface (net-8a)
+
+`netd` carries a real `lo` interface: a 127.0.0.1/8 stack so an in-guest client
+dialing 127.x reaches an in-guest server **over the real `/net` 9P path**. It is
+both a genuine OS feature (loopback networking) and the mechanism the net-8 owed
+in-guest peer E2Es need (the NIC-only live stack could not give a deterministic
+peer -- slirp does not loop a guest-to-own-IP packet, and a self-addressed packet
+egresses the wire, not internally).
+
+- **Why a SECOND isolated stack, not the NIC's**: a loopback socket cannot share
+  the NIC's `Interface`+`SocketSet`. The NIC default route steals 127.x egress
+  (`tcp::Socket::dispatch` has no iface-address-ownership gate -> `route()` falls
+  to the default route, verified in smoltcp 0.12 -- the net-3d "isolation is
+  load-bearing" finding), and `update_ip_addrs` clears the prior address. So the
+  `lo` stack gets its OWN `Interface` + `Loopback` device + `SocketSet`, addressed
+  127.0.0.1/8, polled alongside the NIC each `Net::poll` tick. The construction
+  mirrors the audited `loopback_e2e`.
+
+- **`Net.lo: Option<LoStack>`** -- the resident netd opts in (`enable_loopback`,
+  called once at bring-up after `Net::new`); the isolated single-stack E2E
+  selftests leave it `None` (they pass a loopback-configured iface as the PRIMARY
+  stack, so a 127.x dial stays on `self.sockets` and the `set_*` routing is
+  behavior-identical for them -- the audited E2E paths are untouched).
+
+- **Per-slot routing**: a `Slot` gains a `lo: bool` flag (false at clone -> the
+  NIC `SocketSet`). A dial/announce to an explicit 127.x address calls
+  `ensure_lo_stack`, which DROPS the fresh NIC-set socket and mints an equivalent
+  one on the lo `SocketSet` (the smoltcp `Socket` enum is not re-`add`able -- a
+  never-connected socket carries no state worth moving), flipping `slot.lo`. A
+  handle is set-specific (a typed `get` on the wrong set panics), so EVERY socket
+  access routes through `set_ref(n)`/`set_mut(n)`, which pick the slot's stack.
+  `accept_swap` mints M on the listener's stack (a loopback listener accepts
+  loopback calls). `tcp_connect` uses the lo iface's `context()` for a migrated
+  slot, so smoltcp selects 127.0.0.1 as the source (an on-link route).
+
+- **`*`-announce does NOT span loopback at v1.0**: `announce *!port` (any local
+  address) stays on the NIC; a loopback server binds 127.0.0.1 explicitly. The
+  wildcard-spans-both refinement is a v1.x seam.
+
+- **Proof**: `resident_lo_selftest` (boot-asserted, `net-8a resident lo E2E PASS`)
+  builds the dual-stack with a NON-loopback primary (10.0.0.1/24, no 127 route),
+  so a 127.x announce + connect + accept + data round-trip can ONLY succeed by
+  migrating to the resident lo stack -- proving `ensure_lo_stack` + the dual-poll +
+  a clean teardown (the connection table returns to baseline; no leak). The
+  in-guest cross-Proc round-trip over the real `/net` path (a guest tool dialing
+  127.x) is net-8b.
+
 ## References
 
 - `docs/NET-DESIGN.md` (the #68 charter) — §2 (one netd, narrowed views), §13

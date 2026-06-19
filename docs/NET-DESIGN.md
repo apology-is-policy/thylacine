@@ -1096,8 +1096,23 @@ named in §2.)
   (net-3d) — a backlog > 1 is also a net-8 seam.
   Then **net-6b** (the `dev9p.poll` bridge — spec-first `net_poll.tla` + impl +
   focused audit; the one ABI surface). §12.2 + §17 refined.
-- **net-7..net-8: not started.**
-  net-7 (TLS + SNTP + `SYS_CLOCK_SETTIME` — ABI), net-8 (exit criteria + the arc
-  audit), per §17, sequenced before the container runner (#70) per ROADMAP §2.2.
+- **net-7: complete** (TLS + SNTP + `SYS_CLOCK_SETTIME` + observability; audited +
+  gated at net-7d).
+- **net-8: in progress.**
+  - **net-8a (landed): the resident loopback interface** — netd carries a real
+    `lo` stack (127.0.0.1/8 on its own `Loopback` device + `SocketSet`, polled
+    alongside the NIC; a 127.x dial/announce migrates the connection's socket to
+    it). This is the in-guest peer mechanism the owed E2Es need: the NIC-only live
+    stack could not give a deterministic in-guest peer (slirp does not loop a
+    guest-to-own-IP packet). A loopback socket cannot share the NIC iface+set (the
+    net-3d default-route mis-route), so it is a second isolated stack — opt-in
+    (`enable_loopback`), so the audited single-stack E2E selftests are untouched.
+    Proven by the boot-asserted `resident_lo_selftest` (127.x migrate + accept +
+    data + no-leak over the dual-poll). See `docs/reference/121-netd.md`.
+  - **net-8b/c (next): the in-guest over-`/net` peer E2Es** (a guest tool dialing
+    127.x reaches an in-guest server over the real `/net` path — the net-3a/4b/6a
+    deferred-reply round-trips + the 7c-2 `TlsStream`-over-`/net` live socket) +
+    the §16 soak (table-returns-to-baseline, no leak).
+  - **net-8d: the whole-arc focused audit (§15.2) + the close.**
 
 The thylacine is real. So is its network — and it is, of course, a filesystem.

@@ -304,6 +304,11 @@ impl Driver for NetD {
         // renewal re-application is a v1.x seam). `ifc` carries the lease into
         // the ipifc/ndb views and seeds the resolver socket.
         let mut net = server::Net::new(iface, sockets, base, ifc);
+        // net-8a: stand up the resident loopback interface (127.0.0.1/8 on its own
+        // Loopback device + socket set), so an in-guest client dialing 127.x reaches
+        // an in-guest server over the REAL /net path. Serviced by net.poll alongside
+        // the NIC; a dial/announce to 127.x routes the connection's socket to it.
+        net.enable_loopback();
 
         // net-3b: a best-effort UDP round-trip through the live /net/udp data
         // path (a DNS query to slirp's resolver), bounded + logged, NEVER a boot
@@ -378,6 +383,18 @@ impl Driver for NetD {
                 lo.udp,
                 lo.icmp
             );
+        }
+
+        // net-8a: the RESIDENT loopback interface proof -- the dual-stack the live
+        // netd runs (NOT the isolated single-stack lo of net-3d). The primary
+        // "NIC" is 10.0.0.1 (no 127 route), so the 127.x announce/connect MUST
+        // migrate to the resident lo stack to round-trip -- proving ensure_lo_stack
+        // + the dual-poll + clean teardown. No host coupling -> ASSERTED.
+        let rlo = server::resident_lo_selftest(base);
+        if rlo == "PASS" {
+            say!("netd: net-8a resident lo E2E PASS (127.x migrate + accept + data + no-leak)");
+        } else {
+            say!("netd: net-8a resident lo E2E FAIL ({})", rlo);
         }
 
         // net-6a: the DETERMINISTIC in-guest blocking-read self-test -- a TCP
