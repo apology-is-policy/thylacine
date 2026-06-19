@@ -1429,6 +1429,22 @@ egresses the wire, not internally).
   in-guest cross-Proc round-trip over the real `/net` path (a guest tool dialing
   127.x) is net-8b.
 
+- **Known caveats (net-8d audit P3s)**:
+  - **One-way migration (#240, F1)**: `ensure_lo_stack` migrates NIC->lo only; there
+    is no lo->NIC de-migration. A UDP/ICMP socket whose stack was fixed by a 127.x
+    FIRST dial, then re-dialed (`udp_connect`/`icmp_connect`, e.g. a pouch per-datagram
+    `sendto`) to a NON-loopback destination, stays on the lo stack -> the datagram
+    egresses the lo iface (no route to the public dest) and is silently dropped while
+    `data_send` returns success. Narrow (mixed loopback/non-loopback destinations on
+    ONE socket; UDP is unreliable by contract), degradation-only (no panic/leak/
+    privilege). Rule: a UDP/ICMP socket's stack is fixed by its FIRST dial -- use a
+    fresh socket for a different-scope destination. v1.x: reject the cross-stack
+    re-dial (an honest error) or re-migrate.
+  - **Selftest non-fatal (#242, F3)**: `resident_lo_selftest` logs `FAIL` but does NOT
+    gate netd bring-up; a broken loopback is caught downstream by net-echo's net-8b
+    boot gate (exit-0 + `net-8b loopback E2E PASS`), so it cannot ship silently. v1.x:
+    fail-closed at netd's own layer (return `Err` on non-`PASS`, like `post_srv_net`).
+
 ## References
 
 - `docs/NET-DESIGN.md` (the #68 charter) — §2 (one netd, narrowed views), §13
