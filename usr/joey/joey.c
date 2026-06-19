@@ -3847,6 +3847,33 @@ int main(void) {
                                  "EchoReply via /net/icmp loopback)\n");
                     }
 
+                    // === net-util: curl URL/HTTP parser self-test ===
+                    // `curl --selftest` runs curl's DETERMINISTIC, network-free
+                    // gate: a URL-parse + request-build + response-parse battery
+                    // (the new pure logic). The transport itself -- a /net
+                    // TcpStream (http) or a TlsStream over it (https) -- is
+                    // net-8b/net-7c-audited, and a live fetch is host-dependent
+                    // under slirp, so the parser battery is the in-guest gate
+                    // (the https-tool --selftest pattern). No cap (pure logic).
+                    {
+                        static const char curl_name[] = "/bin/curl";
+                        static const char curl_argv[] = "curl\0--selftest";
+                        static const char curl_m1[] = "SELFTEST OK";
+                        const struct argv_marker curl_markers[] = {
+                            { curl_m1, sizeof(curl_m1) - 1 },
+                        };
+                        if (pouch_smoke_one_argv(
+                                curl_name, sizeof(curl_name) - 1, curl_argv,
+                                sizeof(curl_argv), /*argc=*/2u, curl_markers,
+                                sizeof(curl_markers) / sizeof(curl_markers[0]),
+                                /*cap_mask=*/0ul, /*perm_flags=*/0ul) != 0) {
+                            t_putstr("joey: net-util PROBE curl FAILED\n");
+                            return 1;
+                        }
+                        t_putstr("joey: net-util PROBE OK (curl --selftest -> "
+                                 "URL/HTTP parser battery)\n");
+                    }
+
                     // === net-7c-1: native rustls TLS feasibility (runtime) ===
                     // Spawn /bin/tls-smoke (native, no pouch): it builds a real
                     // rustls ClientConfig (the RustCrypto provider + the LS-K
