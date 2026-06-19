@@ -152,7 +152,7 @@ exact residue UTOPIA-VISUAL.md §8 flags; corrected to Bonfire with T2.)*
 
 | Mode | Keys |
 |---|---|
-| Normal | `i`/`a`/`o`/`A` → Insert; `v` → Visual; `:` / `/` → Command; `Space` → Palette; `h j k l` + arrows, `0`/`$`/`g`/`G`/`w`/`b`/PageUp/PageDown nav; `x` delete char; `d` delete line; `u` undo; `p` paste register; `n` repeat search |
+| Normal | `i`/`a`/`o`/`A` → Insert; `v` → Visual; `:` / `/` → Command; `Space` → Palette; `h j k l` + arrows, `0`/`$`/`g`/`G`/`{n}G`/PageUp/PageDown nav; `w`/`b`/`e`/`W` punctuation-aware word motions; `f`/`F`/`t`/`T` find-char (+ `;`/`,` repeat / reverse-repeat); `mi<o>`/`ma<o>` inner/around text objects (`o` ∈ word/`(`/`[`/`{`/`"`/…) + `mm` jump-to-match-bracket; a numeric **count prefix** (`3w`, `5j`, `2dd`); `%`/`s`/`,` multi-cursor (select-all / split-into-carets / collapse) + `c` multi-edit; `x` delete char; `d` delete line (or the selection / every caret); `y` yank; `p` paste register; `u` undo; `n` repeat search |
 | Insert | printable → insert; Enter → split; Backspace/Delete; Tab → 4 spaces (soft tab); Esc → Normal |
 | Visual | `h j k l 0 $ g G w b` extend the selection; `y` yank; `d`/`x` cut; Esc → cancel |
 | Command | type the line; Enter runs it; Backspace (erasing `:`/`/` exits); Esc → Normal |
@@ -185,6 +185,22 @@ forced). `/<pat>` Enter searches forward (wrapping); `n` repeats. `nora -R
   buffer → `view::render` (returns the cursor) → `set_cursor` → one `flush`
   diff frame to fd 1. Human-speed input, so the immediate-mode redraw-everything
   cost is irrelevant; the diff keeps the wire small.
+- **Multi-cursor** (`editor.rs` `carets: Vec<Sel>`, the Helix `%`/`s`/`c` flow) is
+  empty == single-cursor (the legacy `cursor`/`selection` path, untouched) and
+  non-empty == multi, with `carets[0]` the primary (it drives scrolling + the
+  block cursor). `%` selects the whole buffer, `s` splits the selection's matches
+  into one caret each, `c` enters a simultaneous insert applied at every caret per
+  keystroke, and `,` (or any mode switch) collapses back to the primary. A
+  `MultiEdit` (Char/Newline/Backspace) re-runs at each caret; `shift_after`
+  re-bases the not-yet-processed carets as the buffer mutates so their offsets stay
+  valid (the v1 backspace-across-carets case is the documented narrow seam).
+- **Text objects + find-char + counts** are Normal-mode parse state, not new
+  modes: a `Pending` (e.g. `FindChar(FindKind)`, the `m`-prefix object) holds the
+  half-typed operator until its argument key arrives; a numeric prefix accumulates
+  a `count` consumed by the next motion/operator (`3w`, `2dd`, `{n}G`).
+- **Syntax highlighting** is a native UT lexer highlighter (the KAUA §12 lexer
+  model, not tree-sitter at v1.0): the view colors tokens from the Bonfire syntax
+  hues. Off the edit hot-path (re-lexed per redraw, at human input speed).
 
 ## Console discipline (I-27)
 
