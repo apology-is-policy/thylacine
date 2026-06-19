@@ -22,7 +22,22 @@ pub extern "C" fn rs_main() -> i64 {
     run(env::args())
 }
 
+const USAGE: &str = "\
+usage: yes [STRING...]
+  Print STRING (or 'y' if none) on its own line, repeatedly, until the write
+  fails (e.g. the pipe reader closes).
+  --help  show this help
+
+Examples:
+  yes | head -3         # y / y / y
+  yes ok | head -1      # ok
+";
+
 fn run(args: Args) -> i64 {
+    if let Some(rc) = coreutils::usage::help_if_requested(args, USAGE) {
+        return rc;
+    }
+
     let mut line = String::new();
     let mut first = true;
     for op in args.operands() {

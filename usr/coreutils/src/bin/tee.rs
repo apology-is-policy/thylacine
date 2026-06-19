@@ -24,7 +24,22 @@ pub extern "C" fn rs_main() -> i64 {
     run(env::args())
 }
 
+const USAGE: &str = "\
+usage: tee [-a] FILE...
+  Copy stdin to stdout AND to each FILE.
+  -a      append to the FILEs instead of truncating
+  --help  show this help
+
+Examples:
+  ls | tee files.txt        # screen + file
+  cmd | tee -a log.txt      # append to a log
+";
+
 fn run(args: Args) -> i64 {
+    if let Some(rc) = coreutils::usage::help_if_requested(args, USAGE) {
+        return rc;
+    }
+
     let mut idx = 1;
     let mut append = false;
     while let Some(a) = args.get_str(idx) {

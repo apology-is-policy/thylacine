@@ -1,8 +1,10 @@
-// uniq [-c] [FILE] -- collapse ADJACENT duplicate lines.
+// uniq [-cdui] [FILE] -- collapse ADJACENT duplicate lines.
 //
-// -c prefixes each output line with its run count. Reads one FILE (or
-// stdin). Like GNU uniq, only ADJACENT duplicates are merged (sort first to
-// dedupe globally).
+// -c prefixes each output line with its run count. -d prints only duplicated
+// groups (count > 1); -u prints only unique lines (count == 1); -i compares
+// case-insensitively (the first line of each group is emitted as-is). Reads one
+// FILE (or stdin). Like GNU uniq, only ADJACENT duplicates are merged (sort
+// first to dedupe globally).
 
 #![no_std]
 #![no_main]
@@ -31,26 +33,72 @@ fn emit(out: &mut io::OutSink, line: &[u8], count: usize, with_count: bool) {
     out.put(b"\n");
 }
 
+/// Adjacent-line equality, optionally ASCII-case-insensitive.
+fn same(a: &[u8], b: &[u8], ignore_case: bool) -> bool {
+    if ignore_case {
+        a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.eq_ignore_ascii_case(y))
+    } else {
+        a == b
+    }
+}
+
+const USAGE: &str = "\
+usage: uniq [-cdui] [FILE]
+  Collapse adjacent duplicate lines.
+  -c      prefix each line with its run count
+  -d      only print duplicated lines (count > 1)
+  -u      only print unique lines (count == 1)
+  -i      ignore case when comparing
+  --help  show this help
+
+Examples:
+  sort f | uniq         # drop adjacent duplicates
+  sort f | uniq -c      # with a run count
+  uniq -d file          # only the duplicated lines
+";
+
 fn run(args: Args) -> i64 {
+    if let Some(rc) = coreutils::usage::help_if_requested(args, USAGE) {
+        return rc;
+    }
+
     let mut idx = 1;
     let mut with_count = false;
+    let mut only_dup = false;
+    let mut only_uniq = false;
+    let mut ignore_case = false;
     while let Some(a) = args.get_str(idx) {
-        match a {
-            "-c" => {
-                with_count = true;
-                idx += 1;
+        if a == "--" {
+            idx += 1;
+            break;
+        }
+        if a.starts_with('-') && a != "-" && a.len() > 1 {
+            for ch in a[1..].chars() {
+                match ch {
+                    'c' => with_count = true,
+                    'd' => only_dup = true,
+                    'u' => only_uniq = true,
+                    'i' => ignore_case = true,
+                    _ => {
+                        eprintln!("uniq: invalid option -- '{}'", ch);
+                        return 1;
+                    }
+                }
             }
-            "--" => {
-                idx += 1;
-                break;
-            }
-            _ if a.starts_with('-') && a != "-" => {
-                eprintln!("uniq: unknown option {}", a);
-                return 1;
-            }
-            _ => break,
+            idx += 1;
+        } else {
+            break;
         }
     }
+
+    // Whether a group of `count` lines should be emitted. -d and -u together
+    // select nothing (a line cannot be both duplicated and unique).
+    let want = |count: usize| match (only_dup, only_uniq) {
+        (true, true) => false,
+        (true, false) => count > 1,
+        (false, true) => count == 1,
+        (false, false) => true,
+    };
 
     let data = match args.get(idx) {
         Some(op) => {
@@ -88,9 +136,11 @@ fn run(args: Args) -> i64 {
     let mut count = 0usize;
     for line in lines {
         match prev {
-            Some(p) if p == line => count += 1,
+            Some(p) if same(p, line, ignore_case) => count += 1,
             Some(p) => {
-                emit(&mut out, p, count, with_count);
+                if want(count) {
+                    emit(&mut out, p, count, with_count);
+                }
                 prev = Some(line);
                 count = 1;
             }
@@ -101,7 +151,9 @@ fn run(args: Args) -> i64 {
         }
     }
     if let Some(p) = prev {
-        emit(&mut out, p, count, with_count);
+        if want(count) {
+            emit(&mut out, p, count, with_count);
+        }
     }
     if out.failed() {
         eprintln!("uniq: write error");

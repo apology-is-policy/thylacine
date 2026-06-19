@@ -63,7 +63,24 @@ fn print_counts(out: &mut io::OutSink, c: &Counts, l: bool, w: bool, by: bool, n
     out.put(b"\n");
 }
 
+const USAGE: &str = "\
+usage: wc [-clwm] [FILE...]
+  Count lines, words, and bytes of each FILE (or stdin). Default prints all
+  three; flags select a subset.
+  -l  lines    -w  words    -c  bytes    -m  chars (= bytes at v1.0)
+  --help  show this help
+
+Examples:
+  wc file               # lines words bytes file
+  wc -l file            # just the line count
+  ls | wc -l            # count entries
+";
+
 fn run(args: Args) -> i64 {
+    if let Some(rc) = coreutils::usage::help_if_requested(args, USAGE) {
+        return rc;
+    }
+
     let (mut want_l, mut want_w, mut want_c) = (false, false, false);
     let mut idx = 1;
     while let Some(a) = args.get_str(idx) {

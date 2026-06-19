@@ -20,7 +20,22 @@ pub extern "C" fn rs_main() -> i64 {
     run(env::args())
 }
 
+const USAGE: &str = "\
+usage: id [-u | -g]
+  Print the caller's identity. No flag: 'uid=N gid=M groups=M'. -u prints
+  only the numeric uid; -g only the gid. (Numeric only -- no name service.)
+  --help  show this help
+
+Examples:
+  id          # uid=1000 gid=1000 groups=1000
+  id -u       # 1000
+";
+
 fn run(args: Args) -> i64 {
+    if let Some(rc) = coreutils::usage::help_if_requested(args, USAGE) {
+        return rc;
+    }
+
     let mut only_u = false;
     let mut only_g = false;
     let mut idx = 1;

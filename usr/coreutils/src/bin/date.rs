@@ -26,7 +26,21 @@ pub extern "C" fn rs_main() -> i64 {
     run(env::args())
 }
 
+const USAGE: &str = "\
+usage: date [+%s]
+  Print the current UTC time. With +%s, print the Unix epoch in seconds.
+  --help  show this help
+
+Examples:
+  date        # Www YYYY-MM-DD HH:MM:SS UTC
+  date +%s    # seconds since 1970-01-01
+";
+
 fn run(args: Args) -> i64 {
+    if let Some(rc) = coreutils::usage::help_if_requested(args, USAGE) {
+        return rc;
+    }
+
     let mut want_epoch = false;
     let mut idx = 1;
     while let Some(a) = args.get_str(idx) {

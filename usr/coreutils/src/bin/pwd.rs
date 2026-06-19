@@ -13,8 +13,20 @@ extern crate alloc;
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
+const USAGE: &str = "\
+usage: pwd
+  Print the current working directory as an absolute path.
+  --help  show this help
+
+Examples:
+  pwd         # e.g. /home/susan
+";
+
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
+    if let Some(rc) = coreutils::usage::help_if_requested(libthyla_rs::env::args(), USAGE) {
+        return rc;
+    }
     match libthyla_rs::env::current_dir() {
         Ok(cwd) => {
             libthyla_rs::io::out(cwd.as_bytes());

@@ -20,7 +20,23 @@ pub extern "C" fn rs_main() -> i64 {
     run(env::args())
 }
 
+const USAGE: &str = "\
+usage: which NAME...
+  Locate a command by printing its path. NOTE: v1.0 has no PATH, so only a
+  NAME containing '/' resolves (probed as a path); a bare name is reported
+  not-found (exit 1).
+  --help  show this help
+
+Examples:
+  which ./script        # prints ./script if it exists
+  which /bin/ut         # prints /bin/ut if it exists
+";
+
 fn run(args: Args) -> i64 {
+    if let Some(rc) = coreutils::usage::help_if_requested(args, USAGE) {
+        return rc;
+    }
+
     let mut status = 0;
     let mut had = false;
     for op in args.operands() {

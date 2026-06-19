@@ -40,7 +40,22 @@ fn normalize(path: &str) -> String {
     out
 }
 
+const USAGE: &str = "\
+usage: realpath PATH...
+  Print the cleaned absolute form of each PATH: collapse . / .. / //, and
+  anchor a relative path at the cwd. Lexical only (no symlinks at v1.0).
+  --help  show this help
+
+Examples:
+  realpath ./a/../b   # /<cwd>/b
+  realpath file.txt   # /<cwd>/file.txt
+";
+
 fn run(args: Args) -> i64 {
+    if let Some(rc) = coreutils::usage::help_if_requested(args, USAGE) {
+        return rc;
+    }
+
     let mut status = 0;
     let mut out = io::OutSink::new();
     let mut had = false;

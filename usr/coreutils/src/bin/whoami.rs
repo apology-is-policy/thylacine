@@ -19,7 +19,20 @@ pub extern "C" fn rs_main() -> i64 {
     run(env::args())
 }
 
+const USAGE: &str = "\
+usage: whoami
+  Print the caller's numeric user id (no name service at v1.0).
+  --help  show this help
+
+Examples:
+  whoami                # e.g. 1000
+";
+
 fn run(args: Args) -> i64 {
+    if let Some(rc) = coreutils::usage::help_if_requested(args, USAGE) {
+        return rc;
+    }
+
     if args.get_str(1).is_some() {
         eprintln!("whoami: extra operand");
         return 1;

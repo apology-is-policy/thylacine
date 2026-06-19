@@ -96,7 +96,26 @@ fn process(out: &mut io::OutSink, data: &[u8], by_field: bool, delim: u8, ranges
     }
 }
 
+const USAGE: &str = "\
+usage: cut -f LIST [-d DELIM] [FILE...]
+       cut -c LIST [FILE...]
+  Print selected parts of each line. LIST is comma-separated positions and
+  ranges (1,3 or 2-5 or 4- or -3).
+  -f LIST   select delimiter-separated fields
+  -c LIST   select 1-based byte positions
+  -d DELIM  field delimiter for -f (default TAB)
+  --help    show this help
+
+Examples:
+  cut -d: -f1 /etc/passwd   # first colon-field of each line
+  cut -c1-3 file            # first three bytes of each line
+";
+
 fn run(args: Args) -> i64 {
+    if let Some(rc) = coreutils::usage::help_if_requested(args, USAGE) {
+        return rc;
+    }
+
     let mut idx = 1;
     let mut delim = b'\t';
     let mut flist: Option<&str> = None;

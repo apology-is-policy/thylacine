@@ -63,7 +63,22 @@ fn dump<R: Read>(out: &mut io::OutSink, r: &mut R) -> Result<()> {
     Ok(())
 }
 
+const USAGE: &str = "\
+usage: hexdump [FILE...]
+  Canonical hex + ASCII dump of FILE (or stdin): 8-digit offset, 16 bytes
+  in hex, then the printable ASCII. (Like `hexdump -C` / `xxd`.)
+  --help  show this help
+
+Examples:
+  hexdump file.bin
+  echo hi | hexdump
+";
+
 fn run(args: Args) -> i64 {
+    if let Some(rc) = coreutils::usage::help_if_requested(args, USAGE) {
+        return rc;
+    }
+
     let mut status = 0;
     let mut out = io::OutSink::new();
     let mut had = false;

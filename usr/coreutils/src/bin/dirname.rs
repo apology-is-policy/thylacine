@@ -20,7 +20,21 @@ pub extern "C" fn rs_main() -> i64 {
     run(env::args())
 }
 
+const USAGE: &str = "\
+usage: dirname PATH
+  Print PATH with its last component removed (the containing directory).
+  --help  show this help
+
+Examples:
+  dirname /usr/bin/ut   # /usr/bin
+  dirname file.txt      # .
+";
+
 fn run(args: Args) -> i64 {
+    if let Some(rc) = coreutils::usage::help_if_requested(args, USAGE) {
+        return rc;
+    }
+
     let path = match args.get_str(1) {
         Some(p) => p,
         None => {

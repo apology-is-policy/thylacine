@@ -20,7 +20,21 @@ pub extern "C" fn rs_main() -> i64 {
     run(env::args())
 }
 
+const USAGE: &str = "\
+usage: cmp FILE1 FILE2
+  Compare two files byte by byte. Silent + exit 0 if identical; prints
+  'differ: byte N, line M' + exit 1 if they differ; exit 2 on error.
+  --help  show this help
+
+Examples:
+  cmp a.bin b.bin     # nothing printed if identical
+";
+
 fn run(args: Args) -> i64 {
+    if let Some(rc) = coreutils::usage::help_if_requested(args, USAGE) {
+        return rc;
+    }
+
     let (p1, p2) = match (args.get_str(1), args.get_str(2)) {
         (Some(a), Some(b)) => (a, b),
         _ => {

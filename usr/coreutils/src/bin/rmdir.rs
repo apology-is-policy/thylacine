@@ -18,7 +18,21 @@ pub extern "C" fn rs_main() -> i64 {
     run(env::args())
 }
 
+const USAGE: &str = "\
+usage: rmdir DIR...
+  Remove each DIR, which must be empty. (Use `rm -r` for a non-empty tree.)
+  --help  show this help
+
+Examples:
+  rmdir olddir
+  rmdir a b c         # each must be empty
+";
+
 fn run(args: Args) -> i64 {
+    if let Some(rc) = coreutils::usage::help_if_requested(args, USAGE) {
+        return rc;
+    }
+
     let mut had = false;
     let mut status = 0;
     for op in args.operands() {

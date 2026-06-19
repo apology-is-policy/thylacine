@@ -22,21 +22,53 @@ pub extern "C" fn rs_main() -> i64 {
     run(env::args())
 }
 
+const USAGE: &str = "\
+usage: tail [-n N | -c N | -N] [FILE...]
+  Print the last N lines (default 10), or last N bytes with -c.
+  -n N    last N lines        -c N    last N bytes
+  --help  show this help
+
+Examples:
+  tail file             # last 10 lines
+  tail -n 5 file        # last 5 lines
+  tail -c 20 file       # last 20 bytes
+";
+
 fn run(args: Args) -> i64 {
+    if let Some(rc) = coreutils::usage::help_if_requested(args, USAGE) {
+        return rc;
+    }
+
     let mut n: usize = 10;
+    let mut bytes = false;
     let mut idx = 1;
     loop {
         match args.get_str(idx) {
-            Some("-n") => match args.get_str(idx + 1).and_then(|s| s.parse::<usize>().ok()) {
-                Some(v) => {
-                    n = v;
-                    idx += 2;
+            Some("-n") | Some("-c") => {
+                let want_bytes = args.get_str(idx) == Some("-c");
+                match args.get_str(idx + 1).and_then(|s| s.parse::<usize>().ok()) {
+                    Some(v) => {
+                        n = v;
+                        bytes = want_bytes;
+                        idx += 2;
+                    }
+                    None => {
+                        eprintln!("tail: invalid count");
+                        return 1;
+                    }
                 }
-                None => {
-                    eprintln!("tail: invalid number of lines");
-                    return 1;
-                }
-            },
+            }
+            // Attached forms `-cN` / `-nN`.
+            Some(a)
+                if a.len() > 2
+                    && (a.starts_with("-c") || a.starts_with("-n"))
+                    && a[2..].bytes().all(|c| c.is_ascii_digit()) =>
+            {
+                n = a[2..].parse::<usize>().unwrap_or(10);
+                bytes = a.starts_with("-c");
+                idx += 1;
+            }
+            // Legacy `-N` = last N lines.
             Some(a)
                 if a.len() > 1
                     && a.starts_with('-')
@@ -44,6 +76,7 @@ fn run(args: Args) -> i64 {
                     && a[1..].bytes().all(|c| c.is_ascii_digit()) =>
             {
                 n = a[1..].parse::<usize>().unwrap_or(10);
+                bytes = false;
                 idx += 1;
             }
             _ => break,
@@ -83,7 +116,7 @@ fn run(args: Args) -> i64 {
         }
         match File::open(path).and_then(|mut f| io::slurp(&mut f)) {
             Ok(data) => {
-                if let Err(e) = emit_tail(&data, n) {
+                if let Err(e) = emit(&data, n, bytes) {
                     eprintln!("tail: {}: {}", path, e);
                     status = 1;
                 }
@@ -98,7 +131,7 @@ fn run(args: Args) -> i64 {
     if !had {
         match io::slurp(&mut io::stdin()) {
             Ok(data) => {
-                if let Err(e) = emit_tail(&data, n) {
+                if let Err(e) = emit(&data, n, bytes) {
                     eprintln!("tail: stdin: {}", e);
                     status = 1;
                 }
@@ -112,7 +145,23 @@ fn run(args: Args) -> i64 {
     status
 }
 
-fn emit_tail(data: &[u8], n: usize) -> Result<()> {
+fn emit(data: &[u8], n: usize, bytes: bool) -> Result<()> {
+    if bytes {
+        emit_tail_bytes(data, n)
+    } else {
+        emit_tail_lines(data, n)
+    }
+}
+
+fn emit_tail_bytes(data: &[u8], n: usize) -> Result<()> {
+    if n == 0 {
+        return Ok(());
+    }
+    let start = data.len().saturating_sub(n);
+    io::stdout().write_all(&data[start..])
+}
+
+fn emit_tail_lines(data: &[u8], n: usize) -> Result<()> {
     if n == 0 || data.is_empty() {
         return Ok(());
     }

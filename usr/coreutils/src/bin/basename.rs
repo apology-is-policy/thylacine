@@ -20,7 +20,21 @@ pub extern "C" fn rs_main() -> i64 {
     run(env::args())
 }
 
+const USAGE: &str = "\
+usage: basename PATH [SUFFIX]
+  Strip the directory prefix (and an optional trailing SUFFIX) from PATH.
+  --help  show this help
+
+Examples:
+  basename /usr/bin/ut         # ut
+  basename /tmp/file.txt .txt  # file
+";
+
 fn run(args: Args) -> i64 {
+    if let Some(rc) = coreutils::usage::help_if_requested(args, USAGE) {
+        return rc;
+    }
+
     let path = match args.get_str(1) {
         Some(p) => p,
         None => {

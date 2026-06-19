@@ -24,7 +24,24 @@ pub extern "C" fn rs_main() -> i64 {
     run(env::args())
 }
 
+const USAGE: &str = "\
+usage: chmod MODE FILE...
+  Change each FILE's permission bits. MODE is octal (e.g. 644) or symbolic
+  ([ugoa]*[-+=][rwx]*, comma-separated -- e.g. u+x, go-w, a=rx). Owner-only;
+  setuid/setgid/sticky are unsupported.
+  --help  show this help
+
+Examples:
+  chmod 755 script    # rwxr-xr-x
+  chmod +x script     # add execute for all
+  chmod go-w file     # drop group + other write
+";
+
 fn run(args: Args) -> i64 {
+    if let Some(rc) = coreutils::usage::help_if_requested(args, USAGE) {
+        return rc;
+    }
+
     let mut ops: Vec<&str> = Vec::new();
     for op in args.operands() {
         match core::str::from_utf8(op) {

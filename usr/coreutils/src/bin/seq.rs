@@ -23,7 +23,23 @@ pub extern "C" fn rs_main() -> i64 {
     run(env::args())
 }
 
+const USAGE: &str = "\
+usage: seq [FIRST [INCR]] LAST
+  Print integers from FIRST (default 1) to LAST, stepping by INCR
+  (default 1), one per line. INCR may be negative to count down.
+  --help  show this help
+
+Examples:
+  seq 5               # 1 2 3 4 5 (one per line)
+  seq 2 2 10          # 2 4 6 8 10
+  seq 10 -2 0         # 10 8 6 4 2 0
+";
+
 fn run(args: Args) -> i64 {
+    if let Some(rc) = coreutils::usage::help_if_requested(args, USAGE) {
+        return rc;
+    }
+
     let mut nops = 0;
     while args.get(1 + nops).is_some() {
         nops += 1;

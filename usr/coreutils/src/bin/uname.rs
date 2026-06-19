@@ -27,7 +27,22 @@ fn field(first: &mut bool, s: &[u8]) {
     *first = false;
 }
 
+const USAGE: &str = "\
+usage: uname [-asnrvm]
+  Print system information. -s kernel name, -n node name, -r release,
+  -v version, -m machine; -a prints all. (Fields are static at v1.0.)
+  --help  show this help
+
+Examples:
+  uname                 # Thylacine
+  uname -a              # all fields at once
+";
+
 fn run(args: Args) -> i64 {
+    if let Some(rc) = coreutils::usage::help_if_requested(args, USAGE) {
+        return rc;
+    }
+
     let (mut sysname, mut node, mut rel, mut ver, mut mach) = (false, false, false, false, false);
     let mut idx = 1;
     while let Some(a) = args.get_str(idx) {

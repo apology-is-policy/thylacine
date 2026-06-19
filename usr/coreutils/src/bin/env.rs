@@ -21,7 +21,19 @@ pub extern "C" fn rs_main() -> i64 {
     run(env::args())
 }
 
+const USAGE: &str = "\
+usage: env [NAME=VALUE...] [COMMAND...]
+  Print the environment, or run COMMAND with extra variables. NOTE:
+  Thylacine v1.0 exposes no environment to native programs, so `env` prints
+  nothing and the NAME=VALUE / COMMAND forms are unsupported.
+  --help  show this help
+";
+
 fn run(args: Args) -> i64 {
+    if let Some(rc) = coreutils::usage::help_if_requested(args, USAGE) {
+        return rc;
+    }
+
     if args.operands().next().is_some() {
         eprintln!(
             "env: setting variables / running a command is unsupported at v1.0 (no envp surface)"

@@ -1,4 +1,4 @@
-// cp [-rR] SRC... DST -- copy files (and, with -r, directory trees).
+// cp [-rRvnf] SRC... DST -- copy files (and, with -r, directory trees).
 //
 // Forms: `cp SRC DST` (DST a file or existing dir) and `cp SRC... DIR`.
 // -r / -R: recursively copy a directory. Recursion skips "." / ".." (fs::read_dir
@@ -8,25 +8,54 @@
 #![no_main]
 
 extern crate alloc;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
+use coreutils::usage;
 use libthyla_rs::env::{self, Args};
 use libthyla_rs::err::{Error, Result};
 use libthyla_rs::fs::{self, File, Path};
-use libthyla_rs::{eprintln, io};
+use libthyla_rs::{eprintln, io, println};
+
+/// Behavior flags threaded through the copy.
+struct Opts {
+    verbose: bool,
+    no_clobber: bool,
+}
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
     run(env::args())
 }
 
+const USAGE: &str = "\
+usage: cp [-rRvnf] SRC... DST
+  Copy files (and, with -r, directory trees).
+  -r, -R  copy directories recursively
+  -v      verbose: print each copy
+  -n      no-clobber: never overwrite an existing file
+  -f      force (accepted; cp always overwrites and never prompts)
+  --help  show this help
+
+Examples:
+  cp a b                # copy a file
+  cp -r dir copy        # copy a directory tree
+  cp -v *.txt dest/     # report each copy
+";
+
 fn run(args: Args) -> i64 {
+    if let Some(rc) = usage::help_if_requested(args, USAGE) {
+        return rc;
+    }
+
     let mut idx = 1;
     let mut recursive = false;
+    let mut verbose = false;
+    let mut no_clobber = false;
     while let Some(a) = args.get_str(idx) {
         if a == "--" {
             idx += 1;
@@ -36,10 +65,10 @@ fn run(args: Args) -> i64 {
             for ch in a[1..].chars() {
                 match ch {
                     'r' | 'R' => recursive = true,
-                    _ => {
-                        eprintln!("cp: invalid option -- '{}'", ch);
-                        return 1;
-                    }
+                    'v' => verbose = true,
+                    'n' => no_clobber = true,
+                    'f' => {} // force: a no-op (cp always overwrites, never prompts)
+                    _ => return usage::die("cp", &format!("invalid option -- '{}'", ch)),
                 }
             }
             idx += 1;
@@ -47,6 +76,7 @@ fn run(args: Args) -> i64 {
             break;
         }
     }
+    let opts = Opts { verbose, no_clobber };
 
     let mut ops: Vec<&str> = Vec::new();
     let mut i = idx;
@@ -108,7 +138,7 @@ fn run(args: Args) -> i64 {
                 }
             }
         }
-        if let Err(e) = cp_one(src, target.as_str()) {
+        if let Err(e) = cp_one(src, target.as_str(), &opts) {
             eprintln!("cp: {} -> {}: {}", src, target, e);
             status = 1;
         }
@@ -118,12 +148,16 @@ fn run(args: Args) -> i64 {
 
 // Copy `src` to `dst`. A directory here always means recursive mode (the top
 // level gated the dir-without-r case), so recurse into it.
-fn cp_one(src: &str, dst: &str) -> Result<()> {
+fn cp_one(src: &str, dst: &str, o: &Opts) -> Result<()> {
     match fs::metadata(src) {
         Ok(m) if m.is_dir() => {
-            match fs::create_dir(dst) {
-                Ok(()) | Err(Error::Exists) => {}
+            let created = match fs::create_dir(dst) {
+                Ok(()) => true,
+                Err(Error::Exists) => false,
                 Err(e) => return Err(e),
+            };
+            if o.verbose && created {
+                println!("'{}' -> '{}'", src, dst);
             }
             for ent in fs::read_dir(src)? {
                 let e = ent?;
@@ -131,19 +165,26 @@ fn cp_one(src: &str, dst: &str) -> Result<()> {
                 if name == "." || name == ".." {
                     continue;
                 }
-                cp_one(&join(src, name), &join(dst, name))?;
+                cp_one(&join(src, name), &join(dst, name), o)?;
             }
             Ok(())
         }
-        Ok(_) => copy_file(src, dst),
+        Ok(_) => copy_file(src, dst, o),
         Err(e) => Err(e),
     }
 }
 
-fn copy_file(src: &str, dst: &str) -> Result<()> {
+fn copy_file(src: &str, dst: &str, o: &Opts) -> Result<()> {
+    // -n: never overwrite an existing destination (skip silently).
+    if o.no_clobber && fs::metadata(dst).is_ok() {
+        return Ok(());
+    }
     let mut r = File::open(src)?;
     let mut w = File::create(dst)?;
     io::copy(&mut r, &mut w)?;
+    if o.verbose {
+        println!("'{}' -> '{}'", src, dst);
+    }
     Ok(())
 }
 

@@ -16,5 +16,13 @@ edition.workspace = true
 publish.workspace = true
 license.workspace = true
 
+[features]
+# `backend` pulls libthyla-rs -- every bin needs the syscall surface. On by
+# default for the device build (so the bins compile); host tests of the pure
+# presentation lib (palette / color / size / boxd) drop it and scope to --lib so
+# the bins are not compiled. Mirrors nora's split.
+default = ["backend"]
+backend = ["dep:libthyla-rs"]
+
 [dependencies]
-libthyla-rs = { path = "../lib/libthyla-rs" }
+libthyla-rs = { path = "../lib/libthyla-rs", optional = true }

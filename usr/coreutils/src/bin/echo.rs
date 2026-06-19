@@ -20,7 +20,23 @@ pub extern "C" fn rs_main() -> i64 {
     run(env::args())
 }
 
+const USAGE: &str = "\
+usage: echo [-n] [ARG...]
+  Print the ARGs separated by spaces, then a newline. Bytes pass through
+  verbatim (no backslash-escape processing).
+  -n      omit the trailing newline
+  --help  show this help
+
+Examples:
+  echo hello world      # hello world
+  echo -n 'prompt: '    # no trailing newline
+";
+
 fn run(args: Args) -> i64 {
+    if let Some(rc) = coreutils::usage::help_if_requested(args, USAGE) {
+        return rc;
+    }
+
     let mut idx = 1; // argv[0] is the program name
     let mut newline = true;
 

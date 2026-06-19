@@ -21,21 +21,53 @@ pub extern "C" fn rs_main() -> i64 {
     run(env::args())
 }
 
+const USAGE: &str = "\
+usage: head [-n N | -c N | -N] [FILE...]
+  Print the first N lines (default 10), or first N bytes with -c.
+  -n N    first N lines       -c N    first N bytes
+  --help  show this help
+
+Examples:
+  head file             # first 10 lines
+  head -n 3 file        # first 3 lines
+  head -c 20 file       # first 20 bytes
+";
+
 fn run(args: Args) -> i64 {
+    if let Some(rc) = coreutils::usage::help_if_requested(args, USAGE) {
+        return rc;
+    }
+
     let mut n: usize = 10;
+    let mut bytes = false;
     let mut idx = 1;
     loop {
         match args.get_str(idx) {
-            Some("-n") => match args.get_str(idx + 1).and_then(|s| s.parse::<usize>().ok()) {
-                Some(v) => {
-                    n = v;
-                    idx += 2;
+            Some("-n") | Some("-c") => {
+                let want_bytes = args.get_str(idx) == Some("-c");
+                match args.get_str(idx + 1).and_then(|s| s.parse::<usize>().ok()) {
+                    Some(v) => {
+                        n = v;
+                        bytes = want_bytes;
+                        idx += 2;
+                    }
+                    None => {
+                        eprintln!("head: invalid count");
+                        return 1;
+                    }
                 }
-                None => {
-                    eprintln!("head: invalid number of lines");
-                    return 1;
-                }
-            },
+            }
+            // Attached forms `-cN` / `-nN`.
+            Some(a)
+                if a.len() > 2
+                    && (a.starts_with("-c") || a.starts_with("-n"))
+                    && a[2..].bytes().all(|c| c.is_ascii_digit()) =>
+            {
+                n = a[2..].parse::<usize>().unwrap_or(10);
+                bytes = a.starts_with("-c");
+                idx += 1;
+            }
+            // Legacy `-N` = first N lines.
             Some(a)
                 if a.len() > 1
                     && a.starts_with('-')
@@ -43,6 +75,7 @@ fn run(args: Args) -> i64 {
                     && a[1..].bytes().all(|c| c.is_ascii_digit()) =>
             {
                 n = a[1..].parse::<usize>().unwrap_or(10);
+                bytes = false;
                 idx += 1;
             }
             _ => break,
@@ -82,7 +115,7 @@ fn run(args: Args) -> i64 {
         }
         match File::open(path) {
             Ok(mut f) => {
-                if let Err(e) = emit_head(&mut f, n) {
+                if let Err(e) = emit(&mut f, n, bytes) {
                     eprintln!("head: {}: {}", path, e);
                     status = 1;
                 }
@@ -95,7 +128,7 @@ fn run(args: Args) -> i64 {
     }
 
     if !had {
-        if let Err(e) = emit_head(&mut io::stdin(), n) {
+        if let Err(e) = emit(&mut io::stdin(), n, bytes) {
             eprintln!("head: stdin: {}", e);
             status = 1;
         }
@@ -103,7 +136,15 @@ fn run(args: Args) -> i64 {
     status
 }
 
-fn emit_head<R: Read>(r: &mut R, n: usize) -> Result<()> {
+fn emit<R: Read>(r: &mut R, n: usize, bytes: bool) -> Result<()> {
+    if bytes {
+        emit_head_bytes(r, n)
+    } else {
+        emit_head_lines(r, n)
+    }
+}
+
+fn emit_head_lines<R: Read>(r: &mut R, n: usize) -> Result<()> {
     if n == 0 {
         return Ok(());
     }
@@ -130,6 +171,27 @@ fn emit_head<R: Read>(r: &mut R, n: usize) -> Result<()> {
         }
         out.write_all(&chunk[..emit_to])?;
         if done {
+            return Ok(());
+        }
+    }
+}
+
+fn emit_head_bytes<R: Read>(r: &mut R, n: usize) -> Result<()> {
+    if n == 0 {
+        return Ok(());
+    }
+    let mut out = io::stdout();
+    let mut buf = [0u8; 4096];
+    let mut remaining = n;
+    loop {
+        let got = r.read(&mut buf)?;
+        if got == 0 {
+            return Ok(());
+        }
+        let take = got.min(remaining);
+        out.write_all(&buf[..take])?;
+        remaining -= take;
+        if remaining == 0 {
             return Ok(());
         }
     }

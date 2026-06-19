@@ -21,7 +21,22 @@ pub extern "C" fn rs_main() -> i64 {
     run(env::args())
 }
 
+const USAGE: &str = "\
+usage: touch FILE...
+  Create each FILE if it does not exist (an existing file is left as-is).
+  NOTE: v1.0 does not update timestamps (no mtime setter yet).
+  --help  show this help
+
+Examples:
+  touch newfile         # create an empty file
+  touch a b c           # create several
+";
+
 fn run(args: Args) -> i64 {
+    if let Some(rc) = coreutils::usage::help_if_requested(args, USAGE) {
+        return rc;
+    }
+
     let mut had = false;
     let mut status = 0;
     for op in args.operands() {

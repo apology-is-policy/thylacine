@@ -40,7 +40,23 @@ fn parse_dur(s: &str) -> Option<Duration> {
     Some(Duration::from_secs_f64(secs))
 }
 
+const USAGE: &str = "\
+usage: sleep DURATION...
+  Pause for the sum of the DURATIONs. Each is a number with an optional
+  suffix: s seconds (default), m minutes, h hours, d days. Fractions allowed.
+  --help  show this help
+
+Examples:
+  sleep 1             # one second
+  sleep 0.5 2         # half a second, then two seconds
+  sleep 2m            # two minutes
+";
+
 fn run(args: Args) -> i64 {
+    if let Some(rc) = coreutils::usage::help_if_requested(args, USAGE) {
+        return rc;
+    }
+
     let mut total = Duration::ZERO;
     let mut had = false;
     for op in args.operands() {
