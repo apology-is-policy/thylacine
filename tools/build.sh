@@ -349,7 +349,7 @@ EOF
     # P4-Ia2: copy any built Rust-side userspace binaries from
     # build/usr-rs/<target>/release/. Same curation discipline.
     # Binary name = crate's [[bin]] name = directory under usr/.
-    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "coreutil-smoke" "fs-mut-smoke" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "ipconfig" "netstat" "id" "whoami" "date" "pipe-src" "pipe-sink" "legate-prover" "login" "ut" "nora" "loom-smoke" "loom-stress" "loom-bench" "net-echo" "sntp" "tls-smoke" )
+    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "coreutil-smoke" "fs-mut-smoke" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "ipconfig" "netstat" "id" "whoami" "date" "pipe-src" "pipe-sink" "legate-prover" "login" "ut" "nora" "loom-smoke" "loom-stress" "loom-bench" "net-echo" "sntp" "tls-smoke" "https" )
     local rs_release="$USR_RS_BUILD/$USR_RS_TARGET/release"
     for bin in "${usr_rs_bins[@]}"; do
         local src="$rs_release/$bin"
@@ -358,6 +358,31 @@ EOF
             chmod 0755 "$ramfs_src/$bin"
         fi
     done
+
+    # net-7c-2: the native rustls TLS binaries link the full rustls + RustCrypto
+    # stack and exceed SYS_SPAWN_BLOB_MAX (1 MiB) UNSTRIPPED (tls-smoke ~1.11 MiB,
+    # https ~1.06 MiB), so the kernel could not slurp them into a spawn blob.
+    # Strip the COPY in the cpio root (-> ~520 KiB each): no userspace tool
+    # consumes their symbols -- the only addr2line is the kernel's own Halls
+    # symtab over the KERNEL image. The UNSTRIPPED artifacts stay under
+    # build/usr-rs/.../release/ for manual fault-PC resolution. This is the
+    # recorded v1.0 size strategy (NET-DESIGN 9.1); REVENANT's file-backed exec
+    # (#231) retires the cap, after which the strip becomes optional. Surgical
+    # (TLS bins only) -- the global workspace keeps symbols for every other bin.
+    local tls_strip_bins=( "tls-smoke" "https" )
+    local llvm_strip="$LLVM_PREFIX/bin/llvm-strip"
+    if [[ ! -x "$llvm_strip" ]]; then
+        echo "==> ramfs: llvm-strip not found at $llvm_strip -- the TLS bins exceed" >&2
+        echo "    SYS_SPAWN_BLOB_MAX unstripped and would fail to spawn. Set LLVM_PREFIX." >&2
+        exit 1
+    fi
+    for bin in "${tls_strip_bins[@]}"; do
+        if [[ -f "$ramfs_src/$bin" ]]; then
+            "$llvm_strip" --strip-all "$ramfs_src/$bin" \
+                || { echo "==> ramfs: llvm-strip $bin FAILED" >&2; exit 1; }
+        fi
+    done
+    ledger "ramfs.cpio: TLS bins stripped (tls-smoke + https; SYS_SPAWN_BLOB_MAX, net-7c-2)"
 
     # P6-pouch-hello-smoke: copy the pouch POSIX test binaries (built
     # against the pouch sysroot by build_pouch_progs) into the cpio root.
@@ -1460,6 +1485,25 @@ populate_stratum_pool() {
     "$stratum_fs_bin" -s "$sock_path" read /lib/ndb/local | cmp -s - "$ndb_src" \
         || { echo "==> populate pool: /lib/ndb/local readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
     echo "==> populate pool: /lib/ndb/local baked + readback-verified (NET-DESIGN s5 ndb)"
+
+    # --- net-7c-2: bake the system root-cert bundle at the canonical path ---
+    # /etc/ssl/certs/ca-certificates.crt (NET-DESIGN s9; the host-bake idiom,
+    # like /lib/ndb/local). The native https tool + the tls crate read it at
+    # runtime via load_roots_pem; pouch/curl read the same path. The committed
+    # source is a real Mozilla CA root set (provenance: Homebrew ca-certificates;
+    # v1.x adds a refresh/update mechanism). mkdir is single-level (no -p).
+    local cabundle_src="$REPO_ROOT/usr/https/ca-certificates.crt"
+    for d in /etc /etc/ssl /etc/ssl/certs; do
+        "$stratum_fs_bin" -s "$sock_path" mkdir "$d" \
+            || { echo "==> populate pool: mkdir $d FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    done
+    "$stratum_fs_bin" -s "$sock_path" write /etc/ssl/certs/ca-certificates.crt < "$cabundle_src" \
+        || { echo "==> populate pool: write ca-certificates.crt FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    "$stratum_fs_bin" -s "$sock_path" sync \
+        || { echo "==> populate pool: sync (ca bundle) FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    "$stratum_fs_bin" -s "$sock_path" read /etc/ssl/certs/ca-certificates.crt | cmp -s - "$cabundle_src" \
+        || { echo "==> populate pool: ca-certificates.crt readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    echo "==> populate pool: /etc/ssl/certs/ca-certificates.crt baked + readback-verified ($(grep -c 'BEGIN CERTIFICATE' "$cabundle_src" | tr -d ' ') roots, NET-DESIGN s9)"
 
     # Clean stratumd shutdown: SIGTERM then wait. stratumd unmounts the
     # pool + flushes on its way out, so the pool.img bytes after this

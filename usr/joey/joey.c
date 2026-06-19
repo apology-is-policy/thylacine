@@ -3812,9 +3812,43 @@ int main(void) {
                             t_putstr("joey: net-7c PROBE tls-smoke FAILED\n");
                             return 1;
                         }
-                        t_putstr("joey: net-7c PROBE OK (native rustls "
-                                 "ClientHello: RustCrypto provider + CSPRNG + "
-                                 "record layer on aarch64)\n");
+                        // net-7c-2: tls-smoke now also runs the deterministic
+                        // loopback E2E -- a full client<->server handshake +
+                        // app-data round-trip in memory, exercising the REAL
+                        // WebPki cert verification (against a baked self-signed
+                        // test root + the LS-K wall clock) and the record layer.
+                        t_putstr("joey: net-7c PROBE OK (native rustls: "
+                                 "ClientHello + loopback E2E [handshake + cert "
+                                 "verify + round-trip] + untrusted-cert "
+                                 "rejected)\n");
+
+                        // net-7c-2: the https tool's deterministic gate -- read
+                        // + parse the baked /etc/ssl/certs/ca-certificates.crt
+                        // into a non-empty trust store and build a client config
+                        // (no network). Proves the CA bundle baked + load_roots_
+                        // pem parses it in-guest. `https` with no args runs its
+                        // selftest. Spawned WITH CAP_CSPRNG_READ (any TLS tool).
+                        // The live `https <host>` fetch (TlsStream over /net) is
+                        // shell-runnable + best-effort; its deterministic
+                        // in-guest E2E (a netd loopback) is owed to net-8.
+                        const char https_name[] = "/bin/https";
+                        long https_pid = t_spawn_with_caps(
+                            https_name, sizeof(https_name) - 1,
+                            T_CAP_CSPRNG_READ);
+                        if (https_pid <= 0) {
+                            t_putstr("joey: t_spawn(\"https\") FAILED\n");
+                            return 1;
+                        }
+                        int https_status = -1;
+                        long https_reaped =
+                            t_wait_pid_for((int)https_pid, 0, &https_status);
+                        if (https_reaped != https_pid || https_status != 0) {
+                            t_putstr("joey: net-7c-2 PROBE https selftest "
+                                     "FAILED\n");
+                            return 1;
+                        }
+                        t_putstr("joey: net-7c-2 PROBE OK (https baked CA "
+                                 "bundle parsed + client config built)\n");
                     }
 
                     // === net-6b: the dev9p.poll readiness bridge (the kernel half) ===

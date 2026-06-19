@@ -422,6 +422,46 @@ pouch/curl path), NOT a compiled-in `webpki-roots` -- which would be a second
 copy of ~150 certs and add hundreds of KiB toward the cap. net-7c-2 lands the
 PEM loader + the baked bundle.
 
+### 9.2 As-built: the full client + the bundle (net-7c-2)
+
+net-7c-2 completes the native TLS path. The detail lives in
+`docs/reference/123-tls.md`; the design-relevant facts:
+
+- **The transport.** `tls::TlsStream<S>` drives the unbuffered rustls state
+  machine over any blocking `Read + Write` stream (a `/net` `TcpStream`),
+  validating the server cert against the config's trust anchors + the LS-K wall
+  clock at `connect`, then carrying plaintext through the record layer. A shared
+  `drive_state<D>` helper handles every connection state (the per-role
+  `process_tls_records` is the only role-specific call).
+- **The bundle.** `load_roots_pem` parses the baked
+  `/etc/ssl/certs/ca-certificates.crt` into a `RootCertStore`. The bundle is a
+  real Mozilla CA root set (193 roots), baked into the pool at build time (the
+  host-bake idiom, like `/lib/ndb/local`); the committed source is
+  `usr/https/ca-certificates.crt`. A refresh/update mechanism is a v1.x seam.
+- **The client tool.** `/bin/https <host> [path]` is the native curl-over-pouch
+  analog: resolve via `/net/cs`, handshake, GET, print the status line.
+- **The deterministic in-guest proofs** (the net-3d loopback pattern, since the
+  blocking `TlsStream` cannot be tested single-threaded against an in-memory
+  peer): `tls::loopback_roundtrip` runs a full client<->server handshake + an
+  app-data round-trip in memory using a baked self-signed test cert -- exercising
+  the **real WebPki certificate verification** (chain + validity window vs the
+  wall clock + the SAN). A **negative** test (a client trusting no roots must
+  REJECT the handshake) proves the verifier is not a permissive accept-all -- the
+  cert-validation regression a real TLS client must never have. Both gate the
+  boot via `tls-smoke`.
+- **The size strategy (resolved: strip).** The TLS binaries exceed
+  `SYS_SPAWN_BLOB_MAX` (1 MiB) unstripped (~1.1 MiB), so the build strips them
+  (`llvm-strip`, ~520 KiB each) into the cpio root; the unstripped artifacts stay
+  under `build/` for fault-PC resolution. Pure build config, no kernel change.
+  This is the v1.0 expedient: REVENANT's file-backed demand-paged exec (task
+  #231, post-net) retires the slurp cap entirely, after which the strip becomes
+  optional.
+
+The live `https <host>` socket transport is shell-runnable + best-effort (it
+needs a reachable server + a trusted chain); the deterministic in-guest E2E of
+that path (a netd loopback interface) is owed to net-8. The formal focused audit
+of the cert-validation surface is net-7d.
+
 ---
 
 ## 10. NTP / clock synchronization (closes W4-F11)

@@ -537,6 +537,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "https"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+ "tls",
+]
+
+[[package]]
 name = "hybrid-array"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

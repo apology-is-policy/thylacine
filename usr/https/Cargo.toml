@@ -1,0 +1,21 @@
+# /bin/https -- a native libthyla_rs HTTPS GET client (NET-DESIGN section 9).
+#
+# Dials over netd's `/net` tree, runs the rustls TLS handshake (validating the
+# server cert against the baked CA bundle + the LS-K wall clock) via the `tls`
+# crate's `TlsStream`, and issues an HTTP/1.0 GET. A native `/net` client: it
+# touches no hardware (netd owns the NIC, I-5) and reaches only the `/net` +
+# `/etc` its territory grants.
+[package]
+name = "https"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "https"
+path = "src/main.rs"
+
+[dependencies]
+libthyla-rs = { path = "../lib/libthyla-rs" }
+tls = { path = "../lib/tls" }
