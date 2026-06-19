@@ -403,7 +403,20 @@ path), not just an exit-criterion mention.
     single wall-clock offset (`g_wallclock_offset_ns`) at full-nanosecond
     granularity via one atomic `u64` store; `CLOCK_MONOTONIC` untouched. The
     report-only fallback was declined. Landed net-7a-1 (the ABI surface +
-    bindings + joey's elevated round-trip proof); the SNTP client is net-7a-2.
+    bindings + joey's elevated round-trip proof).
+  - **net-7a-2 LANDED — the native SNTP client** (`usr/sntp`, RFC 4330): a
+    `libthyla_rs::net::UdpSocket` (new — the connected-UDP analog of
+    `TcpStream`, over `/net/udp`) carries an NTPv4 request; the reply's Transmit
+    timestamp converts 1900→Unix (`− 2_208_988_800`); the offset is computed
+    against the LS-K MONOTONIC clock (for the round-trip) and applied via
+    `time::set_realtime`. `sntp` (no args) is the deterministic boot gate (the
+    build/parse/validate + offset battery + the **EACCES clock-step gate proof**
+    — spawned unelevated, `set_realtime` must be denied); `sntp <a.b.c.d>` is the
+    best-effort live query (bounded-poll via the `ready` QTPOLL sibling, net-6b).
+    No new kernel surface (open/read/write/close over `/net` + the landed
+    `SYS_CLOCK_SETTIME` + `SYS_POLL`); composes I-1/I-5/I-23/I-28, no new
+    invariant. The in-guest live round-trip over a loopback UDP responder is
+    owed to net-8. See `docs/reference/122-net.md`.
 
 ---
 

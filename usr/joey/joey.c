@@ -3712,6 +3712,32 @@ int main(void) {
                                  "announce/local + Loom async /net read)\n");
                     }
 
+                    // === net-7a-2: the native SNTP client selftest (deterministic) ===
+                    // Spawn /bin/sntp (no args) -> its in-guest SELFTEST: the
+                    // NTPv4 build/parse/validate + 1900->Unix + offset battery,
+                    // plus the clock-step GATE PROOF (spawned unelevated here, so
+                    // set_realtime is DENIED with EACCES -- a non-denial is a
+                    // privilege regression). Peer-independent (no I/O): the live
+                    // `sntp <server>` query is best-effort + host-dependent under
+                    // slirp, NOT a boot gate (its in-guest round-trip over a
+                    // loopback responder is owed to net-8).
+                    {
+                        const char sn_name[] = "/bin/sntp";
+                        long sn_pid = t_spawn(sn_name, sizeof(sn_name) - 1);
+                        if (sn_pid <= 0) {
+                            t_putstr("joey: t_spawn(\"sntp\") FAILED\n");
+                            return 1;
+                        }
+                        int sn_status = -1;
+                        long sn_reaped = t_wait_pid_for((int)sn_pid, 0, &sn_status);
+                        if (sn_reaped != sn_pid || sn_status != 0) {
+                            t_putstr("joey: net-7a-2 PROBE sntp selftest FAILED\n");
+                            return 1;
+                        }
+                        t_putstr("joey: net-7a-2 PROBE OK (native sntp NTPv4 selftest "
+                                 "+ EACCES clock-step gate)\n");
+                    }
+
                     // === net-6b: the dev9p.poll readiness bridge (the kernel half) ===
                     // The E2E proof of the kernel dev9p_poll path. Clone a UDP
                     // connection, connect (bind a local port -> sendable), open its

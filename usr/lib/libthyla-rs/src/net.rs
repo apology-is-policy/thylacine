@@ -160,13 +160,15 @@ fn parse_port(s: &str) -> Result<u16> {
     Ok(v as u16)
 }
 
-/// Open `/net/tcp/clone` for read+write; the opened fid is the new connection's
-/// `ctl`. Read it to learn the connection number N. Returns `(ctl, N)`.
-fn clone_conn() -> Result<(File, u32)> {
+/// Open `/net/<proto>/clone` for read+write; the opened fid is the new
+/// connection's `ctl`. Read it to learn the connection number N. Returns
+/// `(ctl, N)`. `proto` is `"tcp"` or `"udp"` (the `/net` connection-server
+/// trees netd serves).
+fn clone_conn(proto: &str) -> Result<(File, u32)> {
     let mut ctl = OpenOptions::new()
         .read(true)
         .write(true)
-        .open("/net/tcp/clone")?;
+        .open(format!("/net/{}/clone", proto))?;
     let n = read_decimal(&mut ctl)?;
     Ok((ctl, n))
 }
@@ -196,18 +198,18 @@ fn read_decimal(f: &mut File) -> Result<u32> {
     Ok(v)
 }
 
-/// Open `/net/tcp/<n>/<file>` with the given access. `read`+`write` selects
+/// Open `/net/<proto>/<n>/<file>` with the given access. `read`+`write` selects
 /// ORDWR (Plan 9 OWRITE does not grant read).
-fn open_conn_file(n: u32, file: &str, read: bool, write: bool) -> Result<File> {
+fn open_conn_file(proto: &str, n: u32, file: &str, read: bool, write: bool) -> Result<File> {
     OpenOptions::new()
         .read(read)
         .write(write)
-        .open(format!("/net/tcp/{}/{}", n, file))
+        .open(format!("/net/{}/{}/{}", proto, n, file))
 }
 
 /// Read and parse a `local`/`remote` endpoint file (`a.b.c.d!port`).
-fn read_endpoint(n: u32, file: &str) -> Result<SocketAddrV4> {
-    let mut f = open_conn_file(n, file, true, false)?;
+fn read_endpoint(proto: &str, n: u32, file: &str) -> Result<SocketAddrV4> {
+    let mut f = open_conn_file(proto, n, file, true, false)?;
     let mut buf = [0u8; 48];
     let got = f.read(&mut buf)?;
     let line = core::str::from_utf8(&buf[..got]).map_err(|_| Error::Io)?;
@@ -230,10 +232,10 @@ pub struct TcpStream {
 impl TcpStream {
     /// Active open: dial `addr` and block until the connection is ESTABLISHED.
     pub fn connect(addr: SocketAddrV4) -> Result<TcpStream> {
-        let (mut ctl, n) = clone_conn()?;
+        let (mut ctl, n) = clone_conn("tcp")?;
         ctl.write_all(format!("connect {}", addr.wire()).as_bytes())?;
         // Opening `data` blocks until ESTABLISHED (or fails on RST/refused).
-        let data = open_conn_file(n, "data", true, true)?;
+        let data = open_conn_file("tcp", n, "data", true, true)?;
         Ok(TcpStream { ctl, data, n })
     }
 
@@ -268,12 +270,12 @@ impl TcpStream {
 
     /// The peer's address (`/net/tcp/N/remote`).
     pub fn peer_addr(&self) -> Result<SocketAddrV4> {
-        read_endpoint(self.n, "remote")
+        read_endpoint("tcp", self.n, "remote")
     }
 
     /// This end's address (`/net/tcp/N/local`).
     pub fn local_addr(&self) -> Result<SocketAddrV4> {
-        read_endpoint(self.n, "local")
+        read_endpoint("tcp", self.n, "local")
     }
 
     /// The raw `data` fd (for `poll`/Loom registration).
@@ -314,7 +316,7 @@ impl TcpListener {
         if addr.port() == 0 {
             return Err(Error::InvalidArgument);
         }
-        let (mut ctl, n) = clone_conn()?;
+        let (mut ctl, n) = clone_conn("tcp")?;
         let verb = if addr.ip().is_unspecified() {
             format!("announce *!{}", addr.port())
         } else {
@@ -334,11 +336,11 @@ impl TcpListener {
     pub fn accept(&self) -> Result<(TcpStream, SocketAddrV4)> {
         // Opening `listen` blocks (net-3a deferred reply); the opened fid is
         // the new connection M's ctl, and reading it yields M.
-        let mut mctl = open_conn_file(self.n, "listen", true, true)?;
+        let mut mctl = open_conn_file("tcp", self.n, "listen", true, true)?;
         let m = read_decimal(&mut mctl)?;
-        let data = open_conn_file(m, "data", true, true)?;
-        let peer =
-            read_endpoint(m, "remote").unwrap_or(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0));
+        let data = open_conn_file("tcp", m, "data", true, true)?;
+        let peer = read_endpoint("tcp", m, "remote")
+            .unwrap_or(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0));
         Ok((
             TcpStream {
                 ctl: mctl,
@@ -352,7 +354,7 @@ impl TcpListener {
     /// The bound local address.
     pub fn local_addr(&self) -> Result<SocketAddrV4> {
         // Prefer netd's view; fall back to the announced address.
-        read_endpoint(self.n, "local").or(Ok(self.local))
+        read_endpoint("tcp", self.n, "local").or(Ok(self.local))
     }
 
     /// The listener connection number N.
@@ -363,6 +365,73 @@ impl TcpListener {
     /// The raw `ctl` fd (for Loom registration of the listener).
     pub fn as_raw_fd(&self) -> i32 {
         self.ctl.as_raw_fd()
+    }
+}
+
+/// A connected UDP socket over netd's `/net/udp` tree (net-7a). The Plan 9
+/// datagram model is connection-oriented at the `/net` layer: `connect`
+/// records the remote (and binds a local ephemeral port), `data` writes send a
+/// datagram to that remote, `data` reads dequeue one received datagram. Holds
+/// the `ctl` (lifetime) and `data` (the datagram channel) fids; both close on
+/// drop.
+///
+/// `recv` BLOCKS until a datagram arrives (net-6a-1) -- a client wanting a
+/// bounded wait polls `ready_fd()` (the QTPOLL readiness sibling, net-6b) with
+/// a timeout first, then `recv` only when POLLIN fired. The SNTP client is the
+/// first consumer.
+pub struct UdpSocket {
+    #[allow(dead_code)]
+    ctl: File,
+    data: File,
+    n: u32,
+}
+
+impl UdpSocket {
+    /// Dial `/net/udp` and `connect` to `peer` (binds a local ephemeral port,
+    /// making the socket sendable). A subsequent `send` goes to `peer`.
+    pub fn connect(peer: SocketAddrV4) -> Result<UdpSocket> {
+        let (mut ctl, n) = clone_conn("udp")?;
+        ctl.write_all(format!("connect {}", peer.wire()).as_bytes())?;
+        let data = open_conn_file("udp", n, "data", true, true)?;
+        Ok(UdpSocket { ctl, data, n })
+    }
+
+    /// Send a datagram to the connected remote. The whole buffer is one
+    /// datagram (UDP has no coalescing); returns the bytes accepted.
+    pub fn send(&mut self, buf: &[u8]) -> Result<usize> {
+        self.data.write(buf)
+    }
+
+    /// Receive one datagram into `buf` (returns its length). BLOCKS until a
+    /// datagram arrives (net-6a-1); poll `ready_fd()` first for a bounded wait.
+    pub fn recv(&mut self, buf: &mut [u8]) -> Result<usize> {
+        self.data.read(buf)
+    }
+
+    /// Open the QTPOLL `ready` sibling (`/net/udp/N/ready`) for a bounded poll
+    /// on receive (net-6b dev9p.poll: POLLIN fires when a datagram is queued).
+    pub fn ready_fd(&self) -> Result<File> {
+        open_conn_file("udp", self.n, "ready", true, false)
+    }
+
+    /// The connected remote address (`/net/udp/N/remote`).
+    pub fn peer_addr(&self) -> Result<SocketAddrV4> {
+        read_endpoint("udp", self.n, "remote")
+    }
+
+    /// This end's bound address (`/net/udp/N/local`).
+    pub fn local_addr(&self) -> Result<SocketAddrV4> {
+        read_endpoint("udp", self.n, "local")
+    }
+
+    /// The connection number N (its `/net/udp/N` directory).
+    pub fn conn_n(&self) -> u32 {
+        self.n
+    }
+
+    /// The raw `data` fd (for `poll`/Loom registration).
+    pub fn as_raw_fd(&self) -> i32 {
+        self.data.as_raw_fd()
     }
 }
 
