@@ -142,17 +142,24 @@ void test_clock_settime_cap_gate(void) {
     struct Proc *p = t->proc;
     caps_t saved = __atomic_load_n(&p->caps, __ATOMIC_ACQUIRE);
 
+    // Capture every handler result while the cap is flipped, then restore the
+    // cap BEFORE any assert -- so an early assert-abort (TEST_ASSERT returns
+    // from the test fn) cannot leak a flipped CAP_HOSTOWNER on this (the test)
+    // Proc into a later serially-run test (net-7d audit F3).
     __atomic_store_n(&p->caps, saved & ~(caps_t)CAP_HOSTOWNER, __ATOMIC_RELEASE);
-    TEST_ASSERT(sys_clock_settime_handler(T_CLOCK_REALTIME, 0, 0, 0) == -T_E_ACCES,
-        "SYS_CLOCK_SETTIME without CAP_HOSTOWNER must return -EACCES");
-    TEST_ASSERT(sys_clock_settime_handler(T_CLOCK_MONOTONIC, 0, 0, 0) == -T_E_INVAL,
-        "SYS_CLOCK_SETTIME MONOTONIC must be EINVAL (checked before the cap)");
-
+    s64 noown_realtime = sys_clock_settime_handler(T_CLOCK_REALTIME, 0, 0, 0);
+    s64 noown_mono     = sys_clock_settime_handler(T_CLOCK_MONOTONIC, 0, 0, 0);
     __atomic_store_n(&p->caps, saved | CAP_HOSTOWNER, __ATOMIC_RELEASE);
-    TEST_ASSERT(sys_clock_settime_handler(T_CLOCK_REALTIME, 0, 0, 0) == -T_E_FAULT,
-        "SYS_CLOCK_SETTIME with CAP_HOSTOWNER + NULL buffer must return -EFAULT");
-    TEST_ASSERT(sys_clock_settime_handler(T_CLOCK_MONOTONIC, 0, 0, 0) == -T_E_INVAL,
-        "SYS_CLOCK_SETTIME MONOTONIC must be EINVAL even with CAP_HOSTOWNER");
-
+    s64 own_realtime = sys_clock_settime_handler(T_CLOCK_REALTIME, 0, 0, 0);
+    s64 own_mono     = sys_clock_settime_handler(T_CLOCK_MONOTONIC, 0, 0, 0);
     __atomic_store_n(&p->caps, saved, __ATOMIC_RELEASE);
+
+    TEST_ASSERT(noown_realtime == -T_E_ACCES,
+        "SYS_CLOCK_SETTIME without CAP_HOSTOWNER must return -EACCES");
+    TEST_ASSERT(noown_mono == -T_E_INVAL,
+        "SYS_CLOCK_SETTIME MONOTONIC must be EINVAL (checked before the cap)");
+    TEST_ASSERT(own_realtime == -T_E_FAULT,
+        "SYS_CLOCK_SETTIME with CAP_HOSTOWNER + NULL buffer must return -EFAULT");
+    TEST_ASSERT(own_mono == -T_E_INVAL,
+        "SYS_CLOCK_SETTIME MONOTONIC must be EINVAL even with CAP_HOSTOWNER");
 }

@@ -486,7 +486,9 @@ macro_rules! tlsconn_role {
                     ConnectionState::WriteTraffic(mut wt) => encrypt_into(&mut wt, data, outgoing),
                     _ => Err(TlsError::Protocol),
                 };
-                incoming.drain(..discard);
+                // Clamp like pump (line 450): a drain past the end panics, and
+                // panic=abort is a self-DoS on the hostile-server path.
+                incoming.drain(..core::cmp::min(discard, incoming.len()));
                 r
             }
 
@@ -508,7 +510,9 @@ macro_rules! tlsconn_role {
                     ConnectionState::WriteTraffic(mut wt) => close_notify_into(&mut wt, outgoing),
                     _ => Ok(()),
                 };
-                incoming.drain(..discard);
+                // Clamp like pump (line 450): a drain past the end panics, and
+                // panic=abort is a self-DoS on the hostile-server path.
+                incoming.drain(..core::cmp::min(discard, incoming.len()));
                 r
             }
         }

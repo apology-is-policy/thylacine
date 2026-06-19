@@ -957,6 +957,15 @@ Two mechanics distinguish it from the other static files:
   `file_content`), so a `stat` is accurate; a reader looping to EOF is unaffected
   either way. Mode is `FILE_RO` (`0444`, SYSTEM), `QTFILE` (not `QTPOLL`).
 
+**Known caveat (net-7d audit F2): paginated reads are not cross-Tread coherent.**
+Because the `Vec` is rebuilt per Tread, a summary larger than one msize frame
+that is read across multiple Treads can shift between reads if another `/net`
+client connects/clunks a slot in the window (a `cat` of a large rollup could see
+a duplicated/dropped/shifted line). The slice access stays in bounds (no memory
+bug — purely a coherency artifact), and it matches the existing per-protocol
+`stats` behaviour. The v1.x fix snapshots the render into the per-fid state at
+the first (offset-0) Tread and serves that snapshot until EOF.
+
 netd holds the connection table; the kernel holds no network state — which is why
 the rollup lives here in `/net` rather than at a kernel `/ctl/net` (the charter's
 original path, reconciled to `/net/summary` 2026-06-19: a kernel devctl read
