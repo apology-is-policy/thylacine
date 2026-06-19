@@ -16,6 +16,11 @@
 //       0b. net-8c-1: the soak / leak-baseline (NET-DESIGN 16) -- repeat the
 //          round-trip 8x and require netd's live TCP `active` count to return to
 //          its pre-soak baseline (no per-cycle slot leak).
+//       0c. net-8c-2: a REAL TLS 1.3 handshake + app-data echo over the live
+//          /net loopback (the `tls` crate's TlsStream client <-> TlsServerStream
+//          server). Two Threads (server + client) interleave through netd, since
+//          a handshake needs the server-side TLS state machine to pump
+//          concurrently with the client's (see `tls_over_net_e2e`).
 //       1. the native net parsing round-trips (Ipv4Addr / SocketAddrV4),
 //       2. `TcpListener::bind` (the `announce` server-side passive open) +
 //          `local_addr` over the live /net mount,
@@ -33,16 +38,19 @@
 extern crate alloc;
 
 use alloc::vec;
+use core::sync::atomic::{AtomicU32, Ordering};
+use core::time::Duration;
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
 use libthyla_rs::env;
 use libthyla_rs::fs::File;
-use libthyla_rs::io::Read;
+use libthyla_rs::io::{Read, Write};
 use libthyla_rs::loom::{BufReg, Ring, Sqe};
 use libthyla_rs::net::{echo_serve, Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
-use libthyla_rs::{t_exits, t_putstr};
+use libthyla_rs::thread;
+use libthyla_rs::{t_burrow_attach, t_exits, t_putstr};
 
 /// net-8b: the in-guest over-/net TCP echo round-trip on netd's resident loopback
 /// interface (net-8a). This is the first LIVE exercise of the full Plan 9
@@ -75,7 +83,7 @@ fn loopback_e2e() -> Result<(), &'static str> {
     server.write_all(&rbuf[..got]).map_err(|_| "server echo")?;
     let mut ebuf = [0u8; 64];
     let back = client.read(&mut ebuf).map_err(|_| "client read")?;
-    if &ebuf[..back] != &msg[..] {
+    if ebuf[..back] != msg[..] {
         return Err("echo mismatch");
     }
     Ok(())
@@ -86,7 +94,7 @@ fn loopback_e2e() -> Result<(), &'static str> {
 /// freed by its last clunk (the section-16 no-leak exit criterion), so the count
 /// returns to its pre-soak baseline.
 fn read_tcp_active() -> Option<u32> {
-    let mut f = File::open(alloc::format!("/net/tcp/stats")).ok()?;
+    let mut f = File::open("/net/tcp/stats").ok()?;
     let mut buf = [0u8; 64];
     let n = f.read(&mut buf).ok()?;
     let s = core::str::from_utf8(&buf[..n]).ok()?;
@@ -110,6 +118,193 @@ fn soak_e2e(cycles: u32) -> Result<(), &'static str> {
     let after = read_tcp_active().ok_or("stats read (after)")?;
     if after != before {
         return Err("leak: tcp active did not return to baseline");
+    }
+    Ok(())
+}
+
+// =============================================================================
+// net-8c-2: a real TLS 1.3 handshake over a live /net TcpStream (SA-2).
+// =============================================================================
+//
+// net-8b's loopback_e2e proves PLAINTEXT bytes flow over the live /net mount;
+// this proves the `tls` crate's handshake + record layer compose over that SAME
+// live byte transport -- the symmetric TlsStream (client) <-> TlsServerStream
+// (server) pair, end to end, over netd's resident loopback.
+//
+// Unlike net-8b, this CANNOT be single-threaded: a TLS handshake is a multi-
+// round-trip application protocol, so the server-side TLS state machine must
+// PUMP concurrently with the client's (netd only moves TCP bytes; it does not
+// run TLS). A dedicated server Thread runs the server side while the main
+// Thread runs the client side; they interleave through netd over the loopback.
+// (Both ends' blocking reads are death-interruptible + the kernel preempts, so
+// it is sound on a single CPU too: when main blocks reading the ServerHello,
+// the server Thread is scheduled, and vice versa.)
+
+const TLS_PORT: u16 = 7799;
+const TLS_HOST: &str = "loopback.test";
+const LOOPBACK_CERT: &[u8] = include_bytes!("../testdata/loopback-cert.pem");
+const LOOPBACK_KEY: &[u8] = include_bytes!("../testdata/loopback-key.pem");
+/// The app data the client sends; the server echoes it back verbatim over TLS.
+const TLS_MSG: &[u8] = b"thylacine-net-8c-2-tls-over-net";
+
+/// The server Thread's stack. rustls's server handshake is moderately stack-
+/// hungry; 1 MiB is generous (a too-small stack faults past the mapped region
+/// -> the boot gate catches it loudly, never silent corruption).
+const TLS_SRV_STACK: u64 = 1024 * 1024;
+/// The non-zero tid sentinel the kernel clears on the server Thread's exit.
+const SRV_SENTINEL: u32 = 1;
+
+// The server Thread's outcome, surfaced to main after the join.
+const SR_PENDING: u32 = 0;
+const SR_OK: u32 = 1;
+const SR_CFG: u32 = 2;
+const SR_BIND: u32 = 3;
+const SR_ACCEPT: u32 = 4;
+const SR_TLS: u32 = 5;
+const SR_READ: u32 = 6;
+const SR_EOF: u32 = 7;
+const SR_ECHO: u32 = 8;
+
+/// The server Thread's join tid word, the announce-ready rendezvous, and its
+/// result code. (Statics because the raw `spawn_raw` entry takes only a u64 arg
+/// -- the server Thread builds its own listener + config and reports here.)
+static SRV_TID: AtomicU32 = AtomicU32::new(0);
+static SRV_READY: AtomicU32 = AtomicU32::new(0);
+static SRV_RESULT: AtomicU32 = AtomicU32::new(SR_PENDING);
+
+/// The server Thread entry: announce on the loopback, accept one connection, run
+/// the SERVER side of the TLS handshake, echo the (decrypted) request, close.
+/// Records its outcome in SRV_RESULT for main to read after the join. Never
+/// prints (only main writes the console -- no concurrent console writes).
+extern "C" fn tls_server_entry(_arg: u64) {
+    let _ = thread::set_tid_address(&SRV_TID);
+    let code = tls_server_run();
+    SRV_RESULT.store(code, Ordering::SeqCst);
+    thread::exit_self();
+}
+
+fn tls_server_run() -> u32 {
+    // Build the server config (cert + key) BEFORE announcing, so a config error
+    // never strands a client on a port that will not handshake.
+    let server_cfg = match tls::server_config_single_cert(LOOPBACK_CERT, LOOPBACK_KEY) {
+        Ok(c) => c,
+        Err(_) => return SR_CFG,
+    };
+    let listener = match TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, TLS_PORT)) {
+        Ok(l) => l,
+        Err(_) => return SR_BIND,
+    };
+    // Announced now -- release the client to connect.
+    SRV_READY.store(1, Ordering::Release);
+    let _ = libthyla_rs::torpor::wake_all(&SRV_READY);
+
+    let (stream, _peer) = match listener.accept() {
+        Ok(s) => s,
+        Err(_) => return SR_ACCEPT,
+    };
+    let mut tls = match tls::TlsServerStream::accept(stream, server_cfg) {
+        Ok(t) => t,
+        Err(_) => return SR_TLS,
+    };
+    // Read the client's (decrypted) request and echo it back (encrypted).
+    let mut buf = [0u8; 256];
+    let n = match tls.read(&mut buf) {
+        Ok(n) => n,
+        Err(_) => return SR_READ,
+    };
+    if n == 0 {
+        return SR_EOF;
+    }
+    if tls.write_all(&buf[..n]).is_err() {
+        return SR_ECHO;
+    }
+    tls.close();
+    SR_OK
+}
+
+/// net-8c-2: spawn the server Thread, run the client side here, join, and assert
+/// both halves of a real TLS handshake + app-data echo over the live /net
+/// loopback succeeded. Runs once (not in the soak loop).
+fn tls_over_net_e2e() -> Result<(), &'static str> {
+    // Reset the rendezvous before spawning.
+    SRV_READY.store(0, Ordering::SeqCst);
+    SRV_RESULT.store(SR_PENDING, Ordering::SeqCst);
+    SRV_TID.store(SRV_SENTINEL, Ordering::SeqCst); // sentinel BEFORE spawn
+
+    // The server Thread's stack (a fresh anon burrow; its top is 16-aligned
+    // since the base is page-aligned and the size is a page multiple).
+    let stack = unsafe { t_burrow_attach(TLS_SRV_STACK) };
+    if stack < 0 {
+        return Err("server stack attach");
+    }
+    let sp = (stack as u64) + TLS_SRV_STACK;
+    if unsafe { thread::spawn_raw(tls_server_entry as *const () as u64, sp, 0, 0) }.is_err() {
+        return Err("server spawn");
+    }
+
+    // Wait for the server to announce (bounded). torpor::wait closes the
+    // check-then-wait race: if READY is already 1 the load exits the loop; if
+    // the server stores+wakes between our load and the syscall, the kernel
+    // returns ValueMismatch without sleeping.
+    let mut waited = 0;
+    while SRV_READY.load(Ordering::Acquire) == 0 && waited < 8 {
+        let _ = libthyla_rs::torpor::wait(&SRV_READY, 0, Some(Duration::from_secs(1)));
+        waited += 1;
+    }
+    if SRV_READY.load(Ordering::Acquire) == 0 {
+        return Err("server announce timeout");
+    }
+
+    // Run the client side, then join the server Thread (the kernel wakes us when
+    // it clears SRV_TID on the server's exit). Join BEFORE inspecting the client
+    // result so the server Thread is reaped on the happy path.
+    let client_res = tls_client_roundtrip();
+    let joined = thread::join_tid(&SRV_TID, SRV_SENTINEL, Some(Duration::from_secs(30)));
+
+    client_res?;
+    if joined.is_err() {
+        return Err("server join timeout");
+    }
+    match SRV_RESULT.load(Ordering::SeqCst) {
+        SR_OK => Ok(()),
+        SR_CFG => Err("server tls config"),
+        SR_BIND => Err("server bind"),
+        SR_ACCEPT => Err("server accept"),
+        SR_TLS => Err("server tls accept"),
+        SR_READ => Err("server tls read"),
+        SR_EOF => Err("server saw EOF"),
+        SR_ECHO => Err("server tls echo"),
+        _ => Err("server pending"),
+    }
+}
+
+/// The client half: TCP-connect over /net, complete the TLS handshake
+/// (validating the self-signed server cert against the trust anchor + the wall
+/// clock), send the request, read + verify the echo.
+fn tls_client_roundtrip() -> Result<(), &'static str> {
+    // Trust the self-signed leaf as its own root (the standard isolated-test
+    // pattern -- the same trust setup tls-smoke's loopback E2E uses).
+    let roots = tls::load_roots_pem(LOOPBACK_CERT).map_err(|_| "client trust store")?;
+    let client_cfg = tls::client_config(roots);
+    let sock = TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, TLS_PORT))
+        .map_err(|_| "client connect")?;
+    let mut tls =
+        tls::TlsStream::connect(sock, TLS_HOST, client_cfg).map_err(|_| "client tls handshake")?;
+    tls.write_all(TLS_MSG).map_err(|_| "client tls write")?;
+    // Read the echo back. TLS records may fragment app data, so loop until we
+    // have the whole message (or a clean EOF cuts it short).
+    let mut got = [0u8; 256];
+    let mut have = 0usize;
+    while have < TLS_MSG.len() {
+        let n = tls.read(&mut got[have..]).map_err(|_| "client tls read")?;
+        if n == 0 {
+            break; // clean TLS EOF before the full echo
+        }
+        have += n;
+    }
+    tls.close();
+    if &got[..have] != TLS_MSG {
+        return Err("client tls echo mismatch");
     }
     Ok(())
 }
@@ -169,6 +364,18 @@ fn probe() -> i64 {
                 "net-echo: FAIL -- net-8c-1 soak ({})\n",
                 why
             ));
+            unsafe { t_exits(1) }
+        }
+    };
+    // net-8c-2: a real TLS 1.3 handshake + app-data echo over the live /net
+    // loopback (the client TlsStream <-> the server TlsServerStream, two Threads
+    // interleaving through netd). SA-2.
+    match tls_over_net_e2e() {
+        Ok(()) => t_putstr(
+            "net-echo: net-8c-2 TLS-over-/net E2E PASS (handshake + cert verify + echo over the live mount)\n",
+        ),
+        Err(why) => {
+            t_putstr(&alloc::format!("net-echo: FAIL -- net-8c-2 TLS-over-/net ({})\n", why));
             unsafe { t_exits(1) }
         }
     };

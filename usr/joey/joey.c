@@ -3682,22 +3682,31 @@ int main(void) {
                     }
 #endif
 
-                    // === net-6a-3: native libthyla-rs TCP stack + Loom async ===
-                    // Spawn /bin/net-echo (native, no pouch): it exercises the
-                    // net::TcpListener/TcpStream API over the live /net mount --
-                    // the parsing round-trips, the server-side `announce` passive
-                    // open + `local_addr`, and the Loom async witness (a Loom READ
-                    // on a /net fid completes via the kernel dev9p async client,
-                    // proving network I/O rides Loom with zero new Loom core,
-                    // NET-DESIGN 12.1). Deterministic + peer-independent: it does
-                    // NOT call accept (that blocks with no in-guest peer; the live
-                    // >=2-concurrent echo round-trip is net-8's, which owns the
-                    // peer mechanism). The deterministic >=2-concurrent echo
-                    // SERVER LOGIC is netd's isolated-loopback echo_e2e (run at
-                    // netd bring-up).
+                    // === net-8: native libthyla-rs TCP stack over the live /net ===
+                    // Spawn /bin/net-echo (native, no pouch). It is the live
+                    // over-/net proving tool: net-8b (a full bind+connect+accept
+                    // +data echo round-trip over netd's resident loopback,
+                    // net-8a), net-8c-1 (the soak / leak-baseline -- the live TCP
+                    // `active` count returns to baseline over 8 cycles), net-8c-2
+                    // (a REAL TLS 1.3 handshake + echo over /net: a client
+                    // TlsStream <-> a server TlsServerStream, two Threads
+                    // interleaving through netd), plus the net-6a-3 parsing
+                    // round-trips + `announce`/`local_addr` + the Loom async
+                    // witness (a Loom READ on a /net fid completes via the kernel
+                    // dev9p async client -- network I/O on Loom, zero new Loom
+                    // core, NET-DESIGN 12.1). All deterministic + peer-independent
+                    // (this one Proc is both ends; the blocking accept/recv defer
+                    // inside netd, so no self-deadlock). net-echo gates the boot
+                    // on each step (exit 0 only if all pass).
                     {
                         const char ne_name[] = "/bin/net-echo";
-                        long ne_pid = t_spawn(ne_name, sizeof(ne_name) - 1);
+                        // net-8c-2 runs a REAL TLS handshake over /net, which
+                        // needs the kernel CSPRNG (the client random + the ECDHE
+                        // ephemeral key share) -- so spawn it WITH CAP_CSPRNG_READ,
+                        // like any native TLS tool (tls-smoke below does the same).
+                        long ne_pid = t_spawn_with_caps(ne_name,
+                                                        sizeof(ne_name) - 1,
+                                                        T_CAP_CSPRNG_READ);
                         if (ne_pid <= 0) {
                             t_putstr("joey: t_spawn(\"net-echo\") FAILED\n");
                             return 1;
@@ -3705,11 +3714,11 @@ int main(void) {
                         int ne_status = -1;
                         long ne_reaped = t_wait_pid_for((int)ne_pid, 0, &ne_status);
                         if (ne_reaped != ne_pid || ne_status != 0) {
-                            t_putstr("joey: net-6a-3 PROBE net-echo FAILED\n");
+                            t_putstr("joey: net-8 PROBE net-echo FAILED\n");
                             return 1;
                         }
-                        t_putstr("joey: net-6a-3 PROBE OK (native net::TcpListener bind/"
-                                 "announce/local + Loom async /net read)\n");
+                        t_putstr("joey: net-8 PROBE OK (live over-/net echo + soak "
+                                 "+ TLS-over-/net E2E; net-6a-3 net + Loom async)\n");
                     }
 
                     // === net-7a-2: the native SNTP client selftest (deterministic) ===

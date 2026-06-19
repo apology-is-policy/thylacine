@@ -1119,8 +1119,29 @@ named in §2.)
     accepted ctl), so the A-3 dev9p `perm_check` denied the open before the
     Tlopen — latent because the deferred accept had only ever been driven by
     `echo_e2e`'s direct methods (no perm_check). Boot: `net-8b loopback E2E PASS`.
-  - **net-8c (next): UDP/ICMP over-`/net` + the 7c-2 `TlsStream`-over-`/net` live
-    socket** (SA-2) + the §16 soak (table-returns-to-baseline, no leak).
+  - **net-8c-1 (landed): the §16 soak / leak-baseline.** `net-echo`'s `soak_e2e`
+    runs the net-8b live over-`/net` echo round-trip 8x and requires netd's live
+    TCP `active` count (`/net/tcp/stats`) to return to its pre-soak baseline — a
+    per-cycle slot leak (each cycle mints a listener + connector + accepted M)
+    would grow it. The I-10/I-11 slot-lifetime discipline proven under repeated
+    live use. Boot: `net-8c-1 soak PASS`.
+  - **net-8c-2 (landed): the `TlsStream`-over-`/net` live socket** (SA-2) — a real
+    TLS 1.3 handshake + app-data echo over the live `/net` loopback. The `tls`
+    crate gains a symmetric server transport `TlsServerStream<S>` (the server
+    `accept`), factored with the existing client `TlsStream<S>` over one shared
+    private `TlsTransport<S, C>` driver (zero record-layer duplication). `net-echo`
+    spawns a server Thread (the server-side TLS state machine must pump
+    concurrently with the client's — netd only moves TCP bytes, it does not run
+    TLS) bound on the lo stack; the main Thread is the client; they interleave
+    through netd. The cert is verified against a baked self-signed trust anchor +
+    the LS-K wall clock. `net-echo` gains `CAP_CSPRNG_READ` (the handshake's
+    `SYS_GETRANDOM`) + joins the TLS-bin strip (it exceeds `SYS_SPAWN_BLOB_MAX`
+    unstripped). Boot: `net-8c-2 TLS-over-/net E2E PASS`. (The UDP/ICMP *protocol*
+    logic over `/net` is proven at net-3b/3c/3d on the isolated lo stack; the
+    live-mount dev9p plumbing — perm_check, deferred replies, blocking reads — is
+    proto-agnostic and exercised over the real mount by net-8b/8c-2 for TCP, so a
+    live-mount UDP/ICMP round-trip is a net-8d audit consideration, not a named
+    §15.2 exit criterion.)
   - **net-8d: the whole-arc focused audit (§15.2) + the close.**
 
 The thylacine is real. So is its network — and it is, of course, a filesystem.

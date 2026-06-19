@@ -420,9 +420,21 @@ impl TlsConn<UnbufferedServerConnection> {
 // `outgoing`/`inbox` are mutated by `drive_state` -- all four are distinct
 // fields, so the splits don't conflict, and the state is consumed before
 // `incoming.drain` releases that borrow.
+/// The role-specific half of the unbuffered driver: advancing the state
+/// machine (`pump`), encrypting app data (`write_app`), and queuing a
+/// close_notify (`queue_close`). The `tlsconn_role!` macro implements it once
+/// per role; the transport (`TlsTransport`) is generic over it, so the client
+/// and server share ONE record-layer driver -- a fix to the driver is a fix to
+/// both roles, with no second copy to drift.
+trait Drive {
+    fn pump(&mut self) -> Result<(), TlsError>;
+    fn write_app(&mut self, data: &[u8]) -> Result<(), TlsError>;
+    fn queue_close(&mut self) -> Result<(), TlsError>;
+}
+
 macro_rules! tlsconn_role {
     ($t:ty) => {
-        impl TlsConn<$t> {
+        impl Drive for TlsConn<$t> {
             /// Run the state machine to a blocking point (need-read, established
             /// idle, peer-closed, or closed), staging outgoing TLS bytes and
             /// draining decrypted app data along the way.
@@ -493,7 +505,6 @@ macro_rules! tlsconn_role {
             }
 
             /// Stage a close_notify alert (best-effort clean shutdown).
-            #[allow(dead_code)]
             fn queue_close(&mut self) -> Result<(), TlsError> {
                 if !self.established || self.closed {
                     return Ok(());
@@ -523,31 +534,38 @@ tlsconn_role!(UnbufferedClientConnection);
 tlsconn_role!(UnbufferedServerConnection);
 
 // =============================================================================
-// TlsStream<S> -- the blocking client transport.
+// The blocking TLS transport (TlsStream client / TlsServerStream server).
 // =============================================================================
+//
+// The handshake loop, the record-layer Read/Write, and the close path are
+// IDENTICAL for both roles -- only the initial connection (client vs server)
+// and the public entry point (`connect` vs `accept`) differ. So the driver
+// lives ONCE in the private `TlsTransport<S, C>` (generic over the role's
+// `Drive`-able `TlsConn<C>`), and the two public types are thin role-specific
+// wrappers that forward into it. A fix to the transport is a fix to both roles
+// -- there is no second copy to drift (the audit-bearing reason to share it).
 
-/// A TLS client connection over a blocking byte stream `S` (a `/net`
-/// `TcpStream`). `connect` runs the handshake to completion (validating the
-/// server cert against the config's trust anchors and the wall clock); the
-/// `Read`/`Write` impls then carry plaintext app data, encrypting/decrypting
-/// through the rustls record layer transparently.
-pub struct TlsStream<S> {
-    inner: TlsConn<UnbufferedClientConnection>,
+/// The shared blocking driver: an unbuffered rustls connection of either role
+/// plus the byte stream `S` it speaks over. `Drive` supplies the role-specific
+/// `pump`/`write_app`/`queue_close`; everything else (the handshake pump, the
+/// transmit/receive shuttle, the record-layer Read/Write) is role-agnostic.
+/// Private -- so the private `Drive` bound never leaks into a public signature.
+struct TlsTransport<S, C> {
+    inner: TlsConn<C>,
     sock: S,
 }
 
-impl<S: Read + Write> TlsStream<S> {
-    /// Open a TLS connection to `host` over `sock`, completing the handshake.
-    /// Fails (`Rustls`) if the server cert does not validate against `cfg`'s
-    /// trust anchors / the wall clock.
-    pub fn connect(sock: S, host: &str, cfg: Arc<ClientConfig>) -> Result<TlsStream<S>, TlsError> {
-        let inner = TlsConn::new_client(cfg, host)?;
-        let mut s = TlsStream { inner, sock };
-        s.do_handshake()?;
-        Ok(s)
-    }
-
-    fn do_handshake(&mut self) -> Result<(), TlsError> {
+impl<S: Read + Write, C> TlsTransport<S, C>
+where
+    TlsConn<C>: Drive,
+{
+    /// Run the handshake to completion: pump the state machine, transmit any
+    /// staged TLS records, and block for more peer bytes until the connection
+    /// is established (or the peer closes -> `Handshake`). Role-symmetric: the
+    /// client's first pump emits the ClientHello (a record to flush); the
+    /// server's first pump wants the ClientHello (nothing to flush) and blocks
+    /// in `fill_in` until the client sends it.
+    fn handshake(&mut self) -> Result<(), TlsError> {
         loop {
             self.inner.pump()?;
             self.flush_out()?;
@@ -582,15 +600,16 @@ impl<S: Read + Write> TlsStream<S> {
 
     /// Send a close_notify and stop. Best-effort: a transport error is ignored
     /// (the caller is tearing down anyway).
-    pub fn close(&mut self) {
+    fn close(&mut self) {
         if self.inner.queue_close().is_ok() {
             let _ = self.flush_out();
         }
     }
-}
 
-impl<S: Read + Write> Read for TlsStream<S> {
-    fn read(&mut self, buf: &mut [u8]) -> libthyla_rs::err::Result<usize> {
+    /// Read decrypted app data, processing peer records (and flushing any
+    /// responses) until some plaintext is available or the TLS stream reaches a
+    /// clean EOF (the peer's close_notify -> `Ok(0)`).
+    fn read_plaintext(&mut self, buf: &mut [u8]) -> libthyla_rs::err::Result<usize> {
         use libthyla_rs::err::Error as IoError;
         loop {
             let n = self.inner.read_app(buf);
@@ -613,14 +632,95 @@ impl<S: Read + Write> Read for TlsStream<S> {
             self.fill_in().map_err(|_| IoError::Io)?;
         }
     }
-}
 
-impl<S: Read + Write> Write for TlsStream<S> {
-    fn write(&mut self, buf: &[u8]) -> libthyla_rs::err::Result<usize> {
+    /// Encrypt `buf` as app data and transmit it; returns the plaintext length.
+    fn write_plaintext(&mut self, buf: &[u8]) -> libthyla_rs::err::Result<usize> {
         use libthyla_rs::err::Error as IoError;
         self.inner.write_app(buf).map_err(|_| IoError::Io)?;
         self.flush_out().map_err(|_| IoError::Io)?;
         Ok(buf.len())
+    }
+}
+
+/// A TLS 1.3 **client** connection over a blocking byte stream `S` (a `/net`
+/// `TcpStream`). `connect` runs the handshake to completion (validating the
+/// server cert against the config's trust anchors and the wall clock); the
+/// `Read`/`Write` impls then carry plaintext app data, encrypting/decrypting
+/// through the rustls record layer transparently.
+pub struct TlsStream<S> {
+    t: TlsTransport<S, UnbufferedClientConnection>,
+}
+
+impl<S: Read + Write> TlsStream<S> {
+    /// Open a TLS connection to `host` over `sock`, completing the handshake.
+    /// Fails (`Rustls`) if the server cert does not validate against `cfg`'s
+    /// trust anchors / the wall clock.
+    pub fn connect(sock: S, host: &str, cfg: Arc<ClientConfig>) -> Result<TlsStream<S>, TlsError> {
+        let inner = TlsConn::new_client(cfg, host)?;
+        let mut t = TlsTransport { inner, sock };
+        t.handshake()?;
+        Ok(TlsStream { t })
+    }
+
+    /// Send a close_notify and stop (best-effort; a transport error is ignored).
+    pub fn close(&mut self) {
+        self.t.close();
+    }
+}
+
+impl<S: Read + Write> Read for TlsStream<S> {
+    fn read(&mut self, buf: &mut [u8]) -> libthyla_rs::err::Result<usize> {
+        self.t.read_plaintext(buf)
+    }
+}
+
+impl<S: Read + Write> Write for TlsStream<S> {
+    fn write(&mut self, buf: &[u8]) -> libthyla_rs::err::Result<usize> {
+        self.t.write_plaintext(buf)
+    }
+    fn flush(&mut self) -> libthyla_rs::err::Result<()> {
+        Ok(())
+    }
+}
+
+/// A TLS 1.3 **server** connection over a blocking byte stream `S` (a `/net`
+/// `TcpStream` returned by `TcpListener::accept`). `accept` runs the server
+/// side of the handshake to completion (presenting `cfg`'s certificate); the
+/// `Read`/`Write` impls then carry plaintext app data through the record layer.
+/// netd serves raw TCP, so a Thylacine TLS *server* lives here in userspace
+/// over the `/net` byte stream -- the symmetric counterpart to
+/// `TlsStream::connect`, sharing the same `TlsTransport` driver.
+pub struct TlsServerStream<S> {
+    t: TlsTransport<S, UnbufferedServerConnection>,
+}
+
+impl<S: Read + Write> TlsServerStream<S> {
+    /// Accept a TLS connection from a client over `sock`, completing the
+    /// handshake (presenting `cfg`'s single certificate; no client auth).
+    /// Fails (`Handshake`/`Rustls`) if the client closes mid-handshake or the
+    /// negotiation does not converge.
+    pub fn accept(sock: S, cfg: Arc<ServerConfig>) -> Result<TlsServerStream<S>, TlsError> {
+        let inner = TlsConn::new_server(cfg)?;
+        let mut t = TlsTransport { inner, sock };
+        t.handshake()?;
+        Ok(TlsServerStream { t })
+    }
+
+    /// Send a close_notify and stop (best-effort; a transport error is ignored).
+    pub fn close(&mut self) {
+        self.t.close();
+    }
+}
+
+impl<S: Read + Write> Read for TlsServerStream<S> {
+    fn read(&mut self, buf: &mut [u8]) -> libthyla_rs::err::Result<usize> {
+        self.t.read_plaintext(buf)
+    }
+}
+
+impl<S: Read + Write> Write for TlsServerStream<S> {
+    fn write(&mut self, buf: &[u8]) -> libthyla_rs::err::Result<usize> {
+        self.t.write_plaintext(buf)
     }
     fn flush(&mut self) -> libthyla_rs::err::Result<()> {
         Ok(())

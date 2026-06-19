@@ -736,6 +736,7 @@ name = "net-echo"
 version = "0.1.0"
 dependencies = [
  "libthyla-rs",
+ "tls",
 ]
 
 [[package]]
