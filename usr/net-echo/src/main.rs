@@ -13,6 +13,9 @@
 //          on netd's resident loopback (net-8a). Peer-independent because this
 //          one Proc is BOTH ends -- the blocking accept/recv defer inside netd,
 //          so there is no self-deadlock (see `loopback_e2e`).
+//       0b. net-8c-1: the soak / leak-baseline (NET-DESIGN 16) -- repeat the
+//          round-trip 8x and require netd's live TCP `active` count to return to
+//          its pre-soak baseline (no per-cycle slot leak).
 //       1. the native net parsing round-trips (Ipv4Addr / SocketAddrV4),
 //       2. `TcpListener::bind` (the `announce` server-side passive open) +
 //          `local_addr` over the live /net mount,
@@ -36,6 +39,7 @@ static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::Th
 
 use libthyla_rs::env;
 use libthyla_rs::fs::File;
+use libthyla_rs::io::Read;
 use libthyla_rs::loom::{BufReg, Ring, Sqe};
 use libthyla_rs::net::{echo_serve, Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
 use libthyla_rs::{t_exits, t_putstr};
@@ -73,6 +77,39 @@ fn loopback_e2e() -> Result<(), &'static str> {
     let back = client.read(&mut ebuf).map_err(|_| "client read")?;
     if &ebuf[..back] != &msg[..] {
         return Err("echo mismatch");
+    }
+    Ok(())
+}
+
+/// Read netd's live TCP connection count from `/net/tcp/stats` (the `active`
+/// line). The soak's leak detector: every connection a cycle opens must be
+/// freed by its last clunk (the section-16 no-leak exit criterion), so the count
+/// returns to its pre-soak baseline.
+fn read_tcp_active() -> Option<u32> {
+    let mut f = File::open(alloc::format!("/net/tcp/stats")).ok()?;
+    let mut buf = [0u8; 64];
+    let n = f.read(&mut buf).ok()?;
+    let s = core::str::from_utf8(&buf[..n]).ok()?;
+    let at = s.find("active ")? + "active ".len();
+    let rest = &s[at..];
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+/// net-8c-1: the soak / leak-baseline (NET-DESIGN section 16). Run the live
+/// over-`/net` echo round-trip N times and require netd's live TCP connection
+/// count to return to its pre-soak baseline -- a per-cycle leak of even one slot
+/// (listener / connector / accepted M each open + free per cycle) would grow it.
+fn soak_e2e(cycles: u32) -> Result<(), &'static str> {
+    let before = read_tcp_active().ok_or("stats read (before)")?;
+    for _ in 0..cycles {
+        loopback_e2e()?;
+    }
+    let after = read_tcp_active().ok_or("stats read (after)")?;
+    if after != before {
+        return Err("leak: tcp active did not return to baseline");
     }
     Ok(())
 }
@@ -116,6 +153,20 @@ fn probe() -> i64 {
         Err(why) => {
             t_putstr(&alloc::format!(
                 "net-echo: FAIL -- net-8b loopback E2E ({})\n",
+                why
+            ));
+            unsafe { t_exits(1) }
+        }
+    };
+    // net-8c-1: the soak / leak-baseline (section 16) -- repeat the round-trip and
+    // require netd's live TCP connection count to return to baseline (no leak).
+    match soak_e2e(8) {
+        Ok(()) => t_putstr(
+            "net-echo: net-8c-1 soak PASS (8x echo over /net; tcp active returns to baseline)\n",
+        ),
+        Err(why) => {
+            t_putstr(&alloc::format!(
+                "net-echo: FAIL -- net-8c-1 soak ({})\n",
                 why
             ));
             unsafe { t_exits(1) }
