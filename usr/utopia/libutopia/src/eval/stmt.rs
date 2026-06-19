@@ -1539,8 +1539,37 @@ fn glob_candidate(w: &Word) -> Option<&str> {
 /// `Word::Concat(toks)` evaluates each token then applies rc-style
 /// cross-product concatenation (matches `eval_expr`'s Concat
 /// semantics).
+/// Expand a word-leading `~` to `$home`. When `$home` is unset (a
+/// bare-spawned `ut` with no `--home`), the literal `~` is kept: POSIX
+/// leaves `~` unspecified when HOME is unset, and a literal avoids
+/// `~/foo` silently collapsing to `/foo`. Never returns a zero-element
+/// Value -- an empty `acc` would annihilate a `~/foo` Concat at the
+/// cross-product step (len 0 * len 1 = 0).
+fn tilde_home(env: &Env) -> Value {
+    let home = env.get("home");
+    if home.is_empty() {
+        Value::scalar("~")
+    } else {
+        home
+    }
+}
+
+/// Whether a `~`-led word is the `$home` form. Only the bare `~` (a
+/// single-token word) and the `~/...` form (the char after `~` is `/`)
+/// expand. A `~name` / `~$x` prefix is the POSIX username form, left
+/// literal at v1.0 (no name service yet) -- so `cat ~backup` and a file
+/// literally named `~tmp` are NOT silently rewritten to a home path.
+fn tilde_leads_home(toks: &[Token]) -> bool {
+    match toks.get(1).map(|t| &t.kind) {
+        Some(TokenKind::Word(s)) => s.starts_with('/'),
+        _ => false,
+    }
+}
+
 fn eval_word(env: &Env, word: &Word) -> EvalResult<Value> {
     match word {
+        // A bare leading `~` (its own word): expand to $home.
+        Word::Single(tok) if matches!(tok.kind, TokenKind::Tilde) => Ok(tilde_home(env)),
         Word::Single(tok) => eval_value_token(env, tok),
         Word::Concat(toks) => {
             if toks.is_empty() {
@@ -1549,7 +1578,18 @@ fn eval_word(env: &Env, word: &Word) -> EvalResult<Value> {
                     word.span(),
                 ));
             }
-            let mut acc = eval_value_token(env, &toks[0])?;
+            // The FIRST token leads the word. A leading `~` expands to $home
+            // only in the `~/...` form (tilde_leads_home); a `~name`/`~$x`
+            // prefix and every non-leading `~` (e.g. `a~b`) are literal.
+            let mut acc = if matches!(toks[0].kind, TokenKind::Tilde) {
+                if tilde_leads_home(toks) {
+                    tilde_home(env)
+                } else {
+                    Value::scalar("~")
+                }
+            } else {
+                eval_value_token(env, &toks[0])?
+            };
             for tok in &toks[1..] {
                 let next = eval_value_token(env, tok)?;
                 let mut new_acc = Vec::with_capacity(acc.len() * next.len());
@@ -1600,6 +1640,10 @@ fn eval_value_token(env: &Env, tok: &Token) -> EvalResult<Value> {
             EvalErrorKind::NotImplemented("process substitution <(cmd) / >(cmd)"),
             tok.span,
         )),
+        // A `~` reaching here is NOT word-leading (only a word's first
+        // token leads; eval_word routes that one to $home). A mid/trailing
+        // `~` is a literal tilde: `echo a~b` -> `a~b`, `echo a~` -> `a~`.
+        TokenKind::Tilde => Ok(Value::scalar("~")),
         _ => Err(EvalError::new(
             EvalErrorKind::Internal("non-value token in Word"),
             tok.span,
@@ -2537,5 +2581,95 @@ mod tests {
         let (interp, arg) = parse_shebang_line(b"#!/bin/ut").unwrap();
         assert_eq!(interp, "/bin/ut");
         assert_eq!(arg, None);
+    }
+
+    // --- tilde (`~`) expansion in command-word evaluation ----------------
+
+    fn tok(kind: TokenKind) -> Token {
+        Token::new(kind, Span::new(0, 0))
+    }
+
+    fn home_env() -> Env {
+        let mut env = Env::new();
+        env.assign("home", Value::scalar("/home/susan"));
+        env
+    }
+
+    #[test]
+    fn tilde_single_expands_to_home() {
+        let env = home_env();
+        let v = eval_word(&env, &Word::Single(tok(TokenKind::Tilde))).unwrap();
+        assert_eq!(v.0, alloc::vec![String::from("/home/susan")]);
+    }
+
+    #[test]
+    fn tilde_single_unset_home_stays_literal() {
+        let env = Env::new(); // no $home (a bare-spawned ut)
+        let v = eval_word(&env, &Word::Single(tok(TokenKind::Tilde))).unwrap();
+        assert_eq!(v.0, alloc::vec![String::from("~")]);
+    }
+
+    #[test]
+    fn tilde_slash_concat_joins_home() {
+        let env = home_env();
+        let w = Word::Concat(alloc::vec![
+            tok(TokenKind::Tilde),
+            tok(TokenKind::Word(String::from("/foo"))),
+        ]);
+        let v = eval_word(&env, &w).unwrap();
+        assert_eq!(v.0, alloc::vec![String::from("/home/susan/foo")]);
+    }
+
+    #[test]
+    fn tilde_slash_concat_unset_home_keeps_literal_and_word() {
+        let env = Env::new(); // no $home
+        let w = Word::Concat(alloc::vec![
+            tok(TokenKind::Tilde),
+            tok(TokenKind::Word(String::from("/foo"))),
+        ]);
+        let v = eval_word(&env, &w).unwrap();
+        // `~` literal (NOT `/foo`); and the word must not vanish -- the
+        // zero-element-acc annihilation guard in tilde_home.
+        assert_eq!(v.0, alloc::vec![String::from("~/foo")]);
+    }
+
+    #[test]
+    fn tilde_username_form_stays_literal() {
+        let env = home_env(); // $home IS set, but `~alice` must NOT expand
+        let w = Word::Concat(alloc::vec![
+            tok(TokenKind::Tilde),
+            tok(TokenKind::Word(String::from("alice"))),
+        ]);
+        let v = eval_word(&env, &w).unwrap();
+        assert_eq!(v.0, alloc::vec![String::from("~alice")]);
+    }
+
+    #[test]
+    fn tilde_slash_var_expands_and_joins() {
+        let mut env = home_env();
+        env.assign("dir", Value::scalar("sub"));
+        // `~/$dir` -> <home>/<dir>: the leading `~/` expands and the var
+        // suffix (absorbed into the same word) joins on.
+        let w = Word::Concat(alloc::vec![
+            tok(TokenKind::Tilde),
+            tok(TokenKind::Word(String::from("/"))),
+            tok(TokenKind::Var(String::from("dir"))),
+        ]);
+        let v = eval_word(&env, &w).unwrap();
+        assert_eq!(v.0, alloc::vec![String::from("/home/susan/sub")]);
+    }
+
+    #[test]
+    fn tilde_nonleading_in_concat_is_literal() {
+        let env = home_env();
+        // Concat([a, ~, b]) -> "a~b": only a *leading* tilde expands, even
+        // with $home set.
+        let w = Word::Concat(alloc::vec![
+            tok(TokenKind::Word(String::from("a"))),
+            tok(TokenKind::Tilde),
+            tok(TokenKind::Word(String::from("b"))),
+        ]);
+        let v = eval_word(&env, &w).unwrap();
+        assert_eq!(v.0, alloc::vec![String::from("a~b")]);
     }
 }

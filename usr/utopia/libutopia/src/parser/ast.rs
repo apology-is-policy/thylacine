@@ -220,10 +220,14 @@ pub struct SimpleCommand {
 pub enum Word {
     /// A single value-producing token.
     Single(Token),
-    /// Span-adjacent value tokens joined by `^` (one or more
-    /// `Caret` operators between them). The Vec holds the value
-    /// tokens in order; the Caret tokens themselves are NOT in the
-    /// AST (their presence is implicit in the Concat variant).
+    /// Span-adjacent value tokens fused into one word. Two fusers:
+    /// the `^` operator (one or more `Caret` operators between the
+    /// values; the Caret tokens are NOT in the AST -- their presence
+    /// is implicit), and a `~` (which glues its span-adjacent
+    /// neighbours so `~/foo` and `a~b` are each one word; the `Tilde`
+    /// tokens ARE in the AST so eval can expand a *leading* `~` to
+    /// $home while keeping a non-leading `~` literal). The Vec holds
+    /// the value tokens in source order.
     Concat(Vec<Token>),
 }
 

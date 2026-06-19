@@ -581,36 +581,62 @@ impl Parser {
     fn parse_word(&mut self) -> ParseResult<Word> {
         let first = self.advance();
         debug_assert!(is_value_token(&first.kind));
-        // Detect Concat: span-adjacent Caret + span-adjacent value.
+        // Assemble a maximal span-adjacent word. Two joining rules, both
+        // requiring zero whitespace between the joined tokens:
+        //   (a) a `~` fuses span-adjacent value tokens into ONE word, so
+        //       `~/foo` is a single argv element and `a~b` stays one
+        //       literal word. Position decides meaning at eval time: only
+        //       a *leading* `~` (the word's first token) expands to $home;
+        //       a `~` anywhere else is a literal tilde (eval_word).
+        //   (b) the explicit `^` operator (scripture 6.7): span-adjacent
+        //       Caret + span-adjacent value, with the Caret dropped from
+        //       the AST.
+        // `~` and `^` are the ONLY word-gluers; plain span-adjacent values
+        // (`$a$b`) stay separate words, unchanged from before.
         let mut parts: Vec<Token> = alloc::vec![first];
+        let mut has_tilde = matches!(parts[0].kind, TokenKind::Tilde);
         loop {
             let last_end = parts.last().expect("parts has >= 1").span.end;
-            let maybe_caret = match self.peek_token() {
-                Some(t) => t,
+            // Copy out the scalars the branches need so no borrow of the
+            // peeked token survives across the `self` mutation below.
+            let (adjacent, is_value, is_tilde, is_caret, next_end) = match self.peek_token() {
+                Some(t) => (
+                    t.span.start == last_end,
+                    is_value_token(&t.kind),
+                    matches!(t.kind, TokenKind::Tilde),
+                    matches!(t.kind, TokenKind::Caret),
+                    t.span.end,
+                ),
                 None => break,
             };
-            if !matches!(maybe_caret.kind, TokenKind::Caret) {
-                break;
+            // (a) tilde gluing: once a `~` is anywhere in the word, absorb
+            // span-adjacent value tokens, so the whole tilde-prefix-and-path
+            // is one argv element (`~/foo`, `~/$dir`, and the literal `a~b`).
+            // The leading-vs-literal decision is made later at eval by token
+            // position; here we only assemble the word.
+            if adjacent && is_value && (has_tilde || is_tilde) {
+                let value = self.advance();
+                has_tilde |= matches!(value.kind, TokenKind::Tilde);
+                parts.push(value);
+                continue;
             }
-            if maybe_caret.span.start != last_end {
-                break;
+            // (b) `^` concatenation: span-adjacent Caret + span-adjacent
+            // value. Consume both (skip the Caret, store the value).
+            if is_caret && adjacent {
+                let maybe_value = match self.tokens.get(self.pos + 1) {
+                    Some(t) => t,
+                    None => break,
+                };
+                if !is_value_token(&maybe_value.kind) || maybe_value.span.start != next_end {
+                    break;
+                }
+                self.pos += 1; // past the Caret
+                let value = self.advance();
+                has_tilde |= matches!(value.kind, TokenKind::Tilde);
+                parts.push(value);
+                continue;
             }
-            let caret_end = maybe_caret.span.end;
-            let maybe_value = match self.tokens.get(self.pos + 1) {
-                Some(t) => t,
-                None => break,
-            };
-            if !is_value_token(&maybe_value.kind) {
-                break;
-            }
-            if maybe_value.span.start != caret_end {
-                break;
-            }
-            // Adjacent Caret + value. Consume both (skip the Caret,
-            // store the value).
-            self.pos += 1; // past the Caret
-            let value = self.advance();
-            parts.push(value);
+            break;
         }
         if parts.len() == 1 {
             Ok(Word::Single(parts.into_iter().next().expect("len 1")))
@@ -1411,6 +1437,12 @@ fn is_value_token(k: &TokenKind) -> bool {
             | TokenKind::ProcSubIn(_)
             | TokenKind::ProcSubOut(_)
             | TokenKind::Regex(_)
+            // A word-position `~` is a value: it expands to $home when it
+            // leads a word (`~`, `~/foo`), and is a literal tilde mid-word
+            // (`a~b`). Arithmetic context uses a SEPARATE predicate
+            // (expr.rs::is_value_token_kind), so arith's bitwise-not `~`
+            // is unaffected.
+            | TokenKind::Tilde
     )
 }
 
@@ -1480,6 +1512,128 @@ mod tests {
             },
             _ => panic!(),
         }
+    }
+
+    /// The argv Words of the first simple command in `src`.
+    fn first_words(src: &str) -> Vec<Word> {
+        let s = parse_ok(src);
+        match &s.statements[0].kind {
+            StatementKind::Pipeline(p) => match &p.elements[0].command.kind {
+                CommandKind::Simple(sc) => sc.words.clone(),
+                _ => panic!("not a simple command"),
+            },
+            _ => panic!("not a pipeline"),
+        }
+    }
+
+    #[test]
+    fn tilde_bare_is_single_tilde() {
+        // `cd ~` -> two words; the second is a lone `~` (Single Tilde),
+        // which eval expands to $home.
+        let w = first_words("cd ~");
+        assert_eq!(w.len(), 2);
+        assert!(matches!(&w[1], Word::Single(t) if t.kind == TokenKind::Tilde));
+    }
+
+    #[test]
+    fn tilde_slash_path_glues_into_concat() {
+        // `~/foo` is ONE argv element: Concat([Tilde, Word("/foo")]).
+        let w = first_words("cat ~/foo");
+        assert_eq!(w.len(), 2);
+        match &w[1] {
+            Word::Concat(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert_eq!(parts[0].kind, TokenKind::Tilde);
+                assert_eq!(parts[1].kind, TokenKind::Word("/foo".to_string()));
+            }
+            other => panic!("expected Concat, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn tilde_username_form_glues_one_word() {
+        // `~alice` (no slash) is the username form: it still glues into ONE
+        // word (Concat), but eval keeps it literal (no name service at v1.0).
+        let w = first_words("ls ~alice");
+        assert_eq!(w.len(), 2);
+        match &w[1] {
+            Word::Concat(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert_eq!(parts[0].kind, TokenKind::Tilde);
+                assert_eq!(parts[1].kind, TokenKind::Word("alice".to_string()));
+            }
+            other => panic!("expected Concat, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn tilde_slash_var_glues_whole_word() {
+        // `~/$dir` is ONE word (maximal tilde absorb): Concat([Tilde, "/",
+        // $dir]) -- the `~` keeps absorbing span-adjacent values past the
+        // first, so a var suffix is not split off into its own word.
+        let w = first_words("cd ~/$dir");
+        assert_eq!(w.len(), 2);
+        match &w[1] {
+            Word::Concat(parts) => {
+                assert_eq!(parts.len(), 3);
+                assert_eq!(parts[0].kind, TokenKind::Tilde);
+                assert_eq!(parts[1].kind, TokenKind::Word("/".to_string()));
+                assert!(matches!(parts[2].kind, TokenKind::Var(_)));
+            }
+            other => panic!("expected 3-part Concat, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn tilde_midword_glues_literal() {
+        // `a~b` stays ONE word: Concat([Word("a"), Tilde, Word("b")]).
+        // The non-leading Tilde is literal at eval -> `a~b`.
+        let w = first_words("echo a~b");
+        assert_eq!(w.len(), 2);
+        match &w[1] {
+            Word::Concat(parts) => {
+                assert_eq!(parts.len(), 3);
+                assert_eq!(parts[0].kind, TokenKind::Word("a".to_string()));
+                assert_eq!(parts[1].kind, TokenKind::Tilde);
+                assert_eq!(parts[2].kind, TokenKind::Word("b".to_string()));
+            }
+            other => panic!("expected Concat, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn tilde_trailing_glues_literal() {
+        // `echo a~` -> `a~` (Concat; the Tilde is not leading -> literal).
+        let w = first_words("echo a~");
+        assert_eq!(w.len(), 2);
+        assert!(matches!(&w[1], Word::Concat(p) if p.len() == 2
+            && p[0].kind == TokenKind::Word("a".to_string())
+            && p[1].kind == TokenKind::Tilde));
+    }
+
+    #[test]
+    fn tilde_as_command_name_parses() {
+        // A leading `~` in command-name position parses (the home-relative
+        // exec path): `~/bin/x arg` -> argv[0] = Concat([Tilde, ...]).
+        let w = first_words("~/bin/x arg");
+        assert_eq!(w.len(), 2);
+        assert!(matches!(&w[0], Word::Concat(_)));
+    }
+
+    #[test]
+    fn caret_concat_unaffected_by_tilde_gluing() {
+        // The `^` operator still concats: `echo a^b` -> Concat of 2 parts.
+        let w = first_words("echo a^b");
+        assert_eq!(w.len(), 2);
+        assert!(matches!(&w[1], Word::Concat(p) if p.len() == 2));
+    }
+
+    #[test]
+    fn adjacent_values_without_glue_stay_separate() {
+        // No `~`/`^` -> no implicit join: `$a$b` stays two words. Tilde
+        // gluing must not disturb this pre-existing behavior.
+        let w = first_words("echo $a$b");
+        assert_eq!(w.len(), 3);
     }
 
     #[test]

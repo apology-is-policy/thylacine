@@ -57,6 +57,9 @@ pub extern "C" fn rs_main() -> i64 {
     if let Err(rc) = flow_builtin_branch() {
         return rc;
     }
+    if let Err(rc) = flow_tilde_expand() {
+        return rc;
+    }
     if let Err(rc) = flow_heredoc_var_redirect() {
         return rc;
     }
@@ -172,6 +175,45 @@ fn flow_builtin_branch() -> Result<(), i64> {
         return fail("flow 4: $status branch / $cwd Dq-interp did not compose");
     }
     t_putstr("u-6-test: builtin + special-vars + if + Dq OK\n");
+    Ok(())
+}
+
+// Flow tilde -- `~` expansion in command-word evaluation. A *leading* `~`
+// (`~`, `~/path`) in a spawned command's argv expands to $home (an ordinary
+// var, the same store login's `--home` forward writes via set_home); a
+// mid-word `~` (`a~b`) stays literal. The expansion happens in ut's eval
+// BEFORE the spawn, so `$(echo ~/foo)` captures the already-expanded path
+// (stdout is dropped pre-PTY, so the substitution capture is the observable).
+fn flow_tilde_expand() -> Result<(), i64> {
+    let mut env = Env::new();
+    env.interactive = true;
+
+    let src = "let home = /home/test\n\
+               let sub = docs\n\
+               let a = $(echo ~)\n\
+               let b = $(echo ~/foo)\n\
+               let c = $(echo a~b)\n\
+               let d = $(echo ~user)\n\
+               let e = $(echo ~/$sub)";
+    if eval_source(&mut env, src).is_err() {
+        return fail("flow tilde: tilde-expansion script errored");
+    }
+    if env.get("a").as_scalar() != "/home/test" {
+        return fail("flow tilde: bare ~ did not expand to $home");
+    }
+    if env.get("b").as_scalar() != "/home/test/foo" {
+        return fail("flow tilde: ~/foo did not expand to $home/foo");
+    }
+    if env.get("c").as_scalar() != "a~b" {
+        return fail("flow tilde: mid-word a~b did not stay literal");
+    }
+    if env.get("d").as_scalar() != "~user" {
+        return fail("flow tilde: ~user (no name service) did not stay literal");
+    }
+    if env.get("e").as_scalar() != "/home/test/docs" {
+        return fail("flow tilde: ~/$sub did not expand + join the var suffix");
+    }
+    t_putstr("u-6-test: tilde (~) command-word expansion OK\n");
     Ok(())
 }
 
