@@ -9,17 +9,20 @@
 //     proof is netd's isolated-loopback `echo_e2e` (server.rs), and the live
 //     native-API round-trip is net-8's (it owns the in-guest peer mechanism).
 //   * default (the joey boot probe) -- DETERMINISTIC + peer-independent:
+//       0. net-8b: the live over-/net echo round-trip (bind+connect+accept+data)
+//          on netd's resident loopback (net-8a). Peer-independent because this
+//          one Proc is BOTH ends -- the blocking accept/recv defer inside netd,
+//          so there is no self-deadlock (see `loopback_e2e`).
 //       1. the native net parsing round-trips (Ipv4Addr / SocketAddrV4),
 //       2. `TcpListener::bind` (the `announce` server-side passive open) +
 //          `local_addr` over the live /net mount,
 //       3. the Loom async witness: a Loom READ on a /net fid completes via the
 //          kernel dev9p async client (the SAME deferred-reply path net-6a-1
 //          audited), proving network I/O rides Loom with ZERO new Loom core
-//          (NET-DESIGN 12.1). It does NOT call `accept` (that blocks forever
-//          with no peer).
+//          (NET-DESIGN 12.1).
 //
-// joey spawns + reaps + asserts exit 0 + "net-echo: PROBE OK", so any failure
-// gates the boot.
+// joey spawns + reaps + asserts exit 0 + "net-8b loopback E2E PASS" +
+// "net-echo: PROBE OK", so any failure gates the boot.
 
 #![no_std]
 #![no_main]
@@ -34,8 +37,45 @@ static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::Th
 use libthyla_rs::env;
 use libthyla_rs::fs::File;
 use libthyla_rs::loom::{BufReg, Ring, Sqe};
-use libthyla_rs::net::{echo_serve, Ipv4Addr, SocketAddrV4, TcpListener};
+use libthyla_rs::net::{echo_serve, Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
 use libthyla_rs::{t_exits, t_putstr};
+
+/// net-8b: the in-guest over-/net TCP echo round-trip on netd's resident loopback
+/// interface (net-8a). This is the first LIVE exercise of the full Plan 9
+/// dial+accept+data path over the kernel dev9p `/net` mount -- the deferred-accept
+/// (net-3a held Rlopen) + the blocking data read (net-6a-1) + the resident lo
+/// stack, end to end. (The net-3* echo_e2e proofs drive netd's methods DIRECTLY
+/// on an isolated stack; this drives the real syscalls through the mount.)
+///
+/// Single-threaded: both ends live in this one Proc. That works because every
+/// blocking step (accept, recv) DEFERS inside netd (a separate Proc whose serve
+/// loop keeps polling both ends of the loopback) -- this Proc blocks in the
+/// kernel while netd makes progress, so there is no self-deadlock. Closes #239
+/// (the live `listen` open was denied by the A-3 dev9p perm_check because netd
+/// served the listen file read-only; it is FILE_RW now).
+fn loopback_e2e() -> Result<(), &'static str> {
+    let addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 7788);
+    let listener = TcpListener::bind(addr).map_err(|_| "bind")?;
+    let mut client = TcpStream::connect(addr).map_err(|_| "connect")?;
+    // accept blocks until netd's poll establishes the inbound call + swaps.
+    let (mut server, _peer) = listener.accept().map_err(|_| "accept")?;
+
+    // client -> server, echoed server -> client.
+    let msg = b"thylacine-net-8b-loopback";
+    client.write_all(msg).map_err(|_| "client write")?;
+    let mut rbuf = [0u8; 64];
+    let got = server.read(&mut rbuf).map_err(|_| "server read")?;
+    if got == 0 {
+        return Err("server EOF");
+    }
+    server.write_all(&rbuf[..got]).map_err(|_| "server echo")?;
+    let mut ebuf = [0u8; 64];
+    let back = client.read(&mut ebuf).map_err(|_| "client read")?;
+    if &ebuf[..back] != &msg[..] {
+        return Err("echo mismatch");
+    }
+    Ok(())
+}
 
 fn fail(msg: &str) -> ! {
     t_putstr(msg);
@@ -66,6 +106,21 @@ pub extern "C" fn rs_main() -> i64 {
 
 /// The deterministic, peer-independent boot probe.
 fn probe() -> i64 {
+    // net-8b: the live over-/net echo round-trip (bind+connect+accept+data) on
+    // the resident loopback. Deterministic + peer-independent (this Proc is both
+    // ends). A failure gates the boot.
+    match loopback_e2e() {
+        Ok(()) => {
+            t_putstr("net-echo: net-8b loopback E2E PASS (bind+connect+accept+echo over /net)\n")
+        }
+        Err(why) => {
+            t_putstr(&alloc::format!(
+                "net-echo: FAIL -- net-8b loopback E2E ({})\n",
+                why
+            ));
+            unsafe { t_exits(1) }
+        }
+    };
     t_putstr("net-echo: starting (net-6a-3 native net + Loom async witness)\n");
 
     // 1. Pure parsing round-trips -- no I/O, fully deterministic.

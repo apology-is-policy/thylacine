@@ -1109,10 +1109,18 @@ named in §2.)
     (`enable_loopback`), so the audited single-stack E2E selftests are untouched.
     Proven by the boot-asserted `resident_lo_selftest` (127.x migrate + accept +
     data + no-leak over the dual-poll). See `docs/reference/121-netd.md`.
-  - **net-8b/c (next): the in-guest over-`/net` peer E2Es** (a guest tool dialing
-    127.x reaches an in-guest server over the real `/net` path — the net-3a/4b/6a
-    deferred-reply round-trips + the 7c-2 `TlsStream`-over-`/net` live socket) +
-    the §16 soak (table-returns-to-baseline, no leak).
+  - **net-8b (landed): the in-guest over-`/net` TCP echo round-trip.** `net-echo`'s
+    `loopback_e2e` dials 127.0.0.1 and accepts + echoes over the *real* `/net`
+    mount — the first live exercise of the full Plan 9 dial+accept+data path
+    (net-3a deferred accept + net-6a-1 blocking read + the net-8a lo stack). It is
+    peer-independent (one Proc is both ends; the blocking accept/recv defer inside
+    netd, so no self-deadlock). This surfaced + fixed **#239**: netd served the
+    `listen` file `FILE_RO`, but the accept opens it `ORDWR` (its fid becomes the
+    accepted ctl), so the A-3 dev9p `perm_check` denied the open before the
+    Tlopen — latent because the deferred accept had only ever been driven by
+    `echo_e2e`'s direct methods (no perm_check). Boot: `net-8b loopback E2E PASS`.
+  - **net-8c (next): UDP/ICMP over-`/net` + the 7c-2 `TlsStream`-over-`/net` live
+    socket** (SA-2) + the §16 soak (table-returns-to-baseline, no leak).
   - **net-8d: the whole-arc focused audit (§15.2) + the close.**
 
 The thylacine is real. So is its network — and it is, of course, a filesystem.

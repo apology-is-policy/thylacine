@@ -350,6 +350,17 @@ handles it natively over the existing client); `poll()` multiplexes N fds withou
 committing (needs the readiness bridge). They are complementary, not the same
 surface — so net-3a needs **no kernel surface** and no `net_poll.tla`.
 
+**The `listen` file is served `FILE_RW` (#239).** The accept opens `/net/tcp/N/listen`
+**ORDWR** — it must, because `complete_accept` *rebinds that very fid* onto the
+accepted connection's `ctl` (which `shutdown` writes). So `h_getattr` reports
+`listen` as `FILE_RW` (0666), alongside `ctl`/`data`. Serving it `FILE_RO` (the
+pre-#239 default for every non-`ctl`/`data` file) made the kernel's **A-3 dev9p
+`perm_check` deny the W** and fail the open *before the Tlopen ever reached
+`h_lopen`** — invisible to net-3a's gate test (which opens a *non-announced*
+connection and is rejected at `h_lopen` *after* the open succeeds) and to the
+`echo_e2e` direct-method proofs (which bypass `perm_check` entirely). It surfaced
+only at the first *live over-the-mount* accept (net-8b).
+
 **Tflush cancels a dead deferred accept.** A `listen` Rlopen can be held for a
 long time, so a client that dies on its blocked open is reachable: the kernel
 client sends `Tflush(oldtag=T)` (`client_run` on a death-interrupt). `h_flush`

@@ -4791,7 +4791,12 @@ impl Conn {
             let m = match f.path {
                 P_TCP_CLONE | P_UDP_CLONE | P_ICMP_CLONE | P_CS | P_DNS | P_IPIFC_0_CTL => FILE_RW,
                 _ if is_conn(f.path) => match conn_filekind(f.path) {
-                    FK_CTL | FK_DATA => FILE_RW,
+                    // FK_LISTEN is opened ORDWR by the accept (net-3a): its fid is
+                    // REBOUND onto the accepted connection's ctl (rw -- `shutdown`
+                    // writes it), so it MUST be writable, else the kernel's A-3
+                    // dev9p perm_check denies the W and the open fails before the
+                    // Tlopen ever reaches h_lopen (the #239 live-accept break).
+                    FK_CTL | FK_DATA | FK_LISTEN => FILE_RW,
                     _ => FILE_RO,
                 },
                 _ => FILE_RO, // stats + summary
