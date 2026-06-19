@@ -1,12 +1,11 @@
 # REVENANT.md — file-backed demand-paged exec + the static-linking conviction
 
-> **REVENANT** *(proposed thematic name; held for signoff)* — a revenant returns
-> from death. A binary rests in the immutable Stratum archive (a content-addressed
-> fossil) and is **roused page by page, on fault**, into a running Proc — never
-> slurped whole. The name carries the project's de-extinction motif (cf. Lazarus,
-> Halls of Extinction). The Plan 9-derived mechanism keeps its heritage name:
-> the **Image** (the qid-keyed shared-text cache). If the name doesn't land, the
-> arc can ship as "exec-load" — the design is independent of it.
+> **REVENANT** *(confirmed thematic name; user signoff 2026-06-19)* — a revenant
+> returns from death. A binary rests in the immutable Stratum archive (a
+> content-addressed fossil) and is **roused page by page, on fault**, into a
+> running Proc — never slurped whole. The name carries the project's de-extinction
+> motif (cf. Lazarus, Halls of Extinction). The Plan 9-derived mechanism keeps its
+> heritage name: the **Image** (the qid-keyed shared-text cache).
 
 Binding scripture for the exec-load arc. Design-first: this document + the ARCH /
 ROADMAP / VISION edits in the same commit land BEFORE any code, per CLAUDE.md
@@ -407,9 +406,8 @@ scoped.
 
 ## 11. Naming rationale
 
-**REVENANT** *(proposed, held for signoff)* — the arc that rouses a binary from
-the immutable archive page by page, on fault. Fits the de-extinction motif
+**REVENANT** *(confirmed; user signoff 2026-06-19)* — the arc that rouses a binary
+from the immutable archive page by page, on fault. Fits the de-extinction motif
 (Lazarus, Halls of Extinction, Menagerie). The Plan 9-derived shared-text cache
 keeps its heritage name, **Image** (like bind / mount / 9P — Plan 9 concepts are
-not renamed). `BURROW_TYPE_FILE` keeps the reserved enum name. If REVENANT
-doesn't land, the arc ships as "exec-load"; the design is name-independent.
+not renamed). `BURROW_TYPE_FILE` keeps the reserved enum name.
