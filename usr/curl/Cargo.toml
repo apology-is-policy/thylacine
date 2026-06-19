@@ -14,9 +14,17 @@ edition.workspace = true
 publish.workspace = true
 license.workspace = true
 
+[lib]
+name = "curl"
+path = "src/lib.rs"
+
 [[bin]]
 name = "curl"
-path = "src/main.rs"
+path = "src/bin/curl.rs"
+
+[[bin]]
+name = "wget"
+path = "src/bin/wget.rs"
 
 [dependencies]
 libthyla-rs = { path = "../lib/libthyla-rs" }

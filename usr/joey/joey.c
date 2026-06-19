@@ -3874,6 +3874,31 @@ int main(void) {
                                  "URL/HTTP parser battery)\n");
                     }
 
+                    // === net-util: wget URL/HTTP + basename self-test ===
+                    // `wget --selftest` runs the shared curl-engine gate plus
+                    // wget's default-output basename derivation. wget downloads
+                    // to a file (vs curl's stdout); both ride the same /net /
+                    // TLS engine, so the deterministic in-guest gate is the
+                    // parser battery (a live fetch is host-dependent). No cap.
+                    {
+                        static const char wget_name[] = "/bin/wget";
+                        static const char wget_argv[] = "wget\0--selftest";
+                        static const char wget_m1[] = "SELFTEST OK";
+                        const struct argv_marker wget_markers[] = {
+                            { wget_m1, sizeof(wget_m1) - 1 },
+                        };
+                        if (pouch_smoke_one_argv(
+                                wget_name, sizeof(wget_name) - 1, wget_argv,
+                                sizeof(wget_argv), /*argc=*/2u, wget_markers,
+                                sizeof(wget_markers) / sizeof(wget_markers[0]),
+                                /*cap_mask=*/0ul, /*perm_flags=*/0ul) != 0) {
+                            t_putstr("joey: net-util PROBE wget FAILED\n");
+                            return 1;
+                        }
+                        t_putstr("joey: net-util PROBE OK (wget --selftest -> "
+                                 "URL/HTTP + basename battery)\n");
+                    }
+
                     // === net-7c-1: native rustls TLS feasibility (runtime) ===
                     // Spawn /bin/tls-smoke (native, no pouch): it builds a real
                     // rustls ClientConfig (the RustCrypto provider + the LS-K
