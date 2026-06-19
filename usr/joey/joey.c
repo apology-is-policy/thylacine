@@ -3738,6 +3738,46 @@ int main(void) {
                                  "+ EACCES clock-step gate)\n");
                     }
 
+                    // === net-7b: observability -- netstat walk + /net/summary ===
+                    // netstat writes its table to fd 1 (io::stdout -- the real
+                    // shell-tool path, like ipconfig), which a bare t_spawn'd
+                    // probe does NOT have (sntp/net-echo print via the console-
+                    // direct t_putstr, so they need no fd 1; netstat does). So
+                    // spawn it via pouch_smoke_one -- a pipe wired as the child's
+                    // fd 0 + fd 1, reaped, drained to the boot log, with exit 0 +
+                    // a marker asserted. A clean exit proves the readdir walk over
+                    // the live /net ran to COMPLETION (run() returns 0 only after
+                    // every cat + walk_proto); the "10.0.2.15" marker proves it
+                    // rendered the live interface. Then read netd's /net/summary
+                    // rollup directly (joey's own console write -- no fd 1 needed)
+                    // and assert the interface + stats aggregate (the DHCP addr +
+                    // "opened"). The populated-connection-table case is
+                    // structurally identical; its live round-trip is owed to
+                    // net-8 (the in-guest peer).
+                    {
+                        const char nst_name[] = "/bin/netstat";
+                        if (pouch_smoke_one(nst_name, sizeof(nst_name) - 1,
+                                            "10.0.2.15", 9) != 0) {
+                            t_putstr("joey: net-7b PROBE netstat walk FAILED\n");
+                            return 1;
+                        }
+                        unsigned char sb[512];
+                        long su = t_open(T_WALK_OPEN_FROM_ROOT, "/net/summary",
+                                         12, T_OREAD);
+                        long sn = (su >= 0) ? t_read(su, sb, sizeof(sb) - 1) : -1;
+                        if (su >= 0) {
+                            t_close(su);
+                        }
+                        if (su < 0 || sn <= 0 ||
+                            !mem_contains(sb, (size_t)sn, "10.0.2.15", 9) ||
+                            !mem_contains(sb, (size_t)sn, "opened", 6)) {
+                            t_putstr("joey: net-7b PROBE /net/summary FAILED\n");
+                            return 1;
+                        }
+                        t_putstr("joey: net-7b PROBE OK (netstat walk + "
+                                 "/net/summary rollup)\n");
+                    }
+
                     // === net-6b: the dev9p.poll readiness bridge (the kernel half) ===
                     // The E2E proof of the kernel dev9p_poll path. Clone a UDP
                     // connection, connect (bind a local port -> sendable), open its

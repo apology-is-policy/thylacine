@@ -201,6 +201,7 @@ const P_IPIFC_0: u64 = 14; //   /net/ipifc/0 (the one interface dir; the NIC)
 const P_IPIFC_0_CTL: u64 = 15; //    /net/ipifc/0/ctl (add/remove static config)
 const P_IPIFC_0_STATUS: u64 = 16; // /net/ipifc/0/status (the live config view)
 const P_IPIFC_0_LOCAL: u64 = 17; //  /net/ipifc/0/local (the interface address)
+const P_SUMMARY: u64 = 18; //   /net/summary (net-7b: the observability rollup)
 
 const CONN_FLAG: u64 = 1 << 40;
 const PROTO_SHIFT: u64 = 32;
@@ -276,6 +277,14 @@ fn proto_dir(proto: u64) -> u64 {
         PROTO_UDP => P_UDP,
         PROTO_ICMP => P_ICMP,
         _ => P_TCP,
+    }
+}
+
+fn proto_name(proto: u64) -> &'static [u8] {
+    match proto {
+        PROTO_UDP => b"udp",
+        PROTO_ICMP => b"icmp",
+        _ => b"tcp",
     }
 }
 
@@ -1767,7 +1776,7 @@ impl Net {
             }
         } else {
             match path {
-                P_TCP | P_UDP | P_ICMP | P_CS | P_DNS | P_IPIFC | P_NDB => P_ROOT,
+                P_TCP | P_UDP | P_ICMP | P_CS | P_DNS | P_IPIFC | P_NDB | P_SUMMARY => P_ROOT,
                 P_TCP_CLONE | P_TCP_STATS => P_TCP,
                 P_UDP_CLONE | P_UDP_STATS => P_UDP,
                 P_ICMP_CLONE | P_ICMP_STATS => P_ICMP,
@@ -1817,6 +1826,7 @@ impl Net {
                 b"dns" => Some(P_DNS),
                 b"ipifc" => Some(P_IPIFC),
                 b"ndb" => Some(P_NDB),
+                b"summary" => Some(P_SUMMARY),
                 _ => None,
             },
             P_IPIFC => match name {
@@ -1884,6 +1894,7 @@ impl Net {
                 push(b"dns", P_DNS, false);
                 push(b"ipifc", P_IPIFC, true);
                 push(b"ndb", P_NDB, false);
+                push(b"summary", P_SUMMARY, false); // net-7b: the observability rollup
             }
             P_TCP => {
                 push(b"clone", P_TCP_CLONE, false);
@@ -2002,6 +2013,64 @@ impl Net {
             _ => {}
         }
         c
+    }
+
+    /// The /net/summary rollup (NET-DESIGN section 11): a read-only one-shot
+    /// aggregate of the interface view + the per-protocol stats + the live
+    /// connection table, rendered server-side (netd holds the connection table;
+    /// the kernel holds no network state). Built fresh per read into a growable
+    /// Vec, since a multi-connection table exceeds the fixed `Content` cap. It
+    /// reports only THIS netd's /net -- per-territory by construction, visibility
+    /// not authority (it mints nothing; every datum is already readable via the
+    /// per-protocol `stats` + the per-connection `status`/`local`/`remote`).
+    fn render_summary(&self) -> Vec<u8> {
+        let mut out: Vec<u8> = Vec::new();
+        out.extend_from_slice(b"ipifc\n");
+        let mut c = Content::new();
+        self.push_ifc_status(&mut c);
+        out.extend_from_slice(c.as_slice());
+        for path in [P_TCP_STATS, P_UDP_STATS, P_ICMP_STATS] {
+            out.extend_from_slice(self.file_content(path).as_slice());
+        }
+        out.extend_from_slice(b"conn\n");
+        for i in 0..MAX_SLOTS {
+            if !self.slots[i].used {
+                continue;
+            }
+            let n = i as u32;
+            let proto = self.slots[i].proto;
+            // One line per live connection, mirroring the FK_LOCAL/FK_REMOTE/
+            // FK_STATUS renderers a per-connection read would return.
+            let mut line = Content::new();
+            line.push(proto_name(proto));
+            line.push(b" ");
+            line.push_dec(n);
+            line.push(b" ");
+            if let Some((ip, port)) = self.slot_endpoint(n, true) {
+                if proto == PROTO_ICMP {
+                    line.push_ip(ip);
+                } else {
+                    line.push_endpoint(ip, port);
+                }
+            } else {
+                line.push(b"-");
+            }
+            line.push(b" ");
+            if let Some((ip, port)) = self.slot_endpoint(n, false) {
+                if proto == PROTO_ICMP {
+                    line.push_ip(ip);
+                } else {
+                    line.push_endpoint(ip, port);
+                }
+            } else {
+                line.push(b"-");
+            }
+            line.push(b" ");
+            line.push(self.state_str(n).as_bytes());
+            line.push(b"\n");
+            out.extend_from_slice(line.as_slice());
+        }
+        out
     }
 }
 
@@ -4254,6 +4323,20 @@ impl Conn {
                 .min(a.count as usize);
             return self.query_read(net, a.fid, cap, tag);
         }
+        if f.path == P_SUMMARY {
+            // net-7b: the /net/summary rollup. A multi-connection table can
+            // exceed the fixed Content cap, so render into a Vec and offset-slice
+            // it exactly like the static file_content path below. Re-rendered per
+            // Tread; a `cat` fits the whole rollup in one msize frame (coherent),
+            // and a paginated read sees a stable byte stream as long as no slot
+            // is freed mid-read -- the same property the per-protocol stats carry.
+            let body = net.render_summary();
+            let off = a.offset as usize;
+            let avail: &[u8] = if off >= body.len() { &[] } else { &body[off..] };
+            let cap = (self.msize as usize).saturating_sub(p9::P9_HDR_LEN + 4);
+            let want = (a.count as usize).min(cap).min(avail.len());
+            return p9::build_rread(&mut self.out_buf, tag, &avail[..want]);
+        }
         let content = net.file_content(f.path);
         let body = content.as_slice();
         let off = a.offset as usize;
@@ -4332,9 +4415,17 @@ impl Conn {
                     FK_CTL | FK_DATA => FILE_RW,
                     _ => FILE_RO,
                 },
-                _ => FILE_RO, // stats
+                _ => FILE_RO, // stats + summary
             };
-            (m, 1u64, net.file_content(f.path).as_slice().len() as u64)
+            // P_SUMMARY's bytes come from render_summary (a Vec), not the fixed
+            // Content of file_content -- report its true length so a stat is
+            // accurate (a reader that loops to EOF is unaffected either way).
+            let size = if f.path == P_SUMMARY {
+                net.render_summary().len() as u64
+            } else {
+                net.file_content(f.path).as_slice().len() as u64
+            };
+            (m, 1u64, size)
         };
         // The security trio (mode/uid/gid) MUST be filled: the kernel's A-3
         // dev9p per-component X-search reads them, and an unfilled trio fails
