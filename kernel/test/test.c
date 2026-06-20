@@ -227,6 +227,9 @@ void test_weft_ring_bounds_reject(void);
 void test_weft_ring_multi_split(void);
 void test_weft_should_ring_threshold(void);
 void test_weft_ring_layout_constraints(void);
+void test_weft_ready_signal_observe(void);
+void test_weft_ready_park_handshake(void);
+void test_weft_ready_arm_park_sees_race(void);
 void test_pgtable_install_user_pte_smoke(void);
 void test_pgtable_install_user_pte_constraints(void);
 void test_pgtable_install_user_pte_idempotent(void);
@@ -1246,6 +1249,9 @@ struct test_case g_tests[] = {
     { "weft.ring_multi_split",            test_weft_ring_multi_split,         false, NULL },
     { "weft.should_ring_threshold",       test_weft_should_ring_threshold,    false, NULL },
     { "weft.ring_layout_constraints",     test_weft_ring_layout_constraints,  false, NULL },
+    { "weft.ready_signal_observe",        test_weft_ready_signal_observe,     false, NULL },
+    { "weft.ready_park_handshake",        test_weft_ready_park_handshake,     false, NULL },
+    { "weft.ready_arm_park_sees_race",    test_weft_ready_arm_park_sees_race, false, NULL },
     { "pgtable.install_user_pte_smoke",
                                        test_pgtable_install_user_pte_smoke,
                                                                            false, NULL },

@@ -28,14 +28,19 @@ void test_weft_ring_bounds_reject(void);
 void test_weft_ring_multi_split(void);
 void test_weft_should_ring_threshold(void);
 void test_weft_ring_layout_constraints(void);
+void test_weft_ready_signal_observe(void);
+void test_weft_ready_park_handshake(void);
+void test_weft_ready_arm_park_sees_race(void);
 
 #define WEFT_TEST_VA   0x20000000ull          // 512 MiB; well inside user-VA
 #define WEFT_RING_ENTRIES 8u
-// A 4-page ring Burrow: hdr (64) + desc[8] (128) + a payload region spanning
-// multiple pages (exercises the BURROW_TYPE_ANON contiguity the share rests on).
+// A 4-page ring Burrow: ring_hdr (64) + ready_hdr (128) + desc[8] (128) + a
+// payload region spanning multiple pages (exercises the BURROW_TYPE_ANON
+// contiguity the share rests on).
 #define WEFT_RING_PAGES (4ull * PAGE_SIZE)
-#define WEFT_DESC_OFF   64
-#define WEFT_PAYLOAD_OFF (64 + 8 * 16)        // hdr + desc[8]
+#define WEFT_DESC_OFF   192                    // ring_hdr(64) + ready_hdr(128)
+#define WEFT_PAYLOAD_OFF (192 + 8 * 16)        // + desc[8] = 320
+#define WEFT_READY_OFF  64                     // ring_hdr(64) -> ready_hdr
 
 static struct Proc *weft_make_proc(void) { return proc_alloc(); }
 
@@ -291,4 +296,101 @@ void test_weft_ring_layout_constraints(void) {
     TEST_EXPECT_EQ((int)rv.cons_head, 0,                 "cons_head starts at 0");
 
     burrow_unref(v);
+}
+
+// ---------------------------------------------------------------------------
+// Readiness ring (Weft-4) -- the netd<->guest single-cache-line poke. These
+// tests drive the producer (weft_ready_signal) + consumer (weft_ready_observe /
+// arm_park) decision primitives over the shared page. The store-buffer no-lost-
+// wake ordering itself is the spec's (weft_readiness.tla) + the seq-cst code's
+// proof; a single-threaded test cannot reorder hardware, so it instead asserts
+// the primitives' contracts -- the poke's cross-page visibility, the producer's
+// wake decision (armed consumer -> wake), and the consumer's observe re-check
+// (an edge already posted -> don't park).
+// ---------------------------------------------------------------------------
+
+// weft.ready_signal_observe -- the producer bumps the shared edge counter +
+// publishes the mask; the consumer observes the new seq + mask over the same
+// shared page (the Shenango cache-line read). A not-armed consumer is no wake.
+void test_weft_ready_signal_observe(void) {
+    WEFT_SETUP(netd, guest, v, rv);
+    weft_ready_init_hdr(&rv);
+
+    struct weft_ring_hdr *h = (struct weft_ring_hdr *)rv.base;
+    TEST_EXPECT_EQ((int)h->ready_off, WEFT_READY_OFF, "ready_off mirror = sizeof(ring_hdr)");
+
+    // Initial state: no edge posted.
+    u32 mask = 0xFFu;
+    TEST_EXPECT_EQ((int)weft_ready_observe(&rv, &mask), 0, "initial ready_seq = 0");
+    TEST_EXPECT_EQ((int)mask, 0,                           "initial mask = 0");
+
+    // Producer posts an RX edge; the consumer is not parked, so no wake needed.
+    TEST_ASSERT(!weft_ready_signal(&rv, WEFT_READY_RX),
+        "signal with no parked consumer -> no wake");
+    TEST_EXPECT_EQ((int)weft_ready_observe(&rv, &mask), 1, "ready_seq advanced to 1");
+    TEST_EXPECT_EQ((int)mask, (int)WEFT_READY_RX,          "mask = RX over the shared page");
+
+    // A second edge (TX) advances the counter + republishes the mask.
+    TEST_ASSERT(!weft_ready_signal(&rv, WEFT_READY_TX), "second signal -> no wake (not parked)");
+    TEST_EXPECT_EQ((int)weft_ready_observe(&rv, &mask), 2, "ready_seq advanced to 2");
+    TEST_EXPECT_EQ((int)mask, (int)WEFT_READY_TX,          "mask = TX");
+
+    weft_teardown(netd, guest, v);
+}
+
+// weft.ready_park_handshake -- the consumer (caught up) arms a park; a producer
+// edge then finds it armed and reports a wake is needed (the no-lost-wake: the
+// poke wakes the parked consumer). The consumer un-parks + observes the edge.
+void test_weft_ready_park_handshake(void) {
+    WEFT_SETUP(netd, guest, v, rv);
+    weft_ready_init_hdr(&rv);
+    struct weft_ready_hdr *rh = (struct weft_ready_hdr *)(rv.base + rv.ready_off);
+
+    // Consumer caught up (last_seen = current seq = 0); arming finds no edge in
+    // the window -> safe to park, and the park-intent is published.
+    u32 last_seen = weft_ready_observe(&rv, NULL);
+    TEST_EXPECT_EQ((int)last_seen, 0, "consumer caught up at seq 0");
+    TEST_ASSERT(weft_ready_arm_park(&rv, last_seen), "arm with no edge -> safe to park");
+    TEST_EXPECT_EQ((int)rh->wait_active, 1, "park-intent published");
+    TEST_EXPECT_EQ((int)rh->wait_seq, 0,    "registered at last_seen");
+
+    // Producer posts an edge: the consumer is armed at a seq this edge passed,
+    // so a wake IS needed (the parked consumer would be woken -- no lost wake).
+    TEST_ASSERT(weft_ready_signal(&rv, WEFT_READY_RX),
+        "signal with a parked consumer -> wake needed");
+
+    // The consumer (woken) clears its park-intent and observes the new edge.
+    weft_ready_unpark(&rv);
+    TEST_EXPECT_EQ((int)rh->wait_active, 0, "park-intent cleared on resume");
+    u32 mask = 0;
+    TEST_EXPECT_EQ((int)weft_ready_observe(&rv, &mask), 1, "observes the posted edge");
+    TEST_EXPECT_EQ((int)mask, (int)WEFT_READY_RX,          "observes the edge mask");
+
+    weft_teardown(netd, guest, v);
+}
+
+// weft.ready_arm_park_sees_race -- the register-then-observe re-check: an edge
+// posted BEFORE the consumer arms is caught by the post-register re-read, so the
+// consumer does NOT park (it re-processes), and the park-intent is left clear.
+void test_weft_ready_arm_park_sees_race(void) {
+    WEFT_SETUP(netd, guest, v, rv);
+    weft_ready_init_hdr(&rv);
+    struct weft_ready_hdr *rh = (struct weft_ready_hdr *)(rv.base + rv.ready_off);
+
+    // An edge arrives (ready_seq -> 1) while the consumer still thinks last_seen
+    // = 0 (it has not observed it yet -- the in-window race).
+    TEST_ASSERT(!weft_ready_signal(&rv, WEFT_READY_RX), "edge posted, consumer not yet armed");
+
+    // The consumer arms a park at its STALE last_seen = 0. The observe re-check
+    // sees ready_seq = 1 != 0 -> DON'T park; un-arm and re-process.
+    TEST_ASSERT(!weft_ready_arm_park(&rv, 0), "arm sees the raced edge -> don't park");
+    TEST_EXPECT_EQ((int)rh->wait_active, 0, "park-intent left clear (un-armed)");
+
+    // The consumer re-processes, catches up to seq 1, then a fresh arm is safe.
+    u32 last_seen = weft_ready_observe(&rv, NULL);
+    TEST_EXPECT_EQ((int)last_seen, 1, "re-processed to the current edge");
+    TEST_ASSERT(weft_ready_arm_park(&rv, last_seen), "arm caught-up -> safe to park");
+    TEST_EXPECT_EQ((int)rh->wait_active, 1, "park-intent now published");
+
+    weft_teardown(netd, guest, v);
 }

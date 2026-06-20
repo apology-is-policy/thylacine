@@ -1266,3 +1266,36 @@ The four buggy cfgs are the durable regressions for the Weft-7 focused audit
 self-loop keeps the legitimate terminal state (flow torndown + share dropped +
 no buffer admitted) from tripping the deadlock check. See NET-THROUGHPUT.md §5
 + ARCH §28 I-37.
+
+## weft_readiness.tla — Weft-4 (the readiness ring; the single-cache-line poke)
+
+Model-first at **Weft-4** (spec-first RE-ENABLED for Weft). The readiness ring is
+the netd↔guest **wake** mechanism: the producer (netd) bumps a shared edge
+counter; the consumer (guest) observes it at memory speed (the Shenango
+single-cache-line poke), retiring the ~50 ms RX-wake (NET-PERF N1). It is the
+**push** counterpart of `net_poll.tla`'s elicited **pull** — it *eliminates* the
+probe (the edge is written straight into shared memory). A *new* I-9 surface, so
+a *new* focused module (the `cons_poll.tla` / `net_poll.tla` / Loom-5 precedent:
+leave the audited `weft.tla` untouched). Pins ARCH §28 **I-9** (no-lost-wake)
+across the store-buffer register-then-observe.
+
+| cfg | constants | property | result | states |
+|---|---|---|---|---|
+| `weft_readiness.cfg`                  | `MaxSeq=2`, `BUGGY_OBSERVE_BEFORE_ARM=FALSE` | `Invariants` | clean | 12 |
+| `weft_readiness_liveness.cfg`         | `MaxSeq=2`, `Spec_Live`, FALSE | `Invariants` + `EventuallyDrained` | clean | 12 |
+| `weft_readiness_buggy_lost_wake.cfg`  | `MaxSeq=1`, `BUGGY_OBSERVE_BEFORE_ARM=TRUE`  | `NoLostReadyWake` | violation | 10 |
+
+**Action ↔ code (`kernel/weft.c`, the substrate — the live Rendez park/wake is Weft-6):**
+
+- `ProducerEdge` ↔ `kernel/weft.c::weft_ready_signal` bumps `ready_seq` (seq-cst RMW) + publishes the mask, then reads the consumer-owned park-intent (`wait_active`, seq-cst) to decide a wakeup; never writes the consumer's words (single-writer-per-word). The seq-cst bump-then-load is the producer half of the SB barrier.
+- `ConsumerProcess` ↔ `kernel/weft.c::weft_ready_observe` acquire-loads `ready_seq` (+ mask); the caller compares to its private last-seen cursor and drains in place — the lock-free fast path.
+- `ConsumerPark` ↔ `kernel/weft.c::weft_ready_arm_park` publishes the park-intent (`wait_active`, seq-cst) THEN re-reads `ready_seq` (seq-cst): the consumer half of the SB barrier (register-then-observe). Returns *safe-to-park*; the actual `sleep(&rendez)` is Weft-6.
+- `NoLostReadyWake` (I-9) ↔ the seq-cst store-then-load on opposite words on BOTH sides — at least one side sees the other's write, so no parked consumer is left with an unprocessed edge.
+- `EventuallyDrained` (liveness) ↔ the poke wakes the parked consumer (the Weft-6 Rendez wakeup), which then drains via `weft_ready_observe`.
+
+The `weft_readiness_buggy_lost_wake` cfg (the observe-before-arm inversion) is the
+durable regression for this surface (the Weft-7 audit). Exercised by
+`kernel/test/test_weft_ring.c::weft.ready_*` (the primitives over a
+`burrow_share_into` page; the SB hardware reordering itself is the spec's + the
+seq-cst code's proof). See NET-THROUGHPUT.md §5.2-2 / §5.4 + ARCH §28 I-9 +
+`docs/reference/125-weft.md`.

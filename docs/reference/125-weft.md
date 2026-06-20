@@ -1,11 +1,14 @@
-# 125 — Weft: the per-flow capability network dataplane (descriptor ring)
+# 125 — Weft: the per-flow capability network dataplane (descriptor + readiness rings)
 
-**Status:** Weft-3 substrate landed (the descriptor-ring ABI + the kernel
-snapshot-and-bounds-validate consumer + the hybrid threshold). Kernel-internal;
-no EL0 ABI. The live guest↔netd wiring + the EL0 share delivery is Weft-6.
+**Status:** Weft-3 (the descriptor-ring ABI + the kernel snapshot-and-bounds-
+validate consumer + the hybrid threshold) **and** Weft-4 (the readiness ring —
+the single-cache-line poke + the store-buffer register-then-observe) substrates
+landed. Kernel-internal; no EL0 ABI. The live guest↔netd wiring + the EL0 share
+delivery is Weft-6.
 
-Source: `kernel/include/thylacine/weft.h`, `kernel/weft.c`. Spec:
-`specs/weft.tla` (ARCH §28 I-37). Design: `docs/NET-THROUGHPUT.md` §5–6.
+Source: `kernel/include/thylacine/weft.h`, `kernel/weft.c`. Specs:
+`specs/weft.tla` (ARCH §28 I-37, the data plane), `specs/weft_readiness.tla`
+(ARCH §28 I-9, the readiness poke). Design: `docs/NET-THROUGHPUT.md` §5–6.
 
 ---
 
@@ -147,13 +150,16 @@ A per-flow ring Burrow (a `BURROW_TYPE_ANON`, so `alloc_pages(order, KP_ZERO)`
 makes its pages physically contiguous) holds, in order:
 
 ```
-[ weft_ring_hdr (64 B) ][ weft_desc[ring_entries] ][ payload region (16-aligned) ]
+[ weft_ring_hdr (64 B) ][ weft_ready_hdr (128 B) ][ weft_desc[ring_entries] ][ payload region (16-aligned) ]
 ```
 
 `weft_ring_layout` validates `ring_entries` (a non-zero power of two ≤
-`WEFT_MAX_ENTRIES` = 1024), 16-aligns the payload region after the descriptor
-array, and requires a non-empty payload region whose length is representable in
-the u32 descriptor domain. It writes `*rv` only on success.
+`WEFT_MAX_ENTRIES` = 1024), places the readiness header (two cache lines) in the
+fixed control region after the ring header, 16-aligns the payload region after
+the descriptor array, and requires a non-empty payload region whose length is
+representable in the u32 descriptor domain. It writes `*rv` only on success. The
+`ready_off` is mirrored into the shared `weft_ring_hdr` (offset 32) so the guest
+can find the readiness block.
 
 ### The drain — the snapshot discipline (`weft.c::weft_ring_drain`)
 
@@ -205,6 +211,125 @@ is the I-30 ring-TOCTOU discipline, validate-once-at-submit.
 
 ---
 
+## Readiness ring (Weft-4)
+
+The descriptor ring moves the payload; the **readiness ring** removes the
+remaining round-trip — the *wake*. A consumer parked waiting for the other side
+(a guest parked on its `/net` read; netd waiting on a peer) must be woken when
+readiness arrives. Today that wake is a poll cadence (the ~50 ms RX-wake floor,
+NET-PERF N1). The readiness ring replaces it with a single shared cache line:
+the **producer** (netd) bumps a readiness edge counter; the **consumer** (guest)
+observes it at memory speed — the Shenango single-cache-line poke. It is the
+**push** counterpart of the dev9p.poll elicited **pull** (`net_poll.tla`): no
+probe to keep outstanding, the edge is written straight into shared memory.
+
+### Public API
+
+```c
+#define WEFT_READY_RX 0x001u   // RX data available (POLLIN-aligned)
+#define WEFT_READY_TX 0x004u   // TX space / send complete (POLLOUT-aligned)
+
+// Zero the readiness header. Called once at flow grant, with weft_ring_init_hdr.
+void weft_ready_init_hdr(const struct weft_ring_view *rv);
+
+// PRODUCER (netd): post a readiness edge -- bump ready_seq + publish `mask`, then
+// read the consumer's park-intent. Returns true iff a parked consumer must be
+// woken (the caller issues the Rendez wakeup); false iff it is running (busy-
+// polling). Seq-cst bump-then-load: never misses a consumer that armed
+// concurrently. NEVER writes the consumer-owned wait_* words.
+bool weft_ready_signal(struct weft_ring_view *rv, u32 mask);
+
+// CONSUMER (guest) fast path: acquire-load the edge counter (+ mask). The caller
+// compares the returned seq to its private last-seen cursor; a difference is a
+// new edge. No park, no syscall -- the lock-free cache-line read.
+u32 weft_ready_observe(struct weft_ring_view *rv, u32 *mask_out);
+
+// CONSUMER (guest) park decision: register-then-observe. Publishes the park-
+// intent THEN re-reads ready_seq (seq-cst). Returns true iff safe to park (no
+// edge raced the window); false iff an edge arrived (don't park -- re-process;
+// wait_active cleared). The Rendez sleep on a true return is Weft-6.
+bool weft_ready_arm_park(struct weft_ring_view *rv, u32 last_seen);
+
+// CONSUMER (guest): clear the park-intent on resume (after a wakeup, or after
+// deciding not to park). The consumer owns wait_active; the producer only reads.
+void weft_ready_unpark(struct weft_ring_view *rv);
+```
+
+### Data structure — `struct weft_ready_hdr` (128 B, two cache lines, ABI)
+
+At `ready_off` (= `sizeof(weft_ring_hdr)` = 64) of the per-flow Burrow.
+
+```c
+struct weft_ready_hdr {
+    u32 ready_seq;      // producer-owned: bumped per readiness edge (the poke)
+    u32 ready_mask;     // producer-owned: WEFT_READY_* of the latest edge
+    u32 _ppad[14];      // pad the producer words to a full cache line
+    u32 wait_seq;       // consumer-owned: the seq registered before parking
+    u32 wait_active;    // consumer-owned: 1 while parked, 0 while running
+    u32 _cpad[14];      // pad the consumer words to a full cache line
+};
+_Static_assert(sizeof(struct weft_ready_hdr) == 128, ...);
+_Static_assert(__builtin_offsetof(struct weft_ready_hdr, wait_seq) == 64, ...);
+```
+
+**Single-writer-per-word, on two cache lines** (no false sharing — the producer
+never touches the consumer's line and vice versa): `ready_seq` / `ready_mask`
+are producer-owned (netd writes, guest reads); `wait_seq` / `wait_active` are
+consumer-owned (guest writes, netd reads *to decide a wakeup*, never writes —
+the producer's wake is a Rendez wakeup, wired at Weft-6, not a write of
+`wait_active`). The Shenango cache-line: the consumer reads one line to learn
+readiness without a round-trip.
+
+### The no-lost-wake — the store-buffer register-then-observe (`I-9`)
+
+The hazard is the classic store-buffer (SB) litmus: two parties write disjoint
+words and read the other's; the bad outcome is both reading the stale value — the
+consumer parks having observed "no edge", while the producer's edge, posted in
+the window, found the consumer "not yet parked" and issued no wake. The edge is
+lost; the consumer sleeps forever on a ready channel.
+
+The discipline that forecloses it is **register-then-observe**:
+
+```c
+// CONSUMER arm_park: REGISTER (publish park-intent) THEN OBSERVE (re-read seq)
+__atomic_store_n(&rh->wait_active, 1u, __ATOMIC_SEQ_CST);     // register
+u32 seq = __atomic_load_n(&rh->ready_seq, __ATOMIC_SEQ_CST);  // observe (re-check)
+if (seq != last_seen) { un-arm; return false; /* don't park */ }
+return true; /* safe to park */
+
+// PRODUCER signal: bump seq (release+barrier) THEN read park-intent
+u32 seq = __atomic_add_fetch(&rh->ready_seq, 1u, __ATOMIC_SEQ_CST);  // poke
+bool armed = __atomic_load_n(&rh->wait_active, __ATOMIC_SEQ_CST);    // wake?
+return armed && wseq != seq;
+```
+
+Each side does a **seq-cst store then a seq-cst load on opposite words** — the
+StoreLoad barrier the SB litmus needs (the Linux `set_current_state()` +
+`smp_mb()` before a cond re-check). In the global seq-cst order, either the
+producer's store-`ready_seq` precedes the consumer's load-`ready_seq` (the
+consumer sees the new edge → doesn't park) **or** the consumer's
+store-`wait_active` precedes the producer's load-`wait_active` (the producer
+sees armed → wakes). At least one holds; no edge in the window is lost. This is
+`specs/weft_readiness.tla`'s `NoLostReadyWake` (I-9). The live Weft-6 wiring
+*additionally* serializes the park-decision and the wake under the consumer's
+Rendez lock (the #811 `wait_lock` register-then-observe) — both are sound
+realizations of the one atomic discipline the spec models.
+
+The producer never writes `wait_active` (single-writer-per-word): on a wake it
+issues the Rendez wakeup (re-scheduling the parked consumer), and the consumer
+clears its own `wait_active` on resume (`weft_ready_unpark`). A stale
+`wait_active` (set while the consumer is actually running) at most costs a
+redundant — harmless — wakeup, never a lost one. The `wait_seq` lets the producer
+skip even that redundant wakeup (it wakes only for a consumer parked at a seq the
+new edge passed).
+
+What Weft-4 is **not**: the live park/wake. `weft_ready_arm_park` returns the
+*decision* to park; the actual `sleep(&rendez)` on a true return, and the
+`wakeup(&rendez)` on a true `weft_ready_signal`, are the Weft-6 wiring (per
+direction: netd→guest RX-ready, guest→netd TX-queued).
+
+---
+
 ## Spec cross-reference
 
 `specs/weft.tla` (model-first at Weft-1; ARCH §28 I-37). Weft-3 realizes:
@@ -222,12 +347,30 @@ regression for this surface (the Weft-7 audit). The spec gate re-ran green at
 Weft-3 (clean 1412 distinct; each buggy cfg violates its named invariant);
 Weft-3 extends the modeled mechanism without changing the spec.
 
+`specs/weft_readiness.tla` (model-first at Weft-4; ARCH §28 I-9). Weft-4
+realizes (the readiness ring is a *new* I-9 surface — a new focused module,
+leaving the audited `weft.tla` untouched, the `cons_poll.tla` / `net_poll.tla`
+precedent):
+
+| weft_readiness.tla action / invariant | impl |
+|---|---|
+| `ProducerEdge` (bump + wake-decision) | `weft_ready_signal` (seq-cst bump-then-load) |
+| `ConsumerProcess` (fast-path drain) | `weft_ready_observe` (acquire-load) + the caller |
+| `ConsumerPark` (register-then-observe) | `weft_ready_arm_park` (seq-cst store-then-load) |
+| `NoLostReadyWake` (I-9) | the SB barrier on both halves; no parked consumer with an unprocessed edge |
+| `EventuallyDrained` (liveness) | the poke wakes the parked consumer (Weft-6 Rendez) |
+
+The buggy cfg `weft_readiness_buggy_lost_wake` → `NoLostReadyWake` (the
+observe-before-arm inversion) is the durable regression for the readiness ring
+(the Weft-7 audit). Spec gate at Weft-4: clean + liveness green, the buggy cfg
+violates `NoLostReadyWake`.
+
 ---
 
 ## Tests
 
-`kernel/test/test_weft_ring.c` — 6 tests over a `burrow_share_into` cross-Proc
-shared page (`weft.*`):
+`kernel/test/test_weft_ring.c` — 9 tests over a `burrow_share_into` cross-Proc
+shared page (`weft.*`). The descriptor ring (Weft-3):
 
 - `weft.ring_basic` — a ≥-threshold payload rides the ring; the kernel snapshots
   the descriptor and reads the payload **in place** at the validated offset (no
@@ -245,7 +388,21 @@ shared page (`weft.*`):
 - `weft.ring_layout_constraints` — power-of-two entries, the regions must fit,
   NULL + degenerate inputs fail closed.
 
-943/943 PASS, boot OK, 0 EXTINCTION at landing.
+The readiness ring (Weft-4) — the primitives over the shared page; the SB
+hardware reordering itself is the spec's + the seq-cst code's proof (a single-
+threaded test cannot reorder), so these assert the primitives' contracts:
+
+- `weft.ready_signal_observe` — the producer bumps the edge counter + publishes
+  the mask; the consumer observes the new seq + mask over the shared page (the
+  cache-line read); a not-armed consumer is no wake.
+- `weft.ready_park_handshake` — the consumer (caught up) arms a park; a producer
+  edge then finds it armed and reports a wake is needed (the no-lost-wake: the
+  poke wakes the parked consumer); the consumer un-parks + observes the edge.
+- `weft.ready_arm_park_sees_race` — the register-then-observe re-check: an edge
+  posted *before* the arm is caught by the post-register re-read, so the consumer
+  does not park (it re-processes) and the park-intent is left clear.
+
+946/946 PASS, boot OK, 0 EXTINCTION at landing.
 
 ---
 
@@ -257,6 +414,11 @@ shared page (`weft.*`):
   on failure.
 - `weft_ring_drain` → `0` on NULL `rv`/`out` or `max <= 0` (no side effects). A
   rejected descriptor is dropped (counted), not an error return.
+- The readiness primitives take a valid `rv` (constructed by `weft_ring_layout`
+  at grant) and do not validate it — they are internal substrate the Weft-6 grant
+  path drives, not an EL0 entry point. `weft_ready_signal` returns a bool
+  (wake-needed), `weft_ready_arm_park` a bool (safe-to-park); neither has an
+  error return.
 
 ---
 
@@ -280,3 +442,18 @@ shared page (`weft.*`):
 - **The F_NOTIF multi-holder buffer lifetime** (the page not reused until the
   last of {netd stack, NIC DMA, peer ACK}) is Weft-5, not here. Weft-3 is the
   descriptor ring; the buffer-lifetime pin is a separate leg.
+- **The readiness park/wake is not live.** `weft_ready_arm_park` returns the
+  *decision*; the `sleep(&rendez)`/`wakeup(&rendez)` integration (per direction)
+  is Weft-6. Until then nothing in production calls the readiness primitives —
+  they are exercised by the kernel test over a `burrow_share_into` page.
+- **`ready_seq` / `wait_seq` are free-running u32 counters.** Wraparound is
+  astronomically far (one increment per readiness edge); the `!=` comparisons
+  (not `<`) are wrap-immune by construction (a parked-at seq differs from the
+  current after any edge).
+- **The descriptor-ring `weft_ring_hdr` co-locates `prod_tail` (guest) and
+  `cons_head` (kernel) on one cache line** (a Weft-3 ABI, unchanged). They are
+  written by different parties, so that line false-shares under a live
+  producer↔consumer — a v1.x layout refinement (split onto separate lines, the
+  way the Weft-4 `weft_ready_hdr` already separates its two writers). Correctness
+  is unaffected (single-writer-per-word holds); only the ping-pong cost. The
+  readiness ring, the latency-critical path, is already split.

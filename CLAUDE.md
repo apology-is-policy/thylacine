@@ -81,13 +81,13 @@ Concrete pattern:
 5. Implement against the model. Cross-reference each impl step to the corresponding spec action in comments. Keep `specs/SPEC-TO-CODE.md` current.
 6. When the impl surfaces a new mechanism the spec didn't cover, extend the spec FIRST, then update the impl.
 
-The committed spec inventory is **22 modules** (the authoritative table lives
+The committed spec inventory is **23 modules** (the authoritative table lives
 in `ARCHITECTURE.md §25.2`): `scheduler` / `territory` / `handles` / `burrow`
 / `9p_client` / `poll` / `pipe` / `tsleep` / `corvus` / `sched_ctxsw` /
 `sched_oncpu` / `sched_alpha` / `asid` / `death_wake` / `loom` /
 `loom_multishot` / `loom_order` / `cons_poll` / `loom_devgone` / `allowance` /
-`net_poll` / `weft`, each with clean cfg(s) + buggy-cfg
-counterexamples (84 buggy cfgs total). Three of the Phase-0 planned nine
+`net_poll` / `weft` / `weft_readiness`, each with clean cfg(s) + buggy-cfg
+counterexamples (85 buggy cfgs total). Three of the Phase-0 planned nine
 (`futex.tla`, `notes.tla`, `pty.tla`) were dropped per the 2026-05-23
 suspension — torpor + notes are prose-validated; PTY is unbuilt (LS-8, #952).
 
@@ -363,7 +363,7 @@ names).
 | I-6 | Handle rights monotonically reduce on transfer/dup/endow | `handles.tla` |
 | I-7 | BURROW pages live until last handle closed AND last mapping unmapped (#847 dual count) | `burrow.tla` |
 | I-8 | Every runnable thread eventually runs (as-built: ordered dispatch + preempt; full EEVDF deferred, 2A-F6) | `scheduler.tla` liveness |
-| I-9 | No wakeup lost between cond-check and sleep, incl. the death-wake (#811) + terminate-`interrupt` (LS-5) generalizations | `scheduler.tla`, `poll.tla`, `tsleep.tla`, `death_wake.tla`; torpor leg prose |
+| I-9 | No wakeup lost between cond-check and sleep, incl. the death-wake (#811) + terminate-`interrupt` (LS-5) generalizations + the Weft-4 readiness-ring single-cache-line poke (the store-buffer register-then-observe) | `scheduler.tla`, `poll.tla`, `cons_poll.tla`, `net_poll.tla`, `weft_readiness.tla`, `tsleep.tla`, `death_wake.tla`; torpor leg prose |
 | I-10 | Per-9P-session tag uniqueness (tag==table index; no reuse until reply/Rflush, #845) | `9p_client.tla` |
 | I-11 | Per-9P-session fid identity stable for the fid's open lifetime | `9p_client.tla` |
 | I-12 | W^X: every page writable XOR executable (PTE checks + ELF reject + no prot-mutation syscall exists; W1.5 transient RW+XN alias) | runtime + `_Static_assert` |

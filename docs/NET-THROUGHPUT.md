@@ -519,8 +519,38 @@ dataplane arc the user committed.
   1412 distinct + each buggy cfg violates its named invariant — `ring_toctou` →
   `DescPinnedToSnapshot`). The live guest↔netd wiring (the dev9p Weft-Twrite path that calls
   the drain) + the EL0 share delivery is Weft-6. Reference: `docs/reference/125-weft.md`.
-- **Weft-4 (the readiness ring + the latency convergence).** The single-cache-line readiness
-  poke; retire the 50 ms RX-wake; close NET-PERF N1.
+- **Weft-4 (the readiness ring + the latency convergence) — LANDED.** The single-cache-line
+  readiness poke; the substrate that retires the 50 ms RX-wake (NET-PERF N1).
+
+  *As-built (the substrate; no EL0 ABI):* `kernel/include/thylacine/weft.h` adds the
+  `weft_ready_hdr` (128 B, **two cache lines, single-writer-per-word** — `ready_seq`/
+  `ready_mask` producer-owned, `wait_seq`/`wait_active` consumer-owned, on separate lines so
+  the producer and consumer never false-share), placed in the per-flow Burrow's control region
+  after the descriptor-ring header (`ready_off` mirrored at `weft_ring_hdr` offset 32).
+  `kernel/weft.c` adds the four direction-agnostic decision primitives: `weft_ready_signal`
+  (the producer poke — bump `ready_seq` + read the park-intent, returning *wake-needed*),
+  `weft_ready_observe` (the consumer fast-path — the lock-free Shenango cache-line acquire-read),
+  `weft_ready_arm_park` (the consumer **register-then-observe** — publish the park-intent then
+  re-read `ready_seq`, returning *safe-to-park*), and `weft_ready_unpark`. The no-lost-wake is
+  the **store-buffer register-then-observe** (`specs/weft_readiness.tla`, I-9): each side does a
+  seq-cst store then a seq-cst load on opposite words — the StoreLoad barrier the SB litmus needs
+  (the Linux `set_current_state()`+`smp_mb()`) — so in the global seq-cst order at least one side
+  sees the other's write and an edge in the park window is never lost. The producer never writes
+  the consumer-owned words (its wake is a Rendez wakeup, wired at Weft-6); a parked consumer is
+  re-scheduled, then clears its own `wait_active` on resume. 3 kernel tests
+  (`weft.ready_{signal_observe,park_handshake,arm_park_sees_race}`) drive the producer/consumer
+  primitives over a `burrow_share_into` cross-Proc page: the poke's cross-page visibility, the
+  wake decision (armed → wake), and the observe re-check (a pre-arm edge → don't park). 946/946,
+  boot OK, 0 EXTINCTION.
+
+  **Spec-first** (RE-ENABLED for Weft): the readiness ring is a *new* I-9 surface — the **push**
+  counterpart of the dev9p.poll elicited **pull** (`net_poll.tla`), which *eliminates* the probe.
+  Per the `cons_poll.tla` / `net_poll.tla` / Loom-5 precedent (a new wake mechanism gets its own
+  focused module, leaving the audited `weft.tla` untouched), `specs/weft_readiness.tla` (clean +
+  liveness `EventuallyDrained` + the `BUGGY_OBSERVE_BEFORE_ARM` counterexample on `NoLostReadyWake`)
+  is written + TLC-green BEFORE the impl. The live park/wake integration (the `sleep`/`wakeup` on
+  the decision, per direction) is **Weft-6**; the readiness ring closes NET-PERF N1 once wired.
+  Reference: `docs/reference/125-weft.md`.
 - **Weft-5 (the `F_NOTIF` zero-copy-send contract).** The two-CQE send completion; the I-30
   pin released at notification-terminal; the fallback-copied indicator.
 - **Weft-6 (the per-flow capability binding + the native API).** Bind the ring setup to the
