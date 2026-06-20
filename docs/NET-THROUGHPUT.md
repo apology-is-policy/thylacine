@@ -573,7 +573,8 @@ dataplane arc the user committed.
   on the 9P fid** (Option B, §6.1 — superseding the earlier eager "data-fid auto-map" sketch).
   The mechanism:
   - **`Tweft(fid F) → Rweft(share_id, geometry)`** — a new Thylacine-private 9P op
-    (`P9_TWEFT = 128` / `P9_RWEFT = 129`, just past the legacy 9P2000 range; the **#845
+    (`P9_TWEFT = 134` / `P9_RWEFT = 135`, just past the Stratum-extension range
+    [`Tfallocate` 132/133; **128/129 are already `Tsync`/`Rsync`**]; the **#845
     `Tflush` precedent** — a kernel-client-issued op the netd 9P server handles). The kernel
     dev9p client issues it on the shared `/net` client the **first** time a flow goes
     zero-copy.
