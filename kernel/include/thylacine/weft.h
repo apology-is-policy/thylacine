@@ -345,6 +345,12 @@ struct weft_binding {
     struct Burrow *burrow;     // the per-flow ring; the registration pin is held HERE
     u64            guest_va;   // where it is mapped in the guest (idempotent-MAP return)
     u32            ring_size;  // mapped byte length (== burrow size; diagnostics)
+    // Weft-6b-2: the kernel's PRIVATE trusted geometry of this ring (computed
+    // at SYS_WEFT_MAP via weft_ring_layout from the shared Burrow's contiguous
+    // KVA + the Rweft-reported ring_entries). The data-drive validate reads the
+    // payload-region geometry from HERE, never from the guest-mutable shared
+    // header mirror (the I-30 validator-once; the Weft-3 snapshot discipline).
+    struct weft_ring_view view;
 };
 
 // Register a per-flow ring `v` (netd's backing ANON Burrow) owned by `owner`
@@ -370,10 +376,24 @@ struct Burrow *weft_share_claim(u64 share_id);
 void weft_share_release_owner(struct Proc *owner);
 
 // Allocate a weft_binding owning the (already-claimed) registration pin on
-// `burrow`, recording the guest VA + size. Returns NULL on OOM (the caller then
-// drops the pin + the guest mapping itself). The binding is stored in the data
-// Spoor's dev9p_priv.
-struct weft_binding *weft_binding_alloc(struct Burrow *burrow, u64 guest_va, u32 ring_size);
+// `burrow`, recording the guest VA + size + computing the kernel-private ring
+// view (geometry) from the Burrow's contiguous KVA + `ring_entries` (the
+// netd-reported descriptor-slot count from Rweft). Returns NULL on OOM OR on an
+// invalid geometry (the caller then drops the pin + the guest mapping itself).
+// The binding is stored in the data Spoor's dev9p_priv.
+struct weft_binding *weft_binding_alloc(struct Burrow *burrow, u64 guest_va,
+                                        u32 ring_size, u32 ring_entries);
+
+// Weft-6b-2 data drive: validate a guest write buffer against the flow's ring.
+// `ubuf_va` is the caller's SYS_WRITE buffer; if it lies within this flow's
+// shared-ring payload region and `[off, off+len)` is in bounds, returns 0 and
+// sets `*out_off` to the payload-region-relative offset (the descriptor's
+// `addr`, the same domain as weft_desc.addr). Returns -1 if the buffer is not
+// in the ring or the window is out of bounds (the caller falls back to the
+// byte-copy path). The geometry read is the kernel-private view (never the
+// guest-mutable shared header) -- the I-30 validator-once.
+int weft_binding_validate_write(const struct weft_binding *b, u64 ubuf_va,
+                                u32 len, u32 *out_off);
 
 // Release a data-fd's ring binding at dev9p_close: drop the registration pin
 // (burrow_unref) + free the binding struct. Does NOT touch the guest's ring

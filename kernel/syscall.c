@@ -1026,12 +1026,50 @@ s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len) {
     return (s64)n;
 }
 
+// Weft-6b-2 data drive: the zero-copy write fast-path. A large write whose user
+// buffer points INTO a weft-bound /net data fd's shared ring moves through the
+// ring (Tweftio) with NO copy-in -- so it is NOT capped at SYS_RW_MAX (the
+// byte-copy scratch bound); the ring's payload region is the bound. Resolves the
+// handle once; on a non-weft write it releases the ref and returns
+// *handled = false so the caller takes the byte-copy path. Gated by the caller
+// on len >= WEFT_HYBRID_THRESHOLD, so small writes never pay this lookup.
+static s64 sys_write_weft_fastpath(struct Proc *p, hidx_t h, u64 buf_va,
+                                   u64 len, bool *handled) {
+    *handled = false;
+    if (len > 0xFFFFFFFFull) return 0;              // beyond the u32 descriptor domain
+    struct Spoor *c = sys_lookup_rw_handle(p, h, RIGHT_WRITE);
+    if (!c) return 0;                               // bad fd -> the byte-copy path -EBADFs
+    if (c->flag & CWALKONLY) { spoor_clunk(c); return 0; }   // O_PATH -> byte-copy rejects
+    u32 accepted = 0;
+    int v = dev9p_weft_try_write(c, buf_va, (u32)len, &accepted);
+    if (v == 0) { spoor_clunk(c); return 0; }       // not a weft write -> byte-copy
+    // v == 1 (handled OK) or v == -1 (weft transport error -- the flow is dead,
+    // the byte-copy path would fail identically, so surface it).
+    s64 r;
+    if (v == 1) { c->offset += accepted; r = (s64)accepted; }
+    else        { r = -1; }
+    spoor_clunk(c);
+    *handled = true;
+    return r;
+}
+
 static s64 sys_write_handler(u64 hraw, u64 buf_va, u64 len) {
     struct Thread *t = current_thread();
     if (!t)                                          return -1;
     struct Proc *p = t->proc;
     if (!p)                                          return -1;
     if (!sys_validate_user_buf(buf_va, len))         return -1;
+
+    // Weft zero-copy fast-path: a large write whose buffer points into a
+    // weft-bound /net data fd's shared ring goes through the ring (no copy-in,
+    // NOT SYS_RW_MAX-capped). Gated on the hybrid threshold so small writes are
+    // unaffected (they fall straight through to the byte-copy path).
+    if (len >= WEFT_HYBRID_THRESHOLD) {
+        bool weft_handled = false;
+        s64 wr = sys_write_weft_fastpath(p, (hidx_t)hraw, buf_va, len, &weft_handled);
+        if (weft_handled) return wr;
+    }
+
     if (len > SYS_RW_MAX) len = SYS_RW_MAX;
 
     if (len == 0) {
@@ -3502,7 +3540,7 @@ s64 sys_weft_share_for_proc(struct Proc *p, u64 ring_va, u64 ring_size_raw) {
 // the ring whole into the guest, records the binding. Returns the guest ring VA,
 // dropping every ref it took on any failure.
 static s64 weft_map_claimed(struct Proc *p, struct dev9p_priv *priv,
-                            u64 share_id, u64 hint_va) {
+                            u64 share_id, u32 ring_entries, u64 hint_va) {
     (void)hint_va;   // v1.0: the kernel picks the VA (hint reserved for v1.x)
 
     struct Burrow *v = weft_share_claim(share_id);
@@ -3538,8 +3576,10 @@ static s64 weft_map_claimed(struct Proc *p, struct dev9p_priv *priv,
     spin_unlock(&p->vma_lock);
 
     // Build the binding -- it will OWN the registration pin (transferred from
-    // the claim). On OOM, drop BOTH the guest mapping AND the pin.
-    struct weft_binding *b = weft_binding_alloc(v, va, (u32)bsize);
+    // the claim) + compute the kernel-private ring view (geometry) from the
+    // Burrow's KVA + the netd-reported ring_entries. On OOM / invalid geometry,
+    // drop BOTH the guest mapping AND the pin.
+    struct weft_binding *b = weft_binding_alloc(v, va, (u32)bsize, ring_entries);
     if (!b) {
         spin_lock(&p->vma_lock);
         (void)burrow_unmap(p, va, bsize);
@@ -3598,7 +3638,7 @@ s64 sys_weft_map_for_proc(struct Proc *p, hidx_t data_fd, u64 hint_va) {
     int e = p9_client_weft(client, fid, &geom);
     if (e != 0) { handle_put(&dh); return -1; }   // e.g. a server with no Tweft handler (pre-6b)
 
-    s64 r = weft_map_claimed(p, priv, geom.share_id, hint_va);
+    s64 r = weft_map_claimed(p, priv, geom.share_id, geom.ring_entries, hint_va);
     handle_put(&dh);
     return r;
 }

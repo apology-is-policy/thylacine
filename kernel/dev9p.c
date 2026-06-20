@@ -520,6 +520,31 @@ static long dev9p_write(struct Spoor *c, const void *buf, long n, s64 off) {
     return (long)accepted;
 }
 
+// Weft-6b-2 data drive: a large SYS_WRITE whose buffer points INTO a weft-bound
+// /net data fd's shared ring moves zero-copy -- the kernel validates the
+// descriptor against the flow's private ring view (the I-30 validator-once) and
+// issues Tweftio(WRITE); netd reads the ring IN PLACE + replies the moved-byte
+// count. Returns 1 if handled (the weft path was taken; *accepted set), 0 if NOT
+// a weft write (the caller falls back to the byte-copy path -- small payload,
+// not weft-bound, or a buffer outside the ring), -1 on a weft transport error.
+// NOT the byte-copy path: the payload is already in the shared ring (the native
+// client wrote it there), so nothing is copied through the 9P body.
+int dev9p_weft_try_write(struct Spoor *spoor, u64 ubuf_va, u32 len, u32 *accepted) {
+    struct dev9p_priv *p = priv_of(spoor);
+    if (!p) return 0;                                   // not dev9p -> byte-copy
+    struct weft_binding *b = __atomic_load_n(&p->weft, __ATOMIC_ACQUIRE);
+    if (!b) return 0;                                   // not weft-bound -> byte-copy
+    if (!weft_should_ring(len)) return 0;               // below the hybrid threshold
+    u32 off = 0;
+    if (weft_binding_validate_write(b, ubuf_va, len, &off) != 0)
+        return 0;                                       // buffer not in the ring -> byte-copy
+    u32 got = 0;
+    int e = p9_client_weftio(p->client, p->fid, off, len, WEFT_DIR_WRITE, &got);
+    if (e != 0) return -1;                              // weft attempted + failed (dead flow)
+    if (accepted) *accepted = got;
+    return 1;                                           // handled zero-copy
+}
+
 static long dev9p_bwrite(struct Spoor *c, struct Block *bp, s64 off) {
     (void)c; (void)bp; (void)off;
     return -1;

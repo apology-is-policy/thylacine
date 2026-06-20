@@ -21,6 +21,7 @@
 
 #include <thylacine/weft.h>
 #include <thylacine/burrow.h>
+#include <thylacine/page.h>
 #include <thylacine/proc.h>
 #include <thylacine/spinlock.h>
 
@@ -357,13 +358,43 @@ void weft_share_release_owner(struct Proc *owner) {
 }
 
 struct weft_binding *weft_binding_alloc(struct Burrow *burrow, u64 guest_va,
-                                        u32 ring_size) {
+                                        u32 ring_size, u32 ring_entries) {
+    if (!burrow || burrow->pages == NULL) return NULL;
+    // Compute the kernel-private ring view from the Burrow's contiguous KVA.
+    // BURROW_TYPE_ANON pages are physically contiguous (alloc_pages), so the
+    // ring is one direct-map span; weft_ring_layout validates ring_entries +
+    // the [hdr][ready][desc][payload] geometry against ring_size.
+    u8 *base = (u8 *)pa_to_kva(page_to_pa(burrow->pages));
+    struct weft_ring_view rv;
+    if (weft_ring_layout(base, (size_t)ring_size, ring_entries, &rv) != 0)
+        return NULL;
+
     struct weft_binding *b = kmalloc(sizeof(*b), KP_ZERO);
     if (!b) return NULL;
     b->burrow    = burrow;
     b->guest_va  = guest_va;
     b->ring_size = ring_size;
+    b->view      = rv;
     return b;
+}
+
+int weft_binding_validate_write(const struct weft_binding *b, u64 ubuf_va,
+                                u32 len, u32 *out_off) {
+    if (!b || !out_off) return -1;
+    // The descriptor's addr is PAYLOAD-region-relative: the guest's write buffer
+    // must sit at or after the payload region's base in the SAME address space
+    // it mapped the ring into (guest_va is the guest mapping; ubuf_va is the
+    // same-Proc SYS_WRITE buffer).
+    u64 payload_base = b->guest_va + (u64)b->view.payload_off;
+    if (ubuf_va < payload_base) return -1;        // below the payload region
+    u64 o = ubuf_va - payload_base;
+    if (o > 0xFFFFFFFFull) return -1;             // beyond the u32 descriptor domain
+    // Reuse the Weft-3 bounds gate: flags clear + len != 0 + (o + len) <=
+    // payload_size, computed in u64 so a hostile pair cannot wrap in-bounds.
+    struct weft_desc d = { (u32)o, len, 0u, 0u };
+    if (!weft_desc_valid(&d, b->view.payload_size)) return -1;
+    *out_off = (u32)o;
+    return 0;
 }
 
 void weft_binding_release(struct weft_binding *b) {

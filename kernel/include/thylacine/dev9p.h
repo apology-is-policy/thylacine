@@ -142,6 +142,15 @@ struct Spoor *dev9p_attach_client(struct p9_client *client, u32 root_fid);
 // (a live dev9p Spoor implies a live client -- dev9p's lifecycle invariant).
 int dev9p_client_fid(struct Spoor *c, struct p9_client **out_client, u32 *out_fid);
 
+// Weft-6b-2 data drive: try the zero-copy write path for a /net data fd whose
+// SYS_WRITE buffer points INTO its weft-bound shared ring. The kernel validates
+// the descriptor against the flow's private ring view (the I-30 validator-once)
+// and issues Tweftio(WRITE); netd reads the ring in place + replies the count.
+// Returns 1 if handled (*accepted = bytes moved), 0 if NOT a weft write (the
+// caller falls back to the byte-copy path), -1 on a weft transport error. Called
+// from the write syscall handler with the caller's user VA (before any copy-in).
+int dev9p_weft_try_write(struct Spoor *spoor, u64 ubuf_va, u32 len, u32 *accepted);
+
 // Resolve a dev9p-backed Spoor to its `struct dev9p_priv *` (dc + magic gated;
 // NULL if `c` is not a live dev9p Spoor). Exposed for kernel/dev9p_poll.c (the
 // `.poll` bridge reads p->poll + p->client + p->fid) + the dev9p_poll tests.

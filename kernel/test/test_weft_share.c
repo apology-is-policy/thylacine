@@ -233,8 +233,9 @@ void test_weft_map_binding_lifetime(void) {
     spin_unlock(&guest->vma_lock);
     TEST_EXPECT_EQ(burrow_mapping_count(v), 2, "netd + guest mappings");
 
-    struct weft_binding *b = weft_binding_alloc(v, WEFT_TEST_VA, (u32)PAGE_SIZE);
-    TEST_ASSERT(b != NULL, "binding alloc");
+    // ring_entries = 8: [hdr 64][ready 128][desc 8*16=128][payload 3776] fits one page.
+    struct weft_binding *b = weft_binding_alloc(v, WEFT_TEST_VA, (u32)PAGE_SIZE, 8);
+    TEST_ASSERT(b != NULL, "binding alloc + view");
 
     u64 destroyed_before = burrow_total_destroyed();
 

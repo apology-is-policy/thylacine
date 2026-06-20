@@ -15,9 +15,13 @@ below). **Weft-6b-1** landed the netd side — the `h_weft` handler that allocat
 registers a per-flow ring and answers `Rweft`, making the grant-is-the-share
 mapping LIVE end to end (proven in-guest: a real `SYS_WEFT_MAP` round-trip maps a
 ring whose geometry mirror is visible; see "The netd ring register" below). The
-live ring DRIVE (the descriptor / readiness / F_NOTIF wiring on real transfers)
-is Weft-6b-2/6b-3; the native `libthyla_rs::net` push/pop/wait API + the in-guest
-data E2E are Weft-6c.
+**Weft-6b-2** lands the live TX data drive — the `Tweftio`/`Rweftio` op
+(6b-2a) + the kernel write fast-path + the binding ring view + netd's
+`h_weftio` (6b-2b): a large write whose buffer points into a flow's shared ring
+moves zero-copy (see "The data drive" below), proven in-guest by `net-echo`'s
+`weft_tx_e2e`. The readiness park/wake + the `F_NOTIF` two-CQE posting + the RX
+(`dir=READ`) half are Weft-6b-3; the native `libthyla_rs::net` push/pop/wait API
++ the batched descriptor-ring drive are Weft-6c.
 
 Source: `kernel/include/thylacine/weft.h`, `kernel/weft.c`. Specs:
 `specs/weft.tla` (ARCH §28 I-37, the data plane + the F_NOTIF holder lifecycle),
@@ -597,6 +601,75 @@ the readiness park/wake, the F_NOTIF two-CQE posting) is Weft-6b-2/6b-3; the
 `Tweft` and the kernel claim leaks the registration pin until netd's
 owner-death GC — a narrow window, since the claim follows `Tweft` in the same
 `SYS_WEFT_MAP`) are the **Weft-7** prosecution surface.
+
+---
+
+## The data drive — `Tweftio` (Weft-6b-2)
+
+Weft-6b-2 makes the *data* live: a large payload travels through the per-flow
+ring instead of the 9P body. The wire mechanism (user-voted 2026-06-20,
+NET-THROUGHPUT §6.2) is a new Thylacine-private op, **`Tweftio`** — the kernel
+stays the I-30 validator-once and a 9P op still mediates every transfer (§4.8).
+
+### The kick + the kernel validator (`6b-2b`)
+
+The kick is the **existing `SYS_WRITE`** (no new syscall; the virtio-9p
+`p9_client_zc_rpc` shape): the native client writes the payload into the ring's
+payload region (its own RW mapping) and issues `SYS_WRITE(data_fd, ring_va +
+payload_off + O, L)` — the buffer points *into* the bound ring.
+`sys_write_handler`, gated on `len >= WEFT_HYBRID_THRESHOLD` so small writes are
+unaffected, runs `sys_write_weft_fastpath` → `dev9p_weft_try_write`:
+
+- `weft_binding_validate_write` derives the descriptor `{O = buf - (guest_va +
+  payload_off), L}` from the **trusted, register-passed syscall args** and
+  bounds-checks it against the binding's kernel-private `weft_ring_view` (the
+  same `weft_desc_valid` gate as the descriptor ring — but sourced from a
+  trusted arg, so inherently free of the descriptor-ring TOCTOU);
+- on success it issues `p9_client_weftio(off=O, len=L, dir=WRITE)` and returns
+  the moved-byte count; a small write, a buffer outside the ring, or a no-binding
+  fd falls through to the byte-copy path (the hybrid threshold).
+
+Because the fast-path bypasses the `SYS_RW_MAX` (4 KiB) scratch bounce, a single
+weft write moves up to `payload_size` (the ring is the bound) — the byte-copy
+cap does not apply to the zero-copy path.
+
+The binding's **`weft_ring_view`** is computed once at `SYS_WEFT_MAP`
+(`weft_binding_alloc` → `weft_ring_layout` from the Burrow's contiguous KVA +
+the `Rweft`-reported `ring_entries`) — the trusted geometry the validate reads,
+never the guest-mutable shared header mirror.
+
+### netd reads in place (`h_weftio`)
+
+`usr/netd/src/server.rs::h_weftio` (dispatched on `P9_TWEFTIO`) resolves
+`fid → connection N` (the same fail-closed gate as `h_weft`), re-bounds
+`[off, off+len)` against its own ring geometry (defence in depth — a memory
+bound, not a per-op capability re-check), reads `ring_va + payload_off + off`
+for `len` **in place** (no 9P-body copy), hands it to smoltcp (`data_send`), and
+replies `Rweftio(count)`. v1.0 is **TX-only** (`WEFT_DIR_WRITE`); the RX
+(`dir=READ`) half — netd writing recv bytes into the ring + the blocking-read
+defer — is Weft-6b-3. The ring→smoltcp-TX copy is netd-local; the true
+zero-copy-to-NIC (no intermediate copy) is the F_NOTIF send, Weft-6b-3/Weft-5.
+
+### The synchronous path vs the batched descriptor ring
+
+6b-2 drives the **synchronous** path — one descriptor per `SYS_WRITE`, the
+buf-in-ring *is* the descriptor (no shared-ring slot to snapshot). The
+descriptor RING + `weft_ring_drain`'s snapshot discipline is the **batched/async**
+submission the native `libthyla_rs::net` API drives through Loom (Weft-6c). Both
+validate through `weft_desc_valid` against the kernel view.
+
+### Tests + what's deferred
+
+`weft.binding_validate_write` (a unit test of the write validator: in-ring
+offset, below-region reject, past-`payload_size` reject, the byte-copy
+fall-through) + `9p_wire.tweftio_round_trip` / `9p_session.weftio_round_trip` /
+`9p_client.weftio` (6b-2a). The **live TX E2E** is `net-echo`'s `weft_tx_e2e`
+over the resident loopback (`net-echo: weft-6b TX E2E PASS`): the client
+weft-writes a 4 KiB payload through the shared ring, netd reads it in place +
+sends it over the loopback, the server reads it back byte-copy, and the bytes
+are verified. The RX half, the readiness park/wake, the F_NOTIF posting, and the
+batched ring drive are Weft-6b-3/6c; the focused buffer-lifetime audit is
+Weft-7. 961/961 PASS, boot OK, 0 EXTINCTION at landing.
 
 ---
 

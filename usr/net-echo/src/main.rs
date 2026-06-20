@@ -130,6 +130,63 @@ fn weft_e2e() -> Result<(), &'static str> {
     Ok(())
 }
 
+/// Weft-6b-2: the live TX zero-copy DATA drive over netd's resident loopback.
+/// After SYS_WEFT_MAP maps the flow's ring, the client writes a payload INTO the
+/// ring's payload region and issues a SYS_WRITE whose buffer points AT the ring
+/// -> the kernel's weft fast-path validates the descriptor + issues Tweftio(WRITE)
+/// -> netd's h_weftio reads the payload IN PLACE (no 9P-body copy) + smoltcp sends
+/// it over the loopback -> the server reads it back (byte-copy) and we verify the
+/// bytes survived the zero-copy hop. Proves the Tweftio drive end to end, live.
+fn weft_tx_e2e() -> Result<(), &'static str> {
+    let addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 7791);
+    let listener = TcpListener::bind(addr).map_err(|_| "bind")?;
+    let mut client = TcpStream::connect(addr).map_err(|_| "connect")?;
+    let (mut server, _peer) = listener.accept().map_err(|_| "accept")?;
+
+    // Map the flow's ring; read the payload-region offset from the geometry
+    // mirror (weft_ring_hdr: magic@0, ring_entries@4, desc_off@8, payload_off@12).
+    let data_fd = client.as_raw_fd();
+    let va = unsafe { t_weft_map(data_fd as u64, 0) };
+    if va <= 0 {
+        return Err("map returned no ring");
+    }
+    let base = va as u64;
+    let payload_off = unsafe { core::ptr::read_volatile((base + 12) as *const u32) } as u64;
+
+    // Write a known pattern INTO the ring's payload region (the guest's own RW
+    // mapping). N >= WEFT_HYBRID_THRESHOLD so the write rides the ring.
+    const N: usize = 4096;
+    let payload_ptr = (base + payload_off) as *mut u8;
+    for i in 0..N {
+        unsafe { core::ptr::write_volatile(payload_ptr.add(i), (i as u8) ^ 0x5A) };
+    }
+    // The SYS_WRITE buffer POINTS INTO the ring -> the kernel weft fast-path
+    // issues Tweftio instead of copying the payload through the 9P body.
+    let ring_slice = unsafe { core::slice::from_raw_parts(payload_ptr as *const u8, N) };
+    let sent = client.write(ring_slice).map_err(|_| "weft write")?;
+    if sent != N {
+        return Err("weft write short");
+    }
+
+    // The server reads the bytes back over the loopback (byte-copy) + we verify
+    // the payload survived the zero-copy hop intact.
+    let mut got = [0u8; N];
+    let mut total = 0usize;
+    while total < N {
+        let k = server.read(&mut got[total..]).map_err(|_| "server read")?;
+        if k == 0 {
+            return Err("server EOF before full payload");
+        }
+        total += k;
+    }
+    for i in 0..N {
+        if got[i] != ((i as u8) ^ 0x5A) {
+            return Err("payload mismatch after the zero-copy hop");
+        }
+    }
+    Ok(())
+}
+
 /// Read netd's live TCP connection count from `/net/tcp/stats` (the `active`
 /// line). The soak's leak detector: every connection a cycle opens must be
 /// freed by its last clunk (the section-16 no-leak exit criterion), so the count
@@ -403,6 +460,18 @@ fn probe() -> i64 {
         ),
         Err(why) => {
             t_putstr(&alloc::format!("net-echo: FAIL -- weft-6b MAP E2E ({})\n", why));
+            unsafe { t_exits(1) }
+        }
+    };
+    // Weft-6b-2: the live TX zero-copy DATA drive -- the client weft-writes a
+    // payload through the shared ring (Tweftio), the server reads it back, and
+    // the bytes are verified. Runs before the soak so its connection is freed.
+    match weft_tx_e2e() {
+        Ok(()) => t_putstr(
+            "net-echo: weft-6b TX E2E PASS (ring write -> Tweftio -> netd in-place -> verified)\n",
+        ),
+        Err(why) => {
+            t_putstr(&alloc::format!("net-echo: FAIL -- weft-6b TX E2E ({})\n", why));
             unsafe { t_exits(1) }
         }
     };

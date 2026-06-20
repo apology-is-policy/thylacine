@@ -208,6 +208,8 @@ Per-message bodies (the cumulative codec subset through P5-wire-io):
 | Runlinkat (77) | (empty body; 7-byte msg) |
 | Tweft (134) | `[fid: u32]` (Weft-6; the per-flow ring request) |
 | Rweft (135) | `[share_id: u64][ring_size: u32][ring_entries: u32]` (16 bytes body) |
+| Tweftio (136) | `[fid: u32][off: u32][len: u32][dir: u32]` (Weft-6b-2; the data drive; `dir` = WEFT_DIR_WRITE/READ) |
+| Rweftio (137) | `[count: u32]` (4 bytes body; the moved-byte count) |
 
 All integers little-endian (matches Thylacine's AArch64 host endianness; encoding is still explicit byte-shift to remain portable).
 
@@ -311,6 +313,7 @@ Every public function returns negative on:
 | Tclunk / Rclunk | **Landed (P5-wire)** |
 | Tflush (build) / Rflush (parse) | **Landed (#845)** -- `p9_build_tflush` (body `[oldtag:u16]`) + `p9_parse_rflush` (header-only) |
 | Tweft / Rweft (build + parse, both directions) | **Landed (Weft-6a-1)** -- `p9_build_tweft`/`p9_parse_tweft` (body `[fid:u32]`) + `p9_build_rweft`/`p9_parse_rweft` (`struct p9_weft_geom`, 16-byte body) |
+| Tweftio / Rweftio (build + parse, both directions) | **Landed (Weft-6b-2a)** -- `p9_build_tweftio`/`p9_parse_tweftio` (body `[fid][off][len][dir]`, 16 B) + `p9_build_rweftio`/`p9_parse_rweftio` (body `[count]`, 4 B) -- the data-drive op |
 | Rlerror parse | **Landed (P5-wire)** |
 | Tlopen / Rlopen | **Landed (P5-wire-io)** |
 | Tread / Rread + Twrite / Rwrite | **Landed (P5-wire-io)** |

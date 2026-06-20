@@ -1295,6 +1295,18 @@ impl Net {
         Some(share_id as u64)
     }
 
+    /// The per-flow ring of connection `n`, if it has gone zero-copy (a Tweft
+    /// mapped it). Returns a COPY (WeftFlow is Copy) so the caller can read the
+    /// ring geometry without holding a borrow of `self` -- h_weftio reads the
+    /// ring in place (a raw-pointer slice) and then calls data_send(&mut self).
+    fn weft_flow(&self, n: u32) -> Option<WeftFlow> {
+        let i = n as usize;
+        if i >= MAX_SLOTS || !self.slots[i].used {
+            return None;
+        }
+        self.slots[i].weft
+    }
+
     /// Decrement the per-protocol live-connection counter (the `active` stat).
     fn dec_active(&mut self, proto: u64) {
         match proto {
@@ -4558,6 +4570,7 @@ impl Conn {
             p9::P9_TCLUNK => self.h_clunk(net, tmsg, tag),
             p9::P9_TFLUSH => self.h_flush(net, tmsg, tag),
             p9::P9_TWEFT => self.h_weft(net, tmsg, tag), // Weft-6b: per-flow ring setup
+            p9::P9_TWEFTIO => self.h_weftio(net, tmsg, tag), // Weft-6b-2: the data drive
             // Tauth/Tsetattr/... are unused on the /net tree (read-only metadata).
             _ => self.err(tag, p9::E_NOSYS),
         };
@@ -5196,6 +5209,67 @@ impl Conn {
             ),
             None => self.err(tag, p9::E_NOMEM),
         }
+    }
+
+    /// Weft-6b-2 data drive: the kernel validated a guest write descriptor
+    /// against the flow's ring and issued Tweftio(off, len, dir). netd reads the
+    /// payload IN PLACE from the shared ring (no 9P-body copy) and hands it to
+    /// smoltcp, replying Rweftio(count). v1.0 is TX-only (WEFT_DIR_WRITE); the RX
+    /// half (netd writing recv bytes into the ring + the blocking-read defer) is
+    /// Weft-6b-3.
+    fn h_weftio(&mut self, net: &mut Net, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
+        let req = match p9::parse_tweftio(tmsg) {
+            Ok(r) => r,
+            Err(_) => return self.err(tag, p9::E_PROTO),
+        };
+        // Resolve fid -> connection N (the same fail-closed gate as h_weft).
+        let i = match self.fid_find(req.fid) {
+            Some(i) => i,
+            None => return self.err(tag, p9::E_BADF),
+        };
+        let f = match self.fids[i] {
+            Some(f) => f,
+            None => return self.err(tag, p9::E_BADF),
+        };
+        if !f.opened || !is_conn(f.path) || conn_filekind(f.path) != FK_DATA {
+            return self.err(tag, p9::E_INVAL);
+        }
+        let n = conn_n(f.path);
+        if !net.slot_live(n) {
+            return self.err(tag, p9::E_INVAL);
+        }
+        // v1.0: TX only. RX (READ) is Weft-6b-3.
+        if req.dir != p9::WEFT_DIR_WRITE {
+            return self.err(tag, p9::E_INVAL);
+        }
+        // The flow must have a mapped ring: the kernel issues Tweftio only after
+        // SYS_WEFT_MAP, which followed a Tweft that built the ring.
+        let flow = match net.weft_flow(n) {
+            Some(w) => w,
+            None => return self.err(tag, p9::E_INVAL),
+        };
+        // Memory-safety bound: [off, off+len) must lie within the ring's payload
+        // region. The kernel already validated against ITS view; netd re-checks
+        // its OWN mapping before reading (defense in depth -- a memory bound, NOT
+        // a per-op capability re-check).
+        let geom = match weftlib::ring_layout(flow.ring_size, WEFT_RING_ENTRIES) {
+            Some(g) => g,
+            None => return self.err(tag, p9::E_INVAL),
+        };
+        let off = req.off as usize;
+        let len = req.len as usize;
+        let psz = geom.payload_size as usize;
+        if len == 0 || off > psz || len > psz - off {
+            return self.err(tag, p9::E_INVAL);
+        }
+        // Read the payload IN PLACE from the shared ring (no 9P-body copy) + hand
+        // it to smoltcp. SAFETY: ring_va is netd's live mapping of the per-flow
+        // ring (held while the slot is live); [payload_off+off, +len) is
+        // bounds-checked above to lie within the payload region.
+        let base = flow.ring_va as usize + geom.payload_off as usize + off;
+        let payload: &[u8] = unsafe { core::slice::from_raw_parts(base as *const u8, len) };
+        let sent = net.data_send(n, payload);
+        p9::build_rweftio(&mut self.out_buf, tag, sent as u32)
     }
 
     fn h_write(&mut self, net: &mut Net, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
