@@ -39,8 +39,8 @@ Build all native bins: `tools/build.sh userspace` (or, per tool,
 | `con` | coreutils bin | **built** | interactive Plan 9 dial-string client (service-name aware) |
 | `tcpproxy` | coreutils bin | **built** | listen/accept/dial-upstream splice; a throughput torture + port-forwarder |
 | `httpd` | crate | **built** | tiny static HTTP/1.1 server; host-curl a big file -> real-protocol throughput |
-| `nettest` | crate | todo | host-paired sustained-bandwidth bench (the number `netperf` can't produce) |
-| `weft-bench` | crate | staged | zero-copy dataplane yardstick; skeleton until the Weft native API (Weft-6c) |
+| `nettest` | crate | **built** | host-paired sustained-bandwidth bench (the number `netperf` can't produce) |
+| `weft-bench` | crate | **staged** | zero-copy yardstick; skeleton built (copy-tax baseline), zero-copy path awaits Weft-6c |
 | `tftp` | -- | deferred | blocked by a UdpSocket `recvfrom` gap (the TID-port switch) -- see DOC-GAPs; `nc -u` covers UDP bulk |
 
 The shared pump + cs-resolution live in `coreutils::netpump` (`stdio_pump`,
@@ -219,9 +219,51 @@ Re-run after a throughput change to confirm the win end to end -- the streamed
 grants and its identity may read, I-1/I-22/I-23/I-28); `..` traversal is rejected
 on top of that.
 
-## `nettest` / `weft-bench`
+## `nettest` -- wire throughput bench
 
-Standalone crates (todo / staged) -- see the slate. `nettest` is the host-paired
-sustained-bandwidth bench (the over-the-wire number `netperf`'s loopback design
-omits); `weft-bench` is the zero-copy dataplane yardstick (skeleton until the Weft
-native API lands at Weft-6c). Their sections land with the code.
+`nettest -s [-p PORT]` (sink: accept, drain to EOF, report received MB/s) or
+`nettest -c HOST [-p PORT] [-n MB]` (source: send MB megabytes, report sent
+MB/s). The over-the-wire number `netperf`'s loopback design omits -- it includes
+the NIC RX-wake floor. Rate math is integer-only (the no_std float path is not
+linked). Host-paired: a host load tool drives the other end.
+
+**Build:** clean (clippy-clean). **Test plan (in-VM, host-paired):**
+
+**T1 -- guest sink, host source (NIC-in):**
+```
+# guest:
+nettest -s                              # sink on :5555
+# host (with -netdev user,hostfwd=tcp::5555-:5555):
+head -c 200000000 /dev/zero | nc localhost 5555
+# guest prints: received 200000000 bytes in T s = X MB/s
+```
+
+**T2 -- guest source, host sink (NIC-out):**
+```
+# host:  nc -l 5555 > /dev/null         (or iperf -s)
+# guest:
+nettest -c <host> -n 128                # send 128 MB; prints MB/s
+```
+
+Compare against `netperf`'s loopback M2 (which excludes the NIC) to see the wire
+overhead; re-run after a throughput change to confirm the win on the NIC. A
+wire-RTT percentile mode (p50/p99) needs a paired echo peer -- a follow-on.
+
+## `weft-bench` -- zero-copy dataplane yardstick (staged)
+
+The yardstick for the Weft NOVEL (the per-flow capability-scoped zero-copy `/net`
+path, `docs/NET-THROUGHPUT.md`). The native Weft push/pop/wait API lands at
+Weft-6c; this is the aux Phase-B skeleton -- it compiles and runs the BASELINE
+now, the zero-copy path clearly staged:
+
+- **Baseline (now):** `weft-bench [-n MB]` measures the memcpy **copy-tax** -- the
+  userspace per-byte copy bandwidth, the ceiling on any copy-based dataplane and
+  the cost Weft's zero-copy path removes. A real, motivating number.
+- **Zero-copy (Weft-6c):** register a flow ring (anon Burrow), push payload
+  descriptors (no copy), wait on the readiness ring; report ops/s + the speedup
+  vs the copy-tax. Stubbed with a note today.
+
+**Build:** clean (clippy-clean). **Test (in-VM, now):** `weft-bench` prints the
+copy-tax MB/s + the staged note; `weft-bench -n 1024` runs over 1 GiB. **When
+Weft-6c lands:** fill in the zero-copy path (the API surface is sketched in the
+source + NET-THROUGHPUT.md section 6) and the bench reports the win directly.

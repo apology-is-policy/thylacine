@@ -1,0 +1,15 @@
+[package]
+name = "weft-bench"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "weft-bench"
+path = "src/main.rs"
+
+[dependencies]
+libthyla-rs = { path = "../lib/libthyla-rs" }
+# The Bonfire palette for the report.
+coreutils = { path = "../coreutils" }
