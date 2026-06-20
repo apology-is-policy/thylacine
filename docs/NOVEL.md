@@ -130,6 +130,38 @@ These are not v1.0 angles — they're recorded so a future direction isn't lost.
   primitive folds into ARCH §6.6 (whose post-v1.0 pkey-shaped-syscall note now
   points here). Audit-bearing (W^X + the `CAP_*` system).
 
+- **Weft — a capability-scoped, zero-copy, batched network dataplane**
+  (`docs/NET-THROUGHPUT.md`, **COMMITTED 2026-06-20** as a sequenced post-net arc, before
+  REVENANT). The throughput inversion of the per-op 9P round-trip: granting a Proc its flow
+  capability (a `/net/<proto>/N/data` fid) *also* establishes a per-flow shared-page ring
+  between that Proc and netd, so the flow's payload bytes travel through a shared Burrow set
+  up **once** at grant time, with **no per-operation mediation** by the netd stack — netd does
+  the control-plane setup (the capability check, the flow grant, the policy) and drops out of
+  the per-packet loop. **Isolation is the capability grant; speed is the absence of per-op
+  mediation.** The fusion of Snap's userspace-net-service transport (SOSP'19) + Shenango's
+  NIC-demux-and-readiness (NSDI'19) + Arrakis's control/data-plane split (OSDI'14) + Loom's
+  shared async ring (above) + Burrow's shared VMOs (Angle #2) + io_uring's registered-buffer
+  zero-copy + the I-30 submit-pin (which RDMA's "registration *is* the access capability"
+  validates). **Why it's novel** (a five-lineage literature pass, gap-confirmed): decompose
+  the thesis into {zero-copy ring × no per-op stack mediation × *per-flow* grain × *software*
+  grant-is-the-setup} and **no system is all four** — the closest *primitive*, Fuchsia's
+  IOBuffer (RFC-0218, "the capability grant IS the zero-copy peered ring"), is scoped to
+  **logging/tracing, never networking**; the closest *property-set*, Arrakis, is
+  **NIC-hardware-enforced (SR-IOV), with no capability/namespace model**. The capability-µK
+  world (seL4 sDDF, Genode packet_stream) keeps a software virtualizer touching every packet
+  and grants per-NIC; the dataplane-OS world goes per-flow + unmediated but in NIC silicon.
+  The contribution is the fusion + the *purely-software, hardware-independent, per-flow*
+  framing. **Heritage**: lineage-correct — virtio-9p (Linux v9fs, since 2007) is the shipping
+  precedent for "9P control message + zero-copy payload page," with a hybrid small-payload
+  copy threshold (so it is the lineage's own fast local-9P transport, not a deviation).
+  Reserves **I-37** (dataplane integrity: enforcement at setup not per-packet; the
+  multi-holder buffer-lifetime / `F_NOTIF` release; the split-ring SMP discipline) +
+  `specs/dataplane.tla` (spec-first re-enabled). Subsumes the *latency* half of the
+  net-optimization arc too: the readiness ring closes the RX-wake floor (NET-PERF N1) on the
+  same mechanism. The build is the **Weft arc** (Weft-0 Tier-A window win is the v1.0 piece;
+  Weft-1..7 the dataplane). Audit-bearing (the buffer-lifetime UAF + the no-per-op-mediation
+  property). (Name *held for signoff* — the crosswise thread woven through the Loom warp.)
+
 ---
 
 ## 3. Per-angle scope

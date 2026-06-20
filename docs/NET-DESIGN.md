@@ -557,6 +557,14 @@ Network I/O **rides Loom with no socket opcodes** (ARCH §10.1):
 
 This is the primary native readiness mechanism and needs no new kernel surface.
 
+**Throughput + the Weft dataplane (`docs/NET-THROUGHPUT.md`, I-37).** The committed
+"net rides Loom" path above is the *latency*/readiness mechanism. The *throughput* arc
+extends it: a per-flow capability-scoped zero-copy shared-page dataplane — the bytes of a
+flow travel through a Burrow shared guest↔netd, set up once at grant, netd out of the
+per-packet loop — the Snap/Arrakis-grounded NOVEL that pushes throughput from 16 MiB/s
+toward hundreds of MiB/s and closes the RX-wake floor on the *same* readiness ring.
+Committed 2026-06-20 as the post-net **Weft** arc; design in `docs/NET-THROUGHPUT.md`.
+
 ### 12.2 Synchronous `poll()`/`select()` — the `dev9p.poll` bridge
 
 Pouch/Linux binaries call `poll()`/`select()`/`pselect6` over `/net` fds. The
