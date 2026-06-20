@@ -457,3 +457,97 @@ Ranked levers (the NP-4 backlog, feeding #62):
 `tools/np3-bench.sh` (build + host baselines + M6 under TCG and HVF). Or, from a
 logged-in shell with a host server + guestfwd up: `netperf nic 10.0.2.100 7820`.
 The guest M6 lines: `grep 'netperf M6' build/test-boot.log`.
+
+---
+
+## 11. NP-4 — the attribution map + ranked optimization backlog (the report)
+
+This is the synthesis. No new measurement: it attributes a real HTTPS fetch to
+the costs measured in sections 8 (M1/M2/M3 lo), 9 (M4/M5 TLS+crypto), and 10
+(M6 NIC + host baselines), and ranks the reserve. No stack changes land in this
+arc — each recommendation is a follow-on the user greenlights.
+
+### 11.1 The measured cost primitives (HVF, the fast-substrate case)
+
+| Primitive | Cost (HVF) | Bound (section) |
+|---|---|---|
+| One NIC round-trip, reply lands after netd parks | **~50 ms** | the RX-wake floor (10) |
+| One NIC round-trip, reply already in the RX ring | ~0.35 ms | device + 9P (10) |
+| One `lo` round-trip (M1) | ~0.16 ms | 9P + netd + smoltcp (8) |
+| TCP connect processing (M3/M6, instant SYN-ACK) | ~1.2 ms | netd CPU (8/10) |
+| TLS 1.3 handshake crypto (M4) | ~2.5 ms | sw asymmetric crypto (9) |
+| AES-128-GCM, 1 KiB (M5) | ~21 us (~47 MB/s) | sw symmetric crypto (9) |
+| `lo` bulk send (M2) | ~50 KiB/s | the loopback-drain POLLOUT timer (8) |
+| NIC bulk send to a fast drain (M6) | ~16 MiB/s | flow-controlled, no floor (10) |
+
+The decisive fact (section 10): on a fast CPU (HVF, and **real hardware**), the
+guest issues its `read` *before* a NIC reply arrives, so **every** request/
+response round-trip hits the ~50 ms RX-wake floor — there is no pollable NIC-IRQ
+fd, so a reply that lands while netd is parked in `t_poll(>=50 ms)` waits the
+full timeout. On the slow TCG CPU the reply is often already in the RX ring, so
+the floor is intermittent (the M6-rtt bimodality). The floor is *ours* (the netd
+poll model), not the QEMU device.
+
+### 11.2 An HTTPS GET, decomposed and attributed
+
+A `https://host/path` GET to a real remote at round-trip time `R`, on HVF:
+
+| Segment | Round-trips | Dominant cost | ~HVF cost |
+|---|---|---|---|
+| **DNS** resolve (UDP to the resolver) | 1 | **RX-wake floor** + R | ~50 ms + R |
+| **TCP connect** (SYN/SYN-ACK) | 1 | **RX-wake floor** + R + netd connect (~1.2 ms) | ~51 ms + R |
+| **TLS 1.3 handshake** (1-RTT: CH / SH+cert / Fin) | ~2 | **RX-wake floor** x2 + 2R + sw crypto (~2.5 ms) | ~103 ms + 2R |
+| **HTTP** request + response head | 1 | **RX-wake floor** + R | ~50 ms + R |
+| **HTTP** body (bulk, size S) | — | sw crypto (~S/47 MB/s) + flow control; **not** the floor | S-dependent |
+| **TOTAL (latency, head-of-fetch)** | ~5 | **~5 x the 50 ms floor** + ~5R + ~2.5 ms crypto | **~250 ms + 5R** |
+
+The attribution is unambiguous:
+
+- **The RX-wake floor is ~250 ms of every HTTPS fetch on HVF** (~5 floored
+  round-trips). It dwarfs the crypto (~2.5 ms), the device (~0.35 ms/round-trip),
+  and — for a low-RTT peer — the real network. This is **the** answer to "why is
+  HTTPS slow on HVF": not the QEMU device, not the crypto, but our netd poll
+  model paying the 50 ms floor on every round-trip a fast CPU outruns.
+- **Software crypto** is the bulk-body cost (~47 MB/s) and ~2.5 ms of the
+  handshake — real, but ~100x smaller than the floor for the per-fetch latency,
+  and (per NP-2 section 9c) ~1000x above the in-guest bulk ceiling, so it is the
+  *second* lever, not the first.
+- **The QEMU virtio-net + slirp device is not a bottleneck** (M6-rtt min ~0.35
+  ms ~= `lo`; NIC bulk ~16 MiB/s). It adds the per-round-trip device cost only,
+  which the floor swamps.
+- **The `lo` bulk ceiling (50 KiB/s)** is a *separate*, in-guest issue: the
+  loopback-drain POLLOUT timer cadence (#221), not the NIC and not HTTPS.
+
+### 11.3 The ranked optimization backlog (estimated headroom; feeds RW-11 #62)
+
+| # | Lever | Mechanism | Est. headroom | Audit-bearing? |
+|---|---|---|---|---|
+| **N1** | **RX-driven netd via a pollable IRQ-readiness fd** | a small kernel ABI (the eventfd/timerfd analog): a fd that becomes readable on a NIC RX IRQ, so netd `t_poll([srv_fd, irq_fd], ...)` wakes on a NIC RX *or* a 9P request — eliminating the 50 ms idle-poll wait for an externally-arriving reply | **the single biggest network lever: ~50 ms x N round-trips per fetch (~250 ms/HTTPS fetch on HVF) -> ~0**; after, a fetch is real-RTT-bound | **Yes** — a new kernel IRQ-delivery ABI + the netd event loop; prosecute I-9 (no lost wake), the IRQ→fd readiness path, lifetime |
+| **N2** | **Hardware AES/SHA (ARMv8 crypto ext)** | route the rustls RustCrypto symmetric + hash path through the FEAT_AES/FEAT_SHA instructions (the Lazarus-style conditional-on-`hwcaps`) | ~100x symmetric (47 MB/s -> ~GB/s) + the SHA-heavy handshake transcript/HKDF; **matters for bulk HTTPS *after* N1** | Moderate — a userspace crypto-provider swap; no kernel/privilege surface |
+| **N3** | **TLS session resumption / 0-RTT** | rustls session tickets / PSK resumption | ~1.5 ms asymmetric handshake -> ~0 on repeat connections (the dominant *per-connection* crypto cost) | No — userspace TLS config |
+| **N4** | **Blocking-write / event-driven POLLOUT for `lo` bulk** | netd defers the `Rwrite` until the window has room (mirroring the blocking-read `poll_data`), or wakes the parked POLLOUT poll on window-reopen not on the idle-pump timer (#221) | the `lo` bulk ceiling 50 KiB/s -> window/RTT-bound; **in-guest bulk only** (the NIC bulk is already fine) | Yes — netd deferred-reply + the dev9p.poll wake path (#221/#220) |
+| **N5** | **Larger socket windows + msize** | `TCP_RX/TX_BUF` 4 KiB -> 64 KiB+; `SRV_MSIZE` 8 KiB -> 128 KiB+ (folds into #62 item 3) | fewer windows/RPCs per MiB; amortizes the per-window + per-RPC cost on every bulk path | Yes — back-pressure vs #841/#845 (the #62 item-3 audit note) |
+
+N1 is the headline: it is the only lever that moves the *latency* of a typical
+HTTPS fetch (the floor is ~99% of the per-fetch wall-clock on HVF once the real
+RTT is small). N2-N3 are the crypto reserve (bulk + repeat-connect). N4-N5 are
+the in-guest bulk reserve (the M2 ceiling), independent of the NIC.
+
+### 11.4 Seams surfaced by the arc (tracked, not in-scope here)
+
+- **#264** — netd hangs a read after `shutdown(SHUT_WR)` when the peer replies
+  post-FIN (a netd half-close read-path bug; latent for v1.0 full-duplex
+  clients). Bundle the fix with #258's owed focused netd deferred-reply audit.
+- **#258 item-2** — the focused Opus audit of netd's deferred-reply paths
+  (PendingConnect/accept/data lifetime + cancellation + I-9) remains owed; the
+  deterministic outbound-TCP-over-NIC *test* (item-1) is delivered by
+  `np3-bench.sh`.
+
+### Conclusion
+
+The NET-PERF arc answers the originating question (2026-06-20): **HTTPS is slow
+on HVF because of our netd RX-wake floor (~50 ms x ~5 round-trips), not the QEMU
+device and not the crypto.** The reserve is large and the #1 lever — an
+RX-driven netd via a pollable IRQ fd (N1) — is a small, well-scoped kernel ABI
+that would remove ~250 ms from a typical in-guest HTTPS fetch. The ranked
+backlog (N1-N5) feeds the RW-11 v1.x perf backlog (#62).
