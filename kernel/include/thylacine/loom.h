@@ -293,7 +293,15 @@ enum {
 #define LOOM_SQE_MULTISHOT  (1u << 3)   // one SQE -> many CQEs (accept loop)
 
 // CQE flags. LOOM_CQE_MORE: more completions for this SQE follow (multishot).
+// LOOM_CQE_F_NOTIF: this is the NOTIFICATION CQE of a two-CQE F_NOTIF zero-copy
+// send (Weft-5; weft.tla) -- the registered buffer is now reusable. A ZC send
+// posts a RESULT CQE (LOOM_CQE_MORE = "queued"; a notification follows) then,
+// once the LAST of {netd stack, NIC DMA, peer ACK} releases, this NOTIFICATION
+// CQE (the I-30 buffer pin dropped at notification-terminal, never op-terminal).
+// Reserved ABI: the contract + the holder tracker land at Weft-5 (kernel/weft.c
+// weft_notif_*); the live two-CQE POSTING onto the loom_async_op path is Weft-6.
 #define LOOM_CQE_MORE       (1u << 0)
+#define LOOM_CQE_F_NOTIF    (1u << 1)
 
 // handle_idx sentinel: the op carries a raw (path-resolved at submit) target
 // rather than a registered-handle index. Reserved; v1.0 uses registered

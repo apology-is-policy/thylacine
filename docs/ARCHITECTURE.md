@@ -3901,7 +3901,7 @@ before the MA-1 impl (the post-net Imperium/Authority arc).
 | `specs/cons_poll.tla` | P7-LS-8 | I-9 across the IRQ->console_mgr->poll-hook *deferred* wake (LS-8a; the Linux-tty `flush_to_ldisc` relay) |
 | `specs/allowance.tla` | Menagerie build-arc 2 | Hardware allowance / driver-authority bound (I-34): handles within the live allowance incl. the revoke-vs-create race; never widened; fully revoked on teardown |
 | `specs/net_poll.tla` | net-6b | I-9 across the elicited (PROBE-then-observe) `dev9p.poll` readiness relay |
-| `specs/weft.tla` | Weft-1 (spec; impl Weft-2..3 landed, Weft-5..7 OWED) | Capability network dataplane (I-37): no per-op mediation + the F_NOTIF multi-holder buffer lifetime + the descriptor-ring TOCTOU + the shared-Burrow lifetime bounded by the flow |
+| `specs/weft.tla` | Weft-1 (spec; impl Weft-2 / 3 / 5 landed, Weft-6..7 OWED; Weft-4 = `weft_readiness.tla`) | Capability network dataplane (I-37): no per-op mediation + the F_NOTIF multi-holder buffer lifetime (Weft-5 `weft_notif`) + the descriptor-ring TOCTOU (Weft-3) + the shared-Burrow lifetime bounded by the flow |
 | `specs/weft_readiness.tla` | Weft-4 | I-9 across the readiness ring: the single-cache-line poke's store-buffer register-then-observe (netd's edge vs the guest's park) loses no wake — the PUSH counterpart of `net_poll.tla`'s elicited PULL |
 
 Each module carries its clean cfg(s) plus buggy-cfg counterexamples (85

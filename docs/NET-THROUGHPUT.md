@@ -551,8 +551,22 @@ dataplane arc the user committed.
   is written + TLC-green BEFORE the impl. The live park/wake integration (the `sleep`/`wakeup` on
   the decision, per direction) is **Weft-6**; the readiness ring closes NET-PERF N1 once wired.
   Reference: `docs/reference/125-weft.md`.
-- **Weft-5 (the `F_NOTIF` zero-copy-send contract).** The two-CQE send completion; the I-30
-  pin released at notification-terminal; the fallback-copied indicator.
+- **Weft-5 (the `F_NOTIF` zero-copy-send contract) — LANDED.** The two-CQE send completion
+  (a result CQE `LOOM_CQE_MORE` = "queued", then a notification CQE `LOOM_CQE_F_NOTIF` =
+  "buffer reusable"); the I-30 buffer pin released at the **notification**-terminal — the last
+  of {netd stack done, NIC DMA done, peer ACK} — never op-terminal; the fallback-copied
+  indicator (`WEFT_NOTIF_COPIED`, the `IORING_SEND_ZC_REPORT_USAGE` analog, so netd is never
+  silently-wrong). Kernel-internal substrate (no EL0 ABI, autonomy-OK): `struct weft_notif` is
+  the kernel-private per-send holder tracker (`weft.tla` `holders[b]`) — the holder bitmask is
+  the complete state, and the release gate (`weft_notif_clear` → `WEFT_NOTIF_RELEASE`) fires
+  **exactly once** on the last-holder transition, so the spec's `ReleasePremature` (the io_uring
+  `ubuf_info` UAF) is *structurally unreachable* through the API. Impl-against-the-existing-spec
+  (`weft.tla` already models the full F_NOTIF lifecycle: `NetdAct`/`HolderRelease`/`ReleaseClean`/
+  `ReleasePremature`/`PinHeldWhileInFlight`/`NoInFlightReuse`) — **no new module**; the spec gate
+  re-ran green (clean 1412 distinct + the `weft_buggy_premature_release` → `PinHeldWhileInFlight`
+  counterexample). 3 kernel tests, 949/949 + boot OK + 0 EXTINCTION. The **live two-CQE posting**
+  (the `weft_notif` on the flow's `loom_async_op`, the holders driven by real netd/NIC/ACK events)
+  is wired at Weft-6. Reference: `docs/reference/125-weft.md`.
 - **Weft-6 (the per-flow capability binding + the native API).** Bind the ring setup to the
   `/net` data fid's I-30 pin (the "grant *is* the dataplane" realization) — **this is where
   the grant-is-the-share EL0 surface lands** (`SYS_WEFT_SHARE = 81` netd-side +

@@ -1,14 +1,16 @@
-# 125 — Weft: the per-flow capability network dataplane (descriptor + readiness rings)
+# 125 — Weft: the per-flow capability network dataplane (descriptor + readiness rings + F_NOTIF)
 
 **Status:** Weft-3 (the descriptor-ring ABI + the kernel snapshot-and-bounds-
-validate consumer + the hybrid threshold) **and** Weft-4 (the readiness ring —
-the single-cache-line poke + the store-buffer register-then-observe) substrates
-landed. Kernel-internal; no EL0 ABI. The live guest↔netd wiring + the EL0 share
-delivery is Weft-6.
+validate consumer + the hybrid threshold), Weft-4 (the readiness ring — the
+single-cache-line poke + the store-buffer register-then-observe), **and** Weft-5
+(the F_NOTIF two-CQE zero-copy-send completion contract — the multi-holder
+buffer-pin release) substrates landed. Kernel-internal; no EL0 ABI. The live
+guest↔netd wiring + the EL0 share delivery is Weft-6.
 
 Source: `kernel/include/thylacine/weft.h`, `kernel/weft.c`. Specs:
-`specs/weft.tla` (ARCH §28 I-37, the data plane), `specs/weft_readiness.tla`
-(ARCH §28 I-9, the readiness poke). Design: `docs/NET-THROUGHPUT.md` §5–6.
+`specs/weft.tla` (ARCH §28 I-37, the data plane + the F_NOTIF holder lifecycle),
+`specs/weft_readiness.tla` (ARCH §28 I-9, the readiness poke). Design:
+`docs/NET-THROUGHPUT.md` §4.6, §5–6.
 
 ---
 
@@ -330,9 +332,94 @@ direction: netd→guest RX-ready, guest→netd TX-queued).
 
 ---
 
+## F_NOTIF zero-copy-send completion (Weft-5)
+
+A zero-copy send completing means only **queued**: the registered payload page is
+still *in flight* — the NIC may DMA from it, and for TCP it stays pinned until the
+peer ACKs (the stack may retransmit). So a Weft ZC send posts **two** CQEs (the
+io_uring `IORING_SEND_ZC` contract; NET-THROUGHPUT.md §4.6): a **result CQE**
+(`LOOM_CQE_MORE` = "queued", a notification follows) and, later, a **notification
+CQE** (`LOOM_CQE_F_NOTIF` = "buffer reusable"). **The I-30 buffer pin releases at
+the *notification*-terminal — the last of {netd stack done, NIC DMA done, peer
+ACK} — never at op-terminal.** Releasing at op-terminal (netd's stack done = the
+result CQE) reuses a page a holder may still be reading: the io_uring `ubuf_info`
+UAF (`weft.tla` `PinHeldWhileInFlight` + `NoInFlightReuse`).
+
+`struct weft_notif` is the **kernel-private** per-send in-flight tracker (the
+spec's `holders[b]`): not a shared-page structure, not ABI — the guest sees only
+the two CQEs. The holder bitmask alone is the complete state (in flight iff
+`holders != 0`); no `armed`/`terminated` flag is needed. The release gate
+(`weft_notif_clear` → `WEFT_NOTIF_RELEASE`) fires **exactly once**, on the
+last-holder transition, so a premature drop is *structurally unreachable* through
+the API: there is no function that returns `RELEASE` or drops the pin while a
+holder is pending, and a clear of an already-clear holder (a stray/duplicate/late
+event) is a no-op returning `HELD`. A caller that releases the pin **only** on
+`RELEASE` therefore cannot reuse an in-flight page — the spec's `ReleasePremature`
+action has no impl path. The live tracker rides the `loom_async_op` (the audited
+Loom completion state, under the engine lock) at Weft-6, where the two CQEs are
+posted onto the flow's Loom ring.
+
+The **fallback-copied indicator** (`WEFT_NOTIF_COPIED`, the
+`IORING_SEND_ZC_REPORT_USAGE` analog): if the send falls back to a copy (the
+payload is copied into a netd-side buffer), the page is free *immediately* — no
+in-flight window — and the result CQE carries `WEFT_NOTIF_COPIED` so netd is never
+silently-wrong about whether the buffer is in flight.
+
+### Public API
+
+```c
+// The F_NOTIF in-flight holder set (weft.tla Holders). A zero-copied page is held
+// until ALL THREE clear; each is a distinct completion event.
+#define WEFT_HOLDER_NETD 0x1u   // netd's stack still references the page
+#define WEFT_HOLDER_NIC  0x2u   // the NIC may still DMA from the page
+#define WEFT_HOLDER_ACK  0x4u   // the peer has not yet ACKed (TCP may retransmit)
+#define WEFT_HOLDERS_ALL (WEFT_HOLDER_NETD | WEFT_HOLDER_NIC | WEFT_HOLDER_ACK)
+#define WEFT_NOTIF_COPIED 0x1u  // result-CQE indicator: the send fell back to a copy
+
+enum weft_notif_phase { WEFT_NOTIF_HELD = 0, WEFT_NOTIF_RELEASE };
+
+struct weft_notif { u32 holders; u32 result_flags; };
+
+// Arm for a zero-copied send: in flight under `holders` (masked to WEFT_HOLDERS_ALL
+// -- an over-wide arg cannot manufacture a phantom holder that clear() can never
+// reach). weft.tla NetdAct.
+void weft_notif_arm(struct weft_notif *n, u32 holders);
+
+// Arm for a COPIED send: free immediately (no in-flight window), result_flags =
+// WEFT_NOTIF_COPIED; weft_notif_inflight is false at once.
+void weft_notif_arm_copied(struct weft_notif *n);
+
+// Clear one holder (a netd-stack / NIC-DMA / peer-ACK event; one WEFT_HOLDER_*
+// bit). Returns WEFT_NOTIF_RELEASE iff this emptied the set -- release the pin +
+// post the notification CQE (EXACTLY ONCE; weft.tla HolderRelease -> ReleaseClean).
+enum weft_notif_phase weft_notif_clear(struct weft_notif *n, u32 holder);
+
+// PinHeldWhileInFlight query: true iff a holder is still pending -- the pin must
+// stay held + the page must NOT be reused (weft.tla NoInFlightReuse).
+bool weft_notif_inflight(const struct weft_notif *n);
+
+// The result-CQE flags (WEFT_NOTIF_COPIED or 0) -- the never-silently-wrong
+// fallback indicator, OR'd into the result CQE.
+u32 weft_notif_result_flags(const struct weft_notif *n);
+```
+
+These functions are **not internally synchronized**: the caller serializes them
+(the live tracker is per-op state mutated under the Loom engine lock at Weft-6,
+exactly as `weft.tla` models each action atomic under the per-client lock). No
+allocation, no atomics, no shared memory — pure bitmask state transitions.
+
+What Weft-5 is **not**: the live two-CQE posting. Nothing in production arms a
+`weft_notif` yet — the holder lifecycle is exercised by the kernel test suite. The
+flow's ZC send (the `weft_notif` on its `loom_async_op`, the result + notification
+CQEs onto its Loom ring, the holders driven by netd-stack / NIC-DMA-done /
+peer-ACK events) lands at Weft-6.
+
+---
+
 ## Spec cross-reference
 
-`specs/weft.tla` (model-first at Weft-1; ARCH §28 I-37). Weft-3 realizes:
+`specs/weft.tla` (model-first at Weft-1; ARCH §28 I-37). Weft-3 (the descriptor
+ring) **and** Weft-5 (the F_NOTIF holder lifecycle) realize:
 
 | weft.tla action / invariant | impl |
 |---|---|
@@ -341,11 +428,18 @@ direction: netd→guest RX-ready, guest→netd TX-queued).
 | `DescPinnedToSnapshot` | the value-copy `kd`; act on `out[]`, never the shared slot |
 | `ActedDescValidated` | `weft_desc_valid` (u64 bound; flags clear; len > 0) |
 | split-ring leg (5) | `prod_tail` guest-only / `cons_head` kernel-only |
+| `NetdAct` (arm the in-flight holder set) | `weft_notif_arm` (`holders := WEFT_HOLDERS_ALL`) |
+| `HolderRelease(b, h)` | `weft_notif_clear` (clear one holder bit) |
+| `ReleaseClean` (pin drop at notification-terminal) | `weft_notif_clear` → `WEFT_NOTIF_RELEASE` (exactly once, on `holders → 0`) |
+| `PinHeldWhileInFlight` | `weft_notif_inflight` (the reuse guard; `holders != 0`) |
+| `ReleasePremature` (the F_NOTIF UAF) | **no impl path** — RELEASE fires only on the last-holder transition |
 
-The buggy cfg `weft_buggy_ring_toctou` → `DescPinnedToSnapshot` is the durable
-regression for this surface (the Weft-7 audit). The spec gate re-ran green at
-Weft-3 (clean 1412 distinct; each buggy cfg violates its named invariant);
-Weft-3 extends the modeled mechanism without changing the spec.
+The buggy cfgs `weft_buggy_ring_toctou` → `DescPinnedToSnapshot` (the descriptor
+ring) and `weft_buggy_premature_release` → `PinHeldWhileInFlight` (the F_NOTIF
+op-terminal-drop UAF) are the durable regressions for these surfaces (the Weft-7
+audit). The spec gate re-ran green at Weft-5 (clean 1412 distinct; each buggy cfg
+violates its named invariant; liveness `EventuallyReleased` green); Weft-3 and
+Weft-5 realize the modeled mechanism without changing the spec.
 
 `specs/weft_readiness.tla` (model-first at Weft-4; ARCH §28 I-9). Weft-4
 realizes (the readiness ring is a *new* I-9 surface — a new focused module,
@@ -369,8 +463,9 @@ violates `NoLostReadyWake`.
 
 ## Tests
 
-`kernel/test/test_weft_ring.c` — 9 tests over a `burrow_share_into` cross-Proc
-shared page (`weft.*`). The descriptor ring (Weft-3):
+`kernel/test/test_weft_ring.c` — 12 tests (`weft.*`); the ring tests run over a
+`burrow_share_into` cross-Proc shared page, the F_NOTIF tests over the
+kernel-private tracker. The descriptor ring (Weft-3):
 
 - `weft.ring_basic` — a ≥-threshold payload rides the ring; the kernel snapshots
   the descriptor and reads the payload **in place** at the validated offset (no
@@ -402,7 +497,25 @@ threaded test cannot reorder), so these assert the primitives' contracts:
   posted *before* the arm is caught by the post-register re-read, so the consumer
   does not park (it re-processes) and the park-intent is left clear.
 
-946/946 PASS, boot OK, 0 EXTINCTION at landing.
+The F_NOTIF completion contract (Weft-5) — pure struct-level tests of the holder
+lifecycle (the tracker is kernel-private completion state, not a shared page):
+
+- `weft.notif_terminal_release` — arm `{netd,nic,ack}`; clear each holder in a
+  non-trivial order; the page stays in flight (the pin held) through each non-last
+  clear, and the last clear yields `WEFT_NOTIF_RELEASE` **exactly once** (the
+  notification-terminal); a stray late event after the terminal is a `HELD` no-op
+  (no double-release).
+- `weft.notif_premature_blocked` — the `ubuf_info` UAF, structurally prevented:
+  after netd's stack is done (op-terminal) the page is **still** in flight, so a
+  reuse gating on `weft_notif_inflight()` is blocked; only the *true* last holder
+  (the peer ACK) yields `RELEASE`; a duplicate netd-done cannot fake the terminal
+  (`PinHeldWhileInFlight` + `NoInFlightReuse`).
+- `weft.notif_copied_immediate` — the fallback-copied path: `arm_copied` →
+  not-in-flight at once + `WEFT_NOTIF_COPIED`; plus the arm-domain masking (an
+  over-wide `holders` masks to the three real holders; an empty arm is
+  not-in-flight).
+
+949/949 PASS, boot OK, 0 EXTINCTION at landing.
 
 ---
 
@@ -440,8 +553,18 @@ threaded test cannot reorder), so these assert the primitives' contracts:
   proves the *discipline* (acquire/release + the value-copy snapshot) over a
   single-threaded test.
 - **The F_NOTIF multi-holder buffer lifetime** (the page not reused until the
-  last of {netd stack, NIC DMA, peer ACK}) is Weft-5, not here. Weft-3 is the
-  descriptor ring; the buffer-lifetime pin is a separate leg.
+  last of {netd stack, NIC DMA, peer ACK}) is the `weft_notif` tracker (Weft-5).
+  The contract is structurally enforced (`RELEASE` only on the last-holder
+  transition), but nothing in production arms a tracker yet: the **live two-CQE
+  posting** — the `weft_notif` on the flow's `loom_async_op`, the result +
+  notification CQEs, and the holders driven by real netd-stack / NIC-DMA-done /
+  peer-ACK events — is Weft-6. Until then a caller must still honour the contract:
+  release the pin **only** on `WEFT_NOTIF_RELEASE`, never on the result CQE.
+- **`weft_notif` is not internally synchronized.** The caller serializes the
+  arm/clear/query (the live tracker is per-op state under the Loom engine lock at
+  Weft-6). A `clear` takes one `WEFT_HOLDER_*` bit; the impl is robust against
+  out-of-domain bits (they no-op), but a multi-bit `holder` clears multiple — pass
+  one event per call.
 - **The readiness park/wake is not live.** `weft_ready_arm_park` returns the
   *decision*; the `sleep(&rendez)`/`wakeup(&rendez)` integration (per direction)
   is Weft-6. Until then nothing in production calls the readiness primitives —

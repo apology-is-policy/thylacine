@@ -199,3 +199,58 @@ void weft_ready_unpark(struct weft_ring_view *rv) {
     struct weft_ready_hdr *rh = weft_ready_of(rv);
     __atomic_store_n(&rh->wait_active, 0u, __ATOMIC_SEQ_CST);
 }
+
+// =============================================================================
+// F_NOTIF zero-copy-send completion contract (Weft-5). The kernel-private
+// multi-holder tracker for one in-flight ZC send. The whole point is the
+// notification-terminal pin release: the I-30 buffer pin is held while ANY of
+// {netd stack, NIC DMA, peer ACK} still references the page, and released ONLY
+// once the LAST clears -- the io_uring F_NOTIF two-CQE contract. Releasing at
+// op-terminal (netd done) reuses a page the NIC may still DMA / TCP may still
+// retransmit = the ubuf_info UAF (weft.tla PinHeldWhileInFlight + NoInFlightReuse;
+// the ReleasePremature buggy cfg is the counterexample).
+//
+// The holder bitmask is the COMPLETE state -- in flight iff holders != 0 -- so no
+// `armed`/`terminated` flag is needed: a clear of an already-clear holder (a stray
+// or duplicate completion event, or any event after the terminal) finds the bit
+// 0, no-ops, and returns HELD, so WEFT_NOTIF_RELEASE is emitted EXACTLY ONCE (on
+// the nonzero->zero transition). A caller that releases the pin only on RELEASE
+// therefore cannot drop it early -- ReleasePremature is unreachable through the
+// API. These run on the kernel's per-op completion state under the engine's lock
+// (the loom_async_op the live tracker rides at Weft-6); no shared memory.
+// =============================================================================
+
+void weft_notif_arm(struct weft_notif *n, u32 holders) {
+    // Mask to the valid holder domain (a degenerate over-wide/empty argument
+    // cannot manufacture a phantom holder; an empty result is a no-op send,
+    // not-in-flight). weft.tla NetdAct sets holders = Holders.
+    n->holders      = holders & WEFT_HOLDERS_ALL;
+    n->result_flags = 0u;        // zero-copied: in flight until the notification
+}
+
+void weft_notif_arm_copied(struct weft_notif *n) {
+    n->holders      = 0u;        // copied -> no in-flight window; reusable at once
+    n->result_flags = WEFT_NOTIF_COPIED;
+}
+
+enum weft_notif_phase weft_notif_clear(struct weft_notif *n, u32 holder) {
+    // A clear of a holder that is not currently pending (a stray/duplicate/late
+    // completion, an event for a never-armed holder, or anything after the
+    // terminal) is a no-op: the page is not freed twice, and RELEASE is never
+    // emitted a second time. weft.tla HolderRelease requires h \in holders[b].
+    if ((n->holders & holder) == 0u)
+        return WEFT_NOTIF_HELD;
+
+    n->holders &= ~holder;
+    // RELEASE iff this clear emptied the set -- the notification-terminal. The
+    // pin drops here (weft.tla ReleaseClean), never with a holder still pending.
+    return (n->holders == 0u) ? WEFT_NOTIF_RELEASE : WEFT_NOTIF_HELD;
+}
+
+bool weft_notif_inflight(const struct weft_notif *n) {
+    return n->holders != 0u;
+}
+
+u32 weft_notif_result_flags(const struct weft_notif *n) {
+    return n->result_flags;
+}

@@ -226,4 +226,87 @@ bool weft_ready_arm_park(struct weft_ring_view *rv, u32 last_seen);
 // it. Called from the consumer's post-sleep path (Weft-6).
 void weft_ready_unpark(struct weft_ring_view *rv);
 
+// =============================================================================
+// F_NOTIF zero-copy-send completion contract (Weft-5) -- the two-CQE send +
+// the multi-holder buffer-pin release (NET-THROUGHPUT.md section 4.6; weft.tla
+// Holders / HolderRelease / ReleaseClean / ReleasePremature). A zero-copy send
+// completing means only "queued": the registered payload page is still IN FLIGHT
+// (the NIC may DMA from it; for TCP it stays pinned until the peer ACKs). So the
+// send posts a RESULT CQE (LOOM_CQE_MORE = "queued") and, later, a NOTIFICATION
+// CQE (LOOM_CQE_F_NOTIF = "buffer reusable"). The I-30 buffer pin releases at the
+// NOTIFICATION-terminal -- the LAST of {netd stack done, NIC DMA done, peer ACK}
+// -- NEVER at op-terminal. Releasing at op-terminal reuses a page the NIC may
+// still be reading / TCP may still retransmit = the io_uring ubuf_info UAF
+// (weft.tla PinHeldWhileInFlight + NoInFlightReuse).
+//
+// weft_notif is the KERNEL-PRIVATE per-send in-flight tracker (the spec's
+// holders[b]): NOT a shared-page structure, NOT ABI -- the guest sees only the
+// two CQEs. The holder bitmask alone is the complete state (in flight iff
+// holders != 0); the release gate (weft_notif_clear -> WEFT_NOTIF_RELEASE) fires
+// EXACTLY ONCE, on the last-holder transition, so a premature drop is structurally
+// unreachable through this API: a caller that releases the pin ONLY on RELEASE
+// cannot reuse an in-flight page. The live tracker rides the loom_async_op at
+// Weft-6 (the two-CQE posting); Weft-5 lands the contract + the holder mechanism.
+// =============================================================================
+
+// The F_NOTIF in-flight holder set (weft.tla Holders). A zero-copied page is held
+// until ALL THREE clear; each is a distinct completion event.
+#define WEFT_HOLDER_NETD 0x1u   // netd's stack still references the page
+#define WEFT_HOLDER_NIC  0x2u   // the NIC may still DMA from the page
+#define WEFT_HOLDER_ACK  0x4u   // the peer has not yet ACKed (TCP may retransmit)
+#define WEFT_HOLDERS_ALL (WEFT_HOLDER_NETD | WEFT_HOLDER_NIC | WEFT_HOLDER_ACK)
+
+// Result-CQE indicator (the IORING_SEND_ZC_REPORT_USAGE / ZC_COPIED analog): set
+// when the send FELL BACK to a copy, so the buffer is free immediately and netd
+// is never silently-wrong about whether the page is in flight.
+#define WEFT_NOTIF_COPIED 0x1u
+
+// The action a holder-clear yields (the caller's completion step).
+enum weft_notif_phase {
+    WEFT_NOTIF_HELD = 0,    // the pin stays held -- holders remain (or a stray/late event)
+    WEFT_NOTIF_RELEASE,     // the LAST holder cleared: release the I-30 pin + post the
+                            // notification CQE NOW (returned EXACTLY ONCE; weft.tla ReleaseClean)
+};
+
+// weft_notif -- the kernel-private F_NOTIF multi-holder tracker for one in-flight
+// ZC send. `holders` is the set still pending (0 == not in flight: free / copied /
+// notification-terminal). `result_flags` carries WEFT_NOTIF_COPIED for a copied
+// send. Zero-initialize before arming (an all-zero tracker is "not in flight").
+struct weft_notif {
+    u32 holders;        // WEFT_HOLDER_* still pending; 0 == not in flight
+    u32 result_flags;   // WEFT_NOTIF_* for the result CQE
+};
+
+// Arm the tracker for a ZERO-COPIED send: the page is in flight under `holders`
+// (a non-empty subset of WEFT_HOLDERS_ALL, typically all three) until the
+// notification-terminal. Clears result_flags (zero-copied, in flight). weft.tla
+// NetdAct. A degenerate empty/over-wide `holders` is masked to WEFT_HOLDERS_ALL's
+// domain; an empty result leaves the tracker not-in-flight (no-op send).
+void weft_notif_arm(struct weft_notif *n, u32 holders);
+
+// Arm for a COPIED send (the ZC path fell back to a copy): the payload is already
+// copied, so the buffer is free IMMEDIATELY -- no in-flight holders. The
+// notification fires at once carrying WEFT_NOTIF_COPIED; weft_notif_inflight is
+// false right away (the buffer is reusable).
+void weft_notif_arm_copied(struct weft_notif *n);
+
+// Clear one holder (a netd-stack-done / NIC-DMA-done / peer-ACK event; `holder`
+// is one WEFT_HOLDER_* bit). Returns WEFT_NOTIF_RELEASE iff this clear emptied the
+// holder set -- the caller then releases the I-30 buffer pin + posts the
+// notification CQE (EXACTLY ONCE: a stray/duplicate/late event, or a clear of an
+// already-clear holder, is a no-op returning WEFT_NOTIF_HELD). weft.tla
+// HolderRelease (-> ReleaseClean on the last).
+enum weft_notif_phase weft_notif_clear(struct weft_notif *n, u32 holder);
+
+// PinHeldWhileInFlight query: true iff the page is still in flight (a holder
+// pending) -- the I-30 pin must stay held + the page must NOT be reused. A reuse
+// path checks this; a true result means a reuse would be the ubuf_info UAF
+// (weft.tla NoInFlightReuse).
+bool weft_notif_inflight(const struct weft_notif *n);
+
+// The result-CQE flags (WEFT_NOTIF_COPIED if the send fell back to a copy, else 0)
+// -- OR'd into the result CQE so userspace/netd knows whether the buffer is in
+// flight (the never-silently-wrong fallback indicator).
+u32 weft_notif_result_flags(const struct weft_notif *n);
+
 #endif

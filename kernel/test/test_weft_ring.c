@@ -31,6 +31,9 @@ void test_weft_ring_layout_constraints(void);
 void test_weft_ready_signal_observe(void);
 void test_weft_ready_park_handshake(void);
 void test_weft_ready_arm_park_sees_race(void);
+void test_weft_notif_terminal_release(void);
+void test_weft_notif_premature_blocked(void);
+void test_weft_notif_copied_immediate(void);
 
 #define WEFT_TEST_VA   0x20000000ull          // 512 MiB; well inside user-VA
 #define WEFT_RING_ENTRIES 8u
@@ -393,4 +396,113 @@ void test_weft_ready_arm_park_sees_race(void) {
     TEST_EXPECT_EQ((int)rh->wait_active, 1, "park-intent now published");
 
     weft_teardown(netd, guest, v);
+}
+
+// ---------------------------------------------------------------------------
+// F_NOTIF zero-copy-send completion contract (Weft-5) -- the multi-holder
+// buffer-pin release. The weft_notif tracker is kernel-private per-send
+// completion state (NOT a shared page), so these are pure struct-level tests of
+// the holder lifecycle (specs/weft.tla Holders / HolderRelease / ReleaseClean).
+// ---------------------------------------------------------------------------
+
+// weft.notif_terminal_release -- arm the {netd,nic,ack} in-flight set; the pin
+// stays held (inflight) through each holder clear, and the LAST clear (any order)
+// yields WEFT_NOTIF_RELEASE EXACTLY ONCE (the notification-terminal). A stray
+// late event after the terminal is a HELD no-op (no double-release).
+void test_weft_notif_terminal_release(void) {
+    struct weft_notif n = {0};
+
+    weft_notif_arm(&n, WEFT_HOLDERS_ALL);
+    TEST_ASSERT(weft_notif_inflight(&n),               "armed -> in flight (pin held)");
+    TEST_EXPECT_EQ((int)weft_notif_result_flags(&n), 0, "zero-copied -> no COPIED flag");
+
+    // Clear in a non-trivial order (nic, ack, netd); each non-last clear keeps
+    // the page in flight (a holder still pending -> the pin stays held).
+    TEST_EXPECT_EQ((int)weft_notif_clear(&n, WEFT_HOLDER_NIC),  WEFT_NOTIF_HELD,
+        "NIC done -> still held (netd/ack pending)");
+    TEST_ASSERT(weft_notif_inflight(&n),               "still in flight after NIC");
+    TEST_EXPECT_EQ((int)weft_notif_clear(&n, WEFT_HOLDER_ACK),  WEFT_NOTIF_HELD,
+        "peer ACK -> still held (netd pending)");
+    TEST_ASSERT(weft_notif_inflight(&n),               "still in flight after ACK");
+
+    // The LAST holder clears -> RELEASE (the notification-terminal: drop the pin).
+    TEST_EXPECT_EQ((int)weft_notif_clear(&n, WEFT_HOLDER_NETD), WEFT_NOTIF_RELEASE,
+        "last holder (netd) -> RELEASE (notification-terminal)");
+    TEST_ASSERT(!weft_notif_inflight(&n),              "no longer in flight (reusable)");
+
+    // Exactly-once: a stray/duplicate completion after the terminal is a no-op,
+    // NEVER a second RELEASE (no double pin-drop).
+    TEST_EXPECT_EQ((int)weft_notif_clear(&n, WEFT_HOLDER_NETD), WEFT_NOTIF_HELD,
+        "stray late netd event -> HELD (no second RELEASE)");
+    TEST_EXPECT_EQ((int)weft_notif_clear(&n, WEFT_HOLDER_NIC),  WEFT_NOTIF_HELD,
+        "stray late nic event -> HELD");
+    TEST_ASSERT(!weft_notif_inflight(&n),              "still reusable (no re-arm)");
+}
+
+// weft.notif_premature_blocked -- the io_uring ubuf_info UAF, structurally
+// prevented (weft.tla PinHeldWhileInFlight + NoInFlightReuse). After netd's stack
+// is done (op-terminal) the page is STILL in flight (the NIC may DMA / the peer
+// has not ACKed), so a reuse-path gating on weft_notif_inflight() blocks the
+// reuse. The ONLY path to "reuse safe" is !inflight(), reached only once ALL
+// holders clear (notification-terminal). A duplicate clear cannot fake it.
+void test_weft_notif_premature_blocked(void) {
+    struct weft_notif n = {0};
+    weft_notif_arm(&n, WEFT_HOLDERS_ALL);
+
+    // OP-terminal: netd's stack finished (the result CQE point). If the pin were
+    // dropped HERE the page would be reused while the NIC/ACK still hold it = the
+    // UAF. The tracker keeps it in flight.
+    TEST_EXPECT_EQ((int)weft_notif_clear(&n, WEFT_HOLDER_NETD), WEFT_NOTIF_HELD,
+        "netd done (op-terminal) -> NOT yet terminal");
+    TEST_ASSERT(weft_notif_inflight(&n),
+        "page STILL in flight after op-terminal -> reuse BLOCKED (no premature drop)");
+
+    // A duplicate netd-done cannot empty the set (NIC/ACK still pending) -- it
+    // can't manufacture a premature RELEASE.
+    TEST_EXPECT_EQ((int)weft_notif_clear(&n, WEFT_HOLDER_NETD), WEFT_NOTIF_HELD,
+        "duplicate netd-done -> HELD (NIC/ACK still hold the page)");
+    TEST_ASSERT(weft_notif_inflight(&n), "duplicate cannot fake the terminal");
+
+    TEST_EXPECT_EQ((int)weft_notif_clear(&n, WEFT_HOLDER_NIC),  WEFT_NOTIF_HELD,
+        "NIC DMA done -> still held (ACK pending)");
+    TEST_ASSERT(weft_notif_inflight(&n), "still in flight: peer ACK outstanding");
+
+    // The peer ACKs -> the genuine notification-terminal; reuse is now safe.
+    TEST_EXPECT_EQ((int)weft_notif_clear(&n, WEFT_HOLDER_ACK),  WEFT_NOTIF_RELEASE,
+        "peer ACK (the true last holder) -> RELEASE");
+    TEST_ASSERT(!weft_notif_inflight(&n), "reuse now safe (notification-terminal reached)");
+}
+
+// weft.notif_copied_immediate -- the fallback-copied path (IORING_SEND_ZC_REPORT_
+// USAGE): a copied send is free IMMEDIATELY (no in-flight window); the result CQE
+// carries WEFT_NOTIF_COPIED so netd is never silently-wrong. Plus the arm-domain
+// masking (an over-wide holders argument cannot manufacture a phantom holder; an
+// empty arm is not-in-flight).
+void test_weft_notif_copied_immediate(void) {
+    struct weft_notif n = {0};
+
+    weft_notif_arm_copied(&n);
+    TEST_ASSERT(!weft_notif_inflight(&n),
+        "copied -> NOT in flight (buffer free immediately)");
+    TEST_EXPECT_EQ((int)weft_notif_result_flags(&n), (int)WEFT_NOTIF_COPIED,
+        "result CQE carries the COPIED indicator");
+    // A clear on a copied (already-free) tracker is a harmless no-op.
+    TEST_EXPECT_EQ((int)weft_notif_clear(&n, WEFT_HOLDER_NETD), WEFT_NOTIF_HELD,
+        "clear on a copied send -> HELD no-op");
+
+    // Arm-domain masking: an over-wide argument is masked to the valid holders;
+    // only the three real holders end up pending.
+    struct weft_notif m = {0};
+    weft_notif_arm(&m, 0xFFFFFFFFu);
+    TEST_ASSERT(weft_notif_inflight(&m), "over-wide arm masks to the valid holders");
+    TEST_EXPECT_EQ((int)weft_notif_clear(&m, WEFT_HOLDER_NETD), WEFT_NOTIF_HELD, "netd");
+    TEST_EXPECT_EQ((int)weft_notif_clear(&m, WEFT_HOLDER_NIC),  WEFT_NOTIF_HELD, "nic");
+    TEST_EXPECT_EQ((int)weft_notif_clear(&m, WEFT_HOLDER_ACK),  WEFT_NOTIF_RELEASE,
+        "exactly the three masked holders empty the set -> RELEASE");
+    TEST_ASSERT(!weft_notif_inflight(&m), "no phantom holder remained");
+
+    // An empty arm is a no-op send -- not in flight.
+    struct weft_notif z = {0};
+    weft_notif_arm(&z, 0u);
+    TEST_ASSERT(!weft_notif_inflight(&z), "empty arm -> not in flight");
 }
