@@ -218,13 +218,15 @@ void test_weft_ring_bounds_reject(void) {
 }
 
 // ---------------------------------------------------------------------------
-// weft.binding_validate_write -- the data-drive write validator (Weft-6b-2): a
-// SYS_WRITE buffer pointing INTO the flow's ring payload region resolves to the
-// payload-relative offset; a buffer below the region or a window past
-// payload_size is rejected (the byte-copy fall-through). The geometry is read
-// from the kernel-private view, never the shared header.
+// weft.binding_validate_rw -- the direction-agnostic data-drive validator
+// (Weft-6b-2 WRITE / Weft-6b-3 READ): a SYS_WRITE/SYS_READ buffer pointing INTO
+// the flow's ring payload region resolves to the payload-relative offset; a
+// buffer below the region or a window past payload_size is rejected (the
+// byte-copy fall-through). The geometry is read from the kernel-private view,
+// never the shared header. The validation is identical for both directions (the
+// descriptor names a [off, off+len) window either way), so one test covers both.
 // ---------------------------------------------------------------------------
-void test_weft_binding_validate_write(void) {
+void test_weft_binding_validate_rw(void) {
     WEFT_SETUP(netd, guest, v, rv);
 
     // The binding the kernel records at SYS_WEFT_MAP: the guest mapped the ring
@@ -238,31 +240,31 @@ void test_weft_binding_validate_write(void) {
     u32 off = 0xABCDu;
 
     // In the payload region, in bounds -> the payload-relative offset.
-    TEST_EXPECT_EQ(weft_binding_validate_write(&b, payload_base + 64, 2000, &off), 0,
+    TEST_EXPECT_EQ(weft_binding_validate_rw(&b, payload_base + 64, 2000, &off), 0,
         "in-ring write validated");
     TEST_EXPECT_EQ((int)off, 64, "offset is payload-relative");
     off = 0xABCDu;
-    TEST_EXPECT_EQ(weft_binding_validate_write(&b, payload_base, 1500, &off), 0, "base ok");
+    TEST_EXPECT_EQ(weft_binding_validate_rw(&b, payload_base, 1500, &off), 0, "base ok");
     TEST_EXPECT_EQ((int)off, 0, "base offset 0");
 
     // Below the payload region (the descriptor/control area) -> rejected.
-    TEST_EXPECT_EQ(weft_binding_validate_write(&b, WEFT_TEST_VA, 2000, &off), -1,
+    TEST_EXPECT_EQ(weft_binding_validate_rw(&b, WEFT_TEST_VA, 2000, &off), -1,
         "below-payload buffer rejected (byte-copy fall-through)");
-    TEST_EXPECT_EQ(weft_binding_validate_write(&b, payload_base - 1, 2000, &off), -1,
+    TEST_EXPECT_EQ(weft_binding_validate_rw(&b, payload_base - 1, 2000, &off), -1,
         "one byte below payload rejected");
 
     // Window past payload_size -> rejected (an in-place read would overrun).
-    TEST_EXPECT_EQ(weft_binding_validate_write(&b, payload_base, rv.payload_size + 1, &off), -1,
+    TEST_EXPECT_EQ(weft_binding_validate_rw(&b, payload_base, rv.payload_size + 1, &off), -1,
         "len past payload_size rejected");
-    TEST_EXPECT_EQ(weft_binding_validate_write(&b, payload_base + rv.payload_size - 10, 11, &off),
+    TEST_EXPECT_EQ(weft_binding_validate_rw(&b, payload_base + rv.payload_size - 10, 11, &off),
         -1, "window straddling the payload end rejected");
-    TEST_EXPECT_EQ(weft_binding_validate_write(&b, payload_base + rv.payload_size - 1, 1, &off), 0,
+    TEST_EXPECT_EQ(weft_binding_validate_rw(&b, payload_base + rv.payload_size - 1, 1, &off), 0,
         "last byte ok");
 
     // Zero-length + NULL guards.
-    TEST_EXPECT_EQ(weft_binding_validate_write(&b, payload_base, 0, &off), -1, "zero-len rejected");
-    TEST_EXPECT_EQ(weft_binding_validate_write(NULL, payload_base, 100, &off), -1, "NULL binding");
-    TEST_EXPECT_EQ(weft_binding_validate_write(&b, payload_base, 100, NULL), -1, "NULL out_off");
+    TEST_EXPECT_EQ(weft_binding_validate_rw(&b, payload_base, 0, &off), -1, "zero-len rejected");
+    TEST_EXPECT_EQ(weft_binding_validate_rw(NULL, payload_base, 100, &off), -1, "NULL binding");
+    TEST_EXPECT_EQ(weft_binding_validate_rw(&b, payload_base, 100, NULL), -1, "NULL out_off");
 
     weft_teardown(netd, guest, v);
 }

@@ -638,10 +638,18 @@ dataplane arc the user committed.
     proven in-guest by `net-echo`'s `weft_e2e` (a real `SYS_WEFT_MAP` round-trip over the
     resident loopback: a ring VA + the visible geometry mirror + an idempotent second map,
     `net-echo: weft-6b MAP E2E PASS`), with the soak leak-baseline confirming no teardown leak.
-    The live DATA DRIVE (the descriptor ring on large Twrite/Tread, the readiness park/wake, the
-    F_NOTIF posting) is **Weft-6b-2/6b-3** — the data-drive wire mechanism (the new `Tweftio` op)
-    is resolved in **§6.2** (user-voted 2026-06-20); `weft.tla` stays unchanged (6b-1 realizes the
-    netd side of `Init`/`Teardown`, no new mechanism).
+    The live DATA DRIVE's wire mechanism (the new `Tweftio` op) is resolved in **§6.2**
+    (user-voted 2026-06-20). **Weft-6b-2 LANDED** — the live TX zero-copy drive (`Tweftio`/
+    `Rweftio` + the kernel write fast-path + the binding ring view + netd's `h_weftio`; a large
+    write whose buffer points into the ring moves zero-copy, proven by `net-echo`'s `weft_tx_e2e`,
+    `net-echo: weft-6b TX E2E PASS`). **Weft-6b-3a LANDED** — the symmetric RX direction
+    (`Tweftio` `dir=READ` + the kernel read fast-path + netd's recv-into-ring + the net-6a-1-shaped
+    blocking defer: a weft `recv()` parks on an empty socket and `poll_weftio` delivers the held
+    `Rweftio` when bytes arrive, so it blocks instead of spuriously returning 0; proven by
+    `weft_rx_e2e`, `net-echo: weft-6b RX E2E PASS`). `weft.tla` stays unchanged for both (the data
+    drive is the symmetric read/write direction of the modeled `Consume`; the 4 buggy cfgs re-ran
+    green). The live readiness park/wake (6b-3b — wire the Weft-4 Rendez, closing NET-PERF N1) +
+    the F_NOTIF two-CQE posting (6b-3c — the Weft-5 holders driven by real events) remain.
 - **Weft-7 (the focused audit + SMP gate + benchmark).** Prosecute the buffer-lifetime UAF
   (the §4.6 hazard, the F1-class), the no-per-op-mediation property, the cross-Proc Burrow
   lifetime, **and the new Weft-6 `Tweft` / `share_id` correlation** (the consumed-exactly-once

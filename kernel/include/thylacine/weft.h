@@ -384,16 +384,18 @@ void weft_share_release_owner(struct Proc *owner);
 struct weft_binding *weft_binding_alloc(struct Burrow *burrow, u64 guest_va,
                                         u32 ring_size, u32 ring_entries);
 
-// Weft-6b-2 data drive: validate a guest write buffer against the flow's ring.
-// `ubuf_va` is the caller's SYS_WRITE buffer; if it lies within this flow's
-// shared-ring payload region and `[off, off+len)` is in bounds, returns 0 and
-// sets `*out_off` to the payload-region-relative offset (the descriptor's
-// `addr`, the same domain as weft_desc.addr). Returns -1 if the buffer is not
-// in the ring or the window is out of bounds (the caller falls back to the
-// byte-copy path). The geometry read is the kernel-private view (never the
+// Weft-6b-2/6b-3 data drive: validate a guest syscall buffer against the flow's
+// ring. Direction-agnostic -- a Tweftio WRITE source and a Tweftio READ
+// destination both name a `[off, off+len)` window in the payload, so one
+// validator serves both. `ubuf_va` is the caller's SYS_WRITE/SYS_READ buffer; if
+// it lies within this flow's shared-ring payload region and `[off, off+len)` is
+// in bounds, returns 0 and sets `*out_off` to the payload-region-relative offset
+// (the descriptor's `addr`, the same domain as weft_desc.addr). Returns -1 if the
+// buffer is not in the ring or the window is out of bounds (the caller falls back
+// to the byte-copy path). The geometry read is the kernel-private view (never the
 // guest-mutable shared header) -- the I-30 validator-once.
-int weft_binding_validate_write(const struct weft_binding *b, u64 ubuf_va,
-                                u32 len, u32 *out_off);
+int weft_binding_validate_rw(const struct weft_binding *b, u64 ubuf_va,
+                             u32 len, u32 *out_off);
 
 // Release a data-fd's ring binding at dev9p_close: drop the registration pin
 // (burrow_unref) + free the binding struct. Does NOT touch the guest's ring

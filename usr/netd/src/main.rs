@@ -538,6 +538,7 @@ impl Driver for NetD {
                     i -= 1;
                     if !conns[i].poll_dns(&mut net)
                         || !conns[i].poll_data(&mut net)
+                        || !conns[i].poll_weftio(&mut net)
                         || !conns[i].poll_ready(&mut net)
                         || !conns[i].poll_connects(&mut net)
                     {
@@ -558,6 +559,7 @@ impl Driver for NetD {
                 || conns.iter().any(|c| {
                     c.has_pending_dns()
                         || c.has_pending_reads()
+                        || c.has_pending_weftio()
                         || c.has_pending_ready()
                         || c.has_pending_connects()
                 }) {

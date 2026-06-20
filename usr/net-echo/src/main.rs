@@ -187,6 +187,72 @@ fn weft_tx_e2e() -> Result<(), &'static str> {
     Ok(())
 }
 
+/// The RX twin of weft_tx_e2e (Weft-6b-3): the SERVER sends a known pattern; the
+/// CLIENT maps the flow's ring and reads INTO it -- the SYS_READ buffer points AT
+/// the ring, so the kernel's weft read fast-path issues Tweftio(READ) -> netd
+/// recvs IN PLACE into the shared ring -> the client reads the bytes from its OWN
+/// ring mapping (zero-copy, never through the 9P body). Proves the Tweftio READ
+/// drive end to end -- INCLUDING the blocking defer: over the loopback the first
+/// read finds the rx empty (the server's bytes are still in netd's poll queue), so
+/// netd parks a PendingWeftRead and poll_weftio recvs + delivers the held Rweftio
+/// on the next poll tick. So this exercises the full park/deliver path.
+fn weft_rx_e2e() -> Result<(), &'static str> {
+    let addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 7792);
+    let listener = TcpListener::bind(addr).map_err(|_| "bind")?;
+    let mut client = TcpStream::connect(addr).map_err(|_| "connect")?;
+    let (mut server, _peer) = listener.accept().map_err(|_| "accept")?;
+
+    // Map the CLIENT's ring (the side that weft-reads); read the payload-region
+    // offset from the geometry mirror (weft_ring_hdr: payload_off @ 12).
+    let data_fd = client.as_raw_fd();
+    let va = unsafe { t_weft_map(data_fd as u64, 0) };
+    if va <= 0 {
+        return Err("map returned no ring");
+    }
+    let base = va as u64;
+    let payload_off = unsafe { core::ptr::read_volatile((base + 12) as *const u32) } as u64;
+
+    // The server sends a known pattern. N >= WEFT_HYBRID_THRESHOLD so the client's
+    // read rides the ring (the weft read fast-path).
+    const N: usize = 4096;
+    let mut tx = [0u8; N];
+    for (i, b) in tx.iter_mut().enumerate() {
+        *b = (i as u8) ^ 0x3C;
+    }
+    let mut sent = 0usize;
+    while sent < N {
+        let k = server.write(&tx[sent..]).map_err(|_| "server write")?;
+        if k == 0 {
+            return Err("server write stalled");
+        }
+        sent += k;
+    }
+
+    // The client reads INTO the ring: the read buffer POINTS AT the ring payload,
+    // so the kernel weft read fast-path recvs in place (Tweftio READ). Loop until
+    // the whole payload arrives (each read blocks until netd delivers).
+    let payload_ptr = (base + payload_off) as *mut u8;
+    let mut total = 0usize;
+    while total < N {
+        let dst = unsafe { core::slice::from_raw_parts_mut(payload_ptr.add(total), N - total) };
+        let k = client.read(dst).map_err(|_| "weft read")?;
+        if k == 0 {
+            return Err("client EOF before full payload");
+        }
+        total += k;
+    }
+
+    // The bytes are now in the client's own ring mapping (written there by netd,
+    // never copied through the 9P body) -- verify they survived the zero-copy hop.
+    for i in 0..N {
+        let b = unsafe { core::ptr::read_volatile(payload_ptr.add(i)) };
+        if b != ((i as u8) ^ 0x3C) {
+            return Err("payload mismatch after the zero-copy RX hop");
+        }
+    }
+    Ok(())
+}
+
 /// Read netd's live TCP connection count from `/net/tcp/stats` (the `active`
 /// line). The soak's leak detector: every connection a cycle opens must be
 /// freed by its last clunk (the section-16 no-leak exit criterion), so the count
@@ -472,6 +538,19 @@ fn probe() -> i64 {
         ),
         Err(why) => {
             t_putstr(&alloc::format!("net-echo: FAIL -- weft-6b TX E2E ({})\n", why));
+            unsafe { t_exits(1) }
+        }
+    };
+    // Weft-6b-3: the live RX zero-copy DATA drive -- the server sends a payload,
+    // the client weft-reads it INTO the shared ring (Tweftio READ, exercising the
+    // blocking defer over the loopback). Runs before the soak so its connection is
+    // freed.
+    match weft_rx_e2e() {
+        Ok(()) => t_putstr(
+            "net-echo: weft-6b RX E2E PASS (Tweftio READ -> netd recv-in-place -> ring verified)\n",
+        ),
+        Err(why) => {
+            t_putstr(&alloc::format!("net-echo: FAIL -- weft-6b RX E2E ({})\n", why));
             unsafe { t_exits(1) }
         }
     };

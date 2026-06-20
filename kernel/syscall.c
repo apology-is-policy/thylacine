@@ -1095,12 +1095,53 @@ static s64 sys_write_handler(u64 hraw, u64 buf_va, u64 len) {
     return sys_write_for_proc(p, (hidx_t)hraw, scratch, len);
 }
 
+// Weft-6b-3 data drive (RX): the zero-copy read fast-path. A large read whose
+// user buffer points INTO a weft-bound /net data fd's shared ring recvs through
+// the ring (Tweftio READ) with NO copy-out -- netd writes the bytes directly into
+// the guest's shared mapping, so the read is NOT capped at SYS_RW_MAX (the
+// byte-copy scratch bound) and the handler does NO uaccess_store on this path.
+// Resolves the handle once; on a non-weft read it releases the ref and returns
+// *handled = false so the caller takes the byte-copy path. Gated by the caller on
+// len >= WEFT_HYBRID_THRESHOLD, so small reads never pay this lookup. Mirrors
+// sys_write_weft_fastpath.
+static s64 sys_read_weft_fastpath(struct Proc *p, hidx_t h, u64 buf_va,
+                                  u64 len, bool *handled) {
+    *handled = false;
+    if (len > 0xFFFFFFFFull) return 0;              // beyond the u32 descriptor domain
+    struct Spoor *c = sys_lookup_rw_handle(p, h, RIGHT_READ);
+    if (!c) return 0;                               // bad fd -> the byte-copy path -EBADFs
+    if (c->flag & CWALKONLY) { spoor_clunk(c); return 0; }   // O_PATH -> byte-copy rejects
+    u32 got = 0;
+    int v = dev9p_weft_try_read(c, buf_va, (u32)len, &got);
+    if (v == 0) { spoor_clunk(c); return 0; }       // not a weft read -> byte-copy
+    // v == 1 (handled OK; netd wrote the bytes into the guest's ring) or v == -1
+    // (weft transport error -- the flow is dead, the byte-copy path would fail
+    // identically, so surface it).
+    s64 r;
+    if (v == 1) { c->offset += got; r = (s64)got; }
+    else        { r = -1; }
+    spoor_clunk(c);
+    *handled = true;
+    return r;
+}
+
 static s64 sys_read_handler(u64 hraw, u64 buf_va, u64 len) {
     struct Thread *t = current_thread();
     if (!t)                                          return -1;
     struct Proc *p = t->proc;
     if (!p)                                          return -1;
     if (!sys_validate_user_buf(buf_va, len))         return -1;
+
+    // Weft zero-copy fast-path (RX): a large read whose buffer points into a
+    // weft-bound /net data fd's shared ring recvs through the ring (no copy-out,
+    // NOT SYS_RW_MAX-capped). Gated on the hybrid threshold so small reads are
+    // unaffected (they fall straight through to the byte-copy path).
+    if (len >= WEFT_HYBRID_THRESHOLD) {
+        bool weft_handled = false;
+        s64 rd = sys_read_weft_fastpath(p, (hidx_t)hraw, buf_va, len, &weft_handled);
+        if (weft_handled) return rd;
+    }
+
     if (len > SYS_RW_MAX) len = SYS_RW_MAX;
 
     if (len == 0) {

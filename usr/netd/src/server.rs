@@ -491,6 +491,25 @@ struct PendingReady {
     mask: u16,   // the requested poll events (POLLIN | POLLOUT) from the offset
 }
 
+/// A blocking weft `data` read holding its Rweftio (Weft-6b-3, RX). The kernel
+/// issues Tweftio(READ) on a weft-bound flow's data fd; netd recvs IN PLACE into
+/// the flow's shared ring at `[off, off+len)`. If the socket's rx is empty but the
+/// connection is still open, the read DEFERS (park this, return Disp::Deferred)
+/// instead of replying Rweftio(0) -- a 0 would look like EOF to the guest's
+/// `recv()`. poll_weftio re-resolves the ring + recvs when bytes arrive (or 0 on
+/// EOF), then sends the held Rweftio. This is the weft twin of PendingRead: the
+/// recv target is the shared ring (not a 9P-body scratch) and the reply is the
+/// byte count (not the bytes). Cancelled by the fid's clunk / a Tflush on its tag
+/// / teardown / Tversion, exactly like PendingRead. Bounded by MAX_FIDS (#65).
+#[derive(Copy, Clone)]
+struct PendingWeftRead {
+    fid: u32,    // the data fid the read is on (cancelled on its clunk)
+    slot_n: u32, // the connection slot to recv from + whose ring to write into
+    tag: u16,    // the held Tweftio tag (cancelled by a Tflush on it)
+    off: u32,    // the ring payload offset to recv into (validated at park time)
+    len: u32,    // the recv window length (the Tweftio len; the recv cap)
+}
+
 /// The result of a non-blocking dequeue from a connection's rx (net-6a). The
 /// blocking read path needs to distinguish "no data yet, the connection is open"
 /// (DEFER) from "end of stream" (return 0) -- a distinction the older `data_recv`
@@ -504,6 +523,39 @@ enum RecvOutcome {
     // empty UDP datagram)
     WouldBlock, // no data yet, the connection is open -- the caller may defer
     Eof,        // end of stream (TCP FIN drained / socket gone) -- read returns 0
+}
+
+/// Recv from connection `n`'s socket directly INTO its weft ring at
+/// `[off, off+len)` (Weft-6b-3, RX). Re-resolves the flow's ring + re-validates
+/// the window on every call, so a slot freed/re-minted mid-defer is safe -- a
+/// vanished or shrunk ring yields Eof, never an OOB write (the net-3d slot-reuse
+/// discipline). On Data(k) the k bytes are already in the guest's shared mapping
+/// (zero-copy). Used by both h_weftio's first attempt and poll_weftio's deferred
+/// delivery. SAFETY: ring_va is netd's live mapping of the flow's ring (held
+/// while the slot is live); `[payload_off+off, +len)` is bounds-checked here
+/// before the &mut slice is built, against geometry derived from the flow's own
+/// ring_size.
+fn weft_recv_into_ring(net: &mut Net, n: u32, off: u32, len: u32) -> RecvOutcome {
+    let flow = match net.weft_flow(n) {
+        Some(w) => w, // a Copy -- no borrow of `net` is held across data_recv_outcome
+        None => return RecvOutcome::Eof, // no ring (slot gone) -> nothing arrives
+    };
+    let geom = match weftlib::ring_layout(flow.ring_size, WEFT_RING_ENTRIES) {
+        Some(g) => g,
+        None => return RecvOutcome::Eof,
+    };
+    let off = off as usize;
+    let len = len as usize;
+    let psz = geom.payload_size as usize;
+    if len == 0 || off > psz || len > psz - off {
+        return RecvOutcome::Eof; // window no longer fits (ring changed) -> stop
+    }
+    let base = flow.ring_va as usize + geom.payload_off as usize + off;
+    // SAFETY: bounds-checked above; ring_va is netd's live per-flow mapping. The
+    // &mut slice is a raw pointer into netd's own AS (not borrowed from `net`), so
+    // the &mut net for data_recv_outcome does not alias it.
+    let dst: &mut [u8] = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, len) };
+    net.data_recv_outcome(n, dst)
 }
 
 /// A completed accept ready to deliver: the serve loop rebinds `fid` onto the
@@ -4031,6 +4083,11 @@ pub struct Conn {
     // reaches ESTABLISHED (or fails / times out). Makes the data open block to
     // ESTABLISHED, as TcpStream::connect documents -- the outbound NIC path.
     pending_connects: Vec<PendingConnect>,
+    // Blocking weft `data` reads holding their Rweftio (Weft-6b-3, RX): each
+    // parked on an empty rx, completed by poll_weftio (recv IN PLACE into the
+    // flow's shared ring) when bytes arrive (or 0 on EOF). The weft twin of
+    // pending_reads -- the recv target is the ring, the reply is the byte count.
+    pending_weftio: Vec<PendingWeftRead>,
 }
 
 impl Conn {
@@ -4047,6 +4104,7 @@ impl Conn {
             pending_reads: Vec::new(),
             pending_ready: Vec::new(),
             pending_connects: Vec::new(),
+            pending_weftio: Vec::new(),
         }
     }
 
@@ -4282,6 +4340,53 @@ impl Conn {
         !self.pending_reads.is_empty()
     }
 
+    /// Complete any blocking weft `data` reads whose bytes arrived (Weft-6b-3,
+    /// RX): recv IN PLACE into the flow's shared ring + send the held Rweftio
+    /// (the byte count). False on a write failure (tear the connection down). The
+    /// weft twin of poll_data -- register-then-observe holds the same way (net.poll
+    /// runs before this pass, and netd is single-threaded, so no readiness edge is
+    /// lost between h_weftio's empty dequeue and the park).
+    pub fn poll_weftio(&mut self, net: &mut Net) -> bool {
+        let mut i = 0;
+        while i < self.pending_weftio.len() {
+            let pw = self.pending_weftio[i];
+            match weft_recv_into_ring(net, pw.slot_n, pw.off, pw.len) {
+                RecvOutcome::WouldBlock => i += 1, // still empty; check next tick
+                RecvOutcome::Data(k) => {
+                    self.pending_weftio.remove(i);
+                    if !self.deliver_weftio(pw.tag, k as u32) {
+                        return false;
+                    }
+                }
+                RecvOutcome::Eof => {
+                    self.pending_weftio.remove(i);
+                    if !self.deliver_weftio(pw.tag, 0) {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// Build + send the held Rweftio for a now-ready blocking weft read. False on
+    /// a write failure (tear the connection down). Mirrors deliver_read.
+    fn deliver_weftio(&mut self, tag: u16, count: u32) -> bool {
+        self.out_buf.clear();
+        self.out_buf.resize(SRV_MSIZE_USIZE, 0);
+        match p9::build_rweftio(&mut self.out_buf, tag, count) {
+            Ok(rlen) => self.send_all(rlen),
+            Err(()) => false,
+        }
+    }
+
+    /// Any parked weft read clamps the serve-loop poll delay to the floor (RX
+    /// arrives on the NIC, not a pollable 9P fd) -- the same property as
+    /// has_pending_reads for the byte-copy stream.
+    pub fn has_pending_weftio(&self) -> bool {
+        !self.pending_weftio.is_empty()
+    }
+
     /// Complete any deferred TCP `data` opens whose handshake has resolved (#257;
     /// the serve-loop pass, called per-Conn after net.poll so a transition this
     /// tick is visible). ESTABLISHED -> send the held Rlopen (the data stream is
@@ -4452,6 +4557,7 @@ impl Conn {
         self.query_clear_all(net); // free cs/dns sessions + cancel queries (net-4b)
         self.pending_reads.clear(); // the held Rreads die with the connection (net-6a)
         self.pending_ready.clear(); // ... and the held readiness Rreads (net-6b)
+        self.pending_weftio.clear(); // ... and the held weft Rweftios (Weft-6b-3)
         self.pending_connects.clear(); // ... and the held connect Rlopens (#257)
     }
 
@@ -4496,6 +4602,7 @@ impl Conn {
             self.query_drop(net, fid); // free cs/dns session + cancel query (net-4b)
             self.pending_reads.retain(|pr| pr.fid != fid); // drop blocked reads (net-6a)
             self.pending_ready.retain(|pr| pr.fid != fid); // drop readiness probes (net-6b)
+            self.pending_weftio.retain(|pw| pw.fid != fid); // drop blocked weft reads (Weft-6b-3)
             self.pending_connects.retain(|pc| pc.fid != fid); // drop deferred connects (#257)
             if let Some(n) = path_conn_n(f.path) {
                 net.slot_unref(n);
@@ -4700,6 +4807,7 @@ impl Conn {
         self.query_clear_all(net); // a Tversion also resets cs/dns sessions (net-4b)
         self.pending_reads.clear(); // ... and drops any blocked data reads (net-6a)
         self.pending_ready.clear(); // ... and any deferred readiness probes (net-6b)
+        self.pending_weftio.clear(); // ... and any blocked weft reads (Weft-6b-3)
         self.pending_connects.clear(); // ... and any deferred connect opens (#257)
     }
 
@@ -5165,6 +5273,7 @@ impl Conn {
         self.cancel_dns_flush(net, a.oldtag); // net-4b: drop a deferred dns read
         self.pending_reads.retain(|pr| pr.tag != a.oldtag); // net-6a: drop a blocked read
         self.pending_ready.retain(|pr| pr.tag != a.oldtag); // net-6b: drop a readiness probe
+        self.pending_weftio.retain(|pw| pw.tag != a.oldtag); // Weft-6b-3: drop a blocked weft read
         self.pending_connects.retain(|pc| pc.tag != a.oldtag); // #257: drop a deferred connect
         p9::build_rflush(&mut self.out_buf, tag)
     }
@@ -5238,8 +5347,7 @@ impl Conn {
         if !net.slot_live(n) {
             return self.err(tag, p9::E_INVAL);
         }
-        // v1.0: TX only. RX (READ) is Weft-6b-3.
-        if req.dir != p9::WEFT_DIR_WRITE {
+        if req.dir != p9::WEFT_DIR_WRITE && req.dir != p9::WEFT_DIR_READ {
             return self.err(tag, p9::E_INVAL);
         }
         // The flow must have a mapped ring: the kernel issues Tweftio only after
@@ -5248,10 +5356,11 @@ impl Conn {
             Some(w) => w,
             None => return self.err(tag, p9::E_INVAL),
         };
-        // Memory-safety bound: [off, off+len) must lie within the ring's payload
-        // region. The kernel already validated against ITS view; netd re-checks
-        // its OWN mapping before reading (defense in depth -- a memory bound, NOT
-        // a per-op capability re-check).
+        // Memory-safety bound (shared by both directions): [off, off+len) must lie
+        // within the ring's payload region. The kernel already validated against
+        // ITS view; netd re-checks its OWN mapping (defense in depth -- a memory
+        // bound, NOT a per-op capability re-check). A malformed window is E_INVAL
+        // (a protocol error), never silently treated as 0/EOF.
         let geom = match weftlib::ring_layout(flow.ring_size, WEFT_RING_ENTRIES) {
             Some(g) => g,
             None => return self.err(tag, p9::E_INVAL),
@@ -5262,14 +5371,41 @@ impl Conn {
         if len == 0 || off > psz || len > psz - off {
             return self.err(tag, p9::E_INVAL);
         }
-        // Read the payload IN PLACE from the shared ring (no 9P-body copy) + hand
-        // it to smoltcp. SAFETY: ring_va is netd's live mapping of the per-flow
-        // ring (held while the slot is live); [payload_off+off, +len) is
-        // bounds-checked above to lie within the payload region.
-        let base = flow.ring_va as usize + geom.payload_off as usize + off;
-        let payload: &[u8] = unsafe { core::slice::from_raw_parts(base as *const u8, len) };
-        let sent = net.data_send(n, payload);
-        p9::build_rweftio(&mut self.out_buf, tag, sent as u32)
+        if req.dir == p9::WEFT_DIR_WRITE {
+            // TX: read the payload IN PLACE from the shared ring (no 9P-body copy)
+            // + hand it to smoltcp. SAFETY: ring_va is netd's live mapping of the
+            // per-flow ring (held while the slot is live); [payload_off+off, +len)
+            // is bounds-checked above to lie within the payload region.
+            let base = flow.ring_va as usize + geom.payload_off as usize + off;
+            let payload: &[u8] =
+                unsafe { core::slice::from_raw_parts(base as *const u8, len) };
+            let sent = net.data_send(n, payload);
+            return p9::build_rweftio(&mut self.out_buf, tag, sent as u32);
+        }
+        // RX (WEFT_DIR_READ): recv from the socket directly INTO the ring at
+        // [off, off+len). Bytes now -> reply the count (already in the guest's
+        // shared mapping, zero-copy). An empty-but-open socket DEFERS (park a
+        // PendingWeftRead; poll_weftio recvs + replies when bytes arrive) -- a 0
+        // would look like EOF to the guest's recv() (the net-6a-1 distinction).
+        // EOF -> Rweftio(0).
+        match weft_recv_into_ring(net, n, req.off, req.len) {
+            RecvOutcome::Data(k) => p9::build_rweftio(&mut self.out_buf, tag, k as u32),
+            RecvOutcome::Eof => p9::build_rweftio(&mut self.out_buf, tag, 0),
+            RecvOutcome::WouldBlock => {
+                if self.pending_weftio.len() >= MAX_FIDS {
+                    return self.err(tag, p9::E_PROTO);
+                }
+                self.pending_weftio.push(PendingWeftRead {
+                    fid: req.fid,
+                    slot_n: n,
+                    tag,
+                    off: req.off,
+                    len: req.len,
+                });
+                self.defer = true;
+                Ok(0) // ignored: dispatch returns Disp::Deferred
+            }
+        }
     }
 
     fn h_write(&mut self, net: &mut Net, tmsg: &[u8], tag: u16) -> Result<usize, ()> {

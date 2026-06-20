@@ -1214,8 +1214,16 @@ landed at Weft-2 (`burrow_share_into`) and the descriptor-ring leg
 Weft-3 (`kernel/weft.c`); the `F_NOTIF` holder lifecycle at Weft-5; the EL0
 delivery (`Init`/`Teardown` — the `share_id` registry + `SYS_WEFT_SHARE`/`MAP` +
 the `dev9p_priv` binding) at Weft-6a-2 (`weft.tla` unchanged — the registry is
-the model's `Init`/`Teardown` plumbing). The live ring drive + the full
-`SYS_WEFT_MAP` E2E are OWED across Weft-6b/6c/7.** Models the per-flow zero-copy network
+the model's `Init`/`Teardown` plumbing). The netd `Tweft` handler + per-flow ring
+register at Weft-6b-1; the **live data drive** at Weft-6b-2 (TX:
+`sys_write_weft_fastpath` → `dev9p_weft_try_write` → `p9_client_weftio(WRITE)`) +
+Weft-6b-3a (RX: `sys_read_weft_fastpath` → `dev9p_weft_try_read` →
+`p9_client_weftio(READ)` + netd's recv-into-ring defer) — both are the symmetric
+write/read direction of the modeled `Consume` (the descriptor is a trusted
+register-passed syscall arg validated by `weft_binding_validate_rw` against the
+kernel-private `weft_ring_view`, so `weft.tla` is unchanged; the 4 buggy cfgs
+re-ran green). The live readiness park/wake (6b-3b) + the `F_NOTIF` posting
+(6b-3c) + the full native-API E2E are OWED across Weft-6b-3/6c/7.** Models the per-flow zero-copy network
 dataplane (NET-THROUGHPUT.md §5; ARCH §28 I-37) and pins I-37 — the
 generalization of the Loom I-29/I-30 pin to the cross-Proc SHARED PAGE + the
 notification-terminal (`F_NOTIF`) multi-holder release. `loom.tla` owns the

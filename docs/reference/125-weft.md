@@ -19,9 +19,11 @@ ring whose geometry mirror is visible; see "The netd ring register" below). The
 (6b-2a) + the kernel write fast-path + the binding ring view + netd's
 `h_weftio` (6b-2b): a large write whose buffer points into a flow's shared ring
 moves zero-copy (see "The data drive" below), proven in-guest by `net-echo`'s
-`weft_tx_e2e`. The readiness park/wake + the `F_NOTIF` two-CQE posting + the RX
-(`dir=READ`) half are Weft-6b-3; the native `libthyla_rs::net` push/pop/wait API
-+ the batched descriptor-ring drive are Weft-6c.
+`weft_tx_e2e`. **Weft-6b-3a** lands the symmetric RX direction (`Tweftio`
+`dir=READ` + the kernel read fast-path + netd's recv-into-ring + the blocking
+defer), proven by `weft_rx_e2e`. The live readiness park/wake (6b-3b) + the
+`F_NOTIF` two-CQE posting (6b-3c) + the native `libthyla_rs::net` push/pop/wait
+API + the batched descriptor-ring drive (6c) remain.
 
 Source: `kernel/include/thylacine/weft.h`, `kernel/weft.c`. Specs:
 `specs/weft.tla` (ARCH §28 I-37, the data plane + the F_NOTIF holder lifecycle),
@@ -604,12 +606,16 @@ owner-death GC — a narrow window, since the claim follows `Tweft` in the same
 
 ---
 
-## The data drive — `Tweftio` (Weft-6b-2)
+## The data drive — `Tweftio` (Weft-6b-2 TX / Weft-6b-3 RX)
 
-Weft-6b-2 makes the *data* live: a large payload travels through the per-flow
-ring instead of the 9P body. The wire mechanism (user-voted 2026-06-20,
-NET-THROUGHPUT §6.2) is a new Thylacine-private op, **`Tweftio`** — the kernel
-stays the I-30 validator-once and a 9P op still mediates every transfer (§4.8).
+Weft-6b-2/6b-3 make the *data* live: a large payload travels through the per-flow
+ring instead of the 9P body, in **both directions**. The wire mechanism
+(user-voted 2026-06-20, NET-THROUGHPUT §6.2) is a new Thylacine-private op,
+**`Tweftio`** with a `dir` field (`WEFT_DIR_WRITE` / `WEFT_DIR_READ`) — the
+kernel stays the I-30 validator-once and a 9P op still mediates every transfer
+(§4.8). The TX direction landed at 6b-2; the RX direction is its symmetric twin
+(6b-3a) — the validation, the I-30 pin, and the fast-path shape are identical, so
+the validator is direction-agnostic (`weft_binding_validate_rw`).
 
 ### The kick + the kernel validator (`6b-2b`)
 
@@ -620,7 +626,7 @@ payload_off + O, L)` — the buffer points *into* the bound ring.
 `sys_write_handler`, gated on `len >= WEFT_HYBRID_THRESHOLD` so small writes are
 unaffected, runs `sys_write_weft_fastpath` → `dev9p_weft_try_write`:
 
-- `weft_binding_validate_write` derives the descriptor `{O = buf - (guest_va +
+- `weft_binding_validate_rw` derives the descriptor `{O = buf - (guest_va +
   payload_off), L}` from the **trusted, register-passed syscall args** and
   bounds-checks it against the binding's kernel-private `weft_ring_view` (the
   same `weft_desc_valid` gate as the descriptor ring — but sourced from a
@@ -629,26 +635,54 @@ unaffected, runs `sys_write_weft_fastpath` → `dev9p_weft_try_write`:
   the moved-byte count; a small write, a buffer outside the ring, or a no-binding
   fd falls through to the byte-copy path (the hybrid threshold).
 
+**The RX fast-path (`6b-3a`)** is the symmetric twin: `sys_read_handler` →
+`sys_read_weft_fastpath` → `dev9p_weft_try_read` runs the **same**
+`weft_binding_validate_rw` (the descriptor names a `[off, off+len)` window either
+way) and issues `p9_client_weftio(dir=READ)`. The one structural difference:
+because netd writes the recv'd bytes **directly into the guest's shared ring**,
+the read handler does **no `uaccess_store`** copy-out — the guest reads the bytes
+from its own ring mapping (the true zero-copy property). The `p9_client_weftio`
+call **blocks** until netd replies (the #841 elected reader, death-interruptible,
+no per-op deadline), so RX inherits the blocking semantics free from the
+synchronous client + netd's deferred reply (below).
+
 Because the fast-path bypasses the `SYS_RW_MAX` (4 KiB) scratch bounce, a single
-weft write moves up to `payload_size` (the ring is the bound) — the byte-copy
-cap does not apply to the zero-copy path.
+weft write/read moves up to `payload_size` (the ring is the bound) — the
+byte-copy cap does not apply to the zero-copy path.
 
 The binding's **`weft_ring_view`** is computed once at `SYS_WEFT_MAP`
 (`weft_binding_alloc` → `weft_ring_layout` from the Burrow's contiguous KVA +
 the `Rweft`-reported `ring_entries`) — the trusted geometry the validate reads,
 never the guest-mutable shared header mirror.
 
-### netd reads in place (`h_weftio`)
+### netd reads/writes in place (`h_weftio`)
 
 `usr/netd/src/server.rs::h_weftio` (dispatched on `P9_TWEFTIO`) resolves
-`fid → connection N` (the same fail-closed gate as `h_weft`), re-bounds
-`[off, off+len)` against its own ring geometry (defence in depth — a memory
-bound, not a per-op capability re-check), reads `ring_va + payload_off + off`
-for `len` **in place** (no 9P-body copy), hands it to smoltcp (`data_send`), and
-replies `Rweftio(count)`. v1.0 is **TX-only** (`WEFT_DIR_WRITE`); the RX
-(`dir=READ`) half — netd writing recv bytes into the ring + the blocking-read
-defer — is Weft-6b-3. The ring→smoltcp-TX copy is netd-local; the true
-zero-copy-to-NIC (no intermediate copy) is the F_NOTIF send, Weft-6b-3/Weft-5.
+`fid → connection N` (the same fail-closed gate as `h_weft`), validates the dir,
+and re-bounds `[off, off+len)` against its own ring geometry (defence in depth —
+a memory bound, not a per-op capability re-check; a malformed window is
+`E_INVAL`, never silently treated as EOF). Then:
+
+- **TX (`WEFT_DIR_WRITE`):** reads `ring_va + payload_off + off` for `len` **in
+  place** (no 9P-body copy), hands it to smoltcp (`data_send`), replies
+  `Rweftio(count)`.
+- **RX (`WEFT_DIR_READ`, 6b-3a):** recvs from the socket **directly into** the
+  ring at `[off, off+len)` (`weft_recv_into_ring` → `data_recv_outcome` over the
+  in-place `&mut` slice). Bytes now → reply the count (already in the guest's
+  shared mapping). An **empty-but-open** socket **DEFERS** — netd parks a
+  `PendingWeftRead` and returns `Disp::Deferred` (no reply), so the kernel
+  client's `p9_client_weftio` blocks on the held tag; `poll_weftio` (the
+  serve-loop pass, after `net.poll`) recvs into the ring + delivers the held
+  `Rweftio` when bytes arrive (or `0` on EOF). This is the weft twin of the
+  net-6a-1 byte-copy `h_read`/`poll_data` defer — without it a 0-byte reply would
+  look like EOF to the guest's `recv()`. The defer's I-9 no-lost-wake holds the
+  same way: netd is single-threaded, so no readiness edge is lost between the
+  empty-observe and the park; the `PendingWeftRead` is cancelled on its data
+  fid's clunk / a `Tflush` on its tag / teardown / `Tversion`, exactly like
+  `PendingRead` (a missed cancel = a stranded held tag).
+
+The ring→smoltcp-TX copy (and the RX recv-into-ring copy) is netd-local; the true
+zero-copy-to-NIC (no intermediate copy) is the F_NOTIF send, Weft-6b-3c/Weft-5.
 
 ### The synchronous path vs the batched descriptor ring
 
@@ -660,16 +694,20 @@ validate through `weft_desc_valid` against the kernel view.
 
 ### Tests + what's deferred
 
-`weft.binding_validate_write` (a unit test of the write validator: in-ring
-offset, below-region reject, past-`payload_size` reject, the byte-copy
-fall-through) + `9p_wire.tweftio_round_trip` / `9p_session.weftio_round_trip` /
-`9p_client.weftio` (6b-2a). The **live TX E2E** is `net-echo`'s `weft_tx_e2e`
-over the resident loopback (`net-echo: weft-6b TX E2E PASS`): the client
+`weft.binding_validate_rw` (a unit test of the direction-agnostic validator:
+in-ring offset, below-region reject, past-`payload_size` reject, the byte-copy
+fall-through — identical for read and write) + `9p_wire.tweftio_round_trip` /
+`9p_session.weftio_round_trip` / `9p_client.weftio` (6b-2a). The **live E2Es** are
+`net-echo`'s `weft_tx_e2e` (`net-echo: weft-6b TX E2E PASS`) and `weft_rx_e2e`
+(`net-echo: weft-6b RX E2E PASS`) over the resident loopback. TX: the client
 weft-writes a 4 KiB payload through the shared ring, netd reads it in place +
-sends it over the loopback, the server reads it back byte-copy, and the bytes
-are verified. The RX half, the readiness park/wake, the F_NOTIF posting, and the
-batched ring drive are Weft-6b-3/6c; the focused buffer-lifetime audit is
-Weft-7. 961/961 PASS, boot OK, 0 EXTINCTION at landing.
+sends it, the server reads it back, the bytes are verified. RX: the server sends
+a 4 KiB pattern, the client weft-reads it **into** the ring (`Tweftio` READ —
+exercising the full blocking defer, since over the loopback the first read finds
+the rx empty and netd parks + delivers on the next poll tick), and the bytes are
+verified in the client's own ring mapping. The readiness park/wake (6b-3b), the
+F_NOTIF posting (6b-3c), and the batched ring drive (6c) remain; the focused
+buffer-lifetime audit is Weft-7. 961/961 PASS, boot OK, 0 EXTINCTION at landing.
 
 ---
 

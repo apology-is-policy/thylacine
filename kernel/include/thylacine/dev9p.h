@@ -151,6 +151,17 @@ int dev9p_client_fid(struct Spoor *c, struct p9_client **out_client, u32 *out_fi
 // from the write syscall handler with the caller's user VA (before any copy-in).
 int dev9p_weft_try_write(struct Spoor *spoor, u64 ubuf_va, u32 len, u32 *accepted);
 
+// Weft-6b-3 data drive (RX): try the zero-copy read path for a /net data fd whose
+// SYS_READ buffer points INTO its weft-bound shared ring. The kernel validates the
+// destination descriptor against the flow's private ring view (the I-30
+// validator-once) and issues Tweftio(READ); netd recvs IN PLACE into the ring +
+// replies the count. Returns 1 if handled (*got = bytes recv'd, written directly
+// into the guest's ring), 0 if NOT a weft read (the caller falls back to the
+// byte-copy path), -1 on a weft transport error. Called from the read syscall
+// handler with the caller's user VA; on a handled read the handler does NO
+// uaccess_store (netd already wrote the bytes into the guest's shared mapping).
+int dev9p_weft_try_read(struct Spoor *spoor, u64 ubuf_va, u32 len, u32 *got);
+
 // Resolve a dev9p-backed Spoor to its `struct dev9p_priv *` (dc + magic gated;
 // NULL if `c` is not a live dev9p Spoor). Exposed for kernel/dev9p_poll.c (the
 // `.poll` bridge reads p->poll + p->client + p->fid) + the dev9p_poll tests.

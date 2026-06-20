@@ -536,12 +536,38 @@ int dev9p_weft_try_write(struct Spoor *spoor, u64 ubuf_va, u32 len, u32 *accepte
     if (!b) return 0;                                   // not weft-bound -> byte-copy
     if (!weft_should_ring(len)) return 0;               // below the hybrid threshold
     u32 off = 0;
-    if (weft_binding_validate_write(b, ubuf_va, len, &off) != 0)
+    if (weft_binding_validate_rw(b, ubuf_va, len, &off) != 0)
         return 0;                                       // buffer not in the ring -> byte-copy
     u32 got = 0;
     int e = p9_client_weftio(p->client, p->fid, off, len, WEFT_DIR_WRITE, &got);
     if (e != 0) return -1;                              // weft attempted + failed (dead flow)
     if (accepted) *accepted = got;
+    return 1;                                           // handled zero-copy
+}
+
+// Weft-6b-3 data drive (RX): a large SYS_READ whose buffer points INTO a
+// weft-bound /net data fd's shared ring recvs zero-copy -- the kernel validates
+// the destination descriptor against the flow's private ring view (the I-30
+// validator-once) and issues Tweftio(READ); netd recvs from the socket IN PLACE
+// into the ring + replies the recv'd byte count. Returns 1 if handled (*got set),
+// 0 if NOT a weft read (the caller falls back to the byte-copy path -- small
+// payload, not weft-bound, or a buffer outside the ring), -1 on a weft transport
+// error. NOT the byte-copy path: netd writes the bytes directly into the guest's
+// shared ring, so nothing is copied back through the 9P body OR the SYS_READ
+// scratch -- the SYS_READ handler does NO uaccess_store on this path.
+int dev9p_weft_try_read(struct Spoor *spoor, u64 ubuf_va, u32 len, u32 *got) {
+    struct dev9p_priv *p = priv_of(spoor);
+    if (!p) return 0;                                   // not dev9p -> byte-copy
+    struct weft_binding *b = __atomic_load_n(&p->weft, __ATOMIC_ACQUIRE);
+    if (!b) return 0;                                   // not weft-bound -> byte-copy
+    if (!weft_should_ring(len)) return 0;               // below the hybrid threshold
+    u32 off = 0;
+    if (weft_binding_validate_rw(b, ubuf_va, len, &off) != 0)
+        return 0;                                       // buffer not in the ring -> byte-copy
+    u32 n = 0;
+    int e = p9_client_weftio(p->client, p->fid, off, len, WEFT_DIR_READ, &n);
+    if (e != 0) return -1;                              // weft attempted + failed (dead flow)
+    if (got) *got = n;
     return 1;                                           // handled zero-copy
 }
 
