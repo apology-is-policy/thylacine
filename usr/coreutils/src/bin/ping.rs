@@ -188,8 +188,12 @@ fn run(args: Args) -> i64 {
     let loss_color = if loss == 0 { grn } else { emb };
     let row = ui::Row::new(
         format!("{} transmitted, {} received, {}% loss", sent, received, loss),
+        // Color each "value word" pair as ONE contiguous span: a consumer that
+        // substring-matches a marker like "N received" must not find a color
+        // RESET wedged between the count and the word. (The joey net-util boot
+        // probe greps ping's piped output for "1 received".)
         format!(
-            "{}{}{} transmitted, {}{}{} received, {}{}%{} loss",
+            "{}{} transmitted{}, {}{} received{}, {}{}% loss{}",
             gold, sent, rst, gold, received, rst, loss_color, loss, rst
         ),
     );
