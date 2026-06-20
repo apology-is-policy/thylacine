@@ -567,15 +567,85 @@ dataplane arc the user committed.
   counterexample). 3 kernel tests, 949/949 + boot OK + 0 EXTINCTION. The **live two-CQE posting**
   (the `weft_notif` on the flow's `loom_async_op`, the holders driven by real netd/NIC/ACK events)
   is wired at Weft-6. Reference: `docs/reference/125-weft.md`.
-- **Weft-6 (the per-flow capability binding + the native API).** Bind the ring setup to the
-  `/net` data fid's I-30 pin (the "grant *is* the dataplane" realization) — **this is where
-  the grant-is-the-share EL0 surface lands** (`SYS_WEFT_SHARE = 81` netd-side +
-  `SYS_WEFT_MAP = 82` guest-side, keyed on the data fid; the data-fid open auto-maps the
-  flow's shared Burrow into the guest, per the Weft-2 delivery-model decision); the
-  `libthyla_rs::net` native client over the Demikernel-shaped API (`push`/`pop`/`wait`).
+- **Weft-6 (the per-flow capability binding + the native API) — DESIGN LOCKED (the keying
+  fork resolved 2026-06-20, §6.1; impl OWED).** The EL0 delivery: bind the ring setup to the
+  `/net` data fid's I-30 pin (the "grant *is* the dataplane" realization), **lazily and keyed
+  on the 9P fid** (Option B, §6.1 — superseding the earlier eager "data-fid auto-map" sketch).
+  The mechanism:
+  - **`Tweft(fid F) → Rweft(share_id, geometry)`** — a new Thylacine-private 9P op
+    (`P9_TWEFT = 128` / `P9_RWEFT = 129`, just past the legacy 9P2000 range; the **#845
+    `Tflush` precedent** — a kernel-client-issued op the netd 9P server handles). The kernel
+    dev9p client issues it on the shared `/net` client the **first** time a flow goes
+    zero-copy.
+  - **`SYS_WEFT_SHARE(ring_va, ring_size) → share_id / -1`** (netd-side, syscall 81). On
+    `Tweft(F)` netd resolves `F → connection N` (its server fid table),
+    `SYS_BURROW_ATTACH`-allocates the per-flow ring in its own AS, initializes the headers
+    (`weft_ring_init_hdr` + `weft_ready_init_hdr`), then `SYS_WEFT_SHARE` resolves
+    `ring_va → netd's backing ANON Burrow`, validates ANON + size + **RW-only (W^X, like
+    `SYS_BURROW_ATTACH`)**, takes the **I-30 pin** (`burrow_ref`), mints a kernel-scoped
+    `share_id`, and returns it; netd embeds `share_id` + geometry in `Rweft`.
+  - **`SYS_WEFT_MAP(data_fd, hint_va) → ring_va / -1`** (guest-side, syscall 82). The native
+    client calls it lazily, on the first large transfer: resolve `data_fd → (client, F)` via
+    `dev9p_client_fid`; if unbound, issue `Tweft(F)` → `Rweft(share_id, geom)`; join
+    `share_id → the pinned Burrow`; `burrow_share_into(guest, burrow, hint_va, RW)`; record
+    the binding in the data Spoor's `dev9p_priv`; return `ring_va` (idempotent — a second call
+    returns the cached VA). **The `share_id` is kernel-internal (netd→kernel via `Rweft`),
+    never handed to the guest** — so a guest cannot forge one, and the kernel honors a
+    `share_id` only when it arrived on the kernel's own `Tweft` to that netd (the RDMA-`rkey`
+    shape, §4.6).
+  - **Teardown / lifetime:** `share_id` is a transient kernel token, consumed exactly once at
+    the kernel's `SYS_WEFT_MAP` completion, GC'd (netd-pin released) if the guest dies before
+    mapping. The binding lives in `dev9p_priv`; the data-fid clunk (`dev9p_close`) drops
+    **both** #847 refs (the guest mapping + netd's registration pin) → the ring Burrow freed
+    (I-7). This *is* the `ShareBoundedByFlow` / `NoStaleShareAccess` realization.
+  - **Going live here:** the descriptor ring (Weft-3), the readiness ring's park/wake (Weft-4
+    — the Rendez the substrate reserved), and the `F_NOTIF` two-CQE holders (Weft-5 — driven
+    by real netd-stack / NIC-DMA / peer-ACK events) all wire up. Small/control writes stay on
+    the byte-copy 9P path (`weft_should_ring` < 1024 B); **only a flow that goes zero-copy ever
+    issues `Tweft` + builds a ring.**
+  - **The native `libthyla_rs::net` API:** the Demikernel-shaped `push` / `pop` / `wait` over
+    the ring, composing with the existing `TcpStream` / `TcpListener` (which hold the data fd);
+    small payloads fall back to `read` / `write` (the hybrid threshold).
+  - **`weft.tla` stays UNCHANGED:** the `Tweft` / `share_id` setup is plumbing the model
+    abstracts as `Init` (the Weft-2/3/5 impl-against-existing-spec precedent); the new
+    correlation property (a `share_id` consumed exactly once, no cross-flow mis-binding) is
+    validated by prose + the **Weft-7** audit (the broadened suspension — Weft's spec-first is
+    re-enabled only for the I-37 buffer-lifetime *core*); if 6a surfaces real subtlety, the
+    spec is extended *first*. **Sub-split:** 6a (kernel ABI: the 2 syscalls + `Tweft`/`Rweft` +
+    the `dev9p_priv` binding + the `share_id` correlation + teardown + kernel tests) / 6b (netd:
+    handle `Tweft` + alloc/register the ring + drive the desc ring on large Twrite/Tread + the
+    live readiness park/wake + the `F_NOTIF` posting) / 6c (the native API + the in-guest E2E).
 - **Weft-7 (the focused audit + SMP gate + benchmark).** Prosecute the buffer-lifetime UAF
   (the §4.6 hazard, the F1-class), the no-per-op-mediation property, the cross-Proc Burrow
-  lifetime; the throughput measurement (§8); docs.
+  lifetime, **and the new Weft-6 `Tweft` / `share_id` correlation** (the consumed-exactly-once
+  token, the no-cross-flow-mis-binding, the netd-pin GC if the guest dies before mapping); the
+  throughput measurement (§8); docs.
+
+### 6.1 The Weft-6 keying decision (resolved 2026-06-20)
+
+The grant-is-the-share vote (§5.2, Weft-2) settled *that* opening the data fid establishes the
+share and *that* no Burrow handle crosses Procs — but not *how* the ring setup correlates
+across the netd↔kernel boundary. The grounding pass found the wall: the kernel knows a data fd
+as `(p9_client, 9P fid F)`; netd knows it as `connection N`. The bridge is the fid `F` (the
+kernel client picks it in `Twalk(newfid=F)`; netd binds `F→N` server-side), but the kernel's
+`dev9p_priv` does not cache netd's qid, so it cannot recover `N` from a fd alone. Three viable
+shapes were surfaced as a structured choice; the user picked **B**:
+
+| Option | Mechanism | Precedent | Why / why not |
+|---|---|---|---|
+| A — eager auto-map at open | netd allocs the ring at the data-fid `Tlopen`; the kernel auto-maps it into the guest at open-completion (no explicit map syscall) | Fuchsia IOBuffer RFC-0218 ("the grant returns the peered ring"); the most literal grant-is-the-share | a ring per data-fd open, **even for small-payload flows that never go zero-copy** — tension with the §4.8 hybrid threshold |
+| **B — lazy fid-keyed, new `Tweft` op (CHOSEN)** | the ring is built on the first large transfer, keyed on the fid `F` both sides share; a new `Tweft(F)→Rweft(share_id)` op + `SYS_WEFT_SHARE` / `SYS_WEFT_MAP` | **virtio-9p `p9_client_zc_rpc`** (the transport sets up the ZC region per-RPC) + RDMA (registration mints the `rkey`-capability, §4.6) + Plan 9 (the fid is the per-open handle) | **only B never charges a small-payload flow a ring** (composes the hybrid threshold); `dev9p_client_fid` already returns `F`; no qid-caching; no new token namespace to police. Cost: one new 9P op + the netd↔kernel correlation window (prosecuted at Weft-7) |
+| C — token via ctl file | netd publishes a flow token into a `weft` ctl file; the guest claims the ring with it | Snap's bootstrap-regions-via-handshake | no new 9P op, but the token is a **new capability surface to police** (softer than "the fid IS the cap"); most guest-side moving parts |
+
+**Why B over A** (A was the literal reading of the earlier "data-fid auto-map" sketch): the
+§4.8 heritage rule keeps small / control payloads on the byte-copy ring, so most flows never
+need a shared page; A's eager per-open ring is wasted setup for exactly those flows, while B's
+laziness materializes a ring *only* when a flow actually goes zero-copy. B keeps the
+grant-is-the-share spirit (holding the data fid is what *authorizes* the ring) while deferring
+the *materialization* to first use. **Why B over C:** B keys on the fid — the identity both
+sides already share — so there is no new token capability to mint, leak, or forge; the
+`share_id` is a kernel-internal join key (netd→kernel via `Rweft`, never handed to the guest),
+whereas C's ctl token is a softer, more-surface-to-police variant of the same idea.
 
 ---
 
