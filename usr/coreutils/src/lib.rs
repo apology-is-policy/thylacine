@@ -30,4 +30,6 @@ pub mod size;
 #[cfg(feature = "backend")]
 pub mod meta;
 #[cfg(feature = "backend")]
+pub mod netpump;
+#[cfg(feature = "backend")]
 pub mod usage;
