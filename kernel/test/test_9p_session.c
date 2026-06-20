@@ -46,6 +46,7 @@ void test_9p_session_getattr_round_trip(void);
 void test_9p_session_setattr_round_trip(void);
 void test_9p_session_readdir_round_trip(void);
 void test_9p_session_statfs_round_trip(void);
+void test_9p_session_weft_round_trip(void);
 void test_9p_session_fsync_round_trip(void);
 void test_9p_session_setattr_with_inflight_on_fid_refused(void);
 void test_9p_session_getattr_permits_concurrent(void);
@@ -922,6 +923,35 @@ void test_9p_session_statfs_round_trip(void) {
     TEST_EXPECT_EQ((u64)r.statfs.bsize, (u64)4096,       "statfs.bsize");
     TEST_EXPECT_EQ(r.statfs.blocks, (u64)1000,           "statfs.blocks");
     TEST_EXPECT_EQ(r.statfs.fsid, (u64)0xCAFE,           "statfs.fsid");
+}
+
+// Weft-6a-1: send_weft (read-shaped) -> dispatch Rweft -> the share_id +
+// ring geometry surface in dispatch_result.weft_geom (by value, no rmsg alias).
+void test_9p_session_weft_round_trip(void) {
+    struct p9_session s;
+    drive_session_open(&s, 0);
+    TEST_EXPECT_EQ(walk_to(&s, 34), 0, "walk to fid 34");
+
+    int len = p9_session_send_weft(&s, g_buf, sizeof(g_buf), 34);
+    TEST_ASSERT(len > 0, "send_weft ok");
+    u32 sz; u8 ty; u16 tag;
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &tag);
+    TEST_EXPECT_EQ((u64)ty, (u64)P9_TWEFT, "Tweft type");
+
+    struct p9_weft_geom geom = {
+        .share_id     = 0xDEADBEEFCAFEF00DULL,
+        .ring_size    = 0x00008000,   // 32 KiB
+        .ring_entries = 128,
+    };
+    len = p9_build_rweft(g_buf, sizeof(g_buf), tag, &geom);
+    TEST_ASSERT(len > 0, "build_rweft ok");
+    struct p9_dispatch_result r;
+    int rc = p9_session_dispatch_rmsg(&s, g_buf, (size_t)len, &r);
+    TEST_EXPECT_EQ(rc, 0,                                            "dispatch Rweft ok");
+    TEST_EXPECT_EQ((u64)r.kind, (u64)P9_TWEFT,                       "result kind = TWEFT");
+    TEST_EXPECT_EQ(r.weft_geom.share_id, (u64)0xDEADBEEFCAFEF00DULL, "weft_geom.share_id round-trip");
+    TEST_EXPECT_EQ((u64)r.weft_geom.ring_size, (u64)0x00008000,      "weft_geom.ring_size");
+    TEST_EXPECT_EQ((u64)r.weft_geom.ring_entries, (u64)128,          "weft_geom.ring_entries");
 }
 
 void test_9p_session_fsync_round_trip(void) {

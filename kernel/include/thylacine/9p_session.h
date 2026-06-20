@@ -416,6 +416,19 @@ int p9_session_send_unlinkat(struct p9_session *s,
                              u32 flags);
 
 // =============================================================================
+// Weft send-side API (Weft-6; NET-THROUGHPUT.md section 6).
+// =============================================================================
+
+// Tweft: request the per-flow zero-copy ring for the flow bound to `fid`.
+// Read-shaped -- returns the flow's stable share_id + ring geometry; idempotent
+// on the netd side, no client-side fid-table mutation -- so concurrent ops on
+// the same fid are permitted at the wire layer. Only valid in state OPEN; fid
+// must be bound.
+int p9_session_send_weft(struct p9_session *s,
+                         u8 *out, size_t cap,
+                         u32 fid);
+
+// =============================================================================
 // Receive-side API.
 // =============================================================================
 
@@ -464,6 +477,9 @@ struct p9_dispatch_result {
     // the input rmsg buffer; caller must not free rmsg while consuming).
     const u8      *readlink_target;
     u16            readlink_target_len;
+    // For Tweft, the parsed per-flow ring registration token + geometry
+    // (Weft-6). Plain scalars -- no alias into rmsg, safe past the call.
+    struct p9_weft_geom weft_geom;
 };
 
 // Dispatch one received Rmsg. The Rmsg's tag is looked up in

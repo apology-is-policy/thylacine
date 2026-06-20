@@ -71,6 +71,9 @@ int  p9_client_mkdir(...);
 int  p9_client_renameat(...);
 int  p9_client_unlinkat(...);
 
+// Weft (Weft-6; the per-flow zero-copy ring setup).
+int  p9_client_weft(...);     // ← Tweft(fid) -> Rweft(share_id, geom)
+
 // Query.
 bool   p9_client_is_open(const struct p9_client *c);
 size_t p9_client_inflight(const struct p9_client *c);
@@ -175,7 +178,7 @@ The as-built client is **pipelined and multi-Proc-shared** (a single `p9_client`
 
 ## Tests
 
-24 tests in `kernel/test/test_9p_client.c` (the sync ops below, plus the
+25 tests in `kernel/test/test_9p_client.c` (the sync ops below, plus the
 `lock_released_between_ops` reentrancy test, 3 async-seam tests, 3 Loom-engine
 tests, and 4 Loom-4 deadline-pump tests). The canonical responder handles every
 op type with a sensible canned response; the rlerror responder always returns
@@ -191,6 +194,7 @@ op type with a sensible canned response; the rlerror responder always returns
 | `9p_client.getattr` | walk → getattr; struct p9_attr fields round-trip (mode, size) |
 | `9p_client.readdir` | walk → readdir; empty dirent stream → count = 0 |
 | `9p_client.statfs` | walk → statfs; bsize round-trip |
+| `9p_client.weft` | walk → weft (Weft-6); share_id + ring geometry round-trip from the canned Rweft |
 | `9p_client.mkdir` | walk → mkdir; created_qid surfaced |
 | `9p_client.unlinkat` | walk → unlinkat |
 | `9p_client.readlink` | walk → readlink; target string surfaced (caller-cap-bounded copy) |
@@ -228,6 +232,7 @@ Every public op returns negative on:
 | IO ops (lopen / lcreate / read / write) | **Landed (P5-client)** |
 | Metadata ops (getattr / setattr / readdir / statfs / fsync) | **Landed (P5-client)** |
 | Mutation ops (symlink / mknod / rename / readlink / link / mkdir / renameat / unlinkat) | **Landed (P5-client)** |
+| Weft op (`p9_client_weft`: Tweft → Rweft, the per-flow ring setup) | **Landed (Weft-6a-1)** — wire op + client method; the `SYS_WEFT_SHARE`/`SYS_WEFT_MAP` syscalls + the `dev9p_priv` binding are Weft-6a-2 |
 | Lock / xattr / Stratum-extension wrappers | Phase 5+ (await codec extensions) |
 | Async dispatch (multi-in-flight) | **Landed (#841 elected-reader)** — tag-demuxed, out-of-order, lock-not-held-across-recv |
 | Partial-walk handling (Rwalk's nwqid < requested nwname) | Phase 5+ (currently returns -EIO if partial) |

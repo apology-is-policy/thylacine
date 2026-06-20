@@ -272,6 +272,18 @@ int  p9_client_statfs(struct p9_client *c, u32 fid,
 int  p9_client_fsync(struct p9_client *c, u32 fid, u32 datasync);
 
 // =============================================================================
+// Weft operations (Weft-6; NET-THROUGHPUT.md section 6).
+// =============================================================================
+
+// Tweft: request the per-flow zero-copy ring for the flow bound to `fid`. On
+// success `*out` holds the netd-minted share_id + ring geometry. The kernel
+// dev9p / weft layer joins the share_id to the pinned ring Burrow + maps it
+// into the guest (SYS_WEFT_MAP). The share_id is kernel-internal and never
+// crosses to the guest -- the RDMA-rkey shape.
+int  p9_client_weft(struct p9_client *c, u32 fid,
+                     struct p9_weft_geom *out);
+
+// =============================================================================
 // Mutation operations.
 // =============================================================================
 

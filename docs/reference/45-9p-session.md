@@ -121,6 +121,9 @@ int  p9_session_send_renameat(struct p9_session *s, u8 *out, size_t cap,
 int  p9_session_send_unlinkat(struct p9_session *s, u8 *out, size_t cap,
                                u32 dfid, const u8 *name, size_t name_len,
                                u32 flags);
+// Weft family (Weft-6; the per-flow zero-copy ring setup).
+int  p9_session_send_weft    (struct p9_session *s, u8 *out, size_t cap,
+                               u32 fid);   // read-shaped; Rweft -> dispatch_result.weft_geom
 
 // Receive-side: dispatch by tag, apply state mutation, surface result.
 int  p9_session_dispatch_rmsg(struct p9_session *s,
@@ -211,6 +214,7 @@ Allocation: caller-managed. The kernel handle-table layer (P5-attach) wraps each
 | `9p_session.setattr_round_trip` | Tsetattr→Rsetattr (header-only) |
 | `9p_session.readdir_round_trip` | Treaddir→Rreaddir; zero-copy dirent stream + p9_unpack_dirent traversal |
 | `9p_session.statfs_round_trip` | Tstatfs→Rstatfs; struct p9_statfs surfaced |
+| `9p_session.weft_round_trip` | Tweft→Rweft (Weft-6); share_id + ring geometry surfaced in `dispatch_result.weft_geom` |
 | `9p_session.fsync_round_trip` | Tfsync→Rfsync (header-only) |
 | `9p_session.setattr_with_inflight_on_fid_refused` | concurrent Tsetattr on same fid → `-1` (mutation-exclusive) |
 | `9p_session.getattr_permits_concurrent` | two Tgetattr on same fid → both accepted (read-shaped) |
@@ -255,6 +259,7 @@ The tests use synthesized Rmsg buffers (helper `synth_*` functions in the test f
 | Metadata family Send/Receive (Tgetattr / Tsetattr / Treaddir / Tstatfs / Tfsync) | **Landed (P5-wire-meta)** |
 | Mutation family Send/Receive (Tsymlink / Tmknod / Trename / Treadlink / Tlink / Tmkdir / Trenameat / Tunlinkat) | **Landed (P5-wire-mutation)** |
 | Tflush send + Rflush dispatch + `awaiting_flush` abandon-reservation (`p9_session_send_flush`) | **Landed (#845)** |
+| Weft send + Rweft dispatch (`p9_session_send_weft`; read-shaped, `dispatch_result.weft_geom`) | **Landed (Weft-6a-1)** |
 | Mutation family | Phase 5+ (with P5-wire-mutation) |
 | Lock family + Xattr family | Phase 5+ (with P5-wire-lock / -xattr) |
 | Stratum extensions (Tsync / Treflink / Tbind / Tunbind / Tfallocate / Tfadvise) | Phase 5+ (with P5-wire-stratum-ext) |

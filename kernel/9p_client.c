@@ -1091,6 +1091,33 @@ int p9_client_fsync(struct p9_client *c, u32 fid, u32 datasync) {
 }
 
 // =============================================================================
+// Weft operations (Weft-6).
+// =============================================================================
+
+// Tweft: request the per-flow zero-copy ring for the flow bound to `fid`.
+// On success `*out` carries the netd-minted share_id + ring geometry (plain
+// scalars -- no alias into the recv buffer, so they survive the call). The
+// dev9p layer joins the share_id to the pinned ring Burrow (SYS_WEFT_MAP).
+int p9_client_weft(struct p9_client *c, u32 fid,
+                   struct p9_weft_geom *out) {
+    if (!c) return -P9_E_INVAL;
+    if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
+    spin_lock(&c->lock);
+    if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
+    if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
+    int len = p9_session_send_weft(&c->session, c->out_buf,
+                                    sizeof(c->out_buf), fid);
+    if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
+    struct p9_dispatch_result r;
+    int e = client_run(c, (size_t)len, &r);
+    c->total_ops++;
+    if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
+    if (out) *out = r.weft_geom;
+    spin_unlock(&c->lock);
+    return 0;
+}
+
+// =============================================================================
 // Mutation operations.
 // =============================================================================
 

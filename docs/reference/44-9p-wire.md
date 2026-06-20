@@ -119,6 +119,11 @@ int p9_parse_rlink    (const u8 *in, size_t len, u16 *tag);
 int p9_parse_rmkdir   (const u8 *in, size_t len, u16 *tag, struct p9_qid *qid);
 int p9_parse_rrenameat(const u8 *in, size_t len, u16 *tag);
 int p9_parse_runlinkat(const u8 *in, size_t len, u16 *tag);
+// Weft extension (Weft-6; NET-THROUGHPUT.md section 6).
+int p9_build_tweft (u8 *out, size_t cap, u16 tag, u32 fid);
+int p9_parse_tweft (const u8 *in, size_t len, u16 *tag, u32 *fid);
+int p9_build_rweft (u8 *out, size_t cap, u16 tag, const struct p9_weft_geom *geom);
+int p9_parse_rweft (const u8 *in, size_t len, u16 *tag, struct p9_weft_geom *out);
 ```
 
 ### Error convention
@@ -201,6 +206,8 @@ Per-message bodies (the cumulative codec subset through P5-wire-io):
 | Rrenameat (75) | (empty body; 7-byte msg) |
 | Tunlinkat (76) | `[dfid: u32][name: str][flags: u32]` |
 | Runlinkat (77) | (empty body; 7-byte msg) |
+| Tweft (134) | `[fid: u32]` (Weft-6; the per-flow ring request) |
+| Rweft (135) | `[share_id: u64][ring_size: u32][ring_entries: u32]` (16 bytes body) |
 
 All integers little-endian (matches Thylacine's AArch64 host endianness; encoding is still explicit byte-shift to remain portable).
 
@@ -272,6 +279,7 @@ The codec is purely procedural — no callbacks, no state, no allocation. Every 
 | `9p_wire.tmkdir_round_trip` | Build Tmkdir + synthesize Rmkdir (qid-only) + parse |
 | `9p_wire.trenameat_round_trip` | Build Trenameat (old/new dir + names) + synthesize header-only Rrenameat |
 | `9p_wire.tunlinkat_round_trip` | Build Tunlinkat + synthesize header-only Runlinkat + flag encoding check |
+| `9p_wire.tweft_round_trip` | Build Tweft (fid) + build/parse Rweft (share_id + geometry); truncated / oversize / wrong-type / NULL-arg rejects |
 
 ## Error paths
 
@@ -302,6 +310,7 @@ Every public function returns negative on:
 | Twalk / Rwalk | **Landed (P5-wire)** |
 | Tclunk / Rclunk | **Landed (P5-wire)** |
 | Tflush (build) / Rflush (parse) | **Landed (#845)** -- `p9_build_tflush` (body `[oldtag:u16]`) + `p9_parse_rflush` (header-only) |
+| Tweft / Rweft (build + parse, both directions) | **Landed (Weft-6a-1)** -- `p9_build_tweft`/`p9_parse_tweft` (body `[fid:u32]`) + `p9_build_rweft`/`p9_parse_rweft` (`struct p9_weft_geom`, 16-byte body) |
 | Rlerror parse | **Landed (P5-wire)** |
 | Tlopen / Rlopen | **Landed (P5-wire-io)** |
 | Tread / Rread + Twrite / Rwrite | **Landed (P5-wire-io)** |

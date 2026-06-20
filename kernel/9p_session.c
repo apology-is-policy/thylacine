@@ -714,6 +714,29 @@ int p9_session_send_unlinkat(struct p9_session *s,
 }
 
 // =============================================================================
+// Send: Weft extension (Weft-6) -- request the per-flow zero-copy ring.
+// =============================================================================
+
+int p9_session_send_weft(struct p9_session *s,
+                         u8 *out, size_t cap,
+                         u32 fid) {
+    if (!s) return -1;
+    if (s->magic != P9_SESSION_MAGIC) return -1;
+    if (s->state != P9_SESS_OPEN) return -1;
+    if (!out) return -1;
+    if (!fid_bound(s, fid)) return -1;
+    // Tweft is read-shaped (returns the flow's stable share_id + geometry;
+    // idempotent on the netd side, no client-side fid mutation) -- concurrent
+    // ops on fid permitted.
+    int t = alloc_tag(s);
+    if (t < 0) return -1;
+    int rc = p9_build_tweft(out, cap, (u16)t, fid);
+    if (rc < 0) return -1;
+    mark_outstanding(s, (u16)t, P9_TWEFT, fid, fid);
+    return rc;
+}
+
+// =============================================================================
 // Receive: dispatch by tag, apply state mutation.
 // =============================================================================
 
@@ -782,6 +805,9 @@ static void zero_result(struct p9_dispatch_result *out) {
     out->created_qid.path    = 0;
     out->readlink_target     = NULL;
     out->readlink_target_len = 0;
+    out->weft_geom.share_id     = 0;
+    out->weft_geom.ring_size    = 0;
+    out->weft_geom.ring_entries = 0;
 }
 
 // Special path for Rversion: tag is NOTAG; not from outstanding[];
@@ -1072,6 +1098,13 @@ int p9_session_dispatch_rmsg(struct p9_session *s,
         if (tag_check != tag) return -1;
         out->readlink_target     = target;
         out->readlink_target_len = target_len;
+    } else if (op->kind == P9_TWEFT) {
+        u16 tag_check;
+        rc = p9_parse_rweft(rmsg, len, &tag_check, &out->weft_geom);
+        if (rc < 0) return -1;
+        if (tag_check != tag) return -1;
+        // No fid table mutation: the flow's data fid stays bound; Tweft
+        // queries the per-flow ring's stable share_id + geometry.
     } else {
         // Unknown / unsupported kind.
         return -1;

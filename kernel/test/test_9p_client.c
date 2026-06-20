@@ -35,6 +35,7 @@ void test_9p_client_write(void);
 void test_9p_client_getattr(void);
 void test_9p_client_readdir(void);
 void test_9p_client_statfs(void);
+void test_9p_client_weft(void);
 void test_9p_client_mkdir(void);
 void test_9p_client_unlinkat(void);
 void test_9p_client_readlink(void);
@@ -256,6 +257,25 @@ int canonical_responder(void *ctx, const u8 *req, size_t req_len,
         for (size_t i = 0; i < sizeof(tgt); i++) resp[9 + i] = tgt[i];
         return (int)total;
     }
+    if (type == P9_TWEFT) {
+        // Canned Rweft: share_id 0x1122334455667788, ring_size 64 KiB,
+        // ring_entries 256. Body = [share_id u64][ring_size u32][entries u32].
+        // Bytes hand-written (independent of p9_build_rweft, so a builder bug
+        // can't mask a dispatch/copy-out bug at the client-composition layer).
+        size_t total = P9_HDR_LEN + 8 + 4 + 4;   // 23
+        if (resp_cap < total) return -1;
+        resp[0] = (u8)(total & 0xff); resp[1] = 0; resp[2] = 0; resp[3] = 0;
+        resp[4] = P9_RWEFT;
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        // share_id = 0x1122334455667788 (little-endian)
+        resp[7]  = 0x88; resp[8]  = 0x77; resp[9]  = 0x66; resp[10] = 0x55;
+        resp[11] = 0x44; resp[12] = 0x33; resp[13] = 0x22; resp[14] = 0x11;
+        // ring_size = 0x00010000 (64 KiB)
+        resp[15] = 0x00; resp[16] = 0x00; resp[17] = 0x01; resp[18] = 0x00;
+        // ring_entries = 256 = 0x00000100
+        resp[19] = 0x00; resp[20] = 0x01; resp[21] = 0x00; resp[22] = 0x00;
+        return (int)total;
+    }
     return -1;
 }
 
@@ -447,6 +467,24 @@ void test_9p_client_statfs(void) {
     int rc = p9_client_statfs(&g_client, 14, &sf);
     TEST_EXPECT_EQ(rc, 0,                       "statfs ok");
     TEST_EXPECT_EQ((u64)sf.bsize, (u64)4096,    "bsize round-trip");
+
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// Weft-6a-1: p9_client_weft composition -- send_weft -> client_run ->
+// dispatch (Rweft) -> copy the geom out. Fid 20 stands in for an opened
+// /net data fid; the canned Rweft carries a known share_id + geometry.
+void test_9p_client_weft(void) {
+    drive_client_open(&g_client, &g_loopback);
+    p9_client_walk_one(&g_client, 0, 20, (const u8 *)"d", 1, NULL);
+
+    struct p9_weft_geom geom;
+    int rc = p9_client_weft(&g_client, 20, &geom);
+    TEST_EXPECT_EQ(rc, 0,                                       "weft ok");
+    TEST_EXPECT_EQ(geom.share_id, (u64)0x1122334455667788ULL,   "share_id round-trip");
+    TEST_EXPECT_EQ((u64)geom.ring_size, (u64)0x00010000,        "ring_size round-trip");
+    TEST_EXPECT_EQ((u64)geom.ring_entries, (u64)256,            "ring_entries round-trip");
 
     p9_client_destroy(&g_client);
     p9_loopback_destroy(&g_loopback);

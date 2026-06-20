@@ -5,7 +5,12 @@ validate consumer + the hybrid threshold), Weft-4 (the readiness ring — the
 single-cache-line poke + the store-buffer register-then-observe), **and** Weft-5
 (the F_NOTIF two-CQE zero-copy-send completion contract — the multi-holder
 buffer-pin release) substrates landed. Kernel-internal; no EL0 ABI. The live
-guest↔netd wiring + the EL0 share delivery is Weft-6.
+guest↔netd wiring + the EL0 share delivery is Weft-6 — begun at **Weft-6a-1**:
+the `Tweft(F) → Rweft(share_id, geom)` 9P op + `p9_client_weft` (the lazy
+fid-keyed ring-setup request; see `docs/reference/44-9p-wire.md` /
+`45-9p-session.md` / `47-9p-client.md`). The `SYS_WEFT_SHARE`/`SYS_WEFT_MAP`
+syscalls + the kernel-scoped `share_id` registry + the `dev9p_priv` binding are
+Weft-6a-2.
 
 Source: `kernel/include/thylacine/weft.h`, `kernel/weft.c`. Specs:
 `specs/weft.tla` (ARCH §28 I-37, the data plane + the F_NOTIF holder lifecycle),
