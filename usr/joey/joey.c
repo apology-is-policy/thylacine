@@ -3749,6 +3749,33 @@ int main(void) {
                                  "resident lo stack)\n");
                     }
 
+                    // === NET-PERF NP-2: the TLS handshake + crypto micro-bench ===
+                    // Spawn /bin/tlsperf (native, no args -> the boot probe): M4
+                    // (a full TLS 1.3 handshake over the resident lo, timed, the
+                    // net-8c-2 two-Thread pattern) + M5 (a crypto micro-bench over
+                    // the RustCrypto primitives TLS pays for). It links the tls
+                    // crate, so the handshake needs the kernel CSPRNG -> spawn WITH
+                    // CAP_CSPRNG_READ (like net-echo). Console-direct t_putstr;
+                    // gates the boot on a successful run (data, not a threshold).
+                    {
+                        const char tp_name[] = "/bin/tlsperf";
+                        long tp_pid = t_spawn_with_caps(tp_name,
+                                                        sizeof(tp_name) - 1,
+                                                        T_CAP_CSPRNG_READ);
+                        if (tp_pid <= 0) {
+                            t_putstr("joey: t_spawn(\"tlsperf\") FAILED\n");
+                            return 1;
+                        }
+                        int tp_status = -1;
+                        long tp_reaped = t_wait_pid_for((int)tp_pid, 0, &tp_status);
+                        if (tp_reaped != tp_pid || tp_status != 0) {
+                            t_putstr("joey: NET-PERF NP-2 tlsperf FAILED\n");
+                            return 1;
+                        }
+                        t_putstr("joey: NET-PERF NP-2 OK (tlsperf M4 handshake + "
+                                 "M5 crypto over the resident lo stack)\n");
+                    }
+
                     // === net-7a-2: the native SNTP client selftest (deterministic) ===
                     // Spawn /bin/sntp (no args) -> its in-guest SELFTEST: the
                     // NTPv4 build/parse/validate + 1900->Unix + offset battery,

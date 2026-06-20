@@ -1,0 +1,26 @@
+[package]
+name = "tlsperf"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "tlsperf"
+path = "src/main.rs"
+
+[dependencies]
+# NP-2: TLS handshake timing (M4) + a crypto micro-bench (M5). M4 reuses the
+# `tls` crate's TlsStream/TlsServerStream over a /net loopback (and `tls`
+# registers the custom getrandom -> SYS_GETRANDOM backend the handshake needs).
+libthyla-rs = { path = "../lib/libthyla-rs" }
+tls = { path = "../lib/tls" }
+# M5 benches the EXACT RustCrypto primitives rustls-rustcrypto uses (pinned to
+# the workspace-resolved versions so cargo reuses one copy, not a second build).
+# no_std: default-features=false drops each crate's `std` (which would pull
+# getrandom-std). aarch64 has no AES/SHA intrinsics here -> these are the
+# software-crypto cost TLS pays (the NP-4 lever).
+x25519-dalek = { version = "2.0.1", default-features = false, features = ["static_secrets", "alloc"] }
+aes-gcm = { version = "0.10.3", default-features = false, features = ["aes", "alloc"] }
+sha2 = { version = "0.10.9", default-features = false }
+p256 = { version = "0.13.2", default-features = false, features = ["ecdsa", "arithmetic"] }

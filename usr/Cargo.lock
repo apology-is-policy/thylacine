@@ -1213,6 +1213,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
+ "serde_derive",
 ]
 
 [[package]]
@@ -1390,6 +1391,18 @@ version = "0.1.0"
 dependencies = [
  "libthyla-rs",
  "tls",
+]
+
+[[package]]
+name = "tlsperf"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "libthyla-rs",
+ "p256",
+ "sha2",
+ "tls",
+ "x25519-dalek",
 ]
 
 [[package]]
@@ -1665,6 +1678,7 @@ checksum = "c7e468321c81fb07fa7f4c636c3972b9100f0346e5b6a9f2bd0603a52f7ed277"
 dependencies = [
  "curve25519-dalek",
  "rand_core",
+ "serde",
  "zeroize",
 ]
 

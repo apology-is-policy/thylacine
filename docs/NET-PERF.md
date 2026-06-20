@@ -259,3 +259,74 @@ Boot probe (logged every boot) or, from the shell, `netperf 1000 4 200`
 at ~40 KiB/s -- shell only, never the boot). The TCG-vs-HVF contrast:
 `THYLACINE_ACCEL={tcg,hvf} tools/test.sh` then
 `grep 'netperf M' build/test-boot.log`.
+
+---
+
+## 9. NP-2 results (TLS handshake + crypto micro-bench)
+
+The in-guest `tlsperf` tool (`usr/tlsperf` -- native libthyla-rs; joey boot probe
+spawned WITH `CAP_CSPRNG_READ` + shell-runnable `tlsperf [handshakes]`). **M4**
+times a full TLS 1.3 handshake over netd's resident loopback (the net-8c-2
+two-Thread TlsStream <-> TlsServerStream pattern, timing ONLY the
+`TlsStream::connect` -- the TCP connect is untimed; M3 owns it). **M5**
+micro-benches the EXACT RustCrypto primitives rustls-rustcrypto uses (ops/sec) --
+which on aarch64 here have NO AES/SHA intrinsics, so they are the software-crypto
+cost. Boot-probe run, TCG and HVF (the axis-2 contrast):
+
+| Metric | TCG | HVF | TCG/HVF |
+|---|---|---|---|
+| **M4** TLS 1.3 handshake (cert verify incl.) | **29.1 ms** | **2.55 ms** | 11.4x |
+| **M5** AES-128-GCM seal 1 KiB | 3020 op/s (331 us) | 47547 op/s (21 us) | 15.7x |
+| **M5** AES-128-GCM open 1 KiB | 3097 op/s (323 us) | 47479 op/s (21 us) | 15.3x |
+| **M5** SHA-256 1 KiB | 12393 op/s (81 us) | 186177 op/s (5.4 us) | 15.0x |
+| **M5** X25519 agree | 1679 op/s (595 us) | 17620 op/s (57 us) | 10.5x |
+| **M5** ECDSA-P256 verify | 164 op/s (6.1 ms) | 2371 op/s (422 us) | 14.5x |
+
+### The findings
+
+**(a) TLS is CPU-bound, all the way down.** Every M5 primitive AND the M4
+handshake are ~10-16x faster on HVF -- so the TLS cost is *software crypto*, not
+IO/timer (the opposite of M2's bulk send). The ~11x handshake ratio tracks the
+~10-16x crypto ratios: the handshake is dominated by the asymmetric ops.
+
+**(b) The handshake is asymmetric-crypto-bound.** On HVF a handshake is ~2.5 ms;
+the asymmetric primitives a TLS 1.3 ECDHE-ECDSA handshake runs -- ~2 ECDSA-P256
+verifies (the leaf + CertVerify, 422 us each) + the server's ECDSA-P256 sign
+(~similar) + 2 X25519 agrees (57 us) -- sum to ~1.5 ms, the bulk of the 2.5 ms
+(the rest is the loopback round-trips + the symmetric key schedule). ECDSA-P256
+verify (422 us HVF / 6.1 ms TCG) is the single slowest primitive.
+
+**(c) Crypto is NOT the HTTPS bulk-throughput bottleneck today -- the M2 transport
+is.** AES-128-GCM runs at ~47k ops/s of 1 KiB = **~47 MB/s** software (HVF),
+~1000x ABOVE M2's ~50 KiB/s loopback bulk ceiling (section 8). So an HTTPS bulk
+download is gated by the M2 POLLOUT-readiness timer cadence, NOT by the cipher.
+Hardware AES/SHA would lift the *crypto* ceiling ~5-10x but would not move bulk
+HTTPS until the M2 transport floor is fixed first.
+
+### Candidate optimizations (ranked at NP-4, feeding #62; NOT built here)
+
+1. **The M2 transport fix first** (blocking-write / event-driven POLLOUT, section
+   8) -- the actual HTTPS bulk bottleneck; crypto has ~1000x headroom over it.
+2. **Hardware AES/SHA intrinsics** (the ARMv8 crypto extension) -- ~5-10x on the
+   symmetric record layer + the SHA-heavy handshake transcript/HKDF; matters for
+   bulk HTTPS *after* lever 1.
+3. **TLS session resumption / 0-RTT** -- avoids the ~1.5 ms asymmetric handshake
+   cost on repeat connections (the dominant per-connection HTTPS latency).
+
+### The `tlsperf` tool (as-built)
+
+- `usr/tlsperf/src/main.rs` -- native libthyla-rs, no_std, links the `tls` crate
+  (rustls + rustls-rustcrypto; ~553 KiB stripped, in `tls_strip_bins`) and the M5
+  crypto crates pinned to the workspace-resolved versions (x25519-dalek 2.0.1 /
+  aes-gcm 0.10.3 / sha2 0.10.9 / p256 0.13.2), so the bench measures the SAME
+  primitives TLS pays for (one copy, no second build). Spawned WITH
+  `CAP_CSPRNG_READ` (the handshake's randomness via the `tls`-registered custom
+  getrandom -> SYS_GETRANDOM).
+- M4 reuses the net-8c-2 two-Thread pattern (a server Thread + the main client
+  Thread interleave through netd over the loopback); M5 is pure CPU (no network).
+
+### Reproduce
+
+`tlsperf` (boot probe) or `tlsperf 100` (100 handshakes) from the shell. The
+TCG-vs-HVF contrast: `THYLACINE_ACCEL={tcg,hvf} tools/test.sh` then
+`grep 'tlsperf M' build/test-boot.log`.
