@@ -48,7 +48,7 @@ use libthyla_rs::env;
 use libthyla_rs::fs::File;
 use libthyla_rs::io::{Read, Write};
 use libthyla_rs::loom::{BufReg, Ring, Sqe};
-use libthyla_rs::net::{echo_serve, Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
+use libthyla_rs::net::{echo_serve, Ipv4Addr, SocketAddrV4, TcpListener, TcpStream, WeftFlow};
 use libthyla_rs::thread;
 use libthyla_rs::{t_burrow_attach, t_exits, t_putstr, t_weft_map};
 
@@ -249,6 +249,111 @@ fn weft_rx_e2e() -> Result<(), &'static str> {
         if b != ((i as u8) ^ 0x3C) {
             return Err("payload mismatch after the zero-copy RX hop");
         }
+    }
+    Ok(())
+}
+
+/// Weft-6c-2: the native async push/pop/wait API end to end over the resident lo.
+/// The client drives a WeftFlow (push = Loom WRITE -> Tweftio, pop = Loom READ ->
+/// Tweftio READ) instead of the sync SYS_WRITE/READ -- proving the zero-copy data
+/// drive rides Loom (the Demikernel async trio): the bytes move through the shared
+/// ring in place, the Loom CQE is the completion, and netd's readiness edge is
+/// observed syscall-free. Both directions: the client PUSHES a pattern (the server
+/// reads it back + verifies), then the server SENDS a pattern (the client POPS it
+/// into its ring + reads it out of rx_buf, zero-copy, + verifies). Single-threaded
+/// -- the blocking wait defers inside netd (a separate Proc polling the loopback),
+/// so there is no self-deadlock (same property as weft_tx_e2e / weft_rx_e2e).
+fn weft_async_e2e() -> Result<(), &'static str> {
+    let addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 7793);
+    let listener = TcpListener::bind(addr).map_err(|_| "bind")?;
+    let client = TcpStream::connect(addr).map_err(|_| "connect")?;
+    let (mut server, _peer) = listener.accept().map_err(|_| "accept")?;
+
+    // The client's WeftFlow over its data fd: maps the per-flow ring (the first map
+    // issues Tweft -> netd), sets up a Loom ring, registers (data fd, whole ring).
+    let mut flow = WeftFlow::open(&client).map_err(|_| "weft open")?;
+    const N: usize = 4096;
+    if flow.payload_capacity() < N {
+        return Err("ring payload too small");
+    }
+
+    // --- TX: fill the ring's payload region directly (zero-copy, no app->ring
+    //     copy), push (Loom WRITE -> kernel weft fast-path -> Tweftio), wait for the
+    //     CQE. The server reads it back over the loopback + verifies.
+    {
+        let tx = flow.tx_buf();
+        for (i, b) in tx.iter_mut().take(N).enumerate() {
+            *b = (i as u8) ^ 0x5A;
+        }
+    }
+    let t = flow.push(N).map_err(|_| "weft push")?;
+    let c = flow.wait(t).map_err(|_| "weft push wait")?;
+    if c.bytes() != N {
+        return Err("weft push short");
+    }
+    let mut got = [0u8; N];
+    let mut total = 0usize;
+    while total < N {
+        let k = server.read(&mut got[total..]).map_err(|_| "server read")?;
+        if k == 0 {
+            return Err("server EOF before full TX payload");
+        }
+        total += k;
+    }
+    for i in 0..N {
+        if got[i] != ((i as u8) ^ 0x5A) {
+            return Err("TX payload mismatch (push)");
+        }
+    }
+
+    // --- RX: the server sends a pattern; the client POPS it INTO its ring (Loom
+    //     READ -> Tweftio READ, netd recvs in place) and reads it out of rx_buf
+    //     (zero-copy). The readiness seq must advance (netd signaled RX-ready on
+    //     each recv-into-ring) -- the syscall-free busy-poll edge, live.
+    let mut tx = [0u8; N];
+    for (i, b) in tx.iter_mut().enumerate() {
+        *b = (i as u8) ^ 0x3C;
+    }
+    let mut sent = 0usize;
+    while sent < N {
+        let k = server.write(&tx[sent..]).map_err(|_| "server write")?;
+        if k == 0 {
+            return Err("server write stalled");
+        }
+        sent += k;
+    }
+    let ready_before = flow.rx_ready_seq();
+    let mut recv = [0u8; N];
+    let mut total = 0usize;
+    while total < N {
+        let t = flow.pop(N - total).map_err(|_| "weft pop")?;
+        let k = flow.wait(t).map_err(|_| "weft pop wait")?.bytes();
+        if k == 0 {
+            return Err("client EOF before full RX payload");
+        }
+        let k = core::cmp::min(k, N - total);
+        // Read this chunk OUT of the ring (zero-copy view) into the accumulator
+        // before the next pop overwrites the payload region.
+        recv[total..total + k].copy_from_slice(&flow.rx_buf()[..k]);
+        total += k;
+    }
+    for i in 0..N {
+        if recv[i] != ((i as u8) ^ 0x3C) {
+            return Err("RX payload mismatch (pop)");
+        }
+    }
+    if flow.rx_ready_seq() == ready_before {
+        return Err("readiness seq did not advance over RX");
+    }
+
+    // Single-in-flight is enforced: a second push without waiting -> WouldBlock.
+    let t2 = flow.push(N).map_err(|_| "weft push (single-in-flight setup)")?;
+    if flow.push(N).is_ok() {
+        return Err("single-in-flight not enforced");
+    }
+    let c = flow.wait(t2).map_err(|_| "weft drain push wait")?;
+    if c.bytes() != N {
+        return Err("weft drain push short");
     }
     Ok(())
 }
@@ -551,6 +656,19 @@ fn probe() -> i64 {
         ),
         Err(why) => {
             t_putstr(&alloc::format!("net-echo: FAIL -- weft-6b RX E2E ({})\n", why));
+            unsafe { t_exits(1) }
+        }
+    };
+    // Weft-6c-2: the native async push/pop/wait API end to end -- the client drives
+    // a WeftFlow (Loom WRITE/READ -> Tweftio) over the resident loopback, both
+    // directions, with the readiness busy-poll edge observed. The async twin of the
+    // sync weft TX/RX above; proves the native dataplane API rides Loom zero-copy.
+    match weft_async_e2e() {
+        Ok(()) => t_putstr(
+            "net-echo: weft-6c async E2E PASS (WeftFlow push/pop/wait -> Tweftio over Loom + readiness edge)\n",
+        ),
+        Err(why) => {
+            t_putstr(&alloc::format!("net-echo: FAIL -- weft-6c async E2E ({})\n", why));
             unsafe { t_exits(1) }
         }
     };

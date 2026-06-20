@@ -736,6 +736,50 @@ path + a netd→kernel holder-clear channel, neither of which exists at v1.0. Th
 not-in-flight; the deferred case = `HolderRelease`/`ReleaseClean`), so no spec
 changes; the buggy cfgs re-run green.
 
+### The native `WeftFlow` push/pop/wait API (Weft-6c-2)
+
+`libthyla_rs::net::WeftFlow` is the native, Demikernel-shaped consumer of the
+6c-1 routing — **pure userspace; the kernel is byte-unchanged** (a weft flow is
+just a Loom ring whose registered buffer is a `SYS_WEFT_MAP`'d region, which the
+kernel already detects). `WeftFlow::open(&TcpStream)` does the four-step setup:
+`SYS_WEFT_MAP(data_fd)` → `ring_va`; `weft::read_ring_geom(ring_va)` reads the
+geometry mirror netd wrote (magic-validated; `ring_size = payload_off +
+payload_size`, the whole-Burrow size the routing requires the registered length
+to equal exactly); `Ring::setup(8, 0)`; then `register_handles(&[data_fd])`
+(handle 0 = the I-30 fid pin) + `register_buffers(&[{va: ring_va, len:
+ring_size}])` (buffer 0 = the whole shared ring). The trio:
+
+- **`push(len)`** stages a `LOOM_OP_WRITE` SQE (`buf_off = payload_off`, `len`)
+  into the SQ — the caller has filled the ring's payload region via `tx_buf()`
+  (true zero-copy, no app→ring copy), or via the `send(data)` convenience that
+  copies once into the ring (the io_uring registered-buffer fill).
+- **`pop(max)`** stages a `LOOM_OP_READ` of up to `max` bytes into the ring.
+- **`wait(ticket)`** does the io_uring submit-and-wait (`enter(1, 1,
+  GETEVENTS)`) — the staged SQE is submitted and the call parks on the **Loom CQ
+  wait** (NET-THROUGHPUT §6: "the consumer's park *is* the Loom CQ wait, not a
+  separate weft Rendez"; death-interruptible, no per-op deadline). The terminal
+  CQE's result is the byte count; a pop's bytes are read zero-copy from `rx_buf()`.
+
+**Single-in-flight.** The shared ring's payload region is one buffer, so exactly
+one op (push XOR pop) is in flight at a time — a second push/pop before its
+`wait` returns `Error::WouldBlock`. The TX/RX region must not be mutated while an
+op is in flight; the borrow checker enforces it (`tx_buf`/`rx_buf` borrow `self`,
+the trio takes `&mut self`, no ring slice outlives a submit), and `WeftFlow` is
+`!Send`+`!Sync` (the raw `ring_va`) so it cannot race across threads. Full-duplex
+and multi-op pipelining (partitioning the payload region into slots) are v1.x
+refinements.
+
+**The readiness edge** (the §6 syscall-free busy-poll): netd
+`weft_recv_into_ring`, on a real RX delivery into a flow's ring, bumps the ring's
+single-cache-line `ready_seq` (`weftlib::ready_signal(WEFT_READY_RX)`), and the
+client observes it without a syscall (`WeftFlow::rx_ready_seq` →
+`weft::ready_observe`). The userspace `ready_signal`/`ready_observe` mirror the
+kernel `weft_ready_signal`/`weft_ready_observe` orderings exactly (the store-buffer
+register-then-observe of `specs/weft_readiness.tla`, I-9), so the cross-Proc
+seq-cst story holds across the shared page. The native client's park is the Loom
+CQ wait, so the producer's wake is the CQE, not a `wait_active` write — the
+direct-park leg (`arm_park`/`unpark`) stays validated-not-wired (v1.x).
+
 ### Tests + what's deferred
 
 `weft.binding_validate_rw` (a unit test of the direction-agnostic validator:
@@ -753,10 +797,18 @@ verified in the client's own ring mapping. **Weft-6c-1** adds the Loom data driv
 (above) with `9p_client.loom_weft_{read,write,hybrid_fallback,oob_rejected}` —
 the routing (READ/WRITE → `Tweftio`), the zero-copy completion (the ring slice
 untouched by the kernel on a READ), the §4.8 byte-path fallback, and the in-ring
-OOB reject, each over the loopback 9P client. The native `libthyla_rs::net`
-push/pop/wait API + the in-guest E2E are Weft-6c-2; the readiness busy-poll edge +
-the deferred-F_NOTIF true-ZC path are v1.x seams; the focused buffer-lifetime audit
-+ SMP gate are Weft-7 (6c-3). 965/965 PASS, boot OK, 0 EXTINCTION at the 6c-1 landing.
+OOB reject, each over the loopback 9P client. **Weft-6c-2** adds the native
+`libthyla_rs::net::WeftFlow` push/pop/wait API (above) + the live readiness edge,
+proven in-guest by `net-echo`'s `weft_async_e2e` (`net-echo: weft-6c async E2E
+PASS`): the client drives a `WeftFlow` (push = Loom WRITE → `Tweftio`, pop = Loom
+READ → `Tweftio` READ) over the resident loopback, both directions — push a 4 KiB
+pattern (the server reads it back + verifies), then the server sends a pattern
+(the client pops it into its ring + reads it out of `rx_buf` zero-copy + verifies)
+— asserting the readiness `ready_seq` advanced over the RX and that a second push
+without a `wait` returns `WouldBlock` (single-in-flight). 965/965 PASS, boot OK, 0
+EXTINCTION (kernel byte-unchanged). The deferred-F_NOTIF true-ZC path is a v1.x
+seam; the focused buffer-lifetime audit + SMP gate + the throughput benchmark are
+Weft-7 (6c-3).
 
 ---
 

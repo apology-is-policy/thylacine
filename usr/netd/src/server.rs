@@ -555,7 +555,24 @@ fn weft_recv_into_ring(net: &mut Net, n: u32, off: u32, len: u32) -> RecvOutcome
     // &mut slice is a raw pointer into netd's own AS (not borrowed from `net`), so
     // the &mut net for data_recv_outcome does not alias it.
     let dst: &mut [u8] = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, len) };
-    net.data_recv_outcome(n, dst)
+    let outcome = net.data_recv_outcome(n, dst);
+    // Weft-6c readiness edge (NET-THROUGHPUT 6 busy-poll): on a real RX delivery
+    // into the ring, bump the single-cache-line readiness seq (WEFT_READY_RX) so a
+    // native client's syscall-free `rx_ready_seq` observe sees the edge without a
+    // Loom ENTER. The native client's park is the Loom CQ wait (the CQE is what
+    // wakes it), so there is no weft Rendez to wake here -- the bump is purely the
+    // busy-poll edge (the direct-park leg stays validated-not-wired, v1.x). Single-
+    // writer-per-word: netd owns ready_seq/ready_mask. `ready_base` is within the
+    // same bounds-checked live mapping (ready_off < payload_off).
+    if let RecvOutcome::Data(k) = &outcome {
+        if *k > 0 {
+            let ready_base = (flow.ring_va as usize + geom.ready_off as usize) as *mut u8;
+            unsafe {
+                let _ = weftlib::ready_signal(ready_base, weftlib::WEFT_READY_RX);
+            }
+        }
+    }
+    outcome
 }
 
 /// A completed accept ready to deliver: the serve loop rebinds `fid` onto the

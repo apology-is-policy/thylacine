@@ -714,11 +714,19 @@ dataplane arc the user committed.
     `ConsumerProcess`; the arm_park-park leg stays validated-not-wired). **`loom.tla` +
     `loom_multishot`/`loom_order` cfgs re-run** (the async completion path the weft op rides).
     **No new spec module** (the Loom-ride composes audited mechanisms).
-  - **Sub-split:** **6c-1** (kernel — the weft-binding detection + routing in `loom_submit_payload`
-    to `p9_client_weftio` for a weft-bound `/net` data fd; the live F_NOTIF posting on
-    `loom_async_op`; kernel tests; spec re-runs) / **6c-2** (the native `libthyla_rs::net`
-    push/pop/wait API over Loom + `SYS_WEFT_MAP` + the registered ring; netd's readiness edge; the
-    in-guest data round-trip E2E over the resident `lo`) / **6c-3 = Weft-7** (the focused
+  - **Sub-split:** **6c-1 LANDED** (kernel — the weft-binding detection + routing in
+    `loom_submit_payload` to `loom_build_weftio` for a weft-bound `/net` data fd; the honest
+    single-CQE copied-send realization; kernel tests; spec re-runs). **6c-2 LANDED** (pure
+    userspace; the kernel byte-unchanged) — `libthyla_rs::net::WeftFlow`, the native
+    Demikernel-shaped `push`/`pop`/`wait` over Loom + `SYS_WEFT_MAP` + the registered whole-ring
+    buffer (the park *is* the Loom CQ wait; single-in-flight over the one payload region); the
+    `libthyla_rs::weft` readiness-drive primitives (`ready_signal`/`ready_observe`, the
+    `weft_readiness.tla` mirror) + netd's `WEFT_READY_RX` edge on each recv-into-ring (the §6
+    syscall-free busy-poll); proven in-guest by `net-echo`'s `weft_async_e2e` (`net-echo: weft-6c
+    async E2E PASS`) — a bidirectional zero-copy round-trip over the resident `lo` (push verified
+    server-side, pop verified out of `rx_buf`, the readiness seq advancing, single-in-flight
+    enforced); 965/965 + boot OK + 0 EXTINCTION + the spec gate (weft + weft_readiness + loom
+    clean). The deferred two-CQE true-ZC path stays the v1.x seam. **6c-3 = Weft-7** (the focused
     buffer-lifetime-UAF + `Tweft`/`share_id`-correlation + F_NOTIF-holder audit + SMP gate + the §8
     throughput benchmark + #269 M6 + docs).
 - **Weft-7 (the focused audit + SMP gate + benchmark).** Prosecute the buffer-lifetime UAF
