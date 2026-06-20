@@ -45,11 +45,13 @@
 // Sized to hold the ramfs binaries Phase 6 ships (33+ entries by sub-chunk
 // 14) plus the Phase 7 Utopia userspace -- the U-6e-pre coreutils adoption
 // pushed the live cpio to ~69 entries (it had been ~51), so the prior cap of
-// 64 silently TRUNCATED the load (dropping /welcome et al.). 128 restores
-// comfortable headroom for the deferred coreutils + future tools. 24 bytes
-// per slot; the static array sits in BSS (~3 KiB), well below the synth-dir
-// qid base (RAMFS_QID_SYNTH_BASE) so file indices never collide.
-#define RAMFS_FILE_MAX 128
+// 64 silently TRUNCATED the load (dropping /welcome et al.). The net / TLS /
+// Weft arc since then grew the live cpio to ~127 entries -- one short of the
+// prior 128 cap (a single added binary would TRUNCATE again), so 256 restores
+// comfortable headroom. 24 bytes per slot; the static array sits in BSS
+// (~6 KiB), far below the synth-dir qid base (RAMFS_QID_SYNTH_BASE =
+// 0x1000000000000000) so file indices never collide.
+#define RAMFS_FILE_MAX 256
 
 struct ramfs_file {
     const char *name;        // NUL-terminated; lives in the cpio blob
