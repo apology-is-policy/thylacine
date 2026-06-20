@@ -36,6 +36,7 @@ void test_9p_client_getattr(void);
 void test_9p_client_readdir(void);
 void test_9p_client_statfs(void);
 void test_9p_client_weft(void);
+void test_9p_client_weftio(void);
 void test_9p_client_mkdir(void);
 void test_9p_client_unlinkat(void);
 void test_9p_client_readlink(void);
@@ -276,6 +277,19 @@ int canonical_responder(void *ctx, const u8 *req, size_t req_len,
         resp[19] = 0x00; resp[20] = 0x01; resp[21] = 0x00; resp[22] = 0x00;
         return (int)total;
     }
+    if (type == P9_TWEFTIO) {
+        // Canned Rweftio: count = 0x00001000 (4096). Body = [count u32].
+        // Hand-written (independent of p9_build_rweftio) so a builder bug can't
+        // mask a dispatch / copy-out bug at the client-composition layer.
+        size_t total = P9_HDR_LEN + 4;   // 11
+        if (resp_cap < total) return -1;
+        resp[0] = (u8)(total & 0xff); resp[1] = 0; resp[2] = 0; resp[3] = 0;
+        resp[4] = P9_RWEFTIO;
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        // count = 0x00001000 (little-endian)
+        resp[7] = 0x00; resp[8] = 0x10; resp[9] = 0x00; resp[10] = 0x00;
+        return (int)total;
+    }
     return -1;
 }
 
@@ -485,6 +499,23 @@ void test_9p_client_weft(void) {
     TEST_EXPECT_EQ(geom.share_id, (u64)0x1122334455667788ULL,   "share_id round-trip");
     TEST_EXPECT_EQ((u64)geom.ring_size, (u64)0x00010000,        "ring_size round-trip");
     TEST_EXPECT_EQ((u64)geom.ring_entries, (u64)256,            "ring_entries round-trip");
+
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// Weft-6b-2a: p9_client_weftio composition -- send_weftio -> client_run ->
+// dispatch (Rweftio) -> copy the count out. Fid 20 stands in for an opened
+// /net data fid; the canned Rweftio carries a known moved-byte count.
+void test_9p_client_weftio(void) {
+    drive_client_open(&g_client, &g_loopback);
+    p9_client_walk_one(&g_client, 0, 20, (const u8 *)"d", 1, NULL);
+
+    u32 count = 0;
+    int rc = p9_client_weftio(&g_client, 20, /*off=*/0x100u, /*len=*/0x800u,
+                              WEFT_DIR_WRITE, &count);
+    TEST_EXPECT_EQ(rc, 0,                        "weftio ok");
+    TEST_EXPECT_EQ((u64)count, (u64)0x00001000u, "weftio count round-trip");
 
     p9_client_destroy(&g_client);
     p9_loopback_destroy(&g_loopback);

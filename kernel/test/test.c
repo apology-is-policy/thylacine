@@ -675,6 +675,7 @@ void test_9p_wire_twalk_zero_names_clone(void);
 void test_9p_wire_tclunk_round_trip(void);
 void test_9p_wire_tflush_round_trip(void);
 void test_9p_wire_tweft_round_trip(void);
+void test_9p_wire_tweftio_round_trip(void);
 void test_9p_wire_rlerror_parse(void);
 void test_9p_wire_rmsg_size_mismatch_rejected(void);
 void test_9p_wire_rmsg_wrong_type_rejected(void);
@@ -733,6 +734,7 @@ void test_9p_session_setattr_round_trip(void);
 void test_9p_session_readdir_round_trip(void);
 void test_9p_session_statfs_round_trip(void);
 void test_9p_session_weft_round_trip(void);
+void test_9p_session_weftio_round_trip(void);
 void test_9p_session_fsync_round_trip(void);
 void test_9p_session_setattr_with_inflight_on_fid_refused(void);
 void test_9p_session_getattr_permits_concurrent(void);
@@ -769,6 +771,7 @@ void test_9p_client_getattr(void);
 void test_9p_client_readdir(void);
 void test_9p_client_statfs(void);
 void test_9p_client_weft(void);
+void test_9p_client_weftio(void);
 void test_9p_client_mkdir(void);
 void test_9p_client_unlinkat(void);
 void test_9p_client_readlink(void);
@@ -1764,6 +1767,7 @@ struct test_case g_tests[] = {
     { "9p_wire.tclunk_round_trip",     test_9p_wire_tclunk_round_trip,     false, NULL },
     { "9p_wire.tflush_round_trip",     test_9p_wire_tflush_round_trip,     false, NULL },
     { "9p_wire.tweft_round_trip",      test_9p_wire_tweft_round_trip,      false, NULL },
+    { "9p_wire.tweftio_round_trip",    test_9p_wire_tweftio_round_trip,    false, NULL },
     { "9p_wire.rlerror_parse",         test_9p_wire_rlerror_parse,         false, NULL },
     { "9p_wire.rmsg_size_mismatch_rejected",
                                        test_9p_wire_rmsg_size_mismatch_rejected,
@@ -1863,6 +1867,7 @@ struct test_case g_tests[] = {
     { "9p_session.readdir_round_trip", test_9p_session_readdir_round_trip, false, NULL },
     { "9p_session.statfs_round_trip",  test_9p_session_statfs_round_trip,  false, NULL },
     { "9p_session.weft_round_trip",    test_9p_session_weft_round_trip,    false, NULL },
+    { "9p_session.weftio_round_trip",  test_9p_session_weftio_round_trip,  false, NULL },
     { "9p_session.fsync_round_trip",   test_9p_session_fsync_round_trip,   false, NULL },
     { "9p_session.setattr_with_inflight_on_fid_refused",
                                        test_9p_session_setattr_with_inflight_on_fid_refused,
@@ -1928,6 +1933,7 @@ struct test_case g_tests[] = {
     { "9p_client.readdir",             test_9p_client_readdir,             false, NULL },
     { "9p_client.statfs",              test_9p_client_statfs,              false, NULL },
     { "9p_client.weft",                test_9p_client_weft,                false, NULL },
+    { "9p_client.weftio",              test_9p_client_weftio,              false, NULL },
     { "9p_client.mkdir",               test_9p_client_mkdir,               false, NULL },
     { "9p_client.unlinkat",            test_9p_client_unlinkat,            false, NULL },
     { "9p_client.readlink",            test_9p_client_readlink,            false, NULL },

@@ -158,6 +158,18 @@
 // (the #845 Tflush precedent).
 #define P9_TWEFT       134u
 #define P9_RWEFT       135u
+// Thylacine extension (Weft-6b-2; NET-THROUGHPUT.md section 6.2): the data
+// drive. After a flow's ring is mapped (Tweft), a large Twrite/Tread on the
+// data fd issues Tweftio carrying the kernel-validated payload descriptor
+// (offset + len within the flow's shared ring + a direction); netd reads/writes
+// the ring IN PLACE + replies the count. Kernel-client-issued (the Tweft/Tflush
+// precedent). 136/137 sit just past Tweft/Rweft (134/135).
+#define P9_TWEFTIO     136u
+#define P9_RWEFTIO     137u
+
+// Tweftio direction -- which way the payload moves through the shared ring.
+#define WEFT_DIR_WRITE 0u   // TX: netd reads ring[off..off+len] -> smoltcp send
+#define WEFT_DIR_READ  1u   // RX: netd writes recv bytes -> ring[off..off+len]
 
 // =============================================================================
 // Wire-format constants.
@@ -720,5 +732,38 @@ int p9_build_rweft(u8 *out, size_t cap, u16 tag,
 // Rweft parse (client side): extract share_id + geometry.
 int p9_parse_rweft(const u8 *in, size_t len,
                    u16 *tag, struct p9_weft_geom *out);
+
+// =============================================================================
+// Weft data drive (Weft-6b-2; NET-THROUGHPUT.md section 6.2) -- Tweftio/Rweftio.
+//
+// After Tweft maps the flow's shared ring, a large Twrite/Tread on the data fd
+// drives the payload through the ring instead of the 9P body. The kernel dev9p
+// path validates the descriptor (the syscall buffer's offset + len within the
+// flow's payload region, against its private weft_ring_view -- the I-30
+// validator-once) and issues Tweftio; netd reads/writes the ring IN PLACE at
+// that offset and replies Rweftio(count).
+//
+//   Tweftio body: [fid: u32][off: u32][len: u32][dir: u32]   (16 bytes)
+//   Rweftio body: [count: u32]                               (4 bytes)
+//
+// `off`/`len` are PAYLOAD-region-relative (the same domain as weft_desc.addr),
+// already bounds-validated by the kernel; netd reads them as a trusted region
+// within the ring it allocated. `dir` is WEFT_DIR_WRITE / WEFT_DIR_READ.
+// =============================================================================
+
+// Tweftio: drive `len` payload bytes at ring offset `off` for the flow bound to
+// `fid`, in direction `dir` (WEFT_DIR_WRITE / WEFT_DIR_READ).
+int p9_build_tweftio(u8 *out, size_t cap, u16 tag,
+                     u32 fid, u32 off, u32 len, u32 dir);
+
+// Tweftio parse (server / test side): extract the descriptor + direction.
+int p9_parse_tweftio(const u8 *in, size_t len, u16 *tag,
+                     u32 *fid, u32 *off, u32 *xfer_len, u32 *dir);
+
+// Rweftio: the count of payload bytes the consumer actually moved.
+int p9_build_rweftio(u8 *out, size_t cap, u16 tag, u32 count);
+
+// Rweftio parse (client side): extract the moved-byte count.
+int p9_parse_rweftio(const u8 *in, size_t len, u16 *tag, u32 *count);
 
 #endif  // THYLACINE_9P_WIRE_H

@@ -1154,3 +1154,68 @@ int p9_parse_rweft(const u8 *in, size_t len,
     if (off != len) return -1;
     return 0;
 }
+
+// =============================================================================
+// Weft data drive (Weft-6b-2) -- Tweftio / Rweftio.
+//
+// Tweftio body: [fid: u32][off: u32][len: u32][dir: u32]   (16 bytes)
+// Rweftio body: [count: u32]                               (4 bytes)
+//
+// validate_rmsg_header is the generic header validator (size==len + type
+// match); reusing it for the Tweftio parse is sound (the netd/test server side).
+// =============================================================================
+
+_Static_assert(P9_RWEFTIO == P9_TWEFTIO + 1u, "Rweftio = Tweftio + 1 (IO-family parity)");
+
+int p9_build_tweftio(u8 *out, size_t cap, u16 tag,
+                     u32 fid, u32 off, u32 len, u32 dir) {
+    size_t total = P9_HDR_LEN + 4 + 4 + 4 + 4;
+    if (cap < total) return -1;
+    int rc = write_header(out, cap, (u32)total, P9_TWEFTIO, tag);
+    if (rc < 0) return -1;
+    size_t o = P9_HDR_LEN;
+    rc = p9_pack_u32(out + o, cap - o, fid); if (rc < 0) return -1; o += (size_t)rc;
+    rc = p9_pack_u32(out + o, cap - o, off); if (rc < 0) return -1; o += (size_t)rc;
+    rc = p9_pack_u32(out + o, cap - o, len); if (rc < 0) return -1; o += (size_t)rc;
+    rc = p9_pack_u32(out + o, cap - o, dir); if (rc < 0) return -1; o += (size_t)rc;
+    return (int)o;
+}
+
+int p9_parse_tweftio(const u8 *in, size_t len, u16 *tag,
+                     u32 *fid, u32 *off, u32 *xfer_len, u32 *dir) {
+    if (!tag || !fid || !off || !xfer_len || !dir) return -1;
+    int hdr = validate_rmsg_header(in, len, P9_TWEFTIO, tag);
+    if (hdr < 0) return -1;
+    size_t o = (size_t)hdr;
+    size_t rem = len - o;
+    int rc;
+    rc = p9_unpack_u32(in + o, rem, fid);      if (rc < 0) return -1; o += (size_t)rc; rem -= (size_t)rc;
+    rc = p9_unpack_u32(in + o, rem, off);      if (rc < 0) return -1; o += (size_t)rc; rem -= (size_t)rc;
+    rc = p9_unpack_u32(in + o, rem, xfer_len); if (rc < 0) return -1; o += (size_t)rc; rem -= (size_t)rc;
+    rc = p9_unpack_u32(in + o, rem, dir);      if (rc < 0) return -1; o += (size_t)rc;
+    if (o != len) return -1;
+    return 0;
+}
+
+int p9_build_rweftio(u8 *out, size_t cap, u16 tag, u32 count) {
+    size_t total = P9_HDR_LEN + 4;
+    if (cap < total) return -1;
+    int rc = write_header(out, cap, (u32)total, P9_RWEFTIO, tag);
+    if (rc < 0) return -1;
+    rc = p9_pack_u32(out + P9_HDR_LEN, cap - P9_HDR_LEN, count);
+    if (rc < 0) return -1;
+    return (int)total;
+}
+
+int p9_parse_rweftio(const u8 *in, size_t len, u16 *tag, u32 *count) {
+    if (!tag || !count) return -1;
+    int hdr = validate_rmsg_header(in, len, P9_RWEFTIO, tag);
+    if (hdr < 0) return -1;
+    size_t o = (size_t)hdr;
+    size_t rem = len - o;
+    int rc = p9_unpack_u32(in + o, rem, count);
+    if (rc < 0) return -1;
+    o += (size_t)rc;
+    if (o != len) return -1;
+    return 0;
+}

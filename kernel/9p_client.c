@@ -1117,6 +1117,29 @@ int p9_client_weft(struct p9_client *c, u32 fid,
     return 0;
 }
 
+// Tweftio: drive a validated payload descriptor through the flow's shared ring.
+// On success `*out_count` carries the count of bytes netd moved (TX: queued to
+// smoltcp; RX: copied into the ring). Mirrors p9_client_weft -- the lock is
+// never held across the blocking recv (the #841 elected reader; client_run).
+int p9_client_weftio(struct p9_client *c, u32 fid,
+                     u32 off, u32 len, u32 dir, u32 *out_count) {
+    if (!c) return -P9_E_INVAL;
+    if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
+    spin_lock(&c->lock);
+    if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
+    if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
+    int slen = p9_session_send_weftio(&c->session, c->out_buf,
+                                       sizeof(c->out_buf), fid, off, len, dir);
+    if (slen < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
+    struct p9_dispatch_result r;
+    int e = client_run(c, (size_t)slen, &r);
+    c->total_ops++;
+    if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
+    if (out_count) *out_count = r.weftio_count;
+    spin_unlock(&c->lock);
+    return 0;
+}
+
 // =============================================================================
 // Mutation operations.
 // =============================================================================

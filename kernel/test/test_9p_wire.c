@@ -24,6 +24,7 @@ void test_9p_wire_twalk_zero_names_clone(void);
 void test_9p_wire_tclunk_round_trip(void);
 void test_9p_wire_tflush_round_trip(void);
 void test_9p_wire_tweft_round_trip(void);
+void test_9p_wire_tweftio_round_trip(void);
 void test_9p_wire_rlerror_parse(void);
 void test_9p_wire_rmsg_size_mismatch_rejected(void);
 void test_9p_wire_rmsg_wrong_type_rejected(void);
@@ -1185,4 +1186,56 @@ void test_9p_wire_tweft_round_trip(void) {
                    "Rweft build NULL geom");
     TEST_EXPECT_EQ(p9_parse_rweft(g_buf, 23, (u16 *)0, &go), -1,
                    "Rweft parse NULL tag");
+}
+
+// Tweftio build (body = [fid][off][len][dir], 16 bytes) + Rweftio (body =
+// [count], 4 bytes) round-trips + malformed rejects (Weft-6b-2a).
+void test_9p_wire_tweftio_round_trip(void) {
+    // Tweftio: hdr(7) + 4*4 = 23. tag=0x0011, fid=20, off=0x100, len=0x800,
+    // dir=WEFT_DIR_WRITE.
+    int total = p9_build_tweftio(g_buf, sizeof(g_buf), 0x0011,
+                                 20u, 0x100u, 0x800u, WEFT_DIR_WRITE);
+    TEST_EXPECT_EQ(total, 23,                          "Tweftio total len");
+    TEST_EXPECT_EQ((u64)g_buf[4], (u64)P9_TWEFTIO,     "Tweftio type");
+    TEST_EXPECT_EQ((u64)g_buf[5], (u64)0x11,           "Tweftio tag LE low");
+
+    u16 tag_out; u32 fid_out, off_out, len_out, dir_out;
+    int rc = p9_parse_tweftio(g_buf, (size_t)total, &tag_out,
+                              &fid_out, &off_out, &len_out, &dir_out);
+    TEST_EXPECT_EQ(rc, 0,                              "Tweftio parse ok");
+    TEST_EXPECT_EQ((u64)tag_out, (u64)0x0011,          "Tweftio tag round-trip");
+    TEST_EXPECT_EQ((u64)fid_out, (u64)20u,             "Tweftio fid round-trip");
+    TEST_EXPECT_EQ((u64)off_out, (u64)0x100u,          "Tweftio off round-trip");
+    TEST_EXPECT_EQ((u64)len_out, (u64)0x800u,          "Tweftio len round-trip");
+    TEST_EXPECT_EQ((u64)dir_out, (u64)WEFT_DIR_WRITE,  "Tweftio dir round-trip");
+
+    // Truncated Tweftio body rejected (header claims 23, deliver 22).
+    rc = p9_parse_tweftio(g_buf, 22, &tag_out, &fid_out, &off_out, &len_out, &dir_out);
+    TEST_EXPECT_EQ(rc, -1,                             "Tweftio truncated rejected");
+
+    // Rweftio: hdr(7) + count(4) = 11. count = 0x1234.
+    total = p9_build_rweftio(g_buf, sizeof(g_buf), 0x0011, 0x1234u);
+    TEST_EXPECT_EQ(total, 11,                          "Rweftio total len");
+    TEST_EXPECT_EQ((u64)g_buf[4], (u64)P9_RWEFTIO,     "Rweftio type");
+
+    u32 count_out;
+    rc = p9_parse_rweftio(g_buf, (size_t)total, &tag_out, &count_out);
+    TEST_EXPECT_EQ(rc, 0,                              "Rweftio parse ok");
+    TEST_EXPECT_EQ((u64)tag_out, (u64)0x0011,          "Rweftio tag round-trip");
+    TEST_EXPECT_EQ((u64)count_out, (u64)0x1234u,       "Rweftio count round-trip");
+
+    // Oversize Rweftio body rejected (header claims 11, deliver 12).
+    rc = p9_parse_rweftio(g_buf, 12, &tag_out, &count_out);
+    TEST_EXPECT_EQ(rc, -1,                             "Rweftio oversize rejected");
+
+    // Wrong-type parse rejected: Rweftio bytes parsed as Tweftio.
+    rc = p9_parse_tweftio(g_buf, 11, &tag_out, &fid_out, &off_out, &len_out, &dir_out);
+    TEST_EXPECT_EQ(rc, -1,                             "Tweftio wrong-type rejected");
+
+    // NULL-arg guards.
+    TEST_EXPECT_EQ(p9_parse_rweftio(g_buf, 11, (u16 *)0, &count_out), -1,
+                   "Rweftio parse NULL tag");
+    TEST_EXPECT_EQ(p9_parse_tweftio(g_buf, 23, &tag_out, (u32 *)0,
+                                    &off_out, &len_out, &dir_out), -1,
+                   "Tweftio parse NULL fid");
 }

@@ -428,6 +428,14 @@ int p9_session_send_weft(struct p9_session *s,
                          u8 *out, size_t cap,
                          u32 fid);
 
+// Tweftio (Weft-6b-2): drive `len` payload bytes at ring offset `off` for the
+// flow bound to `fid`, in direction `dir` (WEFT_DIR_WRITE / WEFT_DIR_READ).
+// The descriptor is already kernel-validated; netd acts on the ring in place +
+// replies the moved-byte count. Only valid in state OPEN; fid must be bound.
+int p9_session_send_weftio(struct p9_session *s,
+                           u8 *out, size_t cap,
+                           u32 fid, u32 off, u32 len, u32 dir);
+
 // =============================================================================
 // Receive-side API.
 // =============================================================================
@@ -480,6 +488,8 @@ struct p9_dispatch_result {
     // For Tweft, the parsed per-flow ring registration token + geometry
     // (Weft-6). Plain scalars -- no alias into rmsg, safe past the call.
     struct p9_weft_geom weft_geom;
+    // For Tweftio, the count of payload bytes the consumer moved (Weft-6b-2).
+    u32 weftio_count;
 };
 
 // Dispatch one received Rmsg. The Rmsg's tag is looked up in

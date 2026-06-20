@@ -690,6 +690,76 @@ pub fn parse_rweft(buf: &[u8]) -> Result<WeftGeom, ()> {
 }
 
 // =============================================================================
+// Tweftio / Rweftio (Weft-6b-2 Thylacine extension) -- the data drive. After a
+// flow's ring is mapped (Tweft), a large Twrite/Tread issues Tweftio carrying
+// the kernel-validated payload descriptor (offset + len within the flow's shared
+// ring + a direction); netd reads/writes the ring IN PLACE + replies the count.
+// Mirrors kernel/9p_wire.c::p9_{build,parse}_{tweftio,rweftio} byte for byte.
+//
+// Tweftio body: [fid: u32][off: u32][len: u32][dir: u32]   (16 bytes).
+// Rweftio body: [count: u32]                               (4 bytes).
+// =============================================================================
+
+pub const P9_TWEFTIO: u8 = 136;
+pub const P9_RWEFTIO: u8 = 137;
+
+/// Tweftio direction -- which way the payload moves through the shared ring.
+pub const WEFT_DIR_WRITE: u32 = 0; // TX: netd reads ring[off..off+len] -> send
+pub const WEFT_DIR_READ: u32 = 1; // RX: netd writes recv bytes -> ring[off..off+len]
+
+/// The validated payload descriptor a Tweftio carries: the flow fid + the
+/// payload-region-relative window (off, len) + the direction.
+#[derive(Copy, Clone)]
+pub struct WeftIoReq {
+    pub fid: u32,
+    pub off: u32,
+    pub len: u32,
+    pub dir: u32,
+}
+
+/// parse_tweftio (server side) -- extract the descriptor + direction.
+pub fn parse_tweftio(buf: &[u8]) -> Result<WeftIoReq, ()> {
+    let (fid, p) = unpack_u32(buf, P9_HDR_LEN)?;
+    let (off, p) = unpack_u32(buf, p)?;
+    let (len, p) = unpack_u32(buf, p)?;
+    let (dir, _) = unpack_u32(buf, p)?;
+    Ok(WeftIoReq { fid, off, len, dir })
+}
+
+/// build_rweftio (server side) -- the count of payload bytes the consumer moved.
+pub fn build_rweftio(out: &mut [u8], tag: u16, count: u32) -> Result<usize, ()> {
+    let p = build_header(out, P9_RWEFTIO, tag)?;
+    let p = pack_u32(out, p, count)?;
+    patch_header_size(out, p)?;
+    Ok(p)
+}
+
+/// build_tweftio (client side) -- the kernel dev9p client is the only v1.0
+/// issuer; provided for symmetry + tests.
+pub fn build_tweftio(
+    out: &mut [u8],
+    tag: u16,
+    fid: u32,
+    off: u32,
+    len: u32,
+    dir: u32,
+) -> Result<usize, ()> {
+    let p = build_header(out, P9_TWEFTIO, tag)?;
+    let p = pack_u32(out, p, fid)?;
+    let p = pack_u32(out, p, off)?;
+    let p = pack_u32(out, p, len)?;
+    let p = pack_u32(out, p, dir)?;
+    patch_header_size(out, p)?;
+    Ok(p)
+}
+
+/// parse_rweftio (client side) -- extract the moved-byte count from an Rweftio.
+pub fn parse_rweftio(buf: &[u8]) -> Result<u32, ()> {
+    let (count, _) = unpack_u32(buf, P9_HDR_LEN)?;
+    Ok(count)
+}
+
+// =============================================================================
 // Treaddir / Rreaddir (9P2000.L directory enumeration).
 //
 // A Rreaddir body is `[count: u32][data: count]` where `data` is a packed

@@ -283,6 +283,15 @@ int  p9_client_fsync(struct p9_client *c, u32 fid, u32 datasync);
 int  p9_client_weft(struct p9_client *c, u32 fid,
                      struct p9_weft_geom *out);
 
+// Tweftio (Weft-6b-2): drive `len` payload bytes at ring offset `off` for the
+// flow bound to `fid`, in direction `dir` (WEFT_DIR_WRITE / WEFT_DIR_READ). The
+// descriptor is already kernel-validated against the flow's private ring view;
+// netd reads/writes the shared ring IN PLACE + replies the moved-byte count
+// (`*out_count`, plain scalar, safe past the call). Returns 0 on success, a
+// -errno on a transport / server error.
+int  p9_client_weftio(struct p9_client *c, u32 fid,
+                      u32 off, u32 len, u32 dir, u32 *out_count);
+
 // =============================================================================
 // Mutation operations.
 // =============================================================================

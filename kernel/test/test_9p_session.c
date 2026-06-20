@@ -47,6 +47,7 @@ void test_9p_session_setattr_round_trip(void);
 void test_9p_session_readdir_round_trip(void);
 void test_9p_session_statfs_round_trip(void);
 void test_9p_session_weft_round_trip(void);
+void test_9p_session_weftio_round_trip(void);
 void test_9p_session_fsync_round_trip(void);
 void test_9p_session_setattr_with_inflight_on_fid_refused(void);
 void test_9p_session_getattr_permits_concurrent(void);
@@ -952,6 +953,29 @@ void test_9p_session_weft_round_trip(void) {
     TEST_EXPECT_EQ(r.weft_geom.share_id, (u64)0xDEADBEEFCAFEF00DULL, "weft_geom.share_id round-trip");
     TEST_EXPECT_EQ((u64)r.weft_geom.ring_size, (u64)0x00008000,      "weft_geom.ring_size");
     TEST_EXPECT_EQ((u64)r.weft_geom.ring_entries, (u64)128,          "weft_geom.ring_entries");
+}
+
+// Weft-6b-2a: send_weftio (the data drive) -> dispatch Rweftio -> the moved-byte
+// count surfaces in dispatch_result.weftio_count (by value, no rmsg alias).
+void test_9p_session_weftio_round_trip(void) {
+    struct p9_session s;
+    drive_session_open(&s, 0);
+    TEST_EXPECT_EQ(walk_to(&s, 34), 0, "walk to fid 34");
+
+    int len = p9_session_send_weftio(&s, g_buf, sizeof(g_buf), 34,
+                                     /*off=*/0x200u, /*len=*/0x1000u, WEFT_DIR_WRITE);
+    TEST_ASSERT(len > 0, "send_weftio ok");
+    u32 sz; u8 ty; u16 tag;
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &tag);
+    TEST_EXPECT_EQ((u64)ty, (u64)P9_TWEFTIO, "Tweftio type");
+
+    len = p9_build_rweftio(g_buf, sizeof(g_buf), tag, /*count=*/0x0FA0u);  // 4000
+    TEST_ASSERT(len > 0, "build_rweftio ok");
+    struct p9_dispatch_result r;
+    int rc = p9_session_dispatch_rmsg(&s, g_buf, (size_t)len, &r);
+    TEST_EXPECT_EQ(rc, 0,                           "dispatch Rweftio ok");
+    TEST_EXPECT_EQ((u64)r.kind, (u64)P9_TWEFTIO,    "result kind = TWEFTIO");
+    TEST_EXPECT_EQ((u64)r.weftio_count, (u64)0x0FA0u, "weftio_count round-trip");
 }
 
 void test_9p_session_fsync_round_trip(void) {
