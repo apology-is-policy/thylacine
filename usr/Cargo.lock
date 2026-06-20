@@ -545,6 +545,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "httpd"
+version = "0.1.0"
+dependencies = [
+ "coreutils",
+ "libthyla-rs",
+]
+
+[[package]]
 name = "https"
 version = "0.1.0"
 dependencies = [

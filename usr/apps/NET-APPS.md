@@ -38,7 +38,7 @@ Build all native bins: `tools/build.sh userspace` (or, per tool,
 | `dial` | coreutils bin | **built** | `/net/cs` reachability tester (Plan 9 `dial`) + RTT |
 | `con` | coreutils bin | **built** | interactive Plan 9 dial-string client (service-name aware) |
 | `tcpproxy` | coreutils bin | **built** | listen/accept/dial-upstream splice; a throughput torture + port-forwarder |
-| `httpd` | crate | todo | tiny static HTTP/1.1 server; host-curl a big file -> real-protocol throughput |
+| `httpd` | crate | **built** | tiny static HTTP/1.1 server; host-curl a big file -> real-protocol throughput |
 | `nettest` | crate | todo | host-paired sustained-bandwidth bench (the number `netperf` can't produce) |
 | `weft-bench` | crate | staged | zero-copy dataplane yardstick; skeleton until the Weft native API (Weft-6c) |
 | `tftp` | -- | deferred | blocked by a UdpSocket `recvfrom` gap (the TID-port switch) -- see DOC-GAPs; `nc -u` covers UDP bulk |
@@ -182,10 +182,46 @@ SPEC.md`). Until then these tools default to `Always` and honor `--color=never`.
 
 ---
 
-## `httpd` / `nettest` / `weft-bench`
+## `httpd` -- static HTTP/1.1 server
 
-Standalone crates (todo / staged) -- see the slate. `httpd` serves a file tree
-over HTTP/1.1 (host-curl throughput + first web-serve); `nettest` is the
-host-paired sustained-bandwidth bench; `weft-bench` is the zero-copy dataplane
-yardstick (skeleton until the Weft native API lands at Weft-6c). Their sections
-land with the code.
+`httpd [-p PORT] [DIR]` -- serve files under DIR (default `/`) on PORT (default
+8080); GET + HEAD, one connection at a time, `Connection: close`. The response
+body is STREAMED (chunked file reads + `send_all` backpressure), so it serves
+files far larger than the userspace heap -- the throughput case. A colored access
+log prints per request.
+
+**Build:** clean (clippy-clean). **Test plan (in-VM):**
+
+**T1 -- functional.** Put a file in the namespace and GET it (host with
+`-netdev user,hostfwd=tcp::8080-:8080`):
+```
+echo hello > /tmp/index.html
+httpd -p 8080 /tmp &
+# host:
+curl http://localhost:8080/                  # -> hello   (/ maps to /index.html)
+curl -I http://localhost:8080/index.html     # HEAD: headers only
+curl http://localhost:8080/nope              # -> 404 Not Found
+curl http://localhost:8080/../etc            # -> 400 (traversal rejected)
+```
+
+**T2 -- throughput (the real-NIC, real-protocol number).** Serve a big file,
+host-curl it, measure:
+```
+# create a big file in the guest namespace, then:
+httpd -p 9999 /srv/www &
+# host:
+curl -s -o /dev/null -w '%{speed_download} B/s\n' http://localhost:9999/big.bin
+```
+Re-run after a throughput change to confirm the win end to end -- the streamed
+`send_all` path exercises the same POLLOUT backpressure as the bulk sender.
+
+**Security:** the namespace is the sandbox (httpd reaches only what its territory
+grants and its identity may read, I-1/I-22/I-23/I-28); `..` traversal is rejected
+on top of that.
+
+## `nettest` / `weft-bench`
+
+Standalone crates (todo / staged) -- see the slate. `nettest` is the host-paired
+sustained-bandwidth bench (the over-the-wire number `netperf`'s loopback design
+omits); `weft-bench` is the zero-copy dataplane yardstick (skeleton until the Weft
+native API lands at Weft-6c). Their sections land with the code.

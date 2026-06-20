@@ -163,6 +163,30 @@ pub fn stdio_pump(stream: &mut TcpStream, prog: &str) -> i64 {
     }
 }
 
+/// Write the whole of `buf` to a TCP connection, waiting on POLLOUT under window
+/// backpressure (netd's data write is non-blocking -- a full window returns a
+/// 0-count write, not a deferred reply). `ready_fd` is the connection's readiness
+/// sibling (`stream.ready_fd()`), opened once by the caller and reused across
+/// chunks. Returns `true` on success, `false` on a write/poll error. The workhorse
+/// for a streaming server (`httpd`) sending a response larger than one window.
+pub fn send_all(stream: &mut TcpStream, mut buf: &[u8], ready_fd: i32) -> bool {
+    while !buf.is_empty() {
+        match stream.write(buf) {
+            Ok(0) => {
+                // Window full: block until the peer's ACKs reopen it.
+                let mut ps = PollSet::new();
+                ps.add_raw(ready_fd, PollEvents::WRITE);
+                if ps.poll(PollTimeout::Block).is_err() {
+                    return false;
+                }
+            }
+            Ok(n) => buf = &buf[n..],
+            Err(_) => return false,
+        }
+    }
+    true
+}
+
 /// One direction of a socket-to-socket splice: a fixed staging buffer with a
 /// fully-sent / pending cursor plus the half-close bookkeeping.
 struct Leg {
