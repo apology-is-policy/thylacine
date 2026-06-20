@@ -18,6 +18,7 @@
 #include <thylacine/9p_wire.h>
 #include <thylacine/burrow.h>     // Loom-6 white-box registered-buffer install
 #include <thylacine/dev9p.h>
+#include <thylacine/weft.h>       // Weft-6c: weft_binding_alloc + the zero-copy drive
 #include <thylacine/errno.h>
 #include <thylacine/handle.h>
 #include <thylacine/loom.h>
@@ -1719,6 +1720,277 @@ void test_9p_client_loom_write_e2e(void) {
     TEST_EXPECT_EQ(burrow_handle_count(b), hc0, "op buffer pin balanced");
 
     burrow_unref(b);
+    loom_unref(l);
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// =============================================================================
+// Weft-6c (NET-THROUGHPUT 6; I-37): the zero-copy data drive over Loom. A
+// LOOM_OP_READ/WRITE on a /net data fid whose registered buffer IS the per-flow
+// shared ring is routed to a Tweftio (off/len/dir descriptor) instead of a byte-
+// copying Tread/Twrite -- netd moves the bytes IN PLACE in the shared ring, so the
+// kernel copies NOTHING and the Rweftio count is the CQE result. The capture
+// responder records which wire op the server saw (Tweftio vs Tread) + the Tweftio
+// descriptor, and echoes the requested len back as the moved count.
+// =============================================================================
+static u8  g_weft_req_type;     // last request type the server saw (0 == none)
+static u32 g_weft_off;          // captured Tweftio offset (payload-relative)
+static u32 g_weft_len;          // captured Tweftio len
+static u32 g_weft_dir;          // captured Tweftio direction (WEFT_DIR_*)
+static int loom_weft_capture_responder(void *ctx, const u8 *req, size_t req_len,
+                                       u8 *resp, size_t cap) {
+    u32 size; u8 type; u16 tag;
+    if (p9_peek_header(req, req_len, &size, &type, &tag) >= 0) {
+        g_weft_req_type = type;
+        if (type == P9_TWEFTIO && req_len >= P9_HDR_LEN + 16) {
+            // Tweftio body: [fid u32][off u32][len u32][dir u32].
+            g_weft_off = (u32)req[P9_HDR_LEN+4]  | ((u32)req[P9_HDR_LEN+5]<<8)
+                       | ((u32)req[P9_HDR_LEN+6]<<16) | ((u32)req[P9_HDR_LEN+7]<<24);
+            g_weft_len = (u32)req[P9_HDR_LEN+8]  | ((u32)req[P9_HDR_LEN+9]<<8)
+                       | ((u32)req[P9_HDR_LEN+10]<<16) | ((u32)req[P9_HDR_LEN+11]<<24);
+            g_weft_dir = (u32)req[P9_HDR_LEN+12] | ((u32)req[P9_HDR_LEN+13]<<8)
+                       | ((u32)req[P9_HDR_LEN+14]<<16) | ((u32)req[P9_HDR_LEN+15]<<24);
+            // Rweftio echoing the requested len (proves the len round-trips the wire).
+            size_t total = P9_HDR_LEN + 4;
+            if (cap < total) return -1;
+            resp[0] = (u8)total; resp[1] = 0; resp[2] = 0; resp[3] = 0;
+            resp[4] = P9_RWEFTIO;
+            resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+            resp[7]  = (u8)(g_weft_len & 0xff);         resp[8]  = (u8)((g_weft_len >> 8) & 0xff);
+            resp[9]  = (u8)((g_weft_len >> 16) & 0xff); resp[10] = (u8)((g_weft_len >> 24) & 0xff);
+            return (int)total;
+        }
+    }
+    return canonical_responder(ctx, req, req_len, resp, cap);
+}
+
+// Open the loopback client with the weft capture responder (mirrors
+// drive_client_open, which wires canonical_responder).
+static int weft_drive_open(struct p9_client *c, struct p9_loopback *lb) {
+    int rc = p9_loopback_init(lb, g_loopback_resp, sizeof(g_loopback_resp),
+                              loom_weft_capture_responder, NULL);
+    if (rc < 0) return -1;
+    rc = p9_client_init(c, 0, 8192, p9_loopback_ops_for(lb),
+                        g_recv_buf, sizeof(g_recv_buf));
+    if (rc < 0) return -1;
+    const u8 uname[] = {'r','o','o','t'};
+    const u8 aname[] = {'/'};
+    return p9_client_handshake(c, uname, sizeof(uname), aname, sizeof(aname), 0);
+}
+
+#define WEFT_TEST_RING_SIZE   PAGE_SIZE
+#define WEFT_TEST_RING_ENTS   8u
+#define WEFT_TEST_GUEST_VA    0x40000000ULL
+
+// Install a fresh anon Burrow as BOTH the Loom reg_buf[idx] AND a weft binding on
+// `sp`'s dev9p priv -- the SYS_WEFT_MAP'd per-flow ring. The WHOLE Burrow is the
+// registered buffer (buf_reg_len == ring_size), so a slice's buf_off is ring-base-
+// relative -- the weft routing's whole-ring contract. The binding holds one
+// registration pin (burrow_ref), released by dev9p_close -> weft_binding_release
+// when `sp` is clunked at loom_unref. Returns the payload-region offset (where a
+// zero-copy slice must start); the binding pointer comes back via out_wb so the
+// caller asserts the install.
+static u32 weft_install_ring(struct Loom *l, u32 idx, struct Spoor *sp,
+                             struct Burrow **out_b, u8 **out_kva,
+                             struct weft_binding **out_wb) {
+    loom_install_test_buf(l, idx, WEFT_TEST_RING_SIZE, out_b, out_kva);
+    struct weft_binding *wb = weft_binding_alloc(*out_b, WEFT_TEST_GUEST_VA,
+                                                 WEFT_TEST_RING_SIZE, WEFT_TEST_RING_ENTS);
+    *out_wb = wb;
+    if (!wb) return 0;
+    burrow_ref(*out_b);                          // the binding's registration pin
+    dev9p_priv_of(sp)->weft = wb;
+    return wb->view.payload_off;
+}
+
+// Weft READ E2E: a LOOM_OP_READ on a weft-bound fid + the ring buffer routes to a
+// Tweftio(dir=READ); the kernel copies NOTHING into the ring slice (netd places the
+// recv'd bytes there in place -- the canned reply carries none, so the sentinel must
+// survive), and the CQE result is the Rweftio count. A single terminal CQE, no MORE.
+void test_9p_client_loom_weft_read_e2e(void) {
+    TEST_ASSERT(weft_drive_open(&g_client, &g_loopback) == 0, "weft client open");
+    // Walk-bind fid 20 (like a real /net data fid -- a walked, opened fid, never the
+    // attach root); an unbound fid would fail fid_bound in p9_session_send_*.
+    p9_client_walk_one(&g_client, 0, 20, (const u8 *)"d", 1, NULL);
+    struct Spoor *sp = dev9p_attach_client(&g_client, 20);
+    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
+
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create");
+    rights_t rt = RIGHT_READ | RIGHT_WRITE;
+    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p handle");
+
+    struct Burrow *ringb; u8 *rkva; struct weft_binding *wb;
+    u32 poff = weft_install_ring(l, 0, sp, &ringb, &rkva, &wb);
+    TEST_ASSERT(wb != NULL, "weft binding installed");
+    int hc0 = burrow_handle_count(ringb);
+    for (u32 i = 0; i < 256; i++) rkva[poff + i] = 0xAA;   // sentinel (must survive)
+
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    g_weft_req_type = 0;
+    cl_stage_rw(l, 0, LOOM_OP_READ, /*handle=*/0, /*offset=*/0, /*count=*/256,
+                /*bidx=*/0, /*buf_off=*/poff, 0xBEEFBEEF00000100ULL);
+    __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
+
+    int n = loom_enter(l, 1, 1, 0);
+    TEST_EXPECT_EQ(n, 1, "one SQE consumed");
+    TEST_EXPECT_EQ((u64)g_weft_req_type, (u64)P9_TWEFTIO, "server saw a Tweftio (not Tread)");
+    TEST_EXPECT_EQ((u64)g_weft_dir, (u64)WEFT_DIR_READ, "Tweftio dir = READ");
+    TEST_EXPECT_EQ((u64)g_weft_off, (u64)0, "Tweftio off = payload-relative 0");
+    TEST_EXPECT_EQ((u64)g_weft_len, (u64)256, "Tweftio len = 256");
+    TEST_EXPECT_EQ((u64)l->cq_tail, (u64)1, "one CQE");
+    TEST_ASSERT((cqes[0].flags & LOOM_CQE_MORE) == 0, "single terminal CQE (no MORE)");
+    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)256, "result = Rweftio count");
+    bool intact = true;
+    for (u32 i = 0; i < 256; i++) if (rkva[poff + i] != 0xAA) intact = false;
+    TEST_ASSERT(intact, "ring slice untouched by the kernel (zero-copy READ)");
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "op reaped");
+    TEST_EXPECT_EQ(burrow_handle_count(ringb), hc0, "op buffer pin balanced");
+
+    burrow_unref(ringb);
+    loom_unref(l);
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// Weft WRITE E2E: a LOOM_OP_WRITE routes to a Tweftio(dir=WRITE) carrying ONLY the
+// off/len descriptor (no payload on the wire -- netd reads the ring in place); the
+// CQE result is the Rweftio count, and the completion is a single terminal CQE (no
+// LOOM_CQE_MORE -- the COPIED F_NOTIF realization: at v1.0 netd copies the ring into
+// its socket buffer, so the slice is reusable the instant the CQE arrives).
+void test_9p_client_loom_weft_write_e2e(void) {
+    TEST_ASSERT(weft_drive_open(&g_client, &g_loopback) == 0, "weft client open");
+    // Walk-bind fid 20 (like a real /net data fid -- a walked, opened fid, never the
+    // attach root); an unbound fid would fail fid_bound in p9_session_send_*.
+    p9_client_walk_one(&g_client, 0, 20, (const u8 *)"d", 1, NULL);
+    struct Spoor *sp = dev9p_attach_client(&g_client, 20);
+    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
+
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create");
+    rights_t rt = RIGHT_READ | RIGHT_WRITE;
+    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p handle");
+
+    struct Burrow *ringb; u8 *rkva; struct weft_binding *wb;
+    u32 poff = weft_install_ring(l, 0, sp, &ringb, &rkva, &wb);
+    TEST_ASSERT(wb != NULL, "weft binding installed");
+    int hc0 = burrow_handle_count(ringb);
+    for (u32 i = 0; i < 512; i++) rkva[poff + i] = (u8)i;   // the guest's payload, in the ring
+
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    g_weft_req_type = 0;
+    cl_stage_rw(l, 0, LOOM_OP_WRITE, /*handle=*/0, /*offset=*/0, /*count=*/512,
+                /*bidx=*/0, /*buf_off=*/poff, 0xF00DF00D00000200ULL);
+    __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
+
+    int n = loom_enter(l, 1, 1, 0);
+    TEST_EXPECT_EQ(n, 1, "one SQE consumed");
+    TEST_EXPECT_EQ((u64)g_weft_req_type, (u64)P9_TWEFTIO, "server saw a Tweftio (not Twrite)");
+    TEST_EXPECT_EQ((u64)g_weft_dir, (u64)WEFT_DIR_WRITE, "Tweftio dir = WRITE");
+    TEST_EXPECT_EQ((u64)g_weft_len, (u64)512, "Tweftio len = 512");
+    TEST_EXPECT_EQ((u64)l->cq_tail, (u64)1, "one CQE");
+    TEST_ASSERT((cqes[0].flags & LOOM_CQE_MORE) == 0,
+                "single terminal CQE, no MORE (copied F_NOTIF realization)");
+    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)512, "result = Rweftio count");
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "op reaped");
+    TEST_EXPECT_EQ(burrow_handle_count(ringb), hc0, "op buffer pin balanced");
+
+    burrow_unref(ringb);
+    loom_unref(l);
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// Weft hybrid fallback (section 4.8): a LOOM_OP_READ on a weft-bound fid but with a
+// NON-ring registered buffer (slot 1, a separate Burrow) falls through to the byte
+// path -- a normal Tread, NOT a Tweftio. Only the per-flow ring goes zero-copy; a
+// small/control transfer over a scratch buffer stays byte-copy, and its reply is
+// copied into the buffer as usual.
+void test_9p_client_loom_weft_hybrid_fallback(void) {
+    TEST_ASSERT(weft_drive_open(&g_client, &g_loopback) == 0, "weft client open");
+    // Walk-bind fid 20 (like a real /net data fid -- a walked, opened fid, never the
+    // attach root); an unbound fid would fail fid_bound in p9_session_send_*.
+    p9_client_walk_one(&g_client, 0, 20, (const u8 *)"d", 1, NULL);
+    struct Spoor *sp = dev9p_attach_client(&g_client, 20);
+    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
+
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create");
+    rights_t rt = RIGHT_READ | RIGHT_WRITE;
+    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p handle");
+
+    struct Burrow *ringb; u8 *rkva; struct weft_binding *wb;
+    (void)weft_install_ring(l, 0, sp, &ringb, &rkva, &wb);   // ring + binding -> slot 0
+    TEST_ASSERT(wb != NULL, "weft binding installed");
+    struct Burrow *plain; u8 *pkva;
+    loom_install_test_buf(l, 1, PAGE_SIZE, &plain, &pkva);   // a NON-ring buffer -> slot 1
+    pkva[0] = 0x00;
+
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    g_weft_req_type = 0;
+    // bidx = 1 (the NON-ring buffer) -> the weft routing does not fire.
+    cl_stage_rw(l, 0, LOOM_OP_READ, /*handle=*/0, /*offset=*/0, /*count=*/5,
+                /*bidx=*/1, /*buf_off=*/0, 0xCAFE000000000005ULL);
+    __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
+
+    int n = loom_enter(l, 1, 1, 0);
+    TEST_EXPECT_EQ(n, 1, "one SQE consumed");
+    TEST_EXPECT_EQ((u64)g_weft_req_type, (u64)P9_TREAD, "non-ring buffer -> byte Tread, not Tweftio");
+    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)5, "byte READ result = 5 (hello)");
+    TEST_ASSERT(pkva[0] == 'h' && pkva[4] == 'o', "byte path copied the reply into the buffer");
+
+    burrow_unref(ringb);
+    burrow_unref(plain);
+    loom_unref(l);
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// Weft OOB rejection: a weft op whose slice lands in the ring's CONTROL region
+// (buf_off < payload_off) is rejected at submit (-EINVAL) -- the same bounds gate
+// the synchronous dev9p_weft_try_rw uses. No Tweftio is sent (rejected before the
+// engine), proving the validator-once runs on the kernel SQE snapshot.
+void test_9p_client_loom_weft_oob_rejected(void) {
+    TEST_ASSERT(weft_drive_open(&g_client, &g_loopback) == 0, "weft client open");
+    // Walk-bind fid 20 (like a real /net data fid -- a walked, opened fid, never the
+    // attach root); an unbound fid would fail fid_bound in p9_session_send_*.
+    p9_client_walk_one(&g_client, 0, 20, (const u8 *)"d", 1, NULL);
+    struct Spoor *sp = dev9p_attach_client(&g_client, 20);
+    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
+
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create");
+    rights_t rt = RIGHT_READ | RIGHT_WRITE;
+    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p handle");
+
+    struct Burrow *ringb; u8 *rkva; struct weft_binding *wb;
+    u32 poff = weft_install_ring(l, 0, sp, &ringb, &rkva, &wb);
+    TEST_ASSERT(wb != NULL && poff > 0, "binding installed; payload after the control region");
+
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    g_weft_req_type = 0;
+    // buf_off = 0 lands in the control region [0, payload_off) -> rejected.
+    cl_stage_rw(l, 0, LOOM_OP_WRITE, /*handle=*/0, /*offset=*/0, /*count=*/64,
+                /*bidx=*/0, /*buf_off=*/0, 0xDEAD000000000040ULL);
+    __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
+
+    int n = loom_enter(l, 1, 1, 0);
+    TEST_EXPECT_EQ(n, 1, "one SQE consumed");
+    TEST_EXPECT_EQ((u64)g_weft_req_type, (u64)0, "no wire op sent (rejected at submit)");
+    TEST_EXPECT_EQ((u64)l->cq_tail, (u64)1, "one CQE (the inline rejection)");
+    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)(s64)(-(s32)T_E_INVAL),
+                   "in-ring slice outside payload -> -EINVAL");
+
+    burrow_unref(ringb);
     loom_unref(l);
     p9_client_destroy(&g_client);
     p9_loopback_destroy(&g_loopback);

@@ -676,12 +676,20 @@ dataplane arc the user committed.
     fast-path: netd recvs in place into the ring, the kernel does **no** copy-out) instead of the
     byte-copy `loom_build_read`. The terminal CQE carries the byte count; the bytes are already
     in the guest's ring.
-  - **`push` (send)** = a `LOOM_OP_WRITE` SQE → `p9_client_weftio(WRITE)` (the 6b-2b zero-copy
-    fast-path) → the **F_NOTIF two-CQE** on the op's `loom_async_op.notif` (the Weft-5
-    `weft_notif`): a result CQE `LOOM_CQE_MORE` ("queued") at op-terminal, then a notification
-    CQE `LOOM_CQE_F_NOTIF` ("buffer reusable") when the **last** of {netd stack done, NIC DMA
-    done, peer ACK} clears — the I-30 pin held to notification-terminal (I-37 leg 2). This is the
-    live realization of the 6b-3c posting, driven by real netd/NIC/ACK events.
+  - **`push` (send)** = a `LOOM_OP_WRITE` SQE → `loom_build_weftio(WRITE)` (the 6b-2b zero-copy
+    fast-path). **AS-BUILT (6c-1) — the honest F_NOTIF realization:** a weft WRITE is a zero-copy
+    send *across the guest↔netd boundary*, but at v1.0 netd's `h_weftio` COPIES the ring into its
+    socket buffer, so the slice is reusable the instant `Rweftio` returns — the io_uring SEND_ZC
+    "copied" path: a **single terminal CQE, no `LOOM_CQE_MORE`** (`loom.tla` single-shot), which
+    *is* the "buffer reusable" signal. There is no deferral and no `loom_async_op.notif` field at
+    v1.0. The deferred two-CQE (a result CQE with `MORE` "queued", then a `LOOM_CQE_F_NOTIF`
+    "reusable" CQE when the **last** of {netd stack done, NIC DMA done, peer ACK} clears — the I-30
+    pin held to notification-terminal, I-37 leg 2) is the **v1.x true-zero-copy seam**: it needs a
+    netd-holds-the-page TX path (no internal copy) + a netd→kernel holder-clear channel, neither of
+    which exists at v1.0. The consumer reads `LOOM_CQE_MORE` to decide whether to wait for the
+    notification — clear ⇒ reusable now (v1.0), set ⇒ wait (v1.x) — so the native API is forward-
+    compatible without change. `weft.tla` already models both (the copied case =
+    `weft_notif_arm_copied` → not-in-flight; the deferred case = `HolderRelease`/`ReleaseClean`).
   - **`wait`** = `SYS_LOOM_ENTER(min_complete)` — the **existing** Loom CQ wait
     (`loom_wait_for_completions` on `cq_waiters`; `loom.tla` I-9 no-missed-CQ-wake). **No new weft
     wait/wake syscall**: the park is the Loom CQ wait, woken by the CQE post. This is the answer to

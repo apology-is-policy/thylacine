@@ -801,6 +801,10 @@ void test_9p_client_loom_independent_past_held(void);
 void test_9p_client_loom_drain_waits_for_rearm_pending(void);
 void test_9p_client_loom_read_e2e(void);
 void test_9p_client_loom_write_e2e(void);
+void test_9p_client_loom_weft_read_e2e(void);
+void test_9p_client_loom_weft_write_e2e(void);
+void test_9p_client_loom_weft_hybrid_fallback(void);
+void test_9p_client_loom_weft_oob_rejected(void);
 void test_9p_client_loom_rw_rejects(void);
 void test_9p_client_loom_readdir_e2e(void);
 void test_9p_client_loom_readlink_e2e(void);
@@ -1994,6 +1998,12 @@ struct test_case g_tests[] = {
                                        test_9p_client_loom_drain_waits_for_rearm_pending, false, NULL },
     { "9p_client.loom_read_e2e",       test_9p_client_loom_read_e2e,       false, NULL },
     { "9p_client.loom_write_e2e",      test_9p_client_loom_write_e2e,      false, NULL },
+    { "9p_client.loom_weft_read_e2e",  test_9p_client_loom_weft_read_e2e,  false, NULL },
+    { "9p_client.loom_weft_write_e2e", test_9p_client_loom_weft_write_e2e, false, NULL },
+    { "9p_client.loom_weft_hybrid_fallback",
+                                       test_9p_client_loom_weft_hybrid_fallback, false, NULL },
+    { "9p_client.loom_weft_oob_rejected",
+                                       test_9p_client_loom_weft_oob_rejected, false, NULL },
     { "9p_client.loom_rw_rejects",     test_9p_client_loom_rw_rejects,     false, NULL },
     { "9p_client.loom_readdir_e2e",    test_9p_client_loom_readdir_e2e,    false, NULL },
     { "9p_client.loom_readlink_e2e",   test_9p_client_loom_readlink_e2e,   false, NULL },

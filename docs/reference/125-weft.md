@@ -701,6 +701,41 @@ descriptor RING + `weft_ring_drain`'s snapshot discipline is the **batched/async
 submission the native `libthyla_rs::net` API drives through Loom (Weft-6c). Both
 validate through `weft_desc_valid` against the kernel view.
 
+### The Loom data drive — `LOOM_OP_READ`/`WRITE` → `Tweftio` (Weft-6c-1)
+
+The native async API rides Loom (NET-THROUGHPUT §4.4/§6): a `pop` is a
+`LOOM_OP_READ`, a `push` is a `LOOM_OP_WRITE`, and the park is the existing
+`SYS_LOOM_ENTER` CQ wait — **no new wait/wake ABI**. `kernel/loom.c::loom_submit_payload`
+detects the zero-copy case at submit: a READ/WRITE whose pinned `/net` data fid
+carries a weft binding (`dev9p_priv->weft`, read `__atomic`-acquire) **and** whose
+registered Loom buffer **is that flow's whole shared ring** (`buf == wb->burrow &&
+buf_reg_len == wb->ring_size`) routes to `loom_build_weftio` (a `Tweftio` off/len/dir
+descriptor) instead of the byte-copying `loom_build_read`/`write`. The whole-ring
+registration makes the SQE's `buf_off` ring-base-relative, so the slice runs the
+**same** validator the synchronous `dev9p_weft_try_rw` uses (`weft_binding_validate_rw`,
+on `wb->guest_va + buf_off` — the `guest_va` cancels, so only the offset *within*
+the ring is load-bearing). A non-ring buffer (or a partial-ring registration) on a
+weft fid falls through to the byte path — the §4.8 hybrid. An in-ring slice outside
+the payload region is rejected `-EINVAL`. The completion copies **nothing**
+(`loom_payload_result`, the `op->weft` branch: result = the `Rweftio` count, no
+`loom_bufcopy`) — *that* is the zero-copy property: a READ's bytes are already in
+the guest's ring slice (netd placed them there in place), a WRITE's were read out
+of it. I-30 holds: the offset is computed from the SQE snapshot + the kernel-private
+`wb->view`, never re-read from the shared ring; the ring Burrow is pinned (the
+audited #847 payload-buffer `burrow_ref`) from submit to reap.
+
+**The F_NOTIF realization** (the honest v1.0 vs v1.x split): a weft WRITE is a
+zero-copy *send*. At v1.0 netd's `h_weftio` COPIES the ring into its socket buffer,
+so the slice is reusable the instant `Rweftio` returns — the io_uring SEND_ZC
+"copied" path: a **single terminal CQE, no `LOOM_CQE_MORE`**, is the reusability
+signal (the consumer reuses the slice on that CQE). The deferred two-CQE
+(result+`MORE`, then a `LOOM_CQE_F_NOTIF` CQE on the last `{netd,NIC,ACK}` holder
+release) is the **v1.x** true-zero-copy seam — it needs a netd-holds-the-page TX
+path + a netd→kernel holder-clear channel, neither of which exists at v1.0. The
+`weft.tla` model already covers both (the copied case = `weft_notif_arm_copied` →
+not-in-flight; the deferred case = `HolderRelease`/`ReleaseClean`), so no spec
+changes; the buggy cfgs re-run green.
+
 ### Tests + what's deferred
 
 `weft.binding_validate_rw` (a unit test of the direction-agnostic validator:
@@ -714,9 +749,14 @@ sends it, the server reads it back, the bytes are verified. RX: the server sends
 a 4 KiB pattern, the client weft-reads it **into** the ring (`Tweftio` READ —
 exercising the full blocking defer, since over the loopback the first read finds
 the rx empty and netd parks + delivers on the next poll tick), and the bytes are
-verified in the client's own ring mapping. The readiness park/wake (6b-3b), the
-F_NOTIF posting (6b-3c), and the batched ring drive (6c) remain; the focused
-buffer-lifetime audit is Weft-7. 961/961 PASS, boot OK, 0 EXTINCTION at landing.
+verified in the client's own ring mapping. **Weft-6c-1** adds the Loom data drive
+(above) with `9p_client.loom_weft_{read,write,hybrid_fallback,oob_rejected}` —
+the routing (READ/WRITE → `Tweftio`), the zero-copy completion (the ring slice
+untouched by the kernel on a READ), the §4.8 byte-path fallback, and the in-ring
+OOB reject, each over the loopback 9P client. The native `libthyla_rs::net`
+push/pop/wait API + the in-guest E2E are Weft-6c-2; the readiness busy-poll edge +
+the deferred-F_NOTIF true-ZC path are v1.x seams; the focused buffer-lifetime audit
++ SMP gate are Weft-7 (6c-3). 965/965 PASS, boot OK, 0 EXTINCTION at the 6c-1 landing.
 
 ---
 

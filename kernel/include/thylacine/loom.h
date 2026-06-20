@@ -294,12 +294,19 @@ enum {
 
 // CQE flags. LOOM_CQE_MORE: more completions for this SQE follow (multishot).
 // LOOM_CQE_F_NOTIF: this is the NOTIFICATION CQE of a two-CQE F_NOTIF zero-copy
-// send (Weft-5; weft.tla) -- the registered buffer is now reusable. A ZC send
-// posts a RESULT CQE (LOOM_CQE_MORE = "queued"; a notification follows) then,
+// send (Weft-5; weft.tla) -- the registered buffer is now reusable. A *true* ZC
+// send posts a RESULT CQE (LOOM_CQE_MORE = "queued"; a notification follows) then,
 // once the LAST of {netd stack, NIC DMA, peer ACK} releases, this NOTIFICATION
 // CQE (the I-30 buffer pin dropped at notification-terminal, never op-terminal).
-// Reserved ABI: the contract + the holder tracker land at Weft-5 (kernel/weft.c
-// weft_notif_*); the live two-CQE POSTING onto the loom_async_op path is Weft-6.
+// AS-BUILT REALIZATION (Weft-6c-1): a weft WRITE is a zero-copy send across the
+// guest<->netd boundary, but at v1.0 netd's h_weftio COPIES the ring into its
+// socket buffer, so the slice is reusable the instant Rweftio returns -- the
+// io_uring SEND_ZC "copied" path: a SINGLE terminal CQE (no LOOM_CQE_MORE) is the
+// reusability signal, and LOOM_CQE_F_NOTIF is NOT posted (there is no deferral).
+// The consumer checks LOOM_CQE_MORE: clear => reusable now (v1.0); set => wait for
+// the F_NOTIF CQE (the v1.x deferred path, which needs a netd-holds-the-page TX
+// path + a netd->kernel holder-clear channel). The flag stays reserved + forward-
+// compatible; the native consumer's wait-for-reusable logic is identical either way.
 #define LOOM_CQE_MORE       (1u << 0)
 #define LOOM_CQE_F_NOTIF    (1u << 1)
 
