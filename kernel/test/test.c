@@ -215,6 +215,10 @@ void test_vmo_map_proc_overlap_rejected(void);
 void test_vmo_map_proc_user_va_top_boundary(void);
 void test_vmo_unmap_proc_smoke(void);
 void test_vmo_unmap_proc_no_match(void);
+void test_burrow_share_into_cross_proc(void);
+void test_burrow_share_into_alive_while_either_maps(void);
+void test_burrow_share_into_frees_on_last_drop(void);
+void test_burrow_share_into_constraints(void);
 void test_pgtable_install_user_pte_smoke(void);
 void test_pgtable_install_user_pte_constraints(void);
 void test_pgtable_install_user_pte_idempotent(void);
@@ -1220,6 +1224,14 @@ struct test_case g_tests[] = {
                                                                               false, NULL },
     { "burrow.unmap_proc_smoke",          test_vmo_unmap_proc_smoke,          false, NULL },
     { "burrow.unmap_proc_no_match",       test_vmo_unmap_proc_no_match,       false, NULL },
+    { "burrow.share_into_cross_proc",     test_burrow_share_into_cross_proc,  false, NULL },
+    { "burrow.share_into_alive_while_either_maps",
+                                          test_burrow_share_into_alive_while_either_maps,
+                                                                              false, NULL },
+    { "burrow.share_into_frees_on_last_drop",
+                                          test_burrow_share_into_frees_on_last_drop,
+                                                                              false, NULL },
+    { "burrow.share_into_constraints",    test_burrow_share_into_constraints, false, NULL },
     { "pgtable.install_user_pte_smoke",
                                        test_pgtable_install_user_pte_smoke,
                                                                            false, NULL },

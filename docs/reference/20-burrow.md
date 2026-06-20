@@ -61,6 +61,11 @@ int           burrow_map(struct Proc *p, struct Burrow *v,
                       u64 vaddr, size_t length, u32 prot);
 int           burrow_unmap(struct Proc *p, u64 vaddr, size_t length);
 
+// Weft-2 / I-37: map the WHOLE of an ANON Burrow into a SECOND Proc (the
+// per-flow dataplane share). length is implicit (v->size). 0 / -1.
+int           burrow_share_into(struct Proc *dst, struct Burrow *v,
+                      u64 vaddr, u32 prot);
+
 size_t        burrow_get_size(const struct Burrow *v);
 int           burrow_handle_count(const struct Burrow *v);
 int           burrow_mapping_count(const struct Burrow *v);
@@ -95,6 +100,21 @@ The upper-bound check `vaddr + length > USER_VA_TOP` (added at R12-vaddr) enforc
 |---|---|
 | `0` | success: the VMA exactly matching `[vaddr, vaddr + length)` was removed and freed. mapping_count--; the BURROW may be freed if it was the last mapping AND no handles are open. |
 | `-1` | no matching VMA. Partial unmap (a sub-range of an existing VMA) is post-v1.0; v1.0 requires exact-match. |
+
+### `burrow_share_into(Proc*, Burrow*, vaddr, prot)` — cross-Proc share (Weft-2 / I-37)
+
+The Weft capability dataplane (`docs/NET-THROUGHPUT.md §6`; `ARCHITECTURE.md §28 I-37`) needs one Burrow — a per-flow ring — reachable from **two** Procs: the guest and netd. `burrow_share_into` is that path, the tree's **first** cross-Proc-shared Burrow. It maps the **whole** Burrow (`length = v->size`; a share is always whole-ring, so the caller passes no length) into `dst`'s address space at `vaddr`, taking the `mapping_count` ref that keeps `v` alive for `dst` **independent** of the other Proc's refs. NO Burrow *handle* crosses Procs — `dst` holds only a mapping (grant-is-the-share; the capability is holding the namespace-gated flow fid, I-1/I-28).
+
+It is a thin composition of `burrow_map`, which is already Proc-agnostic (it takes any `p`) and #847-SMP-safe. The only new property is that the two refcount holders now sit in **different** Procs — sound because the dual-refcount lock (`v->lock`) is **per-Burrow, not per-Proc**, so it serializes `dst`'s `burrow_acquire_mapping` against the other Proc's `burrow_unref` / `burrow_release_mapping` identically to two threads of one Proc; the Burrow frees only when ALL refs (both Procs' mappings + any handle) drop, in any interleaving (`weft.tla::ShareBoundedByFlow`). Lock order is acyclic across Procs: A holds `A->vma_lock -> v->lock`, B holds `B->vma_lock -> v->lock` — distinct per-Proc leaf-ward `vma_lock`s, one shared inner `v->lock`.
+
+| Return | Meaning |
+|---|---|
+| `0` | success: `v` mapped whole into `dst`; `mapping_count++`. |
+| `-1` | NULL `dst`/`v`; corrupted, non-ANON, or zero-size `v`; W+X `prot` (rejected by `vma_alloc`, I-12); VMA overlap; or VMA SLUB OOM. No mapping installed; `v`'s refcount unchanged. |
+
+**Scope**: ANON only — a dataplane ring is anonymous memory; cross-Proc sharing of an MMIO/DMA Burrow is a distinct (unaudited) hardware-mapping surface (its own I-5 analysis owed) and fails closed here.
+
+**Preconditions** (the same shape as `burrow_map`): the caller holds `dst->vma_lock` (a `dst->vmas` mutator), AND guarantees `v` stays live across the call (a held ref, or a higher-level lock excluding a concurrent teardown to `{h:0,m:0}` — the Weft-6 caller serializes the data-fid open against flow teardown). The substrate cannot manufacture liveness for the instant before `vma_alloc` bumps the count; if both counts were already 0, `burrow_acquire_mapping`'s resurrection guard extincts.
 
 ### Defensive checks (extinct on violation)
 
@@ -244,6 +264,13 @@ Mapping (canonical at `specs/SPEC-TO-CODE.md`):
 - `burrow.unmap_proc_smoke` — `burrow_unmap(p, vaddr, len)` removes the VMA + decrements mapping_count.
 - `burrow.unmap_proc_no_match` — non-matching range / unaligned start / wrong length all return -1 without disturbing existing VMAs.
 
+### Weft-2 tests (`burrow_share_into(Proc*, ...)` — cross-Proc share)
+
+- `burrow.share_into_cross_proc` — one ANON Burrow mapped into TWO Procs (netd via `burrow_map`, the guest via `burrow_share_into`); both Procs' VMAs reference the IDENTICAL Burrow → the identical backing page (a byte on the shared page is visible to both mappings); `mapping_count == 2`; teardown frees on the last ref drop.
+- `burrow.share_into_alive_while_either_maps` — drop the construction HANDLE while two mappings remain → `v` stays alive (mappings alone keep it, h==0 — the grant-is-the-share guest-holds-only-a-mapping case); frees only when the LAST mapping drops.
+- `burrow.share_into_frees_on_last_drop` — the reverse teardown order (both mappings, then the handle last); with the test above, witnesses order-independence (free iff ALL refs gone — the cross-Proc #847 proof). Also exercises the multi-page whole-ring share.
+- `burrow.share_into_constraints` — NULL inputs, W+X prot, and a same-VA overlap within one Proc each return -1 without disturbing `mapping_count`.
+
 ---
 
 ## Known caveats / footguns
@@ -276,6 +303,8 @@ Partial unmap (a sub-range of an existing VMA) is post-v1.0. The v1.0 entry comp
 
 `burrow_ref` / `burrow_unref` / `burrow_acquire_mapping` / `burrow_release_mapping` run the `handle_count` + `mapping_count` mutations AND the `both-counts-zero` free decision under a **per-Burrow `spin_lock` (`v->lock`)** -- the #847 fix. A multi-thread Proc reaches these from concurrent CPUs (e.g. a sibling `handle_close` racing a mapping teardown), so the dual refcount had to become intrinsically SMP-safe: a torn count or two paths racing the free decision was a latent UAF/double-free. `burrow_free_internal` runs OUTSIDE `v->lock` (leaf discipline -- it takes the buddy / mmio / dma locks). `burrow_acquire_mapping` additionally carries the both-counts-zero resurrection guard + the per-type liveness read inside the lock (RW-1 C-F4). The per-Proc VMA-list mutators (`burrow_map` / `burrow_unmap` via `vma_insert`/`vma_remove`) serialize on the caller-held `p->vma_lock` (#713; lock order `vma_lock -> v->lock -> buddy zone->lock`).
 
+Weft-2 (`burrow_share_into`) exercises this SMP-safety **across Procs** for the first time: because `v->lock` is per-Burrow (not per-Proc), the guest's `burrow_acquire_mapping` and netd's `burrow_unref` / `burrow_release_mapping` on the one shared ring serialize identically to two threads of one Proc. The cross-Proc lock order stays acyclic — each Proc holds its own `vma_lock` then the single shared `v->lock`. The runtime witness is the SMP gate (the unit tests exercise the refcount transitions; the multi-boot gate witnesses the concurrent race).
+
 ### `_Static_assert` on `struct Burrow` size is intentionally absent
 
 The struct contains `enum burrow_type` whose underlying integer type is implementation-defined (typically int). To avoid an unnecessarily fragile assert that would fail under different compiler defaults, we don't pin the size. The `_Static_assert(__builtin_offsetof(struct Burrow, magic) == 0)` IS pinned because `burrow_free_internal`'s clobber (`v->magic = 0`) targets offset 0, and any post-free stale-pointer read of offset 0 needs to land on `magic` (not some other field) for the magic-check defense to detect the UAF. SLUB's own freelist next-pointer write (which on most allocators also lands at offset 0 of a freed slot) is a defense-in-depth backup, not the primary mechanism.
@@ -291,6 +320,7 @@ The struct contains `enum burrow_type` whose underlying integer type is implemen
 | `burrow_create_anon` (eager allocation) | Landed (P2-Fd) |
 | `burrow_ref` / `burrow_unref` / `burrow_acquire_mapping` / `burrow_release_mapping` | Landed (P2-Fd; renamed at P3-Db) |
 | `burrow_map(Proc*, ...)` / `burrow_unmap(Proc*, ...)` (high-level VMA-installing entry points) | Landed (P3-Db) |
+| `burrow_share_into(Proc*, ...)` (cross-Proc Burrow share; the Weft per-flow dataplane ring) | **Landed (Weft-2; I-37 substrate, no EL0 ABI — the flow-keyed delivery is Weft-6)** |
 | Dual-check NoUseAfterFree enforcement | Landed (P2-Fd) |
 | Integration with `handle.c` (KOBJ_BURROW release/acquire) | Landed (P2-Fd) |
 | In-kernel tests | 6 (P2-Fd) + 5 (P3-Db) = 11 covering refcount lifecycle + new VMA-installing entry points + overlap rollback. |

@@ -465,6 +465,81 @@ int burrow_unmap(struct Proc *p, u64 vaddr, size_t length) {
 }
 
 // =============================================================================
+// Weft-2 / I-37: cross-Proc Burrow share (the per-flow dataplane ring).
+// =============================================================================
+
+// burrow_share_into: map an EXISTING Burrow into a SECOND Proc's address
+// space, establishing the cross-Proc share. The tree's FIRST path that makes
+// one Burrow reachable from two Procs concurrently -- the substrate the Weft
+// capability dataplane (docs/NET-THROUGHPUT.md §6; ARCH §28 I-37) builds the
+// per-flow guest<->netd shared ring on (Weft-6 wires the EL0 delivery).
+//
+// A share maps the WHOLE Burrow (the entire per-flow ring): the caller passes
+// NO length (unlike burrow_map, whose sub-range callers drive an explicit
+// length) because a share is always whole-Burrow. length comes from v->size
+// via burrow_get_size (magic-checked: 0 on a NULL/corrupted v -> reject).
+// ANON only: a dataplane ring is anonymous memory; cross-Proc sharing of an
+// MMIO/DMA Burrow is a distinct (unaudited) hardware-mapping surface (its own
+// I-5 analysis owed), so it fails closed here.
+//
+// Composes burrow_map, which is ALREADY Proc-agnostic (it takes any `p`) and
+// #847-SMP-safe (vma_alloc -> burrow_acquire_mapping bumps mapping_count under
+// the per-Burrow v->lock). The ONLY new property Weft-2 establishes is that
+// the two refcount holders now sit in DIFFERENT Procs:
+//
+//   #847 cross-Proc proof. The dual-refcount lock (struct Burrow::lock) is
+//   per-BURROW, not per-Proc, so it serializes ref/unref/{acquire,release}_
+//   mapping identically whether the callers are two Threads of one Proc (the
+//   #847 case) or two different Procs (Weft-2). Proc A's burrow_release_mapping
+//   and Proc B's burrow_unref race the `handle_count==0 && mapping_count==0`
+//   free decision under v->lock; exactly one sees the 0,0 edge and frees. The
+//   Burrow lives while EITHER Proc holds a mapping OR any handle is open, and
+//   frees only when ALL drop, in ANY interleaving (the spec's
+//   weft.tla::ShareBoundedByFlow: free iff both share refs gone).
+//
+//   Lock order (acyclic across Procs). burrow_map requires the CALLER's
+//   dst->vma_lock, then vma_alloc takes v->lock: dst->vma_lock -> v->lock.
+//   Proc A holds A->vma_lock -> v->lock; Proc B holds B->vma_lock -> v->lock.
+//   The vma_locks are distinct per-Proc leaf-ward locks; v->lock is the single
+//   inner lock both reach -- no cycle, no cross-Proc deadlock.
+//
+// PRECONDITIONS:
+//   - The caller MUST hold dst->vma_lock (this installs a VMA in dst -- the
+//     #713 / RW-1 C-F2 vmas-mutator discipline, like burrow_map).
+//   - The caller MUST guarantee `v` stays alive across the call (a held
+//     handle/mapping ref, OR a higher-level lock excluding a concurrent
+//     teardown to {h:0,m:0}). burrow_share_into takes the mapping ref that
+//     keeps v alive THEREAFTER, but cannot manufacture liveness for the
+//     instant before vma_alloc bumps the count -- if both counts were already
+//     0, burrow_acquire_mapping extincts (the resurrection guard). In the
+//     grant-is-the-share flow the kernel resolves v from a live flow and the
+//     data-fid open is serialized against flow teardown (the Weft-6 caller's
+//     obligation).
+//
+// Returns 0 on success; -1 on NULL inputs, a corrupted/non-ANON/zero-size v,
+// W+X prot (rejected by vma_alloc), VMA overlap, or VMA SLUB OOM. On failure
+// no mapping is installed and v's refcount is unchanged.
+int burrow_share_into(struct Proc *dst, struct Burrow *v, u64 vaddr, u32 prot) {
+    if (!dst || !v) return -1;
+
+    // burrow_get_size magic-checks v (returns 0 on NULL/corrupted) -- a freed
+    // or wild v is rejected here, before any mapping ref is taken. A non-zero
+    // return proves v->magic == VMO_MAGIC, so the immutable v->type read below
+    // is on a valid Burrow.
+    size_t length = burrow_get_size(v);
+    if (length == 0) return -1;
+
+    // Scope the cross-Proc share to anonymous dataplane rings. MMIO/DMA are
+    // create-immutable types; a lock-free read is coherent here.
+    if (v->type != BURROW_TYPE_ANON) return -1;
+
+    // burrow_map takes the mapping_count ref (vma_alloc -> burrow_acquire_
+    // mapping) that keeps v alive for dst from here on -- the cross-Proc #847
+    // ref. W^X (prot) + VA bounds + overlap are validated inside.
+    return burrow_map(dst, v, vaddr, length, prot);
+}
+
+// =============================================================================
 // Diagnostics.
 // =============================================================================
 

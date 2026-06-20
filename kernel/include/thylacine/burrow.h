@@ -311,6 +311,37 @@ int burrow_map(struct Proc *p, struct Burrow *v, u64 vaddr, size_t length, u32 p
 // `p->vmas` mutator; same discipline as burrow_map).
 int burrow_unmap(struct Proc *p, u64 vaddr, size_t length);
 
+// =============================================================================
+// Weft-2 / I-37: cross-Proc Burrow share (the per-flow dataplane ring).
+// =============================================================================
+
+// burrow_share_into: map the WHOLE of an existing ANON Burrow `v` into a
+// SECOND Proc `dst`'s address space at `vaddr`, establishing the cross-Proc
+// share the Weft capability dataplane (ARCH §28 I-37; docs/NET-THROUGHPUT.md
+// §6) builds the per-flow guest<->netd ring on. The tree's FIRST path that
+// makes one Burrow reachable from two Procs: the mapping_count ref taken here
+// keeps `v` alive for `dst` independent of the other Proc's refs (the #847
+// dual-refcount, now cross-Proc). NO Burrow handle crosses Procs -- `dst`
+// holds only a mapping (grant-is-the-share; the capability is holding the
+// namespace-gated flow fid, I-1/I-28).
+//
+// Length is the whole Burrow (v->size) -- a share is always whole-ring, so the
+// caller passes no length (unlike burrow_map). ANON only (cross-Proc MMIO/DMA
+// mapping is out of scope; I-5 analysis owed). prot is RW (W+X rejected by
+// vma_alloc, I-12).
+//
+// Returns 0 on success; -1 on NULL inputs, a corrupted/non-ANON `v`, W+X prot,
+// VMA overlap, or SLUB OOM. On failure no mapping is installed and v's
+// refcount is unchanged.
+//
+// PRECONDITIONS (see kernel/burrow.c for the cross-Proc #847 proof + lock
+// order): the caller MUST hold `dst->vma_lock` (a dst->vmas mutator, the same
+// #713 / RW-1 C-F2 discipline as burrow_map) AND MUST guarantee `v` stays live
+// across the call (a held ref, or a higher-level lock excluding a concurrent
+// teardown to {h:0,m:0} -- the Weft-6 caller serializes the data-fid open
+// against flow teardown).
+int burrow_share_into(struct Proc *dst, struct Burrow *v, u64 vaddr, u32 prot);
+
 // Diagnostic accessors. Safe to call on a non-NULL, non-freed BURROW.
 // Behavior on a freed BURROW is UB (the magic check would catch a
 // straight post-free deref, but a coincidental magic re-use after

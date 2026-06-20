@@ -447,7 +447,7 @@ dataplane arc the user committed.
   (teardown leaves a #847 ref). The four buggy cfgs are the durable Weft-7-audit regressions.
   Model maps to the planned impl sites (`specs/SPEC-TO-CODE.md::weft.tla`); the impl is OWED
   across Weft-2..7.
-- **Weft-2 (the cross-Proc Burrow-share substrate).** The kernel mechanism a per-flow
+- **Weft-2 (the cross-Proc Burrow-share substrate) — LANDED.** The kernel mechanism a per-flow
   shared page rests on: one Burrow mapped into *two* Procs (guest + netd) with the #847
   dual-refcount (I-7) holding it alive while *either* maps it and freeing it when *both*
   drop. The map mechanism already exists — `burrow_map(struct Proc *p, ...)` takes an
@@ -459,6 +459,16 @@ dataplane arc the user committed.
   Weft-2** (see the delivery model below) — this is the substrate; the EL0 surface is
   inherently per-flow and lands at Weft-6. Validates `weft.tla` Init (the share mapped into
   both via the dual ref) + Teardown (drop both → free).
+
+  *As-built:* `kernel/burrow.c::burrow_share_into(dst, v, vaddr, prot)` maps the WHOLE ANON
+  Burrow (`length = v->size`; ANON-only — cross-Proc MMIO/DMA is a distinct unaudited surface,
+  fail-closed) into a second Proc via `burrow_map`, with the cross-Proc #847 proof + lock-order
+  reasoning in the function header and `docs/reference/20-burrow.md`. 4 kernel unit tests
+  (`burrow.share_into_{cross_proc,alive_while_either_maps,frees_on_last_drop,constraints}`)
+  exercise the two-Proc reachability, both teardown orders (free iff ALL refs drop), the
+  mapping-only liveness (grant-is-the-share, h==0), and the W^X/overlap rejects — 937/937, boot
+  OK. The `burrow.tla` spec gate re-ran green (clean + the 3 buggy cfgs each still violate),
+  confirming Weft-2 extends the modeled #847 mechanism without changing it. No EL0 ABI.
 
   **The delivery model — grant-is-the-share (user-voted 2026-06-20).** Opening the flow's
   `/net/<proto>/N/data` fid maps the per-flow shared Burrow into the guest; **no Burrow
