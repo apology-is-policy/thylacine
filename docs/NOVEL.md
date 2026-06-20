@@ -156,11 +156,11 @@ These are not v1.0 angles — they're recorded so a future direction isn't lost.
   copy threshold (so it is the lineage's own fast local-9P transport, not a deviation).
   Reserves **I-37** (dataplane integrity: enforcement at setup not per-packet; the
   multi-holder buffer-lifetime / `F_NOTIF` release; the split-ring SMP discipline) +
-  `specs/dataplane.tla` (spec-first re-enabled). Subsumes the *latency* half of the
+  `specs/weft.tla` (spec-first re-enabled). Subsumes the *latency* half of the
   net-optimization arc too: the readiness ring closes the RX-wake floor (NET-PERF N1) on the
   same mechanism. The build is the **Weft arc** (Weft-0 Tier-A window win is the v1.0 piece;
   Weft-1..7 the dataplane). Audit-bearing (the buffer-lifetime UAF + the no-per-op-mediation
-  property). (Name *held for signoff* — the crosswise thread woven through the Loom warp.)
+  property). (Name ratified 2026-06-20 — the crosswise thread woven through the Loom warp.)
 
 ---
 

@@ -295,10 +295,9 @@ one, and virtio-9p needed *both*.
 
 ## 5. The committed design: the Weft capability dataplane
 
-**Weft** (proposed thematic name, *held for signoff* — the crosswise thread the shuttle
-carries through the warp on a loom; here, the zero-copy data woven *through* Loom. Loom is
-the async control ring; Weft is the zero-copy data path through it. Scripture keeps the
-descriptive "capability dataplane" until the name is ratified.)
+**Weft** (ratified 2026-06-20 — the crosswise thread the shuttle carries through the warp
+on a loom; here, the zero-copy data woven *through* Loom. Loom is the async control ring;
+Weft is the zero-copy data path through it.)
 
 ### 5.1 The thesis (the precise NOVEL claim)
 
@@ -397,13 +396,12 @@ release.
 
 **Spec-first RE-ENABLED for this surface** (the fifth instance of re-enabling point (a); the
 io_uring `ubuf_info` buffer-lifetime race is the famous, subtle class that benefits from
-machine-checked exploration). **Model-first**: `specs/dataplane.tla` (clean +
+machine-checked exploration). **Model-first**: `specs/weft.tla` (clean +
 buggy cfgs: `premature_release` [the F_NOTIF UAF — pin released at op-terminal not
 notification-terminal], `recheck_per_op` [a per-packet capability re-check — the reviewer
 attack, which must *fail* the no-mediation invariant if present], `ring_toctou` [a re-read
 shared-ring field], `share_outlives_flow` [the Burrow surviving the flow's teardown]) is
-written + TLC-green **before** the impl. (Spec name reserved as `dataplane.tla`; renamed to
-`weft.tla` if the thematic name is ratified.)
+written + TLC-green **before** the impl.
 
 ---
 
@@ -417,7 +415,7 @@ dataplane arc the user committed.
   kernel-client msize — coherently. Measure on M6. Audit-light (back-pressure #841/#845 + the
   #65 per-Proc memory cap with bigger per-conn buffers). *Independent of Weft-1+; can land
   any time.*
-- **Weft-1 (spec-first).** `specs/dataplane.tla` — model the shared-page transport + the
+- **Weft-1 (spec-first).** `specs/weft.tla` — model the shared-page transport + the
   `F_NOTIF` multi-holder buffer lifetime + the enforcement-at-setup / no-per-op-recheck +
   the split-ring discipline. Clean + the four buggy cfgs. Model-first, before any impl.
 - **Weft-2 (the cross-Proc Burrow-share primitive).** The missing inter-Proc Burrow-share
