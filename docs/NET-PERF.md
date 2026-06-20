@@ -330,3 +330,130 @@ HTTPS until the M2 transport floor is fixed first.
 `tlsperf` (boot probe) or `tlsperf 100` (100 handshakes) from the shell. The
 TCG-vs-HVF contrast: `THYLACINE_ACCEL={tcg,hvf} tools/test.sh` then
 `grep 'tlsperf M' build/test-boot.log`.
+
+---
+
+## 10. NP-3 results (the NIC path M6 + host baselines) — the "device or us" answer
+
+M6 measures the guest reaching a **host** server over the **virtio-net NIC +
+slirp** (`tools/np3-bench.sh` runs a 3-port host server and a slirp `guestfwd`
+maps `10.0.2.100:7820/+1/+2` -> the host's `127.0.0.1`; the in-guest `netperf
+nic` boot probe drives it). Comparing M6 (NIC) to M1/M2/M3 (the resident `lo`
+stack) isolates the QEMU device + slirp delta; the host baselines are the
+apples-to-apples reference. This *is* the deterministic outbound-TCP-over-NIC
+test (#258).
+
+| Metric | TCG | HVF | Host baseline (loopback) |
+|---|---|---|---|
+| **M6 rtt** (1B echo over NIC) | **min 349 us** / max **51400 us** / mean 10547 | **min 50104 / mean 50437 / max 50862 us** (ALL floor) | B1 51 us (min 27) |
+| **M6 floor** (host echo delayed 5 ms) | **51418 us** (consistent) | **50428 us** (consistent) | — |
+| **M6 connect** (dial to ESTABLISHED) | 3925 us | 1164 us | B3 47 us (min 20) |
+| **M6 throughput** (32 KiB send to sink) | 4788 KiB/s | **15968 KiB/s** | B2 3156 **MiB/s** |
+| (for reference: M1 lo rtt) | 524 us | 158 us | |
+| (for reference: M2 lo bulk) | 51 KiB/s | 52 KiB/s | |
+| (for reference: M3 lo connect) | 3859 us | 1085 us | |
+
+Host crypto (B4, openssl, ARMv8 AES/SHA): AES-128-GCM **~8.7 GB/s**, SHA-256
+~2.5 GB/s, ECDSA-P256 ~20200 verify/s + ~60000 sign/s, X25519 ~36300/s. Host
+TLS 1.3 handshake (B5, openssl s_time): **~0.31 ms** (3209 conn/s).
+
+### The headline finding (M6 rtt): the slowness is OURS (the RX-wake floor), and it bites HARDEST on HVF
+
+The charter (section 2.1) hypothesized a 50 ms RX-wake floor; M6 **confirms and
+sharpens it**. A request/response over the NIC is: the guest *writes* (a 9P
+Twrite wakes netd, which TXes) then *reads* (a 9P Tread wakes netd, which checks
+RX). Two outcomes:
+
+- **The reply is already in the RX ring** when the read's wake reaches netd ->
+  delivered at once -> ~**350 us** (the device + 9P + smoltcp per-op cost; the
+  M6-rtt *min*). The QEMU virtio-net + slirp device is **fast** — comparable to
+  the in-guest `lo` (M1).
+- **The read beats the reply** -> netd defers the read + parks in `t_poll(>=50
+  ms)`; the reply lands on the NIC RX during the park but there is **no 9P event
+  and no pollable IRQ fd to wake `t_poll`** (`netd/src/main.rs:495-501`,
+  `IDLE_POLL_MIN_MS=50`), so it is delivered at the 50 ms timeout -> ~**51 ms**
+  (the M6-rtt *max*).
+
+**This is why HTTPS is slow on HVF specifically.** On the fast HVF CPU the guest
+issues the read so quickly (the whole write->read cycle is microseconds) that the
+reply — a real slirp+host transit of ~1 ms — has **not yet arrived**, so EVERY
+round-trip defers and pays the floor: M6-rtt is `min == mean == max == 50 ms`.
+On the ~50x slower TCG CPU the write->read cycle is hundreds of us, so the reply
+is **often already there** -> bimodal (min 350 us, max 51 ms). The **M6-floor**
+probe (the host echoes after 5 ms, forcing the reply past the park) confirms it
+deterministically: a 5 ms reply costs **~51 ms** on both accels. A TLS fetch over
+a real network has ~5-6 such round-trips (SYN-ACK + handshake flights + the HTTP
+request/response), so on HVF that is **~250-300 ms of pure floor** stacked on the
+real RTT — the reported symptom. The device is not at fault; our poll model is.
+
+### M6 connect, M6 throughput: the device handles connect + bulk fine
+
+- **M6 connect** (~3.9 ms TCG / ~1.2 ms HVF) ~= **M3 lo connect** — CPU-bound
+  netd connect-processing, no floor (slirp's SYN-ACK is near-instant, so the
+  connect read rarely parks). The device adds nothing to connect latency.
+- **M6 throughput** (~5 MiB/s TCG / ~16 MiB/s HVF) is **~100x faster than M2 lo
+  bulk** (~50 KiB/s). Both are POLLOUT-paced sends; the difference is the
+  *drain*. M6's host sink drains over the NIC instantly, so netd's 4 KiB send
+  buffer rarely fills -> the writer rarely hits `Ok(0)` -> rarely waits POLLOUT.
+  M2's in-guest loopback drain (a 2nd thread reading via netd's `lo` + the
+  timer-paced dev9p.poll POLLOUT readiness, #221) is the actual M2 bottleneck —
+  **not the send, and not the device**. So the M2 50 KiB/s ceiling is a
+  *loopback-drain* artifact, not the NIC's bulk capability.
+
+### The "device or us" verdict (the user's question)
+
+**Us, decisively.** The QEMU virtio-net + slirp device is fast (M6-rtt min ~350
+us ~= the in-guest `lo`; M6 bulk ~16 MiB/s). The slowness is the **netd RX-wake
+floor** (no pollable NIC-IRQ fd -> a NIC-arriving reply waits up to netd's 50 ms
+idle poll), which on a fast CPU (HVF / real hardware) hits **every** round-trip.
+Ranked levers (the NP-4 backlog, feeding #62):
+
+1. **A pollable IRQ-readiness fd (the #1 lever).** A small kernel ABI (the
+   eventfd/timerfd analog) so netd can `t_poll([srv_fd, irq_fd], ...)` and wake
+   on a NIC RX *or* a 9P request. This eliminates the per-round-trip 50 ms floor
+   — the single biggest real-RTT / HVF latency lever. (NET-PERF section 2.1's
+   candidate, now quantified: ~50 ms x N round-trips per fetch.)
+2. **Hardware AES/SHA** (NP-2 lever 2): ~100x on the symmetric record layer +
+   the SHA-heavy handshake (B4 ~8.7 GB/s HW vs guest ~47 MB/s SW). Secondary to
+   lever 1 for latency; matters for bulk HTTPS *after* the floor is fixed.
+3. **The M2 loopback-drain path** (the dev9p.poll POLLOUT timer cadence, #221) +
+   larger socket windows + msize — for in-guest bulk; the NIC bulk is already
+   fine.
+
+### The `np3-bench.sh` harness (as-built)
+
+- `tools/np3-bench.sh` runs a 3-port host server (echo / +1 delayed-echo 5 ms /
+  +2 sink — one port per metric so each gets its own slirp `guestfwd` connection;
+  same-dest-port dials coalesce onto one rule's connection), the host baselines
+  (a socket ping-pong / bulk / connect mirroring M1/M2/M3; `openssl speed` +
+  `s_time` for B4/B5), then boots the guest under TCG + HVF with the guestfwd on
+  and greps the M6 lines. Re-runnable; ground-truths the guest banner instead of
+  trusting the HVF exit code (the #34 virtio-input QMP flake makes HVF `test.sh`
+  exit 1 with a fully healthy guest).
+- `netperf nic <ip> <port> [iters] [kib] [conns]` is the in-guest tool (a
+  best-effort joey boot probe `netperf nic 10.0.2.100 7820`): a **bounded**
+  reachability gate (`TcpStream::connect_timeout`, 600 ms, polls the QTPOLL
+  `ready` sibling for POLLOUT = ESTABLISHED) so a standard boot (no guestfwd, no
+  host server) **SKIPs fast** and never hangs; numbers only when np3-bench's host
+  server is up. The one libthyla-rs add is `TcpStream::connect_timeout`.
+- The guestfwd is **env-gated** in `run-vm.sh` (`THYLACINE_GUESTFWD`) -> the
+  standard boot / SMP gate QEMU launch is byte-identical.
+
+### Caveats / surfaced seams
+
+- **M6 throughput is send-completion, not drain-confirmed** (a < 1/N_windows
+  overcount): a half-close (`shutdown`) + read-the-ack would confirm the host
+  drained, but **netd hangs a read after `shutdown(SHUT_WR)` when the peer
+  replies post-FIN** (#264 — a real netd half-close read-path bug, surfaced here,
+  latent for v1.0 full-duplex clients). The probe measures send-completion to
+  sidestep it.
+- M6 connect dials coalesce onto one slirp guestfwd connection (same dest:port),
+  so it measures netd connect-processing with an instant SYN-ACK — the SYN-ACK
+  floor does not manifest because slirp answers at once (a real-RTT SYN-ACK
+  would, like the data floor).
+
+### Reproduce
+
+`tools/np3-bench.sh` (build + host baselines + M6 under TCG and HVF). Or, from a
+logged-in shell with a host server + guestfwd up: `netperf nic 10.0.2.100 7820`.
+The guest M6 lines: `grep 'netperf M6' build/test-boot.log`.

@@ -171,6 +171,24 @@ fi
 # order, so virtio-blk-device stays at slot 31; virtio-net lands at
 # slot 30; virtio-rng-device drops to slot 29). The probe scans all
 # 32 slots, so order is informational.
+# NP-3 (M6): an OPTIONAL slirp guestfwd on net1 (netd's NIC -- the warden binds
+# `virtio-pci:1` -> netd, which opens VirtioNetPci on net1). When THYLACINE_GUESTFWD
+# is set, the guest's magic `10.0.2.100:7820` forwards to a HOST server on
+# `127.0.0.1:$THYLACINE_GUESTFWD_HOSTPORT` (default 28099) -- the apples-to-apples
+# NIC-path benchmark target (`tools/np3-bench.sh`). Unset (the standard boot/SMP
+# gate): net1 is byte-identical, no forwarding rule. Inert without a host server
+# (a closed target RSTs); the in-guest M6 probe gates on a bounded connect, so an
+# absent/inert guestfwd is a fast SKIP, never a hang.
+net1_opts="user,id=net1"
+if [[ -n "${THYLACINE_GUESTFWD:-}" ]]; then
+    gf_hostport="${THYLACINE_GUESTFWD_HOSTPORT:-28099}"
+    # Three rules: 7820/+1/+2 (rtt-echo / floor-delayed-echo / bw-sink) -> the host
+    # server's 28099/+1/+2. One rule per metric so each gets its own host
+    # connection (a guestfwd rule maps to one connection; same-port dials coalesce).
+    for gf_i in 0 1 2; do
+        net1_opts="${net1_opts},guestfwd=tcp:10.0.2.100:$((7820 + gf_i))-tcp:127.0.0.1:$((gf_hostport + gf_i))"
+    done
+fi
 net_flags=()
 if [[ "${THYLACINE_NO_NET:-0}" != "1" ]]; then
     net_flags=(
@@ -185,7 +203,7 @@ if [[ "${THYLACINE_NO_NET:-0}" != "1" ]]; then
         # test claims it (virtio_device_id=1); the warden-bound netdev-driver
         # claims the mmio net above (MENAGERIE 5d-3). The PCI function is not a
         # virtio-mmio slot (like rng-pci), so the mmio slot map below is unchanged.
-        -netdev "user,id=net1"
+        -netdev "$net1_opts"
         -device "virtio-net-pci,netdev=net1,disable-legacy=on,mac=52:54:00:12:34:57"
     )
 fi

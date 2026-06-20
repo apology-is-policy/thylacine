@@ -3776,6 +3776,47 @@ int main(void) {
                                  "M5 crypto over the resident lo stack)\n");
                     }
 
+                    // === NET-PERF NP-3: the NIC path (M6), best-effort ===
+                    // Spawn `/bin/netperf nic 10.0.2.100 7820`: the M6 NIC-path
+                    // bench (rtt / connect / throughput) against a HOST server
+                    // reached through the slirp guestfwd (tools/np3-bench.sh
+                    // starts the server + sets THYLACINE_GUESTFWD; run-vm.sh maps
+                    // 10.0.2.100:7820 -> the host's 127.0.0.1). The in-guest gate
+                    // is a BOUNDED connect (600 ms) so on the standard boot -- no
+                    // host server, the guestfwd inert/absent -- it SKIPs fast and
+                    // exits 0. M6 is profiling data, never a boot gate.
+                    {
+                        static const char np3_argv[] =
+                            "netperf\0" "nic\0" "10.0.2.100\0" "7820\0";
+                        const char np3_name[] = "/bin/netperf";
+                        struct t_sys_spawn_args np3_req = {
+                            .name_va       = (unsigned long)np3_name,
+                            .argv_data_va  = (unsigned long)np3_argv,
+                            .fd_list_va    = 0,
+                            .name_len      = sizeof(np3_name) - 1,
+                            .argv_data_len = sizeof(np3_argv) - 1,
+                            .argc          = 4,
+                            .fd_count      = 0,
+                            .perm_flags    = 0,
+                            ._pad_envp     = 0,
+                            .cap_mask      = 0,
+                        };
+                        long np3_pid = t_spawn_full_argv(&np3_req);
+                        if (np3_pid <= 0) {
+                            t_putstr("joey: t_spawn(\"netperf nic\") FAILED\n");
+                            return 1;
+                        }
+                        int np3_status = -1;
+                        long np3_reaped =
+                            t_wait_pid_for((int)np3_pid, 0, &np3_status);
+                        if (np3_reaped != np3_pid || np3_status != 0) {
+                            t_putstr("joey: NET-PERF NP-3 netperf-nic FAILED\n");
+                            return 1;
+                        }
+                        t_putstr("joey: NET-PERF NP-3 OK (netperf M6 NIC path; "
+                                 "numbers under np3-bench, else a fast SKIP)\n");
+                    }
+
                     // === net-7a-2: the native SNTP client selftest (deterministic) ===
                     // Spawn /bin/sntp (no args) -> its in-guest SELFTEST: the
                     // NTPv4 build/parse/validate + 1900->Unix + offset battery,

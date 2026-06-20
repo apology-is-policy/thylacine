@@ -24,10 +24,12 @@
 use crate::err::{Error, Result};
 use crate::fs::{File, OpenOptions};
 use crate::io::{Read, Write};
+use crate::poll::{PollEvents, PollSet, PollTimeout};
 use alloc_crate::format;
 use alloc_crate::string::String;
 use alloc_crate::vec::Vec;
 use core::fmt;
+use core::time::Duration;
 
 /// Plan 9 wire separator between host and port (`a.b.c.d!port`). The native API
 /// presents the Rust `:` convention; we translate only at the `/net` boundary.
@@ -235,6 +237,36 @@ impl TcpStream {
         let (mut ctl, n) = clone_conn("tcp")?;
         ctl.write_all(format!("connect {}", addr.wire()).as_bytes())?;
         // Opening `data` blocks until ESTABLISHED (or fails on RST/refused).
+        let data = open_conn_file("tcp", n, "data", true, true)?;
+        Ok(TcpStream { ctl, data, n })
+    }
+
+    /// Active open with a bounded wait. Like `connect`, but instead of blocking
+    /// the `data` open until ESTABLISHED (which has no deadline short of netd's
+    /// 15 s connect timeout), it polls the QTPOLL `ready` sibling for POLLOUT --
+    /// netd's `check_ready` gates POLLOUT on `tcp::can_send()`, true only once
+    /// ESTABLISHED (a SynSent socket reports neither, net-6b) -- with `timeout`.
+    /// Returns `TimedOut` if the handshake does not complete in time (the
+    /// half-open `ctl` closes on drop). For a best-effort prober that must never
+    /// block on an unreachable peer (NET-PERF M6, the slirp `guestfwd` path).
+    pub fn connect_timeout(addr: SocketAddrV4, timeout: Duration) -> Result<TcpStream> {
+        let (mut ctl, n) = clone_conn("tcp")?;
+        ctl.write_all(format!("connect {}", addr.wire()).as_bytes())?;
+        // The readiness sibling is openable while the socket is still SynSent;
+        // POLLOUT fires only on ESTABLISHED (can_send). A RST leaves the socket
+        // !can_send, so a refused dial also resolves to the timeout (bounded).
+        let ready = open_conn_file("tcp", n, "ready", true, false)?;
+        let mut ps = PollSet::new();
+        ps.add_raw(ready.as_raw_fd(), PollEvents::WRITE);
+        let ms = timeout.as_millis().min(u32::MAX as u128) as u32;
+        let established = ps
+            .poll(PollTimeout::Millis(ms))
+            .map(|r| r.into_iter().any(|e| e.is_writable()))
+            .map_err(|_| Error::Io)?;
+        if !established {
+            return Err(Error::TimedOut);
+        }
+        // ESTABLISHED: the `data` open returns at once (no further blocking).
         let data = open_conn_file("tcp", n, "data", true, true)?;
         Ok(TcpStream { ctl, data, n })
     }

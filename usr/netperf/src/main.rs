@@ -358,18 +358,320 @@ fn m3_connect(conns: u32) -> Result<(), &'static str> {
     Ok(())
 }
 
+// =============================================================================
+// M6 -- the NIC path (guest -> a HOST server over the virtio-net NIC + slirp).
+// =============================================================================
+//
+// M1/M2/M3 are self-loop over the resident `lo` stack (this Proc is both ends).
+// M6 is CLIENT-ONLY against a HOST server reached through a QEMU slirp `guestfwd`
+// (`tools/np3-bench.sh` starts the host server + the launcher maps the magic
+// `10.0.2.100:7820` -> the host's `127.0.0.1`). It isolates the QEMU virtio-net +
+// slirp delta -- and DIRECTLY exposes the NET-PERF section-2.1 RX-wake floor: a
+// host-driven reply (an echo, a SYN-ACK, the bulk ACKs) arrives on the NIC with
+// NO 9P event to wake netd, so each completion waits up to netd's ~50 ms idle
+// poll. Compare M6-rtt to M1, M6-connect to M3, M6-bw to M2.
+//
+// The host server speaks a 1-byte mode header per connection:
+//   'r' -> echo every subsequent byte (RTT);  's' -> drain to EOF then send one
+//   'A' ack (bulk sink);  no byte (the client connects + closes) -> connect-only.
+//
+// BEST-EFFORT: when no host server is reachable (the standard boot -- the
+// guestfwd is inert / absent), the bounded gate `connect_timeout` resolves to a
+// fast SKIP and the run still exits 0 (M6 is data, never a boot gate). The gate
+// is bounded so an unreachable peer can NEVER hang the boot.
+
+const M6_GATE_MS: u32 = 600; // the bounded reachability gate (skip-fast budget).
+const M6_BW_BUF: usize = 16 * 1024;
+const M6_POLL_MS: u32 = 2000;
+const M6_MAX_STALLS: u32 = 15;
+// The host-injected per-echo delay for the floor probe. Chosen well BELOW netd's
+// IDLE_POLL_MIN_MS (50 ms) idle-poll floor: a reply that lands AFTER netd has
+// deferred the read + parked in t_poll waits the floor, NOT the real RTT. So the
+// floor probe's measured RTT >> this delay is the direct, isolated measurement of
+// the NET-PERF section-2.1 RX-wake floor (the M6-rtt instant echo never parks).
+const M6_FLOOR_DELAY_MS: u16 = 5;
+
+/// One round of M6: gate the peer (bounded), then RTT + floor + connect + bulk.
+/// Prints a SKIP line + returns Ok when the peer is unreachable (best-effort).
+///
+/// Each metric uses a DISTINCT dest port (`port`, `port+1`, `port+2`), where the
+/// PORT selects the host server's behavior (echo / delayed-echo / sink) -- no
+/// in-band mode byte. This is load-bearing: a slirp `guestfwd` maps each rule to
+/// its OWN host connection, and sequential dials to the SAME dest:port coalesce
+/// onto one host connection (observed empirically), which would conflate the
+/// metrics. One metric per port keeps each measurement isolated.
+fn run_m6(ip: Ipv4Addr, port: u16, iters: u32, kib: u64, conns: u32) {
+    let rtt_addr = SocketAddrV4::new(ip, port); // echo
+    let floor_addr = SocketAddrV4::new(ip, port.wrapping_add(1)); // delayed echo
+    let bw_addr = SocketAddrV4::new(ip, port.wrapping_add(2)); // sink
+
+    let mut gate = match TcpStream::connect_timeout(
+        rtt_addr,
+        Duration::from_millis(M6_GATE_MS as u64),
+    ) {
+        Ok(c) => c,
+        Err(_) => {
+            t_putstr(&format!(
+                    "netperf M6 SKIP: no host server reachable at {} over the NIC (guestfwd inert; standard boot)\n",
+                    rtt_addr
+                ));
+            return;
+        }
+    };
+
+    // M6-rtt: reuse the established gate connection (the echo port). The reply is
+    // near-instant, so it is usually already in the RX ring when netd next polls
+    // -> the device + slirp per-op cost (the min); a reply that lands just after
+    // netd parks pays the ~50 ms floor (the max) -- the bimodal device-vs-floor.
+    if let Err(e) = m6_rtt(&mut gate, iters) {
+        t_putstr(&format!("netperf M6 rtt: ERR ({})\n", e));
+    }
+    drop(gate);
+
+    // M6-floor: a fresh dial to the DELAYED-echo port (the host sleeps
+    // M6_FLOOR_DELAY_MS before echoing). The reply ALWAYS lands after netd has
+    // deferred the read + parked, so the RTT is the ~50 ms RX-wake floor, NOT the
+    // 5 ms host delay -- the clean isolation of the floor (the device-or-us core).
+    if let Err(e) = m6_floor(floor_addr, iters) {
+        t_putstr(&format!("netperf M6 floor: ERR ({})\n", e));
+    }
+
+    // M6-connect: blocking dials to the echo port; the connect-to-ESTABLISHED
+    // latency. These DO coalesce among themselves (same dest:port), so they
+    // measure netd's connect processing with a near-instant slirp SYN-ACK (no
+    // SYN-ACK floor -- slirp answers at once), i.e. the NIC connect ~= M3 (lo).
+    if let Err(e) = m6_connect(rtt_addr, conns) {
+        t_putstr(&format!("netperf M6 connect: ERR ({})\n", e));
+    }
+
+    // M6-bw: a fresh connection to the SINK port, POLLOUT-paced bulk send.
+    if let Err(e) = m6_throughput(bw_addr, kib * 1024) {
+        t_putstr(&format!("netperf M6 throughput: ERR ({})\n", e));
+    }
+}
+
+fn m6_rtt(client: &mut TcpStream, iters: u32) -> Result<(), &'static str> {
+    let ping = [0x5au8; 1];
+    let mut buf = [0u8; 1];
+    let mut total_ns: u64 = 0;
+    let mut min_ns: u64 = u64::MAX;
+    let mut max_ns: u64 = 0;
+    for _ in 0..iters {
+        let t = Instant::now();
+        client.write_all(&ping).map_err(|_| "write")?;
+        let n = client.read(&mut buf).map_err(|_| "read")?;
+        if n == 0 {
+            return Err("peer EOF");
+        }
+        let dt = t.elapsed().as_nanos() as u64;
+        total_ns += dt;
+        if dt < min_ns {
+            min_ns = dt;
+        }
+        if dt > max_ns {
+            max_ns = dt;
+        }
+    }
+    let mean = total_ns / iters as u64;
+    t_putstr(&format!(
+        "netperf M6 rtt: {} round-trips over NIC; mean {} / min {} / max {} (1B echo)\n",
+        iters,
+        us(mean),
+        us(min_ns),
+        us(max_ns)
+    ));
+    Ok(())
+}
+
+/// The floor probe: the host echoes each byte after sleeping M6_FLOOR_DELAY_MS,
+/// so the reply arrives AFTER netd has deferred the read + parked in t_poll. The
+/// measured RTT is then netd's idle-poll floor (~50 ms), not the 5 ms host delay
+/// -- the direct measurement that the NIC slowness is OUR poll model, not the
+/// QEMU device (M6-rtt, instant echo, never parks -> ~370 us).
+fn m6_floor(addr: SocketAddrV4, iters: u32) -> Result<(), &'static str> {
+    // The dest port (port+1) IS the delayed-echo behavior: the host sleeps
+    // M6_FLOOR_DELAY_MS before each echo. No in-band mode byte (a same-port
+    // reconnect would coalesce; the port selects the behavior).
+    let mut client = TcpStream::connect(addr).map_err(|_| "connect")?;
+    let ping = [0x5au8; 1];
+    let mut buf = [0u8; 1];
+    let mut total_ns: u64 = 0;
+    let mut min_ns: u64 = u64::MAX;
+    let mut max_ns: u64 = 0;
+    for _ in 0..iters {
+        let t = Instant::now();
+        client.write_all(&ping).map_err(|_| "write")?;
+        let n = client.read(&mut buf).map_err(|_| "read")?;
+        if n == 0 {
+            return Err("peer EOF");
+        }
+        let dt = t.elapsed().as_nanos() as u64;
+        total_ns += dt;
+        if dt < min_ns {
+            min_ns = dt;
+        }
+        if dt > max_ns {
+            max_ns = dt;
+        }
+    }
+    let mean = total_ns / iters as u64;
+    t_putstr(&format!(
+        "netperf M6 floor: {} round-trips over NIC, host echo delayed {} ms; mean {} / min {} / max {} (excess over {} ms = netd RX-wake floor)\n",
+        iters,
+        M6_FLOOR_DELAY_MS,
+        us(mean),
+        us(min_ns),
+        us(max_ns),
+        M6_FLOOR_DELAY_MS
+    ));
+    Ok(())
+}
+
+fn m6_connect(addr: SocketAddrV4, conns: u32) -> Result<(), &'static str> {
+    let mut total_ns: u64 = 0;
+    let mut min_ns: u64 = u64::MAX;
+    let mut max_ns: u64 = 0;
+    for _ in 0..conns {
+        let t = Instant::now();
+        let c = TcpStream::connect(addr).map_err(|_| "connect")?;
+        let dt = t.elapsed().as_nanos() as u64;
+        drop(c); // FIN -> the host accept's recv(1) sees EOF + closes.
+        total_ns += dt;
+        if dt < min_ns {
+            min_ns = dt;
+        }
+        if dt > max_ns {
+            max_ns = dt;
+        }
+    }
+    let mean = total_ns / conns as u64;
+    t_putstr(&format!(
+        "netperf M6 connect: {} dials over NIC; mean {} / min {} / max {}\n",
+        conns,
+        us(mean),
+        us(min_ns),
+        us(max_ns)
+    ));
+    Ok(())
+}
+
+fn m6_throughput(addr: SocketAddrV4, total: u64) -> Result<(), &'static str> {
+    let mut client = TcpStream::connect(addr).map_err(|_| "connect")?;
+    let ready = client.ready_fd().map_err(|_| "ready fd")?;
+    let mut ps = PollSet::new();
+    ps.add_raw(ready.as_raw_fd(), PollEvents::WRITE);
+
+    // The dest port (port+2) IS the sink behavior: the host drains to EOF then
+    // sends one ack byte. No in-band mode byte.
+    let scratch = vec![0xa5u8; M6_BW_BUF];
+    let t = Instant::now();
+    let mut sent: u64 = 0;
+    while sent < total {
+        let take = core::cmp::min(scratch.len() as u64, total - sent) as usize;
+        let mut off = 0usize;
+        let mut stalls = 0u32;
+        while off < take {
+            match client.write(&scratch[off..take]) {
+                Ok(0) => {
+                    let woke = ps
+                        .poll(PollTimeout::Millis(M6_POLL_MS))
+                        .map(|r| r.into_iter().any(|e| e.is_writable()))
+                        .map_err(|_| "poll")?;
+                    if woke {
+                        stalls = 0;
+                    } else {
+                        stalls += 1;
+                        if stalls > M6_MAX_STALLS {
+                            return Err("stalled");
+                        }
+                    }
+                }
+                Ok(k) => {
+                    off += k;
+                    sent += k as u64;
+                    stalls = 0;
+                }
+                Err(_) => return Err("write"),
+            }
+        }
+    }
+    // Time = send-completion (all bytes accepted, POLLOUT-paced by the host's
+    // ACKs reopening the window). We deliberately do NOT half-close + read an ack
+    // here: a `shutdown()` (hangup) followed by a `read` of the host's post-FIN
+    // reply HANGS -- netd does not deliver post-hangup RX to a blocking read
+    // (tracked, a netd read-after-SHUT_WR seam). Dropping `client` (below) sends
+    // the FIN; the host drains the tail + closes. The last window's transit is
+    // not counted, a < 1/N_windows overcount, fine for a throughput proxy.
+    let dt = t.elapsed();
+    drop(client);
+    let us_total = dt.as_micros() as u64;
+    let kibps = if us_total > 0 {
+        total * 1_000_000 / 1024 / us_total
+    } else {
+        0
+    };
+    t_putstr(&format!(
+        "netperf M6 throughput: {} KiB over NIC in {}.{:03} ms; {} KiB/s (send-completion to sink)\n",
+        total / 1024,
+        dt.as_millis(),
+        dt.as_micros() % 1000,
+        kibps
+    ));
+    Ok(())
+}
+
 fn fail(metric: &str, why: &str) -> ! {
     t_putstr(&format!("netperf: FAIL -- {} ({})\n", metric, why));
     unsafe { t_exits(1) }
 }
 
+// M6 boot-probe defaults (small + bounded: each NIC op pays the ~50 ms RX-wake
+// floor, so 20 RTTs + 10 dials + 32 KiB measure it in ~2-3 s).
+const M6_ITERS: u32 = 20;
+const M6_CONNS: u32 = 10;
+const M6_KIB: u64 = 32;
+const M6_DEFAULT_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 100); // the slirp guestfwd magic.
+const M6_DEFAULT_PORT: u16 = 7820;
+
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
+    let args = env::args();
+
+    // `netperf nic [ip] [port] [iters] [kib] [conns]` -- the NET-PERF M6 NIC
+    // path (NP-3). Best-effort: a fast bounded SKIP when no host server is
+    // reachable (the standard boot), real numbers when np3-bench.sh runs a
+    // host server behind the slirp guestfwd. Always exits 0 (M6 is data).
+    if args.get_str(1) == Some("nic") {
+        let ip = args
+            .get_str(2)
+            .and_then(|s| Ipv4Addr::parse(s).ok())
+            .unwrap_or(M6_DEFAULT_IP);
+        let port: u16 = args
+            .get_str(3)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(M6_DEFAULT_PORT);
+        let iters: u32 = args
+            .get_str(4)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(M6_ITERS);
+        let kib: u64 = args
+            .get_str(5)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(M6_KIB);
+        let conns: u32 = args
+            .get_str(6)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(M6_CONNS);
+        t_putstr("netperf: NET-PERF NP-3 -- NIC path (M6 rtt / connect / throughput)\n");
+        run_m6(ip, port, iters, kib, conns);
+        t_putstr("netperf: NP-3 OK (M6 over the NIC, or a best-effort SKIP)\n");
+        return 0;
+    }
+
     // `netperf [iters] [mib] [conns]` -- all optional; default = the boot probe.
     // The M2 size is in MiB from the shell, but defaults to M2_BOOT_BYTES (a
     // small fixed byte count) so the boot probe stays ~1s -- the per-window-
     // paced rate is size-independent (see M2_BOOT_BYTES).
-    let args = env::args();
     let iters: u32 = args
         .get_str(1)
         .and_then(|s| s.parse().ok())
