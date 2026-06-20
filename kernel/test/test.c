@@ -669,6 +669,7 @@ void test_9p_wire_twalk_round_trip(void);
 void test_9p_wire_twalk_zero_names_clone(void);
 void test_9p_wire_tclunk_round_trip(void);
 void test_9p_wire_tflush_round_trip(void);
+void test_9p_wire_tweft_round_trip(void);
 void test_9p_wire_rlerror_parse(void);
 void test_9p_wire_rmsg_size_mismatch_rejected(void);
 void test_9p_wire_rmsg_wrong_type_rejected(void);
@@ -1750,6 +1751,7 @@ struct test_case g_tests[] = {
     { "9p_wire.twalk_zero_names_clone",test_9p_wire_twalk_zero_names_clone,false, NULL },
     { "9p_wire.tclunk_round_trip",     test_9p_wire_tclunk_round_trip,     false, NULL },
     { "9p_wire.tflush_round_trip",     test_9p_wire_tflush_round_trip,     false, NULL },
+    { "9p_wire.tweft_round_trip",      test_9p_wire_tweft_round_trip,      false, NULL },
     { "9p_wire.rlerror_parse",         test_9p_wire_rlerror_parse,         false, NULL },
     { "9p_wire.rmsg_size_mismatch_rejected",
                                        test_9p_wire_rmsg_size_mismatch_rejected,

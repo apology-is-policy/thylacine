@@ -152,6 +152,12 @@
 #define P9_RREFLINK    131u
 #define P9_TFALLOCATE  132u
 #define P9_RFALLOCATE  133u
+// Thylacine extension (Weft-6; NET-THROUGHPUT.md section 6): the per-flow
+// zero-copy dataplane ring setup. 134/135 sit just past the Stratum extension
+// range (128/129 are Tsync/Rsync, 132/133 Tfallocate). Kernel-client-issued op
+// (the #845 Tflush precedent).
+#define P9_TWEFT       134u
+#define P9_RWEFT       135u
 
 // =============================================================================
 // Wire-format constants.
@@ -672,5 +678,47 @@ int p9_parse_rrenameat(const u8 *in, size_t len, u16 *tag);
 int p9_build_tunlinkat(u8 *out, size_t cap, u16 tag, u32 dfid,
                        const u8 *name, size_t name_len, u32 flags);
 int p9_parse_runlinkat(const u8 *in, size_t len, u16 *tag);
+
+// =============================================================================
+// Weft extension (Weft-6; NET-THROUGHPUT.md section 6).
+//
+// The per-flow zero-copy dataplane ring setup -- a kernel-client-issued
+// request/reply op (the #845 Tflush precedent). On the FIRST zero-copy use of a
+// /net flow, the kernel dev9p client issues Tweft(fid) to netd; netd resolves
+// the fid to its connection, allocates the per-flow shared ring,
+// SYS_WEFT_SHARE-registers it (minting a kernel-scoped share_id), and replies
+// Rweft carrying that share_id + the ring geometry. The kernel then joins the
+// share_id to the pinned ring Burrow and maps it into the guest.
+//
+//   Tweft body: [fid: u32]
+//   Rweft body: [share_id: u64][ring_size: u32][ring_entries: u32]   (16 bytes)
+//
+// The share_id is kernel-minted (by SYS_WEFT_SHARE) and netd-echoed here; the
+// kernel honors it only when it arrives on the kernel's own Tweft to that netd
+// (the RDMA-rkey shape -- never handed to the guest, never forgeable).
+// =============================================================================
+
+// Rweft payload: the kernel-minted registration token + the ring geometry the
+// kernel needs to compute its private weft_ring_view (it does NOT trust the
+// shared header's geometry mirror -- the Weft-3 snapshot discipline).
+struct p9_weft_geom {
+    u64 share_id;       // kernel-scoped registration token (netd->kernel join key)
+    u32 ring_size;      // total shared ring size in bytes
+    u32 ring_entries;   // descriptor-ring entry count
+};
+
+// Tweft: request a zero-copy ring for the flow bound to `fid`.
+int p9_build_tweft(u8 *out, size_t cap, u16 tag, u32 fid);
+
+// Tweft parse (server / test side): extract the target fid.
+int p9_parse_tweft(const u8 *in, size_t len, u16 *tag, u32 *fid);
+
+// Rweft: the server's ring grant -- share_id + geometry.
+int p9_build_rweft(u8 *out, size_t cap, u16 tag,
+                   const struct p9_weft_geom *geom);
+
+// Rweft parse (client side): extract share_id + geometry.
+int p9_parse_rweft(const u8 *in, size_t len,
+                   u16 *tag, struct p9_weft_geom *out);
 
 #endif  // THYLACINE_9P_WIRE_H

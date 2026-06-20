@@ -1092,3 +1092,65 @@ int p9_build_tunlinkat(u8 *out, size_t cap, u16 tag, u32 dfid,
 int p9_parse_runlinkat(const u8 *in, size_t len, u16 *tag) {
     return parse_empty_body(in, len, P9_RUNLINKAT, tag);
 }
+
+// =============================================================================
+// Weft extension (Weft-6) -- Tweft / Rweft.
+//
+// Tweft body: [fid: u32]
+// Rweft body: [share_id: u64][ring_size: u32][ring_entries: u32]   (16 bytes)
+//
+// validate_rmsg_header is a generic header validator (size==len + type match);
+// reusing it for the Tweft parse is sound (the netd/test server side).
+// =============================================================================
+
+int p9_build_tweft(u8 *out, size_t cap, u16 tag, u32 fid) {
+    size_t total = P9_HDR_LEN + 4;
+    if (cap < total) return -1;
+    int rc = write_header(out, cap, (u32)total, P9_TWEFT, tag);
+    if (rc < 0) return -1;
+    rc = p9_pack_u32(out + P9_HDR_LEN, cap - P9_HDR_LEN, fid);
+    if (rc < 0) return -1;
+    return (int)total;
+}
+
+int p9_parse_tweft(const u8 *in, size_t len, u16 *tag, u32 *fid) {
+    if (!tag || !fid) return -1;
+    int hdr = validate_rmsg_header(in, len, P9_TWEFT, tag);
+    if (hdr < 0) return -1;
+    size_t off = (size_t)hdr;
+    size_t rem = len - off;
+    int rc = p9_unpack_u32(in + off, rem, fid);
+    if (rc < 0) return -1;
+    off += (size_t)rc;
+    if (off != len) return -1;
+    return 0;
+}
+
+int p9_build_rweft(u8 *out, size_t cap, u16 tag,
+                   const struct p9_weft_geom *geom) {
+    if (!geom) return -1;
+    size_t total = P9_HDR_LEN + 8 + 4 + 4;
+    if (cap < total) return -1;
+    int rc = write_header(out, cap, (u32)total, P9_RWEFT, tag);
+    if (rc < 0) return -1;
+    size_t off = P9_HDR_LEN;
+    rc = p9_pack_u64(out + off, cap - off, geom->share_id);     if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u32(out + off, cap - off, geom->ring_size);    if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u32(out + off, cap - off, geom->ring_entries); if (rc < 0) return -1; off += (size_t)rc;
+    return (int)off;
+}
+
+int p9_parse_rweft(const u8 *in, size_t len,
+                   u16 *tag, struct p9_weft_geom *out) {
+    if (!tag || !out) return -1;
+    int hdr = validate_rmsg_header(in, len, P9_RWEFT, tag);
+    if (hdr < 0) return -1;
+    size_t off = (size_t)hdr;
+    size_t rem = len - off;
+    int rc;
+    rc = p9_unpack_u64(in + off, rem, &out->share_id);     if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+    rc = p9_unpack_u32(in + off, rem, &out->ring_size);    if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+    rc = p9_unpack_u32(in + off, rem, &out->ring_entries); if (rc < 0) return -1; off += (size_t)rc;
+    if (off != len) return -1;
+    return 0;
+}

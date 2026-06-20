@@ -23,6 +23,7 @@ void test_9p_wire_twalk_round_trip(void);
 void test_9p_wire_twalk_zero_names_clone(void);
 void test_9p_wire_tclunk_round_trip(void);
 void test_9p_wire_tflush_round_trip(void);
+void test_9p_wire_tweft_round_trip(void);
 void test_9p_wire_rlerror_parse(void);
 void test_9p_wire_rmsg_size_mismatch_rejected(void);
 void test_9p_wire_rmsg_wrong_type_rejected(void);
@@ -1127,4 +1128,61 @@ void test_9p_wire_tflush_round_trip(void) {
     g_buf[0] = 7; g_buf[4] = P9_RCLUNK;
     rc = p9_parse_rflush(g_buf, 7, &tag_out);
     TEST_EXPECT_EQ(rc, -1,                       "Rflush wrong-type rejected");
+}
+
+// Tweft build (body = [fid:u32]) + Rweft (body = [share_id:u64][ring_size:u32]
+// [ring_entries:u32]) round-trip + the parse-side validators. Weft-6.
+void test_9p_wire_tweft_round_trip(void) {
+    // Tweft: hdr(7) + fid(4) = 11. tag=0x0010, fid=0x12345678.
+    int total = p9_build_tweft(g_buf, sizeof(g_buf), 0x0010, 0x12345678u);
+    TEST_EXPECT_EQ(total, 11,                       "Tweft total len");
+    TEST_EXPECT_EQ((u64)g_buf[4], (u64)P9_TWEFT,    "Tweft type");
+    TEST_EXPECT_EQ((u64)g_buf[5], (u64)0x10,        "Tweft tag LE low");
+    TEST_EXPECT_EQ((u64)g_buf[7], (u64)0x78,        "Tweft fid LE byte0");
+    TEST_EXPECT_EQ((u64)g_buf[10], (u64)0x12,       "Tweft fid LE byte3");
+
+    u16 tag_out = 0; u32 fid_out = 0;
+    int rc = p9_parse_tweft(g_buf, (size_t)total, &tag_out, &fid_out);
+    TEST_EXPECT_EQ(rc, 0,                           "Tweft parse ok");
+    TEST_EXPECT_EQ((u64)tag_out, (u64)0x0010,       "Tweft tag round-trip");
+    TEST_EXPECT_EQ((u64)fid_out, (u64)0x12345678u,  "Tweft fid round-trip");
+
+    // Rweft: hdr(7) + share_id(8) + ring_size(4) + ring_entries(4) = 23.
+    struct p9_weft_geom g = {
+        .share_id = 0x1122334455667788ull,
+        .ring_size = 0x00010000u,           // 64 KiB
+        .ring_entries = 256u,
+    };
+    total = p9_build_rweft(g_buf, sizeof(g_buf), 0x0010, &g);
+    TEST_EXPECT_EQ(total, 23,                        "Rweft total len");
+    TEST_EXPECT_EQ((u64)g_buf[4], (u64)P9_RWEFT,     "Rweft type");
+
+    struct p9_weft_geom go;
+    go.share_id = 0; go.ring_size = 0; go.ring_entries = 0;
+    tag_out = 0;
+    rc = p9_parse_rweft(g_buf, (size_t)total, &tag_out, &go);
+    TEST_EXPECT_EQ(rc, 0,                              "Rweft parse ok");
+    TEST_EXPECT_EQ((u64)tag_out, (u64)0x0010,          "Rweft tag round-trip");
+    TEST_EXPECT_EQ((u64)go.share_id, (u64)0x1122334455667788ull, "Rweft share_id round-trip");
+    TEST_EXPECT_EQ((u64)go.ring_size, (u64)0x00010000u, "Rweft ring_size round-trip");
+    TEST_EXPECT_EQ((u64)go.ring_entries, (u64)256u,    "Rweft ring_entries round-trip");
+
+    // Truncated Rweft body rejected (header claims 23, deliver 22).
+    rc = p9_parse_rweft(g_buf, 22, &tag_out, &go);
+    TEST_EXPECT_EQ(rc, -1,                           "Rweft truncated rejected");
+
+    // size/len mismatch rejected (header claims 23, deliver 24).
+    rc = p9_parse_rweft(g_buf, 24, &tag_out, &go);
+    TEST_EXPECT_EQ(rc, -1,                           "Rweft oversize rejected");
+
+    // Wrong type rejected.
+    g_buf[4] = P9_RCLUNK;
+    rc = p9_parse_rweft(g_buf, 23, &tag_out, &go);
+    TEST_EXPECT_EQ(rc, -1,                           "Rweft wrong-type rejected");
+
+    // NULL-arg guards.
+    TEST_EXPECT_EQ(p9_build_rweft(g_buf, sizeof(g_buf), 0, (struct p9_weft_geom *)0), -1,
+                   "Rweft build NULL geom");
+    TEST_EXPECT_EQ(p9_parse_rweft(g_buf, 23, (u16 *)0, &go), -1,
+                   "Rweft parse NULL tag");
 }
