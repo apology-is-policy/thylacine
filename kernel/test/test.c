@@ -233,6 +233,11 @@ void test_weft_ready_arm_park_sees_race(void);
 void test_weft_notif_terminal_release(void);
 void test_weft_notif_premature_blocked(void);
 void test_weft_notif_copied_immediate(void);
+void test_weft_share_register_claim(void);
+void test_weft_share_full(void);
+void test_weft_share_owner_gc(void);
+void test_weft_syscall_share(void);
+void test_weft_map_binding_lifetime(void);
 void test_pgtable_install_user_pte_smoke(void);
 void test_pgtable_install_user_pte_constraints(void);
 void test_pgtable_install_user_pte_idempotent(void);
@@ -1261,6 +1266,11 @@ struct test_case g_tests[] = {
     { "weft.notif_terminal_release",      test_weft_notif_terminal_release,   false, NULL },
     { "weft.notif_premature_blocked",     test_weft_notif_premature_blocked,  false, NULL },
     { "weft.notif_copied_immediate",      test_weft_notif_copied_immediate,   false, NULL },
+    { "weft.share_register_claim",        test_weft_share_register_claim,     false, NULL },
+    { "weft.share_full",                  test_weft_share_full,               false, NULL },
+    { "weft.share_owner_gc",              test_weft_share_owner_gc,           false, NULL },
+    { "weft.syscall_share",               test_weft_syscall_share,            false, NULL },
+    { "weft.map_binding_lifetime",        test_weft_map_binding_lifetime,     false, NULL },
     { "pgtable.install_user_pte_smoke",
                                        test_pgtable_install_user_pte_smoke,
                                                                            false, NULL },

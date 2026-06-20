@@ -1438,6 +1438,33 @@ enum {
     //   -T_E_INVAL. The SNTP client (net-7a) is the consumer. See ARCH section
     //   22.6 + the audit-trigger row.
     SYS_CLOCK_SETTIME = 79,  // arg: clk_id (x0), timespec_va (x1)
+
+    // 80 reserved for SYS_FD_DEVCLASS (the Menagerie fd->device-class query;
+    // NET-THROUGHPUT.md section 6.1). Not yet built.
+
+    // SYS_WEFT_SHARE(ring_va, ring_size) -> share_id / -1  (Weft-6a-2;
+    //   NET-THROUGHPUT.md section 6). The netd side of the per-flow zero-copy
+    //   ring: register an ANON Burrow (mapped at ring_va in the caller's AS,
+    //   whole-ring, RW / no-exec) as a flow ring. Takes the I-30 registration
+    //   pin (burrow_ref) + mints a kernel-scoped share_id (never 0) the kernel
+    //   echoes in Rweft and claims at SYS_WEFT_MAP. The share_id is inert in any
+    //   other hand (it only maps a ring when the kernel's own Tweft round-trip
+    //   returns it), so no capability is required to mint one. -1 on: NULL Proc /
+    //   ring_va not an ANON-Burrow VMA start / ring_size != the Burrow size /
+    //   an exec mapping / a full registry.
+    SYS_WEFT_SHARE = 81,   // arg: ring_va (x0), ring_size (x1)
+
+    // SYS_WEFT_MAP(data_fd, hint_va) -> ring_va / -1  (Weft-6a-2;
+    //   NET-THROUGHPUT.md section 6). The guest side: lazily map a /net data
+    //   fd's per-flow ring into the caller. Resolves data_fd -> (client, fid F)
+    //   via dev9p_client_fid, issues Tweft(F) -> Rweft(share_id) on the first
+    //   zero-copy use, claims the share_id (consume-once), burrow_share_into's
+    //   the ring, and records the binding in the data Spoor's dev9p_priv.
+    //   Idempotent (a second call returns the cached ring_va without a second
+    //   Tweft). hint_va is reserved (v1.0 ignores it; the kernel picks the VA in
+    //   the burrow-attach window). -1 on: bad fd / not a dev9p file / Tweft
+    //   failure (e.g. a server with no Tweft handler) / a bad share_id / OOM.
+    SYS_WEFT_MAP = 82,     // arg: data_fd (x0), hint_va (x1)
 };
 
 // SYS_CLOCK_GETTIME clock ids. Values match Linux clockid_t so a future pouch

@@ -14,6 +14,7 @@
 #include <thylacine/path.h>
 #include <thylacine/spoor.h>
 #include <thylacine/syscall.h>
+#include <thylacine/weft.h>
 #include <thylacine/types.h>
 
 #include "../mm/slub.h"
@@ -433,6 +434,16 @@ static void dev9p_close(struct Spoor *c) {
     // readiness op pins the Spoor (a ref) while a registered poller holds the
     // handle's obj ref -- so at close there is neither a live op nor a poller.
     dev9p_poll_priv_release(p);
+
+    // Weft-6a-2: release the per-flow ring binding (if this data fd went
+    // zero-copy). Drops the I-30 registration pin -> the #847 dual count frees
+    // the ring Burrow once the guest's mapping also drops (vma_drain at guest
+    // exit). LAST-ref runs here, so no concurrent SYS_WEFT_MAP can race the
+    // read: a mapper needs a live handle, and the last ref means none remains.
+    if (p->weft) {
+        weft_binding_release(p->weft);
+        p->weft = NULL;
+    }
 
     // F2 (F236 close) discipline — order matters:
     //

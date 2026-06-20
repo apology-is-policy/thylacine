@@ -37,6 +37,7 @@
 #include <thylacine/types.h>
 #include <thylacine/virtio.h>
 #include <thylacine/vma.h>
+#include <thylacine/weft.h>
 
 #include "../arch/arm64/mmu.h"
 #include "../arch/arm64/timer.h"   // timer_now_ns (A-4a legate valid_until expiry)
@@ -1795,6 +1796,14 @@ void exits(const char *msg) {
     // stripes, no accidental elevation), but cleanup frees the table slot.
     cap_proc_exit_notify(p);
 
+    // Weft-6a-2: GC any per-flow ring this Proc registered (SYS_WEFT_SHARE) but
+    // that the kernel never claimed -- drops each I-30 registration pin so a
+    // netd that shared a ring then died can't leak it (weft.tla ShareBounded-
+    // ByFlow). Same leaf-lock discipline (g_weft_lock, no relation with
+    // g_proc_table_lock). No-op for the overwhelming majority (only netd ever
+    // registers shares).
+    weft_share_release_owner(p);
+
     // #926: a SINGLE-thread Proc closes its fds HERE -- at exit, while still
     // RUNNING + ALIVE + peerless -- so inherited pipe write ends (and other
     // fds) close at process termination, delivering pipe EOF immediately to a
@@ -1963,6 +1972,7 @@ void thread_exit_self(void) {
     if (become_zombie) {
         srv_proc_exit_notify(p);
         cap_proc_exit_notify(p);
+        weft_share_release_owner(p);   // Weft-6a-2: GC un-claimed per-flow shares
         // #926: NO at-exit handle close here. A multi-thread Proc's fds close
         // at reap (proc_free) -- the EXITING mark above is atomic-under-lock
         // with the last-Thread determination, so there is no RUNNING window

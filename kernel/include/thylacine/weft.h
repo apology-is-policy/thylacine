@@ -309,4 +309,75 @@ bool weft_notif_inflight(const struct weft_notif *n);
 // flight (the never-silently-wrong fallback indicator).
 u32 weft_notif_result_flags(const struct weft_notif *n);
 
+// =============================================================================
+// Weft-6a-2: the per-flow EL0 delivery (grant-is-the-share). The kernel-scoped
+// share_id registry + the per-data-fd ring binding. NET-THROUGHPUT.md section 6.
+//
+// share_id is the kernel-internal join key between netd's SYS_WEFT_SHARE (which
+// registers a per-flow ring Burrow it allocated in its own AS) and the kernel's
+// SYS_WEFT_MAP (which, on a guest's first zero-copy use of a flow, issues
+// Tweft(F) -> netd returns the share_id in Rweft -> the kernel claims it here +
+// maps the ring into the guest via burrow_share_into). The share_id NEVER
+// reaches the guest: it travels netd->kernel inside the kernel's OWN Tweft
+// round-trip (the RDMA-rkey shape, NET-THROUGHPUT.md section 4.6), so a guest
+// cannot forge one, and a claim consumes it exactly once.
+//
+// The registry struct (struct weft_share) is private to kernel/weft.c. The
+// lifetime authority is the I-30 REGISTRATION PIN (a burrow_ref / handle_count):
+// SYS_WEFT_SHARE takes it so the ring Burrow survives the netd<->kernel
+// correlation window even if netd drops its own mapping; the claim TRANSFERS it
+// to a weft_binding; dev9p_close drops it. The guest's ring MAPPING
+// (mapping_count) is owned by the guest VMA and reclaimed by vma_drain at guest
+// exit (the Loom-ring precedent, kernel/loom.c::loom_free) -- NOT by the binding
+// release. The #847 dual refcount frees the ring when BOTH reach 0, in any order
+// (weft.tla ShareBoundedByFlow).
+// =============================================================================
+
+struct Proc;
+struct Burrow;
+
+// The per-data-fd ring binding recorded in dev9p_priv once a flow's ring has
+// been mapped into the guest. Holds the registration pin (transferred from the
+// registry at claim); a weak record of the guest VA for the idempotent SYS_WEFT_
+// MAP return. Allocated by weft_binding_alloc at SYS_WEFT_MAP; released (pin
+// dropped + struct freed) by weft_binding_release at dev9p_close.
+struct weft_binding {
+    struct Burrow *burrow;     // the per-flow ring; the registration pin is held HERE
+    u64            guest_va;   // where it is mapped in the guest (idempotent-MAP return)
+    u32            ring_size;  // mapped byte length (== burrow size; diagnostics)
+};
+
+// Register a per-flow ring `v` (netd's backing ANON Burrow) owned by `owner`
+// (the registering netd Proc, for owner-death GC). Takes the I-30 registration
+// pin (burrow_ref) and returns a fresh kernel-scoped share_id (monotonic; never
+// 0). Returns 0 on NULL inputs or a full registry (the caller then fails the
+// flow's setup; the byte-copy path still works). The pin is the caller's-burrow
+// liveness across the claim window.
+u64 weft_share_register(struct Proc *owner, struct Burrow *v);
+
+// Claim a registered share by id (consume-EXACTLY-once). On success removes the
+// registry entry, TRANSFERS the registration pin to the caller (who must
+// burrow_unref it or hand it to a weft_binding), and returns the Burrow. Returns
+// NULL if no live entry has `share_id` (a replay / forged / already-claimed id).
+// Because the pin is transferred, the caller owns exactly one burrow_ref after a
+// non-NULL return -- no extra ref/unref.
+struct Burrow *weft_share_claim(u64 share_id);
+
+// GC every UN-claimed share owned by `owner` (drops each registration pin). The
+// share_outlives_flow backstop: a netd that registered a ring but died before
+// the kernel claimed it must not leak the pinned ring Burrow. Called at the netd
+// Proc's exit (kernel/proc.c exit-notify, alongside srv/cap_proc_exit_notify).
+void weft_share_release_owner(struct Proc *owner);
+
+// Allocate a weft_binding owning the (already-claimed) registration pin on
+// `burrow`, recording the guest VA + size. Returns NULL on OOM (the caller then
+// drops the pin + the guest mapping itself). The binding is stored in the data
+// Spoor's dev9p_priv.
+struct weft_binding *weft_binding_alloc(struct Burrow *burrow, u64 guest_va, u32 ring_size);
+
+// Release a data-fd's ring binding at dev9p_close: drop the registration pin
+// (burrow_unref) + free the binding struct. Does NOT touch the guest's ring
+// mapping (vma_drain owns it, the Loom-ring precedent). NULL-safe.
+void weft_binding_release(struct weft_binding *b);
+
 #endif

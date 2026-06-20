@@ -216,6 +216,7 @@ set(KERNEL_TEST_SRCS
     test/test_torpor.c
     test/test_loom.c
     test/test_weft_ring.c
+    test/test_weft_share.c
     test/test_notes.c
     test/test_thread_spawn.c
     test/test_pipe_probe.c

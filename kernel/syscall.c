@@ -7,8 +7,10 @@
 
 #include <thylacine/syscall.h>
 #include <thylacine/9p_attach.h>
+#include <thylacine/9p_client.h>          // p9_client_weft (SYS_WEFT_MAP; Weft-6a-2)
 #include <thylacine/9p_spoor_transport.h>
 #include <thylacine/9p_srvconn_transport.h>
+#include <thylacine/9p_wire.h>            // struct p9_weft_geom (Weft-6a-2)
 #include <thylacine/burrow.h>
 #include <thylacine/caps.h>
 #include <thylacine/dev.h>
@@ -46,6 +48,7 @@
 #include <thylacine/torpor.h>
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
+#include <thylacine/weft.h>             // share_id registry + binding (SYS_WEFT_*; Weft-6a-2)
 
 #include "../arch/arm64/exception.h"
 #include "../arch/arm64/timer.h"
@@ -3435,6 +3438,184 @@ static s64 sys_burrow_detach_handler(u64 vaddr_raw, u64 length_raw) {
 }
 
 // =============================================================================
+// Weft -- the per-flow capability network dataplane EL0 delivery (Weft-6a-2;
+// NET-THROUGHPUT.md section 6). kernel/weft.c owns the share_id registry + the
+// binding lifecycle; these two syscalls wire a /net flow's shared ring into a
+// guest. grant-is-the-share: holding the flow's data fd is the capability; the
+// share_id is a kernel-internal join key (netd->kernel via Rweft, never to the
+// guest -- the RDMA-rkey shape, section 4.6), so a guest cannot forge a mapping.
+// =============================================================================
+
+// SYS_WEFT_SHARE: register the caller's ANON ring Burrow (mapped whole at
+// ring_va, RW / no-exec) as a per-flow ring + mint a share_id. The netd side.
+s64 sys_weft_share_for_proc(struct Proc *p, u64 ring_va, u64 ring_size_raw) {
+    if (!p)                                          return -1;
+    if (ring_size_raw == 0)                          return -1;
+    if (ring_size_raw > BURROW_ATTACH_MAX)           return -1;
+
+    // The ring is whole-Burrow + page-granular (netd allocated it via
+    // SYS_BURROW_ATTACH, which page-rounds), so round the request the same way
+    // and require it to equal the backing Burrow's size below (the whole-ring
+    // contract -- a partial share is rejected).
+    u64 ring_size = (ring_size_raw + (PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1);
+
+    // Resolve ring_va -> the caller's ANON ring Burrow, validate, and take a
+    // TEMPORARY ref so v survives the gap between dropping vma_lock and
+    // weft_share_register taking its own (registration) ref -- a multi-thread
+    // netd could SYS_BURROW_DETACH the ring concurrently in that window.
+    spin_lock(&p->vma_lock);
+    struct Vma *vma = vma_lookup(p, ring_va);
+    if (!vma || vma->burrow == NULL || vma->vaddr_start != ring_va) {
+        spin_unlock(&p->vma_lock);
+        return -1;
+    }
+    struct Burrow *v = vma->burrow;
+    // ANON only (cross-Proc MMIO/DMA share is a distinct unaudited hw surface
+    // -> fails closed); RW (no exec -- the share is RW-only, W^X like
+    // SYS_BURROW_ATTACH); whole-ring (ring_size == the Burrow size).
+    if (v->type != BURROW_TYPE_ANON) {
+        spin_unlock(&p->vma_lock);
+        return -1;
+    }
+    if (vma->prot & VMA_PROT_EXEC) {
+        spin_unlock(&p->vma_lock);
+        return -1;
+    }
+    if ((u64)burrow_get_size(v) != ring_size) {
+        spin_unlock(&p->vma_lock);
+        return -1;
+    }
+    burrow_ref(v);                       // temp ref: keep v alive across the gap
+    spin_unlock(&p->vma_lock);
+
+    u64 share_id = weft_share_register(p, v);   // takes its OWN registration pin
+    burrow_unref(v);                            // drop the temp ref
+    if (share_id == 0) return -1;               // full registry -> the flow stays byte-copy
+
+    // share_id is a u64 monotonic from 1; it stays well below the s64 sign bit
+    // (a positive return) until 2^63 zero-copy flows -- unreachable. Cast.
+    return (s64)share_id;
+}
+
+// The claim-and-map half of SYS_WEFT_MAP (after Tweft returned a share_id).
+// Claims the share (consume-once -> the registration pin transfers to us), maps
+// the ring whole into the guest, records the binding. Returns the guest ring VA,
+// dropping every ref it took on any failure.
+static s64 weft_map_claimed(struct Proc *p, struct dev9p_priv *priv,
+                            u64 share_id, u64 hint_va) {
+    (void)hint_va;   // v1.0: the kernel picks the VA (hint reserved for v1.x)
+
+    struct Burrow *v = weft_share_claim(share_id);
+    if (!v) {
+        // The id was already consumed. If a concurrent SYS_WEFT_MAP on this SAME
+        // data fd won the race (netd returned the same share_id idempotently for
+        // the two Tweft(F)), return its cached VA; else it is a genuinely bad /
+        // replayed / forged id.
+        struct weft_binding *winner = __atomic_load_n(&priv->weft, __ATOMIC_ACQUIRE);
+        if (winner) return (s64)winner->guest_va;
+        return -1;
+    }
+
+    size_t bsize = burrow_get_size(v);
+
+    // Place + share the whole ring into the guest's burrow-attach window (so the
+    // returned VA is detach-able by the native client, the SYS_BURROW_ATTACH
+    // shape). burrow_share_into takes the guest mapping ref (mapping_count); the
+    // shared pages are netd's commit (charged at netd's SYS_BURROW_ATTACH), so
+    // the guest is NOT #65-charged for the share.
+    spin_lock(&p->vma_lock);
+    u64 va;
+    if (vma_find_gap(p, bsize, EXEC_USER_BURROW_BASE, EXEC_USER_BURROW_TOP, &va) != 0) {
+        spin_unlock(&p->vma_lock);
+        burrow_unref(v);                 // drop the claimed registration pin
+        return -1;
+    }
+    if (burrow_share_into(p, v, va, VMA_PROT_RW) != 0) {
+        spin_unlock(&p->vma_lock);
+        burrow_unref(v);
+        return -1;
+    }
+    spin_unlock(&p->vma_lock);
+
+    // Build the binding -- it will OWN the registration pin (transferred from
+    // the claim). On OOM, drop BOTH the guest mapping AND the pin.
+    struct weft_binding *b = weft_binding_alloc(v, va, (u32)bsize);
+    if (!b) {
+        spin_lock(&p->vma_lock);
+        (void)burrow_unmap(p, va, bsize);
+        spin_unlock(&p->vma_lock);
+        burrow_unref(v);
+        return -1;
+    }
+
+    // Install atomically. A concurrent SYS_WEFT_MAP on this SAME fd (a
+    // multi-thread guest) that ALSO built a binding (its own ring, a DISTINCT
+    // share_id) races us: exactly one CAS wins. The loser tears its ring down
+    // (guest mapping + the pin via weft_binding_release) and returns the
+    // winner's cached VA -- no leak, no double-owned priv->weft.
+    struct weft_binding *expected = NULL;
+    if (!__atomic_compare_exchange_n(&priv->weft, &expected, b, false,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        spin_lock(&p->vma_lock);
+        (void)burrow_unmap(p, va, bsize);
+        spin_unlock(&p->vma_lock);
+        weft_binding_release(b);         // unrefs b->burrow (the pin) + frees b
+        return (s64)expected->guest_va;  // expected == the winner's live binding
+    }
+    return (s64)va;
+}
+
+// SYS_WEFT_MAP: lazily map a /net data fd's per-flow ring into the caller. The
+// guest side.
+s64 sys_weft_map_for_proc(struct Proc *p, hidx_t data_fd, u64 hint_va) {
+    if (!p) return -1;
+
+    struct Handle dh;
+    if (handle_get(p, data_fd, &dh) != 0)  return -1;
+    if (dh.kind != KOBJ_SPOOR)             { handle_put(&dh); return -1; }
+    struct Spoor *spoor = (struct Spoor *)dh.obj;
+
+    struct dev9p_priv *priv = dev9p_priv_of(spoor);
+    if (!priv) { handle_put(&dh); return -1; }   // not a dev9p file
+
+    // Idempotent fast path: already mapped -> return the cached VA (no Tweft).
+    struct weft_binding *existing = __atomic_load_n(&priv->weft, __ATOMIC_ACQUIRE);
+    if (existing) {
+        u64 va = existing->guest_va;
+        handle_put(&dh);
+        return (s64)va;
+    }
+
+    // Resolve (client, fid F) + issue Tweft(F) -> Rweft(share_id) on the shared
+    // /net client. The blocking round-trip is the #841 elected reader +
+    // #811-death-interruptible; the handle_get ref keeps the Spoor (hence the
+    // client -- dev9p's lifecycle invariant) alive across it.
+    struct p9_client *client = NULL;
+    u32 fid = 0;
+    if (dev9p_client_fid(spoor, &client, &fid) != 0) { handle_put(&dh); return -1; }
+
+    struct p9_weft_geom geom;
+    int e = p9_client_weft(client, fid, &geom);
+    if (e != 0) { handle_put(&dh); return -1; }   // e.g. a server with no Tweft handler (pre-6b)
+
+    s64 r = weft_map_claimed(p, priv, geom.share_id, hint_va);
+    handle_put(&dh);
+    return r;
+}
+
+static s64 sys_weft_share_handler(u64 ring_va, u64 ring_size_raw) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc)                              return -1;
+    return sys_weft_share_for_proc(t->proc, ring_va, ring_size_raw);
+}
+
+static s64 sys_weft_map_handler(u64 data_fd_raw, u64 hint_va) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc)                              return -1;
+    return sys_weft_map_for_proc(t->proc, (hidx_t)data_fd_raw, hint_va);
+}
+
+// =============================================================================
 // Loom -- the io_uring-inverted 9P ring transport (Loom-2a). kernel/loom.c owns
 // the KObj_Loom + the ring substrate; these inners wire a ring into a Proc's
 // address space + handle table (the sys_burrow_attach_for_proc factoring). The
@@ -6164,6 +6345,14 @@ void syscall_dispatch(struct exception_context *ctx) {
     case SYS_CLOCK_SETTIME:
         ctx->regs[0] = (u64)sys_clock_settime_handler(ctx->regs[0], ctx->regs[1],
                                                       ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_WEFT_SHARE:
+        ctx->regs[0] = (u64)sys_weft_share_handler(ctx->regs[0], ctx->regs[1]);
+        return;
+
+    case SYS_WEFT_MAP:
+        ctx->regs[0] = (u64)sys_weft_map_handler(ctx->regs[0], ctx->regs[1]);
         return;
 
     case SYS_WALK_CREATE:

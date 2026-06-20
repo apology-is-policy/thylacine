@@ -56,6 +56,7 @@ struct Spoor;
 struct Dev;
 struct poll_waiter;
 struct dev9p_poll_state;   // net-6b-2b: lazily-allocated per-Spoor poll state (dev9p_poll.c)
+struct weft_binding;       // Weft-6a-2: lazily-bound per-flow ring share (weft.c)
 
 // Device character for dev9p — '9'. Distinct from all kernel-Dev
 // characters (-, c, 0, z, r, p, C, m).
@@ -99,6 +100,14 @@ struct dev9p_priv {
     // on the first poll of a readiness file; freed by dev9p_close. Owned by THIS
     // priv (not shared across walks -- each walked Spoor gets its own priv).
     struct dev9p_poll_state  *poll;
+    // Weft-6a-2: lazily-bound per-flow ring share for a /net data fid; NULL for
+    // every fd that has not gone zero-copy (the common path). Installed by
+    // SYS_WEFT_MAP on the first large transfer (holds the I-30 registration pin);
+    // released by dev9p_close. Multi-thread-reachable (a data fd is handle_dup-
+    // shareable), so SYS_WEFT_MAP installs it via an __atomic CAS + reads it
+    // __atomic-acquire; dev9p_close reads it plainly (it runs at the LAST ref, so
+    // no concurrent mapper exists).
+    struct weft_binding      *weft;
 };
 
 #define DEV9P_PRIV_MAGIC 0x44395050u   // "D9PP" little-endian

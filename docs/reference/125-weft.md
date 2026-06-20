@@ -8,9 +8,11 @@ buffer-pin release) substrates landed. Kernel-internal; no EL0 ABI. The live
 guest↔netd wiring + the EL0 share delivery is Weft-6 — begun at **Weft-6a-1**:
 the `Tweft(F) → Rweft(share_id, geom)` 9P op + `p9_client_weft` (the lazy
 fid-keyed ring-setup request; see `docs/reference/44-9p-wire.md` /
-`45-9p-session.md` / `47-9p-client.md`). The `SYS_WEFT_SHARE`/`SYS_WEFT_MAP`
-syscalls + the kernel-scoped `share_id` registry + the `dev9p_priv` binding are
-Weft-6a-2.
+`45-9p-session.md` / `47-9p-client.md`). **Weft-6a-2** landed the kernel ABI: the
+`SYS_WEFT_SHARE` (81) / `SYS_WEFT_MAP` (82) syscalls + the kernel-scoped
+`share_id` registry + the `dev9p_priv` ring binding (see "The EL0 delivery"
+below). The netd `Tweft` handler + the live ring drive are Weft-6b; the native
+`libthyla_rs::net` API + the in-guest E2E are Weft-6c.
 
 Source: `kernel/include/thylacine/weft.h`, `kernel/weft.c`. Specs:
 `specs/weft.tla` (ARCH §28 I-37, the data plane + the F_NOTIF holder lifecycle),
@@ -418,6 +420,96 @@ What Weft-5 is **not**: the live two-CQE posting. Nothing in production arms a
 flow's ZC send (the `weft_notif` on its `loom_async_op`, the result + notification
 CQEs onto its Loom ring, the holders driven by netd-stack / NIC-DMA-done /
 peer-ACK events) lands at Weft-6.
+
+---
+
+## The EL0 delivery — the `share_id` registry + the per-flow binding (Weft-6a-2)
+
+Weft-6a-2 is the kernel half of **grant-is-the-share**: the two syscalls that
+wire a `/net` flow's shared ring into a guest, plus the kernel-scoped `share_id`
+registry that joins the two sides. The wire op (`Tweft`/`Rweft` + `p9_client_weft`)
+landed at Weft-6a-1; the netd `Tweft` handler + the live ring drive are Weft-6b;
+the native `libthyla_rs::net` API + the in-guest E2E are Weft-6c.
+
+### The mechanism
+
+A flow goes zero-copy lazily, on its first large transfer (the §4.8 hybrid
+threshold). The guest's native client calls `SYS_WEFT_MAP(data_fd)`; the kernel:
+
+1. resolves `data_fd → (p9_client, fid F)` via `dev9p_client_fid`,
+2. issues `Tweft(F)` on the shared `/net` 9P client; netd allocates + initializes
+   the per-flow ring in **its own** address space (`SYS_BURROW_ATTACH` +
+   `weft_ring_init_hdr` + `weft_ready_init_hdr`), registers it with
+   `SYS_WEFT_SHARE` → a `share_id`, and returns `Rweft(share_id, geom)`,
+3. **claims** the `share_id` (consume-once), `burrow_share_into`s the ring into
+   the guest's burrow-attach window, and records the binding in the data Spoor's
+   `dev9p_priv->weft`.
+
+The `share_id` is the join key. It travels **netd → kernel** inside the kernel's
+own `Tweft` round-trip and is **never handed to the guest** — the RDMA-`rkey`
+shape (§4.6). So a guest cannot forge a mapping: the only `share_id` the kernel
+honours is the one its own `Tweft` elicited.
+
+### The `share_id` registry (`weft.c`)
+
+A fixed 64-entry table (`g_weft_shares`) under a leaf spinlock (`g_weft_lock`),
+keyed by a monotonic `u64` (never 0). Occupancy is normally ~0: an entry lives
+only for the `Tweft` round-trip window, since the kernel's `SYS_WEFT_MAP` claims
+it in the same call.
+
+| function | role |
+|---|---|
+| `weft_share_register(owner, v)` | take the I-30 **registration pin** (`burrow_ref`) + mint a `share_id`. Returns 0 on a full table (the flow stays byte-copy) — the pin is taken **before** the lock and dropped on a full table, so `g_weft_lock` nests no other lock. |
+| `weft_share_claim(share_id)` | consume-EXACTLY-once: remove the entry, **transfer** the registration pin to the caller, return the Burrow (NULL on a replayed / forged / already-claimed id). |
+| `weft_share_release_owner(owner)` | GC every un-claimed share owned by a dying netd (drops each pin) — the `ShareBoundedByFlow` backstop. Called from `proc.c` exit-notify, alongside `srv`/`cap_proc_exit_notify`. |
+
+### The lifetime — registration pin vs guest mapping
+
+The ring Burrow is held alive by the **#847 dual refcount**, split across two
+owners that drop independently (free iff **both** reach 0, in any order):
+
+- **The registration pin** (`handle_count`) is taken at `SYS_WEFT_SHARE`,
+  transferred to the `weft_binding` at the claim, and dropped at `dev9p_close`
+  (`weft_binding_release → burrow_unref`). It bridges the netd↔kernel correlation
+  window — even if netd unmaps its own copy, the pin keeps the ring alive until
+  the kernel maps it.
+- **The guest's ring mapping** (`mapping_count`) is owned by the guest's VMA and
+  reclaimed by `vma_drain` at guest exit — **the Loom-ring precedent**
+  (`loom_free` drops only its handle ref; the guest mapping rides `vma_drain`).
+  `dev9p_close` deliberately does **not** unmap the guest's ring: doing so would
+  need the guest Proc pointer at close time, which is unsafe if the data fd was
+  `handle_dup`'d to a now-dead child. So the binding drops only the pin; the
+  mapping is bounded by the guest's address-space lifetime.
+
+A flow-close while the guest lives therefore leaves a benign stale mapping (the
+guest's own ring, no longer driven by netd) until the guest exits — exactly the
+semantics a closed `loom_fd`'s ring has.
+
+### Concurrency (`SYS_WEFT_MAP` on a shared data fd)
+
+A data fd is `handle_dup`-shareable, so two threads of a multi-thread guest can
+race `SYS_WEFT_MAP` on it. `priv->weft` is therefore accessed via `__atomic`
+(load-acquire on the idempotent fast path; a CAS-acq/rel at install;
+`dev9p_close` reads it plainly at the last ref, where no mapper remains). The
+install is a compare-exchange: if a concurrent map won (its own ring, a distinct
+`share_id`), the loser tears its ring down (`burrow_unmap` + `weft_binding_release`)
+and returns the winner's cached VA. If netd returned the **same** `share_id`
+idempotently, the second claim returns NULL and the kernel returns the winner's
+VA from `priv->weft` (or a transient `-1` if the winner has not yet installed —
+a benign retryable spurious failure, the v1.0 seam).
+
+### Tests + what's deferred
+
+`weft.share_register_claim` / `weft.share_full` / `weft.share_owner_gc` /
+`weft.syscall_share` / `weft.map_binding_lifetime` exercise the registry
+(register/claim/consume-once/owner-GC/full-table), the `SYS_WEFT_SHARE` handler
+(ANON + RW + whole-ring validation; the rejects), and the binding lifetime (the
+pin held by the binding, the mapping reclaimed by `vma_drain`, the cross-Proc
+#847 free-on-last). The **full live `SYS_WEFT_MAP` E2E** (issuing a real `Tweft`
+to netd's handler) needs Weft-6b/6c and is owed there — the same impl-against-
+existing-spec posture as Weft-2..5. The `Tweft`/`share_id` correlation (consumed-
+exactly-once, no cross-flow mis-binding, the netd-pin GC if the guest dies
+pre-map) is the **Weft-7** focused-audit prosecution surface.
 
 ---
 

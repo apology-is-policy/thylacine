@@ -20,6 +20,11 @@
 // Weft-6 (SYS_WEFT_SHARE/MAP, keyed on the /net data fid).
 
 #include <thylacine/weft.h>
+#include <thylacine/burrow.h>
+#include <thylacine/proc.h>
+#include <thylacine/spinlock.h>
+
+#include "../mm/slub.h"
 
 // A descriptor is valid iff: its reserved flags are clear (fail-closed
 // forward-compat), its length is non-zero, and [addr, addr+len) lies within the
@@ -253,4 +258,120 @@ bool weft_notif_inflight(const struct weft_notif *n) {
 
 u32 weft_notif_result_flags(const struct weft_notif *n) {
     return n->result_flags;
+}
+
+// =============================================================================
+// share_id registry (Weft-6a-2) -- the netd<->kernel join key for the per-flow
+// ring (NET-THROUGHPUT.md section 6; weft.h). A small fixed table: an entry
+// normally lives only for the Tweft round-trip window (SYS_WEFT_SHARE mints it,
+// the kernel's SYS_WEFT_MAP claims it in the SAME call), so occupancy is ~0.
+//
+// The lifetime authority is the I-30 REGISTRATION PIN (a burrow_ref). It is
+// taken at register, TRANSFERRED to the claimer (or to owner-death GC), and
+// dropped exactly once -- so a ring Burrow that a netd shared but the kernel
+// never claimed cannot leak (weft.tla ShareBoundedByFlow). g_weft_lock is a
+// pure LEAF: every burrow_ref / burrow_unref runs OUTSIDE it (those take the
+// per-Burrow v->lock + may free, which takes the buddy lock), so the registry
+// lock never nests another lock and cannot deadlock.
+// =============================================================================
+
+#define WEFT_MAX_SHARES 64u
+
+struct weft_share {
+    u64            share_id;   // 0 == free slot
+    struct Burrow *burrow;     // registration pin held (burrow_ref)
+    struct Proc   *owner;      // the registering netd Proc (owner-death GC key)
+};
+
+static struct weft_share g_weft_shares[WEFT_MAX_SHARES];
+static u64               g_weft_next_id = 1;   // monotonic; never mints 0
+static spin_lock_t       g_weft_lock = SPIN_LOCK_INIT;   // leaf; process context only
+
+u64 weft_share_register(struct Proc *owner, struct Burrow *v) {
+    if (!owner || !v) return 0u;
+
+    // Take the registration pin BEFORE publishing the entry, so the slot never
+    // names a Burrow it does not hold alive (and so burrow_ref stays OUTSIDE
+    // g_weft_lock -- the leaf discipline). On a full table the pin is dropped.
+    burrow_ref(v);
+
+    spin_lock(&g_weft_lock);
+    int slot = -1;
+    for (u32 i = 0; i < WEFT_MAX_SHARES; i++) {
+        if (g_weft_shares[i].share_id == 0u) { slot = (int)i; break; }
+    }
+    if (slot < 0) {
+        spin_unlock(&g_weft_lock);
+        burrow_unref(v);                 // table full: drop the pin we took
+        return 0u;
+    }
+    u64 id = g_weft_next_id++;
+    if (g_weft_next_id == 0u) g_weft_next_id = 1u;   // never reuse 0 across the u64 wrap
+    g_weft_shares[slot].share_id = id;
+    g_weft_shares[slot].burrow   = v;
+    g_weft_shares[slot].owner    = owner;
+    spin_unlock(&g_weft_lock);
+    return id;
+}
+
+struct Burrow *weft_share_claim(u64 share_id) {
+    if (share_id == 0u) return NULL;     // 0 is never a valid id
+
+    spin_lock(&g_weft_lock);
+    for (u32 i = 0; i < WEFT_MAX_SHARES; i++) {
+        if (g_weft_shares[i].share_id == share_id) {
+            struct Burrow *v = g_weft_shares[i].burrow;
+            // Consume-exactly-once: free the slot. The registration pin is now
+            // OWNED by the caller (transferred out of the registry) -- no extra
+            // ref/unref. A replay of this id finds nothing -> NULL.
+            g_weft_shares[i].share_id = 0u;
+            g_weft_shares[i].burrow   = NULL;
+            g_weft_shares[i].owner    = NULL;
+            spin_unlock(&g_weft_lock);
+            return v;
+        }
+    }
+    spin_unlock(&g_weft_lock);
+    return NULL;
+}
+
+void weft_share_release_owner(struct Proc *owner) {
+    if (!owner) return;
+
+    // Snapshot the orphaned Burrows under the lock, then drop the pins OUTSIDE
+    // it (burrow_unref takes v->lock + may free via burrow_free_internal, which
+    // takes the buddy lock -- never under the registry leaf).
+    struct Burrow *orphans[WEFT_MAX_SHARES];
+    u32 n = 0;
+    spin_lock(&g_weft_lock);
+    for (u32 i = 0; i < WEFT_MAX_SHARES; i++) {
+        if (g_weft_shares[i].share_id != 0u && g_weft_shares[i].owner == owner) {
+            orphans[n++] = g_weft_shares[i].burrow;
+            g_weft_shares[i].share_id = 0u;
+            g_weft_shares[i].burrow   = NULL;
+            g_weft_shares[i].owner    = NULL;
+        }
+    }
+    spin_unlock(&g_weft_lock);
+    for (u32 i = 0; i < n; i++) burrow_unref(orphans[i]);
+}
+
+struct weft_binding *weft_binding_alloc(struct Burrow *burrow, u64 guest_va,
+                                        u32 ring_size) {
+    struct weft_binding *b = kmalloc(sizeof(*b), KP_ZERO);
+    if (!b) return NULL;
+    b->burrow    = burrow;
+    b->guest_va  = guest_va;
+    b->ring_size = ring_size;
+    return b;
+}
+
+void weft_binding_release(struct weft_binding *b) {
+    if (!b) return;
+    // Drop the registration pin (handle_count). The guest's ring MAPPING
+    // (mapping_count) is owned by the guest VMA + reclaimed by vma_drain at
+    // guest exit (the Loom-ring precedent) -- never here.
+    if (b->burrow) burrow_unref(b->burrow);
+    b->burrow = NULL;
+    kfree(b);
 }

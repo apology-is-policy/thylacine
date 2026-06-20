@@ -1211,8 +1211,11 @@ PRE-terminal, so it is still caught). See NET-DESIGN.md §12.2 + ARCH §28 I-9.
 Status: **spec landed model-first at Weft-1; the cross-Proc share substrate
 landed at Weft-2 (`burrow_share_into`) and the descriptor-ring leg
 (`GuestPostDesc`/`Consume`/`DescPinnedToSnapshot`/`ActedDescValidated`) at
-Weft-3 (`kernel/weft.c`); the buffer-lifetime (`F_NOTIF`) + flow-teardown legs
-are OWED across Weft-5..7.** Models the per-flow zero-copy network
+Weft-3 (`kernel/weft.c`); the `F_NOTIF` holder lifecycle at Weft-5; the EL0
+delivery (`Init`/`Teardown` — the `share_id` registry + `SYS_WEFT_SHARE`/`MAP` +
+the `dev9p_priv` binding) at Weft-6a-2 (`weft.tla` unchanged — the registry is
+the model's `Init`/`Teardown` plumbing). The live ring drive + the full
+`SYS_WEFT_MAP` E2E are OWED across Weft-6b/6c/7.** Models the per-flow zero-copy network
 dataplane (NET-THROUGHPUT.md §5; ARCH §28 I-37) and pins I-37 — the
 generalization of the Loom I-29/I-30 pin to the cross-Proc SHARED PAGE + the
 notification-terminal (`F_NOTIF`) multi-holder release. `loom.tla` owns the
@@ -1254,13 +1257,13 @@ Spec action ↔ impl mapping (OWED — the impl lands across Weft-2..7; the plan
 sites, from the spec header):
 
 - `RebindFlowCap` ↔ a clunk + reuse / revoke-rebind of the `/net` data fid (the flow cap binding) — the `loom.tla` `UserRegister` analog.
-- `Register` ↔ `SYS_LOOM_REGISTER` of a payload page within the per-flow shared Burrow (the I-30 buffer pin) — Weft-2 (cross-Proc Burrow-share) + Weft-6 (the per-flow binding).
+- `Register` ↔ `SYS_LOOM_REGISTER` of a payload page within the per-flow shared Burrow (the I-30 buffer pin) — Weft-2 (cross-Proc Burrow-share) + Weft-6 (the per-flow binding). The per-flow ring registration is **Weft-6a-2**: `SYS_WEFT_SHARE` (`kernel/syscall.c::sys_weft_share_for_proc`) takes the I-30 **registration pin** (`kernel/weft.c::weft_share_register` → `burrow_ref`) + mints the kernel-scoped `share_id`; `SYS_WEFT_MAP` (`sys_weft_map_for_proc` → `weft_map_claimed`) claims it (`weft_share_claim`, consume-once) and `burrow_share_into`s the ring into the guest, recording the binding in `dev9p_priv->weft`.
 - `GuestPostDesc` / `GuestMutateDesc` ↔ the guest writes/mutates a `{addr,len}` `struct weft_desc` in the shared split-ring + release-bumps `weft_ring_hdr.prod_tail` — **Weft-3** (`kernel/weft.c`; the producer is the Weft-6 guest, exercised by `kernel/test/test_weft_ring.c::weft_post`).
 - `Consume` ↔ `kernel/weft.c::weft_ring_drain` copies each in-flight descriptor to kernel memory (the snapshot) + `weft_desc_valid` bounds-validates it against the registered payload region — **Weft-3** (`DescPinnedToSnapshot` + `ActedDescValidated` realized; the `loom_drain_sq` `ksqe = sqes[i]` discipline).
 - `NetdAct` ↔ the consumer reads the payload IN PLACE at the validated `out[].addr` under the flow pin (no per-op re-check) + queues the smoltcp send — the validated snapshot is **Weft-3** (`weft_ring_drain`'s `out[]`); the F_NOTIF holder-set arm (`holders := Holders`) is **Weft-5** (`kernel/weft.c::weft_notif_arm`); the live netd in-place read + smoltcp queue is **Weft-6**.
 - `HolderRelease(b, h)` ↔ netd-stack-done / NIC-DMA-done / peer-ACK, each clearing one F_NOTIF holder — **Weft-5** (`kernel/weft.c::weft_notif_clear`, clear one `WEFT_HOLDER_*` bit); the live holder events (netd stack / NIC used-ring / smoltcp ACK) are **Weft-6**.
 - `ReleaseClean` ↔ the notification-terminal CQE: the pin released when the LAST holder clears — **Weft-5** (`weft_notif_clear` → `WEFT_NOTIF_RELEASE`, fired EXACTLY ONCE on the `holders → 0` transition; `ReleasePremature` has **no impl path** — `PinHeldWhileInFlight` structurally held). The buggy cfg `weft_buggy_premature_release` → `PinHeldWhileInFlight` is the durable regression. The live two-CQE POSTING (`LOOM_CQE_MORE` result + `LOOM_CQE_F_NOTIF` notification onto the flow's Loom ring) is **Weft-6**.
-- `Teardown` ↔ the `/net` data fid clunk: quiesce in-flight + drop BOTH #847 share refs (the Burrow frees) — Weft-2 / Weft-7.
+- `Teardown` ↔ the `/net` data fid clunk: drop BOTH #847 share refs (the Burrow frees) — **Weft-6a-2**: `kernel/dev9p.c::dev9p_close` calls `kernel/weft.c::weft_binding_release` (drops the **registration pin**, `burrow_unref`); the **guest mapping** (`mapping_count`) is reclaimed by `vma_drain` at guest exit (the Loom-ring precedent — `dev9p_close` does NOT unmap the guest, avoiding a dead-guest-pointer hazard if the fd was `handle_dup`'d to a dead child). The netd-owner-death GC of an un-claimed share is `kernel/proc.c` exit-notify → `weft_share_release_owner`. `ShareBoundedByFlow` holds: the ring frees iff both refs drop (the cross-Proc #847 count), in any order. The live in-flight quiesce (the desc-ring drain on teardown) is Weft-6b; the focused buffer-lifetime audit is Weft-7.
 
 The four buggy cfgs are the durable regressions for the Weft-7 focused audit
 (the buffer-lifetime UAF prosecution). cfgs run with `-deadlock`; the `Done`

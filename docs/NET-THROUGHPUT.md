@@ -616,6 +616,16 @@ dataplane arc the user committed.
     the `dev9p_priv` binding + the `share_id` correlation + teardown + kernel tests) / 6b (netd:
     handle `Tweft` + alloc/register the ring + drive the desc ring on large Twrite/Tread + the
     live readiness park/wake + the `F_NOTIF` posting) / 6c (the native API + the in-guest E2E).
+    **Weft-6a-1 LANDED** (`Tweft`/`Rweft` + `p9_client_weft`; `P9_TWEFT = 134` / `P9_RWEFT =
+    135`). **Weft-6a-2 LANDED** — the `share_id` registry in `kernel/weft.c` + `SYS_WEFT_SHARE
+    = 81` / `SYS_WEFT_MAP = 82` + the `dev9p_priv->weft` binding + the `dev9p_close` teardown +
+    the `proc.c` owner-death GC. The registration pin is held by the binding; the guest mapping
+    is reclaimed by `vma_drain` (the Loom-ring precedent), so `dev9p_close` drops only the pin.
+    5 kernel tests; `weft.tla` unchanged (the `share_id` correlation is the `Init`/`Teardown`
+    plumbing the model abstracts — the impl-against-existing-spec posture). The full live
+    `SYS_WEFT_MAP` E2E (a real `Tweft` to netd's handler) is owed to Weft-6b/6c; the
+    consumed-exactly-once / no-cross-flow-mis-binding / netd-pin-GC prosecution is Weft-7. See
+    `docs/reference/125-weft.md` "The EL0 delivery".
 - **Weft-7 (the focused audit + SMP gate + benchmark).** Prosecute the buffer-lifetime UAF
   (the §4.6 hazard, the F1-class), the no-per-op-mediation property, the cross-Proc Burrow
   lifetime, **and the new Weft-6 `Tweft` / `share_id` correlation** (the consumed-exactly-once
