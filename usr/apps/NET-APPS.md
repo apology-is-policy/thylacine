@@ -47,6 +47,19 @@ The shared pump + cs-resolution live in `coreutils::netpump` (`stdio_pump`,
 `udp_pump`, `splice`, `cs_resolve`) -- one correct implementation of the
 non-blocking, POLLOUT-backpressured pump for all four tools.
 
+## A tour: `net-demo.ut`
+
+`net-demo.ut` (baked 0755 into the cpio by `tools/build.sh`; run it as
+`net-demo.ut` from any `ut` prompt) is a guided tour. It runs only what works
+in-guest with no host peer -- `ipconfig` (the DHCP lease), `ping 127.0.0.1` (the
+net-8a loopback auto-answers, deterministic), `weft-bench` (the copy-tax), and a
+best-effort bounded `dial 1.1.1.1 443` (out through slirp) -- then prints the
+toolbox + the host-paired throughput commands. No backgrounded servers, no
+unbounded connects: it never hangs, and `dial` degrades gracefully to
+"unreachable" if there is no outbound route. (aux can't boot, so the script is
+authored to the proven `fun.ut` dialect but is unrun -- the main track's first
+in-VM boot is its test.)
+
 ---
 
 ## `nc` -- netcat

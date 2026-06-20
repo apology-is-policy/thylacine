@@ -333,6 +333,10 @@ echo 'the thylacine yips, and is gone.'
 EOF
     chmod 0755 "$ramfs_src/fun.ut"
 
+    # aux/apps: a tour of the native /net tools, baked 0755 (runs as net-demo.ut).
+    cp "$REPO_ROOT/usr/apps/net-demo.ut" "$ramfs_src/net-demo.ut"
+    chmod 0755 "$ramfs_src/net-demo.ut"
+
     # P4-Ia1: copy any built C-side userspace binaries from build/usr
     # into the cpio root. The list is curated below (not glob) so an
     # accidental CMake byproduct doesn't get shipped. Each binary's
