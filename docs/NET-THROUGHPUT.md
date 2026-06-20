@@ -447,9 +447,42 @@ dataplane arc the user committed.
   (teardown leaves a #847 ref). The four buggy cfgs are the durable Weft-7-audit regressions.
   Model maps to the planned impl sites (`specs/SPEC-TO-CODE.md::weft.tla`); the impl is OWED
   across Weft-2..7.
-- **Weft-2 (the cross-Proc Burrow-share primitive).** The missing inter-Proc Burrow-share
-  surface (the substrate exists; only the share syscall + the lifetime audit are new) — a
-  Burrow mapped into both the guest and netd, #847 dual-refcount, I-5/I-1 gated.
+- **Weft-2 (the cross-Proc Burrow-share substrate).** The kernel mechanism a per-flow
+  shared page rests on: one Burrow mapped into *two* Procs (guest + netd) with the #847
+  dual-refcount (I-7) holding it alive while *either* maps it and freeing it when *both*
+  drop. The map mechanism already exists — `burrow_map(struct Proc *p, ...)` takes an
+  explicit `p` and the #847 refcount is intrinsically SMP-safe — but **no Burrow has ever
+  been reachable from two Procs**, so the load-bearing new work is the proof that the
+  dual-refcount is sound under two Procs *concurrently* mapping/unmapping one Burrow (the
+  SMP-safety the whole dataplane assumes), landed as a kernel unit test + a focused
+  reasoning pass, plus a thin `burrow_share_into(dst, v, ...)` helper. **No EL0 ABI at
+  Weft-2** (see the delivery model below) — this is the substrate; the EL0 surface is
+  inherently per-flow and lands at Weft-6. Validates `weft.tla` Init (the share mapped into
+  both via the dual ref) + Teardown (drop both → free).
+
+  **The delivery model — grant-is-the-share (user-voted 2026-06-20).** Opening the flow's
+  `/net/<proto>/N/data` fid maps the per-flow shared Burrow into the guest; **no Burrow
+  handle ever crosses Procs** — the kernel maps both sides, the #847 refs are kernel-
+  internal, and the capability *is* holding the namespace-gated flow fid (I-1/I-28). This
+  is the convergent answer — Plan 9 (mmap the server-backed file), Fuchsia IOBuffer
+  (RFC-0218, "the grant *is* the peered ring"), seL4 (a coordinator maps both address
+  spaces) — and the one where the spec's `ShareBoundedByFlow` / `NoStaleShareAccess` are
+  easiest to uphold: there is no free-floating, dup-able Burrow handle to leak, retain past
+  the flow, or mis-target. **Rejected:** *capability delegation* (the Burrow handle crosses
+  netd→guest, guest `SYS_BURROW_ATTACH`es it — reuses the audited attach, but opens the
+  deferred I-4 handle-transfer path and makes a dup-able cross-Proc handle new surface to
+  police, hardening `ShareBoundedByFlow`); *an explicit `SYS_FLOW_SHARE`/`SYS_FLOW_MAP` pair
+  decoupled from the open* (most ABI, least "the grant *is* the share"). The EL0 surface —
+  `SYS_WEFT_SHARE = 81` (netd registers a Burrow as a flow's ring) + `SYS_WEFT_MAP = 82`
+  (the guest maps the flow's ring → VA), keyed on the `/net` data fid — is **flow-bound, so
+  it lands at Weft-6** (the per-flow cap binding), *not* Weft-2: the `/net` SrvConn is
+  shared across *all* flows (joey mounts `/net` over one kernel dev9p session), so a
+  per-flow share cannot key on the SrvConn — it keys on connection N, which is the Weft-6
+  wiring. **`weft.tla` is unchanged:** grant-is-the-share *realizes* Init (the model is
+  delivery-agnostic by construction — the grant is implicit in Init), the cross-Proc
+  dual-refcount SMP-safety is `burrow.tla`'s (#847) domain, and the flow-containment is
+  I-28's; no new invariant-bearing mechanism is introduced, so the model written model-first
+  at Weft-1 stands (spec-first satisfied).
 - **Weft-3 (the descriptor ring + in-place payload).** The virtio split-ring between guest
   and netd; netd maps + reads/writes payload in place; the hybrid `< threshold` fallback to
   the byte-copy ring. Wire it under the existing 9P Tread/Twrite (the heritage split, §4.8).
@@ -458,7 +491,10 @@ dataplane arc the user committed.
 - **Weft-5 (the `F_NOTIF` zero-copy-send contract).** The two-CQE send completion; the I-30
   pin released at notification-terminal; the fallback-copied indicator.
 - **Weft-6 (the per-flow capability binding + the native API).** Bind the ring setup to the
-  `/net` data fid's I-30 pin (the "grant *is* the dataplane" realization); the
+  `/net` data fid's I-30 pin (the "grant *is* the dataplane" realization) — **this is where
+  the grant-is-the-share EL0 surface lands** (`SYS_WEFT_SHARE = 81` netd-side +
+  `SYS_WEFT_MAP = 82` guest-side, keyed on the data fid; the data-fid open auto-maps the
+  flow's shared Burrow into the guest, per the Weft-2 delivery-model decision); the
   `libthyla_rs::net` native client over the Demikernel-shaped API (`push`/`pop`/`wait`).
 - **Weft-7 (the focused audit + SMP gate + benchmark).** Prosecute the buffer-lifetime UAF
   (the §4.6 hazard, the F1-class), the no-per-op-mediation property, the cross-Proc Burrow
