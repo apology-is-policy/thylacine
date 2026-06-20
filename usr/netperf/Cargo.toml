@@ -1,0 +1,15 @@
+[package]
+name = "netperf"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "netperf"
+path = "src/main.rs"
+
+[dependencies]
+# NP-1: a native libthyla-rs loopback micro-bench. NO tls dep (so it stays
+# under SYS_SPAWN_BLOB_MAX -- not in build.sh::tls_strip_bins).
+libthyla-rs = { path = "../lib/libthyla-rs" }

@@ -3721,6 +3721,34 @@ int main(void) {
                                  "+ TLS-over-/net E2E; net-6a-3 net + Loom async)\n");
                     }
 
+                    // === NET-PERF NP-1: the loopback micro-bench ===
+                    // Spawn /bin/netperf (native, no args -> the boot probe): a
+                    // SHORT fixed run of M1 (per-op RTT) / M2 (loopback bulk
+                    // throughput) / M3 (TCP connect latency) over netd's resident
+                    // loopback (net-8a). It prints its measured numbers via the
+                    // console-direct t_putstr (no fd 1 -> bare t_spawn, no caps),
+                    // captured in the boot log -- the TCG vs HVF boot logs give
+                    // the free TCG-vs-HVF profiler contrast (NET-PERF section 3).
+                    // It gates the boot on success (all three metrics ran),
+                    // proving the measurement path is sound, NOT a perf threshold
+                    // (the numbers are data, not an assertion).
+                    {
+                        const char np_name[] = "/bin/netperf";
+                        long np_pid = t_spawn(np_name, sizeof(np_name) - 1);
+                        if (np_pid <= 0) {
+                            t_putstr("joey: t_spawn(\"netperf\") FAILED\n");
+                            return 1;
+                        }
+                        int np_status = -1;
+                        long np_reaped = t_wait_pid_for((int)np_pid, 0, &np_status);
+                        if (np_reaped != np_pid || np_status != 0) {
+                            t_putstr("joey: NET-PERF NP-1 netperf FAILED\n");
+                            return 1;
+                        }
+                        t_putstr("joey: NET-PERF NP-1 OK (netperf M1+M2+M3 over the "
+                                 "resident lo stack)\n");
+                    }
+
                     // === net-7a-2: the native SNTP client selftest (deterministic) ===
                     // Spawn /bin/sntp (no args) -> its in-guest SELFTEST: the
                     // NTPv4 build/parse/validate + 1900->Unix + offset battery,

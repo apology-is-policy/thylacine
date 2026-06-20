@@ -282,6 +282,15 @@ impl TcpStream {
     pub fn as_raw_fd(&self) -> i32 {
         self.data.as_raw_fd()
     }
+
+    /// Open the QTPOLL `ready` sibling (`/net/tcp/N/ready`) for a bounded poll
+    /// on readiness (net-6b dev9p.poll): POLLIN fires when bytes are queued,
+    /// POLLOUT when the send window has room. A bulk sender polls POLLOUT before
+    /// retrying a write that returned 0 -- netd's data write is non-blocking, so
+    /// a full send buffer returns a 0-count `Rwrite`, not a deferred reply.
+    pub fn ready_fd(&self) -> Result<File> {
+        open_conn_file("tcp", self.n, "ready", true, false)
+    }
 }
 
 impl Read for TcpStream {

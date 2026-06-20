@@ -94,7 +94,7 @@
 
 [workspace]
 resolver = "2"
-members = ["lib/libthyla-rs", "lib/corvus-crypto", "lib/kaua", "lib/netdev", "lib/tls", "lib/libdriver", "hello-rs", "mmio-probe", "irq-probe", "virtio-blk-probe", "virtio-blk-rw", "virtio-net-probe", "virtio-net-arp", "virtio-net-loop", "netdev-driver", "netd", "warden", "menagerie-probe", "crash-probe", "virtio-mmio-source", "virtio-input", "virtio-gpu", "irq-bench", "corvus", "alloc-smoke", "burrow-torture", "u-test", "u-redir-test", "u-builtin-test", "u-readdir-test", "u-glob-test", "u-subst-test", "u-repl-test", "u-6-test", "u-job-test", "u-7-test", "argv-smoke", "coreutils", "coreutil-smoke", "fs-mut-smoke", "pipe-src", "pipe-sink", "legate-prover", "login", "loom-smoke", "loom-stress", "loom-bench", "net-echo", "sntp", "tls-smoke", "https", "curl", "nora", "utopia/libutopia", "utopia/shell"]
+members = ["lib/libthyla-rs", "lib/corvus-crypto", "lib/kaua", "lib/netdev", "lib/tls", "lib/libdriver", "hello-rs", "mmio-probe", "irq-probe", "virtio-blk-probe", "virtio-blk-rw", "virtio-net-probe", "virtio-net-arp", "virtio-net-loop", "netdev-driver", "netd", "warden", "menagerie-probe", "crash-probe", "virtio-mmio-source", "virtio-input", "virtio-gpu", "irq-bench", "corvus", "alloc-smoke", "burrow-torture", "u-test", "u-redir-test", "u-builtin-test", "u-readdir-test", "u-glob-test", "u-subst-test", "u-repl-test", "u-6-test", "u-job-test", "u-7-test", "argv-smoke", "coreutils", "coreutil-smoke", "fs-mut-smoke", "pipe-src", "pipe-sink", "legate-prover", "login", "loom-smoke", "loom-stress", "loom-bench", "net-echo", "netperf", "sntp", "tls-smoke", "https", "curl", "nora", "utopia/libutopia", "utopia/shell"]
 
 [workspace.package]
 edition = "2021"

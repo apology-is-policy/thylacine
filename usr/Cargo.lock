@@ -774,6 +774,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "netperf"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
 name = "nora"
 version = "0.1.0"
 dependencies = [

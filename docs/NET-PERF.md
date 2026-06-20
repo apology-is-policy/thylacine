@@ -185,3 +185,77 @@ If so, the #1 ranked recommendation is the irq-fd / RX-driven netd.
   (the serve loop + the #257 deferred-connect), `docs/reference/122-net.md` +
   `123-tls.md` + `124-net-utils.md` (the client surfaces), ARCH §22.6 (LS-K
   CLOCK_MONOTONIC), `tools/ci-smp-gate.sh` (the TCG/HVF run harness pattern).
+
+---
+
+## 8. NP-1 results (measured, the resident `lo` stack)
+
+The in-guest `netperf` tool (`usr/netperf` -- a native libthyla-rs `/net`
+client; joey boot probe + shell-runnable as `netperf [iters] [mib] [conns]`)
+over netd's resident loopback. Boot-probe run (M1 = 100 RTTs, M2 = 32 KiB,
+M3 = 50 dials), TCG and HVF -- the axis-2 contrast (a CPU-bound cost is ~3x
+faster on HVF; a timer/IO-bound cost is *equal* on both):
+
+| Metric | TCG | HVF | Bound |
+|---|---|---|---|
+| **M1** per-op RTT (1 B ping-pong, 4 ops/rt) | mean **480 us** / min 428 / max 606 | mean **158 us** / min **44 us** / max 388 | **CPU-bound** (~3x on HVF): the 9P + netd + smoltcp + context-switch per-op cost |
+| **M2** loopback bulk throughput | **50 KiB/s** (32 KiB / 629 ms) | **52 KiB/s** (32 KiB / 606 ms) | **timer/IO-bound** (accel-invariant): the per-4-KiB-window POLLOUT-readiness cadence |
+| **M3** TCP connect latency | mean **3735 us** / min 3413 / max 5034 | mean **1085 us** / min 740 / max 1842 | **CPU-bound** (~3.4x on HVF): netd connect processing (clone + connect verb + PendingConnect + establish + accept) |
+
+### The headline finding (M2): loopback bulk *send* is timer-paced, not CPU-paced
+
+M2's throughput is **identical on TCG and HVF** (~50 KiB/s) despite HVF's
+~10-50x faster CPU -- conclusive evidence the bulk-send ceiling is **not** a
+copy/CPU cost. The cause: **netd's data write is non-blocking** -- a full 4 KiB
+TCP send window returns a 0-count `Rwrite` (`server.rs` `data_send` ->
+`send_slice().unwrap_or(0)`), never a deferred reply -- so a bulk sender must
+poll POLLOUT on the `ready` sibling per window, and that readiness delivery is
+**timer-paced** (the dev9p.poll idle-pump / netd's `IDLE_POLL_MIN_MS` 50 ms,
+#221/#220): ~75-90 ms per 4 KiB window -> ~40-50 KiB/s regardless of transfer
+size or accel. (The exact decomposition of the ~80 ms is NP-4's; the
+attribution -- *not CPU* -- is settled by the accel-invariance.)
+
+This **extends** the charter's "netd is timer-paced" thesis (§2.1): loopback
+avoids the floor on small **request/response** (M1: a data write self-wakes
+netd -> 480 us, no floor) but **not** on bulk **send** (the POLLOUT-readiness
+path has no self-wake -> the per-window timer cadence dominates). Two faces of
+one root cause -- and the reason the same stack is fast for an HTTP request but
+slow for a bulk body.
+
+**Candidate optimizations** (ranked at NP-4, feeding #62; NOT built in this
+pure-profiling arc):
+1. A **blocking-write** path (netd defers the `Rwrite` until the window has
+   room, mirroring the existing blocking-read `poll_data`) -- removes the
+   per-window POLLOUT round-trip entirely. Likely the single largest bulk lift.
+2. **Event-driven POLLOUT** delivery (wake the parked poll the instant the
+   window reopens, not on the idle-pump timer) -- the #221 fix.
+3. Larger socket windows (64 KiB+) + msize (§2.2) -- fewer windows per MiB
+   amortizes the per-window cost.
+
+The M1/M3 CPU-bound results say per-op latency (request/response, connect) is
+optimizable by reducing per-op CPU work (fewer 9P round-trips per operation,
+leaner netd dispatch); HVF already shows the ~3x headroom a faster path buys.
+
+### The `netperf` tool (as-built)
+
+- `usr/netperf/src/main.rs` -- native libthyla-rs, no_std, no TLS dep (113 KiB,
+  under `SYS_SPAWN_BLOB_MAX` so it is NOT stripped). Three metrics over the
+  resident `lo` stack, timed with the LS-K `CLOCK_MONOTONIC` (`time::Instant`):
+  M1 single-threaded 1 B ping-pong (the net-8b `loopback_e2e` pattern in a timed
+  loop); M2 a two-Thread drain-server + main-writer (the net-8c-2 pattern minus
+  TLS) with POLLOUT backpressure per window; M3 connect-then-drain-the-backlog.
+- The one libthyla-rs surface add: `TcpStream::ready_fd()` (open
+  `/net/tcp/N/ready`, the QTPOLL readiness sibling -- mirrors `UdpSocket`/
+  `IcmpSocket`), so the M2 writer can wait for POLLOUT. Client code only; netd
+  already serves the file (`FK_READY`).
+- Wiring: `usr/Cargo.toml` member + `tools/build.sh::usr_rs_bins` (no strip) +
+  the joey post-net probe (bare `t_spawn`, console-direct `t_putstr`, no caps).
+  Gates the boot on a successful run (the numbers are data, not a threshold).
+
+### Reproduce
+
+Boot probe (logged every boot) or, from the shell, `netperf 1000 4 200`
+(1000 RTTs / 4 MiB / 200 dials) for a long baseline (the 4 MiB M2 takes ~100 s
+at ~40 KiB/s -- shell only, never the boot). The TCG-vs-HVF contrast:
+`THYLACINE_ACCEL={tcg,hvf} tools/test.sh` then
+`grep 'netperf M' build/test-boot.log`.
