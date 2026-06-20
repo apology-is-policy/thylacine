@@ -432,9 +432,21 @@ dataplane arc the user committed.
   is too small to isolate a steady-state rate, and the slirp guestfwd that feeds it is inert
   under HVF on the dev host (the probe SKIPs gracefully; a measurement-infra gap, not a guest
   fault — the NIC itself works: DHCP lease + 24/24 ARP each boot). *Independent of Weft-1+.*
-- **Weft-1 (spec-first).** `specs/weft.tla` — model the shared-page transport + the
-  `F_NOTIF` multi-holder buffer lifetime + the enforcement-at-setup / no-per-op-recheck +
-  the split-ring discipline. Clean + the four buggy cfgs. Model-first, before any impl.
+- **Weft-1 (spec-first) — LANDED.** `specs/weft.tla` (model-first, TLC-green BEFORE any
+  impl). One module pins I-37 — the Loom I-29/I-30 pin GENERALIZED to the cross-Proc shared
+  page + the notification-terminal release — over a single flow (`active`→`torndown`) + N
+  registered payload pages, with the F_NOTIF holder set {netd,nic,ack}, the #847 share refs
+  {guest,netd}, and the flow cap pinned-at-grant vs the live (rebindable) binding. 13 safety
+  invariants + the `EventuallyReleased` liveness witness. Six cfgs: `weft.cfg` (clean,
+  TLC-green, 1412 distinct, depth 22), `weft_liveness.cfg` (green), and the **four named
+  buggy cfgs**, each a short executable counterexample on its named invariant —
+  `premature_release` → `PinHeldWhileInFlight` (the F_NOTIF UAF: pin dropped at op-terminal
+  with {nic,ack} pending), `recheck_per_op` → `NoPerOpMediation` (the reviewer-attack per-op
+  cap re-resolve, which also breaks `ActedUnderFlowPin` under a rebind), `ring_toctou` →
+  `DescPinnedToSnapshot` (mutate-after-consume), `share_outlives_flow` → `ShareBoundedByFlow`
+  (teardown leaves a #847 ref). The four buggy cfgs are the durable Weft-7-audit regressions.
+  Model maps to the planned impl sites (`specs/SPEC-TO-CODE.md::weft.tla`); the impl is OWED
+  across Weft-2..7.
 - **Weft-2 (the cross-Proc Burrow-share primitive).** The missing inter-Proc Burrow-share
   surface (the substrate exists; only the share syscall + the lifetime audit are new) — a
   Burrow mapped into both the guest and netd, #847 dual-refcount, I-5/I-1 gated.

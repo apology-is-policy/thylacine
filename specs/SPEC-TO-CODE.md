@@ -1202,3 +1202,64 @@ probe-then-observe order.
 cfgs run with `-deadlock`; the `Done` self-loop keeps the legitimate terminal
 state from tripping the deadlock check (the lost-ready stuck state is
 PRE-terminal, so it is still caught). See NET-DESIGN.md §12.2 + ARCH §28 I-9.
+
+---
+
+## weft.tla — Weft-1 (the capability network dataplane; spec-first re-enabled, model-first)
+
+Status: **spec landed model-first at Weft-1; the impl is OWED across
+Weft-2..7 (source map filled then).** Models the per-flow zero-copy network
+dataplane (NET-THROUGHPUT.md §5; ARCH §28 I-37) and pins I-37 — the
+generalization of the Loom I-29/I-30 pin to the cross-Proc SHARED PAGE + the
+notification-terminal (`F_NOTIF`) multi-holder release. `loom.tla` owns the
+SQ/CQ completion integrity + the submit-time pin on a kernel-local op;
+`weft.tla` adds the four things the shared-page dataplane introduces above that
+engine:
+
+- **No per-op mediation** (enforcement at grant, not per-packet — the reviewer
+  attack of §4.7 stated as a checkable invariant). The flow capability is
+  resolved + PINNED once; every data op acts under the pin, never a
+  re-resolution of the live binding.
+- **The F_NOTIF multi-holder buffer lifetime** (the io_uring `ubuf_info` UAF):
+  the I-30 buffer pin is held until the LAST of {netd stack, NIC DMA, peer ACK}
+  releases it (the two-CQE notification-terminal, NOT op-terminal).
+- **The descriptor-ring TOCTOU** (the Loom ring TOCTOU lifted to the Weft
+  `{addr,len}` descriptor): the kernel acts on the validated snapshot, never a
+  re-read of the shared ring slot.
+- **The shared-Burrow lifetime bounded by the flow** (the #847 dual-refcount
+  dropped at teardown — the `allowance.tla` `RevokedFullyCleared` analog for
+  the shared page).
+
+State universe: one flow (`active`→`torndown`), `Bufs` registered payload pages
+each running `free`→`registered`→`submitted`→`snapped`→`sending`→`released`,
+the F_NOTIF holder set {netd,nic,ack} per in-flight page, the #847 share refs
+{guest,netd}, the flow cap pinned-at-grant vs the live (rebindable) binding.
+CONSTANTS: `BUGGY_PREMATURE_RELEASE` / `BUGGY_RECHECK_PER_OP` /
+`BUGGY_RING_TOCTOU` / `BUGGY_SHARE_OUTLIVES_FLOW` + `ALLOW_TEARDOWN`.
+
+| Config | Flags | Checked | Result | Distinct |
+|---|---|---|---|---|
+| `weft.cfg`                           | all FALSE, `ALLOW_TEARDOWN=TRUE` | `Invariants` (13) | clean (depth 22) | 1412 |
+| `weft_liveness.cfg`                  | `Spec_Live`, all FALSE           | `Invariants` + `EventuallyReleased` | clean | 1250 |
+| `weft_buggy_premature_release.cfg`   | `BUGGY_PREMATURE_RELEASE=TRUE`   | `PinHeldWhileInFlight` (+ `NoInFlightReuse`) | violation (depth 6) | 50 |
+| `weft_buggy_recheck_per_op.cfg`      | `BUGGY_RECHECK_PER_OP=TRUE`      | `NoPerOpMediation` (+ `ActedUnderFlowPin`) | violation (depth 5) | 16 |
+| `weft_buggy_ring_toctou.cfg`         | `BUGGY_RING_TOCTOU=TRUE`         | `DescPinnedToSnapshot` (+ `ActedDescValidated`) | violation (depth 5) | 52 |
+| `weft_buggy_share_outlives_flow.cfg` | `BUGGY_SHARE_OUTLIVES_FLOW=TRUE` | `ShareBoundedByFlow` (+ `NoStaleShareAccess`) | violation (depth 2) | 22 |
+
+Spec action ↔ impl mapping (OWED — the impl lands across Weft-2..7; the planned
+sites, from the spec header):
+
+- `RebindFlowCap` ↔ a clunk + reuse / revoke-rebind of the `/net` data fid (the flow cap binding) — the `loom.tla` `UserRegister` analog.
+- `Register` ↔ `SYS_LOOM_REGISTER` of a payload page within the per-flow shared Burrow (the I-30 buffer pin) — Weft-2 (cross-Proc Burrow-share) + Weft-6 (the per-flow binding).
+- `GuestPostDesc` / `GuestMutateDesc` ↔ the guest writes/mutates a `{addr,len}` descriptor in the shared split-ring — Weft-3.
+- `Consume` ↔ the kernel copies + bounds-validates the descriptor against the registered Burrow (the snapshot) — Weft-3.
+- `NetdAct` ↔ netd reads the payload IN PLACE under the flow pin (no per-op re-check) + queues the smoltcp send — Weft-3 / Weft-6.
+- `HolderRelease` ↔ netd-stack-done / NIC-DMA-done / peer-ACK, each clearing one F_NOTIF holder — Weft-5.
+- `ReleaseClean` ↔ the notification-terminal CQE: the pin released when the LAST holder clears — Weft-5 (the F_NOTIF two-CQE contract).
+- `Teardown` ↔ the `/net` data fid clunk: quiesce in-flight + drop BOTH #847 share refs (the Burrow frees) — Weft-2 / Weft-7.
+
+The four buggy cfgs are the durable regressions for the Weft-7 focused audit
+(the buffer-lifetime UAF prosecution). cfgs run with `-deadlock`; the `Done`
+self-loop keeps the legitimate terminal state (flow torndown + share dropped +
+no buffer admitted) from tripping the deadlock check. See NET-THROUGHPUT.md §5
++ ARCH §28 I-37.
