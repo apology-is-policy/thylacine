@@ -25,12 +25,12 @@ use alloc::string::String;
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
 use coreutils::color::{self, ColorMode};
-use coreutils::{netpump, palette};
+use coreutils::{netpump, palette, ui};
 use libthyla_rs::env::{self, Args};
 use libthyla_rs::err::Error;
 use libthyla_rs::net::TcpStream;
 use libthyla_rs::time::{Duration, Instant};
-use libthyla_rs::{eprintln, println};
+use libthyla_rs::eprintln;
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
@@ -107,24 +107,36 @@ fn run(args: Args) -> i64 {
             return 1;
         }
     };
-    println!("{}dial:{} {}{}{} {}->{} {}{}{} {}(via /net/cs){}", dim, rst, vio, dialstr, rst, dim, rst, gold, addr, rst, dim, rst);
-
     let t0 = Instant::now();
-    match TcpStream::connect_timeout(addr, CONNECT_TIMEOUT) {
+    let (outcome_plain, outcome_col, rc) = match TcpStream::connect_timeout(addr, CONNECT_TIMEOUT) {
         Ok(_stream) => {
             let rtt = t0.elapsed();
-            println!("{}dial:{} {}connected{} to {}{}{} in {}{}{}", dim, rst, grn, rst, gold, addr, rst, grn, FmtMs(rtt), rst);
-            0
+            (
+                format!("connected in {}", FmtMs(rtt)),
+                format!("{}connected{} in {}{}{}", grn, rst, grn, FmtMs(rtt), rst),
+                0,
+            )
         }
-        Err(Error::TimedOut) => {
-            eprintln!("{}dial:{} {} unreachable (no answer in {}s)", emb, rst, addr, CONNECT_TIMEOUT.as_secs());
-            1
-        }
-        Err(_) => {
-            eprintln!("{}dial:{} connection to {} refused", emb, rst, addr);
-            1
-        }
-    }
+        Err(Error::TimedOut) => (
+            format!("unreachable (no answer in {}s)", CONNECT_TIMEOUT.as_secs()),
+            format!("{}unreachable{} (no answer in {}s)", emb, rst, CONNECT_TIMEOUT.as_secs()),
+            1,
+        ),
+        Err(_) => (
+            String::from("connection refused"),
+            format!("{}connection refused{}", emb, rst),
+            1,
+        ),
+    };
+    let rows = [
+        ui::Row::new(
+            format!("{}  ->  {}  (via /net/cs)", dialstr, addr),
+            format!("{}{}{}  ->  {}{}{}  {}(via /net/cs){}", vio, dialstr, rst, gold, addr, rst, dim, rst),
+        ),
+        ui::Row::new(outcome_plain, outcome_col),
+    ];
+    ui::card("dial", "", &rows, on);
+    rc
 }
 
 /// Build a Plan 9 dial string `proto!host!service` from the operands:

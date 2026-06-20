@@ -13,11 +13,15 @@ half: a **load generator** (`nc`/`httpd`/`tcpproxy`) and an **over-the-wire
 yardstick** (`nettest`, and `weft-bench` for the zero-copy dataplane), so the
 main agent can *see* an optimization land end-to-end on the real NIC.
 
-**Design language:** these match the coreutils -- the Bonfire palette on by
-default (`--color[=WHEN]`, `never` for a clean pipe) and `--help` with worked
-examples on every tool. The discipline holds: color is on PRESENTATION and
-DIAGNOSTICS (status banners, errors, reports), never on a PAYLOAD a pipe consumes
--- `nc`'s pumped bytes on stdout stay byte-clean.
+**Design language:** every net tool -- the ones built here AND the pre-existing
+`ping` / `netstat` / `nslookup` / `ipconfig` -- shares the coreutils look: the
+Bonfire palette on by default (`--color[=WHEN]`, `never` for a clean pipe),
+`--help` with worked examples, and box-drawing (`coreutils::ui::card` over
+`boxd`) framing the tables and results -- netstat's connection table, plus the
+nslookup / ping / dial / nettest / weft-bench result cards. The discipline holds:
+color is on PRESENTATION and DIAGNOSTICS (banners, errors, reports), never on a
+PAYLOAD a pipe consumes -- `nc`'s pumped bytes stay byte-clean, and the streamed
+views (netstat/ipconfig `cat` netd's authoritative text) are left verbatim.
 
 **Verification ceiling (aux):** `cargo build` only -- the aux track never boots
 QEMU. Each tool is compile- and clippy-clean here; the **functional + throughput

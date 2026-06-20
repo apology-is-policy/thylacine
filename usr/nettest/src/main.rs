@@ -29,7 +29,7 @@ use alloc::format;
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
 use coreutils::color::{self, ColorMode};
-use coreutils::{netpump, palette};
+use coreutils::{netpump, palette, ui};
 use libthyla_rs::env::{self, Args};
 use libthyla_rs::net::{self, Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
 use libthyla_rs::time::{Duration, Instant};
@@ -168,7 +168,7 @@ fn sink(port: u16, on: bool) -> i64 {
         }
     }
     let dt = t0.map(|t| t.elapsed()).unwrap_or(Duration::from_micros(1));
-    report("received", total, dt, on);
+    ui::rate_card("nettest", "received", total, dt, on);
     0
 }
 
@@ -218,39 +218,8 @@ fn source(host: &str, port: u16, mb: u64, on: bool) -> i64 {
     }
     let _ = stream.shutdown(); // FIN so the peer's sink sees EOF
     let dt = t0.elapsed();
-    report("sent", sent, dt, on);
+    ui::rate_card("nettest", "sent", sent, dt, on);
     0
-}
-
-/// Print the colored throughput summary, integer-only (MB/s = bytes * 1e6 / us,
-/// then / 2^20, with two fractional digits via *100).
-fn report(verb: &str, bytes: u64, dt: Duration, on: bool) {
-    let dim = color::col(palette::DIM, on);
-    let rst = color::reset(on);
-    let gold = color::col(palette::GOLD, on);
-    let grn = color::col(palette::GREEN, on);
-
-    let us = dt.as_micros().max(1);
-    let bps = bytes as u128 * 1_000_000 / us; // bytes/second
-    let mbps_x100 = bps * 100 / (1024 * 1024); // MB/s * 100
-    let secs = us / 1_000_000;
-    let ms = (us % 1_000_000) / 1000;
-
-    println!(
-        "{}nettest:{} {} {}{}{} bytes in {}.{:03} s = {}{}.{:02} MB/s{}",
-        dim,
-        rst,
-        verb,
-        gold,
-        bytes,
-        rst,
-        secs,
-        ms,
-        grn,
-        mbps_x100 / 100,
-        mbps_x100 % 100,
-        rst
-    );
 }
 
 /// A TCP port is 1..=65535.

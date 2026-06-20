@@ -31,10 +31,10 @@ use alloc::{format, vec};
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
 use coreutils::color::{self, ColorMode};
-use coreutils::palette;
+use coreutils::{palette, ui};
 use libthyla_rs::env::{self, Args};
 use libthyla_rs::println;
-use libthyla_rs::time::{Duration, Instant};
+use libthyla_rs::time::Instant;
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
@@ -114,38 +114,7 @@ fn baseline_copy_tax(mb: u64, on: bool) {
         done += n as u64;
     }
     let dt = t0.elapsed();
-    report("copy-tax (memcpy)", done, dt, on);
-}
-
-/// Print the colored throughput line, integer-only (MB/s = bytes * 1e6 / us,
-/// then / 2^20, two fractional digits via *100).
-fn report(label: &str, bytes: u64, dt: Duration, on: bool) {
-    let dim = color::col(palette::DIM, on);
-    let rst = color::reset(on);
-    let gold = color::col(palette::GOLD, on);
-    let grn = color::col(palette::GREEN, on);
-
-    let us = dt.as_micros().max(1);
-    let bps = bytes as u128 * 1_000_000 / us;
-    let mbps_x100 = bps * 100 / (1024 * 1024);
-    let secs = us / 1_000_000;
-    let ms = (us % 1_000_000) / 1000;
-
-    println!(
-        "{}weft-bench:{} {} {}{}{} bytes in {}.{:03} s = {}{}.{:02} MB/s{}",
-        dim,
-        rst,
-        label,
-        gold,
-        bytes,
-        rst,
-        secs,
-        ms,
-        grn,
-        mbps_x100 / 100,
-        mbps_x100 % 100,
-        rst
-    );
+    ui::rate_card("weft-bench", "copy-tax (memcpy)", done, dt, on);
 }
 
 /// The staged zero-copy section -- printed until the native Weft API lands.
