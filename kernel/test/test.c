@@ -219,6 +219,14 @@ void test_burrow_share_into_cross_proc(void);
 void test_burrow_share_into_alive_while_either_maps(void);
 void test_burrow_share_into_frees_on_last_drop(void);
 void test_burrow_share_into_constraints(void);
+
+// Weft-3 / I-37: the descriptor-ring substrate (kernel/weft.c) over the share.
+void test_weft_ring_basic(void);
+void test_weft_ring_toctou_snapshot(void);
+void test_weft_ring_bounds_reject(void);
+void test_weft_ring_multi_split(void);
+void test_weft_should_ring_threshold(void);
+void test_weft_ring_layout_constraints(void);
 void test_pgtable_install_user_pte_smoke(void);
 void test_pgtable_install_user_pte_constraints(void);
 void test_pgtable_install_user_pte_idempotent(void);
@@ -1232,6 +1240,12 @@ struct test_case g_tests[] = {
                                           test_burrow_share_into_frees_on_last_drop,
                                                                               false, NULL },
     { "burrow.share_into_constraints",    test_burrow_share_into_constraints, false, NULL },
+    { "weft.ring_basic",                  test_weft_ring_basic,               false, NULL },
+    { "weft.ring_toctou_snapshot",        test_weft_ring_toctou_snapshot,     false, NULL },
+    { "weft.ring_bounds_reject",          test_weft_ring_bounds_reject,       false, NULL },
+    { "weft.ring_multi_split",            test_weft_ring_multi_split,         false, NULL },
+    { "weft.should_ring_threshold",       test_weft_should_ring_threshold,    false, NULL },
+    { "weft.ring_layout_constraints",     test_weft_ring_layout_constraints,  false, NULL },
     { "pgtable.install_user_pte_smoke",
                                        test_pgtable_install_user_pte_smoke,
                                                                            false, NULL },

@@ -56,6 +56,7 @@ set(KERNEL_SRCS
     handle.c
     burrow.c
     loom.c
+    weft.c
     vma.c
     elf.c
     exec.c
@@ -214,6 +215,7 @@ set(KERNEL_TEST_SRCS
     test/test_sys_burrow.c
     test/test_torpor.c
     test/test_loom.c
+    test/test_weft_ring.c
     test/test_notes.c
     test/test_thread_spawn.c
     test/test_pipe_probe.c

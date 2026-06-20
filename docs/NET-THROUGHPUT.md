@@ -493,9 +493,32 @@ dataplane arc the user committed.
   dual-refcount SMP-safety is `burrow.tla`'s (#847) domain, and the flow-containment is
   I-28's; no new invariant-bearing mechanism is introduced, so the model written model-first
   at Weft-1 stands (spec-first satisfied).
-- **Weft-3 (the descriptor ring + in-place payload).** The virtio split-ring between guest
-  and netd; netd maps + reads/writes payload in place; the hybrid `< threshold` fallback to
-  the byte-copy ring. Wire it under the existing 9P Tread/Twrite (the heritage split, §4.8).
+- **Weft-3 (the descriptor ring + in-place payload) — LANDED.** The virtio split-ring
+  between guest and netd; the consumer reads payload in place at the validated offset; the
+  hybrid `< threshold` fallback to the byte-copy ring.
+
+  *As-built (the substrate; no EL0 ABI):* `kernel/include/thylacine/weft.h` pins the
+  on-shared-page ABI — `weft_desc` (16 B, `{addr,len,flags}`) + `weft_ring_hdr` (64 B, the
+  split-ring control words), both `_Static_assert`-pinned, single-writer per region
+  (`prod_tail` guest-owned / `cons_head` kernel-owned — the `loom_ring_hdr` discipline, leg
+  (5)). `kernel/weft.c::weft_ring_drain` is the kernel snapshot-and-bounds-validate consumer
+  — the spec's `Consume`: it acquire-loads `prod_tail`, COPIES each in-flight descriptor to
+  kernel memory (the TOCTOU snapshot, the `loom_drain_sq` `ksqe = sqes[i]` pattern),
+  bounds-validates it against the registered payload region (`(u64)addr + len <=
+  payload_size`, no u32 wrap; reserved flags clear; len > 0), and acts only on that snapshot
+  — never re-reading the shared slot (`DescPinnedToSnapshot` / `ActedDescValidated`). The
+  geometry is the kernel's private `weft_ring_view` (the `l->sq_entries` precedent — a guest
+  scribble of the header mirror cannot move it). `weft_should_ring` is the hybrid `< 1024 B`
+  threshold. The kernel is the validator (it pinned the ring Burrow at grant, the I-30
+  pin — RDMA-HCA-shaped, not per-op *mediation*). 6 kernel tests
+  (`weft.ring_{basic,toctou_snapshot,bounds_reject,multi_split,layout_constraints}` +
+  `weft.should_ring_threshold`) drive a producer/consumer over a `burrow_share_into`
+  cross-Proc shared page: the in-place read, the snapshot's immunity to a post-consume
+  mutation, the bounds gate, the single-writer split-ring property, and the layout
+  fail-closed. 943/943, boot OK, 0 EXTINCTION; the `weft.tla` spec gate re-ran green (clean
+  1412 distinct + each buggy cfg violates its named invariant — `ring_toctou` →
+  `DescPinnedToSnapshot`). The live guest↔netd wiring (the dev9p Weft-Twrite path that calls
+  the drain) + the EL0 share delivery is Weft-6. Reference: `docs/reference/125-weft.md`.
 - **Weft-4 (the readiness ring + the latency convergence).** The single-cache-line readiness
   poke; retire the 50 ms RX-wake; close NET-PERF N1.
 - **Weft-5 (the `F_NOTIF` zero-copy-send contract).** The two-CQE send completion; the I-30

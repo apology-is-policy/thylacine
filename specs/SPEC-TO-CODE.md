@@ -1207,8 +1207,11 @@ PRE-terminal, so it is still caught). See NET-DESIGN.md §12.2 + ARCH §28 I-9.
 
 ## weft.tla — Weft-1 (the capability network dataplane; spec-first re-enabled, model-first)
 
-Status: **spec landed model-first at Weft-1; the impl is OWED across
-Weft-2..7 (source map filled then).** Models the per-flow zero-copy network
+Status: **spec landed model-first at Weft-1; the cross-Proc share substrate
+landed at Weft-2 (`burrow_share_into`) and the descriptor-ring leg
+(`GuestPostDesc`/`Consume`/`DescPinnedToSnapshot`/`ActedDescValidated`) at
+Weft-3 (`kernel/weft.c`); the buffer-lifetime (`F_NOTIF`) + flow-teardown legs
+are OWED across Weft-5..7.** Models the per-flow zero-copy network
 dataplane (NET-THROUGHPUT.md §5; ARCH §28 I-37) and pins I-37 — the
 generalization of the Loom I-29/I-30 pin to the cross-Proc SHARED PAGE + the
 notification-terminal (`F_NOTIF`) multi-holder release. `loom.tla` owns the
@@ -1251,9 +1254,9 @@ sites, from the spec header):
 
 - `RebindFlowCap` ↔ a clunk + reuse / revoke-rebind of the `/net` data fid (the flow cap binding) — the `loom.tla` `UserRegister` analog.
 - `Register` ↔ `SYS_LOOM_REGISTER` of a payload page within the per-flow shared Burrow (the I-30 buffer pin) — Weft-2 (cross-Proc Burrow-share) + Weft-6 (the per-flow binding).
-- `GuestPostDesc` / `GuestMutateDesc` ↔ the guest writes/mutates a `{addr,len}` descriptor in the shared split-ring — Weft-3.
-- `Consume` ↔ the kernel copies + bounds-validates the descriptor against the registered Burrow (the snapshot) — Weft-3.
-- `NetdAct` ↔ netd reads the payload IN PLACE under the flow pin (no per-op re-check) + queues the smoltcp send — Weft-3 / Weft-6.
+- `GuestPostDesc` / `GuestMutateDesc` ↔ the guest writes/mutates a `{addr,len}` `struct weft_desc` in the shared split-ring + release-bumps `weft_ring_hdr.prod_tail` — **Weft-3** (`kernel/weft.c`; the producer is the Weft-6 guest, exercised by `kernel/test/test_weft_ring.c::weft_post`).
+- `Consume` ↔ `kernel/weft.c::weft_ring_drain` copies each in-flight descriptor to kernel memory (the snapshot) + `weft_desc_valid` bounds-validates it against the registered payload region — **Weft-3** (`DescPinnedToSnapshot` + `ActedDescValidated` realized; the `loom_drain_sq` `ksqe = sqes[i]` discipline).
+- `NetdAct` ↔ the consumer reads the payload IN PLACE at the validated `out[].addr` under the flow pin (no per-op re-check) + queues the smoltcp send — the validated snapshot is **Weft-3** (`weft_ring_drain`'s `out[]`); the live netd in-place read + smoltcp queue is **Weft-6**.
 - `HolderRelease` ↔ netd-stack-done / NIC-DMA-done / peer-ACK, each clearing one F_NOTIF holder — Weft-5.
 - `ReleaseClean` ↔ the notification-terminal CQE: the pin released when the LAST holder clears — Weft-5 (the F_NOTIF two-CQE contract).
 - `Teardown` ↔ the `/net` data fid clunk: quiesce in-flight + drop BOTH #847 share refs (the Burrow frees) — Weft-2 / Weft-7.
