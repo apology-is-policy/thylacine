@@ -62,8 +62,9 @@ struct p9_attached *p9_attached_create(
     struct p9_attached *a = kmalloc(sizeof(*a), KP_ZERO);
     if (!a) { if (out_err) *out_err = -T_E_NOMEM; return NULL; }
 
-    // The p9_client struct is ~12 KiB; kmalloc routes large requests
-    // through alloc_pages (slub.c bypass at SLUB_MAX_OBJECT_SIZE).
+    // The p9_client struct is ~36 KiB (it inlines out_buf =
+    // P9_CLIENT_OUT_BUF_MAX = 32 KiB, Weft-0); kmalloc routes large
+    // requests through alloc_pages (slub.c bypass at SLUB_MAX_OBJECT_SIZE).
     a->client = kmalloc(sizeof(*a->client), KP_ZERO);
     if (!a->client) {
         kfree(a);

@@ -269,7 +269,7 @@ batch of 9P requests, so a just-enqueued SYN/data egresses that tick instead of
 waiting for the poll timeout.
 
 **The socket reserved at clone.** `clone` now reserves a real `tcp::Socket` (rx/tx
-`SocketBuffer`s, 4 KiB each) and stores its `SocketHandle` in the slot — the
+`SocketBuffer`s, 64 KiB each since Weft-0) and stores its `SocketHandle` in the slot — the
 faithful §3.4 `ALLOCATED` state (one socket bound to the connection for its open
 lifetime). The last clunk (`slot_unref` → refs 0) `SocketSet::remove`s it, the
 *sole* free path, so the socket lifetime is exactly the connection's.

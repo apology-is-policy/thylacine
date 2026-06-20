@@ -62,10 +62,16 @@ struct poll_waiter;
 // on free so a read of a freed SrvConn fast-fails (UAF defense).
 #define SRV_CONN_MAGIC  0x535256434F4E4E00ULL    // 'SRVCONN' || 0x00
 
-// The negotiated 9P msize for a /srv connection. Small: the corvus
-// wire (CORVUS-DESIGN §6.4) carries short verb frames and the 1217-byte
-// DEK envelope — 4 KiB is generous. Matches SYS_ATTACH_9P's default.
-#define SRVCONN_MSIZE   4096u
+// The negotiated 9P msize for a /srv connection -- the per-op payload
+// ceiling for EVERY SrvConn-backed 9P session. corvus's wire
+// (CORVUS-DESIGN §6.4) sends only short verb frames + the 1217-byte DEK
+// envelope, but the /net mount (netd posts /srv/net byte-mode; joey
+// attaches it via SYS_ATTACH_9P_SRV) rides the SAME SrvConn transport,
+// and its Tread/Twrite throughput is window/round-trip-bound by this
+// msize (Weft-0 / NET-THROUGHPUT.md Tier A). 32 KiB lifts the /net
+// per-op payload 8x over the prior 4 KiB; corvus is unaffected (msize is
+// a max -- its frames stay small). The inline ring below scales with it.
+#define SRVCONN_MSIZE   (32u * 1024u)
 
 // The 9P root fid for a SrvConn-backed session (P9 convention; matches
 // SYS_ATTACH_DEFAULT_ROOT_FID). srvconn_attach_dev9p_root (9p_attach.c)
@@ -73,10 +79,16 @@ struct poll_waiter;
 // the shared attach helper can pass the same root fid.
 #define SRVCONN_ROOT_FID  1u
 
-// Per-direction ring capacity. Sized to comfortably hold one whole
-// msize frame so the synchronous, single-frame-in-flight kernel 9P
-// client never blocks on a write (see the file-header rationale).
-#define SRVCONN_RING_CAP  8192u
+// Per-direction ring capacity (2x msize). Sized to comfortably hold one
+// whole msize frame so the synchronous, single-frame-in-flight kernel 9P
+// client never blocks on a write (see the file-header rationale). INLINE
+// in struct srvconn_chan (x2: c2s + s2c), so it scales struct SrvConn --
+// at 32 KiB msize a SrvConn is ~129 KiB of kmalloc'd kernel memory (NOT
+// #65-charged; allocated at connection setup, mostly boot-time, and
+// graceful-fail on OOM). The 64 KiB+ /net throughput ceiling comes from
+// the Weft shared-page dataplane (which retires this byte-copy ring),
+// not from growing this further.
+#define SRVCONN_RING_CAP  (2u * SRVCONN_MSIZE)
 
 _Static_assert(SRVCONN_RING_CAP >= SRVCONN_MSIZE,
                "a connection ring must hold a full msize frame so the "

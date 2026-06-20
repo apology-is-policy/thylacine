@@ -285,10 +285,15 @@ void test_9p_srvconn_transport_large_frame_roundtrip(void) {
     static u8 big[2048];
     for (int i = 0; i < 2048; i++) big[i] = (u8)((i * 7 + 3) & 0xff);
 
-    // Warm-up: cycle 400-byte frames to advance the ring head/tail near the
-    // SRVCONN_RING_CAP (8192) boundary so the subsequent large frame wraps.
+    // Warm-up: cycle 400-byte frames to advance the ring head/tail to within
+    // ~1 KiB of the SRVCONN_RING_CAP boundary so the subsequent 2048-byte frame
+    // straddles the wraparound. The cycle count is DERIVED from SRVCONN_RING_CAP
+    // so the wrap is exercised regardless of the ring size (Weft-0 raised it
+    // 8 KiB -> 64 KiB; the prior fixed count of 20 stopped reaching the boundary
+    // and silently turned this into a non-wrapping test).
     static u8 warm[512];
-    for (int cyc = 0; cyc < 20; cyc++) {
+    unsigned warm_cycles = (SRVCONN_RING_CAP - 1024) / 400;
+    for (unsigned cyc = 0; cyc < warm_cycles; cyc++) {
         int sn = ops.send(ops.ctx, big, 400);
         TEST_EXPECT_EQ(sn, 400, "warmup send full");
         long gn = srvconn_server_recv_blocking(cn, warm, 400);

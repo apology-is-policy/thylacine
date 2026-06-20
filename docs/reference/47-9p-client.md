@@ -141,7 +141,7 @@ The pattern is the only thing in this layer. The reason each op is a separate fu
 
 ### Buffer ownership
 
-- **Inline state**: `struct p9_client` embeds session (~4 KiB) + transport (~80 B) + an inline outbound buffer (8 KiB by default). Total struct size ≈ 12 KiB; must be allocated statically or heap-side, never on the stack.
+- **Inline state**: `struct p9_client` embeds session (~4 KiB) + transport (~80 B) + an inline outbound buffer (32 KiB by default since Weft-0). Total struct size ≈ 36 KiB; must be allocated statically or heap-side, never on the stack.
 - **Caller-provided recv buffer**: passed to `p9_client_init`; sized to negotiated msize.
 - **Caller-provided I/O buffers**: read/write/readdir output buffers are passed per-call (no inline-data storage in the client struct).
 
@@ -216,7 +216,7 @@ Every public op returns negative on:
 
 - Per-op cost: 1 backend send + 1+ backend recv calls (depending on partial-read aggregation) + one `kmalloc(recv_cap)` per op for the rpc reply buffer + one frame copy (reader → owner buffer). A buffer pool / read-into-owner-buffer is a v1.x optimization.
 - Locking: one per-client spinlock `c->lock`, taken per op and DROPPED across the blocking `recv` (the elected-reader, #841). SMP-safe and shared across Procs (no caller serialization required — the client serializes internally).
-- Memory: `sizeof(struct p9_client)` ≈ 12 KiB + at most one `recv_cap`-sized `done_reply_buf` held between completions. Most of the struct is the embedded session's fid + outstanding tables (~4 KiB) + the 8 KiB inline out_buf.
+- Memory: `sizeof(struct p9_client)` ≈ 36 KiB + at most one `recv_cap`-sized `done_reply_buf` held between completions. Most of the struct is the 32 KiB inline out_buf (Weft-0; was 8 KiB) + the embedded session's fid + outstanding tables (~4 KiB).
 
 ## Status
 

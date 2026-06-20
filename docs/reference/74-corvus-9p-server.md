@@ -153,8 +153,8 @@ struct Conn {
 
 `MAX_FIDS_PER_CONN = 8` is a v1.0 cap. The kernel-internal client uses only 2 fids per connection (one for the attach-root, one for the walked `/ctl`); 8 leaves headroom for v1.x.
 
-**Constants** (mirror `kernel/srvconn.h`'s `SRVCONN_MSIZE`):
-- `SERVER_MSIZE: u32 = 4096` — must equal the kernel-side `SRVCONN_MSIZE`; the kernel's `srvconn_drive_client_handshake` proposes 4096 and the server's Tversion handler accepts it. A drift here would surface as a handshake failure at the very first Tversion.
+**Constants**:
+- `SERVER_MSIZE: u32 = 4096` — corvus's server-side msize ceiling (its verb frames + the 1217-byte DEK envelope fit comfortably). The kernel client proposes `SRVCONN_MSIZE` (32 KiB since Weft-0, `NET-THROUGHPUT.md`) and corvus's Tversion handler negotiates `min(client_msize, SERVER_MSIZE) = 4096`, so the session lands at 4 KiB regardless of the larger kernel proposal — corvus's small-frame wire is unaffected by the /net throughput lift. (`SRVCONN_MSIZE` need NOT equal `SERVER_MSIZE`; the 9P `min` negotiation reconciles them.)
 - `MAX_CONNS = 8` — max simultaneous accepted connections corvus tracks. At v1.0 joey is the only client and the kernel-side `SRV_CONN_PER_PROC_MAX = 1` already gates this; the userspace cap is defensive.
 - `REQ_HDR_LEN = 4` — verb-frame request header (verb_id u8 + protocol_version u8 + payload_len u16).
 - `RESP_HDR_LEN = 3` — verb-frame response header (status u8 + payload_len u16).

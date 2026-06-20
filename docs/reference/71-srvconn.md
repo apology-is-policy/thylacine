@@ -150,7 +150,7 @@ struct srvconn_chan {
     u32            count, head, tail;
     bool           eof;           // teardown latched this direction
     struct Rendez  rendez;        // the single blocking consumer waits here
-    u8             buf[SRVCONN_RING_CAP];   // SRVCONN_RING_CAP == 8192
+    u8             buf[SRVCONN_RING_CAP];   // SRVCONN_RING_CAP == 65536 (2x SRVCONN_MSIZE)
 };
 ```
 
@@ -164,8 +164,9 @@ the channel lock. `chan_produce` appends bytes and wakes the consumer;
 The kernel 9P client is **synchronous and single-frame-in-flight** — it
 holds `p9_client.lock` across a whole send-then-receive exchange, so at
 most one `Tmsg` is ever in `c2s` and one `Rmsg` in `s2c`. Each ring is
-`SRVCONN_RING_CAP` (8192) — twice the negotiated msize (`SRVCONN_MSIZE`,
-4096), pinned by `_Static_assert(SRVCONN_RING_CAP >= SRVCONN_MSIZE)` —
+`SRVCONN_RING_CAP` (65536) — twice the msize (`SRVCONN_MSIZE`, 32 KiB
+since Weft-0; NET-THROUGHPUT.md Tier A lifted it from 4 KiB for /net
+throughput), pinned by `_Static_assert(SRVCONN_RING_CAP >= SRVCONN_MSIZE)` —
 so a whole frame always fits and a write never has to block. A write
 that would not fit (a protocol violation — an oversized frame) is
 refused: `chan_produce` returns a short count, which the transport core
@@ -290,8 +291,8 @@ total size.
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `SRVCONN_MSIZE` | 4096 | the connection's negotiated 9P msize |
-| `SRVCONN_RING_CAP` | 8192 | per-direction ring capacity (≥ msize) |
+| `SRVCONN_MSIZE` | 32768 | the connection's negotiated 9P msize (Weft-0; was 4096) |
+| `SRVCONN_RING_CAP` | 65536 | per-direction ring capacity (2x msize) |
 | `SRV_CONN_MAGIC` | `0x535256434F4E4E00` | `struct SrvConn` sentinel |
 
 ---

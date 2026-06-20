@@ -47,9 +47,9 @@
 //   - The transport's recv buffer is caller-provided at init time.
 //   - The outbound buffer for each Tmsg is INLINE in the client
 //     (`out_buf[P9_CLIENT_OUT_BUF_MAX]`); sized to comfortably hold
-//     any Tmsg shape up to one msize-bounded Twrite. Tests that don't
-//     need huge writes can use a smaller cap; the default 8 KiB is
-//     enough for handshake + meta + small reads/writes.
+//     any Tmsg shape up to one msize-bounded Twrite. The default 32 KiB
+//     (Weft-0) holds a full /net SrvConn Twrite frame (SRVCONN_MSIZE);
+//     Stratum / corvus sessions use only a prefix.
 
 #ifndef THYLACINE_9P_CLIENT_H
 #define THYLACINE_9P_CLIENT_H
@@ -61,9 +61,12 @@
 #include <thylacine/spinlock.h>
 #include <thylacine/types.h>
 
-// Inline outbound Tmsg buffer. 8 KiB is plenty for handshake / meta /
-// mutation messages; large writes should use a larger client cap.
-#define P9_CLIENT_OUT_BUF_MAX  (8u * 1024u)
+// Inline outbound Tmsg buffer. Must hold one whole Tmsg frame (<= the
+// session's negotiated msize). The /net SrvConn session negotiates
+// SRVCONN_MSIZE (32 KiB, Weft-0), so a /net Twrite frame can be ~32 KiB
+// -- size to match. Stratum / corvus sessions negotiate smaller and use
+// only a prefix. Inline in struct p9_client -> kmalloc'd per session.
+#define P9_CLIENT_OUT_BUF_MAX  (32u * 1024u)
 
 #define P9_CLIENT_MAGIC        0x50394354u   // "P9CT" little-endian
 

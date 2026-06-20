@@ -41,7 +41,7 @@ crossings** per chunk, and a single-frame-in-flight serialization on the second:
 1. **app ↔ kernel** — `SYS_WRITE`/Loom trap; the payload copied `user → out_buf`
    (`kernel/9p_client.c:977`) then `out_buf → SrvConn ring`.
 2. **kernel ↔ netd** — the `SrvConn` transport is a **byte-copy ring**
-   (`SRVCONN_RING_CAP = 8192`, 2× msize) and the kernel client is **synchronous
+   (`SRVCONN_RING_CAP` = 8192 pre-Weft-0, now 65536 = 2× msize) and the kernel client is **synchronous
    single-frame-in-flight** (holds `p9_client.lock` across send-then-receive); netd
    then copies the bytes *out* of the ring and smoltcp copies them *in* to the
    pre-allocated `SocketBuffer` (`usr/netd/src/server.rs:1834`).
@@ -410,11 +410,28 @@ written + TLC-green **before** the impl.
 One Tier-A piece lands first as a v1.0 win (independent of the dataplane); the rest is the
 dataplane arc the user committed.
 
-- **Weft-0 (Tier A, v1.0 — the cheap win, lands first).** Grow `TCP_TX_BUF`/`TCP_RX_BUF`
-  (4 KiB → 64 KiB), `SRV_MSIZE`/`DATA_CHUNK`, `SRVCONN_RING_CAP` + `SRVCONN_MSIZE`, and the
-  kernel-client msize — coherently. Measure on M6. Audit-light (back-pressure #841/#845 + the
-  #65 per-Proc memory cap with bigger per-conn buffers). *Independent of Weft-1+; can land
-  any time.*
+- **Weft-0 (Tier A, v1.0 — the cheap win) — LANDED.** Grew, coherently: `TCP_TX_BUF`/
+  `TCP_RX_BUF` 4 KiB → **64 KiB** (the window), and `SRV_MSIZE`/`DATA_CHUNK`/`SRVCONN_MSIZE`/
+  `SRVCONN_RING_CAP`/the kernel-client `P9_CLIENT_OUT_BUF_MAX` to a **32 KiB** per-op payload
+  (an 8× reduction in cross-process crossings per MiB). The msize ceiling is **32 KiB, not the
+  64 KiB the §3 table models**: `SRVCONN_RING_CAP` is an inline `buf[]` (×2: c2s + s2c) in
+  `struct SrvConn`, so the ring scales the struct (2× msize → a ~129 KiB kmalloc at 32 KiB —
+  order-6, but allocated at connection setup [mostly boot, unfragmented] and graceful-fail on
+  OOM); the 64 KiB+ payload ceiling comes from the **Weft shared-page dataplane** (Weft-3),
+  which retires the byte-copy ring entirely — so growing the inline ring further is throwaway
+  work. corvus (the other SrvConn service) is unaffected: it negotiates 9P `min()` down to its
+  4 KiB `SERVER_MSIZE`. The netd per-op recv scratch moved stack → heap (a 32 KiB stack array
+  would overflow netd's 256 KiB stack and terminate the NIC owner). Audit-light: no new
+  invariant; the #841/#845 back-pressure + the #65 memory cap (netd's buffers are ~2 MiB ≪ the
+  256 MiB floor) hold; the SrvConn 2× ratio is preserved so the Loom async pipelining depth is
+  unchanged. Proven: build + boot (933/933 + the live `net-8b` /net E2E + `loom-stress` dev9p
+  round-trip + 0 EXTINCTION) + the SMP gate (0 corruption, 40 boots). The win is **modeled**
+  (8× → ~128 MiB/s, Tier A's low end) and proven to work end-to-end by the live `net-8b` E2E
+  (a real /net round-trip at the 32 KiB msize / 64 KiB window); the clean **empirical**
+  large-transfer measurement is owed to the Weft-7 benchmark — the 32 KiB M6 probe over slirp
+  is too small to isolate a steady-state rate, and the slirp guestfwd that feeds it is inert
+  under HVF on the dev host (the probe SKIPs gracefully; a measurement-infra gap, not a guest
+  fault — the NIC itself works: DHCP lease + 24/24 ARP each boot). *Independent of Weft-1+.*
 - **Weft-1 (spec-first).** `specs/weft.tla` — model the shared-page transport + the
   `F_NOTIF` multi-holder buffer lifetime + the enforcement-at-setup / no-per-op-recheck +
   the split-ring discipline. Clean + the four buggy cfgs. Model-first, before any impl.

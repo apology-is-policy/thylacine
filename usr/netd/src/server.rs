@@ -66,17 +66,23 @@ const MAX_SLOTS: usize = 16;
 /// (ENOMEM) rather than deferred.
 const MAX_PENDING_ACCEPTS: usize = MAX_SLOTS;
 
-/// Server-negotiated msize. Bounds every frame; the per-conn buffers are sized
-/// to it. 8 KiB holds the largest reply (a stats read, an Rgetattr, or a full
-/// Treaddir page of the shallow /net tree).
-const SRV_MSIZE: u32 = 8192;
+/// Server-negotiated msize. Bounds every frame; the per-conn out_buf is sized to
+/// it. 32 KiB (Weft-0 / NET-THROUGHPUT.md Tier A) lifts the per-op data payload
+/// 8x over the prior 4 KiB negotiated on the SrvConn: the kernel client proposes
+/// SRVCONN_MSIZE = 32 KiB and netd negotiates `min`, so both land at 32 KiB. It
+/// still holds the largest control reply (a stats read, an Rgetattr, a Treaddir
+/// page of the shallow /net tree).
+const SRV_MSIZE: u32 = 32768;
 const SRV_MSIZE_USIZE: usize = SRV_MSIZE as usize;
 
-/// Per-connection smoltcp TCP socket buffer sizes (rx/tx). 4 KiB each is a
-/// modest TCP window -- enough for the net-2c-2 control path plus a small
-/// stream; MAX_SLOTS * (rx + tx) bounds netd's socket memory (16 * 8 KiB).
-const TCP_RX_BUF: usize = 4096;
-const TCP_TX_BUF: usize = 4096;
+/// Per-connection smoltcp TCP socket buffer sizes (rx/tx) -- the TCP window. 64
+/// KiB each (Weft-0 / NET-THROUGHPUT.md Tier A) covers the bandwidth-delay
+/// product at the Tier-A target over the NIC round-trip, 2x the 32 KiB per-op
+/// chunk so the NIC pipeline stays full while the next 9P op crosses. MAX_SLOTS
+/// * (rx + tx) bounds netd's socket memory (16 * 128 KiB = 2 MiB, allocated only
+/// for live slots; << the 256 MiB #65 per-Proc floor).
+const TCP_RX_BUF: usize = 65536;
+const TCP_TX_BUF: usize = 65536;
 
 /// Per-connection smoltcp UDP socket buffer sizes (net-3b). A UDP PacketBuffer
 /// stores whole datagrams WITH per-packet metadata (sender endpoint), unlike
@@ -95,7 +101,10 @@ const ICMP_RX_BUF: usize = 2048;
 const ICMP_TX_BUF: usize = 2048;
 
 /// The largest `data` chunk a single Tread drains from a socket's rx buffer.
-const DATA_CHUNK: usize = 4096;
+/// 32 KiB (Weft-0) matches SRV_MSIZE so one Tread moves a full msize payload.
+/// The recv scratch is heap-allocated per op (a 32 KiB stack array would
+/// overflow netd's 256 KiB stack and terminate the NIC owner).
+const DATA_CHUNK: usize = 32768;
 
 /// The ephemeral local-port range floor (IANA 49152..=65535). smoltcp's
 /// `connect` requires a non-zero local port (it auto-selects only the local
@@ -4114,10 +4123,13 @@ impl Conn {
     /// single-threaded loop runs net.poll() BEFORE this, so a data edge cannot be
     /// lost between h_read's empty dequeue and the park (the poll_dns reasoning).
     pub fn poll_data(&mut self, net: &mut Net) -> bool {
+        // Heap scratch (a 32 KiB DATA_CHUNK stack array would overflow the
+        // 256 KiB stack); one allocation per call, reused across this tick's
+        // pending reads.
+        let mut scratch = alloc::vec![0u8; DATA_CHUNK];
         let mut i = 0;
         while i < self.pending_reads.len() {
             let pr = self.pending_reads[i];
-            let mut scratch = [0u8; DATA_CHUNK];
             let cap = pr.cap.min(DATA_CHUNK);
             match net.data_recv_outcome(pr.slot_n, &mut scratch[..cap]) {
                 RecvOutcome::WouldBlock => i += 1, // still empty; check next tick
@@ -4810,7 +4822,9 @@ impl Conn {
             if cap == 0 {
                 return p9::build_rread(&mut self.out_buf, tag, &[]);
             }
-            let mut scratch = [0u8; DATA_CHUNK];
+            // Heap scratch (a 32 KiB DATA_CHUNK stack array would overflow the
+            // 256 KiB stack); cap-sized, one allocation per data Tread.
+            let mut scratch = alloc::vec![0u8; cap];
             match net.data_recv_outcome(n, &mut scratch[..cap]) {
                 // Data now: the fast path -- a recv that finds bytes never blocks.
                 RecvOutcome::Data(k) => {

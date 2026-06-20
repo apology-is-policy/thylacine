@@ -76,14 +76,17 @@ before we build it.
 
 ### 2.2 Throughput levers
 
-| Constant | Value | Effect |
+| Constant | Value (Weft-0) | Effect |
 |---|---|---|
-| `TCP_RX_BUF`/`TCP_TX_BUF` (`server.rs:78`) | **4096** | the TCP window is 4 KiB; throughput ≈ window/RTT, and the poll floor inflates effective RTT → caps hard |
-| `SRV_MSIZE` (`server.rs:72`) | **8192** | the 9P frame; bulk transfer is ≤ msize per RPC |
-| `DATA_CHUNK` (`server.rs:98`) | **4096** | ≤ 4 KiB moved per `data` read/write = one netd round-trip + context switch per 4 KiB |
+| `TCP_RX_BUF`/`TCP_TX_BUF` (`server.rs:78`) | **65536** (was 4096) | the TCP window; throughput ≈ window/RTT. Weft-0 (NET-THROUGHPUT.md Tier A) lifted it 4 KiB → 64 KiB |
+| `SRV_MSIZE` (`server.rs:72`) | **32768** (was 8192) | the 9P frame; bulk transfer is ≤ msize per RPC. The /net session now negotiates 32 KiB (the kernel `SRVCONN_MSIZE` proposal) |
+| `DATA_CHUNK` (`server.rs:98`) | **32768** (was 4096) | ≤ 32 KiB moved per `data` read/write = one netd round-trip per 32 KiB (8x fewer cross-process crossings per MiB) |
 
-So bulk transfer is 4 KiB per 9P round-trip through a separate Proc. Candidate
-fixes (follow-on): larger socket windows (64 KiB+), larger msize.
+Weft-0 lifted the per-op payload 4 KiB → 32 KiB and the window 4 KiB → 64 KiB
+(coherently across `SRVCONN_MSIZE`/`SRVCONN_RING_CAP`/the kernel-client
+`P9_CLIENT_OUT_BUF_MAX`); the 32 KiB ceiling is the inline-SrvConn-ring
+constraint (64 KiB+ comes from the Weft shared-page dataplane). See
+NET-THROUGHPUT.md.
 
 ### 2.3 The crypto lever (HTTPS-specific)
 
