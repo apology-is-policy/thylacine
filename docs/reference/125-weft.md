@@ -21,9 +21,18 @@ ring whose geometry mirror is visible; see "The netd ring register" below). The
 moves zero-copy (see "The data drive" below), proven in-guest by `net-echo`'s
 `weft_tx_e2e`. **Weft-6b-3a** lands the symmetric RX direction (`Tweftio`
 `dir=READ` + the kernel read fast-path + netd's recv-into-ring + the blocking
-defer), proven by `weft_rx_e2e`. The live readiness park/wake (6b-3b) + the
-`F_NOTIF` two-CQE posting (6b-3c) + the native `libthyla_rs::net` push/pop/wait
-API + the batched descriptor-ring drive (6c) remain.
+defer), proven by `weft_rx_e2e`. **Weft-6c (DESIGN, 2026-06-20)** folds the
+standalone readiness park/wake + F_NOTIF legs into one coherent native-async
+chunk: the native `libthyla_rs::net` push/pop/wait API **rides Loom** (`pop` =
+`LOOM_OP_READ` / `push` = `LOOM_OP_WRITE` routed to the weft fast-path; `wait` =
+`SYS_LOOM_ENTER` — no new wait/wake syscall), `push` posts the live F_NOTIF
+two-CQE on the op's `loom_async_op.notif`, and the readiness ring is the
+syscall-free busy-poll edge (its `arm_park`/Rendez leg stays validated-not-wired).
+Sub-split 6c-1 (kernel weft-Loom routing + live F_NOTIF) / 6c-2 (native API +
+netd readiness edge + in-guest E2E) / 6c-3 = Weft-7 (audit + SMP + bench). The
+readiness ring removes the **guest-wake** round-trip; the measured ~50 ms
+**netd-notice** floor (NET-PERF N1) is the orthogonal pollable-NIC-IRQ-fd chunk,
+not the readiness ring (NET-THROUGHPUT §5.4). See `docs/NET-THROUGHPUT.md` §6.
 
 Source: `kernel/include/thylacine/weft.h`, `kernel/weft.c`. Specs:
 `specs/weft.tla` (ARCH §28 I-37, the data plane + the F_NOTIF holder lifecycle),
