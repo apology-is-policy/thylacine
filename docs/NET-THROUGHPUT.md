@@ -639,8 +639,9 @@ dataplane arc the user committed.
     resident loopback: a ring VA + the visible geometry mirror + an idempotent second map,
     `net-echo: weft-6b MAP E2E PASS`), with the soak leak-baseline confirming no teardown leak.
     The live DATA DRIVE (the descriptor ring on large Twrite/Tread, the readiness park/wake, the
-    F_NOTIF posting) is **Weft-6b-2/6b-3**; `weft.tla` stays unchanged (6b-1 realizes the netd
-    side of `Init`/`Teardown`, no new mechanism).
+    F_NOTIF posting) is **Weft-6b-2/6b-3** — the data-drive wire mechanism (the new `Tweftio` op)
+    is resolved in **§6.2** (user-voted 2026-06-20); `weft.tla` stays unchanged (6b-1 realizes the
+    netd side of `Init`/`Teardown`, no new mechanism).
 - **Weft-7 (the focused audit + SMP gate + benchmark).** Prosecute the buffer-lifetime UAF
   (the §4.6 hazard, the F1-class), the no-per-op-mediation property, the cross-Proc Burrow
   lifetime, **and the new Weft-6 `Tweft` / `share_id` correlation** (the consumed-exactly-once
@@ -672,6 +673,74 @@ the *materialization* to first use. **Why B over C:** B keys on the fid — the 
 sides already share — so there is no new token capability to mint, leak, or forge; the
 `share_id` is a kernel-internal join key (netd→kernel via `Rweft`, never handed to the guest),
 whereas C's ctl token is a softer, more-surface-to-police variant of the same idea.
+
+### 6.2 The Weft-6b-2 data-drive decision (resolved 2026-06-20)
+
+Weft-6b-1 made the per-flow ring's *mapping* live (a `Tweft` on first use builds +
+maps the ring). Weft-6b-2 makes the *data* live: a large payload travels through that
+shared ring instead of the 9P body. The substrate settled most of the shape — the guest
+produces; the kernel is the I-30 validator-once (`weft_ring_drain`); §4.8's "the
+Tread/Twrite still happens, only the payload moves off-band" — leaving one question:
+**how the kernel signals netd to act on the kernel-validated descriptor.** Three shapes
+were surfaced; the user picked **A**:
+
+| Option | Mechanism | Why / why not |
+|---|---|---|
+| **A — new `Tweftio` op (CHOSEN)** | the kernel issues a Thylacine-private 9P op carrying the kernel-validated descriptor; netd reads/writes the ring **in place** + replies the count | keeps the kernel the I-30 validator-once **and** a 9P op mediating every transfer (4.8-faithful; the `Tweft` precedent — a kernel-client-issued op netd handles); one new wire op |
+| B — reuse Twrite/Tread | the descriptor rides the body; netd infers weft mode from a count-vs-body-length mismatch | no new op, but the signal is an overloaded convention (no flag field in `Twrite`; a 16-byte real-payload edge to guard) |
+| C — netd drains its own ring | netd drains its OWN mapping (woken by the readiness poke); the kernel leaves the per-op data path | most zero-copy, but netd becomes the per-op descriptor validator (the TOCTOU leaves the kernel TCB), there is **no** Tread/Twrite for data (a §4.8 *side-channel* — the explicit violation), and the substrate's kernel-side `weft_ring_drain` goes unused — a re-architecture |
+
+**Why A:** it preserves the two properties the whole NOVEL rests on — the kernel is the
+validator-once (the RDMA-HCA shape, §4.6/§5.3) and the 9P file abstraction mediates every
+access (§4.8: a side-channel read/written *without* a Tread/Twrite is the violation A
+avoids and C commits). B's overload is fragile (the count-vs-body-length signal has a
+real-payload edge case); C's re-architecture moves descriptor validation off the kernel
+TCB onto netd.
+
+**The as-decided mechanism (impl OWED across 6b-2a/6b-2b):**
+
+- **`Tweftio(fid, off, len, dir) → Rweftio(count)`** — `P9_TWEFTIO = 136` /
+  `P9_RWEFTIO = 137` (just past `Tweft`/`Rweft` 134/135; the parity `RX = TX + 1`). The
+  kernel dev9p data path issues it on a large transfer on a weft-bound fd; netd's server
+  handles it (the `Tweft`/`Tflush` precedent). `dir` = WRITE (TX) / READ (RX). Body 16 B:
+  `[fid:u32][off:u32][len:u32][dir:u32]`; reply `[count:u32]` (4 B). Reuses the audited
+  tag/demux machinery (no `9p_client.tla` change — the buggy cfgs re-run green).
+- **The kick is the existing `SYS_WRITE`/`SYS_READ`** on the data fd (**no new syscall**;
+  lineage-correct — virtio-9p's `p9_client_zc_rpc` reuses the same request, payload
+  off-band). The native client writes the payload into the ring's payload region (its own
+  mapping) and issues `SYS_WRITE(data_fd, ring_va + payload_off + O, L)` — the buffer points
+  *into* the bound ring. `dev9p_write`, on `priv->weft != NULL && weft_should_ring(L)`,
+  derives the descriptor `{O = buf - (guest_va + payload_off), L}` from the (trusted,
+  register-passed) syscall args, validates it against the binding's kernel-private
+  `weft_ring_view` (the same `weft_desc_valid` bounds gate — but sourced from a trusted
+  syscall arg, so inherently free of the descriptor-ring TOCTOU), and issues `Tweftio`. A
+  small write (`< 1024 B`) or a buffer outside the ring stays on the byte-copy path (the
+  hybrid threshold).
+- **netd's `h_weftio`** resolves `fid → connection N`, reads `ring_va + payload_off + off`
+  for `len` **in place** (TX → `data_send` to smoltcp; RX → `data_recv` *into* the ring),
+  and replies `Rweftio(count)`.
+- **The kernel-private `weft_ring_view`** is stored in the binding (computed at
+  `SYS_WEFT_MAP` via `weft_ring_layout` from the shared Burrow's contiguous KVA) — the
+  trusted geometry the validate reads, never the guest-mutable shared header mirror.
+
+**The descriptor RING (`weft_ring_drain`) vs the synchronous syscall-arg path:** 6b-2
+drives the *synchronous* path — one descriptor per `SYS_WRITE`, the buf-in-ring *is* the
+descriptor (no shared-ring slot to snapshot, so inherently TOCTOU-free; the validate is
+the trusted-arg sibling of the ring drain). The descriptor RING + `weft_ring_drain`'s
+snapshot discipline is the **batched/async** submission the native `libthyla_rs::net` API
+drives through Loom at **Weft-6c** (post N descriptors, one boundary crossing, the kernel
+drains all N — the throughput amortization). Both validate through `weft_desc_valid`
+against the kernel view; the synchronous path is the first live data movement.
+
+**Split:** **6b-2a** (the `Tweftio`/`Rweftio` wire codec + `p9_client_weftio` + the session
+arm + dispatch — kernel + the `libthyla-rs`/`ninep` mirror, mirroring 6a-1) / **6b-2b** (the
+`dev9p_write` weft path + the `weft_ring_view` in the binding + netd's `h_weftio` + the
+in-guest **TX** E2E over net-echo's loopback). **RX** (the `dir=READ` half, which needs
+netd's net-6a-1 blocking-read defer) + the **readiness park/wake** (the Weft-4 Rendez) +
+the **`F_NOTIF`** two-CQE posting are **Weft-6b-3**. `weft.tla` stays unchanged (the
+synchronous descriptor is a trusted syscall arg validated by the modeled `weft_desc_valid`
+gate; no new invariant-bearing mechanism — the impl-against-existing-spec posture of
+Weft-2/3/5/6a).
 
 ---
 
