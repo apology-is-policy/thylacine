@@ -50,7 +50,7 @@ use libthyla_rs::io::{Read, Write};
 use libthyla_rs::loom::{BufReg, Ring, Sqe};
 use libthyla_rs::net::{echo_serve, Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
 use libthyla_rs::thread;
-use libthyla_rs::{t_burrow_attach, t_exits, t_putstr};
+use libthyla_rs::{t_burrow_attach, t_exits, t_putstr, t_weft_map};
 
 /// net-8b: the in-guest over-/net TCP echo round-trip on netd's resident loopback
 /// interface (net-8a). This is the first LIVE exercise of the full Plan 9
@@ -85,6 +85,47 @@ fn loopback_e2e() -> Result<(), &'static str> {
     let back = client.read(&mut ebuf).map_err(|_| "client read")?;
     if ebuf[..back] != msg[..] {
         return Err("echo mismatch");
+    }
+    Ok(())
+}
+
+/// Weft-6b: the live SYS_WEFT_MAP round-trip over netd's resident loopback. A
+/// flow's FIRST zero-copy use (SYS_WEFT_MAP on its data fd) issues Tweft(F) on the
+/// shared `/net` dev9p client -> netd's h_weft allocates + registers a per-flow
+/// ring + answers Rweft(share_id, geom) -> the kernel claims the share + maps the
+/// ring into THIS guest (burrow_share_into). The proof of the grant-is-the-share
+/// keystone, live: a real ring VA comes back; the geometry-mirror header netd
+/// wrote is visible in the shared mapping (the magic + entry count); and a second
+/// map on the same fd is idempotent (the kernel fast-path, no second Tweft).
+fn weft_e2e() -> Result<(), &'static str> {
+    let addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 7790);
+    let listener = TcpListener::bind(addr).map_err(|_| "bind")?;
+    let client = TcpStream::connect(addr).map_err(|_| "connect")?;
+    // accept establishes the inbound half over the loopback (this Proc is both
+    // ends; the blocking accept defers inside netd, so no self-deadlock).
+    let (_server, _peer) = listener.accept().map_err(|_| "accept")?;
+
+    // SYS_WEFT_MAP on the client stream's data fd (as_raw_fd() IS the data fd).
+    let data_fd = client.as_raw_fd();
+    let va = unsafe { t_weft_map(data_fd as u64, 0) };
+    if va <= 0 {
+        return Err("map returned no ring");
+    }
+    // The geometry mirror netd wrote must be visible in the shared mapping.
+    let base = va as u64 as *const u8;
+    let magic = unsafe { core::ptr::read_volatile(base as *const u32) };
+    if magic != libthyla_rs::weft::WEFT_MAGIC {
+        return Err("ring magic mismatch");
+    }
+    // ring_entries lives at offset 4 in weft_ring_hdr; it must echo netd's choice.
+    let entries = unsafe { core::ptr::read_volatile(base.add(4) as *const u32) };
+    if entries != 64 {
+        return Err("ring entries mismatch");
+    }
+    // Idempotent: a second map on the SAME fd returns the SAME VA (no 2nd Tweft).
+    let va2 = unsafe { t_weft_map(data_fd as u64, 0) };
+    if va2 != va {
+        return Err("map not idempotent");
     }
     Ok(())
 }
@@ -350,6 +391,18 @@ fn probe() -> i64 {
                 "net-echo: FAIL -- net-8b loopback E2E ({})\n",
                 why
             ));
+            unsafe { t_exits(1) }
+        }
+    };
+    // Weft-6b: the live SYS_WEFT_MAP round-trip (Tweft -> netd h_weft -> share ->
+    // burrow_share_into) -- the grant-is-the-share keystone, live. Runs BEFORE the
+    // soak so its connection is freed (the ring detached) before the leak baseline.
+    match weft_e2e() {
+        Ok(()) => t_putstr(
+            "net-echo: weft-6b MAP E2E PASS (Tweft -> netd ring register -> mapped ring visible)\n",
+        ),
+        Err(why) => {
+            t_putstr(&alloc::format!("net-echo: FAIL -- weft-6b MAP E2E ({})\n", why));
             unsafe { t_exits(1) }
         }
     };

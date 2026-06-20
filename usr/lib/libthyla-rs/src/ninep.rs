@@ -621,6 +621,75 @@ pub fn build_rgetattr(
 }
 
 // =============================================================================
+// Tweft / Rweft (Weft-6 Thylacine extension) -- the per-flow zero-copy ring
+// setup op. A kernel-client-issued op (the #845 Tflush precedent): the kernel's
+// dev9p client issues Tweft(fid F) the first time a /net flow goes zero-copy;
+// netd's 9P server allocates + registers a per-flow ring and answers Rweft with
+// the kernel-scoped share_id + geometry. The share_id is a netd->kernel join key
+// (it rides the kernel's OWN Tweft round-trip), never handed to the guest -- the
+// RDMA-rkey shape (NET-THROUGHPUT.md section 4.6 / 6). Mirrors the kernel wire
+// codec (kernel/9p_wire.c::p9_{build,parse}_{tweft,rweft}) byte for byte.
+//
+// Tweft body: [fid: u32].  Rweft body: [share_id: u64][ring_size: u32][ring_entries: u32].
+// =============================================================================
+
+pub const P9_TWEFT: u8 = 134;
+pub const P9_RWEFT: u8 = 135;
+
+/// The ring grant an Rweft carries: the kernel-scoped registration token + the
+/// geometry the kernel needs to compute its private weft_ring_view (it does NOT
+/// trust the shared header's mirror -- the Weft-3 snapshot discipline).
+#[derive(Copy, Clone)]
+pub struct WeftGeom {
+    pub share_id: u64,
+    pub ring_size: u32,
+    pub ring_entries: u32,
+}
+
+/// parse_tweft (server side) -- extract the target fid from a Tweft.
+pub fn parse_tweft(buf: &[u8]) -> Result<u32, ()> {
+    let (fid, _) = unpack_u32(buf, P9_HDR_LEN)?;
+    Ok(fid)
+}
+
+/// build_rweft (server side) -- the ring grant: share_id + geometry.
+pub fn build_rweft(
+    out: &mut [u8],
+    tag: u16,
+    share_id: u64,
+    ring_size: u32,
+    ring_entries: u32,
+) -> Result<usize, ()> {
+    let p = build_header(out, P9_RWEFT, tag)?;
+    let p = pack_u64(out, p, share_id)?;
+    let p = pack_u32(out, p, ring_size)?;
+    let p = pack_u32(out, p, ring_entries)?;
+    patch_header_size(out, p)?;
+    Ok(p)
+}
+
+/// build_tweft (client side) -- request a zero-copy ring for the flow on `fid`.
+/// The kernel dev9p client is the only v1.0 issuer; provided for symmetry + tests.
+pub fn build_tweft(out: &mut [u8], tag: u16, fid: u32) -> Result<usize, ()> {
+    let p = build_header(out, P9_TWEFT, tag)?;
+    let p = pack_u32(out, p, fid)?;
+    patch_header_size(out, p)?;
+    Ok(p)
+}
+
+/// parse_rweft (client side) -- extract share_id + geometry from an Rweft.
+pub fn parse_rweft(buf: &[u8]) -> Result<WeftGeom, ()> {
+    let (share_id, p) = unpack_u64(buf, P9_HDR_LEN)?;
+    let (ring_size, p) = unpack_u32(buf, p)?;
+    let (ring_entries, _) = unpack_u32(buf, p)?;
+    Ok(WeftGeom {
+        share_id,
+        ring_size,
+        ring_entries,
+    })
+}
+
+// =============================================================================
 // Treaddir / Rreaddir (9P2000.L directory enumeration).
 //
 // A Rreaddir body is `[count: u32][data: count]` where `data` is a packed

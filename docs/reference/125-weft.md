@@ -11,8 +11,13 @@ fid-keyed ring-setup request; see `docs/reference/44-9p-wire.md` /
 `45-9p-session.md` / `47-9p-client.md`). **Weft-6a-2** landed the kernel ABI: the
 `SYS_WEFT_SHARE` (81) / `SYS_WEFT_MAP` (82) syscalls + the kernel-scoped
 `share_id` registry + the `dev9p_priv` ring binding (see "The EL0 delivery"
-below). The netd `Tweft` handler + the live ring drive are Weft-6b; the native
-`libthyla_rs::net` API + the in-guest E2E are Weft-6c.
+below). **Weft-6b-1** landed the netd side — the `h_weft` handler that allocates +
+registers a per-flow ring and answers `Rweft`, making the grant-is-the-share
+mapping LIVE end to end (proven in-guest: a real `SYS_WEFT_MAP` round-trip maps a
+ring whose geometry mirror is visible; see "The netd ring register" below). The
+live ring DRIVE (the descriptor / readiness / F_NOTIF wiring on real transfers)
+is Weft-6b-2/6b-3; the native `libthyla_rs::net` push/pop/wait API + the in-guest
+data E2E are Weft-6c.
 
 Source: `kernel/include/thylacine/weft.h`, `kernel/weft.c`. Specs:
 `specs/weft.tla` (ARCH §28 I-37, the data plane + the F_NOTIF holder lifecycle),
@@ -510,6 +515,88 @@ to netd's handler) needs Weft-6b/6c and is owed there — the same impl-against-
 existing-spec posture as Weft-2..5. The `Tweft`/`share_id` correlation (consumed-
 exactly-once, no cross-flow mis-binding, the netd-pin GC if the guest dies
 pre-map) is the **Weft-7** focused-audit prosecution surface.
+
+---
+
+## The netd ring register — the live `Tweft` handler (Weft-6b-1)
+
+Weft-6b-1 lands the netd half that makes grant-is-the-share LIVE: when a guest's
+first zero-copy use of a flow drives `SYS_WEFT_MAP`, the kernel issues `Tweft(F)`
+on the shared `/net` dev9p client; netd's 9P server answers `Rweft(share_id,
+geom)`; the kernel claims the share + maps the ring into the guest. Pure
+userspace (`usr/netd`, `usr/lib/libthyla-rs`); the kernel is byte-unchanged
+(Weft-6a-2 already landed every kernel-side step).
+
+### The handler (`usr/netd/src/server.rs::Conn::h_weft`)
+
+Dispatched from the 9P serve loop on `p9::P9_TWEFT` (134), alongside the other
+kernel-client-issued ops (`Tflush`, the #845 precedent). It:
+
+1. `p9::parse_tweft` → the fid `F`.
+2. Resolves `F → connection N` via the server fid table (`fid_find` →
+   `conn_n(path)`), and **fail-closes** unless `F` is an *opened* `/net/<proto>/N/
+   data` fid of a *live* slot (`f.opened && is_conn && conn_filekind == FK_DATA &&
+   slot_live`). A weft ring is a per-flow DATA channel; a `Tweft` on a ctl /
+   listen / dir fid, or a dead slot, returns an `Rlerror` so the guest's
+   `SYS_WEFT_MAP` returns `-1` and the flow stays on the byte-copy path. (Defence
+   in depth: the kernel issues `Tweft` only on a dev9p fd, but a non-`/net` dev9p
+   server simply does not handle op 134 and rejects it — the tagged #841 elected
+   reader matches the `Rlerror` by tag, no desync.)
+3. `Net::weft_ensure(N)` → the flow's `share_id`, embedded in `Rweft` with the
+   geometry (`WEFT_RING_SIZE` / `WEFT_RING_ENTRIES`).
+
+### The per-flow ring (`Net::weft_ensure` + `Slot::weft`)
+
+One ring + one `share_id` per connection `N`, recorded in the connection slot
+(`Slot.weft: Option<WeftFlow { ring_va, ring_size, share_id }>`), allocated lazily
+on the FIRST `Tweft`. `weft_ensure`:
+
+- returns the stored `share_id` if the flow already has a ring (**idempotent** — a
+  repeat `Tweft`, e.g. from a concurrent multi-thread first-MAP race, re-returns
+  the same id; the kernel's claim consumed it on the first map, so `weft_map_-
+  claimed` then falls back to the data fd's cached binding — the designed
+  consumed-`share_id` path);
+- else `SYS_BURROW_ATTACH`es a 256 KiB / 64-entry ANON ring (RW, demand-zero —
+  satisfies the kernel's ANON + RW-only + whole-ring check; page-aligned so a
+  later detach matches), writes its geometry mirror + zeroes the readiness header
+  (`libthyla_rs::weft::init_ring` — the shared ABI mirror, the `loom.h ↔
+  libthyla_rs::loom` precedent), then `SYS_WEFT_SHARE`es it to take the kernel's
+  I-30 registration pin + mint the `share_id`. Any failure (OOM, bad layout, full
+  registry) returns `None` → the flow stays on the byte-copy path: **a denied ring
+  is never fatal** (the hybrid threshold's whole point).
+
+### Teardown (the netd half of `ShareBoundedByFlow`)
+
+`slot_unref` (the connection's only free path) detaches netd's own ring mapping
+(`SYS_BURROW_DETACH`, dropping netd's #847 *mapping* ref) when the last fid clunks.
+The *registration pin* (the #847 *handle* ref) transferred to the kernel at the
+guest's claim and is dropped at the guest's `dev9p_close`; the ring Burrow frees
+when both reach 0, in any order. netd is single-threaded, so `Slot.weft` needs no
+lock (it is touched only in the serve loop).
+
+### The ABI mirror (`usr/lib/libthyla-rs/src/weft.rs`) + the 9P codec
+
+`libthyla_rs::weft` mirrors the on-page ring ABI (`WeftRingHdr` 64 B / `WeftReady-
+Hdr` 128 B / `WeftDesc` 16 B, `repr(C)` byte-pinned to `weft.h` by `const _:
+assert!(offset_of!…)`), plus `ring_layout` / `init_ring`. `libthyla_rs::ninep`
+gains `P9_TWEFT`/`P9_RWEFT` + `parse_tweft` / `build_rweft` (+ `build_tweft` /
+`parse_rweft` for symmetry), mirroring `kernel/9p_wire.c` byte for byte. Both are
+the shared substrate the Weft-6c native client reuses.
+
+### Proof + what's deferred
+
+The live round-trip is gated at boot by `net-echo`'s `weft_e2e` (`usr/net-echo`):
+over netd's resident loopback it bind/connect/accepts a flow, `SYS_WEFT_MAP`s the
+client's data fd, and asserts a real ring VA comes back, the ring header's magic +
+entry count are visible in the shared mapping, and a second map is idempotent
+(same VA, no second `Tweft`) — printed as `net-echo: weft-6b MAP E2E PASS`. The
+soak's leak-baseline (run right after) confirms the ring + connection teardown
+leaves no leak. The live DATA DRIVE (the descriptor ring on large Twrite/Tread,
+the readiness park/wake, the F_NOTIF two-CQE posting) is Weft-6b-2/6b-3; the
+`Tweft`/`share_id` correlation + the unclaimed-pin GC (a guest that dies between
+`Tweft` and the kernel claim leaks the registration pin until netd's
+owner-death GC — a narrow window, since the claim follows `Tweft` in the same
+`SYS_WEFT_MAP`) are the **Weft-7** prosecution surface.
 
 ---
 

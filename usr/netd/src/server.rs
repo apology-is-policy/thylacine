@@ -34,6 +34,7 @@
 use crate::NicDevice;
 use alloc::vec::Vec;
 use libthyla_rs::ninep as p9;
+use libthyla_rs::weft as weftlib;
 use libthyla_rs::time::{sleep, Duration, Instant};
 use libthyla_rs::{
     t_close, t_open, t_walk_create, T_GID_SYSTEM, T_OPATH, T_OREAD, T_PRINCIPAL_SYSTEM,
@@ -350,6 +351,35 @@ struct Slot {
     // by it, since a handle is set-specific (a get on the wrong set panics). Only
     // ever true when `Net.lo` is Some, so the lo-branch unwrap is unreachable.
     lo: bool,
+    // The per-flow Weft zero-copy ring (Weft-6b), allocated lazily on the FIRST
+    // Tweft for this connection and torn down (netd's mapping detached) at the
+    // last unref. None until a flow goes zero-copy -- the hybrid threshold keeps
+    // small-payload flows on the byte-copy path, so most slots never allocate one.
+    weft: Option<WeftFlow>,
+}
+
+/// The per-flow ring geometry netd allocates (Weft-6b). 256 KiB total (64 pages,
+/// page-aligned so the SYS_BURROW_ATTACH mapped size equals it exactly -- a later
+/// detach matches) with 64 descriptor slots; the kernel/native client recompute
+/// the [hdr][ready][desc][payload] split deterministically from these two values
+/// (libthyla_rs::weft::ring_layout). The payload region (~255 KiB) holds large
+/// Tread/Twrite payloads; small payloads stay on the byte-copy path (the hybrid
+/// threshold). Only a flow that actually goes zero-copy ever allocates a ring.
+const WEFT_RING_SIZE: u64 = 256 * 1024;
+const WEFT_RING_ENTRIES: u32 = 64;
+
+/// A connection's lazily-allocated Weft ring (Weft-6b). One ring + one share_id
+/// per flow N. `ring_va`/`ring_size` are netd's own SYS_BURROW_ATTACH mapping
+/// (the #847 mapping ref netd holds, detached at slot teardown); `share_id` is
+/// the kernel-scoped token netd minted via SYS_WEFT_SHARE and echoes in Rweft
+/// (idempotently, on a repeat Tweft -- the kernel's claim consumes it once, then
+/// falls back to the data fd's cached binding). `ring_size` is page-aligned (it
+/// equals the SYS_BURROW_ATTACH mapped size) so a later SYS_BURROW_DETACH matches.
+#[derive(Copy, Clone)]
+struct WeftFlow {
+    ring_va: u64,
+    ring_size: u64,
+    share_id: u64,
 }
 
 impl Slot {
@@ -366,6 +396,7 @@ impl Slot {
             icmp_ident: 0,
             gen: 0,
             lo: false,
+            weft: None,
         }
     }
 }
@@ -1070,6 +1101,7 @@ impl Net {
             icmp_ident: 0,
             gen,
             lo: false,
+            weft: None,
         };
         self.tcp_active += 1;
         self.tcp_opened += 1;
@@ -1103,6 +1135,7 @@ impl Net {
             icmp_ident: 0,
             gen,
             lo: false,
+            weft: None,
         };
         self.udp_active += 1;
         self.udp_opened += 1;
@@ -1145,6 +1178,7 @@ impl Net {
             icmp_ident: ident,
             gen,
             lo: false,
+            weft: None,
         };
         self.icmp_active += 1;
         self.icmp_opened += 1;
@@ -1183,6 +1217,12 @@ impl Net {
                 // socket (the only free path -- I-10/I-11). remove() returns the
                 // Socket, dropped here, releasing its rx/tx buffers.
                 let proto = self.slots[i].proto;
+                // Capture the Weft ring (if any) before the slot is cleared, so
+                // we can detach netd's mapping (drop netd's #847 mapping ref) --
+                // the netd half of ShareBoundedByFlow (Weft-6). The registration
+                // pin transferred to the kernel at the guest's claim (dropped at
+                // the guest's dev9p_close); netd only owns its own mapping.
+                let weft = self.slots[i].weft;
                 if let Some(h) = self.slots[i].socket.take() {
                     // Remove from the slot's stack (lo or NIC); set_mut still reads
                     // the slot's `lo` flag (only `socket` was taken). net-8a.
@@ -1190,8 +1230,69 @@ impl Net {
                 }
                 self.slots[i] = Slot::empty();
                 self.dec_active(proto);
+                if let Some(w) = weft {
+                    // SYS_BURROW_DETACH netd's own ring mapping. ring_size is
+                    // page-aligned (== the attach mapped size), so it matches.
+                    unsafe {
+                        let _ = libthyla_rs::t_burrow_detach(w.ring_va, w.ring_size);
+                    }
+                }
             }
         }
+    }
+
+    /// Ensure connection N has a Weft zero-copy ring, returning its share_id
+    /// (Weft-6b). Idempotent: a flow has at most ONE ring -- a repeat Tweft
+    /// returns the stored share_id (the kernel's claim already consumed it on the
+    /// first SYS_WEFT_MAP; weft_map_claimed then falls back to the data fd's
+    /// cached binding, so re-returning a consumed id is the designed idempotent
+    /// path). On the FIRST call: SYS_BURROW_ATTACH the backing ANON ring, write
+    /// its geometry mirror, then SYS_WEFT_SHARE to take the kernel registration
+    /// pin + mint the share_id. Returns None on a dead slot or any allocation /
+    /// registration failure -- the flow then stays on the byte-copy path (a
+    /// missing ring is never fatal; that is the hybrid threshold's whole point).
+    fn weft_ensure(&mut self, n: u32) -> Option<u64> {
+        let i = n as usize;
+        if i >= MAX_SLOTS || !self.slots[i].used {
+            return None;
+        }
+        if let Some(w) = self.slots[i].weft {
+            return Some(w.share_id); // one ring per flow -- idempotent
+        }
+        // First zero-copy use of this flow: allocate netd's backing ANON ring
+        // (RW, demand-zero -- satisfies SYS_WEFT_SHARE's ANON + RW-only +
+        // whole-ring check). The size is page-aligned so a later detach matches.
+        let ring_va = unsafe { libthyla_rs::t_burrow_attach(WEFT_RING_SIZE) };
+        if ring_va < 0 {
+            return None; // OOM -> byte-copy
+        }
+        let ring_va = ring_va as u64;
+        // Write the geometry mirror + zero the readiness header so the guest can
+        // read the ring's geometry once it maps it.
+        if unsafe { weftlib::init_ring(ring_va as *mut u8, WEFT_RING_SIZE, WEFT_RING_ENTRIES) }
+            .is_none()
+        {
+            unsafe {
+                let _ = libthyla_rs::t_burrow_detach(ring_va, WEFT_RING_SIZE);
+            }
+            return None;
+        }
+        // Register with the kernel: it takes the I-30 registration pin (keeping
+        // the ring alive across the netd<->kernel correlation window even if we
+        // detach our own mapping) and mints the kernel-scoped share_id.
+        let share_id = unsafe { libthyla_rs::t_weft_share(ring_va, WEFT_RING_SIZE) };
+        if share_id <= 0 {
+            unsafe {
+                let _ = libthyla_rs::t_burrow_detach(ring_va, WEFT_RING_SIZE);
+            }
+            return None; // full registry / reject -> byte-copy
+        }
+        self.slots[i].weft = Some(WeftFlow {
+            ring_va,
+            ring_size: WEFT_RING_SIZE,
+            share_id: share_id as u64,
+        });
+        Some(share_id as u64)
     }
 
     /// Decrement the per-protocol live-connection counter (the `active` stat).
@@ -1696,6 +1797,7 @@ impl Net {
             icmp_ident: 0,
             gen: mgen,
             lo: nlo,
+            weft: None,
         };
         self.tcp_active += 1;
         self.tcp_opened += 1;
@@ -4455,6 +4557,7 @@ impl Conn {
             p9::P9_TGETATTR => self.h_getattr(net, tmsg, tag),
             p9::P9_TCLUNK => self.h_clunk(net, tmsg, tag),
             p9::P9_TFLUSH => self.h_flush(net, tmsg, tag),
+            p9::P9_TWEFT => self.h_weft(net, tmsg, tag), // Weft-6b: per-flow ring setup
             // Tauth/Tsetattr/... are unused on the /net tree (read-only metadata).
             _ => self.err(tag, p9::E_NOSYS),
         };
@@ -5051,6 +5154,48 @@ impl Conn {
         self.pending_ready.retain(|pr| pr.tag != a.oldtag); // net-6b: drop a readiness probe
         self.pending_connects.retain(|pc| pc.tag != a.oldtag); // #257: drop a deferred connect
         p9::build_rflush(&mut self.out_buf, tag)
+    }
+
+    /// Tweft -- the kernel dev9p client requests a per-flow zero-copy ring for the
+    /// flow on `fid` (Weft-6b; the first time the flow goes zero-copy). Resolve
+    /// `fid -> connection N`, ensure N has a ring (lazily allocate + register on
+    /// first use), and answer Rweft with the kernel-scoped share_id + geometry.
+    /// The share_id rides the kernel's OWN Tweft round-trip back to the kernel
+    /// (it never reaches the guest -- the RDMA-rkey shape), so a guest cannot
+    /// forge one. A weft is meaningful ONLY on an opened /net/<proto>/N/data fid
+    /// of a live connection; any other fid (ctl/listen/dir, a dead slot) is
+    /// fail-closed (the guest's SYS_WEFT_MAP then returns -1 and the flow stays on
+    /// the byte-copy path -- a denied ring is never fatal).
+    fn h_weft(&mut self, net: &mut Net, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
+        let fid = match p9::parse_tweft(tmsg) {
+            Ok(f) => f,
+            Err(_) => return self.err(tag, p9::E_PROTO),
+        };
+        let i = match self.fid_find(fid) {
+            Some(i) => i,
+            None => return self.err(tag, p9::E_BADF),
+        };
+        let f = match self.fids[i] {
+            Some(f) => f,
+            None => return self.err(tag, p9::E_BADF),
+        };
+        if !f.opened || !is_conn(f.path) || conn_filekind(f.path) != FK_DATA {
+            return self.err(tag, p9::E_INVAL);
+        }
+        let n = conn_n(f.path);
+        if !net.slot_live(n) {
+            return self.err(tag, p9::E_INVAL);
+        }
+        match net.weft_ensure(n) {
+            Some(share_id) => p9::build_rweft(
+                &mut self.out_buf,
+                tag,
+                share_id,
+                WEFT_RING_SIZE as u32,
+                WEFT_RING_ENTRIES,
+            ),
+            None => self.err(tag, p9::E_NOMEM),
+        }
     }
 
     fn h_write(&mut self, net: &mut Net, tmsg: &[u8], tag: u16) -> Result<usize, ()> {

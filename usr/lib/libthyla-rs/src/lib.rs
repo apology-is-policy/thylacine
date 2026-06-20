@@ -89,6 +89,7 @@ pub mod territory;
 pub mod thread;
 pub mod time;
 pub mod torpor;
+pub mod weft;
 
 // =============================================================================
 // Syscall numbers — MUST mirror kernel/include/thylacine/syscall.h.

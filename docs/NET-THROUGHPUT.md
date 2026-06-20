@@ -625,7 +625,22 @@ dataplane arc the user committed.
     plumbing the model abstracts — the impl-against-existing-spec posture). The full live
     `SYS_WEFT_MAP` E2E (a real `Tweft` to netd's handler) is owed to Weft-6b/6c; the
     consumed-exactly-once / no-cross-flow-mis-binding / netd-pin-GC prosecution is Weft-7. See
-    `docs/reference/125-weft.md` "The EL0 delivery".
+    `docs/reference/125-weft.md` "The EL0 delivery". **Weft-6b-1 LANDED** — the netd half (pure
+    userspace; the kernel is byte-unchanged): `usr/netd/src/server.rs::h_weft` (dispatched on
+    `P9_TWEFT`) resolves `F → connection N` (fail-closed unless an opened `/net/<proto>/N/data`
+    fid of a live slot), `weft_ensure(N)` lazily `SYS_BURROW_ATTACH`es + `init_ring`s + `SYS_-
+    WEFT_SHARE`es a per-flow 256 KiB/64-entry ring (one ring + one `share_id` per flow, stored
+    in `Slot.weft`, idempotent on a repeat `Tweft`), and answers `Rweft(share_id, geom)`;
+    `slot_unref` detaches netd's ring mapping at the last clunk (the netd half of
+    `ShareBoundedByFlow`). The shared ABI substrate the native client (6c) reuses lands here too:
+    `libthyla_rs::weft` (the `repr(C)` ring-ABI mirror + `init_ring`, the `loom.rs` precedent) +
+    `libthyla_rs::ninep` `Tweft`/`Rweft` codec. This makes grant-is-the-share LIVE end to end —
+    proven in-guest by `net-echo`'s `weft_e2e` (a real `SYS_WEFT_MAP` round-trip over the
+    resident loopback: a ring VA + the visible geometry mirror + an idempotent second map,
+    `net-echo: weft-6b MAP E2E PASS`), with the soak leak-baseline confirming no teardown leak.
+    The live DATA DRIVE (the descriptor ring on large Twrite/Tread, the readiness park/wake, the
+    F_NOTIF posting) is **Weft-6b-2/6b-3**; `weft.tla` stays unchanged (6b-1 realizes the netd
+    side of `Init`/`Teardown`, no new mechanism).
 - **Weft-7 (the focused audit + SMP gate + benchmark).** Prosecute the buffer-lifetime UAF
   (the §4.6 hazard, the F1-class), the no-per-op-mediation property, the cross-Proc Burrow
   lifetime, **and the new Weft-6 `Tweft` / `share_id` correlation** (the consumed-exactly-once
