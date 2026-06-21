@@ -130,6 +130,31 @@ bool sched_idle_in_wfi(unsigned cpu_idx);
 // production path calls this -- it lands with its consumer at TI-2.
 u64 timerwait_earliest_deadline(void);
 
+// Tickless idle backstop (NO_HZ_IDLE; docs/TICKLESS-IDLE.md TI-2, #299). An idle
+// CPU with no pending deadline arms its one-shot to now + this, so it wakes
+// ~10x/s (vs the never-stopped 1 kHz) -- negligible idle cost, yet enough to
+// self-heal a hypothetically-dropped IPI_RESCHED within a bounded hiccup rather
+// than a hang. 100 ms.
+#define TICKLESS_IDLE_BACKSTOP_NS  100000000ull
+
+// Tickless idle (NO_HZ_IDLE; docs/TICKLESS-IDLE.md TI-2). Pure: the absolute
+// CNTVCT value an idle CPU arms its one-shot to, given the current counter, the
+// nearest pending deadline (0 = none), and the backstop delta in counter ticks.
+// min(deadline, now + backstop), or just the backstop when no deadline. Split
+// out so the arm-decision is unit-testable without the live timer/list.
+u64 tickless_target_cnt(u64 now_cnt, u64 earliest_deadline, u64 backstop_cnt);
+
+// Tickless idle (NO_HZ_IDLE; docs/TICKLESS-IDLE.md TI-2, #299). The shared idle
+// body for bootcpu_idle_main + per_cpu_main: under one IRQ-masked region, set
+// idle_in_wfi, sched() (yield to any runnable), arm a one-shot to the nearest
+// deadline-or-backstop, WFI, then on wake restore the periodic tick + run the
+// deadline scan. `tickless` gates the one-shot arm + restore: the boot CPU
+// passes true; a secondary passes false until its timer PPI is enabled (then it
+// just WFIs on IPI -- the byte-identical pre-preempt behavior). The I-9 arm-race
+// holds because idle_in_wfi is set BEFORE the arm + WFI (register-then-observe;
+// specs/sched_tickless.tla). See ARCH 8.6.
+void sched_idle_park(bool tickless);
+
 // P3-G: notify-idle-peer toggle. Off (default) during in-kernel tests so
 // they keep their UP-like assumptions; on (set by boot_main between
 // test_run_all() and joey_run()) for production. When off, ready() /

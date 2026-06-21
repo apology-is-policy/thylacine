@@ -119,14 +119,42 @@ a peer that `ready()`s work finds an `idle_in_wfi==true` CPU and sends it
 tick** -- it already works today and is what wakes an idle CPU for new work. The
 one-shot is only for *timed* wakes (deadlines); work-arrival rides the IPI.
 
-### 3.3 Resume periodic on wake-to-running
+### 3.3 Resume periodic on wake-to-running (the as-built restore, TI-2)
 
-When an idle CPU wakes (one-shot fires, or `IPI_RESCHED`, or any device IRQ) and
-`pick_next` selects a *real* thread, the normal periodic tick resumes (the next
-`sched_tick` re-arms `g_reload` for slice accounting). If `pick_next` selects the
-idle thread again (the wake found nothing runnable -- e.g. a redundant one-shot,
-or a deadline already serviced by another CPU), the idle loop simply re-arms the
-one-shot and WFIs again.
+When an idle CPU wakes (one-shot fires, `IPI_RESCHED`, or any device IRQ), the
+idle loop -- still inside its IRQ-masked region, before any placed work is
+dispatched -- does two things:
+
+```
+timer_arm_this_cpu()    // restore the 1 kHz periodic tick
+timerwait_tick()        // service any passed deadline explicitly
+```
+
+Both are load-bearing, and the TI-2 impl surfaced *why* the naive "just let the
+one-shot's handler re-arm periodic" sketch is insufficient:
+
+- **`timer_arm_this_cpu()` covers the IPI-wake I-17 window.** A CPU woken from
+  tickless idle by an `IPI_RESCHED` (work placed) has its one-shot *still armed*
+  to the far target -- no timer fired. Without an explicit re-arm, the placed
+  thread would run up to the backstop (100 ms) with no slice tick, starving a
+  co-runnable peer (an I-17 violation). Re-arming periodic here means the placed
+  work runs with 1 kHz ticking immediately.
+- **`timerwait_tick()` covers the deassert-vs-deadline hazard.** Re-arming
+  periodic writes `CNTV_TVAL = g_reload > 0`, which *deasserts* the one-shot's
+  pending timer IRQ (the generic timer is level-sensitive: `ISTATUS` drops when
+  `TVAL > 0`). So the timer IRQ handler will NOT run for that fire -- and the
+  handler is where `timerwait_tick` normally wakes the deadlined sleeper. Left
+  there, the sleeper would never wake (a busy-spin: the idle loop re-reads the
+  still-past deadline, arms a MIN one-shot, fires, deasserts, repeats). Running
+  `timerwait_tick` explicitly here wakes the sleeper now; on an IPI-wake (no
+  deadline passed) it is a cheap no-op scan.
+
+The next `sched()` then dispatches the woken sleeper / placed work with periodic
+ticking, or re-enters the idle park (re-arming the one-shot) if the wake found
+nothing runnable (a redundant one-shot, or a deadline already serviced by
+another CPU). The whole restore runs under the same `spin_lock_irqsave(NULL)`
+region as the arm + WFI, so it completes before the pending IRQ is taken at the
+unmask -- a placed thread never runs un-ticked.
 
 ### 3.4 Per-CPU, global deadline list
 
@@ -158,13 +186,23 @@ spin_lock_irqsave(NULL)
 sched_set_idle_in_wfi(true)        // register: peers will now IPI us on work
 sched()                            // observe: nothing runnable -> idle selected
 // --- tickless arm (new) ---
-under g_timerwait.lock: D = timerwait_earliest_deadline()
-arm one-shot at min(D, now + BACKSTOP)   // or BACKSTOP if D==0
+D = timerwait_earliest_deadline()              // under g_timerwait.lock
+arm one-shot at tickless_target_cnt(now, D, BACKSTOP)   // min(D, now+BACKSTOP)
 // --------------------------
 wfi
 sched_set_idle_in_wfi(false)
+// --- wake-to-running restore (new; section 3.3) ---
+timer_arm_this_cpu()               // periodic, before any placed work runs (I-17)
+timerwait_tick()                   // service the deadline (the deassert covers it)
+// --------------------------------------------------
 spin_unlock_irqrestore(NULL, s)
 ```
+
+As-built, this whole body is the shared `sched_idle_park(bool tickless)` in
+`kernel/sched.c`, called by `bootcpu_idle_main` (always `tickless=true`) and
+`per_cpu_main` (`tickless=timer_armed` -- false until a secondary's timer PPI is
+enabled, then the byte-identical pre-preempt WFI-on-IPI behavior). The pure
+arm-decision `tickless_target_cnt(now, deadline, backstop)` is unit-tested.
 
 Register-then-observe (the existing R7 F128 ordering) is preserved: `idle_in_wfi`
 is set BEFORE the arm + WFI, so a peer that `ready()`s work after the arm sends an

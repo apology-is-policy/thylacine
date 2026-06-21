@@ -493,11 +493,12 @@ void per_cpu_main(int cpu_idx) {
             timer_arm_this_cpu();
             timer_armed = true;
         }
-        irq_state_t s = spin_lock_irqsave(NULL);
-        sched_set_idle_in_wfi(true);
-        sched();
-        __asm__ __volatile__("wfi" ::: "memory");
-        sched_set_idle_in_wfi(false);
-        spin_unlock_irqrestore(NULL, s);
+        // Tickless idle (NO_HZ_IDLE; TI-2): once this secondary's timer PPI is
+        // enabled (timer_armed), sched_idle_park arms a one-shot to the nearest
+        // deadline-or-backstop instead of holding the 1 kHz periodic tick. Until
+        // then it passes false -> the byte-identical pre-preempt behavior (just
+        // WFI on IPI, quiescent during the deterministic test phase). The shared
+        // body lives in sched.c::sched_idle_park.
+        sched_idle_park(timer_armed);
     }
 }

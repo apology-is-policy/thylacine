@@ -437,14 +437,13 @@ void sched_install_bootcpu_idle(struct Thread *t) {
 // Dispatched by ordinary pick_next from cpu0's run_tree[IDLE] (NO deadlock path).
 __attribute__((noreturn))
 void bootcpu_idle_main(void) {
-    for (;;) {
-        irq_state_t s = spin_lock_irqsave(NULL);
-        sched_set_idle_in_wfi(true);
-        sched();
-        __asm__ __volatile__("wfi" ::: "memory");
-        sched_set_idle_in_wfi(false);
-        spin_unlock_irqrestore(NULL, s);
-    }
+    // Tickless idle (NO_HZ_IDLE; TI-2): the boot CPU's timer + PPI are armed
+    // before this loop runs (timer_init + gic_enable_irq in boot_main), so it
+    // is always tickless-eligible -- sched_idle_park(true) arms a one-shot to
+    // the nearest deadline-or-backstop instead of holding the 1 kHz periodic
+    // tick. The mask -> idle_in_wfi -> sched -> arm -> wfi -> restore body lives
+    // in sched_idle_park (shared with per_cpu_main).
+    for (;;) sched_idle_park(true);
 }
 
 // True iff `t` is currently in `cs`'s run tree (linked or as head).
@@ -1781,6 +1780,58 @@ static void timerwait_tick(void) {
 
         spin_unlock(&g_timerwait.lock);
     }
+}
+
+// ===========================================================================
+// Tickless idle (NO_HZ_IDLE; docs/TICKLESS-IDLE.md TI-2, #299). Defined here,
+// after timerwait_tick, so sched_idle_park can call the static timerwait_tick +
+// timerwait_earliest_deadline directly. bootcpu_idle_main (above) +
+// per_cpu_main (smp.c) reach it via the sched.h declaration.
+// ===========================================================================
+
+u64 tickless_target_cnt(u64 now_cnt, u64 earliest_deadline, u64 backstop_cnt) {
+    u64 backstop = now_cnt + backstop_cnt;
+    return (earliest_deadline != 0 && earliest_deadline < backstop)
+         ? earliest_deadline : backstop;
+}
+
+void sched_idle_park(bool tickless) {
+    irq_state_t s = spin_lock_irqsave(NULL);
+    sched_set_idle_in_wfi(true);
+    sched();
+    if (tickless) {
+        // Arm a one-shot to the nearest deadline (or the backstop) instead of
+        // leaving the 1 kHz periodic tick armed -- a genuinely-idle CPU then
+        // takes no timer IRQs until a real wake (the #299 fix). idle_in_wfi is
+        // already TRUE (set above, BEFORE this arm + the WFI) -> register-then-
+        // observe: a peer placing work sends IPI_RESCHED which the WFI sees
+        // pending, so the work-arrival wake is never lost across the arm
+        // (I-9; specs/sched_tickless.tla Register-before-Park).
+        u64 now    = timer_get_counter();
+        u64 target = tickless_target_cnt(now, timerwait_earliest_deadline(),
+                                         timer_ns_to_counter(TICKLESS_IDLE_BACKSTOP_NS));
+        timer_arm_oneshot_cnt(target);
+    }
+    __asm__ __volatile__("wfi" ::: "memory");
+    sched_set_idle_in_wfi(false);
+    if (tickless) {
+        // Wake-to-running restore, under the same IRQ-masked region so it runs
+        // BEFORE any placed work is dispatched. Two jobs:
+        //   1. timer_arm_this_cpu() re-arms the periodic tick, so a CPU woken
+        //      from tickless idle by an IPI_RESCHED runs the placed thread with
+        //      1 kHz slice ticking immediately -- not up to the backstop with no
+        //      tick (the I-17 window the one-shot would otherwise leave open).
+        //   2. The re-arm DEASSERTS the one-shot's pending timer IRQ (CNTV_TVAL
+        //      back > 0), so timerwait_tick must run here explicitly: had the
+        //      one-shot fired on a passed deadline, deasserting it would stop the
+        //      handler ever running timerwait_tick for it -> the sleeper would
+        //      never wake (a busy-spin: re-arm a MIN one-shot on the still-past
+        //      deadline, fire, deassert, repeat). Running it here wakes the
+        //      sleeper now; an IPI-wake makes it a cheap no-op scan.
+        timer_arm_this_cpu();
+        timerwait_tick();
+    }
+    spin_unlock_irqrestore(NULL, s);
 }
 
 void sched_tick(void) {

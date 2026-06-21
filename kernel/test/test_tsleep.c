@@ -413,3 +413,38 @@ void test_timerwait_earliest_deadline(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u,
         "run tree empty after both consumers freed");
 }
+
+// ---------------------------------------------------------------------------
+// tickless.target_cnt -- the TI-2 idle one-shot arm decision (pure).
+// ---------------------------------------------------------------------------
+//
+// min(nearest deadline, now + backstop), or just the backstop when no deadline.
+// Pure, so every branch is driven deterministically without the live timer/list.
+
+void test_tickless_target_cnt(void) {
+    u64 now      = 1000000;
+    u64 backstop = 6250000;   // an arbitrary backstop delta in counter ticks
+
+    // No deadline (0 sentinel) -> arm to the backstop.
+    TEST_EXPECT_EQ(tickless_target_cnt(now, 0, backstop), now + backstop,
+        "no deadline -> arm to now + backstop");
+
+    // A deadline nearer than the backstop -> arm to the deadline.
+    TEST_EXPECT_EQ(tickless_target_cnt(now, now + 1000, backstop), now + 1000,
+        "near deadline -> arm to the deadline");
+
+    // A deadline farther than the backstop -> arm to the backstop.
+    TEST_EXPECT_EQ(tickless_target_cnt(now, now + backstop + 1, backstop),
+        now + backstop,
+        "far deadline -> arm to the backstop");
+
+    // A deadline exactly at the backstop boundary -> the backstop (strict <).
+    TEST_EXPECT_EQ(tickless_target_cnt(now, now + backstop, backstop),
+        now + backstop,
+        "deadline == backstop -> the backstop (strict <)");
+
+    // A past deadline (< now) -> selected as-is; the timer_arm_oneshot_cnt clamp
+    // turns it into a fire-ASAP, so an overdue sleeper is serviced immediately.
+    TEST_EXPECT_EQ(tickless_target_cnt(now, now - 500, backstop), now - 500,
+        "past deadline -> selected as-is (the one-shot clamp fires it ASAP)");
+}

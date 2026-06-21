@@ -1382,15 +1382,23 @@ precondition change, which would ripple through `scheduler.tla`'s 11 cfgs — th
 
 ### Model ↔ impl
 
-- `registered[cpu]` ↔ the impl's `idle_in_wfi` flag (`kernel/sched.c`
-  `sched_set_idle_in_wfi(true)` in `bootcpu_idle_main` + the `per_cpu_main` idle
-  loop). The "register" half of register-then-observe.
+As-built (TI-2): the whole register/arm/park/restore body is the shared
+`kernel/sched.c::sched_idle_park(bool tickless)`, called by `bootcpu_idle_main`
+(always) + `per_cpu_main` (`tickless=timer_armed`).
+
+- `registered[cpu]` ↔ the impl's `idle_in_wfi` flag
+  (`sched_idle_park`'s `sched_set_idle_in_wfi(true)`). The "register" half of
+  register-then-observe.
 - `parked[cpu]` ↔ the CPU halted in WFI with the one-shot armed.
 - `pending[cpu]` ↔ a runnable thread placed in this CPU's runq.
-- `Register(cpu)` ↔ `sched_set_idle_in_wfi(true)` set BEFORE the arm + WFI.
-- `Park(cpu)` ↔ `timer_arm_oneshot_cnt(min(nearest deadline, now + backstop))` +
-  `wfi` (TI-1 `timer_arm_oneshot_cnt` / `timerwait_earliest_deadline`; TI-2 the
-  idle-loop arm). CORRECT: requires `registered` (the ordering guard).
+- `Register(cpu)` ↔ `sched_set_idle_in_wfi(true)` set BEFORE the arm + WFI (the
+  first statements of `sched_idle_park`).
+- `Park(cpu)` ↔ `timer_arm_oneshot_cnt(tickless_target_cnt(now,
+  timerwait_earliest_deadline(), backstop))` + `wfi` (TI-1 primitives; the TI-2
+  `sched_idle_park` arm). CORRECT: the arm runs only after `Register` set
+  `idle_in_wfi`. The wake-to-running restore (`timer_arm_this_cpu()` +
+  `timerwait_tick()`) is below the model's abstraction — it preserves I-17 +
+  services the deadline, not part of the no-lost-wake property modeled here.
 - `PlaceWork(cpu)` ↔ a peer's `ready()` / `wakeup()` placing a thread + the
   `sched_notify_idle_peer()` `IPI_RESCHED` decision keyed on `idle_in_wfi`
   (`kernel/sched.c:569`): registered ⇒ IPI ⇒ park lifted.
