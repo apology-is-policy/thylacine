@@ -3861,8 +3861,9 @@ Per `NOVEL.md` Angle #8. Practical TLA+ verification of every load-bearing OS in
 ### 25.2 The spec inventory
 
 The Phase-0 plan gate-tied nine specs. As-built (RW-10 reconcile 2026-06-11;
-table re-reconciled +`allowance`/`net_poll`/`weft` 2026-06-20) the committed
-inventory is **22 modules**; three of the planned nine
+table re-reconciled +`allowance`/`net_poll`/`weft` 2026-06-20;
++`net_poll_teardown` @#294 2026-06-21) the committed
+inventory is **24 modules**; three of the planned nine
 (`futex.tla`, `notes.tla`, `pty.tla`) were dropped per the 2026-05-23
 spec-to-code suspension — their surfaces are prose-validated (torpor / notes)
 or not yet built (the PTY *master/slave* pair, Phase 8) — and sixteen modules were
@@ -3901,10 +3902,11 @@ before the MA-1 impl (the post-net Imperium/Authority arc).
 | `specs/cons_poll.tla` | P7-LS-8 | I-9 across the IRQ->console_mgr->poll-hook *deferred* wake (LS-8a; the Linux-tty `flush_to_ldisc` relay) |
 | `specs/allowance.tla` | Menagerie build-arc 2 | Hardware allowance / driver-authority bound (I-34): handles within the live allowance incl. the revoke-vs-create race; never widened; fully revoked on teardown |
 | `specs/net_poll.tla` | net-6b | I-9 across the elicited (PROBE-then-observe) `dev9p.poll` readiness relay |
+| `specs/net_poll_teardown.tla` | #294 | The `dev9p.poll` readiness-op cancel-at-close teardown lifetime (BELOW `net_poll.tla`'s abstraction): no UAF of the refcounted poll-state + the `ready`-fd Tclunk delivered exactly once at fd-close (the slot-leak fix; Fix=TRUE) vs the deferred-pin leak (Fix=FALSE counterexample) |
 | `specs/weft.tla` | Weft-1 (spec; impl Weft-2 / 3 / 5 landed, Weft-6..7 OWED; Weft-4 = `weft_readiness.tla`) | Capability network dataplane (I-37): no per-op mediation + the F_NOTIF multi-holder buffer lifetime (Weft-5 `weft_notif`) + the descriptor-ring TOCTOU (Weft-3) + the shared-Burrow lifetime bounded by the flow |
 | `specs/weft_readiness.tla` | Weft-4 | I-9 across the readiness ring: the single-cache-line poke's store-buffer register-then-observe (netd's edge vs the guest's park) loses no wake — the PUSH counterpart of `net_poll.tla`'s elicited PULL |
 
-Each module carries its clean cfg(s) plus buggy-cfg counterexamples (85
+Each module carries its clean cfg(s) plus buggy-cfg counterexamples (86
 buggy cfgs total across the inventory).
 
 ### 25.3 Spec → code mapping

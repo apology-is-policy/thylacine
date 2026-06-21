@@ -689,3 +689,170 @@ void test_dev9p_poll_regular_file_always_ready(void) {
     TEST_ASSERT(p->poll == NULL, "priv_release on NULL poll is a no-op");
     teardown(root);
 }
+
+// =============================================================================
+// #294 cancel-at-close: a readiness op outstanding at dev9p_close.
+// =============================================================================
+
+static u32  g_cancel_treads;        // readiness Treads the responder saw
+static u32  g_cancel_tflushes;      // cancel-at-close Tflushes the responder saw
+static u32  g_cancel_tclunks;       // Tclunks the responder saw
+static u32  g_cancel_ready_fid;     // the fid the readiness Tread + close Tclunk name
+static bool g_cancel_ready_clunked; // the readiness fid's Tclunk was delivered
+
+// A responder for the cancel-at-close test: the walked file is QTPOLL (so
+// dev9p_poll probes it) and its readiness Tread DEFERS (stages no reply, so the op
+// stays outstanding). The Tflush (the cancel) stages NOTHING -- p9_client_abandon_
+// async does not await an Rflush, and a staged-undrained reply would block the
+// synchronous Tclunk that follows (loopback_send refuses a second send while a
+// reply is undrained). The Tclunk -- the leak fix's deliverable -- replies Rclunk
+// and is recorded.
+static int dev9p_cancel_responder(void *ctx, const u8 *req, size_t req_len,
+                                  u8 *resp, size_t resp_cap) {
+    (void)ctx;
+    if (req_len < P9_HDR_LEN) return -1;
+    u32 size; u8 type; u16 tag;
+    if (p9_peek_header(req, req_len, &size, &type, &tag) < 0) return -1;
+
+    if (type == P9_TVERSION) {
+        size_t total = P9_HDR_LEN + 4 + 2 + 8;
+        if (resp_cap < total) return -1;
+        resp[0] = (u8)(total & 0xff); resp[1] = (u8)((total >> 8) & 0xff);
+        resp[2] = 0; resp[3] = 0;
+        resp[4] = P9_RVERSION;
+        resp[5] = 0xff; resp[6] = 0xff;
+        resp[7] = 0; resp[8] = 0x20; resp[9] = 0; resp[10] = 0;     // msize=8192
+        resp[11] = 8; resp[12] = 0;
+        const char *v = "9P2000.L";
+        for (int i = 0; i < 8; i++) resp[13 + i] = (u8)v[i];
+        return (int)total;
+    }
+    if (type == P9_TATTACH) {
+        size_t total = P9_HDR_LEN + P9_QID_LEN;
+        if (resp_cap < total) return -1;
+        resp[0] = (u8)(total & 0xff); resp[1] = 0; resp[2] = 0; resp[3] = 0;
+        resp[4] = P9_RATTACH;
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        resp[7] = P9_QTDIR;
+        for (int i = 0; i < 4; i++) resp[8 + i] = 0;
+        resp[12] = 1; for (int i = 1; i < 8; i++) resp[12 + i] = 0;
+        return (int)total;
+    }
+    if (type == P9_TWALK) {
+        if (req_len < P9_HDR_LEN + 4 + 4 + 2) return -1;
+        u16 nwname = (u16)req[15] | ((u16)req[16] << 8);
+        size_t body_len = 2 + (size_t)nwname * P9_QID_LEN;
+        size_t total = P9_HDR_LEN + body_len;
+        if (resp_cap < total) return -1;
+        resp[0] = (u8)(total & 0xff); resp[1] = (u8)((total >> 8) & 0xff);
+        resp[2] = 0; resp[3] = 0;
+        resp[4] = P9_RWALK;
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        resp[7] = (u8)(nwname & 0xff); resp[8] = (u8)((nwname >> 8) & 0xff);
+        for (u16 i = 0; i < nwname; i++) {
+            size_t off = P9_HDR_LEN + 2 + (size_t)i * P9_QID_LEN;
+            resp[off] = (u8)(P9_QTFILE | P9_QTPOLL);   // QTPOLL => the readiness file
+            for (int j = 0; j < 4; j++) resp[off + 1 + j] = 0;
+            resp[off + 5] = (u8)(0x10 + i);
+            for (int j = 1; j < 8; j++) resp[off + 5 + j] = 0;
+        }
+        return (int)total;
+    }
+    if (type == P9_TREAD) {
+        // The readiness probe (Tread offset=mask). DEFER: stage NO reply so the op
+        // stays outstanding. Record the fid for the Tclunk assertion.
+        g_cancel_treads++;
+        if (req_len >= P9_HDR_LEN + 4) g_cancel_ready_fid = le32_at(req + 7);
+        return 0;
+    }
+    if (type == P9_TFLUSH) {
+        // The cancel-at-close Tflush. Stage NOTHING (see the responder comment).
+        g_cancel_tflushes++;
+        return 0;
+    }
+    if (type == P9_TCLUNK) {
+        // The `ready`-fd Tclunk -- the leak fix's deliverable.
+        g_cancel_tclunks++;
+        if (req_len >= P9_HDR_LEN + 4 && le32_at(req + 7) == g_cancel_ready_fid)
+            g_cancel_ready_clunked = true;
+        if (resp_cap < P9_HDR_LEN) return -1;
+        resp[0] = 7; resp[1] = 0; resp[2] = 0; resp[3] = 0;
+        resp[4] = P9_RCLUNK;
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        return (int)P9_HDR_LEN;
+    }
+    return -1;
+}
+
+// #294 cancel-at-close regression. A readiness op outstanding at dev9p_close must
+// be CANCELLED (Tflush) and the `ready`-fd Tclunk delivered -- not extinct (the
+// pre-#294 dev9p_poll_priv_release extincted on a live op) and not leak (the bug:
+// the kthread-GC-deferred Tclunk could never reach netd, leaving the slot pinned).
+// Deterministic: in the in-kernel suite SMP + preemption are off and the test
+// thread does not yield between submit and close, so the close -- not the poll-pump
+// kthread -- grabs + cancels the op. attached_owner==NULL here (the test path); the
+// session-ref leg is exercised by the live netd boot probes.
+void test_dev9p_poll_cancel_at_close(void) {
+    g_cancel_treads = 0; g_cancel_tflushes = 0; g_cancel_tclunks = 0;
+    g_cancel_ready_fid = 0; g_cancel_ready_clunked = false;
+
+    TEST_ASSERT(p9_loopback_init(&g_loopback, g_loopback_resp, sizeof(g_loopback_resp),
+                                 dev9p_cancel_responder, NULL) == 0, "loopback init");
+    TEST_ASSERT(p9_client_init(&g_client, /*root_fid=*/0, 8192,
+                               p9_loopback_ops_for(&g_loopback),
+                               g_recv_buf, sizeof(g_recv_buf)) == 0, "client init");
+    const u8 uname[] = {'r','o','o','t'};
+    const u8 aname[] = {'/'};
+    TEST_ASSERT(p9_client_handshake(&g_client, uname, sizeof(uname),
+                                    aname, sizeof(aname), 0) == 0, "handshake");
+    struct Spoor *root = dev9p_attach_client(&g_client, /*root_fid=*/0);
+    TEST_ASSERT(root != NULL, "root");
+
+    // Walk to a QTPOLL file (a netd `ready` analog) -- a fid_owned walked Spoor,
+    // so its close issues a Tclunk (the leak fix's deliverable).
+    struct Spoor *nc = spoor_clone(root);
+    TEST_ASSERT(nc != NULL, "clone target");
+    const char *name = "ready";
+    struct Walkqid *w = dev9p.walk(root, nc, &name, 1);
+    TEST_ASSERT(w != NULL && w->spoor == nc, "walk to the readiness file");
+    walkqid_free(w);
+    TEST_ASSERT((nc->qid.type & QTPOLL) != 0, "the walked qid carries QTPOLL");
+
+    u32 base = dev9p_poll_op_count_for_test();
+
+    // Poll: the responder defers the readiness Tread, so dev9p_poll submits an op +
+    // returns not-ready, leaving it OUTSTANDING (the timed-out-poll state). NOTE: a
+    // live op-COUNT snapshot here would race the poll-pump kthread, which runs on a
+    // secondary CPU during the suite (SMP is up) and can stranded-GC a pw==NULL op
+    // before this thread reads the count -- so we assert the NON-racy submission
+    // witness (the Tread reached the responder, recorded synchronously during the
+    // submit) instead. The post-close assertions below hold whether the close OR the
+    // kthread tore the op down (both deliver the Tflush + leave the Tclunk to close).
+    short rv = dev9p_poll(nc, (short)POLLIN, NULL);
+    TEST_EXPECT_EQ((u64)(rv & POLLIN), (u64)0, "deferred readiness -> not ready");
+    TEST_EXPECT_EQ((u64)g_cancel_treads, (u64)1, "one readiness Tread submitted");
+
+    struct dev9p_priv *ncp = dev9p_priv_of(nc);
+    TEST_ASSERT(ncp != NULL && ncp->fid_owned, "the walked Spoor owns its fid");
+    u32 want_fid = ncp->fid;
+
+    // Close the readiness Spoor WITH the op still live. Pre-#294 this extincted in
+    // dev9p_poll_priv_release; now it cancels the op (Tflush) + delivers the Tclunk.
+    spoor_clunk(nc);
+
+    TEST_EXPECT_EQ((u64)dev9p_poll_op_count_for_test(), (u64)base,
+                   "the live op was torn down at close (registry back to baseline)");
+    TEST_ASSERT(g_cancel_tflushes >= 1, "the outstanding op was cancelled (Tflush)");
+    // The `ready`-fd Tclunk reached the server -> netd's slot_unref fires (the leak
+    // fix). Note the Tflush leaves the readiness tag awaiting_flush; the clunk
+    // succeeds because any_outstanding_on_fid no longer counts a flushed op (the
+    // 9p_session SendClunk-precondition fix this test surfaced).
+    TEST_ASSERT(g_cancel_ready_clunked,
+                "the `ready`-fd Tclunk was delivered at close (#294 leak fix)");
+    TEST_EXPECT_EQ((u64)p9_session_fid_bound(&g_client.session, want_fid), (u64)0,
+                   "the readiness fid is unbound after close (clunk completed)");
+
+    spoor_clunk(root);   // root_fid is not clunked by dev9p (fid_owned false); frees the Spoor
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}

@@ -429,10 +429,13 @@ static void dev9p_close(struct Spoor *c) {
     struct dev9p_priv *p = priv_of(c);
     if (!p) return;
 
-    // net-6b-2b: free the readiness poll-state (if this was a netd `ready` file).
-    // Safe here: dev9p_close runs only at the Spoor's LAST ref, and an outstanding
-    // readiness op pins the Spoor (a ref) while a registered poller holds the
-    // handle's obj ref -- so at close there is neither a live op nor a poller.
+    // net-6b-2b + #294: release the readiness poll-state (if this was a netd
+    // `ready` file). A registered poller holds the Spoor obj-ref, so poll_list is
+    // empty here, but an outstanding readiness op may be live (it pins the
+    // refcounted poll-state + the session, NOT the Spoor). priv_release cancels
+    // that op at the client (Tflush) BEFORE the fid_owned Tclunk below delivers the
+    // `ready`-fd clunk -- so the clunk frees the netd slot deterministically at
+    // fd-close (the cancel-at-close leak fix) without orphaning the held Tread.
     dev9p_poll_priv_release(p);
 
     // Weft-6a-2: release the per-flow ring binding (if this data fd went

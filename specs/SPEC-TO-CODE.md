@@ -1206,6 +1206,62 @@ PRE-terminal, so it is still caught). See NET-DESIGN.md §12.2 + ARCH §28 I-9.
 
 ---
 
+## net_poll_teardown.tla — #294 (the dev9p.poll readiness-op cancel-at-close; spec-first re-enabled, model-first)
+
+Status: **spec landed model-first @bb72098; the cancel-at-close impl landed at
+#294-B (`kernel/dev9p_poll.c`).** `net_poll.tla` proves the I-9 readiness
+invariants (no missed edge) for a LIVE poller; it ABSTRACTS AWAY the layer this
+module models: the readiness op's MEMORY/pin lifetime and the delivery of the
+`ready`-fd Tclunk to netd (which frees the connection slot). The #294 leak lived
+entirely in that abstracted-away layer -- a permanent per-connection netd
+slot leak on the poll-timeout path: the readiness op pinned the `ready` Spoor, so
+`dev9p_close` (which sends the slot-freeing Tclunk) could only run after the
+kthread GC'd the stranded op + dropped the pin, and a real SMP race left ops
+un-GC'd. The Heisenbug (heavy instrumentation hides the leak) made the model the
+reliable verifier.
+
+CONSTANT `Fix` selects the design: **Fix=FALSE** (the bug) = the op pins the
+Spoor, so the Tclunk delivery hinges on `KthreadGc` firing (a liveness assumption
+the buggy cfg withholds WF on -> the leak counterexample). **Fix=TRUE** (the
+landed design) = the op pins a refcounted poll-state + the session, NOT the
+Spoor, so the user's fd-close is the Spoor's LAST ref -> `dev9p_close` runs AT
+fd-close, cancels the still-outstanding op (Tflush, under c->lock), and delivers
+the Tclunk DETERMINISTICALLY (a SAFETY consequence of the close, not a liveness
+assumption on the kthread).
+
+| Config | Flags | Checked | Result |
+|---|---|---|---|
+| `net_poll_teardown.cfg`            | `Fix=TRUE`  | `SafetyInvariants` (TypeOk + NoUseAfterFreePs + ClunkAtMostOnce) | clean |
+| `net_poll_teardown_liveness.cfg`   | `Fix=TRUE`  | `Liveness` (SlotEventuallyFreed) -- with NO kthread fairness | clean |
+| `net_poll_teardown_buggy_leak.cfg` | `Fix=FALSE` | `Liveness` -- no WF on `KthreadGc` | violation (the #294 leak) |
+
+Spec action ↔ impl mapping (`kernel/dev9p_poll.c` unless noted):
+- `Init` (op pins ps[refcount] + session, NOT the Spoor) = `dev9p_poll_submit_locked`
+  takes `dev9p_poll_state_ref(ps)` + `p9_attached_ref(attached_owner)` under
+  `g_dev9p_poll_lock`; the priv's ps ref is `cand->refs = 1` at lazy-alloc.
+- `PollTimeout` (the poll ends, op stranded) = `kernel/poll.c::sys_poll_for_proc`
+  unregisters the hook; the op stays live (no Spoor pin to defer close).
+- `KthreadTouchPs` (the UAF probe) = the kthread derefs `op->ps->poll_list` /
+  `cached_revents` via a LIVE op only (`dev9p_poll_service_once`, `dev9p_poll_complete`).
+- `KthreadGc` (collect + tear down a stranded op) = `dev9p_poll_service_once`
+  Phase 1 unlink + Phase 2b `p9_client_abandon_async` + `dev9p_poll_op_free`.
+- `UserClose` (Fix) = `dev9p_poll_priv_release` grabs `ps->op` from the registry
+  under g_lock (whoever removes it owns the teardown), `p9_client_abandon_async`
+  (clear inflight + Tflush) + `dev9p_poll_op_free`, drops the priv's ps ref; then
+  `kernel/dev9p.c::dev9p_close` delivers the `ready`-fd Tclunk (`p9_client_clunk`).
+
+NOT modeled (caught by the kernel test `dev9p.poll_cancel_at_close`, not the
+spec): the abandon's Tflush leaves the readiness oldtag `awaiting_flush`, which
+`kernel/9p_session.c::any_outstanding_on_fid` counted -> the immediate
+SendClunk-precondition refused the Tclunk -> the slot would leak anyway. Fix:
+`any_outstanding_on_fid` excludes flushed (awaiting_flush) entries -- a cancelled
+op does not block a fid op (Tflush-then-Tclunk is the standard cancel-then-close).
+The model specifies "the clunk IS delivered at UserClose"; the impl had to make
+the session core honor that. See `memory/bug_294_net_session_death.md` + ARCH §28
+I-9 / §25.4 (the dev9p.poll row).
+
+---
+
 ## weft.tla — Weft-1 (the capability network dataplane; spec-first re-enabled, model-first)
 
 Status: **spec landed model-first at Weft-1; the cross-Proc share substrate

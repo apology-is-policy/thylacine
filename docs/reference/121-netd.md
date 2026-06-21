@@ -983,6 +983,41 @@ polled `POLLOUT` (deterministically ready → the full submit → kthread-pump �
 `check_ready(POLLOUT)` → completion → wake path) then `POLLIN` (no datagram →
 netd defers → the poll parks then times out → the kthread GCs the stranded read).
 
+### #294: the readiness-op cancel-at-close (the permanent slot-leak fix)
+
+The original kernel teardown pinned the netd `ready` Spoor (`op->pinned =
+spoor_ref(c)`), so `dev9p_close` — which sends the `ready`-fd `Tclunk` that frees
+the netd connection slot — could only run **after** the poll-pump kthread GC'd the
+stranded op and dropped that pin. A real SMP race left some stranded ops un-GC'd,
+so the `Tclunk` was never delivered and the netd slot **leaked permanently** on
+every poll-that-timed-out (bounded at netd `MAX_SLOTS=16`; the network stays up —
+this is a *leak*, not a session death). The leak is a Heisenbug: heavy in-guest
+instrumentation hides it (prints shift the GC timing window), so the formal model
+(`specs/net_poll_teardown.tla`) is the reliable design verifier.
+
+The fix (modeled `Fix=TRUE`): the readiness op no longer pins the Spoor. It holds
+a **refcounted** poll-state ref (`dev9p_poll_state.refs` — the priv holds one,
+each outstanding op holds one; freed when both drop, so the kthread's `op->ps`
+deref is safe after the priv frees) plus a **session** ref (`p9_attached_ref` on
+the priv's `attached_owner`). So `dev9p_close` runs at the user's fd-close, grabs
+the still-outstanding op from `g_dev9p_poll_ops` under `g_dev9p_poll_lock` (whoever
+removes it owns the teardown — the kthread may have collected it first), cancels it
+at the client (`p9_client_abandon_async` — clear `c->inflight[tag]` + `Tflush`),
+frees it, then delivers the `Tclunk` **deterministically** — the slot frees at
+fd-close, not hinged on the kthread.
+
+One session-core change was load-bearing and *below* the model's abstraction (the
+kernel test `dev9p.poll_cancel_at_close` caught it): the `Tflush` leaves the
+readiness oldtag `awaiting_flush`, and `kernel/9p_session.c::any_outstanding_on_fid`
+(the `SendClunk` precondition) counted it — so the immediate `Tclunk` was refused
+and the slot leaked anyway (this would bite production identically). A flushed op is
+cancelled and does not block a fid op, so `any_outstanding_on_fid` now **excludes**
+`awaiting_flush` entries — making `Tflush`-then-`Tclunk` (the standard
+cancel-then-close) legal. The tag stays reserved until its `Rflush` (the I-10 reuse
+guard, orthogonal); a late flushed reply is discarded ownerless by tag, never bound
+to a reused fid (I-11). See ARCH §25.4 (the dev9p.poll row) + `specs/SPEC-TO-CODE.md`
+(`net_poll_teardown.tla`).
+
 ## net-7b: observability (`/net/summary` + the native `netstat`)
 
 net-7b closes NET-DESIGN §11 (W4-F5). Network introspection is 9P-native and

@@ -833,6 +833,7 @@ void test_dev9p_fsync(void);
 void test_dev9p_readdir(void);
 void test_dev9p_readdir_cookie_high_bit(void);
 void test_dev9p_poll_regular_file_always_ready(void);
+void test_dev9p_poll_cancel_at_close(void);
 void test_dev9p_rename(void);
 void test_dev9p_unlink(void);
 void test_dev9p_stat_native_maps_getattr(void);
@@ -2043,6 +2044,7 @@ struct test_case g_tests[] = {
     { "dev9p.readdir",                 test_dev9p_readdir,                 false, NULL },
     { "dev9p.readdir_cookie_high_bit", test_dev9p_readdir_cookie_high_bit, false, NULL },
     { "dev9p.poll_regular_file_always_ready", test_dev9p_poll_regular_file_always_ready, false, NULL },
+    { "dev9p.poll_cancel_at_close",    test_dev9p_poll_cancel_at_close,    false, NULL },
     { "dev9p.rename",                  test_dev9p_rename,                  false, NULL },
     { "dev9p.unlink",                  test_dev9p_unlink,                  false, NULL },
     { "dev9p.stat_native_maps_getattr",

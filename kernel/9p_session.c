@@ -135,12 +135,24 @@ static void clear_outstanding(struct p9_session *s, u16 t) {
     s->total_completed++;
 }
 
-// Check whether any in-flight op targets `fid` (as either `fid` or
-// `new_fid`). Used by SendClunk to enforce the spec's "no other
-// in-flight op on the same fid" discipline.
+// Check whether any LIVE in-flight op targets `fid` (as either `fid` or
+// `new_fid`). Used by SendClunk / SendWalk(new_fid) / SendLopen / SendLcreate to
+// enforce the spec's "no other in-flight op on the same fid" discipline.
+//
+// A FLUSHED op (awaiting_flush, #845) is EXCLUDED: it has been cancelled, its
+// reply is discarded (the I-10 ownerless-demux path), and it will not act on the
+// fid, so it does not block a fid op. This makes Tflush-then-Tclunk -- the
+// standard cancel-then-close pattern -- legal: #294's cancel-at-close abandons
+// (Tflush) an outstanding readiness op then IMMEDIATELY clunks its fid, before any
+// Rflush has cleared the tag; counting the awaiting_flush entry here would refuse
+// the clunk (-> the netd `ready`-fd Tclunk never goes out -> the slot leaks --
+// exactly the leak the cancel-at-close was meant to close). The tag itself stays
+// reserved until its Rflush (the I-10 reuse guard) -- that is orthogonal to this
+// precondition, which is about whether a LIVE op references the fid.
 static bool any_outstanding_on_fid(const struct p9_session *s, u32 fid) {
     for (size_t t = 0; t < P9_SESSION_MAX_OUTSTANDING; t++) {
         if (!s->outstanding[t].active) continue;
+        if (s->outstanding[t].awaiting_flush) continue;   // cancelled -> not live
         if (s->outstanding[t].fid == fid) return true;
         if (s->outstanding[t].new_fid == fid) return true;
     }

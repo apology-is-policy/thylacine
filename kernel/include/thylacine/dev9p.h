@@ -97,8 +97,11 @@ struct dev9p_priv {
     struct p9_attached       *attached_owner;
     // net-6b-2b: lazily-allocated poll state for a QTPOLL (netd `ready`) Spoor;
     // NULL for every regular dev9p file (the common path). Allocated by dev9p_poll
-    // on the first poll of a readiness file; freed by dev9p_close. Owned by THIS
-    // priv (not shared across walks -- each walked Spoor gets its own priv).
+    // on the first poll of a readiness file. #294: independently REFCOUNTED -- the
+    // priv holds one ref (dropped via dev9p_poll_priv_release at dev9p_close), each
+    // outstanding readiness op holds one; freed when both drop (so an op the kthread
+    // still owns keeps it alive after this priv frees). Owned by THIS priv (not
+    // shared across walks -- each walked Spoor gets its own priv).
     struct dev9p_poll_state  *poll;
     // Weft-6a-2: lazily-bound per-flow ring share for a /net data fid; NULL for
     // every fd that has not gone zero-copy (the common path). Installed by
@@ -191,9 +194,18 @@ void dev9p_poll_init(void);
 // process context), reaps terminal ops, and garbage-collects stranded ops.
 void dev9p_poll_pump_main(void);
 
-// Release a priv's poll state at dev9p_close (frees p->poll if allocated). Safe
-// because the Spoor's last ref cannot drop while an op holds a pin on it, so at
-// close there is no outstanding op + no registered poller.
+// Release a priv's poll state at dev9p_close (#294 cancel-at-close,
+// specs/net_poll_teardown.tla). A registered poller holds the Spoor obj-ref, so
+// poll_list is empty at close, but an outstanding readiness op may still be live
+// (it pins the refcounted poll-state + the session, NOT the Spoor). This grabs +
+// cancels that op at the client (Tflush) -- so the subsequent `ready`-fd Tclunk in
+// dev9p_close frees the netd slot deterministically without orphaning the held
+// readiness Tread -- and drops the priv's poll-state ref.
 void dev9p_poll_priv_release(struct dev9p_priv *p);
+
+// Test accessor (test_dev9p): the live readiness-op registry length. Lets a test
+// assert the cancel-at-close teardown (op count back to baseline) without exposing
+// the static registry. Reads the atomic count; no lock needed.
+u32 dev9p_poll_op_count_for_test(void);
 
 #endif  // THYLACINE_DEV9P_H

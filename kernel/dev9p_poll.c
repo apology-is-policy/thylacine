@@ -52,9 +52,9 @@
 
 #include <thylacine/dev9p.h>
 
+#include <thylacine/9p_attach.h>
 #include <thylacine/9p_client.h>
 #include <thylacine/9p_session.h>
-#include <thylacine/extinction.h>
 #include <thylacine/poll.h>
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
@@ -72,16 +72,22 @@
 // =============================================================================
 
 // One in-flight readiness op. `rpc` at OFFSET 0 so dev9p_poll_complete recovers
-// the container with a single cast (the audited Loom offset-0 idiom). Holds an
-// INDEPENDENT spoor_ref on `pinned` (the readiness Spoor) -- the kthread borrows
-// the client from it, never owning the client lifetime (a live dev9p Spoor
-// implies a live client; the Loom I-30 pin / borrow-guard). `terminal` is set by
-// complete (under c->lock, atomic) and read by the kthread reap.
+// the container with a single cast (the audited Loom offset-0 idiom). #294
+// cancel-at-close: the op does NOT pin the readiness Spoor (that would defer
+// dev9p_close past the user's fd-close -- the permanent-slot-leak root). It holds
+// instead (a) a poll-state ref (ps->refs; keeps op->ps deref-safe) + (b) a session
+// ref (p9_attached_ref on attached_owner; keeps op->client alive -- the kthread
+// borrows the client, never owning the lifetime). So the op survives independent
+// of the user's fd, and dev9p_close runs AT fd-close, cancels the op, and delivers
+// the `ready`-fd Tclunk deterministically (specs/net_poll_teardown.tla, Fix=TRUE).
+// `attached_owner` is NULL only on the test path (dev9p_attach_client -- the client
+// is externally owned); a netd QTPOLL Spoor always carries a session. `terminal` is
+// set by complete (under c->lock, atomic) and read by the kthread reap.
 struct dev9p_poll_op {
     struct p9_rpc            rpc;       // OFFSET 0 -- the completion casts (op *)rpc
-    struct dev9p_poll_state *ps;        // the poll-state this op probes for
-    struct Spoor            *pinned;    // spoor_ref on the readiness Spoor (=> client alive)
-    struct p9_client        *client;    // borrowed (valid while `pinned` held)
+    struct dev9p_poll_state *ps;        // the poll-state this op probes for (holds a ps ref)
+    struct p9_attached      *attached_owner; // session ref (=> client alive); NULL = test path
+    struct p9_client        *client;    // borrowed (valid while the session ref / ext-owner holds)
     u32                      fid;        // the readiness file's 9P fid
     u16                      mask;       // the event mask = the Tread offset
     bool                     terminal;   // completion fired (atomic; reaped by the kthread)
@@ -92,15 +98,21 @@ _Static_assert(__builtin_offsetof(struct dev9p_poll_op, rpc) == 0,
                "p9_rpc must be at offset 0 -- dev9p_poll_complete recovers the container");
 
 // Per-readiness-Spoor poll state. Lazily allocated by dev9p_poll the first time a
-// QTPOLL Spoor is polled; hung off dev9p_priv->poll; freed at dev9p_close.
-// Multi-thread-Proc-reachable (handle_dup shares the Spoor -> the same priv -> the
-// same poll-state): poll_list has its own lock; cached_revents is atomic; `op` +
+// QTPOLL Spoor is polled; hung off dev9p_priv->poll. #294: independently
+// REFCOUNTED -- the priv holds one ref (dropped via dev9p_poll_priv_release at
+// dev9p_close) and each outstanding op holds one (taken at submit, dropped at op
+// teardown); freed when both drop. This decoupling is what lets dev9p_close free
+// the priv + clunk the fid while an op the kthread still owns keeps ps (op->ps)
+// alive -- no UAF (specs/net_poll_teardown.tla NoUseAfterFreePs). Multi-thread-
+// Proc-reachable (handle_dup shares the Spoor -> the same priv -> the same poll-
+// state): poll_list has its own lock; cached_revents + refs are atomic; `op` +
 // `wanted_mask` are under g_dev9p_poll_lock.
 struct dev9p_poll_state {
     struct poll_waiter_list  poll_list;     // pollers' hooks (own lock)
     u32                      cached_revents; // atomic: DEV9P_POLL_VALID | revents
     struct dev9p_poll_op    *op;            // the outstanding op (under g_lock); NULL = none
     u16                      wanted_mask;    // union of pollers' events for the live op (g_lock)
+    int                      refs;           // atomic: priv (1) + 1 per outstanding op; free at 0
 };
 
 #define DEV9P_POLL_VALID    0x00010000u   // cached_revents bit 16: a completion recorded
@@ -132,6 +144,43 @@ void dev9p_poll_init(void) {
     g_dev9p_poll_ops = NULL;
     g_dev9p_poll_op_count = 0;
     g_dev9p_poll_inited = true;
+}
+
+// =============================================================================
+// Refcounted poll-state + op lifetime (#294 cancel-at-close).
+// =============================================================================
+
+// Take a poll-state ref. The caller already holds a ref (the priv's, or
+// g_dev9p_poll_lock with ps reachable via p->poll), so ps cannot be freed under
+// us -- RELAXED is sufficient (no synchronizes-with needed to acquire an existing
+// object).
+static void dev9p_poll_state_ref(struct dev9p_poll_state *ps) {
+    __atomic_fetch_add(&ps->refs, 1, __ATOMIC_RELAXED);
+}
+
+// Drop a poll-state ref; free on the last. ACQ_REL so the freeing thread observes
+// every prior holder's writes (and the free is not reordered before this drop). At
+// the last drop there is no registered poller -- the sys_poll_for_proc 2C-F1
+// discipline keeps a registered poller's Spoor obj-ref alive, so dev9p_close (the
+// Spoor's LAST ref) cannot run with a poller still on poll_list -- and no op, so
+// the free races nothing.
+static void dev9p_poll_state_unref(struct dev9p_poll_state *ps) {
+    if (__atomic_fetch_sub(&ps->refs, 1, __ATOMIC_ACQ_REL) == 1)
+        kfree(ps);
+}
+
+// Free a torn-down op: drop its session ref (=> may destroy the client+attached on
+// the last ref) + its poll-state ref (=> may free ps) + kfree the op. The caller
+// has already removed it from the registry and (if it had an in-flight reply)
+// abandoned it at the client, so nothing else references it. Runs OUTSIDE
+// g_dev9p_poll_lock -- the session unref may sleep (attached_destroy_inner does
+// wire clunks). Captures ps BEFORE the kfree so the unref does not read freed
+// memory.
+static void dev9p_poll_op_free(struct dev9p_poll_op *op) {
+    struct dev9p_poll_state *ps = op->ps;
+    if (op->attached_owner) p9_attached_unref(op->attached_owner);
+    kfree(op);
+    dev9p_poll_state_unref(ps);
 }
 
 // =============================================================================
@@ -193,14 +242,22 @@ static void dev9p_poll_complete(struct p9_rpc *rpc, int status,
 // to op_in (the reaper clears it).
 static void dev9p_poll_submit_locked(struct dev9p_poll_state *ps,
                                      struct dev9p_poll_op *op_in,
-                                     struct p9_client *client, u32 fid, u16 wanted) {
-    // op_in is freshly kmalloc(KP_ZERO)'d and op_in->pinned was already set by the
-    // caller (spoor_ref(c)); set only the non-zero fields.
+                                     struct p9_client *client, u32 fid, u16 wanted,
+                                     struct p9_attached *attached_owner) {
+    // op_in is freshly kmalloc(KP_ZERO)'d; set the non-zero fields. #294: the op
+    // pins ps + the session (NOT the Spoor), so it outlives the user's fd without
+    // deferring dev9p_close. Both refs are taken HERE, under g_lock, atomically
+    // with linking the op into the registry below -- so an op reachable from the
+    // registry always holds them (and on a synchronous submit failure the
+    // already-linked op is reaped by the kthread, which drops them).
     op_in->rpc.on_complete = dev9p_poll_complete;
-    op_in->ps       = ps;
-    op_in->client   = client;
-    op_in->fid      = fid;
-    op_in->mask     = wanted;
+    op_in->ps             = ps;
+    op_in->client         = client;
+    op_in->fid            = fid;
+    op_in->mask           = wanted;
+    op_in->attached_owner = attached_owner;
+    dev9p_poll_state_ref(ps);                            // the op's ps ref
+    if (attached_owner) p9_attached_ref(attached_owner); // the op's session ref (=> client alive)
     // Link into the registry + publish as ps's live op BEFORE submitting, so a
     // synchronous submit failure's on_complete (which sets op->terminal) finds the
     // op linked -> the kthread reaps it. A previous op (terminal, pending reap) is
@@ -258,6 +315,11 @@ short dev9p_poll(struct Spoor *c, short events, struct poll_waiter *pw) {
             return (short)(events & POLL_REQUESTABLE);
         }
         poll_waiter_list_init(&cand->poll_list);
+        cand->refs = 1;   // #294: the priv's poll-state ref (dropped at dev9p_close
+                          // via dev9p_poll_priv_release). Each outstanding op adds
+                          // one more; ps frees when both the priv + all ops drop.
+                          // MUST be set before publish, or the first op's teardown
+                          // takes refs 1->0 and frees ps out from under p->poll.
         spin_lock(&g_dev9p_poll_lock);
         // RELEASE-publish so the lockless fast-path ACQUIRE-load above observes the
         // initialized poll_list (F5). The re-reads here are serialized by g_lock.
@@ -310,9 +372,10 @@ short dev9p_poll(struct Spoor *c, short events, struct poll_waiter *pw) {
                 }
                 abandon = live;            // unlinked -> no concurrent reaper/completer
             }
-            spoor_ref(c);                  // the op's I-30 pin (=> Spoor + client alive)
-            cand_op->pinned = c;
-            dev9p_poll_submit_locked(ps, cand_op, p->client, p->fid, ps->wanted_mask);
+            // #294: the op pins ps + the session (in submit_locked), NOT the Spoor,
+            // so dev9p_close runs at fd-close and cancels it -- the leak fix.
+            dev9p_poll_submit_locked(ps, cand_op, p->client, p->fid,
+                                     ps->wanted_mask, p->attached_owner);
             cand_op = NULL;                // consumed
             woke = true;
             // A synchronous submit failure fired the completion (POLLERR) under
@@ -349,11 +412,11 @@ short dev9p_poll(struct Spoor *c, short events, struct poll_waiter *pw) {
     if (cand_op) kfree(cand_op);   // unused candidate
 
     if (abandon) {
-        // Cancel the widened-away op at the client (Tflush; #845) THEN release its
-        // pin -- outside g_lock (abandon takes c->lock; spoor_clunk may sleep).
+        // Cancel the widened-away op at the client (Tflush; #845) THEN free it
+        // (drop its session + ps refs) -- outside g_lock (abandon takes c->lock;
+        // the session unref may sleep).
         p9_client_abandon_async(abandon->client, &abandon->rpc);
-        spoor_clunk(abandon->pinned);
-        kfree(abandon);
+        dev9p_poll_op_free(abandon);
     }
     if (woke) (void)wakeup(&g_dev9p_poll_rendez);
 
@@ -380,7 +443,7 @@ short dev9p_poll(struct Spoor *c, short events, struct poll_waiter *pw) {
 // head-anchored LIFO scan STARVES the tail (R2-F1; see the DEV9P_POLL_MAX_PUMP note)
 // -- the v1.x per-client-work-queue close must use a fair start, not this scan.
 static u32 dev9p_poll_collect_clients(struct p9_client **out_cl,
-                                      struct Spoor **out_pin, u32 max) {
+                                      struct p9_attached **out_pin, u32 max) {
     u32 n = 0;
     spin_lock(&g_dev9p_poll_lock);
     for (struct dev9p_poll_op *op = g_dev9p_poll_ops; op && n < max; op = op->next) {
@@ -391,8 +454,13 @@ static u32 dev9p_poll_collect_clients(struct p9_client **out_cl,
             if (out_cl[i] == op->client) { seen = true; break; }
         if (seen) continue;
         out_cl[n]  = op->client;
-        out_pin[n] = op->pinned;
-        spoor_ref(op->pinned);   // borrow-guard (=> Spoor + client alive)
+        // Borrow-guard: take an EXTRA session ref so the client stays alive past
+        // the unlock + across the blocking pump, even if a concurrent reaper frees
+        // this op (#294: was spoor_ref(op->pinned)). NULL only on the test path
+        // (the client is externally owned) -- store NULL + skip the unref
+        // symmetrically.
+        out_pin[n] = op->attached_owner;
+        if (op->attached_owner) p9_attached_ref(op->attached_owner);
         n++;
     }
     spin_unlock(&g_dev9p_poll_lock);
@@ -443,28 +511,30 @@ static void dev9p_poll_service_once(void) {
     // may drop the last ref -> dev9p_close -> free the poll-state).
     while (reap) {
         struct dev9p_poll_op *next = reap->next;
+        // Wake pollers BEFORE freeing the op (the wake touches reap->ps, kept alive
+        // by the op's ps ref). #294: op_free drops the session + ps refs (was
+        // spoor_clunk(pinned)); the ps ref drop may free ps -- the last touch of
+        // reap->ps is the wake above.
         poll_waiter_list_wake(&reap->ps->poll_list);   // process context
-        spoor_clunk(reap->pinned);
-        kfree(reap);
+        dev9p_poll_op_free(reap);
         reap = next;
     }
 
-    // Phase 2b (outside g_lock): cancel stranded ops at the client (Tflush) +
-    // release pins. No poller cares, so no poll_list walk.
+    // Phase 2b (outside g_lock): cancel stranded ops at the client (Tflush) + free
+    // them (drop the session + ps refs). No poller cares, so no poll_list walk.
     while (abandon) {
         struct dev9p_poll_op *next = abandon->next;
         p9_client_abandon_async(abandon->client, &abandon->rpc);
-        spoor_clunk(abandon->pinned);
-        kfree(abandon);
+        dev9p_poll_op_free(abandon);
         abandon = next;
     }
 
     // Phase 3: pump the elected reader of EVERY distinct client with a remaining
     // live op (F1 -- fairness; pumping only one would starve a second client), else
-    // park. Each pin keeps its client alive past the unlock + across the blocking
-    // pump; clunk each after its pump.
-    struct p9_client *clients[DEV9P_POLL_MAX_PUMP];
-    struct Spoor     *pins[DEV9P_POLL_MAX_PUMP];
+    // park. Each pin (a borrowed session ref) keeps its client alive past the
+    // unlock + across the blocking pump; unref each after its pump.
+    struct p9_client   *clients[DEV9P_POLL_MAX_PUMP];
+    struct p9_attached *pins[DEV9P_POLL_MAX_PUMP];
     u32 npump = dev9p_poll_collect_clients(clients, pins, DEV9P_POLL_MAX_PUMP);
     if (npump == 0) {
         // Nothing outstanding -> park. The cond re-checks the registry count under
@@ -478,7 +548,7 @@ static void dev9p_poll_service_once(void) {
     for (u32 i = 0; i < npump; i++) {
         u64 deadline = timer_now_ns() + DEV9P_POLL_IDLE_NS;
         int rc = p9_client_reader_pump_once_deadline(clients[i], deadline);
-        spoor_clunk(pins[i]);              // release this client's borrow-guard
+        if (pins[i]) p9_attached_unref(pins[i]);   // release this client's borrow-guard
         if (rc == P9_PUMP_BUSY) any_busy = true;
         // PROGRESS: demuxed a frame (a completion may have set an op terminal).
         // IDLE: the boundary deadline lapsed, stream synced. DEAD:
@@ -500,16 +570,62 @@ void dev9p_poll_pump_main(void) {
 
 void dev9p_poll_priv_release(struct dev9p_priv *p) {
     if (!p || !p->poll) return;
-    // dev9p_close runs only at the Spoor's LAST ref. An outstanding op holds a pin
-    // (a ref) on the Spoor, and a registered poller holds the handle's obj ref, so
-    // neither can be live here -> ps->op == NULL + poll_list empty. Free the state.
+    // #294 cancel-at-close (specs/net_poll_teardown.tla, Fix=TRUE). dev9p_close runs
+    // at the Spoor's LAST ref. A registered poller holds the Spoor obj-ref (the
+    // sys_poll_for_proc 2C-F1 discipline retains it until AFTER the unregister
+    // sweep), so poll_list is empty here -- but an outstanding readiness OP may
+    // still be live: it pins ps + the session, NOT the Spoor, so it does NOT defer
+    // this close. Grab it from the registry (whoever removes it owns the teardown;
+    // the kthread may have collected it first), cancel it at the client, and free
+    // it. The caller (dev9p_close) then clunks the `ready` fid -- delivered
+    // DETERMINISTICALLY now, not hinged on the kthread GC firing (the permanent-
+    // slot-leak root). The cancel (abandon_async) runs BEFORE that Tclunk so netd
+    // releases the held readiness Tread and the kernel op does not strand awaiting
+    // a reply that will never come.
     struct dev9p_poll_state *ps = p->poll;
-    if (ps->op != NULL) {
-        // Defense in depth: a live op at close would be a lifetime-invariant
-        // violation (the pin should have deferred this close). Loudly fail rather
-        // than leak/UAF -- this can only fire on a refcount bug.
-        extinction("dev9p_poll_priv_release: poll-state freed with a live op");
+    struct dev9p_poll_op *grabbed = NULL;
+
+    spin_lock(&g_dev9p_poll_lock);
+    struct dev9p_poll_op *op = ps->op;
+    if (op) {
+        // ps->op is consistent with the registry under g_lock (submit links + sets
+        // ps->op; the kthread Phase 1 unlinks + clears ps->op; the widen swaps both
+        // atomically). So ps->op != NULL => op is in the registry unless the kthread
+        // already collected it -- search, and own it only if still present.
+        struct dev9p_poll_op **pp = &g_dev9p_poll_ops;
+        while (*pp && *pp != op) pp = &(*pp)->next;
+        if (*pp == op) {
+            *pp = op->next;
+            __atomic_fetch_sub(&g_dev9p_poll_op_count, 1u, __ATOMIC_RELEASE);
+            grabbed = op;                  // we removed it -> we own its teardown
+        }
+        ps->op = NULL;
+        ps->wanted_mask = 0;
     }
+    spin_unlock(&g_dev9p_poll_lock);
+
+    if (grabbed) {
+        // Cancel at the client (clear c->inflight[tag] + Tflush; #845) so no late
+        // dev9p_poll_complete fires on the freed op and the kernel op does not
+        // strand awaiting a reply. Then free it (drop the session + ps refs).
+        // Outside g_lock (abandon takes c->lock; the unrefs may sleep). The client
+        // is alive: the priv still holds its session ref (dropped last, in
+        // dev9p_close, after the Tclunk) and `grabbed` holds its own.
+        p9_client_abandon_async(grabbed->client, &grabbed->rpc);
+        dev9p_poll_op_free(grabbed);
+    }
+
+    // Drop the priv's ps ref. If the kthread still owns an op (we did not grab it),
+    // that op's ps ref keeps ps alive until the kthread tears it down; else this is
+    // the last ref and frees ps. Either way no UAF: the kthread only derefs ps via
+    // a live op->ps, never via the now-cleared p->poll.
     p->poll = NULL;
-    kfree(ps);
+    dev9p_poll_state_unref(ps);
+}
+
+// Test accessor: the live readiness-op registry length (g_dev9p_poll_op_count).
+// Lets test_dev9p assert the cancel-at-close teardown (op count back to baseline)
+// without exposing the static registry. Reads the atomic count; no lock needed.
+u32 dev9p_poll_op_count_for_test(void) {
+    return __atomic_load_n(&g_dev9p_poll_op_count, __ATOMIC_ACQUIRE);
 }
