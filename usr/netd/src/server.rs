@@ -553,7 +553,14 @@ fn weft_recv_into_ring(net: &mut Net, n: u32, off: u32, len: u32) -> RecvOutcome
     let base = flow.ring_va as usize + geom.payload_off as usize + off;
     // SAFETY: bounds-checked above; ring_va is netd's live per-flow mapping. The
     // &mut slice is a raw pointer into netd's own AS (not borrowed from `net`), so
-    // the &mut net for data_recv_outcome does not alias it.
+    // the &mut net for data_recv_outcome does not alias it. INVARIANT (Weft-7 F4):
+    // ring_va's liveness against a concurrent slot_unref -> t_burrow_detach rests
+    // on netd being SINGLE-THREADED -- this runs synchronously inside the serve
+    // loop (h_weftio / poll_weftio), so no slot_unref can interleave. The VALUE
+    // safety (a vanished/shrunk ring yields Eof above, never an OOB) already holds
+    // unconditionally; only the mapping LIVENESS needs single-threadedness, so a
+    // future netd-concurrency lift (A-5b per-user-netd) MUST add a per-slot guard
+    // keeping the ring mapped across this raw write.
     let dst: &mut [u8] = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, len) };
     let outcome = net.data_recv_outcome(n, dst);
     // Weft-6c readiness edge (NET-THROUGHPUT 6 busy-poll): on a real RX delivery
@@ -5392,7 +5399,11 @@ impl Conn {
             // TX: read the payload IN PLACE from the shared ring (no 9P-body copy)
             // + hand it to smoltcp. SAFETY: ring_va is netd's live mapping of the
             // per-flow ring (held while the slot is live); [payload_off+off, +len)
-            // is bounds-checked above to lie within the payload region.
+            // is bounds-checked above to lie within the payload region. INVARIANT
+            // (Weft-7 F4): ring_va's liveness against a concurrent slot_unref ->
+            // t_burrow_detach rests on netd being single-threaded (this runs in the
+            // serve loop; see weft_recv_into_ring's note) -- a future concurrency
+            // lift MUST keep the slot mapped across this raw read.
             let base = flow.ring_va as usize + geom.payload_off as usize + off;
             let payload: &[u8] =
                 unsafe { core::slice::from_raw_parts(base as *const u8, len) };

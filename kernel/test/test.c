@@ -239,6 +239,7 @@ void test_weft_share_full(void);
 void test_weft_share_owner_gc(void);
 void test_weft_syscall_share(void);
 void test_weft_map_binding_lifetime(void);
+void test_weft_share_cap_gate(void);
 void test_pgtable_install_user_pte_smoke(void);
 void test_pgtable_install_user_pte_constraints(void);
 void test_pgtable_install_user_pte_idempotent(void);
@@ -1280,6 +1281,7 @@ struct test_case g_tests[] = {
     { "weft.share_owner_gc",              test_weft_share_owner_gc,           false, NULL },
     { "weft.syscall_share",               test_weft_syscall_share,            false, NULL },
     { "weft.map_binding_lifetime",        test_weft_map_binding_lifetime,     false, NULL },
+    { "weft.share_cap_gate",              test_weft_share_cap_gate,           false, NULL },
     { "pgtable.install_user_pte_smoke",
                                        test_pgtable_install_user_pte_smoke,
                                                                            false, NULL },

@@ -849,6 +849,19 @@ Extend `usr/netperf nic` + `tools/np3-bench.sh` so each lever is **measured, not
 5. **The latency convergence check**: M6-rtt with the readiness ring on vs the 50 ms RX-wake
    off — confirms Weft-4 closes N1.
 
+**Weft-7 as-built (the MW loopback bench, #269 M6).** `netperf`'s new **MW** mode is the
+deterministic in-guest realization of item 4 (the Weft delta) over the resident `lo`: the M2
+twin with the SEND side on a `WeftFlow` (push/wait over Loom → `Tweftio` → netd reads the ring
+in place) vs `TcpStream::write` (byte-copy). The honest result: **weft is ~10× slower than
+byte-copy on loopback** (MW ~2.4 MiB/s vs M2 ~24 MiB/s). This is the binding constraint the
+bench exists to find — netd's smoltcp socket tx buffer is **4 KiB**, so `data_send` accepts
+~4 KiB/op, capping BOTH paths at 4 KiB windows; weft then pays per-op Loom + `Tweftio`
+overhead per 4 KiB without the large-send amortization, in its worst regime (the copy it
+avoids is negligible at 4 KiB). The zero-copy throughput win is gated behind a **larger socket
+tx buffer** (one push absorbs a big send — the v1.x lever, task #288) or the NIC path (where
+the copy is the bottleneck; the slirp-bounded M6, not deterministic in-guest). The full
+window/msize sweep + the NIC-path Weft delta (items 1-3, 5) stay the v1.x measurement backlog.
+
 Per the no-host-load discipline: every timing boot is ground-truthed to the healthy guest
 end-state; a nondeterministic result is a guest race to hunt, never "host load."
 

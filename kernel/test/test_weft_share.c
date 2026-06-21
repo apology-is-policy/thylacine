@@ -30,6 +30,7 @@
 #include "test.h"
 
 #include <thylacine/burrow.h>
+#include <thylacine/caps.h>
 #include <thylacine/proc.h>
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
@@ -40,6 +41,7 @@ void test_weft_share_full(void);
 void test_weft_share_owner_gc(void);
 void test_weft_syscall_share(void);
 void test_weft_map_binding_lifetime(void);
+void test_weft_share_cap_gate(void);
 
 // Non-static syscall inner (kernel/syscall.c). ring_va (x0), ring_size (x1).
 s64 sys_weft_share_for_proc(struct Proc *p, u64 ring_va, u64 ring_size_raw);
@@ -167,6 +169,7 @@ void test_weft_share_owner_gc(void) {
 void test_weft_syscall_share(void) {
     struct Proc *netd = make_proc();
     TEST_ASSERT(netd != NULL, "proc_alloc failed");
+    netd->caps = CAP_HW_CREATE;   // Weft-7 F1: SYS_WEFT_SHARE is driver-tier gated.
 
     // netd attaches a ring (the SYS_BURROW_ATTACH shape: {h:0, m:1} -- the VMA
     // alone holds it). sys_weft_share_for_proc resolves the VA -> that Burrow.
@@ -259,4 +262,49 @@ void test_weft_map_binding_lifetime(void) {
 
     drop_proc(netd);
     drop_proc(guest);
+}
+
+// Weft-7 F1: SYS_WEFT_SHARE is gated to the NIC-owning driver tier
+// (CAP_HW_CREATE). Ungated, any EL0 Proc could squat the fixed WEFT_MAX_SHARES
+// registry (its minted share_id is never claimable -- only netd's Rweft hands
+// the kernel an id to claim) and starve netd's weft_ensure -> every flow
+// system-wide degrades to byte-copy (a cross-Proc availability DoS). A Proc
+// WITHOUT the cap is refused before it touches a registry slot; the cap lets it
+// through. Fails on pre-fix code (the cap-less share returned a positive id).
+void test_weft_share_cap_gate(void) {
+    struct Proc *p = make_proc();           // a fresh Proc has caps == 0
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    s64 va = sys_burrow_attach_for_proc(p, PAGE_SIZE);
+    TEST_ASSERT(va > 0, "burrow_attach a ring");
+    struct Vma *vma = vma_lookup(p, (u64)va);
+    TEST_ASSERT(vma != NULL && vma->burrow != NULL, "ring VMA present");
+    struct Burrow *v = vma->burrow;
+    int h_before = burrow_handle_count(v);
+
+    // No CAP_HW_CREATE: the share is refused (-1) and touches NO registry slot
+    // (the pin count is the witness -- the gate fires before weft_share_register).
+    TEST_ASSERT((p->caps & CAP_HW_CREATE) == 0, "test Proc starts cap-less");
+    TEST_EXPECT_EQ(sys_weft_share_for_proc(p, (u64)va, PAGE_SIZE), -1,
+        "SYS_WEFT_SHARE without CAP_HW_CREATE is refused");
+    TEST_EXPECT_EQ(burrow_handle_count(v), h_before,
+        "a cap-refused share takes no registration pin");
+
+    // Grant the driver-tier cap: the share now passes the gate + mints an id.
+    p->caps = CAP_HW_CREATE;
+    s64 id = sys_weft_share_for_proc(p, (u64)va, PAGE_SIZE);
+    TEST_ASSERT(id > 0, "SYS_WEFT_SHARE with CAP_HW_CREATE succeeds");
+    TEST_EXPECT_EQ(burrow_handle_count(v), h_before + 1,
+        "the granted share holds the registration pin");
+
+    // Tidy up: claim the id (transfers the pin), drop it + the mapping -> free.
+    struct Burrow *claimed = weft_share_claim((u64)id);
+    TEST_EXPECT_EQ(claimed, v, "claim returns the ring");
+    u64 destroyed_before = burrow_total_destroyed();
+    burrow_unref(v);                 // the claimed pin
+    vma_drain(p);                    // the ring mapping
+    TEST_EXPECT_EQ(burrow_total_destroyed(), destroyed_before + 1,
+        "ring frees once the pin + mapping drop");
+
+    drop_proc(p);
 }

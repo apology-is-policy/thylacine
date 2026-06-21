@@ -3529,6 +3529,20 @@ static s64 sys_burrow_detach_handler(u64 vaddr_raw, u64 length_raw) {
 // ring_va, RW / no-exec) as a per-flow ring + mint a share_id. The netd side.
 s64 sys_weft_share_for_proc(struct Proc *p, u64 ring_va, u64 ring_size_raw) {
     if (!p)                                          return -1;
+    // Weft-7 F1: gate the share to the NIC-owning driver tier (CAP_HW_CREATE).
+    // SYS_WEFT_SHARE registers a per-flow ring + mints a share_id that ONLY netd's
+    // Rweft ever hands the kernel to claim -- a non-driver caller's share_id is
+    // never returned in any Rweft, so it is unclaimable and the call has NO
+    // legitimate non-driver use. Ungated, any EL0 Proc could loop SYS_BURROW_ATTACH
+    // + SYS_WEFT_SHARE to squat the fixed WEFT_MAX_SHARES registry (each entry held
+    // until the squatter exits), starving the trusted netd's weft_ensure -> every
+    // flow system-wide silently falls back to byte-copy (a cross-Proc availability
+    // DoS on a shared global resource). CAP_HW_CREATE is the same driver-tier gate
+    // SYS_MMIO/IRQ/DMA/PCI_CREATE use; netd holds it (the warden confers it), an
+    // ordinary user Proc does not. ACQUIRE load: proc_become_legate writes caps
+    // cross-thread (the A-4a clearance redeem).
+    if ((__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_HW_CREATE) == 0)
+        return -1;
     if (ring_size_raw == 0)                          return -1;
     if (ring_size_raw > BURROW_ATTACH_MAX)           return -1;
 

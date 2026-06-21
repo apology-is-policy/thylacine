@@ -931,7 +931,82 @@ lifecycle (the tracker is kernel-private completion state, not a shared page):
 
 ---
 
-## Known caveats / footguns (Weft-6 obligations)
+## The Weft-7 focused audit close + the throughput benchmark
+
+Weft-7 is the FIRST + FINAL formal prosecution of the whole Weft EL0 surface
+(6a-6c) and CLOSES the Weft arc. An Opus-4.8-max adversarial soundness prosecutor
+(the dedicated reviewer agent) + a concurrent self-audit. **Verdict: 0 P0 / 0 P1
+/ 1 P2 / 3 P3 -- a clean close (the P2 fix is a localized cap-gate, not dirty).**
+
+### Findings
+
+- **F1 [P2] -- ungated `SYS_WEFT_SHARE` -> unprivileged registry-squat DoS. FIXED.**
+  `sys_weft_share_for_proc` had no capability gate, and `weft_share_register`
+  takes any free slot regardless of owner. Any EL0 Proc could loop
+  `SYS_BURROW_ATTACH` + `SYS_WEFT_SHARE` to squat the fixed `WEFT_MAX_SHARES=64`
+  registry (its share_id is never claimable -- only netd's `Rweft` hands the
+  kernel an id to claim -- so the slots stay occupied for the squatter's
+  lifetime), starving the trusted netd's `weft_ensure` so every flow system-wide
+  silently falls back to byte-copy: a cross-Proc AVAILABILITY DoS (no
+  UAF/corruption/leak -> P2). FIX: gate `SYS_WEFT_SHARE` on `CAP_HW_CREATE` (the
+  driver tier netd holds, the same gate `SYS_MMIO/IRQ/DMA/PCI_CREATE` use; an
+  ordinary user Proc lacks it). Regression: `weft.share_cap_gate` (cap-less ->
+  -1 + no slot taken; cap'd -> id minted) -- fails on pre-fix code.
+- **F2 [P3] -- a transient `SYS_WEFT_MAP` OOM permanently pins one flow to
+  byte-copy** (the consumed-but-unmapped share_id is re-returned idempotently ->
+  unclaimable). Graceful (byte-copy works; a new flow is unaffected). Same family
+  as the self-audit's minted-but-unclaimed leak (bounded at the 64-slot registry,
+  reclaimed at netd death). Fix = a per-flow `SYS_WEFT_UNSHARE` GC + re-mint
+  (ABI-escalating -> v1.x, task #289).
+- **F3 [P3] -- `dev9p_close` cleared `p->weft` non-atomically vs `__ATOMIC_ACQUIRE`
+  readers. FIXED (hardening).** Sound today (last-ref excludes all readers; every
+  reader holds a Spoor ref), now an `__ATOMIC_RELEASE` store + a comment naming
+  the Loom-reader/reg-table-ref invariant.
+- **F4 [P3] -- the netd raw-pointer slice sites rest on undocumented
+  single-threadedness. FIXED (doc hardening).** Explicit "INVARIANT: netd
+  single-threaded; a future concurrency lift MUST add a per-slot guard" notes at
+  `weft_recv_into_ring`/`h_weftio`; the value safety (Eof on a vanished ring,
+  never OOB) already holds unconditionally. (`WeftFlow` is auto-`!Send`+`!Sync`
+  via `Ring`'s raw `*mut` -- the cross-thread property holds structurally.)
+
+The SOUND set (the cross-Proc #847 dual-refcount ledger, the share_id
+consume-once + unforgeability, the I-30 submit-time pin / ring-TOCTOU, the I-29
+count clamp, the I-9 RX-defer + readiness seq-cst mirror, W^X, the wire codec +
+kernel-owned geometry) all traced + survived; the `weft.tla` + `weft_readiness
+.tla` spec gate is GREEN (clean + liveness + every buggy cfg). Full closed list:
+`memory/audit_weft_closed_list.md`.
+
+### The throughput benchmark (NET-THROUGHPUT section 8; #269 M6)
+
+`netperf`'s new **MW** mode is the M2 twin: the SAME bulk transfer over the SAME
+resident `lo`, but the SEND side rides a `WeftFlow` (push/wait over Loom ->
+`Tweftio` -> netd reads the ring IN PLACE) instead of `TcpStream::write`
+(byte-copy). The drain server stays a byte-copy reader, so MW isolates the
+send-side zero-copy delta.
+
+The HONEST in-guest result: **weft is ~10x SLOWER than byte-copy on loopback**
+(MW ~2.4 MiB/s vs M2 ~24 MiB/s for the boot-probe transfer). This is not a bug --
+it is the binding constraint the bench EXISTS to find: netd's smoltcp socket tx
+buffer is **4 KiB**, so `data_send` accepts at most ~4 KiB per op. On loopback
+that caps BOTH paths at 4 KiB windows, so weft pays the per-op Loom + `Tweftio`
+round-trip overhead per 4 KiB **without the large-send amortization**, while the
+copy it avoids is negligible at 4 KiB -- weft's WORST regime. The zero-copy
+throughput win is gated behind (a) a larger socket tx buffer (so one weft push
+absorbs a big send in one op -- the v1.x lever, task #288) or (b) the NIC path,
+where the copy is the actual bottleneck (the slirp-bounded M6, not deterministic
+in-guest). The bench's value is exactly this: it pins the lever, not a flattering
+number.
+
+## Known caveats / footguns (Weft-7 closed; v1.x seams)
+
+- **Weft-7 v1.x seams.** (1) The per-flow share-GC: an unclaimed/transiently-
+  failed-map share_id leaks its ring until netd death, bounded at
+  `WEFT_MAX_SHARES=64` slots (~16 MiB), self-limiting to byte-copy, reclaimed at
+  netd restart -- a per-flow `SYS_WEFT_UNSHARE` is the fix (task #289). (2) The
+  socket-tx-buffer throughput lever (task #288, above). (3) The deferred two-CQE
+  true-zero-copy-to-NIC F_NOTIF path (v1.0's weft send is the copied single-CQE
+  realization). (4) netd single-threadedness is load-bearing for the raw-pointer
+  slice sites (F4) -- a per-user-netd concurrency lift must add a per-slot guard.
 
 - **Single consumer per ring.** `weft_ring_drain` is lock-free under the
   precondition that one party (the dev9p elected reader) drains a given ring;

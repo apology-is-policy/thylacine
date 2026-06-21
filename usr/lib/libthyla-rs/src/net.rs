@@ -681,7 +681,11 @@ struct Inflight {
 /// slice outlives a submit. The kernel pins the ring Burrow (the #847 payload-
 /// buffer ref) from submit to reap and validates the slice at submit against its
 /// private `weft_ring_view` (I-30), so a buggy producer corrupts only its own
-/// in-flight bytes -- never the kernel or netd.
+/// in-flight bytes -- never the kernel or netd. `WeftFlow` is auto-`!Send`+`!Sync`
+/// (its `Ring` field holds raw `*mut` pointers), so the raw `ring_va` mapping can
+/// never be shared across threads -- the single-in-flight contract is per-instance
+/// and the `&mut self` discipline keeps even an aliased `&self` reader (`rx_buf`)
+/// from overlapping a submit.
 ///
 /// A weft flow is self-sufficient after `open`: the Loom handle registration takes
 /// its own I-30 pin on the data fid, so push/pop keep working even if the

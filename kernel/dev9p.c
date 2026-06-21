@@ -438,11 +438,21 @@ static void dev9p_close(struct Spoor *c) {
     // Weft-6a-2: release the per-flow ring binding (if this data fd went
     // zero-copy). Drops the I-30 registration pin -> the #847 dual count frees
     // the ring Burrow once the guest's mapping also drops (vma_drain at guest
-    // exit). LAST-ref runs here, so no concurrent SYS_WEFT_MAP can race the
-    // read: a mapper needs a live handle, and the last ref means none remains.
-    if (p->weft) {
-        weft_binding_release(p->weft);
-        p->weft = NULL;
+    // exit). LAST-ref runs here, so no concurrent reader can race the clear:
+    // EVERY reader of p->weft holds a Spoor ref while it reads -- the sync
+    // paths (dev9p_weft_try_{write,read}) via sys_lookup_rw_handle's handle ref,
+    // AND the Loom async path (loom_submit_payload) via the reg-handle table's
+    // spoor_ref (op->pinned, held submit..reap) -- and a held ref excludes this
+    // last-ref close. Weft-7 F3: the clear is a RELEASE store paired with those
+    // readers' ACQUIRE loads (symmetry + defense-in-depth: the ref-exclusion
+    // makes it non-racy today; the pairing keeps it sound if a future reader
+    // ever reads priv->weft without first taking the Spoor ref the invariant
+    // above requires). NULL the slot BEFORE freeing so it never names a freed
+    // binding.
+    struct weft_binding *wb = __atomic_load_n(&p->weft, __ATOMIC_ACQUIRE);
+    if (wb) {
+        __atomic_store_n(&p->weft, NULL, __ATOMIC_RELEASE);
+        weft_binding_release(wb);
     }
 
     // F2 (F236 close) discipline — order matters:
