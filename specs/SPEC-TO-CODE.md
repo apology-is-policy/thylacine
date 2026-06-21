@@ -1367,3 +1367,55 @@ durable regression for this surface (the Weft-7 audit). Exercised by
 `burrow_share_into` page; the SB hardware reordering itself is the spec's + the
 seq-cst code's proof). See NET-THROUGHPUT.md §5.2-2 / §5.4 + ARCH §28 I-9 +
 `docs/reference/125-weft.md`.
+
+## sched_tickless.tla — TI-spec (#299); model-first, impl mapping at TI-1/TI-2
+
+The tickless idle (NO_HZ_IDLE) one-shot ARM-RACE (I-9). A **sibling** of the
+audited `scheduler.tla`, not an extension: `scheduler.tla` already proves the
+tickless WAKE-correctness — its `wfi`/IPI/`Wake` model never treats the periodic
+tick as a wake source, and `LatencyBound` holds under exactly the IPI +
+deadline-`Wake` sources tickless leans on. The arm-race needs `EnterWFI` (atomic
+there) split into a register + park step + a new flag + a `NotifyWFIPeer`
+precondition change, which would ripple through `scheduler.tla`'s 11 cfgs — the
+`sched_oncpu`/`sched_alpha` precedent of a focused sibling. See
+`docs/TICKLESS-IDLE.md` §7 + ARCH §8.6 / §8.10 / §25.2.
+
+### Model ↔ impl
+
+- `registered[cpu]` ↔ the impl's `idle_in_wfi` flag (`kernel/sched.c`
+  `sched_set_idle_in_wfi(true)` in `bootcpu_idle_main` + the `per_cpu_main` idle
+  loop). The "register" half of register-then-observe.
+- `parked[cpu]` ↔ the CPU halted in WFI with the one-shot armed.
+- `pending[cpu]` ↔ a runnable thread placed in this CPU's runq.
+- `Register(cpu)` ↔ `sched_set_idle_in_wfi(true)` set BEFORE the arm + WFI.
+- `Park(cpu)` ↔ `timer_arm_oneshot_cnt(min(nearest deadline, now + backstop))` +
+  `wfi` (TI-1 `timer_arm_oneshot_cnt` / `timerwait_earliest_deadline`; TI-2 the
+  idle-loop arm). CORRECT: requires `registered` (the ordering guard).
+- `PlaceWork(cpu)` ↔ a peer's `ready()` / `wakeup()` placing a thread + the
+  `sched_notify_idle_peer()` `IPI_RESCHED` decision keyed on `idle_in_wfi`
+  (`kernel/sched.c:569`): registered ⇒ IPI ⇒ park lifted.
+- `Dispatch(cpu)` ↔ `pick_next` / `Resume` running the placed thread.
+
+### Bug class (executable counterexample)
+
+`sched_tickless_buggy.cfg` (`BUGGY_PARK = TRUE`) ↔ `BuggyPark` = park WITHOUT
+registering (arm-before-register). A peer placing work reads `idle_in_wfi =
+FALSE`, sends no IPI, and the CPU stays parked with runnable work — `NoLostWake`
+(~(parked ∧ pending)) VIOLATED at depth 4 (Block → BuggyPark → PlaceWork). The
+register-then-observe ordering (TI-2) is what forbids it.
+
+### TLC posture
+
+- `sched_tickless.cfg` (clean, `BUGGY_PARK = FALSE`, 2 CPUs): `TypeOK` +
+  `NoLostWake` + `ParkedImpliesRegistered` + `RunningNotParked` invariants + the
+  `EventuallyRuns` liveness (WF on `Dispatch`). GREEN — 36 distinct states.
+- `sched_tickless_buggy.cfg` (`BUGGY_PARK = TRUE`, 1 CPU): `NoLostWake` VIOLATED
+  — the executable counterexample.
+
+The deadline one-shot (the timed-sleeper wake) + the 100 ms backstop
+(defense-in-depth vs a hypothetical dropped IPI) are ORTHOGONAL to the arm-race
+and prose-validated (`docs/TICKLESS-IDLE.md` §3.1 / §4); they are deliberately
+unmodeled, so the buggy cfg is a clean lost-wake counterexample rather than a
+masked latency hiccup. The runtime regression (TI-2/TI-3): a deadlined sleeper
+wakes on time under tickless; a cross-CPU `ready()` wakes a tickless CPU; an idle
+CPU's tick count stops advancing.
