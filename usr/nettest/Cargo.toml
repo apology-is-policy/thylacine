@@ -1,0 +1,15 @@
+[package]
+name = "nettest"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "nettest"
+path = "src/main.rs"
+
+[dependencies]
+libthyla-rs = { path = "../lib/libthyla-rs" }
+# The Bonfire palette + the backpressure-aware send_all.
+coreutils = { path = "../coreutils" }

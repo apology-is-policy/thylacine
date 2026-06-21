@@ -1,0 +1,50 @@
+#!/bin/ut
+# net-demo.ut -- a tour of the native Thylacine /net tools (aux/apps).
+#   net-demo.ut      (lives in /bin; runs from anywhere)
+#
+# Runs what works in-guest with no host peer (deterministic + best-effort
+# bounded), then prints the throughput commands that need a host peer. Full
+# plans + DNS examples: /usr/apps/NET-APPS.md. Every tool here colors its own
+# output (the Bonfire palette); add --color=never for clean bytes.
+
+echo '=================================================='
+echo '  Thylacine /net -- a tour of the native tools'
+echo '=================================================='
+echo ''
+
+echo '-- 1. the network config (the DHCP lease) --'
+ipconfig
+echo ''
+
+echo '-- 2. ping the in-guest loopback (auto-answers) --'
+ping -c 3 127.0.0.1
+echo ''
+
+echo '-- 3. the Weft yardstick: the memcpy copy-tax --'
+echo '      (the per-byte cost the zero-copy dataplane removes)'
+weft-bench -n 64
+echo ''
+
+echo '-- 4. dial out through the NIC (best-effort) --'
+echo '      (numeric, so no DNS; needs outbound slirp internet)'
+dial 1.1.1.1 443
+echo ''
+
+echo '-- 5. the toolbox (run TOOL --help for worked examples) --'
+echo '      nc          TCP/UDP byte-pump + the bulk load generator'
+echo '      dial        /net/cs reachability tester + RTT'
+echo '      con         interactive dial-string client'
+echo '      tcpproxy    forwarding splice (a throughput torture)'
+echo '      httpd       static HTTP/1.1 file server'
+echo '      nettest     host-paired bandwidth bench'
+echo '      weft-bench  zero-copy dataplane yardstick'
+echo ''
+
+echo '-- 6. throughput, host-paired (run with a host peer) --'
+echo '      httpd -p 8080 /            # host: curl http://GUEST:8080/'
+echo '      nettest -s                 # host: dd .. | nc GUEST 5555'
+echo '      nc -l 9999 > /dev/null     # host: nc GUEST 9999 < bigfile'
+echo '      (full plans + DNS examples: /usr/apps/NET-APPS.md)'
+echo ''
+
+echo 'the thylacine has surveyed its territory.'

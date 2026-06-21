@@ -1,0 +1,15 @@
+[package]
+name = "httpd"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "httpd"
+path = "src/main.rs"
+
+[dependencies]
+libthyla-rs = { path = "../lib/libthyla-rs" }
+# The Bonfire palette + the shared send_all (backpressure-aware full write).
+coreutils = { path = "../coreutils" }
