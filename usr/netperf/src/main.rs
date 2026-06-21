@@ -532,7 +532,7 @@ fn weft_throughput(total: u64) -> Result<(), &'static str> {
         0
     };
     t_putstr(&format!(
-        "netperf MW weft-throughput: {} KiB over lo in {}.{:03} ms; {} KiB/s (zero-copy push, {} KiB ring; aggregate is POLLOUT-readiness-stall-bound #221, equal to M2's byte-copy -- the zero-copy win is in the data-move time, see breakdown)\n",
+        "netperf MW weft-throughput: {} KiB over lo in {}.{:03} ms; {} KiB/s (zero-copy push, {} KiB ring; #221-fixed ~6x; residual stall is the loopback window-update round-trip; byte-copy is also SYS_RW_MAX=4KiB/op-capped while weft bypasses it -- the zero-copy data-move is ~2x faster, see breakdown)\n",
         total / 1024,
         dt.as_millis(),
         dt.as_micros() % 1000,

@@ -141,11 +141,30 @@ orphan-adopter when the warden exits; its I-34 allowance is bound to its own Pro
 (confer-at-spawn, #160), so the warden's exit neither revokes the NIC nor reaps
 the daemon.
 
-The resident loop honors smoltcp's `poll_delay` hint, clamped to `[50 ms, 1 s]`:
-a floor that forecloses a 0 ms busy-spin (the #108 idle-spin class), a ceiling
-that keeps netd responsive and bounds the idle-wakeup rate. With no active
-sockets the hint is the DHCP renew deadline, so an idle netd wakes ~once/second.
-net-2b-2 folds the 9P accept into this loop.
+The resident loop honors smoltcp's `poll_delay` hint, clamped to `[50 ms, 1 s]`
+when **idle** (no connection has a pending probe): a floor that forecloses a 0 ms
+busy-spin (the #108 idle-spin class), a ceiling that keeps netd responsive and
+bounds the idle-wakeup rate. With no active sockets the hint is the DHCP renew
+deadline, so an idle netd wakes ~once/second. net-2b-2 folds the 9P accept into
+this loop.
+
+**#291 -- the active re-poll cap.** When a connection HAS a pending probe (a
+deferred read / readiness / accept / connect), the loop honors `poll_delay`
+clamped to `[1 ms, ACTIVE_POLL_MAX_MS]` (`ACTIVE_POLL_MAX_MS = 2 ms`) instead of
+the 50 ms floor. This is the loopback-throughput fix: on the resident `lo` stack
+the TCP window-update that unblocks a parked bulk sender is driven by `net.poll`
+with no 9P frame to wake on, and smoltcp exposes no prompt timer for it via
+`poll_delay`, so only frequent re-polling catches it. The old flat 50 ms floor
+throttled it to ~50 ms/stall -- ~95% of bulk loopback time, capping throughput at
+~2.4 MiB/s; the 2 ms cap lifts bulk loopback ~6x to **~14 MiB/s** (M2 byte-copy
+and MW weft alike; NET-PERF / NET-THROUGHPUT #290). The 1 ms floor preserves the
+anti-busy-spin guarantee. **Tradeoff:** while a probe is pending netd re-polls at
+up to ~500 Hz, so a long-lived idle blocked-reader connection polls faster than
+the old 50 ms -- bounded by `MAX_CONNS` and benign at v1.0 (transient `/net`
+clients; no idle-blocked-reader server in the workload). A NIC read is now also
+re-polled within ~2 ms (vs the old 50 ms RX-wake floor -- a latency bonus). The
+v1.x refinement is a loopback-vs-NIC-aware cap (only the `lo` stack needs the fast
+re-poll; a NIC read is RX-latency-bounded and could keep the 50 ms floor).
 
 ## net-2b-2: the 9P /net server
 

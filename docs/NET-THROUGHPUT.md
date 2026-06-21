@@ -862,10 +862,26 @@ the 4 KiB window, so it never stalled, vs MW at 256 KiB which did). **(2)** Weft
 per-op cost is EQUAL, so there is NO Loom/`Tweftio` penalty). **(3)** ~95% of BOTH aggregates is
 the POLLOUT readiness-stall and it is IDENTICAL for the two transports (M2 ~100620 µs, MW
 ~101519 µs — transport-independent): a bulk sender fills the 4 KiB window then waits for the
-writable edge via the dev9p.poll bridge — the registered seam **#221** (make the readiness wake
-prompt — helps ALL streaming, byte-copy included) / **#288** (grow the socket window). NEITHER
-is a weft defect. The bench now reports a `weft_breakdown` line for both M2+MW. The full
-window/msize sweep + the NIC-path Weft delta (items 1-3, 5) stay the v1.x measurement backlog.
+writable edge, which on the resident `lo` stack is driven by `net.poll` with no 9P frame to
+wake on. NEITHER is a weft defect. The bench now reports a `weft_breakdown` line for both M2+MW.
+
+**#221 LANDED 2026-06-21 (the readiness-stall fix; ~6× loopback throughput).** Root cause:
+netd's serve loop forced a flat 50 ms re-poll while any connection had a pending probe, and
+smoltcp exposes no prompt timer for the loopback window-update — so the unblock waited up to
+50 ms/stall. Fix (netd-only, off the audited kernel surface): honor smoltcp's `poll_delay`
+clamped to `[1 ms, 2 ms]` while a probe is pending (vs the idle 50 ms floor). Result: M2 byte-copy
+2370 → **14267 KiB/s**, MW weft 2436 → **15073 KiB/s** (~6×), and MW now edges M2 — weft's
+~2× faster data-move finally surfaces in the aggregate once the shared stall shrinks. The
+residual stall (~12 ms over the transfer) is smoltcp's own loopback window-update round-trip.
+
+NOTE — **#288 ("grow netd's 4 KiB socket tx buffer") is mis-scoped (found #291).** netd's TCP
+socket buffers are ALREADY 64 KiB and msize is 32 KiB (Weft-0 #267). The real ~4 KiB/op cap is
+the KERNEL `SYS_RW_MAX = 4096` bounce buffer on the byte-copy path (every `SYS_WRITE` is capped
+at 4 KiB) -- which **weft BYPASSES** (it moves the ring slice in place, ~8 KiB/op here, the
+source of its ~2× data-move edge). So the only residual byte-copy lever is growing `SYS_RW_MAX`
+(a kernel-wide change that does NOT help weft, the future path); weft's own ceiling is the
+loopback drain / window-update timing, not a buffer size. The full window/msize sweep + the
+NIC-path Weft delta (items 1-3, 5) stay the v1.x measurement backlog.
 
 Per the no-host-load discipline: every timing boot is ground-truthed to the healthy guest
 end-state; a nondeterministic result is a guest race to hunt, never "host load."
