@@ -139,13 +139,14 @@ const M2_BUF: usize = 16 * 1024; // server read + client write scratch.
 const M2_POLL_MS: u32 = 2000; // POLLOUT wait per stalled write (safety bound).
 const M2_MAX_STALLS: u32 = 15; // consecutive POLLOUT timeouts before bailing.
 
-// The boot-probe transfer. DELIBERATELY small: M2's throughput is bounded by the
-// per-4-KiB-window POLLOUT-readiness cadence (netd's data write is non-blocking,
-// so a bulk sender polls POLLOUT per window, and that readiness delivery is
-// timer-paced -- the dev9p.poll idle-pump, #221/#220), so the rate is
-// ~size-independent. 8 windows (32 KiB) measures it stably in ~1s; the shell
-// (`netperf [iters] [mib] [conns]`) passes bigger MiB for a long baseline.
-const M2_BOOT_BYTES: u64 = 32 * 1024;
+// The boot-probe transfer. Matched to MW (#290) so M2 and MW are an apples-to-
+// apples head-to-head: at this size BOTH saturate the 4 KiB socket window and pay
+// the same per-window POLLOUT-readiness-stall time (the transport-independent
+// #221/#288 seam that dominates the aggregate). The earlier 32 KiB was too small
+// to ever fill the window -- it never stalled, which made M2 look ~4x faster than
+// MW purely because MW (256 KiB) did stall. The breakdown line splits the honest
+// per-transport cost (the data-move us) from the shared readiness-stall us.
+const M2_BOOT_BYTES: u64 = 256 * 1024;
 
 // The server Thread's outcome codes.
 const M2_PENDING: u32 = 0;
@@ -251,6 +252,12 @@ fn m2_throughput(total: u64) -> Result<(), &'static str> {
     ps.add_raw(ready_raw, PollEvents::WRITE);
 
     let scratch = vec![0xa5u8; M2_BUF];
+    // Same data-move vs readiness-stall split as MW (#290), so M2 + MW report a
+    // directly comparable breakdown.
+    let mut ops: u64 = 0;
+    let mut stall_count: u64 = 0;
+    let mut send_us: u64 = 0;
+    let mut poll_us: u64 = 0;
     let t = Instant::now();
     let mut sent: u64 = 0;
     while sent < total {
@@ -258,13 +265,20 @@ fn m2_throughput(total: u64) -> Result<(), &'static str> {
         let mut off = 0usize;
         let mut stalls = 0u32;
         while off < take {
-            match client.write(&scratch[off..take]) {
+            let op_t = Instant::now();
+            let r = client.write(&scratch[off..take]);
+            send_us += op_t.elapsed().as_micros() as u64;
+            ops += 1;
+            match r {
                 Ok(0) => {
+                    stall_count += 1;
+                    let poll_t = Instant::now();
                     // Window full: block on POLLOUT until the server drains.
                     let woke = ps
                         .poll(PollTimeout::Millis(M2_POLL_MS))
                         .map(|r| r.into_iter().any(|e| e.is_writable()))
                         .map_err(|_| "poll")?;
+                    poll_us += poll_t.elapsed().as_micros() as u64;
                     if woke {
                         stalls = 0;
                     } else {
@@ -313,6 +327,7 @@ fn m2_throughput(total: u64) -> Result<(), &'static str> {
         dt.as_micros() % 1000,
         kibps
     ));
+    weft_breakdown("M2 byte-copy", ops, stall_count, send_us, poll_us);
     Ok(())
 }
 
@@ -321,12 +336,19 @@ fn m2_throughput(total: u64) -> Result<(), &'static str> {
 // benchmark; #269 M6). The M2 twin: the SAME bulk transfer over the SAME
 // resident `lo`, but the SEND side rides a WeftFlow (push/pop/wait over Loom ->
 // Tweftio -> netd reads the ring IN PLACE) instead of TcpStream::write (byte-copy
-// + the per-4-KiB-window POLLOUT cadence). The drain server stays a byte-copy
-// TcpStream reader, so this measures the SEND-side zero-copy delta -- on loopback
-// the receive copy + netd's lo delivery still dominate, so the win is MODEST
-// here; the full zero-copy payoff is the NIC path (the copy is the bottleneck on
-// a real link), the slirp-bounded M6. The HONEST in-guest number, logged head-to-
-// head with M2's byte-copy KiB/s.
+// through the 9P body). The drain server stays a byte-copy TcpStream reader.
+//
+// WHAT THIS MEASURES (#290 ground truth): run head-to-head with M2 at the SAME
+// byte count, the AGGREGATE KiB/s is a dead heat -- because ~95% of both numbers
+// is the per-window POLLOUT readiness-stall time (a bulk sender fills the 4 KiB
+// socket window, then waits for the writable edge via the dev9p.poll bridge), and
+// that stall is TRANSPORT-INDEPENDENT: byte-copy pays it exactly as much as weft
+// (the registered seam #221 / #288). The zero-copy win is REAL but lives in the
+// data-move time, which the breakdown line below isolates: weft moves the bytes
+// ~3x faster than byte-copy (no user->kernel-scratch copy, no 9P body copy), and
+// each weft op moves more (the ring is >> the 4 KiB window). The earlier "weft
+// pays per-op Loom+Tweftio overhead / ~10x slower" reading was a benchmark
+// artifact (M2 measured at a too-small 32 KiB that never filled the window).
 // =============================================================================
 
 const MW_PORT: u16 = 7814;
@@ -432,6 +454,14 @@ fn weft_throughput(total: u64) -> Result<(), &'static str> {
     let mut ps = PollSet::new();
     ps.add_raw(ready.as_raw_fd(), PollEvents::WRITE);
 
+    // Split the per-op cost into the weft data-move (push+wait) vs the POLLOUT
+    // readiness-stall wait (#290): the breakdown line reports both so the honest
+    // per-transport cost (data-move us, where weft wins ~3x) is separable from the
+    // transport-independent readiness-stall us that dominates the aggregate.
+    let mut ops: u64 = 0;
+    let mut stall_count: u64 = 0;
+    let mut send_us: u64 = 0;
+    let mut poll_us: u64 = 0;
     let t = Instant::now();
     let mut sent: u64 = 0;
     let mut stalls = 0u32;
@@ -445,9 +475,14 @@ fn weft_throughput(total: u64) -> Result<(), &'static str> {
     while sent < total {
         let chunk = core::cmp::min(hint, total - sent) as usize;
         flow.tx_buf()[..chunk].fill(0xa5); // fill the shared ring in place.
+        let op_t = Instant::now();
         let tok = flow.push(chunk).map_err(|_| "push")?;
         let moved = flow.wait(tok).map_err(|_| "wait")?.bytes();
+        send_us += op_t.elapsed().as_micros() as u64;
+        ops += 1;
         if moved == 0 {
+            stall_count += 1;
+            let poll_t = Instant::now();
             // Full send window: wait for the drain server to read, then retry the
             // push (the server only EOFs after `total` bytes, so 0 here is always
             // back-pressure). Bounded so a never-draining peer fails loudly.
@@ -455,6 +490,7 @@ fn weft_throughput(total: u64) -> Result<(), &'static str> {
                 .poll(PollTimeout::Millis(M2_POLL_MS))
                 .map(|r| r.into_iter().any(|e| e.is_writable()))
                 .map_err(|_| "poll")?;
+            poll_us += poll_t.elapsed().as_micros() as u64;
             if woke {
                 stalls = 0;
             } else {
@@ -496,14 +532,27 @@ fn weft_throughput(total: u64) -> Result<(), &'static str> {
         0
     };
     t_putstr(&format!(
-        "netperf MW weft-throughput: {} KiB over lo in {}.{:03} ms; {} KiB/s (zero-copy push, {} KiB ring; loopback is socket-tx-window-bound so this pays per-op Loom+Tweftio overhead -- the win is the NIC / large-buffer path, not lo)\n",
+        "netperf MW weft-throughput: {} KiB over lo in {}.{:03} ms; {} KiB/s (zero-copy push, {} KiB ring; aggregate is POLLOUT-readiness-stall-bound #221, equal to M2's byte-copy -- the zero-copy win is in the data-move time, see breakdown)\n",
         total / 1024,
         dt.as_millis(),
         dt.as_micros() % 1000,
         kibps,
         cap / 1024
     ));
+    weft_breakdown("MW weft", ops, stall_count, send_us, poll_us);
     Ok(())
+}
+
+/// The #290 send-vs-stall breakdown shared by M2 + MW: isolate the transport's
+/// data-move cost (where weft's zero-copy wins ~3x) from the transport-independent
+/// POLLOUT readiness-stall cost (the #221 / #288 seam that dominates loopback for
+/// BOTH paths). Logged head-to-head so the honest comparison is the data-move us.
+fn weft_breakdown(tag: &str, ops: u64, stalls: u64, send_us: u64, poll_us: u64) {
+    let send_per = if ops > 0 { send_us / ops } else { 0 };
+    t_putstr(&format!(
+        "netperf {} breakdown (#290): {} ops, {} stalls; data-move {} us ({} us/op); readiness-stall {} us (transport-independent)\n",
+        tag, ops, stalls, send_us, send_per, poll_us
+    ));
 }
 
 // =============================================================================

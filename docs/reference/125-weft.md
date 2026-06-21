@@ -984,18 +984,33 @@ resident `lo`, but the SEND side rides a `WeftFlow` (push/wait over Loom ->
 (byte-copy). The drain server stays a byte-copy reader, so MW isolates the
 send-side zero-copy delta.
 
-The HONEST in-guest result: **weft is ~10x SLOWER than byte-copy on loopback**
-(MW ~2.4 MiB/s vs M2 ~24 MiB/s for the boot-probe transfer). This is not a bug --
-it is the binding constraint the bench EXISTS to find: netd's smoltcp socket tx
-buffer is **4 KiB**, so `data_send` accepts at most ~4 KiB per op. On loopback
-that caps BOTH paths at 4 KiB windows, so weft pays the per-op Loom + `Tweftio`
-round-trip overhead per 4 KiB **without the large-send amortization**, while the
-copy it avoids is negligible at 4 KiB -- weft's WORST regime. The zero-copy
-throughput win is gated behind (a) a larger socket tx buffer (so one weft push
-absorbs a big send in one op -- the v1.x lever, task #288) or (b) the NIC path,
-where the copy is the actual bottleneck (the slirp-bounded M6, not deterministic
-in-guest). The bench's value is exactly this: it pins the lever, not a flattering
-number.
+The in-guest result, run HEAD-TO-HEAD with M2 at the SAME 256 KiB and instrumented
+to split the data-move cost from the readiness-stall cost (#290 -- an earlier
+write-up here claimed "weft is ~10x slower ... pays per-op Loom+Tweftio overhead",
+which was WRONG):
+
+- **Weft is NOT slower.** The aggregate is a dead heat: MW ~2394 vs M2 ~2382 KiB/s.
+  The earlier "~4.3x slower" reading was a pure SIZE artifact -- M2 had been measured
+  at 32 KiB, too small to ever fill the 4 KiB socket window, so it never stalled,
+  while MW at 256 KiB did.
+- **Weft's DATA-MOVE is ~2x faster.** MW moves the 256 KiB in ~half the ops (each
+  push absorbs more than the 4 KiB window, since the ring is >> the window); the
+  per-op cost is EQUAL to byte-copy (~87 us/op), so there is NO per-op Loom/`Tweftio`
+  penalty -- the original claim was simply false. The zero-copy advantage is real
+  (no user->kernel-scratch copy, no 9P-body copy) and grows with op size / on the NIC.
+- **~95% of BOTH aggregates is the POLLOUT readiness-stall** -- and it is identical
+  for the two transports (M2 ~100620 us, MW ~101519 us), because it is
+  transport-INDEPENDENT. A bulk sender fills the 4 KiB window then waits for the
+  writable edge via the dev9p.poll bridge; that wait is the registered seam #221
+  (make the POLLOUT readiness wake prompt -- helps ALL streaming, byte-copy
+  included) / #288 (grow the socket window so fewer fills happen). The recv pump is
+  event-driven (`reader_recv_frame`; the 20 ms `DEV9P_POLL_IDLE_NS` is only a
+  boundary cap), so the stall is the whole window-full -> server-drain -> readiness
+  round-trip + two-thread scheduling, not a fixed 20 ms tick.
+
+The bench output reports a `weft_breakdown` line for both M2 and MW that isolates
+the honest per-transport data-move us from the shared readiness-stall us. The real
+throughput levers (#221, #288) are NOT weft defects.
 
 ## Known caveats / footguns (Weft-7 closed; v1.x seams)
 

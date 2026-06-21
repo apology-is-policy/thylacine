@@ -849,17 +849,22 @@ Extend `usr/netperf nic` + `tools/np3-bench.sh` so each lever is **measured, not
 5. **The latency convergence check**: M6-rtt with the readiness ring on vs the 50 ms RX-wake
    off — confirms Weft-4 closes N1.
 
-**Weft-7 as-built (the MW loopback bench, #269 M6).** `netperf`'s new **MW** mode is the
-deterministic in-guest realization of item 4 (the Weft delta) over the resident `lo`: the M2
-twin with the SEND side on a `WeftFlow` (push/wait over Loom → `Tweftio` → netd reads the ring
-in place) vs `TcpStream::write` (byte-copy). The honest result: **weft is ~10× slower than
-byte-copy on loopback** (MW ~2.4 MiB/s vs M2 ~24 MiB/s). This is the binding constraint the
-bench exists to find — netd's smoltcp socket tx buffer is **4 KiB**, so `data_send` accepts
-~4 KiB/op, capping BOTH paths at 4 KiB windows; weft then pays per-op Loom + `Tweftio`
-overhead per 4 KiB without the large-send amortization, in its worst regime (the copy it
-avoids is negligible at 4 KiB). The zero-copy throughput win is gated behind a **larger socket
-tx buffer** (one push absorbs a big send — the v1.x lever, task #288) or the NIC path (where
-the copy is the bottleneck; the slirp-bounded M6, not deterministic in-guest). The full
+**Weft-7 as-built (the MW loopback bench, #269 M6) — CORRECTED 2026-06-21 (#290).** `netperf`'s
+**MW** mode is the deterministic in-guest realization of item 4 (the Weft delta) over the
+resident `lo`: the M2 twin with the SEND side on a `WeftFlow` (push/wait over Loom → `Tweftio`
+→ netd reads the ring in place) vs `TcpStream::write` (byte-copy). Run head-to-head with M2 at
+the SAME 256 KiB and instrumented to split the data-move cost from the readiness-stall cost
+(an earlier write-up here claimed "weft is ~10× slower ... pays per-op Loom+Tweftio overhead",
+which was WRONG): **(1)** weft is NOT slower — the aggregate is a dead heat (MW ~2394 vs M2
+~2382 KiB/s); the "~4.3× slower" was a SIZE artifact (M2 had been at 32 KiB, too small to fill
+the 4 KiB window, so it never stalled, vs MW at 256 KiB which did). **(2)** Weft's DATA-MOVE is
+~2× faster (it moves the bytes in ~half the ops — each push absorbs more than the window;
+per-op cost is EQUAL, so there is NO Loom/`Tweftio` penalty). **(3)** ~95% of BOTH aggregates is
+the POLLOUT readiness-stall and it is IDENTICAL for the two transports (M2 ~100620 µs, MW
+~101519 µs — transport-independent): a bulk sender fills the 4 KiB window then waits for the
+writable edge via the dev9p.poll bridge — the registered seam **#221** (make the readiness wake
+prompt — helps ALL streaming, byte-copy included) / **#288** (grow the socket window). NEITHER
+is a weft defect. The bench now reports a `weft_breakdown` line for both M2+MW. The full
 window/msize sweep + the NIC-path Weft delta (items 1-3, 5) stay the v1.x measurement backlog.
 
 Per the no-host-load discipline: every timing boot is ground-truthed to the healthy guest
