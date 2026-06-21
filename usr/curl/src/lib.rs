@@ -21,6 +21,7 @@ use alloc::vec::Vec;
 use libthyla_rs::fs::File;
 use libthyla_rs::io::{self, Read, Write};
 use libthyla_rs::net::{self, SocketAddrV4, TcpStream};
+use libthyla_rs::time::Instant;
 
 /// The canonical system root-cert bundle (NET-DESIGN section 9; baked at build).
 pub const CA_BUNDLE: &str = "/etc/ssl/certs/ca-certificates.crt";
@@ -125,6 +126,141 @@ pub fn http_exchange<S: Read + Write>(s: &mut S, req: &str) -> Result<Vec<u8>, S
         }
     }
     Ok(resp)
+}
+
+// =============================================================================
+// streaming transfer + timing (the download path: no whole-body buffering)
+// =============================================================================
+
+/// A `Write` sink that counts the bytes written and discards them -- the
+/// streaming-discard target for the bench / a `-o /dev/null` download, so a
+/// large transfer never accumulates in memory (the `http_exchange` RESP_CAP path
+/// is for small fetches the caller wants to inspect).
+#[derive(Default)]
+pub struct CountSink {
+    pub n: u64,
+}
+impl Write for CountSink {
+    // io::Result is not re-exported publicly; err::Result is the same (public) type.
+    fn write(&mut self, buf: &[u8]) -> libthyla_rs::err::Result<usize> {
+        self.n += buf.len() as u64;
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> libthyla_rs::err::Result<()> {
+        Ok(())
+    }
+}
+
+/// Timing + size of a streamed transfer. All times are nanoseconds from the
+/// start of `fetch_stream` (so `connect_ns` covers resolve+connect+handshake,
+/// `ttfb_ns` is to the first body byte, `total_ns` is to EOF).
+pub struct StreamStats {
+    pub status: String,
+    pub body_bytes: u64,
+    pub connect_ns: u64,
+    pub ttfb_ns: u64,
+    pub total_ns: u64,
+}
+
+/// The head we will buffer before declaring a malformed response (a normal
+/// status line + headers is a few hundred bytes; 64 KiB is a generous ceiling).
+const HEAD_CAP: usize = 64 * 1024;
+
+/// Write `req`, parse the response head, then STREAM the body to `sink`
+/// chunk-by-chunk (no whole-body buffer), counting body bytes + recording the
+/// time-to-first-body-byte relative to `start`. Returns (status_line,
+/// body_bytes, ttfb_ns). Tolerates a head split across reads and a CRLF or
+/// bare-LF blank line.
+pub fn http_stream<S: Read + Write, W: Write>(
+    s: &mut S,
+    req: &str,
+    sink: &mut W,
+    start: Instant,
+) -> Result<(String, u64, u64), String> {
+    s.write_all(req.as_bytes())
+        .map_err(|_| "write request failed".to_string())?;
+    let mut head: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 16384];
+    let mut body_bytes: u64 = 0;
+    let mut ttfb_ns: u64 = 0;
+    let mut in_body = false;
+    loop {
+        match s.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                if in_body {
+                    if body_bytes == 0 {
+                        ttfb_ns = start.elapsed().as_nanos() as u64;
+                    }
+                    sink.write_all(&buf[..n])
+                        .map_err(|_| "sink write failed".to_string())?;
+                    body_bytes += n as u64;
+                    continue;
+                }
+                head.extend_from_slice(&buf[..n]);
+                let sep = find_subseq(&head, b"\r\n\r\n")
+                    .map(|i| (i, 4usize))
+                    .or_else(|| find_subseq(&head, b"\n\n").map(|i| (i, 2usize)));
+                if let Some((i, sep_len)) = sep {
+                    let body_start = i + sep_len;
+                    if head.len() > body_start {
+                        ttfb_ns = start.elapsed().as_nanos() as u64;
+                        let part = head[body_start..].to_vec();
+                        sink.write_all(&part)
+                            .map_err(|_| "sink write failed".to_string())?;
+                        body_bytes += part.len() as u64;
+                    }
+                    head.truncate(i); // keep only the header bytes for the status line
+                    in_body = true;
+                } else if head.len() > HEAD_CAP {
+                    return Err("response head too large".to_string());
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    Ok((status_line(&head).to_string(), body_bytes, ttfb_ns))
+}
+
+/// Parse + resolve + connect (+ TLS handshake for https) + stream the body to
+/// `sink`, returning the timing + size. The download path (vs `fetch`, which
+/// buffers a small response). `method` is "GET" or "HEAD".
+pub fn fetch_stream<W: Write>(
+    raw: &str,
+    method: &str,
+    sink: &mut W,
+) -> Result<StreamStats, String> {
+    let start = Instant::now();
+    let url = parse_url(raw)?;
+    let addr = net::resolve(&url.host, url.port)
+        .map_err(|_| format!("could not resolve host: {}", url.host))?;
+    let req = build_request(method, &url.host, &url.path);
+    let (status, body_bytes, ttfb_ns, connect_ns) = if url.https {
+        let mut f = File::open(CA_BUNDLE).map_err(|_| format!("read {} failed", CA_BUNDLE))?;
+        let pem = io::slurp(&mut f).map_err(|_| "read CA bundle failed".to_string())?;
+        let roots = tls::load_roots_pem(&pem).map_err(|_| "CA bundle parse failed".to_string())?;
+        let cfg = tls::client_config(roots);
+        let tcp = TcpStream::connect(addr).map_err(|_| format!("connect to {} failed", addr))?;
+        let mut s = tls::TlsStream::connect(tcp, &url.host, cfg)
+            .map_err(|e| format!("TLS handshake to {} failed: {}", url.host, e))?;
+        let connect_ns = start.elapsed().as_nanos() as u64; // resolve+connect+handshake
+        let (st, bb, ttfb) = http_stream(&mut s, &req, sink, start)?;
+        s.close();
+        (st, bb, ttfb, connect_ns)
+    } else {
+        let mut tcp =
+            TcpStream::connect(addr).map_err(|_| format!("connect to {} failed", addr))?;
+        let connect_ns = start.elapsed().as_nanos() as u64; // resolve+connect
+        let (st, bb, ttfb) = http_stream(&mut tcp, &req, sink, start)?;
+        (st, bb, ttfb, connect_ns)
+    };
+    Ok(StreamStats {
+        status,
+        body_bytes,
+        connect_ns,
+        ttfb_ns,
+        total_ns: start.elapsed().as_nanos() as u64,
+    })
 }
 
 /// First occurrence of `needle` in `hay`.
