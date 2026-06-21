@@ -105,8 +105,10 @@ struct CpuSched {
     // CPU's (the old "boot CPU stays FALSE forever" no longer holds). And since
     // #868 cpu0 ATTACHES IPI_RESCHED (smp_boot_cpu_ipi_init), so a peer's notify
     // wakes cpu0's idle immediately like any secondary -- cpu0 is a full SGI peer
-    // (it still ALSO has its always-armed timer as a <=1ms backstop). Modeled in
-    // `scheduler.tla` by `EnterWFI` + `IPI_Deliver`-clears-`wfi[dst]`.
+    // (TI-2: cpu0's idle now arms a 100 ms ONE-SHOT backstop, not the 1 kHz
+    // periodic; #868's reliable IPI is the primary wake, the one-shot self-heals
+    // a hypothetical dropped IPI). Modeled in `scheduler.tla` by `EnterWFI` +
+    // `IPI_Deliver`-clears-`wfi[dst]`.
     volatile bool  idle_in_wfi;
 
     // HMP foundation (#864, ARCH §8.4.4): this CPU's normalized capacity class
@@ -1790,6 +1792,10 @@ static void timerwait_tick(void) {
 // ===========================================================================
 
 u64 tickless_target_cnt(u64 now_cnt, u64 earliest_deadline, u64 backstop_cnt) {
+    // now_cnt + backstop_cnt cannot overflow on v1.0 targets (a 62.5 MHz CNTVCT
+    // has a ~300,000-year horizon before u64 wrap). If it ever did, the wrapped
+    // small `backstop` would be passed to timer_arm_oneshot_cnt, whose clamp
+    // turns target<=now into MIN -> a benign fire-ASAP wake, never a lost wake.
     u64 backstop = now_cnt + backstop_cnt;
     return (earliest_deadline != 0 && earliest_deadline < backstop)
          ? earliest_deadline : backstop;

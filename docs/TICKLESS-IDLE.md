@@ -295,8 +295,21 @@ inventory (ARCH 25.2 + CLAUDE.md) update with the spec commit.
 
 ---
 
-## 8. Expected result
+## 8. Result (MEASURED at TI-3)
 
-HVF idle: 332% -> ~0% (the durable fix; production parity). No change to
-running-thread behavior, the slice model, I-17, or the kernel-test timing.
-Verified by re-running the #299 measurement at TI-3.
+HVF idle: **332% -> ~0.3%** (the #299 method re-run: a direct `-serial file:`
+HVF boot to login, steady-state `top`/`ps` = 0.3-0.7% process CPU, the vCPU
+threads parked in `hvf_wfi` instead of churning `hvf_vcpu_exec` per-ms). A
+~1000x reduction -- and below the 250 Hz stopgap's 5.2%, because a genuinely-
+idle CPU now takes effectively zero ticks (the backstop is ~10 Hz) rather than a
+4 ms tick. No change to running-thread behavior, the slice model, I-17, or the
+kernel-test timing (the suite is 971/971 at `--cpus 4`, the secondary idle loop
+tickless). The durable fix; production parity (Linux NO_HZ_IDLE / FreeBSD
+dynticks).
+
+**TI-3 close (verified green):** the SMP gate PASS -- 0 corruption across all
+configs (default+UBSan x smp4/smp8, N=10 = 40 boots, 0 corruption / 0 timing);
+the focused Opus-4.8-max audit 0 P0 / 0 P1 / 0 P2 / 3 P3 (CLEAN, NOT dirty: F1
+stale-comment + F2 overflow-boundary-comment FIXED, F3 = this empirical proof,
+the documented close gate); spec gate GREEN (`sched_tickless` clean +
+`BUGGY_PARK` counterexample).

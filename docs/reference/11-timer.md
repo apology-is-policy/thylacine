@@ -247,9 +247,14 @@ Without `CNTHCTL_EL2.{EL1PCEN, EL1PCTEN} = 1` set during the EL2 → EL1 drop, E
 
 The EL1 non-secure physical timer is banked per PE (CPU). At P1-G with NCPUS=1, there's only one timer; Phase 2 SMP introduces per-CPU `g_ticks` counters. Until then, the global `g_ticks` is correct because only CPU 0 receives ticks.
 
-### No tickless / NOHZ mode
+### Tickless idle (NO_HZ_IDLE) — as-built (TI arc, #299)
 
-The timer fires unconditionally at 1 kHz. A modern Linux kernel suppresses the periodic tick when no thread needs it; we don't. Cost is ~50 µs/s per CPU = 0.005% — acceptable at v1.0. NOHZ is a post-v1.0 power optimization (matters for battery-powered hardware; QEMU virt doesn't care).
+The timer fires at 1 kHz for any **running** thread (slice accounting), but a **genuinely-idle** CPU stops the periodic tick and arms a **one-shot** instead. This is the as-built reversal of the original "the timer fires unconditionally at 1 kHz; we don't do NOHZ" caveat — the never-stopped tick was measured at **332% HVF host CPU when idle** (per-tick VTIMER exit + emulated-GICv2 MMIO vmexits + a WFI that never parks at the 1 ms period); see `docs/TICKLESS-IDLE.md` for the measurement + design.
+
+- **The primitive** (TI-1, `arch/arm64/timer.c`): `timer_arm_oneshot_cnt(u64 target_cnt)` arms the banked virtual timer as a one-shot at an absolute `CNTVCT` value, via the pure clamp `timer_oneshot_tval(target, now)` → `[TIMER_MIN_RELOAD, TIMER_MAX_RELOAD]` (target≤now → MIN = fire-ASAP; over-horizon → MAX). `TIMER_MIN_RELOAD`/`TIMER_MAX_RELOAD` are the public clamp contract in `timer.h`.
+- **The integration** (TI-2, `kernel/sched.c::sched_idle_park`): an idle CPU arms to `min(nearest g_timerwait deadline, now + TICKLESS_IDLE_BACKSTOP_NS=100ms)`. The 1 kHz tick is byte-unchanged for running threads (I-17 / the §8.2 slice model untouched). Work-arrival wakes ride the existing `IPI_RESCHED` (tick-independent). On wake the loop re-arms periodic (`timer_arm_this_cpu`) **before** dispatching placed work and runs `timerwait_tick()` explicitly (the re-arm deasserts the one-shot's pending IRQ). The I-9 no-lost-wake arm-race is register-then-observe (`specs/sched_tickless.tla`).
+- **The handler is unchanged**: when the one-shot fires it re-enters `timer_irq_handler`, which re-arms the periodic `g_reload` exactly as for any tick — correct the moment the CPU has runnable work. There is no `timer_disable_this_cpu` (the always-arm-the-backstop design makes it dead code).
+- **Cost**: an idle CPU wakes ~10×/s (the backstop) instead of 1000×/s → HVF idle ~0% (re-measured at TI-3). Timekeeping is unaffected (`CLOCK_MONOTONIC`/`REALTIME` ride `CNTVCT`, not the tick; `g_ticks` freezes during cpu0 idle but is busy-wait/diagnostic-only, run from a running context). Full design + invariants: `docs/TICKLESS-IDLE.md` + ARCH §8.6.
 
 ### `timer_busy_wait_ticks` doesn't yield
 
