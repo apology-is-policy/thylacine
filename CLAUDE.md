@@ -81,14 +81,14 @@ Concrete pattern:
 5. Implement against the model. Cross-reference each impl step to the corresponding spec action in comments. Keep `specs/SPEC-TO-CODE.md` current.
 6. When the impl surfaces a new mechanism the spec didn't cover, extend the spec FIRST, then update the impl.
 
-The committed spec inventory is **25 modules** (the authoritative table lives
+The committed spec inventory is **26 modules** (the authoritative table lives
 in `ARCHITECTURE.md §25.2`): `scheduler` / `territory` / `handles` / `burrow`
 / `9p_client` / `poll` / `pipe` / `tsleep` / `corvus` / `sched_ctxsw` /
 `sched_oncpu` / `sched_alpha` / `asid` / `death_wake` / `loom` /
 `loom_multishot` / `loom_order` / `cons_poll` / `loom_devgone` / `allowance` /
 `net_poll` / `net_poll_teardown` / `weft` / `weft_readiness` /
-`sched_tickless`, each with clean
-cfg(s) + buggy-cfg counterexamples (87 buggy cfgs total). Three of the Phase-0 planned nine
+`sched_tickless` / `sched_rebalance`, each with clean
+cfg(s) + buggy-cfg counterexamples (89 buggy cfgs total). Three of the Phase-0 planned nine
 (`futex.tla`, `notes.tla`, `pty.tla`) were dropped per the 2026-05-23
 suspension — torpor + notes are prose-validated; PTY is unbuilt (LS-8, #952).
 

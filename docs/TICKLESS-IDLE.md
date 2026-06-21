@@ -313,3 +313,155 @@ the focused Opus-4.8-max audit 0 P0 / 0 P1 / 0 P2 / 3 P3 (CLEAN, NOT dirty: F1
 stale-comment + F2 overflow-boundary-comment FIXED, F3 = this empirical proof,
 the documented close gate); spec gate GREEN (`sched_tickless` clean +
 `BUGGY_PARK` counterexample).
+
+---
+
+## 9. TI-4 -- the work-conservation regression + the push synthesis
+
+Status: DESIGN (Direction A, user-voted 2026-06-21). TI-4a (the spec) lands
+first; TI-4b..e fill in the as-built impl. Detail of the investigation:
+`memory/project_ti4_research.md`.
+
+### 9.1 The regression TI-3 missed
+
+TI-3 was gated on CORRECTNESS (the SMP gate = 0 corruption) and IDLE COST (the
+HVF re-measure = 332% -> 0.3%), but **never on multi-core THROUGHPUT.** A 2.4x
+boot regression sailed through: HVF boot-to-`login:` went **7.2s -> 17.5s**
+(ground-truthed, every timing boot to a healthy guest end-state).
+
+Root cause (ground-truthed against the code): the never-stopped 1 kHz tick was
+silently the **work-stealing RE-POLL.** Thylacine's v1.0 work-conservation on a
+uniform topology is *pull-with-one-kick*: `ready()` enqueues a waking thread on
+the WAKING CPU's own run tree, then `sched_notify_idle_peer()` kicks exactly ONE
+idle peer (scan from `self+1`, no rotation) to come `try_steal`. The kick is
+best-effort -- it wakes one peer, may re-target a not-yet-cleared peer, and is
+suppressed entirely during the in-kernel test phase (`g_sched_notify_enabled`
+off). The 1 kHz tick was the catch-all: every idle CPU re-ran `sched()` ->
+`try_steal` every 1 ms, so whatever the single kick missed was pulled within
+1 ms. NO_HZ_IDLE removed that re-poll; queued work then stranded on a busy CPU
+until the 100 ms backstop -> the spawn+IPC-heavy boot serialized.
+
+Two load-bearing re-poll consumers: (1) the in-kernel test phase (notify gated
+off -> EVERY cross-CPU handoff relied on cpu0's idle re-poll; cpu0's
+`bootcpu_idle_main` went tickless during tests because it always passed
+`tickless=true`); (2) the production post-test phase (the single kick has gaps
+the 1 ms tick covered).
+
+**The process lesson (owned):** a tickless-idle change is a SCHEDULER change;
+gating it on idle cost + correctness without a throughput gate was the miss. The
+TI-4 fix MUST add a perf gate (section 9.5) so this cannot regress silently again.
+The "load-aware backstop" experiments (a park-time "any peer busy" signal, a
+50 ms activity-window) all FAILED -- a park-time signal cannot see work readied
+AFTER the park, and an activity-window driven by a single ~20 Hz periodic poller
+drags every idle CPU to a fast backstop (~100% idle). The fix is not a smarter
+poll; it is to stop polling.
+
+### 9.2 Prior art (SOTA convergence -- the two-mechanism minimum)
+
+Three primary-source research passes (Linux NO_HZ_IDLE, FreeBSD ULE, seL4 +
+Zircon) converge on splitting work-conservation into TWO distinct mechanisms,
+and conflating them is exactly the TI-3 mistake:
+
+- **PLACEMENT is push, never tick-driven -- everywhere.** Linux
+  `try_to_wake_up` -> `ttwu_queue` -> unconditional `smp_send_reschedule` to a
+  parked CPU; seL4 `possibleSwitchTo` -> enqueue-on-target + reschedule-IPI;
+  Zircon `FindTargetCpu` (prioritizes idle cores) + `mp_reschedule`. The
+  periodic tick was NEVER how a freshly-woken task reached an idle CPU. So
+  stopping the idle tick creates no placement hole -- *if* placement pushes.
+- **REBALANCE of ALREADY-QUEUED work is the leg the tick covered**, and a fixed
+  idle backstop is the wrong shape for it (it is *periodic* -- the cost being
+  deleted -- and *idle-side* -- the parked CPU cannot pull). The SOTA answer is
+  the inverse: a BUSY CPU -- still ticking, since tickless stops only the IDLE
+  tick -- detects imbalance and PUSHES (kicks) one idle peer. Linux moved nohz
+  balancing pull->push specifically so idle CPUs stay fully tickless; ULE kicks
+  an idle peer at enqueue when it has excess + keeps a slow (~1 s) `sched_balance`
+  backstop; seL4 gives up auto-balancing entirely; Zircon keeps pull-steal but
+  triggers it at reschedule context, never an idle poll.
+
+Consensus minimal sound design: **push-complete PLACEMENT (eliminates the wakeup
+poll) + push-on-overload REBALANCE (a busy CPU kicks an idle peer) + a coarse
+periodic backstop as pure defense-in-depth.** No idle CPU ever polls.
+
+### 9.3 The Thylacine mapping (Direction A)
+
+The fix lands cleanly because most of it already exists:
+
+- **Push-complete placement.** `select_target_cpu` is extended to PREFER an idle
+  CPU when one exists (reading the existing `idle_in_wfi` flag), production-gated
+  on `g_sched_notify_enabled`. The cross-CPU enqueue MECHANISM already exists --
+  `ready_on(target)` + `need_resched_set(target)` + `sched_notify_cpu(target)`
+  IPI -- but is gated behind `g_sched_hetero` (HMP-misfit only), inert on v1.0.
+  The fix routes uniform-topology placement through it. SAFETY is already proven:
+  `sched_alpha.tla` models `Place` with a NON-DETERMINISTIC target, so
+  placement-on-idle is inside the proven envelope; `sched_tickless.tla` proves
+  the place+IPI no-lost-wake (I-9). This fixes the boot spawn-storm at its root
+  (spawns spread across idle CPUs immediately, one IPI each).
+- **Push-on-overload rebalance.** A busy CPU's `sched_tick` (still running at
+  1 kHz -- tickless stops only the IDLE tick) checks "my runq has surplus (>=2
+  non-idle runnable) AND an idle peer exists" and kicks the peer to `try_steal`.
+  Rides the tick we keep; replaces "every idle CPU re-polls every 1 ms" with "a
+  busy CPU kicks one idle peer only on real surplus." Modeled by
+  `sched_rebalance.tla` (section 9.4).
+- **The 100 ms backstop stays** -- but becomes pure defense-in-depth (self-heal
+  a dropped kick), NOT the work mechanism. So a genuinely-idle CPU still wakes
+  ~10 Hz -> ~0.3% idle (the TI-3 win is preserved; it is no longer bundled with
+  the regression).
+- **cpu0 production-gating.** `sched_idle_park` computes `go_tickless = tickless
+  && g_sched_notify_enabled`, so cpu0 stays PERIODIC during the in-kernel test
+  phase (byte-identical to pre-tickless) -- closing the test-phase half of the
+  regression. The secondaries already gate on `timer_armed`; cpu0 did not.
+
+End state: **~0.3% idle AND full throughput AND proper rebalancing** -- the
+complete Linux NO_HZ_IDLE model, mapped onto existing Thylacine mechanisms.
+
+### 9.4 Spec (TI-4a; spec-first re-enabled for this surface)
+
+`specs/sched_rebalance.tla` (a focused sibling, the `sched_oncpu`/`sched_alpha`/
+`sched_tickless` precedent) models the ONE new mechanism -- the busy-side push of
+already-queued work to an idle peer. Placement needs no new model (covered by
+`sched_alpha.tla`). The model proves:
+
+- `EventuallyParallelized` (surplus ~> ~surplus): queued surplus on a busy CPU,
+  with an idle peer, is eventually taken off it (work-conservation). The
+  property the busy-side kick restores.
+- `NoLostWake` (~(parked /\ pending)): the kick respects register-then-observe
+  (it lifts the kicked peer's park), so pushed work is never left asleep.
+
+Two executable counterexamples: `buggy_nokick` (no kick -> surplus strands = the
+TI-3 regression in model form, `EventuallyParallelized` VIOLATED) and
+`buggy_nolift` (kick forgets the park-lift -> `NoLostWake` VIOLATED). The 100 ms
+backstop is ORTHOGONAL and deliberately unmodeled, so `buggy_nokick` is a clean
+stranded-work counterexample rather than a masked latency hiccup. TLC-green
+model-first (clean: 117 distinct states) BEFORE the TI-4c impl. Mapping:
+`specs/SPEC-TO-CODE.md`.
+
+### 9.5 The perf gate (the missing throughput gate + the user's tool)
+
+Built two ways, since a STEADY CPU-bound bench would NOT catch this regression
+(the regression is wake/steal LATENCY under churn, not steady parallel
+throughput):
+
+- **Guest-measured boot-duration counter** (CNTVCT delta, boot-start ->
+  `SYS_BOOT_COMPLETE`) wired into `tools/ci-smp-gate.sh` with a threshold (TCG
+  for determinism). The cheap durable CI gate; it catches *this exact* regression
+  (boot is spawn+IPC churn).
+- **`/bin/cpubench`** (native libthyla-rs): single-core (ops/sec) + multi-core
+  (N-worker aggregate + the scaling factor multi/single = the scheduler-health
+  number) + a cross-CPU PING-PONG churn metric (thread A wakes B on another core,
+  round-trips/sec = the wake/steal latency the regression hit). User tool +
+  regression sentinel.
+
+### 9.6 Sub-chunk plan
+
+- **TI-4a:** `sched_rebalance.tla` + cfgs (this section's spec), TLC-green
+  model-first. The spec commit (no kernel code).
+- **TI-4b:** push-complete placement (`select_target_cpu` idle-preference) +
+  cpu0 production-gating + the boot-duration counter. Measure the boot recovery
+  in-guest.
+- **TI-4c:** push-on-overload rebalance kick from `sched_tick`, validated against
+  `sched_rebalance.tla`. The 100 ms backstop becomes defense-in-depth.
+- **TI-4d:** the perf gate (boot-duration threshold in `ci-smp-gate`) +
+  `/bin/cpubench`.
+- **TI-4e:** focused Opus-4.8-max audit (the #788/#860/#809/#811/#926 idle/wake
+  lineage) + SMP gate + HVF re-measure (confirm ~0.3% idle AND ~7.2s boot both
+  return) + docs + close.

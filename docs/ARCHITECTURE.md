@@ -3879,8 +3879,9 @@ Per `NOVEL.md` Angle #8. Practical TLA+ verification of every load-bearing OS in
 
 The Phase-0 plan gate-tied nine specs. As-built (RW-10 reconcile 2026-06-11;
 table re-reconciled +`allowance`/`net_poll`/`weft` 2026-06-20;
-+`net_poll_teardown` @#294 2026-06-21; +`sched_tickless` @TI-spec 2026-06-21)
-the committed inventory is **25 modules**; three of the planned nine
++`net_poll_teardown` @#294 2026-06-21; +`sched_tickless` @TI-spec 2026-06-21;
++`sched_rebalance` @TI-4a 2026-06-21)
+the committed inventory is **26 modules**; three of the planned nine
 (`futex.tla`, `notes.tla`, `pty.tla`) were dropped per the 2026-05-23
 spec-to-code suspension — their surfaces are prose-validated (torpor / notes)
 or not yet built (the PTY *master/slave* pair, Phase 8) — and seventeen modules were
@@ -3923,8 +3924,9 @@ before the MA-1 impl (the post-net Imperium/Authority arc).
 | `specs/weft.tla` | Weft-1 (spec; impl Weft-2 / 3 / 5 landed, Weft-6..7 OWED; Weft-4 = `weft_readiness.tla`) | Capability network dataplane (I-37): no per-op mediation + the F_NOTIF multi-holder buffer lifetime (Weft-5 `weft_notif`) + the descriptor-ring TOCTOU (Weft-3) + the shared-Burrow lifetime bounded by the flow |
 | `specs/weft_readiness.tla` | Weft-4 | I-9 across the readiness ring: the single-cache-line poke's store-buffer register-then-observe (netd's edge vs the guest's park) loses no wake — the PUSH counterpart of `net_poll.tla`'s elicited PULL |
 | `specs/sched_tickless.tla` | TI-spec (#299) | I-9 across the tickless idle one-shot arm (NO_HZ_IDLE, ARCH §8.6): register-then-observe (`idle_in_wfi` set BEFORE the arm + WFI) loses no work-arrival wake (`NoLostWake` + the `EventuallyRuns` liveness) vs `sched_tickless_buggy.cfg` (`BUGGY_PARK` = park-before-register ⇒ the IPI is never sent ⇒ parked-with-pending counterexample). A sibling, not a `scheduler.tla` extension (which already proves the tickless wake-correctness — the periodic tick was never a modeled wake) |
+| `specs/sched_rebalance.tla` | TI-4a (#304) | Work-conservation under tickless idle — the push-on-overload rebalance leg (ARCH §8.6 / §8.10): a busy CPU pushes surplus queued work to an idle peer (`EventuallyParallelized` liveness) + the kick respects register-then-observe (`NoLostWake`) vs `sched_rebalance_buggy_nokick.cfg` (no kick ⇒ surplus strands = the TI-3 regression in model form) + `sched_rebalance_buggy_nolift.cfg` (kick forgets the park-lift ⇒ lost wake). A sibling — placement itself is already inside `sched_alpha.tla`'s arbitrary-target envelope; this models only the busy-side rebalance the periodic tick used to cover by pull-polling |
 
-Each module carries its clean cfg(s) plus buggy-cfg counterexamples (86
+Each module carries its clean cfg(s) plus buggy-cfg counterexamples (88
 buggy cfgs total across the inventory).
 
 ### 25.3 Spec → code mapping

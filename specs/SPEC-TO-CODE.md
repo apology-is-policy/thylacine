@@ -1427,3 +1427,51 @@ unmodeled, so the buggy cfg is a clean lost-wake counterexample rather than a
 masked latency hiccup. The runtime regression (TI-2/TI-3): a deadlined sleeper
 wakes on time under tickless; a cross-CPU `ready()` wakes a tickless CPU; an idle
 CPU's tick count stops advancing.
+
+## sched_rebalance.tla — TI-4a (#304); model-first, impl mapping at TI-4b/TI-4c
+
+The push-on-overload rebalance leg of tickless work-conservation (ARCH §8.6 /
+§8.10). A **sibling** of `sched_tickless.tla` (the `sched_oncpu`/`sched_alpha`
+precedent): `sched_alpha.tla` already proves placement SAFETY under an arbitrary
+target CPU (`Place` is non-deterministic), so push-PLACEMENT (place a waking
+thread on an idle CPU) needs no new model; `sched_tickless.tla` proves the
+idle-enter arm-race. This module captures the ONE remaining mechanism — the
+busy-side push of ALREADY-QUEUED work to an idle peer, the leg the 1 kHz periodic
+tick used to cover by pull-polling (its removal at TI-3 was the 2.4x boot
+regression). See `docs/TICKLESS-IDLE.md` §9 (TI-4) + ARCH §8.6 / §8.10 / §25.2.
+
+### Model ↔ impl (impl lands at TI-4c)
+
+- `surplus[cpu]` ↔ a running CPU has >1 non-idle runnable thread in its runq
+  (the running thread + queued work that should migrate).
+- `Overload(b, i)` ↔ the busy CPU's `sched_tick` detecting surplus + an idle peer
+  (`idle_in_wfi`) and kicking it (`IPI_RESCHED`) to `try_steal` — the new TI-4c
+  mechanism. The kick lifts the peer's park exactly as `sched_tickless`'s
+  `PlaceWork` does (register-then-observe).
+- `Dispatch(i)` ↔ the kicked idle CPU's `sched()` → `try_steal` pulling the work.
+- `Block`/`DrainLocally`/`Register`/`Park` ↔ the existing idle-enter + local-run
+  paths. `DrainLocally` is UNFAIR: a CPU-bound producer need not yield, so the
+  kick is the only GUARANTEED rebalance.
+
+### Bug class (executable counterexamples)
+
+- `sched_rebalance_buggy_nokick.cfg` (`BUGGY_NO_KICK = TRUE`) ↔ `Overload`
+  disabled = the TI-3 regression: a non-yielding producer's surplus strands
+  forever while a peer idles. `EventuallyParallelized` (surplus ~> ¬surplus)
+  VIOLATED.
+- `sched_rebalance_buggy_nolift.cfg` (`BUGGY_KICK_NO_LIFT = TRUE`) ↔ the kick
+  pushes work but does not lift the peer's park. `NoLostWake` (~(parked ∧
+  pending)) VIOLATED — the register-then-observe obligation the kick must honor.
+
+### TLC posture
+
+- `sched_rebalance.cfg` (clean, 3 CPUs): `TypeOK` + `NoLostWake` +
+  `PendingImpliesNotRunning` + `SurplusImpliesRunning` + `ParkedImpliesRegistered`
+  + the `EventuallyParallelized` liveness (WF on `Overload` + `Dispatch`). GREEN —
+  117 distinct states.
+- `sched_rebalance_buggy_nokick.cfg` (2 CPUs): `EventuallyParallelized` VIOLATED.
+- `sched_rebalance_buggy_nolift.cfg` (2 CPUs): `NoLostWake` VIOLATED.
+
+The 100 ms backstop (defense-in-depth vs a dropped kick) is ORTHOGONAL and
+deliberately unmodeled (as in `sched_tickless`), so `buggy_nokick` is a clean
+stranded-work counterexample rather than a masked latency hiccup.
