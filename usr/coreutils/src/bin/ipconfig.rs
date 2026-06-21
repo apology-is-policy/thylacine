@@ -6,6 +6,7 @@
 //   ipconfig add IP MASK [GW] assign a static address (MASK = 255.255.255.0
 //                            or a /24 or a bare 24); replaces the current addr
 //   ipconfig remove          clear the address + default route
+//   ipconfig renew           re-acquire the DHCP lease (force a fresh DISCOVER)
 //
 // The DHCP path is netd's own (it drives the lease at bring-up and folds it
 // into /net/ipifc + /net/ndb); `ipconfig add` is the static / bridged-network
@@ -41,8 +42,9 @@ fn run(args: Args) -> i64 {
         None => show(),
         Some(sub) if sub == b"add" => add(&ops[1..]),
         Some(sub) if sub == b"remove" || sub == b"down" => ctl(b"remove"),
+        Some(sub) if sub == b"renew" => ctl(b"renew"),
         Some(_) => {
-            eprintln!("ipconfig: usage: ipconfig [add <ip> <mask> [gw] | remove]");
+            eprintln!("ipconfig: usage: ipconfig [add <ip> <mask> [gw] | remove | renew]");
             1
         }
     }

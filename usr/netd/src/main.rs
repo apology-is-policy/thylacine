@@ -316,7 +316,7 @@ impl Driver for NetD {
         // are both pinned at THIS bring-up lease -- they stay coherent (a DHCP
         // renewal re-application is a v1.x seam). `ifc` carries the lease into
         // the ipifc/ndb views and seeds the resolver socket.
-        let mut net = server::Net::new(iface, sockets, base, ifc);
+        let mut net = server::Net::new(iface, sockets, base, ifc, Some(dhcp_handle));
         // net-8a: stand up the resident loopback interface (127.0.0.1/8 on its own
         // Loopback device + socket set), so an in-guest client dialing 127.x reaches
         // an in-guest server over the REAL /net path. Serviced by net.poll alongside
@@ -458,6 +458,15 @@ impl Driver for NetD {
             say!("netd: net-4c ipifc E2E FAIL");
         }
 
+        // #293: the connect-sweep disposal self-test -- a stuck connecting socket
+        // is REMOVED (not abort()ed), so an abandoned dial to an unreachable host
+        // cannot re-ARP forever and starve DNS. Deterministic, no host coupling.
+        if server::connect_sweep_selftest(base) {
+            say!("netd: #293 connect-sweep selftest PASS (stuck dial socket removed)");
+        } else {
+            say!("netd: #293 connect-sweep selftest FAIL");
+        }
+
         // net-4d: deterministic in-guest proofs of the net-4 surface (no host
         // coupling -> ASSERTED PASS lines, like the loopback/ipifc selftests).
         // (1) the cs/dns/ndb/mask parser battery; (2) the F1 deferred-read guard
@@ -519,6 +528,39 @@ impl Driver for NetD {
         let mut pollfds = [TPollFd::default(); 1 + server::MAX_CONNS];
         loop {
             net.poll(&mut device);
+
+            // Drain + re-apply the DHCP lease event each tick. smoltcp drives the
+            // renew/rebind exchange inside net.poll, but the resulting
+            // Configured/Deconfigured EVENTS are delivered only via this poll(), and
+            // the bring-up apply ran once -- so a real DHCP server's lease expiry
+            // (vs slirp's silent auto-renew) would otherwise never reach the live
+            // iface address/route/resolver. A delta is rare; log it.
+            match net.poll_dhcp() {
+                server::DhcpDelta::Renewed {
+                    addr,
+                    prefix,
+                    dns_changed,
+                } => say!(
+                    "netd: DHCP lease re-applied t={}s addr={}.{}.{}.{}/{} dns_changed={}",
+                    base.elapsed().as_secs(),
+                    addr[0],
+                    addr[1],
+                    addr[2],
+                    addr[3],
+                    prefix,
+                    dns_changed
+                ),
+                server::DhcpDelta::Lost => say!(
+                    "netd: DHCP lease LOST t={}s -- link down until re-lease",
+                    base.elapsed().as_secs()
+                ),
+                server::DhcpDelta::None => {}
+            }
+
+            // #293: abort any TCP connect stuck SynSent past CONNECT_TIMEOUT_MS, so
+            // an abandoned dial to an UNREACHABLE host stops re-ARPing forever
+            // (which starves DNS via smoltcp's global ARP rate-limit). Cheap scan.
+            net.sweep_stale_connects();
 
             // Deliver any deferred accepts whose inbound call has landed: rebind
             // the blocked listen fid onto the accepted connection's ctl and send

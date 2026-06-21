@@ -166,6 +166,32 @@ re-polled within ~2 ms (vs the old 50 ms RX-wake floor -- a latency bonus). The
 v1.x refinement is a loopback-vs-NIC-aware cap (only the `lo` stack needs the fast
 re-poll; a NIC read is RX-latency-bounded and could keep the 50 ms floor).
 
+**#293 -- the connect-abort sweep (the DNS-death fix).** Every resident-loop tick
+calls `net.sweep_stale_connects()`: any TCP slot whose socket has been `SynSent`
+past `CONNECT_TIMEOUT_MS` (15 s) is dropped. The bug it fixes: a dial to an
+**unreachable** host (the boot `netperf nic 10.0.2.100 7820` probe on a standard
+boot with no guestfwd) leaves a socket stuck in `SynSent`, re-ARPing the dead
+address **once a second forever** -- and smoltcp's neighbor cache has a single
+*global* ARP rate-limit (`silent_until`, 1 s), so that storm re-arms the limit
+continuously. When the DNS server's (`10.0.2.3`) neighbor entry expires at the
+60 s `ENTRY_LIFETIME`, the DNS query's re-ARP is globally rate-limited and never
+sent -> **DNS dies permanently ~60 s after boot** (it was a coincidence that the
+DHCP renew T1 is also 60 s). The sweep **REMOVES** the stuck socket from the set
+(not `abort()` -- aborting makes smoltcp try to send a RST, which to an unreachable
+peer needs the same dead neighbor, so it keeps ARPing); with nothing left to
+dispatch the ARP stops, and the 60 s DNS re-ARP succeeds. Proven by
+`connect_sweep_selftest` (the stuck socket is removed deterministically) + a >120 s
+live boot (DNS `OK` through 88 s; the `10.0.2.100` ARP bounded to ~15 packets vs
+~90 unbounded). **Companion (not the #293 fix):** `poll_dhcp` now re-applies a
+renewed/re-acquired DHCP lease each tick (a no-op on slirp's silent auto-renew, but
+correct for a real DHCP server whose lease genuinely expires), and a new
+`ipconfig renew` ctl verb (`/net/ipifc/0/ctl` `renew` -> `dhcp_renew`) forces a
+fresh DISCOVER. **Known residual (#294):** after the sweep the slot stays allocated
+but socketless (`refs` stuck at 1) -- the `ready`/QTPOLL fid is not disposed when a
+client closes its poll with a stranded readiness probe (a kernel dev9p.poll GC
+gap); benign for connectivity now, but a slow slot-table leak (the netstat "extra
+connection per ping/curl").
+
 ## net-2b-2: the 9P /net server
 
 net-2b-2 stands the `/net` server up. After the lease, netd **posts `/srv/net`**
