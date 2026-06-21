@@ -326,3 +326,90 @@ void test_tsleep_herd_timeout(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u,
         "run tree empty after the herd is freed");
 }
+
+// ---------------------------------------------------------------------------
+// timerwait.earliest_deadline -- the TI-1 nearest-deadline scan.
+// ---------------------------------------------------------------------------
+//
+// Empty list -> 0; two deadlined sleepers -> the minimum sleep_deadline (the
+// nearer one); back to 0 once both are woken + freed. The deadline is exact
+// (read straight off the parked Thread's stored counter value), so the min
+// assertion is deterministic, not timing-sensitive. The idle loop (TI-2) arms
+// its one-shot to this value.
+
+#define ED_N 2
+
+static volatile int  g_ed_cond;
+static volatile u32  g_ed_done;
+static u64           g_ed_deadline[ED_N];
+static struct Rendez g_ed_rendez[ED_N];
+static volatile bool g_ed_exited[ED_N];
+
+static int ed_cond_check(void *arg) { (void)arg; return g_ed_cond; }
+
+static void ed_consumer(void *arg) {
+    unsigned i = (unsigned)(uintptr_t)arg;
+    tsleep(&g_ed_rendez[i], ed_cond_check, NULL, g_ed_deadline[i]);
+    __atomic_fetch_add(&g_ed_done, 1u, __ATOMIC_RELAXED);
+    test_kthread_park_terminal(&g_ed_exited[i]);
+}
+
+void test_timerwait_earliest_deadline(void) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u,
+        "run tree must be empty at test entry");
+    TEST_EXPECT_EQ(timerwait_earliest_deadline(), 0ull,
+        "no deadlined sleeper -> earliest deadline 0");
+
+    g_ed_cond = 0;
+    g_ed_done = 0;
+    for (unsigned i = 0; i < ED_N; i++) {
+        rendez_init(&g_ed_rendez[i]);
+        g_ed_exited[i] = false;
+    }
+    // Two distinct far deadlines; consumer 1 (the +30 s sleeper) is the nearer.
+    g_ed_deadline[0] = timer_now_ns() + 60ull * 1000000000ull;
+    g_ed_deadline[1] = timer_now_ns() + 30ull * 1000000000ull;
+
+    struct Thread *c[ED_N];
+    for (unsigned i = 0; i < ED_N; i++) {
+        c[i] = thread_create_with_arg(kproc(), ed_consumer, (void *)(uintptr_t)i);
+        TEST_ASSERT(c[i] != NULL, "thread_create_with_arg(ed consumer) failed");
+        ready(c[i]);
+    }
+
+    // Yield until both consumers have parked in tsleep (SLEEPING + linked on
+    // g_timerwait). The cap turns a stuck park into a clean failure.
+    for (u64 spin = 0; spin < 100000000ull &&
+         !(c[0]->state == THREAD_SLEEPING && c[1]->state == THREAD_SLEEPING);
+         spin++) {
+        sched();
+    }
+    TEST_EXPECT_EQ(c[0]->state, THREAD_SLEEPING, "consumer 0 must be SLEEPING");
+    TEST_EXPECT_EQ(c[1]->state, THREAD_SLEEPING, "consumer 1 must be SLEEPING");
+
+    // The earliest deadline is the minimum stored sleep_deadline -- consumer 1.
+    u64 expect_min = c[0]->sleep_deadline < c[1]->sleep_deadline
+                   ? c[0]->sleep_deadline : c[1]->sleep_deadline;
+    TEST_EXPECT_EQ(timerwait_earliest_deadline(), expect_min,
+        "earliest deadline must equal the minimum sleep_deadline");
+    TEST_EXPECT_EQ(timerwait_earliest_deadline(), c[1]->sleep_deadline,
+        "consumer 1 (the +30 s sleeper) must be the nearest deadline");
+
+    // Wake both: set cond, wakeup each. They resume in tsleep, see cond true,
+    // return TSLEEP_AWOKEN, increment done, park. (cond false would re-sleep.)
+    g_ed_cond = 1;
+    for (unsigned i = 0; i < ED_N; i++) wakeup(&g_ed_rendez[i]);
+    for (u64 spin = 0; spin < 100000000ull && g_ed_done < (u32)ED_N; spin++) {
+        sched();
+    }
+    TEST_EXPECT_EQ(g_ed_done, (u32)ED_N,
+        "both consumers must have resumed and finished");
+
+    for (unsigned i = 0; i < ED_N; i++) {
+        test_kthread_join_free(c[i], &g_ed_exited[i]);
+    }
+    TEST_EXPECT_EQ(timerwait_earliest_deadline(), 0ull,
+        "earliest deadline back to 0 after both sleepers wake + free");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u,
+        "run tree empty after both consumers freed");
+}

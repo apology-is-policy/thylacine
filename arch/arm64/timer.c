@@ -93,15 +93,10 @@ static volatile u64 g_ticks;
 // timer_init.
 // ---------------------------------------------------------------------------
 
-// CNTP_TVAL_EL0 is a 32-bit signed value per ARMv8 ARM D11.2.4. Reload
-// values must fit in [1, INT32_MAX]; reload of 1 fires every counter
-// tick (pathological — handler can't keep up), reload > INT32_MAX
-// truncates and the timer fires sooner than intended. We bound on
-// both sides: minimum reload of 100 keeps IRQ rate under freq/100
-// (well under 1% CPU even at 5 GHz counter freq), maximum bounded by
-// the architectural register width.
-#define TIMER_MIN_RELOAD   100u
-#define TIMER_MAX_RELOAD   0x7FFFFFFFu     // INT32_MAX
+// TIMER_MIN_RELOAD / TIMER_MAX_RELOAD bound every reload (the periodic
+// g_reload below AND the tickless one-shot delta); they moved to timer.h as
+// the public clamp contract for timer_arm_oneshot_cnt -- see the rationale
+// there.
 
 bool timer_init(u32 hz) {
     if (hz == 0) return false;
@@ -140,6 +135,33 @@ void timer_arm_this_cpu(void) {
     if (g_reload == 0)
         extinction("timer_arm_this_cpu before timer_init (g_reload unset)");
     write_cntv_tval_el0(g_reload);
+    write_cntv_ctl_el0(CNTV_CTL_ENABLE);
+}
+
+// ---------------------------------------------------------------------------
+// Tickless idle one-shot (NO_HZ_IDLE; docs/TICKLESS-IDLE.md, #299).
+//
+// An idle CPU does not need the 1 kHz periodic re-arm: it arms a SINGLE shot
+// to the nearest pending deadline (min'd with a backstop at TI-2) and parks,
+// so a genuinely-idle CPU takes zero timer IRQs until there is real work --
+// closing the HVF per-tick vmexit storm (idle 332% -> ~0). The periodic tick
+// stays byte-unchanged for any RUNNING thread (the slice model, I-17, the
+// tick-coupled tests). TI-1 lands the primitive; the idle loop wires it at
+// TI-2, so nothing here changes behavior yet.
+// ---------------------------------------------------------------------------
+
+u32 timer_oneshot_tval(u64 target_cnt, u64 now_cnt) {
+    u64 delta = (target_cnt > now_cnt) ? (target_cnt - now_cnt) : 0;
+    if (delta < TIMER_MIN_RELOAD) delta = TIMER_MIN_RELOAD;
+    if (delta > TIMER_MAX_RELOAD) delta = TIMER_MAX_RELOAD;
+    return (u32)delta;
+}
+
+void timer_arm_oneshot_cnt(u64 target_cnt) {
+    if (g_reload == 0)
+        extinction("timer_arm_oneshot_cnt before timer_init (g_reload unset)");
+    u64 now = read_cntvct_el0();
+    write_cntv_tval_el0(timer_oneshot_tval(target_cnt, now));
     write_cntv_ctl_el0(CNTV_CTL_ENABLE);
 }
 

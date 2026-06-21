@@ -77,6 +77,8 @@ void test_slub_kmalloc_overflow_guard(void);
 void test_slub_cache_destroy_guards(void);
 void test_gic_init_smoke(void);
 void test_timer_tick_increments(void);
+void test_timer_oneshot_tval_clamps(void);
+void test_timer_arm_oneshot_restores(void);
 void test_clock_monotonic_advances(void);
 void test_clock_realtime_anchored(void);
 void test_clock_wallclock_offset_math(void);
@@ -119,6 +121,7 @@ void test_tsleep_past_deadline_immediate(void);
 void test_tsleep_woken_before_deadline(void);
 void test_tsleep_timeout_via_tick(void);
 void test_tsleep_herd_timeout(void);
+void test_timerwait_earliest_deadline(void);
 void test_smp_bringup_smoke(void);
 void test_smp_exception_stack_smoke(void);
 void test_smp_per_cpu_idle_smoke(void);
@@ -1055,6 +1058,8 @@ struct test_case g_tests[] = {
     { "slub.cache_destroy_guards",     test_slub_cache_destroy_guards,     false, NULL },
     { "gic.init_smoke",                test_gic_init_smoke,                false, NULL },
     { "timer.tick_increments",         test_timer_tick_increments,         false, NULL },
+    { "timer.oneshot_tval_clamps",     test_timer_oneshot_tval_clamps,     false, NULL },
+    { "timer.arm_oneshot_restores",    test_timer_arm_oneshot_restores,    false, NULL },
     { "clock.monotonic_advances",      test_clock_monotonic_advances,      false, NULL },
     { "clock.realtime_anchored",       test_clock_realtime_anchored,       false, NULL },
     { "clock.wallclock_offset_math",   test_clock_wallclock_offset_math,   false, NULL },
@@ -1127,6 +1132,9 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "tsleep.herd_timeout",
                                        test_tsleep_herd_timeout,
+                                                                           false, NULL },
+    { "timerwait.earliest_deadline",
+                                       test_timerwait_earliest_deadline,
                                                                            false, NULL },
     { "smp.bringup_smoke",             test_smp_bringup_smoke,             false, NULL },
     { "smp.exception_stack_smoke",     test_smp_exception_stack_smoke,     false, NULL },

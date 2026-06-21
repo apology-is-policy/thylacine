@@ -39,6 +39,17 @@
 // hypervisor-reserved under HVF -- see the file header).
 #define TIMER_INTID_EL1_VIRT  GIC_PPI_TO_INTID(11)   /* = 27 */
 
+// CNTV_TVAL_EL0 is a 32-bit signed down-counter (ARMv8 ARM D11.2.4); the IRQ
+// fires when it crosses 0. A reload (the periodic g_reload AND the tickless
+// one-shot delta) must fit [TIMER_MIN_RELOAD, TIMER_MAX_RELOAD]: a reload of 1
+// fires every counter tick (a handler can't keep up), so the floor of 100
+// caps the IRQ rate under freq/100; a reload above INT32_MAX truncates and
+// fires sooner than intended, so the ceiling is the register width. Public
+// (not file-static) because they are the clamp contract a timer_arm_oneshot_cnt
+// caller relies on, and the clamp helper's unit test pins against them.
+#define TIMER_MIN_RELOAD   100u
+#define TIMER_MAX_RELOAD   0x7FFFFFFFu     // INT32_MAX
+
 // One-time bring-up (boot CPU). Reads CNTFRQ_EL0, caches the reload count
 // for `hz` Hz, then arms the boot CPU's timer via timer_arm_this_cpu()
 // (CNTV_TVAL_EL0 + CNTV_CTL_EL0 = ENABLE, !IMASK). Secondaries arm their
@@ -57,6 +68,29 @@ bool timer_init(u32 hz);
 // timer PPI on this CPU's redistributor (gic_enable_irq, per-CPU). MUST
 // run after timer_init has set the reload. See #810 / I-8 / I-17.
 void timer_arm_this_cpu(void);
+
+// Tickless idle (NO_HZ_IDLE; docs/TICKLESS-IDLE.md, #299). Arm THIS CPU's
+// banked virtual timer as a ONE-SHOT firing at absolute counter value
+// `target_cnt` (a CNTVCT timestamp -- e.g. a g_timerwait sleep_deadline, or
+// timer_ns_to_counter(deadline_ns)). Reads CNTVCT, writes the clamped reload,
+// leaves CNTV_CTL at ENABLE. When the shot fires, timer_irq_handler re-arms
+// the periodic g_reload exactly as for any tick -- correct the moment the CPU
+// has runnable work again; the idle loop (TI-2) re-arms the one-shot before
+// each WFI so a genuinely-idle CPU takes no 1 kHz ticks. MUST run after
+// timer_init (same precondition as timer_arm_this_cpu). At TI-1 NO production
+// path calls this -- the periodic tick still drives idle; the idle-loop wiring
+// lands at TI-2.
+void timer_arm_oneshot_cnt(u64 target_cnt);
+
+// Pure clamp helper behind timer_arm_oneshot_cnt: the CNTV_TVAL reload that
+// fires at absolute counter `target_cnt` given the current counter `now_cnt`.
+// CNTV_TVAL counts DOWN, so the reload is the delta (target - now), clamped to
+// [TIMER_MIN_RELOAD, TIMER_MAX_RELOAD]. A target at-or-before now yields delta
+// 0 -> clamps UP to MIN (fire ASAP, never a 0/negative reload that fires every
+// counter tick); a target past the 32-bit horizon clamps DOWN to MAX (the idle
+// loop re-arms; the tickless backstop keeps real arms well inside range).
+// Split out so the clamp is unit-testable without touching the live timer.
+u32 timer_oneshot_tval(u64 target_cnt, u64 now_cnt);
 
 // IRQ handler. Signature matches gic_irq_handler_t. Increments the tick
 // counter and reloads CNTV_TVAL_EL0. Caller wires this via gic_attach.

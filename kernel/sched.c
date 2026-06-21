@@ -1414,6 +1414,38 @@ static void timerwait_unlink(struct Thread *t) {
     t->timerwait_prev = NULL;
 }
 
+// Tickless idle (NO_HZ_IDLE; docs/TICKLESS-IDLE.md TI-1). The earliest pending
+// deadline across all deadlined sleepers -- the absolute CNTVCT counter value
+// an idle CPU arms its one-shot to (min'd with the backstop at TI-2). Returns
+// 0 iff no thread is in a deadlined tsleep (the idle CPU then arms only the
+// backstop). The 0 sentinel is unambiguous: a linked sleeper's sleep_deadline
+// is a post-boot CNTVCT timestamp (timer_ns_to_counter of timer_now_ns()+t),
+// never 0; the `found` seed makes the min correct regardless.
+//
+// O(n) min-scan under g_timerwait.lock -- a LEAF acquisition (no nested lock;
+// the lock-order's outermost). irqsave because a g_timerwait.lock holder MUST
+// have IRQs masked: the timer IRQ's timerwait_tick takes the same lock, so an
+// IRQ landing mid-hold on this CPU would self-deadlock. The idle-loop caller
+// (TI-2) already runs IRQ-masked, so the save/restore is a confirmed no-op
+// there; the irqsave keeps this helper correct from any context. Unlike
+// timerwait_tick it does NOT filter on_cpu -- it reads deadlines (wakes
+// nothing), and a mid-switch sleeper's near deadline still needs covering. A
+// deadline already in the past is returned as-is: the one-shot clamp fires it
+// ASAP, which is correct for an overdue sleeper.
+u64 timerwait_earliest_deadline(void) {
+    u64 earliest = 0;
+    bool found = false;
+    irq_state_t s = spin_lock_irqsave(&g_timerwait.lock);
+    for (struct Thread *p = g_timerwait.head; p; p = p->timerwait_next) {
+        if (!found || p->sleep_deadline < earliest) {
+            earliest = p->sleep_deadline;
+            found = true;
+        }
+    }
+    spin_unlock_irqrestore(&g_timerwait.lock, s);
+    return found ? earliest : 0;
+}
+
 // P5-tsleep: the wake transition shared by wakeup() and the sched_tick
 // timeout scan. Transitions the SLEEPING waiter t of r to RUNNABLE and
 // readies it. `timed_out` records the cause in t->sleep_timedout for

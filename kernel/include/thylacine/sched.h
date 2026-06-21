@@ -121,6 +121,15 @@ void sched_install_bootcpu_idle(struct Thread *t);
 void sched_set_idle_in_wfi(bool in_wfi);
 bool sched_idle_in_wfi(unsigned cpu_idx);
 
+// Tickless idle (NO_HZ_IDLE; docs/TICKLESS-IDLE.md TI-1, #299). The earliest
+// pending deadline (absolute CNTVCT counter value) across all deadlined tsleep
+// sleepers, or 0 if none. The idle loop (TI-2) arms its one-shot to
+// min(this, now + TICKLESS_IDLE_BACKSTOP) before WFI so a genuinely-idle CPU
+// takes no 1 kHz ticks yet still wakes for the next real deadline. O(n)
+// min-scan under g_timerwait.lock (irqsave; a leaf acquisition). At TI-1 no
+// production path calls this -- it lands with its consumer at TI-2.
+u64 timerwait_earliest_deadline(void);
+
 // P3-G: notify-idle-peer toggle. Off (default) during in-kernel tests so
 // they keep their UP-like assumptions; on (set by boot_main between
 // test_run_all() and joey_run()) for production. When off, ready() /
