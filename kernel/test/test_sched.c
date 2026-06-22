@@ -318,8 +318,20 @@ static volatile u32 g_notify_test_ran;
 
 static void notify_test_thread(void) {
     g_notify_test_ran++;
+    // Reach a stable, reapable terminal (EXITING) rather than falling off the
+    // end into thread_trampoline's RUNNING wfe-halt loop. With TI-4b push
+    // placement a notify-enabled ready() places this thread on an idle secondary
+    // that RUNS it (under the old pull model the steal often did not complete in
+    // the test window, leaving it RUNNABLE on cpu0 -- the latent assumption push
+    // made deterministic). sched() with state EXITING does not re-insert us; the
+    // CPU switches to its idle and we sit EXITING + off-cpu, which the cleanup's
+    // thread_free accepts (its on_cpu-spin covers the EXITING-but-still-on_cpu
+    // window). If notify is DISABLED (the no_ipi test) this thread is never run
+    // -> it stays RUNNABLE on cpu0's tree and thread_free removes it; both
+    // terminals are safe.
+    current_thread()->state = THREAD_EXITING;
     sched();
-    // Unreachable — boot doesn't switch back here.
+    // Unreachable -- EXITING is never re-dispatched.
 }
 
 // scheduler.notify_idle_peer_smoke — verify that with notify enabled,
@@ -374,9 +386,10 @@ void test_sched_notify_idle_peer_smoke(void) {
     TEST_ASSERT(any_secondary_received,
         "at least one secondary received IPI_RESCHED via notify_idle_peer");
 
-    // Cleanup. Either secondary stole + ran the thread (g_notify_test_ran
-    // > 0), or the thread is still RUNNABLE in some tree (boot's or
-    // a secondary's). thread_free is idempotent across both.
+    // Cleanup. The secondary ran the thread (g_notify_test_ran > 0 -> it
+    // reached its EXITING terminal off-cpu), or -- if the IPI raced -- it is
+    // still RUNNABLE in a tree. thread_free accepts both (its on_cpu-spin covers
+    // the EXITING-but-still-on_cpu window).
     thread_free(t);
 }
 

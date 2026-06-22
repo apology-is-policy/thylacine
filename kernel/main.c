@@ -143,6 +143,17 @@ bool boot_mark_complete(void) {
     static bool g_boot_complete_done;   // BSS false
     if (__atomic_exchange_n(&g_boot_complete_done, true, __ATOMIC_SEQ_CST))
         return false;
+    // TI-4b boot-duration gate: timer_now_ns() is CLOCK_MONOTONIC (ns since the
+    // CNTVCT reset == since boot), so at this one-shot SYS_BOOT_COMPLETE point it
+    // IS the boot duration. A greppable in-guest number (tools/ci-smp-gate.sh
+    // thresholds it) -- the throughput sentinel TI-3 lacked. On HVF CNTVCT tracks
+    // wall-clock, so boot-ms ~= the wall-clock seconds the #299 / TI-4 regression
+    // was measured in; on TCG it is the virtual-clock elapsed, comparable
+    // run-to-run. Printed BEFORE the banner so the "Thylacine boot OK" tooling
+    // ABI line (TOOLING.md section 10) stays a clean standalone line.
+    uart_puts("boot-ms: ");
+    uart_putdec(timer_now_ns() / 1000000ull);
+    uart_puts("\n");
     uart_puts("Thylacine boot OK\n");
     return true;
 }

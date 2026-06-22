@@ -340,12 +340,66 @@ static void sched_util_decay(struct Thread *t) {
     t->util -= (t->util >> SCHED_UTIL_SHIFT);
 }
 
+// g_sched_notify_enabled: the production gate (set once at boot between
+// test_run_all and joey_run; the full semantics + the setter are at
+// sched_set_notify_enabled below). Declared HERE -- ahead of its original spot
+// -- so the TI-4b push-placement it gates can read it. volatile + relaxed: set
+// once, observed by every CPU.
+static volatile bool g_sched_notify_enabled;
+
+// Push-complete placement (TI-4b): rotate placement across distinct idle CPUs so
+// a burst from one busy producer (the boot spawn-storm) spreads instead of
+// piling on the waking CPU's own tree + relying on the single best-effort kick.
+// Distinct from g_try_steal_rotate (the pull side); a relaxed counter suffices
+// (the spread is approximate, not strictly fair).
+static volatile u32 g_idle_place_rotate;
+
+// Pick an IDLE peer (one that announced idle_in_wfi) to PLACE a waking thread on,
+// so it runs there NOW -- ready_on enqueues on the peer + sched_notify_cpu IPIs
+// it -- instead of the enqueue-locally + kick-ONE-peer-to-PULL path the retired
+// 1 kHz re-poll backstopped (the TI-3 boot regression). Returns prev_cpu when
+// the waker is itself idle (it runs the work on its own IRQ-return -- no needless
+// migration) OR no peer is idle (the saturated regime: keep local; the busy-side
+// overload kick (TI-4c) then rebalances). The idle_in_wfi read is the same
+// volatile hint sched_notify_idle_peer uses; a stale TRUE only costs a harmless
+// IPI to a just-woken CPU. The place+IPI no-lost-wake is sched_tickless.tla's
+// register-then-observe (idle_in_wfi set BEFORE the peer's arm + WFI); safety
+// under an arbitrary target is sched_alpha.tla's non-deterministic Place.
+static unsigned select_idle_target(unsigned prev_cpu) {
+    if (prev_cpu < DTB_MAX_CPUS && g_cpu_sched[prev_cpu].idle_in_wfi)
+        return prev_cpu;
+    if (smp_cpu_online_count() <= 1) return prev_cpu;
+    u32 base = t_atomic_fetch_add_relaxed_u32((u32 *)&g_idle_place_rotate, 1u);
+    for (unsigned k = 0; k < DTB_MAX_CPUS; k++) {
+        unsigned i = (unsigned)((base + k) % DTB_MAX_CPUS);
+        if (i == prev_cpu) continue;
+        struct CpuSched *peer = &g_cpu_sched[i];
+        if (!peer->initialized) continue;
+        if (!peer->idle_in_wfi) continue;
+        return i;
+    }
+    return prev_cpu;
+}
+
 unsigned select_target_cpu(struct Thread *t, unsigned prev_cpu) {
     if (!t) return prev_cpu;
     // CPU-pinned threads (every per-CPU idle + kthread) NEVER migrate -- their
     // home CPU is fixed (ARCH §8.4.2 / sched_alpha.tla IdleStaysHome). This is
     // the placement-side companion to try_steal's cpu_pinned skip.
     if (t->cpu_pinned) return prev_cpu;
+    // Push-complete placement (TI-4b): in production, prefer an IDLE CPU for a
+    // waking thread -- place it where it runs NOW + IPI that CPU, instead of
+    // enqueuing locally + best-effort-kicking one peer to PULL (the pull-with-
+    // one-kick the retired 1 kHz re-poll backstopped -- the TI-3 boot
+    // regression). Gated on g_sched_notify_enabled so the in-kernel test phase
+    // stays UP-like (no cross-CPU placement; the ready_on cross-CPU enqueue test
+    // relies on the placed thread sitting still until removed). Composes with
+    // HMP: on a hetero topology the capacity placement below still applies when
+    // no peer is idle.
+    if (g_sched_notify_enabled) {
+        unsigned idle = select_idle_target(prev_cpu);
+        if (idle != prev_cpu) return idle;
+    }
     // Uniform topology (v1.0 QEMU virt / RPi): identity placement -- keep the
     // waking CPU. Byte-identical to the pre-#864 ready() behavior. #866 F3:
     // ACQUIRE pairs with sched_capacity_init's RELEASE so a true result implies
@@ -537,7 +591,8 @@ static struct Thread *pick_next(struct CpuSched *cs) {
 // needed beyond memory ordering of the boot-CPU's set being visible
 // before the first cross-CPU read (boot's banner UART writes after the
 // set provide an implicit dsb-equivalent boundary).
-static volatile bool g_sched_notify_enabled;
+// (The definition lives up in the push-placement section (TI-4b) so
+// select_target_cpu can gate its idle-preference on it.)
 
 void sched_set_notify_enabled(bool enabled) {
     g_sched_notify_enabled = enabled;
@@ -1802,10 +1857,20 @@ u64 tickless_target_cnt(u64 now_cnt, u64 earliest_deadline, u64 backstop_cnt) {
 }
 
 void sched_idle_park(bool tickless) {
+    // Production-gate tickless on cpu0 (TI-4b): cpu0's bootcpu_idle_main always
+    // passes tickless=true, but during the in-kernel test phase the work-steal /
+    // cross-CPU-handoff re-poll the 1 kHz tick provided is load-bearing
+    // (g_sched_notify_enabled is OFF -> no wake IPIs, so a cross-CPU test handoff
+    // relies on cpu0's idle re-poll). Going tickless there stalled every handoff
+    // to the backstop (the test-phase half of the TI-3 regression). The
+    // secondaries already gate on timer_armed; this extends the same "only
+    // tickless in production" discipline to cpu0 -- so the test phase is
+    // byte-identical to the pre-tickless periodic idle.
+    bool go_tickless = tickless && g_sched_notify_enabled;
     irq_state_t s = spin_lock_irqsave(NULL);
     sched_set_idle_in_wfi(true);
     sched();
-    if (tickless) {
+    if (go_tickless) {
         // Arm a one-shot to the nearest deadline (or the backstop) instead of
         // leaving the 1 kHz periodic tick armed -- a genuinely-idle CPU then
         // takes no timer IRQs until a real wake (the #299 fix). idle_in_wfi is
@@ -1820,7 +1885,7 @@ void sched_idle_park(bool tickless) {
     }
     __asm__ __volatile__("wfi" ::: "memory");
     sched_set_idle_in_wfi(false);
-    if (tickless) {
+    if (go_tickless) {
         // Wake-to-running restore, under the same IRQ-masked region so it runs
         // BEFORE any placed work is dispatched. Two jobs:
         //   1. timer_arm_this_cpu() re-arms the periodic tick, so a CPU woken
