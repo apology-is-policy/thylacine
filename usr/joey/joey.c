@@ -2020,6 +2020,55 @@ int main(void) {
     }
     t_putstr("joey: /loom-smoke reaped status=0; native loom ring API verified\n");
 
+    // === /go-hello orchestration (GOOS=thylacine Go-port, Stage 1) ===
+    // The first GOOS=thylacine Go binary: a runtime-direct `println` hello.
+    // Spawning it drives the real SVC ABI end-to-end -- the SysV initial-stack
+    // frame, osinit/schedinit/mallocinit (eager BURROW_ATTACH), sysmon's
+    // OS-thread spawn via the thread_entry trampoline, clock_gettime, and
+    // exit_group. The unstripped binary is >1 MiB, so the REVENANT file-backed
+    // exec path carries it (like net-echo).
+    //
+    // Unlike native libthyla-rs binaries (which print via the fd-less SYS_PUTS),
+    // Go writes through SYS_WRITE on fd 1/2, so the child needs real stdio
+    // handles -- exactly how a Go program gets stdout/stderr in Thylacine (the
+    // spawner provides them). joey is console-attached during bringup, so it
+    // opens a /dev/cons handle and installs it as the child's fd 0/1/2; both the
+    // println output and any Go runtime "fatal error:" then reach the console.
+    //
+    // GATING (Stage 1 proven): a spawned go-hello that exits non-zero or faults
+    // FAILS the boot -- it is the GOOS=thylacine regression sentinel. A Go
+    // runtime `throw` prints "fatal error:" on fd 2; a fault prints a snare:*
+    // note; both reach the console above. The fork-absent path stays graceful:
+    // if the Go fork was not present at build, build_go_probes skipped, the
+    // binary is unbaked, t_spawn returns <= 0, and the boot continues (the Go
+    // arc is optional infra, not a hard boot dependency).
+    {
+        const char go_hello_name[] = "go-hello";
+        long gh_cfd = t_console_open();
+        long gh_pid;
+        if (gh_cfd >= 0) {
+            unsigned int gh_fds[3] = { (unsigned int)gh_cfd,
+                                       (unsigned int)gh_cfd,
+                                       (unsigned int)gh_cfd };
+            gh_pid = t_spawn_with_fds(go_hello_name, sizeof(go_hello_name) - 1,
+                                      gh_fds, 3);
+            (void)t_close(gh_cfd);
+        } else {
+            gh_pid = t_spawn(go_hello_name, sizeof(go_hello_name) - 1);
+        }
+        if (gh_pid <= 0) {
+            t_putstr("joey: go-hello NOT spawned (Go fork absent at build) -- skipping\n");
+        } else {
+            int gh_status = -1;
+            long gh_reaped = t_wait_pid_for((int)gh_pid, 0, &gh_status);
+            if (gh_reaped != gh_pid || gh_status != 0) {
+                t_putstr("joey: go-hello FAILED -- GOOS=thylacine Stage 1 regression (see fatal error / snare:* above)\n");
+                return 1;
+            }
+            t_putstr("joey: go-hello reaped status=0 -- GOOS=thylacine Stage 1 RUNS in-VM\n");
+        }
+    }
+
     // === /pouch-hello-mallocng-torture (EBADTAG DFS; report-only) ===
     // The kernel burrow path tested clean, so the "AEGIS corruption" /
     // STM_EBADTAG is musl mallocng-specific. This pouch binary replicates

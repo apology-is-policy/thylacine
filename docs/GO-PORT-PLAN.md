@@ -295,6 +295,46 @@ Self-hosting is a staged bootstrap; you never build Go *on* Thylacine first.
 Each stage is a clean, demoable checkpoint; Stages 0–3 are the runtime port,
 Stage 4 is the payoff, Stage 5 is purity.
 
+### 5.1 Status (as built, 2026-06-22)
+
+The Go fork lives at `~/projects/go-thylacine` (a sibling tree, like
+`~/projects/stratum`); its commits stay LOCAL. The Thylacine-repo side is the
+`build.sh` cross-compile + FS bake (`build_go_probes` → `$GOFORK/bin/go build`,
+baked into the ramfs by `build_ramfs`) plus the `go-hello` boot probe in
+`usr/joey/joey.c`.
+
+- **Stage 0 — DONE** (fork `b2e204b` + `6d6829b`). 0a registered `GOOS=thylacine`
+  in the toolchain tables; 0b ported the runtime OS layer (6 `runtime/*_thylacine*`
+  files + build-tag edits), so `GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 go build`
+  compiles the runtime and a `println` hello LINKS to a 1.5 MiB Thylacine ELF.
+  Thylacine is a **hybrid GOOS**: non-unix like plan9 (no POSIX signals → no
+  `signal_unix.go`, so no sigctxt/sigtramp at Stage 0/1) but futex-based like linux
+  (`lock_futex.go` over `SYS_TORPOR_WAIT/WAKE`). The three mechanism divergences:
+  thread_spawn is entry-point (a `thread_entry` asm trampoline + custom `newosproc`),
+  futex is split into two syscalls, and mmap is `SYS_BURROW_ATTACH` (eager-commit,
+  kernel-chosen address, no MAP_FIXED).
+
+- **Stage 1 — DONE** (fork `0266e9f` + Thylacine `usr/go-hello/` + `build.sh` +
+  `joey.c`). A `println` hello RUNS in-VM to clean exit: `go-hello: sum(1..100) =
+  5050`, reaped status 0, boot OK, 0 EXTINCTION. The unstripped 1.5 MiB binary execs
+  via the REVENANT file-backed path (the >1-MiB exec REVENANT enabled). go-hello is
+  spawned with `/dev/cons` wired to fd 0/1/2 (a Go program gets stdio from its
+  spawner; native libthyla-rs binaries instead print via the fd-less `SYS_PUTS`).
+  The **eager-commit memory model** was the real fight (as predicted): Go's 64-bit
+  page allocator reserves the page-summary arrays for the whole 48-bit heap (~512
+  MiB), and `sysReserve ≡ commit` blew past `BURROW_ATTACH_MAX` (256 MiB). Fix:
+  `thylacine/arm64` uses the same constrained heap config as `ios/arm64`
+  (`heapAddrBits=40`, 4 MiB arenas) — the summary shrinks to ~2 MiB and the
+  eager-commit physical ceiling keeps live mappings near the 4 GiB
+  `EXEC_USER_BURROW_BASE`, far below 2^40.
+
+  **Owed for Stage 2+ (the proper memory model):** a `BURROW_ATTACH(LAZY)` kernel
+  flag (reserve VA, demand-allocate pages on fault) + a decommit primitive backing
+  `sysUnused` (so a long-running Go program's RSS can shrink under GC). This is an
+  **audit-bearing Thylacine-kernel change** (touches the fault path / I-12 / #65) —
+  it ESCALATES and is model-first if it touches fault invariants. The Stage-1
+  iOS-style config carries Stage 1 and likely Stage 2 (modest heaps) without it.
+
 ---
 
 ## 6. Native, not Pouch — and `CGO_ENABLED=0`

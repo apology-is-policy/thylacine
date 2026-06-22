@@ -81,6 +81,11 @@ CORVUS_RECOVERY_HEADER="$GEN_DIR/corvus_system_recovery_phrase.h"
 TOOLCHAIN_FILE="$REPO_ROOT/cmake/Toolchain-aarch64-thylacine.cmake"
 USR_TOOLCHAIN_FILE="$REPO_ROOT/cmake/Toolchain-aarch64-userspace.cmake"
 USR_RS_TARGET="aarch64-unknown-none"
+# GOOS=thylacine Go-port fork (the Thylacine Go toolchain). Lives OUTSIDE this
+# repo -- a sibling tree, like ~/projects/stratum. Absent on a fresh checkout,
+# so build_go_probes skips cleanly when it is missing (the Go boot probe just
+# does not get baked). Override with GOFORK=/path/to/go-thylacine.
+GOFORK="${GOFORK:-$HOME/projects/go-thylacine}"
 # LLVM install prefix for the pouch sysroot build (clang/llvm-ar/llvm-ranlib).
 # Mirrors cmake/Toolchain-aarch64-pouch.cmake + tools/pouch-clang.
 LLVM_PREFIX="${LLVM_PREFIX:-/opt/homebrew/opt/llvm}"
@@ -273,6 +278,9 @@ build_kernel() {
     # fixture (pool.img + system.key) before build_ramfs so the keyfile
     # gets copied into the cpio at /etc/stratum/system.key.
     build_stratum_pool_fixture
+    # GOOS=thylacine Stage 1: cross-compile the Go boot probe before build_ramfs
+    # bakes it. Skips cleanly if the Go fork is absent.
+    build_go_probes
     build_ramfs
 
     # P4-Ic5b2: produce build/disk.img alongside the kernel so
@@ -374,6 +382,21 @@ EOF
         fi
     done
 
+    # GOOS=thylacine Stage 1: bake the Go boot probe (build_go_probes produced it
+    # under $BUILD_DIR/go/). Shipped UNSTRIPPED (~1.5 MiB) -- the REVENANT
+    # file-backed exec path carries it, like net-echo. Absent if the Go fork was
+    # not present at build time (build_go_probes skipped); the joey go-hello
+    # probe then degrades to "not spawned".
+    local go_bins=( "go-hello" )
+    local go_release="$BUILD_DIR/go"
+    for bin in "${go_bins[@]}"; do
+        local src="$go_release/$bin"
+        if [[ -f "$src" ]]; then
+            cp "$src" "$ramfs_src/$bin"
+            chmod 0755 "$ramfs_src/$bin"
+        fi
+    done
+
     # net-7c-2 / net-8c-2: the native rustls TLS binaries link the full rustls +
     # RustCrypto stack and exceed the OLD SYS_SPAWN_BLOB_MAX (1 MiB) UNSTRIPPED
     # (tls-smoke ~1.11 MiB, https ~1.06 MiB, net-echo ~1.10 MiB). REVENANT R-4
@@ -445,6 +468,33 @@ EOF
     python3 "$REPO_ROOT/tools/mkcpio.py" "$ramfs_src" "$ramfs_out"
     echo "==> ramfs cpio: $ramfs_out"
     ledger "ramfs.cpio: REBUILT (bakes the current userspace binaries + system.key)"
+}
+
+# GOOS=thylacine Go-port (Stage 1): cross-compile the runtime-direct Go probe
+# binaries with the Thylacine Go fork ($GOFORK) and stage them under
+# $BUILD_DIR/go/ so build_ramfs bakes them into the cpio root. The Go fork lives
+# outside this repo; if it is absent, skip cleanly (the binary is not baked and
+# joey's go-hello probe degrades to "not spawned" -- a fresh checkout still
+# builds). The Go binary is shipped UNSTRIPPED (>1 MiB) -- the REVENANT
+# file-backed exec path carries it, like net-echo.
+build_go_probes() {
+    local go_bin="$GOFORK/bin/go"
+    local go_out="$BUILD_DIR/go"
+    if [[ ! -x "$go_bin" ]]; then
+        echo "==> Go-port: fork toolchain not found at $go_bin -- skipping go-hello (set GOFORK)"
+        return 0
+    fi
+    mkdir -p "$go_out"
+    echo "==> Building Go probes (GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0, fork=$GOFORK)"
+    # `go build` infers GOROOT from the fork's own bin/go location, so the fork's
+    # GOOS=thylacine runtime is used. Module mode (usr/go-hello/go.mod) keeps the
+    # build self-contained.
+    ( cd "$REPO_ROOT/usr/go-hello" && \
+      GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 "$go_bin" build -o "$go_out/go-hello" . ) \
+        || { echo "==> Go-port: go build go-hello FAILED" >&2; return 1; }
+    echo "==> Go probe built: $go_out/go-hello"
+    ls -la "$go_out/go-hello"
+    ledger "go-hello: Go cross-compile (GOOS=thylacine) -> ramfs (Stage 1 boot probe)"
 }
 
 # A-5c-c: emit the host-baked system recovery phrase as a C header BEFORE the
@@ -1704,11 +1754,14 @@ case "$target" in
     # year; coupling the ramfs rebuild to the pool re-bake is the fix. See
     # docs/DEBUGGING-PLAYBOOK.md.
     pool)        build_stratum_pool_fixture; build_ramfs ;;
+    # GOOS=thylacine Stage 1: rebuild the Go boot probe + re-bake the ramfs so the
+    # new binary lands in the cpio without a full kernel rebuild.
+    go-probes)   build_go_probes; build_ramfs ;;
     all)         build_all         ;;
     clean)       clean             ;;
     *)
         echo "Unknown target: $target" >&2
-        echo "Valid: kernel, ramfs, sysroot, pouch-progs, stratumd, userspace, disk, pool, all, clean" >&2
+        echo "Valid: kernel, ramfs, sysroot, pouch-progs, stratumd, userspace, disk, pool, go-probes, all, clean" >&2
         exit 1
         ;;
 esac
