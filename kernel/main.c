@@ -49,6 +49,7 @@
 #include <thylacine/thread.h>
 #include <thylacine/vma.h>      // vma_init (P3-Da)
 #include <thylacine/burrow.h>
+#include <thylacine/image.h>    // image_cache_init (REVENANT R-3)
 #include <thylacine/cons.h>     // console_mgr_main (A-4c-1)
 #include <thylacine/dev.h>
 #include <thylacine/dev9p.h>
@@ -472,6 +473,7 @@ void boot_main(void) {
     territory_init();
     handle_init();
     burrow_init();
+    image_cache_init();    // REVENANT R-3: the qid-keyed shared-text Image cache (BSS-backed; after burrow_init)
     vma_init();
     asid_init();
     // P4-Ib: kobj_mmio_init sets up the MMIO claim-tracking table.

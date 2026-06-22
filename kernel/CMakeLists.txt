@@ -55,6 +55,7 @@ set(KERNEL_SRCS
     territory.c
     handle.c
     burrow.c
+    image.c
     loom.c
     weft.c
     vma.c
@@ -136,6 +137,7 @@ set(KERNEL_TEST_SRCS
     test/test_territory_chroot.c
     test/test_handle.c
     test/test_burrow.c
+    test/test_image.c
     test/test_elf.c
     test/test_asid.c
     test/test_directmap.c
