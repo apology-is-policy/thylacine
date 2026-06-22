@@ -51,6 +51,7 @@
 #include <thylacine/dma_handle.h>    // P4-Ic5b1b: kobj_dma_ref/unref for DMA Burrows
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
+#include <thylacine/spoor.h>        // REVENANT: spoor_ref/clunk + SPOOR_MAGIC + qid for BURROW_TYPE_FILE
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
 #include <thylacine/burrow.h>
@@ -196,6 +197,61 @@ struct Burrow *burrow_create_dma(struct KObj_DMA *kobj_dma) {
     return v;
 }
 
+// REVENANT / I-36: file-backed demand-paged text Burrow (the Plan 9 Image as
+// BURROW_TYPE_FILE; docs/REVENANT.md §4). ADOPTS one ref on `spoor` — the store
+// is the last step, so every error path below returns NULL having taken NO ref
+// (the caller retains ownership + must clunk it). Mirrors burrow_create_anon's
+// page_count/size rounding, but allocates NO backing pages: the per-page
+// physical pages fault in lazily (R-2) into the sparse `filepages` array, which
+// is the only allocation made here.
+struct Burrow *burrow_create_file(struct Spoor *spoor, u64 file_offset, size_t length) {
+    if (!g_vmo_cache) extinction("burrow_create_file before burrow_init");
+    if (!spoor)       return NULL;
+    if (spoor->magic != SPOOR_MAGIC)
+        extinction("burrow_create_file: spoor has bad magic (UAF?)");
+    if (length == 0)  return NULL;
+    // Overflow guard (mirror burrow_create_anon): size + PAGE_SIZE - 1 must not
+    // wrap. page_count * sizeof(struct page *) then cannot overflow either
+    // (page_count <= SIZE_MAX/PAGE_SIZE, so * 8 stays < SIZE_MAX).
+    if (length > SIZE_MAX - (PAGE_SIZE - 1)) return NULL;
+
+    size_t page_count = (length + PAGE_SIZE - 1) / PAGE_SIZE;
+
+    struct Burrow *v = kmem_cache_alloc(g_vmo_cache, KP_ZERO);
+    if (!v) return NULL;
+
+    // The sparse per-page array: page_count slots, all NULL ("not resident").
+    // The R-2 fault arm fills a slot on the first fault to that page;
+    // burrow_free_internal frees every non-NULL slot. A few KiB even for a
+    // multi-MiB segment (8 bytes/page).
+    struct page **filepages = kmalloc(page_count * sizeof(struct page *), KP_ZERO);
+    if (!filepages) {
+        kmem_cache_free(g_vmo_cache, v);
+        return NULL;     // no ref taken: caller still owns `spoor`
+    }
+
+    v->magic         = VMO_MAGIC;
+    v->type          = BURROW_TYPE_FILE;
+    v->size          = page_count * PAGE_SIZE;
+    v->page_count    = page_count;
+    v->handle_count  = 1;            // construction reference
+    v->mapping_count = 0;
+    v->pages         = NULL;         // FILE: no contiguous alloc_pages chunk
+    v->order         = 0;
+    // Adopt the caller's ref (loom_register_handles "adopt the caller's ref"
+    // discipline) — stored directly, no spoor_ref bump. burrow_free_internal
+    // spoor_clunks it on the last unref (the I-30 pin held for the Burrow's life).
+    v->spoor         = spoor;
+    v->file_offset   = file_offset;
+    v->file_dc       = spoor->dc;
+    v->file_devno    = spoor->devno;
+    v->file_qid_path = spoor->qid.path;
+    v->file_qid_vers = spoor->qid.vers;
+    v->filepages     = filepages;
+    g_vmo_created++;
+    return v;
+}
+
 // Internal: release pages + struct when both counts have reached 0.
 // The caller has already verified the precondition.
 //
@@ -244,6 +300,29 @@ static void burrow_free_internal(struct Burrow *v) {
         // kobj_dma_free_internal + free_pages on the underlying chunk.
         kobj_dma_unref(v->kobj_dma);
         v->kobj_dma = NULL;
+        break;
+    case BURROW_TYPE_FILE:
+        // REVENANT / I-36: free every resident demand-paged page (order 0
+        // each), then the sparse array, then clunk the adopted backing Spoor.
+        // Runs at {handle_count==0 && mapping_count==0}, so no VMA maps this
+        // Burrow and no concurrent fault touches filepages -- the walk needs no
+        // lock. spoor_clunk (dev->close + unref) may sleep (a 9P Tclunk);
+        // burrow_free_internal runs OUTSIDE v->lock (leaf discipline), so the
+        // sleep is safe. The spoor==NULL double-free guard mirrors MMIO/DMA.
+        if (!v->spoor)
+            extinction("burrow_free_internal(FILE) with spoor already NULL (double-free)");
+        if (v->filepages) {
+            for (size_t i = 0; i < v->page_count; i++) {
+                if (v->filepages[i]) {
+                    free_pages(v->filepages[i], 0);
+                    v->filepages[i] = NULL;
+                }
+            }
+            kfree(v->filepages);
+            v->filepages = NULL;
+        }
+        spoor_clunk(v->spoor);
+        v->spoor = NULL;
         break;
     case BURROW_TYPE_INVALID:
     default:
@@ -343,6 +422,16 @@ void burrow_acquire_mapping(struct Burrow *v) {
         if (!v->kobj_dma) {
             spin_unlock(&v->lock);
             extinction("burrow_acquire_mapping of DMA BURROW with NULL kobj_dma (UAF)");
+        }
+        break;
+    case BURROW_TYPE_FILE:
+        // REVENANT / I-36: liveness is the pinned backing Spoor. filepages MAY
+        // be all-NULL (no page faulted in yet) -- the normal fresh-mapping
+        // state, not a UAF. spoor==NULL only post-free (the {0,0} resurrection
+        // guard above already covers the freed case).
+        if (!v->spoor) {
+            spin_unlock(&v->lock);
+            extinction("burrow_acquire_mapping of FILE BURROW with NULL spoor (UAF)");
         }
         break;
     case BURROW_TYPE_INVALID:
@@ -568,3 +657,30 @@ int burrow_mapping_count(const struct Burrow *v) {
 
 u64 burrow_total_created(void)    { return g_vmo_created; }
 u64 burrow_total_destroyed(void)  { return g_vmo_destroyed; }
+
+#ifdef KERNEL_TESTS
+// REVENANT R-1 test hooks — let test_burrow.c exercise the FILE-Burrow
+// resident-page free path before the R-2 fault arm exists to populate slots.
+size_t burrow_file_page_count_for_test(const struct Burrow *v) {
+    if (!v || v->magic != VMO_MAGIC)
+        extinction("burrow_file_page_count_for_test: bad Burrow");
+    if (v->type != BURROW_TYPE_FILE)
+        extinction("burrow_file_page_count_for_test: not a FILE Burrow");
+    return v->page_count;
+}
+
+void burrow_file_install_page_for_test(struct Burrow *v, size_t idx) {
+    if (!v || v->magic != VMO_MAGIC)
+        extinction("burrow_file_install_page_for_test: bad Burrow");
+    if (v->type != BURROW_TYPE_FILE)
+        extinction("burrow_file_install_page_for_test: not a FILE Burrow");
+    if (!v->filepages || idx >= v->page_count)
+        extinction("burrow_file_install_page_for_test: idx out of range");
+    if (v->filepages[idx])
+        extinction("burrow_file_install_page_for_test: slot already resident");
+    struct page *p = alloc_pages(0, KP_ZERO);
+    if (!p)
+        extinction("burrow_file_install_page_for_test: alloc_pages OOM");
+    v->filepages[idx] = p;
+}
+#endif

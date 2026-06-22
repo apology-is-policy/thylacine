@@ -206,6 +206,10 @@ void test_vmo_via_handle_table(void);
 void test_vmo_handle_table_orphan_cleanup(void);
 void test_vmo_size_overflow_rejected(void);
 void test_vmo_dup_oom_rollback(void);
+void test_vmo_file_create_close_round_trip(void);
+void test_vmo_file_create_failure_retains_spoor(void);
+void test_vmo_file_map_unmap_lifecycle(void);
+void test_vmo_file_resident_pages_freed(void);
 void test_asid_width_valid(void);
 void test_asid_resolve_reuse(void);
 void test_asid_distinct_active(void);
@@ -1251,6 +1255,10 @@ struct test_case g_tests[] = {
     { "burrow.handle_table_orphan_cleanup", test_vmo_handle_table_orphan_cleanup, false, NULL },
     { "burrow.size_overflow_rejected",    test_vmo_size_overflow_rejected,    false, NULL },
     { "burrow.dup_oom_rollback",          test_vmo_dup_oom_rollback,          false, NULL },
+    { "burrow.file_create_close_round_trip",   test_vmo_file_create_close_round_trip,   false, NULL },
+    { "burrow.file_create_failure_retains_spoor", test_vmo_file_create_failure_retains_spoor, false, NULL },
+    { "burrow.file_map_unmap_lifecycle",  test_vmo_file_map_unmap_lifecycle,  false, NULL },
+    { "burrow.file_resident_pages_freed", test_vmo_file_resident_pages_freed, false, NULL },
     { "asid.width_valid",              test_asid_width_valid,              false, NULL },
     { "asid.resolve_reuse",            test_asid_resolve_reuse,            false, NULL },
     { "asid.distinct_active",          test_asid_distinct_active,          false, NULL },

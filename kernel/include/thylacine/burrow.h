@@ -94,12 +94,27 @@ enum burrow_type {
     // burrow_unref of a DMA Burrow skips free_pages and calls
     // kobj_dma_unref(kobj_dma) to release the held reference.
     BURROW_TYPE_DMA     = 3,
-    // Post-v1.0: BURROW_TYPE_FILE  (Stratum page cache)
+    // REVENANT / I-36: BURROW_TYPE_FILE — backing is a `length`-byte range of
+    // a FILE, demand-paged one page at a time from a kernel-pinned Spoor (the
+    // executable's Chan). This is the Plan 9 Image model (docs/REVENANT.md
+    // §4.1): the kernel loads a binary by mapping each PT_LOAD text segment as
+    // a file-backed VMA and faulting its pages in lazily (dev->read), instead
+    // of slurping the whole ELF eagerly. `pages` is NULL (no contiguous
+    // alloc_pages chunk); the per-page physical pages live in the sparse
+    // `filepages` array, read in on demand by the R-2 fault arm and freed at
+    // burrow_free_internal. The Burrow ADOPTS one reference on the backing
+    // `spoor` (pinned at exec, never re-resolved at fault — the I-30 discipline)
+    // and spoor_clunks it on the last unref. Text is R+X (W^X-clean by
+    // construction — never writable); writable .data is eager-copied into a
+    // BURROW_TYPE_ANON segment at exec (D4), so a FILE Burrow is read-only and
+    // shareable across Procs (the Image's cross-Proc text share, R-3).
+    BURROW_TYPE_FILE    = 4,
 };
 
 struct page;
 struct KObj_MMIO;
 struct KObj_DMA;
+struct Spoor;          // <thylacine/spoor.h> — REVENANT: the pinned backing Chan
 
 struct Burrow {
     u64            magic;          // VMO_MAGIC; clobbered to 0 in burrow_free_internal before kmem_cache_free (R9 F148 discipline; R13 F213)
@@ -130,6 +145,29 @@ struct Burrow {
     struct KObj_MMIO *kobj_mmio;   // NULL except for BURROW_TYPE_MMIO
     struct KObj_DMA  *kobj_dma;    // NULL except for BURROW_TYPE_DMA
     u64               pa;           // 0 except for hw-backed types
+
+    // REVENANT / I-36: BURROW_TYPE_FILE fields. Zero/NULL for every other type.
+    // The Burrow ADOPTS one ref on `spoor` at burrow_create_file (the I-30 pin:
+    // the backing Chan is pinned at exec, never re-resolved at fault) and
+    // spoor_clunks it in burrow_free_internal on the last unref. `file_offset`
+    // is the segment's base byte offset in the backing file; the segment length
+    // is v->size. The cache-key scalars are the executable's file identity
+    // sampled at create — the R-3 Image-cache key AND the coherence token (a
+    // binary atomically replaced bumps qid.vers -> a fresh key; the running
+    // Proc stays pinned to the version it exec'd). `filepages` is the sparse
+    // per-page array (page_count entries, kzalloc'd at create, each slot NULL
+    // until the R-2 fault arm dev->reads that page in); the slots are protected
+    // by v->lock (read/install), with the blocking dev->read done OUTSIDE the
+    // lock. burrow_free_internal frees every resident page (order 0) + kfrees
+    // the array + clunks the spoor (free runs at {h:0,m:0} — no mapping holds
+    // it, so no concurrent faulter touches filepages).
+    struct Spoor     *spoor;        // NULL except FILE: the adopted+pinned backing Chan
+    u64               file_offset;  // FILE: segment base byte offset in the backing file
+    int               file_dc;      // FILE: cache key — backing dc       (sampled at create)
+    u32               file_devno;   // FILE: cache key — backing devno    (sampled at create)
+    u64               file_qid_path;// FILE: cache key — backing qid.path (sampled at create)
+    u32               file_qid_vers;// FILE: cache key — backing qid.vers (coherence token)
+    struct page     **filepages;    // FILE: sparse [page_count]; slot NULL until faulted in
 };
 
 _Static_assert(__builtin_offsetof(struct Burrow, magic) == 0,
@@ -206,6 +244,32 @@ struct Burrow *burrow_create_mmio(struct KObj_MMIO *kobj_mmio);
 // VirtIO transports), MMIO Burrows install Device-nGnRnE PTEs. The
 // dispatch happens in arch/arm64/fault.c::userland_demand_page.
 struct Burrow *burrow_create_dma(struct KObj_DMA *kobj_dma);
+
+// REVENANT / I-36: burrow_create_file — the file-backed demand-paged text
+// Burrow (the Plan 9 Image realized as BURROW_TYPE_FILE; docs/REVENANT.md §4).
+// Backs a `length`-byte segment of the file behind `spoor`, starting at byte
+// `file_offset`. The Burrow ADOPTS one reference on `spoor` (transfers
+// ownership, like loom_register_handles "adopt the caller's ref"):
+//   - on SUCCESS the Burrow owns the ref and spoor_clunks it at
+//     burrow_free_internal (the last unref);
+//   - on FAILURE (NULL return) the caller RETAINS its ref (must spoor_clunk it)
+//     — burrow_create_file takes NO ref on any error path.
+// `spoor` should be opened OEXEC (the R-2 fault arm dev->reads it) and is
+// pinned for the Burrow's life (the I-30 "pin at exec, never re-resolve at
+// fault" discipline). The cache-key scalars (dc/devno/qid.{path,vers}) are
+// sampled from `spoor` here — the R-3 Image-cache key + coherence token.
+//
+// The backing pages are NOT allocated here — they are demand-paged one at a
+// time by the R-2 fault arm into the sparse `filepages` array (allocated here,
+// page_count slots, all NULL). `length` is rounded up to a page multiple
+// (size = page_count * PAGE_SIZE); v->pages stays NULL + v->order 0 (FILE has
+// no contiguous alloc_pages chunk). handle_count starts at 1 (the construction
+// reference, consumed by burrow_map -> burrow_unref transfer or explicit unref).
+//
+// Returns NULL (taking NO spoor ref) on:
+//   - NULL spoor / corrupted spoor magic, burrow_init not run, length == 0,
+//     length overflow, SLUB OOM, or filepages-array OOM.
+struct Burrow *burrow_create_file(struct Spoor *spoor, u64 file_offset, size_t length);
 
 // Increment handle_count. Maps to spec's HandleOpen action. Called by
 // handle_dup (and Phase 4's handle_transfer_via_9p) for KOBJ_BURROW
@@ -357,5 +421,17 @@ int    burrow_mapping_count(const struct Burrow *v);
 //   - At any state, (created - destroyed) == live BURROW count.
 u64 burrow_total_created(void);
 u64 burrow_total_destroyed(void);
+
+#ifdef KERNEL_TESTS
+// REVENANT R-1 test hooks — exercise the FILE-Burrow lifecycle (the
+// resident-page free) in isolation, before the R-2 fault arm exists to
+// populate slots. Returns the FILE Burrow's page_count; extincts on a
+// non-FILE Burrow.
+size_t burrow_file_page_count_for_test(const struct Burrow *v);
+// Install a freshly alloc_pages(0, KP_ZERO) page into filepages[idx], so the
+// burrow_free_internal FILE arm has a resident page to free. Extincts on a
+// non-FILE Burrow, out-of-range idx, an already-resident slot, or page OOM.
+void   burrow_file_install_page_for_test(struct Burrow *v, size_t idx);
+#endif
 
 #endif // THYLACINE_VMO_H

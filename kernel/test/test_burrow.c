@@ -44,10 +44,16 @@
 
 #include "test.h"
 
+#include <thylacine/dev.h>          // REVENANT R-1: devnone as the backing Dev for a test Spoor
 #include <thylacine/handle.h>
 #include <thylacine/proc.h>
+#include <thylacine/spoor.h>        // REVENANT R-1: spoor_alloc/clunk + spoor_total_freed
 #include <thylacine/types.h>
 #include <thylacine/burrow.h>
+
+// REVENANT R-1: the buddy free-page counter (mm/phys.h) — witness for the
+// resident-page-free assertion; forward-declared to avoid a relative mm include.
+u64 phys_free_pages(void);
 
 void test_vmo_create_close_round_trip(void);
 void test_vmo_refcount_lifecycle(void);
@@ -57,6 +63,11 @@ void test_vmo_via_handle_table(void);
 void test_vmo_handle_table_orphan_cleanup(void);
 void test_vmo_size_overflow_rejected(void);
 void test_vmo_dup_oom_rollback(void);
+// REVENANT R-1: BURROW_TYPE_FILE lifecycle.
+void test_vmo_file_create_close_round_trip(void);
+void test_vmo_file_create_failure_retains_spoor(void);
+void test_vmo_file_map_unmap_lifecycle(void);
+void test_vmo_file_resident_pages_freed(void);
 
 // Convenience: test "did we free a BURROW this turn" by snapshot diff.
 static u64 created_diff_snap;
@@ -420,4 +431,129 @@ void test_vmo_handle_table_orphan_cleanup(void) {
     TEST_EXPECT_EQ(burrow_total_destroyed() - destroyed_before, (u64)1,
         "BURROW must be freed when proc_free orphan-cleans the handle table");
     // Note: cannot assert burrow_handle_count(v) — v is now invalid.
+}
+
+// =============================================================================
+// REVENANT R-1: BURROW_TYPE_FILE lifecycle (file-backed demand-paged text).
+// burrow_create_file ADOPTS one ref on the backing Spoor and spoor_clunks it at
+// the last unref; the sparse filepages array + any resident pages are freed in
+// the FILE arm of burrow_free_internal. These exercise the lifecycle in
+// isolation — before R-2 wires the demand-page fault arm that fills slots.
+// =============================================================================
+
+void test_vmo_file_create_close_round_trip(void) {
+    snap_counters();
+    u64 spoor_freed_before = spoor_total_freed();
+
+    // A backing Spoor (ref 1, the test's). burrow_create_file ADOPTS this ref,
+    // so the test must NOT clunk it afterward — the Burrow owns it now.
+    struct Spoor *s = spoor_alloc(&devnone);
+    TEST_ASSERT(s != NULL, "spoor_alloc(&devnone) NULL");
+
+    struct Burrow *v = burrow_create_file(s, /*file_offset=*/0, /*length=*/8192);
+    TEST_ASSERT(v != NULL, "burrow_create_file(8192) returned NULL");
+    TEST_EXPECT_EQ(burrow_get_size(v), (size_t)8192, "FILE size rounds to 2 pages");
+    TEST_EXPECT_EQ(burrow_handle_count(v), 1, "fresh FILE Burrow handle_count=1");
+    TEST_EXPECT_EQ(burrow_mapping_count(v), 0, "fresh FILE Burrow mapping_count=0");
+    TEST_EXPECT_EQ(created_since_snap(), (u64)1, "1 create");
+
+    // unref → both counts 0 → free → the FILE arm spoor_clunks the adopted ref
+    // (ref 1→0 → Spoor freed). No resident pages; the sparse array is kfreed.
+    burrow_unref(v);
+    TEST_EXPECT_EQ(destroyed_since_snap(), (u64)1, "FILE Burrow freed at last unref");
+    TEST_EXPECT_EQ(spoor_total_freed() - spoor_freed_before, (u64)1,
+        "the adopted backing Spoor is clunked (freed) when the FILE Burrow frees");
+}
+
+void test_vmo_file_create_failure_retains_spoor(void) {
+    // A failure path (length == 0) returns NULL having taken NO ref — the
+    // caller still owns the Spoor and must clunk it. Pin that the failure path
+    // does not consume/clunk the ref (else a double-free or a leak in exec).
+    u64 spoor_freed_before = spoor_total_freed();
+
+    struct Spoor *s = spoor_alloc(&devnone);
+    TEST_ASSERT(s != NULL, "spoor_alloc NULL");
+
+    struct Burrow *v = burrow_create_file(s, 0, 0);     // length 0 → reject
+    TEST_EXPECT_EQ(v, NULL, "burrow_create_file(length=0) must return NULL");
+    TEST_EXPECT_EQ(spoor_total_freed() - spoor_freed_before, (u64)0,
+        "a rejected create must NOT clunk the caller's Spoor (no ref taken)");
+
+    // The test still owns s; clunk it now — only NOW is it freed.
+    spoor_clunk(s);
+    TEST_EXPECT_EQ(spoor_total_freed() - spoor_freed_before, (u64)1,
+        "the retained Spoor frees on the caller's own clunk");
+}
+
+void test_vmo_file_map_unmap_lifecycle(void) {
+    // The dual-refcount (#847/I-7) holds for FILE exactly as for ANON, and the
+    // burrow_acquire_mapping FILE liveness arm accepts a not-yet-faulted Burrow.
+    snap_counters();
+    u64 spoor_freed_before = spoor_total_freed();
+
+    struct Spoor *s = spoor_alloc(&devnone);
+    TEST_ASSERT(s != NULL, "spoor_alloc NULL");
+
+    struct Burrow *v = burrow_create_file(s, 0, 4096);
+    TEST_ASSERT(v != NULL, "burrow_create_file NULL");
+
+    burrow_acquire_mapping(v);                  // mapping_count = 1 (FILE liveness arm)
+    TEST_EXPECT_EQ(burrow_mapping_count(v), 1, "map → mapping_count=1");
+
+    // Drop the handle. handle_count 0, mapping_count 1 → NOT freed (the mapping
+    // holds it); the Spoor stays pinned.
+    burrow_unref(v);
+    TEST_EXPECT_EQ(destroyed_since_snap(), (u64)0,
+        "FILE Burrow not freed while mapping_count > 0");
+    TEST_EXPECT_EQ(burrow_handle_count(v), 0, "handle_count=0");
+    TEST_EXPECT_EQ(burrow_mapping_count(v), 1, "mapping_count=1");
+    TEST_EXPECT_EQ(spoor_total_freed() - spoor_freed_before, (u64)0,
+        "Spoor stays pinned while the Burrow is mapped");
+
+    // Drop the last mapping → both 0 → free → Spoor clunked.
+    burrow_release_mapping(v);
+    TEST_EXPECT_EQ(destroyed_since_snap(), (u64)1, "freed at last unmap");
+    TEST_EXPECT_EQ(spoor_total_freed() - spoor_freed_before, (u64)1,
+        "Spoor clunked when the FILE Burrow frees");
+}
+
+void test_vmo_file_resident_pages_freed(void) {
+    // burrow_free_internal's FILE arm frees every resident demand-paged page
+    // and skips the sparse NULL slots. Order-0 pages are per-CPU-magazine-
+    // managed (mm/magazines.h MAGAZINE_SIZE=16), and free_pages routes them
+    // through mag_free WITHOUT touching the buddy zone — so phys_free_pages
+    // (the buddy-zone counter) does NOT move across one balanced create/free
+    // cycle. To witness "no leak" reliably, run MANY balanced cycles: a
+    // free-path leak drains PAGES_PER pages/cycle past the small bounded
+    // magazine into a monotonic phys_free_pages decline; a correct free keeps
+    // the count within the magazine's slop (<= MAGAZINE_SIZE * ncpus).
+    snap_counters();
+    u64 spoor_freed_before = spoor_total_freed();
+    const int ITERS     = 256;     // 256 * 4 = 1024 page-frees — a leak signal far past any magazine
+    const int PAGES_PER = 4;       // install every slot each cycle (also covers sparse-skip = none NULL)
+    const u64 SLOP      = 256;     // > MAGAZINE_SIZE(16) * max ncpus(8) = 128, << 1024
+
+    u64 free_before = phys_free_pages();
+
+    for (int it = 0; it < ITERS; it++) {
+        struct Spoor *s = spoor_alloc(&devnone);
+        TEST_ASSERT(s != NULL, "spoor_alloc NULL");
+        struct Burrow *v = burrow_create_file(s, 0, PAGES_PER * 4096);
+        TEST_ASSERT(v != NULL, "burrow_create_file NULL");
+        for (int i = 0; i < PAGES_PER; i++)
+            burrow_file_install_page_for_test(v, (size_t)i);
+        // free → the FILE arm free_pages each resident slot + kfrees the array
+        // + clunks the adopted Spoor.
+        burrow_unref(v);
+    }
+
+    TEST_EXPECT_EQ(destroyed_since_snap(), (u64)ITERS, "every FILE Burrow freed");
+    TEST_EXPECT_EQ(spoor_total_freed() - spoor_freed_before, (u64)ITERS,
+        "every adopted Spoor clunked across the cycles");
+
+    // A leak of ITERS*PAGES_PER (1024) pages would crater phys_free_pages well
+    // past the magazine slop; a correct balanced free keeps it ~flat.
+    u64 free_after = phys_free_pages();
+    TEST_ASSERT(free_after + SLOP >= free_before,
+        "resident pages must not leak across many create/install/free cycles");
 }
