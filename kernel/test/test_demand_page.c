@@ -63,6 +63,8 @@ void test_demand_page_lifecycle_round_trip(void);
 void test_demand_page_file_smoke(void);
 void test_demand_page_file_read_error_snare_bus(void);
 void test_demand_page_file_multi_page(void);
+// REVENANT R-5 audit SA-F1: the slow path must LOOP over a short-returning read.
+void test_demand_page_file_short_read_fills_page(void);
 
 #define USER_VA   0x10000000ull           // 256 MiB; well within user-half
 #define ONE_PAGE  PAGE_SIZE
@@ -397,14 +399,20 @@ void test_demand_page_lifecycle_round_trip(void) {
 
 static bool g_rev_read_fail  = false;
 static int  g_rev_read_calls = 0;
+static long g_rev_read_chunk = 0;    // 0 = full count; >0 = cap each read (force a
+                                     // partial Rread -- a conforming 9P server's
+                                     // choice, which the slow path must loop over)
 
 static long rev_test_read(struct Spoor *c, void *buf, long n, s64 off) {
     (void)c;
     g_rev_read_calls++;
     if (g_rev_read_fail) return -1;
+    long m = n;
+    if (g_rev_read_chunk > 0 && m > g_rev_read_chunk)
+        m = g_rev_read_chunk;        // short-return (interior, NOT EOF)
     u8 *b = (u8 *)buf;
-    for (long i = 0; i < n; i++) b[i] = (u8)(((u64)off + (u64)i) & 0xff);
-    return n;
+    for (long i = 0; i < m; i++) b[i] = (u8)(((u64)off + (u64)i) & 0xff);
+    return m;
 }
 
 static struct Dev g_rev_test_dev = {
@@ -534,6 +542,57 @@ void test_demand_page_file_multi_page(void) {
     TEST_ASSERT(burrow_file_slot_for_test(v, 3) == NULL, "slot 3 sparse");
     TEST_EXPECT_EQ(g_rev_read_calls, 1, "only the faulted page read");
 
+    drop_proc(p);
+    burrow_unref(v);
+}
+
+// REVENANT R-5 audit SA-F1: an INTERIOR page whose backing dev->read short-returns
+// (a conforming 9P server may return a partial Rread mid-file -- dev9p_read issues
+// ONE Tread and returns its count) must still be FULLY filled. The pre-fix single
+// read filled only the first chunk and left the tail KP_ZERO -> a corrupt interior
+// text page on a Stratum-backed binary. The fixed slow path loops until the page
+// is full or true EOF. Assert EVERY byte (incl. the last) carries the file pattern,
+// and that the loop iterated PAGE_SIZE/chunk times.
+void test_demand_page_file_short_read_fills_page(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    g_rev_read_fail  = false;
+    g_rev_read_calls = 0;
+    g_rev_read_chunk = 256;          // each dev->read returns <=256 bytes (partial Rread)
+
+    struct Spoor *s = spoor_alloc(&g_rev_test_dev);
+    TEST_ASSERT(s != NULL, "spoor_alloc");
+    const u64 FILE_OFF = 0x6000;
+    struct Burrow *v = burrow_create_file(s, FILE_OFF, ONE_PAGE);
+    TEST_ASSERT(v != NULL, "burrow_create_file");
+    int rc = burrow_map(p, v, USER_VA, ONE_PAGE, VMA_PROT_RX);
+    TEST_EXPECT_EQ(rc, 0, "burrow_map RX");
+
+    struct fault_info fi;
+    make_fi(&fi, USER_VA + 0x40, /*is_write=*/false, /*is_instr=*/true);
+    enum fault_result r = userland_demand_page(p, &fi);
+    TEST_EXPECT_EQ(r, FAULT_HANDLED, "FILE demand-page resolves despite partial reads");
+
+    struct page *slotpg = burrow_file_slot_for_test(v, 0);
+    TEST_ASSERT(slotpg != NULL, "slot 0 resident");
+    u8 *bytes = (u8 *)pa_to_kva(page_to_pa(slotpg));
+    TEST_EXPECT_EQ((u64)bytes[0],            (u64)(u8)(FILE_OFF & 0xff),
+        "first byte = file_offset pattern");
+    // byte 257 (NOT 256): the pattern at FILE_OFF+256 is (0x6000+256)&0xff == 0x00,
+    // which coincides with the zero-fill -> a vacuous assertion. FILE_OFF+257 ->
+    // 0x01, a NON-ZERO value that genuinely distinguishes file-data from a
+    // zero-filled tail (R-5 R2 audit F1).
+    TEST_EXPECT_EQ((u64)bytes[257],          (u64)(u8)((FILE_OFF + 257) & 0xff),
+        "byte 257 (PAST the first short read, non-zero pattern) is file data, NOT a zero-filled tail");
+    TEST_EXPECT_EQ((u64)bytes[2000],         (u64)(u8)((FILE_OFF + 2000) & 0xff),
+        "mid-page byte is file data");
+    TEST_EXPECT_EQ((u64)bytes[PAGE_SIZE - 1], (u64)(u8)((FILE_OFF + PAGE_SIZE - 1) & 0xff),
+        "LAST byte is file data, NOT a zero-filled tail (the SA-F1 corruption)");
+    TEST_EXPECT_EQ(g_rev_read_calls, (int)(PAGE_SIZE / 256),
+        "the slow path looped over the short reads to fill the whole page");
+
+    g_rev_read_chunk = 0;            // reset (self-contained; siblings run with 0)
     drop_proc(p);
     burrow_unref(v);
 }

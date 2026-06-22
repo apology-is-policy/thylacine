@@ -175,6 +175,28 @@ s64 sys_torpor_wait_for_proc(struct Proc *p, u64 addr_va, u32 expected,
     w.awoken  = 0;
     w._pad    = 0;
 
+    // REVENANT R-5 audit F1: fault the futex word in BEFORE taking torpor_lock.
+    // Pre-REVENANT every user page was eager-anon, so the under-lock
+    // uaccess_load_u32 below could fault but never SLEEP (the ANON demand-page arm
+    // allocs + installs in place). REVENANT adds file-backed (BURROW_TYPE_FILE)
+    // text VMAs whose demand-page does a BLOCKING dev->read; a crafted
+    // torpor_wait(addr = an unfaulted text VA) would make the under-lock load sleep
+    // on that 9P read while holding the GLOBAL torpor_lock -> a system-wide futex
+    // stall (every CPU in torpor_wait/torpor_wake busy-spins on the lock; a wedged
+    // FS makes it permanent). Pre-faulting outside the lock makes the page resident
+    // + its PTE installed, so the under-lock load cannot fault-and-sleep; a
+    // concurrent unmap in the window makes the under-lock load -EFAULT (no VMA ->
+    // the sleeping FILE arm is never reached), handled there. FILE pages are not
+    // individually evicted at v1.0; a future reclaim pass (REVENANT section 9) must
+    // re-establish this non-blocking-uaccess-under-lock property (e.g. a
+    // pagefault-disabled atomic uaccess + drop-lock-fault-in-retry, the Linux
+    // futex pattern).
+    {
+        u32 prefault = 0;
+        if (uaccess_load_u32(addr_va, &prefault) != 0)
+            return TORPOR_ERR_EFAULT;
+    }
+
     spin_lock(&torpor_lock);
 
     // Load the user-VA word and compare under torpor_lock. The lock

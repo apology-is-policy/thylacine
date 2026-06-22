@@ -523,6 +523,15 @@ static enum fault_result file_install_locked(struct Proc *p,
         return FAULT_UNHANDLED_USER;
     }
     struct Burrow *v = vma->burrow;
+    // freq->slot was computed pre-sleep from the original VMA's geometry; it stays
+    // valid against this re-looked-up VMA because a BURROW_TYPE_FILE Burrow is
+    // created only by exec, mapped exactly once at burrow_offset 0 (burrow_map's
+    // fixed offset arg), and never handed to userspace to re-map -- so a FILE
+    // Burrow has ONE fixed VMA over its life and freq->page_va -> freq->slot is
+    // stable. (R-5 audit F2 [P3, unreachable at v1.0]: if a future path ever maps a
+    // FILE Burrow at a chosen offset/VA, recompute slot here from
+    // vma->burrow_offset + (freq->page_va - vma->vaddr_start) rather than trusting
+    // the cached freq->slot.)
 
     struct page *resident;
     spin_lock(&v->lock);                 // vma_lock -> v->lock (established order)
@@ -572,17 +581,34 @@ static enum fault_result file_demand_page_slow(struct Proc *p,
         goto out;
     }
 
-    // KP_ZERO pre-zeroed the page: a short read (the file's final partial page,
-    // or read past EOF -- got == 0) leaves the tail zero (the .bss-style fill).
+    // Fill the page from the backing file. dev->read may legitimately short-return
+    // for an interior page (a conforming 9P server's choice -- dev9p_read issues
+    // ONE p9_client_read = ONE Tread and returns its count), so a SINGLE read could
+    // leave the page tail KP_ZERO with file bytes MISSING -> a corrupt interior
+    // text page. Loop until the page is full OR n == 0 (true EOF: the file's final
+    // partial page, where the tail legitimately stays zero = the .bss-style fill).
+    // This mirrors map_eager_from_file + exec_read_header, which loop for the same
+    // reason. (R-5 audit SA-F1: the single-read version corrupted a Stratum-backed
+    // binary's interior text on a partial Rread; devramfs reads full-count, so the
+    // boot's /bin-bound binaries never tripped it.)
     void *kva = pa_to_kva(page_to_pa(newpg));
-    long got = -1;
-    if (freq->spoor && freq->spoor->dev && freq->spoor->dev->read)
-        got = freq->spoor->dev->read(freq->spoor, kva, (long)PAGE_SIZE,
-                                     (s64)freq->file_offset);
-    if (got < 0) {
+    if (!freq->spoor || !freq->spoor->dev || !freq->spoor->dev->read) {
         free_pages(newpg, 0);
-        r = FAULT_USER_BUS;              // page-in I/O error -> snare:bus, never zero-fill
+        r = FAULT_USER_BUS;              // no backing read -> fail closed, never zero-fill
         goto out;
+    }
+    size_t got = 0;
+    while (got < PAGE_SIZE) {
+        long n = freq->spoor->dev->read(freq->spoor, (u8 *)kva + got,
+                                        (long)(PAGE_SIZE - got),
+                                        (s64)(freq->file_offset + got));
+        if (n < 0) {
+            free_pages(newpg, 0);
+            r = FAULT_USER_BUS;          // page-in I/O error / death-interrupt -> snare:bus
+            goto out;
+        }
+        if (n == 0) break;               // EOF -> the tail stays zero (KP_ZERO)
+        got += (size_t)n;
     }
 
     // REVENANT R-4 / I-36: the page was filled via the data path (dev->read);

@@ -265,6 +265,7 @@ void test_demand_page_lifecycle_round_trip(void);
 void test_demand_page_file_smoke(void);
 void test_demand_page_file_read_error_snare_bus(void);
 void test_demand_page_file_multi_page(void);
+void test_demand_page_file_short_read_fills_page(void);
 void test_exec_setup_smoke(void);
 void test_exec_setup_segment_data_copied(void);
 void test_exec_setup_constraints(void);
@@ -1338,6 +1339,8 @@ struct test_case g_tests[] = {
     { "demand_page.file_read_error_snare_bus",
                                        test_demand_page_file_read_error_snare_bus, false, NULL },
     { "demand_page.file_multi_page",   test_demand_page_file_multi_page,   false, NULL },
+    { "demand_page.file_short_read_fills_page",
+                                       test_demand_page_file_short_read_fills_page, false, NULL },
     { "exec.setup_smoke",              test_exec_setup_smoke,              false, NULL },
     { "exec.setup_segment_data_copied",
                                        test_exec_setup_segment_data_copied,
