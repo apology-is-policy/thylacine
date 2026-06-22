@@ -683,4 +683,13 @@ void burrow_file_install_page_for_test(struct Burrow *v, size_t idx) {
         extinction("burrow_file_install_page_for_test: alloc_pages OOM");
     v->filepages[idx] = p;
 }
+
+struct page *burrow_file_slot_for_test(const struct Burrow *v, size_t idx) {
+    if (!v || v->magic != VMO_MAGIC)
+        extinction("burrow_file_slot_for_test: bad Burrow");
+    if (v->type != BURROW_TYPE_FILE)
+        extinction("burrow_file_slot_for_test: not a FILE Burrow");
+    if (!v->filepages || idx >= v->page_count) return NULL;
+    return v->filepages[idx];
+}
 #endif

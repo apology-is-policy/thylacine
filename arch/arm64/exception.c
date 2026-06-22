@@ -221,6 +221,15 @@ static void exception_sync_curr_el_impl(struct exception_context *ctx) {
         case FAULT_UNHANDLED_USER:
             extinction_with_addr("unhandled user-mode fault (no VMA / SIGSEGV pending)",
                                  (uintptr_t)fi.vaddr);
+        case FAULT_USER_BUS:
+            // REVENANT: only userland_demand_page (the EL0 / uaccess demand-page
+            // path) ever returns FAULT_USER_BUS; arch_fault_handle never does,
+            // so this is unreachable here (a uaccess FILE-fault routes through
+            // the `== FAULT_HANDLED` fixup branch above, not this switch).
+            // Defense-in-depth + -Wswitch completeness: a genuine EL1 abort
+            // returning it would be a kernel-side bug -> extinct, don't mask.
+            extinction_with_addr("arch_fault_handle returned FAULT_USER_BUS (EL1)",
+                                 (uintptr_t)fi.vaddr);
         case FAULT_FATAL:
             // Reserved — current arch_fault_handle paths extinct
             // internally. Defense-in-depth.
@@ -364,6 +373,16 @@ static void exception_sync_lower_el_impl(struct exception_context *ctx) {
             // Diagnostic preserves the visibility the prior
             // extinction_with_addr line provided.
             proc_fault_terminate(NOTE_NAME_SNARE_SEGV, (uintptr_t)fi.vaddr);
+        case FAULT_USER_BUS:
+            // REVENANT / I-36 condition 6 (the dedicated enum value the
+            // FAULT_FATAL comment below anticipated): a file-backed
+            // (BURROW_TYPE_FILE) demand-page I/O error -- a dead/wedged FS
+            // server, or a failed/death-interrupted dev->read while faulting in
+            // executable text. Terminate the faulting Proc with snare:bus (POSIX
+            // SIGBUS for an I/O error on a mapped file), attributable to the
+            // faulting VA -- NEVER a silent zero-fill of text, NEVER a kernel
+            // extinction. proc_fault_terminate is noreturn (exits()).
+            proc_fault_terminate(NOTE_NAME_SNARE_BUS, (uintptr_t)fi.vaddr);
         case FAULT_FATAL:
             // F3 audit close: FAULT_FATAL's documented contract (per
             // arch/arm64/fault.h) is "kernel-side invariant violation;

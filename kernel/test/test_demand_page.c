@@ -43,9 +43,11 @@
 #include "../../arch/arm64/mmu.h"
 #include "../../mm/phys.h"
 
+#include <thylacine/dev.h>           // REVENANT R-2: struct Dev for the stub backing Dev
 #include <thylacine/extinction.h>
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
+#include <thylacine/spoor.h>         // REVENANT R-2: spoor_alloc for the FILE Burrow's backing Chan
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
 #include <thylacine/burrow.h>
@@ -57,6 +59,10 @@ void test_demand_page_smoke(void);
 void test_demand_page_no_vma(void);
 void test_demand_page_permission_denied(void);
 void test_demand_page_lifecycle_round_trip(void);
+// REVENANT R-2: BURROW_TYPE_FILE demand-page fault arm.
+void test_demand_page_file_smoke(void);
+void test_demand_page_file_read_error_snare_bus(void);
+void test_demand_page_file_multi_page(void);
 
 #define USER_VA   0x10000000ull           // 256 MiB; well within user-half
 #define ONE_PAGE  PAGE_SIZE
@@ -377,4 +383,157 @@ void test_demand_page_lifecycle_round_trip(void) {
         "phys_free_pages must return to baseline (no leak in demand-page "
         "lifecycle: VMA → burrow_release_mapping; sub-tables → "
         "proc_pgtable_destroy walker; backing pages → burrow_free_internal)");
+}
+
+// =============================================================================
+// REVENANT R-2: BURROW_TYPE_FILE demand-page fault arm.
+//
+// A stub backing Dev whose .read fills the buffer with a deterministic
+// per-file-offset pattern (so a test verifies the RIGHT file bytes landed in
+// the page -- proving the file_offset / slot mapping is honored), or fails
+// (-1) when g_rev_read_fail is set (the fail-closed snare:bus path).
+// g_rev_read_calls counts reads so a resident fast-hit is proven to NOT re-read.
+// =============================================================================
+
+static bool g_rev_read_fail  = false;
+static int  g_rev_read_calls = 0;
+
+static long rev_test_read(struct Spoor *c, void *buf, long n, s64 off) {
+    (void)c;
+    g_rev_read_calls++;
+    if (g_rev_read_fail) return -1;
+    u8 *b = (u8 *)buf;
+    for (long i = 0; i < n; i++) b[i] = (u8)(((u64)off + (u64)i) & 0xff);
+    return n;
+}
+
+static struct Dev g_rev_test_dev = {
+    .dc   = '?',
+    .name = "revtest",
+    .read = rev_test_read,
+};
+
+void test_demand_page_file_smoke(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    g_rev_read_fail  = false;
+    g_rev_read_calls = 0;
+
+    // A FILE Burrow over the stub Dev, backing file bytes [0x2000, 0x3000) --
+    // a non-zero file_offset, so the content pattern is offset-keyed.
+    struct Spoor *s = spoor_alloc(&g_rev_test_dev);
+    TEST_ASSERT(s != NULL, "spoor_alloc");
+    const u64 FILE_OFF = 0x2000;
+    struct Burrow *v = burrow_create_file(s, FILE_OFF, ONE_PAGE);
+    TEST_ASSERT(v != NULL, "burrow_create_file");
+
+    // Map it R+X (text) at USER_VA.
+    int rc = burrow_map(p, v, USER_VA, ONE_PAGE, VMA_PROT_RX);
+    TEST_EXPECT_EQ(rc, 0, "burrow_map RX");
+    TEST_ASSERT(burrow_file_slot_for_test(v, 0) == NULL, "slot 0 starts empty");
+
+    // Instruction fault (text) -> demand-read one page.
+    struct fault_info fi;
+    make_fi(&fi, USER_VA + 0x40, /*is_write=*/false, /*is_instr=*/true);
+    enum fault_result r = userland_demand_page(p, &fi);
+    TEST_EXPECT_EQ(r, FAULT_HANDLED, "FILE demand-page resolves a mapped text VA");
+    TEST_EXPECT_EQ(g_rev_read_calls, 1, "exactly one dev->read for the miss");
+
+    // The slot is now resident; the PTE points at it; the PTE is R+X (W^X).
+    struct page *slotpg = burrow_file_slot_for_test(v, 0);
+    TEST_ASSERT(slotpg != NULL, "slot 0 resident after fault");
+    u64 pte = walk_to_l3_entry(p->pgtable_root, USER_VA);
+    TEST_ASSERT(pte != 0, "L3 PTE installed after FILE demand-page");
+    TEST_EXPECT_EQ(pte & 0x0000FFFFFFFFF000ull, page_to_pa(slotpg),
+        "PTE PA equals the resident FILE slot page");
+    TEST_ASSERT((pte & BIT_UXN) == 0, "R+X text clears UXN (user can exec)");
+    TEST_EXPECT_EQ(pte & BIT_AP_FIELD, BIT_AP_RO_ANY,
+        "R+X text is RO_ANY (W^X-clean: text never writable)");
+
+    // Content: the stub filled the page with (FILE_OFF + i) & 0xff -- proves the
+    // right file bytes landed (file_offset honored, NOT a silent zero page).
+    u8 *bytes = (u8 *)pa_to_kva(page_to_pa(slotpg));
+    TEST_EXPECT_EQ((u64)bytes[0],    (u64)(u8)(FILE_OFF & 0xff),         "byte 0 = file_offset pattern");
+    TEST_EXPECT_EQ((u64)bytes[5],    (u64)(u8)((FILE_OFF + 5) & 0xff),   "byte 5 matches pattern");
+    TEST_EXPECT_EQ((u64)bytes[0xff], (u64)(u8)((FILE_OFF + 0xff) & 0xff),"byte 255 matches pattern");
+
+    // A SECOND fault to the same page hits the resident fast path -- no re-read.
+    make_fi(&fi, USER_VA + 0x800, /*is_write=*/false, /*is_instr=*/true);
+    r = userland_demand_page(p, &fi);
+    TEST_EXPECT_EQ(r, FAULT_HANDLED, "second fault to resident page resolves");
+    TEST_EXPECT_EQ(g_rev_read_calls, 1, "fast-hit must NOT re-read (still 1)");
+
+    drop_proc(p);
+    burrow_unref(v);
+}
+
+void test_demand_page_file_read_error_snare_bus(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    g_rev_read_fail  = true;     // the stub .read returns -1 (a dead/wedged FS)
+    g_rev_read_calls = 0;
+
+    struct Spoor *s = spoor_alloc(&g_rev_test_dev);
+    TEST_ASSERT(s != NULL, "spoor_alloc");
+    struct Burrow *v = burrow_create_file(s, 0, ONE_PAGE);
+    TEST_ASSERT(v != NULL, "burrow_create_file");
+    int rc = burrow_map(p, v, USER_VA, ONE_PAGE, VMA_PROT_RX);
+    TEST_EXPECT_EQ(rc, 0, "burrow_map RX");
+
+    struct fault_info fi;
+    make_fi(&fi, USER_VA, /*is_write=*/false, /*is_instr=*/true);
+    enum fault_result r = userland_demand_page(p, &fi);
+    // Fail closed (I-36 condition 6): a page-in I/O error -> FAULT_USER_BUS
+    // (snare:bus), NEVER a FAULT_HANDLED with a zero-filled text page.
+    TEST_EXPECT_EQ(r, FAULT_USER_BUS, "FILE read error -> FAULT_USER_BUS (snare:bus)");
+    TEST_EXPECT_EQ(g_rev_read_calls, 1, "the read was attempted once");
+    // No page installed (no silent zero-fill) and no PTE.
+    TEST_ASSERT(burrow_file_slot_for_test(v, 0) == NULL,
+        "no page installed on a read error (no silent zero-fill of text)");
+    TEST_ASSERT(walk_to_l3_entry(p->pgtable_root, USER_VA) == 0,
+        "no PTE installed on a read error");
+
+    g_rev_read_fail = false;     // reset for other tests
+    drop_proc(p);
+    burrow_unref(v);
+}
+
+void test_demand_page_file_multi_page(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    g_rev_read_fail  = false;
+    g_rev_read_calls = 0;
+
+    struct Spoor *s = spoor_alloc(&g_rev_test_dev);
+    TEST_ASSERT(s != NULL, "spoor_alloc");
+    const u64 FILE_OFF = 0x4000;
+    struct Burrow *v = burrow_create_file(s, FILE_OFF, FOUR_PAGES);   // 4 pages
+    TEST_ASSERT(v != NULL, "burrow_create_file 4-page");
+    int rc = burrow_map(p, v, USER_VA, FOUR_PAGES, VMA_PROT_RX);
+    TEST_EXPECT_EQ(rc, 0, "burrow_map 4-page FILE RX");
+
+    // Fault page 2 FIRST (out of order) -> reads file offset FILE_OFF + 2 pages.
+    // This pins the slot<->file-offset mapping (an off-by-one would read the
+    // wrong file bytes into the wrong slot).
+    struct fault_info fi;
+    make_fi(&fi, USER_VA + 2 * ONE_PAGE + 0x10, /*is_write=*/false, /*is_instr=*/true);
+    TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_HANDLED, "page 2 fault resolves");
+
+    struct page *pg2 = burrow_file_slot_for_test(v, 2);
+    TEST_ASSERT(pg2 != NULL, "slot 2 resident");
+    u8 *b2 = (u8 *)pa_to_kva(page_to_pa(pg2));
+    TEST_EXPECT_EQ((u64)b2[0], (u64)(u8)((FILE_OFF + 2 * ONE_PAGE) & 0xff),
+        "slot 2 content = file bytes at FILE_OFF + 2 pages (slot<->offset map)");
+
+    // Slots 0,1,3 stay empty (sparse -- only the faulted page reads).
+    TEST_ASSERT(burrow_file_slot_for_test(v, 0) == NULL, "slot 0 sparse");
+    TEST_ASSERT(burrow_file_slot_for_test(v, 1) == NULL, "slot 1 sparse");
+    TEST_ASSERT(burrow_file_slot_for_test(v, 3) == NULL, "slot 3 sparse");
+    TEST_EXPECT_EQ(g_rev_read_calls, 1, "only the faulted page read");
+
+    drop_proc(p);
+    burrow_unref(v);
 }

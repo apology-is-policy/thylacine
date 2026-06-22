@@ -432,6 +432,9 @@ size_t burrow_file_page_count_for_test(const struct Burrow *v);
 // burrow_free_internal FILE arm has a resident page to free. Extincts on a
 // non-FILE Burrow, out-of-range idx, an already-resident slot, or page OOM.
 void   burrow_file_install_page_for_test(struct Burrow *v, size_t idx);
+// REVENANT R-2: the page resident in filepages[idx] (NULL if not faulted in or
+// out of range) -- lets the demand-page tests verify the PTE target + content.
+struct page *burrow_file_slot_for_test(const struct Burrow *v, size_t idx);
 #endif
 
 #endif // THYLACINE_VMO_H
