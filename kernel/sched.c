@@ -381,6 +381,22 @@ static unsigned select_idle_target(unsigned prev_cpu) {
     return prev_cpu;
 }
 
+// Affinity-ready predicate (the priority/affinity pluggable seam, user-ratified
+// TI-4e). True iff thread `t` is permitted to run on `cpu`. v1.0 has no
+// per-thread affinity mask, so every non-cpu_pinned thread may run anywhere and
+// this is unconditionally true -- a trivially-true gate today that becomes load-
+// bearing the day a SYS_SCHED_SETATTR affinity mask lands (then: return
+// (t->affinity_mask >> cpu) & 1u). Consulted at the two CPU-binding decisions --
+// placement (select_target_cpu) and steal (try_steal's victim pick) -- so the
+// balancer never binds a thread to a forbidden CPU; the future mask plugs into
+// THIS one function. cpu_pinned (the idle/kthread hard pin) stays a separate,
+// stronger predicate. Inert today (always true): no behavior change, only the
+// seam, so the work-conservation redesign does not foreclose affinity.
+static inline bool thread_may_run_on(const struct Thread *t, unsigned cpu) {
+    (void)t; (void)cpu;
+    return true;
+}
+
 unsigned select_target_cpu(struct Thread *t, unsigned prev_cpu) {
     if (!t) return prev_cpu;
     // CPU-pinned threads (every per-CPU idle + kthread) NEVER migrate -- their
@@ -398,7 +414,7 @@ unsigned select_target_cpu(struct Thread *t, unsigned prev_cpu) {
     // no peer is idle.
     if (g_sched_notify_enabled) {
         unsigned idle = select_idle_target(prev_cpu);
-        if (idle != prev_cpu) return idle;
+        if (idle != prev_cpu && thread_may_run_on(t, idle)) return idle;
     }
     // Uniform topology (v1.0 QEMU virt / RPi): identity placement -- keep the
     // waking CPU. Byte-identical to the pre-#864 ready() behavior. #866 F3:
@@ -417,6 +433,9 @@ unsigned select_target_cpu(struct Thread *t, unsigned prev_cpu) {
     // uninitialized slot had caps[i]==0 so could only be chosen if prev was
     // also 0 -- defensive belt regardless). Fall back to the prev CPU.
     if (tgt >= DTB_MAX_CPUS || !g_cpu_sched[tgt].initialized) return prev_cpu;
+    // Affinity-ready seam: never place on a CPU the thread's (future) mask
+    // forbids; inert today (thread_may_run_on is unconditionally true).
+    if (!thread_may_run_on(t, tgt)) return prev_cpu;
     return tgt;
 }
 
@@ -984,7 +1003,7 @@ static struct Thread *try_steal(struct CpuSched *cs, bool *contended_out) {
             // pinned thread in the band is the lowest-vd_t one.
             for (struct Thread *cand = peer->run_tree[b]; cand;
                  cand = cand->runnable_next) {
-                if (cand->cpu_pinned) continue;
+                if (cand->cpu_pinned || !thread_may_run_on(cand, self)) continue;
                 // ARCH 8.4.5 steal-invariant: we hold peer->lock, so peer is not
                 // mid-switch (its spin_trylock would have failed) and its tree
                 // holds only RUNNABLE, !on_cpu threads (RunqOnCpuSafe). Fail loud
@@ -1396,6 +1415,13 @@ static u64 g_wc_tickless_parks;
 static u64 g_wc_tickless_starved_events;
 static u64 g_wc_tickless_starved_ns;
 static u64 g_wc_tickless_max_starved_ns;
+// Wake-source telemetry (TI-4e): a tickless park woken by an IPI (prompt, the
+// common case) vs by the one-shot/backstop timer. The split is the wake-path
+// health signal -- TI-4e measured 99.85% IPI under the 100 ms deep-park, proving
+// the wake path correct (the boot slowdown was HVF deep-park resume LATENCY, not
+// a stranding bug); under the 4 ms re-poll the one-shot share rises by design.
+static u64 g_wc_tickless_oneshot_wakes;
+static u64 g_wc_tickless_ipi_wakes;
 
 // Relaxed atomic monotonic-max: store dt iff it exceeds the current value.
 static void wc_max_update(u64 *slot, u64 dt) {
@@ -1422,6 +1448,10 @@ void sched_wc_stats(struct sched_wc_stats *out) {
         __atomic_load_n(&g_wc_tickless_starved_ns, __ATOMIC_RELAXED);
     out->tickless_max_starved_ns =
         __atomic_load_n(&g_wc_tickless_max_starved_ns, __ATOMIC_RELAXED);
+    out->tickless_oneshot_wakes =
+        __atomic_load_n(&g_wc_tickless_oneshot_wakes, __ATOMIC_RELAXED);
+    out->tickless_ipi_wakes =
+        __atomic_load_n(&g_wc_tickless_ipi_wakes, __ATOMIC_RELAXED);
 }
 
 // Best-effort snapshot of every runnable thread across ALL CPUs' run trees
@@ -1951,6 +1981,7 @@ void sched_idle_park(bool tickless) {
     // so a large starved_ns/max is exactly the steal-gap regression's signature.
     bool starved = sched_has_runnable_work();
     u64 park_start = timer_now_ns();
+    u64 armed_target = 0;  // TI-4e: one-shot target, kept for the wake-source classify below
     if (go_tickless) {
         // Arm a one-shot to the nearest deadline (or the backstop) instead of
         // leaving the 1 kHz periodic tick armed -- a genuinely-idle CPU then
@@ -1960,13 +1991,23 @@ void sched_idle_park(bool tickless) {
         // pending, so the work-arrival wake is never lost across the arm
         // (I-9; specs/sched_tickless.tla Register-before-Park).
         u64 now    = timer_get_counter();
-        u64 target = tickless_target_cnt(now, timerwait_earliest_deadline(),
-                                         timer_ns_to_counter(TICKLESS_IDLE_BACKSTOP_NS));
-        timer_arm_oneshot_cnt(target);
+        armed_target = tickless_target_cnt(now, timerwait_earliest_deadline(),
+                                           timer_ns_to_counter(TICKLESS_IDLE_BACKSTOP_NS));
+        timer_arm_oneshot_cnt(armed_target);
     }
     __asm__ __volatile__("wfi" ::: "memory");
     sched_set_idle_in_wfi(false);
     if (go_tickless) {
+        // Wake-source telemetry (TI-4e): now2 < armed_target -> woke BEFORE the
+        // one-shot = an IPI woke us (the prompt path, the common case); >= -> the
+        // one-shot/backstop timer woke us. The split is the wake-path health
+        // signal -- TI-4e measured 99.85% IPI under the 100 ms deep-park, proving
+        // the wake path correct (the boot slowdown was HVF deep-park resume
+        // LATENCY, not a stranding gap), which the 4 ms re-poll then mitigates.
+        if (timer_get_counter() >= armed_target)
+            __atomic_fetch_add(&g_wc_tickless_oneshot_wakes, 1, __ATOMIC_RELAXED);
+        else
+            __atomic_fetch_add(&g_wc_tickless_ipi_wakes, 1, __ATOMIC_RELAXED);
         // Wake-to-running restore, under the same IRQ-masked region so it runs
         // BEFORE any placed work is dispatched. Two jobs:
         //   1. timer_arm_this_cpu() re-arms the periodic tick, so a CPU woken
@@ -2007,6 +2048,33 @@ void sched_idle_park(bool tickless) {
     spin_unlock_irqrestore(NULL, s);
 }
 
+// TI-4c: does THIS CPU hold queued work a parked peer could steal? Reads ONLY
+// the non-IDLE band HEAD pointers (the sched_has_runnable_work lock-free
+// discipline -- never derefs a Thread, so it is safe from the IRQ-context tick
+// without the run-tree lock; a racy stale read only costs a benign spurious or
+// skipped kick, self-correcting next tick). A non-NULL INTERACTIVE/NORMAL head
+// is a RUNNABLE thread queued BEHIND the running current (current is unlinked
+// while running) = genuine migratable surplus. SCHED_BAND_IDLE is excluded: it
+// holds this CPU's pinned idle (unstealable) and at most a best-effort IDLE-band
+// thread (not worth a cross-CPU kick at v1.0; the boot/IPC workload is NORMAL
+// band). Band-aware by scanning the real-work bands; the kicked peer's try_steal
+// then pulls the highest band first. Affinity-ready: the per-thread mask gate
+// lives in try_steal's victim pick (thread_may_run_on) -- this is only the cheap
+// "is there anything to push" pre-check.
+static bool cpu_has_surplus_for_kick(struct CpuSched *cs) {
+    return __atomic_load_n(&cs->run_tree[SCHED_BAND_INTERACTIVE], __ATOMIC_RELAXED) ||
+           __atomic_load_n(&cs->run_tree[SCHED_BAND_NORMAL], __ATOMIC_RELAXED);
+}
+
+#ifdef KERNEL_TESTS
+// Test accessor (TI-4c): expose the static surplus-kick decision for `cpu` so a
+// unit test can assert it. Bounds-checked; false for an OOB/uninitialized CPU.
+bool sched_cpu_has_surplus_for_test(unsigned cpu) {
+    if (cpu >= DTB_MAX_CPUS || !g_cpu_sched[cpu].initialized) return false;
+    return cpu_has_surplus_for_kick(&g_cpu_sched[cpu]);
+}
+#endif /* KERNEL_TESTS */
+
 void sched_tick(void) {
     // P2-Cd: per-CPU need_resched + this CPU's sched state.
     unsigned cpu = smp_cpu_idx_self();
@@ -2034,6 +2102,25 @@ void sched_tick(void) {
         need_resched_set(cpu);
         t->slice_remaining = THREAD_DEFAULT_SLICE_TICKS;
     }
+
+    // TI-4c push-on-overload rebalance (sched_rebalance.tla::Overload). The busy
+    // CPU's still-running tick is the work-conservation re-poll the never-stopped
+    // 1 kHz tick silently WAS before NO_HZ_IDLE: a deep-parked peer no longer
+    // re-runs try_steal every ms, so without this, queued work strands on a busy
+    // CPU until the 100 ms backstop (the TI-3 2.4x boot regression). If THIS
+    // running CPU holds surplus stealable work AND a peer is parked in WFI, kick
+    // ONE peer to come steal it (it wakes -> sched() -> try_steal pulls). The
+    // kick IS sched_notify_idle_peer's register-then-observe IPI: the peer set
+    // idle_in_wfi BEFORE parking (sched_tickless.tla), so the IPI lifts its park
+    // (Overload's NoLostWake leg -- the BUGGY_KICK_NO_LIFT counterexample). The
+    // pull-realizes-the-migration shape (kick -> peer try_steals) sits inside
+    // sched_alpha.tla's proven arbitrary-placement envelope. Suppressed while
+    // THIS CPU runs its own idle (no surplus to push -- it would run any queued
+    // work itself via preempt) and gated on g_sched_notify_enabled so the
+    // in-kernel test phase stays UP-quiescent.
+    struct CpuSched *cs = &g_cpu_sched[cpu];
+    if (g_sched_notify_enabled && t != cs->idle && cpu_has_surplus_for_kick(cs))
+        (void)sched_notify_idle_peer();
 }
 
 void preempt_check_irq(void) {

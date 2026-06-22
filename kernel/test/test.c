@@ -104,6 +104,7 @@ void test_sched_capacity_normalize_synthetic_dtb(void);
 void test_sched_place_by_capacity_synthetic_dtb(void);
 void test_sched_select_target_cpu_homogeneous_is_prev(void);
 void test_sched_ready_on_cross_cpu_enqueue(void);
+void test_sched_cpu_surplus_for_kick(void);
 void test_sched_ready_on_clamps_stale_vd(void);
 void test_sched_wake_preempts_policy(void);
 void test_sched_wake_preempt_same_cpu(void);
@@ -1096,6 +1097,8 @@ struct test_case g_tests[] = {
                                        test_sched_select_target_cpu_homogeneous_is_prev, false, NULL },
     { "scheduler.ready_on_cross_cpu_enqueue",
                                        test_sched_ready_on_cross_cpu_enqueue, false, NULL },
+    { "scheduler.cpu_surplus_for_kick",
+                                       test_sched_cpu_surplus_for_kick, false, NULL },
     { "scheduler.ready_on_clamps_stale_vd",
                                        test_sched_ready_on_clamps_stale_vd, false, NULL },
     { "scheduler.wake_preempts_policy",

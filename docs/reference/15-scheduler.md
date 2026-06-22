@@ -261,6 +261,7 @@ VISION §4 budget: 500 ms. Headroom remains generous.
 | **SMP redesign: per-CPU `cpu_pinned` in-tree idle (retires `g_bootcpu_idle`); `idle_in_wfi` F7 fix; steal/pick invariant assert** | **Landed (deep-smp-review #863; ARCH §8.4.2/§8.4.5; gate `specs/sched_alpha.tla`; closes #860)** |
 | **HMP foundation: `select_target_cpu` placement hook + `ready_on` cross-CPU enqueue + per-CPU `capacity` (DTB) + per-task `util` + `balance_pull`** | **Landed (deep-smp-review #864; ARCH §8.4.3/§8.4.4; logic-verified vs synthetic asymmetric DTB; inert on uniform v1.0 targets)** |
 | **#866 formal adversarial audit (Opus + self-audit) of #863+#864** | **CLOSED CLEAN (0 P0 + 1 P1 + 0 P2 + 5 P3); F1 cross-CPU `need_resched` + F2 steal band-walk + F3 capacity release/acquire + F4 self-OOB guard + F6 doc fixed; F5 deferred (dormant `r->lock` coupling). `memory/audit_smp_redesign_closed_list.md`** |
+| **TI-4 work-conservation under tickless: push-placement (TI-4b) + the busy-tick overload kick (TI-4c, `sched_rebalance.tla::Overload`) + the affinity-ready `thread_may_run_on` seam + the 4 ms re-poll backstop (TI-4e)** | **Landed (TI arc; #304/#307/#309). Focused Opus-4.8-max audit + SMP gate. The tickless boot slowdown root-caused to HVF deep-park vCPU resume latency (99.85% IPI wakes — not a guest bug; the design is correct for the bare-metal target). See "Work-conservation under tickless idle (TI-4)" above.** |
 | `LatencyBound` liveness spec | Phase 2 close |
 | Red-black tree refactor | Phase 7 |
 | **Empirical EAS tuning (PELT decay, energy model, schedutil/DVFS, misfit push)** | **Deferred to real heterogeneous HW (ARCH §8.4.4 verification boundary)** |
@@ -558,6 +559,48 @@ Existing buggy configs (`scheduler_buggy.cfg`, `scheduler_buggy_steal.cfg`, `sch
 - **First-ready-on-secondary loop**: when /init runs (notify enabled), the first ready/wakeup wakes one secondary. Subsequent ready/wakeup on the same CPU — if no other secondary is in WFI — falls through. The selection is rotation-style (self+1, self+2, ...); under sustained load, IPIs distribute across all online secondaries.
 - **try_steal retry budget**: 256-iteration CPU-relax bounded. Truly-empty system still extincts in finite time; transient contention absorbed. Cap is conservative (microseconds at typical clock rates).
 - **The boot CPU is intentionally NOT a wake target**: its post-init flow is `_torpor`'s asm wfi loop with no C-level idle_in_wfi hook. If a future change adds a sched/wfi loop on boot post-init (like Linux's idle task), this hook needs adding. Today's invariant: only secondaries are wake candidates.
+
+---
+
+## Work-conservation under tickless idle (TI-4)
+
+Tickless idle (TI-3) stopped the 1 kHz periodic tick on a genuinely-idle CPU — but that tick was *also*, silently, the **work-steal re-poll**: every tick an idle CPU re-ran `sched()` → `try_steal` and pulled any queued work within 1 ms (`sched_notify_idle_peer` wakes only ONE peer per `ready()`; the tick was the catch-all for the rest). Removing it stranded queued work until the 100 ms backstop → a **2.4× boot slowdown**. TI-4 restores work-conservation with three composing pieces (the Linux `NO_HZ_IDLE` shape: idle CPUs deep-park; a still-ticking busy CPU drives rebalancing), an affinity-ready seam, and a backstop retune. All are production-only (`g_sched_notify_enabled`); the in-kernel test phase runs periodic idle, byte-identical to pre-tickless.
+
+### The enqueue side: push-placement (TI-4b)
+
+`select_target_cpu(t, prev_cpu)` (the HMP placement hook, above) prefers an **idle peer** for a waking thread in production: `select_idle_target` rotates `g_cpu_sched[]` for the first `idle_in_wfi` peer and `ready_on` enqueues `t` there + `sched_notify_cpu` IPIs it. The common case — a wake with an idle CPU available — runs `t` promptly there, no steal needed.
+
+### The pull side: `try_steal` at idle entry (existing)
+
+When `pick_next` returns NULL (nothing local) a CPU runs `try_steal` *before* parking (the `sched()` in `sched_idle_park`), so a CPU going idle already does one steal pass. The gap tickless opened is the **already-deep-parked** CPU: work that strands on a busy peer *after* a CPU parked has no local re-poll to catch it.
+
+### The push-on-overload kick (TI-4c) — `sched_rebalance.tla::Overload`
+
+`sched_tick()` runs at 1 kHz on every **running** CPU (tickless stops only the *idle* tick). At the tail of the tick, if THIS running CPU holds **surplus** stealable work AND a peer is parked in WFI, it kicks ONE peer to come steal:
+
+```c
+struct CpuSched *cs = &g_cpu_sched[cpu];
+if (g_sched_notify_enabled && t != cs->idle && cpu_has_surplus_for_kick(cs))
+    (void)sched_notify_idle_peer();
+```
+
+- `cpu_has_surplus_for_kick(cs)` is a **lock-free** read of the INTERACTIVE + NORMAL `run_tree[]` head pointers (`__atomic_load_n` RELAXED, never deref — the `sched_has_runnable_work` discipline; safe from the IRQ-context tick without the run-tree lock; a racy stale read costs only a benign spurious/skipped kick, self-correcting next tick). A non-NULL head is a RUNNABLE thread queued *behind* the running current (current is unlinked while running) = genuine migratable surplus. `SCHED_BAND_IDLE` is excluded (the pinned idle + at most best-effort IDLE work — never worth a cross-CPU kick).
+- The kick **reuses `sched_notify_idle_peer`** — it finds a registered-idle peer (`idle_in_wfi`) and sends `IPI_RESCHED`, "stops on first send" (no thundering herd; never self). It *lifts the peer's park* exactly as a placement IPI does: the peer set `idle_in_wfi` BEFORE its WFI under the IRQ-masked idle region (register-then-observe), so the IPI is never lost (I-9). The migration is **pull-realized** — the kicked peer's `sched()` → `try_steal` pulls the surplus — inside `sched_alpha.tla`'s proven arbitrary-placement envelope.
+- `t != cs->idle` suppresses the kick when THIS CPU runs its own idle (no surplus to push — it would run any queued work itself via preempt).
+
+This is structurally the Linux `NO_HZ_IDLE` model. Modeled by `specs/sched_rebalance.tla` (`Overload` / `NoLostWake` / `EventuallyParallelized`; clean + `buggy_nokick` [the TI-3 regression] + `buggy_nolift` [the kick that forgets the park-lift] counterexamples, TLC-green). Regression: `scheduler.cpu_surplus_for_kick`.
+
+### The affinity-ready seam (the priority/affinity pluggable point)
+
+`thread_may_run_on(const struct Thread *t, unsigned cpu)` is the single future plug point for a per-thread affinity mask. v1.0 has no mask, so it is **unconditionally `true`** — a trivially-true gate today that becomes load-bearing the day a `SYS_SCHED_SETATTR` affinity mask lands (then `return (t->affinity_mask >> cpu) & 1u;`). It is consulted at the two CPU-binding decisions so the work-conserving machinery never binds a thread to a forbidden CPU: `select_target_cpu` (placement — the idle-target + capacity-target returns) and `try_steal`'s victim pick (steal — beside the `cpu_pinned` skip). Inert today (always-true → the gates collapse to their pre-change behavior); the future mask plugs into THIS one function, so the redesign does not foreclose affinity. `cpu_pinned` (the idle/kthread hard pin) stays a separate, stronger predicate. The kick is band-aware by construction (it scans the real-work bands; `try_steal` then pulls highest-band-first).
+
+### The 4 ms re-poll backstop (TI-4e) + the wake-latency finding
+
+`TICKLESS_IDLE_BACKSTOP_NS = 4 ms` (was 100 ms at TI-3) → an idle CPU re-polls at ~250 Hz. **Why:** TI-4e root-caused the residual tickless boot slowdown to wake **latency**, NOT a guest bug. The wake path is IPI-prompt — measured **99.85% of tickless parks woken by an IPI** (`sched_wc_stats.tickless_ipi_wakes` vs `tickless_oneshot_wakes`; `wake-ipi=`/`wake-oneshot=` in the `boot-wc:` banner), not stranding on the backstop. But **resuming a DEEP-parked vCPU via SGI costs ~0.85 ms under HVF vs ~7 µs when hot** — an emulation artifact (HVF GICv2-MMIO vmexits + the host vCPU-thread resume; #299/#890), not a scheduler defect: on bare metal an SGI to a WFI'd core is hardware-fast (~ns), so deep-park there already gives fast boot + ~0% idle. The 4 ms re-poll keeps the dev-loop vCPUs warm enough that IPI resumes drop to ~0.09 ms → HVF boot ~7 s (≈ tickful) vs ~17–35 s at 100 ms, at ~5% HVF idle (vs 0.3%). The kick still earns its place: it is the fast (~1 ms) parallel-surplus catch, validated by the `cpubench` work-conservation counter (starvation −34…−60% across the parallel modes) even though the *sequential* boot is dominated by the per-wake latency the re-poll mitigates. A v1.x adaptive (warm-while-active / deep-when-idle) or accel-gated backstop reclaims 0.3% HVF idle without the dev-boot cost. (Bare-metal confirmation is owed at the Lazarus/RPi bring-up.)
+
+### Telemetry (`/ctl/sched` + the `boot-wc:` banner)
+
+`struct sched_wc_stats` (read by `sched_wc_stats`) carries the work-conservation counters sampled in `sched_idle_park`: `park_events` / `idle_ns` (denominators), `starved_events` / `starved_ns` / `max_starved_ns` (a park committed while work was queued — the steal-gap signal), the `tickless_*` subset (production only; the regression lives there), and the TI-4e wake-source split `tickless_ipi_wakes` / `tickless_oneshot_wakes` (the wake-path health signal). `cpubench` (`/bin/cpubench`) reads the deltas; the boot-window snapshot is the `boot-wc:` banner line.
 
 ---
 

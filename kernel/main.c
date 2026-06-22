@@ -183,6 +183,10 @@ bool boot_mark_complete(void) {
     uart_putdec(wc.tickless_starved_ns / 1000000ull);
     uart_puts(" max_ms=");
     uart_putdec(wc.tickless_max_starved_ns / 1000000ull);
+    uart_puts(" wake-ipi=");
+    uart_putdec(wc.tickless_ipi_wakes);
+    uart_puts(" wake-oneshot=");
+    uart_putdec(wc.tickless_oneshot_wakes);
     uart_puts("\n");
     uart_puts("Thylacine boot OK\n");
     return true;

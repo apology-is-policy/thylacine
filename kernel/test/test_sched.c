@@ -630,6 +630,45 @@ void test_sched_ready_on_cross_cpu_enqueue(void) {
     thread_free(t);
 }
 
+// scheduler.cpu_surplus_for_kick  (TI-4c)
+//   The busy-tick overload kick (sched_rebalance.tla::Overload) fires only when
+//   THIS CPU holds migratable surplus -- a RUNNABLE thread queued in a non-IDLE
+//   band behind the running current. cpu_has_surplus_for_kick is that decision.
+//   Assert: a queued NORMAL thread makes it TRUE; a band-IDLE thread does NOT
+//   (the per-CPU idle + best-effort IDLE work are never a cross-CPU kick
+//   reason); removal returns it to FALSE. thread_may_run_on (the inert affinity-
+//   ready gate) is exercised on the placement path by ready_on_cross_cpu_enqueue.
+void test_sched_cpu_surplus_for_kick(void) {
+    unsigned self = smp_cpu_idx_self();
+
+    // Baseline: with no queued non-idle work on self, no surplus to kick.
+    TEST_EXPECT_EQ(sched_cpu_has_surplus_for_test(self), false,
+        "no surplus when self's non-idle bands are empty");
+
+    // A queued NORMAL work thread = migratable surplus -> kick-eligible.
+    struct Thread *work = thread_create(kproc(), sched_test_thread_a);
+    TEST_ASSERT(work != NULL, "thread_create(work) failed");   // default NORMAL
+    ready(work);
+    TEST_EXPECT_EQ(sched_cpu_has_surplus_for_test(self), true,
+        "a queued NORMAL thread is migratable surplus");
+    sched_remove_if_runnable(work);
+    TEST_EXPECT_EQ(sched_cpu_has_surplus_for_test(self), false,
+        "surplus clears when the queued work is removed");
+
+    // A band-IDLE thread is NOT surplus (the kick excludes the IDLE band: it
+    // holds the pinned idle + at most best-effort work, never worth a kick).
+    struct Thread *idle_band = thread_create(kproc(), sched_test_thread_b);
+    TEST_ASSERT(idle_band != NULL, "thread_create(idle_band) failed");
+    idle_band->band = SCHED_BAND_IDLE;
+    ready(idle_band);
+    TEST_EXPECT_EQ(sched_cpu_has_surplus_for_test(self), false,
+        "a band-IDLE thread is NOT a cross-CPU kick reason");
+    sched_remove_if_runnable(idle_band);
+
+    thread_free(work);
+    thread_free(idle_band);
+}
+
 // scheduler.ready_on_clamps_stale_vd  (RW-2 2A-F1)
 //   A thread carries its vd_t from its last yield on whatever CPU it last ran
 //   on; each CPU's vd_counter is an independent clock. A cross-CPU wake must

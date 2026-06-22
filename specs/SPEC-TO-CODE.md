@@ -1428,7 +1428,7 @@ masked latency hiccup. The runtime regression (TI-2/TI-3): a deadlined sleeper
 wakes on time under tickless; a cross-CPU `ready()` wakes a tickless CPU; an idle
 CPU's tick count stops advancing.
 
-## sched_rebalance.tla — TI-4a (#304); model-first, impl mapping at TI-4b/TI-4c
+## sched_rebalance.tla — TI-4a (#304) spec; impl LANDED at TI-4c (#307)
 
 The push-on-overload rebalance leg of tickless work-conservation (ARCH §8.6 /
 §8.10). A **sibling** of `sched_tickless.tla` (the `sched_oncpu`/`sched_alpha`
@@ -1440,14 +1440,20 @@ busy-side push of ALREADY-QUEUED work to an idle peer, the leg the 1 kHz periodi
 tick used to cover by pull-polling (its removal at TI-3 was the 2.4x boot
 regression). See `docs/TICKLESS-IDLE.md` §9 (TI-4) + ARCH §8.6 / §8.10 / §25.2.
 
-### Model ↔ impl (impl lands at TI-4c)
+### Model ↔ impl (impl LANDED at TI-4c — `kernel/sched.c::sched_tick` + `cpu_has_surplus_for_kick`)
 
-- `surplus[cpu]` ↔ a running CPU has >1 non-idle runnable thread in its runq
-  (the running thread + queued work that should migrate).
-- `Overload(b, i)` ↔ the busy CPU's `sched_tick` detecting surplus + an idle peer
-  (`idle_in_wfi`) and kicking it (`IPI_RESCHED`) to `try_steal` — the new TI-4c
-  mechanism. The kick lifts the peer's park exactly as `sched_tickless`'s
-  `PlaceWork` does (register-then-observe).
+- `surplus[cpu]` ↔ `cpu_has_surplus_for_kick(cs)`: a non-NULL INTERACTIVE/NORMAL
+  `run_tree[]` head (the running thread is unlinked while running, so a queued
+  head IS the migratable surplus). Lock-free relaxed head read (the
+  `sched_has_runnable_work` discipline).
+- `Overload(b, i)` ↔ the busy CPU's `sched_tick` tail: `if (g_sched_notify_enabled
+  && t != cs->idle && cpu_has_surplus_for_kick(cs)) sched_notify_idle_peer();` —
+  detects surplus + (inside the reused `sched_notify_idle_peer`) an idle peer
+  (`idle_in_wfi`) and kicks it (`IPI_RESCHED`) to `try_steal`. The kick lifts the
+  peer's park exactly as `sched_tickless`'s `PlaceWork` does (register-then-
+  observe — `idle_in_wfi` set BEFORE the WFI under the IRQ-masked idle region).
+  The migration is pull-realized (kicked peer → `try_steal`), inside
+  `sched_alpha.tla`'s arbitrary-placement envelope.
 - `Dispatch(i)` ↔ the kicked idle CPU's `sched()` → `try_steal` pulling the work.
 - `Block`/`DrainLocally`/`Register`/`Park` ↔ the existing idle-enter + local-run
   paths. `DrainLocally` is UNFAIR: a CPU-bound producer need not yield, so the

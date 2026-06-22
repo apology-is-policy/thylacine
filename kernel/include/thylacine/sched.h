@@ -130,12 +130,24 @@ bool sched_idle_in_wfi(unsigned cpu_idx);
 // production path calls this -- it lands with its consumer at TI-2.
 u64 timerwait_earliest_deadline(void);
 
-// Tickless idle backstop (NO_HZ_IDLE; docs/TICKLESS-IDLE.md TI-2, #299). An idle
-// CPU with no pending deadline arms its one-shot to now + this, so it wakes
-// ~10x/s (vs the never-stopped 1 kHz) -- negligible idle cost, yet enough to
-// self-heal a hypothetically-dropped IPI_RESCHED within a bounded hiccup rather
-// than a hang. 100 ms.
-#define TICKLESS_IDLE_BACKSTOP_NS  100000000ull
+// Tickless idle re-poll backstop (NO_HZ_IDLE; docs/TICKLESS-IDLE.md TI-4e, #299).
+// An idle CPU arms its one-shot to min(nearest deadline, now + this), so it
+// re-polls (sched() -> try_steal) at ~250 Hz. 4 ms (TI-4e, user-voted).
+//
+// WHY 4 ms not the prior 100 ms: TI-4e root-caused the tickless boot slowdown to
+// the wake LATENCY, not a guest bug -- the wake path is IPI-prompt (measured:
+// 99.85% of tickless parks woken by an IPI, not the backstop), but under HVF
+// resuming a DEEP-parked vCPU via SGI costs ~0.85 ms vs ~7 us when hot. That is
+// an EMULATION artifact (HVF GICv2-MMIO vmexits + the host vCPU-thread resume;
+// #299/#890), NOT a scheduler defect: on the bare-metal production target an SGI
+// to a WFI'd core is hardware-fast (~ns), so deep-park already gives fast boot +
+// ~0% idle. The 4 ms re-poll keeps the dev-loop vCPUs warm enough for a fast HVF
+// boot (~7 s vs the ~17-35 s the 100 ms deep-park took) at ~5% HVF idle; on bare
+// metal the re-poll is ~free. The 100 ms deep-park (0.3% HVF idle, the #299
+// number) is the alternative -- 4 ms trades HVF idle for HVF dev-boot speed. A
+// v1.x adaptive (warm-while-active / deep-when-idle) or accel-gated backstop is
+// the recorded path to reclaim 0.3% HVF idle without the dev-boot cost.
+#define TICKLESS_IDLE_BACKSTOP_NS  4000000ull
 
 // Tickless idle (NO_HZ_IDLE; docs/TICKLESS-IDLE.md TI-2). Pure: the absolute
 // CNTVCT value an idle CPU arms its one-shot to, given the current counter, the
@@ -289,9 +301,14 @@ bool sched_in_cpu_tree(unsigned cpu, struct Thread *t);
 //   - sched_clear_need_resched_for_test (RW-11 SA-1b): clears a CPU's
 //     need_resched so a unit test can establish a clean baseline before
 //     exercising the same-CPU wake-preempt path.
+//   - sched_cpu_has_surplus_for_test (TI-4c): the busy-tick overload-kick
+//     decision for `cpu` -- true iff a non-IDLE run-tree band head is non-NULL
+//     (migratable surplus). The unit test asserts a queued NORMAL thread makes
+//     it true and a band-IDLE thread does not.
 #ifdef KERNEL_TESTS
 bool sched_need_resched_pending(unsigned cpu);
 void sched_clear_need_resched_for_test(unsigned cpu);
+bool sched_cpu_has_surplus_for_test(unsigned cpu);
 #endif /* KERNEL_TESTS */
 
 // Diagnostic accessors.
@@ -326,6 +343,8 @@ struct sched_wc_stats {
     u64 tickless_starved_events; // tickless parks committed on queued work
     u64 tickless_starved_ns;     // ns the tickless path starved (THE regression signal)
     u64 tickless_max_starved_ns; // longest tickless starved park (= backstop if hit)
+    u64 tickless_oneshot_wakes;  // TI-4e wake-source telemetry: parks woken by the one-shot/backstop
+    u64 tickless_ipi_wakes;      // TI-4e wake-source telemetry: parks woken (prompt) by an IPI
 };
 void sched_wc_stats(struct sched_wc_stats *out);
 
