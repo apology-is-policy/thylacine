@@ -264,6 +264,16 @@ else()
     message(STATUS "Kernel: production shape -- in-kernel test suite DISABLED (KERNEL_TESTS=OFF)")
 endif()
 
+# TI-4e tickful-baseline lever (tools/build.sh --no-tickless): force the old
+# 1 kHz-always idle (sched_idle_park's go_tickless=false) so cpubench can capture
+# the gold-standard "fast tickful scheduler" numbers the work-conservation
+# redesign must match-or-exceed. Diagnostic-only; production builds leave it OFF
+# (the kernel is then byte-identical to the committed tickless idle).
+if(THYLACINE_NO_TICKLESS)
+    target_compile_definitions(thylacine.elf PRIVATE THYLACINE_NO_TICKLESS)
+    message(STATUS "Kernel: TICKFUL-BASELINE build -- tickless idle DISABLED (THYLACINE_NO_TICKLESS=ON)")
+endif()
+
 target_include_directories(thylacine.elf
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include

@@ -85,6 +85,7 @@ pub mod notes;
 pub mod poll;
 pub mod process;
 pub mod rand;
+pub mod sched;
 pub mod territory;
 pub mod thread;
 pub mod time;

@@ -3749,9 +3749,9 @@ int main(void) {
                                  "resident lo stack)\n");
                     }
 
-                    // === TI-4d: the cpubench scheduler/CPU regression probe ===
-                    // Spawn /bin/cpubench (native, no args -> the short all-modes
-                    // boot probe): single / scale / yield / storm / pingpong over
+                    // === TI-4e: the cpubench scheduler/CPU regression probe ===
+                    // Spawn /bin/cpubench (native, no args -> the short boot
+                    // probe): single / scale / yield / storm / pingpong / idle over
                     // the SMP scheduler, each bracketing the kernel /ctl/sched
                     // work-conservation `wc-tickless` delta. This is the throughput
                     // + wakeup-latency net the TI arc lacked -- the regression that
@@ -3772,11 +3772,12 @@ int main(void) {
                         int cb_status = -1;
                         long cb_reaped = t_wait_pid_for((int)cb_pid, 0, &cb_status);
                         if (cb_reaped != cb_pid || cb_status != 0) {
-                            t_putstr("joey: TI-4d cpubench PROBE FAILED\n");
+                            t_putstr("joey: TI-4e cpubench PROBE FAILED\n");
                             return 1;
                         }
-                        t_putstr("joey: TI-4d cpubench PROBE OK (scheduler "
-                                 "single/scale/yield/storm/pingpong)\n");
+                        t_putstr("joey: TI-4e cpubench PROBE OK (scheduler "
+                                 "single/scale/yield/storm/pingpong/idle; "
+                                 "'cpubench all' = the full 13-mode bench)\n");
                     }
 
                     // === NET-PERF NP-2: the TLS handshake + crypto micro-bench ===

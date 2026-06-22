@@ -16,17 +16,42 @@
 //     delta, so the bench's own latency tail is correlated with kernel-observed
 //     starvation (a core idle while work was queued = the steal/handoff gap).
 //
-// THE FIVE MODES (the user's five load characters):
-//   single   -- single-threaded constant load            -> ops/sec baseline
-//   scale    -- N long-running CPU threads (will-it-scale) -> efficiency T1/Tn
-//   yield    -- long-running threads that periodically sleep -> sleeps/sec + fairness
-//   storm    -- thread spawn/join churn (hackbench-shape)  -> threads/sec
-//   pingpong -- 2-thread cross-CPU IPC wakeup (sched pipe) -> p50/p99/p99.9/max us
+// THE MODES (each a distinct scheduler axis mapping to a real Thylacine workload):
+//   single    -- single-threaded constant load             -> ops/sec baseline
+//   scale     -- N long CPU threads (will-it-scale)         -> efficiency T1/Tn
+//   yield     -- long threads that periodically sleep        -> sleeps/sec + fairness
+//   storm     -- thread spawn/join churn (hackbench-shape)  -> threads/sec
+//   pingpong  -- 2-thread cross-CPU IPC wakeup (sched pipe) -> p50/p99/p99.9/max us
+//   latency   -- schbench: 1 probe + N CPU hogs            -> probe wake-overshoot tail
+//                THE work-conservation detector (tail-under-load; the wait-bound
+//                boot's interactive-responsiveness analog).
+//   wakestorm -- K short sleepers, no compute              -> wakes/sec + overshoot tail
+//                the boot pattern (netd poll / Loom / the bring-up wait chain).
+//   burst     -- imbalanced: hot subset + idle peers, then  -> cold vs loaded drain ratio
+//                inject a burst; how fast idle peers absorb (the ILB detector).
+//   pipeline  -- N-stage cross-CPU handoff chain           -> tokens/sec + end-to-end tail
+//                the 9P request->dispatch->reply IPC shape.
+//   contention-- N threads on one torpor lock              -> acquisitions/sec + fairness
+//   idle      -- a quiet window, parks/sec via /ctl/sched  -> the #299 idle-cost axis
+//                (high = tickful re-poll; low = tickless deep-park).
+//   mixed     -- FORWARD SEAM (priority): INTERACTIVE probe + IDLE hogs. Today the
+//                priorities are not enforced (no SYS_SCHED_SETATTR) -> the
+//                uniform-priority BASELINE the future priority system must beat.
+//   affinity  -- FORWARD SEAM (affinity): pinned cross-CPU ping-pong. Today pinning
+//                is not enforced -> the natural-placement baseline.
 //
-// `cpubench`           -- the short boot/CI probe: all five modes, bounded, with
-//                         per-mode wc-delta; prints data, exits 0 (data is the
-//                         value -- no flaky perf-threshold gate, per the no-host-
-//                         load discipline).
+// PRIORITY / AFFINITY PLUG POINT (user-directed 2026-06-22 -- "build with that in
+// mind, easily pluggable later"): per-worker PRIO/AFFINITY are applied through ONE
+// hook (`worker_apply_attr`) over `libthyla_rs::sched`, which returns
+// NotImplemented today. When a `SYS_SCHED_SETATTR`-class syscall lands, only that
+// lib stub changes and the mixed/affinity modes measure for real -- the scaffold,
+// the call sites, and the consumers already exist.
+//
+// `cpubench`           -- the short boot/CI probe: the 5 core modes + idle,
+//                         bounded; prints data, exits 0 (data is the value -- no
+//                         flaky perf-threshold gate, per the no-host-load discipline).
+//   `cpubench all`      -- the comprehensive deep run: EVERY mode at solid params,
+//                         delimited block (the redesign's compass + baseline capture).
 //   `cpubench <mode> [N] [iters]` -- one mode, bigger params, from the shell.
 //
 // Pure userspace -- a buggy bench corrupts only its own state (the kernel
@@ -68,11 +93,73 @@ const TID_SENTINEL: u32 = 0xC0FFEE; // non-zero "spawned, not yet exited".
 const KIND_CPU: u32 = 0; // run G_INNER_ITERS of cpu_work, G_ROUNDS times.
 const KIND_YIELD: u32 = 1; // G_ROUNDS x { cpu_work(G_INNER_ITERS); sleep(G_SLEEP_US) }.
 const KIND_PINGPONG: u32 = 2; // the responder half of the ping-pong (B).
+const KIND_HOG: u32 = 3; // cpu_work bursts until G_STOP -- background saturating load.
+const KIND_WAKESTORM: u32 = 4; // G_ROUNDS x sleep(G_SLEEP_US), record wake overshoot.
+const KIND_PIPELINE: u32 = 5; // stage worker: wait my turn, hand to next, until G_STOP.
+const KIND_CONTEND: u32 = 6; // G_ROUNDS x { lock G_MUTEX; tiny; unlock }, count acquisitions.
 
 static G_KIND: AtomicU32 = AtomicU32::new(KIND_CPU);
 static G_INNER_ITERS: AtomicU64 = AtomicU64::new(0);
 static G_ROUNDS: AtomicU64 = AtomicU64::new(0);
 static G_SLEEP_US: AtomicU64 = AtomicU64::new(0);
+
+// Run-until-stop flag for hog/pipeline workers (0 = run, 1 = stop + exit).
+static G_STOP: AtomicU32 = AtomicU32::new(0);
+
+// Pipeline stage handoff: STAGE[s] holds the token id currently AT stage s (0 =
+// empty). Stage worker s waits STAGE[s] != 0, takes it, stores into STAGE[s+1],
+// wakes the next. The injector (main) writes STAGE[0] and reads STAGE[G_STAGES].
+const MAX_STAGES: usize = 16;
+static STAGE: [AtomicU32; MAX_STAGES + 1] = {
+    const Z: AtomicU32 = AtomicU32::new(0);
+    [Z; MAX_STAGES + 1]
+};
+static G_STAGES: AtomicU32 = AtomicU32::new(0);
+
+// Contention mutex: 0 = free, 1 = held (torpor-backed CAS lock).
+static G_MUTEX: AtomicU32 = AtomicU32::new(0);
+
+// Per-worker wake-latency accumulators (wakestorm: overshoot = actual - intended).
+static WAKE_SUM_NS: [AtomicU64; MAX_WORKERS] = {
+    const Z: AtomicU64 = AtomicU64::new(0);
+    [Z; MAX_WORKERS]
+};
+static WAKE_MAX_NS: [AtomicU64; MAX_WORKERS] = {
+    const Z: AtomicU64 = AtomicU64::new(0);
+    [Z; MAX_WORKERS]
+};
+
+// ---------------------------------------------------------------------------
+// PRIORITY / AFFINITY FORWARD SEAM (user-directed: build pluggable). Per-worker
+// scheduling attrs, applied through ONE hook over libthyla_rs::sched. The lib
+// returns NotImplemented today (no SYS_SCHED_SETATTR), so this is a no-op now;
+// when the syscall lands, only the lib stub changes and mixed/affinity measure
+// for real. PRIO_UNSET / AFFINITY 0 = "leave default" (the common case).
+// ---------------------------------------------------------------------------
+const PRIO_UNSET: i32 = i32::MIN;
+static PRIO: [AtomicU32; MAX_WORKERS] = {
+    const Z: AtomicU32 = AtomicU32::new(PRIO_UNSET as u32);
+    [Z; MAX_WORKERS]
+};
+static AFFINITY: [AtomicU64; MAX_WORKERS] = {
+    const Z: AtomicU64 = AtomicU64::new(0);
+    [Z; MAX_WORKERS]
+};
+
+/// The single pluggable point: apply worker `i`'s scheduling attrs to the
+/// calling thread. Best-effort -- today `libthyla_rs::sched` returns
+/// NotImplemented, so an unset/default attr is a no-op and a set attr fails
+/// silently. When `SYS_SCHED_SETATTR` lands this takes effect with no change here.
+fn worker_apply_attr(i: usize) {
+    let p = PRIO[i].load(Ordering::Acquire) as i32;
+    if p != PRIO_UNSET {
+        let _ = libthyla_rs::sched::set_self_priority(p);
+    }
+    let a = AFFINITY[i].load(Ordering::Acquire);
+    if a != 0 {
+        let _ = libthyla_rs::sched::set_self_affinity(a);
+    }
+}
 
 // Per-worker join words + outputs. Index = the worker's spawn arg.
 static TIDS: [AtomicU32; MAX_WORKERS] = {
@@ -123,6 +210,7 @@ fn cpu_work(iters: u64, seed: u64) -> u64 {
 extern "C" fn worker_entry(idx: u64) {
     let i = idx as usize;
     let _ = libthyla_rs::thread::set_tid_address(&TIDS[i]);
+    worker_apply_attr(i); // priority/affinity forward seam (no-op today).
 
     // Start barrier: sleep until main releases (G_START == 1).
     while G_START.load(Ordering::Acquire) == 0 {
@@ -133,6 +221,10 @@ extern "C" fn worker_entry(idx: u64) {
     match G_KIND.load(Ordering::Acquire) {
         KIND_YIELD => worker_yield(i),
         KIND_PINGPONG => worker_pingpong(),
+        KIND_HOG => worker_hog(i),
+        KIND_WAKESTORM => worker_wakestorm(i),
+        KIND_PIPELINE => worker_pipeline(i),
+        KIND_CONTEND => worker_contend(i),
         _ => worker_cpu(i),
     }
     WORK_NS[i].store(t0.elapsed().as_nanos() as u64, Ordering::SeqCst);
@@ -193,6 +285,92 @@ fn worker_pingpong() {
     }
 }
 
+/// Hog worker: cpu_work bursts until G_STOP. The saturating background load for
+/// `latency` (a probe's wake-overshoot under load) and `burst` (the warm subset).
+fn worker_hog(i: usize) {
+    let inner = G_INNER_ITERS.load(Ordering::Acquire);
+    let mut acc: u64 = 0;
+    let mut r: u64 = 0;
+    while G_STOP.load(Ordering::Acquire) == 0 {
+        acc ^= cpu_work(inner, acc ^ (i as u64).wrapping_mul(0x9e3779b9) ^ r);
+        r += 1;
+    }
+    OPS_DONE[i].store(r, Ordering::SeqCst);
+    SINK.fetch_xor(acc, Ordering::Relaxed);
+}
+
+/// Wakestorm worker: G_ROUNDS short sleeps, recording the wake OVERSHOOT (actual
+/// elapsed - intended) into per-worker sum/max. Many of these concurrently are
+/// the boot's many-short-sleepers pattern; the overshoot tail is the wake latency.
+fn worker_wakestorm(i: usize) {
+    let rounds = G_ROUNDS.load(Ordering::Acquire);
+    let sleep_us = G_SLEEP_US.load(Ordering::Acquire);
+    let dur = Duration::from_micros(sleep_us);
+    let target = sleep_us.wrapping_mul(1000); // intended sleep, ns.
+    let mut sum: u64 = 0;
+    let mut maxv: u64 = 0;
+    let mut count: u64 = 0;
+    let mut r: u64 = 0;
+    while r < rounds {
+        let t = Instant::now();
+        let _ = time::sleep(dur);
+        let over = (t.elapsed().as_nanos() as u64).saturating_sub(target);
+        sum = sum.wrapping_add(over);
+        if over > maxv {
+            maxv = over;
+        }
+        count += 1;
+        r += 1;
+    }
+    OPS_DONE[i].store(count, Ordering::SeqCst);
+    WAKE_SUM_NS[i].store(sum, Ordering::SeqCst);
+    WAKE_MAX_NS[i].store(maxv, Ordering::SeqCst);
+}
+
+/// Pipeline stage worker (stage index = spawn arg `i`). Waits its turn on
+/// STAGE[i], does a tiny fixed unit, hands the token to STAGE[i+1] and wakes the
+/// next stage. Loops until G_STOP. The N-stage cross-CPU handoff = the 9P
+/// request->dispatch->reply chain + the boot's IPC shape.
+fn worker_pipeline(i: usize) {
+    loop {
+        while STAGE[i].load(Ordering::Acquire) == 0 {
+            if G_STOP.load(Ordering::Acquire) != 0 {
+                return;
+            }
+            let _ = libthyla_rs::torpor::wait(&STAGE[i], 0, Some(Duration::from_millis(100)));
+        }
+        let tok = STAGE[i].swap(0, Ordering::AcqRel); // take the token.
+        SINK.fetch_xor(cpu_work(64, tok as u64), Ordering::Relaxed); // a real (tiny) stage.
+        STAGE[i + 1].store(tok, Ordering::Release);
+        let _ = libthyla_rs::torpor::wake(&STAGE[i + 1], 1);
+    }
+}
+
+/// Contention worker: G_ROUNDS x { acquire G_MUTEX (torpor-backed CAS lock); tiny
+/// critical section; release + wake one waiter }. Records acquisitions. Stresses
+/// the lock/wait-wake path (the allocator, shared server state).
+fn worker_contend(i: usize) {
+    let rounds = G_ROUNDS.load(Ordering::Acquire);
+    let mut got: u64 = 0;
+    let mut r: u64 = 0;
+    while r < rounds {
+        // Acquire.
+        while G_MUTEX
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            let _ = libthyla_rs::torpor::wait(&G_MUTEX, 1, Some(Duration::from_millis(100)));
+        }
+        SINK.fetch_xor(cpu_work(32, r ^ (i as u64)), Ordering::Relaxed);
+        // Release + wake exactly one waiter.
+        G_MUTEX.store(0, Ordering::Release);
+        let _ = libthyla_rs::torpor::wake_one(&G_MUTEX);
+        got += 1;
+        r += 1;
+    }
+    OPS_DONE[i].store(got, Ordering::SeqCst);
+}
+
 // ===========================================================================
 // Stack pool: attach (lazily) up to MAX_WORKERS user stacks and hand out the
 // 16-aligned TOP for each worker. Reused across modes.
@@ -231,14 +409,55 @@ impl StackPool {
 /// barrier. Returns false if a spawn fails. The caller releases the barrier.
 fn spawn_batch(pool: &StackPool, n: usize) -> bool {
     G_START.store(0, Ordering::SeqCst);
+    clear_attrs(n); // the simple modes run at default priority/affinity.
     for i in 0..n {
-        TIDS[i].store(TID_SENTINEL, Ordering::SeqCst);
-        WORK_NS[i].store(0, Ordering::SeqCst);
-        OPS_DONE[i].store(0, Ordering::SeqCst);
+        reset_slot(i);
     }
     for i in 0..n {
         let sp = pool.top(i);
         if unsafe { libthyla_rs::thread::spawn_raw(worker_entry as *const () as u64, sp, i as u64, 0) }
+            .is_err()
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// Reset worker `i`'s output + join slots (NOT its attrs -- the caller manages
+/// PRIO/AFFINITY for an attr-bearing spawn).
+fn reset_slot(i: usize) {
+    TIDS[i].store(TID_SENTINEL, Ordering::SeqCst);
+    WORK_NS[i].store(0, Ordering::SeqCst);
+    OPS_DONE[i].store(0, Ordering::SeqCst);
+    WAKE_SUM_NS[i].store(0, Ordering::SeqCst);
+    WAKE_MAX_NS[i].store(0, Ordering::SeqCst);
+}
+
+/// Clear scheduling attrs for slots [0, n) to default (unset). The attr-bearing
+/// modes call this then set specific slots before spawning.
+fn clear_attrs(n: usize) {
+    for i in 0..n.min(MAX_WORKERS) {
+        PRIO[i].store(PRIO_UNSET as u32, Ordering::SeqCst);
+        AFFINITY[i].store(0, Ordering::SeqCst);
+    }
+}
+
+/// Spawn a single worker into `slot` with spawn-arg `arg` (the worker reads it as
+/// its index). Resets the output slots; leaves attrs as the caller set them. Used
+/// where workers occupy disjoint slot ranges (burst, pipeline, mixed, affinity).
+fn spawn_at(pool: &StackPool, slot: usize, arg: u64) -> bool {
+    reset_slot(slot);
+    unsafe {
+        libthyla_rs::thread::spawn_raw(worker_entry as *const () as u64, pool.top(slot), arg, 0)
+    }
+    .is_ok()
+}
+
+/// Join workers in slot range [lo, hi). Returns false on any join timeout.
+fn join_range(lo: usize, hi: usize) -> bool {
+    for i in lo..hi {
+        if libthyla_rs::thread::join_tid(&TIDS[i], TID_SENTINEL, Some(Duration::from_secs(30)))
             .is_err()
         {
             return false;
@@ -322,6 +541,17 @@ fn wc_snapshot() -> Option<WcSnap> {
         starved_ns: field_u64(tl, "starved_ns=").unwrap_or(0),
         max_ns: field_u64(tl, "max_starved_ns=").unwrap_or(0),
     })
+}
+
+/// All-parks counter (the `wc:` line -- BOTH tickful + tickless parks). The idle
+/// mode's idle-cost proxy: parks/sec over a quiet window is the wake/vmexit rate
+/// (a tickful idle CPU re-parks ~1000x/s on the periodic tick; tickless ~10).
+fn wc_all_parks() -> Option<u64> {
+    let mut buf = [0u8; 512];
+    let n = read_ctl_sched(&mut buf)?;
+    let s = core::str::from_utf8(&buf[..n]).ok()?;
+    let tl = &s[s.find("wc: ")?..];
+    field_u64(tl, "parks=")
 }
 
 /// The online CPU count from /ctl/sched `cpus:`; falls back to 1 if unreadable.
@@ -616,6 +846,436 @@ fn mode_pingpong(pool: &StackPool, iters: u64) {
     report_wc_delta(wc_before, wc_after);
 }
 
+/// latency -- schbench: N CPU hogs saturate the machine, ONE probe (this thread)
+/// sleeps then measures its wake OVERSHOOT (actual - intended). The probe's tail
+/// under saturation is THE work-conservation detector (a starved wake is a
+/// p99.9/max spike). Maps onto interactive responsiveness while the box is busy.
+fn mode_latency(pool: &StackPool, hogs: usize, probe_iters: u64, probe_us: u64) {
+    G_KIND.store(KIND_HOG, Ordering::SeqCst);
+    G_INNER_ITERS.store(50_000, Ordering::SeqCst);
+    G_STOP.store(0, Ordering::SeqCst);
+    if !spawn_batch(pool, hogs) {
+        t_putstr("latency: FAIL (spawn hogs)\n");
+        return;
+    }
+    release_batch();
+    let _ = time::sleep(Duration::from_millis(20)); // ramp to saturation.
+    let wc_before = wc_snapshot();
+    let mut samples: Vec<u64> = Vec::with_capacity(probe_iters as usize);
+    let target = probe_us.wrapping_mul(1000);
+    for _ in 0..probe_iters {
+        let t = Instant::now();
+        let _ = time::sleep(Duration::from_micros(probe_us));
+        samples.push((t.elapsed().as_nanos() as u64).saturating_sub(target));
+    }
+    let wc_after = wc_snapshot();
+    G_STOP.store(1, Ordering::SeqCst);
+    if !join_batch(hogs) {
+        t_putstr("latency: WARN (hog join timeout)\n");
+    }
+    samples.sort_unstable();
+    t_putstr(&format!(
+        "latency: {} probes vs {} hogs (sleep {}us) -> wake-overshoot p50 {} p99 {} p99.9 {} max {} us\n",
+        samples.len(),
+        hogs,
+        probe_us,
+        fmt_us(pct(&samples, 500)),
+        fmt_us(pct(&samples, 990)),
+        fmt_us(pct(&samples, 999)),
+        fmt_us(samples.last().copied().unwrap_or(0)),
+    ));
+    report_wc_delta(wc_before, wc_after);
+}
+
+/// wakestorm -- K short sleepers (no compute), the boot's many-short-sleepers
+/// pattern. Aggregate wakes/sec + the per-wake overshoot mean/max. The wait-bound
+/// boot, netd's poll loop, and Loom are this shape; the mode that would have
+/// caught the TI-4 regression at once.
+fn mode_wakestorm(pool: &StackPool, n: usize, rounds: u64, sleep_us: u64) {
+    G_KIND.store(KIND_WAKESTORM, Ordering::SeqCst);
+    G_ROUNDS.store(rounds, Ordering::SeqCst);
+    G_SLEEP_US.store(sleep_us, Ordering::SeqCst);
+    if !spawn_batch(pool, n) {
+        t_putstr("wakestorm: FAIL (spawn)\n");
+        return;
+    }
+    let wc_before = wc_snapshot();
+    let t = Instant::now();
+    release_batch();
+    if !join_batch(n) {
+        t_putstr("wakestorm: FAIL (join timeout)\n");
+        return;
+    }
+    let ns = t.elapsed().as_nanos() as u64;
+    let wc_after = wc_snapshot();
+    let mut total: u64 = 0;
+    let mut sum: u64 = 0;
+    let mut maxv: u64 = 0;
+    for i in 0..n {
+        total += OPS_DONE[i].load(Ordering::SeqCst);
+        sum = sum.wrapping_add(WAKE_SUM_NS[i].load(Ordering::SeqCst));
+        maxv = maxv.max(WAKE_MAX_NS[i].load(Ordering::SeqCst));
+    }
+    let wps = if ns > 0 { total.saturating_mul(1_000_000_000) / ns } else { 0 };
+    let mean = if total > 0 { sum / total } else { 0 };
+    t_putstr(&format!(
+        "wakestorm: {} wakes over {} threads in {} ms -> {} wakes/s; overshoot mean {} max {} us (sleep {}us)\n",
+        total,
+        n,
+        ns / 1_000_000,
+        wps,
+        fmt_us(mean),
+        fmt_us(maxv),
+        sleep_us,
+    ));
+    report_wc_delta(wc_before, wc_after);
+}
+
+/// burst -- imbalanced-load absorption (the ILB detector). Drain a burst of
+/// workers on an idle machine (cold), then drain the SAME burst while a hog
+/// subset keeps some CPUs busy (loaded). The loaded/cold ratio is how well idle
+/// peers absorb queued work -- a work-conserving scheduler keeps it near 1.0.
+fn mode_burst(pool: &StackPool, burst: usize, hogs: usize) {
+    clear_attrs(MAX_WORKERS);
+    let work: u64 = 800_000; // each burst worker's unit (a few ms).
+
+    // Phase 1: cold drain on an idle machine.
+    G_KIND.store(KIND_CPU, Ordering::SeqCst);
+    G_INNER_ITERS.store(work, Ordering::SeqCst);
+    G_ROUNDS.store(1, Ordering::SeqCst);
+    if !spawn_batch(pool, burst) {
+        t_putstr("burst: FAIL (cold spawn)\n");
+        return;
+    }
+    let t = Instant::now();
+    release_batch();
+    if !join_batch(burst) {
+        t_putstr("burst: FAIL (cold join)\n");
+        return;
+    }
+    let cold = t.elapsed().as_nanos() as u64;
+
+    // Phase 2: warm a hog subset (slots [0, hogs)), then drain the burst (slots
+    // [hogs, hogs+burst)) while the peers are busy.
+    G_KIND.store(KIND_HOG, Ordering::SeqCst);
+    G_INNER_ITERS.store(50_000, Ordering::SeqCst);
+    G_STOP.store(0, Ordering::SeqCst);
+    G_START.store(0, Ordering::SeqCst);
+    for s in 0..hogs {
+        if !spawn_at(pool, s, s as u64) {
+            t_putstr("burst: FAIL (hog spawn)\n");
+            G_STOP.store(1, Ordering::SeqCst);
+            return;
+        }
+    }
+    G_START.store(1, Ordering::Release);
+    let _ = libthyla_rs::torpor::wake_all(&G_START);
+    let _ = time::sleep(Duration::from_millis(20)); // hogs ramp.
+    G_KIND.store(KIND_CPU, Ordering::SeqCst); // burst workers (spawned next) are CPU.
+    G_INNER_ITERS.store(work, Ordering::SeqCst);
+    let wc_before = wc_snapshot();
+    let t2 = Instant::now();
+    for s in hogs..hogs + burst {
+        if !spawn_at(pool, s, s as u64) {
+            t_putstr("burst: FAIL (loaded burst spawn)\n");
+            G_STOP.store(1, Ordering::SeqCst);
+            return;
+        }
+    }
+    if !join_range(hogs, hogs + burst) {
+        t_putstr("burst: FAIL (loaded join)\n");
+        G_STOP.store(1, Ordering::SeqCst);
+        return;
+    }
+    let loaded = t2.elapsed().as_nanos() as u64;
+    let wc_after = wc_snapshot();
+    G_STOP.store(1, Ordering::SeqCst);
+    let _ = join_range(0, hogs);
+    let ratio = if cold > 0 { loaded.saturating_mul(1000) / cold } else { 0 };
+    t_putstr(&format!(
+        "burst: drain {} workers -- cold {} ms, loaded ({} hogs) {} ms -> penalty {}.{:02}x (1.0 = idle peers absorbed instantly)\n",
+        burst,
+        cold / 1_000_000,
+        hogs,
+        loaded / 1_000_000,
+        ratio / 1000,
+        (ratio % 1000) / 10,
+    ));
+    report_wc_delta(wc_before, wc_after);
+}
+
+/// pipeline -- an N-stage cross-CPU handoff chain (the 9P request->dispatch->
+/// reply IPC shape + the boot's producer-consumer pattern). Inject tokens through
+/// all N stages, time the end-to-end latency tail + tokens/sec.
+fn mode_pipeline(pool: &StackPool, stages_req: usize, tokens: u64) {
+    clear_attrs(MAX_WORKERS);
+    let stages = stages_req.clamp(1, MAX_STAGES);
+    G_KIND.store(KIND_PIPELINE, Ordering::SeqCst);
+    G_STAGES.store(stages as u32, Ordering::SeqCst);
+    G_STOP.store(0, Ordering::SeqCst);
+    for s in 0..=stages {
+        STAGE[s].store(0, Ordering::SeqCst);
+    }
+    G_START.store(1, Ordering::SeqCst); // stage workers skip the barrier; they park on STAGE[i].
+    for s in 0..stages {
+        if !spawn_at(pool, s, s as u64) {
+            t_putstr("pipeline: FAIL (spawn stage)\n");
+            G_STOP.store(1, Ordering::SeqCst);
+            for k in 0..stages {
+                let _ = libthyla_rs::torpor::wake(&STAGE[k], 1);
+            }
+            return;
+        }
+    }
+    let mut samples: Vec<u64> = Vec::with_capacity(tokens as usize);
+    let wc_before = wc_snapshot();
+    let wall = Instant::now();
+    for k in 1..=tokens {
+        let id = k as u32; // nonzero token id (k starts at 1).
+        let t = Instant::now();
+        STAGE[0].store(id, Ordering::Release);
+        let _ = libthyla_rs::torpor::wake(&STAGE[0], 1);
+        let mut spins = 0u32;
+        while STAGE[stages].load(Ordering::Acquire) != id {
+            let _ = libthyla_rs::torpor::wait(&STAGE[stages], 0, Some(Duration::from_millis(100)));
+            spins += 1;
+            if spins > 50 {
+                break; // ~5s: a stage wedged; bail rather than hang.
+            }
+        }
+        STAGE[stages].store(0, Ordering::Release);
+        samples.push(t.elapsed().as_nanos() as u64);
+    }
+    let total_ns = wall.elapsed().as_nanos() as u64;
+    let wc_after = wc_snapshot();
+    G_STOP.store(1, Ordering::Release);
+    for s in 0..stages {
+        let _ = libthyla_rs::torpor::wake(&STAGE[s], 1);
+    }
+    let _ = join_range(0, stages);
+    samples.sort_unstable();
+    let mut sum: u64 = 0;
+    for &x in &samples {
+        sum += x;
+    }
+    let mean = if samples.is_empty() { 0 } else { sum / samples.len() as u64 };
+    let tps = if total_ns > 0 {
+        (samples.len() as u64).saturating_mul(1_000_000_000) / total_ns
+    } else {
+        0
+    };
+    t_putstr(&format!(
+        "pipeline: {} tokens x {} stages -> {} tokens/s; end-to-end mean {} p50 {} p99 {} p99.9 {} max {} us\n",
+        samples.len(),
+        stages,
+        tps,
+        fmt_us(mean),
+        fmt_us(pct(&samples, 500)),
+        fmt_us(pct(&samples, 990)),
+        fmt_us(pct(&samples, 999)),
+        fmt_us(samples.last().copied().unwrap_or(0)),
+    ));
+    report_wc_delta(wc_before, wc_after);
+}
+
+/// contention -- N threads hammer one torpor-backed lock. Acquisitions/sec +
+/// fairness (the min/max per-thread spread). Stresses the lock + wait/wake path
+/// (the allocator, shared server state).
+fn mode_contend(pool: &StackPool, n: usize, rounds: u64) {
+    G_KIND.store(KIND_CONTEND, Ordering::SeqCst);
+    G_ROUNDS.store(rounds, Ordering::SeqCst);
+    G_MUTEX.store(0, Ordering::SeqCst);
+    if !spawn_batch(pool, n) {
+        t_putstr("contention: FAIL (spawn)\n");
+        return;
+    }
+    let t = Instant::now();
+    release_batch();
+    if !join_batch(n) {
+        t_putstr("contention: FAIL (join timeout)\n");
+        return;
+    }
+    let ns = t.elapsed().as_nanos() as u64;
+    let mut total: u64 = 0;
+    let (mut lo, mut hi) = (u64::MAX, 0u64);
+    for i in 0..n {
+        let g = OPS_DONE[i].load(Ordering::SeqCst);
+        total += g;
+        lo = lo.min(g);
+        hi = hi.max(g);
+    }
+    let aps = if ns > 0 { total.saturating_mul(1_000_000_000) / ns } else { 0 };
+    let fairness = if hi > 0 { lo * 1000 / hi } else { 0 };
+    t_putstr(&format!(
+        "contention: {} acquisitions over {} threads in {} ms -> {} acq/s; fairness {}.{:01} (per-thread {}..{})\n",
+        total,
+        n,
+        ns / 1_000_000,
+        aps,
+        fairness / 1000,
+        (fairness % 1000) / 100,
+        lo,
+        hi,
+    ));
+}
+
+/// idle -- the #299 idle-cost axis. A quiet window with no workers; the all-parks
+/// delta over it is the wake/vmexit rate (tickful idle re-parks ~1000x/s/CPU on
+/// the periodic tick; tickless deep-parks ~10x/s). The redesign must keep this
+/// LOW while matching the tickful throughput/latency.
+fn mode_idle(window_ms: u64) {
+    let before = wc_all_parks();
+    let _ = time::sleep(Duration::from_millis(window_ms));
+    let after = wc_all_parks();
+    match (before, after) {
+        (Some(b), Some(a)) => {
+            let parks = a.saturating_sub(b);
+            let pps = parks.saturating_mul(1000) / window_ms.max(1);
+            t_putstr(&format!(
+                "idle: {} ms quiet window -> {} parks ({} parks/s; high = tickful re-poll, low = tickless deep-park = the #299 axis)\n",
+                window_ms, parks, pps,
+            ));
+        }
+        _ => {
+            t_putstr("idle: n/a (/ctl/sched unreadable)\n");
+        }
+    }
+}
+
+/// mixed -- FORWARD SEAM (priority). An INTERACTIVE probe (this thread) vs N IDLE
+/// CPU hogs. The per-worker priorities are applied via worker_apply_attr, which
+/// no-ops today (no SYS_SCHED_SETATTR) -> this prints the UNIFORM-priority
+/// baseline the future priority system must beat (the probe's tail should drop
+/// below `latency`'s once IDLE hogs actually yield to the INTERACTIVE probe).
+fn mode_mixed(pool: &StackPool, hogs: usize, probe_iters: u64, probe_us: u64) {
+    clear_attrs(MAX_WORKERS);
+    for s in 0..hogs.min(MAX_WORKERS) {
+        PRIO[s].store(libthyla_rs::sched::prio::IDLE as u32, Ordering::SeqCst);
+    }
+    let _ = libthyla_rs::sched::set_self_priority(libthyla_rs::sched::prio::INTERACTIVE);
+    G_KIND.store(KIND_HOG, Ordering::SeqCst);
+    G_INNER_ITERS.store(50_000, Ordering::SeqCst);
+    G_STOP.store(0, Ordering::SeqCst);
+    G_START.store(0, Ordering::SeqCst);
+    for s in 0..hogs {
+        if !spawn_at(pool, s, s as u64) {
+            t_putstr("mixed: FAIL (spawn hogs)\n");
+            G_STOP.store(1, Ordering::SeqCst);
+            return;
+        }
+    }
+    G_START.store(1, Ordering::Release);
+    let _ = libthyla_rs::torpor::wake_all(&G_START);
+    let _ = time::sleep(Duration::from_millis(20));
+    let mut samples: Vec<u64> = Vec::with_capacity(probe_iters as usize);
+    let target = probe_us.wrapping_mul(1000);
+    for _ in 0..probe_iters {
+        let t = Instant::now();
+        let _ = time::sleep(Duration::from_micros(probe_us));
+        samples.push((t.elapsed().as_nanos() as u64).saturating_sub(target));
+    }
+    G_STOP.store(1, Ordering::SeqCst);
+    let _ = join_range(0, hogs);
+    let _ = libthyla_rs::sched::set_self_priority(libthyla_rs::sched::prio::NORMAL); // reset main.
+    samples.sort_unstable();
+    let enforced = libthyla_rs::sched::is_supported();
+    t_putstr(&format!(
+        "mixed: INTERACTIVE probe vs {} IDLE hogs -> overshoot p50 {} p99 {} p99.9 {} max {} us [priority {}: {}]\n",
+        hogs,
+        fmt_us(pct(&samples, 500)),
+        fmt_us(pct(&samples, 990)),
+        fmt_us(pct(&samples, 999)),
+        fmt_us(samples.last().copied().unwrap_or(0)),
+        if enforced { "ENFORCED" } else { "NOT enforced" },
+        if enforced {
+            "live"
+        } else {
+            "uniform-priority baseline; v1.x SYS_SCHED_SETATTR must beat it"
+        },
+    ));
+}
+
+/// affinity -- FORWARD SEAM (affinity). A cross-CPU ping-pong with the responder
+/// pinned (slot 0 -> CPU 1, the timer -> CPU 0). Pinning is applied via
+/// worker_apply_attr / set_self_affinity, which no-op today -> this is the
+/// natural-placement RTT baseline; with real pinning, same-CPU vs cross-CPU RTT
+/// becomes measurable.
+fn mode_affinity(pool: &StackPool, iters: u64) {
+    clear_attrs(MAX_WORKERS);
+    AFFINITY[0].store(libthyla_rs::sched::affinity_for(1), Ordering::SeqCst);
+    let _ = libthyla_rs::sched::set_self_affinity(libthyla_rs::sched::affinity_for(0));
+    G_KIND.store(KIND_PINGPONG, Ordering::SeqCst);
+    PP_TURN.store(0, Ordering::SeqCst);
+    PP_STOP.store(0, Ordering::SeqCst);
+    G_START.store(1, Ordering::SeqCst);
+    if !spawn_at(pool, 0, 0) {
+        t_putstr("affinity: FAIL (spawn responder)\n");
+        return;
+    }
+    let mut samples: Vec<u64> = Vec::with_capacity(iters as usize);
+    for _ in 0..iters {
+        let t = Instant::now();
+        PP_TURN.store(1, Ordering::Release);
+        let _ = libthyla_rs::torpor::wake(&PP_TURN, 1);
+        let mut spins = 0u32;
+        while PP_TURN.load(Ordering::Acquire) != 0 {
+            let _ = libthyla_rs::torpor::wait(&PP_TURN, 1, Some(Duration::from_millis(100)));
+            spins += 1;
+            if spins > 50 {
+                break;
+            }
+        }
+        samples.push(t.elapsed().as_nanos() as u64);
+    }
+    PP_STOP.store(1, Ordering::Release);
+    PP_TURN.store(1, Ordering::Release);
+    let _ = libthyla_rs::torpor::wake(&PP_TURN, 1);
+    let _ = libthyla_rs::thread::join_tid(&TIDS[0], TID_SENTINEL, Some(Duration::from_secs(10)));
+    let _ = libthyla_rs::sched::set_self_affinity(0); // reset main (0 = all CPUs).
+    samples.sort_unstable();
+    let enforced = libthyla_rs::sched::is_supported();
+    t_putstr(&format!(
+        "affinity: pinned cross-CPU ping-pong ({} rtt) -> p50 {} p99 {} p99.9 {} max {} us [pinning {}: {}]\n",
+        samples.len(),
+        fmt_us(pct(&samples, 500)),
+        fmt_us(pct(&samples, 990)),
+        fmt_us(pct(&samples, 999)),
+        fmt_us(samples.last().copied().unwrap_or(0)),
+        if enforced { "ENFORCED" } else { "NOT enforced" },
+        if enforced { "live" } else { "natural-placement baseline; v1.x SYS_SCHED_SETATTR" },
+    ));
+}
+
+/// The comprehensive deep run: every mode at solid params in a delimited block.
+/// The redesign's compass + the tickful-baseline capture target.
+fn run_all(pool: &mut StackPool, cpus: usize) {
+    let need = (cpus * 2 + cpus / 2 + 2).min(MAX_WORKERS);
+    if !pool.ensure(need) {
+        t_putstr("cpubench all: FAIL (stack pool OOM)\n");
+        return;
+    }
+    let burst = (cpus * 2).min(MAX_WORKERS - cpus.max(1));
+    let hogsub = (cpus / 2).max(1);
+    t_putstr(&format!(
+        "cpubench: ==== TI-4e comprehensive bench (cpus={}) ====\n",
+        cpus
+    ));
+    mode_idle(500); // first -- labels the build (high parks/s = tickful, low = tickless).
+    mode_single(Duration::from_millis(200));
+    mode_scale(pool, cpus, 30_000_000);
+    mode_yield(pool, cpus, 100, 500);
+    mode_storm(pool, cpus, 20);
+    mode_pingpong(pool, 5_000);
+    mode_latency(pool, cpus, 300, 1_000);
+    mode_wakestorm(pool, (cpus * 2).min(MAX_WORKERS), 300, 200);
+    mode_burst(pool, burst, hogsub);
+    mode_pipeline(pool, cpus.clamp(2, 4), 3_000);
+    mode_contend(pool, (cpus * 2).min(MAX_WORKERS), 5_000);
+    mode_mixed(pool, cpus, 300, 1_000);
+    mode_affinity(pool, 3_000);
+    t_putstr("cpubench: ==== END comprehensive ====\n");
+}
+
 // ===========================================================================
 // Entry.
 // ===========================================================================
@@ -675,11 +1335,69 @@ pub extern "C" fn rs_main() -> i64 {
             let iters = p3.unwrap_or(5_000);
             mode_pingpong(&pool, iters);
         }
+        Some("latency") => {
+            let iters = p3.unwrap_or(500);
+            if !pool.ensure(n) {
+                fail("stack pool (latency)");
+            }
+            mode_latency(&pool, n, iters, 1_000);
+        }
+        Some("wakestorm") => {
+            let rounds = p3.unwrap_or(500);
+            if !pool.ensure(n) {
+                fail("stack pool (wakestorm)");
+            }
+            mode_wakestorm(&pool, n, rounds, 200);
+        }
+        Some("burst") => {
+            // arg2 = burst size (default cpus*2); hogs = cpus/2.
+            let burst = args
+                .get_str(2)
+                .and_then(|s| s.parse::<usize>().ok())
+                .map(|v| v.clamp(1, MAX_WORKERS - 1))
+                .unwrap_or((cpus * 2).min(MAX_WORKERS - cpus.max(1)));
+            let hogs = (cpus / 2).max(1);
+            if !pool.ensure((burst + hogs).min(MAX_WORKERS)) {
+                fail("stack pool (burst)");
+            }
+            mode_burst(&pool, burst, hogs);
+        }
+        Some("pipeline") => {
+            let stages = n.clamp(2, MAX_STAGES);
+            let tokens = p3.unwrap_or(5_000);
+            if !pool.ensure(stages) {
+                fail("stack pool (pipeline)");
+            }
+            mode_pipeline(&pool, stages, tokens);
+        }
+        Some("contention") | Some("contend") => {
+            let rounds = p3.unwrap_or(10_000);
+            if !pool.ensure(n) {
+                fail("stack pool (contention)");
+            }
+            mode_contend(&pool, n, rounds);
+        }
+        Some("idle") => {
+            mode_idle(p3.unwrap_or(1_000));
+        }
+        Some("mixed") => {
+            let iters = p3.unwrap_or(500);
+            if !pool.ensure(n) {
+                fail("stack pool (mixed)");
+            }
+            mode_mixed(&pool, n, iters, 1_000);
+        }
+        Some("affinity") => {
+            mode_affinity(&pool, p3.unwrap_or(5_000));
+        }
+        Some("all") => {
+            run_all(&mut pool, cpus);
+        }
         _ => {
             // Default: the short all-modes boot/CI probe. Bounded so it runs in
             // ~1-2s and never hangs; prints data (greppable), exits 0.
             t_putstr(&format!(
-                "cpubench: TI-4d scheduler probe (cpus={}) -- single/scale/yield/storm/pingpong\n",
+                "cpubench: TI-4e scheduler probe (cpus={}) -- single/scale/yield/storm/pingpong/idle ('cpubench all' = the full bench)\n",
                 cpus
             ));
             let wc0 = wc_snapshot();
@@ -691,6 +1409,8 @@ pub extern "C" fn rs_main() -> i64 {
             mode_storm(&pool, cpus, 8);
             // 3000 round-trips so p99.9 has >= 1000 samples behind it.
             mode_pingpong(&pool, 3_000);
+            // the #299 idle-cost axis in every boot log (cheap; 200ms window).
+            mode_idle(200);
             let wc1 = wc_snapshot();
             t_putstr("cpubench: full-run kernel work-conservation:\n");
             report_wc_delta(wc0, wc1);

@@ -95,6 +95,7 @@ build_type="Debug"
 hardening_full="OFF"
 kaslr="OFF"
 sanitize=""
+no_tickless="OFF"
 # #61 (RW-11 R4-F1/F2): production boot shape. ON (default) keeps the in-kernel
 # test suite + joey's boot-test probe ladder (dev/CI); --production flips both
 # OFF for the lean V1.0 boot-to-getty.
@@ -131,6 +132,13 @@ while [[ $# -gt 0 ]]; do
             # P1-I: opt-in sanitizer build. Currently supports
             # --sanitize=undefined (UBSan trapping). KASAN deferred.
             sanitize="${1#--sanitize=}"
+            shift
+            ;;
+        --no-tickless)
+            # TI-4e tickful-baseline capture: force the old 1 kHz-always idle
+            # (sched_idle_park go_tickless=false). Diagnostic-only; uses its own
+            # build dir so it never clobbers the production tickless kernel.
+            no_tickless="ON"
             shift
             ;;
         --build-dir=*)
@@ -170,6 +178,8 @@ if [[ -n "$build_dir_override" ]]; then
     KERNEL_BUILD="$build_dir_override"
 elif [[ -n "$sanitize_cmake" ]]; then
     KERNEL_BUILD="$BUILD_DIR/kernel-${sanitize_cmake}"
+elif [[ "$no_tickless" == "ON" ]]; then
+    KERNEL_BUILD="$BUILD_DIR/kernel-no-tickless"
 fi
 
 # --- build ledger -------------------------------------------------------------
@@ -233,6 +243,7 @@ build_kernel() {
         -DTHYLACINE_KASLR="$kaslr" \
         -DTHYLACINE_SANITIZE="$sanitize_cmake" \
         -DKERNEL_TESTS="$kernel_tests" \
+        -DTHYLACINE_NO_TICKLESS="$no_tickless" \
         ${extra_cmake_args[@]+"${extra_cmake_args[@]}"}
     cmake --build "$KERNEL_BUILD" $verbose
     # HX-2: bake the live symbol table from the linked ELF + re-link (two-pass;

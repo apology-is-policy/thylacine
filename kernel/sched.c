@@ -1928,7 +1928,17 @@ void sched_idle_park(bool tickless) {
     // secondaries already gate on timer_armed; this extends the same "only
     // tickless in production" discipline to cpu0 -- so the test phase is
     // byte-identical to the pre-tickless periodic idle.
+#ifdef THYLACINE_NO_TICKLESS
+    // TI-4e tickful-baseline capture (tools/build.sh --no-tickless): force the
+    // old 1 kHz-always idle so the periodic tick stays the work-steal re-poll.
+    // The redesign's cpubench numbers are measured against this gold standard
+    // (the fast scheduler that predates the #299 tickless trade). Production
+    // builds never define this -- the code below is then byte-identical.
+    bool go_tickless = false;
+    (void)tickless;
+#else
     bool go_tickless = tickless && g_sched_notify_enabled;
+#endif
     irq_state_t s = spin_lock_irqsave(NULL);
     sched_set_idle_in_wfi(true);
     sched();
