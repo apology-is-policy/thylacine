@@ -309,8 +309,9 @@ subsystems.
 ## Status
 
 LANDED (R-1 `@4f7dbde` substrate; R-2 `@c4f97de` fault arm; R-3 `@67aa9e2` Image
-cache; R-4 `@12454d0` file-backed exec; R-5 the focused audit + SMP gate + this
-doc). Resolves #229. The arc (#231) is complete.
+cache; R-4 `@12454d0` file-backed exec; R-5 `@698a9dd` the focused audit [2 P1 + 1
+P3, two independent prosecutors] + SMP gate [0 corruption / 40 boots] + this doc).
+Resolves #229. The arc (#231) is complete.
 
 ## Known caveats / footguns
 
