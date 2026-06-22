@@ -465,3 +465,60 @@ throughput):
 - **TI-4e:** focused Opus-4.8-max audit (the #788/#860/#809/#811/#926 idle/wake
   lineage) + SMP gate + HVF re-measure (confirm ~0.3% idle AND ~7.2s boot both
   return) + docs + close.
+
+### 9.7 TI-4d AS-BUILT (the kernel work-conservation counter + `/bin/cpubench`)
+
+Two instruments landed; together they RESOLVE the rebalance-vs-sequential fork
+Direction A left open (and overturn Direction A's premise).
+
+**The kernel work-conservation counter** (`kernel/sched.c`, exposed at
+`/ctl/sched` + the `boot-wc:` banner line). A core that parks in WFI while a
+runqueue holds queued-but-not-running work is the classic "wasted core" (the
+work-conservation invariant -- "A Decade of Wasted Cores", EuroSys'16).
+`sched_idle_park` samples `sched_has_runnable_work()` (a bounded, lock-free read
+of each band's HEAD pointer only -- never a `runnable_next` walk, so it is safe
+on the 3M-park hot path) at the instant it commits to parking; if work is queued,
+the WHOLE park duration is charged as STARVED. Accumulators are split into a
+TOTAL and a TICKLESS-only subset (`go_tickless == true`, i.e. production): a
+starved PERIODIC park ends at the next <=1ms tick (the correct pre-tickless
+baseline), so the TICKLESS `starved_ns`/`max` is the regression's clean signal in
+isolation from the test-phase periodic re-poll. Diagnostic only -- consulted by
+NO scheduling decision; relaxed stat atomics; two `timer_now_ns()` reads (a
+CNTVCT register read, no vmexit) bracket the WFI.
+
+**`/bin/cpubench`** (`usr/cpubench`, native libthyla-rs). Five modes mapping the
+real load characters, each bracketing the `/ctl/sched` `wc-tickless` delta:
+`single` (1-thread ops/sec baseline), `scale` (N long-running CPU threads ->
+will-it-scale efficiency T1/Tn), `yield` (long-running threads that periodically
+sleep -> stresses the idle/wake path), `storm` (thread spawn/join churn ->
+threads/sec), `pingpong` (2-thread cross-CPU futex round-trip -> p50/p99/p99.9/max
+us, the schbench + `perf bench sched pipe` shape). Methodology: TAIL percentiles
+(p99/p99.9), NEVER the mean -- a "some wakes slow" bug is a tail event the mean
+hides. A boot probe (joey, gated on a CLEAN run, not a perf threshold) prints the
+numbers every boot; `cpubench <mode> [N] [iters]` runs one mode bigger from the
+shell.
+
+**THE FINDING (TCG, -smp 4, the clean production-phase measurement):**
+- `scale` efficiency ~= 0.9-1.0x of ideal (near-perfect 4-core parallel scaling)
+  -> **throughput is NOT regressed; the scheduler is work-conserving for steady
+  parallel load.**
+- `pingpong` p50 ~22us / p99 ~70us / p99.9 ~110us / max ~160us -> **cross-CPU
+  wakeup latency is BOUNDED and prompt; the wakee does NOT hit the 100ms
+  backstop.** The TI-4b push-placement delivers the wake.
+- The kernel `wc-tickless` delta during pingpong shows starved parks with a
+  `max_starved` ~= 103ms (a full-backstop park) -- BUT this does NOT inflate the
+  workload's actual latency (p99.9 = 110us, three orders below 103ms). The
+  `starved` counter is the OVER-BROAD strict-work-conservation signal: it counts
+  an idle CPU as starved whenever work is queued ANYWHERE, even when that work's
+  home CPU handles it promptly.
+
+**Conclusion: the boot regression is PER-PARK OVERHEAD, not a work-conservation /
+rebalance gap.** The workload's wakees already get prompt wakes (push-placement
+works) and parallel throughput scales -- so TI-4c (push-on-overload rebalance)
+would only reclaim idle cores for marginal energy/throughput, not fix latency
+(which is already fine). The leading fix for the boot slowdown is
+**tickless-only-on-deep-idle** (skip the arm+restore dance on the ~2.9M brief
+IPI-woken parks; the tickless one-shot pays ~2-3 HVF VTIMER vmexits per park vs
+the periodic ~1) -- now directly measurable with these two instruments. TI-4c is
+deferred to a data-driven decision; TI-4e carries the fix + the audit + the HVF
+re-measure.

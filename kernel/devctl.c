@@ -25,6 +25,7 @@
 #include <thylacine/extinction.h>
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
+#include <thylacine/smp.h>
 #include <thylacine/spoor.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
@@ -267,6 +268,44 @@ static size_t format_sched(char *buf, size_t cap) {
 
     n = fmt_str(buf, cap, off, "runnable: "); if (!n) return 0; off += n;
     n = fmt_udec(buf, cap, off, (unsigned long)sched_runnable_count()); off += n;
+    n = fmt_str(buf, cap, off, "\n"); if (!n) return 0; off += n;
+
+    // cpus: the online CPU count -- the ncpus a userspace bench (cpubench) reads
+    // to size its scaling sweep without a dedicated syscall (Plan 9 /dev/sysstat
+    // shape). smp_cpu_count() is the dtb_cpu_count mirror.
+    n = fmt_str(buf, cap, off, "cpus: "); if (!n) return 0; off += n;
+    n = fmt_udec(buf, cap, off, (unsigned long)smp_cpu_count()); off += n;
+    n = fmt_str(buf, cap, off, "\n"); if (!n) return 0; off += n;
+
+    // work-conservation (TI-4d): how much idle time was spent parked while work
+    // was queued elsewhere (a steal/handoff gap). A high starved fraction =
+    // queued-but-unstolen work; ~0 = a genuinely sequential workload. ns -> ms.
+    struct sched_wc_stats wc;
+    sched_wc_stats(&wc);
+    n = fmt_str(buf, cap, off, "wc: parks="); if (!n) return 0; off += n;
+    n = fmt_udec(buf, cap, off, (unsigned long)wc.park_events); off += n;
+    n = fmt_str(buf, cap, off, " idle_ms="); if (!n) return 0; off += n;
+    n = fmt_udec(buf, cap, off, (unsigned long)(wc.idle_ns / 1000000ul)); off += n;
+    n = fmt_str(buf, cap, off, " starved="); if (!n) return 0; off += n;
+    n = fmt_udec(buf, cap, off, (unsigned long)wc.starved_events); off += n;
+    n = fmt_str(buf, cap, off, " starved_ms="); if (!n) return 0; off += n;
+    n = fmt_udec(buf, cap, off, (unsigned long)(wc.starved_ns / 1000000ul)); off += n;
+    n = fmt_str(buf, cap, off, " max_starved_ms="); if (!n) return 0; off += n;
+    n = fmt_udec(buf, cap, off, (unsigned long)(wc.max_starved_ns / 1000000ul)); off += n;
+    n = fmt_str(buf, cap, off, "\n"); if (!n) return 0; off += n;
+
+    // The tickless subset (production parks) -- the regression signal in
+    // isolation from the periodic test-phase re-poll. Reported with ns
+    // precision (not /1e6) so a sub-ms-but-nonzero tickless starvation rate is
+    // visible to a bench reading deltas around a short controlled workload.
+    n = fmt_str(buf, cap, off, "wc-tickless: parks="); if (!n) return 0; off += n;
+    n = fmt_udec(buf, cap, off, (unsigned long)wc.tickless_parks); off += n;
+    n = fmt_str(buf, cap, off, " starved="); if (!n) return 0; off += n;
+    n = fmt_udec(buf, cap, off, (unsigned long)wc.tickless_starved_events); off += n;
+    n = fmt_str(buf, cap, off, " starved_ns="); if (!n) return 0; off += n;
+    n = fmt_udec(buf, cap, off, (unsigned long)wc.tickless_starved_ns); off += n;
+    n = fmt_str(buf, cap, off, " max_starved_ns="); if (!n) return 0; off += n;
+    n = fmt_udec(buf, cap, off, (unsigned long)wc.tickless_max_starved_ns); off += n;
     n = fmt_str(buf, cap, off, "\n"); if (!n) return 0; off += n;
 
     return off;

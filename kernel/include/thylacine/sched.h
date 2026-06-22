@@ -299,6 +299,43 @@ unsigned sched_runnable_count(void);
 unsigned sched_runnable_count_band(unsigned band);
 void sched_dump_runnable(const char *tag);   // DEBUG (#857): all-CPU runnable set + RX-IRQ counters
 
+// TI-4d work-conservation telemetry. A core that parks in WFI while a runqueue
+// holds queued-but-not-running work is the classic "wasted core" -- the
+// work-conservation invariant ("A Decade of Wasted Cores", EuroSys'16). The
+// idle-park path samples sched_has_runnable_work() at the instant it commits to
+// parking; if work is queued, the WHOLE park duration is charged as STARVED (a
+// steal/handoff gap -- this CPU should have run that work, not slept). The
+// numbers decide a scheduler workload's character: a high starved fraction says
+// queued-but-unstolen work exists (push/steal rebalance is the lever); ~0 says
+// the workload is genuinely sequential (idle parks are correct, the cost is
+// per-park overhead). Diagnostic only -- consulted by NO scheduling decision.
+// The accumulators split by idle regime: the TOTAL covers every park; the
+// TICKLESS subset covers only parks that went tickless (go_tickless == true,
+// i.e. production -- g_sched_notify_enabled on). The split is load-bearing for
+// the TI-4 question: a starved PERIODIC park ends at the next <=1ms tick (the
+// pre-tickless baseline, correct), so most boot-time starvation is periodic
+// test-phase re-poll; a starved TICKLESS park can run to the 100ms backstop, so
+// the TICKLESS starved_ns / max is the regression's clean signal.
+struct sched_wc_stats {
+    u64 park_events;     // total idle parks (periodic + tickless)
+    u64 idle_ns;         // total ns spent parked (the denominator)
+    u64 starved_events;  // total parks committed while work was queued elsewhere
+    u64 starved_ns;      // total ns parked while work was queued
+    u64 max_starved_ns;  // the single longest starved park (any regime)
+    u64 tickless_parks;          // parks that went tickless (production)
+    u64 tickless_starved_events; // tickless parks committed on queued work
+    u64 tickless_starved_ns;     // ns the tickless path starved (THE regression signal)
+    u64 tickless_max_starved_ns; // longest tickless starved park (= backstop if hit)
+};
+void sched_wc_stats(struct sched_wc_stats *out);
+
+// True iff any non-idle band on any CPU's run tree is non-empty (queued
+// runnable work exists somewhere). Reads ONLY the per-band head pointers
+// (never dereferences a Thread), so it is safe to call lock-free from the hot
+// idle-park path without risking a dangling runnable_next walk -- unlike
+// sched_runnable_count(), which follows the chains and is for the cold callers.
+bool sched_has_runnable_work(void);
+
 // Internal — called by thread_free if t->state == THREAD_RUNNABLE so the
 // run tree doesn't carry a dangling pointer. Idempotent: safe to call
 // on an already-not-in-tree thread.

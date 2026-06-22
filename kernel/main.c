@@ -154,6 +154,36 @@ bool boot_mark_complete(void) {
     uart_puts("boot-ms: ");
     uart_putdec(timer_now_ns() / 1000000ull);
     uart_puts("\n");
+    // TI-4d work-conservation summary for the boot itself: how much idle time
+    // was spent parked WHILE work was queued elsewhere (a steal/handoff gap).
+    // This is THE diagnostic for the tickless boot regression -- a large
+    // starved_ms / max_ms means queued-but-unstolen work (rebalance is the
+    // lever); ~0 means the boot is genuinely sequential (the cost is per-park
+    // overhead, not work-conservation). The /ctl/sched `wc:` line carries the
+    // live counters; this is the boot-window snapshot the ci-gate can grep.
+    struct sched_wc_stats wc;
+    sched_wc_stats(&wc);
+    uart_puts("boot-wc: parks=");
+    uart_putdec(wc.park_events);
+    uart_puts(" idle_ms=");
+    uart_putdec(wc.idle_ns / 1000000ull);
+    uart_puts(" starved=");
+    uart_putdec(wc.starved_events);
+    uart_puts(" starved_ms=");
+    uart_putdec(wc.starved_ns / 1000000ull);
+    uart_puts(" max_ms=");
+    uart_putdec(wc.max_starved_ns / 1000000ull);
+    // The tickless subset is the regression signal -- starved parks here can run
+    // to the backstop (the periodic remainder ends at the next <=1ms tick).
+    uart_puts(" | tickless: parks=");
+    uart_putdec(wc.tickless_parks);
+    uart_puts(" starved=");
+    uart_putdec(wc.tickless_starved_events);
+    uart_puts(" starved_ms=");
+    uart_putdec(wc.tickless_starved_ns / 1000000ull);
+    uart_puts(" max_ms=");
+    uart_putdec(wc.tickless_max_starved_ns / 1000000ull);
+    uart_puts("\n");
     uart_puts("Thylacine boot OK\n");
     return true;
 }

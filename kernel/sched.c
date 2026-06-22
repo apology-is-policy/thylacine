@@ -1362,6 +1362,68 @@ unsigned sched_runnable_count_band(unsigned band) {
     return n;
 }
 
+// TI-4d: is there ANY queued non-idle runnable work anywhere? Reads ONLY each
+// band's HEAD pointer (a stable slot in g_cpu_sched[]) and tests it for NULL --
+// it never dereferences a Thread, so unlike sched_runnable_count() it cannot
+// follow a runnable_next that a peer is concurrently freeing. That makes it
+// safe to call lock-free on the hot idle-park path (3M+ times during boot). A
+// relaxed load races a concurrent insert/unlink, but the answer is only used as
+// a statistic-at-this-instant -- a few-ns-stale yes/no is exactly right for the
+// "was work queued when I parked" sample. SCHED_BAND_IDLE excluded (the per-CPU
+// idle threads are infrastructure, not pending work -- same rule as the count).
+bool sched_has_runnable_work(void) {
+    for (unsigned i = 0; i < DTB_MAX_CPUS; i++) {
+        struct CpuSched *cs = &g_cpu_sched[i];
+        if (!cs->initialized) continue;
+        for (unsigned b = 0; b < SCHED_BAND_COUNT; b++) {
+            if (b == SCHED_BAND_IDLE) continue;
+            if (__atomic_load_n(&cs->run_tree[b], __ATOMIC_RELAXED)) return true;
+        }
+    }
+    return false;
+}
+
+// TI-4d work-conservation accumulators. Updated only from sched_idle_park (each
+// park adds one sample); read by sched_wc_stats. Relaxed atomics -- they are
+// pure statistics, no ordering dependency on other state. The tickless_* subset
+// counts only parks that went tickless (production); the regression lives there.
+static u64 g_wc_park_events;
+static u64 g_wc_idle_ns;
+static u64 g_wc_starved_events;
+static u64 g_wc_starved_ns;
+static u64 g_wc_max_starved_ns;
+static u64 g_wc_tickless_parks;
+static u64 g_wc_tickless_starved_events;
+static u64 g_wc_tickless_starved_ns;
+static u64 g_wc_tickless_max_starved_ns;
+
+// Relaxed atomic monotonic-max: store dt iff it exceeds the current value.
+static void wc_max_update(u64 *slot, u64 dt) {
+    u64 prev = __atomic_load_n(slot, __ATOMIC_RELAXED);
+    while (dt > prev &&
+           !__atomic_compare_exchange_n(slot, &prev, dt, false,
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+        // prev was reloaded by the failed CAS; retry while dt is still larger.
+    }
+}
+
+void sched_wc_stats(struct sched_wc_stats *out) {
+    if (!out) return;
+    out->park_events    = __atomic_load_n(&g_wc_park_events, __ATOMIC_RELAXED);
+    out->idle_ns        = __atomic_load_n(&g_wc_idle_ns, __ATOMIC_RELAXED);
+    out->starved_events = __atomic_load_n(&g_wc_starved_events, __ATOMIC_RELAXED);
+    out->starved_ns     = __atomic_load_n(&g_wc_starved_ns, __ATOMIC_RELAXED);
+    out->max_starved_ns = __atomic_load_n(&g_wc_max_starved_ns, __ATOMIC_RELAXED);
+    out->tickless_parks =
+        __atomic_load_n(&g_wc_tickless_parks, __ATOMIC_RELAXED);
+    out->tickless_starved_events =
+        __atomic_load_n(&g_wc_tickless_starved_events, __ATOMIC_RELAXED);
+    out->tickless_starved_ns =
+        __atomic_load_n(&g_wc_tickless_starved_ns, __ATOMIC_RELAXED);
+    out->tickless_max_starved_ns =
+        __atomic_load_n(&g_wc_tickless_max_starved_ns, __ATOMIC_RELAXED);
+}
+
 // Best-effort snapshot of every runnable thread across ALL CPUs' run trees
 // (every band, INCLUDING idle -- the dump shows everything so a quiescence
 // failure can be fingerprinted), with enough identity (cpu / tid / band /
@@ -1870,6 +1932,15 @@ void sched_idle_park(bool tickless) {
     irq_state_t s = spin_lock_irqsave(NULL);
     sched_set_idle_in_wfi(true);
     sched();
+    // TI-4d work-conservation sample: we are committed to parking THIS CPU.
+    // sched() just chose idle, so this CPU's own non-idle tree is empty -- a
+    // positive sched_has_runnable_work() here is a PEER's queued backlog this
+    // CPU is about to sleep through (a steal/handoff gap). Charge the whole
+    // park as starved if so. In the periodic path the next <=1ms tick re-polls
+    // and ends a starved park fast; in tickless it can run to the backstop --
+    // so a large starved_ns/max is exactly the steal-gap regression's signature.
+    bool starved = sched_has_runnable_work();
+    u64 park_start = timer_now_ns();
     if (go_tickless) {
         // Arm a one-shot to the nearest deadline (or the backstop) instead of
         // leaving the 1 kHz periodic tick armed -- a genuinely-idle CPU then
@@ -1901,6 +1972,27 @@ void sched_idle_park(bool tickless) {
         //      sleeper now; an IPI-wake makes it a cheap no-op scan.
         timer_arm_this_cpu();
         timerwait_tick();
+    }
+    // TI-4d: charge the park. timer_now_ns() is monotonic CNTVCT-derived (a
+    // register read, no vmexit), so bracketing the WFI is cheap. The tickless
+    // subset is the load-bearing diagnostic (a tickless starved park can run to
+    // the 100ms backstop = the regression); the periodic remainder ends at the
+    // next <=1ms tick (the correct pre-tickless baseline). idle_ns/park_events
+    // are the denominators.
+    u64 dt = timer_now_ns() - park_start;
+    __atomic_fetch_add(&g_wc_park_events, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&g_wc_idle_ns, dt, __ATOMIC_RELAXED);
+    if (go_tickless)
+        __atomic_fetch_add(&g_wc_tickless_parks, 1, __ATOMIC_RELAXED);
+    if (starved) {
+        __atomic_fetch_add(&g_wc_starved_events, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&g_wc_starved_ns, dt, __ATOMIC_RELAXED);
+        wc_max_update(&g_wc_max_starved_ns, dt);
+        if (go_tickless) {
+            __atomic_fetch_add(&g_wc_tickless_starved_events, 1, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&g_wc_tickless_starved_ns, dt, __ATOMIC_RELAXED);
+            wc_max_update(&g_wc_tickless_max_starved_ns, dt);
+        }
     }
     spin_unlock_irqrestore(NULL, s);
 }

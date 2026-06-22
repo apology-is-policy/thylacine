@@ -3749,6 +3749,36 @@ int main(void) {
                                  "resident lo stack)\n");
                     }
 
+                    // === TI-4d: the cpubench scheduler/CPU regression probe ===
+                    // Spawn /bin/cpubench (native, no args -> the short all-modes
+                    // boot probe): single / scale / yield / storm / pingpong over
+                    // the SMP scheduler, each bracketing the kernel /ctl/sched
+                    // work-conservation `wc-tickless` delta. This is the throughput
+                    // + wakeup-latency net the TI arc lacked -- the regression that
+                    // slipped through was a 2.4x boot slowdown the SMP gate (0
+                    // corruption) could not see. It runs post-pivot (so /ctl is
+                    // reachable for the wc-delta) and prints its measured numbers
+                    // via console-direct t_putstr (captured in the boot log; the
+                    // ci-smp-gate greps them). Gated on a CLEAN RUN (status 0 = no
+                    // worker hang / spawn fail), NOT a perf threshold -- the numbers
+                    // are data, never an assertion (no-flake discipline).
+                    {
+                        const char cb_name[] = "/bin/cpubench";
+                        long cb_pid = t_spawn(cb_name, sizeof(cb_name) - 1);
+                        if (cb_pid <= 0) {
+                            t_putstr("joey: t_spawn(\"cpubench\") FAILED\n");
+                            return 1;
+                        }
+                        int cb_status = -1;
+                        long cb_reaped = t_wait_pid_for((int)cb_pid, 0, &cb_status);
+                        if (cb_reaped != cb_pid || cb_status != 0) {
+                            t_putstr("joey: TI-4d cpubench PROBE FAILED\n");
+                            return 1;
+                        }
+                        t_putstr("joey: TI-4d cpubench PROBE OK (scheduler "
+                                 "single/scale/yield/storm/pingpong)\n");
+                    }
+
                     // === NET-PERF NP-2: the TLS handshake + crypto micro-bench ===
                     // Spawn /bin/tlsperf (native, no args -> the boot probe): M4
                     // (a full TLS 1.3 handshake over the resident lo, timed, the
