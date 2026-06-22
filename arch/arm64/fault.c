@@ -354,6 +354,7 @@ struct file_fault_req {
     u64            file_offset;  // byte offset in the backing file for this page
     u64            page_va;      // page-aligned fault VA (the PTE target)
     size_t         slot;         // page index within burrow->filepages
+    bool           exec;         // mapping is executable -> I-cache sync the page-in
 };
 
 // Locked core. Caller validated p and holds p->vma_lock across the whole
@@ -461,6 +462,7 @@ static enum fault_result demand_page_locked(struct Proc *p,
         freq->file_offset = v->file_offset + (burrow_byte_off & ~(u64)(PAGE_SIZE - 1));
         freq->page_va     = page_va;
         freq->slot        = slot;
+        freq->exec        = (vma->prot & VMA_PROT_EXEC) != 0;  // text -> I-cache sync
         return FAULT_UNHANDLED_USER;    // ignored by the caller (freq->needed set)
     }
     case BURROW_TYPE_INVALID:
@@ -582,6 +584,19 @@ static enum fault_result file_demand_page_slow(struct Proc *p,
         r = FAULT_USER_BUS;              // page-in I/O error -> snare:bus, never zero-fill
         goto out;
     }
+
+    // REVENANT R-4 / I-36: the page was filled via the data path (dev->read);
+    // an executable mapping (text) fetches it via the I-cache, which is not
+    // coherent with the D-cache for instruction fetch on ARMv8. Clean to PoU +
+    // invalidate the I-cache BEFORE the PTE is installed (the install below is
+    // EL0's only reach to the page), or EL0 could fetch a stale line from a
+    // prior occupant of this recycled PA -> wrong-instruction execution. The
+    // race-loser's page (a sibling faulter won the slot) is discarded in
+    // file_install_locked; whichever page backs the PTE was synced by ITS
+    // creator, so every installed text page is coherent. Non-exec FILE pages
+    // (none at v1.0) skip the sync.
+    if (freq->exec)
+        arch_icache_sync_range(kva, PAGE_SIZE);
 
     spin_lock(&p->vma_lock);
     r = file_install_locked(p, fi, freq, newpg);

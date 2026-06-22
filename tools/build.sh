@@ -375,17 +375,18 @@ EOF
     done
 
     # net-7c-2 / net-8c-2: the native rustls TLS binaries link the full rustls +
-    # RustCrypto stack and exceed SYS_SPAWN_BLOB_MAX (1 MiB) UNSTRIPPED (tls-smoke
-    # ~1.11 MiB, https ~1.06 MiB, net-echo ~1.10 MiB since it gained the
-    # TLS-over-/net E2E), so the kernel could not slurp them into a spawn blob.
-    # Strip the COPY in the cpio root (-> ~520-543 KiB each): no userspace tool
-    # consumes their symbols -- the only addr2line is the kernel's own Halls
-    # symtab over the KERNEL image. The UNSTRIPPED artifacts stay under
-    # build/usr-rs/.../release/ for manual fault-PC resolution. This is the
-    # recorded v1.0 size strategy (NET-DESIGN 9.1); REVENANT's file-backed exec
-    # (#231) retires the cap, after which the strip becomes optional. Surgical
-    # (TLS bins only) -- the global workspace keeps symbols for every other bin.
-    local tls_strip_bins=( "tls-smoke" "https" "net-echo" "curl" "wget" "tlsperf" )
+    # RustCrypto stack and exceed the OLD SYS_SPAWN_BLOB_MAX (1 MiB) UNSTRIPPED
+    # (tls-smoke ~1.11 MiB, https ~1.06 MiB, net-echo ~1.10 MiB). REVENANT R-4
+    # (#231) RETIRED that cap: exec no longer slurps the whole binary -- it
+    # demand-pages text + eager-copies data per segment -- so a >1 MiB binary
+    # execs. **net-echo is now shipped UNSTRIPPED on purpose**: its boot probe
+    # (joey: net-8 PROBE) execs a ~1.1 MiB binary via the file-backed path -- the
+    # live R-4 >1-MiB-exec proof. The remaining TLS bins stay stripped purely for
+    # ramfs-SIZE economy (-> ~520-543 KiB each; no userspace tool consumes their
+    # symbols), NOT for correctness; un-stripping them is now safe but grows the
+    # cpio (a separable build-economy choice). The UNSTRIPPED artifacts stay under
+    # build/usr-rs/.../release/ for manual fault-PC resolution.
+    local tls_strip_bins=( "tls-smoke" "https" "curl" "wget" "tlsperf" )
     local llvm_strip="$LLVM_PREFIX/bin/llvm-strip"
     if [[ ! -x "$llvm_strip" ]]; then
         echo "==> ramfs: llvm-strip not found at $llvm_strip -- the TLS bins exceed" >&2
@@ -398,7 +399,7 @@ EOF
                 || { echo "==> ramfs: llvm-strip $bin FAILED" >&2; exit 1; }
         fi
     done
-    ledger "ramfs.cpio: TLS bins stripped (tls-smoke + https + net-echo; SYS_SPAWN_BLOB_MAX, net-7c-2/net-8c-2)"
+    ledger "ramfs.cpio: TLS bins stripped for ramfs economy (tls-smoke + https + curl + wget + tlsperf); net-echo ships UNSTRIPPED (~1.1 MiB) -- the live REVENANT R-4 >1-MiB-exec proof"
 
     # P6-pouch-hello-smoke: copy the pouch POSIX test binaries (built
     # against the pouch sysroot by build_pouch_progs) into the cpio root.

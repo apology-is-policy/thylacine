@@ -958,6 +958,25 @@ static void patch_sync_icache(const void *scratch, const void *canon, u32 len) {
     __asm__ __volatile__("isb" ::: "memory");
 }
 
+// Single-VA instruction-cache sync (page.h contract). The write and the fetch
+// share the same kernel VA (and PA) -- unlike patch_sync_icache, whose scratch
+// alias differs from the canonical VA -- so clean + invalidate the one range.
+void arch_icache_sync_range(const void *addr, size_t len) {
+    if (len == 0) return;
+    u64 ctr;
+    __asm__ __volatile__("mrs %0, ctr_el0" : "=r"(ctr));
+    u32 dline = 4u << ((u32)(ctr >> 16) & 0xF);   // DminLine (words -> bytes)
+    u32 iline = 4u << ((u32)ctr & 0xF);           // IminLine
+    uintptr_t s = (uintptr_t)addr, end = s + len;
+    for (uintptr_t p = s & ~(uintptr_t)(dline - 1); p < end; p += dline)
+        __asm__ __volatile__("dc cvau, %0" :: "r"(p) : "memory");
+    dsb_ish();
+    for (uintptr_t p = s & ~(uintptr_t)(iline - 1); p < end; p += iline)
+        __asm__ __volatile__("ic ivau, %0" :: "r"(p) : "memory");
+    dsb_ish();
+    __asm__ __volatile__("isb" ::: "memory");
+}
+
 void mmu_patch_text(void *dst, const void *src, u32 n) {
     const u8 *s = (const u8 *)src;
     u8 *d = (u8 *)dst;

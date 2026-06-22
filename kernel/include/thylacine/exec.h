@@ -32,6 +32,7 @@
 #include <thylacine/types.h>
 
 struct Proc;
+struct Spoor;   // REVENANT R-4: exec_setup_from_spoor's pinned executable
 
 // User-VA layout for v1.0 exec'd Procs:
 //
@@ -232,6 +233,51 @@ int exec_setup(struct Proc *p, const void *blob, size_t blob_size,
 int exec_setup_with_argv(struct Proc *p, const void *blob, size_t blob_size,
                          const char *argv_data, u32 argv_data_len, u32 argc,
                          u64 *entry_out, u64 *sp_out);
+
+// REVENANT R-4: bounds for the file-backed exec path (exec_setup_from_spoor).
+//
+// EXEC_ELF_HEADER_MAX — the eager read of the ELF header + program-header
+// table. A static aarch64 ET_EXEC has ehdr(64) + a handful of phdrs(56 each);
+// 16 KiB covers the worst case the loader permits (ELF_MAX_PHNUM=256 phdrs ->
+// 64 + 256*56 = 14400 bytes) with margin. The phdr table MUST reside within
+// the first EXEC_ELF_HEADER_MAX bytes (every real toolchain emits phoff=64);
+// a binary whose phdrs sit beyond it is rejected. This replaces the old whole-
+// binary SYS_SPAWN_BLOB_MAX wall: only the header is read eagerly, so a binary
+// of any size execs (its text demand-pages, its data eager-copies per-segment).
+#define EXEC_ELF_HEADER_MAX  16384u
+
+// EXEC_FILE_MAX — a sanity ceiling on the executable's total size (from stat),
+// bounding the loader's arithmetic + rejecting a pathological "file." Generous
+// (the #67 toolchain is tens of MiB); per-segment OOM is still graceful.
+#define EXEC_FILE_MAX  (256ull * 1024 * 1024)
+
+// exec_setup_from_spoor — the file-backed production exec path (REVENANT R-4).
+//
+// Unlike exec_setup (which eager-copies a whole in-memory ELF blob — retained
+// for the kernel test suite), this reads ONLY the ELF header + phdrs from the
+// pinned executable `exe` (a Spoor resolved by exec_resolve_from_namespace),
+// then maps each PT_LOAD:
+//   - executable text (PF_X, no bss page beyond the file) -> a SHARED file-
+//     backed BURROW_TYPE_FILE via the Image cache (image_lookup_or_create),
+//     demand-paged by the R-2 fault arm; R+X (W^X-clean by construction).
+//   - everything else (data/bss/rodata, or a rare PF_X segment with whole bss
+//     pages) -> a PRIVATE anonymous BURROW eager-copied from the file (filesz
+//     bytes; the memsz tail zero-filled). No userspace file-backed writable
+//     mapping is ever created.
+//
+// `exe_size` is the executable's total byte size (from the caller's stat in the
+// parent context); it bounds the ELF loader's per-segment file-extent checks.
+// BORROWS `exe` (does NOT consume it): the caller (the spawn thunk) retains the
+// pin and spoor_clunks it after this returns. Internally spoor_refs `exe` per
+// text-segment Image lookup (which consumes a ref) and dev->reads the header +
+// data segments through the borrowed `exe` (death-interruptible, #811).
+//
+// Same `*entry_out` / `*sp_out` contract + same partial-state-on-failure
+// disposal contract as exec_setup. argv threads through exactly as
+// exec_setup_with_argv (argc==0 + argv_data==NULL is the no-argv shape).
+int exec_setup_from_spoor(struct Proc *p, struct Spoor *exe, size_t exe_size,
+                          const char *argv_data, u32 argv_data_len, u32 argc,
+                          u64 *entry_out, u64 *sp_out);
 
 // Kernel→EL0 transition (asm in arch/arm64/userland.S). Sets
 // ELR_EL1 = entry_pc, SP_EL0 = user_sp, SPSR_EL1 = 0 (PSTATE = EL0t,

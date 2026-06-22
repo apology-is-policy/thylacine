@@ -158,7 +158,7 @@ static void joey_thunk(void *arg) {
 // root_spoor pointing at the devramfs root. The child Territory clone inherits
 // it (territory_clone deep-copies + spoor_refs), so joey + every descendant has
 // a sane FROM_ROOT base AND (post-#58) a namespace for SYS_SPAWN binary
-// resolution (exec_load_from_namespace -> stalk). Idempotent: an already-rooted
+// resolution (exec_resolve_from_namespace -> stalk). Idempotent: an already-rooted
 // Territory is left as-is -- the kernel test harness calls this before the
 // spawn-resolution tests, so joey_run's later call finds it done. devramfs.
 // attach returns ref=1; territory_chroot takes its own ref; we unref to leave

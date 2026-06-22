@@ -4334,22 +4334,23 @@ static s64 sys_getrandom_handler(u64 buf_va, u64 len, u64 flags_raw) {
 // no SYS_RFORK (which would require COW + child-context restoration);
 // adding it later is a separate chunk.
 //
-// Lifetime of the ELF blob copy: kmalloc'd by the SYS_SPAWN handler,
-// freed by the child's spawn_thunk after exec_setup. The args struct is
-// also kmalloc'd + freed (lives across the rfork boundary, so it can't
-// be on the caller's kernel stack — the caller may return to userspace
-// before the child's thunk runs).
+// Lifetime of the executable Spoor (REVENANT R-4): PINNED by the SYS_SPAWN
+// handler (exec_resolve_from_namespace transfers the ref) and clunked by the
+// child's spawn_thunk after exec_setup_from_spoor reads the header + maps the
+// segments. The args struct is also kmalloc'd + freed (lives across the rfork
+// boundary, so it can't be on the caller's kernel stack — the caller may return
+// to userspace before the child's thunk runs).
 
 struct spawn_args {
-    void   *blob;       // kmalloc'd 8-aligned copy of the ELF; thunk frees
-    size_t  blob_size;
+    struct Spoor *exe;      // REVENANT R-4: the pinned executable; thunk clunks it
+    size_t        exe_size; // stat'd file size (bounds the ELF segment-extent check)
 };
 
 __attribute__((noreturn))
 static void sys_spawn_thunk(void *arg) {
     struct spawn_args *sa = (struct spawn_args *)arg;
-    void *blob       = sa->blob;
-    size_t blob_size = sa->blob_size;
+    struct Spoor *exe = sa->exe;
+    size_t exe_size   = sa->exe_size;
     kfree(sa);
 
     struct Thread *t = current_thread();
@@ -4358,8 +4359,8 @@ static void sys_spawn_thunk(void *arg) {
     if (!p) extinction("sys_spawn_thunk: no proc");
 
     u64 entry = 0, sp = 0;
-    int rc = exec_setup(p, blob, blob_size, &entry, &sp);
-    kfree(blob);
+    int rc = exec_setup_from_spoor(p, exe, exe_size, NULL, 0, 0, &entry, &sp);
+    spoor_clunk(exe);
     if (rc != 0) {
         // Surfaces as exit_status=1 in the parent's SYS_WAIT_PID.
         exits("fail-exec");
@@ -4400,24 +4401,27 @@ static int sys_bump_inherit_fds(struct Proc *p, const u32 *fds, u32 fd_count,
     return 0;
 }
 
-// exec_load_from_namespace (#58) -- resolve the program `name` in the CALLER's
-// namespace and slurp the ELF into a fresh 8-aligned kmalloc'd blob, replacing
-// the flat boot-cpio `devramfs_lookup`. Realizes I-28 + I-1 for the exec path:
-// a binary in a mounted FS (a container root, the disk-backed Stratum FS) is
-// now executable, and a confined Proc can exec ONLY what its namespace names
-// (the reverse-visibility leak closes -- a `stalk` miss is -1, never a flat
+// exec_resolve_from_namespace (#58 / REVENANT R-4) -- resolve the program `name`
+// in the CALLER's namespace + PIN the resulting executable Spoor, replacing the
+// flat boot-cpio `devramfs_lookup`. Realizes I-28 + I-1 for the exec path: a
+// binary in a mounted FS (a container root, the disk-backed Stratum FS) is
+// executable, and a confined Proc can exec ONLY what its namespace names (the
+// reverse-visibility leak closes -- a `stalk` miss is NULL, never a flat
 // fallback). Resolution mirrors SYS_OPEN exactly: an absolute path from the
 // Territory `root_spoor`, a relative name via the LS-4 cwd-join; OEXEC gates a
 // per-component X-search on every directory hop and PERM_R|PERM_X on the final
-// file (RW-3 R3-F1), and the A-3 OEXEC->RIGHT_READ open yields a readable Spoor
-// to load the bytes. The whole binary is read into kernel memory and handed
-// UNCHANGED to exec_setup -- the same shape the cpio path used (it memcpy'd the
-// whole blob), so the audited ELF loader / W^X reject / segment map are
-// byte-identical. Runs in the parent's context (its Territory), like Unix exec.
-// Returns the blob (caller kfree) + *size_out, or NULL on any failure.
-// Exported for the kernel-internal #58 tests.
-void *exec_load_from_namespace(struct Proc *p, const char *name,
-                               size_t name_len, size_t *size_out) {
+// file (RW-3 R3-F1), and the A-3 OEXEC->RIGHT_READ open yields a readable Spoor.
+//
+// REVENANT R-4 retires the whole-binary slurp: the Spoor is PINNED (the ref is
+// transferred to the caller) and the bytes are read LATER -- the header+phdrs
+// + data segments by exec_setup_from_spoor in the CHILD's context, the text
+// pages demand-paged by the R-2 fault arm -- so a binary of any size execs (the
+// old SYS_SPAWN_BLOB_MAX 1-MiB cap is gone; only EXEC_FILE_MAX sanity-bounds the
+// stat'd size). Runs in the parent's context (its Territory), like Unix exec.
+// Returns the pinned Spoor (caller spoor_clunks) + *size_out, or NULL on any
+// failure. Exported for the kernel-internal #58 tests.
+struct Spoor *exec_resolve_from_namespace(struct Proc *p, const char *name,
+                                          size_t name_len, size_t *size_out) {
     if (!p || !name || !size_out)                  return NULL;
     *size_out = 0;
     if (name_len == 0 || name_len > SYS_OPEN_PATH_MAX) return NULL;
@@ -4444,36 +4448,16 @@ void *exec_load_from_namespace(struct Proc *p, const char *name,
     if (!quarry)                                   return NULL;
     if (!quarry->dev || !quarry->dev->read)        { spoor_clunk(quarry); return NULL; }
 
-    // Size from stat; bound by SYS_SPAWN_BLOB_MAX (the same cap the cpio path
-    // enforced -- no regression; a > cap binary already failed before #58).
+    // Size from stat -- bounds exec_setup_from_spoor's ELF segment-extent
+    // validation + an EXEC_FILE_MAX sanity ceiling (the binary is NOT read here
+    // anymore; only its identity is pinned). A truncated file surfaces later as
+    // a short read in exec_setup_from_spoor -> clean exec failure, no partial map.
     struct t_stat st;
     if (spoor_stat_native(quarry, &st) != 0)       { spoor_clunk(quarry); return NULL; }
-    if (st.size == 0 || st.size > SYS_SPAWN_BLOB_MAX)      { spoor_clunk(quarry); return NULL; }
-    size_t sz = (size_t)st.size;
+    if (st.size == 0 || (u64)st.size > EXEC_FILE_MAX) { spoor_clunk(quarry); return NULL; }
 
-    void *blob = kmalloc(sz, 0);
-    if (!blob)                                     { spoor_clunk(quarry); return NULL; }
-    if (((uintptr_t)blob & 0x7) != 0)              { kfree(blob); spoor_clunk(quarry); return NULL; }
-
-    // Read the whole file via dev->read (a short read is legal -- loop). For a
-    // devramfs Spoor (the /bin bind) this is an in-memory copy; for dev9p it is
-    // Tread round-trips (#811-death-interruptible if the parent dies). A read
-    // that ends before st.size (truncated file) fails cleanly -> no partial map.
-    u8 *dst = (u8 *)blob;
-    s64 off = 0;
-    size_t got = 0;
-    while (got < sz) {
-        long n = quarry->dev->read(quarry, dst + got, (long)(sz - got), off);
-        if (n < 0)                                 { kfree(blob); spoor_clunk(quarry); return NULL; }
-        if (n == 0)                                break;   // EOF before st.size
-        got += (size_t)n;
-        off += n;
-    }
-    spoor_clunk(quarry);
-    if (got != sz)                                 { kfree(blob); return NULL; }
-
-    *size_out = sz;
-    return blob;
+    *size_out = (size_t)st.size;
+    return quarry;        // ref transferred to the caller (the spawn thunk clunks it)
 }
 
 // Kernel-side body: takes a kernel-resident NUL-terminated name and the
@@ -4491,24 +4475,25 @@ int sys_spawn_for_proc(struct Proc *p, const char *name, size_t name_len) {
     }
     if (name[name_len] != '\0')                         return -1;
 
-    // #58: resolve + slurp the ELF from the caller's namespace (was the flat
-    // devramfs_lookup). The blob is 8-aligned, <= SYS_SPAWN_BLOB_MAX, kmalloc'd.
-    size_t cpio_size = 0;
-    void *blob_copy = exec_load_from_namespace(p, name, name_len, &cpio_size);
-    if (!blob_copy)                                    return -1;
+    // #58 / REVENANT R-4: resolve + PIN the executable from the caller's
+    // namespace (was the flat devramfs_lookup + whole-binary slurp). The bytes
+    // are read later (header in the child, text demand-paged) -- no size cap.
+    size_t exe_size = 0;
+    struct Spoor *exe = exec_resolve_from_namespace(p, name, name_len, &exe_size);
+    if (!exe)                                          return -1;
 
     struct spawn_args *sa = kmalloc(sizeof(*sa), KP_ZERO);
     if (!sa) {
-        kfree(blob_copy);
+        spoor_clunk(exe);
         return -1;
     }
-    sa->blob      = blob_copy;
-    sa->blob_size = cpio_size;
+    sa->exe      = exe;
+    sa->exe_size = exe_size;
 
     int pid = rfork(RFPROC, sys_spawn_thunk, sa);
     if (pid < 0) {
         kfree(sa);
-        kfree(blob_copy);
+        spoor_clunk(exe);
         return -1;
     }
     return pid;
@@ -4551,8 +4536,8 @@ static s64 sys_spawn_handler(u64 name_va, u64 name_len_raw) {
 // all bumped refs.
 
 struct spawn_with_fds_args {
-    void          *blob;
-    size_t         blob_size;
+    struct Spoor  *exe;        // REVENANT R-4: pinned executable; thunk clunks it
+    size_t         exe_size;
     u32            fd_count;
     struct Spoor  *spoors[SYS_SPAWN_MAX_FDS];
     // R15 F231 close: capture parent's slot rights at spawn time so
@@ -4578,8 +4563,8 @@ void apply_spawn_perms(struct Proc *p, u32 perm_flags);
 __attribute__((noreturn))
 static void sys_spawn_with_fds_thunk(void *arg) {
     struct spawn_with_fds_args *sa = (struct spawn_with_fds_args *)arg;
-    void   *blob       = sa->blob;
-    size_t  blob_size  = sa->blob_size;
+    struct Spoor *exe  = sa->exe;
+    size_t  exe_size   = sa->exe_size;
     u32     fd_count   = sa->fd_count;
     u32     perm_flags = sa->perm_flags;
     struct Spoor *spoors_local[SYS_SPAWN_MAX_FDS];
@@ -4623,7 +4608,7 @@ static void sys_spawn_with_fds_thunk(void *arg) {
             // Drop refs on the un-installed remainder; the installed
             // prefix gets cleaned up by proc_free.
             for (u32 j = i; j < fd_count; j++) spoor_clunk(spoors_local[j]);
-            kfree(blob);
+            spoor_clunk(exe);
             exits("fail-fd-install");
         }
         installed++;
@@ -4631,8 +4616,8 @@ static void sys_spawn_with_fds_thunk(void *arg) {
     (void)installed;
 
     u64 entry = 0, sp = 0;
-    int rc = exec_setup(p, blob, blob_size, &entry, &sp);
-    kfree(blob);
+    int rc = exec_setup_from_spoor(p, exe, exe_size, NULL, 0, 0, &entry, &sp);
+    spoor_clunk(exe);
     if (rc != 0) {
         // Installed handles cleaned by proc_free.
         exits("fail-exec");
@@ -4663,22 +4648,22 @@ int sys_spawn_with_fds_for_proc(struct Proc *p, const char *name, size_t name_le
     if (sys_bump_inherit_fds(p, fds, fd_count, bumped, bumped_rights) != 0)
         return -1;
 
-    // #58: resolve + slurp from the caller's namespace (was devramfs_lookup).
-    size_t cpio_size = 0;
-    void *blob_copy = exec_load_from_namespace(p, name, name_len, &cpio_size);
-    if (!blob_copy) {
+    // #58 / REVENANT R-4: resolve + PIN the executable (was the whole-binary slurp).
+    size_t exe_size = 0;
+    struct Spoor *exe = exec_resolve_from_namespace(p, name, name_len, &exe_size);
+    if (!exe) {
         for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
         return -1;
     }
 
     struct spawn_with_fds_args *sa = kmalloc(sizeof(*sa), KP_ZERO);
     if (!sa) {
-        kfree(blob_copy);
+        spoor_clunk(exe);
         for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
         return -1;
     }
-    sa->blob      = blob_copy;
-    sa->blob_size = cpio_size;
+    sa->exe      = exe;
+    sa->exe_size = exe_size;
     sa->fd_count  = fd_count;
     for (u32 i = 0; i < fd_count; i++) {
         sa->spoors[i] = bumped[i];
@@ -4688,7 +4673,7 @@ int sys_spawn_with_fds_for_proc(struct Proc *p, const char *name, size_t name_le
     int pid = rfork(RFPROC, sys_spawn_with_fds_thunk, sa);
     if (pid < 0) {
         kfree(sa);
-        kfree(blob_copy);
+        spoor_clunk(exe);
         for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
         return -1;
     }
@@ -4716,24 +4701,23 @@ int sys_spawn_with_caps_for_proc(struct Proc *p, const char *name, size_t name_l
     }
     if (name[name_len] != '\0')                         return -1;
 
-    // #58: resolve + slurp the ELF from the caller's namespace (was the flat
-    // devramfs_lookup).
-    size_t cpio_size = 0;
-    void *blob_copy = exec_load_from_namespace(p, name, name_len, &cpio_size);
-    if (!blob_copy)                                    return -1;
+    // #58 / REVENANT R-4: resolve + PIN the executable (was the whole-binary slurp).
+    size_t exe_size = 0;
+    struct Spoor *exe = exec_resolve_from_namespace(p, name, name_len, &exe_size);
+    if (!exe)                                          return -1;
 
     struct spawn_args *sa = kmalloc(sizeof(*sa), KP_ZERO);
     if (!sa) {
-        kfree(blob_copy);
+        spoor_clunk(exe);
         return -1;
     }
-    sa->blob      = blob_copy;
-    sa->blob_size = cpio_size;
+    sa->exe      = exe;
+    sa->exe_size = exe_size;
 
     int pid = rfork_with_caps(RFPROC, sys_spawn_thunk, sa, cap_mask);
     if (pid < 0) {
         kfree(sa);
-        kfree(blob_copy);
+        spoor_clunk(exe);
         return -1;
     }
     return pid;
@@ -4808,22 +4792,22 @@ static int sys_spawn_full_with_perms_for_proc(struct Proc *p,
     if (sys_bump_inherit_fds(p, fds, fd_count, bumped, bumped_rights) != 0)
         return -1;
 
-    // #58: resolve + slurp from the caller's namespace (was devramfs_lookup).
-    size_t cpio_size = 0;
-    void *blob_copy = exec_load_from_namespace(p, name, name_len, &cpio_size);
-    if (!blob_copy) {
+    // #58 / REVENANT R-4: resolve + PIN the executable (was the whole-binary slurp).
+    size_t exe_size = 0;
+    struct Spoor *exe = exec_resolve_from_namespace(p, name, name_len, &exe_size);
+    if (!exe) {
         for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
         return -1;
     }
 
     struct spawn_with_fds_args *sa = kmalloc(sizeof(*sa), KP_ZERO);
     if (!sa) {
-        kfree(blob_copy);
+        spoor_clunk(exe);
         for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
         return -1;
     }
-    sa->blob       = blob_copy;
-    sa->blob_size  = cpio_size;
+    sa->exe        = exe;
+    sa->exe_size   = exe_size;
     sa->fd_count   = fd_count;
     sa->perm_flags = perm_flags;
     for (u32 i = 0; i < fd_count; i++) {
@@ -4834,7 +4818,7 @@ static int sys_spawn_full_with_perms_for_proc(struct Proc *p,
     int pid = rfork_with_caps(RFPROC, sys_spawn_with_fds_thunk, sa, cap_mask);
     if (pid < 0) {
         kfree(sa);
-        kfree(blob_copy);
+        spoor_clunk(exe);
         for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
         return -1;
     }
@@ -5135,8 +5119,8 @@ static void spawn_allowance_copy(struct spawn_allowance *dst,
 // Kernel-side spawn args for SYS_SPAWN_FULL_ARGV. Mirrors
 // spawn_with_fds_args but adds argv_data ownership.
 struct spawn_full_argv_args {
-    void          *blob;
-    size_t         blob_size;
+    struct Spoor  *exe;        // REVENANT R-4: pinned executable; thunk clunks it
+    size_t         exe_size;
     u32            fd_count;
     struct Spoor  *spoors[SYS_SPAWN_MAX_FDS];
     // R15 F231: rights captured at spawn time so the child's install
@@ -5162,8 +5146,8 @@ struct spawn_full_argv_args {
 __attribute__((noreturn))
 static void sys_spawn_full_argv_thunk(void *arg) {
     struct spawn_full_argv_args *sa = (struct spawn_full_argv_args *)arg;
-    void   *blob          = sa->blob;
-    size_t  blob_size     = sa->blob_size;
+    struct Spoor *exe     = sa->exe;
+    size_t  exe_size      = sa->exe_size;
     u32     fd_count      = sa->fd_count;
     u32     perm_flags    = sa->perm_flags;
     char   *argv_data     = sa->argv_data;
@@ -5208,7 +5192,7 @@ static void sys_spawn_full_argv_thunk(void *arg) {
     // no concurrent reader). The parent already gated it as a narrowing vs its
     // own allowance (allowance_confer_within_parent), so this only installs.
     // proc_confer_allowance frees any rfork-inherited clone. Fail-closed on OOM
-    // (mirror the fd-install failure path: free the still-owned blob + argv).
+    // (mirror the fd-install failure path: clunk the still-pinned exe + free argv).
     if (allowance.set) {
         if (proc_confer_allowance(p, allowance.mmio, allowance.mmio_count,
                                   allowance.irq, allowance.irq_count,
@@ -5219,7 +5203,7 @@ static void sys_spawn_full_argv_thunk(void *arg) {
             // clunk all of them, mirroring the fail-fd-install arm's clunk of
             // its un-installed range.
             for (u32 j = 0; j < fd_count; j++) spoor_clunk(spoors_local[j]);
-            kfree(blob);
+            spoor_clunk(exe);
             kfree(argv_data);
             exits("fail-allowance");
         }
@@ -5232,7 +5216,7 @@ static void sys_spawn_full_argv_thunk(void *arg) {
                                  spoors_local[i]);
         if (fd != (hidx_t)i) {
             for (u32 j = i; j < fd_count; j++) spoor_clunk(spoors_local[j]);
-            kfree(blob);
+            spoor_clunk(exe);
             kfree(argv_data);
             exits("fail-fd-install");
         }
@@ -5241,10 +5225,10 @@ static void sys_spawn_full_argv_thunk(void *arg) {
     (void)installed;
 
     u64 entry = 0, sp = 0;
-    int rc = exec_setup_with_argv(p, blob, blob_size,
-                                  argv_data, argv_data_len, argc,
-                                  &entry, &sp);
-    kfree(blob);
+    int rc = exec_setup_from_spoor(p, exe, exe_size,
+                                   argv_data, argv_data_len, argc,
+                                   &entry, &sp);
+    spoor_clunk(exe);
     kfree(argv_data);
     if (rc != 0) {
         exits("fail-exec");
@@ -5300,22 +5284,22 @@ static int sys_spawn_full_argv_with_perms_for_proc(
     if (sys_bump_inherit_fds(p, fds, fd_count, bumped, bumped_rights) != 0)
         return -1;
 
-    // #58: resolve + slurp from the caller's namespace (was devramfs_lookup).
-    size_t cpio_size = 0;
-    void *blob_copy = exec_load_from_namespace(p, name, name_len, &cpio_size);
-    if (!blob_copy) {
+    // #58 / REVENANT R-4: resolve + PIN the executable (was the whole-binary slurp).
+    size_t exe_size = 0;
+    struct Spoor *exe = exec_resolve_from_namespace(p, name, name_len, &exe_size);
+    if (!exe) {
         for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
         return -1;
     }
 
     // Kernel-side argv copy. Lifetime: owned by the spawn_args struct
-    // until the thunk's exec_setup_with_argv consumes it. Free-on-error
+    // until the thunk's exec_setup_from_spoor consumes it. Free-on-error
     // paths handle every interleaving below.
     char *argv_data_copy = NULL;
     if (argv_data_len > 0) {
         argv_data_copy = kmalloc(argv_data_len, 0);
         if (!argv_data_copy) {
-            kfree(blob_copy);
+            spoor_clunk(exe);
             for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
             return -1;
         }
@@ -5325,12 +5309,12 @@ static int sys_spawn_full_argv_with_perms_for_proc(
     struct spawn_full_argv_args *sa = kmalloc(sizeof(*sa), KP_ZERO);
     if (!sa) {
         if (argv_data_copy) kfree(argv_data_copy);
-        kfree(blob_copy);
+        spoor_clunk(exe);
         for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
         return -1;
     }
-    sa->blob          = blob_copy;
-    sa->blob_size     = cpio_size;
+    sa->exe           = exe;
+    sa->exe_size      = exe_size;
     sa->fd_count      = fd_count;
     sa->perm_flags    = perm_flags;
     sa->argv_data     = argv_data_copy;
@@ -5352,7 +5336,7 @@ static int sys_spawn_full_argv_with_perms_for_proc(
     if (pid < 0) {
         kfree(sa);
         if (argv_data_copy) kfree(argv_data_copy);
-        kfree(blob_copy);
+        spoor_clunk(exe);
         for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
         return -1;
     }

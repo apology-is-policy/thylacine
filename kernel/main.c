@@ -743,7 +743,7 @@ void boot_main(void) {
     // sanitizer matrix lands at P1-I.
 #ifdef KERNEL_TESTS
     // #58: the spawn tests resolve the binary through the caller's namespace
-    // (exec_load_from_namespace -> stalk), so the test Proc (kproc) needs a
+    // (exec_resolve_from_namespace -> stalk), so the test Proc (kproc) needs a
     // root_spoor. Root it at devramfs BEFORE the suite; joey_run idempotently
     // re-roots it later for the boot chain. NOTE (#58 audit F5): kproc's root is
     // now devramfs for the WHOLE suite -- no test may assume an unrooted kproc or

@@ -442,17 +442,25 @@ A tombstone-rebind protection (CORVUS-DESIGN.md §6.1) leverages the same bit: w
 ### Exec from the namespace (#58)
 
 Since #58 the `SYS_SPAWN_*` family resolves the binary through the **caller's
-namespace**, not the flat boot-cpio table. `exec_load_from_namespace(p, name,
+namespace**, not the flat boot-cpio table. `exec_resolve_from_namespace(p, name,
 name_len, &size)` (`kernel/syscall.c`) mirrors `SYS_OPEN`: an absolute path from
 the Territory `root_spoor`, a relative name via the LS-4 cwd-join, through
-`stalk(p, start, path, len, STALK_OPEN, OEXEC)`; it then slurps the whole ELF from
-the resolved Spoor via `dev->read` into an 8-aligned `kmalloc` blob (bounded by
-`SYS_SPAWN_BLOB_MAX`) and hands it UNCHANGED to `exec_setup` — the same shape the
-cpio path used (it `memcpy`-d the whole binary), so the audited ELF loader / W^X
-reject / segment map are byte-identical. The five spawn bodies (`sys_spawn_for_proc`
-/ `_with_fds_` / `_with_caps_` / `_full_with_perms_` / `_full_argv_with_perms_`)
-call it in place of `devramfs_lookup`. Resolution runs in the **parent's** context
-(its Territory), like Unix `exec`.
+`stalk(p, start, path, len, STALK_OPEN, OEXEC)`. **REVENANT R-4 (#231) retired the
+whole-ELF slurp**: rather than reading the binary into a `kmalloc` blob (the old
+`SYS_SPAWN_BLOB_MAX` 1-MiB cap), it stats the resolved Spoor (sanity-bounded by
+`EXEC_FILE_MAX` = 256 MiB) and **PINS** it (the ref transfers to the caller); the
+bytes are read later by `exec_setup_from_spoor` in the CHILD's context — the ELF
+header + phdrs eagerly (a few KB), text segments demand-paged by the R-2 fault arm
+(shared across Procs via the qid-keyed Image cache), data segments eager-copied
+per-segment from the file. So **a binary of any size execs** (the boot proof execs
+the unstripped ~1.1-MiB `net-echo`). The five spawn bodies (`sys_spawn_for_proc` /
+`_with_fds_` / `_with_caps_` / `_full_with_perms_` / `_full_argv_with_perms_`)
+carry the pinned Spoor across the rfork boundary in their `*_args` struct (the
+thunk `spoor_clunk`s it after `exec_setup_from_spoor` returns). Resolution runs in
+the **parent's** context (its Territory), like Unix `exec`; the deferred reads run
+in the child (death-interruptible #811 against the child's death). See the full
+REVENANT design in `docs/REVENANT.md`; the exec rework + the Image cache get their
+as-built reference treatment at R-5.
 
 This realizes **I-28 + I-1 for the exec path** (no new invariant): per-component
 X-search gates every directory hop and `perm_want_for_omode(OEXEC) = PERM_R|PERM_X`

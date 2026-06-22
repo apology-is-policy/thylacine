@@ -27,8 +27,12 @@
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
 #include <thylacine/burrow.h>
+#include <thylacine/dev.h>      // REVENANT R-4: exe->dev->read for the file-backed path
+#include <thylacine/spoor.h>    // REVENANT R-4: spoor_ref / spoor_clunk
+#include <thylacine/image.h>    // REVENANT R-4: image_lookup_or_create (shared text)
 
 #include "../mm/phys.h"
+#include "../mm/slub.h"         // REVENANT R-4: kmalloc/kfree for the ELF header read
 
 // =============================================================================
 // Helpers
@@ -107,26 +111,11 @@ static int exec_map_segment(struct Proc *p, const void *blob,
         // bytes don't change across iterations.
         //
         // Only required when segment is executable. RW-only segments
-        // (data, bss) don't need I-cache maintenance.
-        if (seg->flags & PF_X) {
-            // ARM ARM cache-line size from CTR_EL0.DminLine; v1.0 uses
-            // a conservative 64-byte fixed line (matches Cortex-A72/76
-            // DminLine 4 → 16 words = 64B). Phase 5+ may read CTR_EL0
-            // dynamically.
-            const size_t line = 64;
-            uintptr_t start = (uintptr_t)burrow_kva;
-            uintptr_t end   = start + seg->filesz;
-            uintptr_t addr  = start & ~(uintptr_t)(line - 1);
-            for (; addr < end; addr += line) {
-                __asm__ __volatile__("dc cvau, %0" :: "r" (addr) : "memory");
-            }
-            __asm__ __volatile__("dsb ish" ::: "memory");
-            addr = start & ~(uintptr_t)(line - 1);
-            for (; addr < end; addr += line) {
-                __asm__ __volatile__("ic ivau, %0" :: "r" (addr) : "memory");
-            }
-            __asm__ __volatile__("dsb ish\nisb\n" ::: "memory");
-        }
+        // (data, bss) don't need I-cache maintenance. REVENANT R-4 routed
+        // this through the shared arch helper (correct CTR_EL0 line sizes
+        // vs the prior hardcoded 64B; same helper the FILE fault arm uses).
+        if (seg->flags & PF_X)
+            arch_icache_sync_range(burrow_kva, seg->filesz);
     }
     // [filesz, size) stays zero from KP_ZERO.
 
@@ -408,4 +397,186 @@ int exec_setup_with_argv(struct Proc *p, const void *blob, size_t blob_size,
     return exec_setup_argv_body(p, blob, blob_size,
                                 argv_data, argv_data_len, argc,
                                 entry_out, sp_out);
+}
+
+// =============================================================================
+// REVENANT R-4: the file-backed production exec path.
+// =============================================================================
+//
+// docs/REVENANT.md §4.2. exec_setup_from_spoor reads ONLY the ELF header+phdrs
+// from the pinned executable, then maps each PT_LOAD: executable text (whose
+// memsz fits within file-backed pages) is SHARED file-backed via the Image
+// cache (demand-paged by the R-2 fault arm); everything else is a private
+// eager-copied anonymous segment. This retires the whole-binary slurp -- a
+// binary of any size execs.
+
+// map_text_file_backed -- a PF_X PT_LOAD as SHARED file-backed text. Gated by
+// the caller to round_up(filesz) == round_up(memsz) (every mapped page has a
+// file page behind it; the last partial page's tail is the file's zero padding
+// between page-aligned segments, or EOF -> the fault arm's KP_ZERO). BORROWS
+// exe; spoor_refs a fresh ref for the consuming Image lookup.
+static int map_text_file_backed(struct Proc *p, struct Spoor *exe,
+                                const struct elf_load_segment *seg) {
+    u64 vaddr_end = seg->vaddr + seg->memsz;
+    if (vaddr_end < seg->vaddr)             return -1;
+    u64 vaddr_end_aligned = round_up_page(vaddr_end);
+    if (vaddr_end_aligned == 0)             return -1;
+    size_t size = (size_t)(vaddr_end_aligned - seg->vaddr);
+
+    // image_lookup_or_create CONSUMES one spoor ref (adopts on miss / clunks on
+    // hit). The thunk keeps the borrowed `exe`, so hand the lookup a FRESH ref;
+    // on a NULL return it consumed nothing -> drop the fresh ref.
+    spoor_ref(exe);
+    struct Burrow *b = image_lookup_or_create(exe, seg->file_offset, seg->filesz);
+    if (!b) { spoor_clunk(exe); return -1; }
+
+    // R+X. W^X (I-12) holds by construction: elf_load rejected PF_W|PF_X, so a
+    // PF_X segment is never writable.
+    u32 prot = vma_prot_for_elf(seg->flags);
+    int rc = burrow_map(p, b, seg->vaddr, size, prot);
+    // Drop the caller's handle ref. On success mapping_count + the cache's
+    // strong ref keep the image alive; on map failure the image stays validly
+    // cached (idle) for a later exec -- never leaked.
+    burrow_unref(b);
+    return rc == 0 ? 0 : -1;
+}
+
+// map_eager_from_file -- a non-shared PT_LOAD eager-copied from the file into a
+// PRIVATE anonymous Burrow: data (R+W), rodata (R), or a rare PF_X segment whose
+// memsz extends past the file's last page (whole bss pages the file-backed path
+// cannot zero). filesz bytes are dev->read; the [filesz, size) tail stays zero
+// (KP_ZERO) = .bss. No userspace file-backed writable mapping is ever created.
+static int map_eager_from_file(struct Proc *p, struct Spoor *exe,
+                               const struct elf_load_segment *seg) {
+    u64 vaddr_end = seg->vaddr + seg->memsz;
+    if (vaddr_end < seg->vaddr)             return -1;
+    u64 vaddr_end_aligned = round_up_page(vaddr_end);
+    if (vaddr_end_aligned == 0)             return -1;
+    size_t size = (size_t)(vaddr_end_aligned - seg->vaddr);
+
+    struct Burrow *b = burrow_create_anon(size);
+    if (!b)                                  return -1;
+
+    if (seg->filesz > 0) {
+        u8 *kva = (u8 *)pa_to_kva(page_to_pa(b->pages));
+        size_t got = 0;
+        while (got < seg->filesz) {
+            long n = exe->dev->read(exe, kva + got, (long)(seg->filesz - got),
+                                    (s64)(seg->file_offset + got));
+            if (n < 0)  { burrow_unref(b); return -1; }   // #811-interruptible / I/O error
+            if (n == 0) break;                             // short read (caught below)
+            got += (size_t)n;
+        }
+        if (got != seg->filesz) { burrow_unref(b); return -1; }   // truncated -> no partial map
+
+        // A PF_X segment routed here (memsz extends past the file pages) still
+        // executes its loaded bytes -> I-cache maintenance on the copied range.
+        if (seg->flags & PF_X)
+            arch_icache_sync_range(kva, seg->filesz);
+    }
+    // [filesz, size) stays zero (KP_ZERO from alloc_pages) = .bss.
+
+    u32 prot = vma_prot_for_elf(seg->flags);
+    int rc = burrow_map(p, b, seg->vaddr, size, prot);
+    burrow_unref(b);
+    return rc == 0 ? 0 : -1;
+}
+
+// Read the ELF header + program-header table from the pinned executable into a
+// kmalloc'd buffer, bounded so elf_load (which derefs the ehdr + ph[]) never
+// reads past it. Returns the buffer (caller kfree) + *got_out, or NULL on any
+// failure. elf_load re-validates everything against the real file size; this is
+// purely the OOB-deref guard for handing it a header-only buffer.
+static void *exec_read_header(struct Spoor *exe, size_t *got_out) {
+    *got_out = 0;
+    void *hdr = kmalloc(EXEC_ELF_HEADER_MAX, 0);
+    if (!hdr)                                  return NULL;
+    if (((uintptr_t)hdr & 0x7) != 0)           { kfree(hdr); return NULL; }  // 8-align the Ehdr cast
+
+    u8 *dst = (u8 *)hdr;
+    size_t got = 0;
+    while (got < EXEC_ELF_HEADER_MAX) {
+        long n = exe->dev->read(exe, dst + got, (long)(EXEC_ELF_HEADER_MAX - got),
+                                (s64)got);
+        if (n < 0) { kfree(hdr); return NULL; }   // #811-interruptible / I/O error
+        if (n == 0) break;                        // EOF (a header smaller than the cap)
+        got += (size_t)n;
+    }
+
+    // Bound the phdr table within what we read, so elf_load's ph[0..phnum) deref
+    // stays in-bounds. elf_load enforces phentsize == sizeof(Phdr) before it
+    // indexes ph[] (returning early otherwise) and uses that fixed stride; the
+    // span below mirrors it. Overflow-safe: got <= EXEC_ELF_HEADER_MAX (16 KiB)
+    // and phnum is a u16, so span <= 65535*56 fits a u64 with no wrap, and the
+    // phoff > got check runs before the subtraction.
+    if (got < sizeof(struct Elf64_Ehdr))       { kfree(hdr); return NULL; }
+    const struct Elf64_Ehdr *eh = (const struct Elf64_Ehdr *)hdr;
+    if (eh->e_phentsize != sizeof(struct Elf64_Phdr)) { kfree(hdr); return NULL; }
+    u64 phoff = eh->e_phoff;
+    u64 span  = (u64)eh->e_phnum * sizeof(struct Elf64_Phdr);
+    if (phoff > (u64)got || (u64)got - phoff < span)  { kfree(hdr); return NULL; }
+
+    *got_out = got;
+    return hdr;
+}
+
+int exec_setup_from_spoor(struct Proc *p, struct Spoor *exe, size_t exe_size,
+                          const char *argv_data, u32 argv_data_len, u32 argc,
+                          u64 *entry_out, u64 *sp_out) {
+    if (!p || !exe || !entry_out || !sp_out)   return -1;
+    if (p->magic != PROC_MAGIC)                return -1;
+    if (p->pgtable_root == 0)                  return -1;     // kproc rejected
+    if (p->vmas != NULL)                       return -1;     // clean address space only
+    if (!exe->dev || !exe->dev->read)          return -1;
+    if (exe_size == 0 || exe_size > EXEC_FILE_MAX) return -1;
+
+    // argv invariants (defense-in-depth; the syscall body already checked them,
+    // but the contract is owned here too -- exec_setup_from_spoor is exported).
+    if (argc > 0) {
+        if (argv_data_len == 0 || !argv_data)      return -1;
+        if (argv_data[argv_data_len - 1] != '\0')  return -1;
+    } else {
+        if (argv_data_len != 0)                    return -1;
+    }
+
+    // 1. Read + parse ONLY the ELF header + phdrs (a few KB), not the whole
+    //    binary. elf_load validates segment extents against the real file size.
+    size_t hdr_got = 0;
+    void *hdr = exec_read_header(exe, &hdr_got);
+    if (!hdr)                                  return -1;
+    struct elf_image img;
+    int r = elf_load(hdr, exe_size, &img);
+    kfree(hdr);
+    if (r != ELF_LOAD_OK)                      return -1;
+
+    // 2. Map each PT_LOAD. Executable text whose memsz fits within file-backed
+    //    pages is SHARED file-backed (demand-paged); everything else is a
+    //    private eager-copied anon segment. Page-aligned vaddr + file_offset is
+    //    required (matches exec_map_segment): the fault arm + the eager copy
+    //    both assume burrow-offset-0 == seg->vaddr.
+    for (int i = 0; i < img.n_segments; i++) {
+        const struct elf_load_segment *seg = &img.segments[i];
+        if (seg->vaddr & (PAGE_SIZE - 1))       return -1;
+        if (seg->file_offset & (PAGE_SIZE - 1)) return -1;
+        if (seg->memsz == 0)                    return -1;
+
+        // text_shareable iff PF_X AND round_up(filesz) == round_up(memsz) (no
+        // whole bss page beyond the file). vaddr is page-aligned, so the
+        // vaddr-relative rounded ends compare the rounded sizes; a 0 from
+        // round_up_page is overflow -> fall to the eager path (which re-rejects).
+        u64 fend = round_up_page(seg->vaddr + seg->filesz);
+        u64 mend = round_up_page(seg->vaddr + seg->memsz);
+        bool text_shareable = (seg->flags & PF_X) && fend != 0 && fend == mend;
+
+        int rc = text_shareable ? map_text_file_backed(p, exe, seg)
+                                : map_eager_from_file(p, exe, seg);
+        if (rc != 0)                            return -1;   // partial -> caller disposes Proc
+    }
+
+    // 3. User stack + the System V startup frame (unchanged; reads img metadata,
+    //    not the file -- AT_PHDR resolves into the first mapped segment's VA).
+    if (exec_map_user_stack(p) != 0)           return -1;
+    *entry_out = img.entry;
+    *sp_out    = exec_build_init_stack(p, &img, argv_data, argv_data_len, argc);
+    return 0;
 }

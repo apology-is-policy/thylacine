@@ -247,10 +247,11 @@ enum {
     // a fresh child Proc via rfork(RFPROC, ...), exec_setup the binary
     // into the child, and return its PID. Returns -1 on:
     //   - name_len out of range / name_va bound violation
-    //   - binary not found in devramfs
-    //   - blob exceeds SYS_SPAWN_BLOB_MAX (1 MiB)
+    //   - binary not resolvable in the caller's namespace (stalk miss / X-deny)
+    //   - executable exceeds EXEC_FILE_MAX (256 MiB sanity ceiling; REVENANT R-4
+    //     retired the old 1-MiB SYS_SPAWN_BLOB_MAX slurp cap)
     //   - kmalloc / rfork OOM
-    //   - exec_setup failure (child exits "fail-exec" → parent's
+    //   - exec_setup_from_spoor failure (child exits "fail-exec" → parent's
     //     SYS_WAIT_PID observes non-zero status)
     // The child inherits no capabilities (CAP_ALL & 0u = 0). v1.0 model
     // is "the child fully describes its needs"; future SYS_RFORK with a
@@ -879,7 +880,8 @@ enum {
     //   - perm_flags carries any bit outside SPAWN_PERM_ALL
     //   - perm_flags nonzero but caller is not console-attached
     //   - any inherited fd is not a KOBJ_SPOOR handle
-    //   - devramfs binary not found OR oversize (> SYS_SPAWN_BLOB_MAX)
+    //   - binary not resolvable in the namespace, OR exceeds EXEC_FILE_MAX
+    //     (REVENANT R-4 retired the 1-MiB SYS_SPAWN_BLOB_MAX slurp cap)
     //   - kmalloc OOM at any step
     //   - rfork_with_caps OOM (Proc / Thread allocation)
     SYS_SPAWN_FULL_ARGV = 49,
