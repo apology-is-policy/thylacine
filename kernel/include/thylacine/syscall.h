@@ -723,7 +723,7 @@ enum {
     //   2. Mark self THREAD_EXITING under g_proc_table_lock.
     //   3. If this is the LAST non-EXITING thread in the Proc, also
     //      transition the Proc to ZOMBIE with exit_status = 0 + wake
-    //      parent's child_done (mirrors exits() with status 0).
+    //      parent's child_waiters (mirrors exits() with status 0).
     //   4. yield via sched(); never returns.
     //
     // After-exit reaping: the Thread descriptor + kstack remain

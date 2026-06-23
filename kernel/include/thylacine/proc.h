@@ -10,7 +10,8 @@
 // History:
 //   P2-A:  pid + threads list + thread_count.
 //   P2-D:  + state (ALIVE / ZOMBIE) + parent + children + sibling
-//          + exit_status + exit_msg + child_done Rendez.
+//          + exit_status + exit_msg + the child-reap wait (multi-waiter
+//          child_waiters since #344; single-waiter child_done Rendez before).
 //   P2-E:  + territory pointer (Territory).
 //   P2-F:  + handle table head.
 //   P2-G:  + address space (page table root, vma_tree) + credentials
@@ -22,6 +23,7 @@
 #include <thylacine/caps.h>     // caps_t (P4-Ic3 rfork_with_caps signature)
 #include <thylacine/page.h>     // paddr_t (P3-Bcb pgtable_root)
 #include <thylacine/rendez.h>
+#include <thylacine/poll.h>      // poll_waiter_list -- the multi-waiter child-reap wait (#344)
 #include <thylacine/spinlock.h>
 #include <thylacine/types.h>
 
@@ -140,12 +142,25 @@ struct Proc {
     // a per-Proc exit_msg buffer to copy from user.
     const char       *exit_msg;
 
-    // P2-D: parent's wait Rendez. Parent's wait_pid() sleeps on this
-    // until any child enters ZOMBIE (which is the wakeup edge). Single-
-    // waiter convention (only the parent waits on its own children;
-    // multiple parent threads waiting concurrently are a Phase 5+
-    // concern handled by promoting to multi-waiter wait queue).
-    struct Rendez     child_done;
+    // P2-D / #344: parent's child-reap wait list. Every Thread that calls
+    // wait_pid_for registers its OWN stack-local poll_waiter here and parks
+    // on its OWN private Rendez; a child entering ZOMBIE (the wakeup edge)
+    // calls poll_waiter_list_wake under g_proc_table_lock, which wakes EVERY
+    // registered waiter. This is the #344 multi-waiter lift the old single-
+    // waiter `struct Rendez child_done` could not do: a 2nd concurrent waiter
+    // tripped sleep's single-waiter assert (-> extinction), so the RW-2
+    // 2B-F1/F2 `wait_active` guard had to REFUSE the 2nd caller (-1) rather
+    // than serve it -- which broke multi-threaded Go's parallel `go build`.
+    // `struct poll_waiter_list` is byte-identical in layout to the old
+    // `struct Rendez` (a spinlock + a pointer), so the swap is offset-stable
+    // (every following field keeps its pinned offset). The list is the
+    // wake-RELAY only; the AUTHORITATIVE "is a matching zombie reapable"
+    // decision is wait_pid_for's re-scan of `children` under g_proc_table_-
+    // lock (register-then-observe, the poll.c discipline). poll_waiter_list_-
+    // wake is called UNDER g_proc_table_lock (the established exits() order
+    // proc_table_lock -> list -> rendez), so the parent stays alive through
+    // the wake and no death-wake is lost (I-9).
+    struct poll_waiter_list  child_waiters;
 
     // P2-Eb: territory (Plan 9 Territory). At v1.0 each Proc has its own
     // private Territory (rfork(RFPROC) calls territory_clone). Phase 5+ adds
@@ -257,18 +272,16 @@ struct Proc {
     // visible via future debug surfaces for audit verification.
     u32                proc_flags;
 
-    // RW-2 2B-F1/F2: per-Proc wait_pid_for serialization (repurposed from the
-    // former srv_conn_count/_pad_srv reserved u32, removed in stalk-3b-β -- same
-    // size + offset at the time, so this field's offset is unchanged; the struct
-    // later grew to 272 when the #65 resource-floor counters appended).
-    // At most ONE Thread of a Proc may be inside wait_pid_for's reap-or-sleep
-    // critical section at a time: p->child_done is a single-waiter Rendez (a 2nd
-    // concurrent waiter trips sleep's single-waiter assert -> extinction) and
-    // wait_pid_cond walks p->children locklessly (racing a peer's reap+free ->
-    // UAF). Accessed via __atomic exchange(1)/store(0); 0 == free. The v1.x
-    // multi-waiter child_done + proc_table_lock-protected cond promotion lifts
-    // this from "refuse the 2nd concurrent caller" to "all may wait".
-    u32                wait_active;
+    // #344: formerly `wait_active`, the RW-2 2B-F1/F2 per-Proc wait_pid_for
+    // serialization that refused a genuinely-concurrent 2nd waiter with -1.
+    // The #344 multi-waiter lift -- a per-Thread stack `poll_waiter` on
+    // `child_waiters` + the g_proc_table_lock-protected re-scan (replacing the
+    // single-waiter `child_done` Rendez + the lockless `wait_pid_cond` walk
+    // that the guard existed to protect) -- RETIRES the guard: all may wait.
+    // The field is kept (now reserved) so every following field holds its
+    // pinned offset; the size + offset _Static_asserts below depend on it.
+    // KP_ZERO inits it to 0; nothing reads or writes it.
+    u32                _reserved0;
 
     // P5-corvus-srv: the kernel's per-Proc identity tag — the
     // thylacine's stripe pattern; every animal's is unique. Drawn from
@@ -567,7 +580,7 @@ void proc_publish_init(struct Proc *p);
 struct Proc *proc_init_proc(void);
 
 // SLUB-allocate a fresh Proc descriptor. Initializes pid (next monotonic
-// pid), threads = NULL, thread_count = 0, state = ALIVE, child_done
+// pid), threads = NULL, thread_count = 0, state = ALIVE, child_waiters
 // initialized. parent / children / sibling left NULL (caller wires
 // linkage). Returns NULL on OOM.
 struct Proc *proc_alloc(void);
@@ -699,7 +712,8 @@ int rfork_with_caps(unsigned flags, void (*entry)(void *), void *arg,
 //   1. Mark the Proc ZOMBIE, set exit_status + exit_msg.
 //   2. Mark the calling Thread EXITING — sched() will leave it out of
 //      the run tree.
-//   3. Wake parent's child_done Rendez (if parent exists).
+//   3. Wake parent's child_waiters -- every Thread waiting in wait_pid_for
+//      (if a parent exists). #344 multi-waiter.
 //   4. yield via sched(). exits() never returns; the thread is left in
 //      EXITING state until wait() reaps it.
 //
@@ -710,7 +724,7 @@ int rfork_with_caps(unsigned flags, void (*entry)(void *), void *arg,
 //
 // Re-parenting of orphaned children: if the exiting Proc has children, they
 // re-parent to init (g_init_proc), or to kproc() while init is not up. The
-// adopter's child_done IS load-bearing: a child adopted already-ZOMBIE gets an
+// adopter's child_waiters wake IS load-bearing: a child adopted already-ZOMBIE gets an
 // explicit wakeup so an adopter blocked in wait_pid reaps it rather than
 // sleeping over it (the I-9 fix in proc_reparent_children); init reaps adoptees
 // via its getty supervisor loop.
@@ -746,7 +760,7 @@ void proc_fault_terminate(const char *name, uintptr_t faulting_addr);
 //      the wake but does not extinct.
 //   2. Mark self THREAD_EXITING under g_proc_table_lock.
 //   3. If this was the last non-EXITING Thread in the Proc, ALSO mark
-//      the Proc ZOMBIE with exit_status = 0 + wake parent's child_done
+//      the Proc ZOMBIE with exit_status = 0 + wake parent's child_waiters
 //      (mirrors exits("ok")).
 //   4. yield via sched(); never returns.
 //

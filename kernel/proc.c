@@ -27,6 +27,7 @@
 #include <thylacine/mmio_handle.h>
 #include <thylacine/notes.h>
 #include <thylacine/page.h>
+#include <thylacine/poll.h>        // child_waiters multi-waiter reap (#344)
 #include <thylacine/territory.h>
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
@@ -96,107 +97,79 @@ static u32                g_next_legate_scope;
 //
 // LOCK ORDER:
 //
-//   `exits()` holds proc_table_lock through the wakeup of parent's
-//   child_done — the wakeup acquires `r->lock` while proc_table_lock is
-//   still held. Order: proc_table_lock → r->lock.
+//   `exits()` holds proc_table_lock through the wake of parent's
+//   child_waiters — poll_waiter_list_wake takes the list lock (nested)
+//   then, for each registered waiter, sets pw->ready and signals that
+//   waiter's private rendez. Order: proc_table_lock → list → rendez.
 //
 //   This bracketing is REQUIRED to defeat a self-audit-found race:
 //   without it, between exits's release of proc_table_lock and exits's
-//   call to wakeup(parent_to_wake->child_done), the parent could be
-//   reaped + freed by the grandparent's wait_pid (which also takes
-//   proc_table_lock — but acquires AFTER our release, blocking us not
-//   at all). Holding proc_table_lock through wakeup ensures the parent
-//   stays alive until our wakeup completes.
+//   call to poll_waiter_list_wake(&parent->child_waiters), the parent
+//   could be reaped + freed by the grandparent's wait_pid (which also
+//   takes proc_table_lock — but acquires AFTER our release, blocking us
+//   not at all). Holding proc_table_lock through the wake ensures the
+//   parent stays alive until the wake completes.
 //
-//   For the order to be deadlock-free, NO PATH may hold `r->lock` while
-//   acquiring proc_table_lock. `wait_pid_cond` is THE candidate — it's
-//   called from `sleep` under `r->lock`. The discipline at P3-A:
-//   `wait_pid_cond` reads the children list WITHOUT proc_table_lock,
-//   relying on three observations:
+//   #344 (the multi-waiter lift). wait_pid_for no longer sleeps on a
+//   single-waiter `child_done` Rendez with a `wait_pid_cond` that walks
+//   the children list locklessly. Instead each waiting Thread registers
+//   its OWN stack `poll_waiter` on `child_waiters` and parks on its OWN
+//   private rendez whose cond reads ONLY `pw->ready` (a flag) — it
+//   touches NO lineage state. This DISSOLVES the deadlock hazard the old
+//   design fought, on three grounds:
 //
-//     (1) The parent's children list head + sibling chain is single-
-//         writer per non-kproc parent at v1.0: only the parent's own
-//         thread mutates it (via its own rfork / wait_pid / exits-
-//         reparent). Single-thread Procs at v1.0; the parent's own
-//         thread is the only modifier. When the parent is in wait_pid
-//         (calling sleep, which calls wait_pid_cond), it is NOT
-//         concurrently in exits or rfork.
+//     (1) Acyclic by construction. The register (poll_waiter_list_-
+//         register) and the wake (poll_waiter_list_wake) both run UNDER
+//         proc_table_lock and take the list lock nested inside it:
+//         proc_table_lock → list. The rendez lock is taken strictly
+//         INSIDE the list-locked wake (list → rendez) and, separately,
+//         by a parked Thread's own sleep cond-check (rendez only). NO
+//         path takes the rendez lock then acquires proc_table_lock, so
+//         proc_table_lock → list → rendez has no cycle. The old
+//         `wait_pid_cond reads children under r->lock` — the one path
+//         that risked an r->lock → proc_table_lock inversion — is gone.
 //
-//         **ADOPTER EXCEPTION (R6-A F105; widened by 2B-F3)**: the
-//         orphan-adopter's children list (`g_init_proc->children` when
-//         init is up, else `g_kproc->children`) IS multi-writer — every
-//         exiting Proc with orphan children calls
-//         `proc_reparent_children(p)` which head-inserts into the
-//         adopter's list (sets `c->sibling = adopter->children;
-//         adopter->children = c`). The mutators serialize via
-//         proc_table_lock, but the adopter's own thread walking
-//         lockless in wait_pid_cond CAN observe a mid-insert
-//         interleaving (e.g. the new head visible before its sibling
-//         store, ARM64 weak ordering).
+//     (2) The authoritative scan is always locked. The "a matching
+//         zombie is reapable" decision is wait_pid_for's re-scan of
+//         p->children UNDER proc_table_lock at the top of every loop
+//         iteration (never locklessly). So the old observations about a
+//         lockless cond walk tolerating mid-insert / stale-state races
+//         are MOOT: the scan is fully synchronized with every concurrent
+//         exits / rfork / reparent (all hold proc_table_lock), including
+//         the multi-writer orphan-adopter list (R6-A F105 / 2B-F3) —
+//         there is no lockless reader left to race it.
 //
-//         Since 2B-F3 this is ROUTINE, not quiescent (orphan adoption
-//         is the feature, and the adopter — init/joey — DOES wait_pid).
-//         It stays SOUND on two grounds:
+//     (3) No lost death-wake (I-9 register-then-observe, the poll.c
+//         discipline). The no-zombie scan AND the poll_waiter_list_-
+//         register run in ONE proc_table_lock critical section. A child
+//         that becomes ZOMBIE *after* that section must take proc_table_-
+//         lock (after our release), so it finds our already-registered
+//         waiter and sets pw->ready + wakes — the parked Thread re-scans
+//         and reaps. A child that became ZOMBIE *before* our scan is seen
+//         by the scan directly. `pw->ready` is only the wake RELAY; the
+//         re-scan is the readiness truth, so a spurious/non-matching wake
+//         simply re-scans and re-parks. The set-ready (under list lock)
+//         is made visible to the cond-check (under rendez lock) by the
+//         wake's intervening wakeup(rendez), exactly as in poll.c.
 //
-//           (a) No UAF: a stale walk can only land on the dying
-//               parent's remaining orphans (valid, unfreed Procs mid-
-//               move) or NULL. Nodes in the adopter's list are
-//               unlinked+freed ONLY by the adopter's own wait_pid_for
-//               (joey is single-threaded; a multi-thread adopter is
-//               serialized by wait_active, RW-2 2B-F1/F2) — never
-//               concurrently with that same thread's sleeping cond
-//               walk.
-//
-//           (b) No lost wake: a mid-insert walk can at worst MISS a
-//               zombie and sleep. Every zombie-producing event wakes
-//               the adopter's child_done — the child's own exits
-//               (parent == adopter post-adoption) or, for children
-//               adopted already-ZOMBIE, the explicit adopted-zombie
-//               wakeup in proc_reparent_children. The wakeup's r->lock
-//               release pairs with the sleeper's cond-check acquire,
-//               so the re-evaluation sees the consistent post-insert
-//               list (the insert precedes the wakeup in the same
-//               proc_table_lock critical section).
-//
-//     (2) Per-child `state` is mutated by the child's own exits under
-//         proc_table_lock + observed via the wakeup→sleep handshake's
-//         release/acquire on `r->lock`. Plain reads in wait_pid_cond
-//         see post-wakeup state because `r->lock`'s acquire pairs with
-//         the child's release on `r->lock` from its wakeup, and the
-//         child's wakeup happens AFTER the child's proc_table_lock-
-//         held state mutation. Acquire/release transitivity covers the
-//         visibility — for any child that has called wakeup, the first
-//         cond check ALSO sees the post-wakeup state (no "stale state"
-//         window in practice; see (3)).
-//
-//     (3) Defense-in-depth: even if (2)'s release/acquire chain didn't
-//         cover the first cond check (e.g., if a child has not yet
-//         called wakeup), the cond loop's structure tolerates a stale
-//         read: if no zombie is visible, sleep; the next wakeup re-
-//         evaluates with fresh visibility via (2). At v1.0 P3-A (2)
-//         actually covers the first call because parent's program-
-//         ordered writes (rfork) are visible to its own thread, and any
-//         child's wakeup release pairs with parent's first r->lock
-//         acquire. (3) is a defensive re-statement, not the primary
-//         correctness mechanism.
-//
-//   When v1.0 lifts to multi-thread Procs (Phase 5+), assumption (1)
-//   weakens for ALL parents (not just kproc): a sibling thread of the
-//   parent could mutate the list concurrently. wait_pid_cond will need
-//   to acquire proc_table_lock then, AND the sleep protocol will need
-//   refactoring to avoid the r->lock → proc_table_lock nesting that
-//   re-introduces the cycle. Documented as a Phase 5+ trip-hazard.
+//   Multi-thread Procs (P6-pouch-threads) are now first-class here: ANY
+//   number of a Proc's Threads may wait_pid_for concurrently — each parks
+//   on its own rendez, the wake fans out to all, and exactly one reaps
+//   each zombie (a loser re-scans and either waits again or returns -1 =
+//   no matching child). This RETIRES the RW-2 2B-F1/F2 `wait_active`
+//   guard that had to refuse the 2nd concurrent waiter (-1) — the very
+//   refusal that broke multi-threaded Go's parallel `go build` (#342).
 //
 // CASCADING-EXITS RACE (R5-H F75):
 //   Without this lock, parent A's `proc_reparent_children` walk could
 //   rewrite child B's `parent` pointer concurrently with B's `exits()`
-//   reading the same field at `wakeup(&p->parent->child_done)`. If B
-//   holds the stale (pre-reparent) pointer in a register and A's
-//   subsequent ZOMBIE + parent-wakeup chain causes A to be reaped +
-//   freed before B's wakeup line fires, B accesses freed-A → UAF on the
-//   Rendez. This lock serializes A's mutation with B's read; the
-//   wakeup-inside-lock structure additionally prevents the
-//   reaped-between-release-and-wakeup variant.
+//   reading the same field at `poll_waiter_list_wake(&p->parent->child_-
+//   waiters)`. If B holds the stale (pre-reparent) pointer in a register
+//   and A's subsequent ZOMBIE + parent-wake chain causes A to be reaped +
+//   freed before B's wake line fires, B accesses freed-A → UAF on the
+//   wait list. This lock serializes A's mutation with B's read; the
+//   wake-inside-lock structure additionally prevents the
+//   reaped-between-release-and-wake variant.
 //
 // SPIN_LOCK_IRQSAVE used uniformly: at v1.0 P3-A, no IRQ handler
 // modifies Proc lineage state, but the discipline future-proofs against
@@ -210,7 +183,7 @@ static void proc_init_fields(struct Proc *p, int pid) {
     p->magic = PROC_MAGIC;
     p->pid   = pid;
     p->state = PROC_STATE_ALIVE;
-    rendez_init(&p->child_done);
+    poll_waiter_list_init(&p->child_waiters);   // #344: multi-waiter child-reap
     // P3-Bcb: pgtable_root + context_id left at 0 by KP_ZERO. proc_alloc
     // (post-phys_init) installs a real pgtable_root and leaves context_id 0
     // for the rolling allocator to stamp at first switch; proc_init (kproc,
@@ -682,9 +655,11 @@ static void proc_unlink_child(struct Proc *parent, struct Proc *child) {
 // generated its exits()-side wakeup against the OLD parent (now dying),
 // so without a fresh wake the adopter could sleep in a blocking
 // wait-any over a reapable zombie until some unrelated child exits
-// (I-9-shaped lost-wake). Wake the adopter's child_done once if any
-// adoptee arrived ZOMBIE. Lock order proc_table_lock -> r->lock is the
-// established exits() discipline; the adopter is alive under the lock
+// (I-9-shaped lost-wake). Wake the adopter's child_waiters once if any
+// adoptee arrived ZOMBIE -- every Thread of the adopter waiting in
+// wait_pid_for re-scans (#344 multi-waiter). Lock order proc_table_lock ->
+// list -> rendez is the established exits() discipline; the adopter is alive
+// under the lock
 // (kproc never dies; a dead init was cleared before this read). No
 // child_exit note is re-posted: the note was delivered to the
 // then-parent at exit time, and wait_pid re-discovers zombies by
@@ -710,7 +685,7 @@ static void proc_reparent_children(struct Proc *p) {
             adopted_zombie = true;
     }
     if (adopted_zombie)
-        wakeup(&adopter->child_done);
+        poll_waiter_list_wake(&adopter->child_waiters);
 }
 
 // =============================================================================
@@ -1559,7 +1534,7 @@ static void thread_clear_child_tid_handoff(struct Thread *t, struct Proc *p) {
 // Internal: common Proc-ZOMBIE transition body shared by exits() and
 // thread_exit_self(). MUST be called UNDER g_proc_table_lock. The Proc
 // must be ALIVE; transitions to ZOMBIE, captures exit_msg/exit_status,
-// re-parents orphan children, wakes parent's child_done.
+// re-parents orphan children, wakes parent's child_waiters (#344).
 //
 // status: 0 = clean exit ("ok"); non-zero = error.
 // msg:    captured by reference; caller-owned (typically a string
@@ -1602,11 +1577,12 @@ static void proc_become_zombie_locked(struct Proc *p, int status, const char *ms
     p->exit_msg    = msg ? msg : "ok";
     p->exit_status = status;
     p->state       = PROC_STATE_ZOMBIE;
-    // Wake parent's child_done UNDER the lock — parent stays alive
-    // through the wakeup (the original P3-A discipline). Lock order:
-    // proc_table_lock → r->lock.
+    // Wake parent's child_waiters UNDER the lock — parent stays alive
+    // through the wake (the original P3-A discipline; #344 multi-waiter:
+    // every Thread of the parent waiting in wait_pid_for is woken to
+    // re-scan). Lock order: proc_table_lock → list → rendez.
     if (p->parent) {
-        wakeup(&p->parent->child_done);
+        poll_waiter_list_wake(&p->parent->child_waiters);
         // P6-pouch-signals-impl (sub-chunk 13a): post the synthetic
         // `child_exit` note to the parent's queue. notes_post takes the
         // queue lock + the poll_list.lock + (after dropping queue lock)
@@ -1868,16 +1844,16 @@ void exits(const char *msg) {
     // proc_reparent_children to rewrite p->parent between our read and
     // use of it for wakeup. Holding proc_table_lock through the wakeup
     // additionally prevents a self-audit-found variant: between lock
-    // release and wakeup, the parent could be reaped + freed by the
-    // grandparent's wait_pid; our wakeup would access freed memory.
-    // Holding the lock through wakeup ensures the parent stays alive.
+    // release and the wake, the parent could be reaped + freed by the
+    // grandparent's wait_pid; our wake would access freed memory.
+    // Holding the lock through the wake ensures the parent stays alive.
     //
-    // Lock order: proc_table_lock → r->lock (the rendez lock acquired
-    // inside wakeup). Sound iff no path holds r->lock and tries to
-    // acquire proc_table_lock — at P3-A, wait_pid_cond is the only
-    // r->lock holder, and it does NOT acquire proc_table_lock (per
-    // header comment, single-thread-Proc invariant + wakeup-acquire
-    // visibility chain).
+    // Lock order: proc_table_lock → list → rendez (poll_waiter_list_wake
+    // takes the list lock then signals each waiter's rendez). Sound iff no
+    // path takes the rendez lock then acquires proc_table_lock — #344: a
+    // wait_pid_for waiter's cond reads only pw->ready under its rendez lock
+    // and touches NO lineage state, so the old r->lock → proc_table_lock
+    // inversion candidate (wait_pid_cond) no longer exists.
     //
     // t->state = THREAD_EXITING also under lock so wait_pid's reap-path
     // observes consistent (p->state == ZOMBIE AND ct->state == EXITING).
@@ -2181,63 +2157,26 @@ void el0_return_die_check(void) {
     }
 }
 
-// cond predicate for wait_pid's sleep: any child in ZOMBIE state, OR
-// the parent has no children at all (-1 return path).
+// child_wait_ready_cond — wait_pid_for's sleep predicate (#344). Returns 1
+// iff the caller's OWN stack `poll_waiter` has its `ready` flag set, i.e. a
+// child of this Proc entered ZOMBIE (or was adopted ZOMBIE) and the wake site
+// (proc_become_zombie_locked / proc_reparent_children) ran poll_waiter_list_-
+// wake on `child_waiters`. Reads ONLY `pw->ready` (a flag) -- it touches NO
+// lineage state, so unlike the retired `wait_pid_cond` it adds nothing to the
+// lock order and cannot invert proc_table_lock (the deadlock the old design
+// fought; see the g_proc_table_lock declaration block).
 //
-// CALLED FROM `sleep` UNDER r->lock. P3-A: deliberately does NOT
-// acquire g_proc_table_lock — that would create a r->lock →
-// g_proc_table_lock nesting that, combined with exits's
-// g_proc_table_lock → r->lock-via-wakeup discipline, deadlocks.
-//
-// Soundness rests on the three invariants documented in detail at
-// `g_proc_table_lock`'s declaration block above. Briefly:
-//
-//   1. Single-writer children list (per non-adopter parent at v1.0).
-//      **ADOPTER EXCEPTION (R6-A F105; widened by 2B-F3)**: the orphan-
-//      adopter's children list (init when up, else kproc) IS multi-
-//      writer (any exiting Proc with orphan children head-inserts here
-//      under proc_table_lock) and since 2B-F3 that is ROUTINE. Sound
-//      because a stale walk only reaches valid unfreed Procs (no
-//      concurrent free of the adopter's children — only the adopter's
-//      own thread reaps them) and a missed zombie is re-discovered at
-//      the next child_done wakeup (exits-side wake, or the adopted-
-//      zombie wake in proc_reparent_children). Full chain at the
-//      g_proc_table_lock declaration block above.
-//
-//   2. Per-child `state` visibility via the wakeup→sleep handshake's
-//      release/acquire on r->lock.
-//
-//   3. Defense-in-depth: stale-read tolerance via the cond loop's
-//      re-evaluation under (2)'s chain on each subsequent wakeup.
-//
-// See g_proc_table_lock's header for the full chain.
-// cond predicate for wait_pid_for's sleep: a child MATCHING want_pid is
-// in ZOMBIE state, OR no matching child exists at all (-1 return path).
-// `want_pid == -1` matches any child (the original wait_pid semantics);
-// `want_pid > 0` selects that one child.
-//
-// CALLED FROM `sleep` UNDER r->lock. P3-A: deliberately does NOT acquire
-// g_proc_table_lock — that would create a r->lock → g_proc_table_lock
-// nesting that, combined with exits's g_proc_table_lock → r->lock-via-
-// wakeup discipline, deadlocks. The pid filter only compares `c->pid`
-// (set once at proc_alloc, never mutated), so it adds nothing to the
-// lock/visibility reasoning — the same three invariants documented at
-// g_proc_table_lock's declaration hold unchanged.
-struct wait_cond_ctx {
-    struct Proc *parent;
-    int          want_pid;
-};
-
-static int wait_pid_cond(void *arg) {
-    struct wait_cond_ctx *ctx = arg;
-    struct Proc *parent = ctx->parent;
-    bool any_match = false;
-    for (struct Proc *c = parent->children; c; c = c->sibling) {
-        if (ctx->want_pid != -1 && c->pid != ctx->want_pid) continue;
-        any_match = true;
-        if (c->state == PROC_STATE_ZOMBIE) return 1;   // matching zombie → wake to reap
-    }
-    return any_match ? 0 : 1;   // no matching child → wake to return -1; else sleep
+// Called under the caller's OWN private rendez lock (sleep's discipline). The
+// producer's set-ready runs under `child_waiters`' list lock, but its
+// intervening wakeup(rendez) takes THIS rendez lock -- so the release/acquire
+// on the rendez lock makes `ready` visible to this cond re-check. That is the
+// poll.c register-then-observe chain verbatim (specs/poll.tla; <thylacine/
+// poll.h>). `ready` is the wake RELAY only; the authoritative reapable-zombie
+// decision is wait_pid_for's re-scan of p->children under proc_table_lock, so
+// a spurious or non-matching wake simply re-scans and re-parks.
+static int child_wait_ready_cond(void *arg) {
+    const struct poll_waiter *pw = (const struct poll_waiter *)arg;
+    return pw->ready ? 1 : 0;
 }
 
 int wait_pid_for(int want_pid, int flags, int *status_out) {
@@ -2250,24 +2189,18 @@ int wait_pid_for(int want_pid, int flags, int *status_out) {
 
     const bool nohang = (flags & WAIT_WNOHANG) != 0;
 
-    // RW-2 2B-F1/F2: serialize wait_pid_for per-Proc -- at most ONE Thread of a
-    // Proc may be in the reap-or-sleep critical section at a time. `p->child_-
-    // done` is a single-waiter Rendez (a 2nd concurrent waiter trips `sleep`'s
-    // single-waiter assert -> kernel extinction, F1), and `wait_pid_cond` walks
-    // `p->children` locklessly (under r->lock, never g_proc_table_lock -- the
-    // P3-A lock-order choice), racing a peer's `proc_unlink_child`+`proc_free`
-    // reap -> UAF (F2). Both rest on a single-writer/single-waiter premise the
-    // P6 multi-thread-Proc lift falsified. The exchange refuses a genuinely-
-    // CONCURRENT 2nd caller (returns -1) -- NOT every multi-thread Proc: a
-    // single-thread Proc, AND a legitimately-multi-thread Proc with only one
-    // waiting Thread (kproc has many kthreads but only the boot Thread reaps;
-    // a server with one designated reaper), see wait_active == 0 and proceed.
-    // The flag is contended ONLY by two Threads of the SAME Proc both inside
-    // wait_pid_for. Cleared at the single `out:` exit. (Promoting `child_done`
-    // to multi-waiter + a proc_table_lock-protected cond -- the tracked v1.x
-    // completeness -- lifts this from "refuse the 2nd" to "all may wait".)
-    if (__atomic_exchange_n(&p->wait_active, 1u, __ATOMIC_ACQUIRE) != 0u)
-        return -1;
+    // #344 multi-waiter wait. THIS Thread's OWN private rendez + stack
+    // poll_waiter. ANY number of a Proc's Threads may be in wait_pid_for
+    // concurrently -- each registers its own waiter on `child_waiters` and
+    // parks on its own rendez, the wake fans out to all, exactly one reaps each
+    // zombie. This RETIRES the RW-2 2B-F1/F2 `wait_active` guard that refused a
+    // 2nd concurrent waiter (-1) -- the refusal that broke multi-threaded Go's
+    // parallel `go build` (#342). rendez_init once; poll_waiter_init is re-done
+    // per park to clear `ready` (the wake-RELAY flag) before each sleep.
+    struct Rendez self_rendez;
+    rendez_init(&self_rendez);
+    struct poll_waiter pw;
+    poll_waiter_init(&pw, &self_rendez);
 
     int ret;
     for (;;) {
@@ -2373,34 +2306,51 @@ int wait_pid_for(int want_pid, int flags, int *status_out) {
             goto out;
         }
 
-        // A matching child is alive but not yet a zombie. Release the lock.
-        spin_unlock_irqrestore(&g_proc_table_lock, s);
-
+        // A matching child is alive but not yet a zombie.
         if (nohang) {
-            ret = 0;         // WAIT_WNOHANG: report "not ready" without blocking.
+            // WAIT_WNOHANG: report "not ready" without blocking.
+            spin_unlock_irqrestore(&g_proc_table_lock, s);
+            ret = 0;
             goto out;
         }
 
-        // Sleep on child_done; exits() in a matching child wakes us. The
-        // cond re-evaluates the SAME pid filter under r->lock; sleep is
-        // atomic with the cond check (see scheduler.tla NoMissedWakeup
-        // proof). `ctx` is stack-local to this frame, which outlives the
-        // sleep call.
-        struct wait_cond_ctx ctx = { .parent = p, .want_pid = want_pid };
+        // #344 register-then-observe (the poll.c discipline; I-9). Install
+        // THIS Thread's stack waiter on child_waiters BEFORE releasing
+        // g_proc_table_lock -- atomic with the no-zombie scan above. A child
+        // that becomes ZOMBIE *after* our release must take g_proc_table_lock
+        // (after us), so it finds this registered waiter and sets pw->ready +
+        // wakes; a child already ZOMBIE was seen by the scan. So no death-wake
+        // is lost. The previous iteration's unregister (or the pre-loop init)
+        // left pw->list == NULL, so this register is clean (no double-register);
+        // the re-init clears `ready` so a stale wake from a prior iteration
+        // cannot make this park spin.
+        poll_waiter_init(&pw, &self_rendez);
+        poll_waiter_list_register(&p->child_waiters, &pw);
+        spin_unlock_irqrestore(&g_proc_table_lock, s);
+
+        // Park on our OWN rendez; child_wait_ready_cond reads ONLY pw->ready.
+        // On any wake we unregister + loop to re-scan under the lock -- the
+        // re-scan is the authoritative readiness check, so a spurious or
+        // non-matching wake simply re-parks.
         // #811 (ARCH §8.8.1): a death-interrupted sleep means THIS Proc is
         // group-terminating (a peer / kill flagged it while we waited on a
-        // child). Return so the waiting Thread unwinds to its EL0-return
-        // die-check; do NOT loop (re-sleep would re-INTR = livelock).
-        if (sleep(&p->child_done, wait_pid_cond, &ctx) == SLEEP_INTR) {
+        // child). Unregister, then return so the waiting Thread unwinds to its
+        // EL0-return die-check; do NOT loop (re-sleep would re-INTR = livelock).
+        int sl = sleep(&self_rendez, child_wait_ready_cond, &pw);
+        poll_waiter_list_unregister(&pw);
+        if (sl == SLEEP_INTR) {
             ret = -1;
             goto out;
         }
     }
 out:
-    // RW-2 2B-F1/F2: release the per-Proc wait serialization. Reached on EVERY
-    // non-extinction exit (the zombie-with-bad-threads paths are noreturn). The
-    // RELEASE pairs with the next claimant's ACQUIRE exchange.
-    __atomic_store_n(&p->wait_active, 0u, __ATOMIC_RELEASE);
+    // #344 defensive unregister (poll.tla NoStaleHook). Every out: path leaves
+    // pw->list == NULL today (the no-match / zombie-reap / nohang paths never
+    // registered; the SLEEP_INTR path unregistered above), so this is a no-op
+    // -- but it guarantees no stack waiter outlives this frame even if a future
+    // edit adds a goto from within the registered window. pw is always
+    // initialized (poll_waiter_init before the loop), so this is safe.
+    poll_waiter_list_unregister(&pw);
     return ret;
 }
 

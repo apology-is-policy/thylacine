@@ -196,8 +196,8 @@ void test_proc_rfork_stress_1000(void) {
 //
 // Exercises three-level lineage (boot → child → grandchild) so the
 // proc-table-lock paths in proc_link_child / proc_unlink_child /
-// proc_reparent_children / wait_pid_cond are all exercised in nested
-// configurations.
+// proc_reparent_children / wait_pid_for's locked re-scan are all exercised in
+// nested configurations.
 //
 // At v1.0 P3-A this is also a regression-protector against future
 // changes that bypass the locking discipline. The tests don't
@@ -406,7 +406,7 @@ static void oti_init_sim_entry(void *arg) {
     while (__atomic_load_n(&g_oti_init_go, __ATOMIC_ACQUIRE) == 0u)
         sched();
     // Sole child by now is the adopted orphan (zombie or about to be:
-    // its exits wakes our child_done since we became its parent).
+    // its exits wakes our child_waiters since we became its parent).
     int st = -1;
     int r = wait_pid(&st);
     __atomic_store_n(&g_oti_init_reaped, (u32)(r > 0 ? r : 0),
@@ -516,7 +516,7 @@ fail:
 // =============================================================================
 // proc.orphan_reparent_zombie_to_init
 //   The adopted-ALREADY-ZOMBIE leg of proc_reparent_children (the
-//   `adopted_zombie` branch + its child_done wakeup), which
+//   `adopted_zombie` branch + its child_waiters wake), which
 //   orphan_reparent_to_init does NOT exercise -- that test adopts the
 //   grandchild while ALIVE, so the branch is never taken. Here B exits and
 //   ZOMBIES *before* its parent A exits, so A's reparent moves a ZOMBIE to
@@ -528,7 +528,7 @@ fail:
 //   Coverage boundary: this does NOT place init BLOCKED in wait_pid at the
 //   instant of adoption (where the wakeup is what releases it) -- that needs
 //   init to already hold an alive child. A lost wake there surfaces as a
-//   reap-hang caught by the boot timeout; the wakeup is the same child_done
+//   reap-hang caught by the boot timeout; the wake is the same child_waiters
 //   primitive every exits() uses (no-lost-wake argument at the g_proc_table_-
 //   lock header). Left as a reasoned residual.
 // =============================================================================

@@ -173,8 +173,9 @@ void test_virtio_blk_probe_rfork_with_caps(void) {
                               CAP_HW_CREATE);
     TEST_ASSERT(pid > 0, "rfork_with_caps failed for /virtio-blk-probe");
 
-    // wait_pid works directly here even when both parent (sleeping on
-    // child_done) and child (sleeping on the hardware IRQ Rendez) are SLEEPING
+    // wait_pid works directly here even when both parent (sleeping on its
+    // child_waiters reap-wait) and child (sleeping on the hardware IRQ Rendez)
+    // are SLEEPING
     // simultaneously. cpu0 has a CPU-pinned in-tree BAND_IDLE thread
     // (bootcpu_idle, ARCH 8.4.2), so pick_next always finds something to switch
     // to: the scheduler switches to bootcpu_idle's WFI loop; the device IRQ
