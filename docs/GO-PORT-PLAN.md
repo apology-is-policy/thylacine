@@ -357,6 +357,25 @@ audit** (scripture before code). Rejected: wiring the reserved `_pad_envp` slot 
 `SYS_SPAWN_FULL_ARGV` (an ABI change; less Plan-9-idiomatic; needs a non-plan9 Go
 env path).
 
+**SCRIPTURE LANDED (Stage 4a, 2026-06-23): ARCH §9.7** (the per-Proc Env group +
+the `/env` `devenv` Dev) + the §25.4 audit-trigger row + the CLAUDE.md mirror. As
+committed: a ref-counted per-Proc `Env` group (`kernel/env.{c,h}`,
+`struct Proc.env`), deep-**copied** on spawn (`env_clone_into` in `rfork_internal`,
+the Plan 9 default-copy-on-`rfork` like `territory_clone`; the reserved
+`RFENVG`=0x100 stays deferred), surfaced by `devenv` (dc='E', a synthetic dir Dev
+mounted by the `/srv`-idiom; per-Proc *content* behind a global mount = I-1). Two
+research findings folded in: **(1)** entries enumerate as **standard 9P2000.L
+`Treaddir` dirents** (the tree-wide format), NOT Plan 9's legacy stat-format
+directory read — so the fork gets a thin `runtime/env_thylacine.go` (`goenvs`
+reads `/env` via readdir; structurally the plan9 `goenvs`, dirent-parse adapted),
+"almost verbatim" holding for the *shape*; **(2)** inheritance rides the kernel
+clone (a `go build` sub-process inherits `$GOROOT` etc. exactly as it inherits the
+namespace) — the `os/exec` explicit-`Cmd.Env` *override* is a Go-side seam, never a
+kernel ABI change. Composes I-1 + I-32; no new §28 invariant; prose-validated (the
+`env->lock` is the standard per-Proc-group pattern, Territory/allowance). The impl
++ the go-fork `goenvs` + the boot env-var setup + the focused audit are Stage 4a's
+kernel / go / bootenv / audit sub-chunks.
+
 **Decision 2 — GOROOT shipping: baked by default (~150 MB trimmed).** Bake the
 toolchain binaries (~60 MB) + the stdlib *source* (~90 MB after stripping
 `_test.go`/`testdata`/`src/cmd`) into the default pool image, growing `pool.img`
