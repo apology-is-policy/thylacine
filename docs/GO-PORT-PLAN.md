@@ -310,9 +310,24 @@ Self-hosting is a staged bootstrap; you never build Go *on* Thylacine first.
   rebuilds Go from source (bootstrap-with-a-prior-Go; pin the bootstrap version).
   Optionally upstream `GOOS=thylacine` (`plan9` is upstream — precedent + heritage
   make it realistic).
+- **Stage 8 — Nora as a Go IDE + the cross-boundary debugger.** The headline: a
+  fully-fledged Go IDE shipped by default — gopls (editing intelligence) + a
+  capability-scoped, namespace-native, **visual debugger** in the Kaua TUI, with
+  unified **user->kernel stacks**, variable/frame inspection, the namespace/
+  resource + scheduler superpowers, and an interactive run-pane. Rides a new
+  kernel `/proc` debug-fs (arm64 HW breakpoints, no software `BRK` — preserves
+  W^X + the REVENANT Image cache) + a `dlv` `proc_thylacine` backend, driven over
+  DAP/LSP. **Ratified + charter'd 2026-06-23: `docs/GO-IDE-DESIGN.md`** (NOVEL
+  #13). Built AFTER the toolchain (4-6).
+- **Stage 9 (deferred moonshot) — OS-native time-travel.** Deterministic
+  record-replay (we own the scheduler + syscalls + CSPRNG + clock) -> a true
+  reverse-step in the Go debugger. A research-grade arc of its own; deferred per
+  the 2026-06-23 vote, earned after Stage 8 is solid. GO-IDE-DESIGN section 9.
 
 Each stage is a clean, demoable checkpoint; Stages 0-3 are the runtime port,
-Stages 4-6 are the on-device toolchain (the payoff), Stage 7 is purity.
+Stages 4-6 are the on-device toolchain (the payoff), Stage 7 is toolchain purity,
+Stage 8 is the IDE + cross-boundary debugger (the headline), Stage 9 is the
+time-travel moonshot.
 
 #### 5.0.1 The on-device-toolchain design (locked 2026-06-23, user-voted)
 
