@@ -235,6 +235,11 @@ pub const T_SYS_CLOCK_SETTIME: u64    = 79;     // net-7a: step CLOCK_REALTIME (
 // 80 reserved for SYS_FD_DEVCLASS (Menagerie; not yet built).
 pub const T_SYS_WEFT_SHARE: u64       = 81;     // Weft-6a-2: register a per-flow ring -> share_id
 pub const T_SYS_WEFT_MAP: u64         = 82;     // Weft-6a-2: map a /net data fd's ring -> ring_va
+// Overcommit memory model (#321): reserve cheaply, commit on first touch,
+// release via decommit. SYS_BURROW_ATTACH (37) stays the eager path for
+// kernel-internal copy-target callers; the native heap reserves lazily.
+pub const T_SYS_BURROW_ATTACH_LAZY: u64 = 83;   // reserve demand-zero VA, no pages until touched
+pub const T_SYS_BURROW_DECOMMIT: u64    = 84;   // drop resident pages (madvise DONTNEED analog)
 // SYS_CLOCK_GETTIME clock ids (match Linux clockid_t).
 pub const T_CLOCK_REALTIME: u64       = 0;
 pub const T_CLOCK_MONOTONIC: u64      = 1;
@@ -1739,6 +1744,49 @@ pub unsafe fn t_burrow_detach(vaddr: u64, length: u64) -> i64 {
         inlateout("x0") x0,
         in("x1") length,
         in("x8") T_SYS_BURROW_DETACH,
+        options(nostack)
+    );
+    x0
+}
+
+// t_burrow_attach_lazy — like t_burrow_attach, but the region is RESERVED,
+// not committed: no physical pages are allocated until each page is first
+// touched (the Linux overcommit contract; ARCHITECTURE.md §6.5). The kernel
+// zero-fills + installs RW/XN on the first fault, charging the page to the
+// Proc then (so RSS == what was touched, not what was reserved). Returns the
+// page-aligned base user-VA on success, -1 on:
+//   - length == 0 or length > BURROW_RESERVE_MAX (= 1 GiB)
+//   - no free gap of round_up(length) in the burrow window
+//   - VMA-slab cap (PROC_VMA_MAX) or burrow OOM
+//
+// This is the substrate the native global heap reserves on (alloc.rs), so a
+// program that allocates little commits little.
+#[inline(always)]
+pub unsafe fn t_burrow_attach_lazy(length: u64) -> i64 {
+    let mut x0: i64 = length as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x8") T_SYS_BURROW_ATTACH_LAZY,
+        options(nostack)
+    );
+    x0
+}
+
+// t_burrow_decommit — drop the resident pages of [vaddr, vaddr + length) of a
+// lazily-attached region (the madvise(MADV_DONTNEED) analog): clear the PTEs,
+// free the pages, and uncharge them; the VMA reservation stays, so a later
+// touch re-faults a fresh zero page. Returns 0 on success, -1 on:
+//   - the range is not within one BURROW_TYPE_ANON_LAZY VMA
+//   - vaddr not page-aligned or length == 0 / > BURROW_RESERVE_MAX
+#[inline(always)]
+pub unsafe fn t_burrow_decommit(vaddr: u64, length: u64) -> i64 {
+    let mut x0: i64 = vaddr as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") length,
+        in("x8") T_SYS_BURROW_DECOMMIT,
         options(nostack)
     );
     x0

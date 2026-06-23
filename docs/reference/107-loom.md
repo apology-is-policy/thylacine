@@ -683,6 +683,18 @@ substrate + decouples the buffer's lifetime from the user mapping: a later
 alive (the #847 dual-refcount), so a registered buffer stays valid for the ring's
 life.
 
+The `BURROW_TYPE_ANON` (eager) requirement is load-bearing, not incidental: the
+single-base-kva resolution assumes one physically-contiguous chunk. The
+overcommit lazy heap (`BURROW_TYPE_ANON_LAZY`, doc 127 — pages allocated
+per-fault, scattered in the sparse `filepages`, no single `->pages`) does NOT
+satisfy it and is rejected. So a registered buffer is allocated eagerly +
+explicitly: native code uses **`libthyla_rs::loom::RegisteredBuffer`** (an eager
+`SYS_BURROW_ATTACH` region), the way a DMA buffer is special memory — a plain
+`Vec`/`Box` from the lazy general heap is not a valid registered buffer. (A
+Linux-io_uring-style scatter-gather registration — pin an ordinary heap buffer
+via a bvec — is the v1.x upgrade; it needs the chunk-walking kva path the
+Loom-6c-audit F3 anchor flagged.)
+
 **Dispatch** (`loom_submit_rw`). A `LOOM_OP_READ`/`WRITE` SQE names a registered
 file fid (`handle_idx`), a registered buffer (`buf_idx_or_off`), a file offset
 (`offset`), a byte count (`len`), and a buffer sub-offset (`_resv1[0]`,

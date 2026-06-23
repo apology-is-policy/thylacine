@@ -668,7 +668,7 @@ build_sysroot() {
                     'SYS_rt_sigaction 0xFFFF' 'SYS_rt_sigprocmask 0xFFFF' \
                     'SYS_tkill 0xFFFF' 'SYS_kill 0xFFFF' \
                     'SYS_rt_sigreturn 0xFFFF' \
-                    'SYS_mmap 37' 'SYS_munmap 38' \
+                    'SYS_mmap 83' 'SYS_munmap 38' \
                     'SYS_srv_accept 27' 'SYS_srv_peer 28' \
                     'SYS_mmio_create 2' 'SYS_irq_create 3' 'SYS_irq_wait 4' \
                     'SYS_mmio_map 5' 'SYS_dma_create 6' 'SYS_dma_map 7' \

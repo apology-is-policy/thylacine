@@ -37,7 +37,6 @@
 
 extern crate alloc;
 
-use alloc::vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 use core::time::Duration;
 
@@ -47,7 +46,7 @@ static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::Th
 use libthyla_rs::env;
 use libthyla_rs::fs::File;
 use libthyla_rs::io::{Read, Write};
-use libthyla_rs::loom::{BufReg, Ring, Sqe};
+use libthyla_rs::loom::{RegisteredBuffer, Ring, Sqe};
 use libthyla_rs::net::{echo_serve, Ipv4Addr, SocketAddrV4, TcpListener, TcpStream, WeftFlow};
 use libthyla_rs::thread;
 use libthyla_rs::{t_burrow_attach, t_exits, t_putstr, t_weft_map};
@@ -740,12 +739,14 @@ fn probe() -> i64 {
         Ok(r) => r,
         Err(_) => fail("net-echo: FAIL -- Ring::setup\n"),
     };
-    let mut buf = vec![0u8; 64];
-    let breg = BufReg {
-        va: buf.as_mut_ptr() as u64,
-        len: buf.len() as u64,
+    // Eager contiguous buffer (RegisteredBuffer -> SYS_BURROW_ATTACH); the lazy
+    // general heap is non-contiguous and the kernel rejects it for registration.
+    // Held to scope end so the kernel's pin always has a live VMA.
+    let buf = match RegisteredBuffer::new(64) {
+        Ok(b) => b,
+        Err(_) => fail("net-echo: FAIL -- RegisteredBuffer::new\n"),
     };
-    if ring.register_buffers(&[breg]).is_err() {
+    if ring.register_buffers(&[buf.buf_reg()]).is_err() {
         fail("net-echo: FAIL -- register_buffers\n");
     }
     if ring.register_handles(&[local.as_raw_fd()]).is_err() {

@@ -213,6 +213,21 @@ Full suite: **992/992 PASS** (986 + these 6), 0 EXTINCTION, boot OK.
   extinction, but real kernel-memory pressure. The v1.x fix is a **charged
   radix/sparse metadata structure** (the Linux page-table-radix shape), which
   also lifts the reservation cap. (Audit F1's deeper implication; tracked.)
+- **Loom registered buffers stay eager — the lazy heap is not a valid one.** A
+  `LOOM_REGISTER_BUFFERS` buffer is resolved to a single contiguous kernel-VA
+  (`loom_resolve_buf` = `pa_to_kva(page_to_pa(burrow->pages)) + boff`), which is
+  valid only for an eager `BURROW_TYPE_ANON` Burrow (one `alloc_pages` chunk). A
+  lazy region's pages are allocated per-fault and scattered (the sparse
+  `filepages`, no single `->pages`), so the kernel **rejects** it — correctly:
+  widening the gate would compute a wrong/OOB kva (the Loom-6c-audit F3 hazard).
+  So a registered Loom buffer is allocated eagerly + explicitly via
+  `libthyla_rs::loom::RegisteredBuffer` (an eager `SYS_BURROW_ATTACH` region),
+  the way a DMA buffer is special memory — the lazy general heap (`vec!`/`Box`)
+  is **not** a valid registered buffer. (#321 routed the four native Loom-buffer
+  probes — loom-smoke/stress/bench + net-echo — onto `RegisteredBuffer`; netd's
+  Weft ring was already eager.) The Linux-io_uring scatter-gather model — register
+  an ordinary heap buffer, the kernel pins it via a bvec — is the **v1.x Loom
+  upgrade**: it needs the chunk-walking kva path the F3 anchor flagged.
 
 ## Spec cross-reference
 
@@ -228,7 +243,13 @@ I-32 (the resource floor + the new VMA axis), I-30-class submit-time discipline
 - #318 scripture (ARCH §6.5 + §28 I-32 + §25.4 + CLAUDE.md mirror).
 - #319 (this) — the kernel mechanism + the 6 tests + this doc.
 - #320 — the focused Opus-4.8-max audit + the SMP gate.
-- #321 — the userspace wiring (libthyla-rs / pouch / Go `sysReserve`=LAZY,
-  `sysUnused`=DECOMMIT) + the Go **stock `heapAddrBits=48`** proof (a 512-MiB
-  page-summary reserve commits nothing until touched — the proof the model
-  needs no per-program tuning).
+- #321 (landed) — the userspace wiring: libthyla-rs `sysAlloc` (the native global
+  heap) + the pouch `mmap` boundary-line (`__NR_mmap` 37→83) + the Go fork
+  `sysReserve`=LAZY / `sysUnused`=DECOMMIT all reserve lazily; the Go fork's
+  `malloc.go` reverted to **stock `heapAddrBits=48`**, and booting that go-hello
+  (a ~512-MiB page-summary reserve that commits nothing until touched) is the
+  proof the model needs no per-program tuning. Plus `RegisteredBuffer` (the eager
+  carve-out for Loom registered buffers, above). Eager `SYS_BURROW_ATTACH` (37)
+  stays for the kernel-internal copy-target callers (exec data, DMA, Weft rings)
+  + the native `RegisteredBuffer`. Verified: 993/993, boot OK, go-hello PASS, the
+  4 Loom probes + net-echo's Weft/TLS E2E PASS, SMP gate 0 corruption.

@@ -32,13 +32,12 @@
 
 extern crate alloc;
 
-use alloc::vec;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
-use libthyla_rs::loom::{BufReg, Ring, Sqe, ENTER_GETEVENTS, ENTER_NONBLOCK};
+use libthyla_rs::loom::{RegisteredBuffer, Ring, Sqe, ENTER_GETEVENTS, ENTER_NONBLOCK};
 use libthyla_rs::thread;
 use libthyla_rs::{
     t_burrow_attach, t_exits, t_fsync, t_putstr, t_walk_create, t_walk_open, t_write,
@@ -204,12 +203,14 @@ pub extern "C" fn rs_main() -> i64 {
     if ring.register_handles(&[rw_fd as i32]).is_err() {
         fail("loom-stress: FAIL -- register_handles\n");
     }
-    let mut buf = vec![0u8; 4096];
-    let breg = BufReg {
-        va: buf.as_mut_ptr() as u64,
-        len: buf.len() as u64,
+    // The registered buffer is eager + contiguous (RegisteredBuffer ->
+    // SYS_BURROW_ATTACH); the lazy general heap is non-contiguous and the
+    // kernel rejects it for registration. See libthyla_rs::loom::RegisteredBuffer.
+    let mut buf = match RegisteredBuffer::new(4096) {
+        Ok(b) => b,
+        Err(_) => fail("loom-stress: FAIL -- RegisteredBuffer::new\n"),
     };
-    if ring.register_buffers(&[breg]).is_err() {
+    if ring.register_buffers(&[buf.buf_reg()]).is_err() {
         fail("loom-stress: FAIL -- register_buffers\n");
     }
 
@@ -220,7 +221,8 @@ pub extern "C" fn rs_main() -> i64 {
         Err(_) => fail("loom-stress: FAIL -- phase1 READ submit\n"),
     };
     match rc.ok() {
-        Ok(got) if got as usize >= PROBE_DATA.len() && buf[..PROBE_DATA.len()] == *PROBE_DATA => {}
+        Ok(got) if got as usize >= PROBE_DATA.len()
+            && buf.as_mut_slice()[..PROBE_DATA.len()] == *PROBE_DATA => {}
         _ => fail("loom-stress: FAIL -- phase1 READ bytes wrong\n"),
     }
     // A positive FSYNC on the writable handle too (the op the stress hammers).

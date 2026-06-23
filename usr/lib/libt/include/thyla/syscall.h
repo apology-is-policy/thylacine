@@ -69,10 +69,12 @@ enum {
     T_SYS_CHROOT      = 35,      // P5-stratumd-stub-bringup-e2: stamp territory root_spoor
     T_SYS_SET_TID_ADDRESS = 36,  // P6-pouch-kernel-auxv: return the calling thread's tid
     // 37 + 38 — SYS_BURROW_ATTACH / SYS_BURROW_DETACH (P6-pouch-mem-a).
-    // No libt C-side wrappers yet — pouch's mmap/munmap reaches the
-    // syscalls directly through the musl seam (0003-pouch-mman). Native
-    // C consumers will land a t_burrow_attach / t_burrow_detach pair
-    // when the first one materialises.
+    // 83 + 84 — SYS_BURROW_ATTACH_LAZY / SYS_BURROW_DECOMMIT (#321, the
+    // overcommit model): reserve demand-zero VA + madvise(DONTNEED).
+    // No libt C-side wrappers yet — pouch's mmap reaches the lazy attach
+    // (83) directly through the musl seam (0003-pouch-mman); the native
+    // Rust heap reaches it through libthyla-rs::t_burrow_attach_lazy.
+    // Native C consumers will land a wrapper pair when one materialises.
     T_SYS_TORPOR_WAIT = 39,      // P6-pouch-wait-addr: wait on a user-VA word
     T_SYS_TORPOR_WAKE = 40,      // P6-pouch-wait-addr: wake waiters on a user-VA word
     T_SYS_THREAD_SPAWN = 41,     // P6-pouch-threads: spawn an EL0 Thread in the caller's Proc

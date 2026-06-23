@@ -31,12 +31,10 @@
 
 extern crate alloc;
 
-use alloc::vec;
-
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
-use libthyla_rs::loom::{BufReg, Ring, Sqe, ENTER_GETEVENTS};
+use libthyla_rs::loom::{RegisteredBuffer, Ring, Sqe, ENTER_GETEVENTS};
 use libthyla_rs::{
     t_exits, t_fsync, t_putstr, t_puts, t_walk_create, t_walk_open, t_write, T_ORDWR,
     T_WALK_OPEN_FROM_ROOT,
@@ -176,9 +174,14 @@ pub extern "C" fn rs_main() -> i64 {
     if ring.register_handles(&[temp as i32]).is_err() {
         fail("loom-bench: FAIL -- register_handles\n");
     }
-    let mut rect = vec![0u8; 64];
-    rect[..seed.len()].copy_from_slice(seed);
-    if ring.register_buffers(&[BufReg { va: rect.as_mut_ptr() as u64, len: rect.len() as u64 }]).is_err() {
+    // Eager contiguous buffer (RegisteredBuffer -> SYS_BURROW_ATTACH); the lazy
+    // general heap is non-contiguous and the kernel rejects it for registration.
+    let mut rect = match RegisteredBuffer::new(64) {
+        Ok(b) => b,
+        Err(_) => fail("loom-bench: FAIL -- RegisteredBuffer::new\n"),
+    };
+    rect.as_mut_slice()[..seed.len()].copy_from_slice(seed);
+    if ring.register_buffers(&[rect.buf_reg()]).is_err() {
         fail("loom-bench: FAIL -- register_buffers\n");
     }
 

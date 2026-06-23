@@ -17,7 +17,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::err::{Error, Result};
 use crate::handle::{Handle, Rights};
-use crate::{t_burrow_detach, t_loom_enter, t_loom_register, t_loom_setup};
+use crate::{t_burrow_attach, t_burrow_detach, t_loom_enter, t_loom_register, t_loom_setup};
 
 // ---------------------------------------------------------------------------
 // ABI constants -- mirror kernel/include/thylacine/loom.h. Kept in lockstep;
@@ -145,6 +145,72 @@ pub struct BufReg {
 const _: () = assert!(core::mem::size_of::<BufReg>() == 16);
 const _: () = assert!(core::mem::offset_of!(BufReg, va) == 0);
 const _: () = assert!(core::mem::offset_of!(BufReg, len) == 8);
+
+/// An eager, physically-contiguous, page-aligned buffer for Loom buffer
+/// registration (`Ring::register_buffers`).
+///
+/// A registered Loom buffer needs a single physically-contiguous backing: the
+/// kernel resolves the whole slice to one base kernel-VA (`loom_resolve_buf`),
+/// valid only for an eager `SYS_BURROW_ATTACH` region (one `alloc_pages`
+/// chunk). The lazy general heap (`ThylaAlloc` -> `SYS_BURROW_ATTACH_LAZY`,
+/// demand-zero pages allocated per-fault and scattered) is NOT contiguous and
+/// the kernel rejects it. So -- exactly as a DMA buffer is special memory,
+/// distinct from `Vec`/`Box` -- a Loom registered buffer is allocated here,
+/// eagerly and explicitly. Drop detaches it; keep it alive while the ring's
+/// registration references it.
+pub struct RegisteredBuffer {
+    va: u64,
+    len: usize,
+}
+
+impl RegisteredBuffer {
+    /// Attach `len` bytes of eager, zeroed, contiguous, RW memory (the kernel
+    /// rounds `len` up to a page). `Err(InvalidArgument)` on `len == 0`, a
+    /// `len` over `BURROW_ATTACH_MAX` (256 MiB), or attach failure.
+    pub fn new(len: usize) -> Result<RegisteredBuffer> {
+        if len == 0 {
+            return Err(Error::InvalidArgument);
+        }
+        let rc = unsafe { t_burrow_attach(len as u64) };
+        if rc <= 0 {
+            return Err(Error::InvalidArgument);
+        }
+        Ok(RegisteredBuffer { va: rc as u64, len })
+    }
+
+    /// The buffer as a mutable byte slice (the registration target the kernel
+    /// reads from / writes into).
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        // SAFETY: `va` is a live, RW, `len`-byte region owned by this struct.
+        unsafe { core::slice::from_raw_parts_mut(self.va as *mut u8, self.len) }
+    }
+
+    /// The `BufReg` descriptor to hand to `Ring::register_buffers`.
+    pub fn buf_reg(&self) -> BufReg {
+        BufReg { va: self.va, len: self.len as u64 }
+    }
+
+    /// The buffer length in bytes.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether the buffer is empty (always false: `new` rejects `len == 0`).
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl Drop for RegisteredBuffer {
+    fn drop(&mut self) {
+        // SAFETY: detach the exact region `new` attached. The kernel holds its
+        // own pin on the backing Burrow while a ring registration references
+        // it, so detaching here frees only this Proc's VMA.
+        unsafe {
+            let _ = t_burrow_detach(self.va, self.len as u64);
+        }
+    }
+}
 
 /// `SYS_LOOM_SETUP` in/out struct (`struct loom_params`, 88 bytes). `flags` is the
 /// only IN field; the kernel fills the rest with the mapped ring geometry.

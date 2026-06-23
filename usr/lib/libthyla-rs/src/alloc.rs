@@ -1,7 +1,7 @@
 // libthyla-rs::alloc — Thylacine native heap allocator.
 //
 // Provides `ThylaAlloc`, a `core::alloc::GlobalAlloc` implementation
-// backed by a single SYS_BURROW_ATTACH region subdivided by
+// backed by a single SYS_BURROW_ATTACH_LAZY region subdivided by
 // `linked_list_allocator`. Binaries opt in by declaring:
 //
 //     #[global_allocator]
@@ -11,9 +11,10 @@
 //
 // After that, the `alloc` crate (Box, Vec, String, BTreeMap, ...) is
 // usable throughout the binary. Lazy init: the first allocation
-// triggers one SYS_BURROW_ATTACH; subsequent allocations subdivide
-// that region locally. Binaries that never call alloc never pay the
-// syscall.
+// triggers one SYS_BURROW_ATTACH_LAZY (which reserves but commits no
+// physical pages); subsequent allocations subdivide that region
+// locally, faulting in pages as blocks are written. Binaries that
+// never call alloc never pay the syscall.
 //
 // Foundation chunk: U-2b per docs/UTOPIA-SHELL-DESIGN.md §15.
 //
@@ -30,9 +31,12 @@
 // SIZING:
 //   - INITIAL_HEAP_SIZE = 4 MiB. Fits the shell + a few coreutils +
 //     parser ASTs + tab-completion caches comfortably; far below
-//     BURROW_ATTACH_MAX (= 256 MiB) so the syscall never bumps the
-//     upper bound. Growable heap is a v1.x consideration; v1 binaries
-//     that need more allocate explicit Burrows themselves.
+//     BURROW_RESERVE_MAX (= 1 GiB) so the lazy attach never bumps the
+//     upper bound. Because the region is reserved (not committed), the
+//     4 MiB costs nothing until blocks are written -- a binary that
+//     allocates a few KiB has a few KiB of RSS. Growable heap is a v1.x
+//     consideration; v1 binaries that need more allocate explicit
+//     Burrows themselves.
 //
 // THREAD SAFETY:
 //   - `LockedHeap` from `linked_list_allocator` uses an internal
@@ -47,8 +51,8 @@
 //     bounds.
 //
 // FAULT POLICY:
-//   - If the initial SYS_BURROW_ATTACH fails (kernel OOM or invalid
-//     request), the program calls t_exits(1). LockedHeap would
+//   - If the initial SYS_BURROW_ATTACH_LAZY fails (no VA gap, VMA cap,
+//     or invalid request), the program calls t_exits(1). LockedHeap would
 //     otherwise return null pointers, which alloc-aware code mostly
 //     treats as "abort with OOM" via the global alloc_error_handler
 //     — but the panic message would be opaque. Failing fast at init
@@ -58,7 +62,7 @@
 //     panics to t_exits(1). So an OOM during normal operation
 //     terminates the program with exit status 1.
 
-use crate::{t_burrow_attach, t_exits};
+use crate::{t_burrow_attach_lazy, t_exits};
 use core::alloc::{GlobalAlloc, Layout};
 use core::sync::atomic::{AtomicU8, Ordering};
 
@@ -136,10 +140,14 @@ unsafe fn ensure_initialized() {
         Ordering::Relaxed,
     ) {
         Ok(_) => {
-            // Won the race. Perform the one-time init.
-            let rc = t_burrow_attach(INITIAL_HEAP_SIZE as u64);
+            // Won the race. Perform the one-time init. The heap region is
+            // RESERVED lazily (overcommit): the 4 MiB span costs nothing until
+            // the linked-list allocator hands out blocks that get written,
+            // which fault pages in one at a time. A binary that allocates
+            // little commits little.
+            let rc = t_burrow_attach_lazy(INITIAL_HEAP_SIZE as u64);
             if rc <= 0 {
-                // SYS_BURROW_ATTACH returns a positive VA on success
+                // SYS_BURROW_ATTACH_LAZY returns a positive VA on success
                 // and -1 on failure. Treat both 0 and negative as
                 // failure (0 would be the null VA, which the kernel
                 // never returns from this syscall but we defend

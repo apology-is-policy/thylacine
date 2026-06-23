@@ -189,6 +189,19 @@ commits sub-ranges as the heap grows. Eager commit breaks this — Go would comm
 Stack growth (Go's copy-stacks) is pure userspace + `mmap` for new segments →
 `burrow` → same story; small stacks make the eager-commit fallback fine there.
 
+**STATUS — path 2 LANDED (the overcommit model, #318–321; ARCH §6.5 + doc 127).**
+Stage 1 shipped path 1 (the bring-up fallback: `sysReserve` == eager commit, with
+`heapAddrBits` constrained to 40 + 4 MiB arenas, the ios/arm64 config, to keep the
+page-summary reserve under the 256-MiB eager cap). #318–321 built the proper
+answer as a **dedicated `SYS_BURROW_ATTACH_LAZY` (83)** (chosen over a flag on
+`SYS_BURROW_ATTACH` for blast-radius discipline) + `SYS_BURROW_DECOMMIT` (84). At
+#321 `mem_thylacine.go` reserves via the lazy attach (`sysReserve`/`sysAlloc`) and
+decommits via `sysUnused`/`sysFault`, and **`malloc.go` reverted to stock
+`heapAddrBits = 48` + 64 MiB arenas** — booting that go-hello (the ~512-MiB
+page-summary reserve commits nothing until touched) is the proof the model needs
+no per-program tuning. The same lazy path backs libthyla-rs's native heap +
+pouch's `mmap`, so every native + ported program gets overcommit.
+
 ### 4.2 Signals: notes → `sighandler`, and **no async preemption** (like plan9)
 
 Thylacine **notes** are the Plan 9 notes model (same name, same concept) —
@@ -328,20 +341,28 @@ baked into the ramfs by `build_ramfs`) plus the `go-hello` boot probe in
   eager-commit physical ceiling keeps live mappings near the 4 GiB
   `EXEC_USER_BURROW_BASE`, far below 2^40.
 
-  **The proper memory model — BUILDING NOW (user-directed 2026-06-23, "implement
+  **The proper memory model — LANDED (#318–321; user-directed 2026-06-23, "implement
   properly preemptively"; Option 2 = the overcommit contract, chosen for
-  future-proofing across toolchains/pouch).** Scripture landed: the overcommit model
-  (`BURROW_ATTACH(LAZY)` demand-zero reserve + commit-on-fault + charge-on-fault +
-  `SYS_BURROW_DECOMMIT` backing `sysUnused`) + the I-32 VMA-count fourth axis bounding
-  the free reservation (ARCH §6.5 "The overcommit model" + §28 I-32 + the §25.4 audit
-  row). This is the **Linux overcommit contract** the whole native ecosystem
+  future-proofing across toolchains/pouch).** The overcommit model (a dedicated
+  `SYS_BURROW_ATTACH_LAZY` (83) demand-zero reserve + commit-on-fault +
+  charge-on-fault + `SYS_BURROW_DECOMMIT` (84) backing `sysUnused`) + the I-32
+  VMA-count fourth axis bounding the free reservation (ARCH §6.5 "The overcommit
+  model" + §28 I-32 + the §25.4 audit row; kernel mechanism + audit at #319/#320;
+  doc 127). This is the **Linux overcommit contract** the whole native ecosystem
   (musl/glibc/jemalloc/LLVM/Go-stock) assumes — Option 1 (charge-at-reserve) only
   worked for programs I could hand-tune (Go via heapAddrBits=40), so it does not
   generalize to arbitrary pouch/LLVM binaries. The contract reaches every program via
-  the two malloc substrates (libthyla-rs `sysAlloc` + the pouch boundary-line `mmap`)
-  passing `LAZY`. **When it lands, Go reverts to stock `heapAddrBits=48`** (the 512-MiB
-  page-summary reserve commits nothing until touched) — the proof the overcommit model
-  needs no per-program tuning. Impl / audit / Go-rewiring are the tracked next sub-chunks.
+  the two malloc substrates (libthyla-rs `sysAlloc` + the pouch boundary-line `mmap`,
+  retargeted `__NR_mmap` 37→83) + the Go fork's `mem_thylacine.go` — all reserve
+  lazily. **At #321 `malloc.go` reverted to stock `heapAddrBits=48`** (the 512-MiB
+  page-summary reserve commits nothing until touched) — booting that go-hello is the
+  proof the overcommit model needs no per-program tuning (verified: `go-hello: sum =
+  5050`, 993/993, boot OK). One carve-out: a Loom registered buffer needs eager
+  contiguous backing, so native code allocates it via `libthyla_rs::loom::RegisteredBuffer`
+  (eager `SYS_BURROW_ATTACH`), not the lazy heap (doc 107/127). The eager
+  `SYS_BURROW_ATTACH` (37) thus survives for the kernel-internal copy-target callers +
+  the native registered-buffer helper. **The Stage-1 `heapAddrBits=40` hack above is
+  RETIRED by this.**
 
 ---
 
