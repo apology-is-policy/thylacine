@@ -308,7 +308,7 @@ Self-hosting is a staged bootstrap; you never build Go *on* Thylacine first.
 Each stage is a clean, demoable checkpoint; Stages 0–3 are the runtime port,
 Stage 4 is the payoff, Stage 5 is purity.
 
-### 5.1 Status (as built, 2026-06-22)
+### 5.1 Status (as built, 2026-06-23)
 
 The Go fork lives at `~/projects/go-thylacine` (a sibling tree, like
 `~/projects/stratum`); its commits stay LOCAL. The Thylacine-repo side is the
@@ -363,6 +363,46 @@ baked into the ramfs by `build_ramfs`) plus the `go-hello` boot probe in
   `SYS_BURROW_ATTACH` (37) thus survives for the kernel-internal copy-target callers +
   the native registered-buffer helper. **The Stage-1 `heapAddrBits=40` hack above is
   RETIRED by this.**
+
+- **Stage 2 — DONE** (fork `be82db1` [the #321 overcommit rewire, the Stage-2
+  prerequisite] + Thylacine `usr/go-goroutines/` + the `build.sh` + `joey.c`
+  probe wiring). The runtime port's real test: a concurrent Go program RUNS the
+  three subsystems Stage 1 never touched, on the proper overcommit model, FIRST
+  TRY. `usr/go-goroutines` does `GOMAXPROCS(4)` + 8 worker goroutines that
+  ping-pong an UNBUFFERED channel fan-in, join via `sync.WaitGroup`, churn
+  `make([]byte, ...)` allocations, increment a cross-M `sync/atomic` counter, and
+  a concurrent goroutine hammers `runtime.GC()` — so it drives **multiple Ms**
+  (SYS_THREAD_SPAWN under load via `thread_entry`, placed across the SMP CPUs),
+  **scheduler-sync on torpor** (M park/wake + SYS_TORPOR_WAIT/WAKE), and the
+  **GC + the overcommit memory layer** (STW under cooperative-only preemption +
+  `sysUnused` → SYS_BURROW_DECOMMIT). In-VM (`-smp 4`):
+
+  ```
+  go-goroutines: workers = 8  GOMAXPROCS = 4
+  go-goroutines: allocOps = 16000  want = 16000
+  go-goroutines: NumGC = 4  HeapAlloc = 79208  bytes
+  go-goroutines: fan-in total = 1056640
+  go-goroutines: STAGE 2 OK (goroutines + channels + GC)
+  ```
+
+  reaped status 0, 993/993, boot OK, 0 EXTINCTION. The `fan-in total = 1056640`
+  is *arithmetically exact* (sum of id*2000 = 56000, plus 8*125080 = 1000640),
+  so the workers did not merely run — every byte was computed correctly across
+  all 8 goroutines and 4 Ps under concurrent GC + decommit, proving the memory
+  model holds under churn. `sync` + `sync/atomic` compiled for `thylacine` with
+  NO build-tag work (they are GOOS-independent). The design avoids a tight
+  no-safepoint loop (every worker iteration allocates → a cooperative
+  safepoint), so STW always converges under `preemptMSupported = false` (the
+  documented plan9-class no-async-preempt limitation). SMP-gated (default+UBSan ×
+  smp4/smp8 N=10): go-goroutines runs under real parallelism on every boot.
+
+  **Stage-2 finding (deferred, not a blocker): `getCPUCount()` returns 1**, so
+  the default GOMAXPROCS is 1; the probe forces parallelism with an explicit
+  `runtime.GOMAXPROCS(4)`. A real CPU-count source (a `/proc` or `/ctl` file, or
+  a syscall) does not exist in the kernel yet — wiring it would let GOMAXPROCS
+  default correctly. Genuinely separable from the Stage-2 proof (which the
+  explicit GOMAXPROCS gives identically); a follow-up, owed at Stage 3 with the
+  syscall/fs package.
 
 ---
 

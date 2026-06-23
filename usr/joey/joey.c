@@ -2069,6 +2069,49 @@ int main(void) {
         }
     }
 
+    // === /go-goroutines orchestration (GOOS=thylacine Go-port, Stage 2) ===
+    // The Stage-2 proof: GOMAXPROCS(4) workers ping-pong channels, join via a
+    // sync.WaitGroup, churn allocations, and a concurrent goroutine hammers
+    // runtime.GC() -- so spawning it drives the three subsystems Stage 1 never
+    // touched: multiple Ms (SYS_THREAD_SPAWN under load via thread_entry, placed
+    // across the SMP CPUs), scheduler-sync on torpor (M park/wake +
+    // SYS_TORPOR_WAIT/WAKE), and the GC + the overcommit memory layer (STW under
+    // cooperative-only preemption + sysUnused -> SYS_BURROW_DECOMMIT). The binary
+    // self-checks (every allocation ran, NumGC >= 1, the fan-in delivered) and
+    // panics (exit 2) on any mismatch.
+    //
+    // GATING: a non-zero exit or fault FAILS the boot -- the Stage-2 regression
+    // sentinel. Same stdio wiring as go-hello (Go writes via SYS_WRITE on fd
+    // 1/2, so joey installs a /dev/cons handle as the child's fd 0/1/2). The
+    // fork-absent path is graceful (build_go_probes skipped -> t_spawn <= 0 ->
+    // boot continues).
+    {
+        const char go_gor_name[] = "go-goroutines";
+        long gg_cfd = t_console_open();
+        long gg_pid;
+        if (gg_cfd >= 0) {
+            unsigned int gg_fds[3] = { (unsigned int)gg_cfd,
+                                       (unsigned int)gg_cfd,
+                                       (unsigned int)gg_cfd };
+            gg_pid = t_spawn_with_fds(go_gor_name, sizeof(go_gor_name) - 1,
+                                      gg_fds, 3);
+            (void)t_close(gg_cfd);
+        } else {
+            gg_pid = t_spawn(go_gor_name, sizeof(go_gor_name) - 1);
+        }
+        if (gg_pid <= 0) {
+            t_putstr("joey: go-goroutines NOT spawned (Go fork absent at build) -- skipping\n");
+        } else {
+            int gg_status = -1;
+            long gg_reaped = t_wait_pid_for((int)gg_pid, 0, &gg_status);
+            if (gg_reaped != gg_pid || gg_status != 0) {
+                t_putstr("joey: go-goroutines FAILED -- GOOS=thylacine Stage 2 regression (see fatal error / panic / snare:* above)\n");
+                return 1;
+            }
+            t_putstr("joey: go-goroutines reaped status=0 -- GOOS=thylacine Stage 2 RUNS in-VM\n");
+        }
+    }
+
     // === /pouch-hello-mallocng-torture (EBADTAG DFS; report-only) ===
     // The kernel burrow path tested clean, so the "AEGIS corruption" /
     // STM_EBADTAG is musl mallocng-specific. This pouch binary replicates
