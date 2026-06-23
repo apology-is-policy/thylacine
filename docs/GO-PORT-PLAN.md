@@ -392,6 +392,47 @@ all traced sound. `1004/1004`, boot OK, `go-env: STAGE 4a OK`, 0 EXTINCTION; SMP
 remaining Stage-4 work is the GOROOT bake (Decision 2 below) + the post-pivot `/env`
 re-graft seam.
 
+**4b LANDED (2026-06-23): the on-device toolchain is BUILDABLE + BAKED. The headline
+de-risk is done — the whole Go toolchain cross-compiles for `GOOS=thylacine`.** Three
+landings, all verified host-side (no boot needed for the bake itself):
+- **The toolchain cross-builds** (go-thylacine fork `6e2a5c6`). `go build cmd` for
+  `GOOS=thylacine GOARCH=arm64` was 8 small GOOS-surface fixes short: a getrandom
+  `rand_thylacine.go` (`SYS_GETRANDOM`), an honest no-op `signal_thylacine.go` (notes
+  aren't yet delivered to os/signal), a `root_thylacine.go` (CA bundle reader), a
+  `syscall.Exec` ENOSYS stub (spawn-only OS; cmd/link's execArchive never runs on a
+  pure-Go internal link), and 4 `notunix`/`other` build-tag additions (telemetry mmap,
+  cmd/go mmap, testenv, the 3 `signalsToIgnore`). Result: `go` 17.7M / `compile`
+  26.2M / `link` 7.9M / `asm` (+pack/buildid/cover/vet), all thylacine/arm64 static
+  ELF; a realistic fmt/os/strings/sort program cross-builds to 2.08 MB. Deferred (NOT
+  toolchain-required, NOT a Stage-4 dep): `os/user` + `net/internal/socktest` (a stub
+  lands when a real consumer needs it, Stage 5/6).
+- **`stratum-fs put`** (Stratum `thylacine-pouch-arm` `8c75623`): a single-session
+  recursive host-dir -> pool copy, descending with a per-level dir fid (each op walks
+  <=1 component -> never hits the 16-component Twalk cap, never re-attaches). A
+  per-file CLI loop over ~3600 files was infeasible. Host-tested: a deep tree copies
+  in 43 ms, exec bits preserved.
+- **4b-1 re-graft** (thylacine `aa66f65`): post-pivot `/env` re-graft in joey (mirror
+  `/dev`); verified in-VM (`Go-4b post-pivot /env re-graft OK`, go-env Stage 4a
+  unregressed, boot OK, 0 EXTINCTION).
+- **4b-2 GOROOT bake** (thylacine `07be1a6`): `build_go_goroot()` cross-builds the
+  toolchain (stripped) + stages the trimmed stdlib src (109 MB / 3620 files); the pool
+  grows 64->256 MiB and `stratum-fs put`s it at `/goroot`. Gated on
+  `THYLACINE_BAKE_GOROOT=1` (default off -> the dev loop is byte-identical). Host-
+  verified: a baked pool resolves `/goroot/bin/go` (0755, 12.4 MB), all 7
+  `pkg/tool/thylacine_arm64` tools, `src/fmt/print.go`, VERSION=go1.25.3.
+
+**4c (NEXT) — the on-device `go build` proof.** A baked 256 MB pool with `/goroot` is
+ready. The remaining piece is a joey probe that sets `$GOROOT`/`$GOCACHE`/`$GOPATH`/
+`$HOME`/`$TMPDIR` on its post-pivot `/env`, spawns `/goroot/bin/go build` on a tiny
+in-guest `.go`, runs the output, and reaps. **THE ONE DESIGN DECISION: the emulated
+in-guest compile speed.** A trivial program still compiles its stdlib deps from source
+with the 18 MB `compile` under TCG -> likely minutes, which blows the 90 s boot-test
+timeout. So 4c needs one of: (a) **pre-warm the GOCACHE on the host + bake it into the
+pool** (link-only on-device -> fast; the right "by default" answer, but the cache must
+be action-ID-portable to the on-device toolchain), (b) an **HVF / interactive proof**
+(measure the real time off the gated boot path), or (c) a **raised bake-boot timeout**.
+Pick (a) if portable; else (b) for the headline + (a) as Stage-6 polish.
+
 **Decision 2 — GOROOT shipping: baked by default (~150 MB trimmed).** Bake the
 toolchain binaries (~60 MB) + the stdlib *source* (~90 MB after stripping
 `_test.go`/`testdata`/`src/cmd`) into the default pool image, growing `pool.img`
