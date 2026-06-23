@@ -4761,6 +4761,47 @@ int main(void) {
                 }
                 t_putstr("joey: /fs-mut-smoke reaped status=0; LS-3b fs-mutation API verified\n");
             }
+
+            // === Go Stage 3a: fs file I/O (/go-fs) ===
+            // The GOOS=thylacine Go-port Stage-3a proof: a Go binary driving the
+            // new os + syscall packages end-to-end -- os.Mkdir / os.Create /
+            // (*File).Write / os.ReadFile / os.Stat / (*File).Seek / os.ReadDir /
+            // os.Rename / os.Remove -- against the WRITABLE post-pivot Stratum FS
+            // (devramfs is read-only, so this runs HERE, after the pivot, unlike
+            // the pre-pivot go-hello/go-goroutines which do no file I/O). The
+            // binary self-checks every step and panics (exit != 0) on mismatch.
+            //
+            // Same /dev/cons stdio wiring as the other go probes (Go writes via
+            // SYS_WRITE on fd 1/2, so a real stdout/stderr is required; the
+            // spawner provides it). GATING: a non-zero exit or fault FAILS the
+            // boot -- the Stage-3a regression sentinel. Fork-absent (the Go fork
+            // was not present at build) -> graceful skip.
+            {
+                const char go_fs_name[] = "/bin/go-fs";  // #58: post-pivot /bin bind
+                long gf_cfd = t_console_open();
+                long gf_pid;
+                if (gf_cfd >= 0) {
+                    unsigned int gf_fds[3] = { (unsigned int)gf_cfd,
+                                               (unsigned int)gf_cfd,
+                                               (unsigned int)gf_cfd };
+                    gf_pid = t_spawn_with_fds(go_fs_name, sizeof(go_fs_name) - 1,
+                                              gf_fds, 3);
+                    (void)t_close(gf_cfd);
+                } else {
+                    gf_pid = t_spawn(go_fs_name, sizeof(go_fs_name) - 1);
+                }
+                if (gf_pid <= 0) {
+                    t_putstr("joey: go-fs NOT spawned (Go fork absent at build) -- skipping\n");
+                } else {
+                    int gf_status = -1;
+                    long gf_reaped = t_wait_pid_for((int)gf_pid, 0, &gf_status);
+                    if (gf_reaped != gf_pid || gf_status != 0) {
+                        t_putstr("joey: go-fs FAILED -- GOOS=thylacine Stage 3a regression (see fatal error / panic / snare:* above)\n");
+                        return 1;
+                    }
+                    t_putstr("joey: go-fs reaped status=0 -- GOOS=thylacine Stage 3a (fs file I/O) RUNS in-VM\n");
+                }
+            }
 #endif /* THYLA_BOOT_PROBES (post-pivot boot-test probe ladder) */
 
             (void)t_close(sd_rd);

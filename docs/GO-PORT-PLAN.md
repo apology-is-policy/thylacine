@@ -404,6 +404,37 @@ baked into the ramfs by `build_ramfs`) plus the `go-hello` boot probe in
   explicit GOMAXPROCS gives identically); a follow-up, owed at Stage 3 with the
   syscall/fs package.
 
+- **Stage 3a (fs) — DONE** (fork `f6015e9` + Thylacine `usr/go-fs/` + the
+  `build.sh` + `joey.c` probe wiring). The `syscall` and `os` packages (plus
+  `internal/poll`, `time`, `internal/filepathlite`) are ported to
+  `GOOS=thylacine`, so a Go program does real **file I/O via the `os`
+  package**. The shape is the hybrid the plan calls for: **Plan-9 structure**
+  (Open and Create are distinct, files reached by path through the per-Proc
+  namespace, no fork, `fd2path`, `netpoll_stub`) + **Linux conventions**
+  (numeric `Errno` — the kernel returns `-errno` — not Plan 9's error strings;
+  a flat fixed `Stat_t` filled from the 80-byte `t_stat`, not a marshaled 9P
+  `Dir`). The new-GOOS build-tag wrinkle: thylacine, like plan9, is non-Unix,
+  so the os files written as "non-plan9 == unix" (`rawconn.go`,
+  `types_unix.go`) had to exclude it; `removeall_noat.go` + `root_noopenat.go`
+  include it; `error_errno.go` supplies the `Errno` error type for free.
+  `os.Create` opens the parent **O_PATH** to get the born-R|W create base
+  `SYS_WALK_CREATE` requires; `os.Remove` tries unlink then falls back to rmdir
+  for a directory (the lone in-VM bug, root-caused at step 8 of 8). The
+  syscall primitives are **raw SVC** (no `entersyscall`) at 3a — file blocking
+  is bounded and sysmon is the backstop; the `entersyscall`-wrapped blocking
+  path lands with the net layer (3c). `usr/go-fs` runs POST-pivot (devramfs is
+  read-only) against the writable Stratum FS:
+
+  ```
+  go-fs: wrote+read 25 bytes; stat size=25; seek+readdir+rename+remove OK
+  go-fs: STAGE 3a OK (fs file I/O: create/write/read/stat/seek/readdir/rename/remove)
+  ```
+
+  reaped status 0, 993/993, boot OK, 0 EXTINCTION; Stage 1/2 unregressed.
+  Remaining in Stage 3: **3b** (os/exec -> SYS_SPAWN_FULL_ARGV) and **3c** (net
+  over /net + the entersyscall-wrapped blocking netpoll). The getCPUCount seam
+  (read `/ctl/sched`, which emits `cpus: N`) still folds into Stage 3.
+
 ---
 
 ## 6. Native, not Pouch — and `CGO_ENABLED=0`
