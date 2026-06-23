@@ -2069,6 +2069,63 @@ int main(void) {
         }
     }
 
+    // === /go-env orchestration (GOOS=thylacine Go-port, Stage 4a: the /env
+    // device, G15) ===
+    // Proves the per-Proc /env environment device end to end: joey sets two
+    // vars on its OWN /env (devenv create + write), spawns go-env -- which
+    // inherits a COPY via env_clone_into (the Plan 9 copy-on-rfork) -- and
+    // go-env's runtime goenvs reads them from /env into os.Getenv/os.Environ.
+    // joey then UNSETs them (the child already has its copy) so the test vars do
+    // not leak into the later login session. Pre-pivot: /env is mounted in the
+    // boot namespace. Fork-absent -> graceful skip (like go-hello).
+    {
+        const char go_env_name[] = "go-env";
+        int env_set_ok = 0;
+        long edir = t_open(T_WALK_OPEN_FROM_ROOT, "/env", 4, T_OPATH);
+        if (edir >= 0) {
+            long v1 = t_walk_create(edir, "GOENVTEST", 9, T_OWRITE, 0644);
+            if (v1 >= 0) {
+                if (t_write(v1, "stage4a-ok", 10) == 10) env_set_ok |= 1;
+                (void)t_close(v1);
+            }
+            long v2 = t_walk_create(edir, "GOENVNUM", 8, T_OWRITE, 0644);
+            if (v2 >= 0) {
+                if (t_write(v2, "42", 2) == 2) env_set_ok |= 2;
+                (void)t_close(v2);
+            }
+        }
+        long ge_cfd = t_console_open();
+        long ge_pid;
+        if (ge_cfd >= 0) {
+            unsigned int ge_fds[3] = { (unsigned int)ge_cfd,
+                                       (unsigned int)ge_cfd,
+                                       (unsigned int)ge_cfd };
+            ge_pid = t_spawn_with_fds(go_env_name, sizeof(go_env_name) - 1,
+                                      ge_fds, 3);
+            (void)t_close(ge_cfd);
+        } else {
+            ge_pid = t_spawn(go_env_name, sizeof(go_env_name) - 1);
+        }
+        // Unset AFTER the spawn -- the child's env was deep-copied at rfork, so
+        // this only cleans joey's (the init's) environment.
+        if (edir >= 0) {
+            (void)t_unlink(edir, "GOENVTEST", 9, 0);
+            (void)t_unlink(edir, "GOENVNUM", 8, 0);
+            (void)t_close(edir);
+        }
+        if (ge_pid <= 0) {
+            t_putstr("joey: go-env NOT spawned (Go fork absent at build) -- skipping\n");
+        } else {
+            int ge_status = -1;
+            long ge_reaped = t_wait_pid_for((int)ge_pid, 0, &ge_status);
+            if (ge_reaped != ge_pid || ge_status != 0 || env_set_ok != 3) {
+                t_putstr("joey: go-env FAILED -- GOOS=thylacine Stage 4a /env regression\n");
+                return 1;
+            }
+            t_putstr("joey: go-env reaped status=0 -- GOOS=thylacine Stage 4a /env RUNS in-VM\n");
+        }
+    }
+
     // === /go-goroutines orchestration (GOOS=thylacine Go-port, Stage 2) ===
     // The Stage-2 proof: GOMAXPROCS(4) workers ping-pong channels, join via a
     // sync.WaitGroup, churn allocations, and a concurrent goroutine hammers
