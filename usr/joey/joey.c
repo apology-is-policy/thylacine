@@ -3140,6 +3140,17 @@ int main(void) {
                 t_putstr("joey: devhw pre-pivot t_open(/hw) FAILED\n");
                 return 1;
             }
+            // Go Stage 4b: /env (devenv: the per-Proc environment device). The
+            // kernel boot-mounts it for the pre-pivot ladder, but the post-pivot
+            // toolchain (go reads $GOROOT/$GOCACHE/... via goenvs) is the first
+            // consumer that needs it AFTER the root swap -- same pre-pivot-handle
+            // + post-pivot-MREPL idiom as /dev. O_PATH crosses the mount, yielding
+            // the devenv root (per-Proc content keys on the opener, not this handle).
+            long env_dev_h = t_open(T_WALK_OPEN_FROM_ROOT, "/env", 4, T_OPATH);
+            if (env_dev_h < 0) {
+                t_putstr("joey: Go-4b pre-pivot t_open(/env) FAILED\n");
+                return 1;
+            }
 
             if (t_pivot_root(sd_attach_fd) != 0) {
                 t_putstr("joey: stratumd-boot t_pivot_root FAILED\n");
@@ -3234,6 +3245,29 @@ int main(void) {
                 }
             }
             (void)t_close(hw_dev_h);
+            // Go Stage 4b: re-establish /env on the pivoted root (mirror /dev).
+            // The post-pivot Go toolchain's goenvs reads it for $GOROOT et al.
+            {
+                long mk = t_walk_create(T_WALK_OPEN_FROM_ROOT, "env", 3, T_OREAD,
+                                        T_WALK_CREATE_DMDIR | 0755u);
+                if (mk >= 0) (void)t_close(mk);
+                if (t_mount("/env", 4, env_dev_h, T_MREPL) != 0) {
+                    t_putstr("joey: Go-4b post-pivot t_mount(/env) FAILED\n");
+                    return 1;
+                }
+            }
+            (void)t_close(env_dev_h);
+            // 4b-1 reachability proof: /env resolves through the pivoted root.
+            // (The functional set->inherit->goenvs loop is exercised at 4c.)
+            {
+                long e = t_open(T_WALK_OPEN_FROM_ROOT, "/env", 4, T_OPATH);
+                if (e < 0) {
+                    t_putstr("joey: Go-4b post-pivot /env NOT reachable\n");
+                    return 1;
+                }
+                (void)t_close(e);
+                t_putstr("joey: Go-4b post-pivot /env re-graft OK\n");
+            }
 
             // net-2c-1: mount netd's /net on the pivoted root. netd (warden-
             // spawned, persistent) posted /srv/net (9P-mode) pre-pivot; the
