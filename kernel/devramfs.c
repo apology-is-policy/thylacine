@@ -87,6 +87,7 @@ static bool              g_ramfs_initialized;
 #define RAMFS_QID_SYNTH_CTL   (RAMFS_QID_SYNTH_BASE + 3ULL)   // /ctl
 #define RAMFS_QID_SYNTH_DEV   (RAMFS_QID_SYNTH_BASE + 4ULL)   // /dev (#57b)
 #define RAMFS_QID_SYNTH_HW    (RAMFS_QID_SYNTH_BASE + 5ULL)   // /hw (Menagerie devhw)
+#define RAMFS_QID_SYNTH_ENV   (RAMFS_QID_SYNTH_BASE + 6ULL)   // /env (G15, Go Stage 4a)
 
 struct ramfs_synth_dir {
     const char *name;
@@ -99,6 +100,7 @@ static const struct ramfs_synth_dir g_ramfs_synth_dirs[] = {
     { "ctl",  RAMFS_QID_SYNTH_CTL  },
     { "dev",  RAMFS_QID_SYNTH_DEV  },
     { "hw",   RAMFS_QID_SYNTH_HW   },
+    { "env",  RAMFS_QID_SYNTH_ENV  },
 };
 
 static inline bool ramfs_qid_is_synth(u64 path) {

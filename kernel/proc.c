@@ -21,6 +21,7 @@
 #include <thylacine/caps.h>
 #include <thylacine/devcap.h>
 #include <thylacine/devsrv.h>
+#include <thylacine/env.h>
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
 #include <thylacine/mmio_handle.h>
@@ -533,6 +534,12 @@ void proc_free(struct Proc *p) {
     // heap struct, independent of the handle/notes/VMA frees above.
     allowance_free(p);
 
+    // G15: release the per-Proc environment group (NULL-tolerant; frees every
+    // entry's value + the struct). Like the allowance, a plain heap struct
+    // independent of the frees above; owned 1:1 by this Proc (RFENVG sharing
+    // deferred), so this is the sole release.
+    env_free(p);
+
     // RW-1 B-F1: release the per-Proc page table. There is NO per-Proc ASID
     // free in the rolling-ASID model -- the Proc's context_id is simply
     // dropped; its hardware ASID value stays reserved in the current
@@ -915,6 +922,18 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // allowance_free is a clean no-op there; a LATER failure (territory_clone
     // / thread_create) frees the just-cloned allowance via the same path.
     if (allowance_clone_into(child, parent) != 0) {
+        child->state = PROC_STATE_ZOMBIE;
+        proc_free(child);
+        return -1;
+    }
+
+    // G15 (ARCH section 9.7): deep-copy the parent's environment group into the
+    // child -- the Plan 9 default-copy-on-rfork (RFENVG sharing deferred), so a
+    // spawned child inherits $GOROOT etc. exactly as it inherits the namespace.
+    // A NULL parent->env leaves child->env NULL. On OOM, child->env stays NULL,
+    // so the proc_free rollback's env_free is a clean no-op (mirrors the
+    // allowance_clone_into discipline above).
+    if (env_clone_into(child, parent) != 0) {
         child->state = PROC_STATE_ZOMBIE;
         proc_free(child);
         return -1;

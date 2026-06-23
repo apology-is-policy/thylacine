@@ -355,6 +355,15 @@ void joey_run(void) {
         if (joey_mount_static_dev(kt, &devpci, "hw/pci", 6) != 0)
             extinction("joey: /hw/pci mount (devpci) failed");
         uart_puts("  joey: /hw/pci mounted (mediated PCI topology)\n");
+
+        // G15: graft the per-Proc environment directory at /env (devenv: the
+        // Plan 9 Egrp -- read /env/NAME, write/create to set, readdir to list).
+        // ARCH section 9.7. The mount is global but every op resolves the
+        // calling Proc's own env (per-Proc content, I-1); inherited by every
+        // Proc via territory_clone. Go's runtime reads it at startup (goenvs).
+        if (joey_mount_static_dev(kt, &devenv, "env", 3) != 0)
+            extinction("joey: /env mount (devenv) failed");
+        uart_puts("  joey: /env mounted (per-Proc environment)\n");
     }
 
     uart_puts("  joey: rforking child for /joey (");

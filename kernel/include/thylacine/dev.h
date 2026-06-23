@@ -247,6 +247,7 @@ extern struct Dev devramfs;       // dc='m'  — /ramfs/<file> from cpio newc in
 extern struct Dev devdev;         // dc='d'  — /dev char-device directory (#57b)
 extern struct Dev devhw;          // dc='H'  — DTB hardware inventory tree (Menagerie devhw)
 extern struct Dev devpci;         // dc='P'  — /hw/pci mediated PCI topology (Menagerie 6b)
+extern struct Dev devenv;         // dc='E'  — /env per-Proc environment (G15, Go Stage 4a)
 
 // devramfs diagnostics (used by tests).
 int  devramfs_file_count(void);

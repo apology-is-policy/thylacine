@@ -60,6 +60,7 @@ struct Territory;
 struct HandleTable;
 struct Vma;
 struct Allowance;   // I-34 hardware allowance (<thylacine/allowance.h>)
+struct Env;         // G15 per-Proc environment group (<thylacine/env.h>)
 
 // A-1a: identity model (docs/IDENTITY-DESIGN.md §3.3 + §9.1; ARCH §28 I-22).
 //
@@ -457,6 +458,15 @@ struct Proc {
     // __atomic_load_n for a coherent cross-Proc snapshot, as page_count's reader does.
     // Like page_count, it is a resource axis, not a privilege axis (orthogonal to I-22).
     u32                vma_count;
+
+    // G15 (ARCH section 9.7): the per-Proc environment group -- the Plan 9 Egrp
+    // surfaced as the per-Proc /env directory (devenv). Lazily allocated (NULL ==
+    // empty), deep-COPIED across rfork by env_clone_into (the Plan 9 default-copy;
+    // the reserved RFENVG share-flag stays deferred), freed by proc_free
+    // (env_free). KP_ZERO inits it NULL. Shared across a Proc's threads (one
+    // p->env, env->lock serializes); never shared cross-Proc at v1.0. See
+    // <thylacine/env.h>.
+    struct Env        *env;
 };
 
 #define PROC_FLAG_NODUMP            (1u << 0)
@@ -501,14 +511,17 @@ struct Proc {
 // thread, and an armed kproc would *_INTR every kernel-thread sleep).
 #define PROC_FLAG_INTR_TERMINATE_PENDING (1u << 7)
 
-_Static_assert(sizeof(struct Proc) == 288,
-               "struct Proc size pinned at 288 bytes (the I-34 280 baseline + the "
-               "I-32 fourth-axis vma_count u32 @280 = 4 + 4 tail pad -> 288). Adding "
-               "a field grows the SLUB cache; update this assert deliberately so the "
-               "change is intentional.");
+_Static_assert(sizeof(struct Proc) == 296,
+               "struct Proc size pinned at 296 bytes (the 288 baseline + the G15 "
+               "per-Proc env pointer @288 = 8). Adding a field grows the SLUB cache; "
+               "update this assert deliberately so the change is intentional.");
 _Static_assert(__builtin_offsetof(struct Proc, vma_count) == 280,
                "I-32 fourth-axis vma_count appends after the I-34 allowance pointer "
                "(offset 280); existing offsets stay stable (KP_ZERO inits it 0).");
+_Static_assert(__builtin_offsetof(struct Proc, env) == 288,
+               "G15 per-Proc env pointer appends after vma_count (offset 288, the "
+               "next 8-aligned slot past the u32 @280 + its pad); existing offsets "
+               "stay stable (KP_ZERO inits it NULL = empty).");
 _Static_assert(__builtin_offsetof(struct Proc, page_count) == 264,
                "#65 resource-floor counters append after the A-4a legate "
                "block; existing offsets stay stable (KP_ZERO inits them 0).");

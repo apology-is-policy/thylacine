@@ -125,6 +125,7 @@ void dev_init(void) {
     dev_register(&devdev);          // #57b: /dev char-device directory (dc='d')
     dev_register(&devhw);           // Menagerie devhw: DTB inventory tree (dc='H')
     dev_register(&devpci);          // Menagerie 6b: /hw/pci mediated PCI topology (dc='P')
+    dev_register(&devenv);          // G15: /env per-Proc environment (dc='E', Go Stage 4a)
 
     // Walk bestiary: dev->init() may itself dev_register additional
     // devs (e.g., a virtio probe that fans out to multiple instances).

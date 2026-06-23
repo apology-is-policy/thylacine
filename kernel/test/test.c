@@ -501,6 +501,18 @@ void test_devpci_readonly(void);
 void test_devpci_readdir(void);
 void test_devpci_walk_reuse_nc(void);
 
+void test_env_set_get(void);
+void test_env_create_idempotent(void);
+void test_env_overwrite_truncate(void);
+void test_env_unset_monotonic(void);
+void test_env_iter_order(void);
+void test_env_bounds(void);
+void test_env_clone_deep_independent(void);
+void test_env_free_null_tolerant(void);
+void test_devenv_bestiary(void);
+void test_devenv_walk_reuse_nc(void);
+void test_devenv_walk_read(void);
+
 void test_allowance_null_is_broad(void);
 void test_allowance_mmio_containment(void);
 void test_allowance_irq_membership(void);
@@ -1624,6 +1636,18 @@ struct test_case g_tests[] = {
     { "devpci.readonly",               test_devpci_readonly,               false, NULL },
     { "devpci.readdir",                test_devpci_readdir,                false, NULL },
     { "devpci.walk_reuse_nc",          test_devpci_walk_reuse_nc,          false, NULL },
+
+    { "env.set_get",                   test_env_set_get,                   false, NULL },
+    { "env.create_idempotent",         test_env_create_idempotent,         false, NULL },
+    { "env.overwrite_truncate",        test_env_overwrite_truncate,        false, NULL },
+    { "env.unset_monotonic",           test_env_unset_monotonic,           false, NULL },
+    { "env.iter_order",                test_env_iter_order,                false, NULL },
+    { "env.bounds",                    test_env_bounds,                    false, NULL },
+    { "env.clone_deep_independent",    test_env_clone_deep_independent,    false, NULL },
+    { "env.free_null_tolerant",        test_env_free_null_tolerant,        false, NULL },
+    { "devenv.bestiary",               test_devenv_bestiary,               false, NULL },
+    { "devenv.walk_reuse_nc",          test_devenv_walk_reuse_nc,          false, NULL },
+    { "devenv.walk_read",              test_devenv_walk_read,              false, NULL },
 
     { "allowance.null_is_broad",            test_allowance_null_is_broad,            false, NULL },
     { "allowance.mmio_containment",         test_allowance_mmio_containment,         false, NULL },
