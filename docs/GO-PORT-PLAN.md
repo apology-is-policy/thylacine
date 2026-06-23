@@ -296,17 +296,60 @@ Self-hosting is a staged bootstrap; you never build Go *on* Thylacine first.
 - **Stage 3 — fs + os/exec + net.** Read/write files; `os/exec` a coreutil; dial
   a TCP socket over `/net` (the plan9-net adaptation). Proves the syscall package
   + the blocking netpoll + spawn.
-- **Stage 4 — the Go *toolchain* runs on Thylacine.** Cross-build `cmd/compile`,
-  `cmd/asm`, `cmd/link` (themselves Go programs) to **run on Thylacine** →
-  `go build` *on the device*. This is the **v1 on-device-dev milestone** (write
-  + compile Go on the Pi).
-- **Stage 5 — self-host + (stretch) upstream.** The on-device Go toolchain
-  rebuilds Go from source (the bootstrap-with-a-prior-Go chain; pin the bootstrap
-  toolchain version). Optionally upstream `GOOS=thylacine` (Go accepts ports;
-  `plan9` is upstream — the precedent + the heritage make this realistic).
+- **Stage 4 — LOCAL on-device build (no net).** The `/env` device (closes G15)
+  + bake the trimmed GOROOT into the pool → `go build` a local `.go` file *on the
+  device* produces and runs a Thylacine ELF. This is the **headline milestone**:
+  the "write a Go program in Nora → build → run" loop, minus modules.
+- **Stage 5 — MODULES over the net.** `net/http` (a stdlib port) + `go mod` /
+  `go get` over the fast `/net` (TLS + DNS, already shipped) → download + build a
+  real dependency. The module proxy protocol is plain HTTPS GETs.
+- **Stage 6 — BY DEFAULT + Nora integration.** Ship the toolchain in the default
+  image; the `ut`/Nora UX; polish → the full end-to-end **write-in-Nora, `go mod`,
+  build, run** experience, out of the box.
+- **Stage 7 — self-host + (stretch) upstream.** The on-device Go toolchain
+  rebuilds Go from source (bootstrap-with-a-prior-Go; pin the bootstrap version).
+  Optionally upstream `GOOS=thylacine` (`plan9` is upstream — precedent + heritage
+  make it realistic).
 
-Each stage is a clean, demoable checkpoint; Stages 0–3 are the runtime port,
-Stage 4 is the payoff, Stage 5 is purity.
+Each stage is a clean, demoable checkpoint; Stages 0-3 are the runtime port,
+Stages 4-6 are the on-device toolchain (the payoff), Stage 7 is purity.
+
+#### 5.0.1 The on-device-toolchain design (locked 2026-06-23, user-voted)
+
+**Why Go is the *ideal first* on-device toolchain (the aux + main investigation).**
+Go is **self-contained**: `cmd/compile` / `cmd/asm` / `cmd/link` are all *pure Go*
+(no LLVM backend, no C-toolchain dependency with `CGO_ENABLED=0`), and the Go
+*runtime* is ALREADY ported and proven in-VM (Stages 1-3). So the on-device
+toolchain is "ship the prebuilt toolchain binaries + close env + bake GOROOT" —
+**not** "port a compiler backend." Against the alternatives this is night-and-day:
+Rust needs LLVM; a C toolchain needs clang/lld (#67). Go is the tractable path to a
+self-hosting Thylacine, by a wide margin — which is why it is the first toolchain.
+What's already in place makes Stage 4 mostly assembly, not invention: `os/exec`
+(3b), file I/O (3a), TLS (net-7c), the overcommit/lazy-mem model (compiles are
+RAM-hungry), REVENANT large-binary exec (`compile`/`link` are 10-20 MB each),
+`getCPUCount` (parallel builds), graceful file-lock degradation (`filelock_other`),
+and the linker already emits Linux-shaped static ELF (Hlinux, set at Stage 0a).
+
+**Decision 1 — environment variables (G15): the Plan 9 `/env` device.** The
+toolchain is profoundly env-driven (`$GOROOT`/`$GOPATH`/`$GOCACHE`/`$HOME`/
+`$TMPDIR`/`go env`). Go-on-plan9 reads its environment from **`/env/*` files**
+(`runtime/env_plan9.go::goenvs`), NOT a Unix `envp` array — so `GOOS=thylacine`
+mirrors plan9: a per-Proc `/env` device, and the Go port reuses the plan9 `goenvs`
+path almost verbatim. **No spawn-ABI change.** `/env` is a new kernel Dev (Dev
+semantics + rfork share/copy inheritance + a boot mount + the I-1 per-Proc-
+isolation posture), so **Stage 4 opens with a focused `/env` design pass +
+audit** (scripture before code). Rejected: wiring the reserved `_pad_envp` slot in
+`SYS_SPAWN_FULL_ARGV` (an ABI change; less Plan-9-idiomatic; needs a non-plan9 Go
+env path).
+
+**Decision 2 — GOROOT shipping: baked by default (~150 MB trimmed).** Bake the
+toolchain binaries (~60 MB) + the stdlib *source* (~90 MB after stripping
+`_test.go`/`testdata`/`src/cmd`) into the default pool image, growing `pool.img`
+from 64 MB to ~256 MB. Truly offline + by-default — Thylacine ships a complete Go
+toolchain out of the box, no "install the compiler first" asterisk. Rejected: a
+fetch-once installable `go` package (not literally by-default) and binaries-baked-
+stdlib-downloaded (first build needs net). The on-device build cache + module cache
+live on the writable post-pivot Stratum FS.
 
 ### 5.1 Status (as built, 2026-06-23)
 
