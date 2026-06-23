@@ -328,12 +328,20 @@ baked into the ramfs by `build_ramfs`) plus the `go-hello` boot probe in
   eager-commit physical ceiling keeps live mappings near the 4 GiB
   `EXEC_USER_BURROW_BASE`, far below 2^40.
 
-  **Owed for Stage 2+ (the proper memory model):** a `BURROW_ATTACH(LAZY)` kernel
-  flag (reserve VA, demand-allocate pages on fault) + a decommit primitive backing
-  `sysUnused` (so a long-running Go program's RSS can shrink under GC). This is an
-  **audit-bearing Thylacine-kernel change** (touches the fault path / I-12 / #65) —
-  it ESCALATES and is model-first if it touches fault invariants. The Stage-1
-  iOS-style config carries Stage 1 and likely Stage 2 (modest heaps) without it.
+  **The proper memory model — BUILDING NOW (user-directed 2026-06-23, "implement
+  properly preemptively"; Option 2 = the overcommit contract, chosen for
+  future-proofing across toolchains/pouch).** Scripture landed: the overcommit model
+  (`BURROW_ATTACH(LAZY)` demand-zero reserve + commit-on-fault + charge-on-fault +
+  `SYS_BURROW_DECOMMIT` backing `sysUnused`) + the I-32 VMA-count fourth axis bounding
+  the free reservation (ARCH §6.5 "The overcommit model" + §28 I-32 + the §25.4 audit
+  row). This is the **Linux overcommit contract** the whole native ecosystem
+  (musl/glibc/jemalloc/LLVM/Go-stock) assumes — Option 1 (charge-at-reserve) only
+  worked for programs I could hand-tune (Go via heapAddrBits=40), so it does not
+  generalize to arbitrary pouch/LLVM binaries. The contract reaches every program via
+  the two malloc substrates (libthyla-rs `sysAlloc` + the pouch boundary-line `mmap`)
+  passing `LAZY`. **When it lands, Go reverts to stock `heapAddrBits=48`** (the 512-MiB
+  page-summary reserve commits nothing until touched) — the proof the overcommit model
+  needs no per-program tuning. Impl / audit / Go-rewiring are the tracked next sub-chunks.
 
 ---
 
