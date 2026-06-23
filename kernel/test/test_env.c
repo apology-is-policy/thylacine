@@ -152,6 +152,11 @@ void test_env_bounds(void) {
     TEST_EXPECT_EQ(env_read(p, id, 0, buf, sizeof(buf)), (long)0, "rejected write left it empty");
     // A write exactly at the cap succeeds.
     TEST_EXPECT_EQ(env_write(p, id, 0, huge, ENV_VALUE_MAX), (long)ENV_VALUE_MAX, "value == MAX ok");
+    // Prove the at-cap value is STORED, not just that the right count was returned
+    // (the new_len cast + the copy loops at the exact ENV_VALUE_MAX boundary).
+    char tail[2];
+    TEST_EXPECT_EQ(env_read(p, id, ENV_VALUE_MAX - 2, tail, 2), (long)2, "at-cap read-back len");
+    TEST_ASSERT(tail[0] == 'y' && tail[1] == 'y', "at-cap boundary bytes stored");
 
     // ENV_MAX_ENTRIES cap: fill, then the next distinct name is refused.
     struct Proc *q = emk();
@@ -278,6 +283,11 @@ void test_devenv_walk_read(void) {
 
     // The directory itself does not byte-read (readdir is its enumeration path).
     TEST_EXPECT_EQ(devenv.read(root, buf, sizeof(buf), 0), (long)-1, "dir read rejected");
+
+    // Create under a value file (a non-root parent) is rejected -- a value file
+    // is not a directory, even though env_create resolves names against the env
+    // root. Without the guard this would mint a top-level var + return vf.
+    TEST_ASSERT(devenv.create(vf, "NOPE", 1, 0644, 0) == NULL, "create under a value file rejected");
 
     // An absent var misses cleanly.
     const char *gone[1] = { "ABSENT" };

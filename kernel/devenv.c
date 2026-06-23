@@ -168,6 +168,12 @@ static struct Spoor *devenv_create(struct Spoor *c, const char *name, int omode,
                                    u32 perm, u32 gid) {
     (void)gid;
     if (!c || !name) return NULL;
+    // Create only directly under the /env root: a value file is not a directory.
+    // The other create-capable Devs reject a non-dir parent either by stub
+    // (devramfs) or server-side (dev9p's Tlcreate -> ENOTDIR); devenv must
+    // self-check, since env_create resolves the name against the Proc's env root
+    // regardless of the parent Spoor's qid.
+    if (c->qid.path != ENV_QID_ROOT) return NULL;
     if (perm & SYS_WALK_CREATE_DMDIR) return NULL;     // /env has no sub-directories
     struct Proc *p = env_proc();
     if (!p) return NULL;
@@ -277,6 +283,13 @@ static struct Spoor *devenv_power(struct Spoor *c, int on) {
 struct Dev devenv = {
     .dc       = 'E',
     .name     = "env",
+
+    // visibility, not authority -- a Proc's /env is its own (per-Proc content
+    // behind a global mount); there is nothing to leak across the per-Proc
+    // resolution, so no perm_check runs (matches devhw / devpci). Explicit so a
+    // flip -- which would fail-close every walk-open via devenv_stat's -1 -- is
+    // a visible, deliberate decision, not an implicit zero-init default.
+    .perm_enforced = false,
 
     .reset    = devenv_reset,
     .init     = devenv_init,

@@ -376,6 +376,22 @@ kernel ABI change. Composes I-1 + I-32; no new §28 invariant; prose-validated (
 + the go-fork `goenvs` + the boot env-var setup + the focused audit are Stage 4a's
 kernel / go / bootenv / audit sub-chunks.
 
+**4a-AUDIT CLOSED (2026-06-23): 0 P0 / 0 P1 / 0 P2 / 3 P3 — CLEAN.** Two concurrent
+independent prosecutors converged: an Opus-4.8-max `holotype-reviewer`
+(MODEL(start)==MODEL(end), no Fable fallback) found F1 (`devenv.perm_enforced`
+implicit zero-init → explicit `false` + comment) + F2 (`test_env_bounds` proved the
+at-cap write's return not its storage → read-back added); a concurrent self-audit
+found F3 (`devenv_create` did not reject a non-root/value-file parent → one-line
+`qid.path == ENV_QID_ROOT` guard + regression). All 3 P3 fixed; no soundness hole.
+The lifetime/refcount balance (rfork-rollback + later-failure + `proc_free`), the
+`env->lock` peer-thread discipline, the I-1 isolation (a `/env/NAME` Spoor's id
+resolves against the *caller's* env), the I-32 bounds, and the net-3d monotonic-id
+all traced sound. `1004/1004`, boot OK, `go-env: STAGE 4a OK`, 0 EXTINCTION; SMP gate
+(default+UBSan × smp4/smp8). Reference: `docs/reference/128-devenv.md`. Close list:
+`memory/audit_env_closed_list.md`. Stage 4a (the `/env` device) is COMPLETE; the
+remaining Stage-4 work is the GOROOT bake (Decision 2 below) + the post-pivot `/env`
+re-graft seam.
+
 **Decision 2 — GOROOT shipping: baked by default (~150 MB trimmed).** Bake the
 toolchain binaries (~60 MB) + the stdlib *source* (~90 MB after stripping
 `_test.go`/`testdata`/`src/cmd`) into the default pool image, growing `pool.img`
