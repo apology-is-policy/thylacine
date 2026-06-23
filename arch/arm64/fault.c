@@ -465,6 +465,73 @@ static enum fault_result demand_page_locked(struct Proc *p,
         freq->exec        = (vma->prot & VMA_PROT_EXEC) != 0;  // text -> I-cache sync
         return FAULT_UNHANDLED_USER;    // ignored by the caller (freq->needed set)
     }
+    case BURROW_TYPE_ANON_LAZY: {
+        // Overcommit / I-32 (ARCH §6.5; SYS_BURROW_ATTACH_LAZY): demand-ZERO. The
+        // page is allocated, zero-filled, and installed RW/XN on first touch. The
+        // structural twin of the FILE arm but SIMPLER -- no backing read, so the
+        // whole fill runs under the already-held vma_lock (alloc_pages under vma_lock
+        // is the established order: SYS_BURROW_ATTACH holds vma_lock across
+        // burrow_create_anon -> alloc_pages). No slow path, no pin, no
+        // death-interruptible read.
+        struct Burrow *v = vma->burrow;
+        size_t slot = (burrow_byte_off & ~(u64)(PAGE_SIZE - 1)) / PAGE_SIZE;
+
+        spin_lock(&v->lock);            // vma_lock -> v->lock (the established order)
+        struct page *resident =
+            (v->filepages && slot < v->page_count) ? v->filepages[slot] : NULL;
+        spin_unlock(&v->lock);
+        if (resident) {
+            // Resident hit (a re-fault, or a sibling faulter filled it): the page was
+            // charged when it was allocated -- do NOT charge again.
+            page_pa = page_to_pa(resident);
+            device_memory = false;
+            break;                      // -> step-5 PTE install
+        }
+
+        // Miss: charge the I-32 page_count BEFORE the alloc so page_count == true RSS
+        // and a cap-hit frees nothing. An over-PROC_PAGE_MAX commit on a non-TCB Proc
+        // fails the fault here -> the caller proc_fault_terminates (graceful OOM,
+        // never a box extinction -- I-32; the same backstop the eager attach gives at
+        // attach time, moved to fault time for the free reservation).
+        if (!proc_page_charge(p, 1))
+            return FAULT_UNHANDLED_USER;
+        struct page *newpg = alloc_pages(0, KP_ZERO);
+        if (!newpg) {
+            proc_page_uncharge(p, 1);
+            return FAULT_UNHANDLED_USER;    // OOM -> graceful per-Proc terminate
+        }
+
+        // Install-once into the slot. Under vma_lock (held by the caller across the
+        // whole demand_page_locked) no sibling faulter of this Proc can touch
+        // filepages -- they serialize on vma_lock -- so at v1.0 (one mapping, one
+        // Proc) the slot is still NULL here. The v->lock re-check + loser-free is the
+        // audited FILE-arm install-once shape, defensive against a future shared-lazy
+        // mapping; the loser branch is unreachable at v1.0.
+        struct page *winner;
+        struct page *loser = NULL;
+        spin_lock(&v->lock);
+        if (!v->filepages || slot >= v->page_count) {
+            spin_unlock(&v->lock);
+            free_pages(newpg, 0);
+            proc_page_uncharge(p, 1);
+            return FAULT_UNHANDLED_USER;    // impossible shape change; bail safe
+        }
+        if (v->filepages[slot]) {
+            winner = v->filepages[slot];    // a sibling won the race
+            loser  = newpg;
+        } else {
+            v->filepages[slot] = newpg;     // we win -- the Burrow owns newpg now
+            winner = newpg;
+        }
+        spin_unlock(&v->lock);
+        if (loser) {
+            free_pages(loser, 0);           // free OUTSIDE v->lock (leaf order)
+            proc_page_uncharge(p, 1);       // we double-charged; give it back
+        }
+        page_pa = page_to_pa(winner);
+        device_memory = false;
+        break;                              // -> step-5 PTE install (RW/XN, W^X-clean)
+    }
     case BURROW_TYPE_INVALID:
     default:
         return FAULT_UNHANDLED_USER;

@@ -65,6 +65,16 @@ void test_demand_page_file_read_error_snare_bus(void);
 void test_demand_page_file_multi_page(void);
 // REVENANT R-5 audit SA-F1: the slow path must LOOP over a short-returning read.
 void test_demand_page_file_short_read_fills_page(void);
+// Overcommit / I-32 (ARCH section 6.5): the BURROW_TYPE_ANON_LAZY demand-zero arm.
+void test_demand_page_lazy_zero_fill(void);
+void test_demand_page_lazy_decommit_refault(void);
+void test_demand_page_lazy_charge_on_fault_oom(void);
+void test_demand_page_lazy_detach_uncharges_resident(void);
+
+// The lazy attach/detach _for_proc inners (non-static cores in kernel/syscall.c),
+// driven directly -- the same pattern test_sys_burrow / test_resource use.
+extern s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw);
+extern s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw);
 
 #define USER_VA   0x10000000ull           // 256 MiB; well within user-half
 #define ONE_PAGE  PAGE_SIZE
@@ -595,4 +605,173 @@ void test_demand_page_file_short_read_fills_page(void) {
     g_rev_read_chunk = 0;            // reset (self-contained; siblings run with 0)
     drop_proc(p);
     burrow_unref(v);
+}
+
+// =============================================================================
+// Overcommit / I-32 (ARCH section 6.5): the BURROW_TYPE_ANON_LAZY demand-zero arm.
+//
+//   demand_page.lazy_zero_fill
+//     A lazy attach commits no pages; the first touch demand-zeroes one page,
+//     installs it RW/XN (W^X-clean), and charges page_count at FAULT time. A
+//     re-fault hits resident -- no double-charge.
+//   demand_page.lazy_decommit_refault
+//     burrow_decommit releases the resident pages (PTE cleared, page freed,
+//     page_count uncharged) but keeps the VMA; a later touch re-faults a fresh
+//     zero page + re-charges. No page leak across the whole cycle.
+//   demand_page.lazy_charge_on_fault_oom
+//     An over-PROC_PAGE_MAX commit fails the fault (FAULT_UNHANDLED_USER --
+//     graceful per-Proc terminate, NEVER an extinction) with no page committed +
+//     page_count unchanged (the charge rolled back).
+//   demand_page.lazy_detach_uncharges_resident
+//     SYS_BURROW_DETACH on a lazy region uncharges ONLY the resident pages (the
+//     lazy region charged per-fault, not the whole reservation span).
+// =============================================================================
+
+void test_demand_page_lazy_zero_fill(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+    struct Burrow *v = burrow_create_anon_lazy(FOUR_PAGES);
+    TEST_ASSERT(v != NULL, "burrow_create_anon_lazy failed");
+    int rc = burrow_map(p, v, USER_VA, FOUR_PAGES, VMA_PROT_RW);
+    TEST_EXPECT_EQ(rc, 0, "burrow_map RW lazy");
+
+    // No page committed yet: slot empty + page_count 0 (the free reservation).
+    TEST_ASSERT(burrow_lazy_slot_for_test(v, 0) == NULL, "slot 0 starts empty (lazy)");
+    TEST_EXPECT_EQ((u64)p->page_count, 0ull, "lazy attach charges no pages");
+
+    // Write-fault page 0 -> demand-zero install + charge-on-fault.
+    struct fault_info fi;
+    make_fi(&fi, USER_VA + 0x100, /*is_write=*/true, /*is_instr=*/false);
+    enum fault_result r = userland_demand_page(p, &fi);
+    TEST_EXPECT_EQ(r, FAULT_HANDLED, "lazy demand-page resolves a mapped VA");
+
+    struct page *slot = burrow_lazy_slot_for_test(v, 0);
+    TEST_ASSERT(slot != NULL, "slot 0 resident after fault");
+    TEST_EXPECT_EQ((u64)p->page_count, 1ull, "charge-on-fault: page_count == 1");
+    u8 *bytes = (u8 *)pa_to_kva(page_to_pa(slot));
+    TEST_EXPECT_EQ((u64)bytes[0], 0ull,             "demand-zero: byte 0 is zero");
+    TEST_EXPECT_EQ((u64)bytes[0x800], 0ull,         "demand-zero: mid byte is zero");
+    TEST_EXPECT_EQ((u64)bytes[PAGE_SIZE - 1], 0ull, "demand-zero: last byte is zero");
+
+    // PTE is RW/XN (W^X-clean: writable, never executable).
+    u64 pte = walk_to_l3_entry(p->pgtable_root, USER_VA);
+    TEST_ASSERT(pte != 0, "L3 PTE installed after lazy demand-page");
+    TEST_EXPECT_EQ(pte & 0x0000FFFFFFFFF000ull, page_to_pa(slot), "PTE PA = the resident slot page");
+    TEST_ASSERT((pte & BIT_PXN) != 0, "lazy page PXN (kernel never execs user)");
+    TEST_ASSERT((pte & BIT_UXN) != 0, "lazy page UXN (W^X: never executable)");
+    TEST_EXPECT_EQ(pte & BIT_AP_FIELD, BIT_AP_RW_ANY, "lazy page RW (AP_RW_ANY)");
+
+    // A second fault to the same page hits resident -- no double-charge.
+    make_fi(&fi, USER_VA + 0x40, /*is_write=*/false, /*is_instr=*/false);
+    r = userland_demand_page(p, &fi);
+    TEST_EXPECT_EQ(r, FAULT_HANDLED, "second fault to resident lazy page resolves");
+    TEST_EXPECT_EQ((u64)p->page_count, 1ull, "re-fault does NOT double-charge (still 1)");
+
+    // Other slots stay sparse (only the faulted page committed).
+    TEST_ASSERT(burrow_lazy_slot_for_test(v, 1) == NULL, "slot 1 sparse");
+    TEST_ASSERT(burrow_lazy_slot_for_test(v, 3) == NULL, "slot 3 sparse");
+
+    drop_proc(p);
+    burrow_unref(v);
+}
+
+void test_demand_page_lazy_decommit_refault(void) {
+    u64 free_before = phys_free_pages();
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+    struct Burrow *v = burrow_create_anon_lazy(FOUR_PAGES);
+    TEST_ASSERT(v != NULL, "burrow_create_anon_lazy");
+    int rc = burrow_map(p, v, USER_VA, FOUR_PAGES, VMA_PROT_RW);
+    TEST_EXPECT_EQ(rc, 0, "burrow_map lazy");
+
+    // Fault pages 0,1,2 (leave 3 sparse) -> page_count 3.
+    for (int i = 0; i < 3; i++) {
+        struct fault_info fi;
+        make_fi(&fi, USER_VA + (u64)i * ONE_PAGE + 0x10, /*is_write=*/true, /*is_instr=*/false);
+        TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_HANDLED, "fault page i");
+    }
+    TEST_EXPECT_EQ((u64)p->page_count, 3ull, "3 faulted pages charged");
+    TEST_ASSERT(burrow_lazy_slot_for_test(v, 2) != NULL, "slot 2 resident");
+    TEST_ASSERT(burrow_lazy_slot_for_test(v, 3) == NULL, "slot 3 sparse");
+
+    // Decommit the whole 4-page range (under vma_lock, like the syscall path).
+    spin_lock(&p->vma_lock);
+    int drc = burrow_decommit(p, USER_VA, FOUR_PAGES);
+    spin_unlock(&p->vma_lock);
+    TEST_EXPECT_EQ(drc, 0, "decommit succeeds");
+    TEST_EXPECT_EQ((u64)p->page_count, 0ull, "decommit uncharges the 3 resident pages");
+    TEST_ASSERT(burrow_lazy_slot_for_test(v, 0) == NULL, "slot 0 released");
+    TEST_ASSERT(burrow_lazy_slot_for_test(v, 2) == NULL, "slot 2 released");
+    TEST_ASSERT(walk_to_l3_entry(p->pgtable_root, USER_VA) == 0, "PTE cleared after decommit");
+
+    // Re-fault page 0 -> a FRESH zero page, re-charged.
+    struct fault_info fi;
+    make_fi(&fi, USER_VA + 0x20, /*is_write=*/false, /*is_instr=*/false);
+    TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_HANDLED, "re-fault after decommit");
+    TEST_EXPECT_EQ((u64)p->page_count, 1ull, "re-fault re-charges (1)");
+    struct page *slot = burrow_lazy_slot_for_test(v, 0);
+    TEST_ASSERT(slot != NULL, "slot 0 re-resident");
+    TEST_EXPECT_EQ((u64)((u8 *)pa_to_kva(page_to_pa(slot)))[0], 0ull, "re-faulted page is fresh-zero");
+
+    drop_proc(p);
+    burrow_unref(v);
+    TEST_EXPECT_EQ(phys_free_pages(), free_before,
+        "lazy fault + decommit + re-fault + teardown leaks no pages "
+        "(sparse pages freed; sub-tables freed by proc_pgtable_destroy)");
+}
+
+void test_demand_page_lazy_charge_on_fault_oom(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+    // A proc_alloc'd Proc is principal_id 0 (PRINCIPAL_INVALID) -> NOT exempt, so the
+    // I-32 page cap applies. Park page_count AT the cap so the next commit fails.
+    p->page_count = PROC_PAGE_MAX;
+
+    struct Burrow *v = burrow_create_anon_lazy(ONE_PAGE);
+    TEST_ASSERT(v != NULL, "burrow_create_anon_lazy");
+    int rc = burrow_map(p, v, USER_VA, ONE_PAGE, VMA_PROT_RW);
+    TEST_EXPECT_EQ(rc, 0, "burrow_map lazy");
+
+    // The fault tries to commit page #(PROC_PAGE_MAX+1) -> proc_page_charge refuses
+    // -> graceful per-Proc terminate (FAULT_UNHANDLED_USER), NEVER an extinction.
+    struct fault_info fi;
+    make_fi(&fi, USER_VA, /*is_write=*/true, /*is_instr=*/false);
+    enum fault_result r = userland_demand_page(p, &fi);
+    TEST_EXPECT_EQ(r, FAULT_UNHANDLED_USER, "over-cap commit fails the fault (graceful OOM)");
+    TEST_ASSERT(burrow_lazy_slot_for_test(v, 0) == NULL, "no page committed on a cap-hit");
+    TEST_ASSERT(walk_to_l3_entry(p->pgtable_root, USER_VA) == 0, "no PTE on a cap-hit");
+    TEST_EXPECT_EQ((u64)p->page_count, (u64)PROC_PAGE_MAX, "page_count unchanged (charge rolled back)");
+
+    p->page_count = 0;     // reset (hygiene; drop_proc doesn't touch page_count)
+    drop_proc(p);
+    burrow_unref(v);
+}
+
+void test_demand_page_lazy_detach_uncharges_resident(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    // Lazy-attach a 4-page region via the syscall path (commits nothing).
+    s64 r = sys_burrow_attach_lazy_for_proc(p, FOUR_PAGES);
+    TEST_ASSERT(r > 0, "lazy attach failed");
+    u64 va = (u64)r;
+    TEST_EXPECT_EQ((u64)p->page_count, 0ull, "lazy attach commits nothing");
+
+    // Fault 2 of the 4 pages resident -> page_count 2.
+    for (int i = 0; i < 2; i++) {
+        struct fault_info fi;
+        make_fi(&fi, va + (u64)i * ONE_PAGE + 0x8, /*is_write=*/true, /*is_instr=*/false);
+        TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_HANDLED, "fault lazy page i");
+    }
+    TEST_EXPECT_EQ((u64)p->page_count, 2ull, "2 resident pages charged");
+
+    // Detach the whole region. The uncharge must be ONLY the 2 RESIDENT pages -- the
+    // lazy region charged per-fault, NOT the whole 4-page span (the eager detach
+    // would over-uncharge by 2 if it used length/PAGE_SIZE here).
+    TEST_EXPECT_EQ(sys_burrow_detach_for_proc(p, va, FOUR_PAGES), 0, "detach lazy region");
+    TEST_EXPECT_EQ((u64)p->page_count, 0ull,
+        "detach uncharges exactly the 2 resident pages (NOT the whole 4-page span)");
+    TEST_ASSERT(vma_lookup(p, va) == NULL, "VMA gone after detach");
+
+    drop_proc(p);
 }

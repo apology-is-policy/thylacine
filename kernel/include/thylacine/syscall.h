@@ -1467,6 +1467,33 @@ enum {
     //   the burrow-attach window). -1 on: bad fd / not a dev9p file / Tweft
     //   failure (e.g. a server with no Tweft handler) / a bad share_id / OOM.
     SYS_WEFT_MAP = 82,     // arg: data_fd (x0), hint_va (x1)
+
+    // Overcommit / I-32 (ARCH section 6.5 "The overcommit model"). A DEDICATED
+    // lazy-attach syscall (user-voted 2026-06-23 over a flags-on-SYS_BURROW_ATTACH
+    // arg, for blast-radius discipline -- the eager SYS_BURROW_ATTACH = 37 stays a
+    // 1-arg syscall, byte-identical; the Plan 9 small-syscall idiom).
+    //
+    // SYS_BURROW_ATTACH_LAZY(length) -> vaddr / -1. The demand-ZERO twin of
+    //   SYS_BURROW_ATTACH: reserves a VA + VMA + a sparse BURROW_TYPE_ANON_LAZY
+    //   Burrow in the burrow-attach window but commits NO physical pages. Each page
+    //   faults in zero-filled (RW/XN, W^X-clean) on first touch, and the I-32
+    //   page_count is charged THERE (per page) -- the whole point is a free
+    //   reservation, so page_count tracks true RSS. The VMA-count axis (PROC_VMA_MAX)
+    //   IS charged at attach, so a free reservation cannot exhaust the vma slab.
+    //   -1 on: length == 0 / length > BURROW_ATTACH_MAX / no free gap / OOM. Same
+    //   page-rounding as SYS_BURROW_ATTACH.
+    SYS_BURROW_ATTACH_LAZY = 83,  // arg: length (x0)
+
+    // SYS_BURROW_DECOMMIT(vaddr, length) -> 0 / -1. The madvise(MADV_DONTNEED)
+    //   analog: release the resident pages backing [vaddr, vaddr+length) of a
+    //   BURROW_TYPE_ANON_LAZY mapping WITHOUT removing the VMA. Clears each PTE
+    //   (+ TLBI before the page frees to the buddy), frees the page, NULLs the sparse
+    //   slot, and uncharges page_count. The VMA + reservation stay; a later touch
+    //   re-faults a fresh zero page. Idempotent on never-faulted pages. Confined to
+    //   the burrow-attach window (like SYS_BURROW_DETACH); rejects a non-ANON_LAZY
+    //   VMA / a range outside one VMA. Backs the Go runtime's sysUnused (the GC
+    //   shrinks RSS). -1 on a bad range / wrong VMA type.
+    SYS_BURROW_DECOMMIT = 84,     // arg: vaddr (x0), length (x1)
 };
 
 // SYS_CLOCK_GETTIME clock ids. Values match Linux clockid_t so a future pouch

@@ -36,11 +36,14 @@ void test_sys_burrow_attach_rounds_up(void);
 void test_sys_burrow_attach_rejects_bad_length(void);
 void test_sys_burrow_detach_rejects(void);
 void test_sys_burrow_detach_window_confined(void);
+void test_sys_burrow_attach_lazy_window_va(void);
 
 // The non-static inners of the SVC handlers (defined in kernel/syscall.c).
 extern s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw);
 extern s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw,
                                       u64 length_raw);
+// Overcommit / I-32 (ARCH section 6.5): the demand-zero lazy attach.
+extern s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw);
 
 static void drop_proc(struct Proc *p) {
     if (!p) return;
@@ -227,4 +230,37 @@ void test_sys_burrow_detach_window_confined(void) {
     p->state = 2;                    // PROC_STATE_ZOMBIE
     proc_free(p);
     burrow_unref(burrow);
+}
+
+// Overcommit / I-32 (ARCH section 6.5): a lazy attach reserves a window VA + an
+// ANON_LAZY VMA but commits NO pages (page_count stays 0 -- the free reservation);
+// the I-32 VMA-count axis IS charged. The fault-side demand-zero behavior is covered
+// in test_demand_page (lazy_zero_fill / decommit_refault / charge_on_fault_oom).
+void test_sys_burrow_attach_lazy_window_va(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    s64 r = sys_burrow_attach_lazy_for_proc(p, PAGE_SIZE);
+    TEST_ASSERT(r > 0, "lazy attach returned a non-positive result");
+    u64 va = (u64)r;
+    TEST_ASSERT(in_window(va), "lazy attach VA outside the burrow window");
+    TEST_ASSERT((va & (PAGE_SIZE - 1)) == 0, "lazy attach VA not page-aligned");
+
+    struct Vma *vma = vma_lookup(p, va);
+    TEST_ASSERT(vma != NULL, "no VMA at the lazy-attached VA");
+    TEST_EXPECT_EQ(vma->vaddr_start, va,             "lazy VMA start == attach VA");
+    TEST_EXPECT_EQ(vma->vaddr_end,   va + PAGE_SIZE, "lazy VMA spans one page");
+    TEST_EXPECT_EQ(vma->prot,        VMA_PROT_RW,    "lazy VMA prot is RW");
+
+    // Tier 1: the VMA owns the Burrow -- mapping_count 1, handle_count 0.
+    struct Burrow *b = vma->burrow;
+    TEST_ASSERT(b != NULL, "lazy VMA has no backing Burrow");
+    TEST_EXPECT_EQ(burrow_mapping_count(b), 1, "lazy Burrow mapping_count == 1");
+    TEST_EXPECT_EQ(burrow_handle_count(b),  0, "lazy Burrow handle_count == 0");
+
+    // A lazy reservation commits no pages (page_count 0) but charges the VMA axis.
+    TEST_EXPECT_EQ((u64)p->page_count, 0ull, "lazy attach charges no pages (free reservation)");
+    TEST_EXPECT_EQ((u64)p->vma_count,  1ull, "lazy attach charges one VMA (I-32 4th axis)");
+
+    drop_proc(p);
 }

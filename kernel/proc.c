@@ -742,6 +742,29 @@ void proc_page_uncharge(struct Proc *p, u32 npages) {
     __atomic_store_n(&p->page_count, nv, __ATOMIC_RELEASE);
 }
 
+bool proc_vma_charge(struct Proc *p) {
+    if (!p) return false;
+    // Caller holds p->vma_lock (the vma_insert/vma_remove domain), so the load + the
+    // cap decision + the store are atomic against a sibling attach -> the VMA cap is
+    // EXACT. The atomic store keeps a lockless cross-Proc /proc reader coherent. The
+    // I-32 fourth axis: the bound a free SYS_BURROW_ATTACH_LAZY reservation needs.
+    u32 cur = __atomic_load_n(&p->vma_count, __ATOMIC_RELAXED);
+    if (cur == 0xFFFFFFFFu) return false;            // counter saturation (refuse)
+    if (!proc_resource_exempt(p) && cur >= PROC_VMA_MAX)
+        return false;                                // over cap -> vma_insert rejects
+    __atomic_store_n(&p->vma_count, cur + 1, __ATOMIC_RELEASE);
+    return true;
+}
+
+void proc_vma_uncharge(struct Proc *p) {
+    if (!p) return;
+    // Caller holds p->vma_lock. Clamp so an over-uncharge (every uncharge matches a
+    // charge) never wraps past 0.
+    u32 cur = __atomic_load_n(&p->vma_count, __ATOMIC_RELAXED);
+    u32 nv  = (cur > 0) ? cur - 1 : 0;
+    __atomic_store_n(&p->vma_count, nv, __ATOMIC_RELEASE);
+}
+
 bool proc_thread_cap_ok(struct Proc *p) {
     if (!p) return false;
     if (proc_resource_exempt(p)) return true;

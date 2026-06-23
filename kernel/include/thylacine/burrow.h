@@ -109,6 +109,20 @@ enum burrow_type {
     // BURROW_TYPE_ANON segment at exec (D4), so a FILE Burrow is read-only and
     // shareable across Procs (the Image's cross-Proc text share, R-3).
     BURROW_TYPE_FILE    = 4,
+    // Overcommit / I-32 (ARCH §6.5 "The overcommit model"; SYS_BURROW_ATTACH_LAZY):
+    // BURROW_TYPE_ANON_LAZY — backing is a `length`-byte ANONYMOUS region whose
+    // pages are demand-ZEROED one at a time on first touch. The structural twin of
+    // BURROW_TYPE_FILE but SIMPLER: there is no backing file, so the fault arm
+    // allocates + zero-fills + installs RW/XN ENTIRELY under vma_lock (no blocking
+    // read -> no slow path / no pin / no death-interruptible read). `pages` is NULL
+    // (no contiguous alloc_pages chunk); the per-page physical pages live in the
+    // sparse `filepages` array (the SAME field FILE uses), each slot NULL until
+    // faulted in (or after SYS_BURROW_DECOMMIT releases it). The I-32 page_count
+    // charge moves to FAULT time, per page — the whole point is a free reservation,
+    // so page_count tracks true committed RSS. No `spoor` (anon), no file/cache
+    // fields, no kobj. burrow_free_internal frees every resident page (order 0) +
+    // kfrees the array (mirrors the FILE arm, minus the spoor_clunk).
+    BURROW_TYPE_ANON_LAZY = 5,
 };
 
 struct page;
@@ -167,7 +181,7 @@ struct Burrow {
     u32               file_devno;   // FILE: cache key — backing devno    (sampled at create)
     u64               file_qid_path;// FILE: cache key — backing qid.path (sampled at create)
     u32               file_qid_vers;// FILE: cache key — backing qid.vers (coherence token)
-    struct page     **filepages;    // FILE: sparse [page_count]; slot NULL until faulted in
+    struct page     **filepages;    // FILE / ANON_LAZY: sparse [page_count]; slot NULL until faulted in
 };
 
 _Static_assert(__builtin_offsetof(struct Burrow, magic) == 0,
@@ -270,6 +284,20 @@ struct Burrow *burrow_create_dma(struct KObj_DMA *kobj_dma);
 //   - NULL spoor / corrupted spoor magic, burrow_init not run, length == 0,
 //     length overflow, SLUB OOM, or filepages-array OOM.
 struct Burrow *burrow_create_file(struct Spoor *spoor, u64 file_offset, size_t length);
+
+// Overcommit / I-32: burrow_create_anon_lazy — the demand-ZERO anonymous Burrow
+// (ARCH §6.5 "The overcommit model"; SYS_BURROW_ATTACH_LAZY). Reserves a `size`-byte
+// anonymous region (rounded up to whole pages) but allocates NO backing pages: each
+// page faults in zero-filled on first touch (the BURROW_TYPE_ANON_LAZY arm of
+// userland_demand_page), into the sparse `filepages` array allocated here
+// (page_count slots, all NULL). The structural twin of burrow_create_file minus the
+// backing Spoor — the simpler half (zero-fill, no read). handle_count starts at 1
+// (the construction reference, consumed by burrow_map -> burrow_unref transfer or
+// explicit unref); pages == NULL, order 0 (no contiguous chunk).
+//
+// Returns NULL on: burrow_init not run (extincts), size == 0, size overflow, SLUB
+// OOM, or filepages-array OOM.
+struct Burrow *burrow_create_anon_lazy(size_t size);
 
 // Increment handle_count. Maps to spec's HandleOpen action. Called by
 // handle_dup (and Phase 4's handle_transfer_via_9p) for KOBJ_BURROW
@@ -376,6 +404,39 @@ int burrow_map(struct Proc *p, struct Burrow *v, u64 vaddr, size_t length, u32 p
 int burrow_unmap(struct Proc *p, u64 vaddr, size_t length);
 
 // =============================================================================
+// Overcommit / I-32: lazy-anon decommit + resident-page accounting (ARCH §6.5).
+// =============================================================================
+
+// burrow_decommit: release the resident pages backing [vaddr, vaddr+length) of a
+// BURROW_TYPE_ANON_LAZY mapping WITHOUT removing the VMA — the
+// madvise(MADV_DONTNEED) analog (SYS_BURROW_DECOMMIT). For each page in range: if
+// resident, clear the leaf PTE (+ broadcast TLBI BEFORE the page is freed to the
+// buddy — the burrow_unmap / §"MMU user-PTE clear + TLBI" discipline), free the
+// page, NULL its sparse slot, and uncharge the I-32 page_count. The VMA + the
+// reservation stay; a later touch re-faults a fresh zero page. Idempotent on
+// never-faulted (already-NULL) slots. The range must fall WITHIN a single
+// BURROW_TYPE_ANON_LAZY VMA; any other type (ANON/FILE/MMIO/DMA) or a range
+// spanning / outside a VMA is rejected (-1, no-op).
+//
+// Returns 0 on success (>= 0 pages released), -1 on a bad range / wrong VMA type.
+//
+// PRECONDITION: the caller MUST hold p->vma_lock (a p->vmas reader + a filepages
+// mutator — the #713 discipline, like burrow_unmap). Decommit relies on vma_lock
+// excluding concurrent faulters from filepages (the single-mapping invariant), so
+// the sparse-slot read/NULL is safe; free_pages runs under vma_lock (the
+// established attach/unmap order), never under v->lock. Lock order vma_lock ->
+// v->lock for the per-slot read/NULL.
+int burrow_decommit(struct Proc *p, u64 vaddr, size_t length);
+
+// burrow_lazy_resident_count: the number of resident (faulted-in, not-decommitted)
+// pages in a BURROW_TYPE_ANON_LAZY Burrow — the count SYS_BURROW_DETACH uncharges
+// from page_count (a lazy region charged page_count per FAULT, so a full detach
+// uncharges only the resident pages, not the whole reservation). Counts non-NULL
+// filepages slots under v->lock (lock order vma_lock -> v->lock; the caller holds
+// vma_lock). Returns 0 for a NULL / corrupted / non-ANON_LAZY Burrow.
+u32 burrow_lazy_resident_count(const struct Burrow *v);
+
+// =============================================================================
 // Weft-2 / I-37: cross-Proc Burrow share (the per-flow dataplane ring).
 // =============================================================================
 
@@ -435,6 +496,10 @@ void   burrow_file_install_page_for_test(struct Burrow *v, size_t idx);
 // REVENANT R-2: the page resident in filepages[idx] (NULL if not faulted in or
 // out of range) -- lets the demand-page tests verify the PTE target + content.
 struct page *burrow_file_slot_for_test(const struct Burrow *v, size_t idx);
+// Overcommit: the page resident in an ANON_LAZY Burrow's filepages[idx] (NULL if
+// not faulted in / decommitted / out of range) -- lets the lazy-fault tests verify
+// the demand-zero install + the decommit release. Extincts on a non-ANON_LAZY Burrow.
+struct page *burrow_lazy_slot_for_test(const struct Burrow *v, size_t idx);
 #endif
 
 #endif // THYLACINE_VMO_H

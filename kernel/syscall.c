@@ -3495,16 +3495,25 @@ s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
     if (vaddr_raw > EXEC_USER_BURROW_TOP - length)   return -1;
 
     spin_lock(&p->vma_lock);
+    // #65 (I-32): the uncharge must MATCH the charge. An EAGER attach charged
+    // length/PAGE_SIZE at attach; a LAZY attach (SYS_BURROW_ATTACH_LAZY) charged only
+    // the FAULTED-in pages (per-page, at fault time -- ARCH §6.5 overcommit). Read
+    // the VMA type + resident count BEFORE burrow_unmap frees the VMA/Burrow; under
+    // vma_lock so the count is stable. (For a wrong-base/length detach, burrow_unmap
+    // returns -1 and the uncharge is skipped.)
+    struct Vma *dvma = vma_lookup(p, vaddr_raw);
+    u32 uncharge = (u32)(length / PAGE_SIZE);    // eager default (the whole span)
+    if (dvma && dvma->burrow && dvma->burrow->magic == VMO_MAGIC &&
+        dvma->burrow->type == BURROW_TYPE_ANON_LAZY)
+        uncharge = burrow_lazy_resident_count(dvma->burrow);   // lazy: only the resident
+
     // burrow_unmap exact-matches [vaddr, vaddr + length) against an
     // installed VMA (no partial detach at v1.0), removes it, and frees
-    // the Burrow's pages — mapping_count reaches 0 with handle_count
-    // already 0.
+    // the Burrow's pages -- for an ANON_LAZY Burrow that is the resident
+    // sparse slots (burrow_free_internal's ANON_LAZY arm).
     int rc = burrow_unmap(p, vaddr_raw, length);
-    // #65 (I-32): uncharge the anon-page floor ONLY on a successful unmap (rc==0
-    // means the pages were freed); the same rounded length that attach charged.
-    // Under vma_lock, so it pairs exactly with the charge.
-    if (rc == 0)
-        proc_page_uncharge(p, (u32)(length / PAGE_SIZE));
+    if (rc == 0 && uncharge)
+        proc_page_uncharge(p, uncharge);
     spin_unlock(&p->vma_lock);
 
     return (s64)rc;
@@ -3514,6 +3523,100 @@ static s64 sys_burrow_detach_handler(u64 vaddr_raw, u64 length_raw) {
     struct Thread *t = current_thread();
     if (!t)                                          return -1;
     return sys_burrow_detach_for_proc(t->proc, vaddr_raw, length_raw);
+}
+
+// =============================================================================
+// Overcommit / I-32 (ARCH §6.5 "The overcommit model"): the demand-zero lazy attach
+// + decommit. The eager SYS_BURROW_ATTACH / SYS_BURROW_DETACH above are byte-
+// unchanged; these are additive (SYS_BURROW_ATTACH_LAZY = 83 / SYS_BURROW_DECOMMIT =
+// 84). The contract reaches every program through the two malloc substrates
+// (libthyla-rs sysAlloc + the pouch boundary-line mmap) + the Go runtime's
+// sysReserve/sysUnused (#321).
+// =============================================================================
+
+// SYS_BURROW_ATTACH_LAZY: the demand-zero twin of sys_burrow_attach_for_proc. Same
+// window placement + VMA install, but (a) the Burrow is BURROW_TYPE_ANON_LAZY (no
+// eager pages), and (b) the I-32 page_count is NOT charged here -- it is charged per
+// page at FAULT time (the whole point of a free reservation, so page_count tracks
+// true RSS). The VMA-count axis (PROC_VMA_MAX) IS charged inside vma_insert, so a
+// free lazy reservation cannot exhaust the vma slab.
+s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw) {
+    if (!p)                                          return -1;
+    if (length_raw == 0)                             return -1;
+    if (length_raw > BURROW_ATTACH_MAX)              return -1;
+
+    u64 length = (length_raw + (PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1);
+
+    spin_lock(&p->vma_lock);
+
+    u64 vaddr;
+    if (vma_find_gap(p, length, EXEC_USER_BURROW_BASE,
+                     EXEC_USER_BURROW_TOP, &vaddr) != 0) {
+        spin_unlock(&p->vma_lock);
+        return -1;
+    }
+
+    // No proc_page_charge here -- lazy reservations commit (and charge) per page at
+    // fault time. The VMA-count cap (vma_insert -> proc_vma_charge) is the bound on
+    // the free reservation; a non-TCB Proc at PROC_VMA_MAX fails burrow_map below.
+    struct Burrow *b = burrow_create_anon_lazy(length);
+    if (!b) {
+        spin_unlock(&p->vma_lock);
+        return -1;
+    }
+
+    // burrow_map installs the VMA (vma_alloc -> burrow_acquire_mapping; mapping_count
+    // -> 1; vma_insert -> proc_vma_charge). Then drop the construction handle:
+    // handle_count -> 0, mapping_count = 1 keeps the Burrow alive (Tier 1). On
+    // burrow_map failure (overlap / vma-cap / OOM) the construction handle is the
+    // only ref; burrow_unref frees the empty lazy Burrow (no pages committed).
+    if (burrow_map(p, b, vaddr, length, VMA_PROT_RW) != 0) {
+        burrow_unref(b);
+        spin_unlock(&p->vma_lock);
+        return -1;
+    }
+    burrow_unref(b);
+
+    spin_unlock(&p->vma_lock);
+    return (s64)vaddr;
+}
+
+static s64 sys_burrow_attach_lazy_handler(u64 length_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    return sys_burrow_attach_lazy_for_proc(t->proc, length_raw);
+}
+
+// SYS_BURROW_DECOMMIT: release the resident pages of a BURROW_TYPE_ANON_LAZY mapping
+// WITHOUT removing the VMA (the madvise(MADV_DONTNEED) analog). Confined to the
+// burrow-attach window (the SYS_BURROW_DETACH discipline -- a decommit only makes
+// sense on a lazy attach region, all of which live in the window); burrow_decommit
+// additionally rejects any non-ANON_LAZY VMA + a range not within one VMA.
+s64 sys_burrow_decommit_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
+    if (!p)                                          return -1;
+    if (length_raw == 0)                             return -1;
+    if (length_raw > BURROW_ATTACH_MAX)              return -1;
+    if (vaddr_raw & (PAGE_SIZE - 1))                 return -1;
+
+    u64 length = (length_raw + (PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1);
+
+    // Window confinement (matches SYS_BURROW_DETACH): overflow-safe since
+    // length <= BURROW_ATTACH_MAX, far below EXEC_USER_BURROW_TOP.
+    if (vaddr_raw < EXEC_USER_BURROW_BASE)           return -1;
+    if (vaddr_raw > EXEC_USER_BURROW_TOP - length)   return -1;
+
+    spin_lock(&p->vma_lock);
+    // burrow_decommit does the per-page PTE clear (+ TLBI before free) + page free +
+    // page_count uncharge, and rejects a non-ANON_LAZY / out-of-VMA range.
+    int rc = burrow_decommit(p, vaddr_raw, length);
+    spin_unlock(&p->vma_lock);
+    return (s64)rc;
+}
+
+static s64 sys_burrow_decommit_handler(u64 vaddr_raw, u64 length_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    return sys_burrow_decommit_for_proc(t->proc, vaddr_raw, length_raw);
 }
 
 // =============================================================================
@@ -6491,6 +6594,15 @@ void syscall_dispatch(struct exception_context *ctx) {
     case SYS_BURROW_DETACH:
         ctx->regs[0] = (u64)sys_burrow_detach_handler(ctx->regs[0],
                                                       ctx->regs[1]);
+        return;
+
+    case SYS_BURROW_ATTACH_LAZY:
+        ctx->regs[0] = (u64)sys_burrow_attach_lazy_handler(ctx->regs[0]);
+        return;
+
+    case SYS_BURROW_DECOMMIT:
+        ctx->regs[0] = (u64)sys_burrow_decommit_handler(ctx->regs[0],
+                                                        ctx->regs[1]);
         return;
 
     case SYS_LOOM_SETUP:

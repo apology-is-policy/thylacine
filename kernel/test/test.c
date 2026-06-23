@@ -151,6 +151,7 @@ void test_resource_child_cap_ok(void);
 void test_resource_child_count_tracks_list(void);
 void test_resource_child_count_rfork_reap(void);
 void test_resource_page_cap_attach_enforced(void);
+void test_resource_vma_cap(void);
 
 void test_exec_ns_resolve_absolute_ok(void);
 void test_exec_ns_resolve_relative_ok(void);
@@ -266,6 +267,10 @@ void test_demand_page_file_smoke(void);
 void test_demand_page_file_read_error_snare_bus(void);
 void test_demand_page_file_multi_page(void);
 void test_demand_page_file_short_read_fills_page(void);
+void test_demand_page_lazy_zero_fill(void);
+void test_demand_page_lazy_decommit_refault(void);
+void test_demand_page_lazy_charge_on_fault_oom(void);
+void test_demand_page_lazy_detach_uncharges_resident(void);
 void test_exec_setup_smoke(void);
 void test_exec_setup_segment_data_copied(void);
 void test_exec_setup_constraints(void);
@@ -316,6 +321,7 @@ void test_sys_burrow_attach_rounds_up(void);
 void test_sys_burrow_attach_rejects_bad_length(void);
 void test_sys_burrow_detach_rejects(void);
 void test_sys_burrow_detach_window_confined(void);
+void test_sys_burrow_attach_lazy_window_va(void);
 void test_torpor_wait_rejects_bad_args(void);
 void test_torpor_wait_rejects_unmapped_va(void);
 void test_torpor_wake_rejects_bad_args(void);
@@ -1202,6 +1208,7 @@ struct test_case g_tests[] = {
     { "namespace_layout.proc_ctl_cross", test_namespace_layout_proc_ctl_cross, false, NULL },
     { "resource.page_cap_attach_enforced",
                                        test_resource_page_cap_attach_enforced, false, NULL },
+    { "resource.vma_cap",              test_resource_vma_cap,              false, NULL },
     { "proc_identity.kproc_is_system", test_proc_identity_kproc_is_system, false, NULL },
     { "proc_identity.rfork_inherits",  test_proc_identity_rfork_inherits,  false, NULL },
     { "proc_identity.apply_sets_fields",
@@ -1341,6 +1348,13 @@ struct test_case g_tests[] = {
     { "demand_page.file_multi_page",   test_demand_page_file_multi_page,   false, NULL },
     { "demand_page.file_short_read_fills_page",
                                        test_demand_page_file_short_read_fills_page, false, NULL },
+    { "demand_page.lazy_zero_fill",    test_demand_page_lazy_zero_fill,    false, NULL },
+    { "demand_page.lazy_decommit_refault",
+                                       test_demand_page_lazy_decommit_refault, false, NULL },
+    { "demand_page.lazy_charge_on_fault_oom",
+                                       test_demand_page_lazy_charge_on_fault_oom, false, NULL },
+    { "demand_page.lazy_detach_uncharges_resident",
+                                       test_demand_page_lazy_detach_uncharges_resident, false, NULL },
     { "exec.setup_smoke",              test_exec_setup_smoke,              false, NULL },
     { "exec.setup_segment_data_copied",
                                        test_exec_setup_segment_data_copied,
@@ -1421,6 +1435,7 @@ struct test_case g_tests[] = {
     { "sys_burrow.attach_rejects_bad_length", test_sys_burrow_attach_rejects_bad_length, false, NULL },
     { "sys_burrow.detach_rejects",            test_sys_burrow_detach_rejects,            false, NULL },
     { "sys_burrow.detach_window_confined",    test_sys_burrow_detach_window_confined,    false, NULL },
+    { "sys_burrow.attach_lazy_window_va",     test_sys_burrow_attach_lazy_window_va,     false, NULL },
     { "torpor.wait_rejects_bad_args",          test_torpor_wait_rejects_bad_args,          false, NULL },
     { "torpor.wait_rejects_unmapped_va",       test_torpor_wait_rejects_unmapped_va,       false, NULL },
     { "torpor.wake_rejects_bad_args",          test_torpor_wake_rejects_bad_args,          false, NULL },

@@ -105,6 +105,14 @@ struct Allowance;   // I-34 hardware allowance (<thylacine/allowance.h>)
 #define PROC_PAGE_MAX   65536u   // 256 MiB at 4-KiB pages
 #define PROC_THREAD_MAX 256
 #define PROC_CHILD_MAX  256
+// PROC_VMA_MAX -- live VMAs (the I-32 FOURTH axis; overcommit, ARCH section 6.5).
+// The Linux vm.max_map_count analog. The eager attach path is already transitively
+// bounded (each VMA charges >=1 page, so PROC_PAGE_MAX caps eager VMAs), but a FREE
+// lazy reservation (SYS_BURROW_ATTACH_LAZY -- uncharged at attach) reopens a
+// VMA-slab DoS this axis closes. Charged at vma_insert / uncharged at vma_remove,
+// both under p->vma_lock; TCB-exempt. 65536 * sizeof(struct Vma) (64 B) = 4 MiB of
+// Vma slab is the per-Proc ceiling.
+#define PROC_VMA_MAX    65536u
 
 struct Proc {
     u64               magic;            // PROC_MAGIC
@@ -436,6 +444,18 @@ struct Proc {
     // reduction, I-2); freed by proc_free (allowance_free). KP_ZERO inits it
     // NULL (broad/none). See <thylacine/allowance.h>.
     struct Allowance  *allowance;
+
+    // I-32 FOURTH axis (overcommit, ARCH section 6.5): live VMA count -- the DoS
+    // bound a free (uncharged-at-attach) SYS_BURROW_ATTACH_LAZY reservation needs
+    // (eager self-limits at ~PROC_PAGE_MAX VMAs since each charges >=1 page). ++ at
+    // vma_insert (gated on PROC_VMA_MAX unless exempt), -- at vma_remove, both under
+    // p->vma_lock (the VMA-list mutation domain) -> the cap is EXACT. Counted
+    // uniformly for every VMA (attach / exec image / guard / DMA / Weft share). NOT
+    // propagated by rfork (KP_ZERO -> 0). PRINCIPAL_SYSTEM is exempt from the CAP
+    // (the count is still maintained for observability). External /proc readers use
+    // __atomic_load_n (a coherent snapshot). Like page_count, it is a resource axis,
+    // not a privilege axis (orthogonal to I-22).
+    u32                vma_count;
 };
 
 #define PROC_FLAG_NODUMP            (1u << 0)
@@ -480,11 +500,14 @@ struct Proc {
 // thread, and an armed kproc would *_INTR every kernel-thread sleep).
 #define PROC_FLAG_INTR_TERMINATE_PENDING (1u << 7)
 
-_Static_assert(sizeof(struct Proc) == 280,
-               "struct Proc size pinned at 280 bytes (the #65 272 baseline + "
-               "the I-34 hardware-allowance pointer = 8 -> 280). Adding a field "
-               "grows the SLUB cache; update this assert deliberately so the "
+_Static_assert(sizeof(struct Proc) == 288,
+               "struct Proc size pinned at 288 bytes (the I-34 280 baseline + the "
+               "I-32 fourth-axis vma_count u32 @280 = 4 + 4 tail pad -> 288). Adding "
+               "a field grows the SLUB cache; update this assert deliberately so the "
                "change is intentional.");
+_Static_assert(__builtin_offsetof(struct Proc, vma_count) == 280,
+               "I-32 fourth-axis vma_count appends after the I-34 allowance pointer "
+               "(offset 280); existing offsets stay stable (KP_ZERO inits it 0).");
 _Static_assert(__builtin_offsetof(struct Proc, page_count) == 264,
                "#65 resource-floor counters append after the A-4a legate "
                "block; existing offsets stay stable (KP_ZERO inits them 0).");
@@ -559,6 +582,16 @@ bool proc_resource_exempt(const struct Proc *p);
 //   overflow. uncharge clamp-subtracts (never underflows past 0).
 bool proc_page_charge(struct Proc *p, u32 npages);
 void proc_page_uncharge(struct Proc *p, u32 npages);
+
+// proc_vma_charge / proc_vma_uncharge -- the live-VMA counter (I-32 FOURTH axis;
+//   the overcommit VMA-slab DoS bound). The CALLER MUST HOLD p->vma_lock (the
+//   vma_insert/vma_remove domain), so the check + charge is atomic against a
+//   sibling attach and the cap is EXACT. charge returns true (and ++vma_count) if
+//   the Proc is exempt OR vma_count < PROC_VMA_MAX; false (charging nothing) if it
+//   would exceed (the vma_insert caller rejects with -1, like an overlap) or the
+//   counter would saturate. uncharge clamp-decrements (never underflows past 0).
+bool proc_vma_charge(struct Proc *p);
+void proc_vma_uncharge(struct Proc *p);
 
 // proc_thread_cap_ok -- the thread-spawn gate. Returns true if the Proc is
 //   exempt OR thread_count < PROC_THREAD_MAX. Takes g_proc_table_lock for the
