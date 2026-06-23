@@ -434,7 +434,7 @@ int burrow_decommit(struct Proc *p, u64 vaddr, size_t length);
 // uncharges only the resident pages, not the whole reservation). Counts non-NULL
 // filepages slots under v->lock (lock order vma_lock -> v->lock; the caller holds
 // vma_lock). Returns 0 for a NULL / corrupted / non-ANON_LAZY Burrow.
-u32 burrow_lazy_resident_count(const struct Burrow *v);
+u32 burrow_lazy_resident_count(struct Burrow *v);
 
 // =============================================================================
 // Weft-2 / I-37: cross-Proc Burrow share (the per-flow dataplane ring).

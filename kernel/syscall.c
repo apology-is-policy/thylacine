@@ -3543,7 +3543,11 @@ static s64 sys_burrow_detach_handler(u64 vaddr_raw, u64 length_raw) {
 s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw) {
     if (!p)                                          return -1;
     if (length_raw == 0)                             return -1;
-    if (length_raw > BURROW_ATTACH_MAX)              return -1;
+    // BURROW_RESERVE_MAX (1 GiB), NOT BURROW_ATTACH_MAX (256 MiB): a lazy reservation
+    // commits no data pages, so the eager-sized bound would defeat the purpose
+    // (audit F1; Go-stock reserves a ~512-MiB page-summary). page_count (at fault) +
+    // PROC_VMA_MAX bound the real resource use.
+    if (length_raw > BURROW_RESERVE_MAX)             return -1;
 
     u64 length = (length_raw + (PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1);
 
@@ -3595,7 +3599,9 @@ static s64 sys_burrow_attach_lazy_handler(u64 length_raw) {
 s64 sys_burrow_decommit_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
     if (!p)                                          return -1;
     if (length_raw == 0)                             return -1;
-    if (length_raw > BURROW_ATTACH_MAX)              return -1;
+    // BURROW_RESERVE_MAX, not BURROW_ATTACH_MAX -- a lazy region can be up to the
+    // reservation max, so a decommit range may span up to that (audit F1).
+    if (length_raw > BURROW_RESERVE_MAX)             return -1;
     if (vaddr_raw & (PAGE_SIZE - 1))                 return -1;
 
     u64 length = (length_raw + (PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1);

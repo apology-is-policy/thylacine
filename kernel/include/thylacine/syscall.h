@@ -1940,6 +1940,21 @@ _Static_assert((SYS_WALK_CREATE_DMSRVBYTE &
 // page-rounding so `length + PAGE_SIZE` cannot overflow.
 #define BURROW_ATTACH_MAX  (256u * 1024u * 1024u)
 
+// Overcommit / I-32 (ARCH §6.5): the maximum length for a single LAZY reservation
+// (SYS_BURROW_ATTACH_LAZY). DISTINCT from BURROW_ATTACH_MAX because a lazy
+// reservation commits NO data pages at attach -- the eager 256-MiB bound (sized for
+// the committed allocation) would defeat the whole purpose (Go's stock 64-bit page
+// allocator reserves a ~512-MiB page-summary; #321). The real bounds on a lazy
+// region's resource use are page_count (charged at FAULT, per touched page) +
+// PROC_VMA_MAX (the slab DoS) -- NOT the reservation byte size. 1 GiB is 2x Go-stock
+// with headroom; the only eager cost is the sparse `filepages` array (8 B / reserved
+// page -> 2 MiB for 1 GiB, a kmalloc -> alloc_pages order-9, within MAX_ORDER 18).
+// v1.x SEAM: the flat eager `filepages` array is UNCHARGED kernel memory and does not
+// scale to huge reservations -- a per-Proc array-DoS bounded today only by graceful-
+// OOM (alloc fails -> attach -1) + PROC_VMA_MAX; the fix is a charged radix/sparse
+// metadata structure (the Linux page-table-radix shape), which also lifts this cap.
+#define BURROW_RESERVE_MAX  (1024ull * 1024ull * 1024ull)
+
 // SYS_SPAWN_FULL_ARGV argument record (P6-pouch-stratumd-boot sub-chunk
 // 16b-alpha). The caller fills this in user memory and passes its
 // user-VA in x0; the kernel uaccess-copies the struct, then each

@@ -693,16 +693,18 @@ int burrow_decommit(struct Proc *p, u64 vaddr, size_t length) {
 // pages in an ANON_LAZY Burrow -- the amount SYS_BURROW_DETACH uncharges (a lazy
 // region charged page_count per FAULT, so a full detach uncharges only the resident
 // pages). Read under v->lock (caller holds vma_lock; order vma_lock -> v->lock).
-u32 burrow_lazy_resident_count(const struct Burrow *v) {
+// NOT const-qualified: it TAKES v->lock (a logically-const observation that
+// nonetheless mutates the lock word -- audit F3, dropping the const-cast).
+u32 burrow_lazy_resident_count(struct Burrow *v) {
     if (!v || v->magic != VMO_MAGIC)        return 0;
     if (v->type != BURROW_TYPE_ANON_LAZY)   return 0;
     u32 n = 0;
-    spin_lock(&((struct Burrow *)v)->lock);
+    spin_lock(&v->lock);
     if (v->filepages) {
         for (size_t i = 0; i < v->page_count; i++)
             if (v->filepages[i]) n++;
     }
-    spin_unlock(&((struct Burrow *)v)->lock);
+    spin_unlock(&v->lock);
     return n;
 }
 

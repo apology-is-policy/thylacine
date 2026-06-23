@@ -49,8 +49,14 @@ matches the Plan 9 small-syscall idiom that already splits `ATTACH`/`DETACH`.
 - **`SYS_BURROW_ATTACH_LAZY(length)`** — reserve a `length`-byte (page-rounded)
   anonymous region in the burrow-attach window. No physical pages are
   committed; the I-32 `page_count` is **not** charged here. Returns the
-  kernel-chosen base VA. -1 on `length == 0`, `length > BURROW_ATTACH_MAX`, no
-  free gap, the VMA cap (`PROC_VMA_MAX`), or OOM.
+  kernel-chosen base VA. -1 on `length == 0`, `length > BURROW_RESERVE_MAX`
+  (**1 GiB** — DISTINCT from the eager `BURROW_ATTACH_MAX` of 256 MiB: a lazy
+  reservation commits no data pages, so it is bounded by `page_count`-at-fault +
+  `PROC_VMA_MAX`, not the reservation byte size; reusing the 256-MiB eager cap
+  would block Go-stock's ~512-MiB page-summary reserve — audit F1), no free gap,
+  the VMA cap (`PROC_VMA_MAX`), or OOM. The only eager cost of a large reservation
+  is the sparse `filepages` array (8 B / reserved page); the flat array is the
+  v1.x radix-structure SEAM that lifts this cap (see Known caveats).
 - **`SYS_BURROW_DECOMMIT(vaddr, length)`** — release the resident pages of a
   `BURROW_TYPE_ANON_LAZY` region in `[vaddr, vaddr+length)` without removing
   the VMA. Clears each PTE (+ TLBI before the page frees), frees the page,
@@ -199,6 +205,14 @@ Full suite: **992/992 PASS** (986 + these 6), 0 EXTINCTION, boot OK.
   translation when it returns — holds either way).
 - The unconditional migration of *every* `SYS_BURROW_ATTACH` to demand-zero is
   a recorded v1.x follow-up (it would re-audit Weft/Loom/exec-data callers).
+- **The flat `filepages` array is eager + uncharged kernel memory** (8 B per
+  reserved page, kmalloc'd at attach), so it does not scale to huge reservations
+  and `BURROW_RESERVE_MAX` (1 GiB) is the v1.0 ceiling. A per-Proc array-DoS
+  (`PROC_VMA_MAX` reservations × the array size) is bounded today only by
+  graceful-OOM (`alloc_pages` fails → attach -1) + `PROC_VMA_MAX` — never a box
+  extinction, but real kernel-memory pressure. The v1.x fix is a **charged
+  radix/sparse metadata structure** (the Linux page-table-radix shape), which
+  also lifts the reservation cap. (Audit F1's deeper implication; tracked.)
 
 ## Spec cross-reference
 

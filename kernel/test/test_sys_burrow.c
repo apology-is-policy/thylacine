@@ -264,3 +264,33 @@ void test_sys_burrow_attach_lazy_window_va(void) {
 
     drop_proc(p);
 }
+
+// Audit F1 regression: a LAZY reservation must NOT be capped at the eager
+// BURROW_ATTACH_MAX (256 MiB) -- a lazy region commits no pages at attach, so the
+// reservation can be large (Go-stock reserves a ~512-MiB page-summary). The lazy
+// cap is BURROW_RESERVE_MAX (1 GiB). Pre-fix, the lazy attach reused the 256-MiB
+// eager cap and -1'd a 512-MiB reservation, making the #321 Go-stock proof impossible.
+void test_sys_burrow_attach_lazy_large(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    // 512 MiB -- ABOVE the eager 256-MiB cap, BELOW the 1-GiB reservation cap. The
+    // eager SYS_BURROW_ATTACH would -1 this; the lazy attach must SUCCEED, committing
+    // NO pages (the free reservation -> page_count stays 0).
+    const u64 BIG = 512ull * 1024 * 1024;
+    s64 r = sys_burrow_attach_lazy_for_proc(p, BIG);
+    TEST_ASSERT(r > 0, "lazy attach of 512 MiB (> BURROW_ATTACH_MAX) must succeed");
+    u64 va = (u64)r;
+    TEST_ASSERT(in_window(va), "big lazy attach VA in the burrow window");
+    struct Vma *vma = vma_lookup(p, va);
+    TEST_ASSERT(vma != NULL && vma->vaddr_end - vma->vaddr_start == BIG,
+        "the 512-MiB VMA spans the whole reservation");
+    TEST_EXPECT_EQ((u64)p->page_count, 0ull,
+        "a 512-MiB lazy reservation commits NO pages (page_count 0)");
+
+    // Above BURROW_RESERVE_MAX (1 GiB) is still rejected (the lazy reservation cap).
+    TEST_EXPECT_EQ(sys_burrow_attach_lazy_for_proc(p, BURROW_RESERVE_MAX + PAGE_SIZE),
+                   -1L, "lazy attach above BURROW_RESERVE_MAX rejected");
+
+    drop_proc(p);
+}

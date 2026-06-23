@@ -452,9 +452,10 @@ struct Proc {
     // p->vma_lock (the VMA-list mutation domain) -> the cap is EXACT. Counted
     // uniformly for every VMA (attach / exec image / guard / DMA / Weft share). NOT
     // propagated by rfork (KP_ZERO -> 0). PRINCIPAL_SYSTEM is exempt from the CAP
-    // (the count is still maintained for observability). External /proc readers use
-    // __atomic_load_n (a coherent snapshot). Like page_count, it is a resource axis,
-    // not a privilege axis (orthogonal to I-22).
+    // (the count is still maintained for observability). All accesses use __atomic_*;
+    // a FUTURE /proc reader (none is wired at this commit -- audit F2) MUST use
+    // __atomic_load_n for a coherent cross-Proc snapshot, as page_count's reader does.
+    // Like page_count, it is a resource axis, not a privilege axis (orthogonal to I-22).
     u32                vma_count;
 };
 
