@@ -1977,6 +1977,18 @@ impl Net {
         let listened = self.set_mut(n).get_mut::<tcp::Socket>(h).listen(ep).is_ok();
         if listened {
             self.slots[n as usize].listen_ep = Some(ep);
+            // Record the bound local endpoint so `/net/tcp/N/local` reports the
+            // listen address. A plan9 net client (Go's net.Listen, via
+            // listenPlan9 -> readPlan9Addr) reads `local` immediately after
+            // `announce`; without this it sees an empty file -> EOF. A wildcard
+            // announce (addr None) binds 0.0.0.0. (The native libthyla-rs client
+            // never read `local` post-announce, so this gap stayed latent until
+            // the Go port exercised the full Plan 9 listen sequence.)
+            let local_ip = match ep.addr {
+                Some(IpAddress::Ipv4(a)) => a.octets(),
+                _ => [0u8; 4],
+            };
+            self.slots[n as usize].local = Some((local_ip, ep.port));
             self.slots[n as usize].err = None;
             Ok(())
         } else {

@@ -4842,6 +4842,48 @@ int main(void) {
                     t_putstr("joey: go-exec reaped status=0 -- GOOS=thylacine Stage 3b (os/exec) RUNS in-VM\n");
                 }
             }
+
+            // === Go Stage 3c: net (/go-net) ===
+            // The GOOS=thylacine Go-port Stage-3c proof: a Go binary driving the
+            // plan9-shaped net package over netd's /net, end-to-end. It
+            // net.Listen("tcp", "127.0.0.1:9099") (queryCS1 -> /net/cs -> open
+            // clone -> announce), spawns an accept goroutine (blocking
+            // open(/net/tcp/N/listen) on the entersyscall path), net.Dial()s the
+            // same endpoint (connect -> data), then round-trips a payload and
+            // verifies the echo. netd migrates the explicit 127.0.0.1 endpoint
+            // onto the resident lo (net-8a), so the exchange stays in-guest --
+            // the net-8b round-trip, driven by Go. /net is mounted (net-2c-1,
+            // above) and the lo path is proven by the native net-8 probe.
+            //
+            // Same /dev/cons stdio wiring. GATING: a non-zero exit, fault, or
+            // the 20 s in-probe watchdog FAILS the boot -- the Stage-3c
+            // regression sentinel. Fork-absent -> graceful skip.
+            {
+                const char go_net_name[] = "/bin/go-net";  // #58: post-pivot /bin bind
+                long gn_cfd = t_console_open();
+                long gn_pid;
+                if (gn_cfd >= 0) {
+                    unsigned int gn_fds[3] = { (unsigned int)gn_cfd,
+                                               (unsigned int)gn_cfd,
+                                               (unsigned int)gn_cfd };
+                    gn_pid = t_spawn_with_fds(go_net_name, sizeof(go_net_name) - 1,
+                                              gn_fds, 3);
+                    (void)t_close(gn_cfd);
+                } else {
+                    gn_pid = t_spawn(go_net_name, sizeof(go_net_name) - 1);
+                }
+                if (gn_pid <= 0) {
+                    t_putstr("joey: go-net NOT spawned (Go fork absent at build) -- skipping\n");
+                } else {
+                    int gn_status = -1;
+                    long gn_reaped = t_wait_pid_for((int)gn_pid, 0, &gn_status);
+                    if (gn_reaped != gn_pid || gn_status != 0) {
+                        t_putstr("joey: go-net FAILED -- GOOS=thylacine Stage 3c regression (see fatal error / panic / snare:* above)\n");
+                        return 1;
+                    }
+                    t_putstr("joey: go-net reaped status=0 -- GOOS=thylacine Stage 3c (net over /net) RUNS in-VM\n");
+                }
+            }
 #endif /* THYLA_BOOT_PROBES (post-pivot boot-test probe ladder) */
 
             (void)t_close(sd_rd);
