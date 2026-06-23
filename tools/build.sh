@@ -387,7 +387,7 @@ EOF
     # file-backed exec path carries it, like net-echo. Absent if the Go fork was
     # not present at build time (build_go_probes skipped); the joey go-hello
     # probe then degrades to "not spawned".
-    local go_bins=( "go-hello" "go-goroutines" "go-fs" )
+    local go_bins=( "go-hello" "go-goroutines" "go-fs" "go-exec" )
     local go_release="$BUILD_DIR/go"
     for bin in "${go_bins[@]}"; do
         local src="$go_release/$bin"
@@ -495,15 +495,18 @@ build_go_probes() {
     #                    SYS_THREAD_SPAWN + torpor sched-sync + STW GC + decommit).
     #   go-fs         -- Stage 3a: os/syscall file I/O (create/write/read/stat/
     #                    seek/readdir/rename/remove) against the post-pivot FS.
+    #   go-exec       -- Stage 3b: os/exec (spawn a /bin coreutil via
+    #                    SYS_SPAWN_FULL_ARGV, capture stdout through a pipe,
+    #                    reap via SYS_WAIT_PID, read the exit status).
     local probe
-    for probe in go-hello go-goroutines go-fs; do
+    for probe in go-hello go-goroutines go-fs go-exec; do
         ( cd "$REPO_ROOT/usr/$probe" && \
           GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 "$go_bin" build -o "$go_out/$probe" . ) \
             || { echo "==> Go-port: go build $probe FAILED" >&2; return 1; }
         echo "==> Go probe built: $go_out/$probe"
         ls -la "$go_out/$probe"
     done
-    ledger "go-hello + go-goroutines + go-fs: Go cross-compile (GOOS=thylacine) -> ramfs (Stage 1/2/3a boot probes)"
+    ledger "go-hello + go-goroutines + go-fs + go-exec: Go cross-compile (GOOS=thylacine) -> ramfs (Stage 1/2/3a/3b boot probes)"
 }
 
 # A-5c-c: emit the host-baked system recovery phrase as a C header BEFORE the

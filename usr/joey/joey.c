@@ -4802,6 +4802,46 @@ int main(void) {
                     t_putstr("joey: go-fs reaped status=0 -- GOOS=thylacine Stage 3a (fs file I/O) RUNS in-VM\n");
                 }
             }
+
+            // === Go Stage 3b: os/exec (/go-exec) ===
+            // The GOOS=thylacine Go-port Stage-3b proof: a Go binary driving
+            // os/exec end-to-end -- it spawns /bin/echo via SYS_SPAWN_FULL_ARGV
+            // (os.StartProcess), captures the child's stdout through an os.Pipe
+            // (the entersyscall-wrapped blocking pipe Read), reaps it via
+            // SYS_WAIT_PID (os.Process.Wait), and asserts both the captured
+            // bytes AND a non-zero exit status (/bin/false -> *exec.ExitError,
+            // code 1). Runs POST-pivot: it execs the /bin coreutils, reachable
+            // through the /bin bind in joey's post-pivot namespace (#58).
+            //
+            // Same /dev/cons stdio wiring as the other go probes. GATING: a
+            // non-zero exit or fault FAILS the boot -- the Stage-3b regression
+            // sentinel. Fork-absent -> graceful skip.
+            {
+                const char go_exec_name[] = "/bin/go-exec";  // #58: post-pivot /bin bind
+                long ge_cfd = t_console_open();
+                long ge_pid;
+                if (ge_cfd >= 0) {
+                    unsigned int ge_fds[3] = { (unsigned int)ge_cfd,
+                                               (unsigned int)ge_cfd,
+                                               (unsigned int)ge_cfd };
+                    ge_pid = t_spawn_with_fds(go_exec_name, sizeof(go_exec_name) - 1,
+                                              ge_fds, 3);
+                    (void)t_close(ge_cfd);
+                } else {
+                    ge_pid = t_spawn(go_exec_name, sizeof(go_exec_name) - 1);
+                }
+                if (ge_pid <= 0) {
+                    t_putstr("joey: go-exec NOT spawned (Go fork absent at build) -- skipping\n");
+                } else {
+                    int ge_status = -1;
+                    long ge_reaped = t_wait_pid_for((int)ge_pid, 0, &ge_status);
+                    if (ge_reaped != ge_pid || ge_status != 0) {
+                        t_putstr("joey: go-exec FAILED -- GOOS=thylacine Stage 3b regression (see fatal error / panic / snare:* above)\n");
+                        return 1;
+                    }
+                    t_putstr("joey: go-exec reaped status=0 -- GOOS=thylacine Stage 3b (os/exec) RUNS in-VM\n");
+                }
+            }
 #endif /* THYLA_BOOT_PROBES (post-pivot boot-test probe ladder) */
 
             (void)t_close(sd_rd);

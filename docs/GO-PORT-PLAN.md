@@ -422,7 +422,7 @@ baked into the ramfs by `build_ramfs`) plus the `go-hello` boot probe in
   for a directory (the lone in-VM bug, root-caused at step 8 of 8). The
   syscall primitives are **raw SVC** (no `entersyscall`) at 3a — file blocking
   is bounded and sysmon is the backstop; the `entersyscall`-wrapped blocking
-  path lands with the net layer (3c). `usr/go-fs` runs POST-pivot (devramfs is
+  path lands at **3b** (below). `usr/go-fs` runs POST-pivot (devramfs is
   read-only) against the writable Stratum FS:
 
   ```
@@ -435,9 +435,46 @@ baked into the ramfs by `build_ramfs`) plus the `go-hello` boot probe in
   `getCPUCount` now reads `/ctl/sched` (which emits `cpus: N`) via an
   allocation-free raw `SYS_OPEN`+read at osinit, fail-soft to 1 on any error;
   `go-fs` prints `NumCPU=4` under `-smp 4` (was stuck at 1), so GOMAXPROCS
-  defaults to the real CPU count. Remaining in Stage 3: **3b** (os/exec ->
-  SYS_SPAWN_FULL_ARGV) and **3c** (net over /net + the entersyscall-wrapped
-  blocking netpoll).
+  defaults to the real CPU count.
+
+- **Stage 3b (os/exec) — DONE** (fork `a40796a` + Thylacine `usr/go-exec/` +
+  the `build.sh` + `joey.c` probe wiring). The `os/exec` package end-to-end:
+  a Go program **spawns** a child via `SYS_SPAWN_FULL_ARGV` (`os.StartProcess`
+  -> `syscall.startProcess`, marshalling name + argv + fd_list into a 96-byte
+  `struct sys_spawn_args` — the Go mirror matches the kernel layout
+  byte-for-byte, every u64 on an 8-boundary, verified against the kernel
+  `_Static_assert` offset pins; identity/allowance blocks left zero = inherit),
+  **captures** the child's stdout through an `os.Pipe`, and **reaps** it via
+  `SYS_WAIT_PID` (`os.Process.Wait` -> by-pid `waitProcess`, status read back).
+  The load-bearing piece is the **`entersyscall`-wrapped blocking-syscall
+  path** (the riskiest asm): a goroutine blocked in a raw `SYS_WAIT_PID` /
+  pipe `Read` while the GC does stop-the-world would HANG (the un-preemptible
+  SVC is not a safepoint), so `Syscall`/`Syscall6` now bracket the SVC with
+  `BL runtime.entersyscall<ABIInternal>` / `exitsyscall` — the Darwin/BSD
+  arm64 model (a `$0` NOSPLIT frame is fine; the arm64 assembler auto-saves LR
+  for a non-leaf, so the `BL` doesn't clobber the return address), keeping the
+  Linux-shaped `CMN $4095` errno decode. `RawSyscall`/`RawSyscall6` stay raw.
+  File I/O now correctly rides the wrapped path too (a 9P read can block), and
+  go-fs re-ran clean through it. `os/exec` needed the new-GOOS plumbing again:
+  `exec_unix.go`'s `!plan9 && !windows` wrongly matched thylacine, so add
+  `&& !thylacine` + provide `exec_thylacine.go` (`skipStdinCopyError`) +
+  `lp_thylacine.go` (`LookPath`; `findExecutable` checks exists-and-not-a-dir,
+  NOT the POSIX 0111 bit — thylacine gates exec on namespace X-search +
+  `OEXEC`) + `path/filepath/path_thylacine.go`. `ProcAttr.Dir` is fail-closed
+  `ENOSYS` (no spawn-time chdir); `Env` is silently dropped (G15). `usr/go-exec`
+  runs POST-pivot (it execs the `/bin` coreutils, reachable via the `/bin`
+  bind):
+
+  ```
+  go-exec: captured "go exec stage 3b" via os/exec + pipe; /bin/false exit code 1
+  go-exec: STAGE 3b OK (os/exec: spawn /bin coreutil + capture stdout + wait + exit-status)
+  ```
+
+  reaped status 0, 993/993, boot OK, 0 EXTINCTION; Stage 1/2/3a unregressed.
+  Remaining in Stage 3: **3c** (net over /net + `netpoll_stub`; rides the same
+  `entersyscall`-wrapped blocking path landed here). The Stage-3 close (#327)
+  owes the SMP gate (kernel byte-unchanged across 3a/3b -> deferred to the
+  close).
 
 ---
 
