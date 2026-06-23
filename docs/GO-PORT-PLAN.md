@@ -529,10 +529,45 @@ baked into the ramfs by `build_ramfs`) plus the `go-hello` boot probe in
   ```
 
   reaped status 0, 993/993, boot OK, 0 EXTINCTION; Stage 1/2/3a unregressed.
-  Remaining in Stage 3: **3c** (net over /net + `netpoll_stub`; rides the same
-  `entersyscall`-wrapped blocking path landed here). The Stage-3 close (#327)
-  owes the SMP gate (kernel byte-unchanged across 3a/3b -> deferred to the
-  close).
+
+- **Stage 3c (net) — DONE** (2026-06-23; fork `6320e2f`, thylacine `68d785b`).
+  A Go program drives the full plan9-shaped net stack over netd's `/net`,
+  end to end. The `net` package is ported by mirroring the 14 `*_plan9.go`
+  files to `*_thylacine.go` — netd's `/net` IS a Plan 9 network filesystem
+  (clone/ctl/data/connect/announce/listen + cs/dns), so the plan9 package maps
+  on almost verbatim. The dial/listen path is
+  `queryCS1(/net/cs) -> open clone -> read N -> connect`/`announce -> data`,
+  exactly what netd serves; every BSD-sockets net file is `unix`-tagged (which
+  excludes thylacine, like plan9), so no `_posix`/`_unix` file is touched. Four
+  targeted edits to the otherwise-verbatim copies: `syscall.EPLAN9` ->
+  `ENOSYS`; `syscall.Dup(fd, -1)` -> one-arg `Dup`; ipsock `fixErr`'s
+  `ErrorString` assertion -> `Errno`; and ipsock `probe()` returns a fixed
+  IPv4-enabled result (netd exposes no `/net/iproute`; v1.0 is IPv4-only). The
+  blocking accept-open + data `Read` ride the Stage-3b `entersyscall` path;
+  `netpoll_stub.go` already carries the thylacine tag (Stage 0b).
+
+  One **netd gap** surfaced + was fixed (the kernel stayed byte-unchanged):
+  `ctl_announce` never recorded `slots[n].local`, so `/net/tcp/N/local` was
+  empty for an announced-but-unconnected listener -> Go's `listenPlan9 ->
+  readPlan9Addr` read it and got `io.EOF` -> `net.Listen` failed. The native
+  libthyla-rs client never read `local` after announce, so the gap was latent
+  until the Go port exercised the full Plan 9 listen sequence. Fix: record the
+  bound listen endpoint on a successful announce (correct Plan 9 `local`
+  semantics for every `/net` client). Root-caused by ground truth — an
+  instrumented probe proved cs and the clone read both worked, isolating the
+  EOF to the local read. `usr/go-net` (a self-contained listen+accept+dial+echo
+  round-trip on the resident lo):
+
+  ```
+  go-net: listening on 127.0.0.1:9099
+  go-net: dialed 127.0.0.1:9099 -> 127.0.0.1:9099 (local 127.0.0.1:49237)
+  go-net: round-trip OK ("go net stage 3c over /net")
+  go-net: STAGE 3c OK
+  ```
+
+  All 5 go stages reaped status 0; 993/993, boot OK, 0 EXTINCTION, login
+  clean. **STAGE 3 COMPLETE.** Next: the on-device toolchain (Stage 4 — the
+  `/env` device + GOROOT bake + local `go build`).
 
 ---
 
