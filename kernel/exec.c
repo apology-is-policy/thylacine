@@ -194,11 +194,11 @@ static u64 exec_build_init_stack(struct Proc *p, const struct elf_image *img,
     if (has_argv) {
         if (argv_data_len == 0 || !argv_data)
             extinction("exec_build_init_stack: argc > 0 with no argv_data");
-        if (argc > 16u)                    // SYS_SPAWN_ARGV_MAX bound — kept
+        if (argc > 512u)                   // mirrors SYS_SPAWN_ARGV_MAX — kept
                                            // local to this file to avoid a
                                            // syscall.h include cycle
             extinction("exec_build_init_stack: argc exceeds bound");
-        if (argv_data_len > 4096u)         // SYS_SPAWN_ARGV_DATA_MAX bound
+        if (argv_data_len > 65536u)        // mirrors SYS_SPAWN_ARGV_DATA_MAX
             extinction("exec_build_init_stack: argv_data_len exceeds bound");
         if (argv_data[argv_data_len - 1] != '\0')
             extinction("exec_build_init_stack: argv_data not NUL-terminated");

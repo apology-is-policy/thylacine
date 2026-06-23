@@ -228,8 +228,8 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 
 // SYS_SPAWN_FULL_ARGV bounds — must mirror SYS_SPAWN_ARGV_MAX +
 // SYS_SPAWN_ARGV_DATA_MAX in kernel/include/thylacine/syscall.h.
-#define T_SYS_SPAWN_ARGV_MAX        16u
-#define T_SYS_SPAWN_ARGV_DATA_MAX   4096u
+#define T_SYS_SPAWN_ARGV_MAX        512u
+#define T_SYS_SPAWN_ARGV_DATA_MAX   65536u
 
 // SYS_SPAWN_FULL_ARGV argument record — must mirror struct sys_spawn_args
 // in kernel/include/thylacine/syscall.h. The 80-byte ABI shape is pinned
@@ -374,7 +374,7 @@ _Static_assert(__builtin_offsetof(struct t_allowance_desc, pci) == 180,
 #define T_CAP_KILL            (1UL << 9)   // elevation-only; cross-identity kill override
 
 // Maximum binary name length for t_spawn (mirror SYS_SPAWN_NAME_MAX).
-#define T_SPAWN_NAME_MAX  64u
+#define T_SPAWN_NAME_MAX  256u
 
 // Maximum inherited-fd count for t_spawn_with_fds (mirror SYS_SPAWN_MAX_FDS).
 #define T_SPAWN_MAX_FDS   16u

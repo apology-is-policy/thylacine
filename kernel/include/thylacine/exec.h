@@ -149,13 +149,14 @@ _Static_assert(EXEC_USER_BURROW_TOP <= (1ull << 47),
 // under Shape A (no argv). Shape B computes the offset dynamically.
 #define EXEC_INIT_RANDOM_OFFSET   (EXEC_INIT_STACK_SIZE - 16)
 // Maximum frame size under Shape B (argv-bearing). Bounds the kernel
-// validation + the EXEC_USER_STACK_SIZE budget: with argc = 16 (=
-// SYS_SPAWN_ARGV_MAX) and argv_data_len = 4096 (= SYS_SPAWN_ARGV_DATA_MAX),
-// the structured top is (8 + 8*17 + 8 + 96 + 16-align-pad + 16) bytes,
-// followed by 4096 strings bytes, rounded up to 16. ~4376 bytes — well
-// under the 256 KiB user-stack budget.
+// validation + the EXEC_USER_STACK_SIZE budget: with argc = 512 (=
+// SYS_SPAWN_ARGV_MAX) and argv_data_len = 64 KiB (= SYS_SPAWN_ARGV_DATA_MAX,
+// both raised for the on-device Go toolchain's compile/link command lines),
+// the structured top is (8 + 8*513 + 8 + AUXV*16 + 16-align-pad + 16) bytes,
+// followed by 64 KiB strings bytes, rounded up to 16. ~68 KiB — still well
+// under the 256 KiB user-stack budget; the _Static_assert below proves it.
 #define EXEC_INIT_STACK_MAX_SIZE \
-    (((8 + (16u + 1u) * 8 + 8 + EXEC_INIT_AUXV_COUNT * 16 + 16 + 16 + 4096) + 15) & ~15ull)
+    (((8 + (512u + 1u) * 8 + 8 + EXEC_INIT_AUXV_COUNT * 16 + 16 + 16 + 65536) + 15) & ~15ull)
 _Static_assert(EXEC_INIT_STACK_SIZE % 16 == 0,
                "initial sp must be 16-byte aligned (AArch64 SysV ABI)");
 _Static_assert(EXEC_INIT_STACK_MAX_SIZE % 16 == 0,
@@ -222,7 +223,7 @@ int exec_setup(struct Proc *p, const void *blob, size_t blob_size,
 //                if argv_data_len > 0.
 //
 // argc: number of NULs in argv_data (i.e., number of strings). Bounded
-//       by SYS_SPAWN_ARGV_MAX (16). Caller's invariant: argv_data has
+//       by SYS_SPAWN_ARGV_MAX (512). Caller's invariant: argv_data has
 //       exactly `argc` NUL terminators.
 //
 // Returns 0 on success; -1 on any failure (ELF parse error, alignment

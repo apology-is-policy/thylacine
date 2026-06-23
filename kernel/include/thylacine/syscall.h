@@ -1835,10 +1835,12 @@ _Static_assert(__builtin_offsetof(struct t_stat, gid)       == 76, "t_stat.gid a
 // a heap scratch (avoidable for v1.0) or per-call segmented copy.
 #define SYS_RW_MAX  4096u
 
-// Maximum binary name length for SYS_SPAWN. Names are devramfs entries
-// ("hello", "stratumd-stub", "corvus" — all short). 64 bytes is more
-// than enough; bounds the kernel-stack scratch buffer at a small cap.
-#define SYS_SPAWN_NAME_MAX  64u
+// Maximum binary name length for SYS_SPAWN. Most callers pass short
+// devramfs/`/bin` names, but the on-device Go toolchain (Stage 4c) execs
+// absolute tool paths (`/goroot/pkg/tool/thylacine_arm64/compile`) and
+// $WORK-relative output paths, so 256 bytes accommodates a deep namespace
+// path. Bounds the kernel-stack `name[]` scratch (257 bytes — small).
+#define SYS_SPAWN_NAME_MAX  256u
 
 // Maximum ELF blob size for SYS_SPAWN. v1.0 userspace binaries that
 // stay near the cap: /pouch-hello-sodium = 276848 bytes at sub-chunk 14
@@ -1855,21 +1857,23 @@ _Static_assert(__builtin_offsetof(struct t_stat, gid)       == 76, "t_stat.gid a
 // kernel-stack scratch for the fd-list copy.
 #define SYS_SPAWN_MAX_FDS   16u
 
-// Maximum argc for SYS_SPAWN_FULL_ARGV (P6-pouch-stratumd-boot sub-chunk
-// 16b-alpha). 16 is well above the v1.0 callers' needs: stratumd's full
-// CLI shape is ~8 args (binary-path + --keyfile + path + --listen + path
-// + optional --read-only + optional --bind-pool-serial + hex). Bounds the
-// kernel argv-pointer array sizing in exec_build_init_stack.
-#define SYS_SPAWN_ARGV_MAX  16u
+// Maximum argc for SYS_SPAWN_FULL_ARGV. Raised from 16 (the original
+// stratumd-CLI sizing) to 512 for the on-device Go toolchain (Stage 4c):
+// `go build` execs `compile` with one argv entry per source file plus its
+// flags, and the widest stdlib package (runtime/arm64) is ~200 .go+.s
+// files. 512 leaves headroom. Bounds the argv-pointer array in
+// exec_build_init_stack ((argc+1)*8 = ~4 KiB at 512).
+#define SYS_SPAWN_ARGV_MAX  512u
 
 // Maximum total bytes of the argv buffer for SYS_SPAWN_FULL_ARGV (the
-// concatenated NUL-terminated strings). One page is generous for the
-// v1.0 callers (stratumd's longest CLI is well under 200 bytes). Bounds
-// the kernel-side kmalloc + the user-stack region that holds the strings.
-// At the maximum (4 KiB strings + 16 argv pointers * 8 + 152 fixed-frame
-// bytes), the System V frame fits comfortably under EXEC_USER_STACK_SIZE
-// (256 KiB).
-#define SYS_SPAWN_ARGV_DATA_MAX  4096u
+// concatenated NUL-terminated strings). Raised from 4 KiB to 64 KiB for the
+// Go toolchain: a runtime compile passes ~200 $WORK-relative source paths
+// (~50 B each) ≈ 25 KiB + flags. The kernel copies it via kmalloc (the
+// handler's buffer is heap, NOT a kernel-stack array — the 16 KiB kstack
+// could not hold 64 KiB), and the System V init frame (structured + the
+// strings region, ≤ ~68 KiB) sits at the top of the 256 KiB user stack
+// (EXEC_USER_STACK_SIZE) with ~188 KiB to spare.
+#define SYS_SPAWN_ARGV_DATA_MAX  65536u
 
 // Maximum single-component name length for SYS_WALK_OPEN. Matches the
 // Plan 9 + 9P2000.L practical cap for a single path element; bounds the

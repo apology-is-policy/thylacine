@@ -5649,16 +5649,10 @@ static s64 sys_spawn_full_argv_handler(u64 req_va) {
         fds_kbuf[i] = v;
     }
 
-    // Copy argv_data into a stack buffer for in-kernel validation. The
-    // body re-copies into a kmalloc'd region before rfork; the stack
-    // buffer here only lives for the duration of the handler and the
-    // synchronous body call below. Bound: SYS_SPAWN_ARGV_DATA_MAX = 4 KiB.
-    char argv_kbuf[SYS_SPAWN_ARGV_DATA_MAX];
-    for (u32 i = 0; i < req.argv_data_len; i++) {
-        u8 b = 0;
-        if (uaccess_load_u8(req.argv_data_va + i, &b) != 0) return -1;
-        argv_kbuf[i] = (char)b;
-    }
+    // argv_data is copied just before the synchronous body call below into a
+    // KMALLOC'd buffer -- NOT a kernel-stack array. SYS_SPAWN_ARGV_DATA_MAX is
+    // 64 KiB (the Go toolchain's compile/link command lines), far over the
+    // 16 KiB kstack. validate_req already bounded argv_data_len <= the cap.
 
     // A-1a: copy supplementary gids only when a SET identity is requested.
     // validate_req already bounded supp_gid_count <= PROC_SUPP_GIDS_MAX for
@@ -5727,14 +5721,34 @@ static s64 sys_spawn_full_argv_handler(u64 req_va) {
             allow_kbuf.pci[i] = desc.pci[i];
     }
 
-    return (s64)sys_spawn_full_argv_identity_for_proc(
+    // Copy argv_data into a kmalloc'd buffer (NOT a kernel-stack array --
+    // SYS_SPAWN_ARGV_DATA_MAX is 64 KiB, over the 16 KiB kstack). The body
+    // re-copies into its own kmalloc'd region (owned by the child's thunk)
+    // synchronously before rfork returns, so this buffer only needs to outlive
+    // the body call below; free it after. validate_req bounded argv_data_len.
+    char *argv_kbuf = NULL;
+    if (req.argv_data_len > 0) {
+        argv_kbuf = kmalloc(req.argv_data_len, 0);
+        if (!argv_kbuf) return -1;
+        for (u32 i = 0; i < req.argv_data_len; i++) {
+            u8 b = 0;
+            if (uaccess_load_u8(req.argv_data_va + i, &b) != 0) {
+                kfree(argv_kbuf);
+                return -1;
+            }
+            argv_kbuf[i] = (char)b;
+        }
+    }
+    s64 rc = (s64)sys_spawn_full_argv_identity_for_proc(
         p, name, (size_t)req.name_len,
-        req.argv_data_len > 0 ? argv_kbuf : NULL, req.argv_data_len, req.argc,
+        argv_kbuf, req.argv_data_len, req.argc,
         fds_kbuf, req.fd_count,
         (caps_t)req.cap_mask, req.perm_flags,
         set_identity, req.principal_id, req.primary_gid,
         supp_kbuf, supp_count,
         set_allowance ? &allow_kbuf : NULL);
+    if (argv_kbuf) kfree(argv_kbuf);
+    return rc;
 }
 
 static s64 sys_spawn_with_fds_handler(u64 name_va, u64 name_len_raw,

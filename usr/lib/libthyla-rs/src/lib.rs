@@ -304,11 +304,11 @@ pub const T_S_IFCHR: u32              = 0o020000;
 
 // SYS_SPAWN_FULL_ARGV bounds — must mirror SYS_SPAWN_ARGV_MAX +
 // SYS_SPAWN_ARGV_DATA_MAX in kernel/include/thylacine/syscall.h.
-pub const T_SYS_SPAWN_ARGV_MAX: usize        = 16;
-pub const T_SYS_SPAWN_ARGV_DATA_MAX: usize   = 4096;
+pub const T_SYS_SPAWN_ARGV_MAX: usize        = 512;
+pub const T_SYS_SPAWN_ARGV_DATA_MAX: usize   = 65536;
 
 // Maximum binary name length (mirror SYS_SPAWN_NAME_MAX).
-pub const T_SPAWN_NAME_MAX: usize    = 64;
+pub const T_SPAWN_NAME_MAX: usize    = 256;
 
 // Maximum inherited-fd count (mirror SYS_SPAWN_MAX_FDS).
 pub const T_SPAWN_MAX_FDS: usize     = 16;
