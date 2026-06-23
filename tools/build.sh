@@ -274,6 +274,10 @@ build_kernel() {
     # on no-source-change rebuilds (CMake/ninja dep tracking inside
     # $stratumd_build keep this <5s warm; cold rebuild is ~2-3 min).
     build_stratumd
+    # GOOS=thylacine Stage 4b: stage a trimmed GOROOT BEFORE the pool fixture so
+    # populate_stratum_pool can `stratum-fs put` it. No-op unless
+    # THYLACINE_BAKE_GOROOT=1 (the default build is untouched).
+    build_go_goroot
     # P6-pouch-stratumd-boot sub-chunk 16b-beta: produce the boot pool
     # fixture (pool.img + system.key) before build_ramfs so the keyfile
     # gets copied into the cpio at /etc/stratum/system.key.
@@ -511,6 +515,56 @@ build_go_probes() {
         ls -la "$go_out/$probe"
     done
     ledger "go-hello + go-goroutines + go-fs + go-exec + go-net + go-env: Go cross-compile (GOOS=thylacine) -> ramfs (Stage 1/2/3a/3b/3c/4a boot probes)"
+}
+
+# GOOS=thylacine Stage 4b: assemble a trimmed thylacine GOROOT (the cross-built
+# toolchain binaries + the stdlib SOURCE) under $BUILD_DIR/go/goroot, for the
+# on-device `go build` (Stage 4c). Gated on THYLACINE_BAKE_GOROOT=1 -- the
+# default dev loop skips it (a ~150 MB cross-build + a 256 MB pool populate is
+# too heavy for fast iteration; the default 64 MiB bootstrap pool is untouched).
+# When enabled, build_stratum_pool_fixture grows pool.img to 256 MiB and
+# populate_stratum_pool `stratum-fs put`s this tree at /goroot. The `go` driver
+# shells out to $GOROOT/pkg/tool/thylacine_arm64/{compile,link,asm,...} and
+# compiles a program's imports from $GOROOT/src on the device.
+build_go_goroot() {
+    [[ "${THYLACINE_BAKE_GOROOT:-0}" == "1" ]] || return 0
+    local go_bin="$GOFORK/bin/go"
+    if [[ ! -x "$go_bin" ]]; then
+        echo "==> Go GOROOT bake: fork toolchain not found at $go_bin -- skipping (set GOFORK)"
+        return 0
+    fi
+    if ! command -v rsync >/dev/null 2>&1; then
+        echo "==> Go GOROOT bake: rsync not found (needed to stage src/) -- skipping" >&2
+        return 1
+    fi
+    local stage="$BUILD_DIR/go/goroot"
+    echo "==> Building Go GOROOT staging (thylacine/arm64, stripped) at $stage"
+    rm -rf "$stage"
+    mkdir -p "$stage/bin" "$stage/pkg/tool/thylacine_arm64"
+    # The `go` command driver.
+    ( cd "$GOFORK" && GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 \
+        "$go_bin" build -ldflags="-s -w" -o "$stage/bin/go" cmd/go ) \
+        || { echo "==> Go GOROOT bake: build cmd/go FAILED" >&2; return 1; }
+    # The toolchain commands the driver execs.
+    local tool
+    for tool in compile link asm pack buildid cover vet; do
+        ( cd "$GOFORK" && GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 \
+            "$go_bin" build -ldflags="-s -w" \
+            -o "$stage/pkg/tool/thylacine_arm64/$tool" "cmd/$tool" ) \
+            || { echo "==> Go GOROOT bake: build cmd/$tool FAILED" >&2; return 1; }
+    done
+    # The stdlib SOURCE (go build compiles a program's imports from here on the
+    # device). Deref symlinks; drop *_test.go + testdata + src/cmd (the
+    # toolchain source -- needed only to self-host [Stage 7], never to build a
+    # user program, whose imports never reach into cmd).
+    rsync -aL --exclude='*_test.go' --exclude='testdata/' --exclude='/cmd/' \
+        "$GOFORK/src/" "$stage/src/" \
+        || { echo "==> Go GOROOT bake: rsync src FAILED" >&2; return 1; }
+    # GOROOT metadata the toolchain reads (version string, go.env, timezone db).
+    cp "$GOFORK/VERSION" "$GOFORK/go.env" "$stage/" 2>/dev/null || true
+    [[ -d "$GOFORK/lib" ]] && cp -RL "$GOFORK/lib" "$stage/" 2>/dev/null
+    echo "==> Go GOROOT staged: $(du -sh "$stage" | cut -f1) ($(find "$stage" -type f | wc -l | tr -d ' ') files)"
+    ledger "Go GOROOT: cross-built toolchain + trimmed stdlib src staged at $stage (Stage 4b; THYLACINE_BAKE_GOROOT=1)"
 }
 
 # A-5c-c: emit the host-baked system recovery phrase as a C header BEFORE the
@@ -1365,12 +1419,19 @@ build_stratum_pool_fixture() {
     # (PRINCIPAL_SYSTEM) owns the whole baked tree once the OS enforces dev9p
     # rwx (A-3b) -- otherwise joey-as-other cannot create in the root -> brick.
     local bake_owner=4294967294
-    echo "==> generating stratum pool fixture ($pool_img, system.key)"
-    "$mkfs_bin" "$pool_img" --size 64M --keyfile "$keyfile" \
+    # Stage 4b: a baked Go GOROOT (~150 MB tree) needs a bigger pool; the
+    # default bootstrap pool stays 64 MiB. Keyed on the staged GOROOT existing
+    # (build_go_goroot ran first under THYLACINE_BAKE_GOROOT=1).
+    local pool_size="64M"
+    if [[ "${THYLACINE_BAKE_GOROOT:-0}" == "1" && -d "$BUILD_DIR/go/goroot" ]]; then
+        pool_size="256M"
+    fi
+    echo "==> generating stratum pool fixture ($pool_img, system.key, size=$pool_size)"
+    "$mkfs_bin" "$pool_img" --size "$pool_size" --keyfile "$keyfile" \
             --seed "$mkfs_seed" --root-uid "$bake_owner" --root-gid "$bake_owner" \
             >/dev/null 2>&1 || {
         echo "==> stratum-mkfs failed; rerunning with stderr visible" >&2
-        "$mkfs_bin" "$pool_img" --size 64M --keyfile "$keyfile" \
+        "$mkfs_bin" "$pool_img" --size "$pool_size" --keyfile "$keyfile" \
             --seed "$mkfs_seed" --root-uid "$bake_owner" --root-gid "$bake_owner"
         exit 2
     }
@@ -1508,6 +1569,19 @@ populate_stratum_pool() {
     "$stratum_fs_bin" -s "$sock_path" sync \
         || { echo "==> populate pool: sync FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
     echo "==> populate pool: /thylacine-version written ($(echo "$sentinel_content" | wc -c | tr -d ' ') bytes)"
+
+    # GOOS=thylacine Stage 4b: bake the trimmed Go GOROOT (if staged) at /goroot
+    # via the single-session recursive `put` (a per-file CLI loop over ~3600
+    # files is infeasible). No-op unless THYLACINE_BAKE_GOROOT=1 staged the tree.
+    local goroot_stage="$BUILD_DIR/go/goroot"
+    if [[ "${THYLACINE_BAKE_GOROOT:-0}" == "1" && -d "$goroot_stage" ]]; then
+        echo "==> populate pool: baking Go GOROOT ($goroot_stage -> /goroot, $(du -sh "$goroot_stage" | cut -f1))"
+        "$stratum_fs_bin" -s "$sock_path" put "$goroot_stage" /goroot \
+            || { echo "==> populate pool: put GOROOT FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" sync \
+            || { echo "==> populate pool: sync after GOROOT FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        echo "==> populate pool: Go GOROOT baked at /goroot"
+    fi
 
     # --- A-5c-b: host-bake the system identity into /var/lib/corvus ---
     # corvus-mint mints the admin keypair + system-wrap (keypair under the
