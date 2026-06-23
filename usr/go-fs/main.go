@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"runtime"
 )
 
 const (
@@ -96,7 +97,9 @@ func main() {
 	_, err = os.Stat(root)
 	must("dir gone after remove", err != nil)
 
-	fmt.Printf("go-fs: wrote+read %d bytes; stat size=%d; seek+readdir+rename+remove OK\n",
-		len(payload), fi.Size())
+	// NumCPU reflects getCPUCount() (reads /ctl/sched). With -smp 4 it should
+	// be 4, not the old stub's 1 -- the Stage-2 getCPUCount seam, closed.
+	fmt.Printf("go-fs: wrote+read %d bytes; stat size=%d; seek+readdir+rename+remove OK; NumCPU=%d\n",
+		len(payload), fi.Size(), runtime.NumCPU())
 	fmt.Println("go-fs: STAGE 3a OK (fs file I/O: create/write/read/stat/seek/readdir/rename/remove)")
 }

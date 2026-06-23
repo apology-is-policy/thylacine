@@ -431,9 +431,13 @@ baked into the ramfs by `build_ramfs`) plus the `go-hello` boot probe in
   ```
 
   reaped status 0, 993/993, boot OK, 0 EXTINCTION; Stage 1/2 unregressed.
-  Remaining in Stage 3: **3b** (os/exec -> SYS_SPAWN_FULL_ARGV) and **3c** (net
-  over /net + the entersyscall-wrapped blocking netpoll). The getCPUCount seam
-  (read `/ctl/sched`, which emits `cpus: N`) still folds into Stage 3.
+  The **getCPUCount seam is also closed** (the Stage-2 deferred finding):
+  `getCPUCount` now reads `/ctl/sched` (which emits `cpus: N`) via an
+  allocation-free raw `SYS_OPEN`+read at osinit, fail-soft to 1 on any error;
+  `go-fs` prints `NumCPU=4` under `-smp 4` (was stuck at 1), so GOMAXPROCS
+  defaults to the real CPU count. Remaining in Stage 3: **3b** (os/exec ->
+  SYS_SPAWN_FULL_ARGV) and **3c** (net over /net + the entersyscall-wrapped
+  blocking netpoll).
 
 ---
 
