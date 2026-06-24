@@ -296,8 +296,13 @@ static int dev9p_stat_native(struct Spoor *c, struct t_stat *out) {
     struct dev9p_priv *p = priv_of(c);
     if (!p || !out) return -1;
     struct p9_attr attr;
-    if (p9_client_getattr(p->client, p->fid, P9_GETATTR_BASIC, &attr) != 0)
-        return -1;
+    // errno-rollout: propagate the server's POSIX errno (p9_client_getattr
+    // returns -ecode on Rlerror, e.g. -T_E_NOENT for a vanished file; I-14
+    // bounds it to [-4095,-2], so it is never the generic -1/-T_E_PERM). The
+    // caller (spoor_stat_native -> stalk/SYS_FSTAT) propagates it as -errno.
+    int gr = p9_client_getattr(p->client, p->fid, P9_GETATTR_BASIC, &attr);
+    if (gr != 0)
+        return gr;
     for (size_t i = 0; i < sizeof(*out); i++) ((u8 *)out)[i] = 0;
     out->size      = attr.size;
     out->qid_path  = attr.qid.path;

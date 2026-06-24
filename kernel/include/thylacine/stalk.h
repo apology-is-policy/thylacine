@@ -75,6 +75,18 @@ struct Spoor;
 struct Spoor *stalk(struct Proc *p, struct Spoor *start,
                     const char *path, u64 pathlen, int amode, u32 omode);
 
+// stalk_err -- the errno-aware core (the errno-rollout arc; ERRORS.md). Identical
+// to stalk(), but on a NULL return writes the cause to *errp (OPTIONAL -- may be
+// NULL) as a POSITIVE T_E_<NAME> code: T_E_NOENT (missing component), T_E_ACCES
+// (perm_check denial), T_E_INVAL (structural reject), or a propagated / T_E_IO
+// otherwise. NEVER T_E_PERM (== 1, which collides with the generic -1 sentinel).
+// On a non-NULL return *errp is unspecified. The caller returns -*errp so a
+// missing path surfaces as -T_E_NOENT (Go os.IsNotExist) instead of the bare -1
+// (which Go's Linux-shaped decode renders EPERM). stalk() == stalk_err(...,NULL).
+struct Spoor *stalk_err(struct Proc *p, struct Spoor *start,
+                        const char *path, u64 pathlen, int amode, u32 omode,
+                        int *errp);
+
 // stalk_cross_mounts -- Plan 9 `domount`, exposed for the single-hop walk
 // syscalls (SYS_WALK_OPEN) so they cross mounts identically to stalk()/SYS_OPEN.
 // Tests `probe`'s (dc, devno, qid.path) identity against `p`'s mount table; if

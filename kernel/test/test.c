@@ -582,6 +582,7 @@ void test_stalk_dotdot_pop(void);
 void test_stalk_dotdot_containment(void);
 void test_stalk_xsearch_deny(void);
 void test_stalk_missing_component(void);
+void test_stalk_err_codes(void);
 void test_stalk_opath_no_open(void);
 void test_stalk_open_root(void);
 void test_stalk_open_replace(void);
@@ -2428,6 +2429,7 @@ struct test_case g_tests[] = {
     { "stalk.dotdot_containment",      test_stalk_dotdot_containment,      false, NULL },
     { "stalk.xsearch_deny",            test_stalk_xsearch_deny,            false, NULL },
     { "stalk.missing_component",       test_stalk_missing_component,       false, NULL },
+    { "stalk.err_codes",               test_stalk_err_codes,               false, NULL },
     { "stalk.opath_no_open",           test_stalk_opath_no_open,           false, NULL },
     { "stalk.open_root",               test_stalk_open_root,               false, NULL },
     { "stalk.open_replace",            test_stalk_open_replace,            false, NULL },

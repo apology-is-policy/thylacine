@@ -32,6 +32,7 @@
 
 #include <thylacine/caps.h>
 #include <thylacine/dev.h>
+#include <thylacine/errno.h>    // errno-rollout: T_E_NOENT / T_E_ACCES assertions
 #include <thylacine/path.h>     // #66: quarry->path assertions
 #include <thylacine/perm.h>
 #include <thylacine/proc.h>
@@ -364,6 +365,43 @@ void test_stalk_missing_component(void) {
 
     struct Spoor *q = stalk(&p, root, "a/nope", 6, STALK_OPEN, 0);
     TEST_ASSERT(q == NULL, "a/nope -> miss -> NULL");
+    spoor_unref(root);
+}
+
+// errno-rollout (ER-1): stalk_err writes the cause so SYS_OPEN returns the real
+// -errno. The keystone: a missing path -> -T_E_NOENT (Go's os.IsNotExist true ->
+// the O_CREATE create-or-open fallback fires) instead of the bare -1 (Go's
+// Linux-shaped decode renders that EPERM, "operation not permitted"). A denial
+// reports T_E_ACCES, NEVER T_E_PERM (== 1 == the generic -1 sentinel).
+void test_stalk_err_codes(void) {
+    struct Proc p; mkproc_system(&p);
+    struct Spoor *root = fix_root();
+    TEST_ASSERT(root != NULL, "fix_root");
+
+    int e;
+
+    // walk-miss -> T_E_NOENT (the Go os.IsNotExist keystone).
+    e = -12345;
+    struct Spoor *miss = stalk_err(&p, root, "a/nope", 6, STALK_OPEN, 0, &e);
+    TEST_ASSERT(miss == NULL, "a/nope -> miss -> NULL");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOENT, "miss reports T_E_NOENT (not the generic -1)");
+
+    // X-search denial -> T_E_ACCES (a permission failure; owner-first denies the
+    // 0644 nox even to SYSTEM, and ACCES != T_E_PERM/-1).
+    e = -12345;
+    struct Spoor *deny = stalk_err(&p, root, "nox/sekret", 10, STALK_OPEN, 0, &e);
+    TEST_ASSERT(deny == NULL, "nox/sekret -> X-search denied -> NULL");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_ACCES, "denial reports T_E_ACCES");
+
+    // success leaves the quarry openable (errp value irrelevant on success).
+    struct Spoor *ok = stalk_err(&p, root, "a/b", 3, STALK_OPEN, 0, &e);
+    TEST_ASSERT(ok != NULL, "a/b resolves");
+    spoor_clunk(ok);
+
+    // the wrapper stalk() == stalk_err(..., NULL): a NULL errp must not fault.
+    struct Spoor *wrap = stalk(&p, root, "a/nope", 6, STALK_OPEN, 0);
+    TEST_ASSERT(wrap == NULL, "stalk() wrapper (errp==NULL) resolves the miss to NULL, no fault");
+
     spoor_unref(root);
 }
 

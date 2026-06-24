@@ -1842,7 +1842,7 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
         // the Walkqid before returning NULL).
         nc->aux = NULL;
         spoor_unref(nc);
-        return -1;
+        return -T_E_NOENT;   // errno-rollout (ER-1): walk-miss -> NotFound
     }
     // F4 close (P5-stratumd-stub-bringup audit): the Dev `walk` vtable
     // is documented as permissive ("Either reuses nc OR ignores it and
@@ -1874,7 +1874,7 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     if (w->nqid != 1) {
         walkqid_free(w);
         spoor_clunk(nc);
-        return -1;
+        return -T_E_NOENT;   // errno-rollout (ER-1): walk-miss -> NotFound
     }
     // dev9p's walkqid carrier has nc as its spoor; we own + free it
     // now that we've consumed the walk result (we don't need the qids
@@ -2301,12 +2301,18 @@ static s64 sys_open_handler(u64 start_fd_raw, u64 path_va,
     }
 
     int amode = (omode_raw & SYS_WALK_OPEN_OPATH) ? STALK_WALK : STALK_OPEN;
-    struct Spoor *quarry = stalk(p, start, rpath, rlen,
-                                 amode, (u32)omode_raw);
+    // errno-rollout (ER-1): stalk writes the cause (T_E_NOENT walk-miss,
+    // T_E_ACCES perm denial, ...) so SYS_OPEN returns the real -errno. This is
+    // the Go-build keystone: a missing path -> -T_E_NOENT (Go os.IsNotExist
+    // true -> the O_CREATE create-or-open fallback fires; the cache existence
+    // checks work) instead of the bare -1 (Go renders that EPERM).
+    int serr = T_E_NOENT;
+    struct Spoor *quarry = stalk_err(p, start, rpath, rlen,
+                                     amode, (u32)omode_raw, &serr);
     // #844: start (BORROWED by stalk -- it never refs/clunks it) is done now;
     // release the borrow. quarry owns its own ref from stalk.
     spoor_clunk(start);
-    if (!quarry)                                     return -1;
+    if (!quarry)                                     return -serr;
 
     // Handle rights, identical policy to sys_walk_open_handler: an O_PATH
     // (walk-only) handle is born R|W with NO RIGHT_TRANSFER (a navigation /

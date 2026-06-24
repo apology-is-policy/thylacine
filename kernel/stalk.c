@@ -33,11 +33,21 @@
 #include <thylacine/stalk.h>
 
 #include <thylacine/dev.h>
+#include <thylacine/errno.h>      // T_E_* (the errno-rollout arc; stalk *errp)
 #include <thylacine/perm.h>
 #include <thylacine/proc.h>       // struct Proc -> territory
 #include <thylacine/spoor.h>
 #include <thylacine/syscall.h>    // SYS_WALK_OPEN_NAME_MAX + struct t_stat
 #include <thylacine/territory.h>  // mount_lookup + PGRP_MAX_MOUNTS
+
+// Map a spoor_stat_native / Dev return (0 ok, a negative errno, or the generic
+// -1) into a POSITIVE T_E_* code for stalk's *errp. A real -errno in [-4095,-2]
+// yields its magnitude; -1 (the generic sentinel -- and == -T_E_PERM, which must
+// never surface as errno 1) and anything else collapse to T_E_IO.
+static int err_code(int ret) {
+    if (ret <= -2 && ret >= -4095) return -ret;
+    return T_E_IO;
+}
 
 // Clunk every owned trail entry trail[0..depth). Used both on the success path
 // (after the quarry is popped, this releases the ancestors) and on every
@@ -127,19 +137,33 @@ int stalk_cross_mounts(struct Proc *p, struct Spoor *probe,
     return 0;
 }
 
+// stalk() -- the errp==NULL convenience wrapper (the common, errno-agnostic
+// API the bulk of callers + the test suite use). The errno-rollout consumers
+// (SYS_OPEN) call stalk_err() directly.
 struct Spoor *stalk(struct Proc *p, struct Spoor *start,
                     const char *path, u64 pathlen, int amode, u32 omode) {
-    if (!start || !path) return NULL;
+    return stalk_err(p, start, path, pathlen, amode, omode, NULL);
+}
+
+struct Spoor *stalk_err(struct Proc *p, struct Spoor *start,
+                        const char *path, u64 pathlen, int amode, u32 omode,
+                        int *errp) {
+    if (!start || !path) { if (errp) *errp = T_E_INVAL; return NULL; }
     // Reject an unknown amode LOUDLY rather than silently degrading to walk-only
     // (stalk-1 audit F1). stalk-2 adds STALK_MOUNT; any future amode must be
     // added here AND given its final-hop dispatch arm below -- a missed arm must
     // fail-closed, not skip an open / a cross / a create's parent check.
     if (amode != STALK_WALK && amode != STALK_OPEN && amode != STALK_MOUNT)
-        return NULL;
+        { if (errp) *errp = T_E_INVAL; return NULL; }
 
     struct Spoor *trail[STALK_MAX_DEPTH];
     int           depth  = 0;
     struct Spoor *quarry = NULL;
+    // Errno-rollout: the cause of a NULL return, written to *errp at `fail`.
+    // Set precisely before each `goto fail` (T_E_NOENT walk-miss, T_E_ACCES
+    // perm denial, T_E_INVAL structural, propagated for a stat/open failure);
+    // T_E_IO is the generic default for an OOM / transport / cross failure.
+    int           err    = T_E_IO;
 
     // Cross the BASE: `start` itself may be a mount point. If it crosses, the
     // owned crossed clone becomes trail[0] (so the first component searches the
@@ -176,7 +200,7 @@ struct Spoor *stalk(struct Proc *p, struct Spoor *start,
         // A real component. Bound its length (the Dev.walk vtable takes a
         // NUL-terminated name; an over-long component is rejected, not
         // truncated).
-        if (clen > SYS_WALK_OPEN_NAME_MAX) goto fail;
+        if (clen > SYS_WALK_OPEN_NAME_MAX) { err = T_E_INVAL; goto fail; }
 
         // The directory we are about to search. CROSS IT ON DESCENT: if the
         // trail tip is a mount point, replace it in place with the mounted root
@@ -202,12 +226,13 @@ struct Spoor *stalk(struct Proc *p, struct Spoor *start,
         // into). Fail-closed if the Dev cannot vouch for the metadata.
         if (parent->dev && parent->dev->perm_enforced) {
             struct t_stat st;
-            if (spoor_stat_native(parent, &st) != 0) goto fail;
-            if (perm_check(p, &st, PERM_X) != 0)      goto fail;
+            int sr = spoor_stat_native(parent, &st);
+            if (sr != 0)                         { err = err_code(sr); goto fail; }
+            if (perm_check(p, &st, PERM_X) != 0) { err = T_E_ACCES;    goto fail; }
         }
 
-        if (depth >= STALK_MAX_DEPTH)            goto fail;   // trail full
-        if (!parent->dev || !parent->dev->walk)  goto fail;
+        if (depth >= STALK_MAX_DEPTH)            { err = T_E_INVAL; goto fail; }  // trail full
+        if (!parent->dev || !parent->dev->walk)  { err = T_E_INVAL; goto fail; }
 
         struct Spoor *nc = spoor_clone(parent);
         if (!nc) goto fail;
@@ -222,8 +247,16 @@ struct Spoor *stalk(struct Proc *p, struct Spoor *start,
         struct Walkqid *w = parent->dev->walk(parent, nc, names, 1);
         if (!w) {
             // Walk failed: nc still shares the parent's aux -> detach + unref.
+            // A NULL Walkqid is dev9p's miss (p9_client_walk Rlerror/short) --
+            // the dominant case is "no such component" (ENOENT). The rare deep
+            // failures (session-dead -> EIO, OOM) also land here; reporting
+            // NOENT is the load-bearing-correct answer (os.IsNotExist), and the
+            // kernel's own perm_check above is the ACCES authority, so a walk
+            // NULL is never a masked permission denial. (ER-2 may propagate the
+            // exact dev9p errno via a walk-vtable out-param.)
             nc->aux = NULL;
             spoor_unref(nc);
+            err = T_E_NOENT;
             goto fail;
         }
         if (w->spoor != nc) {
@@ -240,6 +273,7 @@ struct Spoor *stalk(struct Proc *p, struct Spoor *start,
             // so clunk is safe -- matches sys_walk_open_handler's nqid!=1 path.
             walkqid_free(w);
             spoor_clunk(nc);
+            err = T_E_NOENT;            // walk-miss (devramfs)
             goto fail;
         }
         walkqid_free(w);
@@ -292,10 +326,11 @@ struct Spoor *stalk(struct Proc *p, struct Spoor *start,
     if (amode == STALK_OPEN) {
         if (quarry->dev && quarry->dev->perm_enforced) {
             struct t_stat st;
-            if (spoor_stat_native(quarry, &st) != 0)                  goto fail;
-            if (perm_check(p, &st, perm_want_for_omode(omode)) != 0)  goto fail;
+            int sr = spoor_stat_native(quarry, &st);
+            if (sr != 0)                                              { err = err_code(sr); goto fail; }
+            if (perm_check(p, &st, perm_want_for_omode(omode)) != 0)  { err = T_E_ACCES;    goto fail; }
         }
-        if (!quarry->dev || !quarry->dev->open)                       goto fail;
+        if (!quarry->dev || !quarry->dev->open)                       { err = T_E_INVAL; goto fail; }
         // Dev.open returns EITHER the same Spoor opened in place (dev9p /
         // devramfs: a read/write cursor over the walked node, ref unchanged) OR
         // a DIFFERENT owned Spoor that REPLACES the quarry (devsrv open=connect:
@@ -324,6 +359,7 @@ struct Spoor *stalk(struct Proc *p, struct Spoor *start,
     return quarry;
 
 fail:
+    if (errp) *errp = err;             // the cause, for the caller's -*errp
     if (quarry) spoor_clunk(quarry);   // quarry was popped off the trail
     stalk_unwind(trail, depth);        // release any remaining ancestors
     return NULL;
