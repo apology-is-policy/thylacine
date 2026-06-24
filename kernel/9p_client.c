@@ -182,6 +182,13 @@ static void client_mark_dead_locked(struct p9_client *c, bool devgone) {
             wakeup(&r->rendez);
         }
     }
+    // #349 SA-1: also wake every sender parked on c2s back-pressure
+    // (client_send_flow). They sleep on their OWN rendez, NOT their rpc->rendez,
+    // so the per-rpc wake above does not reach them; their cond reads c->dead (now
+    // true) -> each returns -EIO. A death from a path with no subsequent
+    // reader-clear signal (e.g. the c2s send-break in client_run) would otherwise
+    // leave them parked indefinitely. (mark_dead is the SOLE c->dead setter.)
+    if (c->send_waiters) poll_waiter_list_wake(&c->send_waiters_list);
 }
 
 // Hand the reader role to one still-pending op so a survivor keeps reading
@@ -204,6 +211,17 @@ static void client_handoff_reader_locked(struct p9_client *c,
             return;
         }
     }
+}
+
+// #349 send flow control. Signal senders parked on c2s back-pressure that a
+// reader made progress (a frame was demuxed -> the server drained a c2s slot,
+// or the reader departed -> a sender may itself self-pump). Bump the progress
+// generation the parked senders' conds compare against, and wake EVERY parked
+// sender iff any is waiting (gating the list-walk off the hot demux path).
+// c->lock HELD (lock order c->lock -> send_waiters_list.lock -> rendez.lock).
+static void client_send_progress_signal(struct p9_client *c) {
+    c->send_progress++;
+    if (c->send_waiters) poll_waiter_list_wake(&c->send_waiters_list);
 }
 
 // Read ONE complete 9P frame into c->transport.recv_buf, mirroring
@@ -368,6 +386,7 @@ static int client_wait(struct p9_client *c, struct p9_rpc *rpc) {
                 spin_lock(&c->lock);
                 if (rr > 0) {
                     demux_frame_locked(c, (size_t)rr);
+                    client_send_progress_signal(c);     // #349: a c2s slot freed
                 } else if (client_self_dying()) {
                     break;                              // death-interrupt: unwind
                 } else {
@@ -377,6 +396,8 @@ static int client_wait(struct p9_client *c, struct p9_rpc *rpc) {
                 }
             }
             c->reader_active = false;
+            client_send_progress_signal(c);             // #349: I departed -- a
+                                                        // parked sender may self-pump
             client_handoff_reader_locked(c, rpc);
             // re-loop: done / dead / dying now decides the return.
         } else {
@@ -399,6 +420,86 @@ static int client_wait(struct p9_client *c, struct p9_rpc *rpc) {
             spin_unlock(&c->lock);
             (void)sleep(&rpc->rendez, rpc_wait_cond, rpc);
             spin_lock(&c->lock);
+        }
+    }
+}
+
+// #349 send-flow-control park condition. The parked sender retries its send on
+// ANY reader progress (send_progress bumped past the snapshot) or session death.
+struct send_wait_ctx { struct p9_client *c; u64 gen; };
+static int send_wait_cond(void *arg) {
+    struct send_wait_ctx *w = (struct send_wait_ctx *)arg;
+    return w->c->dead || w->c->send_progress != w->gen;
+}
+
+// Send the framed Tmsg in c->out_buf with #349 flow control. c->lock HELD on
+// entry + exit. A transiently-FULL c2s ring (P9_TRANSPORT_EAGAIN -- back-pressure
+// under #841 pipelining + concurrent large frames) is NOT a session death: the
+// sender makes progress on the reply path so the server drains c2s, then retries.
+// Returns 0 = the whole frame is on the wire; -P9_E_IO = a genuine transport
+// break or self-death (the caller cleans up + decides whether to latch dead).
+//
+// Deadlock-freedom: a back-pressured sender MUST drop c->lock (else it blocks the
+// active reader's demux -> the server can't drain s2c -> can't drain c2s -> wedge).
+// If no reader is active it self-pumps one s2c frame (the reader-election body);
+// else it parks until a reader makes progress (register-then-observe on
+// send_progress -- the rpc->done pattern). A live server always produces replies
+// for the queued requests, so the reply path drains + c2s frees; a dead server
+// surfaces as a reader EOF/error -> c->dead -> the park/loop exits -EIO. The op's
+// own tag is NOT on the wire (this send is failing), so a self-pump only demuxes
+// OTHER ops' replies -- never its own (no reentrancy on rpc).
+static int client_send_flow(struct p9_client *c, size_t built_len,
+                            struct p9_rpc *rpc) {
+    for (;;) {
+        if (client_self_dying()) return -P9_E_IO;
+        if (c->dead)             return -P9_E_IO;
+
+        int src = p9_transport_send(&c->transport, c->out_buf, built_len);
+        if (src == 0)                   return 0;          // whole frame sent
+        if (src != P9_TRANSPORT_EAGAIN) return -P9_E_IO;   // genuine break
+
+        if (!c->reader_active) {
+            // No reader: pump one s2c frame myself (drain -> free the server to
+            // drain c2s), then retry. Mirrors client_wait's elected-reader body.
+            // R2-F3: a recv error/EOF here latches the SHARED session dead via
+            // client_mark_dead_locked, identically to the elected reader -- a real
+            // peer-gone/transport break is a death for everyone; the fail-close
+            // semantics are unchanged from #841 (just now reachable from the send
+            // path too, not only the read path).
+            c->reader_active = true;
+            rpc->be_reader   = false;
+            spin_unlock(&c->lock);
+            int rr = reader_recv_frame(c, 0, NULL);
+            spin_lock(&c->lock);
+            if (rr > 0)                    demux_frame_locked(c, (size_t)rr);
+            else if (!client_self_dying()) client_mark_dead_locked(c, rr == 0);
+            c->reader_active = false;
+            client_send_progress_signal(c);          // a c2s slot may have freed
+            client_handoff_reader_locked(c, rpc);
+        } else {
+            // Another thread is the reader (draining s2c). Park until it makes
+            // progress (bumps send_progress) or the session dies, then retry.
+            // MULTI-WAITER (R2-F1): N senders can be back-pressured on the shared
+            // client at once, so each parks on its OWN stack Rendez via a
+            // poll_waiter on c->send_waiters_list -- a single Rendez extincts on the
+            // 2nd sleeper (rendez.h). register-then-observe: register the hook +
+            // snapshot send_progress under c->lock, so a concurrent reader's
+            // bump-then-wake is either captured by the snapshot (cond true at
+            // sleep's re-check) or delivered to the now-registered hook -- no lost
+            // wake (I-9; the poll.tla register-then-observe). The stack Rendez/hook
+            // outlive the sleep (unregistered under c->lock before this frame pops).
+            struct Rendez      pr;
+            struct poll_waiter pw;
+            rendez_init(&pr);
+            poll_waiter_init(&pw, &pr);
+            struct send_wait_ctx w = { c, c->send_progress };
+            poll_waiter_list_register(&c->send_waiters_list, &pw);
+            c->send_waiters++;
+            spin_unlock(&c->lock);
+            (void)sleep(&pr, send_wait_cond, &w);
+            spin_lock(&c->lock);
+            c->send_waiters--;
+            poll_waiter_list_unregister(&pw);
         }
     }
 }
@@ -439,14 +540,21 @@ static int client_run(struct p9_client *c, size_t built_len,
 
     c->inflight[tag] = &rpc;
 
-    // Send the framed Tmsg. c->lock HELD: the send is a non-blocking ring write
-    // (the srvconn adapter's all-or-nothing send never leaves a partial frame),
-    // and holding the lock serializes senders so two frames never interleave.
-    int src = p9_transport_send(&c->transport, c->out_buf, built_len);
-    if (src < 0) {
+    // Send the framed Tmsg with #349 flow control. c->lock HELD: holding it
+    // serializes senders so two frames never interleave; a transiently-full c2s
+    // ring (back-pressure under #841 pipelining) is drained + retried inside
+    // client_send_flow, NOT a death (the pre-#349 path marked the whole session
+    // dead here, killing every other op including in-flight text page-ins).
+    int sfr = client_send_flow(c, built_len, &rpc);
+    if (sfr < 0) {
         c->inflight[tag] = NULL;
         kfree(rpc.reply_buf);
-        client_mark_dead_locked(c, false);
+        // A genuine transport break latches the session dead (every op then fails
+        // closed). A self-death does NOT: the request never reached the wire (the
+        // send kept back-pressuring), so there is nothing in flight to flush and
+        // the session stays live for peers -- mark dead only if the ring broke.
+        if (!c->dead && !client_self_dying())
+            client_mark_dead_locked(c, false);
         return -P9_E_IO;
     }
 
@@ -753,6 +861,9 @@ int p9_client_init(struct p9_client *c,
     c->reader_active  = false;
     c->dead           = false;
     c->done_reply_buf = NULL;
+    poll_waiter_list_init(&c->send_waiters_list);   // #349 send-flow-control park (multi-waiter)
+    c->send_progress  = 0;
+    c->send_waiters   = 0;
     for (u32 i = 0; i < P9_SESSION_MAX_OUTSTANDING; i++) c->inflight[i] = NULL;
     // Fid allocator starts at root_fid + 1; dev9p (and other callers)
     // pull fresh fids monotonically via p9_client_alloc_fid.

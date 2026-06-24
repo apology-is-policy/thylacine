@@ -2717,3 +2717,129 @@ void test_9p_client_loom_multi_inflight_read_e2e(void) {
     p9_client_destroy(&g_client);
     p9_mq_loopback_destroy(&g_mq);
 }
+
+// =============================================================================
+// #349: a transiently-FULL c2s ring is flow-control, NOT session death. Under
+// #841 pipelining + concurrent large frames the kernel->server c2s ring can fill
+// momentarily; pre-fix, srvconn collapsed ring-full to -1 and client_run marked
+// the WHOLE session dead -- killing every in-flight op, including a peer's text
+// page-in (the go-build snare:bus + EIO cascade). The fix (client_send_flow)
+// treats P9_TRANSPORT_EAGAIN as back-pressure: it drains the reply path (self-
+// pumps when no reader, else parks on a per-sender waiter) so the server frees a
+// c2s slot, then RETRIES the send -- the session stays live.
+//
+// This drives the FAITHFUL production shape on the mq transport (eagain_budget):
+// a PRIOR op A (async Tclunk) is in flight with its Rclunk queued; a sync op B
+// (Twalk) hits one armed EAGAIN; B self-pumps -> drains A's reply (completing A)
+// -> retries -> B succeeds. Both complete, the session is never marked dead.
+// Pre-fix this fails by construction: B's EAGAIN -> -1 -> client_mark_dead, so B
+// returns -P9_E_IO and A is completed with -P9_E_IO (a dead session), not 0.
+// =============================================================================
+void test_9p_client_send_backpressure_self_pump(void) {
+    int rc = p9_mq_loopback_init(&g_mq, canonical_responder, NULL);
+    TEST_EXPECT_EQ(rc, 0, "mq loopback init");
+    rc = p9_client_init(&g_client, /*root_fid=*/0, /*msize=*/8192,
+                        p9_mq_loopback_ops_for(&g_mq), g_recv_buf, sizeof(g_recv_buf));
+    TEST_EXPECT_EQ(rc, 0, "client init over mq transport");
+    const u8 uname[] = {'r','o','o','t'};
+    const u8 aname[] = {'/'};
+    TEST_EXPECT_EQ(p9_client_handshake(&g_client, uname, sizeof(uname), aname, sizeof(aname), 0),
+                   0, "handshake over mq transport");
+
+    // The async-op completion records into a Loom CQ (reuse the proven harness).
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create(8,16)");
+
+    // Bind fid 20 so op A (an async Tclunk(20)) is well-formed.
+    TEST_EXPECT_EQ(p9_client_walk_one(&g_client, 0, 20, (const u8 *)"f", 1, NULL), 0,
+                   "walk binds fid 20 (sync; drains clean)");
+
+    // Op A: async Tclunk(20). Its Rclunk is queued in the FIFO and A stays in
+    // flight (no reader has pumped) -- the prior op whose reply B's self-pump drains.
+    g_async_op.loom           = l;
+    g_async_op.user_data      = 0xA0A0A0A0ULL;
+    g_async_op.last_result    = 0x7fffffff;
+    g_async_op.completed      = false;
+    g_async_op.rpc.on_complete = test_async_on_complete;
+    u32 fid_a = 20;
+    rc = p9_client_submit_async(&g_client, &g_async_op.rpc, test_build_clunk, &fid_a);
+    TEST_EXPECT_EQ(rc, 0, "submit_async(clunk A): A in flight, its reply queued");
+    TEST_ASSERT(!g_async_op.completed, "A not completed before B's self-pump drains it");
+
+    // Arm ONE EAGAIN: op B's NEXT send hits a transiently-full-but-alive ring.
+    g_mq.eagain_budget = 1;
+
+    // Op B: sync Twalk(21). Its send EAGAINs once -> client_send_flow self-pumps
+    // (drains A's Rclunk, completing A) -> retries -> B is accepted and completes.
+    rc = p9_client_walk_one(&g_client, 0, 21, (const u8 *)"g", 1, NULL);
+    TEST_EXPECT_EQ(rc, 0, "sync op B survives c2s back-pressure (self-pump + retry)");
+
+    TEST_EXPECT_EQ((u64)g_mq.eagain_budget, (u64)0, "the armed EAGAIN actually fired");
+    TEST_ASSERT(g_async_op.completed, "op A completed (its reply drained by B's self-pump)");
+    TEST_EXPECT_EQ((u64)(s64)g_async_op.last_result, (u64)0,
+                   "op A completed with SUCCESS, not -EIO (the session never died)");
+    TEST_ASSERT(!g_client.dead, "session stayed LIVE through the back-pressure");
+
+    loom_unref(l);
+    p9_client_destroy(&g_client);
+    p9_mq_loopback_destroy(&g_mq);
+}
+
+// =============================================================================
+// #349 R2-F1: the send-flow park is MULTI-WAITER. N Procs share one dev9p client
+// (docs/reference/47-9p-client.md), so N senders can be back-pressured at once
+// and park concurrently. The original fix parked them on a single `Rendez`, which
+// extincts on the 2nd sleeper (rendez.h "Extincts on second sleeper") -- an
+// unprivileged SMP panic on exactly the #349 workload (parallel writers filling
+// the shared c2s while a third op reads). The fix parks each on its OWN stack
+// Rendez via a poll_waiter on c->send_waiters_list; the reader's
+// client_send_progress_signal wakes them ALL.
+//
+// This deterministically exercises the multi-waiter wake the park branch relies
+// on: register 2 send-waiters, then run the client_send_progress_signal body
+// (bump the generation + wake the list) and assert BOTH are woken with NO
+// extinction -- the structural guard against the F1 single-waiter regression (a
+// single Rendez could not even hold the 2nd register). The full concurrent
+// park->retry->complete loop needs 2 live threads racing the shared client (the
+// SMP-gate workload + the deterministic multi-thread harness owed since
+// #841/#845/Loom); here the multi-waiter mechanism itself is proven directly.
+// =============================================================================
+void test_9p_client_send_backpressure_multi_waiter(void) {
+    int rc = p9_mq_loopback_init(&g_mq, canonical_responder, NULL);
+    TEST_EXPECT_EQ(rc, 0, "mq loopback init");
+    rc = p9_client_init(&g_client, /*root_fid=*/0, /*msize=*/8192,
+                        p9_mq_loopback_ops_for(&g_mq), g_recv_buf, sizeof(g_recv_buf));
+    TEST_EXPECT_EQ(rc, 0, "client init (send_waiters_list initialized)");
+
+    // Two concurrent back-pressured senders, each parked on its OWN stack Rendez
+    // via a hook on the shared send-waiter list. A single Rendez would extinct at
+    // the 2nd register/sleeper; the poll_waiter_list holds N.
+    struct Rendez      r1, r2;
+    struct poll_waiter pw1, pw2;
+    rendez_init(&r1);
+    rendez_init(&r2);
+    poll_waiter_init(&pw1, &r1);
+    poll_waiter_init(&pw2, &r2);
+    u64 gen = g_client.send_progress;
+    poll_waiter_list_register(&g_client.send_waiters_list, &pw1);
+    poll_waiter_list_register(&g_client.send_waiters_list, &pw2);
+    g_client.send_waiters = 2;
+
+    // A reader makes progress -- the client_send_progress_signal body: bump the
+    // generation, then wake EVERY parked sender. No extinction => the multi-waiter
+    // holds 2; both `ready` => both woken; the bumped generation => each parked
+    // sender's send_wait_cond (send_progress != gen) would now flip true on retry.
+    g_client.send_progress++;
+    poll_waiter_list_wake(&g_client.send_waiters_list);
+
+    TEST_ASSERT(pw1.ready, "sender 1 woken by the shared-list wake");
+    TEST_ASSERT(pw2.ready, "sender 2 woken (no single-waiter extinction at the 2nd parker)");
+    TEST_ASSERT(g_client.send_progress != gen, "progress generation advanced (the park cond would flip)");
+
+    poll_waiter_list_unregister(&pw1);
+    poll_waiter_list_unregister(&pw2);
+    g_client.send_waiters = 0;
+
+    p9_client_destroy(&g_client);
+    p9_mq_loopback_destroy(&g_mq);
+}

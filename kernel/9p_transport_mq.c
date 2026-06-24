@@ -23,6 +23,7 @@ int p9_mq_loopback_init(struct p9_mq_loopback *mq,
     mq->recvs          = 0;
     mq->deadline_armed = false;
     mq->timed_out      = false;
+    mq->eagain_budget  = 0;
     return 0;
 }
 
@@ -44,6 +45,11 @@ static int mq_send(void *ctx, const u8 *buf, size_t len) {
     if (!mq || mq->magic != P9_MQ_LOOPBACK_MAGIC) return -1;
     spin_lock(&mq->lock);
     if (mq->closed) { spin_unlock(&mq->lock); return -1; }
+    if (mq->eagain_budget > 0) {            // #349: transiently-full-but-ALIVE ring
+        mq->eagain_budget--;                // reject the frame; do NOT synthesize a
+        spin_unlock(&mq->lock);             // reply (a real full ring drops nothing
+        return P9_TRANSPORT_EAGAIN;         // on the floor -- the sender retries)
+    }
     int n = mq->responder(mq->user_ctx, buf, len, mq->scratch, sizeof(mq->scratch));
     if (n < 0 || (size_t)n > sizeof(mq->scratch)) { spin_unlock(&mq->lock); return -1; }
     if ((size_t)mq->tail + (size_t)n > P9_MQ_RING_CAP) {   // would overflow the ring

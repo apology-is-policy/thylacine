@@ -50,6 +50,14 @@ struct p9_mq_loopback {
     // returns -1 + sets timed_out (the frame-boundary-timeout model) instead of 0.
     bool                   deadline_armed;
     bool                   timed_out;
+    // Back-pressure knob (#349 regression). A test sets eagain_budget = K to make
+    // the next K send calls return P9_TRANSPORT_EAGAIN (a transiently-full-but-ALIVE
+    // c2s ring) and REJECT the frame -- no reply synthesized, no acceptance --
+    // exactly like a real full ring. The reply is generated only when the frame is
+    // accepted (budget exhausted), so a prior op's already-queued reply stays
+    // drainable: the production shape where client_send_flow's self-pump drains an
+    // OTHER op's reply, frees the slot, then the rejected frame's retry is accepted.
+    u32                    eagain_budget;
 };
 
 // Initialize. `responder` is required (same contract as p9_loopback_responder:

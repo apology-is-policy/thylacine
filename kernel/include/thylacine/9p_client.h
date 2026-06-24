@@ -57,6 +57,7 @@
 #include <thylacine/9p_session.h>
 #include <thylacine/9p_transport.h>
 #include <thylacine/9p_wire.h>
+#include <thylacine/poll.h>
 #include <thylacine/rendez.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/types.h>
@@ -148,6 +149,27 @@ struct p9_client {
     struct p9_rpc       *inflight[P9_SESSION_MAX_OUTSTANDING];
     bool                 reader_active;
     bool                 dead;
+    // #349 send flow control. A send whose c2s ring is transiently FULL (under
+    // #841 pipelining + concurrent large frames) is back-pressure, NOT a death:
+    // the sender drains the reply path + retries (client_send_flow). A reader
+    // bumps send_progress + (iff send_waiters) wakes the parked senders on each
+    // demux and on reader departure -- so a continuously-busy pipeline cannot
+    // starve a sender (it retries on every reader-progress edge, not just on
+    // reader-exit). send_progress + send_waiters are under c->lock; a parked
+    // sender's cond reads send_progress under ITS OWN rendez lock -- the poll()
+    // register-then-observe pattern (I-9, no lost wake; poll.tla).
+    //
+    // MULTI-WAITER (R2-F1): the client is shared across every Proc whose territory
+    // resolves through its dev9p mount, so N senders can be back-pressured at once.
+    // A single `Rendez` is single-waiter (extincts on the 2nd sleeper, rendez.h) --
+    // an unprivileged SMP-reachable panic on exactly this workload (parallel writers
+    // filling the shared c2s). So senders park on a `poll_waiter_list`: each holds
+    // its OWN stack `Rendez` via a `poll_waiter`, and the reader wakes them all with
+    // `poll_waiter_list_wake`. send_waiters is the registered-waiter count, gating
+    // the wake off the hot demux path.
+    struct poll_waiter_list send_waiters_list;
+    u64                  send_progress;
+    u32                  send_waiters;
     // Most-recently-completed op's reply buffer, kept alive past client_run's
     // return. The read/readdir/readlink dispatch results ZERO-COPY ALIAS into
     // it (out->read_data / readdir_data / readlink_target point inside the
