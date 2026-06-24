@@ -6117,8 +6117,9 @@ static s64 sys_poll_handler(u64 fds_va, u64 nfds_raw, u64 timeout_ms_raw) {
 
     // nfds bound — same as the testable core's check, but also the
     // stack-array bound on `kfds[]` below. Reject before touching
-    // user-VA.
-    if (nfds_raw == 0 || nfds_raw > PROC_HANDLE_MAX)         return -1;
+    // user-VA. POLL_MAX_NFDS (decoupled from PROC_HANDLE_MAX) keeps the
+    // kfds[] frame bounded regardless of the open-fd table size.
+    if (nfds_raw == 0 || nfds_raw > POLL_MAX_NFDS)          return -1;
     u64 nfds = nfds_raw;
 
     // User-VA range check on the entire pollfd[] array.
@@ -6129,7 +6130,7 @@ static s64 sys_poll_handler(u64 fds_va, u64 nfds_raw, u64 timeout_ms_raw) {
     // canonical fd+events the kernel operates on; this snapshot is
     // taken once at entry so the values can't change mid-sleep under
     // a concurrent userspace mutation.
-    struct pollfd kfds[PROC_HANDLE_MAX];
+    struct pollfd kfds[POLL_MAX_NFDS];
     u8 *kbytes = (u8 *)kfds;
     for (u64 i = 0; i < buf_bytes; i++) {
         if (uaccess_load_u8(fds_va + i, &kbytes[i]) != 0)    return -1;

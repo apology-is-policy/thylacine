@@ -428,8 +428,8 @@ void test_poll_bad_args_rejected(void) {
 
     TEST_EXPECT_EQ(sys_poll_for_proc(p, pfds, 0, 0), -1L,
         "nfds == 0 → -1");
-    TEST_EXPECT_EQ(sys_poll_for_proc(p, pfds, PROC_HANDLE_MAX + 1, 0), -1L,
-        "nfds > PROC_HANDLE_MAX → -1");
+    TEST_EXPECT_EQ(sys_poll_for_proc(p, pfds, POLL_MAX_NFDS + 1, 0), -1L,
+        "nfds > POLL_MAX_NFDS → -1");
     TEST_EXPECT_EQ(sys_poll_for_proc(NULL, pfds, 1, 0), -1L,
         "p == NULL → -1");
     TEST_EXPECT_EQ(sys_poll_for_proc(p, NULL, 1, 0), -1L,
@@ -971,23 +971,25 @@ void test_poll_mixed_spoor_and_srv(void) {
 }
 
 void test_poll_max_nfds(void) {
-    // Boundary coverage: nfds = PROC_HANDLE_MAX = 64. Exercises the
-    // stack allocation of `waiters[64]` and the per-fd scan loop's
-    // bound. All-POLLNVAL (cheapest setup) — the sweep walks all 64.
+    // Boundary coverage: nfds = POLL_MAX_NFDS = 64 (the poll-at-once cap,
+    // decoupled from PROC_HANDLE_MAX so the larger fd table cannot
+    // blow the waiters[]/held[] kstack frame). Exercises the stack
+    // allocation of `waiters[64]` and the per-fd scan loop's bound.
+    // All-POLLNVAL (cheapest setup) — the sweep walks all 64.
     struct Proc *p = make_test_proc();
     TEST_ASSERT(p != NULL, "test proc");
 
-    struct pollfd pfds[PROC_HANDLE_MAX];
-    for (u32 i = 0; i < PROC_HANDLE_MAX; i++) {
+    struct pollfd pfds[POLL_MAX_NFDS];
+    for (u32 i = 0; i < POLL_MAX_NFDS; i++) {
         pfds[i].fd      = (s32)i;       // unallocated → POLLNVAL
         pfds[i].events  = POLLIN;
         pfds[i].revents = 0;
     }
-    s64 ret = sys_poll_for_proc(p, pfds, PROC_HANDLE_MAX, 0);
-    TEST_EXPECT_EQ(ret, (s64)PROC_HANDLE_MAX,
-        "every fd POLLNVAL → 64 ready");
+    s64 ret = sys_poll_for_proc(p, pfds, POLL_MAX_NFDS, 0);
+    TEST_EXPECT_EQ(ret, (s64)POLL_MAX_NFDS,
+        "every fd POLLNVAL → POLL_MAX_NFDS ready");
     bool all_pollnval = true;
-    for (u32 i = 0; i < PROC_HANDLE_MAX; i++) {
+    for (u32 i = 0; i < POLL_MAX_NFDS; i++) {
         if (pfds[i].revents != POLLNVAL) { all_pollnval = false; break; }
     }
     TEST_ASSERT(all_pollnval, "every revents = POLLNVAL");

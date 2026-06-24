@@ -162,6 +162,16 @@ _Static_assert(__builtin_offsetof(struct pollfd, revents) == 6,
 #define POLL_REQUESTABLE     (POLLIN | POLLOUT)
 #define POLL_OUTPUT_ONLY     (POLLERR | POLLHUP | POLLNVAL)
 
+// Max fds polled in ONE poll() call. DECOUPLED from PROC_HANDLE_MAX (the
+// total open-fd count): sys_poll_for_proc stack-allocates `waiters[]` +
+// `held[]` of this size, so it must stay small enough that the frame fits
+// the kernel stack -- waiters[256]+held[256] (~14 KiB at PROC_HANDLE_MAX=256)
+// overflows it. 64 preserves the historical behavior exactly (PROC_HANDLE_MAX
+// was 64, so poll was already bounded to 64). A poll with more fds returns
+// -1; lifting it past a stack-frame's worth needs a heap-backed waiter array
+// (the #355 growable-fd-table chunk's natural companion).
+#define POLL_MAX_NFDS        64
+
 // =============================================================================
 // kernel-internal poll_waiter hook + per-object hook list.
 // =============================================================================

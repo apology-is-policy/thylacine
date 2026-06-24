@@ -54,7 +54,6 @@
 
 #include "../mm/slub.h"
 
-static struct kmem_cache *g_handle_table_cache;
 static u64                g_handle_allocated;
 static u64                g_handle_freed;
 
@@ -82,28 +81,18 @@ bool kobj_kind_is_srv(enum kobj_kind k) {
 // =============================================================================
 
 void handle_init(void) {
-    if (g_handle_table_cache) extinction("handle_init called twice");
-
-    // R5-F F50/F51 close: NO PANIC_ON_FAIL. Per-Proc handle tables
-    // allocate at proc_alloc, which is reachable from rfork — userspace
-    // OOM (a fork bomb) shouldn't extinct the kernel. Caller-side
-    // rollback paths handle the NULL return per the documented
-    // contract in handle.h.
-    g_handle_table_cache = kmem_cache_create("handle_table",
-                                             sizeof(struct HandleTable),
-                                             8,
-                                             0);
-    if (!g_handle_table_cache) {
-        extinction("kmem_cache_create(handle_table) returned NULL");
-    }
+    // The per-Proc handle table is kmalloc-backed: sizeof(HandleTable) =
+    // 8 + 24*PROC_HANDLE_MAX exceeds SLUB_MAX_OBJECT_SIZE (2048) at the
+    // current PROC_HANDLE_MAX, so a dedicated slab cache cannot hold it --
+    // kmalloc routes the oversize object through alloc_pages. Nothing to init.
 }
 
 struct HandleTable *handle_table_alloc(void) {
-    if (!g_handle_table_cache)
-        extinction("handle_table_alloc before handle_init");
-    // KP_ZERO ensures every slot's magic = 0 (free) at allocation.
-    struct HandleTable *t = kmem_cache_alloc(g_handle_table_cache, KP_ZERO);
-    return t;   // NULL on OOM
+    // R5-F F50/F51: NO PANIC_ON_FAIL. The table allocates at proc_alloc,
+    // reachable from rfork -- userspace OOM (a fork bomb) must not extinct
+    // the kernel; caller-side rollback handles the NULL return per the
+    // contract in handle.h. KP_ZERO makes every slot's magic = 0 (free).
+    return kmalloc(sizeof(struct HandleTable), KP_ZERO);   // NULL on OOM
 }
 
 // Per-kind release of the underlying kernel object reference. Called
@@ -320,7 +309,7 @@ void handle_table_free(struct HandleTable *t) {
     // accessor -- e.g. a /proc/<pid>/fd surface inspecting a LIVE peer's
     // table -- breaks premise (b) and would need the table lock here AND
     // coordination with the #926 at-exit close. The slot-zeroing is
-    // belt-and-suspenders before the cache free.
+    // belt-and-suspenders before the kfree.
     for (int i = 0; i < PROC_HANDLE_MAX; i++) {
         if (t->slots[i].magic == HANDLE_MAGIC) {
             handle_release_obj(t->slots[i].kind, t->slots[i].obj);
@@ -331,7 +320,7 @@ void handle_table_free(struct HandleTable *t) {
             __atomic_fetch_add(&g_handle_freed, 1, __ATOMIC_RELAXED);
         }
     }
-    kmem_cache_free(g_handle_table_cache, t);
+    kfree(t);
 }
 
 int handle_table_count(const struct HandleTable *t) {

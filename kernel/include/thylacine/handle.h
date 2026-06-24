@@ -155,11 +155,18 @@ _Static_assert(__builtin_offsetof(struct Handle, magic) == 0,
                "magic at offset 0 — KP_ZERO clearing the table at alloc "
                "makes every slot's magic == 0, naturally signaling free");
 
-// Per-Proc handle table size at v1.0. Phase 5+ refactors to growable
-// (e.g., RB-tree keyed by hidx_t) when the syscall surface lands and
-// processes need >> 64 handles. 64 * 24 = 1536 bytes per Proc — kept
-// in its own SLUB cache.
-#define PROC_HANDLE_MAX 64
+// Per-Proc handle table size. 64 was a v1.0 toy limit the code always
+// anticipated growing (Phase 5+ -> growable). Real fd-hungry workloads --
+// the on-device Go toolchain (cmd/go + compile/asm/link spawn fast and hold
+// many open files), multi-fd servers -- need well more than 64, so it is
+// raised to 256. 256 slots = 8 + 24*256 = 6152 bytes exceeds
+// SLUB_MAX_OBJECT_SIZE (2048), so the table is kmalloc-backed (handle.c) --
+// kmalloc routes the oversize object through alloc_pages (2 pages here) --
+// rather than a dedicated slab cache, which cannot hold it. The growable
+// table (a two-level fdtable keyed by hidx_t, the Linux model) is the v1.x
+// design once a Proc needs >> 256; it touches the #844 shared-table lock
+// discipline (peer threads snapshot slots by-value). Tracked as #355.
+#define PROC_HANDLE_MAX 256
 
 struct HandleTable {
     // #844: serializes all slot ops (alloc / close / get / dup) -- the Plan 9
