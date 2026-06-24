@@ -54,6 +54,7 @@ void test_srvconn_recv_blocks_then_wakes(void);
 void test_srvconn_recv_deadline_timeout(void);
 void test_srvconn_teardown_eofs(void);
 void test_srvconn_teardown_wakes_blocked(void);
+void test_srvconn_server_send_blocks_then_drain_wakes(void);
 
 // ---------------------------------------------------------------------------
 // Helpers.
@@ -277,6 +278,114 @@ void test_srvconn_recv_blocks_then_wakes(void) {
         "the woken consumer read the server's bytes intact");
 
     test_kthread_join_free(consumer, &g_sc_exited);
+    srvconn_unref(cn);
+}
+
+// ---------------------------------------------------------------------------
+// srvconn.server_send_blocks_then_drain_wakes (#348)
+// ---------------------------------------------------------------------------
+//
+// The s2c twin of recv_blocks_then_wakes. A blocking SERVER send into a
+// FULL s2c ring must PARK on wrendez (the new #348 behavior) -- never
+// return 0, which a 9P-server Proc's write_full treats as EPIPE and closes
+// the kernel-attached mount on (the go-build EIO cascade). The kernel
+// client's drain (srvconn_client_recv) must then WAKE the producer to
+// deliver the whole payload. Non-vacuous: pre-fix srvconn_server_send
+// returned 0 on a full ring (no wrendez, no park).
+
+static struct SrvConn   *g_ss_conn;
+static volatile u32      g_ss_ran;       // producer: pre-send → 1, post-send → 2
+static volatile long     g_ss_ret;       // server_send_blocking's return value
+static volatile bool     g_ss_exited;    // #109 terminal-park reap handshake
+static u8                g_ss_payload[256];
+
+static void ss_send_producer(void) {
+    g_ss_ran++;                                          // → 1: pre-send
+    g_ss_ret = srvconn_server_send_blocking(g_ss_conn, g_ss_payload,
+                                            (long)sizeof g_ss_payload);
+    g_ss_ran++;                                          // → 2: post-send
+    test_kthread_park_terminal(&g_ss_exited);            // #109: EXITING park
+}
+
+void test_srvconn_server_send_blocks_then_drain_wakes(void) {
+    struct SrvConn *cn = srvconn_create(0x6666u, 66, false, 0);
+    TEST_ASSERT(cn != NULL, "srvconn_create");
+
+    g_ss_conn   = cn;
+    g_ss_ran    = 0;
+    g_ss_ret    = -999;
+    g_ss_exited = false;
+    fill_pattern(g_ss_payload, sizeof g_ss_payload, 0x55);
+
+    // Fill s2c to capacity with a continuous 0xAA ramp via the non-blocking
+    // server_send (≤1 KiB chunks — no SRVCONN_RING_CAP stack buffer). The
+    // producer's first chan_produce then writes nothing and parks.
+    long filled = 0;
+    while (filled < (long)SRVCONN_RING_CAP) {
+        long want = (long)SRVCONN_RING_CAP - filled;
+        if (want > (long)sizeof g_sc_chunk) want = (long)sizeof g_sc_chunk;
+        for (long j = 0; j < want; j++)
+            g_sc_chunk[j] = (u8)(0xAA + (u8)(filled + j));
+        TEST_EXPECT_EQ(srvconn_server_send(cn, g_sc_chunk, want), want,
+            "s2c prefill chunk accepted");
+        filled += want;
+    }
+    TEST_EXPECT_EQ(cn->s2c.count, SRVCONN_RING_CAP, "s2c filled to capacity");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty at test entry");
+
+    struct Thread *producer = thread_create(kproc(), ss_send_producer);
+    TEST_ASSERT(producer != NULL, "thread_create(producer)");
+    ready(producer);
+
+    // Yield: producer runs, increments to 1, writes nothing (s2c is full),
+    // and PARKS on wrendez -- the load-bearing #348 behavior. Pre-fix it
+    // would have returned 0 here and incremented to 2.
+    sched();
+    TEST_EXPECT_EQ(g_ss_ran, 1u, "producer ran once before blocking");
+    TEST_EXPECT_EQ(producer->state, THREAD_SLEEPING,
+        "producer is SLEEPING inside server_send_blocking");
+    TEST_EXPECT_EQ(cn->s2c.wrendez.waiter, producer,
+        "producer parked on the s2c WRENDEZ (the new #348 mechanism)");
+    TEST_ASSERT(cn->s2c.rendez.waiter == NULL,
+        "the reader rendez has NO waiter -- separate from wrendez");
+    TEST_ASSERT(cn->s2c.writing == true,
+        "the single-writer busy-guard is held across the park");
+    TEST_EXPECT_EQ(g_ss_ret, -999L, "producer has NOT returned (still blocked)");
+
+    // The kernel client drains s2c -> the drain-wake (wakeup wrendez)
+    // releases the producer. One 256-byte drain frees enough room.
+    u8 in[256];
+    TEST_EXPECT_EQ(srvconn_client_recv(cn, in, sizeof in), 256L,
+        "client_recv drains a chunk of the prefill");
+
+    sched();
+    TEST_EXPECT_EQ(g_ss_ran, 2u, "producer resumed past the blocking send");
+    TEST_EXPECT_EQ(g_ss_ret, (long)sizeof g_ss_payload,
+        "server_send_blocking delivered the WHOLE payload");
+    TEST_ASSERT(cn->s2c.writing == false,
+        "the busy-guard is released after the send completes");
+
+    // Verify the payload landed intact at the tail. After the 256-byte
+    // drain + the producer's 256-byte write, s2c holds (CAP-256) prefill
+    // (0xAA ramp from offset 256) then the 256-byte payload (0x55 ramp).
+    long off = 256;
+    long remain = (long)SRVCONN_RING_CAP - 256;
+    while (remain > 0) {
+        long want = remain;
+        if (want > (long)sizeof in) want = (long)sizeof in;
+        TEST_EXPECT_EQ(srvconn_client_recv(cn, in, want), want,
+            "drain remaining prefill");
+        for (long j = 0; j < want; j++)
+            TEST_ASSERT(in[j] == (u8)(0xAA + (u8)(off + j)),
+                "prefill byte intact");
+        off += want;
+        remain -= want;
+    }
+    TEST_EXPECT_EQ(srvconn_client_recv(cn, in, 256), 256L, "drain payload");
+    TEST_ASSERT(check_pattern(in, 256, 0x55),
+        "the producer's payload landed intact at the stream tail");
+
+    test_kthread_join_free(producer, &g_ss_exited);
     srvconn_unref(cn);
 }
 

@@ -639,6 +639,7 @@ void test_srvconn_recv_blocks_then_wakes(void);
 void test_srvconn_recv_deadline_timeout(void);
 void test_srvconn_teardown_eofs(void);
 void test_srvconn_teardown_wakes_blocked(void);
+void test_srvconn_server_send_blocks_then_drain_wakes(void);
 void test_devsrv_walk_service(void);
 void test_devsrv_open_connect_byte(void);
 void test_devsrv_kernel_attached_io_refused(void);
@@ -1739,6 +1740,9 @@ struct test_case g_tests[] = {
     { "srvconn.ring_capacity",         test_srvconn_ring_capacity,         false, NULL },
     { "srvconn.recv_blocks_then_wakes",
                                        test_srvconn_recv_blocks_then_wakes,
+                                                                           false, NULL },
+    { "srvconn.server_send_blocks_then_drain_wakes",
+                                       test_srvconn_server_send_blocks_then_drain_wakes,
                                                                            false, NULL },
     { "srvconn.recv_deadline_timeout",
                                        test_srvconn_recv_deadline_timeout, false, NULL },

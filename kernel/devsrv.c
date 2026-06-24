@@ -1063,8 +1063,22 @@ static long devsrv_write(struct Spoor *c, const void *buf, long n, s64 off) {
         // mirror of the server arm; stalk-3b-β (see devsrv_read).
         return srvconn_client_send(cn, (const u8 *)buf, n);
     }
-    // SERVER endpoint: write replies toward the client via s2c.
-    return srvconn_server_send(cn, (const u8 *)buf, n);
+    // SERVER endpoint: write replies toward the client via s2c. BLOCKING
+    // (#348): a 9P-server Proc (stratumd) writing reply frames must not get
+    // a 0 from a full s2c ring -- its write_full treats 0 as EPIPE and
+    // CLOSES the kernel-attached mount mid-build. srvconn_server_send_
+    // blocking parks the writer until the kernel client drains s2c (the s2c
+    // twin of #349's c2s client_send_flow). The CLIENT arm above stays non-
+    // blocking: a kernel-attached conn's c2s is driven by the kernel 9P
+    // client (with #349 flow control), not this path; a userspace-byte-
+    // client c2s back-pressure is a separable v1.x seam.
+    //
+    // V1.0 SINGLE-WRITER PRE-CONDITION (#348 audit F1 / task #354): the
+    // server endpoint of one conn has exactly one writer (stratumd is
+    // thread-per-conn). A 2nd concurrent blocking writer is refused -1 (which
+    // closes the mount) -- a threaded-server lift MUST serialize per-conn s2c
+    // writes OR go multi-waiter (the #349 c2s precedent) before it lands.
+    return srvconn_server_send_blocking(cn, (const u8 *)buf, n);
 }
 
 static long devsrv_bwrite(struct Spoor *c, struct Block *bp, s64 off) {

@@ -136,12 +136,15 @@ enum srvconn_state {
 };
 
 // One direction of the transport: a byte FIFO with a single blocking
-// consumer. `eof` latches at teardown — the consumer then drains any
-// residual bytes and reads EOF; the producer's writes fail. `rendez`
-// is where the (single) blocking consumer waits; the single-waiter
-// Rendez convention holds because the kernel 9P client serializes
-// every op on `p9_client.lock`, so at most one thread drains a given
-// ring at a time.
+// consumer and (optionally) a single blocking producer. `eof` latches
+// at teardown — the consumer then drains any residual bytes and reads
+// EOF; the producer's writes fail. `rendez` is where the (single)
+// blocking consumer waits; `wrendez` is where the (single) blocking
+// producer waits for ring room (#348 s2c back-pressure). The two are
+// SEPARATE Rendezes so a reader and a writer never contend one
+// single-waiter slot; the single-waiter convention then holds trivially
+// — each Rendez has exactly one possible waiter, guarded by `reading` /
+// `writing` respectively.
 struct srvconn_chan {
     spin_lock_t    lock;          // protects count / head / tail / eof
     u32            count;         // bytes buffered; 0..SRVCONN_RING_CAP
@@ -156,7 +159,19 @@ struct srvconn_chan {
                                   // concurrent blocking recv is refused (-1)
                                   // rather than registering a 2nd waiter (which
                                   // trips the single-waiter extinction)
+    bool           writing;       // a blocking PRODUCER holds the single-writer
+                                  // role (#348 s2c back-pressure): symmetric to
+                                  // `reading`. Only srvconn_server_send_blocking
+                                  // parks on `wrendez`; a 2nd concurrent blocking
+                                  // producer is refused (-1), never a 2nd waiter.
     struct Rendez  rendez;        // the single blocking consumer waits here
+    struct Rendez  wrendez;       // the single blocking producer waits here, for
+                                  // ring room (s2c FULL -> has-room). A SEPARATE
+                                  // Rendez from `rendez` so the reader (parks on
+                                  // `rendez`) and the writer (parks on `wrendez`)
+                                  // never share a single-waiter slot -- each
+                                  // Rendez has exactly one possible waiter, so no
+                                  // #349-class single-waiter overflow is reachable.
     u8             buf[SRVCONN_RING_CAP];
 };
 
@@ -422,6 +437,30 @@ long srvconn_client_recv(struct SrvConn *cn, u8 *buf, long n);
 // client (the s2c ring). Returns bytes accepted (0..n) or -1 if torn
 // down / bad args. Non-blocking.
 long srvconn_server_send(struct SrvConn *cn, const u8 *buf, long n);
+
+// srvconn_server_send_blocking — the BLOCKING server-side write (#348).
+//
+// The non-blocking srvconn_server_send above can short-write (or return 0)
+// when the s2c ring is full. A POSIX server endpoint — a 9P-server Proc
+// like stratumd writing reply frames through devsrv_write — treats a 0
+// from write() as EPIPE and CLOSES the connection, killing the kernel-
+// attached mount mid-build (the #348 s2c back-pressure, the s2c twin of
+// the #349 c2s fix). This blocking variant instead delivers the WHOLE
+// buffer: it writes what fits, then parks on s2c.wrendez until the kernel
+// client drains s2c (srvconn_client_recv wakes wrendez) or teardown
+// latches eof. Returns:
+//   n   — all bytes delivered.
+//   >0  — partial then eof (the connection tore down mid-write).
+//   -1  — eof before any byte / bad args / a 2nd concurrent blocking
+//         producer (the single-writer busy-guard) / #811 death-interrupt.
+// Death-interruptible (#811): a dying Proc unwinds at its EL0-return
+// die-check. Frame-atomicity vs a concurrent producer is the `writing`
+// busy-guard's (one blocking writer per s2c at a time -- the v1.0 single-
+// writer pre-condition, audit F1 / task #354). A partial return after a
+// death-interrupt is safe-by-construction (audit F2): the dying Proc
+// unwinds at its next EL0 return before any write_full retry can re-enter,
+// so the partial count is never re-driven from a live caller.
+long srvconn_server_send_blocking(struct SrvConn *cn, const u8 *buf, long n);
 
 // srvconn_server_recv — corvus reads up to `n` bytes from the kernel
 // client (the c2s ring). Non-blocking — corvus polls. Returns:

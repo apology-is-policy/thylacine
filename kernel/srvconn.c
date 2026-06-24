@@ -82,11 +82,13 @@ static void chan_init(struct srvconn_chan *ch) {
     // is the unlocked form, a zeroed Rendez is {unlocked, no waiter}.
     // The explicit init is the documented contract (mirrors pipe.c).
     spin_lock_init(&ch->lock);
-    ch->count = 0;
-    ch->head  = 0;
-    ch->tail  = 0;
-    ch->eof   = false;
+    ch->count   = 0;
+    ch->head    = 0;
+    ch->tail    = 0;
+    ch->eof     = false;
+    ch->writing = false;
     rendez_init(&ch->rendez);
+    rendez_init(&ch->wrendez);
 }
 
 // chan_cond_readable — tsleep's wait predicate for the blocking client
@@ -98,6 +100,22 @@ static void chan_init(struct srvconn_chan *ch) {
 static int chan_cond_readable(void *arg) {
     struct srvconn_chan *ch = (struct srvconn_chan *)arg;
     return (ch->count > 0) || ch->eof;
+}
+
+// chan_cond_writable — tsleep's wait predicate for the blocking server
+// send (#348): the ring has room (count < cap) OR has latched EOF. Reads
+// count / eof WITHOUT the channel lock for the same reason chan_cond_
+// readable does — tsleep evaluates it under wrendez->lock, and the
+// consumer's drain (srvconn_client_recv) decrements count under ch->lock
+// then wakeup(wrendez), whose lock acquisition provides the happens-
+// before with this read. The mirror of chan_cond_readable (specs/tsleep
+// .tla register-then-observe). The `|| eof` means "stop blocking"
+// (teardown), NOT "room available": a producer woken on eof re-runs
+// chan_produce, observes eof, and fails -- it never writes a full+torn
+// ring (#348 audit F3).
+static int chan_cond_writable(void *arg) {
+    struct srvconn_chan *ch = (struct srvconn_chan *)arg;
+    return (ch->count < SRVCONN_RING_CAP) || ch->eof;
 }
 
 // chan_produce — append `n` bytes; wake a blocked consumer. Returns
@@ -269,12 +287,18 @@ void srvconn_teardown(struct SrvConn *cn) {
     spin_unlock(&cn->s2c.lock);
     spin_unlock(&cn->c2s.lock);
 
-    // Wake every blocked consumer + every registered poller. Wakes happen
-    // outside the channel locks (the wakeup / poll-list paths take the
-    // rendez / list locks; producer-mutates-then-wakes is the chan_produce
-    // discipline). Both EOFs are visible to any wake observer.
+    // Wake every blocked consumer + every blocked producer + every
+    // registered poller. Wakes happen outside the channel locks (the
+    // wakeup / poll-list paths take the rendez / list locks; producer-
+    // mutates-then-wakes is the chan_produce discipline). Both EOFs are
+    // visible to any wake observer. The wrendez wakes (#348) release a
+    // blocking server send parked on a full s2c; c2s.wrendez never has a
+    // waiter (the c2s producer is non-blocking) but is woken for symmetry
+    // — a wake with no sleeper is a no-op.
     wakeup(&cn->c2s.rendez);
     wakeup(&cn->s2c.rendez);
+    wakeup(&cn->c2s.wrendez);
+    wakeup(&cn->s2c.wrendez);
 
     // Teardown is a single readiness edge for every server-endpoint
     // poller: POLLHUP latches off c2s.eof, POLLERR off s2c.eof. ONE wake
@@ -408,6 +432,13 @@ long srvconn_client_recv(struct SrvConn *cn, u8 *buf, long n) {
         if (ch->count > 0) {
             ret = chan_ring_read(ch, buf, n);
             spin_unlock(&ch->lock);
+            // #348: draining s2c made room -> wake a blocked server send
+            // (srvconn_server_send_blocking parks on wrendez when s2c
+            // fills). Wake OUTSIDE ch->lock (wakeup takes wrendez->lock --
+            // the consumer-mutates-then-wakes discipline, mirroring how
+            // chan_produce wakes ch->rendez after a write). A no-op when no
+            // producer is parked.
+            wakeup(&ch->wrendez);
             break;
         }
         if (ch->eof) {
@@ -456,6 +487,95 @@ long srvconn_server_send(struct SrvConn *cn, const u8 *buf, long n) {
     // side poll path (cn->client_poll_list), which would observe s2c FILL
     // as a POLLIN edge.
     return chan_produce(&cn->s2c, buf, n);
+}
+
+// srvconn_server_send_blocking — #348. The BLOCKING s2c producer: deliver
+// the WHOLE buffer, parking on s2c.wrendez when the ring is full until the
+// kernel client drains it (srvconn_client_recv wakes wrendez) or teardown
+// latches eof. The s2c twin of #349's c2s client_send_flow. See srvconn.h
+// for the contract + the EPIPE-close hazard it closes.
+//
+// The `writing` busy-guard mirrors srvconn_client_recv's `reading`: only
+// ONE blocking producer parks on wrendez (stratumd is thread-per-conn; a
+// 2nd concurrent producer is refused -1 -> fail-closed, never a 2nd
+// single-waiter waiter). The guard is held across the WHOLE multi-chunk
+// write, so the n bytes enter s2c contiguously vs any other producer
+// (frame-atomicity). A mid-fill reader drain is safe: the kernel s2c
+// reader already reassembles partial frames by size — it MUST, since the
+// non-blocking srvconn_server_send already short-writes today.
+//
+// Deadlock-free composed with the #349 c2s blocking send: the kernel
+// client is the guaranteed s2c drainer (its elected reader, or #349's
+// self-pump when it is itself back-pressured on c2s), so a full s2c always
+// has a draining party. No lock is held across the park (chan_produce
+// releases ch->lock; `writing` is a plain bool guard, not a lock, and the
+// reader uses the separate `reading` flag).
+long srvconn_server_send_blocking(struct SrvConn *cn, const u8 *buf, long n) {
+    if (!cn || cn->magic != SRV_CONN_MAGIC) return -1;
+    if (!buf || n < 0) return -1;
+    if (n == 0) return 0;
+
+    struct srvconn_chan *ch = &cn->s2c;
+
+    // V1.0 SINGLE-WRITER PRE-CONDITION (#348 audit F1, task #354). Claim the
+    // single-writer role (mirror srvconn_client_recv's `reading`). A 2nd
+    // concurrent blocking writer on one s2c is refused -1 -- which a 9P-server
+    // Proc's write_full treats as fatal -> mount close (the very #348 cascade).
+    // This is LATENT-only: stratumd is one-thread-per-conn, so one s2c has one
+    // writer; the -1 mirrors the SHIPPED `reading` guard (a 2nd reader also
+    // gets -1, relying on the #841 single-reader election). A threaded-server /
+    // per-user-netd lift on THIS transport MUST first serialize per-conn s2c
+    // writes server-side OR go multi-waiter on BOTH wrendez + rendez (the #349
+    // c2s send_waiters_list precedent). Not built at v1.0 -- it is unverifiable
+    // without the threaded server (no driving workload, no deterministic test).
+    spin_lock(&ch->lock);
+    if (ch->writing) { spin_unlock(&ch->lock); return -1; }
+    ch->writing = true;
+    spin_unlock(&ch->lock);
+
+    long done = 0;
+    long ret;
+    for (;;) {
+        // chan_produce writes what fits (eof-checked) + wakes the blocked
+        // client reader (s2c.rendez). put < (n-done) means the ring filled
+        // (chan_ring_write writes min(avail, n), so a short write exhausted
+        // avail). put == 0 with bytes left likewise means a full ring.
+        long put = chan_produce(ch, buf + done, n - done);
+        if (put < 0) {                        // eof latched (teardown)
+            ret = (done > 0) ? done : -1;
+            break;
+        }
+        done += put;
+        if (done >= n) { ret = done; break; } // whole buffer delivered
+
+        // Ring full -> park until the kernel client drains s2c (wakes
+        // wrendez) or teardown latches eof. tsleep re-checks chan_cond_
+        // writable under wrendez->lock, so a drain between chan_produce and
+        // here is not lost (specs/tsleep.tla register-then-observe).
+        // deadline 0 = indefinite (the kernel client is the guaranteed
+        // drainer; see the function header on deadlock-freedom).
+        int ts = tsleep(&ch->wrendez, chan_cond_writable, ch, 0u);
+        if (ts == TSLEEP_TIMEDOUT) {          // unreachable with deadline 0; defense in depth
+            // #348 audit F4: a future non-zero server deadline here would need a
+            // caller-visible `server_timed_out` signal (analog to client_timed_
+            // out) so write_full distinguishes a deadline expiry from a short
+            // write -- else the retry loop just re-parks. Add it WITH any deadline.
+            ret = (done > 0) ? done : -1;
+            break;
+        }
+        // #811 (ARCH §8.8.1): death-interrupted -> the Proc is group-
+        // terminating; return so the Thread unwinds to its die-check.
+        if (ts == TSLEEP_INTR) {
+            ret = (done > 0) ? done : -1;
+            break;
+        }
+        // TSLEEP_AWOKEN — loop, chan_produce again.
+    }
+
+    spin_lock(&ch->lock);
+    ch->writing = false;
+    spin_unlock(&ch->lock);
+    return ret;
 }
 
 long srvconn_server_recv(struct SrvConn *cn, u8 *buf, long n) {

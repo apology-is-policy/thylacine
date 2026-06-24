@@ -96,13 +96,19 @@ failure to `-ETIMEDOUT` (corvus hung) vs `-EIO` (corvus crashed).
 long srvconn_client_send(struct SrvConn *cn, const u8 *buf, long n);
 long srvconn_client_recv(struct SrvConn *cn, u8 *buf, long n);
 long srvconn_server_send(struct SrvConn *cn, const u8 *buf, long n);
+long srvconn_server_send_blocking(struct SrvConn *cn, const u8 *buf, long n);  // #348
 long srvconn_server_recv(struct SrvConn *cn, u8 *buf, long n);
 ```
 
-`client_*` is the kernel 9P client's side, `server_*` is corvus's side.
-`client_send` writes the `c2s` ring; `server_recv` drains it.
-`server_send` writes the `s2c` ring; `client_recv` drains it.
-`client_recv` is the one blocking call — see Implementation.
+`client_*` is the kernel 9P client's side, `server_*` is corvus's /
+stratumd's side. `client_send` writes the `c2s` ring; `server_recv`
+drains it. `server_send` writes the `s2c` ring; `client_recv` drains it.
+There are **two** blocking calls (see Implementation): `client_recv`
+(blocks on an empty `s2c`) and `server_send_blocking` (#348 — blocks on
+a full `s2c`). The non-blocking `server_send` remains for the corvus
+poll-then-write pattern; `devsrv_write`'s server arm uses the blocking
+variant so a 9P-server Proc never sees a 0-return it would misread as
+EPIPE.
 
 ### Peer / server identity
 
@@ -149,7 +155,9 @@ struct srvconn_chan {
     spin_lock_t    lock;          // protects count / head / tail / eof
     u32            count, head, tail;
     bool           eof;           // teardown latched this direction
-    struct Rendez  rendez;        // the single blocking consumer waits here
+    bool           writing;       // a blocking PRODUCER holds the single-writer role (#348)
+    struct Rendez  rendez;        // the single blocking CONSUMER waits here
+    struct Rendez  wrendez;       // the single blocking PRODUCER waits here (#348)
     u8             buf[SRVCONN_RING_CAP];   // SRVCONN_RING_CAP == 65536 (2x SRVCONN_MSIZE)
 };
 ```
@@ -159,21 +167,39 @@ ops (mirroring `kernel/pipe.c`'s `ring_write` / `ring_read`), run under
 the channel lock. `chan_produce` appends bytes and wakes the consumer;
 `chan_consume_nonblock` drains without blocking.
 
-### No-writer-block design
+### Writer back-pressure (#348 + #349)
 
-The kernel 9P client is **synchronous and single-frame-in-flight** — it
-holds `p9_client.lock` across a whole send-then-receive exchange, so at
-most one `Tmsg` is ever in `c2s` and one `Rmsg` in `s2c`. Each ring is
-`SRVCONN_RING_CAP` (65536) — twice the msize (`SRVCONN_MSIZE`, 32 KiB
-since Weft-0; NET-THROUGHPUT.md Tier A lifted it from 4 KiB for /net
-throughput), pinned by `_Static_assert(SRVCONN_RING_CAP >= SRVCONN_MSIZE)` —
-so a whole frame always fits and a write never has to block. A write
-that would not fit (a protocol violation — an oversized frame) is
-refused: `chan_produce` returns a short count, which the transport core
-surfaces as an error. The upshot: **only one direction ever blocks** —
-the kernel client draining `s2c` — so the transport is a single-
-consumer wait/wake per ring, not the two-way back-pressure machine a
-general pipe needs.
+The original design assumed the kernel 9P client was **synchronous and
+single-frame-in-flight** — one `Tmsg` in `c2s`, one `Rmsg` in `s2c` — so
+that a single frame always fit a `SRVCONN_RING_CAP` (65536, twice the
+`SRVCONN_MSIZE` 32 KiB msize, pinned by
+`_Static_assert(SRVCONN_RING_CAP >= SRVCONN_MSIZE)`) ring and a write
+**never had to block**. The **#841 pipeline restoration** broke that
+premise: the elected-reader client now has **several frames in flight**,
+so a burst of pipelined `Tmsg`s can fill `c2s` and a burst of `Rmsg`
+replies can fill `s2c` faster than the far side drains them. A
+non-blocking write into a full ring then returns a **short count / 0**,
+which the writer mis-reads as a fatal error and **closes the
+connection** — killing a live, kernel-attached mount mid-workload.
+
+So **both directions now have real back-pressure**, each a single-
+producer / single-consumer blocking pair:
+
+| Ring | Writer (blocks on full) | Drainer (wakes the writer) |
+|---|---|---|
+| `c2s` | the kernel client — **#349** `client_send_flow` (block-and-self-pump at the `p9_client` layer) | stratumd / corvus `server_recv` |
+| `s2c` | a 9P-server Proc via `devsrv_write` — **#348** `server_send_blocking` (parks on `s2c.wrendez`) | the kernel client `client_recv` |
+
+The two fixes are twins. #349's was the smoking-gun that killed the
+`go build` text page-in (`c2s` Twrite back-pressure); #348's is the
+symmetric `s2c` case (stratumd's `Rread` replies filling `s2c` under the
+compile's concurrent-fault Tread burst — a write of `0` became `EPIPE`
+became a mount close became a `-P9_E_IO` text page-in became `snare:bus`).
+
+An oversized single frame (a protocol violation, `n > SRVCONN_RING_CAP`)
+is still refused by the `c2s` `client_send_frame` all-or-nothing path;
+the `s2c` blocking write tolerates any `n` by multi-cycling across drain
+rounds.
 
 ### The blocking client recv
 
@@ -208,6 +234,55 @@ whose `rendez->lock` acquisition is the happens-before. This is exactly
 The `Rendez` is single-waiter. The convention holds because the kernel
 9P client serializes every op on `p9_client.lock`, so at most one
 thread drains `s2c` at a time.
+
+### The blocking server send (#348)
+
+`srvconn_server_send_blocking` is the `s2c`-write twin of the blocking
+client recv. `devsrv_write`'s server arm uses it so a 9P-server Proc
+(stratumd) writing reply frames **delivers the whole buffer**, parking
+when `s2c` is full instead of returning a `0` its `write_full` would
+treat as `EPIPE`:
+
+```
+claim the single-writer role (writing busy-guard, mirror of reading)
+loop:
+  put = chan_produce(s2c, buf+done, n-done)   // eof-checked; wakes the reader rendez
+  if put < 0:    eof -> return (done>0 ? done : -1)
+  done += put
+  if done >= n:  return done                  // whole buffer delivered
+  tsleep(s2c.wrendez, cond = count<CAP || eof, deadline=0)   // ring full -> park
+  if TSLEEP_INTR: return (done>0 ? done : -1)  // #811 death-interrupt
+  (TSLEEP_AWOKEN -> loop, chan_produce again)
+release the writing guard
+```
+
+Two design points make this sound:
+
+- **A separate `wrendez`, not the reader's `rendez`.** The reader parks
+  on `rendez` (waits `s2c` non-empty); the writer parks on `wrendez`
+  (waits `s2c` has-room). Giving each its own `Rendez` means each has
+  **exactly one possible waiter** — the single-waiter convention holds
+  trivially, with no "EMPTY xor FULL never-both-parked" argument to
+  prove (the #349-class single-waiter-overflow extinction is structurally
+  unreachable). The drain-wake is added to `client_recv`: after
+  `chan_ring_read` it `wakeup(s2c.wrendez)`, the register-then-observe
+  partner of `chan_cond_writable` (I-9, the `chan_cond_readable`
+  discipline mirrored).
+- **The `writing` busy-guard** (set/cleared under `ch->lock`, mirror of
+  `reading`) refuses a second concurrent blocking producer (`-1`,
+  fail-closed) — stratumd is thread-per-connection so there is one
+  writer per `s2c`, but a multi-thread Proc sharing the fd cannot trip
+  the single-waiter `wrendez`. The guard is held across the whole
+  multi-cycle write, so the `n` bytes enter `s2c` contiguously versus any
+  other producer (frame-atomicity); the kernel `s2c` reader already
+  reassembles partial frames by size (it must — the non-blocking
+  `server_send` already short-writes).
+
+Deadlock-free composed with #349: a full `s2c` always has a draining
+party (the kernel elected reader, or #349's self-pump when the client is
+itself back-pressured on `c2s`), and a full `c2s` likewise. No spinlock
+is held across either `tsleep`; the `writing` / `reading` flags are
+plain booleans the opposite role never waits on.
 
 ### Transport vtable
 
@@ -344,7 +419,7 @@ in `kernel/syscall.c` (reference 70's Spec cross-reference).
 
 ## Tests
 
-`kernel/test/test_srvconn.c` — 7 tests:
+`kernel/test/test_srvconn.c` — 8 tests:
 
 - `srvconn.create_destroy` — `srvconn_create` stamps the peer identity
   by value; the connection is born `LIVE` with refcount 1; the stamped
@@ -359,6 +434,13 @@ in `kernel/syscall.c` (reference 70's Spec cross-reference).
 - `srvconn.recv_blocks_then_wakes` — a `client_recv` on an empty ring
   blocks (`THREAD_SLEEPING`, the connection's `s2c` rendez waiter); a
   `server_send` wakes it and it reads the bytes.
+- `srvconn.server_send_blocks_then_drain_wakes` (#348) — the `s2c`-write
+  twin: a producer kthread calling `server_send_blocking` into a full
+  `s2c` ring parks on the `s2c.wrendez` (`THREAD_SLEEPING`, `writing` held,
+  the reader `rendez` waiter `NULL`); the main thread's `client_recv`
+  drain wakes it; it delivers the whole payload (returns `n`), and the
+  payload lands intact at the stream tail. Non-vacuous: pre-fix
+  `server_send` returned `0` on a full ring (no park).
 - `srvconn.recv_deadline_timeout` — a `client_recv` past its deadline
   returns `-1` with `client_timed_out` set; a fresh deadline clears the
   signal.
@@ -370,9 +452,11 @@ in `kernel/syscall.c` (reference 70's Spec cross-reference).
   `client_recv` blocked on an empty ring; it returns EOF (`0`) — a
   corvus crash never wedges a client.
 
-The two threaded tests use the kernel test harness's `thread_create` /
-`ready` / `sched` cooperative-yield pattern (cf. `test_tsleep.c`).
-Suite: 466/466 PASS × default + UBSan.
+The three threaded tests (`recv_blocks_then_wakes`,
+`server_send_blocks_then_drain_wakes`, `teardown_wakes_blocked`) use the
+kernel test harness's `thread_create` / `ready` / `sched` cooperative-
+yield pattern (cf. `test_tsleep.c`) plus the #109 terminal-park reap
+handshake. Default + UBSan green.
 
 ---
 
@@ -386,6 +470,7 @@ sentinels the caller interprets:
 | `srvconn_client_send` | bytes accepted | nothing accepted (ring full) | torn down / bad args |
 | `srvconn_client_recv` | bytes read | EOF (torn + drained) | deadline expired (then `client_timed_out`), or bad args |
 | `srvconn_server_send` | bytes accepted | nothing accepted (ring full) | torn down / bad args |
+| `srvconn_server_send_blocking` (#348) | the whole `n` delivered (blocking on a full ring), or a partial then eof | — (never 0 on a live conn) | eof before any byte / bad args / a 2nd concurrent blocking producer (the `writing` guard) / #811 death-interrupt |
 | `srvconn_server_recv` | bytes read | ring empty, connection live (poll again) | EOF (torn + drained) |
 
 `srvconn_create` returns `NULL` on any allocation failure (the
