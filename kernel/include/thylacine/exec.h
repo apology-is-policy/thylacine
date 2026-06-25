@@ -92,6 +92,24 @@ _Static_assert(EXEC_USER_BURROW_BASE < EXEC_USER_BURROW_TOP,
 _Static_assert(EXEC_USER_BURROW_TOP <= (1ull << 47),
                "burrow-attach window must stay under USER_VA_TOP (2^47)");
 
+// vDSO clock page (docs/VDSO-DESIGN.md): the single READ-ONLY kernel
+// timekeeping page mapped into every exec'd Proc so native userspace reads
+// CLOCK_MONOTONIC/_REALTIME from CNTVCT_EL0 + this page without a syscall. It
+// sits at a fixed VA in the free 2-4 GiB gap between the user-stack TOP
+// (0x8000_0000) and the burrow-attach window base (0x1_0000_0000) — so it can
+// never collide with the ELF image (low VAs), the stack, the guard, or an
+// attached anon region. The kernel maps it (no MAP_FIXED) and delivers its VA
+// in the AT_VDSO_CLOCK auxv entry. One page; the same physical page shared
+// across every Proc.
+#define EXEC_USER_VDSO_BASE   0x00000000C0000000ull   // 3 GiB
+#define EXEC_USER_VDSO_SIZE   0x1000ull
+_Static_assert(EXEC_USER_VDSO_BASE >= EXEC_USER_STACK_TOP,
+               "vDSO page must sit above the user stack");
+_Static_assert(EXEC_USER_VDSO_BASE + EXEC_USER_VDSO_SIZE <= EXEC_USER_BURROW_BASE,
+               "vDSO page must sit below the burrow-attach window");
+_Static_assert((EXEC_USER_VDSO_BASE & 0xFFFull) == 0,
+               "vDSO page VA must be page-aligned");
+
 // Initial process stack — the System V process-startup frame exec_setup
 // (and exec_setup_with_argv) builds at the very top of the user stack
 // (POUCH-DESIGN.md §12.1). A C runtime (pouch — the Thylacine POSIX libc)
@@ -106,11 +124,14 @@ _Static_assert(EXEC_USER_BURROW_TOP <= (1ull << 47),
 //   sp + 16     envp[] terminator     one NULL pointer
 //   sp + 24     auxv[]                EXEC_INIT_AUXV_COUNT × Elf64_auxv_t
 //                                      (AT_PHDR, AT_PHENT, AT_PHNUM,
-//                                       AT_PAGESZ, AT_RANDOM, AT_NULL)
-//   sp + 120    (8 bytes padding)
-//   sp + 128    AT_RANDOM entropy     16 kernel-CSPRNG bytes
-//   sp + 144    EXEC_USER_STACK_TOP
-// Frame size is the fixed EXEC_INIT_STACK_SIZE = 144 bytes.
+//                                       AT_PAGESZ, AT_RANDOM,
+//                                       [AT_VDSO_CLOCK], AT_NULL)
+//   sp + ...    (8 bytes padding)
+//   sp + ...    AT_RANDOM entropy     16 kernel-CSPRNG bytes
+//   sp + 160    EXEC_USER_STACK_TOP
+// Frame size is the fixed EXEC_INIT_STACK_SIZE = 160 bytes (room for the max 7
+// auxv entries reserved; AT_VDSO_CLOCK is present only when the vDSO page
+// mapped, else its slot stays unused before the AT_NULL terminator).
 //
 // Shape B — "argv-bearing" (exec_setup_with_argv, P6-pouch-stratumd-boot
 // sub-chunk 16b-alpha):
@@ -120,7 +141,7 @@ _Static_assert(EXEC_USER_BURROW_TOP <= (1ull << 47),
 //   sp + 8 + 8*i                  argv[i]               (i = 1..argc-1)
 //   sp + 8 + 8*argc               argv[argc]            u64 = 0 (terminator)
 //   sp + 16 + 8*argc              envp[0]               u64 = 0 (no envp at v1.0)
-//   sp + 24 + 8*argc              auxv[]                6 × 16 bytes (same
+//   sp + 24 + 8*argc              auxv[]                up to 7 × 16 bytes (same
 //                                                        entries as Shape A;
 //                                                        AT_RANDOM points to the
 //                                                        AT_RANDOM block below)
@@ -142,7 +163,12 @@ _Static_assert(EXEC_USER_BURROW_TOP <= (1ull << 47),
 // In both shapes, initial sp = EXEC_USER_STACK_TOP - frame_size; sp is
 // 16-byte aligned because the frame size is rounded up to a 16-byte
 // multiple and EXEC_USER_STACK_TOP is aligned.
-#define EXEC_INIT_AUXV_COUNT   6
+// 7 = AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_RANDOM, AT_VDSO_CLOCK, AT_NULL.
+// The frame ALWAYS reserves room for all 7 (so the AT_RANDOM block + strings
+// region offsets are stable); when the vDSO page is absent the builder writes
+// the AT_NULL terminator after 5 entries and the AT_VDSO_CLOCK slot stays
+// unused (zeroed) padding before the random block.
+#define EXEC_INIT_AUXV_COUNT   7
 #define EXEC_INIT_STACK_SIZE \
     (((8 + 8 + 8 + EXEC_INIT_AUXV_COUNT * 16 + 16) + 15) & ~15ull)
 // Offset (from the frame base / from sp) of the 16-byte AT_RANDOM block

@@ -168,6 +168,13 @@ void timer_reset_wallclock_anchor_ns(u64 epoch_ns);
 // after anchoring a 0 epoch) this equals timer_now_ns() (== 1970 + uptime).
 u64 timer_realtime_ns(void);
 
+// The current wall-clock offset (the g_wallclock_offset_ns of CLOCK_REALTIME =
+// CLOCK_MONOTONIC + offset). Used by vdso_init to seed the shared clock page
+// from the boot anchor (which runs before burrow_init / vdso_init); subsequent
+// updates ride wallclock_publish_ns -> vdso_publish_wall. An aligned-u64 atomic
+// load (no seqlock; the single-field invariant).
+u64 timer_wallclock_offset_ns_now(void);
+
 // P4-Ic-latency: enable EL0 reads of the architectural counter via
 // CNTKCTL_EL1. Sets EL0VCTEN (virtual counter; the timebase userspace
 // should read, matching the virtual timer) and EL0PCTEN (physical

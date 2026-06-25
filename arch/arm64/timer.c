@@ -27,6 +27,7 @@
 #include <thylacine/sched.h>
 #include <thylacine/smp.h>
 #include <thylacine/types.h>
+#include <thylacine/vdso.h>     // vdso_publish_wall (mirror the wall offset)
 
 // Compile-time sanity: PPI 11 → INTID 27 (architectural per ARMv8 ARM
 // D11.2.4). Catches a regression to GIC_PPI_TO_INTID's offset.
@@ -257,6 +258,10 @@ static void wallclock_publish_ns(u64 epoch_ns) {
     u64 mono = timer_now_ns();
     u64 off  = (epoch_ns == 0 || epoch_ns < mono) ? 0 : (epoch_ns - mono);
     __atomic_store_n(&g_wallclock_offset_ns, off, __ATOMIC_RELAXED);
+    // Mirror into the vDSO clock page so userspace's syscall-free CLOCK_REALTIME
+    // tracks the same offset. Null-safe before vdso_init (the boot anchor runs
+    // first, then vdso_init seeds the page from timer_wallclock_offset_ns_now).
+    vdso_publish_wall(off);
 }
 
 void timer_set_wallclock_anchor(u64 epoch_seconds) {
@@ -279,6 +284,10 @@ void timer_reset_wallclock_anchor_ns(u64 epoch_ns) {
 u64 timer_realtime_ns(void) {
     return timer_now_ns()
          + __atomic_load_n(&g_wallclock_offset_ns, __ATOMIC_RELAXED);
+}
+
+u64 timer_wallclock_offset_ns_now(void) {
+    return __atomic_load_n(&g_wallclock_offset_ns, __ATOMIC_RELAXED);
 }
 
 void timer_busy_wait_ticks(u64 n) {

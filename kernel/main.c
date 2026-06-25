@@ -50,6 +50,7 @@
 #include <thylacine/vma.h>      // vma_init (P3-Da)
 #include <thylacine/burrow.h>
 #include <thylacine/image.h>    // image_cache_init (REVENANT R-3)
+#include <thylacine/vdso.h>     // vdso_init (the clock vDSO page, #343)
 #include <thylacine/cons.h>     // console_mgr_main (A-4c-1)
 #include <thylacine/dev.h>
 #include <thylacine/dev9p.h>
@@ -473,6 +474,14 @@ void boot_main(void) {
     territory_init();
     handle_init();
     burrow_init();
+    // vDSO clock page: one kernel-owned BURROW_TYPE_ANON page, mapped RO into
+    // every exec'd Proc so native userspace reads CLOCK_MONOTONIC/_REALTIME
+    // without a SYS_CLOCK_GETTIME trap (docs/VDSO-DESIGN.md, #343). Runs AFTER
+    // burrow_init (it burrow_create_anons the page), timer_init (freq known,
+    // line 398), and the boot wall anchor (offset set, line 406) so the page
+    // seeds correct values. Best-effort: on OOM the page is absent + readers
+    // fall back to the syscall.
+    vdso_init();
     image_cache_init();    // REVENANT R-3: the qid-keyed shared-text Image cache (BSS-backed; after burrow_init)
     vma_init();
     asid_init();

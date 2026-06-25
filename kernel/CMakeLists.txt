@@ -61,6 +61,7 @@ set(KERNEL_SRCS
     vma.c
     elf.c
     exec.c
+    vdso.c
     syscall.c
     joey.c
     spoor.c
@@ -149,6 +150,7 @@ set(KERNEL_TEST_SRCS
     test/test_vma.c
     test/test_burrow_map_proc.c
     test/test_demand_page.c
+    test/test_vdso.c
     test/test_exec.c
     test/test_syscall.c
     test/test_dev.c

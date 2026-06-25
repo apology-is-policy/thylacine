@@ -271,6 +271,12 @@ void test_demand_page_lazy_zero_fill(void);
 void test_demand_page_lazy_decommit_refault(void);
 void test_demand_page_lazy_charge_on_fault_oom(void);
 void test_demand_page_lazy_detach_uncharges_resident(void);
+// vDSO clock page (docs/VDSO-DESIGN.md, #343).
+void test_vdso_page_populated(void);
+void test_vdso_publish_updates(void);
+void test_vdso_mono_matches_timer(void);
+void test_vdso_maps_ro_read(void);
+void test_vdso_maps_ro_write_faults(void);
 void test_exec_setup_smoke(void);
 void test_exec_setup_segment_data_copied(void);
 void test_exec_setup_constraints(void);
@@ -1373,6 +1379,11 @@ struct test_case g_tests[] = {
                                        test_demand_page_lazy_charge_on_fault_oom, false, NULL },
     { "demand_page.lazy_detach_uncharges_resident",
                                        test_demand_page_lazy_detach_uncharges_resident, false, NULL },
+    { "vdso.page_populated",           test_vdso_page_populated,           false, NULL },
+    { "vdso.publish_updates",          test_vdso_publish_updates,          false, NULL },
+    { "vdso.mono_matches_timer",       test_vdso_mono_matches_timer,       false, NULL },
+    { "vdso.maps_ro_read",             test_vdso_maps_ro_read,             false, NULL },
+    { "vdso.maps_ro_write_faults",     test_vdso_maps_ro_write_faults,     false, NULL },
     { "exec.setup_smoke",              test_exec_setup_smoke,              false, NULL },
     { "exec.setup_segment_data_copied",
                                        test_exec_setup_segment_data_copied,

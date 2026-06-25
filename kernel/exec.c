@@ -27,6 +27,7 @@
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
 #include <thylacine/burrow.h>
+#include <thylacine/vdso.h>     // vdso_clock_burrow (map the RO clock page, #343)
 #include <thylacine/dev.h>      // REVENANT R-4: exe->dev->read for the file-backed path
 #include <thylacine/spoor.h>    // REVENANT R-4: spoor_ref / spoor_clunk
 #include <thylacine/image.h>    // REVENANT R-4: image_lookup_or_create (shared text)
@@ -165,6 +166,23 @@ static int exec_map_user_stack(struct Proc *p) {
     return 0;
 }
 
+// Map the shared vDSO clock page READ-ONLY into `p` at the fixed
+// EXEC_USER_VDSO_BASE (docs/VDSO-DESIGN.md). Returns the mapped user VA for the
+// AT_VDSO_CLOCK auxv entry, or 0 if the page is unavailable (boot OOM left
+// vdso_clock_burrow() NULL) or the per-Proc VMA install fails (VMA SLUB OOM) --
+// in which case exec omits the auxv entry and the reader falls back to
+// SYS_CLOCK_GETTIME (best-effort; never a boot gate). Unlike the stack/segment
+// Burrows, the vDSO Burrow is kernel-owned + shared + held forever (never
+// unref'd), so burrow_map's mapping_count++ is the Proc's ONLY reference; the
+// VVA's vma_drain drops it at teardown and the shared page never frees.
+static u64 exec_map_vdso(struct Proc *p) {
+    struct Burrow *v = vdso_clock_burrow();
+    if (!v)                                    return 0;
+    if (burrow_map(p, v, EXEC_USER_VDSO_BASE, EXEC_USER_VDSO_SIZE,
+                   VMA_PROT_READ) != 0)        return 0;
+    return EXEC_USER_VDSO_BASE;
+}
+
 // Build the System V initial-process stack frame — argc / argv / envp /
 // auxv (+ argv strings region under Shape B) — at the top of the user
 // stack. See exec.h for the byte layout.
@@ -180,13 +198,32 @@ static int exec_map_user_stack(struct Proc *p) {
 // BURROW corresponds to EXEC_USER_STACK_BASE, so the frame's bytes land
 // in the BURROW's last `frame_size` bytes. Returns the initial user sp —
 // the user VA of the frame's `argc` word.
-_Static_assert(EXEC_INIT_AUXV_COUNT == 6,
-               "exec_build_init_stack writes exactly 6 auxv entries by "
-               "literal index — adding an entry means editing the auxv "
-               "block below, not just bumping the exec.h macro");
+// Fill the System V auxv block: AT_PHDR/PHENT/PHNUM/PAGESZ, AT_RANDOM, the
+// OPTIONAL AT_VDSO_CLOCK (only when vdso_va != 0 — the page mapped), then the
+// AT_NULL terminator. `a` has room for EXEC_INIT_AUXV_COUNT (7) entries; with no
+// vDSO it writes 6 and the 7th 16-byte slot stays the caller-zeroed padding
+// before the AT_RANDOM block (the reader stops at the AT_NULL terminator). Both
+// frame shapes route through here, so the entry set cannot diverge.
+_Static_assert(EXEC_INIT_AUXV_COUNT == 7,
+               "exec_fill_auxv reserves room for exactly 7 auxv entries "
+               "(AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_RANDOM, "
+               "AT_VDSO_CLOCK, AT_NULL) — keep this in sync with the macro");
+static void exec_fill_auxv(u64 *a, u64 phdr_va, u64 phent, u64 phnum,
+                           u64 rand_va, u64 vdso_va) {
+    *a++ = AT_PHDR;   *a++ = phdr_va;
+    *a++ = AT_PHENT;  *a++ = phent;
+    *a++ = AT_PHNUM;  *a++ = phnum;
+    *a++ = AT_PAGESZ; *a++ = PAGE_SIZE;
+    *a++ = AT_RANDOM; *a++ = rand_va;
+    if (vdso_va) { *a++ = AT_VDSO_CLOCK; *a++ = vdso_va; }
+    *a++ = AT_NULL;   *a++ = 0;
+}
+
+// `vdso_va` is the user VA of the mapped vDSO clock page (from exec_map_vdso),
+// or 0 if it could not be mapped (-> no AT_VDSO_CLOCK; reader falls back).
 static u64 exec_build_init_stack(struct Proc *p, const struct elf_image *img,
                                  const char *argv_data, u32 argv_data_len,
-                                 u32 argc) {
+                                 u32 argc, u64 vdso_va) {
     // Shape selection. argv_data_len > 0 iff argc > 0 (caller's
     // invariant enforced at the syscall body); we re-check the
     // structural invariant here as defense-in-depth.
@@ -272,13 +309,11 @@ static u64 exec_build_init_stack(struct Proc *p, const struct elf_image *img,
         w[0]  = 0;                           // argc
         w[1]  = 0;                           // argv[0] — NULL terminator
         w[2]  = 0;                           // envp[0] — NULL terminator
-        w[3]  = AT_PHDR;    w[4]  = phdr_va;
-        w[5]  = AT_PHENT;   w[6]  = phent;
-        w[7]  = AT_PHNUM;   w[8]  = phnum;
-        w[9]  = AT_PAGESZ;  w[10] = PAGE_SIZE;
-        w[11] = AT_RANDOM;  w[12] = sp + EXEC_INIT_RANDOM_OFFSET;
-        w[13] = AT_NULL;    w[14] = 0;
-        // w[15] is the 8-byte alignment pad — left zero.
+        // auxv at w[3..]; up to 7 entries (14 u64s) reserved before the
+        // AT_RANDOM block at EXEC_INIT_RANDOM_OFFSET. The trailing slots beyond
+        // the AT_NULL the helper writes stay zero (the stack BURROW is KP_ZERO).
+        exec_fill_auxv(&w[3], phdr_va, phent, phnum,
+                       sp + EXEC_INIT_RANDOM_OFFSET, vdso_va);
     } else {
         // Shape B — argc real, argv[] points into the strings region.
         // The strings region starts at (sp + random_offset_from_sp + 16);
@@ -308,14 +343,10 @@ static u64 exec_build_init_stack(struct Proc *p, const struct elf_image *img,
         w[1 + argc]   = 0;                   // argv[argc] = NULL terminator
         w[2 + argc]   = 0;                   // envp[0]    = NULL terminator
 
-        // auxv at w[3 + argc .. 14 + argc]; 12 u64s (6 entries × 2).
-        u64 *auxv = &w[3 + argc];
-        auxv[0]  = AT_PHDR;   auxv[1]  = phdr_va;
-        auxv[2]  = AT_PHENT;  auxv[3]  = phent;
-        auxv[4]  = AT_PHNUM;  auxv[5]  = phnum;
-        auxv[6]  = AT_PAGESZ; auxv[7]  = PAGE_SIZE;
-        auxv[8]  = AT_RANDOM; auxv[9]  = sp + random_offset_from_sp;
-        auxv[10] = AT_NULL;   auxv[11] = 0;
+        // auxv at w[3 + argc ..]; up to 7 entries (14 u64s) reserved (the
+        // EXEC_INIT_AUXV_COUNT the structured-size math at the top accounts for).
+        exec_fill_auxv(&w[3 + argc], phdr_va, phent, phnum,
+                       sp + random_offset_from_sp, vdso_va);
 
         // Copy argv strings into the strings region.
         u8 *strings_dst = frame + random_offset_from_sp + 16u;
@@ -375,11 +406,15 @@ static int exec_setup_argv_body(struct Proc *p,
         return -1;
     }
 
+    // Map the shared vDSO clock page RO (best-effort; 0 -> no AT_VDSO_CLOCK).
+    u64 vdso_va = exec_map_vdso(p);
+
     // Build the System V startup frame (argc / argv / envp / auxv +
     // strings region under Shape B) at the top of the user stack;
     // *sp_out points at its `argc` word.
     *entry_out = img.entry;
-    *sp_out    = exec_build_init_stack(p, &img, argv_data, argv_data_len, argc);
+    *sp_out    = exec_build_init_stack(p, &img, argv_data, argv_data_len, argc,
+                                       vdso_va);
     return 0;
 }
 
@@ -573,10 +608,13 @@ int exec_setup_from_spoor(struct Proc *p, struct Spoor *exe, size_t exe_size,
         if (rc != 0)                            return -1;   // partial -> caller disposes Proc
     }
 
-    // 3. User stack + the System V startup frame (unchanged; reads img metadata,
-    //    not the file -- AT_PHDR resolves into the first mapped segment's VA).
+    // 3. User stack + the vDSO clock page + the System V startup frame (reads
+    //    img metadata, not the file -- AT_PHDR resolves into the first mapped
+    //    segment's VA; AT_VDSO_CLOCK into the RO clock page).
     if (exec_map_user_stack(p) != 0)           return -1;
+    u64 vdso_va = exec_map_vdso(p);            // best-effort; 0 -> no AT_VDSO_CLOCK
     *entry_out = img.entry;
-    *sp_out    = exec_build_init_stack(p, &img, argv_data, argv_data_len, argc);
+    *sp_out    = exec_build_init_stack(p, &img, argv_data, argv_data_len, argc,
+                                       vdso_va);
     return 0;
 }

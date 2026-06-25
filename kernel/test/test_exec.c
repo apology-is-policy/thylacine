@@ -390,7 +390,8 @@ void test_exec_setup_auxv(void) {
     TEST_EXPECT_EQ(w[1], 0ull, "argv[] terminator is NULL");
     TEST_EXPECT_EQ(w[2], 0ull, "envp[] terminator is NULL");
 
-    // auxv — six (a_type, a_val) pairs, AT_NULL last.
+    // auxv — seven (a_type, a_val) pairs: AT_PHDR/PHENT/PHNUM/PAGESZ, AT_RANDOM,
+    // AT_VDSO_CLOCK (the vDSO page maps at boot -- vdso_init ran), AT_NULL last.
     TEST_EXPECT_EQ(w[3],  (u64)AT_PHDR,   "auxv[0].a_type == AT_PHDR");
     TEST_EXPECT_EQ(w[4],  0x10040ull,     "AT_PHDR == seg0 vaddr + e_phoff");
     TEST_EXPECT_EQ(w[5],  (u64)AT_PHENT,  "auxv[1].a_type == AT_PHENT");
@@ -401,8 +402,10 @@ void test_exec_setup_auxv(void) {
     TEST_EXPECT_EQ(w[9],  (u64)AT_PAGESZ, "auxv[3].a_type == AT_PAGESZ");
     TEST_EXPECT_EQ(w[10], (u64)PAGE_SIZE, "AT_PAGESZ == PAGE_SIZE");
     TEST_EXPECT_EQ(w[11], (u64)AT_RANDOM, "auxv[4].a_type == AT_RANDOM");
-    TEST_EXPECT_EQ(w[13], (u64)AT_NULL,   "auxv[5].a_type == AT_NULL");
-    TEST_EXPECT_EQ(w[14], 0ull,           "AT_NULL.a_val == 0");
+    TEST_EXPECT_EQ(w[13], (u64)AT_VDSO_CLOCK, "auxv[5].a_type == AT_VDSO_CLOCK");
+    TEST_EXPECT_EQ(w[14], EXEC_USER_VDSO_BASE, "AT_VDSO_CLOCK == EXEC_USER_VDSO_BASE");
+    TEST_EXPECT_EQ(w[15], (u64)AT_NULL,   "auxv[6].a_type == AT_NULL");
+    TEST_EXPECT_EQ(w[16], 0ull,           "AT_NULL.a_val == 0");
 
     // AT_RANDOM points at the 16-byte entropy block, which must lie
     // within the user stack region.
@@ -450,9 +453,10 @@ void test_exec_setup_auxv_no_phdr_segment(void) {
     // The whole phdr triple is zeroed when no segment covers the table —
     // a coherent "no phdrs" auxv (audit F1).
     TEST_EXPECT_EQ(w[6], 0ull, "AT_PHENT == 0 when AT_PHDR is unresolved");
-    // The startup frame is otherwise well-formed.
+    // The startup frame is otherwise well-formed. With the vDSO page mapped,
+    // AT_VDSO_CLOCK occupies the slot at w[13] and AT_NULL terminates at w[15].
     TEST_EXPECT_EQ(w[0],  0ull,          "argc == 0");
-    TEST_EXPECT_EQ(w[13], (u64)AT_NULL,  "auxv terminated by AT_NULL");
+    TEST_EXPECT_EQ(w[15], (u64)AT_NULL,  "auxv terminated by AT_NULL");
 
     drop_proc(p);
 }
