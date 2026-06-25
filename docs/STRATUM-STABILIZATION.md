@@ -181,9 +181,33 @@ stays bounded at one slot.
 
 ## Status
 
-- Charter: **drafted** (this doc), pending user sign-off on scope.
-- Area A round 1: deep fix uncommitted + unsafe (F1/F2); corrected design known
-  (task #1). **Next.**
-- Areas B–E: scoped, not started.
-- Folded in: tasks #2 (bdev failed-latch) + #3 (errno) -> area F; #343 dcache
-  (task #8) -> area E.
+- Charter: **signed off**; the arc is executing.
+- **Area A** (extent write/overwrite/flush/coalesce) — **CLOSED** (`stratum
+  db365fc`; the deep-fix F1 partial-split data-loss closed over 3 rounds).
+- **Area B** (read path + RAW + short-read coherence) — **CLOSED** (`634a3de`;
+  the multi-extent read, A's F2).
+- **Area F** (exhaustion + I/O-error recovery; #2 bdev failed-latch + #3 errno)
+  — **CLOSED** (`7f407d2` + `thylacine 80ae0cf`).
+- **Area D** (heavy concurrent writes through one session) — **CLOSED**
+  (`9fa3714`; the ~57 MB/s flat-scaling bottleneck → the concurrent-FS arc).
+- **Area S** (Pleiades / many-small-files throughput) — **CLOSED** (`5227790`;
+  the O(N^2)→O(1) inode-alloc reuse-gate, 59x at 80k creates).
+- **Area G** (durability under load: commit/sync/fsync) — **CLOSED** (this
+  commit). Commit atomicity HOLDS (the new content-differential harness);
+  durability made self-contained via the bdev `VIRTIO_BLK_F_FLUSH` negotiation
+  (was a no-op fsync depending on `cache=writethrough`); the per-commit fixed
+  overhead (10 fsyncs + 163x write-amp) tracked as perf debt → the concurrent-FS
+  / Bε arc (shares S-2's metadata-re-COW root). Audit 0 P0/0 P1/1 P2/4 P3, clean.
+- **Area E** (crypto/integrity throughput baseline + the #343 dcache) —
+  **CLOSED** (this commit). The dcache hardened (F2 static_assert + F3
+  stderr-gate + the `stm_sync_dcache_stats` accessor) + 2 non-vacuous
+  regressions; the crypto **measurement reference** (`bench_crypto`) built — the
+  G2 baseline that did not exist: AEGIS-256 ~7.6 GiB/s decrypt (NOT the
+  sequential-I/O bottleneck on the target), the dcache 10.1× on a re-read,
+  integrity near-parity. Audit 0 P0 / 0 P1 / 0 P2 / 1 P3 (two prosecutors
+  converged on the bench memcpy-elision; fixed). Tracked perf finding: BLAKE3
+  runs the portable path — enabling the vendored NEON measured 2.3×, surfaced
+  for a greenlight to touch `third_party/`.
+- **THE ARC (A→B→F→D→S→G→E) IS COMPLETE.**
+- Then the **Go return** (#342): re-bake the GOROOT pool with the stabilized
+  Stratum, boot go-4c.
