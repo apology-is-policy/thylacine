@@ -108,6 +108,11 @@ u64 timer_get_counter(void);
 // Read CNTFRQ_EL0 (counter frequency in Hz). Cached after timer_init.
 u32 timer_get_freq(void);
 
+// The full u64 CNTVCT frequency (== the divisor timer_now_ns uses). Distinct
+// from timer_get_freq's u32 truncation; the vDSO clock page seeds this so a
+// userspace cnt/freq is bit-identical to the syscall (vDSO audit F1).
+u64 timer_freq_hz(void);
+
 // P5-tsleep: current monotonic time in nanoseconds, derived from the
 // virtual architectural counter (CNTVCT_EL0). The timebase for tsleep /
 // poll / futex deadlines — a caller computes its deadline as

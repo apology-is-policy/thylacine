@@ -2,21 +2,17 @@
 //
 // Foundation chunk: U-2g per docs/UTOPIA-SHELL-DESIGN.md section 15.6.11.
 //
-// At v1.0 the kernel exposes NO native SYS_CLOCK_GETTIME / SYS_NANOSLEEP
-// surface. `sleep` is built on the only ambient-time primitive the
-// kernel has -- `SYS_TORPOR_WAIT` with a timeout against an atomic
-// the caller never wakes. The kernel returns `-ETIMEDOUT` when the
-// timeout lapses; we map that to `Ok(())`. The atomic itself is a
-// stack-local sentinel; nobody else has its address, so spurious
-// matches are impossible.
+// `sleep` is built on the only ambient-time primitive the kernel has for
+// blocking -- `SYS_TORPOR_WAIT` with a timeout against a stack-local sentinel
+// atomic the caller never wakes (kernel returns `-ETIMEDOUT` -> `Ok(())`; nobody
+// else has the atomic's address, so spurious matches are impossible).
 //
-// `Duration` is re-exported from `core::time` since libthyla-rs is
-// no_std (no `std::time`).
+// Timestamps (`now`/`Instant`/`SystemTime`, below) land on `CLOCK_MONOTONIC` /
+// `CLOCK_REALTIME`: the #343 vDSO fast-path (CNTVCT_EL0 + the kernel timekeeping
+// page, no syscall -- read_clock -> crate::vdso_now_ns) with a
+// `SYS_CLOCK_GETTIME` (LS-K) fallback when the page is absent.
 //
-// v1.x extensions (when the kernel grows the surface):
-//   - `now()`: monotonic + wall clock.
-//   - `Instant`: timestamp newtype.
-//   - `SystemTime`: epoch-based timestamp.
+// `Duration` is re-exported from `core::time` since libthyla-rs is no_std.
 
 pub use core::time::Duration;
 use core::sync::atomic::AtomicU32;

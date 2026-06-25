@@ -40,12 +40,17 @@ void vdso_init(void) {
     // and the struct sits at the head of the page (offset 0).
     struct vdso_clock *pg = (struct vdso_clock *)pa_to_kva(page_to_pa(v->pages));
 
-    pg->freq           = (u64)timer_get_freq();          // CNTFRQ Hz (write-once)
+    pg->freq           = timer_freq_hz();                // CNTFRQ Hz (write-once; the FULL u64 divisor, not the u32-truncating getter -- audit F1)
     pg->wall_offset_ns = timer_wallclock_offset_ns_now(); // the boot anchor's offset
     pg->version        = VDSO_CLOCK_VERSION;
-    // Publish magic LAST with a release barrier: a reader that observes the
-    // valid magic is guaranteed to see the fully-populated fields above. (Boot
-    // is single-CPU, but the discipline is free and documents the contract.)
+    // Publish magic LAST. The real safety guarantee here is BOOT ORDERING, not
+    // a release/acquire pairing: vdso_init runs single-CPU before smp_init and
+    // before any EL0 Proc can exec, so the page is fully written + globally
+    // visible before the first reader exists. The readers validate magic with a
+    // PLAIN load (lib.rs / os_thylacine.go) -- they do NOT acquire. The RELEASE
+    // below is documentary/free at boot; if a future change ever re-publishes
+    // the page from a live CPU (e.g. a reserved[] seqlock), the readers must
+    // then ACQUIRE the magic + retry -- the pairing is not in place today (F4).
     __atomic_store_n(&pg->magic, VDSO_CLOCK_MAGIC, __ATOMIC_RELEASE);
 
     g_vdso_page   = pg;

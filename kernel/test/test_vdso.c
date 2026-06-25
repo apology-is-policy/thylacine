@@ -62,7 +62,7 @@ void test_vdso_page_populated(void) {
     TEST_ASSERT(pg != NULL, "vdso page present (vdso_init must have run)");
     TEST_EXPECT_EQ(pg->magic, VDSO_CLOCK_MAGIC, "magic == VDSO_CLOCK_MAGIC");
     TEST_EXPECT_EQ(pg->version, (u64)VDSO_CLOCK_VERSION, "version");
-    TEST_EXPECT_EQ(pg->freq, (u64)timer_get_freq(), "freq == CNTFRQ");
+    TEST_EXPECT_EQ(pg->freq, timer_freq_hz(), "freq == the full u64 CNTFRQ divisor");
     TEST_ASSERT(pg->freq != 0, "freq must be non-zero on a real timer");
     TEST_EXPECT_EQ(pg->wall_offset_ns, timer_wallclock_offset_ns_now(),
         "wall_offset_ns seeded from the boot anchor");

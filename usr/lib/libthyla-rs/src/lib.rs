@@ -2442,7 +2442,11 @@ unsafe fn capture_vdso_clock(argc: usize, argv: *const *const u8) {
 fn read_cntvct() -> u64 {
     let cnt: u64;
     // SAFETY: CNTVCT_EL0 is EL0-readable (the kernel sets CNTKCTL_EL1.EL0VCTEN);
-    // a pure register read, no memory/stack effects.
+    // a pure register read, no memory/stack effects. No ISB before the MRS:
+    // CNTVCT is architecturally monotonic, so a few-cycle speculative skew stays
+    // monotonic across calls separated by real work (the FreeBSD getCntxct +
+    // Go-fork precedent). The kernel's own read_cntvct_el0 ISBs; this relaxation
+    // is the deliberate userspace fast-path choice (vDSO audit F3).
     unsafe {
         core::arch::asm!("mrs {c}, cntvct_el0", c = out(reg) cnt,
                          options(nomem, nostack, preserves_flags));

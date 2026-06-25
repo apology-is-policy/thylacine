@@ -198,6 +198,10 @@ void timer_irq_handler(u32 intid, void *arg) {
 u64 timer_get_ticks(void)   { return g_ticks; }
 u64 timer_get_counter(void) { return read_cntvct_el0(); }
 u32 timer_get_freq(void)    { return (u32)g_freq; }
+// The FULL CNTVCT frequency -- the same u64 divisor timer_now_ns() uses. The
+// vDSO page must seed this (NOT the u32-truncating timer_get_freq) so a reader's
+// cnt/freq is bit-identical to SYS_CLOCK_GETTIME on any counter (vDSO audit F1).
+u64 timer_freq_hz(void)     { return g_freq; }
 
 // P5-tsleep: counter <-> nanosecond conversion. Both use the split
 // (quotient, remainder) form: a flat `value * 1e9` would overflow u64
