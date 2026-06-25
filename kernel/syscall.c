@@ -992,14 +992,26 @@ s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len) {
     if (len == 0)                                  { spoor_clunk(c); return 0; }
     if (!c->dev || !c->dev->write)                 { spoor_clunk(c); return -1; }
     long n = c->dev->write(c, kbuf, (long)len, c->offset);
-    if (n < 0)                                     { spoor_clunk(c); return -1; }
+    // #3 (Area F errno-rollout): propagate a Dev's real -errno (dev9p now
+    // returns -T_E_* for an ecode in 2..4095) instead of collapsing to -1.
+    // The legacy -1 sentinel is unchanged -- the pouch/native boundary decodes
+    // it to EIO, NOT EPERM (errno.h forbids a handler returning -T_E_PERM=1);
+    // an ecode==1/EPERM server error still collides with the -1 sentinel ->
+    // EIO (a wider channel is the ER-rollout's job). Clamp an out-of-window
+    // negative so a future Dev cannot punch a fake-huge "success" through
+    // pouch's [-4095,-1] error window (symmetric with the native saturation).
+    if (n < 0) {
+        spoor_clunk(c);
+        return (n < -4095) ? (s64)(-T_E_IO) : (s64)n;
+    }
     c->offset += n;
     spoor_clunk(c);
     return (s64)n;
 }
 
 // Inner — testable with kernel-side buf. Returns bytes read (>=0; 0
-// on EOF) or -1 on bad handle / wrong kind / missing rights / dev error.
+// on EOF), -1 on bad handle / wrong kind / missing rights, or the Dev's
+// negative -errno on a dev error (#3 -- dev9p now surfaces -T_E_IO etc.).
 //
 // Only KOBJ_SPOOR is readable (sys_lookup_rw_handle filters): the read
 // routes through the Dev `.read` vtable (Spoor.offset). A byte-mode /srv
@@ -1020,7 +1032,13 @@ s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len) {
     if (len == 0)                                  { spoor_clunk(c); return 0; }
     if (!c->dev || !c->dev->read)                  { spoor_clunk(c); return -1; }
     long n = c->dev->read(c, kbuf, (long)len, c->offset);
-    if (n < 0)                                     { spoor_clunk(c); return -1; }
+    // #3 (Area F errno-rollout): propagate a Dev's real -errno (dev9p now
+    // returns -T_E_*) instead of collapsing to -1; clamp an out-of-window
+    // negative to keep pouch's [-4095,-1] error window safe (see the write twin).
+    if (n < 0) {
+        spoor_clunk(c);
+        return (n < -4095) ? (s64)(-T_E_IO) : (s64)n;
+    }
     c->offset += n;
     spoor_clunk(c);
     return (s64)n;

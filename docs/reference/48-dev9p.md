@@ -89,7 +89,8 @@ Every vtable op returns the Dev-vtable failure convention (NULL or -1):
 - Client not OPEN → NULL.
 - p9_client_alloc_fid exhausted → walk returns NULL.
 - p9_client_walk partial result (server walked fewer components than requested) → walk returns NULL; the fresh fid is best-effort clunked. Phase 5+ extension may surface partial walks.
-- p9_client_lopen / _read / _write returning -errno → vtable returns NULL / -1; the Dev-vtable layer's error reporting is coarse-grained at v1.0.
+- p9_client_lopen returning -errno → walk/open returns NULL (coarse; the open path has no -errno channel at v1.0).
+- **p9_client_read / _write returning -errno → `dev9p_read`/`dev9p_write` propagate `(long)rc` (the real `-T_E_*`), NOT the legacy `-1` collapse (#3, Stabilization Area F).** `p9_client_{read,write}` return `-(int)ecode` on an Rlerror (or `-P9_E_IO` on transport death), with `P9_E_* == T_E_* == POSIX errno`, so `rc` is already a valid `-errno`. `sys_{read,write}_for_proc` propagate it (`return (s64)n` on `n<0`), the syscall handlers pass it through, and the pouch boundary-line maps `[-4095,-2] → errno` — so a Stratum `STM_ENOSPC`/`STM_EACCES`/`STM_EIO` reaches userspace as the precise errno, instead of the pre-#3 generic `-1` sentinel (which the pouch/native boundary decodes to **EIO**, *not* EPERM — `errno.h` forbids a handler returning `-T_E_PERM=1`). Verified by `test_dev9p.c::test_dev9p_write_read_propagate_errno`. Residual: a server EPERM (`ecode==1`) still collides with the `-1` generic sentinel → EIO (the ER-rollout's wider-channel job). The change is a no-op for the legacy `-1`-returning vtable paths (lopen/walk/stat/create) and for every other Dev (which return `-1`, the generic sentinel). `sys_{read,write}_for_proc` also clamp an out-of-window negative (`< -4095`) to `-T_E_IO` so a future Dev can't punch a fake-huge success through pouch's error window.
 
 ## Performance characteristics
 

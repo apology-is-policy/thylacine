@@ -10,11 +10,12 @@
 // trivial-Devs trio that pouch's minimal synthetic-FS namespace names.
 //
 // v1.0 errno caveat: devfull_write returns -1 (the generic dev-error
-// convention; sys_write_for_proc collapses negative returns to flat -1).
-// pouch's syscall_ret decodes that to errno=EIO, not errno=ENOSPC. A
-// future chunk that widens sys_write_for_proc's error channel (passing
-// dev-supplied -errno through unchanged) can flip this to ENOSPC without
-// touching this file — kept here as a documented v1.0 limitation.
+// convention), which the pouch/native boundary decodes to errno=EIO, not
+// errno=ENOSPC. Since #3 (Area F) sys_write_for_proc NO LONGER collapses a
+// Dev's negative -- it propagates dev-supplied -errno unchanged -- promoting
+// /dev/full to the POSIX-correct ENOSPC is now just a one-line change here
+// (`devfull_write` -> -T_E_NOSPC) plus flipping test_full_write_returns_minus1.
+// Kept as -1->EIO at v1.0 (out of Area F's dev9p scope); a clean follow-up.
 
 #include <thylacine/dev.h>
 #include <thylacine/spoor.h>

@@ -431,6 +431,80 @@ void test_dev9p_write_routes_through_client(void) {
     teardown(root);
 }
 
+// #3 (Area F errno-rollout) regression: a 9P write/read error (Rlerror)
+// must surface as the real negative -errno through dev9p, NOT collapse to
+// -1 (== -EPERM, which mis-reported every Stratum write failure as a
+// permission error -- the go-build's STM_ENOSPC -> EPERM cascade).
+// g_io_error_ecode, when nonzero, makes the responder answer every
+// Twrite/Tread with Rlerror(ecode); the handshake/walk/open/clunk ops
+// delegate to the canonical responder so the fid is openable first.
+static u32 g_io_error_ecode;
+
+static int dev9p_io_error_responder(void *ctx, const u8 *req, size_t req_len,
+                                     u8 *resp, size_t resp_cap) {
+    if (req_len < P9_HDR_LEN) return -1;
+    u32 size; u8 type; u16 tag;
+    if (p9_peek_header(req, req_len, &size, &type, &tag) < 0) return -1;
+    if ((type == P9_TWRITE || type == P9_TREAD) && g_io_error_ecode != 0) {
+        // Rlerror body: [ecode:u32]. Frame = [size:4][type=7][tag:2][ecode:4].
+        size_t total = P9_HDR_LEN + 4;
+        if (resp_cap < total) return -1;
+        resp[0] = (u8)total; resp[1] = 0; resp[2] = 0; resp[3] = 0;
+        resp[4] = P9_RLERROR;
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        resp[7] = (u8)(g_io_error_ecode & 0xff);
+        resp[8] = (u8)((g_io_error_ecode >> 8) & 0xff);
+        resp[9] = (u8)((g_io_error_ecode >> 16) & 0xff);
+        resp[10] = (u8)((g_io_error_ecode >> 24) & 0xff);
+        return (int)total;
+    }
+    return dev9p_responder(ctx, req, req_len, resp, resp_cap);
+}
+
+void test_dev9p_write_read_propagate_errno(void) {
+    g_io_error_ecode = 0;
+    TEST_ASSERT(p9_loopback_init(&g_loopback, g_loopback_resp,
+                                  sizeof(g_loopback_resp),
+                                  dev9p_io_error_responder, NULL) == 0,
+                 "loopback init (error responder)");
+    TEST_ASSERT(p9_client_init(&g_client, /*root_fid=*/0, 8192,
+                                p9_loopback_ops_for(&g_loopback),
+                                g_recv_buf, sizeof(g_recv_buf)) == 0,
+                 "client init");
+    const u8 uname[] = {'r','o','o','t'};
+    const u8 aname[] = {'/'};
+    TEST_ASSERT(p9_client_handshake(&g_client, uname, sizeof(uname),
+                                      aname, sizeof(aname), 0) == 0,
+                 "handshake");
+    struct Spoor *root = dev9p_attach_client(&g_client, /*root_fid=*/0);
+    TEST_ASSERT(root != NULL, "root");
+    struct Spoor *nc = spoor_clone(root);
+    const char *name = "file";
+    struct Walkqid *w = dev9p.walk(root, nc, &name, 1);
+    walkqid_free(w);
+    dev9p.open(nc, 0);
+
+    // ENOSPC (28) -- the exact go-build `_pkg_.a` exhaustion ecode. Pre-#3
+    // dev9p.write collapsed any rc!=0 to -1 (== -EPERM); post-#3 it
+    // propagates the real -errno so userspace sees ENOSPC.
+    g_io_error_ecode = 28u;     // ENOSPC
+    u8 wbuf[8] = {0};
+    long wr = dev9p.write(nc, wbuf, 8, 0);
+    TEST_EXPECT_EQ((u64)wr, (u64)(-(long)28),
+                    "dev9p.write propagates -ENOSPC (not the -1 collapse)");
+
+    // EIO (5 == T_E_IO) on the read twin (dev9p_read had the same collapse).
+    g_io_error_ecode = 5u;      // EIO
+    u8 rbuf[8];
+    long rd = dev9p.read(nc, rbuf, 8, 0);
+    TEST_EXPECT_EQ((u64)rd, (u64)(-(long)5),
+                    "dev9p.read propagates -EIO (not the -1 collapse)");
+
+    g_io_error_ecode = 0;
+    spoor_clunk(nc);
+    teardown(root);
+}
+
 void test_dev9p_close_clunks_owned_fid(void) {
     struct Spoor *root = make_open_client_and_root();
     struct Spoor *nc = spoor_clone(root);

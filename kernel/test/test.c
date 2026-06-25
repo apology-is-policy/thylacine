@@ -867,6 +867,7 @@ void test_dev9p_walk_clone(void);
 void test_dev9p_open_lopens_fid(void);
 void test_dev9p_read_routes_through_client(void);
 void test_dev9p_write_routes_through_client(void);
+void test_dev9p_write_read_propagate_errno(void);
 void test_dev9p_close_clunks_owned_fid(void);
 void test_dev9p_close_does_not_clunk_root_fid(void);
 void test_dev9p_create_file(void);
@@ -2128,6 +2129,9 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "dev9p.write_routes_through_client",
                                        test_dev9p_write_routes_through_client,
+                                                                           false, NULL },
+    { "dev9p.write_read_propagate_errno",
+                                       test_dev9p_write_read_propagate_errno,
                                                                            false, NULL },
     { "dev9p.close_clunks_owned_fid",  test_dev9p_close_clunks_owned_fid,  false, NULL },
     { "dev9p.close_does_not_clunk_root_fid",

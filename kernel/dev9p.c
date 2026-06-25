@@ -513,7 +513,8 @@ static long dev9p_read(struct Spoor *c, void *buf, long n, s64 off) {
     u64 offset = (off < 0) ? 0 : (u64)off;
     u32 got = 0;
     int rc = p9_client_read(p->client, p->fid, offset, count, (u8 *)buf, &got);
-    if (rc != 0) return -1;
+    // #3 (Area F errno-rollout): propagate the real ecode, not -1. See dev9p_write.
+    if (rc != 0) return (long)rc;
     return (long)got;
 }
 
@@ -534,7 +535,17 @@ static long dev9p_write(struct Spoor *c, const void *buf, long n, s64 off) {
     u32 accepted = 0;
     int rc = p9_client_write(p->client, p->fid, offset, count,
                               (const u8 *)buf, &accepted);
-    if (rc != 0) return -1;
+    // #3 (Area F errno-rollout): propagate the real Stratum ecode instead of
+    // collapsing to -1. p9_client_write returns -(T_E_*) on an Rlerror (e.g.
+    // -T_E_NOSPC, -T_E_IO) or -P9_E_IO on transport death, with P9_E_* ==
+    // T_E_* == POSIX, so rc is already a valid -errno in [-4095,-1] --
+    // sys_write_for_proc propagates it and userspace sees the precise errno
+    // (ENOSPC/EACCES/...) instead of the pre-#3 generic -1, which the
+    // pouch/native boundary decodes to EIO (NOT EPERM -- errno.h forbids a
+    // handler returning -T_E_PERM=1). One residual: a server EPERM (Rlerror
+    // ecode==1) collides with the -1 generic sentinel -> EIO; conveying it
+    // needs a wider channel (the ER-rollout's job).
+    if (rc != 0) return (long)rc;
     return (long)accepted;
 }
 
