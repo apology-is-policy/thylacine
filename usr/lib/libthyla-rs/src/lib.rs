@@ -2359,6 +2359,7 @@ extern "C" {
 unsafe extern "C" fn __libthyla_rt_start(argc: usize, argv: *const *const u8) -> i64 {
     RT_ARGC.store(argc, Ordering::Release);
     RT_ARGV.store(argv as *mut *const u8, Ordering::Release);
+    capture_vdso_clock(argc, argv);
     rs_main()
 }
 
@@ -2370,6 +2371,108 @@ pub(crate) fn rt_raw_args() -> (usize, *const *const u8) {
     let argc = RT_ARGC.load(Ordering::Acquire);
     let argv = RT_ARGV.load(Ordering::Acquire) as *const *const u8;
     (argc, argv)
+}
+
+// =============================================================================
+// Monotonic-clock vDSO (Thylacine #343). The kernel maps a read-only
+// timekeeping page into every Proc and delivers its VA in the AT_VDSO_CLOCK
+// auxv entry. Reading CNTVCT_EL0 (EL0-enabled by the kernel) + this page
+// computes CLOCK_MONOTONIC / CLOCK_REALTIME with NO syscall. See
+// docs/VDSO-DESIGN.md + kernel/include/thylacine/vdso.h. Best-effort: if the
+// page is absent (an older kernel, or an exec OOM left no AT_VDSO_CLOCK), the
+// clock reads fall back to t_clock_gettime.
+// =============================================================================
+
+const AT_NULL_TAG: usize = 0;
+const AT_VDSO_CLOCK_TAG: usize = 0x5654;
+const VDSO_CLOCK_MAGIC: u64 = 0x5644534f4c4b3031; // "VDSOLK01"
+const VDSO_CLOCK_VERSION: u64 = 1;
+
+// Mirror of struct vdso_clock (kernel/include/thylacine/vdso.h): 64 bytes.
+#[repr(C)]
+struct VdsoClock {
+    magic: u64,
+    version: u64,
+    freq: u64,           // CNTVCT Hz (write-once before smp_init)
+    wall_offset_ns: u64, // CLOCK_REALTIME = mono + this (atomic; settime updates)
+    _reserved: [u64; 4],
+}
+
+// The validated page pointer, or null to fall back to the syscall. Set once in
+// capture_vdso_clock at startup; read-only thereafter (Release/Acquire so a peer
+// thread sharing the address space observes it).
+static RT_VDSO_CLOCK: AtomicPtr<VdsoClock> = AtomicPtr::new(core::ptr::null_mut());
+
+// Walk the auxv (after argv + envp on the initial stack -- the _start frame
+// gives argc + &argv[0]) for AT_VDSO_CLOCK; validate magic/version/freq and
+// cache the page.
+unsafe fn capture_vdso_clock(argc: usize, argv: *const *const u8) {
+    if argv.is_null() {
+        return;
+    }
+    // argv[argc] is the NULL terminator; argv[argc+1] is envp[0]. Skip envp to
+    // its NULL terminator, then the separator lands us on auxv[0].
+    let mut p = argv.add(argc + 1);
+    while !(*p).is_null() {
+        p = p.add(1);
+    }
+    p = p.add(1);
+    let mut a = p as *const usize; // auxv: (tag, val) pairs, AT_NULL-terminated
+    loop {
+        let tag = *a;
+        if tag == AT_NULL_TAG {
+            return;
+        }
+        if tag == AT_VDSO_CLOCK_TAG {
+            let pg = *a.add(1) as *const VdsoClock;
+            if !pg.is_null()
+                && (*pg).magic == VDSO_CLOCK_MAGIC
+                && (*pg).version == VDSO_CLOCK_VERSION
+                && (*pg).freq != 0
+            {
+                RT_VDSO_CLOCK.store(pg as *mut VdsoClock, Ordering::Release);
+            }
+            return;
+        }
+        a = a.add(2);
+    }
+}
+
+#[inline(always)]
+fn read_cntvct() -> u64 {
+    let cnt: u64;
+    // SAFETY: CNTVCT_EL0 is EL0-readable (the kernel sets CNTKCTL_EL1.EL0VCTEN);
+    // a pure register read, no memory/stack effects.
+    unsafe {
+        core::arch::asm!("mrs {c}, cntvct_el0", c = out(reg) cnt,
+                         options(nomem, nostack, preserves_flags));
+    }
+    cnt
+}
+
+/// Nanoseconds for `clk_id` (T_CLOCK_REALTIME / T_CLOCK_MONOTONIC) read from the
+/// vDSO page, or None if the page is absent (caller falls back to the syscall).
+/// Replicates the kernel's timer_now_ns() split form (no u64 overflow), so the
+/// value is bit-identical to SYS_CLOCK_GETTIME at the same instant.
+#[inline]
+pub(crate) fn vdso_now_ns(clk_id: u64) -> Option<u64> {
+    let pg = RT_VDSO_CLOCK.load(Ordering::Acquire);
+    if pg.is_null() {
+        return None;
+    }
+    // SAFETY: pg is a validated, kernel-mapped RO page; freq is write-once
+    // non-zero; wall_offset_ns is a single aligned u64 (read volatile so the
+    // kernel's atomic settime update is observed, never cached).
+    unsafe {
+        let freq = (*pg).freq;
+        let cnt = read_cntvct();
+        let mono = (cnt / freq) * 1_000_000_000 + (cnt % freq) * 1_000_000_000 / freq;
+        if clk_id == T_CLOCK_REALTIME {
+            Some(mono.wrapping_add(core::ptr::read_volatile(&(*pg).wall_offset_ns)))
+        } else {
+            Some(mono)
+        }
+    }
 }
 
 // =============================================================================

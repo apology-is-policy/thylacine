@@ -77,7 +77,7 @@ void test_driver_crash_recovery(void);
 #define VIRTIO_MMIO_GIC_INTID_BASE  (32u + 16u)  // = 48
 
 // Same 16-KiB convention as test_virtio_blk_probe.c (P4-image-shrink).
-#define VIRTIO_BLK_PROBE_BLOB_MAX 16384
+#define VIRTIO_BLK_PROBE_BLOB_MAX 32768
 static _Alignas(16) u8 g_blk_probe_blob[VIRTIO_BLK_PROBE_BLOB_MAX];
 
 struct exec_args {

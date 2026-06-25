@@ -85,11 +85,16 @@ struct TimeSpec {
     tv_nsec: i64,
 }
 
-// Read a clock into a Duration. The kernel only returns non-zero on a bad
+// Read a clock into a Duration. Fast-path: the #343 vDSO page (CNTVCT_EL0 + the
+// kernel timekeeping page, no syscall) when present. Fallback: SYS_CLOCK_GETTIME
+// (an older kernel without the vDSO). The kernel only returns non-zero on a bad
 // clk_id (we pass the two valid constants) or a bad buffer (ours is a valid
 // stack slot), so a non-zero return is unreachable here -- map it to ZERO
 // defensively. tv_sec >= 0 (epoch or uptime); tv_nsec is clamped to [0, 1e9).
 fn read_clock(clk_id: u64) -> Duration {
+    if let Some(ns) = crate::vdso_now_ns(clk_id) {
+        return Duration::new(ns / 1_000_000_000, (ns % 1_000_000_000) as u32);
+    }
     let mut ts = TimeSpec { tv_sec: 0, tv_nsec: 0 };
     let rc = unsafe { t_clock_gettime(clk_id, &mut ts as *mut TimeSpec as u64) };
     if rc != 0 {

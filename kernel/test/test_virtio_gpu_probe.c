@@ -64,7 +64,7 @@ void test_virtio_gpu_probe_rfork_with_caps(void);
 // MAXPAGESIZE-driven file gap; the virtio-gpu release ELF lives at
 // ~12 KiB (versus ~73 KiB pre-flag). 16 KiB gives ~4 KiB headroom per
 // probe + keeps the kernel-side .bss reservation modest.
-#define VIRTIO_GPU_PROBE_BLOB_MAX 16384
+#define VIRTIO_GPU_PROBE_BLOB_MAX 32768
 static _Alignas(16) u8 g_virtio_gpu_probe_blob[VIRTIO_GPU_PROBE_BLOB_MAX];
 
 struct virtio_gpu_probe_exec_args {

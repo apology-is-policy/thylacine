@@ -28,7 +28,7 @@ void test_virtio_net_arp_rfork_with_caps(void);
 
 // 16 KiB per blob (P4-image-shrink convention; every userspace binary
 // fits under 16 KiB with -z max-page-size=4096 on both Rust + C sides).
-#define VIRTIO_NET_ARP_BLOB_MAX 16384
+#define VIRTIO_NET_ARP_BLOB_MAX 32768
 static _Alignas(16) u8 g_virtio_net_arp_blob[VIRTIO_NET_ARP_BLOB_MAX];
 
 struct virtio_net_arp_exec_args {

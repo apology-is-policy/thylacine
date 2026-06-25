@@ -66,7 +66,7 @@ void test_virtio_blk_rw_rfork_with_caps(void);
 
 // 16 KiB per blob (P4-image-shrink convention; every userspace binary
 // fits under 16 KiB with -z max-page-size=4096 on both Rust + C sides).
-#define VIRTIO_BLK_RW_BLOB_MAX 16384
+#define VIRTIO_BLK_RW_BLOB_MAX 32768
 static _Alignas(16) u8 g_virtio_blk_rw_blob[VIRTIO_BLK_RW_BLOB_MAX];
 
 struct virtio_blk_rw_exec_args {
