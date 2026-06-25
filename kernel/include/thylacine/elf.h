@@ -175,6 +175,14 @@ _Static_assert(sizeof(struct Elf64_Phdr) == 56,
 #define AT_PHNUM      5    // a_val = number of program headers
 #define AT_PAGESZ     6    // a_val = system page size in bytes
 #define AT_RANDOM     25   // a_val = user VA of 16 bytes of entropy
+// Thylacine-private auxv tag (a_val = user VA of the struct vdso_clock page;
+// docs/VDSO-DESIGN.md + thylacine/vdso.h). Deliberately OUTSIDE the
+// Linux/System V AT_ range so a pouch/musl binary stores-and-ignores it (musl
+// queries only the standard tags); it must NEVER be confused with
+// AT_SYSINFO_EHDR=33, which musl would parse as a vDSO ELF. Native readers
+// (libthyla-rs, the Go fork) query it explicitly; absence -> fall back to
+// SYS_CLOCK_GETTIME.
+#define AT_VDSO_CLOCK 0x5654   // 'VT' — the clock vDSO page
 
 // Elf64_auxv_t — one auxiliary-vector entry. 16 bytes; the initial
 // stack carries an array of these terminated by an AT_NULL entry.
