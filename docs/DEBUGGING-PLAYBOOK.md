@@ -737,6 +737,53 @@ live soundness defect. Enqueue + fix or escalate; never file it "tracked dormant
 
 ---
 
+## 6.16 #359 cracked -- QMP live-corpse autopsy + the preemptible-holder spinlock class (2026-07-04)
+
+The parallel on-device `go build` wedged the whole guest syscall-silent
+(~1-in-1.5 boots). No extinction, no output -- the hardest observability case:
+a LIVE corpse. Three method entries earned here:
+
+1. **QMP autopsy works on a wedged guest (even under HVF).** `info registers
+   -a` over the QMP socket dumps every vCPU's PC/PSTATE/GPRs while the guest
+   spins. PC - KASLR offset -> `nm` names the spin site; PSTATE's DAIF bits
+   say who is maskable. The scratch toolkit (`qmp_dump.py`, `pc_resolve.py`,
+   `walk_threads.py` -- a proc-tree thread enumerator that fp-walks RUNNABLE
+   threads' saved stacks via `ctx.fp`/`ctx.lr`) turned "syscall-silent wedge"
+   into a full holder stack in one capture. The decisive frame: the ONLY
+   RUNNABLE thread held the contended lock, preempted mid-critical-section --
+   every spinning CPU was IRQ-masked, so nothing could ever run it again.
+
+2. **The class: a plain spinlock held by a PREEMPTIBLE context, contended by
+   IRQ-masked spinners.** Thylacine syscalls/faults run IRQ-masked end-to-end;
+   kthreads and fresh-thread spawn thunks run IRQ-enabled. Any plain lock
+   shared between the two tiers could deadlock exactly this way -- `c->lock`
+   was merely the first the go build exposed. The fix is the rule, not the
+   instance: plain `spin_lock` now disables preemption per-thread
+   (`Thread.preempt_count`; ARCH 8.11), `sched()` asserts no lock is held
+   across it, and an unbalanced release extincts at its own site.
+
+3. **The fix's OWN first cut had a classic bug the diagnostics caught: a
+   per-CPU count torn by preempt+migrate mid-increment.** The `ldr/add/str`
+   RMW computed the slot address first; an IRQ mid-RMW read the pre-increment
+   value (0), the gate passed, the thread migrated, and the `str` landed in
+   the OLD CPU's slot -- poisoning it non-preemptible forever (a livelock with
+   the kernel still breathing: frozen stats counters but live periodic dumps
+   was the signature) while the unlock underflowed the NEW CPU's slot. TWO
+   simultaneous extinctions, char-interleaved on the UART, were the two
+   halves of one migration event. Lessons: (a) per-CPU data mutated by
+   preemptible code is the Linux `this_cpu_*` problem -- Thylacine's answer
+   is per-THREAD state that travels with the migration; (b) when two CPUs
+   extinct concurrently the UART interleaves char-by-char -- de-interleave
+   by extracting hex runs and resolving CANDIDATE ranges, or serialize the
+   extinction path first; (c) an underflow probe (`dec at count==0 ->
+   extinction at the release site`) converts a silent poisoned-gate livelock
+   into a named one-line diagnosis. The probe caught BOTH the first-cut
+   per-CPU tear AND the raw/counted asymmetry on sched's early-return -- it
+   pays rent.
+
+Full record: `memory/bug_359_9p_client_deadlock.md` + the #360 sections in
+`docs/reference/15-scheduler.md` and ARCH 8.11.
+
 ## 7. Appendix — reproduction recipe
 
 ```sh

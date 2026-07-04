@@ -169,6 +169,47 @@ static bool in_run_tree(struct CpuSched *cs, struct Thread *t);
 // correctness loss. Volatile alone would be a data race now that a peer writes.
 static u8 g_need_resched[DTB_MAX_CPUS];
 
+// #360: the per-THREAD plain-spinlock hold count bodies (spinlock.h has the
+// discipline + declarations; thread.h has the per-thread-over-per-CPU
+// rationale). Out-of-line because spinlock.h cannot see struct Thread
+// (thread.h includes spinlock.h for wait_lock). Pre-thread boot (TPIDR_EL1
+// not yet parked) skips counting -- that code runs single-CPU with IRQs
+// masked, so it needs no gate. The __builtin_return_address(0) here is the
+// caller of the inlined spin_lock/spin_unlock -- the lock site.
+//
+// PERMANENT #360 diagnostics (audit F4: both caught real bugs during
+// bring-up -- the first-cut per-CPU tear AND a counted release of the raw
+// acquire -- and the underflow check is the ONLY detector of the counted/raw
+// mismatch class): a per-CPU outer-acquire breadcrumb (recorded on this
+// thread's 0->1 transition; racy only in windows that don't matter for a
+// diagnostic) printed by sched()'s assert, and an underflow extinction
+// naming an unbalanced release at its own site. Cost: one predictable
+// branch per unlock + one store per OUTERMOST acquire.
+static volatile u64 g_spin_outer_acquire[DTB_MAX_CPUS];
+
+void spin_preempt_inc(void) {
+    struct Thread *t = current_thread();
+    if (!t || t->magic != THREAD_MAGIC) return;
+    if (t->preempt_count++ == 0u) {
+        unsigned cpu = smp_cpu_idx_self();
+        if (cpu < DTB_MAX_CPUS)
+            g_spin_outer_acquire[cpu] =
+                (u64)(uintptr_t)__builtin_return_address(0);
+    }
+    __atomic_signal_fence(__ATOMIC_SEQ_CST);
+}
+
+void spin_preempt_dec(void) {
+    __atomic_signal_fence(__ATOMIC_SEQ_CST);
+    struct Thread *t = current_thread();
+    if (!t || t->magic != THREAD_MAGIC) return;
+    if (t->preempt_count == 0u)   // #360: unbalanced release (see above)
+        extinction_with_addr(
+            "spin_unlock without a counted lock (preempt underflow)",
+            (uintptr_t)__builtin_return_address(0));
+    t->preempt_count--;
+}
+
 static inline void need_resched_set(unsigned cpu) {
     if (cpu < DTB_MAX_CPUS)
         __atomic_store_n(&g_need_resched[cpu], 1u, __ATOMIC_RELAXED);
@@ -462,6 +503,13 @@ bool sched_need_resched_pending(unsigned cpu) {
 
 void sched_clear_need_resched_for_test(unsigned cpu) {
     need_resched_clear(cpu);
+}
+
+// #360: arm this CPU's preempt flag from the test suite -- the gate test
+// (sched.preempt_gate_defers_while_locked) proves preempt_check_irq DEFERS
+// (does not consume) a pending resched while a plain spinlock is held.
+void sched_set_need_resched_for_test(unsigned cpu) {
+    need_resched_set(cpu);
 }
 #endif /* KERNEL_TESTS */
 
@@ -922,7 +970,7 @@ void sched_finish_task_switch(void) {
     }
     spin_lock_t *lk = cs->pending_release_lock;
     cs->pending_release_lock = NULL;
-    if (lk) spin_unlock(lk);
+    if (lk) spin_unlock_raw(lk);   // #360: the cross-thread handoff release
 }
 
 // P2-Ce: try to steal a runnable thread from a peer CPU's run tree.
@@ -1102,7 +1150,14 @@ void sched(void) {
     // mutates shared state (run tree, current_thread via TPIDR_EL1, the vd_t
     // counter); the lock protects against a re-entrant preempt_check_irq ->
     // sched() AND a peer's try_steal (which try_locks and moves on if held).
-    spin_lock(&cs->lock);
+    //
+    // #360: RAW (uncounted) acquire -- this is the one cross-thread lock
+    // handoff in the kernel: prev acquires here, the RESUMING thread (or a
+    // fresh thread's trampoline) releases via pending_release_lock, so a
+    // per-thread count cannot balance it. Sound without the count: IRQs are
+    // masked from the entry mask above through the release, so the hold is
+    // non-preemptible by masking. See spinlock.h (spin_lock_raw).
+    spin_lock_raw(&cs->lock);
 
     // #107 loud-fail guard (the durable regression for a timing-only SMP race):
     // with the entry mask above, the per-CPU slot we just locked MUST belong to
@@ -1115,6 +1170,18 @@ void sched(void) {
     struct Thread *prev = current_thread();
     if (!prev) extinction("sched() with no current thread");
     if (prev->magic != THREAD_MAGIC) extinction("sched() with corrupted current");
+
+    // #360: a plain spinlock may never be held across sched() -- a descheduled
+    // holder deadlocks every masked spinner behind it (the #359 class; the
+    // lock-across-sleep twin of preempt_check_irq's gate). Every legitimate
+    // caller holds none here: sleep/tsleep drop their locks first,
+    // preempt_check_irq gates on count==0, exits / thread_exit_self / the
+    // idle parks / the sqpoll terminal hold none. sched()'s own cs->lock is
+    // the RAW-acquired handoff below -- never counted, never trips this.
+    if (prev->preempt_count != 0u)   // breadcrumb names the outer acquire
+        extinction_with_addr(
+            "sched: plain spinlock held across sched() (lock-across-sleep)",
+            (uintptr_t)g_spin_outer_acquire[smp_cpu_idx_self()]);
 
     // sched() respects prev->state — yield vs block dispatch:
     //   THREAD_RUNNING   → yield: prev → RUNNABLE + inserted into tree.
@@ -1182,7 +1249,11 @@ void sched(void) {
         // either way, prev is the only runnable thread, so give it a
         // fresh quantum.
         prev->slice_remaining = THREAD_DEFAULT_SLICE_TICKS;
-        spin_unlock_irqrestore(&cs->lock, s);
+        // #360: RAW release pairing the RAW acquire above (a counted release
+        // of an uncounted acquire underflows the per-thread count -- the
+        // first-cut bug this comment memorializes). Then restore DAIF.
+        spin_unlock_raw(&cs->lock);
+        spin_unlock_irqrestore(NULL, s);
         return;
     }
 
@@ -1308,7 +1379,7 @@ void sched(void) {
         // sched() and arms no pending_release_lock; a thread suspended INSIDE
         // sched() that is later resumed via thread_switch reaches here with
         // lk == NULL -> spin_unlock(NULL) would store through address 0.
-        if (lk) spin_unlock(lk);
+        if (lk) spin_unlock_raw(lk);   // #360: the cross-thread handoff release
         __asm__ __volatile__("msr daif, %x0\n" :: "r"(s) : "memory");
     }
 }
@@ -2134,6 +2205,18 @@ void preempt_check_irq(void) {
     struct Thread *t = current_thread();
     if (!t) return;                             // pre-thread_init IRQ
     if (t->magic != THREAD_MAGIC) return;       // corruption — defer
+
+    // #360: never preempt a thread inside a plain-spinlock hold. The
+    // interrupted thread holds (or is acquiring) a lock that IRQ-masked
+    // spinners may be waiting on; switching it out RUNNABLE while every CPU
+    // fills with masked spinners is the #359 permanent deadlock. Return
+    // WITHOUT consuming need_resched -- the flag must stay pending (it may
+    // be the #866-F1 cross-CPU placement kick, set exactly once) so the
+    // deferred preempt fires at the first IRQ-return after the hold drops
+    // (<= 1 tick; the same granularity as the existing tick-driven
+    // preemption). Reading the pre-increment value of a mid-RMW count is
+    // safe: the thread holds nothing yet at that point (spinlock.h).
+    if (t->preempt_count != 0u) return;
 
     // Clear the flag BEFORE sched() so a re-fire-during-sched doesn't double-
     // trigger. The cross-CPU write now exists for real (#866 F1: ready_on's

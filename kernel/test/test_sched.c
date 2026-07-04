@@ -804,3 +804,87 @@ void test_sched_wake_preempt_same_cpu(void) {
         "sched_mark_interactive is a no-op on a kproc (kernel) thread");
     thread_free(k);
 }
+
+// ===========================================================================
+// #360: the per-CPU plain-spinlock preempt count (spinlock.h).
+
+// spinlock.preempt_count_balance -- bookkeeping: inc on lock / trylock-
+// success, none on trylock-failure, dec on unlock; the irqsave-with-lock
+// variants count too; the raw variants never count. Whole test under an IRQ
+// mask so no tick perturbs the reads (the counted IRQ-handler locks are
+// inc/dec-balanced within each handler, but masking makes the assertions
+// exact). The count is per-thread (Thread.preempt_count, #360).
+void test_spinlock_preempt_count_balance(void) {
+    irq_state_t s0 = spin_lock_irqsave(NULL);
+    struct Thread *me = current_thread();
+    u32 base = me->preempt_count;
+
+    spin_lock_t a = SPIN_LOCK_INIT;
+    spin_lock_t b = SPIN_LOCK_INIT;
+
+    spin_lock(&a);
+    TEST_EXPECT_EQ(me->preempt_count, base + 1u, "spin_lock increments");
+    TEST_EXPECT_EQ(spin_trylock(&b), true, "trylock acquires a free lock");
+    TEST_EXPECT_EQ(me->preempt_count, base + 2u, "trylock-success increments");
+    TEST_EXPECT_EQ(spin_trylock(&b), false, "trylock on a held lock fails");
+    TEST_EXPECT_EQ(me->preempt_count, base + 2u, "trylock-failure is balanced");
+    spin_unlock(&b);
+    TEST_EXPECT_EQ(me->preempt_count, base + 1u, "spin_unlock decrements");
+
+    irq_state_t s1 = spin_lock_irqsave(&b);
+    TEST_EXPECT_EQ(me->preempt_count, base + 2u, "irqsave-with-lock increments");
+    spin_unlock_irqrestore(&b, s1);
+    TEST_EXPECT_EQ(me->preempt_count, base + 1u, "irqrestore-with-lock decrements");
+
+    spin_lock_raw(&b);
+    TEST_EXPECT_EQ(me->preempt_count, base + 1u, "raw lock does NOT count");
+    spin_unlock_raw(&b);
+    TEST_EXPECT_EQ(me->preempt_count, base + 1u, "raw unlock does NOT count");
+
+    spin_unlock(&a);
+    TEST_EXPECT_EQ(me->preempt_count, base, "balanced at exit");
+    spin_unlock_irqrestore(NULL, s0);
+}
+
+// scheduler.preempt_gate_defers_while_locked -- the #360 gate regression.
+// While this CPU holds a plain spinlock, an armed need_resched is DEFERRED
+// across tick returns (preempt_check_irq returns without consuming); after
+// release it is consumed within a bounded number of ticks.
+//
+// RED pre-#360 deterministically: without the gate, EVERY tick's IRQ-return
+// consumed a pending flag (preempting the holder mid-hold -- the #359
+// deadlock ingredient), and the sample below runs strictly after a tick
+// return, so it always read clear.
+void test_sched_preempt_gate_defers_while_locked(void) {
+    spin_lock_t l = SPIN_LOCK_INIT;
+
+    spin_lock(&l);
+    // Non-preemptible from here: no migration, so `self` is stable for the
+    // whole hold (read it only now, under the count).
+    unsigned self = smp_cpu_idx_self();
+    sched_clear_need_resched_for_test(self);
+    sched_set_need_resched_for_test(self);
+
+    // Spin 3 tick boundaries with IRQs ENABLED: ticks fire, sched_tick runs,
+    // preempt_check_irq runs at every return -- and must defer each time.
+    u64 t0 = timer_get_ticks();
+    while (timer_get_ticks() < t0 + 3) {
+        __asm__ __volatile__("" ::: "memory");
+    }
+    bool held_pending = sched_need_resched_pending(self);
+    spin_unlock(&l);
+
+    TEST_EXPECT_EQ(held_pending, true,
+        "the gate DEFERS (does not consume) need_resched while a plain lock is held");
+
+    // Released: the deferred preempt is consumed at an IRQ-return within a
+    // bounded number of ticks (self's next tick return passes the gate).
+    u64 t1 = timer_get_ticks();
+    bool saw_clear = false;
+    while (timer_get_ticks() < t1 + 12) {
+        if (!sched_need_resched_pending(self)) { saw_clear = true; break; }
+        __asm__ __volatile__("" ::: "memory");
+    }
+    TEST_EXPECT_EQ(saw_clear, true, "released -> the deferred preempt is consumed");
+    sched_clear_need_resched_for_test(smp_cpu_idx_self());  // leave no dangling preempt
+}

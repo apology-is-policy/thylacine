@@ -752,3 +752,103 @@ new deterministic failure mode — virtio-input passed 3/3 on re-run post-change
 - **`tools/ci-smp-gate.sh`** (`make smp-gate`) builds the needed kernels once and runs the matrix — `default-smp4` / `default-smp8` / `ubsan-smp4` (the #860 amplifier) / `ubsan-smp8` — at **N≥10** boots each (env `SMP_GATE_N`, `SMP_GATE_CONFIGS`). It composes **`tools/smp-multiboot.sh`**, which re-runs `tools/test.sh` against one built kernel and classifies each failure: **CORRUPTION** (a ctx/stack-corruption signature — `invalid prev state`, `stack canary mismatch`, `kernel stack overflow`, `already on_cpu`, `#860`, …) FAILS the gate; benign host-**TIMING** fragility is reported, not failed; **OTHER** is surfaced for investigation. `test.sh` itself is the *primitive* the gate multi-boots — it is deliberately NOT a soundness gate, and the gate is a separate CI entry point to avoid recursion. `smp-multiboot.sh` clears its own label's prior `build/multiboot-fails/*.log` at the start of each run, so the captures dir only ever reflects the latest run — stale logs (including any written by a since-fixed classifier) cannot masquerade as current findings.
 
 - **`TEST_SOFT_WARN(cond, msg)`** (`kernel/test/test.h`) is a host-fragility budget that logs `[SOFT-WARN]` + bumps a counter surfaced in the boot summary (`tests: N/M PASS (K soft-warn)`) **without failing the suite**. `test_irq_latency_bench`'s QEMU-TCG p99 budget (`IRQ_BENCH_CI_BUDGET_NS`, 50 ms) now soft-warns instead of hard-extincting: a `TEST_ASSERT` there turned host throttling into a kernel "crash" AND — because `boot_main` extincts on any suite failure — masked any real fault later in the SAME boot (the #860 class lived in the post-test production bringup). A true pathological regression is still caught (an infinite hang trips `BOOT_TIMEOUT`; broken counter math trips the hard `valid >= N-2` assert). **Use `TEST_SOFT_WARN` only for host-timing budgets** — never to soften a correctness check. The cons/torpor `sched_runnable_count()==0` quiescence asserts are a *correctness* class (tasks #857/#858/#859), deliberately left hard so a leaked-runnable helper still fails.
+
+---
+
+## Preemption discipline: the per-thread spinlock preempt count (#359/#360)
+
+Plain `spin_lock` disables preemption for the holding THREAD (the Linux
+"spin_lock disables preemption" rule, realized per-thread). Landed as the
+general fix for #359 — the parallel-`go build` whole-guest wedge.
+
+### The bug class (#359)
+
+Syscalls (and EL0 faults) run IRQ-masked end-to-end, so a syscall spinning on
+a contended plain spinlock is non-preemptible. Before #360, a holder running
+IRQ-ENABLED — a kproc kthread (loom sqpoll, the dev9p_poll pump, console_mgr),
+or a spawn thunk on a fresh thread (`thread_trampoline` unmasks) — could be
+preempted MID-HOLD: it goes RUNNABLE off-CPU still holding the lock, sibling
+IRQ-masked spinners occupy every CPU waiting for it, and the holder never gets
+a CPU again. Permanent whole-guest deadlock. #359's confirmed instance: the
+REVENANT eager exec read holding the shared dev9p pool client's `c->lock`
+preemptibly under a parallel `go build` (~1-in-1.5 boots); the same shape was
+latent on `l->lock`, `g_dev9p_poll_lock`, the poll hook-list locks — any lock
+shared between a preemptible context and syscall paths.
+
+### Mechanism
+
+- **`Thread.preempt_count`** (`thread.h`): the number of plain spinlocks the
+  thread currently holds. `spin_lock`/`spin_trylock`-success increment BEFORE
+  the acquire; `spin_unlock` decrements AFTER the release store
+  (`spin_preempt_inc`/`spin_preempt_dec`, out-of-line in `sched.c` because
+  `spinlock.h` cannot see `struct Thread`).
+- **The gate** — `preempt_check_irq` returns WITHOUT consuming `need_resched`
+  while the interrupted thread's count is nonzero. The flag stays pending
+  (it may be the #866-F1 cross-CPU placement kick, set exactly once), so the
+  deferred preempt fires at the first IRQ-return after the hold drops
+  (≤ 1 tick — the granularity preemption already had).
+- **The assert** — `sched()` extincts if entered with `count != 0`
+  ("plain spinlock held across sched()"): sleeping or yielding while holding
+  a plain spinlock is forbidden (the lock-across-sleep deadlock class). A
+  per-CPU breadcrumb (`g_spin_outer_acquire`) names the outermost acquire
+  site in the extinction. `spin_preempt_dec` extincts on an unlock at
+  count==0 (an unbalanced release — it would otherwise silently poison the
+  gate).
+- **The raw pair** — `spin_lock_raw`/`spin_unlock_raw` (uncounted) exist
+  EXCLUSIVELY for sched()'s `cs->lock` pending-release handoff: the one lock
+  acquired by one thread (prev, inside sched) and released by another (the
+  resuming thread / a fresh thread's trampoline via
+  `sched_finish_task_switch`), which a per-thread count cannot balance. The
+  hold needs no count: sched runs fully IRQ-masked from its entry mask
+  through `cpu_switch_context` to the release. Three release sites pair with
+  the one raw acquire: `sched_finish_task_switch`, sched's resume block, and
+  sched's nothing-runnable early return. Any other use of the raw variants
+  is a bug (it opts a lock out of the discipline).
+
+### Why per-THREAD and not per-CPU (the first-cut bug)
+
+The first cut used a per-CPU count. It has an unfixable-in-place tear: the
+increment is `ldr/add/str` on a slot whose ADDRESS is computed first; an IRQ
+landing mid-RMW reads the pre-increment value (0), the gate passes, the
+thread is preempted and MIGRATED, and the `str` then lands in the OLD CPU's
+slot — poisoning that CPU permanently non-preemptible (an EL0 thread pinned
+there livelocks the box) while the thread's later unlock underflows the NEW
+CPU's slot. Reproduced under the parallel go build (two simultaneous
+extinctions = the two halves of one migration event). Per-thread is
+structurally immune: the count travels with the thread, so the gate and the
+RMW always target the same thread — an IRQ reading a mid-increment pre-value
+may preempt, but the thread holds nothing at that point and the half-done
+RMW completes correctly wherever it resumes.
+
+### The one lock-across-sleep site the assert found
+
+`p9_client_handshake` held the fresh client's `c->lock` across the serial
+NOTAG Tversion exchange's BLOCKING recv (by design — "unshared client").
+Sound pre-#360 only because nothing could contend; the assert rightly
+rejected it, and `client_run`'s NOTAG branch now drops `c->lock` across
+`p9_transport_exchange`, aligning the handshake with the elected reader's
+drop-before-recv discipline (`9p_client.c`).
+
+### Tests
+
+- `spinlock.preempt_count_balance` — inc/dec bookkeeping across lock,
+  trylock success/failure, irqsave-with-lock, and the raw variants (which
+  must NOT count).
+- `scheduler.preempt_gate_defers_while_locked` — the gate regression: an
+  armed `need_resched` survives 3 tick-returns while a plain lock is held
+  (pre-#360 it was consumed at the first tick-return, deterministically),
+  and is consumed within a bounded number of ticks after release.
+- The end-to-end regression witness is the parallel-`go build` roll test
+  (the #359 reproducer): N boots × 2 parallel cold builds, 0 wedges.
+
+### Trip-hazards
+
+- A syscall RETURNING to EL0 with a plain lock held (a leak) now pins its
+  CPU non-preemptible forever — the assert cannot see it (no sched call).
+  The underflow extinction catches the double-release flavor; a pure leak
+  surfaces as a livelock. Pre-existing bug class, sharper consequence.
+- `spin_lock_irqsave(l)`/`spin_unlock_irqrestore(l, s)` with a non-NULL lock
+  COUNT (they wrap spin_lock/spin_unlock); the mask-only NULL forms do not.
+- Pre-thread boot code (TPIDR_EL1 not yet parked) skips counting entirely —
+  single-CPU, IRQs masked, no gate needed. A lock held ACROSS the TPIDR
+  park would underflow at its release; don't do that.

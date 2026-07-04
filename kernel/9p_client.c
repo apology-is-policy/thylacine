@@ -519,8 +519,21 @@ static int client_run(struct p9_client *c, size_t built_len,
     if (tag == P9_NOTAG) {
         // Tversion (the only NOTAG message; serial handshake path -- single-
         // threaded on a fresh client, so send + recv-one + dispatch is safe).
+        //
+        // #360: drop c->lock across the exchange -- its recv BLOCKS (the
+        // srvconn/spoor transports tsleep), and a plain spinlock may never be
+        // held across sched() (the lock-across-sleep class; sched() asserts).
+        // The drop is data-race-free by the same argument that made the old
+        // held-across-recv shape deadlock-free: Tversion exists only inside
+        // p9_client_handshake on a client that is PRIVATE by construction
+        // (p9_attached_create has not yet published it -- no spoor, no handle,
+        // no peer thread can reach c->lock / out_buf / session). The elected-
+        // reader steady state already follows this exact drop discipline
+        // (client_wait line ~384).
+        spin_unlock(&c->lock);
         int rc = p9_transport_exchange(&c->transport, &c->session,
                                        c->out_buf, built_len, out);
+        spin_lock(&c->lock);
         return map_error(0, rc, out);
     }
     if (tag >= P9_SESSION_MAX_OUTSTANDING)

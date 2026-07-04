@@ -266,6 +266,23 @@ struct Thread {
     // deadlock the cascade). Zero (KP_ZERO from the SLUB cache) == unlocked,
     // so no explicit init is needed.
     spin_lock_t        wait_lock;
+
+    // #360 preemption discipline: the number of plain spinlocks THIS thread
+    // currently holds (see spinlock.h). Nonzero => preempt_check_irq will not
+    // involuntarily deschedule the thread, and sched() asserts it is zero at
+    // every voluntary entry (lock-across-sleep is forbidden). PER-THREAD, not
+    // per-CPU, deliberately: the count travels with the thread across a
+    // migration, so the mid-increment preempt+migrate window that corrupted a
+    // per-CPU slot (the #360 first-cut bug: an IRQ reading the pre-increment
+    // value passes the gate, the thread migrates, and the store lands in the
+    // OLD CPU's slot -- poisoning it non-preemptible forever) is structurally
+    // gone: the gate and the RMW target the same thread. Only this thread
+    // (and its own nested IRQ handlers, which are inc/dec-balanced before
+    // IRQ-return) mutates it. The ONE cross-thread lock handoff -- sched()'s
+    // cs->lock pending-release, released by the NEXT thread -- bypasses the
+    // count via spin_lock_raw/spin_unlock_raw (sound: sched runs fully
+    // IRQ-masked, so that hold is non-preemptible by masking). KP_ZERO init.
+    u32                preempt_count;
 };
 
 _Static_assert(sizeof(struct Thread) == 1136,

@@ -309,6 +309,7 @@ bool sched_in_cpu_tree(unsigned cpu, struct Thread *t);
 bool sched_need_resched_pending(unsigned cpu);
 void sched_clear_need_resched_for_test(unsigned cpu);
 bool sched_cpu_has_surplus_for_test(unsigned cpu);
+void sched_set_need_resched_for_test(unsigned cpu);   // #360 gate test
 #endif /* KERNEL_TESTS */
 
 // Diagnostic accessors.
