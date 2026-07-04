@@ -207,8 +207,9 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 #define T_OPATH    0x80u
 
 // Maximum single-component name length for t_walk_open (matches the
-// kernel cap; passing longer returns -1 from the syscall).
-#define T_WALK_OPEN_NAME_MAX  64u
+// kernel cap; passing longer returns -1 from the syscall). 255 since the
+// #36 raise (the 64-era cap EINVAL'd content-addressed names).
+#define T_WALK_OPEN_NAME_MAX  255u
 
 // SYS_SPAWN_WITH_PERMS perm_flags — must mirror SPAWN_PERM_* in
 // kernel/include/thylacine/syscall.h. SPAWN_PERM_MAY_POST_SERVICE stamps

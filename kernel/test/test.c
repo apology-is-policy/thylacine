@@ -598,6 +598,7 @@ void test_stalk_open_root(void);
 void test_stalk_open_replace(void);
 void test_stalk_depth_cap(void);
 void test_stalk_lifetime_no_leak(void);
+void test_stalk_long_component_bound(void);
 void test_stalk_cross_mount(void);
 void test_stalk_cross_mount_final_quarry(void);
 void test_stalk_cross_mount_xsearch_deny(void);
@@ -2471,6 +2472,7 @@ struct test_case g_tests[] = {
     { "stalk.open_replace",            test_stalk_open_replace,            false, NULL },
     { "stalk.depth_cap",               test_stalk_depth_cap,               false, NULL },
     { "stalk.lifetime_no_leak",        test_stalk_lifetime_no_leak,        false, NULL },
+    { "stalk.long_component_bound",    test_stalk_long_component_bound,    false, NULL },
     { "stalk.cross_mount",             test_stalk_cross_mount,             false, NULL },
     { "stalk.cross_mount_final_quarry", test_stalk_cross_mount_final_quarry, false, NULL },
     { "stalk.cross_mount_xsearch_deny", test_stalk_cross_mount_xsearch_deny, false, NULL },

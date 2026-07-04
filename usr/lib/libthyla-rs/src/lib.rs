@@ -286,7 +286,7 @@ pub const T_WALK_OPEN_FROM_ROOT: i64  = -1;
 
 // Maximum single-component name length for SYS_WALK_OPEN. Multi-
 // component paths split at '/' and call SYS_WALK_OPEN per component.
-pub const T_WALK_OPEN_NAME_MAX: usize = 64;
+pub const T_WALK_OPEN_NAME_MAX: usize = 255;
 
 // SYS_LSEEK whence values — must mirror kernel/include/thylacine/syscall.h.
 pub const T_SEEK_SET: u32             = 0;

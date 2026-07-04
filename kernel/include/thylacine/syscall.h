@@ -1877,10 +1877,17 @@ _Static_assert(__builtin_offsetof(struct t_stat, gid)       == 76, "t_stat.gid a
 
 // Maximum single-component name length for SYS_WALK_OPEN. Matches the
 // Plan 9 + 9P2000.L practical cap for a single path element; bounds the
-// kernel-stack scratch + the per-byte uaccess loop. The wire codec's
-// per-name cap is larger; we choose the smaller bound here because v1.0
-// callers (joey, the bringup probes) all walk short server-stamped names.
-#define SYS_WALK_OPEN_NAME_MAX  64u
+// kernel-stack scratch + the per-byte uaccess loop. 255 = the Linux
+// NAME_MAX / 9P2000.L-conventional per-component bound (the wire codec's
+// s16 cap is larger). The original 64 was sized for the bringup probes'
+// short server-stamped names and silently broke every content-addressed
+// name: the Go build cache's 66-char entry basenames (64-hex + "-a")
+// EINVAL'd at the stalk component check, so /go-cache could neither read
+// the baked entries nor persist device-written ones (#36 -- the total
+// GOCACHE miss; cmd/go treats every cache error as a silent best-effort
+// miss). Per-site cost: the [MAX+1] kernel-stack scratches grow 65 -> 256
+// bytes (at most two live at once, in rename).
+#define SYS_WALK_OPEN_NAME_MAX  255u
 
 // Maximum full-path length for SYS_OPEN (stalk-1). Bounds the kernel-stack
 // path scratch + the per-byte uaccess copy. A path is at most STALK_MAX_DEPTH

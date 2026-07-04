@@ -774,3 +774,47 @@ void test_stalk_path_adopt_transplant(void) {
     spoor_clunk(q);
     spoor_unref(root);
 }
+
+// #36: content-addressed names must pass the per-component bound. The Go build
+// cache names every entry <64-hex>-a / <64-hex>-d (66 chars); the pre-#36 cap
+// of 64 EINVAL'd every such open/create at stalk's component check, so the
+// on-device GOCACHE could neither read the host-baked entries nor persist its
+// own -- a TOTAL cache miss that cmd/go absorbs silently (every cache error is
+// a best-effort miss). Pin: a 66-char and a 255-char component PASS the bound
+// (reach the Dev and report a clean walk-miss, T_E_NOENT -- proving the
+// component validator no longer rejects them); a 256-char component still
+// fails CLOSED with T_E_INVAL (the bound itself stays enforced).
+void test_stalk_long_component_bound(void) {
+    struct Proc p; mkproc_system(&p);
+    struct Spoor *root = fix_root();
+    TEST_ASSERT(root != NULL, "fix_root");
+
+    char name[258];
+    int e;
+
+    // 66 chars -- the exact Go-cache entry shape.
+    for (int i = 0; i < 66; i++) name[i] = 'x';
+    e = -12345;
+    struct Spoor *q66 = stalk_err(&p, root, name, 66, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q66 == NULL, "66-char unknown name -> walk-miss");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOENT,
+                   "66-char component PASSES the bound (miss, not EINVAL)");
+
+    // 255 chars -- the new bound, inclusive.
+    for (int i = 0; i < 255; i++) name[i] = 'y';
+    e = -12345;
+    struct Spoor *q255 = stalk_err(&p, root, name, 255, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q255 == NULL, "255-char unknown name -> walk-miss");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOENT,
+                   "255-char component PASSES the bound (miss, not EINVAL)");
+
+    // 256 chars -- over the bound; fail-closed rejection, never truncation.
+    for (int i = 0; i < 256; i++) name[i] = 'z';
+    e = -12345;
+    struct Spoor *q256 = stalk_err(&p, root, name, 256, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q256 == NULL, "256-char name -> NULL");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_INVAL,
+                   "over-bound component rejected with T_E_INVAL");
+
+    spoor_unref(root);
+}
