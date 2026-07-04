@@ -114,6 +114,12 @@ struct Dev {
     //                    less Devs (devramfs at v1.0) leave it NULL. The
     //                    handler has already validated the mask + value bounds;
     //                    the Dev forwards to its backing.
+    //                    A Dev exposing this MUST set .perm_enforced = true
+    //                    (#47 audit F1): SYS_WSTAT's fd gate is kind-only, so
+    //                    perm_wstat_check -- which runs only when
+    //                    perm_enforced -- is the ONLY write-authority check on
+    //                    the metadata path. dev_register extincts on a
+    //                    wstat-capable Dev that does not enforce.
     struct Spoor   *(*attach)(const char *spec);
     struct Walkqid *(*walk)(struct Spoor *c, struct Spoor *nc,
                             const char **name, int nname);

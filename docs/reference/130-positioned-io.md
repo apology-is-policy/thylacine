@@ -140,6 +140,18 @@ boundary) is ER-1's, shared with the rest of the fd surface.
 
 ## Known caveats / footguns
 
+- **`.wstat_native` implies `.perm_enforced`** (audit F1): since #47,
+  `perm_wstat_check` — which runs only on perm-enforced Devs — is the ONLY
+  write-authority gate on the metadata path, so a wstat-capable
+  `perm_enforced == false` Dev would let any handle holder mutate its
+  metadata unchecked. `dev_register` extincts on that combination (boot-time
+  enforcement; dev9p, the sole implementor today, is enforced), and the
+  `dev.h` slot comment pins the rule for future Dev authors.
+- The Go `syscall.Pread`/`Pwrite` len==0 early return (required — `&p[0]`
+  panics on an empty slice) skips the trap, so a zero-length positioned op
+  on a non-seekable fd returns `(0, nil)` where the kernel reports the
+  ESPIPE-shaped -1 (audit F2). Unreachable via `os.File`; documented in the
+  wrapper.
 - The per-call `SYS_RW_MAX` (4096) clamp applies; positioned I/O has no weft
   large-op bypass. Big positioned transfers loop (all current consumers do).
 - On a seekable Dev whose backing ignores offsets for a particular file

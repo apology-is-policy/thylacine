@@ -43,6 +43,17 @@ int dev_register(struct Dev *d) {
     if (g_dev_count >= BESTIARY_MAX)
         extinction("dev_register: bestiary full (BESTIARY_MAX exceeded)");
 
+    // #47 (audit F1): a Dev exposing .wstat_native MUST enforce rwx.
+    // SYS_WSTAT's fd gate is kind-only since #47, so perm_wstat_check --
+    // which runs only when perm_enforced -- is the ONLY write-authority
+    // check on the metadata-mutation path. A wstat-capable
+    // perm_enforced==false Dev would let ANY handle holder mutate its
+    // metadata with no identity check; fail the boot rather than ship
+    // that silently.
+    if (d->wstat_native && !d->perm_enforced)
+        extinction("dev_register: .wstat_native without .perm_enforced "
+                   "(#47: perm_wstat_check is the only wstat authority gate)");
+
     // Collision check — both dc and name must be unique. The bestiary's
     // primary lookup is by dc (the on-wire identity that walks/syscalls
     // dispatch through); name collisions are a separate confusion class.
