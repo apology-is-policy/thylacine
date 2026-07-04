@@ -269,6 +269,8 @@ void test_demand_page_file_smoke(void);
 void test_demand_page_file_read_error_snare_bus(void);
 void test_demand_page_file_multi_page(void);
 void test_demand_page_file_short_read_fills_page(void);
+void test_demand_page_file_cluster_short_read(void);
+void test_demand_page_file_eof_tail_zero(void);
 void test_demand_page_lazy_zero_fill(void);
 void test_demand_page_lazy_decommit_refault(void);
 void test_demand_page_lazy_charge_on_fault_oom(void);
@@ -1378,6 +1380,9 @@ struct test_case g_tests[] = {
     { "demand_page.file_multi_page",   test_demand_page_file_multi_page,   false, NULL },
     { "demand_page.file_short_read_fills_page",
                                        test_demand_page_file_short_read_fills_page, false, NULL },
+    { "demand_page.file_cluster_short_read",
+                                       test_demand_page_file_cluster_short_read, false, NULL },
+    { "demand_page.file_eof_tail_zero", test_demand_page_file_eof_tail_zero, false, NULL },
     { "demand_page.lazy_zero_fill",    test_demand_page_lazy_zero_fill,    false, NULL },
     { "demand_page.lazy_decommit_refault",
                                        test_demand_page_lazy_decommit_refault, false, NULL },

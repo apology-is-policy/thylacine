@@ -124,22 +124,70 @@ which cannot run under the `vma_lock` spinlock. So the path splits:
    Burrow (the pin), fills a caller-zeroed `struct file_fault_req` (`burrow`,
    `spoor`, `file_offset`, `page_va`, `slot`, `exec`), and signals `freq->needed`.
    The pin is safe because the VMA holds a mapping ref → the Burrow is alive *now*.
-2. **Slow path** (`file_demand_page_slow`, **no lock**): `alloc_pages(0, KP_ZERO)`,
-   then **loop** `dev->read` to fill the page (one page is `<= PAGE_SIZE` from the
+2. **Slow path entry** (`file_demand_page_slow`, **no lock**): runs the
+   read-ahead cluster fill (`file_demand_page_cluster`, below), which degrades to
+   the proven single-page fill (`file_demand_page_single`) on any alloc shortfall
+   or a degenerate 1-page cluster, then drops the Burrow pin exactly once,
+   **outside** `vma_lock` (the last unref's `spoor_clunk` may sleep).
+3. **Single-page fill** (`file_demand_page_single`, **no lock** — the pre-cluster
+   `file_demand_page_slow` body, unchanged): `alloc_pages(0, KP_ZERO)`, then
+   **loop** `dev->read` to fill the page (one page is `<= PAGE_SIZE` from the
    pinned Spoor at `file_offset`); `n < 0` → `FAULT_USER_BUS`; `n == 0` → EOF (the
    tail stays KP_ZERO = the `.bss`/zero-pad fill). The loop matches `exec_read_header`
    and `map_eager_from_file` — `dev->read` may legitimately short-return for an
    interior page (a conforming 9P server's choice), so a single read is unsafe.
    After a successful fill, if `freq->exec`, `arch_icache_sync_range(kva, PAGE_SIZE)`
    **before** the PTE is installed.
-3. **Install-once** (`file_install_locked`, under the **re-acquired** `vma_lock`):
+4. **Install-once** (`file_install_locked`, under the **re-acquired** `vma_lock`):
    re-lookup the VMA and re-validate `vma->burrow == freq->burrow` (the pin kept
    the Burrow + its SLUB address alive across the sleep, so this comparison is
    ABA-safe; a torn-down/remapped VMA bails and frees the page). Then under
    `v->lock`, install-once: if a sibling faulter already filled the slot, use the
    resident page + free our freshly-read one; else store ours. Install the PTE.
-4. The pin is dropped (`burrow_unref(freq->burrow)`) **outside** `vma_lock` (the
-   last unref's `spoor_clunk` may sleep).
+
+#### The read-ahead cluster fill (`file_demand_page_cluster` + `file_install_cluster_locked`)
+
+A FILE page-in demand-reads 4 KiB per fault, and each 4 KiB 9P `Tread` lands in
+an 8 MiB Stratum extent that Stratum decrypts + Merkle-verifies whole — paging a
+multi-MiB binary that way is thousands of round-trips (the go-arc amplification
+finding). Read-ahead batches the FILL across a page cluster into one `dev->read`
+while the cheap PTE install stays per-fault — the Linux page-cache readahead
+model. `filepages[]` semantics are unchanged (each slot an independent order-0
+page), so the free arm / decommit / install-once / resident-check are untouched.
+
+- **Cluster geometry**: `REVENANT_READAHEAD_PAGES = 64` (256 KiB); the cluster
+  aligns DOWN from the faulting slot and clamps to `page_count` (geometry scalars
+  are immutable post-create). `ncluster <= 1` degrades to the single fill.
+- **Batched read**: one KP_ZERO staging buffer (order = ceil-log2(ncluster);
+  buddy `MAX_ORDER` 18 dwarfs it), the same looped short-read + death-interrupt +
+  fail-closed discipline as the single path — **byte-identical to N sequential
+  single-page reads** (same offsets; the EOF tail stays zero). Any staging or
+  per-page alloc shortfall frees what was taken and degrades to the single fill —
+  read-ahead never fails a fault it could have served.
+- **Per-slot pages**: each cluster slot gets its own order-0 page, word-copied
+  from the staging buffer (`revenant_copy_page`; both operands page-aligned),
+  I-cache-synced (`freq->exec` — derived from `vma->prot`, and every FILE VMA is
+  text R+X, so every fill syncs) **before** any PTE can back it.
+- **Cluster install-once** (`file_install_cluster_locked`, under the re-acquired
+  `vma_lock` + `v->lock`): re-validates the VMA/Burrow exactly like the single
+  path, then per-slot: a sibling-won slot keeps the resident page (ours stays a
+  loser, freed by the caller outside `v->lock`); an empty slot adopts ours
+  (`clpages[i]` NULL'd). Only the FAULTING slot's PTE is installed —
+  cluster-mates install their own PTEs via the resident fast path on their own
+  faults. The #317 race-loser I-cache argument generalizes: whichever page ends
+  up in a slot was synced by its creator before the under-`v->lock` store.
+- **Kernel stack**: `clpages[64]` = 512 B on the fault-path kstack (16 KiB
+  kstacks; the fault slow path is shallow — syscall/fault entry → slow → cluster).
+- **Memory-pressure envelope** (audit F5): the transient per-fault peak is
+  staging (up to 256 KiB contiguous, order = ceil-log2(ncluster)) + the per-slot
+  pages (up to another 256 KiB) held simultaneously; a fragmented/pressured
+  buddy fails the staging alloc and the path degrades gracefully. Read-ahead
+  front-loads up to 64 resident FILE pages per touched cluster — a sparse-touch
+  workload inflates resident FILE memory up to 64x per touched cluster, but the
+  total is bounded by the binary's `page_count` (read-ahead never exceeds the
+  binary) and FILE pages live in the shared, LRU-evictable Image cache (they are
+  deliberately NOT charged to the per-Proc I-32 `page_count`), so no new
+  unbounded-DoS axis opens.
 
 **Lock order**: `vma_lock → v->lock` (the established order; `burrow_ref`/`unref`
 take `v->lock` internally). Condition 5 (death-interruptible) is inherited from the

@@ -148,9 +148,11 @@ uaccess_store_u8_fault:
 //
 // Implementation mirrors uaccess_load_u8: one `ldr w2, [x0]` is the
 // fault point; the fixup-table entry maps it to the `.L` fault label.
-// Plain LDR (not LDAR) — the consumer's torpor_lock acquire pairs with
-// the producer's torpor_lock release on its preceding WAKE to provide
-// the memory ordering. Standard Linux-futex discipline.
+// Plain LDR (not LDAR) — a PARKING consumer's torpor_lock acquire pairs
+// with the producer's torpor_lock release on its preceding WAKE to
+// provide the memory ordering. Standard Linux-futex discipline. (The
+// lock-free mismatch path — torpor.c's pre-lock compare — deliberately
+// gets only this load's single-copy-atomicity; see torpor.h.)
 .global uaccess_load_u32
 .type uaccess_load_u32, @function
 uaccess_load_u32:

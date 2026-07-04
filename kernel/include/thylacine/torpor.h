@@ -55,13 +55,25 @@
 //     no cross-Proc shared anonymous memory (POUCH-DESIGN.md §10, Tier
 //     2 burrows are deferred), so a `(Proc, VA)` key is sufficient.
 //     Cross-Proc shared-futex semantics land with Tier 2.
-//   - Plain `LDR` (not `LDAR`): the consumer's load runs under the
+//   - Plain `LDR` (not `LDAR`): a consumer that PARKS loads under the
 //     torpor_lock; the lock-acquire (acquire op) synchronizes with any
 //     prior lock-release on the same lock — including the producer's
 //     WAKE-unlock that follows a user-side store. Standard Linux-futex
 //     memory-ordering discipline (the producer is contractually
 //     required to call WAKE after every value change that should
 //     unblock a waiter).
+//   - Lock-free pre-lock compare (the go-arc osyield floor): a
+//     `prefault != expected` mismatch returns TORPOR_OK WITHOUT taking
+//     torpor_lock. No waiter registers on that path, so the a/b/c
+//     no-lost-wakeup cases above are never entered; the mismatch
+//     return deliberately provides ONLY the plain aligned-u32 load's
+//     ordering (single-copy-atomic), weaker than the old locked path's
+//     incidental acquire — sound because every futex client re-checks
+//     its own predicate with its own atomics on return (musl, the Go
+//     runtime, libthyla-rs torpor::wait's documented contract). A
+//     stale `== expected` read does NOT early-return; it falls through
+//     to the authoritative under-lock load, so the parking path's
+//     ordering is unchanged.
 //   - Stack-allocated waiters: the per-call waiter struct lives on the
 //     consumer's kernel stack. Every exit path unlinks it from the
 //     bucket before the stack frame is reaped, so its address never

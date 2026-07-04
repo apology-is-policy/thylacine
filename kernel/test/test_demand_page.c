@@ -412,12 +412,20 @@ static int  g_rev_read_calls = 0;
 static long g_rev_read_chunk = 0;    // 0 = full count; >0 = cap each read (force a
                                      // partial Rread -- a conforming 9P server's
                                      // choice, which the slow path must loop over)
+static s64  g_rev_read_eof   = -1;   // <0 = no EOF; >=0 = absolute file offset at
+                                     // which the backing "file" ends (a read at or
+                                     // past it returns 0; a straddling read clamps)
 
 static long rev_test_read(struct Spoor *c, void *buf, long n, s64 off) {
     (void)c;
     g_rev_read_calls++;
     if (g_rev_read_fail) return -1;
     long m = n;
+    if (g_rev_read_eof >= 0) {
+        if (off >= g_rev_read_eof) return 0;             // true EOF
+        if ((s64)m > g_rev_read_eof - off)
+            m = (long)(g_rev_read_eof - off);            // clamp to EOF
+    }
     if (g_rev_read_chunk > 0 && m > g_rev_read_chunk)
         m = g_rev_read_chunk;        // short-return (interior, NOT EOF)
     u8 *b = (u8 *)buf;
@@ -518,39 +526,60 @@ void test_demand_page_file_read_error_snare_bus(void) {
     burrow_unref(v);
 }
 
+// REVENANT read-ahead (#343): a FILE fault fills a CLUSTER of pages from ONE
+// batched dev->read -- the Linux page-cache readahead model that closes the
+// 4 KiB-fault-vs-8-MiB-Stratum-extent amplification (~400x slower than the host).
+// Verify: the faulted slot + its cluster-mates carry the CORRECT per-slot file
+// bytes (the slot<->offset map -- an off-by-one would corrupt a slot); read-ahead
+// is BOUNDED (a far page stays sparse -- it does NOT slurp the whole file, which
+// would re-introduce the 1-MiB-slurp cost REVENANT retired); and the whole
+// cluster comes from ONE batched read (g_rev_read_calls == 1). The 200-page
+// Burrow spans more than one read-ahead cluster, so the boundary is exercised
+// without coupling the test to the exact REVENANT_READAHEAD_PAGES constant.
 void test_demand_page_file_multi_page(void) {
     struct Proc *p = make_proc();
     TEST_ASSERT(p != NULL, "proc_alloc failed");
 
     g_rev_read_fail  = false;
     g_rev_read_calls = 0;
+    g_rev_read_chunk = 0;            // full-count reads (defensive; a sibling may have set it)
 
     struct Spoor *s = spoor_alloc(&g_rev_test_dev);
     TEST_ASSERT(s != NULL, "spoor_alloc");
-    const u64 FILE_OFF = 0x4000;
-    struct Burrow *v = burrow_create_file(s, FILE_OFF, FOUR_PAGES);   // 4 pages
-    TEST_ASSERT(v != NULL, "burrow_create_file 4-page");
-    int rc = burrow_map(p, v, USER_VA, FOUR_PAGES, VMA_PROT_RX);
-    TEST_EXPECT_EQ(rc, 0, "burrow_map 4-page FILE RX");
+    const u64    FILE_OFF = 0x4000;
+    const size_t NPAGES   = 200;                    // > one read-ahead cluster
+    const u64    SPAN     = (u64)NPAGES * ONE_PAGE;
+    struct Burrow *v = burrow_create_file(s, FILE_OFF, SPAN);
+    TEST_ASSERT(v != NULL, "burrow_create_file 200-page");
+    int rc = burrow_map(p, v, USER_VA, SPAN, VMA_PROT_RX);
+    TEST_EXPECT_EQ(rc, 0, "burrow_map 200-page FILE RX");
 
-    // Fault page 2 FIRST (out of order) -> reads file offset FILE_OFF + 2 pages.
-    // This pins the slot<->file-offset mapping (an off-by-one would read the
-    // wrong file bytes into the wrong slot).
+    // Fault page 2 (out of order -> the cluster aligns DOWN to slot 0; an
+    // off-by-one in the per-slot offset would read the wrong file bytes).
     struct fault_info fi;
     make_fi(&fi, USER_VA + 2 * ONE_PAGE + 0x10, /*is_write=*/false, /*is_instr=*/true);
     TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_HANDLED, "page 2 fault resolves");
 
+    // The faulted slot + a cluster-mate (slot 0) are resident with the CORRECT
+    // per-slot file bytes (slot k holds the file byte at FILE_OFF + k pages).
     struct page *pg2 = burrow_file_slot_for_test(v, 2);
     TEST_ASSERT(pg2 != NULL, "slot 2 resident");
-    u8 *b2 = (u8 *)pa_to_kva(page_to_pa(pg2));
-    TEST_EXPECT_EQ((u64)b2[0], (u64)(u8)((FILE_OFF + 2 * ONE_PAGE) & 0xff),
+    TEST_EXPECT_EQ((u64)((u8 *)pa_to_kva(page_to_pa(pg2)))[0],
+        (u64)(u8)((FILE_OFF + 2 * ONE_PAGE) & 0xff),
         "slot 2 content = file bytes at FILE_OFF + 2 pages (slot<->offset map)");
+    struct page *pg0 = burrow_file_slot_for_test(v, 0);
+    TEST_ASSERT(pg0 != NULL, "slot 0 resident (read-ahead cluster-mate)");
+    TEST_EXPECT_EQ((u64)((u8 *)pa_to_kva(page_to_pa(pg0)))[0],
+        (u64)(u8)(FILE_OFF & 0xff),
+        "slot 0 content = file bytes at FILE_OFF (cluster start)");
 
-    // Slots 0,1,3 stay empty (sparse -- only the faulted page reads).
-    TEST_ASSERT(burrow_file_slot_for_test(v, 0) == NULL, "slot 0 sparse");
-    TEST_ASSERT(burrow_file_slot_for_test(v, 1) == NULL, "slot 1 sparse");
-    TEST_ASSERT(burrow_file_slot_for_test(v, 3) == NULL, "slot 3 sparse");
-    TEST_EXPECT_EQ(g_rev_read_calls, 1, "only the faulted page read");
+    // Read-ahead is BOUNDED: a far page stays sparse -- the fault does NOT slurp
+    // the whole file.
+    TEST_ASSERT(burrow_file_slot_for_test(v, NPAGES - 1) == NULL,
+        "far slot 199 sparse (read-ahead is a bounded cluster, not the whole file)");
+
+    // The whole cluster came from ONE batched read (the amplification fix).
+    TEST_EXPECT_EQ(g_rev_read_calls, 1, "the cluster filled in ONE batched read");
 
     drop_proc(p);
     burrow_unref(v);
@@ -605,6 +634,167 @@ void test_demand_page_file_short_read_fills_page(void) {
     g_rev_read_chunk = 0;            // reset (self-contained; siblings run with 0)
     drop_proc(p);
     burrow_unref(v);
+}
+
+// Read-ahead audit F1: the CLUSTER short-read loop -- the SA-F1 recurrence
+// surface. The single-path short-read regression above uses a 1-page Burrow,
+// which degrades (ncluster <= 1) to the single path, so the cluster's OWN
+// loop (one batched read filled by partial Rreads) was unpinned. A multi-page
+// Burrow + a 256-byte read cap forces the cluster loop to iterate; assert the
+// faulted slot AND the cluster-mates carry per-slot file bytes to their LAST
+// byte (a broken loop leaves a KP_ZERO tail somewhere in the batch), and that
+// the call count equals resident_span/chunk (proving the loop, without
+// coupling to the REVENANT_READAHEAD_PAGES constant).
+void test_demand_page_file_cluster_short_read(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    g_rev_read_fail  = false;
+    g_rev_read_calls = 0;
+    g_rev_read_chunk = 256;
+    g_rev_read_eof   = -1;
+
+    struct Spoor *s = spoor_alloc(&g_rev_test_dev);
+    TEST_ASSERT(s != NULL, "spoor_alloc");
+    const u64    FILE_OFF = 0x8000;
+    const size_t NPAGES   = 200;                    // > one read-ahead cluster
+    const u64    SPAN     = (u64)NPAGES * ONE_PAGE;
+    struct Burrow *v = burrow_create_file(s, FILE_OFF, SPAN);
+    TEST_ASSERT(v != NULL, "burrow_create_file 200-page");
+    int rc = burrow_map(p, v, USER_VA, SPAN, VMA_PROT_RX);
+    TEST_EXPECT_EQ(rc, 0, "burrow_map 200-page FILE RX");
+
+    struct fault_info fi;
+    make_fi(&fi, USER_VA + 2 * ONE_PAGE + 0x10, /*is_write=*/false, /*is_instr=*/true);
+    TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_HANDLED,
+        "cluster fault resolves despite partial reads");
+
+    // Count the resident prefix (the cluster) without assuming its size.
+    size_t resident = 0;
+    while (resident < NPAGES && burrow_file_slot_for_test(v, resident) != NULL)
+        resident++;
+    TEST_ASSERT(resident >= 3, "the cluster spans at least the faulted slot's neighborhood");
+    TEST_ASSERT(resident < NPAGES, "read-ahead stays bounded under short reads");
+
+    // Every resident slot's FIRST and LAST byte carries the per-slot file
+    // pattern -- a broken batched-read loop strands a zero tail in the batch.
+    // (Pattern bytes at these offsets are non-zero for FILE_OFF = 0x8000:
+    // first byte of slot k = (0x8000 + k*0x1000) & 0xff = 0x00 -- VACUOUS, the
+    // R-5 R2-F1 lesson -- so check byte 1 [0x01] and the last byte [0xff].)
+    for (size_t k = 0; k < resident; k++) {
+        u8 *b = (u8 *)pa_to_kva(page_to_pa(burrow_file_slot_for_test(v, k)));
+        TEST_EXPECT_EQ((u64)b[1],
+            (u64)(u8)((FILE_OFF + k * ONE_PAGE + 1) & 0xff),
+            "cluster slot byte 1 is file data");
+        TEST_EXPECT_EQ((u64)b[PAGE_SIZE - 1],
+            (u64)(u8)((FILE_OFF + k * ONE_PAGE + PAGE_SIZE - 1) & 0xff),
+            "cluster slot LAST byte is file data (no zero tail in the batch)");
+    }
+
+    // The batched read looped: one call per 256-byte chunk of the resident span.
+    TEST_EXPECT_EQ(g_rev_read_calls, (int)(resident * (PAGE_SIZE / 256)),
+        "the cluster loop iterated over every partial Rread");
+
+    g_rev_read_chunk = 0;
+    drop_proc(p);
+    burrow_unref(v);
+}
+
+// Read-ahead audit F2: the EOF (n == 0) zero-tail arm, for BOTH fill paths.
+// The stub's EOF mode ends the backing file mid-cluster: pre-EOF bytes carry
+// the file pattern, the post-EOF remainder of the batch stays KP_ZERO (the
+// .bss-style fill), and slots wholly past EOF are adopted as zero pages --
+// byte-identical to N sequential single-page reads. Part (b) drives the
+// SAME arm on the single path (1-page Burrow, EOF mid-page).
+void test_demand_page_file_eof_tail_zero(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    // (a) Cluster: an 8-page Burrow whose backing file ends mid-slot-2.
+    g_rev_read_fail  = false;
+    g_rev_read_calls = 0;
+    g_rev_read_chunk = 0;
+    const u64    FILE_OFF = 0xA000;
+    const size_t NPAGES   = 8;
+    const u64    EOF_OFF  = FILE_OFF + 2 * ONE_PAGE + 0x800;   // mid slot 2
+    g_rev_read_eof = (s64)EOF_OFF;
+
+    struct Spoor *s = spoor_alloc(&g_rev_test_dev);
+    TEST_ASSERT(s != NULL, "spoor_alloc");
+    struct Burrow *v = burrow_create_file(s, FILE_OFF, (u64)NPAGES * ONE_PAGE);
+    TEST_ASSERT(v != NULL, "burrow_create_file 8-page");
+    int rc = burrow_map(p, v, USER_VA, (u64)NPAGES * ONE_PAGE, VMA_PROT_RX);
+    TEST_EXPECT_EQ(rc, 0, "burrow_map 8-page FILE RX");
+
+    struct fault_info fi;
+    make_fi(&fi, USER_VA + ONE_PAGE + 0x10, /*is_write=*/false, /*is_instr=*/true);
+    TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_HANDLED,
+        "cluster fault resolves across the EOF boundary");
+
+    // Slot 1 (wholly pre-EOF): full file data to the last byte.
+    struct page *pg1 = burrow_file_slot_for_test(v, 1);
+    TEST_ASSERT(pg1 != NULL, "slot 1 resident");
+    u8 *b1 = (u8 *)pa_to_kva(page_to_pa(pg1));
+    TEST_EXPECT_EQ((u64)b1[PAGE_SIZE - 1],
+        (u64)(u8)((FILE_OFF + ONE_PAGE + PAGE_SIZE - 1) & 0xff),
+        "pre-EOF slot 1 last byte is file data");
+
+    // Slot 2 (straddles EOF): file data before, ZERO after. The pre-EOF probe
+    // byte 0x7ff has pattern 0xff (non-zero, non-vacuous); the post-EOF probe
+    // byte 0x801 WOULD be 0x01 if the fill overran EOF -- assert it is 0.
+    struct page *pg2 = burrow_file_slot_for_test(v, 2);
+    TEST_ASSERT(pg2 != NULL, "slot 2 (EOF-straddling) resident");
+    u8 *b2 = (u8 *)pa_to_kva(page_to_pa(pg2));
+    TEST_EXPECT_EQ((u64)b2[0x7ff],
+        (u64)(u8)((FILE_OFF + 2 * ONE_PAGE + 0x7ff) & 0xff),
+        "slot 2 pre-EOF byte is file data");
+    TEST_EXPECT_EQ((u64)b2[0x801], 0ull, "slot 2 post-EOF byte is ZERO (bss tail)");
+    TEST_EXPECT_EQ((u64)b2[PAGE_SIZE - 1], 0ull, "slot 2 last byte is ZERO");
+
+    // A slot wholly past EOF is a zero page (identical to the single path's
+    // n==0 -> KP_ZERO semantics for that slot).
+    struct page *pg4 = burrow_file_slot_for_test(v, 4);
+    if (pg4 != NULL) {
+        u8 *b4 = (u8 *)pa_to_kva(page_to_pa(pg4));
+        TEST_EXPECT_EQ((u64)b4[0], 0ull, "post-EOF slot is a zero page");
+        TEST_EXPECT_EQ((u64)b4[PAGE_SIZE - 1], 0ull, "post-EOF slot tail is zero");
+    }
+
+    drop_proc(p);
+    burrow_unref(v);
+
+    // (b) Single path: a 1-page Burrow (degrades to file_demand_page_single)
+    // whose file ends mid-page -- the n==0 break leaves the KP_ZERO tail.
+    p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed (part b)");
+    g_rev_read_calls = 0;
+    const u64 FILE_OFF_B = 0xC000;
+    g_rev_read_eof = (s64)(FILE_OFF_B + 0x800);                // mid-page EOF
+
+    struct Spoor *s2 = spoor_alloc(&g_rev_test_dev);
+    TEST_ASSERT(s2 != NULL, "spoor_alloc (part b)");
+    struct Burrow *v2 = burrow_create_file(s2, FILE_OFF_B, ONE_PAGE);
+    TEST_ASSERT(v2 != NULL, "burrow_create_file 1-page");
+    rc = burrow_map(p, v2, USER_VA, ONE_PAGE, VMA_PROT_RX);
+    TEST_EXPECT_EQ(rc, 0, "burrow_map 1-page FILE RX");
+
+    make_fi(&fi, USER_VA + 0x10, /*is_write=*/false, /*is_instr=*/true);
+    TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_HANDLED,
+        "single-path fault resolves at EOF");
+    struct page *pgb = burrow_file_slot_for_test(v2, 0);
+    TEST_ASSERT(pgb != NULL, "slot 0 resident (part b)");
+    u8 *bb = (u8 *)pa_to_kva(page_to_pa(pgb));
+    TEST_EXPECT_EQ((u64)bb[0x7ff],
+        (u64)(u8)((FILE_OFF_B + 0x7ff) & 0xff),
+        "single-path pre-EOF byte is file data");
+    TEST_EXPECT_EQ((u64)bb[0x801], 0ull, "single-path post-EOF byte is ZERO");
+    TEST_EXPECT_EQ((u64)bb[PAGE_SIZE - 1], 0ull, "single-path last byte is ZERO (bss tail)");
+    TEST_EXPECT_EQ(g_rev_read_calls, 2,
+        "single path: one clamped read + one 0-return (true EOF) ended the loop");
+
+    g_rev_read_eof = -1;             // reset (self-contained; siblings run without EOF)
+    drop_proc(p);
+    burrow_unref(v2);
 }
 
 // =============================================================================
