@@ -312,6 +312,15 @@ bool sched_cpu_has_surplus_for_test(unsigned cpu);
 void sched_set_need_resched_for_test(unsigned cpu);   // #360 gate test
 #endif /* KERNEL_TESTS */
 
+// #361 (audit-360 F2): extinction tail of the EL0-return preempt-count leak
+// detector. Called from el0_return_die_check (kernel/proc.c) ONLY when
+// t->preempt_count != 0 at an EL0 return -- a counted-acquire/raw-release
+// mismatch (or an outright leak) that would otherwise pin the CPU
+// non-preemptible forever with no detector (the sched() assert needs a
+// sleep; a CPU-bound EL0 loop never sleeps). Lives in sched.c to read the
+// sched-private outer-acquire breadcrumb for the report.
+void sched_report_el0_leak(void) __attribute__((noreturn));
+
 // Diagnostic accessors.
 unsigned sched_runnable_count(void);
 unsigned sched_runnable_count_band(unsigned band);

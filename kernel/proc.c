@@ -2127,6 +2127,19 @@ void el0_return_die_check(void) {
     struct Proc *p = t->proc;
     if (!p || p->magic != PROC_MAGIC)   return;
 
+    // #361 (audit-360 F2): no lock is legally held across the kernel->EL0
+    // boundary, so a nonzero preempt count here is definitionally a leak (a
+    // counted acquire whose release went through the raw variant, or none at
+    // all). Undetected it pins this CPU non-preemptible forever -- the sched()
+    // assert needs a sleep, and a CPU-bound EL0 loop never sleeps. Checked
+    // FIRST: the die path below calls thread_exit_self -> sched(), which would
+    // report the leak as a misleading "lock-across-sleep". Runs on BOTH EL0
+    // return tails (sync + IRQ, vectors.S); a leak on the first-enter path
+    // (userland_enter, no die-check) is caught at the thread's next kernel
+    // round-trip. One load on an already-hot line + a predictable branch.
+    if (t->preempt_count != 0u)
+        sched_report_el0_leak();
+
     // A-4a (I-25) trigger 2: legate scope time-expiry. Cheap guard FIRST -- the
     // common case is not-a-legate (scope_id == 0), which short-circuits before
     // any timer read or lock. If this Proc is in a legate scope whose deadline

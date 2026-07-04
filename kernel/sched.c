@@ -210,6 +210,18 @@ void spin_preempt_dec(void) {
     t->preempt_count--;
 }
 
+// #361 (audit-360 F2): the extinction tail of the EL0-return leak detector.
+// The fast-path check (t->preempt_count != 0) is inlined at
+// el0_return_die_check (kernel/proc.c) -- this out-of-line body exists only
+// to read the sched-private outer-acquire breadcrumb on the never-taken
+// path, keeping the per-EL0-return cost at one load + a predictable branch.
+void sched_report_el0_leak(void) {
+    unsigned cpu = smp_cpu_idx_self();
+    extinction_with_addr(
+        "counted spinlock leaked to EL0 return (acquire/release mismatch)",
+        cpu < DTB_MAX_CPUS ? (uintptr_t)g_spin_outer_acquire[cpu] : 0);
+}
+
 static inline void need_resched_set(unsigned cpu) {
     if (cpu < DTB_MAX_CPUS)
         __atomic_store_n(&g_need_resched[cpu], 1u, __ATOMIC_RELAXED);
