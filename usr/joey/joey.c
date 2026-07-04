@@ -3688,12 +3688,18 @@ int main(void) {
                     // warm edit-build loop -- and whether the cache hits at
                     // all (the host-seeded entries never have; near-instant
                     // + -v silence means the device-written ones do).
+                    // -work keeps build2 flag-symmetric with build1 (neither
+                    // pays the $WORK-cleanup unlink storm; /tmp is per-boot
+                    // ramfs, so nothing accumulates across boots) -- the
+                    // cold-vs-warm TIMING comparison is then honest. The
+                    // asymmetric shape read as "warm slower than cold" (#36
+                    // follow-up A/B, 2026-07-04).
                     static const char argv_build2[] =
-                        "go\0build\0-v\0-o\0/tmp/go4c-bin2\0/go4c/hello.go\0";
+                        "go\0build\0-work\0-v\0-o\0/tmp/go4c-bin2\0/go4c/hello.go\0";
                     tstep = go4c_now_ms();
                     long st_b2 = go4c_spawn_wait(go_path, sizeof(go_path) - 1,
                                                  argv_build2,
-                                                 sizeof(argv_build2) - 1, 6);
+                                                 sizeof(argv_build2) - 1, 7);
                     go4c_timing("build2-warm", tstep);
 #else
                     long st_b = 0, st_r = 0, st_b2 = 0;

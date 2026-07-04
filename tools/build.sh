@@ -1766,6 +1766,19 @@ populate_stratum_pool() {
     # Clear the trap; happy path is done.
     trap - EXIT INT TERM
     echo "==> populate pool: stratumd shut down cleanly; pool.img populated"
+
+    # Refresh the pool/key snapshot twins from the just-populated COHERENT
+    # pair. The twins are the per-boot restore source (the gate's
+    # pool_restore + manual roll recovery); before this they were a manual
+    # convention, so a re-bake regenerating pool + key left STALE twins --
+    # and a subsequent restore then pairs an old-key pool with the
+    # fresh-key ramfs, which stratumd greets with STM_EBADTAG (-201, AEAD
+    # verification failure) on its first read. cp -c = APFS clonefile.
+    cp -c "$pool_img" "$pool_img.baked-snapshot" 2>/dev/null \
+        || cp "$pool_img" "$pool_img.baked-snapshot"
+    cp -c "$keyfile" "$keyfile.baked-snapshot" 2>/dev/null \
+        || cp "$keyfile" "$keyfile.baked-snapshot"
+    echo "==> populate pool: snapshot twins refreshed (pool.img/system.key .baked-snapshot)"
 }
 
 build_pouch_progs() {
