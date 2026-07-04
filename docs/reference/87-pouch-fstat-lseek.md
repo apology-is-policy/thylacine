@@ -12,8 +12,8 @@ glue that closes stratumd's `stm_keyfile_load` path: `open` → `fstat` → `rea
 `lseek` → `read`. Three pieces:
 
 1. **Kernel ABI**: `SYS_FSTAT = 50`, `SYS_LSEEK = 51` (`kernel/include/thylacine/syscall.h`).
-2. **Native fstat record**: `struct t_stat` (72 bytes; field offsets pinned by
-   `_Static_assert`s).
+2. **Native fstat record**: `struct t_stat` (80 bytes since A-2a; field
+   offsets pinned by `_Static_assert`s).
 3. **Pouch arm**: patch `0010-pouch-fstat-lseek.patch` retargets musl's
    `src/stat/fstat.c` + `src/fcntl/open.c` and re-defines `__NR_fstat` /
    `__NR_lseek` in `bits/syscall.h.in`.
@@ -37,8 +37,8 @@ fstat / lseek path activated:
 
 ```
 SYS_FSTAT(spoor_fd, stat_va) -> 0 / -1
-  x0 = spoor_fd   hidx_t; must be KOBJ_SPOOR with RIGHT_READ
-  x1 = stat_va    user-VA pointer to a 72-byte struct t_stat
+  x0 = spoor_fd   hidx_t; must be KOBJ_SPOOR (any rights -- #46)
+  x1 = stat_va    user-VA pointer to an 80-byte struct t_stat
                   (fully mapped + writable; alignment NOT required)
 ```
 
@@ -46,7 +46,7 @@ The kernel calls `dev->stat_native(spoor, &kernel_scratch)`. devramfs implements
 it (filling size + mode + qid from the cpio file table). Other Devs leave the
 slot NULL — SYS_FSTAT on those fds returns -1 (graceful "no native stat").
 
-### struct t_stat (72 bytes; ABI-locked)
+### struct t_stat (80 bytes; ABI-locked; A-2a grew it from 72 with uid+gid)
 
 | Offset | Size | Field          | Purpose |
 |--------|------|----------------|---------|
@@ -63,13 +63,17 @@ slot NULL — SYS_FSTAT on those fds returns -1 (graceful "no native stat").
 | 56     | 4    | `blksize`      | Preferred I/O size hint |
 | 60     | 4    | `_pad_blksize` | Explicit padding to align blocks |
 | 64     | 8    | `blocks`       | Count of 512-byte blocks |
+| 72     | 4    | `uid`          | Owner principal_id (A-2a) |
+| 76     | 4    | `gid`          | Owner group id (A-2a) |
 
-`_Static_assert`s pin `sizeof(struct t_stat) == 72` and every `__builtin_offsetof`.
-A future kernel field add MUST bump both the size and the assertions; an old
-consumer reading a 72-byte slot from a 96-byte producer would silently see
-zeros in the new fields. The two `_pad_*` slots are reserved for forward-compat
-fields (the natural extension is `atime_nsec` / `mtime_nsec` / `ctime_nsec`
-when sub-second timestamps land).
+`_Static_assert`s pin `sizeof(struct t_stat) == 80` and every `__builtin_offsetof`.
+The kernel STORES the full 80 bytes unconditionally, so a consumer's buffer
+MUST be at least 80 bytes -- a 72-byte pre-A-2a buffer gets its 8 adjacent
+bytes clobbered. A future kernel field add MUST bump both the size and the
+assertions; an old consumer reading an 80-byte slot from a larger future
+producer would silently see zeros in the new fields. The `_pad_*` slots are
+reserved for forward-compat fields (the natural extension is `atime_nsec` /
+`mtime_nsec` / `ctime_nsec` when sub-second timestamps land).
 
 ## SYS_LSEEK
 
@@ -144,11 +148,29 @@ re-defined, `lseek()` "just works" without a rewrite.
 
 ## Invariants
 
-- **I-6 (handle rights monotonicity)**: SYS_FSTAT requires RIGHT_READ on the
-  spoor_fd. SYS_LSEEK requires KOBJ_SPOOR kind only (cursor manipulation is
-  not access).
+- **I-6 (handle rights monotonicity)**: SYS_FSTAT and SYS_LSEEK both require
+  KOBJ_SPOOR kind only, no rights bits (#46 dropped fstat's original
+  RIGHT_READ tightening). fstat observes metadata, not content -- POSIX
+  fstat(2) works on any valid fd (Linux: O_WRONLY, O_PATH, anything; Plan 9
+  Tstat / 9P2000.L Tgetattr have no open/read requirement). The tightening
+  was falsified by the standard write-then-stat pattern: an O_WRONLY create
+  mints a WRITE-only handle (omode-derived rights, A-3 F1), and cmd/go's
+  putIndexEntry fstats exactly such an fd for its truncate no-op gate -- the
+  -1 made it self-delete every fresh go-cache index entry (#36 layer 4). It
+  also guarded nothing: metadata is already reachable by re-walking the path
+  O_PATH (#81 keeps fstat allowed on O_PATH by design). The one real
+  residual (the #46 audit F1): a spawn-endowed, rights-stripped handle in a
+  child whose Territory CANNOT walk the file now reveals its metadata --
+  ACCEPTED by the POSIX/Plan 9 fd-passing precedent (a passed fd conveys
+  fstat; the endower could read the metadata and chose to pass the handle;
+  rights-stripping in this tree bounds read/write/transfer, never metadata
+  secrecy -- a future sandbox design must not assume otherwise). The
+  in-guest regression is joey's `probe46` (O_WRONLY create -> write(175) ->
+  fstat -> fsync -> fstat, size asserted both times, boot-fatal; run on the
+  pool root every boot, plus the quiet AND post-build-churned /go-cache in
+  bake-config boots).
 - **I-13 (kernel-userspace isolation)**: t_stat stored via per-byte
-  `uaccess_store_u8`. SYS_FSTAT first validates the entire 72-byte target
+  `uaccess_store_u8`. SYS_FSTAT first validates the entire 80-byte target
   range fits in the user-VA bound. On uaccess fault (unmapped page mid-store)
   the partial bytes already written are observable but the return value is
   -1 — same shape as existing SYS_READ.

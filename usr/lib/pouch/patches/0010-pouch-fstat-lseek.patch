@@ -72,8 +72,8 @@ diff -u a/arch/aarch64/bits/syscall.h.in b/arch/aarch64/bits/syscall.h.in
 + * SYS_lseek(fd, offset, whence) which matches the kernel ABI
 + * one-to-one.
 + *
-+ * Gate: SYS_FSTAT requires RIGHT_READ on the fd; SYS_LSEEK requires
-+ * the fd be a KOBJ_SPOOR (any rights). Both fail -1 on bad fd.
++ * Gate: SYS_FSTAT and SYS_LSEEK both require only that the fd be a
++ * KOBJ_SPOOR (any rights; #46, POSIX shape). Both fail -1 on bad fd.
 + */
 +#undef  __NR_fstat
 +#define __NR_fstat 50

@@ -2049,6 +2049,85 @@ static long go4c_spawn_wait_hb(const char *name, unsigned int name_len,
     }
 }
 
+// #46 regression probe: fstat on a WRITE-ONLY fd must work + see the
+// write's size. The cmd/go putIndexEntry shape driven natively against a
+// pool-backed dir: create a fresh 66-char -a name T_OWRITE (an
+// omode-derived WRITE-only handle, A-3 F1), write 175 bytes, IMMEDIATE
+// t_fstat (no fsync) -> rc must be 0 and size 175 (SYS_FSTAT is
+// kind-gated only, #46 -- the pre-fix RIGHT_READ gate returned -1 here
+// and made putIndexEntry self-delete every fresh go-cache index entry);
+// then t_fsync + t_fstat again (pins Stratum unfsynced-size coherence,
+// the staleness this probe was built to hunt -- both host layers probed
+// CLEAN, the kernel gate was the real culprit). Unlinks its file so the
+// probe is idempotent across boots on a preserved pool. Called against
+// the pool ROOT on EVERY boot (the #46 audit F2 always-run coverage --
+// the /go-cache pair below is bake-config-gated) + against /go-cache
+// pre/post the go builds in bake boots. Returns 0 OK / -1 (boot-fatal
+// at the call sites).
+static int probe46_fstat_wronly(const char *tag, const char *dirpath,
+                                unsigned int dirlen, const char *name66,
+                                unsigned int nl) {
+    char nb[24];
+    int bad = 0;
+    long pd = t_open(T_WALK_OPEN_FROM_ROOT, dirpath, dirlen, T_OPATH);
+    if (pd < 0) {
+        t_putstr("joey: probe46 open parent dir FAILED\n");
+        return -1;
+    }
+    long fd = t_walk_create(pd, name66, nl, T_OWRITE, 0644u);
+    if (fd < 0) {
+        // Self-heal a leftover from a crashed prior boot on a preserved
+        // pool (create is EEXCL-shaped here): unlink + retry once.
+        (void)t_unlink(pd, name66, nl, 0);
+        fd = t_walk_create(pd, name66, nl, T_OWRITE, 0644u);
+    }
+    if (fd < 0) {
+        t_putstr("joey: probe46 create FAILED rc=");
+        t_putstr(itoa_dec(fd, nb, sizeof(nb)));
+        t_putstr("\n");
+        (void)t_close(pd);
+        return -1;
+    }
+    static unsigned char e46[175];
+    for (unsigned int i = 0; i < sizeof(e46); i++)
+        e46[i] = (unsigned char)('A' + (i % 26u));
+    long wn = t_write(fd, e46, sizeof(e46));
+    struct t_stat st = {0};
+    long sr = t_fstat(fd, &st);
+    if (wn != (long)sizeof(e46) || sr != 0 || st.size != sizeof(e46))
+        bad = 1;
+    long fr = t_fsync(fd, 0);
+    struct t_stat st2 = {0};
+    long sr2 = t_fstat(fd, &st2);
+    if (fr != 0 || sr2 != 0 || st2.size != sizeof(e46))
+        bad = 1;
+    (void)t_close(fd);
+    (void)t_unlink(pd, name66, nl, 0);
+    (void)t_close(pd);
+    if (bad) {
+        t_putstr("joey: probe46 ");
+        t_putstr(tag);
+        t_putstr(" FAILED wn=");
+        t_putstr(itoa_dec(wn, nb, sizeof(nb)));
+        t_putstr(" fstat rc=");
+        t_putstr(itoa_dec(sr, nb, sizeof(nb)));
+        t_putstr(" size=");
+        t_putstr(itoa_dec((long)st.size, nb, sizeof(nb)));
+        t_putstr(" | post-fsync rc=");
+        t_putstr(itoa_dec(sr2, nb, sizeof(nb)));
+        t_putstr(" size=");
+        t_putstr(itoa_dec((long)st2.size, nb, sizeof(nb)));
+        t_putstr(" fsync=");
+        t_putstr(itoa_dec(fr, nb, sizeof(nb)));
+        t_putstr("\n");
+        return -1;
+    }
+    t_putstr("joey: probe46 ");
+    t_putstr(tag);
+    t_putstr(" OK (write-only fstat sees the unfsynced size)\n");
+    return 0;
+}
+
 int main(void) {
     char buf[24];
     t_putstr("joey: hello from /joey (real userspace binary, loaded from ramfs)\n");
@@ -3572,6 +3651,14 @@ int main(void) {
                     // link read) predate the Stratum dirty-buffer + btree-split
                     // fixes, so parallel-clean is what this gate now asserts.
                     // -work keeps $WORK for the st_b!=0 forensic below.
+                    // #46 regression: write-only fstat, quiet pool (before
+                    // the first build churns anything). Boot-fatal.
+                    static const char p46_pre[] =
+                        "p46-pre-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        "aaaaaaaaaaaaaaaaaaaaaaaaaa-a";
+                    if (probe46_fstat_wronly("pre", "/go-cache", 9, p46_pre,
+                                             sizeof(p46_pre) - 1) != 0)
+                        return 1;
                     static const char argv_build[] =
                         "go\0build\0-work\0"
                         "-v\0-o\0/tmp/go4c-bin\0/go4c/hello.go\0";
@@ -3701,6 +3788,14 @@ int main(void) {
                                                  argv_build2,
                                                  sizeof(argv_build2) - 1, 7);
                     go4c_timing("build2-warm", tstep);
+                    // #46 regression: same probe on the churned pool (two go
+                    // builds' worth of uncommitted state behind it). Boot-fatal.
+                    static const char p46_post[] =
+                        "p46-post-bbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        "bbbbbbbbbbbbbbbbbbbbbbbbbb-a";
+                    if (probe46_fstat_wronly("post", "/go-cache", 9, p46_post,
+                                             sizeof(p46_post) - 1) != 0)
+                        return 1;
 #else
                     long st_b = 0, st_r = 0, st_b2 = 0;
 #endif
@@ -4980,6 +5075,18 @@ int main(void) {
                 t_putstr("joey: fs-mut mkdir+readdir OK (d1=");
                 t_putstr(itoa_dec(d1, buf, sizeof(buf)));
                 t_putstr(" bytes)\n");
+            }
+
+            // #46 always-run regression (audit F2): write-only fstat against
+            // the pool ROOT -- runs on EVERY boot config (the /go-cache pair
+            // is bake-gated inside the Go-4c block). Boot-fatal.
+            {
+                static const char p46_root[] =
+                    "p46-root-ccccccccccccccccccccccccccccc"
+                    "cccccccccccccccccccccccccc-a";
+                if (probe46_fstat_wronly("root", "/", 1, p46_root,
+                                         sizeof(p46_root) - 1) != 0)
+                    return 1;
             }
 
             // === /loom-stress orchestration (Loom-6d-2) ===

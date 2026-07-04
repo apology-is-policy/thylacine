@@ -746,7 +746,11 @@ like `LOOM_OP_READ`.
 the resolve+pin (file `spoor_ref` + buffer `burrow_ref` -- the two I-30 pins),
 the `[buf_off, buf_off+len)` slice bounds-check, and the async submit are shared;
 only the *builder* and the *required right* are selected per opcode. The
-read-shaped ops require `RIGHT_READ` (the `SYS_FSTAT` gate); WRITE requires
+read-shaped ops require `RIGHT_READ` (the SYS_READ-side posture -- DELIBERATELY
+stricter than the synchronous `SYS_FSTAT`, which since #46 is kind-gated only
+per POSIX; the Loom registered-handle surface keeps the conservative floor
+until a consumer needs a W-only async GETATTR, at which point relaxing it is a
+Loom-owned decision with its own focused look); WRITE requires
 `RIGHT_WRITE`. So the 6a I-30 gates apply uniformly to every 6b op with no new
 gate code (the `loom_metaread_rejects` test proves a read-shaped op without
 `RIGHT_READ` is denied `-EACCES`, and a bad buffer index `-EINVAL`).

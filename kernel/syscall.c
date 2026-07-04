@@ -1221,11 +1221,12 @@ static s64 sys_close_handler(u64 hraw) {
 // syscalls, stratumd's keyfile_load fails at the first fstat / lseek and
 // the system-pool mount never starts.
 //
-// SYS_FSTAT routes through dev->stat_native; only devramfs implements it
-// at v1.0 (real file-metadata source). Other Devs leave the slot NULL and
-// fstat returns -1, the graceful "no stat for this kind of object" answer.
-// SrvConn (KOBJ_SRV) handles likewise reject — fstat on a socket isn't
-// meaningful.
+// SYS_FSTAT routes through dev->stat_native; six Devs implement it today
+// (devramfs, dev9p, devhw, devsrv, devproc, devpci -- #46 audit F3 refresh
+// of the stale "only devramfs" 16b-gamma note). Devs without it leave the
+// slot NULL and fstat returns -1, the graceful "no stat for this kind of
+// object" answer. KOBJ_SRV handles are rejected at the kind gate; a devsrv
+// conn SPOOR (dc='s') serves fstat via devsrv_stat_native since #957.
 //
 // SYS_LSEEK manipulates the per-Spoor `s64 offset` cursor that SYS_READ /
 // SYS_WRITE advance per call. SEEK_END queries dev->stat_native for size;
@@ -1258,10 +1259,27 @@ static s64 sys_fstat_handler(u64 hraw, u64 stat_va) {
     // loop tolerates any alignment.
     if (!sys_validate_user_buf(stat_va, sizeof(struct t_stat))) return -1;
 
-    // Rights gate: KOBJ_SPOOR with RIGHT_READ (sys_lookup_rw_handle filters
-    // KOBJ_SRV + checks rights). #844: c is REF-HELD; spoor_clunk on every exit
-    // -- the ref keeps c alive across the (possibly blocking) dev->stat_native.
-    struct Spoor *c = sys_lookup_rw_handle(p, (hidx_t)hraw, RIGHT_READ);
+    // No rights mask (#46): fstat observes metadata, not content -- POSIX
+    // fstat(2) works on ANY valid fd (Linux: O_WRONLY, O_PATH, anything;
+    // Plan 9 Tstat / 9P2000.L Tgetattr have no open/read requirement). The
+    // original RIGHT_READ tightening ("every v1.0 caller that fstats also
+    // reads") was falsified by the standard POSIX write-then-stat pattern:
+    // an O_WRONLY create mints a WRITE-only handle (omode-derived rights,
+    // A-3 F1), and cmd/go's putIndexEntry fstats exactly such an fd for its
+    // truncate no-op gate -- the -1 made it self-delete every fresh go-cache
+    // index entry. The tightening also guarded nothing for any Proc that
+    // can WALK the path: the same file's metadata is already reachable by
+    // re-walking it O_PATH (#81 keeps fstat allowed on O_PATH, the Linux
+    // semantics). The one real residual (#46 audit F1) -- a spawn-endowed
+    // rights-stripped handle in a child whose Territory cannot walk the
+    // file now reveals its metadata -- is ACCEPTED by the POSIX/Plan 9
+    // fd-passing precedent (a passed fd conveys fstat; the endower chose to
+    // pass it; rights-stripping bounds read/write/transfer, never metadata
+    // secrecy). Kind-gate only (KOBJ_SPOOR; rejects KOBJ_SRV) -- the
+    // SYS_LSEEK rights-0 precedent. #844: c is REF-HELD; spoor_clunk on
+    // every exit -- the ref keeps c alive across the (possibly blocking)
+    // dev->stat_native.
+    struct Spoor *c = sys_lookup_rw_handle(p, (hidx_t)hraw, 0);
     if (!c)                                           return -1;
 
     // Fill a kernel-scratch t_stat from the Dev. Failing the Dev's

@@ -893,7 +893,7 @@ enum {
     // mode/size/timestamps so pouch's `fstat()` can translate to musl's
     // `struct stat` without losing 9P provenance.
     //
-    //   x0 = spoor_fd   (hidx_t; must be KOBJ_SPOOR with RIGHT_READ)
+    //   x0 = spoor_fd   (hidx_t; must be KOBJ_SPOOR — any rights)
     //   x1 = stat_va    user-VA pointer to an 80-byte struct t_stat (must be
     //                   fully mapped + writable; alignment NOT required — the
     //                   kernel stores byte-by-byte for alignment tolerance)
@@ -905,15 +905,25 @@ enum {
     // SrvConn) leave the slot NULL — SYS_FSTAT on those fds returns -1, the
     // graceful "no stat for this object" answer.
     //
-    // Rights: RIGHT_READ on the handle. fstat does not "read" file contents
-    // but it does observe metadata, which is the read-side of access (POSIX
-    // fstat requires the fd be valid, not specifically readable; we tighten
-    // to RIGHT_READ because every v1.0 caller that fstats a fd also reads it,
-    // and the tightening cheaply blocks a fstat-as-side-channel on a
-    // write-only handle).
+    // Rights: none (kind-gate only, the SYS_LSEEK precedent) — #46. fstat
+    // observes metadata, not content; POSIX fstat(2) works on any valid fd
+    // (Linux: O_WRONLY, O_PATH, anything; Plan 9 Tstat / 9P2000.L Tgetattr
+    // have no open/read requirement). The original RIGHT_READ tightening
+    // ("every v1.0 caller that fstats also reads") was falsified by the
+    // standard write-then-stat pattern: an O_WRONLY create mints a
+    // WRITE-only handle (omode-derived rights, A-3 F1), and cmd/go's
+    // putIndexEntry fstats exactly such an fd — the -1 self-deleted every
+    // fresh go-cache index entry. The tightening also guarded nothing for
+    // any Proc that can WALK the path: metadata is already reachable by
+    // re-walking it O_PATH (#81 keeps fstat allowed on O_PATH by design).
+    // The one real residual (#46 audit F1) -- a spawn-endowed
+    // rights-stripped handle in a child whose Territory cannot walk the
+    // file now reveals its metadata -- is ACCEPTED by the POSIX/Plan 9
+    // fd-passing precedent (a passed fd conveys fstat; rights-stripping
+    // bounds read/write/transfer, never metadata secrecy).
     //
     // Returns 0 on success (out_stat populated), -1 on:
-    //   - spoor_fd not KOBJ_SPOOR / out-of-range / missing RIGHT_READ
+    //   - spoor_fd not KOBJ_SPOOR / out-of-range
     //   - stat_va outside the user-VA bound / unmapped at store time
     //   - the Dev does not implement stat_native (NULL slot)
     //   - dev->stat_native returned an error
