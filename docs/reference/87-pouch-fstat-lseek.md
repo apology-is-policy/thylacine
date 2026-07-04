@@ -5,6 +5,11 @@ without a formal prosecutor round at the checkpoint (deferred to the 16b-γ-moun
 sub-chunk, where the bdev_thylacine read-path lift surfaces additional surface
 worth auditing concurrently).
 
+> **#37/#47 sibling surface (2026-07-04):** positioned I/O (`SYS_PREAD`/`SYS_PWRITE`,
+> incl. the pouch `pread64`/`pwrite64` seam wiring) and the `SYS_WSTAT`
+> kind-gate posture live in [130-positioned-io.md](130-positioned-io.md) +
+> [99-fs-permission.md](99-fs-permission.md).
+
 ## Purpose
 
 Two POSIX-shaped kernel syscalls (`SYS_FSTAT`, `SYS_LSEEK`) plus the userspace

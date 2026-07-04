@@ -118,15 +118,28 @@ the root-dir and file branches.
 in (the no-translation map); `p9_client_setattr(client, fid, &sa)`. Borrows the
 caller's fid; allocates no transient fid.
 
-### Handler — `sys_wstat_handler` (`kernel/syscall.c`)
+### Handler — `sys_wstat_handler` → `sys_wstat_for_proc` (`kernel/syscall.c`)
 
-1. `current_thread()` → Proc.
-2. Mask sanity: `valid != 0` and `(valid & ~T_WSTAT_VALID) == 0`.
-3. Per-field bounds: `T_WSTAT_MODE` ⇒ `(mode & ~0777) == 0`; `T_WSTAT_UID` ⇒
+The handler thins to `current_thread()` + the exported all-scalar inner
+`sys_wstat_for_proc(p, fd, valid, mode, uid, gid)` (testable without a live EL0
+thread — the #37-chunk refactor; regression `dev9p.wstat_readonly_fd`).
+
+1. Mask sanity: `valid != 0` and `(valid & ~T_WSTAT_VALID) == 0`.
+2. Per-field bounds: `T_WSTAT_MODE` ⇒ `(mode & ~0777) == 0`; `T_WSTAT_UID` ⇒
    `uid != PRINCIPAL_INVALID`; `T_WSTAT_GID` ⇒ `gid != GID_INVALID`. A field whose
    valid bit is clear is forced to 0 before the Dev call.
-4. `sys_lookup_rw_handle(p, fd, RIGHT_WRITE)`; reject non-`KOBJ_SPOOR`.
-5. `spoor_wstat_native(c, valid, mode, uid, gid)` → `dev->wstat_native` (NULL ⇒ -1).
+3. `sys_lookup_rw_handle(p, fd, 0)`; reject non-`KOBJ_SPOOR`. **Kind-gate only
+   since #47** (landed with #37): the pre-#47 `RIGHT_WRITE` gate made POSIX
+   fchmod(2)/fchown(2) fail on an fd opened `O_RDONLY` (an `O_RDONLY` open mints
+   a `RIGHT_READ`-only handle — A-3 F1 omode-derived rights) while guarding
+   nothing: metadata mutation stays reachable by re-walking the path, and the
+   write *authority* is `perm_wstat_check` below (the identity axis), never the
+   handle's byte-I/O envelope. The `SYS_FSTAT`/#46 + `SYS_LSEEK` posture. The
+   #46 endowed-fd exception carries over: a rights-stripped handle passed
+   cross-Proc still wstats **iff** the receiver passes `perm_wstat_check` —
+   rights bound byte I/O and transfer, not the identity axis (POSIX fd-passing
+   behaves identically).
+4. `spoor_wstat_native(c, valid, mode, uid, gid)` → `dev->wstat_native` (NULL ⇒ -1).
 
 Validation precedes the handle lookup; the value checks are **structural** (mask
 shape, mode-bit hygiene, sentinel reject); the permission *policy* — who may
@@ -220,7 +233,7 @@ test proves the same denial deterministically against real devramfs metadata).
 
 | Return | Trigger |
 |--------|---------|
-| `SYS_WSTAT` -1 | fd not KOBJ_SPOOR / missing RIGHT_WRITE; `valid == 0`; reserved valid bit; `mode & ~0777`; uid/gid INVALID; Dev has no `.wstat_native`; server Rlerror |
+| `SYS_WSTAT` -1 | fd not KOBJ_SPOOR (any rights pass — #47); `valid == 0`; reserved valid bit; `mode & ~0777`; uid/gid INVALID; `perm_wstat_check` denial (perm-enforced Dev); Dev has no `.wstat_native`; server Rlerror |
 | `SYS_FSTAT` -1 | (unchanged) bad fd / no `stat_native` / Dev error |
 
 ---

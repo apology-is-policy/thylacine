@@ -967,19 +967,29 @@ static bool sys_validate_user_buf(u64 buf_va, u64 len) {
     return true;
 }
 
-// Inner — testable with kernel-side buf. Returns bytes written (>=0)
-// or -1 on bad handle / wrong kind / missing rights / dev error.
+// Shared body behind SYS_WRITE (cursor) and SYS_PWRITE (positioned) -- #37.
+// positioned=false reads the per-Spoor cursor and advances it by the accepted
+// count, byte-identical to the pre-#37 sys_write_for_proc. positioned=true
+// writes at the caller's absolute `off` and NEVER reads or advances the
+// cursor -- the POSIX pwrite contract: concurrent positioned ops on one fd
+// share no mutable state. The positioned arm adds three gates: off >= 0, no
+// s64 overflow at off + len, and dev->seekable (the SYS_LSEEK gate, RW-4
+// R2-F2) so positioned I/O on a pipe/cons/srv stream fails up front (the
+// POSIX ESPIPE shape) instead of silently acting as a cursor-free write.
 //
 // Only KOBJ_SPOOR is writable (sys_lookup_rw_handle filters): the write
-// routes through the Dev `.write` vtable (Spoor.offset). A byte-mode /srv
-// connection endpoint is itself a KOBJ_SPOOR conn Spoor, so its bytes ride
-// this path too -- devsrv_write picks the server arm (srvconn_server_send)
-// or the CSRVCLIENT client arm (srvconn_client_send) by the conn direction.
-// The client-side KObj_Srv conn handle that once routed here was retired
-// with SYS_SRV_CONNECT (stalk-3c); the kernel-attached no-direct-I/O guard
-// moved with it into devsrv_write.
-s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len) {
+// routes through the Dev `.write` vtable, whose offset parameter has always
+// been explicit (the Plan 9 shape) -- the cursor is syscall-layer sugar. A
+// byte-mode /srv connection endpoint is itself a KOBJ_SPOOR conn Spoor, so
+// its bytes ride this path too -- devsrv_write picks the server arm
+// (srvconn_server_send) or the CSRVCLIENT client arm (srvconn_client_send)
+// by the conn direction. The client-side KObj_Srv conn handle that once
+// routed here was retired with SYS_SRV_CONNECT (stalk-3c); the
+// kernel-attached no-direct-I/O guard moved with it into devsrv_write.
+static s64 spoor_write_common(struct Proc *p, hidx_t h, const u8 *kbuf,
+                              u64 len, bool positioned, s64 off) {
     if (!p || (!kbuf && len > 0))                    return -1;
+    if (positioned && off < 0)                       return -1;
     // #844: c is a REF-HELD Spoor (the lookup transferred the ref); it keeps c
     // alive across the blocking dev->write even if a sibling closes the fd.
     // spoor_clunk on EVERY exit after the lookup.
@@ -989,9 +999,11 @@ s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len) {
     // for create/walk-target use but perm_check-exempt at open). Reject every
     // write, including len 0, so it cannot serve content (IDENTITY-DESIGN 9.4 #81).
     if (c->flag & CWALKONLY)                       { spoor_clunk(c); return -1; }
+    if (positioned && (!c->dev || !c->dev->seekable)) { spoor_clunk(c); return -1; }
     if (len == 0)                                  { spoor_clunk(c); return 0; }
     if (!c->dev || !c->dev->write)                 { spoor_clunk(c); return -1; }
-    long n = c->dev->write(c, kbuf, (long)len, c->offset);
+    if (positioned && len > (u64)INT64_MAX - (u64)off) { spoor_clunk(c); return -1; }
+    long n = c->dev->write(c, kbuf, (long)len, positioned ? off : c->offset);
     // #3 (Area F errno-rollout): propagate a Dev's real -errno (dev9p now
     // returns -T_E_* for an ecode in 2..4095) instead of collapsing to -1.
     // The legacy -1 sentinel is unchanged -- the pouch/native boundary decodes
@@ -1004,23 +1016,40 @@ s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len) {
         spoor_clunk(c);
         return (n < -4095) ? (s64)(-T_E_IO) : (s64)n;
     }
-    c->offset += n;
+    if (!positioned) c->offset += n;
     spoor_clunk(c);
     return (s64)n;
 }
 
-// Inner — testable with kernel-side buf. Returns bytes read (>=0; 0
-// on EOF), -1 on bad handle / wrong kind / missing rights, or the Dev's
-// negative -errno on a dev error (#3 -- dev9p now surfaces -T_E_IO etc.).
+// Inner — testable with kernel-side buf. Returns bytes written (>=0)
+// or -1 on bad handle / wrong kind / missing rights / dev error.
+s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len) {
+    return spoor_write_common(p, h, kbuf, len, /*positioned=*/false, 0);
+}
+
+// SYS_PWRITE inner (#37) — testable with kernel-side buf. The cursor is
+// untouched on every path.
+s64 sys_pwrite_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len,
+                        s64 off) {
+    return spoor_write_common(p, h, kbuf, len, /*positioned=*/true, off);
+}
+
+// Shared body behind SYS_READ (cursor) and SYS_PREAD (positioned) -- #37.
+// The read twin of spoor_write_common; see its comment for the positioned
+// gates (off >= 0, off + len overflow, dev->seekable) and the cursor
+// contract. positioned=false is byte-identical to the pre-#37
+// sys_read_for_proc.
 //
 // Only KOBJ_SPOOR is readable (sys_lookup_rw_handle filters): the read
-// routes through the Dev `.read` vtable (Spoor.offset). A byte-mode /srv
-// connection endpoint is itself a KOBJ_SPOOR conn Spoor -- devsrv_read picks
-// the server arm (srvconn_server_recv*) or the CSRVCLIENT client arm
+// routes through the Dev `.read` vtable. A byte-mode /srv connection
+// endpoint is itself a KOBJ_SPOOR conn Spoor -- devsrv_read picks the server
+// arm (srvconn_server_recv*) or the CSRVCLIENT client arm
 // (srvconn_client_recv) by the conn direction. The client-side KObj_Srv conn
 // handle that once routed here was retired with SYS_SRV_CONNECT (stalk-3c).
-s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len) {
+static s64 spoor_read_common(struct Proc *p, hidx_t h, u8 *kbuf, u64 len,
+                             bool positioned, s64 off) {
     if (!p || (!kbuf && len > 0))                    return -1;
+    if (positioned && off < 0)                       return -1;
     // #844: c is a REF-HELD Spoor; it stays alive across the blocking
     // dev->read even if a sibling closes the fd. spoor_clunk on EVERY exit.
     struct Spoor *c = sys_lookup_rw_handle(p, h, RIGHT_READ);
@@ -1029,9 +1058,11 @@ s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len) {
     // read (the perm_check-exempt O_PATH open would otherwise be a read-bypass,
     // e.g. the 0400 /system.key via /bin/system.key). IDENTITY-DESIGN 9.4 #81.
     if (c->flag & CWALKONLY)                       { spoor_clunk(c); return -1; }
+    if (positioned && (!c->dev || !c->dev->seekable)) { spoor_clunk(c); return -1; }
     if (len == 0)                                  { spoor_clunk(c); return 0; }
     if (!c->dev || !c->dev->read)                  { spoor_clunk(c); return -1; }
-    long n = c->dev->read(c, kbuf, (long)len, c->offset);
+    if (positioned && len > (u64)INT64_MAX - (u64)off) { spoor_clunk(c); return -1; }
+    long n = c->dev->read(c, kbuf, (long)len, positioned ? off : c->offset);
     // #3 (Area F errno-rollout): propagate a Dev's real -errno (dev9p now
     // returns -T_E_*) instead of collapsing to -1; clamp an out-of-window
     // negative to keep pouch's [-4095,-1] error window safe (see the write twin).
@@ -1039,9 +1070,22 @@ s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len) {
         spoor_clunk(c);
         return (n < -4095) ? (s64)(-T_E_IO) : (s64)n;
     }
-    c->offset += n;
+    if (!positioned) c->offset += n;
     spoor_clunk(c);
     return (s64)n;
+}
+
+// Inner — testable with kernel-side buf. Returns bytes read (>=0; 0
+// on EOF), -1 on bad handle / wrong kind / missing rights, or the Dev's
+// negative -errno on a dev error (#3 -- dev9p now surfaces -T_E_IO etc.).
+s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len) {
+    return spoor_read_common(p, h, kbuf, len, /*positioned=*/false, 0);
+}
+
+// SYS_PREAD inner (#37) — testable with kernel-side buf. The cursor is
+// untouched on every path.
+s64 sys_pread_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len, s64 off) {
+    return spoor_read_common(p, h, kbuf, len, /*positioned=*/true, off);
 }
 
 // Weft-6b-2 data drive: the zero-copy write fast-path. A large write whose user
@@ -1183,6 +1227,57 @@ static s64 sys_read_handler(u64 hraw, u64 buf_va, u64 len) {
         if (uaccess_store_u8(buf_va + (u64)i, scratch[i]) != 0) return -1;
     }
     return got;
+}
+
+// =============================================================================
+// SYS_PREAD / SYS_PWRITE — positioned byte I/O (#37).
+// =============================================================================
+//
+// Thin twins of sys_read_handler / sys_write_handler: the same user-buffer
+// validation + SYS_RW_MAX clamp + per-byte uaccess staging, routed to the
+// positioned inners. Deliberately NO weft fast-path -- a weft flow is a
+// stream, so positioned I/O on it has no meaning; the byte path's
+// dev->seekable gate rejects nothing there (dev9p is seekable) but netd's
+// data files are the only weft-bound fids and no consumer preads them, while
+// wiring the fast-path would put the cursor-free contract inside the
+// weft accounting for zero benefit. len==0 rides the inner's
+// validate-then-0 path (the POSIX EBADF discipline incl. the #81 O_PATH
+// gate and the positioned off/seekable gates).
+
+static s64 sys_pread_handler(u64 hraw, u64 buf_va, u64 len, u64 off_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+    if (!sys_validate_user_buf(buf_va, len))         return -1;
+    if (len > SYS_RW_MAX) len = SYS_RW_MAX;
+
+    u8 scratch[SYS_RW_MAX];
+    s64 got = sys_pread_for_proc(p, (hidx_t)hraw, scratch, len, (s64)off_raw);
+    if (got <= 0)                                    return got;
+
+    // Copy out to user-VA. Per-byte; the SYS_READ partial-copy caveat applies
+    // -- but unlike SYS_READ nothing is LOST on a fault: the cursor never
+    // moved, so the caller can simply repeat the pread.
+    for (s64 i = 0; i < got; i++) {
+        if (uaccess_store_u8(buf_va + (u64)i, scratch[i]) != 0) return -1;
+    }
+    return got;
+}
+
+static s64 sys_pwrite_handler(u64 hraw, u64 buf_va, u64 len, u64 off_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+    if (!sys_validate_user_buf(buf_va, len))         return -1;
+    if (len > SYS_RW_MAX) len = SYS_RW_MAX;
+
+    u8 scratch[SYS_RW_MAX];
+    for (u64 i = 0; i < len; i++) {
+        if (uaccess_load_u8(buf_va + i, &scratch[i]) != 0) return -1;
+    }
+    return sys_pwrite_for_proc(p, (hidx_t)hraw, scratch, len, (s64)off_raw);
 }
 
 // =============================================================================
@@ -2837,17 +2932,11 @@ static int spoor_wstat_native(struct Spoor *c, u32 valid, u32 mode,
     return c->dev->wstat_native(c, valid, mode, uid, gid);
 }
 
-static s64 sys_wstat_handler(u64 hraw, u64 valid_raw, u64 mode_raw,
-                             u64 uid_raw, u64 gid_raw) {
-    struct Thread *t = current_thread();
-    if (!t)                                          return -1;
-    struct Proc *p = t->proc;
+// Inner — testable without a live EL0 thread (all-scalar args, no user
+// buffer). The handler thins to current_thread() + this.
+s64 sys_wstat_for_proc(struct Proc *p, hidx_t h, u32 valid, u32 mode,
+                       u32 uid, u32 gid) {
     if (!p)                                          return -1;
-
-    u32 valid = (u32)valid_raw;
-    u32 mode  = (u32)mode_raw;
-    u32 uid   = (u32)uid_raw;
-    u32 gid   = (u32)gid_raw;
 
     // Mask sanity: at least one known bit, no reserved bit (so a future
     // T_WSTAT_* extension cannot be silently dropped -- same discipline as
@@ -2874,17 +2963,28 @@ static s64 sys_wstat_handler(u64 hraw, u64 valid_raw, u64 mode_raw,
         gid = 0;
     }
 
-    // Rights gate: KOBJ_SPOOR with RIGHT_WRITE (setattr mutates metadata).
-    // Mirrors SYS_FSTAT's lookup but with RIGHT_WRITE; rejects KOBJ_SRV.
-    // #844: c is REF-HELD (KOBJ_SPOOR + RIGHT_WRITE); spoor_clunk on every exit
-    // -- the ref keeps c alive across the (possibly blocking) stat/setattr.
-    struct Spoor *c = sys_lookup_rw_handle(p, (hidx_t)hraw, RIGHT_WRITE);
+    // #47 (the #46 sibling): kind-gate only -- KOBJ_SPOOR, ANY rights (rights
+    // mask 0, the SYS_FSTAT/#46 + SYS_LSEEK posture); rejects KOBJ_SRV. POSIX
+    // fchmod(2)/fchown(2) work on an fd opened O_RDONLY: the authority to
+    // change metadata is the IDENTITY axis (owner-or-CAP, perm_wstat_check
+    // below), never the handle's byte-I/O envelope. An O_RDONLY open mints a
+    // RIGHT_READ-only handle (A-3 F1 omode-derived rights), so the old
+    // RIGHT_WRITE gate made fchmod on it fail -1 while guarding nothing --
+    // the caller can re-walk the path and wstat that handle; the fd is just a
+    // name for the file. The endowed-fd exception documented at #46 (a
+    // rights-stripped handle passed cross-Proc still wstats IF the receiver
+    // passes perm_wstat_check) carries over: rights bound byte I/O + transfer,
+    // never the identity axis, and POSIX fd-passing behaves identically.
+    // #844: c is REF-HELD; spoor_clunk on every exit -- the ref keeps c alive
+    // across the (possibly blocking) stat/setattr.
+    struct Spoor *c = sys_lookup_rw_handle(p, h, 0);
     if (!c)                                          return -1;
 
     // A-2d: the ownership-change policy (IDENTITY-DESIGN.md 3.7.1 + perm.c).
-    // Gated on perm_enforced (dev9p deferred to A-3; devramfs .wstat_native is
+    // Gated on perm_enforced (dev9p live since A-3; devramfs .wstat_native is
     // NULL so SYS_WSTAT on it returns -1 below regardless). Reads the file's
-    // CURRENT owner, then applies the policy.
+    // CURRENT owner, then applies the policy. Since #47 this identity check is
+    // the ONLY write-authority gate on this path -- do not weaken it.
     if (c->dev && c->dev->perm_enforced) {
         struct t_stat cur;
         if (spoor_stat_native(c, &cur) != 0)              { spoor_clunk(c); return -1; }
@@ -2893,6 +2993,16 @@ static s64 sys_wstat_handler(u64 hraw, u64 valid_raw, u64 mode_raw,
     int rc = spoor_wstat_native(c, valid, mode, uid, gid);
     spoor_clunk(c);
     return rc == 0 ? 0 : -1;
+}
+
+static s64 sys_wstat_handler(u64 hraw, u64 valid_raw, u64 mode_raw,
+                             u64 uid_raw, u64 gid_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+    return sys_wstat_for_proc(p, (hidx_t)hraw, (u32)valid_raw, (u32)mode_raw,
+                              (u32)uid_raw, (u32)gid_raw);
 }
 
 // =============================================================================
@@ -6387,6 +6497,20 @@ void syscall_dispatch(struct exception_context *ctx) {
         ctx->regs[0] = (u64)sys_write_handler(ctx->regs[0],
                                               ctx->regs[1],
                                               ctx->regs[2]);
+        return;
+
+    case SYS_PREAD:
+        ctx->regs[0] = (u64)sys_pread_handler(ctx->regs[0],
+                                              ctx->regs[1],
+                                              ctx->regs[2],
+                                              ctx->regs[3]);
+        return;
+
+    case SYS_PWRITE:
+        ctx->regs[0] = (u64)sys_pwrite_handler(ctx->regs[0],
+                                               ctx->regs[1],
+                                               ctx->regs[2],
+                                               ctx->regs[3]);
         return;
 
     case SYS_CLOSE:

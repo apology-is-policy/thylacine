@@ -106,6 +106,8 @@ enum {
     T_SYS_PCI_MAP_BAR       = 77,  // pci-1c: map a KObj_PCI BAR into user VA
     T_SYS_PCI_INFO          = 78,  // pci-1c: read a KObj_PCI's resolved topology
     T_SYS_CLOCK_SETTIME     = 79,  // net-7a: step CLOCK_REALTIME (CAP_HOSTOWNER)
+    T_SYS_PREAD             = 85,  // #37: positioned read (cursor untouched)
+    T_SYS_PWRITE            = 86,  // #37: positioned write (cursor untouched)
 };
 
 // SYS_CLOCK_*TIME clock ids (match Linux clockid_t) + the 16-byte timespec.
@@ -723,6 +725,47 @@ static inline long t_write(long fd, const void *buf, size_t len) {
         "svc #0"
         : "+r"(x0)
         : "r"(x1), "r"(x2), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_pread — read up to `len` bytes from `fd` at absolute byte offset
+// `off` (#37). The per-Spoor cursor is neither read nor advanced, so
+// concurrent positioned ops on one fd share no mutable state (the POSIX
+// pread contract). Returns bytes read (>0), 0 on EOF, -1 on error --
+// including off < 0 and a non-seekable Dev (the ESPIPE shape: pread on
+// a pipe fails). Per-call cap is 4096 bytes (SYS_RW_MAX).
+__attribute__((always_inline))
+static inline long t_pread(long fd, void *buf, size_t len, long off) {
+    register long x0 __asm__("x0") = fd;
+    register long x1 __asm__("x1") = (long)(unsigned long)buf;
+    register long x2 __asm__("x2") = (long)len;
+    register long x3 __asm__("x3") = off;
+    register long x8 __asm__("x8") = T_SYS_PREAD;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x2), "r"(x3), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_pwrite — write up to `len` bytes from `buf` to `fd` at absolute byte
+// offset `off` (#37). Cursor untouched; same gates as t_pread. Returns
+// bytes written (>=0), -1 on error.
+__attribute__((always_inline))
+static inline long t_pwrite(long fd, const void *buf, size_t len, long off) {
+    register long x0 __asm__("x0") = fd;
+    register long x1 __asm__("x1") = (long)(unsigned long)buf;
+    register long x2 __asm__("x2") = (long)len;
+    register long x3 __asm__("x3") = off;
+    register long x8 __asm__("x8") = T_SYS_PWRITE;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x2), "r"(x3), "r"(x8)
         : "memory", "cc"
     );
     return x0;

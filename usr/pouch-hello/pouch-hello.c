@@ -73,6 +73,50 @@ int main(void) {
     if (emit("pouch-hello: open -> ENOENT (16b-gamma openat live)\n") != 0)
         return 1;
 
+    // #37: pread/pwrite ride SYS_PREAD/SYS_PWRITE (musl's pread64/pwrite64
+    // seam numbers went 0xFFFF -> 85/86). Pre-#37 both short-circuited to
+    // ENOSYS, so a successful pread IS the wiring proof. /welcome is the
+    // read-only devramfs smoke file ("Welcome to Thylacine ramfs.\n",
+    // pinned by tools/build.sh) -- runs PRE-pivot like the stdio prover's
+    // /version read. The read()-pread()-read() sandwich proves the POSIX
+    // cursor contract end-to-end through musl: the positioned read must
+    // not move the fd cursor.
+    {
+        int fd = open("/welcome", O_RDONLY);
+        if (fd < 0) {
+            (void)emit("pouch-hello: FAIL open /welcome\n");
+            return 1;
+        }
+        char a[4], b[4], c[3];
+        if (read(fd, a, 4) != 4 || memcmp(a, "Welc", 4) != 0) {
+            (void)emit("pouch-hello: FAIL read /welcome head\n");
+            return 1;
+        }
+        errno = 0;
+        ssize_t pn = pread(fd, b, 4, 1);
+        if (pn != 4 || memcmp(b, "elco", 4) != 0) {
+            (void)emit(errno == ENOSYS
+                       ? "pouch-hello: FAIL pread -> ENOSYS (seam not wired)\n"
+                       : "pouch-hello: FAIL pread @1 content\n");
+            return 1;
+        }
+        if (read(fd, c, 3) != 3 || memcmp(c, "ome", 3) != 0) {
+            (void)emit("pouch-hello: FAIL cursor moved by pread\n");
+            return 1;
+        }
+        // pwrite must reach the kernel (devramfs is read-only and the fd is
+        // O_RDONLY, so it fails there) -- ENOSYS would mean the seam number
+        // never left musl.
+        errno = 0;
+        if (pwrite(fd, "x", 1, 0) != -1 || errno == ENOSYS) {
+            (void)emit("pouch-hello: FAIL pwrite seam (expected kernel -1, not ENOSYS)\n");
+            return 1;
+        }
+        (void)close(fd);
+        if (emit("pouch-hello: pread/pwrite seam ok (#37: cursor untouched, wired to 85/86)\n") != 0)
+            return 1;
+    }
+
     if (emit("pouch-hello: exit 0\n") != 0)
         return 1;
     return 0;

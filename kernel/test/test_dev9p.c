@@ -23,6 +23,7 @@
 #include <thylacine/perm.h>
 #include <thylacine/proc.h>
 #include <thylacine/caps.h>
+#include <thylacine/handle.h>
 
 void test_dev9p_registered(void);
 void test_dev9p_attach_client_root_spoor(void);
@@ -38,6 +39,8 @@ void test_dev9p_create_dir(void);
 void test_dev9p_fsync(void);
 void test_dev9p_readdir(void);
 void test_dev9p_poll_regular_file_always_ready(void);
+void test_dev9p_prw_wire_offset_and_cursor(void);
+void test_dev9p_wstat_readonly_fd(void);
 
 // File-scope buffers — client is ~12 KiB, won't fit on the 16 KiB test
 // thread stack alongside a few smaller locals.
@@ -61,6 +64,11 @@ static u64 le64_at(const u8 *p) {
 // test can assert dev9p_readdir forwards a high-bit (>INT64_MAX) cookie verbatim
 // rather than sign-clamping it to 0.
 static u64 g_readdir_req_offset;
+
+// #37: capture the Tread/Twrite request offsets so the positioned-I/O tests
+// can assert the CALLER's offset (SYS_PREAD/SYS_PWRITE) vs the Spoor cursor
+// (SYS_READ/SYS_WRITE) is what actually reaches the wire.
+static u64 g_tread_req_offset, g_twrite_req_offset;
 
 // Canonical responder — synthesizes valid Rmsgs for every op type
 // dev9p might issue. Mirrors the responder used in test_9p_client.c
@@ -140,6 +148,9 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         return (int)total;
     }
     if (type == P9_TREAD) {
+        // Capture the request offset (Tread body: fid@7, offset@11, count@19).
+        if (req_len >= P9_HDR_LEN + 4 + 8 + 4)
+            g_tread_req_offset = le64_at(req + 11);
         // Respond with 5-byte payload "hello".
         const u8 payload[] = {'h','e','l','l','o'};
         size_t total = P9_HDR_LEN + 4 + sizeof(payload);
@@ -154,6 +165,8 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
     if (type == P9_TWRITE) {
         // Echo accepted count = requested count.
         if (req_len < P9_HDR_LEN + 4 + 8 + 4) return -1;
+        // Capture the request offset (Twrite body: fid@7, offset@11, count@19).
+        g_twrite_req_offset = le64_at(req + 11);
         u32 count = (u32)req[P9_HDR_LEN + 4 + 8]
                   | ((u32)req[P9_HDR_LEN + 4 + 8 + 1] << 8)
                   | ((u32)req[P9_HDR_LEN + 4 + 8 + 2] << 16)
@@ -929,4 +942,124 @@ void test_dev9p_poll_cancel_at_close(void) {
     spoor_clunk(root);   // root_fid is not clunked by dev9p (fid_owned false); frees the Spoor
     p9_client_destroy(&g_client);
     p9_loopback_destroy(&g_loopback);
+}
+
+// =============================================================================
+// SYS_PREAD / SYS_PWRITE (#37) + SYS_WSTAT kind-gate (#47) — syscall-layer
+// tests against the loopback client (the wire-visible halves).
+// =============================================================================
+
+// The positioned inners + the wstat inner (defined in kernel/syscall.c).
+extern s64 sys_pread_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len,
+                              s64 off);
+extern s64 sys_pwrite_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf,
+                               u64 len, s64 off);
+extern s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf,
+                              u64 len);
+extern s64 sys_wstat_for_proc(struct Proc *p, hidx_t h, u32 valid, u32 mode,
+                              u32 uid, u32 gid);
+
+// #37: SYS_PREAD/SYS_PWRITE put the CALLER's offset in the Tread/Twrite and
+// never move the Spoor cursor; SYS_READ/SYS_WRITE keep putting the CURSOR
+// there and advancing it. The loopback responder captures the wire offsets.
+void test_dev9p_prw_wire_offset_and_cursor(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "client+root");
+    struct Spoor *nc = spoor_clone(root);
+    const char *name = "file";
+    struct Walkqid *w = dev9p.walk(root, nc, &name, 1);
+    TEST_ASSERT(w != NULL, "walk");
+    walkqid_free(w);
+    TEST_ASSERT(dev9p.open(nc, 2) != NULL, "open ORDWR");
+
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    hidx_t fd = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, nc);
+    TEST_ASSERT(fd >= 0, "handle_alloc");   // adopts nc's ref
+
+    const u8 payload[5] = {'w','r','i','t','e'};
+    u8 buf[8];
+
+    g_twrite_req_offset = 0xdeadbeefull;
+    TEST_EXPECT_EQ(sys_pwrite_for_proc(p, fd, payload, 5, 0x1234), 5L,
+                   "pwrite accepted");
+    TEST_EXPECT_EQ(g_twrite_req_offset, 0x1234ull,
+                   "Twrite carries the caller's offset");
+    TEST_EXPECT_EQ((s64)nc->offset, 0LL, "cursor untouched by pwrite");
+
+    g_tread_req_offset = 0xdeadbeefull;
+    TEST_EXPECT_EQ(sys_pread_for_proc(p, fd, buf, 5, 0x77), 5L,
+                   "pread returned payload");
+    TEST_EXPECT_EQ(g_tread_req_offset, 0x77ull,
+                   "Tread carries the caller's offset");
+    TEST_EXPECT_EQ((s64)nc->offset, 0LL, "cursor untouched by pread");
+
+    // The cursor path interleaves cleanly: a plain write goes at the cursor
+    // (0) and advances it; a positioned write elsewhere leaves it; the next
+    // plain write continues from 5.
+    TEST_EXPECT_EQ(sys_write_for_proc(p, fd, payload, 5), 5L, "cursor write");
+    TEST_EXPECT_EQ(g_twrite_req_offset, 0ull, "cursor write went at 0");
+    TEST_EXPECT_EQ((s64)nc->offset, 5LL, "cursor advanced to 5");
+    TEST_EXPECT_EQ(sys_pwrite_for_proc(p, fd, payload, 5, 9), 5L, "pwrite @9");
+    TEST_EXPECT_EQ(g_twrite_req_offset, 9ull, "Twrite offset 9");
+    TEST_EXPECT_EQ((s64)nc->offset, 5LL, "cursor still 5 after pwrite");
+    TEST_EXPECT_EQ(sys_write_for_proc(p, fd, payload, 5), 5L, "cursor write 2");
+    TEST_EXPECT_EQ(g_twrite_req_offset, 5ull,
+                   "second cursor write continued at 5");
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);        // releases the handle -> clunks nc's fid
+    teardown(root);
+}
+
+// #47: SYS_WSTAT is kind-gated only. POSIX fchmod(2) works on an fd opened
+// O_RDONLY -- the write authority is perm_wstat_check (the IDENTITY axis),
+// not the handle rights. The loopback Rgetattr reports uid 0x1234: an
+// owner-principal Proc chmods through a RIGHT_READ-only handle (pre-#47 this
+// returned -1 at the rights gate); a stranger holding FULL rights is still
+// denied by the identity gate -- the rights-drop opened no authority hole.
+void test_dev9p_wstat_readonly_fd(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "client+root");
+    const char *name = "file";
+
+    struct Spoor *nc = spoor_clone(root);
+    struct Walkqid *w = dev9p.walk(root, nc, &name, 1);
+    TEST_ASSERT(w != NULL, "walk");
+    walkqid_free(w);
+
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->principal_id = 0x1234u;     // the owner the loopback Rgetattr reports
+    p->primary_gid  = 0x5678u;
+    p->caps         = 0;
+    hidx_t fd = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, nc);
+    TEST_ASSERT(fd >= 0, "handle_alloc R-only");
+
+    g_setattr_valid = g_setattr_mode = 0xdeadbeefu;
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fd, T_WSTAT_MODE, 0644u, 0, 0), 0L,
+                   "owner chmod through a READ-only handle succeeds (#47)");
+    TEST_EXPECT_EQ(g_setattr_mode, 0644u, "mode reached the wire");
+
+    // The identity gate is the live authority: a non-owner without caps is
+    // denied even holding R|W rights.
+    struct Spoor *nc2 = spoor_clone(root);
+    struct Walkqid *w2 = dev9p.walk(root, nc2, &name, 1);
+    TEST_ASSERT(w2 != NULL, "walk 2");
+    walkqid_free(w2);
+    struct Proc *q = proc_alloc();
+    TEST_ASSERT(q != NULL, "proc_alloc q");
+    q->principal_id = 0x9999u;
+    q->primary_gid  = 0x9999u;
+    q->caps         = 0;
+    hidx_t fq = handle_alloc(q, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, nc2);
+    TEST_ASSERT(fq >= 0, "handle_alloc q");
+    TEST_EXPECT_EQ(sys_wstat_for_proc(q, fq, T_WSTAT_MODE, 0600u, 0, 0), -1L,
+                   "non-owner chmod denied by perm_wstat_check despite R|W");
+
+    q->state = PROC_STATE_ZOMBIE;
+    proc_free(q);
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+    teardown(root);
 }

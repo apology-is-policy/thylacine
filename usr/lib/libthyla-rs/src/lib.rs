@@ -201,6 +201,11 @@ pub const T_TORPOR_MAX_TIMEOUT_US: i64     = 3600 * 1_000_000; // 1 hour
 pub const T_SYS_WALK_OPEN: u64        = 34;
 pub const T_SYS_FSTAT: u64            = 50;
 pub const T_SYS_LSEEK: u64            = 51;
+// #37: positioned byte I/O -- the per-Spoor cursor is neither read nor
+// advanced, so concurrent positioned ops on one fd share no mutable state
+// (the POSIX pread/pwrite contract).
+pub const T_SYS_PREAD: u64            = 85;
+pub const T_SYS_PWRITE: u64           = 86;
 // FS-mutation foundation (IDENTITY-DESIGN.md section 9.2): create-then-open,
 // durability barrier, directory enumeration.
 pub const T_SYS_WALK_CREATE: u64      = 54;
@@ -2157,6 +2162,44 @@ pub unsafe fn t_lseek(spoor_fd: i64, offset: i64, whence: u32) -> i64 {
         in("x1") offset,
         in("x2") whence as u64,
         in("x8") T_SYS_LSEEK,
+        options(nostack)
+    );
+    x0
+}
+
+// t_pread — read up to `len` bytes from `spoor_fd` at absolute byte
+// offset `off` (#37). The per-Spoor cursor is neither read nor advanced.
+// Returns bytes read (>0), 0 at EOF, -1 / -errno on error -- including
+// off < 0 and a non-seekable Dev (the POSIX ESPIPE shape: pread on a
+// pipe fails). Per-call cap is 4096 bytes (SYS_RW_MAX); loop for more.
+#[inline(always)]
+pub unsafe fn t_pread(spoor_fd: i64, buf: *mut u8, len: usize, off: i64) -> i64 {
+    let mut x0: i64 = spoor_fd;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") buf as u64,
+        in("x2") len as u64,
+        in("x3") off,
+        in("x8") T_SYS_PREAD,
+        options(nostack)
+    );
+    x0
+}
+
+// t_pwrite — write up to `len` bytes to `spoor_fd` at absolute byte
+// offset `off` (#37). Cursor untouched; same gates as t_pread. Returns
+// bytes written (>=0), -1 / -errno on error.
+#[inline(always)]
+pub unsafe fn t_pwrite(spoor_fd: i64, buf: *const u8, len: usize, off: i64) -> i64 {
+    let mut x0: i64 = spoor_fd;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") buf as u64,
+        in("x2") len as u64,
+        in("x3") off,
+        in("x8") T_SYS_PWRITE,
         options(nostack)
     );
     x0

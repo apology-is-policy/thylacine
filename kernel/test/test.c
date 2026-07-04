@@ -892,6 +892,8 @@ void test_dev9p_rename(void);
 void test_dev9p_unlink(void);
 void test_dev9p_stat_native_maps_getattr(void);
 void test_dev9p_wstat_native_drives_setattr(void);
+void test_dev9p_prw_wire_offset_and_cursor(void);
+void test_dev9p_wstat_readonly_fd(void);
 void test_dev9p_perm_enforced_deny_allow(void);
 void test_p9_attached_create_destroy(void);
 void test_p9_attached_handshake_failure_returns_null(void);
@@ -970,6 +972,9 @@ void test_sys_rw_write_then_read_round_trip(void);
 void test_sys_rw_rights_check(void);
 void test_sys_rw_zero_length_validates_fd(void);
 void test_sys_rw_read_after_close_returns_eof(void);
+void test_sys_prw_pipe_not_seekable(void);
+void test_sys_pread_devramfs_offset_and_cursor(void);
+void test_sys_prw_rights_and_walkonly(void);
 void test_sys_pipe_dup_spoor_handle_acquires_ref(void);
 void test_pipe_probe_round_trip(void);
 void test_sys_attach_9p_rejection_paths(void);
@@ -2173,6 +2178,9 @@ struct test_case g_tests[] = {
                                        test_dev9p_stat_native_maps_getattr, false, NULL },
     { "dev9p.wstat_native_drives_setattr",
                                        test_dev9p_wstat_native_drives_setattr, false, NULL },
+    { "dev9p.prw_wire_offset_and_cursor",
+                                       test_dev9p_prw_wire_offset_and_cursor, false, NULL },
+    { "dev9p.wstat_readonly_fd",       test_dev9p_wstat_readonly_fd,          false, NULL },
     { "dev9p.perm_enforced_deny_allow",
                                        test_dev9p_perm_enforced_deny_allow, false, NULL },
     { "p9_attached.create_destroy",    test_p9_attached_create_destroy,    false, NULL },
@@ -2257,6 +2265,9 @@ struct test_case g_tests[] = {
     { "sys_rw.rights_check",                           test_sys_rw_rights_check,                           false, NULL },
     { "sys_rw.zero_length_validates_fd",               test_sys_rw_zero_length_validates_fd,               false, NULL },
     { "sys_rw.read_after_close_returns_eof",           test_sys_rw_read_after_close_returns_eof,           false, NULL },
+    { "sys_prw.pipe_not_seekable",                      test_sys_prw_pipe_not_seekable,                      false, NULL },
+    { "sys_prw.pread_devramfs_offset_and_cursor",       test_sys_pread_devramfs_offset_and_cursor,           false, NULL },
+    { "sys_prw.rights_and_walkonly",                    test_sys_prw_rights_and_walkonly,                    false, NULL },
     { "sys_pipe.dup_spoor_handle_acquires_ref",        test_sys_pipe_dup_spoor_handle_acquires_ref,        false, NULL },
     { "userspace.pipe_probe_round_trip",               test_pipe_probe_round_trip,                         false, NULL },
     { "sys_attach_9p.rejection_paths",                 test_sys_attach_9p_rejection_paths,                 false, NULL },

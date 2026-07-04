@@ -436,8 +436,8 @@ Binding design: docs/POUCH-DESIGN.md sections 5 + 5.1. Invariants P-1, P-3.
 +#define __NR_write 10
 +#define __NR_readv 0xFFFF
 +#define __NR_writev 0xFFFF
-+#define __NR_pread64 0xFFFF
-+#define __NR_pwrite64 0xFFFF
++#define __NR_pread64 85
++#define __NR_pwrite64 86
 +#define __NR_preadv 0xFFFF
 +#define __NR_pwritev 0xFFFF
 +#define __NR_sendfile 0xFFFF

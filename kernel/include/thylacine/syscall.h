@@ -1199,11 +1199,23 @@ enum {
     //
     // This chunk builds the MECHANISM only. The per-file rwx PERMISSION check
     // (who may chmod/chown -- owner-only chmod, CAP_HOSTOWNER chown) is A-2d
-    // (the kernel rwx-enforcement layer); at A-2a the handle RIGHT_WRITE gate is
+    // (the kernel rwx-enforcement layer); at A-2a the handle RIGHT_WRITE gate was
     // the only gate, and I-22 stands (no rwx enforcement exists yet to bypass).
     //
+    // #47 (the #46 sibling, landed with #37): the RIGHT_WRITE gate is DROPPED --
+    // the fd is kind-gated only (KOBJ_SPOOR, any rights). POSIX fchmod(2)/
+    // fchown(2) work on an fd opened O_RDONLY: the authority to change metadata
+    // is the IDENTITY axis (owner-or-CAP -- perm_wstat_check, live since A-2d/
+    // A-3), never the handle's byte-I/O envelope. An O_RDONLY open mints a
+    // RIGHT_READ-only handle (A-3 F1 omode-derived rights), so the old gate made
+    // fchmod on it fail -1 while guarding nothing (metadata mutation stayed
+    // reachable by re-walking the path -- the fd is just a name for the file;
+    // the SYS_FSTAT/#46 + SYS_LSEEK precedent).
+    //
     // SYS_WSTAT(fd, valid, mode, uid, gid) -> 0 / -1
-    //   x0 = fd     (hidx_t; KOBJ_SPOOR with RIGHT_WRITE -- setattr mutates.)
+    //   x0 = fd     (hidx_t; must be KOBJ_SPOOR -- any rights (kind-gate only,
+    //                #47). The write-authority gate is perm_wstat_check on
+    //                perm-enforced Devs, an identity check, not a rights check.)
     //   x1 = valid  (u32 bitmask of T_WSTAT_MODE | T_WSTAT_UID | T_WSTAT_GID;
     //                at least one bit set; any other bit -> -1.)
     //   x2 = mode   (u32; new permission bits when T_WSTAT_MODE. The 9 rwx bits
@@ -1212,8 +1224,9 @@ enum {
     //   x3 = uid    (u32; new owner principal-id when T_WSTAT_UID. PRINCIPAL_-
     //                INVALID (0) -> -1.)
     //   x4 = gid    (u32; new group when T_WSTAT_GID. GID_INVALID (0) -> -1.)
-    //   Returns 0 on success, -1 on: fd not KOBJ_SPOOR / missing RIGHT_WRITE;
-    //   valid 0 or with a reserved bit; mode outside 0777; uid/gid INVALID;
+    //   Returns 0 on success, -1 on: fd not KOBJ_SPOOR; valid 0 or with a
+    //   reserved bit; mode outside 0777; uid/gid INVALID; perm_wstat_check
+    //   denial (perm-enforced Dev, caller neither owner nor CAP-holder);
     //   Dev has no .wstat_native slot; server Rlerror. Audit-bearing:
     //   CLAUDE.md A-2 FS-permission row.
     SYS_WSTAT        = 59,   // arg: fd (x0), valid (x1), mode (x2), uid (x3), gid (x4)
@@ -1504,6 +1517,37 @@ enum {
     //   VMA / a range outside one VMA. Backs the Go runtime's sysUnused (the GC
     //   shrinks RSS). -1 on a bad range / wrong VMA type.
     SYS_BURROW_DECOMMIT = 84,     // arg: vaddr (x0), length (x1)
+
+    // Positioned byte I/O (#37; the go-build clean+perf mission P2.1). The Dev
+    // vtable read/write have ALWAYS taken an explicit byte offset (the Plan 9
+    // shape) -- the per-Spoor cursor is syscall-layer sugar -- so pread/pwrite
+    // are the same lookup + rights + O_PATH gates as SYS_READ/SYS_WRITE with the
+    // caller's offset passed through and the cursor NEVER read or advanced.
+    // That absence is the whole point: concurrent positioned ops on one fd share
+    // NO mutable state (POSIX pread(2); Go io.ReaderAt's documented parallel-use
+    // contract) -- a property no Seek+Read emulation can provide.
+    //
+    // SYS_PREAD(fd, buf, len, off) -> bytes read (0 = EOF) / -1 / -errno
+    //   x0 = fd   (hidx_t; KOBJ_SPOOR with RIGHT_READ; CWALKONLY/O_PATH
+    //              rejected, as SYS_READ.)
+    //   x1 = buf  (user VA; validated + staged exactly like SYS_READ.)
+    //   x2 = len  (clamped to SYS_RW_MAX per call; short reads are normal.)
+    //   x3 = off  (s64 absolute byte offset. off < 0 -> -1; off + len past
+    //              INT64_MAX -> -1. Requires dev->seekable (the SYS_LSEEK
+    //              gate) -- positioned I/O on a pipe/cons/srv stream fails up
+    //              front (the POSIX ESPIPE shape), never silently acts as a
+    //              cursor read.)
+    //   Returns like SYS_READ: bytes read, 0 at EOF, -1 sentinel, or the
+    //   Dev's -errno passthrough (#3). The Spoor cursor is untouched on
+    //   every path, success or failure.
+    SYS_PREAD  = 85,   // arg: fd (x0), buf (x1), len (x2), off (x3)
+
+    // SYS_PWRITE(fd, buf, len, off) -> bytes written / -1 / -errno
+    //   The write twin: RIGHT_WRITE + the same off >= 0 / overflow /
+    //   dev->seekable gates; cursor untouched. No O_APPEND interaction
+    //   exists (Thylacine has no kernel append mode; ports emulate
+    //   O_APPEND above this layer).
+    SYS_PWRITE = 86,   // arg: fd (x0), buf (x1), len (x2), off (x3)
 };
 
 // SYS_CLOCK_GETTIME clock ids. Values match Linux clockid_t so a future pouch
