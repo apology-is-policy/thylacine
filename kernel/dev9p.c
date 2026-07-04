@@ -609,7 +609,11 @@ static long dev9p_bwrite(struct Spoor *c, struct Block *bp, s64 off) {
 static int dev9p_fsync(struct Spoor *c, u32 datasync) {
     struct dev9p_priv *p = priv_of(c);
     if (!p) return -1;
-    return p9_client_fsync(p->client, p->fid, datasync) == 0 ? 0 : -1;
+    // Area-F errno rollout (the slot the #3 pass missed): propagate the real
+    // ecode -- p9_client_fsync returns 0 or -(T_E_*)/-P9_E_IO, already a valid
+    // -errno in [-4095,-1]. Collapsing to -1 masked the underlying failure
+    // (the post-go-build fsync cascade read as a meaningless EPERM).
+    return p9_client_fsync(p->client, p->fid, datasync);
 }
 
 // Directory enumeration -> Stratum Treaddir. Returns the raw 9P2000.L dirent

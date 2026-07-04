@@ -2580,7 +2580,9 @@ static s64 sys_fsync_handler(u64 fd_raw, u64 datasync_raw) {
     u32 datasync = (datasync_raw != 0) ? 1u : 0u;
     int rc = c->dev->fsync(c, datasync);
     spoor_clunk(c);
-    return rc == 0 ? 0 : -1;
+    // Area-F errno rollout: propagate the Dev's real -errno (dev9p returns
+    // -(T_E_*)); a legacy Dev's bare -1 stays the generic sentinel.
+    return (s64)rc;
 }
 
 // =============================================================================
@@ -4492,6 +4494,11 @@ static void sys_spawn_thunk(void *arg) {
     if (!p) extinction("sys_spawn_thunk: no proc");
 
     u64 entry = 0, sp = 0;
+    // #359/#360: this thunk runs IRQ-ENABLED on a fresh thread (preemptible,
+    // like a kthread). Its shared-lock holds (the REVENANT eager read + the
+    // spoor_clunk on the dev9p pool client's c->lock) are safe because a plain
+    // spin_lock hold now disables preemption per-THREAD (spinlock.h #360) --
+    // the general rule that replaced the interim whole-thunk IRQ mask.
     int rc = exec_setup_from_spoor(p, exe, exe_size, NULL, 0, 0, &entry, &sp);
     spoor_clunk(exe);
     if (rc != 0) {
@@ -4749,6 +4756,8 @@ static void sys_spawn_with_fds_thunk(void *arg) {
     (void)installed;
 
     u64 entry = 0, sp = 0;
+    // #359/#360: preemptible fresh-thread exec; the c->lock holds are covered
+    // by the spinlock preempt count (spinlock.h). See sys_spawn_thunk.
     int rc = exec_setup_from_spoor(p, exe, exe_size, NULL, 0, 0, &entry, &sp);
     spoor_clunk(exe);
     if (rc != 0) {
@@ -5358,6 +5367,8 @@ static void sys_spawn_full_argv_thunk(void *arg) {
     (void)installed;
 
     u64 entry = 0, sp = 0;
+    // #359/#360: preemptible fresh-thread exec; the c->lock holds are covered
+    // by the spinlock preempt count (spinlock.h). See sys_spawn_thunk.
     int rc = exec_setup_from_spoor(p, exe, exe_size,
                                    argv_data, argv_data_len, argc,
                                    &entry, &sp);
