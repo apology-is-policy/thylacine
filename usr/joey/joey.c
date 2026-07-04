@@ -1933,6 +1933,122 @@ static void session_getty_loop(long cfd, long consctl_fd) {
     }
 }
 
+// Go Stage 4c: per-step wall-clock (CLOCK_MONOTONIC ms) for the device-vs-host
+// build-time comparison. 0 on a clock failure -> the printed delta degrades to
+// a raw now-ms, never blocks the probe.
+static long go4c_now_ms(void) {
+    struct t_timespec ts;
+    if (t_clock_gettime(T_CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static void go4c_timing(const char *step, long t0_ms) {
+    char buf[24];
+    t_putstr("joey: go4c TIMING ");
+    t_putstr(step);
+    t_putstr("=");
+    t_putstr(itoa_dec(go4c_now_ms() - t0_ms, buf, sizeof(buf)));
+    t_putstr("ms\n");
+}
+
+// Go Stage 4c: spawn `name` with an explicit NUL-separated argv blob (argc
+// entries, the login full-argv idiom) on cons fds 0/1/2 -- so the child's
+// stdout/stderr (go's diagnostics + the built binary's marker) reach the console
+// log -- wait BY PID, and return the exit status (>= 0), or -1 on a spawn/wait
+// failure. The children run as joey's identity (PRINCIPAL_SYSTEM during
+// bringup), so they own the SYSTEM-baked /goroot + /go-cache and are
+// resource-exempt (the Go compiler allocates freely). perm_flags/cap_mask 0:
+// the toolchain needs neither -- it reads/writes files (identity-gated) and
+// execs subtools (namespace OEXEC), no capabilities.
+static long go4c_spawn_wait(const char *name, unsigned int name_len,
+                            const char *argv_blob, unsigned int argv_len,
+                            unsigned int argc) {
+    long cfd = t_console_open();
+    unsigned int fds[3] = { 0, 0, 0 };
+    unsigned int fd_count = 0;
+    if (cfd >= 0) {
+        fds[0] = fds[1] = fds[2] = (unsigned int)cfd;
+        fd_count = 3;
+    }
+    struct t_sys_spawn_args req = {
+        .name_va       = (unsigned long)name,
+        .argv_data_va  = (unsigned long)argv_blob,
+        .fd_list_va    = (unsigned long)fds,
+        .name_len      = name_len,
+        .argv_data_len = argv_len,
+        .argc          = argc,
+        .fd_count      = fd_count,
+        .perm_flags    = 0,
+        ._pad_envp     = 0,
+        .cap_mask      = 0,
+    };
+    long pid = t_spawn_full_argv(&req);
+    if (cfd >= 0) (void)t_close(cfd);
+    if (pid <= 0) return -1;
+    int st = -1;
+    long reaped = t_wait_pid_for((int)pid, 0, &st);
+    if (reaped != pid) return -1;
+    return (long)st;
+}
+
+// Spawn + bounded WNOHANG wait with a wall-clock heartbeat (LS-K MONOTONIC).
+// Prints elapsed every hb_sec so a slow REVENANT page-in shows progress;
+// returns the child status, -1 on spawn/reap error, or -2 if the child did not
+// finish within max_sec (so a hung child cannot wedge the boot -- joey reports
+// + proceeds to login, abandoning the orphan). A coarse busy-spin throttles the
+// WNOHANG/clock syscall rate; the child runs on a peer CPU under -smp.
+static long go4c_spawn_wait_hb(const char *name, unsigned int name_len,
+                               const char *argv_blob, unsigned int argv_len,
+                               unsigned int argc, unsigned long max_sec,
+                               unsigned long hb_sec) {
+    long cfd = t_console_open();
+    unsigned int fds[3] = { 0, 0, 0 };
+    unsigned int fd_count = 0;
+    if (cfd >= 0) {
+        fds[0] = fds[1] = fds[2] = (unsigned int)cfd;
+        fd_count = 3;
+    }
+    struct t_sys_spawn_args req = {
+        .name_va       = (unsigned long)name,
+        .argv_data_va  = (unsigned long)argv_blob,
+        .fd_list_va    = (unsigned long)fds,
+        .name_len      = name_len,
+        .argv_data_len = argv_len,
+        .argc          = argc,
+        .fd_count      = fd_count,
+        .perm_flags    = 0,
+        ._pad_envp     = 0,
+        .cap_mask      = 0,
+    };
+    long pid = t_spawn_full_argv(&req);
+    if (cfd >= 0) (void)t_close(cfd);
+    if (pid <= 0) return -1;
+    struct t_timespec t0 = { 0, 0 }, now = { 0, 0 };
+    (void)t_clock_gettime(T_CLOCK_MONOTONIC, &t0);
+    unsigned long next_hb = hb_sec;
+    char hb[24];
+    for (;;) {
+        int st = -1;
+        long r = t_wait_pid_for((int)pid, WAIT_WNOHANG, &st);
+        if (r == pid) return (long)st;
+        if (r < 0) return -1;
+        unsigned long el = 0;
+        if (t_clock_gettime(T_CLOCK_MONOTONIC, &now) == 0 &&
+            now.tv_sec >= t0.tv_sec) {
+            el = (unsigned long)(now.tv_sec - t0.tv_sec);
+        }
+        if (el >= max_sec) return -2;
+        if (el >= next_hb) {
+            t_putstr("joey: Go-4c BISECT compile running ");
+            t_putstr(itoa_dec((long)el, hb, sizeof(hb)));
+            t_putstr("s\n");
+            next_hb = el + hb_sec;
+        }
+        for (volatile unsigned long i = 0; i < 3000000UL; i++) {
+        }
+    }
+}
+
 int main(void) {
     char buf[24];
     t_putstr("joey: hello from /joey (real userspace binary, loaded from ramfs)\n");
@@ -3269,6 +3385,352 @@ int main(void) {
                 t_putstr("joey: Go-4b post-pivot /env re-graft OK\n");
             }
 
+            // === Go Stage 4c: on-device `go build` (the GOOS=thylacine toolchain
+            // runs ON the device) ===
+            // The headline of the on-device-toolchain arc: the cross-built `go`
+            // (baked at /goroot under THYLACINE_BAKE_GOROOT=1) compiles + links a
+            // Go program ON THE DEVICE, then the freshly-built thylacine ELF execs
+            // (via the REVENANT file-backed path) and runs. Gated on /goroot
+            // existing -> the default (non-bake) build skips it (the default boot
+            // stays byte-unchanged + within the 90 s timeout; the bake config
+            // wears BOOT_TIMEOUT=300, since a from-source compile is heavier). The
+            // stdlib deps are a pre-warmed cache HIT (/go-cache), so the device
+            // cold-compiles only the user package + links -- the genuine
+            // compile+link proof, bounded to seconds. joey sets the Go env on its
+            // OWN /env (the child inherits a deep copy via env_clone_into ->
+            // goenvs -> os.Getenv), runs `go version` + `go build` + the built
+            // binary, then UNSETs the vars so they do not leak into the session.
+            {
+                long goprobe = t_open(T_WALK_OPEN_FROM_ROOT, "/goroot/bin/go",
+                                      14, T_OPATH);
+                if (goprobe < 0) {
+                    t_putstr("joey: Go-4c /goroot absent (THYLACINE_BAKE_GOROOT "
+                             "not set) -- skipping\n");
+                } else {
+                    (void)t_close(goprobe);
+                    // Writable scratch on the pool root: /tmp ($WORK + the build
+                    // output). mkdir idempotent (the pool persists across boots).
+                    {
+                        long m = t_walk_create(T_WALK_OPEN_FROM_ROOT, "tmp", 3,
+                                               T_OREAD,
+                                               T_WALK_CREATE_DMDIR | 0777u);
+                        if (m >= 0) (void)t_close(m);
+                    }
+                    // The Go env -> joey's /env. GO111MODULE=off (GOPATH/script
+                    // mode) matches the host cache-warm exactly; GOENV=off avoids
+                    // a per-user env file; GOCACHE=/go-cache is the warm cache
+                    // (read+write); /tmp is the writable $WORK + output dir.
+                    static const struct {
+                        const char *k; unsigned int kl;
+                        const char *v; unsigned int vl;
+                    } go4c_env[] = {
+                        { "GOROOT",      6, "/goroot",     7 },
+                        { "GOCACHE",     7, "/go-cache",   9 },
+                        { "GO111MODULE", 11, "off",        3 },
+                        { "GOPROXY",     7, "off",         3 },
+                        { "GOTELEMETRY", 11, "off",        3 },
+                        { "GOENV",       5, "off",         3 },
+                        { "HOME",        4, "/tmp",        4 },
+                        { "TMPDIR",      6, "/tmp",        4 },
+                        { "GOTMPDIR",    8, "/tmp",        4 },
+                        { "GOPATH",      6, "/tmp/gopath", 11 },
+                    };
+                    const unsigned int n_env =
+                        (unsigned int)(sizeof(go4c_env) / sizeof(go4c_env[0]));
+                    long edir = t_open(T_WALK_OPEN_FROM_ROOT, "/env", 4, T_OPATH);
+                    int env_ok = (edir >= 0);
+                    if (edir >= 0) {
+                        for (unsigned int i = 0; i < n_env; i++) {
+                            long v = t_walk_create(edir, go4c_env[i].k,
+                                                   go4c_env[i].kl, T_OWRITE,
+                                                   0644);
+                            if (v < 0) { env_ok = 0; continue; }
+                            if (t_write(v, go4c_env[i].v, go4c_env[i].vl) !=
+                                (long)go4c_env[i].vl) {
+                                env_ok = 0;
+                            }
+                            (void)t_close(v);
+                        }
+                    }
+                    const char go_path[] = "/goroot/bin/go";
+                    // `go version` -- the toolchain BINARY execs + runs (reads its
+                    // own GOROOT). Instant; the cheapest "the 12 MB go ELF runs
+                    // on Thylacine" milestone.
+                    static const char argv_version[] = "go\0version\0";
+                    long tstep = go4c_now_ms();
+                    long st_v = go4c_spawn_wait(go_path, sizeof(go_path) - 1,
+                                                argv_version,
+                                                sizeof(argv_version) - 1, 2);
+                    go4c_timing("version", tstep);
+                    // DIAGNOSTIC (cache-miss cause): print the device's build
+                    // settings -- a mismatch vs the host cache-warm explains a
+                    // miss. Lightweight (reuses go's Image; no package load).
+                    static const char argv_env[] =
+                        "go\0env\0GOROOT\0GOCACHE\0GOVERSION\0GOEXPERIMENT\0"
+                        "GOARM64\0CGO_ENABLED\0GO111MODULE\0GOFLAGS\0";
+                    (void)go4c_spawn_wait(go_path, sizeof(go_path) - 1,
+                                          argv_env, sizeof(argv_env) - 1, 10);
+                    // === Go-4c COMPILE-vs-LINK bisection (the "not package
+                    // main" hunt) === The FS is ruled out (fsbench COHERENCE +
+                    // ARPATCH pass), so the link's "not package main" is a
+                    // toolchain-EXECUTION bug: either the on-device COMPILE
+                    // emits a PKGDEF lacking the `main` package-name line, or
+                    // the LINK mis-reads a good archive. Isolate: compile a
+                    // minimal no-import `package main` with `go tool compile
+                    // -pack` (no importcfg, no buildID rewrite, no link), then
+                    // scan the archive for the `\nmain\n` line ldpkg requires.
+                    {
+                        long td = t_open(T_WALK_OPEN_FROM_ROOT, "/tmp", 4,
+                                         T_OPATH);
+                        if (td >= 0) {
+                            static const char simple_src[] =
+                                "package main\nfunc main() {}\n";
+                            long sf = t_walk_create(td, "simple.go", 9,
+                                                    T_OWRITE, 0644);
+                            if (sf >= 0) {
+                                (void)t_write(sf, simple_src,
+                                              sizeof(simple_src) - 1);
+                                (void)t_close(sf);
+                            }
+                            (void)t_close(td);
+                        }
+                        static const char argv_compile[] =
+                            "go\0tool\0compile\0-p\0main\0-pack\0-o\0"
+                            "/tmp/x.a\0/tmp/simple.go\0";
+                        // Bounded heartbeat wait: a slow REVENANT page-in shows
+                        // progress; a hang (>900 s) is reported, not a boot
+                        // wedge. -2 = did not finish in the bound.
+                        tstep = go4c_now_ms();
+                        long st_comp = go4c_spawn_wait_hb(
+                            go_path, sizeof(go_path) - 1, argv_compile,
+                            sizeof(argv_compile) - 1, 9, 900, 20);
+                        go4c_timing("bisect-compile", tstep);
+                        if (st_comp == -2) {
+                            t_putstr("joey: Go-4c BISECT compile DID NOT FINISH "
+                                     "in 900s -- likely a HANG (compile-exec "
+                                     "bug) or extreme REVENANT\n");
+                        } else if (st_comp != 0) {
+                            t_putstr("joey: Go-4c BISECT compile exited NONZERO "
+                                     "(see telemetry/errors above)\n");
+                        }
+                        long xf = t_open(T_WALK_OPEN_FROM_ROOT, "/tmp/x.a", 8,
+                                         T_OREAD);
+                        if (xf < 0) {
+                            t_putstr("joey: Go-4c BISECT no /tmp/x.a -- the "
+                                     "on-device COMPILE itself FAILED (see "
+                                     "above) -- compile bug\n");
+                        } else {
+                            static char xbuf[1024];
+                            long xn = t_read(xf, xbuf, sizeof(xbuf) - 1);
+                            (void)t_close(xf);
+                            int have_main = 0;
+                            for (long i = 0; xn > 6 && i + 5 < xn; i++) {
+                                if (xbuf[i] == '\n' && xbuf[i + 1] == 'm' &&
+                                    xbuf[i + 2] == 'a' && xbuf[i + 3] == 'i' &&
+                                    xbuf[i + 4] == 'n' && xbuf[i + 5] == '\n') {
+                                    have_main = 1;
+                                    break;
+                                }
+                            }
+                            long dn = xn; if (dn > 220) dn = 220;
+                            static char dbuf[232];
+                            long j = 0;
+                            for (long i = 0; i < dn; i++) {
+                                char c = xbuf[i];
+                                dbuf[j++] = ((c >= 32 && c < 127) || c == '\n')
+                                                ? c : '.';
+                            }
+                            dbuf[j] = 0;
+                            t_putstr("joey: Go-4c BISECT x.a[0..220] <<<\n");
+                            t_putstr(dbuf);
+                            t_putstr("\n>>> end x.a head\n");
+                            t_putstr(have_main
+                                ? "joey: Go-4c BISECT COMPILE-EMITS-MAIN=yes "
+                                  "-- archive GOOD; 'not package main' is a "
+                                  "LINK-side bug\n"
+                                : "joey: Go-4c BISECT COMPILE-EMITS-MAIN=no "
+                                  "-- on-device COMPILE emits a bad PKGDEF "
+                                  "(compile bug; see head above)\n");
+                        }
+                    }
+                    // `go build` -- the device cold-compiles the user package +
+                    // links (stdlib all a /go-cache HIT). Single-file
+                    // (GO111MODULE=off) so no module resolution walks the pool.
+                    // -v: print each package as it compiles (a flood of stdlib
+                    // names == a cache MISS; near-silence == the warm /go-cache
+                    // is hitting and only the user pkg cold-compiles). DIAGNOSTIC.
+                    // Default parallelism (-p 1 retired: it sidestepped the
+                    // pre-#344 single-concurrent-waiter wait_pid guard, fixed at
+                    // 86f085f). GO4C_RUN_BUILD=0 skips the build+run tail (and
+                    // hardcodes st_b/st_r 0, so the success line below would
+                    // print VACUOUSLY -- flip it off only for bisect-only boots).
+#define GO4C_RUN_BUILD 1
+#if GO4C_RUN_BUILD
+                    // Default parallelism (the -p 1 discriminator is retired):
+                    // the two parallel-only failure shapes it isolated (the
+                    // all-CPU syscall-silent wedge; the "not package main"
+                    // link read) predate the Stratum dirty-buffer + btree-split
+                    // fixes, so parallel-clean is what this gate now asserts.
+                    // -work keeps $WORK for the st_b!=0 forensic below.
+                    static const char argv_build[] =
+                        "go\0build\0-work\0"
+                        "-v\0-o\0/tmp/go4c-bin\0/go4c/hello.go\0";
+                    tstep = go4c_now_ms();
+                    long st_b = go4c_spawn_wait(go_path, sizeof(go_path) - 1,
+                                                argv_build,
+                                                sizeof(argv_build) - 1, 7);
+                    go4c_timing("build", tstep);
+                    if (st_b != 0) {
+                        // #342 forensic: -work preserved $WORK; find the
+                        // go-build* dir under /tmp and re-read the archive the
+                        // link rejected. On-disk \nmain\n present => the write
+                        // was good and the link's read tore; absent => the
+                        // write side (compile emit / buildid rewrite / FS
+                        // write path) corrupted it.
+                        char wpath[64];
+                        unsigned int wlen = 0;
+                        long td = t_open(T_WALK_OPEN_FROM_ROOT, "/tmp", 4,
+                                         T_OREAD);
+                        if (td >= 0) {
+                            static unsigned char db[2048];
+                            long dn;
+                            while (wlen == 0 &&
+                                   (dn = t_readdir(td, db, sizeof(db))) > 0) {
+                                long i = 0;
+                                while (i + 24 <= dn) {
+                                    unsigned int nl =
+                                        (unsigned int)db[i + 22] |
+                                        ((unsigned int)db[i + 23] << 8);
+                                    const char *nm = (const char *)&db[i + 24];
+                                    if (i + 24 + (long)nl > dn) break;
+                                    if (nl >= 8 && nl < 40 &&
+                                        nm[0] == 'g' && nm[1] == 'o' &&
+                                        nm[2] == '-' && nm[3] == 'b' &&
+                                        nm[4] == 'u' && nm[5] == 'i' &&
+                                        nm[6] == 'l' && nm[7] == 'd') {
+                                        const char pre[] = "/tmp/";
+                                        const char suf[] = "/b001/_pkg_.a";
+                                        unsigned int k = 0, j;
+                                        for (j = 0; j < sizeof(pre) - 1; j++)
+                                            wpath[k++] = pre[j];
+                                        for (j = 0; j < nl &&
+                                                    k < sizeof(wpath) - 16;
+                                             j++)
+                                            wpath[k++] = nm[j];
+                                        for (j = 0; j < sizeof(suf) - 1; j++)
+                                            wpath[k++] = suf[j];
+                                        wpath[k] = 0;
+                                        wlen = k;
+                                        break;
+                                    }
+                                    i += 24 + (long)nl;
+                                }
+                            }
+                            (void)t_close(td);
+                        }
+                        if (wlen > 0) {
+                            t_putstr("joey: go4c FORENSIC re-reading ");
+                            t_putstr(wpath);
+                            t_putstr("\n");
+                            long af = t_open(T_WALK_OPEN_FROM_ROOT, wpath,
+                                             wlen, T_OREAD);
+                            if (af < 0) {
+                                t_putstr("joey: go4c FORENSIC open FAILED\n");
+                            } else {
+                                static char ab[1024];
+                                long an = t_read(af, ab, sizeof(ab) - 1);
+                                (void)t_close(af);
+                                int am = 0;
+                                for (long q = 0; an > 6 && q + 5 < an; q++) {
+                                    if (ab[q] == '\n' && ab[q + 1] == 'm' &&
+                                        ab[q + 2] == 'a' && ab[q + 3] == 'i' &&
+                                        ab[q + 4] == 'n' &&
+                                        ab[q + 5] == '\n') {
+                                        am = 1;
+                                        break;
+                                    }
+                                }
+                                for (long q = 0; q < an && q < 220; q++) {
+                                    if (ab[q] < 32 || ab[q] > 126)
+                                        ab[q] = '.';
+                                }
+                                if (an > 220) an = 220;
+                                if (an < 0) an = 0;
+                                ab[an] = 0;
+                                t_putstr(am
+                                    ? "joey: go4c FORENSIC on-disk archive "
+                                      "HAS the main line -- WRITE GOOD, the "
+                                      "link's READ tore\n"
+                                    : "joey: go4c FORENSIC on-disk archive "
+                                      "LACKS the main line -- WRITE-side "
+                                      "corruption\n");
+                                t_putstr("joey: go4c FORENSIC head[0..220] "
+                                         "<<<\n");
+                                t_putstr(ab);
+                                t_putstr("\n>>> end head\n");
+                            }
+                        } else {
+                            t_putstr("joey: go4c FORENSIC no go-build* dir "
+                                     "under /tmp\n");
+                        }
+                    }
+                    // Run the freshly-built thylacine ELF (REVENANT file-backed
+                    // exec). It prints "go-4c on-device build OK: ..." to cons.
+                    const char built[] = "/tmp/go4c-bin";
+                    static const char argv_run[] = "go4c-bin\0";
+                    tstep = go4c_now_ms();
+                    long st_r = go4c_spawn_wait(built, sizeof(built) - 1,
+                                                argv_run, sizeof(argv_run) - 1,
+                                                1);
+                    go4c_timing("run", tstep);
+                    // Warm twin: the cold build above wrote device-computed
+                    // entries into /go-cache, so a repeat build measures the
+                    // warm edit-build loop -- and whether the cache hits at
+                    // all (the host-seeded entries never have; near-instant
+                    // + -v silence means the device-written ones do).
+                    static const char argv_build2[] =
+                        "go\0build\0-v\0-o\0/tmp/go4c-bin2\0/go4c/hello.go\0";
+                    tstep = go4c_now_ms();
+                    long st_b2 = go4c_spawn_wait(go_path, sizeof(go_path) - 1,
+                                                 argv_build2,
+                                                 sizeof(argv_build2) - 1, 6);
+                    go4c_timing("build2-warm", tstep);
+#else
+                    long st_b = 0, st_r = 0, st_b2 = 0;
+#endif
+                    // Unset the Go vars from joey's /env (the children already
+                    // hold their deep copies) so they do not leak into login.
+                    if (edir >= 0) {
+                        for (unsigned int i = 0; i < n_env; i++) {
+                            (void)t_unlink(edir, go4c_env[i].k, go4c_env[i].kl,
+                                           0);
+                        }
+                        (void)t_close(edir);
+                    }
+                    if (!env_ok || st_v != 0 || st_b != 0 || st_b2 != 0 ||
+                        st_r != 0) {
+                        char snb[24];
+                        t_putstr("joey: Go-4c FAILED -- on-device `go build` "
+                                 "regression env_ok=");
+                        t_putstr(itoa_dec(env_ok, snb, sizeof(snb)));
+                        t_putstr(" st_v=");
+                        t_putstr(itoa_dec(st_v, snb, sizeof(snb)));
+                        t_putstr(" st_b=");
+                        t_putstr(itoa_dec(st_b, snb, sizeof(snb)));
+                        t_putstr(" st_b2=");
+                        t_putstr(itoa_dec(st_b2, snb, sizeof(snb)));
+                        t_putstr(" st_r=");
+                        t_putstr(itoa_dec(st_r, snb, sizeof(snb)));
+                        t_putstr("\n");
+                        return 1;
+                    } else {
+                        t_putstr("joey: Go-4c reaped status=0 -- the "
+                                 "GOOS=thylacine toolchain BUILT + RAN a "
+                                 "program ON-DEVICE\n");
+                    }
+                }
+            }
+
             // net-2c-1: mount netd's /net on the pivoted root. netd (warden-
             // spawned, persistent) posted /srv/net (9P-mode) pre-pivot; the
             // immortal boot registry (re-grafted as /srv above) carries it across
@@ -3963,6 +4425,37 @@ int main(void) {
                                  "'cpubench all' = the full 13-mode bench)\n");
                     }
 
+                    // === The in-guest FS throughput bench (the netperf analog for
+                    // storage) ===
+                    // Spawn /bin/fsbench (native, no args -> the short boot probe):
+                    // seqwrite / seqread / reread / create / fsync over the REAL
+                    // stack (SYS_READ/WRITE/FSYNC -> dev9p -> stratumd -> bdev ->
+                    // virtio-blk -> the Stratum pool) -- the in-guest end-to-end FS
+                    // throughput the Stabilization arc measured only host-side. The
+                    // `reread` line is the #343 dcache hit through the real stack.
+                    // Runs post-pivot (the disk-backed pool is mounted), writes its
+                    // scratch to /tmp (mkdir'd on the pool root), cleans up after
+                    // each mode. Gated on a CLEAN RUN (status 0), NOT a perf
+                    // threshold -- data, never an assertion (the modes fail-soft
+                    // internally, e.g. ENOSPC -> a FAIL line, still exit 0).
+                    {
+                        const char fb_name[] = "/bin/fsbench";
+                        long fb_pid = t_spawn(fb_name, sizeof(fb_name) - 1);
+                        if (fb_pid <= 0) {
+                            t_putstr("joey: t_spawn(\"fsbench\") FAILED\n");
+                            return 1;
+                        }
+                        int fb_status = -1;
+                        long fb_reaped = t_wait_pid_for((int)fb_pid, 0, &fb_status);
+                        if (fb_reaped != fb_pid || fb_status != 0) {
+                            t_putstr("joey: fsbench PROBE FAILED\n");
+                            return 1;
+                        }
+                        t_putstr("joey: fsbench PROBE OK (in-guest FS throughput "
+                                 "seqwrite/seqread/reread/create/fsync; "
+                                 "'fsbench all' = the full bench)\n");
+                    }
+
                     // === NET-PERF NP-2: the TLS handshake + crypto micro-bench ===
                     // Spawn /bin/tlsperf (native, no args -> the boot probe): M4
                     // (a full TLS 1.3 handshake over the resident lo, timed, the
@@ -4408,8 +4901,11 @@ int main(void) {
                         t_putstr("joey: fs-mut write FAILED\n");
                         return 1;
                     }
-                    if (t_fsync(cf, 0) != 0) {
-                        t_putstr("joey: fs-mut fsync FAILED\n");
+                    long frc = t_fsync(cf, 0);
+                    if (frc != 0) {
+                        t_putstr("joey: fs-mut fsync FAILED rc=");
+                        t_putstr(itoa_dec(frc, buf, sizeof(buf)));
+                        t_putstr("\n");
                         return 1;
                     }
                     (void)t_close(cf);

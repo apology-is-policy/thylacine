@@ -376,7 +376,7 @@ EOF
     # P4-Ia2: copy any built Rust-side userspace binaries from
     # build/usr-rs/<target>/release/. Same curation discipline.
     # Binary name = crate's [[bin]] name = directory under usr/.
-    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "coreutil-smoke" "fs-mut-smoke" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "pipe-src" "pipe-sink" "legate-prover" "login" "ut" "nora" "loom-smoke" "loom-stress" "loom-bench" "cpubench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" )
+    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "coreutil-smoke" "fs-mut-smoke" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "pipe-src" "pipe-sink" "legate-prover" "login" "ut" "nora" "loom-smoke" "loom-stress" "loom-bench" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" )
     local rs_release="$USR_RS_BUILD/$USR_RS_TARGET/release"
     for bin in "${usr_rs_bins[@]}"; do
         local src="$rs_release/$bin"
@@ -553,6 +553,13 @@ build_go_goroot() {
             -o "$stage/pkg/tool/thylacine_arm64/$tool" "cmd/$tool" ) \
             || { echo "==> Go GOROOT bake: build cmd/$tool FAILED" >&2; return 1; }
     done
+    # The assembler headers ($GOROOT/pkg/include/{textflag,funcdata,asm_*}.h).
+    # Every stdlib .s file `#include`s textflag.h (and many funcdata.h), so the
+    # on-device `asm` step of any assembly-bearing package (internal/cpu,
+    # runtime, internal/bytealg, sync/atomic, crypto, ...) fails without them --
+    # i.e. effectively every real build. Tiny (~40 KB); always stage it.
+    cp -RL "$GOFORK/pkg/include" "$stage/pkg/include" \
+        || { echo "==> Go GOROOT bake: stage pkg/include FAILED" >&2; return 1; }
     # The stdlib SOURCE (go build compiles a program's imports from here on the
     # device). Deref symlinks; drop *_test.go + testdata + src/cmd (the
     # toolchain source -- needed only to self-host [Stage 7], never to build a
@@ -565,6 +572,68 @@ build_go_goroot() {
     [[ -d "$GOFORK/lib" ]] && cp -RL "$GOFORK/lib" "$stage/" 2>/dev/null
     echo "==> Go GOROOT staged: $(du -sh "$stage" | cut -f1) ($(find "$stage" -type f | wc -l | tr -d ' ') files)"
     ledger "Go GOROOT: cross-built toolchain + trimmed stdlib src staged at $stage (Stage 4b; THYLACINE_BAKE_GOROOT=1)"
+
+    # Stage 4c: warm a GOCACHE for the on-device probe's stdlib deps + stage the
+    # probe source. The correct production design (not a timeout hack): real Go
+    # delivers a snappy edit->build->run loop via the build cache -- a from-cold
+    # stdlib compile is always slow, even on Linux. A blank-import SEED program
+    # (importing exactly the probe's stdlib set) compiles those packages INTO the
+    # cache without ever caching a "real main", so the on-device `go build` of the
+    # probe cold-compiles only the user package + links (a GENUINE device
+    # compile+link), with every stdlib dep a cache HIT. Portability is exact: Go's
+    # build-cache action IDs key on (target arm64/thylacine + tool version + source
+    # + flags), and the tool IDs are VERSION-ONLY (`compile version go1.25.3`, no
+    # per-binary hash -- verified), so a cache warmed by the darwin-cross compiler
+    # is hit byte-for-byte by the thylacine-native compiler on-device. The cache is
+    # content-keyed + relocatable. GO111MODULE=off (GOPATH/script mode) matches the
+    # device build exactly + avoids any module resolution walking the pool over 9P.
+    local gocache="$BUILD_DIR/go/gocache"
+    local go4c="$BUILD_DIR/go/go4c"
+    local seed="$BUILD_DIR/go/seed"
+    rm -rf "$gocache" "$go4c" "$seed"
+    mkdir -p "$gocache" "$go4c" "$seed"
+    cat > "$seed/seed.go" <<'GOSEEDEOF'
+package main
+
+import (
+	_ "fmt"
+	_ "os"
+	_ "sort"
+	_ "strings"
+)
+
+func main() {}
+GOSEEDEOF
+    # The probe source (baked; never built on the host, so its main stays COLD on
+    # the device -> the device's compile+link actually run). Imports == the seed's
+    # set, so all stdlib deps are warm.
+    cat > "$go4c/hello.go" <<'GO4CEOF'
+package main
+
+import (
+	"fmt"
+	"os"
+	"sort"
+	"strings"
+)
+
+func main() {
+	xs := []int{5, 3, 8, 1, 9, 2, 7, 4, 6, 0}
+	sort.Ints(xs)
+	parts := make([]string, len(xs))
+	for i, v := range xs {
+		parts[i] = fmt.Sprintf("%d", v)
+	}
+	fmt.Fprintf(os.Stdout, "go-4c on-device build OK: %s\n", strings.Join(parts, ","))
+}
+GO4CEOF
+    ( cd "$seed" && GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 GO111MODULE=off \
+        GOCACHE="$gocache" GOPATH="$BUILD_DIR/go/gopath" \
+        GOPROXY=off GOTELEMETRY=off GOENV=off \
+        "$go_bin" build -o /dev/null "$seed/seed.go" ) \
+        || { echo "==> Go 4c: seed cache warm FAILED" >&2; return 1; }
+    echo "==> Go 4c: GOCACHE warmed ($(du -sh "$gocache" | cut -f1)); probe source staged at $go4c"
+    ledger "Go 4c: seed-warmed GOCACHE + probe source staged (Stage 4c; baked at /go-cache + /go4c)"
 }
 
 # A-5c-c: emit the host-baked system recovery phrase as a C header BEFORE the
@@ -1419,12 +1488,23 @@ build_stratum_pool_fixture() {
     # (PRINCIPAL_SYSTEM) owns the whole baked tree once the OS enforces dev9p
     # rwx (A-3b) -- otherwise joey-as-other cannot create in the root -> brick.
     local bake_owner=4294967294
-    # Stage 4b: a baked Go GOROOT (~150 MB tree) needs a bigger pool; the
-    # default bootstrap pool stays 64 MiB. Keyed on the staged GOROOT existing
-    # (build_go_goroot ran first under THYLACINE_BAKE_GOROOT=1).
+    # Stage 4b/4c: a baked Go GOROOT (~109 MB tree) + an on-device `go build`
+    # needs a real dev pool. The default bootstrap pool stays 64 MiB; the GOROOT
+    # bake grows to 1 GiB so a from-cold build (which compiles all of stdlib into
+    # $WORK and writes a native /go-cache) does not ENOSPC -- the 256 MiB pool
+    # filled mid-build, truncating the last _pkg_.a -> the linker's `not package
+    # main`. Keyed on the staged GOROOT existing (build_go_goroot ran first under
+    # THYLACINE_BAKE_GOROOT=1).
     local pool_size="64M"
     if [[ "${THYLACINE_BAKE_GOROOT:-0}" == "1" && -d "$BUILD_DIR/go/goroot" ]]; then
-        pool_size="256M"
+        # Sized against MEASURED consumption (2026-07-03, task #39): the bake
+        # itself uses ~575M for ~170M logical (~3.3x FS amplification) and the
+        # boot's go4c build + suite burned the ~960M that remained free in a
+        # 1536M pool (~6x on fsync-less small-write churn -- CoW garbage only a
+        # commit sweeps). 2560M = bake + boot-at-6x + margin. The REAL fix is
+        # commit-on-allocation-pressure (task #39, the P1.2 write-amp lever);
+        # this is capacity so the gate boot isn't hostage to it.
+        pool_size="2560M"
     fi
     echo "==> generating stratum pool fixture ($pool_img, system.key, size=$pool_size)"
     "$mkfs_bin" "$pool_img" --size "$pool_size" --keyfile "$keyfile" \
@@ -1581,6 +1661,21 @@ populate_stratum_pool() {
         "$stratum_fs_bin" -s "$sock_path" sync \
             || { echo "==> populate pool: sync after GOROOT FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
         echo "==> populate pool: Go GOROOT baked at /goroot"
+        # Stage 4c: the seed-warmed GOCACHE (-> /go-cache, read+write by the
+        # on-device build) + the probe source (-> /go4c). Top-level paths so the
+        # `put`-created parents do not collide with the /var corvus bake below.
+        local gocache_stage="$BUILD_DIR/go/gocache"
+        local go4c_stage="$BUILD_DIR/go/go4c"
+        if [[ -d "$gocache_stage" && -d "$go4c_stage" ]]; then
+            echo "==> populate pool: baking Go warm cache ($(du -sh "$gocache_stage" | cut -f1)) -> /go-cache + probe source -> /go4c"
+            "$stratum_fs_bin" -s "$sock_path" put "$gocache_stage" /go-cache \
+                || { echo "==> populate pool: put /go-cache FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+            "$stratum_fs_bin" -s "$sock_path" put "$go4c_stage" /go4c \
+                || { echo "==> populate pool: put /go4c FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+            "$stratum_fs_bin" -s "$sock_path" sync \
+                || { echo "==> populate pool: sync after Go cache FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+            echo "==> populate pool: Go warm cache + probe source baked"
+        fi
     fi
 
     # --- A-5c-b: host-bake the system identity into /var/lib/corvus ---
