@@ -567,6 +567,20 @@ build_go_goroot() {
     rsync -aL --exclude='*_test.go' --exclude='testdata/' --exclude='/cmd/' \
         "$GOFORK/src/" "$stage/src/" \
         || { echo "==> Go GOROOT bake: rsync src FAILED" >&2; return 1; }
+    # cmd/gofmt + its cmd-internal/vendor deps (~760 KB) -- the #34 REAL
+    # multi-package on-device build target (91 pkgs), and a useful user tool.
+    # The blanket /cmd/ exclusion above stands; these four subtrees are the
+    # exact `go list -deps cmd/gofmt` closure under cmd/. Per-dir rsync +
+    # mkdir (macOS openrsync does not honor the -R "/./" relative anchor).
+    local gofmt_sub
+    for gofmt_sub in cmd/gofmt cmd/internal/telemetry \
+                     cmd/vendor/golang.org/x/telemetry \
+                     cmd/vendor/golang.org/x/sync; do
+        mkdir -p "$stage/src/$(dirname "$gofmt_sub")"
+        rsync -aL --exclude='*_test.go' --exclude='testdata/' \
+            "$GOFORK/src/$gofmt_sub" "$stage/src/$(dirname "$gofmt_sub")/" \
+            || { echo "==> Go GOROOT bake: rsync $gofmt_sub FAILED" >&2; return 1; }
+    done
     # GOROOT metadata the toolchain reads (version string, go.env, timezone db).
     cp "$GOFORK/VERSION" "$GOFORK/go.env" "$stage/" 2>/dev/null || true
     [[ -d "$GOFORK/lib" ]] && cp -RL "$GOFORK/lib" "$stage/" 2>/dev/null
