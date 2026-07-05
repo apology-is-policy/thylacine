@@ -1077,8 +1077,14 @@ on_cpu handoff, stealing, and `Place`. TLC-green (2-CPU + 3-CPU cfgs).
 | Spec action | Code site | Invariant pinned |
 |---|---|---|
 | `StartSwitch(c)` / `FinishSwitch(c)` | `kernel/sched.c::sched` + `arch/arm64/context.S::cpu_switch_context` — the two-step switch with the `prev_to_clear_on_cpu` handoff | I-21-adjacent migration safety: a ctx/kstack is never written by two CPUs concurrently |
+| `StartSwitch(c)` with `kind = "yield"` | `kernel/sched.c::sched` with prev RUNNING — driven by tick preemption AND (since #33) voluntarily by `sched_yield_hint` / `SYS_YIELD` | the yield requeue is the already-modeled transition; no new protocol step |
 | `StealCand(c)` / `RemoveFromRunq` | `kernel/sched.c::try_steal` (pinned idles excluded — `cpu_pinned`) | steal never moves a pinned idle; no double-enqueue |
 | `Place(t)` | `kernel/sched.c::ready` / `ready_on` (+ the RW-2 2A-F1 vd_t clamp) | a woken thread lands in exactly one runq |
+
+`SYS_YIELD` (#33) adds NO spec change: `sched_yield_hint`'s dispatch path IS
+`StartSwitch(kind="yield")`, and its fast path (skip `sched()` when the only
+local tree occupant is the pinned idle — the TI-4c `cpu_has_surplus_for_kick`
+peek) is a model *stutter* (no state change), trivially within the envelope.
 
 Pre-commit gate: `sched_alpha.cfg` + `sched_alpha_3cpu.cfg` clean on any
 change to the on_cpu protocol, the pinned-idle dispatch, or `try_steal`.

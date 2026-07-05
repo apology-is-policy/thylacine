@@ -206,6 +206,7 @@ pub const T_SYS_LSEEK: u64            = 51;
 // (the POSIX pread/pwrite contract).
 pub const T_SYS_PREAD: u64            = 85;
 pub const T_SYS_PWRITE: u64           = 86;
+pub const T_SYS_YIELD: u64            = 87;
 // FS-mutation foundation (IDENTITY-DESIGN.md section 9.2): create-then-open,
 // durability barrier, directory enumeration.
 pub const T_SYS_WALK_CREATE: u64      = 54;
@@ -2202,6 +2203,23 @@ pub unsafe fn t_pwrite(spoor_fd: i64, buf: *const u8, len: usize, off: i64) -> i
         in("x8") T_SYS_PWRITE,
         options(nostack)
     );
+    x0
+}
+
+// t_yield — voluntary yield (#33). If another thread is queued runnable on
+// the calling CPU, the caller is requeued behind it and it runs; otherwise
+// returns immediately. A hint (POSIX sched_yield shape); always returns 0.
+#[inline(always)]
+pub fn t_yield() -> i64 {
+    let mut x0: i64;
+    unsafe {
+        asm!(
+            "svc #0",
+            lateout("x0") x0,
+            in("x8") T_SYS_YIELD,
+            options(nostack)
+        );
+    }
     x0
 }
 

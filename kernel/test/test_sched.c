@@ -669,6 +669,69 @@ void test_sched_cpu_surplus_for_kick(void) {
     thread_free(idle_band);
 }
 
+// scheduler.yield_fast_path_no_work  (#33)
+//   With no queued non-idle work on this CPU, sched_yield_hint returns false
+//   WITHOUT dispatching -- the fast path that makes the yield syscall
+//   affordable from spin loops (the pinned in-tree idle is NOT competition; an
+//   unconditional sched() would bounce through it and back). A queued
+//   band-IDLE thread is likewise not competition -- the predicate is
+//   cpu_has_surplus_for_kick, and band IDLE holds the pinned idle + at most
+//   best-effort work that the tick path serves at slice granularity.
+void test_sched_yield_fast_path_no_work(void) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u,
+        "run tree must be empty at test entry");
+
+    TEST_EXPECT_EQ(sched_yield_hint(), false,
+        "yield with an empty local queue takes the fast path (no dispatch)");
+    TEST_EXPECT_EQ(current_thread(), kthread(),
+        "fast-path yield returns on the calling thread");
+
+    // A band-IDLE occupant is not competition either. Masked across the
+    // place->peek->remove triplet so a slice-expiry preempt cannot dispatch
+    // the queued thread mid-window (the RW-2 R2-F1 pattern from
+    // ready_on_clamps_stale_vd below; the peek itself never sched()s here).
+    struct Thread *idle_band = thread_create(kproc(), sched_test_thread_a);
+    TEST_ASSERT(idle_band != NULL, "thread_create failed");
+    idle_band->band = SCHED_BAND_IDLE;
+    irq_state_t s = spin_lock_irqsave(NULL);
+    ready(idle_band);
+    bool dispatched = sched_yield_hint();
+    sched_remove_if_runnable(idle_band);
+    spin_unlock_irqrestore(NULL, s);
+    TEST_EXPECT_EQ(dispatched, false,
+        "a queued band-IDLE thread does not trigger a yield dispatch");
+    thread_free(idle_band);
+}
+
+// scheduler.yield_dispatches_queued_work  (#33)
+//   The dispatch half: a queued NORMAL thread makes sched_yield_hint dispatch
+//   -- the caller is requeued at the back of its band and the queued work
+//   runs (the sched_alpha.tla StartSwitch kind="yield" transition, the same
+//   one tick preemption drives). The rotation is the dispatch_smoke shape:
+//   the queued thread runs (counter increments), yields away, the caller
+//   resumes. Pre-#33 nothing but preemption drove this transition from EL0.
+void test_sched_yield_dispatches_queued_work(void) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u,
+        "run tree must be empty at test entry");
+    g_test_sched_state[0] = 0;
+
+    struct Thread *ta = thread_create(kproc(), sched_test_thread_a);
+    TEST_ASSERT(ta != NULL, "thread_create failed");
+    ready(ta);
+
+    TEST_EXPECT_EQ(sched_yield_hint(), true,
+        "yield with queued NORMAL work dispatches (returns true)");
+    TEST_EXPECT_EQ(g_test_sched_state[0], 1u,
+        "the queued thread ran across the yield");
+    TEST_EXPECT_EQ(current_thread(), kthread(),
+        "the yielding thread resumed after the rotation");
+
+    // ta is RUNNABLE in the tree (suspended inside its own sched()).
+    thread_free(ta);
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u,
+        "tree empty after thread_free");
+}
+
 // scheduler.ready_on_clamps_stale_vd  (RW-2 2A-F1)
 //   A thread carries its vd_t from its last yield on whatever CPU it last ran
 //   on; each CPU's vd_counter is an independent clock. A cross-CPU wake must

@@ -28,6 +28,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <sched.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -116,6 +117,19 @@ int main(void) {
         if (emit("pouch-hello: pread/pwrite seam ok (#37: cursor untouched, wired to 85/86)\n") != 0)
             return 1;
     }
+
+    // #33: sched_yield rides SYS_YIELD (musl's seam number went 0xFFFF -> 87).
+    // Pre-#33 it short-circuited to ENOSYS -> musl returned -1, so rc == 0 IS
+    // the wiring proof (the kernel handler always returns 0).
+    errno = 0;
+    if (sched_yield() != 0) {
+        (void)emit(errno == ENOSYS
+                   ? "pouch-hello: FAIL sched_yield -> ENOSYS (seam not wired)\n"
+                   : "pouch-hello: FAIL sched_yield rc\n");
+        return 1;
+    }
+    if (emit("pouch-hello: sched_yield ok (#33: wired to 87)\n") != 0)
+        return 1;
 
     if (emit("pouch-hello: exit 0\n") != 0)
         return 1;

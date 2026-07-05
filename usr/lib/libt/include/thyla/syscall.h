@@ -108,6 +108,7 @@ enum {
     T_SYS_CLOCK_SETTIME     = 79,  // net-7a: step CLOCK_REALTIME (CAP_HOSTOWNER)
     T_SYS_PREAD             = 85,  // #37: positioned read (cursor untouched)
     T_SYS_PWRITE            = 86,  // #37: positioned write (cursor untouched)
+    T_SYS_YIELD             = 87,  // #33: voluntary yield (hint; always 0)
 };
 
 // SYS_CLOCK_*TIME clock ids (match Linux clockid_t) + the 16-byte timespec.
@@ -766,6 +767,22 @@ static inline long t_pwrite(long fd, const void *buf, size_t len, long off) {
         "svc #0"
         : "+r"(x0)
         : "r"(x1), "r"(x2), "r"(x3), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_yield — voluntary yield (#33). If another thread is queued runnable on
+// the calling CPU, the caller is requeued behind it and it runs; otherwise
+// returns immediately. A hint (POSIX sched_yield shape); always returns 0.
+__attribute__((always_inline))
+static inline long t_yield(void) {
+    register long x0 __asm__("x0");
+    register long x8 __asm__("x8") = T_SYS_YIELD;
+    __asm__ volatile (
+        "svc #0"
+        : "=r"(x0)
+        : "r"(x8)
         : "memory", "cc"
     );
     return x0;

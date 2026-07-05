@@ -2285,6 +2285,17 @@ s64 sys_getgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
     return (s64)(u64)p->primary_gid;
 }
 
+// SYS_YIELD (#33): the thin syscall front for sched_yield_hint (sched.c) --
+// the whole contract lives there. Always 0 (POSIX sched_yield(2)); whether a
+// dispatch happened is deliberately not surfaced (a hint has no observable
+// success/failure, and callers loop regardless). Static: the kernel tests
+// exercise sched_yield_hint directly; the in-guest consumers prove dispatch.
+static s64 sys_yield_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+    (void)a0; (void)a1; (void)a2; (void)a3;
+    (void)sched_yield_hint();
+    return 0;
+}
+
 s64 sys_clock_gettime_handler(u64 clk_id, u64 ts_va, u64 a2, u64 a3) {
     (void)a2; (void)a3;
     // Validate the clock id FIRST -- a bad id never touches the buffer.
@@ -6511,6 +6522,11 @@ void syscall_dispatch(struct exception_context *ctx) {
                                                ctx->regs[1],
                                                ctx->regs[2],
                                                ctx->regs[3]);
+        return;
+
+    case SYS_YIELD:
+        ctx->regs[0] = (u64)sys_yield_handler(ctx->regs[0], ctx->regs[1],
+                                              ctx->regs[2], ctx->regs[3]);
         return;
 
     case SYS_CLOSE:

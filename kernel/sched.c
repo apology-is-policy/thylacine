@@ -2158,6 +2158,45 @@ bool sched_cpu_has_surplus_for_test(unsigned cpu) {
 }
 #endif /* KERNEL_TESTS */
 
+// SYS_YIELD (#33): voluntary yield. sched() with prev RUNNING already IS the
+// yield primitive (requeue at the back of the band + dispatch -- the
+// sched_alpha.tla StartSwitch kind="yield" transition tick preemption drives);
+// this wrapper adds only the fast path that makes a yield SYSCALL affordable:
+// the per-CPU pinned idle is ALWAYS in-tree while a non-idle thread runs
+// (sched_alpha.tla IdleAvailable), so an unconditional sched() on an
+// otherwise-empty queue would pick the idle, switch to it, and have the idle
+// immediately switch back -- two context switches for nothing, on a call the
+// Go runtime issues from spin loops (36.8M osyield calls per go build).
+//
+// The peek reuses cpu_has_surplus_for_kick (TI-4c): non-idle band heads only,
+// relaxed loads, never a Thread deref. Band IDLE is deliberately excluded --
+// it holds the pinned idle (+ at most best-effort work, which the tick path
+// serves at slice granularity); yielding to it is never useful. In the model
+// the skipped call is a stutter (no state change), trivially safe.
+//
+// Advisory by design, racy in both directions, both benign:
+//   - stale non-NULL (the queued thread was just picked/stolen): sched()
+//     re-picks under cs->lock and may dispatch the idle for one bounce --
+//     wasteful once, correct.
+//   - stale NULL (a thread is being placed concurrently): this yield skips;
+//     the placer's own wake-preemption (ready_on's need_resched_set) serves
+//     the placed thread at the next preempt point, and yield callers loop.
+//   - a preempt between this_cpu_sched() and the loads can migrate the caller,
+//     making the peek read a FOREIGN CPU's heads. This is the #104/#107 CPU-
+//     identity TOCTOU shape, but unlike sched() no lock is taken and nothing
+//     is mutated on the peeked slot -- the result is just an advisory answer
+//     for a CPU the caller was on a moment ago. sched() itself re-derives the
+//     CPU under its own entry mask.
+//
+// Returns whether it dispatched (called sched()) -- consumed by the kernel
+// tests; the syscall handler discards it and returns 0 (POSIX sched_yield).
+bool sched_yield_hint(void) {
+    struct CpuSched *cs = this_cpu_sched();
+    if (!cpu_has_surplus_for_kick(cs)) return false;
+    sched();
+    return true;
+}
+
 void sched_tick(void) {
     // P2-Cd: per-CPU need_resched + this CPU's sched state.
     unsigned cpu = smp_cpu_idx_self();

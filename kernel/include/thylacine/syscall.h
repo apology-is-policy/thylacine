@@ -1548,6 +1548,20 @@ enum {
     //   exists (Thylacine has no kernel append mode; ports emulate
     //   O_APPEND above this layer).
     SYS_PWRITE = 86,   // arg: fd (x0), buf (x1), len (x2), off (x3)
+
+    // SYS_YIELD() -> 0 (#33)
+    //   Voluntary yield: if another non-idle thread is queued runnable on the
+    //   calling CPU, requeue the caller at the back of its band's rotation and
+    //   dispatch the queued work (the sched_alpha.tla StartSwitch kind="yield"
+    //   transition -- the same one tick preemption drives). If the only local
+    //   tree occupant is the CPU's pinned idle, return WITHOUT switching (a
+    //   dispatch would bounce through the idle thread and back: two context
+    //   switches for nothing). The peek is advisory (lock-free head loads);
+    //   yield is a hint, never a fairness guarantee -- the POSIX
+    //   sched_yield(2) shape. No arguments; always returns 0. Consumers: the
+    //   Go runtime's osyield (spin-loop backoff), musl sched_yield via the
+    //   pouch seam, libt/libthyla-rs t_yield.
+    SYS_YIELD = 87,    // no args
 };
 
 // SYS_CLOCK_GETTIME clock ids. Values match Linux clockid_t so a future pouch

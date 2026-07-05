@@ -365,6 +365,15 @@ void sched_wc_stats(struct sched_wc_stats *out);
 // sched_runnable_count(), which follows the chains and is for the cold callers.
 bool sched_has_runnable_work(void);
 
+// SYS_YIELD (#33): voluntary yield. If another non-idle thread is queued
+// runnable on the calling CPU, requeue the caller (sched() with prev RUNNING
+// -- the modeled StartSwitch kind="yield") and dispatch it; if the only local
+// tree occupant is the pinned idle, return false WITHOUT switching (skipping
+// the pointless idle bounce). Lock-free advisory peek (the TI-4c
+// cpu_has_surplus_for_kick predicate); a hint, never a fairness guarantee.
+// Returns whether it dispatched.
+bool sched_yield_hint(void);
+
 // Internal — called by thread_free if t->state == THREAD_RUNNABLE so the
 // run tree doesn't carry a dangling pointer. Idempotent: safe to call
 // on an already-not-in-tree thread.

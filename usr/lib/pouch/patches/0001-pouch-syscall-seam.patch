@@ -493,7 +493,7 @@ Binding design: docs/POUCH-DESIGN.md sections 5 + 5.1. Invariants P-1, P-3.
 +#define __NR_sched_getparam 0xFFFF
 +#define __NR_sched_setaffinity 0xFFFF
 +#define __NR_sched_getaffinity 0xFFFF
-+#define __NR_sched_yield 0xFFFF
++#define __NR_sched_yield 87       /* #33: SYS_YIELD (voluntary yield hint) */
 +#define __NR_sched_get_priority_max 0xFFFF
 +#define __NR_sched_get_priority_min 0xFFFF
 +#define __NR_sched_rr_get_interval 0xFFFF

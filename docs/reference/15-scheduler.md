@@ -604,6 +604,67 @@ This is structurally the Linux `NO_HZ_IDLE` model. Modeled by `specs/sched_rebal
 
 ---
 
+## Voluntary yield — `SYS_YIELD` / `sched_yield_hint` (#33)
+
+`SYS_YIELD` (87) is the EL0 entry to the yield transition `sched()` has always
+implemented (prev `RUNNING` → requeue at the back of the band + dispatch — the
+`sched_alpha.tla` `StartSwitch kind="yield"` action, the same one tick
+preemption drives). Until #33 nothing but preemption drove it from EL0; the Go
+runtime's `osyield` was a `torpor_wait` mismatch-return that made a syscall
+round-trip without ever giving up the CPU, degrading the spinbit-mutex passive
+tier and every runtime spin loop (36.8M calls per `go build`).
+
+`sched_yield_hint()` (`kernel/sched.c`) is the whole mechanism:
+
+```c
+bool sched_yield_hint(void) {
+    struct CpuSched *cs = this_cpu_sched();
+    if (!cpu_has_surplus_for_kick(cs)) return false;
+    sched();
+    return true;
+}
+```
+
+- **The fast path is the point.** The per-CPU pinned idle is ALWAYS in-tree
+  while a non-idle thread runs (`IdleAvailable`), so an unconditional `sched()`
+  on an otherwise-empty queue would pick the idle, switch to it, and have the
+  idle immediately switch back — two context switches per call, on a syscall
+  issued from spin loops. The peek reuses the TI-4c `cpu_has_surplus_for_kick`
+  predicate verbatim: INTERACTIVE + NORMAL head pointers, relaxed loads, never
+  a `Thread` deref. Band IDLE is deliberately excluded — it holds only the
+  pinned idle (+ at most best-effort work the tick path serves at slice
+  granularity); yielding to it is never useful.
+- **Advisory, racy in both directions, both benign**: a stale non-NULL costs
+  one wasteful-but-correct idle bounce inside `sched()` (which re-picks under
+  `cs->lock`); a stale NULL skips one yield (the placer's wake-preemption
+  `need_resched_set` serves the placed thread at the next preempt point, and
+  yield callers loop). A preempt between `this_cpu_sched()` and the loads can
+  migrate the caller so the peek reads a foreign CPU's heads — the #104/#107
+  CPU-identity TOCTOU shape, but unlike `sched()` no lock is taken and nothing
+  is mutated on the peeked slot; `sched()` re-derives the CPU under its own
+  entry mask. In the model the skipped call is a stutter (no state change).
+- The syscall handler (`sys_yield_handler`, `kernel/syscall.c`) discards the
+  bool and returns 0 always — the POSIX `sched_yield(2)` shape; a hint has no
+  observable success/failure.
+- `need_resched` is deliberately untouched on the fast path (pure read-only):
+  a pending cross-CPU placement kick implies a non-empty band, so the peek
+  routes it into `sched()` (which clears the flag at entry); an empty-bands
+  slice-expiry flag keeps its normal IRQ-return service.
+
+Consumers: the Go runtime `osyield` (`runtime·osyield` in
+`sys_thylacine_arm64.s` — the linux `SYS_sched_yield` shape), musl
+`sched_yield`/`thrd_yield` via the pouch seam (`__NR_sched_yield` 0xFFFF → 87;
+proven boot-fatally by `pouch-hello`'s `sched_yield ok` probe), `t_yield` in
+libt + libthyla-rs.
+
+Regressions: `scheduler.yield_fast_path_no_work` (empty queue → no dispatch;
+a queued band-IDLE thread is not competition) +
+`scheduler.yield_dispatches_queued_work` (a queued NORMAL thread runs across
+the yield and the caller resumes — the dispatch_smoke rotation driven through
+`sched_yield_hint`).
+
+---
+
 ## Build + verify
 
 ```bash
