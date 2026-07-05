@@ -194,10 +194,11 @@ because CF-1's Bε buffer changes what a commit contains.
   downgrade (a v33-written pool mis-parses under v32), pre-release, no
   converter; the field has zero deployed pools and Thylacine's pool.img
   is a rebuildable build fixture (a PRESERVE'd pre-bump pool re-bakes
-  once). Per standing policy this bump is ESCALATED to the user for
-  explicit acknowledgment before chunk 7 lands; the format-independent
-  CF-1 chunks (9b engine-retire + the §5.1.1 envelope items) do not
-  wait on it.
+  once). Per standing policy this bump was ESCALATED — and the user
+  granted a standing approval (2026-07-05): **"Any format change
+  automatically approved in this arc."** So STM_UB_VERSION 32 → 33 (and
+  any further format change CF-1..CF-5 needs) proceeds without a
+  per-change round-trip; the grant is scoped to THIS arc only.
 - No change to the kernel 9P client's public API (it is already
   concurrent).
 - No weakening of PARALLEL-3 / commit exclusion: compound ops (commit,
