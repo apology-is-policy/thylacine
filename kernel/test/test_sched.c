@@ -717,9 +717,22 @@ void test_sched_yield_dispatches_queued_work(void) {
 
     struct Thread *ta = thread_create(kproc(), sched_test_thread_a);
     TEST_ASSERT(ta != NULL, "thread_create failed");
-    ready(ta);
 
-    TEST_EXPECT_EQ(sched_yield_hint(), true,
+    // Mask across the ready -> yield window (the sibling test's RW-2 R2-F1
+    // pattern; the #33-audit F3): a slice-expiry preempt landing between
+    // ready(ta) and the hint would dispatch ta EARLY, and the hint's own
+    // sched() would then re-dispatch it PAST its lone sched() call into the
+    // trampoline's wfe halt -- the asserts still pass (ta increments exactly
+    // once), but through an unintended ~2-slice detour. sched() runs masked
+    // anyway (preempt_check_irq calls it masked), so the dispatch inside the
+    // mask is the ordinary shape; ta itself runs unmasked (a fresh thread's
+    // trampoline unmasks).
+    irq_state_t s = spin_lock_irqsave(NULL);
+    ready(ta);
+    bool dispatched = sched_yield_hint();
+    spin_unlock_irqrestore(NULL, s);
+
+    TEST_EXPECT_EQ(dispatched, true,
         "yield with queued NORMAL work dispatches (returns true)");
     TEST_EXPECT_EQ(g_test_sched_state[0], 1u,
         "the queued thread ran across the yield");

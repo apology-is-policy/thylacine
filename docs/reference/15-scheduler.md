@@ -594,6 +594,34 @@ This is structurally the Linux `NO_HZ_IDLE` model. Modeled by `specs/sched_rebal
 
 `thread_may_run_on(const struct Thread *t, unsigned cpu)` is the single future plug point for a per-thread affinity mask. v1.0 has no mask, so it is **unconditionally `true`** — a trivially-true gate today that becomes load-bearing the day a `SYS_SCHED_SETATTR` affinity mask lands (then `return (t->affinity_mask >> cpu) & 1u;`). It is consulted at the two CPU-binding decisions so the work-conserving machinery never binds a thread to a forbidden CPU: `select_target_cpu` (placement — the idle-target + capacity-target returns) and `try_steal`'s victim pick (steal — beside the `cpu_pinned` skip). Inert today (always-true → the gates collapse to their pre-change behavior); the future mask plugs into THIS one function, so the redesign does not foreclose affinity. `cpu_pinned` (the idle/kthread hard pin) stays a separate, stronger predicate. The kick is band-aware by construction (it scans the real-work bands; `try_steal` then pulls highest-band-first).
 
+### The #363 park-guard — never park over your own queue (the #33-audit F1)
+
+`sched()` picks **before** it requeues: `pick_next` runs while prev (RUNNING)
+is not in the tree; prev is inserted only afterwards. So a slice-expiry
+preempt (or a yield) of a thread with an otherwise-empty local queue always
+dispatches the pinned in-tree idle, and the preempted thread lands in
+`run_tree[NORMAL]` right after the pick. The dispatched idle does not restart
+its loop — it resumes inside `sched_idle_park` past its own `sched()` call,
+headed for the one-shot arm + WFI, and pre-#363 there was **no re-check of
+the local queue** on that resume path: the CPU parked up to
+`TICKLESS_IDLE_BACKSTOP_NS` (4 ms) over its own just-requeued RUNNABLE
+thread (no IPI exists for a local self-requeue; the one-shot deasserted the
+periodic tick). Cost: up to ~4 ms per 6 ms slice for a solo compute-bound
+thread. The TI-4d multi-ms `max_starved` records (e.g. the 103 ms
+full-backstop park) were this — previously misattributed to peer backlog
+("even when that work's home CPU handles it promptly" — false: the home CPU
+*was* the parked CPU), and the `scale` bench is structurally blind to it
+(a self-ratio; the solo baseline suffers the identical loss).
+
+The fix is the #33 predicate applied at the park commit: after `sched()`
+returns in `sched_idle_park`, loop `while (cpu_has_surplus_for_kick(cs))
+sched();` before arming the one-shot — two relaxed head loads; the park is
+deferred, never lost (a peer's concurrent insert still rides the
+`idle_in_wfi` register-then-observe IPI, I-9; the deferred park is a stutter
+on `sched_tickless.tla`'s park action, so no spec change). Witness: the
+boot-wc `tickless starved` counters (pre-fix ~9.6 s starved-park time per
+boot; see the commit for the post-fix numbers).
+
 ### The 4 ms re-poll backstop (TI-4e) + the wake-latency finding
 
 `TICKLESS_IDLE_BACKSTOP_NS = 4 ms` (was 100 ms at TI-3) → an idle CPU re-polls at ~250 Hz. **Why:** TI-4e root-caused the residual tickless boot slowdown to wake **latency**, NOT a guest bug. The wake path is IPI-prompt — measured **99.85% of tickless parks woken by an IPI** (`sched_wc_stats.tickless_ipi_wakes` vs `tickless_oneshot_wakes`; `wake-ipi=`/`wake-oneshot=` in the `boot-wc:` banner), not stranding on the backstop. But **resuming a DEEP-parked vCPU via SGI costs ~0.85 ms under HVF vs ~7 µs when hot** — an emulation artifact (HVF GICv2-MMIO vmexits + the host vCPU-thread resume; #299/#890), not a scheduler defect: on bare metal an SGI to a WFI'd core is hardware-fast (~ns), so deep-park there already gives fast boot + ~0% idle. The 4 ms re-poll keeps the dev-loop vCPUs warm enough that IPI resumes drop to ~0.09 ms → HVF boot ~7 s (≈ tickful) vs ~17–35 s at 100 ms, at ~5% HVF idle (vs 0.3%). The kick still earns its place: it is the fast (~1 ms) parallel-surplus catch, validated by the `cpubench` work-conservation counter (starvation −34…−60% across the parallel modes) even though the *sequential* boot is dominated by the per-wake latency the re-poll mitigates. A v1.x adaptive (warm-while-active / deep-when-idle) or accel-gated backstop reclaims 0.3% HVF idle without the dev-boot cost. (Bare-metal confirmation is owed at the Lazarus/RPi bring-up.)
@@ -627,29 +655,41 @@ bool sched_yield_hint(void) {
 
 - **The fast path is the point.** The per-CPU pinned idle is ALWAYS in-tree
   while a non-idle thread runs (`IdleAvailable`), so an unconditional `sched()`
-  on an otherwise-empty queue would pick the idle, switch to it, and have the
-  idle immediately switch back — two context switches per call, on a syscall
-  issued from spin loops. The peek reuses the TI-4c `cpu_has_surplus_for_kick`
-  predicate verbatim: INTERACTIVE + NORMAL head pointers, relaxed loads, never
-  a `Thread` deref. Band IDLE is deliberately excluded — it holds only the
-  pinned idle (+ at most best-effort work the tick path serves at slice
-  granularity); yielding to it is never useful.
+  on an otherwise-empty queue would dispatch the idle — two context switches
+  per call (thread → idle → the #363 park-guard re-dispatches the requeued
+  yielder), on a syscall issued from spin loops. Pre-#363 the cost was far
+  worse: the dispatched idle resumed inside `sched_idle_park` headed for the
+  WFI and parked up to the backstop over the requeued yielder (the #33-audit
+  F1 — see "The #363 park-guard" under TI-4 below). The peek reuses the TI-4c
+  `cpu_has_surplus_for_kick` predicate verbatim: INTERACTIVE + NORMAL head
+  pointers, relaxed loads, never a `Thread` deref. Band IDLE is deliberately
+  excluded — it holds only the pinned idle (+ at most best-effort work the
+  tick path serves at slice granularity); yielding to it is never useful.
 - **Advisory, racy in both directions, both benign**: a stale non-NULL costs
   one wasteful-but-correct idle bounce inside `sched()` (which re-picks under
-  `cs->lock`); a stale NULL skips one yield (the placer's wake-preemption
-  `need_resched_set` serves the placed thread at the next preempt point, and
-  yield callers loop). A preempt between `this_cpu_sched()` and the loads can
-  migrate the caller so the peek reads a foreign CPU's heads — the #104/#107
-  CPU-identity TOCTOU shape, but unlike `sched()` no lock is taken and nothing
-  is mutated on the peeked slot; `sched()` re-derives the CPU under its own
-  entry mask. In the model the skipped call is a stutter (no state change).
+  `cs->lock`; the #363 park-guard re-dispatches and the idle parks only on a
+  genuinely-empty queue); a stale NULL skips one yield — the placer's
+  wake-preemption `need_resched_set` is served at this very syscall's return
+  tail (`preempt_check_irq` runs on the EL0 sync-return path in `vectors.S`,
+  not merely "the next IRQ"), and yield callers loop. The CPU-identity
+  staleness note (the #104/#107 TOCTOU shape) is HYPOTHETICAL today: syscalls
+  run IRQ-masked end-to-end (`spinlock.h`), so no preempt can land inside the
+  peek from the SVC path, and the test callers run on the `cpu_pinned`
+  kthread; a future IRQ-enabled kthread caller migrating mid-peek would read
+  a foreign CPU's heads — still benign (no lock taken, nothing mutated on
+  the peeked slot; `sched()` re-derives the CPU under its own entry mask).
+  In the model the skipped call is a stutter (no state change).
 - The syscall handler (`sys_yield_handler`, `kernel/syscall.c`) discards the
   bool and returns 0 always — the POSIX `sched_yield(2)` shape; a hint has no
   observable success/failure.
-- `need_resched` is deliberately untouched on the fast path (pure read-only):
-  a pending cross-CPU placement kick implies a non-empty band, so the peek
-  routes it into `sched()` (which clears the flag at entry); an empty-bands
-  slice-expiry flag keeps its normal IRQ-return service.
+- `need_resched` is deliberately untouched on the fast path (pure read-only).
+  A pending cross-CPU placement kick is always served: the flag's consumer
+  (`preempt_check_irq` → `sched()`) acquires `cs->lock`, which pairs with the
+  placer's release, so the insert is visible to whoever consumes the flag —
+  the sound argument is consumer-under-the-lock, NOT "flag implies the peek
+  sees the head" (a later plain store may be observed before an earlier
+  store-release on ARM64, so flag-visible ∧ head-not-yet-visible is
+  architecturally permitted; behavior is unaffected either way).
 
 Consumers: the Go runtime `osyield` (`runtime·osyield` in
 `sys_thylacine_arm64.s` — the linux `SYS_sched_yield` shape), musl

@@ -156,6 +156,7 @@ static bool g_sched_hetero;
 // Forward declaration: sched_in_cpu_tree (HMP section) reads in_run_tree,
 // which is defined further down with the run-tree helpers.
 static bool in_run_tree(struct CpuSched *cs, struct Thread *t);
+static bool cpu_has_surplus_for_kick(struct CpuSched *cs);
 
 // P2-Cd: per-CPU preemption signal. Each CPU's timer IRQ sets its own slot
 // (sched_tick); preempt_check_irq on the same CPU reads + clears it. #866 F1
@@ -2053,10 +2054,30 @@ void sched_idle_park(bool tickless) {
     bool go_tickless = tickless && g_sched_notify_enabled;
 #endif
     irq_state_t s = spin_lock_irqsave(NULL);
+    struct CpuSched *cs = this_cpu_sched();   // idle is cpu_pinned; stable
     sched_set_idle_in_wfi(true);
     sched();
+    // #363 (the #33-audit F1): do NOT park over our own queue. sched() picks
+    // BEFORE it requeues prev, so a slice-expiry preempt (or a yield) of a
+    // thread with an otherwise-empty local queue dispatches THIS idle -- and
+    // the preempted thread lands in run_tree[NORMAL] right after the pick.
+    // The dispatched idle does not restart its loop; it resumes HERE, past
+    // the sched() above, headed for the one-shot arm + WFI. Without this
+    // re-check the CPU parks up to TICKLESS_IDLE_BACKSTOP_NS over its own
+    // just-requeued RUNNABLE thread (no IPI exists for a local self-requeue;
+    // the one-shot deasserted the periodic tick) -- up to ~4 ms lost per
+    // 6 ms slice for a solo compute-bound thread, the misattributed source
+    // of the TI-4d multi-ms starved-park records. Two relaxed head loads
+    // (the #33 yield predicate); loop until our own non-idle bands are
+    // empty. A peer's concurrent insert into our tree is NOT this race --
+    // the peer's ready_on sees idle_in_wfi (set above, register-then-
+    // observe) and sends IPI_RESCHED, which the WFI takes pended (I-9).
+    // The deferred park is a stutter on sched_tickless.tla's Park action;
+    // NoLostWake / ParkedImpliesRegistered are untouched.
+    while (cpu_has_surplus_for_kick(cs))
+        sched();
     // TI-4d work-conservation sample: we are committed to parking THIS CPU.
-    // sched() just chose idle, so this CPU's own non-idle tree is empty -- a
+    // The #363 loop above just verified our OWN non-idle tree is empty, so a
     // positive sched_has_runnable_work() here is a PEER's queued backlog this
     // CPU is about to sleep through (a steal/handoff gap). Charge the whole
     // park as starved if so. In the periodic path the next <=1ms tick re-polls
@@ -2164,9 +2185,11 @@ bool sched_cpu_has_surplus_for_test(unsigned cpu) {
 // this wrapper adds only the fast path that makes a yield SYSCALL affordable:
 // the per-CPU pinned idle is ALWAYS in-tree while a non-idle thread runs
 // (sched_alpha.tla IdleAvailable), so an unconditional sched() on an
-// otherwise-empty queue would pick the idle, switch to it, and have the idle
-// immediately switch back -- two context switches for nothing, on a call the
-// Go runtime issues from spin loops (36.8M osyield calls per go build).
+// otherwise-empty queue would dispatch the idle -- two context switches for
+// nothing (thread -> idle -> the #363 park-guard loop re-dispatches the
+// requeued yielder), on a call the Go runtime issues from spin loops (36.8M
+// osyield calls per go build). Pre-#363 the cost was far worse -- a park up
+// to the tickless backstop over the requeued yielder (the #33-audit F1).
 //
 // The peek reuses cpu_has_surplus_for_kick (TI-4c): non-idle band heads only,
 // relaxed loads, never a Thread deref. Band IDLE is deliberately excluded --
@@ -2175,18 +2198,23 @@ bool sched_cpu_has_surplus_for_test(unsigned cpu) {
 // the skipped call is a stutter (no state change), trivially safe.
 //
 // Advisory by design, racy in both directions, both benign:
-//   - stale non-NULL (the queued thread was just picked/stolen): sched()
-//     re-picks under cs->lock and may dispatch the idle for one bounce --
-//     wasteful once, correct.
+//   - stale non-NULL (the queued thread was just stolen): sched() re-picks
+//     under cs->lock and dispatches the idle for one bounce (the #363 loop
+//     re-checks and parks only on a genuinely-empty queue) -- wasteful once,
+//     correct.
 //   - stale NULL (a thread is being placed concurrently): this yield skips;
 //     the placer's own wake-preemption (ready_on's need_resched_set) serves
-//     the placed thread at the next preempt point, and yield callers loop.
-//   - a preempt between this_cpu_sched() and the loads can migrate the caller,
-//     making the peek read a FOREIGN CPU's heads. This is the #104/#107 CPU-
-//     identity TOCTOU shape, but unlike sched() no lock is taken and nothing
-//     is mutated on the peeked slot -- the result is just an advisory answer
-//     for a CPU the caller was on a moment ago. sched() itself re-derives the
-//     CPU under its own entry mask.
+//     the placed thread at this very syscall's return tail
+//     (preempt_check_irq runs on the EL0 sync-return path), and yield
+//     callers loop.
+//   - CPU-identity staleness (the #104/#107 TOCTOU shape) is HYPOTHETICAL
+//     today: syscalls run IRQ-masked end-to-end (spinlock.h), so no preempt
+//     can land inside the peek from the SVC path, and the test callers run
+//     on the cpu_pinned kthread. A future IRQ-enabled kthread caller could
+//     migrate between this_cpu_sched() and the loads and peek a FOREIGN
+//     CPU's heads -- still benign: no lock is taken and nothing is mutated
+//     on the peeked slot, and sched() re-derives the CPU under its own
+//     entry mask.
 //
 // Returns whether it dispatched (called sched()) -- consumed by the kernel
 // tests; the syscall handler discards it and returns 0 (POSIX sched_yield).

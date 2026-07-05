@@ -511,6 +511,16 @@ shell.
   `starved` counter is the OVER-BROAD strict-work-conservation signal: it counts
   an idle CPU as starved whenever work is queued ANYWHERE, even when that work's
   home CPU handles it promptly.
+  **CORRECTION (#363, the #33-audit F1, 2026-07-05): the disposition above was
+  wrong for the multi-ms records.** The home CPU frequently did NOT handle the
+  queued work promptly -- it was the PARKED CPU itself: sched() picks before it
+  requeues, so a slice-expiry preempt of a solo thread dispatched the pinned
+  idle, which resumed inside sched_idle_park past its own sched() and parked
+  over the just-requeued thread with no re-check (no IPI exists for a local
+  self-requeue). The full-backstop starved records were that self-inflicted
+  park, not (only) peer backlog. Fixed by the #363 park-guard: sched_idle_park
+  loops `while (cpu_has_surplus_for_kick(cs)) sched();` before committing to
+  the arm+WFI. See docs/reference/15-scheduler.md "The #363 park-guard".
 
 **Conclusion: the boot regression is PER-PARK OVERHEAD, not a work-conservation /
 rebalance gap.** The workload's wakees already get prompt wakes (push-placement
