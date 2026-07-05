@@ -2041,7 +2041,10 @@ void sched_idle_park(bool tickless) {
     // to the backstop (the test-phase half of the TI-3 regression). The
     // secondaries already gate on timer_armed; this extends the same "only
     // tickless in production" discipline to cpu0 -- so the test phase is
-    // byte-identical to the pre-tickless periodic idle.
+    // byte-identical to the pre-tickless periodic idle (modulo the #363
+    // park-guard below, which runs in all modes: dormant on pre-preempt
+    // secondaries, and on cpu0 it only ACCELERATES requeued-work service
+    // from <=1ms to immediate).
 #ifdef THYLACINE_NO_TICKLESS
     // TI-4e tickful-baseline capture (tools/build.sh --no-tickless): force the
     // old 1 kHz-always idle so the periodic tick stays the work-steal re-poll.
@@ -2070,8 +2073,12 @@ void sched_idle_park(bool tickless) {
     // of the TI-4d multi-ms starved-park records. Two relaxed head loads
     // (the #33 yield predicate); loop until our own non-idle bands are
     // empty. A peer's concurrent insert into our tree is NOT this race --
-    // the peer's ready_on sees idle_in_wfi (set above, register-then-
-    // observe) and sends IPI_RESCHED, which the WFI takes pended (I-9).
+    // a peer that places ONTO us IPIs unconditionally (ready_on's
+    // cross-CPU tail: need_resched_set + sched_notify_cpu -- NOT gated on
+    // idle_in_wfi; do not "optimize" that gate in), and a peer that
+    // places locally reads idle_in_wfi (set above, register-then-observe)
+    // and kicks us via sched_notify_idle_peer -- either way the WFI takes
+    // the IPI pended (I-9).
     // The deferred park is a stutter on sched_tickless.tla's Park action;
     // NoLostWake / ParkedImpliesRegistered are untouched.
     while (cpu_has_surplus_for_kick(cs))
