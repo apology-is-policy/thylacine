@@ -163,6 +163,27 @@ These are not v1.0 angles — they're recorded so a future direction isn't lost.
   Weft-1..7 the dataplane). Audit-bearing (the buffer-lifetime UAF + the no-per-op-mediation
   property). (Name ratified 2026-06-20 — the crosswise thread woven through the Loom warp.)
 
+- **Concurrent-FS — a fully concurrent 9P file server on a lockless metadata
+  core** (`docs/CONCURRENT-FS.md`, **RATIFIED 2026-07-05** as the scheduled
+  post-Go-arc arc; charter user-directed 2026-06-25). A network-FS server that is
+  **fully concurrent across the 9P boundary** — a per-request worker pool per
+  connection (the Plan 9 `exportfs` slave-proc idiom + the diod/npfs SOTA)
+  dispatching onto a **lockless (Bε CAS-prepend + EBR) metadata core** (the
+  Stratum 9.8-BE write half) — so a single user's `make -j` / parallel `go build`
+  gets the concurrency a kernel FS has, *through* a 9P mount. Why it's novel:
+  concurrent 9P servers exist (diod) but sit on conventional kernel filesystems;
+  lockless-metadata filesystems exist but present POSIX in-kernel, not a wire
+  boundary; the fusion — wait-free reads + CAS-prepend writes surfaced through
+  per-request 9P dispatch, with the client side already pipelined (Angle #3) —
+  is the unoccupied square, and it makes the 9P-totalization thesis (Angle #1)
+  *performance-credible* for build workloads, the exact place network
+  filesystems historically concede to local ones. Soundness-first staging:
+  the lockless write half (R171 closure) lands BEFORE server-side concurrency
+  ships. Audit-bearing on both halves (the R171 UAF family closure; the fid-pin
+  + Tflush + reply-serialization discipline). Measured motivation: the go-build
+  mission's exit bar (2026-07-05) — device `-p 4` builds execute at serial
+  wall-clock because every FS op funnels through one serial server loop.
+
 ---
 
 ## 3. Per-angle scope
