@@ -103,6 +103,20 @@ slow-warm store; inode `dsstate` invalidation on rollback root-swap).
 - **Also the write-throughput fix:** the Bε buffer batches the go-build's
   small-object-write storm (S9) — the same chunk closes soundness AND the
   write-amplification regime.
+  **[AS MEASURED at chunk 11 (`bench_write_amp` + the engine node-COW
+  counters): the write-amp claim was the MODEL's promise, not the
+  mechanism's. Apples-to-apples at the same commit cadence the Bε
+  format reduces node COW writes 1.0×–2.0× (2.04× max, at
+  fsync-per-op; 1.00× at batch cadences — both regimes batch dirty
+  state in RAM and write only at commit), not the modeled 20–50×,
+  whose math double-counted (per-op-flush baseline vs batch-amortized
+  Bε + buffer(52 msgs) < fanout(~150) as built). The S9 small-write
+  storm is cheap because of in-RAM commit batching — true in BOTH
+  regimes — and CF-1's load-bearing deliverables stand unchanged: the
+  R171 P0 closure + wait-free writers (CF-2's prerequisite). Details +
+  the ε/flush-strategy seam: stratum `phase-9.8-design.md` §9.2
+  as-measured; the §14 ship-criterion disposition is flagged for the
+  user's vote.]**
 - Spec-first: the 9.8 specs exist (`concurrency.tla`, `concurrency_mvcc.tla`
   — `BuggyImmediateFree` is the executable counterexample; the Bε chunk
   table names its specs). This satisfies the re-enabled spec-first bar for
@@ -174,6 +188,15 @@ barrier batching (~10 fsyncs → 2: one data barrier + one UB barrier) and
 the clean-commit short-circuit (a no-dirty commit near-free; must account
 for the in-commit CAS-GC + deferred-free sweeps). S11. Sequenced last
 because CF-1's Bε buffer changes what a commit contains.
+
+- **Chunk-11 datum for this stage:** the clone-arm commit (every
+  production commit since chunk 10's latch) costs CPU proportional to
+  the RESIDENT tree — measured 24 ms vs 1.6 ms serial per commit on a
+  500K-key fully-resident tree (shadow consolidate + flush walk +
+  whole-tree EBR retire per cycle; `bench_write_amp` B/C=1). Negligible
+  at boot-scale trees (the R175 gate showed no regression) and hidden
+  behind a real device fsync, but a per-commit O(resident) term the
+  clean-commit short-circuit should also account for.
 
 ### CF-5 — measure, gate, audit, close
 
