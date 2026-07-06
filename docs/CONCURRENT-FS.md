@@ -136,6 +136,18 @@ The diod/exportfs model applied to `serve.c` + `server.c`:
 - **What this unlocks immediately:** the go build's dominant READ storm —
   wait-free in the core (S6) — parallelizes across workers; disjoint-inode
   writes overlap up to the S8 funnel.
+- **R175-carried obligations (close within CF-2):** (a) the write path's
+  SERIAL range scans (inode seed/find_freed on every alloc; extent
+  collect/overlap on every RMW; dirent unlink sweep; xattr serial list)
+  hold `serial_mu` for the whole walk and suppress the mini-consolidation's
+  trylock under a scan-heavy pool — chain-growth/space-amp pressure (the
+  #39/#40 family), NOT a UAF (a fold requires `serial_mu` or the fs-level
+  EX envelope); close via `_concurrent` scan variants for the alloc-path
+  scans or a commit-cadence chain bound (phase-9.8-design.md 7.2.1). (b)
+  The write funnels PROPAGATE engine `STM_EBUSY` (seal back-pressure) —
+  decide retry-at-dispatch vs propagate-to-client when the pool makes it
+  reachable (the READ side already resolves it via the R175-F2 widened
+  SH-fallback).
 
 ### CF-3 — transport: measurement-gated frame/latency levers (Thylacine side)
 
