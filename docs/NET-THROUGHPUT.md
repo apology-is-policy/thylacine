@@ -586,9 +586,9 @@ dataplane arc the user committed.
   on the 9P fid** (Option B, §6.1 — superseding the earlier eager "data-fid auto-map" sketch).
   The mechanism:
   - **`Tweft(fid F) → Rweft(share_id, geometry)`** — a new Thylacine-private 9P op
-    (`P9_TWEFT = 134` / `P9_RWEFT = 135`, just past the Stratum-extension range
-    [`Tfallocate` 132/133; **128/129 are already `Tsync`/`Rsync`**]; the **#845
-    `Tflush` precedent** — a kernel-client-issued op the netd 9P server handles). The kernel
+    (`P9_TWEFT = 142` / `P9_RWEFT = 143` since the #371 renumber -- born 134/135,
+    which latently collided with Stratum `Tfadvise`/`Tpin`; the cross-project
+    registry is `docs/9P-EXTENSIONS.md`; the **#845 `Tflush` precedent** — a kernel-client-issued op the netd 9P server handles). The kernel
     dev9p client issues it on the shared `/net` client the **first** time a flow goes
     zero-copy.
   - **`SYS_WEFT_SHARE(ring_va, ring_size) → share_id / -1`** (netd-side, syscall 81). On
@@ -629,8 +629,8 @@ dataplane arc the user committed.
     the `dev9p_priv` binding + the `share_id` correlation + teardown + kernel tests) / 6b (netd:
     handle `Tweft` + alloc/register the ring + drive the desc ring on large Twrite/Tread + the
     live readiness park/wake + the `F_NOTIF` posting) / 6c (the native API + the in-guest E2E).
-    **Weft-6a-1 LANDED** (`Tweft`/`Rweft` + `p9_client_weft`; `P9_TWEFT = 134` / `P9_RWEFT =
-    135`). **Weft-6a-2 LANDED** — the `share_id` registry in `kernel/weft.c` + `SYS_WEFT_SHARE
+    **Weft-6a-1 LANDED** (`Tweft`/`Rweft` + `p9_client_weft`; `P9_TWEFT = 142` / `P9_RWEFT =
+    143` since #371 -- born 134/135). **Weft-6a-2 LANDED** — the `share_id` registry in `kernel/weft.c` + `SYS_WEFT_SHARE
     = 81` / `SYS_WEFT_MAP = 82` + the `dev9p_priv->weft` binding + the `dev9p_close` teardown +
     the `proc.c` owner-death GC. The registration pin is held by the binding; the guest mapping
     is reclaimed by `vma_drain` (the Loom-ring precedent), so `dev9p_close` drops only the pin.
@@ -786,8 +786,8 @@ TCB onto netd.
 
 **The as-decided mechanism (impl OWED across 6b-2a/6b-2b):**
 
-- **`Tweftio(fid, off, len, dir) → Rweftio(count)`** — `P9_TWEFTIO = 136` /
-  `P9_RWEFTIO = 137` (just past `Tweft`/`Rweft` 134/135; the parity `RX = TX + 1`). The
+- **`Tweftio(fid, off, len, dir) → Rweftio(count)`** — `P9_TWEFTIO = 144` /
+  `P9_RWEFTIO = 145` since #371 (just past `Tweft`/`Rweft` 142/143; the parity `RX = TX + 1`). The
   kernel dev9p data path issues it on a large transfer on a weft-bound fd; netd's server
   handles it (the `Tweft`/`Tflush` precedent). `dir` = WRITE (TX) / READ (RX). Body 16 B:
   `[fid:u32][off:u32][len:u32][dir:u32]`; reply `[count:u32]` (4 B). Reuses the audited

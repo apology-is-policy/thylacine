@@ -48,9 +48,10 @@ stratum-side `src/9p/server.c::h_walkgetattr`, landed P-1):
 - Client op: `p9_client_walkgetattr` (`9p_client.c:1003`) — a standard
   #841 pipelined op, nothing special in the engine.
 
-Registry note: 140/141 sit past the Stratum extension range in use;
-the Tweft/Tweftio 134-137 collision with Stratum's Tfadvise/Tpin is the
-SEPARATE #371 registry item (renumbering needs user signoff).
+Registry note: 140/141 sit past the Stratum extension range in use.
+The Tweft/Tweftio collision with Stratum's Tfadvise/Tpin (#371) was
+RESOLVED 2026-07-07: the Weft quartet moved 134-137 -> 142-145 and the
+cross-project registry now lives in `docs/9P-EXTENSIONS.md`.
 
 ## `Dev.walk_attrs` — the optional vtable slot
 

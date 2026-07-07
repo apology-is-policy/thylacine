@@ -153,19 +153,23 @@
 #define P9_TFALLOCATE  132u
 #define P9_RFALLOCATE  133u
 // Thylacine extension (Weft-6; NET-THROUGHPUT.md section 6): the per-flow
-// zero-copy dataplane ring setup. 134/135 sit just past the Stratum extension
-// range (128/129 are Tsync/Rsync, 132/133 Tfallocate). Kernel-client-issued op
-// (the #845 Tflush precedent).
-#define P9_TWEFT       134u
-#define P9_RWEFT       135u
+// zero-copy dataplane ring setup. 142/143 sit just past the end of the shared
+// extension registry (docs/9P-EXTENSIONS.md -- Stratum's enum runs through
+// Tunpin 138/139 and the shared Twalkgetattr is 140/141); renumbered from
+// 134/135 at #371 (which latently collided with Stratum Tfadvise/Tpin on a
+// disjoint domain). Kernel-client-issued op (the #845 Tflush precedent), both
+// endpoints in-tree (kernel <-> netd), nothing persists the number.
+#define P9_TWEFT       142u
+#define P9_RWEFT       143u
 // Thylacine extension (Weft-6b-2; NET-THROUGHPUT.md section 6.2): the data
 // drive. After a flow's ring is mapped (Tweft), a large Twrite/Tread on the
 // data fd issues Tweftio carrying the kernel-validated payload descriptor
 // (offset + len within the flow's shared ring + a direction); netd reads/writes
 // the ring IN PLACE + replies the count. Kernel-client-issued (the Tweft/Tflush
-// precedent). 136/137 sit just past Tweft/Rweft (134/135).
-#define P9_TWEFTIO     136u
-#define P9_RWEFTIO     137u
+// precedent). 144/145 sit just past Tweft/Rweft (142/143); renumbered from
+// 136/137 at #371.
+#define P9_TWEFTIO     144u
+#define P9_RWEFTIO     145u
 
 // Tweftio direction -- which way the payload moves through the shared ring.
 #define WEFT_DIR_WRITE 0u   // TX: netd reads ring[off..off+len] -> smoltcp send
@@ -176,12 +180,12 @@
 // component's full Rgetattr body (the walk-fused per-component X-search
 // attrs); newfid == P9_NOFID is permitted as a walk-QUERY (walk + sample,
 // bind nothing -- nothing to clunk; the 1-RPC stat). Kernel-client-issued
-// against stratumd (the Tsync/Tflush precedent). NUMBERING: 140/141, NOT
-// 138/139 -- the Stratum extension enum runs through Tfadvise 134/135 +
-// Tpin 136/137 + Tunpin 138/139 (so Tweft/Tweftio above ALREADY collide
-// latently with Stratum's 134-137 on a DISJOINT domain [Weft ops go
-// kernel->netd only, never to stratumd] -- the registry reconciliation is
-// #371); 140/141 is free in BOTH registries.
+// against stratumd (the Tsync/Tflush precedent). NUMBERING: 140/141 -- the
+// Stratum extension enum runs through Tfadvise 134/135 + Tpin 136/137 +
+// Tunpin 138/139, so 140/141 is the first pair free in both registries.
+// The cross-project registry lives in docs/9P-EXTENSIONS.md (#371: allocate
+// there, never from one project's enum alone -- the Weft family above wore
+// 134-137 until it was renumbered out of Stratum's range).
 #define P9_TWALKGETATTR 140u
 #define P9_RWALKGETATTR 141u
 

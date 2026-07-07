@@ -83,10 +83,12 @@ Why not the alternatives (voted down 2026-07-07):
 Numbering note (P-1 discovery): the Stratum extension enum does NOT end at
 Tfallocate 132/133 as the Weft-era numbering believed — Stratum also assigns
 Tfadvise 134/135 + Tpin 136/137 + Tunpin 138/139 (the last two reserved),
-so Thylacine's kernel<->netd Tweft/Tweftio (134-137) already collide with
-those LATENTLY (disjoint server domains — no wire confusion is reachable
-today), and 138/139 was taken. 140/141 is free in BOTH registries; the
-cross-project registry reconciliation is tracked as #371.
+so Thylacine's kernel<->netd Tweft/Tweftio (born 134-137) collided with
+those LATENTLY (disjoint server domains — no wire confusion was reachable),
+and 138/139 was taken. 140/141 is free in BOTH registries. #371 RESOLVED
+(user-approved 2026-07-07): the Weft quartet renumbered to 142-145 (both
+endpoints in-tree, nothing persists the numbers) and the cross-project
+registry now lives in `docs/9P-EXTENSIONS.md` — allocate there.
 
 ```
 Twalkgetattr  tag[2] fid[4] newfid[4] request_mask[8] nwname[2] nwname*(wname[s])

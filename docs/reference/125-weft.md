@@ -544,7 +544,8 @@ userspace (`usr/netd`, `usr/lib/libthyla-rs`); the kernel is byte-unchanged
 
 ### The handler (`usr/netd/src/server.rs::Conn::h_weft`)
 
-Dispatched from the 9P serve loop on `p9::P9_TWEFT` (134), alongside the other
+Dispatched from the 9P serve loop on `p9::P9_TWEFT` (142 since the #371
+renumber), alongside the other
 kernel-client-issued ops (`Tflush`, the #845 precedent). It:
 
 1. `p9::parse_tweft` → the fid `F`.
