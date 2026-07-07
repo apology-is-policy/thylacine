@@ -32,3 +32,4 @@
 0016-pouch-net-sockets.patch
 0017-pouch-net-datacalls.patch
 0018-pouch-net-poll.patch
+0019-pouch-stat.patch

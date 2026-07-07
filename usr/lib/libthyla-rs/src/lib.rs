@@ -207,6 +207,7 @@ pub const T_SYS_LSEEK: u64            = 51;
 pub const T_SYS_PREAD: u64            = 85;
 pub const T_SYS_PWRITE: u64           = 86;
 pub const T_SYS_YIELD: u64            = 87;
+pub const T_SYS_STAT: u64             = 88;
 // FS-mutation foundation (IDENTITY-DESIGN.md section 9.2): create-then-open,
 // durability barrier, directory enumeration.
 pub const T_SYS_WALK_CREATE: u64      = 54;
@@ -2220,6 +2221,28 @@ pub fn t_yield() -> i64 {
             options(nostack)
         );
     }
+    x0
+}
+
+// t_stat_path — path-stat in ONE syscall (POUNCE; SYS_STAT = 88): resolve
+// `path` (absolute from the Territory root; relative joined with the cwd)
+// and fill the 80-byte `struct t_stat` at stat_va with the LEAF's metadata.
+// On the disk FS the whole resolution is a single fused Twalkgetattr RPC and
+// no handle/Spoor/fid is ever created. The X-search authority equals the
+// O_PATH+fstat emulation it replaces (path-X only). Returns 0, -errno
+// (-T_E_NOENT / -T_E_ACCES) on resolution failure, -1 on argument faults.
+// Backs t::fs::metadata (the free function).
+#[inline(always)]
+pub unsafe fn t_stat_path(path: *const u8, path_len: usize, stat_va: *mut u8) -> i64 {
+    let mut x0: i64 = path as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") path_len as u64,
+        in("x2") stat_va as u64,
+        in("x8") T_SYS_STAT,
+        options(nostack)
+    );
     x0
 }
 
