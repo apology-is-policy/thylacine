@@ -176,6 +176,15 @@ struct Walkqid *(*walk_attrs)(struct Spoor *c, struct Spoor *nc,
   other reply — success OR a real errno like ENOENT — proves the server
   parsed the op, and is handled normally. A NULL return stays "the walk
   failed at the first component"; the sentinel is a THIRD, non-error state.
+  KNOWN COST on the latched fallback (P-5 audit F1, P3, tracked as #372):
+  the pounce block runs its base X-check `stat_native` BEFORE the sentinel
+  returns, and the per-component fall-through then X-searches the same
+  parent again — 2 Tgetattr per component on a latched session's paths
+  (idempotent, no correctness impact; `/net` paths are shallow setup-only
+  ops). The fix — the base X-check moved after the sentinel arm, sound
+  because a walk has no observable side effect (§6) — rides the next
+  stalk-touching chunk rather than churning the audited deny/release
+  ladder at close.
 
 ## 5. The stalk pounce (the batching fast path)
 
