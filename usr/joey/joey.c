@@ -562,7 +562,8 @@ static int do_pouch_hello_smoke(void) {
     if (pouch_smoke_one(ph_name, sizeof(ph_name) - 1,
                         ph_expect, sizeof(ph_expect) - 1) != 0)
         return -1;
-    t_putstr("joey: pouch-hello smoke ok (write(2) seam + 0xFFFF sentinel both paths)\n");
+    t_putstr("joey: pouch-hello smoke ok (write(2) seam + 0xFFFF sentinel both "
+             "paths + stat(path) via 0019/SYS_STAT)\n");
 
     static const char ps_name[]   = "pouch-hello-stdio";
     static const char ps_expect[] = "buffer drains at exit";

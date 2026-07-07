@@ -30,6 +30,7 @@
 #include <fcntl.h>
 #include <sched.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 // emit — write the whole NUL-terminated string to stdout, looping on
@@ -130,6 +131,43 @@ int main(void) {
     }
     if (emit("pouch-hello: sched_yield ok (#33: wired to 87)\n") != 0)
         return 1;
+
+    // POUNCE P-4 (patch 0019): stat(path) rides SYS_STAT (musl's fstatat
+    // AT_FDCWD/absolute forms went 0xFFFF -> SYS_thyla_stat 88; there is
+    // no aarch64 __NR_stat, so pre-0019 the whole stat(path) family
+    // short-circuited to ENOSYS -- success IS the wiring proof). Field
+    // equality against fstat(2) on the same file proves the 0019 t_stat
+    // translation agrees with 0010's (both mirror the 80-byte kernel
+    // struct); the miss leg proves resolution errnos pass through.
+    {
+        struct stat st, fst;
+        errno = 0;
+        if (stat("/welcome", &st) != 0) {
+            (void)emit(errno == ENOSYS
+                       ? "pouch-hello: FAIL stat -> ENOSYS (0019 seam not wired)\n"
+                       : "pouch-hello: FAIL stat /welcome\n");
+            return 1;
+        }
+        int fd = open("/welcome", O_RDONLY);
+        if (fd < 0 || fstat(fd, &fst) != 0) {
+            (void)emit("pouch-hello: FAIL fstat /welcome (stat probe)\n");
+            return 1;
+        }
+        (void)close(fd);
+        if (st.st_size != fst.st_size || st.st_ino != fst.st_ino ||
+            st.st_mode != fst.st_mode || st.st_uid != fst.st_uid ||
+            st.st_gid != fst.st_gid) {
+            (void)emit("pouch-hello: FAIL stat/fstat field mismatch\n");
+            return 1;
+        }
+        errno = 0;
+        if (stat("/no-such-pouch-stat-probe", &st) != -1 || errno != ENOENT) {
+            (void)emit("pouch-hello: FAIL stat miss -> ENOENT\n");
+            return 1;
+        }
+        if (emit("pouch-hello: stat(path) ok (0019: SYS_STAT=88, fields == fstat, miss -> ENOENT)\n") != 0)
+            return 1;
+    }
 
     if (emit("pouch-hello: exit 0\n") != 0)
         return 1;
