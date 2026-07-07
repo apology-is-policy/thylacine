@@ -78,7 +78,15 @@ Why not the alternatives (voted down 2026-07-07):
   surface); v1.x-sized. The pounce makes deep paths ~1 RPC regardless, which
   removes most of its value at v1.0.
 
-## 3. The wire op: `Twalkgetattr` (138) / `Rwalkgetattr` (139)
+## 3. The wire op: `Twalkgetattr` (140) / `Rwalkgetattr` (141)
+
+Numbering note (P-1 discovery): the Stratum extension enum does NOT end at
+Tfallocate 132/133 as the Weft-era numbering believed — Stratum also assigns
+Tfadvise 134/135 + Tpin 136/137 + Tunpin 138/139 (the last two reserved),
+so Thylacine's kernel<->netd Tweft/Tweftio (134-137) already collide with
+those LATENTLY (disjoint server domains — no wire confusion is reachable
+today), and 138/139 was taken. 140/141 is free in BOTH registries; the
+cross-project registry reconciliation is tracked as #371.
 
 ```
 Twalkgetattr  tag[2] fid[4] newfid[4] request_mask[8] nwname[2] nwname*(wname[s])
@@ -247,7 +255,7 @@ it:
 
 | # | scope | proof |
 |---|---|---|
-| P-1 | Stratum: `h_walkgetattr` (138/139) + NOFID + per-component attrs; host tests (walk parity vs Twalk+Tgetattr; NOFID binds nothing; partial-walk attr prefix; pool-path) | stratum suite + host 9P test |
+| P-1 | Stratum: `h_walkgetattr` (140/141) + NOFID + per-component attrs; host tests (walk parity vs Twalk+Tgetattr; NOFID binds nothing; partial-walk attr prefix; pool-path) | stratum suite + host 9P test |
 | P-2 | Kernel wire + client: codec (`p9_build_twalkgetattr`/`p9_parse_rwalkgetattr`) + `p9_client_walkgetattr`; loopback tests | kernel tests; `9p_client.tla` buggy cfgs re-run |
 | P-3 | `Dev.walk_attrs` slot + dev9p impl + devramfs impl; `stalk` pounce (run gather, fail-ordering post-scan, mount-split) + `STALK_STAT` + `SYS_STAT` | kernel tests: pounce parity vs per-component loop; ACCES-masks-NOENT; mount-mid-run split; `..` runs; boot OK |
 | P-4 | Consumers: Go port `os.Stat`/`os.Lstat` -> SYS_STAT; libthyla-rs `fs::metadata`; pouch stat family; re-measure (bench pair + instrumented-pool op recount) | bench + RT histogram delta |
