@@ -185,6 +185,15 @@ The fix threads a back-pressure sentinel and drains-then-retries instead of dyin
 
 The two `Tflush` sends and the async `p9_client_submit_async` (the Loom path) treat EAGAIN as their existing fail-close — the #845 flush-fallback and (the pre-existing, tracked **#350** seam) a session-mark-dead, respectively; `client_run` is the only EAGAIN-aware caller by design.
 
+### Per-op payload clamp (CF-3 A)
+
+`p9_client_read` / `p9_client_write` clamp a single op's `count` to the negotiated msize's payload and return the **short** count — the protocol's own contract (a 9P client never emits an op exceeding the negotiated msize); callers loop per the POSIX short-read/short-write discipline.
+
+- `client_max_read_count` = `negotiated_msize − 11` (Rread framing: hdr 7 + count 4) — bounds the **reply** the server may send.
+- `client_max_write_payload` = `min(negotiated_msize, sizeof(out_buf)) − 23` (Twrite framing: hdr 7 + fid 4 + offset 8 + count 4) — bounds the **request frame this client can build** as well as what the server accepts.
+
+Before CF-3 A no caller could exceed either bound (`SYS_RW_MAX` was 4096), so the miss was latent. The ceiling lift exposed it immediately: an unclamped bulk `Twrite` **failed the frame build** (`p9_build_twrite` `cap < total`) and returned `-P9_E_IO` on every over-payload write — the go compiler's object writes all EIO'd, no cache puts landed, and the warm build ran cold. `9p_client.bulk_write_clamps_short` pins the clamp (an over-payload write must return the payload max as `accepted`, never EIO). The read-side clamp is belt (servers clamp their replies anyway — `maxgot == 32757` on the boot mount); the write-side clamp is load-bearing.
+
 ## Compile-time invariants
 
 `_Static_assert` in `kernel/9p_client.c`:

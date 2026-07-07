@@ -2129,6 +2129,103 @@ static int probe46_fstat_wronly(const char *tag, const char *dirpath,
     return 0;
 }
 
+// CF-3 A always-run regression: bulk byte-I/O through the two-tier syscall
+// bounce + uaccess_copy_in/out + the 9P client payload clamp. The 40 KiB
+// pattern crosses the EXACT boundary that produced the CF-3 bench cascade
+// (audit F3): a single t_write above the Twrite payload max (negotiated
+// msize 32 KiB -> 32745) must return a SHORT count -- pre-clamp it EIO'd
+// (the frame build failed), which killed every bulk object write. So:
+// write in a loop asserting the FIRST call moves > SYS_RW_STACK bytes but
+// less than the whole buffer (the clamp fired, the heap tier engaged);
+// read back the same way (first call > 4096); byte-verify everything, and
+// cross-check a 4 KiB t_pread (the stack tier + the positioned path see
+// the same bytes). Boot-fatal.
+static int probe_cf3_bulk_io(void) {
+    char nb[24];
+    static const char nm[] = "cf3-bulk-probe";
+    enum { CF3_LEN = 40960 };
+    static unsigned char pat[CF3_LEN];
+    static unsigned char rdb[CF3_LEN];
+    for (unsigned int i = 0; i < sizeof(pat); i++)
+        pat[i] = (unsigned char)((i * 31u + 7u) & 0xFFu);
+    long pd = t_open(T_WALK_OPEN_FROM_ROOT, "/", 1, T_OPATH);
+    if (pd < 0) { t_putstr("joey: cf3-bulk open / FAILED\n"); return -1; }
+    long fd = t_walk_create(pd, nm, sizeof(nm) - 1, T_OWRITE, 0644u);
+    if (fd < 0) {
+        // Self-heal a leftover from a crashed prior boot on a preserved pool.
+        (void)t_unlink(pd, nm, sizeof(nm) - 1, 0);
+        fd = t_walk_create(pd, nm, sizeof(nm) - 1, T_OWRITE, 0644u);
+    }
+    if (fd < 0) {
+        t_putstr("joey: cf3-bulk create FAILED rc=");
+        t_putstr(itoa_dec(fd, nb, sizeof(nb)));
+        t_putstr("\n");
+        (void)t_close(pd);
+        return -1;
+    }
+    int bad = 0;
+    long wn0 = -1;
+    {
+        unsigned long off = 0;
+        while (off < sizeof(pat)) {
+            long w = t_write(fd, pat + off, sizeof(pat) - off);
+            if (off == 0) wn0 = w;
+            if (w <= 0) { bad = 1; break; }
+            off += (unsigned long)w;
+        }
+        // The first call must be a bulk SHORT write: more than the stack
+        // tier (the heap bounce engaged), less than the whole 40 KiB (the
+        // 9P payload clamp fired instead of EIO -- the audit-F3 boundary).
+        if (wn0 <= 4096 || wn0 >= (long)sizeof(pat)) bad = 1;
+    }
+    (void)t_close(fd);
+    long rfd = t_open(pd, nm, sizeof(nm) - 1, T_OREAD);
+    long got0 = -1;
+    if (rfd >= 0 && !bad) {
+        unsigned long off = 0;
+        while (off < sizeof(rdb)) {
+            long g = t_read(rfd, rdb + off, sizeof(rdb) - off);
+            if (off == 0) got0 = g;
+            if (g <= 0) { bad = 2; break; }
+            off += (unsigned long)g;
+        }
+        if (got0 <= 4096) bad = 2;   // the bulk read tier must have engaged
+        if (!bad) {
+            for (unsigned int i = 0; i < sizeof(pat); i++)
+                if (rdb[i] != pat[i]) { bad = 3; break; }
+        }
+        // The stack tier + positioned path must see the same bytes.
+        static unsigned char small[4096];
+        long pg = t_pread(rfd, small, sizeof(small), 4096);
+        if (pg != (long)sizeof(small)) bad = 4;
+        else {
+            for (unsigned int i = 0; i < sizeof(small); i++)
+                if (small[i] != pat[4096u + i]) { bad = 5; break; }
+        }
+    } else if (rfd < 0) {
+        bad = 6;
+    }
+    if (rfd >= 0) (void)t_close(rfd);
+    (void)t_unlink(pd, nm, sizeof(nm) - 1, 0);
+    (void)t_close(pd);
+    if (bad) {
+        t_putstr("joey: cf3-bulk FAILED code=");
+        t_putstr(itoa_dec(bad, nb, sizeof(nb)));
+        t_putstr(" wn0=");
+        t_putstr(itoa_dec(wn0, nb, sizeof(nb)));
+        t_putstr(" got0=");
+        t_putstr(itoa_dec(got0, nb, sizeof(nb)));
+        t_putstr("\n");
+        return -1;
+    }
+    t_putstr("joey: cf3-bulk OK (40 KiB round-trip; first write ");
+    t_putstr(itoa_dec(wn0, nb, sizeof(nb)));
+    t_putstr(" first read ");
+    t_putstr(itoa_dec(got0, nb, sizeof(nb)));
+    t_putstr(" bytes; clamp short, bytes verified)\n");
+    return 0;
+}
+
 int main(void) {
     char buf[24];
     t_putstr("joey: hello from /joey (real userspace binary, loaded from ramfs)\n");
@@ -5118,6 +5215,11 @@ int main(void) {
                                          sizeof(p46_root) - 1) != 0)
                     return 1;
             }
+
+            // CF-3 A always-run regression: bulk byte-I/O (the two-tier
+            // syscall bounce + uaccess_copy_in/out). Boot-fatal.
+            if (probe_cf3_bulk_io() != 0)
+                return 1;
 
             // === /loom-stress orchestration (Loom-6d-2) ===
             // The concurrent + cross-Proc-death SMP stress harness for the native

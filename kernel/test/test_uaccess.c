@@ -24,6 +24,9 @@ void test_uaccess_fixup_table_well_formed(void);
 void test_uaccess_fixup_lookup_known(void);
 void test_uaccess_fixup_lookup_unknown_returns_zero(void);
 void test_uaccess_load_u8_unmapped_user_va_returns_minus1(void);
+void test_uaccess_copy_out_unmapped_faults_all_arms(void);
+void test_uaccess_copy_in_unmapped_faults_all_arms(void);
+void test_uaccess_copy_fixup_entries_present(void);
 
 // Each fixup table entry — must mirror arch/arm64/uaccess.c's
 // struct layout. PC-relative s32 offsets; absolute PC is recovered
@@ -126,4 +129,78 @@ void test_uaccess_load_u8_unmapped_user_va_returns_minus1(void) {
     rc = uaccess_load_u8(0x40000000ull, &out);
     TEST_EXPECT_EQ(rc, (s64)-1,
         "uaccess_load_u8 on a second unmapped VA must also return -1");
+}
+
+// CF-3 A: the bulk copy primitives' negative path. kproc's TTBR0 has no
+// user-half mappings, so every user-VA touch faults; the (alignment, len)
+// variants steer the FIRST faulting instruction to each of the three fault
+// points (head strb / body str / tail strb for copy_out; the ldrb/ldr
+// mirrors for copy_in), proving each fixup entry resolves. The positive
+// path + mid-copy semantics are exercised in-guest by joey's boot-fatal
+// bulk-I/O probe (every EL0 read/write above SYS_RW_STACK rides them).
+
+extern char uaccess_copy_out_op_head[];
+extern char uaccess_copy_out_op_body[];
+extern char uaccess_copy_out_op_tail[];
+extern char uaccess_copy_out_fault[];
+extern char uaccess_copy_in_op_head[];
+extern char uaccess_copy_in_op_body[];
+extern char uaccess_copy_in_op_tail[];
+extern char uaccess_copy_in_fault[];
+
+void test_uaccess_copy_out_unmapped_faults_all_arms(void) {
+    static const u8 src[64] = { 1, 2, 3 };
+
+    // len == 0: no user deref at all -- must succeed.
+    TEST_EXPECT_EQ(uaccess_copy_out(0x10000000ull, src, 0), (s64)0,
+        "copy_out len=0 must succeed without touching the VA");
+
+    // Unaligned dst -> the HEAD strb is the first fault point.
+    TEST_EXPECT_EQ(uaccess_copy_out(0x10000001ull, src, 16), (s64)-1,
+        "copy_out head-arm fault must return -1");
+
+    // Aligned dst, len >= 8 -> the BODY str is the first fault point.
+    TEST_EXPECT_EQ(uaccess_copy_out(0x10000000ull, src, 64), (s64)-1,
+        "copy_out body-arm fault must return -1");
+
+    // Aligned dst, len < 8 -> the TAIL strb is the first fault point.
+    TEST_EXPECT_EQ(uaccess_copy_out(0x10000000ull, src, 3), (s64)-1,
+        "copy_out tail-arm fault must return -1");
+}
+
+void test_uaccess_copy_in_unmapped_faults_all_arms(void) {
+    u8 dst[64];
+    dst[0] = 0xAB;   // poisoned; the head fault must not have stored.
+
+    TEST_EXPECT_EQ(uaccess_copy_in(dst, 0x10000000ull, 0), (s64)0,
+        "copy_in len=0 must succeed without touching the VA");
+
+    TEST_EXPECT_EQ(uaccess_copy_in(dst, 0x10000001ull, 16), (s64)-1,
+        "copy_in head-arm fault must return -1");
+    TEST_EXPECT_EQ((u64)dst[0], 0xABull,
+        "copy_in must not write dst[0] when the first load faults");
+
+    TEST_EXPECT_EQ(uaccess_copy_in(dst, 0x10000000ull, 64), (s64)-1,
+        "copy_in body-arm fault must return -1");
+
+    TEST_EXPECT_EQ(uaccess_copy_in(dst, 0x10000000ull, 3), (s64)-1,
+        "copy_in tail-arm fault must return -1");
+}
+
+void test_uaccess_copy_fixup_entries_present(void) {
+    // Each of the six faulting instructions must resolve to its shared
+    // fault label -- the lookup path the dispatcher takes to install
+    // ctx->elr on a copy fault.
+    TEST_EXPECT_EQ(uaccess_fixup_lookup((u64)(uintptr_t)uaccess_copy_out_op_head),
+        (u64)(uintptr_t)uaccess_copy_out_fault, "copy_out head fixup");
+    TEST_EXPECT_EQ(uaccess_fixup_lookup((u64)(uintptr_t)uaccess_copy_out_op_body),
+        (u64)(uintptr_t)uaccess_copy_out_fault, "copy_out body fixup");
+    TEST_EXPECT_EQ(uaccess_fixup_lookup((u64)(uintptr_t)uaccess_copy_out_op_tail),
+        (u64)(uintptr_t)uaccess_copy_out_fault, "copy_out tail fixup");
+    TEST_EXPECT_EQ(uaccess_fixup_lookup((u64)(uintptr_t)uaccess_copy_in_op_head),
+        (u64)(uintptr_t)uaccess_copy_in_fault, "copy_in head fixup");
+    TEST_EXPECT_EQ(uaccess_fixup_lookup((u64)(uintptr_t)uaccess_copy_in_op_body),
+        (u64)(uintptr_t)uaccess_copy_in_fault, "copy_in body fixup");
+    TEST_EXPECT_EQ(uaccess_fixup_lookup((u64)(uintptr_t)uaccess_copy_in_op_tail),
+        (u64)(uintptr_t)uaccess_copy_in_fault, "copy_in tail fixup");
 }

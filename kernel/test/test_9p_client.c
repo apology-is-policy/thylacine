@@ -534,6 +534,43 @@ void test_9p_client_write(void) {
     p9_loopback_destroy(&g_loopback);
 }
 
+// CF-3 A regression: a write whose count exceeds the negotiated msize's
+// Twrite payload must be CLAMPED to a short write (the POSIX contract;
+// callers loop), never fail the frame build. Pre-clamp this returned
+// -P9_E_IO for every over-payload write -- the bench cascade: the go
+// compiler's bulk object writes EIO'd, no cache puts landed, the warm
+// build ran cold. msize here is the negotiated 8192, so the payload max
+// is 8192 - 23 (hdr 7 + fid 4 + offset 8 + count 4) = 8169.
+void test_9p_client_bulk_write_clamps_short(void) {
+    drive_client_open(&g_client, &g_loopback);
+    p9_client_walk_one(&g_client, 0, 14, (const u8 *)"f", 1, NULL);
+
+    static u8 big[16000];
+    for (u32 i = 0; i < sizeof(big); i++) big[i] = (u8)(i & 0xFF);
+    u32 nmsize = g_client.session.negotiated_msize;
+    TEST_ASSERT(nmsize > 0 && nmsize <= 8192, "loopback msize sanity");
+    u64 wmax = (u64)nmsize - 23u;
+
+    u32 accepted = 0;
+    int rc = p9_client_write(&g_client, 14, 0,
+                               (u32)sizeof(big), big, &accepted);
+    TEST_EXPECT_EQ(rc, 0,               "over-payload write must not EIO");
+    TEST_EXPECT_EQ((u64)accepted, wmax, "accepted = the msize payload max");
+
+    // The read-side twin clamp: an over-payload count is clamped before the
+    // Tread goes out (observable only as rc==0 here -- the loopback file is
+    // 5 bytes; the pre-clamp count would have been legal on the wire anyway
+    // since Tread carries no payload, but the clamp keeps the REPLY bound
+    // inside the negotiated msize by construction).
+    static u8 rbuf[16000];
+    u32 n = 0;
+    rc = p9_client_read(&g_client, 14, 0, (u32)sizeof(rbuf), rbuf, &n);
+    TEST_EXPECT_EQ(rc, 0, "over-payload read count must not error");
+
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
 void test_9p_client_getattr(void) {
     drive_client_open(&g_client, &g_loopback);
     p9_client_walk_one(&g_client, 0, 12, (const u8 *)"f", 1, NULL);

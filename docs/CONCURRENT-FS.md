@@ -181,6 +181,73 @@ pre-committed:
   the #348/#349 backpressure paths get re-validated; S12/#354-class server
   send multi-writer latent must be closed in the same pass).
 
+**[AS MEASURED at CF-3 open (2026-07-07; the CF3RT throwaway instrument —
+dev9p_read size/latency/contiguous-run/path counters + a syscall-level
+requested-len histogram, one bench boot on the post-#367 twins): the
+binding constraint was NEITHER candidate lever — it sat one layer below
+both, at the SYSCALL staging. `SYS_RW_MAX = 4096` (the 4 KiB kernel-stack
+bounce, whose copy-out was additionally a per-byte `uaccess_store_u8`
+call loop) capped every EL0 read at one 4 KiB Tread, and the Go port
+mirrors the constant (`rwMax`, a userspace pre-chunk), so bulk reads
+arrive as runs of contiguous 4 KiB RPCs. 4096 B per ~145 µs turnaround ≈
+the long-measured ~27 MiB/s effective read ceiling. The negotiated
+32 KiB msize was never reached by the storm — S2's "a 256 KiB cluster
+read = 8 round trips" held only for kernel-internal reads (`maxgot` =
+32757 confirms those already ride the full payload). The windows:
+gofmt-COLD = 39,052 Treads / 444 MB delivered, 67% of calls exactly
+4096, ≥48% of ops in detected contiguous same-fid runs (the single-slot
+run tracker undercounts under `-p 4` interleave), Tread latency sum
+35.4 s inside a 21.2 s wall (reads overlap across Procs) with median
+< 100 µs and a fat serial-server queueing tail (1,957 calls ≥ 500 µs,
+max 200 ms — CF-2/CF-4 territory, not a frame-size problem); gofmt-WARM
+(2.79 s) = 4,678 Treads / 29.2 MB, 71% exactly-4096, 79% of bytes in
+runs, latency sum 3.23 s ≈ 1.16× the wall — the warm build IS the read
+stream. The stage therefore splits:**
+
+- **CF-3 A (LANDED with this note): lift the syscall byte-I/O ceiling.**
+  `SYS_RW_MAX` 4096 → 128 KiB via a two-tier bounce (ops ≤ the new
+  `SYS_RW_STACK` = 4096 keep the stack scratch — the metadata storm pays
+  nothing; above it a transient kmalloc, degrading to the stack tier on
+  allocation failure so memory pressure shortens an op, never fails it)
+  + bulk `uaccess_copy_out` / `uaccess_copy_in` primitives (word-wise,
+  three fixup entries each — head/body/tail; replaces the per-byte
+  uaccess call loops in all four byte-I/O handlers) + the port mirror
+  lifts (go `rwMax` → 128 KiB with `Readdir` PINNED at the kernel's kept
+  4 KiB dirent bound; libt/libthyla-rs doc caps). `SYS_READDIR` /
+  `SYS_GETRANDOM` / `SYS_EXPLICIT_BZERO` deliberately KEEP the 4 KiB
+  bound (`SYS_RW_STACK`) — no bulk need, and the scrub arm's oversize
+  REJECT is ABI. At today's msize a bulk read RPC now carries 32,757 B
+  (8× fewer RPCs per byte); the full 128 KiB per-RPC payload arrives
+  with CF-3 B. 128 KiB = `STM_9P_MSIZE_DEFAULT`, the server's accepted
+  default — the client proposal is the only thing pinning 32 KiB.
+  **As-landed numbers (fresh-twin protocol, 2 boots, the lifted-rwMax
+  toolchain re-baked):** gofmt cold **19.8 / 20.0 s** (vs the post-#367
+  21.1/20.6 pair — the cold window's Treads 39.0k → 18.5k, 2.1× fewer,
+  same 444 MB moved, `eq4096` 26.1k → 1.9k), warm **2.73 / 2.77 s**
+  (~flat vs 2.77/2.79 — warm is small-op + queue-bound). The syscall
+  layer is no longer the binding constraint; the residual cold time is
+  per-byte server work + the serial-server queueing tail — CF-3 B's and
+  CF-2/CF-4's territory respectively.
+  **The lift's first bench EXPOSED a latent the 4 KiB cap had masked:
+  the 9P client never clamped a single op's count to the negotiated
+  payload — an over-payload Twrite failed the frame build and returned
+  EIO (the compiler's bulk object writes all failed → no cache puts →
+  the warm build ran cold → the build exited 1). Fixed in the same
+  chunk: `p9_client_read`/`p9_client_write` clamp to the negotiated
+  msize's payload (Twrite additionally to the client out_buf bound) and
+  return SHORT — the protocol's own contract; callers loop. Regression:
+  `9p_client.bulk_write_clamps_short`.**
+- **CF-3 B (next; carries the §8.3 signoff): the msize/ring lift.**
+  stratumd already accepts 128 KiB; the kernel SrvConn ring
+  (`SRVCONN_MSIZE`, an embedded fixed array — 2 frames each way) is the
+  blocker. A global bump costs every byte-mode connection ~512 KB of
+  kernel memory and connections are user-drivable (I-32-adjacent), so
+  the per-service post-time ring hint remains the designed shape; the
+  memory math + the ABI addition go to the user per §8.3.
+- **CF-3 C (fan-out): HOLD** — re-measure the post-A residual first; the
+  measured latency tail is server-side queueing, which fan-out cannot
+  help while the pool defaults to workers=1.]
+
 ### CF-4 — Stratum: commit-path cost (Area G's designed follow-ups)
 
 Scripture-first on the Stratum side (both are crash-consistency-critical):

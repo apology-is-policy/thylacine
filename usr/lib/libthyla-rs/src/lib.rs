@@ -969,8 +969,9 @@ pub unsafe fn t_pipe() -> (i64, i64) {
 //   = 0  : EOF (peer closed write side)
 //   < 0  : error (-1 on invalid fd / bad buf / fault)
 //
-// Per-call cap is 4 KiB (kernel-side SYS_RW_MAX); userspace loops for
-// larger transfers.
+// Per-call cap is 128 KiB (kernel-side SYS_RW_MAX, CF-3 A; the 9P
+// transport clamps a single RPC's payload below that, so short reads
+// stay normal); userspace loops for larger transfers.
 //
 // Safety: caller must ensure `buf` points to at least `len` writable
 // bytes in valid user-VA memory.
@@ -1448,7 +1449,7 @@ pub unsafe fn t_set_traceable(traceable: u64) -> i64 {
 // t_explicit_bzero — compiler-barrier'd memset to zero of `len` bytes at
 // `buf`. The kernel performs a per-byte uaccess_store_u8 loop which the
 // optimizer cannot elide. Returns 0 on success, -1 on validation
-// failure (buf in kernel-VA, len > SYS_RW_MAX, mid-stream fault).
+// failure (buf in kernel-VA, len > SYS_RW_STACK, mid-stream fault).
 //
 // Use this for in-RAM secrets immediately after they're consumed —
 // passphrase buffers, derived KEKs, unwrapped DEKs. Without it, the
@@ -1472,7 +1473,7 @@ pub unsafe fn t_explicit_bzero(buf: *mut u8, len: usize) -> i64 {
 
 // t_getrandom — read `len` random bytes into `buf` from the kernel
 // CSPRNG. `flags` is reserved at v1.0 (must be 0). Caller must hold
-// CAP_CSPRNG_READ. Per-call cap is SYS_RW_MAX (4 KiB) at v1.0.
+// CAP_CSPRNG_READ. Per-call cap is SYS_RW_STACK (4 KiB) at v1.0.
 //
 // Returns `len` on success, -1 on cap missing / non-zero flags /
 // oversized len / mid-stream uaccess fault. The kernel CSPRNG is
@@ -2090,7 +2091,7 @@ pub unsafe fn t_fsync(fd: i64, datasync: u32) -> i64 {
 }
 
 // t_readdir — read the next run of 9P2000.L dirents from directory `fd`
-// (KOBJ_SPOOR, RIGHT_READ) into `buf` (<= SYS_RW_MAX), advancing the Spoor's
+// (KOBJ_SPOOR, RIGHT_READ) into `buf` (<= SYS_RW_STACK = 4096), advancing the Spoor's
 // offset. Returns bytes (>= 0; 0 = end-of-directory), -1 on error. Each entry:
 // qid(13) + offset(8 LE) + type(1) + name_len(2 LE) + name. FS-mutation
 // foundation (§9.2).
@@ -2173,7 +2174,7 @@ pub unsafe fn t_lseek(spoor_fd: i64, offset: i64, whence: u32) -> i64 {
 // offset `off` (#37). The per-Spoor cursor is neither read nor advanced.
 // Returns bytes read (>0), 0 at EOF, -1 / -errno on error -- including
 // off < 0 and a non-seekable Dev (the POSIX ESPIPE shape: pread on a
-// pipe fails). Per-call cap is 4096 bytes (SYS_RW_MAX); loop for more.
+// pipe fails). Per-call cap is SYS_RW_MAX (128 KiB, CF-3 A); loop for more.
 #[inline(always)]
 pub unsafe fn t_pread(spoor_fd: i64, buf: *mut u8, len: usize, off: i64) -> i64 {
     let mut x0: i64 = spoor_fd;

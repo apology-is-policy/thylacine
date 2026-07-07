@@ -698,8 +698,9 @@ static inline long t_pipe(long *out_rd_fd, long *out_wr_fd) {
 }
 
 // t_read — read up to `len` bytes from `fd` into `buf`. Returns bytes
-// read (>0), 0 on EOF, -1 on error. Per-call cap is 4096 bytes
-// (kernel-side SYS_RW_MAX); userspace loops for larger transfers.
+// read (>0), 0 on EOF, -1 on error. Per-call cap is 128 KiB
+// (kernel-side SYS_RW_MAX, CF-3 A; a single 9P RPC's payload is still
+// msize-clamped, so short reads stay normal); userspace loops.
 __attribute__((always_inline))
 static inline long t_read(long fd, void *buf, size_t len) {
     register long x0 __asm__("x0") = fd;
@@ -737,7 +738,7 @@ static inline long t_write(long fd, const void *buf, size_t len) {
 // concurrent positioned ops on one fd share no mutable state (the POSIX
 // pread contract). Returns bytes read (>0), 0 on EOF, -1 on error --
 // including off < 0 and a non-seekable Dev (the ESPIPE shape: pread on
-// a pipe fails). Per-call cap is 4096 bytes (SYS_RW_MAX).
+// a pipe fails). Per-call cap is SYS_RW_MAX (128 KiB, CF-3 A).
 __attribute__((always_inline))
 static inline long t_pread(long fd, void *buf, size_t len, long off) {
     register long x0 __asm__("x0") = fd;
@@ -876,7 +877,7 @@ static inline long t_set_traceable(unsigned long traceable) {
 }
 
 // t_explicit_bzero — compiler-barrier'd memset to zero of `len` bytes
-// starting at `buf`. Per-call cap is SYS_RW_MAX (4096); loop for
+// starting at `buf`. Per-call cap is SYS_RW_STACK (4096); loop for
 // larger buffers. Returns 0 on success, -1 on user-VA validation
 // failure. The kernel's per-byte uaccess_store_u8 path is the
 // barrier — the compiler cannot elide the writes across the syscall
@@ -896,7 +897,7 @@ static inline long t_explicit_bzero(void *buf, size_t len) {
 }
 
 // t_getrandom — read `len` random bytes into `buf` from the kernel
-// CSPRNG. Caller must hold CAP_CSPRNG_READ. Per-call cap is SYS_RW_MAX
+// CSPRNG. Caller must hold CAP_CSPRNG_READ. Per-call cap is SYS_RW_STACK
 // (4096); loop for larger buffers. Returns bytes read (= len on
 // success) or -1 on: missing cap / bad user-VA / CSPRNG unseeded /
 // CSPRNG hardware fault.
@@ -1471,7 +1472,7 @@ static inline long t_fsync(long fd, unsigned long datasync) {
 }
 
 // t_readdir — read the next run of 9P2000.L dirents from a directory `fd`
-// (KOBJ_SPOOR, RIGHT_READ) into `buf` (<= SYS_RW_MAX), advancing the Spoor's
+// (KOBJ_SPOOR, RIGHT_READ) into `buf` (<= SYS_RW_STACK = 4096), advancing the Spoor's
 // offset. Returns bytes written (>=0; 0 = end-of-directory), -1 on error. Each
 // entry: qid(13) + offset(8 LE) + type(1) + name_len(2 LE) + name. FS-mutation
 // foundation (IDENTITY-DESIGN.md section 9.2).

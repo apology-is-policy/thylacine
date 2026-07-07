@@ -1108,6 +1108,30 @@ int p9_client_lcreate(struct p9_client *c, u32 fid,
     return 0;
 }
 
+// CF-3 A: a single op's payload is bounded by the negotiated msize (and, for
+// Twrite, additionally by this client's out_buf -- the frame-build bound).
+// Pre-lift no syscall caller could exceed either (SYS_RW_MAX was 4096); the
+// lift made bulk counts reachable, and an unclamped Twrite FAILED the frame
+// build (-P9_E_IO on every over-payload write -- the CF-3 bench cascade:
+// EIO'd object writes -> no cache puts -> the warm build ran cold). The
+// client clamps and returns the SHORT count -- the protocol's own contract
+// (a 9P client never emits an op exceeding the negotiated msize); callers
+// loop per the POSIX short-read/short-write discipline.
+static u32 client_max_read_count(const struct p9_client *c) {
+    u32 ms = c->session.negotiated_msize ? c->session.negotiated_msize
+                                         : c->session.msize;
+    // Rread reply framing: hdr(7) + count(4).
+    return (ms > P9_HDR_LEN + 4u) ? ms - (P9_HDR_LEN + 4u) : 0;
+}
+
+static u32 client_max_write_payload(const struct p9_client *c) {
+    u32 ms = c->session.negotiated_msize ? c->session.negotiated_msize
+                                         : c->session.msize;
+    if (ms > (u32)sizeof(c->out_buf)) ms = (u32)sizeof(c->out_buf);
+    // Twrite framing: hdr(7) + fid(4) + offset(8) + count(4).
+    return (ms > P9_HDR_LEN + 16u) ? ms - (P9_HDR_LEN + 16u) : 0;
+}
+
 int p9_client_read(struct p9_client *c, u32 fid, u64 offset,
                     u32 count, u8 *out_data, u32 *out_count) {
     if (!c) return -P9_E_INVAL;
@@ -1116,6 +1140,12 @@ int p9_client_read(struct p9_client *c, u32 fid, u64 offset,
     spin_lock(&c->lock);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
+    u32 rmax = client_max_read_count(c);
+    // Audit F2: a degenerate negotiated msize (<= the framing overhead)
+    // would clamp every op to 0 -- a spurious EOF a looping reader spins
+    // on. Unreachable from any v1.0 mount (all >= 4096); fail closed.
+    if (rmax == 0 && count > 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
+    if (count > rmax) count = rmax;      // short read; the caller loops
     int len = p9_session_send_read(&c->session, c->out_buf,
                                     sizeof(c->out_buf),
                                     fid, offset, count);
@@ -1143,6 +1173,11 @@ int p9_client_write(struct p9_client *c, u32 fid, u64 offset,
     spin_lock(&c->lock);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
+    u32 wmax = client_max_write_payload(c);
+    // Audit F2: the write-side twin of the degenerate-msize guard above --
+    // a 0-clamp would return accepted=0 forever to a looping writer.
+    if (wmax == 0 && count > 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
+    if (count > wmax) count = wmax;      // short write; the caller loops
     int len = p9_session_send_write(&c->session, c->out_buf,
                                      sizeof(c->out_buf),
                                      fid, offset, count, data);

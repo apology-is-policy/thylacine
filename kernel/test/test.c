@@ -302,6 +302,9 @@ void test_uaccess_fixup_table_well_formed(void);
 void test_uaccess_fixup_lookup_known(void);
 void test_uaccess_fixup_lookup_unknown_returns_zero(void);
 void test_uaccess_load_u8_unmapped_user_va_returns_minus1(void);
+void test_uaccess_copy_out_unmapped_faults_all_arms(void);
+void test_uaccess_copy_in_unmapped_faults_all_arms(void);
+void test_uaccess_copy_fixup_entries_present(void);
 void test_fault_decode_kernel_data_translation_l2(void);
 void test_fault_decode_kernel_data_permission_write(void);
 void test_fault_decode_user_data_translation(void);
@@ -834,6 +837,7 @@ void test_9p_client_walk_and_clunk(void);
 void test_9p_client_walkgetattr(void);
 void test_9p_client_lopen_read(void);
 void test_9p_client_write(void);
+void test_9p_client_bulk_write_clamps_short(void);
 void test_9p_client_getattr(void);
 void test_9p_client_readdir(void);
 void test_9p_client_statfs(void);
@@ -1459,6 +1463,15 @@ struct test_case g_tests[] = {
     { "uaccess.load_u8_unmapped_user_va_returns_minus1",
                                        test_uaccess_load_u8_unmapped_user_va_returns_minus1,
                                                                            false, NULL },
+    { "uaccess.copy_out_unmapped_faults_all_arms",
+                                       test_uaccess_copy_out_unmapped_faults_all_arms,
+                                                                           false, NULL },
+    { "uaccess.copy_in_unmapped_faults_all_arms",
+                                       test_uaccess_copy_in_unmapped_faults_all_arms,
+                                                                           false, NULL },
+    { "uaccess.copy_fixup_entries_present",
+                                       test_uaccess_copy_fixup_entries_present,
+                                                                           false, NULL },
     { "fault.decode_kernel_data_translation_l2",
                                        test_fault_decode_kernel_data_translation_l2,
                                                                            false, NULL },
@@ -2080,6 +2093,9 @@ struct test_case g_tests[] = {
     { "9p_client.walkgetattr",         test_9p_client_walkgetattr,         false, NULL },
     { "9p_client.lopen_read",          test_9p_client_lopen_read,          false, NULL },
     { "9p_client.write",               test_9p_client_write,               false, NULL },
+    { "9p_client.bulk_write_clamps_short",
+                                       test_9p_client_bulk_write_clamps_short,
+                                                                           false, NULL },
     { "9p_client.getattr",             test_9p_client_getattr,             false, NULL },
     { "9p_client.readdir",             test_9p_client_readdir,             false, NULL },
     { "9p_client.statfs",              test_9p_client_statfs,              false, NULL },

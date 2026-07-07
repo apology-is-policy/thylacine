@@ -66,6 +66,25 @@ extern s64 uaccess_load_u32(u64 user_va, u32 *out);
 // (the kernel here) for memory ordering. Mirrors uaccess_load_u32.
 extern s64 uaccess_store_u32(u64 user_va, u32 value);
 
+// Copy `len` bytes from a kernel buffer to a user VA (bulk copy-out).
+// Returns 0 on success or -1 on translation/permission fault at any point
+// in the range. [user_va, user_va+len) must lie in [0, UACCESS_USER_VA_TOP)
+// (the caller validates -- sys_validate_user_buf on the syscall surface).
+// On -1, bytes before the faulting page were already stored to user-VA
+// (the same partial-copy caveat the per-byte loop had); the caller returns
+// its EFAULT-equivalent and the user must not trust the buffer.
+//
+// Added at CF-3 A for the byte-I/O handlers' bulk staging: replaces the
+// per-byte uaccess_store_u8 loop (one function call per byte) with a
+// word-wise copy carrying three fixup entries (head/body/tail).
+extern s64 uaccess_copy_out(u64 user_va, const void *src, u64 len);
+
+// Copy `len` bytes from a user VA into a kernel buffer (bulk copy-in).
+// Returns 0 on success or -1 on fault. On -1 the kernel buffer's prefix is
+// defined and the rest unspecified -- callers treat -1 as whole-op EFAULT
+// and must not consume the buffer. The mirror of uaccess_copy_out.
+extern s64 uaccess_copy_in(void *dst, u64 user_va, u64 len);
+
 // Look up the fixup PC for a faulting instruction PC. Returns 0 if
 // `fault_pc` is not in the table (the fault is not a uaccess fault).
 // Otherwise returns the fixup PC to which the dispatcher must

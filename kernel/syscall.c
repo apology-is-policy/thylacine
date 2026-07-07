@@ -903,11 +903,38 @@ static s64 sys_pipe_handler(u64 *out_rd, u64 *out_wr) {
 //            routes through dev->write. Returns bytes written (>=0),
 //            -1 on error.
 //
-// Length is capped at SYS_RW_MAX per call (4096 bytes; matches
-// PIPE_BUF_SIZE). Userspace loops for larger transfers.
+// Length is capped at SYS_RW_MAX per call (128 KiB since CF-3 A; ops
+// above SYS_RW_STACK take a transient kmalloc bounce, smaller ops stay
+// on the 4 KiB stack scratch). Userspace loops for larger transfers.
 //
 // Rights gate: SYS_READ requires RIGHT_READ on the handle; SYS_WRITE
 // requires RIGHT_WRITE.
+
+// CF-3 A audit F1: the per-Proc bounce budget (an I-32-shaped resource
+// axis; PROC_BOUNCE_MAX, proc.h). The byte-I/O heap tier is TRANSIENT
+// kernel memory a Proc can hold across an indefinitely-blocking
+// dev->read/write (a held-open pipe, an idle /net socket, a hung server)
+// -- unbudgeted, threads x SYS_RW_MAX of order-5 heap per Proc, fork-
+// aggregable and buddy-fragmenting. Charge before the kmalloc, uncharge
+// at the free on every path; over-budget ops degrade to the stack tier
+// (a short op -- correct, never failed). PRINCIPAL_SYSTEM is exempt (the
+// TCB pattern shared with page/thread/child caps); charge and uncharge
+// gate on the same predicate, so the counter stays balanced.
+static bool sys_bounce_charge(struct Proc *p, u64 n) {
+    if (proc_resource_exempt(p)) return true;
+    u64 cur = __atomic_load_n(&p->bounce_bytes, __ATOMIC_RELAXED);
+    do {
+        if (cur + n > (u64)PROC_BOUNCE_MAX) return false;
+    } while (!__atomic_compare_exchange_n(&p->bounce_bytes, &cur, cur + n,
+                                          false, __ATOMIC_RELAXED,
+                                          __ATOMIC_RELAXED));
+    return true;
+}
+
+static void sys_bounce_uncharge(struct Proc *p, u64 n) {
+    if (proc_resource_exempt(p)) return;
+    __atomic_fetch_sub(&p->bounce_bytes, n, __ATOMIC_RELAXED);
+}
 
 // Helper: look up an open KOBJ_SPOOR handle, validate rights. Returns a
 // REF-HELD Spoor on success (NULL on bad fd / wrong kind / missing rights).
@@ -1148,13 +1175,30 @@ static s64 sys_write_handler(u64 hraw, u64 buf_va, u64 len) {
         return 0;
     }
 
-    // Bounce buffer on the kernel stack. 4 KiB cap → 4 KiB stack
-    // frame; kernel test thread stack is 16 KiB, leaves headroom.
-    u8 scratch[SYS_RW_MAX];
-    for (u64 i = 0; i < len; i++) {
-        if (uaccess_load_u8(buf_va + i, &scratch[i]) != 0) return -1;
+    // CF-3 A: two-tier bounce. Ops <= SYS_RW_STACK stay on the stack (the
+    // metadata-storm path -- zero new cost; 4 KiB frame vs the 16 KiB kernel
+    // stack); bulk ops take a transient kmalloc so ONE syscall stages up to
+    // SYS_RW_MAX. kmalloc failure degrades to the stack tier -- memory
+    // pressure shortens a write (POSIX short writes are normal), never
+    // fails it. uaccess_copy_in replaces the per-byte load loop.
+    u8 stack_scratch[SYS_RW_STACK];
+    u8 *scratch = stack_scratch;
+    void *heap_scratch = NULL;
+    if (len > SYS_RW_STACK) {
+        if (sys_bounce_charge(p, len)) {
+            heap_scratch = kmalloc(len, 0);
+            if (heap_scratch) scratch = heap_scratch;
+            else              sys_bounce_uncharge(p, len);
+        }
+        if (!heap_scratch) len = SYS_RW_STACK;
     }
-    return sys_write_for_proc(p, (hidx_t)hraw, scratch, len);
+    if (uaccess_copy_in(scratch, buf_va, len) != 0) {
+        if (heap_scratch) { kfree(heap_scratch); sys_bounce_uncharge(p, len); }
+        return -1;
+    }
+    s64 wr = sys_write_for_proc(p, (hidx_t)hraw, scratch, len);
+    if (heap_scratch) { kfree(heap_scratch); sys_bounce_uncharge(p, len); }
+    return wr;
 }
 
 // Weft-6b-3 data drive (RX): the zero-copy read fast-path. A large read whose
@@ -1216,16 +1260,28 @@ static s64 sys_read_handler(u64 hraw, u64 buf_va, u64 len) {
         return 0;
     }
 
-    u8 scratch[SYS_RW_MAX];
-    s64 got = sys_read_for_proc(p, (hidx_t)hraw, scratch, len);
-    if (got <= 0)                                    return got;
-
-    // Copy what was read back to user-VA. Per-byte; on fault, return
-    // -1 — partial bytes already in user-VA are not "uncopied" but
-    // bytes consumed beyond the fault are LOST. Documented caveat.
-    for (s64 i = 0; i < got; i++) {
-        if (uaccess_store_u8(buf_va + (u64)i, scratch[i]) != 0) return -1;
+    // CF-3 A: two-tier bounce (see sys_write_handler). Pre-CF-3 the 4 KiB
+    // stack scratch capped every bulk read RPC at 4 KiB against a 32 KiB
+    // negotiated msize -- 67% of a go build's Treads were exactly-4096
+    // userspace chunks (the CF3 Tread-stream measurement).
+    u8 stack_scratch[SYS_RW_STACK];
+    u8 *scratch = stack_scratch;
+    void *heap_scratch = NULL;
+    if (len > SYS_RW_STACK) {
+        if (sys_bounce_charge(p, len)) {
+            heap_scratch = kmalloc(len, 0);
+            if (heap_scratch) scratch = heap_scratch;
+            else              sys_bounce_uncharge(p, len);
+        }
+        if (!heap_scratch) len = SYS_RW_STACK;
     }
+    s64 got = sys_read_for_proc(p, (hidx_t)hraw, scratch, len);
+    // Bulk copy-out; on fault, return -1 — partial bytes already in
+    // user-VA are not "uncopied" but bytes consumed beyond the fault are
+    // LOST. Documented caveat (unchanged from the per-byte era).
+    if (got > 0 && uaccess_copy_out(buf_va, scratch, (u64)got) != 0)
+        got = -1;
+    if (heap_scratch) { kfree(heap_scratch); sys_bounce_uncharge(p, len); }
     return got;
 }
 
@@ -1252,16 +1308,25 @@ static s64 sys_pread_handler(u64 hraw, u64 buf_va, u64 len, u64 off_raw) {
     if (!sys_validate_user_buf(buf_va, len))         return -1;
     if (len > SYS_RW_MAX) len = SYS_RW_MAX;
 
-    u8 scratch[SYS_RW_MAX];
-    s64 got = sys_pread_for_proc(p, (hidx_t)hraw, scratch, len, (s64)off_raw);
-    if (got <= 0)                                    return got;
-
-    // Copy out to user-VA. Per-byte; the SYS_READ partial-copy caveat applies
-    // -- but unlike SYS_READ nothing is LOST on a fault: the cursor never
-    // moved, so the caller can simply repeat the pread.
-    for (s64 i = 0; i < got; i++) {
-        if (uaccess_store_u8(buf_va + (u64)i, scratch[i]) != 0) return -1;
+    // CF-3 A: two-tier bounce (see sys_read_handler).
+    u8 stack_scratch[SYS_RW_STACK];
+    u8 *scratch = stack_scratch;
+    void *heap_scratch = NULL;
+    if (len > SYS_RW_STACK) {
+        if (sys_bounce_charge(p, len)) {
+            heap_scratch = kmalloc(len, 0);
+            if (heap_scratch) scratch = heap_scratch;
+            else              sys_bounce_uncharge(p, len);
+        }
+        if (!heap_scratch) len = SYS_RW_STACK;
     }
+    s64 got = sys_pread_for_proc(p, (hidx_t)hraw, scratch, len, (s64)off_raw);
+    // Bulk copy-out; the SYS_READ partial-copy caveat applies -- but unlike
+    // SYS_READ nothing is LOST on a fault: the cursor never moved, so the
+    // caller can simply repeat the pread.
+    if (got > 0 && uaccess_copy_out(buf_va, scratch, (u64)got) != 0)
+        got = -1;
+    if (heap_scratch) { kfree(heap_scratch); sys_bounce_uncharge(p, len); }
     return got;
 }
 
@@ -1273,11 +1338,25 @@ static s64 sys_pwrite_handler(u64 hraw, u64 buf_va, u64 len, u64 off_raw) {
     if (!sys_validate_user_buf(buf_va, len))         return -1;
     if (len > SYS_RW_MAX) len = SYS_RW_MAX;
 
-    u8 scratch[SYS_RW_MAX];
-    for (u64 i = 0; i < len; i++) {
-        if (uaccess_load_u8(buf_va + i, &scratch[i]) != 0) return -1;
+    // CF-3 A: two-tier bounce (see sys_write_handler).
+    u8 stack_scratch[SYS_RW_STACK];
+    u8 *scratch = stack_scratch;
+    void *heap_scratch = NULL;
+    if (len > SYS_RW_STACK) {
+        if (sys_bounce_charge(p, len)) {
+            heap_scratch = kmalloc(len, 0);
+            if (heap_scratch) scratch = heap_scratch;
+            else              sys_bounce_uncharge(p, len);
+        }
+        if (!heap_scratch) len = SYS_RW_STACK;
     }
-    return sys_pwrite_for_proc(p, (hidx_t)hraw, scratch, len, (s64)off_raw);
+    if (uaccess_copy_in(scratch, buf_va, len) != 0) {
+        if (heap_scratch) { kfree(heap_scratch); sys_bounce_uncharge(p, len); }
+        return -1;
+    }
+    s64 wr = sys_pwrite_for_proc(p, (hidx_t)hraw, scratch, len, (s64)off_raw);
+    if (heap_scratch) { kfree(heap_scratch); sys_bounce_uncharge(p, len); }
+    return wr;
 }
 
 // =============================================================================
@@ -1568,7 +1647,7 @@ static s64 sys_stat_handler(u64 path_va, u64 path_len_raw, u64 stat_va) {
 
 // Default 9P handshake parameters for SYS_ATTACH_9P at v1.0. msize
 // must match what dev9p / sys_read_handler scratch buffers can hold.
-// 4 KiB matches PIPE_BUF_SIZE + SYS_RW_MAX; aligns with the design.
+// 4 KiB matches PIPE_BUF_SIZE + SYS_RW_STACK; aligns with the design.
 #define SYS_ATTACH_DEFAULT_MSIZE     4096u
 #define SYS_ATTACH_DEFAULT_ROOT_FID  1u
 
@@ -2811,7 +2890,7 @@ static s64 sys_readdir_handler(u64 fd_raw, u64 buf_va, u64 buf_len_raw) {
     struct Proc *p = t->proc;
     if (!p)                                          return -1;
 
-    if (buf_len_raw == 0 || buf_len_raw > SYS_RW_MAX) return -1;
+    if (buf_len_raw == 0 || buf_len_raw > SYS_RW_STACK) return -1;
     if (!sys_validate_user_buf(buf_va, buf_len_raw))  return -1;
 
     // #844: c is REF-HELD (borrow); spoor_clunk on every exit (readdir blocks).
@@ -2823,7 +2902,7 @@ static s64 sys_readdir_handler(u64 fd_raw, u64 buf_va, u64 buf_len_raw) {
     if (c->flag & CWALKONLY)                       { spoor_clunk(c); return -1; }
     if (!c->dev || !c->dev->readdir)               { spoor_clunk(c); return -1; }
 
-    u8 scratch[SYS_RW_MAX];
+    u8 scratch[SYS_RW_STACK];
     u64 in_cookie = (u64)c->offset;   // the opaque resume cookie we ask to resume FROM
     long got = c->dev->readdir(c, scratch, (long)buf_len_raw, c->offset);
     if (got < 0)                                   { spoor_clunk(c); return -1; }
@@ -4620,11 +4699,14 @@ static s64 sys_explicit_bzero_handler(u64 buf_va, u64 len) {
     struct Proc *p = t->proc;
     if (!p)                                          return -1;
     if (!sys_validate_user_buf(buf_va, len))         return -1;
-    // RW-3 R2-F1: reject len > SYS_RW_MAX -- do NOT silently cap. For a secret-
-    // scrub primitive, capping + returning success would silently retain the
-    // tail of the buffer; the libthyla-rs wrapper documents -1 on oversize, and
-    // SYS_PUTS/SYS_READDIR reject oversize the same way.
-    if (len > SYS_RW_MAX)                             return -1;
+    // RW-3 R2-F1: reject len > SYS_RW_STACK -- do NOT silently cap. For a
+    // secret-scrub primitive, capping + returning success would silently
+    // retain the tail of the buffer; the libthyla-rs wrapper documents -1 on
+    // oversize, and SYS_PUTS/SYS_READDIR reject oversize the same way.
+    // (CF-3 A kept this arm at the historical 4 KiB bound when SYS_RW_MAX
+    // lifted to 128 KiB -- widening a REJECT bound is an ABI change this
+    // chunk does not need.)
+    if (len > SYS_RW_STACK)                           return -1;
     if (len == 0)                                    return 0;
 
     for (u64 i = 0; i < len; i++) {
@@ -4635,8 +4717,9 @@ static s64 sys_explicit_bzero_handler(u64 buf_va, u64 len) {
 
 // SYS_GETRANDOM — read kernel CSPRNG bytes into a user-VA buffer.
 // CAP_CSPRNG_READ required. Caller's user-VA buffer is filled via
-// 4 KiB kernel-stack scratch + uaccess_store_u8 per byte (mirrors
-// SYS_READ's bounce pattern).
+// 4 KiB kernel-stack scratch + uaccess_store_u8 per byte (the pre-CF-3
+// SYS_READ bounce shape, kept here: the F237 partial-fault scrub wants
+// the per-byte loop, and 4 KiB of entropy per call needs no bulk path).
 //
 // CSPRNG-seeded check (C-15): if kern_random_seeded() is false, returns
 // -1 immediately. The GRND_NONBLOCK flag is effectively v1.0's only
@@ -4651,11 +4734,11 @@ static s64 sys_getrandom_handler(u64 buf_va, u64 len, u64 flags_raw) {
         return -1;
     if (flags_raw > (u64)0xFFFFFFFFu)                 return -1;
     if (!sys_validate_user_buf(buf_va, len))         return -1;
-    if (len > SYS_RW_MAX) len = SYS_RW_MAX;
+    if (len > SYS_RW_STACK) len = SYS_RW_STACK;
     if (len == 0)                                    return 0;
     if (!kern_random_seeded())                       return -1;
 
-    u8 scratch[SYS_RW_MAX];
+    u8 scratch[SYS_RW_STACK];
     long got = kern_random_bytes(scratch, (long)len);
     if (got != (long)len)                            return -1;
 

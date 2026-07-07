@@ -106,6 +106,15 @@ struct Env;         // G15 per-Proc environment group (<thylacine/env.h>)
 //                      kstack (256 threads -> 8 MiB kstacks).
 //   PROC_CHILD_MAX  -- live DIRECT children (the direct-fork rate).
 #define PROC_PAGE_MAX   65536u   // 256 MiB at 4-KiB pages
+// CF-3 A audit F1: per-Proc cap on TRANSIENT byte-I/O bounce heap (the
+// SYS_RW_MAX kmalloc tier in the read/write/pread/pwrite handlers).
+// 512 KiB = four concurrent 128-KiB bulk ops -- ample for the measured
+// build workloads (84% of ops run at in-flight depth 1) while bounding
+// the order-5 heap a Proc's BLOCKED ops can pin (a held-open pipe / idle
+// socket / hung server holds its bounce for the block's duration) at
+// 64x below the unbudgeted threads x SYS_RW_MAX. Over-budget ops degrade
+// to the 4-KiB stack tier -- shorter, never failed.
+#define PROC_BOUNCE_MAX (512u * 1024u)
 #define PROC_THREAD_MAX 256
 #define PROC_CHILD_MAX  256
 // PROC_VMA_MAX -- live VMAs (the I-32 FOURTH axis; overcommit, ARCH section 6.5).
@@ -480,6 +489,19 @@ struct Proc {
     // p->env, env->lock serializes); never shared cross-Proc at v1.0. See
     // <thylacine/env.h>.
     struct Env        *env;
+
+    // CF-3 A audit F1 (an I-32-shaped resource axis): live TRANSIENT bounce
+    // bytes -- the byte-I/O syscall staging's heap tier currently allocated
+    // by this Proc's in-flight reads/writes. Charged before the kmalloc,
+    // uncharged at the free on every path. A blocked dev->read/write (a
+    // held-open pipe, an idle socket, a hung server) holds its charge for
+    // the block's duration, so the cap bounds the order-5 heap a Proc can
+    // pin: an over-budget op DEGRADES to the stack tier (a short op, never
+    // a failure). PRINCIPAL_SYSTEM is exempt per proc_resource_exempt (the
+    // I-32 pattern; the counter is not maintained for exempt Procs -- the
+    // charge and uncharge gates are symmetric). NOT propagated by rfork
+    // (KP_ZERO -> 0). __atomic_* CAS charge / fetch_sub uncharge; no lock.
+    u64                bounce_bytes;
 };
 
 #define PROC_FLAG_NODUMP            (1u << 0)
@@ -524,10 +546,13 @@ struct Proc {
 // thread, and an armed kproc would *_INTR every kernel-thread sleep).
 #define PROC_FLAG_INTR_TERMINATE_PENDING (1u << 7)
 
-_Static_assert(sizeof(struct Proc) == 296,
-               "struct Proc size pinned at 296 bytes (the 288 baseline + the G15 "
-               "per-Proc env pointer @288 = 8). Adding a field grows the SLUB cache; "
+_Static_assert(sizeof(struct Proc) == 304,
+               "struct Proc size pinned at 304 bytes (the 296 baseline + the CF-3 A "
+               "bounce_bytes u64 @296 = 8). Adding a field grows the SLUB cache; "
                "update this assert deliberately so the change is intentional.");
+_Static_assert(__builtin_offsetof(struct Proc, bounce_bytes) == 296,
+               "CF-3 A bounce_bytes appends after the G15 env pointer (offset 296); "
+               "existing offsets stay stable (KP_ZERO inits it 0).");
 _Static_assert(__builtin_offsetof(struct Proc, vma_count) == 280,
                "I-32 fourth-axis vma_count appends after the I-34 allowance pointer "
                "(offset 280); existing offsets stay stable (KP_ZERO inits it 0).");

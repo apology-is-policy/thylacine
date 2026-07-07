@@ -530,7 +530,7 @@ static int devramfs_fsync(struct Spoor *c, u32 datasync) {
 // the next would not fit `n`, leaving the rest for the next call. Returns the
 // byte count (>= 0; 0 == end-of-directory), -1 on a non-directory Spoor.
 //
-// `n` is the handler's user buf_len, already bounded to (0, SYS_RW_MAX] and to
+// `n` is the handler's user buf_len, already bounded to (0, SYS_RW_STACK] and to
 // the kernel scratch size, so writing up to `n` bytes into `buf` is in-bounds.
 // If the FIRST entry of a run does not fit `n`, returns -1 (not 0): 0 means
 // end-of-directory per the ABI, so reporting it would silently truncate the

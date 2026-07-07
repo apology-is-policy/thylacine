@@ -90,10 +90,11 @@ enum {
     // SYS_READ(fd, buf_va, len)  → bytes read (>=0), 0 on EOF, -1 on error
     // SYS_WRITE(fd, buf_va, len) → bytes written (>=0), -1 on error
     //
-    // Length is capped at SYS_RW_MAX (4096) per call — userspace
-    // loops for larger transfers. Bouncing through a 4 KiB kernel
-    // stack scratch buffer; uaccess_load_u8 / uaccess_store_u8 do
-    // the per-byte user-VA copy with fault-fixup.
+    // Length is capped at SYS_RW_MAX (128 KiB since CF-3 A) per call —
+    // userspace loops for larger transfers. Ops <= SYS_RW_STACK bounce
+    // through the 4 KiB kernel stack scratch; larger ops take a
+    // transient kmalloc bounce. uaccess_copy_in / uaccess_copy_out do
+    // the bulk user-VA copy with fault-fixup.
     SYS_READ        = 9,    // arg: fd (x0), buf_va (x1), len (x2)
     SYS_WRITE       = 10,   // arg: fd (x0), buf_va (x1), len (x2)
 
@@ -219,17 +220,18 @@ enum {
 
     // SYS_EXPLICIT_BZERO(buf_va, len) → 0/-1
     //   x0 = buf_va (user-VA; same bound checks as SYS_PUTS)
-    //   x1 = len (bytes; ≤ SYS_RW_MAX = 4096 per call)
+    //   x1 = len (bytes; ≤ SYS_RW_STACK = 4096 per call)
     // Compiler-barrier'd memset of the user-VA buffer to zero. Used by
     // corvus + per-user stratumd to wipe secrets without the optimizer
     // eliding the memset. Returns 0 on success, -1 on user-VA bound
-    // violation. Length cap matches SYS_PUTS / SYS_RW_MAX; userspace
-    // loops for larger buffers.
+    // violation. Length cap matches SYS_PUTS / SYS_RW_STACK (CF-3 A kept
+    // the secret-scrub arm at the 4 KiB reject bound -- RW-3 R2-F1);
+    // userspace loops for larger buffers.
     SYS_EXPLICIT_BZERO = 19, // arg: buf_va (x0), len (x1)
 
     // SYS_GETRANDOM(buf_va, len, flags) → bytes_read / -1
     //   x0 = buf_va (user-VA destination)
-    //   x1 = len (bytes; ≤ SYS_RW_MAX = 4096 per call)
+    //   x1 = len (bytes; ≤ SYS_RW_STACK = 4096 per call)
     //   x2 = flags (u32; 0 = block until kernel CSPRNG seeded [default];
     //                    GRND_NONBLOCK (= 1) = return -1 if not seeded)
     // Read `len` bytes from the kernel CSPRNG into the user-VA buffer.
@@ -1128,15 +1130,15 @@ enum {
     // SYS_READDIR(fd, buf_va, buf_len) -> bytes_written (>=0) / -1 (§9.2).
     //   x0 = fd        (hidx_t; KOBJ_SPOOR opened on a directory, RIGHT_READ.)
     //   x1 = buf_va    (user-VA out buffer.)
-    //   x2 = buf_len   (1 .. SYS_RW_MAX (4096).)
+    //   x2 = buf_len   (1 .. SYS_RW_STACK (4096).)
     // Reads the next run of directory entries into buf, advancing the Spoor's
     // offset (the same offset SYS_READ / SYS_LSEEK use); 0 bytes returned ==
     // end-of-directory. The buffer is the raw 9P2000.L Treaddir dirent stream
     // (per entry: qid(13) + offset(8) + type(1) + name_len(2 LE) + name); the
     // caller parses it. Dispatches dev->readdir (dev9p -> p9_client_readdir).
     // Returns -1 on: fd not KOBJ_SPOOR / missing RIGHT_READ; buf_len 0 or >
-    // SYS_RW_MAX; buf_va outside user-VA; the Dev has no .readdir slot; server
-    // Rlerror. Audit-bearing: CLAUDE.md FS-mutation-syscalls row.
+    // SYS_RW_STACK; buf_va outside user-VA; the Dev has no .readdir slot;
+    // server Rlerror. Audit-bearing: CLAUDE.md FS-mutation-syscalls row.
     SYS_READDIR      = 56,   // arg: fd (x0), buf_va (x1), buf_len (x2)
 
     // Convergence-detour FS-gamma (IDENTITY-DESIGN.md §9.3). rename + unlink,
@@ -1920,11 +1922,28 @@ _Static_assert(__builtin_offsetof(struct t_stat, gid)       == 76, "t_stat.gid a
 // "pool/data"). 256 bytes is generous.
 #define SYS_ATTACH_ANAME_MAX  256u
 
-// Maximum bytes transferred per SYS_READ / SYS_WRITE call. Userspace
-// loops for larger transfers. Kept at PIPE_BUF_SIZE (4 KiB) to match
-// the kernel pipe ring buffer; longer single calls would either need
-// a heap scratch (avoidable for v1.0) or per-call segmented copy.
-#define SYS_RW_MAX  4096u
+// Maximum bytes transferred per SYS_READ / SYS_WRITE / SYS_PREAD /
+// SYS_PWRITE call. Userspace still loops for larger transfers (short
+// reads/writes are normal -- the POSIX contract is unchanged).
+//
+// CF-3 A lifted this from 4096 to 128 KiB: the 4 KiB stack scratch was
+// the binding constraint on every bulk read RPC -- 67% of a go build's
+// Treads were exactly-4096 userspace chunks against a 32 KiB negotiated
+// msize (the CF3 Tread-stream measurement), i.e. the transport frame was
+// never the limit, the syscall bounce was. Ops above SYS_RW_STACK bounce
+// through a transient kmalloc (freed before return; degrades to the
+// stack tier on allocation failure -- memory pressure shortens an op,
+// never fails it). 128 KiB is sized for the CF-3 transport lift (the
+// Stratum server's msize default); the negotiated msize still clamps a
+// single RPC's payload until that lands.
+#define SYS_RW_MAX  (128u * 1024u)
+
+// The stack-bounce bound: byte-I/O ops <= this stay on the 4 KiB kernel-
+// stack scratch (no allocation on the metadata-storm path). SYS_READDIR
+// and SYS_GETRANDOM keep THIS as their per-call bound (their handlers
+// stack-allocate the scratch; the scrub arm additionally REJECTS oversize
+// per RW-3 R2-F1 rather than capping). Matches PIPE_BUF_SIZE.
+#define SYS_RW_STACK  4096u
 
 // Maximum binary name length for SYS_SPAWN. Most callers pass short
 // devramfs/`/bin` names, but the on-device Go toolchain (Stage 4c) execs
