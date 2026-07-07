@@ -138,6 +138,13 @@ struct p9_outstanding {
     // TFLUSH entry: the original tag this flush abandons.
     bool awaiting_flush;
     u16  flush_oldtag;
+    // Twalkgetattr bookkeeping (POUNCE): the REQUESTED nwname, so the
+    // dispatch can bind new_fid ONLY on a full walk (nwqid == wga_nwname).
+    // Meaningful only on a TWALKGETATTR entry. (The TWALK arm predates
+    // this and still binds unconditionally -- safe because every TWALK
+    // caller sends 0/1 names, where a partial walk cannot exist; the
+    // pounce sends multi-name walks, where it can.)
+    u16  wga_nwname;
 };
 
 // =============================================================================
@@ -228,6 +235,19 @@ int p9_session_send_walk(struct p9_session *s,
                          u16 nwname,
                          const u8 *const *names,
                          const size_t *name_lens);
+
+// Build a Twalkgetattr (POUNCE, 140): send_walk's preconditions when
+// new_fid is real; new_fid == P9_NOFID is the walk-QUERY form (no fid
+// gates on the destination, nothing binds at dispatch). Dispatch binds
+// a real new_fid ONLY on a full walk (nwqid == nwname) -- the correct
+// partial-walk semantics the multi-name pounce requires.
+int p9_session_send_walkgetattr(struct p9_session *s,
+                                u8 *out, size_t cap,
+                                u32 src_fid, u32 new_fid,
+                                u64 request_mask,
+                                u16 nwname,
+                                const u8 *const *names,
+                                const size_t *name_lens);
 
 // Build a Tclunk on `fid`. Only valid in state OPEN. Preconditions:
 //   - fid is bound.
@@ -490,6 +510,12 @@ struct p9_dispatch_result {
     struct p9_weft_geom weft_geom;
     // For Tweftio, the count of payload bytes the consumer moved (Weft-6b-2).
     u32 weftio_count;
+    // For Twalkgetattr (POUNCE), the per-component attr elements: nwqid
+    // fixed-stride (P9_WGA_BODY_LEN) Rgetattr bodies aliasing the input
+    // rmsg (frame validated by p9_parse_rwalkgetattr; the qids land in
+    // `qids` above). The caller extracts each element via
+    // p9_parse_getattr_body while rmsg stays alive (done_reply_buf).
+    const u8      *wga_data;
 };
 
 // Dispatch one received Rmsg. The Rmsg's tag is looked up in

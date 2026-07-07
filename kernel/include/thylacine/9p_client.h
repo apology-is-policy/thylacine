@@ -243,6 +243,22 @@ int  p9_client_walk_one(struct p9_client *c,
                          const u8 *name, size_t name_len,
                          struct p9_qid *out_qid);
 
+// Fused walk+getattr (POUNCE, Twalkgetattr 140; docs/POUNCE-DESIGN.md):
+// p9_client_walk's contract PLUS each walked component's full attribute
+// record in out_attrs[i] (caller capacity >= nwname). new_fid may be
+// P9_NOFID: the walk-QUERY form -- the server walks + samples and binds
+// NOTHING (nothing to clunk; the 1-RPC stat). A real new_fid binds ONLY
+// on a full walk (nwqid == nwname); a partial walk returns the walked
+// prefix's qids+attrs with new_fid unbound. Returns 0 on success (which
+// includes a partial walk -- the caller checks *out_nwqid).
+int  p9_client_walkgetattr(struct p9_client *c,
+                           u32 src_fid, u32 new_fid,
+                           u64 request_mask,
+                           u16 nwname,
+                           const u8 *const *names, const size_t *name_lens,
+                           u16 *out_nwqid, struct p9_qid *out_qids,
+                           struct p9_attr *out_attrs);
+
 // Clunk (release) a fid.
 int  p9_client_clunk(struct p9_client *c, u32 fid);
 

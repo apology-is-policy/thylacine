@@ -171,6 +171,23 @@
 #define WEFT_DIR_WRITE 0u   // TX: netd reads ring[off..off+len] -> smoltcp send
 #define WEFT_DIR_READ  1u   // RX: netd writes recv bytes -> ring[off..off+len]
 
+// Thylacine POUNCE extension (docs/POUNCE-DESIGN.md): fused walk+getattr.
+// One RPC walks up to P9_MAX_WALK components AND returns each walked
+// component's full Rgetattr body (the walk-fused per-component X-search
+// attrs); newfid == P9_NOFID is permitted as a walk-QUERY (walk + sample,
+// bind nothing -- nothing to clunk; the 1-RPC stat). Kernel-client-issued
+// against stratumd (the Tsync/Tflush precedent). NUMBERING: 140/141, NOT
+// 138/139 -- the Stratum extension enum runs through Tfadvise 134/135 +
+// Tpin 136/137 + Tunpin 138/139 (so Tweft/Tweftio above ALREADY collide
+// latently with Stratum's 134-137 on a DISJOINT domain [Weft ops go
+// kernel->netd only, never to stratumd] -- the registry reconciliation is
+// #371); 140/141 is free in BOTH registries.
+#define P9_TWALKGETATTR 140u
+#define P9_RWALKGETATTR 141u
+
+// One Rwalkgetattr element == one Rgetattr body (valid + qid + attrs).
+#define P9_WGA_BODY_LEN 153u
+
 // =============================================================================
 // Wire-format constants.
 // =============================================================================
@@ -543,6 +560,31 @@ int p9_build_tgetattr(u8 *out, size_t cap, u16 tag,
 // tells the caller which fields are actually meaningful.
 int p9_parse_rgetattr(const u8 *in, size_t len,
                       u16 *tag, struct p9_attr *out_attr);
+
+// One Rgetattr BODY (valid + qid + attrs; P9_WGA_BODY_LEN bytes) parsed
+// from `in` -- the shared element parser for Rgetattr and Rwalkgetattr
+// (the POUNCE per-component attrs; the two layouts are byte-identical
+// by design). Returns the consumed byte count (== P9_WGA_BODY_LEN) or
+// -1 on a short buffer.
+int p9_parse_getattr_body(const u8 *in, size_t rem, struct p9_attr *out_attr);
+
+// Twalkgetattr (POUNCE, 140): Twalk's shape + request_mask. newfid may
+// be P9_NOFID (walk-query: server binds nothing).
+int p9_build_twalkgetattr(u8 *out, size_t cap, u16 tag,
+                          u32 fid, u32 newfid, u64 request_mask,
+                          u16 nwname,
+                          const u8 *const *names, const size_t *name_lens);
+
+// Rwalkgetattr parse (141): validates the frame STRICTLY (nwqid bounded
+// by qid_cap/P9_MAX_WALK; body length == nwqid * P9_WGA_BODY_LEN), fills
+// qids[i] from each element's embedded qid, and returns via *body_out a
+// pointer to the FIRST element (aliases `in`; the caller extracts each
+// element's full attrs with p9_parse_getattr_body while the reply frame
+// stays alive). body_out may be NULL when only qids are wanted.
+int p9_parse_rwalkgetattr(const u8 *in, size_t len,
+                          u16 *tag, u16 *nwqid_out,
+                          struct p9_qid *qids, size_t qid_cap,
+                          const u8 **body_out);
 
 // Tsetattr: set attributes for `fid`. The `attr->valid` mask says which
 // fields are being set; only those should be honored by the server.

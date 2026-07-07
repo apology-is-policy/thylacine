@@ -83,6 +83,10 @@ static u8 g_loopback_resp[4096];
 // SrvConn-vehicle device-gone tests (test_9p_srvconn_transport.c)
 // pre-stage handshake replies through it -- the single source of
 // truth for the canonical 9P2000.L reply byte layouts.
+// Staged by the walkgetattr test: the responder answers one element
+// FEWER than requested (a partial walk).
+static bool g_wga_partial = false;
+
 int canonical_responder(void *ctx, const u8 *req, size_t req_len,
                                  u8 *resp, size_t resp_cap) {
     (void)ctx;
@@ -125,6 +129,37 @@ int canonical_responder(void *ctx, const u8 *req, size_t req_len,
         resp[9] = P9_QTFILE;
         for (int i = 0; i < 4; i++) resp[10 + i] = 0;
         resp[14] = 77; for (int i = 1; i < 8; i++) resp[14 + i] = 0;
+        return (int)total;
+    }
+    if (type == P9_TWALKGETATTR) {
+        // POUNCE: echo the REQUESTED nwname back as full-walk elements
+        // (or one fewer when the partial-walk flag is staged), each with
+        // distinctive per-index attrs so client-side extraction is
+        // assertable. Bytes hand-written (independent of the builders).
+        if (req_len < P9_HDR_LEN + 18) return -1;
+        u16 nwname = (u16)(req[P9_HDR_LEN + 16] |
+                           ((u16)req[P9_HDR_LEN + 17] << 8));
+        u16 n = (g_wga_partial && nwname > 0) ? (u16)(nwname - 1) : nwname;
+        size_t total = P9_HDR_LEN + 2 + (size_t)n * P9_WGA_BODY_LEN;
+        if (resp_cap < total) return -1;
+        resp[0] = (u8)(total & 0xff); resp[1] = (u8)((total >> 8) & 0xff);
+        resp[2] = 0; resp[3] = 0;
+        resp[4] = P9_RWALKGETATTR;
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        resp[7] = (u8)(n & 0xff); resp[8] = (u8)((n >> 8) & 0xff);
+        for (u16 i = 0; i < n; i++) {
+            u8 *el = resp + 9 + (size_t)i * P9_WGA_BODY_LEN;
+            for (u32 b = 0; b < P9_WGA_BODY_LEN; b++) el[b] = 0;
+            el[0] = 0xFF; el[1] = 0x3F;                  // valid = ALL
+            el[8] = (i + 1 == n) ? P9_QTFILE : P9_QTDIR; // qid.type
+            el[13] = (u8)(200 + i);                      // qid.path
+            if (i + 1 == n) { el[21] = 0xA4; el[22] = 0x81; }  // 0100644
+            else            { el[21] = 0xED; el[22] = 0x41; }  // 0040755
+            el[25] = 7;                                  // uid
+            el[29] = 8;                                  // gid
+            el[33] = 1;                                  // nlink
+            el[49] = (u8)(100 + i);                      // size
+        }
         return (int)total;
     }
     if (type == P9_TCLUNK || type == P9_TSETATTR || type == P9_TFSYNC ||
@@ -405,6 +440,59 @@ void test_9p_client_walk_and_clunk(void) {
 
     rc = p9_client_clunk(&g_client, 5);
     TEST_EXPECT_EQ(rc, 0, "clunk fid 5 ok");
+
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+void test_9p_client_walkgetattr(void) {
+    drive_client_open(&g_client, &g_loopback);
+
+    const u8 *names[2];
+    size_t lens[2];
+    names[0] = (const u8 *)"a"; lens[0] = 1;
+    names[1] = (const u8 *)"f"; lens[1] = 1;
+    u16 nwqid;
+    struct p9_qid  qids[P9_MAX_WALK];
+    struct p9_attr attrs[2];
+
+    // Full walk with a real newfid: binds + per-component attrs extract.
+    int rc = p9_client_walkgetattr(&g_client, /*src=*/0, /*new=*/30,
+                                   P9_GETATTR_ALL, 2, names, lens,
+                                   &nwqid, qids, attrs);
+    TEST_EXPECT_EQ(rc, 0,                              "walkgetattr(0->30) ok");
+    TEST_EXPECT_EQ((u64)nwqid, (u64)2,                 "2 elements");
+    TEST_EXPECT_EQ(qids[0].path, (u64)200,             "qid0.path 200");
+    TEST_EXPECT_EQ(qids[1].path, (u64)201,             "qid1.path 201");
+    TEST_EXPECT_EQ((u64)attrs[0].mode, (u64)0x41ED,    "attr0 dir mode");
+    TEST_EXPECT_EQ((u64)attrs[1].mode, (u64)0x81A4,    "attr1 file mode");
+    TEST_EXPECT_EQ((u64)attrs[1].uid, (u64)7,          "attr1 uid");
+    TEST_EXPECT_EQ(attrs[1].size, (u64)101,            "attr1 size");
+    TEST_EXPECT_EQ(attrs[0].qid.path, (u64)200,        "attr0 embedded qid");
+    rc = p9_client_clunk(&g_client, 30);
+    TEST_EXPECT_EQ(rc, 0,                              "bound newfid clunks ok");
+
+    // NOFID query: attrs return; the session binds NOTHING.
+    size_t fids_before = p9_session_n_bound_fids(&g_client.session);
+    rc = p9_client_walkgetattr(&g_client, 0, P9_NOFID, P9_GETATTR_ALL,
+                               2, names, lens, &nwqid, qids, attrs);
+    TEST_EXPECT_EQ(rc, 0,                              "NOFID query ok");
+    TEST_EXPECT_EQ((u64)nwqid, (u64)2,                 "query: 2 elements");
+    TEST_EXPECT_EQ((u64)attrs[0].gid, (u64)8,          "query attr gid");
+    TEST_EXPECT_EQ((u64)p9_session_n_bound_fids(&g_client.session),
+                   (u64)fids_before,                   "query bound NOTHING");
+
+    // Partial walk with a real newfid: prefix attrs; newfid NOT bound.
+    g_wga_partial = true;
+    rc = p9_client_walkgetattr(&g_client, 0, 31, P9_GETATTR_ALL,
+                               2, names, lens, &nwqid, qids, attrs);
+    g_wga_partial = false;
+    TEST_EXPECT_EQ(rc, 0,                              "partial walkgetattr ok");
+    TEST_EXPECT_EQ((u64)nwqid, (u64)1,                 "partial: 1 element");
+    TEST_EXPECT_EQ((u64)p9_session_n_bound_fids(&g_client.session),
+                   (u64)fids_before,                   "partial bound NOTHING");
+    rc = p9_client_clunk(&g_client, 31);
+    TEST_ASSERT(rc != 0,               "unbound partial newfid cannot clunk");
 
     p9_client_destroy(&g_client);
     p9_loopback_destroy(&g_loopback);

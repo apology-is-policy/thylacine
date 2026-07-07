@@ -731,6 +731,7 @@ void test_9p_wire_tclunk_round_trip(void);
 void test_9p_wire_tflush_round_trip(void);
 void test_9p_wire_tweft_round_trip(void);
 void test_9p_wire_tweftio_round_trip(void);
+void test_9p_wire_twalkgetattr_round_trip(void);
 void test_9p_wire_rlerror_parse(void);
 void test_9p_wire_rmsg_size_mismatch_rejected(void);
 void test_9p_wire_rmsg_wrong_type_rejected(void);
@@ -820,6 +821,7 @@ void test_9p_transport_deadline_idle_vs_eof(void);
 void test_9p_client_init_destroy(void);
 void test_9p_client_handshake(void);
 void test_9p_client_walk_and_clunk(void);
+void test_9p_client_walkgetattr(void);
 void test_9p_client_lopen_read(void);
 void test_9p_client_write(void);
 void test_9p_client_getattr(void);
@@ -1903,6 +1905,7 @@ struct test_case g_tests[] = {
     { "9p_wire.tflush_round_trip",     test_9p_wire_tflush_round_trip,     false, NULL },
     { "9p_wire.tweft_round_trip",      test_9p_wire_tweft_round_trip,      false, NULL },
     { "9p_wire.tweftio_round_trip",    test_9p_wire_tweftio_round_trip,    false, NULL },
+    { "9p_wire.twalkgetattr_round_trip", test_9p_wire_twalkgetattr_round_trip, false, NULL },
     { "9p_wire.rlerror_parse",         test_9p_wire_rlerror_parse,         false, NULL },
     { "9p_wire.rmsg_size_mismatch_rejected",
                                        test_9p_wire_rmsg_size_mismatch_rejected,
@@ -2062,6 +2065,7 @@ struct test_case g_tests[] = {
     { "9p_client.init_destroy",        test_9p_client_init_destroy,        false, NULL },
     { "9p_client.handshake",           test_9p_client_handshake,           false, NULL },
     { "9p_client.walk_and_clunk",      test_9p_client_walk_and_clunk,      false, NULL },
+    { "9p_client.walkgetattr",         test_9p_client_walkgetattr,         false, NULL },
     { "9p_client.lopen_read",          test_9p_client_lopen_read,          false, NULL },
     { "9p_client.write",               test_9p_client_write,               false, NULL },
     { "9p_client.getattr",             test_9p_client_getattr,             false, NULL },

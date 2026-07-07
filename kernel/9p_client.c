@@ -999,6 +999,50 @@ int p9_client_walk_one(struct p9_client *c,
     return 0;
 }
 
+int p9_client_walkgetattr(struct p9_client *c,
+                          u32 src_fid, u32 new_fid,
+                          u64 request_mask,
+                          u16 nwname,
+                          const u8 *const *names, const size_t *name_lens,
+                          u16 *out_nwqid, struct p9_qid *out_qids,
+                          struct p9_attr *out_attrs) {
+    if (!c) return -P9_E_INVAL;
+    if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
+    spin_lock(&c->lock);
+    if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
+    if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
+    int len = p9_session_send_walkgetattr(&c->session, c->out_buf,
+                                          sizeof(c->out_buf),
+                                          src_fid, new_fid, request_mask,
+                                          nwname, names, name_lens);
+    if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
+    struct p9_dispatch_result r;
+    int e = client_run(c, (size_t)len, &r);
+    c->total_ops++;
+    if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
+    if (out_nwqid) *out_nwqid = r.nwqid;
+    if (out_qids) {
+        for (u16 i = 0; i < r.nwqid && i < P9_MAX_WALK; i++)
+            copy_qid(&out_qids[i], &r.qids[i]);
+    }
+    if (out_attrs && r.wga_data) {
+        // The reply frame is retained (done_reply_buf) until the NEXT op
+        // on this client and we still hold c->lock, so the fixed-stride
+        // elements (frame-validated by p9_parse_rwalkgetattr) are safe
+        // to extract here.
+        for (u16 i = 0; i < r.nwqid && i < P9_MAX_WALK; i++) {
+            if (p9_parse_getattr_body(
+                    r.wga_data + (size_t)i * P9_WGA_BODY_LEN,
+                    P9_WGA_BODY_LEN, &out_attrs[i]) < 0) {
+                c->total_errors++;
+                CLIENT_UNLOCK_RET(c, -P9_E_IO);
+            }
+        }
+    }
+    spin_unlock(&c->lock);
+    return 0;
+}
+
 int p9_client_clunk(struct p9_client *c, u32 fid) {
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;

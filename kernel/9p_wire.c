@@ -665,13 +665,14 @@ int p9_build_tgetattr(u8 *out, size_t cap, u16 tag,
 //   + mtime{sec,nsec}(16) + ctime{sec,nsec}(16) + btime{sec,nsec}(16)
 //   + gen(8) + data_version(8) = 8 + 13 + 12 + 15*8 = 153 bytes
 //   (15 u64s after qid: 5 mid + 8 times + 2 trailing.)
-int p9_parse_rgetattr(const u8 *in, size_t len,
-                      u16 *tag, struct p9_attr *out_attr) {
-    if (!tag || !out_attr) return -1;
-    int hdr = validate_rmsg_header(in, len, P9_RGETATTR, tag);
-    if (hdr < 0) return -1;
-    size_t off = (size_t)hdr;
-    size_t rem = len - off;
+// The body parser is shared with Rwalkgetattr (POUNCE), whose elements
+// are byte-identical Rgetattr bodies.
+_Static_assert(8 + 13 + 12 + 15 * 8 == P9_WGA_BODY_LEN,
+               "Rgetattr body length drift vs P9_WGA_BODY_LEN");
+
+int p9_parse_getattr_body(const u8 *in, size_t rem, struct p9_attr *out_attr) {
+    if (!in || !out_attr) return -1;
+    size_t off = 0;
     int rc;
 
     rc = p9_unpack_u64(in + off, rem, &out_attr->valid);
@@ -720,7 +721,91 @@ int p9_parse_rgetattr(const u8 *in, size_t len,
     rc = p9_unpack_u64(in + off, rem, &out_attr->data_version);
     if (rc < 0) return -1; off += (size_t)rc;
 
-    if (off != len) return -1;       // strict body-length equality
+    if (off != P9_WGA_BODY_LEN) return -1;   // layout drift guard
+    return (int)off;
+}
+
+int p9_parse_rgetattr(const u8 *in, size_t len,
+                      u16 *tag, struct p9_attr *out_attr) {
+    if (!tag || !out_attr) return -1;
+    int hdr = validate_rmsg_header(in, len, P9_RGETATTR, tag);
+    if (hdr < 0) return -1;
+    int rc = p9_parse_getattr_body(in + (size_t)hdr, len - (size_t)hdr,
+                                   out_attr);
+    if (rc < 0) return -1;
+    if ((size_t)hdr + (size_t)rc != len) return -1;  // strict body length
+    return 0;
+}
+
+// =============================================================================
+// Twalkgetattr / Rwalkgetattr (POUNCE, 140/141; docs/POUNCE-DESIGN.md).
+//
+// Twalkgetattr body: [fid: u32][newfid: u32][request_mask: u64][nwname: u16]
+//                    [wname[nwname]: str * nwname]
+// Rwalkgetattr body: [nwqid: u16][getattr_body * nwqid]  (elements are
+//                    byte-identical Rgetattr bodies, P9_WGA_BODY_LEN each)
+// =============================================================================
+
+int p9_build_twalkgetattr(u8 *out, size_t cap, u16 tag,
+                          u32 fid, u32 newfid, u64 request_mask,
+                          u16 nwname,
+                          const u8 *const *names, const size_t *name_lens) {
+    if (nwname > P9_MAX_WALK) return -1;
+    if (nwname > 0 && (!names || !name_lens)) return -1;
+    size_t body_len = 4 + 4 + 8 + 2;
+    for (u16 i = 0; i < nwname; i++) {
+        if (name_lens[i] > 0xFFFFu) return -1;
+        if (name_lens[i] > 0 && !names[i]) return -1;
+        body_len += 2 + name_lens[i];
+    }
+    size_t total = P9_HDR_LEN + body_len;
+    if (total > 0xFFFFFFFFull) return -1;
+    if (cap < total) return -1;
+    int rc = write_header(out, cap, (u32)total, P9_TWALKGETATTR, tag);
+    if (rc < 0) return -1;
+    size_t off = P9_HDR_LEN;
+    rc = p9_pack_u32(out + off, cap - off, fid);          if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u32(out + off, cap - off, newfid);       if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u64(out + off, cap - off, request_mask); if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u16(out + off, cap - off, nwname);       if (rc < 0) return -1; off += (size_t)rc;
+    for (u16 i = 0; i < nwname; i++) {
+        rc = p9_pack_str(out + off, cap - off, names[i], name_lens[i]);
+        if (rc < 0) return -1;
+        off += (size_t)rc;
+    }
+    return (int)off;
+}
+
+int p9_parse_rwalkgetattr(const u8 *in, size_t len,
+                          u16 *tag, u16 *nwqid_out,
+                          struct p9_qid *qids, size_t qid_cap,
+                          const u8 **body_out) {
+    if (!tag || !nwqid_out) return -1;
+    int hdr = validate_rmsg_header(in, len, P9_RWALKGETATTR, tag);
+    if (hdr < 0) return -1;
+    size_t off = (size_t)hdr;
+    size_t rem = len - off;
+    u16 nwqid = 0;
+    int rc = p9_unpack_u16(in + off, rem, &nwqid);
+    if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+    // R111 doctrine: bound the server-supplied count against the
+    // caller-supplied cap BEFORE writing into the caller buffer.
+    if (nwqid > qid_cap) return -1;
+    if (nwqid > P9_MAX_WALK) return -1;
+    if (qids == NULL && nwqid > 0) return -1;
+    // STRICT frame length: exactly nwqid elements, nothing else. This is
+    // what lets the caller iterate body_out in fixed P9_WGA_BODY_LEN
+    // strides without re-checking bounds per element.
+    if (rem != (size_t)nwqid * P9_WGA_BODY_LEN) return -1;
+    const u8 *body = in + off;
+    for (u16 i = 0; i < nwqid; i++) {
+        // Each element's qid sits at +8 (after the u64 valid mask).
+        rc = p9_unpack_qid(body + (size_t)i * P9_WGA_BODY_LEN + 8,
+                           P9_QID_LEN, &qids[i]);
+        if (rc < 0) return -1;
+    }
+    *nwqid_out = nwqid;
+    if (body_out) *body_out = body;
     return 0;
 }
 

@@ -120,6 +120,7 @@ static void mark_outstanding(struct p9_session *s, u16 t,
     s->outstanding[t].op_id         = s->next_op_id;
     s->outstanding[t].awaiting_flush = false;
     s->outstanding[t].flush_oldtag  = 0;
+    s->outstanding[t].wga_nwname    = 0;
     s->total_sent++;
 }
 
@@ -310,6 +311,43 @@ int p9_session_send_walk(struct p9_session *s,
                             nwname, names, name_lens);
     if (rc < 0) return -1;
     mark_outstanding(s, (u16)t, P9_TWALK, src_fid, new_fid);
+    return rc;
+}
+
+// =============================================================================
+// Send: Twalkgetattr (POUNCE, 140).
+// =============================================================================
+
+int p9_session_send_walkgetattr(struct p9_session *s,
+                                u8 *out, size_t cap,
+                                u32 src_fid, u32 new_fid,
+                                u64 request_mask,
+                                u16 nwname,
+                                const u8 *const *names,
+                                const size_t *name_lens) {
+    if (!s) return -1;
+    if (s->magic != P9_SESSION_MAGIC) return -1;
+    if (s->state != P9_SESS_OPEN) return -1;
+    if (!out) return -1;
+    if (!fid_bound(s, src_fid)) return -1;
+    if (nwname > P9_MAX_WALK) return -1;
+    if (new_fid != P9_NOFID) {
+        // send_walk's destination gates apply only when a fid will bind;
+        // the NOFID query names no destination (nothing binds, nothing
+        // to reserve, no capacity to pre-check).
+        if (fid_bound(s, new_fid)) return -1;
+        if (new_fid == s->root_fid) return -1;
+        if (any_outstanding_on_fid(s, new_fid)) return -1;
+        if (s->n_bound_fids >= P9_SESSION_MAX_FIDS) return -1;
+    }
+    int t = alloc_tag(s);
+    if (t < 0) return -1;
+    int rc = p9_build_twalkgetattr(out, cap, (u16)t,
+                                   src_fid, new_fid, request_mask,
+                                   nwname, names, name_lens);
+    if (rc < 0) return -1;
+    mark_outstanding(s, (u16)t, P9_TWALKGETATTR, src_fid, new_fid);
+    s->outstanding[t].wga_nwname = nwname;
     return rc;
 }
 
@@ -965,6 +1003,35 @@ int p9_session_dispatch_rmsg(struct p9_session *s,
             out->ecode    = T_E_IO;   // EIO (POSIX-aligned 9P2000.L wire errno)
         } else {
             out->nwqid    = nwqid;
+        }
+    } else if (op->kind == P9_TWALKGETATTR) {
+        u16 tag_check;
+        u16 nwqid;
+        const u8 *body = NULL;
+        rc = p9_parse_rwalkgetattr(rmsg, len, &tag_check, &nwqid,
+                                   out->qids, P9_MAX_WALK, &body);
+        if (rc < 0) return -1;
+        if (tag_check != tag) return -1;
+        // Bind new_fid ONLY on a FULL walk with a real destination -- the
+        // correct partial-walk semantics (a partial Rwalkgetattr binds
+        // nothing server-side; the NOFID query never names a destination).
+        // This is the nuance the TWALK arm defers (its callers send 0/1
+        // names, where partial cannot exist); the multi-name pounce
+        // requires it.
+        if (op->new_fid != P9_NOFID && nwqid == op->wga_nwname) {
+            if (fid_bind(s, op->new_fid) < 0) {
+                // Same LOCAL-failure posture as the TWALK arm: a fid-table
+                // exhaustion completes THIS op with -EIO; it must not latch
+                // the shared session dead.
+                out->is_error = true;
+                out->ecode    = T_E_IO;
+            } else {
+                out->nwqid    = nwqid;
+                out->wga_data = body;
+            }
+        } else {
+            out->nwqid    = nwqid;
+            out->wga_data = body;
         }
     } else if (op->kind == P9_TCLUNK) {
         u16 tag_check;
