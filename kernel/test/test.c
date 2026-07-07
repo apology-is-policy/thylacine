@@ -560,6 +560,7 @@ void test_devramfs_read_dir_returns_neg1(void);
 void test_devramfs_write_rejected(void);
 void test_devramfs_stat_native_system_owned(void);
 void test_devramfs_readdir_enumerates_root(void);
+void test_devramfs_walk_attrs(void);
 void test_devramfs_readdir_file_returns_neg1(void);
 void test_devramfs_readdir_buffer_too_small_errs(void);
 void test_devramfs_readdir_synth_dir_empty(void);
@@ -611,6 +612,15 @@ void test_stalk_path_accumulate(void);
 void test_stalk_path_dotdot(void);
 void test_stalk_path_cross_transplant(void);
 void test_stalk_path_adopt_transplant(void);
+// POUNCE (docs/POUNCE-DESIGN.md): the batched fast path + stalk_stat.
+void test_stalk_pounce_engaged(void);
+void test_stalk_pounce_acces_masks_noent(void);
+void test_stalk_pounce_parity_nowa(void);
+void test_stalk_pounce_full_walk_past_mount(void);
+void test_stalk_stat_query(void);
+void test_stalk_stat_mount_leaf(void);
+void test_sys_stat_for_proc(void);
+void test_stalk_pounce_unsupported_fallback(void);
 void test_devsrv_registered(void);
 void test_devsrv_open_root_dir(void);
 void test_devsrv_stat_native_root(void);
@@ -898,6 +908,7 @@ void test_dev9p_stat_native_maps_getattr(void);
 void test_dev9p_wstat_native_drives_setattr(void);
 void test_dev9p_prw_wire_offset_and_cursor(void);
 void test_dev9p_wstat_readonly_fd(void);
+void test_dev9p_walk_attrs(void);
 void test_dev9p_perm_enforced_deny_allow(void);
 void test_p9_attached_create_destroy(void);
 void test_p9_attached_handshake_failure_returns_null(void);
@@ -1736,6 +1747,7 @@ struct test_case g_tests[] = {
                                        test_devramfs_readdir_buffer_too_small_errs, false, NULL },
     { "devramfs.readdir_synth_dir_empty",
                                        test_devramfs_readdir_synth_dir_empty, false, NULL },
+    { "devramfs.walk_attrs",           test_devramfs_walk_attrs,           false, NULL },
     { "devramfs.readdir_paginates_no_dup_no_skip",
                                        test_devramfs_readdir_paginates_no_dup_no_skip, false, NULL },
     { "devsrv.registered",             test_devsrv_registered,             false, NULL },
@@ -2191,6 +2203,7 @@ struct test_case g_tests[] = {
     { "dev9p.prw_wire_offset_and_cursor",
                                        test_dev9p_prw_wire_offset_and_cursor, false, NULL },
     { "dev9p.wstat_readonly_fd",       test_dev9p_wstat_readonly_fd,          false, NULL },
+    { "dev9p.walk_attrs",              test_dev9p_walk_attrs,                 false, NULL },
     { "dev9p.perm_enforced_deny_allow",
                                        test_dev9p_perm_enforced_deny_allow, false, NULL },
     { "p9_attached.create_destroy",    test_p9_attached_create_destroy,    false, NULL },
@@ -2504,6 +2517,14 @@ struct test_case g_tests[] = {
     { "stalk.path_dotdot",             test_stalk_path_dotdot,             false, NULL },
     { "stalk.path_cross_transplant",   test_stalk_path_cross_transplant,   false, NULL },
     { "stalk.path_adopt_transplant",   test_stalk_path_adopt_transplant,   false, NULL },
+    { "stalk.pounce_engaged",          test_stalk_pounce_engaged,          false, NULL },
+    { "stalk.pounce_acces_masks_noent", test_stalk_pounce_acces_masks_noent, false, NULL },
+    { "stalk.pounce_parity_nowa",      test_stalk_pounce_parity_nowa,      false, NULL },
+    { "stalk.pounce_full_walk_past_mount", test_stalk_pounce_full_walk_past_mount, false, NULL },
+    { "stalk.stat_query",              test_stalk_stat_query,              false, NULL },
+    { "stalk.stat_mount_leaf",         test_stalk_stat_mount_leaf,         false, NULL },
+    { "sys_stat.for_proc",             test_sys_stat_for_proc,             false, NULL },
+    { "stalk.pounce_unsupported_fallback", test_stalk_pounce_unsupported_fallback, false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
 };
 

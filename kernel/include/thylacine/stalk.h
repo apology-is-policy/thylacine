@@ -32,6 +32,7 @@
 
 struct Proc;
 struct Spoor;
+struct t_stat;   // <thylacine/syscall.h>; the stalk_stat metadata sink
 
 // amode -- what stalk does at the final (quarry) component.
 #define STALK_WALK  0   // resolve only; do NOT open (the O_PATH / walkable-base
@@ -47,6 +48,14 @@ struct Spoor;
                         // mount (Plan 9 Amount). Intermediate components still
                         // cross normally (you can mount onto /a/b where /a is
                         // itself a mount).
+#define STALK_STAT  3   // resolve for METADATA only (POUNCE; SYS_STAT): like
+                        // STALK_WALK (quarry crossed, never opened), but when
+                        // the final run resolves via Dev.walk_attrs the leaf's
+                        // attrs return in the fused reply and NO quarry Spoor /
+                        // fid is ever materialized (the walk-QUERY form -- the
+                        // 1-RPC stat). Callers use stalk_stat(); passing
+                        // STALK_STAT to stalk()/stalk_err() (no stat sink)
+                        // degrades to STALK_WALK behavior.
 
 // Trail depth cap: the maximum number of path components stalk resolves. An
 // over-deep path (including a '..'-heavy path that pushes past the cap before
@@ -86,6 +95,20 @@ struct Spoor *stalk(struct Proc *p, struct Spoor *start,
 struct Spoor *stalk_err(struct Proc *p, struct Spoor *start,
                         const char *path, u64 pathlen, int amode, u32 omode,
                         int *errp);
+
+// stalk_stat -- resolve `path` and fill *out with the LEAF's metadata without
+// installing anything (POUNCE; the SYS_STAT core). The X-search is identical
+// to a STALK_WALK resolution (POSIX stat authority = the path X-search only;
+// the leaf's own R/W are irrelevant). On the fast path (the final run's Dev
+// implements walk_attrs and the leaf is not a mount point) NO quarry Spoor or
+// fid is ever created -- the attrs arrive fused with the walk. Fallback paths
+// (Dev without walk_attrs / leaf mount point / zero-component path) resolve a
+// quarry, stat_native it, and clunk it -- today's exact O_PATH+fstat shape.
+// Returns 0 (out filled) or -1 with the cause in *errp (OPTIONAL; same codes
+// as stalk_err).
+int stalk_stat(struct Proc *p, struct Spoor *start,
+               const char *path, u64 pathlen,
+               struct t_stat *out, int *errp);
 
 // stalk_cross_mounts -- Plan 9 `domount`, exposed for the single-hop walk
 // syscalls (SYS_WALK_OPEN) so they cross mounts identically to stalk()/SYS_OPEN.

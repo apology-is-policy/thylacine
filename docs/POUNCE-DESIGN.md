@@ -137,17 +137,26 @@ It runs under the CF-2 dispatch pool like any op.
   `specs/9p_client.tla`'s tag/fid model is unchanged; the 4 buggy cfgs re-run
   as the pre-commit gate at impl (no new spec module per the 2026-05-23
   broadening; prose validation per this doc + the audit).
-- A new OPTIONAL Dev vtable slot:
+- A new OPTIONAL Dev vtable slot (as-built at P-3; names carry explicit
+  lengths so the resolver's path buffer is used zero-copy — the components
+  are '/'-separated, not NUL-terminated, and copying 16 names per resolution
+  on the hot path would be pure waste):
 
 ```c
-// Walk nname components from src in ONE operation, filling sts[0..nqid)
-// with each walked component's attributes (the walk-fused getattr). The
-// Walkqid contract is Dev.walk's (reuse-nc; nqid short on partial walk).
-// sts_query: when nc == NULL the walk is a QUERY (no Spoor transitioned,
-// nothing to clunk — dev9p maps this to newfid=NOFID).
-struct Walkqid *(*walk_attrs)(struct Spoor *src, struct Spoor *nc,
-                              const char **names, int nname,
-                              struct t_stat *sts);
+// Walk nname REAL components (never "."/"..") from c in ONE operation,
+// filling sts[0..nqid) with each walked component's attributes (the
+// walk-fused getattr). names are (ptr, len) pairs (name_lens defines each
+// extent). The Walkqid contract SHARPENS Dev.walk's reuse-nc rule:
+//   nc != NULL (bind): on a FULL walk nc transitions and w->spoor == nc;
+//     on a partial walk nc is UNTOUCHED and w->spoor == NULL (the
+//     Twalkgetattr session rule: newfid binds only on a full walk).
+//   nc == NULL (query): nothing transitions, no fid binds on either end
+//     (dev9p sends newfid = P9_NOFID); w->spoor == NULL always.
+// May return DEV_WALK_ATTRS_UNSUPPORTED (a distinguished sentinel): the
+// SESSION's server does not implement Twalkgetattr — see below.
+struct Walkqid *(*walk_attrs)(struct Spoor *c, struct Spoor *nc,
+                              const char **names, const size_t *name_lens,
+                              int nname, struct t_stat *sts);
 ```
 
 - `dev9p` implements it via the wire op. `devramfs` implements it natively
@@ -155,6 +164,18 @@ struct Walkqid *(*walk_attrs)(struct Spoor *src, struct Spoor *nc,
   perm-enforced Devs. Every other Dev leaves the slot NULL and keeps
   today's per-component loop — correctness is identical, only the RPC count
   differs.
+- **The per-session capability latch (P-3 as-built).** `Twalkgetattr` is a
+  Stratum extension: dev9p sessions also reach servers that do NOT implement
+  it — netd's `/net` is the live v1.0 case (its unknown-op arm answers
+  `Rlerror(ENOSYS)` cleanly). dev9p therefore latches per `p9_client`
+  (`wga_unsupported`): the FIRST walk_attrs on a session probes the wire;
+  an `-ENOSYS` reply latches the flag and returns the distinguished
+  `DEV_WALK_ATTRS_UNSUPPORTED` sentinel, after which every walk_attrs on
+  that session returns the sentinel RPC-free and the resolver falls back to
+  the per-component loop (one wasted RPC per session lifetime, total). Any
+  other reply — success OR a real errno like ENOENT — proves the server
+  parsed the op, and is handled normally. A NULL return stays "the walk
+  failed at the first component"; the sentinel is a THIRD, non-error state.
 
 ## 5. The stalk pounce (the batching fast path)
 

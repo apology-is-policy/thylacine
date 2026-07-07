@@ -286,6 +286,34 @@ static int dev9p_stat(struct Spoor *c, u8 *dp, int n) {
     return -1;
 }
 
+// p9_attr -> struct t_stat conversion, shared by dev9p_stat_native (Tgetattr)
+// and dev9p_walk_attrs (the POUNCE Twalkgetattr per-component records — the
+// two paths MUST report identical shapes for the same server attrs, or the
+// pounce's X-search would diverge from the per-component loop's).
+static void t_stat_from_p9_attr(struct t_stat *out, const struct p9_attr *attr) {
+    for (size_t i = 0; i < sizeof(*out); i++) ((u8 *)out)[i] = 0;
+    out->size      = attr->size;
+    out->qid_path  = attr->qid.path;
+    out->atime_sec = attr->atime_sec;
+    out->mtime_sec = attr->mtime_sec;
+    out->ctime_sec = attr->ctime_sec;
+    out->nlink     = (u32)attr->nlink;
+    out->qid_vers  = attr->qid.version;
+    out->qid_type  = qid_type_p9_to_kernel(attr->qid.type);
+    out->blksize   = attr->blksize ? (u32)attr->blksize : 4096u;
+    out->blocks    = attr->blocks;
+    // A-2a F2 (closed in A-2d): respect the server's `valid` mask for the
+    // security-critical trio. A server that did not fill mode/uid/gid must NOT
+    // have us report stale wire bytes -- leaving the pre-zeroed field is
+    // fail-closed (mode 0 = no rwx bits; uid 0 = PRINCIPAL_INVALID, gid 0 =
+    // GID_INVALID -- a real principal matches none, so perm_check denies). v1.0
+    // Stratum fills BASIC, so this is dormant for the reference server; it makes
+    // the A-3 dev9p enforcement (which reads these) sound against any server.
+    if (attr->valid & P9_GETATTR_MODE) out->mode = attr->mode;
+    if (attr->valid & P9_GETATTR_UID)  out->uid  = attr->uid;
+    if (attr->valid & P9_GETATTR_GID)  out->gid  = attr->gid;
+}
+
 // Native fstat surface (A-2a; IDENTITY-DESIGN.md §9.5) -> Stratum Tgetattr.
 // Fills *out from the server's Rgetattr. uid/gid are the server-reported owner
 // + group; for a per-user stratumd they are the connection's principal (A-3
@@ -303,28 +331,119 @@ static int dev9p_stat_native(struct Spoor *c, struct t_stat *out) {
     int gr = p9_client_getattr(p->client, p->fid, P9_GETATTR_BASIC, &attr);
     if (gr != 0)
         return gr;
-    for (size_t i = 0; i < sizeof(*out); i++) ((u8 *)out)[i] = 0;
-    out->size      = attr.size;
-    out->qid_path  = attr.qid.path;
-    out->atime_sec = attr.atime_sec;
-    out->mtime_sec = attr.mtime_sec;
-    out->ctime_sec = attr.ctime_sec;
-    out->nlink     = (u32)attr.nlink;
-    out->qid_vers  = attr.qid.version;
-    out->qid_type  = qid_type_p9_to_kernel(attr.qid.type);
-    out->blksize   = attr.blksize ? (u32)attr.blksize : 4096u;
-    out->blocks    = attr.blocks;
-    // A-2a F2 (closed in A-2d): respect the server's `valid` mask for the
-    // security-critical trio. A server that did not fill mode/uid/gid must NOT
-    // have us report stale wire bytes -- leaving the pre-zeroed field is
-    // fail-closed (mode 0 = no rwx bits; uid 0 = PRINCIPAL_INVALID, gid 0 =
-    // GID_INVALID -- a real principal matches none, so perm_check denies). v1.0
-    // Stratum fills BASIC, so this is dormant for the reference server; it makes
-    // the A-3 dev9p enforcement (which reads these) sound against any server.
-    if (attr.valid & P9_GETATTR_MODE) out->mode = attr.mode;
-    if (attr.valid & P9_GETATTR_UID)  out->uid  = attr.uid;
-    if (attr.valid & P9_GETATTR_GID)  out->gid  = attr.gid;
+    t_stat_from_p9_attr(out, &attr);
     return 0;
+}
+
+// The POUNCE walk-fused getattr (docs/POUNCE-DESIGN.md §4) -> Twalkgetattr.
+// Contract per <thylacine/dev.h> walk_attrs: bind form transitions nc ONLY on
+// a full walk; query form (nc == NULL -> newfid = P9_NOFID) binds nothing on
+// either end. The per-element p9_attr array is heap scratch (16 * ~152 B —
+// too big to stack alongside stalk's own run arrays on the 16 KiB kstack).
+_Static_assert(DEV_WALK_ATTRS_MAX == P9_MAX_WALK,
+               "the vtable walk_attrs cap must equal the Twalkgetattr wire "
+               "bound -- a resolver run must fit one wire op");
+static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
+                                        const char **name,
+                                        const size_t *name_lens,
+                                        int nname, struct t_stat *sts) {
+    struct dev9p_priv *src_priv = priv_of(c);
+    if (!src_priv) return NULL;
+    if (nname <= 0 || nname > (int)P9_MAX_WALK) return NULL;
+    if (!name || !name_lens || !sts) return NULL;
+
+    // Per-session capability latch: Twalkgetattr is a Stratum extension.
+    // netd's /net (and any plain 9P2000.L server) answers it Rlerror ENOSYS
+    // -- latched below on the first probe, after which every walk_attrs on
+    // this session degrades the resolver to the per-component loop with no
+    // further RPC. Racy read is benign (one extra probe at worst).
+    if (src_priv->client->wga_unsupported)
+        return DEV_WALK_ATTRS_UNSUPPORTED;
+
+    // Carrier first (the F3 resource-order discipline shared with dev9p_walk).
+    struct Walkqid *w = walkqid_alloc(nname);
+    if (!w) return NULL;
+
+    struct p9_attr *attrs = kmalloc(sizeof(struct p9_attr) * (size_t)nname, 0);
+    if (!attrs) {
+        walkqid_free(w);
+        return NULL;
+    }
+
+    // Bind form allocates the destination fid; query form sends P9_NOFID.
+    // A fid NUMBER consumed by a walk that then goes partial (never bound
+    // server-side) is abandoned, exactly like dev9p_walk's failure paths —
+    // benign under the monotonic-u32 allocator (numbers are never reused).
+    u32 new_fid = P9_NOFID;
+    if (nc) {
+        new_fid = p9_client_alloc_fid(src_priv->client);
+        if (new_fid == P9_NOFID) {
+            kfree(attrs);
+            walkqid_free(w);
+            return NULL;
+        }
+    }
+
+    u16 nwqid = 0;
+    struct p9_qid qids[P9_MAX_WALK];
+    int rc = p9_client_walkgetattr(src_priv->client, src_priv->fid, new_fid,
+                                   P9_GETATTR_BASIC, (u16)nname,
+                                   (const u8 *const *)name, name_lens,
+                                   &nwqid, qids, attrs);
+    if (rc == -T_E_NOSYS) {
+        // The server does not speak the extension (netd's unknown-op arm:
+        // Rlerror E_NOSYS -- the one non-supporting server in the v1.0 set;
+        // Stratum implements the op). Latch it for the session and hand the
+        // resolver the fallback sentinel -- this is NOT a walk failure
+        // (nothing about the path was learned). The abandoned new_fid number
+        // is benign (monotonic allocator). A future foreign server replying
+        // EOPNOTSUPP would need that code appended to the errno registry
+        // (ERRORS.md signoff) and classified here.
+        src_priv->client->wga_unsupported = true;
+        kfree(attrs);
+        walkqid_free(w);
+        return DEV_WALK_ATTRS_UNSUPPORTED;
+    }
+    if (rc != 0 || nwqid > (u16)nname) {
+        // Rlerror (miss at the first component / server error) or a
+        // malformed over-count. Nothing was bound (the session layer binds
+        // new_fid only on a FULL walk); nc untouched.
+        kfree(attrs);
+        walkqid_free(w);
+        return NULL;
+    }
+
+    w->nqid = (int)nwqid;
+    for (int i = 0; i < w->nqid; i++) {
+        w->qid[i].path   = qids[i].path;
+        w->qid[i].vers   = qids[i].version;
+        w->qid[i].type   = qid_type_p9_to_kernel(qids[i].type);
+        w->qid[i].pad[0] = w->qid[i].pad[1] = w->qid[i].pad[2] = 0;
+        t_stat_from_p9_attr(&sts[i], &attrs[i]);
+    }
+    kfree(attrs);
+
+    if (nc && w->nqid == nname) {
+        // FULL walk: new_fid is bound server-side; install it into nc (the
+        // dev9p_walk tail — same priv shape, same attached_owner inheritance).
+        struct dev9p_priv *new_priv = priv_alloc(src_priv->client, new_fid,
+                                                 /*fid_owned=*/true,
+                                                 src_priv->attached_owner);
+        if (!new_priv) {
+            (void)p9_client_clunk(src_priv->client, new_fid);
+            walkqid_free(w);
+            return NULL;
+        }
+        nc->aux = new_priv;
+        nc->qid = w->qid[w->nqid - 1];
+        w->spoor = nc;
+    } else {
+        // Partial walk (bind form: new_fid was never bound; nc still
+        // shallow-shares c's aux — the caller detaches + unrefs it) or the
+        // query form. Nothing to clunk.
+        w->spoor = NULL;
+    }
+    return w;
 }
 
 static struct Spoor *dev9p_open(struct Spoor *c, int omode) {
@@ -764,6 +883,7 @@ struct Dev dev9p = {
 
     .attach   = dev9p_attach_spec,
     .walk     = dev9p_walk,
+    .walk_attrs = dev9p_walk_attrs,   // POUNCE: Twalkgetattr (the stalk fast path)
     .stat     = dev9p_stat,
     .stat_native = dev9p_stat_native,
     .seekable = true,   // file content: read/write honor the byte offset (RW-4 R2-F2)

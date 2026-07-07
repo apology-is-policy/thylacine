@@ -327,23 +327,19 @@ static int devramfs_stat(struct Spoor *c, u8 *dp, int n) {
     return -1;
 }
 
-// devramfs_stat_native — populate struct t_stat for the file backed by `c`.
-// P6-pouch-stratumd-boot sub-chunk 16b-gamma. The Thylacine-native SYS_FSTAT
-// surface: caller (syscall handler) provides a kernel-scratch t_stat; we
-// fill it from the in-kernel ramfs table; the syscall handler then copies
-// it out to user-VA byte-by-byte via uaccess_store_u8.
+// devramfs_stat_qid — the qid-keyed t_stat fill shared by devramfs_stat_native
+// (SYS_FSTAT / the stalk X-search) and devramfs_walk_attrs (the POUNCE
+// per-component records — one source of truth so the pounce cannot diverge
+// from the per-component loop).
 //
-// Returns 0 on success, -1 if `c` does not name a real file (root dir or
-// out-of-range qid).
-static int devramfs_stat_native(struct Spoor *c, struct t_stat *out) {
-    if (!c || !out) return -1;
-
+// Returns 0 on success, -1 if `qid_path` does not name a known node.
+static int devramfs_stat_qid(u64 qid_path, struct t_stat *out) {
     // Zero everything first so any field we don't set is a defined zero.
     // The caller can rely on every t_stat reaching it byte-for-byte equal
     // to what the kernel wrote, with no stack-garbage leakage.
     for (size_t i = 0; i < sizeof(*out); i++) ((u8 *)out)[i] = 0;
 
-    if (c->qid.path == RAMFS_QID_ROOT_PATH) {
+    if (qid_path == RAMFS_QID_ROOT_PATH) {
         // The synthetic root directory. Reasonable for "what is fd N?"
         // when N is the root spoor; size 0 + S_IFDIR + qid_type=QTDIR.
         out->mode      = T_S_IFDIR | 0555u;
@@ -359,14 +355,14 @@ static int devramfs_stat_native(struct Spoor *c, struct t_stat *out) {
         return 0;
     }
 
-    if (ramfs_qid_is_synth(c->qid.path)) {
+    if (ramfs_qid_is_synth(qid_path)) {
         // A synthetic mount-point dir (stalk-2 D4): system-owned, world-r/x
         // (0555), same as the root. The X bit is load-bearing -- stalk's
         // per-component X-search must pass for a principal to traverse onto the
         // mount point and cross. Empty (no entries); a directory.
         out->mode      = T_S_IFDIR | 0555u;
         out->nlink     = 1;
-        out->qid_path  = c->qid.path;
+        out->qid_path  = qid_path;
         out->qid_vers  = 0;
         out->qid_type  = QTDIR;
         out->blksize   = 4096;
@@ -375,7 +371,7 @@ static int devramfs_stat_native(struct Spoor *c, struct t_stat *out) {
         return 0;
     }
 
-    int idx = ramfs_index_for_qid(c->qid.path);
+    int idx = ramfs_index_for_qid(qid_path);
     if (idx < 0 || idx >= g_ramfs_count) return -1;
 
     const struct ramfs_file *f = &g_ramfs_files[idx];
@@ -389,7 +385,7 @@ static int devramfs_stat_native(struct Spoor *c, struct t_stat *out) {
     // 0100644 so the fallback is structurally cold.
     out->mode      = f->mode ? f->mode : (T_S_IFREG | 0644u);
     out->nlink     = 1;
-    out->qid_path  = c->qid.path;
+    out->qid_path  = qid_path;
     out->qid_vers  = 0;
     out->qid_type  = QTFILE;
     out->blksize   = 4096;
@@ -398,6 +394,62 @@ static int devramfs_stat_native(struct Spoor *c, struct t_stat *out) {
     out->uid       = PRINCIPAL_SYSTEM;
     out->gid       = GID_SYSTEM;
     return 0;
+}
+
+// devramfs_stat_native — the SYS_FSTAT vtable surface (P6-pouch-stratumd-boot
+// 16b-gamma): the caller (syscall handler) provides a kernel-scratch t_stat;
+// the handler then copies it out to user-VA byte-by-byte via uaccess_store_u8.
+static int devramfs_stat_native(struct Spoor *c, struct t_stat *out) {
+    if (!c || !out) return -1;
+    return devramfs_stat_qid(c->qid.path, out);
+}
+
+// The POUNCE walk-fused getattr (docs/POUNCE-DESIGN.md §4) — native: the
+// attrs live in the in-kernel ramfs table, so this is walk_one + stat_qid per
+// component with zero I/O. Exists so stalk keeps ONE fast-path shape across
+// both perm-enforced Devs (the design's stated reason), and because the
+// per-component walk cursor here is a local u64 — the strict walk_attrs
+// contract (nc untouched unless the walk is FULL) falls out naturally.
+static struct Walkqid *devramfs_walk_attrs(struct Spoor *c, struct Spoor *nc,
+                                           const char **names,
+                                           const size_t *name_lens,
+                                           int nname, struct t_stat *sts) {
+    if (!c || nname <= 0 || nname > DEV_WALK_ATTRS_MAX) return NULL;
+    if (!names || !name_lens || !sts) return NULL;
+
+    struct Walkqid *wq = walkqid_alloc(nname);
+    if (!wq) return NULL;
+
+    u64 cur = c->qid.path;
+    int n = 0;
+    for (int i = 0; i < nname; i++) {
+        // walk_one takes a NUL-terminated name; names[] are (ptr, len) slices
+        // into the resolver's path buffer. Per-component bounded copy (the
+        // resolver enforces len <= SYS_WALK_OPEN_NAME_MAX before calling).
+        char nb[SYS_WALK_OPEN_NAME_MAX + 1];
+        size_t l = name_lens[i];
+        if (l == 0 || l > SYS_WALK_OPEN_NAME_MAX) break;
+        for (size_t k = 0; k < l; k++) nb[k] = names[i][k];
+        nb[l] = '\0';
+
+        struct Qid next;
+        if (!walk_one(cur, nb, &next)) break;
+        if (devramfs_stat_qid(next.path, &sts[n]) != 0) break;
+        cur = next.path;
+        wq->qid[n++] = next;
+    }
+
+    wq->nqid = n;
+    if (nc && n == nname) {
+        nc->qid  = wq->qid[n - 1];
+        wq->spoor = nc;
+    } else {
+        // Partial walk or the query form: nothing transitioned (contract:
+        // nc untouched — devramfs Spoors are qid-only, so "untouched" means
+        // the qid is not advanced).
+        wq->spoor = NULL;
+    }
+    return wq;
 }
 
 static struct Spoor *devramfs_open(struct Spoor *c, int omode) {
@@ -579,6 +631,7 @@ struct Dev devramfs = {
 
     .attach   = devramfs_attach,
     .walk     = devramfs_walk,
+    .walk_attrs = devramfs_walk_attrs,   // POUNCE: native (RAM-table) fused walk+attrs
     .stat     = devramfs_stat,
     .stat_native = devramfs_stat_native,
     .seekable = true,   // file content: read/write honor the byte offset (RW-4 R2-F2)

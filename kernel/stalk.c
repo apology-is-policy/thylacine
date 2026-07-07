@@ -137,6 +137,25 @@ int stalk_cross_mounts(struct Proc *p, struct Spoor *probe,
     return 0;
 }
 
+// path_has_dotdot -- pre-scan for a ".." component. The POUNCE compresses a
+// run of components into ONE trail entry (intermediates never materialize as
+// Spoors), which is incompatible with `..`'s pop-one-component semantics --
+// a pop into the middle of a pounced run has no Spoor to land on. Any ".."
+// in the path therefore disables the pounce wholesale and the resolver runs
+// today's per-component loop (the design's stated worst case). Resolved
+// paths in the motivating workloads are lexically cleaned ('..'-free): the
+// cwd join cleans (LS-4), and toolchain paths are absolute.
+static bool path_has_dotdot(const char *path, u64 pathlen) {
+    u64 i = 0;
+    while (i < pathlen) {
+        while (i < pathlen && path[i] == '/') i++;
+        u64 s = i;
+        while (i < pathlen && path[i] != '/') i++;
+        if (i - s == 2 && path[s] == '.' && path[s + 1] == '.') return true;
+    }
+    return false;
+}
+
 // stalk() -- the errp==NULL convenience wrapper (the common, errno-agnostic
 // API the bulk of callers + the test suite use). The errno-rollout consumers
 // (SYS_OPEN) call stalk_err() directly.
@@ -145,15 +164,23 @@ struct Spoor *stalk(struct Proc *p, struct Spoor *start,
     return stalk_err(p, start, path, pathlen, amode, omode, NULL);
 }
 
-struct Spoor *stalk_err(struct Proc *p, struct Spoor *start,
-                        const char *path, u64 pathlen, int amode, u32 omode,
-                        int *errp) {
+// stalk_core -- the resolver body. stat_out/stat_done are the STALK_STAT
+// walk-query sink (stalk_stat only): when the final run resolves through
+// Dev.walk_attrs and the leaf is clean, the core fills *stat_out, sets
+// *stat_done, unwinds, and returns NULL WITHOUT touching *errp -- no quarry
+// Spoor ever exists. Every other caller passes NULL/NULL.
+static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
+                                const char *path, u64 pathlen,
+                                int amode, u32 omode, int *errp,
+                                struct t_stat *stat_out, bool *stat_done) {
     if (!start || !path) { if (errp) *errp = T_E_INVAL; return NULL; }
     // Reject an unknown amode LOUDLY rather than silently degrading to walk-only
-    // (stalk-1 audit F1). stalk-2 adds STALK_MOUNT; any future amode must be
-    // added here AND given its final-hop dispatch arm below -- a missed arm must
-    // fail-closed, not skip an open / a cross / a create's parent check.
-    if (amode != STALK_WALK && amode != STALK_OPEN && amode != STALK_MOUNT)
+    // (stalk-1 audit F1). stalk-2 adds STALK_MOUNT; POUNCE adds STALK_STAT; any
+    // future amode must be added here AND given its final-hop dispatch arm below
+    // -- a missed arm must fail-closed, not skip an open / a cross / a create's
+    // parent check.
+    if (amode != STALK_WALK && amode != STALK_OPEN && amode != STALK_MOUNT &&
+        amode != STALK_STAT)
         { if (errp) *errp = T_E_INVAL; return NULL; }
 
     struct Spoor *trail[STALK_MAX_DEPTH];
@@ -164,6 +191,21 @@ struct Spoor *stalk_err(struct Proc *p, struct Spoor *start,
     // perm denial, T_E_INVAL structural, propagated for a stat/open failure);
     // T_E_IO is the generic default for an OOM / transport / cross failure.
     int           err    = T_E_IO;
+
+    // POUNCE state (docs/POUNCE-DESIGN.md §5). `carried` holds the current
+    // trail tip's attrs when they arrived fused with the walk that produced it
+    // (the previous run's leaf record) -- the next run's base X-check and the
+    // final-hop R/W check consume it instead of a fresh stat_native RPC.
+    // Invalidated whenever the tip stops being the Spoor the record describes:
+    // a cross (mounted root != mount point), a '..' pop, an old-path hop
+    // (plain walk fetches no attrs). `logical_depth` counts REAL components
+    // consumed -- runs compress the trail array, so `depth` alone would let a
+    // pounced path exceed the STALK_MAX_DEPTH surface the per-component loop
+    // enforces; monotone because pounce_ok excludes '..' (the only pop).
+    bool          pounce_ok = !path_has_dotdot(path, pathlen);
+    struct t_stat carried;
+    bool          carried_valid = false;
+    int           logical_depth = 0;
 
     // Cross the BASE: `start` itself may be a mount point. If it crosses, the
     // owned crossed clone becomes trail[0] (so the first component searches the
@@ -194,6 +236,7 @@ struct Spoor *stalk_err(struct Proc *p, struct Spoor *start,
         // owns its fid: a walked child or a crossed clone).
         if (clen == 2 && path[s] == '.' && path[s + 1] == '.') {
             if (depth > 0) spoor_clunk(trail[--depth]);
+            carried_valid = false;   // hygiene; unreachable while pounce_ok
             continue;
         }
 
@@ -214,16 +257,275 @@ struct Spoor *stalk_err(struct Proc *p, struct Spoor *start,
             if (crossed) {
                 spoor_clunk(trail[depth - 1]);
                 trail[depth - 1] = crossed;
+                carried_valid = false;   // the tip changed; the record described
+                                         // the mount point, not the mounted root
             }
             parent = trail[depth - 1];
         } else {
             parent = start;
         }
 
+        // =====================================================================
+        // POUNCE (docs/POUNCE-DESIGN.md §5) -- batch the maximal run of
+        // consecutive real components through ONE Dev.walk_attrs call (one wire
+        // RPC on dev9p), then enforce the per-component X-search + mount scan
+        // in a LEFT-TO-RIGHT post-scan whose outcome is byte-identical to the
+        // per-component loop below (the fail-ordering invariant, §6).
+        // Disabled when the path contains '..' (pounce_ok) or the Dev lacks
+        // the slot -- those take the per-component loop unchanged.
+        // =====================================================================
+        if (pounce_ok && parent->dev && parent->dev->walk_attrs &&
+            logical_depth < STALK_MAX_DEPTH) {
+            // -- Gather the run. The already-tokenized component is names[0];
+            // keep consuming real components (a '.' / '..' / over-long token
+            // ends the run and is LEFT for the outer loop, preserving its
+            // existing disposition + ordering). ends[j] = the scan position
+            // just past component j -- the split-resume point.
+            const char  *names[DEV_WALK_ATTRS_MAX];
+            size_t       lens [DEV_WALK_ATTRS_MAX];
+            u64          ends [DEV_WALK_ATTRS_MAX];
+            int          nrun = 1;
+            names[0] = &path[s]; lens[0] = (size_t)clen; ends[0] = i;
+            int budget = STALK_MAX_DEPTH - logical_depth;
+            if (budget > DEV_WALK_ATTRS_MAX) budget = DEV_WALK_ATTRS_MAX;
+            while (nrun < budget) {
+                u64 save = i;
+                while (i < pathlen && path[i] == '/') i++;
+                if (i >= pathlen) { i = save; break; }
+                u64 s2 = i;
+                while (i < pathlen && path[i] != '/') i++;
+                u64 cl2 = i - s2;
+                bool tok_dot    = (cl2 == 1 && path[s2] == '.');
+                bool tok_dotdot = (cl2 == 2 && path[s2] == '.' &&
+                                   path[s2 + 1] == '.');
+                if (tok_dot || tok_dotdot || cl2 > SYS_WALK_OPEN_NAME_MAX) {
+                    i = save;   // not part of the run; the outer loop owns it
+                    break;
+                }
+                names[nrun] = &path[s2];
+                lens [nrun] = (size_t)cl2;
+                ends [nrun] = i;
+                nrun++;
+            }
+            bool final_run;
+            {
+                u64 peek = i;
+                while (peek < pathlen && path[peek] == '/') peek++;
+                final_run = (peek >= pathlen);
+            }
+
+            // -- Base X-check: one stat_native per run, or the previous run's
+            // carried leaf record (both server-fresh samples of THIS
+            // resolution; the same unsynchronized-snapshot TOCTOU shape as the
+            // per-component loop -- §6).
+            if (parent->dev->perm_enforced) {
+                struct t_stat pst;
+                if (carried_valid) {
+                    pst = carried;
+                } else {
+                    int sr = spoor_stat_native(parent, &pst);
+                    if (sr != 0)                         { err = err_code(sr); goto fail; }
+                }
+                if (perm_check(p, &pst, PERM_X) != 0)    { err = T_E_ACCES;    goto fail; }
+            }
+
+            // -- The batched walk. STALK_STAT's FINAL run is the walk-QUERY
+            // (nc == NULL -> dev9p sends newfid = P9_NOFID): the leaf's attrs
+            // return in the reply and no Spoor/fid ever exists. Every other
+            // run binds (the leaf becomes the next trail entry / the quarry).
+            bool query = (amode == STALK_STAT) && final_run &&
+                         (stat_out != NULL) && (stat_done != NULL);
+            struct Spoor *nc = NULL;
+            if (!query) {
+                if (depth >= STALK_MAX_DEPTH)            { err = T_E_INVAL; goto fail; }
+                nc = spoor_clone(parent);
+                if (!nc) goto fail;
+            }
+            struct t_stat sts[DEV_WALK_ATTRS_MAX];
+            struct Walkqid *w = parent->dev->walk_attrs(parent, nc, names, lens,
+                                                        nrun, sts);
+            if (w == DEV_WALK_ATTRS_UNSUPPORTED) {
+                // This SESSION's server does not implement the fused op
+                // (dev9p latches the first ENOSYS; the sentinel then returns
+                // RPC-free). Not a walk failure -- nothing about the path was
+                // learned. Release the untouched clone, rewind the gather to
+                // just past the first component, and resolve per-component:
+                // the outer loop re-tokenizes the rest, and each subsequent
+                // iteration's walk_attrs returns the sentinel instantly, so
+                // the whole resolution degrades to today's loop.
+                if (nc) { nc->aux = NULL; spoor_unref(nc); }
+                i = ends[0];
+                goto per_component;
+            }
+            if (!w) {
+                // Failed at the FIRST component (dev9p Rlerror / transport /
+                // OOM): nothing bound, nc untouched (contract). The base was
+                // X-checked above, so NOENT is correctly ordered -- the same
+                // disposition as the per-component loop's walk-NULL arm.
+                if (nc) { nc->aux = NULL; spoor_unref(nc); }
+                err = T_E_NOENT;
+                goto fail;
+            }
+            int  k     = w->nqid;
+            bool full  = (k == nrun);
+            bool bound = (nc != NULL && full && w->spoor == nc);
+            // Valid shapes (the sharpened contract): a full BIND walk MUST
+            // have transitioned nc (w->spoor == nc); everything else --
+            // partial, or the query form -- MUST carry w->spoor == NULL. A
+            // full bind walk with spoor == NULL is a VIOLATION (pushing the
+            // untransitioned nc would later clunk the parent's shared fid).
+            bool shape_ok = (nc && full) ? bound : (w->spoor == NULL);
+            if (k < 0 || k > nrun || !shape_ok) {
+                // Contract violation (defense-in-depth; dev9p + devramfs honor
+                // the sharpened reuse-nc rule).
+                bool was_bound = (nc && w->spoor == nc);
+                walkqid_free(w);
+                if (nc) {
+                    if (was_bound) spoor_clunk(nc);
+                    else { nc->aux = NULL; spoor_unref(nc); }
+                }
+                goto fail;
+            }
+
+            // -- Fail-ordering post-scan, LEFT-TO-RIGHT (§6). Component j's
+            // parent X-gate: the base was checked pre-batch; thereafter
+            // component j-1's own fused record (sts[j-1]) vouches for j. An
+            // X-denial MASKS everything deeper -- including a partial walk's
+            // miss -- so a caller cannot probe existence under a forbidden
+            // directory (T_E_ACCES, never T_E_NOENT). Interleaved with the
+            // mount scan in the SAME order as the per-component loop (a
+            // component's mount test precedes its own X-check; its X-check
+            // precedes the next component's consumption).
+            int split_at = -1;
+            for (int j = 0; j < k; j++) {
+                if (j > 0 && parent->dev->perm_enforced &&
+                    perm_check(p, &sts[j - 1], PERM_X) != 0) {
+                    walkqid_free(w);
+                    if (bound) spoor_clunk(nc);
+                    else if (nc) { nc->aux = NULL; spoor_unref(nc); }
+                    err = T_E_ACCES;
+                    goto fail;
+                }
+                // Mount membership of walked component j (identity = the run
+                // parent's (dc, devno) + the reply qid; batch intermediates
+                // are never materialized as Spoors). A hit means the batch
+                // walked PAST a mount point server-side, so everything past j
+                // -- including a partial walk's miss verdict -- is the
+                // UNDERLYING tree's answer: split the run at j. EXCEPT the
+                // leaf of a full BIND walk, where nc IS the mount point and
+                // the existing machinery (cross-on-descent when it becomes a
+                // parent; the quarry cross; STALK_MOUNT's no-cross) already
+                // handles it exactly as today.
+                if (p && p->territory &&
+                    mount_is_point_id(p->territory, parent->dc, parent->devno,
+                                      w->qid[j].path)) {
+                    if (!(bound && j == nrun - 1)) { split_at = j; break; }
+                }
+            }
+
+            if (split_at >= 0) {
+                // Split: discard the batch (a bound leaf lives in the WRONG
+                // tree -- past the mount point), materialize a Spoor AT the
+                // mount point by re-walking the validated prefix [0..split_at]
+                // (one extra RPC; mid-path crossings are rare and mount points
+                // stable), push it, and resume the outer loop after component
+                // split_at. The next iteration's cross-on-descent (or the
+                // quarry cross) then crosses it and X-checks the MOUNTED root
+                // -- today's exact semantics.
+                walkqid_free(w);
+                if (bound) spoor_clunk(nc);
+                else if (nc) { nc->aux = NULL; spoor_unref(nc); }
+                if (depth >= STALK_MAX_DEPTH)            { err = T_E_INVAL; goto fail; }
+                struct Spoor *mc = spoor_clone(parent);
+                if (!mc) goto fail;
+                // Reuse sts -- the consumed prefix's records are spent.
+                struct Walkqid *rw = parent->dev->walk_attrs(parent, mc,
+                                                             names, lens,
+                                                             split_at + 1, sts);
+                if (rw == DEV_WALK_ATTRS_UNSUPPORTED) {
+                    // Unreachable with the one-way per-session latch (the
+                    // batch above just SUCCEEDED on this session), but the
+                    // sentinel is a static object -- it must never reach
+                    // walkqid_free. Fail closed.
+                    mc->aux = NULL;
+                    spoor_unref(mc);
+                    goto fail;
+                }
+                if (!rw || rw->nqid != split_at + 1 || rw->spoor != mc) {
+                    // The tree changed between the two walks (racing
+                    // unlink/rename) -- fail as a sequential resolution racing
+                    // the same mutation would.
+                    if (rw) {
+                        bool rbound = (rw->spoor == mc);
+                        walkqid_free(rw);
+                        if (rbound) spoor_clunk(mc);
+                        else { mc->aux = NULL; spoor_unref(mc); }
+                    } else {
+                        mc->aux = NULL; spoor_unref(mc);
+                    }
+                    err = T_E_NOENT;
+                    goto fail;
+                }
+                walkqid_free(rw);
+                // #66: the prefix components join mc's namespace name
+                // (non-load-bearing, I-33).
+                for (int j = 0; j <= split_at; j++)
+                    spoor_path_extend(mc, names[j], lens[j]);
+                trail[depth++] = mc;
+                logical_depth += split_at + 1;
+                carried_valid = false;   // the tip is a mount point; the
+                                         // resumed loop crosses + re-stats
+                i = ends[split_at];
+                continue;
+            }
+
+            if (!full) {
+                // Partial walk with no mount among the walked prefix: the miss
+                // at component k is a REAL miss in the correct tree. Its
+                // parent is component k-1 (the base for k == 0, X-checked
+                // pre-batch): the fail-ordering invariant's last obligation --
+                // an X-denial on the miss's parent masks the miss.
+                walkqid_free(w);
+                if (nc) { nc->aux = NULL; spoor_unref(nc); }   // never bound on partial
+                if (k > 0 && parent->dev->perm_enforced &&
+                    perm_check(p, &sts[k - 1], PERM_X) != 0) {
+                    err = T_E_ACCES;
+                    goto fail;
+                }
+                err = T_E_NOENT;
+                goto fail;
+            }
+
+            // Full walk, no split.
+            if (query) {
+                // The 1-RPC stat: the leaf's fused record is the answer; no
+                // quarry Spoor / fid ever existed -- nothing to clunk, on
+                // either end. Success exit WITHOUT touching *errp.
+                walkqid_free(w);
+                *stat_out  = sts[nrun - 1];
+                *stat_done = true;
+                stalk_unwind(trail, depth);
+                return NULL;
+            }
+            walkqid_free(w);
+            // #66: the walked components join nc's namespace name (the leaf
+            // Spoor carries the whole run; intermediates never materialize).
+            for (int j = 0; j < nrun; j++)
+                spoor_path_extend(nc, names[j], lens[j]);
+            trail[depth++] = nc;
+            logical_depth += nrun;
+            carried = sts[nrun - 1];   // the new tip's walk-fused record seeds
+            carried_valid = true;      // the next run's base X-check and the
+                                       // final-hop R/W check (STALK_OPEN)
+            continue;
+        }
+
         // Per-component X-search: a perm_enforced Dev gates traversal on PERM_X
         // for the caller's principal (A-2d/A-3 generalized from the single-hop
         // walk-open to every hop, now including the mounted root we crossed
         // into). Fail-closed if the Dev cannot vouch for the metadata.
+        // (`per_component` is the pounce's walk_attrs-unsupported fall-through.)
+per_component:
         if (parent->dev && parent->dev->perm_enforced) {
             struct t_stat st;
             int sr = spoor_stat_native(parent, &st);
@@ -231,7 +533,15 @@ struct Spoor *stalk_err(struct Proc *p, struct Spoor *start,
             if (perm_check(p, &st, PERM_X) != 0) { err = T_E_ACCES;    goto fail; }
         }
 
-        if (depth >= STALK_MAX_DEPTH)            { err = T_E_INVAL; goto fail; }  // trail full
+        // Trail-full reject. When pouncing is possible on this path, ALSO
+        // enforce the cap on the LOGICAL component count -- runs compress the
+        // trail array, and without this a >STALK_MAX_DEPTH-component path
+        // whose tail lands on a walk_attrs-less Dev would resolve where the
+        // per-component loop INVALs (a surface divergence). Monotone since
+        // pounce_ok excludes '..'.
+        if (depth >= STALK_MAX_DEPTH ||
+            (pounce_ok && logical_depth >= STALK_MAX_DEPTH))
+                                                 { err = T_E_INVAL; goto fail; }  // trail full
         if (!parent->dev || !parent->dev->walk)  { err = T_E_INVAL; goto fail; }
 
         struct Spoor *nc = spoor_clone(parent);
@@ -289,12 +599,16 @@ struct Spoor *stalk_err(struct Proc *p, struct Spoor *start,
         // Push UN-crossed. The cross happens lazily when nc later becomes a
         // parent (cross-on-descent above) or, for the quarry, at the end below.
         trail[depth++] = nc;   // owned (own fid post-walk for dev9p)
+        logical_depth++;       // (only consumed while pounce_ok)
+        carried_valid = false; // a plain walk fetches no attrs for the new tip
     }
 
     // Determine the quarry.
     if (depth > 0) {
         // Pop the deepest resolved Spoor off the trail; trail[0..depth) now
-        // holds only the ancestors (released by stalk_unwind below).
+        // holds only the ancestors (released by stalk_unwind below). A valid
+        // `carried` record describes exactly this Spoor (it was set when the
+        // tip was pushed and invalidated on every event that changed the tip).
         quarry = trail[--depth];
     } else {
         // Zero real components ("/", ".", or a ".." run netted back to the
@@ -316,18 +630,31 @@ struct Spoor *stalk_err(struct Proc *p, struct Spoor *start,
         if (crossed) {
             spoor_clunk(quarry);
             quarry = crossed;
+            carried_valid = false;   // the record described the mount point
         }
     }
 
-    // Final hop. STALK_WALK (O_PATH) + STALK_MOUNT return the resolved quarry
-    // unopened (a navigation / create / chroot / mount base; exempt from the R/W
-    // gate, matching the single-hop walk-open's O_PATH carve-out). STALK_OPEN
-    // runs the R/W perm_check then Dev.open.
+    // Final hop. STALK_WALK (O_PATH) + STALK_MOUNT + STALK_STAT return the
+    // resolved quarry unopened (a navigation / create / chroot / mount /
+    // metadata base; exempt from the R/W gate, matching the single-hop
+    // walk-open's O_PATH carve-out -- POSIX stat authority is the path
+    // X-search only, exactly what the O_PATH+fstat emulation granted).
+    // STALK_STAT's pure-query fast path returned earlier via stat_done; a
+    // quarry reaching here (walk_attrs-less final Dev / leaf mount point /
+    // zero-component path) is stat_native'd by the stalk_stat wrapper.
+    // STALK_OPEN runs the R/W perm_check then Dev.open.
     if (amode == STALK_OPEN) {
         if (quarry->dev && quarry->dev->perm_enforced) {
             struct t_stat st;
-            int sr = spoor_stat_native(quarry, &st);
-            if (sr != 0)                                              { err = err_code(sr); goto fail; }
+            if (carried_valid) {
+                // The quarry's own walk-fused record (the final run's leaf) --
+                // the same server sample a fresh Tgetattr would re-fetch,
+                // taken by THIS resolution (§6: zero staleness added).
+                st = carried;
+            } else {
+                int sr = spoor_stat_native(quarry, &st);
+                if (sr != 0)                                          { err = err_code(sr); goto fail; }
+            }
             if (perm_check(p, &st, perm_want_for_omode(omode)) != 0)  { err = T_E_ACCES;    goto fail; }
         }
         if (!quarry->dev || !quarry->dev->open)                       { err = T_E_INVAL; goto fail; }
@@ -363,4 +690,29 @@ fail:
     if (quarry) spoor_clunk(quarry);   // quarry was popped off the trail
     stalk_unwind(trail, depth);        // release any remaining ancestors
     return NULL;
+}
+
+struct Spoor *stalk_err(struct Proc *p, struct Spoor *start,
+                        const char *path, u64 pathlen, int amode, u32 omode,
+                        int *errp) {
+    return stalk_core(p, start, path, pathlen, amode, omode, errp, NULL, NULL);
+}
+
+int stalk_stat(struct Proc *p, struct Spoor *start,
+               const char *path, u64 pathlen,
+               struct t_stat *out, int *errp) {
+    if (!out) { if (errp) *errp = T_E_INVAL; return -1; }
+    bool done = false;
+    struct Spoor *q = stalk_core(p, start, path, pathlen, STALK_STAT, 0,
+                                 errp, out, &done);
+    if (done) return 0;   // the walk-query fast path filled *out; no Spoor existed
+    if (!q)   return -1;  // *errp carries the cause
+    // Fallback quarry (walk_attrs-less final Dev / leaf mount point crossed to
+    // the mounted root / zero-component path): stat it and release it --
+    // exactly the O_PATH+fstat emulation this syscall replaces, minus the
+    // handle-table round trip.
+    int sr = spoor_stat_native(q, out);
+    spoor_clunk(q);
+    if (sr != 0) { if (errp) *errp = err_code(sr); return -1; }
+    return 0;
 }

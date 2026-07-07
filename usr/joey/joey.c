@@ -2868,6 +2868,35 @@ int main(void) {
             (void)t_close(sk_fd);
             return 1;
         }
+        // POUNCE: SYS_STAT end-to-end through the real SVC dispatch + uaccess
+        // path copy-in + the stalk walk-query (devramfs walk_attrs) + t_stat
+        // copy-out -- the 1-syscall/0-handle path-stat. Must agree with the
+        // open+fstat result above; a missing path must report -T_E_NOENT
+        // (2), the Go os.IsNotExist keystone.
+        {
+            static const char sk_path[] = "/system.key";
+            struct t_stat ps;
+            long prc = t_stat_path(sk_path, sizeof(sk_path) - 1, &ps);
+            if (prc != 0 || ps.size != sk_st.size ||
+                ps.qid_path != sk_st.qid_path ||
+                ps.uid != T_PRINCIPAL_SYSTEM) {
+                t_putstr("joey: probe SYS_STAT /system.key FAILED rc=");
+                t_putstr(itoa_dec(prc, buf, sizeof(buf)));
+                t_putstr("\n");
+                (void)t_close(sk_fd);
+                return 1;
+            }
+            static const char nope[] = "/no-such-file-pounce";
+            long nrc = t_stat_path(nope, sizeof(nope) - 1, &ps);
+            if (nrc != -2) {   // -T_E_NOENT
+                t_putstr("joey: probe SYS_STAT miss errno wrong rc=");
+                t_putstr(itoa_dec(nrc, buf, sizeof(buf)));
+                t_putstr("\n");
+                (void)t_close(sk_fd);
+                return 1;
+            }
+            t_putstr("joey: probe SYS_STAT OK (attrs match fstat; miss -> -ENOENT)\n");
+        }
         (void)t_close(sk_fd);
         // #81: the O_PATH read-bypass is CLOSED. An O_PATH (T_OPATH) handle is a
         // navigation base, NOT a byte-I/O channel -- t_read on it MUST return -1

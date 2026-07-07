@@ -881,6 +881,7 @@ int p9_client_init(struct p9_client *c,
     // Fid allocator starts at root_fid + 1; dev9p (and other callers)
     // pull fresh fids monotonically via p9_client_alloc_fid.
     c->next_fid     = (root_fid < P9_NOFID - 1) ? (root_fid + 1) : 1;
+    c->wga_unsupported = false;   // POUNCE: Twalkgetattr capability unknown
     c->total_ops    = 0;
     c->total_errors = 0;
     return 0;

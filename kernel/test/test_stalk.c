@@ -42,6 +42,13 @@
 #include <thylacine/territory.h> // stalk-2: mount / unmount / territory_alloc
 #include <thylacine/types.h>
 
+// POUNCE (docs/POUNCE-DESIGN.md): stalkfix implements Dev.walk_attrs, so the
+// ENTIRE pre-existing battery below now resolves through the pounce fast path
+// -- their unchanged expectations are the pounce==per-component-loop parity
+// proof. stalkfix_nowa is the same tree WITHOUT the slot (the per-component
+// loop), for explicit A/B parity assertions; the g_fix_*_calls counters prove
+// which path engaged (non-vacuity).
+
 // Forward declarations (registered in kernel/test/test.c).
 void test_stalk_resolve_multi(void);
 void test_stalk_resolve_deep(void);
@@ -68,6 +75,15 @@ void test_stalk_path_accumulate(void);
 void test_stalk_path_dotdot(void);
 void test_stalk_path_cross_transplant(void);
 void test_stalk_path_adopt_transplant(void);   // #66 F2 (owed from #66a)
+// POUNCE: the batched fast path + stalk_stat (docs/POUNCE-DESIGN.md).
+void test_stalk_pounce_engaged(void);
+void test_stalk_pounce_acces_masks_noent(void);
+void test_stalk_pounce_parity_nowa(void);
+void test_stalk_pounce_full_walk_past_mount(void);
+void test_stalk_stat_query(void);
+void test_stalk_stat_mount_leaf(void);
+void test_sys_stat_for_proc(void);
+void test_stalk_pounce_unsupported_fallback(void);
 
 // =============================================================================
 // The fixture Dev.
@@ -126,9 +142,16 @@ static bool fix_walk_one(u64 cur_path, const char *name, struct Qid *out) {
     return false;
 }
 
+// Path-engagement counters: which resolver path actually ran (non-vacuity --
+// a pounce test that silently fell back to the per-component loop would
+// otherwise pass hollowly).
+static int g_fix_walk_calls;
+static int g_fix_walkattrs_calls;
+
 static struct Walkqid *fix_walk(struct Spoor *c, struct Spoor *nc,
                                 const char **name, int nname) {
     if (!c || nname < 0) return NULL;
+    if (nname > 0) g_fix_walk_calls++;   // real steps only (0-walk = clone)
     struct Walkqid *wq = walkqid_alloc(nname > 0 ? nname : 1);
     if (!wq) return NULL;
 
@@ -148,9 +171,8 @@ static struct Walkqid *fix_walk(struct Spoor *c, struct Spoor *nc,
     return wq;
 }
 
-static int fix_stat_native(struct Spoor *c, struct t_stat *out) {
-    if (!c || !out) return -1;
-    const struct fixnode *fn = fix_node(c->qid.path);
+static int fix_stat_qid(u64 qid_path, struct t_stat *out) {
+    const struct fixnode *fn = fix_node(qid_path);
     if (!fn) return -1;
     for (size_t i = 0; i < sizeof(*out); i++) ((u8 *)out)[i] = 0;
     out->mode     = ((fn->type & QTDIR) ? T_S_IFDIR : T_S_IFREG) | fn->mode;
@@ -161,6 +183,49 @@ static int fix_stat_native(struct Spoor *c, struct t_stat *out) {
     out->uid      = PRINCIPAL_SYSTEM;
     out->gid      = GID_SYSTEM;
     return 0;
+}
+
+static int fix_stat_native(struct Spoor *c, struct t_stat *out) {
+    if (!c || !out) return -1;
+    return fix_stat_qid(c->qid.path, out);
+}
+
+// The POUNCE fixture walk_attrs. Honors the sharpened contract in
+// <thylacine/dev.h>: transitions nc ONLY on a full walk; partial/query leave
+// nc untouched and return w->spoor == NULL.
+static struct Walkqid *fix_walk_attrs(struct Spoor *c, struct Spoor *nc,
+                                      const char **names,
+                                      const size_t *name_lens,
+                                      int nname, struct t_stat *sts) {
+    if (!c || nname <= 0 || nname > DEV_WALK_ATTRS_MAX) return NULL;
+    if (!names || !name_lens || !sts) return NULL;
+    g_fix_walkattrs_calls++;
+
+    struct Walkqid *wq = walkqid_alloc(nname);
+    if (!wq) return NULL;
+
+    u64 cur = c->qid.path;
+    int n = 0;
+    for (int i = 0; i < nname; i++) {
+        char nb[SYS_WALK_OPEN_NAME_MAX + 1];
+        size_t l = name_lens[i];
+        if (l == 0 || l > SYS_WALK_OPEN_NAME_MAX) break;
+        for (size_t k = 0; k < l; k++) nb[k] = names[i][k];
+        nb[l] = '\0';
+        struct Qid next;
+        if (!fix_walk_one(cur, nb, &next)) break;
+        if (fix_stat_qid(next.path, &sts[n]) != 0) break;
+        cur = next.path;
+        wq->qid[n++] = next;
+    }
+    wq->nqid = n;
+    if (nc && n == nname) {
+        nc->qid  = wq->qid[n - 1];
+        wq->spoor = nc;
+    } else {
+        wq->spoor = NULL;
+    }
+    return wq;
 }
 
 static struct Spoor *fix_open(struct Spoor *c, int omode) {
@@ -181,10 +246,29 @@ static struct Dev stalkfix = {
     .perm_enforced = true,
     .attach        = NULL,   // we mint the root via dev_simple_attach(&stalkfix,...)
     .walk          = fix_walk,
+    .walk_attrs    = fix_walk_attrs,   // POUNCE: the whole battery runs the fast path
     .stat_native   = fix_stat_native,
     .open          = fix_open,
     .close         = fix_close,
 };
+
+// The A/B twin: the SAME tree with NO walk_attrs slot -- resolves through the
+// per-component loop. The parity test runs identical paths on both and
+// asserts identical outcomes.
+static struct Dev stalkfix_nowa = {
+    .dc            = (int)'X',
+    .name          = "stalkfix_nowa",
+    .perm_enforced = true,
+    .attach        = NULL,
+    .walk          = fix_walk,
+    .stat_native   = fix_stat_native,
+    .open          = fix_open,
+    .close         = fix_close,
+};
+
+static struct Spoor *fix_root_nowa(void) {
+    return dev_simple_attach(&stalkfix_nowa, QTDIR);
+}
 
 // Mint the fixture root Spoor (qid.path 0, QTDIR). Caller owns the ref.
 static struct Spoor *fix_root(void) {
@@ -213,6 +297,7 @@ static struct Dev stalkfix_replace = {
     .perm_enforced = true,
     .attach        = NULL,
     .walk          = fix_walk,
+    .walk_attrs    = fix_walk_attrs,
     .stat_native   = fix_stat_native,
     .open          = fix_open_replace,
     .close         = fix_close,
@@ -246,6 +331,7 @@ static struct Dev stalkfix_replace_nopath = {
     .perm_enforced = true,
     .attach        = NULL,
     .walk          = fix_walk,
+    .walk_attrs    = fix_walk_attrs,
     .stat_native   = fix_stat_native,
     .open          = fix_open_replace_nopath,
     .close         = fix_close,
@@ -815,6 +901,309 @@ void test_stalk_long_component_bound(void) {
     TEST_ASSERT(q256 == NULL, "256-char name -> NULL");
     TEST_EXPECT_EQ((u64)e, (u64)T_E_INVAL,
                    "over-bound component rejected with T_E_INVAL");
+
+    spoor_unref(root);
+}
+
+// =============================================================================
+// POUNCE (docs/POUNCE-DESIGN.md §5/§6) -- the batched fast path. The whole
+// battery above already runs THROUGH the pounce (stalkfix has walk_attrs);
+// these tests pin the properties the batching itself introduces: engagement
+// (non-vacuity), the fail-ordering invariant, the mount-mid-run split, the
+// A/B parity vs the per-component loop, and the stalk_stat walk-query.
+// =============================================================================
+
+void test_stalk_pounce_engaged(void) {
+    struct Proc p; mkproc_system(&p);
+    struct Spoor *root = fix_root();
+    TEST_ASSERT(root != NULL, "fix_root");
+
+    // A 3-component path resolves in ONE walk_attrs batch and ZERO
+    // per-component walks (fix_walk counts only real steps; the quarry is
+    // popped, not clone-walked). This is the non-vacuity anchor: if the
+    // pounce silently fell back to the loop, every "parity" pass above
+    // would be hollow.
+    g_fix_walk_calls = 0; g_fix_walkattrs_calls = 0;
+    struct Spoor *q = stalk(&p, root, "a/deep/leaf", 11, STALK_WALK, 0);
+    TEST_ASSERT(q != NULL, "resolve a/deep/leaf");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)4, "a/deep/leaf -> qid 4");
+    TEST_EXPECT_EQ((u64)g_fix_walkattrs_calls, (u64)1,
+                   "ONE batched walk_attrs call for the whole run");
+    TEST_EXPECT_EQ((u64)g_fix_walk_calls, (u64)0,
+                   "ZERO per-component walks (the run never fell back)");
+    spoor_clunk(q);
+    spoor_unref(root);
+}
+
+void test_stalk_pounce_acces_masks_noent(void) {
+    struct Proc p; mkproc_system(&p);
+    struct Spoor *root = fix_root();
+    TEST_ASSERT(root != NULL, "fix_root");
+
+    // THE fail-ordering invariant (POUNCE-DESIGN §6; the audit's #1 target):
+    // nox (0644, no x) followed by a MISSING component. The batch walks nox
+    // then misses -- a naive post-scan would report the walk's NOENT, leaking
+    // "no such entry under nox" to a caller with no X on nox. The post-scan
+    // must consume left-to-right: the X-denial on nox (the miss's parent)
+    // MASKS the miss -> T_E_ACCES, never T_E_NOENT.
+    int e = -12345;
+    g_fix_walkattrs_calls = 0;
+    struct Spoor *q = stalk_err(&p, root, "nox/missing", 11, STALK_WALK, 0, &e);
+    TEST_ASSERT(q == NULL, "nox/missing denied");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_ACCES,
+                   "X-denial at nox MASKS the deeper miss (ACCES, not NOENT)");
+    TEST_ASSERT(g_fix_walkattrs_calls >= 1, "the pounce path ran (non-vacuous)");
+
+    // The same masking one level deeper: nox/sekret/missing -- sekret EXISTS
+    // (a file) but nox denies X; still ACCES.
+    e = -12345;
+    struct Spoor *q2 = stalk_err(&p, root, "nox/sekret/x", 12, STALK_WALK, 0, &e);
+    TEST_ASSERT(q2 == NULL, "nox/sekret/x denied");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_ACCES, "deeper probe still masked (ACCES)");
+
+    spoor_unref(root);
+}
+
+void test_stalk_pounce_parity_nowa(void) {
+    struct Proc p; mkproc_system(&p);
+    struct Spoor *root_wa   = fix_root();
+    struct Spoor *root_nowa = fix_root_nowa();
+    TEST_ASSERT(root_wa != NULL && root_nowa != NULL, "both roots");
+
+    // A/B parity: identical paths through the pounce (stalkfix) and the
+    // per-component loop (stalkfix_nowa) yield identical (qid | errno).
+    static const struct { const char *path; u64 len; } cases[] = {
+        { "a/b",           3 },   // plain multi-component
+        { "a/deep/leaf",  11 },   // 3-deep
+        { "/a//b",         5 },   // separator collapsing
+        { "a/./b",         5 },   // '.' breaks the run
+        { "a/deep/../b",  11 },   // '..' disables the pounce entirely
+        { "a/nope",        6 },   // miss under a searchable dir -> NOENT
+        { "nox/sekret",   10 },   // X-denial on an existing deeper file
+        { "nox/nope",      8 },   // X-denial masking a miss
+        { "/",             1 },   // zero real components
+    };
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        int ea = 0, eb = 0;
+        struct Spoor *qa = stalk_err(&p, root_wa, cases[i].path, cases[i].len,
+                                     STALK_WALK, 0, &ea);
+        struct Spoor *qb = stalk_err(&p, root_nowa, cases[i].path, cases[i].len,
+                                     STALK_WALK, 0, &eb);
+        TEST_EXPECT_EQ((u64)(qa != NULL), (u64)(qb != NULL),
+                       "parity: same success/failure");
+        if (qa && qb) {
+            TEST_EXPECT_EQ((u64)qa->qid.path, (u64)qb->qid.path,
+                           "parity: same resolved qid");
+        } else if (!qa && !qb) {
+            TEST_EXPECT_EQ((u64)ea, (u64)eb, "parity: same errno");
+        }
+        if (qa) spoor_clunk(qa);
+        if (qb) spoor_clunk(qb);
+    }
+    spoor_unref(root_wa);
+    spoor_unref(root_nowa);
+}
+
+void test_stalk_pounce_full_walk_past_mount(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+
+    // Mount deep (qid 3) onto a (qid 1). The underlying `a` HAS a child `b`
+    // (qid 2), so the batched walk of [a, b] FULLY succeeds server-side --
+    // walking PAST the mount point into the underlying tree. The post-scan's
+    // mount test must catch `a` mid-run, SPLIT, cross to the mounted deep,
+    // and resolve `b` there -- where it does NOT exist. A broken pounce
+    // returns the underlying b (qid 2); the correct answer is NOENT.
+    struct Spoor *src = stalk(&p, root, "a/deep", 6, STALK_WALK, 0);
+    struct Spoor *mp  = stalk(&p, root, "a", 1, STALK_MOUNT, 0);
+    TEST_ASSERT(src != NULL && mp != NULL, "resolve deep + a");
+    TEST_EXPECT_EQ(mount(p.territory, src, mp, 0), 0, "mount deep onto a");
+
+    int e = -12345;
+    struct Spoor *q = stalk_err(&p, root, "a/b", 3, STALK_WALK, 0, &e);
+    TEST_ASSERT(q == NULL,
+        "a/b resolves in the MOUNTED tree (deep has no b) -- the batch's "
+        "underlying full-walk result was discarded");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOENT, "miss in the mounted tree");
+
+    // And the positive twin: a/leaf lives ONLY in the mounted tree (deep's
+    // child, qid 4); the underlying a has no `leaf`, so the batch goes
+    // partial at it -- the split + cross must still find it.
+    struct Spoor *q2 = stalk(&p, root, "a/leaf", 6, STALK_WALK, 0);
+    TEST_ASSERT(q2 != NULL, "a/leaf resolves through the crossed mount");
+    TEST_EXPECT_EQ((u64)q2->qid.path, (u64)4, "a/leaf -> mounted deep/leaf (qid 4)");
+    spoor_clunk(q2);
+
+    territory_unref(p.territory);
+    spoor_clunk(src);
+    spoor_clunk(mp);
+    spoor_unref(root);
+}
+
+void test_stalk_stat_query(void) {
+    struct Proc p; mkproc_system(&p);
+    struct Spoor *root = fix_root();
+    TEST_ASSERT(root != NULL, "fix_root");
+
+    // The walk-QUERY 1-RPC stat: attrs arrive fused with the walk; NO quarry
+    // Spoor is ever materialized. The live-Spoor balance across the call is
+    // the no-materialization proof (a fallback-shaped implementation would
+    // mint + clunk a quarry -- balanced too -- so ALSO pin the engagement
+    // counters: one batch, zero per-component walks, zero plain clones).
+    struct t_stat st;
+    int e = -12345;
+    g_fix_walk_calls = 0; g_fix_walkattrs_calls = 0;
+    u64 alloc_before = spoor_total_allocated();
+    int rc = stalk_stat(&p, root, "a/deep/leaf", 11, &st, &e);
+    u64 alloc_after = spoor_total_allocated();
+    TEST_EXPECT_EQ((u64)rc, (u64)0, "stalk_stat a/deep/leaf");
+    TEST_EXPECT_EQ((u64)st.qid_path, (u64)4, "attrs are the leaf's (qid 4)");
+    TEST_EXPECT_EQ((u64)st.mode, (u64)(T_S_IFREG | 0640u), "leaf mode 0640");
+    TEST_EXPECT_EQ((u64)st.uid, (u64)PRINCIPAL_SYSTEM, "leaf uid SYSTEM");
+    TEST_EXPECT_EQ((u64)g_fix_walkattrs_calls, (u64)1, "ONE batched query walk");
+    TEST_EXPECT_EQ((u64)g_fix_walk_calls, (u64)0, "zero per-component walks");
+    TEST_EXPECT_EQ(alloc_after, alloc_before,
+                   "the query materialized NO Spoor at all");
+
+    // Resolution failures carry the stalk errnos.
+    e = -12345;
+    TEST_EXPECT_EQ((u64)stalk_stat(&p, root, "a/nope", 6, &st, &e), (u64)-1,
+                   "stat of a missing path fails");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOENT, "missing -> NOENT");
+    e = -12345;
+    TEST_EXPECT_EQ((u64)stalk_stat(&p, root, "nox/sekret", 10, &st, &e), (u64)-1,
+                   "stat under a no-X dir fails");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_ACCES, "denied -> ACCES (fail-ordering)");
+
+    // The stat of "/" (zero real components) takes the fallback quarry path.
+    e = -12345;
+    TEST_EXPECT_EQ((u64)stalk_stat(&p, root, "/", 1, &st, &e), (u64)0, "stat /");
+    TEST_EXPECT_EQ((u64)st.qid_path, (u64)0, "root attrs");
+    TEST_EXPECT_EQ((u64)st.mode, (u64)(T_S_IFDIR | 0755u), "root mode");
+
+    spoor_unref(root);
+}
+
+void test_stalk_stat_mount_leaf(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+
+    // stat ON a mount point reports the MOUNTED root (POSIX: stat of /mnt
+    // shows the mounted fs root). The query walked the UNDERLYING loop, so
+    // the leaf-mount split discards the query, materializes the mount point,
+    // crosses, and the wrapper stats the crossed a-root.
+    struct Spoor *src = stalk(&p, root, "a", 1, STALK_WALK, 0);
+    struct Spoor *mp  = stalk(&p, root, "loop", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(src != NULL && mp != NULL, "resolve src + mount point");
+    TEST_EXPECT_EQ(mount(p.territory, src, mp, 0), 0, "mount a onto loop");
+
+    struct t_stat st;
+    int e = -12345;
+    TEST_EXPECT_EQ((u64)stalk_stat(&p, root, "loop", 4, &st, &e), (u64)0,
+                   "stat of a mount point succeeds");
+    TEST_EXPECT_EQ((u64)st.qid_path, (u64)1,
+                   "attrs are the MOUNTED a-root's (qid 1), not loop's (qid 7)");
+
+    territory_unref(p.territory);
+    spoor_clunk(src);
+    spoor_clunk(mp);
+    spoor_unref(root);
+}
+
+// SYS_STAT's testable inner (the #37 *_for_proc shape; kernel path + kernel
+// t_stat -- the handler's uaccess staging wraps it).
+extern s64 sys_stat_for_proc(struct Proc *p, const char *path, u64 path_len,
+                             struct t_stat *out_k);
+
+void test_sys_stat_for_proc(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);   // synthetic Proc + fresh Territory
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+    // The Territory root is the fixture root (SYS_STAT resolves from
+    // territory_root_ref, the FROM_ROOT arm).
+    TEST_EXPECT_EQ(territory_chroot(p.territory, root), 0, "chroot to fixture");
+
+    struct t_stat st;
+    TEST_EXPECT_EQ((u64)sys_stat_for_proc(&p, "/a/b", 4, &st), (u64)0,
+                   "SYS_STAT inner: absolute path");
+    TEST_EXPECT_EQ((u64)st.qid_path, (u64)2, "/a/b -> qid 2");
+    TEST_EXPECT_EQ((u64)st.mode, (u64)(T_S_IFREG | 0644u), "b mode 0644");
+
+    // Relative path joins the cwd (dot unset == "/"); same answer.
+    TEST_EXPECT_EQ((u64)sys_stat_for_proc(&p, "a/b", 3, &st), (u64)0,
+                   "SYS_STAT inner: relative path via the cwd join");
+    TEST_EXPECT_EQ((u64)st.qid_path, (u64)2, "a/b -> qid 2");
+
+    // Resolution errnos pass through as -errno.
+    TEST_EXPECT_EQ((u64)sys_stat_for_proc(&p, "/a/nope", 7, &st),
+                   (u64)(s64)-T_E_NOENT, "missing -> -T_E_NOENT");
+    TEST_EXPECT_EQ((u64)sys_stat_for_proc(&p, "/nox/sekret", 11, &st),
+                   (u64)(s64)-T_E_ACCES, "denied -> -T_E_ACCES");
+
+    // Structural rejects -> the bare -1.
+    TEST_EXPECT_EQ((u64)sys_stat_for_proc(&p, NULL, 3, &st), (u64)(s64)-1,
+                   "NULL path -> -1");
+    TEST_EXPECT_EQ((u64)sys_stat_for_proc(&p, "/a/b", 0, &st), (u64)(s64)-1,
+                   "zero-length path -> -1");
+
+    territory_unref(p.territory);
+    spoor_unref(root);
+}
+
+// A Dev whose walk_attrs always reports the backing as incapable (the netd
+// case: a 9P server without the Twalkgetattr extension; dev9p latches the
+// first ENOSYS and then returns this sentinel RPC-free). The resolver must
+// degrade to the per-component loop with identical results.
+static struct Walkqid *fix_walk_attrs_unsup(struct Spoor *c, struct Spoor *nc,
+                                            const char **names,
+                                            const size_t *name_lens,
+                                            int nname, struct t_stat *sts) {
+    (void)c; (void)nc; (void)names; (void)name_lens; (void)nname; (void)sts;
+    g_fix_walkattrs_calls++;
+    return DEV_WALK_ATTRS_UNSUPPORTED;
+}
+
+static struct Dev stalkfix_unsup = {
+    .dc            = (int)'W',
+    .name          = "stalkfix_unsup",
+    .perm_enforced = true,
+    .attach        = NULL,
+    .walk          = fix_walk,
+    .walk_attrs    = fix_walk_attrs_unsup,
+    .stat_native   = fix_stat_native,
+    .open          = fix_open,
+    .close         = fix_close,
+};
+
+void test_stalk_pounce_unsupported_fallback(void) {
+    struct Proc p; mkproc_system(&p);
+    struct Spoor *root = dev_simple_attach(&stalkfix_unsup, QTDIR);
+    TEST_ASSERT(root != NULL, "unsup root");
+
+    // The full resolution succeeds through the per-component loop; every
+    // component's walk_attrs probe returned the sentinel (no real batch).
+    g_fix_walk_calls = 0; g_fix_walkattrs_calls = 0;
+    struct Spoor *q = stalk(&p, root, "a/deep/leaf", 11, STALK_WALK, 0);
+    TEST_ASSERT(q != NULL, "resolution degrades to the loop and succeeds");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)4, "same answer as the pounce");
+    TEST_EXPECT_EQ((u64)g_fix_walk_calls, (u64)3, "three per-component walks");
+    TEST_ASSERT(g_fix_walkattrs_calls >= 3, "the sentinel was consulted per hop");
+    spoor_clunk(q);
+
+    // stalk_stat degrades too: the fallback quarry path stats + clunks.
+    struct t_stat st;
+    int e = -12345;
+    TEST_EXPECT_EQ((u64)stalk_stat(&p, root, "a/b", 3, &st, &e), (u64)0,
+                   "stalk_stat via the fallback");
+    TEST_EXPECT_EQ((u64)st.qid_path, (u64)2, "correct attrs via stat_native");
+
+    // The X-search still enforces (the sentinel path is the audited loop).
+    e = -12345;
+    struct Spoor *deny = stalk_err(&p, root, "nox/sekret", 10, STALK_WALK, 0, &e);
+    TEST_ASSERT(deny == NULL, "denial intact on the fallback path");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_ACCES, "ACCES on the fallback path");
 
     spoor_unref(root);
 }

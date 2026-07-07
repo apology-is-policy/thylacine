@@ -346,6 +346,19 @@ int unmount(struct Territory *territory, struct Spoor *mountpoint);
 // clone_walk_zero mints the independent crossed Spoor).
 struct Spoor *mount_lookup(struct Territory *territory, struct Spoor *probe);
 
+// mount_is_point_id: MEMBERSHIP-only mount-point test by raw (dc, devno,
+// qid_path) identity — no Spoor needed, no ref minted. The stalk POUNCE
+// post-scan uses it on batch-walked components that were never materialized as
+// Spoors (their would-be identity = the run parent's (dc, devno) + the walk
+// reply's qid.path): a hit means the batch walked PAST a mount point
+// server-side, so the resolver splits the run and crosses via the normal
+// mount_lookup path on a re-walked Spoor. Same ns_lock discipline as
+// mount_lookup; the boolean is a snapshot (the resolver's cross machinery
+// re-tests via mount_lookup on the materialized Spoor, so a racing
+// mount/unmount degrades to today's unsynchronized-snapshot behavior).
+bool mount_is_point_id(struct Territory *territory, int dc, u32 devno,
+                       u64 qid_path);
+
 // territory_root_ref: atomically read root_spoor + take a ref under ns_lock, so
 // the read+ref cannot race a concurrent territory_pivot_root / territory_chroot
 // that swaps root_spoor + clunks the displaced one to zero (RW-4 SA-F1). Returns

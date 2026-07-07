@@ -23,6 +23,11 @@
 // bestiary[] backing storage — sized to BESTIARY_MAX + 1 so the sentinel
 // (NULL pointer at index dev_count) is always present. Iterators stop
 // at the first NULL.
+// POUNCE: the Dev.walk_attrs "backing does not implement the fused op"
+// sentinel (see <thylacine/dev.h>). Address-compared only; never read or
+// freed. Zero contents.
+struct Walkqid dev_walk_attrs_unsupported;
+
 struct Dev *bestiary[BESTIARY_MAX + 1];
 
 static int  g_dev_count;

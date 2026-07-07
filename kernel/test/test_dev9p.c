@@ -41,6 +41,7 @@ void test_dev9p_readdir(void);
 void test_dev9p_poll_regular_file_always_ready(void);
 void test_dev9p_prw_wire_offset_and_cursor(void);
 void test_dev9p_wstat_readonly_fd(void);
+void test_dev9p_walk_attrs(void);
 
 // File-scope buffers — client is ~12 KiB, won't fit on the 16 KiB test
 // thread stack alongside a few smaller locals.
@@ -69,6 +70,11 @@ static u64 g_readdir_req_offset;
 // can assert the CALLER's offset (SYS_PREAD/SYS_PWRITE) vs the Spoor cursor
 // (SYS_READ/SYS_WRITE) is what actually reaches the wire.
 static u64 g_tread_req_offset, g_twrite_req_offset;
+
+// POUNCE: when set, the Twalkgetattr responder answers one component SHORT
+// (a partial walk) -- the session layer must then leave newfid unbound and
+// dev9p_walk_attrs must leave nc untouched.
+static bool g_dev9p_wga_partial;
 
 // Canonical responder — synthesizes valid Rmsgs for every op type
 // dev9p might issue. Mirrors the responder used in test_9p_client.c
@@ -288,6 +294,41 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         resp[o] = 1; o += 8;                                 // blocks = 1
         o += 8 * 8 + 2 * 8;                                  // a/m/c/b times + gen + dv = 0
         (void)o;                                             // o == total here
+        return (int)total;
+    }
+    if (type == P9_TWALKGETATTR) {
+        // POUNCE: Rwalkgetattr = nwqid(2) + nwqid * getattr_body(153). Echo
+        // the requested component count (or one fewer under g_wga_partial --
+        // the session layer then leaves newfid unbound). Body offsets:
+        // hdr(7) + fid(4) + newfid(4) + request_mask(8) = 23; nwname at 23.
+        if (req_len < P9_HDR_LEN + 4 + 4 + 8 + 2) return -1;
+        u16 nwname = (u16)req[23] | ((u16)req[24] << 8);
+        u16 nwqid  = nwname;
+        if (g_dev9p_wga_partial && nwqid > 0) nwqid--;
+        size_t total = P9_HDR_LEN + 2 + (size_t)nwqid * P9_WGA_BODY_LEN;
+        if (resp_cap < total) return -1;
+        for (size_t i = 0; i < total; i++) resp[i] = 0;
+        resp[0] = (u8)(total & 0xff); resp[1] = (u8)((total >> 8) & 0xff);
+        resp[4] = P9_RWALKGETATTR;
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        resp[7] = (u8)(nwqid & 0xff); resp[8] = (u8)((nwqid >> 8) & 0xff);
+        for (u16 e = 0; e < nwqid; e++) {
+            size_t o = P9_HDR_LEN + 2 + (size_t)e * P9_WGA_BODY_LEN;
+            resp[o] = 0xff; resp[o + 1] = 0x07;              // valid = BASIC
+            o += 8;
+            resp[o] = P9_QTFILE; o += 1 + 4;                 // qid.type + version
+            resp[o] = (u8)(0x20 + e); o += 8;                // qid.path
+            { u32 m = 0100644u;                              // mode
+              resp[o] = (u8)m; resp[o + 1] = (u8)(m >> 8);
+              resp[o + 2] = (u8)(m >> 16); resp[o + 3] = (u8)(m >> 24); o += 4; }
+            resp[o] = 0x11; resp[o + 1] = 0x11; o += 4;      // uid = 0x1111
+            resp[o] = 0x22; resp[o + 1] = 0x22; o += 4;      // gid = 0x2222
+            resp[o] = 1; o += 8;                             // nlink
+            o += 8;                                          // rdev
+            resp[o] = (u8)e; resp[o + 1] = 0x02; o += 8;     // size = 0x200 + e
+            resp[o] = 0x00; resp[o + 1] = 0x10; o += 8;      // blksize = 4096
+            // blocks + times + gen + dv stay 0.
+        }
         return (int)total;
     }
     if (type == P9_TSETATTR) {
@@ -1061,5 +1102,77 @@ void test_dev9p_wstat_readonly_fd(void) {
     proc_free(q);
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
+    teardown(root);
+}
+
+// POUNCE (docs/POUNCE-DESIGN.md §4): dev9p.walk_attrs -> Twalkgetattr. The
+// wire mechanics were proven at P-2 (test_9p_client walkgetattr); this test
+// pins the VTABLE layer: the p9_attr -> t_stat conversion parity with
+// dev9p_stat_native (one shared converter), the bind/partial/query fid
+// discipline, and the strict nc contract.
+void test_dev9p_walk_attrs(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "client + root");
+    TEST_ASSERT(dev9p.walk_attrs != NULL, "slot wired");
+
+    const char  *names[2] = { "dirA", "fileB" };
+    const size_t lens[2]  = { 4, 5 };
+
+    // BIND form, FULL walk: nc transitions (own fid, leaf qid), and the
+    // fused attrs map exactly as dev9p_stat_native maps an Rgetattr
+    // (mode/uid/gid under the valid mask; size; qid).
+    {
+        g_dev9p_wga_partial = false;
+        struct Spoor *nc = spoor_clone(root);
+        TEST_ASSERT(nc != NULL, "clone");
+        struct t_stat sts[2];
+        struct Walkqid *w = dev9p.walk_attrs(root, nc, names, lens, 2, sts);
+        TEST_ASSERT(w != NULL, "full bind walk");
+        TEST_EXPECT_EQ(w->nqid, 2, "both components walked");
+        TEST_ASSERT(w->spoor == nc, "nc transitioned");
+        TEST_EXPECT_EQ(nc->qid.path, (u64)0x21, "nc at the leaf qid (0x20+1)");
+        TEST_EXPECT_EQ((u64)sts[0].qid_path, (u64)0x20, "element 0 qid");
+        TEST_EXPECT_EQ((u64)sts[1].qid_path, (u64)0x21, "element 1 qid");
+        TEST_EXPECT_EQ((u64)sts[1].mode, (u64)0100644u, "mode mapped");
+        TEST_EXPECT_EQ((u64)sts[1].uid,  (u64)0x1111u, "uid mapped");
+        TEST_EXPECT_EQ((u64)sts[1].gid,  (u64)0x2222u, "gid mapped");
+        TEST_EXPECT_EQ(sts[1].size, (u64)0x201, "size mapped (0x200+1)");
+        walkqid_free(w);
+        spoor_clunk(nc);   // clunks the bound fid
+    }
+
+    // BIND form, PARTIAL walk: the responder answers one short; the session
+    // layer leaves new_fid unbound and nc must be UNTOUCHED (still sharing
+    // the root's priv via the shallow clone).
+    {
+        g_dev9p_wga_partial = true;
+        struct Spoor *nc = spoor_clone(root);
+        TEST_ASSERT(nc != NULL, "clone");
+        void *aux_before = nc->aux;
+        struct t_stat sts[2];
+        struct Walkqid *w = dev9p.walk_attrs(root, nc, names, lens, 2, sts);
+        TEST_ASSERT(w != NULL, "partial walk returns the prefix");
+        TEST_EXPECT_EQ(w->nqid, 1, "one component walked");
+        TEST_ASSERT(w->spoor == NULL, "partial binds NOTHING");
+        TEST_ASSERT(nc->aux == aux_before, "nc untouched (shallow aux intact)");
+        TEST_EXPECT_EQ((u64)sts[0].qid_path, (u64)0x20, "prefix attrs present");
+        walkqid_free(w);
+        nc->aux = NULL;      // detach the shared aux; never clunk it
+        spoor_unref(nc);
+        g_dev9p_wga_partial = false;
+    }
+
+    // QUERY form (nc == NULL -> newfid = P9_NOFID): attrs only; no fid was
+    // consumed on either end (the wire op carries NOFID; nothing to clunk).
+    {
+        struct t_stat sts[2];
+        struct Walkqid *w = dev9p.walk_attrs(root, NULL, names, lens, 2, sts);
+        TEST_ASSERT(w != NULL, "query walk");
+        TEST_EXPECT_EQ(w->nqid, 2, "query walked both");
+        TEST_ASSERT(w->spoor == NULL, "query transitions NOTHING");
+        TEST_EXPECT_EQ((u64)sts[1].uid, (u64)0x1111u, "query attrs mapped");
+        walkqid_free(w);
+    }
+
     teardown(root);
 }

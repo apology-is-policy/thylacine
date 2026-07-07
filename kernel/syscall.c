@@ -1457,6 +1457,89 @@ static s64 sys_lseek_handler(u64 hraw, u64 offset_raw, u64 whence_raw) {
 }
 
 // =============================================================================
+// SYS_STAT — path-stat in one syscall (POUNCE; docs/POUNCE-DESIGN.md §7).
+// =============================================================================
+//
+// Replaces the O_PATH walk-open + SYS_FSTAT + close emulation (3 syscalls,
+// 13 RPCs on a 4-deep dev9p path) with one syscall whose resolution is the
+// stalk walk-QUERY: on a walk_attrs Dev the leaf's attrs arrive fused with
+// the walk — 1 RPC, no handle, no Spoor, no server fid. The path X-search is
+// byte-identical to the emulation's (STALK_STAT == STALK_WALK's checks;
+// POSIX stat authority is the path X-search only, which is exactly what
+// O_PATH granted: it skips the R/W perm_check, and SYS_FSTAT is kind-gated
+// only, #46).
+
+// Inner — kernel-side core (the #37 *_for_proc testable shape): `path` is
+// kernel memory, NUL-terminated at path[path_len], already NUL-free within;
+// *out_k is kernel scratch. Returns 0 / -1 (structural) / -errno (resolution).
+s64 sys_stat_for_proc(struct Proc *p, const char *path, u64 path_len,
+                      struct t_stat *out_k) {
+    if (!p || !path || !out_k)                       return -1;
+    if (path_len == 0 || path_len > SYS_OPEN_PATH_MAX) return -1;
+    if (!p->territory)                               return -1;
+
+    // RW-4 SA-F1: atomic root read+ref under ns_lock (races a concurrent
+    // pivot_root otherwise).
+    struct Spoor *start = territory_root_ref(p->territory);
+    if (!start)                                      return -1;
+
+    // LS-4: a relative path resolves against the Territory cwd — the same
+    // join SYS_OPEN's FROM_ROOT arm performs (stalk re-clamps '..' at
+    // root_spoor, so the join cannot escape containment; I-28).
+    char joined[SYS_OPEN_PATH_MAX + 1];
+    const char *rpath = path;
+    u64 rlen = path_len;
+    if (path[0] != '/') {
+        int jl = territory_resolve_cwd(p->territory, path, path_len,
+                                       joined, sizeof(joined));
+        if (jl < 0) { spoor_clunk(start); return -1; }
+        rpath = joined;
+        rlen  = (u64)jl;
+    }
+
+    int serr = T_E_NOENT;
+    int rc = stalk_stat(p, start, rpath, rlen, out_k, &serr);
+    spoor_clunk(start);
+    if (rc != 0)                                     return -(s64)serr;
+    return 0;
+}
+
+static s64 sys_stat_handler(u64 path_va, u64 path_len_raw, u64 stat_va) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+
+    if (path_len_raw == 0)                           return -1;
+    if (path_len_raw > SYS_OPEN_PATH_MAX)            return -1;
+    if (!sys_validate_user_buf(path_va, path_len_raw)) return -1;
+    if (!sys_validate_user_buf(stat_va, sizeof(struct t_stat))) return -1;
+
+    // Copy the path into kernel scratch + reject embedded NUL (the SYS_OPEN
+    // prologue shape; '/' is allowed — stalk tokenizes it).
+    char path_scratch[SYS_OPEN_PATH_MAX + 1];
+    for (u64 i = 0; i < path_len_raw; i++) {
+        u8 b;
+        if (uaccess_load_u8(path_va + i, &b) != 0)   return -1;
+        if (b == '\0')                               return -1;
+        path_scratch[i] = (char)b;
+    }
+    path_scratch[path_len_raw] = '\0';
+
+    struct t_stat ks;
+    s64 rc = sys_stat_for_proc(p, path_scratch, path_len_raw, &ks);
+    if (rc != 0)                                     return rc;
+
+    // Copy out to user-VA (per-byte, the SYS_FSTAT shape; a fault may leave
+    // partially-written bytes, consistent with SYS_READ).
+    const u8 *src = (const u8 *)&ks;
+    for (u64 i = 0; i < sizeof(struct t_stat); i++) {
+        if (uaccess_store_u8(stat_va + i, src[i]) != 0) return -1;
+    }
+    return 0;
+}
+
+// =============================================================================
 // SYS_ATTACH_9P — wrap a Spoor pair in a 9P client + return root fd
 // (P5-attach-syscall).
 // =============================================================================
@@ -6527,6 +6610,12 @@ void syscall_dispatch(struct exception_context *ctx) {
     case SYS_YIELD:
         ctx->regs[0] = (u64)sys_yield_handler(ctx->regs[0], ctx->regs[1],
                                               ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_STAT:
+        ctx->regs[0] = (u64)sys_stat_handler(ctx->regs[0],   // path_va
+                                             ctx->regs[1],   // path_len
+                                             ctx->regs[2]);  // stat_va
         return;
 
     case SYS_CLOSE:

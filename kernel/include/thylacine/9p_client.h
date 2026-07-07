@@ -185,6 +185,14 @@ struct p9_client {
     // fresh fids for walk-derived Spoors. Mutated only under
     // c->lock.
     u32                  next_fid;
+    // POUNCE per-session capability latch (dev9p_walk_attrs). Twalkgetattr is
+    // a Stratum extension; a server that does not implement it (netd's /net,
+    // any plain 9P2000.L peer) answers the first probe with Rlerror ENOSYS /
+    // EOPNOTSUPP -- dev9p latches this true and every later walk_attrs on the
+    // session returns the unsupported sentinel WITHOUT an RPC (the resolver
+    // falls back to the per-component loop). One-way false -> true; a benign
+    // one-word race (two concurrent probes both latch the same value).
+    bool                 wga_unsupported;
     // Diagnostics.
     u32                  total_ops;
     u32                  total_errors;

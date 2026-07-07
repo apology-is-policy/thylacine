@@ -1562,6 +1562,29 @@ enum {
     //   Go runtime's osyield (spin-loop backoff), musl sched_yield via the
     //   pouch seam, libt/libthyla-rs t_yield.
     SYS_YIELD = 87,    // no args
+
+    // SYS_STAT(path_va, path_len, stat_va) -> 0 / -1 / -errno (POUNCE;
+    // docs/POUNCE-DESIGN.md section 7)
+    //   Path-stat in ONE syscall: resolve `path` through the caller's
+    //   Territory (absolute from root_spoor; relative joined with the LS-4
+    //   cwd, exactly like SYS_OPEN's FROM_ROOT arm) and fill the 80-byte
+    //   struct t_stat at stat_va with the LEAF's metadata. The X-search is
+    //   identical to the O_PATH walk-open + SYS_FSTAT + close emulation it
+    //   replaces (POSIX stat authority = the path X-search only; the leaf's
+    //   own R/W bits are irrelevant) -- but on a walk_attrs-capable Dev
+    //   (dev9p/devramfs) the resolution is the stalk POUNCE walk-QUERY: the
+    //   attrs arrive fused with the walk and NO handle, Spoor, or server fid
+    //   is ever created. os.Stat = 1 RPC (was 13). Symlinks do not exist at
+    //   v1.0 (G11), so stat == lstat.
+    //   x0 = path_va  (user VA; NUL-free; '/'-separated multi-component)
+    //   x1 = path_len (1 .. SYS_OPEN_PATH_MAX bytes)
+    //   x2 = stat_va  (user VA of an 80-byte struct t_stat; copy-out)
+    //   Returns 0 on success; -errno from resolution (-T_E_NOENT walk-miss,
+    //   -T_E_ACCES X-denial -- the fail-ordering invariant guarantees an
+    //   X-denial at component k masks everything past k, so a caller cannot
+    //   existence-probe under a forbidden directory); the bare -1 on
+    //   argument-validation / copy-out faults (the SYS_FSTAT shape).
+    SYS_STAT = 88,     // arg: path_va (x0), path_len (x1), stat_va (x2)
 };
 
 // SYS_CLOCK_GETTIME clock ids. Values match Linux clockid_t so a future pouch

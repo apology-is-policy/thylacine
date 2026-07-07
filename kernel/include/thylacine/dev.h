@@ -42,6 +42,22 @@ struct Block;       // 9P-style block I/O carrier; defined when bread/bwrite-usi
 struct poll_waiter; // <thylacine/poll.h>; the hook a polling thread installs on .poll
 struct t_stat;      // <thylacine/syscall.h>; the SYS_FSTAT native metadata record
 
+// Per-call component cap for Dev.walk_attrs (POUNCE). Vtable-level so
+// non-9P Devs and the resolver need no wire header; dev9p _Static_asserts
+// it equals the wire's P9_MAX_WALK (the Twalkgetattr per-op bound).
+#define DEV_WALK_ATTRS_MAX 16
+
+// Distinguished Dev.walk_attrs return: THIS SESSION's backing server does
+// not implement the fused op (Twalkgetattr is a Stratum extension; netd and
+// any plain 9P2000.L peer answer it Rlerror ENOSYS). The resolver falls back
+// to the per-component loop -- correctness identical, RPC count higher.
+// Distinct from NULL (a REAL walk failure at the first component). Callers
+// must NOT walkqid_free it. dev9p latches the answer per-session, so after
+// the one probe RPC the sentinel returns instantly. Native implementations
+// (devramfs) never return it.
+extern struct Walkqid dev_walk_attrs_unsupported;
+#define DEV_WALK_ATTRS_UNSUPPORTED (&dev_walk_attrs_unsupported)
+
 // The Plan 9 Dev vtable. ARCH §9.2 verbatim with C99 const additions on
 // input strings (read-only inputs that were `char *` in 9front; we
 // preserve the original typing for buffer params + `void *`/`u8 *` for
@@ -127,6 +143,36 @@ struct Dev {
     int             (*stat_native)(struct Spoor *c, struct t_stat *out);
     int             (*wstat_native)(struct Spoor *c, u32 valid,
                                     u32 mode, u32 uid, u32 gid);
+
+    // walk_attrs(c, nc, names, name_lens, nname, sts) — the walk-fused getattr
+    // (POUNCE; docs/POUNCE-DESIGN.md §4). OPTIONAL (NULL-permitted, like
+    // .fsync): a NULL slot means the resolver keeps the per-component
+    // walk + stat_native loop — correctness identical, only the RPC count
+    // differs. Only Devs whose backing can sample per-step attributes in one
+    // operation set it (dev9p -> Twalkgetattr; devramfs -> the RAM table).
+    //
+    // Walks `nname` REAL components (the resolver never passes "." / "..")
+    // from c in ONE operation, filling sts[0..nqid) with each walked
+    // component's attributes. Names are (ptr, len) pairs — NOT necessarily
+    // NUL-terminated (name_lens defines each extent; every len is
+    // 1..SYS_WALK_OPEN_NAME_MAX); 1 <= nname <= DEV_WALK_ATTRS_MAX.
+    //
+    // The Walkqid contract SHARPENS Dev.walk's reuse-nc rule:
+    //   - nc != NULL (the BIND form): nc is the caller's spoor_clone(c). On a
+    //     FULL walk (w->nqid == nname) nc is transitioned (own backing fid for
+    //     dev9p; qid = the leaf's) and w->spoor == nc. On a PARTIAL walk
+    //     (w->nqid < nname) nc is left UNTOUCHED (still shallow-sharing c's
+    //     aux — the caller detaches + unrefs it) and w->spoor == NULL: nothing
+    //     was bound, nothing to clunk. This mirrors the Twalkgetattr session
+    //     rule (new_fid binds only on a full walk).
+    //   - nc == NULL (the QUERY form): a pure sample — no Spoor transitions,
+    //     no fid binds on either end (dev9p sends newfid=P9_NOFID), and
+    //     w->spoor == NULL always. The 1-RPC stat.
+    //   - NULL return: the walk failed at the FIRST component (or transport /
+    //     OOM). Nothing bound; nc untouched.
+    struct Walkqid *(*walk_attrs)(struct Spoor *c, struct Spoor *nc,
+                                  const char **names, const size_t *name_lens,
+                                  int nname, struct t_stat *sts);
 
     // Open / create / close.
     //   open(c, omode) — transition c from "walked" to "opened". Returns
