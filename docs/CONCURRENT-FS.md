@@ -432,9 +432,21 @@ metadata commit's engine flush). F1 (wrap the test-only stm_fs_reserve) /
 F3 (the flush-path test) / F4 (3 stale comments) FIXED; F2 (fsync-ENOSPC
 partial-durability) doc'd. Guest boot-OK confirmed (new stratumd):
 1047/1047 kernel suite, boot OK, login E2E, DEK-home provision, 0
-EXTINCTION -- kernel byte-unchanged, so no SMP gate owed. The in-guest
-go-build-cold re-measure (the wall-clock saving from the eliminated
-$WORK-cleanup sweep) is the owed quantification.
+EXTINCTION -- kernel byte-unchanged, so no SMP gate owed. **In-guest
+re-measure (2026-07-08; a confound-free A/B -- ONE freshly-baked goroot
+pool, same toolchain + kernel + joey vehicle, only the 5 stratumd source
+files reverted between CF-4 B eager-reclaim and CF-4 C deferred): the
+91-pkg `cmd/gofmt` cold build drops 4118 -> 3366 ms (2 boots each; CF-4 B
+4120/4116, CF-4 C 3287/3444) = ~750 ms / ~18%; warm flat (1273/1424 vs
+1248/1271 -- few extent $WORK files at warm).** The saving is smaller than
+the pre-CF-4-A 3.2 s attribution because CF-4 A's hardware AEAD already
+collapsed the per-commit cost the eager reclaim was paying 2x of: the ~17
+extent $WORK archives (the compiled `_pkg_.a`, ~50 ms/double-commit each)
+were the expensive unlinks -- the 222-figure counted ALL unlinks, mostly
+cheap inline. So the host mechanism (47,000 -> 15 us/unlink) IS confirmed
+to translate to a real-workload wall-clock win, and the ground-truth
+number corrects the attribution. The `-work` control (a $WORK-preserving
+build) was made moot by the direct stratumd A/B.
 
 ### CF-5 — measure, gate, audit, close
 
