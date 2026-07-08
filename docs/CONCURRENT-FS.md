@@ -448,6 +448,19 @@ to translate to a real-workload wall-clock win, and the ground-truth
 number corrects the attribution. The `-work` control (a $WORK-preserving
 build) was made moot by the direct stratumd A/B.
 
+**[#343 dcache sizing (2026-07-08; Stratum-side, kernel byte-unchanged;
+@stratum 1297e64).]** A go-build-register rider measured during this
+arc. The decrypted-extent cache was SLOT-bound: 16 slots peaked at ~20 MB,
+far under the 64 MiB byte ceiling, so it evicted extents it had budget to
+keep -- the slot count, not the byte ceiling, was the constraint. Growing to
+128 slots / 128 MiB cuts the 91-pkg `cmd/gofmt` cold build 3278 -> 2633 ms
+(**-20%**, deterministic across boots) at ~55% hit. The hit-rate gain is
+small (+4pp) but the win is queueing-amplified: stratumd is serial, so every
+avoided miss frees it from a bdev-read + whole-extent decrypt that all queued
+ops wait behind. 128 is the knee -- the ~46 MB hot working set is captured
+there; 256 slots is marginal (~56%, +1 MB cached). Perf-only: the cache's
+lookup/insert/LRU-evict logic is unchanged and correct at any size.
+
 ### CF-5 — measure, gate, audit, close
 
 - fsbench: multi-threaded through ONE mount (the new capability) — expect
