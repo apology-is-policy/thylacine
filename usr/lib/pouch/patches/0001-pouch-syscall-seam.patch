@@ -482,7 +482,7 @@ Binding design: docs/POUCH-DESIGN.md sections 5 + 5.1. Invariants P-1, P-3.
 +#define __NR_timer_settime 0xFFFF
 +#define __NR_timer_delete 0xFFFF
 +#define __NR_clock_settime 0xFFFF
-+#define __NR_clock_gettime 0xFFFF
++#define __NR_clock_gettime 75     /* SYS_CLOCK_GETTIME (LS-K): Linux clockid 0/1 + 16-byte timespec pass through; musl gettimeofday()/time() route here too */
 +#define __NR_clock_getres 0xFFFF
 +#define __NR_clock_nanosleep 0xFFFF
 +#define __NR_syslog 0xFFFF

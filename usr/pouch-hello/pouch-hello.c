@@ -31,6 +31,7 @@
 #include <sched.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 // emit — write the whole NUL-terminated string to stdout, looping on
@@ -166,6 +167,46 @@ int main(void) {
             return 1;
         }
         if (emit("pouch-hello: stat(path) ok (0019: SYS_STAT=88, fields == fstat, miss -> ENOENT)\n") != 0)
+            return 1;
+    }
+
+    // clock_gettime rides SYS_CLOCK_GETTIME (musl's seam number went
+    // 0xFFFF -> 75; the LS-K kernel surface predates the wiring). Pre-wiring
+    // it short-circuited to ENOSYS and left the timespec untouched, so a
+    // 0-rc + a sane advancing MONOTONIC value IS the wiring proof. musl
+    // routes gettimeofday()/time() through the same call, so this covers
+    // the whole ported-code time family.
+    {
+        struct timespec t1, t2;
+        errno = 0;
+        if (clock_gettime(CLOCK_MONOTONIC, &t1) != 0) {
+            (void)emit(errno == ENOSYS
+                       ? "pouch-hello: FAIL clock_gettime -> ENOSYS (seam not wired)\n"
+                       : "pouch-hello: FAIL clock_gettime rc\n");
+            return 1;
+        }
+        for (volatile int spin = 0; spin < 50000; spin++) { }
+        if (clock_gettime(CLOCK_MONOTONIC, &t2) != 0) {
+            (void)emit("pouch-hello: FAIL clock_gettime 2nd rc\n");
+            return 1;
+        }
+        if (t1.tv_sec == 0 && t1.tv_nsec == 0) {
+            (void)emit("pouch-hello: FAIL clock_gettime returned zero time\n");
+            return 1;
+        }
+        if (t2.tv_sec < t1.tv_sec ||
+            (t2.tv_sec == t1.tv_sec && t2.tv_nsec < t1.tv_nsec)) {
+            (void)emit("pouch-hello: FAIL MONOTONIC went backward\n");
+            return 1;
+        }
+        errno = 0;
+        if (clock_gettime(CLOCK_REALTIME, &t1) != 0 || t1.tv_sec < 1577836800) {
+            // 2020-01-01 floor: the LS-K RTC anchor guarantees a post-2020
+            // wall clock on QEMU-virt (PL031 present).
+            (void)emit("pouch-hello: FAIL clock_gettime REALTIME\n");
+            return 1;
+        }
+        if (emit("pouch-hello: clock_gettime ok (wired to 75: MONOTONIC advances, REALTIME > 2020)\n") != 0)
             return 1;
     }
 
