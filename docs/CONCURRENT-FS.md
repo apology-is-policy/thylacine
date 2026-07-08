@@ -359,6 +359,38 @@ fallback on crypto-less cores — RPi4's A72), and the Go fork wires
 `internal/cpu` hwcap init (hardware SHA-256 for the toolchain's cache
 hashing). **CF-4 B (the commit path as designed above) follows.**
 
+**[CF-4 B LANDED (2026-07-08; Stratum-side, kernel byte-unchanged;
+design = stratum `docs/cf-4-design.md`, as-built = stratum
+`docs/reference/31-durability-commit.md`).]** The three pieces as
+pinned: (1) the bdev **barrier-defer window** — a dirty commit issues
+exactly TWO real fsyncs (one pre-final-UB data barrier covering the
+reservation UB + the single staged bootstrap COW + every phase-2 node
+write, then the final UB's own fsync); (2) the **single staged
+bootstrap COW** per commit (the N per-component `stm_bootstrap_commit`
+calls record into a defer window; stage-without-promote keeps
+failed-commit retries sound [the fsyncgate axis], and single-COW is
+load-bearing — two un-barriered COWs would ping-pong onto both
+dual-slot pairs and a crash could tear both headers); (3) the
+**clean-commit short-circuit** — a content-identical commit (masked
+prototype compare vs the last durably-written UB) is a true no-op:
+zero writes, zero fsyncs, gens unchanged (gen-age = real-commit count;
+the CAS `min_age_txgs` policy ages with activity). Plus the **#369
+rider** (R176 F1): the 8 create/symlink rollback `(void)
+stm_inode_free` sites now check + surface a rollback-free failure
+loudly (the orphan-record scrub kind stays a named seam). Measured:
+host bench_commit empty 19,756 → **13.6 us** / 6 → **0 fsyncs**;
+data-4k 51,324 → 27,732 us / 10 → **2 fsyncs** / write-amp 163× →
+118×; **in-guest fsbench fsync 39 → 340 files/s** (2,933 us/durable-
+file). The crash sweeps (test_durability + test_crash_inject) pass
+unchanged over the new ordering; + 8 new tests (the 2-fsync witness,
+the clean-skip contract, the inject-fail + in-process-retry sweep, the
+defer single-COW lifecycle, torn staged header/bitmap R7a fallbacks).
+Named seams: the per-engine O(resident) clean-flush cycle (CPU-only,
+~24 ms at 500K resident keys — needs a provably-sound mutation-counter
+choke point; cf-4-design.md §6.1) and the metadata re-COW density
+(Area-S S-2). The 39-files/s fsync ceiling was the last pinned CF-4
+item — **the CF-4 stage is COMPLETE**.
+
 ### CF-5 — measure, gate, audit, close
 
 - fsbench: multi-threaded through ONE mount (the new capability) — expect
