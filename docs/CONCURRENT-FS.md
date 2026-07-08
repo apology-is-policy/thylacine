@@ -391,6 +391,51 @@ choke point; cf-4-design.md §6.1) and the metadata re-COW density
 (Area-S S-2). The 39-files/s fsync ceiling was the last pinned CF-4
 item — **the CF-4 stage is COMPLETE**.
 
+**[CF-4 C LANDED (2026-07-08; Stratum-side, kernel byte-unchanged;
+design = stratum `docs/cf-4c-design.md`, as-built = stratum
+`docs/reference/31-durability-commit.md` §31.2.2).]** The #374 fix, the
+third commit-path lever (CF-4 B batched the fsyncs *within* a commit;
+CF-4 C batches the *commits themselves* for reclaim). The measurement
+refuted #374's "dirent sweep" premise: an INLINE-file unlink is 8.84 us
+(the tombstone the task blamed), but an EXTENT-file unlink was 47,000 us
+with gen_delta = 4 per unlink = **two full commits** -- the SWISS-4q
+eager reclaim double-commit handing freed blocks back immediately. The
+go-build `$WORK` cleanup's 222 extent unlinks = **444 commits = 3.2 s**.
+Fix (user-approved Option A): (1) remove the eager double-commit from the
+3 inode-free paths -- freed blocks stay PENDING (crash-safe: #791 mount
+reconcile rebuilds `pending_head`) and return to FREE lazily at the next
+commit's sweep, aligning unlink with truncate-shrink + COW-overwrite
+which already deferred; (2) a reserve-path **reclaim-on-ENOSPC** backstop
+(`fs_reclaim_on_enospc_locked`: on `STM_ENOSPC` with pending > 0, sweep
+via the double-commit + retry once; loop-free + wedge-on-failure) at
+every data-reserve choke (the buffer drain, direct writes, inline->extent
+transitions, migrate/promote) -- which ALSO closes a latent gap (truncate/
+overwrite-then-rewrite near-full-no-commit had no backstop). Deliberate +
+POSIX-correct: unlink is no longer durable-without-fsync / gen-advancing,
+consistent with every other lazy-durable mutation. The direction is the
+COW-FS norm (Btrfs pinned-extents + delayed-refs + `flush_space`->
+`COMMIT_TRANS`; ZFS `ms_defer` + `async_destroy`; WAFL CP deferral) --
+the eager per-unlink double-commit was the outlier. Measured (host
+bench_create_many CHURN, 222 x 8 KiB extent files): extent unlink
+**47,000 -> ~15 us/file**, gen_delta **888 -> 0** (the blocks reclaim in
+one sweep at the next commit). Host suite 70/70 incl. test_durability +
+test_crash_inject unchanged over the new ordering; +5 tests (deferral
+proof, the availability guarantee [non-vacuous], the closed truncate gap,
+the flush-internal reclaim path, loop-freedom). **Focused audit
+(holotype-reviewer, Opus-4.8-max -- Fable quota out; MODEL start==end):
+0 P0 / 0 P1 / 0 P2 / 4 P3, NOT dirty** -- the prosecutor cross-confirmed
+the whole self-audit sound-set and WITHDREW the commit-under-SH-wedge
+concern with a stronger grounding (metadata + data draw from DISJOINT
+pools -- engine/alloc-COW nodes from the bootstrap bitmap, only file data
+from the data alloc tree -- so deferred DATA pending can never starve a
+metadata commit's engine flush). F1 (wrap the test-only stm_fs_reserve) /
+F3 (the flush-path test) / F4 (3 stale comments) FIXED; F2 (fsync-ENOSPC
+partial-durability) doc'd. Guest boot-OK confirmed (new stratumd):
+1047/1047 kernel suite, boot OK, login E2E, DEK-home provision, 0
+EXTINCTION -- kernel byte-unchanged, so no SMP gate owed. The in-guest
+go-build-cold re-measure (the wall-clock saving from the eliminated
+$WORK-cleanup sweep) is the owed quantification.
+
 ### CF-5 — measure, gate, audit, close
 
 - fsbench: multi-threaded through ONE mount (the new capability) — expect
