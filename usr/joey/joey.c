@@ -2235,6 +2235,29 @@ static int probe_cf3_bulk_io(void) {
     return 0;
 }
 
+// #370: the system stratumd's stdout/stderr pipe is read by joey only until
+// the readiness token; without a standing reader the 4 KiB pipe buffer is the
+// daemon's whole remaining output budget, and one diagnostic burst past it
+// blocks a stratumd thread mid-write -- under the FS that wedges the whole
+// system (proven live: an instrumented stratumd deadlocked a boot at the
+// first over-budget print). This drainer thread owns the pipe's read end for
+// the daemon's lifetime, forwarding every chunk to the console so stratumd
+// output is never back-pressured and post-startup diagnostics stay visible
+// in the boot log. Blocks in t_read (death-interruptible, #811); EOF means
+// stratumd exited, so the thread exits with it.
+static unsigned char sd_drain_stack[16384] __attribute__((aligned(16)));
+
+static void sd_stderr_drain_main(void *arg) {
+    long fd = (long)arg;
+    for (;;) {
+        unsigned char b[256];
+        long n = t_read(fd, b, sizeof(b));
+        if (n <= 0) break;
+        (void)t_puts((const char *)b, (size_t)n);
+    }
+    t_thread_exit();
+}
+
 int main(void) {
     char buf[24];
     t_putstr("joey: hello from /joey (real userspace binary, loaded from ramfs)\n");
@@ -3330,9 +3353,26 @@ int main(void) {
         if (sd_ready) {
             sd_srv_fd = t_open(T_WALK_OPEN_FROM_ROOT, srv_path,
                                sizeof(srv_path) - 1, T_ORDWR);
-            if (sd_srv_fd >= 0)
+            if (sd_srv_fd >= 0) {
                 t_putstr("joey: stratumd-boot /srv/stratum-fs bound + ready "
                          "(deterministic readiness handshake)\n");
+                // #370: hand the pipe's read end to the drainer thread for
+                // the daemon's lifetime. Joey stops reading it here; the
+                // drainer keeps stratumd's output from ever back-pressuring
+                // (see sd_stderr_drain_main). Ownership of sd_rd transfers:
+                // joey must not read or close it past this point. Spawn
+                // failure is non-fatal -- the boot proceeds with the old
+                // undrained (wedge-prone, but bounded-output) behavior.
+                long sd_drain_tid = t_thread_spawn(
+                    sd_stderr_drain_main,
+                    (void *)(sd_drain_stack + sizeof(sd_drain_stack)),
+                    (void *)sd_rd, (void *)0);
+                if (sd_drain_tid < 0)
+                    t_putstr("joey: stratumd stderr drainer spawn FAILED "
+                             "(#370: daemon output will back-pressure)\n");
+                else
+                    t_putstr("joey: stratumd stderr drainer up (#370)\n");
+            }
         }
 
         if (sd_srv_fd < 0) {
@@ -5727,7 +5767,12 @@ int main(void) {
             }
 #endif /* THYLA_BOOT_PROBES (post-pivot boot-test probe ladder) */
 
-            (void)t_close(sd_rd);
+            // #370: sd_rd is owned by the stderr drainer thread for the
+            // daemon's lifetime -- do NOT close it here. (The pre-#370 close
+            // at this point EPIPE-silenced every post-boot stratumd
+            // diagnostic; worse, closing the slot under the drainer's
+            // blocked t_read would let the fd number be reused beneath its
+            // next read.)
         }
     }
 
