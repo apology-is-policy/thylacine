@@ -40,6 +40,7 @@
 #include <thylacine/burrow.h>
 
 #include "../../mm/phys.h"
+#include "../../arch/arm64/hwfeat.h"   // g_hw_features.linux_hwcap (AT_HWCAP)
 
 void test_exec_setup_smoke(void);
 void test_exec_setup_segment_data_copied(void);
@@ -390,8 +391,9 @@ void test_exec_setup_auxv(void) {
     TEST_EXPECT_EQ(w[1], 0ull, "argv[] terminator is NULL");
     TEST_EXPECT_EQ(w[2], 0ull, "envp[] terminator is NULL");
 
-    // auxv — seven (a_type, a_val) pairs: AT_PHDR/PHENT/PHNUM/PAGESZ, AT_RANDOM,
-    // AT_VDSO_CLOCK (the vDSO page maps at boot -- vdso_init ran), AT_NULL last.
+    // auxv — eight (a_type, a_val) pairs: AT_PHDR/PHENT/PHNUM/PAGESZ,
+    // AT_HWCAP, AT_RANDOM, AT_VDSO_CLOCK (the vDSO page maps at boot --
+    // vdso_init ran), AT_NULL last.
     TEST_EXPECT_EQ(w[3],  (u64)AT_PHDR,   "auxv[0].a_type == AT_PHDR");
     TEST_EXPECT_EQ(w[4],  0x10040ull,     "AT_PHDR == seg0 vaddr + e_phoff");
     TEST_EXPECT_EQ(w[5],  (u64)AT_PHENT,  "auxv[1].a_type == AT_PHENT");
@@ -401,15 +403,23 @@ void test_exec_setup_auxv(void) {
     TEST_EXPECT_EQ(w[8],  1ull,           "AT_PHNUM == e_phnum");
     TEST_EXPECT_EQ(w[9],  (u64)AT_PAGESZ, "auxv[3].a_type == AT_PAGESZ");
     TEST_EXPECT_EQ(w[10], (u64)PAGE_SIZE, "AT_PAGESZ == PAGE_SIZE");
-    TEST_EXPECT_EQ(w[11], (u64)AT_RANDOM, "auxv[4].a_type == AT_RANDOM");
-    TEST_EXPECT_EQ(w[13], (u64)AT_VDSO_CLOCK, "auxv[5].a_type == AT_VDSO_CLOCK");
-    TEST_EXPECT_EQ(w[14], EXEC_USER_VDSO_BASE, "AT_VDSO_CLOCK == EXEC_USER_VDSO_BASE");
-    TEST_EXPECT_EQ(w[15], (u64)AT_NULL,   "auxv[6].a_type == AT_NULL");
-    TEST_EXPECT_EQ(w[16], 0ull,           "AT_NULL.a_val == 0");
+    TEST_EXPECT_EQ(w[11], (u64)AT_HWCAP,  "auxv[4].a_type == AT_HWCAP");
+    TEST_EXPECT_EQ(w[12], g_hw_features.linux_hwcap,
+        "AT_HWCAP == g_hw_features.linux_hwcap");
+    // FP + AdvSIMD are architecturally present on every ARMv8-A target
+    // Thylacine boots on (QEMU-virt TCG/HVF; the Lazarus boards) — a
+    // zero word would mean the PFR0 inverted-sentinel decode regressed.
+    TEST_ASSERT((w[12] & 0x3ull) == 0x3ull,
+        "AT_HWCAP carries FP|ASIMD (the PFR0 decode)");
+    TEST_EXPECT_EQ(w[13], (u64)AT_RANDOM, "auxv[5].a_type == AT_RANDOM");
+    TEST_EXPECT_EQ(w[15], (u64)AT_VDSO_CLOCK, "auxv[6].a_type == AT_VDSO_CLOCK");
+    TEST_EXPECT_EQ(w[16], EXEC_USER_VDSO_BASE, "AT_VDSO_CLOCK == EXEC_USER_VDSO_BASE");
+    TEST_EXPECT_EQ(w[17], (u64)AT_NULL,   "auxv[7].a_type == AT_NULL");
+    TEST_EXPECT_EQ(w[18], 0ull,           "AT_NULL.a_val == 0");
 
     // AT_RANDOM points at the 16-byte entropy block, which must lie
     // within the user stack region.
-    u64 rand_va = w[12];
+    u64 rand_va = w[14];
     TEST_EXPECT_EQ(rand_va, sp + EXEC_INIT_RANDOM_OFFSET,
         "AT_RANDOM a_val == sp + EXEC_INIT_RANDOM_OFFSET");
     TEST_ASSERT(rand_va >= EXEC_USER_STACK_BASE &&
@@ -454,9 +464,10 @@ void test_exec_setup_auxv_no_phdr_segment(void) {
     // a coherent "no phdrs" auxv (audit F1).
     TEST_EXPECT_EQ(w[6], 0ull, "AT_PHENT == 0 when AT_PHDR is unresolved");
     // The startup frame is otherwise well-formed. With the vDSO page mapped,
-    // AT_VDSO_CLOCK occupies the slot at w[13] and AT_NULL terminates at w[15].
+    // AT_VDSO_CLOCK occupies the slot at w[15] and AT_NULL terminates at
+    // w[17] (AT_HWCAP shifted the tail by one entry).
     TEST_EXPECT_EQ(w[0],  0ull,          "argc == 0");
-    TEST_EXPECT_EQ(w[15], (u64)AT_NULL,  "auxv terminated by AT_NULL");
+    TEST_EXPECT_EQ(w[17], (u64)AT_NULL,  "auxv terminated by AT_NULL");
 
     drop_proc(p);
 }

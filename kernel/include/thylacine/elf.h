@@ -174,6 +174,14 @@ _Static_assert(sizeof(struct Elf64_Phdr) == 56,
 #define AT_PHENT      4    // a_val = size of one program-header entry
 #define AT_PHNUM      5    // a_val = number of program headers
 #define AT_PAGESZ     6    // a_val = system page size in bytes
+// a_val = the Linux-compatible arm64 hwcap word (g_hw_features.linux_hwcap:
+// FP/ASIMD/AES/PMULL/SHA1/SHA2/CRC32/ATOMICS/SHA3/ASIMDDP/SHA512 at the
+// Linux uapi bit numbers). The STANDARD SysV/Linux tag — musl's
+// getauxval(AT_HWCAP) and the Go runtime's cpu init read it directly, so
+// ported feature detection (libsodium's armcrypto gate, Go's crypto
+// packages) sees the real CPU. Bits are truthful per ID_AA64ISAR0/PFR0;
+// a consumer must fall back to its portable path on a clear bit.
+#define AT_HWCAP      16
 #define AT_RANDOM     25   // a_val = user VA of 16 bytes of entropy
 // Thylacine-private auxv tag (a_val = user VA of the struct vdso_clock page;
 // docs/VDSO-DESIGN.md + thylacine/vdso.h). Deliberately OUTSIDE the

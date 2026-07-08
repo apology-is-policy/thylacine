@@ -21,10 +21,11 @@ ARCH §16: "exec is the boundary between the kernel-internal Proc/Thread model a
 
 // System V process-startup frame (P6-pouch-kernel-auxv) — see
 // "Initial process stack" below. EXEC_INIT_STACK_SIZE is a 16-aligned
-// computed macro; it resolves to 144 at v1.0.
-#define EXEC_INIT_AUXV_COUNT     6
-#define EXEC_INIT_STACK_SIZE     144   // argc+argv+envp + 6 auxv + 16 random
-#define EXEC_INIT_RANDOM_OFFSET  128   // EXEC_INIT_STACK_SIZE - 16
+// computed macro; it resolves to 176 (8 auxv entries since AT_HWCAP;
+// AT_VDSO_CLOCK landed at #343).
+#define EXEC_INIT_AUXV_COUNT     8
+#define EXEC_INIT_STACK_SIZE     176   // argc+argv+envp + 8 auxv + 16 random
+#define EXEC_INIT_RANDOM_OFFSET  160   // EXEC_INIT_STACK_SIZE - 16
 
 int exec_setup(struct Proc *p, const void *blob, size_t blob_size,
                u64 *entry_out, u64 *sp_out);
@@ -134,19 +135,19 @@ The guard owns no physical page (no BURROW) — it costs one `struct Vma` and no
 
 After mapping the segments + the user stack, `exec_setup` calls `exec_build_init_stack` to write a **System V process-startup frame** into the top of the user stack. A C runtime (pouch — the Thylacine POSIX libc; `docs/POUCH-DESIGN.md`) reads `argc`, `argv`, `envp`, and the auxiliary vector from this frame at entry. `*sp_out` points at the frame's `argc` word.
 
-The frame is a fixed `EXEC_INIT_STACK_SIZE` (144) bytes — `argc == 0` at v1.0 (there is no argv source until the exec syscall lands) and a fixed six-entry auxv. Layout, low → high address:
+The Shape-A frame is a fixed `EXEC_INIT_STACK_SIZE` (176) bytes — `argc == 0` (the argv-bearing Shape B is documented in `exec.h`) and room for the max eight-entry auxv. Layout, low → high address:
 
 | Offset from sp | Bytes | Contents |
 |---|---|---|
-| 0   | 8  | `argc` — 0 |
-| 8   | 8  | `argv[]` terminator (one NULL) |
-| 16  | 8  | `envp[]` terminator (one NULL) |
-| 24  | 96 | `auxv[]` — six `Elf64_auxv_t` (16 B each) |
-| 120 | 8  | alignment padding (zero, from `KP_ZERO`) |
-| 128 | 16 | `AT_RANDOM` entropy block |
-| 144 | —  | `EXEC_USER_STACK_TOP` |
+| 0   | 8   | `argc` — 0 |
+| 8   | 8   | `argv[]` terminator (one NULL) |
+| 16  | 8   | `envp[]` terminator (one NULL) |
+| 24  | 128 | `auxv[]` — up to eight `Elf64_auxv_t` (16 B each) |
+| 152 | 8   | alignment padding (zero, from `KP_ZERO`) |
+| 160 | 16  | `AT_RANDOM` entropy block |
+| 176 | —   | `EXEC_USER_STACK_TOP` |
 
-The six auxv entries (`a_type`, `a_val`):
+The auxv entries (`a_type`, `a_val`), written by `exec_fill_auxv` (both frame shapes route through it):
 
 | a_type | a_val |
 |---|---|
@@ -154,10 +155,12 @@ The six auxv entries (`a_type`, `a_val`):
 | `AT_PHENT` (4)   | `e_phentsize` (56 — `sizeof(Elf64_Phdr)`) |
 | `AT_PHNUM` (5)   | `e_phnum`, or 0 when `AT_PHDR` is unresolved |
 | `AT_PAGESZ` (6)  | `PAGE_SIZE` (4096) |
-| `AT_RANDOM` (25) | user VA of the 16-byte entropy block (`sp + 128`) |
+| `AT_HWCAP` (16)  | the Linux-compatible arm64 CPU-feature word (`g_hw_features.linux_hwcap` — FP/ASIMD/AES/PMULL/SHA1/SHA2/SHA512/SHA3/CRC32/ATOMICS/ASIMDDP at the Linux uapi bit numbers, derived from ID_AA64ISAR0/PFR0 at boot; `hwcap_CPUID` is never set — see `12-hardening.md`) |
+| `AT_RANDOM` (25) | user VA of the 16-byte entropy block (`sp + 160` in Shape A) |
+| `AT_VDSO_CLOCK` (0x5654) | user VA of the RO clock page — OPTIONAL, present only when the vDSO page mapped (see `11-timer.md`); when absent the AT_NULL terminator moves up and the slot stays zeroed padding |
 | `AT_NULL` (0)    | 0 — vector terminator |
 
-The minimum a static musl process needs (per POUCH-DESIGN.md §12.1). Optional entries with safe defaults (`AT_HWCAP`, `AT_SECURE`, `AT_CLKTCK`, ...) are deliberately omitted — a C runtime supplies its own defaults for absent entries.
+The minimum a static musl process needs (per POUCH-DESIGN.md §12.1) plus the two informational entries. `AT_HWCAP` is the STANDARD SysV tag — musl's `getauxval`, libsodium's armcrypto runtime gate, and the Go runtime's `internal/cpu` init read it directly; consumers treat a clear bit as feature-absent (fail-safe on crypto-less cores). Other optional entries (`AT_SECURE`, `AT_CLKTCK`, ...) remain deliberately omitted — a C runtime supplies its own defaults for absent entries. All known consumers scan the vector by tag to `AT_NULL`; nothing parses by fixed offset.
 
 **The initial sp** = `EXEC_USER_STACK_TOP - EXEC_INIT_STACK_SIZE`. It is 16-byte aligned — the AArch64 SysV ABI requirement — because `EXEC_INIT_STACK_SIZE` is rounded up to a 16-byte multiple and `EXEC_USER_STACK_TOP` is itself aligned. The header pins this with `_Static_assert(EXEC_INIT_STACK_SIZE % 16 == 0)`.
 

@@ -1032,16 +1032,29 @@ build_libsodium() {
     # 2. The compose-list. Curated from src/libsodium/Makefile.am
     #    (libsodium_la_SOURCES base + !HAVE_AMD64_ASM ref-salsa20 +
     #    !EMSCRIPTEN randombytes + !MINIMAL non-minimal arm).
-    #    Excluded: x86 ASM (AESNI, SSE, AVX, sandy2x); ARMv8 crypto extension
-    #    sources (libarmcrypto_la — needs +crypto march, pouch baseline is
-    #    -march=armv8-a+lse+pauth+bti). The portable refs implement every
-    #    primitive; performance is fine for a proving binary.
+    #    Excluded: x86 ASM (AESNI, SSE, AVX, sandy2x).
+    #    INCLUDED since the AEAD-lever chunk: the ARMv8 crypto-extension
+    #    sources (libarmcrypto_la). They need no +crypto -march — each TU
+    #    self-arms via `#pragma clang attribute push(target("neon,crypto,
+    #    aes"))` — and they are RUNTIME-gated: the per-primitive picker
+    #    calls sodium_runtime_has_armcrypto(), which under HAVE_GETAUXVAL
+    #    reads getauxval(AT_HWCAP) & (1<<3) — the Linux-compatible word
+    #    the kernel publishes in the exec auxv from ID_AA64ISAR0. A CPU
+    #    without the AES extensions (RPi4's A72) reports a clear bit and
+    #    the soft implementation is picked, so the crypto-instruction TUs
+    #    never execute there. Measured why: the on-device go-build cold
+    #    window was 20.0 s of 20.7 s inside soft AEGIS-256 decrypt
+    #    (~43 MB/s) while the M2's hardware AES sat idle behind the
+    #    missing HWCAP gate.
     local sources=(
         crypto_aead/aegis128l/aead_aegis128l.c
         crypto_aead/aegis128l/aegis128l_soft.c
+        crypto_aead/aegis128l/aegis128l_armcrypto.c
         crypto_aead/aegis256/aead_aegis256.c
         crypto_aead/aegis256/aegis256_soft.c
+        crypto_aead/aegis256/aegis256_armcrypto.c
         crypto_aead/aes256gcm/aead_aes256gcm.c
+        crypto_aead/aes256gcm/armcrypto/aead_aes256gcm_armcrypto.c
         crypto_aead/chacha20poly1305/aead_chacha20poly1305.c
         crypto_aead/xchacha20poly1305/aead_xchacha20poly1305.c
         crypto_auth/crypto_auth.c
@@ -1143,16 +1156,21 @@ build_libsodium() {
 
     # 3. Compile flags. The HAVE_* set mirrors what ./configure would AC_DEFINE
     #    for aarch64-thylacine: musl-style libc (1.2.5), clang 22.1, no x86
-    #    ASM, no ARMv8 crypto extension, pthreads available. Notes on the
-    #    POUCH-specific choices:
+    #    ASM, ARMv8 crypto extension RUNTIME-gated (HAVE_ARMCRYPTO + the
+    #    self-arming TUs above; picked only when AT_HWCAP reports AES),
+    #    pthreads available. Notes on the POUCH-specific choices:
     #      - HAVE_MPROTECT / HAVE_MLOCK / HAVE_MADVISE NOT defined — pouch's
     #        sentinel returns ENOSYS for these; libsodium's sodium_mlock would
     #        try to call them and silently return -1, which is benign but
     #        defining them would mislead libsodium consumers about what it
     #        actually does.
-    #      - HAVE_NANOSLEEP / HAVE_CLOCK_GETTIME NOT defined — pouch's sentinel
-    #        returns ENOSYS for these too; libsodium uses them only on retry
-    #        paths and busy-waits adequately without them at v1.0.
+    #      - HAVE_NANOSLEEP NOT defined — pouch's sentinel returns ENOSYS;
+    #        libsodium uses it only on retry paths and busy-waits adequately.
+    #        HAVE_CLOCK_GETTIME also NOT defined, but for a different reason
+    #        since the clock seam was wired (0xFFFF -> SYS_CLOCK_GETTIME=75):
+    #        it is now DEFINABLE — a separate small lift, deliberately not
+    #        taken with the AEAD chunk (libsodium only uses it on non-default
+    #        entropy paths).
     #      - HAVE_GETPID defined — getpid() in pouch returns -1 (sentinel
     #        ENOSYS); libsodium uses it only for fork-detection in the
     #        internal_random path (not the default sysrandom path), where the
@@ -1171,7 +1189,10 @@ build_libsodium() {
     local cflags=( --target=aarch64-thylacine -march=armv8-a+lse+pauth+bti
                    -std=gnu11 -O2 -fno-pic -fomit-frame-pointer
                    -fno-stack-protector
-                   -nostdinc -isystem "$sysroot/include"
+                   # -nostdlibinc (NOT -nostdinc): the armcrypto TUs include
+                   # the COMPILER-provided <arm_neon.h>; musl's headers still
+                   # take priority via the -isystem (the compiler-rt idiom).
+                   -nostdlibinc -isystem "$sysroot/include"
                    -I"$sodium_obj/gen/sodium"
                    -I"$sodium_src/include"
                    -I"$sodium_src/include/sodium"
@@ -1187,6 +1208,7 @@ build_libsodium() {
                    -DHAVE_SYS_PARAM_H=1
                    -DHAVE_SYS_RANDOM_H=1
                    -DHAVE_SYS_AUXV_H=1
+                   -DHAVE_ARMCRYPTO=1
                    -DHAVE_PTHREAD=1
                    -DHAVE_WEAK_SYMBOLS=1
                    -DHAVE_C11_MEMORY_FENCES=1

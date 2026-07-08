@@ -28,6 +28,7 @@
 #include <thylacine/vma.h>
 #include <thylacine/burrow.h>
 #include <thylacine/vdso.h>     // vdso_clock_burrow (map the RO clock page, #343)
+#include "../arch/arm64/hwfeat.h" // g_hw_features.linux_hwcap (the AT_HWCAP word)
 #include <thylacine/dev.h>      // REVENANT R-4: exe->dev->read for the file-backed path
 #include <thylacine/spoor.h>    // REVENANT R-4: spoor_ref / spoor_clunk
 #include <thylacine/image.h>    // REVENANT R-4: image_lookup_or_create (shared text)
@@ -189,7 +190,7 @@ static u64 exec_map_vdso(struct Proc *p) {
 //
 // Two shapes (selected by whether argv_data is non-NULL and argc > 0):
 //   Shape A — no argv (legacy: argc == 0; fixed-size frame =
-//             EXEC_INIT_STACK_SIZE = 144 bytes).
+//             EXEC_INIT_STACK_SIZE = 176 bytes).
 //   Shape B — argv-bearing (P6-pouch-stratumd-boot sub-chunk 16b-alpha;
 //             variable-size frame bounded by EXEC_INIT_STACK_MAX_SIZE).
 //
@@ -198,15 +199,17 @@ static u64 exec_map_vdso(struct Proc *p) {
 // BURROW corresponds to EXEC_USER_STACK_BASE, so the frame's bytes land
 // in the BURROW's last `frame_size` bytes. Returns the initial user sp —
 // the user VA of the frame's `argc` word.
-// Fill the System V auxv block: AT_PHDR/PHENT/PHNUM/PAGESZ, AT_RANDOM, the
-// OPTIONAL AT_VDSO_CLOCK (only when vdso_va != 0 — the page mapped), then the
-// AT_NULL terminator. `a` has room for EXEC_INIT_AUXV_COUNT (7) entries; with no
-// vDSO it writes 6 and the 7th 16-byte slot stays the caller-zeroed padding
+// Fill the System V auxv block: AT_PHDR/PHENT/PHNUM/PAGESZ, AT_HWCAP (the
+// Linux-compatible feature word from g_hw_features.linux_hwcap — read-only
+// after boot, so a plain read is coherent), AT_RANDOM, the OPTIONAL
+// AT_VDSO_CLOCK (only when vdso_va != 0 — the page mapped), then the AT_NULL
+// terminator. `a` has room for EXEC_INIT_AUXV_COUNT (8) entries; with no
+// vDSO it writes 7 and the 8th 16-byte slot stays the caller-zeroed padding
 // before the AT_RANDOM block (the reader stops at the AT_NULL terminator). Both
 // frame shapes route through here, so the entry set cannot diverge.
-_Static_assert(EXEC_INIT_AUXV_COUNT == 7,
-               "exec_fill_auxv reserves room for exactly 7 auxv entries "
-               "(AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_RANDOM, "
+_Static_assert(EXEC_INIT_AUXV_COUNT == 8,
+               "exec_fill_auxv reserves room for exactly 8 auxv entries "
+               "(AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_HWCAP, AT_RANDOM, "
                "AT_VDSO_CLOCK, AT_NULL) — keep this in sync with the macro");
 static void exec_fill_auxv(u64 *a, u64 phdr_va, u64 phent, u64 phnum,
                            u64 rand_va, u64 vdso_va) {
@@ -214,6 +217,7 @@ static void exec_fill_auxv(u64 *a, u64 phdr_va, u64 phent, u64 phnum,
     *a++ = AT_PHENT;  *a++ = phent;
     *a++ = AT_PHNUM;  *a++ = phnum;
     *a++ = AT_PAGESZ; *a++ = PAGE_SIZE;
+    *a++ = AT_HWCAP;  *a++ = g_hw_features.linux_hwcap;
     *a++ = AT_RANDOM; *a++ = rand_va;
     if (vdso_va) { *a++ = AT_VDSO_CLOCK; *a++ = vdso_va; }
     *a++ = AT_NULL;   *a++ = 0;
@@ -249,10 +253,10 @@ static u64 exec_build_init_stack(struct Proc *p, const struct elf_image *img,
 
     // Compute frame layout.
     //
-    // Shape A: fixed-size 144-byte frame; same as the legacy layout.
+    // Shape A: fixed-size 176-byte frame; same as the legacy layout.
     // Shape B:
     //   structured_top_bytes = 8 (argc) + 8*(argc+1) (argv[]+NULL)
-    //                          + 8 (envp NULL) + 96 (auxv) = 120 + 8*argc.
+    //                          + 8 (envp NULL) + 128 (auxv) = 152 + 8*argc.
     //   strings_region_offset = round_up(structured_top_bytes, 16) + 16
     //                            (the 16-aligned AT_RANDOM block precedes
     //                            the strings region).
@@ -309,7 +313,7 @@ static u64 exec_build_init_stack(struct Proc *p, const struct elf_image *img,
         w[0]  = 0;                           // argc
         w[1]  = 0;                           // argv[0] — NULL terminator
         w[2]  = 0;                           // envp[0] — NULL terminator
-        // auxv at w[3..]; up to 7 entries (14 u64s) reserved before the
+        // auxv at w[3..]; up to 8 entries (16 u64s) reserved before the
         // AT_RANDOM block at EXEC_INIT_RANDOM_OFFSET. The trailing slots beyond
         // the AT_NULL the helper writes stay zero (the stack BURROW is KP_ZERO).
         exec_fill_auxv(&w[3], phdr_va, phent, phnum,
@@ -343,7 +347,7 @@ static u64 exec_build_init_stack(struct Proc *p, const struct elf_image *img,
         w[1 + argc]   = 0;                   // argv[argc] = NULL terminator
         w[2 + argc]   = 0;                   // envp[0]    = NULL terminator
 
-        // auxv at w[3 + argc ..]; up to 7 entries (14 u64s) reserved (the
+        // auxv at w[3 + argc ..]; up to 8 entries (16 u64s) reserved (the
         // EXEC_INIT_AUXV_COUNT the structured-size math at the top accounts for).
         exec_fill_auxv(&w[3 + argc], phdr_va, phent, phnum,
                        sp + random_offset_from_sp, vdso_va);

@@ -45,15 +45,41 @@ static inline u64 read_id_aa64pfr1_el1(void) {
     __asm__ __volatile__("mrs %0, id_aa64pfr1_el1" : "=r"(v));
     return v;
 }
+static inline u64 read_id_aa64pfr0_el1(void) {
+    u64 v;
+    __asm__ __volatile__("mrs %0, id_aa64pfr0_el1" : "=r"(v));
+    return v;
+}
 
 #define FIELD_GET(val, shift, mask) (((val) >> (shift)) & (mask))
+
+// Linux arm64 uapi hwcap bit numbers (arch/arm64/include/uapi/asm/hwcap.h).
+// Only the bits Thylacine derives are listed; the published word is
+// append-only (a consumer must treat unknown-clear as feature-absent).
+#define THWCAP_FP       (1ull << 0)
+#define THWCAP_ASIMD    (1ull << 1)
+#define THWCAP_AES      (1ull << 3)
+#define THWCAP_PMULL    (1ull << 4)
+#define THWCAP_SHA1     (1ull << 5)
+#define THWCAP_SHA2     (1ull << 6)
+#define THWCAP_CRC32    (1ull << 7)
+#define THWCAP_ATOMICS  (1ull << 8)
+#define THWCAP_SHA3     (1ull << 17)
+#define THWCAP_ASIMDDP  (1ull << 20)
+#define THWCAP_SHA512   (1ull << 21)
 
 void hw_features_detect(void) {
     u64 isar0 = read_id_aa64isar0_el1();
     u64 isar1 = read_id_aa64isar1_el1();
     u64 pfr1  = read_id_aa64pfr1_el1();
+    u64 pfr0  = read_id_aa64pfr0_el1();
 
-    g_hw_features.atomic   = FIELD_GET(isar0, 20, 0xF) != 0;
+    // Atomic (23:20): 0b0010 = FEAT_LSE, 0b0011 = FEAT_LSE128; 0b0001 is
+    // RESERVED, so the gate is >= 2 (Linux's cpufeature threshold) -- a
+    // future 0b0001 assignment would denote something LESS than full LSE,
+    // and this bool feeds both the W1.5 alternatives patcher and the EL0
+    // AT_HWCAP ATOMICS bit (audit F4).
+    g_hw_features.atomic   = FIELD_GET(isar0, 20, 0xF) >= 2;
     g_hw_features.crc32    = FIELD_GET(isar0, 16, 0xF) != 0;
 
     g_hw_features.pac_apa  = FIELD_GET(isar1,  4, 0xF) != 0;
@@ -63,6 +89,32 @@ void hw_features_detect(void) {
 
     g_hw_features.bti      = FIELD_GET(pfr1,  0, 0xF) != 0;
     g_hw_features.mte      = (u8)FIELD_GET(pfr1,  8, 0xF);
+
+    // The Linux-compatible AT_HWCAP word (hwfeat.h). Field semantics per
+    // ARM ARM D17.2.x:
+    //   ISAR0.AES  (7:4):   1 = AESE/AESD/AESMC/AESIMC, 2 = + PMULL
+    //   ISAR0.SHA1 (11:8):  1 = SHA1 instructions
+    //   ISAR0.SHA2 (15:12): 1 = SHA256, 2 = + SHA512
+    //   ISAR0.SHA3 (35:32): 1 = SHA3 instructions
+    //   ISAR0.DP   (47:44): 1 = ASIMD dot product
+    //   PFR0.FP (19:16) / PFR0.AdvSIMD (23:20): 0b0000 = implemented,
+    //     0b1111 = NOT implemented — inverted-sentinel fields, unlike
+    //     the zero-means-absent ISAR0 fields above.
+    u64 hc = 0;
+    if (FIELD_GET(pfr0, 16, 0xF) != 0xF) hc |= THWCAP_FP;
+    if (FIELD_GET(pfr0, 20, 0xF) != 0xF) hc |= THWCAP_ASIMD;
+    u64 aes = FIELD_GET(isar0, 4, 0xF);
+    if (aes >= 1) hc |= THWCAP_AES;
+    if (aes >= 2) hc |= THWCAP_PMULL;
+    if (FIELD_GET(isar0,  8, 0xF) != 0) hc |= THWCAP_SHA1;
+    u64 sha2 = FIELD_GET(isar0, 12, 0xF);
+    if (sha2 >= 1) hc |= THWCAP_SHA2;
+    if (sha2 >= 2) hc |= THWCAP_SHA512;
+    if (FIELD_GET(isar0, 32, 0xF) != 0) hc |= THWCAP_SHA3;
+    if (FIELD_GET(isar0, 44, 0xF) != 0) hc |= THWCAP_ASIMDDP;
+    if (g_hw_features.crc32)  hc |= THWCAP_CRC32;
+    if (g_hw_features.atomic) hc |= THWCAP_ATOMICS;
+    g_hw_features.linux_hwcap = hc;
 }
 
 // Append a literal string to a buffer; returns chars written.

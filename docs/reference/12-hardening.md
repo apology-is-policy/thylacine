@@ -66,6 +66,7 @@ struct hw_features {
     bool pac_gpi;    // FEAT_PAuth PACGA via IMPDEF
     bool bti;        // FEAT_BTI
     u8   mte;        // FEAT_MTE: 0 / 1 inst-only / 2 +tags / 3 +async
+    u64  linux_hwcap; // the Linux-compatible AT_HWCAP word (see below)
 };
 extern struct hw_features g_hw_features;
 
@@ -73,7 +74,30 @@ void     hw_features_detect(void);
 unsigned hw_features_describe(char *buf, unsigned cap);
 ```
 
-`hw_features_detect` is called from `boot_main` after `slub_init`. Reads `ID_AA64ISAR0_EL1`, `ID_AA64ISAR1_EL1`, `ID_AA64PFR1_EL1`. Idempotent (re-readable; subsequent calls overwrite the struct with the same values). `hw_features_describe` produces a comma-separated string for the banner (e.g., `"PAC,BTI,MTE1,LSE,CRC32"`).
+`hw_features_detect` is called from `boot_main` after `slub_init`. Reads `ID_AA64ISAR0_EL1`, `ID_AA64ISAR1_EL1`, `ID_AA64PFR1_EL1`, `ID_AA64PFR0_EL1`. Idempotent (re-readable; subsequent calls overwrite the struct with the same values). `hw_features_describe` produces a comma-separated string for the banner (e.g., `"PAC,BTI,MTE1,LSE,CRC32"`).
+
+**`linux_hwcap` — the EL0 `AT_HWCAP` word (the CF-4 A AEAD lever).** A
+Linux-uapi-numbered feature word `exec_fill_auxv` publishes verbatim under
+the standard `AT_HWCAP` (16) tag in every exec auxv (see `27-exec.md`):
+FP / ASIMD (from `ID_AA64PFR0_EL1`'s **inverted-sentinel** fields — `0b1111`
+means NOT implemented, unlike the zero-means-absent ISAR0 fields) + AES /
+PMULL / SHA1 / SHA2 / SHA512 / SHA3 / CRC32 / ATOMICS / ASIMDDP (from
+`ID_AA64ISAR0_EL1`). The bits must stay TRUTHFUL (a set bit whose
+instructions fault on this CPU is a SIGILL time bomb in every consumer;
+a clear bit is a silent portable-path fallback — fail-safe on crypto-less
+cores like RPi4's A72). The word is APPEND-ONLY, and **`hwcap_CPUID`
+(bit 11) is never set**: Linux traps-and-emulates EL0 `mrs midr_el1`
+when it advertises CPUID; Thylacine does not, and Go's `hwcapInit` calls
+`getMIDR()` when it sees the bit — here that would be `snare:ill`.
+Consumers: musl `getauxval`, libsodium's armcrypto runtime gate
+(hardware AEGIS — see `84-pouch-libsodium.md`), the Go fork's
+`internal/cpu` init (hardware SHA-256 for the toolchain's cache hashing).
+**Recorded seam (audit F5)**: the word is BOOT-CPU-derived (detect runs
+once before `smp_init`); a heterogeneous target whose secondaries lack a
+boot-CPU feature must AND-in the secondary ID registers at `smp_init`
+before the first exec (the Linux sanitized-view analog). All current
+targets (QEMU `-cpu max`, HVF/M-series, RPi4) are homogeneous, and the
+W1.5 LSE patcher already carries the identical assumption.
 
 ---
 

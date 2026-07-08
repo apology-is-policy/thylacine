@@ -307,6 +307,58 @@ because CF-1's Bε buffer changes what a commit contains.
   behind a real device fsync, but a per-commit O(resident) term the
   clean-commit short-circuit should also account for.
 
+**[AS MEASURED at CF-4 open (2026-07-08; the CF4RT throwaway instrument —
+a per-op-type handler-time table in the stratumd serial loop + flush/
+commit phase lines + bdev-read / AEAD-decrypt counters; enabled by the
+#370 stderr drainer + the pouch clock_gettime seam fix, both keepers):
+the go-build queueing-tail hypothesis was WRONG for the build window —
+the CF3RT lesson repeating one layer down. Ground truth on the fresh
+goroot twins:**
+
+- **Commits do NOT fire mid-build** (Tfsync n=2 in the whole gofmt
+  window). The whole build's writes accumulate in the dirty buffer
+  (27.5 MB at the post-bench commit; the 256 MiB global cap is never
+  approached). The CF3RT "max 200 ms" tail = the Tread max (234 ms) +
+  the rare Tfsync (159 ms); 1,294 of the ~1,957 >=500 us calls are
+  slow TREADS themselves.
+- **The cold window IS the AEAD software-decrypt bill**: Tread handler
+  sum 22.5 s inside a 20.7 s wall, decomposing to 20.0 s inside
+  `stm_aead_decrypt` (5,918 calls, 860 MB at ~43 MB/s soft AEGIS-256)
+  + 1.4 s of device reads + ~1.1 s of everything else. 860 MB decrypted
+  vs ~444 MB delivered = whole-covering-extent decrypt amplification x
+  the 16-entry #343 dcache. Root cause of the rate: the pouch libsodium
+  compiled ONLY `aegis256_soft.c` and Thylacine's auxv carried no
+  AT_HWCAP, so `sodium_runtime_has_armcrypto()` could never see the
+  M2's idle hardware AES.
+- **The commit path is still real debt where commits DO fire**: every
+  commit = 10 fsyncs; an EMPTY commit costs ~23-33 ms (the fsbench
+  fsync 39-files/s ceiling IS the commit cost); the post-build commit
+  drained 27.5 MB in 686 ms. The barrier-batching + clean-commit design
+  facts are pinned (the bootstrap dual-slot/self-csum fallback [R7a
+  P2-1] makes every intermediate fsync deferrable to ONE pre-final-UB
+  data barrier; the mid-commit error path keeps fail-before-final-UB);
+  the build lands when this stage's turn comes — it is a
+  fsync-workload lever, NOT a go-build lever.
+- **Workers re-test (the CF-2f follow-up)**: `--fs-workers 4` on the
+  now-ms-scale ops is FLAT (cold 20723 vs 20706 ms) — the 4-vCPU guest
+  is CPU-saturated by the build + the server's decrypt; parallelizing a
+  CPU-bound server re-slices the same cores. Cut the work, not the
+  queue. The workers=1 default stands.
+- **Found + tracked**: #374 (Tunlinkat 14.6 ms/call x 222 = 3.2 s per
+  build — the serial dirent-unlink sweep on the $WORK cleanup, the
+  R175-carried scan family); the #343 dcache sizing (the 2x decrypt
+  amplification) is the follow-up lever after hardware AES lands.
+
+**The stage therefore SPLITS: CF-4 A (LANDED with this note) = the AEAD
+hardware lever** — the kernel publishes a Linux-compatible `AT_HWCAP`
+word in the exec auxv (`g_hw_features.linux_hwcap` from ID_AA64ISAR0/
+PFR0; hwcap_CPUID deliberately never set — Thylacine does not
+trap-and-emulate EL0 MIDR reads), the pouch libsodium compiles the
+self-arming armcrypto TUs runtime-gated on that word (fail-safe soft
+fallback on crypto-less cores — RPi4's A72), and the Go fork wires
+`internal/cpu` hwcap init (hardware SHA-256 for the toolchain's cache
+hashing). **CF-4 B (the commit path as designed above) follows.**
+
 ### CF-5 — measure, gate, audit, close
 
 - fsbench: multi-threaded through ONE mount (the new capability) — expect

@@ -124,12 +124,12 @@ _Static_assert((EXEC_USER_VDSO_BASE & 0xFFFull) == 0,
 //   sp + 16     envp[] terminator     one NULL pointer
 //   sp + 24     auxv[]                EXEC_INIT_AUXV_COUNT × Elf64_auxv_t
 //                                      (AT_PHDR, AT_PHENT, AT_PHNUM,
-//                                       AT_PAGESZ, AT_RANDOM,
+//                                       AT_PAGESZ, AT_HWCAP, AT_RANDOM,
 //                                       [AT_VDSO_CLOCK], AT_NULL)
 //   sp + ...    (8 bytes padding)
 //   sp + ...    AT_RANDOM entropy     16 kernel-CSPRNG bytes
-//   sp + 160    EXEC_USER_STACK_TOP
-// Frame size is the fixed EXEC_INIT_STACK_SIZE = 160 bytes (room for the max 7
+//   sp + 176    EXEC_USER_STACK_TOP
+// Frame size is the fixed EXEC_INIT_STACK_SIZE = 176 bytes (room for the max 8
 // auxv entries reserved; AT_VDSO_CLOCK is present only when the vDSO page
 // mapped, else its slot stays unused before the AT_NULL terminator).
 //
@@ -141,11 +141,11 @@ _Static_assert((EXEC_USER_VDSO_BASE & 0xFFFull) == 0,
 //   sp + 8 + 8*i                  argv[i]               (i = 1..argc-1)
 //   sp + 8 + 8*argc               argv[argc]            u64 = 0 (terminator)
 //   sp + 16 + 8*argc              envp[0]               u64 = 0 (no envp at v1.0)
-//   sp + 24 + 8*argc              auxv[]                up to 7 × 16 bytes (same
+//   sp + 24 + 8*argc              auxv[]                up to 8 × 16 bytes (same
 //                                                        entries as Shape A;
 //                                                        AT_RANDOM points to the
 //                                                        AT_RANDOM block below)
-//   sp + 120 + 8*argc             (pad to next 16-align)
+//   sp + 152 + 8*argc             (pad to next 16-align)
 //   sp + R                        AT_RANDOM entropy     16 kernel-CSPRNG bytes
 //                                                        (R is the 16-aligned
 //                                                        offset; the AT_RANDOM
@@ -163,12 +163,13 @@ _Static_assert((EXEC_USER_VDSO_BASE & 0xFFFull) == 0,
 // In both shapes, initial sp = EXEC_USER_STACK_TOP - frame_size; sp is
 // 16-byte aligned because the frame size is rounded up to a 16-byte
 // multiple and EXEC_USER_STACK_TOP is aligned.
-// 7 = AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_RANDOM, AT_VDSO_CLOCK, AT_NULL.
-// The frame ALWAYS reserves room for all 7 (so the AT_RANDOM block + strings
-// region offsets are stable); when the vDSO page is absent the builder writes
-// the AT_NULL terminator after 5 entries and the AT_VDSO_CLOCK slot stays
-// unused (zeroed) padding before the random block.
-#define EXEC_INIT_AUXV_COUNT   7
+// 8 = AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_HWCAP, AT_RANDOM,
+// AT_VDSO_CLOCK, AT_NULL. The frame ALWAYS reserves room for all 8 (so the
+// AT_RANDOM block + strings region offsets are stable); when the vDSO page
+// is absent the builder writes the AT_NULL terminator after 6 entries and
+// the AT_VDSO_CLOCK slot stays unused (zeroed) padding before the random
+// block. AT_HWCAP is unconditional (the hwcap word exists on every boot).
+#define EXEC_INIT_AUXV_COUNT   8
 #define EXEC_INIT_STACK_SIZE \
     (((8 + 8 + 8 + EXEC_INIT_AUXV_COUNT * 16 + 16) + 15) & ~15ull)
 // Offset (from the frame base / from sp) of the 16-byte AT_RANDOM block

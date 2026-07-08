@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/auxv.h>
 
 #include <sodium.h>
 
@@ -161,6 +162,33 @@ int main(void) {
     }
     printf("pouch-hello-sodium: ed25519 sign + verify + reject-tampered ok\n");
     fflush(stdout);
+
+    // 6. The AEAD-lever wiring proof: libsodium's armcrypto selection must
+    // AGREE with the kernel's AT_HWCAP word (bit 3 = HWCAP_AES, the Linux
+    // number). On an AES-capable CPU (QEMU-virt TCG -cpu max, HVF on
+    // M-series) this proves the hardware AEGIS path is live end-to-end
+    // (kernel ID-reg decode -> auxv -> musl getauxval -> the runtime
+    // picker); on an AES-less CPU (RPi4's A72) it proves the fail-safe
+    // fallback. A DISAGREEMENT either way is the regression: HWCAP-set
+    // but soft-picked = the gate wiring broke (the 20-of-21-seconds
+    // soft-decrypt regime returns silently); HWCAP-clear but
+    // armcrypto-picked = a SIGILL time bomb.
+    {
+        unsigned long hw = getauxval(AT_HWCAP);
+        int aes_hw = (hw & (1ul << 3)) != 0;
+        int aes_sodium = sodium_runtime_has_armcrypto();
+        if (aes_hw != aes_sodium) {
+            printf("pouch-hello-sodium: FAIL armcrypto gate disagrees "
+                   "(AT_HWCAP aes=%d, sodium armcrypto=%d)\n",
+                   aes_hw, aes_sodium);
+            fflush(stdout);
+            return 13;
+        }
+        printf("pouch-hello-sodium: armcrypto gate ok (AT_HWCAP=0x%lx, "
+               "aes=%d -> %s AEGIS)\n",
+               hw, aes_hw, aes_hw ? "HARDWARE" : "soft");
+        fflush(stdout);
+    }
 
     printf("pouch-hello-sodium: exit 0\n");
     fflush(stdout);

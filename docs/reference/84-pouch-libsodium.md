@@ -64,28 +64,42 @@ The macros that matter on `aarch64-thylacine`:
 | `HAVE_RAISE` | 1 | sub-chunk 13b. |
 | `HAVE_SYSCONF` | 1 | musl provides — reads from auxv. |
 | `HAVE_GETRANDOM` / `HAVE_GETENTROPY` / `HAVE_LINUX_COMPATIBLE_GETRANDOM` | 1 | sub-chunks 4 + 11. The Linux-compatible flag bypasses the `__linux__` conditional in `randombytes_sysrandom.c` so libsodium uses musl's `getrandom(2)` directly (a `/dev/urandom` fallback isn't reachable from pouch). |
-| `HAVE_GETAUXVAL` | 1 | musl provides — returns 0 for `AT_HWCAP` (pouch's auxv carries only `AT_PHDR`/`AT_PHENT`/`AT_PHNUM`/`AT_PAGESZ`/`AT_RANDOM`/`AT_NULL`; the 0 return makes libsodium fall back to the portable refs, which is what we compile anyway). |
+| `HAVE_GETAUXVAL` | 1 | musl provides. Since the CF-4 A AEAD lever the kernel publishes a REAL `AT_HWCAP` word in the exec auxv (see `27-exec.md`), so `sodium_runtime_has_armcrypto()` = `getauxval(AT_HWCAP) & (1<<3)` — the runtime gate that selects the hardware AEGIS/AES implementations on AES-capable CPUs and the portable refs elsewhere. (Before the lever this returned 0 and everything ran the portable refs — the measured ~43 MB/s soft-AEGIS regime.) |
 | `HAVE_GETPID` | 1 | musl provides — returns `-1` (`ENOSYS`) at runtime; harmless for libsodium's fork-detection (the `-1` value never matches a "new" pid). |
 | `HAVE_POSIX_MEMALIGN` | 1 | mallocng (sub-chunk 7b). |
 | `HAVE_EXPLICIT_BZERO` | 1 | musl 1.2.5 provides. |
 | `SODIUM_STATIC` | 1 | Expands `SODIUM_EXPORT` to nothing (no visibility attribute needed for a static-archive build). |
-| `HAVE_AMD64_ASM`, `HAVE_AVX_*`, `HAVE_*INTRIN_H`, `HAVE_RDRAND`, `HAVE_CPUID`, `HAVE_CET_H`, `HAVE_ARMCRYPTO`, `HAVE_ANDROID_GETCPUFEATURES`, `HAVE_INTRIN_H`, `HAVE_ARC4RANDOM`, `HAVE_ELF_AUX_INFO`, `HAVE_MEMSET_S`/`HAVE_MEMSET_EXPLICIT`/`HAVE_EXPLICIT_MEMSET`, `HAVE_CATCHABLE_ABRT`/`HAVE_CATCHABLE_SEGV`, `HAVE_NANOSLEEP`, `HAVE_CLOCK_GETTIME`, `HAVE_MLOCK`, `HAVE_MADVISE`, `HAVE_MPROTECT`, `HAVE_ALIGNED_MALLOC` | NOT defined | x86-only / non-pouch-OS / unsupported on pouch (`sigaction` for `SIGABRT`/`SIGSEGV` is `EINVAL` per sub-chunk 13b; `mlock`/`madvise`/`mprotect`/`nanosleep`/`clock_gettime` all return `ENOSYS` via pouch's `0xFFFF` sentinel — leaving them undefined is more honest than defining them and silently returning `-1`). |
+| `HAVE_ARMCRYPTO` | 1 | **Since the CF-4 A AEAD lever.** Compiles the ARMv8 crypto-extension implementations + their runtime pickers (see "The source list" below). Selection is runtime-gated on the `AT_HWCAP` AES bit, so a crypto-less CPU never executes them. |
+| `HAVE_AMD64_ASM`, `HAVE_AVX_*`, `HAVE_*INTRIN_H`, `HAVE_RDRAND`, `HAVE_CPUID`, `HAVE_CET_H`, `HAVE_ANDROID_GETCPUFEATURES`, `HAVE_INTRIN_H`, `HAVE_ARC4RANDOM`, `HAVE_ELF_AUX_INFO`, `HAVE_MEMSET_S`/`HAVE_MEMSET_EXPLICIT`/`HAVE_EXPLICIT_MEMSET`, `HAVE_CATCHABLE_ABRT`/`HAVE_CATCHABLE_SEGV`, `HAVE_NANOSLEEP`, `HAVE_CLOCK_GETTIME`, `HAVE_MLOCK`, `HAVE_MADVISE`, `HAVE_MPROTECT`, `HAVE_ALIGNED_MALLOC` | NOT defined | x86-only / non-pouch-OS / unsupported on pouch (`sigaction` for `SIGABRT`/`SIGSEGV` is `EINVAL` per sub-chunk 13b; `mlock`/`madvise`/`mprotect`/`nanosleep` all return `ENOSYS` via pouch's `0xFFFF` sentinel — leaving them undefined is more honest than defining them and silently returning `-1`. `clock_gettime` IS wired since the CF-4 keeper [seam 0xFFFF -> 75, Linux 113's slot], so `HAVE_CLOCK_GETTIME` is now definable — a separate small lift, not taken with the AEAD chunk). |
 
 ## The source list
 
 Curated from `src/libsodium/Makefile.am`, the `libsodium_la_SOURCES` set
 plus the `!HAVE_AMD64_ASM` (ref salsa20), `!EMSCRIPTEN` (randombytes), and
-`!MINIMAL` (full API surface) arms. 97 `.c` files compiled. Excluded:
+`!MINIMAL` (full API surface) arms, plus the armcrypto set (below). 100
+`.c` files compiled. Excluded:
 
 - **x86 ASM** — AESNI, SSE2/3/4.1, AVX, AVX2, AVX512F, sandy2x. None
   reachable on aarch64.
-- **ARMv8 crypto extension sources** — `libarmcrypto_la` (`aegis128l_armcrypto.c`,
-  `aegis256_armcrypto.c`, `aead_aes256gcm_armcrypto.c`). These need
-  `-march=...+crypto`; pouch's baseline is `-march=armv8-a+lse+pauth+bti`
-  (no `+crypto`). The portable refs implement every primitive, so AES-GCM
-  and AEGIS still work — they just don't get the hardware acceleration.
-  Future work: enable `+crypto` opportunistically when the platform
-  reports `AT_HWCAP` AES, then conditionally link the `armcrypto` arms.
+
+**INCLUDED since the CF-4 A AEAD lever** — the ARMv8 crypto-extension
+sources (`libarmcrypto_la`): `aegis128l_armcrypto.c`,
+`aegis256_armcrypto.c`, `aead_aes256gcm_armcrypto.c`. They need no
+`+crypto` `-march` (each TU self-arms via `#pragma clang attribute
+push(target("neon,crypto,aes"))` — the baseline
+`-march=armv8-a+lse+pauth+bti` is unchanged, so no OTHER TU can emit a
+crypto instruction), and selection is RUNTIME-gated:
+`sodium_runtime_has_armcrypto()` reads `getauxval(AT_HWCAP) & (1<<3)`,
+the word the kernel now publishes (see `27-exec.md`). An AES-less CPU
+(RPi4's A72) reports a clear bit and the soft implementations are
+picked — the crypto TUs never execute there. The libsodium cflags also
+switched `-nostdinc` → `-nostdlibinc` (the compiler-rt idiom): the
+armcrypto TUs include the compiler-provided `<arm_neon.h>`; musl's
+headers still take priority via the `-isystem`. Measured effect: the
+on-device AEGIS-256 decrypt went ~43 MB/s (soft) → ~2.2 GB/s
+(hardware, M2 under HVF); the go-build cold window 21.3 → 4.4 s. The
+boot-fatal proof is pouch-hello-sodium's agreement probe
+(`sodium_runtime_has_armcrypto()` must equal the `AT_HWCAP` AES bit).
 
 The list is hard-coded in `build_libsodium`, with a `[[ ${#sources[@]}
 -lt 90 ]]` sanity gate to catch a re-vendor that drops sources.

@@ -3367,11 +3367,17 @@ int main(void) {
                     sd_stderr_drain_main,
                     (void *)(sd_drain_stack + sizeof(sd_drain_stack)),
                     (void *)sd_rd, (void *)0);
-                if (sd_drain_tid < 0)
+                if (sd_drain_tid < 0) {
+                    // No drainer owns the fd; close it so post-startup
+                    // stratumd writes fail fast (EPIPE) instead of
+                    // blocking on a full never-read pipe -- the degraded
+                    // mode is silenced diagnostics, never the FS wedge.
+                    (void)t_close(sd_rd);
                     t_putstr("joey: stratumd stderr drainer spawn FAILED "
-                             "(#370: daemon output will back-pressure)\n");
-                else
+                             "(#370: daemon diagnostics silenced)\n");
+                } else {
                     t_putstr("joey: stratumd stderr drainer up (#370)\n");
+                }
             }
         }
 
