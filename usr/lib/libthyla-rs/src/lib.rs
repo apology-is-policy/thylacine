@@ -284,6 +284,13 @@ pub const T_WALK_CREATE_DMDIR: u32    = 0x8000_0000;
 // against a /srv directory, this perm bit posts the new service in BYTE mode;
 // its absence posts 9P mode. Mirrors SYS_WALK_CREATE_DMSRVBYTE in the kernel.
 pub const T_WALK_CREATE_DMSRVBYTE: u32 = 0x0200_0000;
+// DMSRVBULK (CF-3 B; CONCURRENT-FS.md): on a /srv service post, selects the
+// BULK ring class -- connections carry 128 KiB-frame rings and a
+// kernel-attached mount negotiates a 128 KiB msize. Mirrors
+// SYS_WALK_CREATE_DMSRVBULK in the kernel. No native poster uses it yet
+// (netd's /net stays default-class); stratumd posts it via the pouch
+// SO_SNDBUF mapping.
+pub const T_WALK_CREATE_DMSRVBULK: u32 = 0x0100_0000;
 
 // SYS_WALK_OPEN sentinel for "walk from the calling Proc's territory
 // root spoor" (P5-stratumd-stub-bringup-e2). Passed as spoor_fd when

@@ -666,6 +666,11 @@ void test_srvconn_recv_deadline_timeout(void);
 void test_srvconn_teardown_eofs(void);
 void test_srvconn_teardown_wakes_blocked(void);
 void test_srvconn_server_send_blocks_then_drain_wakes(void);
+void test_srvconn_bulk_ring_class(void);
+void test_srvconn_role_park_second_writer(void);
+void test_srvconn_role_park_second_reader(void);
+void test_srvconn_client_send_blocking_backpressure(void);
+void test_srvconn_client_send_blocking_poll_edge(void);
 void test_devsrv_walk_service(void);
 void test_devsrv_open_connect_byte(void);
 void test_devsrv_kernel_attached_io_refused(void);
@@ -1805,6 +1810,19 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "srvconn.server_send_blocks_then_drain_wakes",
                                        test_srvconn_server_send_blocks_then_drain_wakes,
+                                                                           false, NULL },
+    { "srvconn.bulk_ring_class",       test_srvconn_bulk_ring_class,       false, NULL },
+    { "srvconn.role_park_second_writer",
+                                       test_srvconn_role_park_second_writer,
+                                                                           false, NULL },
+    { "srvconn.role_park_second_reader",
+                                       test_srvconn_role_park_second_reader,
+                                                                           false, NULL },
+    { "srvconn.client_send_blocking_backpressure",
+                                       test_srvconn_client_send_blocking_backpressure,
+                                                                           false, NULL },
+    { "srvconn.client_send_blocking_poll_edge",
+                                       test_srvconn_client_send_blocking_poll_edge,
                                                                            false, NULL },
     { "srvconn.recv_deadline_timeout",
                                        test_srvconn_recv_deadline_timeout, false, NULL },

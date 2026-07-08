@@ -169,7 +169,30 @@ The as-built client is **pipelined and multi-Proc-shared** (a single `p9_client`
 - The session is marked `c->dead` on transport EOF/error OR a demux-level protocol violation; every in-flight rpc is then failed `-EIO`. A dead session rejects all subsequent ops.
 - **Tflush-on-abandon (#845):** when a Proc dies mid-op (`CLIENT_WAIT_DIED`), `client_run` NULLs `inflight[tag]`, frees the rpc's `reply_buf`, and sends `Tflush(oldtag=T)` under `c->lock` (`p9_session_send_flush` + `p9_transport_send`). The abandoned tag T stays *reserved* (`session.outstanding[T].awaiting_flush`) and is freed **only** by its `Rflush` — never by a late original reply (the I-10 reuse-race guard: per 9P, `oldtag` is not reusable until `Rflush`, so a stray reply can't be mis-attributed to a reused tag). The flush is ownerless (no `inflight[F]`); a survivor's elected reader drains the `Rflush` via the ownerless demux path. `dispatch_rmsg` consumes a late original on an `awaiting_flush` tag without clearing it, and on the `Rflush` frees both T and the flush tag F. If the flush can't be built/sent the client falls back to the pre-#845 leave-active path (no regression). See ARCH §21.10 "Tflush-on-abandon".
 
-### Send-side flow control (#349)
+#### The two-tier out_buf + the per-connection msize (CF-3 B)
+
+`struct p9_client` builds every Tmsg in `out_buf` (`out_buf_cap`
+bytes). Since CF-3 B that is two-tier: a session initialized with
+`msize <= P9_CLIENT_OUT_BUF_MAX` (32 KiB — every static test client and
+every default-class /srv service) points `out_buf` at the inline
+`out_buf_inline` array (no allocation); a BULK session (a `DMSRVBULK`
+service's conn — the FS mounts, 128 KiB) kmallocs an msize-sized buffer
+at `p9_client_init`, freed at destroy. OOM at init DEGRADES to the
+inline tier: the CF-3 A write clamp (`min(msize, out_buf_cap) - 23`)
+then simply produces shorter writes — a degraded session still works,
+reads unaffected (their payload rides the caller-provided recv buffer,
+which `srvconn_attach_dev9p_root` sizes to the CONNECTION's msize).
+
+The msize proposal itself comes from the connection:
+`srvconn_attach_dev9p_root` passes `srvconn_msize(cn)` as both the
+proposal and the recv cap, so a bulk FS service negotiates 131072 with
+stratumd (its `msize_max` default is far above) and a default service
+stays at 32 KiB. The negotiated msize can never exceed what the conn's
+rings carry (cap = 2x msize by construction). The boot-fatal joey
+`cf3-bulk` probe asserts the EXACT clamp counts (first write 131049 /
+first read 131061) — the live proof the 128 KiB negotiation happened.
+
+## Send-side flow control (#349)
 
 A transiently-**full** kernel→server c2s byte ring is **back-pressure, not death**. Under #841 pipelining + concurrent large frames, a `SrvConn`'s c2s ring (64 KiB = 2× msize) can momentarily fill while prior frames are undrained. Pre-#349, `srvconn_client_send_frame`'s `0` ("ring full but alive") collapsed to `-1` and `client_run` marked the **whole shared session dead** — killing every in-flight op, including a *peer's* in-flight REVENANT text page-in (the on-device `go build` failure: a Twrite's back-pressured send → `snare:bus` + an `-EIO` cascade across the shared dev9p client).
 

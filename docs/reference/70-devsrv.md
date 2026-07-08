@@ -387,6 +387,20 @@ The bit is admitted through the create-perm validation so it reaches the
 devsrv branch; a regular (non-`/srv`) create **rejects** it, so it can never
 leak into a dev9p `Tlcreate` perm.
 
+**`DMSRVBULK`** (`SYS_WALK_CREATE_DMSRVBULK`, `0x01000000`, bit 24 — CF-3 B,
+CONCURRENT-FS.md) rides the same channel: it selects the BULK ring class for
+the service (`SrvService.ring_msize = SRVCONN_BULK_MSIZE`, 128 KiB — the
+default is `SRVCONN_MSIZE`, 32 KiB). Every connection minted on the service
+gets heap rings of 2× that class, and `srvconn_attach_dev9p_root` proposes
+it as the kernel client's msize, so a bulk FS service negotiates 131072.
+Like `mode`, `ring_msize` is set at `srv_reserve_in` (validated against the
+two-point class set), is part of the service IDENTITY on a tombstone rebind
+(a class flip requires a different name — the F2 discipline), and is
+captured in `devsrv_open_connect` under the registry lock atomically with
+the LIVE check. The consumer is the pouch AF_UNIX bind path (patch 0020: a
+pre-bind `setsockopt(SO_SNDBUF/SO_RCVBUF ≥ 128 KiB)` sets the bit), driven
+by stratumd's FS listeners; corvus and netd stay default-class.
+
 No client posts via `create` yet — corvus still uses `SYS_POST_SERVICE`; the
 migration (post-before-chroot) lands with the open=connect client migration
 in stalk-3b-β.

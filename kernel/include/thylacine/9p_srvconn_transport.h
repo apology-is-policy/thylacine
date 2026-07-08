@@ -67,11 +67,11 @@
 // I/O semantics
 // =============================================================================
 //
-// - send: writes go to c2s via `srvconn_client_send`. Non-blocking;
-//   SRVCONN_RING_CAP (8 KiB) is sized to hold a full msize (4 KiB)
-//   frame, so a synchronous single-frame-in-flight kernel 9P client
-//   never blocks on a write. A short write (the ring filled because of
-//   a bug -- should not happen) loops in spoor-transport style.
+// - send: writes go to c2s via `srvconn_client_send_frame`
+//   (all-or-nothing, #841). The ring (2x the conn's msize class --
+//   CF-3 B: 64 KiB default, 256 KiB bulk) always fits one whole frame
+//   when empty; a transiently-full ring surfaces as
+//   P9_TRANSPORT_EAGAIN and the #349 flow control absorbs it.
 //
 // - recv: reads block on s2c via `srvconn_client_recv`. Each blocking
 //   recv is bounded by `cn->client_deadline_ns`. SYS_ATTACH_9P_SRV

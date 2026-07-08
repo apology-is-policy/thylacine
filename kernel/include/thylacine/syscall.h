@@ -2035,13 +2035,33 @@ _Static_assert(__builtin_offsetof(struct t_stat, gid)       == 76, "t_stat.gid a
 // SYS_WALK_CREATE_PERM_VALID so it reaches the devsrv-post branch of
 // sys_walk_create_handler; that branch is the ONLY place it is meaningful -- a
 // regular (non-/srv) create rejects it (it must not leak into a dev9p Tlcreate
-// perm). For a service post the only valid perm bits are {0, DMSRVBYTE}.
+// perm). For a service post the valid perm bits are {0, DMSRVBYTE} |
+// {0, DMSRVBULK}.
 #define SYS_WALK_CREATE_DMSRVBYTE   0x02000000u
+// DMSRVBULK (Thylacine extension; CF-3 B, CONCURRENT-FS.md): on a /srv
+// service post, selects the BULK ring class -- every connection minted on
+// the service gets rings sized for SRVCONN_BULK_MSIZE (128 KiB) frames and
+// the kernel dev9p client proposes that msize (stratumd's
+// STM_9P_MSIZE_DEFAULT accepts exactly 128 KiB), so one bulk read/write
+// RPC carries 4x the default payload. Its absence posts the default
+// 32 KiB class. Bit 24 is the next free bit below DMSRVBYTE (bits 26..31
+// are Plan 9's standard DM set -- DMTMP occupies 0x04000000). Like
+// DMSRVBYTE it is meaningful ONLY on the devsrv-post branch; a regular
+// create rejects it. The pouch AF_UNIX boundary-line maps a pre-bind
+// setsockopt(SO_SNDBUF/SO_RCVBUF >= 128 KiB) to this bit (stratumd's
+// listener setup is the consumer).
+#define SYS_WALK_CREATE_DMSRVBULK   0x01000000u
 #define SYS_WALK_CREATE_PERM_VALID  (0x1FFu | SYS_WALK_CREATE_DMDIR | \
-                                     SYS_WALK_CREATE_DMSRVBYTE)
+                                     SYS_WALK_CREATE_DMSRVBYTE | \
+                                     SYS_WALK_CREATE_DMSRVBULK)
 _Static_assert((SYS_WALK_CREATE_DMSRVBYTE &
                 (0x1FFu | SYS_WALK_CREATE_DMDIR)) == 0,
                "DMSRVBYTE must not collide with the mode bits or DMDIR");
+_Static_assert((SYS_WALK_CREATE_DMSRVBULK &
+                (0x1FFu | SYS_WALK_CREATE_DMDIR |
+                 SYS_WALK_CREATE_DMSRVBYTE)) == 0,
+               "DMSRVBULK must not collide with the mode bits, DMDIR, or "
+               "DMSRVBYTE");
 
 // SYS_UNLINK flags: the only permitted bit at v1.0 is SYS_UNLINK_REMOVEDIR
 // (rmdir an empty directory vs unlink a non-directory). Mirrors the wire

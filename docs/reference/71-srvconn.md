@@ -142,8 +142,14 @@ u64 srvconn_total_freed(void);
 
 `kernel/srvconn.c`. The chunk introduces no boot-time `init` — there is
 no SLUB cache and no global state beyond two diagnostic counters; every
-`SrvConn` is `kmalloc`'d (the struct is ~16 KiB — two 8 KiB rings — so
-`kmalloc` routes it through `alloc_pages`).
+`SrvConn` is `kmalloc`'d. Since CF-3 B the ring storage is HEAP, owned
+by the conn: the struct itself is small, and `srvconn_create` allocates
+each direction's buffer at `2x` the conn's msize class — 2 x 64 KiB for
+the default class, 2 x 256 KiB for a `DMSRVBULK` service's conns (which
+also retired the old inline-array shape that rounded every conn up to a
+256 KiB `kmalloc`). Exactly two classes exist (`SRVCONN_MSIZE` /
+`SRVCONN_BULK_MSIZE`); `srvconn_create` rejects anything else, so ring
+memory is a two-point policy, never an arbitrary demand.
 
 ### The two channels
 
@@ -152,15 +158,23 @@ blocking consumer:
 
 ```c
 struct srvconn_chan {
-    spin_lock_t    lock;          // protects count / head / tail / eof
+    spin_lock_t    lock;          // protects count / head / tail / eof + roles
+    u32            cap;           // ring capacity: 2x the conn's msize (CF-3 B)
     u32            count, head, tail;
     bool           eof;           // teardown latched this direction
-    bool           writing;       // a blocking PRODUCER holds the single-writer role (#348)
-    struct Rendez  rendez;        // the single blocking CONSUMER waits here
-    struct Rendez  wrendez;       // the single blocking PRODUCER waits here (#348)
-    u8             buf[SRVCONN_RING_CAP];   // SRVCONN_RING_CAP == 65536 (2x SRVCONN_MSIZE)
+    bool           reading;       // the single blocking-CONSUMER role
+    bool           writing;       // the single blocking-PRODUCER role (#348)
+    struct Rendez  rendez;        // the role-holding consumer waits here
+    struct Rendez  wrendez;       // the role-holding producer waits here (#348)
+    struct poll_waiter_list role_waiters;  // #354: parked role CONTENDERS
+    u8            *buf;           // heap ring storage, cap bytes (CF-3 B)
 };
 ```
+
+The byte copies (`chan_copy`) are word-wise — 8 bytes at a time with
+byte head/tail — since every FS byte crosses the rings twice and a
+128 KiB bulk frame makes a per-byte loop real cost (kernel unaligned
+u64 access is legal, SCTLR_EL1.A == 0).
 
 `chan_ring_write` / `chan_ring_read` are the two-segment wrap-aware ring
 ops (mirroring `kernel/pipe.c`'s `ring_write` / `ring_read`), run under
@@ -283,6 +297,58 @@ party (the kernel elected reader, or #349's self-pump when the client is
 itself back-pressured on `c2s`), and a full `c2s` likewise. No spinlock
 is held across either `tsleep`; the `writing` / `reading` flags are
 plain booleans the opposite role never waits on.
+
+### The blocking-role park (#354, CF-3 B)
+
+`reading` / `writing` are ROLES, not refusals. The role holder is the
+only thread that may park on the direction's `rendez` / `wrendez` (each
+stays single-waiter — the audited #348/#349 machinery is untouched). A
+CONTENDING blocking party parks on the chan's `role_waiters` list —
+each on its own stack `Rendez` via a `poll_waiter`, the #349
+`send_waiters_list` pattern — inside `chan_role_acquire`, and
+`chan_role_release` clears the flag under `ch->lock` then wakes the
+list; teardown wakes it too, so parked contenders unwind on EOF. The
+acquire honors a deadline (used by `srvconn_client_recv`, whose whole
+recv — role wait included — is bounded by `client_deadline_ns`) and is
+#811 death-interruptible.
+
+Pre-#354 a contender was refused `-1`, which a POSIX server's
+`write_full` treats as EPIPE → it closes the kernel-attached mount (the
+#348-audit F1 latent). While stratumd was one-thread-per-conn that was
+unreachable; CF-2's threaded request processing made the kernel's
+soundness rest on stratumd's own `write_mu` — a cross-project
+pre-condition the role-park retires. Semantics: concurrent blocking
+READS serialize per call (each recv consumes one lock-atomic chunk);
+concurrent blocking WRITES serialize per buffer (the role spans the
+whole multi-chunk delivery, so two writers' bytes never interleave —
+`srvconn.role_park_second_writer` pins the A-then-B order).
+
+Two audit findings landed on this machinery and are closed in-chunk:
+**F1 [P1]** — the blocking client send originally woke the conn's
+`poll_list` once at end-of-delivery; a poll-then-read byte server
+parked on POLLIN plus a client write larger than the ring was a
+circular wait (the send needs the drain, the drainer needs the edge).
+Every accepted chunk now fires `poll_waiter_list_wake` (the
+per-write discipline of the non-blocking twin);
+`srvconn.client_send_blocking_poll_edge` pins it. **F2 [P3]** — the
+role-wait conds carried an `|| eof` term, so a contender woken by
+teardown while the unwinding holder still held the role busy-spun
+until the holder got scheduled; the conds now wait purely on
+role-free, with liveness resting on the holder's guaranteed release
+(teardown wakes the holder; every exit path releases; the release
+wakes the contenders).
+
+The family's THIRD producer also went blocking in the same pass:
+`srvconn_client_send_blocking` (the byte-mode CLIENT write — the
+per-user stratumd proxy forwards whole Tmsg frames upstream through its
+conn Spoor with `write_full`, which treats a 0 from a transiently-full
+c2s as EPIPE). It parks on `c2s.wrendez`; the server-side recv paths
+(`srvconn_server_recv` / `_blocking`) now wake `wrendez` on every
+drain, mirroring #348's `client_recv` drain-wake. `devsrv_write`'s
+CSRVCLIENT arm routes to it (kernel-attached conns still refused).
+Both-directions-full with a peer that never reads is the classic
+full-duplex application deadlock POSIX AF_UNIX shares; teardown / #811
+death unwinds both parked parties.
 
 ### Transport vtable
 

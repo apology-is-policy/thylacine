@@ -544,7 +544,7 @@ static struct Proc *make_marked_test_proc(void) {
 static int post_svc_byte(struct Proc *p, const char *name, size_t name_len) {
     struct Spoor *root = devsrv_attach_registry(srv_boot_registry());
     if (!root) return -1;
-    int h = devsrv_post_listener(p, root, name, name_len, SRV_MODE_BYTE);
+    int h = devsrv_post_listener(p, root, name, name_len, SRV_MODE_BYTE, false);
     spoor_clunk(root);
     return h;
 }

@@ -237,13 +237,55 @@ stream. The stage therefore splits:**
   msize's payload (Twrite additionally to the client out_buf bound) and
   return SHORT — the protocol's own contract; callers loop. Regression:
   `9p_client.bulk_write_clamps_short`.**
-- **CF-3 B (next; carries the §8.3 signoff): the msize/ring lift.**
-  stratumd already accepts 128 KiB; the kernel SrvConn ring
-  (`SRVCONN_MSIZE`, an embedded fixed array — 2 frames each way) is the
-  blocker. A global bump costs every byte-mode connection ~512 KB of
-  kernel memory and connections are user-drivable (I-32-adjacent), so
-  the per-service post-time ring hint remains the designed shape; the
-  memory math + the ABI addition go to the user per §8.3.
+- **CF-3 B (LANDED; B2 user-signed-off 2026-07-08 per §8.3): the
+  per-service bulk ring — msize 32 KiB → 128 KiB on the FS mounts.**
+  As-built: a `DMSRVBULK` create-perm bit on the /srv service post (the
+  `DMSRVBYTE` idiom; bit 24) selects the BULK ring class —
+  `SrvService.ring_msize` = `SRVCONN_BULK_MSIZE` (128 KiB) — and every
+  connection minted on the service gets HEAP rings of 2× its class
+  (the inline 64 KiB `srvconn_chan` array is retired; a default conn
+  now carries 2×64 KiB heap rings — which also stops the old ~129 KiB
+  struct rounding every conn up to a 256 KiB kmalloc — a bulk conn
+  2×256 KiB). `srvconn_attach_dev9p_root` proposes the CONNECTION's
+  msize (`srvconn_msize`), so the kernel client negotiates 131072 with
+  stratumd (`msize_max` default ≥ 128 KiB) and `p9_client` grows a
+  two-tier out_buf (inline 32 KiB default / heap msize-sized bulk,
+  OOM-degrading to inline). Delivery to stratumd is POSIX-shaped: the
+  pouch AF_UNIX layer (patch 0020) maps a pre-bind
+  `setsockopt(SO_SNDBUF/SO_RCVBUF ≥ 128 KiB)` to DMSRVBULK, and
+  `stm_stratumd_listen_unix` gains a `sockbuf` param the two FS
+  listeners pass (`STM_STRATUMD_FS_SOCKBUF` = 2× msize; the /ctl
+  listener stays default-class) — so BOTH the system mount and the
+  per-user home proxies negotiate 128 KiB, and the proxy's upstream
+  dial rides bulk rings automatically (a 128 KiB Tmsg forwarded
+  through its conn Spoor fits whole). The default class is
+  byte-identical for every other service (corvus, /srv/net); the
+  user-drivable exposure stays the two-point class policy ×
+  `SRV_MAX_CONNS` (≤ ~32 MiB pathological, documented). One landed
+  latent: `srvconn_client_send_frame`'s free-space bound still read
+  the old compile-time cap, so the FIRST bulk Twrite frame "never fit"
+  and `client_send_flow` EAGAIN-spun — a whole-boot wedge at fsbench;
+  fixed + pinned by the in-test big-frame regression
+  (`srvconn.bulk_ring_class`). The joey `cf3-bulk` probe now
+  round-trips 160 KiB asserting the EXACT clamp counts (first write
+  131049 / first read 131061) — the boot-fatal end-to-end proof of the
+  128 KiB negotiation.
+- **#354 (closed in the same srvconn surgery): the blocking-role park.**
+  The `reading`/`writing` single-role guards no longer refuse (-1) a
+  2nd concurrent blocking party — a contender PARKS on a per-chan
+  `role_waiters` list (the #349 stack-Rendez-per-waiter pattern) until
+  the holder releases; rendez/wrendez stay single-waiter (the audited
+  #348/#349 machinery untouched), writes stay call-atomic (the role is
+  held across the whole delivery). This retires the cross-project
+  pre-condition that stratumd's own `write_mu` is the only thing
+  keeping a threaded server's concurrent replies from EPIPE-closing
+  the mount (the #348-audit F1 latent, live-class since CF-2 made
+  stratumd threaded). The third producer of the family also goes
+  blocking: `srvconn_client_send_blocking` (the byte-mode CLIENT write
+  — the per-user proxy's upstream `write_full` treats a 0 as EPIPE),
+  with drain-wakes added to the server-side recv paths. Regressions:
+  `srvconn.role_park_second_writer` / `role_park_second_reader` /
+  `client_send_blocking_backpressure`.
 - **CF-3 C (fan-out): HOLD** — re-measure the post-A residual first; the
   measured latency tail is server-side queueing, which fan-out cannot
   help while the pool defaults to workers=1.]

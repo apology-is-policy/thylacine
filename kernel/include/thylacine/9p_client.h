@@ -62,11 +62,15 @@
 #include <thylacine/spinlock.h>
 #include <thylacine/types.h>
 
-// Inline outbound Tmsg buffer. Must hold one whole Tmsg frame (<= the
-// session's negotiated msize). The /net SrvConn session negotiates
-// SRVCONN_MSIZE (32 KiB, Weft-0), so a /net Twrite frame can be ~32 KiB
-// -- size to match. Stratum / corvus sessions negotiate smaller and use
-// only a prefix. Inline in struct p9_client -> kmalloc'd per session.
+// INLINE outbound Tmsg buffer capacity -- the DEFAULT msize class. Must
+// hold one whole Tmsg frame (<= the session's negotiated msize) for a
+// default (32 KiB) session; a session initialized with a LARGER msize
+// (CF-3 B: a DMSRVBULK service negotiates SRVCONN_BULK_MSIZE = 128 KiB)
+// spills to a heap out_buf sized to that msize at p9_client_init, so the
+// frame-build bound always matches the proposal. Static test clients +
+// every default session stay on the inline tier (no allocation); the
+// heap tier degrades BACK to inline on OOM (writes then clamp shorter --
+// a short op, never a failed init; the CF-3 A degrade discipline).
 #define P9_CLIENT_OUT_BUF_MAX  (32u * 1024u)
 
 #define P9_CLIENT_MAGIC        0x50394354u   // "P9CT" little-endian
@@ -139,7 +143,17 @@ struct p9_client {
     // build+send of one op (serialized), so the elected-reader pipeline can
     // share it across ops without per-op allocation -- the frame is copied
     // into the c2s ring by the send before c->lock is released.
-    u8                   out_buf[P9_CLIENT_OUT_BUF_MAX];
+    //
+    // Two-tier (CF-3 B): `out_buf` points at `out_buf_inline` for a
+    // default-msize session (<= P9_CLIENT_OUT_BUF_MAX; every static test
+    // client and small-frame service), or at a kmalloc'd `msize`-byte
+    // buffer for a bulk session (freed at destroy). `out_buf_cap` is the
+    // usable size -- EVERY frame build passes it as the cap (never
+    // sizeof), and the CF-3 A write clamp min(msize, out_buf_cap) keeps
+    // the two tiers correct by construction.
+    u8                   out_buf_inline[P9_CLIENT_OUT_BUF_MAX];
+    u8                  *out_buf;
+    u32                  out_buf_cap;
     size_t               recv_cap;     // transport recv-buf cap; per-rpc reply_buf size
     // Pipeline state (ARCH §21.10). inflight[tag] is the submitter's stack
     // p9_rpc for the op holding `tag`, or NULL (free / op died + unwound,

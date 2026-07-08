@@ -2734,21 +2734,25 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
     // 9P-mode; no other perm bit is meaningful for a service post.
     if (src->dc == 's' && src->aux &&
         *(const u64 *)src->aux == SRV_REGISTRY_MAGIC) {
-        if (perm & ~SYS_WALK_CREATE_DMSRVBYTE)          { spoor_clunk(src); return -1; }
+        if (perm & ~(SYS_WALK_CREATE_DMSRVBYTE |
+                     SYS_WALK_CREATE_DMSRVBULK))        { spoor_clunk(src); return -1; }
         enum srv_mode mode = (perm & SYS_WALK_CREATE_DMSRVBYTE)
                                  ? SRV_MODE_BYTE : SRV_MODE_9P;
+        bool bulk = (perm & SYS_WALK_CREATE_DMSRVBULK) != 0;   // CF-3 B ring class
         // #844: devsrv_post_listener mints a registry-lifetime KObj_Srv (not
         // tied to src); release the src borrow after it returns.
         s64 lh = (s64)devsrv_post_listener(p, src, name_scratch,
-                                           (size_t)name_len_raw, mode);
+                                           (size_t)name_len_raw, mode, bulk);
         spoor_clunk(src);
         return lh;
     }
 
-    // DMSRVBYTE is meaningful ONLY for the /srv service post above. On a
-    // regular create it must not reach a Dev's create perm (e.g. a dev9p
-    // Tlcreate), where the high bit would corrupt the wire perm -- reject it.
-    if (perm & SYS_WALK_CREATE_DMSRVBYTE)                 { spoor_clunk(src); return -1; }
+    // DMSRVBYTE / DMSRVBULK are meaningful ONLY for the /srv service post
+    // above. On a regular create they must not reach a Dev's create perm
+    // (e.g. a dev9p Tlcreate), where the high bits would corrupt the wire
+    // perm -- reject them.
+    if (perm & (SYS_WALK_CREATE_DMSRVBYTE |
+                SYS_WALK_CREATE_DMSRVBULK))               { spoor_clunk(src); return -1; }
 
     // Clone the parent, then CLONE-walk so nc carries its own fid at the
     // parent dir (a 0-component walk). create then mutates nc's fid into the

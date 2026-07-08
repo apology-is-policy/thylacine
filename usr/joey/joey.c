@@ -2129,21 +2129,27 @@ static int probe46_fstat_wronly(const char *tag, const char *dirpath,
     return 0;
 }
 
-// CF-3 A always-run regression: bulk byte-I/O through the two-tier syscall
-// bounce + uaccess_copy_in/out + the 9P client payload clamp. The 40 KiB
-// pattern crosses the EXACT boundary that produced the CF-3 bench cascade
-// (audit F3): a single t_write above the Twrite payload max (negotiated
-// msize 32 KiB -> 32745) must return a SHORT count -- pre-clamp it EIO'd
-// (the frame build failed), which killed every bulk object write. So:
-// write in a loop asserting the FIRST call moves > SYS_RW_STACK bytes but
-// less than the whole buffer (the clamp fired, the heap tier engaged);
-// read back the same way (first call > 4096); byte-verify everything, and
-// cross-check a 4 KiB t_pread (the stack tier + the positioned path see
-// the same bytes). Boot-fatal.
+// CF-3 A+B always-run regression: bulk byte-I/O through the two-tier
+// syscall bounce + uaccess_copy_in/out + the 9P client payload clamp, on
+// the BULK-negotiated FS mount (CF-3 B: stratumd posts /srv/stratum-fs
+// with the DMSRVBULK ring class, so the kernel client proposes -- and
+// stratumd's STM_9P_MSIZE_DEFAULT accepts -- a 128 KiB msize). The
+// 160 KiB pattern crosses the EXACT clamp boundary of the negotiated
+// session (the audit-F3 discipline, moved up from the CF-3 A 40 KiB /
+// 32 KiB-msize shape): the first t_write is clamped by the syscall tier
+// to SYS_RW_MAX (131072) and then by the Twrite payload bound to
+// EXACTLY 131072 - 23 = 131049 -- so asserting the exact count IS the
+// end-to-end proof that the 128 KiB msize negotiated (a fallback to the
+// old 32 KiB class would return 32745 here and fail loudly). The first
+// t_read is likewise exactly msize - 11 = 131061. Byte-verify
+// everything + a 4 KiB t_pread cross-check (stack tier + positioned
+// path). Boot-fatal.
 static int probe_cf3_bulk_io(void) {
     char nb[24];
     static const char nm[] = "cf3-bulk-probe";
-    enum { CF3_LEN = 40960 };
+    enum { CF3_LEN = 163840 };                 /* 160 KiB */
+    enum { CF3_W0  = 131049 };                 /* min(SYS_RW_MAX, msize) - 23 */
+    enum { CF3_R0  = 131061 };                 /* min(SYS_RW_MAX, msize) - 11 */
     static unsigned char pat[CF3_LEN];
     static unsigned char rdb[CF3_LEN];
     for (unsigned int i = 0; i < sizeof(pat); i++)
@@ -2173,10 +2179,13 @@ static int probe_cf3_bulk_io(void) {
             if (w <= 0) { bad = 1; break; }
             off += (unsigned long)w;
         }
-        // The first call must be a bulk SHORT write: more than the stack
-        // tier (the heap bounce engaged), less than the whole 40 KiB (the
-        // 9P payload clamp fired instead of EIO -- the audit-F3 boundary).
-        if (wn0 <= 4096 || wn0 >= (long)sizeof(pat)) bad = 1;
+        // The first call must be EXACTLY the bulk-session Twrite payload
+        // max: the syscall tier clamps 160 KiB -> SYS_RW_MAX, the 9P clamp
+        // then returns SHORT at msize - 23. The exact value pins the
+        // NEGOTIATED 128 KiB msize end to end -- a fallback to the 32 KiB
+        // class reads 32745 here; a wrong clamp EIOs (the audit-F3
+        // cascade). Boot-fatal either way.
+        if (wn0 != (long)CF3_W0) bad = 1;
     }
     (void)t_close(fd);
     long rfd = t_open(pd, nm, sizeof(nm) - 1, T_OREAD);
@@ -2189,7 +2198,7 @@ static int probe_cf3_bulk_io(void) {
             if (g <= 0) { bad = 2; break; }
             off += (unsigned long)g;
         }
-        if (got0 <= 4096) bad = 2;   // the bulk read tier must have engaged
+        if (got0 != (long)CF3_R0) bad = 2;   // the exact bulk Rread payload max
         if (!bad) {
             for (unsigned int i = 0; i < sizeof(pat); i++)
                 if (rdb[i] != pat[i]) { bad = 3; break; }
@@ -2218,7 +2227,7 @@ static int probe_cf3_bulk_io(void) {
         t_putstr("\n");
         return -1;
     }
-    t_putstr("joey: cf3-bulk OK (40 KiB round-trip; first write ");
+    t_putstr("joey: cf3-bulk OK (160 KiB round-trip on the 128 KiB-msize mount; first write ");
     t_putstr(itoa_dec(wn0, nb, sizeof(nb)));
     t_putstr(" first read ");
     t_putstr(itoa_dec(got0, nb, sizeof(nb)));
