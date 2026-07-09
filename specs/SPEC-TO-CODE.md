@@ -1498,8 +1498,8 @@ stranded-work counterexample rather than a masked latency hiccup.
 > `file:line` as each lands. The Stratum companion (`si_cvers` bump; `si_gen`
 > decoupled) landed at L1a-1 (`inode.tla`) + L1a-2 (the 9P wire, `server.c`).
 
-Status: **model LANDED (L1b), TLC-green; ATTR sub-cache LANDED (L1c);
-dentry/page OWED (L1d/L1e).** Models the per-`p9_client` Larder + the `cvers`
+Status: **model LANDED (L1b), TLC-green; ATTR sub-cache LANDED (L1c); DENTRY
+sub-cache LANDED (L1d); page OWED (L1e).** Models the per-`p9_client` Larder + the `cvers`
 close-to-open coherence: the open-time revalidation gate AND the own-write
 write-through invalidation, interleaved on the shared client (the
 invalidate-vs-serve SMP race). Proves I-38 (LARDER-DESIGN §6): a served value
@@ -1516,12 +1516,30 @@ owner/lock/key.
 
 | Spec action | Impl site |
 |---|---|
-| `Open(f)` (revalidate + populate; the `cvers` check point) | `kernel/dev9p.c::dev9p_walk_attrs` (per-component free populate, `larder_attr_install` after the walkgetattr RPC) + `dev9p_stat_native`'s miss-populate. Both ALWAYS install from the fresh RPC (revalidate-by-overwrite) — the L1c attr serve does not re-check `cvers` (that's a `Read`); the `cvers` compare becomes load-bearing at the L1d dentry-serve / L1e page-serve. The dentry serve (L1d) is where "POUNCE's `walk_attrs` carries the fresh `cvers` for free" applies. |
+| `Open(f)` (revalidate + populate; the `cvers` check point) | `kernel/dev9p.c::dev9p_walk_attrs` (per-component free populate, `larder_attr_install` after the walkgetattr RPC) + `dev9p_stat_native`'s miss-populate. Both ALWAYS install from the fresh RPC (revalidate-by-overwrite) — the L1c attr serve does not re-check `cvers` (that's a `Read`). The `cvers`-compare `Open` gate is used by the attr/page sub-caches (each validated by its OWN file's `cvers`); the **dentry** sub-cache (L1d) does NOT use it — a name-binding has no directory-content version to revalidate against (the parent `si_cvers` does not track dirent changes; L1d ground truth), so the dentry cache is the `Read`+`OwnWrite` subset. The `cvers` gate becomes load-bearing at the L1e page-serve. |
 | `Read(f)` (serve without re-check) | `kernel/dev9p.c::dev9p_stat_native` serve fast path (`larder_attr_serve` — the base X-check re-stat storm + fstat, the biggest cheap win). Page serve at `dev9p_read` is L1e. |
 | `OwnWrite(f)` (bump + write-through invalidate) | `kernel/dev9p.c` `larder_attr_invalidate` at `dev9p_write` / `dev9p_wstat_native` (file) + `dev9p_create` (parent AND the child — the created qid.path may reuse a freed ino, so its stale prior-occupant attr must drop; the create path never runs `walk_attrs`) / `dev9p_rename` (both dirs) / `dev9p_unlink` (parent). |
 | `ExternalWrite(f)` (out-of-band bump, no invalidate) | not an impl site — models an out-of-band Stratum mutation; the impl obligation is that `Open`'s revalidation catches it. |
 | `Evict(f)` (capacity/LRU drop) | `kernel/larder.c::attr_install_slot_locked` (LRU-min victim when the bounded `LARDER_ATTR_ENTRIES` array is full; I-32). |
 | `Refetch(f, fresh)` (install, evict-if-full) | `kernel/larder.c::larder_attr_install` (install `{attr, cvers}`; overwrite existing / free slot / LRU-evict). GEN-GUARDED: `larder_gen_snapshot` before the RPC, install skipped if `l->gen` changed — the impl realization of the spec's ATOMIC read-and-install (closes the populate-after-invalidate resurrection). |
+
+### Action → impl mapping (dentry sub-cache; L1d LANDED)
+
+The dentry sub-cache is the `Read`+`OwnWrite` SUBSET of this model (NO `Open`/`cvers`
+gate — a `(parent,name)→child` binding has no directory-content version to
+revalidate against; the parent `si_cvers` does not track a dirent change, verified
+`stratum/src/fs/fs.c`, the L1d ground-truth correction). The "file" of the model is
+the parent directory; a valid dentry is always current because own-writes
+invalidate. This is exactly `fs_cache.cfg`'s single-writer regime restricted to
+`{Read, OwnWrite, Evict}`.
+
+| Spec action | Impl site |
+|---|---|
+| `Read(f)` (serve without re-check) | `kernel/larder.c::larder_walk_serve` (called at `kernel/dev9p.c::dev9p_walk_attrs` before the RPC): chains the dentry+attr caches under ONE lock hold. Skips the `Twalkgetattr` for a full positive run in the query form (`nc==NULL`) or a cached miss (either form). |
+| `OwnWrite(f)` (write-through invalidate) | `kernel/larder.c::larder_dentry_invalidate_parent` (drop every dentry whose parent is the mutated dir + bump gen) at `dev9p_create` / `dev9p_rename` (both dirs) / `dev9p_unlink`. This is the SOLE dentry coherence mechanism. |
+| `Refetch(f, fresh)` (install) | `kernel/larder.c::larder_dentry_install` (positive per walked component + negative on a partial/first-component miss) at `dev9p_walk_attrs`. GEN-GUARDED by the same `wga_seq0` snapshot as the attr populate. |
+| `Evict(f)` (capacity/LRU drop) | `kernel/larder.c::dentry_install_slot_locked` (LRU-min victim when the bounded `LARDER_DENTRY_ENTRIES` array is full; I-32). |
+| `Open(f)` / `ExternalWrite(f)` | NOT used by the dentry sub-cache (no `cvers` gate). An out-of-band dirent change is bounded by LRU / the next own-sync mutation, not a revalidation window (the documented dentry external-writer seam, LARDER-DESIGN §11). |
 
 ### Invariant / property → obligation
 

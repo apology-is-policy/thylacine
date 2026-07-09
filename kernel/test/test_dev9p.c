@@ -660,6 +660,42 @@ void test_dev9p_create_invalidates_reused_child(void) {
     teardown(root);
 }
 
+// L1d: dev9p_create must invalidate the PARENT's cached dentries (own-write) so a
+// stale NEGATIVE entry for the created name cannot serve ENOENT for the new file.
+// The parent's si_cvers does NOT bump on a create (Stratum stores dirents in a
+// separate index -- verified src/fs/fs.c), so own-write invalidation is the SOLE
+// coherence mechanism (no parent-cvers gate). Non-vacuous: fails if the
+// dev9p_create -> larder_dentry_invalidate_parent hook is missing.
+void test_dev9p_create_invalidates_negative_dentry(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    struct Spoor *nc = spoor_clone(root);
+    TEST_ASSERT(nc != NULL, "clone target");
+    struct Walkqid *w = dev9p.walk(root, nc, NULL, 0);
+    TEST_ASSERT(w != NULL, "clone-walk");
+    walkqid_free(w);
+
+    // dev9p_create captures parent_path = c->qid.path pre-transition; nc inherited
+    // root's qid via the 0-element clone-walk, so this is the parent dir.
+    u64 parent = nc->qid.path;
+    larder_dentry_install(&g_client.larder, larder_gen_snapshot(&g_client.larder),
+                          parent, "newfile", 7, 0, /*negative=*/true);
+    const char *nm[] = { "newfile" };
+    size_t      ln[] = { 7 };
+    struct t_stat sts[2];
+    int nres; bool miss;
+    TEST_ASSERT(larder_walk_serve(&g_client.larder, parent, nm, ln, 1, sts, &nres, &miss) &&
+                miss, "negative dentry serves the miss pre-create");
+
+    struct Spoor *opened = dev9p.create(nc, "newfile", 1 /*OWRITE*/, 0644u, 1000u);
+    TEST_ASSERT(opened == nc, "create returns the Spoor");
+    TEST_ASSERT(!larder_walk_serve(&g_client.larder, parent, nm, ln, 1, sts, &nres, &miss),
+                "create invalidates the stale NEGATIVE dentry (no ENOENT for the new file)");
+
+    spoor_clunk(nc);
+    teardown(root);
+}
+
 // dev9p.create directory path: perm & DMDIR -> Tmkdir, then walk+lopen the new
 // dir so the returned Spoor is opened OREAD on it.
 void test_dev9p_create_dir(void) {
@@ -1157,10 +1193,18 @@ void test_dev9p_walk_attrs(void) {
     const char  *names[2] = { "dirA", "fileB" };
     const size_t lens[2]  = { 4, 5 };
 
+    // These sub-tests flip the wire result for the SAME path (dirA/fileB) by
+    // toggling g_dev9p_wga_partial -- a non-physical change in the single-writer
+    // model (a name cannot appear/vanish without a create/unlink that would
+    // invalidate the Larder). Reset the L1d dentry/attr cache before each so this
+    // WIRE-mechanics test exercises the wire fresh, not a stale served entry.
+    struct larder *lard = &dev9p_priv_of(root)->client->larder;
+
     // BIND form, FULL walk: nc transitions (own fid, leaf qid), and the
     // fused attrs map exactly as dev9p_stat_native maps an Rgetattr
     // (mode/uid/gid under the valid mask; size; qid).
     {
+        larder_init(lard);
         g_dev9p_wga_partial = false;
         struct Spoor *nc = spoor_clone(root);
         TEST_ASSERT(nc != NULL, "clone");
@@ -1184,6 +1228,7 @@ void test_dev9p_walk_attrs(void) {
     // layer leaves new_fid unbound and nc must be UNTOUCHED (still sharing
     // the root's priv via the shallow clone).
     {
+        larder_init(lard);
         g_dev9p_wga_partial = true;
         struct Spoor *nc = spoor_clone(root);
         TEST_ASSERT(nc != NULL, "clone");
@@ -1204,6 +1249,8 @@ void test_dev9p_walk_attrs(void) {
     // QUERY form (nc == NULL -> newfid = P9_NOFID): attrs only; no fid was
     // consumed on either end (the wire op carries NOFID; nothing to clunk).
     {
+        larder_init(lard);
+        g_dev9p_wga_partial = false;
         struct t_stat sts[2];
         struct Walkqid *w = dev9p.walk_attrs(root, NULL, names, lens, 2, sts);
         TEST_ASSERT(w != NULL, "query walk");

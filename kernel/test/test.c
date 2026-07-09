@@ -901,6 +901,16 @@ void test_larder_gen_guard_skips_raced_install(void);
 void test_larder_root_qid_zero(void);
 void test_larder_overwrite_wins(void);
 void test_larder_eviction_bounded(void);
+void test_larder_dentry_serve(void);
+void test_larder_dentry_serve_miss(void);
+void test_larder_dentry_negative(void);
+void test_larder_dentry_multi_hop(void);
+void test_larder_dentry_partial_chain_bails(void);
+void test_larder_dentry_attr_miss_bails(void);
+void test_larder_dentry_invalidate_parent(void);
+void test_larder_dentry_gen_guard(void);
+void test_larder_dentry_name_too_long(void);
+void test_larder_dentry_bounded(void);
 
 void test_dev9p_registered(void);
 void test_dev9p_attach_client_root_spoor(void);
@@ -914,6 +924,7 @@ void test_dev9p_close_clunks_owned_fid(void);
 void test_dev9p_close_does_not_clunk_root_fid(void);
 void test_dev9p_create_file(void);
 void test_dev9p_create_invalidates_reused_child(void);
+void test_dev9p_create_invalidates_negative_dentry(void);
 void test_dev9p_create_dir(void);
 void test_dev9p_fsync(void);
 void test_dev9p_readdir(void);
@@ -2134,6 +2145,16 @@ struct test_case g_tests[] = {
     { "larder.root_qid_zero",          test_larder_root_qid_zero,          false, NULL },
     { "larder.overwrite_wins",         test_larder_overwrite_wins,         false, NULL },
     { "larder.eviction_bounded",       test_larder_eviction_bounded,       false, NULL },
+    { "larder.dentry_serve",           test_larder_dentry_serve,           false, NULL },
+    { "larder.dentry_serve_miss",      test_larder_dentry_serve_miss,      false, NULL },
+    { "larder.dentry_negative",        test_larder_dentry_negative,        false, NULL },
+    { "larder.dentry_multi_hop",       test_larder_dentry_multi_hop,       false, NULL },
+    { "larder.dentry_partial_chain_bails", test_larder_dentry_partial_chain_bails, false, NULL },
+    { "larder.dentry_attr_miss_bails", test_larder_dentry_attr_miss_bails, false, NULL },
+    { "larder.dentry_invalidate_parent", test_larder_dentry_invalidate_parent, false, NULL },
+    { "larder.dentry_gen_guard",       test_larder_dentry_gen_guard,       false, NULL },
+    { "larder.dentry_name_too_long",   test_larder_dentry_name_too_long,   false, NULL },
+    { "larder.dentry_bounded",         test_larder_dentry_bounded,         false, NULL },
     { "9p_client.weftio",              test_9p_client_weftio,              false, NULL },
     { "9p_client.mkdir",               test_9p_client_mkdir,               false, NULL },
     { "9p_client.unlinkat",            test_9p_client_unlinkat,            false, NULL },
@@ -2240,6 +2261,9 @@ struct test_case g_tests[] = {
     { "dev9p.create_file",             test_dev9p_create_file,             false, NULL },
     { "dev9p.create_invalidates_reused_child",
                                        test_dev9p_create_invalidates_reused_child,
+                                                                           false, NULL },
+    { "dev9p.create_invalidates_negative_dentry",
+                                       test_dev9p_create_invalidates_negative_dentry,
                                                                            false, NULL },
     { "dev9p.create_dir",              test_dev9p_create_dir,              false, NULL },
     { "dev9p.fsync",                   test_dev9p_fsync,                   false, NULL },

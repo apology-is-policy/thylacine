@@ -14,8 +14,11 @@ L1a-2 (surface `si_cvers` as the 9P `qid.version`, decoupled from `si_gen`;
 @stratum `3288c02`+`5763876`, audit-clean), **L1b** (`specs/fs_cache.tla` — the
 close-to-open coherence model, TLC-green with a 5-cfg matrix; §8), **L1c** (the
 Larder substrate + attr sub-cache — `kernel/larder.{c,h}` + the `dev9p.c`
-serve/populate/invalidate hooks; §3/§9, `docs/reference/132-larder.md`). **Next:**
-L1d (dentry), L1e (page), L1f (audit + SMP gate + gofmt re-measure). See §9.
+serve/populate/invalidate hooks; §3/§9, `docs/reference/132-larder.md`), **L1d**
+(the dentry sub-cache incl. negative — `larder_walk_serve` / `larder_dentry_*` +
+the `dev9p_walk_attrs` serve/populate + create/rename/unlink invalidate; coherence
+is **own-write invalidation, NOT a cvers gate** — the ground-truth correction, §4).
+**Next:** L1e (page), L1f (audit + SMP gate + gofmt re-measure). See §9.
 
 **Naming (proposal — open to your preference).** A thylacine is a pursuit/ambush
 predator; a **larder** is a predator's store of provisions it returns to instead
@@ -408,8 +411,20 @@ on the real `si_cvers`).
   `stalk-2` delete+recreate+create-in-it E2E). Tests: `larder.*` (serve / miss /
   invalidate / gen-guard / root-qid-0 / overwrite / eviction-bounded) +
   `dev9p.create_invalidates_reused_child`; 1055/1055 + boot OK.
-- **L1d — the dentry cache** (incl. negative). Serve/populate at
-  `dev9p_walk_attrs`/`walk`; invalidate at create/rename/unlink.
+- **L1d — the dentry cache** (incl. negative). **LANDED.** `larder_walk_serve`
+  (serve a whole run from the dentry+attr caches, under one lock hold) +
+  `larder_dentry_install` (positive per walked component + negative on a miss,
+  gen-guarded) + `larder_dentry_invalidate_parent`; hooked at `dev9p_walk_attrs`
+  (serve before the RPC — full positive in the query form + any-form negative;
+  populate after) and `dev9p_create` / `rename` / `unlink` (invalidate the
+  parent). **Coherence is own-write invalidation, NOT a cvers gate** — the L1d
+  ground-truth correction (§4): Stratum's parent `si_cvers` does not bump on a
+  child create/unlink, so a cvers gate would falsely match a stale negative; the
+  dentry cache is `fs_cache.tla`'s `Read`+`OwnWrite` subset (the attr discipline
+  keyed by `(parent,name)`). Tests: `larder.dentry_*` (10, incl. the
+  `dentry_invalidate_parent` ground-truth core) + `dev9p.create_invalidates_negative_dentry`
+  (non-vacuous hook regression); `dev9p.walk_attrs` resets the cache between its
+  wire sub-tests. 1066/1066 + boot OK + stalk-2 E2E.
 - **L1e — the page cache.** The bounded page pool, LRU, serve/populate at
   `dev9p_read`; invalidate at `dev9p_write`.
 - **L1f — the focused audit + the SMP gate + the bench.** The adversarial
@@ -449,6 +464,24 @@ proven-in-principle to delivered.
   serve-your-own-FS-to-one-guest case). A concurrent *external* writer (out-of-
   band Stratum mutation) is bounded by the revalidation window, not instantly
   coherent — acceptable at v1.0, tightenable via the writeback modes.
+- **The Loom async path bypasses the Larder (L1c/L1d seam).** The Larder is
+  populated + invalidated ONLY on the SYNCHRONOUS dev9p path (`dev9p_stat_native`
+  / `dev9p_walk_attrs` populate; `dev9p_write` / `dev9p_wstat_native` / create /
+  rename / unlink invalidate). The Loom async engine (`kernel/loom.c` —
+  `LOOM_OP_WRITE` / `MKNOD` / `SYMLINK` / `LINK` / `UNLINKAT` / `RENAMEAT`) drives
+  `p9_client_*` directly and touches neither sub-cache, so a client that mixes
+  Loom FS *mutations* with synchronous *resolution* on the SAME mount is, from
+  the Larder's view, a second (out-of-band) writer: a Loom write can leave a
+  stale attr, and a Loom symlink/mknod/link/unlinkat/rename can leave a stale
+  dentry (a negative entry a Loom create should have filled, or a positive a Loom
+  unlink should have dropped), bounded by the next own-*sync* mutation of that
+  file/dir or by LRU eviction. **Unreachable at v1.0** — no consumer mixes them
+  (the go-build is pure synchronous pouch/musl; the Loom consumers do
+  network / FSYNC / NOP, not FS-dirent mutations on the shared Stratum client).
+  The v1.x fix invalidates the Larder from the Loom completion path (the
+  completion carries the op's fid → the affected dir/file qid.path → the same
+  `larder_*_invalidate` calls). Tracked; not fixed at v1.0 (no consumer makes it
+  load-bearing, and the completion-side qid.path plumbing is non-trivial).
 - **Dentry external-writer window (L1d).** Unlike attr/page entries (each
   revalidated at open by its own file's `cvers`), a **dentry** has no
   content-version to revalidate against: Stratum surfaces no directory-content

@@ -74,21 +74,51 @@
 // 32 KiB out_buf, and there are a handful of live clients). Tunable.
 #define LARDER_ATTR_ENTRIES 256u
 
+// Dentry-cache capacity + the inline component-name bound. The hot re-resolution
+// set (root -> ~7 top-level dirs re-walked thousands of times) + the failed-lookup
+// storm (import/search-path negative probes) both fit comfortably; 256 mirrors the
+// attr cache. NAME_MAX 88 covers a go-cache content-hash file name (a 64-hex hash +
+// suffix ~66 B); a longer component is simply not cached (the serve/populate
+// fail-safe to the RPC -- correctness is unaffected, only that walk isn't elided).
+#define LARDER_DENTRY_ENTRIES  256u
+#define LARDER_DENTRY_NAME_MAX 88u
+
 struct larder_attr_ent {
     u64            qid_path;   // key. root's qid.path is 0x0, so `valid` (not
                                //   path==0) marks an empty slot.
     u32            cvers;      // content-version (qid.version == si_cvers) at fetch;
-                               //   consumed by the L1d/L1e revalidation.
+                               //   consumed by the L1e page revalidation.
     bool           valid;      // slot occupied
     u64            lru;        // last-access sequence (LRU eviction)
     struct t_stat  attr;       // cached metadata (mode/uid/gid/size/times/nlink/...)
 };
 
+// A cached name->child binding (the Plan 9 dentry). Keyed by (parent_qid_path,
+// name[0..name_len)). A NEGATIVE entry caches "name does not exist in parent"
+// (the failed-lookup-storm win). NO content-version field: a name-binding is a
+// PARENT-dirent fact, and Stratum surfaces no directory-content version that
+// tracks a dirent change (a child create/unlink does not bump the parent's
+// si_cvers -- verified src/fs/fs.c; only rename stamps the parent mtime), so the
+// dentry cache is NOT cvers-gated -- its sole coherence is own-write invalidation
+// (larder_dentry_invalidate_parent on a create/rename/unlink; LARDER-DESIGN §4).
+// A positive entry's reply attr is served from the attr sub-cache (the child's
+// qid.path keys it), so the dentry stores only the linkage, not the attr.
+struct larder_dentry_ent {
+    u64  parent_qid_path;   // key part 1
+    u64  child_qid_path;    // resolved child (positive only; 0 when negative)
+    u32  name_len;          // key part 2: name[0..name_len)
+    bool valid;             // slot occupied
+    bool negative;          // true: (parent,name) -> ENOENT (no child)
+    u64  lru;               // last-access sequence (LRU eviction)
+    char name[LARDER_DENTRY_NAME_MAX];   // the component (NOT NUL-terminated)
+};
+
 struct larder {
-    spin_lock_t             lock;       // dedicated near-leaf; never held across an RPC
-    u64                     lru_clock;  // monotonic; stamps ent->lru on access
-    u64                     gen;        // monotonic invalidation sequence (populate guard)
-    struct larder_attr_ent  attr[LARDER_ATTR_ENTRIES];
+    spin_lock_t               lock;       // dedicated near-leaf; never held across an RPC
+    u64                       lru_clock;  // monotonic; stamps ent->lru on access
+    u64                       gen;        // monotonic invalidation sequence (populate guard)
+    struct larder_attr_ent    attr[LARDER_ATTR_ENTRIES];
+    struct larder_dentry_ent  dentry[LARDER_DENTRY_ENTRIES];
     // Diagnostics (hit-rate measurement for the L1f bench; not load-bearing).
     u64 attr_hits;
     u64 attr_misses;
@@ -96,6 +126,13 @@ struct larder {
     u64 attr_install_skips;   // gen-guard skips (populate raced an invalidate)
     u64 attr_invalidations;
     u64 attr_evictions;
+    u64 dentry_hits;          // positive dentry serves
+    u64 dentry_neg_hits;      // negative dentry serves (walk misses served RPC-free)
+    u64 dentry_misses;
+    u64 dentry_installs;
+    u64 dentry_install_skips; // gen-guard skips
+    u64 dentry_invalidations; // entries dropped by invalidate-parent
+    u64 dentry_evictions;
 };
 
 // Initialize an embedded Larder (memset-equivalent + lock init). No teardown --
@@ -125,5 +162,44 @@ void larder_attr_install(struct larder *l, u64 seq0, u64 qid_path,
 // (always -- the file was mutated even if it was not cached, so a concurrent
 // populate that fetched the pre-mutation value must be skipped).
 void larder_attr_invalidate(struct larder *l, u64 qid_path);
+
+// -- L1d: the dentry sub-cache --------------------------------------------------
+
+// Serve a whole resolver run (fs_cache.tla Read) from the dentry + attr
+// sub-caches WITHOUT an RPC. Chains (base_qid_path, names[0]) -> child0,
+// (child0, names[1]) -> child1, ... under ONE lock hold (an atomic snapshot -- a
+// concurrent own-write invalidate precedes or follows the whole serve, never
+// tears it). Each POSITIVE hop's reply attr is served from the attr sub-cache
+// into sts[i] (which carries the child's qid.path/vers/type). Outcomes:
+//   - full positive run: returns true, *nresolved = nname, *is_miss = false,
+//     sts[0..nname) filled.
+//   - a NEGATIVE dentry at hop i: returns true, *nresolved = i, *is_miss = true,
+//     sts[0..i) filled (the walk misses at i; the caller returns a partial walk).
+//   - a dentry MISS, an attr MISS mid-chain, or a too-long component name:
+//     returns false (the caller falls through to the RPC).
+// The CALLER decides whether to skip the RPC: a full positive run only in the
+// QUERY form (no server fid to bind); a cached miss in either form (a miss binds
+// nothing). `sts` is the caller's DEV_WALK_ATTRS_MAX array; a false return may
+// leave it partially written (the RPC overwrites it). NULL Larder -> false.
+bool larder_walk_serve(struct larder *l, u64 base_qid_path,
+                       const char *const *names, const size_t *name_lens,
+                       int nname, struct t_stat *sts,
+                       int *nresolved, bool *is_miss);
+
+// Populate a dentry (Read/OwnWrite install). Install (parent_qid_path, name) ->
+// child_qid_path (negative == false) or -> ENOENT (negative == true, child
+// ignored) IFF `l->gen == seq0` (no invalidate raced the RPC since the snapshot).
+// A name longer than LARDER_DENTRY_NAME_MAX is not cached (a no-op). Overwrite an
+// existing (parent,name) / use a free slot / evict the LRU entry when full.
+void larder_dentry_install(struct larder *l, u64 seq0, u64 parent_qid_path,
+                           const char *name, size_t name_len,
+                           u64 child_qid_path, bool negative);
+
+// Invalidate (OwnWrite). Drop EVERY cached dentry whose parent is
+// `parent_qid_path` (a create/rename/unlink changed this directory's dirent set),
+// and bump gen (always -- a concurrent populate that fetched the pre-mutation
+// listing must be skipped). This is the dentry cache's SOLE coherence mechanism
+// (there is no parent-cvers gate -- LARDER-DESIGN §4).
+void larder_dentry_invalidate_parent(struct larder *l, u64 parent_qid_path);
 
 #endif // THYLACINE_LARDER_H

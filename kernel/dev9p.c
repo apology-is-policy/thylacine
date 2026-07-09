@@ -373,6 +373,38 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
     if (src_priv->client->wga_unsupported)
         return DEV_WALK_ATTRS_UNSUPPORTED;
 
+    // L1d dentry serve (fs_cache.tla Read): resolve the whole run from the
+    // dentry + attr sub-caches, skipping the Twalkgetattr. A FULL positive run
+    // serves ONLY in the query form (nc == NULL -- there is no server fid to
+    // bind, so no RPC is needed); a cached MISS (negative dentry) serves in
+    // either form (a miss binds nothing). A bind-form full walk still RPCs (the
+    // server must bind the fid) but re-populates below.
+    {
+        int  nres    = 0;
+        bool is_miss = false;
+        if (larder_walk_serve(&src_priv->client->larder, c->qid.path,
+                              (const char *const *)name, name_lens, nname, sts,
+                              &nres, &is_miss)) {
+            bool full = (!is_miss && nres == nname);
+            if (is_miss || (full && nc == NULL)) {
+                struct Walkqid *sw = walkqid_alloc(nname);
+                if (sw) {
+                    sw->nqid = nres;
+                    for (int i = 0; i < nres; i++) {
+                        sw->qid[i].path   = sts[i].qid_path;
+                        sw->qid[i].vers   = sts[i].qid_vers;
+                        sw->qid[i].type   = sts[i].qid_type;
+                        sw->qid[i].pad[0] = sw->qid[i].pad[1] = sw->qid[i].pad[2] = 0;
+                    }
+                    sw->spoor = NULL;   // query form / miss: nothing bound
+                    return sw;
+                }
+                // walkqid_alloc OOM -> fall through to the RPC (fail-safe).
+            }
+            // full positive in BIND form -> must RPC to bind the fid.
+        }
+    }
+
     // Carrier first (the F3 resource-order discipline shared with dev9p_walk).
     struct Walkqid *w = walkqid_alloc(nname);
     if (!w) return NULL;
@@ -421,6 +453,14 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
         return DEV_WALK_ATTRS_UNSUPPORTED;
     }
     if (rc != 0 || nwqid > (u16)nname) {
+        // L1d negative populate: a definitive first-component miss (Rlerror
+        // ENOENT -- name[0] does not exist in c) is cacheable so a repeated
+        // failed lookup serves RPC-free. Only for -T_E_NOENT (a clean "no such
+        // name"); a transport/other error caches nothing. Gen-guarded.
+        if (rc == -T_E_NOENT)
+            larder_dentry_install(&src_priv->client->larder, wga_seq0,
+                                  c->qid.path, name[0], name_lens[0], 0,
+                                  /*negative=*/true);
         // Rlerror (miss at the first component / server error) or a
         // malformed over-count. Nothing was bound (the session layer binds
         // new_fid only on a FULL walk); nc untouched.
@@ -430,6 +470,8 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
     }
 
     w->nqid = (int)nwqid;
+    // The parent of component i: c for i==0, else the previous walked component.
+    u64 prev_path = c->qid.path;
     for (int i = 0; i < w->nqid; i++) {
         w->qid[i].path   = qids[i].path;
         w->qid[i].vers   = qids[i].version;
@@ -442,8 +484,24 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
         // -- the L1a-2 audit-F1 rule; LARDER-DESIGN section 3.2).
         larder_attr_install(&src_priv->client->larder, wga_seq0,
                             w->qid[i].path, w->qid[i].vers, &sts[i]);
+        // L1d populate: install the POSITIVE dentry (prev_path, name[i]) ->
+        // qids[i].path. Same gen guard as the attr install (skipped if a
+        // concurrent create/rename/unlink bumped gen during the RPC).
+        larder_dentry_install(&src_priv->client->larder, wga_seq0, prev_path,
+                              name[i], name_lens[i], w->qid[i].path,
+                              /*negative=*/false);
+        prev_path = w->qid[i].path;
     }
     kfree(attrs);
+
+    // L1d negative populate: a PARTIAL walk (nwqid < nname, rc == 0) missed at
+    // component nwqid -- name[nwqid] does not exist in prev_path (the last walked
+    // component, or c for nwqid == 0). Cache the negative so the failed-lookup
+    // storm is served RPC-free. (A first-component Rlerror ENOENT is cached at
+    // the rc handling above.)
+    if ((int)nwqid < nname)
+        larder_dentry_install(&src_priv->client->larder, wga_seq0, prev_path,
+                              name[nwqid], name_lens[nwqid], 0, /*negative=*/true);
 
     if (nc && w->nqid == nname) {
         // FULL walk: new_fid is bound server-side; install it into nc (the
@@ -584,6 +642,10 @@ static struct Spoor *dev9p_create(struct Spoor *c, const char *name,
     struct larder *l = &p->client->larder;
     larder_attr_invalidate(l, parent_path);
     larder_attr_invalidate(l, c->qid.path);
+    // L1d invalidate (fs_cache.tla OwnWrite): the create added a name to the
+    // parent's dirent set -- drop the parent's cached dentries so a stale
+    // NEGATIVE entry (parent_path, name) cannot serve ENOENT for the new file.
+    larder_dentry_invalidate_parent(l, parent_path);
     return c;
 }
 
@@ -825,6 +887,11 @@ static int dev9p_rename(struct Spoor *olddir, const char *oldname,
     struct larder *l = &od->client->larder;
     larder_attr_invalidate(l, olddir->qid.path);
     larder_attr_invalidate(l, newdir->qid.path);
+    // L1d invalidate: the rename removed oldname from olddir + added newname to
+    // newdir -- drop BOTH dirs' cached dentries (a same-dir rename drops it once
+    // effectively; the second scan is a benign no-op).
+    larder_dentry_invalidate_parent(l, olddir->qid.path);
+    larder_dentry_invalidate_parent(l, newdir->qid.path);
     return 0;
 }
 
@@ -845,6 +912,10 @@ static int dev9p_unlink(struct Spoor *parent, const char *name, u32 flags) {
     // is left; an ino-reuse serve is caught by the gen guard + walk-overwrite,
     // and mode is unchanged by unlink (LARDER-DESIGN section 11).
     larder_attr_invalidate(&p->client->larder, parent->qid.path);
+    // L1d invalidate: unlink removed a name from the parent's dirent set -- drop
+    // the parent's cached dentries so a stale POSITIVE entry (parent, name) ->
+    // the now-removed child cannot be served.
+    larder_dentry_invalidate_parent(&p->client->larder, parent->qid.path);
     return 0;
 }
 
