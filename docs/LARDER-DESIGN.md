@@ -1,12 +1,20 @@
 # LARDER — the guest-side FS cache (the 9P metadata + data round-trip fix)
 
-Status: **DESIGN (scripture; no code)**. The measured top lever of the on-device
-`go build` mission (`docs/project`-adjacent register + the FS-perf deep dive,
-2026-07-09). Resolves the forks by user vote (2026-07-09): the coherence key is
-a true Stratum **content-version** (`si_cvers`, surfaced as `qid.version`); the
-first arc lands the **full** cache (attr + dentry + data); **spec-first is
-re-enabled** for the coherence race. This document is binding once committed;
-implementation lands against it (scripture-before-code).
+Status: **BUILDING** — the Stratum content-version (`si_cvers`) foundation and
+the coherence spec are landed; the guest Larder impl is next. The measured top
+lever of the on-device `go build` mission (the FS-perf deep dive, 2026-07-09).
+Resolves the forks by user vote (2026-07-09): the coherence key is a true Stratum
+**content-version** (`si_cvers`, surfaced as `qid.version`); the first arc lands
+the **full** cache (attr + dentry + data); **spec-first is re-enabled** for the
+coherence race. This document is binding; implementation lands against it
+(scripture-before-code).
+
+**Landed:** L1a-1 (`si_cvers` inode primitive + `inode.tla`, @stratum `f4fbdf4`),
+L1a-2 (surface `si_cvers` as the 9P `qid.version`, decoupled from `si_gen`;
+@stratum `3288c02`+`5763876`, audit-clean), **L1b** (`specs/fs_cache.tla` — the
+close-to-open coherence model, TLC-green with a 5-cfg matrix; §8). **Next:** L1c
+(the Larder substrate + attr cache), L1d (dentry), L1e (page), L1f (audit + SMP
+gate + gofmt re-measure). See §9.
 
 **Naming (proposal — open to your preference).** A thylacine is a pursuit/ambush
 predator; a **larder** is a predator's store of provisions it returns to instead
@@ -121,6 +129,14 @@ Three sub-caches share the owner + key:
    without a byte crossing the wire. Invalidated on create/rename/unlink in the
    parent (see §4). A build's walks share enormous prefix (11 distinct first-hops
    warm), so the dentry cache serves far more than the run-memo floor.
+   **Populate source (load-bearing coherence rule):** a dentry entry is installed
+   ONLY from a `walk_attrs`/`getattr` reply, whose `qid.version` is the true
+   content-version `si_cvers` (L1a-2). The Larder is **never** populated from a
+   `readdir` qid — Rreaddir's `qid.version` is a link-time `si_gen` snapshot
+   stored in the dirent record, not `si_cvers`, so a readdir-sourced version
+   would read backwards against a getattr-sourced one for the same inode (the
+   L1a-2 audit F1). v1.0 does not cache directory listings at all (§11); this
+   rule is the guest-side realization of that.
 
 3. **Page cache** — `(qid.path, page_index) → { bytes, cvers }`. Serves
    `dev9p_read`. The biggest cold win (83.9% redundant — cross-package
@@ -274,14 +290,35 @@ Spec-first is re-enabled for the Larder (user-voted 2026-07-09) — the coherenc
 invalidation race is SMP-race-bearing, exactly the class the ASID / death-wake /
 allowance re-enable precedents cover. The model comes BEFORE the impl:
 
-- **`specs/fs_cache.tla`** (Thylacine side): model the Larder + the `cvers`
-  coherence — serve, populate, own-write-invalidate, close-to-open revalidate,
-  and the concurrent invalidate-vs-read on the shared client. Clean cfg
-  TLC-green under the safety invariants (**no wrong read** = a served value
-  equals the current content; **no stale-past-revalidation**; **bounded**) + a
-  **liveness** witness (a fresh write is eventually visible), plus a **buggy
-  cfg** = the stale-serve counterexample (serve-without-`cvers`-check → a wrong
-  read). Written + green before the impl.
+- **`specs/fs_cache.tla`** (Thylacine side) — **LANDED (L1b), TLC-green.** Models
+  the Larder + the `cvers` coherence: `Open` (the close-to-open revalidation +
+  populate), `Read` (serve without re-check), `OwnWrite` (write-through
+  invalidate), `ExternalWrite` (the out-of-band writer — the coherence hazard),
+  `Evict` (the bound), interleaved on the shared client (TLC explores the
+  invalidate-vs-serve race). The as-built cfg matrix:
+  - `fs_cache.cfg` — single-writer, both bugs off: **NoWrongRead** is ABSOLUTE
+    (own-writes invalidate → a valid entry is always fresh → a served value
+    never lags the current content), plus **NoStalePastRevalidation**,
+    **Bounded**, **CacheNeverAhead**. 72 distinct states, green.
+  - `fs_cache_external.cfg` — the out-of-band writer exercises the open gate:
+    **NoStalePastRevalidation** holds (the revalidation always catches the
+    mismatch, bounding staleness to one episode). NoWrongRead is *not* checked
+    here — an external write within an open episode is served stale until the
+    next open (the accepted §4/§11 window). Green.
+  - `fs_cache_liveness.cfg` — **WriteEventuallyVisible** (a fresh write is
+    eventually served, via the revalidation), under WF(Open)+WF(Evict). Green,
+    non-vacuous (the external writer makes staleness reachable).
+  - `fs_cache_buggy_stale_serve.cfg` — the serve-without-`cvers`-check bug: `Open`
+    keeps a stale entry validated → a minimal 4-state **NoStalePastRevalidation**
+    counterexample.
+  - `fs_cache_buggy_no_invalidate.cfg` — the own-write-not-invalidated bug: a read
+    serves the guest's own stale write → a minimal 4-state **NoWrongRead**
+    counterexample.
+
+  The model pins two distinct disciplines with distinct bugs: the *open-time
+  revalidation gate* (compare `cvers` before trusting an entry) AND the
+  *own-write write-through invalidation*. Both are required; the two buggy cfgs
+  show removing either reaches a wrong read.
 - **`inode.tla` extension** (Stratum side): model "content mutation bumps
   `si_cvers`; `si_gen` unchanged" + a buggy cfg (bump `si_gen` on write →
   spurious `ESTALE` of a live fid). The companion the R94 caveat named.
@@ -349,7 +386,21 @@ proven-in-principle to delivered.
   band Stratum mutation) is bounded by the revalidation window, not instantly
   coherent — acceptable at v1.0, tightenable via the writeback modes.
 - **Readdir (directory-content) caching.** v1.0 caches attrs/dentries/pages; a
-  directory-listing cache is a candidate v1.x addition.
+  directory-listing cache is a candidate v1.x addition. Consequently the L1a-2
+  seam — Rreaddir's `qid.version` stays a link-time `si_gen` snapshot (the dirent
+  record stores no content-version) rather than `si_cvers` — is **closed on the
+  guest side, not the server side**: the Larder never populates from a readdir
+  qid (§3.2), so a readdir version can never read backwards against a getattr
+  `si_cvers`. This is the ground-truth-corrected disposition of the L1a-2 audit
+  F1 (the audit's two suggested server-side fixes both fail on ground truth: the
+  dirent stores a *link-time snapshot*, so carrying `si_cvers` in the dirent
+  record is BOTH an on-disk format break AND semantically stale — the snapshot
+  never tracks the child's later content writes — while a per-child stat in
+  `h_readdir` is a perf regression on the go-build readdir path, which is 30%+ of
+  the op mix). The correct v1.x readdir-listing cache therefore needs a per-child
+  content-version *revalidation* mechanism (e.g. a batched getattr / POUNCE over
+  the listed children at open), designed with the listing cache itself — not a
+  dirent-format snapshot.
 
 ---
 
@@ -360,4 +411,6 @@ proven-in-principle to delivered.
   LWN 1060656); virtio-fs/DAX design; io_uring (Axboe).
 - The built lower levers: `docs/POUNCE-DESIGN.md` (fusion), `docs/LOOM.md`
   (pipelining), `docs/NET-THROUGHPUT.md` (Weft/DAX).
+- The specs: `specs/fs_cache.tla` (the guest Larder coherence model, L1b) +
+  the Stratum `inode.tla` `si_cvers`/`ContentMutate` extension (L1a-1).
 - ARCH §28 I-38 (the invariant) + §25.4 (the audit-trigger row).

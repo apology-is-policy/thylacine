@@ -1487,3 +1487,67 @@ regression). See `docs/TICKLESS-IDLE.md` §9 (TI-4) + ARCH §8.6 / §8.10 / §25
 The 100 ms backstop (defense-in-depth vs a dropped kick) is ORTHOGONAL and
 deliberately unmodeled (as in `sched_tickless`), so `buggy_nokick` is a clean
 stranded-work counterexample rather than a masked latency hiccup.
+
+---
+
+## fs_cache.tla — L1b (the guest-side Larder cache; close-to-open content-version coherence; spec-first re-enabled, model-first)
+
+> **Model-first (2026-07-09).** The spec is written + TLC-green BEFORE the guest
+> Larder impl (L1c-e). This section maps each action / invariant to its INTENDED
+> impl site; the sites are OWED at L1c-e and this section is updated to real
+> `file:line` as each lands. The Stratum companion (`si_cvers` bump; `si_gen`
+> decoupled) landed at L1a-1 (`inode.tla`) + L1a-2 (the 9P wire, `server.c`).
+
+Status: **model LANDED (L1b), TLC-green; impl OWED at L1c-e.** Models the
+per-`p9_client` Larder + the `cvers` close-to-open coherence: the open-time
+revalidation gate AND the own-write write-through invalidation, interleaved on
+the shared client (the invalidate-vs-serve SMP race). Proves I-38 (LARDER-DESIGN
+§6): a served value never lags the current content (single-writer), no entry is
+trusted past its revalidation (the gate bounds an external writer to one
+episode), the cache is bounded, and a fresh write is eventually visible. Two
+buggy cfgs each produce a minimal 4-state counterexample on its named invariant.
+
+### Action → impl mapping (OWED at L1c-e)
+
+| Spec action | Intended impl site (L1c-e) |
+|---|---|
+| `Open(f)` (revalidate + populate; the `cvers` check point) | the serve/populate hook at the top of `dev9p_stat_native` / `dev9p_walk_attrs` (L1c/L1d): a hit trusts the entry only when the freshly-fetched `qid.version` (= `si_cvers`) equals the cached `cvers`, else drop + refetch. POUNCE's `walk_attrs` carries the fresh `cvers` for free. |
+| `Read(f)` (serve without re-check) | the cache-hit fast path in `dev9p_read` (L1e; page cache) / the attr serve (L1c) — returns the cached value without an RPC. |
+| `OwnWrite(f)` (bump + write-through invalidate) | the invalidate hook at `dev9p_write` (L1e): drop the file's cached pages + mark its attr entry for refetch (the guest sees its own writes strongly). |
+| `ExternalWrite(f)` (out-of-band bump, no invalidate) | not an impl site — models an out-of-band Stratum mutation; the impl obligation is that `Open`'s revalidation catches it. |
+| `Evict(f)` (capacity/LRU drop) | the LRU evictor over the bounded attr/dentry/page pool (L1c-e; I-32). |
+| `Refetch(f, fresh)` (install, evict-if-full) | the populate path installing `{attr/qid/pages, cvers}` tagged with the reply's `cvers`. |
+
+### Invariant / property → obligation
+
+| Spec name | Obligation |
+|---|---|
+| `NoWrongRead` (single-writer; `~bad_read`) | own-write write-through invalidation — a read never serves the guest's own stale write. `dev9p_write` MUST invalidate before returning. |
+| `NoStalePastRevalidation` (the close-to-open gate) | `Open` MUST compare `cvers` and drop+refetch on mismatch — never trust a stale entry. The load-bearing coherence property (the reason spec-first is re-enabled). |
+| `Bounded` (I-32 / I-38) | the Larder is LRU-capped; a hostile workload cannot grow it unbounded. |
+| `CacheNeverAhead` | a cached `cvers` never exceeds the server's (populate always takes the reply's `cvers`). |
+| `WriteEventuallyVisible` (liveness) | a fresh write is eventually served (the revalidation refetches). |
+
+**Guest-side populate rule (the L1a-2 audit-F1 disposition):** the Larder is
+populated ONLY from a `getattr`/`walk_attrs` qid (true `si_cvers`), NEVER from a
+`readdir` qid (a link-time `si_gen` snapshot). `Read`/`Open`'s `fresh` is always
+a content-version; a v1.0 impl that fed a readdir qid into the cache would break
+the `MODELING ASSUMPTIONS`. Enforced in the L1c-e impl (no `dev9p_readdir`
+populate) + documented in LARDER-DESIGN §3.2/§11.
+
+### TLC posture
+
+- `fs_cache.cfg` (single-writer; Files={f1,f2}, Capacity=1, MaxCvers=2):
+  `Invariants` = `TypeOk` + `CacheNeverAhead` + `Bounded` +
+  `NoStalePastRevalidation` + `NoWrongRead` (ABSOLUTE single-writer). GREEN —
+  72 distinct states.
+- `fs_cache_external.cfg` (external writer): `SafetyCore` (incl.
+  `NoStalePastRevalidation` — the gate holds vs an out-of-band writer). GREEN —
+  213 distinct states. NoWrongRead deliberately unchecked (the accepted
+  within-episode window).
+- `fs_cache_liveness.cfg` (external writer, WF(Open)+WF(Evict)):
+  `WriteEventuallyVisible`. GREEN, non-vacuous.
+- `fs_cache_buggy_stale_serve.cfg`: `NoStalePastRevalidation` VIOLATED (Open
+  keeps a stale entry validated) — a 4-state counterexample.
+- `fs_cache_buggy_no_invalidate.cfg`: `NoWrongRead` VIOLATED (a read serves the
+  guest's own stale write) — a 4-state counterexample.
