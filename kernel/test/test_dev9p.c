@@ -661,6 +661,46 @@ void test_dev9p_create_invalidates_reused_child(void) {
     teardown(root);
 }
 
+// L1e (L1f audit F1): the reused-ino hazard applies to the child's PAGES exactly
+// as to its attr. A create at a freed+reused qid.path can carry a stale prior-
+// occupant page whose cvers collides with the fresh file's qid.version -- a
+// collision the Thylacine tree cannot rule out (it depends on Stratum's fresh-
+// inode si_cvers). dev9p_create must invalidate the child's pages, mirroring the
+// attr defense above. Pre-seed a stale page at 0x77 (the created file's qid);
+// verify create drops it. FAILS pre-fix (create invalidated the child's attr +
+// the parent, never the child's pages -- the only page invalidate was
+// dev9p_write).
+void test_dev9p_create_invalidates_reused_child_pages(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    struct Spoor *nc = spoor_clone(root);
+    TEST_ASSERT(nc != NULL, "clone target");
+    struct Walkqid *w = dev9p.walk(root, nc, NULL, 0);
+    TEST_ASSERT(w != NULL, "clone-walk");
+    walkqid_free(w);
+
+    // Pre-seed a stale page at qid.path 0x77, page 0, cvers 1 -- as if a prior
+    // file at that reused ino had a page cached.
+    static const u8 stale_pg[5] = { 'S', 'T', 'A', 'L', 'E' };
+    larder_page_install(&g_client.larder, larder_gen_snapshot(&g_client.larder),
+                        0x77, /*page_index=*/0, /*cvers=*/1, stale_pg, 5);
+    u8 probe[16]; u64 s0 = 0;
+    TEST_EXPECT_EQ((u64)larder_page_serve(&g_client.larder, 0x77, 0, 0, 16,
+                                          /*want_cvers=*/1, probe, &s0),
+                   (u64)5, "stale child page present pre-create");
+
+    struct Spoor *opened = dev9p.create(nc, "newfile", 1 /*OWRITE*/, 0644u, 1000u);
+    TEST_ASSERT(opened == nc, "create returns the Spoor");
+    TEST_EXPECT_EQ((u64)nc->qid.path, (u64)0x77, "qid from Rlcreate");
+    TEST_EXPECT_EQ((u64)larder_page_serve(&g_client.larder, 0x77, 0, 0, 16, 1,
+                                          probe, &s0),
+                   (u64)0, "create invalidates the reused child's stale page");
+
+    larder_destroy(&g_client.larder);
+    spoor_clunk(nc);
+    teardown(root);
+}
+
 // L1d: dev9p_create must invalidate the PARENT's cached dentries (own-write) so a
 // stale NEGATIVE entry for the created name cannot serve ENOENT for the new file.
 // The parent's si_cvers does NOT bump on a create (Stratum stores dirents in a

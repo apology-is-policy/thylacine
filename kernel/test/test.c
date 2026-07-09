@@ -934,6 +934,7 @@ void test_dev9p_close_clunks_owned_fid(void);
 void test_dev9p_close_does_not_clunk_root_fid(void);
 void test_dev9p_create_file(void);
 void test_dev9p_create_invalidates_reused_child(void);
+void test_dev9p_create_invalidates_reused_child_pages(void);
 void test_dev9p_create_invalidates_negative_dentry(void);
 void test_dev9p_create_dir(void);
 void test_dev9p_fsync(void);
@@ -2282,6 +2283,9 @@ struct test_case g_tests[] = {
     { "dev9p.create_file",             test_dev9p_create_file,             false, NULL },
     { "dev9p.create_invalidates_reused_child",
                                        test_dev9p_create_invalidates_reused_child,
+                                                                           false, NULL },
+    { "dev9p.create_invalidates_reused_child_pages",
+                                       test_dev9p_create_invalidates_reused_child_pages,
                                                                            false, NULL },
     { "dev9p.create_invalidates_negative_dentry",
                                        test_dev9p_create_invalidates_negative_dentry,

@@ -662,6 +662,15 @@ static struct Spoor *dev9p_create(struct Spoor *c, const char *name,
     struct larder *l = &p->client->larder;
     larder_attr_invalidate(l, parent_path);
     larder_attr_invalidate(l, c->qid.path);
+    // L1e invalidate (L1f audit F1): the reused-ino hazard applies to the
+    // child's PAGES exactly as to its attr. A create at a freed+reused qid.path
+    // can carry a STALE prior-occupant page whose cvers collides with the fresh
+    // file's qid.version -- a collision the Thylacine tree cannot rule out (it
+    // depends on Stratum's fresh-inode si_cvers assignment). Drop the child's
+    // pages too, mirroring the attr defense above: data integrity must NOT rest
+    // on an unstated cross-project version-uniqueness guarantee. (Usually a
+    // no-op -- a genuinely-new qid.path has no cached pages.)
+    larder_page_invalidate(l, c->qid.path);
     // L1d invalidate (fs_cache.tla OwnWrite): the create added a name to the
     // parent's dirent set -- drop the parent's cached dentries so a stale
     // NEGATIVE entry (parent_path, name) cannot serve ENOENT for the new file.

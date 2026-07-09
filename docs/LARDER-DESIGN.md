@@ -1,8 +1,10 @@
 # LARDER — the guest-side FS cache (the 9P metadata + data round-trip fix)
 
-Status: **BUILDING** — the Stratum content-version (`si_cvers`) foundation and
-the coherence spec are landed; the guest Larder impl is next. The measured top
-lever of the on-device `go build` mission (the FS-perf deep dive, 2026-07-09).
+Status: **L1 ARC COMPLETE (L1a → L1f)** — the Stratum content-version (`si_cvers`)
+foundation + the coherence spec + the full guest Larder (attr + dentry + page +
+the cacheability gate) are landed, audited (0 P0 / 1 P1-fixed / 2 P3-seams), SMP-
+gated (40/40), and benched. The measured top lever of the on-device `go build`
+mission (the FS-perf deep dive, 2026-07-09).
 Resolves the forks by user vote (2026-07-09): the coherence key is a true Stratum
 **content-version** (`si_cvers`, surfaced as `qid.version`); the first arc lands
 the **full** cache (attr + dentry + data); **spec-first is re-enabled** for the
@@ -23,8 +25,26 @@ serve/populate + `dev9p_write` page invalidate, keyed `(qid.path, page_index)`,
 cvers-gated + own-write-invalidated; **the load-bearing cacheability gate** — a
 per-`p9_client` `cacheable` flag, proven by a successful `Twalkgetattr` (POUNCE),
 that engages the whole Larder ONLY for a content-versioned FS so a stream server
-[netd `/net`] is never cached — §3.3/§7; also closes the latent L1c netd-attr gap).
-**Next:** L1f (audit + full SMP gate + gofmt re-measure). See §9.
+[netd `/net`] is never cached — §3.3/§7; also closes the latent L1c netd-attr gap),
+**L1f** (the arc close: the focused Opus-4.8-max prosecutor + a concurrent
+self-audit — **0 P0 / 1 P1 / 0 P2 / 2 P3**, NOT dirty — F1 [P1] the reused-ino
+page-invalidate-on-create gap FIXED [the page twin of the attr defense; regression
+`create_invalidates_reused_child_pages`, non-vacuous], F2/F3 documented as v1.x
+seams §11; the **full SMP gate** default+UBSan × smp4/smp8 N=10 = 40/40 PASS 0
+corruption; the gofmt re-measure warm 1352→1147 ms [−15%] / cold 2506→2474 ms).
+**The L1 arc is COMPLETE.**
+
+**The gofmt re-measure — an honest, oracle-driven result (§10).** The Larder
+captured its full addressable FS-redundancy band (−15% warm) but fell short of the
+predicted warm ~3× host, and the bench GROUND-TRUTHED why: a *trivial* warm hello
+build is already 987 ms, so the 91-package `gofmt-warm` (1147 ms) adds only ~160 ms
+over that floor — the warm build is ~86% FIXED go-tool overhead (REVENANT exec/
+page-in of the ~12 MB toolchain + build-graph + link), only ~14% package-specific
+FS work. The §10 prediction over-attributed the warm cost to eliminable FS ops; the
+warm bottleneck is exec/build-graph, a DIFFERENT surface (the next lever). The
+Larder's engagement is proven independently (the page-hit + serve-and-gate unit
+tests, the 40/40 SMP gate, and the −15% delta itself — a 0%-hit cache gives 0
+delta), so this is a recalibration of the expected payoff, not a broken cache.
 
 **Naming (proposal — open to your preference).** A thylacine is a pursuit/ambush
 predator; a **larder** is a predator's store of provisions it returns to instead
@@ -539,13 +559,37 @@ proven-in-principle to delivered.
   stale attr, and a Loom symlink/mknod/link/unlinkat/rename can leave a stale
   dentry (a negative entry a Loom create should have filled, or a positive a Loom
   unlink should have dropped), bounded by the next own-*sync* mutation of that
-  file/dir or by LRU eviction. **Unreachable at v1.0** — no consumer mixes them
-  (the go-build is pure synchronous pouch/musl; the Loom consumers do
-  network / FSYNC / NOP, not FS-dirent mutations on the shared Stratum client).
-  The v1.x fix invalidates the Larder from the Loom completion path (the
-  completion carries the op's fid → the affected dir/file qid.path → the same
-  `larder_*_invalidate` calls). Tracked; not fixed at v1.0 (no consumer makes it
-  load-bearing, and the completion-side qid.path plumbing is non-trivial).
+  file/dir or by LRU eviction. **Not driven by any v1.0 consumer** — no v1.0
+  consumer mixes them (the go-build is pure synchronous pouch/musl; the Loom
+  consumers do network / FSYNC / NOP, not FS-dirent mutations on the shared
+  Stratum client). *Self-inflicted-reachable, not unreachable* (L1f audit F2, the
+  wording corrected from "unreachable"): a crafted EL0 program COULD open a
+  cacheable Stratum file, register it into a Loom ring, and submit a
+  `LOOM_OP_WRITE`/dirent-mutation, bypassing the invalidate — but the stale data
+  is the file's OWN prior content under its OWN `qid.path` (the page/attr key), so
+  it is a self-inflicted stale view of one's own file, with **no** cross-file /
+  cross-Proc / privilege leak (P3). The v1.x fix invalidates the Larder from the
+  Loom completion path (the completion carries the op's fid → the affected
+  dir/file qid.path → the same `larder_*_invalidate` calls), or fail-closed
+  rejects a Loom mutation op submitted against a `cacheable` dev9p fid. Tracked;
+  not fixed at v1.0 (no consumer makes it load-bearing, and the completion-side
+  qid.path plumbing is non-trivial).
+- **rename/unlink leave the moved/unlinked file's OWN attr — stale `ctime`/`nlink`
+  (L1f audit F3 / self-audit SA-1).** `dev9p_rename` invalidates both directories'
+  attrs + dentries but not the *moved file's* own attr (a rename bumps the file's
+  `ctime`); `dev9p_unlink` invalidates the parent but deliberately leaves the child
+  attr (`dev9p.c` comment), so an unlink-while-open leaves a stale `nlink`. A
+  held-open fid `fstat`'d after the guest's own unlink/rename (keyed by the file's
+  unchanged `qid.path`) therefore serves stale `ctime`/`nlink`. **Metadata-only:**
+  `mode`/`uid`/`gid` are UNCHANGED by rename/unlink and `perm_check` reads only
+  those, so there is NO privilege / X-search / I-28 consequence; the content is
+  untouched; `nlink` staleness is largely moot at v1.0 (no sync `link`/`symlink`/
+  `mknod` path — hardlinks are Loom-only, the seam above). Bounded by the next
+  own-write or LRU eviction. The fix needs the moved/unlinked file's `qid.path`
+  (not available at the rename/unlink site, which takes parent + name), so it is a
+  v1.x refinement, not a v1.0 code fix. (The *reused-ino* twin — a create at a
+  freed ino serving a prior occupant's stale attr AND now pages — IS fixed at v1.0
+  via the child-invalidate in `dev9p_create`; see §4 / L1f audit F1.)
 - **Dentry external-writer window (L1d).** Unlike attr/page entries (each
   revalidated at open by its own file's `cvers`), a **dentry** has no
   content-version to revalidate against: Stratum surfaces no directory-content

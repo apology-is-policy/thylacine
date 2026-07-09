@@ -1,11 +1,20 @@
 # 132 — The Larder (guest-side 9P FS cache)
 
-**Status:** L1c + L1d + L1e LANDED — the substrate + the **attr** sub-cache (L1c),
-the **dentry** sub-cache incl. negative entries (L1d), and the **page** sub-cache
-(L1e). L1e also adds the load-bearing **cacheability gate** (a per-`p9_client`
-`cacheable` flag proven by a successful `Twalkgetattr`) that engages the whole
-Larder ONLY for a content-versioned FS — a stream/control server (netd `/net`) is
-never cached. L1f (the focused audit + full SMP gate + gofmt re-measure) is next.
+**Status:** **L1c + L1d + L1e + L1f LANDED — the L1 arc is COMPLETE.** The
+substrate + the **attr** sub-cache (L1c), the **dentry** sub-cache incl. negative
+entries (L1d), and the **page** sub-cache (L1e) with the load-bearing
+**cacheability gate** (a per-`p9_client` `cacheable` flag proven by a successful
+`Twalkgetattr`) that engages the whole Larder ONLY for a content-versioned FS — a
+stream/control server (netd `/net`) is never cached. **L1f** closed the arc: the
+focused Opus-4.8-max prosecutor + a concurrent self-audit (**0 P0 / 1 P1 / 0 P2 /
+2 P3**, NOT dirty) — F1 [P1] the reused-ino page-invalidate-on-create gap FIXED
+(the page twin of the attr defense; regression `create_invalidates_reused_child_pages`,
+non-vacuous), F2/F3 documented as v1.x seams (§11); the **full SMP gate** (default
++UBSan × smp4/smp8, N=10 = 40/40 PASS, 0 corruption); and the gofmt re-measure
+(warm 1352→1147 ms, −15%; cold 2506→2474 ms). The re-measure GROUND-TRUTHED the
+warm build as ~86% fixed go-tool overhead (a 987 ms trivial-hello floor), so the
+Larder captured its full addressable FS-redundancy band but the warm bottleneck is
+exec/page-in/build-graph, not FS redundancy — the next lever (a different surface).
 
 The Larder is the guest-side cache of FS metadata + data the guest has already
 fetched over 9P, so a repeated stat/walk/read is served locally instead of
@@ -131,7 +140,7 @@ root's `qid.path` is legitimately `0x0` (`dev9p.c:130`).
 |---|---|
 | `Read` (serve, no re-check) | `dev9p_stat_native` calls `larder_attr_serve` first; a hit returns with no RPC. The base X-check (`stalk.c:326` → `spoor_stat_native`) and `SYS_FSTAT` are the consumers — the biggest cheap win. |
 | `Open`/`Refetch` (install fresh) | `dev9p_walk_attrs` installs each walked component's `{sts[i], w->qid[i].vers}` after the `Twalkgetattr` RPC (free — attrs already fetched); `dev9p_stat_native`'s miss-populate installs after its `Tgetattr`. Both ALWAYS install from the fresh RPC (revalidate-by-overwrite). |
-| `OwnWrite` (write-through invalidate) | `larder_attr_invalidate` at `dev9p_write` / `dev9p_wstat_native` (the file), `dev9p_create` (parent AND child), `dev9p_rename` (both dirs), `dev9p_unlink` (parent). |
+| `OwnWrite` (write-through invalidate) | **attr:** `larder_attr_invalidate` at `dev9p_write` / `dev9p_wstat_native` (the file), `dev9p_create` (parent AND child), `dev9p_rename` (both dirs), `dev9p_unlink` (parent). **page:** `larder_page_invalidate` at `dev9p_write` (the file) AND `dev9p_create` (the child — L1f audit F1: the reused-ino page twin of the attr defense, so a create at a freed+reused `qid.path` cannot serve a prior occupant's stale page). **dentry:** `larder_dentry_invalidate_parent` at create / rename (both dirs) / unlink. |
 | `Evict` (bound) | `attr_install_slot_locked` picks existing-key / free / LRU-min victim; never exceeds `LARDER_ATTR_ENTRIES`. |
 
 **The attr serve is a `Read`, not an `Open`.** L1c serves a cached attr WITHOUT
