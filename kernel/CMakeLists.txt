@@ -96,6 +96,7 @@ set(KERNEL_SRCS
     9p_session.c
     9p_transport.c
     9p_client.c
+    larder.c
     dev9p.c
     dev9p_poll.c
     9p_attach.c
@@ -196,6 +197,7 @@ set(KERNEL_TEST_SRCS
     test/test_9p_session.c
     test/test_9p_transport.c
     test/test_9p_client.c
+    test/test_larder.c
     test/test_dev9p.c
     test/test_perm.c
     test/test_path.c

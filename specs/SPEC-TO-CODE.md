@@ -1498,25 +1498,30 @@ stranded-work counterexample rather than a masked latency hiccup.
 > `file:line` as each lands. The Stratum companion (`si_cvers` bump; `si_gen`
 > decoupled) landed at L1a-1 (`inode.tla`) + L1a-2 (the 9P wire, `server.c`).
 
-Status: **model LANDED (L1b), TLC-green; impl OWED at L1c-e.** Models the
-per-`p9_client` Larder + the `cvers` close-to-open coherence: the open-time
-revalidation gate AND the own-write write-through invalidation, interleaved on
-the shared client (the invalidate-vs-serve SMP race). Proves I-38 (LARDER-DESIGN
-§6): a served value never lags the current content (single-writer), no entry is
-trusted past its revalidation (the gate bounds an external writer to one
-episode), the cache is bounded, and a fresh write is eventually visible. Two
-buggy cfgs each produce a minimal 4-state counterexample on its named invariant.
+Status: **model LANDED (L1b), TLC-green; ATTR sub-cache LANDED (L1c);
+dentry/page OWED (L1d/L1e).** Models the per-`p9_client` Larder + the `cvers`
+close-to-open coherence: the open-time revalidation gate AND the own-write
+write-through invalidation, interleaved on the shared client (the
+invalidate-vs-serve SMP race). Proves I-38 (LARDER-DESIGN §6): a served value
+never lags the current content (single-writer), no entry is trusted past its
+revalidation (the gate bounds an external writer to one episode), the cache is
+bounded, and a fresh write is eventually visible. Two buggy cfgs each produce a
+minimal 4-state counterexample on its named invariant.
 
-### Action → impl mapping (OWED at L1c-e)
+The L1c impl is `kernel/larder.{c,h}` (the substrate + attr sub-cache) hooked
+into `kernel/dev9p.c`; the dentry (L1d) and page (L1e) sub-caches extend the same
+owner/lock/key.
 
-| Spec action | Intended impl site (L1c-e) |
+### Action → impl mapping (attr sub-cache; L1c LANDED)
+
+| Spec action | Impl site |
 |---|---|
-| `Open(f)` (revalidate + populate; the `cvers` check point) | the serve/populate hook at the top of `dev9p_stat_native` / `dev9p_walk_attrs` (L1c/L1d): a hit trusts the entry only when the freshly-fetched `qid.version` (= `si_cvers`) equals the cached `cvers`, else drop + refetch. POUNCE's `walk_attrs` carries the fresh `cvers` for free. |
-| `Read(f)` (serve without re-check) | the cache-hit fast path in `dev9p_read` (L1e; page cache) / the attr serve (L1c) — returns the cached value without an RPC. |
-| `OwnWrite(f)` (bump + write-through invalidate) | the invalidate hook at `dev9p_write` (L1e): drop the file's cached pages + mark its attr entry for refetch (the guest sees its own writes strongly). |
+| `Open(f)` (revalidate + populate; the `cvers` check point) | `kernel/dev9p.c::dev9p_walk_attrs` (per-component free populate, `larder_attr_install` after the walkgetattr RPC) + `dev9p_stat_native`'s miss-populate. Both ALWAYS install from the fresh RPC (revalidate-by-overwrite) — the L1c attr serve does not re-check `cvers` (that's a `Read`); the `cvers` compare becomes load-bearing at the L1d dentry-serve / L1e page-serve. The dentry serve (L1d) is where "POUNCE's `walk_attrs` carries the fresh `cvers` for free" applies. |
+| `Read(f)` (serve without re-check) | `kernel/dev9p.c::dev9p_stat_native` serve fast path (`larder_attr_serve` — the base X-check re-stat storm + fstat, the biggest cheap win). Page serve at `dev9p_read` is L1e. |
+| `OwnWrite(f)` (bump + write-through invalidate) | `kernel/dev9p.c` `larder_attr_invalidate` at `dev9p_write` / `dev9p_wstat_native` (file) + `dev9p_create` (parent AND the child — the created qid.path may reuse a freed ino, so its stale prior-occupant attr must drop; the create path never runs `walk_attrs`) / `dev9p_rename` (both dirs) / `dev9p_unlink` (parent). |
 | `ExternalWrite(f)` (out-of-band bump, no invalidate) | not an impl site — models an out-of-band Stratum mutation; the impl obligation is that `Open`'s revalidation catches it. |
-| `Evict(f)` (capacity/LRU drop) | the LRU evictor over the bounded attr/dentry/page pool (L1c-e; I-32). |
-| `Refetch(f, fresh)` (install, evict-if-full) | the populate path installing `{attr/qid/pages, cvers}` tagged with the reply's `cvers`. |
+| `Evict(f)` (capacity/LRU drop) | `kernel/larder.c::attr_install_slot_locked` (LRU-min victim when the bounded `LARDER_ATTR_ENTRIES` array is full; I-32). |
+| `Refetch(f, fresh)` (install, evict-if-full) | `kernel/larder.c::larder_attr_install` (install `{attr, cvers}`; overwrite existing / free slot / LRU-evict). GEN-GUARDED: `larder_gen_snapshot` before the RPC, install skipped if `l->gen` changed — the impl realization of the spec's ATOMIC read-and-install (closes the populate-after-invalidate resurrection). |
 
 ### Invariant / property → obligation
 

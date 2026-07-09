@@ -899,6 +899,7 @@ int p9_client_init(struct p9_client *c,
     // pull fresh fids monotonically via p9_client_alloc_fid.
     c->next_fid     = (root_fid < P9_NOFID - 1) ? (root_fid + 1) : 1;
     c->wga_unsupported = false;   // POUNCE: Twalkgetattr capability unknown
+    larder_init(&c->larder);      // L1c: the guest FS cache (its own leaf lock)
     c->total_ops    = 0;
     c->total_errors = 0;
     return 0;

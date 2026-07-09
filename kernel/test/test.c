@@ -894,6 +894,14 @@ void test_9p_client_loom_multi_inflight_e2e(void);
 void test_9p_client_loom_multi_inflight_read_e2e(void);
 void test_9p_client_send_backpressure_self_pump(void);
 void test_9p_client_send_backpressure_multi_waiter(void);
+void test_larder_install_serve(void);
+void test_larder_serve_miss(void);
+void test_larder_invalidate(void);
+void test_larder_gen_guard_skips_raced_install(void);
+void test_larder_root_qid_zero(void);
+void test_larder_overwrite_wins(void);
+void test_larder_eviction_bounded(void);
+
 void test_dev9p_registered(void);
 void test_dev9p_attach_client_root_spoor(void);
 void test_dev9p_walk_one_component(void);
@@ -905,6 +913,7 @@ void test_dev9p_write_read_propagate_errno(void);
 void test_dev9p_close_clunks_owned_fid(void);
 void test_dev9p_close_does_not_clunk_root_fid(void);
 void test_dev9p_create_file(void);
+void test_dev9p_create_invalidates_reused_child(void);
 void test_dev9p_create_dir(void);
 void test_dev9p_fsync(void);
 void test_dev9p_readdir(void);
@@ -2118,6 +2127,13 @@ struct test_case g_tests[] = {
     { "9p_client.readdir",             test_9p_client_readdir,             false, NULL },
     { "9p_client.statfs",              test_9p_client_statfs,              false, NULL },
     { "9p_client.weft",                test_9p_client_weft,                false, NULL },
+    { "larder.install_serve",          test_larder_install_serve,          false, NULL },
+    { "larder.serve_miss",             test_larder_serve_miss,             false, NULL },
+    { "larder.invalidate",             test_larder_invalidate,             false, NULL },
+    { "larder.gen_guard",              test_larder_gen_guard_skips_raced_install, false, NULL },
+    { "larder.root_qid_zero",          test_larder_root_qid_zero,          false, NULL },
+    { "larder.overwrite_wins",         test_larder_overwrite_wins,         false, NULL },
+    { "larder.eviction_bounded",       test_larder_eviction_bounded,       false, NULL },
     { "9p_client.weftio",              test_9p_client_weftio,              false, NULL },
     { "9p_client.mkdir",               test_9p_client_mkdir,               false, NULL },
     { "9p_client.unlinkat",            test_9p_client_unlinkat,            false, NULL },
@@ -2222,6 +2238,9 @@ struct test_case g_tests[] = {
                                        test_dev9p_close_does_not_clunk_root_fid,
                                                                            false, NULL },
     { "dev9p.create_file",             test_dev9p_create_file,             false, NULL },
+    { "dev9p.create_invalidates_reused_child",
+                                       test_dev9p_create_invalidates_reused_child,
+                                                                           false, NULL },
     { "dev9p.create_dir",              test_dev9p_create_dir,              false, NULL },
     { "dev9p.fsync",                   test_dev9p_fsync,                   false, NULL },
     { "dev9p.readdir",                 test_dev9p_readdir,                 false, NULL },

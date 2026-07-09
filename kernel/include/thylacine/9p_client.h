@@ -57,6 +57,7 @@
 #include <thylacine/9p_session.h>
 #include <thylacine/9p_transport.h>
 #include <thylacine/9p_wire.h>
+#include <thylacine/larder.h>
 #include <thylacine/poll.h>
 #include <thylacine/rendez.h>
 #include <thylacine/spinlock.h>
@@ -207,6 +208,12 @@ struct p9_client {
     // falls back to the per-component loop). One-way false -> true; a benign
     // one-word race (two concurrent probes both latch the same value).
     bool                 wga_unsupported;
+    // The Larder -- the guest-side FS cache (L1c; docs/LARDER-DESIGN.md, I-38).
+    // Shared by every Proc/thread resolving through this mount; protected by its
+    // OWN near-leaf lock (never held with c->lock -- the RPCs that take c->lock
+    // run outside the Larder lock). Serves the base X-check re-stat storm + fstat
+    // from local metadata; own-write invalidation keeps it close-to-open coherent.
+    struct larder        larder;
     // Diagnostics.
     u32                  total_ops;
     u32                  total_errors;

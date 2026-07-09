@@ -323,6 +323,15 @@ static void t_stat_from_p9_attr(struct t_stat *out, const struct p9_attr *attr) 
 static int dev9p_stat_native(struct Spoor *c, struct t_stat *out) {
     struct dev9p_priv *p = priv_of(c);
     if (!p || !out) return -1;
+    struct larder *l = &p->client->larder;
+    u64 key = c->qid.path;
+    // L1c serve (fs_cache.tla Read): a cached attr for this qid.path is served
+    // with NO RPC -- the base X-check (stalk.c) re-stat storm (root ~96.8% warm)
+    // + fstat redundancy, the Larder's biggest cheap win. Close-to-open coherent
+    // via the own-write invalidation on the mutation paths below.
+    u64 seq0 = 0;
+    if (larder_attr_serve(l, key, out, &seq0))
+        return 0;
     struct p9_attr attr;
     // errno-rollout: propagate the server's POSIX errno (p9_client_getattr
     // returns -ecode on Rlerror, e.g. -T_E_NOENT for a vanished file; I-14
@@ -332,6 +341,10 @@ static int dev9p_stat_native(struct Spoor *c, struct t_stat *out) {
     if (gr != 0)
         return gr;
     t_stat_from_p9_attr(out, &attr);
+    // L1c populate (fs_cache.tla Refetch): install {attr, cvers} keyed by
+    // qid.path; the seq0 gen guard skips it if an invalidate raced this getattr
+    // (the populate-after-invalidate resurrection close -- larder.h note (2)).
+    larder_attr_install(l, seq0, key, attr.qid.version, out);
     return 0;
 }
 
@@ -384,6 +397,9 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
         }
     }
 
+    // L1c populate guard: capture the Larder gen BEFORE the RPC so a concurrent
+    // own-write that invalidates during the walk skips our (now-stale) install.
+    u64 wga_seq0 = larder_gen_snapshot(&src_priv->client->larder);
     u16 nwqid = 0;
     struct p9_qid qids[P9_MAX_WALK];
     int rc = p9_client_walkgetattr(src_priv->client, src_priv->fid, new_fid,
@@ -420,6 +436,12 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
         w->qid[i].type   = qid_type_p9_to_kernel(qids[i].type);
         w->qid[i].pad[0] = w->qid[i].pad[1] = w->qid[i].pad[2] = 0;
         t_stat_from_p9_attr(&sts[i], &attrs[i]);
+        // L1c populate (free -- attrs already fetched): install each walked
+        // component's attr keyed by its qid.path, with its content-version. A
+        // getattr/walk_attrs qid carries the true si_cvers (never a readdir qid
+        // -- the L1a-2 audit-F1 rule; LARDER-DESIGN section 3.2).
+        larder_attr_install(&src_priv->client->larder, wga_seq0,
+                            w->qid[i].path, w->qid[i].vers, &sts[i]);
     }
     kfree(attrs);
 
@@ -490,6 +512,9 @@ static struct Spoor *dev9p_create(struct Spoor *c, const char *name,
     struct dev9p_priv *p = priv_of(c);
     if (!p) return NULL;
     if (!name) return NULL;
+    // Capture the PARENT's qid.path before Tlcreate/Tmkdir transitions c->qid to
+    // the new child -- the L1c invalidate below drops the parent's cached attr.
+    u64 parent_path = c->qid.path;
 
     // Name length: the handler NUL-terminates within SYS_WALK_OPEN_NAME_MAX,
     // so this scan is bounded. p9_client_* take an explicit length.
@@ -546,6 +571,19 @@ static struct Spoor *dev9p_create(struct Spoor *c, const char *name,
     c->qid.type = qid_type_p9_to_kernel(qid.type);
     c->flag    |= COPEN;
     c->offset   = 0;
+    // L1c invalidate (fs_cache.tla OwnWrite): a create changes TWO qid.paths.
+    //  - the PARENT dir (nlink/mtime/cvers) -- so its base X-check + fstat see
+    //    the new metadata.
+    //  - the CHILD itself: Stratum may reuse a just-freed ino, so the new file's
+    //    qid.path can carry a STALE prior-occupant attr in the Larder (a deleted
+    //    dir/file's mode). Unlike a walk, the create path never runs walk_attrs
+    //    (no revalidate-by-overwrite), so the stale entry would be served by the
+    //    next stat -- the stalk-2-e2e delete+recreate+create-in-it failure. Drop
+    //    it; the next stat refetches fresh (create returns only the qid, not a
+    //    full attr to populate).
+    struct larder *l = &p->client->larder;
+    larder_attr_invalidate(l, parent_path);
+    larder_attr_invalidate(l, c->qid.path);
     return c;
 }
 
@@ -665,6 +703,10 @@ static long dev9p_write(struct Spoor *c, const void *buf, long n, s64 off) {
     // ecode==1) collides with the -1 generic sentinel -> EIO; conveying it
     // needs a wider channel (the ER-rollout's job).
     if (rc != 0) return (long)rc;
+    // L1c invalidate (fs_cache.tla OwnWrite): the file's attrs changed
+    // (size/mtime/cvers). Drop its cached entry so a subsequent stat/fstat cannot
+    // serve the pre-write metadata -- the guest sees its own write strongly.
+    larder_attr_invalidate(&p->client->larder, c->qid.path);
     return (long)accepted;
 }
 
@@ -775,8 +817,15 @@ static int dev9p_rename(struct Spoor *olddir, const char *oldname,
     size_t ol = 0; while (oldname[ol] != '\0') ol++;
     size_t nl = 0; while (newname[nl] != '\0') nl++;
     if (ol == 0 || nl == 0) return -1;
-    return p9_client_renameat(od->client, od->fid, (const u8 *)oldname, ol,
-                               nd->fid, (const u8 *)newname, nl) == 0 ? 0 : -1;
+    int rc = p9_client_renameat(od->client, od->fid, (const u8 *)oldname, ol,
+                                nd->fid, (const u8 *)newname, nl);
+    if (rc != 0) return -1;
+    // L1c invalidate (fs_cache.tla OwnWrite): both dirs' attrs (nlink/mtime/cvers)
+    // changed. od->client == nd->client (checked above) -- one Larder.
+    struct larder *l = &od->client->larder;
+    larder_attr_invalidate(l, olddir->qid.path);
+    larder_attr_invalidate(l, newdir->qid.path);
+    return 0;
 }
 
 // Unlink -> Stratum Tunlinkat (FS-gamma; section 9.3). parent is the caller's
@@ -789,8 +838,14 @@ static int dev9p_unlink(struct Spoor *parent, const char *name, u32 flags) {
     if (!name) return -1;
     size_t nl = 0; while (name[nl] != '\0') nl++;
     if (nl == 0) return -1;
-    return p9_client_unlinkat(p->client, p->fid, (const u8 *)name, nl, flags)
-               == 0 ? 0 : -1;
+    int rc = p9_client_unlinkat(p->client, p->fid, (const u8 *)name, nl, flags);
+    if (rc != 0) return -1;
+    // L1c invalidate (fs_cache.tla OwnWrite): unlink changed the parent dir's
+    // attrs (nlink/mtime/cvers). The unlinked child's own cached entry (if any)
+    // is left; an ino-reuse serve is caught by the gen guard + walk-overwrite,
+    // and mode is unchanged by unlink (LARDER-DESIGN section 11).
+    larder_attr_invalidate(&p->client->larder, parent->qid.path);
+    return 0;
 }
 
 // SYS_UNLINK passes its flags arg straight through dev9p_unlink to the wire, so
@@ -829,7 +884,14 @@ static int dev9p_wstat_native(struct Spoor *c, u32 valid, u32 mode,
     sa.mode  = mode;
     sa.uid   = uid;
     sa.gid   = gid;
-    return p9_client_setattr(p->client, p->fid, &sa) == 0 ? 0 : -1;
+    int rc = p9_client_setattr(p->client, p->fid, &sa);
+    if (rc != 0) return -1;
+    // L1c invalidate (fs_cache.tla OwnWrite): chmod/chown/truncate changed
+    // mode/uid/gid/size. CRITICAL -- the base X-check perm_checks the cached
+    // mode, so a stale mode after a tighten would be a bounded I-28 window; the
+    // invalidate keeps the window at zero for the guest's own chmod.
+    larder_attr_invalidate(&p->client->larder, c->qid.path);
+    return 0;
 }
 
 // SYS_WSTAT passes its valid mask straight through dev9p_wstat_native to the

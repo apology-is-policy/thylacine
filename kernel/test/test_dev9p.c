@@ -621,6 +621,45 @@ void test_dev9p_create_file(void) {
     teardown(root);
 }
 
+// L1c regression (the create-reuse stale-serve, the stalk-2-e2e failure): a
+// create at a qid.path that carries a STALE cached attr -- Stratum reused a
+// just-freed ino, so the new file's qid.path had a prior occupant cached -- MUST
+// invalidate that child, or the base X-check on the new file serves the old
+// file's attr. The create path never runs walk_attrs (no revalidate-by-
+// overwrite), so dev9p_create must invalidate the child explicitly. The
+// responder mints 0x77 for the created file; pre-seed a bogus 0x77 entry and
+// verify create drops it. FAILS pre-fix (create invalidated only the parent).
+void test_dev9p_create_invalidates_reused_child(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    struct Spoor *nc = spoor_clone(root);
+    TEST_ASSERT(nc != NULL, "clone target");
+    struct Walkqid *w = dev9p.walk(root, nc, NULL, 0);
+    TEST_ASSERT(w != NULL, "clone-walk");
+    walkqid_free(w);
+
+    // Pre-seed a stale attr at qid.path 0x77 (the created file's qid), as if a
+    // prior file at that reused ino was cached -- a FILE mode (no X-bit), which a
+    // base X-check on the new dir/file would wrongly consult.
+    struct t_stat stale;
+    for (size_t i = 0; i < sizeof(stale); i++) ((u8 *)&stale)[i] = 0;
+    stale.mode = 0644;
+    larder_attr_install(&g_client.larder, larder_gen_snapshot(&g_client.larder),
+                        0x77, /*cvers=*/1, &stale);
+    struct t_stat probe; u64 s0 = 0;
+    TEST_ASSERT(larder_attr_serve(&g_client.larder, 0x77, &probe, &s0),
+                "stale child entry present pre-create");
+
+    struct Spoor *opened = dev9p.create(nc, "newfile", 1 /*OWRITE*/, 0644u, 1000u);
+    TEST_ASSERT(opened == nc, "create returns the Spoor");
+    TEST_EXPECT_EQ((u64)nc->qid.path, (u64)0x77, "qid from Rlcreate");
+    TEST_ASSERT(!larder_attr_serve(&g_client.larder, 0x77, &probe, &s0),
+                "create invalidates the reused child's stale attr");
+
+    spoor_clunk(nc);
+    teardown(root);
+}
+
 // dev9p.create directory path: perm & DMDIR -> Tmkdir, then walk+lopen the new
 // dir so the returned Spoor is opened OREAD on it.
 void test_dev9p_create_dir(void) {

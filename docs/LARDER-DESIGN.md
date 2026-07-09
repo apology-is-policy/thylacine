@@ -12,9 +12,10 @@ coherence race. This document is binding; implementation lands against it
 **Landed:** L1a-1 (`si_cvers` inode primitive + `inode.tla`, @stratum `f4fbdf4`),
 L1a-2 (surface `si_cvers` as the 9P `qid.version`, decoupled from `si_gen`;
 @stratum `3288c02`+`5763876`, audit-clean), **L1b** (`specs/fs_cache.tla` — the
-close-to-open coherence model, TLC-green with a 5-cfg matrix; §8). **Next:** L1c
-(the Larder substrate + attr cache), L1d (dentry), L1e (page), L1f (audit + SMP
-gate + gofmt re-measure). See §9.
+close-to-open coherence model, TLC-green with a 5-cfg matrix; §8), **L1c** (the
+Larder substrate + attr sub-cache — `kernel/larder.{c,h}` + the `dev9p.c`
+serve/populate/invalidate hooks; §3/§9, `docs/reference/132-larder.md`). **Next:**
+L1d (dentry), L1e (page), L1f (audit + SMP gate + gofmt re-measure). See §9.
 
 **Naming (proposal — open to your preference).** A thylacine is a pursuit/ambush
 predator; a **larder** is a predator's store of provisions it returns to instead
@@ -341,9 +342,25 @@ on the real `si_cvers`).
   the gate.
 - **L1b — `specs/fs_cache.tla`.** The coherence model + the stale-serve buggy
   cfg, TLC-green, before the Thylacine impl.
-- **L1c — the Larder substrate + attr cache.** The cache struct on `p9_client`,
-  the cache lock, the qid-keyed store; the attr-cache serve/populate/invalidate
-  at `dev9p_stat_native` + the base X-check. The biggest cheap win.
+- **L1c — the Larder substrate + attr cache. LANDED.** The `struct larder` on
+  `p9_client` (a dedicated near-leaf lock + a bounded `LARDER_ATTR_ENTRIES`=256
+  LRU array, `qid.path`-keyed with an explicit `valid` bit so root's `qid.path`==0
+  caches like any key); the attr serve (`larder_attr_serve` at
+  `dev9p_stat_native` — the base X-check re-stat storm + fstat), the free populate
+  (`larder_attr_install` at `dev9p_walk_attrs` per component + the stat miss), and
+  the write-through invalidate at `dev9p_write`/`wstat`/`create`/`rename`/`unlink`.
+  Two impl subtleties the L1c build surfaced: (1) the **populate GEN guard** — the
+  spec's `Open` is an atomic read-and-install, but the impl reads via an RPC and
+  installs later, so a monotonic `gen` (captured pre-RPC, re-checked at install)
+  skips a populate that raced an invalidate, closing the populate-after-invalidate
+  resurrection (§7); (2) **create invalidates the CHILD** as well as the parent —
+  Stratum can reuse a freed ino, so a newly-created qid.path may carry a stale
+  prior-occupant attr, and the create path never runs `walk_attrs` (no
+  revalidate-by-overwrite), so an explicit child-invalidate is required (the
+  `dev9p.create_invalidates_reused_child` regression; caught in-build by the
+  `stalk-2` delete+recreate+create-in-it E2E). Tests: `larder.*` (serve / miss /
+  invalidate / gen-guard / root-qid-0 / overwrite / eviction-bounded) +
+  `dev9p.create_invalidates_reused_child`; 1055/1055 + boot OK.
 - **L1d — the dentry cache** (incl. negative). Serve/populate at
   `dev9p_walk_attrs`/`walk`; invalidate at create/rename/unlink.
 - **L1e — the page cache.** The bounded page pool, LRU, serve/populate at
