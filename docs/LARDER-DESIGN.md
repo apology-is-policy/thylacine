@@ -17,8 +17,14 @@ Larder substrate + attr sub-cache — `kernel/larder.{c,h}` + the `dev9p.c`
 serve/populate/invalidate hooks; §3/§9, `docs/reference/132-larder.md`), **L1d**
 (the dentry sub-cache incl. negative — `larder_walk_serve` / `larder_dentry_*` +
 the `dev9p_walk_attrs` serve/populate + create/rename/unlink invalidate; coherence
-is **own-write invalidation, NOT a cvers gate** — the ground-truth correction, §4).
-**Next:** L1e (page), L1f (audit + SMP gate + gofmt re-measure). See §9.
+is **own-write invalidation, NOT a cvers gate** — the ground-truth correction, §4),
+**L1e** (the page sub-cache — `larder_page_*` + `larder_destroy` + the `dev9p_read`
+serve/populate + `dev9p_write` page invalidate, keyed `(qid.path, page_index)`,
+cvers-gated + own-write-invalidated; **the load-bearing cacheability gate** — a
+per-`p9_client` `cacheable` flag, proven by a successful `Twalkgetattr` (POUNCE),
+that engages the whole Larder ONLY for a content-versioned FS so a stream server
+[netd `/net`] is never cached — §3.3/§7; also closes the latent L1c netd-attr gap).
+**Next:** L1f (audit + full SMP gate + gofmt re-measure). See §9.
 
 **Naming (proposal — open to your preference).** A thylacine is a pursuit/ambush
 predator; a **larder** is a predator's store of provisions it returns to instead
@@ -172,6 +178,39 @@ Three sub-caches share the owner + key:
 - **Invalidate** — at `dev9p_write` (the file's pages + bump its cached entry),
   and at create / rename / unlink (the parent's dentries), and on a `cvers`
   mismatch at open (drop + refetch).
+
+### 3.3 The cacheability gate (the content-versioned-server requirement)
+
+The Larder's soundness rests on a contract the *server* must honor: **reads are
+offset-stable (the same offset returns the same bytes until the content-version
+changes), and there is a real content-version** (`cvers`) to key freshness.
+Stratum (the FS) honors it. A **stream / control server does not** — netd's
+`/net/<proto>/N/data` reads are *consuming* (the same offset returns different
+bytes as the stream advances) and carry no content-version (`qid.version` is
+always 0), so page-caching a `/net` read would serve stale stream bytes on any
+offset re-read (an `lseek`-back-and-reread, a `pread(0)`), and attr-caching a
+`/net` file would serve a stat the network mutated out of band (own-write
+invalidation cannot cover an *external* writer). The guest cannot *detect* this
+by observation, so it must be **declared per-mount** — the Plan 9 idiom, where
+whether to interpose `cfs` is a per-mount choice.
+
+Mechanism: a per-`p9_client` **`cacheable`** flag, **default false**, latched
+true by the guest's first **successful `Twalkgetattr` (POUNCE)** reply — the v1.0
+proxy for "a content-versioned FS." Stratum speaks POUNCE, so its first
+resolution latches `cacheable`; netd answers `Twalkgetattr` with Rlerror ENOSYS,
+so it never latches, and its attr + page caches never engage (`dev9p_stat_native`
+and `dev9p_read` gate serve *and* populate on the flag; the dentry `walk_serve` is
+additionally guarded by the pre-existing `wga_unsupported` latch). The flag is
+**fail-safe**: an unproven mount is never cached (a perf loss for a hypothetical
+POUNCE-less FS, never a stale read), and it is settled **before any read** (a file
+is resolved via `walk_attrs` before it is read). The proxy is not identical to the
+true property (a future server that speaks POUNCE but streams, or a
+content-versioned FS without POUNCE, would need an explicit attach-time capability
+— a clean v1.x add), but it is sound for the v1.0 server set (Stratum, netd) and
+fail-safe in the direction that matters. This is the only non-Stratum dev9p client
+at v1.0 — corvus is a byte-mode SrvConn (not dev9p), so it has no Larder; `/proc`
+/ `/ctl` / `/env` / `/dev` are native kernel Devs (not dev9p), so they bypass the
+Larder entirely.
 
 ---
 
@@ -425,8 +464,33 @@ on the real `si_cvers`).
   `dentry_invalidate_parent` ground-truth core) + `dev9p.create_invalidates_negative_dentry`
   (non-vacuous hook regression); `dev9p.walk_attrs` resets the cache between its
   wire sub-tests. 1066/1066 + boot OK + stalk-2 E2E.
-- **L1e — the page cache.** The bounded page pool, LRU, serve/populate at
-  `dev9p_read`; invalidate at `dev9p_write`.
+- **L1e — the page cache. LANDED.** `larder_page_{serve,install,invalidate}` +
+  `larder_destroy` on `struct larder` (a 512-slot LRU table keyed
+  `(qid.path, page_index)`; each slot's 4 KiB buffer is HEAP — lazily kmalloc'd,
+  reused across evictions, freed at `larder_destroy` from `p9_client_destroy`),
+  hooked at `dev9p_read` (serve the one page containing the offset, fresh + in
+  range, RPC-free — a single-page copy under the leaf lock, a short serve the
+  caller loops on; populate each page the read covered *from its aligned start*,
+  so there is never a hole) and `dev9p_write` (own-write page invalidate). The
+  cvers freshness gate (Read/Open) + own-write invalidate (OwnWrite) compose, and
+  a partial (small-file / EOF) page serves only within `[0, valid_len)` and misses
+  beyond, so no EOF determination is needed (§4). **The load-bearing cacheability
+  gate (§3.3): the whole Larder engages ONLY for a `cacheable` client** — a
+  per-`p9_client` flag latched true by a successful `Twalkgetattr` (the v1.0 proxy
+  for a content-versioned, offset-stable FS). A stream/control server (netd `/net`
+  — consuming reads, `qid.version` always 0) answers `Twalkgetattr` ENOSYS, never
+  latches `cacheable`, and is never cached (a re-read of an offset would serve
+  stale stream bytes). Fail-safe (default false; a file is resolved via
+  `walk_attrs` before it is read, so the gate is settled first). This also closes
+  the latent L1c gap — attr caching had no server gate, so netd attrs (mutated out
+  of band by the network) could serve stale. Maps to `fs_cache.tla`'s
+  `Read`+`Open`+`OwnWrite` on content tokens keyed `(qid.path, page_index)` — **no
+  spec extension** (a page is a content token like an attr). Tests: `larder.page_*`
+  (10 — serve / miss / offset / cvers-mismatch / partial / invalidate / gen-guard /
+  overwrite / bounded / destroy-frees) + `dev9p.page_cache_serve_and_gate` (a
+  non-vacuous integration proof: a cacheable client's re-read is served with NO
+  second Tread, a non-cacheable client's re-read RPCs, and an own-write
+  invalidates — proven to fail with the serve disabled). 1077/1077 + boot OK.
 - **L1f — the focused audit + the SMP gate + the bench.** The adversarial
   coherence/SMP/lifetime/bound round; `tools/ci-smp-gate.sh`; the gofmt cold/warm
   re-measure vs the §10 predictions.
@@ -495,6 +559,26 @@ proven-in-principle to delivered.
   inode on create/unlink, at a parent-COW cost on the create/unlink-heavy build
   path — deliberately NOT paid at v1.0), which would then let a `walk_attrs`
   revalidate a parent's dentries by its `cvers`, exactly as attr/page do today.
+- **Page-cache v1.x refinements (all perf/memory, none correctness).** (a)
+  *Over-invalidation on write*: `dev9p_write` drops **every** cached page of the
+  file (`larder_page_invalidate` by `qid.path`), not just the written range —
+  sound (never stale) but re-reads unchanged pages; a precise per-range invalidate
+  is a v1.x tuning (writes in a build are mostly whole-file, so the cost is
+  negligible). (b) *Single-page serve*: `dev9p_read` serves at most the one page
+  containing the offset (a bounded ≤ 4 KiB copy under the leaf lock; the caller
+  loops on the short read), so a fully-cached 128 KiB read is 32 fast serves;
+  multi-page serve (with the pin-and-copy-outside-lock below) is a v1.x
+  throughput refinement. (c) *Copy-out under the lock*: v1.0 copies served bytes
+  under the Larder lock (so an evict/invalidate cannot free a page mid-copy); the
+  `#847`-style pin-page-then-copy-outside-lock is the v1.x SMP-scaling refinement
+  (§7). (d) *Partial-front page not cached*: an **unaligned** read's first page
+  (its aligned start precedes the read offset) is not populated, to keep every
+  cached page hole-free `[0, valid_len)`; Go's reads are page-aligned, so this
+  rarely bites. (e) *Inline page metadata on non-cacheable clients*: every
+  `p9_client` carries the 512-slot page-metadata array inline (~24 KiB), even
+  netd, which never allocates a page buffer (only a cacheable client does); a
+  lazy-heap page table (allocated only when `cacheable` latches) is a v1.x memory
+  refinement.
 - **Readdir (directory-content) caching.** v1.0 caches attrs/dentries/pages; a
   directory-listing cache is a candidate v1.x addition. Consequently the L1a-2
   seam — Rreaddir's `qid.version` stays a link-time `si_gen` snapshot (the dirent

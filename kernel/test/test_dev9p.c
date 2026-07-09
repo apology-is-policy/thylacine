@@ -42,9 +42,10 @@ void test_dev9p_poll_regular_file_always_ready(void);
 void test_dev9p_prw_wire_offset_and_cursor(void);
 void test_dev9p_wstat_readonly_fd(void);
 void test_dev9p_walk_attrs(void);
+void test_dev9p_page_cache_serve_and_gate(void);
 
-// File-scope buffers — client is ~12 KiB, won't fit on the 16 KiB test
-// thread stack alongside a few smaller locals.
+// File-scope buffers — client is ~80 KiB (the embedded Larder attr+dentry+page
+// metadata), won't fit on the 16 KiB test thread stack alongside a few locals.
 static struct p9_client g_client;
 static struct p9_loopback g_loopback;
 static u8 g_recv_buf[4096];
@@ -1260,5 +1261,58 @@ void test_dev9p_walk_attrs(void) {
         walkqid_free(w);
     }
 
+    teardown(root);
+}
+
+// L1e integration: a read on a CACHEABLE client populates the page cache; a
+// re-read of the same offset is served from the cache with NO second Tread. The
+// cacheability GATE: on a non-cacheable client (the default -- no walk_attrs has
+// proven POUNCE support), a read is never page-cached, so the re-read RPCs (a
+// netd /net stream is never served stale). The sentinel-offset trick reuses the
+// loopback's Tread-offset capture as a "was a Tread sent?" probe: set it to a
+// sentinel before the re-read; if the cache served, no Tread fires and it stays.
+void test_dev9p_page_cache_serve_and_gate(void) {
+    struct Spoor *root = make_open_client_and_root();
+    struct Spoor *nc = spoor_clone(root);
+    const char *name = "file";
+    struct Walkqid *w = dev9p.walk(root, nc, &name, 1);   // per-component: leaves cacheable false
+    walkqid_free(w);
+    dev9p.open(nc, 0);
+    u8 buf[64];
+
+    // --- Gate OFF (cacheable=false, the default): no caching -> the re-read RPCs. ---
+    __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
+    long g1 = dev9p.read(nc, buf, 64, 0);
+    TEST_EXPECT_EQ((u64)g1, (u64)5, "gate-off first read");
+    g_tread_req_offset = 0xDEAD;                            // sentinel
+    long g2 = dev9p.read(nc, buf, 64, 0);
+    TEST_EXPECT_EQ((u64)g2, (u64)5, "gate-off re-read");
+    TEST_EXPECT_EQ(g_tread_req_offset, 0ull,
+                   "gate-off re-read RPCs (non-cacheable client is not page-cached)");
+
+    // --- Gate ON (cacheable=true): the re-read is served from the page cache. ---
+    __atomic_store_n(&g_client.cacheable, true, __ATOMIC_RELAXED);
+    long h1 = dev9p.read(nc, buf, 64, 0);                   // miss -> RPC + populate page 0
+    TEST_EXPECT_EQ((u64)h1, (u64)5, "gate-on first read populates");
+    TEST_ASSERT(buf[0] == 'h' && buf[4] == 'o', "populate payload correct");
+    g_tread_req_offset = 0xDEAD;                            // sentinel
+    long h2 = dev9p.read(nc, buf, 64, 0);                   // HIT -> served from cache
+    TEST_EXPECT_EQ((u64)h2, (u64)5, "gate-on re-read serves the cached bytes");
+    TEST_ASSERT(buf[0] == 'h' && buf[4] == 'o', "served payload correct");
+    TEST_EXPECT_EQ(g_tread_req_offset, 0xDEADull,
+                   "gate-on re-read served from the page cache (NO second Tread)");
+    TEST_ASSERT(g_client.larder.page_hits >= 1ull, "a page hit was counted");
+
+    // An own-write invalidates the cached page: the next read RPCs again.
+    dev9p.write(nc, (const u8 *)"x", 1, 0);
+    g_tread_req_offset = 0xDEAD;
+    long h3 = dev9p.read(nc, buf, 64, 0);
+    TEST_EXPECT_EQ((u64)h3, (u64)5, "post-write read");
+    TEST_EXPECT_EQ(g_tread_req_offset, 0ull,
+                   "own-write invalidated the page (post-write read RPCs)");
+
+    larder_destroy(&g_client.larder);
+    __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);   // restore default for teardown
+    spoor_clunk(nc);
     teardown(root);
 }

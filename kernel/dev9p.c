@@ -325,12 +325,18 @@ static int dev9p_stat_native(struct Spoor *c, struct t_stat *out) {
     if (!p || !out) return -1;
     struct larder *l = &p->client->larder;
     u64 key = c->qid.path;
+    // L1e gate: the attr cache engages ONLY for a cacheable client (a proven
+    // content-versioned FS). A stream/control server (netd /net) is never latched
+    // cacheable, so its attrs -- which the network mutates out of band (own-write
+    // invalidation cannot cover an external writer) -- are never served stale from
+    // the Larder. This closes the latent L1c gap (attr caching had no server gate).
+    bool cacheable = __atomic_load_n(&p->client->cacheable, __ATOMIC_RELAXED);
     // L1c serve (fs_cache.tla Read): a cached attr for this qid.path is served
     // with NO RPC -- the base X-check (stalk.c) re-stat storm (root ~96.8% warm)
     // + fstat redundancy, the Larder's biggest cheap win. Close-to-open coherent
     // via the own-write invalidation on the mutation paths below.
     u64 seq0 = 0;
-    if (larder_attr_serve(l, key, out, &seq0))
+    if (cacheable && larder_attr_serve(l, key, out, &seq0))
         return 0;
     struct p9_attr attr;
     // errno-rollout: propagate the server's POSIX errno (p9_client_getattr
@@ -344,7 +350,9 @@ static int dev9p_stat_native(struct Spoor *c, struct t_stat *out) {
     // L1c populate (fs_cache.tla Refetch): install {attr, cvers} keyed by
     // qid.path; the seq0 gen guard skips it if an invalidate raced this getattr
     // (the populate-after-invalidate resurrection close -- larder.h note (2)).
-    larder_attr_install(l, seq0, key, attr.qid.version, out);
+    // Gated on `cacheable` (a non-content-versioned server is never cached).
+    if (cacheable)
+        larder_attr_install(l, seq0, key, attr.qid.version, out);
     return 0;
 }
 
@@ -378,8 +386,10 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
     // serves ONLY in the query form (nc == NULL -- there is no server fid to
     // bind, so no RPC is needed); a cached MISS (negative dentry) serves in
     // either form (a miss binds nothing). A bind-form full walk still RPCs (the
-    // server must bind the fid) but re-populates below.
-    {
+    // server must bind the fid) but re-populates below. Gated on `cacheable` (a
+    // non-content-versioned server is never served from the Larder -- its caches
+    // are provably empty, but the gate makes the invariant explicit + grep-able).
+    if (__atomic_load_n(&src_priv->client->cacheable, __ATOMIC_RELAXED)) {
         int  nres    = 0;
         bool is_miss = false;
         if (larder_walk_serve(&src_priv->client->larder, c->qid.path,
@@ -468,6 +478,16 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
         walkqid_free(w);
         return NULL;
     }
+
+    // L1e: a successful Twalkgetattr proves this mount's server speaks the POUNCE
+    // extension -- the v1.0 proxy for "a content-versioned, offset-stable FS"
+    // (Stratum). Latch cacheable so the Larder attr + page caches engage. A stream
+    // / control server (netd /net -- Rlerror ENOSYS above, never reaching here)
+    // stays non-cacheable, so its consuming reads are never page-cached. This runs
+    // BEFORE any read of a walked file (a file is resolved via walk_attrs first),
+    // so the gate is settled before the read path consults it. Monotonic false ->
+    // true; a benign one-word race (concurrent walks both latch true).
+    __atomic_store_n(&src_priv->client->cacheable, true, __ATOMIC_RELAXED);
 
     w->nqid = (int)nwqid;
     // The parent of component i: c for i==0, else the previous walked component.
@@ -730,10 +750,45 @@ static long dev9p_read(struct Spoor *c, void *buf, long n, s64 off) {
     // u32 cap on the read count + s64-to-u64 cast on offset.
     u32 count = (n > 0x7fffffffL) ? 0x7fffffffu : (u32)n;
     u64 offset = (off < 0) ? 0 : (u64)off;
+    struct larder *l = &p->client->larder;
+    bool cacheable = __atomic_load_n(&p->client->cacheable, __ATOMIC_RELAXED);
+    // L1e page serve (fs_cache.tla Read): the ONE cached page containing `offset`,
+    // fresh (cvers == this fid's qid.vers) + in range, is served RPC-free. One page
+    // per call bounds the <= 4 KiB copy under the Larder lock; a short serve is a
+    // legal short read the caller loops on. Gated on `cacheable` -- a stream server
+    // (netd /net: consuming reads, qid.version 0) is never page-cached, so an offset
+    // re-read can never serve stale stream bytes. `buf` is a kernel bounce buffer
+    // (SYS_READ scratch), so the copy is kernel-to-kernel (no uaccess).
+    u64 seq0 = 0;
+    if (cacheable) {
+        u64 page_index = offset / LARDER_PAGE_SIZE;
+        u32 page_off   = (u32)(offset % LARDER_PAGE_SIZE);
+        u32 served = larder_page_serve(l, c->qid.path, page_index, page_off,
+                                       count, c->qid.vers, (u8 *)buf, &seq0);
+        if (served > 0)
+            return (long)served;
+    }
     u32 got = 0;
     int rc = p9_client_read(p->client, p->fid, offset, count, (u8 *)buf, &got);
     // #3 (Area F errno-rollout): propagate the real ecode, not -1. See dev9p_write.
     if (rc != 0) return (long)rc;
+    // L1e page populate (fs_cache.tla Refetch): cache each page the read covered
+    // FROM ITS ALIGNED START -- a page whose start is within [offset, offset+got)
+    // holds bytes [0, valid_len) with no hole. An unaligned read's first (partial-
+    // front) page is skipped (its start precedes `offset`); the caller's aligned
+    // reads populate the rest. cvers = this fid's qid.vers; the seq0 gen guard
+    // (captured at the serve miss above) skips a fill that raced an own-write.
+    if (cacheable && got > 0) {
+        u64 end = offset + (u64)got;
+        // First page whose aligned start is >= offset.
+        u64 ps = (offset + (LARDER_PAGE_SIZE - 1)) / LARDER_PAGE_SIZE * LARDER_PAGE_SIZE;
+        for (; ps < end; ps += LARDER_PAGE_SIZE) {
+            u64 rem  = end - ps;
+            u32 plen = (rem >= LARDER_PAGE_SIZE) ? LARDER_PAGE_SIZE : (u32)rem;
+            larder_page_install(l, seq0, c->qid.path, ps / LARDER_PAGE_SIZE,
+                                c->qid.vers, (const u8 *)buf + (ps - offset), plen);
+        }
+    }
     return (long)got;
 }
 
@@ -765,10 +820,13 @@ static long dev9p_write(struct Spoor *c, const void *buf, long n, s64 off) {
     // ecode==1) collides with the -1 generic sentinel -> EIO; conveying it
     // needs a wider channel (the ER-rollout's job).
     if (rc != 0) return (long)rc;
-    // L1c invalidate (fs_cache.tla OwnWrite): the file's attrs changed
-    // (size/mtime/cvers). Drop its cached entry so a subsequent stat/fstat cannot
-    // serve the pre-write metadata -- the guest sees its own write strongly.
+    // L1c/L1e invalidate (fs_cache.tla OwnWrite): the file's attrs (size/mtime/
+    // cvers) AND its content changed. Drop its cached attr entry AND every cached
+    // page so a subsequent stat/fstat/read cannot serve the pre-write metadata or
+    // bytes -- the guest sees its own write strongly (unconditional: harmless
+    // no-ops for a non-cacheable client, whose caches are empty).
     larder_attr_invalidate(&p->client->larder, c->qid.path);
+    larder_page_invalidate(&p->client->larder, c->qid.path);
     return (long)accepted;
 }
 

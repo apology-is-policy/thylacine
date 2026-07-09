@@ -911,6 +911,16 @@ void test_larder_dentry_invalidate_parent(void);
 void test_larder_dentry_gen_guard(void);
 void test_larder_dentry_name_too_long(void);
 void test_larder_dentry_bounded(void);
+void test_larder_page_serve(void);
+void test_larder_page_serve_miss(void);
+void test_larder_page_offset(void);
+void test_larder_page_cvers_mismatch(void);
+void test_larder_page_partial(void);
+void test_larder_page_invalidate(void);
+void test_larder_page_gen_guard(void);
+void test_larder_page_overwrite(void);
+void test_larder_page_bounded(void);
+void test_larder_page_destroy_frees(void);
 
 void test_dev9p_registered(void);
 void test_dev9p_attach_client_root_spoor(void);
@@ -938,6 +948,7 @@ void test_dev9p_wstat_native_drives_setattr(void);
 void test_dev9p_prw_wire_offset_and_cursor(void);
 void test_dev9p_wstat_readonly_fd(void);
 void test_dev9p_walk_attrs(void);
+void test_dev9p_page_cache_serve_and_gate(void);
 void test_dev9p_perm_enforced_deny_allow(void);
 void test_p9_attached_create_destroy(void);
 void test_p9_attached_handshake_failure_returns_null(void);
@@ -2155,6 +2166,16 @@ struct test_case g_tests[] = {
     { "larder.dentry_gen_guard",       test_larder_dentry_gen_guard,       false, NULL },
     { "larder.dentry_name_too_long",   test_larder_dentry_name_too_long,   false, NULL },
     { "larder.dentry_bounded",         test_larder_dentry_bounded,         false, NULL },
+    { "larder.page_serve",             test_larder_page_serve,             false, NULL },
+    { "larder.page_serve_miss",        test_larder_page_serve_miss,        false, NULL },
+    { "larder.page_offset",            test_larder_page_offset,            false, NULL },
+    { "larder.page_cvers_mismatch",    test_larder_page_cvers_mismatch,    false, NULL },
+    { "larder.page_partial",           test_larder_page_partial,           false, NULL },
+    { "larder.page_invalidate",        test_larder_page_invalidate,        false, NULL },
+    { "larder.page_gen_guard",         test_larder_page_gen_guard,         false, NULL },
+    { "larder.page_overwrite",         test_larder_page_overwrite,         false, NULL },
+    { "larder.page_bounded",           test_larder_page_bounded,           false, NULL },
+    { "larder.page_destroy_frees",     test_larder_page_destroy_frees,     false, NULL },
     { "9p_client.weftio",              test_9p_client_weftio,              false, NULL },
     { "9p_client.mkdir",               test_9p_client_mkdir,               false, NULL },
     { "9p_client.unlinkat",            test_9p_client_unlinkat,            false, NULL },
@@ -2281,6 +2302,7 @@ struct test_case g_tests[] = {
                                        test_dev9p_prw_wire_offset_and_cursor, false, NULL },
     { "dev9p.wstat_readonly_fd",       test_dev9p_wstat_readonly_fd,          false, NULL },
     { "dev9p.walk_attrs",              test_dev9p_walk_attrs,                 false, NULL },
+    { "dev9p.page_cache_serve_and_gate", test_dev9p_page_cache_serve_and_gate, false, NULL },
     { "dev9p.perm_enforced_deny_allow",
                                        test_dev9p_perm_enforced_deny_allow, false, NULL },
     { "p9_attached.create_destroy",    test_p9_attached_create_destroy,    false, NULL },

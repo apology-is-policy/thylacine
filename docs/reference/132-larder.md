@@ -1,8 +1,11 @@
 # 132 — The Larder (guest-side 9P FS cache)
 
-**Status:** L1c + L1d LANDED — the substrate + the **attr** sub-cache (L1c) + the
-**dentry** sub-cache incl. negative entries (L1d). The page (L1e) sub-cache extends
-the same owner/lock/key and is not yet built.
+**Status:** L1c + L1d + L1e LANDED — the substrate + the **attr** sub-cache (L1c),
+the **dentry** sub-cache incl. negative entries (L1d), and the **page** sub-cache
+(L1e). L1e also adds the load-bearing **cacheability gate** (a per-`p9_client`
+`cacheable` flag proven by a successful `Twalkgetattr`) that engages the whole
+Larder ONLY for a content-versioned FS — a stream/control server (netd `/net`) is
+never cached. L1f (the focused audit + full SMP gate + gofmt re-measure) is next.
 
 The Larder is the guest-side cache of FS metadata + data the guest has already
 fetched over 9P, so a repeated stat/walk/read is served locally instead of
@@ -66,11 +69,34 @@ void larder_dentry_install(struct larder *l, u64 seq0, u64 parent_qid_path,
 // Invalidate (OwnWrite). Drop EVERY dentry whose parent is parent_qid_path +
 // bump gen. The dentry cache's SOLE coherence mechanism (no cvers gate).
 void larder_dentry_invalidate_parent(struct larder *l, u64 parent_qid_path);
+
+// --- L1e: the page sub-cache ---
+
+// Serve (Read). On a HIT for (qid_path, page_index) with cvers == want_cvers and
+// page_off < valid_len, copy min(want, valid_len - page_off) bytes into out UNDER
+// the lock, return the count (> 0). Else set *seq0_out = gen and return 0. One
+// page per call (bounded copy under the lock; caller loops the short serve).
+u32 larder_page_serve(struct larder *l, u64 qid_path, u64 page_index,
+                      u32 page_off, u32 want, u32 want_cvers,
+                      u8 *out, u64 *seq0_out);
+
+// Populate (Open/Refetch). Install (qid_path, page_index) with len bytes [0,len)
+// from data (from the page's aligned start), tagged cvers, IFF gen == seq0. Lazily
+// kmallocs the slot's 4 KiB buffer (a failure skips -- best-effort). len clamped.
+void larder_page_install(struct larder *l, u64 seq0, u64 qid_path, u64 page_index,
+                         u32 cvers, const u8 *data, u32 len);
+
+// Invalidate (OwnWrite). Drop EVERY cached page of qid_path + bump gen. Buffers
+// are retained for reuse.
+void larder_page_invalidate(struct larder *l, u64 qid_path);
+
+// Free every lazily-allocated page buffer (called from p9_client_destroy).
+void larder_destroy(struct larder *l);
 ```
 
-All are NULL-defensive (a NULL Larder is a miss / no-op). `larder_attr_serve` and
-`larder_walk_serve` copy their `t_stat`(s) out under the lock — a concurrent
-invalidate can never tear a serve.
+All are NULL-defensive (a NULL Larder is a miss / no-op). `larder_attr_serve`,
+`larder_walk_serve`, and `larder_page_serve` copy their data out under the lock — a
+concurrent invalidate/evict can never tear a serve or free a page mid-copy.
 
 ## Data structures
 
@@ -218,6 +244,51 @@ walk (`nwqid < nname`) or a first-component `Rlerror ENOENT`, a negative dentry 
 the miss. All gen-guarded by the same pre-RPC `wga_seq0` snapshot as the attr
 populate. NEVER from a readdir qid (the L1a-2 rule).
 
+## The page sub-cache (L1e)
+
+`(qid.path, page_index) → { bytes[0..valid_len), cvers }`, a 512-slot LRU table
+(`LARDER_PAGE_ENTRIES`; ~2 MiB of heap at capacity). The slot metadata is inline in
+`struct larder`; each slot's 4 KiB buffer is a **lazily-kmalloc'd heap page**,
+reused across evictions, freed only at `larder_destroy` (from `p9_client_destroy`).
+Maps to `fs_cache.tla`'s `Read` + `Open` + `OwnWrite` on content tokens — **no spec
+extension** (a page is a content token like an attr).
+
+**The cacheability gate (§3.3, the load-bearing L1e addition).** The page cache
+caches file CONTENT, so it engages ONLY for a `cacheable` client (`p9_client.cacheable`
+— latched true by a successful `Twalkgetattr`, the v1.0 proxy for a
+content-versioned, offset-stable FS). `dev9p_read` gates serve *and* populate on it,
+so a stream server (netd `/net` — consuming reads, `qid.version` 0) is never
+page-cached (an offset re-read would serve stale stream bytes). Fail-safe (default
+false, settled before the first read); it also gates `dev9p_stat_native` (closing
+the latent L1c netd-attr gap).
+
+**Serve.** `dev9p_read` computes `page_index = off / 4096`, `page_off = off % 4096`,
+and serves the one page if it exists, `cvers == c->qid.vers` (the reader fid's
+version — the close-to-open `Open` gate; catches a cross-open external write), and
+`page_off < valid_len`. A hit copies `min(want, valid_len - page_off)` bytes under
+the lock and returns that count — a short serve is a legal short read the caller
+loops on (one-page-per-call bounds the ≤ 4 KiB copy under the leaf lock). A partial
+(small-file / EOF) page serves only within `[0, valid_len)` and misses beyond (the
+caller's next read refetches), so **no EOF determination is needed**.
+
+**Populate.** After the read RPC, `dev9p_read` installs each page the read covered
+**from its aligned start** (`page_start ∈ [offset, offset+got)`), so every cached
+page holds `[0, valid_len)` with no hole; an unaligned read's partial-front page is
+skipped. `cvers = c->qid.vers`; gen-guarded by the `seq0` snapshot from the serve
+miss (skips a fill that raced an own-write — the resurrection close).
+
+**Invalidate.** `dev9p_write` drops every cached page of the file
+(`larder_page_invalidate` by `qid.path`) + bumps gen, so the guest sees its own
+write strongly. (A whole-file drop, not per-range — sound; a precise invalidate is
+a v1.x tuning.)
+
+**Page-buffer lifetime (SMP).** A serve copies OUT under the lock; an evict / reuse
+/ invalidate / destroy runs UNDER the lock; a slot's buffer is never freed on evict
+(only reused or freed at destroy), so a concurrent serve can never read a freed
+buffer. `kmalloc(4096)` is non-blocking (buddy `zone->lock`, a leaf below the leaf
+`l->lock` — the **`l->lock → buddy` order**), so the lazy alloc is safe under the
+lock (LARDER-DESIGN §7 anticipated this order).
+
 ## State / coherence properties
 
 - **Own-write happens-before a later read → the read sees the write.** The
@@ -250,8 +321,21 @@ populate. NEVER from a readdir qid (the L1a-2 rule).
   the Larder between its wire sub-tests (they flip the wire result for one path
   without a mutation — non-physical for single-writer — so the cache would
   otherwise serve a stale entry).
+- `kernel/test/test_larder.c` (page, L1e) — `larder.page_serve` (bytes verbatim) /
+  `page_serve_miss` (gen handed back) / `page_offset` (page_off + want) /
+  `page_cvers_mismatch` (the Open gate) / `page_partial` (serve within valid_len,
+  miss beyond) / `page_invalidate` (OwnWrite drops all pages + bumps gen) /
+  `page_gen_guard` (the resurrection close) / `page_overwrite` (buffer reused) /
+  `page_bounded` (I-32) / `page_destroy_frees`.
+- `kernel/test/test_dev9p.c::test_dev9p_page_cache_serve_and_gate` — the L1e
+  integration proof (non-vacuous: `1076/1077 FAIL` with the `dev9p_read` serve
+  disabled): a cacheable client's re-read is served with NO second Tread (the
+  sentinel-offset trick reuses the loopback's Tread-offset capture as a
+  "was a Tread sent?" probe), a non-cacheable client's re-read RPCs (the gate), and
+  an own-write invalidates the page.
 - In-guest: `stalk-2` cross-mount E2E (the delete+recreate+create-in-it sequence),
-  `fs-mut-smoke`, `probe46` (fstat). 1066/1066 + boot OK.
+  `fs-mut-smoke`, `probe46` (fstat). 1077/1077 + boot OK + reduced SMP gate 20/20
+  (default+ubsan-smp4, 0 corruption).
 
 ## Error paths
 
@@ -277,11 +361,20 @@ dentry + page sub-caches). The `attr_*` diagnostics counters expose the hit rate
 - **Never populate from a readdir qid** (the L1a-2 audit-F1 rule): Rreaddir's
   `qid.version` is a link-time `si_gen` snapshot, not `si_cvers`. L1c populates
   only from getattr/walk_attrs; `dev9p_readdir` has no populate.
-- **The Larder is uniform across dev9p sessions.** Attr + dentry caching is sound
-  for any 9P server (attrs are close-to-open coherent; name-bindings are own-write
-  invalidated; for `/net` the attrs are kind-static and the tree is flat). The L1e
-  page cache — which caches file CONTENT — will need a gate for a
-  non-content-versioned server (e.g. `/net` dynamic reads).
+- **The Larder engages only for a `cacheable` client (the L1e gate).** A
+  per-`p9_client` `cacheable` flag (default false) latches true on the first
+  successful `Twalkgetattr` (POUNCE) — the v1.0 proxy for a content-versioned,
+  offset-stable FS. `dev9p_stat_native` (attr) and `dev9p_read` (page) gate serve
+  *and* populate on it; the dentry `walk_serve` is additionally guarded by the
+  `wga_unsupported` latch. A stream/control server (netd `/net` — consuming reads,
+  `qid.version` 0) answers `Twalkgetattr` ENOSYS and never latches, so it is never
+  cached (no stale stream bytes, no out-of-band-mutated stale attr). This closed
+  the latent L1c gap (attr caching previously had no server gate). netd is the only
+  non-Stratum dev9p client at v1.0; corvus is a byte-mode SrvConn (no Larder);
+  `/proc` `/ctl` `/env` `/dev` are native kernel Devs (no dev9p, no Larder). The
+  POUNCE-support proxy is not identical to the true property (a future POUNCE-but-
+  streaming server, or a content-versioned FS without POUNCE, needs an explicit
+  attach-time capability — a v1.x add); it is fail-safe (unproven → not cached).
 - **The Loom async path bypasses the Larder (L1c/L1d seam).** The Larder is
   populated + invalidated only on the SYNCHRONOUS dev9p path. The Loom async
   engine (`kernel/loom.c` — `LOOM_OP_WRITE` / `MKNOD` / `SYMLINK` / `LINK` /

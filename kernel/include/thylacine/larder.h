@@ -83,6 +83,19 @@
 #define LARDER_DENTRY_ENTRIES  256u
 #define LARDER_DENTRY_NAME_MAX 88u
 
+// Page-cache capacity + unit (L1e). Each slot caches one LARDER_PAGE_SIZE window of
+// a file's content, keyed (qid.path, page_index = file offset / LARDER_PAGE_SIZE).
+// The unit is one 4 KiB page (aligns with the buddy/demand-page system and Go's
+// page-aligned .a reads). LARDER_PAGE_ENTRIES slots x 4 KiB = the per-client page
+// budget: the slot buffers are HEAP (unlike the inline attr/dentry entries), lazily
+// kmalloc'd per slot, reused across evictions, freed at larder_destroy. 512 slots
+// = 2 MiB caches the hot cold-read re-read set (cross-package .a export data --
+// 83.9% cold read redundancy); tunable at L1f. Only a cacheable client (a proven
+// content-versioned FS -- p9_client.cacheable) ever allocates page buffers, so a
+// stream/control server (netd) costs only the inline slot metadata, never heap.
+#define LARDER_PAGE_ENTRIES 512u
+#define LARDER_PAGE_SIZE    4096u
+
 struct larder_attr_ent {
     u64            qid_path;   // key. root's qid.path is 0x0, so `valid` (not
                                //   path==0) marks an empty slot.
@@ -113,12 +126,33 @@ struct larder_dentry_ent {
     char name[LARDER_DENTRY_NAME_MAX];   // the component (NOT NUL-terminated)
 };
 
+// A cached file-content page (L1e). Keyed (qid_path, page_index). Coherence is
+// close-to-open, keyed on the file's content-version: a page is served only while
+// its `cvers` matches the reader's fid version (Spoor qid.vers), and is dropped on
+// the guest's own write to the file (larder_page_invalidate). Bytes [0, valid_len)
+// hold content from the page's ALIGNED START -- a read that did not cover the page
+// start does not populate it (LARDER-DESIGN section 4), so there is never a hole; a
+// serve reads only within [0, valid_len) and misses beyond (falls to the RPC), so
+// a partial (small-file / EOF) page is served soundly without an EOF determination.
+// `page` is a lazily-allocated heap buffer, reused across evictions, freed only at
+// larder_destroy (a slot's buffer outlives the (qid_path,page_index) it caches).
+struct larder_page_ent {
+    u64  qid_path;     // key part 1
+    u64  page_index;   // key part 2: file offset / LARDER_PAGE_SIZE
+    u32  cvers;        // content-version (fid qid.vers) at fetch -- the freshness gate
+    u32  valid_len;    // bytes [0, valid_len) of `page` hold content (<= LARDER_PAGE_SIZE)
+    bool valid;        // slot occupied (buffer may still be allocated when !valid)
+    u64  lru;          // last-access sequence (LRU eviction)
+    u8  *page;         // heap buffer (lazily kmalloc'd; reused; freed at larder_destroy)
+};
+
 struct larder {
     spin_lock_t               lock;       // dedicated near-leaf; never held across an RPC
     u64                       lru_clock;  // monotonic; stamps ent->lru on access
     u64                       gen;        // monotonic invalidation sequence (populate guard)
     struct larder_attr_ent    attr[LARDER_ATTR_ENTRIES];
     struct larder_dentry_ent  dentry[LARDER_DENTRY_ENTRIES];
+    struct larder_page_ent    page[LARDER_PAGE_ENTRIES];
     // Diagnostics (hit-rate measurement for the L1f bench; not load-bearing).
     u64 attr_hits;
     u64 attr_misses;
@@ -133,6 +167,12 @@ struct larder {
     u64 dentry_install_skips; // gen-guard skips
     u64 dentry_invalidations; // entries dropped by invalidate-parent
     u64 dentry_evictions;
+    u64 page_hits;            // page serves (RPC-free byte deliveries)
+    u64 page_misses;          // page serve misses (miss / stale cvers / out of range)
+    u64 page_installs;
+    u64 page_install_skips;   // gen-guard skips
+    u64 page_invalidations;   // pages dropped by own-write invalidate
+    u64 page_evictions;
 };
 
 // Initialize an embedded Larder (memset-equivalent + lock init). No teardown --
@@ -201,5 +241,47 @@ void larder_dentry_install(struct larder *l, u64 seq0, u64 parent_qid_path,
 // listing must be skipped). This is the dentry cache's SOLE coherence mechanism
 // (there is no parent-cvers gate -- LARDER-DESIGN §4).
 void larder_dentry_invalidate_parent(struct larder *l, u64 parent_qid_path);
+
+// -- L1e: the page sub-cache ----------------------------------------------------
+//
+// The page cache holds file CONTENT, so it is engaged only for a CACHEABLE client
+// (a proven content-versioned FS -- p9_client.cacheable; the dev9p hooks gate on
+// it). A stream/control server (netd /net -- consuming reads, no offset stability,
+// qid.version always 0) is never page-cached: a re-read of an offset would serve
+// stale stream bytes. That gate lives in the dev9p caller (it holds the client);
+// these functions are the mechanism.
+
+// Serve (fs_cache.tla Read). On a HIT for (qid_path, page_index) whose cvers ==
+// want_cvers and page_off < valid_len, copy min(want, valid_len - page_off) bytes
+// into `out` UNDER the lock and return the count (> 0). Otherwise set *seq0_out to
+// the current gen (the caller's populate guard) and return 0. ONE page per call
+// (a bounded <= 4 KiB copy under the lock); the caller loops for a multi-page read
+// (a short serve is a legal short read). A cvers mismatch is a cross-open external
+// write (close-to-open) -> miss + refetch. NULL l/out or want == 0 -> 0.
+u32 larder_page_serve(struct larder *l, u64 qid_path, u64 page_index,
+                      u32 page_off, u32 want, u32 want_cvers,
+                      u8 *out, u64 *seq0_out);
+
+// Populate (Open/Refetch). Install page (qid_path, page_index) with `len` bytes
+// [0, len) of `data` (content from the page's aligned start), tagged `cvers`, IFF
+// l->gen == seq0 (no invalidate raced the read since the snapshot -- the
+// resurrection close). `len` is clamped to LARDER_PAGE_SIZE. Lazily allocates the
+// slot's 4 KiB buffer under the lock (kmalloc is non-blocking -> buddy zone->lock,
+// the pinned larder -> buddy lock order); a kmalloc failure skips the install (the
+// RPC already served the bytes -- the cache is a best-effort accelerator, I-38
+// correctness never depends on a fill). Overwrite (qid_path,page_index) / free
+// slot / LRU victim (reusing its retained buffer).
+void larder_page_install(struct larder *l, u64 seq0, u64 qid_path, u64 page_index,
+                         u32 cvers, const u8 *data, u32 len);
+
+// Invalidate (OwnWrite). Drop EVERY cached page of `qid_path` (the guest wrote the
+// file) and bump gen (always -- a concurrent populate that read the pre-write
+// content must be skipped). Slot buffers are retained for reuse.
+void larder_page_invalidate(struct larder *l, u64 qid_path);
+
+// Free every lazily-allocated page buffer. Called from p9_client_destroy (the
+// attr/dentry sub-caches are inline -- only the page buffers are heap). No op is
+// in flight at destroy (the last attached ref dropped), so the lock is defensive.
+void larder_destroy(struct larder *l);
 
 #endif // THYLACINE_LARDER_H

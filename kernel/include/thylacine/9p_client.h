@@ -208,6 +208,18 @@ struct p9_client {
     // falls back to the per-component loop). One-way false -> true; a benign
     // one-word race (two concurrent probes both latch the same value).
     bool                 wga_unsupported;
+    // L1e cacheability gate: true once this mount's server has proven it is a
+    // content-versioned FS by answering a Twalkgetattr (POUNCE) successfully --
+    // the v1.0 proxy for "offset-stable, content-versioned reads" (Stratum). The
+    // whole Larder (attr + page) engages ONLY for a cacheable client: a stream /
+    // control server (netd /net -- consuming reads, qid.version always 0) answers
+    // Twalkgetattr Rlerror ENOSYS, so it never latches cacheable and is never
+    // cached (a re-read of an offset would serve stale stream bytes). FAIL-SAFE:
+    // default false; set only on proven support (before any read -- a file is
+    // resolved via walk_attrs before it is read). One-way false -> true; a benign
+    // one-word race. Accessed with __atomic (relaxed -- a monotonic optimization
+    // hint; the Larder lock orders the cached data itself).
+    bool                 cacheable;
     // The Larder -- the guest-side FS cache (L1c; docs/LARDER-DESIGN.md, I-38).
     // Shared by every Proc/thread resolving through this mount; protected by its
     // OWN near-leaf lock (never held with c->lock -- the RPCs that take c->lock

@@ -3,6 +3,7 @@
 // docs/LARDER-DESIGN.md for the full scripture; ARCH section 28 I-38.
 
 #include <thylacine/larder.h>
+#include "../mm/slub.h"   // kmalloc / kfree for the L1e page-buffer pool
 
 void larder_init(struct larder *l) {
     if (!l) return;
@@ -247,6 +248,150 @@ void larder_dentry_invalidate_parent(struct larder *l, u64 parent_qid_path) {
         if (e->valid && e->parent_qid_path == parent_qid_path) {
             e->valid = false;
             l->dentry_invalidations++;
+        }
+    }
+    spin_unlock(&l->lock);
+}
+
+// -- L1e: the page sub-cache ----------------------------------------------------
+
+// Copy `n` bytes (no freestanding memcpy -- the loom_bufcopy precedent, widened to
+// 8-byte words for the up-to-4 KiB page copy). Word-copy only when both ends are
+// 8-aligned (the page-aligned read fast path -- Go's .a reads); byte-copy otherwise
+// (unaligned: UBSan-clean, correctness over speed). Both ends are kernel memory.
+static void larder_pagecopy(u8 *dst, const u8 *src, u32 n) {
+    if ((((u64)dst | (u64)src) & 7u) == 0) {
+        u32 i = 0;
+        for (; i + 8 <= n; i += 8) *(u64 *)(dst + i) = *(const u64 *)(src + i);
+        for (; i < n; i++) dst[i] = src[i];
+    } else {
+        for (u32 i = 0; i < n; i++) dst[i] = src[i];
+    }
+}
+
+// Find the page slot (qid_path, page_index) (valid), or NULL. Caller holds l->lock.
+static struct larder_page_ent *page_find_locked(struct larder *l, u64 qid_path,
+                                                u64 page_index) {
+    for (u32 i = 0; i < LARDER_PAGE_ENTRIES; i++) {
+        struct larder_page_ent *e = &l->page[i];
+        if (e->valid && e->qid_path == qid_path && e->page_index == page_index)
+            return e;
+    }
+    return NULL;
+}
+
+u32 larder_page_serve(struct larder *l, u64 qid_path, u64 page_index,
+                      u32 page_off, u32 want, u32 want_cvers,
+                      u8 *out, u64 *seq0_out) {
+    if (!l || !out || want == 0) return 0;
+    spin_lock(&l->lock);
+    struct larder_page_ent *e = page_find_locked(l, qid_path, page_index);
+    // Serve only a fresh (cvers-matching), in-range slot. A cvers mismatch is a
+    // cross-open external write (close-to-open); page_off >= valid_len is past the
+    // page's known content (the caller's next read, at valid_len, refetches -- so
+    // a partial page needs no EOF determination). Copy [0, chunk) out UNDER the
+    // lock so a concurrent invalidate/evict cannot free `page` mid-copy.
+    if (e && e->cvers == want_cvers && page_off < e->valid_len) {
+        u32 avail = e->valid_len - page_off;
+        u32 chunk = (want < avail) ? want : avail;
+        larder_pagecopy(out, e->page + page_off, chunk);
+        e->lru = ++l->lru_clock;
+        l->page_hits++;
+        spin_unlock(&l->lock);
+        return chunk;
+    }
+    // Miss: hand back the gen snapshot for the caller's install guard (a stale slot
+    // is left in place -- the subsequent install for the same key overwrites it).
+    if (seq0_out) *seq0_out = l->gen;
+    l->page_misses++;
+    spin_unlock(&l->lock);
+    return 0;
+}
+
+// Choose the install slot for (qid_path, page_index): an existing entry
+// (overwrite), else a free slot, else the LRU victim (its retained buffer is
+// reused). Caller holds l->lock. Never returns NULL.
+static struct larder_page_ent *page_install_slot_locked(struct larder *l,
+                                                        u64 qid_path,
+                                                        u64 page_index) {
+    struct larder_page_ent *free_slot = NULL;
+    struct larder_page_ent *lru_victim = NULL;
+    for (u32 i = 0; i < LARDER_PAGE_ENTRIES; i++) {
+        struct larder_page_ent *e = &l->page[i];
+        if (e->valid && e->qid_path == qid_path && e->page_index == page_index)
+            return e;                          // overwrite (revalidate-by-overwrite)
+        if (!e->valid) {
+            if (!free_slot) free_slot = e;     // prefer a free slot (may hold a reusable buffer)
+        } else if (!lru_victim || e->lru < lru_victim->lru) {
+            lru_victim = e;
+        }
+    }
+    if (free_slot) return free_slot;
+    l->page_evictions++;
+    return lru_victim;                         // full: evict LRU (always non-NULL)
+}
+
+void larder_page_install(struct larder *l, u64 seq0, u64 qid_path, u64 page_index,
+                         u32 cvers, const u8 *data, u32 len) {
+    if (!l || !data) return;
+    if (len > LARDER_PAGE_SIZE) len = LARDER_PAGE_SIZE;
+    spin_lock(&l->lock);
+    // The gen guard (same as attr/dentry): an invalidate raced the read since the
+    // seq0 snapshot -> the read may have seen the pre-mutation content; skip the
+    // install (the populate-after-invalidate resurrection close, larder.h note).
+    if (l->gen != seq0) {
+        l->page_install_skips++;
+        spin_unlock(&l->lock);
+        return;
+    }
+    struct larder_page_ent *e = page_install_slot_locked(l, qid_path, page_index);
+    // Lazily allocate the slot's 4 KiB buffer (retained + reused across evictions).
+    // kmalloc is non-blocking (buddy zone->lock, a leaf below l->lock -- the pinned
+    // larder -> buddy order), so it is safe under the spinlock. A failure skips the
+    // install (best-effort; the RPC already served the bytes -- I-38 never depends
+    // on a fill). Only a cacheable client reaches here, so netd allocates no pages.
+    if (!e->page) {
+        e->page = kmalloc(LARDER_PAGE_SIZE, 0);
+        if (!e->page) {
+            spin_unlock(&l->lock);
+            return;
+        }
+    }
+    larder_pagecopy(e->page, data, len);
+    e->qid_path   = qid_path;
+    e->page_index = page_index;
+    e->cvers      = cvers;
+    e->valid_len  = len;
+    e->valid      = true;
+    e->lru        = ++l->lru_clock;
+    l->page_installs++;
+    spin_unlock(&l->lock);
+}
+
+void larder_page_invalidate(struct larder *l, u64 qid_path) {
+    if (!l) return;
+    spin_lock(&l->lock);
+    // Bump gen ALWAYS (a concurrent populate that read the pre-write content must
+    // be skipped -- the same guard as the attr/dentry paths).
+    l->gen++;
+    for (u32 i = 0; i < LARDER_PAGE_ENTRIES; i++) {
+        struct larder_page_ent *e = &l->page[i];
+        if (e->valid && e->qid_path == qid_path) {
+            e->valid = false;   // buffer retained for reuse
+            l->page_invalidations++;
+        }
+    }
+    spin_unlock(&l->lock);
+}
+
+void larder_destroy(struct larder *l) {
+    if (!l) return;
+    spin_lock(&l->lock);
+    for (u32 i = 0; i < LARDER_PAGE_ENTRIES; i++) {
+        if (l->page[i].page) {
+            kfree(l->page[i].page);
+            l->page[i].page  = NULL;
+            l->page[i].valid = false;
         }
     }
     spin_unlock(&l->lock);

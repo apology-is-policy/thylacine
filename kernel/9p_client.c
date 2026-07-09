@@ -899,6 +899,7 @@ int p9_client_init(struct p9_client *c,
     // pull fresh fids monotonically via p9_client_alloc_fid.
     c->next_fid     = (root_fid < P9_NOFID - 1) ? (root_fid + 1) : 1;
     c->wga_unsupported = false;   // POUNCE: Twalkgetattr capability unknown
+    c->cacheable       = false;   // L1e: not a proven content-versioned FS yet
     larder_init(&c->larder);      // L1c: the guest FS cache (its own leaf lock)
     c->total_ops    = 0;
     c->total_errors = 0;
@@ -923,6 +924,10 @@ void p9_client_destroy(struct p9_client *c) {
     if (c->out_buf && c->out_buf != c->out_buf_inline) kfree(c->out_buf);
     c->out_buf     = NULL;
     c->out_buf_cap = 0;
+    // L1e: free the Larder's lazily-allocated page buffers (the attr/dentry
+    // sub-caches are inline in *c -- nothing to free there). No op is in flight
+    // (last attached ref dropped), so the Larder lock is uncontended.
+    larder_destroy(&c->larder);
     p9_transport_destroy(&c->transport);
     p9_session_destroy(&c->session);
 }

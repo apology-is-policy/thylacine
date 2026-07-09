@@ -1499,7 +1499,7 @@ stranded-work counterexample rather than a masked latency hiccup.
 > decoupled) landed at L1a-1 (`inode.tla`) + L1a-2 (the 9P wire, `server.c`).
 
 Status: **model LANDED (L1b), TLC-green; ATTR sub-cache LANDED (L1c); DENTRY
-sub-cache LANDED (L1d); page OWED (L1e).** Models the per-`p9_client` Larder + the `cvers`
+sub-cache LANDED (L1d); PAGE sub-cache LANDED (L1e, + the cacheability gate).** Models the per-`p9_client` Larder + the `cvers`
 close-to-open coherence: the open-time revalidation gate AND the own-write
 write-through invalidation, interleaved on the shared client (the
 invalidate-vs-serve SMP race). Proves I-38 (LARDER-DESIGN §6): a served value
@@ -1517,7 +1517,7 @@ owner/lock/key.
 | Spec action | Impl site |
 |---|---|
 | `Open(f)` (revalidate + populate; the `cvers` check point) | `kernel/dev9p.c::dev9p_walk_attrs` (per-component free populate, `larder_attr_install` after the walkgetattr RPC) + `dev9p_stat_native`'s miss-populate. Both ALWAYS install from the fresh RPC (revalidate-by-overwrite) — the L1c attr serve does not re-check `cvers` (that's a `Read`). The `cvers`-compare `Open` gate is used by the attr/page sub-caches (each validated by its OWN file's `cvers`); the **dentry** sub-cache (L1d) does NOT use it — a name-binding has no directory-content version to revalidate against (the parent `si_cvers` does not track dirent changes; L1d ground truth), so the dentry cache is the `Read`+`OwnWrite` subset. The `cvers` gate becomes load-bearing at the L1e page-serve. |
-| `Read(f)` (serve without re-check) | `kernel/dev9p.c::dev9p_stat_native` serve fast path (`larder_attr_serve` — the base X-check re-stat storm + fstat, the biggest cheap win). Page serve at `dev9p_read` is L1e. |
+| `Read(f)` (serve without re-check) | `kernel/dev9p.c::dev9p_stat_native` serve fast path (`larder_attr_serve` — the base X-check re-stat storm + fstat, the biggest cheap win). Page serve at `dev9p_read` (`larder_page_serve`) is L1e (below). Both serve paths are gated on `p9_client.cacheable`. |
 | `OwnWrite(f)` (bump + write-through invalidate) | `kernel/dev9p.c` `larder_attr_invalidate` at `dev9p_write` / `dev9p_wstat_native` (file) + `dev9p_create` (parent AND the child — the created qid.path may reuse a freed ino, so its stale prior-occupant attr must drop; the create path never runs `walk_attrs`) / `dev9p_rename` (both dirs) / `dev9p_unlink` (parent). |
 | `ExternalWrite(f)` (out-of-band bump, no invalidate) | not an impl site — models an out-of-band Stratum mutation; the impl obligation is that `Open`'s revalidation catches it. |
 | `Evict(f)` (capacity/LRU drop) | `kernel/larder.c::attr_install_slot_locked` (LRU-min victim when the bounded `LARDER_ATTR_ENTRIES` array is full; I-32). |
@@ -1540,6 +1540,34 @@ invalidate. This is exactly `fs_cache.cfg`'s single-writer regime restricted to
 | `Refetch(f, fresh)` (install) | `kernel/larder.c::larder_dentry_install` (positive per walked component + negative on a partial/first-component miss) at `dev9p_walk_attrs`. GEN-GUARDED by the same `wga_seq0` snapshot as the attr populate. |
 | `Evict(f)` (capacity/LRU drop) | `kernel/larder.c::dentry_install_slot_locked` (LRU-min victim when the bounded `LARDER_DENTRY_ENTRIES` array is full; I-32). |
 | `Open(f)` / `ExternalWrite(f)` | NOT used by the dentry sub-cache (no `cvers` gate). An out-of-band dirent change is bounded by LRU / the next own-sync mutation, not a revalidation window (the documented dentry external-writer seam, LARDER-DESIGN §11). |
+
+### Action → impl mapping (page sub-cache; L1e LANDED)
+
+The page sub-cache is the full `Read`+`Open`+`OwnWrite` model on content tokens
+keyed `(qid.path, page_index)` — a page IS a content token like an attr, so **no
+spec extension**. It engages ONLY for a `cacheable` client (a proven
+content-versioned FS; the gate below). The "file" of the model is the file's
+content; a cached page is correct iff its `cvers` matches the file's current
+content-version.
+
+| Spec action | Impl site |
+|---|---|
+| `Read(f)` (serve, cvers-gated) | `kernel/larder.c::larder_page_serve` (called at `kernel/dev9p.c::dev9p_read` before the RPC, gated on `cacheable`): serve the one page containing the offset if `page.cvers == c->qid.vers` (the `Open`/close-to-open gate applied at serve — this is where the `cvers` compare is load-bearing) and `page_off < valid_len`. Copies `min(want, valid_len - page_off)` bytes out UNDER the leaf lock (a short serve the caller loops on). |
+| `Open(f)` (the `cvers` revalidation) | folded into the serve above: the serve's `page.cvers == c->qid.vers` check IS the close-to-open `Open` gate. A cross-open external write bumps the reopened fid's `qid.vers` → mismatch → miss → refetch. Within a client, own-writes invalidate immediately (below), so the gate is strong. |
+| `OwnWrite(f)` (write-through invalidate) | `kernel/larder.c::larder_page_invalidate` (drop EVERY cached page of the file + bump gen) at `kernel/dev9p.c::dev9p_write`, alongside `larder_attr_invalidate`. A whole-file drop (sound; per-range is a v1.x tuning). |
+| `Refetch(f, fresh)` (install, evict-if-full) | `kernel/larder.c::larder_page_install` at `dev9p_read` after the RPC: install each page the read covered FROM ITS ALIGNED START (`page_start ∈ [offset, offset+got)` → `[0, valid_len)`, no hole). GEN-GUARDED by the `seq0` snapshot from the serve miss (skips a fill that raced an own-write — the resurrection close). Lazily kmallocs the slot's 4 KiB buffer (non-blocking under the leaf lock — the `l->lock → buddy` order). |
+| `Evict(f)` (capacity/LRU drop) | `kernel/larder.c::page_install_slot_locked` (LRU-min victim when the bounded `LARDER_PAGE_ENTRIES`=512 table is full; I-32). The victim's buffer is REUSED (overwritten), never freed on evict; buffers free only at `kernel/larder.c::larder_destroy` (from `p9_client_destroy`). |
+| `ExternalWrite(f)` (out-of-band bump) | not an impl site — the impl obligation is that the serve's `cvers` gate (`Open`) catches it at the next open (close-to-open; the accepted within-episode window). |
+
+**The cacheability gate (not a spec action — a soundness precondition on which
+mounts the model applies to).** The model assumes offset-stable, content-versioned
+reads. `kernel/9p_client.c` inits `p9_client.cacheable = false`; `kernel/dev9p.c::dev9p_walk_attrs`
+sets it true on a successful `Twalkgetattr` (the v1.0 proxy for a content-versioned
+FS). A stream/control server (netd `/net`) answers `Twalkgetattr` ENOSYS → never
+cacheable → the model never applies to it (a `/net` read is neither offset-stable
+nor content-versioned, so caching it would violate `Read`). `dev9p_stat_native`
+(attr) and `dev9p_read` (page) gate serve+populate on it; `dev9p_walk_attrs`'s
+`larder_walk_serve` (dentry) is additionally guarded by the `wga_unsupported` latch.
 
 ### Invariant / property → obligation
 
