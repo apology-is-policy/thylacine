@@ -123,21 +123,35 @@ Three sub-caches share the owner + key:
    few-entry attr cache serves ~96–99.5% of stats. Populated *for free* by every
    `walk_attrs`/`getattr` reply (each carries the qid + attr).
 
-2. **Dentry cache** — `(parent-qid.path, name) → { child-qid, type, cvers }`,
+2. **Dentry cache** — `(parent-qid.path, name) → { child-qid.path, type }`,
    **including negative entries** (`… → ENOENT`, the LWN #1 mechanism). A cached
-   resolution skips the `Twalkgetattr` RPC and returns the child qid directly.
-   Negative dentries kill the failed-lookup storm (import/search-path probes)
-   without a byte crossing the wire. Invalidated on create/rename/unlink in the
-   parent (see §4). A build's walks share enormous prefix (11 distinct first-hops
-   warm), so the dentry cache serves far more than the run-memo floor.
+   resolution skips the `Twalkgetattr` RPC and returns the child qid directly
+   (the child's attr for the walk reply is served from the attr sub-cache — see
+   the serve mechanics in §4). Negative dentries kill the failed-lookup storm
+   (import/search-path probes) without a byte crossing the wire. **Coherence =
+   own-write invalidation** (§4): a create/rename/unlink in a directory drops
+   that directory's cached dentries. A build's walks share enormous prefix (11
+   distinct first-hops warm), so the dentry cache serves far more than the
+   run-memo floor.
    **Populate source (load-bearing coherence rule):** a dentry entry is installed
-   ONLY from a `walk_attrs`/`getattr` reply, whose `qid.version` is the true
-   content-version `si_cvers` (L1a-2). The Larder is **never** populated from a
-   `readdir` qid — Rreaddir's `qid.version` is a link-time `si_gen` snapshot
-   stored in the dirent record, not `si_cvers`, so a readdir-sourced version
-   would read backwards against a getattr-sourced one for the same inode (the
-   L1a-2 audit F1). v1.0 does not cache directory listings at all (§11); this
-   rule is the guest-side realization of that.
+   ONLY from a `walk_attrs`/`getattr` reply. The Larder is **never** populated
+   from a `readdir` qid — Rreaddir's `qid.version` is a link-time `si_gen`
+   snapshot stored in the dirent record, not `si_cvers`, so a readdir-sourced
+   version would read backwards against a getattr-sourced one for the same inode
+   (the L1a-2 audit F1). v1.0 does not cache directory listings at all (§11);
+   this rule is the guest-side realization of that.
+   **The dentry binding carries NO content-version, and it is NOT cvers-gated
+   (the L1d ground-truth correction — see §4).** Unlike an attr or a page (each
+   validated by its OWN file's `cvers`), a name→child binding is a fact about
+   the PARENT directory's dirent set, and Stratum does not surface a
+   directory-content version that tracks dirent changes: verified in the Stratum
+   tree (`src/fs/fs.c`), a child **create** and **unlink** touch only the
+   separate dirent index and do **not** run `stm_inode_set` on the parent inode,
+   so the parent's `si_cvers` does **not** bump on a create/unlink (only
+   **rename** stamps the parent mtime → bumps it). The parent's content-version
+   is therefore an unreliable signal for a dirent change, so the dentry cache's
+   sole coherence mechanism is own-write invalidation (never a parent-cvers
+   compare).
 
 3. **Page cache** — `(qid.path, page_index) → { bytes, cvers }`. Serves
    `dev9p_read`. The biggest cold win (83.9% redundant — cross-package
@@ -175,9 +189,42 @@ The cache is **coherent to close-to-open**, keyed on a true **content-version**
 - **Own-writes invalidate immediately** (write-through + invalidate): a
   `dev9p_write` to a file drops that file's cached pages and marks its attr
   entry for refetch. The client sees its own writes with strong consistency.
-- **Negative dentries** are validated by the **parent's** `cvers`: a create in a
-  dir bumps the dir's `cvers`, so a cached "`name` does not exist" is invalidated
-  the moment the dir changes.
+- **Dentries (positive AND negative) are coherent by own-write invalidation,
+  NOT by a cvers gate** (the L1d ground-truth correction). A name→child binding
+  (or a negative "no such name") is a fact about the PARENT directory's dirent
+  set. Ground truth (verified in Stratum `src/fs/fs.c`): a child **create** and
+  **unlink** touch only the separate dirent index — the parent inode is never
+  `stm_inode_set`, so the parent's `si_cvers` does **not** bump (only **rename**
+  stamps the parents' mtime → bumps them). So the parent's content-version does
+  not track a create/unlink, and a cvers compare against it would falsely match
+  a stale negative dentry after a create (serve `ENOENT` for a now-existing
+  file). The dentry cache therefore drops a directory's cached dentries on every
+  guest **create / rename / unlink** in that directory (the guest holds the
+  parent's `qid.path` at each mutation site — the same L1c own-write discipline,
+  now scanning by parent). Under single-writer this is **absolute** (own-writes
+  drop the parent's dentries → a stale name→child or negative entry can never be
+  served); it maps onto `fs_cache.tla`'s `Read` + `OwnWrite` (the single-writer
+  subset, `NoWrongRead` absolute), exactly as the attr sub-cache does — there is
+  no `Open` (cvers) gate for dentries. An out-of-band (external) writer's dirent
+  change is bounded by LRU eviction / the next own-write, not by a
+  cvers-revalidation window (§11).
+
+**Serve mechanics (skip the `Twalkgetattr`).** A resolution serves from the
+dentry cache only when it can construct the whole `walk_attrs` reply locally: for
+a run of components from a base parent `c`, walk the dentry chain
+`(c.qid.path, name₀) → child₀`, `(child₀, name₁) → child₁`, …; for each POSITIVE
+hop the child's attr for the reply comes from the attr sub-cache (a miss there
+bails the serve to the RPC), and the next hop's parent is the resolved child. A
+NEGATIVE hop is the walk's miss (return the partial-walk verdict, no RPC). A FULL
+positive run can skip the RPC only in the **query** form (`SYS_STAT`'s final run,
+`nc == NULL` — no server fid to bind); a **bind**-form full walk still issues the
+RPC (the server must bind the fid), though it re-populates from the reply. The
+chained lookup runs under one Larder-lock hold (an atomic snapshot — a concurrent
+own-write invalidate either precedes or follows the whole serve). Because the
+dentry cache holds the underlying dev9p tree's raw bindings (Territory-independent
+— `walk_attrs` walks the 9P server, not the per-Proc mount overlay), the resolver
+applies the per-Proc mount view to the served qids exactly as it does to an RPC
+reply; the serve needs no mount knowledge.
 
 **Why close-to-open is sound here.** Thylacine serves its own FS to the guest;
 within a build the 95–99% redundant ops are read-only shared data (goroot
@@ -402,6 +449,19 @@ proven-in-principle to delivered.
   serve-your-own-FS-to-one-guest case). A concurrent *external* writer (out-of-
   band Stratum mutation) is bounded by the revalidation window, not instantly
   coherent — acceptable at v1.0, tightenable via the writeback modes.
+- **Dentry external-writer window (L1d).** Unlike attr/page entries (each
+  revalidated at open by its own file's `cvers`), a **dentry** has no
+  content-version to revalidate against: Stratum surfaces no directory-content
+  version that tracks dirent changes (a create/unlink does not bump the parent
+  `si_cvers` — §4 ground truth). So an out-of-band create/unlink in a directory
+  is not caught by a cvers revalidation; a stale dentry (a name→child that a
+  peer renamed, or a negative entry a peer filled) is bounded only by LRU
+  eviction or the guest's own next mutation of that directory. Under
+  single-writer (the v1.0 model) this is moot — own-writes invalidate. The v1.x
+  tightening is a true directory-content-version in Stratum (stamp the parent
+  inode on create/unlink, at a parent-COW cost on the create/unlink-heavy build
+  path — deliberately NOT paid at v1.0), which would then let a `walk_attrs`
+  revalidate a parent's dentries by its `cvers`, exactly as attr/page do today.
 - **Readdir (directory-content) caching.** v1.0 caches attrs/dentries/pages; a
   directory-listing cache is a candidate v1.x addition. Consequently the L1a-2
   seam — Rreaddir's `qid.version` stays a link-time `si_gen` snapshot (the dirent
