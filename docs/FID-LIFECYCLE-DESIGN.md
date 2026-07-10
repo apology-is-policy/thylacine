@@ -143,14 +143,83 @@ ONE **query-form** Twalkgetattr to the server (binds no fid, 1 RT) to obtain the
 file's **fresh `cvers`** — this IS the I-38 close-to-open `Open` revalidation.
 Then:
 - If the returned `cvers` matches the page cache's cached content for that
-  `qid.path` AND all covered pages are resident → mint a **fidless "cached-open"
-  Spoor** (`dev9p_priv.fid = P9_NOFID`, a new `CACHED_OPEN` state): its
-  `dev9p_read` serves from `larder_page_serve` (gated on the fresh `cvers`), and
-  its `dev9p_close` is a **no-op** (no Tlopen was done, no fid to Tclunk). **Zero
-  further server RTs.**
-- On any miss (attr not cached, a covered page not resident, `cvers` mismatch,
-  or write mode) → **fall back** to the current path (bind-walk + Tlopen + reads
+  `qid.path` AND all covered pages are resident → **snapshot the file's content
+  `[0, size)` into a private per-open buffer** (one Larder lock hold — atomic vs
+  a concurrent invalidate) and mint a **fidless "cached-open" Spoor**
+  (`dev9p_priv.fid = P9_NOFID`): its `dev9p_read` serves from the snapshot, and
+  its `dev9p_close` frees the snapshot — a **no-op on the wire** (no Tlopen was
+  done, no fid to Tclunk). **Zero further server RTs.**
+- On any miss (chain not dentry-cached, a covered page not resident, `cvers`
+  mismatch, size over the cap, budget exhausted, snapshot OOM, or a non-plain
+  open mode) → **fall back** to the current path (bind-walk + Tlopen + reads
   that populate the caches). Cached-open is a *fast path*, never a requirement.
+
+**Why a private snapshot, not live serves from the page cache (the 2026-07-10
+impl-design refinement — scripture-first):** a fidless Spoor has **no recovery
+channel for a read-time miss**. If reads served from `larder_page_serve` directly
+and a covered page were evicted (LRU pressure) or invalidated (a concurrent
+own-write to the same file) mid-open, the fidless read could not fall back — 9P
+has no "fid from qid" op, so a fidless Spoor cannot late-bind, retained path
+re-walks are rename-unsound (POSIX: an open fd survives rename/unlink), and
+returning 0 at a non-EOF offset is a **false EOF = silent data corruption**.
+Pinning the pages in-cache for the open's lifetime was weighed and rejected: it
+couples into the L1f-audited eviction + own-write-invalidate paths (a pinned
+page surviving an own-write must become snapshot-only, or the writer's own
+read-after-write would serve pre-write bytes at its matching open-time cvers — a
+NoWrongRead violation), a materially larger audit surface on the most-audited
+path. The private copy keeps the Larder **byte-identical to its audited state**
+(the only additions are pure readers), and gives exact close-to-open semantics:
+every read of the open serves the open-time content (what NFS close-to-open and
+a snapshot-at-open both mandate; a concurrent writer's changes surface at the
+NEXT open's revalidation). Cost is trivial for the target workload (~1.6 pages
+per file measured; a memcpy of ~6.5 KiB per open).
+
+**Bounds (the CF-3 bounce-budget class — user-drivable kernel heap):** the
+snapshot is kernel memory a hostile EL0 program could otherwise inflate, so (a)
+a **per-file size cap** (`DEV9P_CO_MAX_SIZE`, 128 KiB — beyond it the fid RTs
+amortize against the read volume anyway) and (b) a **global outstanding-bytes
+budget** (`DEV9P_CO_BUDGET`, 8 MiB, atomic charge at mint / uncharge at close).
+Global, NOT per-Proc: a cached-open fd outlives its syscall and crosses Proc
+boundaries (rfork inheritance, handle transfer), so a per-Proc charge would
+unbalance at close-by-inheritor. Exhaustion degrades the fast path only
+(fallback is the normal open — fail-safe, no correctness or DoS exposure).
+
+**The Dev slot + the resolver contract (who checks what):** a single
+NULL-permitted vtable slot `Dev.open_cached(c, names, name_lens, nname, sts)`
+called by stalk on the **final run** of a plain `STALK_OPEN`/`OREAD` resolution
+(exact `omode == 0`; OTRUNC / write / OEXEC / O_PATH never take it). The Dev
+does internally: (1) an RPC-free **hint** (dentry-chain the run + leaf attr +
+full page coverage under the Larder lock — a non-eligible open costs nothing);
+(2) the **forced-wire query** Twalkgetattr (`newfid = P9_NOFID`), issued
+directly at the client, deliberately **bypassing the L1d dentry serve** — the
+revalidation MUST be server-fresh or B2 silently degrades to B1 (the
+prosecution item); (3) fresh-leaf checks (plain regular file, size cap) +
+budget + snapshot at the fresh `cvers`; (4) mint the opened fidless Spoor.
+It returns the Spoor **plus the fresh per-component records in `sts`**, and the
+resolver — never the Dev — then runs the **mandatory fail-ordering post-scan**:
+per-component X-search on the fresh records + mount-membership scan (ANY mount
+hit, including the leaf, discards the cached open and falls back to the normal
+path, whose split/cross machinery handles the crossing) + the final-hop R/W
+`perm_check` on the fresh leaf record. Permission stays in the resolver
+(the I-28/I-22 chokepoint is not fragmented into Devs); a denial destroys the
+minted Spoor (a wire-free close) and fails with the identical error the normal
+path would produce. On a NULL return nothing was bound or revealed — the
+caller's observable outcome comes solely from the fallback path.
+
+**Fidless-fd semantics (the v1.0 seam, documented + tested):** `fstat` serves
+the open-time snapshot stat (the same close-to-open discipline as the attr
+cache); `fsync` is a no-op success (read-only fd — POSIX-legal); `read`/`pread`
+serve the snapshot; `write` is rejected (defense-in-depth — the omode-derived
+handle rights already deny it). **`SYS_WSTAT` (fchmod/fchown *on the fd*)
+returns -1**: Tsetattr is fid-addressed and a fidless Spoor cannot late-bind
+(see above). No v1.0 consumer fchmod/fchowns an O_RDONLY dev9p fd (verified:
+cmd/go's cache mtime updates are path-based `Chtimes`; the #47 kind-gate fix was
+conformance-driven, not consumer-driven); path-based chmod/chown are untouched.
+The divergence fails LOUD (-1), is regression-tested, and the v1.x fix — if a
+real consumer appears — is the retain-the-walk-fid-unopened variant (wstat and
+getattr work on an unopened fid; costs the async clunk back). Every other wire
+op on a fidless Spoor (walk, walk_attrs, create, readdir, rename, unlink,
+re-open) is `P9_NOFID`-guarded to fail cleanly rather than emit a NOFID wire op.
 
 **RT accounting for a cached small file:** 3 fid RTs (bind-walk + lopen + clunk)
 + reads → **1 RT** (the query-getattr revalidation) + local reads = a 3-4× cut,
@@ -166,19 +235,29 @@ I-38 and still delivers ~4×. **B1 is deferred as a possible future opt-in
 per-mount `cache=loose` mode layered on B2** — not v1.0.
 
 **Invariants: refines I-38, no new invariant.** The fidless open is close-to-open
-because the query-getattr at open IS the `Open` revalidation (fs_cache.tla); reads
-serve only while `cvers` matches; an own-write invalidates (L1e); the fallback is
-byte-identical to today. The served open+read+close is exactly what a bind-walk +
-lopen + reads + clunk would return, minus the fid RTs. **Spec-first:** the
-cached-open path maps onto the EXISTING `fs_cache.tla` `Open`+`Read`+`OwnWrite`
-actions (the query-getattr = `Open`; the page serve = `Read`; no new action) — the
-model already proves it; a prose SPEC-TO-CODE mapping suffices, or a focused
+because the query-getattr at open IS the `Open` revalidation (fs_cache.tla); the
+snapshot is taken at the fresh `cvers` atomically under the Larder lock (a
+concurrent own-write invalidate either precedes it — failing the coverage — or
+follows the whole copy); the fallback is byte-identical to today. The served
+open+read+close is exactly what a bind-walk + lopen + reads + clunk would return,
+minus the fid RTs. **Spec-first:** the cached-open path maps onto the EXISTING
+`fs_cache.tla` `Open`+`Read`+`OwnWrite` actions (the query-getattr = `Open`; the
+snapshot = `Open`-time `Read` of every covered page, served unchanged for the
+open's lifetime — close-to-open allows serving open-time values; no new action) —
+the model already proves it; a prose SPEC-TO-CODE mapping suffices, or a focused
 `cached_open` cfg if the audit surfaces subtlety. Prosecute in the focused audit:
-the fidless-Spoor lifetime (no server fid to leak; close is a true no-op); the
-"fully page-cached" detection soundness (a partial-cache open MUST fall back, not
-serve a hole); the `cvers` revalidation completeness (every cached-open path
-gated); the read-only gate (a write mode never takes the fidless path); the
-fallback byte-identity.
+the fidless-Spoor lifetime (no server fid to leak; close is wire-free; the
+snapshot buffer + budget balance on EVERY path — mint, denial-destroy, close,
+handle-transfer); the "fully page-cached" detection soundness (a partial-cache
+open MUST fall back, not serve a hole; the msize-clamped mid-file partial page —
+`valid_len` short of the boundary — fails coverage); the `cvers` revalidation
+completeness (every cached-open engagement gated on the FRESH wire cvers — the
+forced-wire query must bypass the dentry serve, else B2 silently degrades to
+B1); the read-only gate (`omode == 0` exactly — write / OTRUNC / OEXEC / O_PATH
+never take the fidless path); the resolver post-scan completeness (X-search +
+mount scan + leaf R/W on the fresh records — the fail-ordering invariant, I-28);
+the `P9_NOFID` guards on every wire op reachable from a fidless Spoor; the
+`SYS_WSTAT` seam (loud -1, tested); the fallback byte-identity.
 
 ---
 
