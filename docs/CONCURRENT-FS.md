@@ -548,3 +548,28 @@ lookup/insert/LRU-evict logic is unchanged and correct at any size.
    comes back for signoff per standing policy before it lands.
 4. **NOVEL.md entry RECORDED** at this scripture commit (the captured
    post-v1.0-candidates list, the Weft/Loom precedent).
+
+## 9. The RC arc — the successor (ratified 2026-07-10; scripture: stratum `docs/rc-design.md`)
+
+The CF arc closed at CF-5 with the caches + commit-path + transport levers
+landed — and with the 2026-07-10 in-guest measurement that REFRAMED the
+residual: the CF-2 worker pool regresses (+7-15%) because the serializer is
+NOT the dispatch layer but **`stm_sync.lock`** (stratum sync.c:208/6457) — one
+exclusive mutex wrapping the ENTIRE extent data path (index lookup + blocking
+bdev I/O + AEAD decrypt + dcache) ABOVE the already-concurrent (9.8-BE/EBR,
+R171-closed) metadata engine. With 4 workers the s->lock wait explodes
+0.03 ms -> 141 ms/build (~4700x) while the bdev lock stays ~7 us — the
+workers never reach the device.
+
+The **RC arc** (the binding design lives Stratum-side: `docs/rc-design.md`)
+retires `s->lock` from the data path — **reads AND writes** (user-voted) —
+via an EBR-pinned dcache (RC-1), the read-path restructure onto the built
+`_concurrent` EBR extent lookup + unlocked bdev/decrypt + the same-inode
+reader-pin + the DEK read-vs-rekey guard (RC-2), the write-path twin
+(unlocked encrypt + device write; RC-3), then turns the CF-2 pool ON
+measurement-gated (RC-4) and closes with the re-measure + audits + gates
+(RC-5). Spec-first (user-voted): the dcache pin/evict/retire lifecycle + the
+DEK guard get Stratum spec modules with buggy-cfg counterexamples BEFORE the
+impl. bdev multi-outstanding stays stage-2 (deferred; ~7 us today, real on
+hardware). No Thylacine kernel bytes; no expected format change (the CF-arc
+format grant does NOT carry).
