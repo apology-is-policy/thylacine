@@ -90,6 +90,24 @@ These are not v1.0 angles — they're recorded so a future direction isn't lost.
   built up front; `specs/loom.tla` gates impl; reserves invariants I-29 + I-30).
   Audit-bearing. (Renamed from "Warren" 2026-06-05.)
 
+- **The fidless close-to-open open** (`docs/FID-LIFECYCLE-DESIGN.md`, user-voted
+  2026-07-09; BEING BUILT in the go-build FS-perf arc, task #24 — recorded here
+  for the NOVEL inventory, not deferred). A guest 9P client serves a read-only
+  open+read+close of a fully-cached file with a SINGLE close-to-open revalidation
+  getattr — no fid bind, no lopen, no clunk. The measured on-device go-build warm
+  floor is 67% per-file fid lifecycle (bind-walk + open + clunk); the Larder (I-38)
+  caches the metadata + content but 9P's fid model still forces those round-trips
+  per open. The novel synthesis: Linux v9fs `cache=loose` (the SOTA) ALWAYS binds a
+  server fid to open; NFSv4 delegations serve locally only via a server→client
+  callback (9P has none). Thylacine's angle uses the Larder's existing close-to-open
+  discipline as the coherence source — the query-`Twalkgetattr` at open IS the I-38
+  `Open` revalidation — so a cached read-only file needs 1 RT/open instead of 3-4,
+  WITHOUT weakening close-to-open (the fully-loose 0-RT variant was rejected as the
+  default) and WITHOUT NFS-style callbacks. Composes Angle #3 (the pipelined 9P
+  client) + Angle #5 (Stratum content-version `si_cvers`). The companion
+  async-clunk (fire-and-forget Tclunk, ownerless drain) is a known 9P optimization,
+  not novel; the fidless open is the new synthesis.
+
 - **Tapestry — a graphics fast-path woven on Loom** (`docs/TAPESTRY.md`, signed
   off 2026-06-07). The concrete consumer that shapes Loom-5 (multishot) + Loom-6
   (registered buffers + native API) and the demonstration that Loom's generality
