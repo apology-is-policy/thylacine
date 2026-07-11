@@ -452,13 +452,112 @@ all three arrays + hashes. Order-7 kmalloc caveat: both arrays are ~426/491 KiB
 contiguous allocations -- the same #25-F1 posture (an OOM skips the install,
 self-heals on a later attempt, correctness never depends on a fill).
 
+## The F1 write-behind (per-open-file append-run staging, 2026-07-11)
+
+The loose writeback leg (LARDER-DESIGN §12, Senate-voted; the CHASE C-2
+measured motivation: 97.9% of the S3 cold build's 19.6k wire Twrites were
+<= 4 KiB — Go's bufio dribble, each object written twice). On a LOOSE +
+cacheable client, `dev9p_write` STAGES small pure-append writes into a
+per-open-file contiguous run instead of paying a wire RPC each; the run
+flushes as msize-max Twrites. Measured effect (the F1 N=3 bench): wire
+writes 19.6k → 2.2k (−89%), the write band 936 → 283 ms, S3 median
+3614 → 3297 ms.
+
+State lives on `dev9p_priv` (NOT in `struct larder` — the run is per-OPEN,
+not per-file): `wb_lock` (a pure leaf spinlock; byte copies + kmalloc/kfree
+only under it, the larder leaf→buddy order; wire I/O never), the run
+`{wb_off, wb_len, wb_buf, wb_cap}`, the append anchor `wb_base` (valid iff
+`wb_known`), the freeze count `wb_flushers`, the error latch `wb_err`, and
+the fast-path hint `wb_eligible`.
+
+Key contracts (`kernel/dev9p.c` `wb_*` helpers):
+
+- **Eligibility = create/OTRUNC-born** on a loose+cacheable client, plain
+  file. The anchor is born 0 and advances only through completed flushes +
+  completed write-throughs (`max`), so `wb_base <= true file end` always,
+  and the run — which only ever starts AT the anchor — sits at the file's
+  end with no hole below it. An opened-existing file never stages; a
+  `wstat` flushes then permanently de-eligibilizes (a truncate moves the
+  end).
+- **The stage gate**: pure append (`off == run end`, or `off == wb_base`
+  when empty) AND `count <= DEV9P_WB_STAGE_MAX` (32 KiB — bounds the copy
+  under the spinlock; bigger writes are already wire-efficient) AND
+  `wb_flushers == 0`. Everything else: if a run exists and the write
+  OVERLAPS it, flush-then-write-through (ordering: staged bytes are
+  older); if disjoint (appends past a frozen run's end; interiors wholly
+  below), write through directly — order-free.
+- **The visible-run SINGLE-FLIGHT flush** (`wb_flush_locked`; the SA-F1
+  close @4c823d30): the flusher snapshots `{off,total,buf}` under the
+  lock, bumps `wb_flushers` (freezing the run: no stage, no growth
+  realloc, so the out-of-lock buf reads cannot race a move), and wires
+  msize-clamped chunks outside the lock. A second flush-needing party
+  yield-waits at entry (`while (wb_flushers) { unlock; sched(); lock; }`
+  — the on_cpu-spin class, bounded by the flusher's independent progress
+  incl. its #811 death-unwind). Duplicate concurrent flushes are
+  FORBIDDEN, not idempotent: a completed duplicate would let an
+  ordering-dependent through-write land while the first flusher's stale
+  residual chunks still fly, silently overwriting it. Close and the cap
+  flush never contend (last-ref; staging requires `wb_flushers == 0`).
+- **Flush sites**: close (BEFORE the async-clunk Tclunk — the fid must be
+  live), fsync (then `Tfsync`; also waits for a run-less in-flight flush
+  — its contract needs those bytes durable), the 256-KiB cap (inline in
+  the writer, then re-stages), any overlapping non-append write, wstat.
+  Death: #926 closes handles at exit → the close flush runs.
+- **Reads on the staging fd** split three ways with NO flush: below the
+  run = server/cache (complete — the anchor discipline means the server
+  holds every byte below `wb_off`); within = served from `wb_buf` under
+  the lock (a short read up to the run end; POSIX short-read composition
+  carries spanning callers across); at/past the run end = falls through
+  to the normal path (the wire/attr answer EOF honestly — never a
+  synthesized 0, so racing extensions stay visible). The attr-EOF fast
+  path stays sound during staging: the cached attr's size == `wb_off`
+  (the pre-stage server size; cvers cannot move while staging), so it can
+  only fire for `offset >= run end`, where 0 is the correct answer.
+- **`fstat` patches** `size = max(server view, run end)` on both the
+  larder-serve and wire-fetch paths (`wb_patch_stat_size`) — the Go #46
+  truncate-gate fstats its own O_WRONLY fd mid-open. mtime stays the
+  server's until the flush (the documented writeback posture); path-stats
+  via other fids see the last-flushed state (close-to-open-legal).
+- **Invalidates move per-write → per-FLUSH** (`fs_cache.tla` OwnWrite
+  realized at the wire moment): the attr + page drops happen after the
+  flush's wire writes, outside `wb_lock`. Write-throughs keep their
+  immediate invalidates.
+- **Errors (the voted NFS model)**: a flush failure latches a positive
+  errno in `wb_err` and DROPS the run (retry-forever would wedge close);
+  every subsequent write/fsync on the fd returns it — fsync is the
+  reliable channel (`Dev.close` is void at v1.0, the documented seam).
+  The buffer stays allocated until close (freed there; the global budget
+  uncharged in full).
+- **The global budget** `DEV9P_WB_BUDGET` (8 MiB; `dev9p_wb_budget_used`
+  diagnostic) is charged by the growth DELTA and uncharged in full at
+  close — GLOBAL, not per-Proc, because the priv crosses Proc boundaries
+  (dup/rfork/#926 close-by-inheritor), exactly the `DEV9P_CO_BUDGET`
+  reasoning. Denial (or kmalloc failure) degrades to write-through.
+
+Known seams: Loom async payload ops bypass `dev9p_write`/`dev9p_read`, so
+they neither stage nor overlay — the L1f-F2 self-inflicted-only class (no
+v1.0 consumer drives Loom I/O on build files); v1.x unifies at
+`loom_submit_payload`. The deterministic two-thread-same-fd flush-race
+harness is impossible in the synchronous loopback fixture (a flush
+completes within the call, so `wb_flushers` is never observably > 0) —
+the same owed SMP-harness class as #349/#841/Loom.
+
+The same chunk widened the kernel-image L3 window 4 → 8 MiB
+(`mmu.c` `KERNEL_L3_TABLES` = 4 + both `kernel.ld` guards + the
+direct-map alias tables in lockstep) and the KASLR slide alignment to
+8 MiB (`KASLR_ALIGN_BITS` 23; 11 bits of slide entropy over 16 GiB —
+I-16 preserved): the UBSan image crossed the 4-MiB ceiling, the second
+iteration of the documented P5-kernel-l3-4mib move.
+
 ## State / coherence properties
 
 - **Own-write happens-before a later read → the read sees the write.** The
   invalidate is part of `dev9p_write`/etc.'s completion (before it returns), so
   any read that starts after the write returns misses → refetches fresh. A read
   CONCURRENT with the write is an unsynchronized application race (POSIX allows
-  either value).
+  either value). Under write-behind the same property holds via the overlay: a
+  staged (not yet flushed) own-write is served from the run itself; the
+  invalidate accompanies the eventual flush.
 - **Base X-check bounded staleness (I-28).** A tightened dir permission via the
   guest's own `chmod` invalidates immediately (`dev9p_wstat_native`); an
   out-of-band tighten is bounded by the next `walk_attrs` revalidation. This is
@@ -466,6 +565,16 @@ self-heals on a later attempt, correctness never depends on a fill).
 
 ## Tests
 
+- `kernel/test/test_dev9p.c` (write-behind, F1) — `dev9p.wb_coalesce_one_twrite`
+  (4 appends → zero wire → ONE close Twrite, payload byte-verified, ordered
+  before the Tclunk, budget balanced; plus the strict-client non-regression) /
+  `wb_overlay_read` (within/spanning/past/below arms + post-flush re-staging) /
+  `wb_flush_at_close` (the OTRUNC-eligibility twin) / `wb_fsync_flush_and_error`
+  (Twrite-before-Tfsync order; one-shot Rlerror injection → the latch on
+  write+fsync → close emits nothing) / `wb_nonappend_writethrough` (flush-then-
+  patch order + wstat flush/de-eligibility) / `wb_fstat_staged_size` (both stat
+  paths) / `wb_cap_flush` (256-KiB inline flush; every wire byte pattern-
+  verified) / `wb_budget_fallback` (bias-exhaust → write-through → recovery).
 - `kernel/test/test_larder.c` (attr) — `larder.install_serve` / `serve_miss` /
   `invalidate` / `gen_guard` (the resurrection close) / `root_qid_zero` /
   `overwrite_wins` / `eviction_bounded` (I-32).
