@@ -3204,6 +3204,16 @@ int main(void) {
         // proxy's SO_PEERCRED, not force them SYSTEM-owned (Stratum 9e4f9a7
         // decoupled the /ctl SYSTEM gate from bake-owner). bake-owner stays
         // host-bake-only.
+        // RC-4b (stratum docs/rc-design.md): --fs-workers 4 turns the
+        // CF-2a per-connection dispatch pool ON with ADAPTIVE dispatch --
+        // the reader executes inline when nothing is in flight and no
+        // further frame is buffered (the depth-1 handoff tax is gone),
+        // and dispatches to workers when the client pipelines (the burst
+        // overlaps). Flat 4, not ncpu-probed: in-VM musl sysconf has no
+        // substrate and reports 1, so the deployment states its worker
+        // count explicitly (fs_pool clamps at 16). The ctl listener has
+        // its own serial serve path -- the pool applies to FS
+        // connections only.
         static const char sd_name[] = "stratumd";
         static const char sd_argv_data[] =
             "stratumd\0"
@@ -3217,18 +3227,21 @@ int main(void) {
             "--corvus-socket\0"
             "/srv/corvus/ctl\0"
             "--system-uid\0"
-            "4294967294\0";
-        // 12 strings: "stratumd"(9) + "/dev/virtio-blk"(16) + "--listen"(9) +
+            "4294967294\0"
+            "--fs-workers\0"
+            "4\0";
+        // 14 strings: "stratumd"(9) + "/dev/virtio-blk"(16) + "--listen"(9) +
         // "/srv/stratum-fs"(16) + "--keyfile"(10) + "/system.key"(12) +
         // "--ctl-listen"(13) + "/srv/stratum-ctl"(17) + "--corvus-socket"(16) +
-        // "/srv/corvus/ctl"(16) + "--system-uid"(13) + "4294967294"(11) = 158.
+        // "/srv/corvus/ctl"(16) + "--system-uid"(13) + "4294967294"(11) +
+        // "--fs-workers"(13) + "4"(2) = 173.
         struct t_sys_spawn_args sd_req = {
             .name_va       = (unsigned long)sd_name,
             .argv_data_va  = (unsigned long)sd_argv_data,
             .fd_list_va    = 0,
             .name_len      = sizeof(sd_name) - 1,
             .argv_data_len = sizeof(sd_argv_data) - 1,
-            .argc          = 12,
+            .argc          = 14,
             .fd_count      = 0,
             .perm_flags    = (unsigned int)T_SPAWN_PERM_MAY_POST_SERVICE,
             ._pad_envp     = 0,
