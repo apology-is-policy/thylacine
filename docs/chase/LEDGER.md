@@ -20,6 +20,7 @@ windows; magnitudes land at C-1.
 | W1 S3 fully-cold **post-C-3** | 5093/5052/5085 ms (med **5085**) | (same) | +2637 ms | <= 2648 ms (**-48% remains**) | OPEN |
 | W1 S3 fully-cold **post-B1** | 4877/5252/5222 ms (med **5222**) | (same) | +2774 ms | <= 2648 ms (S3 needs C-2) | OPEN |
 | W1 S3 fully-cold **post-D44+#45** | 4059/3973/4066 ms (med **4059**) | (same) | +1611 ms | <= 2648 ms (**-35% remains**; the gap now lives in the write band -- rpc_ms 3.3-3.5 s of the 4.0 s window, write=~20k ops) | OPEN |
+| W1 S3 fully-cold **post-C-2-F2** (stratum 85d3b72: transition-into-buffer + the 3-round audit close) | 3551/3844/3614 ms (med **3614**; warm 246/244/255 -- S1 stays crossed) | (same) | +1166 ms | <= 2648 ms (**-27% remains**; the W-C transition tax is dead [enc 636->73, hw 43.9->18.4 us/op]; the residual = the op-count bands F1 [voted, scripture @f9c3cafe] removes + the wga cold band) | OPEN |
 | W2 cold (diag) | — | — | — | not bar-bound | C-2 |
 | W2 warm (diag) | — | — | — | not bar-bound | C-2 |
 
