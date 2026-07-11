@@ -675,14 +675,28 @@ Fuchsia minfs writeback) all buffer client-side under close-to-open.
     active) — 97.9% of the measured mix. Anything else (an interior pwrite —
     e.g. the Go buildid header patch — a hole, a non-file, an error-latched
     priv) **flushes the run then writes through**: fail-safe, zero new
-    semantics for the odd cases.
+    semantics for the odd cases. `base_size` is the **append anchor** and is
+    KNOWN only for a priv born at a create / OTRUNC-open (size 0), advancing
+    with completed flushes + completed write-throughs (`max`); an
+    opened-existing file has no known end and never stages — the measured
+    mix is entirely create-then-write. The anchor discipline is what makes
+    the below-run read arm complete (the server holds every byte below the
+    run — no hole a read would need to zero-fill). Writes larger than
+    `DEV9P_WB_STAGE_MAX` (32 KiB) also flush-then-write-through: they are
+    already wire-efficient, and the bound caps the staging copy under the
+    priv spinlock.
   - The buffer grows by doubling (kmalloc) up to `DEV9P_WB_CAP` (256 KiB — two
     msize payloads); reaching the cap flushes the whole run and restarts. So
     steady-state staging turns the 4-KiB dribble into full-msize wire writes.
-  - Staged bytes are charged to the Proc's I-32 page budget
-    (`proc_page_charge`); over-budget → write-through fallback (graceful,
-    like every Larder OOM path). `PRINCIPAL_SYSTEM` (the build chain) is
-    exempt, per I-32.
+  - Staged buffers are bounded by a **GLOBAL** outstanding-bytes budget
+    (`DEV9P_WB_BUDGET`, 8 MiB — the `DEV9P_CO_BUDGET` cached-open shape),
+    NOT a per-Proc I-32 charge: the staging home is the per-open-file priv,
+    which crosses Proc boundaries (handle_dup, rfork inheritance, the #926
+    close-at-exit runs in whichever holder dies last), so a per-Proc charge
+    has no sound uncharge site — exactly the reasoning already recorded on
+    `DEV9P_CO_BUDGET`. Budget denial → write-through fallback (graceful;
+    combined with the per-priv cap the kernel-heap exposure is bounded, and
+    the degrade is the strict-mount behavior).
 - **Flush sites** (all funnel through one `wb_flush`):
   1. **close** (`dev9p_close`) — BEFORE the async-clunk Tclunk (the
      fid must be live for the flush Twrites). This is the close-to-open
@@ -691,11 +705,16 @@ Fuchsia minfs writeback) all buffer client-side under close-to-open.
   3. **cap/threshold** — the mid-stream flushes above.
   4. **a non-append write / wstat / weft-bind** on the same priv — flush
      first, then the op (ordering: the staged bytes are older).
-  5. **a read of the same priv past the staged region** needs no flush: the
-     run is contiguous at the file's end, so reads split cleanly — below
-     `stage_off` = old content (server/cache, correct), within the run =
-     served from the staged buffer (overlay, the guest's newest bytes), past
-     the run = EOF at the patched size.
+  5. **a read of the same priv** needs no flush: the run is contiguous at
+     the file's known end, so reads split cleanly — below `stage_off` = old
+     content (server/cache, complete: the append-anchor discipline means the
+     server holds every byte below the run), within the run = served from
+     the staged buffer (overlay, the guest's newest bytes; a short read up
+     to the run's end — POSIX short-read composition carries a spanning
+     caller across the boundary), at/past the run's end = fall through to
+     the normal path (which answers EOF honestly from the server/attr —
+     never a synthesized 0, so a racing write-through extension past the run
+     stays visible).
 - **fstat on the staging fd** patches `size = max(server_size,
   stage_off + stage_len)` (the Go truncate-gate/buildid pattern needs the
   post-write size mid-open). Path-stats via OTHER fids see the last-flushed
@@ -707,7 +726,9 @@ Fuchsia minfs writeback) all buffer client-side under close-to-open.
 - **Error semantics (the voted NFS model, honestly bounded by the ABI)**: a
   flush failure (ENOSPC/EIO) LATCHES on the priv; every subsequent
   write/fsync on that fd returns the latched errno (so a streaming writer
-  aborts at the next op); **fsync is the reliable error channel**. The
+  aborts at the next op); **fsync is the reliable error channel**. A failed
+  flush DROPS the staged run (the NFS-async posture: the bytes are lost, the
+  latch reports it — retry-forever would wedge close). The
   `Dev.close` slot is `void` at v1.0, so a close-flush failure cannot reach
   the caller's close() return — documented seam; v1.x grows the slot. The
   threshold flushes bound the silently-at-risk tail to < 256 KiB.
@@ -715,11 +736,21 @@ Fuchsia minfs writeback) all buffer client-side under close-to-open.
   close). An unlink-while-open flushes at close into the orphaned fid
   (9P keeps the fid live until clunk) — harmless; the skip-flush-on-unlinked
   optimization needs unlink→priv plumbing and is v1.x.
-- **SMP** (the §7 shared-client discipline): the run is detached under the
-  priv lock, flushed OUTSIDE it (blocking 9P I/O never under a spinlock); a
-  concurrent write starts a fresh run continuing past the detached end; a
-  concurrent read overlays BOTH the detached (in-flight) and active runs.
-  Death mid-stage: #926 closes handles at exit → the close flush runs.
+- **SMP** (the §7 shared-client discipline): the run stays **VISIBLE** under
+  the priv lock across its flush — a flusher count freezes it (no detach:
+  the flusher snapshots `{off, len, buf}` under the lock, does the wire I/O
+  OUTSIDE it — blocking 9P never under a spinlock — and re-locks to retire
+  the run; retirement is idempotent under duplicate flushers). While any
+  flusher is in flight, a concurrent same-priv write goes write-through
+  (fail-safe and order-correct: its offset is at/past the frozen run's end,
+  and the server applies disjoint ranges), a concurrent read overlays the
+  still-visible run, and a concurrent fsync duplicates the flush (identical
+  bytes at identical offsets — idempotent) then Tfsyncs. Nobody ever waits,
+  so there is no park/wake surface — no new I-9 leg. The frozen-run rule
+  also pins the buffer (no growth reallocation while a flusher reads it).
+  Death mid-stage: #926 closes handles at exit → the close flush runs
+  (dev9p_close runs at the LAST Spoor ref, so it is uncontended — the
+  cached-open/weft last-ref invariant).
 
 ### 12.3 What it does NOT change
 
