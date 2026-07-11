@@ -46,7 +46,29 @@ Evidence logs: build/chase/20260711T10{2128,2200,2334,2458}Z/.
    plausibly near host-parity (host S3 = 2448 ms is mostly compile) —
    W2 at C-2 separates it.
 
-## S1 candidate bands (warm gap; device ~669-711ms @smp4 vs host 40-50ms)
+## S1 MEASURED bands (C-1 boot 2, 2026-07-11; wall 668 ms, rpc_ms 859;
+## bands SUM to 856 -- N=1, re-price at N=3 before any FOUNDATIONAL claim)
+
+The warm window is ~100% RPC aggregate (4751 ops). Priced per type
+(DIAG23ns; per-op = total/count):
+
+| band | ms | ops | per-op | mechanism | fix candidate |
+|---|---|---|---|---|---|
+| readdir | 378 | 206 | 1835 us | wire Treaddir; the per-op cost is 20x every other type -> SERVER-side big-dir dirent iteration suspect (the #374 unlink-sweep sibling; GOCACHE is one flat ~2400-entry dir) | (a) server h_readdir iteration fix; (b) a Larder dirent-stream cache (own-write parent-invalidate, the L1d discipline -- NOT cvers-gated; Stratum parent cvers does not bump on child create) |
+| wga | 292 | 2356 | 124 us | cached-open B2 FORCED-WIRE revalidation (~1604 minted opens) + bind-form walks for wire opens (~535+) | the deferred B1 loose mode (serve the snapshot with NO wire revalidation) -- sound under single-writer-guest + own-write invalidation, but it weakens the I-38 close-to-open DEFAULT -> scripture + USER VOTE (FIXABLE-VOTED) |
+| read | 148 | 1588 | 93 us | cached-open snapshot fills + GOCACHE index reads that miss the 512-slot Larder page cache (lp=1047 served vs 1588 wire) | page-cache sizing to the warm workset; or a shared snapshot cache keyed (qid,cvers) instead of per-open buffers |
+| open | 31 | 535 | 58 us | wire Tlopen (fid binds) | fidless-open coverage extension (funnel: hchain=126 hpart=77 htype=103 hsize=94 hcover=197 fails) |
+| rest | ~7 | 66 | -- | walk/gattr/clunk/write | noise |
+
+Reading: the four named bands carry ~849 of 856 ms. The bar needs
+-64% (668 -> <=266): the readdir band alone (-370 if both levers land)
+plus ANY second band gets within reach -- the chase is alive, and no
+band has yet earned FOUNDATIONAL. Per-RPC turnaround (~90 us floor,
+~1.8 ms readdir outlier) matters less than COUNT: at 10x op reduction
+the residual boundary cost is ~40 ms.
+
+## S1 candidate bands (pre-measurement shapes -- kept for the mechanism
+## notes; superseded by the table above)
 
 Priors from the register: the L1f-era 987ms trivial-hello floor was ~86%
 go-tool overhead, not FS redundancy; the fid-lifecycle arc (async-clunk +
