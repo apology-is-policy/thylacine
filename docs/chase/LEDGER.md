@@ -122,7 +122,8 @@ measured single-invocation floor with every tool Image-cached.
   compute band. W2-cold at C-2 separates HVF-CPU from machinery.
 - **B-S3-2 GOCACHE writes**: every action's output written to /gocold
   through 9P + AEAD + Merkle + commit cadence (H1/H2/H6). STMD26 write
-  ticks + d26 re/dec counters.
+  ticks + d26 re/dec counters. **DECOMPOSED at C-2 — see the C-2
+  section below.**
 - **B-S3-3 tool-invocation floor x N** (H3): ~dozens of
   compile/asm/link spawns; each pays spawn + ELF load + page-in.
   version-warm (~17 ms) x invocation count bounds it from below.
@@ -131,6 +132,100 @@ measured single-invocation floor with every tool Image-cached.
   boot).
 - **B-S3-5 sched/parallelism** (H4/H5): -p 8 fan-out efficiency on 8
   vCPUs vs the host's 8 cores.
+
+## C-2 write-band decomposition (task #46; MEASURED 2026-07-11, smp=4
+## instrumented boot 155304Z: wall S3=4093 ms, rpc=40480/3609 ms — the
+## instrument boot reproduces the 4059 baseline; decomposition-grade)
+
+**The S3 write band = 19593 wire Twrites / 1795 ms guest RTT (91.6 us
+avg; 52 us depth-1) moving only 85 MB — 97.9% of Twrites are <= 4 KiB
+(sz4k=19174, sz32k=376, sz128k=43).** The Go toolchain writes its
+outputs through ~4 KiB buffered I/O (cmd/internal/bio = bufio 4096),
+and every object lands TWICE ($WORK output + GOCACHE copy: the C2top
+pairs — q=100001812 + q=100001820 both 11075 KB at ~2.7k writes each;
+q=1000018ef + q=100001913 both 3114 KB; ...). Server-side (STMD26W
+deltas over the S3 window, frq=24 MHz):
+
+| sub-band | measured | mechanism |
+|---|---|---|
+| W-A transport+queueing | **~933 ms** (guest 91.6 − server 43.9 us × 19.6k ops; depth-1 transport ≈ 8 us — the rest is queueing: ge2=18257 = 45% of sends ride behind a peer) | per-op wire cost × op count; same-inode writes serialize on the server's exclusive per-inode pin + the single guest wire |
+| W-B server per-op fixed | **~430 ms** of hw=862 ms: ins=218 ms (dirty-buffer insert memcpy+admission, 11.6 us/op), iset=71 ms (per-write mtime+size inode_set, 3.7 us), vfs+ilk=31 ms (the 2 EBR lookups — nearly free), parse/fid/reply ≈ 52 ms | 3 metadata ops + 1 buffer memcpy per 4 KiB dribble |
+| W-C INLINE→EXTENT transition | **~400 ms** = 587 transitions × ~600 us: the transition arm SYNCHRONOUSLY writes the combined buffer as an extent — reserve + AEAD + **one ~508 us virtio-blk round-trip mid-RPC** (bw window delta: 635 writes / 323 ms / 47.4 MB ≈ 587 transitions + 47 drains) | every created file > 128 B pays a sync bdev write on its FIRST over-inline write, for bytes NOT yet durable anyway (commit=0 in-window) |
+| W-D cap-pressure drains | **~146 ms** (47 drain cbs / 42.8 MB — the two 11 MB files breach the 8 MiB per-inode dirty-buffer cap mid-write; drains emit efficient big extents) | correct behavior; shrinks to noise if ops coalesce |
+| AEAD encrypt | **35 ms TOTAL** (enc delta = 636) | armcrypto did its job — encryption is NOT the S3 story |
+| commit barrier | **0 in-window** (cm delta=0; the only commit is at mount; bf=0) | no barrier cost; #369/#40 quiet; unlink correctly DISCARDS buffered ranges (drop_ino — no drain-of-dying-bytes) |
+
+Cross-check: hw(862) + W-A(933) = guest 1795 ✓; fw(810) = ins(218) +
+iset(71) + ilk(21) + drains(146) + transitions(~354) ✓.
+
+**Verdict: the write band is OP-COUNT dominated (W-A+W-B ≈ 1.36 s scale
+linearly with the 19.6k ops) plus the per-file sync-transition tax
+(W-C ≈ 0.4 s).** Named levers (C-2 STEP 2):
+- **F1 guest write-behind — SENATE VOTED YES (2026-07-11); scripture
+  LANDED (LARDER-DESIGN.md §12 + the ARCH/CLAUDE.md Larder-row F1
+  addendum)**: per-open-file contiguous append-run staging
+  (`dev9p_priv.wb`, 256 KiB cap, I-32-charged, write-through fallback
+  on any non-append/over-budget/latched-error); flush at close
+  (before the async-clunk)/fsync/cap/non-append; same-priv reads
+  overlay; fstat patches size; per-write invalidates become per-flush.
+  Deferred errors latch on the priv + surface at fsync (the `Dev.close`
+  slot is void at v1.0 — close-flush best-effort, documented). Strict
+  mounts byte-identical. Spec-first: fs_cache.tla + StageWrite/
+  FlushClose + 2 buggy cfgs BEFORE the impl. 19.6k ops → ~1.4k ⇒
+  W-A+W-B ≈ −0.7..0.9 s of the post-F2 936 ms band + queueing ripple.
+- **F2 server transition-into-buffer (Stratum) — LANDED; R1 audit
+  CLOSED (Fable 5: 0 P0 / 2 P1 / 0 P2 / 4 P3, ALL FIXED; round-2 on
+  the fixes in flight; `memory/audit_c2_f2_closed_list.md`)**: the
+  INLINE→EXTENT transition INSERTS the block-aligned combined buffer
+  into the dirty buffer (same #40 bounded admission; ENOSPC falls
+  back to the pre-F2 sync write — fail-safe) instead of the sync
+  extent write; the kind-flip iset is unchanged. **R1-F1 [P1]: the
+  reclaim-on-ENOSPC double-commit persisted a transitioned inode's
+  flip WITHOUT its extent (drain-free commit; crash/wedge → silent
+  zeros incl. previously-committed inline content) → FIXED
+  drain-first (raw drain, no reclaim re-entry; deep corner: pair →
+  re-drain → closing commit); regression revert-probed (pre-fix
+  reads zeros). R1-F2 [P1, PRE-EXISTING, widened]: the buffered
+  read's 3 critical sections race a pin-free cross-inode flush_all →
+  transient silent-zero reads → FIXED via the monotone resident-byte
+  retry (termination-proof: same-ino inserts pin-excluded, the count
+  only decreases). +F5 threshold gate (≥1 MiB transitions go
+  direct), F6 ghost-range drop, F4 punch-refusal regression, F3
+  comment.** The read path needed ZERO changes (the EXTENT arm
+  zero-fills holes [never ENOENT] + overlays the buffer —
+  writeback.tla::ReadHidesFlushOrder); every extent-structure mutator
+  pre-flushes (fallocate/truncate/reflink/cfr verified); getattr
+  blocks synthesize from size. TWO accompanying finds: (a) the #40
+  admission counted plaintext blocks but the drain reserves plaintext
+  + AEAD tag/header (~1 block per emitted extent) — a PRE-EXISTING
+  invariant hole that passed on margin luck; FIXED by charging +1
+  block per started 8-MiB piece per range in `blocks_spanned`
+  (symmetric at every footprint site; conservative ≥ needed under
+  drain coalescing); (b) the two fallocate punch/collapse tests
+  encoded the OLD transition's extent seam as if contractual —
+  rewritten to construct per-block seams via commit-between-writes
+  (extent granularity is write-pattern-dependent; punch cannot split
+  an AEAD-blob extent, the documented MVP posture; F2 shifts which
+  patterns give which seams). stratum ctest 73/73; writeback.tla
+  clean GREEN + both buggy cfgs RED. **Measured (smp=4 instrumented
+  boot 163621Z, clean pre-sentinel): S3 4093 → 3657 ms (−436); warm
+  243. Mechanism confirmed server-side: transition encrypts 636 → 73,
+  fw 810 → 362 ms, hw 862 → 381 ms (43.9 → 18.4 us/op), commits
+  still 0; the queueing ripple lifted every band (wga 821→397, read
+  524→311; guest write band 1795 → 936 ms).** First N=3 attempt
+  VOIDED by a dirty post-sentinel (mediaanalysisd 208% — host media
+  indexing); the quiet-gated retry (clean sentinels BOTH ends):
+  **3810 / 4076 / ~3507 → med 3810 vs the pre-F2 med 4059 (−249 ms
+  at med; the clean single boot showed 3657).** Boot-3's TIMING line
+  was uart-interleave-mangled by a concurrent STMD26W print (the
+  known never-commit-instrument artifact; the phase ran healthy —
+  full DIAG23 block, rpc=41039 consistent; the fragments reconstruct
+  to ~3.5 s). The instrument print volume grew this term (STMD26W
+  fires per 200 ms-gated change), so keeper-build numbers should sit
+  slightly better.
+- Projected remaining after F1: 3657 − (W-A+W-B op-count collapse
+  ~0.7-0.9 s + ripple) ≈ **~2.6-2.8 s vs the 2648 bar** — tight; the
+  wga cold band (397 ms post-F2) is the reserve lever.
 
 ## FOUNDATIONAL candidates (empty until measured)
 

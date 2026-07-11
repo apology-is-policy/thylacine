@@ -94,6 +94,24 @@
 (*                                 BUGGY_NO_OWN_INVALIDATE, single-writer -- *)
 (*                                 NoWrongRead counterexample: a read serves *)
 (*                                 the guest's own stale write.              *)
+(*   fs_cache_wb.cfg              EnableStaging=TRUE, single-writer, buggy   *)
+(*                                 flags FALSE -- the F1 WRITE-BEHIND leg    *)
+(*                                 (LARDER-DESIGN 12, Senate-voted           *)
+(*                                 2026-07-11): StageWrite advances the      *)
+(*                                 guest's LOGICAL content ahead of the      *)
+(*                                 server; a Read must serve the staged      *)
+(*                                 overlay; FlushClose lands it. NoWrongRead *)
+(*                                 + NoLostStage hold.                       *)
+(*   fs_cache_buggy_skip_staged.cfg                                          *)
+(*                                 BUGGY_READ_SKIPS_STAGED -- a read serves  *)
+(*                                 the cache/server token while a stage is   *)
+(*                                 present (the overlay-miss class):         *)
+(*                                 NoWrongRead counterexample.               *)
+(*   fs_cache_buggy_lost_stage.cfg                                           *)
+(*                                 BUGGY_LOST_STAGE -- FlushClose clears the *)
+(*                                 stage WITHOUT landing it at the server    *)
+(*                                 (the lost-write class -- a dropped close  *)
+(*                                 flush): NoLostStage counterexample.       *)
 (*                                                                         *)
 (* MODELING ASSUMPTIONS                                                     *)
 (*                                                                         *)
@@ -183,20 +201,47 @@ CONSTANTS
     BUGGY_STALE_SERVE,      \* BOOLEAN -- TRUE: Open treats any valid entry as a
                             \*   hit and skips the cvers==current comparison, so a
                             \*   stale entry survives revalidation and is served.
-    BUGGY_NO_OWN_INVALIDATE \* BOOLEAN -- TRUE: OwnWrite bumps cvers but does NOT
+    BUGGY_NO_OWN_INVALIDATE, \* BOOLEAN -- TRUE: OwnWrite bumps cvers but does NOT
                             \*   drop the cached entry, so a read serves the
                             \*   guest's own stale (pre-write) content.
+    EnableStaging,          \* BOOLEAN -- TRUE: the F1 write-behind actions
+                            \*   (StageWrite / FlushClose) are enabled. FALSE
+                            \*   keeps the pre-F1 write-through model exactly
+                            \*   (guest_cvers == svr_cvers always), so the
+                            \*   original cfgs are semantically unchanged.
+    BUGGY_READ_SKIPS_STAGED,\* BOOLEAN -- TRUE: a Read with a stage present may
+                            \*   serve the cached (server-lagging) token instead
+                            \*   of the staged overlay -- the overlay-miss bug.
+    BUGGY_LOST_STAGE        \* BOOLEAN -- TRUE: FlushClose clears the stage
+                            \*   WITHOUT landing the staged content at the
+                            \*   server -- the lost-write bug (a dropped close
+                            \*   flush: close/death path that neither flushes
+                            \*   nor deliberately write-throughs).
 
 ASSUME /\ Capacity \in Nat
        /\ MaxCvers \in Nat /\ MaxCvers >= 1
        /\ EnableExternalWriter    \in BOOLEAN
        /\ BUGGY_STALE_SERVE       \in BOOLEAN
        /\ BUGGY_NO_OWN_INVALIDATE \in BOOLEAN
+       /\ EnableStaging           \in BOOLEAN
+       /\ BUGGY_READ_SKIPS_STAGED \in BOOLEAN
+       /\ BUGGY_LOST_STAGE        \in BOOLEAN
+       \* The loose (B1) premise: staging asserts single-writer.
+       /\ (EnableStaging => ~EnableExternalWriter)
 
 VARIABLES
     svr_cvers,   \* [Files -> 0..MaxCvers] -- the server (Stratum) content-
                  \*   version per file. Bumps on OwnWrite / ExternalWrite. The
                  \*   token svr_cvers[f] IS the content a fresh read of f returns.
+    guest_cvers, \* [Files -> 0..MaxCvers] -- the file's LOGICAL content version
+                 \*   (what a correct same-guest read must return). Write-through
+                 \*   keeps it equal to svr_cvers; the F1 write-behind lets it run
+                 \*   AHEAD while a stage is outstanding (guest > svr <=> staged,
+                 \*   on the correct path). FlushClose lands svr := guest.
+    staged,      \* [Files -> BOOLEAN] -- an unflushed staged run exists for f
+                 \*   (the per-open-file dev9p_priv.wb, abstracted per-file: the
+                 \*   model has one guest actor). Set by StageWrite; cleared by
+                 \*   FlushClose.
     cache,       \* [Files -> [valid: BOOLEAN, cvers: 0..MaxCvers]] -- the Larder
                  \*   entry per file. `cvers` is the content-token the entry will
                  \*   serve; meaningful only while `valid`.
@@ -208,12 +253,14 @@ VARIABLES
                  \*   served a token that did NOT equal the file's current content
                  \*   at the moment of the read. NoWrongRead == ~bad_read.
 
-vars == <<svr_cvers, cache, validated, bad_read>>
+vars == <<svr_cvers, guest_cvers, staged, cache, validated, bad_read>>
 
 ValidSet == {f \in Files : cache[f].valid}
 
 TypeOk ==
     /\ svr_cvers \in [Files -> 0..MaxCvers]
+    /\ guest_cvers \in [Files -> 0..MaxCvers]
+    /\ staged \in [Files -> BOOLEAN]
     /\ cache \in [Files -> [valid : BOOLEAN, cvers : 0..MaxCvers]]
     /\ validated \in [Files -> BOOLEAN]
     /\ bad_read \in BOOLEAN
@@ -223,7 +270,9 @@ TypeOk ==
 (* Larder is empty, nothing validated, no bad read yet.                     *)
 (***************************************************************************)
 Init ==
-    /\ svr_cvers = [f \in Files |-> 0]
+    /\ svr_cvers   = [f \in Files |-> 0]
+    /\ guest_cvers = [f \in Files |-> 0]
+    /\ staged      = [f \in Files |-> FALSE]
     /\ cache     = [f \in Files |-> [valid |-> FALSE, cvers |-> 0]]
     /\ validated = [f \in Files |-> FALSE]
     /\ bad_read  = FALSE
@@ -261,7 +310,7 @@ Open(f) ==
              /\ validated' = [validated EXCEPT ![f] = TRUE]
           \/ /\ ~is_hit                        \* miss or stale: drop + refetch
              /\ Refetch(f, fresh)
-    /\ UNCHANGED <<svr_cvers, bad_read>>
+    /\ UNCHANGED <<svr_cvers, guest_cvers, staged, bad_read>>
 
 (***************************************************************************)
 (* Read(f) -- serve f from a valid cached entry, WITHOUT re-fetching cvers   *)
@@ -275,10 +324,23 @@ Open(f) ==
 (* the accepted close-to-open window), which does set bad_read -- hence       *)
 (* NoWrongRead is checked only in the single-writer cfgs.                     *)
 (***************************************************************************)
+(* The correctness judge is guest_cvers -- the LOGICAL content at the moment  *)
+(* of the read. Without staging guest_cvers == svr_cvers (write-through), so   *)
+(* the original judge is unchanged. With a stage present the CORRECT read      *)
+(* serves the staged overlay (always the newest guest content, correct by      *)
+(* construction); BUGGY_READ_SKIPS_STAGED lets the cache arm fire anyway,      *)
+(* serving a server-lagging token -- the overlay-miss bug.                     *)
 Read(f) ==
-    /\ cache[f].valid
-    /\ bad_read' = (bad_read \/ cache[f].cvers # svr_cvers[f])
-    /\ UNCHANGED <<svr_cvers, cache, validated>>
+    \/ \* the staged-overlay arm: a same-priv read within the run.
+       /\ staged[f]
+       /\ bad_read' = bad_read      \* serves guest_cvers[f]: correct by construction
+       /\ UNCHANGED <<svr_cvers, guest_cvers, staged, cache, validated>>
+    \/ \* the cache arm. CORRECT only when no stage is present (the impl's
+       \* overlay-wins split); the buggy flag re-enables it under a stage.
+       /\ (~staged[f] \/ BUGGY_READ_SKIPS_STAGED)
+       /\ cache[f].valid
+       /\ bad_read' = (bad_read \/ cache[f].cvers # guest_cvers[f])
+       /\ UNCHANGED <<svr_cvers, guest_cvers, staged, cache, validated>>
 
 (***************************************************************************)
 (* OwnWrite(f) -- the guest writes f: bump the content-version and, in the   *)
@@ -290,13 +352,15 @@ Read(f) ==
 (* guest fails to see its own write.                                         *)
 (***************************************************************************)
 OwnWrite(f) ==
-    /\ svr_cvers[f] < MaxCvers
-    /\ svr_cvers'  = [svr_cvers EXCEPT ![f] = svr_cvers[f] + 1]
+    /\ ~staged[f]   \* the impl flushes before any write-through op (flush-first)
+    /\ guest_cvers[f] < MaxCvers
+    /\ svr_cvers'   = [svr_cvers   EXCEPT ![f] = guest_cvers[f] + 1]
+    /\ guest_cvers' = [guest_cvers EXCEPT ![f] = guest_cvers[f] + 1]
     /\ validated'  = [validated EXCEPT ![f] = FALSE]
     /\ IF BUGGY_NO_OWN_INVALIDATE
          THEN cache' = cache
          ELSE cache' = [cache EXCEPT ![f].valid = FALSE]
-    /\ UNCHANGED bad_read
+    /\ UNCHANGED <<staged, bad_read>>
 
 (***************************************************************************)
 (* ExternalWrite(f) -- an out-of-band (non-guest) Stratum mutation bumps f's *)
@@ -308,10 +372,11 @@ OwnWrite(f) ==
 (***************************************************************************)
 ExternalWrite(f) ==
     /\ EnableExternalWriter
-    /\ svr_cvers[f] < MaxCvers
-    /\ svr_cvers'  = [svr_cvers EXCEPT ![f] = svr_cvers[f] + 1]
+    /\ guest_cvers[f] < MaxCvers
+    /\ svr_cvers'   = [svr_cvers   EXCEPT ![f] = guest_cvers[f] + 1]
+    /\ guest_cvers' = [guest_cvers EXCEPT ![f] = guest_cvers[f] + 1]
     /\ validated'  = [validated EXCEPT ![f] = FALSE]
-    /\ UNCHANGED <<cache, bad_read>>
+    /\ UNCHANGED <<staged, cache, bad_read>>
 
 (***************************************************************************)
 (* Evict(f) -- LRU/capacity eviction of a valid entry (the bounded page/     *)
@@ -323,7 +388,44 @@ Evict(f) ==
     /\ cache[f].valid
     /\ cache'     = [cache EXCEPT ![f].valid = FALSE]
     /\ validated' = [validated EXCEPT ![f] = FALSE]
-    /\ UNCHANGED <<svr_cvers, bad_read>>
+    /\ UNCHANGED <<svr_cvers, guest_cvers, staged, bad_read>>
+
+(***************************************************************************)
+(* StageWrite(f) -- the F1 write-behind: a pure-append write lands in the    *)
+(* per-open-file staging run. The guest's LOGICAL content advances; the       *)
+(* server does NOT (no wire op). The shared-cache invalidate moves to the     *)
+(* flush (per-write -> per-flush), so the cache is untouched here; the        *)
+(* staged-overlay arm of Read keeps same-priv reads correct in the interim.   *)
+(***************************************************************************)
+StageWrite(f) ==
+    /\ EnableStaging
+    /\ guest_cvers[f] < MaxCvers
+    /\ guest_cvers' = [guest_cvers EXCEPT ![f] = guest_cvers[f] + 1]
+    /\ staged'      = [staged EXCEPT ![f] = TRUE]
+    /\ UNCHANGED <<svr_cvers, cache, validated, bad_read>>
+
+(***************************************************************************)
+(* FlushClose(f) -- the flush (close / fsync / cap / non-append pre-flush):   *)
+(* the staged run lands at the server as msize-max Twrites; the shared attr   *)
+(* + page entries invalidate (the per-flush invalidate); `validated` clears.  *)
+(* This is the close-to-open anchor: after it, any open (any Proc) reads the  *)
+(* flushed content.                                                           *)
+(*                                                                           *)
+(* BUGGY_LOST_STAGE clears the stage WITHOUT landing it (svr unchanged): the  *)
+(* lost-write bug -- a close/death path that neither flushes nor deliberately *)
+(* write-throughs. NoLostStage catches it structurally (staged=FALSE yet      *)
+(* guest > svr); a subsequent Open+Read also serves the pre-write content     *)
+(* (bad_read fires via the cache arm).                                        *)
+(***************************************************************************)
+FlushClose(f) ==
+    /\ staged[f]
+    /\ IF BUGGY_LOST_STAGE
+         THEN svr_cvers' = svr_cvers
+         ELSE svr_cvers' = [svr_cvers EXCEPT ![f] = guest_cvers[f]]
+    /\ staged'    = [staged EXCEPT ![f] = FALSE]
+    /\ cache'     = [cache EXCEPT ![f].valid = FALSE]
+    /\ validated' = [validated EXCEPT ![f] = FALSE]
+    /\ UNCHANGED <<guest_cvers, bad_read>>
 
 Next ==
     \E f \in Files :
@@ -332,6 +434,8 @@ Next ==
         \/ OwnWrite(f)
         \/ ExternalWrite(f)
         \/ Evict(f)
+        \/ StageWrite(f)
+        \/ FlushClose(f)
 
 Spec == Init /\ [][Next]_vars
 
@@ -343,6 +447,17 @@ Spec == Init /\ [][Next]_vars
 \* Larder can lag (stale-behind) but can never fabricate a future version. A
 \* modeling-integrity check (populate/refetch always take svr_cvers[f]).
 CacheNeverAhead == \A f \in Files : cache[f].valid => cache[f].cvers <= svr_cvers[f]
+
+\* ServerNeverAhead (staging integrity) -- the server never runs ahead of the
+\* guest's logical content: svr <= guest always (write-through keeps them
+\* equal; a stage advances guest; a flush lands svr := guest).
+ServerNeverAhead == \A f \in Files : svr_cvers[f] <= guest_cvers[f]
+
+\* NoLostStage (F1, the lost-write class) -- whenever no stage is outstanding,
+\* the server holds the guest's full logical content. Every path OUT of the
+\* staged state must land the bytes (flush) -- a close/death path that clears
+\* the stage without flushing (BUGGY_LOST_STAGE) violates this immediately.
+NoLostStage == \A f \in Files : ~staged[f] => guest_cvers[f] = svr_cvers[f]
 
 \* Bounded (I-32 / I-38) -- the Larder never holds more than Capacity valid
 \* entries. Non-vacuous: Capacity < |Files|, so a refetch must evict.
@@ -372,12 +487,19 @@ NoWrongRead == ~bad_read
 SafetyCore ==
     /\ TypeOk
     /\ CacheNeverAhead
+    /\ ServerNeverAhead
     /\ Bounded
     /\ NoStalePastRevalidation
 
 Invariants ==
     /\ SafetyCore
     /\ NoWrongRead
+
+\* The staging cfgs check the full set incl. the lost-write class.
+InvariantsWb ==
+    /\ SafetyCore
+    /\ NoWrongRead
+    /\ NoLostStage
 
 (***************************************************************************)
 (* ============================== LIVENESS ================================ *)

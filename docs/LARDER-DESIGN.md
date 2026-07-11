@@ -537,8 +537,12 @@ proven-in-principle to delivered.
 
 ## 11. What v1.0 does NOT do (the seams)
 
-- **Writeback caching.** v1.0 is write-through (own-writes invalidate + go to the
-  server immediately). Open-to-close writeback (v9fs `writeback`) is a v1.x knob.
+- **Writeback caching.** ~~v1.0 is write-through (own-writes invalidate + go to
+  the server immediately). Open-to-close writeback (v9fs `writeback`) is a v1.x
+  knob.~~ **PULLED FORWARD as §12 (F1, Senate-voted 2026-07-11)** — the CHASE
+  C-2 decomposition measured 97.9% of the S3 go-build's Twrites at ≤ 4 KiB
+  (19.6k ops / 85 MB — the op-count band ≈ 1.36 s); write-behind on the LOOSE
+  mount is the removing lever. Strict mounts keep write-through verbatim.
 - **Persistent (on-disk) cache.** The Larder is in-memory per-session; the
   fscache/`cfs`-on-disk analog (a cache that survives a session) is v1.x.
 - **Cross-session / cross-mount sharing.** Each `p9_client` has its own Larder;
@@ -639,6 +643,113 @@ proven-in-principle to delivered.
   content-version *revalidation* mechanism (e.g. a batched getattr / POUNCE over
   the listed children at open), designed with the listing cache itself — not a
   dirent-format snapshot.
+
+---
+
+## 12. Write-behind (F1 — the loose writeback leg; Senate-voted 2026-07-11)
+
+The CHASE C-2 decomposition (LEDGER "C-2 write-band decomposition") measured
+the S3 write band at 19.6k wire Twrites / 1795 ms for 85 MB — **97.9% ≤ 4 KiB**
+(the Go toolchain writes through ~4 KiB `bufio`; every object lands twice,
+$WORK + its GOCACHE copy). W-A transport+queueing (~933 ms) and W-B server
+per-op fixed cost (~430 ms) scale linearly with op count; the removing lever is
+**fewer, larger writes**. F2 (the Stratum transition-into-buffer) killed the
+per-file sync-extent tax server-side; F1 is the guest half.
+
+### 12.1 The model
+
+The v9fs `cache=loose` **writeback** leg / NFS-async precedent, completing the
+B1-voted loose premise (§ the I-38 row): on a **loose + cacheable** client,
+small sequential writes STAGE guest-side and flush as msize-max Twrites. Plan 9
+heritage is write-through (`cfs` is read-only caching) — but Plan 9 had no
+build-farm-on-9P story; the capability-OS SOTA (v9fs writeback / NFS async /
+Fuchsia minfs writeback) all buffer client-side under close-to-open.
+
+### 12.2 The mechanism (deliberately minimal)
+
+- **Staging home: per-open-file** (`dev9p_priv.wb`), NOT dirty bits in the
+  shared L1e page cache. A single **contiguous append run**
+  `{stage_off, stage_len, buf, cap, base_size, err}` under a per-priv spinlock:
+  - A write STAGES iff it is a **pure append** to the run's logical end
+    (`off == base_size` when empty, `off == stage_off + stage_len` when
+    active) — 97.9% of the measured mix. Anything else (an interior pwrite —
+    e.g. the Go buildid header patch — a hole, a non-file, an error-latched
+    priv) **flushes the run then writes through**: fail-safe, zero new
+    semantics for the odd cases.
+  - The buffer grows by doubling (kmalloc) up to `DEV9P_WB_CAP` (256 KiB — two
+    msize payloads); reaching the cap flushes the whole run and restarts. So
+    steady-state staging turns the 4-KiB dribble into full-msize wire writes.
+  - Staged bytes are charged to the Proc's I-32 page budget
+    (`proc_page_charge`); over-budget → write-through fallback (graceful,
+    like every Larder OOM path). `PRINCIPAL_SYSTEM` (the build chain) is
+    exempt, per I-32.
+- **Flush sites** (all funnel through one `wb_flush`):
+  1. **close** (`dev9p_close`) — BEFORE the async-clunk Tclunk (the
+     fid must be live for the flush Twrites). This is the close-to-open
+     anchor: the next open (any Proc) reads the flushed bytes.
+  2. **fsync** — flush, then `p9_client_fsync`; errors return synchronously.
+  3. **cap/threshold** — the mid-stream flushes above.
+  4. **a non-append write / wstat / weft-bind** on the same priv — flush
+     first, then the op (ordering: the staged bytes are older).
+  5. **a read of the same priv past the staged region** needs no flush: the
+     run is contiguous at the file's end, so reads split cleanly — below
+     `stage_off` = old content (server/cache, correct), within the run =
+     served from the staged buffer (overlay, the guest's newest bytes), past
+     the run = EOF at the patched size.
+- **fstat on the staging fd** patches `size = max(server_size,
+  stage_off + stage_len)` (the Go truncate-gate/buildid pattern needs the
+  post-write size mid-open). Path-stats via OTHER fids see the last-flushed
+  state — legal under close-to-open (the file is open-dirty).
+- **Shared-cache coherence**: the attr + page invalidates move from per-WRITE
+  to per-FLUSH (the bytes reach the server exactly at flush; 19.6k invalidate
+  pairs become ~1.4k). Same-priv readers never see stale (the overlay wins);
+  other-priv readers are close-to-open-legal until the close flush.
+- **Error semantics (the voted NFS model, honestly bounded by the ABI)**: a
+  flush failure (ENOSPC/EIO) LATCHES on the priv; every subsequent
+  write/fsync on that fd returns the latched errno (so a streaming writer
+  aborts at the next op); **fsync is the reliable error channel**. The
+  `Dev.close` slot is `void` at v1.0, so a close-flush failure cannot reach
+  the caller's close() return — documented seam; v1.x grows the slot. The
+  threshold flushes bound the silently-at-risk tail to < 256 KiB.
+- **Unlink** of a closed staged file needs nothing (the flush happened at
+  close). An unlink-while-open flushes at close into the orphaned fid
+  (9P keeps the fid live until clunk) — harmless; the skip-flush-on-unlinked
+  optimization needs unlink→priv plumbing and is v1.x.
+- **SMP** (the §7 shared-client discipline): the run is detached under the
+  priv lock, flushed OUTSIDE it (blocking 9P I/O never under a spinlock); a
+  concurrent write starts a fresh run continuing past the detached end; a
+  concurrent read overlays BOTH the detached (in-flight) and active runs.
+  Death mid-stage: #926 closes handles at exit → the close flush runs.
+
+### 12.3 What it does NOT change
+
+Strict mounts: byte-identical write-through. Non-cacheable clients (netd),
+byte-mode (corvus), weft-bound fids, directories, cached-open (read-only)
+privs: untouched. The 9P wire protocol: unchanged (the flush is ordinary
+Twrites). The server: unchanged. I-28/perm: the staged write happens on an
+already-opened fid whose rights were checked at open — staging defers only the
+TRANSPORT, never a check.
+
+### 12.4 The spec (model-first; the L1b re-enabled surface)
+
+`specs/fs_cache.tla` gains the write-behind actions on the existing
+content-token abstraction: `StageWrite` (the newest content lives in a
+per-file `staged` slot; a `Read` MUST serve staged-over-cache-over-server) and
+`FlushClose` (staged → server, `cvers` bump, staged cleared, cache
+invalidated). Two new buggy cfgs pin the two bug classes:
+`BUGGY_READ_SKIPS_STAGED` (a read serves cache/server while staged is present
+— the overlay-miss class) and `BUGGY_LOST_STAGE` (close drops the staged token
+without flushing — the lost-write class; the next open reads the pre-write
+server content). The byte-granular overlay split (below/within/past the run)
+is beneath the token abstraction — pinned by the kernel tests instead.
+
+### 12.5 Projected effect
+
+19.6k → ~1.4k wire writes (85 MB / 128-KiB flushes + the sub-cap tails at
+close). W-A+W-B ≈ −0.7..0.9 s of the post-F2 936 ms write band, plus the
+queueing ripple on the other bands (the pre-F2→F2 step showed wga/read
+shrinking ~40% from depth relief alone). F2+F1 projects S3 ≈ 2.5–2.8 s vs the
+2648 bar; the wga cold band is the reserve lever.
 
 ---
 
