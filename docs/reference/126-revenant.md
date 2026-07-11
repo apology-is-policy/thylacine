@@ -212,8 +212,13 @@ A kernel-global fixed table (`IMAGE_CACHE_MAX = 128` — doubled from 64 at #45,
 since a binary now contributes TWO entries: text + rodata) of entries, each
 holding **one** handle_count ref (a STRONG ref → a cached segment persists past
 the last unmap, the Plan 9 temporal cache) on a FILE Burrow, keyed on `(dc,
-devno, qid.path, qid.vers, file_offset, size)` — per-SEGMENT, which is what let
-the #45 rodata extension ride with no cache change. `image_lookup_or_create`:
+devno, qid.path, qid.vers, file_offset, size, exec)` — per-SEGMENT **and
+per-exec-class**. The `exec` component (#45 audit F1) is load-bearing: two
+segments with an identical file window but different X-ness (a crafted ELF's
+aliased R+X + R-only PT_LOADs) resolve to DISTINCT Burrows, so no single FILE
+Burrow is ever mapped at both an executable and a non-executable prot — the
+property the fault arm's `freq->exec`-gated I-cache sync depends on (a non-exec
+fill never leaves an executable resident-hit unsynced). `image_lookup_or_create`:
 
 - **HIT** (pass 1, under `g_image_lock`): `burrow_ref` the cached Burrow for the
   caller; `spoor_clunk` the redundant passed Spoor (outside the lock).
@@ -254,9 +259,10 @@ freeing unref). One `spoor_clunk` per Spoor on every path.
    (no pointer into the buffer), so `kfree(hdr)` before `exec_build_init_stack`
    reads `img` is safe.
 3. Per `PT_LOAD`: require page-aligned `vaddr` + `file_offset`, `memsz != 0`, then
-   dispatch on `file_shareable = !(PF_W) && round_up(vaddr+filesz) == round_up(vaddr+memsz)`
+   dispatch on `file_shareable = (PF_R) && !(PF_W) && round_up(vaddr+filesz) == round_up(vaddr+memsz)`
    (the #45 generalization of the original `PF_X` gate — text byte-identical since
-   `elf_load` rejects `W|X`; R-only rodata newly qualifies):
+   `elf_load` rejects `W|X`; R-only rodata newly qualifies; the `PF_R` requirement
+   is #45 audit F2 — a no-access `flags==0` PT_LOAD stays eager, pinning no cache slot):
    - **file-shareable** → `map_file_backed` (Image cache → shared FILE Burrow,
      `burrow_map` at the segment's own ELF prot — `R+X` text / `R`-only [XN]
      rodata — then `burrow_unref`). BORROWS `exe`; `spoor_ref`s a fresh ref
@@ -296,9 +302,11 @@ already prot-general (REVENANT §4.6 records the full soundness walk):
 
 - `file_install_locked` / `file_install_cluster_locked` install at `vma->prot`;
 - the #317 I-cache sync is gated on `freq->exec` — never fires for rodata,
-  sound because each FILE Burrow backs ONE segment at ONE prot (the per-segment
-  Image key), so no page migrates from a non-exec to an exec mapping;
-- the Image cache keys per-segment; a binary now holds two entries;
+  sound because each FILE Burrow backs ONE segment at ONE exec-class (ENFORCED
+  by the `exec` component of the Image key — #45 audit F1 — so a crafted ELF's
+  aliased R+X/R-only PT_LOADs get distinct Burrows), so no page migrates from a
+  non-exec to an exec mapping;
+- the Image cache keys per-segment + per-exec-class; a binary holds two entries;
 - torpor's R-5-F1 pre-fault is address-based and covers rodata FILE pages;
 - the I-32 charge posture (per-page charge = v1.x seam) is unchanged in kind.
 

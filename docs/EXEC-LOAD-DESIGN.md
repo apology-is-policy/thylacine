@@ -259,9 +259,12 @@ compile execs, and a private per-live-Proc RAM copy under parallel builds.
 
 An R-only segment is semantically text-minus-the-X-bit: immutable, never
 written, safely shared. The dispatch predicate generalizes from `PF_X` to
-`NOT PF_W`:
+`PF_R && !PF_W` (the `PF_R` requirement — #45 audit F2 — keeps a no-access
+`flags==0` PT_LOAD on the eager path; it can never be faulted, so file-backing
+it would only pin an idle Image slot):
 
-    file_shareable = !(flags & PF_W) && round_up(filesz) == round_up(memsz)
+    file_shareable = (flags & PF_R) && !(flags & PF_W) &&
+                     round_up(filesz) == round_up(memsz)
 
 Text behavior is byte-identical (`elf_load` rejects `PF_W|PF_X`, so
 `PF_X ⇒ !PF_W`). Writable segments keep the D4 eager-copy-into-anon path.
@@ -274,9 +277,17 @@ Soundness — why this is an extension, not new mechanism:
 - **The fault arm is already prot-general**: `file_install_locked` /
   `file_install_cluster_locked` install at `vma->prot`; the #317 I-cache sync
   is gated on `freq->exec` — a rodata page is never synced, which is sound
-  because each FILE Burrow backs exactly ONE segment at ONE prot (the Image
-  keys per-segment), so no page ever migrates from a non-exec to an exec
-  mapping.
+  because each FILE Burrow backs exactly ONE segment at ONE **exec-class**, so
+  no page ever migrates from a non-exec to an exec mapping. **This is ENFORCED,
+  not assumed (#45 audit F1)**: the Image key is `(dc, devno, qid.path,
+  qid.vers, file_offset, size, exec)` — the `exec` component splits a crafted
+  ELF's aliased R+X + R-only PT_LOADs (identical file window, different X-ness)
+  into DISTINCT Burrows, so no single FILE Burrow is ever mapped at both an
+  executable and a non-executable prot. Without it, a rodata-first fill (no
+  sync) then a text resident-hit would execute stale I-cache lines — the #317
+  hazard, reachable by a crafted binary; the exec key closes it. A legit binary
+  is unaffected (the same file's same segment always carries the same X bit ->
+  the same key -> maximal cross-Proc sharing).
 - **The Image cache already keys per-segment** `(dc, devno, qid.path,
   qid.vers, file_offset, size)`; a binary now occupies two entries (text +
   rodata). `IMAGE_CACHE_MAX` doubles 64 → 128 to keep the effective binary

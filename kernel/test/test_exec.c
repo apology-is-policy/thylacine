@@ -235,6 +235,55 @@ void test_exec_from_spoor_rodata_dispatch(void) {
     spoor_clunk(exe);
 }
 
+// #45 audit F1: a crafted ELF whose R+X and R-only PT_LOADs share an IDENTICAL
+// file window (same file_offset + filesz, distinct vaddrs). The prot-less Image
+// key (pre-fix) resolved BOTH to the SAME FILE Burrow -> one physical page
+// mapped at both an executable and a non-executable prot; a rodata-first fill
+// (no I-cache sync) then a text resident-hit executed stale I-cache lines
+// (#317 hazard). The fix keys on `exec`, so the two segments get DISTINCT
+// Burrows. This test asserts distinct Burrows + TWO Image creates; it FAILS on
+// the pre-fix code by construction (same Burrow pointer, one create).
+void test_exec_from_spoor_aliased_window_distinct(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    // seg0 R+X @ 0x10000, seg1 R-only @ 0x20000 -- both point at file 0x1000.
+    u32 flags[2] = { PF_R | PF_X, PF_R };
+    size_t size = build_elf(flags, 2, /*filesz=*/0x1000);
+    // Repoint seg1's file_offset onto seg0's window (the alias). build_elf packs
+    // seg1 at file 0x2000; make it 0x1000 == seg0. The blob at 0x1000 backs both.
+    struct Elf64_Phdr *ph = (struct Elf64_Phdr *)
+        (g_elf_blob + sizeof(struct Elf64_Ehdr));
+    ph[1].p_offset = ph[0].p_offset;    // == 0x1000; same (file_offset, size)
+    g_blob_dev_size = size;
+
+    u64 creates0 = image_cache_creates_for_test();
+
+    struct Spoor *exe = spoor_alloc(&g_blob_dev);
+    TEST_ASSERT(exe != NULL, "spoor_alloc");
+    exe->qid.path = 0xA11A5ull;         // distinct Image key vs other tests
+    exe->qid.vers = 3;
+
+    u64 entry = 0, sp = 0;
+    int rc = exec_setup_from_spoor(p, exe, size, NULL, 0, 0, &entry, &sp);
+    TEST_EXPECT_EQ(rc, 0, "exec_setup_from_spoor (aliased window)");
+
+    struct Vma *text = vma_lookup(p, 0x10000ull);
+    struct Vma *ro   = vma_lookup(p, 0x20000ull);
+    TEST_ASSERT(text != NULL && ro != NULL, "both VMAs");
+    TEST_EXPECT_EQ((int)text->burrow->type, (int)BURROW_TYPE_FILE, "text FILE");
+    TEST_EXPECT_EQ((int)ro->burrow->type,   (int)BURROW_TYPE_FILE, "rodata FILE");
+    // THE FIX: distinct Burrows despite the identical file window.
+    TEST_ASSERT(text->burrow != ro->burrow,
+        "aliased-window R+X and R-only resolve to DISTINCT Burrows (no dual-prot)");
+    TEST_EXPECT_EQ(image_cache_creates_for_test() - creates0, 2,
+        "TWO Image entries -- the exec bit splits the aliased key (fails pre-fix)");
+
+    drop_proc(p);
+    image_cache_evict_idle_for_test();
+    spoor_clunk(exe);
+}
+
 void test_exec_setup_smoke(void) {
     struct Proc *p = make_proc();
     TEST_ASSERT(p != NULL, "proc_alloc");

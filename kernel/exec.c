@@ -468,7 +468,8 @@ static int map_file_backed(struct Proc *p, struct Spoor *exe,
     // hit). The thunk keeps the borrowed `exe`, so hand the lookup a FRESH ref;
     // on a NULL return it consumed nothing -> drop the fresh ref.
     spoor_ref(exe);
-    struct Burrow *b = image_lookup_or_create(exe, seg->file_offset, seg->filesz);
+    struct Burrow *b = image_lookup_or_create(exe, seg->file_offset, seg->filesz,
+                                              (seg->flags & PF_X) != 0);
     if (!b) { spoor_clunk(exe); return -1; }
 
     // The segment's own ELF prot: R+X for text, R-only (XN) for rodata. W^X
@@ -606,16 +607,20 @@ int exec_setup_from_spoor(struct Proc *p, struct Spoor *exe, size_t exe_size,
         if (seg->file_offset & (PAGE_SIZE - 1)) return -1;
         if (seg->memsz == 0)                    return -1;
 
-        // file_shareable iff NOT PF_W (R+X text, R-only rodata -- #45 /
+        // file_shareable iff PF_R AND NOT PF_W (R+X text, R-only rodata -- #45 /
         // REVENANT §4.6; text byte-identical since elf_load rejects W|X) AND
         // round_up(filesz) == round_up(memsz) (no whole bss page beyond the
-        // file). vaddr is page-aligned, so the vaddr-relative rounded ends
-        // compare the rounded sizes; a 0 from round_up_page is overflow -> fall
-        // to the eager path (which re-rejects). PF_W MUST stay eager: a
-        // file-backed writable mapping violates I-36-4 + the §6.5 refusal.
+        // file). The PF_R requirement (#45 audit F2) keeps a no-access (flags==0)
+        // PT_LOAD on the eager path -- it can never be read/faulted, so caching
+        // it would only pin an idle Image slot + spoor ref. vaddr is
+        // page-aligned, so the vaddr-relative rounded ends compare the rounded
+        // sizes; a 0 from round_up_page is overflow -> fall to the eager path
+        // (which re-rejects). PF_W MUST stay eager: a file-backed writable
+        // mapping violates I-36-4 + the §6.5 refusal.
         u64 fend = round_up_page(seg->vaddr + seg->filesz);
         u64 mend = round_up_page(seg->vaddr + seg->memsz);
-        bool file_shareable = !(seg->flags & PF_W) && fend != 0 && fend == mend;
+        bool file_shareable = (seg->flags & PF_R) && !(seg->flags & PF_W) &&
+                              fend != 0 && fend == mend;
 
         int rc = file_shareable ? map_file_backed(p, exe, seg)
                                 : map_eager_from_file(p, exe, seg);

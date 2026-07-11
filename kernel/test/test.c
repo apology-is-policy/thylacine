@@ -219,6 +219,7 @@ void test_image_miss_then_hit_shares(void);
 void test_image_distinct_qid_distinct_entry(void);
 void test_image_qid_vers_bump_new_entry(void);
 void test_image_distinct_offset_distinct_entry(void);
+void test_image_exec_discriminates_key(void);
 void test_image_eviction_bounds_cache(void);
 void test_image_bad_arg_retains_spoor(void);
 void test_asid_width_valid(void);
@@ -286,6 +287,7 @@ void test_vdso_maps_ro_read(void);
 void test_vdso_maps_ro_write_faults(void);
 void test_exec_setup_smoke(void);
 void test_exec_from_spoor_rodata_dispatch(void);
+void test_exec_from_spoor_aliased_window_distinct(void);
 void test_exec_setup_segment_data_copied(void);
 void test_exec_setup_constraints(void);
 void test_exec_setup_multi_segment(void);
@@ -1393,6 +1395,7 @@ struct test_case g_tests[] = {
     { "image.distinct_qid_distinct_entry", test_image_distinct_qid_distinct_entry, false, NULL },
     { "image.qid_vers_bump_new_entry",    test_image_qid_vers_bump_new_entry,    false, NULL },
     { "image.distinct_offset_distinct_entry", test_image_distinct_offset_distinct_entry, false, NULL },
+    { "image.exec_discriminates_key",       test_image_exec_discriminates_key,       false, NULL },
     { "image.eviction_bounds_cache",      test_image_eviction_bounds_cache,      false, NULL },
     { "image.bad_arg_retains_spoor",      test_image_bad_arg_retains_spoor,      false, NULL },
     { "asid.width_valid",              test_asid_width_valid,              false, NULL },
@@ -1479,6 +1482,7 @@ struct test_case g_tests[] = {
     { "vdso.maps_ro_write_faults",     test_vdso_maps_ro_write_faults,     false, NULL },
     { "exec.setup_smoke",              test_exec_setup_smoke,              false, NULL },
     { "exec.from_spoor_rodata_dispatch", test_exec_from_spoor_rodata_dispatch, false, NULL },
+    { "exec.from_spoor_aliased_window_distinct", test_exec_from_spoor_aliased_window_distinct, false, NULL },
     { "exec.setup_segment_data_copied",
                                        test_exec_setup_segment_data_copied,
                                                                            false, NULL },

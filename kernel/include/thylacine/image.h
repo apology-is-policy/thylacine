@@ -5,7 +5,7 @@
 // Burrows (R+X text; + R-only rodata since #45), keyed on the executable's
 // FILE IDENTITY:
 //
-//     (dc, devno, qid.path, qid.vers, file_offset, size)
+//     (dc, devno, qid.path, qid.vers, file_offset, size, exec)
 //
 // Its purpose is cross-Proc text sharing. The first exec of a binary creates a
 // FILE Burrow over the executable's pinned Spoor (R-1) and demand-pages its
@@ -26,7 +26,14 @@
 // (REVENANT §3.1). DISTINCT SEGMENTS of one binary (same qid, different
 // file_offset) are distinct entries — each segment is its own Burrow over its
 // own Spoor ref (no consolidation needed). Since #45 a binary typically
-// contributes TWO entries: its text segment + its R-only rodata segment.
+// contributes TWO entries: its text segment + its R-only rodata segment. The
+// key includes `exec` (#45 audit F1): two segments with an IDENTICAL file
+// window but different X-ness (a crafted ELF's aliased R+X + R-only PT_LOADs)
+// resolve to DISTINCT Burrows, so no single FILE Burrow is ever mapped at both
+// an executable and a non-executable prot -- the property that keeps the
+// fault arm's freq->exec-gated I-cache sync sound (a non-exec fill never
+// leaves an executable resident-hit unsynced). A legit binary is unaffected:
+// the same file's same segment always carries the same X bit -> the same key.
 //
 // LIFECYCLE: the cache holds ONE handle_count ref per cached Burrow (a STRONG
 // ref), so text persists after the last Proc unmaps (the Plan 9 temporal cache —
@@ -87,10 +94,15 @@ void image_cache_init(void);
 // and `spoor` is NOT consumed — the caller still owns it (mirrors
 // burrow_create_file).
 //
+// `exec` (#45 audit F1) discriminates an executable segment from a
+// non-executable one with an otherwise-identical file window (see the key note
+// above); pass `(seg->flags & PF_X) != 0`.
+//
 // SMP: serialized by the global cache lock; the blocking burrow_create_file runs
 // OUTSIDE the lock with a re-search-on-reacquire (the create race — two Procs
 // exec'ing the same binary concurrently; the loser frees its surplus Burrow).
-struct Burrow *image_lookup_or_create(struct Spoor *spoor, u64 file_offset, size_t length);
+struct Burrow *image_lookup_or_create(struct Spoor *spoor, u64 file_offset,
+                                      size_t length, bool exec);
 
 #ifdef KERNEL_TESTS
 // Number of live (used) cache entries. Snapshot under the cache lock.

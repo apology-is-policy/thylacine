@@ -538,9 +538,13 @@ void test_demand_page_file_rodata_prot(void) {
         "R-only rodata is RO_ANY (W^X: never writable)");
 
     // The right FILE bytes landed (offset-keyed pattern), not a zero page.
+    // #45 audit F3: probe NON-zero-coinciding offsets -- byte 0 of FILE_OFF
+    // 0x7000 is pattern 0x00, indistinguishable from a zero fill, so it carries
+    // no signal (the R-5 R2-F1 vacuity class). byte 1 (0x01) + byte 0x9f (0x9f)
+    // both genuinely discriminate file-data from zero-fill.
     u8 *bytes = (u8 *)pa_to_kva(page_to_pa(slotpg));
-    TEST_EXPECT_EQ((u64)bytes[0],    (u64)(u8)(FILE_OFF & 0xff),
-        "byte 0 = file_offset pattern");
+    TEST_EXPECT_EQ((u64)bytes[1],    (u64)(u8)((FILE_OFF + 1) & 0xff),
+        "byte 1 = file_offset pattern (non-zero -> discriminates zero-fill)");
     TEST_EXPECT_EQ((u64)bytes[0x9f], (u64)(u8)((FILE_OFF + 0x9f) & 0xff),
         "byte 0x9f matches pattern");
 
