@@ -957,6 +957,7 @@ void test_dev9p_walk_attrs(void);
 void test_dev9p_page_cache_serve_and_gate(void);
 void test_dev9p_cached_open(void);
 void test_dev9p_cached_open_fallbacks(void);
+void test_dev9p_cached_open_loose(void);
 void test_dev9p_perm_enforced_deny_allow(void);
 void test_p9_attached_create_destroy(void);
 void test_p9_attached_handshake_failure_returns_null(void);
@@ -2319,6 +2320,7 @@ struct test_case g_tests[] = {
     { "dev9p.page_cache_serve_and_gate", test_dev9p_page_cache_serve_and_gate, false, NULL },
     { "dev9p.cached_open",             test_dev9p_cached_open,                 false, NULL },
     { "dev9p.cached_open_fallbacks",   test_dev9p_cached_open_fallbacks,       false, NULL },
+    { "dev9p.cached_open_loose",       test_dev9p_cached_open_loose,           false, NULL },
     { "dev9p.perm_enforced_deny_allow",
                                        test_dev9p_perm_enforced_deny_allow, false, NULL },
     { "p9_attached.create_destroy",    test_p9_attached_create_destroy,    false, NULL },

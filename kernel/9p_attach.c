@@ -244,7 +244,7 @@ bool p9_attached_is_open(const struct p9_attached *a) {
 
 struct Spoor *srvconn_attach_dev9p_root(struct SrvConn *cn,
                                         const u8 *aname, size_t aname_len,
-                                        u32 n_uname, int *out_err) {
+                                        u32 n_uname, bool loose, int *out_err) {
     if (out_err) *out_err = 0;
     if (!cn) { if (out_err) *out_err = -T_E_INVAL; return NULL; }
 
@@ -303,6 +303,13 @@ struct Spoor *srvconn_attach_dev9p_root(struct SrvConn *cn,
     // The HANDSHAKE_DEADLINE armed above bounded only the serial, fresh-client
     // handshake, where a timeout tears down the unshared client with no desync.
     srvconn_set_client_deadline(cn, 0);
+
+    // B1 per-attach loose mode (I-38 opt-in): stamped on the still-private
+    // client BEFORE the root Spoor exists -- the caller's handle publication
+    // orders it against every subsequent dev9p op, so the plain bool needs no
+    // atomics and is never flipped after this point.
+    if (loose && att->client)
+        att->client->loose = true;
 
     // Transfer adapter ownership into the attached (tx == rx == NULL: the SrvConn
     // lifetime is the adapter's own srvconn_ref, not a transport-Spoor pair).

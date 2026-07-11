@@ -1848,7 +1848,8 @@ static s64 sys_attach_9p_handler(u64 tx_fd_raw, u64 rx_fd_raw,
 // per-byte uaccess_load_u8. NULL with len=0 is allowed (empty aname).
 
 static s64 sys_attach_9p_srv_handler(u64 srv_fd_raw, u64 aname_va,
-                                       u64 aname_len, u64 n_uname) {
+                                       u64 aname_len, u64 n_uname,
+                                       u64 flags) {
     struct Thread *t = current_thread();
     if (!t)                                          return -1;
     struct Proc *p = t->proc;
@@ -1859,6 +1860,14 @@ static s64 sys_attach_9p_srv_handler(u64 srv_fd_raw, u64 aname_va,
     // n_uname is 9P2000.L's u32 numeric uid field; reject values that
     // would silently truncate to u32. Mirrors SYS_ATTACH_9P F239 fix.
     if (n_uname > (u64)0xFFFFFFFFu)                   return -1;
+    // Reject unknown flag bits (forward-compat guard). SYS_ATTACH_9P_LOOSE
+    // is the B1 per-attach I-38 opt-in (docs/chase/B1-VOTE.md + the ARCH
+    // I-38 row): the mounter asserts the single-writer premise for this
+    // attach; the minted client's cached-opens then serve full hint hits
+    // without the per-open wire revalidation. The #112 ABI discipline:
+    // this is arg x4 -- EVERY caller sets it (the lib wrappers take it
+    // explicitly, so a stale caller cannot pass garbage silently).
+    if (flags & ~(u64)SYS_ATTACH_9P_LOOSE)            return -1;
     // Validate user-VA range when aname_len > 0; zero-length aname is
     // legal per 9P2000.L.
     if (aname_len > 0 && !sys_validate_user_buf(aname_va, aname_len))
@@ -1910,7 +1919,8 @@ static s64 sys_attach_9p_srv_handler(u64 srv_fd_raw, u64 aname_va,
     // connect shares the SAME helper -- the 9P-unification.
     int aerr = 0;
     struct Spoor *root = srvconn_attach_dev9p_root(
-        cn, aname_len > 0 ? aname_scratch : NULL, aname_len, p->principal_id, &aerr);
+        cn, aname_len > 0 ? aname_scratch : NULL, aname_len, p->principal_id,
+        (flags & SYS_ATTACH_9P_LOOSE) != 0, &aerr);
     if (!root) {
         // A-3c/M6: surface the Tattach Rlerror ecode (e.g. -T_E_ACCES on a
         // per-user stratumd dataset-scope refusal) rather than a bare -1.
@@ -6827,7 +6837,8 @@ void syscall_dispatch(struct exception_context *ctx) {
         ctx->regs[0] = (u64)sys_attach_9p_srv_handler(ctx->regs[0],
                                                        ctx->regs[1],
                                                        ctx->regs[2],
-                                                       ctx->regs[3]);
+                                                       ctx->regs[3],
+                                                       ctx->regs[4]);
         return;
 
     case SYS_PIVOT_ROOT:

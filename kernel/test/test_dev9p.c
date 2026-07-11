@@ -45,6 +45,7 @@ void test_dev9p_walk_attrs(void);
 void test_dev9p_page_cache_serve_and_gate(void);
 void test_dev9p_cached_open(void);
 void test_dev9p_cached_open_fallbacks(void);
+void test_dev9p_cached_open_loose(void);
 
 // File-scope buffers — client is ~80 KiB (the embedded Larder attr+dentry+page
 // metadata), won't fit on the 16 KiB test thread stack alongside a few locals.
@@ -1491,6 +1492,79 @@ void test_dev9p_cached_open(void) {
     TEST_EXPECT_EQ((u64)g_clunk_seen, 0ull, "close sends NO Tclunk");
     TEST_EXPECT_EQ(dev9p_co_budget_used(), budget0, "budget uncharged at close");
 
+    larder_destroy(l);
+    __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
+    teardown(root);
+}
+
+// B1 per-attach loose mode (I-38 opt-in; docs/chase/B1-VOTE.md): a LOOSE
+// client's cached-open serves a FULL hint hit with ZERO wire ops (the wga
+// query skipped; the snapshot at the CACHED cvers); a hint miss still
+// returns NULL without a wire op from open_cached (first touch takes the
+// normal path); a STRICT client is byte-unchanged (the sibling test above
+// pins its exactly-one-wire-op contract, which fails if loose leaks).
+void test_dev9p_cached_open_loose(void) {
+    struct Spoor *root = make_open_client_and_root();
+    struct larder *l = &g_client.larder;
+    const char *names[1] = { "fileA" };
+    size_t lens[1] = { 5 };
+    struct t_stat sts[DEV_WALK_ATTRS_MAX];
+
+    co_prime(root, "fileA", 5);
+    static u8 data[0x200];
+    for (u32 i = 0; i < sizeof(data); i++) data[i] = (u8)(i * 3 + 1);
+    larder_page_install(l, larder_gen_snapshot(l), 0x20, 0, 0, data,
+                        (u32)sizeof(data));
+
+    g_client.loose = true;
+    u64 budget0 = dev9p_co_budget_used();
+
+    // The loose fidless open: ZERO wire ops -- the B1 contract. The sts
+    // post-scan records come from the caches (the same attrs the L1c base
+    // X-check serves).
+    g_wga_seen = 0; g_lopen_seen = 0;
+    struct Spoor *co = dev9p.open_cached(root, (const char *const *)names,
+                                         lens, 1, sts);
+    TEST_ASSERT(co != NULL, "loose cached-open mints the fidless Spoor");
+    TEST_EXPECT_EQ((u64)g_wga_seen, 0ull, "ZERO wire ops on a full hint hit");
+    TEST_EXPECT_EQ((u64)g_lopen_seen, 0ull, "no Tlopen");
+    struct dev9p_priv *cp = dev9p_priv_of(co);
+    TEST_ASSERT(cp != NULL && cp->cached_open, "cached_open priv");
+    TEST_EXPECT_EQ((u64)cp->fid, (u64)P9_NOFID, "fidless (P9_NOFID)");
+    TEST_EXPECT_EQ(sts[0].qid_path, 0x20ull, "cached sts filled for the post-scan");
+    TEST_EXPECT_EQ(sts[0].size, 0x200ull, "cached leaf size");
+    TEST_EXPECT_EQ(dev9p_co_budget_used() - budget0, 0x200ull, "budget charged");
+
+    // Reads serve the snapshot taken at the CACHED cvers.
+    u8 buf[0x200];
+    long r = dev9p.read(co, buf, (long)sizeof(buf), 0);
+    TEST_EXPECT_EQ((u64)r, 0x200ull, "read serves the full snapshot");
+    bool bytes_ok = true;
+    for (u32 i = 0; i < 0x200; i++)
+        if (buf[i] != data[i]) { bytes_ok = false; break; }
+    TEST_ASSERT(bytes_ok, "snapshot bytes verbatim");
+    spoor_clunk(co);
+    TEST_EXPECT_EQ(dev9p_co_budget_used(), budget0, "budget uncharged at close");
+
+    // A hint MISS on a loose client: NULL and STILL zero wire ops from
+    // open_cached (first touch belongs to the normal path -- the loose
+    // mode never invents state it has not cached).
+    const char *miss[1] = { "absent" };
+    size_t mlen[1] = { 6 };
+    g_wga_seen = 0;
+    co = dev9p.open_cached(root, (const char *const *)miss, mlen, 1, sts);
+    TEST_ASSERT(co == NULL, "hint miss -> NULL on a loose client");
+    TEST_EXPECT_EQ((u64)g_wga_seen, 0ull, "a loose hint miss costs no wire op");
+
+    // An own-write invalidate drops the coverage: the next loose
+    // cached-open must MISS (fall back), not serve the stale snapshot.
+    larder_page_invalidate(l, 0x20);
+    g_wga_seen = 0;
+    co = dev9p.open_cached(root, (const char *const *)names, lens, 1, sts);
+    TEST_ASSERT(co == NULL, "own-write invalidate -> loose hint miss");
+    TEST_EXPECT_EQ((u64)g_wga_seen, 0ull, "no wire op on the post-invalidate miss");
+
+    g_client.loose = false;
     larder_destroy(l);
     __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
     teardown(root);

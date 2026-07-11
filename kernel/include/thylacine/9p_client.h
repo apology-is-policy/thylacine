@@ -220,6 +220,14 @@ struct p9_client {
     // one-word race. Accessed with __atomic (relaxed -- a monotonic optimization
     // hint; the Larder lock orders the cached data itself).
     bool                 cacheable;
+    // B1 per-attach loose mode (I-38 opt-in; user-voted option B 2026-07-11,
+    // docs/chase/B1-VOTE.md + the ARCH I-38 row): a cached-open whose RPC-free
+    // hint FULLY hits skips the per-open forced-wire revalidation and
+    // snapshots at the CACHED cvers. Set ONCE by the attach path (from the
+    // validated SYS_ATTACH_9P_LOOSE flag) BEFORE the root Spoor publishes --
+    // ordered by the handle publication, never flipped at runtime, so a plain
+    // read is sound. Default false = strict close-to-open (I-38's default).
+    bool                 loose;
     // The Larder -- the guest-side FS cache (L1c; docs/LARDER-DESIGN.md, I-38).
     // Shared by every Proc/thread resolving through this mount; protected by its
     // OWN near-leaf lock (never held with c->lock -- the RPCs that take c->lock

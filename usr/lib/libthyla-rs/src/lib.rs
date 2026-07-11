@@ -1217,6 +1217,12 @@ pub unsafe fn t_pivot_root(new_root_fd: i64) -> i64 {
     x0
 }
 
+/// SYS_ATTACH_9P_SRV flags: the B1 per-attach loose mode (I-38 opt-in --
+/// the caller asserts the single-writer premise for this attach;
+/// cached-opens then serve full Larder-hint hits without the per-open
+/// wire revalidation). docs/chase/B1-VOTE.md + the ARCH I-38 row.
+pub const T_ATTACH_9P_LOOSE: u64 = 0x1;
+
 /// t_attach_9p_srv -- drive a 9P attach over a byte-mode `/srv` connection
 /// (16c; SYS_ATTACH_9P_SRV). `srv_fd` is a KOBJ_SPOOR CLIENT byte-conn from
 /// open=connect on a byte-mode service (must carry R+W; the kernel 9P client
@@ -1224,12 +1230,13 @@ pub unsafe fn t_pivot_root(new_root_fd: i64) -> i64 {
 /// the caller's principal_id for `n_uname`) and returns a KOBJ_SPOOR rooting
 /// the attached tree (R|W|TRANSFER). `aname` is the server-side path /
 /// capability string (<= SYS_ATTACH_ANAME_MAX; pass NULL+0 for the default
-/// root). After a successful attach the `srv_fd` handle may be closed -- the
-/// attach holds its own ref and the rings are kernel_attached. Returns the
-/// new fd (>= 0) or -1.
+/// root). `flags` is 0 (strict close-to-open) or T_ATTACH_9P_LOOSE; unknown
+/// bits reject. After a successful attach the `srv_fd` handle may be closed
+/// -- the attach holds its own ref and the rings are kernel_attached.
+/// Returns the new fd (>= 0) or -1.
 #[inline(always)]
 pub unsafe fn t_attach_9p_srv(srv_fd: i64, aname: *const u8, aname_len: usize,
-                              n_uname: u64) -> i64 {
+                              n_uname: u64, flags: u64) -> i64 {
     let mut x0: i64 = srv_fd;
     asm!(
         "svc #0",
@@ -1237,6 +1244,7 @@ pub unsafe fn t_attach_9p_srv(srv_fd: i64, aname: *const u8, aname_len: usize,
         in("x1") aname as u64,
         in("x2") aname_len as u64,
         in("x3") n_uname,
+        in("x4") flags,
         in("x8") T_SYS_ATTACH_9P_SRV,
         options(nostack)
     );

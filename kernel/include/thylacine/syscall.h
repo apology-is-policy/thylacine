@@ -971,7 +971,8 @@ enum {
     SYS_LSEEK        = 51,   // arg: spoor_fd (x0), offset (x1), whence (x2)
 
     // P6-pouch-stratumd-boot 16c: SYS_ATTACH_9P_SRV(srv_fd, aname_va,
-    //                                                 aname_len, n_uname)
+    //                                                 aname_len, n_uname,
+    //                                                 flags)
     //                                                 -> spoor_fd / -1
     //   x0 = srv_fd      (hidx_t; must be a byte-mode CSRVCLIENT conn Spoor
     //                    (KOBJ_SPOOR) the caller holds, with RIGHT_READ +
@@ -983,6 +984,15 @@ enum {
     //   x2 = aname_len   (bytes; <= SYS_ATTACH_ANAME_MAX = 256;
     //                    zero-length aname is permitted)
     //   x3 = n_uname     (u32; 0 for no-auth attach at v1.0)
+    //   x4 = flags       (B1: SYS_ATTACH_9P_LOOSE opts the minted client
+    //                    into the per-attach loose mode -- the mounter
+    //                    asserts the single-writer premise for THIS attach
+    //                    (docs/chase/B1-VOTE.md + the ARCH I-38 row); a
+    //                    cached-open whose RPC-free hint fully hits then
+    //                    skips the per-open wire revalidation. Unknown
+    //                    bits reject. The #112 ABI discipline: EVERY
+    //                    caller sets x4 -- the libt/libthyla-rs wrappers
+    //                    take it as an explicit parameter)
     //
     // Parallel to SYS_ATTACH_9P but the transport is a byte-mode SrvConn
     // reached by open=connect (SYS_OPEN on a byte-mode /srv service ->
@@ -1031,7 +1041,7 @@ enum {
     //
     // Audit-bearing: CLAUDE.md §"Audit-triggering changes" SYS_ATTACH_
     // 9P_SRV row.
-    SYS_ATTACH_9P_SRV = 52,  // arg: srv_fd, aname_va, aname_len, n_uname
+    SYS_ATTACH_9P_SRV = 52,  // arg: srv_fd, aname_va, aname_len, n_uname, flags
 
     // P6-pouch-stratumd-boot 16c: SYS_PIVOT_ROOT(new_root_fd) -> 0 / -1
     //   x0 = new_root_fd   (hidx_t; must be KOBJ_SPOOR with RIGHT_READ)
@@ -1921,6 +1931,14 @@ _Static_assert(__builtin_offsetof(struct t_stat, gid)       == 76, "t_stat.gid a
 // side path or capability string (typically short — "/", "tcp!host!port",
 // "pool/data"). 256 bytes is generous.
 #define SYS_ATTACH_ANAME_MAX  256u
+
+// SYS_ATTACH_9P_SRV flags (x4). SYS_ATTACH_9P_LOOSE = the B1 per-attach
+// I-38 opt-in (user-voted option B, 2026-07-11; docs/chase/B1-VOTE.md +
+// the ARCH I-38 row): the mounter asserts the single-writer premise for
+// THIS attach, and the minted client's cached-opens serve full hint hits
+// without the per-open wire revalidation (first touch / any hint miss
+// still wires; strict clients byte-unchanged). Unknown bits reject.
+#define SYS_ATTACH_9P_LOOSE   0x1u
 
 // Maximum bytes transferred per SYS_READ / SYS_WRITE / SYS_PREAD /
 // SYS_PWRITE call. Userspace still loops for larger transfers (short

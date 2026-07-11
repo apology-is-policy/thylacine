@@ -649,57 +649,74 @@ static struct Spoor *dev9p_open_cached(struct Spoor *c, const char *const *names
     // 2. The FORCED-WIRE revalidation: the query-form Twalkgetattr issued
     //    DIRECTLY at the client -- deliberately BYPASSING dev9p_walk_attrs and
     //    its L1d dentry serve (which would answer a query-form full-positive
-    //    run from the caches). The B2 revalidation MUST be server-fresh, or
-    //    cached-open silently degrades to the rejected B1/loose mode (the
+    //    run from the caches). On a STRICT client the B2 revalidation MUST be
+    //    server-fresh, or cached-open silently degrades to B1/loose (the
     //    FID-LIFECYCLE prosecution item). newfid = P9_NOFID: no fid binds on
     //    either end, exactly the walk-query shape.
-    struct p9_attr *attrs = kmalloc(sizeof(struct p9_attr) * (size_t)nname, 0);
-    if (!attrs) return NULL;
-    u64 seq0 = larder_gen_snapshot(l);
-    u16 nwqid = 0;
-    struct p9_qid qids[P9_MAX_WALK];
-    int rc = p9_client_walkgetattr(client, src_priv->fid, P9_NOFID,
-                                   P9_GETATTR_BASIC, (u16)nname,
-                                   (const u8 *const *)names, name_lens,
-                                   &nwqid, qids, attrs);
-    if (rc == -T_E_NOSYS) {
-        // The same per-session latch dev9p_walk_attrs maintains (a server that
-        // does not speak the extension never reaches the hint anyway -- it is
-        // never latched cacheable -- but keep the latch coherent).
-        client->wga_unsupported = true;
+    //
+    //    B1 per-attach loose mode (I-38 opt-in; user-voted option B
+    //    2026-07-11, docs/chase/B1-VOTE.md + the ARCH I-38 row): a LOOSE
+    //    client (client->loose, set once at attach before the root
+    //    published) skips the wire query on a FULL hint hit -- the step-1
+    //    records already in sts ARE the post-scan input (the same cached
+    //    attrs the L1c base X-check serves; the permission axis is not
+    //    weakened beyond L1c's accepted discipline), and step 4 snapshots
+    //    at the CACHED cvers (hleaf->qid_vers) with the identical
+    //    Larder-lock atomicity. Any hint miss returned NULL above -- a
+    //    loose first touch takes the normal path and populates via its
+    //    walk_attrs, so the wire is never skipped on unproven state.
+    if (!client->loose) {
+        struct p9_attr *attrs = kmalloc(sizeof(struct p9_attr) * (size_t)nname, 0);
+        if (!attrs) return NULL;
+        u64 seq0 = larder_gen_snapshot(l);
+        u16 nwqid = 0;
+        struct p9_qid qids[P9_MAX_WALK];
+        int rc = p9_client_walkgetattr(client, src_priv->fid, P9_NOFID,
+                                       P9_GETATTR_BASIC, (u16)nname,
+                                       (const u8 *const *)names, name_lens,
+                                       &nwqid, qids, attrs);
+        if (rc == -T_E_NOSYS) {
+            // The same per-session latch dev9p_walk_attrs maintains (a server
+            // that does not speak the extension never reaches the hint anyway
+            // -- it is never latched cacheable -- but keep the latch coherent).
+            client->wga_unsupported = true;
+            kfree(attrs);
+            return NULL;
+        }
+        if (rc != 0 || nwqid != (u16)nname) {
+            // The fresh tree disagrees with the cached hint (a concurrent
+            // unlink/rename). Nothing bound; the normal path's own walk
+            // produces the observable outcome with its own fail ordering.
+            kfree(attrs);
+            return NULL;
+        }
+
+        // Fill the caller's sts (the post-scan input) and re-populate the
+        // caches from the fresh records -- the dev9p_walk_attrs populate
+        // discipline (gen-guarded; a concurrent own-write that invalidated
+        // during the RPC skips the install).
+        u64 prev_path = c->qid.path;
+        for (int i = 0; i < nname; i++) {
+            t_stat_from_p9_attr(&sts[i], &attrs[i]);
+            larder_attr_install(l, seq0, attrs[i].qid.path, attrs[i].qid.version,
+                                &sts[i]);
+            larder_dentry_install(l, seq0, prev_path, names[i], name_lens[i],
+                                  attrs[i].qid.path, /*negative=*/false);
+            prev_path = attrs[i].qid.path;
+        }
         kfree(attrs);
-        return NULL;
-    }
-    if (rc != 0 || nwqid != (u16)nname) {
-        // The fresh tree disagrees with the cached hint (a concurrent
-        // unlink/rename). Nothing bound; the normal path's own walk produces
-        // the observable outcome with its own fail ordering.
-        kfree(attrs);
-        return NULL;
     }
 
-    // Fill the caller's sts (the post-scan input) and re-populate the caches
-    // from the fresh records -- the dev9p_walk_attrs populate discipline
-    // (gen-guarded; a concurrent own-write that invalidated during the RPC
-    // skips the install).
-    u64 prev_path = c->qid.path;
-    for (int i = 0; i < nname; i++) {
-        t_stat_from_p9_attr(&sts[i], &attrs[i]);
-        larder_attr_install(l, seq0, attrs[i].qid.path, attrs[i].qid.version,
-                            &sts[i]);
-        larder_dentry_install(l, seq0, prev_path, names[i], name_lens[i],
-                              attrs[i].qid.path, /*negative=*/false);
-        prev_path = attrs[i].qid.path;
-    }
-    kfree(attrs);
-
-    // 3. Fresh-leaf gates (authoritative -- the hint may be stale).
+    // 3. Fresh-leaf gates (authoritative on the strict path -- the hint may
+    //    be stale vs the wire refill; on the loose path they re-run over the
+    //    hint records, redundant with step 1 but kept as one shared gate).
     const struct t_stat *leaf = &sts[nname - 1];
     if (leaf->qid_type != 0) { return NULL; }
     if (leaf->size > (u64)DEV9P_CO_MAX_SIZE)
         { return NULL; }
 
-    // 4. Budget + the snapshot at the FRESH cvers, under ONE Larder lock hold
+    // 4. Budget + the snapshot at the leaf cvers (wire-fresh on strict;
+    //    cached on loose -- the B1 contract), under ONE Larder lock hold
     //    (atomic vs a concurrent own-write invalidate -- it precedes, failing
     //    the coverage, or follows the whole copy). Any failure falls back with
     //    everything released; size == 0 (the empty file) snapshots trivially.

@@ -201,9 +201,14 @@ bool p9_attached_is_open(const struct p9_attached *a);
 // path (srvconn_transport_close) has torn `cn` down (EOF both rings); for failures
 // BEFORE it, `cn` is untouched (the caller decides whether to teardown). Either
 // way the caller's own ref(s) on `cn` are NOT dropped here.
+// `loose` opts the minted client into the B1 per-attach loose mode (I-38
+// opt-in, docs/chase/B1-VOTE.md): set on p9_client.loose BEFORE the root
+// Spoor is returned, so the handle publication orders it against every use.
+// SYS_ATTACH_9P_SRV maps its validated SYS_ATTACH_9P_LOOSE flag here;
+// devsrv_open's 9p-mode connect passes false (strict).
 struct SrvConn;
 struct Spoor *srvconn_attach_dev9p_root(struct SrvConn *cn,
                                         const u8 *aname, size_t aname_len,
-                                        u32 n_uname, int *out_err);
+                                        u32 n_uname, bool loose, int *out_err);
 
 #endif  // THYLACINE_9P_ATTACH_H

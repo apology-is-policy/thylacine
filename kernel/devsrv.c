@@ -916,7 +916,8 @@ struct Spoor *devsrv_open_connect(struct Proc *p, struct Spoor *c, int omode) {
     // above, accepts + responds concurrently. On any failure the conn is torn
     // down so the poster's accept sees a dead conn.
     int err = 0;
-    struct Spoor *root = srvconn_attach_dev9p_root(cn, NULL, 0, p->principal_id, &err);
+    struct Spoor *root = srvconn_attach_dev9p_root(cn, NULL, 0, p->principal_id,
+                                                   /*loose=*/false, &err);
     if (!root) {
         srvconn_teardown(cn);      // idempotent (the helper may already have torn it)
         srvconn_unref(cn);         // drop the create ref; the poster drains the backlog ref

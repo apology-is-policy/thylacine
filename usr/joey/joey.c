@@ -3432,7 +3432,19 @@ int main(void) {
             //    root unrefs; new disk-backed root installs.
             // 4. Post-pivot probe — walk + read the sentinel via
             //    T_WALK_OPEN_FROM_ROOT, confirming the pivot took.
-            long sd_attach_fd = t_attach_9p_srv(sd_srv_fd, "", 0, 0);
+            //
+            // T_ATTACH_9P_LOOSE: the SYSTEM mount opts into the B1
+            // per-attach loose mode (Senate option B, 2026-07-11;
+            // docs/chase/B1-VOTE.md + the ARCH I-38 row). The premise
+            // joey asserts here: this pool's block device is exclusively
+            // guest-owned (I-5), the concurrent sessions reach disjoint
+            // datasets, own-writes invalidate through this same client's
+            // Larder, and corvus's /var/lib/corvus (written via its own
+            // byte connection) has no system-mount byte reader. Any of
+            // the ARCH-row re-strict triggers appearing revokes this
+            // flag HERE.
+            long sd_attach_fd = t_attach_9p_srv(sd_srv_fd, "", 0, 0,
+                                                T_ATTACH_9P_LOOSE);
             if (sd_attach_fd < 0) {
                 t_putstr("joey: stratumd-boot t_attach_9p_srv FAILED\n");
                 return 1;

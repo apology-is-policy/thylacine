@@ -535,7 +535,7 @@ fn attach_ctl() -> i64 {
         if conn < 0 {
             continue;
         }
-        let root = unsafe { t_attach_9p_srv(conn, core::ptr::null(), 0, 0) };
+        let root = unsafe { t_attach_9p_srv(conn, core::ptr::null(), 0, 0, 0) };
         let _ = unsafe { t_close(conn) };
         if root >= 0 {
             return root;
@@ -851,7 +851,7 @@ unsafe fn bind_home(user: &[u8], pid: u32, gid: u32, supp: &[u32]) -> Option<Hom
         let conn = t_open(T_WALK_OPEN_FROM_ROOT, listen_b.as_ptr(), listen_b.len(), T_ORDWR);
         if conn >= 0 {
             // attach the proxy's session via the `ds:<user>` child-dataset aname.
-            let r = t_attach_9p_srv(conn, allowed_b.as_ptr(), allowed_b.len(), 0);
+            let r = t_attach_9p_srv(conn, allowed_b.as_ptr(), allowed_b.len(), 0, 0);
             let _ = t_close(conn);
             if r >= 0 {
                 attach_root = r;
