@@ -14,9 +14,16 @@ windows; magnitudes land at C-1.
 | pair | device (smp=4) | host | delta (medians) | bar (host+200ms) | status |
 |---|---|---|---|---|---|
 | W1 S1 all-warm | 675/749/819 ms (med 749) | 64/66/143 ms (med 66) | +683 ms | <= 266 ms (-64%) | OPEN |
+| W1 S1 all-warm **post-C-3** | 448/439/396 ms (med **439**) | (same) | +373 ms | <= 266 ms (**-39% remains**) | OPEN |
 | W1 S3 fully-cold | 5267/5283/5594 ms (med 5283) | 2246/2448/2473 ms (med 2448) | +2835 ms | <= 2648 ms (-50%) | OPEN |
+| W1 S3 fully-cold **post-C-3** | 5093/5052/5085 ms (med **5085**) | (same) | +2637 ms | <= 2648 ms (**-48% remains**) | OPEN |
 | W2 cold (diag) | — | — | — | not bar-bound | C-2 |
 | W2 warm (diag) | — | — | — | not bar-bound | C-2 |
+
+Post-C-3 rows: the readdir batch fix (stratum 750fab1) landed 2026-07-11;
+N=3 pool-restored smp=4 boots, clean sentinels both ends. The warm mix is
+now wga ~200 > read ~160 > open ~40 > rdir ~22 (the wga B1-loose-mode vote
++ the read page-cache band are each singly ~sufficient to reach the S1 bar).
 
 Protocol per docs/CHASE.md section 3 (C-0 as-built block): device = joey
 go4c `gofmt-warm` / `gofmt-s3cold` lines at smp=4 (the measured best; the
@@ -54,9 +61,9 @@ The warm window is ~100% RPC aggregate (4751 ops). Priced per type
 
 | band | ms | ops | per-op | mechanism | fix candidate |
 |---|---|---|---|---|---|
-| readdir | 378 | 206 | 1835 us | wire Treaddir; the per-op cost is 20x every other type -> SERVER-side big-dir dirent iteration suspect (the #374 unlink-sweep sibling; GOCACHE is one flat ~2400-entry dir) | (a) server h_readdir iteration fix; (b) a Larder dirent-stream cache (own-write parent-invalidate, the L1d discipline -- NOT cvers-gated; Stratum parent cvers does not bump on child create) |
+| readdir | 378 | 206 | 1835 us | **CONFIRMED server-side (C-3 instrument, 2026-07-11): 99.75% of h_readdir time is inside stm_fs_readdir** (whole-boot d26: rd=1633 ops/1353.5 ms, fs=13408 calls/1350.2 ms = 100.7 us/call, 8.2 calls/op). h_readdir pulls ONE entry per fs call (R92 P1-2) and each call pays the full stack: EBR pin + parent-inode btree lookup + engine get + WHOLE-DIR scan + qsort + malloc (the dirent key is LE-encoded -> byte order != probe order -> interior cursor bracket inexpressible -> scan-all-and-filter per call; dirent.c:1125 forward-note). The listed dirs are the per-package GOROOT/src ReadDir sweep (~103 dirs x 2 ops [data+EOF]; cmd/go memoizes ReadDir in-process so each dir lists ONCE per invocation -- NOT GOCACHE, which is 256-way fanout and warm-lookup-by-computed-path; the earlier "one flat ~2400-entry dir" note was WRONG) | **FIXED @ stratum 750fab1 (2026-07-11): h_readdir batches 32/call via a per-entry resume cursor** (stm_fs_dirent_entry.next_cursor, wire-identical cookies; UNSTABLE-tier ABI, no wire/disk change) + a collection-time cursor filter in the dirent scan. **Measured: readdir server time 1353.5 -> 39.6 ms/boot (-97%); fs calls 13408 -> 1826 (7.3x); identical wire op counts. Warm band 317 -> 22 ms; build2 274 -> 10; cold 297 -> 25; S3 339 -> 45. Wall: gofmt-warm 673 -> 448 ms, build2-warm 578 -> 317, S3 5505 -> 5093 (N=1; N=3 below).** ctest 73/73 stripped-tree; R92 truncation regression passes; new fs_p4_readdir_next_cursor_resume (4-property contract); dirent spec gate clean + buggy cfgs RED (pre-existing dirent_whiteout.cfg healthy-cfg failure surfaced + tracked). Guest-side Larder dirent cache DEAD for S1 (no repeat listings within one invocation). BE re-key = the deferred on-disk fix (dirent.c forward-note), not needed at this op mix |
 | wga | 292 | 2356 | 124 us | cached-open B2 FORCED-WIRE revalidation (~1604 minted opens) + bind-form walks for wire opens (~535+) | the deferred B1 loose mode (serve the snapshot with NO wire revalidation) -- sound under single-writer-guest + own-write invalidation, but it weakens the I-38 close-to-open DEFAULT -> scripture + USER VOTE (FIXABLE-VOTED) |
-| read | 148 | 1588 | 93 us | cached-open snapshot fills + GOCACHE index reads that miss the 512-slot Larder page cache (lp=1047 served vs 1588 wire) | page-cache sizing to the warm workset; or a shared snapshot cache keyed (qid,cvers) instead of per-open buffers |
+| read | 148 | 1588 | 93 us | cached-open snapshot fills + reads that miss the Larder page cache (lp=1047 served vs 1588 wire). NOTE (corrected post-C-3): the cache is ALREADY 32768 slots / 128 MiB ceiling since #25 -- the earlier "512-slot" note was STALE. The misses are NOT a tiny-cache artifact; candidates: >DEV9P_CO_MAX_SIZE(128K) files (the ~4 MB gofmt binary copy-back), first-touch-in-window files, eviction churn (pe=8515 at C-0 = cold-build churn past 128 MiB). Needs a miss-class instrument BEFORE any sizing claim | instrument the wire-read distribution (size-class / qid / cached-open-fallback flag) first; then either the per-open snapshot budget/cap lift or a shared (qid,cvers) snapshot cache |
 | open | 31 | 535 | 58 us | wire Tlopen (fid binds) | fidless-open coverage extension (funnel: hchain=126 hpart=77 htype=103 hsize=94 hcover=197 fails) |
 | rest | ~7 | 66 | -- | walk/gattr/clunk/write | noise |
 

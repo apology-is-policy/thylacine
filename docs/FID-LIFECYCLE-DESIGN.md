@@ -234,6 +234,34 @@ the marginal gain (1 RT/open) is not worth weakening it globally. B2 preserves
 I-38 and still delivers ~4×. **B1 is deferred as a possible future opt-in
 per-mount `cache=loose` mode layered on B2** — not v1.0.
 
+**B1 as-voted (2026-07-11; the CHASE wga band; `docs/chase/B1-VOTE.md`):** the
+Senate chose **option B — the per-ATTACH opt-in**, keeping I-38's default
+strict. Mechanism, layered exactly on B2:
+
+- A new `SYS_ATTACH_9P_SRV` flags argument (x4; the #112 every-caller-sets-it
+  ABI discipline) with `SYS_ATTACH_9P_LOOSE = 0x1`; unknown bits reject. The
+  flag flows `srvconn_attach_dev9p_root(..., loose)` → `p9_client.loose`, a
+  plain bool set ONCE before the root Spoor publishes (ordered by the handle
+  publication; no runtime flip, no atomics needed).
+- In `dev9p_open_cached`: on a **full** step-1 hint hit (positive dentry chain
+  + leaf attr + full page coverage) a LOOSE client skips the forced-wire query
+  and proceeds to the fresh-leaf gates + budget + snapshot **at the cached
+  cvers**, with the hint's cached records as the resolver post-scan input (the
+  same attrs the L1c base X-check already serves — the permission axis is not
+  weakened beyond L1c's accepted discipline). Any hint MISS falls through to
+  the unchanged B2 forced-wire query — first touch always wires. A STRICT
+  client's path is byte-unchanged.
+- Soundness rests on the checked single-writer premise (the I-38 row carries
+  the full argument + the re-strict triggers): I-5 exclusive block-device
+  ownership, dataset-partitioned sessions, own-write invalidation, and no
+  cross-session byte reader of the one foreign-written subtree
+  (`/var/lib/corvus`). joey opts the SYSTEM mount in; the per-user home proxy
+  may follow (its dataset is strictly session-private — a cleaner premise).
+- The concurrency window is benign by construction: the snapshot re-verifies
+  coverage at the cached cvers under one Larder-lock hold, so a concurrent
+  own-write invalidate either precedes (coverage fails → fallback) or follows
+  the whole copy — the same atomicity B2 relies on.
+
 **Invariants: refines I-38, no new invariant.** The fidless open is close-to-open
 because the query-getattr at open IS the `Open` revalidation (fs_cache.tla); the
 snapshot is taken at the fresh `cvers` atomically under the Larder lock (a
