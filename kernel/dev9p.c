@@ -618,15 +618,21 @@ static struct Spoor *dev9p_open_cached(struct Spoor *c, const char *const *names
     if (client->wga_unsupported) return NULL;
     if (!__atomic_load_n(&client->cacheable, __ATOMIC_RELAXED)) return NULL;
     struct larder *l = &client->larder;
+    // The gen witness (B1-audit F1): captured BEFORE the hint's coverage
+    // decision; larder_pages_snapshot fails closed if ANY invalidate moves
+    // the gen between here and the step-4 copy (the third-actor stale-fid
+    // repopulate hole). Also serves as the strict path's install guard.
+    u64 seq0 = larder_gen_snapshot(l);
 
     // 1. The RPC-free HINT: dentry-chain the run + the leaf attr + full page
     //    coverage, all from the caches under the Larder lock. A non-eligible
     //    open (chain not cached, negative, dir/special, oversize, not covered)
-    //    costs the normal path nothing beyond this consult. The hint is never
-    //    authoritative -- step 3 re-checks against the FRESH records. It fills
+    //    costs the normal path nothing beyond this consult. On a STRICT
+    //    client the hint is never authoritative -- step 3 re-checks against
+    //    the FRESH records the step-2 wire query refills; on a LOOSE client
+    //    (B1) the hint records ARE the post-scan input (no refill). It fills
     //    the CALLER's sts as scratch (the dev.h contract: sts may be scribbled
-    //    on a NULL return; the wire query below REFILLS it with the fresh
-    //    records) -- a second t_stat[16] here would stack ~1.3 KiB on top of
+    //    on a NULL return) -- a second t_stat[16] here would stack ~1.3 KiB on top of
     //    stalk_core's own run arrays above the deep wire call chain.
     {
         int  nres    = 0;
@@ -668,7 +674,6 @@ static struct Spoor *dev9p_open_cached(struct Spoor *c, const char *const *names
     if (!client->loose) {
         struct p9_attr *attrs = kmalloc(sizeof(struct p9_attr) * (size_t)nname, 0);
         if (!attrs) return NULL;
-        u64 seq0 = larder_gen_snapshot(l);
         u16 nwqid = 0;
         struct p9_qid qids[P9_MAX_WALK];
         int rc = p9_client_walkgetattr(client, src_priv->fid, P9_NOFID,
@@ -727,7 +732,8 @@ static struct Spoor *dev9p_open_cached(struct Spoor *c, const char *const *names
         buf = kmalloc((size_t)size, 0);
         if (!buf) { co_budget_uncharge(size); return NULL; }
     }
-    if (!larder_pages_snapshot(l, leaf->qid_path, leaf->qid_vers, size, buf)) {
+    if (!larder_pages_snapshot(l, leaf->qid_path, leaf->qid_vers, size, buf,
+                               seq0)) {
         if (buf) kfree(buf);
         co_budget_uncharge(size);
         return NULL;

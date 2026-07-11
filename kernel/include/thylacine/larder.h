@@ -357,11 +357,16 @@ bool larder_pages_cover(struct larder *l, u64 qid_path, u32 cvers, u64 size);
 
 // Verify coverage AND copy [0, size) into `out` (caller-owned, >= size bytes)
 // under ONE lock hold -- atomic vs a concurrent invalidate (it precedes, failing
-// the coverage, or follows the whole copy). Returns false on any coverage gap
-// (`out` may be partially scribbled; the caller discards it). The open-time
-// snapshot IS the fs_cache.tla Open linearization for the cached-open path.
+// the coverage, or follows the whole copy). `seq0` is the caller's
+// larder_gen_snapshot capture from BEFORE its coverage decision: the snapshot
+// fails closed if ANY invalidate moved the gen since (the B1-audit F1 gen
+// witness -- a third actor's stale-fid repopulate could otherwise re-satisfy
+// coverage at the old cvers with post-write bytes; see larder.c). Returns
+// false on a gen mismatch or any coverage gap (`out` may be partially
+// scribbled; the caller discards it). The open-time snapshot IS the
+// fs_cache.tla Open linearization for the cached-open path.
 bool larder_pages_snapshot(struct larder *l, u64 qid_path, u32 cvers,
-                           u64 size, u8 *out);
+                           u64 size, u8 *out, u64 seq0);
 
 // Free every lazily-allocated array + page buffer (all three sub-caches are
 // heap). Called from p9_client_destroy. No op is in flight at destroy (the last

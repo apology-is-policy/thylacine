@@ -336,9 +336,11 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
             // the FINAL run of a plain read-only STALK_OPEN (omode == 0
             // exactly -- OTRUNC / write / OEXEC / O_PATH never take it) may be
             // served as a FIDLESS open. The Dev revalidates server-fresh (a
-            // forced-wire query walk -- no fid binds on either end), snapshots
-            // the fully-page-cached content, and returns an OPENED Spoor plus
-            // the walk's FRESH records in sts. The RESOLVER keeps every
+            // forced-wire query walk -- no fid binds on either end; on a B1
+            // LOOSE client [the I-38 per-attach opt-in, docs/chase/B1-VOTE.md]
+            // the records may instead be cache-served -- see dev9p_open_cached
+            // step 2), snapshots the fully-page-cached content, and returns an
+            // OPENED Spoor plus the walk's records in sts. The RESOLVER keeps every
             // permission decision: the same left-to-right X + mount post-scan
             // as the batched walk below, then the final-hop R/W gate --
             // identical fail ordering (§6). ANY mount hit (including the leaf

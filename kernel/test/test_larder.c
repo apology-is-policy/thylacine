@@ -47,6 +47,7 @@ void test_larder_page_partial(void);
 void test_larder_page_invalidate(void);
 void test_larder_page_invalidate_multifile(void);
 void test_larder_page_gen_guard(void);
+void test_larder_pages_snapshot_gen_witness(void);
 void test_larder_page_overwrite(void);
 void test_larder_page_bounded(void);
 void test_larder_page_destroy_frees(void);
@@ -564,6 +565,47 @@ void test_larder_page_gen_guard(void) {
     TEST_EXPECT_EQ(larder_page_serve(&g_larder, 7, 0, 0, LARDER_PAGE_SIZE, 5, g_pgout, &s0),
                    0u, "the raced install is skipped (gen guard)");
     TEST_EXPECT_EQ(g_larder.page_install_skips, 1ull, "one page install skip counted");
+    larder_destroy(&g_larder);
+}
+
+// B1-audit F1 regression: the pages-snapshot GEN WITNESS. A stale-fid
+// repopulate between a caller's coverage decision and its snapshot copy
+// re-satisfies coverage at the OLD cvers with post-write bytes; the witness
+// (seq0 captured before the decision, checked under the snapshot's lock
+// hold) fails the snapshot closed on ANY intervening invalidate.
+void test_larder_pages_snapshot_gen_witness(void) {
+    larder_reset();
+    fill_pattern(g_pgsrc, LARDER_PAGE_SIZE, 0x5A);
+    // A fully-covered one-page file (qid 7, cvers 5).
+    larder_page_install(&g_larder, larder_gen_snapshot(&g_larder), 7, 0, 5,
+                        g_pgsrc, LARDER_PAGE_SIZE);
+    static u8 snap[LARDER_PAGE_SIZE];
+
+    // Fresh witness -> the snapshot serves.
+    u64 seq_ok = larder_gen_snapshot(&g_larder);
+    TEST_ASSERT(larder_pages_snapshot(&g_larder, 7, 5, LARDER_PAGE_SIZE, snap,
+                                      seq_ok),
+                "fresh witness -> snapshot serves");
+    TEST_ASSERT(bytes_eq(snap, g_pgsrc, LARDER_PAGE_SIZE), "snapshot bytes");
+
+    // The F1 interleave: capture the witness, then an own-write invalidate
+    // (ANY file) + a stale-tagged repopulate land before the copy. The
+    // coverage alone would pass (the page is back at cvers 5); the witness
+    // must fail it.
+    u64 seq_stale = larder_gen_snapshot(&g_larder);
+    larder_page_invalidate(&g_larder, 7);                 // the own-write drop
+    larder_page_install(&g_larder, larder_gen_snapshot(&g_larder), 7, 0, 5,
+                        g_pgsrc, LARDER_PAGE_SIZE);       // the stale-fid repopulate
+    TEST_ASSERT(larder_pages_cover(&g_larder, 7, 5, LARDER_PAGE_SIZE),
+                "coverage alone re-satisfied (the F1 hole)");
+    TEST_ASSERT(!larder_pages_snapshot(&g_larder, 7, 5, LARDER_PAGE_SIZE, snap,
+                                       seq_stale),
+                "stale witness -> snapshot FAILS closed (the F1 fix)");
+
+    // A fresh re-capture serves again (the fallback path's next attempt).
+    TEST_ASSERT(larder_pages_snapshot(&g_larder, 7, 5, LARDER_PAGE_SIZE, snap,
+                                      larder_gen_snapshot(&g_larder)),
+                "fresh re-capture serves");
     larder_destroy(&g_larder);
 }
 

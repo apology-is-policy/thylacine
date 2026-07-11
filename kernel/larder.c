@@ -703,14 +703,33 @@ bool larder_pages_cover(struct larder *l, u64 qid_path, u32 cvers, u64 size) {
 }
 
 bool larder_pages_snapshot(struct larder *l, u64 qid_path, u32 cvers,
-                           u64 size, u8 *out) {
+                           u64 size, u8 *out, u64 seq0) {
     if (!l) return false;
     if (size > 0 && !out) return false;
     spin_lock(&l->lock);
+    // The GEN WITNESS (B1-audit F1): the two-party invalidate-vs-snapshot
+    // serialization below is not enough on its own -- a THIRD actor holding
+    // a fid opened before a concurrent own-write can re-populate the just-
+    // invalidated pages with POST-write bytes tagged the OLD cvers (the
+    // populate tags with the reading fid's open-time qid.vers), re-satisfying
+    // coverage at `cvers` and minting a torn snapshot (post-write bytes at
+    // the pre-write size/attr -- a view no fresh RPC could return, an I-38
+    // NoWrongRead violation). `seq0` is the caller's gen capture from BEFORE
+    // its coverage decision (the cached-open hint / the pre-RPC refill); ANY
+    // invalidate since then moved l->gen, so the mismatch fails the snapshot
+    // closed and the caller falls back to the normal wire path. Coarse by
+    // design (any file's own-write in the window fails it) -- the window is
+    // microseconds and the fallback is correctness-neutral.
+    if (l->gen != seq0) {
+        l->co_misses++;
+        spin_unlock(&l->lock);
+        return false;
+    }
     // ONE lock hold over the whole verify-and-copy: a concurrent own-write
     // invalidate either precedes this (its unlink fails page_find -> coverage
-    // FALSE) or follows the entire copy -- the snapshot is atomically the
-    // open-time content at `cvers` (the fs_cache.tla Open linearization).
+    // FALSE; the gen witness above catches the repopulated-stale case) or
+    // follows the entire copy -- the snapshot is atomically the open-time
+    // content at `cvers` (the fs_cache.tla Open linearization).
     bool ok = pages_cover_locked(l, qid_path, cvers, size, out);
     if (ok) l->co_snapshots++; else l->co_misses++;
     spin_unlock(&l->lock);

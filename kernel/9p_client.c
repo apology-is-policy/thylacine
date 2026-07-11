@@ -910,6 +910,14 @@ int p9_client_init(struct p9_client *c,
     // smaller cap (a short op, never a failed init -- reads are unaffected,
     // their payload rides the recv buffer). No KP_ZERO: every send writes a
     // built frame of exact length, so uninitialized bytes never leave.
+    // B1-audit F3: the cache-mode flags are contract-bearing ("set ONLY from
+    // the validated attach flag") -- initialize them explicitly rather than
+    // relying on allocation zeroing, so an in-place re-init of a recycled
+    // client (destroy -> init, no re-alloc -- the test scaffolding's shape)
+    // can never carry a stale loose/cacheable/wga latch across lives.
+    c->loose           = false;
+    c->cacheable       = false;
+    c->wga_unsupported = false;
     c->out_buf     = c->out_buf_inline;
     c->out_buf_cap = P9_CLIENT_OUT_BUF_MAX;
     if (msize > P9_CLIENT_OUT_BUF_MAX) {

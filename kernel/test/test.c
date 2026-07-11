@@ -923,6 +923,7 @@ void test_larder_page_partial(void);
 void test_larder_page_invalidate(void);
 void test_larder_page_invalidate_multifile(void);
 void test_larder_page_gen_guard(void);
+void test_larder_pages_snapshot_gen_witness(void);
 void test_larder_page_overwrite(void);
 void test_larder_page_bounded(void);
 void test_larder_page_destroy_frees(void);
@@ -2183,6 +2184,7 @@ struct test_case g_tests[] = {
     { "larder.page_invalidate",        test_larder_page_invalidate,        false, NULL },
     { "larder.page_invalidate_multifile", test_larder_page_invalidate_multifile, false, NULL },
     { "larder.page_gen_guard",         test_larder_page_gen_guard,         false, NULL },
+    { "larder.pages_snapshot_gen_witness", test_larder_pages_snapshot_gen_witness, false, NULL },
     { "larder.page_overwrite",         test_larder_page_overwrite,         false, NULL },
     { "larder.page_bounded",           test_larder_page_bounded,           false, NULL },
     { "larder.page_destroy_frees",     test_larder_page_destroy_frees,     false, NULL },
