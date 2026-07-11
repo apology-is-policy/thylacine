@@ -567,19 +567,25 @@ build_go_goroot() {
     rsync -aL --exclude='*_test.go' --exclude='testdata/' --exclude='/cmd/' \
         "$GOFORK/src/" "$stage/src/" \
         || { echo "==> Go GOROOT bake: rsync src FAILED" >&2; return 1; }
-    # cmd/gofmt + its cmd-internal/vendor deps (~760 KB) -- the #34 REAL
-    # multi-package on-device build target (91 pkgs), and a useful user tool.
-    # The blanket /cmd/ exclusion above stands; these four subtrees are the
-    # exact `go list -deps cmd/gofmt` closure under cmd/. Per-dir rsync +
-    # mkdir (macOS openrsync does not honor the -R "/./" relative anchor).
-    local gofmt_sub
-    for gofmt_sub in cmd/gofmt cmd/internal/telemetry \
+    # cmd/gofmt + cmd/compile and their cmd-internal/vendor deps -- the #34
+    # REAL multi-package on-device build target (gofmt, 91 pkgs, the CHASE W1
+    # bar workload) + the CHASE W2 triangulation workload (cmd/compile, the
+    # heaviest pure-std real program; docs/CHASE.md section 3). The blanket
+    # /cmd/ exclusion above stands; these subtrees are the union of the exact
+    # `go list -deps` closures under cmd/ for both. Per-dir rsync + mkdir
+    # (macOS openrsync does not honor the -R "/./" relative anchor).
+    local gocmd_sub
+    for gocmd_sub in cmd/gofmt cmd/compile \
+                     cmd/internal/archive cmd/internal/bio cmd/internal/cov \
+                     cmd/internal/dwarf cmd/internal/goobj cmd/internal/hash \
+                     cmd/internal/obj cmd/internal/objabi cmd/internal/pgo \
+                     cmd/internal/src cmd/internal/sys cmd/internal/telemetry \
                      cmd/vendor/golang.org/x/telemetry \
                      cmd/vendor/golang.org/x/sync; do
-        mkdir -p "$stage/src/$(dirname "$gofmt_sub")"
+        mkdir -p "$stage/src/$(dirname "$gocmd_sub")"
         rsync -aL --exclude='*_test.go' --exclude='testdata/' \
-            "$GOFORK/src/$gofmt_sub" "$stage/src/$(dirname "$gofmt_sub")/" \
-            || { echo "==> Go GOROOT bake: rsync $gofmt_sub FAILED" >&2; return 1; }
+            "$GOFORK/src/$gocmd_sub" "$stage/src/$(dirname "$gocmd_sub")/" \
+            || { echo "==> Go GOROOT bake: rsync $gocmd_sub FAILED" >&2; return 1; }
     done
     # GOROOT metadata the toolchain reads (version string, go.env, timezone db).
     cp "$GOFORK/VERSION" "$GOFORK/go.env" "$stage/" 2>/dev/null || true
@@ -1685,6 +1691,15 @@ populate_stratum_pool() {
     "$stratum_fs_bin" -s "$sock_path" sync \
         || { echo "==> populate pool: sync FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
     echo "==> populate pool: /thylacine-version written ($(echo "$sentinel_content" | wc -c | tr -d ' ') bytes)"
+
+    # CHASE W2 marker (docs/CHASE.md section 3): gates joey's heavy
+    # cmd/compile bench steps. Baked only on request, so SMP gates and
+    # normal boots never pay a full on-device compiler build.
+    if [[ "${THYLACINE_CHASE_W2:-0}" == "1" ]]; then
+        echo "w2" | "$stratum_fs_bin" -s "$sock_path" write /chase-w2 \
+            || { echo "==> populate pool: write /chase-w2 FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        echo "==> populate pool: CHASE W2 marker baked (/chase-w2)"
+    fi
 
     # GOOS=thylacine Stage 4b: bake the trimmed Go GOROOT (if staged) at /goroot
     # via the single-session recursive `put` (a per-file CLI loop over ~3600

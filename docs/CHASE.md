@@ -65,9 +65,17 @@ EVERY bar-bound pair has one of the two dispositions.
 go-thylacine fork — darwin-native binaries on the host, the
 thylacine/arm64 cross on the device. **Both sides measured in the same
 session**, host quiet (§5). **Device configuration**: the shipped boot
-(workers-ON adaptive dispatch) at **smp=8** for bar runs — parity means
-parity of the machine, and the M2 runs 8 cores; smp=4 numbers are
-diagnostic only.
+(workers-ON adaptive dispatch) at the device's **best measured smp —
+currently smp=4**. The original smp=8 rule was measured WRONG at C-0
+(clean sentinels, same boot lineage: S1 974 vs 675 ms, S3 10 605 vs
+5 267 ms — smp=8 loses 1.4–2.0×): 8 vCPUs on the 4P+4E M2 under HVF
+straggle on E-cores the guest cannot see. Parity of the machine means
+BOTH sides at their best honest configuration on the same hardware — the
+host keeps all 8 cores natively; handicapping the device with a config
+that hurts it serves nothing. The inversion itself is a ledger band
+(H5 sharpened: why does the device NOT scale to 8 vCPUs when the host
+scales to 8 cores — vCPU E-core placement / IPI+wake costs / -p 8 FS
+queueing are the candidate mechanisms).
 
 **W1 (the bar workload)**: `go build -o <out> cmd/gofmt` (91 packages,
 real program, source baked).
@@ -75,8 +83,19 @@ real program, source baked).
 | state | definition (identical both sides) | bar |
 |---|---|---|
 | **S1 all-warm** | second consecutive build in the same boot/session; GOCACHE warm; all caches hot | device ≤ host + 200 ms |
-| **S3 fully-cold** | `go clean -cache` immediately before the build (both sides); same boot/session so OS/guest file caches are warm-ish but the build cache is empty | device ≤ host + 200 ms |
+| **S3 fully-cold** | a FRESH empty GOCACHE on the real FS immediately before the build (both sides) — the `go clean -cache` state realized without paying the deletion storm inside or adjacent to the measured window. Device: `/gocold` on the pool (same substrate as `/go-cache`); host: `mktemp -d` on APFS. Same boot/session, so OS/guest file caches are warm-ish but the build cache is empty | device ≤ host + 200 ms |
 | S2 boot-cold, cache-warm | first build after boot (device) | **diagnostic only** — the host analog needs a page-cache purge (sudo); measured once if the user assists, never bar-bound |
+
+**C-0 as-built** (2026-07-11): device S1 = the joey go4c `gofmt-warm` line;
+device S3 = the new `gofmt-s3cold` line (fresh `/gocold` + a staleness guard
+that VOIDs the number on a non-restored pool). W2 = `w2compile-cold/-warm`
+lines, gated on a `/chase-w2` pool marker baked only under
+`THYLACINE_CHASE_W2=1` (SMP gates and normal boots never pay a compiler
+build); its cold runs on its own fresh `/gocold2` (the S3 gofmt build
+part-warms `/gocold` with shared stdlib deps). smp=8 =
+`THYLACINE_TEST_CPUS=8` (no code change; test.sh had the knob). The
+sanctioned driver is `tools/chase-bench.sh` (sentinel-wired per §5:
+`device [N]` / `host [N]` / `host-w2 [N]`).
 
 2026-07-11 opening positions (quiet host, N=2): S1 device 669/711 ms vs
 host 40–50 ms (**gap ~630 ms**); S3 host 2.43 s, device unmeasured-matched
@@ -149,6 +168,15 @@ Every bar-relevant number obeys:
 5. Instrument deltas (DIAG23 op counts, STMD26 service ticks) ride every
    run — a wall-clock move without a mechanism attribution is not
    accepted as progress.
+6. Known environmental flares (C-0 observed): **macOS Spotlight**
+   (`spotlightknowledged`/`mds`) re-indexes the 2.5 GB pool.img after
+   every per-boot restore and can burn a core mid-run — the sentinel
+   catches it (a one-time fix is adding `build/` to Spotlight Privacy;
+   needs the user's GUI session). The sentinel's stray check is
+   2-sample persistence (5 s apart, pid-matched): the burner class it
+   defends against is persistent; single-sample spikes (a finishing
+   pipeline, the agent's own turn processing) decay before the measured
+   window and must not void runs.
 
 ## 6. The floor ledger (the arc's central artifact)
 
