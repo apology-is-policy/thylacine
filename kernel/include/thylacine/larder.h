@@ -256,6 +256,16 @@ bool larder_attr_serve(struct larder *l, u64 qid_path,
 // larder_attr_install.
 u64 larder_gen_snapshot(struct larder *l);
 
+// FRESH-attr size read (the EOF serve, task #44). Returns true + *size_out iff a
+// cached attr for `qid_path` exists AND its cvers matches `cvers` (the reading
+// fid's open-time qid.vers -- the SAME freshness gate as the page serve, unlike
+// larder_attr_serve's ungated Read). A read at offset >= *size_out can then
+// return 0 (EOF) RPC-free: the fresh size is the open-time size, and with
+// own-write invalidation (+ the I-38 single-writer premise) the wire would
+// answer the same. Conservative on any mismatch (miss -> the caller wires).
+bool larder_attr_fresh_size(struct larder *l, u64 qid_path, u32 cvers,
+                            u64 *size_out);
+
 // Populate (Open/Refetch). Install {attr, cvers} for `qid_path` -- overwriting an
 // existing entry (revalidate-by-overwrite), using a free slot, or evicting the
 // LRU entry when full -- IFF `l->gen == seq0` (no invalidate raced the RPC since

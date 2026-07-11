@@ -618,6 +618,7 @@ static struct Spoor *dev9p_open_cached(struct Spoor *c, const char *const *names
     if (client->wga_unsupported) return NULL;
     if (!__atomic_load_n(&client->cacheable, __ATOMIC_RELAXED)) return NULL;
     struct larder *l = &client->larder;
+
     // The gen witness (B1-audit F1): captured BEFORE the hint's coverage
     // decision; larder_pages_snapshot fails closed if ANY invalidate moves
     // the gen between here and the step-4 copy (the third-actor stale-fid
@@ -693,6 +694,7 @@ static struct Spoor *dev9p_open_cached(struct Spoor *c, const char *const *names
             // unlink/rename). Nothing bound; the normal path's own walk
             // produces the observable outcome with its own fail ordering.
             kfree(attrs);
+
             return NULL;
         }
 
@@ -736,6 +738,7 @@ static struct Spoor *dev9p_open_cached(struct Spoor *c, const char *const *names
                                seq0)) {
         if (buf) kfree(buf);
         co_budget_uncharge(size);
+
         return NULL;
     }
 
@@ -773,6 +776,7 @@ static struct Spoor *dev9p_open_cached(struct Spoor *c, const char *const *names
     // I-33 -- an OOM leaves the name short; the open still succeeds).
     for (int i = 0; i < nname; i++)
         spoor_path_extend(co, names[i], name_lens[i]);
+
     return co;
 }
 
@@ -1036,6 +1040,18 @@ static long dev9p_read(struct Spoor *c, void *buf, long n, s64 off) {
     // (SYS_READ scratch), so the copy is kernel-to-kernel (no uaccess).
     u64 seq0 = 0;
     if (cacheable) {
+        // Task-#44 attr-served EOF: a FRESH cached attr (cvers == this fid's
+        // open-time qid.vers -- the page-serve freshness rule) answers the
+        // sequential reader's final read-returns-0 probe RPC-free. Sound under
+        // I-38 close-to-open + own-write invalidation: the fresh size IS the
+        // open-time size, so the wire would answer 0 identically. PLAIN FILES
+        // only (qid.type 0): a dir's cached size must not convert the server's
+        // read-on-directory ERROR into a silent 0.
+        u64 fsz;
+        if (c->qid.type == 0 &&
+            larder_attr_fresh_size(l, c->qid.path, c->qid.vers, &fsz) &&
+            offset >= fsz)
+            return 0;
         u64 page_index = offset / LARDER_PAGE_SIZE;
         u32 page_off   = (u32)(offset % LARDER_PAGE_SIZE);
         u32 served = larder_page_serve(l, c->qid.path, page_index, page_off,
@@ -1043,26 +1059,54 @@ static long dev9p_read(struct Spoor *c, void *buf, long n, s64 off) {
         if (served > 0)
             return (long)served;
     }
+    // Task-#44 aligned wire read: a big unaligned read on a cacheable client is
+    // issued at the containing page's ALIGNED start instead (a legal short read
+    // -- the caller loops). Why: the msize payload (131049 B) is not a page
+    // multiple, so a sequential stream's chunks each end in a PARTIAL page; the
+    // populate below cannot fill a partial-front page, so the hole persisted
+    // forever and every re-read of the stream pv-missed at the hole and re-paid
+    // the wire for the whole tail (the measured 82%-of-misses class: the go
+    // tools' multi-MB rodata segments eagerly re-read per exec). Fetching from
+    // the aligned start fully REWRITES the prior chunk's partial tail page, so
+    // holes heal and the second pass serves from pages. Cost: <= 4095 duplicate
+    // bytes per chunk (~3%). Small reads (<= one page) keep the exact path --
+    // they never populate, so they cannot create holes.
+    u64 wire_off = offset;
+    u32 lead = 0;
+    if (cacheable && count > LARDER_PAGE_SIZE) {
+        u32 mis = (u32)(offset % LARDER_PAGE_SIZE);
+        if (mis) { wire_off = offset - mis; lead = mis; }
+    }
     u32 got = 0;
-    int rc = p9_client_read(p->client, p->fid, offset, count, (u8 *)buf, &got);
+    int rc = p9_client_read(p->client, p->fid, wire_off, count, (u8 *)buf, &got);
     // #3 (Area F errno-rollout): propagate the real ecode, not -1. See dev9p_write.
     if (rc != 0) return (long)rc;
     // L1e page populate (fs_cache.tla Refetch): cache each page the read covered
-    // FROM ITS ALIGNED START -- a page whose start is within [offset, offset+got)
-    // holds bytes [0, valid_len) with no hole. An unaligned read's first (partial-
-    // front) page is skipped (its start precedes `offset`); the caller's aligned
-    // reads populate the rest. cvers = this fid's qid.vers; the seq0 gen guard
-    // (captured at the serve miss above) skips a fill that raced an own-write.
+    // FROM ITS ALIGNED START -- a page whose start is within [wire_off, end)
+    // holds bytes [0, valid_len) with no hole. On the aligned path wire_off IS
+    // page-aligned, so the front page installs FULL (the hole heal); on the
+    // exact path an unaligned front page is skipped as before. cvers = this
+    // fid's qid.vers; the seq0 gen guard (captured at the serve miss above)
+    // skips a fill that raced an own-write.
     if (cacheable && got > 0) {
-        u64 end = offset + (u64)got;
-        // First page whose aligned start is >= offset.
-        u64 ps = (offset + (LARDER_PAGE_SIZE - 1)) / LARDER_PAGE_SIZE * LARDER_PAGE_SIZE;
+        u64 end = wire_off + (u64)got;
+        // First page whose aligned start is >= wire_off.
+        u64 ps = (wire_off + (LARDER_PAGE_SIZE - 1)) / LARDER_PAGE_SIZE * LARDER_PAGE_SIZE;
         for (; ps < end; ps += LARDER_PAGE_SIZE) {
             u64 rem  = end - ps;
             u32 plen = (rem >= LARDER_PAGE_SIZE) ? LARDER_PAGE_SIZE : (u32)rem;
             larder_page_install(l, seq0, c->qid.path, ps / LARDER_PAGE_SIZE,
-                                c->qid.vers, (const u8 *)buf + (ps - offset), plen);
+                                c->qid.vers, (const u8 *)buf + (ps - wire_off), plen);
         }
+    }
+    if (lead) {
+        // The caller's bytes start `lead` into the fetched window. got <= lead
+        // means the file ends at/before the caller's offset -> EOF. The shift is
+        // a forward copy with dst < src (overlap-safe).
+        if (got <= lead) return 0;
+        u32 cgot = got - lead;
+        co_copy((u8 *)buf, (const u8 *)buf + lead, cgot);
+        return (long)cgot;
     }
     return (long)got;
 }

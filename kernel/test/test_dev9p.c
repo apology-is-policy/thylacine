@@ -51,8 +51,11 @@ void test_dev9p_cached_open_loose(void);
 // metadata), won't fit on the 16 KiB test thread stack alongside a few locals.
 static struct p9_client g_client;
 static struct p9_loopback g_loopback;
-static u8 g_recv_buf[4096];
-static u8 g_loopback_resp[4096];
+// Sized to the fixture's negotiated msize (8192): a 9P endpoint's recv/resp
+// buffers must hold a full msize frame (the task-#44 big-file Rread is the
+// first reply that actually needs it -- the "hello"-era 4096 was under-msize).
+static u8 g_recv_buf[8192];
+static u8 g_loopback_resp[8192];
 
 // A-2a: capture the Tsetattr fields dev9p_wstat_native put on the wire so a
 // test can assert the T_WSTAT_* -> P9_SETATTR_* mask + values reached it.
@@ -74,6 +77,8 @@ static u64 g_readdir_req_offset;
 // can assert the CALLER's offset (SYS_PREAD/SYS_PWRITE) vs the Spoor cursor
 // (SYS_READ/SYS_WRITE) is what actually reaches the wire.
 static u64 g_tread_req_offset, g_twrite_req_offset;
+static u64 g_tread_seen;        // Tread RPC counter (task-#44 wire-op assertions)
+static u64 g_tread_file_size;   // != 0: the loopback serves a pattern file this big
 
 // POUNCE: when set, the Twalkgetattr responder answers one component SHORT
 // (a partial walk) -- the session layer must then leave newfid unbound and
@@ -173,6 +178,30 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         // Capture the request offset (Tread body: fid@7, offset@11, count@19).
         if (req_len >= P9_HDR_LEN + 4 + 8 + 4)
             g_tread_req_offset = le64_at(req + 11);
+        g_tread_seen++;
+        // Big-file mode (task-#44 aligned-read tests): a pattern file of
+        // g_tread_file_size bytes, honoring offset + count (the client already
+        // clamps count to the msize payload, 8169 -- the SAME non-page-multiple
+        // stride shape as production's 131049). byte(o) = pattern below.
+        if (g_tread_file_size) {
+            u64 off = le64_at(req + 11);
+            u32 cnt = le32_at(req + 19);
+            u64 rem = (off < g_tread_file_size) ? g_tread_file_size - off : 0;
+            u32 n = (cnt < rem) ? cnt : (u32)rem;
+            size_t btotal = P9_HDR_LEN + 4 + n;
+            if (resp_cap < btotal) return -1;
+            resp[0] = (u8)(btotal & 0xff); resp[1] = (u8)((btotal >> 8) & 0xff);
+            resp[2] = (u8)((btotal >> 16) & 0xff); resp[3] = 0;
+            resp[4] = P9_RREAD;
+            resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+            resp[7] = (u8)(n & 0xff); resp[8] = (u8)((n >> 8) & 0xff);
+            resp[9] = (u8)((n >> 16) & 0xff); resp[10] = (u8)((n >> 24) & 0xff);
+            for (u32 i = 0; i < n; i++) {
+                u64 o = off + i;
+                resp[11 + i] = (u8)((o * 131u) ^ (o >> 8));
+            }
+            return (int)btotal;
+        }
         // Respond with 5-byte payload "hello".
         const u8 payload[] = {'h','e','l','l','o'};
         size_t total = P9_HDR_LEN + 4 + sizeof(payload);
@@ -1388,6 +1417,120 @@ void test_dev9p_page_cache_serve_and_gate(void) {
 
     larder_destroy(&g_client.larder);
     __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);   // restore default for teardown
+    spoor_clunk(nc);
+    teardown(root);
+}
+
+// Task-#44 aligned wire read: the msize payload (8169 here; 131049 in
+// production) is not a page multiple, so a big sequential stream's chunks each
+// end in a PARTIAL page. Pre-fix, the partial-front page could never be
+// re-populated (populate starts at aligned starts >= the read offset), so the
+// hole persisted and EVERY re-read of the stream pv-missed at it and re-paid
+// the wire for the whole tail. The fix wires a big unaligned read at the
+// containing page's ALIGNED start (a legal short read): each chunk fully
+// rewrites its predecessor's partial tail, so pass 2 serves from pages.
+void test_dev9p_read_align_heals_partial(void) {
+    struct Spoor *root = make_open_client_and_root();
+    struct Spoor *nc = spoor_clone(root);
+    const char *name = "file";
+    struct Walkqid *w = dev9p.walk(root, nc, &name, 1);
+    walkqid_free(w);
+    dev9p.open(nc, 0);
+    enum { FSZ = 20000 };
+    g_tread_file_size = FSZ;
+    __atomic_store_n(&g_client.cacheable, true, __ATOMIC_RELAXED);
+
+    static u8 buf[16384];
+    static u8 pass1[FSZ], pass2[FSZ];
+
+    // Pass 1 (first touch): stream to EOF. Chunk 1 wires at 0 and ends at 8169
+    // (page 1 partial, valid_len 4073); chunk 2 MUST wire at the ALIGNED 4096
+    // (healing page 1), not the caller's 8169.
+    u64 off = 0; long n;
+    u64 chunk2_wire = 0; int chunk_i = 0;
+    while ((n = dev9p.read(nc, buf, (long)sizeof buf, (s64)off)) > 0) {
+        TEST_ASSERT(off + (u64)n <= (u64)FSZ, "pass-1 bounds");
+        for (long i = 0; i < n; i++) pass1[off + (u64)i] = buf[i];
+        off += (u64)n;
+        chunk_i++;
+        if (chunk_i == 1) g_tread_req_offset = 0xEEEE;   // sentinel for chunk 2
+        if (chunk_i == 2) chunk2_wire = g_tread_req_offset;
+    }
+    TEST_EXPECT_EQ(off, (u64)FSZ, "pass 1 read the whole file");
+    TEST_EXPECT_EQ(chunk2_wire, 4096ull,
+                   "chunk 2 wired at the ALIGNED offset (4096, not 8169)");
+    bool ok = true;
+    for (u64 o = 0; o < (u64)FSZ; o++)
+        if (pass1[o] != (u8)((o * 131u) ^ (o >> 8))) { ok = false; break; }
+    TEST_ASSERT(ok, "pass-1 bytes match the pattern (the shift is byte-exact)");
+
+    // Pass 2 (re-stream): every page serves from the cache; the ONLY wire op
+    // is the tail EOF probe (no fresh attr installed in this fixture). Pre-fix
+    // the holes persisted and the stream tail re-wired every pass.
+    u64 wires0 = g_tread_seen;
+    off = 0;
+    while ((n = dev9p.read(nc, buf, (long)sizeof buf, (s64)off)) > 0) {
+        for (long i = 0; i < n; i++) pass2[off + (u64)i] = buf[i];
+        off += (u64)n;
+    }
+    TEST_EXPECT_EQ(off, (u64)FSZ, "pass 2 read the whole file");
+    TEST_EXPECT_EQ(g_tread_seen - wires0, 1ull,
+                   "pass 2 wired ONLY the EOF probe (holes healed; pages serve)");
+    ok = true;
+    for (u64 o = 0; o < (u64)FSZ; o++)
+        if (pass2[o] != pass1[o]) { ok = false; break; }
+    TEST_ASSERT(ok, "pass-2 bytes identical to pass 1");
+
+    larder_destroy(&g_client.larder);
+    __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
+    g_tread_file_size = 0;
+    spoor_clunk(nc);
+    teardown(root);
+}
+
+// Task-#44 attr-served EOF: a FRESH cached attr (cvers == the fid's open-time
+// qid.vers -- the page-serve freshness rule) answers the sequential reader's
+// final read-returns-0 probe RPC-free; absent/stale attrs stay conservative
+// (the probe wires). Own-write invalidation restores the wire probe.
+void test_dev9p_read_eof_attr_served(void) {
+    struct Spoor *root = make_open_client_and_root();
+    struct Spoor *nc = spoor_clone(root);
+    const char *name = "file";
+    struct Walkqid *w = dev9p.walk(root, nc, &name, 1);
+    walkqid_free(w);
+    dev9p.open(nc, 0);
+    g_tread_file_size = 20000;
+    __atomic_store_n(&g_client.cacheable, true, __ATOMIC_RELAXED);
+    struct larder *l = &g_client.larder;
+    u8 buf[64];
+
+    // No attr cached: the EOF probe pays a wire RPC (conservative).
+    u64 w0 = g_tread_seen;
+    long r = dev9p.read(nc, buf, 64, 20000);
+    TEST_EXPECT_EQ((u64)r, 0ull, "EOF read returns 0");
+    TEST_EXPECT_EQ(g_tread_seen - w0, 1ull, "no fresh attr -> the probe wires");
+
+    // FRESH attr: EOF serves RPC-free; in-range reads still return bytes.
+    struct t_stat st = {0};
+    st.size = 20000; st.qid_path = nc->qid.path; st.qid_vers = nc->qid.vers;
+    larder_attr_install(l, larder_gen_snapshot(l), nc->qid.path, nc->qid.vers, &st);
+    w0 = g_tread_seen;
+    r = dev9p.read(nc, buf, 64, 20000);
+    TEST_EXPECT_EQ((u64)r, 0ull, "EOF read returns 0 (attr-served)");
+    TEST_EXPECT_EQ(g_tread_seen - w0, 0ull, "fresh attr -> ZERO wire ops");
+    r = dev9p.read(nc, buf, 64, 19990);
+    TEST_EXPECT_EQ((u64)r, 10ull, "in-range read still returns bytes");
+
+    // An own-write invalidates the attr: the next EOF probe wires again.
+    dev9p.write(nc, (const u8 *)"x", 1, 0);
+    w0 = g_tread_seen;
+    r = dev9p.read(nc, buf, 64, 20000);
+    TEST_EXPECT_EQ((u64)r, 0ull, "post-write EOF read returns 0");
+    TEST_EXPECT_EQ(g_tread_seen - w0, 1ull, "post-write EOF probe wires");
+
+    larder_destroy(&g_client.larder);
+    __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
+    g_tread_file_size = 0;
     spoor_clunk(nc);
     teardown(root);
 }

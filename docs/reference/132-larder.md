@@ -340,6 +340,74 @@ buffer. `kmalloc(4096)` is non-blocking (buddy `zone->lock`, a leaf below the le
 `l->lock` — the **`l->lock → buddy` order**), so the lazy alloc is safe under the
 lock (LARDER-DESIGN §7 anticipated this order).
 
+## The D44 read-band fixes: aligned wire reads + attr-served EOF (2026-07-11)
+
+The CHASE D44 miss-class instrument decomposed the warm go-build's wire-read
+band and found 82% of the page-serve misses were **permanent partial-page
+holes**, not capacity or coherence misses:
+
+- The msize payload (131049 B = 128 KiB msize minus the 23-byte Rread
+  framing) is not a page multiple, so a big sequential stream's chunks each
+  end in a partial page (`valid_len` 4073).
+- `larder_page_install` populates only from a page's ALIGNED start, so a
+  partial-FRONT page could never be refilled by the continuing stream: the
+  hole persisted forever, and every re-read of the stream pv-missed at it and
+  re-paid the wire for the entire tail.
+- The dominant victims were the go toolchain's multi-MB rodata+data segments,
+  eagerly `dev->read` on EVERY exec by `kernel/exec.c::map_eager_from_file`
+  (REVENANT demand-pages only the text segment): `/goroot/bin/go` re-read
+  6.1 MB per invocation (even `go version`); `compile` 8.7 MB x 91 execs
+  = 792 MB over one cold build.
+
+Two guest-local fixes in `dev9p_read` (no ABI, no server change):
+
+**(a) Aligned wire reads.** A big (> one page) unaligned read on a CACHEABLE
+client is wired at the containing page's aligned start (`wire_off = offset
+- offset % 4096`) into the caller's own buffer, populated from `wire_off`
+(the front page installs FULL -- the heal), then the caller's slice is
+shifted forward (`co_copy`, dst < src, overlap-safe) and returned as a legal
+SHORT read. Each chunk of a sequential stream thereby fully rewrites its
+predecessor's partial tail page: holes heal in one pass and the second pass
+serves entirely from pages. Cost: <= 4095 duplicate bytes per chunk (~3%);
+zero allocation. `got <= lead` means the file ends at/before the caller's
+offset -> EOF (0). Small reads (<= one page) keep the byte-exact path: they
+never populate, so they cannot create holes, and naive non-looping small
+readers keep exact semantics. Non-cacheable clients (netd streams) are
+untouched.
+
+**(b) Attr-served EOF.** `larder_attr_fresh_size` (larder.c) returns the
+cached attr's size iff its `cvers` matches the reading fid's open-time
+`qid.vers` -- the SAME freshness rule as the page serve (unlike
+`larder_attr_serve`, which is deliberately ungated per L1c). A read at
+`offset >= size` on a PLAIN FILE (qid.type 0) then returns 0 RPC-free: the
+fresh size is the open-time size, so under close-to-open + own-write
+invalidation the wire would answer identically. This kills the sequential
+reader's final read-returns-0 probe (one RPC per streamed file). The
+plain-file gate keeps a directory's cached size from converting the server's
+read-on-directory error into a silent 0. The EOF determination comes from
+the attr's authoritative size, NOT from a short page -- the "no EOF
+determination from pages" rule stands.
+
+Neither fix extends `fs_cache.tla`: the aligned read changes only the wire
+request shape (invisible to the model); the attr-EOF is a `Read` of the
+modeled attr cache.
+
+Tests: `dev9p.read_align_heals_partial` (pass 2 of a re-streamed 20000-byte
+pattern file wires ONLY the EOF probe; the chunk-2 wire offset is asserted
+ALIGNED; fails pre-fix) and `dev9p.read_eof_attr_served` (fresh attr -> zero
+wire ops; absent attr / post-own-write -> the probe wires). The loopback
+fixture gained a big-file pattern mode (`g_tread_file_size`) and msize-sized
+buffers (the 4096-byte `g_recv_buf`/`g_loopback_resp` were under the
+negotiated msize 8192 -- dormant until the first > 4 KiB reply).
+
+Measured (instrumented, N=3, clean sentinels, smp=4): warm gofmt 367 ->
+249 ms median (read band 157 -> 64 ms; wire reads 1568 -> 935; bytes 64 MB
+-> 20 MB; szbig 166 -> 0; page serves 1037 -> 12632); S3 cold 5486 -> 4088;
+gofmt-cold 1540 -> 1123; version-warm 18 -> 7 ms. Remaining seam: the FIRST
+exec per boot still eagerly wire-reads rodata+data; the structural fix is
+REVENANT file-backing the R-only rodata segment (Image-cached like text,
+R+XN) -- the next S3 lever.
+
 ## The FID-LIFECYCLE re-size (attr + dentry heap + O(1) hash, 2026-07-10)
 
 The attr and dentry sub-caches moved from 256-slot INLINE linear arrays to

@@ -7,6 +7,7 @@
 #include "../mm/slub.h"   // kmalloc / kfree for the L1e page-buffer pool
 
 
+
 void larder_init(struct larder *l) {
     if (!l) return;
     // Self-sufficient zero (valid=false / gen=0 / heap ptrs NULL / diagnostics=0);
@@ -121,6 +122,23 @@ u64 larder_gen_snapshot(struct larder *l) {
     u64 g = l->gen;
     spin_unlock(&l->lock);
     return g;
+}
+
+bool larder_attr_fresh_size(struct larder *l, u64 qid_path, u32 cvers,
+                            u64 *size_out) {
+    if (!l || !size_out) return false;
+    spin_lock(&l->lock);
+    struct larder_attr_ent *e = attr_find_locked(l, qid_path);
+    // Freshness gate: cvers must match the reading fid's open-time qid.vers
+    // (the page-serve rule -- larder.h). A stale/newer entry is a miss.
+    if (e && e->cvers == cvers) {
+        *size_out = e->attr.size;
+        e->ref = true;              // CLOCK: touched
+        spin_unlock(&l->lock);
+        return true;
+    }
+    spin_unlock(&l->lock);
+    return false;
 }
 
 // Choose the install slot for `qid_path`: an existing entry (overwrite), else
