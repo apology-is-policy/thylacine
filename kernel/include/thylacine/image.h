@@ -1,7 +1,8 @@
 // Image — the qid-keyed shared-text cache (REVENANT R-3; the Plan 9 Image).
 //
-// Per docs/REVENANT.md §4.4 + ARCH §28 I-36. The Image cache is a kernel-global,
-// refcounted registry of BURROW_TYPE_FILE text Burrows, keyed on the executable's
+// Per docs/REVENANT.md §4.4 + §4.6 + ARCH §28 I-36. The Image cache is a
+// kernel-global, refcounted registry of BURROW_TYPE_FILE non-writable-segment
+// Burrows (R+X text; + R-only rodata since #45), keyed on the executable's
 // FILE IDENTITY:
 //
 //     (dc, devno, qid.path, qid.vers, file_offset, size)
@@ -23,9 +24,9 @@
 // (FS-gamma rename-swap -> a new qid.vers) is a NEW cache entry (the qid.vers in
 // the key misses the old one); a Proc stays pinned to the version it exec'd
 // (REVENANT §3.1). DISTINCT SEGMENTS of one binary (same qid, different
-// file_offset) are distinct entries — each text segment is its own Burrow over
-// its own Spoor ref (no consolidation needed; binaries are typically one text
-// segment under D4 eager-copy-data anyway).
+// file_offset) are distinct entries — each segment is its own Burrow over its
+// own Spoor ref (no consolidation needed). Since #45 a binary typically
+// contributes TWO entries: its text segment + its R-only rodata segment.
 //
 // LIFECYCLE: the cache holds ONE handle_count ref per cached Burrow (a STRONG
 // ref), so text persists after the last Proc unmaps (the Plan 9 temporal cache —
@@ -54,11 +55,13 @@
 struct Spoor;
 struct Burrow;
 
-// Bounded LRU cap on cached text images. Sized generously for the v1.0 binary
-// set (the toolchain + the native programs); the pressure-triggered reclaim pass
-// (REVENANT §9) is the v1.x growth path. On a full insert the LRU idle entry is
-// evicted; a cache full of LIVE entries degrades to a bypass (never fails exec).
-#define IMAGE_CACHE_MAX 64
+// Bounded LRU cap on cached images. Sized generously for the v1.0 binary set
+// (the toolchain + the native programs) at TWO entries per binary since #45
+// (text + rodata; 128 slots ~= 64 binaries, ~4 KiB more BSS than the original
+// 64); the pressure-triggered reclaim pass (REVENANT §9) is the v1.x growth
+// path. On a full insert the LRU idle entry is evicted; a cache full of LIVE
+// entries degrades to a bypass (never fails exec).
+#define IMAGE_CACHE_MAX 128
 
 // Bring up the Image cache. Idempotent guard extincts on re-call. The backing
 // table is BSS (zero == all-free), so this only flips the inited flag — a clear

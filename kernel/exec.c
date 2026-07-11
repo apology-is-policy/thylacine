@@ -442,20 +442,22 @@ int exec_setup_with_argv(struct Proc *p, const void *blob, size_t blob_size,
 // REVENANT R-4: the file-backed production exec path.
 // =============================================================================
 //
-// docs/REVENANT.md §4.2. exec_setup_from_spoor reads ONLY the ELF header+phdrs
-// from the pinned executable, then maps each PT_LOAD: executable text (whose
-// memsz fits within file-backed pages) is SHARED file-backed via the Image
-// cache (demand-paged by the R-2 fault arm); everything else is a private
-// eager-copied anonymous segment. This retires the whole-binary slurp -- a
-// binary of any size execs.
+// docs/REVENANT.md §4.2 + §4.6. exec_setup_from_spoor reads ONLY the ELF
+// header+phdrs from the pinned executable, then maps each PT_LOAD: NON-WRITABLE
+// segments (R+X text AND R-only rodata -- #45) whose memsz fits within
+// file-backed pages are SHARED file-backed via the Image cache (demand-paged by
+// the R-2 fault arm); writable data (and degenerate whole-bss-page tails) is a
+// private eager-copied anonymous segment. This retires the whole-binary slurp
+// -- a binary of any size execs.
 
-// map_text_file_backed -- a PF_X PT_LOAD as SHARED file-backed text. Gated by
-// the caller to round_up(filesz) == round_up(memsz) (every mapped page has a
-// file page behind it; the last partial page's tail is the file's zero padding
-// between page-aligned segments, or EOF -> the fault arm's KP_ZERO). BORROWS
-// exe; spoor_refs a fresh ref for the consuming Image lookup.
-static int map_text_file_backed(struct Proc *p, struct Spoor *exe,
-                                const struct elf_load_segment *seg) {
+// map_file_backed -- a NON-WRITABLE PT_LOAD (R+X text or R-only rodata, #45 /
+// REVENANT §4.6) as a SHARED file-backed segment. Gated by the caller to
+// round_up(filesz) == round_up(memsz) (every mapped page has a file page behind
+// it; the last partial page's tail is the file's zero padding between
+// page-aligned segments, or EOF -> the fault arm's KP_ZERO). BORROWS exe;
+// spoor_refs a fresh ref for the consuming Image lookup.
+static int map_file_backed(struct Proc *p, struct Spoor *exe,
+                           const struct elf_load_segment *seg) {
     u64 vaddr_end = seg->vaddr + seg->memsz;
     if (vaddr_end < seg->vaddr)             return -1;
     u64 vaddr_end_aligned = round_up_page(vaddr_end);
@@ -469,8 +471,11 @@ static int map_text_file_backed(struct Proc *p, struct Spoor *exe,
     struct Burrow *b = image_lookup_or_create(exe, seg->file_offset, seg->filesz);
     if (!b) { spoor_clunk(exe); return -1; }
 
-    // R+X. W^X (I-12) holds by construction: elf_load rejected PF_W|PF_X, so a
-    // PF_X segment is never writable.
+    // The segment's own ELF prot: R+X for text, R-only (XN) for rodata. W^X
+    // (I-12) holds by construction: the gate admits only NOT-PF_W segments, so
+    // nothing mapped here is ever writable. Each FILE Burrow backs exactly ONE
+    // segment at ONE prot (the Image keys per-segment), which is what keeps the
+    // fault arm's freq->exec-gated I-cache sync sound (REVENANT §4.6).
     u32 prot = vma_prot_for_elf(seg->flags);
     int rc = burrow_map(p, b, seg->vaddr, size, prot);
     // Drop the caller's handle ref. On success mapping_count + the cache's
@@ -481,10 +486,11 @@ static int map_text_file_backed(struct Proc *p, struct Spoor *exe,
 }
 
 // map_eager_from_file -- a non-shared PT_LOAD eager-copied from the file into a
-// PRIVATE anonymous Burrow: data (R+W), rodata (R), or a rare PF_X segment whose
-// memsz extends past the file's last page (whole bss pages the file-backed path
-// cannot zero). filesz bytes are dev->read; the [filesz, size) tail stays zero
-// (KP_ZERO) = .bss. No userspace file-backed writable mapping is ever created.
+// PRIVATE anonymous Burrow: writable data (R+W), or a rare non-writable segment
+// whose memsz extends past the file's last page (whole bss pages the file-backed
+// path cannot zero). Since #45 rodata (R-only) rides map_file_backed instead.
+// filesz bytes are dev->read; the [filesz, size) tail stays zero (KP_ZERO) =
+// .bss. No userspace file-backed writable mapping is ever created (I-36-4).
 static int map_eager_from_file(struct Proc *p, struct Spoor *exe,
                                const struct elf_load_segment *seg) {
     u64 vaddr_end = seg->vaddr + seg->memsz;
@@ -588,26 +594,30 @@ int exec_setup_from_spoor(struct Proc *p, struct Spoor *exe, size_t exe_size,
     kfree(hdr);
     if (r != ELF_LOAD_OK)                      return -1;
 
-    // 2. Map each PT_LOAD. Executable text whose memsz fits within file-backed
-    //    pages is SHARED file-backed (demand-paged); everything else is a
-    //    private eager-copied anon segment. Page-aligned vaddr + file_offset is
-    //    required (matches exec_map_segment): the fault arm + the eager copy
-    //    both assume burrow-offset-0 == seg->vaddr.
+    // 2. Map each PT_LOAD. Non-writable segments (R+X text, R-only rodata --
+    //    #45) whose memsz fits within file-backed pages are SHARED file-backed
+    //    (demand-paged); writable data is a private eager-copied anon segment.
+    //    Page-aligned vaddr + file_offset is required (matches
+    //    exec_map_segment): the fault arm + the eager copy both assume
+    //    burrow-offset-0 == seg->vaddr.
     for (int i = 0; i < img.n_segments; i++) {
         const struct elf_load_segment *seg = &img.segments[i];
         if (seg->vaddr & (PAGE_SIZE - 1))       return -1;
         if (seg->file_offset & (PAGE_SIZE - 1)) return -1;
         if (seg->memsz == 0)                    return -1;
 
-        // text_shareable iff PF_X AND round_up(filesz) == round_up(memsz) (no
-        // whole bss page beyond the file). vaddr is page-aligned, so the
-        // vaddr-relative rounded ends compare the rounded sizes; a 0 from
-        // round_up_page is overflow -> fall to the eager path (which re-rejects).
+        // file_shareable iff NOT PF_W (R+X text, R-only rodata -- #45 /
+        // REVENANT §4.6; text byte-identical since elf_load rejects W|X) AND
+        // round_up(filesz) == round_up(memsz) (no whole bss page beyond the
+        // file). vaddr is page-aligned, so the vaddr-relative rounded ends
+        // compare the rounded sizes; a 0 from round_up_page is overflow -> fall
+        // to the eager path (which re-rejects). PF_W MUST stay eager: a
+        // file-backed writable mapping violates I-36-4 + the §6.5 refusal.
         u64 fend = round_up_page(seg->vaddr + seg->filesz);
         u64 mend = round_up_page(seg->vaddr + seg->memsz);
-        bool text_shareable = (seg->flags & PF_X) && fend != 0 && fend == mend;
+        bool file_shareable = !(seg->flags & PF_W) && fend != 0 && fend == mend;
 
-        int rc = text_shareable ? map_text_file_backed(p, exe, seg)
+        int rc = file_shareable ? map_file_backed(p, exe, seg)
                                 : map_eager_from_file(p, exe, seg);
         if (rc != 0)                            return -1;   // partial -> caller disposes Proc
     }

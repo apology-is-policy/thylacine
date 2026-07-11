@@ -268,6 +268,7 @@ void test_demand_page_no_vma(void);
 void test_demand_page_permission_denied(void);
 void test_demand_page_lifecycle_round_trip(void);
 void test_demand_page_file_smoke(void);
+void test_demand_page_file_rodata_prot(void);
 void test_demand_page_file_read_error_snare_bus(void);
 void test_demand_page_file_multi_page(void);
 void test_demand_page_file_short_read_fills_page(void);
@@ -284,6 +285,7 @@ void test_vdso_mono_matches_timer(void);
 void test_vdso_maps_ro_read(void);
 void test_vdso_maps_ro_write_faults(void);
 void test_exec_setup_smoke(void);
+void test_exec_from_spoor_rodata_dispatch(void);
 void test_exec_setup_segment_data_copied(void);
 void test_exec_setup_constraints(void);
 void test_exec_setup_multi_segment(void);
@@ -1454,6 +1456,7 @@ struct test_case g_tests[] = {
                                        test_demand_page_lifecycle_round_trip,
                                                                            false, NULL },
     { "demand_page.file_smoke",        test_demand_page_file_smoke,        false, NULL },
+    { "demand_page.file_rodata_prot",  test_demand_page_file_rodata_prot,  false, NULL },
     { "demand_page.file_read_error_snare_bus",
                                        test_demand_page_file_read_error_snare_bus, false, NULL },
     { "demand_page.file_multi_page",   test_demand_page_file_multi_page,   false, NULL },
@@ -1475,6 +1478,7 @@ struct test_case g_tests[] = {
     { "vdso.maps_ro_read",             test_vdso_maps_ro_read,             false, NULL },
     { "vdso.maps_ro_write_faults",     test_vdso_maps_ro_write_faults,     false, NULL },
     { "exec.setup_smoke",              test_exec_setup_smoke,              false, NULL },
+    { "exec.from_spoor_rodata_dispatch", test_exec_from_spoor_rodata_dispatch, false, NULL },
     { "exec.setup_segment_data_copied",
                                        test_exec_setup_segment_data_copied,
                                                                            false, NULL },

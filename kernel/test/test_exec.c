@@ -38,6 +38,9 @@
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
 #include <thylacine/burrow.h>
+#include <thylacine/dev.h>       // #45: the blob-serving stub Dev
+#include <thylacine/spoor.h>     // #45: spoor_alloc for the from_spoor path
+#include <thylacine/image.h>     // #45: Image-cache counters (dispatch proof)
 
 #include "../../mm/phys.h"
 #include "../../arch/arm64/hwfeat.h"   // g_hw_features.linux_hwcap (AT_HWCAP)
@@ -50,8 +53,9 @@ void test_exec_setup_lifecycle_round_trip(void);
 void test_exec_user_stack_guard(void);
 void test_exec_setup_auxv(void);
 void test_exec_setup_auxv_no_phdr_segment(void);
+void test_exec_from_spoor_rodata_dispatch(void);
 
-#define ELF_BLOB_SIZE 8192
+#define ELF_BLOB_SIZE 16384   // 4 pages: headers + 3 one-page segments (#45)
 // 8-byte aligned per elf_load's R5-G F61 alignment precondition. We use
 // 16-byte alignment for safety (struct Elf64_Ehdr alignment fits inside).
 static _Alignas(struct Elf64_Ehdr) u8 g_elf_blob[ELF_BLOB_SIZE];
@@ -136,6 +140,37 @@ static size_t build_elf_phdrs_loaded(void) {
     return size;
 }
 
+
+// =============================================================================
+// #45 / REVENANT 4.6: the from_spoor PT_LOAD dispatch.
+//
+// A stub Dev serving file bytes straight from g_elf_blob, so
+// exec_setup_from_spoor runs against a synthetic "file" with no FS. Proves the
+// generalized gate: NON-WRITABLE segments (R+X text AND R-only rodata) route
+// file-backed through the Image cache; writable data stays eager anon
+// (I-36 condition 4). Fails on the pre-#45 gate by construction (rodata would
+// come back BURROW_TYPE_ANON and only ONE Image entry would be created).
+// =============================================================================
+
+static size_t g_blob_dev_size;
+
+static long blob_dev_read(struct Spoor *c, void *buf, long n, s64 off) {
+    (void)c;
+    if (n <= 0 || off < 0 || (u64)off >= (u64)g_blob_dev_size) return 0;
+    size_t avail = g_blob_dev_size - (size_t)off;
+    size_t want  = (size_t)n < avail ? (size_t)n : avail;
+    u8 *b = (u8 *)buf;
+    for (size_t i = 0; i < want; i++) b[i] = g_elf_blob[(size_t)off + i];
+    return (long)want;
+}
+
+static struct Dev g_blob_dev = {
+    .dc   = '?',
+    .name = "execblob",
+    .read = blob_dev_read,
+};
+
+
 static struct Proc *make_proc(void) {
     return proc_alloc();
 }
@@ -144,6 +179,60 @@ static void drop_proc(struct Proc *p) {
     if (!p) return;
     p->state = 2;     // PROC_STATE_ZOMBIE
     proc_free(p);
+}
+
+void test_exec_from_spoor_rodata_dispatch(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    // text RX @ 0x10000 (file 0x1000), rodata R @ 0x20000 (file 0x2000),
+    // data RW @ 0x30000 (file 0x3000); each filesz == memsz == one page.
+    u32 flags[3] = { PF_R | PF_X, PF_R, PF_R | PF_W };
+    size_t size = build_elf(flags, 3, /*filesz=*/0x1000);
+    // Recognizable bytes in the RW data segment (proves the eager copy still
+    // reads through the Dev). The FILE segments are not faulted here -- their
+    // content path is demand_page.file_rodata_prot / file_smoke.
+    for (size_t i = 0; i < 0x20; i++) g_elf_blob[0x3000 + i] = (u8)(0xE0 + i);
+    g_blob_dev_size = size;
+
+    u64 creates0 = image_cache_creates_for_test();
+
+    struct Spoor *exe = spoor_alloc(&g_blob_dev);
+    TEST_ASSERT(exe != NULL, "spoor_alloc");
+    exe->qid.path = 0x45C0DEull;      // distinct Image key vs any other test
+    exe->qid.vers = 7;
+
+    u64 entry = 0, sp = 0;
+    int rc = exec_setup_from_spoor(p, exe, size, NULL, 0, 0, &entry, &sp);
+    TEST_EXPECT_EQ(rc, 0, "exec_setup_from_spoor");
+    TEST_EXPECT_EQ(entry, (u64)0x10000, "entry == e_entry");
+
+    struct Vma *text = vma_lookup(p, 0x10000ull);
+    struct Vma *ro   = vma_lookup(p, 0x20000ull);
+    struct Vma *rw   = vma_lookup(p, 0x30000ull);
+    TEST_ASSERT(text != NULL && ro != NULL && rw != NULL, "three VMAs");
+    TEST_EXPECT_EQ(text->prot, VMA_PROT_RX,   "text prot RX");
+    TEST_EXPECT_EQ(ro->prot,   VMA_PROT_READ, "rodata prot R-only");
+    TEST_EXPECT_EQ(rw->prot,   VMA_PROT_RW,   "data prot RW");
+    TEST_EXPECT_EQ((int)text->burrow->type, (int)BURROW_TYPE_FILE,
+        "text FILE-backed");
+    TEST_EXPECT_EQ((int)ro->burrow->type, (int)BURROW_TYPE_FILE,
+        "rodata FILE-backed (the #45 gate)");
+    TEST_EXPECT_EQ((int)rw->burrow->type, (int)BURROW_TYPE_ANON,
+        "data eager ANON (I-36 condition 4: writable never file-backed)");
+    TEST_EXPECT_EQ(image_cache_creates_for_test() - creates0, 2,
+        "two Image entries created (text + rodata)");
+
+    // The eager RW copy carried the file bytes.
+    u8 *rwb = (u8 *)pa_to_kva(page_to_pa(rw->burrow->pages));
+    TEST_EXPECT_EQ((u64)rwb[0],    (u64)0xE0, "data byte 0 eager-copied");
+    TEST_EXPECT_EQ((u64)rwb[0x1f], (u64)0xFF, "data byte 0x1f eager-copied");
+
+    // Teardown: unmap (drop_proc) -> both Image entries go idle -> evict frees
+    // the FILE Burrows (each clunks its adopted spoor ref) -> our own ref last.
+    drop_proc(p);
+    image_cache_evict_idle_for_test();
+    spoor_clunk(exe);
 }
 
 void test_exec_setup_smoke(void) {

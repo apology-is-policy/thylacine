@@ -61,6 +61,7 @@ void test_demand_page_permission_denied(void);
 void test_demand_page_lifecycle_round_trip(void);
 // REVENANT R-2: BURROW_TYPE_FILE demand-page fault arm.
 void test_demand_page_file_smoke(void);
+void test_demand_page_file_rodata_prot(void);
 void test_demand_page_file_read_error_snare_bus(void);
 void test_demand_page_file_multi_page(void);
 // REVENANT R-5 audit SA-F1: the slow path must LOOP over a short-returning read.
@@ -489,6 +490,68 @@ void test_demand_page_file_smoke(void) {
     r = userland_demand_page(p, &fi);
     TEST_EXPECT_EQ(r, FAULT_HANDLED, "second fault to resident page resolves");
     TEST_EXPECT_EQ(g_rev_read_calls, 1, "fast-hit must NOT re-read (still 1)");
+
+    drop_proc(p);
+    burrow_unref(v);
+}
+
+// #45 / REVENANT 4.6: an R-only (rodata) FILE mapping demand-pages with a
+// NON-EXECUTABLE read-only PTE -- the prot-generality the rodata dispatch
+// relies on. Mirrors file_smoke with VMA_PROT_READ + a data-read fault; the
+// UXN assertion is the inverse of file_smoke's (text clears UXN, rodata sets
+// it), pinning that the arm installs the VMA's own prot, not a hardcoded R+X.
+void test_demand_page_file_rodata_prot(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    g_rev_read_fail  = false;
+    g_rev_read_calls = 0;
+    g_rev_read_chunk = 0;
+    g_rev_read_eof   = -1;
+
+    struct Spoor *s = spoor_alloc(&g_rev_test_dev);
+    TEST_ASSERT(s != NULL, "spoor_alloc");
+    const u64 FILE_OFF = 0x7000;
+    struct Burrow *v = burrow_create_file(s, FILE_OFF, ONE_PAGE);
+    TEST_ASSERT(v != NULL, "burrow_create_file");
+
+    // Map it R-only (rodata) at USER_VA.
+    int rc = burrow_map(p, v, USER_VA, ONE_PAGE, VMA_PROT_READ);
+    TEST_EXPECT_EQ(rc, 0, "burrow_map R-only");
+
+    // Data-read fault (NOT instruction) -> demand-read one page.
+    struct fault_info fi;
+    make_fi(&fi, USER_VA + 0x10, /*is_write=*/false, /*is_instr=*/false);
+    enum fault_result r = userland_demand_page(p, &fi);
+    TEST_EXPECT_EQ(r, FAULT_HANDLED, "FILE demand-page resolves an R-only VA");
+    TEST_EXPECT_EQ(g_rev_read_calls, 1, "exactly one dev->read for the miss");
+
+    struct page *slotpg = burrow_file_slot_for_test(v, 0);
+    TEST_ASSERT(slotpg != NULL, "slot 0 resident after fault");
+    u64 pte = walk_to_l3_entry(p->pgtable_root, USER_VA);
+    TEST_ASSERT(pte != 0, "L3 PTE installed after FILE demand-page");
+    TEST_EXPECT_EQ(pte & 0x0000FFFFFFFFF000ull, page_to_pa(slotpg),
+        "PTE PA equals the resident FILE slot page");
+    TEST_ASSERT((pte & BIT_UXN) != 0, "R-only rodata SETS UXN (never executable)");
+    TEST_ASSERT((pte & BIT_PXN) != 0, "PXN set (kernel never execs user)");
+    TEST_EXPECT_EQ(pte & BIT_AP_FIELD, BIT_AP_RO_ANY,
+        "R-only rodata is RO_ANY (W^X: never writable)");
+
+    // The right FILE bytes landed (offset-keyed pattern), not a zero page.
+    u8 *bytes = (u8 *)pa_to_kva(page_to_pa(slotpg));
+    TEST_EXPECT_EQ((u64)bytes[0],    (u64)(u8)(FILE_OFF & 0xff),
+        "byte 0 = file_offset pattern");
+    TEST_EXPECT_EQ((u64)bytes[0x9f], (u64)(u8)((FILE_OFF + 0x9f) & 0xff),
+        "byte 0x9f matches pattern");
+
+    // W^X on the R-only VMA: an instruction fault and a write fault are both
+    // REFUSED (the prot gate runs before the backing dispatch).
+    make_fi(&fi, USER_VA + 0x20, /*is_write=*/false, /*is_instr=*/true);
+    r = userland_demand_page(p, &fi);
+    TEST_EXPECT_EQ(r, FAULT_UNHANDLED_USER, "instr fault on R-only VMA refused");
+    make_fi(&fi, USER_VA + 0x30, /*is_write=*/true, /*is_instr=*/false);
+    r = userland_demand_page(p, &fi);
+    TEST_EXPECT_EQ(r, FAULT_UNHANDLED_USER, "write fault on R-only VMA refused");
 
     drop_proc(p);
     burrow_unref(v);

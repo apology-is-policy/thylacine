@@ -208,10 +208,12 @@ prior hardcoded-64B loop).
 
 ### The Image cache (R-3) — `kernel/image.c`
 
-A kernel-global fixed table (`IMAGE_CACHE_MAX = 64`) of entries, each holding **one**
-handle_count ref (a STRONG ref → text persists past the last unmap, the Plan 9
-temporal cache) on a FILE Burrow, keyed on `(dc, devno, qid.path, qid.vers,
-file_offset, size)`. `image_lookup_or_create`:
+A kernel-global fixed table (`IMAGE_CACHE_MAX = 128` — doubled from 64 at #45,
+since a binary now contributes TWO entries: text + rodata) of entries, each
+holding **one** handle_count ref (a STRONG ref → a cached segment persists past
+the last unmap, the Plan 9 temporal cache) on a FILE Burrow, keyed on `(dc,
+devno, qid.path, qid.vers, file_offset, size)` — per-SEGMENT, which is what let
+the #45 rodata extension ride with no cache change. `image_lookup_or_create`:
 
 - **HIT** (pass 1, under `g_image_lock`): `burrow_ref` the cached Burrow for the
   caller; `spoor_clunk` the redundant passed Spoor (outside the lock).
@@ -252,14 +254,19 @@ freeing unref). One `spoor_clunk` per Spoor on every path.
    (no pointer into the buffer), so `kfree(hdr)` before `exec_build_init_stack`
    reads `img` is safe.
 3. Per `PT_LOAD`: require page-aligned `vaddr` + `file_offset`, `memsz != 0`, then
-   dispatch on `text_shareable = (PF_X) && round_up(vaddr+filesz) == round_up(vaddr+memsz)`:
-   - **text-shareable** → `map_text_file_backed` (Image cache → shared FILE Burrow,
-     `burrow_map` `R+X`, `burrow_unref`). BORROWS `exe`; `spoor_ref`s a fresh ref
+   dispatch on `file_shareable = !(PF_W) && round_up(vaddr+filesz) == round_up(vaddr+memsz)`
+   (the #45 generalization of the original `PF_X` gate — text byte-identical since
+   `elf_load` rejects `W|X`; R-only rodata newly qualifies):
+   - **file-shareable** → `map_file_backed` (Image cache → shared FILE Burrow,
+     `burrow_map` at the segment's own ELF prot — `R+X` text / `R`-only [XN]
+     rodata — then `burrow_unref`). BORROWS `exe`; `spoor_ref`s a fresh ref
      for the consuming Image lookup (on NULL it didn't consume → drop the fresh ref).
-   - else → `map_eager_from_file` (private anon, loop `dev->read` `filesz` bytes,
-     KP_ZERO tail = `.bss`; a PF_X segment routed here — a whole bss page past the
-     file — still gets `arch_icache_sync_range`). A short read (`got != filesz`) →
-     fail, no partial map.
+   - else (writable, or a whole-bss-page tail) → `map_eager_from_file` (private
+     anon, loop `dev->read` `filesz` bytes, KP_ZERO tail = `.bss`; a PF_X segment
+     routed here — a whole bss page past the file — still gets
+     `arch_icache_sync_range`). A short read (`got != filesz`) → fail, no partial
+     map. `PF_W` MUST stay on this path: a file-backed writable mapping violates
+     I-36 condition 4 + the ARCH §6.5 refusal.
 4. User stack + the System V startup frame (`exec_map_user_stack`,
    `exec_build_init_stack` — unchanged; reads `img` metadata, not the file;
    AT_PHDR resolves into the first mapped segment's VA).
@@ -273,6 +280,31 @@ instead of a blob: each parent body clunks `exe` on a pre-spawn failure and
 the deferred header+data reads run in the **child** (death-interruptible vs the
 child's death). The blob path (`exec_setup` / `exec_setup_with_argv`) is **kept for
 the kernel exec tests** (test/legacy; the v1.x unification + delete is a seam).
+
+### R-only rodata file-backing (#45, CHASE — 2026-07-11)
+
+The original dispatch file-backed only `PF_X` text; rodata was eager-copied
+with writable data. The CHASE D44 decomposition measured the cost: a Go binary
+carries ~half its bytes in the R-only segment (compile 8.62 MiB R+X / 7.89 MiB
+R / 0.99 MiB RW; `go` 5.41 / 5.92 / 0.41), so every exec eagerly read ~8.9 MiB
+into a private anon copy — ~792 MiB re-read across a cold `go build`'s 91
+compile execs, plus a private per-live-Proc RAM copy under parallel builds.
+
+The #45 change is exactly the gate above (`PF_X` → `!PF_W`) plus
+`IMAGE_CACHE_MAX` 64 → 128. **Nothing else moved**, because the machinery was
+already prot-general (REVENANT §4.6 records the full soundness walk):
+
+- `file_install_locked` / `file_install_cluster_locked` install at `vma->prot`;
+- the #317 I-cache sync is gated on `freq->exec` — never fires for rodata,
+  sound because each FILE Burrow backs ONE segment at ONE prot (the per-segment
+  Image key), so no page migrates from a non-exec to an exec mapping;
+- the Image cache keys per-segment; a binary now holds two entries;
+- torpor's R-5-F1 pre-fault is address-based and covers rodata FILE pages;
+- the I-32 charge posture (per-page charge = v1.x seam) is unchanged in kind.
+
+Effect: the first exec per boot demand-pages only the touched rodata subset
+(64-page clusters); later execs Image-hit — zero reads, zero copies; live
+Procs share one resident rodata.
 
 ## Data structures
 

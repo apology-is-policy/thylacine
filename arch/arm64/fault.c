@@ -689,7 +689,9 @@ static enum fault_result file_demand_page_single(struct Proc *p,
     // race-loser's page (a sibling faulter won the slot) is discarded in
     // file_install_locked; whichever page backs the PTE was synced by ITS
     // creator, so every installed text page is coherent. Non-exec FILE pages
-    // (none at v1.0) skip the sync.
+    // (R-only rodata since #45) skip the sync -- sound because each FILE
+    // Burrow backs ONE segment at ONE prot, so no page ever migrates from a
+    // non-exec to an exec mapping (REVENANT 4.6).
     if (freq->exec)
         arch_icache_sync_range(kva, PAGE_SIZE);
 
