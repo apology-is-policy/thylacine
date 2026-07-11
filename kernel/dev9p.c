@@ -44,6 +44,7 @@ static struct dev9p_priv *priv_alloc(struct p9_client *client, u32 fid,
     p->fid            = fid;
     p->fid_owned      = fid_owned;
     p->attached_owner = attached_owner;
+    spin_lock_init(&p->wb_lock);   // KP_ZERO already unlocked it; explicit
     if (attached_owner) {
         p9_attached_ref(attached_owner);
     }
@@ -108,6 +109,216 @@ static void co_copy(u8 *dst, const u8 *src, u64 n) {
     } else {
         for (u64 i = 0; i < n; i++) dst[i] = src[i];
     }
+}
+
+// =============================================================================
+// F1 write-behind (LARDER-DESIGN section 12): per-open-file append-run
+// staging on a loose + cacheable client. The run state lives on dev9p_priv
+// under wb_lock, a PURE LEAF -- only byte copies + state reads happen under
+// it (wire I/O never; the only lock ever acquired below it is the buddy
+// zone lock via kmalloc/kfree, the established Larder leaf->buddy order).
+// =============================================================================
+
+// The global outstanding-staged-bytes budget (the DEV9P_CO_BUDGET twin --
+// GLOBAL, not per-Proc: the priv crosses Proc boundaries via handle_dup /
+// rfork inheritance / the #926 close-at-exit, so a per-Proc charge has no
+// sound uncharge site). Charged at buffer alloc/growth by the DELTA,
+// uncharged in full at dev9p_close's buffer release. Denial degrades to
+// write-through (the strict-mount behavior).
+static u64 g_wb_budget_used;
+
+static bool wb_budget_charge(u64 n) {
+    u64 cur = __atomic_load_n(&g_wb_budget_used, __ATOMIC_RELAXED);
+    for (;;) {
+        if (cur + n > (u64)DEV9P_WB_BUDGET) return false;
+        if (__atomic_compare_exchange_n(&g_wb_budget_used, &cur, cur + n,
+                                        false, __ATOMIC_RELAXED,
+                                        __ATOMIC_RELAXED))
+            return true;
+    }
+}
+
+static void wb_budget_uncharge(u64 n) {
+    __atomic_fetch_sub(&g_wb_budget_used, n, __ATOMIC_RELAXED);
+}
+
+u64 dev9p_wb_budget_used(void) {
+    return __atomic_load_n(&g_wb_budget_used, __ATOMIC_RELAXED);
+}
+
+void dev9p_wb_budget_bias_for_test(s64 n) {
+    __atomic_fetch_add(&g_wb_budget_used, (u64)n, __ATOMIC_RELAXED);
+}
+
+// Flush the visible run over the wire as msize-max Twrites. The caller HOLDS
+// wb_lock; returns still holding it (the lock is dropped across the wire I/O
+// -- blocking 9P never under a spinlock, #360). Returns 0 or a negative
+// errno (also latched into wb_err).
+//
+// The flusher count freezes the run: while it is nonzero, stagers stand down
+// (write-through) and growth reallocation is impossible, so the out-of-lock
+// reads of the captured wb_buf cannot race a kfree/move. A concurrent
+// DUPLICATE flusher (an fsync racing a cap flush on a dup'd fd) captures the
+// same {off, total, buf} and writes identical bytes at identical offsets --
+// idempotent on the server -- and retirement checks the run is still the
+// captured one, so the second finisher's retire is a no-op. Nobody ever
+// waits: no park/wake surface, no new I-9 leg.
+//
+// On failure the run is DROPPED and the errno latched (the voted NFS-async
+// posture: the bytes are lost, the latch reports it via every subsequent
+// write/fsync -- retry-forever would wedge close). The buffer itself stays
+// allocated (a live duplicate flusher may still be reading it); it is freed
+// at dev9p_close.
+static int wb_flush_locked(struct dev9p_priv *p, u64 qid_path) {
+    if (p->wb_len == 0) return 0;
+    u64 off   = p->wb_off;
+    u32 total = p->wb_len;
+    u8 *buf   = p->wb_buf;
+    p->wb_flushers++;
+    spin_unlock(&p->wb_lock);
+
+    int err = 0;
+    u32 done = 0;
+    while (done < total) {
+        u32 acc = 0;
+        int rc = p9_client_write(p->client, p->fid, off + (u64)done,
+                                 total - done, buf + done, &acc);
+        if (rc != 0) { err = rc; break; }          // already a -errno
+        if (acc == 0) { err = -P9_E_IO; break; }   // no progress: fail, don't spin
+        done += acc;
+    }
+    // Own-write invalidates move per-write -> per-FLUSH (fs_cache.tla
+    // OwnWrite realized at the wire moment). Unconditional: a PARTIAL flush
+    // also mutated the server. Outside wb_lock (the larder lock is its own
+    // leaf; wb_lock never nests with it).
+    larder_attr_invalidate(&p->client->larder, qid_path);
+    larder_page_invalidate(&p->client->larder, qid_path);
+
+    spin_lock(&p->wb_lock);
+    p->wb_flushers--;
+    if (err) {
+        if (p->wb_err == 0) p->wb_err = (int)(-(long)err);   // positive errno
+        p->wb_len   = 0;
+        p->wb_known = false;
+        return err;
+    }
+    u64 fend = off + (u64)total;
+    if (p->wb_known && fend > p->wb_base) p->wb_base = fend;
+    // Retire iff the run is still the captured one (a duplicate flusher may
+    // have retired it first).
+    if (p->wb_len == total && p->wb_off == off)
+        p->wb_len = 0;
+    return 0;
+}
+
+// The dev9p_write staging decision. Returns:
+//   > 0  -- staged (== count); no wire op, no invalidate (moved to flush)
+//   == 0 -- not staged; any ordering-required flush already done; the caller
+//           proceeds with the write-through
+//   < 0  -- the latched flush errno (the NFS error model), or a flush
+//           failure hit while preparing this write
+static long wb_write_prepare(struct dev9p_priv *p, struct Spoor *c,
+                             u32 count, u64 offset, const u8 *data) {
+    spin_lock(&p->wb_lock);
+    for (;;) {
+        if (p->wb_err) {
+            int e = p->wb_err;
+            spin_unlock(&p->wb_lock);
+            return -(long)e;
+        }
+        // The append anchor for this write: the live run's end, else the
+        // known base. No known anchor -> never stages (an opened-existing
+        // file; a post-truncate priv). A live run implies wb_known (runs
+        // only start at a known anchor; wstat flushes before clearing it).
+        bool anchored  = p->wb_len ? true : p->wb_known;
+        u64 append_at  = p->wb_len ? (p->wb_off + (u64)p->wb_len) : p->wb_base;
+        bool stageable = anchored && offset == append_at &&
+                         count <= DEV9P_WB_STAGE_MAX &&
+                         p->wb_flushers == 0;
+        if (!stageable) {
+            if (p->wb_len == 0) {
+                // Nothing staged: plain write-through (the strict-mount
+                // behavior). Covers non-append, oversize, frozen (a flush
+                // in flight -- its captured run is older and disjoint), and
+                // never-anchored privs.
+                spin_unlock(&p->wb_lock);
+                return 0;
+            }
+            // A staged run exists and this write bypasses it (non-append /
+            // oversize): flush FIRST so the wire sees the older staged
+            // bytes before this op (the ordering rule -- an interior pwrite
+            // that overlaps the run must land after it), then write through.
+            int fe = wb_flush_locked(p, c->qid.path);
+            spin_unlock(&p->wb_lock);
+            return (fe != 0) ? (long)fe : 0;
+        }
+        // Cap: a full run flushes inline, then the loop retries the stage
+        // into the emptied run (wb_base advanced to exactly this write's
+        // offset by the flush).
+        if ((u64)p->wb_len + (u64)count > (u64)DEV9P_WB_CAP) {
+            int fe = wb_flush_locked(p, c->qid.path);
+            if (fe != 0) {
+                spin_unlock(&p->wb_lock);
+                return (long)fe;
+            }
+            continue;
+        }
+        // Capacity: grow by doubling; budget-charge the delta. Denial (or
+        // alloc failure) -> write-through fallback, graceful -- the budget
+        // is a DoS floor, not a correctness surface. kmalloc/kfree under
+        // wb_lock follow the Larder leaf -> buddy order (non-blocking).
+        u32 need = p->wb_len + count;
+        if (need > p->wb_cap) {
+            u32 ncap = p->wb_cap ? p->wb_cap : 4096u;
+            while (ncap < need) ncap <<= 1;
+            if (ncap > (u32)DEV9P_WB_CAP) ncap = DEV9P_WB_CAP;
+            if (!wb_budget_charge((u64)(ncap - p->wb_cap))) {
+                spin_unlock(&p->wb_lock);
+                return 0;
+            }
+            u8 *nb = kmalloc(ncap, 0);
+            if (!nb) {
+                wb_budget_uncharge((u64)(ncap - p->wb_cap));
+                spin_unlock(&p->wb_lock);
+                return 0;
+            }
+            if (p->wb_len) co_copy(nb, p->wb_buf, p->wb_len);
+            if (p->wb_buf) kfree(p->wb_buf);
+            p->wb_buf = nb;
+            p->wb_cap = ncap;
+        }
+        if (p->wb_len == 0) p->wb_off = offset;
+        co_copy(p->wb_buf + p->wb_len, data, count);
+        p->wb_len += count;
+        spin_unlock(&p->wb_lock);
+        return (long)count;
+    }
+}
+
+// A COMPLETED write-through advances the append anchor: the file provably
+// extends at least to offset+accepted, and every byte below came through
+// this priv (create/OTRUNC-born) or an earlier completed op -- so max() keeps
+// wb_base == the known end and a subsequent cursor write can stage again.
+static void wb_note_through(struct dev9p_priv *p, u64 offset, u32 accepted) {
+    spin_lock(&p->wb_lock);
+    if (p->wb_known && offset + (u64)accepted > p->wb_base)
+        p->wb_base = offset + (u64)accepted;
+    spin_unlock(&p->wb_lock);
+}
+
+// fstat on the staging fd reports the patched size = max(server view, the
+// staged run's end) -- the Go buildid/truncate-gate fstats its own O_WRONLY
+// fd mid-open (#46). Path-stats via OTHER fids see the last-flushed state
+// (close-to-open-legal; the file is open-dirty). mtime stays the server's
+// (stale until the flush -- the documented writeback posture).
+static void wb_patch_stat_size(struct dev9p_priv *p, struct t_stat *out) {
+    if (!p->wb_eligible) return;
+    spin_lock(&p->wb_lock);
+    if (p->wb_len) {
+        u64 re = p->wb_off + (u64)p->wb_len;
+        if (re > out->size) out->size = re;
+    }
+    spin_unlock(&p->wb_lock);
 }
 
 // Map a 9P qid type to a Plan 9 QT* bit. The wire constants
@@ -388,8 +599,10 @@ static int dev9p_stat_native(struct Spoor *c, struct t_stat *out) {
     // + fstat redundancy, the Larder's biggest cheap win. Close-to-open coherent
     // via the own-write invalidation on the mutation paths below.
     u64 seq0 = 0;
-    if (cacheable && larder_attr_serve(l, key, out, &seq0))
+    if (cacheable && larder_attr_serve(l, key, out, &seq0)) {
+        wb_patch_stat_size(p, out);
         return 0;
+    }
     struct p9_attr attr;
     // errno-rollout: propagate the server's POSIX errno (p9_client_getattr
     // returns -ecode on Rlerror, e.g. -T_E_NOENT for a vanished file; I-14
@@ -405,6 +618,7 @@ static int dev9p_stat_native(struct Spoor *c, struct t_stat *out) {
     // Gated on `cacheable` (a non-content-versioned server is never cached).
     if (cacheable)
         larder_attr_install(l, seq0, key, attr.qid.version, out);
+    wb_patch_stat_size(p, out);
     return 0;
 }
 
@@ -618,7 +832,6 @@ static struct Spoor *dev9p_open_cached(struct Spoor *c, const char *const *names
     if (client->wga_unsupported) return NULL;
     if (!__atomic_load_n(&client->cacheable, __ATOMIC_RELAXED)) return NULL;
     struct larder *l = &client->larder;
-
     // The gen witness (B1-audit F1): captured BEFORE the hint's coverage
     // decision; larder_pages_snapshot fails closed if ANY invalidate moves
     // the gen between here and the step-4 copy (the third-actor stale-fid
@@ -694,7 +907,6 @@ static struct Spoor *dev9p_open_cached(struct Spoor *c, const char *const *names
             // unlink/rename). Nothing bound; the normal path's own walk
             // produces the observable outcome with its own fail ordering.
             kfree(attrs);
-
             return NULL;
         }
 
@@ -738,7 +950,6 @@ static struct Spoor *dev9p_open_cached(struct Spoor *c, const char *const *names
                                seq0)) {
         if (buf) kfree(buf);
         co_budget_uncharge(size);
-
         return NULL;
     }
 
@@ -776,7 +987,6 @@ static struct Spoor *dev9p_open_cached(struct Spoor *c, const char *const *names
     // I-33 -- an OOM leaves the name short; the open still succeeds).
     for (int i = 0; i < nname; i++)
         spoor_path_extend(co, names[i], name_lens[i]);
-
     return co;
 }
 
@@ -818,6 +1028,15 @@ static struct Spoor *dev9p_open(struct Spoor *c, int omode) {
     if (omode & 0x10) {
         larder_attr_invalidate(&p->client->larder, c->qid.path);
         larder_page_invalidate(&p->client->larder, c->qid.path);
+        // F1 write-behind eligibility: an OTRUNC-opened fd's end is KNOWN
+        // (0) -- the append anchor (the create twin; same gate).
+        if (p->client->loose &&
+            __atomic_load_n(&p->client->cacheable, __ATOMIC_RELAXED) &&
+            c->qid.type == 0) {
+            p->wb_eligible = true;
+            p->wb_known    = true;
+            p->wb_base     = 0;
+        }
     }
     c->flag |= COPEN;
     c->mode  = omode;
@@ -922,6 +1141,18 @@ static struct Spoor *dev9p_create(struct Spoor *c, const char *name,
     // parent's dirent set -- drop the parent's cached dentries so a stale
     // NEGATIVE entry (parent_path, name) cannot serve ENOENT for the new file.
     larder_dentry_invalidate_parent(l, parent_path);
+    // F1 write-behind eligibility: a create-born fd's end is KNOWN (0) --
+    // the append anchor (LARDER-DESIGN section 12; the measured mix is
+    // entirely create-then-write). Gate: loose (the B1 I-38 opt-in) +
+    // cacheable + plain file. Pre-share (no handle exists yet), so plain
+    // stores; the dir arm never reaches (DMDIR-gated).
+    if ((perm & SYS_WALK_CREATE_DMDIR) == 0 && p->client->loose &&
+        __atomic_load_n(&p->client->cacheable, __ATOMIC_RELAXED) &&
+        c->qid.type == 0) {
+        p->wb_eligible = true;
+        p->wb_known    = true;
+        p->wb_base     = 0;
+    }
     return c;
 }
 
@@ -965,6 +1196,26 @@ static void dev9p_close(struct Spoor *c) {
         if (p->co_buf) kfree(p->co_buf);
         co_budget_uncharge(p->co_size);
         p->co_buf = NULL;
+    }
+
+    // F1 write-behind: flush the staged run BEFORE the async-clunk Tclunk
+    // below (the fid must be live for the flush Twrites -- a Tclunk racing
+    // ahead would write to a dead fid). LAST-ref runs here (the cached-open/
+    // weft invariant), so no concurrent op exists on this priv: the plain
+    // wb_len read and the uncontended flush are sound; wb_flushers is 0. A
+    // flush failure latches + drops -- the Dev.close slot is void at v1.0
+    // (documented seam; fsync is the reliable error channel). Then release
+    // the buffer + the global budget (unconditional on wb_buf: a wstat-
+    // de-eligibilized priv still owns its buffer).
+    if (p->wb_len) {
+        spin_lock(&p->wb_lock);
+        (void)wb_flush_locked(p, c->qid.path);
+        spin_unlock(&p->wb_lock);
+    }
+    if (p->wb_buf) {
+        kfree(p->wb_buf);
+        wb_budget_uncharge((u64)p->wb_cap);
+        p->wb_buf = NULL;
     }
 
     // F2 (F236 close) discipline — order matters:
@@ -1038,6 +1289,30 @@ static long dev9p_read(struct Spoor *c, void *buf, long n, s64 off) {
         u64 take = (count > rem) ? rem : (u64)count;
         co_copy((u8 *)buf, p->co_buf + offset, take);
         return (long)take;
+    }
+    // F1 write-behind overlay (LARDER-DESIGN section 12): a read WITHIN the
+    // staged run serves from the buffer -- the guest's newest bytes, a short
+    // read up to the run's end (POSIX short-read composition carries a
+    // spanning caller across the boundary). BELOW the run the server/cache
+    // is complete (the append-anchor discipline: the server holds every
+    // byte under wb_off), so fall through. AT/PAST the run's end also fall
+    // through -- the normal path answers EOF honestly from the server/attr
+    // (never a synthesized 0, so a racing write-through extension past the
+    // run stays visible). The run is visible during its own flush, so a
+    // mid-flush read still overlays.
+    if (p->wb_eligible) {
+        spin_lock(&p->wb_lock);
+        if (p->wb_len) {
+            u64 rs = p->wb_off, re = rs + (u64)p->wb_len;
+            if (offset >= rs && offset < re) {
+                u64 take = re - offset;
+                if (take > (u64)count) take = (u64)count;
+                co_copy((u8 *)buf, p->wb_buf + (offset - rs), take);
+                spin_unlock(&p->wb_lock);
+                return (long)take;
+            }
+        }
+        spin_unlock(&p->wb_lock);
     }
     struct larder *l = &p->client->larder;
     bool cacheable = __atomic_load_n(&p->client->cacheable, __ATOMIC_RELAXED);
@@ -1168,6 +1443,15 @@ static long dev9p_write(struct Spoor *c, const void *buf, long n, s64 off) {
     if (n <= 0) return 0;
     u32 count = (n > 0x7fffffffL) ? 0x7fffffffu : (u32)n;
     u64 offset = (off < 0) ? 0 : (u64)off;
+    // F1 write-behind (LARDER-DESIGN section 12): stage a small pure-append
+    // write on an eligible priv instead of paying a wire RPC per bufio
+    // chunk. wb_eligible is a fast-path hint (set pre-share at create/
+    // OTRUNC; cleared by wstat) -- every real decision re-runs under
+    // wb_lock inside.
+    if (p->wb_eligible) {
+        long staged = wb_write_prepare(p, c, count, offset, (const u8 *)buf);
+        if (staged != 0) return staged;
+    }
     u32 accepted = 0;
     int rc = p9_client_write(p->client, p->fid, offset, count,
                               (const u8 *)buf, &accepted);
@@ -1189,6 +1473,9 @@ static long dev9p_write(struct Spoor *c, const void *buf, long n, s64 off) {
     // no-ops for a non-cacheable client, whose caches are empty).
     larder_attr_invalidate(&p->client->larder, c->qid.path);
     larder_page_invalidate(&p->client->larder, c->qid.path);
+    // F1 write-behind: a completed write-through advances the append anchor
+    // so a subsequent cursor write can stage again.
+    if (p->wb_eligible) wb_note_through(p, offset, accepted);
     return (long)accepted;
 }
 
@@ -1255,6 +1542,18 @@ static int dev9p_fsync(struct Spoor *c, u32 datasync) {
     // FID-LIFECYCLE cached-open: fsync on a read-only fd is a POSIX-legal
     // no-op success (nothing to flush; no fid to Tsync).
     if (p->cached_open) return 0;
+    // F1 write-behind: flush the staged run FIRST -- fsync is the reliable
+    // error channel (the voted NFS model), so a latched flush error
+    // surfaces here even when the run itself is already gone; a live run
+    // flushes synchronously (a concurrent duplicate flusher is idempotent).
+    if (p->wb_eligible) {
+        int fe = 0;
+        spin_lock(&p->wb_lock);
+        if (p->wb_err)         fe = -(p->wb_err);
+        else if (p->wb_len)    fe = wb_flush_locked(p, c->qid.path);
+        spin_unlock(&p->wb_lock);
+        if (fe != 0) return fe;
+    }
     // Area-F errno rollout (the slot the #3 pass missed): propagate the real
     // ecode -- p9_client_fsync returns 0 or -(T_E_*)/-P9_E_IO, already a valid
     // -errno in [-4095,-1]. Collapsing to -1 masked the underlying failure
@@ -1383,6 +1682,19 @@ static int dev9p_wstat_native(struct Spoor *c, u32 valid, u32 mode,
     // chmod/chown are untouched. The v1.x fix, if a consumer appears, is the
     // retain-the-walk-fid-unopened variant.
     if (p->cached_open) return -1;
+    // F1 write-behind: a metadata write is a non-append op -- flush the
+    // staged run FIRST (the staged bytes are older; a truncate must land
+    // after them), then STOP staging on this priv (a size change moves the
+    // file end, so the append anchor is no longer known).
+    if (p->wb_eligible) {
+        int fe = 0;
+        spin_lock(&p->wb_lock);
+        if (p->wb_len) fe = wb_flush_locked(p, c->qid.path);
+        p->wb_known    = false;
+        p->wb_eligible = false;
+        spin_unlock(&p->wb_lock);
+        if (fe != 0) return fe;
+    }
     struct p9_setattr sa;
     for (size_t i = 0; i < sizeof(sa); i++) ((u8 *)&sa)[i] = 0;
     sa.valid = valid;        // T_WSTAT_* == P9_SETATTR_* (pinned below)

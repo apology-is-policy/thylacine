@@ -37,20 +37,23 @@
 // 2^39 - 0x80000 = ~512 GiB headroom before bit 39 carries; we stay
 // well clear at 16 GiB max.
 //
-// Mask preserves bits 33..22 = 12 bits = 4096 distinct 4 MiB-aligned
+// Mask preserves bits 33..23 = 11 bits = 2048 distinct 8 MiB-aligned
 // offsets in [0, 16 GiB). Conservative compared to ARCH §6.2's
 // allowable 32 TiB range, but a comfortable balance of entropy and
 // table-builder simplicity (single L0 entry, dynamic L1/L2 indices).
 //
-// P5-kernel-l3-4mib: the slide is 4 MiB-aligned (was 2 MiB). The kernel
-// image is mapped page-grained across a 4 MiB region (two contiguous L3
-// tables — mmu.c); a 4 MiB-aligned base keeps that region inside a
-// single 1 GiB L2 table, so the two 2 MiB L2 entries are always
+// P5-kernel-l3-4mib made the slide 4 MiB-aligned (was 2 MiB) when the
+// UBSan image crossed the 2 MiB L3 window; the F1 write-behind chunk
+// repeats the move at 8 MiB (the UBSan image crossed 4 MiB). The kernel
+// image is mapped page-grained across an 8 MiB region (KERNEL_L3_TABLES
+// contiguous L3 tables — mmu.c); an 8 MiB-aligned base keeps that region
+// inside a single 1 GiB L2 table, so its 2 MiB L2 entries are always
 // consecutive in one l2_ttbr1 table — no straddle special-case at boot.
-// The cost is one bit of slide entropy (8192 -> 4096 positions); 12 bits
-// over a 16 GiB window remains strong kernel-base randomization (I-16).
-#define KASLR_OFFSET_MASK   0x3FFC00000ull  // 16 GiB - 4 MiB, 4 MiB aligned
-#define KASLR_ALIGN_BITS    22              // 4 MiB alignment
+// The cumulative cost is two bits of slide entropy (8192 -> 2048
+// positions); 11 bits over a 16 GiB window remains strong kernel-base
+// randomization (I-16: the slide is never zero and never predictable).
+#define KASLR_OFFSET_MASK   0x3FF800000ull  // 16 GiB - 8 MiB, 8 MiB aligned
+#define KASLR_ALIGN_BITS    23              // 8 MiB alignment
 
 // Source of the seed used. Surfaced in the boot banner for diagnostic
 // purposes (so a developer can tell whether high-entropy DTB seed or

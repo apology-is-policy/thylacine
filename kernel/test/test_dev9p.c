@@ -25,6 +25,8 @@
 #include <thylacine/caps.h>
 #include <thylacine/handle.h>
 
+#include "../../mm/slub.h"             // kmalloc (the wb heap scratch)
+
 void test_dev9p_registered(void);
 void test_dev9p_attach_client_root_spoor(void);
 void test_dev9p_walk_one_component(void);
@@ -46,6 +48,14 @@ void test_dev9p_page_cache_serve_and_gate(void);
 void test_dev9p_cached_open(void);
 void test_dev9p_cached_open_fallbacks(void);
 void test_dev9p_cached_open_loose(void);
+void test_dev9p_wb_coalesce_one_twrite(void);
+void test_dev9p_wb_overlay_read(void);
+void test_dev9p_wb_flush_at_close(void);
+void test_dev9p_wb_fsync_flush_and_error(void);
+void test_dev9p_wb_nonappend_writethrough(void);
+void test_dev9p_wb_fstat_staged_size(void);
+void test_dev9p_wb_cap_flush(void);
+void test_dev9p_wb_budget_fallback(void);
 
 // File-scope buffers — client is ~80 KiB (the embedded Larder attr+dentry+page
 // metadata), won't fit on the 16 KiB test thread stack alongside a few locals.
@@ -89,6 +99,50 @@ static u32 g_tread_clamp_once;  // != 0: the NEXT big-file Tread short-returns
 // dev9p_walk_attrs must leave nc untouched.
 static bool g_dev9p_wga_partial;
 
+// F1 write-behind: wire-op counters, sequencing, payload capture + fault
+// injection for the wb_* tests. g_wire_seq bumps on EVERY request the
+// responder sees; the per-op last_seq captures let a test assert ordering
+// (the flush Twrite must precede the close Tclunk / the fsync Tfsync).
+static u32  g_wire_seq;
+static u32  g_twrite_seen;
+static u32  g_twrite_last_seq, g_clunk_last_seq, g_tfsync_last_seq;
+static u32  g_twrite_fail_ecode;     // != 0: the NEXT Twrite answers Rlerror(ecode), then clears
+static u8  *g_twrite_cap_buf;        // payload capture of the LAST Twrite (heap, 8 KiB)
+#define WB_CAP_BUF_SZ 8192u
+static u32  g_twrite_cap_len;
+static u64  g_twrite_cap_off;
+static u64  g_twrite_off_log[8];     // offsets of the first 8 Twrites since reset
+static u32  g_twrite_log_n;
+static bool g_twrite_pat_on;         // verify every payload byte == wb_pat(off+i)
+static bool g_twrite_pat_ok;
+static u64  g_twrite_total;          // accumulated payload bytes since reset
+
+static u8 wb_pat(u64 o) { return (u8)((o * 29u) ^ (o >> 7) ^ 0xA5u); }
+
+// Shared heap scratch for the wb_* tests (32 KiB -- the largest single write
+// they stage). Heap, not static: the kernel image's L3 window is finite and
+// the UBSan build sits near it; tests run serially so sharing is safe.
+static u8 *wb_scratch(void) {
+    static u8 *s;
+    if (!s) s = kmalloc(32768, 0);
+    return s;
+}
+
+static void wb_wire_reset(void) {
+    if (!g_twrite_cap_buf) g_twrite_cap_buf = kmalloc(WB_CAP_BUF_SZ, 0);
+    g_wire_seq = 0;
+    g_twrite_seen = 0;
+    g_twrite_last_seq = g_clunk_last_seq = g_tfsync_last_seq = 0;
+    g_twrite_fail_ecode = 0;
+    g_twrite_cap_len = 0;
+    g_twrite_cap_off = 0;
+    g_twrite_log_n = 0;
+    g_twrite_pat_on = false;
+    g_twrite_pat_ok = true;
+    g_twrite_total = 0;
+    g_tread_seen = 0;
+}
+
 // FID-LIFECYCLE cached-open: wire-op counters (which ops actually hit the
 // wire -- the fidless open's whole point is Tlopen/Tclunk NEVER do) + shape
 // overrides on the Rwalkgetattr body so tests can drive the leaf's size /
@@ -108,6 +162,7 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
     if (req_len < P9_HDR_LEN) return -1;
     u32 size; u8 type; u16 tag;
     if (p9_peek_header(req, req_len, &size, &type, &tag) < 0) return -1;
+    g_wire_seq++;   // F1 wb ordering witness (every request bumps)
 
     if (type == P9_TVERSION) {
         size_t total = P9_HDR_LEN + 4 + 2 + 8;
@@ -158,6 +213,7 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
     }
     if (type == P9_TCLUNK) {
         g_clunk_seen++;
+        g_clunk_last_seq = g_wire_seq;   // F1 wb ordering witness
         // Empty body.
         if (resp_cap < P9_HDR_LEN) return -1;
         resp[0] = 7; resp[1] = 0; resp[2] = 0; resp[3] = 0;
@@ -230,6 +286,35 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
                   | ((u32)req[P9_HDR_LEN + 4 + 8 + 1] << 8)
                   | ((u32)req[P9_HDR_LEN + 4 + 8 + 2] << 16)
                   | ((u32)req[P9_HDR_LEN + 4 + 8 + 3] << 24);
+        // F1 wb witnesses: count + seq + offset log + payload capture /
+        // pattern verify + the fail-once injection (payload at req+23).
+        g_twrite_seen++;
+        g_twrite_last_seq = g_wire_seq;
+        if (g_twrite_log_n < 8) g_twrite_off_log[g_twrite_log_n++] = g_twrite_req_offset;
+        if (g_twrite_fail_ecode) {
+            u32 ec = g_twrite_fail_ecode;
+            g_twrite_fail_ecode = 0;
+            size_t etotal = P9_HDR_LEN + 4;
+            if (resp_cap < etotal) return -1;
+            resp[0] = 11; resp[1] = 0; resp[2] = 0; resp[3] = 0;
+            resp[4] = P9_RLERROR;
+            resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+            resp[7] = (u8)(ec & 0xff);        resp[8] = (u8)((ec >> 8) & 0xff);
+            resp[9] = (u8)((ec >> 16) & 0xff); resp[10] = (u8)((ec >> 24) & 0xff);
+            return (int)etotal;
+        }
+        if (g_twrite_cap_buf && count <= WB_CAP_BUF_SZ &&
+            req_len >= (size_t)23 + count) {
+            for (u32 i = 0; i < count; i++) g_twrite_cap_buf[i] = req[23 + i];
+            g_twrite_cap_len = count;
+            g_twrite_cap_off = g_twrite_req_offset;
+        }
+        if (g_twrite_pat_on && req_len >= (size_t)23 + count) {
+            for (u32 i = 0; i < count && g_twrite_pat_ok; i++)
+                if (req[23 + i] != wb_pat(g_twrite_req_offset + i))
+                    g_twrite_pat_ok = false;
+        }
+        g_twrite_total += count;
         size_t total = P9_HDR_LEN + 4;
         if (resp_cap < total) return -1;
         resp[0] = 11; resp[1] = 0; resp[2] = 0; resp[3] = 0;
@@ -268,6 +353,7 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         return (int)total;
     }
     if (type == P9_TFSYNC) {
+        g_tfsync_last_seq = g_wire_seq;   // F1 wb ordering witness
         // Rfsync = header only (empty body).
         if (resp_cap < P9_HDR_LEN) return -1;
         resp[0] = 7; resp[1] = 0; resp[2] = 0; resp[3] = 0;
@@ -1905,4 +1991,332 @@ void test_dev9p_cached_open_fallbacks(void) {
     larder_destroy(l);
     __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
     teardown(root);
+}
+
+// =============================================================================
+// F1 write-behind (LARDER-DESIGN section 12): the wb_* suite. Every test
+// runs on a LOOSE + cacheable client (the staging gate); the wire witnesses
+// (g_twrite_seen / seq ordering / payload capture / pattern verify) prove
+// what actually crossed vs what was staged.
+// =============================================================================
+
+// Mint a loose+cacheable client + root and create `wbfile` opened OWRITE
+// (the create-born eligibility path). Returns the opened Spoor via *out;
+// the caller clunks it, then teardown(root).
+static struct Spoor *wb_make_created(struct Spoor **out_root) {
+    struct Spoor *root = make_open_client_and_root();
+    if (!root) return NULL;
+    g_client.loose = true;
+    __atomic_store_n(&g_client.cacheable, true, __ATOMIC_RELAXED);
+    struct Spoor *nc = spoor_clone(root);
+    if (!nc) { teardown(root); return NULL; }
+    struct Walkqid *w = dev9p.walk(root, nc, NULL, 0);
+    if (!w) { spoor_clunk(nc); teardown(root); return NULL; }
+    walkqid_free(w);
+    struct Spoor *opened = dev9p.create(nc, "wbfile", 1 /*OWRITE*/, 0644u, 1000u);
+    if (!opened) { spoor_clunk(nc); teardown(root); return NULL; }
+    *out_root = root;
+    return opened;   // == nc, transitioned to the created file
+}
+
+static void wb_test_end(struct Spoor *root) {
+    g_client.loose = false;
+    __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
+    teardown(root);
+}
+
+// N small appends stage wire-free; close flushes them as ONE Twrite whose
+// payload is the exact concatenation, ordered BEFORE the Tclunk; the global
+// budget balances back to baseline. Also pins the strict-mount non-regression:
+// on a non-loose client the same create+write goes straight through.
+void test_dev9p_wb_coalesce_one_twrite(void) {
+    // (a) strict client: write-through, byte-identical to pre-F1.
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root (strict)");
+    struct Spoor *nc = spoor_clone(root);
+    struct Walkqid *w = dev9p.walk(root, nc, NULL, 0);
+    TEST_ASSERT(w != NULL, "clone-walk (strict)");
+    walkqid_free(w);
+    struct Spoor *f = dev9p.create(nc, "wbfile", 1, 0644u, 1000u);
+    TEST_ASSERT(f != NULL, "create (strict)");
+    struct dev9p_priv *fp = dev9p_priv_of(f);
+    TEST_ASSERT(fp != NULL && !fp->wb_eligible, "strict client: NOT wb-eligible");
+    wb_wire_reset();
+    u8 b[64];
+    for (u32 i = 0; i < sizeof(b); i++) b[i] = wb_pat(i);
+    TEST_EXPECT_EQ((u64)dev9p.write(f, b, 64, 0), 64ull, "strict write ok");
+    TEST_EXPECT_EQ((u64)g_twrite_seen, 1ull, "strict client: write-through");
+    spoor_clunk(f);
+    teardown(root);
+
+    // (b) loose client: 4 appends stage; close coalesces to ONE Twrite.
+    root = NULL;
+    f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create (loose)");
+    fp = dev9p_priv_of(f);
+    TEST_ASSERT(fp != NULL && fp->wb_eligible, "create-born wb-eligible");
+    u64 budget0 = dev9p_wb_budget_used();
+    wb_wire_reset();
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 c = 0; c < 4; c++) {
+        for (u32 i = 0; i < 1000; i++) chunk[i] = wb_pat((u64)c * 1000u + i);
+        TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 1000, (s64)((u64)c * 1000u)),
+                       1000ull, "staged write returns count");
+    }
+    TEST_EXPECT_EQ((u64)g_twrite_seen, 0ull, "4 appends: ZERO wire writes");
+    TEST_ASSERT(dev9p_wb_budget_used() > budget0, "staged bytes charged");
+    g_twrite_pat_on = true;
+    spoor_clunk(f);   // close: flush + async clunk
+    TEST_EXPECT_EQ((u64)g_twrite_seen, 1ull, "close: ONE coalesced Twrite");
+    TEST_EXPECT_EQ(g_twrite_cap_off, 0ull, "flush lands at offset 0");
+    TEST_EXPECT_EQ((u64)g_twrite_cap_len, 4000ull, "flush carries all 4000 bytes");
+    TEST_ASSERT(g_twrite_pat_ok, "payload == the exact concatenation");
+    TEST_ASSERT(g_clunk_seen >= 1 && g_twrite_last_seq < g_clunk_last_seq,
+                "the flush Twrite precedes the Tclunk");
+    TEST_EXPECT_EQ(dev9p_wb_budget_used(), budget0, "budget balanced at close");
+    wb_test_end(root);
+}
+
+// Reads on the staging fd: within the run = staged bytes wire-free (short to
+// the run end); below the run (after a flush advanced the anchor) = the
+// normal wire path; past the run end = falls through to the wire (never a
+// synthesized EOF).
+void test_dev9p_wb_overlay_read(void) {
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 1000; i++) chunk[i] = wb_pat(i);
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 1000, 0), 1000ull, "stage [0,1000)");
+    wb_wire_reset();
+    // Within: served from the buffer, no wire.
+    u8 rb[400];
+    long got = dev9p.read(f, rb, 400, 500);
+    TEST_EXPECT_EQ((u64)got, 400ull, "within-run read serves 400");
+    bool ok = true;
+    for (u32 i = 0; i < 400 && ok; i++)
+        if (rb[i] != wb_pat(500u + i)) ok = false;
+    TEST_ASSERT(ok, "within-run bytes == staged content");
+    TEST_EXPECT_EQ((u64)g_tread_seen + (u64)g_twrite_seen, 0ull,
+                   "within-run read is fully wire-free");
+    // Spanning: starts within, short-returns at the run end.
+    got = dev9p.read(f, rb, 400, 800);
+    TEST_EXPECT_EQ((u64)got, 200ull, "spanning read shorts at the run end");
+    // Past the run end: falls through to the wire (the responder answers;
+    // the point is it ASKED rather than synthesizing 0).
+    wb_wire_reset();
+    (void)dev9p.read(f, rb, 16, 4096);
+    TEST_EXPECT_EQ((u64)g_tread_seen, 1ull, "past-run read consults the wire");
+    // Flush via fsync, then stage a second run [1000,2000): a below-run read
+    // now goes to the wire, a within-run read still serves staged.
+    wb_wire_reset();
+    TEST_EXPECT_EQ((u64)dev9p.fsync(f, 0), 0ull, "fsync flushes");
+    TEST_EXPECT_EQ((u64)g_twrite_seen, 1ull, "fsync: one flush Twrite");
+    for (u32 i = 0; i < 1000; i++) chunk[i] = wb_pat(1000u + i);
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 1000, 1000), 1000ull,
+                   "post-flush append re-stages (anchor advanced)");
+    wb_wire_reset();
+    got = dev9p.read(f, rb, 100, 100);   // below the new run
+    TEST_ASSERT(g_tread_seen >= 1, "below-run read consults the wire");
+    wb_wire_reset();
+    got = dev9p.read(f, rb, 100, 1500);  // within the new run
+    TEST_EXPECT_EQ((u64)got, 100ull, "new-run read serves staged");
+    TEST_EXPECT_EQ((u64)g_tread_seen, 0ull, "…wire-free");
+    ok = true;
+    for (u32 i = 0; i < 100 && ok; i++)
+        if (rb[i] != wb_pat(1500u + i)) ok = false;
+    TEST_ASSERT(ok, "new-run bytes correct");
+    spoor_clunk(f);
+    wb_test_end(root);
+}
+
+// The OTRUNC-open eligibility twin: an existing file opened OWRITE|OTRUNC on
+// a loose client stages; close flushes BEFORE the Tclunk.
+void test_dev9p_wb_flush_at_close(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    g_client.loose = true;
+    __atomic_store_n(&g_client.cacheable, true, __ATOMIC_RELAXED);
+    struct Spoor *nc = spoor_clone(root);
+    const char *names[1] = { "fileA" };
+    struct Walkqid *w = dev9p.walk(root, nc, names, 1);
+    TEST_ASSERT(w != NULL && w->nqid == 1, "walk to fileA");
+    walkqid_free(w);
+    struct Spoor *o = dev9p.open(nc, 1 | 0x10 /*OWRITE|OTRUNC*/);
+    TEST_ASSERT(o != NULL, "OTRUNC open");
+    struct dev9p_priv *op = dev9p_priv_of(o);
+    TEST_ASSERT(op != NULL && op->wb_eligible, "OTRUNC-born wb-eligible");
+    wb_wire_reset();
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 512; i++) chunk[i] = wb_pat(i);
+    TEST_EXPECT_EQ((u64)dev9p.write(o, chunk, 512, 0), 512ull, "stage");
+    TEST_EXPECT_EQ((u64)g_twrite_seen, 0ull, "staged, not wired");
+    g_twrite_pat_on = true;
+    spoor_clunk(o);
+    TEST_EXPECT_EQ((u64)g_twrite_seen, 1ull, "close flushes ONE Twrite");
+    TEST_ASSERT(g_twrite_pat_ok && g_twrite_cap_len == 512,
+                "flush payload correct");
+    TEST_ASSERT(g_twrite_last_seq < g_clunk_last_seq,
+                "flush precedes the Tclunk (the fid was live)");
+    g_client.loose = false;
+    __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
+    teardown(root);
+}
+
+// fsync flushes then Tfsyncs (ordered); a flush failure surfaces on fsync,
+// LATCHES (subsequent write + fsync return it), drops the run, and close
+// emits no further Twrite.
+void test_dev9p_wb_fsync_flush_and_error(void) {
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 256; i++) chunk[i] = wb_pat(i);
+    wb_wire_reset();
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 256, 0), 256ull, "stage");
+    TEST_EXPECT_EQ((u64)dev9p.fsync(f, 0), 0ull, "fsync ok");
+    TEST_EXPECT_EQ((u64)g_twrite_seen, 1ull, "fsync flushed the run");
+    TEST_ASSERT(g_tfsync_last_seq > g_twrite_last_seq,
+                "the flush Twrite precedes the Tfsync");
+    // Stage again; inject a one-shot ENOSPC on the flush Twrite.
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 256, 256), 256ull, "re-stage");
+    g_twrite_fail_ecode = 28;   // ENOSPC
+    long fe = dev9p.fsync(f, 0);
+    TEST_EXPECT_EQ((u64)(-fe), 28ull, "fsync surfaces the flush ENOSPC");
+    // Latched: write + fsync keep returning it; the run is dropped.
+    TEST_EXPECT_EQ((u64)(-dev9p.write(f, chunk, 256, 512)), 28ull,
+                   "subsequent write returns the latched errno");
+    fe = dev9p.fsync(f, 0);
+    TEST_EXPECT_EQ((u64)(-fe), 28ull, "subsequent fsync returns the latch");
+    u32 tw_before_close = g_twrite_seen;
+    spoor_clunk(f);
+    TEST_EXPECT_EQ((u64)g_twrite_seen, (u64)tw_before_close,
+                   "close emits no Twrite (the run was dropped)");
+    wb_test_end(root);
+}
+
+// A non-append write (the Go buildid interior pwrite) flushes the staged run
+// FIRST, then writes through -- two Twrites in old-bytes-first order. A wstat
+// on the staging fd also flushes first and stops staging.
+void test_dev9p_wb_nonappend_writethrough(void) {
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 1000; i++) chunk[i] = wb_pat(i);
+    wb_wire_reset();
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 1000, 0), 1000ull, "stage [0,1000)");
+    u8 hdr[4] = { 0xde, 0xad, 0xbe, 0xef };
+    TEST_EXPECT_EQ((u64)dev9p.write(f, hdr, 4, 0), 4ull, "interior pwrite");
+    TEST_EXPECT_EQ((u64)g_twrite_seen, 2ull, "flush THEN the through-write");
+    TEST_ASSERT(g_twrite_log_n == 2 &&
+                g_twrite_off_log[0] == 0 && g_twrite_off_log[1] == 0,
+                "order: the 1000-byte flush first, the 4-byte patch second");
+    TEST_EXPECT_EQ((u64)g_twrite_cap_len, 4ull, "the LAST Twrite is the patch");
+    // The anchor survived (both completed ops end at/below 1000): a cursor
+    // append at 1000 stages again.
+    wb_wire_reset();
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 500, 1000), 500ull, "re-stage");
+    TEST_EXPECT_EQ((u64)g_twrite_seen, 0ull, "…wire-free");
+    // wstat flushes the new run + stops staging on this priv.
+    TEST_EXPECT_EQ((u64)dev9p.wstat_native(f, T_WSTAT_MODE, 0600u, 0, 0), 0ull,
+                   "wstat ok");
+    TEST_EXPECT_EQ((u64)g_twrite_seen, 1ull, "wstat flushed the run first");
+    struct dev9p_priv *fp = dev9p_priv_of(f);
+    TEST_ASSERT(fp != NULL && !fp->wb_eligible, "wstat stops staging");
+    wb_wire_reset();
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 100, 1500), 100ull, "post-wstat write");
+    TEST_EXPECT_EQ((u64)g_twrite_seen, 1ull, "…goes straight through");
+    spoor_clunk(f);
+    wb_test_end(root);
+}
+
+// fstat on the staging fd patches size = max(server view, the run's end) --
+// on BOTH the larder-serve and the wire-fetch stat paths.
+void test_dev9p_wb_fstat_staged_size(void) {
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 1536; i++) chunk[i] = wb_pat(i);
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 1536, 0), 1536ull, "stage 1536");
+    // First stat: wire getattr (the canonical body reports size 0x200=512),
+    // patched to the staged end.
+    struct t_stat st;
+    TEST_EXPECT_EQ((u64)dev9p.stat_native(f, &st), 0ull, "fstat (wire path)");
+    TEST_EXPECT_EQ(st.size, 1536ull, "size patched to the staged end");
+    // Second stat: larder-served (installed by the first), same patch.
+    TEST_EXPECT_EQ((u64)dev9p.stat_native(f, &st), 0ull, "fstat (serve path)");
+    TEST_EXPECT_EQ(st.size, 1536ull, "served size patched too");
+    spoor_clunk(f);
+    wb_test_end(root);
+}
+
+// Reaching DEV9P_WB_CAP flushes the whole run inline and staging continues;
+// every payload byte that crosses the wire matches the written pattern, and
+// close drains the tail. The msize-clamped flush chunks are the CF-3 short-
+// write loop in action.
+void test_dev9p_wb_cap_flush(void) {
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    u64 budget0 = dev9p_wb_budget_used();
+    u8 *big = wb_scratch();
+    TEST_ASSERT(big != NULL, "scratch");
+    wb_wire_reset();
+    g_twrite_pat_on = true;
+    // 8 x 32 KiB fill the run to exactly DEV9P_WB_CAP -- all staged.
+    for (u32 c = 0; c < 8; c++) {
+        u64 base = (u64)c * 32768u;
+        for (u32 i = 0; i < 32768u; i++) big[i] = wb_pat(base + i);
+        TEST_EXPECT_EQ((u64)dev9p.write(f, big, 32768, (s64)base), 32768ull,
+                       "staged 32 KiB append");
+    }
+    TEST_EXPECT_EQ((u64)g_twrite_seen, 0ull, "256 KiB staged, zero wire");
+    // The 9th write overflows the cap: the run flushes inline (msize-clamped
+    // chunks), then the write stages into the emptied run.
+    u64 base9 = 8ull * 32768u;
+    for (u32 i = 0; i < 32768u; i++) big[i] = wb_pat(base9 + i);
+    TEST_EXPECT_EQ((u64)dev9p.write(f, big, 32768, (s64)base9), 32768ull,
+                   "9th append triggers the cap flush + stages");
+    TEST_ASSERT(g_twrite_seen >= 32, "the cap flush crossed as msize chunks");
+    TEST_EXPECT_EQ(g_twrite_total, 262144ull, "exactly the 256 KiB flushed");
+    TEST_ASSERT(g_twrite_pat_ok, "every wire byte matches the pattern");
+    u32 tw_after_cap = g_twrite_seen;
+    spoor_clunk(f);   // drains the staged 9th chunk
+    TEST_ASSERT(g_twrite_seen > tw_after_cap, "close drained the tail");
+    TEST_EXPECT_EQ(g_twrite_total, 294912ull, "all 9 x 32 KiB on the wire");
+    TEST_ASSERT(g_twrite_pat_ok, "tail bytes match too");
+    TEST_EXPECT_EQ(dev9p_wb_budget_used(), budget0, "budget balanced");
+    wb_test_end(root);
+}
+
+// Budget exhaustion degrades to write-through (the strict-mount behavior),
+// and recovery is automatic once the budget frees: the through-write advanced
+// the anchor, so the next append stages.
+void test_dev9p_wb_budget_fallback(void) {
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 1000; i++) chunk[i] = wb_pat(i);
+    dev9p_wb_budget_bias_for_test((s64)DEV9P_WB_BUDGET);   // exhaust
+    wb_wire_reset();
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 1000, 0), 1000ull,
+                   "over-budget write still succeeds");
+    TEST_EXPECT_EQ((u64)g_twrite_seen, 1ull, "…as a write-through");
+    dev9p_wb_budget_bias_for_test(-(s64)DEV9P_WB_BUDGET);  // release
+    wb_wire_reset();
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 1000, 1000), 1000ull,
+                   "post-release append (the through-write advanced the anchor)");
+    TEST_EXPECT_EQ((u64)g_twrite_seen, 0ull, "…stages again");
+    spoor_clunk(f);
+    wb_test_end(root);
 }

@@ -967,6 +967,14 @@ void test_dev9p_read_eof_attr_served(void);
 void test_dev9p_cached_open(void);
 void test_dev9p_cached_open_fallbacks(void);
 void test_dev9p_cached_open_loose(void);
+void test_dev9p_wb_coalesce_one_twrite(void);
+void test_dev9p_wb_overlay_read(void);
+void test_dev9p_wb_flush_at_close(void);
+void test_dev9p_wb_fsync_flush_and_error(void);
+void test_dev9p_wb_nonappend_writethrough(void);
+void test_dev9p_wb_fstat_staged_size(void);
+void test_dev9p_wb_cap_flush(void);
+void test_dev9p_wb_budget_fallback(void);
 void test_dev9p_perm_enforced_deny_allow(void);
 void test_p9_attached_create_destroy(void);
 void test_p9_attached_handshake_failure_returns_null(void);
@@ -2339,6 +2347,14 @@ struct test_case g_tests[] = {
     { "dev9p.cached_open",             test_dev9p_cached_open,                 false, NULL },
     { "dev9p.cached_open_fallbacks",   test_dev9p_cached_open_fallbacks,       false, NULL },
     { "dev9p.cached_open_loose",       test_dev9p_cached_open_loose,           false, NULL },
+    { "dev9p.wb_coalesce_one_twrite",  test_dev9p_wb_coalesce_one_twrite,      false, NULL },
+    { "dev9p.wb_overlay_read",         test_dev9p_wb_overlay_read,             false, NULL },
+    { "dev9p.wb_flush_at_close",       test_dev9p_wb_flush_at_close,           false, NULL },
+    { "dev9p.wb_fsync_flush_and_error", test_dev9p_wb_fsync_flush_and_error,   false, NULL },
+    { "dev9p.wb_nonappend_writethrough", test_dev9p_wb_nonappend_writethrough, false, NULL },
+    { "dev9p.wb_fstat_staged_size",    test_dev9p_wb_fstat_staged_size,        false, NULL },
+    { "dev9p.wb_cap_flush",            test_dev9p_wb_cap_flush,                false, NULL },
+    { "dev9p.wb_budget_fallback",      test_dev9p_wb_budget_fallback,          false, NULL },
     { "dev9p.perm_enforced_deny_allow",
                                        test_dev9p_perm_enforced_deny_allow, false, NULL },
     { "p9_attached.create_destroy",    test_p9_attached_create_destroy,    false, NULL },

@@ -48,6 +48,7 @@
 #define THYLACINE_DEV9P_H
 
 #include <thylacine/types.h>
+#include <thylacine/spinlock.h>  // spin_lock_t (the write-behind wb_lock)
 #include <thylacine/syscall.h>   // struct t_stat (the cached-open co_stat field)
 
 struct p9_client;
@@ -123,6 +124,29 @@ struct dev9p_priv {
     u8                       *co_buf;
     u64                       co_size;
     struct t_stat             co_stat;
+    // F1 write-behind (LARDER-DESIGN section 12): the per-open-file append-run
+    // staging state. wb_lock is a PURE LEAF (only byte copies + state reads
+    // under it -- wire I/O never; nothing else is ever acquired under it).
+    // The run is the single contiguous byte range [wb_off, wb_off + wb_len)
+    // held in wb_buf; wb_base is the append ANCHOR (the file's known current
+    // end -- valid iff wb_known, born 0 at create/OTRUNC, advanced by
+    // completed flushes + completed write-throughs). wb_flushers counts
+    // in-flight flushes: while nonzero the run is FROZEN (no stage, no growth
+    // realloc -- a flusher reads wb_buf outside the lock) and concurrent
+    // writes go write-through; readers overlay the still-visible run.
+    // wb_err latches the first flush failure (positive errno); once set,
+    // every subsequent write/fsync on this fd returns it (the voted NFS
+    // error model) and the run is dropped.
+    spin_lock_t               wb_lock;
+    bool                      wb_eligible;  // create/OTRUNC-born + loose+cacheable plain file
+    bool                      wb_known;     // wb_base is the file's true current end
+    u32                       wb_flushers;  // in-flight flush count (freezes the run)
+    int                       wb_err;       // latched flush errno (0 = none)
+    u8                       *wb_buf;       // staged bytes (budget-charged wb_cap)
+    u32                       wb_cap;       // wb_buf allocation size
+    u32                       wb_len;       // staged byte count
+    u64                       wb_off;       // run start offset
+    u64                       wb_base;      // append anchor (valid iff wb_known)
 };
 
 // Cached-open bounds (FID-LIFECYCLE section 3.3; the CF-3 bounce-budget class --
@@ -138,6 +162,29 @@ struct dev9p_priv {
 // Diagnostics: bytes currently held by live cached-open snapshots (the global
 // budget's occupancy). Tests assert the charge/uncharge balance.
 u64 dev9p_co_budget_used(void);
+
+// Write-behind bounds (F1, LARDER-DESIGN section 12; the DEV9P_CO_* class).
+// Per-run buffer cap: two msize payloads -- steady-state staging turns the
+// measured 4-KiB write dribble into full-msize wire writes. Stage-size cap:
+// a bigger write is already wire-efficient and would stretch the copy held
+// under the priv spinlock -- it flushes the run then writes through. Global
+// outstanding-staged-bytes budget: GLOBAL, not per-Proc -- the priv crosses
+// Proc boundaries (handle_dup / rfork inheritance / the #926 close-at-exit
+// runs in whichever holder dies last), so a per-Proc charge would unbalance
+// at close-by-inheritor, exactly the DEV9P_CO_BUDGET reasoning above.
+// Exhaustion degrades to write-through (the strict-mount behavior).
+#define DEV9P_WB_CAP        (256u * 1024u)
+#define DEV9P_WB_STAGE_MAX  (32u * 1024u)
+#define DEV9P_WB_BUDGET     (8u * 1024u * 1024u)
+
+// Diagnostics: bytes currently held by live staged-run buffers (the global
+// wb budget's occupancy). Tests assert the charge/uncharge balance.
+u64 dev9p_wb_budget_used(void);
+
+// Test-only: bias the wb budget occupancy by +/-n (a signed add). Lets the
+// budget-denial fallback be exercised without minting DEV9P_WB_BUDGET worth
+// of live runs. Balanced add/subtract pairs only; never in production paths.
+void dev9p_wb_budget_bias_for_test(s64 n);
 
 #define DEV9P_PRIV_MAGIC 0x44395050u   // "D9PP" little-endian
 
