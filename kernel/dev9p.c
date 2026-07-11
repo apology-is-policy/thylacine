@@ -10,6 +10,7 @@
 #include <thylacine/9p_wire.h>
 #include <thylacine/dev.h>
 #include <thylacine/dev9p.h>
+#include <thylacine/sched.h>   // sched() -- the wb single-flight yield-wait
 #include <thylacine/page.h>
 #include <thylacine/path.h>
 #include <thylacine/spoor.h>
@@ -155,22 +156,36 @@ void dev9p_wb_budget_bias_for_test(s64 n) {
 // -- blocking 9P never under a spinlock, #360). Returns 0 or a negative
 // errno (also latched into wb_err).
 //
-// The flusher count freezes the run: while it is nonzero, stagers stand down
-// (write-through) and growth reallocation is impossible, so the out-of-lock
-// reads of the captured wb_buf cannot race a kfree/move. A concurrent
-// DUPLICATE flusher (an fsync racing a cap flush on a dup'd fd) captures the
-// same {off, total, buf} and writes identical bytes at identical offsets --
-// idempotent on the server -- and retirement checks the run is still the
-// captured one, so the second finisher's retire is a no-op. Nobody ever
-// waits: no park/wake surface, no new I-9 leg.
+// SINGLE-FLIGHT (the SA-F1 close, scripture @3c889c09): a second flush-
+// needing party (fsync / non-append write / wstat on a dup-shared fd)
+// yield-waits here until the in-flight flush retires. A DUPLICATE flush
+// would be unsound, not merely redundant: it completes while the FIRST
+// flusher's remaining chunks are still in flight, an ordering-dependent
+// through-write then lands, and the first flusher's stale residual chunks
+// silently overwrite it. The wait is the on_cpu-spin class -- a yield loop
+// bounded by the in-flight flusher's independent progress (it is parked in
+// the 9P recv and completes or death-unwinds per #811, decrementing either
+// way); no Rendez, so no park/wake surface, no single-waiter hazard, no new
+// I-9 leg. Close never reaches the wait (last-ref: no concurrent op); the
+// cap flush never does either (staging requires wb_flushers == 0).
+//
+// The flusher count freezes the run: while it is nonzero, stagers stand
+// down (write-through) and growth reallocation is impossible, so the
+// out-of-lock reads of the captured wb_buf cannot race a kfree/move.
+// Retirement re-checks the run is still the captured one (belt; with
+// single-flight no other retirer exists).
 //
 // On failure the run is DROPPED and the errno latched (the voted NFS-async
 // posture: the bytes are lost, the latch reports it via every subsequent
 // write/fsync -- retry-forever would wedge close). The buffer itself stays
-// allocated (a live duplicate flusher may still be reading it); it is freed
-// at dev9p_close.
+// allocated (freed at dev9p_close).
 static int wb_flush_locked(struct dev9p_priv *p, u64 qid_path) {
-    if (p->wb_len == 0) return 0;
+    while (p->wb_flushers != 0) {
+        spin_unlock(&p->wb_lock);
+        sched();                     // yield; the flusher owns the progress
+        spin_lock(&p->wb_lock);
+    }
+    if (p->wb_len == 0) return p->wb_err ? -(p->wb_err) : 0;
     u64 off   = p->wb_off;
     u32 total = p->wb_len;
     u8 *buf   = p->wb_buf;
@@ -238,9 +253,19 @@ static long wb_write_prepare(struct dev9p_priv *p, struct Spoor *c,
         if (!stageable) {
             if (p->wb_len == 0) {
                 // Nothing staged: plain write-through (the strict-mount
-                // behavior). Covers non-append, oversize, frozen (a flush
-                // in flight -- its captured run is older and disjoint), and
+                // behavior). Covers non-append, oversize, and
                 // never-anchored privs.
+                spin_unlock(&p->wb_lock);
+                return 0;
+            }
+            // A flush is mid-air and this write is DISJOINT from the
+            // frozen run (an append at/past the frozen end -- the common
+            // shape here -- or an interior pwrite wholly below it):
+            // order-free vs the staged bytes, so write through WITHOUT
+            // waiting (the scripture's appends-never-wait rule).
+            bool overlaps = offset < p->wb_off + (u64)p->wb_len &&
+                            offset + (u64)count > p->wb_off;
+            if (p->wb_flushers != 0 && !overlaps) {
                 spin_unlock(&p->wb_lock);
                 return 0;
             }
@@ -248,6 +273,9 @@ static long wb_write_prepare(struct dev9p_priv *p, struct Spoor *c,
             // oversize): flush FIRST so the wire sees the older staged
             // bytes before this op (the ordering rule -- an interior pwrite
             // that overlaps the run must land after it), then write through.
+            // wb_flush_locked single-flights: if another flush is mid-air
+            // this yield-waits for it, so no stale residual chunk can ever
+            // land after our through-write (the SA-F1 close).
             int fe = wb_flush_locked(p, c->qid.path);
             spin_unlock(&p->wb_lock);
             return (fe != 0) ? (long)fe : 0;
@@ -1549,8 +1577,13 @@ static int dev9p_fsync(struct Spoor *c, u32 datasync) {
     if (p->wb_eligible) {
         int fe = 0;
         spin_lock(&p->wb_lock);
-        if (p->wb_err)         fe = -(p->wb_err);
-        else if (p->wb_len)    fe = wb_flush_locked(p, c->qid.path);
+        if (p->wb_err)
+            fe = -(p->wb_err);
+        else if (p->wb_len || p->wb_flushers)
+            // A live run flushes; a run-less in-flight flush (another
+            // party's, not yet retired) is WAITED for inside -- fsync's
+            // contract needs those bytes durable before the Tfsync.
+            fe = wb_flush_locked(p, c->qid.path);
         spin_unlock(&p->wb_lock);
         if (fe != 0) return fe;
     }
