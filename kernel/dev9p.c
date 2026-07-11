@@ -1722,7 +1722,13 @@ static int dev9p_wstat_native(struct Spoor *c, u32 valid, u32 mode,
     if (p->wb_eligible) {
         int fe = 0;
         spin_lock(&p->wb_lock);
-        if (p->wb_len) fe = wb_flush_locked(p, c->qid.path);
+        // wb_len || wb_flushers: fsync-parity (the F1-audit F2 [P3]). The
+        // second disjunct is unreachable today (retire zeroes wb_len and
+        // drops the count under ONE lock hold), but a future retire-protocol
+        // change must not let a Tsetattr (a truncate) race ahead of an
+        // in-flight flush's Twrites -- the wait inside wb_flush_locked
+        // covers it either way.
+        if (p->wb_len || p->wb_flushers) fe = wb_flush_locked(p, c->qid.path);
         p->wb_known    = false;
         p->wb_eligible = false;
         spin_unlock(&p->wb_lock);
