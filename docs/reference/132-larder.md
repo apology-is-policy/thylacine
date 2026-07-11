@@ -255,12 +255,45 @@ populate. NEVER from a readdir qid (the L1a-2 rule).
 
 ## The page sub-cache (L1e)
 
-`(qid.path, page_index) → { bytes[0..valid_len), cvers }`, a 512-slot LRU table
-(`LARDER_PAGE_ENTRIES`; ~2 MiB of heap at capacity). The slot metadata is inline in
-`struct larder`; each slot's 4 KiB buffer is a **lazily-kmalloc'd heap page**,
-reused across evictions, freed only at `larder_destroy` (from `p9_client_destroy`).
-Maps to `fs_cache.tla`'s `Read` + `Open` + `OwnWrite` on content tokens — **no spec
-extension** (a page is a content token like an attr).
+`(qid.path, page_index) → { bytes[0..valid_len), cvers }`, a **32768-slot O(1) table**
+(`LARDER_PAGE_ENTRIES`; **128 MiB CEILING** of heap at capacity — lazy, so only touched
+pages allocate a buffer). Both the slot-entry array AND the per-slot 4 KiB buffers are
+**heap, lazily allocated on the first install** — so a non-cacheable client (netd)
+carries neither, and the cap scales past what an inline `struct larder` member allows.
+Buffers are reused across evictions; the array, buffers, and both hashes are freed at
+`larder_destroy` (from `p9_client_destroy`). Maps to `fs_cache.tla`'s `Read` + `Open` +
+`OwnWrite` on content tokens — **no spec extension** (a page is a content token like an
+attr).
+
+**The index (task #25, O(1) at scale; the qid_path secondary index, task #29).** A
+**chained hash** keyed `(qid.path, page_index)` (`page_hash` buckets, an intrusive
+`hnext` chain per slot) gives O(1) `page_find`; a **free-cursor** (`page_used`) fills
+fresh slots O(1); a **CLOCK second-chance** hand (`page_hand` + a per-slot `ref` bit)
+evicts O(1)-amortized once full. A SECOND hash — `page_qhash`, keyed by `qid.path`
+ALONE, with an intrusive `qnext` chain — makes `larder_page_invalidate` **O(pages-of-
+file)** instead of O(`page_cap`): every page of one file shares one qbucket, so an
+own-write walks only that file's pages (+ hash collisions), never the whole cap (the F3
+fix — see below). The load-bearing invariant is that **a slot is in `page_qhash` IFF it
+is in `page_hash`** (linked/unlinked in lockstep at every install / victim-reuse /
+buffer-OOM / invalidate site). The prior 512-slot design used an inline array with O(N)
+sequential-scan find/evict — which does not scale. The coherence contract (gen-guard /
+cvers / own-write invalidate / serve-copy-under-lock) is byte-identical to the O(N) L1e
+— only the index + eviction mechanics changed; all 13 page tests pass.
+
+**Sizing + what it buys (measured 2026-07-10; task #29 re-measure).** 8192 slots
+(32 MiB) THRASHED the go-build read working set — build2-warm **pe=12119** evictions,
+gofmt-cold pe=18733 — because a Go build reads the package archives **SEQUENTIALLY** (an
+LRU-hostile scan, NOT the Zipf hot-subset the 8192 note assumed): the cache helps only
+once it holds the WHOLE working set. Sizing to hold it (build2 ~20k pages, gofmt-cold
+~27k) drove **pe → 0** on every window — a **COMPOUND** win: (a) reads hit (build2 read
+RTs 2489 → ~980) AND (b) cached-open **coverage** now passes (pages stay resident to the
+next open) so cached-open MINTs jumped 3.6× (396 → ~1440) and its `hcover` fallback
+collapsed −88% (1185 → ~144), cutting the fid lifecycle too. Warm floor: build2
+605 → ~510 ms, gofmt 805 → ~663 ms (both ~−16-18 %); gofmt-cold 2221 → ~2060 ms (−7 %).
+The knee is ~27k (gofmt-cold); 32768 is the pow2 above it with margin. **A real project
+larger than gofmt re-thrashes** → a memory-pressure-adaptive cap (a shrinker) is the
+v1.x design (Thylacine has no reclaim framework yet); buffers stay resident until
+`larder_destroy` (mount teardown) — the v1.0 no-reclaim window, bounded per client.
 
 **The cacheability gate (§3.3, the load-bearing L1e addition).** The page cache
 caches file CONTENT, so it engages ONLY for a `cacheable` client (`p9_client.cacheable`
@@ -286,9 +319,18 @@ page holds `[0, valid_len)` with no hole; an unaligned read's partial-front page
 skipped. `cvers = c->qid.vers`; gen-guarded by the `seq0` snapshot from the serve
 miss (skips a fill that raced an own-write — the resurrection close).
 
-**Invalidate.** `dev9p_write` drops every cached page of the file
-(`larder_page_invalidate` by `qid.path`) + bumps gen, so the guest sees its own
-write strongly. (A whole-file drop, not per-range — sound; a precise invalidate is
+**Invalidate (O(pages-of-file), the F3 fix — task #29).** `dev9p_write` drops every
+cached page of the file (`larder_page_invalidate` by `qid.path`) + bumps gen, so the
+guest sees its own write strongly. It walks ONLY the file's `page_qhash` qbucket chain
+(every page of `qid.path` hashes there), splicing each matching valid slot out of BOTH
+indexes and marking it `!valid` (buffer retained for reuse) — **O(pages-of-file + qbucket
+collisions), independent of `page_cap`**. A `!valid` same-`qid.path` slot (a fresh
+install mid-copy) is left linked: the gen bump makes its install's `seq0` guard skip
+(the resurrection close), and CLOCK reclaims it later (unlinking both). A collision from
+another file (`qid.path` mismatch) is skipped, staying linked. Before task #29 this was
+an O(`page_cap`) full-array scan per own-write — tolerable at 8192 but a ~193M-scan tax
+at 32768 on the write-heavy cold path; the qid_path index is what makes the large cap
+affordable. (A whole-file drop, not per-range — sound; a precise per-range invalidate is
 a v1.x tuning.)
 
 **Page-buffer lifetime (SMP).** A serve copies OUT under the lock; an evict / reuse
@@ -297,6 +339,27 @@ a v1.x tuning.)
 buffer. `kmalloc(4096)` is non-blocking (buddy `zone->lock`, a leaf below the leaf
 `l->lock` — the **`l->lock → buddy` order**), so the lazy alloc is safe under the
 lock (LARDER-DESIGN §7 anticipated this order).
+
+## The FID-LIFECYCLE re-size (attr + dentry heap + O(1) hash, 2026-07-10)
+
+The attr and dentry sub-caches moved from 256-slot INLINE linear arrays to
+4096-slot HEAP arrays with the page cache's exact O(1) index shape (chained
+hash + free-cursor fill + CLOCK second-chance eviction -- the task-#25 pattern
+replicated; `attr_*`/`dentry_*` helpers mirror the `page_*` ones). Why: the
+cached-open hint (docs/FID-LIFECYCLE-DESIGN.md section 3.3) expands the
+metadata working set from the L1c base-X-check dir set (~7 hot dirs) to EVERY
+opened file (~800+ distinct leaves per warm go build); at 256 slots the leaf
+entries evicted before re-open (measured: 86% of cached-open attempts died on
+the chain; 4096 slots -> `hchain` 1525 -> 10). Both arrays are lazily allocated
+on the first install, so a non-cacheable client (netd) allocates neither and
+`struct larder` (inline in `p9_client`) SHRANK by ~56 KiB. The coherence
+contract (gen guard / own-write invalidate / serve-copy-under-lock) is
+byte-identical; only the index + eviction mechanics changed (exact-LRU ->
+CLOCK, an approximate LRU). The dentry hash folds the component name through
+FNV-1a mixed with the parent qid; chains full-compare. `larder_destroy` frees
+all three arrays + hashes. Order-7 kmalloc caveat: both arrays are ~426/491 KiB
+contiguous allocations -- the same #25-F1 posture (an OOM skips the install,
+self-heals on a later attempt, correctness never depends on a fill).
 
 ## State / coherence properties
 
@@ -334,8 +397,12 @@ lock (LARDER-DESIGN §7 anticipated this order).
   `page_serve_miss` (gen handed back) / `page_offset` (page_off + want) /
   `page_cvers_mismatch` (the Open gate) / `page_partial` (serve within valid_len,
   miss beyond) / `page_invalidate` (OwnWrite drops all pages + bumps gen) /
-  `page_gen_guard` (the resurrection close) / `page_overwrite` (buffer reused) /
-  `page_bounded` (I-32) / `page_destroy_frees`.
+  `page_invalidate_multifile` (task #29 — the qid_path secondary index drops
+  EXACTLY the written file's pages [count == 3] and leaves another file's pages
+  intact, then re-installs into the freed slots: proves the O(pages-of-file) walk's
+  discrimination + the two-index lockstep invariant) / `page_gen_guard` (the
+  resurrection close) / `page_overwrite` (buffer reused) / `page_bounded` (I-32) /
+  `page_destroy_frees`.
 - `kernel/test/test_dev9p.c::test_dev9p_page_cache_serve_and_gate` — the L1e
   integration proof (non-vacuous: `1076/1077 FAIL` with the `dev9p_read` serve
   disabled): a cacheable client's re-read is served with NO second Tread (the

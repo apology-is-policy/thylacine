@@ -298,7 +298,43 @@ projection.
 
 ---
 
-## 6. Cross-links
+## 6. As-built (2026-07-10)
+
+**async-clunk** landed as designed (`p9_client_clunk_async`, the ownerless
+Rclunk drain via the #845 dispatch arm, `dev9p_close`'s normal path). The
+`async_clunk_tag_leak` buggy cfg extends `specs/9p_client.tla` (the clean model
+needed NO new action — SendClunk already holds the tag until ReceiveOp drains
+it, and the spec never modeled a blocking submitter; the buggy action injects
+the reply-consumed-but-tag-never-freed leak, caught by TagAndOpAccounting).
+
+**cached-open** landed per §3.3 (the snapshot refinement): `Dev.open_cached` +
+`dev9p_open_cached` (hint → forced-wire query → fresh gates → budget →
+snapshot → fidless mint) + the stalk pounce-block arm (post-scan + mount
+discard + leaf R/W on the FRESH records) + `larder_pages_cover`/`_snapshot`
+(pure readers). The wstat-on-fidless seam is DOUBLE-enforced: the dev9p
+`cached_open` guard + the session layer's I-11 `fid_bound` send gate
+independently refuse the NOFID Tsetattr.
+
+**The metadata-cache re-size (the engagement fix, measured via the DIAG23
+funnel):** the first instrumented boot showed 86% of cached-open attempts dying
+on the hint's metadata chain (`hchain=1525/1782`) — the attr + dentry caches
+were 256 slots (the L1c base-X-check sizing) against the ~800+ distinct leaves
+a warm build opens; leaf entries evicted before re-open (the #343/#25
+working-set-threshold lesson). Fix: both caches heap-allocated + O(1)
+chained-hash + CLOCK (the task-#25 page-array pattern replicated) at 4096
+slots. Post-fix funnel (build2-warm): `hchain=10`, `MINTED=396`; open RTs
+1634→1317, total RPCs 6888→5781; **build2-warm 645→613 ms and gofmt-warm
+785→727 ms — both best-ever**. The residual funnel kill is `hcover` (~1185):
+files opened but only PARTIALLY read (cmd/go buildid Preads, importer section
+reads) never reach full page coverage — the fallback is the structurally
+CORRECT disposition for them (snapshotting a 100 KiB archive to serve a
+100-byte Pread would be waste), so this residual is not a defect. `wire=0
+fresh=0 budget=0` across every boot: the hint's precision means the forced
+query is never wasted and the 8 MiB budget is never touched at this workload.
+
+---
+
+## 7. Cross-links
 
 [[project-warm-floor-decomposition]] (the measurement) ·
 [[project-go-build-clean-perf]] (the mission register) ·
