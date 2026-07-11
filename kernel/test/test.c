@@ -957,6 +957,8 @@ void test_dev9p_wstat_readonly_fd(void);
 void test_dev9p_walk_attrs(void);
 void test_dev9p_page_cache_serve_and_gate(void);
 void test_dev9p_read_align_heals_partial(void);
+void test_dev9p_read_align_short_not_eof(void);
+void test_dev9p_open_trunc_invalidates(void);
 void test_dev9p_read_eof_attr_served(void);
 void test_dev9p_cached_open(void);
 void test_dev9p_cached_open_fallbacks(void);
@@ -2323,6 +2325,8 @@ struct test_case g_tests[] = {
     { "dev9p.walk_attrs",              test_dev9p_walk_attrs,                 false, NULL },
     { "dev9p.page_cache_serve_and_gate", test_dev9p_page_cache_serve_and_gate, false, NULL },
     { "dev9p.read_align_heals_partial", test_dev9p_read_align_heals_partial,    false, NULL },
+    { "dev9p.read_align_short_not_eof", test_dev9p_read_align_short_not_eof,    false, NULL },
+    { "dev9p.open_trunc_invalidates",   test_dev9p_open_trunc_invalidates,      false, NULL },
     { "dev9p.read_eof_attr_served",     test_dev9p_read_eof_attr_served,        false, NULL },
     { "dev9p.cached_open",             test_dev9p_cached_open,                 false, NULL },
     { "dev9p.cached_open_fallbacks",   test_dev9p_cached_open_fallbacks,       false, NULL },

@@ -79,6 +79,10 @@ static u64 g_readdir_req_offset;
 static u64 g_tread_req_offset, g_twrite_req_offset;
 static u64 g_tread_seen;        // Tread RPC counter (task-#44 wire-op assertions)
 static u64 g_tread_file_size;   // != 0: the loopback serves a pattern file this big
+static u32 g_tread_clamp_once;  // != 0: the NEXT big-file Tread short-returns
+                                // at most this many bytes (a legal mid-file
+                                // short Rread -- the R-5 SA-F1 shape), then
+                                // clears. The D44-audit F1 injection knob.
 
 // POUNCE: when set, the Twalkgetattr responder answers one component SHORT
 // (a partial walk) -- the session layer must then leave newfid unbound and
@@ -188,6 +192,10 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
             u32 cnt = le32_at(req + 19);
             u64 rem = (off < g_tread_file_size) ? g_tread_file_size - off : 0;
             u32 n = (cnt < rem) ? cnt : (u32)rem;
+            if (g_tread_clamp_once) {
+                if (n > g_tread_clamp_once) n = g_tread_clamp_once;
+                g_tread_clamp_once = 0;
+            }
             size_t btotal = P9_HDR_LEN + 4 + n;
             if (resp_cap < btotal) return -1;
             resp[0] = (u8)(btotal & 0xff); resp[1] = (u8)((btotal >> 8) & 0xff);
@@ -1464,9 +1472,14 @@ void test_dev9p_read_align_heals_partial(void) {
         if (pass1[o] != (u8)((o * 131u) ^ (o >> 8))) { ok = false; break; }
     TEST_ASSERT(ok, "pass-1 bytes match the pattern (the shift is byte-exact)");
 
-    // Pass 2 (re-stream): every page serves from the cache; the ONLY wire op
-    // is the tail EOF probe (no fresh attr installed in this fixture). Pre-fix
-    // the holes persisted and the stream tail re-wired every pass.
+    // Pass 2 (re-stream): every page serves from the cache; the ONLY wire ops
+    // are the tail EOF probe (no fresh attr installed in this fixture) -- the
+    // shifted probe returns got == lead (delivered exactly up to the caller's
+    // offset), which is AMBIGUOUS between EOF and a mid-file short (the
+    // D44-audit F1 split), so the unshifted retry confirms the EOF: exactly
+    // TWO wire ops. In production a fresh attr serves the EOF with ZERO wire
+    // ops (read_eof_attr_served). Pre-fix the holes persisted and the stream
+    // tail re-wired every pass (>= 3 ops).
     u64 wires0 = g_tread_seen;
     off = 0;
     while ((n = dev9p.read(nc, buf, (long)sizeof buf, (s64)off)) > 0) {
@@ -1474,8 +1487,8 @@ void test_dev9p_read_align_heals_partial(void) {
         off += (u64)n;
     }
     TEST_EXPECT_EQ(off, (u64)FSZ, "pass 2 read the whole file");
-    TEST_EXPECT_EQ(g_tread_seen - wires0, 1ull,
-                   "pass 2 wired ONLY the EOF probe (holes healed; pages serve)");
+    TEST_EXPECT_EQ(g_tread_seen - wires0, 2ull,
+                   "pass 2 wired ONLY the EOF probe + its retry (holes healed)");
     ok = true;
     for (u64 o = 0; o < (u64)FSZ; o++)
         if (pass2[o] != pass1[o]) { ok = false; break; }
@@ -1484,6 +1497,101 @@ void test_dev9p_read_align_heals_partial(void) {
     larder_destroy(&g_client.larder);
     __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
     g_tread_file_size = 0;
+    spoor_clunk(nc);
+    teardown(root);
+}
+
+// D44-audit F1 [P1] regression: a single Rread may legitimately short-return
+// MID-FILE (the R-5 SA-F1 ground truth). If the aligned wire read's fetch
+// short-returns at/below `lead`, that is NOT an EOF -- the pre-fix arm
+// returned 0, manufacturing a false mid-file EOF that looping consumers
+// (the REVENANT cluster fill, exec's eager segment read, userspace streams)
+// treat as end-of-file. The fix retries UNSHIFTED at the caller's offset.
+void test_dev9p_read_align_short_not_eof(void) {
+    struct Spoor *root = make_open_client_and_root();
+    struct Spoor *nc = spoor_clone(root);
+    const char *name = "file";
+    struct Walkqid *w = dev9p.walk(root, nc, &name, 1);
+    walkqid_free(w);
+    dev9p.open(nc, 0);
+    enum { FSZ = 20000 };
+    g_tread_file_size = FSZ;
+    __atomic_store_n(&g_client.cacheable, true, __ATOMIC_RELAXED);
+
+    static u8 buf[16384];
+    static u8 all[FSZ];
+
+    // Read 1: the server short-returns 1500 mid-file (a legal partial Rread).
+    g_tread_clamp_once = 1500;
+    long n1 = dev9p.read(nc, buf, (long)sizeof buf, 0);
+    TEST_EXPECT_EQ((u64)n1, 1500ull, "read 1 accepts the mid-file short");
+    for (long i = 0; i < n1; i++) all[i] = buf[i];
+
+    // Read 2 at 1500 (lead=1500, wire_off=0): the shifted fetch is ALSO
+    // shorted, to 1200 <= lead. Pre-fix: return 0 = a FALSE mid-file EOF.
+    // Post-fix: the unshifted retry at 1500 returns real bytes.
+    g_tread_clamp_once = 1200;
+    long n2 = dev9p.read(nc, buf, (long)sizeof buf, 1500);
+    TEST_ASSERT(n2 > 0, "a short-below-lead fetch is NOT an EOF (the retry serves)");
+    for (long i = 0; i < n2; i++) all[1500 + i] = buf[i];
+
+    // Finish the stream; the caller must receive the WHOLE file, byte-exact.
+    u64 off = 1500 + (u64)n2; long n;
+    while ((n = dev9p.read(nc, buf, (long)sizeof buf, (s64)off)) > 0) {
+        TEST_ASSERT(off + (u64)n <= (u64)FSZ, "stream bounds");
+        for (long i = 0; i < n; i++) all[off + (u64)i] = buf[i];
+        off += (u64)n;
+    }
+    TEST_EXPECT_EQ(off, (u64)FSZ, "the stream reaches the true EOF");
+    bool ok = true;
+    for (u64 o = 0; o < (u64)FSZ; o++)
+        if (all[o] != (u8)((o * 131u) ^ (o >> 8))) { ok = false; break; }
+    TEST_ASSERT(ok, "the assembled bytes match the pattern (no zero holes)");
+
+    larder_destroy(&g_client.larder);
+    __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
+    g_tread_file_size = 0;
+    spoor_clunk(nc);
+    teardown(root);
+}
+
+// D44-audit F3 close: an OTRUNC open is an own-write (the server truncates) --
+// dev9p_open must drop the file's cached attr + pages like dev9p_write does,
+// independent of any server version-bump-on-truncate guarantee.
+void test_dev9p_open_trunc_invalidates(void) {
+    struct Spoor *root = make_open_client_and_root();
+    struct Spoor *nc = spoor_clone(root);
+    const char *name = "file";
+    struct Walkqid *w = dev9p.walk(root, nc, &name, 1);
+    walkqid_free(w);
+    dev9p.open(nc, 0);
+    g_tread_file_size = 20000;
+    __atomic_store_n(&g_client.cacheable, true, __ATOMIC_RELAXED);
+    struct larder *l = &g_client.larder;
+    u8 buf[64];
+
+    // Cache a fresh attr + page 0 for the file.
+    struct t_stat st = {0};
+    st.size = 20000; st.qid_path = nc->qid.path; st.qid_vers = nc->qid.vers;
+    larder_attr_install(l, larder_gen_snapshot(l), nc->qid.path, nc->qid.vers, &st);
+    (void)dev9p.read(nc, buf, 64, 0);            // populates nothing (<=4K, but
+    u64 fsz = 0;                                  // the attr is the assertion target)
+    TEST_ASSERT(larder_attr_fresh_size(l, nc->qid.path, nc->qid.vers, &fsz),
+                "attr cached before the OTRUNC open");
+
+    // A second walk to the same file, opened with OTRUNC (0x10): the open
+    // must invalidate the file's cached attr (and pages).
+    struct Spoor *nc2 = spoor_clone(root);
+    struct Walkqid *w2 = dev9p.walk(root, nc2, &name, 1);
+    walkqid_free(w2);
+    dev9p.open(nc2, 0x10 | 1);                    // OWRITE | OTRUNC
+    TEST_ASSERT(!larder_attr_fresh_size(l, nc->qid.path, nc->qid.vers, &fsz),
+                "OTRUNC open dropped the cached attr (own-write-through)");
+
+    larder_destroy(&g_client.larder);
+    __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
+    g_tread_file_size = 0;
+    spoor_clunk(nc2);
     spoor_clunk(nc);
     teardown(root);
 }

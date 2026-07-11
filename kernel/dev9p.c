@@ -809,6 +809,16 @@ static struct Spoor *dev9p_open(struct Spoor *c, int omode) {
     c->qid.path = qid.path;
     c->qid.vers = qid.version;
     c->qid.type = qid_type_p9_to_kernel(qid.type);
+    // OTRUNC is an own-write (the server truncated the file): drop the file's
+    // cached attr + pages like dev9p_write does, so a stale size/content can
+    // never serve regardless of whether the server bumped qid.version on the
+    // truncate (the D44-audit F3 close -- the write-through discipline must
+    // not rest on an unverified cross-project version-bump guarantee). Keyed
+    // on the POST-open qid (the server-confirmed identity of what truncated).
+    if (omode & 0x10) {
+        larder_attr_invalidate(&p->client->larder, c->qid.path);
+        larder_page_invalidate(&p->client->larder, c->qid.path);
+    }
     c->flag |= COPEN;
     c->mode  = omode;
     c->offset = 0;
@@ -1100,13 +1110,44 @@ static long dev9p_read(struct Spoor *c, void *buf, long n, s64 off) {
         }
     }
     if (lead) {
-        // The caller's bytes start `lead` into the fetched window. got <= lead
-        // means the file ends at/before the caller's offset -> EOF. The shift is
-        // a forward copy with dst < src (overlap-safe).
-        if (got <= lead) return 0;
-        u32 cgot = got - lead;
-        co_copy((u8 *)buf, (const u8 *)buf + lead, cgot);
-        return (long)cgot;
+        if (got > lead) {
+            // The caller's bytes start `lead` into the fetched window; the
+            // shift is a forward copy with dst < src (overlap-safe).
+            u32 cgot = got - lead;
+            co_copy((u8 *)buf, (const u8 *)buf + lead, cgot);
+            return (long)cgot;
+        }
+        // got == 0: the Tread at wire_off returned nothing, so the file ends
+        // at/before wire_off <= offset -- a TRUE EOF for the caller.
+        if (got == 0) return 0;
+        // 0 < got <= lead: the server short-returned BEFORE reaching the
+        // caller's offset. A single Rread may legitimately short-return
+        // mid-file (the REVENANT R-5 SA-F1 ground truth), so this is NOT an
+        // EOF determination -- returning 0 here manufactured a false mid-file
+        // EOF that a looping consumer (the REVENANT cluster fill, exec's
+        // eager segment read, a userspace stream) treats as end-of-file: the
+        // D44-audit F1 [P1] (zero-filled resident text pages / spurious exec
+        // failure / truncated reads). Retry UNSHIFTED at the caller's offset
+        // and return that verbatim (0 iff genuinely EOF). The shifted fetch's
+        // front-page heal is already installed above; the extra RPC exists
+        // only on this rare arm.
+        got = 0;
+        rc = p9_client_read(p->client, p->fid, offset, count, (u8 *)buf, &got);
+        if (rc != 0) return (long)rc;
+        // Populate the retry's coverage with the pre-D44 discipline (aligned
+        // starts only -- the unaligned front page is skipped); same seq0 gen
+        // guard.
+        if (cacheable && got > 0) {
+            u64 end = offset + (u64)got;
+            u64 ps = (offset + (LARDER_PAGE_SIZE - 1)) / LARDER_PAGE_SIZE * LARDER_PAGE_SIZE;
+            for (; ps < end; ps += LARDER_PAGE_SIZE) {
+                u64 rem  = end - ps;
+                u32 plen = (rem >= LARDER_PAGE_SIZE) ? LARDER_PAGE_SIZE : (u32)rem;
+                larder_page_install(l, seq0, c->qid.path, ps / LARDER_PAGE_SIZE,
+                                    c->qid.vers, (const u8 *)buf + (ps - offset), plen);
+            }
+        }
+        return (long)got;
     }
     return (long)got;
 }

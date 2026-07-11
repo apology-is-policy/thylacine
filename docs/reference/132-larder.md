@@ -369,11 +369,18 @@ shifted forward (`co_copy`, dst < src, overlap-safe) and returned as a legal
 SHORT read. Each chunk of a sequential stream thereby fully rewrites its
 predecessor's partial tail page: holes heal in one pass and the second pass
 serves entirely from pages. Cost: <= 4095 duplicate bytes per chunk (~3%);
-zero allocation. `got <= lead` means the file ends at/before the caller's
-offset -> EOF (0). Small reads (<= one page) keep the byte-exact path: they
-never populate, so they cannot create holes, and naive non-looping small
-readers keep exact semantics. Non-cacheable clients (netd streams) are
-untouched.
+zero allocation on the common path. The `got <= lead` arm splits (the
+D44-audit F1 [P1] close): `got == 0` proves the file ends at/before
+`wire_off <= offset` -> a TRUE EOF (0); but `0 < got <= lead` is a server
+short-return BEFORE the caller's offset -- a single Rread may legitimately
+short-return mid-file (the R-5 SA-F1 ground truth) -- so it is NOT an EOF:
+the fix retries UNSHIFTED at the caller's offset and returns that verbatim
+(the pre-fix `return 0` manufactured a false mid-file EOF: the REVENANT
+cluster fill would install zero-filled resident text pages, exec's eager
+segment read would spuriously fail, and userspace streams would truncate).
+Small reads (<= one page) keep the byte-exact path: they never populate, so
+they cannot create holes, and naive non-looping small readers keep exact
+semantics. Non-cacheable clients (netd streams) are untouched.
 
 **(b) Attr-served EOF.** `larder_attr_fresh_size` (larder.c) returns the
 cached attr's size iff its `cvers` matches the reading fid's open-time
@@ -392,10 +399,26 @@ Neither fix extends `fs_cache.tla`: the aligned read changes only the wire
 request shape (invisible to the model); the attr-EOF is a `Read` of the
 modeled attr cache.
 
+Like the page serve, the attr-served EOF rests on the I-38 single-writer
+premise: an external writer's append (invisible to own-write invalidation)
+would make the cached open-time size diverge from a fresh RPC until the next
+revalidation -- the same close-to-open window the page cache already
+carries (the D44-audit F2 disposition). And `dev9p_open` with OTRUNC now
+drops the file's cached attr + pages (own-write-through -- the truncate is
+an own write), so cache soundness does not rest on the server bumping
+qid.version on truncate (the D44-audit F3 close, a PRE-EXISTING gap).
+
 Tests: `dev9p.read_align_heals_partial` (pass 2 of a re-streamed 20000-byte
-pattern file wires ONLY the EOF probe; the chunk-2 wire offset is asserted
-ALIGNED; fails pre-fix) and `dev9p.read_eof_attr_served` (fresh attr -> zero
-wire ops; absent attr / post-own-write -> the probe wires). The loopback
+pattern file wires ONLY the tail EOF probe + its ambiguity retry -- the
+shifted probe returns got == lead, indistinguishable from a mid-file short,
+so the unshifted retry confirms; a fresh attr would serve it with zero wire
+ops; the chunk-2 wire offset is asserted ALIGNED; fails pre-fix),
+`dev9p.read_align_short_not_eof` (a one-shot
+mid-file short-return injection below `lead`; the caller must still receive
+the whole file -- fails pre-F1-fix by construction),
+`dev9p.open_trunc_invalidates` (an OTRUNC open drops the cached attr), and
+`dev9p.read_eof_attr_served` (fresh attr -> zero wire ops; absent attr /
+post-own-write -> the probe wires). The loopback
 fixture gained a big-file pattern mode (`g_tread_file_size`) and msize-sized
 buffers (the 4096-byte `g_recv_buf`/`g_loopback_resp` were under the
 negotiated msize 8192 -- dormant until the first > 4 KiB reply).
