@@ -303,6 +303,13 @@ int  p9_client_walkgetattr(struct p9_client *c,
 // Clunk (release) a fid.
 int  p9_client_clunk(struct p9_client *c, u32 fid);
 
+// Fire-and-forget clunk (FID-LIFECYCLE async-clunk): send the Tclunk, do NOT
+// block on Rclunk. The fid unbinds at send (I-11; the number is never reused);
+// the ownerless Rclunk drains via a later op's elected reader (I-10, the #845
+// Tflush discipline). For the hot close path (dev9p_close) where the submitter
+// need not wait for the release. Returns 0 on send, -P9_E_* on a build/send error.
+int  p9_client_clunk_async(struct p9_client *c, u32 fid);
+
 // =============================================================================
 // IO operations.
 // =============================================================================

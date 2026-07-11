@@ -2843,6 +2843,57 @@ void test_9p_client_loom_multi_inflight_read_e2e(void) {
     p9_mq_loopback_destroy(&g_mq);
 }
 
+// FID-LIFECYCLE async-clunk F1 regression (the arc audit): a >64-fd async-close
+// BURST with NO interleaved sync op must NOT leak bound fids. Pre-fix, the tag
+// pool (64 slots) filled with undrained ownerless Rclunks; alloc_tag then failed
+// and p9_session_send_clunk returned BEFORE fid_unbind, so closes 65..N left
+// their fids bound forever (-> bound_fids[] exhaustion -> a shared-mount DoS).
+// The mq transport stages every unread Rclunk (a single-slot loopback cannot),
+// so the pool genuinely fills; the fix's client_drain_until_free_tag pumps one
+// ownerless reply to free a tag before each over-full send. NON-VACUOUS: with
+// the drain reverted, n_bound_fids stays at 1 + (N - 64) instead of 1.
+void test_9p_client_async_clunk_burst_no_fid_leak(void) {
+    int rc = p9_mq_loopback_init(&g_mq, canonical_responder, NULL);
+    TEST_EXPECT_EQ(rc, 0, "mq loopback init");
+    rc = p9_client_init(&g_client, /*root_fid=*/0, /*msize=*/8192,
+                        p9_mq_loopback_ops_for(&g_mq), g_recv_buf, sizeof(g_recv_buf));
+    TEST_EXPECT_EQ(rc, 0, "client init over mq transport");
+    const u8 uname[] = {'r','o','o','t'};
+    const u8 aname[] = {'/'};
+    TEST_EXPECT_EQ(p9_client_handshake(&g_client, uname, sizeof(uname),
+                                       aname, sizeof(aname), 0),
+                   0, "handshake");
+    // Baseline: only the root fid is bound.
+    TEST_EXPECT_EQ((u64)p9_session_n_bound_fids(&g_client.session), (u64)1,
+                   "baseline: root bound");
+
+    // Bind N > 64 distinct fids (each Twalk is a sync op that drains its own
+    // Rwalk, so the pool is EMPTY before the burst).
+    const u32 N = 70;   // > P9_SESSION_MAX_OUTSTANDING (64)
+    for (u32 i = 0; i < N; i++) {
+        struct p9_qid q;
+        const u8 nm[] = {'f'};
+        TEST_EXPECT_EQ(p9_client_walk_one(&g_client, /*src=*/0, /*new=*/(u32)(i + 1),
+                                          nm, sizeof(nm), &q), 0, "walk binds a fid");
+    }
+    TEST_EXPECT_EQ((u64)p9_session_n_bound_fids(&g_client.session), (u64)(N + 1),
+                   "N + root fids bound");
+
+    // THE BURST: async-clunk all N with NO interleaved sync op. Closes 65..N hit
+    // a full pool; the F1 drain must free a tag for each.
+    for (u32 i = 0; i < N; i++)
+        TEST_EXPECT_EQ(p9_client_clunk_async(&g_client, (u32)(i + 1)), 0,
+                       "async clunk succeeds (drains the full pool)");
+
+    // Every burst-closed fid is UNBOUND -> back to the root-only baseline. A leak
+    // would leave (N - 64) fids bound.
+    TEST_EXPECT_EQ((u64)p9_session_n_bound_fids(&g_client.session), (u64)1,
+                   "all burst-closed fids unbound (no F1 leak)");
+
+    p9_client_destroy(&g_client);
+    p9_mq_loopback_destroy(&g_mq);
+}
+
 // =============================================================================
 // #349: a transiently-FULL c2s ring is flow-control, NOT session death. Under
 // #841 pipelining + concurrent large frames the kernel->server c2s ring can fill

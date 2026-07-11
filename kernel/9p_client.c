@@ -448,6 +448,59 @@ static int send_wait_cond(void *arg) {
 // surfaces as a reader EOF/error -> c->dead -> the park/loop exits -EIO. The op's
 // own tag is NOT on the wire (this send is failing), so a self-pump only demuxes
 // OTHER ops' replies -- never its own (no reentrancy on rpc).
+// Make ONE unit of s2c progress while back-pressured, then return so the caller
+// re-tests its retry condition. Either self-pump one s2c frame (draining a reply
+// -> the server frees a c2s slot AND its tag) when no reader is active, or park
+// on the multi-waiter list until an active reader signals progress. c->lock HELD
+// on entry + exit (dropped only across the blocking recv/sleep). Extracted from
+// client_send_flow so the FID-LIFECYCLE async-clunk's tag-pool drain reuses the
+// IDENTICAL, audited wait/wake body (F1/F2 share this root).
+static void client_pump_or_park_locked(struct p9_client *c, struct p9_rpc *rpc) {
+    if (!c->reader_active) {
+        // No reader: pump one s2c frame myself (drain -> free the server to
+        // drain c2s), then retry. Mirrors client_wait's elected-reader body.
+        // R2-F3: a recv error/EOF here latches the SHARED session dead via
+        // client_mark_dead_locked, identically to the elected reader -- a real
+        // peer-gone/transport break is a death for everyone; the fail-close
+        // semantics are unchanged from #841 (just now reachable from the send
+        // path too, not only the read path).
+        c->reader_active = true;
+        rpc->be_reader   = false;
+        spin_unlock(&c->lock);
+        int rr = reader_recv_frame(c, 0, NULL);
+        spin_lock(&c->lock);
+        if (rr > 0)                    demux_frame_locked(c, (size_t)rr);
+        else if (!client_self_dying()) client_mark_dead_locked(c, rr == 0);
+        c->reader_active = false;
+        client_send_progress_signal(c);          // a c2s slot / tag may have freed
+        client_handoff_reader_locked(c, rpc);
+    } else {
+        // Another thread is the reader (draining s2c). Park until it makes
+        // progress (bumps send_progress) or the session dies, then retry.
+        // MULTI-WAITER (R2-F1): N senders can be back-pressured on the shared
+        // client at once, so each parks on its OWN stack Rendez via a
+        // poll_waiter on c->send_waiters_list -- a single Rendez extincts on the
+        // 2nd sleeper (rendez.h). register-then-observe: register the hook +
+        // snapshot send_progress under c->lock, so a concurrent reader's
+        // bump-then-wake is either captured by the snapshot (cond true at
+        // sleep's re-check) or delivered to the now-registered hook -- no lost
+        // wake (I-9; the poll.tla register-then-observe). The stack Rendez/hook
+        // outlive the sleep (unregistered under c->lock before this frame pops).
+        struct Rendez      pr;
+        struct poll_waiter pw;
+        rendez_init(&pr);
+        poll_waiter_init(&pw, &pr);
+        struct send_wait_ctx w = { c, c->send_progress };
+        poll_waiter_list_register(&c->send_waiters_list, &pw);
+        c->send_waiters++;
+        spin_unlock(&c->lock);
+        (void)sleep(&pr, send_wait_cond, &w);
+        spin_lock(&c->lock);
+        c->send_waiters--;
+        poll_waiter_list_unregister(&pw);
+    }
+}
+
 static int client_send_flow(struct p9_client *c, size_t built_len,
                             struct p9_rpc *rpc) {
     for (;;) {
@@ -458,49 +511,33 @@ static int client_send_flow(struct p9_client *c, size_t built_len,
         if (src == 0)                   return 0;          // whole frame sent
         if (src != P9_TRANSPORT_EAGAIN) return -P9_E_IO;   // genuine break
 
-        if (!c->reader_active) {
-            // No reader: pump one s2c frame myself (drain -> free the server to
-            // drain c2s), then retry. Mirrors client_wait's elected-reader body.
-            // R2-F3: a recv error/EOF here latches the SHARED session dead via
-            // client_mark_dead_locked, identically to the elected reader -- a real
-            // peer-gone/transport break is a death for everyone; the fail-close
-            // semantics are unchanged from #841 (just now reachable from the send
-            // path too, not only the read path).
-            c->reader_active = true;
-            rpc->be_reader   = false;
-            spin_unlock(&c->lock);
-            int rr = reader_recv_frame(c, 0, NULL);
-            spin_lock(&c->lock);
-            if (rr > 0)                    demux_frame_locked(c, (size_t)rr);
-            else if (!client_self_dying()) client_mark_dead_locked(c, rr == 0);
-            c->reader_active = false;
-            client_send_progress_signal(c);          // a c2s slot may have freed
-            client_handoff_reader_locked(c, rpc);
-        } else {
-            // Another thread is the reader (draining s2c). Park until it makes
-            // progress (bumps send_progress) or the session dies, then retry.
-            // MULTI-WAITER (R2-F1): N senders can be back-pressured on the shared
-            // client at once, so each parks on its OWN stack Rendez via a
-            // poll_waiter on c->send_waiters_list -- a single Rendez extincts on the
-            // 2nd sleeper (rendez.h). register-then-observe: register the hook +
-            // snapshot send_progress under c->lock, so a concurrent reader's
-            // bump-then-wake is either captured by the snapshot (cond true at
-            // sleep's re-check) or delivered to the now-registered hook -- no lost
-            // wake (I-9; the poll.tla register-then-observe). The stack Rendez/hook
-            // outlive the sleep (unregistered under c->lock before this frame pops).
-            struct Rendez      pr;
-            struct poll_waiter pw;
-            rendez_init(&pr);
-            poll_waiter_init(&pw, &pr);
-            struct send_wait_ctx w = { c, c->send_progress };
-            poll_waiter_list_register(&c->send_waiters_list, &pw);
-            c->send_waiters++;
-            spin_unlock(&c->lock);
-            (void)sleep(&pr, send_wait_cond, &w);
-            spin_lock(&c->lock);
-            c->send_waiters--;
-            poll_waiter_list_unregister(&pw);
-        }
+        client_pump_or_park_locked(c, rpc);                // drain c2s, then retry
+    }
+}
+
+// FID-LIFECYCLE async-clunk F1: drain ownerless replies until a tag slot frees.
+// A >64-fd async-close burst (the #926 proc-exit close of a handle table, or a
+// userspace batch-close) with no interleaved sync op fills the 64-slot tag pool
+// with undrained ownerless Rclunks; the next p9_session_send_clunk's alloc_tag
+// would then fail and the fid would leak BOUND (send_clunk returns before its
+// fid_unbind) -> eventual bound_fids[] exhaustion -> a system-wide FS partial
+// DoS on the shared mount. Draining ANY reply frees its tag (in a full pool the
+// outstanding set is dominated by ownerless clunks, so a drain frees a clunk
+// tag; even a sync peer's reply drain frees a tag). Uses the SAME pump/park body
+// as the send flow. c->lock HELD; returns 0 (a tag is free) or -P9_E_IO (death).
+static int client_drain_until_free_tag(struct p9_client *c, struct p9_rpc *rpc) {
+    for (;;) {
+        // has_free_tag FIRST (round-2 F1): with a free tag, proceed to
+        // send_clunk even when the caller's Proc is dying, so the fid unbinds
+        // cleanly -- matching the old sync clunk (which unbound BEFORE it
+        // detected death). Only the rare burst-DURING-a-kill (pool full AND
+        // dying) bails, and a bail there leaks the fid bound exactly as the old
+        // sync path did on the same race. The common (not-in-a-burst) close is a
+        // free tag -> a clean immediate unbind.
+        if (p9_session_has_free_tag(&c->session)) return 0;
+        if (c->dead)             return -P9_E_IO;
+        if (client_self_dying()) return -P9_E_IO;
+        client_pump_or_park_locked(c, rpc);
     }
 }
 
@@ -1086,6 +1123,79 @@ int p9_client_clunk(struct p9_client *c, u32 fid) {
     int e = client_run(c, (size_t)len, &r);
     c->total_ops++;
     if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
+    spin_unlock(&c->lock);
+    return 0;
+}
+
+// Fire-and-forget clunk (FID-LIFECYCLE async-clunk; docs/FID-LIFECYCLE-DESIGN.md
+// section 3.1): send the Tclunk and return WITHOUT blocking on Rclunk, so the
+// submitter's thread is not parked for the clunk RTT (the go-build close path was
+// 21% of the warm-floor RTs). Correctness rests on the #845 Tflush ownerless-drain
+// discipline, and the verified fid-lifecycle facts make it hazard-light:
+//   - I-11 (fid): p9_session_send_clunk unbinds the fid at SEND (already
+//     reply-independent); the monotonic fid NUMBER (p9_client_alloc_fid) is never
+//     reused, so the clunk-pending fid can never be re-referenced.
+//   - I-10 (tag): the Tclunk marks session.outstanding[tag] but we register NO
+//     c->inflight[tag] owner, so the Rclunk is OWNERLESS. A later op's elected
+//     reader drains it via demux_frame_locked's else-branch -> dispatch_rmsg
+//     (the P9_TCLUNK arm, "send-time already unbound; no further action") ->
+//     clear_outstanding frees the tag.
+// Two contention cases the fire-and-forget must compose with (the arc-audit
+// F1/F2), both via the SAME audited pump/park machinery the sync send uses:
+//   - F1 tag-pool full: a >64-fd async-close BURST with no interleaved sync op
+//     fills all 64 outstanding[] slots with undrained ownerless Rclunks; without
+//     a drain, alloc_tag fails and the fid leaks BOUND (send_clunk returns before
+//     fid_unbind) -> bound_fids[] exhaustion -> a shared-mount FS DoS. FIX:
+//     client_drain_until_free_tag pumps an ownerless reply (freeing a tag) before
+//     send_clunk. So the burst self-limits (each clunk drains ~1, sends 1).
+//   - F2 c2s back-pressure: a transiently-full c2s ring returns EAGAIN; the send
+//     goes through client_send_flow (self-pump s2c + retry), NEVER a session
+//     death (the pre-fix raw send treated EAGAIN as fatal -- the #349 collapse).
+// A GENUINE transport break marks the session dead (mirror client_run). A
+// send_clunk failure now means only fid unbound / root / a live op on the fid --
+// all cases where the fid should not be clunked here; the sole caller
+// (dev9p_close) ignores it exactly as it ignored a sync-clunk error.
+int p9_client_clunk_async(struct p9_client *c, u32 fid) {
+    if (!c) return -P9_E_INVAL;
+    if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
+    spin_lock(&c->lock);
+    if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
+    if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
+
+    // The async clunk composes with the #841 tag pool + the #349 c2s back-
+    // pressure via a SYNTHETIC (never-inflight) rpc token: the pump/park body
+    // uses it only for `be_reader` + the handoff "not-me" pointer compare (it is
+    // never stored in c->inflight[], so a stack rpc is safe). on_complete = NULL,
+    // be_reader = false.
+    struct p9_rpc rpc;
+    for (size_t i = 0; i < sizeof(rpc); i++) ((u8 *)&rpc)[i] = 0;
+
+    // F1: ensure a free tag BEFORE send_clunk (else alloc_tag fails and the fid
+    // leaks bound). Drains ownerless Rclunks on a full pool (the close-burst).
+    int de = client_drain_until_free_tag(c, &rpc);
+    if (de != 0) CLIENT_UNLOCK_RET(c, de);
+
+    int len = p9_session_send_clunk(&c->session, c->out_buf,
+                                     c->out_buf_cap, fid);
+    // send_clunk fails only for a non-tag reason now (fid unbound / root / a live
+    // op targets the fid) -- all cases where the fid should NOT be clunked here;
+    // the caller ignores the error exactly as it ignored a sync-clunk error.
+    if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
+
+    // F2: send via the #349 flow-control discipline -- a transiently-full c2s
+    // ring is back-pressure (self-pump s2c + retry), NEVER a session death (the
+    // pre-fix raw send treated EAGAIN as fatal, re-opening the #349 shared-mount
+    // collapse). No inflight[tag] is registered, so the Rclunk is OWNERLESS
+    // (drained by a later op's reader or this function's own F1 drain in a
+    // burst). On a GENUINE break, mirror client_run: mark dead only if the
+    // ring actually broke (a self-death leaves the session live for peers).
+    int sfr = client_send_flow(c, (size_t)len, &rpc);
+    if (sfr < 0) {
+        if (!c->dead && !client_self_dying())
+            client_mark_dead_locked(c, false);
+        CLIENT_UNLOCK_RET(c, -P9_E_IO);
+    }
+    c->total_ops++;
     spin_unlock(&c->lock);
     return 0;
 }

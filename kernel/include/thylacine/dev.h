@@ -174,6 +174,34 @@ struct Dev {
                                   const char **names, const size_t *name_lens,
                                   int nname, struct t_stat *sts);
 
+    // open_cached(c, names, name_lens, nname, sts) — the FID-LIFECYCLE fidless
+    // cached open (docs/FID-LIFECYCLE-DESIGN.md §3.3; refines I-38). OPTIONAL
+    // (NULL-permitted, like .walk_attrs): stalk calls it on the FINAL run of a
+    // plain read-only STALK_OPEN resolution (omode == 0 exactly) BEFORE the
+    // normal bind walk. Names are (ptr, len) pairs like walk_attrs; 1 <= nname
+    // <= DEV_WALK_ATTRS_MAX.
+    //
+    // The Dev attempts, wholly internally: an RPC-free eligibility hint; ONE
+    // FORCED-WIRE query walk of the run (no fid binds on either end — the
+    // close-to-open revalidation, which MUST be server-fresh, never served
+    // from a cache); a snapshot of the leaf's full content at the fresh
+    // content-version; and the mint of an OPENED read-only fidless Spoor.
+    //
+    //   - Success: returns the opened Spoor (one owned ref; wire-free to
+    //     destroy) AND fills sts[0..nname) with the walk's FRESH per-component
+    //     records. The CALLER (the resolver) then MUST run its fail-ordering
+    //     post-scan on those records — per-component X-search, mount-membership
+    //     scan, final-hop R/W perm — and destroy the Spoor on any denial or
+    //     mount crossing; permission policy stays in the resolver (I-28/I-22),
+    //     never in the Dev.
+    //   - NULL: not servable (ineligible mode/type, coverage miss, budget,
+    //     stale, OOM, wire failure). Nothing is bound and nothing is revealed
+    //     to the caller; sts may be scribbled. The caller proceeds with the
+    //     normal walk + open path, whose outcome is the observable one.
+    struct Spoor *(*open_cached)(struct Spoor *c, const char *const *names,
+                                 const size_t *name_lens, int nname,
+                                 struct t_stat *sts);
+
     // Open / create / close.
     //   open(c, omode) — transition c from "walked" to "opened". Returns
     //                    c on success (typically with c->flag |= COPEN).

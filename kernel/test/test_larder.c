@@ -45,14 +45,24 @@ void test_larder_page_offset(void);
 void test_larder_page_cvers_mismatch(void);
 void test_larder_page_partial(void);
 void test_larder_page_invalidate(void);
+void test_larder_page_invalidate_multifile(void);
 void test_larder_page_gen_guard(void);
 void test_larder_page_overwrite(void);
 void test_larder_page_bounded(void);
 void test_larder_page_destroy_frees(void);
 
-// The Larder is ~80 KiB (a 256-entry attr + a 256-entry dentry + a 512-slot page
-// metadata array; the page BUFFERS are heap) -- file scope, not stack.
+// struct larder is now small (pointers + counters): all three sub-cache arrays are
+// HEAP + lazy (attr 4096 / dentry 4096 / page 32768 entries; the page BUFFERS too),
+// allocated on first install -- file scope, not stack.
 static struct larder g_larder;
+
+// Destroy-then-init between tests: all three sub-cache arrays are heap + lazy
+// (the FID-LIFECYCLE re-size), so a bare re-init would leak the prior test's
+// arrays. Destroy guards NULL, so the first call (boot-zeroed g_larder) no-ops.
+static void larder_reset(void) {
+    larder_destroy(&g_larder);
+    larder_init(&g_larder);
+}
 // Page-sized scratch (the 16 KiB kstack won't hold two 4 KiB frames per test).
 static u8 g_pgsrc[LARDER_PAGE_SIZE];
 static u8 g_pgout[LARDER_PAGE_SIZE];
@@ -90,7 +100,7 @@ static void put_pos(u64 parent, const char *name, u64 child, u32 mode) {
 }
 
 void test_larder_install_serve(void) {
-    larder_init(&g_larder);
+    larder_reset();
     struct t_stat in = mk_stat(0755);
     u64 seq = larder_gen_snapshot(&g_larder);
     larder_attr_install(&g_larder, seq, /*qid_path=*/5, /*cvers=*/10, &in);
@@ -105,7 +115,7 @@ void test_larder_install_serve(void) {
 }
 
 void test_larder_serve_miss(void) {
-    larder_init(&g_larder);
+    larder_reset();
     struct t_stat out;
     u64 seq0 = 999;   // must be overwritten by the miss
     bool hit = larder_attr_serve(&g_larder, 42, &out, &seq0);
@@ -115,7 +125,7 @@ void test_larder_serve_miss(void) {
 }
 
 void test_larder_invalidate(void) {
-    larder_init(&g_larder);
+    larder_reset();
     struct t_stat in = mk_stat(0644);
     larder_attr_install(&g_larder, larder_gen_snapshot(&g_larder), 7, 1, &in);
 
@@ -133,7 +143,7 @@ void test_larder_invalidate(void) {
 // skipped (the resurrection close). Model: seq captured pre-RPC; an invalidate
 // bumps gen; the install with the stale seq is a no-op.
 void test_larder_gen_guard_skips_raced_install(void) {
-    larder_init(&g_larder);
+    larder_reset();
     struct t_stat in = mk_stat(0700);
 
     u64 seq = larder_gen_snapshot(&g_larder);        // "before the RPC"
@@ -156,7 +166,7 @@ void test_larder_gen_guard_skips_raced_install(void) {
 // Root's qid.path is 0x0 -- the `valid` bit (not path==0) marks empty, so root
 // caches like any other key.
 void test_larder_root_qid_zero(void) {
-    larder_init(&g_larder);
+    larder_reset();
     struct t_stat out;
     u64 seq0 = 0;
     TEST_ASSERT(!larder_attr_serve(&g_larder, 0, &out, &seq0),
@@ -172,7 +182,7 @@ void test_larder_root_qid_zero(void) {
 // Overwrite (revalidate-by-overwrite): a second install for the same qid.path
 // replaces the entry (latest content-version wins), never duplicates it.
 void test_larder_overwrite_wins(void) {
-    larder_init(&g_larder);
+    larder_reset();
     struct t_stat a = mk_stat(0111);
     struct t_stat b = mk_stat(0222);
     larder_attr_install(&g_larder, larder_gen_snapshot(&g_larder), 9, 1, &a);
@@ -193,7 +203,7 @@ void test_larder_overwrite_wins(void) {
 // Bounded (I-32): filling past capacity evicts the LRU victim and never exceeds
 // LARDER_ATTR_ENTRIES valid entries.
 void test_larder_eviction_bounded(void) {
-    larder_init(&g_larder);
+    larder_reset();
     struct t_stat s = mk_stat(0600);
     // Fill exactly to capacity with qid.paths 0..N-1 (lru order 0 oldest).
     for (u64 k = 0; k < LARDER_ATTR_ENTRIES; k++)
@@ -226,7 +236,7 @@ void test_larder_eviction_bounded(void) {
 // Serve (Read): a cached positive dentry + the child's attr resolve a one-hop
 // walk RPC-free.
 void test_larder_dentry_serve(void) {
-    larder_init(&g_larder);
+    larder_reset();
     put_pos(/*parent=*/100, "foo", /*child=*/200, 0644);
 
     const char *names[] = {"foo"};
@@ -244,7 +254,7 @@ void test_larder_dentry_serve(void) {
 }
 
 void test_larder_dentry_serve_miss(void) {
-    larder_init(&g_larder);
+    larder_reset();
     const char *names[] = {"foo"};
     size_t      lens[]  = {3};
     struct t_stat sts[4];
@@ -256,7 +266,7 @@ void test_larder_dentry_serve_miss(void) {
 
 // A NEGATIVE dentry serves the walk-miss RPC-free (the failed-lookup storm win).
 void test_larder_dentry_negative(void) {
-    larder_init(&g_larder);
+    larder_reset();
     larder_dentry_install(&g_larder, larder_gen_snapshot(&g_larder), 100,
                           "nope", 4, 0, /*negative=*/true);
     const char *names[] = {"nope"};
@@ -273,7 +283,7 @@ void test_larder_dentry_negative(void) {
 // A multi-hop run serves fully when every hop's dentry + attr is cached; the
 // chain advances cur = base -> child0 -> child1.
 void test_larder_dentry_multi_hop(void) {
-    larder_init(&g_larder);
+    larder_reset();
     put_pos(100, "a", 200, 040755);   // a dir
     put_pos(200, "b", 300, 0644);     // a file under it
     const char *nm[] = {"a", "b"};
@@ -290,7 +300,7 @@ void test_larder_dentry_multi_hop(void) {
 // A chain with an uncached intermediate hop bails to the RPC (a partial prefix
 // serve cannot skip the whole-run RPC).
 void test_larder_dentry_partial_chain_bails(void) {
-    larder_init(&g_larder);
+    larder_reset();
     put_pos(100, "a", 200, 040755);   // hop 0 cached; (200,"b") is NOT
     const char *nm[] = {"a", "b"};
     size_t      ln[] = {1, 1};
@@ -303,7 +313,7 @@ void test_larder_dentry_partial_chain_bails(void) {
 // A positive dentry whose child attr is NOT cached bails (a served qid must
 // carry a coherent attr from the attr sub-cache).
 void test_larder_dentry_attr_miss_bails(void) {
-    larder_init(&g_larder);
+    larder_reset();
     larder_dentry_install(&g_larder, larder_gen_snapshot(&g_larder), 100,
                           "foo", 3, 200, /*negative=*/false);   // no attr(200)
     const char *nm[] = {"foo"};
@@ -320,7 +330,7 @@ void test_larder_dentry_attr_miss_bails(void) {
 // entry would serve ENOENT for the now-existing file. Non-vacuous (fails if
 // invalidate-parent does not drop the negative).
 void test_larder_dentry_invalidate_parent(void) {
-    larder_init(&g_larder);
+    larder_reset();
     larder_dentry_install(&g_larder, larder_gen_snapshot(&g_larder), 100,
                           "foo", 3, 0, /*negative=*/true);   // "foo" absent in 100
     put_pos(100, "bar", 200, 0644);                          // "bar" -> 200 in 100
@@ -351,7 +361,7 @@ void test_larder_dentry_invalidate_parent(void) {
 // The gen guard covers dentry populates: an install whose RPC raced an
 // invalidate-parent (which bumps the shared gen) is skipped.
 void test_larder_dentry_gen_guard(void) {
-    larder_init(&g_larder);
+    larder_reset();
     u64 seq = larder_gen_snapshot(&g_larder);               // "before the RPC"
     larder_dentry_invalidate_parent(&g_larder, 999);        // a concurrent own-write bumps gen
     larder_dentry_install(&g_larder, seq, 100, "foo", 3, 200, false);  // stale install
@@ -366,21 +376,22 @@ void test_larder_dentry_gen_guard(void) {
 // A component longer than LARDER_DENTRY_NAME_MAX is not cached (fail-safe to the
 // RPC) -- neither installed nor matched.
 void test_larder_dentry_name_too_long(void) {
-    larder_init(&g_larder);
+    larder_reset();
     char longname[LARDER_DENTRY_NAME_MAX + 8];
     for (size_t i = 0; i < sizeof(longname); i++) longname[i] = 'x';
     larder_dentry_install(&g_larder, larder_gen_snapshot(&g_larder), 100,
                           longname, LARDER_DENTRY_NAME_MAX + 1, 200, false);
     u32 cnt = 0;
-    for (u32 i = 0; i < LARDER_DENTRY_ENTRIES; i++)
-        if (g_larder.dentry[i].valid) cnt++;
+    if (g_larder.dentry)   // heap + lazy: a declined install allocates nothing
+        for (u32 i = 0; i < LARDER_DENTRY_ENTRIES; i++)
+            if (g_larder.dentry[i].valid) cnt++;
     TEST_EXPECT_EQ(cnt, 0u, "a too-long component is not cached");
 }
 
 // Bounded (I-32): filling past capacity evicts LRU victims; never exceeds
 // LARDER_DENTRY_ENTRIES valid entries.
 void test_larder_dentry_bounded(void) {
-    larder_init(&g_larder);
+    larder_reset();
     for (u64 k = 0; k < (u64)LARDER_DENTRY_ENTRIES + 8u; k++)
         larder_dentry_install(&g_larder, larder_gen_snapshot(&g_larder),
                               /*parent=*/k, "x", 1, /*child=*/k + 1, false);
@@ -395,7 +406,7 @@ void test_larder_dentry_bounded(void) {
 
 // Install a full page, serve it whole -- the bytes round-trip (fs_cache.tla Read).
 void test_larder_page_serve(void) {
-    larder_init(&g_larder);
+    larder_reset();
     fill_pattern(g_pgsrc, LARDER_PAGE_SIZE, 0x11);
     u64 seq = larder_gen_snapshot(&g_larder);
     larder_page_install(&g_larder, seq, /*qid=*/7, /*page=*/3, /*cvers=*/5,
@@ -412,7 +423,7 @@ void test_larder_page_serve(void) {
 
 // A miss returns 0 and hands back the gen snapshot for the populate guard.
 void test_larder_page_serve_miss(void) {
-    larder_init(&g_larder);
+    larder_reset();
     u64 s0 = 999;
     u32 got = larder_page_serve(&g_larder, 7, 3, 0, LARDER_PAGE_SIZE, 5, g_pgout, &s0);
     TEST_EXPECT_EQ(got, 0u, "an empty page cache misses");
@@ -423,7 +434,7 @@ void test_larder_page_serve_miss(void) {
 // A serve within a page honors page_off + `want`: offset 100, want 200 -> the 200
 // bytes starting at src[100].
 void test_larder_page_offset(void) {
-    larder_init(&g_larder);
+    larder_reset();
     fill_pattern(g_pgsrc, LARDER_PAGE_SIZE, 0x40);
     larder_page_install(&g_larder, larder_gen_snapshot(&g_larder), 7, 3, 5,
                         g_pgsrc, LARDER_PAGE_SIZE);
@@ -441,7 +452,7 @@ void test_larder_page_offset(void) {
 // IS served at 5. (Within one client, own-write invalidation is the primary gate;
 // cvers catches the cross-open change.)
 void test_larder_page_cvers_mismatch(void) {
-    larder_init(&g_larder);
+    larder_reset();
     fill_pattern(g_pgsrc, LARDER_PAGE_SIZE, 0x22);
     larder_page_install(&g_larder, larder_gen_snapshot(&g_larder), 7, 3,
                         /*cvers=*/5, g_pgsrc, LARDER_PAGE_SIZE);
@@ -459,7 +470,7 @@ void test_larder_page_cvers_mismatch(void) {
 // up to valid_len (clamped); a serve AT/PAST valid_len misses (the caller refetches
 // -- sound without an EOF determination). No hole is ever served.
 void test_larder_page_partial(void) {
-    larder_init(&g_larder);
+    larder_reset();
     fill_pattern(g_pgsrc, LARDER_PAGE_SIZE, 0x55);
     larder_page_install(&g_larder, larder_gen_snapshot(&g_larder), 7, 0, 5,
                         g_pgsrc, /*len=*/100);
@@ -480,7 +491,7 @@ void test_larder_page_partial(void) {
 
 // OwnWrite: invalidate(qid_path) drops every page of the file + bumps gen.
 void test_larder_page_invalidate(void) {
-    larder_init(&g_larder);
+    larder_reset();
     fill_pattern(g_pgsrc, LARDER_PAGE_SIZE, 0x33);
     larder_page_install(&g_larder, larder_gen_snapshot(&g_larder), 7, 0, 5,
                         g_pgsrc, LARDER_PAGE_SIZE);
@@ -497,10 +508,54 @@ void test_larder_page_invalidate(void) {
     larder_destroy(&g_larder);
 }
 
+// The F3 O(pages-of-file) invalidate (task #29): the page_qhash secondary index drops
+// EVERY page of the written file and NO page of any OTHER file, and re-uses the freed
+// slots cleanly (the qhash unlink kept the "in qhash IFF in page_hash" invariant).
+void test_larder_page_invalidate_multifile(void) {
+    larder_reset();
+    fill_pattern(g_pgsrc, LARDER_PAGE_SIZE, 0x55);
+    // File A (qid 7): pages 0,1,2.  File B (qid 8): pages 0,1.  Interleaved installs so
+    // A's pages are NOT contiguous in the entry array (exercises the qbucket chain walk).
+    larder_page_install(&g_larder, larder_gen_snapshot(&g_larder), 7, 0, 5, g_pgsrc, LARDER_PAGE_SIZE);
+    larder_page_install(&g_larder, larder_gen_snapshot(&g_larder), 8, 0, 5, g_pgsrc, LARDER_PAGE_SIZE);
+    larder_page_install(&g_larder, larder_gen_snapshot(&g_larder), 7, 1, 5, g_pgsrc, LARDER_PAGE_SIZE);
+    larder_page_install(&g_larder, larder_gen_snapshot(&g_larder), 8, 1, 5, g_pgsrc, LARDER_PAGE_SIZE);
+    larder_page_install(&g_larder, larder_gen_snapshot(&g_larder), 7, 2, 5, g_pgsrc, LARDER_PAGE_SIZE);
+    u64 inv_before = g_larder.page_invalidations;
+    larder_page_invalidate(&g_larder, /*qid=*/7);
+    // Exactly file A's 3 pages dropped -- the qbucket walk found ALL of A and ONLY A.
+    TEST_EXPECT_EQ(g_larder.page_invalidations - inv_before, 3ull,
+                   "invalidate dropped exactly file A's 3 pages");
+    u64 s0 = 0;
+    TEST_EXPECT_EQ(larder_page_serve(&g_larder, 7, 0, 0, LARDER_PAGE_SIZE, 5, g_pgout, &s0), 0u, "A page 0 dropped");
+    TEST_EXPECT_EQ(larder_page_serve(&g_larder, 7, 1, 0, LARDER_PAGE_SIZE, 5, g_pgout, &s0), 0u, "A page 1 dropped");
+    TEST_EXPECT_EQ(larder_page_serve(&g_larder, 7, 2, 0, LARDER_PAGE_SIZE, 5, g_pgout, &s0), 0u, "A page 2 dropped");
+    // File B UNTOUCHED -- the qid_path discrimination (the correctness the qbucket must keep).
+    TEST_EXPECT_EQ(larder_page_serve(&g_larder, 8, 0, 0, LARDER_PAGE_SIZE, 5, g_pgout, &s0),
+                   LARDER_PAGE_SIZE, "B page 0 survives A's invalidate");
+    TEST_EXPECT_EQ(larder_page_serve(&g_larder, 8, 1, 0, LARDER_PAGE_SIZE, 5, g_pgout, &s0),
+                   LARDER_PAGE_SIZE, "B page 1 survives A's invalidate");
+    // A's freed slots re-install cleanly (proves the qhash unlink kept the invariant so a
+    // CLOCK/free-cursor reuse of an invalidated slot re-links both indexes correctly).
+    larder_page_install(&g_larder, larder_gen_snapshot(&g_larder), 7, 0, 6, g_pgsrc, LARDER_PAGE_SIZE);
+    TEST_EXPECT_EQ(larder_page_serve(&g_larder, 7, 0, 0, LARDER_PAGE_SIZE, 6, g_pgout, &s0),
+                   LARDER_PAGE_SIZE, "A page 0 re-installs cleanly after invalidate");
+    // ...and the re-installed page is reachable through the QBUCKET (not just page_hash):
+    // invalidate again must find + drop it (a re-link into page_hash but NOT page_qhash
+    // would pass the serve above yet leak here -- the qhash-relink coverage, audit F3).
+    u64 inv2 = g_larder.page_invalidations;
+    larder_page_invalidate(&g_larder, /*qid=*/7);
+    TEST_EXPECT_EQ(g_larder.page_invalidations - inv2, 1ull,
+                   "the re-installed page is in the qbucket (invalidate drops it)");
+    TEST_EXPECT_EQ(larder_page_serve(&g_larder, 7, 0, 0, LARDER_PAGE_SIZE, 6, g_pgout, &s0),
+                   0u, "re-installed A page 0 dropped by the second invalidate");
+    larder_destroy(&g_larder);
+}
+
 // The gen guard (the atomic-Open realization): an invalidate that raced the read
 // (gen changed since the seq0 snapshot) skips the install -- the resurrection close.
 void test_larder_page_gen_guard(void) {
-    larder_init(&g_larder);
+    larder_reset();
     fill_pattern(g_pgsrc, LARDER_PAGE_SIZE, 0x44);
     u64 seq = larder_gen_snapshot(&g_larder);        // snapshot BEFORE the "read"
     larder_page_invalidate(&g_larder, /*other qid=*/99);  // races: bumps gen
@@ -515,7 +570,7 @@ void test_larder_page_gen_guard(void) {
 // Overwrite (revalidate-by-overwrite): re-installing (qid,page) replaces the bytes
 // in place (the buffer is reused, no leak).
 void test_larder_page_overwrite(void) {
-    larder_init(&g_larder);
+    larder_reset();
     fill_pattern(g_pgsrc, LARDER_PAGE_SIZE, 0xA0);
     larder_page_install(&g_larder, larder_gen_snapshot(&g_larder), 7, 3, 5,
                         g_pgsrc, LARDER_PAGE_SIZE);
@@ -534,7 +589,7 @@ void test_larder_page_overwrite(void) {
 // page installed is present, an early one evicted; valid slots never exceed
 // capacity. Then destroy frees the buffers.
 void test_larder_page_bounded(void) {
-    larder_init(&g_larder);
+    larder_reset();
     fill_pattern(g_pgsrc, LARDER_PAGE_SIZE, 0x01);
     u32 over = LARDER_PAGE_ENTRIES + 50u;
     for (u32 k = 0; k < over; k++)
@@ -555,7 +610,7 @@ void test_larder_page_bounded(void) {
 
 // destroy frees the buffers + drops the entries: a serve after destroy misses.
 void test_larder_page_destroy_frees(void) {
-    larder_init(&g_larder);
+    larder_reset();
     fill_pattern(g_pgsrc, LARDER_PAGE_SIZE, 0x77);
     larder_page_install(&g_larder, larder_gen_snapshot(&g_larder), 7, 0, 5,
                         g_pgsrc, LARDER_PAGE_SIZE);
@@ -564,7 +619,7 @@ void test_larder_page_destroy_frees(void) {
     TEST_EXPECT_EQ(larder_page_serve(&g_larder, 7, 0, 0, LARDER_PAGE_SIZE, 5, g_pgout, &s0),
                    0u, "destroy drops the page (serve misses)");
     // A fresh init + install after destroy still works (buffers re-alloc lazily).
-    larder_init(&g_larder);
+    larder_reset();
     larder_page_install(&g_larder, larder_gen_snapshot(&g_larder), 7, 0, 5,
                         g_pgsrc, LARDER_PAGE_SIZE);
     TEST_EXPECT_EQ(larder_page_serve(&g_larder, 7, 0, 0, LARDER_PAGE_SIZE, 5, g_pgout, &s0),

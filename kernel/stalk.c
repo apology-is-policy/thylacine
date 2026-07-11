@@ -329,6 +329,61 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
                 if (perm_check(p, &pst, PERM_X) != 0)    { err = T_E_ACCES;    goto fail; }
             }
 
+            struct t_stat sts[DEV_WALK_ATTRS_MAX];
+
+            // ================================================================
+            // FID-LIFECYCLE cached-open (docs/FID-LIFECYCLE-DESIGN.md §3.3):
+            // the FINAL run of a plain read-only STALK_OPEN (omode == 0
+            // exactly -- OTRUNC / write / OEXEC / O_PATH never take it) may be
+            // served as a FIDLESS open. The Dev revalidates server-fresh (a
+            // forced-wire query walk -- no fid binds on either end), snapshots
+            // the fully-page-cached content, and returns an OPENED Spoor plus
+            // the walk's FRESH records in sts. The RESOLVER keeps every
+            // permission decision: the same left-to-right X + mount post-scan
+            // as the batched walk below, then the final-hop R/W gate --
+            // identical fail ordering (§6). ANY mount hit (including the leaf
+            // -- this path has no quarry-cross) discards the cached open and
+            // falls back to the normal walk, whose split/cross machinery owns
+            // the crossing. A NULL return reveals nothing: the observable
+            // outcome is the normal path's.
+            // ================================================================
+            if (amode == STALK_OPEN && omode == 0 && final_run &&
+                parent->dev->open_cached) {
+                struct Spoor *co = parent->dev->open_cached(
+                        parent, (const char *const *)names, lens, nrun, sts);
+                if (co) {
+                    bool co_mount = false;
+                    for (int j = 0; j < nrun; j++) {
+                        if (j > 0 && parent->dev->perm_enforced &&
+                            perm_check(p, &sts[j - 1], PERM_X) != 0) {
+                            spoor_clunk(co);   // wire-free destroy
+                            err = T_E_ACCES;
+                            goto fail;
+                        }
+                        if (p && p->territory &&
+                            mount_is_point_id(p->territory, parent->dc,
+                                              parent->devno,
+                                              sts[j].qid_path)) {
+                            co_mount = true;
+                            break;
+                        }
+                    }
+                    if (!co_mount) {
+                        if (parent->dev->perm_enforced &&
+                            perm_check(p, &sts[nrun - 1],
+                                       perm_want_for_omode(omode)) != 0) {
+                            spoor_clunk(co);
+                            err = T_E_ACCES;
+                            goto fail;
+                        }
+                        stalk_unwind(trail, depth);
+                        return co;
+                    }
+                    spoor_clunk(co);   // a mount in the run: the normal path
+                                       // (split + cross) owns the crossing
+                }
+            }
+
             // -- The batched walk. STALK_STAT's FINAL run is the walk-QUERY
             // (nc == NULL -> dev9p sends newfid = P9_NOFID): the leaf's attrs
             // return in the reply and no Spoor/fid ever exists. Every other
@@ -341,7 +396,6 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
                 nc = spoor_clone(parent);
                 if (!nc) goto fail;
             }
-            struct t_stat sts[DEV_WALK_ATTRS_MAX];
             struct Walkqid *w = parent->dev->walk_attrs(parent, nc, names, lens,
                                                         nrun, sts);
             if (w == DEV_WALK_ATTRS_UNSUPPORTED) {

@@ -1252,6 +1252,19 @@ size_t p9_session_inflight(const struct p9_session *s) {
     return n;
 }
 
+// True iff a tag slot is free (a send would find a tag). A pure scan (no
+// mutation) -- the FID-LIFECYCLE async-clunk uses it to detect a full tag pool
+// (a >64-fd async-close burst) BEFORE p9_session_send_clunk's alloc_tag would
+// fail, so it can drain an ownerless reply first instead of leaking the fid.
+bool p9_session_has_free_tag(const struct p9_session *s) {
+    if (!s) return false;
+    if (s->magic != P9_SESSION_MAGIC) return false;
+    for (size_t t = 0; t < P9_SESSION_MAX_OUTSTANDING; t++) {
+        if (!s->outstanding[t].active) return true;
+    }
+    return false;
+}
+
 size_t p9_session_n_bound_fids(const struct p9_session *s) {
     if (!s) return 0;
     if (s->magic != P9_SESSION_MAGIC) return 0;

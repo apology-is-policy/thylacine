@@ -421,6 +421,7 @@ small (<200 distinct) but every bug class reaches its violation in ≤ 6 steps
 | `SendIO(t, fid)` — symlink / mknod / link / mkdir / unlinkat / renameat | Send `Tsymlink` / `Tmknod` / `Tlink` / `Tmkdir` / `Tunlinkat` / `Trenameat` (read-or-mutation-shaped; concurrent ops on same dfid permitted) | `kernel/9p_session.c::p9_session_send_symlink` / `_mknod` / `_link` / `_mkdir` / `_unlinkat` / `_renameat` (use the matching `p9_build_*`). Send-time precondition: dfid bound (+ fid bound for link). Dispatcher: qid-shape Rmsgs populate `out->created_qid`; empty-body Rmsgs are header-only validation. **Landed at P5-wire-mutation.** |
 | `SendIO(t, fid)` — readlink | Send `Treadlink` on tag `t` for `fid` (read-shaped; concurrent permitted) | `kernel/9p_session.c::p9_session_send_readlink` (uses `p9_build_treadlink`). Send-time precondition: fid bound. Dispatcher: surfaces zero-copy `out->readlink_target` + `out->readlink_target_len`. **Landed at P5-wire-mutation.** |
 | `SendIO(t, fid)` — rename | Send `Trename(fid, dfid, name)` on tag `t` (mutation-shaped; fid-exclusive — server-side identity moves) | `kernel/9p_session.c::p9_session_send_rename` (uses `p9_build_trename`). Send-time precondition: fid + dfid bound + no other in-flight op on fid. Dispatcher: Rrename is body-empty header validation. **Landed at P5-wire-mutation.** |
+| `SendClunk(t, fid)` — async | `p9_client_clunk_async` (FID-LIFECYCLE): the fire-and-forget Tclunk. The SPEC IS UNCHANGED for the clean model -- SendClunk already unbinds at send + holds the tag until `ReceiveOp(t)` frees it, and the spec never modeled a blocking submitter; `ReceiveOp` on a clunk tag IS the ownerless drain (who drains is below the abstraction; impl: a later op's elected reader via the #845 dispatch arm -> `clear_outstanding`). NEW buggy action `BuggyAsyncClunkLeakReceive` (+ `9p_client_buggy_async_clunk_tag_leak.cfg`): the ownerless Rclunk consumed off the wire WITHOUT freeing the tag -- a permanently burned `outstanding[]` slot; caught by `TagAndOpAccounting`. The impl's monotonic never-reused fid allocator makes the spec's finite-FidIds reuse traces a SUPERSET of the impl's. |
 | `SendIO(t, fid)` — weft | Send `Tweft(fid)` on tag `t` (Weft-6; read-shaped — queries the flow's stable share_id + ring geometry; idempotent on the netd side; concurrent ops permitted) | `kernel/9p_session.c::p9_session_send_weft` (uses `p9_build_tweft`). Send-time precondition: fid bound. Dispatcher: the `op->kind == P9_TWEFT` arm populates `out->weft_geom` by value (no rmsg alias) via `p9_parse_rweft`; no fid-table mutation. `kernel/9p_client.c::p9_client_weft` copies the geom out. **Landed at Weft-6a-1.** This composes the existing `SendIO`/`ReceiveOp` tag-and-fid machinery (no `9p_client.tla` change; the buggy cfgs re-ran green). |
 | `SendIO(t, fid)` — other families | `Tlock` / `Tsync` / `Treflink` / `Tfallocate` / `Tfadvise` / xattr family on tag `t` for `fid` | Wire builders deferred to P5-wire-lock / -xattr / -stratum-ext; session-side dispatch handlers extend `p9_session_dispatch_rmsg` at each landing. |
 | `SendWalk(t, src, new)` | Send `Twalk(fid=src, newfid=new, n_names=N)` on tag `t` | `kernel/9p_session.c::p9_session_send_walk` (uses `p9_build_twalk`). Send-time precondition: src bound, new not bound, new ≠ root, no other in-flight op on new. **Landed at P5-session.** |
@@ -1598,6 +1599,22 @@ populate) + documented in LARDER-DESIGN §3.2/§11.
   within-episode window).
 - `fs_cache_liveness.cfg` (external writer, WF(Open)+WF(Evict)):
   `WriteEventuallyVisible`. GREEN, non-vacuous.
+
+### FID-LIFECYCLE cached-open (the fidless open) — maps onto the EXISTING actions
+
+The cached-open fast path (docs/FID-LIFECYCLE-DESIGN.md section 3.3;
+`kernel/dev9p.c::dev9p_open_cached` + the stalk pounce-block arm) adds NO new
+`fs_cache.tla` action. The forced-wire query Twalkgetattr at open IS the
+modeled `Open` (the close-to-open revalidation, reading the fresh cvers); the
+private per-open snapshot taken under ONE Larder lock hold at that fresh cvers
+is `Open`-time `Read` of every covered page, atomically (a concurrent
+`OwnWrite` invalidate either precedes -- failing the coverage -- or follows the
+whole copy, exactly the spec's atomic-Open linearization the gen guard realizes
+for installs); serving every read of the open from the immutable snapshot
+serves open-time values, which close-to-open permits (the model constrains what
+a serve may RETURN relative to the last Open, not which store it comes from).
+`larder_pages_cover`/`larder_pages_snapshot` are pure readers -- the modeled
+mutation surface (install/evict/invalidate) is untouched.
 - `fs_cache_buggy_stale_serve.cfg`: `NoStalePastRevalidation` VIOLATED (Open
   keeps a stale entry validated) — a 4-state counterexample.
 - `fs_cache_buggy_no_invalidate.cfg`: `NoWrongRead` VIOLATED (a read serves the

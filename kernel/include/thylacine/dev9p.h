@@ -48,6 +48,7 @@
 #define THYLACINE_DEV9P_H
 
 #include <thylacine/types.h>
+#include <thylacine/syscall.h>   // struct t_stat (the cached-open co_stat field)
 
 struct p9_client;
 struct p9_attached;
@@ -111,7 +112,32 @@ struct dev9p_priv {
     // __atomic-acquire; dev9p_close reads it plainly (it runs at the LAST ref, so
     // no concurrent mapper exists).
     struct weft_binding      *weft;
+    // FID-LIFECYCLE cached-open (docs/FID-LIFECYCLE-DESIGN.md section 3.3): the
+    // fidless open's per-open state. cached_open == true implies fid == P9_NOFID
+    // + fid_owned == false; co_buf holds the [0, co_size) content snapshot taken
+    // at open (NULL iff co_size == 0 -- the empty-file open), immutable for the
+    // Spoor's lifetime (reads copy out with no lock); co_stat is the open-time
+    // metadata (serves fstat -- the same close-to-open discipline as the attr
+    // cache). dev9p_close frees co_buf + uncharges the global budget.
+    bool                      cached_open;
+    u8                       *co_buf;
+    u64                       co_size;
+    struct t_stat             co_stat;
 };
+
+// Cached-open bounds (FID-LIFECYCLE section 3.3; the CF-3 bounce-budget class --
+// the snapshot is user-drivable kernel heap). Per-file cap: beyond it the fid
+// RTs amortize against the read volume anyway (the target is the small go-cache
+// file, ~1.6 pages measured). Global outstanding-bytes budget: GLOBAL, not
+// per-Proc -- a cached-open fd crosses Proc boundaries (rfork inheritance,
+// handle transfer), so a per-Proc charge would unbalance at close-by-inheritor.
+// Exhaustion degrades the fast path only (the fallback is the normal open).
+#define DEV9P_CO_MAX_SIZE  (128u * 1024u)
+#define DEV9P_CO_BUDGET    (8u * 1024u * 1024u)
+
+// Diagnostics: bytes currently held by live cached-open snapshots (the global
+// budget's occupancy). Tests assert the charge/uncharge balance.
+u64 dev9p_co_budget_used(void);
 
 #define DEV9P_PRIV_MAGIC 0x44395050u   // "D9PP" little-endian
 

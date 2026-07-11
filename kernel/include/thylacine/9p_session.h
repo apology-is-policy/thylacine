@@ -537,6 +537,7 @@ int p9_session_dispatch_rmsg(struct p9_session *s,
 bool   p9_session_is_open(const struct p9_session *s);   // state == OPEN
 bool   p9_session_fid_bound(const struct p9_session *s, u32 fid);
 size_t p9_session_inflight(const struct p9_session *s);  // outstanding count
+bool   p9_session_has_free_tag(const struct p9_session *s);  // a tag slot is free
 size_t p9_session_n_bound_fids(const struct p9_session *s);
 
 #endif  // THYLACINE_9P_SESSION_H

@@ -624,6 +624,9 @@ void test_stalk_stat_query(void);
 void test_stalk_stat_mount_leaf(void);
 void test_sys_stat_for_proc(void);
 void test_stalk_pounce_unsupported_fallback(void);
+void test_stalk_cached_open_arm(void);
+void test_stalk_cached_open_denials(void);
+void test_stalk_cached_open_mount_fallback(void);
 void test_devsrv_registered(void);
 void test_devsrv_open_root_dir(void);
 void test_devsrv_stat_native_root(void);
@@ -892,6 +895,7 @@ void test_9p_client_loom_renameat_e2e(void);
 void test_9p_client_loom_mutation_rejects(void);
 void test_9p_client_loom_multi_inflight_e2e(void);
 void test_9p_client_loom_multi_inflight_read_e2e(void);
+void test_9p_client_async_clunk_burst_no_fid_leak(void);
 void test_9p_client_send_backpressure_self_pump(void);
 void test_9p_client_send_backpressure_multi_waiter(void);
 void test_larder_install_serve(void);
@@ -917,6 +921,7 @@ void test_larder_page_offset(void);
 void test_larder_page_cvers_mismatch(void);
 void test_larder_page_partial(void);
 void test_larder_page_invalidate(void);
+void test_larder_page_invalidate_multifile(void);
 void test_larder_page_gen_guard(void);
 void test_larder_page_overwrite(void);
 void test_larder_page_bounded(void);
@@ -950,6 +955,8 @@ void test_dev9p_prw_wire_offset_and_cursor(void);
 void test_dev9p_wstat_readonly_fd(void);
 void test_dev9p_walk_attrs(void);
 void test_dev9p_page_cache_serve_and_gate(void);
+void test_dev9p_cached_open(void);
+void test_dev9p_cached_open_fallbacks(void);
 void test_dev9p_perm_enforced_deny_allow(void);
 void test_p9_attached_create_destroy(void);
 void test_p9_attached_handshake_failure_returns_null(void);
@@ -2173,6 +2180,7 @@ struct test_case g_tests[] = {
     { "larder.page_cvers_mismatch",    test_larder_page_cvers_mismatch,    false, NULL },
     { "larder.page_partial",           test_larder_page_partial,           false, NULL },
     { "larder.page_invalidate",        test_larder_page_invalidate,        false, NULL },
+    { "larder.page_invalidate_multifile", test_larder_page_invalidate_multifile, false, NULL },
     { "larder.page_gen_guard",         test_larder_page_gen_guard,         false, NULL },
     { "larder.page_overwrite",         test_larder_page_overwrite,         false, NULL },
     { "larder.page_bounded",           test_larder_page_bounded,           false, NULL },
@@ -2254,6 +2262,8 @@ struct test_case g_tests[] = {
     { "9p_client.loom_renameat_e2e",   test_9p_client_loom_renameat_e2e,   false, NULL },
     { "9p_client.loom_mutation_rejects",
                                        test_9p_client_loom_mutation_rejects, false, NULL },
+    { "9p_client.async_clunk_burst_no_fid_leak",
+                                       test_9p_client_async_clunk_burst_no_fid_leak, false, NULL },
     { "9p_client.loom_multi_inflight_e2e",
                                        test_9p_client_loom_multi_inflight_e2e, false, NULL },
     { "9p_client.loom_multi_inflight_read_e2e",
@@ -2307,6 +2317,8 @@ struct test_case g_tests[] = {
     { "dev9p.wstat_readonly_fd",       test_dev9p_wstat_readonly_fd,          false, NULL },
     { "dev9p.walk_attrs",              test_dev9p_walk_attrs,                 false, NULL },
     { "dev9p.page_cache_serve_and_gate", test_dev9p_page_cache_serve_and_gate, false, NULL },
+    { "dev9p.cached_open",             test_dev9p_cached_open,                 false, NULL },
+    { "dev9p.cached_open_fallbacks",   test_dev9p_cached_open_fallbacks,       false, NULL },
     { "dev9p.perm_enforced_deny_allow",
                                        test_dev9p_perm_enforced_deny_allow, false, NULL },
     { "p9_attached.create_destroy",    test_p9_attached_create_destroy,    false, NULL },
@@ -2628,6 +2640,9 @@ struct test_case g_tests[] = {
     { "stalk.stat_mount_leaf",         test_stalk_stat_mount_leaf,         false, NULL },
     { "sys_stat.for_proc",             test_sys_stat_for_proc,             false, NULL },
     { "stalk.pounce_unsupported_fallback", test_stalk_pounce_unsupported_fallback, false, NULL },
+    { "stalk.cached_open_arm",           test_stalk_cached_open_arm,             false, NULL },
+    { "stalk.cached_open_denials",       test_stalk_cached_open_denials,         false, NULL },
+    { "stalk.cached_open_mount_fallback", test_stalk_cached_open_mount_fallback, false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
 };
 

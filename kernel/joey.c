@@ -73,7 +73,7 @@
 // net boot probes (net-2c/3a/3b/3c each add a /net fid-machine harness)
 // pushed it past 256 KiB at net-3c; 384 KiB restores headroom for the
 // remaining net arc (net-3d..net-8) and later orchestration.
-#define JOEY_BLOB_MAX (384u * 1024u)
+#define JOEY_BLOB_MAX (512u * 1024u)
 static _Alignas(struct Elf64_Ehdr) u8 g_joey_elf_blob[JOEY_BLOB_MAX];
 
 // Arguments passed via rfork's `arg` to the child entry. Lives on the

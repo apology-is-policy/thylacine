@@ -43,6 +43,8 @@ void test_dev9p_prw_wire_offset_and_cursor(void);
 void test_dev9p_wstat_readonly_fd(void);
 void test_dev9p_walk_attrs(void);
 void test_dev9p_page_cache_serve_and_gate(void);
+void test_dev9p_cached_open(void);
+void test_dev9p_cached_open_fallbacks(void);
 
 // File-scope buffers — client is ~80 KiB (the embedded Larder attr+dentry+page
 // metadata), won't fit on the 16 KiB test thread stack alongside a few locals.
@@ -76,6 +78,16 @@ static u64 g_tread_req_offset, g_twrite_req_offset;
 // (a partial walk) -- the session layer must then leave newfid unbound and
 // dev9p_walk_attrs must leave nc untouched.
 static bool g_dev9p_wga_partial;
+
+// FID-LIFECYCLE cached-open: wire-op counters (which ops actually hit the
+// wire -- the fidless open's whole point is Tlopen/Tclunk NEVER do) + shape
+// overrides on the Rwalkgetattr body so tests can drive the leaf's size /
+// qid.version / qid.type (the canonical body is size 0x200+e / vers 0 / FILE).
+static u32  g_wga_seen, g_lopen_seen, g_clunk_seen;
+static bool g_wga_size_ov_on;
+static u64  g_wga_size_ov;
+static u32  g_wga_vers_ov;    // 0 = the canonical body (version 0)
+static u8   g_wga_type_ov;    // 0 = the canonical P9_QTFILE
 
 // Canonical responder — synthesizes valid Rmsgs for every op type
 // dev9p might issue. Mirrors the responder used in test_9p_client.c
@@ -135,6 +147,7 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         return (int)total;
     }
     if (type == P9_TCLUNK) {
+        g_clunk_seen++;
         // Empty body.
         if (resp_cap < P9_HDR_LEN) return -1;
         resp[0] = 7; resp[1] = 0; resp[2] = 0; resp[3] = 0;
@@ -143,6 +156,7 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         return (int)P9_HDR_LEN;
     }
     if (type == P9_TLOPEN) {
+        g_lopen_seen++;
         size_t total = P9_HDR_LEN + P9_QID_LEN + 4;
         if (resp_cap < total) return -1;
         resp[0] = (u8)(total & 0xff); resp[1] = 0; resp[2] = 0; resp[3] = 0;
@@ -298,6 +312,7 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         return (int)total;
     }
     if (type == P9_TWALKGETATTR) {
+        g_wga_seen++;
         // POUNCE: Rwalkgetattr = nwqid(2) + nwqid * getattr_body(153). Echo
         // the requested component count (or one fewer under g_wga_partial --
         // the session layer then leaves newfid unbound). Body offsets:
@@ -317,7 +332,11 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
             size_t o = P9_HDR_LEN + 2 + (size_t)e * P9_WGA_BODY_LEN;
             resp[o] = 0xff; resp[o + 1] = 0x07;              // valid = BASIC
             o += 8;
-            resp[o] = P9_QTFILE; o += 1 + 4;                 // qid.type + version
+            resp[o] = g_wga_type_ov ? g_wga_type_ov : P9_QTFILE;   // qid.type
+            { u32 v = g_wga_vers_ov;                         // qid.version
+              resp[o + 1] = (u8)v;         resp[o + 2] = (u8)(v >> 8);
+              resp[o + 3] = (u8)(v >> 16); resp[o + 4] = (u8)(v >> 24); }
+            o += 1 + 4;
             resp[o] = (u8)(0x20 + e); o += 8;                // qid.path
             { u32 m = 0100644u;                              // mode
               resp[o] = (u8)m; resp[o + 1] = (u8)(m >> 8);
@@ -326,7 +345,13 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
             resp[o] = 0x22; resp[o + 1] = 0x22; o += 4;      // gid = 0x2222
             resp[o] = 1; o += 8;                             // nlink
             o += 8;                                          // rdev
-            resp[o] = (u8)e; resp[o + 1] = 0x02; o += 8;     // size = 0x200 + e
+            if (g_wga_size_ov_on) {                          // size (overridden)
+                u64 sz = g_wga_size_ov;
+                for (int b = 0; b < 8; b++) resp[o + b] = (u8)(sz >> (8 * b));
+                o += 8;
+            } else {
+                resp[o] = (u8)e; resp[o + 1] = 0x02; o += 8; // size = 0x200 + e
+            }
             resp[o] = 0x00; resp[o + 1] = 0x10; o += 8;      // blksize = 4096
             // blocks + times + gen + dv stay 0.
         }
@@ -570,16 +595,21 @@ void test_dev9p_close_clunks_owned_fid(void) {
     // Capture inflight count before close (should be 0 — walk completed).
     size_t before = p9_session_inflight(&g_client.session);
     spoor_clunk(nc);
-    // After close, the dev9p.close path issued a Tclunk + got Rclunk
-    // synchronously through the loopback. Inflight should still be 0.
-    size_t after = p9_session_inflight(&g_client.session);
-    TEST_EXPECT_EQ((u64)before, (u64)after,
-                    "clunk completed synchronously (inflight unchanged)");
-    // The walk-allocated fid is no longer in the session's bound set.
-    // The walk allocated fid 1 (next_fid after root_fid=0); verify it's
-    // not bound anymore.
+    // FID-LIFECYCLE async-clunk: dev9p_close fires the Tclunk FIRE-AND-FORGET.
+    // The fid unbinds at SEND (I-11), but the Rclunk is NOT drained here -- the
+    // tag stays outstanding until a later op's elected reader pumps it (I-10, the
+    // #845 ownerless drain). The single-slot loopback has no later op, so the
+    // deferred reply is verified by driving the reader pump explicitly (exactly
+    // what the next real op does).
     TEST_ASSERT(!p9_session_fid_bound(&g_client.session, 1),
-                 "walk-allocated fid 1 is unbound after close");
+                 "walk-allocated fid 1 is unbound at send (async-clunk)");
+    size_t after_send = p9_session_inflight(&g_client.session);
+    TEST_EXPECT_EQ((u64)after_send, (u64)(before + 1),
+                    "async-clunk leaves the Tclunk outstanding (deferred, not synchronous)");
+    (void)p9_client_reader_pump_once(&g_client);
+    size_t after_drain = p9_session_inflight(&g_client.session);
+    TEST_EXPECT_EQ((u64)after_drain, (u64)before,
+                    "the ownerless Rclunk drains via the reader pump (tag freed)");
 
     teardown(root);
 }
@@ -1262,7 +1292,11 @@ void test_dev9p_walk_attrs(void) {
         TEST_EXPECT_EQ((u64)sts[1].gid,  (u64)0x2222u, "gid mapped");
         TEST_EXPECT_EQ(sts[1].size, (u64)0x201, "size mapped (0x200+1)");
         walkqid_free(w);
-        spoor_clunk(nc);   // clunks the bound fid
+        spoor_clunk(nc);   // clunks the bound fid (FID-LIFECYCLE async-clunk)
+        // async-clunk defers the Rclunk; drain it before the next sub-test's op
+        // so the single-slot loopback is not left holding a stale reply (the real
+        // system drains it via the next op's reader).
+        (void)p9_client_reader_pump_once(&g_client);
     }
 
     // BIND form, PARTIAL walk: the responder answers one short; the session
@@ -1354,5 +1388,196 @@ void test_dev9p_page_cache_serve_and_gate(void) {
     larder_destroy(&g_client.larder);
     __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);   // restore default for teardown
     spoor_clunk(nc);
+    teardown(root);
+}
+
+// =============================================================================
+// FID-LIFECYCLE cached-open (docs/FID-LIFECYCLE-DESIGN.md section 3.3).
+// =============================================================================
+
+// Prime the Larder metadata for `name`: a bind-form walk_attrs latches
+// cacheable + installs the dentry + attr from the wire (the canonical
+// responder: qid.path 0x20, size 0x200 unless overridden), then close the
+// bound Spoor + drain its deferred Rclunk so the single-slot loopback is
+// clean for the next wire op.
+static void co_prime(struct Spoor *root, const char *name, size_t len) {
+    struct Spoor *nc = spoor_clone(root);
+    TEST_ASSERT(nc != NULL, "co_prime clone");
+    const char *names[1] = { name };
+    size_t lens[1] = { len };
+    struct t_stat sts[DEV_WALK_ATTRS_MAX];
+    struct Walkqid *w = dev9p.walk_attrs(root, nc, names, lens, 1, sts);
+    TEST_ASSERT(w != NULL && w->spoor == nc, "co_prime bind walk");
+    walkqid_free(w);
+    spoor_clunk(nc);
+    (void)p9_client_reader_pump_once(&g_client);   // drain the async Rclunk
+}
+
+void test_dev9p_cached_open(void) {
+    struct Spoor *root = make_open_client_and_root();
+    struct larder *l = &g_client.larder;
+    const char *names[1] = { "fileA" };
+    size_t lens[1] = { 5 };
+    struct t_stat sts[DEV_WALK_ATTRS_MAX];
+
+    co_prime(root, "fileA", 5);
+
+    // Pages absent -> the RPC-free hint misses; NO wire op is spent.
+    g_wga_seen = 0; g_lopen_seen = 0; g_clunk_seen = 0;
+    struct Spoor *co = dev9p.open_cached(root, (const char *const *)names,
+                                         lens, 1, sts);
+    TEST_ASSERT(co == NULL, "no pages cached -> hint miss -> NULL");
+    TEST_EXPECT_EQ((u64)g_wga_seen, 0ull, "a hint miss costs no wire op");
+
+    // Install the covering page: content [0, 0x200) at cvers 0 (the canonical
+    // responder's fresh version).
+    static u8 data[0x200];
+    for (u32 i = 0; i < sizeof(data); i++) data[i] = (u8)(i * 7 + 3);
+    larder_page_install(l, larder_gen_snapshot(l), 0x20, 0, 0, data,
+                        (u32)sizeof(data));
+
+    u64 budget0 = dev9p_co_budget_used();
+
+    // The fidless open: exactly ONE wire op (the forced-fresh query), no
+    // Tlopen, the fresh records in sts, the budget charged.
+    g_wga_seen = 0;
+    co = dev9p.open_cached(root, (const char *const *)names, lens, 1, sts);
+    TEST_ASSERT(co != NULL, "cached-open mints the fidless Spoor");
+    TEST_EXPECT_EQ((u64)g_wga_seen, 1ull, "exactly one wire op (the fresh query)");
+    TEST_EXPECT_EQ((u64)g_lopen_seen, 0ull, "no Tlopen");
+    TEST_ASSERT((co->flag & COPEN) != 0, "the Spoor is opened");
+    TEST_EXPECT_EQ(co->qid.path, 0x20ull, "the leaf qid");
+    struct dev9p_priv *cp = dev9p_priv_of(co);
+    TEST_ASSERT(cp != NULL && cp->cached_open, "cached_open priv");
+    TEST_EXPECT_EQ((u64)cp->fid, (u64)P9_NOFID, "fidless (P9_NOFID)");
+    TEST_EXPECT_EQ(sts[0].qid_path, 0x20ull, "fresh sts filled for the post-scan");
+    TEST_EXPECT_EQ(sts[0].size, 0x200ull, "fresh leaf size");
+    TEST_EXPECT_EQ(dev9p_co_budget_used() - budget0, 0x200ull, "budget charged");
+
+    // Reads serve the snapshot: full, sliced, EOF at + past size.
+    u8 buf[0x260];
+    long r = dev9p.read(co, buf, (long)sizeof(buf), 0);
+    TEST_EXPECT_EQ((u64)r, 0x200ull, "read serves the full snapshot");
+    bool bytes_ok = true;
+    for (u32 i = 0; i < 0x200; i++)
+        if (buf[i] != data[i]) { bytes_ok = false; break; }
+    TEST_ASSERT(bytes_ok, "snapshot bytes verbatim");
+    r = dev9p.read(co, buf, 50, 100);
+    TEST_EXPECT_EQ((u64)r, 50ull, "sliced read");
+    TEST_ASSERT(buf[0] == data[100] && buf[49] == data[149], "slice bytes");
+    r = dev9p.read(co, buf, 64, 0x200);
+    TEST_EXPECT_EQ((u64)r, 0ull, "read at size -> EOF");
+    r = dev9p.read(co, buf, 64, 5000);
+    TEST_EXPECT_EQ((u64)r, 0ull, "read past size -> EOF");
+
+    // fstat serves the open-time stat; the fidless seams fail loud / no-op.
+    struct t_stat st;
+    TEST_EXPECT_EQ((u64)dev9p.stat_native(co, &st), 0ull, "fidless fstat serves");
+    TEST_EXPECT_EQ(st.size, 0x200ull, "fstat size");
+    TEST_EXPECT_EQ(st.qid_path, 0x20ull, "fstat qid");
+    TEST_ASSERT(dev9p.wstat_native(co, T_WSTAT_MODE, 0644, 0, 0) == -1,
+                "wstat on a fidless fd fails LOUD (the documented seam)");
+    TEST_EXPECT_EQ((u64)dev9p.fsync(co, 0), 0ull, "fsync no-ops 0 (read-only fd)");
+    TEST_ASSERT(dev9p.write(co, "x", 1, 0) < 0, "write rejected");
+    TEST_ASSERT(dev9p.readdir(co, buf, 64, 0) < 0, "readdir rejected");
+    TEST_ASSERT(dev9p.walk(co, NULL, names, 1) == NULL,
+                "walk FROM a fidless Spoor rejected (NOFID guard)");
+    TEST_ASSERT(dev9p.walk_attrs(co, NULL, names, lens, 1, sts) == NULL,
+                "walk_attrs FROM a fidless Spoor rejected (NOFID guard)");
+
+    // Close: wire-free (no Tclunk) + the budget released.
+    g_clunk_seen = 0;
+    spoor_clunk(co);
+    TEST_EXPECT_EQ((u64)g_clunk_seen, 0ull, "close sends NO Tclunk");
+    TEST_EXPECT_EQ(dev9p_co_budget_used(), budget0, "budget uncharged at close");
+
+    larder_destroy(l);
+    __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
+    teardown(root);
+}
+
+void test_dev9p_cached_open_fallbacks(void) {
+    struct Spoor *root = make_open_client_and_root();
+    struct larder *l = &g_client.larder;
+    const char *names[1] = { "fileB" };
+    size_t lens[1] = { 5 };
+    struct t_stat sts[DEV_WALK_ATTRS_MAX];
+    static u8 data[0x200];
+    for (u32 i = 0; i < sizeof(data); i++) data[i] = (u8)(i ^ 0x5a);
+
+    co_prime(root, "fileB", 5);
+
+    // (a) Page cvers stale vs the CACHED attr -> the hint misses; no wire op.
+    larder_page_install(l, larder_gen_snapshot(l), 0x20, 0, /*cvers=*/7, data,
+                        (u32)sizeof(data));
+    g_wga_seen = 0;
+    struct Spoor *co = dev9p.open_cached(root, (const char *const *)names,
+                                         lens, 1, sts);
+    TEST_ASSERT(co == NULL, "stale page cvers (hint) -> NULL");
+    TEST_EXPECT_EQ((u64)g_wga_seen, 0ull, "no wire op on a hint miss");
+
+    // (b) THE B2 REGRESSION: the hint passes (cached attr cvers 0 == page
+    // cvers 0) but the SERVER's fresh version moved -> the FRESH gate must
+    // fail the open. A buggy impl that trusted the locally-served attr
+    // (B1/loose) would mint here and serve stale content.
+    larder_page_install(l, larder_gen_snapshot(l), 0x20, 0, /*cvers=*/0, data,
+                        (u32)sizeof(data));
+    g_wga_vers_ov = 5;
+    u64 b0 = dev9p_co_budget_used();
+    g_wga_seen = 0;
+    co = dev9p.open_cached(root, (const char *const *)names, lens, 1, sts);
+    TEST_ASSERT(co == NULL, "fresh-cvers mismatch -> fallback (B2, not B1)");
+    TEST_EXPECT_EQ((u64)g_wga_seen, 1ull, "the query DID reach the wire");
+    TEST_EXPECT_EQ(dev9p_co_budget_used(), b0, "budget balanced on the miss");
+    g_wga_vers_ov = 0;
+
+    // (c) Partial coverage: valid_len short of the required boundary (the
+    // msize-clamp shape) -> the hint's coverage fails; no served hole.
+    larder_page_install(l, larder_gen_snapshot(l), 0x20, 0, /*cvers=*/0, data,
+                        300);
+    g_wga_seen = 0;
+    co = dev9p.open_cached(root, (const char *const *)names, lens, 1, sts);
+    TEST_ASSERT(co == NULL, "partial page -> coverage fails -> NULL");
+    TEST_EXPECT_EQ((u64)g_wga_seen, 0ull, "no wire op on a coverage miss");
+
+    // (d) Oversize leaf: the size cap gates at the hint; no wire op.
+    g_wga_size_ov_on = true;
+    g_wga_size_ov = (u64)DEV9P_CO_MAX_SIZE + 1u;
+    co_prime(root, "fileB", 5);           // re-prime the attr at the new size
+    g_wga_seen = 0;
+    co = dev9p.open_cached(root, (const char *const *)names, lens, 1, sts);
+    TEST_ASSERT(co == NULL, "over-cap size -> NULL");
+    TEST_EXPECT_EQ((u64)g_wga_seen, 0ull, "no wire op on the size gate");
+
+    // (e) A DIRECTORY leaf with size 0 would be "trivially covered" -- the
+    // type gate MUST refuse it (a minted dir-as-file Spoor would break
+    // readdir). Load-bearing, not defense.
+    g_wga_size_ov = 0;                    // size 0: trivially covered
+    g_wga_type_ov = P9_QTDIR;
+    co_prime(root, "fileB", 5);
+    g_wga_seen = 0;
+    co = dev9p.open_cached(root, (const char *const *)names, lens, 1, sts);
+    TEST_ASSERT(co == NULL, "a size-0 DIRECTORY leaf is refused (type gate)");
+    g_wga_type_ov = 0;
+
+    // (f) The empty FILE: size 0, plain type -> the 1-RT fidless open works
+    // (no pages needed; reads are EOF immediately).
+    co_prime(root, "fileB", 5);           // attr: size 0, type FILE
+    u64 b1 = dev9p_co_budget_used();
+    g_wga_seen = 0; g_lopen_seen = 0; g_clunk_seen = 0;
+    co = dev9p.open_cached(root, (const char *const *)names, lens, 1, sts);
+    TEST_ASSERT(co != NULL, "empty-file cached-open mints");
+    TEST_EXPECT_EQ((u64)g_wga_seen, 1ull, "one wire op");
+    u8 buf[16];
+    TEST_EXPECT_EQ((u64)dev9p.read(co, buf, 16, 0), 0ull, "empty file: EOF at 0");
+    spoor_clunk(co);
+    TEST_EXPECT_EQ((u64)g_lopen_seen + (u64)g_clunk_seen, 0ull,
+                   "empty-file open+close fully wire-free beyond the query");
+    TEST_EXPECT_EQ(dev9p_co_budget_used(), b1, "budget balanced (0-byte charge)");
+    g_wga_size_ov_on = false;
+    g_wga_size_ov = 0;
+
+    larder_destroy(l);
+    __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
     teardown(root);
 }

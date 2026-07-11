@@ -67,33 +67,73 @@
 #include <thylacine/spinlock.h>
 #include <thylacine/syscall.h>   // struct t_stat
 
-// Attr-cache capacity. The base X-check re-stat storm hits a handful of dirs
-// (root 96.8%, ~7 top-level dirs); the full dir working set is ~313 + the hot
-// fstat'd files. 256 covers the base X-check completely with ample headroom for
-// fstat locality; the memory is ~26 KiB/client (a p9_client already carries a
-// 32 KiB out_buf, and there are a handful of live clients). Tunable.
-#define LARDER_ATTR_ENTRIES 256u
+// Attr + dentry capacity (FID-LIFECYCLE re-size, 2026-07-10). 256 covered the
+// L1c target (the base X-check dir set, ~7 hot dirs + fstat locality). The
+// cached-open hint (docs/FID-LIFECYCLE-DESIGN.md section 3.3) expands the
+// metadata working set to EVERY opened file -- a warm go build touches ~800+
+// distinct leaves, and at 256 slots the leaf entries evict before re-open
+// (measured: 86% of cached-open attempts died on the metadata chain; the #343
+// dcache lesson -- cross the working-set threshold or get nothing). 4096 holds
+// the build working set. Both arrays are HEAP (lazily allocated on first
+// install, the task-#25 page-array pattern) with an O(1) chained hash + a
+// free-cursor + CLOCK eviction -- a linear scan at 4096 would cost more than
+// the RPCs it saves, and heap-lazy means a non-cacheable client (netd)
+// allocates neither. ~0.9 MiB/client when populated. Tunable.
+#define LARDER_ATTR_ENTRIES 4096u
 
-// Dentry-cache capacity + the inline component-name bound. The hot re-resolution
-// set (root -> ~7 top-level dirs re-walked thousands of times) + the failed-lookup
-// storm (import/search-path negative probes) both fit comfortably; 256 mirrors the
-// attr cache. NAME_MAX 88 covers a go-cache content-hash file name (a 64-hex hash +
-// suffix ~66 B); a longer component is simply not cached (the serve/populate
-// fail-safe to the RPC -- correctness is unaffected, only that walk isn't elided).
-#define LARDER_DENTRY_ENTRIES  256u
+// Dentry-cache capacity + the inline component-name bound. Sized with the attr
+// cache (each opened leaf needs BOTH its dentry and its attr resident for the
+// cached-open hint chain). NAME_MAX 88 covers a go-cache content-hash file name
+// (a 64-hex hash + suffix ~66 B); a longer component is simply not cached (the
+// serve/populate fail-safe to the RPC -- correctness is unaffected, only that
+// walk isn't elided).
+#define LARDER_DENTRY_ENTRIES  4096u
 #define LARDER_DENTRY_NAME_MAX 88u
 
 // Page-cache capacity + unit (L1e). Each slot caches one LARDER_PAGE_SIZE window of
 // a file's content, keyed (qid.path, page_index = file offset / LARDER_PAGE_SIZE).
 // The unit is one 4 KiB page (aligns with the buddy/demand-page system and Go's
 // page-aligned .a reads). LARDER_PAGE_ENTRIES slots x 4 KiB = the per-client page
-// budget: the slot buffers are HEAP (unlike the inline attr/dentry entries), lazily
-// kmalloc'd per slot, reused across evictions, freed at larder_destroy. 512 slots
-// = 2 MiB caches the hot cold-read re-read set (cross-package .a export data --
-// 83.9% cold read redundancy); tunable at L1f. Only a cacheable client (a proven
-// content-versioned FS -- p9_client.cacheable) ever allocates page buffers, so a
-// stream/control server (netd) costs only the inline slot metadata, never heap.
-#define LARDER_PAGE_ENTRIES 512u
+// budget. BOTH the slot buffers AND the slot-entry ARRAY are heap: the array is
+// lazily allocated on the first page install (so a stream/control server -- netd,
+// never cacheable -- allocates NEITHER the array NOR any buffer), and the buffers
+// are lazily kmalloc'd per slot, reused across evictions, freed at larder_destroy.
+// 32768 slots = 128 MiB CEILING (lazy: only touched pages allocate a 4 KiB buffer, so a
+// light client pays ~1.7 MiB metadata + only its live pages; a stream/control client --
+// netd -- pays nothing). Measured 2026-07-10 (task #29, the cached-open re-measure): 8192
+// (32 MiB) THRASHED the go-build read working set -- build2-warm pe=12119 evictions,
+// gofmt-cold pe=18733 -- because a Go build reads the package archives SEQUENTIALLY (an
+// LRU-hostile scan, not the Zipf hot-subset the 8192 note assumed): the cache helps only
+// once it holds the WHOLE working set. Sizing to hold it (build2 ~20k pages, gofmt-cold
+// ~27k) drove pe -> 0 on every window, a COMPOUND win: (a) reads hit (build2 read RTs
+// 2489 -> 982) AND (b) cached-open COVERAGE now passes (pages stay resident to the next
+// open) so MINTED 3.6x (396 -> 1437) + hcover -88% (1185 -> 144), collapsing the fid
+// lifecycle too. Warm floor build2 605 -> 510 ms, gofmt 805 -> 653 ms (both ~-16-19%).
+// The knee is ~27k (gofmt-cold); 32768 is the pow2 above it with margin. A real project
+// larger than gofmt re-thrashes -> a memory-pressure-adaptive cap (a shrinker) is the
+// v1.x design (Thylacine has no reclaim framework yet); the buffers stay resident until
+// larder_destroy (mount teardown) -- the v1.0 no-reclaim window, bounded per client
+// (~2-3 cacheable FS-mount clients at v1.0 -> ~256-384 MiB peak on the 2 GiB dev target,
+// ~13-19%). STEWARDSHIP (task-#29 audit F1): on a small-RAM target (RPi4 / Lazarus) the
+// 128 MiB x client-count makes the absent shrinker load-bearing -- land the adaptive cap
+// (or shrink the constant) before a constrained-RAM bring-up.
+// Task-#25 audit P3 dispositions (all correctness-safe):
+//   F1: the entry array is 32768*sizeof(ent) ~= 1.7 MiB -> alloc_pages(order 9) = a 2-MiB
+//       CONTIGUOUS block. Under a fragmented buddy that alloc can fail -> page_ensure
+//       returns false -> the client silently serves as a pure miss (I-38 holds; NO
+//       correctness impact) and RE-ATTEMPTS on the next install, so it SELF-HEALS when
+//       fragmentation clears. A chunked/non-contiguous entry pool is the v1.x robustness
+//       fix if a large-cap contiguous alloc ever proves to disable the cache in practice.
+//   F2: the one-time first-install allocates + zeroes the array + inits both hashes UNDER
+//       l->lock (preempt-off) -- a bounded spike, once per cacheable client (~2-3 at v1.0).
+//       Double-checked-locking publish outside the lock is the v1.x cleanup.
+//   F3 CLOSED (task #29): invalidate WAS O(page_cap) -- at 32768 that is a 32k-slot locked
+//       scan per own-write (gofmt-cold write=5896 -> ~193M scans). Fixed with a SECONDARY
+//       index keyed by qid_path alone (page_qhash + the qnext chain): every page of one
+//       file shares one qbucket, so larder_page_invalidate walks only that file's pages
+//       (+ hash collisions) -- O(pages-of-file), independent of cap. This is what makes
+//       the large cap affordable for the write-heavy cold path.
+#define LARDER_PAGE_ENTRIES 32768u
 #define LARDER_PAGE_SIZE    4096u
 
 struct larder_attr_ent {
@@ -102,7 +142,8 @@ struct larder_attr_ent {
     u32            cvers;      // content-version (qid.version == si_cvers) at fetch;
                                //   consumed by the L1e page revalidation.
     bool           valid;      // slot occupied
-    u64            lru;        // last-access sequence (LRU eviction)
+    bool           ref;        // CLOCK second-chance bit (set on serve/install)
+    s32            hnext;      // hash chain: next slot in this key's bucket, -1 = end
     struct t_stat  attr;       // cached metadata (mode/uid/gid/size/times/nlink/...)
 };
 
@@ -122,7 +163,8 @@ struct larder_dentry_ent {
     u32  name_len;          // key part 2: name[0..name_len)
     bool valid;             // slot occupied
     bool negative;          // true: (parent,name) -> ENOENT (no child)
-    u64  lru;               // last-access sequence (LRU eviction)
+    bool ref;               // CLOCK second-chance bit (set on serve/install)
+    s32  hnext;             // hash chain: next slot in this key's bucket, -1 = end
     char name[LARDER_DENTRY_NAME_MAX];   // the component (NOT NUL-terminated)
 };
 
@@ -142,17 +184,38 @@ struct larder_page_ent {
     u32  cvers;        // content-version (fid qid.vers) at fetch -- the freshness gate
     u32  valid_len;    // bytes [0, valid_len) of `page` hold content (<= LARDER_PAGE_SIZE)
     bool valid;        // slot occupied (buffer may still be allocated when !valid)
-    u64  lru;          // last-access sequence (LRU eviction)
+    bool ref;          // CLOCK second-chance reference bit (set on serve-hit / install)
+    s32  hnext;        // (qid_path,page_index) hash chain: next slot in this bucket, -1 = end
+    s32  qnext;        // qid_path-only hash chain (page_qhash): O(pages-of-file) invalidate
     u8  *page;         // heap buffer (lazily kmalloc'd; reused; freed at larder_destroy)
 };
 
 struct larder {
     spin_lock_t               lock;       // dedicated near-leaf; never held across an RPC
-    u64                       lru_clock;  // monotonic; stamps ent->lru on access
     u64                       gen;        // monotonic invalidation sequence (populate guard)
-    struct larder_attr_ent    attr[LARDER_ATTR_ENTRIES];
-    struct larder_dentry_ent  dentry[LARDER_DENTRY_ENTRIES];
-    struct larder_page_ent    page[LARDER_PAGE_ENTRIES];
+    // All three sub-cache entry arrays are HEAP (lazily allocated on the first
+    // install -- a non-cacheable client allocates none) with the same O(1)
+    // index shape: chained hash + free-cursor fill + CLOCK eviction.
+    struct larder_attr_ent   *attr;         // heap; lazily allocated on 1st install
+    u32                       attr_cap;
+    s32                      *attr_hash;
+    u32                       attr_nbuckets;
+    u32                       attr_used;
+    u32                       attr_hand;
+    struct larder_dentry_ent *dentry;       // heap; lazily allocated on 1st install
+    u32                       dentry_cap;
+    s32                      *dentry_hash;
+    u32                       dentry_nbuckets;
+    u32                       dentry_used;
+    u32                       dentry_hand;
+    struct larder_page_ent   *page;         // heap; lazily allocated on 1st install
+    u32                       page_cap;      // page[] slot count (0 until allocated)
+    s32                      *page_hash;     // heap bucket heads (page_nbuckets); -1 empty
+    u32                       page_nbuckets; // pow2, ~= 2*page_cap (open-chain hash)
+    u32                       page_used;     // free-cursor: next never-used slot (fill phase)
+    u32                       page_hand;     // CLOCK hand (eviction, once cap-full)
+    s32                      *page_qhash;    // heap qid_path-only bucket heads (page_qnbuckets); -1 empty
+    u32                       page_qnbuckets;// pow2; the F3 O(pages-of-file)-invalidate index
     // Diagnostics (hit-rate measurement for the L1f bench; not load-bearing).
     u64 attr_hits;
     u64 attr_misses;
@@ -173,6 +236,8 @@ struct larder {
     u64 page_install_skips;   // gen-guard skips
     u64 page_invalidations;   // pages dropped by own-write invalidate
     u64 page_evictions;
+    u64 co_snapshots;         // cached-open snapshots served (fidless opens minted)
+    u64 co_misses;            // cached-open snapshot failures (coverage lost pre-copy)
 };
 
 // Initialize an embedded Larder (memset-equivalent + lock init). No teardown --
@@ -279,9 +344,28 @@ void larder_page_install(struct larder *l, u64 seq0, u64 qid_path, u64 page_inde
 // content must be skipped). Slot buffers are retained for reuse.
 void larder_page_invalidate(struct larder *l, u64 qid_path);
 
-// Free every lazily-allocated page buffer. Called from p9_client_destroy (the
-// attr/dentry sub-caches are inline -- only the page buffers are heap). No op is
-// in flight at destroy (the last attached ref dropped), so the lock is defensive.
+// -- FID-LIFECYCLE cached-open helpers (docs/FID-LIFECYCLE-DESIGN.md §3.3) ------
+//
+// PURE READERS for the fidless open: neither mutates cache state beyond the
+// CLOCK ref bit, so the L1f-audited mutation surface is untouched. Coverage =
+// pages [0, ceil(size/PAGE)) all resident at `cvers`, each holding content to
+// min(PAGE, size - i*PAGE) (a mid-file msize-clamped partial page FAILS -- no
+// served hole). size == 0 is trivially covered.
+
+// The RPC-free hint: is [0, size) of qid_path fully cached at cvers?
+bool larder_pages_cover(struct larder *l, u64 qid_path, u32 cvers, u64 size);
+
+// Verify coverage AND copy [0, size) into `out` (caller-owned, >= size bytes)
+// under ONE lock hold -- atomic vs a concurrent invalidate (it precedes, failing
+// the coverage, or follows the whole copy). Returns false on any coverage gap
+// (`out` may be partially scribbled; the caller discards it). The open-time
+// snapshot IS the fs_cache.tla Open linearization for the cached-open path.
+bool larder_pages_snapshot(struct larder *l, u64 qid_path, u32 cvers,
+                           u64 size, u8 *out);
+
+// Free every lazily-allocated array + page buffer (all three sub-caches are
+// heap). Called from p9_client_destroy. No op is in flight at destroy (the last
+// attached ref dropped), so the lock is defensive.
 void larder_destroy(struct larder *l);
 
 #endif // THYLACINE_LARDER_H

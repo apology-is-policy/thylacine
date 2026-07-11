@@ -85,6 +85,12 @@ void test_stalk_stat_mount_leaf(void);
 void test_sys_stat_for_proc(void);
 void test_stalk_pounce_unsupported_fallback(void);
 
+// FID-LIFECYCLE cached-open: the resolver arm (engagement, mode gate,
+// fail-ordering post-scan, mount discard-and-fallback).
+void test_stalk_cached_open_arm(void);
+void test_stalk_cached_open_denials(void);
+void test_stalk_cached_open_mount_fallback(void);
+
 // =============================================================================
 // The fixture Dev.
 // =============================================================================
@@ -106,6 +112,7 @@ static const struct fixnode g_fix[] = {
     { 5, 0, "nox",    QTDIR,  0644u },
     { 6, 5, "sekret", QTFILE, 0600u },
     { 7, 0, "loop",   QTDIR,  0755u },
+    { 8, 1, "nor",    QTFILE, 0200u },   // owner write-only: the leaf-R deny
 };
 #define FIX_LOOP_PATH 7u
 
@@ -237,6 +244,46 @@ static struct Spoor *fix_open(struct Spoor *c, int omode) {
 
 static void fix_close(struct Spoor *c) { (void)c; /* qid-based: no heap aux */ }
 
+// FID-LIFECYCLE cached-open fixture slot. Controllable: g_fix_co_enable false
+// declines every attempt (the arm must fall back byte-identically); enabled, it
+// resolves the run through the FIXTURE table (the "underlying tree" -- blind to
+// mounts, exactly like a real Dev), fills FRESH sts, and mints an OPENED Spoor
+// for a plain-file leaf. The counters prove engagement/minting non-vacuously.
+static int  g_fix_co_calls;    // slot invocations (the arm consulted us)
+static int  g_fix_co_minted;   // successful mints (the arm then post-scans)
+static bool g_fix_co_enable;
+
+static struct Spoor *fix_open_cached(struct Spoor *c, const char *const *names,
+                                     const size_t *name_lens, int nname,
+                                     struct t_stat *sts) {
+    g_fix_co_calls++;
+    if (!g_fix_co_enable) return NULL;
+    if (!c || !names || !name_lens || !sts) return NULL;
+    if (nname <= 0 || nname > DEV_WALK_ATTRS_MAX) return NULL;
+    u64 cur = c->qid.path;
+    for (int i = 0; i < nname; i++) {
+        char nb[SYS_WALK_OPEN_NAME_MAX + 1];
+        size_t l = name_lens[i];
+        if (l == 0 || l > SYS_WALK_OPEN_NAME_MAX) return NULL;
+        for (size_t k = 0; k < l; k++) nb[k] = names[i][k];
+        nb[l] = '\0';
+        struct Qid next;
+        if (!fix_walk_one(cur, nb, &next)) return NULL;
+        if (fix_stat_qid(next.path, &sts[i]) != 0) return NULL;
+        cur = next.path;
+    }
+    if (sts[nname - 1].qid_type & QTDIR) return NULL;   // plain files only
+    struct Spoor *co = spoor_clone(c);
+    if (!co) return NULL;
+    co->qid.path = sts[nname - 1].qid_path;
+    co->qid.vers = 0;
+    co->qid.type = sts[nname - 1].qid_type;
+    co->flag |= COPEN;
+    co->mode  = 0;
+    g_fix_co_minted++;
+    return co;
+}
+
 // The fixture Dev. dc is a test-only sentinel; it is NOT dev_register'd, so the
 // dc never collides with a real Dev (stalk reaches it only through the Spoors we
 // hand it directly).
@@ -247,6 +294,7 @@ static struct Dev stalkfix = {
     .attach        = NULL,   // we mint the root via dev_simple_attach(&stalkfix,...)
     .walk          = fix_walk,
     .walk_attrs    = fix_walk_attrs,   // POUNCE: the whole battery runs the fast path
+    .open_cached   = fix_open_cached,  // FID-LIFECYCLE: the resolver-arm tests
     .stat_native   = fix_stat_native,
     .open          = fix_open,
     .close         = fix_close,
@@ -1205,5 +1253,153 @@ void test_stalk_pounce_unsupported_fallback(void) {
     TEST_ASSERT(deny == NULL, "denial intact on the fallback path");
     TEST_EXPECT_EQ((u64)e, (u64)T_E_ACCES, "ACCES on the fallback path");
 
+    spoor_unref(root);
+}
+
+// =============================================================================
+// FID-LIFECYCLE cached-open: the resolver arm (docs/FID-LIFECYCLE-DESIGN.md
+// section 3.3). The Dev-slot internals (hint / fresh query / snapshot / budget)
+// are dev9p's tests; THESE prosecute the stalk side -- engagement, the strict
+// mode gate, the mandatory fail-ordering post-scan, and the mount discard.
+// =============================================================================
+
+void test_stalk_cached_open_arm(void) {
+    struct Proc p; mkproc_system(&p);
+    struct Spoor *root = fix_root();
+    TEST_ASSERT(root != NULL, "fix_root");
+
+    // Engaged: the arm serves the open FROM the slot -- the batched walk never
+    // runs (short-circuit), the result is the opened leaf.
+    g_fix_co_enable = true;
+    g_fix_co_calls = 0; g_fix_co_minted = 0;
+    int wa0 = g_fix_walkattrs_calls;
+    struct Spoor *q = stalk(&p, root, "a/b", 3, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "cached-open resolves a/b");
+    TEST_EXPECT_EQ((u64)q->qid.path, 2ull, "the leaf qid");
+    TEST_ASSERT((q->flag & COPEN) != 0, "opened");
+    TEST_EXPECT_EQ((u64)g_fix_co_calls, 1ull, "the arm consulted the slot");
+    TEST_EXPECT_EQ((u64)g_fix_co_minted, 1ull, "the slot minted");
+    TEST_EXPECT_EQ((u64)(g_fix_walkattrs_calls - wa0), 0ull,
+                   "the batched walk was short-circuited");
+    spoor_clunk(q);
+
+    // The strict mode gate: anything but a plain OREAD never consults the
+    // slot (write / OTRUNC / OEXEC / a non-open amode).
+    g_fix_co_calls = 0;
+    q = stalk(&p, root, "a/b", 3, STALK_OPEN, 1);          // OWRITE
+    TEST_ASSERT(q != NULL, "OWRITE resolves via the normal path");
+    TEST_EXPECT_EQ((u64)g_fix_co_calls, 0ull, "OWRITE never consults the slot");
+    spoor_clunk(q);
+    g_fix_co_calls = 0;
+    q = stalk(&p, root, "a/b", 3, STALK_OPEN, 0x10);       // OTRUNC (R|W want)
+    TEST_ASSERT(q != NULL, "OTRUNC resolves via the normal path");
+    TEST_EXPECT_EQ((u64)g_fix_co_calls, 0ull, "OTRUNC never consults the slot");
+    spoor_clunk(q);
+    g_fix_co_calls = 0;
+    q = stalk(&p, root, "a/b", 3, STALK_OPEN, 3);          // OEXEC
+    // (b is 0644 -- no x bit -- so the NORMAL final hop denies OEXEC with
+    // PERM_R|PERM_X; the sub-test's point is only that the slot never ran.)
+    TEST_ASSERT(q == NULL, "OEXEC denied via the normal path (no x on b)");
+    TEST_EXPECT_EQ((u64)g_fix_co_calls, 0ull, "OEXEC never consults the slot");
+    g_fix_co_calls = 0;
+    q = stalk(&p, root, "a/b", 3, STALK_WALK, 0);          // O_PATH shape
+    TEST_ASSERT(q != NULL, "STALK_WALK resolves");
+    TEST_EXPECT_EQ((u64)g_fix_co_calls, 0ull, "STALK_WALK never consults the slot");
+    spoor_clunk(q);
+
+    // Declined (the slot returns NULL): byte-identical fallback -- the normal
+    // pounce walk resolves + opens the same leaf.
+    g_fix_co_enable = false;
+    g_fix_co_calls = 0;
+    wa0 = g_fix_walkattrs_calls;
+    q = stalk(&p, root, "a/b", 3, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "fallback resolves");
+    TEST_EXPECT_EQ((u64)q->qid.path, 2ull, "fallback parity: same leaf");
+    TEST_ASSERT((q->flag & COPEN) != 0, "fallback parity: opened");
+    TEST_EXPECT_EQ((u64)g_fix_co_calls, 1ull, "the slot was consulted");
+    TEST_ASSERT(g_fix_walkattrs_calls > wa0, "the batched walk ran (fallback)");
+    spoor_clunk(q);
+
+    spoor_unref(root);
+}
+
+void test_stalk_cached_open_denials(void) {
+    struct Proc p; mkproc_system(&p);
+    struct Spoor *root = fix_root();
+    TEST_ASSERT(root != NULL, "fix_root");
+    g_fix_co_enable = true;
+
+    // X-search denial ON THE CACHED PATH: the slot mints (the fixture tree
+    // resolves nox/sekret -- it is perm-blind, like a real Dev), and the ARM's
+    // post-scan denies on nox (0644, no x): T_E_ACCES, the minted Spoor
+    // destroyed. The fail-ordering invariant holds on the fast path.
+    int e = -12345;
+    g_fix_co_calls = 0; g_fix_co_minted = 0;
+    struct Spoor *q = stalk_err(&p, root, "nox/sekret", 10, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "nox/sekret denied on the cached path");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_ACCES, "T_E_ACCES (never NOENT past a denied dir)");
+    TEST_EXPECT_EQ((u64)g_fix_co_minted, 1ull,
+                   "the slot HAD minted -- the ARM's post-scan denied");
+
+    // Leaf R denial: a/nor is 0200 (owner write-only) -- the final-hop R gate
+    // on the FRESH leaf record denies the read-only open.
+    e = -12345;
+    g_fix_co_minted = 0;
+    q = stalk_err(&p, root, "a/nor", 5, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "a/nor read-open denied (leaf R)");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_ACCES, "T_E_ACCES");
+    TEST_EXPECT_EQ((u64)g_fix_co_minted, 1ull,
+                   "the slot HAD minted -- the ARM's leaf gate denied");
+
+    g_fix_co_enable = false;
+    spoor_unref(root);
+}
+
+void test_stalk_cached_open_mount_fallback(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+
+    // Graft deep(3) onto a(1). The UNDERLYING tree still resolves a/b -- the
+    // wrong tree once a is a mount point.
+    struct Spoor *src = stalk(&p, root, "a/deep", 6, STALK_WALK, 0);
+    struct Spoor *mp  = stalk(&p, root, "a", 1, STALK_MOUNT, 0);
+    TEST_ASSERT(src != NULL && mp != NULL, "resolve src + mp");
+    TEST_EXPECT_EQ(mount(p.territory, src, mp, 0), 0, "mount deep onto a");
+
+    g_fix_co_enable = true;
+
+    // The slot mints from the UNDERLYING tree (a/b = qid 2); the arm's mount
+    // scan hits a (j == 0) and DISCARDS the mint -- the normal path then
+    // crosses into deep, where "b" does not exist. The observable outcome is
+    // the MOUNTED tree's NOENT, never the underlying tree's qid-2 Spoor.
+    int e = -12345;
+    g_fix_co_calls = 0; g_fix_co_minted = 0;
+    struct Spoor *q = stalk_err(&p, root, "a/b", 3, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "the underlying a/b is NOT served across the mount");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOENT, "the mounted tree's NOENT");
+    TEST_EXPECT_EQ((u64)g_fix_co_minted, 1ull,
+                   "the slot HAD minted from the underlying tree (discarded)");
+
+    // The mounted tree's real leaf resolves correctly: the slot declines the
+    // PRE-cross run (the underlying chain has no a/leaf), the normal path
+    // splits + crosses, and the RESUMED run inside the MOUNTED tree
+    // legitimately mints a cached-open there -- the fast path composes with
+    // the split/cross machinery.
+    g_fix_co_calls = 0; g_fix_co_minted = 0;
+    q = stalk(&p, root, "a/leaf", 6, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "a/leaf resolves in the MOUNTED tree");
+    TEST_EXPECT_EQ((u64)q->qid.path, 4ull, "deep/leaf's qid");
+    TEST_ASSERT((q->flag & COPEN) != 0, "opened");
+    TEST_EXPECT_EQ((u64)g_fix_co_calls, 2ull,
+                   "pre-cross run declined + resumed run consulted");
+    TEST_EXPECT_EQ((u64)g_fix_co_minted, 1ull,
+                   "the RESUMED run minted inside the mounted tree");
+    spoor_clunk(q);
+
+    g_fix_co_enable = false;
+    territory_unref(p.territory);
+    spoor_clunk(src);
+    spoor_clunk(mp);
     spoor_unref(root);
 }
