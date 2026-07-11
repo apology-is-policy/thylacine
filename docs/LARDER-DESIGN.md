@@ -740,17 +740,25 @@ Fuchsia minfs writeback) all buffer client-side under close-to-open.
   the priv lock across its flush — a flusher count freezes it (no detach:
   the flusher snapshots `{off, len, buf}` under the lock, does the wire I/O
   OUTSIDE it — blocking 9P never under a spinlock — and re-locks to retire
-  the run; retirement is idempotent under duplicate flushers). While any
-  flusher is in flight, a concurrent same-priv write goes write-through
-  (fail-safe and order-correct: its offset is at/past the frozen run's end,
-  and the server applies disjoint ranges), a concurrent read overlays the
-  still-visible run, and a concurrent fsync duplicates the flush (identical
-  bytes at identical offsets — idempotent) then Tfsyncs. Nobody ever waits,
-  so there is no park/wake surface — no new I-9 leg. The frozen-run rule
-  also pins the buffer (no growth reallocation while a flusher reads it).
+  the run). Flushes are **SINGLE-FLIGHT**: a second flush-needing party
+  (a concurrent fsync / non-append write / wstat on a dup-shared fd)
+  yield-waits at the flush entry until the in-flight flush retires — the
+  `on_cpu`-spin class of wait (bounded by the flusher's independent
+  progress, incl. its #811 death-unwind; a yield-loop, not a Rendez, so
+  there is no park/wake surface, no single-waiter hazard, no new I-9
+  leg). Duplicate concurrent flushes are FORBIDDEN, not merely
+  idempotent: a duplicate that completes lets an ordering-dependent
+  through-write land while the FIRST flusher's remaining stale chunks
+  are still in flight — an interior write overlapping the frozen run
+  would then be silently overwritten by the stale re-send (the
+  self-audit SA-F1 race). While a flush is in flight, a concurrent
+  APPEND goes write-through (order-free: disjoint, past the frozen
+  run's end) and a concurrent read overlays the still-visible run —
+  neither waits; only flush-needing ops do. The frozen-run rule also
+  pins the buffer (no growth reallocation while a flusher reads it).
   Death mid-stage: #926 closes handles at exit → the close flush runs
   (dev9p_close runs at the LAST Spoor ref, so it is uncontended — the
-  cached-open/weft last-ref invariant).
+  cached-open/weft last-ref invariant; close never waits).
 
 ### 12.3 What it does NOT change
 
