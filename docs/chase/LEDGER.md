@@ -182,7 +182,9 @@ wga narrowing LANDED (`b317fc28`, ~-22 ms wire trim, its real value the
 correctness-of-model + O(1) scan retirement) and F1b MEASURED DEAD (~4 ms
 ceiling). Neither approaches the **+424 ms wall gap** (3072/3166 -> <=2648). The
 read-band sizing lever is also inert (128 MiB cache; the miss is partial-page,
-not eviction). The S3 residual is FOUNDATIONAL-dominated:
+not eviction). The S3 residual decomposes as (but see the Opus audit correction
+at the end -- the "FOUNDATIONAL" claim is NOT yet earned; two of these are
+UNMEASURED levers):
 (a) the compile-CPU floor (~1816 ms non-RPC, ~host-comparable under HVF -- H3;
     NOT the gap -- the compiler's CPU work is the same on host and device);
 (b) the userspace-9P-FS first-touch RPC floor (the ~1256 ms RPC bands are
@@ -190,7 +192,7 @@ not eviction). The S3 residual is FOUNDATIONAL-dominated:
     pay -- read every input once, write every output once, walk every path once
     over 9P; the guest cache elides RE-touches, never first touches -- H1/H6).
 
-## Term-2 CLOSE (2026-07-12): the FS-cache-thrash levers are exhausted; S3 is FOUNDATIONAL-dominated
+## Term-2 CLOSE (2026-07-12): the FS-cache-thrash levers are exhausted + measured-insufficient; the FOUNDATIONAL determination is BLOCKED on two unmeasured levers (Opus audit F4/F5 -- see the correction at the end)
 
 Per the Senate's accepted (a)-then-(b) recommendation, the two term-2 fixes were
 processed to ground:
@@ -229,13 +231,17 @@ processed to ground:
   residual: the Senate's call whether to build it, weighed against S1 being
   crossed (warm 248-252 <= 266) and S3 being +424 short with the clean levers spent.
 
-**Recommendation:** S1 is DONE (crossed). S3 is FOUNDATIONAL-dominated (H1/H6
-first-touch + H3 compile CPU); the FS-cache-thrash levers are exhausted and
-measured-insufficient. The remaining lever (bulk working-set prefetch) is large,
-uncertain, and architecturally at the edge of the userspace-9P design. This is
-the arc-exit decision point: **accept S1-crossed / S3-FOUNDATIONAL** (with this
-ledger + a Fable audit of the claim), OR **vote to attempt the prefetch lever**.
-Pending the Fable audit of this FOUNDATIONAL disposition + the Senate's call.
+**Recommendation (CORRECTED by the Opus audit -- see the end):** S1 is DONE
+(crossed). The FS-cache-thrash levers are exhausted + measured-insufficient
+(wga narrowing ~0 wall; F1b [4,33] ms; read-sizing inert). But **"S3
+FOUNDATIONAL" is NOT yet earned** -- two levers under the H1/H6 + H3 residual are
+UNMEASURED: (a) bulk working-set prefetch (~150-400 ms addressable, overlaps the
+gap) and (b) the ~1816 ms non-RPC bucket (W2 -- the compile-CPU-vs-spawn-floor
+split -- was NEVER run). The honest arc-exit path: **run W2 + measure the
+prefetch ceiling** (both cheap; the protocols exist), THEN decide FOUNDATIONAL
+vs FIXABLE -- OR **vote to attempt the prefetch lever** -- OR accept the honest
+partial (S1-crossed, S3 FS-cache-exhausted, the residual FIXABLE-VOTED-pending).
+The Senate's call.
 
 ### N=3 result (2026-07-12, instrumented keeper build `b317fc28`-behavior, smp=4, sentinels clean)
 
@@ -386,3 +392,68 @@ linearly with the 19.6k ops) plus the per-file sync-transition tax
 
 (none yet — a band lands here only with decision + mechanism + measured
 magnitude + the removing redesign, and survives a Fable prosecution.)
+
+## Opus audit correction (2026-07-12; the Fable prosecutor ran out of credits mid-run -> Opus 4.8 max fallback; MODEL start==end)
+
+The adversarial audit of the wga narrowing (Surface A) + the FOUNDATIONAL
+disposition (Surface B). **A: 0 P0 / 0 P1 / 0 P2 / 3 P3. B: 0 P0 / 0 P1 / 2 P2 / 1 P3.**
+
+**Surface A -- the wga narrowing is SOUND (verdict).** Name-specific invalidation
+is sufficient for EVERY guest-reachable synchronous mutation (create / mkdir-via-
+create / unlink / rmdir / rename); the retained global `gen++` closes the
+concurrent-populate resurrection independent of whether the mutated name was
+cached; O(1), hash-correct, under the leaf lock, no torn serve, no new lock-order
+edge; the old whole-parent drop was NOT accidentally load-bearing for any
+guaranteed invariant; the regression is non-vacuous + in the committed tree. Three
+P3s, ALL pre-existing-or-hygiene, NONE attributable to `b317fc28`:
+- **A-F1 [P3]: reused-directory-qid dangling negative dentry (PRE-EXISTING).** A
+  cached negative `(Q,"x")` survives when dir-inode `Q` is rmdir'd + reused as a
+  new dir, because neither the old whole-parent drop (keyed by the *container*
+  parent, never by `Q`) nor the new name-specific drop touches anything keyed on
+  `Q`-as-parent. Identical under both versions -- the narrowing neither introduces
+  nor worsens it. It is the L1f ino-reuse class (attr+pages defended at create)
+  with the **dentry-children axis** undefended. ENQUEUED as task #51. Narrow
+  (needs dir-qid reuse + a pre-cached negative child + reuse-as-dir); the
+  create-forward cold go build rarely bites it.
+- **A-F2 [P3]: the narrowing removes an *incidental, non-guaranteed* heal** of the
+  pre-existing Loom-bypass attr staleness (a Loom SETATTR on a file the old
+  whole-parent drop happened to force-re-walk via a sibling mutation). Root cause =
+  the tracked L1f-F2 Loom-bypass seam; ZERO effect on the go build (sync SYS_* ->
+  dev9p, no Loom mutations). Folds into the Loom-bypass seam.
+- **A-F3 [P3]: strip-hygiene.** The uncommitted DIAG23-instrument working tree
+  re-adds the dead `invalidate_parent` + leaves a stale larder.h:157 comment.
+  RESOLVED by stripping the instrument (revert to the clean committed HEAD).
+
+**Surface B -- the FS-cache exhaustion is HONEST; the "FOUNDATIONAL" HEADLINE is
+NOT yet earned (verdict).** Credited honest: the F1b-dead [4,33] ms bound (robust;
+the watermark undercount cannot flip it), the wga ~0-wall honesty, the S1-crossed
+242 ms, the `fault=0` Image-cache confirmation, and -- explicitly -- the void-boot
+handling as "exemplary no-flake discipline" (excluded from the median, enqueued as
+#50, attributed away from the wga change). Two P2s demote the headline:
+- **B-F4 [P2]: bulk prefetch is headlined-away.** Its plausible payoff (~150-400 ms
+  addressable = read 329 + open 57 + part of walk 74; it does NOT touch the wga
+  re-walk band, correctly) OVERLAPS the ~424 ms gap. A lever whose payoff overlaps
+  the gap while UNMEASURED cannot be called "foundational" (a claim of
+  impossibility) -- it is "unmeasured." FIXED: the headline + recommendation
+  demoted above.
+- **B-F5 [P2]: the ~1816 ms non-RPC bucket is asserted "compile CPU, host-
+  comparable" but W2 was NEVER RUN.** The bar table itself shows W2-cold = "--".
+  `fault=0` honestly rules out exec page-IN, but the bucket still contains the
+  go-tool SPAWN floor x ~91 invocations (exec-setup + Go runtime init per
+  compile/asm/link), whose host-comparability is extrapolated from a SINGLE
+  driver-invocation parity (version-warm ~17 vs host ~30 ms), never measured for
+  the 91 child spawns. OWED: run W2 (the C-2 protocol exists) to split compile-CPU
+  from the spawn floor.
+- **B-F6 [P3]: the transport-RTT framing understates.** ~40-55% of each first-touch
+  RPC is SERVER CPU (`read=41us`/`meta=37us` server-side; the #367 territory,
+  server-side-fixable), and the round-trip COUNT is further reducible by fusion
+  (the POUNCE Twalk+Tgetattr precedent). Precise floor: the first-touch *count* is
+  foundational; the per-touch *cost* + the round-trip *count* are open levers.
+
+**Corrected disposition:** S1 crossed. S3's FS-cache-thrash levers are exhausted +
+measured-insufficient. The FOUNDATIONAL determination is BLOCKED on two owed
+measurements -- **(1) W2** (compile-CPU vs the ~91x spawn floor, B-F5) and **(2)
+the bulk-prefetch ceiling** (B-F4) -- plus two open non-prefetch levers (server
+per-op CPU / #367 + round-trip fusion, B-F6). Until those are measured, the honest
+verdict is **FIXABLE-VOTED-pending**, not FOUNDATIONAL. The Senate's arc-exit call:
+run the two measurements, attempt the prefetch lever, or accept the honest partial.
