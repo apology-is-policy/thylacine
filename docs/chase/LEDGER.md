@@ -118,6 +118,159 @@ measured single-invocation floor with every tool Image-cached.
   B-S1-1..5 sum against wall-clock; TI-4e priors (deep-park resume) say
   this is real under HVF.
 
+## Term-2 MEASUREMENT (2026-07-12; fresh goroot pool, instrumented, smp=4): the post-F1 lever plan was built on a STALE decomposition
+
+The post-F1 row above priced "misc ~335 = getattr" and voted the base-Spoor
+memo (Senate (c)). A fresh instrumented S3 boot (DIAG23ns + a new WGAd
+first-touch/attribution probe) CORRECTS it:
+
+- **The getattr lever is DEAD.** `DIAG23ns gofmts3 gattr=9-12ms`; the Larder
+  attr cache (L1c) already serves **98%** of base X-checks cold (la=14488 vs
+  wire gattr ~290). The "1:1 Tgetattr:Twalkgetattr residual" + "misc 335 =
+  getattr" were PRE-L1c readings carried forward. The base-Spoor memo would
+  duplicate what L1c already does -> NO lever there.
+
+- **True S3 RPC decomposition** (rpc_ms ~1256 of the ~3072-3166 wall; the rest
+  ~1816 is non-RPC = compile CPU + exec/page-in + go-tool floor): **wga 329 /
+  read 329 / write 252 / open 57 / walk 74 / rdir 44 / gattr 9 / clunk 10**.
+
+- **wga is 83% RE-WALK, not first-touch** -- `WGAd wire=7188 distinct=1225`;
+  attribution **dinval=2228 / devict=0 / dskip=878** = 100% invalidation-thrash,
+  0% eviction. The whole-parent dentry invalidation (700 creat + 615 unl + 349
+  mkdir = 1664 dir mutations, each dropping the parent's WHOLE dentry set when
+  only the mutated name is stale) drives it. FIX BUILT
+  (`larder_dentry_invalidate_name` -- name-specific drop, matches
+  `fs_cache.tla OwnWrite(f)` per-token, 1103/1103, NoWrongRead intact) but
+  **MODEST**: wire 7188->6902 (-4%), band 351->329 (~-22ms, within single-boot
+  noise). The re-walks are dominated by mutated-file re-walks + the global
+  gen-bump skip (dskip 707), NOT siblings -- so preserving siblings reclaims
+  little. Only ~15% of the wga band (~50ms) is cache-survival-reclaimable; the
+  ~85% residual is the build's inherent create->walk->create->walk churn (each
+  walk legitimately follows a mutation that invalidated its binding) -- an H1/H6
+  floor (metadata mutation rate x per-op 9P RTT).
+
+- **read (329ms, pe=10344 evictions) is NOT a clean sizing win.** Already a
+  128 MiB page cache (32768 slots); dominant miss is `pv=3834` (partial-page
+  past-valid), not eviction -- growing the cache does not fix partial-page.
+
+- **F1b MEASURED DEAD (the projection was WRONG).** The "~-50-118ms projected"
+  above assumed the 1312 sz4k residual writes were opened-existing appends. A
+  direct append-shape instrument (`WBd`, classifying every wire Twrite at
+  `dev9p_write` by whether it is a sequential append to a `!wb_eligible`
+  opened-existing file) proves otherwise on the fully-cold S3:
+  `WBd gofmts3 staged=20687 wireelig=347 oeapp=26:204kb other=195`.
+  - `oeapp=26 ops / 204 KB` = F1b's ENTIRE addressable ceiling (opened-existing
+    SEQUENTIAL appends). At the ~148us/op S3 write-band wall rate that is **~4 ms**.
+  - `other=195` = opened-existing NON-append = the Go toolchain's buildid
+    `WriteAt` (positioned, mid-file) pwrites -- F1b-inert by construction (the
+    wb gate already write-throughs a non-append; F1b stages only appends).
+  - `staged=20687` = F1 already coalesced 20,687 append writes; the residual is
+    inherent (each object written once, buildid-patched once).
+  The WBd instrument UNDERCOUNTS oeapp: it flags an append via a per-priv
+  running watermark (`dbg_thru_end`, born 0), so the FIRST append to each
+  opened-existing file (watermark still 0, offset != 0) is miscounted into
+  `other`. So F1b's true ceiling is bounded ABOVE by ALL opened-existing wire
+  writes = oeapp + other = 221 ops (~33 ms if EVERY "other" were a first-append
+  -- an overcount, since Go genuinely does buildid pwrites) and BELOW by the
+  measured clean-sequential 26 ops (~4 ms). F1b's ceiling is **[4, 33] ms of a
+  +650 ms gap** -- negligible regardless of the watermark undercount. Building an
+  audit-bearing write-behind extension (a new anchor-staleness hazard) for it
+  would be overfitting for nothing. NOT built; documented measured-insufficient.
+
+**Honest bar math (corrected)**: the two term-2 FS-cache levers are exhausted --
+wga narrowing LANDED (`b317fc28`, ~-22 ms wire trim, its real value the
+correctness-of-model + O(1) scan retirement) and F1b MEASURED DEAD (~4 ms
+ceiling). Neither approaches the **+424 ms wall gap** (3072/3166 -> <=2648). The
+read-band sizing lever is also inert (128 MiB cache; the miss is partial-page,
+not eviction). The S3 residual is FOUNDATIONAL-dominated:
+(a) the compile-CPU floor (~1816 ms non-RPC, ~host-comparable under HVF -- H3;
+    NOT the gap -- the compiler's CPU work is the same on host and device);
+(b) the userspace-9P-FS first-touch RPC floor (the ~1256 ms RPC bands are
+    dominated, after L1/D44/F1, by the ONCE-per-file traffic a cold build must
+    pay -- read every input once, write every output once, walk every path once
+    over 9P; the guest cache elides RE-touches, never first touches -- H1/H6).
+
+## Term-2 CLOSE (2026-07-12): the FS-cache-thrash levers are exhausted; S3 is FOUNDATIONAL-dominated
+
+Per the Senate's accepted (a)-then-(b) recommendation, the two term-2 fixes were
+processed to ground:
+
+| lever | disposition | measured | magnitude |
+|---|---|---|---|
+| wga sibling re-walk (whole-parent dentry drop) | **FIXED** (`b317fc28`) | wire 7188 -> 6933 | ~-22 ms (correctness-of-model + O(1) scan retire the primary value) |
+| F1b opened-existing append staging | **measured-insufficient** (NOT built) | `oeapp=26 ops/204 KB` | ~4 ms ceiling |
+| read-band page-cache sizing | **measured-inert** (already done) | 128 MiB, `pv=3834` partial-page | 0 (miss is not eviction) |
+
+**The residual (S3 ~3072/3166 wall, gap ~+424 to <=2648) decomposes as:**
+- **H3 (compile CPU, ~1816 ms, NOT the gap):** the Go compiler's actual work,
+  ~host-comparable under HVF. Removing it = a different compiler; out of scope.
+- **H1/H6 (first-touch 9P RPC, the gap):** ~1256 ms of RPC bands, after L1
+  (Larder attr/dentry/page), D44 (aligned reads + attr-EOF), F1 (write-behind
+  coalescing 20533 -> 2155 wire writes), and this term's wga narrowing, is
+  dominated by the ONCE-per-file cost a cold build cannot cache away (nothing to
+  cache on first touch). This is the architectural cost of a **userspace 9P FS**
+  (Stratum is a userspace 9P server by VISION/Plan-9-heritage design): every
+  metadata op is a round-trip the host's page-cache-backed local FS elides.
+
+**FOUNDATIONAL disposition + the one residual FIXABLE-VOTED candidate:**
+- **Decision:** the FS is a userspace 9P server (Stratum), reached over a 9P
+  transport, per the "filesystem is the OS" VISION + the Plan-9 heritage.
+- **Mechanism:** one round-trip per metadata op; a cold build does O(files)
+  first-touch metadata ops that no guest cache can pre-populate.
+- **Magnitude:** ~1256 ms of RPC bands on the fully-cold S3 (of which the
+  cache-reducible re-touch fraction is already captured by L1/D44/F1).
+- **Removing redesign:** either (i) move the FS into the guest kernel (a local
+  block FS -- contradicts the userspace-9P-server VISION), or (ii) **bulk-prefetch
+  the build's working set** (readahead the GOROOT/GOCACHE the build will open, so
+  first-touch RPCs batch). (ii) is the one un-tried lever that could trim the H1/H6
+  floor; it is LARGE (predict the data-dependent file set) with UNCERTAIN payoff
+  (a build's access pattern is data-dependent; the REVENANT 64-page read-ahead +
+  D44 aligned reads already batch the WITHIN-file traffic). It is a **FIXABLE-VOTED**
+  residual: the Senate's call whether to build it, weighed against S1 being
+  crossed (warm 248-252 <= 266) and S3 being +424 short with the clean levers spent.
+
+**Recommendation:** S1 is DONE (crossed). S3 is FOUNDATIONAL-dominated (H1/H6
+first-touch + H3 compile CPU); the FS-cache-thrash levers are exhausted and
+measured-insufficient. The remaining lever (bulk working-set prefetch) is large,
+uncertain, and architecturally at the edge of the userspace-9P design. This is
+the arc-exit decision point: **accept S1-crossed / S3-FOUNDATIONAL** (with this
+ledger + a Fable audit of the claim), OR **vote to attempt the prefetch lever**.
+Pending the Fable audit of this FOUNDATIONAL disposition + the Senate's call.
+
+### N=3 result (2026-07-12, instrumented keeper build `b317fc28`-behavior, smp=4, sentinels clean)
+
+- **S1 (warm gofmt): {240, 253, 242} -> median 242 ms.** Bar <=266. **CROSSED.**
+- **S3 (cold gofmt): {3370, 3271, 1890}.** The **1890 boot is VOID** -- its
+  `go build` FAILED (`compile: writing output: write $WORK/b062/_pkg_.a:
+  input/output error`), exiting nonzero after ~half the work (wga=3750 vs the
+  valid boots' ~6908; staged=10595 vs ~20600). The 2 VALID boots are 3370/3271
+  -> **median ~3320 ms, gap ~+670 to <=2648.**
+- **The wga narrowing's S3 WALL effect is ~0 (within boot variance).** It trims
+  255 wire re-walks (7188 -> 6933) but the ~3320 median is within noise of the
+  pre-narrowing ~3072-3166; the narrowing's value is correctness-of-model +
+  the O(1) scan retirement, NOT a measurable S3 win. This SHARPENS the
+  FOUNDATIONAL case: the term-2 FS-cache levers moved S3 by ~0 measurable ms
+  against a ~+670 gap.
+
+### SURFACED DEFECT (task #50, enqueued): a rare intermittent Stratum/bdev write-EIO
+
+The 1890 boot's failure is a **real cold-build reliability defect**, ground-truthed:
+- **~10% frequency** (1 of ~10 S3 cold builds this session; every other boot 0 EIO,
+  incl. the stripped-keeper N=3 which was 0/3).
+- **NOT the wga narrowing** -- a write EIO to an already-open fid never consults
+  the dentry cache; the walk-path change cannot cause it; the stripped keeper build
+  hit it 0/3.
+- **NOT pool-margin** -- goroot content 125M in a 2.5G pool (~2.3G free).
+- **Stratum/bdev-side** -- the STMD26 instrument shows a read-error counter anomaly
+  (`rd=...e10290`) on the failing boot; territory = the F1 write-behind flush path
+  OR the C-2 F2 Stratum inline->extent transition (both freshly landed in the S3
+  write path), OR a QEMU virtio-blk hiccup (NOT yet PROVEN QEMU -- per the no-flake
+  discipline, an intermittent I/O error is a RACE to hunt in the guest/Stratum until
+  QEMU is proven). Does NOT invalidate the wga narrowing (committed, sound) or this
+  FOUNDATIONAL disposition (which uses the successful boots' timing) -- but it is a
+  soundness item on the cold-build write path that should be hunted (the go build is
+  the stress oracle). Enqueued as task #50.
+
 ## S3 candidate bands (fully-cold; host 2.43s; device number lands at C-0)
 
 - **B-S3-1 compile CPU** (91 packages, arm64 codegen under HVF): the
