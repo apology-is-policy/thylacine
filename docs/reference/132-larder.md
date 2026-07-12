@@ -75,9 +75,12 @@ void larder_dentry_install(struct larder *l, u64 seq0, u64 parent_qid_path,
                            const char *name, size_t name_len,
                            u64 child_qid_path, bool negative);
 
-// Invalidate (OwnWrite). Drop EVERY dentry whose parent is parent_qid_path +
-// bump gen. The dentry cache's SOLE coherence mechanism (no cvers gate).
-void larder_dentry_invalidate_parent(struct larder *l, u64 parent_qid_path);
+// Invalidate (OwnWrite). Drop ONLY the (parent_qid_path, name) binding -- the one
+// dentry a single-name create/rename/unlink stales; siblings preserved -- + bump
+// gen. The dentry cache's SOLE coherence mechanism (no cvers gate); O(1) via the
+// serve's (parent,name) hash.
+void larder_dentry_invalidate_name(struct larder *l, u64 parent_qid_path,
+                                   const char *name, size_t name_len);
 
 // --- L1e: the page sub-cache ---
 
@@ -140,7 +143,7 @@ root's `qid.path` is legitimately `0x0` (`dev9p.c:130`).
 |---|---|
 | `Read` (serve, no re-check) | `dev9p_stat_native` calls `larder_attr_serve` first; a hit returns with no RPC. The base X-check (`stalk.c:326` → `spoor_stat_native`) and `SYS_FSTAT` are the consumers — the biggest cheap win. |
 | `Open`/`Refetch` (install fresh) | `dev9p_walk_attrs` installs each walked component's `{sts[i], w->qid[i].vers}` after the `Twalkgetattr` RPC (free — attrs already fetched); `dev9p_stat_native`'s miss-populate installs after its `Tgetattr`. Both ALWAYS install from the fresh RPC (revalidate-by-overwrite). |
-| `OwnWrite` (write-through invalidate) | **attr:** `larder_attr_invalidate` at `dev9p_write` / `dev9p_wstat_native` (the file), `dev9p_create` (parent AND child), `dev9p_rename` (both dirs), `dev9p_unlink` (parent). **page:** `larder_page_invalidate` at `dev9p_write` (the file) AND `dev9p_create` (the child — L1f audit F1: the reused-ino page twin of the attr defense, so a create at a freed+reused `qid.path` cannot serve a prior occupant's stale page). **dentry:** `larder_dentry_invalidate_parent` at create / rename (both dirs) / unlink. |
+| `OwnWrite` (write-through invalidate) | **attr:** `larder_attr_invalidate` at `dev9p_write` / `dev9p_wstat_native` (the file), `dev9p_create` (parent AND child), `dev9p_rename` (both dirs), `dev9p_unlink` (parent). **page:** `larder_page_invalidate` at `dev9p_write` (the file) AND `dev9p_create` (the child — L1f audit F1: the reused-ino page twin of the attr defense, so a create at a freed+reused `qid.path` cannot serve a prior occupant's stale page). **dentry:** `larder_dentry_invalidate_name` at create / rename (both dirs) / unlink — the mutated `(parent, name)` binding ONLY; siblings preserved (matches `fs_cache.tla` per-token `OwnWrite(f)`; O(1), retires the whole-parent O(dentry_cap) scan). |
 | `Evict` (bound) | `attr_install_slot_locked` picks existing-key / free / LRU-min victim; never exceeds `LARDER_ATTR_ENTRIES`. |
 
 **The attr serve is a `Read`, not an `Open`.** L1c serves a cached attr WITHOUT
@@ -223,10 +226,14 @@ the separate dirent index — the parent inode is never `stm_inode_set`, so the
 parent's `si_cvers` does **not** bump (only **rename** stamps the parents' mtime,
 `fs.c:5507`). A parent-`cvers` compare would therefore FALSELY MATCH a stale
 negative dentry after a create (serve `ENOENT` for a now-existing file). So the
-dentry cache's sole coherence mechanism is dropping a directory's cached dentries
-on every guest **create / rename / unlink** in it (`larder_dentry_invalidate_parent`
-at `dev9p_create` / `dev9p_rename` [both dirs] / `dev9p_unlink`; the guest holds
-the parent's qid.path at each site). This maps onto `fs_cache.tla`'s `Read` +
+dentry cache's sole coherence mechanism is dropping the mutated `(parent, name)`
+binding on every guest **create / rename / unlink** in it (`larder_dentry_invalidate_name`
+at `dev9p_create` / `dev9p_rename` [both endpoints] / `dev9p_unlink`; the guest holds
+both the parent's qid.path AND the mutated name at each site). Only the named
+binding stales — a create of `foo` cannot change whether a sibling `bar` exists —
+so siblings are preserved (an over-broad whole-parent drop forced every sibling to
+re-walk, the cold-band wga thrash), and the drop is O(1) via the serve's
+`(parent,name)` hash (retiring the whole-parent O(dentry_cap) scan). This maps onto `fs_cache.tla`'s `Read` +
 `OwnWrite` single-writer subset (`NoWrongRead` absolute) — exactly the attr
 sub-cache's discipline, keyed by `(parent,name)`. No `Open` gate for dentries.
 
@@ -581,15 +588,15 @@ iteration of the documented P5-kernel-l3-4mib move.
 - `kernel/test/test_larder.c` (dentry, L1d) — `larder.dentry_serve` /
   `dentry_serve_miss` / `dentry_negative` / `dentry_multi_hop` /
   `dentry_partial_chain_bails` / `dentry_attr_miss_bails` /
-  `dentry_invalidate_parent` (the ground-truth core: own-write invalidation drops
-  a stale negative) / `dentry_gen_guard` / `dentry_name_too_long` /
-  `dentry_bounded`.
+  `dentry_invalidate_name` (the ground-truth core: own-write invalidation drops the
+  stale named binding AND preserves a sibling — fails on the old whole-parent drop) /
+  `dentry_gen_guard` / `dentry_name_too_long` / `dentry_bounded`.
 - `kernel/test/test_dev9p.c::test_dev9p_create_invalidates_reused_child` — the
   L1c create-reuse attr regression (non-vacuous: `1054/1055 FAIL` with the
   child-invalidate reverted).
 - `kernel/test/test_dev9p.c::test_dev9p_create_invalidates_negative_dentry` — the
   L1d create→dentry-invalidate hook regression (non-vacuous: FAILs with the
-  `larder_dentry_invalidate_parent` call reverted). `test_dev9p_walk_attrs` resets
+  `larder_dentry_invalidate_name` call reverted). `test_dev9p_walk_attrs` resets
   the Larder between its wire sub-tests (they flip the wire result for one path
   without a mutation — non-physical for single-writer — so the cache would
   otherwise serve a stale entry).

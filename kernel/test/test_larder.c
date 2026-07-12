@@ -29,7 +29,7 @@ void test_larder_dentry_negative(void);
 void test_larder_dentry_multi_hop(void);
 void test_larder_dentry_partial_chain_bails(void);
 void test_larder_dentry_attr_miss_bails(void);
-void test_larder_dentry_invalidate_parent(void);
+void test_larder_dentry_invalidate_name(void);
 void test_larder_dentry_gen_guard(void);
 void test_larder_dentry_name_too_long(void);
 void test_larder_dentry_bounded(void);
@@ -330,7 +330,7 @@ void test_larder_dentry_attr_miss_bails(void) {
 // in Stratum) must drop the parent's cached dentries -- else a stale NEGATIVE
 // entry would serve ENOENT for the now-existing file. Non-vacuous (fails if
 // invalidate-parent does not drop the negative).
-void test_larder_dentry_invalidate_parent(void) {
+void test_larder_dentry_invalidate_name(void) {
     larder_reset();
     larder_dentry_install(&g_larder, larder_gen_snapshot(&g_larder), 100,
                           "foo", 3, 0, /*negative=*/true);   // "foo" absent in 100
@@ -345,18 +345,22 @@ void test_larder_dentry_invalidate_parent(void) {
     TEST_ASSERT(larder_walk_serve(&g_larder, 100, nb, lb, 1, sts, &nres, &miss) &&
                 !miss && nres == 1, "positive 'bar' serves the hit before the create");
 
-    // A create in dir 100 (own-write): drop ALL of 100's cached dentries.
-    larder_dentry_invalidate_parent(&g_larder, 100);
+    // A create of "foo" in dir 100 (own-write on exactly (100,"foo")): drop ONLY
+    // that binding. The "bar" sibling MUST survive -- the whole point of the L1d
+    // narrowing (a whole-parent drop would evict it and force a needless re-walk,
+    // the cold-band wga thrash). This assertion FAILS on the old whole-parent code.
+    larder_dentry_invalidate_name(&g_larder, 100, "foo", 3);
 
     TEST_ASSERT(!larder_walk_serve(&g_larder, 100, nf, lf, 1, sts, &nres, &miss),
-                "invalidate-parent drops the stale NEGATIVE dentry (no ENOENT for a new file)");
-    TEST_ASSERT(!larder_walk_serve(&g_larder, 100, nb, lb, 1, sts, &nres, &miss),
-                "invalidate-parent drops the POSITIVE dentry too");
-    // The child's attr survives -- invalidate-parent drops only dentries.
+                "invalidate-name drops the stale NEGATIVE 'foo' (no ENOENT for a new file)");
+    TEST_ASSERT(larder_walk_serve(&g_larder, 100, nb, lb, 1, sts, &nres, &miss) &&
+                !miss && nres == 1,
+                "invalidate-name PRESERVES the 'bar' sibling (the narrowing)");
+    // The child's attr survives -- invalidate-name drops only the named dentry.
     struct t_stat out; u64 s0 = 0;
     TEST_ASSERT(larder_attr_serve(&g_larder, 200, &out, &s0),
-                "invalidate-parent leaves the child's attr (dentry-only drop)");
-    TEST_ASSERT(g_larder.dentry_invalidations >= 2ull, "both dentries dropped");
+                "invalidate-name leaves the child's attr (dentry-only drop)");
+    TEST_ASSERT(g_larder.dentry_invalidations >= 1ull, "the named dentry dropped");
 }
 
 // The gen guard covers dentry populates: an install whose RPC raced an
@@ -364,7 +368,7 @@ void test_larder_dentry_invalidate_parent(void) {
 void test_larder_dentry_gen_guard(void) {
     larder_reset();
     u64 seq = larder_gen_snapshot(&g_larder);               // "before the RPC"
-    larder_dentry_invalidate_parent(&g_larder, 999);        // a concurrent own-write bumps gen
+    larder_dentry_invalidate_name(&g_larder, 999, "x", 1);  // a concurrent own-write bumps gen
     larder_dentry_install(&g_larder, seq, 100, "foo", 3, 200, false);  // stale install
 
     const char *nf[] = {"foo"}; size_t lf[] = {3};

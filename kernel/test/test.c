@@ -915,7 +915,7 @@ void test_larder_dentry_negative(void);
 void test_larder_dentry_multi_hop(void);
 void test_larder_dentry_partial_chain_bails(void);
 void test_larder_dentry_attr_miss_bails(void);
-void test_larder_dentry_invalidate_parent(void);
+void test_larder_dentry_invalidate_name(void);
 void test_larder_dentry_gen_guard(void);
 void test_larder_dentry_name_too_long(void);
 void test_larder_dentry_bounded(void);
@@ -2192,7 +2192,7 @@ struct test_case g_tests[] = {
     { "larder.dentry_multi_hop",       test_larder_dentry_multi_hop,       false, NULL },
     { "larder.dentry_partial_chain_bails", test_larder_dentry_partial_chain_bails, false, NULL },
     { "larder.dentry_attr_miss_bails", test_larder_dentry_attr_miss_bails, false, NULL },
-    { "larder.dentry_invalidate_parent", test_larder_dentry_invalidate_parent, false, NULL },
+    { "larder.dentry_invalidate_name", test_larder_dentry_invalidate_name, false, NULL },
     { "larder.dentry_gen_guard",       test_larder_dentry_gen_guard,       false, NULL },
     { "larder.dentry_name_too_long",   test_larder_dentry_name_too_long,   false, NULL },
     { "larder.dentry_bounded",         test_larder_dentry_bounded,         false, NULL },

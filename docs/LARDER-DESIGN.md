@@ -473,15 +473,18 @@ on the real `si_cvers`).
 - **L1d — the dentry cache** (incl. negative). **LANDED.** `larder_walk_serve`
   (serve a whole run from the dentry+attr caches, under one lock hold) +
   `larder_dentry_install` (positive per walked component + negative on a miss,
-  gen-guarded) + `larder_dentry_invalidate_parent`; hooked at `dev9p_walk_attrs`
+  gen-guarded) + `larder_dentry_invalidate_name`; hooked at `dev9p_walk_attrs`
   (serve before the RPC — full positive in the query form + any-form negative;
-  populate after) and `dev9p_create` / `rename` / `unlink` (invalidate the
-  parent). **Coherence is own-write invalidation, NOT a cvers gate** — the L1d
-  ground-truth correction (§4): Stratum's parent `si_cvers` does not bump on a
-  child create/unlink, so a cvers gate would falsely match a stale negative; the
-  dentry cache is `fs_cache.tla`'s `Read`+`OwnWrite` subset (the attr discipline
-  keyed by `(parent,name)`). Tests: `larder.dentry_*` (10, incl. the
-  `dentry_invalidate_parent` ground-truth core) + `dev9p.create_invalidates_negative_dentry`
+  populate after) and `dev9p_create` / `rename` / `unlink` (invalidate the mutated
+  `(parent, name)` binding ONLY — siblings preserved, the whole-parent drop that
+  forced sibling re-walks retired; O(1) via the serve's hash). **Coherence is
+  own-write invalidation, NOT a cvers gate** — the L1d ground-truth correction
+  (§4): Stratum's parent `si_cvers` does not bump on a child create/unlink, so a
+  cvers gate would falsely match a stale negative; the dentry cache is
+  `fs_cache.tla`'s `Read`+`OwnWrite` subset (the attr discipline keyed by
+  `(parent,name)` — per-token, so name-specific invalidation is the faithful
+  realization). Tests: `larder.dentry_*` (10, incl. the `dentry_invalidate_name`
+  ground-truth core — drops the named binding, preserves a sibling) + `dev9p.create_invalidates_negative_dentry`
   (non-vacuous hook regression); `dev9p.walk_attrs` resets the cache between its
   wire sub-tests. 1066/1066 + boot OK + stalk-2 E2E.
 - **L1e — the page cache. LANDED.** `larder_page_{serve,install,invalidate}` +

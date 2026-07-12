@@ -1165,10 +1165,10 @@ static struct Spoor *dev9p_create(struct Spoor *c, const char *name,
     // on an unstated cross-project version-uniqueness guarantee. (Usually a
     // no-op -- a genuinely-new qid.path has no cached pages.)
     larder_page_invalidate(l, c->qid.path);
-    // L1d invalidate (fs_cache.tla OwnWrite): the create added a name to the
-    // parent's dirent set -- drop the parent's cached dentries so a stale
-    // NEGATIVE entry (parent_path, name) cannot serve ENOENT for the new file.
-    larder_dentry_invalidate_parent(l, parent_path);
+    // L1d invalidate (fs_cache.tla OwnWrite): the create added `name` to the
+    // parent's dirent set -- drop the (parent_path, name) binding so a stale
+    // NEGATIVE entry cannot serve ENOENT for the new file. Siblings preserved.
+    larder_dentry_invalidate_name(l, parent_path, name, name_len);
     // F1 write-behind eligibility: a create-born fd's end is KNOWN (0) --
     // the append anchor (LARDER-DESIGN section 12; the measured mix is
     // entirely create-then-write). Gate: loose (the B1 I-38 opt-in) +
@@ -1645,10 +1645,12 @@ static int dev9p_rename(struct Spoor *olddir, const char *oldname,
     larder_attr_invalidate(l, olddir->qid.path);
     larder_attr_invalidate(l, newdir->qid.path);
     // L1d invalidate: the rename removed oldname from olddir + added newname to
-    // newdir -- drop BOTH dirs' cached dentries (a same-dir rename drops it once
-    // effectively; the second scan is a benign no-op).
-    larder_dentry_invalidate_parent(l, olddir->qid.path);
-    larder_dentry_invalidate_parent(l, newdir->qid.path);
+    // newdir -- drop each endpoint's (dir, name) binding (the src goes negative,
+    // the dst positive; siblings under both dirs preserved). A same-dir rename to
+    // an unrelated name drops two distinct bindings; renaming onto itself drops
+    // the same binding twice (a benign second no-op).
+    larder_dentry_invalidate_name(l, olddir->qid.path, oldname, ol);
+    larder_dentry_invalidate_name(l, newdir->qid.path, newname, nl);
     return 0;
 }
 
@@ -1670,10 +1672,10 @@ static int dev9p_unlink(struct Spoor *parent, const char *name, u32 flags) {
     // is left; an ino-reuse serve is caught by the gen guard + walk-overwrite,
     // and mode is unchanged by unlink (LARDER-DESIGN section 11).
     larder_attr_invalidate(&p->client->larder, parent->qid.path);
-    // L1d invalidate: unlink removed a name from the parent's dirent set -- drop
-    // the parent's cached dentries so a stale POSITIVE entry (parent, name) ->
-    // the now-removed child cannot be served.
-    larder_dentry_invalidate_parent(&p->client->larder, parent->qid.path);
+    // L1d invalidate: unlink removed `name` from the parent's dirent set -- drop
+    // the (parent, name) binding so a stale POSITIVE entry -> the now-removed
+    // child cannot be served. Siblings under the parent are preserved.
+    larder_dentry_invalidate_name(&p->client->larder, parent->qid.path, name, nl);
     return 0;
 }
 

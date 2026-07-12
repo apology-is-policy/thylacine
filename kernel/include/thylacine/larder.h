@@ -154,7 +154,8 @@ struct larder_attr_ent {
 // tracks a dirent change (a child create/unlink does not bump the parent's
 // si_cvers -- verified src/fs/fs.c; only rename stamps the parent mtime), so the
 // dentry cache is NOT cvers-gated -- its sole coherence is own-write invalidation
-// (larder_dentry_invalidate_parent on a create/rename/unlink; LARDER-DESIGN §4).
+// (larder_dentry_invalidate_name on a create/rename/unlink -- the mutated name
+// only, siblings preserved; LARDER-DESIGN §4).
 // A positive entry's reply attr is served from the attr sub-cache (the child's
 // qid.path keys it), so the dentry stores only the linkage, not the attr.
 struct larder_dentry_ent {
@@ -310,12 +311,15 @@ void larder_dentry_install(struct larder *l, u64 seq0, u64 parent_qid_path,
                            const char *name, size_t name_len,
                            u64 child_qid_path, bool negative);
 
-// Invalidate (OwnWrite). Drop EVERY cached dentry whose parent is
-// `parent_qid_path` (a create/rename/unlink changed this directory's dirent set),
-// and bump gen (always -- a concurrent populate that fetched the pre-mutation
-// listing must be skipped). This is the dentry cache's SOLE coherence mechanism
+// Invalidate (OwnWrite). Drop ONLY the (parent_qid_path, name) binding -- the one
+// dentry a single-name create/rename/unlink stales -- and bump gen (always -- a
+// concurrent populate that snapshotted gen pre-mutation must be skipped). Siblings
+// under the same parent are preserved (creating "foo" leaves "bar"'s cached
+// binding valid), matching fs_cache.tla's per-token OwnWrite(f); O(1) via the
+// serve's (parent,name) hash. This is the dentry cache's SOLE coherence mechanism
 // (there is no parent-cvers gate -- LARDER-DESIGN §4).
-void larder_dentry_invalidate_parent(struct larder *l, u64 parent_qid_path);
+void larder_dentry_invalidate_name(struct larder *l, u64 parent_qid_path,
+                                   const char *name, size_t name_len);
 
 // -- L1e: the page sub-cache ----------------------------------------------------
 //

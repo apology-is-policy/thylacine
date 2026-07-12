@@ -397,27 +397,32 @@ void larder_dentry_install(struct larder *l, u64 seq0, u64 parent_qid_path,
     spin_unlock(&l->lock);
 }
 
-void larder_dentry_invalidate_parent(struct larder *l, u64 parent_qid_path) {
+void larder_dentry_invalidate_name(struct larder *l, u64 parent_qid_path,
+                                   const char *name, size_t name_len) {
     if (!l) return;
     spin_lock(&l->lock);
-    // Bump gen ALWAYS (a concurrent walk populate that fetched the pre-mutation
-    // dirent listing must be skipped -- the same guard as the attr path).
+    // Bump gen ALWAYS (a concurrent walk populate that snapshotted gen before
+    // this mutation must be skipped by the install guard -- even when the
+    // mutated name was not itself cached; the same resurrection-close as the
+    // attr path).
     l->gen++;
-    if (l->dentry) {
-        // O(dentry_cap) scan -- the SAME hazard the page cache's larder_page_invalidate
-        // closes with a qid_path secondary index (larder.h F3). Left un-indexed here
-        // DELIBERATELY: this fires on a dir mutation (create/rename/unlink), ~hundreds
-        // per go build; at 4096 slots that is ~1M scans/build (~1 ms) -- negligible vs the
-        // page path's ~193M (write=5896 x 32768). A parent_qid_path secondary index (the
-        // page_qhash twin, O(children-of-parent)) is the v1.x symmetric fix (task #30),
-        // load-bearing only for a dir-mutation-heavy workload.
-        for (u32 i = 0; i < l->dentry_cap; i++) {
-            struct larder_dentry_ent *e = &l->dentry[i];
-            if (e->valid && e->parent_qid_path == parent_qid_path) {
-                dentry_hash_unlink_locked(l, (s32)i);
-                e->valid = false;
-                l->dentry_invalidations++;
-            }
+    // A single-name dir mutation (create/rename/unlink of exactly `name`) stales
+    // ONLY the (parent, name) binding: the negative dentry a create fills, the
+    // positive one an unlink empties, or a rename endpoint. Siblings under the
+    // same parent are untouched -- creating "foo" does not change whether "bar"
+    // exists (dentries are per-(parent,name) existence, populated from walks, not
+    // dir listings), so a whole-parent drop was an over-broad superset that
+    // forced every sibling to re-walk (the cold-band wga thrash this closes).
+    // Name-specific matches fs_cache.tla's per-token OwnWrite(f), and it is O(1)
+    // via the same (parent,name) hash the serve uses -- retiring the whole-parent
+    // O(dentry_cap) scan and its task-#30 secondary-index seam in one move.
+    if (l->dentry && name && name_len && name_len <= LARDER_DENTRY_NAME_MAX) {
+        struct larder_dentry_ent *e =
+            dentry_find_locked(l, parent_qid_path, name, name_len);
+        if (e) {
+            dentry_hash_unlink_locked(l, (s32)(e - l->dentry));
+            e->valid = false;
+            l->dentry_invalidations++;
         }
     }
     spin_unlock(&l->lock);

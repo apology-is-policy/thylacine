@@ -1537,7 +1537,7 @@ invalidate. This is exactly `fs_cache.cfg`'s single-writer regime restricted to
 | Spec action | Impl site |
 |---|---|
 | `Read(f)` (serve without re-check) | `kernel/larder.c::larder_walk_serve` (called at `kernel/dev9p.c::dev9p_walk_attrs` before the RPC): chains the dentry+attr caches under ONE lock hold. Skips the `Twalkgetattr` for a full positive run in the query form (`nc==NULL`) or a cached miss (either form). |
-| `OwnWrite(f)` (write-through invalidate) | `kernel/larder.c::larder_dentry_invalidate_parent` (drop every dentry whose parent is the mutated dir + bump gen) at `dev9p_create` / `dev9p_rename` (both dirs) / `dev9p_unlink`. This is the SOLE dentry coherence mechanism. |
+| `OwnWrite(f)` (write-through invalidate) | `kernel/larder.c::larder_dentry_invalidate_name` (drop ONLY the mutated `(parent, name)` binding + bump gen -- exactly the per-token `OwnWrite(f)`; siblings preserved) at `dev9p_create` / `dev9p_rename` (both endpoints) / `dev9p_unlink`. This is the SOLE dentry coherence mechanism. |
 | `Refetch(f, fresh)` (install) | `kernel/larder.c::larder_dentry_install` (positive per walked component + negative on a partial/first-component miss) at `dev9p_walk_attrs`. GEN-GUARDED by the same `wga_seq0` snapshot as the attr populate. |
 | `Evict(f)` (capacity/LRU drop) | `kernel/larder.c::dentry_install_slot_locked` (LRU-min victim when the bounded `LARDER_DENTRY_ENTRIES` array is full; I-32). |
 | `Open(f)` / `ExternalWrite(f)` | NOT used by the dentry sub-cache (no `cvers` gate). An out-of-band dirent change is bounded by LRU / the next own-sync mutation, not a revalidation window (the documented dentry external-writer seam, LARDER-DESIGN §11). |

@@ -860,7 +860,7 @@ void test_dev9p_create_invalidates_reused_child_pages(void) {
 // The parent's si_cvers does NOT bump on a create (Stratum stores dirents in a
 // separate index -- verified src/fs/fs.c), so own-write invalidation is the SOLE
 // coherence mechanism (no parent-cvers gate). Non-vacuous: fails if the
-// dev9p_create -> larder_dentry_invalidate_parent hook is missing.
+// dev9p_create -> larder_dentry_invalidate_name hook is missing.
 void test_dev9p_create_invalidates_negative_dentry(void) {
     struct Spoor *root = make_open_client_and_root();
     TEST_ASSERT(root != NULL, "root");
