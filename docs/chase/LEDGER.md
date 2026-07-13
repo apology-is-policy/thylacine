@@ -864,3 +864,44 @@ G3+G4+G2 are mechanism-perfect and wall-neutral -- the guest RPC-COUNT axis
 is exhausted. What remains of the gap (S3 med ~2900-3050 vs bar 2648) is the
 SERVER per-op axis (T4-M's measured ~170 ms frame-I/O band + ~60 ms write
 insert) + msize (~45 ms) -- exactly T4-A + T4-C.** Next: T4-A.
+
+## Term-4 T4-A: server cuts landed -- the best S3 set of the term (2026-07-13)
+
+Two stratum commits (e8b82f3 buffered frame reader + 7099b0d dirty-buffer
+shelf; host suite 73/73 each; the shelf regression revert-probed):
+
+- **A-1 buffered frame reader** (fs_pool.c): one reader-private 64 KiB
+  buffer replaces the 2-reads-per-frame shape; pool_read_header's
+  idle-aware SO_RCVTIMEO semantics carried verbatim; the RC-4b depth
+  signal consults the buffer FIRST (the audit-F1 self-starve rule).
+  HONEST PRICING: small (~5-9 ms) -- the T4-M "body-read 55-60 ms"
+  band turned out BYTE-bound on the ~700 big Twrite payloads, not
+  syscall-count-bound as framed. Attribution lesson recorded: a
+  per-frame cost split by COUNT and by BYTES are different claims.
+- **A-3 attribution probe** (the dbi= sub-brackets): the ~745 MB/s
+  insert band is COPY-bound at demand-zero-FAULT speed -- fresh
+  mallocng buffers first-touched inside the payload memcpy -- NOT
+  allocator-call-bound (copy 6.6x alloc). The mmap-churn hypothesis
+  died; the page-residency one lived.
+- **A-2 range-buffer shelf** (dirty_buffer.c): freed range buffers
+  >= 32 KiB park on a 24-slot shelf under buf->mu; inserts reuse
+  resident TLB-warm pages. Write handler 61.5 -> 50.5-53.8 us/op
+  (135 -> 111-118 ms/window). The shelf restocks from what DRAINS
+  in-window; the first touch of net-new dirty data stays a hard cost.
+- **Reply combining DROPPED on the numbers**: reply-write fell 106-124
+  -> ~68-75 ms via G2's op-count cut alone; the worker-path burst share
+  is ~3.5k replies -> combining prices at ~5 ms for an audit-bearing
+  CF2-I2 ordering restructure. Not worth it.
+- **T4-C msize 512K SKIPPED per the T4-M demotion** ("third-order,
+  bundle-if-cheap"): it is NOT cheap -- the CF-3 B ring class is a
+  two-point audited validation and 512K rings would 4x the documented
+  ~32 MiB worst-case kernel-memory exposure + touch the guest wb stage
+  cap. ~40-45 ms does not buy that re-audit.
+
+Walls (instrumented, 3 boots): S3 2945/2806/2843 -> med **2843** (the
+best set of the term; G2 med ~2993, term-3 sanctioned 3104); warm
+190-203. covered_ms 676-723 (term-3: 927 -- the funded covered band is
+down ~230 ms). Gap to the 2648 bar: ~195 ms instrumented. The term-4
+lever inventory is now EXHAUSTED at both ends (guest RPC-count axis +
+server frame/insert axes); what remains is the sanctioned N=3 verdict
+at T4-X and the Senate's close call.
