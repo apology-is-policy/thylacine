@@ -21,7 +21,7 @@ windows; magnitudes land at C-1.
 | W1 S3 fully-cold **post-B1** | 4877/5252/5222 ms (med **5222**) | (same) | +2774 ms | <= 2648 ms (S3 needs C-2) | OPEN |
 | W1 S3 fully-cold **post-D44+#45** | 4059/3973/4066 ms (med **4059**) | (same) | +1611 ms | <= 2648 ms (**-35% remains**; the gap now lives in the write band -- rpc_ms 3.3-3.5 s of the 4.0 s window, write=~20k ops) | OPEN |
 | W1 S3 fully-cold **post-C-2-F2** (stratum 85d3b72: transition-into-buffer + the 3-round audit close) | 3551/3844/3614 ms (med **3614**; warm 246/244/255 -- S1 stays crossed) | (same) | +1166 ms | <= 2648 ms (**-27% remains**; the W-C transition tax is dead [enc 636->73, hw 43.9->18.4 us/op]; the residual = the op-count bands F1 [voted, scripture @f9c3cafe] removes + the wga cold band) | OPEN |
-| W1 S3 fully-cold **post-F1** (94409d56 write-behind + 4c823d30 single-flight + e40f487f audit close; the FINAL-tree N=3, clean sentinels 193134Z [the pre-fix set 190526Z read 3297/3454/3245 med 3297 -- the fixes are hot-path-neutral, the delta is run variance]) | 3354/3142/3166 ms (med **3166**; warm 248/244/248 -- S1 stays crossed) | (same) | +518 ms | <= 2648 ms (**-16% remains**. The op-count lever DELIVERED mechanically: wire writes 19593 -> 2155 [-89%], write band 892 -> 283 ms, rpc_ms 1991 -> 1399 [device-1 pairs of the 164124Z/190526Z instrumented boots] -- roughly -450 of the -592 ms RPC cut reached the wall median. Post-F1 S3 anatomy: rpc ~1399 [wga 414 = the #1 band, read 367, write 283, misc ~335] + non-RPC ~1.8 s [~compile CPU + exec/page-in + the go-tool floor]. Remaining levers: the wga cold band [#372 + the base-Spoor memo seam, ~-150-250?], F1b anchor-from-cached-attr for opened-existing files [the 1312 residual sz4k through-writes, ~-100-150?], read tail [~-50-100?] -- optimistic sum ~-300-500 vs the +518 needed: the bar is at the edge of reach; if the next lever underdelivers, the FOUNDATIONAL decomposition [the honest impossibility ledger] is the remaining path) | OPEN |
+| W1 S3 fully-cold **post-F1** (94409d56 write-behind + 4c823d30 single-flight + e40f487f audit close; the FINAL-tree N=3, clean sentinels 193134Z [the pre-fix set 190526Z read 3297/3454/3245 med 3297 -- the fixes are hot-path-neutral, the delta is run variance]) | 3354/3142/3166 ms (med **3166**; warm 248/244/248 -- S1 stays crossed) | (same) | +518 ms | <= 2648 ms (**-16% remains**. The op-count lever DELIVERED mechanically: wire writes 19593 -> 2155 [-89%], write band 892 -> 283 ms, rpc_ms 1991 -> 1399 [device-1 pairs of the 164124Z/190526Z instrumented boots] -- roughly -450 of the -592 ms RPC cut reached the wall median. Post-F1 S3 anatomy: rpc ~1399 [wga 414 = the #1 band, read 367, write 283, misc ~335] + non-RPC ~1.8 s [~compile CPU + exec/page-in + the go-tool floor]. Remaining levers: the wga cold band [#372 + the base-Spoor memo seam, ~-150-250?], F1b anchor-from-cached-attr for opened-existing files [the 1312 residual sz4k through-writes, ~-100-150?], read tail [~-50-100?] -- optimistic sum ~-300-500 vs the +518 needed: the bar is at the edge of reach; see the Term-2 FINAL close below: post-F1 the guest FS-cache levers are EXHAUSTED [wga/F1b/read-sizing/prefetch all measured-dead] and #50 [the ~10%25 EIO] was root-caused to the #375 out_buf clobber + FIXED; the honest S3 disposition is GUEST-EXHAUSTED/SERVER-FIXABLE [Stratum #367], NOT foundational) | GUEST-EXHAUSTED |
 | W2 cold (diag) | — | — | — | not bar-bound | C-2 |
 | W2 warm (diag) | — | — | — | not bar-bound | C-2 |
 
@@ -527,10 +527,24 @@ wga narrowing (~0 wall), F1b ([4,33] ms), read-sizing (inert), bulk prefetch
 - **H3 -- compile CPU** (~1816-2044 ms non-RPC): host-comparable (B-F5). Not a
   device lever.
 
-**So: FOUNDATIONAL for the GUEST.** The bar is not reachable by any guest-side
-lever (all exhausted + measured). The remaining reducible surface is server-side
-(Stratum #367 per-op cost) + protocol fusion -- a named continuation, not the
-guest-cache thrash the CHASE was chartered to exhaust. S1 is CROSSED; S3
-terminates FOUNDATIONAL-guest with a server-side seam. This is the honest,
-audited close the Opus correction demanded -- the two flagged unmeasured levers
-(prefetch, the non-RPC bucket) are now BOTH measured, and neither is a guest lever.
+**So (CORRECTED -- the honest verdict, self-caught 2026-07-13):** S3 is
+**GUEST-EXHAUSTED, NOT FOUNDATIONAL.** Calling it "FOUNDATIONAL for the guest"
+would be a SCOPE-DODGE (the same over-claim the Opus round already caught once):
+the CHASE bar is `gofmt <= host+200` regardless of WHERE the fix lives, and a
+NON-guest lever demonstrably exists -- the RPC band's per-op COST is ~40-55%
+server CPU (#367, ~550-690 ms of the ~1256 ms band), a real chunk of which is
+reducible (batching/caching the Stratum per-op path) and would close a large
+fraction of the +654 ms gap; plus round-trip fusion (POUNCE precedent). So S3 is
+**FIXABLE server-side**, not impossible -- it earns NEITHER a cross NOR an
+impossibility proof, but a THIRD honest disposition: the GUEST-side levers are
+exhausted + measured-dead (wga / F1b / read-sizing / prefetch), and the residual
+reachable lever is a **Stratum #367 server-perf continuation arc** the guest-scoped
+CHASE did not pursue. S1 is CROSSED (245 <= 266) -- the guest-side caching (Larder
++ fid-lifecycle) did its job. This is a correct SCOPING + a clean handoff, not a
+failure and not an impossibility. (A quantitative bound on #367's reducible
+fraction -- the difference between "large chunk" and "closes the bar" -- is the
+final-audit + the Stratum-continuation's job.)
+
+**SMP gate on the #375 fix: PASS** -- default+UBSan x smp4/smp8, N=10 = 40/40,
+0 corruption (`tools/ci-smp-gate.sh`, 2026-07-13). The shared-FS-client spill is
+production-clean.
