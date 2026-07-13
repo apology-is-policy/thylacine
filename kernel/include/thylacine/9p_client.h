@@ -142,8 +142,14 @@ struct p9_client {
     struct p9_transport  transport;
     // Shared outbound Tmsg buffer. Used only under c->lock during the
     // build+send of one op (serialized), so the elected-reader pipeline can
-    // share it across ops without per-op allocation -- the frame is copied
-    // into the c2s ring by the send before c->lock is released.
+    // share it across ops without per-op allocation. NOTE (#375): on c2s
+    // back-pressure the send returns EAGAIN with NOTHING on the ring, and
+    // client_send_flow drops c->lock to pump/park -- so out_buf content is
+    // UNDEFINED across any lock drop (a peer may rebuild it). client_send_flow
+    // therefore SPILLS the frame to a private buffer at the first EAGAIN and
+    // retries from the spill; no path may re-read out_buf after
+    // client_pump_or_park_locked has run (the sole exception is the NOTAG
+    // handshake exchange -- private client by construction, #360).
     //
     // Two-tier (CF-3 B): `out_buf` points at `out_buf_inline` for a
     // default-msize session (<= P9_CLIENT_OUT_BUF_MAX; every static test
