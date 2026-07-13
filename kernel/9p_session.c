@@ -139,7 +139,9 @@ static void clear_outstanding(struct p9_session *s, u16 t) {
 }
 
 // Check whether any LIVE in-flight op targets `fid` (as either `fid` or
-// `new_fid`). Used by SendClunk / SendWalk(new_fid) / SendLopen / SendLcreate to
+// `new_fid`). Used by SendClunk / SendWalk(new_fid) / SendLopen / SendLcreate /
+// SendWalkgetattr / SendSetattr / SendRename (SEVEN callers -- keep this list
+// current: a stale list narrows future audit scoping, R2-F2) to
 // enforce the spec's "no other in-flight op on the same fid" discipline.
 //
 // A FLUSHED op (awaiting_flush, #845) is EXCLUDED: it has been cancelled, its
@@ -459,6 +461,22 @@ void p9_session_abort_unsent(struct p9_session *s, u16 tag) {
 // slot is uniquely (active && kind==TFLUSH && flush_oldtag==oldtag). If the
 // victim is not awaiting_flush, or no such slot exists, the state did not
 // come from send_flush -- leave everything untouched (fail-soft).
+// #52/#53 R2-F1: the flush-BUILD-failure fallback (tag pool full at the
+// abandon instant, or a non-OPEN state) stages NO flush, so flush_rollback
+// (which requires awaiting_flush) cannot run -- yet the owner is exactly as
+// gone as on the EAGAIN path. Mark the victim abandoned directly so the
+// #294 cancel-then-close Tclunk is not refused on this rarer sibling path.
+// Fail-soft: only an active, un-flushed, un-abandoned tag is marked; a tag
+// with a flush in flight is owned by the flush protocol.
+void p9_session_mark_abandoned(struct p9_session *s, u16 tag) {
+    if (!s) return;
+    if (s->magic != P9_SESSION_MAGIC) return;
+    if (tag >= P9_SESSION_MAX_OUTSTANDING) return;
+    if (!s->outstanding[tag].active) return;
+    if (s->outstanding[tag].awaiting_flush) return;
+    s->outstanding[tag].abandoned = true;
+}
+
 void p9_session_flush_rollback(struct p9_session *s, u16 oldtag) {
     if (!s) return;
     if (s->magic != P9_SESSION_MAGIC) return;

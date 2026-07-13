@@ -137,14 +137,19 @@ struct p9_outstanding {
     // is the I-10 reuse-race guard. `flush_oldtag` is meaningful only on a
     // TFLUSH entry: the original tag this flush abandons.
     bool awaiting_flush;
-    // #53-audit F1: a rolled-back abandon (the flush-EAGAIN path). The owner
-    // is gone but NO Tflush is in flight (it never left the guest), so --
+    // #53-audit F1: a rolled-back or flush-less abandon (the flush-EAGAIN
+    // path via flush_rollback; the flush-BUILD-failure path via
+    // mark_abandoned). The owner is gone but NO Tflush is in flight, so --
     // unlike awaiting_flush -- the tag is freed by its late original reply
-    // (the pre-#845 ownerless reclaim). Like awaiting_flush it is EXCLUDED
-    // from any_outstanding_on_fid: the op is cancelled and will not act on
-    // its fid, so it must not refuse the #294 cancel-then-close Tclunk (its
-    // late reply's only fid mutation is an Rwalk's fid_bind on a FRESH
-    // monotonic new_fid -- conflict-free with any post-exclusion fid op).
+    // (the pre-#845 ownerless reclaim) OR by session teardown (a
+    // deferred-reply server that cancels a parked op without replying, the
+    // task-#56 netd tail). Like awaiting_flush it is EXCLUDED from
+    // any_outstanding_on_fid: the op is cancelled and will not act on its
+    // fid, so it must not refuse the #294 cancel-then-close Tclunk. Its late
+    // reply's only reachable fid mutation is a walk-family fid_bind on a
+    // FRESH monotonic new_fid -- conflict-free with any post-exclusion fid
+    // op (the Rattach arm also binds, but an abandoned attach exists only on
+    // a private pre-publish client with no survivor to dispatch it).
     bool abandoned;
     u16  flush_oldtag;
     // Twalkgetattr bookkeeping (POUNCE): the REQUESTED nwname, so the
@@ -290,6 +295,11 @@ void p9_session_abort_unsent(struct p9_session *s, u16 tag);
 // the pre-#845 ownerless reclaim. No-op unless the (victim, flush-slot)
 // pair matches what send_flush staged (fail-soft).
 void p9_session_flush_rollback(struct p9_session *s, u16 oldtag);
+
+// #52/#53 R2-F1: mark an owner-gone op abandoned when NO flush could even be
+// staged (pool-full / build failure) -- the flush-less sibling of
+// flush_rollback. Fail-soft on inactive / awaiting_flush tags.
+void p9_session_mark_abandoned(struct p9_session *s, u16 tag);
 
 // =============================================================================
 // IO send-side API (P5-wire-io extension; spec's SendIO action).

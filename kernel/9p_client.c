@@ -697,6 +697,12 @@ static int client_run(struct p9_client *c, size_t built_len,
         kfree(rpc.reply_buf);
         int flen = p9_session_send_flush(&c->session, c->out_buf,
                                          c->out_buf_cap, (u16)tag);
+        if (flen <= 0) {
+            // R2-F1: no flush could be staged (pool full at the abandon
+            // instant) -- the owner is still gone; mark abandoned so the
+            // #294 cancel-then-close clunk is not refused (see rollback).
+            p9_session_mark_abandoned(&c->session, (u16)tag);
+        }
         if (flen > 0) {
             int fsr = p9_transport_send(&c->transport, c->out_buf, (size_t)flen);
             if (fsr == P9_TRANSPORT_EAGAIN) {
@@ -939,6 +945,10 @@ void p9_client_abandon_async(struct p9_client *c, struct p9_rpc *rpc) {
         if (!c->dead && p9_session_is_open(&c->session)) {
             int flen = p9_session_send_flush(&c->session, c->out_buf,
                                              c->out_buf_cap, tag);
+            if (flen <= 0) {
+                // R2-F1: flush-less abandon (see the DIED-path twin).
+                p9_session_mark_abandoned(&c->session, tag);
+            }
             if (flen > 0) {
                 int fsr = p9_transport_send(&c->transport, c->out_buf,
                                             (size_t)flen);

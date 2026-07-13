@@ -1571,6 +1571,34 @@ void test_9p_session_flush_rollback_restores_victim(void) {
     p9_session_abort_unsent(&s, vt3);
     TEST_EXPECT_EQ((u64)p9_session_inflight(&s), (u64)1,
                    "abort_unsent refuses an abandoned (sent) tag");
+    rlen = synth_rmsg(g_buf, sizeof(g_buf), P9_RFSYNC, vt3, NULL, 0);
+    TEST_EXPECT_EQ(p9_session_dispatch_rmsg(&s, g_buf, (size_t)rlen, &r), 0,
+                   "victim 3 drained");
+
+    // R2-F1: the flush-LESS abandon (pool-full at the abandon instant) --
+    // mark_abandoned directly must unblock the clunk exactly like the
+    // rollback path, and the late reply still frees the tag.
+    len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 11, 0, NULL, NULL);
+    TEST_ASSERT(len > 0, "walk root -> fid 11");
+    p9_peek_header(g_buf, (size_t)len, &szw, &tyw, &wt2);
+    wl = synth_rwalk_single(g_buf, sizeof(g_buf), wt2, P9_QTDIR, 1, 11);
+    TEST_EXPECT_EQ(p9_session_dispatch_rmsg(&s, g_buf, (size_t)wl, &r), 0,
+                   "fid 11 bound");
+    len = p9_session_send_fsync(&s, g_buf, sizeof(g_buf), 11, 0);
+    TEST_ASSERT(len > 0, "send_fsync on fid 11");
+    u16 vt4; p9_peek_header(g_buf, (size_t)len, &szw, &tyw, &vt4);
+    p9_session_mark_abandoned(&s, vt4);
+    len = p9_session_send_clunk(&s, g_buf, sizeof(g_buf), 11);
+    TEST_ASSERT(len > 0,
+                "clunk on a flush-less abandoned victim's fid SUCCEEDS (R2-F1)");
+    u16 ct3; p9_peek_header(g_buf, (size_t)len, &szw, &tyw, &ct3);
+    rlen = synth_rmsg(g_buf, sizeof(g_buf), P9_RCLUNK, ct3, NULL, 0);
+    TEST_EXPECT_EQ(p9_session_dispatch_rmsg(&s, g_buf, (size_t)rlen, &r), 0,
+                   "Rclunk 11 consumed");
+    rlen = synth_rmsg(g_buf, sizeof(g_buf), P9_RFSYNC, vt4, NULL, 0);
+    TEST_EXPECT_EQ(p9_session_dispatch_rmsg(&s, g_buf, (size_t)rlen, &r), 0,
+                   "flush-less abandoned victim's late reply frees it");
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&s), (u64)0, "all reclaimed");
 
     p9_session_destroy(&s);
 }
