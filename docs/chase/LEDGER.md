@@ -666,3 +666,41 @@ bracket the gap with ~2x margin). The Senate's vote is now a funding
 decision, not a measurement question: (a) fund the Stratum continuation
 (#367 per-op CPU + POUNCE-style fusion + msize; est. crosses the bar), or
 (b) close the CHASE at S1-parity + S3 ~3.1 s with the continuation named.**
+
+### TERM-4 (the funded arc): the Senate votes (a) -- the Stratum continuation
+
+**The vote (2026-07-13): fund the Stratum continuation.** Target: remove
+>= 456 ms of the 927 ms S3 RPC-covered band (>= 49%) so S3 crosses the
+<= 2648 bar (term-3 med 3104), holding S1 <= 266. The three funded levers,
+in the order they will be attacked:
+
+1. **#367-class server per-op CPU** (leg 2): the measured server share is
+   40-55% of per-op RTT (STMD26 read=41us / meta=37us). The T4-M
+   measurement decomposes it -- per-op-type handler totals (the meta band
+   h_walkgetattr/h_lopen/h_walk/h_clunk/h_getattr was never bracketed),
+   the walkgetattr resolve-vs-finish split, and the frame-loop overhead
+   outside handlers (the fs_pool reader does 2 read(2) + 1 malloc/free +
+   1 write(2) per op; the first read's duration is wake+idle, split out).
+2. **POUNCE-style protocol fusion** (op-count reduction over the 21.8k-op
+   stream: wga 6.9k / read 6.0k / write 2.2k / open 2.0k). Two candidate
+   shapes, chosen by measured pattern arithmetic, scripture-first when
+   picked: Treaddirplus (entries carry full wga-equivalent attrs+cvers;
+   the guest populates Larder attr+dentry caches per entry -- sound,
+   unlike the L1b-F1 qid-only seam, because the entry IS a wga reply) vs
+   Topenread (fused walk+lopen+first-read for cold small files). T4-M adds
+   the deciding classifier: the share of wga whose parent dir was
+   previously readdir'd (readdirplus-addressable) vs the lopen-anchored
+   share (openread-addressable).
+3. **msize 128 KiB -> 512 KiB** (leg 3): priced by T4-M's payload-max-leg
+   counters BEFORE building; the server already accepts up to 1 MiB
+   (STM_9P_MSIZE_MAX) -- the lift is guest-side (SrvConn ring class +
+   client out_buf) + the stratumd listen sockbuf hint; the I-32 ring
+   exposure bump is documented if built.
+
+Sequencing: T4-M (measure; instrumented sanctioned run) -> T4-A (server
+CPU) -> T4-B (fusion) -> T4-C (msize, if priced in) -> T4-X (strip,
+audits, gates, fresh bake, sanctioned N=3 bar check, term-4 close +
+CHASE close). Exit gate: S3 med <= 2648 AND S1 med <= 266 on the
+sanctioned protocol, suite green, SMP gate 0-corruption. Caveat carried
+from term-3: covered-wall removal is not perfectly linear in per-op
+savings; the exit gate is the bar itself, not the estimate.
