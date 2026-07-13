@@ -633,6 +633,29 @@ L1c targets the base X-check re-stat storm + fstat redundancy (~1/3 of warm ops;
 cold/warm re-measure vs the LARDER-DESIGN §10 predictions lands at L1f (after the
 dentry + page sub-caches). The `attr_*` diagnostics counters expose the hit rate.
 
+## Write-populate (G1, term-4)
+
+`larder_page_install_own(l, qid, idx, page_off, data, len)` installs the
+writer's own landed bytes at the wb flush (`wb_flush_locked`, err==0 arm
+only -- the `fs_cache_buggy_populate_unflushed` counterexample pins the
+coupling). `own` pages serve without the cvers gate and count toward
+`pages_cover` (cached-open works on just-written files); a normal
+`larder_page_install` over the same key clears `own` (upgrade to cvers-
+gated). `page_off > 0` extends only an OWN page with `valid_len == page_off`
+(the append-chain continuation); other shapes are skipped. No populate gen
+guard: the bytes are the writer's just-landed content and the wb flush
+freeze excludes same-file mutators (LARDER-DESIGN section 13).
+
+`larder_page_invalidate_range(l, qid, first_idx, last_idx)` is the
+write-through discipline (G1b): a non-append write drops only the touched
+pages; own pages outside the range keep serving (single-writer: their bytes
+are still current), cvers pages outside miss at the next revalidation
+exactly as if dropped. Whole-file drops remain on OTRUNC, create-reuse
+(L1f F1), and the failed-flush arm. Tests: `dev9p.wb_populate_readback` /
+`wb_populate_append_chain` / `wb_populate_failed_flush` /
+`wb_writethrough_range` (all revert-probed) + the updated
+`dev9p.wb_overlay_read` below-run contract.
+
 ## Known caveats / footguns
 
 - **v1.0 is single-writer-sound** (own-write invalidation; the accepted

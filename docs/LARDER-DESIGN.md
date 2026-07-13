@@ -795,6 +795,61 @@ shrinking ~40% from depth relief alone). F2+F1 projects S3 ≈ 2.5–2.8 s vs th
 
 ---
 
+## 13. Write-populate (G1 -- term-4; the flush installs OWN pages)
+
+The F1 write-behind's per-flush page invalidate (section 12) discarded the
+very bytes the build is about to read back: the link reads every just-written
+`_pkg_.a`, and cmd/go re-reads objects for cache puts and buildids. G1 makes
+the flush INSTALL instead of drop, and scopes the write-through invalidate to
+the bytes actually written.
+
+**G1a (install at flush).** On `wb_flush_locked`'s full-land arm (err == 0,
+every chunk's Rwrite confirmed), the frozen run's pages install into the page
+cache marked `own`. An `own` page serves WITHOUT the cvers gate: no post-flush
+cvers is knowable client-side (Rwrite carries none), and under the loose
+single-writer premise -- which the wb's existence on the client already
+asserts (fs_cache.tla: `EnableStaging => ~EnableExternalWriter`) -- the
+flushed bytes ARE the file's current content. `pages_cover` accepts own pages
+too, so a just-written file can take the fidless cached-open path. A normal
+read-populate over the same key upgrades the page back to cvers-gated (the
+read observed server content). The boundary page of an append chain EXTENDS
+only when the existing page is OWN and ends exactly at the new run's start
+(never a hole, never a mixed cvers/own page); the failed/partial-flush arm
+keeps the fail-safe whole-file drop.
+
+**No populate gen guard on the own install** -- the resurrection class the
+guard closes is a READ-populate racing an invalidate (pre-mutation bytes
+re-installed); an own install's bytes are the writer's just-landed content,
+and no same-file mutation can land concurrently: the caller holds the wb
+flush freeze (`wb_flushers > 0` excludes same-file stagers and orders
+overlapping through-writes behind the flush -- the SA-F1 single-flight).
+
+**G1b (range-scoped write-through invalidate).** The measured killer: the
+buildid rewrite (a ~100-byte in-place pwrite cmd/go performs on every built
+object and on the linked binary) took the write-through path, whose
+WHOLE-FILE page invalidate nuked the archive's freshly-installed pages
+moments after the close flush -- `b009/_pkg_.a` alone was wire-read 976
+times / 22.7 MB in one S3 window. The write-through now drops only the pages
+in `[offset, offset+accepted)`. Pages outside the range keep serving: a
+cvers-gated page's staleness is caught by the normal open-time revalidation
+exactly as if it had been dropped, and an OWN page's untouched bytes are
+still the file's current content under the single-writer premise. OTRUNC and
+create-reuse (L1f F1) keep their whole-file drops.
+
+**Spec.** `fs_cache.tla` extended model-first: `EnableFlushPopulate` makes
+`FlushClose` install the landed content as the current token (reusing
+`Refetch` -- capacity-honest, validated), gated to the staging single-writer
+world by ASSUME. The new buggy cfg `fs_cache_buggy_populate_unflushed`
+(populate fires on the lost-flush arm) violates `CacheNeverAhead` -- the
+executable counterexample pinning the impl's err==0 coupling. The range
+scoping is below the model's per-file token abstraction (the L1e
+partial-page precedent); its soundness argument is the single-writer own-page
+property above, pinned by the `wb_writethrough_range` regression.
+
+**Measured (instrumented A/B, S3 window).** Wire reads 6.7k -> 3.5k, read
+bytes 112 MB -> 31 MB, server read handler 125 -> 39 ms, covered 969-1039 ->
+726 ms, S3 wall ~3.1-3.3 s -> 2.9 s, S1 warm 233-244 -> 195 ms.
+
 ## References
 - The measured justification: the FS-perf deep dive (the FSPROBE ceilings + the
   decomposed gap model + the proven thesis).

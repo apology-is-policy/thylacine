@@ -212,11 +212,25 @@ CONSTANTS
     BUGGY_READ_SKIPS_STAGED,\* BOOLEAN -- TRUE: a Read with a stage present may
                             \*   serve the cached (server-lagging) token instead
                             \*   of the staged overlay -- the overlay-miss bug.
-    BUGGY_LOST_STAGE        \* BOOLEAN -- TRUE: FlushClose clears the stage
+    BUGGY_LOST_STAGE,       \* BOOLEAN -- TRUE: FlushClose clears the stage
                             \*   WITHOUT landing the staged content at the
                             \*   server -- the lost-write bug (a dropped close
                             \*   flush: close/death path that neither flushes
                             \*   nor deliberately write-throughs).
+    EnableFlushPopulate,    \* BOOLEAN -- TRUE (G1, term-4): FlushClose INSTALLS
+                            \*   the landed content as the current cache token
+                            \*   (the write-populate) instead of invalidating.
+                            \*   The impl realization: own-flag pages installed
+                            \*   from the frozen wb run after every chunk's
+                            \*   Rwrite confirms; the serve accepts own pages
+                            \*   without the cvers gate (sound ONLY under the
+                            \*   staging single-writer premise below).
+    BUGGY_POPULATE_UNFLUSHED \* BOOLEAN -- TRUE: the populate fires even though
+                            \*   the flush did NOT land (the failed/lost-flush
+                            \*   pairing) -- the cache then claims content the
+                            \*   server does not hold (CacheNeverAhead red).
+                            \*   The impl rule it pins: install ONLY on the
+                            \*   err==0 full-land arm of wb_flush_locked.
 
 ASSUME /\ Capacity \in Nat
        /\ MaxCvers \in Nat /\ MaxCvers >= 1
@@ -226,8 +240,13 @@ ASSUME /\ Capacity \in Nat
        /\ EnableStaging           \in BOOLEAN
        /\ BUGGY_READ_SKIPS_STAGED \in BOOLEAN
        /\ BUGGY_LOST_STAGE        \in BOOLEAN
+       /\ EnableFlushPopulate     \in BOOLEAN
+       /\ BUGGY_POPULATE_UNFLUSHED \in BOOLEAN
        \* The loose (B1) premise: staging asserts single-writer.
        /\ (EnableStaging => ~EnableExternalWriter)
+       \* G1 is a flush-path feature; the buggy pairing needs a lost flush.
+       /\ (EnableFlushPopulate => EnableStaging)
+       /\ (BUGGY_POPULATE_UNFLUSHED => (EnableFlushPopulate /\ BUGGY_LOST_STAGE))
 
 VARIABLES
     svr_cvers,   \* [Files -> 0..MaxCvers] -- the server (Stratum) content-
@@ -423,9 +442,17 @@ FlushClose(f) ==
          THEN svr_cvers' = svr_cvers
          ELSE svr_cvers' = [svr_cvers EXCEPT ![f] = guest_cvers[f]]
     /\ staged'    = [staged EXCEPT ![f] = FALSE]
-    /\ cache'     = [cache EXCEPT ![f].valid = FALSE]
-    /\ validated' = [validated EXCEPT ![f] = FALSE]
     /\ UNCHANGED <<guest_cvers, bad_read>>
+    \* G1 (term-4, the write-populate): on the landed arm, install the flushed
+    \* content as the CURRENT token -- semantically "as if an Open refetched
+    \* immediately after the flush", so it reuses Refetch verbatim (capacity-
+    \* honest: evicts a victim when full). The correct pairing installs ONLY
+    \* when the flush landed; BUGGY_POPULATE_UNFLUSHED installs on the lost
+    \* arm too, making the cache claim content the server does not hold.
+    /\ IF EnableFlushPopulate /\ (~BUGGY_LOST_STAGE \/ BUGGY_POPULATE_UNFLUSHED)
+       THEN Refetch(f, guest_cvers[f])
+       ELSE /\ cache'     = [cache EXCEPT ![f].valid = FALSE]
+            /\ validated' = [validated EXCEPT ![f] = FALSE]
 
 Next ==
     \E f \in Files :
