@@ -566,7 +566,7 @@ u32 larder_page_serve(struct larder *l, u64 qid_path, u64 page_index,
     // page's known content (the caller's next read, at valid_len, refetches -- so
     // a partial page needs no EOF determination). Copy [0, chunk) out UNDER the
     // lock so a concurrent invalidate/evict cannot free `page` mid-copy.
-    if (e && e->cvers == want_cvers && page_off < e->valid_len) {
+    if (e && (e->cvers == want_cvers || e->own) && page_off < e->valid_len) {
         u32 avail = e->valid_len - page_off;
         u32 chunk = (want < avail) ? want : avail;
         larder_pagecopy(out, e->page + page_off, chunk);
@@ -654,7 +654,55 @@ void larder_page_install(struct larder *l, u64 seq0, u64 qid_path, u64 page_inde
     e->valid_len  = len;
     e->valid      = true;
     e->ref        = true;          // CLOCK: freshly installed -> a second chance
+    e->own        = false;         // a read-populate observed SERVER content: the
+                                   // own bypass upgrades to the normal cvers gate
     l->page_installs++;
+    spin_unlock(&l->lock);
+}
+
+void larder_page_install_own(struct larder *l, u64 qid_path, u64 page_index,
+                             u32 page_off, const u8 *data, u32 len) {
+    if (!l || !data || len == 0) return;
+    if (page_off >= LARDER_PAGE_SIZE) return;
+    if (len > LARDER_PAGE_SIZE - page_off) len = LARDER_PAGE_SIZE - page_off;
+    spin_lock(&l->lock);
+    if (!page_ensure_array_locked(l)) {
+        spin_unlock(&l->lock);
+        return;
+    }
+    if (page_off != 0) {
+        // Append-chain continuation ONLY: an existing OWN page ending exactly
+        // at our start. A non-own boundary page is left as-is (it serves its
+        // prefix; extending it would mix cvers-gated and own content). A gap
+        // or overlap is skipped (appends are monotonic; anything else is a
+        // shape this API refuses -- the wire serves those reads).
+        struct larder_page_ent *e = page_find_locked(l, qid_path, page_index);
+        if (e && e->valid && e->own && e->valid_len == page_off) {
+            larder_pagecopy(e->page + page_off, data, len);
+            e->valid_len = page_off + len;
+            e->ref = true;
+            l->page_own_installs++;
+        }
+        spin_unlock(&l->lock);
+        return;
+    }
+    struct larder_page_ent *e = page_install_slot_locked(l, qid_path, page_index);
+    if (!e->page) {
+        e->page = kmalloc(LARDER_PAGE_SIZE, 0);
+        if (!e->page) {
+            page_hash_unlink_locked(l, (s32)(e - l->page));
+            page_qhash_unlink_locked(l, (s32)(e - l->page));
+            spin_unlock(&l->lock);
+            return;
+        }
+    }
+    larder_pagecopy(e->page, data, len);
+    e->cvers     = 0;
+    e->valid_len = len;
+    e->valid     = true;
+    e->ref       = true;
+    e->own       = true;
+    l->page_own_installs++;
     spin_unlock(&l->lock);
 }
 
@@ -691,6 +739,37 @@ void larder_page_invalidate(struct larder *l, u64 qid_path) {
     spin_unlock(&l->lock);
 }
 
+void larder_page_invalidate_range(struct larder *l, u64 qid_path,
+                                  u64 first_idx, u64 last_idx) {
+    if (!l) return;
+    spin_lock(&l->lock);
+    // Same gen discipline as the whole-file form: a concurrent read-populate
+    // that observed pre-write content anywhere must be guarded out.
+    l->gen++;
+    if (l->page) {
+        // The same qbucket walk, dropping only pages whose index lies in
+        // [first_idx, last_idx]. Out-of-range pages stay linked AND valid --
+        // the G1b range-scoped write-through discipline (larder.h).
+        u32 qb = page_qbucket(l->page_qnbuckets, qid_path);
+        s32 *pp = &l->page_qhash[qb];
+        while (*pp != -1) {
+            s32 si = *pp;
+            struct larder_page_ent *e = &l->page[si];
+            if (e->qid_path == qid_path && e->valid &&
+                e->page_index >= first_idx && e->page_index <= last_idx) {
+                page_hash_unlink_locked(l, si);
+                *pp = e->qnext;
+                e->qnext = -1;
+                e->valid = false;
+                l->page_invalidations++;
+            } else {
+                pp = &e->qnext;
+            }
+        }
+    }
+    spin_unlock(&l->lock);
+}
+
 // FID-LIFECYCLE cached-open (docs/FID-LIFECYCLE-DESIGN.md section 3.3): the two
 // PURE READERS the fidless open consults. Neither mutates cache state beyond
 // the CLOCK ref bit (a coverage consult is a use), so the L1f-audited mutation
@@ -706,7 +785,7 @@ static bool pages_cover_locked(struct larder *l, u64 qid_path, u32 cvers,
     u64 npages = (size + LARDER_PAGE_SIZE - 1u) / LARDER_PAGE_SIZE;
     for (u64 i = 0; i < npages; i++) {
         struct larder_page_ent *e = page_find_locked(l, qid_path, i);
-        if (!e || e->cvers != cvers) return false;
+        if (!e || (e->cvers != cvers && !e->own)) return false;
         u64 need64 = size - i * LARDER_PAGE_SIZE;
         u32 need   = (need64 >= LARDER_PAGE_SIZE) ? LARDER_PAGE_SIZE : (u32)need64;
         if (e->valid_len < need) return false;

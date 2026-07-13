@@ -186,6 +186,9 @@ struct larder_page_ent {
     u32  valid_len;    // bytes [0, valid_len) of `page` hold content (<= LARDER_PAGE_SIZE)
     bool valid;        // slot occupied (buffer may still be allocated when !valid)
     bool ref;          // CLOCK second-chance reference bit (set on serve-hit / install)
+    bool own;          // G1 write-populate: the writer's OWN landed bytes; the serve
+                       // bypasses the cvers gate (sound under the loose single-writer
+                       // premise the wb asserts -- fs_cache.tla EnableFlushPopulate)
     s32  hnext;        // (qid_path,page_index) hash chain: next slot in this bucket, -1 = end
     s32  qnext;        // qid_path-only hash chain (page_qhash): O(pages-of-file) invalidate
     u8  *page;         // heap buffer (lazily kmalloc'd; reused; freed at larder_destroy)
@@ -235,6 +238,7 @@ struct larder {
     u64 page_misses;          // page serve misses (miss / stale cvers / out of range)
     u64 page_installs;
     u64 page_install_skips;   // gen-guard skips
+    u64 page_own_installs;    // G1 write-populate installs (flush-landed own pages)
     u64 page_invalidations;   // pages dropped by own-write invalidate
     u64 page_evictions;
     u64 co_snapshots;         // cached-open snapshots served (fidless opens minted)
@@ -350,6 +354,22 @@ u32 larder_page_serve(struct larder *l, u64 qid_path, u64 page_index,
 // RPC already served the bytes -- the cache is a best-effort accelerator, I-38
 // correctness never depends on a fill). Overwrite (qid_path,page_index) / free
 // slot / LRU victim (reusing its retained buffer).
+// G1 (term-4) write-populate: install the writer's OWN landed bytes at the wb
+// flush. own pages serve WITHOUT the cvers gate (no post-flush cvers is knowable
+// client-side -- Rwrite carries none) and WITHOUT the populate gen guard: the
+// resurrection class the guard closes is a READ-populate racing an invalidate;
+// these bytes are the writer's just-landed content and no same-file mutation can
+// land concurrently (the caller holds the wb flush freeze, wb_flushers > 0).
+// page_off == 0 installs/overwrites the page (own, cvers ignored); page_off > 0
+// EXTENDS only an existing OWN page whose valid_len == page_off (the append-chain
+// continuation across cap flushes) -- any other shape is skipped: never a hole,
+// never a mixed cvers/own page. Later mutations invalidate per-qid as always,
+// dropping own pages with the rest. Spec: fs_cache.tla FlushClose -> Refetch
+// (EnableFlushPopulate); the buggy_populate_unflushed cfg pins the landed-only
+// coupling.
+void larder_page_install_own(struct larder *l, u64 qid_path, u64 page_index,
+                             u32 page_off, const u8 *data, u32 len);
+
 void larder_page_install(struct larder *l, u64 seq0, u64 qid_path, u64 page_index,
                          u32 cvers, const u8 *data, u32 len);
 
@@ -357,6 +377,16 @@ void larder_page_install(struct larder *l, u64 seq0, u64 qid_path, u64 page_inde
 // file) and bump gen (always -- a concurrent populate that read the pre-write
 // content must be skipped). Slot buffers are retained for reuse.
 void larder_page_invalidate(struct larder *l, u64 qid_path);
+// G1b (term-4): drop ONLY the file's pages whose page_index lies in
+// [first_idx, last_idx] -- the write-through discipline for a non-append
+// write of a known [offset, offset+len) range. Pages OUTSIDE the range keep
+// serving: a cvers-gated page's staleness is caught by the normal open-time
+// revalidation exactly as if it had been dropped, and an OWN page's bytes at
+// untouched offsets are still the file's current content (the single-writer
+// premise; the buildid-pwrite class must not nuke a whole just-populated
+// archive for a ~100-byte patch). Bumps gen like the whole-file form.
+void larder_page_invalidate_range(struct larder *l, u64 qid_path,
+                                  u64 first_idx, u64 last_idx);
 
 // -- FID-LIFECYCLE cached-open helpers (docs/FID-LIFECYCLE-DESIGN.md §3.3) ------
 //

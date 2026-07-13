@@ -56,6 +56,10 @@ void test_dev9p_wb_nonappend_writethrough(void);
 void test_dev9p_wb_fstat_staged_size(void);
 void test_dev9p_wb_cap_flush(void);
 void test_dev9p_wb_budget_fallback(void);
+void test_dev9p_wb_populate_readback(void);
+void test_dev9p_wb_populate_append_chain(void);
+void test_dev9p_wb_populate_failed_flush(void);
+void test_dev9p_wb_writethrough_range_invalidate(void);
 
 // File-scope buffers — client is ~80 KiB (the embedded Larder attr+dentry+page
 // metadata), won't fit on the 16 KiB test thread stack alongside a few locals.
@@ -2110,7 +2114,9 @@ void test_dev9p_wb_overlay_read(void) {
     (void)dev9p.read(f, rb, 16, 4096);
     TEST_EXPECT_EQ((u64)g_tread_seen, 1ull, "past-run read consults the wire");
     // Flush via fsync, then stage a second run [1000,2000): a below-run read
-    // now goes to the wire, a within-run read still serves staged.
+    // serves the FLUSHED bytes wire-free (G1 write-populate: the flush
+    // installs OWN pages instead of invalidating -- pre-G1 this read went to
+    // the wire), a within-run read still serves staged.
     wb_wire_reset();
     TEST_EXPECT_EQ((u64)dev9p.fsync(f, 0), 0ull, "fsync flushes");
     TEST_EXPECT_EQ((u64)g_twrite_seen, 1ull, "fsync: one flush Twrite");
@@ -2118,8 +2124,14 @@ void test_dev9p_wb_overlay_read(void) {
     TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 1000, 1000), 1000ull,
                    "post-flush append re-stages (anchor advanced)");
     wb_wire_reset();
-    got = dev9p.read(f, rb, 100, 100);   // below the new run
-    TEST_ASSERT(g_tread_seen >= 1, "below-run read consults the wire");
+    got = dev9p.read(f, rb, 100, 100);   // below the new run: flushed content
+    TEST_EXPECT_EQ((u64)got, 100ull, "below-run read serves the flushed run");
+    TEST_EXPECT_EQ((u64)g_tread_seen, 0ull,
+                   "below-run read is wire-free (G1 own pages)");
+    ok = true;
+    for (u32 i = 0; i < 100 && ok; i++)
+        if (rb[i] != wb_pat(100u + i)) ok = false;
+    TEST_ASSERT(ok, "below-run bytes == the flushed content");
     wb_wire_reset();
     got = dev9p.read(f, rb, 100, 1500);  // within the new run
     TEST_EXPECT_EQ((u64)got, 100ull, "new-run read serves staged");
@@ -2317,6 +2329,141 @@ void test_dev9p_wb_budget_fallback(void) {
     TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 1000, 1000), 1000ull,
                    "post-release append (the through-write advanced the anchor)");
     TEST_EXPECT_EQ((u64)g_twrite_seen, 0ull, "…stages again");
+    spoor_clunk(f);
+    wb_test_end(root);
+}
+
+
+// ---- G1 (term-4) write-populate: the flush installs OWN pages ----------
+// The landed run's pages serve WITHOUT the cvers gate (fs_cache.tla
+// EnableFlushPopulate; the loose single-writer premise). E2E revert-probe:
+// pre-G1 the flush INVALIDATED the file's pages, so the post-flush read
+// went to the wire (the responder answers "hello") -- both assertions fail.
+void test_dev9p_wb_populate_readback(void) {
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 512; i++) chunk[i] = wb_pat(i);
+    wb_wire_reset();
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 512, 0), 512ull, "stage");
+    TEST_EXPECT_EQ((u64)dev9p.fsync(f, 0), 0ull, "flush ok");
+    TEST_EXPECT_EQ((u64)g_client.larder.page_own_installs, 1ull,
+                   "one own page installed");
+    // Same-priv read AFTER the flush (wb empty): the own pages serve; no wire.
+    u8 rb[512];
+    for (u32 i = 0; i < sizeof(rb); i++) rb[i] = 0;
+    TEST_EXPECT_EQ((u64)dev9p.read(f, rb, 512, 0), 512ull, "readback length");
+    TEST_EXPECT_EQ((u64)g_tread_seen, 0ull, "readback is wire-free");
+    bool ok = true;
+    for (u32 i = 0; i < 512; i++) if (rb[i] != wb_pat(i)) { ok = false; break; }
+    TEST_ASSERT(ok, "readback bytes == the flushed run");
+    // The own gate itself: a serve under an arbitrary (mismatched) cvers.
+    u8 one[64];
+    u32 got = larder_page_serve(&g_client.larder, f->qid.path, 0, 0, 64,
+                                1234u, one, NULL);
+    TEST_EXPECT_EQ((u64)got, 64ull, "own page serves past the cvers gate");
+    // A normal (read-populate) install over the same key clears own: the
+    // mismatched-cvers serve must now MISS.
+    larder_page_install(&g_client.larder, g_client.larder.gen, f->qid.path,
+                        0, 5u, chunk, 512);
+    got = larder_page_serve(&g_client.larder, f->qid.path, 0, 0, 64,
+                            1234u, one, NULL);
+    TEST_EXPECT_EQ((u64)got, 0ull, "normal install upgrades own -> cvers gate");
+    spoor_clunk(f);
+    wb_test_end(root);
+}
+
+// Two flushes with an unaligned boundary: the second run's front partial
+// EXTENDS the first run's own tail page (valid_len == page_off), so the whole
+// [0, 8000) range serves wire-free with exact bytes.
+void test_dev9p_wb_populate_append_chain(void) {
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    wb_wire_reset();
+    for (u32 i = 0; i < 5000; i++) chunk[i] = wb_pat(i);
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 5000, 0), 5000ull, "stage run 1");
+    TEST_EXPECT_EQ((u64)dev9p.fsync(f, 0), 0ull, "flush 1");
+    for (u32 i = 0; i < 3000; i++) chunk[i] = wb_pat(5000u + i);
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 3000, 5000), 3000ull, "stage run 2");
+    u64 qid = f->qid.path;
+    spoor_clunk(f);                      // close = flush 2 (extends page 1)
+    u8 *out = wb_scratch();
+    u32 got = larder_page_serve(&g_client.larder, qid, 0, 0, 4096, 99u, out, NULL);
+    TEST_EXPECT_EQ((u64)got, 4096ull, "page 0 full");
+    bool ok = true;
+    for (u32 i = 0; i < 4096; i++) if (out[i] != wb_pat(i)) { ok = false; break; }
+    TEST_ASSERT(ok, "page 0 bytes");
+    got = larder_page_serve(&g_client.larder, qid, 1, 0, 4096, 99u, out, NULL);
+    TEST_EXPECT_EQ((u64)got, 3904ull, "page 1 extended to 8000-4096");
+    ok = true;
+    for (u32 i = 0; i < 3904; i++)
+        if (out[i] != wb_pat(4096u + i)) { ok = false; break; }
+    TEST_ASSERT(ok, "page 1 bytes span both runs");
+    wb_test_end(root);
+}
+
+// A FAILED flush must not populate (the buggy_populate_unflushed cfg's impl
+// coupling): the landed range is unknown, the file's pages drop fail-safe.
+void test_dev9p_wb_populate_failed_flush(void) {
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 256; i++) chunk[i] = wb_pat(i);
+    wb_wire_reset();
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 256, 0), 256ull, "stage");
+    g_twrite_fail_ecode = 28;   // ENOSPC on the flush Twrite
+    long fe = dev9p.fsync(f, 0);
+    TEST_EXPECT_EQ((u64)(-fe), 28ull, "flush fails");
+    TEST_EXPECT_EQ((u64)g_client.larder.page_own_installs, 0ull,
+                   "no own install on the failed arm");
+    u8 one[64];
+    u32 got = larder_page_serve(&g_client.larder, f->qid.path, 0, 0, 64,
+                                0u, one, NULL);
+    TEST_EXPECT_EQ((u64)got, 0ull, "nothing servable after the failed flush");
+    spoor_clunk(f);
+    wb_test_end(root);
+}
+
+
+// G1b: a non-append write-through drops ONLY the pages it touched -- the
+// buildid-pwrite class (a ~100-byte in-place patch on a just-flushed archive)
+// must not nuke the whole file's freshly-populated own pages. Revert-probe:
+// with the pre-G1b whole-file invalidate, page 1's serve below returns 0.
+void test_dev9p_wb_writethrough_range_invalidate(void) {
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    wb_wire_reset();
+    for (u32 i = 0; i < 8000; i++) chunk[i] = wb_pat(i);
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 8000, 0), 8000ull, "stage");
+    TEST_EXPECT_EQ((u64)dev9p.fsync(f, 0), 0ull, "flush (own pages 0+1)");
+    u8 one[64];
+    TEST_EXPECT_EQ((u64)larder_page_serve(&g_client.larder, f->qid.path, 1,
+                                          0, 64, 77u, one, NULL),
+                   64ull, "page 1 own-serves pre-patch");
+    // The buildid-shaped patch: 100 bytes at offset 100 (page 0), NON-append
+    // -> flush-then-write-through -> the range invalidate touches page 0 only.
+    for (u32 i = 0; i < 100; i++) chunk[i] = 0x5A;
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 100, 100), 100ull, "patch");
+    TEST_EXPECT_EQ((u64)larder_page_serve(&g_client.larder, f->qid.path, 0,
+                                          0, 64, 77u, one, NULL),
+                   0ull, "page 0 (patched) dropped");
+    u32 got = larder_page_serve(&g_client.larder, f->qid.path, 1, 0, 64,
+                                77u, one, NULL);
+    TEST_EXPECT_EQ((u64)got, 64ull, "page 1 survives the patch (range scope)");
+    bool ok = true;
+    for (u32 i = 0; i < 64 && ok; i++)
+        if (one[i] != wb_pat(4096u + i)) ok = false;
+    TEST_ASSERT(ok, "page 1 bytes intact");
     spoor_clunk(f);
     wb_test_end(root);
 }

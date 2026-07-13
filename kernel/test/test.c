@@ -979,6 +979,10 @@ void test_dev9p_wb_nonappend_writethrough(void);
 void test_dev9p_wb_fstat_staged_size(void);
 void test_dev9p_wb_cap_flush(void);
 void test_dev9p_wb_budget_fallback(void);
+void test_dev9p_wb_populate_readback(void);
+void test_dev9p_wb_populate_append_chain(void);
+void test_dev9p_wb_populate_failed_flush(void);
+void test_dev9p_wb_writethrough_range_invalidate(void);
 void test_dev9p_perm_enforced_deny_allow(void);
 void test_p9_attached_create_destroy(void);
 void test_p9_attached_handshake_failure_returns_null(void);
@@ -2368,6 +2372,10 @@ struct test_case g_tests[] = {
     { "dev9p.wb_fstat_staged_size",    test_dev9p_wb_fstat_staged_size,        false, NULL },
     { "dev9p.wb_cap_flush",            test_dev9p_wb_cap_flush,                false, NULL },
     { "dev9p.wb_budget_fallback",      test_dev9p_wb_budget_fallback,          false, NULL },
+    { "dev9p.wb_populate_readback",    test_dev9p_wb_populate_readback,        false, NULL },
+    { "dev9p.wb_populate_append_chain", test_dev9p_wb_populate_append_chain,   false, NULL },
+    { "dev9p.wb_populate_failed_flush", test_dev9p_wb_populate_failed_flush,   false, NULL },
+    { "dev9p.wb_writethrough_range",   test_dev9p_wb_writethrough_range_invalidate, false, NULL },
     { "dev9p.perm_enforced_deny_allow",
                                        test_dev9p_perm_enforced_deny_allow, false, NULL },
     { "p9_attached.create_destroy",    test_p9_attached_create_destroy,    false, NULL },

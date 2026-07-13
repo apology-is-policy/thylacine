@@ -203,11 +203,35 @@ static int wb_flush_locked(struct dev9p_priv *p, u64 qid_path) {
         done += acc;
     }
     // Own-write invalidates move per-write -> per-FLUSH (fs_cache.tla
-    // OwnWrite realized at the wire moment). Unconditional: a PARTIAL flush
-    // also mutated the server. Outside wb_lock (the larder lock is its own
-    // leaf; wb_lock never nests with it).
+    // OwnWrite realized at the wire moment). The attr drops on BOTH arms
+    // (size/mtime/cvers changed server-side even on a partial land). Pages:
+    // a FAILED/partial flush drops the whole file fail-safe (the landed
+    // range is unknown); a FULL land INSTALLS the run's pages as OWN instead
+    // -- the G1 write-populate (fs_cache.tla FlushClose -> Refetch, the
+    // EnableFlushPopulate arm; the buggy_populate_unflushed cfg pins this
+    // err==0 coupling). An append run never overlaps previously-cached
+    // content except the shared boundary page, which install_own extends
+    // only when it is an OWN page ending exactly at our start; bytes outside
+    // the run stay valid. Runs while wb_flushers > 0 (the frozen run pins
+    // wb_buf AND excludes same-file mutators -- the no-gen-guard premise).
+    // Outside wb_lock (the larder lock is its own leaf; wb_lock never nests
+    // with it).
     larder_attr_invalidate(&p->client->larder, qid_path);
-    larder_page_invalidate(&p->client->larder, qid_path);
+    if (err) {
+        larder_page_invalidate(&p->client->larder, qid_path);
+    } else {
+        u64 ps  = LARDER_PAGE_SIZE;
+        u64 end = off + (u64)total;
+        for (u64 idx = off / ps; idx <= (end - 1u) / ps; idx++) {
+            u64 s = idx * ps;
+            if (s < off) s = off;
+            u64 e2 = (idx + 1u) * ps;
+            if (e2 > end) e2 = end;
+            larder_page_install_own(&p->client->larder, qid_path, idx,
+                                    (u32)(s - idx * ps), buf + (s - off),
+                                    (u32)(e2 - s));
+        }
+    }
 
     spin_lock(&p->wb_lock);
     p->wb_flushers--;
@@ -1495,12 +1519,23 @@ static long dev9p_write(struct Spoor *c, const void *buf, long n, s64 off) {
     // needs a wider channel (the ER-rollout's job).
     if (rc != 0) return (long)rc;
     // L1c/L1e invalidate (fs_cache.tla OwnWrite): the file's attrs (size/mtime/
-    // cvers) AND its content changed. Drop its cached attr entry AND every cached
-    // page so a subsequent stat/fstat/read cannot serve the pre-write metadata or
-    // bytes -- the guest sees its own write strongly (unconditional: harmless
-    // no-ops for a non-cacheable client, whose caches are empty).
+    // cvers) AND its content changed. Drop its cached attr entry AND the pages
+    // the write actually TOUCHED (G1b range-scoped: [offset, offset+accepted)).
+    // Pages outside the range keep serving -- an own page's untouched bytes are
+    // still the file's current content (single-writer), and a cvers page misses
+    // at the next revalidation exactly as if dropped. The buildid-pwrite class
+    // (a ~100-byte in-place patch on a just-flushed archive) must not nuke the
+    // whole file's freshly-populated pages. A zero-accepted write keeps the
+    // conservative whole-file drop (nothing is known about what landed).
     larder_attr_invalidate(&p->client->larder, c->qid.path);
-    larder_page_invalidate(&p->client->larder, c->qid.path);
+    if (accepted > 0) {
+        larder_page_invalidate_range(&p->client->larder, c->qid.path,
+                                     offset / LARDER_PAGE_SIZE,
+                                     (offset + (u64)accepted - 1u) /
+                                         LARDER_PAGE_SIZE);
+    } else {
+        larder_page_invalidate(&p->client->larder, c->qid.path);
+    }
     // F1 write-behind: a completed write-through advances the append anchor
     // so a subsequent cursor write can stage again.
     if (p->wb_eligible) wb_note_through(p, offset, accepted);
