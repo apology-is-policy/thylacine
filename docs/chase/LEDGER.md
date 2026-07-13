@@ -599,3 +599,70 @@ band + a post-F1 depth histogram to convert `rpc_ms` to a wall footprint; (2)
 the server-#367 reducible-fraction bound (does it close the bar?); (3) price
 msize. Only "no guest FS-CACHE lever reaches the bar" is earned (wga/F1b/
 read-sizing/prefetch). The task-#54 continuation owns (1)-(3).
+
+### TERM-3 (task #54): the owed measurements land -- the impossibility branch is MEASURED DEAD
+
+The final-audit's owed items (1) [the spawn floor + the sum->wall conversion]
+delivered by a fresh instrumented sanctioned run (chase-bench.sh device 3,
+smp=4, pool-restored, sentinels clean pre+post, 2026-07-13; fresh bake, no
+/chase-w2 marker). Two NEW instruments: `rpc_covered_ns` (the union of the
+intervals during which >=1 sync RPC is in flight -- the honest UPPER bound on
+the RPC band's wall contribution, replacing the retracted `wall - rpc_ms`
+arithmetic) and a joey SPAWNSTORM microbench (24 sequential spawn+wait of the
+device compile tool [-V, ~25 MB] + the just-built gofmt [usage-exit, ~3.5 MB])
+with an exact host twin.
+
+**Bar (contemporaneous, N=3): S1 warm 248/238/244 med 244 -- CROSSED (<=266).
+S3 cold 3058/3104/3173 med 3104 -- gap +456 to <=2648.** (The keeper N=10 med
+3302 last term ran outside the sanctioned bench; the sanctioned protocol is
+the bar-valid one. Both straddle the same verdict.)
+
+**(1a) The ~91x spawn/exec floor is REFUTED.** Device warm per-spawn:
+compile -V med 5-6 ms vs host 4.67 ms (~1.2x, delta ~+1 ms); gofmt med 9-10 ms
+vs host 2.93 ms (~3.2x, delta ~+6.5 ms). Colds: device 5-17 ms vs host 30-48 ms
+(the DEVICE cold spawn BEATS the host cold -- REVENANT + the Image cache).
+S3 spawns = 143 (kernel-counted execs in the window); the naive fully-serial
+upper bound is 143 x (+1..+6.5) = 143..930 ms, and the realistic band
+(compile-class binaries dominate; spawns overlap compute under -p 4) is
+~150 ms. Exec page-in during S3: fault_ms = 0 (tools Image-cached by the
+earlier build phases). The candidate GUEST band the final audit flagged as
+unmeasured is now measured SMALL -- no guest spawn lever exists worth the bar.
+
+**(1b) The honest RPC wall footprint: covered = 901/927/970 med 927 ms = 30%
+of the S3 wall** (vs the rpc_ms SUM 1113-1208 -- the depth>1 overlap the F2
+retraction predicted). Sanity: the sequential storms show covered ~= rpc_ms
+(depth ~1), and covered <= wall everywhere. Per-type (med): wga ~325 ms/6.9k,
+read ~329 ms/6.0k, write ~253 ms/2.2k, walk 64/1.6k, open ~60/2.0k, rdir
+~42/899, clunk 11/349, gattr 10/292. (Depth-hist ge2 counts include lingering
+fire-and-forget async clunks -- an overcount of exploitable concurrency;
+covered_ns is unaffected, it brackets sync RPCs only.)
+
+**(2) The decomposition that kills the impossibility branch:**
+
+    S3 wall 3104 = covered(RPC) 927 + zero-RPC 2177
+    host  S3 2448 (~all non-RPC)          bar 2648
+
+The device's ZERO-RPC wall (2177 ms) is ALREADY UNDER THE BAR by 471 ms --
+and under the HOST'S OWN total. Compute + spawn + sched on the device are
+host-comparable-or-better; the ENTIRE +456 gap lives inside the 927 ms RPC
+band. Nothing ARCH-level blocks parity. An impossibility proof is therefore
+NOT COMPLETABLE -- the honest disposition is the charter's FIXABLE-VOTED,
+now QUANTIFIED: the server arc must remove >= 456/927 = 49% of the covered
+band. The measured #367 server-CPU share is 40-55% of per-op RTT (STMD26:
+read=41us/meta=37us server-side), bracketing the requirement by itself;
+protocol fusion (the POUNCE precedent -- 21.8k ops carry ~6.9k wga + 6.0k
+read + 2.2k write) removes whole round-trips including their guest-side
+overhead; msize 128->512 KiB compresses the multi-chunk tails (leg 3, priced
+inside the arc). First-order estimate of the addressable band: ~-450..-900 ms
+vs the +456 gap -- roughly 2x margin. Caveat stated honestly: covered-wall
+removal is not perfectly linear in per-op savings (depth>1 unions shrink
+sublinearly; queueing relief helps superlinearly) -- the exact yield needs
+the arc to land, which is exactly what FIXABLE-VOTED means.
+
+**TERM-3 VERDICT: S1 = PARITY (crossed, 244 <= 266). S3 = FIXABLE-VOTED,
+impossibility proof CLOSED IN THE NEGATIVE (measured: zero-RPC device wall
+2177 < bar 2648; the gap is 100% RPC-band; the addressable server levers
+bracket the gap with ~2x margin). The Senate's vote is now a funding
+decision, not a measurement question: (a) fund the Stratum continuation
+(#367 per-op CPU + POUNCE-style fusion + msize; est. crosses the bar), or
+(b) close the CHASE at S1-parity + S3 ~3.1 s with the continuation named.**
