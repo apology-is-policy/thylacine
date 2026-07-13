@@ -763,3 +763,54 @@ idiom; ~90 ms). T4-A server -- reply batching + buffered frame reader
 lockless read lookup DEFERRED unless G1 leaves the read band hot.
 T4-C msize ~45 ms, bundle-if-cheap. Estimated total ~-520..-600 ms
 against the +456 gap; the exit gate stays the sanctioned bar itself.
+
+## Term-4 T4-G interim: G1 + G3 + G4 landed; the A/B re-prices the residue (2026-07-13)
+
+**Landed** (commits 5c4e5736 [G1] + 49d4f9de [G3+G4]; suite 1115/1115; every
+mechanism revert-probed): G1 write-populate (own pages at the wb flush +
+range-scoped write-through invalidate), G3 perm-valid attr downgrade, G4
+qid-scoped populate-gen guard (the 128-slot invalidation ring log).
+
+**Instrumented A/B (3 boots, sentinels clean, goroot pool restored after the
+fixture-clobber trap -- see below):**
+
+- S1 warm: 199/199/194 -> med 199 ms (bar <= 266: CROSSED with margin).
+- S3 cold: 2958/2889/2889 -> med 2889 ms (G1 A/B 2903; bar 2648; gap 241 ms).
+- The S3 WGAd window: am_mid 1104 -> **0** (G3 killed its whole class);
+  g3dg=1375 downgrades; g4p=1521 recovered fills vs g4s=6 conservative skips
+  (the scoping is essentially never wrong); dinval 2228-era whole-parent
+  drops long gone. covered_ms 728 (G1: 726). Wire wga 6938 -> 6836 (-102).
+
+**The honest verdict: G3/G4 are mechanism-perfect and WALL-NEUTRAL (~-15 ms,
+within noise).** The T4-M attribution over-credited the serve-bail classes: a
+bail at ANY hop sends the whole chain to ONE fused RPC -- the same RPC a full
+miss would issue -- so converting mid-hop bails into serves saves wire only
+when the ENTIRE chain converts (the -102). The lesson for the ledger: price
+levers in ROUND TRIPS ELIMINATED, never in bail-class counts.
+
+**The re-priced residue** (from the fresh S3 window: rpc=18575, covered 728 ms
+=> ~39 us effective/covered-RT at depth ge2=8392):
+
+- ~3.7k of wire wga=6836 are BIND-FORM walks over FULLY-CACHED chains -- the
+  RPC exists only to mint the server fid. Plus am_leaf=901 (mostly perm_only
+  bind-walks TO the just-mutated dir itself -- sound to serve for a bind
+  consumer, which reads only mode/uid/gid + qid from the leaf).
+- The RT math bounds G2 honestly: a CONSUMING op (create eats the parent fid
+  via Tlcreate; open transitions it via Tlopen) still needs >= 1 RT whatever
+  fid cache exists (a 0-name Twalk clone is itself 1 RT), so G2's 0-RT wins
+  are the NON-CONSUMING by-name ops (unlinkat/renameat/mkdir parents,
+  repeat same-dir resolutions) + donate-back-on-close recycling. Ceiling
+  ~50-150 ms, not the ~90+ ms flat estimate.
+- G2 alone cannot close the 241 ms gap; G2 + T4-A (the MEASURED ~170 ms
+  frame-I/O band + ~60 ms write insert path) + T4-C msize (~45 ms) can,
+  with margin. Sequencing holds: G2 (closes T4-G; one Fable audit over the
+  whole Larder-surface delta + SMP gate owed at the close) -> T4-A -> T4-X.
+
+**Trap re-sharpened (procedural):** the goroot-pool fixture was destroyed by
+plain `tools/build.sh kernel` invocations -- the kernel target runs the FULL
+assembly including build_stratum_pool_fixture, which REGENERATES pool.img +
+system.key whenever THYLACINE_MKFS_PRESERVE=1 is absent. The bake-env rule
+applies to EVERY build.sh invocation, not just `all`. Recovered from the
+pool.img.goroot-safe / system.key.goroot-safe twins (the escape hatch saved
+2026-07-12) + a PRESERVE re-bake; the first no-bar-lines bench run was the
+tell (the guest's own "Go-4c /goroot absent" skip line named it).
