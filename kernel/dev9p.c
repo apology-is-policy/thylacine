@@ -829,6 +829,13 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
             // names this qid while the fid is checked out.
             if (full && nc != NULL && (sts[nname - 1].qid_type & QTDIR)) {
                 struct p9_client *cl = src_priv->client;
+                // Snapshot the gen BEFORE the take: an invalidation landing
+                // in the serve->take window then falls INSIDE the donate
+                // gate's (fid_gen, gen] scan (a false-stale clunk at worst
+                // -- the fail-safe direction). Snapshotting after the take
+                // would exclude exactly that window's death events, leaning
+                // on the create/mkdir drop-hook backstop alone.
+                u64 g2gen = larder_gen_snapshot(&cl->larder);
                 s64 cfid = dirfid_take(cl, sts[nname - 1].qid_path);
                 if (cfid >= 0) {
                     struct Walkqid *sw = walkqid_alloc(nname);
@@ -837,7 +844,7 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
                             priv_alloc(cl, (u32)cfid, /*fid_owned=*/true,
                                        src_priv->attached_owner);
                         if (np) {
-                            np->fid_gen = larder_gen_snapshot(&cl->larder);
+                            np->fid_gen = g2gen;
                             sw->nqid = nname;
                             for (int i = 0; i < nname; i++) {
                                 sw->qid[i].path   = sts[i].qid_path;
@@ -1981,8 +1988,10 @@ static int dev9p_wstat_native(struct Spoor *c, u32 valid, u32 mode,
     sa.gid   = gid;
     int rc = p9_client_setattr(p->client, p->fid, &sa);
     if (rc != 0) { p->fid_suspect = true; return -1; }
-    // L1c invalidate (fs_cache.tla OwnWrite): chmod/chown/truncate changed
-    // mode/uid/gid/size. CRITICAL -- the base X-check perm_checks the cached
+    // L1c invalidate (fs_cache.tla OwnWrite): chmod/chown changed
+    // mode/uid/gid (metadata only -- sa.size is never set here; a content
+    // truncate flows through OTRUNC-dev9p_open, which also drops the
+    // pages). CRITICAL -- the base X-check perm_checks the cached
     // mode, so a stale mode after a tighten would be a bounded I-28 window; the
     // invalidate keeps the window at zero for the guest's own chmod.
     larder_attr_invalidate(&p->client->larder, c->qid.path);
