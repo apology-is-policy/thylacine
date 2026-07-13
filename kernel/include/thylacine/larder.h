@@ -136,6 +136,20 @@
 #define LARDER_PAGE_ENTRIES 32768u
 #define LARDER_PAGE_SIZE    4096u
 
+// G4 (term-4): the qid-scoped populate guard's invalidation ring log. Every
+// invalidation event (attr/dentry/page, any form) bumps `gen` AND records the
+// staled qid at inval_qid[gen % RING]. An install with pre-RPC snapshot seq0
+// skips IFF its own key qid appears among the events in (seq0, gen] -- scanning
+// at most RING slots; a window wider than the ring loses evidence, so it
+// fail-safes to the pre-G4 global skip. Ring-log soundness: for any seq s <=
+// gen, slot s % RING holds the qid of the LATEST event with that residue <= gen,
+// so when gen - seq0 <= RING every in-window slot is exactly its in-window
+// event (a later same-residue writer would exceed gen). Sizing: one in-flight
+// RPC window on the shared client sees the concurrent writers' events (a
+// create logs 4; a flush logs 2); 128 covers a 4-CPU write burst over a
+// ~100-200us RPC with wide margin, and overflow only costs a skipped fill.
+#define LARDER_INVAL_RING 128u
+
 struct larder_attr_ent {
     u64            qid_path;   // key. root's qid.path is 0x0, so `valid` (not
                                //   path==0) marks an empty slot.
@@ -143,6 +157,16 @@ struct larder_attr_ent {
                                //   consumed by the L1e page revalidation.
     bool           valid;      // slot occupied
     bool           ref;        // CLOCK second-chance bit (set on serve/install)
+    bool           perm_only;  // G3 (term-4): a child-mutation in this DIR staled
+                               //   size/mtime/nlink/cvers but NOT mode/uid/gid (a
+                               //   create/unlink/rename never edits the parent's
+                               //   perm bits -- only wstat does, and wstat full-
+                               //   drops). A perm_only entry serves ONLY the
+                               //   resolver's intermediate-hop X-check (which
+                               //   reads mode/uid/gid + the immutable qid.path/
+                               //   type); attr_serve / fresh_size / a walk LEAF
+                               //   reject it (their consumers read size/times/
+                               //   cvers). Any full install clears it.
     s32            hnext;      // hash chain: next slot in this key's bucket, -1 = end
     struct t_stat  attr;       // cached metadata (mode/uid/gid/size/times/nlink/...)
 };
@@ -197,6 +221,8 @@ struct larder_page_ent {
 struct larder {
     spin_lock_t               lock;       // dedicated near-leaf; never held across an RPC
     u64                       gen;        // monotonic invalidation sequence (populate guard)
+    u64                       inval_qid[LARDER_INVAL_RING];  // G4: qid per event seq
+                                          //   (slot = seq % RING; see the ring note above)
     // All three sub-cache entry arrays are HEAP (lazily allocated on the first
     // install -- a non-cacheable client allocates none) with the same O(1)
     // index shape: chained hash + free-cursor fill + CLOCK eviction.
@@ -226,7 +252,10 @@ struct larder {
     u64 attr_installs;
     u64 attr_install_skips;   // gen-guard skips (populate raced an invalidate)
     u64 attr_invalidations;
+    u64 attr_downgrades;      // G3: full -> perm_only downgrades (child-mutations)
     u64 attr_evictions;
+    u64 inval_scope_passes;   // G4: installs the global gen would have skipped but
+                              //   the qid-scoped scan admitted (the recovered fills)
     u64 dentry_hits;          // positive dentry serves
     u64 dentry_neg_hits;      // negative dentry serves (walk misses served RPC-free)
     u64 dentry_misses;
@@ -252,7 +281,9 @@ void larder_init(struct larder *l);
 // Serve (Read). On a HIT, copy the cached attr for `qid_path` into *out under the
 // lock and return true (no RPC). On a MISS, set *seq0_out to the current gen (the
 // populate guard for the caller's subsequent larder_attr_install) and return
-// false. A NULL Larder / out is a miss (defensive).
+// false. A perm_only entry (G3) is a MISS here -- the stat consumers read
+// size/times, exactly the staled fields; the ensuing getattr re-installs full.
+// A NULL Larder / out is a miss (defensive).
 bool larder_attr_serve(struct larder *l, u64 qid_path,
                        struct t_stat *out, u64 *seq0_out);
 
@@ -268,20 +299,36 @@ u64 larder_gen_snapshot(struct larder *l);
 // return 0 (EOF) RPC-free: the fresh size is the open-time size, and with
 // own-write invalidation (+ the I-38 single-writer premise) the wire would
 // answer the same. Conservative on any mismatch (miss -> the caller wires).
+// A perm_only entry is a miss (its size is exactly what the downgrade staled).
 bool larder_attr_fresh_size(struct larder *l, u64 qid_path, u32 cvers,
                             u64 *size_out);
 
 // Populate (Open/Refetch). Install {attr, cvers} for `qid_path` -- overwriting an
 // existing entry (revalidate-by-overwrite), using a free slot, or evicting the
-// LRU entry when full -- IFF `l->gen == seq0` (no invalidate raced the RPC since
-// the seq0 snapshot). Otherwise skipped (the gen guard). `attr` is copied.
+// LRU entry when full -- IFF no invalidation event named `qid_path` since the
+// seq0 snapshot (the G4 qid-scoped gen guard; an over-wide window fail-safes to
+// skip). Otherwise skipped. `attr` is copied; a perm_only entry upgrades to full.
 void larder_attr_install(struct larder *l, u64 seq0, u64 qid_path,
                          u32 cvers, const struct t_stat *attr);
 
-// Invalidate (OwnWrite). Drop `qid_path`'s cached entry (if present) and bump gen
-// (always -- the file was mutated even if it was not cached, so a concurrent
-// populate that fetched the pre-mutation value must be skipped).
+// Invalidate (OwnWrite). Drop `qid_path`'s cached entry (if present) and log the
+// invalidation event (always -- the file was mutated even if it was not cached,
+// so a concurrent populate of THIS qid that fetched the pre-mutation value must
+// be skipped).
 void larder_attr_invalidate(struct larder *l, u64 qid_path);
+
+// Downgrade (G3, term-4): the perm-preserving OwnWrite for a PARENT DIR whose
+// child set mutated (create/unlink/rename target the child; the parent's
+// size/mtime/nlink/cvers change but its mode/uid/gid CANNOT -- only a wstat on
+// the dir itself edits those, and that path full-invalidates). Marks the entry
+// perm_only (servable ONLY at a resolver intermediate hop, where the X-check
+// reads mode/uid/gid + the immutable qid identity) and logs the invalidation
+// event exactly like larder_attr_invalidate (a concurrent full populate of the
+// dir that observed pre-mutation times must still be skipped -- the downgrade
+// is an invalidation to the gen guard; only the perm-servable core survives).
+// Measured motivation (T4-M): the S3 wga band is 5.6x re-walk, am_mid=1104 of
+// it mid-hop attr misses minted by exactly these parent-attr drops.
+void larder_attr_downgrade(struct larder *l, u64 qid_path);
 
 // -- L1d: the dentry sub-cache --------------------------------------------------
 
@@ -297,6 +344,11 @@ void larder_attr_invalidate(struct larder *l, u64 qid_path);
 //     sts[0..i) filled (the walk misses at i; the caller returns a partial walk).
 //   - a dentry MISS, an attr MISS mid-chain, or a too-long component name:
 //     returns false (the caller falls through to the RPC).
+// G3: a perm_only attr serves an INTERMEDIATE hop (the X-check reads only
+// mode/uid/gid + the immutable qid fields) but NOT the final hop of a full
+// positive run -- the LEAF record feeds STALK_STAT's returned stat, the
+// carried-attrs chain, and the cached-open size/cvers gates, all of which read
+// the staled fields; a perm_only leaf bails to the RPC (which re-installs full).
 // The CALLER decides whether to skip the RPC: a full positive run only in the
 // QUERY form (no server fid to bind); a cached miss in either form (a miss binds
 // nothing). `sts` is the caller's DEV_WALK_ATTRS_MAX array; a false return may

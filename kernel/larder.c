@@ -24,6 +24,31 @@ void larder_init(struct larder *l) {
 // (gen guard / own-write invalidate / serve-copy-under-lock) is UNCHANGED --
 // only the index + eviction mechanics differ from the L1c/L1d linear arrays.
 
+// -- G4: the qid-scoped populate guard (larder.h "LARDER_INVAL_RING") ----------
+//
+// Every invalidation event bumps gen and logs the staled qid; an install skips
+// iff ITS key was named in its (seq0, gen] window. Both run under l->lock.
+
+static void inval_log_locked(struct larder *l, u64 qid_path) {
+    l->gen++;
+    l->inval_qid[l->gen % LARDER_INVAL_RING] = qid_path;
+}
+
+// Was `qid_path` staled by any event in (seq0, l->gen]? Fail-safe TRUE when the
+// window exceeds the ring (evidence lost -> the pre-G4 global-skip behavior).
+// Ring soundness: for n <= RING, slot s % RING (s in the window) was last
+// written by seq s itself -- a later same-residue writer would exceed gen.
+static bool inval_hits_locked(struct larder *l, u64 seq0, u64 qid_path) {
+    u64 n = l->gen - seq0;
+    if (n == 0) return false;
+    if (n > LARDER_INVAL_RING) return true;
+    for (u64 s = seq0 + 1; s <= l->gen; s++) {
+        if (l->inval_qid[s % LARDER_INVAL_RING] == qid_path) return true;
+    }
+    l->inval_scope_passes++;   // the global gen would have skipped this fill
+    return false;
+}
+
 // Fibonacci-hash mix of a two-part key into a pow2 bucket.
 static inline u32 larder_bucket2(u32 nbuckets, u64 a, u64 b) {
     u64 h = (a + 0x9E3779B97F4A7C15ull) * 0xBF58476D1CE4E5B9ull;
@@ -99,7 +124,10 @@ bool larder_attr_serve(struct larder *l, u64 qid_path,
     if (!l || !out) return false;
     spin_lock(&l->lock);
     struct larder_attr_ent *e = attr_find_locked(l, qid_path);
-    if (e) {
+    // G3: a perm_only entry misses here -- the stat consumers read size/times,
+    // exactly the fields the downgrade staled. The getattr this miss triggers
+    // re-installs full (the upgrade).
+    if (e && !e->perm_only) {
         // Read: copy the whole entry out UNDER the lock (a concurrent invalidate
         // cannot tear it). CLOCK: touched.
         *out = e->attr;
@@ -130,8 +158,9 @@ bool larder_attr_fresh_size(struct larder *l, u64 qid_path, u32 cvers,
     spin_lock(&l->lock);
     struct larder_attr_ent *e = attr_find_locked(l, qid_path);
     // Freshness gate: cvers must match the reading fid's open-time qid.vers
-    // (the page-serve rule -- larder.h). A stale/newer entry is a miss.
-    if (e && e->cvers == cvers) {
+    // (the page-serve rule -- larder.h). A stale/newer entry is a miss; a
+    // perm_only entry too (its size is what the G3 downgrade staled).
+    if (e && !e->perm_only && e->cvers == cvers) {
         *size_out = e->attr.size;
         e->ref = true;              // CLOCK: touched
         spin_unlock(&l->lock);
@@ -167,10 +196,11 @@ void larder_attr_install(struct larder *l, u64 seq0, u64 qid_path,
                          u32 cvers, const struct t_stat *attr) {
     if (!l || !attr) return;
     spin_lock(&l->lock);
-    // The gen guard: an invalidate raced the RPC since the seq0 snapshot -> the
-    // fetched value may be stale relative to that invalidate; skip the install
-    // (the resurrection close, larder.h note (2)).
-    if (l->gen != seq0) {
+    // The gen guard, G4 qid-scoped: skip only if an invalidation event named
+    // THIS qid since the seq0 snapshot -> the fetched value may be stale
+    // relative to that event (the resurrection close, larder.h note (2)). An
+    // unrelated qid's event no longer discards this fill.
+    if (inval_hits_locked(l, seq0, qid_path)) {
         l->attr_install_skips++;
         spin_unlock(&l->lock);
         return;
@@ -182,10 +212,11 @@ void larder_attr_install(struct larder *l, u64 seq0, u64 qid_path,
         return;
     }
     struct larder_attr_ent *e = attr_install_slot_locked(l, qid_path);
-    e->cvers    = cvers;
-    e->valid    = true;
-    e->ref      = true;
-    e->attr     = *attr;
+    e->cvers     = cvers;
+    e->valid     = true;
+    e->ref       = true;
+    e->perm_only = false;      // a full fresh record upgrades a G3 downgrade
+    e->attr      = *attr;
     l->attr_installs++;
     spin_unlock(&l->lock);
 }
@@ -193,14 +224,31 @@ void larder_attr_install(struct larder *l, u64 seq0, u64 qid_path,
 void larder_attr_invalidate(struct larder *l, u64 qid_path) {
     if (!l) return;
     spin_lock(&l->lock);
-    // Bump gen ALWAYS (the file was mutated even if it was not cached -- a
-    // concurrent populate that fetched the pre-mutation value must be skipped).
-    l->gen++;
+    // Log the event ALWAYS (the file was mutated even if it was not cached -- a
+    // concurrent populate of THIS qid that fetched the pre-mutation value must
+    // be skipped).
+    inval_log_locked(l, qid_path);
     struct larder_attr_ent *e = attr_find_locked(l, qid_path);
     if (e) {
         attr_hash_unlink_locked(l, (s32)(e - l->attr));   // drop from its bucket
         e->valid = false;
         l->attr_invalidations++;
+    }
+    spin_unlock(&l->lock);
+}
+
+void larder_attr_downgrade(struct larder *l, u64 qid_path) {
+    if (!l) return;
+    spin_lock(&l->lock);
+    // An invalidation to the gen guard (a concurrent FULL populate of this dir
+    // that observed pre-mutation times must be skipped) -- only the entry's
+    // perm-servable core (mode/uid/gid + the immutable qid identity) survives,
+    // and only the resolver's intermediate-hop X-check may read it (larder.h).
+    inval_log_locked(l, qid_path);
+    struct larder_attr_ent *e = attr_find_locked(l, qid_path);
+    if (e && !e->perm_only) {
+        e->perm_only = true;
+        l->attr_downgrades++;
     }
     spin_unlock(&l->lock);
 }
@@ -321,8 +369,13 @@ bool larder_walk_serve(struct larder *l, u64 base_qid_path,
         // Positive: the walk reply's per-component attr comes from the attr
         // sub-cache (a miss there bails to the RPC, so a served qid always has a
         // coherent attr). Copy it out UNDER the lock -- no torn serve.
+        // G3: a perm_only attr serves an INTERMEDIATE hop -- the resolver reads
+        // only mode/uid/gid (the X-check) + the immutable qid fields there --
+        // but NOT the final hop of the run: the LEAF record feeds STALK_STAT's
+        // returned stat, the carried-attrs chain, and the cached-open
+        // size/cvers gates, all of which read the fields the downgrade staled.
         struct larder_attr_ent *a = attr_find_locked(l, d->child_qid_path);
-        if (!a) {
+        if (!a || (a->perm_only && i == nname - 1)) {
             l->dentry_misses++;
             spin_unlock(&l->lock);
             return false;
@@ -374,9 +427,12 @@ void larder_dentry_install(struct larder *l, u64 seq0, u64 parent_qid_path,
     if (!l || !name) return;
     if (name_len == 0 || name_len > LARDER_DENTRY_NAME_MAX) return;  // not cacheable
     spin_lock(&l->lock);
-    // The gen guard (same as the attr install): an invalidate raced the RPC since
-    // the seq0 snapshot -> skip (the pre-mutation listing may be stale).
-    if (l->gen != seq0) {
+    // The gen guard (same as the attr install), G4-scoped to the PARENT qid:
+    // every event that stales a (parent, name) binding -- a create/rename/
+    // unlink's dentry invalidate, and the parent-attr invalidate/downgrade the
+    // same mutation issues -- logs the parent, so a raced install of this
+    // parent's chain skips while an unrelated file's event no longer does.
+    if (inval_hits_locked(l, seq0, parent_qid_path)) {
         l->dentry_install_skips++;
         spin_unlock(&l->lock);
         return;
@@ -401,11 +457,11 @@ void larder_dentry_invalidate_name(struct larder *l, u64 parent_qid_path,
                                    const char *name, size_t name_len) {
     if (!l) return;
     spin_lock(&l->lock);
-    // Bump gen ALWAYS (a concurrent walk populate that snapshotted gen before
-    // this mutation must be skipped by the install guard -- even when the
-    // mutated name was not itself cached; the same resurrection-close as the
-    // attr path).
-    l->gen++;
+    // Log the event ALWAYS, keyed by the PARENT (a concurrent walk populate of
+    // this parent's chain that snapshotted gen before this mutation must be
+    // skipped by the install guard -- even when the mutated name was not
+    // itself cached; the same resurrection-close as the attr path).
+    inval_log_locked(l, parent_qid_path);
     // A single-name dir mutation (create/rename/unlink of exactly `name`) stales
     // ONLY the (parent, name) binding: the negative dentry a create fills, the
     // positive one an unlink empties, or a rename endpoint. Siblings under the
@@ -615,10 +671,12 @@ void larder_page_install(struct larder *l, u64 seq0, u64 qid_path, u64 page_inde
     if (!l || !data) return;
     if (len > LARDER_PAGE_SIZE) len = LARDER_PAGE_SIZE;
     spin_lock(&l->lock);
-    // The gen guard (same as attr/dentry): an invalidate raced the read since the
-    // seq0 snapshot -> the read may have seen the pre-mutation content; skip the
-    // install (the populate-after-invalidate resurrection close, larder.h note).
-    if (l->gen != seq0) {
+    // The gen guard (same as attr/dentry), G4-scoped to the file qid: every
+    // event that stales this file's content (write-through/flush/OTRUNC page
+    // invalidates + the attr invalidate the same mutation issues) logs this
+    // qid; an unrelated file's event no longer discards the fill (the
+    // measured 726-886 lost installs per S3 window under the global gen).
+    if (inval_hits_locked(l, seq0, qid_path)) {
         l->page_install_skips++;
         spin_unlock(&l->lock);
         return;
@@ -709,10 +767,11 @@ void larder_page_install_own(struct larder *l, u64 qid_path, u64 page_index,
 void larder_page_invalidate(struct larder *l, u64 qid_path) {
     if (!l) return;
     spin_lock(&l->lock);
-    // Bump gen ALWAYS (a concurrent populate that read the pre-write content must
-    // be skipped -- the same guard as the attr/dentry paths), even if no page array
-    // is allocated yet (a non-cacheable / never-installed client).
-    l->gen++;
+    // Log the event ALWAYS (a concurrent populate of THIS file that read the
+    // pre-write content must be skipped -- the same guard as the attr/dentry
+    // paths), even if no page array is allocated yet (a non-cacheable /
+    // never-installed client).
+    inval_log_locked(l, qid_path);
     if (l->page) {
         // Walk ONLY this file's qbucket (every page of qid_path chains here), splicing
         // each matching valid page out of BOTH indexes -- O(pages-of-file + qbucket
@@ -743,9 +802,11 @@ void larder_page_invalidate_range(struct larder *l, u64 qid_path,
                                   u64 first_idx, u64 last_idx) {
     if (!l) return;
     spin_lock(&l->lock);
-    // Same gen discipline as the whole-file form: a concurrent read-populate
-    // that observed pre-write content anywhere must be guarded out.
-    l->gen++;
+    // Same event discipline as the whole-file form: a concurrent read-populate
+    // of THIS file that observed pre-write content anywhere must be guarded
+    // out (the range narrows the DROP set, not the guard -- an in-flight read
+    // may span the written range).
+    inval_log_locked(l, qid_path);
     if (l->page) {
         // The same qbucket walk, dropping only pages whose index lies in
         // [first_idx, last_idx]. Out-of-range pages stay linked AND valid --
@@ -817,12 +878,13 @@ bool larder_pages_snapshot(struct larder *l, u64 qid_path, u32 cvers,
     // coverage at `cvers` and minting a torn snapshot (post-write bytes at
     // the pre-write size/attr -- a view no fresh RPC could return, an I-38
     // NoWrongRead violation). `seq0` is the caller's gen capture from BEFORE
-    // its coverage decision (the cached-open hint / the pre-RPC refill); ANY
-    // invalidate since then moved l->gen, so the mismatch fails the snapshot
-    // closed and the caller falls back to the normal wire path. Coarse by
-    // design (any file's own-write in the window fails it) -- the window is
-    // microseconds and the fallback is correctness-neutral.
-    if (l->gen != seq0) {
+    // its coverage decision (the cached-open hint / the pre-RPC refill).
+    // G4-scoped to THIS file: the hole is an own-write to qid_path (whose
+    // invalidate logs qid_path); another file's event cannot stale this
+    // file's pages or re-satisfy its coverage, so it no longer fails the
+    // snapshot (the global form killed cached-opens under unrelated write
+    // churn). Fail-safe on ring overflow, as everywhere.
+    if (inval_hits_locked(l, seq0, qid_path)) {
         l->co_misses++;
         spin_unlock(&l->lock);
         return false;

@@ -656,6 +656,36 @@ exactly as if dropped. Whole-file drops remain on OTRUNC, create-reuse
 `wb_writethrough_range` (all revert-probed) + the updated
 `dev9p.wb_overlay_read` below-run contract.
 
+## Perm-valid attr downgrade (G3) + qid-scoped gen guard (G4, term-4)
+
+G3 (`larder_attr_downgrade`, larder.c): a parent dir's child-mutation
+(create/unlink/rename call sites in dev9p.c) marks the dir's attr entry
+`perm_only` instead of dropping it. A perm_only entry serves ONLY a resolver
+intermediate hop inside `larder_walk_serve` (the X-check reads mode/uid/gid +
+the immutable qid fields -- all unchanged by the downgrade-triggering
+mutations); `larder_attr_serve`, `larder_attr_fresh_size`, and the final hop
+of a full positive run treat it as a miss (their consumers read the staled
+size/times/cvers). Any full install clears the flag (upgrade). The downgrade
+logs an invalidation event exactly like `larder_attr_invalidate`, so the
+raced-populate resurrection close is unchanged. wstat (which CAN edit perm
+bits) and the create-child reused-ino defense keep full drops.
+
+G4 (`inval_log_locked` / `inval_hits_locked`, larder.c): every invalidation
+event records its staled qid in the 128-slot `inval_qid` ring (slot = seq %
+LARDER_INVAL_RING); the three install guards + the `larder_pages_snapshot`
+gen witness skip only when THEIR key appears among the events in (seq0, gen]
+-- an unrelated file's event no longer discards the fill (pre-G4: 726-886
+lost installs per S3 cold-build window). Keys: attr/page installs + the
+snapshot witness = the file's qid; the dentry install = the PARENT qid (all
+dentry-staling events log the parent). A window wider than the ring
+fail-safes to the global skip. `inval_scope_passes` counts recovered fills;
+`attr_downgrades` counts G3 downgrades.
+
+Tests: `larder.attr_downgrade_perm_only`,
+`larder.downgrade_guards_raced_populate`, `larder.gen_scope_qid`,
+`dev9p.create_downgrades_parent_attr`; the three pre-existing gen-guard tests
+now race the SAME key (the scoped contract). All revert-probed.
+
 ## Known caveats / footguns
 
 - **v1.0 is single-writer-sound** (own-write invalidation; the accepted

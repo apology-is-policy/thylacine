@@ -850,6 +850,84 @@ property above, pinned by the `wb_writethrough_range` regression.
 bytes 112 MB -> 31 MB, server read handler 125 -> 39 ms, covered 969-1039 ->
 726 ms, S3 wall ~3.1-3.3 s -> 2.9 s, S1 warm 233-244 -> 195 ms.
 
+## 14. Perm-valid attr downgrade (G3) + the qid-scoped gen guard (G4) -- term-4
+
+T4-M measured the S3 wga band as 5.6x RE-WALK (wire 6938 vs 1228 distinct
+chains): the resolver keeps re-issuing Twalkgetattr for chains it had already
+cached, because the cold build's own mutations keep knocking the caches out.
+Two guest-side mechanisms close the two knock-out channels; neither changes
+the wire, the server, or the spec model.
+
+### G3: the perm-valid attr downgrade
+
+A create/unlink/rename in dir D stales D's size/mtime/nlink/cvers -- but CANNOT
+change D's mode/uid/gid (only a wstat on D itself does, and that path
+full-invalidates). Pre-G3 the call sites dropped D's attr whole, so the next
+walk THROUGH D missed its mid-hop attr and re-issued the RPC (measured
+am_mid=1104 mid-hop attr misses per S3 window). G3 replaces the drop with
+`larder_attr_downgrade`: the entry is marked `perm_only` and
+
+- SERVES a resolver INTERMEDIATE hop (larder_walk_serve): the X-check reads
+  mode/uid/gid + the immutable qid.path/type -- every served field is fresh by
+  construction (the downgrade-triggering mutations cannot touch them).
+- MISSES everything that reads the staled fields: `larder_attr_serve` (fstat /
+  SYS_STAT), `larder_attr_fresh_size` (the EOF serve), and the FINAL hop of a
+  full positive run (the leaf record feeds STALK_STAT's returned stat, the
+  carried-attrs chain, and the cached-open size/cvers gates).
+- UPGRADES back to full on any install (revalidate-by-overwrite).
+
+To the gen guard a downgrade IS an invalidation (it logs the event exactly like
+`larder_attr_invalidate`), so a concurrent FULL populate of D that observed
+pre-mutation times is still skipped -- the resurrection close is unchanged; only
+the perm-servable core survives the event.
+
+Call sites switched (dev9p.c): create -> parent downgrade (the CHILD's
+attr+pages stay FULL drops -- the reused-ino defense needs the perm bits gone
+too); rename -> both dirs; unlink -> parent. wstat stays a full drop (it edits
+exactly the perm bits). Write paths are untouched (files are never mid hops).
+
+### G4: the qid-scoped gen guard
+
+The populate guard was GLOBAL: any invalidate bumped `l->gen`, and any in-flight
+populate whose pre-RPC snapshot no longer matched was discarded -- including
+fills of files entirely unrelated to the event (measured 726-886 lost installs
+per S3 window; the cold build's write churn runs concurrently with its read
+populates on the shared client). G4 keeps `gen` as the event sequence and adds
+a 128-slot ring log `inval_qid[gen % RING]` recording WHICH qid each event
+staled. The install guard (`inval_hits_locked`) skips iff its own key appears
+among the events in `(seq0, gen]`; a window wider than the ring loses evidence
+and fail-safes to the pre-G4 global skip.
+
+Soundness rests on the event-logging discipline: every mutation logs EVERY qid
+whose cached state it stales -- create: parent (downgrade + dentry) + child
+(attr + pages); unlink/rename: parent(s) via downgrade + dentry events;
+write-through/flush/OTRUNC: the file via its attr + page invalidates; wstat:
+the file. The dentry install guard keys on the PARENT qid (dentry events log
+the parent); the page/attr installs key on the file. The
+`larder_pages_snapshot` gen witness (the B1-audit F1 close) scopes to the
+snapshot's own file for the same reason: the third-actor repopulate hole
+requires an own-write to THAT file, and its invalidate logs that qid.
+
+Ring-log correctness: for a window n <= RING, slot `s % RING` (s in the window)
+was last written by seq s itself -- a later same-residue writer would exceed
+gen -- so the scan sees exactly the in-window events.
+
+### What this does NOT change
+
+No wire op, no server change, no fs_cache.tla change: G3 is beneath the model's
+abstraction (the model's attr is one content token; perm_only is a partial-
+validity refinement whose soundness argument is the field-freshness prose
+above), and G4 moves the impl CLOSER to the model's per-file semantics (the
+global gen was an over-conservative realization of the modeled per-file atomic
+Open). The 2 buggy cfgs + the 4 clean cfgs re-run green unchanged.
+
+Tests: `larder.attr_downgrade_perm_only` (mid serves / leaf + stat + fresh_size
+miss / install upgrades), `larder.downgrade_guards_raced_populate` (the
+downgrade is an invalidation to the guard), `larder.gen_scope_qid` (unrelated
+admits / own-key skips / ring overflow fail-safes),
+`dev9p.create_downgrades_parent_attr` (the call-site switch, mid-hop chain
+survives a create). All four revert-probed (3 probes, 3 distinct failures).
+
 ## References
 - The measured justification: the FS-perf deep dive (the FSPROBE ceilings + the
   decomposed gap model + the proven thesis).

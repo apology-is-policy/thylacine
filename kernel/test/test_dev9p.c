@@ -859,6 +859,66 @@ void test_dev9p_create_invalidates_reused_child_pages(void) {
     teardown(root);
 }
 
+// G3 (term-4): dev9p_create DOWNGRADES the parent-dir attr instead of dropping
+// it -- a child create stales the parent's size/mtime/nlink/cvers but cannot
+// edit its mode/uid/gid, so the perm-servable core must keep the resolver's
+// intermediate-hop X-check RPC-free while a stat of the dir still refetches.
+// Non-vacuous: with the pre-G3 call site (larder_attr_invalidate on the parent)
+// the mid-hop walk serve fails on the attr miss.
+void test_dev9p_create_downgrades_parent_attr(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    struct Spoor *nc = spoor_clone(root);
+    TEST_ASSERT(nc != NULL, "clone target");
+    struct Walkqid *w = dev9p.walk(root, nc, NULL, 0);
+    TEST_ASSERT(w != NULL, "clone-walk");
+    walkqid_free(w);
+
+    // Seed a synthetic chain that places the REAL parent (the fixture root, the
+    // dir the create below mutates) as the MID hop of a 2-hop walk: a fake base
+    // 0x500 -> "r" -> root, then root -> "sib" -> a fake sibling 0x600.
+    struct larder *l = &g_client.larder;
+    u64 parent = root->qid.path;
+    u64 seq = larder_gen_snapshot(l);
+    struct t_stat pa;
+    for (size_t i = 0; i < sizeof(pa); i++) ((u8 *)&pa)[i] = 0;
+    pa.mode = 040755; pa.qid_path = parent; pa.qid_vers = 1; pa.qid_type = 0x80;
+    larder_attr_install(l, seq, parent, /*cvers=*/1, &pa);
+    larder_dentry_install(l, seq, 0x500, "r", 1, parent, /*negative=*/false);
+    struct t_stat sa;
+    for (size_t i = 0; i < sizeof(sa); i++) ((u8 *)&sa)[i] = 0;
+    sa.mode = 0644; sa.qid_path = 0x600; sa.qid_vers = 1; sa.qid_type = 0;
+    larder_attr_install(l, seq, 0x600, /*cvers=*/1, &sa);
+    larder_dentry_install(l, seq, parent, "sib", 3, 0x600, /*negative=*/false);
+
+    const char *names[] = {"r", "sib"};
+    size_t      lens[]  = {1, 3};
+    struct t_stat sts[4];
+    int nres = -1; bool miss = true;
+    TEST_ASSERT(larder_walk_serve(l, 0x500, names, lens, 2, sts, &nres, &miss),
+                "baseline 2-hop serve through the parent");
+
+    struct Spoor *opened = dev9p.create(nc, "newfile", 1 /*OWRITE*/, 0644u, 1000u);
+    TEST_ASSERT(opened == nc, "create returns the Spoor");
+
+    // The parent attr survives as perm_only: the mid-hop walk still serves
+    // (the sibling dentry preserved by L1d name-scoping; the perm core by G3)...
+    nres = -1; miss = true;
+    TEST_ASSERT(larder_walk_serve(l, 0x500, names, lens, 2, sts, &nres, &miss),
+                "post-create the mid-hop X-check chain still serves");
+    TEST_ASSERT(!miss, "not a cached miss");
+    TEST_EXPECT_EQ(sts[0].mode, 040755u, "parent perm core served");
+    TEST_EXPECT_EQ(g_client.larder.attr_downgrades, 1ull, "one downgrade counted");
+
+    // ...while a stat of the parent refetches (perm_only misses attr_serve).
+    struct t_stat probe; u64 s0 = 0;
+    TEST_ASSERT(!larder_attr_serve(l, parent, &probe, &s0),
+                "post-create a stat of the parent misses (times staled)");
+
+    spoor_clunk(nc);
+    teardown(root);
+}
+
 // L1d: dev9p_create must invalidate the PARENT's cached dentries (own-write) so a
 // stale NEGATIVE entry for the created name cannot serve ENOENT for the new file.
 // The parent's si_cvers does NOT bump on a create (Stratum stores dirents in a

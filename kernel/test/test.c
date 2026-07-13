@@ -935,6 +935,9 @@ void test_larder_pages_snapshot_gen_witness(void);
 void test_larder_page_overwrite(void);
 void test_larder_page_bounded(void);
 void test_larder_page_destroy_frees(void);
+void test_larder_attr_downgrade_perm_only(void);
+void test_larder_downgrade_guards_raced_populate(void);
+void test_larder_gen_scope_qid(void);
 
 void test_dev9p_registered(void);
 void test_dev9p_attach_client_root_spoor(void);
@@ -949,6 +952,7 @@ void test_dev9p_close_does_not_clunk_root_fid(void);
 void test_dev9p_create_file(void);
 void test_dev9p_create_invalidates_reused_child(void);
 void test_dev9p_create_invalidates_reused_child_pages(void);
+void test_dev9p_create_downgrades_parent_attr(void);
 void test_dev9p_create_invalidates_negative_dentry(void);
 void test_dev9p_create_dir(void);
 void test_dev9p_fsync(void);
@@ -2220,6 +2224,11 @@ struct test_case g_tests[] = {
     { "larder.page_overwrite",         test_larder_page_overwrite,         false, NULL },
     { "larder.page_bounded",           test_larder_page_bounded,           false, NULL },
     { "larder.page_destroy_frees",     test_larder_page_destroy_frees,     false, NULL },
+    { "larder.attr_downgrade_perm_only", test_larder_attr_downgrade_perm_only, false, NULL },
+    { "larder.downgrade_guards_raced_populate",
+                                       test_larder_downgrade_guards_raced_populate,
+                                                                           false, NULL },
+    { "larder.gen_scope_qid",          test_larder_gen_scope_qid,          false, NULL },
     { "9p_client.weftio",              test_9p_client_weftio,              false, NULL },
     { "9p_client.mkdir",               test_9p_client_mkdir,               false, NULL },
     { "9p_client.unlinkat",            test_9p_client_unlinkat,            false, NULL },
@@ -2336,6 +2345,9 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "dev9p.create_invalidates_reused_child_pages",
                                        test_dev9p_create_invalidates_reused_child_pages,
+                                                                           false, NULL },
+    { "dev9p.create_downgrades_parent_attr",
+                                       test_dev9p_create_downgrades_parent_attr,
                                                                            false, NULL },
     { "dev9p.create_invalidates_negative_dentry",
                                        test_dev9p_create_invalidates_negative_dentry,

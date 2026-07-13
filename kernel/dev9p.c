@@ -1168,17 +1168,20 @@ static struct Spoor *dev9p_create(struct Spoor *c, const char *name,
     c->flag    |= COPEN;
     c->offset   = 0;
     // L1c invalidate (fs_cache.tla OwnWrite): a create changes TWO qid.paths.
-    //  - the PARENT dir (nlink/mtime/cvers) -- so its base X-check + fstat see
-    //    the new metadata.
+    //  - the PARENT dir (nlink/mtime/cvers) -- G3 DOWNGRADE, not drop: a child
+    //    create cannot edit the parent's mode/uid/gid, so the perm-servable
+    //    core keeps the resolver's intermediate-hop X-check RPC-free while
+    //    fstat/leaf consumers (which read the staled times/size) still refetch.
     //  - the CHILD itself: Stratum may reuse a just-freed ino, so the new file's
     //    qid.path can carry a STALE prior-occupant attr in the Larder (a deleted
-    //    dir/file's mode). Unlike a walk, the create path never runs walk_attrs
-    //    (no revalidate-by-overwrite), so the stale entry would be served by the
+    //    dir/file's mode -- perm bits INCLUDED, so a downgrade is NOT sound
+    //    here). Unlike a walk, the create path never runs walk_attrs (no
+    //    revalidate-by-overwrite), so the stale entry would be served by the
     //    next stat -- the stalk-2-e2e delete+recreate+create-in-it failure. Drop
     //    it; the next stat refetches fresh (create returns only the qid, not a
     //    full attr to populate).
     struct larder *l = &p->client->larder;
-    larder_attr_invalidate(l, parent_path);
+    larder_attr_downgrade(l, parent_path);
     larder_attr_invalidate(l, c->qid.path);
     // L1e invalidate (L1f audit F1): the reused-ino hazard applies to the
     // child's PAGES exactly as to its attr. A create at a freed+reused qid.path
@@ -1674,11 +1677,13 @@ static int dev9p_rename(struct Spoor *olddir, const char *oldname,
     int rc = p9_client_renameat(od->client, od->fid, (const u8 *)oldname, ol,
                                 nd->fid, (const u8 *)newname, nl);
     if (rc != 0) return -1;
-    // L1c invalidate (fs_cache.tla OwnWrite): both dirs' attrs (nlink/mtime/cvers)
-    // changed. od->client == nd->client (checked above) -- one Larder.
+    // L1c OwnWrite: both dirs' attrs (nlink/mtime/cvers) changed -- G3
+    // DOWNGRADE (a rename edits the dirs' child sets + times, never their
+    // mode/uid/gid; the perm-servable core keeps mid-hop X-checks RPC-free).
+    // od->client == nd->client (checked above) -- one Larder.
     struct larder *l = &od->client->larder;
-    larder_attr_invalidate(l, olddir->qid.path);
-    larder_attr_invalidate(l, newdir->qid.path);
+    larder_attr_downgrade(l, olddir->qid.path);
+    larder_attr_downgrade(l, newdir->qid.path);
     // L1d invalidate: the rename removed oldname from olddir + added newname to
     // newdir -- drop each endpoint's (dir, name) binding (the src goes negative,
     // the dst positive; siblings under both dirs preserved). A same-dir rename to
@@ -1702,11 +1707,12 @@ static int dev9p_unlink(struct Spoor *parent, const char *name, u32 flags) {
     if (nl == 0) return -1;
     int rc = p9_client_unlinkat(p->client, p->fid, (const u8 *)name, nl, flags);
     if (rc != 0) return -1;
-    // L1c invalidate (fs_cache.tla OwnWrite): unlink changed the parent dir's
-    // attrs (nlink/mtime/cvers). The unlinked child's own cached entry (if any)
-    // is left; an ino-reuse serve is caught by the gen guard + walk-overwrite,
-    // and mode is unchanged by unlink (LARDER-DESIGN section 11).
-    larder_attr_invalidate(&p->client->larder, parent->qid.path);
+    // L1c OwnWrite: unlink changed the parent dir's attrs (nlink/mtime/cvers)
+    // -- G3 DOWNGRADE (an unlink cannot edit the parent's mode/uid/gid). The
+    // unlinked child's own cached entry (if any) is left; an ino-reuse serve
+    // is caught by the gen guard + walk-overwrite, and mode is unchanged by
+    // unlink (LARDER-DESIGN section 11).
+    larder_attr_downgrade(&p->client->larder, parent->qid.path);
     // L1d invalidate: unlink removed `name` from the parent's dirent set -- drop
     // the (parent, name) binding so a stale POSITIVE entry -> the now-removed
     // child cannot be served. Siblings under the parent are preserved.

@@ -148,7 +148,11 @@ void test_larder_gen_guard_skips_raced_install(void) {
     struct t_stat in = mk_stat(0700);
 
     u64 seq = larder_gen_snapshot(&g_larder);        // "before the RPC"
-    larder_attr_invalidate(&g_larder, 123);          // a concurrent own-write bumps gen
+    larder_attr_invalidate(&g_larder, 8);            // a concurrent own-write on the
+                                                     //   SAME key (G4: the guard is
+                                                     //   qid-scoped; an unrelated
+                                                     //   event admits -- see
+                                                     //   test_larder_gen_scope_qid)
     larder_attr_install(&g_larder, seq, 8, 5, &in);  // "install the now-stale RPC result"
 
     struct t_stat out;
@@ -368,7 +372,10 @@ void test_larder_dentry_invalidate_name(void) {
 void test_larder_dentry_gen_guard(void) {
     larder_reset();
     u64 seq = larder_gen_snapshot(&g_larder);               // "before the RPC"
-    larder_dentry_invalidate_name(&g_larder, 999, "x", 1);  // a concurrent own-write bumps gen
+    larder_dentry_invalidate_name(&g_larder, 100, "x", 1);  // a concurrent own-write
+                                                            //   under the SAME parent
+                                                            //   (G4: the dentry guard
+                                                            //   keys on the parent)
     larder_dentry_install(&g_larder, seq, 100, "foo", 3, 200, false);  // stale install
 
     const char *nf[] = {"foo"}; size_t lf[] = {3};
@@ -563,7 +570,8 @@ void test_larder_page_gen_guard(void) {
     larder_reset();
     fill_pattern(g_pgsrc, LARDER_PAGE_SIZE, 0x44);
     u64 seq = larder_gen_snapshot(&g_larder);        // snapshot BEFORE the "read"
-    larder_page_invalidate(&g_larder, /*other qid=*/99);  // races: bumps gen
+    larder_page_invalidate(&g_larder, 7);            // races on the SAME file (G4:
+                                                     //   the guard is qid-scoped)
     larder_page_install(&g_larder, seq, 7, 0, 5, g_pgsrc, LARDER_PAGE_SIZE);
     u64 s0 = 0;
     TEST_EXPECT_EQ(larder_page_serve(&g_larder, 7, 0, 0, LARDER_PAGE_SIZE, 5, g_pgout, &s0),
@@ -592,10 +600,11 @@ void test_larder_pages_snapshot_gen_witness(void) {
                 "fresh witness -> snapshot serves");
     TEST_ASSERT(bytes_eq(snap, g_pgsrc, LARDER_PAGE_SIZE), "snapshot bytes");
 
-    // The F1 interleave: capture the witness, then an own-write invalidate
-    // (ANY file) + a stale-tagged repopulate land before the copy. The
-    // coverage alone would pass (the page is back at cvers 5); the witness
-    // must fail it.
+    // The F1 interleave: capture the witness, then an own-write invalidate of
+    // THIS file (G4 scoped the witness to the snapshot's qid -- an unrelated
+    // file's event no longer fails it) + a stale-tagged repopulate land before
+    // the copy. The coverage alone would pass (the page is back at cvers 5);
+    // the witness must fail it.
     u64 seq_stale = larder_gen_snapshot(&g_larder);
     larder_page_invalidate(&g_larder, 7);                 // the own-write drop
     larder_page_install(&g_larder, larder_gen_snapshot(&g_larder), 7, 0, 5,
@@ -670,5 +679,116 @@ void test_larder_page_destroy_frees(void) {
                         g_pgsrc, LARDER_PAGE_SIZE);
     TEST_EXPECT_EQ(larder_page_serve(&g_larder, 7, 0, 0, LARDER_PAGE_SIZE, 5, g_pgout, &s0),
                    (u32)LARDER_PAGE_SIZE, "re-init + install after destroy works");
+    larder_destroy(&g_larder);
+}
+
+// -- G3 + G4 (term-4) ------------------------------------------------------------
+
+// G3: a parent-dir DOWNGRADE keeps the perm-servable core. A downgraded attr
+// misses attr_serve + fresh_size (their consumers read the staled size/times)
+// but still serves a resolver INTERMEDIATE hop (the X-check reads mode/uid/gid
+// + the immutable qid fields); a downgraded LEAF bails to the RPC; a full
+// install upgrades it back. Non-vacuous: with downgrade == invalidate (the
+// pre-G3 call sites) the mid-hop walk serve fails on the attr miss.
+void test_larder_attr_downgrade_perm_only(void) {
+    larder_reset();
+    put_pos(100, "d", 200, 040755);   // the dir (the mid hop)
+    put_pos(200, "f", 300, 0644);     // the leaf under it
+
+    const char *names[] = {"d", "f"};
+    size_t      lens[]  = {1, 1};
+    struct t_stat sts[4];
+    int nres = -1; bool miss = true;
+    TEST_ASSERT(larder_walk_serve(&g_larder, 100, names, lens, 2, sts, &nres, &miss),
+                "baseline 2-hop serve");
+
+    larder_attr_downgrade(&g_larder, 200);
+    TEST_EXPECT_EQ(g_larder.attr_downgrades, 1ull, "one downgrade counted");
+
+    struct t_stat out; u64 s0 = 0;
+    TEST_ASSERT(!larder_attr_serve(&g_larder, 200, &out, &s0),
+                "downgraded attr misses the stat serve");
+    u64 sz = 0;
+    TEST_ASSERT(!larder_attr_fresh_size(&g_larder, 200, 1, &sz),
+                "downgraded attr misses fresh_size");
+
+    nres = -1; miss = true;
+    TEST_ASSERT(larder_walk_serve(&g_larder, 100, names, lens, 2, sts, &nres, &miss),
+                "downgraded dir still serves as the MID hop");
+    TEST_ASSERT(!miss, "full positive run (not a cached miss)");
+    TEST_EXPECT_EQ(nres, 2, "both hops resolved");
+    TEST_EXPECT_EQ(sts[0].mode, 040755u, "mid-hop perm core served");
+
+    const char *ln[] = {"d"}; size_t ll[] = {1};
+    TEST_ASSERT(!larder_walk_serve(&g_larder, 100, ln, ll, 1, sts, &nres, &miss),
+                "downgraded dir as the LEAF bails to the RPC");
+
+    struct t_stat fresh = mk_stat(040755);
+    fresh.qid_path = 200; fresh.qid_vers = 2; fresh.qid_type = 0;
+    larder_attr_install(&g_larder, larder_gen_snapshot(&g_larder), 200, 2, &fresh);
+    TEST_ASSERT(larder_attr_serve(&g_larder, 200, &out, &s0),
+                "a full install upgrades the downgraded entry");
+}
+
+// G3 x G4: the downgrade IS an invalidation to the gen guard -- a full populate
+// of the SAME dir whose RPC raced the downgrade skips (it observed the
+// pre-mutation times, the resurrection class), while the perm core stays
+// mid-hop-servable throughout.
+void test_larder_downgrade_guards_raced_populate(void) {
+    larder_reset();
+    struct t_stat in = mk_stat(040755);
+    larder_attr_install(&g_larder, larder_gen_snapshot(&g_larder), 200, 1, &in);
+
+    u64 seq0 = larder_gen_snapshot(&g_larder);   // a populate's pre-RPC snapshot
+    larder_attr_downgrade(&g_larder, 200);       // the mutation lands mid-RPC
+    larder_attr_install(&g_larder, seq0, 200, 1, &in);   // the raced stale install
+    struct t_stat out; u64 s0 = 0;
+    TEST_ASSERT(!larder_attr_serve(&g_larder, 200, &out, &s0),
+                "a raced full populate of the downgraded dir is skipped");
+    TEST_EXPECT_EQ(g_larder.attr_install_skips, 1ull, "guard skip counted");
+}
+
+// G4: the populate guard is qid-SCOPED via the invalidation ring log. An
+// install whose (seq0, gen] window holds only UNRELATED events proceeds (the
+// global gen discarded these fills -- the measured 726-886 lost installs per
+// S3 window); an event naming the install's own key still skips (the
+// resurrection close); a window wider than the ring fail-safes to skip.
+// Non-vacuous: with the global guard (inval_hits := gen != seq0) leg (a) fails.
+void test_larder_gen_scope_qid(void) {
+    larder_reset();
+    struct t_stat in = mk_stat(0644);
+    struct t_stat out; u64 s0 = 0;
+
+    // (a) an unrelated event admits the fill.
+    u64 seq0 = larder_gen_snapshot(&g_larder);
+    larder_attr_invalidate(&g_larder, 999);         // a different file's event
+    larder_attr_install(&g_larder, seq0, 5, 1, &in);
+    TEST_ASSERT(larder_attr_serve(&g_larder, 5, &out, &s0),
+                "an unrelated event no longer discards the fill");
+    TEST_ASSERT(g_larder.inval_scope_passes >= 1ull, "scope pass counted");
+
+    // (b) an own-key event still skips.
+    seq0 = larder_gen_snapshot(&g_larder);
+    larder_attr_invalidate(&g_larder, 7);
+    larder_attr_install(&g_larder, seq0, 7, 1, &in);
+    TEST_ASSERT(!larder_attr_serve(&g_larder, 7, &out, &s0),
+                "an event naming the key still skips the fill");
+
+    // (c) the page install shares the ring: an unrelated file's page event
+    //     admits this file's page fill.
+    fill_pattern(g_pgsrc, 64, 0x21);
+    seq0 = larder_gen_snapshot(&g_larder);
+    larder_page_invalidate(&g_larder, 999);
+    larder_page_install(&g_larder, seq0, 5, 0, 1, g_pgsrc, 64);
+    TEST_EXPECT_EQ(larder_page_serve(&g_larder, 5, 0, 0, 64, 1, g_pgout, &s0),
+                   64u, "an unrelated page event admits the page fill");
+
+    // (d) a window wider than the ring fail-safes to skip (evidence lost).
+    seq0 = larder_gen_snapshot(&g_larder);
+    for (u64 i = 0; i < (u64)LARDER_INVAL_RING + 1u; i++)
+        larder_attr_invalidate(&g_larder, 10000 + i);    // all unrelated
+    larder_attr_install(&g_larder, seq0, 11, 1, &in);
+    TEST_ASSERT(!larder_attr_serve(&g_larder, 11, &out, &s0),
+                "an over-wide window fail-safes to skip");
     larder_destroy(&g_larder);
 }
