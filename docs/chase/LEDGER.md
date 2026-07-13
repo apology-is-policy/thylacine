@@ -833,3 +833,34 @@ Suite 1120/1120; 5 new dev9p.dirfid_* tests, revert-probed (2 probe builds ->
 WGAd dump) prices the realized RT elimination next; the T4-G close (the
 batched Fable audit over the whole G1+G3+G4+G2 Larder/fid-lifecycle delta +
 the SMP gate) follows it.
+
+## Term-4 T4-G FINAL A/B: G2 priced -- the guest arc closes wall-neutral past G1 (2026-07-13)
+
+Two 3-boot instrumented device runs on the G2 build (sentinel-clean both
+ends; identical binary; the deterministic op mix byte-stable across all six
+boots: rpc=15949..15959):
+
+- S3 cold run A: 3069/3051/2955 -> med 3051; run B: 2828/2934/3150 -> med
+  2934. Six-boot med ~2993 vs the G3/G4 bench med 2889 ({2889,2889,2958})
+  -- OVERLAPPING distributions (six-boot spread 322 ms), so G2 is
+  WALL-NEUTRAL. Warm: run A 226/198/219 (med 219), run B 193/216/194 (med
+  194) vs prior 199 -- the run-A warm bump re-sampled AWAY (g2t=13 in the
+  warm window; G2 could not have caused it, and did not).
+- The mechanism is REAL and at its predicted ceiling: g2t=2875 takes (0-RT
+  consumed walks) per S3 window; wire wga 6836 -> 3960 (-42%); TOTAL rpc
+  18578 -> 15956 (-2622, -14%); donates 3410, evict churn 489 (the 64-entry
+  table cycles), refusals stale=228/susp=278 (the defense layers fire).
+- WHY wall-neutral: rpc_ms is FLAT (915 -> 938 med; runs 799..973). The
+  eliminated walks were COVERED time -- depth ge2 dropped 8392 -> 5689,
+  i.e. the wga band overlapped the read/write bands, so removing its RTs
+  removed SUM, not WALL. The claw-back is real but small: gattr 274 -> 527
+  (+253 perm_only-leaf follow-on stats, ~+12 ms).
+- KEEP verdict: -14% op count multiplies with T4-A's per-op server cuts
+  (fewer ops x cheaper ops), the correctness surface is audit-scheduled at
+  T4-X, and the guest CPU cost is negligible (ring scans + 64-entry table).
+
+**The T4-G ledger line: G1 moved the wall (-200..400 ms S3, -40 ms warm);
+G3+G4+G2 are mechanism-perfect and wall-neutral -- the guest RPC-COUNT axis
+is exhausted. What remains of the gap (S3 med ~2900-3050 vs bar 2648) is the
+SERVER per-op axis (T4-M's measured ~170 ms frame-I/O band + ~60 ms write
+insert) + msize (~45 ms) -- exactly T4-A + T4-C.** Next: T4-A.
