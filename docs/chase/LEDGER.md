@@ -905,3 +905,66 @@ down ~230 ms). Gap to the 2648 bar: ~195 ms instrumented. The term-4
 lever inventory is now EXHAUSTED at both ends (guest RPC-count axis +
 server frame/insert axes); what remains is the sanctioned N=3 verdict
 at T4-X and the Senate's close call.
+
+## TERM-4 CLOSE (T4-X, 2026-07-14): S1 bar HELD, S3 bar MISSED by 263 -- the lever inventory is exhausted; to the Senate
+
+**The sanctioned N=3** (the instrumented build carrying the bar probe --
+the LATEST-90 trap re-confirmed the hard way: the first N=3 ran the
+stripped tree and printed no bar lines; discarded, re-run properly on
+the audit-fixed instrumented build):
+
+- **S1 warm: 201/201/197 -> med 201 ms vs bar <= 266: CROSSED with
+  margin** (held since term-2).
+- **S3 cold: 2968/2888/2911 -> med 2911 ms vs bar <= 2648: MISSED by
+  263 ms.** Term-3 sanctioned med 3104 -> term-4 achieved **-193 ms
+  (-6.2%)**. Twelve final-code boots this term span 2806-3069.
+- **The funded covered-band target: NOT met.** Funded: remove >= 456 of
+  the 927 ms covered band. Achieved: covered_ms 676-723 (~-204..-251,
+  roughly HALF the target).
+
+**Why the term-3 FIXABLE quantification over-promised** (the honest
+post-mortem): it priced op-COUNT levers as wall levers. Ground truth
+this term: (1) the wga band's ~2.6k eliminated RPCs were COVERED /
+overlapped time (G2 wall-neutral at depth ge2 8392->5689); (2) the
+protocol-fusion levers measured DEAD at T4-M (readdirplus-addressable
+share 30%, openread fold 0%); (3) msize is third-order (max-legs ~1%
+of reads); (4) the frame band is BYTE-bound, not syscall-count-bound
+(A-1 small); (5) the write-insert band is demand-zero-FAULT-bound and
+~irreducible for net-new dirty data (the shelf recycles only what
+drains in-window, ~20 ms of the ~35 hoped). What actually moved the
+wall: G1 write-populate (the read-back band) + the A-2 shelf + the
+accumulated small cuts = the -193.
+
+**Soundness at close (the gates)**: SMP gate 40/40 (default+UBSan x
+smp4/smp8, N=10), 0 corruption, 0 timing. The batched Fable-5-max
+audit over the WHOLE term-4 delta (G1+G3+G4+G2 guest; A-1+A-2 server):
+**0 P0 / 0 P1 / 1 P2 / 3 P3 + 1 self-found P3 -- NOT dirty, single
+round, all five fixed** (stratum 164b21e: the A-1 rb.b leak on the
+no-worker path + 2 comment hardenings; thylacine 65ef4675: the G2
+fid_gen-before-take gate ordering + the wstat comment).
+`memory/audit_term4_closed_list.md` is the do-not-re-report record.
+
+**The Senate question**: the term-4 lever inventory is exhausted at
+both ends -- the guest RPC-count axis (POUNCE + Larder + wb + G-arc:
+S3 rpc 18.6k -> 16.0k, and the eliminated RTs are now provably the
+overlapped kind) and the server per-op axes (frame byte-bound; insert
+fault-bound; combining ~5 ms; msize demoted). Remaining options:
+
+- **(a) CLOSE at the achieved level**: S3 med 2911 vs host 2456+bar
+  margin -- the device runs the cold gofmt build at ~1.19x the host
+  bar composite, warm at parity. Accept + close CHASE (#38/#54).
+- **(b) FUND term-5** (a deeper-redesign term; honest pricing this
+  time, in COVERED-WALL ms): frame-steal zero-copy insert (the Twrite
+  frame ownership moves into the dirty buffer; kills the remaining
+  ~35 ms fault+copy band; crosses the wire/FS layer boundary),
+  drain-ahead (a background trickle-drain keeps the shelf hot; bounded
+  by commit semantics), server-side attr-carrying readdir (the 30%
+  wga share; a protocol op), CPU-profile-guided handler cuts (the
+  ~197-245 ms handler table, #367-class grind). Realistic composite
+  ~80-150 ms of the 263 -- likely still short of the bar alone.
+- **(c) RE-SET the bar** to the achieved envelope (e.g. host+450) and
+  close.
+
+The arc holds S1 (interactive parity) either way; the S3 gap is now a
+measured, audited, decomposed 263 ms with named residuals -- no longer
+an unexplained 2x.
