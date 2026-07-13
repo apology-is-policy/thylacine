@@ -902,6 +902,7 @@ void test_9p_client_loom_multi_inflight_read_e2e(void);
 void test_9p_client_async_clunk_burst_no_fid_leak(void);
 void test_9p_client_send_backpressure_self_pump(void);
 void test_9p_client_send_backpressure_multi_waiter(void);
+void test_9p_client_send_backpressure_spill_survives_outbuf_reuse(void);
 void test_larder_install_serve(void);
 void test_larder_serve_miss(void);
 void test_larder_invalidate(void);
@@ -2295,6 +2296,8 @@ struct test_case g_tests[] = {
                                        test_9p_client_send_backpressure_self_pump, false, NULL },
     { "9p_client.send_backpressure_multi_waiter",
                                        test_9p_client_send_backpressure_multi_waiter, false, NULL },
+    { "9p_client.send_backpressure_spill_survives_outbuf_reuse",
+                                       test_9p_client_send_backpressure_spill_survives_outbuf_reuse, false, NULL },
     { "dev9p.registered",              test_dev9p_registered,              false, NULL },
     { "dev9p.attach_client_root_spoor",test_dev9p_attach_client_root_spoor,false, NULL },
     { "dev9p.walk_one_component",      test_dev9p_walk_one_component,      false, NULL },

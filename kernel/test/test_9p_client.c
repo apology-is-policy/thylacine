@@ -3019,3 +3019,78 @@ void test_9p_client_send_backpressure_multi_waiter(void) {
     p9_client_destroy(&g_client);
     p9_mq_loopback_destroy(&g_mq);
 }
+
+// =============================================================================
+// #375: a back-pressured sender's frame lives in the SHARED c->out_buf, and the
+// pump/park (client_pump_or_park_locked) DROPS c->lock -- so a peer can legally
+// build ITS frame into out_buf during the window, and the pre-spill retry then
+// pushed built_len bytes of the PEER's frame: an equal-length peer frame (two
+// msize-clamped F1 flush Twrites -- the dominant concurrent cold-build shape)
+// went out as a clean DUPLICATE with the parked frame LOST, whose second reply
+// landed on the freed-then-reused tag as a WRONG reply -- an Rlerror parses
+// cleanly for ANY op (9P has no per-tag wire generation), so a stray
+// Rlerror(ENOENT) poisoned a live Twalkgetattr into a persistent negative
+// dentry (the task-#50 S3 ENOENT cluster + write-EIO); an unequal-length peer
+// frame fails p9_transport_send's size==len validation -> session death.
+//
+// This test models the peer write DETERMINISTICALLY, single-threaded: the mq
+// scribble knob overwrites out_buf during the recv that the self-pump arm makes
+// INSIDE the dropped-lock window (exactly where a peer would build). Pre-spill,
+// the retry sends the scribble -> the send fails -> the op dies and the session
+// latches dead: this test FAILS. With the spill (the frame copied to a private
+// buffer at the first EAGAIN; out_buf never re-read), the retry sends the
+// intact frame: the op completes and the session stays live.
+// =============================================================================
+void test_9p_client_send_backpressure_spill_survives_outbuf_reuse(void) {
+    int rc = p9_mq_loopback_init(&g_mq, canonical_responder, NULL);
+    TEST_EXPECT_EQ(rc, 0, "mq loopback init");
+    rc = p9_client_init(&g_client, /*root_fid=*/0, /*msize=*/8192,
+                        p9_mq_loopback_ops_for(&g_mq), g_recv_buf, sizeof(g_recv_buf));
+    TEST_EXPECT_EQ(rc, 0, "client init over mq transport");
+    const u8 uname[] = {'r','o','o','t'};
+    const u8 aname[] = {'/'};
+    TEST_EXPECT_EQ(p9_client_handshake(&g_client, uname, sizeof(uname), aname, sizeof(aname), 0),
+                   0, "handshake over mq transport");
+
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create(8,16)");
+
+    // Op A: async Tclunk whose Rclunk stays queued -- the reply op B's self-pump
+    // will drain from inside the dropped-lock window (the same shape as the
+    // #349 self_pump test).
+    TEST_EXPECT_EQ(p9_client_walk_one(&g_client, 0, 20, (const u8 *)"f", 1, NULL), 0,
+                   "walk binds fid 20 (sync; drains clean)");
+    g_async_op.loom            = l;
+    g_async_op.user_data       = 0xB5B5B5B5ULL;
+    g_async_op.last_result     = 0x7fffffff;
+    g_async_op.completed       = false;
+    g_async_op.rpc.on_complete = test_async_on_complete;
+    u32 fid_a = 20;
+    rc = p9_client_submit_async(&g_client, &g_async_op.rpc, test_build_clunk, &fid_a);
+    TEST_EXPECT_EQ(rc, 0, "submit_async(clunk A): A in flight, its reply queued");
+
+    // Arm ONE EAGAIN (op B's first send back-pressures) + the peer-write model:
+    // the recv inside B's self-pump overwrites the head of the SHARED out_buf --
+    // where B's built frame sits -- exactly as a peer's build would.
+    g_mq.eagain_budget = 1;
+    g_mq.scribble_buf  = g_client.out_buf;
+    g_mq.scribble_len  = 64;
+    g_mq.scribble_arm  = 1;
+
+    // Op B: sync Twalk. Send -> EAGAIN -> self-pump (drops c->lock; the recv
+    // fires the scribble + drains A's Rclunk) -> retry. Pre-spill the retry
+    // reads the scribbled out_buf and the op/session dies; with the spill the
+    // retry sends B's private copy and B completes.
+    rc = p9_client_walk_one(&g_client, 0, 21, (const u8 *)"g", 1, NULL);
+    TEST_EXPECT_EQ(rc, 0, "op B survives a peer rebuilding out_buf during its park (#375)");
+
+    TEST_EXPECT_EQ((u64)g_mq.eagain_budget, (u64)0, "the armed EAGAIN actually fired");
+    TEST_EXPECT_EQ((u64)g_mq.scribble_arm, (u64)0, "the peer-write model actually fired");
+    TEST_ASSERT(g_async_op.completed, "op A completed (its reply drained by B's self-pump)");
+    TEST_ASSERT(!g_client.dead, "session stayed LIVE (no clobbered frame reached the wire)");
+
+    g_mq.scribble_buf = NULL;
+    loom_unref(l);
+    p9_client_destroy(&g_client);
+    p9_mq_loopback_destroy(&g_mq);
+}

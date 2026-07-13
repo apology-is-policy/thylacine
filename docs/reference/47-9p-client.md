@@ -208,6 +208,15 @@ The fix threads a back-pressure sentinel and drains-then-retries instead of dyin
 
 The two `Tflush` sends and the async `p9_client_submit_async` (the Loom path) treat EAGAIN as their existing fail-close — the #845 flush-fallback and (the pre-existing, tracked **#350** seam) a session-mark-dead, respectively; `client_run` is the only EAGAIN-aware caller by design.
 
+### The spill (#375): `out_buf` is never re-read after the lock drops
+
+The frame is built in the **shared** `c->out_buf`, but both pump/park arms **drop `c->lock`** (across the blocking recv / the sleep) — and a peer may then legally take the lock and build *its* frame into `out_buf`. Pre-spill, the retry pushed `built_len` bytes of whatever `out_buf` then held:
+
+- **Equal-length peer frame** (two msize-clamped F1 flush `Twrite`s — the *dominant* concurrent shape on a cold `go build`): a clean **duplicate** frame on the peer's tag went out and the parked frame was **lost**. The duplicate's second reply landed on the freed-then-**reused** tag as a **wrong reply** — an `Rlerror` parses cleanly for *any* op (9P has no per-tag wire generation), so a stray `Rlerror(ENOENT)` from a duplicated cold-build probe poisoned a live `Twalkgetattr` for an **existing** component into a persistent negative dentry. One poisoned interior component (`$WORK`'s root, `/gocold`) then serves ENOENT for everything beneath it, RPC-free — the task-#50 S3 failure cluster (spurious `mkdir`/`create` ENOENTs across two trees + a stray write `EIO`, ~10% of cold builds once F1's 128 KiB flushes made concurrent equal-length back-pressured sends common). The lost frame's op hung until `cmd/go` killed the child (#811 unwound it invisibly).
+- **Unequal-length peer frame**: `p9_transport_send`'s `header.size == len` validation fails → `-1` → session death (bounded, loud).
+
+The fix: at the **first** EAGAIN — before any window can open — `client_send_flow` spills the frame to a private `kmalloc` buffer (`client_copy`; non-blocking under `c->lock`, the `rpc->reply_buf` precedent) and retries **from the spill**; `out_buf` is never re-read after the lock has dropped. This also makes the DIED-path `Tflush` + async-clunk writers' `out_buf` reuse safe against a parked sender (they assume "the prior frame is fully on the wire" — now true by construction). The transport's **all-or-nothing** EAGAIN contract (zero bytes pushed) is what makes retry-from-spill exact — no partial prefix ever sits on the ring. A spill-OOM fails closed like every other send-path failure. Regression: `9p_client.send_backpressure_spill_survives_outbuf_reuse` — the mq transport's *scribble knob* overwrites `out_buf` during the recv inside the dropped-lock window (modeling the peer build, deterministically, single-threaded); pre-spill the op + session die (`1103/1104 FAIL`), with the spill both survive.
+
 ### Per-op payload clamp (CF-3 A)
 
 `p9_client_read` / `p9_client_write` clamp a single op's `count` to the negotiated msize's payload and return the **short** count — the protocol's own contract (a 9P client never emits an op exceeding the negotiated msize); callers loop per the POSIX short-read/short-write discipline.

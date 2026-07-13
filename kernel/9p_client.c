@@ -503,16 +503,50 @@ static void client_pump_or_park_locked(struct p9_client *c, struct p9_rpc *rpc) 
 
 static int client_send_flow(struct p9_client *c, size_t built_len,
                             struct p9_rpc *rpc) {
+    // #375: the frame is built in the SHARED c->out_buf, but the pump/park
+    // above DROPS c->lock -- and a peer may then legally build ITS frame into
+    // out_buf. Pre-spill, the retry pushed built_len bytes of whatever out_buf
+    // then held: an equal-length peer frame (two msize-clamped F1 flush
+    // Twrites -- the dominant concurrent cold-build shape) went out as a clean
+    // DUPLICATE with this frame LOST; the duplicate's second reply landed on
+    // the freed-then-reused tag as a WRONG reply (an Rlerror parses cleanly
+    // for ANY op -- 9P has no per-tag wire generation), so a stray
+    // Rlerror(ENOENT) poisoned a live Twalkgetattr into a persistent negative
+    // dentry (the task-#50 S3 ENOENT cluster) and injected stray errors (the
+    // write EIO). An unequal-length peer frame fails p9_transport_send's
+    // size==len validation -> session death. So: at the FIRST back-pressure,
+    // BEFORE the window can open, spill the frame to a private buffer and
+    // retry from the spill -- out_buf is never re-read after the lock has
+    // dropped, closing the whole class (including the DIED-path Tflush +
+    // async-clunk writers, which reuse out_buf assuming the prior frame is
+    // fully on the wire). kmalloc under c->lock is non-blocking (the
+    // rpc->reply_buf precedent); a spill-OOM fails closed like every other
+    // send-path failure (the caller latches the session -- distinguishing a
+    // never-sent OOM would need a sentinel + a tag-reclaim path for a case
+    // that requires allocator exhaustion). The transport's all-or-nothing
+    // EAGAIN contract (zero bytes pushed) is what makes the retry-from-spill
+    // exact: there is never a partial prefix on the ring.
+    u8 *spill = NULL;
+    const u8 *frame = c->out_buf;
+    int rc;
     for (;;) {
-        if (client_self_dying()) return -P9_E_IO;
-        if (c->dead)             return -P9_E_IO;
+        if (client_self_dying()) { rc = -P9_E_IO; break; }
+        if (c->dead)             { rc = -P9_E_IO; break; }
 
-        int src = p9_transport_send(&c->transport, c->out_buf, built_len);
-        if (src == 0)                   return 0;          // whole frame sent
-        if (src != P9_TRANSPORT_EAGAIN) return -P9_E_IO;   // genuine break
+        int src = p9_transport_send(&c->transport, frame, built_len);
+        if (src == 0)                   { rc = 0; break; }          // whole frame sent
+        if (src != P9_TRANSPORT_EAGAIN) { rc = -P9_E_IO; break; }   // genuine break
 
-        client_pump_or_park_locked(c, rpc);                // drain c2s, then retry
+        if (!spill) {
+            spill = kmalloc(built_len, 0);
+            if (!spill) { rc = -P9_E_IO; break; }   // fail closed (allocator exhaustion)
+            client_copy(spill, c->out_buf, built_len);
+            frame = spill;
+        }
+        client_pump_or_park_locked(c, rpc);         // drain c2s, then retry
     }
+    if (spill) kfree(spill);
+    return rc;
 }
 
 // FID-LIFECYCLE async-clunk F1: drain ownerless replies until a tag slot frees.

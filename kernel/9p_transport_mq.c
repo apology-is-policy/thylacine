@@ -24,6 +24,9 @@ int p9_mq_loopback_init(struct p9_mq_loopback *mq,
     mq->deadline_armed = false;
     mq->timed_out      = false;
     mq->eagain_budget  = 0;
+    mq->scribble_buf   = NULL;
+    mq->scribble_len   = 0;
+    mq->scribble_arm   = 0;
     return 0;
 }
 
@@ -74,6 +77,13 @@ static int mq_recv(void *ctx, u8 *buf, size_t cap) {
     if (!mq || mq->magic != P9_MQ_LOOPBACK_MAGIC) return -1;
     spin_lock(&mq->lock);
     if (mq->closed) { spin_unlock(&mq->lock); return -1; }
+    // #375 clobber knob: this recv runs inside the client's pump/park window
+    // (c->lock dropped), where a peer may legally rebuild the shared out_buf.
+    // Model that peer write here, deterministically.
+    if (mq->scribble_arm > 0 && mq->scribble_buf && mq->scribble_len > 0) {
+        mq->scribble_arm--;
+        for (u32 i = 0; i < mq->scribble_len; i++) mq->scribble_buf[i] = 0x5A;
+    }
     u32 avail = mq->tail - mq->head;
     if (avail == 0) {
         if (mq->deadline_armed) { mq->timed_out = true; spin_unlock(&mq->lock); return -1; }
