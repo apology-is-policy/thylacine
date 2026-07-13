@@ -457,3 +457,80 @@ the bulk-prefetch ceiling** (B-F4) -- plus two open non-prefetch levers (server
 per-op CPU / #367 + round-trip fusion, B-F6). Until those are measured, the honest
 verdict is **FIXABLE-VOTED-pending**, not FOUNDATIONAL. The Senate's arc-exit call:
 run the two measurements, attempt the prefetch lever, or accept the honest partial.
+
+## Term-2 FINAL (2026-07-13): the owed measurements + the #50 root-cause + the EARNED verdict
+
+The Senate delegated the arc-exit forks to the dictator. Sequenced soundness-first
+(a surfaced defect on the measured path preempts the perf verdict), then the two
+Opus-owed measurements, then the earned close.
+
+### #50 (the ~10% S3 write-EIO) was the #375 out_buf clobber -- NOT Stratum/bdev
+
+The first attribution ("Stratum/bdev race") was OVERTURNED by reading the WHOLE
+failure window: the failing boot (`20260712T105542Z/device-3`) was a CLUSTER --
+4 spurious ENOENTs on existing paths across $WORK+GOCACHE + 1 write EIO, not the
+lone EIO first triaged. Spurious ENOENT on an existing path = a poisoned NEGATIVE
+dentry; the guest installs a negative ONLY on a clean wire ENOENT (`dev9p.c:765`),
+so the WIRE carried the lie. Root: the pre-existing **#375** `out_buf` clobber
+(task #28, enqueued-unhunted since #349) -- `client_send_flow`'s pump/park drops
+`c->lock`, and the retry re-read the SHARED `out_buf`; a peer's equal-length build
+(two F1 128 KiB flush Twrites -- F1 made the shape common) went out as a clean
+DUPLICATE with the parked frame LOST; the duplicate's 2nd reply hit the
+freed-then-reused tag as a WRONG `Rlerror(ENOENT)` (parses for ANY op -- 9P has no
+per-tag wire generation) -> poisoned a live `Twalkgetattr` for an existing
+component -> everything beneath served ENOENT RPC-free. FIXED `53778794`
+(spill-on-first-EAGAIN). Proof: repro-first regression (pre-fix 1103/1104 FAIL ->
+1104/1104), spec gate GREEN, **N=10 post-fix S3 loop 10/10 clean, 0 clusters**.
+Fable audit `e6a2e49a`: SOUND+COMPLETE, #50 chain PROVEN by the code, 0 P0/P1
+(2 pre-existing P2s -> tasks #52/#53). The wga narrowing was NOT the root -- it
+only lengthened the poison lifetime; with the root fixed the latch is sound.
+
+**Bar (post-#375, N=10 clean, smp=4):** S1 warm median **245 ms -- CROSSED**
+(<=266); S3 cold median **~3302 ms**, gap **~+654** to <=2648, all builds
+succeeding.
+
+### B-F4 (bulk prefetch): MEASURED DEAD
+
+The S3-rerun experiment (an identical `cmd/gofmt` build on a 2nd fresh GOCACHE,
+with the GOROOT FS fully Larder-warm from run 1): rerun median 3405 >= cold 3158
+-- warming the static inputs between runs saves **~0**. The sharp reason: by the
+S3 phase the earlier build1/build2 phases have ALREADY warmed GOROOT source
+(Larder-resident), and the GOCACHE bulk is THIS-build-generated (unprefetchable) --
+so a prefetcher has nothing cold left to warm. This also bounds every
+read-cache-sizing lever to ~0 (the same null).
+
+### B-F5 (the ~1816 ms non-RPC bucket): host-comparable (triangulated)
+
+W2-via-`cmd/compile` proved UN-measurable on the device: the trimmed GOOS=thylacine
+GOROOT lacks `preprofile` (default-PGO) and cmd/compile's toolchain deps
+(`no such tool "preprofile"`; `-pgo=off` fails 0 ms on the device fork) -- a
+bench-FIXTURE gap (the GOROOT trim), honestly noted, not a guest bug. The
+triangulation substitutes: device S3 ~3302 = RPC ~1256 + non-RPC ~2044; host S3
+2448 (~all non-RPC, local FS ~free). Device non-RPC (~2044) is NOT larger than
+host non-RPC (~2350) -- so the compile-CPU + go-tool-spawn work is host-comparable,
+and the device's +654..850 excess over the host lives in the 9P RPC band, NOT in
+the non-RPC bucket. (Suggestive-not-clean under -p overlap; a clean W2 split needs
+a fatter GOROOT bake -- a recorded fixture seam, not arc-blocking.)
+
+### The EARNED verdict
+
+The guest-side FS-cache levers are **EXHAUSTED and measured-insufficient**:
+wga narrowing (~0 wall), F1b ([4,33] ms), read-sizing (inert), bulk prefetch
+(~0, this term). The S3 residual is:
+- **H1/H6 -- 9P first-touch RPC** (~1256 ms): the once-per-file cost a cold build
+  cannot cache away. The first-touch COUNT is FOUNDATIONAL to a userspace 9P FS
+  (Stratum by VISION/Plan-9 heritage). BUT (Opus B-F6) the per-touch COST is
+  ~40-55% server CPU (`read=41us`/`meta=37us` server-side -- the #367 territory,
+  server-side-reducible) and the round-trip COUNT is fusion-reducible (the POUNCE
+  Twalk+Tgetattr precedent). These are a **SERVER-SIDE / protocol** arc, distinct
+  from the guest CHASE.
+- **H3 -- compile CPU** (~1816-2044 ms non-RPC): host-comparable (B-F5). Not a
+  device lever.
+
+**So: FOUNDATIONAL for the GUEST.** The bar is not reachable by any guest-side
+lever (all exhausted + measured). The remaining reducible surface is server-side
+(Stratum #367 per-op cost) + protocol fusion -- a named continuation, not the
+guest-cache thrash the CHASE was chartered to exhaust. S1 is CROSSED; S3
+terminates FOUNDATIONAL-guest with a server-side seam. This is the honest,
+audited close the Opus correction demanded -- the two flagged unmeasured levers
+(prefetch, the non-RPC bucket) are now BOTH measured, and neither is a guest lever.
