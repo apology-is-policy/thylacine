@@ -704,3 +704,62 @@ CHASE close). Exit gate: S3 med <= 2648 AND S1 med <= 266 on the
 sanctioned protocol, suite green, SMP gate 0-corruption. Caveat carried
 from term-3: covered-wall removal is not perfectly linear in per-op
 savings; the exit gate is the bar itself, not the estimate.
+
+#### T4-M results (2026-07-13, instrumented sanctioned 3+1 boots): the lever map REDRAWN
+
+Bar-adjacent walls (instrumented builds): S1 233/233/237/240; S3
+3408/3175/3021/3124. Covered 900-1039 ms. The S3-window decomposition
+(boots 2/3 + the attribution boot; STMD26T per-type dispatch table +
+frame-loop brackets + the walk-serve bail split + the readdirplus
+classifier):
+
+- **Server handlers ~380-404 ms (~40% of covered)**: read 115-130 ms
+  (6.7k ops, 19 us/op -- a FIXED cost: dcache 1638 hits / 1 miss,
+  decrypt n~1, bdev n~1; `fri=45` shows the EBR inline arm almost never
+  fires mid-build -- just-written inodes live in the UNCOMMITTED buffer
+  [commits n=0 in-window], so ~5k inline-class reads take the SH path);
+  write 120-128 ms (2.2k ops, 55-59 us/op, byte-bound: 91 MB dirty-
+  buffer insert ~745 MB/s, encrypt deferred to commit); wga only 70 ms
+  (9.8 us/op -- resolve 26 + finish 25); clunk 14-15 ms (7.25k -- the
+  async fire-and-forget population); lcreate 16-18; unlinkat 11;
+  walk 10; readdir 9; lopen 2.9 (1.4 us/op).
+- **Frame I/O ~165-184 ms**: reply-write 106-124 ms over 29.5k replies
+  (~4 us each) + body-read 55-60 ms (the 2-reads-per-frame shape);
+  hdr-wait 2.7-3.1 s is park/idle, not cost. inline=23k vs worker=6.5-7.2k
+  (depth-1-dominated, as designed).
+- **msize is third-order**: read max-legs 71-106 of 6.7k (~1%); write
+  max-legs 558 -> ~40-45 ms total. T4-C demoted to bundle-if-cheap.
+- **The fusion hypothesis is DEAD**: the readdirplus classifier says
+  only 30% of wire wgas have a readdir'd parent (rdseen 2059-2068 of
+  ~6.9k); openread's first-read fold has ZERO addressable population
+  (fr off0=0). Neither shape justifies a protocol op.
+- **The wga band's real structure** (wire 6903, distinct 1228 -- 5.6x
+  re-walk): serve-bails only 3199 (dm=308 mid/898 leaf; am=1104 mid/889
+  leaf) -- the attr-miss-at-intermediate-hop class (1104) is the own-
+  mutation parent-dir churn, exactly the perm-valid-downgrade target;
+  the OTHER ~3.7k wire wgas are BIND-FORM (fid-minting for opens +
+  creates' parents) which no cache can serve; walk=1626 is the by-name
+  mutation parent binds; clunk=7.25k is their fid teardown.
+- **The read band's structure**: the Larder already serves 51.6k page
+  reads guest-side; the 5,948 wire reads are its misses, and the top-8
+  qids carry 43% of the bytes -- the #1 qid (100001811) alone is 976
+  reads / 22.7 MB (written 21x in-window; identity owed to the G1 boot's
+  hot-qid path print). The C2top/D44top overlap shows written~=read
+  archive-class files (the link's read-back of just-written _pkg_.a) --
+  the write-populate target.
+
+**The redrawn levers (all guest-side legs protocol-free):** T4-G guest
+arc -- G1 write-populate the Larder page cache at the wb flush
+(~100-150 ms; fs_cache.tla extended FIRST: Flush installs the current
+token instead of invalidating); G3 perm-valid attr downgrade (an own
+CONTENT mutation provably leaves the parent dir's mode/uid/gid -- all
+the X-check needs -- so downgrade instead of drop; am_mid 1104,
+~52 ms); G4 qid-scoped populate-gen guard (the larder-GLOBAL gen loses
+641-814 installs to unrelated mutations in-storm; ~30 ms); G2 dir-fid
+cache (cached parent fids for the by-name ops unlinkat/renameat/mkdir +
+persistent readdir dir fids; the v9fs dentry-fid / Plan 9 mount-driver
+idiom; ~90 ms). T4-A server -- reply batching + buffered frame reader
+(~90 ms) + the write insert path (~60 ms); the uncommitted-overlay
+lockless read lookup DEFERRED unless G1 leaves the read band hot.
+T4-C msize ~45 ms, bundle-if-cheap. Estimated total ~-520..-600 ms
+against the +456 gap; the exit gate stays the sanctioned bar itself.
