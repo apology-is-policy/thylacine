@@ -58,6 +58,29 @@
 #include <thylacine/9p_transport.h>
 #include <thylacine/9p_wire.h>
 #include <thylacine/larder.h>
+
+// G2 (term-4): the dir-fid cache table (the policy lives in dev9p.c; the
+// struct lives here because it is per-session state embedded in p9_client,
+// like the Larder). 64 parked fids bounds the server-side fid-table residency;
+// round-robin eviction (a consume REMOVES its entry, so entries do not age --
+// eviction only fires when 64 distinct dirs are parked between consumes).
+#define P9_DIRFID_ENTRIES 64u
+struct p9_dirfid_ent {
+    u64  qid_path;
+    u32  fid;
+    bool valid;
+};
+struct p9_dirfid_cache {
+    spin_lock_t          lock;    // leaf; never held across a wire op
+    struct p9_dirfid_ent e[P9_DIRFID_ENTRIES];
+    u32                  hand;    // round-robin eviction cursor
+    // Diagnostics (the T4-G A/B counters; not load-bearing).
+    u64 takes;          // bind-form resolves served a parked fid (0-RT walks)
+    u64 donates;        // unopened dir fids parked at close (clunks elided)
+    u64 dedup_clunks;   // donate found the qid already parked -> incoming clunked
+    u64 evict_clunks;   // donate evicted a victim -> victim clunked
+    u64 drops;          // reuse-hazard drops (create/rmdir/rename-replace)
+};
 #include <thylacine/poll.h>
 #include <thylacine/rendez.h>
 #include <thylacine/spinlock.h>
@@ -240,6 +263,19 @@ struct p9_client {
     // run outside the Larder lock). Serves the base X-check re-stat storm + fstat
     // from local metadata; own-write invalidation keeps it close-to-open coherent.
     struct larder        larder;
+    // G2 (term-4): the dir-fid cache -- PARKED, walk-fresh (never-opened) server
+    // fids for DIRECTORIES, keyed by qid.path (docs/FID-LIFECYCLE-DESIGN.md
+    // section 4). A by-name op (unlink/rename/create-in) resolves its parent dir
+    // with a bind-form walk whose ONLY wire purpose is minting the fid once the
+    // Larder chain fully serves; parking the fid at close and re-issuing it at
+    // the next bind-form resolve makes the repeat resolution ZERO wire ops.
+    // Ownership is exclusive: take() REMOVES the entry (one Spoor per fid,
+    // I-11), put() re-parks it (dedup: a second fid for a parked qid is clunked
+    // by the caller). The POLICY (donate/consume/drop hooks) lives in dev9p.c;
+    // this is only the table. The lock is a pure leaf (never held across a wire
+    // op -- evict/dedup clunks run outside it). Fids die with the session, so
+    // destroy needs no wire teardown.
+    struct p9_dirfid_cache dirfid;
     // Diagnostics.
     u32                  total_ops;
     u32                  total_errors;

@@ -686,6 +686,26 @@ Tests: `larder.attr_downgrade_perm_only`,
 `dev9p.create_downgrades_parent_attr`; the three pre-existing gen-guard tests
 now race the SAME key (the scoped contract). All revert-probed.
 
+## G2 larder-side extensions (the dir-fid cache's substrate, term-4)
+
+Three additions serve the dev9p dir-fid cache (docs/FID-LIFECYCLE-DESIGN.md
+section 8; the cache itself lives on p9_client with policy in dev9p.c):
+`larder_walk_serve` gains a `leaf_perm_only` out-param (non-NULL: a perm_only
+LEAF on a full positive run serves + reports instead of bailing -- ONLY the
+bind-form dir-fid consume may accept; NULL keeps the bail);
+`larder_dentry_lookup` (read-only (parent,name) -> child qid, no CLOCK touch
+-- the rmdir/rename-replace victim resolution); `larder_qid_staled_since`
+(the HARD-event-only ring scan -- the donate gate). The G4 ring is now
+kind-tagged (`inval_hard[]`): attr_invalidate logs HARD (identity death),
+downgrade/dentry/page log SOFT; the install guard scans all events, the
+donate gate hard only. The unlink/rename-replace hooks now also invalidate
+the resolved VICTIM's own attr (strictly safer than the L1f-F3 leave-it
+posture -- the object is deleted -- and the HARD event is what makes a
+checked-out fid for that qid unparkable).
+
+Tests: dev9p.dirfid_* (5, revert-probed) + the three pre-existing gen-guard
+tests unchanged (soft/hard does not alter the install guard).
+
 ## Known caveats / footguns
 
 - **v1.0 is single-writer-sound** (own-write invalidation; the accepted

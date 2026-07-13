@@ -953,6 +953,11 @@ void test_dev9p_create_file(void);
 void test_dev9p_create_invalidates_reused_child(void);
 void test_dev9p_create_invalidates_reused_child_pages(void);
 void test_dev9p_create_downgrades_parent_attr(void);
+void test_dev9p_dirfid_consume_and_recycle(void);
+void test_dev9p_dirfid_perm_only_leaf_consume(void);
+void test_dev9p_dirfid_create_reuse_drop(void);
+void test_dev9p_dirfid_rmdir_drop_and_no_stale_repark(void);
+void test_dev9p_dirfid_suspect_not_reparked(void);
 void test_dev9p_create_invalidates_negative_dentry(void);
 void test_dev9p_create_dir(void);
 void test_dev9p_fsync(void);
@@ -2348,6 +2353,21 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "dev9p.create_downgrades_parent_attr",
                                        test_dev9p_create_downgrades_parent_attr,
+                                                                           false, NULL },
+    { "dev9p.dirfid_consume_and_recycle",
+                                       test_dev9p_dirfid_consume_and_recycle,
+                                                                           false, NULL },
+    { "dev9p.dirfid_perm_only_leaf_consume",
+                                       test_dev9p_dirfid_perm_only_leaf_consume,
+                                                                           false, NULL },
+    { "dev9p.dirfid_create_reuse_drop",
+                                       test_dev9p_dirfid_create_reuse_drop,
+                                                                           false, NULL },
+    { "dev9p.dirfid_rmdir_drop_and_no_stale_repark",
+                                       test_dev9p_dirfid_rmdir_drop_and_no_stale_repark,
+                                                                           false, NULL },
+    { "dev9p.dirfid_suspect_not_reparked",
+                                       test_dev9p_dirfid_suspect_not_reparked,
                                                                            false, NULL },
     { "dev9p.create_invalidates_negative_dentry",
                                        test_dev9p_create_invalidates_negative_dentry,

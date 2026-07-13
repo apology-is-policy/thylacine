@@ -152,6 +152,8 @@ static void wb_wire_reset(void) {
 // overrides on the Rwalkgetattr body so tests can drive the leaf's size /
 // qid.version / qid.type (the canonical body is size 0x200+e / vers 0 / FILE).
 static u32  g_wga_seen, g_lopen_seen, g_clunk_seen;
+static u64  g_wga_path_base = 0x20;  // Rwalkgetattr qid.path = base + component
+static u32  g_unlinkat_fail_ecode;   // != 0: the NEXT Tunlinkat answers Rlerror, then clears
 static bool g_wga_size_ov_on;
 static u64  g_wga_size_ov;
 static u32  g_wga_vers_ov;    // 0 = the canonical body (version 0)
@@ -405,6 +407,18 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         return (int)P9_HDR_LEN;
     }
     if (type == P9_TUNLINKAT) {
+        if (g_unlinkat_fail_ecode) {
+            u32 ec = g_unlinkat_fail_ecode;
+            g_unlinkat_fail_ecode = 0;
+            size_t etotal = P9_HDR_LEN + 4;
+            if (resp_cap < etotal) return -1;
+            resp[0] = 11; resp[1] = 0; resp[2] = 0; resp[3] = 0;
+            resp[4] = P9_RLERROR;
+            resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+            resp[7] = (u8)(ec & 0xff);        resp[8] = (u8)((ec >> 8) & 0xff);
+            resp[9] = (u8)((ec >> 16) & 0xff); resp[10] = (u8)((ec >> 24) & 0xff);
+            return (int)etotal;
+        }
         // Runlinkat = header only (empty body).
         if (resp_cap < P9_HDR_LEN) return -1;
         resp[0] = 7; resp[1] = 0; resp[2] = 0; resp[3] = 0;
@@ -465,7 +479,7 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
               resp[o + 1] = (u8)v;         resp[o + 2] = (u8)(v >> 8);
               resp[o + 3] = (u8)(v >> 16); resp[o + 4] = (u8)(v >> 24); }
             o += 1 + 4;
-            resp[o] = (u8)(0x20 + e); o += 8;                // qid.path
+            resp[o] = (u8)(g_wga_path_base + e); o += 8;    // qid.path
             { u32 m = 0100644u;                              // mode
               resp[o] = (u8)m; resp[o + 1] = (u8)(m >> 8);
               resp[o + 2] = (u8)(m >> 16); resp[o + 3] = (u8)(m >> 24); o += 4; }
@@ -895,7 +909,7 @@ void test_dev9p_create_downgrades_parent_attr(void) {
     size_t      lens[]  = {1, 3};
     struct t_stat sts[4];
     int nres = -1; bool miss = true;
-    TEST_ASSERT(larder_walk_serve(l, 0x500, names, lens, 2, sts, &nres, &miss),
+    TEST_ASSERT(larder_walk_serve(l, 0x500, names, lens, 2, sts, &nres, &miss, NULL),
                 "baseline 2-hop serve through the parent");
 
     struct Spoor *opened = dev9p.create(nc, "newfile", 1 /*OWRITE*/, 0644u, 1000u);
@@ -904,7 +918,7 @@ void test_dev9p_create_downgrades_parent_attr(void) {
     // The parent attr survives as perm_only: the mid-hop walk still serves
     // (the sibling dentry preserved by L1d name-scoping; the perm core by G3)...
     nres = -1; miss = true;
-    TEST_ASSERT(larder_walk_serve(l, 0x500, names, lens, 2, sts, &nres, &miss),
+    TEST_ASSERT(larder_walk_serve(l, 0x500, names, lens, 2, sts, &nres, &miss, NULL),
                 "post-create the mid-hop X-check chain still serves");
     TEST_ASSERT(!miss, "not a cached miss");
     TEST_EXPECT_EQ(sts[0].mode, 040755u, "parent perm core served");
@@ -916,6 +930,221 @@ void test_dev9p_create_downgrades_parent_attr(void) {
                 "post-create a stat of the parent misses (times staled)");
 
     spoor_clunk(nc);
+    teardown(root);
+}
+
+// -- G2: the dir-fid cache (docs/FID-LIFECYCLE-DESIGN.md section 4) ------------
+
+// The full recycle: a bind-form walk to a DIR wires once; closing the unopened
+// Spoor PARKS the fid (no Tclunk); the next bind-form walk of the same dir
+// consumes the parked fid with ZERO wire ops; the minted Spoor drives a real
+// by-name op; its close re-parks. Non-vacuous: without the consume the second
+// walk wires (g_wga_seen bumps); without the donate the close clunks.
+void test_dev9p_dirfid_consume_and_recycle(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    g_wga_seen = 0; g_clunk_seen = 0;
+    g_wga_type_ov = P9_QTDIR; g_wga_path_base = 0x20;
+    g_unlinkat_fail_ecode = 0;
+
+    const char  *names[1] = { "d" };
+    const size_t lens[1]  = { 1 };
+    struct t_stat sts[4];
+
+    // Walk 1: wire (populates the Larder chain + latches cacheable).
+    struct Spoor *nc1 = spoor_clone(root);
+    TEST_ASSERT(nc1 != NULL, "clone 1");
+    struct Walkqid *w1 = dev9p.walk_attrs(root, nc1, names, lens, 1, sts);
+    TEST_ASSERT(w1 != NULL && w1->spoor == nc1, "bind walk 1");
+    TEST_EXPECT_EQ((u64)g_wga_seen, 1ull, "walk 1 wired");
+    walkqid_free(w1);
+    spoor_clunk(nc1);   // unopened dir fid -> PARKED, not clunked
+    TEST_EXPECT_EQ((u64)g_clunk_seen, 0ull, "donate elides the clunk");
+
+    // Walk 2: consumed from the cache -- zero wire ops.
+    struct Spoor *nc2 = spoor_clone(root);
+    TEST_ASSERT(nc2 != NULL, "clone 2");
+    struct Walkqid *w2 = dev9p.walk_attrs(root, nc2, names, lens, 1, sts);
+    TEST_ASSERT(w2 != NULL && w2->spoor == nc2, "bind walk 2 (consume)");
+    TEST_EXPECT_EQ((u64)g_wga_seen, 1ull, "walk 2 did NOT wire (0-RT resolve)");
+    TEST_EXPECT_EQ(nc2->qid.path, (u64)0x20, "consumed Spoor at the dir qid");
+    walkqid_free(w2);
+
+    // The consumed fid drives a real by-name op.
+    TEST_ASSERT(dev9p.unlink != NULL, "unlink slot");
+    TEST_EXPECT_EQ((u64)dev9p.unlink(nc2, "x", 0), 0ull,
+                   "by-name op through the consumed fid");
+    spoor_clunk(nc2);   // healthy, unopened -> re-parked
+    TEST_EXPECT_EQ((u64)g_clunk_seen, 0ull, "re-donate elides the clunk again");
+
+    g_wga_type_ov = 0; g_wga_path_base = 0x20;
+    teardown(root);
+}
+
+// G3 x G2: a perm_only (downgraded) leaf serves the BIND-form consume -- its
+// consumer reads only mode/uid/gid + qid, all fresh -- so a bind-walk TO a
+// just-mutated dir is still a 0-RT resolve (the am_leaf=901 class). The QUERY
+// form keeps refetching. Non-vacuous: without the leaf_perm_only out-param the
+// serve bails and the walk wires.
+void test_dev9p_dirfid_perm_only_leaf_consume(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    g_wga_seen = 0; g_clunk_seen = 0;
+    g_wga_type_ov = P9_QTDIR; g_wga_path_base = 0x20;
+
+    const char  *names[1] = { "d" };
+    const size_t lens[1]  = { 1 };
+    struct t_stat sts[4];
+
+    struct Spoor *nc1 = spoor_clone(root);
+    TEST_ASSERT(nc1 != NULL, "clone 1");
+    struct Walkqid *w1 = dev9p.walk_attrs(root, nc1, names, lens, 1, sts);
+    TEST_ASSERT(w1 != NULL, "bind walk 1");
+    walkqid_free(w1);
+    spoor_clunk(nc1);   // parked
+
+    // The dir mutates (a child create's parent downgrade).
+    larder_attr_downgrade(&g_client.larder, 0x20);
+
+    struct Spoor *nc2 = spoor_clone(root);
+    TEST_ASSERT(nc2 != NULL, "clone 2");
+    struct Walkqid *w2 = dev9p.walk_attrs(root, nc2, names, lens, 1, sts);
+    TEST_ASSERT(w2 != NULL && w2->spoor == nc2, "bind walk consumes");
+    TEST_EXPECT_EQ((u64)g_wga_seen, 1ull,
+                   "perm_only leaf still serves the bind consume (0-RT)");
+    walkqid_free(w2);
+    spoor_clunk(nc2);
+
+    g_wga_type_ov = 0;
+    teardown(root);
+}
+
+// G2 reuse-hazard, the create leg: a parked fid keyed by the qid the create
+// RETURNS (an ino reuse) references a dead inode -- dev9p_create must drop +
+// clunk it. Non-vacuous: without the create-drop no Tclunk fires here.
+void test_dev9p_dirfid_create_reuse_drop(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    g_wga_seen = 0; g_clunk_seen = 0;
+    g_wga_type_ov = P9_QTDIR; g_wga_path_base = 0x77;  // leaf qid == the create qid
+
+    const char  *names[1] = { "d" };
+    const size_t lens[1]  = { 1 };
+    struct t_stat sts[4];
+
+    struct Spoor *nc1 = spoor_clone(root);
+    TEST_ASSERT(nc1 != NULL, "clone 1");
+    struct Walkqid *w1 = dev9p.walk_attrs(root, nc1, names, lens, 1, sts);
+    TEST_ASSERT(w1 != NULL, "bind walk");
+    TEST_EXPECT_EQ(nc1->qid.path, (u64)0x77, "dir parked at qid 0x77");
+    walkqid_free(w1);
+    spoor_clunk(nc1);   // parked {0x77}
+    TEST_EXPECT_EQ((u64)g_clunk_seen, 0ull, "parked, not clunked");
+
+    // The create returns qid 0x77 (the fixture's fixed Rlcreate qid) -- the
+    // parked fid now names a DEAD object and must die.
+    struct Spoor *nc2 = spoor_clone(root);
+    TEST_ASSERT(nc2 != NULL, "clone 2");
+    struct Walkqid *w2 = dev9p.walk(root, nc2, NULL, 0);
+    TEST_ASSERT(w2 != NULL, "clone-walk");
+    walkqid_free(w2);
+    struct Spoor *opened = dev9p.create(nc2, "newfile", 1 /*OWRITE*/, 0644u, 1000u);
+    TEST_ASSERT(opened == nc2, "create");
+    TEST_EXPECT_EQ((u64)g_clunk_seen, 1ull, "create dropped + clunked the parked fid");
+    (void)p9_client_reader_pump_once(&g_client);   // drain the async Rclunk
+
+    g_wga_type_ov = 0; g_wga_path_base = 0x20;
+    spoor_clunk(nc2);
+    (void)p9_client_reader_pump_once(&g_client);
+    teardown(root);
+}
+
+// G2 reuse-hazard, the rmdir leg + the checked-out staleness gate. Leg 1: an
+// unlink(REMOVEDIR) whose (parent, name) dentry names a PARKED dir drops +
+// clunks the parked fid and invalidates the dead object's attr. Leg 2: the
+// same rmdir landing while the dir's fid is CHECKED OUT logs the event, and
+// the close's donate gate (larder_qid_staled_since over the G4 ring) CLUNKS
+// instead of re-parking -- the stale fid never re-enters the cache.
+void test_dev9p_dirfid_rmdir_drop_and_no_stale_repark(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    g_wga_seen = 0; g_clunk_seen = 0;
+    g_wga_type_ov = P9_QTDIR; g_wga_path_base = 0x20;
+    g_unlinkat_fail_ecode = 0;
+
+    const char  *names[1] = { "d" };
+    const size_t lens[1]  = { 1 };
+    struct t_stat sts[4];
+
+    // Leg 1: park, then rmdir by name -> the parked fid dies.
+    struct Spoor *nc1 = spoor_clone(root);
+    TEST_ASSERT(nc1 != NULL, "clone 1");
+    struct Walkqid *w1 = dev9p.walk_attrs(root, nc1, names, lens, 1, sts);
+    TEST_ASSERT(w1 != NULL, "bind walk 1");
+    walkqid_free(w1);
+    spoor_clunk(nc1);   // parked {0x20}
+    TEST_EXPECT_EQ((u64)g_clunk_seen, 0ull, "parked");
+
+    struct dev9p_priv *rootp = dev9p_priv_of(root);
+    TEST_ASSERT(rootp != NULL, "root priv");
+    TEST_EXPECT_EQ((u64)dev9p.unlink(root, "d", SYS_UNLINK_REMOVEDIR), 0ull,
+                   "rmdir d");
+    TEST_EXPECT_EQ((u64)g_clunk_seen, 1ull, "rmdir dropped + clunked the parked fid");
+    (void)p9_client_reader_pump_once(&g_client);
+    struct t_stat probe; u64 s0 = 0;
+    TEST_ASSERT(!larder_attr_serve(&g_client.larder, 0x20, &probe, &s0),
+                "the dead object's attr invalidated (the donate-gate event)");
+
+    // Leg 2: re-walk (checked out), rmdir mid-use, close -> clunk, not re-park.
+    struct Spoor *nc2 = spoor_clone(root);
+    TEST_ASSERT(nc2 != NULL, "clone 2");
+    struct Walkqid *w2 = dev9p.walk_attrs(root, nc2, names, lens, 1, sts);
+    TEST_ASSERT(w2 != NULL && w2->spoor == nc2, "bind walk 2 (wire)");
+    TEST_EXPECT_EQ((u64)g_wga_seen, 2ull, "walk 2 wired (cache empty)");
+    TEST_EXPECT_EQ((u64)dev9p.unlink(root, "d", SYS_UNLINK_REMOVEDIR), 0ull,
+                   "rmdir d while its fid is checked out");
+    u32 pre = g_clunk_seen;
+    spoor_clunk(nc2);   // staled while out -> MUST clunk, never re-park
+    TEST_EXPECT_EQ((u64)g_clunk_seen, (u64)pre + 1ull,
+                   "a staled checked-out fid is clunked at close");
+    (void)p9_client_reader_pump_once(&g_client);
+
+    g_wga_type_ov = 0;
+    teardown(root);
+}
+
+// G2 suspect backstop: a by-name op ERRORING through a consumed fid latches
+// fid_suspect, and the close CLUNKS instead of re-parking -- the loop-breaker
+// for a stale fid whose staleness event was unknowable (the evicted-dentry
+// residual). Non-vacuous: without the suspect gate the close re-parks (no
+// clunk) and the poisoned fid would serve again.
+void test_dev9p_dirfid_suspect_not_reparked(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    g_wga_seen = 0; g_clunk_seen = 0;
+    g_wga_type_ov = P9_QTDIR; g_wga_path_base = 0x20;
+
+    const char  *names[1] = { "d" };
+    const size_t lens[1]  = { 1 };
+    struct t_stat sts[4];
+
+    struct Spoor *nc1 = spoor_clone(root);
+    TEST_ASSERT(nc1 != NULL, "clone 1");
+    struct Walkqid *w1 = dev9p.walk_attrs(root, nc1, names, lens, 1, sts);
+    TEST_ASSERT(w1 != NULL, "bind walk");
+    walkqid_free(w1);
+
+    g_unlinkat_fail_ecode = 2;   // ENOENT: the op through this fid errors
+    TEST_ASSERT(dev9p.unlink(nc1, "x", 0) != 0, "the by-name op errors");
+    g_unlinkat_fail_ecode = 0;
+
+    u32 pre = g_clunk_seen;
+    spoor_clunk(nc1);   // suspect -> clunk, never park
+    TEST_EXPECT_EQ((u64)g_clunk_seen, (u64)pre + 1ull,
+                   "a suspect fid is clunked at close, not re-parked");
+    (void)p9_client_reader_pump_once(&g_client);
+
+    g_wga_type_ov = 0;
     teardown(root);
 }
 
@@ -943,12 +1172,12 @@ void test_dev9p_create_invalidates_negative_dentry(void) {
     size_t      ln[] = { 7 };
     struct t_stat sts[2];
     int nres; bool miss;
-    TEST_ASSERT(larder_walk_serve(&g_client.larder, parent, nm, ln, 1, sts, &nres, &miss) &&
+    TEST_ASSERT(larder_walk_serve(&g_client.larder, parent, nm, ln, 1, sts, &nres, &miss, NULL) &&
                 miss, "negative dentry serves the miss pre-create");
 
     struct Spoor *opened = dev9p.create(nc, "newfile", 1 /*OWRITE*/, 0644u, 1000u);
     TEST_ASSERT(opened == nc, "create returns the Spoor");
-    TEST_ASSERT(!larder_walk_serve(&g_client.larder, parent, nm, ln, 1, sts, &nres, &miss),
+    TEST_ASSERT(!larder_walk_serve(&g_client.larder, parent, nm, ln, 1, sts, &nres, &miss, NULL),
                 "create invalidates the stale NEGATIVE dentry (no ENOENT for the new file)");
 
     spoor_clunk(nc);
@@ -1811,8 +2040,13 @@ static void co_prime(struct Spoor *root, const char *name, size_t len) {
     struct Walkqid *w = dev9p.walk_attrs(root, nc, names, lens, 1, sts);
     TEST_ASSERT(w != NULL && w->spoor == nc, "co_prime bind walk");
     walkqid_free(w);
+    // Drain the async Rclunk ONLY if the close actually clunked: a DIR-typed
+    // prime's close DONATES the fid (G2 -- no Tclunk), and a pump with
+    // nothing pending latches the single-slot loopback client dead.
+    u32 pre_clunk = g_clunk_seen;
     spoor_clunk(nc);
-    (void)p9_client_reader_pump_once(&g_client);   // drain the async Rclunk
+    if (g_clunk_seen != pre_clunk)
+        (void)p9_client_reader_pump_once(&g_client);
 }
 
 void test_dev9p_cached_open(void) {
@@ -2036,7 +2270,13 @@ void test_dev9p_cached_open_fallbacks(void) {
     g_wga_type_ov = 0;
 
     // (f) The empty FILE: size 0, plain type -> the 1-RT fidless open works
-    // (no pages needed; reads are EOF immediately).
+    // (no pages needed; reads are EOF immediately). (e)'s DIR-typed prime of
+    // the SAME leaf is a non-physical toggle (no type-morph exists in the
+    // single-writer model) -- and with G2 a bind walk is cache-servable, so
+    // the stale DIR chain must be dropped or this re-prime consumes (e)'s
+    // parked DIR fid instead of re-wiring (the test_dev9p_walk_attrs
+    // toggle-reset discipline).
+    larder_destroy(l);
     co_prime(root, "fileB", 5);           // attr: size 0, type FILE
     u64 b1 = dev9p_co_budget_used();
     g_wga_seen = 0; g_lopen_seen = 0; g_clunk_seen = 0;

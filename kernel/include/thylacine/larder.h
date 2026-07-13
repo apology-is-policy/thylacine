@@ -223,6 +223,17 @@ struct larder {
     u64                       gen;        // monotonic invalidation sequence (populate guard)
     u64                       inval_qid[LARDER_INVAL_RING];  // G4: qid per event seq
                                           //   (slot = seq % RING; see the ring note above)
+    u8                        inval_hard[LARDER_INVAL_RING]; // G2: 1 = a HARD event
+                                          //   (attr_invalidate -- the identity-death
+                                          //   class: rmdir/rename victims, create at a
+                                          //   reused ino, wstat); 0 = SOFT (downgrade /
+                                          //   dentry / page events -- metadata staled,
+                                          //   the inode lives). The install guard scans
+                                          //   ALL events; the dir-fid donate gate scans
+                                          //   HARD only (a by-name op downgrades its
+                                          //   parent -- treating that as fid-death would
+                                          //   block the recycle; the fid tracks the
+                                          //   INODE, which only hard events kill).
     // All three sub-cache entry arrays are HEAP (lazily allocated on the first
     // install -- a non-cacheable client allocates none) with the same O(1)
     // index shape: chained hash + free-cursor fill + CLOCK eviction.
@@ -349,6 +360,12 @@ void larder_attr_downgrade(struct larder *l, u64 qid_path);
 // positive run -- the LEAF record feeds STALK_STAT's returned stat, the
 // carried-attrs chain, and the cached-open size/cvers gates, all of which read
 // the staled fields; a perm_only leaf bails to the RPC (which re-installs full).
+// G2 refinement: with a non-NULL `leaf_perm_only`, a perm_only LEAF on a full
+// positive run SERVES (sts filled from the entry) and reports itself through
+// the out-flag instead of bailing -- the BIND-form dir-fid consume path reads
+// only mode/uid/gid + qid from the leaf (fresh in perm_only), so it may
+// accept; every other caller must treat the flag as a miss (fall to the RPC).
+// A NULL out keeps the bail behavior above.
 // The CALLER decides whether to skip the RPC: a full positive run only in the
 // QUERY form (no server fid to bind); a cached miss in either form (a miss binds
 // nothing). `sts` is the caller's DEV_WALK_ATTRS_MAX array; a false return may
@@ -356,7 +373,23 @@ void larder_attr_downgrade(struct larder *l, u64 qid_path);
 bool larder_walk_serve(struct larder *l, u64 base_qid_path,
                        const char *const *names, const size_t *name_lens,
                        int nname, struct t_stat *sts,
-                       int *nresolved, bool *is_miss);
+                       int *nresolved, bool *is_miss, bool *leaf_perm_only);
+
+// G2: read-only positive-dentry lookup -- resolve (parent_qid_path, name) to
+// its cached child qid.path WITHOUT serving attrs (no CLOCK touch). Used by
+// the dir-fid reuse-hazard drops (rmdir/rename-replace know the victim only
+// by name; the parked fid is keyed by the child qid this binding names).
+// Returns false on a miss / negative / too-long name.
+bool larder_dentry_lookup(struct larder *l, u64 parent_qid_path,
+                          const char *name, size_t name_len, u64 *child_out);
+
+// G2: has any HARD invalidation event (attr_invalidate -- the identity-death
+// class) named `qid_path` since the `seq0` gen snapshot? Fail-safe TRUE on
+// ring overflow. The dir-fid donate gate: a fid whose dir's INODE died while
+// checked out must be clunked, never re-parked. SOFT events (the G3 parent
+// downgrade every by-name op fires, dentry/page drops) do not kill the fid --
+// it tracks the inode, not the metadata.
+bool larder_qid_staled_since(struct larder *l, u64 seq0, u64 qid_path);
 
 // Populate a dentry (Read/OwnWrite install). Install (parent_qid_path, name) ->
 // child_qid_path (negative == false) or -> ENOENT (negative == true, child

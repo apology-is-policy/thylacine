@@ -67,6 +67,90 @@ struct dev9p_priv *dev9p_priv_of(struct Spoor *c) {
     return priv_of(c);
 }
 
+// -- G2: the dir-fid cache (docs/FID-LIFECYCLE-DESIGN.md section 4) ------------
+//
+// The table lives on p9_client (per-session, like the Larder); ALL policy is
+// here. Parked entries hold walk-fresh (never-opened) DIRECTORY fids keyed by
+// qid.path. Ownership is exclusive at every step: take() removes the entry
+// (one Spoor per live fid -- I-11); put() parks a fid the closing priv OWNED
+// and stops owning (the clunk is elided, not deferred); any dedup/evict/drop
+// victim is returned for the CALLER to clunk OUTSIDE the leaf lock. Parked
+// fids die with the session (no destroy-time wire teardown -- the session
+// close unbinds every fid server-side).
+
+// Take: remove + return the parked fid for `qid_path`, or -1.
+static s64 dirfid_take(struct p9_client *cl, u64 qid_path) {
+    struct p9_dirfid_cache *dc = &cl->dirfid;
+    s64 fid = -1;
+    spin_lock(&dc->lock);
+    for (u32 i = 0; i < P9_DIRFID_ENTRIES; i++) {
+        if (dc->e[i].valid && dc->e[i].qid_path == qid_path) {
+            dc->e[i].valid = false;
+            fid = (s64)dc->e[i].fid;
+            dc->takes++;
+            break;
+        }
+    }
+    spin_unlock(&dc->lock);
+    return fid;
+}
+
+// Park: insert {qid_path, fid}. Returns a fid the CALLER must clunk (the
+// incoming on dedup, an evicted victim on overflow), or -1.
+static s64 dirfid_put(struct p9_client *cl, u64 qid_path, u32 fid) {
+    struct p9_dirfid_cache *dc = &cl->dirfid;
+    s64 clunk = -1;
+    s32 free_i = -1;
+    spin_lock(&dc->lock);
+    for (u32 i = 0; i < P9_DIRFID_ENTRIES; i++) {
+        if (dc->e[i].valid) {
+            if (dc->e[i].qid_path == qid_path) {
+                // Already parked: keep the resident (fids do not age), clunk
+                // the incoming.
+                dc->dedup_clunks++;
+                spin_unlock(&dc->lock);
+                return (s64)fid;
+            }
+        } else if (free_i < 0) {
+            free_i = (s32)i;
+        }
+    }
+    if (free_i < 0) {
+        u32 v = dc->hand;
+        dc->hand = (v + 1u) % P9_DIRFID_ENTRIES;
+        clunk = (s64)dc->e[v].fid;
+        dc->evict_clunks++;
+        free_i = (s32)v;
+    }
+    dc->e[free_i].qid_path = qid_path;
+    dc->e[free_i].fid      = fid;
+    dc->e[free_i].valid    = true;
+    dc->donates++;
+    spin_unlock(&dc->lock);
+    return clunk;
+}
+
+// Drop (the reuse-hazard defense): remove the parked fid for `qid_path`
+// (create at a possibly-reused ino / rmdir / rename-replace victim). Returns
+// the fid for the caller to clunk, or -1. The fid MUST be clunked -- it
+// references a stale or deleted inode, and a fresh walk re-resolving a REUSED
+// qid.path would otherwise be served a fid for the WRONG (dead) object.
+static s64 dirfid_drop(struct p9_client *cl, u64 qid_path) {
+    struct p9_dirfid_cache *dc = &cl->dirfid;
+    s64 fid = -1;
+    spin_lock(&dc->lock);
+    for (u32 i = 0; i < P9_DIRFID_ENTRIES; i++) {
+        if (dc->e[i].valid && dc->e[i].qid_path == qid_path) {
+            dc->e[i].valid = false;
+            fid = (s64)dc->e[i].fid;
+            dc->drops++;
+            break;
+        }
+    }
+    spin_unlock(&dc->lock);
+    return fid;
+}
+
 // =============================================================================
 // FID-LIFECYCLE cached-open support (docs/FID-LIFECYCLE-DESIGN.md section 3.3).
 // =============================================================================
@@ -711,11 +795,16 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
     if (__atomic_load_n(&src_priv->client->cacheable, __ATOMIC_RELAXED)) {
         int  nres    = 0;
         bool is_miss = false;
+        bool leaf_po = false;
         if (larder_walk_serve(&src_priv->client->larder, c->qid.path,
                               (const char *const *)name, name_lens, nname, sts,
-                              &nres, &is_miss)) {
+                              &nres, &is_miss, &leaf_po)) {
             bool full = (!is_miss && nres == nname);
-            if (is_miss || (full && nc == NULL)) {
+            // A perm_only leaf record serves ONLY the bind-form dir-fid
+            // consume below (its consumer reads mode/uid/gid + qid, all
+            // fresh); the query form must refetch (STALK_STAT and the
+            // carried-attrs chain read the staled fields).
+            if (is_miss || (full && nc == NULL && !leaf_po)) {
                 struct Walkqid *sw = walkqid_alloc(nname);
                 if (sw) {
                     sw->nqid = nres;
@@ -730,7 +819,46 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
                 }
                 // walkqid_alloc OOM -> fall through to the RPC (fail-safe).
             }
-            // full positive in BIND form -> must RPC to bind the fid.
+            // G2 consume: a BIND-form full-positive run's only wire purpose is
+            // minting the server fid -- if the leaf is a DIRECTORY with a
+            // parked fid, re-issue it and skip the RPC entirely (the 0-RT
+            // repeat resolution; docs/FID-LIFECYCLE-DESIGN.md section 4). The
+            // take is exclusive (the entry is removed), so exactly one Spoor
+            // ever holds the fid (I-11). fid_gen snapshots the Larder gen NOW:
+            // the donate-back gate re-parks only if no invalidation event
+            // names this qid while the fid is checked out.
+            if (full && nc != NULL && (sts[nname - 1].qid_type & QTDIR)) {
+                struct p9_client *cl = src_priv->client;
+                s64 cfid = dirfid_take(cl, sts[nname - 1].qid_path);
+                if (cfid >= 0) {
+                    struct Walkqid *sw = walkqid_alloc(nname);
+                    if (sw) {
+                        struct dev9p_priv *np =
+                            priv_alloc(cl, (u32)cfid, /*fid_owned=*/true,
+                                       src_priv->attached_owner);
+                        if (np) {
+                            np->fid_gen = larder_gen_snapshot(&cl->larder);
+                            sw->nqid = nname;
+                            for (int i = 0; i < nname; i++) {
+                                sw->qid[i].path   = sts[i].qid_path;
+                                sw->qid[i].vers   = sts[i].qid_vers;
+                                sw->qid[i].type   = sts[i].qid_type;
+                                sw->qid[i].pad[0] = sw->qid[i].pad[1] =
+                                    sw->qid[i].pad[2] = 0;
+                            }
+                            nc->aux = np;
+                            nc->qid = sw->qid[nname - 1];
+                            sw->spoor = nc;
+                            return sw;
+                        }
+                        walkqid_free(sw);
+                    }
+                    // Alloc failure: nothing consumed the fid -- sync-clunk it
+                    // (rare OOM path; correctness over latency).
+                    (void)p9_client_clunk(cl, (u32)cfid);
+                }
+            }
+            // full positive in BIND form (no parked fid) -> must RPC to bind.
         }
     }
 
@@ -853,6 +981,9 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
             walkqid_free(w);
             return NULL;
         }
+        // G2: the fid's birth gen is the pre-RPC snapshot -- an invalidation
+        // event naming this qid DURING the walk already makes it unparkable.
+        new_priv->fid_gen = wga_seq0;
         nc->aux = new_priv;
         nc->qid = w->qid[w->nqid - 1];
         w->spoor = nc;
@@ -904,7 +1035,7 @@ static struct Spoor *dev9p_open_cached(struct Spoor *c, const char *const *names
         int  nres    = 0;
         bool is_miss = false;
         if (!larder_walk_serve(l, c->qid.path, names, name_lens, nname, sts,
-                               &nres, &is_miss))
+                               &nres, &is_miss, NULL))
             { return NULL; }
         if (is_miss || nres != nname)
             { return NULL; }
@@ -1149,7 +1280,7 @@ static struct Spoor *dev9p_create(struct Spoor *c, const char *name,
         p->fid = dir_fid;
 
         rc = p9_client_lopen(p->client, dir_fid, 0u /* OREAD */, &qid, &iounit);
-        if (rc != 0) return NULL;
+        if (rc != 0) { p->fid_suspect = true; return NULL; }
         c->mode = 0;                              // OREAD
     } else {
         // File: Tlcreate creates AND opens; afterward p->fid refers to the
@@ -1158,7 +1289,10 @@ static struct Spoor *dev9p_create(struct Spoor *c, const char *name,
         if (omode & 0x10) flags |= 01000u;        // OTRUNC -> O_TRUNC
         int rc = p9_client_lcreate(p->client, p->fid, (const u8 *)name, name_len,
                                     flags, mode, gid, &qid, &iounit);
-        if (rc != 0) return NULL;                 // p->fid still parent; caller clunks
+        if (rc != 0) {                            // p->fid still parent; caller clunks
+            p->fid_suspect = true;                // G2: never re-park an erroring fid
+            return NULL;
+        }
         c->mode = omode;
     }
 
@@ -1183,6 +1317,13 @@ static struct Spoor *dev9p_create(struct Spoor *c, const char *name,
     struct larder *l = &p->client->larder;
     larder_attr_downgrade(l, parent_path);
     larder_attr_invalidate(l, c->qid.path);
+    // G2 reuse-hazard: a parked dir fid keyed by this (possibly reused)
+    // qid.path now references a DEAD inode -- drop + clunk it (the fid twin
+    // of the child attr/page drops around it).
+    {
+        s64 g2df = dirfid_drop(p->client, c->qid.path);
+        if (g2df >= 0) (void)p9_client_clunk_async(p->client, (u32)g2df);
+    }
     // L1e invalidate (L1f audit F1): the reused-ino hazard applies to the
     // child's PAGES exactly as to its attr. A create at a freed+reused qid.path
     // can carry a STALE prior-occupant page whose cvers collides with the fresh
@@ -1312,7 +1453,32 @@ static void dev9p_close(struct Spoor *c) {
         // (pool full AND the Proc dying -- the fid then leaks bound exactly as
         // the old sync clunk did on the same race, session-teardown-bounded;
         // round-2 F1). Ignored exactly as a sync-clunk error was, no fallback.
-        (void)p9_client_clunk_async(p->client, p->fid);
+        // G2 donate (docs/FID-LIFECYCLE-DESIGN.md section 4): an UNOPENED
+        // DIRECTORY fid on a cacheable client parks in the dir-fid cache
+        // instead of clunking -- the next bind-form resolve of this dir
+        // re-issues it with zero wire ops. Gates: never-opened (COPEN would
+        // make the fid mode-bound; a cached_open priv is fidless and cannot
+        // reach here fid_owned), a dir (files are opened to be used -- no
+        // repeat-bind win), cacheable (the Larder-backed class), NOT suspect
+        // (a by-name op errored through this fid -- the stale-fid backstop),
+        // and NOT staled (no invalidation event named this qid since the
+        // fid's mint/take -- a dir rmdir'd/replaced while its fid was checked
+        // out must die here, never re-park; fail-safe stale on ring overflow
+        // and on the never-stamped fid_gen=0 default). The dedup/evict victim
+        // (if any) is clunked OUTSIDE the table lock.
+        bool parked = false;
+        if ((c->flag & COPEN) == 0 && (c->qid.type & QTDIR) &&
+            !p->fid_suspect &&
+            __atomic_load_n(&p->client->cacheable, __ATOMIC_RELAXED) &&
+            !larder_qid_staled_since(&p->client->larder, p->fid_gen,
+                                     c->qid.path)) {
+            s64 vic = dirfid_put(p->client, c->qid.path, p->fid);
+            parked = true;
+            if (vic >= 0)
+                (void)p9_client_clunk_async(p->client, (u32)vic);
+        }
+        if (!parked)
+            (void)p9_client_clunk_async(p->client, p->fid);
     }
 
     if (p->attached_owner) {
@@ -1674,9 +1840,21 @@ static int dev9p_rename(struct Spoor *olddir, const char *oldname,
     size_t ol = 0; while (oldname[ol] != '\0') ol++;
     size_t nl = 0; while (newname[nl] != '\0') nl++;
     if (ol == 0 || nl == 0) return -1;
+    // G2 reuse-hazard: a rename that REPLACES an existing dir deletes the
+    // DEST inode -- resolve its qid from the (newdir, newname) binding before
+    // the wire op. The SOURCE keeps its inode across a rename (fids track
+    // inodes, not names), so its parked fid stays correct and is left alone.
+    u64 g2victim = 0;
+    bool g2have  = larder_dentry_lookup(&od->client->larder, newdir->qid.path,
+                                        newname, nl, &g2victim);
     int rc = p9_client_renameat(od->client, od->fid, (const u8 *)oldname, ol,
                                 nd->fid, (const u8 *)newname, nl);
-    if (rc != 0) return -1;
+    if (rc != 0) { od->fid_suspect = true; nd->fid_suspect = true; return -1; }
+    if (g2have) {
+        s64 g2df = dirfid_drop(od->client, g2victim);
+        if (g2df >= 0) (void)p9_client_clunk_async(od->client, (u32)g2df);
+        larder_attr_invalidate(&od->client->larder, g2victim);
+    }
     // L1c OwnWrite: both dirs' attrs (nlink/mtime/cvers) changed -- G3
     // DOWNGRADE (a rename edits the dirs' child sets + times, never their
     // mode/uid/gid; the perm-servable core keeps mid-hop X-checks RPC-free).
@@ -1705,13 +1883,31 @@ static int dev9p_unlink(struct Spoor *parent, const char *name, u32 flags) {
     if (!name) return -1;
     size_t nl = 0; while (name[nl] != '\0') nl++;
     if (nl == 0) return -1;
+    // G2 reuse-hazard (BEFORE the wire op mutates the dentry set): resolve
+    // the victim's qid from the cached (parent, name) binding while it still
+    // exists -- the parked dir fid the drop below must kill is keyed by it.
+    u64 g2victim = 0;
+    bool g2have  = larder_dentry_lookup(&p->client->larder, parent->qid.path,
+                                        name, nl, &g2victim);
     int rc = p9_client_unlinkat(p->client, p->fid, (const u8 *)name, nl, flags);
-    if (rc != 0) return -1;
+    if (rc != 0) { p->fid_suspect = true; return -1; }
+    if (g2have) {
+        // Drop + clunk the victim's parked fid (a fresh walk of a REUSED
+        // qid.path must never be served a fid for the dead object), and
+        // invalidate the deleted object's own attr -- it names a dead inode,
+        // and the invalidation EVENT is what makes a checked-out fid for this
+        // qid unparkable at its close (the donate gate's ring scan).
+        s64 g2df = dirfid_drop(p->client, g2victim);
+        if (g2df >= 0) (void)p9_client_clunk_async(p->client, (u32)g2df);
+        larder_attr_invalidate(&p->client->larder, g2victim);
+    }
     // L1c OwnWrite: unlink changed the parent dir's attrs (nlink/mtime/cvers)
     // -- G3 DOWNGRADE (an unlink cannot edit the parent's mode/uid/gid). The
-    // unlinked child's own cached entry (if any) is left; an ino-reuse serve
-    // is caught by the gen guard + walk-overwrite, and mode is unchanged by
-    // unlink (LARDER-DESIGN section 11).
+    // unlinked child's own attr: dropped ABOVE when the (parent, name) binding
+    // resolved it (G2 -- the victim names a dead inode, and the event arms the
+    // donate gate); left as the documented L1f-F3 metadata-only seam when the
+    // binding was not cached (the ino-reuse serve is then caught by the gen
+    // guard + walk-overwrite; mode is unchanged by unlink).
     larder_attr_downgrade(&p->client->larder, parent->qid.path);
     // L1d invalidate: unlink removed `name` from the parent's dirent set -- drop
     // the (parent, name) binding so a stale POSITIVE entry -> the now-removed
@@ -1784,7 +1980,7 @@ static int dev9p_wstat_native(struct Spoor *c, u32 valid, u32 mode,
     sa.uid   = uid;
     sa.gid   = gid;
     int rc = p9_client_setattr(p->client, p->fid, &sa);
-    if (rc != 0) return -1;
+    if (rc != 0) { p->fid_suspect = true; return -1; }
     // L1c invalidate (fs_cache.tla OwnWrite): chmod/chown/truncate changed
     // mode/uid/gid/size. CRITICAL -- the base X-check perm_checks the cached
     // mode, so a stale mode after a tighten would be a bounded I-28 window; the

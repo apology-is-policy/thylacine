@@ -249,7 +249,7 @@ void test_larder_dentry_serve(void) {
     struct t_stat sts[4];
     int  nres = -1;
     bool miss = true;
-    bool ok = larder_walk_serve(&g_larder, 100, names, lens, 1, sts, &nres, &miss);
+    bool ok = larder_walk_serve(&g_larder, 100, names, lens, 1, sts, &nres, &miss, NULL);
     TEST_ASSERT(ok, "cached positive dentry serves the walk");
     TEST_ASSERT(!miss, "positive serve is not a miss");
     TEST_ASSERT(nres == 1, "one component resolved");
@@ -264,7 +264,7 @@ void test_larder_dentry_serve_miss(void) {
     size_t      lens[]  = {3};
     struct t_stat sts[4];
     int nres = 7; bool miss = false;
-    TEST_ASSERT(!larder_walk_serve(&g_larder, 100, names, lens, 1, sts, &nres, &miss),
+    TEST_ASSERT(!larder_walk_serve(&g_larder, 100, names, lens, 1, sts, &nres, &miss, NULL),
                 "empty dentry cache bails to the RPC");
     TEST_EXPECT_EQ(g_larder.dentry_misses, 1ull, "one dentry miss counted");
 }
@@ -278,7 +278,7 @@ void test_larder_dentry_negative(void) {
     size_t      lens[]  = {4};
     struct t_stat sts[4];
     int nres = -1; bool miss = false;
-    bool ok = larder_walk_serve(&g_larder, 100, names, lens, 1, sts, &nres, &miss);
+    bool ok = larder_walk_serve(&g_larder, 100, names, lens, 1, sts, &nres, &miss, NULL);
     TEST_ASSERT(ok, "negative dentry serves");
     TEST_ASSERT(miss, "negative serve reports a miss");
     TEST_ASSERT(nres == 0, "the walk misses at component 0 (nothing resolved)");
@@ -295,7 +295,7 @@ void test_larder_dentry_multi_hop(void) {
     size_t      ln[] = {1, 1};
     struct t_stat sts[4];
     int nres = -1; bool miss = true;
-    bool ok = larder_walk_serve(&g_larder, 100, nm, ln, 2, sts, &nres, &miss);
+    bool ok = larder_walk_serve(&g_larder, 100, nm, ln, 2, sts, &nres, &miss, NULL);
     TEST_ASSERT(ok && !miss && nres == 2, "two-hop chain serves fully");
     TEST_EXPECT_EQ(sts[0].qid_path, 200ull, "hop 0 -> a (qid 200)");
     TEST_EXPECT_EQ(sts[1].qid_path, 300ull, "hop 1 -> b (qid 300)");
@@ -311,7 +311,7 @@ void test_larder_dentry_partial_chain_bails(void) {
     size_t      ln[] = {1, 1};
     struct t_stat sts[4];
     int nres = -1; bool miss = true;
-    TEST_ASSERT(!larder_walk_serve(&g_larder, 100, nm, ln, 2, sts, &nres, &miss),
+    TEST_ASSERT(!larder_walk_serve(&g_larder, 100, nm, ln, 2, sts, &nres, &miss, NULL),
                 "a chain with an uncached hop bails to the RPC");
 }
 
@@ -325,7 +325,7 @@ void test_larder_dentry_attr_miss_bails(void) {
     size_t      ln[] = {3};
     struct t_stat sts[4];
     int nres = -1; bool miss = true;
-    TEST_ASSERT(!larder_walk_serve(&g_larder, 100, nm, ln, 1, sts, &nres, &miss),
+    TEST_ASSERT(!larder_walk_serve(&g_larder, 100, nm, ln, 1, sts, &nres, &miss, NULL),
                 "a positive dentry without a cached child attr bails to the RPC");
 }
 
@@ -344,9 +344,9 @@ void test_larder_dentry_invalidate_name(void) {
     const char *nb[] = {"bar"}; size_t lb[] = {3};
     struct t_stat sts[4]; int nres; bool miss;
 
-    TEST_ASSERT(larder_walk_serve(&g_larder, 100, nf, lf, 1, sts, &nres, &miss) &&
+    TEST_ASSERT(larder_walk_serve(&g_larder, 100, nf, lf, 1, sts, &nres, &miss, NULL) &&
                 miss && nres == 0, "negative 'foo' serves the miss before the create");
-    TEST_ASSERT(larder_walk_serve(&g_larder, 100, nb, lb, 1, sts, &nres, &miss) &&
+    TEST_ASSERT(larder_walk_serve(&g_larder, 100, nb, lb, 1, sts, &nres, &miss, NULL) &&
                 !miss && nres == 1, "positive 'bar' serves the hit before the create");
 
     // A create of "foo" in dir 100 (own-write on exactly (100,"foo")): drop ONLY
@@ -355,9 +355,9 @@ void test_larder_dentry_invalidate_name(void) {
     // the cold-band wga thrash). This assertion FAILS on the old whole-parent code.
     larder_dentry_invalidate_name(&g_larder, 100, "foo", 3);
 
-    TEST_ASSERT(!larder_walk_serve(&g_larder, 100, nf, lf, 1, sts, &nres, &miss),
+    TEST_ASSERT(!larder_walk_serve(&g_larder, 100, nf, lf, 1, sts, &nres, &miss, NULL),
                 "invalidate-name drops the stale NEGATIVE 'foo' (no ENOENT for a new file)");
-    TEST_ASSERT(larder_walk_serve(&g_larder, 100, nb, lb, 1, sts, &nres, &miss) &&
+    TEST_ASSERT(larder_walk_serve(&g_larder, 100, nb, lb, 1, sts, &nres, &miss, NULL) &&
                 !miss && nres == 1,
                 "invalidate-name PRESERVES the 'bar' sibling (the narrowing)");
     // The child's attr survives -- invalidate-name drops only the named dentry.
@@ -380,7 +380,7 @@ void test_larder_dentry_gen_guard(void) {
 
     const char *nf[] = {"foo"}; size_t lf[] = {3};
     struct t_stat sts[4]; int nres; bool miss;
-    TEST_ASSERT(!larder_walk_serve(&g_larder, 100, nf, lf, 1, sts, &nres, &miss),
+    TEST_ASSERT(!larder_walk_serve(&g_larder, 100, nf, lf, 1, sts, &nres, &miss, NULL),
                 "gen-guard skips a dentry install that raced an invalidate");
     TEST_EXPECT_EQ(g_larder.dentry_install_skips, 1ull, "one dentry guard skip counted");
 }
@@ -699,7 +699,7 @@ void test_larder_attr_downgrade_perm_only(void) {
     size_t      lens[]  = {1, 1};
     struct t_stat sts[4];
     int nres = -1; bool miss = true;
-    TEST_ASSERT(larder_walk_serve(&g_larder, 100, names, lens, 2, sts, &nres, &miss),
+    TEST_ASSERT(larder_walk_serve(&g_larder, 100, names, lens, 2, sts, &nres, &miss, NULL),
                 "baseline 2-hop serve");
 
     larder_attr_downgrade(&g_larder, 200);
@@ -713,14 +713,14 @@ void test_larder_attr_downgrade_perm_only(void) {
                 "downgraded attr misses fresh_size");
 
     nres = -1; miss = true;
-    TEST_ASSERT(larder_walk_serve(&g_larder, 100, names, lens, 2, sts, &nres, &miss),
+    TEST_ASSERT(larder_walk_serve(&g_larder, 100, names, lens, 2, sts, &nres, &miss, NULL),
                 "downgraded dir still serves as the MID hop");
     TEST_ASSERT(!miss, "full positive run (not a cached miss)");
     TEST_EXPECT_EQ(nres, 2, "both hops resolved");
     TEST_EXPECT_EQ(sts[0].mode, 040755u, "mid-hop perm core served");
 
     const char *ln[] = {"d"}; size_t ll[] = {1};
-    TEST_ASSERT(!larder_walk_serve(&g_larder, 100, ln, ll, 1, sts, &nres, &miss),
+    TEST_ASSERT(!larder_walk_serve(&g_larder, 100, ln, ll, 1, sts, &nres, &miss, NULL),
                 "downgraded dir as the LEAF bails to the RPC");
 
     struct t_stat fresh = mk_stat(040755);

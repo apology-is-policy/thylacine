@@ -369,3 +369,81 @@ query is never wasted and the 8 MiB budget is never touched at this workload.
 [[project-fs-cache-design]] + `docs/LARDER-DESIGN.md` (the Larder this extends) ·
 `docs/POUNCE-DESIGN.md` (the Twalkgetattr the revalidation reuses) ·
 ARCH §28 I-38 / I-10 / I-11 · `specs/fs_cache.tla` + `specs/9p_client.tla`.
+
+## 8. The dir-fid cache (G2, term-4; 2026-07-13)
+
+The T4-G A/B (docs/chase/LEDGER.md) measured ~3.7k of the S3 window's 6836
+wire Twalkgetattr as BIND-FORM walks over FULLY-CACHED chains -- the RPC's
+only remaining purpose is minting the server fid -- plus 901 leaf-perm_only
+bails that are mostly bind-walks TO the just-mutated dir itself. The dir-fid
+cache (the v9fs dentry-fid / Plan 9 mount-driver idiom, adapted to the
+Larder's coherence machinery) makes the repeat resolution ZERO wire ops.
+
+### Mechanism
+
+A 64-entry table on `p9_client` (`struct p9_dirfid_cache`, 9p_client.h) parks
+walk-fresh (never-opened) DIRECTORY fids keyed by qid.path; ALL policy lives
+in dev9p.c:
+
+- **Consume** (`dev9p_walk_attrs`, bind form): when the Larder chain fully
+  serves and the leaf is a dir with a parked fid, `dirfid_take` REMOVES the
+  entry and the walked Spoor is minted from it -- no RPC. A perm_only leaf
+  serves this path (the new `leaf_perm_only` out-param on
+  `larder_walk_serve`): the bind consumer reads only mode/uid/gid + the
+  immutable qid fields, all fresh under a G3 downgrade; every other caller
+  still treats perm_only-leaf as a miss.
+- **Donate** (`dev9p_close`): an unopened dir fid on a cacheable client parks
+  instead of clunking (dedup + round-robin evict victims are clunked outside
+  the leaf lock). The by-name flow -- resolve parent, op, close -- thus
+  recycles one fid indefinitely: unlink/rename/mkdir storms resolve 0-RT
+  after the first touch.
+- Ownership is exclusive at every step (take removes; the closing priv stops
+  owning at put) -- one Spoor per live fid, I-11 preserved. Parked fids die
+  with the session (no destroy-time wire).
+
+### The stale-fid defense (three layers)
+
+A fid tracks an INODE. The hazard: a parked/checked-out fid for a dir that is
+rmdir'd (or replaced, or whose ino a create reuses) names a dead object; a
+fresh walk re-resolving the REUSED qid.path must never be served it, and a
+poisoned fid must never re-park in a loop.
+
+1. **Drop hooks** (parked fids): `dev9p_create` drops the entry at the
+   returned qid (ino reuse -- the L1f-F1 twin); `dev9p_unlink` and the
+   rename-REPLACE arm resolve the victim's qid from the cached (parent,name)
+   dentry BEFORE the wire op (`larder_dentry_lookup`), drop + clunk the
+   parked fid, and invalidate the victim's own attr -- the HARD event that
+   arms layer 2.
+2. **The donate staleness gate** (checked-out fids): every priv records
+   `fid_gen` (the Larder invalidation-gen at its fid's mint or take);
+   `dev9p_close` parks only if NO HARD event named the qid since
+   (`larder_qid_staled_since` over the G4 ring). Events are kind-tagged
+   (`inval_hard[]`): attr_invalidate = HARD (identity death: rmdir/rename
+   victims, create-reuse, wstat); the G3 parent downgrade + dentry + page
+   events = SOFT -- a by-name op downgrades its own parent on every use, and
+   treating that as fid-death would block exactly the recycle the cache
+   exists for. The install guard still scans ALL events.
+3. **The suspect backstop** (the unknowable residual): if the victim's
+   dentry was evicted before the mutation, no event names the qid -- so any
+   by-name op ERRORING through a priv latches `fid_suspect`, and the close
+   clunks instead of re-parking. A stale fid dies after at most one failed
+   cycle; the observable cost is one honest server error (the same
+   close-to-open race outcome as a pre-G2 walk that resolved before the
+   mutation), never corruption.
+
+### RT accounting (why this is the honest shape)
+
+A CONSUMING op still needs >= 1 RT whatever cache exists: Tlcreate transitions
+the passed fid to the new file, Tlopen mode-binds it, and a 0-name Twalk clone
+is itself 1 RT -- so creates and opens keep their single fused-wga RT. The
+0-RT wins are the NON-consuming by-name ops (unlinkat/renameat operate on the
+dirfid by name without transitioning it) and every repeat parent resolution
+between them. Consumed-then-opened dirs (readdir) save their bind RT and the
+fid dies at close (opened fids are never parked).
+
+Tests (all revert-probed; 2 probe builds -> 5 distinct targeted failures):
+dev9p.dirfid_{consume_and_recycle, perm_only_leaf_consume, create_reuse_drop,
+rmdir_drop_and_no_stale_repark, suspect_not_reparked}. The co_prime test
+helper drains its async Rclunk only when the close actually clunked (a donate
+elides it, and a pump with nothing pending latches the single-slot loopback
+dead).

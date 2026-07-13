@@ -814,3 +814,22 @@ applies to EVERY build.sh invocation, not just `all`. Recovered from the
 pool.img.goroot-safe / system.key.goroot-safe twins (the escape hatch saved
 2026-07-12) + a PRESERVE re-bake; the first no-bar-lines bench run was the
 tell (the guest's own "Go-4c /goroot absent" skip line named it).
+
+## Term-4 T4-G: G2 dir-fid cache LANDED (2026-07-13)
+
+The last T4-G lever (FID-LIFECYCLE-DESIGN section 8): a 64-entry parked-fid
+table on p9_client makes a repeat bind-form dir resolution ZERO wire ops
+(consume a parked fid when the Larder chain fully serves -- incl. a perm_only
+leaf, closing the am_leaf=901 class), with donate-at-close recycling and a
+three-layer stale-fid defense (drop hooks + the HARD/SOFT kind-tagged G4 ring
+feeding the donate staleness gate + the suspect-on-error backstop). The G3
+downgrade needed the kind split: the first cut treated every ring event as
+fid-death, and the recycle test caught its own parent-downgrade blocking the
+re-park -- the hard/soft partition (attr_invalidate = identity death vs
+downgrade/dentry/page = metadata staled) is the load-bearing distinction.
+
+Suite 1120/1120; 5 new dev9p.dirfid_* tests, revert-probed (2 probe builds ->
+5 distinct targeted failures). The instrumented A/B (g2 takes/donates in the
+WGAd dump) prices the realized RT elimination next; the T4-G close (the
+batched Fable audit over the whole G1+G3+G4+G2 Larder/fid-lifecycle delta +
+the SMP gate) follows it.

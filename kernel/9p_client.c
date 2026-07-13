@@ -1044,6 +1044,11 @@ int p9_client_init(struct p9_client *c,
     c->wga_unsupported = false;   // POUNCE: Twalkgetattr capability unknown
     c->cacheable       = false;   // L1e: not a proven content-versioned FS yet
     larder_init(&c->larder);      // L1c: the guest FS cache (its own leaf lock)
+    // G2: the dir-fid table starts empty; arm its leaf lock and zero it (init
+    // may run on non-zeroed storage -- the loopback tests stack/reuse clients).
+    // Parked fids die with the session, so destroy has no wire teardown for it.
+    for (size_t di = 0; di < sizeof(c->dirfid); di++) ((u8 *)&c->dirfid)[di] = 0;
+    spin_lock_init(&c->dirfid.lock);
     c->total_ops    = 0;
     c->total_errors = 0;
     return 0;

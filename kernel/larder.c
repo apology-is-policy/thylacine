@@ -29,9 +29,10 @@ void larder_init(struct larder *l) {
 // Every invalidation event bumps gen and logs the staled qid; an install skips
 // iff ITS key was named in its (seq0, gen] window. Both run under l->lock.
 
-static void inval_log_locked(struct larder *l, u64 qid_path) {
+static void inval_log_locked(struct larder *l, u64 qid_path, bool hard) {
     l->gen++;
-    l->inval_qid[l->gen % LARDER_INVAL_RING] = qid_path;
+    l->inval_qid[l->gen % LARDER_INVAL_RING]  = qid_path;
+    l->inval_hard[l->gen % LARDER_INVAL_RING] = hard ? 1 : 0;
 }
 
 // Was `qid_path` staled by any event in (seq0, l->gen]? Fail-safe TRUE when the
@@ -227,7 +228,7 @@ void larder_attr_invalidate(struct larder *l, u64 qid_path) {
     // Log the event ALWAYS (the file was mutated even if it was not cached -- a
     // concurrent populate of THIS qid that fetched the pre-mutation value must
     // be skipped).
-    inval_log_locked(l, qid_path);
+    inval_log_locked(l, qid_path, /*hard=*/true);
     struct larder_attr_ent *e = attr_find_locked(l, qid_path);
     if (e) {
         attr_hash_unlink_locked(l, (s32)(e - l->attr));   // drop from its bucket
@@ -244,7 +245,7 @@ void larder_attr_downgrade(struct larder *l, u64 qid_path) {
     // that observed pre-mutation times must be skipped) -- only the entry's
     // perm-servable core (mode/uid/gid + the immutable qid identity) survives,
     // and only the resolver's intermediate-hop X-check may read it (larder.h).
-    inval_log_locked(l, qid_path);
+    inval_log_locked(l, qid_path, /*hard=*/false);
     struct larder_attr_ent *e = attr_find_locked(l, qid_path);
     if (e && !e->perm_only) {
         e->perm_only = true;
@@ -341,9 +342,10 @@ static s32 dentry_clock_evict_locked(struct larder *l) {
 bool larder_walk_serve(struct larder *l, u64 base_qid_path,
                        const char *const *names, const size_t *name_lens,
                        int nname, struct t_stat *sts,
-                       int *nresolved, bool *is_miss) {
+                       int *nresolved, bool *is_miss, bool *leaf_perm_only) {
     if (!l || !names || !name_lens || !sts || !nresolved || !is_miss) return false;
     if (nname <= 0) return false;
+    if (leaf_perm_only) *leaf_perm_only = false;
     spin_lock(&l->lock);
     u64 cur = base_qid_path;
     for (int i = 0; i < nname; i++) {
@@ -374,12 +376,18 @@ bool larder_walk_serve(struct larder *l, u64 base_qid_path,
         // but NOT the final hop of the run: the LEAF record feeds STALK_STAT's
         // returned stat, the carried-attrs chain, and the cached-open
         // size/cvers gates, all of which read the fields the downgrade staled.
+        // G2: with a non-NULL leaf_perm_only out, a perm_only LEAF serves and
+        // is REPORTED instead of bailed -- only the bind-form dir-fid consume
+        // (which reads mode/uid/gid + qid, all fresh) may accept; every other
+        // caller treats the flag as a miss.
         struct larder_attr_ent *a = attr_find_locked(l, d->child_qid_path);
-        if (!a || (a->perm_only && i == nname - 1)) {
+        if (!a || (a->perm_only && i == nname - 1 && !leaf_perm_only)) {
             l->dentry_misses++;
             spin_unlock(&l->lock);
             return false;
         }
+        if (a->perm_only && i == nname - 1)
+            *leaf_perm_only = true;
         sts[i] = a->attr;
         a->ref = true;
         d->ref = true;
@@ -391,6 +399,41 @@ bool larder_walk_serve(struct larder *l, u64 base_qid_path,
     *is_miss   = false;
     spin_unlock(&l->lock);
     return true;
+}
+
+bool larder_dentry_lookup(struct larder *l, u64 parent_qid_path,
+                          const char *name, size_t name_len, u64 *child_out) {
+    if (!l || !name || !child_out) return false;
+    spin_lock(&l->lock);
+    struct larder_dentry_ent *d =
+        dentry_find_locked(l, parent_qid_path, name, name_len);
+    if (!d || d->negative) {
+        spin_unlock(&l->lock);
+        return false;
+    }
+    *child_out = d->child_qid_path;
+    spin_unlock(&l->lock);
+    return true;
+}
+
+// HARD-event-only form of inval_hits_locked (the donate gate; see larder.h).
+static bool inval_hard_hits_locked(struct larder *l, u64 seq0, u64 qid_path) {
+    u64 n = l->gen - seq0;
+    if (n == 0) return false;
+    if (n > LARDER_INVAL_RING) return true;
+    for (u64 s = seq0 + 1; s <= l->gen; s++) {
+        u64 slot = s % LARDER_INVAL_RING;
+        if (l->inval_hard[slot] && l->inval_qid[slot] == qid_path) return true;
+    }
+    return false;
+}
+
+bool larder_qid_staled_since(struct larder *l, u64 seq0, u64 qid_path) {
+    if (!l) return true;   // no larder -> no evidence -> fail-safe stale
+    spin_lock(&l->lock);
+    bool staled = inval_hard_hits_locked(l, seq0, qid_path);
+    spin_unlock(&l->lock);
+    return staled;
 }
 
 // Choose the install slot for (parent_qid_path, name): an existing entry
@@ -461,7 +504,7 @@ void larder_dentry_invalidate_name(struct larder *l, u64 parent_qid_path,
     // this parent's chain that snapshotted gen before this mutation must be
     // skipped by the install guard -- even when the mutated name was not
     // itself cached; the same resurrection-close as the attr path).
-    inval_log_locked(l, parent_qid_path);
+    inval_log_locked(l, parent_qid_path, /*hard=*/false);
     // A single-name dir mutation (create/rename/unlink of exactly `name`) stales
     // ONLY the (parent, name) binding: the negative dentry a create fills, the
     // positive one an unlink empties, or a rename endpoint. Siblings under the
@@ -771,7 +814,7 @@ void larder_page_invalidate(struct larder *l, u64 qid_path) {
     // pre-write content must be skipped -- the same guard as the attr/dentry
     // paths), even if no page array is allocated yet (a non-cacheable /
     // never-installed client).
-    inval_log_locked(l, qid_path);
+    inval_log_locked(l, qid_path, /*hard=*/false);
     if (l->page) {
         // Walk ONLY this file's qbucket (every page of qid_path chains here), splicing
         // each matching valid page out of BOTH indexes -- O(pages-of-file + qbucket
@@ -806,7 +849,7 @@ void larder_page_invalidate_range(struct larder *l, u64 qid_path,
     // of THIS file that observed pre-write content anywhere must be guarded
     // out (the range narrows the DROP set, not the guard -- an in-flight read
     // may span the written range).
-    inval_log_locked(l, qid_path);
+    inval_log_locked(l, qid_path, /*hard=*/false);
     if (l->page) {
         // The same qbucket walk, dropping only pages whose index lies in
         // [first_idx, last_idx]. Out-of-range pages stay linked AND valid --

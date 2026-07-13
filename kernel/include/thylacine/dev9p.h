@@ -92,6 +92,18 @@ struct dev9p_priv {
     bool               fid_owned;  // true iff close should clunk; root Spoor's fid
                                    // (the one from p9_client_handshake) is NOT clunked
                                    // by dev9p — the higher layer manages it.
+    // G2 (the dir-fid cache; docs/FID-LIFECYCLE-DESIGN.md section 4):
+    // fid_gen is the Larder invalidation-gen snapshot at the fid's MINT (the
+    // RPC bind tail or a dir-fid consume). dev9p_close parks an unopened dir
+    // fid ONLY if no invalidation event has named this qid since fid_gen
+    // (larder_qid_staled_since over the G4 ring) -- a checked-out fid whose
+    // dir was rmdir'd/replaced mid-use must die, never re-park. fid_suspect
+    // latches when a by-name op (create/unlink/rename/wstat) ERRORS through
+    // this priv -- the backstop that breaks the stale-fid re-park loop when
+    // the staleness event was unknowable (the evicted-dentry residual): a fid
+    // that misbehaved once is clunked at close, never re-served.
+    u64                fid_gen;
+    bool               fid_suspect;
     // F2: attached_owner is the session-resource holder. NULL when the
     // p9_client is externally owned (test path); non-NULL for every priv
     // derived from a SYS_ATTACH_9P session (root + walks). Each non-NULL
