@@ -548,3 +548,54 @@ final-audit + the Stratum-continuation's job.)
 **SMP gate on the #375 fix: PASS** -- default+UBSan x smp4/smp8, N=10 = 40/40,
 0 corruption (`tools/ci-smp-gate.sh`, 2026-07-13). The shared-FS-client spill is
 production-clean.
+
+### FINAL-AUDIT CORRECTION (2026-07-13; Fable, MODEL start==end; 0 P0 / 2 P1 / 2 P2 / 1 P3)
+
+The adversarial audit of the earned verdict broke it further -- the honest
+disposition is the charter's own **FIXABLE-VOTED**, and even "all GUEST levers
+exhausted" is NOT fully established:
+
+- **[P1, F1] the disposition is FIXABLE-VOTED, not any flavor of FOUNDATIONAL.**
+  CHASE.md section 1 requires the impossibility branch to show the fix is an
+  ARCH-level redesign; "a floor that is actually fixable fails the proof." The
+  residual is admitted-fixable (server #367 ~40-55%25 of the RPC band + POUNCE
+  fusion, est. -400..-650 ms >= the +654 gap), and the guest/server scope line
+  was NEVER honored DURING the arc (C-2 F2 + C-3 were in-arc Stratum fixes;
+  POUNCE/B1/F1 were cross-tree; Stratum is in-scope by standing scripture). So
+  invoking it only at exit is the scope-dodge. Disposition: **S3 = FIXABLE-VOTED
+  (Stratum #367 per-op + protocol fusion + msize; the Senate votes the arc).**
+- **[P1, F2] B-5 "non-RPC host-comparable" is RETRACTED as arithmetically
+  unsound.** `rpc_ms` is a SUM over concurrently-in-flight ops (pre-fix boot
+  102334Z: `rpc_ms=7617 > wall 5594`, 60%25 of ops at depth >=2), so
+  `wall - rpc_ms` is NOT a non-RPC WALL footprint. The device non-RPC bucket is
+  therefore UNMEASURED, and it hides a candidate **GUEST** lever -- the ~91x
+  go-tool spawn/exec floor (H3: exec/REVENANT/runtime-init, guest-kernel
+  territory) + the H5 8-vCPU-scaling band -- that W2-device was meant to split
+  but could not (the trimmed-GOROOT fixture gap). So "all GUEST levers
+  exhausted" is NOT established: one guest band (the spawn floor) is UNMEASURED.
+  Per this ledger's own header an unattributed band means C-1 is not done -> the
+  impossibility proof is INCOMPLETE regardless of the label.
+- **[P2, F3] the prefetch-null CONCLUSION stands (prefetch <= ~300 ms, N=9
+  rerun 3352 vs cold 3162 -- indistinguishable from 0 at the +654 scale) but its
+  stated MECHANISM was wrong:** the rerun RE-WIRED the full ~92 MB read volume
+  (`abs` 2492 >= 2007, `qids` 686 vs 241, `pe~10.4k`) -- the Larder does NOT
+  retain the working set across a build; the true basis of the null is that the
+  re-payable read band is OFF the critical path (overlaps compute). The
+  fresh-GOCACHE-both-runs control design is VALID (a rerun's warmth ceiling
+  dominates any real prefetcher's), so prefetch-dead holds -- on the corrected
+  reasoning.
+- **[P2, F4] completeness hole:** the msize lever (128 KiB -> 512 KiB, ~2-4x
+  fewer flushes on multi-MB objects, ~-100..-150 ms) -- a guest+server co-design
+  like POUNCE/F1 -- was never enumerated. Belongs priced inside the continuation.
+- **[P3, F5] provenance:** the N=10 keeper boots print `rpc=0` (RPC instruments
+  stripped), so the "RPC ~1256" decomposition above is INHERITED from the
+  instrumented builds (~3072-3166 walls), not contemporaneous with the 3302
+  median.
+
+**Corrected close: S1 = PARITY (crossed, real guest win). S3 = FIXABLE-VOTED,
+impossibility proof INCOMPLETE** -- owed before any close: (1) device W2 (fatter
+GOROOT bake) OR a spawn-storm microbench to measure the ~91x spawn/exec guest
+band + a post-F1 depth histogram to convert `rpc_ms` to a wall footprint; (2)
+the server-#367 reducible-fraction bound (does it close the bar?); (3) price
+msize. Only "no guest FS-CACHE lever reaches the bar" is earned (wga/F1b/
+read-sizing/prefetch). The task-#54 continuation owns (1)-(3).
