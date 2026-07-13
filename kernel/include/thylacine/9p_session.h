@@ -137,6 +137,15 @@ struct p9_outstanding {
     // is the I-10 reuse-race guard. `flush_oldtag` is meaningful only on a
     // TFLUSH entry: the original tag this flush abandons.
     bool awaiting_flush;
+    // #53-audit F1: a rolled-back abandon (the flush-EAGAIN path). The owner
+    // is gone but NO Tflush is in flight (it never left the guest), so --
+    // unlike awaiting_flush -- the tag is freed by its late original reply
+    // (the pre-#845 ownerless reclaim). Like awaiting_flush it is EXCLUDED
+    // from any_outstanding_on_fid: the op is cancelled and will not act on
+    // its fid, so it must not refuse the #294 cancel-then-close Tclunk (its
+    // late reply's only fid mutation is an Rwalk's fid_bind on a FRESH
+    // monotonic new_fid -- conflict-free with any post-exclusion fid op).
+    bool abandoned;
     u16  flush_oldtag;
     // Twalkgetattr bookkeeping (POUNCE): the REQUESTED nwname, so the
     // dispatch can bind new_fid ONLY on a full walk (nwqid == wga_nwname).

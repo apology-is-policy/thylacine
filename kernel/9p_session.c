@@ -119,6 +119,7 @@ static void mark_outstanding(struct p9_session *s, u16 t,
     s->outstanding[t].new_fid       = new_fid;
     s->outstanding[t].op_id         = s->next_op_id;
     s->outstanding[t].awaiting_flush = false;
+    s->outstanding[t].abandoned     = false;
     s->outstanding[t].flush_oldtag  = 0;
     s->outstanding[t].wga_nwname    = 0;
     s->total_sent++;
@@ -132,6 +133,7 @@ static void clear_outstanding(struct p9_session *s, u16 t) {
     s->outstanding[t].new_fid       = 0;
     s->outstanding[t].op_id         = 0;
     s->outstanding[t].awaiting_flush = false;
+    s->outstanding[t].abandoned     = false;
     s->outstanding[t].flush_oldtag  = 0;
     s->total_completed++;
 }
@@ -154,6 +156,7 @@ static bool any_outstanding_on_fid(const struct p9_session *s, u32 fid) {
     for (size_t t = 0; t < P9_SESSION_MAX_OUTSTANDING; t++) {
         if (!s->outstanding[t].active) continue;
         if (s->outstanding[t].awaiting_flush) continue;   // cancelled -> not live
+        if (s->outstanding[t].abandoned) continue;        // rolled-back abandon (#53-F1)
         if (s->outstanding[t].fid == fid) return true;
         if (s->outstanding[t].new_fid == fid) return true;
     }
@@ -182,6 +185,7 @@ int p9_session_init(struct p9_session *s, u32 root_fid, u32 msize) {
         s->outstanding[i].new_fid       = 0;
         s->outstanding[i].op_id         = 0;
         s->outstanding[i].awaiting_flush = false;
+        s->outstanding[i].abandoned     = false;
         s->outstanding[i].flush_oldtag  = 0;
     }
     s->next_op_id       = 0;
@@ -434,6 +438,7 @@ void p9_session_abort_unsent(struct p9_session *s, u16 tag) {
     if (tag >= P9_SESSION_MAX_OUTSTANDING) return;
     if (!s->outstanding[tag].active) return;
     if (s->outstanding[tag].awaiting_flush) return;
+    if (s->outstanding[tag].abandoned) return;   // sent (rolled-back abandon) -- not ours
     clear_outstanding(s, tag);
 }
 
@@ -466,6 +471,13 @@ void p9_session_flush_rollback(struct p9_session *s, u16 oldtag) {
         if (s->outstanding[t].flush_oldtag != oldtag) continue;
         clear_outstanding(s, (u16)t);
         s->outstanding[oldtag].awaiting_flush = false;
+        // #53-audit F1: the victim's owner is gone and no flush is in flight.
+        // Without this bit the victim counts LIVE in any_outstanding_on_fid
+        // and the #294 cancel-then-close Tclunk that dev9p_close issues NEXT
+        // is refused with no retry -- re-opening the #294 netd slot leak (+
+        // tag accumulation on deferred-reply servers) on the exact congestion
+        // path #53 targets. The late original reply still frees the tag.
+        s->outstanding[oldtag].abandoned = true;
         return;
     }
 }

@@ -1525,5 +1525,52 @@ void test_9p_session_flush_rollback_restores_victim(void) {
     TEST_EXPECT_EQ((u64)p9_session_inflight(&s), (u64)0,
                    "victim reclaimed by the late reply (pre-#845 shape)");
 
+    // #53-audit F1: the rolled-back victim must NOT block the #294
+    // cancel-then-close Tclunk on its own fid. Walk root -> fid 9, park an
+    // fsync on fid 9, flush + roll back (the EAGAIN shape), then send_clunk
+    // on fid 9 -- pre-F1 the live-again victim made any_outstanding_on_fid
+    // refuse it (the netd slot leak reopened); with the abandoned bit the
+    // clunk builds. The victim's tag still frees on its late reply.
+    len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), /*src=*/0, /*new=*/9,
+                                /*nwname=*/0, NULL, NULL);
+    TEST_ASSERT(len > 0, "walk root -> fid 9");
+    u32 szw; u8 tyw; u16 wt2;
+    p9_peek_header(g_buf, (size_t)len, &szw, &tyw, &wt2);
+    int wl = synth_rwalk_single(g_buf, sizeof(g_buf), wt2, P9_QTDIR, 1, 9);
+    TEST_ASSERT(wl > 0, "synth Rwalk fid 9");
+    TEST_EXPECT_EQ(p9_session_dispatch_rmsg(&s, g_buf, (size_t)wl, &r), 0,
+                   "fid 9 bound");
+    len = p9_session_send_fsync(&s, g_buf, sizeof(g_buf), 9, 0);
+    TEST_ASSERT(len > 0, "send_fsync on fid 9");
+    u16 vt2; p9_peek_header(g_buf, (size_t)len, &szw, &tyw, &vt2);
+    len = p9_session_send_flush(&s, g_buf, sizeof(g_buf), vt2);
+    TEST_ASSERT(len > 0, "send_flush on the fid-9 victim");
+    p9_session_flush_rollback(&s, vt2);
+    // The F1 core: the clunk on the victim's fid BUILDS.
+    len = p9_session_send_clunk(&s, g_buf, sizeof(g_buf), 9);
+    TEST_ASSERT(len > 0,
+                "clunk on the rolled-back victim's fid SUCCEEDS (#53-F1)");
+    u16 ct2; p9_peek_header(g_buf, (size_t)len, &szw, &tyw, &ct2);
+    // Drain: Rclunk for the clunk tag; late Rfsync frees the abandoned victim.
+    rlen = synth_rmsg(g_buf, sizeof(g_buf), P9_RCLUNK, ct2, NULL, 0);
+    TEST_EXPECT_EQ(p9_session_dispatch_rmsg(&s, g_buf, (size_t)rlen, &r), 0,
+                   "Rclunk consumed");
+    rlen = synth_rmsg(g_buf, sizeof(g_buf), P9_RFSYNC, vt2, NULL, 0);
+    TEST_EXPECT_EQ(p9_session_dispatch_rmsg(&s, g_buf, (size_t)rlen, &r), 0,
+                   "abandoned victim's late reply consumed");
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&s), (u64)0,
+                   "all tags reclaimed (abandoned bit does not block reclaim)");
+    // abort_unsent must NOT touch an abandoned (sent) tag: park + roll back
+    // another victim, then abort_unsent it -- the slot must survive.
+    len = p9_session_send_fsync(&s, g_buf, sizeof(g_buf), 0, 0);
+    TEST_ASSERT(len > 0, "send_fsync 3");
+    u16 vt3; p9_peek_header(g_buf, (size_t)len, &szw, &tyw, &vt3);
+    len = p9_session_send_flush(&s, g_buf, sizeof(g_buf), vt3);
+    TEST_ASSERT(len > 0, "send_flush 3");
+    p9_session_flush_rollback(&s, vt3);
+    p9_session_abort_unsent(&s, vt3);
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&s), (u64)1,
+                   "abort_unsent refuses an abandoned (sent) tag");
+
     p9_session_destroy(&s);
 }

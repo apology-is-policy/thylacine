@@ -593,8 +593,14 @@ static int client_drain_until_free_tag(struct p9_client *c, struct p9_rpc *rpc) 
 static int client_run(struct p9_client *c, size_t built_len,
                       struct p9_dispatch_result *out) {
     u32 size; u8 type; u16 tag;
-    if (p9_peek_header(c->out_buf, built_len, &size, &type, &tag) < 0)
+    if (p9_peek_header(c->out_buf, built_len, &size, &type, &tag) < 0) {
+        // Unreachable by construction (session_send_* built the frame), but a
+        // future builder bug would otherwise leak the just-marked tag on a
+        // LIVE session with no way to identify it -- mirror submit_async's
+        // fail-closed posture (the orphaned tag is moot on a dead session).
+        client_mark_dead_locked(c, false);
         return -P9_E_IO;
+    }
 
     if (tag == P9_NOTAG) {
         // Tversion (the only NOTAG message; serial handshake path -- single-
@@ -616,8 +622,10 @@ static int client_run(struct p9_client *c, size_t built_len,
         spin_lock(&c->lock);
         return map_error(0, rc, out);
     }
-    if (tag >= P9_SESSION_MAX_OUTSTANDING)
+    if (tag >= P9_SESSION_MAX_OUTSTANDING) {
+        client_mark_dead_locked(c, false);   // as above: fail closed, not leak
         return -P9_E_IO;                 // the session never allocates such a tag
+    }
 
     struct p9_rpc rpc;
     rpc.tag         = (u16)tag;
