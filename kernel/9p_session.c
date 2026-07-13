@@ -411,6 +411,65 @@ int p9_session_send_flush(struct p9_session *s,
     return rc;
 }
 
+// #52: reclaim the tag of an op whose frame NEVER reached the wire (a
+// never-sent abort). The transport send contract is all-or-nothing (zero
+// bytes pushed on back-pressure; a genuine break latches the session dead
+// elsewhere), so on the never-sent paths -- reply-buffer OOM before the
+// send, a self-dying sender refusing to park, a spill-OOM under
+// back-pressure -- the server has NEVER seen this tag. Clearing it is
+// therefore I-10-safe: no late reply can ever arrive for a request that was
+// never sent, so immediate reuse cannot be mis-attributed. Without this,
+// each such abort leaks one of the 64 outstanding[] slots on a LIVE shared
+// session; 64 accumulated aborts wedge every mount that resolves through
+// the client (alloc_tag fails -> every op -P9_E_IO).
+//
+// Fail-soft guards: an inactive tag is a no-op; an awaiting_flush tag is
+// owned by the #845 flush protocol (freed only by its Rflush) and is left
+// alone -- a never-sent op can never be a flush victim (flush targets
+// in-flight ops), so hitting that guard means the caller is wrong and
+// leaving the slot is the conservative disposition.
+void p9_session_abort_unsent(struct p9_session *s, u16 tag) {
+    if (!s) return;
+    if (s->magic != P9_SESSION_MAGIC) return;
+    if (tag >= P9_SESSION_MAX_OUTSTANDING) return;
+    if (!s->outstanding[tag].active) return;
+    if (s->outstanding[tag].awaiting_flush) return;
+    clear_outstanding(s, tag);
+}
+
+// #53: roll back a Tflush whose frame could NOT be pushed because the c2s
+// ring is transiently FULL (P9_TRANSPORT_EAGAIN) -- back-pressure, not a
+// break. The DIED-path / abandon-path senders must neither park (a dying
+// thread is unwinding; an abandoner holds c->lock in a teardown) nor latch
+// the WHOLE shared session dead (the #349 collapse on a different send
+// path). Undo exactly what send_flush staged: free the flush op's own tag
+// (never sent -> I-10-safe, as above) and clear the victim's
+// awaiting_flush, restoring the pre-#845 ownerless reclaim -- the victim
+// tag stays ACTIVE until its late original reply is drained ownerlessly by
+// a survivor's reader, or session teardown reclaims it (the documented
+// no-regression fallback the flush-BUILD-failure path already takes).
+//
+// The flush slot is found by scan: at most one flush per oldtag can exist
+// (send_flush rejects an already-awaiting_flush victim), and a real flush
+// slot is uniquely (active && kind==TFLUSH && flush_oldtag==oldtag). If the
+// victim is not awaiting_flush, or no such slot exists, the state did not
+// come from send_flush -- leave everything untouched (fail-soft).
+void p9_session_flush_rollback(struct p9_session *s, u16 oldtag) {
+    if (!s) return;
+    if (s->magic != P9_SESSION_MAGIC) return;
+    if (oldtag >= P9_SESSION_MAX_OUTSTANDING) return;
+    if (!s->outstanding[oldtag].active) return;
+    if (!s->outstanding[oldtag].awaiting_flush) return;
+    for (size_t t = 0; t < P9_SESSION_MAX_OUTSTANDING; t++) {
+        if (!s->outstanding[t].active) continue;
+        if (s->outstanding[t].kind != P9_TFLUSH) continue;
+        if (s->outstanding[t].flush_oldtag != oldtag) continue;
+        clear_outstanding(s, (u16)t);
+        s->outstanding[oldtag].awaiting_flush = false;
+        return;
+    }
+}
+
 // =============================================================================
 // Send: IO family (Tlopen / Tlcreate / Tread / Twrite). Each shares the
 // OPEN-state + fid-bound preconditions; mutation-shaped ops (lopen,

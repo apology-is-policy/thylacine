@@ -3094,3 +3094,67 @@ void test_9p_client_send_backpressure_spill_survives_outbuf_reuse(void) {
     p9_client_destroy(&g_client);
     p9_mq_loopback_destroy(&g_mq);
 }
+
+// #53 regression (revert-probing): an abandon whose Tflush hits transient c2s
+// back-pressure (EAGAIN) must NOT latch the SHARED session dead -- it rolls
+// the flush back to the pre-#845 ownerless reclaim, and the session stays
+// fully usable: the orphan reply drains ownerlessly on the next op's reader
+// and the tag pool is restored. Pre-fix, the single EAGAIN marked the whole
+// session dead (every peer mount's op then failed -P9_E_IO) -- the #349
+// collapse on a different send path.
+void test_9p_client_abandon_async_eagain_keeps_session_alive(void) {
+    int rc = p9_mq_loopback_init(&g_mq, canonical_responder, NULL);
+    TEST_EXPECT_EQ(rc, 0, "mq loopback init");
+    rc = p9_client_init(&g_client, /*root_fid=*/0, /*msize=*/8192,
+                        p9_mq_loopback_ops_for(&g_mq), g_recv_buf, sizeof(g_recv_buf));
+    TEST_EXPECT_EQ(rc, 0, "client init over mq transport");
+    const u8 uname[] = {'r','o','o','t'};
+    const u8 aname[] = {'/'};
+    TEST_EXPECT_EQ(p9_client_handshake(&g_client, uname, sizeof(uname),
+                                       aname, sizeof(aname), 0),
+                   0, "handshake over mq transport");
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create(8,16)");
+
+    // An async op in flight: the mq transport stages its Rclunk in the ring
+    // (undrained -- nothing pumps), so inflight[tag] is still ours at abandon.
+    TEST_EXPECT_EQ(p9_client_walk_one(&g_client, 0, 31, (const u8 *)"f", 1, NULL),
+                   0, "walk root -> fid 31");
+    g_async_op.loom        = l;
+    g_async_op.user_data   = 0x53535353;
+    g_async_op.last_result = 0x7fffffff;
+    g_async_op.completed   = false;
+    g_async_op.rpc.on_complete = test_async_on_complete;
+    u32 fid = 31;
+    rc = p9_client_submit_async(&g_client, &g_async_op.rpc, test_build_clunk, &fid);
+    TEST_EXPECT_EQ(rc, 0, "submit_async succeeds (op in flight)");
+    u16 vt = g_async_op.rpc.tag;
+
+    // The abandon's Tflush hits a transiently-full ring: ONE EAGAIN.
+    g_mq.eagain_budget = 1;
+    p9_client_abandon_async(&g_client, &g_async_op.rpc);
+    TEST_EXPECT_EQ((u64)g_mq.eagain_budget, (u64)0, "the flush send consumed the EAGAIN");
+
+    // The #53 core: back-pressure is NOT a break.
+    TEST_ASSERT(!g_client.dead, "session ALIVE after EAGAIN'd abandon flush");
+    TEST_ASSERT(!g_async_op.completed, "abandoned op fired no completion");
+    // The rollback restored the pre-#845 shape: the victim tag is still
+    // ACTIVE (reserved against reuse until its late reply) and NOT
+    // awaiting_flush; the never-sent flush tag was freed.
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&g_client.session), (u64)1,
+                   "victim active; flush tag freed");
+    TEST_ASSERT(g_client.session.outstanding[vt].active, "victim still reserved");
+    TEST_ASSERT(!g_client.session.outstanding[vt].awaiting_flush,
+                "victim not awaiting_flush (rolled back)");
+
+    // The ownerless reclaim + live-session proof: a fresh sync op on the SAME
+    // session pumps the orphan Rclunk (clearing the victim tag) and completes.
+    TEST_EXPECT_EQ(p9_client_walk_one(&g_client, 0, 32, (const u8 *)"g", 1, NULL),
+                   0, "a fresh op completes on the still-live session");
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&g_client.session), (u64)0,
+                   "orphan reply drained ownerlessly; tag pool restored");
+
+    loom_unref(l);
+    p9_client_destroy(&g_client);
+    p9_mq_loopback_destroy(&g_mq);
+}

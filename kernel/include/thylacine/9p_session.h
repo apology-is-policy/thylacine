@@ -271,6 +271,17 @@ int p9_session_send_flush(struct p9_session *s,
                           u8 *out, size_t cap,
                           u16 oldtag);
 
+// #52: reclaim the tag of an op whose frame never reached the wire (all-or-
+// nothing send contract -> the server never saw it -> I-10-safe immediate
+// reuse). No-op on an inactive or awaiting_flush tag (fail-soft).
+void p9_session_abort_unsent(struct p9_session *s, u16 tag);
+
+// #53: undo send_flush after its frame hit c2s back-pressure (EAGAIN): free
+// the never-sent flush tag + clear the victim's awaiting_flush, restoring
+// the pre-#845 ownerless reclaim. No-op unless the (victim, flush-slot)
+// pair matches what send_flush staged (fail-soft).
+void p9_session_flush_rollback(struct p9_session *s, u16 oldtag);
+
 // =============================================================================
 // IO send-side API (P5-wire-io extension; spec's SendIO action).
 //

@@ -501,6 +501,16 @@ static void client_pump_or_park_locked(struct p9_client *c, struct p9_rpc *rpc) 
     }
 }
 
+// client_send_flow return contract (#52): 0 = the whole frame is on the wire;
+// CLIENT_SEND_NEVER = the frame NEVER reached the wire and the byte stream is
+// INTACT (a self-dying sender refusing to park, the session observed already
+// dead, or a spill-OOM under back-pressure -- in every case the transport's
+// all-or-nothing contract means zero bytes were pushed), so the caller must
+// reclaim the never-sent tag (p9_session_abort_unsent) and must NOT latch the
+// shared session dead; any other negative = a genuine transport break (the
+// stream may hold a partial frame), the caller latches dead as before.
+#define CLIENT_SEND_NEVER  (-1000)
+
 static int client_send_flow(struct p9_client *c, size_t built_len,
                             struct p9_rpc *rpc) {
     // #375: the frame is built in the SHARED c->out_buf, but the pump/park
@@ -520,18 +530,17 @@ static int client_send_flow(struct p9_client *c, size_t built_len,
     // dropped, closing the whole class (including the DIED-path Tflush +
     // async-clunk writers, which reuse out_buf assuming the prior frame is
     // fully on the wire). kmalloc under c->lock is non-blocking (the
-    // rpc->reply_buf precedent); a spill-OOM fails closed like every other
-    // send-path failure (the caller latches the session -- distinguishing a
-    // never-sent OOM would need a sentinel + a tag-reclaim path for a case
-    // that requires allocator exhaustion). The transport's all-or-nothing
-    // EAGAIN contract (zero bytes pushed) is what makes the retry-from-spill
-    // exact: there is never a partial prefix on the ring.
+    // rpc->reply_buf precedent). The transport's all-or-nothing EAGAIN
+    // contract (zero bytes pushed) is what makes the retry-from-spill exact:
+    // there is never a partial prefix on the ring -- and it is also what
+    // makes the CLIENT_SEND_NEVER exits (self-dying / dead-observed /
+    // spill-OOM) safely reclaimable: the server never saw the frame.
     u8 *spill = NULL;
     const u8 *frame = c->out_buf;
     int rc;
     for (;;) {
-        if (client_self_dying()) { rc = -P9_E_IO; break; }
-        if (c->dead)             { rc = -P9_E_IO; break; }
+        if (client_self_dying()) { rc = CLIENT_SEND_NEVER; break; }
+        if (c->dead)             { rc = CLIENT_SEND_NEVER; break; }
 
         int src = p9_transport_send(&c->transport, frame, built_len);
         if (src == 0)                   { rc = 0; break; }          // whole frame sent
@@ -539,7 +548,7 @@ static int client_send_flow(struct p9_client *c, size_t built_len,
 
         if (!spill) {
             spill = kmalloc(built_len, 0);
-            if (!spill) { rc = -P9_E_IO; break; }   // fail closed (allocator exhaustion)
+            if (!spill) { rc = CLIENT_SEND_NEVER; break; }   // never sent (zero pushed)
             client_copy(spill, c->out_buf, built_len);
             frame = spill;
         }
@@ -619,8 +628,13 @@ static int client_run(struct p9_client *c, size_t built_len,
     rpc.on_complete = NULL;          // sync (WAKE_RENDEZ): the submitter waits
     rendez_init(&rpc.rendez);
     rpc.reply_buf = kmalloc(c->recv_cap, KP_ZERO);
-    if (!rpc.reply_buf)
+    if (!rpc.reply_buf) {
+        // #52: the caller's session_send_* already marked outstanding[tag],
+        // but the frame will never be sent -- reclaim the slot (never-sent =>
+        // I-10-safe) or 64 such OOMs wedge the shared session's tag pool.
+        p9_session_abort_unsent(&c->session, tag);
         return -P9_E_IO;
+    }
 
     c->inflight[tag] = &rpc;
 
@@ -630,14 +644,25 @@ static int client_run(struct p9_client *c, size_t built_len,
     // client_send_flow, NOT a death (the pre-#349 path marked the whole session
     // dead here, killing every other op including in-flight text page-ins).
     int sfr = client_send_flow(c, built_len, &rpc);
+    if (sfr == CLIENT_SEND_NEVER) {
+        // #52: the frame never reached the wire and the stream is intact (a
+        // self-dying sender, a dead-observed session, or a spill-OOM -- all
+        // zero-bytes-pushed by the all-or-nothing contract). Reclaim the tag
+        // (never-sent => I-10-safe) and leave the session LIVE for peers --
+        // pre-#52 the self-dying path leaked the slot and the spill-OOM
+        // latched the whole shared session dead.
+        c->inflight[tag] = NULL;
+        kfree(rpc.reply_buf);
+        p9_session_abort_unsent(&c->session, tag);
+        return -P9_E_IO;
+    }
     if (sfr < 0) {
         c->inflight[tag] = NULL;
         kfree(rpc.reply_buf);
-        // A genuine transport break latches the session dead (every op then fails
-        // closed). A self-death does NOT: the request never reached the wire (the
-        // send kept back-pressuring), so there is nothing in flight to flush and
-        // the session stays live for peers -- mark dead only if the ring broke.
-        if (!c->dead && !client_self_dying())
+        // A genuine transport break: the stream may hold a partial frame, so
+        // latch the session dead (every op then fails closed). The tag slot is
+        // moot on a dead session (teardown reclaims).
+        if (!c->dead)
             client_mark_dead_locked(c, false);
         return -P9_E_IO;
     }
@@ -665,8 +690,20 @@ static int client_run(struct p9_client *c, size_t built_len,
         int flen = p9_session_send_flush(&c->session, c->out_buf,
                                          c->out_buf_cap, (u16)tag);
         if (flen > 0) {
-            if (p9_transport_send(&c->transport, c->out_buf, (size_t)flen) < 0)
+            int fsr = p9_transport_send(&c->transport, c->out_buf, (size_t)flen);
+            if (fsr == P9_TRANSPORT_EAGAIN) {
+                // #53: a transiently-full c2s ring is BACK-PRESSURE, not a
+                // break. A dying thread must not park (it is unwinding), and
+                // latching the SHARED session dead here is the #349 collapse
+                // on a different send path. Roll the flush back (the flush
+                // frame never left -> its tag is I-10-safe to free) and fall
+                // to the pre-#845 ownerless reclaim: outstanding[tag] stays
+                // ACTIVE until the late original reply is drained by a
+                // survivor's reader, or session teardown reclaims it.
+                p9_session_flush_rollback(&c->session, (u16)tag);
+            } else if (fsr < 0) {
                 client_mark_dead_locked(c, false);
+            }
         }
         return -P9_E_IO;
     }
@@ -895,8 +932,17 @@ void p9_client_abandon_async(struct p9_client *c, struct p9_rpc *rpc) {
             int flen = p9_session_send_flush(&c->session, c->out_buf,
                                              c->out_buf_cap, tag);
             if (flen > 0) {
-                if (p9_transport_send(&c->transport, c->out_buf, (size_t)flen) < 0)
+                int fsr = p9_transport_send(&c->transport, c->out_buf,
+                                            (size_t)flen);
+                if (fsr == P9_TRANSPORT_EAGAIN) {
+                    // #53: back-pressure, not a break (see the DIED-path
+                    // twin). Roll the flush back; the abandoned op's tag
+                    // stays reserved until its late reply drains ownerlessly
+                    // or teardown reclaims -- never latch the shared session.
+                    p9_session_flush_rollback(&c->session, tag);
+                } else if (fsr < 0) {
                     client_mark_dead_locked(c, false);
+                }
             }
         }
     }
@@ -1223,6 +1269,11 @@ int p9_client_clunk_async(struct p9_client *c, u32 fid) {
     // op targets the fid) -- all cases where the fid should NOT be clunked here;
     // the caller ignores the error exactly as it ignored a sync-clunk error.
     if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
+    // #52: capture the clunk's tag NOW -- out_buf is reusable by a peer once
+    // send_flow's pump/park drops c->lock (the #375 lesson: a post-send peek
+    // could read a PEER's frame and abort the peer's LIVE tag).
+    u32 csz; u8 cty; u16 ctag = P9_NOTAG;
+    (void)p9_peek_header(c->out_buf, (size_t)len, &csz, &cty, &ctag);
 
     // F2: send via the #349 flow-control discipline -- a transiently-full c2s
     // ring is back-pressure (self-pump s2c + retry), NEVER a session death (the
@@ -1232,8 +1283,19 @@ int p9_client_clunk_async(struct p9_client *c, u32 fid) {
     // burst). On a GENUINE break, mirror client_run: mark dead only if the
     // ring actually broke (a self-death leaves the session live for peers).
     int sfr = client_send_flow(c, (size_t)len, &rpc);
+    if (sfr == CLIENT_SEND_NEVER) {
+        // #52: never-sent (see client_run). Reclaim the clunk's tag (captured
+        // BEFORE the send -- out_buf is not re-readable here) -- the frame
+        // never left, so I-10 holds on immediate reuse. The fid was already
+        // unbound at send (I-11, reply-independent); the server-side fid
+        // persists until session end -- the documented dying-path cost,
+        // bounded, vs the pre-#52 leak of a tag slot on a LIVE session.
+        if (ctag != P9_NOTAG)
+            p9_session_abort_unsent(&c->session, ctag);
+        CLIENT_UNLOCK_RET(c, -P9_E_IO);
+    }
     if (sfr < 0) {
-        if (!c->dead && !client_self_dying())
+        if (!c->dead)
             client_mark_dead_locked(c, false);
         CLIENT_UNLOCK_RET(c, -P9_E_IO);
     }
