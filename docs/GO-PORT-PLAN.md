@@ -341,7 +341,14 @@ Self-hosting is a staged bootstrap; you never build Go *on* Thylacine first.
   kernel `/proc` debug-fs (arm64 HW breakpoints, no software `BRK` — preserves
   W^X + the REVENANT Image cache) + a `dlv` `proc_thylacine` backend, driven over
   DAP/LSP. **Ratified + charter'd 2026-06-23: `docs/GO-IDE-DESIGN.md`** (NOVEL
-  #13). Built AFTER the toolchain (4-6).
+  #13). Built AFTER the toolchain (4-6). **Stage 8a design pass LANDED 2026-07-14
+  (user-voted): `docs/DEBUG-FS-DESIGN.md`** — the kernel debug surface (the
+  `/proc` debug-fs + the stop/step SM + arm64 HW debug + the debug-authority
+  invariant **I-39**), split into 8a-1 (software-checkpoint tier) then 8a-2
+  (arm64 HW-debug tier); feasibility confirmed (guest self-hosted EL0 debug works
+  under HVF QEMU>=8.2, TCG fallback; `CAP_DEBUG` slots in with 3 header edits;
+  8b's stack walk + DWARF is mostly refactor-and-expose). Next: `specs/debug_stop.tla`
+  model-first, then the 8a-1 impl.
 - **Stage 9 (deferred moonshot) — OS-native time-travel.** Deterministic
   record-replay (we own the scheduler + syscalls + CSPRNG + clock) -> a true
   reverse-step in the Go debugger. A research-grade arc of its own; deferred per

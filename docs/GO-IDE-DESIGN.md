@@ -144,8 +144,9 @@ dying-machine dump) adapts to a live stopped thread.
 ## 6. The invariant this introduces (debug authority is bounded)
 
 Reading/writing another process's memory and registers, and controlling its
-execution, is a **privilege surface** — it gets a load-bearing invariant
-(numbered in ARCH §28 at the kernel sub-stage), provisionally:
+execution, is a **privilege surface** — it gets a load-bearing invariant, now
+**I-39** in ARCH §28 (finalized 2026-07-14 in `docs/DEBUG-FS-DESIGN.md §3`;
+provisional text below):
 
 > **Debug authority is exactly namespace- + capability-bounded, and never
 > bypasses memory-safety.** A Proc may debug a target iff it can *name*
@@ -187,8 +188,19 @@ with its own focused design pass + audit (it is a new privilege surface).
 
 - **8a** — kernel `/proc/<pid>/{mem,regs,ctl-debug-verbs,wait}` debug-fs +
   arm64 hardware breakpoints / watchpoints / `MDSCR_EL1.SS` single-step + the
-  I-26-class debug gate (the new invariant, section 6). *Spec-bearing if the
-  stop/wait/control state machine warrants it.*
+  I-26-class debug gate (the new invariant, section 6). **DESIGN LANDED
+  2026-07-14 (user-voted) — the focused pass is `docs/DEBUG-FS-DESIGN.md`.** Four
+  ratified decisions: `CAP_DEBUG` is clearance-grantable elevation-only (bit
+  `1<<10`, corvus-gated legate, `rfork`-stripped, zero new devcap.c); the stop is
+  handle-lifetime-tied (the open debug ctl fd owns it — close/detach/debugger-death
+  resumes, strand-freedom from #68 close-at-exit); **spec-first is RE-ENABLED**
+  (`specs/debug_stop.tla`, model-first); and 8a splits into **8a-1** (the
+  software-checkpoint tier — debug-fs + I-39 gate + stop-at-the-EL0-return-tail +
+  cross-Proc mem/regs + the unified stack walk, ZERO debug registers) then
+  **8a-2** (arm64 HW debug + EC routing + single-step + per-thread register
+  install, gated behind the audited 8a-1 and the empirical HVF verify —
+  confirmed feasible: guest self-hosted EL0 debug works under HVF QEMU>=8.2, TCG
+  fallback).
 - **8b** — cross-boundary unified stack walk + ship kernel DWARF (section 4).
 - **8c** — `dlv` `proc_thylacine` backend; `dlv` drives a Go program on-device
   (CLI first — breakpoints, step, inspect — before any UI).
