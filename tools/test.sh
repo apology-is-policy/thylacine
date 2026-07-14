@@ -44,7 +44,16 @@ esac
 KERNEL_ELF="$KERNEL_BUILD/thylacine.elf"
 LOG_FILE="$BUILD_DIR/test-boot.log"
 
-BOOT_TIMEOUT="${BOOT_TIMEOUT:-90}"          # seconds -- wallclock max,
+# Stage 6: with the Go GOROOT baked by default, joey's go4c on-device
+# compile+link probe rides every boot, so a baked build's default timeout is
+# the bake pipeline's 300 s. Keyed on the staged tree (build_go_goroot leaves
+# it iff the pool was baked); an explicit BOOT_TIMEOUT always wins.
+if [[ -d "$BUILD_DIR/go/goroot" ]]; then
+    BOOT_TIMEOUT="${BOOT_TIMEOUT:-300}"
+else
+    BOOT_TIMEOUT="${BOOT_TIMEOUT:-90}"
+fi
+                                            # seconds -- wallclock max,
                                             # not a fixed wait. test.sh
                                             # exits early on banner or
                                             # extinction (polls log every

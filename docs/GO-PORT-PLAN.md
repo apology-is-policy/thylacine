@@ -316,6 +316,19 @@ Self-hosting is a staged bootstrap; you never build Go *on* Thylacine first.
 - **Stage 6 — BY DEFAULT + Nora integration.** Ship the toolchain in the default
   image; the `ut`/Nora UX; polish → the full end-to-end **write-in-Nora, `go mod`,
   build, run** experience, out of the box.
+  **LANDED 2026-07-14** — kernel byte-unchanged. (a) the GOROOT bake is
+  DEFAULT-ON (`THYLACINE_BAKE_GOROOT=0` opts out; test.sh auto-300s timeout on
+  baked builds) and `bin/gofmt` joins it; (b) bare invocation works with zero
+  setup: the fork's `os.Executable` (Args[0] model) lets findGOROOT self-derive
+  `/goroot`, login seeds `/env/{HOME,USER,PATH}` (the Unix login(1) role) so
+  GOCACHE/GOPATH derive from the per-user encrypted home, and go.env pins
+  `GOPROXY=https://proxy.golang.org` (no `,direct` — no git on-device); (c) ut's
+  static `$path` gains `/goroot/bin` (+ Tab completion), `libthyla_rs::env::var`
+  reads `/env`, and `which` does an honest `$PATH` search; (d) Nora formats a
+  `.go` buffer THROUGH gofmt (stdin→stdout) before the durable write — a save
+  is never blocked or lost (reject/absent → save unformatted + status note);
+  (e) `tools/interactive/go6.exp` proves the whole loop OFFLINE +
+  deterministically. As-built: `docs/reference/133-go-port.md` §6a.
 - **Stage 7 — self-host + (stretch) upstream.** The on-device Go toolchain
   rebuilds Go from source (bootstrap-with-a-prior-Go; pin the bootstrap version).
   Optionally upstream `GOOS=thylacine` (`plan9` is upstream — precedent + heritage

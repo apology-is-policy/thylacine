@@ -1,10 +1,11 @@
 # 133 — The Go port (GOOS=thylacine): capability map
 
-**Status**: as-built through GO-PORT-PLAN Stage 5 (modules over the net, landed
-2026-07-14). The fork lives at `~/projects/go-thylacine` (go1.25.3 base,
-`GOFORK` in `tools/build.sh`); ~54 `*_thylacine*` files across runtime /
-syscall / os / net / crypto / cmd-go. This page is the single map of **what
-runs on-device, at which proof tier, and where the seams are**.
+**Status**: as-built through GO-PORT-PLAN Stage 6 (toolchain BY DEFAULT + Nora
+integration, landed 2026-07-14; Stage 5 modules-over-the-net same day). The
+fork lives at `~/projects/go-thylacine` (go1.25.3 base, `GOFORK` in
+`tools/build.sh`); ~54 `*_thylacine*` files across runtime / syscall / os /
+net / crypto / cmd-go. This page is the single map of **what runs on-device,
+at which proof tier, and where the seams are**.
 
 Proof tiers used below:
 
@@ -114,19 +115,46 @@ on the wire / truncate reaches the wire / O_PATH truncate rejected).
 
 ## 5. The on-device toolchain
 
-**Layout**: `/goroot` (bake: `THYLACINE_BAKE_GOROOT=1`, `build_go_goroot`) =
-cross-built `bin/go` + `pkg/tool/thylacine_arm64/{compile,link,asm,...}` +
-`pkg/include` + trimmed stdlib **source** (compiled on-device on demand) +
-`go.env` + timezone db. `/go-cache` is a bake-time seed-warmed GOCACHE;
-`/go4c` holds the boot-probe source.
+**Layout**: `/goroot` (**baked by default since Stage 6** — `build_go_goroot`;
+`THYLACINE_BAKE_GOROOT=0` opts out for a fast iteration loop, an absent fork
+skips gracefully) = cross-built `bin/go` + **`bin/gofmt`** (Stage 6; nora's
+format-on-save + the bare prompt command) +
+`pkg/tool/thylacine_arm64/{compile,link,asm,...}` + `pkg/include` + trimmed
+stdlib **source** (compiled on-device on demand) + `go.env` + timezone db.
+`/go-cache` is a bake-time seed-warmed GOCACHE (SYSTEM-owned; serves the boot
+probe, NOT sessions); `/go4c` holds the boot-probe source. `tools/test.sh`
+auto-defaults `BOOT_TIMEOUT` to 300 s when the staged goroot exists (the go4c
+probe rides every boot).
 
-**Env contract** (all via `/env`): `GOROOT=/goroot`, writable `GOCACHE` /
-`GOPATH` / `GOTMPDIR` / `TMPDIR` / `HOME`, `GOENV=off`, `GOTELEMETRY=off`.
-`go.env` pins **`GOTOOLCHAIN=local`** — a thylacine `go` can never exec a
-foreign downloaded toolchain, so auto-switching is disabled at the root.
-The boot probes run as SYSTEM with `GOPROXY=off` + `GO111MODULE=off` (hermetic;
-joey's env is inherited by the login session, so module work must override —
-the `go-get` driver does).
+**The out-of-the-box env contract (Stage 6)** — a logged-in user types
+`go build` with ZERO setup:
+
+- **GOROOT** — self-derived: cmd/go's `findGOROOT` walks `os.Executable()`
+  (`/goroot/bin/go` → `/goroot`, gated on `pkg/tool` existing). The fork
+  implements `os.Executable` via the Args[0] path model (`executable_path.go`,
+  the aix/openbsd implementation); ut's `resolve_command` passes the resolved
+  absolute path as argv[0]. Nothing writes `/env/GOROOT`.
+- **HOME / USER / PATH** — seeded into `/env` by **login** before spawning
+  `ut` (the Unix `login(1)` role; `seed_session_env`). Every session child
+  inherits (`env_clone_into`). `PATH=/bin:/goroot/bin` mirrors ut's static
+  `$path`.
+- **GOCACHE / GOPATH / GOENV** — Go's own `$HOME` derivations
+  (`~/.cache/go-build`, `~/go`, `~/.config/go/env`): the per-user encrypted
+  home, writable + private. The FIRST build cold-compiles its stdlib closure
+  (the honest Go experience everywhere); subsequent builds are warm.
+- **TMPDIR** — unset; `os.TempDir` falls to `/tmp`, which joey creates 0777 on
+  the pool at boot.
+- **`go.env` platform defaults** — `GOTOOLCHAIN=local` (a thylacine `go` can
+  never exec a foreign downloaded toolchain) + **`GOPROXY=
+  https://proxy.golang.org`** (no `,direct`: no git on-device — a proxy miss
+  fails with the proxy's clear error; override via env / `go env -w` where
+  direct is wanted).
+
+The boot probe (go4c) runs pre-login as SYSTEM with its own hermetic env
+(`GOPROXY=off`, `GO111MODULE=off`, `GOCACHE=/go-cache`, `HOME=/tmp`, ...)
+written to joey's `/env` and **unlinked after the probe**
+(`usr/joey/joey.c` — "so they do not leak into login"), so a session's env
+starts clean.
 
 | Command | Tier | Proof |
 |---|---|---|
@@ -134,6 +162,8 @@ the `go-get` driver does).
 | `go build` (stdlib compile + link + run result) | **PROVEN** | go4c boot probe; the CHASE gofmt bench (S1/S3) |
 | `go mod tidy` / module download (proxy protocol, sumdb verify, in-place truncate of `.ziphash`) | **PROVEN** | `go-get` driver via go5.exp |
 | `go build` against a downloaded module + `go version -m` | **PROVEN** | `go-get` driver |
+| **bare `go build`** (no env setup: exe-derived GOROOT + HOME-derived cache) | **PROVEN** | go6.exp (Stage 6) |
+| `gofmt` (the standalone binary; stdin→stdout mode) | **PROVEN** | nora format-on-save via go6.exp |
 | `go run`, `go vet`, `go test`, `go fmt`, `go list` | EXPECTED | mechanisms (exec, pipes, tmp, cache) all proven; no dedicated probe |
 | `go get` (upgrading go.mod in place) | EXPECTED | same substrate as tidy |
 | Race detector (`-race`) | not available | needs TSan runtime — no thylacine port |
@@ -157,6 +187,42 @@ the `go-get` driver does).
   logged-in user; **the only external-network-dependent scenario**: an
   in-guest `nslookup example.com` guard SKIPs (exit 0) on offline hosts.
 
+## 6a. Stage 6 — BY DEFAULT + Nora integration (this page's landing)
+
+The write-in-Nora → `go mod` → build → run loop, out of the box. Kernel
+byte-unchanged; the surfaces:
+
+- **Default bake** (`tools/build.sh`): `build_go_goroot` runs unless
+  `THYLACINE_BAKE_GOROOT=0`; the every-invocation `=1` recipe (and its
+  forgot-the-flag footgun) is retired. An explicit opt-out removes the stage
+  so the pool-size/populate `-d` gates cannot bake a stale tree; a fork-absent
+  skip does the same (never ship outdated toolchain bytes).
+- **`bin/gofmt`** joins the bake (a real GOROOT ships it at `bin/`).
+- **login seeds the session env** (`seed_session_env`, usr/login):
+  `/env/{HOME,USER,PATH}` — values only, never a secret; best-effort (a failed
+  seed degrades tool UX, never a login).
+- **ut**: `resolve_command`'s static `$path` gains `/goroot/bin` (last — `/bin`
+  stays authoritative; reachability remains namespace-governed); Tab
+  completion scans it too. The user-settable `$path` stays the recorded v1.x
+  seam.
+- **`libthyla_rs::env::var`** (new): reads `/env/<name>` — the native G15
+  environment read. First consumer: `which`, whose bare-name search is now an
+  honest `$PATH` walk (was the documented G15 degenerate).
+- **Nora format-on-save** (`usr/nora/src/main.rs::gofmt_source`): a `.go` save
+  pipes the buffer THROUGH `gofmt` (stdin→stdout, all stdio `Piped` — the
+  alt-screen is untouchable) **before** the durable write: one write, and
+  unformatted bytes never land on disk. A gofmt reject (mid-edit syntax
+  error) or an absent toolchain saves the buffer as-is + notes the first
+  diagnostic in the status bar — a formatter can never block or lose a save
+  (empty-output and non-UTF-8 guards refuse pathological results;
+  `TextBuffer::replace_content` checkpoints so one `u` restores the
+  pre-format text, cursor clamped).
+- **`tools/interactive/go6.exp`** — the OFFLINE, deterministic LS-CI scenario:
+  `which go` (the env chain) → `go env GOROOT`/`GOCACHE` (exe-derived root +
+  HOME-derived cache) → nora types a misformatted program → `:wq` →
+  `tr '\t' T` proves a tab we never typed (gofmt ran) → `go mod init` → a
+  bare cold `go build` → the binary runs with computed output.
+
 ## 7. Known caveats / footguns
 
 1. **Deadlines do not abort in-flight ops** (section 3). `http.Client.Timeout`
@@ -164,13 +230,17 @@ the `go-get` driver does).
    the SVC). Fix path: the plan9 model (close-on-deadline via a timer) or a
    kernel cancellation surface — a Stage 8 (IDE/debugger arc) candidate, since
    gopls is long-running.
-2. **`GOPROXY=off` + `GO111MODULE=off` leak from joey's env** into every login
-   session (env inheritance). Module work overrides them per-session (the
-   `go-get` driver does; an interactive user must too — there is no ut
-   env-set builtin yet, the G15 seam).
+2. ~~`GOPROXY=off` + `GO111MODULE=off` leak from joey's env~~ **STALE — joey
+   unlinks the whole go4c env set after the probe** (`usr/joey/joey.c`, the
+   "so they do not leak into login" loop), so a session's env starts clean;
+   Stage 6's login seed (HOME/USER/PATH) is the only session-env content.
+   The per-user proxy default is now go.env's `GOPROXY=https://proxy.golang.org`.
 3. **Writable dirs**: the pool bake is SYSTEM-owned + perm-enforced (A-3); a
-   logged-in user points GOCACHE/GOPATH/GOTMPDIR at `$HOME`-side or `/tmp`
-   paths (the driver defaults to its workdir argument).
+   logged-in user's GOCACHE/GOPATH default to `$HOME` derivations and `$WORK`
+   to `/tmp` (Stage 6). The baked `/go-cache` seed cache serves ONLY the
+   SYSTEM boot probe — a user's first build is honestly cold (a shared
+   0777 cache was rejected: content-addressed or not, cross-identity cache
+   poisoning is exactly the ambient-authority smell the identity arc closed).
 4. **netpoll is blocking** — each in-flight net op holds an M (an OS thread).
    Fine for fetch-and-exit tools and modest servers; a high-fan-in server
    would want the Loom-side integration (a Stage 8+ candidate).
@@ -178,10 +248,14 @@ the `go-get` driver does).
    sockets in the native net package.
 6. `GOFLAGS=-mod=vendor` anywhere in the env breaks module downloads —
    the driver clears `GOFLAGS`.
-7. **`os.Executable` is ENOSYS** (no self-image path at v1.0; callers fall
-   back to `os.Args[0]`). Visible as cmd/go's benign "failed to start
-   telemetry sidecar" warning; a `/proc/<pid>/text`-style surface is the
-   v1.x fix.
+7. **`os.Executable` is the Args[0] path model** (Stage 6; was ENOSYS). The
+   fork adopted `executable_path.go` (the aix/openbsd implementation):
+   absolute argv[0] wins, relative joins the init-time wd, bare searches
+   `$PATH`. Every Thylacine spawn path passes the resolved path as argv[0]
+   (ut, os/exec, joey), so it is reliable in practice — but it is
+   ADVISORY, not kernel truth: a spawner that lies in argv[0] gets the lie
+   back. A `/proc/<pid>/text`-style kernel surface stays the v1.x upgrade
+   for anything security-relevant.
 8. **Errno fidelity**: a kernel `-1` (the generic failure) renders as Go
    errno 1 = EPERM ("operation not permitted"), which can mislead — the
    getrandom cap-gate failure read as a permissions problem, which it

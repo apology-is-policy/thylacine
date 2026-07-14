@@ -924,6 +924,49 @@ unsafe fn bind_home(user: &[u8], pid: u32, gid: u32, supp: &[u32]) -> Option<Hom
     Some(HomeSession { proxy, attach_root, mount_path })
 }
 
+// seed_session_env (Go Stage 6): write the session's ambient environment into
+// login's own per-Proc /env device -- open /env O_PATH, walk_create each KEY
+// O_WRITE, write the value (the joey go4c-probe pattern). The shell spawned
+// below inherits a deep copy (env_clone_into), and every session child
+// inherits transitively. HOME/USER/PATH only -- plain, non-secret values.
+// PATH mirrors ut's static $path list (/bin authoritative, /goroot/bin last);
+// the two are drift-guarded by the go6.exp `which go` leg. Best-effort by
+// design: a failure prints one marker and the session proceeds (Go toolchain
+// defaults degrade; login itself is unaffected).
+unsafe fn seed_session_env(user: &[u8]) {
+    let edir = t_open(T_WALK_OPEN_FROM_ROOT, b"/env".as_ptr(), 4, T_OPATH);
+    if edir < 0 {
+        t_putstr("login: env seed: /env unreachable\n");
+        return;
+    }
+    let mut home_val: Vec<u8> = Vec::with_capacity(6 + user.len());
+    home_val.extend_from_slice(b"/home/");
+    home_val.extend_from_slice(user);
+    let path_val: &[u8] = b"/bin:/goroot/bin";
+    let pairs: [(&[u8], &[u8]); 3] = [
+        (b"HOME", &home_val),
+        (b"USER", user),
+        (b"PATH", path_val),
+    ];
+    let mut ok = true;
+    for (key, val) in pairs.iter() {
+        let kf = t_walk_create(edir, key.as_ptr(), key.len(), T_OWRITE, 0o644);
+        if kf < 0 {
+            ok = false;
+            continue;
+        }
+        let w = t_write(kf, val.as_ptr(), val.len());
+        if w != val.len() as i64 {
+            ok = false;
+        }
+        let _ = t_close(kf);
+    }
+    let _ = t_close(edir);
+    if !ok {
+        t_putstr("login: env seed: partial (session env degraded)\n");
+    }
+}
+
 // unbind_home: logout teardown. Unmount /home/<user> + close login's attach ->
 // the proxy's single upstream EOFs -> the proxy returns from serve and exits ->
 // reap it (ut was already reaped, so this wait collects the proxy).
@@ -1114,6 +1157,15 @@ pub extern "C" fn rs_main() -> i64 {
             return 1;
         }
     };
+
+    // Go Stage 6: seed the session's ambient environment into login's own
+    // per-Proc /env BEFORE spawning the shell -- the Unix login(1) role. The
+    // shell and every session child inherit a deep copy (env_clone_into).
+    // Values only, never a secret (the corvus token / DEK lease must NEVER
+    // enter /env -- it is readable by every descendant). Best-effort: a
+    // failed seed prints a marker and degrades toolchain defaults (Go derives
+    // GOCACHE/GOPATH/GOENV from $HOME), never the login.
+    unsafe { seed_session_env(&user) };
 
     // Spawn the shell AS the user. fd 0/1/2 inherit login's (the tty), so the
     // shell reads + writes the same console. The shell gets the user's identity

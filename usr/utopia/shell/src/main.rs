@@ -44,7 +44,10 @@ use libthyla_rs::alloc::ThylaAlloc;
 use libthyla_rs::env;
 use libthyla_rs::io::{self, Read};
 use libthyla_rs::poll::{AsFd, PollEvents, PollSet, PollTimeout};
-use libthyla_rs::t_putstr;
+use libthyla_rs::{
+    t_close, t_mount, t_open, t_putstr, t_walk_create, t_walk_open, T_MREPL, T_OPATH, T_OREAD,
+    T_WALK_CREATE_DMDIR, T_WALK_OPEN_FROM_ROOT,
+};
 use libutopia::repl::Repl;
 use libutopia::{ansi, palette, GLYPH};
 
@@ -191,6 +194,55 @@ fn read_file(path: &str) -> Option<String> {
     Some(s)
 }
 
+/// Per-user /tmp (Go Stage 6): mkdir `<home>/tmp` and bind it MREPL over
+/// `/tmp` in the shell's OWN namespace -- inherited by every session child.
+///
+/// Why here and not login: the global /tmp rides the shared SYSTEM-attach
+/// system mount, where a create's OWNER is the attach identity (9P identity
+/// is per-Tattach; only the gid travels per-op) -- so a user's mode-0700
+/// `MkdirTemp` under the global /tmp (Go's `$WORK`; any POSIX `mkdtemp`)
+/// landed SYSTEM-owned and the user could not create inside it (a bare
+/// `go build` failed `mkdir $WORK/b0NN: operation not permitted`). And
+/// login runs as PRINCIPAL_SYSTEM, which cannot create (or even X-search)
+/// inside the 0700 user-owned home -- only the shell, born AS the user,
+/// can. The namespace bind is the Plan 9 answer: a private, user-owned,
+/// encrypted-at-rest tmp with no env knob, covering hardcoded-/tmp
+/// consumers too. Mounts are per-Proc territory ops (unprivileged); ut's
+/// territory is a private snapshot clone, so the bind scopes exactly to
+/// the session subtree and dies with it. Best-effort: a failure is logged
+/// and the session proceeds (tools needing a writable /tmp degrade).
+fn bind_user_tmp(home: &str) {
+    unsafe {
+        let hd = t_open(
+            T_WALK_OPEN_FROM_ROOT,
+            home.as_ptr(),
+            home.len(),
+            T_OPATH,
+        );
+        if hd < 0 {
+            t_putstr("ut: tmp bind: home open failed\n");
+            return;
+        }
+        let cf = t_walk_create(hd, b"tmp".as_ptr(), 3, T_OREAD, T_WALK_CREATE_DMDIR | 0o755);
+        if cf >= 0 {
+            let _ = t_close(cf);
+        }
+        let td = t_walk_open(hd, b"tmp".as_ptr(), 3, T_OPATH);
+        let _ = t_close(hd);
+        if td < 0 {
+            t_putstr("ut: tmp bind: home tmp mkdir failed\n");
+            return;
+        }
+        let rc = t_mount(b"/tmp".as_ptr(), 4, td, T_MREPL);
+        let _ = t_close(td); // t_mount holds its own ref on the source Spoor
+        if rc == 0 {
+            t_putstr("ut: tmp bound (per-user /tmp from the home)\n");
+        } else {
+            t_putstr("ut: tmp bind: mount over /tmp failed\n");
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
     // D2: `ut SCRIPT [args...]` -- non-interactive script execution. A script
@@ -240,6 +292,7 @@ pub extern "C" fn rs_main() -> i64 {
     // prompt below already shows ~ (a bare-spawned ut gets no --home: skipped,
     // runs at /). Before draw_prompt so the initial prompt reflects the home.
     if let Some(home) = parse_home_arg() {
+        bind_user_tmp(&home);
         repl.set_home(home);
     }
 

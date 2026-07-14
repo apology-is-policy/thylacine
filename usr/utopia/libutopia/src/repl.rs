@@ -157,20 +157,24 @@ impl Repl {
         }
     }
 
-    /// #115a: install namespace-driven Tab completion. Scans `/bin` ONCE (the
-    /// #58 exec namespace -- the external-command set, static for a session) and
-    /// builds the initial command index, then installs the production
-    /// `ShellCompletionSource` into the editor. Called by the consumer ON-TARGET
-    /// (gated on a live console, like `open_notes`) -- `new()` stays syscall-free
-    /// so host tests + the bare-spawn boot check pay nothing. A failed `/bin`
-    /// scan degrades to builtins + aliases + funcs only (Tab still completes
-    /// those); it never fails startup. Idempotent (a re-call re-scans).
+    /// #115a: install namespace-driven Tab completion. Scans the static `$path`
+    /// dirs ONCE (`/bin` + `/goroot/bin` -- the #58 exec namespace, matching
+    /// `resolve_command`'s search list so a resolvable command is a completable
+    /// one; static for a session) and builds the initial command index, then
+    /// installs the production `ShellCompletionSource` into the editor. Called
+    /// by the consumer ON-TARGET (gated on a live console, like `open_notes`)
+    /// -- `new()` stays syscall-free so host tests + the bare-spawn boot check
+    /// pay nothing. A failed scan degrades to builtins + aliases + funcs only
+    /// (Tab still completes those; `/goroot/bin` is absent on a non-bake
+    /// image); it never fails startup. Idempotent (a re-call re-scans).
     pub fn install_completion(&mut self) {
         self.bin_commands.clear();
-        if let Ok(rd) = libthyla_rs::fs::read_dir("/bin") {
-            for ent in rd.flatten() {
-                if ent.is_file() {
-                    self.bin_commands.push(ent.into_file_name());
+        for dir in ["/bin", "/goroot/bin"] {
+            if let Ok(rd) = libthyla_rs::fs::read_dir(dir) {
+                for ent in rd.flatten() {
+                    if ent.is_file() {
+                        self.bin_commands.push(ent.into_file_name());
+                    }
                 }
             }
         }

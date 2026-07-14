@@ -274,9 +274,10 @@ build_kernel() {
     # on no-source-change rebuilds (CMake/ninja dep tracking inside
     # $stratumd_build keep this <5s warm; cold rebuild is ~2-3 min).
     build_stratumd
-    # GOOS=thylacine Stage 4b: stage a trimmed GOROOT BEFORE the pool fixture so
-    # populate_stratum_pool can `stratum-fs put` it. No-op unless
-    # THYLACINE_BAKE_GOROOT=1 (the default build is untouched).
+    # GOOS=thylacine Stage 4b/6: stage a trimmed GOROOT BEFORE the pool fixture
+    # so populate_stratum_pool can `stratum-fs put` it. DEFAULT-ON since Stage 6
+    # (the toolchain ships in the default image); THYLACINE_BAKE_GOROOT=0 opts
+    # out for a fast iteration loop, and an absent fork skips gracefully.
     build_go_goroot
     # P6-pouch-stratumd-boot sub-chunk 16b-beta: produce the boot pool
     # fixture (pool.img + system.key) before build_ramfs so the keyfile
@@ -527,18 +528,29 @@ build_go_probes() {
 
 # GOOS=thylacine Stage 4b: assemble a trimmed thylacine GOROOT (the cross-built
 # toolchain binaries + the stdlib SOURCE) under $BUILD_DIR/go/goroot, for the
-# on-device `go build` (Stage 4c). Gated on THYLACINE_BAKE_GOROOT=1 -- the
-# default dev loop skips it (a ~150 MB cross-build + a 256 MB pool populate is
-# too heavy for fast iteration; the default 64 MiB bootstrap pool is untouched).
-# When enabled, build_stratum_pool_fixture grows pool.img to 256 MiB and
-# populate_stratum_pool `stratum-fs put`s this tree at /goroot. The `go` driver
-# shells out to $GOROOT/pkg/tool/thylacine_arm64/{compile,link,asm,...} and
-# compiles a program's imports from $GOROOT/src on the device.
+# on-device `go build` (Stage 4c). DEFAULT-ON since Stage 6: the toolchain
+# ships in the default image (GO-PORT-PLAN "BY DEFAULT"), retiring the
+# every-invocation THYLACINE_BAKE_GOROOT=1 recipe and its forgot-the-flag
+# footgun (a pool without /goroot broke every go probe). Set
+# THYLACINE_BAKE_GOROOT=0 to opt out for a fast iteration loop (64 MiB pool, no
+# cross-build/populate); an absent fork skips gracefully either way. When
+# staged, build_stratum_pool_fixture grows pool.img and populate_stratum_pool
+# `stratum-fs put`s this tree at /goroot. The `go` driver shells out to
+# $GOROOT/pkg/tool/thylacine_arm64/{compile,link,asm,...} and compiles a
+# program's imports from $GOROOT/src on the device.
 build_go_goroot() {
-    [[ "${THYLACINE_BAKE_GOROOT:-0}" == "1" ]] || return 0
+    if [[ "${THYLACINE_BAKE_GOROOT:-1}" != "1" ]]; then
+        # Explicit opt-out: remove any stale stage so the pool-size + populate
+        # sites (which also key on the -d check) cannot bake a leftover tree.
+        rm -rf "$BUILD_DIR/go/goroot"
+        return 0
+    fi
     local go_bin="$GOFORK/bin/go"
     if [[ ! -x "$go_bin" ]]; then
         echo "==> Go GOROOT bake: fork toolchain not found at $go_bin -- skipping (set GOFORK)"
+        # Drop any stale stage from an earlier build: baking a tree the current
+        # fork can no longer rebuild would ship outdated toolchain bytes.
+        rm -rf "$BUILD_DIR/go/goroot"
         return 0
     fi
     if ! command -v rsync >/dev/null 2>&1; then
@@ -553,6 +565,11 @@ build_go_goroot() {
     ( cd "$GOFORK" && GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 \
         "$go_bin" build -ldflags="-s -w" -o "$stage/bin/go" cmd/go ) \
         || { echo "==> Go GOROOT bake: build cmd/go FAILED" >&2; return 1; }
+    # gofmt lives at $GOROOT/bin like every real GOROOT (not pkg/tool). Stage 6
+    # consumers: nora's format-on-save + the bare `gofmt` at the ut prompt.
+    ( cd "$GOFORK" && GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 \
+        "$go_bin" build -ldflags="-s -w" -o "$stage/bin/gofmt" cmd/gofmt ) \
+        || { echo "==> Go GOROOT bake: build cmd/gofmt FAILED" >&2; return 1; }
     # The toolchain commands the driver execs.
     local tool
     for tool in compile link asm pack buildid cover vet; do
@@ -599,7 +616,7 @@ build_go_goroot() {
     cp "$GOFORK/VERSION" "$GOFORK/go.env" "$stage/" 2>/dev/null || true
     [[ -d "$GOFORK/lib" ]] && cp -RL "$GOFORK/lib" "$stage/" 2>/dev/null
     echo "==> Go GOROOT staged: $(du -sh "$stage" | cut -f1) ($(find "$stage" -type f | wc -l | tr -d ' ') files)"
-    ledger "Go GOROOT: cross-built toolchain + trimmed stdlib src staged at $stage (Stage 4b; THYLACINE_BAKE_GOROOT=1)"
+    ledger "Go GOROOT: cross-built toolchain + trimmed stdlib src staged at $stage (Stage 6 default-on)"
 
     # Stage 4c: warm a GOCACHE for the on-device probe's stdlib deps + stage the
     # probe source. The correct production design (not a timeout hack): real Go
@@ -1543,10 +1560,10 @@ build_stratum_pool_fixture() {
     # bake grows to 1 GiB so a from-cold build (which compiles all of stdlib into
     # $WORK and writes a native /go-cache) does not ENOSPC -- the 256 MiB pool
     # filled mid-build, truncating the last _pkg_.a -> the linker's `not package
-    # main`. Keyed on the staged GOROOT existing (build_go_goroot ran first under
-    # THYLACINE_BAKE_GOROOT=1).
+    # main`. Keyed on the staged GOROOT existing (build_go_goroot -- default-on
+    # since Stage 6; THYLACINE_BAKE_GOROOT=0 opts out and removes the stage).
     local pool_size="64M"
-    if [[ "${THYLACINE_BAKE_GOROOT:-0}" == "1" && -d "$BUILD_DIR/go/goroot" ]]; then
+    if [[ "${THYLACINE_BAKE_GOROOT:-1}" == "1" && -d "$BUILD_DIR/go/goroot" ]]; then
         # Sized against MEASURED consumption (2026-07-03, task #39): the bake
         # itself uses ~575M for ~170M logical (~3.3x FS amplification) and the
         # boot's go4c build + suite burned the ~960M that remained free in a
@@ -1711,9 +1728,11 @@ populate_stratum_pool() {
 
     # GOOS=thylacine Stage 4b: bake the trimmed Go GOROOT (if staged) at /goroot
     # via the single-session recursive `put` (a per-file CLI loop over ~3600
-    # files is infeasible). No-op unless THYLACINE_BAKE_GOROOT=1 staged the tree.
+    # files is infeasible). Default-on since Stage 6; no-op when
+    # THYLACINE_BAKE_GOROOT=0 opted out (which removes the stage) or the fork
+    # is absent (never staged).
     local goroot_stage="$BUILD_DIR/go/goroot"
-    if [[ "${THYLACINE_BAKE_GOROOT:-0}" == "1" && -d "$goroot_stage" ]]; then
+    if [[ "${THYLACINE_BAKE_GOROOT:-1}" == "1" && -d "$goroot_stage" ]]; then
         echo "==> populate pool: baking Go GOROOT ($goroot_stage -> /goroot, $(du -sh "$goroot_stage" | cut -f1))"
         "$stratum_fs_bin" -s "$sock_path" put "$goroot_stage" /goroot \
             || { echo "==> populate pool: put GOROOT FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }

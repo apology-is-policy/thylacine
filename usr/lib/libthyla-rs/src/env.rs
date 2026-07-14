@@ -19,12 +19,16 @@
 // program never overwrites them -- they are valid for the whole process
 // lifetime, hence `&'static [u8]`.
 //
-// ENVP: the kernel reserves the `_pad_envp` spawn-ABI slot but does not pass
-// an environment at v1.0 (the startup frame's envp slot is a single NULL).
-// There is therefore no `var()` / `vars()` yet; it lands when the envp
-// surface does (DOC-GAP G15).
+// ENVIRONMENT (G15, closed by the /env device): the kernel reserves the
+// `_pad_envp` spawn-ABI slot but does not pass an envp at v1.0 (the startup
+// frame's envp slot is a single NULL). Thylacine's environment is instead the
+// per-Proc `/env` Dev (the Plan 9 Egrp idiom; Go Stage 4a): a variable is the
+// file `/env/NAME`, inherited by children via the kernel clone
+// (env_clone_into). `var()` below reads that surface; a `vars()` enumeration
+// (readdir over /env) is an add-when-needed nicety.
 
 use crate::err::{Error, Result};
+use crate::io::Read;
 use crate::rt_raw_args;
 use alloc_crate::string::String;
 
@@ -52,6 +56,36 @@ pub fn set_current_dir(path: &str) -> Result<()> {
     let rc = unsafe { crate::t_chdir(path.as_ptr(), path.len()) };
     Error::from_syscall_return(rc)?;
     Ok(())
+}
+
+// The kernel's ENV_VALUE_MAX (kernel/include/thylacine/env.h): a /env value
+// is at most 4096 raw bytes, so a stack buffer of that size always holds one.
+const ENV_VALUE_BUF: usize = 4096;
+
+/// Read environment variable `name` from the per-Proc `/env` device. Loosely
+/// mirrors `std::env::var`, with `None` covering absent, unreadable, and
+/// non-UTF-8 alike -- callers treat all of those as "unset". A name containing
+/// `/` never resolves (defense against `var("../x")` walking out of /env; the
+/// device would reject the component anyway, this just fails it locally).
+pub fn var(name: &str) -> Option<String> {
+    if name.is_empty() || name.contains('/') {
+        return None;
+    }
+    let mut path = String::with_capacity(5 + name.len());
+    path.push_str("/env/");
+    path.push_str(name);
+    let mut f = crate::fs::File::open(&path).ok()?;
+    let mut buf = [0u8; ENV_VALUE_BUF];
+    let mut len = 0usize;
+    while len < ENV_VALUE_BUF {
+        match f.read(&mut buf[len..]) {
+            Ok(0) => break,
+            Ok(n) => len += n,
+            Err(_) => return None,
+        }
+    }
+    let s = core::str::from_utf8(&buf[..len]).ok()?;
+    Some(String::from(s))
 }
 
 /// The process's command-line arguments, read from the kernel-populated

@@ -36,7 +36,15 @@ if ! command -v expect >/dev/null 2>&1; then
 fi
 
 export THYLACINE_ACCEL="${THYLACINE_ACCEL:-tcg}"
-export LS_CI_BOOT_TIMEOUT="${LS_CI_BOOT_TIMEOUT:-180}"
+# Stage 6: with the Go GOROOT baked by default, joey's go4c on-device
+# compile+link probe rides every boot -- a TCG slow-mode boot + the probe can
+# exceed 180 s. Same goroot-staged auto-bump as tools/test.sh; an explicit
+# LS_CI_BOOT_TIMEOUT always wins.
+if [[ -d "$BUILD_DIR/go/goroot" ]]; then
+    export LS_CI_BOOT_TIMEOUT="${LS_CI_BOOT_TIMEOUT:-300}"
+else
+    export LS_CI_BOOT_TIMEOUT="${LS_CI_BOOT_TIMEOUT:-180}"
+fi
 export LS_CI_CMD_TIMEOUT="${LS_CI_CMD_TIMEOUT:-30}"
 
 # Reap only THIS repo's qemu (match the kernel bin path) so a co-resident,
