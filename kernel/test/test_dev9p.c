@@ -43,6 +43,7 @@ void test_dev9p_readdir(void);
 void test_dev9p_poll_regular_file_always_ready(void);
 void test_dev9p_prw_wire_offset_and_cursor(void);
 void test_dev9p_wstat_readonly_fd(void);
+void test_dev9p_wstat_size(void);
 void test_dev9p_walk_attrs(void);
 void test_dev9p_page_cache_serve_and_gate(void);
 void test_dev9p_cached_open(void);
@@ -74,6 +75,7 @@ static u8 g_loopback_resp[8192];
 // A-2a: capture the Tsetattr fields dev9p_wstat_native put on the wire so a
 // test can assert the T_WSTAT_* -> P9_SETATTR_* mask + values reached it.
 static u32 g_setattr_valid, g_setattr_mode, g_setattr_uid, g_setattr_gid;
+static u64 g_setattr_size;
 static u32 le32_at(const u8 *p) {
     return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24);
 }
@@ -503,11 +505,12 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         // Capture the request's valid/mode/uid/gid (Tsetattr body: fid@7,
         // valid@11, mode@15, uid@19, gid@23) so the test asserts the
         // T_WSTAT_* mask + values reached the wire.
-        if (req_len >= P9_HDR_LEN + 4 + 4 + 4 + 4 + 4) {
+        if (req_len >= P9_HDR_LEN + 4 + 4 + 4 + 4 + 4 + 8) {
             g_setattr_valid = le32_at(req + 11);
             g_setattr_mode  = le32_at(req + 15);
             g_setattr_uid   = le32_at(req + 19);
             g_setattr_gid   = le32_at(req + 23);
+            g_setattr_size  = le64_at(req + 27);
         }
         // Rsetattr = header only (empty body).
         if (resp_cap < P9_HDR_LEN) return -1;
@@ -1310,7 +1313,7 @@ void test_dev9p_wstat_native_drives_setattr(void) {
     g_setattr_valid = g_setattr_mode = g_setattr_uid = g_setattr_gid = 0xdeadbeefu;
     TEST_EXPECT_EQ((u64)dev9p.wstat_native(root,
                        T_WSTAT_MODE | T_WSTAT_UID | T_WSTAT_GID,
-                       0640u, 1000u, 2000u), (u64)0,
+                       0640u, 1000u, 2000u, 0), (u64)0,
                     "wstat_native -> 0 (Rsetattr)");
     TEST_EXPECT_EQ((u64)g_setattr_valid,
                     (u64)(T_WSTAT_MODE | T_WSTAT_UID | T_WSTAT_GID),
@@ -1561,7 +1564,7 @@ extern s64 sys_pwrite_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf,
 extern s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf,
                               u64 len);
 extern s64 sys_wstat_for_proc(struct Proc *p, hidx_t h, u32 valid, u32 mode,
-                              u32 uid, u32 gid);
+                              u32 uid, u32 gid, u64 size);
 
 // #37: SYS_PREAD/SYS_PWRITE put the CALLER's offset in the Tread/Twrite and
 // never move the Spoor cursor; SYS_READ/SYS_WRITE keep putting the CURSOR
@@ -1641,7 +1644,7 @@ void test_dev9p_wstat_readonly_fd(void) {
     TEST_ASSERT(fd >= 0, "handle_alloc R-only");
 
     g_setattr_valid = g_setattr_mode = 0xdeadbeefu;
-    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fd, T_WSTAT_MODE, 0644u, 0, 0), 0L,
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fd, T_WSTAT_MODE, 0644u, 0, 0, 0), 0L,
                    "owner chmod through a READ-only handle succeeds (#47)");
     TEST_EXPECT_EQ(g_setattr_mode, 0644u, "mode reached the wire");
 
@@ -1658,8 +1661,105 @@ void test_dev9p_wstat_readonly_fd(void) {
     q->caps         = 0;
     hidx_t fq = handle_alloc(q, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, nc2);
     TEST_ASSERT(fq >= 0, "handle_alloc q");
-    TEST_EXPECT_EQ(sys_wstat_for_proc(q, fq, T_WSTAT_MODE, 0600u, 0, 0), -1L,
+    TEST_EXPECT_EQ(sys_wstat_for_proc(q, fq, T_WSTAT_MODE, 0600u, 0, 0, 0), -1L,
                    "non-owner chmod denied by perm_wstat_check despite R|W");
+
+    q->state = PROC_STATE_ZOMBIE;
+    proc_free(q);
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+    teardown(root);
+}
+
+// Go Stage 5: T_WSTAT_SIZE (ftruncate). The truth table of the per-axis
+// gates: SIZE is a CONTENT axis -- it requires RIGHT_WRITE on the fd (the
+// POSIX write-opened-fd rule; the open-time perm_check carried the identity
+// W axis) and deliberately SKIPS perm_wstat_check (which stays the sole
+// authority gate for the metadata axes, #47). The u64 value must reach the
+// Tsetattr wire full-width.
+void test_dev9p_wstat_size(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "client+root");
+    const char *name = "file";
+
+    struct Spoor *nc = spoor_clone(root);
+    struct Walkqid *w = dev9p.walk(root, nc, &name, 1);
+    TEST_ASSERT(w != NULL, "walk");
+    walkqid_free(w);
+
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->principal_id = 0x1234u;     // the owner the loopback Rgetattr reports
+    p->primary_gid  = 0x5678u;
+    p->caps         = 0;
+    hidx_t fd = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, nc);
+    TEST_ASSERT(fd >= 0, "handle_alloc R|W");
+
+    // (a) owner + R|W fd: the size reaches the wire full-width (a >4 GiB
+    // value proves the u64 plumbing end to end).
+    g_setattr_valid = 0xdeadbeefu; g_setattr_size = 0;
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fd, T_WSTAT_SIZE, 0, 0, 0,
+                                      0x112233445566ull), 0L,
+                   "truncate through an R|W handle succeeds");
+    TEST_EXPECT_EQ((u64)g_setattr_valid, (u64)T_WSTAT_SIZE,
+                   "wire valid carries exactly the SIZE bit");
+    TEST_EXPECT_EQ(g_setattr_size, 0x112233445566ull,
+                   "wire size is the full u64");
+
+    // (b) the s64 domain bound.
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fd, T_WSTAT_SIZE, 0, 0, 0,
+                                      (1ull << 63)), -1L,
+                   "size past INT64_MAX rejected");
+
+    // (c) an R-only fd cannot truncate (the rights gate) -- while the SAME
+    // fd still chmods (#47 unchanged; regression-guards the per-axis split).
+    struct Spoor *nc2 = spoor_clone(root);
+    struct Walkqid *w2 = dev9p.walk(root, nc2, &name, 1);
+    TEST_ASSERT(w2 != NULL, "walk 2");
+    walkqid_free(w2);
+    hidx_t fr = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, nc2);
+    TEST_ASSERT(fr >= 0, "handle_alloc R-only");
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fr, T_WSTAT_SIZE, 0, 0, 0, 16), -1L,
+                   "truncate through a READ-only handle rejected");
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fr, T_WSTAT_MODE, 0644u, 0, 0, 0), 0L,
+                   "chmod through the same READ-only handle still works");
+
+    // (d) a NON-owner with an R|W fd truncates (size skips the identity
+    // gate -- the write authority was the open) but cannot chmod, and a
+    // combined SIZE|MODE call is denied whole (the metadata axis gates it).
+    struct Spoor *nc3 = spoor_clone(root);
+    struct Walkqid *w3 = dev9p.walk(root, nc3, &name, 1);
+    TEST_ASSERT(w3 != NULL, "walk 3");
+    walkqid_free(w3);
+    struct Proc *q = proc_alloc();
+    TEST_ASSERT(q != NULL, "proc_alloc q");
+    q->principal_id = 0x9999u;
+    q->primary_gid  = 0x9999u;
+    q->caps         = 0;
+    hidx_t fq = handle_alloc(q, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, nc3);
+    TEST_ASSERT(fq >= 0, "handle_alloc q");
+    TEST_EXPECT_EQ(sys_wstat_for_proc(q, fq, T_WSTAT_SIZE, 0, 0, 0, 8), 0L,
+                   "non-owner truncate via a WRITE fd succeeds (open carried W)");
+    TEST_EXPECT_EQ(sys_wstat_for_proc(q, fq, T_WSTAT_SIZE | T_WSTAT_MODE,
+                                      0600u, 0, 0, 8), -1L,
+                   "combined SIZE|MODE still denied by the identity gate");
+
+    // (e) the #81 O_PATH class: a CWALKONLY handle is born RIGHT_WRITE but
+    // perm_check-EXEMPT at open, so its RIGHT_WRITE is hollow -- a truncate
+    // through it must be REJECTED (else it mutates a file the caller has no
+    // W permission on). The SAME handle still chmods (metadata goes through
+    // perm_wstat_check, the owner authority, unaffected by O_PATH).
+    struct Spoor *nc4 = spoor_clone(root);
+    struct Walkqid *w4 = dev9p.walk(root, nc4, &name, 1);
+    TEST_ASSERT(w4 != NULL, "walk 4");
+    walkqid_free(w4);
+    nc4->flag |= CWALKONLY;   // model the T_OPATH born-R|W navigation handle
+    hidx_t fo = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, nc4);
+    TEST_ASSERT(fo >= 0, "handle_alloc O_PATH-like");
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fo, T_WSTAT_SIZE, 0, 0, 0, 16), -1L,
+                   "truncate through an O_PATH (CWALKONLY) handle rejected (#81)");
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fo, T_WSTAT_MODE, 0644u, 0, 0, 0), 0L,
+                   "owner chmod through the O_PATH handle still works");
 
     q->state = PROC_STATE_ZOMBIE;
     proc_free(q);
@@ -2111,7 +2211,7 @@ void test_dev9p_cached_open(void) {
     TEST_EXPECT_EQ((u64)dev9p.stat_native(co, &st), 0ull, "fidless fstat serves");
     TEST_EXPECT_EQ(st.size, 0x200ull, "fstat size");
     TEST_EXPECT_EQ(st.qid_path, 0x20ull, "fstat qid");
-    TEST_ASSERT(dev9p.wstat_native(co, T_WSTAT_MODE, 0644, 0, 0) == -1,
+    TEST_ASSERT(dev9p.wstat_native(co, T_WSTAT_MODE, 0644, 0, 0, 0) == -1,
                 "wstat on a fidless fd fails LOUD (the documented seam)");
     TEST_EXPECT_EQ((u64)dev9p.fsync(co, 0), 0ull, "fsync no-ops 0 (read-only fd)");
     TEST_ASSERT(dev9p.write(co, "x", 1, 0) < 0, "write rejected");
@@ -2536,7 +2636,7 @@ void test_dev9p_wb_nonappend_writethrough(void) {
     TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 500, 1000), 500ull, "re-stage");
     TEST_EXPECT_EQ((u64)g_twrite_seen, 0ull, "…wire-free");
     // wstat flushes the new run + stops staging on this priv.
-    TEST_EXPECT_EQ((u64)dev9p.wstat_native(f, T_WSTAT_MODE, 0600u, 0, 0), 0ull,
+    TEST_EXPECT_EQ((u64)dev9p.wstat_native(f, T_WSTAT_MODE, 0600u, 0, 0, 0), 0ull,
                    "wstat ok");
     TEST_EXPECT_EQ((u64)g_twrite_seen, 1ull, "wstat flushed the run first");
     struct dev9p_priv *fp = dev9p_priv_of(f);

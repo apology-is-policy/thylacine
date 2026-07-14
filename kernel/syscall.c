@@ -3113,16 +3113,16 @@ static s64 sys_unlink_handler(u64 parent_fd_raw, u64 name_va, u64 name_len_raw,
 // =============================================================================
 
 static int spoor_wstat_native(struct Spoor *c, u32 valid, u32 mode,
-                              u32 uid, u32 gid) {
+                              u32 uid, u32 gid, u64 size) {
     if (!c)                                          return -1;
     if (!c->dev || !c->dev->wstat_native)            return -1;
-    return c->dev->wstat_native(c, valid, mode, uid, gid);
+    return c->dev->wstat_native(c, valid, mode, uid, gid, size);
 }
 
 // Inner — testable without a live EL0 thread (all-scalar args, no user
 // buffer). The handler thins to current_thread() + this.
 s64 sys_wstat_for_proc(struct Proc *p, hidx_t h, u32 valid, u32 mode,
-                       u32 uid, u32 gid) {
+                       u32 uid, u32 gid, u64 size) {
     if (!p)                                          return -1;
 
     // Mask sanity: at least one known bit, no reserved bit (so a future
@@ -3149,6 +3149,14 @@ s64 sys_wstat_for_proc(struct Proc *p, hidx_t h, u32 valid, u32 mode,
     } else {
         gid = 0;
     }
+    if (valid & T_WSTAT_SIZE) {
+        // The s64 offset domain (the SYS_LSEEK/SYS_PREAD bound): a length
+        // whose sign bit is set cannot be represented by the size_t/off_t
+        // plumbing below and is rejected up front.
+        if (size > 0x7FFFFFFFFFFFFFFFull)            return -1;
+    } else {
+        size = 0;
+    }
 
     // #47 (the #46 sibling): kind-gate only -- KOBJ_SPOOR, ANY rights (rights
     // mask 0, the SYS_FSTAT/#46 + SYS_LSEEK posture); rejects KOBJ_SRV. POSIX
@@ -3164,32 +3172,55 @@ s64 sys_wstat_for_proc(struct Proc *p, hidx_t h, u32 valid, u32 mode,
     // never the identity axis, and POSIX fd-passing behaves identically.
     // #844: c is REF-HELD; spoor_clunk on every exit -- the ref keeps c alive
     // across the (possibly blocking) stat/setattr.
-    struct Spoor *c = sys_lookup_rw_handle(p, h, 0);
+    // T_WSTAT_SIZE is a CONTENT mutation (POSIX ftruncate(2)): unlike the
+    // #47 kind-gate-only metadata axes it requires the fd's byte-I/O WRITE
+    // envelope -- an O_RDONLY fd must not truncate. Under the A-3 F1
+    // omode-derived rights RIGHT_WRITE == "opened for writing", and the
+    // A-2d open-time perm_check already enforced the identity W axis for
+    // that open, so no perm_wstat_check applies to the size axis below.
+    u32 want_rights = (valid & T_WSTAT_SIZE) ? RIGHT_WRITE : 0;
+    struct Spoor *c = sys_lookup_rw_handle(p, h, want_rights);
     if (!c)                                          return -1;
+
+    // #81 class, extended to the size axis: an O_PATH (CWALKONLY) handle is
+    // born RIGHT_WRITE but is perm_check-EXEMPT at open (it needs only path
+    // X-search, not W) -- so its RIGHT_WRITE is hollow. The metadata axes are
+    // safe (perm_wstat_check below is their real authority, applied regardless
+    // of the handle rights), but T_WSTAT_SIZE deliberately relies on
+    // RIGHT_WRITE as its sole gate, so a truncate through an O_PATH fd would
+    // mutate a file the caller has no W permission on. Reject it -- a
+    // navigation handle is not a byte-I/O channel, and truncate IS byte I/O.
+    if ((valid & T_WSTAT_SIZE) && (c->flag & CWALKONLY)) {
+        spoor_clunk(c);
+        return -1;
+    }
 
     // A-2d: the ownership-change policy (IDENTITY-DESIGN.md 3.7.1 + perm.c).
     // Gated on perm_enforced (dev9p live since A-3; devramfs .wstat_native is
     // NULL so SYS_WSTAT on it returns -1 below regardless). Reads the file's
-    // CURRENT owner, then applies the policy. Since #47 this identity check is
-    // the ONLY write-authority gate on this path -- do not weaken it.
-    if (c->dev && c->dev->perm_enforced) {
+    // CURRENT owner, then applies the policy -- for the METADATA axes only:
+    // since #47 this identity check is the ONLY write-authority gate on the
+    // mode/uid/gid path -- do not weaken it. A size-only call skips it (its
+    // identity check was the open-time perm_check, above).
+    if ((valid & (T_WSTAT_MODE | T_WSTAT_UID | T_WSTAT_GID)) &&
+        c->dev && c->dev->perm_enforced) {
         struct t_stat cur;
         if (spoor_stat_native(c, &cur) != 0)              { spoor_clunk(c); return -1; }
         if (perm_wstat_check(p, cur.uid, valid, gid) != 0){ spoor_clunk(c); return -1; }
     }
-    int rc = spoor_wstat_native(c, valid, mode, uid, gid);
+    int rc = spoor_wstat_native(c, valid, mode, uid, gid, size);
     spoor_clunk(c);
     return rc == 0 ? 0 : -1;
 }
 
 static s64 sys_wstat_handler(u64 hraw, u64 valid_raw, u64 mode_raw,
-                             u64 uid_raw, u64 gid_raw) {
+                             u64 uid_raw, u64 gid_raw, u64 size_raw) {
     struct Thread *t = current_thread();
     if (!t)                                          return -1;
     struct Proc *p = t->proc;
     if (!p)                                          return -1;
     return sys_wstat_for_proc(p, (hidx_t)hraw, (u32)valid_raw, (u32)mode_raw,
-                              (u32)uid_raw, (u32)gid_raw);
+                              (u32)uid_raw, (u32)gid_raw, size_raw);
 }
 
 // =============================================================================
@@ -6977,7 +7008,8 @@ void syscall_dispatch(struct exception_context *ctx) {
                                               ctx->regs[1],
                                               ctx->regs[2],
                                               ctx->regs[3],
-                                              ctx->regs[4]);
+                                              ctx->regs[4],
+                                              ctx->regs[5]);
         return;
 
     case SYS_CHROOT:

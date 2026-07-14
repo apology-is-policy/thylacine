@@ -1224,24 +1224,34 @@ enum {
     // reachable by re-walking the path -- the fd is just a name for the file;
     // the SYS_FSTAT/#46 + SYS_LSEEK precedent).
     //
-    // SYS_WSTAT(fd, valid, mode, uid, gid) -> 0 / -1
+    // SYS_WSTAT(fd, valid, mode, uid, gid, size) -> 0 / -1
     //   x0 = fd     (hidx_t; must be KOBJ_SPOOR -- any rights (kind-gate only,
-    //                #47). The write-authority gate is perm_wstat_check on
-    //                perm-enforced Devs, an identity check, not a rights check.)
-    //   x1 = valid  (u32 bitmask of T_WSTAT_MODE | T_WSTAT_UID | T_WSTAT_GID;
-    //                at least one bit set; any other bit -> -1.)
+    //                #47) for the METADATA axes. The write-authority gate for
+    //                mode/uid/gid is perm_wstat_check on perm-enforced Devs,
+    //                an identity check, not a rights check. T_WSTAT_SIZE is
+    //                the exception: a CONTENT mutation (POSIX ftruncate(2)),
+    //                so the fd must carry RIGHT_WRITE -- "opened for writing"
+    //                under the A-3 F1 omode-derived rights; the open-time
+    //                perm_check already enforced the identity W axis.)
+    //   x1 = valid  (u32 bitmask of T_WSTAT_MODE | T_WSTAT_UID | T_WSTAT_GID
+    //                | T_WSTAT_SIZE; at least one bit set; any other bit -> -1.)
     //   x2 = mode   (u32; new permission bits when T_WSTAT_MODE. The 9 rwx bits
     //                only -- setuid/setgid/sticky (07000) + any bit outside 0777
     //                are REJECTED (-1). setuid is explicitly unsupported, §S5.)
     //   x3 = uid    (u32; new owner principal-id when T_WSTAT_UID. PRINCIPAL_-
     //                INVALID (0) -> -1.)
     //   x4 = gid    (u32; new group when T_WSTAT_GID. GID_INVALID (0) -> -1.)
+    //   x5 = size   (u64; new file length when T_WSTAT_SIZE (Go Stage 5:
+    //                ftruncate for cmd/go's module cache). size > INT64_MAX
+    //                -> -1 (the s64 offset domain). Shrink discards; extend
+    //                zero-fills (Tsetattr semantics, Stratum-side).)
     //   Returns 0 on success, -1 on: fd not KOBJ_SPOOR; valid 0 or with a
-    //   reserved bit; mode outside 0777; uid/gid INVALID; perm_wstat_check
-    //   denial (perm-enforced Dev, caller neither owner nor CAP-holder);
-    //   Dev has no .wstat_native slot; server Rlerror. Audit-bearing:
-    //   CLAUDE.md A-2 FS-permission row.
-    SYS_WSTAT        = 59,   // arg: fd (x0), valid (x1), mode (x2), uid (x3), gid (x4)
+    //   reserved bit; mode outside 0777; uid/gid INVALID; size out of the s64
+    //   domain; T_WSTAT_SIZE on a handle without RIGHT_WRITE; perm_wstat_check
+    //   denial (perm-enforced Dev, metadata axes, caller neither owner nor
+    //   CAP-holder); Dev has no .wstat_native slot; server Rlerror.
+    //   Audit-bearing: CLAUDE.md A-2 FS-permission row.
+    SYS_WSTAT        = 59,   // arg: fd (x0), valid (x1), mode (x2), uid (x3), gid (x4), size (x5)
 
     // SYS_EXIT_GROUP(status) -- terminate the WHOLE Proc (POSIX exit_group(2)).
     // NEVER returns. Cascades termination to every peer Thread of the calling
@@ -1909,15 +1919,20 @@ _Static_assert(__builtin_offsetof(struct t_stat, gid)       == 76, "t_stat.gid a
 #define T_S_IFCHR   0020000u
 
 // SYS_WSTAT valid-mask bits (A-2a; IDENTITY-DESIGN.md §9.5). Which of the
-// (mode, uid, gid) register arguments the kernel applies. Chosen to equal the
-// 9P Tsetattr P9_SETATTR_{MODE,UID,GID} bit values so dev9p_wstat_native maps
-// the mask with no translation; the equality is pinned by a _Static_assert in
-// dev9p.c (the only TU that sees both). Userspace chmod() sets T_WSTAT_MODE;
-// chown() sets T_WSTAT_UID | T_WSTAT_GID (or just one).
+// (mode, uid, gid, size) register arguments the kernel applies. Chosen to
+// equal the 9P Tsetattr P9_SETATTR_{MODE,UID,GID,SIZE} bit values so
+// dev9p_wstat_native maps the mask with no translation; the equality is
+// pinned by a _Static_assert in dev9p.c (the only TU that sees both).
+// Userspace chmod() sets T_WSTAT_MODE; chown() sets T_WSTAT_UID |
+// T_WSTAT_GID (or just one); ftruncate() sets T_WSTAT_SIZE (Go Stage 5).
+// SIZE is a CONTENT axis: it additionally requires RIGHT_WRITE on the fd
+// (POSIX ftruncate needs a write-opened fd), unlike the #47 kind-gate-only
+// metadata axes.
 #define T_WSTAT_MODE   (1u << 0)
 #define T_WSTAT_UID    (1u << 1)
 #define T_WSTAT_GID    (1u << 2)
-#define T_WSTAT_VALID  (T_WSTAT_MODE | T_WSTAT_UID | T_WSTAT_GID)
+#define T_WSTAT_SIZE   (1u << 3)
+#define T_WSTAT_VALID  (T_WSTAT_MODE | T_WSTAT_UID | T_WSTAT_GID | T_WSTAT_SIZE)
 
 // Permission bits a SYS_WSTAT mode may carry (the 9 rwx bits). setuid/setgid/
 // sticky (07000) + any bit outside 0777 are rejected -- setuid is explicitly

@@ -1950,7 +1950,7 @@ static int dev9p_wstat(struct Spoor *c, u8 *dp, int n) {
 // and forwards. Like dev9p_rename / dev9p_unlink it borrows the caller's fid and
 // allocates no transient fid, so the create-path fid-leak class cannot arise.
 static int dev9p_wstat_native(struct Spoor *c, u32 valid, u32 mode,
-                              u32 uid, u32 gid) {
+                              u32 uid, u32 gid, u64 size) {
     struct dev9p_priv *p = priv_of(c);
     if (!p) return -1;
     // FID-LIFECYCLE cached-open seam (section 3.3, documented + tested):
@@ -1986,15 +1986,22 @@ static int dev9p_wstat_native(struct Spoor *c, u32 valid, u32 mode,
     sa.mode  = mode;
     sa.uid   = uid;
     sa.gid   = gid;
+    sa.size  = size;         // applied only when T_WSTAT_SIZE is in valid
     int rc = p9_client_setattr(p->client, p->fid, &sa);
     if (rc != 0) { p->fid_suspect = true; return -1; }
     // L1c invalidate (fs_cache.tla OwnWrite): chmod/chown changed
-    // mode/uid/gid (metadata only -- sa.size is never set here; a content
-    // truncate flows through OTRUNC-dev9p_open, which also drops the
-    // pages). CRITICAL -- the base X-check perm_checks the cached
-    // mode, so a stale mode after a tighten would be a bounded I-28 window; the
-    // invalidate keeps the window at zero for the guest's own chmod.
+    // mode/uid/gid; a T_WSTAT_SIZE truncate changed CONTENT + size. The
+    // attr drop covers both axes. CRITICAL -- the base X-check perm_checks
+    // the cached mode, so a stale mode after a tighten would be a bounded
+    // I-28 window; the invalidate keeps the window at zero for the guest's
+    // own chmod.
     larder_attr_invalidate(&p->client->larder, c->qid.path);
+    // A size change makes every cached page stale (bytes at/past the new
+    // end are gone; an extend zero-fills) -- whole-file drop, the same
+    // discipline as the OTRUNC-open truncate path (L1f F1: data integrity
+    // never rests on a cvers collision being impossible).
+    if (valid & T_WSTAT_SIZE)
+        larder_page_invalidate(&p->client->larder, c->qid.path);
     return 0;
 }
 
@@ -2007,6 +2014,8 @@ _Static_assert(T_WSTAT_UID == P9_SETATTR_UID,
                "T_WSTAT_UID must equal the 9P Tsetattr UID bit");
 _Static_assert(T_WSTAT_GID == P9_SETATTR_GID,
                "T_WSTAT_GID must equal the 9P Tsetattr GID bit");
+_Static_assert(T_WSTAT_SIZE == P9_SETATTR_SIZE,
+               "T_WSTAT_SIZE must equal the 9P Tsetattr SIZE bit");
 
 static struct Spoor *dev9p_power(struct Spoor *c, int on) {
     (void)c; (void)on;

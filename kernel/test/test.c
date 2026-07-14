@@ -971,6 +971,7 @@ void test_dev9p_stat_native_maps_getattr(void);
 void test_dev9p_wstat_native_drives_setattr(void);
 void test_dev9p_prw_wire_offset_and_cursor(void);
 void test_dev9p_wstat_readonly_fd(void);
+void test_dev9p_wstat_size(void);
 void test_dev9p_walk_attrs(void);
 void test_dev9p_page_cache_serve_and_gate(void);
 void test_dev9p_read_align_heals_partial(void);
@@ -2387,6 +2388,7 @@ struct test_case g_tests[] = {
     { "dev9p.prw_wire_offset_and_cursor",
                                        test_dev9p_prw_wire_offset_and_cursor, false, NULL },
     { "dev9p.wstat_readonly_fd",       test_dev9p_wstat_readonly_fd,          false, NULL },
+    { "dev9p.wstat_size",              test_dev9p_wstat_size,                 false, NULL },
     { "dev9p.walk_attrs",              test_dev9p_walk_attrs,                 false, NULL },
     { "dev9p.page_cache_serve_and_gate", test_dev9p_page_cache_serve_and_gate, false, NULL },
     { "dev9p.read_align_heals_partial", test_dev9p_read_align_heals_partial,    false, NULL },

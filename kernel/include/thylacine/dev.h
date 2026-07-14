@@ -120,9 +120,10 @@ struct Dev {
     //                    particular) implement this; trivial leaf Devs
     //                    (devcons / devnull / devzero / devnotes) leave
     //                    the slot NULL.
-    //   wstat_native(c, valid, mode, uid, gid) — Thylacine-native chmod/chown
-    //                    surface (A-2a; IDENTITY-DESIGN.md §9.5). Apply the
-    //                    subset of (mode, uid, gid) selected by the `valid`
+    //   wstat_native(c, valid, mode, uid, gid, size) — Thylacine-native
+    //                    chmod/chown/ftruncate surface (A-2a + Go Stage 5;
+    //                    IDENTITY-DESIGN.md §9.5). Apply the subset of
+    //                    (mode, uid, gid, size) selected by the `valid`
     //                    mask (T_WSTAT_* bits) to the file backed by c.
     //                    Returns 0 on success, -1 on failure. NULL-permitted
     //                    (like .stat_native / .fsync): a NULL slot => SYS_WSTAT
@@ -142,7 +143,7 @@ struct Dev {
     int             (*stat)(struct Spoor *c, u8 *dp, int n);
     int             (*stat_native)(struct Spoor *c, struct t_stat *out);
     int             (*wstat_native)(struct Spoor *c, u32 valid,
-                                    u32 mode, u32 uid, u32 gid);
+                                    u32 mode, u32 uid, u32 gid, u64 size);
 
     // walk_attrs(c, nc, names, name_lens, nname, sts) — the walk-fused getattr
     // (POUNCE; docs/POUNCE-DESIGN.md §4). OPTIONAL (NULL-permitted, like
