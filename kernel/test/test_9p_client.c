@@ -2440,6 +2440,10 @@ static u8  g_loom_mname[64];  static u32 g_loom_mname_len;
 static u32 g_loom_mname_mode;
 static u8  g_loom_mname2[64]; static u32 g_loom_mname2_len;
 static u32 g_loom_msetattr_valid; static u32 g_loom_msetattr_mode;
+static u64 g_loom_msetattr_size;
+static u64 loom_rd_le64(const u8 *p) {
+    u64 v = 0; for (int i = 0; i < 8; i++) v |= (u64)p[i] << (8 * i); return v;
+}
 static u32 loom_rd_le16(const u8 *p) { return (u32)p[0] | ((u32)p[1] << 8); }
 static u32 loom_rd_le32(const u8 *p) {
     return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24);
@@ -2459,9 +2463,10 @@ static int loom_mut_capture_responder(void *ctx, const u8 *req, size_t req_len,
                 loom_cap_name(g_loom_mname, &g_loom_mname_len, req + P9_HDR_LEN + 6, nl);
                 g_loom_mname_mode = loom_rd_le32(req + P9_HDR_LEN + 6 + nl);  // mode after name
             }
-        } else if (type == P9_TSETATTR && req_len >= (size_t)P9_HDR_LEN + 12) {
+        } else if (type == P9_TSETATTR && req_len >= (size_t)P9_HDR_LEN + 28) {
             g_loom_msetattr_valid = loom_rd_le32(req + P9_HDR_LEN + 4);   // valid u32
             g_loom_msetattr_mode  = loom_rd_le32(req + P9_HDR_LEN + 8);   // mode u32
+            g_loom_msetattr_size  = loom_rd_le64(req + P9_HDR_LEN + 20);  // size u64
         } else if (type == P9_TRENAMEAT && req_len >= (size_t)P9_HDR_LEN + 6) {
             u32 onl = loom_rd_le16(req + P9_HDR_LEN + 4);            // oldname s len
             size_t after_old = (size_t)P9_HDR_LEN + 6 + onl;        // -> newdirfid
@@ -2537,6 +2542,19 @@ void test_9p_client_loom_mkdir_e2e(void) {
 // SETATTR end-to-end: the input struct p9_setattr is read FROM the pinned buffer
 // (align-safe copy); the capture responder proves valid + mode reached the wire;
 // Rsetattr (empty) -> result 0. Exercises the struct-from-buffer input path.
+// Scan the CQ ring for the CQE echoing `ud` and return its result. The Loom
+// completions land in submit-completion order, NOT submit order: an inline
+// reject completes at submit while an async op completes when its reply lands,
+// so a mixed batch (reject + async + reject) posts CQEs out of leg order.
+// Match by user_data instead of assuming index == leg.
+static s32 loom_cqe_result(const struct loom_cqe *cqes,
+                           const struct loom_ring_hdr *h, u64 ud) {
+    u32 tail = __atomic_load_n(&h->cq_tail, __ATOMIC_ACQUIRE);
+    for (u32 i = 0; i < tail && i < 64; i++)
+        if (cqes[i].user_data == ud) return cqes[i].result;
+    return 0x7FFFFFFF;   // sentinel: not found (never a valid < 0 or == 0 result)
+}
+
 void test_9p_client_loom_setattr_e2e(void) {
     g_loom_msetattr_valid = 0; g_loom_msetattr_mode = 0;
     int rc = p9_loopback_init(&g_loopback, g_loopback_resp, sizeof(g_loopback_resp),
@@ -2562,25 +2580,72 @@ void test_9p_client_loom_setattr_e2e(void) {
     struct Burrow *b; u8 *bkva;
     loom_install_test_buf(l, 0, PAGE_SIZE, &b, &bkva);
     int hc0 = burrow_handle_count(b);
-    // Write a struct p9_setattr into the registered buffer (valid=MODE, mode=0600).
     struct p9_setattr *sa = (struct p9_setattr *)bkva;
-    for (u32 i = 0; i < sizeof(*sa); i++) ((u8 *)sa)[i] = 0;
-    sa->valid = P9_SETATTR_MODE; sa->mode = 0600u;
 
     struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
     struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
 
+    // (a) T_WSTAT_SIZE audit F2: a Loom SETATTR carrying an IDENTITY axis
+    // (MODE/UID/GID) is REJECTED fail-closed -- the async submit cannot run the
+    // owner-only perm_wstat_check the sync path enforces, and a hollow-RIGHT_WRITE
+    // O_PATH handle would otherwise chmod/chown any X-reachable file. The chmod
+    // must NEVER reach the wire (pre-fix this landed a Tsetattr(MODE=0600)).
+    g_loom_msetattr_valid = 0; g_loom_msetattr_mode = 0; g_loom_msetattr_size = 0;
+    for (u32 i = 0; i < sizeof(*sa); i++) ((u8 *)sa)[i] = 0;
+    sa->valid = P9_SETATTR_MODE; sa->mode = 0600u;
     cl_stage_mut(l, 0, LOOM_OP_SETATTR, /*handle=*/0, /*offset=*/0,
                  /*len=*/(u32)sizeof(struct p9_setattr), /*bidx=*/0, /*buf_off=*/0,
                  0, 0, 0, 0x5E77000000000000ULL);
     __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
-
     int n = loom_enter(l, 1, 1, 0);
-    TEST_EXPECT_EQ(n, 1, "one SQE consumed");
-    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)0, "SETATTR result = 0 (scalar success)");
-    TEST_EXPECT_EQ((u64)g_loom_msetattr_valid, (u64)P9_SETATTR_MODE, "setattr valid mask on wire");
-    TEST_EXPECT_EQ((u64)g_loom_msetattr_mode, (u64)0600u, "setattr mode read from the buffer");
-    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "op reaped");
+    TEST_EXPECT_EQ(n, 1, "one SQE consumed (chmod)");
+    TEST_ASSERT(loom_cqe_result(cqes, h, 0x5E77000000000000ULL) < 0,
+                "async chmod rejected fail-closed (F2)");
+    TEST_EXPECT_EQ((u64)g_loom_msetattr_valid, (u64)0, "chmod NEVER reached the wire");
+    // Drain the CQ so the NEXT leg's min_complete=1 waits for its OWN new CQE
+    // (an inline reject + an async op mixed in one un-drained CQ makes a bare
+    // min_complete=1 return on a stale entry before the async op lands).
+    __atomic_store_n(&h->cq_head, __atomic_load_n(&h->cq_tail, __ATOMIC_ACQUIRE),
+                     __ATOMIC_RELEASE);
+
+    // (b) SIZE (truncate) on the SAME RIGHT_WRITE (non-O_PATH) handle is the
+    // legitimate content mutation -- its authority IS the write-fd -- so it
+    // reaches the wire full-width (a >4 GiB value proves the u64 path).
+    for (u32 i = 0; i < sizeof(*sa); i++) ((u8 *)sa)[i] = 0;
+    sa->valid = P9_SETATTR_SIZE; sa->size = 0x112233445566ull;
+    cl_stage_mut(l, 1, LOOM_OP_SETATTR, /*handle=*/0, /*offset=*/0,
+                 /*len=*/(u32)sizeof(struct p9_setattr), /*bidx=*/0, /*buf_off=*/0,
+                 0, 0, 0, 0x5E77000000000001ULL);
+    __atomic_store_n(&h->sq_tail, 2u, __ATOMIC_RELEASE);
+    n = loom_enter(l, 1, 1, 0);
+    TEST_EXPECT_EQ(n, 1, "one SQE consumed (truncate)");
+    TEST_EXPECT_EQ((u64)(s64)loom_cqe_result(cqes, h, 0x5E77000000000001ULL), (u64)0,
+                   "truncate result = 0 (scalar success)");
+    TEST_EXPECT_EQ((u64)g_loom_msetattr_valid, (u64)P9_SETATTR_SIZE, "truncate valid on wire");
+    TEST_EXPECT_EQ(g_loom_msetattr_size, 0x112233445566ull, "truncate size is the full u64");
+    __atomic_store_n(&h->cq_head, __atomic_load_n(&h->cq_tail, __ATOMIC_ACQUIRE),
+                     __ATOMIC_RELEASE);
+
+    // (c) T_WSTAT_SIZE audit F1 [P0]: SIZE (truncate) through an O_PATH
+    // (CWALKONLY) handle is REJECTED -- the O_PATH handle is born RIGHT_WRITE but
+    // perm_check-EXEMPT, so its RIGHT_WRITE is hollow (the async twin of the sync
+    // O_PATH truncate bypass). Flag the registered Spoor CWALKONLY + re-submit
+    // SIZE; it must be rejected and NEVER reach the wire.
+    sp->flag |= CWALKONLY;
+    g_loom_msetattr_valid = 0; g_loom_msetattr_size = 0;
+    for (u32 i = 0; i < sizeof(*sa); i++) ((u8 *)sa)[i] = 0;
+    sa->valid = P9_SETATTR_SIZE; sa->size = 16;
+    cl_stage_mut(l, 2, LOOM_OP_SETATTR, /*handle=*/0, /*offset=*/0,
+                 /*len=*/(u32)sizeof(struct p9_setattr), /*bidx=*/0, /*buf_off=*/0,
+                 0, 0, 0, 0x5E77000000000002ULL);
+    __atomic_store_n(&h->sq_tail, 3u, __ATOMIC_RELEASE);
+    n = loom_enter(l, 1, 1, 0);
+    TEST_EXPECT_EQ(n, 1, "one SQE consumed (O_PATH truncate)");
+    TEST_ASSERT(loom_cqe_result(cqes, h, 0x5E77000000000002ULL) < 0,
+                "truncate via O_PATH handle rejected (F1 P0)");
+    TEST_EXPECT_EQ((u64)g_loom_msetattr_valid, (u64)0, "O_PATH truncate NEVER reached the wire");
+
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "ops reaped");
     TEST_EXPECT_EQ(burrow_handle_count(b), hc0, "op buffer pin balanced");
 
     burrow_unref(b);

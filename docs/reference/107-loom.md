@@ -1248,6 +1248,20 @@ rolled back via `spoor_clunk`); a user-VA fault reading the fd array.
 
 ## Known caveats / footguns
 
+- **Loom `SETATTR` is truncate-only at v1.0 (the identity axes are
+  fail-closed).** `LOOM_OP_SETATTR` mutates the TARGET the fid points at, so
+  its authority splits by axis exactly as the sync `SYS_WSTAT` path: `SIZE`
+  (truncate) authority is the fd's `RIGHT_WRITE` and is checkable statelessly
+  at submit -- it stays (on a non-`CWALKONLY` handle, with the s64 bound). But
+  `MODE`/`UID`/`GID` (chmod/chown) authority is IDENTITY (owner-only chmod /
+  CAP chown -- `perm_wstat_check`), which the async submit cannot evaluate
+  without a blocking owner-stat, so they are rejected `-EACCES`. This closes
+  the `T_WSTAT_SIZE`-audit finding (a hollow-`RIGHT_WRITE` O_PATH handle could
+  otherwise chmod/chown/truncate any X-reachable file). **v1.x seam**: async
+  identity-setattr needs a submit-time owner-stat or a completion-recheck
+  design before chmod/chown-via-Loom can be re-enabled soundly. The sync
+  `SYS_WSTAT` path is the identity-checked route today.
+
 - **Loom `READDIR` cursors are caller-managed and unguarded.** `loom_build_readdir`
   passes the SQE `offset` (a `u64` the userspace client owns) straight to
   `p9_session_send_readdir` -- it never transits the `s64 Spoor.offset` nor

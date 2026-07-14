@@ -1028,14 +1028,48 @@ static void loom_submit_payload(struct Loom *l, const struct loom_sqe *sqe,
     if (has_second && !(rt2 & need2)) { err = -(s32)T_E_ACCES; goto fail; }
     // #81 F2: an O_PATH (CWALKONLY) handle does NO byte/dir-content I/O. Reject the
     // content opcodes (READ/WRITE/READDIR) on a CWALKONLY-pinned Spoor -- mirrors the
-    // syscall-path gate. The metadata opcodes (GETATTR/STATFS/READLINK) are the
-    // fstat-equivalent class, allowed on O_PATH; the mutation opcodes (MKDIR/SETATTR/
-    // ...) are the create-from-O_PATH-base pattern, legitimately allowed like
-    // SYS_WALK_CREATE. Defense-in-depth: today an O_PATH dev9p fid is un-Tlopen'd so
-    // the server rejects Tread/Treaddir, but this makes the block in-kernel.
+    // syscall-path gate. The metadata READ opcodes (GETATTR/STATFS/READLINK) are the
+    // fstat-equivalent class, allowed on O_PATH; the CHILD-create opcodes (MKDIR/MKNOD/
+    // SYMLINK/UNLINKAT) create/remove a child OF the O_PATH directory base -- the
+    // create-from-O_PATH-base pattern, legitimately allowed like SYS_WALK_CREATE.
+    // Defense-in-depth: today an O_PATH dev9p fid is un-Tlopen'd so the server rejects
+    // Tread/Treaddir, but this makes the block in-kernel.
     if ((sqe->opcode == LOOM_OP_READ || sqe->opcode == LOOM_OP_WRITE ||
          sqe->opcode == LOOM_OP_READDIR) && (sp->flag & CWALKONLY)) {
         err = -(s32)T_E_INVAL; goto fail;
+    }
+    // T_WSTAT_SIZE audit F1/F2: LOOM_OP_SETATTR is NOT a create-from-O_PATH-base op
+    // (those create a CHILD; handled above) -- it MUTATES the TARGET the fid points
+    // at, so its authority splits by axis exactly as the sync SYS_WSTAT path
+    // (kernel/syscall.c::sys_wstat_for_proc):
+    //   * SIZE (truncate) = a CONTENT mutation; authority is the fd's RIGHT_WRITE
+    //     (POSIX write-opened-fd; need1 checked above). But an O_PATH (CWALKONLY)
+    //     handle is born RIGHT_WRITE + perm_check-EXEMPT -> its RIGHT_WRITE is HOLLOW,
+    //     so SIZE-on-CWALKONLY truncates a no-W-permission file (the async twin of the
+    //     sync O_PATH bypass). Reject it; bound size to the s64 domain (sync parity).
+    //   * MODE/UID/GID (chmod/chown) = IDENTITY authority (owner-only chmod / CAP
+    //     chown -- perm_wstat_check), which the ASYNC submit CANNOT evaluate without a
+    //     blocking owner-stat. A hollow-RIGHT_WRITE O_PATH handle would otherwise
+    //     chmod/chown ANY X-reachable file. v1.0 Loom SETATTR therefore supports ONLY
+    //     size-truncate; the identity axes are rejected FAIL-CLOSED. Async
+    //     identity-setattr is a v1.x seam (a submit-stat or a completion-recheck).
+    //   * atime/mtime (and any other bit) are unsupported -- reject (sync parity).
+    if (sqe->opcode == LOOM_OP_SETATTR) {
+        struct p9_setattr sa_chk;
+        loom_bufcopy((u8 *)&sa_chk, buf_kva, (u32)sizeof(sa_chk));
+        if (sa_chk.valid & ~(u32)(P9_SETATTR_MODE | P9_SETATTR_UID |
+                                  P9_SETATTR_GID | P9_SETATTR_SIZE)) {
+            err = -(s32)T_E_INVAL; goto fail;
+        }
+        if (sa_chk.valid & (P9_SETATTR_MODE | P9_SETATTR_UID | P9_SETATTR_GID)) {
+            err = -(s32)T_E_ACCES; goto fail;   // F2: async identity-setattr deferred
+        }
+        if (sa_chk.valid & P9_SETATTR_SIZE) {
+            if (sp->flag & CWALKONLY) { err = -(s32)T_E_INVAL; goto fail; }   // F1 P0
+            if (sa_chk.size > 0x7FFFFFFFFFFFFFFFull) {
+                err = -(s32)T_E_INVAL; goto fail;                            // s64 bound
+            }
+        }
     }
     if (dev9p_client_fid(sp, &cl, &fid) != 0) { err = -(s32)T_E_INVAL; goto fail; }   // not a dev9p Spoor
     if (has_second) {
