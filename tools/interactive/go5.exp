@@ -1,0 +1,54 @@
+#!/usr/bin/expect -f
+# tools/interactive/go5.exp -- GO-PORT-PLAN Stage 5 over a real PTY: the Go
+# toolchain pulls a module off /net, builds it, runs it; and Go's net/http
+# fetches a real web page (DNS -> TCP -> TLS -> x509 -> HTTP), all as the
+# logged-in user.
+#
+# THE ONLY EXTERNAL-NETWORK-DEPENDENT SCENARIO: example.com + proxy.golang.org
+# through slirp's NAT. A host without outbound internet SKIPS (exit 0) after an
+# in-guest DNS guard, keeping the LS-CI set green offline -- the best-effort
+# precedent (net-3b live DNS / net-3c gateway ping).
+
+source [file join [file dirname [info script]] lib.exp]
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# Online guard: resolve example.com through /net/cs -> netd DNS -> slirp ->
+# the host resolver. A miss or timeout is a SKIP, not a failure.
+lc_send "nslookup example.com"
+set timeout 30
+expect {
+    -ex "Address:" { lc_step "online guard: external DNS resolves" }
+    -ex "can't resolve" {
+        send_user "\n==> SKIP go5: no external DNS (offline host?)\n"
+        lc_quit
+        exit 0
+    }
+    timeout {
+        send_user "\n==> SKIP go5: DNS guard timed out (offline host?)\n"
+        lc_quit
+        exit 0
+    }
+    eof { lc_fail "qemu exited during the online guard" }
+}
+lc_pass "go5(guard): external DNS reachable"
+
+# Half 1: net/http fetches a real page -- DNS via cs, TCP via /net, TLS with
+# x509 chain verification against the baked system CA bundle, HTTP.
+set ::lc_cmd_timeout 120
+lc_run_expect "go-web https://example.com/" "go-web: STAGE 5 (net/http fetch) OK"
+lc_pass "go5(a): go-web fetched https://example.com (TLS + verified chain)"
+
+# Half 2: the module workflow -- `go mod tidy` DOWNLOADS go-cmp from
+# proxy.golang.org (sumdb-verified), `go build` compiles against it, the built
+# binary runs and uses it. The driver echoes the "go: downloading" lines (the
+# pull proof) + per-step timing into the transcript.
+set ::lc_cmd_timeout 420
+lc_run_expect "go-get /home/michael/go5" "go-get: STAGE 5 (module pull + build + run) OK"
+lc_pass "go5(b): module pull + build + run all green"
+
+set ::lc_cmd_timeout 30
+lc_quit
+lc_pass "LS-CI go5: Go Stage 5 (modules over /net) verified end-to-end"
+exit 0

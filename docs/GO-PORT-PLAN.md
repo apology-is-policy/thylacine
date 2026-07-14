@@ -303,6 +303,16 @@ Self-hosting is a staged bootstrap; you never build Go *on* Thylacine first.
 - **Stage 5 — MODULES over the net.** `net/http` (a stdlib port) + `go mod` /
   `go get` over the fast `/net` (TLS + DNS, already shipped) → download + build a
   real dependency. The module proxy protocol is plain HTTPS GETs.
+  **LANDED 2026-07-14** — three fork changes (crypto/x509 reads the system CA
+  bundle `/etc/ssl/certs/ca-certificates.crt` first; `go.env` pins
+  `GOTOOLCHAIN=local`; **net/conf.go lists thylacine beside plan9 at the four
+  resolver-order gates** — pre-fix, the first-ever hostname lookup from Go
+  on-device fell into the unix dnsclient's `127.0.0.1:53` default and timed
+  out) + two probes (`go-web` = net/http HTTPS fetch with verified chain, h2;
+  `go-get` = the self-contained module-workflow driver: /env-set module env →
+  `go mod tidy` pulls from proxy.golang.org sumdb-verified → build → run →
+  `go version -m`) + the online-guarded `tools/interactive/go5.exp` scenario.
+  As-built map: `docs/reference/133-go-port.md`.
 - **Stage 6 — BY DEFAULT + Nora integration.** Ship the toolchain in the default
   image; the `ut`/Nora UX; polish → the full end-to-end **write-in-Nora, `go mod`,
   build, run** experience, out of the box.

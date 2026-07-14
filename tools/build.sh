@@ -391,7 +391,7 @@ EOF
     # file-backed exec path carries it, like net-echo. Absent if the Go fork was
     # not present at build time (build_go_probes skipped); the joey go-hello
     # probe then degrades to "not spawned".
-    local go_bins=( "go-hello" "go-goroutines" "go-fs" "go-exec" "go-net" "go-env" )
+    local go_bins=( "go-hello" "go-goroutines" "go-fs" "go-exec" "go-net" "go-env" "go-web" "go-get" )
     local go_release="$BUILD_DIR/go"
     for bin in "${go_bins[@]}"; do
         local src="$go_release/$bin"
@@ -506,15 +506,23 @@ build_go_probes() {
     #                    /net) -- listen + accept + dial + TCP round-trip on the
     #                    resident lo (cs/clone/connect/announce/data; blocking
     #                    accept-open + Read ride the entersyscall path).
+    #   go-web        -- Stage 5 (half 1): net/http against a real URL (DNS via
+    #                    /net/cs -> slirp, TLS + x509 against the baked system
+    #                    CA bundle, h2 via ALPN). EXTERNAL-NETWORK dependent:
+    #                    never boot-wired; driven by go5.exp + by hand.
+    #   go-get        -- Stage 5 (half 2): the module workflow driver (embedded
+    #                    demo project; /env-set module env; go mod tidy pulls
+    #                    from proxy.golang.org through /net; build; run the
+    #                    result). EXTERNAL-NETWORK dependent, like go-web.
     local probe
-    for probe in go-hello go-goroutines go-fs go-exec go-net go-env; do
+    for probe in go-hello go-goroutines go-fs go-exec go-net go-env go-web go-get; do
         ( cd "$REPO_ROOT/usr/$probe" && \
           GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 "$go_bin" build -o "$go_out/$probe" . ) \
             || { echo "==> Go-port: go build $probe FAILED" >&2; return 1; }
         echo "==> Go probe built: $go_out/$probe"
         ls -la "$go_out/$probe"
     done
-    ledger "go-hello + go-goroutines + go-fs + go-exec + go-net + go-env: Go cross-compile (GOOS=thylacine) -> ramfs (Stage 1/2/3a/3b/3c/4a boot probes)"
+    ledger "go-hello + go-goroutines + go-fs + go-exec + go-net + go-env + go-web + go-get: Go cross-compile (GOOS=thylacine) -> ramfs (Stage 1/2/3a/3b/3c/4a boot probes + Stage 5 on-demand probes)"
 }
 
 # GOOS=thylacine Stage 4b: assemble a trimmed thylacine GOROOT (the cross-built
