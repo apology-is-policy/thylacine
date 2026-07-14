@@ -394,14 +394,18 @@ struct Proc *proc_alloc(void) {
 // itself drives -- virtio-rng -- is skipped inside virtio_mmio_reset_in_range
 // (round-2 F2), so the reset never disturbs a device this Proc did not own.
 //
-// Called from BOTH proc-exit handle-close sites so every death path is covered
-// before the pages free: proc_close_handles_at_exit (single-thread voluntary
-// exit, incl. the _Exit crash path) and proc_free (multi-thread reap --
-// stratumd, the live trigger -- plus single-thread-killed and orphan/rollback).
-// NO lock: like the adjacent handle_table_free + vma_drain, this runs only on a
-// quiesced Proc (thread_count==1 sole caller at exit, or all threads reaped at
-// proc_free), so no peer mutates the table or the VMA list. Returns the device
-// count for the regression test.
+// Called from every proc-exit handle-close site so every death path is
+// covered before the pages free (#68 round-2 F4 -- the three-site topology):
+// proc_close_handles_at_exit from exits() (the last-live-thread voluntary
+// exit; live_peers-gated) AND from thread_exit_self (the last Thread out of
+// a group terminate -- multi-thread exit_group incl. pouch _Exit, kills,
+// fault-terminate), plus proc_free (the fallback: orphan/rollback paths whose
+// table is still intact). NO lock: like the adjacent handle_table_free +
+// vma_drain, this runs only on a quiesced Proc -- at the two at-exit sites
+// the quiescence argument is live_peers == 0 (every peer has committed
+// EXITING, whose residual execution never touches the table, and no new
+// peer can spawn without a RUNNING thread); at proc_free all threads are
+// reaped. Returns the device count for the regression test.
 //
 // RESIDUAL (round-3 F1, trust-envelope): a driver that FULLY releases its
 // KObj_MMIO claim (SYS_BURROW_DETACH + close the fd) while the device is still
@@ -459,9 +463,11 @@ void proc_free(struct Proc *p) {
     // RW-7 R3-F1: stop any virtio device this Proc drove BEFORE vma_drain /
     // handle_table_free free its KObj_DMA pages back to the buddy (a still-
     // armed device would DMA into recycled memory). No-op when p->handles is
-    // already NULL (single-thread voluntary exit closed -- and quiesced -- at
-    // proc_close_handles_at_exit); does the work for the multi-thread reap,
-    // single-thread-killed, and orphan/rollback paths whose table is intact.
+    // already NULL -- since #68 that is EVERY exit path (exits()'s
+    // live_peers-gated close + thread_exit_self's last-out close both
+    // quiesce + NULL the table); this does real work only for the direct
+    // `state=ZOMBIE; proc_free()` orphan/rollback paths whose table is
+    // still intact (round-2 F4).
     proc_quiesce_owned_devices(p);
 
     // P3-Da: drain VMAs first. Each Vma carries a burrow_unmap; releasing
@@ -1606,27 +1612,32 @@ static void proc_become_zombie_locked(struct Proc *p, int status, const char *ms
 // the child's pipe write end stayed open in the zombie until reap, so
 // write_eof was never delivered (kernel/pipe.c).
 //
-// CALLED FROM exits() at the TOP, BEFORE the g_proc_table_lock acquire +
-// the ZOMBIE transition, and ONLY when p->thread_count == 1. Three
-// properties make this the sound place:
-//   - t is still RUNNING (EXITING is not set until under the lock below), so
-//     a sleep-capable close hook (a 9P clunk's Tclunk/Rclunk wait,
-//     srvconn teardown) is LEGAL -- sleeping while EXITING trips sched()'s
-//     "current is not RUNNING" assertion.
+// CALLED FROM two places, both BEFORE the ZOMBIE transition and both gated
+// on live_peers == 0 under g_proc_table_lock (round-2 F2 retired the old
+// thread_count==1 gate -- thread_count counts unreaped EXITING peers):
+//   (1) exits() (the voluntary-exit last live thread -- single-thread
+//       Procs AND joined-then-exits native multi-thread Procs);
+//   (2) thread_exit_self(), by the LAST live Thread out of a group
+//       terminate (#68 -- multi-thread exit_group and the killed paths).
+// Three properties make these the sound places:
+//   - t is still RUNNING (EXITING not yet set), so a sleep-capable close
+//     hook (a 9P clunk's Tclunk/Rclunk wait, srvconn teardown) is LEGAL --
+//     sleeping while EXITING trips sched()'s "current is not RUNNING"
+//     assertion. (Site (2) additionally sets t->exit_close_active so
+//     thread_die_pending() reads false for the closer: group_exit_msg is
+//     set on every SYS_EXIT_GROUP, and without the flag the write-behind
+//     flush + Tclunk sends would short-circuit -- the #68 F1 data-loss/
+//     fid-leak class. See the thread_exit_self call site.)
 //   - p is still ALIVE (not yet ZOMBIE), so wait_pid cannot reap it -- there
 //     is no risk that the reaper thread_free's this Thread while it sleeps
 //     mid-close (a UAF). The reaper only ever touches ZOMBIE Procs.
-//   - thread_count == 1, so there are NO peer Threads sharing this handle
-//     table -- closing it cannot pull an fd out from under a live peer.
-//
-// MULTI-thread Procs (thread_count > 1) keep the close at reap (proc_free):
-// their last-Thread ZOMBIE transition marks the Thread EXITING ATOMICALLY
-// (under the lock) with the last-Thread determination, leaving no RUNNING
-// window in which the dying Thread could do a sleeping close. Closing the
-// shared table earlier would race live peers. Multi-thread fds-close-at-exit
-// is a v1.x refinement (needs an EXITING-protocol restructure); at v1.0 they
-// retain the historical close-at-reap, so this is a strict improvement with
-// no regression.
+//   - The table has exactly ONE potential toucher: at site (1)
+//     thread_count == 1 (no peers exist); at site (2) every peer has
+//     committed THREAD_EXITING under g_proc_table_lock, and an EXITING
+//     peer's remaining execution (clear-child-tid handoff + sched()) never
+//     touches the handle table, while no new peer can appear (spawning
+//     requires a RUNNING thread in this Proc and the closer is the only
+//     one).
 //
 // ORDERING vs proc_free's vma_drain (which still runs at reap): inverted
 // (handle close at exit precedes vma_drain at reap), but SAFE by the #847
@@ -1644,12 +1655,26 @@ static void proc_become_zombie_locked(struct Proc *p, int status, const char *ms
 static void proc_close_handles_at_exit(struct Proc *p) {
     if (!p) return;
     if (p->handles) {
+        // #68 F1 (round-2): the whole close runs under exit_close_active so
+        // thread_die_pending() reads false for the closer at BOTH call sites.
+        // exits()'s site is reachable with the LS-5 interrupt-terminate latch
+        // DELIBERATELY still armed (the default-terminate path leaves the
+        // note queued -- notes.c), and thread_exit_self's site always has
+        // group_exit_msg set (every SYS_EXIT_GROUP) -- either would
+        // short-circuit the dev9p write-behind close-flush (silent data
+        // loss) and the close-time Tclunk (a server-side fid leak per fd).
+        // The closer is always current_thread() (both sites are the dying
+        // thread's own straight-line code); the flag is cleared before
+        // return on the same line-of-control, so it cannot leak.
+        struct Thread *closer = current_thread();
+        closer->exit_close_active = true;
         // RW-7 R3-F1: stop this Proc's virtio devices before its fds (and the
-        // KObj_DMA pages they hold) close -- the single-thread voluntary-exit
-        // leg of the device-death quiesce. proc_free covers the other paths.
+        // KObj_DMA pages they hold) close -- the at-exit leg of the
+        // device-death quiesce. proc_free covers the orphan/rollback paths.
         proc_quiesce_owned_devices(p);
         handle_table_free(p->handles);
         p->handles = NULL;
+        closer->exit_close_active = false;
     }
 }
 
@@ -1822,22 +1847,6 @@ void exits(const char *msg) {
     // registers shares).
     weft_share_release_owner(p);
 
-    // #926: a SINGLE-thread Proc closes its fds HERE -- at exit, while still
-    // RUNNING + ALIVE + peerless -- so inherited pipe write ends (and other
-    // fds) close at process termination, delivering pipe EOF immediately to a
-    // peer reading them (a shell draining `$(cmd)` no longer hangs). This is
-    // the ONLY sound spot: t is still RUNNING (a sleep-capable close hook,
-    // e.g. a 9P clunk, is legal -- it would trip sched()'s "not RUNNING"
-    // assert after the EXITING mark below); p is still ALIVE so wait_pid
-    // cannot reap+thread_free us mid-close; and thread_count==1 means no peer
-    // shares this table. Multi-thread Procs keep the close at reap (proc_free)
-    // -- their last-Thread EXITING mark is atomic-under-lock with the
-    // last-Thread determination, leaving no RUNNING window for a sleeping
-    // close (v1.x refinement). See proc_close_handles_at_exit.
-    if (p->thread_count == 1) {
-        proc_close_handles_at_exit(p);
-    }
-
     // P3-A (R5-H F75 close): all lineage mutations + parent wakeup
     // happen UNDER g_proc_table_lock atomically. The previous code did
     // these without synchronization, allowing a parallel parent's
@@ -1883,6 +1892,34 @@ void exits(const char *msg) {
         spin_unlock_irqrestore(&g_proc_table_lock, s);
         thread_exit_self();
         extinction("exits: thread_exit_self returned after group terminate");
+    }
+
+    // #926/#68 (round-2 F2): the LAST live thread out closes the Proc's
+    // handles HERE, in the same RUNNING+ALIVE window thread_exit_self uses --
+    // so inherited pipe write ends deliver EOF at process TERMINATION, not at
+    // reap (a shell draining `$(cmd)` sees EOF immediately). The gate is the
+    // live_peers determination, NOT thread_count: thread_count counts
+    // unreaped EXITING peers (it decrements only at reap), so a well-formed
+    // native multi-thread program that joins its workers then calls exits()
+    // arrives with thread_count > 1 and live_peers == 0 -- the old
+    // thread_count==1 gate skipped its close entirely and the #926
+    // drain-before-reap deadlock survived on that path. Window soundness is
+    // the thread_exit_self argument verbatim: every peer has committed
+    // EXITING (whose residual execution never touches the handle table), no
+    // new peer can spawn without a RUNNING thread, p stays ALIVE (no reap),
+    // and t stays RUNNING (sleep-capable close hooks legal).
+    // proc_close_handles_at_exit sets exit_close_active internally (round-2
+    // F1: this site is reachable with the LS-5 interrupt-terminate latch
+    // still armed -- the default-terminate path calls exits() with the note
+    // deliberately left queued -- and a racing cross-Proc kill can set
+    // group_exit_msg mid-close; either would short-circuit the write-behind
+    // flush + Tclunk without the flag).
+    if (p->handles) {
+        spin_unlock_irqrestore(&g_proc_table_lock, s);
+        proc_close_handles_at_exit(p);
+        s = spin_lock_irqsave(&g_proc_table_lock);
+        if (proc_count_live_peers_locked(p, t) != 0)
+            extinction("exits: peer appeared during handle close");
     }
 
     int status = (msg && msg[0] == 'o' && msg[1] == 'k' && msg[2] == 0) ? 0 : 1;
@@ -1952,6 +1989,60 @@ void thread_exit_self(void) {
     int live_peers = proc_count_live_peers_locked(p, t);
     bool become_zombie = (live_peers == 0);
 
+    // #68 (completes the #926 multi-thread seam): the LAST Thread out closes
+    // the Proc's handles HERE, in a deliberately-opened RUNNING+ALIVE window
+    // BEFORE the ZOMBIE transition -- so inherited pipe write ends deliver
+    // EOF at process termination, not at reap. Pre-#68 a multi-thread Proc
+    // (every Go binary) kept its fds until proc_free, so a parent draining
+    // the child's stdout to EOF BEFORE reaping deadlocked: EOF needed the
+    // reap, the reap needed the parent's wait, the wait waited on EOF (the
+    // nora gofmt-on-save hang; ut's `$(go ...)` substitution wedge).
+    //
+    // Why the window is sound (the same three properties as exits()'s
+    // single-thread close, re-derived for the last-out):
+    //   - t is still RUNNING (EXITING is written below, after re-taking the
+    //     lock), so a sleep-capable close hook is legal.
+    //   - p is still ALIVE (the ZOMBIE transition is below), so wait_pid
+    //     cannot reap + thread_free us mid-close.
+    //   - live_peers == 0 means every peer has committed THREAD_EXITING
+    //     (under this lock) -- an EXITING peer executes only its own
+    //     thread_exit_self tail (clear-child-tid handoff + sched()), which
+    //     never touches the handle table; and no new peer can appear because
+    //     SYS_THREAD_SPAWN requires a RUNNING thread in this Proc and t --
+    //     here -- is the only one. The determination is therefore STABLE
+    //     across the unlock; the recount below is a structural assert, not a
+    //     retry.
+    //
+    // The close runs under exit_close_active (set INSIDE
+    // proc_close_handles_at_exit -- round-2 F1 hoisted it so exits()'s site
+    // is covered too): group_exit_msg is set on EVERY SYS_EXIT_GROUP -- a
+    // clean exit_group(0) included -- and without the flag
+    // thread_die_pending() reads true for the closer, so every
+    // sleep-capable close hook short-circuited (SLEEP_INTR / the 9P
+    // client_self_dying send refusal): the dev9p write-behind close-flush
+    // silently DROPPED its staged bytes (data loss for a file left open at
+    // a multi-thread exit -- accepted write()s must survive exit, the page
+    // cache contract) and the close-time Tclunk was never sent (a
+    // server-side fid leak per open dev9p fd). Pre-#68 both ran on the
+    // REAPER's (non-dying) thread and worked; the flag restores exactly
+    // that behavior inside the new window. The re-admitted wedged-server
+    // strand is RELOCATED from the parent (where it hung the shell's
+    // wait_pid) onto the already-dying Proc -- and, unlike the old
+    // reap-time strand, it is NOT breakable by a further kill (the flag
+    // suppresses both death legs for the closer): a wedged flagged close
+    // parks the dying Proc unreapably. Precondition = a wedged TRUSTED
+    // server (an already system-degraded state); a bounded/abortable
+    // close-flush is the recorded v1.x seam (round-2 F3). proc_free's
+    // handle_table_free remains the fallback for orphan/rollback paths
+    // (idempotent: p->handles is NULLed by the close).
+    if (become_zombie && p->handles) {
+        spin_unlock_irqrestore(&g_proc_table_lock, s);
+        proc_close_handles_at_exit(p);
+        s = spin_lock_irqsave(&g_proc_table_lock);
+        if (proc_count_live_peers_locked(p, t) != 0)
+            extinction("thread_exit: peer appeared during last-out handle close");
+    }
+
     if (become_zombie) {
         // This Thread is the last live one. Proc transitions to ZOMBIE.
         // SYS_EXIT_GROUP / kill cross-thread shootdown (I-24): if a group
@@ -1991,19 +2082,12 @@ void thread_exit_self(void) {
         srv_proc_exit_notify(p);
         cap_proc_exit_notify(p);
         weft_share_release_owner(p);   // Weft-6a-2: GC un-claimed per-flow shares
-        // #926: NO at-exit handle close here. A multi-thread Proc's fds close
-        // at reap (proc_free) -- the EXITING mark above is atomic-under-lock
-        // with the last-Thread determination, so there is no RUNNING window
-        // in which this dying Thread could safely run a sleep-capable close;
-        // and the table was shared with peers until just now. Multi-thread
-        // fds-close-at-exit is a v1.x refinement. Single-thread Procs that exit
-        // VOLUNTARILY (return from main -> exits()) DO close at exit. KNOWN
-        // ASYMMETRY: a single-thread Proc that is KILLED (proc_group_terminate
-        // -> el0_return_die_check -> thread_exit_self) reaches HERE, so its fds
-        // also defer to reap -- the EOF-on-death contract is complete for
-        // voluntary exit but not yet for the kill path. The v1.x EXITING-
-        // protocol restructure (which enables multi-thread at-exit close)
-        // closes the kill path too. See proc_close_handles_at_exit.
+        // #68: the handle close already ran ABOVE (the pre-ZOMBIE
+        // RUNNING+ALIVE window), so the EOF-on-death contract now covers
+        // multi-thread Procs AND the killed-single-thread path (both reach
+        // here) -- the #926 asymmetry is closed. proc_free's
+        // handle_table_free remains the fallback for orphan/rollback paths
+        // and for hooks a death-flagged close skipped.
     }
 
     sched();

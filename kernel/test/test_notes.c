@@ -790,11 +790,13 @@ void test_notes_die_pending_predicate(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc succeeded");
 
-    // The predicate reads only t->proc + t->note_mask (the LS-5b fake-
-    // thread idiom, plus the proc binding).
+    // The predicate reads t->proc + t->note_mask + t->exit_close_active
+    // (the LS-5b fake-thread idiom, plus the proc binding; #68 F1 added the
+    // exit-close gate, so the flag must be explicitly initialized here).
     struct Thread fake_t;
-    fake_t.proc      = p;
-    fake_t.note_mask = 0u;
+    fake_t.proc              = p;
+    fake_t.note_mask         = 0u;
+    fake_t.exit_close_active = false;
 
     TEST_ASSERT(!thread_die_pending(NULL), "NULL thread -> false");
     TEST_ASSERT(!thread_die_pending(&fake_t), "fresh Proc -> false");
@@ -810,6 +812,29 @@ void test_notes_die_pending_predicate(void) {
     __atomic_store_n(&p->group_exit_msg, "killed", __ATOMIC_RELEASE);
     TEST_ASSERT(thread_die_pending(&fake_t),
                 "group exit -> true even with interrupt masked");
+
+    // #68 F1: the exit-close window suppresses BOTH legs -- the last-out
+    // closer's sends/waits must behave like a live thread's even though
+    // group_exit_msg is set (every SYS_EXIT_GROUP sets it; without this the
+    // dev9p write-behind close-flush dropped its staged bytes and the
+    // close-time Tclunk was never sent).
+    fake_t.exit_close_active = true;
+    TEST_ASSERT(!thread_die_pending(&fake_t),
+                "exit-close window -> false even with group_exit_msg set");
+    fake_t.note_mask = 0u; // the latch leg too (interrupt armed above)
+    TEST_ASSERT(!thread_die_pending(&fake_t),
+                "exit-close window -> false even with the latch armed");
+    // Round-2 F1: the LATCH-ONLY case (gmsg NULL) -- the LS-5 interrupt
+    // default-terminate calls exits() with the latch deliberately still
+    // armed and NO group_exit_msg; the flag must suppress that leg alone.
+    __atomic_store_n(&p->group_exit_msg, (const char *)NULL, __ATOMIC_RELEASE);
+    TEST_ASSERT(!thread_die_pending(&fake_t),
+                "exit-close window -> false with the latch armed, gmsg NULL");
+    __atomic_store_n(&p->group_exit_msg, "killed", __ATOMIC_RELEASE);
+    fake_t.exit_close_active = false;
+    TEST_ASSERT(thread_die_pending(&fake_t),
+                "flag cleared -> the death leg reads true again");
+
     __atomic_store_n(&p->group_exit_msg, (const char *)NULL, __ATOMIC_RELEASE);
     fake_t.note_mask = 0u;
 

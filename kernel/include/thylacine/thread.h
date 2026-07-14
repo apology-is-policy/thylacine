@@ -283,6 +283,18 @@ struct Thread {
     // count via spin_lock_raw/spin_unlock_raw (sound: sched runs fully
     // IRQ-masked, so that hold is non-preemptible by masking). KP_ZERO init.
     u32                preempt_count;
+
+    // #68 F1: true while this (last-out) Thread runs the pre-ZOMBIE handle
+    // close in thread_exit_self. thread_die_pending() returns false while
+    // set, so the close's 9P sends / RPC waits / sleeps behave like a live
+    // thread's -- group_exit_msg is set on EVERY SYS_EXIT_GROUP (a clean
+    // exit_group(0) included), and treating the orderly final close as
+    // "dying" short-circuited the dev9p write-behind close-flush (silent
+    // data loss for a file left open at a multi-thread exit) and the
+    // close-time Tclunk (a server-side fid leak per fd). Set/cleared ONLY
+    // by the owning Thread around proc_close_handles_at_exit; read only
+    // via thread_die_pending(self). Fits in the tail padding.
+    bool               exit_close_active;
 };
 
 _Static_assert(sizeof(struct Thread) == 1136,

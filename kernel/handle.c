@@ -298,18 +298,22 @@ void handle_table_free(struct HandleTable *t) {
     // are decremented correctly even on orphan-table cleanup.
     //
     // #844: NO table lock here -- this is the teardown path. It is reached at
-    // proc_free (thread_count == 0), at orphan-table cleanup, AND (since #926)
-    // at SINGLE-thread exit (exits(), thread_count == 1, Proc still ALIVE).
-    // It is lockless-safe because at EVERY one of those call sites the Proc
-    // has at most ONE live thread (thread_count <= 1) AND no production path
-    // ever touches a FOREIGN ALIVE Proc's handle table -- every handle op
-    // derives its Proc from current_thread()->proc (self). So the sole thread
-    // freeing the table cannot race a sibling. (The release MUST run lockless
+    // proc_free (all threads reaped), at orphan-table cleanup, AND (since
+    // #926, generalized by #68) at BOTH at-exit close sites -- exits() and
+    // thread_exit_self's last-out -- where proc_count_live_peers_locked == 0
+    // was determined under g_proc_table_lock. thread_count may exceed 1
+    // there (unreaped EXITING peers -- it decrements only at reap), but
+    // exactly ONE live thread (the closer) exists, an EXITING peer's
+    // residual execution (clear-child-tid handoff + sched()) never touches
+    // the handle table, AND no production path ever touches a FOREIGN ALIVE
+    // Proc's handle table -- every handle op derives its Proc from
+    // current_thread()->proc (self). So the sole live thread freeing the
+    // table cannot race a sibling. (The release MUST run lockless
     // regardless -- it may sleep.) FOOTGUN: a future cross-Proc handle
     // accessor -- e.g. a /proc/<pid>/fd surface inspecting a LIVE peer's
-    // table -- breaks premise (b) and would need the table lock here AND
-    // coordination with the #926 at-exit close. The slot-zeroing is
-    // belt-and-suspenders before the kfree.
+    // table -- breaks the self-only premise and would need the table lock
+    // here AND coordination with the #926/#68 at-exit close. The
+    // slot-zeroing is belt-and-suspenders before the kfree.
     for (int i = 0; i < PROC_HANDLE_MAX; i++) {
         if (t->slots[i].magic == HANDLE_MAGIC) {
             handle_release_obj(t->slots[i].kind, t->slots[i].obj);
