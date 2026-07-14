@@ -343,7 +343,7 @@ exec qemu-system-aarch64 \
     -device virtio-rng-device,id=rng0 \
     -device virtio-rng-pci,id=rng_pci0 \
     -nographic \
-    -serial mon:stdio \
+    -serial "${THYLACINE_SERIAL:-mon:stdio}" \
     ${qmp_flags[@]+"${qmp_flags[@]}"} \
     ${gdb_flags[@]+"${gdb_flags[@]}"} \
     ${share_flags[@]+"${share_flags[@]}"} \

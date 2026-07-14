@@ -51,6 +51,7 @@ proc lc_step {msg} {
 proc lc_fail {msg} {
     lc_step "FAIL: $msg"
     send_user "\nLS-CI FAIL: $msg\n"
+    lc_vm_kill
     exit 1
 }
 
@@ -69,8 +70,60 @@ proc lc_boot {} {
     global lc_repo lc_boot_timeout timeout spawn_id
     set accel [expr {[info exists ::env(THYLACINE_ACCEL)] ? $::env(THYLACINE_ACCEL) : "tcg"}]
     set timeout $lc_boot_timeout
-    lc_step "BOOT spawn accel=$accel timeout=${lc_boot_timeout}s"
-    spawn env THYLACINE_ACCEL=$accel $lc_repo/tools/run-vm.sh
+    # #66: on macOS (26.4) a reader parked in poll()/select() on an
+    # expect-spawn pty can LOSE the master-write wakeup: the bytes queue in the
+    # slave (FIONREAD grows per keystroke) while the parked reader never wakes
+    # -- qemu's stdin deafens a few seconds after its main loop goes
+    # timer-quiet, and every TUI scenario wedges (the ls-7 regression; full
+    # hunt: memory/bug_66_console_poll_wake_lost.md). So on Darwin the serial
+    # console (incl. the qemu monitor mux) rides a UNIX SOCKET, bridged into
+    # the expect pty by serial-bridge.py -- a bounded-park pump whose periodic
+    # re-entry level-checks the pty, immune to lost wakeups by construction.
+    # LS_CI_TRANSPORT=pty forces the direct spawn (Linux CI / A-B debugging);
+    # LS_CI_TRANSPORT=sock forces the bridge anywhere.
+    set transport [expr {[info exists ::env(LS_CI_TRANSPORT)] \
+        ? $::env(LS_CI_TRANSPORT) \
+        : ([string equal $::tcl_platform(os) "Darwin"] ? "sock" : "pty")}]
+    if {$transport eq "sock"} {
+        set sock /tmp/thyla-serial-[pid].sock
+        set vmlog /tmp/thyla-vm-[pid].log
+        file delete -force $sock
+        lc_step "BOOT vm accel=$accel transport=sock timeout=${lc_boot_timeout}s"
+        # server (wait) mode: qemu blocks until the bridge connects, so no
+        # early boot output is lost. The bg pid is run-vm.sh's, which execs
+        # qemu in place -- lc_fail/lc_quit kill exactly this VM, never a
+        # parallel job's.
+        set ::lc_vm_pid [exec env THYLACINE_ACCEL=$accel \
+            THYLACINE_SERIAL=mon:unix:$sock,server \
+            $lc_repo/tools/run-vm.sh > $vmlog 2>@1 &]
+        for {set i 0} {$i < 150} {incr i} {
+            if {[file exists $sock]} break
+            after 200
+        }
+        if {![file exists $sock]} { lc_fail "serial socket never appeared (vm log: $vmlog)" }
+        # PIPE bridge, not a pty: `spawn -open` drives an already-open Tcl
+        # pipe channel to nc, so NO pty exists anywhere on the input path
+        # (expect -> pipe -> nc -> unix socket -> qemu). Every failing
+        # configuration in the #66 hunt shared an expect-spawn pty as the
+        # input carrier; pipes have none of the tty layer.
+        set chan [open "|nc -U $sock" r+]
+        fconfigure $chan -buffering none -translation binary
+        spawn -open $chan
+        lc_step "BOOT nc pipe-bridge up"
+    } else {
+        lc_step "BOOT spawn accel=$accel timeout=${lc_boot_timeout}s"
+        spawn env THYLACINE_ACCEL=$accel $lc_repo/tools/run-vm.sh
+    }
+}
+
+# Kill the socket-transport VM if one was started (no-op otherwise). The pty
+# transport's VM dies with its spawn; the socket VM is a background process
+# that must be reaped explicitly on both the pass and fail exits.
+proc lc_vm_kill {} {
+    if {[info exists ::lc_vm_pid]} {
+        catch {exec kill -9 $::lc_vm_pid}
+        unset ::lc_vm_pid
+    }
 }
 
 # Wait for an EXACT string, with extinction / timeout / eof as hard failures.
@@ -155,4 +208,5 @@ proc lc_quit {} {
         eof     { lc_step "EOF clean" }
         timeout { lc_step "EOF timeout (wrapper will reap qemu)" }
     }
+    lc_vm_kill
 }
