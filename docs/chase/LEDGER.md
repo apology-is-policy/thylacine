@@ -968,3 +968,17 @@ fault-bound; combining ~5 ms; msize demoted). Remaining options:
 The arc holds S1 (interactive parity) either way; the S3 gap is now a
 measured, audited, decomposed 263 ms with named residuals -- no longer
 an unexplained 2x.
+
+## THE SENATE VERDICT (2026-07-14): CHASE CLOSED AT THE ACHIEVED LEVEL
+
+Voted: option (a) with the philosophical framing -- the multiserver
+architecture's benefits (crash isolation, the capability boundary,
+per-user proxies, the Plan 9 model) are bought at a measured, small,
+structural tax on cold I/O; warm is at parity. S1 201 vs 266 HELD; S3
+2911 vs 2648 accepted (+263, = ~19% cold / 0% warm vs a bare-metal M2
+host). The remaining avenues are recorded FOR POSTERITY with honest
+covered-wall prices in docs/CHASE.md section 9 (async write-back
+~150-250; FS dataplane ~100-170; frame-steal ~35; attr-carrying
+readdir ~30-50; handler grind ~30-60; bare-metal re-measure free).
+Tasks #38 + #54 closed. The instrument stacks stripped for good. The
+suspended queue resumes. Next: the Go arc proper.

@@ -221,3 +221,85 @@ chase IS the mission's end-game); the nora-under-HVF bug (unless it
 blocks chase tooling). The RC/CF/Larder/POUNCE closed lists and the
 mission register (`project_go_build_clean_perf.md` in session memory)
 are the arc's data trove — read them before re-deriving anything.
+
+## 9. THE CLOSE (Senate-voted 2026-07-14): parity on S1; the S3 residual accepted as the architecture's price
+
+**Verdict**: the chase ends at the achieved level. S1 warm **201 ms vs
+the 266 bar -- PARITY HELD**. S3 cold **2911 ms vs the 2648 bar --
+263 ms over**, fully decomposed, audited, and attributed: the residual
+is NOT Stratum (handlers ~15 us/op avg, ~230 ms of the band), NOT 9P
+chattiness (killed across the mission: 13-RPC stats -> 1 fused op;
+readdir batched; fids recycled; rpc 18.6k -> 16.0k with the survivors
+~irreducible first-touch), but the **structural cost of cold I/O
+through a userspace file server**: ~40 us of covered round-trip per op
+(two thread wakes + two ring copies + codec) x ~16k irreducible cold
+ops, where Linux/macOS run the same op as an in-kernel function call
+next to the page cache (~1-2 us) and absorb ALL cold writes
+asynchronously. Where the guest cache plays the page cache's role --
+every warm path -- the gap is ZERO; the proof is S1. The multiserver
+philosophy (crash isolation, the capability boundary, per-user proxies,
+the Plan 9 model) buys its benefits at exactly this tax, and the tax is
+now measured: ~19% on a cold build, 0% warm.
+
+### The remaining avenues (for posterity -- honestly priced, none funded)
+
+Recorded so a future arc starts from ground truth, not re-derivation.
+All prices in COVERED-WALL ms against the final S3 window (~700 ms
+covered; the term-4 lesson: price round trips ELIMINATED x their
+covered share, never op counts or CPU sums).
+
+1. **Full asynchronous write-back (the big one, ~150-250 ms)**: make
+   cold guest writes return at Larder-stage time (not just the F1
+   append runs -- ALL writes), flushed by a background drainer, with
+   fsync/close as the only ordering barriers. Attacks BOTH the write
+   band (~150 ms handler+RPC) and its share of the wake tax. This is a
+   real coherence-semantics ARC, not a cut: crash-window semantics, the
+   close-flush contract (I-38's close-to-open edge), error latching
+   (the F1 NFS-model precedent), and the wb budget/backpressure story.
+   The F1 write-behind + the C-2 server dirty-buffer are its landed
+   substrate.
+2. **A shared-memory FS dataplane (Weft-for-9P, ~100-170 ms)**: the
+   per-op wake tax (~20 us x 16k = ~320 ms covered) shrinks 2-3x with
+   a doorbell-batched shared-ring submission path (the Weft/Loom
+   machinery already exists kernel-side; the server would poll/park on
+   the ring like netd's weft arm). Crosses the srvconn ABI; audit-heavy
+   (the I-37 class); composes with (1).
+3. **Frame-steal zero-copy insert (~35 ms)**: the Twrite frame's
+   payload moves INTO the dirty buffer by ownership transfer instead of
+   memcpy -- kills the residual insert fault+copy band the A-2 shelf
+   could not recycle (net-new bytes). Crosses the wire/FS layer
+   boundary in stratumd; medium risk, small yield alone.
+4. **Server-side attr-carrying readdir (~30-50 ms)**: a
+   readdirplus-shaped extension populating child attrs at enumeration;
+   T4-M measured only 30% of wire wgas have a readdir'd parent, so
+   priced accordingly. A protocol op (9P-EXTENSIONS registry + both
+   ends + the Larder populate discipline).
+5. **#367-class handler grind (~30-60 ms)**: profile-guided cuts over
+   the ~230 ms handler table (write 52 us/op is the fat tail; iset ~7,
+   btree lookups, per-op malloc in the pool). Diminishing returns; the
+   T4-A probes are the map.
+6. **Bare-metal re-measure (0 ms of work, unknown yield)**: part of
+   the per-wake tax is QEMU/HVF vmexit cost on every IPI; Lazarus/RPi
+   will shrink the measured tax for free. The bar table should be
+   re-run there before any future funding decision.
+
+Composite if ALL of 1-5 landed: ~250-400 ms -- i.e. the bar is
+plausibly reachable, but only via arcs (1)+(2), which are
+architecture work with real coherence/audit surface, not cuts. The
+Senate's judgment: not worth it now; the philosophy pays elsewhere.
+
+**Arc bookkeeping**: tasks #38 + #54 CLOSED at this verdict. The
+suspended queue (#13 GCP sanitizers [now incl. the term-4 F1
+thread-exhaustion + shelf ASan-poison coverage gaps], #2, #28, #30)
+resumes. The instrument stacks (DIAG23/DIAG26) are STRIPPED for good;
+the final instrumented states live in the session tmp saves. The data
+trove for any future reader: docs/chase/LEDGER.md (every term's
+measurements + lessons), memory/audit_term4_closed_list.md + the
+per-arc closed lists, and the mission register
+(project_go_build_clean_perf.md).
+
+The chase is over. The prey was measured, not caught -- and the
+measurement is the trophy: a cold go build at 1.19x a bare-metal M2
+host through a userspace file server over an encrypted,
+Merkle-verified, capability-scoped filesystem, and warm builds at
+parity. Next: the Go arc proper (the toolchain the chase was for).
