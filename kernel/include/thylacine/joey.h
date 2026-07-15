@@ -51,4 +51,9 @@ void joey_root_kproc_at_devramfs(void);
 // kernel/main.c (where the banner string lives).
 bool boot_mark_complete(void);
 
+// boot_is_complete: true once SYS_BOOT_COMPLETE has fired (the boot->session
+// boundary). Boot-window-only surfaces gate on this -- e.g. the debug-fs
+// `hwverify` diagnostic, refused post-boot (8a-2c F2). Implemented in main.c.
+bool boot_is_complete(void);
+
 #endif // THYLACINE_INIT_H

@@ -2372,6 +2372,23 @@ void proc_debug_stop_deliver(struct Proc *p) {
     // observes it too. RELEASE pairs with el0_return_stop_check's ACQUIRE.
     __atomic_store_n(&p->debug_stop_req, 1u, __ATOMIC_RELEASE);
 
+    // A whole-Proc stop SUPERSEDES any in-flight single-step (8a-2c F1): cancel
+    // every thread's pending step so a step that a peer's bp/wp fire (or a
+    // detach/re-attach) interrupted before its own EC 0x32 does not leave
+    // debug_ss_armed set -> a spurious SPSR.SS armed into the NEXT resume ->
+    // an unexpected one-instruction stop after a `continue`. Idempotent with the
+    // normal step completion, which already cleared debug_ss_armed at its EC 0x32
+    // (hwdebug_singlestep_from_el0) before reaching this deliver. Under
+    // g_proc_table_lock (both callers hold it: the ctl `stop` verb via
+    // proc_for_each, and proc_debug_fault_stop), so p->threads is stable; the
+    // RELEASE store pairs with hwdebug_switch_in's + el0_return_stop_check's
+    // ACQUIRE reads of debug_ss_armed. (v1.0 arms only the head thread, so this is
+    // usually a one-element clear; the walk is future-proof for a per-thread step.)
+    for (struct Thread *peer = p->threads; peer; peer = peer->next_in_proc) {
+        __atomic_store_n(&peer->debug_ss_armed, false, __ATOMIC_RELEASE);
+        peer->debug_stepover_va = 0;
+    }
+
     // Kick any peer RUNNING at EL0 on another CPU so it traps to its IRQ-from-EL0
     // tail (0x480 -> el0_return_stop_check) and parks without waiting for a timer
     // tick. Broadcast to online CPUs (rare path; a CPU not running a peer of p
@@ -2383,6 +2400,29 @@ void proc_debug_stop_deliver(struct Proc *p) {
     // (fewer spurious IPIs) is a v1.x optimization; the broadcast reschedule is
     // the proven death-delivery vehicle.
     smp_resched_others();
+}
+
+// proc_debug_fault_stop -- see proc.h. The EC-path (hardware fire) counterpart
+// of proc_debug_stop_deliver: it takes g_proc_table_lock so it serializes with a
+// concurrent detach / ctl-fd close (devproc_debug_walk_cb / devproc_debug_release
+// _cb, which clear debug_owner + the hw table + proc_debug_resume under the same
+// lock) and delivers the stop ONLY while a debugger still owns the slot. That
+// closes SA-1: a fire that raced a detach and set debug_stop_req AFTER the
+// detach's resume cleared it would park the target with no debugger left to
+// resume it (specs/debug_stop.tla StopImpliesOwned). The debug_owner read is a
+// plain field read under the lock (the same discipline as attach/detach); a NULL
+// owner (detached in the window) is reported as "not delivered" so the caller
+// falls back to the benign STALE-arm path. smp_resched_others() runs under the
+// lock exactly as the ctl `stop` verb already does it (proc_for_each -> callback
+// -> proc_debug_stop_deliver -> smp_resched_others).
+bool proc_debug_fault_stop(struct Proc *p) {
+    if (!p || p->magic != PROC_MAGIC) return false;
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    bool deliver = (p->debug_owner != NULL);
+    if (deliver)
+        proc_debug_stop_deliver(p);   // caller (this frame) now holds g_proc_table_lock
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return deliver;
 }
 
 void proc_debug_resume(struct Proc *p) {

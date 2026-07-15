@@ -349,13 +349,13 @@ complete (real per-Proc hardware breakpoints: the table + ctx-switch install +
 the EC 0x30 route + `hwbreak`/`hwrmbreak` + `#73`). 8a-2b-2 complete (the arm64
 single-step machine + the step-over-breakpoint dance + the `step` verb; §
 below). 8a-2b-3 complete (hardware watchpoints via `DBGWCR`/`DBGWVR` + the EC 0x34
-route + `hwwatch`/`hwrmwatch`; watchpoints-disabled-during-step; § below). Next:
-8a-2c (the consolidated Fable-5-max holotype + the SMP gate + the ARCH §25.4 row +
-docs) — which prosecutes the whole 8a-2 detach/stop/resume surface, incl. **SA-1**
-(a stale bp/wp fire racing a `detach`-while-running can strand the debuggee — a
-narrow, pre-existing-since-b-1, I-39-gated, debuggee-only hazard; task #80). The
-ARCH §25.4 audit-trigger row + the CLAUDE.md mirror for the 8a-2 HW-debug tier land
-at 8a-2c, when the whole surface is coherent + audited.
+route + `hwwatch`/`hwrmwatch`; watchpoints-disabled-during-step; § below).
+**8a-2c complete — THE 8a-2 ARC IS CLOSED** (the arc-close section below): the
+consolidated Fable-5-max holotype over the whole 8a-2 surface + the SA-1 fix
+(`proc_debug_fault_stop`, the attach-gated hardware-fire stop delivery) +
+`StopImpliesOwned` in `debug_stop.tla` + the F1/F2/F3 fixes; default 1136/1136 +
+boot OK + `/debug-probe` (bp/step/wp) + `/hwbp-verify` on HVF + the SMP gate + the
+ARCH §25.4 authoritative row + the CLAUDE.md mirror + this doc.
 
 ## 8a-2b-2 — single-step + the step-over-breakpoint dance
 
@@ -460,6 +460,116 @@ rejects: bad len, cross-doubleword, empty flags) + `hwdebug.wp_encode` (the
 register math) + the `/debug-probe` watch phase (arm a WRITE watchpoint on a
 cross-Proc stack word, resume, the child's store traps → verify the EL0t stop →
 `hwrmwatch` + resume → exit 0; the wp is the ONLY reason the store stops).
+
+## 8a-2c — the consolidated close (SA-1 + the arc audit)
+
+8a-2c is the arc close: a focused Fable-5-max holotype over the WHOLE 8a-2
+hardware-debug surface (the bp/step/wp EC handlers + the ctx-switch install + the
+detach/stop/resume composition with the death path) + the SMP gate + the HVF/TCG
+boot proofs + this doc + the ARCH §25.4 authoritative prosecution row + the
+CLAUDE.md mirror.
+
+### SA-1 — the stale-fire-vs-detach strand (self-found; fixed)
+
+The hazard (found by the 8a-2b-3 self-audit, pre-existing since the b-1 bp path): a
+hardware fire (a bp/wp hit or a single-step completion) delivered the whole-Proc
+stop by calling `proc_debug_stop_deliver` **directly from the EC handler** — in the
+target's own exception context, holding NO lock and with NO owner check. Meanwhile
+a `detach` / ctl-fd close cleared `debug_owner` + the hw table + called
+`proc_debug_resume`, all **under `g_proc_table_lock`**. Those two are unserialized,
+so a fire whose `debug_stop_req` store lands AFTER the detach's `proc_debug_resume`
+cleared it parks the target at its EL0-return tail with **no debugger left to
+resume it** — the strand (violates `debug_stop.tla` NoStrand). Narrow (a genuine
+race window), debuggee-only (the rest of the system is unaffected), I-39-gated (only
+a Proc a debugger attached to). The ctl `stop` verb was never exposed — it delivers
+under `g_proc_table_lock` (`proc_for_each`) with `debug_owner` already verified; the
+EC path was the asymmetric, ungated setter.
+
+The fix: `proc_debug_fault_stop(p)` (`kernel/proc.c`) — the EC-path counterpart of
+`proc_debug_stop_deliver`. It takes `g_proc_table_lock` (so it serializes with a
+concurrent detach) and delivers the stop **only while `p->debug_owner != NULL`**; it
+returns whether it delivered. The three EC handlers
+(`hwdebug_breakpoint_from_el0` / `hwdebug_watchpoint_from_el0` /
+`hwdebug_singlestep_from_el0`) now call it: on a live owner it delivers (the thread
+parks as before); on a NULL owner (detached in the race window) it no-ops and the
+bp/wp handler falls back to the benign STALE-arm path (disable this CPU's debug regs
++ resume the instruction), while the step handler simply lets the thread run free
+(SS is already disarmed) — exactly right for a detached target. The EC handler holds
+no kernel lock when it fires (it was at EL0), so taking `g_proc_table_lock` (the
+outermost lock) is deadlock-free vs the detach's `GPTL → wait_lock` walk; and
+`smp_resched_others()` under the lock is the same shape the ctl `stop` verb already
+uses. The deliver-before-detach sub-case (a fire that delivers, then the thread
+parks after the detach's resume walk) is covered by the existing I-9
+register-then-observe in `proc_debug_resume` (clear-before-walk under the per-Thread
+`wait_lock`): a thread registering after the walk re-observes the cleared flag and
+does not park; one registered before is found + woken.
+
+**The model** gained the invariant `StopImpliesOwned == sflag => attached` (the
+per-Proc stop flag is set only while a debugger owns the slot) + a `FaultStop`
+action (gated on `attached` in the clean model; ungated under the new
+`BUGGY_FAULT_STOP_UNGATED` knob) + the `debug_stop_buggy_fault_stop_ungated.cfg`
+counterexample. `RequestStop` was always attach-gated, so `StopImpliesOwned` is an
+invariant of the correct model; SA-1 was the impl violating it, and
+`proc_debug_fault_stop`'s `debug_owner`-under-GPTL check aligns the impl to the
+model. Clean stays TLC-green (2264 distinct, unperturbed — `FaultStop`-clean is
+dominated by `RequestStop` + `DbgDie`); the buggy cfg violates `StopImpliesOwned`.
+Regression: `devproc.debug_stop_start_resume` gains the SA-1 leg (fault-stop with no
+owner does NOT deliver + sets no flag; with a live owner it delivers) — revert-probed
+(the ungated gate → 1134/1135 FAIL at exactly that leg).
+
+### The holotype + the fixes (F1/F2/F3)
+
+The consolidated Fable-5-max holotype (MODEL(end): Fable 5) + a concurrent
+self-audit over the whole 8a-2 surface closed **0 P0 / 1 P1 / 0 P2 / 2 P3, NOT
+dirty** (all localized fixes — a flag-clear, a boot-window gate, a symmetric disable;
+no wait/wake-protocol restructure). Both prosecutors converged on the SA-1 fix being
+sound + the verified-sound set (gate completeness, no deadlock, no torn `(count,
+slots)` read, death wins, the SPSR guard, the I-39 gate, the wp-encode math).
+
+**F1 [P1] — a stale `debug_ss_armed` leaks a spurious single-step (the multi-thread
+trap; FIXED).** `debug_ss_armed` is set by the `step` verb and was cleared in exactly
+one place — the SS EC handler (`hwdebug_singlestep_from_el0`). So a `step` on the head
+H that is SUPERSEDED by a peer P's bp/wp fire (a whole-Proc stop, reachable on the
+always-multi-threaded Go workload) before H reaches its own EC 0x32 leaves
+`debug_ss_armed` set; H parks for P's stop, and on the next `continue`
+`el0_return_stop_check` re-arms `SPSR.SS` off the stale flag → H executes ONE
+instruction and stops again — a phantom stop after a `continue`. Invisible to the
+single-threaded `debug-child` E2E and below `debug_step.tla`'s single-thread step
+abstraction (no cross-thread stop flag). FIX: a whole-Proc stop supersedes any
+in-flight step — `proc_debug_stop_deliver` clears `debug_ss_armed` +
+`debug_stepover_va` for every thread of `p` (idempotent with the normal step
+completion, which clears the flag at its own EC 0x32 first; under
+`g_proc_table_lock`, so `p->threads` is stable). Regression
+`devproc.debug_step_cancel_on_stop` — revert-probed (the clear disabled → 1135/1136
+FAIL). The cross-thread step-vs-stop supersede is a multi-thread interaction below the
+single-thread `debug_step.tla` abstraction; modeling it would require merging the step
++ stop multi-thread machinery, disproportionate for a bounded functional (phantom-stop,
+not soundness) bug — the fix + the mechanical regression + this prose are the rigor
+(the below-the-model pattern, cf. net-4d / #294).
+
+**F2 [P3] — the global `hwverify` slot could swallow another Proc's real breakpoint
+(FIXED).** The 8a-2a self-scoped verify uses a GLOBAL one-at-a-time slot whose
+EC-swallow is keyed on an ELR match, NOT the arming Proc, and any unprivileged Proc
+could arm a verify on itself post-boot and leave it armed. A debugged Proc D with a
+real bp at the same VA would have its stop swallowed + its MDE transiently cleared —
+bounded (self-healing, no authority gain) but a real cross-Proc integrity effect on an
+authorized session. FIX: the verify is a BOOT-ONLY diagnostic (the boot probe
+`usr/hwbp-verify` runs before `SYS_BOOT_COMPLETE`; post-boot the real HW-debug path is
+the 8a-2b per-Proc install), so `devproc.c` refuses `hwverify` once `boot_is_complete()`
+(exposed from `kernel/main.c`) — no post-boot arm → the global slot stays idle → the
+whole surface is gone. The boot probe still passes (`/hwbp-verify PASS`).
+
+**F3 [P3] — the detached-step leg left MDE + bps loaded (only SS cleared; FIXED).** A
+step loads MDE + the bp table too (`hwdebug_load_debug` with `ss=true`), so on the
+detached-step leg (`proc_debug_fault_stop` returns false) clearing only SS left a wider
+stale window than the bp/wp detached arms (which call `hwdebug_disable_this_cpu`). FIX:
+symmetric `hwdebug_disable_this_cpu()` on the detached-step leg + the corrected comment.
+
+**Gates**: default **1136/1136** + boot OK + 0 EXTINCTION + `/debug-probe` (bp/step/wp)
+PASS + `/hwbp-verify` PASS on HVF (`-cpu host`, GICv2) — the 8a-2c HVF proof;
+`debug_stop.tla` (clean 2264 + 5 buggy) + `debug_step.tla` (clean + 2 buggy) TLC-green;
+the SMP gate default+UBSan × smp4/smp8 N=10 = **40/40 PASS, 0 corruption**. Closed list:
+`memory/audit_8a2_closed_list.md`.
 
 ## Known caveats / footguns
 

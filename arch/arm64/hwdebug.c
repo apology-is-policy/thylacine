@@ -322,14 +322,21 @@ bool hwdebug_breakpoint_from_el0(u64 elr) {
 
     if (match) {
         // A real breakpoint hit: request the whole Proc stop (Delve all-stop).
-        // proc_debug_stop_deliver sets p->debug_stop_req (RELEASE) + kicks the
-        // peers; the current thread returns from here to the EL0-return tail,
-        // observes the flag, and parks (el0_return_stop_check). Death still wins
-        // (the tail's die-check precedes the stop-check). The debugger learns via
-        // /proc/<pid>/wait and reads regs.pc == this bp VA (ELR = the bp'd
-        // instruction, not yet executed). No lock needed: the flag store is
-        // atomic and this thread observes it at its own tail.
-        proc_debug_stop_deliver(p);
+        // proc_debug_fault_stop takes g_proc_table_lock, so it serializes with a
+        // concurrent detach / ctl-fd close and delivers the stop ONLY while a
+        // debugger still owns the slot (SA-1: a fire racing a detach must not park
+        // the target after the debugger is gone -- specs/debug_stop.tla
+        // StopImpliesOwned). On delivery the current thread returns to the
+        // EL0-return tail, observes p->debug_stop_req, and parks
+        // (el0_return_stop_check); death still wins (the tail's die-check precedes
+        // the stop-check). The debugger learns via /proc/<pid>/wait and reads
+        // regs.pc == this bp VA (ELR = the bp'd instruction, not yet executed).
+        if (proc_debug_fault_stop(p))
+            return true;
+        // The debugger detached in the race window (no owner): treat this as a
+        // benign STALE arm -- disable this CPU's debug regs and resume, so the
+        // instruction re-executes untrapped and the detached target runs free.
+        hwdebug_disable_this_cpu();
         return true;
     }
 
@@ -365,7 +372,17 @@ bool hwdebug_singlestep_from_el0(u64 elr) {
     __atomic_store_n(&t->debug_ss_armed, false, __ATOMIC_RELEASE);
     t->debug_stepover_va = 0;
     hwdebug_disable_ss_this_cpu();
-    proc_debug_stop_deliver(p);
+    // proc_debug_fault_stop (not the raw deliver) gates the re-stop on a live
+    // debugger under g_proc_table_lock -- SA-1, symmetric with the bp/wp arms. On a
+    // live owner it re-stops (the thread re-parks at the tail). If the debugger
+    // detached in the race window it no-ops (returns false): the step loaded MDE +
+    // the bp table too (hwdebug_load_debug with ss=true), NOT just SS, so disable
+    // ALL of this CPU's debug regs (F3: symmetric with the bp/wp detached arms --
+    // clearing only SS would leave MDE + a stale bp loaded until the next fire /
+    // switch-out) and let the thread run free -- the right outcome for a detached
+    // target.
+    if (!proc_debug_fault_stop(p))
+        hwdebug_disable_this_cpu();
     return true;
 }
 
@@ -383,13 +400,20 @@ bool hwdebug_watchpoint_from_el0(u64 elr, u64 far) {
         // programmed DBGWCR, so a wp EC on a debugged Proc with armed wps IS a
         // debugger hit. arm64 reports FAR imprecise-within-the-block, so we do NOT
         // gate delivery on an exact FAR match (that would risk a MISSED stop);
-        // wp_count>0 is the sound signal. Deliver the whole-Proc stop (the thread
-        // returns here -> the EL0-return tail's stop-check parks it; death wins, as
-        // the tail's die-check precedes the stop-check). The debugger reads regs.pc
-        // (the load/store instruction; a wp fires with ELR = the accessing insn, so
-        // a plain `start` over a still-armed wp re-traps -- the debugger `step`s
-        // [watchpoints are OFF for the step] or `hwrmwatch`es first).
-        proc_debug_stop_deliver(p);
+        // wp_count>0 is the sound signal. Deliver the whole-Proc stop via
+        // proc_debug_fault_stop (takes g_proc_table_lock -> serializes with a
+        // concurrent detach, delivers only while a debugger owns the slot -- SA-1,
+        // the bp path's twin). On delivery the thread returns here -> the
+        // EL0-return tail's stop-check parks it; death wins (the die-check precedes
+        // the stop-check). The debugger reads regs.pc (the load/store instruction;
+        // a wp fires with ELR = the accessing insn, so a plain `start` over a
+        // still-armed wp re-traps -- the debugger `step`s [watchpoints are OFF for
+        // the step] or `hwrmwatch`es first).
+        if (proc_debug_fault_stop(p))
+            return true;
+        // Detached in the race window (no owner) -> benign STALE, symmetric with
+        // the bp + the wp_count==0 arms below: disable this CPU + resume.
+        hwdebug_disable_this_cpu();
         return true;
     }
     // wp_count == 0: a STALE hardware watchpoint -- a detach/hwrmwatch cleared the

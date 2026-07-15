@@ -24,7 +24,7 @@
 (*     confirm-walk takes the SAME wlock, the debugger can only confirm a     *)
 (*     Thread that has genuinely parked -- no lost stop.                      *)
 (*                                                                         *)
-(* THE FOUR BUG CLASSES (one knob each, each a named buggy cfg).            *)
+(* THE FIVE BUG CLASSES (one knob each, each a named buggy cfg).            *)
 (*   BUGGY_STOP_BEFORE_DIE          -- the tail checks the stop BEFORE the    *)
 (*       die-check, so a group-terminated Thread parks (and, on the death-   *)
 (*       wake resume, re-parks) instead of dying -> death never completes    *)
@@ -40,6 +40,14 @@
 (*   BUGGY_STRAND_ON_CLOSE          -- releasing the slot (detach / ctl-fd     *)
 (*       close / debugger death) neither clears the stop nor wakes the        *)
 (*       parked Threads -> the target is stranded stopped forever (NoStrand). *)
+(*   BUGGY_FAULT_STOP_UNGATED       -- the EC-path hardware fire (a bp / wp /  *)
+(*       step completion) sets the per-Proc stop flag WITHOUT the `attached`  *)
+(*       gate, so a fire racing a detach re-arms the stop after the slot was  *)
+(*       released -> the target parks with no debugger left to resume it      *)
+(*       (StopImpliesOwned -- 8a-2 SA-1). The correct EC path                 *)
+(*       (proc_debug_fault_stop) delivers under g_proc_table_lock ONLY while  *)
+(*       debug_owner != NULL, exactly RequestStop's gate for the hardware     *)
+(*       trigger.                                                             *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -48,7 +56,8 @@ CONSTANTS
     BUGGY_STOP_BEFORE_DIE,          \* TRUE = stop-check before die-check at the tail
     BUGGY_OBSERVE_BEFORE_REGISTER,  \* TRUE = observe sflag before registering
     BUGGY_DOUBLE_WAKE,              \* TRUE = resume has no single-wake latch
-    BUGGY_STRAND_ON_CLOSE           \* TRUE = slot release does not resume the target
+    BUGGY_STRAND_ON_CLOSE,          \* TRUE = slot release does not resume the target
+    BUGGY_FAULT_STOP_UNGATED        \* TRUE = the EC-path fire sets sflag without the attached gate
 
 ASSUME Cardinality(Threads) >= 1
 
@@ -223,6 +232,27 @@ RequestStop ==
     /\ UNCHANGED <<pc, gflag, attached, dbg_live, detach_req,
                    resume_req, release_req, wlock, confirmed, fired>>
 
+(* The EC-path hardware fire (a bp / wp hit or a single-step completion) also  *)
+(* requests the whole-Proc stop. Unlike the discretionary `stop` verb this is  *)
+(* driven by the TARGET executing, and it arrives in the target's own          *)
+(* exception context holding no lock (proc_debug_fault_stop then takes          *)
+(* g_proc_table_lock to serialize with a concurrent detach). CORRECT: gated on  *)
+(* `attached` -- deliver ONLY while a debugger owns the slot (debug_owner !=     *)
+(* NULL), exactly RequestStop's gate. It does NOT require dbg_live: a fire in    *)
+(* the debugger-dead-but-slot-not-yet-released window sets the flag, and         *)
+(* ReleaseSlot then clears + wakes (still resumed). BUGGY_FAULT_STOP_UNGATED     *)
+(* drops the gate (the pre-fix EC path set debug_stop_req with no lock + no      *)
+(* owner check), so a fire racing a detach sets sflag with no debugger attached  *)
+(* -> StopImpliesOwned fails and the target strands (SA-1).                      *)
+FaultStop ==
+    /\ (BUGGY_FAULT_STOP_UNGATED \/ attached)
+    /\ ~sflag
+    /\ ~resume_req
+    /\ (BUGGY_FAULT_STOP_UNGATED \/ ~release_req)
+    /\ sflag' = TRUE
+    /\ UNCHANGED <<pc, gflag, attached, dbg_live, detach_req,
+                   resume_req, release_req, wlock, confirmed, fired>>
+
 (* The delivery walk: mark t confirmed-parked, under t's wait_lock (so it     *)
 (* cannot interleave with t's register-then-observe). CORRECT confirms only a *)
 (* genuinely parked Thread; BUGGY trusts the out-of-lock observe (an obs_     *)
@@ -325,6 +355,7 @@ Next ==
     \/ \E t \in Threads : \E s \in Sources : WakeFrom(t, s)
     \/ Attach
     \/ RequestStop
+    \/ FaultStop
     \/ StartResume
     \/ DetachReq
     \/ DbgDie
@@ -372,11 +403,23 @@ NoEL0AfterStopped ==
 ExactlyOnceResume ==
     \A t \in Threads : NWake(t) <= 1
 
+(* StopImpliesOwned (8a-2 SA-1): the per-Proc stop flag is set only while a    *)
+(* debugger owns the slot. RequestStop and the CORRECT FaultStop both gate on  *)
+(* `attached`, and ReleaseSlot clears sflag and attached together, so the stop *)
+(* flag can never outlive the owner -- there is always a debugger (or a        *)
+(* pending ReleaseSlot on debugger death) to resume the target. The ungated    *)
+(* fault-stop (the pre-fix EC path) violates it: a fire sets sflag with no     *)
+(* owner, so a parked target has no debugger left to resume it -> the strand.  *)
+(* proc_debug_fault_stop's debug_owner check under g_proc_table_lock is the    *)
+(* fix -- it serializes the fire against detach's slot release + resume.       *)
+StopImpliesOwned == sflag => attached
+
 Safety ==
     /\ TypeOk
     /\ NoLostStop
     /\ NoEL0AfterStopped
     /\ ExactlyOnceResume
+    /\ StopImpliesOwned
 
 (* DeathWinsOverStop (liveness): once a group termination is published, every *)
 (* Thread eventually dies -- even against a live debugger holding a stop.     *)

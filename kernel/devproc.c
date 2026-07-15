@@ -37,6 +37,7 @@
 #include <thylacine/caps.h>
 #include <thylacine/dev.h>
 #include <thylacine/extinction.h>
+#include <thylacine/joey.h>   // 8a-2c F2: boot_is_complete() -- gate hwverify to the boot window
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
 #include <thylacine/spoor.h>
@@ -1693,6 +1694,16 @@ static long devproc_write(struct Spoor *c, const void *buf, long n, s64 off) {
     if (!t || !t->proc) return -1;
 
     if (v == CTL_VERB_HWVERIFY) {
+        // 8a-2c F2: the verify is a BOOT-ONLY diagnostic. The boot probe
+        // usr/hwbp-verify runs before SYS_BOOT_COMPLETE (arm -> trigger -> read ->
+        // disarm, all during boot); post-boot the real HW-debug path is the 8a-2b
+        // per-Proc install, so the verify is vestigial. Refuse it post-boot: the
+        // verify uses a GLOBAL one-at-a-time slot whose EC-swallow is keyed on an
+        // ELR match, NOT the arming Proc, so an unprivileged Proc arming a lingering
+        // verify could swallow another (authorized-debug) Proc's real breakpoint at
+        // the same VA + transiently clear its MDE. Gating to the boot window removes
+        // that surface entirely (no post-boot arm -> the global slot stays idle).
+        if (boot_is_complete()) return -1;
         // 8a-2a: the self-scoped EL0 hardware-breakpoint verify. SELF-ONLY (the
         // arm targets the CALLER's own EL0 execution, so the target pid must be
         // the caller) -- which also satisfies I-39 by construction (a Proc is

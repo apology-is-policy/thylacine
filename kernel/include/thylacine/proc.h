@@ -902,6 +902,22 @@ void el0_return_die_check(void);
 // proc_group_terminate; the flag-set + IPI take no sleeping lock).
 void proc_debug_stop_deliver(struct Proc *p);
 
+// proc_debug_fault_stop: the EC-path (hardware bp/wp hit or single-step
+// completion) stop delivery. Unlike proc_debug_stop_deliver (the ctl `stop`
+// verb, which runs under g_proc_table_lock via proc_for_each with debug_owner
+// already verified), a hardware fire arrives in the TARGET's own exception
+// context holding no lock, so it must SERIALIZE with a concurrent detach / ctl-fd
+// close (which clears debug_owner + the hw table + calls proc_debug_resume, all
+// under g_proc_table_lock). This takes g_proc_table_lock and delivers the stop
+// ONLY while a debugger still owns the slot (p->debug_owner != NULL), then
+// returns whether it delivered. Without the gate a fire's debug_stop_req store
+// could land AFTER a detach's proc_debug_resume cleared it, parking the target
+// with no debugger left to resume it -- the 8a-2 SA-1 strand (specs/debug_stop.
+// tla StopImpliesOwned / NoStrand). Returns false (deliver skipped) when the
+// debugger detached in the race window; the EC caller then treats the fire as a
+// benign STALE arm (disables this CPU's debug regs + resumes the instruction).
+bool proc_debug_fault_stop(struct Proc *p);
+
 // proc_debug_resume: resume `p` -- clear p->debug_stop_req (RELEASE, ordered
 // BEFORE the wake so a thread registering at the tail after the walk re-observes
 // the cleared flag: the I-9 register-then-observe close, the mirror of

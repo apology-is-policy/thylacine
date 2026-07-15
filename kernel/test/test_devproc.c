@@ -58,6 +58,7 @@ void test_devproc_debug_stop_start_resume(void);
 void test_devproc_debug_mem(void);
 void test_devproc_debug_regs(void);
 void test_devproc_debug_kregs_kstack_wait(void);
+void test_devproc_debug_step_cancel_on_stop(void);
 
 // A-4b + 8a-1b impl hooks (non-static in kernel/devproc.c) + Proc test helpers
 // (non-static in kernel/proc.c; the test_proc.c / test_devsrv_conn.c pattern).
@@ -781,6 +782,30 @@ void test_devproc_debug_stop_start_resume(void) {
     TEST_EXPECT_EQ((int)flagt->debug_stop_req, 0, "resume clears debug_stop_req");
     proc_debug_resume(flagt);
     TEST_EXPECT_EQ((int)flagt->debug_stop_req, 0, "resume is idempotent (stays 0)");
+
+    // (0') SA-1 -- proc_debug_fault_stop (the EC-path / hardware-fire deliver)
+    //      gates the stop on debug_owner under g_proc_table_lock. A fire that
+    //      raced a detach (owner already cleared) MUST be a no-op: it may not set
+    //      debug_stop_req (else the target parks with no debugger left to resume it
+    //      -> the strand; specs/debug_stop.tla StopImpliesOwned). With a live owner
+    //      it delivers exactly like the ctl `stop` verb. `debug_owner` is only
+    //      compared to NULL here, so any non-NULL identity token stands in for a
+    //      live ctl fd (never dereferenced). Non-vacuous: an ungated fault-stop
+    //      returns 1 + sets the flag on the no-owner leg.
+    struct Spoor *owner_sentinel = (struct Spoor *)flagt;   // non-NULL; never deref'd
+    flagt->debug_owner = NULL;                              // detached: a fire in the race window
+    TEST_EXPECT_EQ((int)proc_debug_fault_stop(flagt), 0,
+                   "fault-stop with no owner does not deliver (SA-1)");
+    TEST_EXPECT_EQ((int)flagt->debug_stop_req, 0,
+                   "fault-stop with no owner set no flag (SA-1: no strand)");
+    flagt->debug_owner = owner_sentinel;                   // attached: a live debugger owns the slot
+    TEST_EXPECT_EQ((int)proc_debug_fault_stop(flagt), 1,
+                   "fault-stop with a live owner delivers");
+    TEST_EXPECT_EQ((int)flagt->debug_stop_req, 1,
+                   "fault-stop with a live owner set debug_stop_req");
+    flagt->debug_owner = NULL;                             // restore before teardown
+    proc_debug_resume(flagt);                              // clear the flag we just set
+
     flagt->state = PROC_STATE_ZOMBIE;
     proc_free(flagt);
 
@@ -849,6 +874,50 @@ void test_devproc_debug_stop_start_resume(void) {
     proc_test_unlink(tgt);
     tgt->state = PROC_STATE_ZOMBIE;
     proc_free(tgt);
+}
+
+// 8a-2c F1: a whole-Proc stop SUPERSEDES an in-flight single-step. proc_debug_
+// stop_deliver clears every thread's debug_ss_armed + debug_stepover_va, so a step
+// that a peer's bp/wp fire (or a detach/re-attach) interrupted before its own EC
+// 0x32 does NOT leak a spurious SPSR.SS into the next resume (a phantom
+// one-instruction stop after a `continue`). A minimal synthetic head thread
+// carries the pending step; no kstack/trapframe needed (F1 touches only the two
+// step flags). Non-vacuous: pre-fix the deliver left debug_ss_armed set.
+void test_devproc_debug_step_cancel_on_stop(void) {
+    struct Thread *tt = current_thread();
+    TEST_ASSERT(tt && tt->proc, "test thread has a proc");
+
+    struct Proc *tgt = proc_alloc();
+    TEST_ASSERT(tgt != NULL, "alloc step-cancel target");
+    tgt->state = PROC_STATE_ALIVE;
+
+    struct Thread th;
+    for (size_t i = 0; i < sizeof(th); i++) ((u8 *)&th)[i] = 0;
+    th.magic             = THREAD_MAGIC;
+    th.state             = THREAD_SLEEPING;
+    th.next_in_proc      = NULL;
+    th.debug_ss_armed    = true;          // a single-step is in flight...
+    th.debug_stepover_va = 0xBEEF000ull;  // ...over this bp
+    tgt->threads         = &th;
+
+    // A whole-Proc stop (the raw deliver -- the cancel walk lives in it) must
+    // cancel the pending step. proc_debug_stop_deliver's g_proc_table_lock contract
+    // is satisfied vacuously here (a fresh synthetic Proc, single-threaded harness,
+    // no concurrent thread-list mutation -- the same direct call the section-0 leg
+    // of debug_stop_start_resume uses). Capture BEFORE cleanup/assert (the kregs
+    // lesson: a returning TEST_ASSERT would strand tgt with a dangling stack thread).
+    proc_debug_stop_deliver(tgt);
+    int ss_cleared = (th.debug_ss_armed == false);
+    int va_cleared = (th.debug_stepover_va == 0);
+    int req_set    = (int)tgt->debug_stop_req;
+
+    tgt->threads = NULL;              // un-dangle before proc_free
+    tgt->state   = PROC_STATE_ZOMBIE;
+    proc_free(tgt);
+
+    TEST_EXPECT_EQ(ss_cleared, 1, "F1: a whole-Proc stop clears debug_ss_armed (step superseded)");
+    TEST_EXPECT_EQ(va_cleared, 1, "F1: a whole-Proc stop clears debug_stepover_va");
+    TEST_EXPECT_EQ(req_set,    1, "the deliver still set debug_stop_req");
 }
 
 // 8a-1b-gamma: /proc/<pid>/mem -- cross-Proc user memory RW (I-39; DEBUG-FS 4.5).

@@ -142,8 +142,19 @@ void boot_main(void);
 // SYS_BOOT_COMPLETE handler additionally gates on the caller being
 // console-attached so no spawned child can emit a premature banner (-> a false
 // test PASS). Returns true iff this call printed the banner.
+// File-scope so boot_is_complete() can read it (8a-2c F2: the hwverify verb is a
+// boot-only diagnostic -- vestigial once the 8a-2b per-Proc HW install is the real
+// mechanism -- so devproc.c refuses it post-boot; that keeps an unprivileged Proc
+// from arming the global verify slot and swallowing another Proc's real breakpoint).
+static bool g_boot_complete_done;   // BSS false
+
+// boot_is_complete: true once SYS_BOOT_COMPLETE has fired (the boot->session
+// boundary; the "Thylacine boot OK" banner). Boot-window-only gates read this.
+bool boot_is_complete(void) {
+    return __atomic_load_n(&g_boot_complete_done, __ATOMIC_ACQUIRE);
+}
+
 bool boot_mark_complete(void) {
-    static bool g_boot_complete_done;   // BSS false
     if (__atomic_exchange_n(&g_boot_complete_done, true, __ATOMIC_SEQ_CST))
         return false;
     // TI-4b boot-duration gate: timer_now_ns() is CLOCK_MONOTONIC (ns since the
