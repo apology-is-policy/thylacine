@@ -2370,6 +2370,35 @@ int main(void) {
     }
     t_putstr("joey: /debug-probe reaped status=0; debug-fs stop/inspect/resume verified\n");
 
+    // === /hwbp-verify orchestration (Go Stage 8a-2a: the HW-debug delivery verify) ===
+    // The empirical confirmation (DEBUG-FS-DESIGN §10) that a guest-programmed EL0
+    // hardware breakpoint delivers EC 0x30 to guest EL1 on THIS substrate (TCG
+    // always; HVF on Apple Silicon is the young path the design requires proven
+    // before the 8a-2b HW-debug tier builds on it). Exit 0 = delivered (PASS);
+    // exit 3 = NOT delivered -- a LEGITIMATE verdict ("8a-2 HW-debug tests are
+    // TCG-only"), NOT a boot failure; any other status = a malfunction (the probe
+    // SNARE-terminated on a stray EC, or the ctl surface misbehaved) -> boot-fatal.
+    const char hwbp_name[] = "hwbp-verify";
+    long hv_pid = t_spawn(hwbp_name, sizeof(hwbp_name) - 1);
+    if (hv_pid <= 0) {
+        t_putstr("joey: t_spawn(\"hwbp-verify\") FAILED\n");
+        return 1;
+    }
+    int hv_status = -1;
+    long hv_reaped = t_wait_pid_for((int)hv_pid, 0, &hv_status);
+    if (hv_reaped != hv_pid) {
+        t_putstr("joey: /hwbp-verify reap FAILED (wrong pid)\n");
+        return 1;
+    }
+    if (hv_status == 0) {
+        t_putstr("joey: /hwbp-verify PASS (HW breakpoint delivers EC 0x30; 8a-2 HW-debug enabled)\n");
+    } else if (hv_status == 3) {
+        t_putstr("joey: /hwbp-verify: HW breakpoint NOT delivered under this accel; 8a-2 tests TCG-only\n");
+    } else {
+        t_putstr("joey: /hwbp-verify MALFUNCTION (unexpected exit) -- boot gate\n");
+        return 1;
+    }
+
     // === /go-hello orchestration (GOOS=thylacine Go-port, Stage 1) ===
     // The first GOOS=thylacine Go binary: a runtime-direct `println` hello.
     // Spawning it drives the real SVC ABI end-to-end -- the SysV initial-stack

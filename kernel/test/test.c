@@ -87,6 +87,8 @@ void test_clock_gettime_errors(void);
 void test_clock_settime_reanchors(void);
 void test_clock_settime_cap_gate(void);
 void test_hardening_detect_smoke(void);
+void test_hwdebug_dfr0_enumerate(void);
+void test_hwdebug_arm_disarm_roundtrip(void);
 void test_alternatives_patch_applied(void);
 void test_alternatives_atomics_correct(void);
 void test_context_create_destroy(void);
@@ -1728,6 +1730,8 @@ struct test_case g_tests[] = {
     { "devproc.debug_mem",                     test_devproc_debug_mem,                     false, NULL },
     { "devproc.debug_regs",                    test_devproc_debug_regs,                    false, NULL },
     { "devproc.debug_kregs_kstack_wait",       test_devproc_debug_kregs_kstack_wait,       false, NULL },
+    { "hwdebug.dfr0_enumerate",                test_hwdebug_dfr0_enumerate,                false, NULL },
+    { "hwdebug.arm_disarm_roundtrip",          test_hwdebug_arm_disarm_roundtrip,          false, NULL },
     { "cons.blocking_read_wakeup",     test_cons_blocking_read_wakeup,     false, NULL },
     { "cons.ring_fill_drain",          test_cons_ring_fill_drain,          false, NULL },
     { "cons.ring_overflow_drop",       test_cons_ring_overflow_drop,       false, NULL },

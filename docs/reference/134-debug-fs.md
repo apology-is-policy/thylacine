@@ -11,8 +11,9 @@ defects it surfaced) → `7be95961` (the UBSan test-copy fix). Binding design:
 audit-trigger row, the authoritative prosecution copy). Spec:
 `specs/debug_stop.tla` (the stop/continue/step state machine — clean cfg +
 4 buggy cfgs, TLC-green; model-first). The 8a-2 hardware-debug tier (real
-breakpoints/watchpoints/single-step via the arm64 debug registers) is NOT
-built here.
+breakpoints/watchpoints/single-step via the arm64 debug registers) has its
+empirical delivery verify landed at **8a-2a** (§ below); the full per-thread
+install + single-step + watchpoints are **8a-2b**.
 
 ## Purpose
 
@@ -235,13 +236,60 @@ records a pointer), so the spec is unchanged and stays green. Action↔site map:
 - `attach` → `Einuse` (`-1`) if the slot is taken. Run-control verbs → `-1`
   for a non-owner. `wait`/`stop` → `-1` if the caller is death-interrupted.
 
+## 8a-2a — the empirical hardware-debug verify
+
+The 8a-2 HW-debug tier depends on one empirical fact the design (DEBUG-FS-DESIGN
+§2, §10) required PROVEN on the dev host before building on it: does a
+GUEST-programmed EL0 hardware breakpoint deliver its debug exception (`EC 0x30`)
+to guest EL1? TCG fully emulates guest debug; macOS HVF on Apple Silicon is the
+young path (it applies the guest's `DBGBVR/DBGBCR` to real hardware and calls
+`hv_vcpu_set_trap_debug_exceptions(false)` when no external gdb is attached to
+QEMU — the Thylacine dev loop). 8a-2a answers it end to end.
+
+**The reusable 8a-2b prerequisites** (`arch/arm64/hwdebug.c`):
+
+- `hwdebug_init_cpu()` — clears the OS Lock (`OSLAR_EL1 = 0` + `OSDLR_EL1 = 0`,
+  LOCKED at reset — it suppresses debug exceptions) + idles `MDSCR`/`DBGBCR0`.
+  Banked per-PE → run on every CPU (`kernel/main.c` boot CPU; `kernel/smp.c`
+  `per_cpu_main` each secondary).
+- `hwdebug_enumerate()` — reads `ID_AA64DFR0_EL1` into
+  `g_hw_features.num_brps`/`num_wrps` (the `.BRPs`/`.WRPs` field + 1;
+  architectural min 2/2). Called from `hw_features_detect`.
+
+**The verify** (the self-scoped `hwverify` ctl verb + `usr/hwbp-verify`): a Proc
+writes `hwverify <hexva>` to its OWN `/proc/<pid>/ctl` (SELF-ONLY — the target
+pid must equal the caller, which satisfies I-39 by construction since a Proc
+owns itself); the kernel arms `DBGBVR0 = va`, `DBGBCR0 = 0x1E5` (`E=1`,
+`PMC=0b10` EL0-only, `BAS=0xF`), `MDSCR.MDE = 1`. The probe then executes the
+armed VA (calls `hwbp_target`); the `EC 0x30` handler
+(`exception_sync_lower_el_impl`) calls `hwdebug_verify_on_ec`, which records the
+delivery + disarms (so the resumed EL0 instruction proceeds) and returns true —
+the empirical proof. The probe reads the verdict back from the same ctl file
+(`hwverify fired=<0|1> elr=0x..`, gated so only the arming Proc sees its own
+result — no cross-Proc leak).
+
+**The verdict is not a boot gate.** `fired=1` → PASS (8a-2 HW-debug enabled).
+`fired=0` (never trapped) is a LEGITIMATE verdict — "HW debug does not deliver
+under this accel, so the 8a-2 tests run TCG-only" — logged, boot continues. Only
+a malfunction (the probe SNARE-terminated on a stray EC, or the ctl surface
+misbehaving) fails the boot. **Measured 2026-07-15: PASS on BOTH HVF (`-cpu
+host`, Apple M2, GICv2) AND TCG (`-cpu max`, GICv3), attempt 1** — the research
+verdict empirically confirmed, so 8a-2b builds on the HW path, not TCG-only.
+
+Tests: the EL1 half is `hwdebug.dfr0_enumerate` (>= 2 bp/wp) +
+`hwdebug.arm_disarm_roundtrip` (the `DBGBVR0`/`DBGBCR0`/`MDSCR.MDE` writes
+stick + a concurrent arm is refused + disarm clears them). The DELIVERY half
+needs real EL0 execution and is the in-guest `/hwbp-verify` probe (a kernel test
+runs at EL1 with no EL0-scheduling loop).
+
 ## Status
 
-8a-1 complete pending the 8a-1c focused Fable-5-max holotype round + the SMP
-gate + this doc. 8a-2 (the arm64 hardware-debug tier: `DBGBCR`/`BVR`/`WCR`/
-`WVR` + `MDSCR.MDE` + the EC routing + single-step + the step-over-breakpoint
-dance + the per-thread register install) is gated behind the audited 8a-1 tier
-and the empirical HVF-debug verify.
+8a-1 complete (the software-checkpoint tier: audited, SMP-gated, `debug_stop.tla`
+green). 8a-2a complete (the HW-debug delivery verify: PASS on HVF + TCG). 8a-2b
+(the full arm64 HW-debug tier: the `DBGBCR`/`BVR`/`WCR`/`WVR` + `MDSCR.MDE` +
+the EC routing to `/proc/<pid>/wait` + single-step + the step-over-breakpoint
+dance + the per-thread register install on ctx-switch) + 8a-2c (its focused
+Fable-5-max holotype + the SMP gate) are next.
 
 ## Known caveats / footguns
 
@@ -260,3 +308,15 @@ and the empirical HVF-debug verify.
   stop-a-sleeping-thread-now is a v1.x refinement.
 - Software breakpoints are FORBIDDEN (I-12 W^X + I-36 REVENANT Image cache) —
   the `dlv` backend routes breakpoints to the 8a-2 HW path.
+- The 8a-2a `hwverify` breakpoint is GLOBAL (one at a time) and armed on the CPU
+  where the ctl-write ran; the `EC 0x30` handler disarms the CPU that fired
+  (= the arm CPU). The only unpaired case is a not-fired verify whose thread
+  MIGRATED off the arm CPU in the single-instruction arm→trap window — leaving
+  `DBGBCR0`/`MDE` set on the migrated-away CPU. In the boot context this is
+  unreachable (a single serial verify, no competing runnable thread to migrate
+  to, and it fires on attempt 1 on both HVF and TCG — so the not-fired path is
+  never taken). The proper closure is 8a-2b's per-thread install (arm on
+  ctx-switch-IN to the debugged thread on its own CPU, disarm on switch-OUT),
+  which makes arm-CPU == run-CPU == disarm-CPU by construction. `hwverify` is a
+  self-scoped verify affordance that 8a-2b's cross-Proc `hwbreak <va>`
+  supersedes.

@@ -16,6 +16,7 @@
 
 #include "uart.h"
 #include "../arch/arm64/alternatives.h"  // apply_alternatives (W1.5 LSE patcher)
+#include "../arch/arm64/hwdebug.h"        // 8a-2: hwdebug_init_cpu (OS-Lock unlock)
 #include "../arch/arm64/asid.h"
 #include "../arch/arm64/exception.h"
 #include "../arch/arm64/gic.h"
@@ -293,6 +294,12 @@ void boot_main(void) {
     // where FEAT_LSE is present. The `features:` line below reports what the
     // running CPU actually implements. Set up `g_hw_features` early.
     hw_features_detect();
+
+    // Go IDE Stage 8a-2: per-PE debug bring-up on the boot CPU (secondaries do
+    // it in per_cpu_main). Clears the OS Lock (LOCKED at reset — it suppresses
+    // debug exceptions) so a guest-programmed EL0 hardware breakpoint can
+    // deliver; hw_features_detect already enumerated DFR0's bp/wp counts.
+    hwdebug_init_cpu();
 
     uart_puts("  hardening: MMU+W^X+extinction+KASLR+vectors+IRQ+canaries (unconditional); PAC/BTI/LSE conditional (P1-H; Lazarus W1)\n");
 

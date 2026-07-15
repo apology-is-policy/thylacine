@@ -46,6 +46,8 @@
 #include <thylacine/types.h>
 
 #include "../arch/arm64/timer.h"        // 8a-1b-beta: timer_now_ns -- the stop-wait poll deadline
+#include "../arch/arm64/hwdebug.h"      // 8a-2a: the self-scoped EL0 hardware-breakpoint verify
+#include "../arch/arm64/uaccess.h"      // 8a-2a: UACCESS_USER_VA_TOP -- the hwverify user-half VA bound
 #include "../arch/arm64/mmu.h"          // 8a-1b-gamma: mmu_cross_proc_read/write -- /proc/<pid>/mem
 #include "../arch/arm64/exception.h"    // 8a-1b-gamma-2: struct exception_context -- /proc/<pid>/regs
 #include "../arch/arm64/halls.h"        // 8a-1b-gamma-3: halls_walk_kernel_frames/link_addr -- /proc/<pid>/kstack
@@ -261,6 +263,27 @@ static size_t format_cmdline(struct Proc *p, char *buf, size_t cap) {
 // unmount could free, so the lock is now load-bearing for the read.
 static size_t format_ns(struct Proc *p, char *buf, size_t cap) {
     return (size_t)territory_format_ns(p->territory, buf, (u64)cap);
+}
+
+// 8a-2a: the /proc/<pid>/ctl READ. ctl is write-only (empty read) EXCEPT the
+// self-scoped hardware-breakpoint verify result: if the READER is the Proc that
+// armed a verify (a self-read of its own ctl -- current_thread()->proc == p),
+// report "hwverify fired=<0|1> elr=0x..\n" so usr/hwbp-verify learns whether its
+// EL0 breakpoint delivered EC 0x30. Any other reader (a cross-Proc ctl read)
+// gets the empty write-only read -- no cross-Proc leak of the verify result.
+static size_t format_ctl_read(struct Proc *p, char *buf, size_t cap) {
+    struct Thread *t = current_thread();
+    if (!t || t->proc != p) return 0;          // only the arming Proc reads its own result
+    bool fired = false;
+    u64  elr   = 0;
+    if (!hwdebug_verify_result(p->pid, &fired, &elr)) return 0;   // no verify armed by p -> empty
+    size_t off = 0, r;
+    r = fmt_str(buf, cap, off, "hwverify fired="); if (!r) return 0; off += r;
+    r = fmt_udec(buf, cap, off, fired ? 1UL : 0UL); if (!r) return 0; off += r;
+    r = fmt_str(buf, cap, off, " elr=");           if (!r) return 0; off += r;
+    r = fmt_hex(buf, cap, off, elr);               if (!r) return 0; off += r;
+    r = fmt_str(buf, cap, off, "\n");              if (!r) return 0; off += r;
+    return off;
 }
 
 // =============================================================================
@@ -568,7 +591,7 @@ static int devproc_read_cb(struct Proc *p, void *arg) {
     case PQS_STATUS:  r->total = format_status(p, r->buf, r->cap);  break;
     case PQS_CMDLINE: r->total = format_cmdline(p, r->buf, r->cap); break;
     case PQS_NS:      r->total = format_ns(p, r->buf, r->cap);      break;
-    case PQS_CTL:     r->total = 0;                                 break;  // write-only: empty read
+    case PQS_CTL:     r->total = format_ctl_read(p, r->buf, r->cap); break;  // 8a-2a hwverify result; else empty
     default:          break;                  // kind pre-validated by the caller
     }
     return 1;                                 // matched -> stop
@@ -980,6 +1003,7 @@ enum ctl_verb {
     CTL_VERB_STOP,     // 8a-1b-beta: park the target's threads; block until stopped/exit
     CTL_VERB_START,    // 8a-1b-beta: resume the target (non-blocking)
     CTL_VERB_WAITSTOP, // 8a-1b-beta: block until the target is stopped/exits
+    CTL_VERB_HWVERIFY, // 8a-2a: arm ("hwverify <hexva>") / disarm ("hwverify off") the self-scoped HW-breakpoint verify
     CTL_VERB_OTHER,
 };
 
@@ -1007,7 +1031,50 @@ static enum ctl_verb parse_ctl_verb(const char *s, long n) {
     if (ctl_tok_eq(s + start, len, "stop"))     return CTL_VERB_STOP;
     if (ctl_tok_eq(s + start, len, "start"))    return CTL_VERB_START;
     if (ctl_tok_eq(s + start, len, "waitstop")) return CTL_VERB_WAITSTOP;
+    if (ctl_tok_eq(s + start, len, "hwverify")) return CTL_VERB_HWVERIFY;
     return CTL_VERB_OTHER;
+}
+
+// 8a-2a: parse the hwverify argument -- the token after "hwverify". Returns:
+//   HWVERIFY_ARG_OFF  = "off"    -> disarm
+//   HWVERIFY_ARG_VA   = "0x..."  -> arm at *va_out (hex, user-half; caller bounds)
+//   HWVERIFY_ARG_BAD  = missing / malformed
+// The VA parse is a bounded hex scan of the second whitespace-delimited token;
+// no libc, no allocation.
+enum hwverify_arg { HWVERIFY_ARG_BAD, HWVERIFY_ARG_OFF, HWVERIFY_ARG_VA };
+static enum hwverify_arg parse_hwverify_arg(const char *s, long n, u64 *va_out) {
+    if (!s || n <= 0) return HWVERIFY_ARG_BAD;
+    long i = 0;
+    // skip the verb token
+    while (i < n && (s[i] == ' ' || s[i] == '\t')) i++;
+    while (i < n && s[i] != ' '  && s[i] != '\t' && s[i] != '\n' &&
+                    s[i] != '\r' && s[i] != '\0') i++;
+    // skip the separator
+    while (i < n && (s[i] == ' ' || s[i] == '\t')) i++;
+    long start = i;
+    while (i < n && s[i] != ' '  && s[i] != '\t' && s[i] != '\n' &&
+                    s[i] != '\r' && s[i] != '\0') i++;
+    long len = i - start;
+    if (len == 0) return HWVERIFY_ARG_BAD;
+    if (ctl_tok_eq(s + start, len, "off")) return HWVERIFY_ARG_OFF;
+    // hex VA, optionally 0x-prefixed
+    const char *p = s + start;
+    long j = 0;
+    if (len >= 2 && p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) j = 2;
+    if (j >= len) return HWVERIFY_ARG_BAD;   // "0x" with no digits
+    u64 v = 0;
+    for (; j < len; j++) {
+        char c = p[j];
+        u64 d;
+        if (c >= '0' && c <= '9') d = (u64)(c - '0');
+        else if (c >= 'a' && c <= 'f') d = (u64)(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') d = (u64)(c - 'A' + 10);
+        else return HWVERIFY_ARG_BAD;
+        if (v > (~0ull >> 4)) return HWVERIFY_ARG_BAD;   // overflow guard
+        v = (v << 4) | d;
+    }
+    *va_out = v;
+    return HWVERIFY_ARG_VA;
 }
 
 // proc_for_each context for the kill walk. result: 0 = target pid not found
@@ -1381,10 +1448,34 @@ static long devproc_write(struct Spoor *c, const void *buf, long n, s64 off) {
     enum ctl_verb v = parse_ctl_verb((const char *)buf, n);
     if (v != CTL_VERB_KILL && v != CTL_VERB_KILLGRP &&
         v != CTL_VERB_ATTACH && v != CTL_VERB_DETACH &&
-        v != CTL_VERB_STOP && v != CTL_VERB_START && v != CTL_VERB_WAITSTOP) return -1;
+        v != CTL_VERB_STOP && v != CTL_VERB_START && v != CTL_VERB_WAITSTOP &&
+        v != CTL_VERB_HWVERIFY) return -1;
 
     struct Thread *t = current_thread();
     if (!t || !t->proc) return -1;
+
+    if (v == CTL_VERB_HWVERIFY) {
+        // 8a-2a: the self-scoped EL0 hardware-breakpoint verify. SELF-ONLY (the
+        // arm targets the CALLER's own EL0 execution, so the target pid must be
+        // the caller) -- which also satisfies I-39 by construction (a Proc is
+        // always the owner of itself). Cross-Proc HW breakpoints are 8a-2b (the
+        // per-thread install via a stopped debuggee). "off" disarms; a hex VA
+        // (user-half, 4-byte aligned) arms bp0. The delivery result is read back
+        // from this same ctl file (devproc_read_cb PQS_CTL).
+        int target = proc_qid_pid(c->qid.path);
+        if (target != t->proc->pid) return -1;    // self-test only
+        u64 va = 0;
+        switch (parse_hwverify_arg((const char *)buf, n, &va)) {
+        case HWVERIFY_ARG_OFF:
+            hwdebug_verify_disarm();
+            return n;
+        case HWVERIFY_ARG_VA:
+            if (va == 0 || va >= UACCESS_USER_VA_TOP) return -1;   // user-half only
+            return hwdebug_verify_arm(t->proc->pid, va) ? n : -1;  // -1 = a verify already armed
+        default:
+            return -1;
+        }
+    }
 
     if (v == CTL_VERB_ATTACH || v == CTL_VERB_DETACH) {
         struct devproc_debug_ctx d = {

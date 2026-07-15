@@ -33,6 +33,13 @@ struct hw_features {
     bool bti;        // FEAT_BTI
     u8   mte;        // FEAT_MTE: 0 none / 1 instructions / 2 + tags / 3 + async
 
+    // ID_AA64DFR0_EL1 (Go IDE Stage 8a-2): the hardware breakpoint / watchpoint
+    // counts (DFR0.BRPs/WRPs + 1; architectural min 2 / 2). Populated by
+    // hwdebug_enumerate; consumed by the 8a-2 HW-debug tier (per-thread bp/wp
+    // install). 0 until hw_features_detect runs.
+    u8   num_brps;   // number of hardware breakpoints (DBGBVR/DBGBCR pairs)
+    u8   num_wrps;   // number of hardware watchpoints (DBGWVR/DBGWCR pairs)
+
     // Linux-compatible AT_HWCAP word for the EL0 exec auxv (the arm64
     // uapi hwcap bit numbers — FP/ASIMD/AES/PMULL/SHA1/SHA2/CRC32/
     // ATOMICS/SHA3/ASIMDDP/SHA512). Derived from ID_AA64ISAR0_EL1 +

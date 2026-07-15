@@ -25,6 +25,7 @@
 // the reference for the bit layouts.
 
 #include "hwfeat.h"
+#include "hwdebug.h"
 
 #include <thylacine/types.h>
 
@@ -115,6 +116,9 @@ void hw_features_detect(void) {
     if (g_hw_features.crc32)  hc |= THWCAP_CRC32;
     if (g_hw_features.atomic) hc |= THWCAP_ATOMICS;
     g_hw_features.linux_hwcap = hc;
+
+    // Go IDE Stage 8a-2: the hardware breakpoint / watchpoint counts (DFR0).
+    hwdebug_enumerate();
 }
 
 // Append a literal string to a buffer; returns chars written.

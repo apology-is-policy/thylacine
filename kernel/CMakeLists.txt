@@ -42,6 +42,7 @@ set(KERNEL_SRCS
     ../arch/arm64/timer.c
     ../arch/arm64/rtc.c
     ../arch/arm64/hwfeat.c
+    ../arch/arm64/hwdebug.c
     ../arch/arm64/alternatives.c
     ../arch/arm64/context.S
     ../arch/arm64/userland.S
@@ -124,6 +125,7 @@ set(KERNEL_TEST_SRCS
     test/test_timer.c
     test/test_clock.c
     test/test_hardening.c
+    test/test_hwdebug.c
     test/test_alternatives.c
     test/test_context.c
     test/test_fp.c

@@ -19,6 +19,7 @@
 #include <thylacine/types.h>
 
 #include "../arch/arm64/gic.h"
+#include "../arch/arm64/hwdebug.h"     // 8a-2: hwdebug_init_cpu (per-PE OS-Lock unlock)
 #include "../arch/arm64/kaslr.h"
 #include "../arch/arm64/psci.h"
 #include "../arch/arm64/timer.h"
@@ -399,6 +400,11 @@ void per_cpu_main(int cpu_idx) {
     // on this secondary. Boot CPU does it in boot_main. Per-CPU
     // register (banked) → must be set independently on each CPU.
     timer_enable_el0_counter_access();
+
+    // Go IDE Stage 8a-2: per-PE debug bring-up on this secondary (boot CPU does
+    // it in boot_main). Clears the banked OS Lock so a guest-programmed EL0
+    // hardware breakpoint can deliver if the debugged thread runs here.
+    hwdebug_init_cpu();
 
     // VBAR_EL1 — install the kernel exception vector table. ISB so
     // any subsequent exception sees the new VBAR.

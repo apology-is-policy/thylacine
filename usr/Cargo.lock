@@ -589,6 +589,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "hwbp-verify"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
 name = "hybrid-array"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

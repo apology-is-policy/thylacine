@@ -22,6 +22,7 @@
 #include "fault.h"                    // P3-C: arch_fault_handle / fault_info_decode
 #include "gic.h"
 #include "halls.h"                    // HX-1: per-CPU live-frame tracking for the crash dump
+#include "hwdebug.h"                  // 8a-2a: the EL0 hardware-breakpoint verify (EC 0x30 swallow)
 #include "uaccess.h"                  // R12-uaccess: kernel-mode user-VA fault-fixup
 
 #include <thylacine/extinction.h>
@@ -76,6 +77,7 @@ _Static_assert(__builtin_offsetof(struct exception_context, far) == 0x118,
 #define EC_BTI             0x0D     /* Branch Target Exception (FEAT_BTI) */
 #define EC_BRK             0x3C     /* deliberate brk #imm */
 #define EC_SVC_AARCH64     0x15     /* svc #imm at EL0 (AArch64) */
+#define EC_BREAKPOINT_LOWER 0x30    /* HW breakpoint from lower EL (8a-2) */
 
 // ---------------------------------------------------------------------------
 // HX-1: per-CPU live-frame tracking. Each public exception entry point is a
@@ -450,6 +452,18 @@ static void exception_sync_lower_el_impl(struct exception_context *ctx) {
         // Terminate with snare:brk. Debuggers attaching at EL0 are a
         // Phase 5+ concern; v1.0 treats all EL0 brk as fatal-to-Proc.
         proc_fault_terminate(NOTE_NAME_SNARE_BRK, (uintptr_t)ctx->elr);
+
+    case EC_BREAKPOINT_LOWER:
+        // 8a-2a: a hardware breakpoint from EL0. The self-scoped verify
+        // (usr/hwbp-verify via the debug-fs `hwverify` ctl verb) arms bp0 on a
+        // VA it will execute; hwdebug_verify_on_ec records the delivery + disarms
+        // and returns true, so the resumed EL0 instruction proceeds -- the
+        // empirical proof that guest-programmed HW debug delivers to guest EL1.
+        // With no verify armed there is no 8a-2b routing yet, so a stray HW
+        // breakpoint is fatal-to-Proc, exactly as the pre-8a-2a default treated
+        // an unknown EC 0x30 (snare:ill; 8a-2b routes it to /proc/<pid>/wait).
+        if (hwdebug_verify_on_ec(ctx->elr)) return;
+        proc_fault_terminate(NOTE_NAME_SNARE_ILL, (uintptr_t)esr);
 
     default:
         // Unknown EC from EL0 -- terminate with snare:ill (illegal
