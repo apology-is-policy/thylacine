@@ -46,6 +46,7 @@
 #include <thylacine/types.h>
 
 #include "../arch/arm64/timer.h"   // 8a-1b-beta: timer_now_ns -- the stop-wait poll deadline
+#include "../arch/arm64/mmu.h"     // 8a-1b-gamma: mmu_cross_proc_read/write -- /proc/<pid>/mem
 
 // =============================================================================
 // Qid path encoding.
@@ -63,6 +64,7 @@ enum {
     PQS_CMDLINE  = 3,        // /proc/<pid>/cmdline          (QTFILE)
     PQS_CTL      = 4,        // /proc/<pid>/ctl              (QTFILE)
     PQS_NS       = 5,        // /proc/<pid>/ns               (QTFILE)
+    PQS_MEM      = 6,        // /proc/<pid>/mem              (QTFILE; 8a-1b-gamma, I-39)
 };
 
 #define PROC_QID_ROOT_PATH  0ULL
@@ -93,6 +95,7 @@ static const struct proc_pid_file g_proc_pid_files[] = {
     { "cmdline", PQS_CMDLINE },
     { "ctl",     PQS_CTL     },
     { "ns",      PQS_NS      },
+    { "mem",     PQS_MEM     },
 };
 
 #define PROC_PID_FILE_COUNT \
@@ -379,6 +382,7 @@ static int devproc_stat(struct Spoor *c, u8 *dp, int n) {
 static u32 devproc_mode_for_kind(u32 kind) {
     switch (kind) {
     case PQS_CTL:     return 0600u;
+    case PQS_MEM:     return 0600u;   // 8a-1b-gamma: owner-private (I-39-gated at the RW site)
     case PQS_STATUS:
     case PQS_CMDLINE:
     case PQS_NS:      return 0444u;
@@ -530,6 +534,12 @@ static int devproc_read_cb(struct Proc *p, void *arg) {
     }
     return 1;                                 // matched -> stop
 }
+// 8a-1b-gamma: /proc/<pid>/mem RW (I-39-gated, stopped-only). Defined after
+// devproc_debug_authorized; forward-declared so devproc_read/devproc_write reach
+// it. `off` is the target user VA (mem is VA-addressed); `buf` is the kernel
+// staging buffer the syscall layer bounced.
+static long devproc_mem_rw(struct Spoor *c, void *buf, long n, s64 off, bool is_write);
+
 static long devproc_read(struct Spoor *c, void *buf, long n, s64 off) {
     if (!c || !buf) return -1;
     if (n < 0) return -1;
@@ -538,6 +548,10 @@ static long devproc_read(struct Spoor *c, void *buf, long n, s64 off) {
 
     u32 kind = proc_qid_kind(c->qid.path);
     int  pid = proc_qid_pid(c->qid.path);
+
+    // mem is a VA-addressed cross-Proc read (I-39 + stopped-only), not a
+    // formatted info file -- its own path (gamma), before the format dispatch.
+    if (kind == PQS_MEM) return devproc_mem_rw(c, buf, n, off, false);
 
     // Root + pid_dir reads return -1 (directories -- readdir lands with 9P
     // readdir). ctl is write-only at v1.0 (reads return empty; Plan 9: ctl is
@@ -631,6 +645,98 @@ bool devproc_debug_authorized(const struct Proc *caller, const struct Proc *targ
     if (__atomic_load_n(&caller->caps, __ATOMIC_ACQUIRE) & (CAP_HOSTOWNER | CAP_DEBUG))
         return true;                                                    // host owner OR debug-anyone
     return false;
+}
+
+// =============================================================================
+// 8a-1b-gamma: /proc/<pid>/mem -- cross-Proc user-memory RW (I-39; DEBUG-FS 4.5).
+// =============================================================================
+
+// True iff every non-EXITING thread of `target` is parked on its OWN debug_rendez
+// with on_cpu==false -- the "fully stopped" predicate a coherent cross-Proc
+// mem/reg access relies on (specs/debug_stop.tla NoEL0AfterStopped). Caller holds
+// g_proc_table_lock (the p->threads walk is stable under it -- the only mutator,
+// thread_free, holds it); reads rendez_blocked_on under each peer's wait_lock (the
+// same lock the park's register-then-observe takes, so it never sees a thread
+// about to proceed to EL0), then the #788 spin-until-off_cpu read (a thread
+// mid-cpu_switch_context still reads on_cpu==true until it fully deschedules).
+static bool devproc_all_threads_parked(struct Proc *target) {
+    for (struct Thread *peer = target->threads; peer; peer = peer->next_in_proc) {
+        if (peer->state == THREAD_EXITING) continue;   // dying -- need not park
+        irq_state_t ws = spin_lock_irqsave(&peer->wait_lock);
+        bool parked = (peer->rendez_blocked_on == &peer->debug_rendez);
+        spin_unlock_irqrestore(&peer->wait_lock, ws);
+        if (!parked) return false;
+        if (__atomic_load_n(&peer->on_cpu, __ATOMIC_ACQUIRE)) return false;   // still on-cpu
+    }
+    return true;
+}
+
+// The mem/reg access gate (I-39 + stopped-only, DEBUG-FS 3): the target is ALIVE,
+// a debugger stop is pending, AND every thread is parked. Caller holds
+// g_proc_table_lock. (A ZOMBIE/dying target is refused -- its pgtable_root may be
+// torn down; its memory is meaningless to inspect.)
+static bool devproc_target_fully_stopped(struct Proc *target) {
+    if (target->state != PROC_STATE_ALIVE) return false;
+    if (__atomic_load_n(&target->debug_stop_req, __ATOMIC_ACQUIRE) == 0) return false;
+    return devproc_all_threads_parked(target);
+}
+
+// The g_proc_table_lock hold spans the resolve + gate + walk + copy, so the
+// per-op copy is clamped: the debugger loops for a larger range (a rare debug
+// path, not a hot one). One page keeps the global-lock hold to a page-copy.
+#define DEBUG_MEM_CHUNK  ((long)4096)
+
+struct devproc_mem_ctx {
+    int          target_pid;
+    struct Proc *caller;
+    u64          vaddr;      // the target user VA (= the Dev off)
+    void        *kbuf;       // the kernel staging buffer (syscall-bounced)
+    long         len;        // clamped to <= DEBUG_MEM_CHUNK
+    bool         is_write;
+    long         result;     // >=0 bytes moved (short at a hole/RO), -1 denied/not-found
+};
+
+// Resolve + I-39 gate + stopped-only gate + the cross-Proc copy, all under
+// g_proc_table_lock (proc_for_each). mmu_cross_proc_read/write take no sleeping
+// lock (a direct-map memcpy), and target->vma_lock is a leaf below
+// g_proc_table_lock (acyclic: nothing under vma_lock takes g_proc_table_lock) --
+// so the copy is safe under the lock, which also pins the target ALIVE across it
+// (no reap-UAF of pgtable_root).
+static int devproc_mem_walk_cb(struct Proc *target, void *arg) {
+    struct devproc_mem_ctx *m = (struct devproc_mem_ctx *)arg;
+    if (target->pid != m->target_pid) return 0;   // keep walking
+    if (target == kproc())                              { m->result = -1; return 1; }
+    if (!devproc_debug_authorized(m->caller, target))   { m->result = -1; return 1; }  // I-39
+    if (!devproc_target_fully_stopped(target))          { m->result = -1; return 1; }  // stopped-only
+
+    irq_state_t vs = spin_lock_irqsave(&target->vma_lock);
+    m->result = m->is_write
+        ? mmu_cross_proc_write(target->pgtable_root, m->vaddr, m->kbuf, m->len)
+        : mmu_cross_proc_read(target->pgtable_root,  m->vaddr, m->kbuf, m->len);
+    spin_unlock_irqrestore(&target->vma_lock, vs);
+    return 1;
+}
+
+static long devproc_mem_rw(struct Spoor *c, void *buf, long n, s64 off, bool is_write) {
+    if (!c || !buf || n < 0) return -1;
+    if (off < 0)             return -1;   // VA is non-negative (TTBR0 user-half)
+    if (n == 0)              return 0;
+    if (n > DEBUG_MEM_CHUNK) n = DEBUG_MEM_CHUNK;   // clamp; the debugger loops
+
+    struct Thread *t = current_thread();
+    if (!t || !t->proc) return -1;
+
+    struct devproc_mem_ctx m = {
+        .target_pid = proc_qid_pid(c->qid.path),
+        .caller     = t->proc,
+        .vaddr      = (u64)off,
+        .kbuf       = buf,
+        .len        = n,
+        .is_write   = is_write,
+        .result     = -1,
+    };
+    proc_for_each(devproc_mem_walk_cb, &m);
+    return m.result;   // -1 not-found / denied; else bytes moved (0 = a hole at off)
 }
 
 // ctl verbs. v1.0: kill / killgrp both terminate the target Proc's thread-
@@ -811,16 +917,7 @@ static int devproc_stopscan_cb(struct Proc *target, void *arg) {
     struct devproc_stopscan_ctx *s = (struct devproc_stopscan_ctx *)arg;
     if (target->pid != s->target_pid) return 0;    // keep walking
     if (target->debug_owner != s->ctl) { s->state = 2; return 1; }  // slot released -- abort the wait
-    bool all_parked = true;
-    for (struct Thread *peer = target->threads; peer; peer = peer->next_in_proc) {
-        if (peer->state == THREAD_EXITING) continue;   // dying -- does not need to park
-        irq_state_t ws = spin_lock_irqsave(&peer->wait_lock);
-        bool parked = (peer->rendez_blocked_on == &peer->debug_rendez);
-        spin_unlock_irqrestore(&peer->wait_lock, ws);
-        bool offcpu = (__atomic_load_n(&peer->on_cpu, __ATOMIC_ACQUIRE) == false);
-        if (!(parked && offcpu)) { all_parked = false; break; }
-    }
-    s->state = all_parked ? 1 : 0;
+    s->state = devproc_all_threads_parked(target) ? 1 : 0;   // gamma-shared "fully parked" predicate
     return 1;
 }
 
@@ -860,11 +957,14 @@ static int devproc_debug_wait_stopped(int pid, struct Spoor *ctl) {
 // return -1. The verb is offset-agnostic (a control message, not a byte
 // stream), so off is ignored.
 static long devproc_write(struct Spoor *c, const void *buf, long n, s64 off) {
-    (void)off;
     if (!c)    return -1;
     if (n < 0) return -1;
 
     u32 kind = proc_qid_kind(c->qid.path);
+    // mem: a VA-addressed cross-Proc write (I-39 + stopped-only + W^X). `off` is
+    // the target VA -- NOT ignored, unlike the ctl control message below.
+    if (kind == PQS_MEM) return devproc_mem_rw(c, (void *)buf, n, off, true);
+    (void)off;
     if (kind != PQS_CTL) return -1;
 
     enum ctl_verb v = parse_ctl_verb((const char *)buf, n);

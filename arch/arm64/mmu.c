@@ -1780,6 +1780,120 @@ int mmu_uninstall_user_range(paddr_t pgtable_root, u16 asid,
     return 0;
 }
 
+// =============================================================================
+// 8a-1b-gamma: cross-Proc user-memory access (I-39; docs/DEBUG-FS-DESIGN.md 4.5).
+// =============================================================================
+//
+// The read-only, NON-GROWING VA->PA resolver a debugger uses to read/write a
+// STOPPED target's user memory through /proc/<pid>/mem. Cloned from
+// mmu_install_user_pte's walk but it NEVER allocates a sub-table and NEVER
+// faults in: an absent level (or an absent L3 leaf) means "not resident" (an
+// unfaulted BURROW_TYPE_ANON_LAZY or REVENANT BURROW_TYPE_FILE page), reported
+// honestly to the caller -- the debug reader does NOT drive userland_demand_page
+// on the target (that path assumes `current` is the faulting Proc; v1.0 reports
+// not-resident). Access is through the kernel DIRECT MAP (pa_to_kva) against the
+// TARGET's pgtable_root -- NOT uaccess (which reaches only CURRENT's TTBR0), NOT
+// the ASID (the walk keys on the PA root, never the rolling context_id).
+//
+// I-13 (kernel/user isolation): the walk reaches ONLY pages mapped in the
+// target's own TTBR0 tree, so a debug read/write cannot touch another Proc's
+// memory (or the kernel's -- the tree holds only user leaves). The write
+// additionally REFUSES a read-only leaf (AP[2]==1): a debugger writes DATA, and
+// letting it write a user-RO page via the direct map would violate I-12 (W^X:
+// the page is RO+X text) AND corrupt the I-36 REVENANT Image cache (shared text
+// pages) -- which is exactly why breakpoints are HW (8a-2), never a software BRK
+// patched into text. LOCK CONTRACT: the caller holds the target's vma_lock (for
+// a coherent VMA/PTE snapshot) and has confirmed the target is fully stopped (no
+// thread of the target runs, so no concurrent fault mutates the tree).
+
+// Bits [47:12] of a PTE = the output address (the 4-KiB granule PA). The leaf
+// PTE's upper bits [54:52] carry UXN/PXN/etc, so a bare `& ~0xFFFull` (correct
+// for table descriptors, whose upper bits are 0) would leave them in the PA --
+// mask [47:12] explicitly for the leaf.
+#define PTE_OA_MASK  0x0000FFFFFFFFF000ull
+
+// Resolve one user byte at `vaddr` in `pgtable_root` to a direct-map kernel
+// pointer, or NULL if not resident. `*writable_out` (when non-NULL) = the leaf
+// is user-writable (AP[2] == 0). Read-only, non-growing.
+static void *cross_proc_resolve(paddr_t pgtable_root, u64 vaddr, bool *writable_out) {
+    if (pgtable_root == 0)  return NULL;
+    if (vaddr >> 47)        return NULL;   // must be a TTBR0 user-half VA
+
+    u32 i0 = (u32)((vaddr >> BLOCK_SHIFT_L0) & 0x1ff);
+    u32 i1 = (u32)((vaddr >> BLOCK_SHIFT_L1) & 0x1ff);
+    u32 i2 = (u32)((vaddr >> BLOCK_SHIFT_L2) & 0x1ff);
+    u32 i3 = (u32)((vaddr >> PAGE_SHIFT)     & 0x1ff);
+
+    u64 *l0 = (u64 *)pa_to_kva(pgtable_root);
+    u64 e = l0[i0];
+    if (!(e & PTE_VALID) || !(e & PTE_TYPE_TABLE)) return NULL;
+    u64 *l1 = (u64 *)pa_to_kva(e & PTE_OA_MASK);
+    e = l1[i1];
+    // No 1-GiB block at L1 for v1.0 user mappings (make_user_pte_l3 is L3-only) --
+    // a non-table entry is not a resolvable user page.
+    if (!(e & PTE_VALID) || !(e & PTE_TYPE_TABLE)) return NULL;
+    u64 *l2 = (u64 *)pa_to_kva(e & PTE_OA_MASK);
+    e = l2[i2];
+    if (!(e & PTE_VALID) || !(e & PTE_TYPE_TABLE)) return NULL;   // no 2-MiB block at v1.0
+    u64 *l3 = (u64 *)pa_to_kva(e & PTE_OA_MASK);
+    e = l3[i3];
+    if (!(e & PTE_VALID)) return NULL;   // not resident (unfaulted lazy-anon / REVENANT FILE)
+
+    if (writable_out)
+        *writable_out = ((e & (1ull << 7)) == 0);   // AP[2] (bit 7) clear -> writable
+    paddr_t page_pa = e & PTE_OA_MASK;
+    u64 pgoff = vaddr & (PAGE_SIZE - 1);
+    return (void *)((u8 *)pa_to_kva(page_pa) + pgoff);
+}
+
+// Copy up to `len` bytes from the target's user memory at `vaddr` into the
+// kernel buffer `dst`, page by page, stopping at the FIRST non-resident page.
+// Returns the byte count copied before the hole (0 if `vaddr`'s own page is not
+// resident). `len` must be >= 0; the caller bounds it (the g_proc_table_lock
+// hold spans this copy).
+long mmu_cross_proc_read(paddr_t pgtable_root, u64 vaddr, void *dst, long len) {
+    if (len <= 0 || !dst) return 0;
+    u8 *d = (u8 *)dst;
+    long done = 0;
+    while (done < len) {
+        void *src = cross_proc_resolve(pgtable_root, vaddr + (u64)done, NULL);
+        if (!src) break;   // hole -> short read
+        u64 pgoff = (vaddr + (u64)done) & (PAGE_SIZE - 1);
+        long chunk = (long)(PAGE_SIZE - pgoff);
+        if (chunk > len - done) chunk = len - done;
+        for (long i = 0; i < chunk; i++) d[done + i] = ((u8 *)src)[i];
+        done += chunk;
+    }
+    return done;
+}
+
+// Write up to `len` bytes from `src` into the target's user memory at `vaddr`,
+// page by page, stopping at the first non-resident OR read-only page. Returns
+// the byte count written before that boundary. A read-only leaf is REFUSED
+// (I-12 / I-36): a short write there tells the debugger the page is not
+// writable (text; use a HW breakpoint, 8a-2).
+long mmu_cross_proc_write(paddr_t pgtable_root, u64 vaddr, const void *src, long len) {
+    if (len <= 0 || !src) return 0;
+    const u8 *s = (const u8 *)src;
+    long done = 0;
+    while (done < len) {
+        bool writable = false;
+        void *dst = cross_proc_resolve(pgtable_root, vaddr + (u64)done, &writable);
+        if (!dst || !writable) break;   // hole or RO -> short write (W^X / Image cache)
+        u64 pgoff = (vaddr + (u64)done) & (PAGE_SIZE - 1);
+        long chunk = (long)(PAGE_SIZE - pgoff);
+        if (chunk > len - done) chunk = len - done;
+        for (long i = 0; i < chunk; i++) ((u8 *)dst)[i] = s[done + i];
+        done += chunk;
+    }
+    // The written pages are user RAM (Normal-WB, coherent); no I-cache sync is
+    // needed for a DATA write (the debugger never writes text -- RO leaves are
+    // refused above). A DSB orders the stores before the debugger observes the
+    // return (the target is stopped, so no concurrent reader races them).
+    if (done > 0) dsb_ishst();
+    return done;
+}
+
 void proc_pgtable_destroy(paddr_t root) {
     if (root == 0) return;             // kproc / unwound failure path
 

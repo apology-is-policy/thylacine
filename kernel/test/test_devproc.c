@@ -20,13 +20,18 @@
 
 #include "test.h"
 
+#include "../../arch/arm64/mmu.h"   // 8a-1b-gamma: mmu_install_user_pte + mmu_cross_proc_* + pa_to_kva
+#include "../../mm/phys.h"          // alloc_pages / free_pages
+
 #include <thylacine/caps.h>
 #include <thylacine/dev.h>
+#include <thylacine/page.h>
 #include <thylacine/proc.h>
 #include <thylacine/spoor.h>
 #include <thylacine/syscall.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
+#include <thylacine/vma.h>
 
 void test_devproc_bestiary_smoke(void);
 void test_devproc_attach_returns_dir(void);
@@ -49,6 +54,7 @@ void test_devproc_write_ctl_kill_dispatch(void);
 void test_devproc_debug_authorized_predicate(void);
 void test_devproc_debug_attach_detach_lifecycle(void);
 void test_devproc_debug_stop_start_resume(void);
+void test_devproc_debug_mem(void);
 
 // A-4b + 8a-1b impl hooks (non-static in kernel/devproc.c) + Proc test helpers
 // (non-static in kernel/proc.c; the test_proc.c / test_devsrv_conn.c pattern).
@@ -150,6 +156,30 @@ static struct Spoor *open_ctl_for_pid(int pid) {
         return NULL;
     }
     return ctl;
+}
+
+// 8a-1b-gamma: open /proc/<pid>/mem for read+write (ORDWR = 2). Caller
+// spoor_clunk's the result.
+static struct Spoor *open_mem_for_pid(int pid) {
+    struct Spoor *root = devproc.attach("");
+    if (!root) return NULL;
+    char pidstr[12]; int n = 0; int v = pid;
+    if (v == 0) pidstr[n++] = '0';
+    else { char tmp[12]; int tn = 0;
+           while (v > 0) { tmp[tn++] = (char)('0' + (v % 10)); v /= 10; }
+           for (int i = tn - 1; i >= 0; i--) pidstr[n++] = tmp[i]; }
+    pidstr[n] = '\0';
+    struct Spoor *piddir = walk_one(root, pidstr);
+    spoor_unref(root);
+    if (!piddir) return NULL;
+    struct Spoor *mem = walk_one(piddir, "mem");
+    spoor_unref(piddir);
+    if (!mem) return NULL;
+    if (!devproc.open(mem, 2)) {        // ORDWR
+        spoor_unref(mem);
+        return NULL;
+    }
+    return mem;
 }
 
 // =============================================================================
@@ -794,6 +824,100 @@ void test_devproc_debug_stop_start_resume(void) {
     TEST_EXPECT_EQ((void *)tgt->debug_owner, (void *)NULL, "close freed the slot");
 
     proc_test_unlink(tgt);
+    tgt->state = PROC_STATE_ZOMBIE;
+    proc_free(tgt);
+}
+
+// 8a-1b-gamma: /proc/<pid>/mem -- cross-Proc user memory RW (I-39; DEBUG-FS 4.5).
+// Two layers: (1) the raw mmu_cross_proc_read/write resolver against a real Proc
+// pgtable (RW read+write land; an RO leaf write is REFUSED [I-12 W^X / I-36 Image
+// cache]; a non-resident VA -> 0, no fault-in); (2) the devproc mem-file path
+// (the I-39 owner gate + the stopped-only gate + the copy) on a SYNTHETIC
+// thread-less target -- debug_stop_req=1 with no threads is vacuously fully
+// stopped, so the full walk_cb runs without a real EL0 thread parked at the tail
+// (the in-guest E2E on a genuinely-parked target is 8a-1c).
+void test_devproc_debug_mem(void) {
+    struct Thread *tt = current_thread();
+    TEST_ASSERT(tt && tt->proc, "test thread has a proc");
+    struct Proc *caller = tt->proc;
+
+    struct Proc *tgt = proc_alloc();
+    TEST_ASSERT(tgt != NULL, "alloc mem target (with a real pgtable_root)");
+    TEST_ASSERT(tgt->pgtable_root != 0, "target has a pgtable_root");
+    tgt->principal_id = caller->principal_id;   // owner -> I-39 authorized
+    tgt->state        = PROC_STATE_ALIVE;
+
+    const u64 RW_VA  = 0x20000000ull;   // 512 MiB, user-half
+    const u64 RO_VA  = 0x20001000ull;   // + one page
+    const u64 GAP_VA = 0x20002000ull;   // + two pages: never mapped (a hole)
+
+    struct page *rw_pg = alloc_pages(0, KP_ZERO);
+    struct page *ro_pg = alloc_pages(0, KP_ZERO);
+    TEST_ASSERT(rw_pg && ro_pg, "alloc backing pages");
+    paddr_t rw_pa = page_to_pa(rw_pg), ro_pa = page_to_pa(ro_pg);
+    u8 *rw_kva = (u8 *)pa_to_kva(rw_pa);
+    u8 *ro_kva = (u8 *)pa_to_kva(ro_pa);
+    for (int i = 0; i < 64; i++) { rw_kva[i] = (u8)(0xA0 + i); ro_kva[i] = (u8)(0x50 + i); }
+    TEST_EXPECT_EQ(mmu_install_user_pte(tgt->pgtable_root, 0, RW_VA, rw_pa, VMA_PROT_RW,   false), 0, "map RW page");
+    TEST_EXPECT_EQ(mmu_install_user_pte(tgt->pgtable_root, 0, RO_VA, ro_pa, VMA_PROT_READ, false), 0, "map RO page");
+
+    // --- Layer 1: the raw cross-Proc resolver ---
+    u8 buf[64], wbuf[64];
+    long got = mmu_cross_proc_read(tgt->pgtable_root, RW_VA, buf, 64);
+    TEST_EXPECT_EQ(got, 64L, "cross_proc_read reads the RW page span");
+    bool match = true; for (int i = 0; i < 64; i++) if (buf[i] != (u8)(0xA0 + i)) match = false;
+    TEST_ASSERT(match, "cross_proc_read returns the RW page bytes");
+
+    for (int i = 0; i < 64; i++) wbuf[i] = (u8)(0x11 + i);
+    TEST_EXPECT_EQ(mmu_cross_proc_write(tgt->pgtable_root, RW_VA, wbuf, 64), 64L, "cross_proc_write writes the RW page");
+    match = true; for (int i = 0; i < 64; i++) if (rw_kva[i] != (u8)(0x11 + i)) match = false;
+    TEST_ASSERT(match, "cross_proc_write landed the bytes in the target page");
+
+    // RO leaf: read OK, write REFUSED (W^X / Image cache) + the page untouched.
+    TEST_EXPECT_EQ(mmu_cross_proc_read(tgt->pgtable_root, RO_VA, buf, 64), 64L, "cross_proc_read reads an RO page");
+    TEST_EXPECT_EQ(mmu_cross_proc_write(tgt->pgtable_root, RO_VA, wbuf, 64), 0L, "cross_proc_write REFUSES an RO leaf");
+    TEST_ASSERT(ro_kva[0] == 0x50, "the RO page was NOT modified by the refused write");
+
+    // A non-resident VA -> 0 (not resident; no fault-in).
+    TEST_EXPECT_EQ(mmu_cross_proc_read(tgt->pgtable_root,  GAP_VA, buf,  64), 0L, "read of a hole returns 0");
+    TEST_EXPECT_EQ(mmu_cross_proc_write(tgt->pgtable_root, GAP_VA, wbuf, 64), 0L, "write of a hole returns 0");
+
+    // --- Layer 2: the devproc mem-file path (I-39 + stopped-only) ---
+    proc_test_link(tgt);
+    struct Spoor *mem = open_mem_for_pid(tgt->pid);
+    TEST_ASSERT(mem != NULL, "open /proc/<pid>/mem");
+
+    // NOT stopped -> refused (stopped-only; DEBUG-FS 3).
+    tgt->debug_stop_req = 0;
+    TEST_EXPECT_EQ(devproc.read(mem, buf, 64, (s64)RW_VA), (long)-1, "mem read of a NOT-stopped target is refused");
+    TEST_EXPECT_EQ(devproc.write(mem, wbuf, 64, (s64)RW_VA), (long)-1, "mem write of a NOT-stopped target is refused");
+
+    // Stopped (thread-less -> vacuously fully-stopped) -> read/write work.
+    tgt->debug_stop_req = 1;
+    got = devproc.read(mem, buf, 64, (s64)RW_VA);
+    TEST_EXPECT_EQ(got, 64L, "mem read of a stopped target returns the bytes");
+    match = true; for (int i = 0; i < 64; i++) if (buf[i] != (u8)(0x11 + i)) match = false;   // the layer-1 write
+    TEST_ASSERT(match, "mem read returns the RW page bytes");
+
+    for (int i = 0; i < 64; i++) wbuf[i] = (u8)(0x77 + i);
+    TEST_EXPECT_EQ(devproc.write(mem, wbuf, 64, (s64)RW_VA), 64L, "mem write of a stopped target");
+    TEST_ASSERT(rw_kva[0] == 0x77, "mem write landed in the target page");
+    TEST_EXPECT_EQ(devproc.read(mem, buf, 64, (s64)GAP_VA), 0L, "mem read of a hole returns 0");
+
+    // Non-owner (a target owned by a different principal; caller has no debug
+    // cap) -> refused even while stopped (I-39).
+    TEST_ASSERT(!(caller->caps & (CAP_HOSTOWNER | CAP_DEBUG)),
+                "test caller lacks CAP_HOSTOWNER/CAP_DEBUG (the denied case is meaningful)");
+    tgt->principal_id = (caller->principal_id == 0x0D0D0D0Du) ? 0x0E0E0E0Eu : 0x0D0D0D0Du;
+    TEST_EXPECT_EQ(devproc.read(mem, buf, 64, (s64)RW_VA), (long)-1,
+                   "mem read by a non-owner (no CAP_DEBUG) is refused (I-39)");
+    spoor_clunk(mem);
+
+    // Cleanup: free MY backing pages (proc_pgtable_destroy leaves leaf data pages
+    // to the VMA layer), then the tree via proc_free.
+    proc_test_unlink(tgt);
+    free_pages(rw_pg, 0);
+    free_pages(ro_pg, 0);
     tgt->state = PROC_STATE_ZOMBIE;
     proc_free(tgt);
 }
