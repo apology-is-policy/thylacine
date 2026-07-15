@@ -63,6 +63,7 @@ struct HandleTable;
 struct Vma;
 struct Allowance;   // I-34 hardware allowance (<thylacine/allowance.h>)
 struct Env;         // G15 per-Proc environment group (<thylacine/env.h>)
+struct Spoor;       // 8a-1b debug_owner slot token (<thylacine/spoor.h>)
 
 // A-1a: identity model (docs/IDENTITY-DESIGN.md §3.3 + §9.1; ARCH §28 I-22).
 //
@@ -502,6 +503,19 @@ struct Proc {
     // charge and uncharge gates are symmetric). NOT propagated by rfork
     // (KP_ZERO -> 0). __atomic_* CAS charge / fetch_sub uncharge; no lock.
     u64                bounce_bytes;
+
+    // 8a-1b (I-39; docs/DEBUG-FS-DESIGN.md section 7.2): the one-debugger attach
+    // slot. NULL = not being debugged; non-NULL = the /proc/<pid>/ctl Spoor that
+    // holds the debug attach (an IDENTITY TOKEN only -- NEVER dereferenced, only
+    // compared for pointer-equality, so no spoor_ref is taken and the debugger's
+    // fd Spoor and this target have independent lifetimes: no cross-ref, no UAF).
+    // Guarded by g_proc_table_lock: claimed (attach), released (detach / the
+    // ctl-fd close hook, incl. debugger death via #68/#926 close-at-exit), and
+    // -- from 8a-1b-beta -- read by proc_group_terminate's death cascade, all
+    // under proc_for_each. A second attach on a non-NULL slot is Einuse (the Plan
+    // 9 one-debugger-per-target shape). KP_ZERO at proc_alloc inits it NULL, so a
+    // reused Proc struct never carries a stale token. NOT propagated by rfork.
+    struct Spoor      *debug_owner;
 };
 
 #define PROC_FLAG_NODUMP            (1u << 0)
@@ -546,13 +560,17 @@ struct Proc {
 // thread, and an armed kproc would *_INTR every kernel-thread sleep).
 #define PROC_FLAG_INTR_TERMINATE_PENDING (1u << 7)
 
-_Static_assert(sizeof(struct Proc) == 304,
-               "struct Proc size pinned at 304 bytes (the 296 baseline + the CF-3 A "
-               "bounce_bytes u64 @296 = 8). Adding a field grows the SLUB cache; "
+_Static_assert(sizeof(struct Proc) == 312,
+               "struct Proc size pinned at 312 bytes (the 304 baseline + the 8a-1b "
+               "debug_owner Spoor* @304 = 8). Adding a field grows the SLUB cache; "
                "update this assert deliberately so the change is intentional.");
 _Static_assert(__builtin_offsetof(struct Proc, bounce_bytes) == 296,
                "CF-3 A bounce_bytes appends after the G15 env pointer (offset 296); "
                "existing offsets stay stable (KP_ZERO inits it 0).");
+_Static_assert(__builtin_offsetof(struct Proc, debug_owner) == 304,
+               "8a-1b debug_owner (the I-39 one-debugger attach slot) appends after "
+               "bounce_bytes (offset 304, the next 8-aligned slot past the u64 @296); "
+               "existing offsets stay stable (KP_ZERO inits it NULL = not debugged).");
 _Static_assert(__builtin_offsetof(struct Proc, vma_count) == 280,
                "I-32 fourth-axis vma_count appends after the I-34 allowance pointer "
                "(offset 280); existing offsets stay stable (KP_ZERO inits it 0).");

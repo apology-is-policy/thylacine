@@ -45,10 +45,14 @@ void test_devproc_read_partial_offset(void);
 void test_devproc_kill_authorized_predicate(void);
 void test_devproc_stat_native_ctl_owner(void);
 void test_devproc_write_ctl_kill_dispatch(void);
+// 8a-1b: the I-39 debug gate + the attach/detach/close slot lifecycle.
+void test_devproc_debug_authorized_predicate(void);
+void test_devproc_debug_attach_detach_lifecycle(void);
 
-// A-4b impl hooks (non-static in kernel/devproc.c) + Proc test helpers
+// A-4b + 8a-1b impl hooks (non-static in kernel/devproc.c) + Proc test helpers
 // (non-static in kernel/proc.c; the test_proc.c / test_devsrv_conn.c pattern).
 bool devproc_kill_authorized(const struct Proc *caller, const struct Proc *target);
+bool devproc_debug_authorized(const struct Proc *caller, const struct Proc *target);
 extern void proc_test_link(struct Proc *p);
 extern void proc_test_unlink(struct Proc *p);
 
@@ -538,4 +542,150 @@ void test_devproc_write_ctl_kill_dispatch(void) {
     spoor_clunk(dctl);
     proc_test_unlink(dead);
     proc_free(dead);
+}
+
+// 8a-1b: the I-39 debug-authority predicate (owner OR CAP_DEBUG; kproc +
+// NOTRACE refused; CAP_HOSTOWNER/CAP_DAC_OVERRIDE are NOT debug axes at v1.0).
+void test_devproc_debug_authorized_predicate(void) {
+    struct Proc *caller = proc_alloc();
+    struct Proc *target = proc_alloc();
+    TEST_ASSERT(caller && target, "proc_alloc caller + target");
+
+    target->principal_id = 0xA11CEu;
+    target->primary_gid  = 0x6u;
+    target->state        = PROC_STATE_ALIVE;
+
+    // 1. Different principal, no caps -> denied.
+    caller->principal_id = 0xB0Bu;
+    caller->caps         = 0;
+    TEST_ASSERT(!devproc_debug_authorized(caller, target),
+                "non-owner with no caps cannot debug");
+
+    // 2. Same principal (owner) -> allowed.
+    caller->principal_id = 0xA11CEu;
+    TEST_ASSERT(devproc_debug_authorized(caller, target),
+                "the owner (same principal) can debug");
+
+    // 3. Different principal + CAP_DEBUG -> allowed (cross-identity debug).
+    caller->principal_id = 0xB0Bu;
+    caller->caps         = CAP_DEBUG;
+    TEST_ASSERT(devproc_debug_authorized(caller, target),
+                "CAP_DEBUG authorizes a cross-identity debug");
+
+    // 4. Different principal + CAP_HOSTOWNER -> DENIED at v1.0. Unlike the kill
+    //    gate, CAP_HOSTOWNER is NOT a debug axis here (the deliberate v1.0 narrow
+    //    reading of I-39; the Plan-9-eve widening is held for signoff).
+    caller->caps = CAP_HOSTOWNER;
+    TEST_ASSERT(!devproc_debug_authorized(caller, target),
+                "CAP_HOSTOWNER is NOT a debug axis at v1.0 (narrow I-39)");
+
+    // 5. Different principal + CAP_DAC_OVERRIDE -> DENIED (fs-admin != debug).
+    caller->caps = CAP_DAC_OVERRIDE;
+    TEST_ASSERT(!devproc_debug_authorized(caller, target),
+                "CAP_DAC_OVERRIDE is NOT a debug axis");
+
+    // 6. kproc (pid 0) is NEVER debuggable, even for a CAP_DEBUG holder (refused
+    //    before the authority axes).
+    caller->caps = CAP_DEBUG;
+    TEST_ASSERT(!devproc_debug_authorized(caller, kproc()),
+                "kproc is undebuggable");
+
+    // 7. A PROC_FLAG_NOTRACE target is refused, even for the owner AND a
+    //    CAP_DEBUG holder (the no-trace seam, DEBUG-FS section 8).
+    target->proc_flags |= PROC_FLAG_NOTRACE;
+    caller->principal_id = target->principal_id;    // owner
+    caller->caps         = 0;
+    TEST_ASSERT(!devproc_debug_authorized(caller, target),
+                "NOTRACE refuses the owner");
+    caller->principal_id = 0xB0Bu;
+    caller->caps         = CAP_DEBUG;
+    TEST_ASSERT(!devproc_debug_authorized(caller, target),
+                "NOTRACE refuses a CAP_DEBUG holder");
+
+    caller->state = PROC_STATE_ZOMBIE;
+    target->state = PROC_STATE_ZOMBIE;
+    proc_free(caller);
+    proc_free(target);
+}
+
+// 8a-1b: the attach/detach/close slot lifecycle (the model's Attach / DetachReq
+// / DbgDie -> ReleaseSlot). Proves: attach claims (Einuse on a 2nd attach),
+// detach frees, and the ctl-fd CLOSE frees the slot with no explicit detach
+// (the handle-lifetime-tied stop ownership -- the NoStrand foundation).
+void test_devproc_debug_attach_detach_lifecycle(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t && t->proc, "test thread has a proc");
+    struct Proc *caller = t->proc;
+    TEST_ASSERT(!(caller->caps & CAP_DEBUG),
+                "test caller lacks CAP_DEBUG (the denied case is meaningful)");
+
+    const char attach_cmd[] = "attach";
+    const char detach_cmd[] = "detach";
+    const long an = (long)sizeof(attach_cmd) - 1;   // 6
+    const long dn = (long)sizeof(detach_cmd) - 1;   // 6
+
+    // (a) OWNER attach claims the slot; a 2nd attach is Einuse; detach frees.
+    struct Proc *owned = proc_alloc();
+    TEST_ASSERT(owned != NULL, "alloc owned target");
+    owned->principal_id = caller->principal_id;
+    owned->state        = PROC_STATE_ALIVE;
+    proc_test_link(owned);
+
+    struct Spoor *ctl1 = open_ctl_for_pid(owned->pid);
+    TEST_ASSERT(ctl1 != NULL, "open owned-target ctl #1");
+    TEST_EXPECT_EQ(devproc.write(ctl1, attach_cmd, an, 0), an, "owner attach returns n");
+    TEST_EXPECT_EQ((void *)owned->debug_owner, (void *)ctl1,
+                   "attach claims the slot (debug_owner == ctl #1)");
+    TEST_ASSERT((ctl1->flag & CDEBUGOWNER) != 0, "attach marks the ctl Spoor CDEBUGOWNER");
+
+    struct Spoor *ctl2 = open_ctl_for_pid(owned->pid);
+    TEST_ASSERT(ctl2 != NULL, "open owned-target ctl #2");
+    TEST_EXPECT_EQ(devproc.write(ctl2, attach_cmd, an, 0), (long)-1, "2nd attach is Einuse (-1)");
+    TEST_EXPECT_EQ((void *)owned->debug_owner, (void *)ctl1, "slot still owned by ctl #1");
+    spoor_clunk(ctl2);   // ctl2 never owned the slot -> no release
+    TEST_EXPECT_EQ((void *)owned->debug_owner, (void *)ctl1,
+                   "clunking a non-owner ctl leaves the slot");
+
+    TEST_EXPECT_EQ(devproc.write(ctl1, detach_cmd, dn, 0), dn, "owner detach returns n");
+    TEST_EXPECT_EQ((void *)owned->debug_owner, (void *)NULL, "detach frees the slot");
+    spoor_clunk(ctl1);
+
+    // (b) the handle-lifetime-tied release: attach, then CLOSE the ctl fd
+    //     (debugger death / fd close) frees the slot with no explicit detach.
+    struct Spoor *ctl3 = open_ctl_for_pid(owned->pid);
+    TEST_ASSERT(ctl3 != NULL, "re-open owned-target ctl");
+    TEST_EXPECT_EQ(devproc.write(ctl3, attach_cmd, an, 0), an, "re-attach returns n");
+    TEST_EXPECT_EQ((void *)owned->debug_owner, (void *)ctl3, "re-attach claims the slot");
+    spoor_clunk(ctl3);   // close the fd -> devproc_close releases the slot
+    TEST_EXPECT_EQ((void *)owned->debug_owner, (void *)NULL,
+                   "ctl-fd close releases the slot (handle-lifetime-tied, NoStrand)");
+
+    proc_test_unlink(owned);
+    owned->state = PROC_STATE_ZOMBIE;
+    proc_free(owned);
+
+    // (c) DENIED: a target owned by a different principal, caller no CAP_DEBUG.
+    struct Proc *other = proc_alloc();
+    TEST_ASSERT(other != NULL, "alloc non-owned target");
+    other->principal_id = (caller->principal_id == 0x0B0B0B0Bu) ? 0x0C0C0C0Cu
+                                                                : 0x0B0B0B0Bu;
+    other->state        = PROC_STATE_ALIVE;
+    proc_test_link(other);
+    struct Spoor *nctl = open_ctl_for_pid(other->pid);
+    TEST_ASSERT(nctl != NULL, "open non-owned-target ctl");
+    TEST_EXPECT_EQ(devproc.write(nctl, attach_cmd, an, 0), (long)-1,
+                   "non-owner without CAP_DEBUG is denied (-1)");
+    TEST_EXPECT_EQ((void *)other->debug_owner, (void *)NULL, "denied target NOT attached");
+    spoor_clunk(nctl);
+    proc_test_unlink(other);
+    other->state = PROC_STATE_ZOMBIE;
+    proc_free(other);
+
+    // (d) kproc (pid 0) attach is refused end-to-end (undebuggable kernel).
+    struct Spoor *kctl = open_ctl_for_pid(0);
+    TEST_ASSERT(kctl != NULL, "open /proc/0/ctl (kproc)");
+    TEST_EXPECT_EQ(devproc.write(kctl, attach_cmd, an, 0), (long)-1,
+                   "attach to kproc is refused (-1)");
+    TEST_EXPECT_EQ((void *)kproc()->debug_owner, (void *)NULL, "kproc slot untouched");
+    spoor_clunk(kctl);
 }

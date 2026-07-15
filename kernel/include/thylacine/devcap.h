@@ -64,8 +64,12 @@ struct Spoor;
 // fs-admin caps split out of CAP_HOSTOWNER -- a clearance grant confers a
 // SUBSET of these. Excludes CAP_HOSTOWNER itself (that stays on the
 // console-gated path) and every fork-grantable cap. A clearance grant whose
-// cap_mask escapes this mask is rejected at register.
-#define CAP_GRANTABLE_CLEARANCE  (CAP_DAC_OVERRIDE | CAP_CHOWN | CAP_KILL)
+// cap_mask escapes this mask is rejected at register. CAP_DEBUG (Stage-8a) is
+// clearance-grantable so a dev-session debugger acquires it via the same
+// scope- and time-bounded legate the fs-admin caps use (docs/DEBUG-FS-DESIGN.md
+// section 7.1) -- the register-gate + redeem-subset check are mask-driven, so
+// no devcap.c change is needed.
+#define CAP_GRANTABLE_CLEARANCE  (CAP_DAC_OVERRIDE | CAP_CHOWN | CAP_KILL | CAP_DEBUG)
 
 // RW-5 SA-2 -- pin the I-25 member-unelevated invariant at compile time. BOTH
 // grantable sets MUST be entirely elevation-only. The load-bearing consequence:

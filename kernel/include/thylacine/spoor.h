@@ -75,6 +75,14 @@ _Static_assert(sizeof(struct Qid) == 16,
                                // opened for byte I/O; sys_read/write/readdir reject
                                // it (-1) so the perm_check-exempt O_PATH open is not
                                // a read-bypass (IDENTITY-DESIGN section 9.4 #81)
+#define CDEBUGOWNER (1u << 4)  // 8a-1b: this /proc/<pid>/ctl Spoor holds the target's
+                               // one-debugger attach slot (Proc.debug_owner == this).
+                               // Set at the `attach` verb; makes devproc_close release
+                               // the slot on the fd's close (the handle-lifetime-tied
+                               // stop ownership -- close/detach/debugger-death = resume,
+                               // docs/DEBUG-FS-DESIGN.md section 7.2). Never cleared:
+                               // it only GATES the release-walk (a stale flag after
+                               // detach finds debug_owner already NULL -> no-op).
 #define CSRVCLIENT (1u << 2)   // devsrv byte-conn Spoor: CLIENT endpoint (read s2c
                                // / write c2s, the mirror of the server endpoint).
                                // Set on the Spoor devsrv_open returns for a byte-

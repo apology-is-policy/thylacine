@@ -445,7 +445,37 @@ static struct Spoor *devproc_create(struct Spoor *c, const char *name, int omode
     return NULL;
 }
 
+// The ctl-fd close hook's release walk (8a-1b; identity-matched across ALL
+// Procs). A closing debug-owner ctl Spoor releases exactly the target it owns —
+// matching by pointer identity is correct under pid reuse (a reused pid with a
+// different debug_owner is untouched) and is a no-op if the target was already
+// reaped (debug_owner never matches). Runs OUTSIDE g_proc_table_lock (see
+// devproc_close). The attach/detach walk (devproc_debug_walk_cb) lives with the
+// ctl-verb machinery below.
+struct devproc_debug_release_ctx { struct Spoor *ctl; bool found; };
+static int devproc_debug_release_cb(struct Proc *p, void *arg) {
+    struct devproc_debug_release_ctx *r = (struct devproc_debug_release_ctx *)arg;
+    if (p->debug_owner != r->ctl) return 0;        // keep walking
+    p->debug_owner = NULL;                          // release
+    // 8a-1b-beta: resume threads parked on p's debugger rendez here.
+    r->found = true;
+    return 1;                                        // matched -> stop
+}
+
 static void devproc_close(struct Spoor *c) {
+    // 8a-1b (I-39, DEBUG-FS §7.2): the handle-lifetime-tied stop ownership. If
+    // this ctl Spoor holds a debug attach slot (CDEBUGOWNER), releasing the fd —
+    // by explicit close, or by debugger death closing its handles at exit
+    // (#68/#926) — releases the slot (and, from 8a-1b-beta, resumes the target),
+    // so a dead/detached debugger provably never strands its quarry. CDEBUGOWNER
+    // gates the walk so a plain kill-user ctl close skips it. Runs OUTSIDE
+    // g_proc_table_lock: this hook is reached from handle_release_obj (SYS_CLOSE)
+    // and the #68 last-thread-out close, both with g_proc_table_lock DROPPED, so
+    // proc_for_each may take it (no recursion).
+    if (c && (c->flag & CDEBUGOWNER)) {
+        struct devproc_debug_release_ctx r = { .ctl = c, .found = false };
+        proc_for_each(devproc_debug_release_cb, &r);
+    }
     dev_simple_close(c);
 }
 
@@ -563,11 +593,55 @@ bool devproc_kill_authorized(const struct Proc *caller, const struct Proc *targe
     return false;
 }
 
+// =============================================================================
+// I-39 debug authority (8a-1b; docs/DEBUG-FS-DESIGN.md §3, the I-26 analog).
+// =============================================================================
+//
+// Two-axis authority for the /proc/<pid> debug surface (attach + the mem/regs/
+// wait reads in later sub-chunks). ctl is 0600 (owner rw), so:
+//   - identity axis: the OWNER (same principal_id) may debug its own target;
+//   - capability axis: CAP_DEBUG (the clearance-grantable cross-identity
+//     debug authority) may debug any nameable target.
+// Checked DIRECTLY (not via perm_check): CAP_DAC_OVERRIDE — the generic fs-rwx
+// admin — is deliberately NOT a debug axis, exactly as the kill gate keeps it
+// off the kill axis. No identity bypasses (I-22 — CAP_DEBUG is a capability).
+// kproc (debugging it would stop the kernel) and a PROC_FLAG_NOTRACE target
+// (the SYS_SET_TRACEABLE(0) no-trace seam — e.g. the login session Proc,
+// DEBUG-FS-DESIGN §8) are refused BEFORE the authority axes: a CAP_DEBUG holder
+// cannot debug either. Non-static: the kernel test suite exercises the predicate.
+//
+// v1.0 NARROW reading of I-39: CAP_HOSTOWNER is NOT a debug axis here. The design
+// doc §3 states the gate as owner-OR-CAP_DEBUG; a host owner debugging any target
+// (the Plan 9 "eve" super-user shape — and the I-26 kill gate DOES admit
+// CAP_HOSTOWNER) is a possible v1.x WIDENING held for signoff, since widening a
+// privilege gate is the user's call and the narrower gate is the safe default. A
+// hostowner that needs to debug acquires CAP_DEBUG via a clearance grant.
+bool devproc_debug_authorized(const struct Proc *caller, const struct Proc *target) {
+    if (!caller || !target)                            return false;
+    if (target == kproc())                             return false;   // kernel: undebuggable
+    // NOTRACE is a monotonic one-way bit; a RELAXED read matches the setter
+    // (sys_set_traceable) and is sound (it is set at target startup, before any
+    // debugger could race — a stale-clear window cannot outlive the setter).
+    if (__atomic_load_n(&target->proc_flags, __ATOMIC_RELAXED) & PROC_FLAG_NOTRACE)
+        return false;                                                   // no-trace seam
+    if (caller->principal_id == target->principal_id)  return true;    // owner-rwx on 0600
+    // caps read ATOMICALLY (RW-5 F2): proc_become_legate is a cross-thread writer
+    // of caller->caps; a plain load is C11-racy (CAP_DEBUG is clearance-grantable).
+    if (__atomic_load_n(&caller->caps, __ATOMIC_ACQUIRE) & CAP_DEBUG)
+        return true;                                                    // debug-anyone
+    return false;
+}
+
 // ctl verbs. v1.0: kill / killgrp both terminate the target Proc's thread-
 // group (no cross-Proc process groups at v1.0 — a distinct killgrp is a v1.x
 // seam). stop / start are scheduler integration (ARCH OPEN Q 7.6.D); other
 // tokens are rejected.
-enum ctl_verb { CTL_VERB_NONE, CTL_VERB_KILL, CTL_VERB_KILLGRP, CTL_VERB_OTHER };
+enum ctl_verb {
+    CTL_VERB_NONE, CTL_VERB_KILL, CTL_VERB_KILLGRP,
+    CTL_VERB_ATTACH,   // 8a-1b: claim the one-debugger slot (I-39-gated; Einuse)
+    CTL_VERB_DETACH,   // 8a-1b: release the slot (owner-fd only)
+    CTL_VERB_OTHER,
+};
 
 // Match the token [s, s+len) against a NUL-terminated literal (no libc).
 static bool ctl_tok_eq(const char *s, long len, const char *lit) {
@@ -588,6 +662,8 @@ static enum ctl_verb parse_ctl_verb(const char *s, long n) {
     if (len == 0)                              return CTL_VERB_NONE;
     if (ctl_tok_eq(s + start, len, "kill"))    return CTL_VERB_KILL;
     if (ctl_tok_eq(s + start, len, "killgrp")) return CTL_VERB_KILLGRP;
+    if (ctl_tok_eq(s + start, len, "attach"))  return CTL_VERB_ATTACH;
+    if (ctl_tok_eq(s + start, len, "detach"))  return CTL_VERB_DETACH;
     return CTL_VERB_OTHER;
 }
 
@@ -621,6 +697,56 @@ static int devproc_kill_walk_cb(struct Proc *target, void *arg) {
     return 1;
 }
 
+// =============================================================================
+// ctl attach / detach — the one-debugger slot (8a-1b; I-39, DEBUG-FS §7.2).
+// =============================================================================
+//
+// The debug attach slot is p->debug_owner: the /proc/<pid>/ctl Spoor that holds
+// the debugger's claim (an identity token only — never dereferenced). Guarded
+// by g_proc_table_lock; all of attach / detach / the ctl-fd-close release run
+// under proc_for_each, so the claim + Einuse check + release are serialized (no
+// atomic needed). This is the FOUNDATION: 8a-1b-beta makes the release ALSO
+// resume threads parked on the debugger rendez (the model's ReleaseSlot wake) —
+// at v1.0-alpha nothing parks yet, so release is a bare slot clear.
+
+// proc_for_each context for the attach/detach walk. result: 0 = target pid not
+// found, +1 = success, -1 = denied / Einuse / not-ALIVE / not-the-owner.
+struct devproc_debug_ctx {
+    int           target_pid;
+    struct Proc  *caller;
+    struct Spoor *ctl;         // the caller's ctl Spoor — the attach slot token
+    enum ctl_verb verb;        // CTL_VERB_ATTACH or CTL_VERB_DETACH
+    int           result;
+};
+
+static int devproc_debug_walk_cb(struct Proc *target, void *arg) {
+    struct devproc_debug_ctx *d = (struct devproc_debug_ctx *)arg;
+    if (target->pid != d->target_pid) return 0;   // keep walking
+
+    if (d->verb == CTL_VERB_ATTACH) {
+        // Refuse a non-ALIVE target, then the I-39 gate (kproc / NOTRACE /
+        // owner-or-CAP_DEBUG), then Einuse: a non-NULL slot is already claimed.
+        if (target->state != PROC_STATE_ALIVE)            { d->result = -1; return 1; }
+        if (!devproc_debug_authorized(d->caller, target)) { d->result = -1; return 1; }
+        if (target->debug_owner != NULL)                  { d->result = -1; return 1; }  // Einuse
+        target->debug_owner = d->ctl;              // claim (under g_proc_table_lock)
+        d->ctl->flag |= CDEBUGOWNER;               // gate the close-hook release
+        d->result = 1;
+        return 1;
+    }
+
+    // CTL_VERB_DETACH: release iff THIS ctl Spoor owns the slot (identity match,
+    // so a stranger's detach or a stale post-reap detach is a clean -1 / no-op).
+    if (target->debug_owner == d->ctl) {
+        target->debug_owner = NULL;                // release
+        // 8a-1b-beta: resume threads parked on target's debugger rendez here.
+        d->result = 1;
+    } else {
+        d->result = -1;
+    }
+    return 1;
+}
+
 // Write: ctl parses kill / killgrp and terminates the target Proc's thread-
 // group (A-4b). Writes to status / cmdline / ns / dirs, and unrecognized
 // verbs, return -1. The verb is offset-agnostic (a control message, not a byte
@@ -634,10 +760,23 @@ static long devproc_write(struct Spoor *c, const void *buf, long n, s64 off) {
     if (kind != PQS_CTL) return -1;
 
     enum ctl_verb v = parse_ctl_verb((const char *)buf, n);
-    if (v != CTL_VERB_KILL && v != CTL_VERB_KILLGRP) return -1;
+    if (v != CTL_VERB_KILL && v != CTL_VERB_KILLGRP &&
+        v != CTL_VERB_ATTACH && v != CTL_VERB_DETACH) return -1;
 
     struct Thread *t = current_thread();
     if (!t || !t->proc) return -1;
+
+    if (v == CTL_VERB_ATTACH || v == CTL_VERB_DETACH) {
+        struct devproc_debug_ctx d = {
+            .target_pid = proc_qid_pid(c->qid.path),
+            .caller     = t->proc,
+            .ctl        = c,
+            .verb       = v,
+            .result     = 0,
+        };
+        proc_for_each(devproc_debug_walk_cb, &d);
+        return (d.result == 1) ? n : -1;
+    }
 
     struct devproc_kill_ctx k = {
         .target_pid = proc_qid_pid(c->qid.path),
