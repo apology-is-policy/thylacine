@@ -1935,6 +1935,34 @@ _Static_assert(sizeof(struct t_user_fpregs) == 520,
 _Static_assert(__builtin_offsetof(struct t_user_fpregs, fpsr) == 512, "t_user_fpregs.fpsr at ABI offset 512");
 _Static_assert(__builtin_offsetof(struct t_user_fpregs, fpcr) == 516, "t_user_fpregs.fpcr at ABI offset 516");
 
+// 8a-1b-gamma-3 (I-39; docs/DEBUG-FS-DESIGN.md 4.5/4.6): the /proc/<pid>/kregs
+// READ-ONLY format -- a stopped thread's saved KERNEL-side callee-saved GP frame
+// (from t->ctx). It is the input to the unified kernel stack walk
+// (/proc/<pid>/kstack: fp + lr feed the frame-pointer chain) AND carries
+// tpidr_el0, the EL0 TLS base dlv reads to recover the Go `g` (DEBUG-FS 4.5).
+// Callee-saved-only (x19..x28 + fp/lr/sp) because those are exactly what
+// cpu_switch_context preserves; the caller-saved x0..x18 are not saved across a
+// switch (the EL0-frame copies live in /proc/<pid>/regs). ttbr0 is DELIBERATELY
+// omitted (a kernel pgtable PA + ASID -- an info-leak with no debug value). No
+// writable path (0400): the kernel-side frame is inspected, never edited.
+//
+// The field offsets deliberately mirror struct Context's GP region (context.h:
+// fp@80, lr@88, sp@96, tpidr_el0@104) so the build is a verbatim copy.
+struct t_kernel_regs {
+    u64 x[10];      // x19..x28 (AAPCS64 callee-saved)
+    u64 fp;         // x29 (kernel frame pointer -- the kstack-walk start)
+    u64 lr;         // x30 (kernel resume PC -- the walk's frame 0)
+    u64 sp;         // kernel SP
+    u64 tpidr_el0;  // EL0 TLS base (dlv reads the Go g from here)
+};
+_Static_assert(sizeof(struct t_kernel_regs) == 112,
+               "struct t_kernel_regs is the /proc/<pid>/kregs ABI: 10 callee-saved "
+               "GP (x19..x28) + fp + lr + sp + tpidr_el0 = 14*8 = 112 bytes");
+_Static_assert(__builtin_offsetof(struct t_kernel_regs, fp)        == 80,  "t_kernel_regs.fp at ABI offset 80");
+_Static_assert(__builtin_offsetof(struct t_kernel_regs, lr)        == 88,  "t_kernel_regs.lr at ABI offset 88");
+_Static_assert(__builtin_offsetof(struct t_kernel_regs, sp)        == 96,  "t_kernel_regs.sp at ABI offset 96");
+_Static_assert(__builtin_offsetof(struct t_kernel_regs, tpidr_el0) == 104, "t_kernel_regs.tpidr_el0 at ABI offset 104");
+
 // SYS_LSEEK whence values (P6-pouch-stratumd-boot sub-chunk 16b-gamma).
 // Mirror POSIX SEEK_SET / SEEK_CUR / SEEK_END but stay namespaced so
 // the kernel ABI never depends on a libc header. The libt + pouch arms

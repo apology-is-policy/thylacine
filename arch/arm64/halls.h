@@ -77,4 +77,17 @@ bool halls_frame_is_live(u64 frame, u64 cur_sp);
 // address -- a stack/heap/zero value), returns addr unchanged.
 u64 halls_link_addr(u64 addr, u64 kaslr_offset);
 
+// 8a-1b-gamma-3 (I-39; DEBUG-FS-DESIGN.md section 4.6): walk a LIVE stopped
+// thread's kernel frame-pointer chain into `out` -- canonical (PAC-stripped)
+// return addresses, out[0] = the frame-0 PC, out[1..] = saved LRs walked from
+// start_fp. EXPLICIT [lo, hi) bounds (the thread's USABLE kstack, excluding the
+// guard) plus a per-frame `fp + 16 <= hi` gate keep every read in-bounds, so --
+// unlike the dying-machine halls_dump path -- this is fault-safe on the live
+// debug path (there is no HX-I1 guard to catch a bad read there). A SEPARATE
+// function from halls_backtrace so the audited dump path stays byte-unchanged.
+// Returns the frame count (>= 1 when max >= 1). Symbolize each result via
+// halls_link_addr (KASLR) + halls_symbolize (halls_symtab.h).
+unsigned halls_walk_kernel_frames(u64 pc, u64 start_fp, u64 lo, u64 hi,
+                                  u64 *out, unsigned max);
+
 #endif // THYLACINE_ARCH_ARM64_HALLS_H

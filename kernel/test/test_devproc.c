@@ -57,6 +57,7 @@ void test_devproc_debug_attach_detach_lifecycle(void);
 void test_devproc_debug_stop_start_resume(void);
 void test_devproc_debug_mem(void);
 void test_devproc_debug_regs(void);
+void test_devproc_debug_kregs_kstack_wait(void);
 
 // A-4b + 8a-1b impl hooks (non-static in kernel/devproc.c) + Proc test helpers
 // (non-static in kernel/proc.c; the test_proc.c / test_devsrv_conn.c pattern).
@@ -1043,4 +1044,146 @@ void test_devproc_debug_regs(void) {
     free_pages(kstk, THREAD_KSTACK_TOTAL_ORDER);
     tgt->state = PROC_STATE_ZOMBIE;
     proc_free(tgt);
+}
+
+// 8a-1b-gamma-3: /proc/<pid>/{kregs,kstack,wait} -- the kernel-side inspection +
+// stop-notification files of a STOPPED target's head thread (I-39; DEBUG-FS
+// 4.5/4.6). Drives the full devproc path on a SYNTHETIC parked thread with a
+// real kstack, a known t->ctx GP frame, and a hand-built fp-chain in the usable
+// kstack region. The kstack walk reuses the additive halls_walk_kernel_frames
+// primitive (the dying-machine dump path stays byte-unchanged). The blocking
+// wait path (block-until-a-real-thread-parks) is the in-guest E2E (8a-1c); here
+// a target that is ALREADY stopped returns immediately (level-triggered).
+//
+// STRUCTURE (deliberate): capture every result into locals, then CLEAN UP the
+// linked target BEFORE any content assert. TEST_ASSERT `return`s on failure, so
+// an assert after proc_test_link would skip the cleanup and leave `tgt` linked
+// with a DANGLING tgt->threads (this stack-local `th`) -- a later proc-table
+// walk then derefs a dead stack frame (the mystery downstream hang this test
+// itself first exposed). Cleanup-before-assert makes a failure report cleanly.
+void test_devproc_debug_kregs_kstack_wait(void) {
+    struct Thread *tt = current_thread();
+    TEST_ASSERT(tt && tt->proc, "test thread has a proc");
+    struct Proc *caller = tt->proc;
+    TEST_ASSERT(!(caller->caps & (CAP_HOSTOWNER | CAP_DEBUG)),
+                "test caller lacks CAP_HOSTOWNER/CAP_DEBUG (the non-owner deny case is meaningful)");
+
+    struct Proc *tgt = proc_alloc();
+    TEST_ASSERT(tgt != NULL, "alloc debug target");
+    tgt->principal_id = caller->principal_id;   // owner -> I-39 authorized
+    tgt->state        = PROC_STATE_ALIVE;
+
+    struct page *kstk = alloc_pages(THREAD_KSTACK_TOTAL_ORDER, KP_ZERO);
+    if (!kstk) { tgt->state = PROC_STATE_ZOMBIE; proc_free(tgt); }
+    TEST_ASSERT(kstk != NULL, "alloc synthetic kstack");
+    u8 *kbase = (u8 *)pa_to_kva(page_to_pa(kstk));
+
+    // Hand-built kernel fp-chain in the USABLE kstack region (above the guard):
+    //   fp0 -> fp1 -> 0(sentinel).  Frame record = [fp]=next_fp, [fp+8]=saved LR.
+    // Strictly-increasing addresses (fp0 < fp1) so halls_fp_is_sane accepts them.
+    u8 *fp0 = kbase + THREAD_KSTACK_TOTAL_SIZE - 256;   // 16-aligned, in [guard, top)
+    u8 *fp1 = kbase + THREAD_KSTACK_TOTAL_SIZE - 128;
+    *(volatile u64 *)fp0        = (u64)(uintptr_t)fp1;   // next frame
+    *(volatile u64 *)(fp0 + 8)  = 0x22220000ull;        // LR0 (frame #1)
+    *(volatile u64 *)fp1        = 0;                     // sentinel -> the walk stops
+    *(volatile u64 *)(fp1 + 8)  = 0x33330000ull;        // LR1 (frame #2)
+
+    struct Thread th;
+    for (size_t i = 0; i < sizeof(th); i++) ((u8 *)&th)[i] = 0;
+    th.magic             = THREAD_MAGIC;
+    th.state             = THREAD_SLEEPING;
+    th.kstack_base       = kbase;
+    th.kstack_size       = THREAD_KSTACK_TOTAL_SIZE;
+    th.on_cpu            = false;
+    th.rendez_blocked_on = &th.debug_rendez;    // "parked on its own debug_rendez"
+    th.next_in_proc      = NULL;
+    // Kernel-side saved GP frame (t->ctx): x19..x28 + fp/lr/sp + TLS. fp = fp0
+    // (the walk start), lr = 0x11110000 (the walk's frame #0 PC). x-values are
+    // 0xC200 + i (sequential, distinct from sp=0xC096 / tpidr=0xC104).
+    th.ctx.x19 = 0xC200ull; th.ctx.x20 = 0xC201ull; th.ctx.x21 = 0xC202ull;
+    th.ctx.x22 = 0xC203ull; th.ctx.x23 = 0xC204ull; th.ctx.x24 = 0xC205ull;
+    th.ctx.x25 = 0xC206ull; th.ctx.x26 = 0xC207ull; th.ctx.x27 = 0xC208ull;
+    th.ctx.x28 = 0xC209ull;
+    th.ctx.fp        = (u64)(uintptr_t)fp0;
+    th.ctx.lr        = 0x11110000ull;
+    th.ctx.sp        = 0xC096ull;
+    th.ctx.tpidr_el0 = 0xC104ull;
+    th.ctx.ttbr0     = 0xDEADBEEFull;   // MUST NOT appear in kregs (info-leak omission)
+
+    tgt->threads        = &th;
+    tgt->debug_stop_req = 1;            // "stopped" (one parked thread + on_cpu==false)
+    proc_test_link(tgt);
+
+    // --- Capture every result while linked+stopped (NO content asserts yet) ---
+    struct t_kernel_regs kr;
+    for (size_t i = 0; i < sizeof(kr); i++) ((u8 *)&kr)[i] = 0;
+    long kregs_rlen = -999, kregs_wlen = -999;
+    struct Spoor *kregs = open_pidfile_for(tgt->pid, "kregs", 0);   // OREAD
+    if (kregs) {
+        kregs_rlen = devproc.read(kregs, &kr, (long)sizeof(kr), 0);
+        kregs_wlen = devproc.write(kregs, &kr, (long)sizeof(kr), 0);   // RO -> -1
+        spoor_clunk(kregs);
+    }
+
+    char sbuf[512]; for (size_t i = 0; i < sizeof(sbuf); i++) sbuf[i] = 0;
+    long slen = -999;
+    struct Spoor *ks = open_pidfile_for(tgt->pid, "kstack", 0);
+    if (ks) { slen = devproc.read(ks, sbuf, (long)sizeof(sbuf), 0); spoor_clunk(ks); }
+
+    char wbuf[16], ebuf[16]; long wl = -999, wl_nonowner = -999, el = -999;
+    for (size_t i = 0; i < sizeof(wbuf); i++) { wbuf[i] = 0; ebuf[i] = 0; }
+    struct Spoor *w = open_pidfile_for(tgt->pid, "wait", 0);
+    if (w) {
+        wl = devproc.read(w, wbuf, (long)sizeof(wbuf), 0);   // stopped -> "stopped\n"
+        // Non-owner -> denied (I-39), even while stopped (immediate, no block).
+        u32 saved_pid = tgt->principal_id;
+        tgt->principal_id = (caller->principal_id == 0x0D0D0D0Du) ? 0x0E0E0E0Eu : 0x0D0D0D0Du;
+        char junk[16];
+        wl_nonowner = devproc.read(w, junk, (long)sizeof(junk), 0);
+        tgt->principal_id = saved_pid;
+        // Exiting target -> "exited" (the debugger unblocks on the target's death).
+        tgt->state = PROC_STATE_ZOMBIE;
+        el = devproc.read(w, ebuf, (long)sizeof(ebuf), 0);
+        spoor_clunk(w);
+    }
+
+    // --- Cleanup FIRST: unlink the target + drop the stack-local thread before
+    //     any content assert can `return` and strand a linked Proc. ---
+    proc_test_unlink(tgt);
+    tgt->threads = NULL;
+    free_pages(kstk, THREAD_KSTACK_TOTAL_ORDER);
+    tgt->state = PROC_STATE_ZOMBIE;
+    proc_free(tgt);
+
+    // --- Now assert on the captured results (safe: nothing linked) ---
+    // kregs: the kernel-side saved frame + TLS base.
+    TEST_EXPECT_EQ(kregs_rlen, (long)sizeof(kr), "kregs read: full struct");
+    bool m = true;
+    for (int i = 0; i < 10; i++) if (kr.x[i] != 0xC200ull + (u64)i) m = false;
+    TEST_ASSERT(m, "kregs read: x19..x28 (callee-saved)");
+    TEST_EXPECT_EQ(kr.fp,        (u64)(uintptr_t)fp0, "kregs read: fp = ctx.fp (kstack-walk start)");
+    TEST_EXPECT_EQ(kr.lr,        0x11110000ull,       "kregs read: lr = ctx.lr");
+    TEST_EXPECT_EQ(kr.sp,        0xC096ull,           "kregs read: sp");
+    TEST_EXPECT_EQ(kr.tpidr_el0, 0xC104ull,           "kregs read: tpidr_el0 (TLS base for Delve's g)");
+    TEST_EXPECT_EQ(kregs_wlen,   (long)-1,            "kregs is RO (write refused)");
+
+    // kstack: the symbolized kernel fp-chain walk. Three frames: #0 = ctx.lr
+    // (0x11110000), #1 = LR0 (0x22220000), #2 = LR1 (0x33330000). KASLR is off in
+    // the test kernel (koff=0) + the addresses are below any slide, so link ==
+    // runtime addr. The sentinel (fp2=0) stops the walk at 3 frames.
+    TEST_ASSERT(slen > 0,                              "kstack read produced text");
+    TEST_ASSERT(contains(sbuf, (size_t)slen, "#0"),         "kstack: frame #0 present");
+    TEST_ASSERT(contains(sbuf, (size_t)slen, "0x11110000"), "kstack: frame #0 addr = ctx.lr");
+    TEST_ASSERT(contains(sbuf, (size_t)slen, "#1"),         "kstack: frame #1 present");
+    TEST_ASSERT(contains(sbuf, (size_t)slen, "0x22220000"), "kstack: frame #1 addr = LR0");
+    TEST_ASSERT(contains(sbuf, (size_t)slen, "#2"),         "kstack: frame #2 present");
+    TEST_ASSERT(contains(sbuf, (size_t)slen, "0x33330000"), "kstack: frame #2 addr = LR1");
+    TEST_ASSERT(!contains(sbuf, (size_t)slen, "#3"),        "kstack: the sentinel stopped the walk at 3 frames");
+
+    // wait: stopped / denied / exited (all level-triggered immediate returns).
+    TEST_EXPECT_EQ(wl, 8L, "wait on a stopped target returns 'stopped\\n'");
+    TEST_ASSERT(wl == 8 && contains(wbuf, (size_t)wl, "stopped"), "wait status = stopped");
+    TEST_EXPECT_EQ(wl_nonowner, (long)-1, "wait by a non-owner (no CAP_DEBUG) is refused (I-39)");
+    TEST_EXPECT_EQ(el, 7L, "wait on an exiting target returns 'exited\\n'");
+    TEST_ASSERT(el == 7 && contains(ebuf, (size_t)el, "exited"), "wait status = exited");
 }

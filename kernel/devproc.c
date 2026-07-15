@@ -45,9 +45,12 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
-#include "../arch/arm64/timer.h"      // 8a-1b-beta: timer_now_ns -- the stop-wait poll deadline
-#include "../arch/arm64/mmu.h"        // 8a-1b-gamma: mmu_cross_proc_read/write -- /proc/<pid>/mem
-#include "../arch/arm64/exception.h"  // 8a-1b-gamma-2: struct exception_context -- /proc/<pid>/regs
+#include "../arch/arm64/timer.h"        // 8a-1b-beta: timer_now_ns -- the stop-wait poll deadline
+#include "../arch/arm64/mmu.h"          // 8a-1b-gamma: mmu_cross_proc_read/write -- /proc/<pid>/mem
+#include "../arch/arm64/exception.h"    // 8a-1b-gamma-2: struct exception_context -- /proc/<pid>/regs
+#include "../arch/arm64/halls.h"        // 8a-1b-gamma-3: halls_walk_kernel_frames/link_addr -- /proc/<pid>/kstack
+#include "../arch/arm64/halls_symtab.h" // 8a-1b-gamma-3: halls_symbolize -- on-target kstack symbolization
+#include "../arch/arm64/kaslr.h"        // 8a-1b-gamma-3: kaslr_get_offset -- kstack link-translation
 
 // =============================================================================
 // Qid path encoding.
@@ -68,6 +71,9 @@ enum {
     PQS_MEM      = 6,        // /proc/<pid>/mem              (QTFILE; 8a-1b-gamma-1, I-39)
     PQS_REGS     = 7,        // /proc/<pid>/regs             (QTFILE; 8a-1b-gamma-2, I-39)
     PQS_FPREGS   = 8,        // /proc/<pid>/fpregs           (QTFILE; 8a-1b-gamma-2, I-39)
+    PQS_WAIT     = 9,        // /proc/<pid>/wait             (QTFILE; 8a-1b-gamma-3, I-39; RO, blocks until stopped)
+    PQS_KREGS    = 10,       // /proc/<pid>/kregs            (QTFILE; 8a-1b-gamma-3, I-39; RO, kernel-side frame)
+    PQS_KSTACK   = 11,       // /proc/<pid>/kstack           (QTFILE; 8a-1b-gamma-3, I-39; RO, symbolized kernel bt)
 };
 
 #define PROC_QID_ROOT_PATH  0ULL
@@ -101,6 +107,9 @@ static const struct proc_pid_file g_proc_pid_files[] = {
     { "mem",     PQS_MEM     },
     { "regs",    PQS_REGS    },
     { "fpregs",  PQS_FPREGS  },
+    { "wait",    PQS_WAIT    },
+    { "kregs",   PQS_KREGS   },
+    { "kstack",  PQS_KSTACK  },
 };
 
 #define PROC_PID_FILE_COUNT \
@@ -148,6 +157,26 @@ static size_t fmt_str(char *buf, size_t cap, size_t off, const char *s) {
         n++;
     }
     return n;
+}
+
+// Append "0x" + minimal-width lowercase hex (no leading zeros). Returns bytes
+// appended, or 0 if there is no room (8a-1b-gamma-3: the /proc/<pid>/kstack
+// symbolized backtrace).
+static size_t fmt_hex(char *buf, size_t cap, size_t off, u64 v) {
+    char tmp[18];   // "0x" + up to 16 hex digits
+    tmp[0] = '0'; tmp[1] = 'x';
+    int n = 2;
+    if (v == 0) {
+        tmp[n++] = '0';
+    } else {
+        char d[16];
+        int m = 0;
+        while (v && m < 16) { u64 x = v & 0xfu; d[m++] = (char)(x < 10u ? ('0' + x) : ('a' + (x - 10u))); v >>= 4; }
+        while (m) tmp[n++] = d[--m];
+    }
+    if (off + (size_t)n > cap) return 0;
+    for (int i = 0; i < n; i++) buf[off + i] = tmp[i];
+    return (size_t)n;
 }
 
 // Translate proc_state to printable form.
@@ -390,6 +419,9 @@ static u32 devproc_mode_for_kind(u32 kind) {
     case PQS_MEM:     return 0600u;   // 8a-1b-gamma-1: owner-private (I-39-gated at the RW site)
     case PQS_REGS:    return 0600u;   // 8a-1b-gamma-2: owner-private (I-39-gated at the RW site)
     case PQS_FPREGS:  return 0600u;
+    case PQS_WAIT:    return 0400u;   // 8a-1b-gamma-3: RO notification (I-39-gated at the read site)
+    case PQS_KREGS:   return 0400u;   // 8a-1b-gamma-3: RO kernel frame (I-39-gated at the read site)
+    case PQS_KSTACK:  return 0400u;   // 8a-1b-gamma-3: RO symbolized bt (I-39-gated at the read site)
     case PQS_STATUS:
     case PQS_CMDLINE:
     case PQS_NS:      return 0444u;
@@ -549,6 +581,12 @@ static long devproc_mem_rw(struct Spoor *c, void *buf, long n, s64 off, bool is_
 // 8a-1b-gamma-2: /proc/<pid>/regs + fpregs RW (I-39-gated, stopped-only). Same
 // forward-decl reason as devproc_mem_rw.
 static long devproc_regs_rw(struct Spoor *c, void *buf, long n, s64 off, bool is_write);
+// 8a-1b-gamma-3: /proc/<pid>/{kstack,wait} RO reads. devproc_read dispatches them
+// (same forward-decl reason); both are DEFINED after the ctl run-control section,
+// since devproc_wait_read reuses its bounded-poll machinery (DEBUG_STOP_POLL_NS /
+// devproc_debug_poll_never).
+static long devproc_kstack_read(struct Spoor *c, void *buf, long n, s64 off);
+static long devproc_wait_read(struct Spoor *c, void *buf, long n, s64 off);
 
 static long devproc_read(struct Spoor *c, void *buf, long n, s64 off) {
     if (!c || !buf) return -1;
@@ -563,6 +601,11 @@ static long devproc_read(struct Spoor *c, void *buf, long n, s64 off) {
     // formatted info file -- its own path (gamma), before the format dispatch.
     if (kind == PQS_MEM) return devproc_mem_rw(c, buf, n, off, false);
     if (kind == PQS_REGS || kind == PQS_FPREGS) return devproc_regs_rw(c, buf, n, off, false);
+    // 8a-1b-gamma-3: kregs reuses the regs read path (devproc_build_regs builds a
+    // t_kernel_regs for PQS_KREGS); kstack/wait are their own RO paths.
+    if (kind == PQS_KREGS)  return devproc_regs_rw(c, buf, n, off, false);
+    if (kind == PQS_KSTACK) return devproc_kstack_read(c, buf, n, off);
+    if (kind == PQS_WAIT)   return devproc_wait_read(c, buf, n, off);
 
     // Root + pid_dir reads return -1 (directories -- readdir lands with 9P
     // readdir). ctl is write-only at v1.0 (reads return empty; Plan 9: ctl is
@@ -766,7 +809,30 @@ static long devproc_mem_rw(struct Spoor *c, void *buf, long n, s64 off, bool is_
 // frame + ctx are settled, not being written by a live cpu_switch_context).
 static long devproc_build_regs(struct Proc *target, u32 kind, u8 *out) {
     struct Thread *th = target->threads;   // the head thread (v1.0)
-    if (!th || !th->kstack_base || th->kstack_size < EXCEPTION_CTX_SIZE) return 0;
+    if (!th) return 0;
+
+    // 8a-1b-gamma-3: kregs reads t->ctx (the saved KERNEL-side callee-saved
+    // frame), NOT the EL0 trapframe, so it needs only a valid thread -- no
+    // kstack-size guard. The struct offsets mirror struct Context's GP region
+    // (context.h), so this is a verbatim field copy. tpidr_el0 is the EL0 TLS
+    // base dlv reads for the Go `g` (DEBUG-FS 4.5); ttbr0 is omitted (a kernel
+    // pgtable PA -- info-leak, no debug value).
+    if (kind == PQS_KREGS) {
+        struct t_kernel_regs *kr = (struct t_kernel_regs *)out;
+        kr->x[0] = th->ctx.x19; kr->x[1] = th->ctx.x20; kr->x[2] = th->ctx.x21;
+        kr->x[3] = th->ctx.x22; kr->x[4] = th->ctx.x23; kr->x[5] = th->ctx.x24;
+        kr->x[6] = th->ctx.x25; kr->x[7] = th->ctx.x26; kr->x[8] = th->ctx.x27;
+        kr->x[9] = th->ctx.x28;
+        kr->fp        = th->ctx.fp;
+        kr->lr        = th->ctx.lr;
+        kr->sp        = th->ctx.sp;
+        kr->tpidr_el0 = th->ctx.tpidr_el0;
+        return (long)sizeof(struct t_kernel_regs);
+    }
+
+    // regs/fpregs read the EL0 trapframe (regs) / the ctx FP block (fpregs) --
+    // require a real kstack big enough for the outermost KERNEL_ENTRY frame.
+    if (!th->kstack_base || th->kstack_size < EXCEPTION_CTX_SIZE) return 0;
 
     if (kind == PQS_REGS) {
         struct exception_context *tf = (struct exception_context *)
@@ -792,6 +858,7 @@ static long devproc_build_regs(struct Proc *target, u32 kind, u8 *out) {
 // saved SPSR is kept (step-related SPSR.SS is 8a-2). fpregs: all fields (no
 // privilege bits). Caller holds g_proc_table_lock + gated fully-stopped.
 static void devproc_apply_regs(struct Proc *target, u32 kind, const u8 *in) {
+    if (kind == PQS_KREGS) return;   // 8a-1b-gamma-3: kregs is RO (no write path routes here; defensive)
     struct Thread *th = target->threads;
     if (!th || !th->kstack_base || th->kstack_size < EXCEPTION_CTX_SIZE) return;
 
@@ -1080,6 +1147,183 @@ static int devproc_debug_wait_stopped(int pid, struct Spoor *ctl) {
         if (tsleep(&pollr, devproc_debug_poll_never, NULL, deadline) == TSLEEP_INTR)
             return -1;   // the caller's Proc is group-terminating -> unwind
     }
+}
+
+// =============================================================================
+// 8a-1b-gamma-3: /proc/<pid>/kstack -- the stopped thread's symbolized KERNEL
+// backtrace (I-39; DEBUG-FS 4.6, the 8a-1 half of the unified user->kernel
+// stack). The USER frames are the debugger's job (walk the EL0 x29 chain via
+// /proc/<pid>/regs + /proc/<pid>/mem); the KERNEL frames need a kernel walker
+// because the debugger cannot read kernel VAs (TTBR1) through mem. The walk
+// reuses the audited Halls fp-chain logic via an ADDITIVE, fault-safe primitive
+// (halls_walk_kernel_frames) that leaves the dying-machine dump path byte-
+// unchanged. Same gate as mem/regs: I-39 + fully-stopped (so on_cpu==false ->
+// t->ctx + the kstack are settled), all under g_proc_table_lock.
+// =============================================================================
+
+#define DEBUG_KSTACK_MAX_FRAMES  32u
+#define DEBUG_KSTACK_BUF         2048
+
+// Walk + symbolize the head thread's kernel stack into `buf`; return the byte
+// length (0 if no walkable thread). Runs under g_proc_table_lock in the cb; the
+// walk reads only the target's own USABLE kstack (guard excluded) + the .rodata
+// symtab -- no sleep, no alloc. t->ctx is canonical here (the fully-stopped gate
+// guaranteed on_cpu==false). Truncates at a whole-line boundary if `cap` fills
+// (best-effort; the shallow checkpoint stack fits easily -- a deep 8a-2 bp stack
+// past 2 KiB is a v1.x offset-aware multi-read).
+static size_t devproc_format_kstack(struct Proc *target, char *buf, size_t cap) {
+    struct Thread *th = target->threads;   // head thread (v1.0)
+    if (!th || !th->kstack_base) return 0;
+    if (th->kstack_size <= THREAD_KSTACK_GUARD_SIZE) return 0;   // no usable region
+
+    // Fault-safe bounds: the USABLE kstack [base + guard, base + total). The low
+    // guard is no-access -- walking into it would fault (there is no HX-I1 guard
+    // on this LIVE path). halls_walk_kernel_frames additionally gates fp+16 <= hi.
+    u64 base = (u64)(uintptr_t)th->kstack_base;
+    u64 lo   = base + (u64)THREAD_KSTACK_GUARD_SIZE;
+    u64 hi   = base + (u64)th->kstack_size;
+
+    u64 frames[DEBUG_KSTACK_MAX_FRAMES];
+    unsigned nf = halls_walk_kernel_frames(th->ctx.lr, th->ctx.fp, lo, hi,
+                                           frames, DEBUG_KSTACK_MAX_FRAMES);
+    u64 koff = kaslr_get_offset();
+
+    size_t off = 0;
+    for (unsigned i = 0; i < nf; i++) {
+        size_t ls = off;   // line start -- truncate cleanly at a whole-line boundary
+        u64 addr = frames[i];
+        u64 link = halls_link_addr(addr, koff);
+        u64 soff = 0;
+        const char *name = halls_symbolize(link, &soff);   // .rodata table; NULL if unresolved
+        size_t r;
+        r = fmt_str(buf, cap, off, "#");        if (!r) return ls; off += r;
+        r = fmt_udec(buf, cap, off, i);         if (!r) return ls; off += r;
+        r = fmt_str(buf, cap, off, "  ");       if (!r) return ls; off += r;
+        r = fmt_hex(buf, cap, off, addr);       if (!r) return ls; off += r;
+        r = fmt_str(buf, cap, off, "  link ");  if (!r) return ls; off += r;
+        r = fmt_hex(buf, cap, off, link);       if (!r) return ls; off += r;
+        if (name) {
+            r = fmt_str(buf, cap, off, "  ");    if (!r) return ls; off += r;
+            r = fmt_str(buf, cap, off, name);    if (!r) return ls; off += r;
+            r = fmt_str(buf, cap, off, "+");     if (!r) return ls; off += r;
+            r = fmt_hex(buf, cap, off, soff);    if (!r) return ls; off += r;
+        }
+        r = fmt_str(buf, cap, off, "\n");        if (!r) return ls; off += r;
+    }
+    return off;
+}
+
+struct devproc_kstack_ctx {
+    int          target_pid;
+    struct Proc *caller;
+    char        *buf;
+    size_t       cap;
+    size_t       total;
+    int          result;   // 0 not found, +1 built, -1 denied / not-stopped / no-thread
+};
+
+static int devproc_kstack_walk_cb(struct Proc *target, void *arg) {
+    struct devproc_kstack_ctx *k = (struct devproc_kstack_ctx *)arg;
+    if (target->pid != k->target_pid) return 0;   // keep walking
+    if (target == kproc())                            { k->result = -1; return 1; }
+    if (!devproc_debug_authorized(k->caller, target)) { k->result = -1; return 1; }   // I-39
+    if (!devproc_target_fully_stopped(target))        { k->result = -1; return 1; }   // stopped-only
+    k->total  = devproc_format_kstack(target, k->buf, k->cap);
+    k->result = 1;
+    return 1;
+}
+
+static long devproc_kstack_read(struct Spoor *c, void *buf, long n, s64 off) {
+    if (!c || !buf || n < 0) return -1;
+    if (off < 0)             return -1;
+    if (n == 0)              return 0;
+    struct Thread *t = current_thread();
+    if (!t || !t->proc) return -1;
+
+    char content[DEBUG_KSTACK_BUF];
+    struct devproc_kstack_ctx k = {
+        .target_pid = proc_qid_pid(c->qid.path),
+        .caller     = t->proc,
+        .buf        = content,
+        .cap        = sizeof(content),
+        .total      = 0,
+        .result     = 0,
+    };
+    proc_for_each(devproc_kstack_walk_cb, &k);
+    if (k.result != 1) return -1;   // not found / denied / not-stopped
+
+    size_t total = k.total;
+    if ((size_t)off >= total) return 0;   // EOF
+    size_t avail = total - (size_t)off;
+    size_t copy = avail > (size_t)n ? (size_t)n : avail;
+    u8 *o = (u8 *)buf;
+    for (size_t i = 0; i < copy; i++) o[i] = (u8)content[(size_t)off + i];
+    return (long)copy;
+}
+
+// =============================================================================
+// 8a-1b-gamma-3: /proc/<pid>/wait -- the debugger's stop-notification channel.
+// A read BLOCKS until the target is fully stopped (a checkpoint/trap park),
+// exits, or the CALLER is death-interrupted; then returns a short status line.
+// Gated by I-39 (the caller can debug the target) -- NOT slot ownership, since
+// the wait fd is a distinct Spoor from the attach ctl fd (any authorized
+// debugger may wait; the stop is driven by whoever owns the slot). Reuses the
+// beta bounded re-poll -- lifetime-safe (no target pointer held across the lock
+// drop; a reaped target is simply not found). The edge-triggered one-message-
+// per-stop refinement is v1.x; v1.0 is level-triggered (already-stopped returns
+// at once -- which still satisfies "blocks until the target stops").
+// =============================================================================
+
+struct devproc_waitscan_ctx {
+    int          target_pid;
+    struct Proc *caller;
+    int          state;   // -2 denied (I-39/kproc), -1 gone/exited, 0 not-yet, 1 stopped
+};
+static int devproc_waitscan_cb(struct Proc *target, void *arg) {
+    struct devproc_waitscan_ctx *w = (struct devproc_waitscan_ctx *)arg;
+    if (target->pid != w->target_pid) return 0;   // keep walking -> not found -> stays -1
+    if (target == kproc())                            { w->state = -2; return 1; }  // undebuggable
+    if (!devproc_debug_authorized(w->caller, target)) { w->state = -2; return 1; }  // I-39
+    if (target->state != PROC_STATE_ALIVE)            { w->state = -1; return 1; }  // exiting/zombie -> "exited"
+    w->state = devproc_target_fully_stopped(target) ? 1 : 0;   // debug_stop_req + all parked
+    return 1;
+}
+
+// Block until a wait event. Returns +1 stopped, 0 exited/gone, -1 denied /
+// caller death-interrupted. Same bounded-poll cadence as devproc_debug_wait_stopped.
+static int devproc_wait_block(int pid, struct Proc *caller) {
+    struct Rendez pollr = RENDEZ_INIT;   // caller-private, single-waiter
+    for (;;) {
+        struct devproc_waitscan_ctx w = { .target_pid = pid, .caller = caller, .state = -1 };
+        proc_for_each(devproc_waitscan_cb, &w);
+        if (w.state == 1)  return 1;    // stopped
+        if (w.state == -1) return 0;    // exited/gone
+        if (w.state == -2) return -1;   // denied (I-39 / kproc)
+        // state 0: ALIVE, not yet stopped -- sleep ~2 ms, then re-scan.
+        u64 deadline = timer_now_ns() + DEBUG_STOP_POLL_NS;
+        if (tsleep(&pollr, devproc_debug_poll_never, NULL, deadline) == TSLEEP_INTR)
+            return -1;   // caller death-interrupted
+    }
+}
+
+static long devproc_wait_read(struct Spoor *c, void *buf, long n, s64 off) {
+    if (!c || !buf || n < 0) return -1;
+    if (off < 0)             return -1;
+    if (n == 0)              return 0;
+    struct Thread *t = current_thread();
+    if (!t || !t->proc) return -1;
+
+    int ev = devproc_wait_block(proc_qid_pid(c->qid.path), t->proc);
+    if (ev < 0) return -1;   // denied or caller death-interrupted
+    const char *msg = ev ? "stopped\n" : "exited\n";
+
+    size_t total = 0; while (msg[total]) total++;
+    if ((size_t)off >= total) return 0;   // EOF
+    size_t avail = total - (size_t)off;
+    size_t copy = avail > (size_t)n ? (size_t)n : avail;
+    u8 *o = (u8 *)buf;
+    for (size_t i = 0; i < copy; i++) o[i] = (u8)msg[(size_t)off + i];
+    return (long)copy;
 }
 
 // Write: ctl parses kill / killgrp and terminates the target Proc's thread-

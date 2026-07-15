@@ -456,6 +456,7 @@ void test_devproc_debug_attach_detach_lifecycle(void);
 void test_devproc_debug_stop_start_resume(void);
 void test_devproc_debug_mem(void);
 void test_devproc_debug_regs(void);
+void test_devproc_debug_kregs_kstack_wait(void);
 void test_cons_blocking_read_wakeup(void);
 void test_cons_ring_fill_drain(void);
 void test_cons_ring_overflow_drop(void);
@@ -1726,6 +1727,7 @@ struct test_case g_tests[] = {
     { "devproc.debug_stop_start_resume",       test_devproc_debug_stop_start_resume,       false, NULL },
     { "devproc.debug_mem",                     test_devproc_debug_mem,                     false, NULL },
     { "devproc.debug_regs",                    test_devproc_debug_regs,                    false, NULL },
+    { "devproc.debug_kregs_kstack_wait",       test_devproc_debug_kregs_kstack_wait,       false, NULL },
     { "cons.blocking_read_wakeup",     test_cons_blocking_read_wakeup,     false, NULL },
     { "cons.ring_fill_drain",          test_cons_ring_fill_drain,          false, NULL },
     { "cons.ring_overflow_drop",       test_cons_ring_overflow_drop,       false, NULL },
