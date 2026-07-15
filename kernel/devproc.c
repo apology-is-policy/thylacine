@@ -835,8 +835,19 @@ static long devproc_build_regs(struct Proc *target, u32 kind, u8 *out) {
     if (!th->kstack_base || th->kstack_size < EXCEPTION_CTX_SIZE) return 0;
 
     if (kind == PQS_REGS) {
-        struct exception_context *tf = (struct exception_context *)
-            ((u8 *)th->kstack_base + th->kstack_size - EXCEPTION_CTX_SIZE);
+        // 8a-1c: the EL0-entry trapframe is NOT at a fixed kstack offset (its base
+        // is SP_EL1-at-entry - EXCEPTION_CTX_SIZE, which is only kstack_top-288 for
+        // a thread's first entry; a running thread's outermost frame sits lower).
+        // el0_return_stop_check captured the vector-supplied pointer at the park;
+        // read THAT. Only reached when the target is fully-stopped (parked in
+        // el0_return_stop_check), so debug_trapframe is set + fresh. Validate it
+        // lies within the usable kstack (a NULL / corrupt pointer -> no regs).
+        struct exception_context *tf = th->debug_trapframe;
+        if (!tf) return 0;
+        u64 klo = (u64)(uintptr_t)th->kstack_base + (u64)THREAD_KSTACK_GUARD_SIZE;
+        u64 ktop = (u64)(uintptr_t)th->kstack_base + (u64)th->kstack_size;
+        u64 tfp  = (u64)(uintptr_t)tf;
+        if (tfp < klo || tfp + (u64)EXCEPTION_CTX_SIZE > ktop) return 0;
         struct t_user_regs *ur = (struct t_user_regs *)out;
         for (int i = 0; i < 31; i++) ur->regs[i] = tf->regs[i];
         ur->sp     = tf->sp;      // SP_EL0
@@ -863,8 +874,14 @@ static void devproc_apply_regs(struct Proc *target, u32 kind, const u8 *in) {
     if (!th || !th->kstack_base || th->kstack_size < EXCEPTION_CTX_SIZE) return;
 
     if (kind == PQS_REGS) {
-        struct exception_context *tf = (struct exception_context *)
-            ((u8 *)th->kstack_base + th->kstack_size - EXCEPTION_CTX_SIZE);
+        // 8a-1c: write the RECORDED trapframe (same pointer the read uses -- NOT
+        // the fixed kstack_top-288 offset). Validated within the usable kstack.
+        struct exception_context *tf = th->debug_trapframe;
+        if (!tf) return;
+        u64 klo = (u64)(uintptr_t)th->kstack_base + (u64)THREAD_KSTACK_GUARD_SIZE;
+        u64 ktop = (u64)(uintptr_t)th->kstack_base + (u64)th->kstack_size;
+        u64 tfp  = (u64)(uintptr_t)tf;
+        if (tfp < klo || tfp + (u64)EXCEPTION_CTX_SIZE > ktop) return;
         const struct t_user_regs *ur = (const struct t_user_regs *)in;
         for (int i = 0; i < 31; i++) tf->regs[i] = ur->regs[i];
         tf->sp  = ur->sp;    // SP_EL0
@@ -1423,6 +1440,16 @@ struct Dev devproc = {
     .open     = devproc_open,
     .create   = devproc_create,
     .close    = devproc_close,
+
+    // 8a-1b: the debug files are POSITIONED -- /proc/<pid>/mem is VA-addressed and
+    // /proc/<pid>/{regs,kregs,kstack,wait} are struct/content-offset-addressed
+    // (Plan 9's seekable /proc/<pid>/mem). So devproc read/write honor `off`, and
+    // seekable must be set for SYS_PREAD/PWRITE/LSEEK to reach them (the #37 ESPIPE
+    // gate rejects positioned I/O on a non-seekable Dev BEFORE devproc_read runs).
+    // The pre-debug files (status/cmdline/ns) already slice at `off`; ctl is a
+    // control channel whose verb parse ignores `off` (positioned writes are the
+    // same kill/attach/stop authority -- no I-26/I-39 change).
+    .seekable = true,
 
     .read     = devproc_read,
     .bread    = devproc_bread,

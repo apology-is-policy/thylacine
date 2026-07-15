@@ -2345,6 +2345,31 @@ int main(void) {
     }
     t_putstr("joey: /loom-smoke reaped status=0; native loom ring API verified\n");
 
+    // === /debug-probe orchestration (Go Stage 8a-1c: the debug-fs E2E) ===
+    // The first in-guest exercise of the /proc/<pid> debug surface against a
+    // GENUINELY-parked EL0 thread -- the one thing the kernel unit tests cannot
+    // produce (a kthread never EL0-returns, so it never reaches the stop
+    // checkpoint or carries an EL0 trapframe). debug-probe spawns /debug-child
+    // (a yield loop with SENTINEL_REG pinned in x20 + a stack region at x21),
+    // attach/stop/waits it, reads its regs/mem/kregs/kstack, cross-Proc-WRITES
+    // its resume flag, `start`s, and reaps it == 0 -- the full I-39 stop /
+    // inspect / modify / resume cycle. Runs pre-pivot (bare-name spawn via the
+    // cpio cwd; /proc is mounted in the boot namespace). "debug-probe: PASS" +
+    // exit 0 gates the boot.
+    const char debug_probe_name[] = "debug-probe";
+    long dp_pid = t_spawn(debug_probe_name, sizeof(debug_probe_name) - 1);
+    if (dp_pid <= 0) {
+        t_putstr("joey: t_spawn(\"debug-probe\") FAILED\n");
+        return 1;
+    }
+    int dp_status = -1;
+    long dp_reaped = t_wait_pid_for((int)dp_pid, 0, &dp_status);
+    if (dp_reaped != dp_pid || dp_status != 0) {
+        t_putstr("joey: /debug-probe orchestration FAILED\n");
+        return 1;
+    }
+    t_putstr("joey: /debug-probe reaped status=0; debug-fs stop/inspect/resume verified\n");
+
     // === /go-hello orchestration (GOOS=thylacine Go-port, Stage 1) ===
     // The first GOOS=thylacine Go binary: a runtime-direct `println` hello.
     // Spawning it drives the real SVC ABI end-to-end -- the SysV initial-stack

@@ -2272,7 +2272,7 @@ static int debug_stop_wake_cond(void *arg) {
     return __atomic_load_n(&p->debug_stop_req, __ATOMIC_ACQUIRE) == 0;
 }
 
-void el0_return_stop_check(void) {
+void el0_return_stop_check(struct exception_context *ctx) {
     struct Thread *t = current_thread();
     if (!t || t->magic != THREAD_MAGIC) return;
     struct Proc *p = t->proc;
@@ -2284,6 +2284,13 @@ void el0_return_stop_check(void) {
     // tla: the tail observes a set sflag).
     if (__atomic_load_n(&p->debug_stop_req, __ATOMIC_ACQUIRE) == 0)
         return;
+
+    // 8a-1c: publish the EL0-entry trapframe pointer (== the current SP at the
+    // vector tail; see thread.h debug_trapframe) so /proc/<pid>/regs reads THIS
+    // entry's saved GPR frame -- its kstack offset is not fixed. Set BEFORE the
+    // park; a concurrent debug reader only trusts it once the thread is parked
+    // (rendez_blocked_on == &debug_rendez + on_cpu==false), which happens below.
+    t->debug_trapframe = ctx;
 
     for (;;) {
         // DEATH WINS (DeathWinsOverStop). A group termination (kill /
@@ -2302,8 +2309,10 @@ void el0_return_stop_check(void) {
         // / ctl-fd close cleared the flag via proc_debug_resume (a RELEASE clear
         // ordered before that cascade's per-peer wake -- the I-9 close). Proceed
         // to the eret. (This is also the fast-path re-observe under no death.)
-        if (__atomic_load_n(&p->debug_stop_req, __ATOMIC_ACQUIRE) == 0)
+        if (__atomic_load_n(&p->debug_stop_req, __ATOMIC_ACQUIRE) == 0) {
+            t->debug_trapframe = NULL;   // 8a-1c: no longer parked -> stop pointing at the (about-to-be-live) frame
             return;
+        }
 
         // A SOFT interrupt-terminate latched while parked (LS-5c; group death
         // ruled out above, so thread_die_pending here is exactly the latch leg).
@@ -2312,8 +2321,10 @@ void el0_return_stop_check(void) {
         // checkpoint (standard interrupt checkpoint-delivery -- an interrupt
         // never preempts mid-EL0). Without this bail, sleep() would return
         // SLEEP_INTR every iteration on the still-set latch -> a livelock.
-        if (thread_die_pending(t))
+        if (thread_die_pending(t)) {
+            t->debug_trapframe = NULL;   // 8a-1c: leaving the park to deliver the interrupt
             return;
+        }
 
         // Park (specs/debug_stop.tla Acquire+RegisterObserve). sleep() registers
         // rendez_blocked_on = &t->debug_rendez under t->wait_lock, re-checks

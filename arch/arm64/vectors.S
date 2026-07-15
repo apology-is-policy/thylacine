@@ -255,6 +255,7 @@ _exception_vectors:
     bl      exception_irq_curr_el
     bl      preempt_check_irq            /* P2-Bc: maybe context-switch */
     bl      el0_return_die_check         /* I-24: self-exit if Proc group-terminating (noreturn if so) */
+    mov     x0, sp                       /* 8a-1c: x0 := the EL0 trapframe (SP == trapframe base here) */
     bl      el0_return_stop_check        /* 8a-1b-beta I-39: park if a debugger stop is pending (AFTER the die-check -- death wins) */
     b       .Lexception_return
 
@@ -331,6 +332,7 @@ _exception_vectors:
     bl      el0_return_die_check
     mov     x0, sp
     bl      notes_deliver_at_el0_return
+    mov     x0, sp                       /* 8a-1c: x0 := the EL0 trapframe (notes clobbered x0; SP == trapframe base here) */
     bl      el0_return_stop_check        /* 8a-1b-beta I-39: park if a debugger stop is pending (AFTER die-check + notes -- death/interrupt win) */
     b       .Lexception_return
 

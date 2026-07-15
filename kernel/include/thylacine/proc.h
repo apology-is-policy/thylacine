@@ -904,7 +904,11 @@ void proc_debug_resume(struct Proc *p);
 // then-observe under wait_lock) until resumed, re-checking group death (terminate
 // here, never eret) on every wake. Returns to the tail (-> eret) when the stop
 // is cleared or a soft interrupt-terminate must be delivered at the next tail.
-void el0_return_stop_check(void);
+// 8a-1c: `ctx` is the vector-supplied EL0 trapframe pointer (== the current SP);
+// recorded into the Thread so /proc/<pid>/regs reads the RIGHT saved frame (its
+// kstack offset is not fixed -- see thread.h debug_trapframe).
+struct exception_context;
+void el0_return_stop_check(struct exception_context *ctx);
 
 // P6-pouch-threads (sub-chunk 9a) audit F1 close: cross-module access to
 // `g_proc_table_lock` (kept static in proc.c). thread.c's

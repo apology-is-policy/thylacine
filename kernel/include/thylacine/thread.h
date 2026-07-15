@@ -19,6 +19,7 @@
 
 struct Proc;
 struct Rendez;
+struct exception_context;   // 8a-1c: /proc/<pid>/regs trapframe pointer (debug_trapframe)
 
 // Thread states. P2-A primarily uses RUNNING and RUNNABLE (only those
 // transition during context switches). SLEEPING and EXITING land at
@@ -310,9 +311,22 @@ struct Thread {
     // a stopped thread with no stack-rendez lifetime concern. KP_ZERO (SLUB) inits
     // it to { unlocked, no waiter } -- no explicit rendez_init needed.
     struct Rendez      debug_rendez;
+
+    // 8a-1c (I-39; docs/DEBUG-FS-DESIGN.md section 4.5): the EL0-entry trapframe
+    // pointer captured at the debug-stop park. The trapframe is NOT at a fixed
+    // kstack offset -- it lives at (SP_EL1 at the exception - EXCEPTION_CTX_SIZE),
+    // which is only kstack_top-288 for a thread's very first entry; for a running
+    // thread the outermost EL0 frame sits lower. el0_return_stop_check records the
+    // vector-supplied `ctx` (== the current SP = the trapframe) here before it
+    // parks, so /proc/<pid>/regs reads the RIGHT frame. Read ONLY while the thread
+    // is fully-stopped (parked in el0_return_stop_check on this same entry), so it
+    // is never stale. NULL when not debug-parked.
+    struct exception_context *debug_trapframe;
 };
 
-_Static_assert(sizeof(struct Thread) == 1152,
+_Static_assert(sizeof(struct Thread) == 1168,
+               "8a-1c appended debug_trapframe (8-byte struct exception_context* "
+               "for /proc/<pid>/regs); the 16-aligned struct pads 1152 -> 1168. "
                "struct Thread size pinned at 1136 bytes (P6 #811 appended a "
                "tail spin_lock_t wait_lock -- death-interruptible sleep, "
                "ARCH 8.8.1; 1120 -> 1136 incl. tail padding). P6-pouch-signals-"

@@ -979,12 +979,17 @@ void test_devproc_debug_regs(void) {
     th.ctx.fpsr = 0xFEEDFACEu;
     th.ctx.fpcr = 0x0BADF00Du;
 
+    // 8a-1c: the trapframe location is NOT a fixed kstack offset -- build_regs
+    // reads th.debug_trapframe (what el0_return_stop_check records at the park).
+    // A real EL0 thread's frame sits below kstack_top-288; here we place the
+    // synthetic frame at the top and point debug_trapframe at it.
     struct exception_context *tf = (struct exception_context *)
         (kbase + THREAD_KSTACK_TOTAL_SIZE - EXCEPTION_CTX_SIZE);
     for (int i = 0; i < 31; i++) tf->regs[i] = 0x1000ull + (u64)i;
     tf->sp   = 0xDEAD0000ull;
     tf->elr  = 0xCAFE0000ull;
     tf->spsr = 0x60000000ull;   // NZCV-ish, EL0t (M[3:0]=0)
+    th.debug_trapframe = tf;
 
     tgt->threads       = &th;
     tgt->debug_stop_req = 1;     // "stopped" (this one parked thread + on_cpu==false)
