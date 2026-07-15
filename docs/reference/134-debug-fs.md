@@ -10,10 +10,12 @@ defects it surfaced) → `7be95961` (the UBSan test-copy fix). Binding design:
 `docs/DEBUG-FS-DESIGN.md`. Invariant: **I-39** (ARCH §28 + the §25.4
 audit-trigger row, the authoritative prosecution copy). Spec:
 `specs/debug_stop.tla` (the stop/continue/step state machine — clean cfg +
-4 buggy cfgs, TLC-green; model-first). The 8a-2 hardware-debug tier (real
-breakpoints/watchpoints/single-step via the arm64 debug registers) has its
-empirical delivery verify landed at **8a-2a** (§ below); the full per-thread
-install + single-step + watchpoints are **8a-2b**.
+4 buggy cfgs, TLC-green; model-first) + `specs/debug_step.tla` (the single-step
+machine; the sibling, clean + 2 buggy cfgs). The 8a-2 hardware-debug tier (real
+breakpoints/watchpoints/single-step via the arm64 debug registers) is landed
+across **8a-2a** (the empirical delivery verify) + **8a-2b-1** (breakpoints) +
+**8a-2b-2** (single-step) + **8a-2b-3** (watchpoints); the consolidated holotype +
+the ARCH §25.4 row are **8a-2c** (§§ below).
 
 ## Purpose
 
@@ -346,11 +348,14 @@ green). 8a-2a complete (the HW-debug delivery verify: PASS on HVF + TCG). 8a-2b-
 complete (real per-Proc hardware breakpoints: the table + ctx-switch install +
 the EC 0x30 route + `hwbreak`/`hwrmbreak` + `#73`). 8a-2b-2 complete (the arm64
 single-step machine + the step-over-breakpoint dance + the `step` verb; §
-below). Next: 8a-2b-3 (watchpoints via `DBGWCR`/`DBGWVR` + the EC 0x34 route +
-the `hwwatch` verb) and 8a-2c (the consolidated Fable-5-max holotype + the SMP
-gate + the ARCH §25.4 row + docs). The ARCH §25.4 audit-trigger row + the
-CLAUDE.md mirror for the 8a-2 HW-debug tier land at 8a-2c, when the whole surface
-is coherent + audited.
+below). 8a-2b-3 complete (hardware watchpoints via `DBGWCR`/`DBGWVR` + the EC 0x34
+route + `hwwatch`/`hwrmwatch`; watchpoints-disabled-during-step; § below). Next:
+8a-2c (the consolidated Fable-5-max holotype + the SMP gate + the ARCH §25.4 row +
+docs) — which prosecutes the whole 8a-2 detach/stop/resume surface, incl. **SA-1**
+(a stale bp/wp fire racing a `detach`-while-running can strand the debuggee — a
+narrow, pre-existing-since-b-1, I-39-gated, debuggee-only hazard; task #80). The
+ARCH §25.4 audit-trigger row + the CLAUDE.md mirror for the 8a-2 HW-debug tier land
+at 8a-2c, when the whole surface is coherent + audited.
 
 ## 8a-2b-2 — single-step + the step-over-breakpoint dance
 
@@ -392,6 +397,69 @@ Tests: `hwdebug.singlestep_benign` (the spurious-step path — the armed path ne
 real EL0 execution) + the `/debug-probe` step phase (steps 3× FROM the
 breakpointed entry, verifying `pc` advances by exactly 4 bytes/instruction — the
 SS machine AND the step-over dance).
+
+## 8a-2b-3 — hardware watchpoints
+
+A watchpoint traps a data ACCESS to a user address (the debugger's `watch var`).
+It is the twin of the breakpoint path — same per-Proc table, same ctx-switch
+install, same stop delivery — so it adds **no new spec** (a wp-fire routes through
+`proc_debug_stop_deliver`, covered by `debug_stop.tla`; the step machine is
+`debug_step.tla`).
+
+**The table** (`struct debug_hw`, `arch/arm64/hwdebug.h`) gains a parallel
+watchpoint array: `wp_count` + `wp_va[]` (the watched VA) + `wp_len[]` (1..8) +
+`wp_flags[]` (`DEBUG_WP_R`/`DEBUG_WP_W`), `DEBUG_HWWP_SLOTS = 4` clamped to
+`ID_AA64DFR0_EL1.WRPs` at enumerate (`g_debug_max_wp`). Same lifetime + quiescence
+discipline as the bp table: lazily allocated, freed at `proc_free`, mutated
+stopped-only, `wp_count` `__atomic` (published RELEASE-last, after the slots) for
+the detach-while-running race.
+
+**The encoding** (`hwdebug_wp_encode` → `DBGWVR`/`DBGWCR`): `DBGWVR` = the VA
+aligned down to the 8-byte doubleword; `DBGWCR` = E=1, PAC=`0b10` (EL0-only), LSC
+from the rwx flags (`0b01` load / `0b10` store / `0b11` both), BAS = the byte mask
+covering `[va, va+len)` within the doubleword, MASK=0. v1.0 supports **1..8 bytes
+within ONE doubleword** (`(va&7)+len ≤ 8`) — a naturally-aligned scalar (the
+realistic `watch` target); a cross-doubleword or `>8`-byte region is rejected at
+`hwdebug_wp_add` (MASK-based larger regions are a v1.x lift). The `hwdebug.wp_encode`
+unit test pins the bit math (aligned/8/W → `0x1FF5`, off4/4/R → `0x1E0D`,
+off1/2/RW → `0xDD`); the E2E proves the delivery.
+
+**Watchpoints are DISABLED during a single-step.** `hwdebug_load_debug` loads
+`wpc = ss ? 0 : wp_count` — the single stepped instruction's own data access must
+not trap a watchpoint mid-step and derail `StepExactlyOne` (the Linux model). A
+watchpoint survives a step (re-armed on the post-step resume, `ss=false`); it is
+inactive only for the one stepped instruction. `MDE` is set when any bp OR wp is
+armed (it gates both).
+
+**The EC 0x34 route** (`hwdebug_watchpoint_from_el0`): an armed watchpoint fired
+(`wp_count > 0`) → deliver the whole-Proc stop (the thread parks at the tail; the
+debugger reads `regs.pc` == the accessing instruction). arm64 reports `FAR`
+**imprecise-within-the-block**, so delivery is gated on `wp_count > 0`, NOT an
+exact `FAR` match (gating on `FAR` would risk a MISSED stop; the hardware only
+traps accesses matching a programmed `DBGWCR`, so a wp EC on a debugged Proc with
+armed wps IS a hit). `wp_count == 0` → a benign STALE wp (a detach/`hwrmwatch`
+cleared the table before this CPU reloaded) → disable this CPU's debug regs +
+resume (symmetric with the bp STALE arm).
+
+**The verbs** (`ctl`): `hwwatch <rwx> <hexva> <declen>` / `hwrmwatch <hexva>`,
+gated identically to `hwbreak` (slot-owner + the I-39 re-check + stopped-only + the
+lazy-table pre-alloc-outside-the-lock). `<rwx>` is `r`/`w` chars (at least one);
+`<declen>` is 1..8. Removal keys on the exact VA. Both cleared at detach +
+close-release (`hwdebug_wp_clear_all`, alongside the bp clear) so a dead debugger's
+watchpoints do not leave the orphaned target re-trapping on the watched access
+forever.
+
+**A `start` (continue) directly over a still-armed watchpoint re-traps** — a wp
+fires with `ELR` = the accessing instruction, which re-executes on `eret`. The
+debugger `step`s past it (watchpoints are OFF for the step) or `hwrmwatch`es it
+first; this is the raw arm64 debug-interface semantic (Delve/GDB wrap it). The
+auto-step-over-on-continue is a v1.x refinement.
+
+Tests: `hwdebug.wp_table` (add/remove/dedup/capacity + the input-validation
+rejects: bad len, cross-doubleword, empty flags) + `hwdebug.wp_encode` (the
+register math) + the `/debug-probe` watch phase (arm a WRITE watchpoint on a
+cross-Proc stack word, resume, the child's store traps → verify the EL0t stop →
+`hwrmwatch` + resume → exit 0; the wp is the ONLY reason the store stops).
 
 ## Known caveats / footguns
 

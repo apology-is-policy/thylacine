@@ -79,6 +79,7 @@ _Static_assert(__builtin_offsetof(struct exception_context, far) == 0x118,
 #define EC_SVC_AARCH64     0x15     /* svc #imm at EL0 (AArch64) */
 #define EC_BREAKPOINT_LOWER 0x30    /* HW breakpoint from lower EL (8a-2) */
 #define EC_SOFTSTEP_LOWER   0x32    /* software step from lower EL (8a-2b-2) */
+#define EC_WATCHPOINT_LOWER 0x34    /* data watchpoint from lower EL (8a-2b-3) */
 
 // ---------------------------------------------------------------------------
 // HX-1: per-CPU live-frame tracking. Each public exception entry point is a
@@ -481,6 +482,17 @@ static void exception_sync_lower_el_impl(struct exception_context *ctx) {
         // for a corrupt thread/Proc -- fatal, since EL0 cannot arm MDSCR.SS so a
         // step EC is always kernel-originated.
         if (hwdebug_singlestep_from_el0(ctx->elr)) return;
+        proc_fault_terminate(NOTE_NAME_SNARE_ILL, (uintptr_t)esr);
+
+    case EC_WATCHPOINT_LOWER:
+        // 8a-2b-3: a data watchpoint from EL0. hwdebug_watchpoint_from_el0 handles
+        // an armed wp (deliver the whole-Proc stop; the thread parks at the tail and
+        // the debugger reads regs.pc == the accessing instruction) or a spurious/
+        // stale wp (benign: disable this CPU's debug regs + resume). It returns false
+        // only for a Proc that was never debugged -- fatal, since EL0 cannot arm a wp
+        // (MDSCR/DBGW* are EL1-only), so a wp EC is always kernel-originated. FAR
+        // carries the faulting VA (imprecise-within-the-block on arm64).
+        if (hwdebug_watchpoint_from_el0(ctx->elr, far)) return;
         proc_fault_terminate(NOTE_NAME_SNARE_ILL, (uintptr_t)esr);
 
     default:

@@ -17,6 +17,8 @@ void test_hwdebug_dfr0_enumerate(void);
 void test_hwdebug_arm_disarm_roundtrip(void);
 void test_hwdebug_bp_table(void);
 void test_hwdebug_singlestep_benign(void);
+void test_hwdebug_wp_table(void);
+void test_hwdebug_wp_encode(void);
 
 // DFR0 enumeration: every ARMv8 debug implementation has at least 2 breakpoints
 // and 2 watchpoints (architectural minimum). hw_features_detect already ran at
@@ -138,4 +140,78 @@ void test_hwdebug_singlestep_benign(void) {
 
     TEST_ASSERT(handled, "a spurious step EC is handled (benign, not fatal)");
     TEST_ASSERT((after & MDSCR_SS_BIT) == 0, "the benign path cleared MDSCR.SS on this CPU");
+}
+
+// 8a-2b-3: the per-Proc WATCHPOINT table logic (hwdebug_wp_add/remove/clear_all),
+// independent of hardware -- a stack debug_hw struct. Covers dedup, capacity
+// (g_debug_max_wp = min(num_wrps, DEBUG_HWWP_SLOTS) >= 2), remove-present vs
+// remove-absent, slot reuse, clear_all, AND the input-validation rejects (bad len,
+// cross-doubleword region, empty flags). The ctx-switch INSTALL + the EC-0x34 route
+// are the /debug-probe E2E's job (a kernel test has no scheduled EL0 access).
+void test_hwdebug_wp_table(void) {
+    hwdebug_enumerate();   // ensure g_debug_max_wp is set (self-contained)
+    struct debug_hw hw = { 0 };
+
+    // Reject arm: bad len (0, 9), cross-doubleword ((va&7)+len > 8), empty flags.
+    bool rej_len0   = !hwdebug_wp_add(&hw, 0x200000ull, 0u, DEBUG_WP_W);
+    bool rej_len9   = !hwdebug_wp_add(&hw, 0x200000ull, 9u, DEBUG_WP_W);
+    bool rej_cross  = !hwdebug_wp_add(&hw, 0x200005ull, 4u, DEBUG_WP_W);   // bytes [5,9) crosses the doubleword
+    bool rej_noflag = !hwdebug_wp_add(&hw, 0x200000ull, 8u, 0u);
+    bool none_yet   = (hw.wp_count == 0u);
+
+    // Add distinct aligned 8-byte watchpoints until the table is full.
+    u32 added = 0;
+    for (u32 i = 0; i < DEBUG_HWWP_SLOTS + 2u; i++) {
+        u64 va = 0x200000ull + (u64)i * 0x1000ull;
+        if (hwdebug_wp_add(&hw, va, 8u, DEBUG_WP_W)) added++;
+        else break;
+    }
+    bool at_least_two  = (added >= 2u);
+    bool count_matches = (hw.wp_count == added);
+    bool dup_refused   = !hwdebug_wp_add(&hw, 0x200000ull, 8u, DEBUG_WP_R);  // first VA -- already present
+    bool full_refused  = !hwdebug_wp_add(&hw, 0x999000ull, 8u, DEBUG_WP_W);  // table full
+    bool rm_ok         = hwdebug_wp_remove(&hw, 0x200000ull);
+    bool count_after   = (hw.wp_count == added - 1u);
+    bool rm_absent     = !hwdebug_wp_remove(&hw, 0x200000ull);
+    bool refit         = hwdebug_wp_add(&hw, 0x999000ull, 4u, DEBUG_WP_R);   // a freed slot now fits
+    hwdebug_wp_clear_all(&hw);
+    bool cleared       = (hw.wp_count == 0u);
+
+    TEST_ASSERT(rej_len0,     "wp_add rejects len 0");
+    TEST_ASSERT(rej_len9,     "wp_add rejects len > 8");
+    TEST_ASSERT(rej_cross,    "wp_add rejects a cross-doubleword region");
+    TEST_ASSERT(rej_noflag,   "wp_add rejects empty rwx flags");
+    TEST_ASSERT(none_yet,     "a rejected wp_add adds nothing");
+    TEST_ASSERT(at_least_two, "wp table holds >= 2 watchpoints (architectural min)");
+    TEST_ASSERT(count_matches,"wp_count matches the number added");
+    TEST_ASSERT(dup_refused,  "adding a duplicate VA is refused");
+    TEST_ASSERT(full_refused, "adding beyond the table capacity is refused");
+    TEST_ASSERT(rm_ok,        "removing a present VA succeeds");
+    TEST_ASSERT(count_after,  "wp_count decrements on remove");
+    TEST_ASSERT(rm_absent,    "removing an absent VA is refused");
+    TEST_ASSERT(refit,        "a freed slot accepts a new watchpoint");
+    TEST_ASSERT(cleared,      "clear_all zeroes wp_count");
+}
+
+// 8a-2b-3: the DBGWVR/DBGWCR encoding math (hwdebug_wp_encode). The E2E proves
+// DELIVERY (a real access traps); this proves the ENCODING (E=1, PAC=EL0, the LSC
+// from rwx, BAS covering [va,va+len) within the doubleword, DBGWVR aligned to 8).
+// A bit-shift error here would silently watch the wrong bytes / wrong access type.
+void test_hwdebug_wp_encode(void) {
+    u64 vr, cr;
+
+    // Aligned, 8 bytes, write-only: BAS=0xFF, LSC=0b10, PAC=0b10, E=1.
+    hwdebug_wp_encode(0x100000ull, 8u, DEBUG_WP_W, &vr, &cr);
+    TEST_EXPECT_EQ(vr, 0x100000ull, "DBGWVR = the aligned VA (8-byte, offset 0)");
+    TEST_EXPECT_EQ(cr, 0x1FF5ull, "DBGWCR aligned/8/W: BAS=0xFF LSC=store PAC=EL0 E=1");
+
+    // Offset 4, 4 bytes, read-only: DBGWVR aligns down, BAS=0xF0, LSC=0b01.
+    hwdebug_wp_encode(0x100004ull, 4u, DEBUG_WP_R, &vr, &cr);
+    TEST_EXPECT_EQ(vr, 0x100000ull, "DBGWVR aligns the VA down to the doubleword");
+    TEST_EXPECT_EQ(cr, 0x1E0Dull, "DBGWCR off4/4/R: BAS=0xF0 LSC=load PAC=EL0 E=1");
+
+    // Offset 1, 2 bytes, read+write: BAS=0x6, LSC=0b11.
+    hwdebug_wp_encode(0x100001ull, 2u, DEBUG_WP_R | DEBUG_WP_W, &vr, &cr);
+    TEST_EXPECT_EQ(vr, 0x100000ull, "DBGWVR aligns down (offset 1)");
+    TEST_EXPECT_EQ(cr, 0xDDull, "DBGWCR off1/2/RW: BAS=0x6 LSC=both PAC=EL0 E=1");
 }

@@ -91,6 +91,8 @@ void test_hwdebug_dfr0_enumerate(void);
 void test_hwdebug_arm_disarm_roundtrip(void);
 void test_hwdebug_bp_table(void);
 void test_hwdebug_singlestep_benign(void);
+void test_hwdebug_wp_table(void);
+void test_hwdebug_wp_encode(void);
 void test_alternatives_patch_applied(void);
 void test_alternatives_atomics_correct(void);
 void test_context_create_destroy(void);
@@ -1736,6 +1738,8 @@ struct test_case g_tests[] = {
     { "hwdebug.arm_disarm_roundtrip",          test_hwdebug_arm_disarm_roundtrip,          false, NULL },
     { "hwdebug.bp_table",                      test_hwdebug_bp_table,                      false, NULL },
     { "hwdebug.singlestep_benign",             test_hwdebug_singlestep_benign,             false, NULL },
+    { "hwdebug.wp_table",                      test_hwdebug_wp_table,                      false, NULL },
+    { "hwdebug.wp_encode",                     test_hwdebug_wp_encode,                     false, NULL },
     { "cons.blocking_read_wakeup",     test_cons_blocking_read_wakeup,     false, NULL },
     { "cons.ring_fill_drain",          test_cons_ring_fill_drain,          false, NULL },
     { "cons.ring_overflow_drop",       test_cons_ring_overflow_drop,       false, NULL },

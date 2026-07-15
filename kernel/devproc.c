@@ -527,6 +527,7 @@ static int devproc_debug_release_cb(struct Proc *p, void *arg) {
     if (p->debug_owner != r->ctl) return 0;        // keep walking
     p->debug_owner = NULL;                          // release
     hwdebug_bp_clear_all(p->debug_hw);              // 8a-2b-1: a dead debugger's breakpoints are disarmed (else the orphaned target re-traps forever)
+    hwdebug_wp_clear_all(p->debug_hw);              // 8a-2b-3: likewise its watchpoints (else the orphaned target re-traps on the watched access forever)
     proc_debug_resume(p);                           // 8a-1b-beta: a dead/detached debugger provably resumes its quarry (ReleaseSlot -> NoStrand)
     // 8a-1b-beta: resume threads parked on p's debugger rendez here.
     r->found = true;
@@ -1009,6 +1010,8 @@ enum ctl_verb {
     CTL_VERB_HWVERIFY, // 8a-2a: arm ("hwverify <hexva>") / disarm ("hwverify off") the self-scoped HW-breakpoint verify
     CTL_VERB_HWBREAK,  // 8a-2b-1: arm a real per-Proc HW breakpoint ("hwbreak <hexva>"; slot-owner + stopped-only)
     CTL_VERB_HWRMBREAK,// 8a-2b-1: disarm a per-Proc HW breakpoint ("hwrmbreak <hexva>")
+    CTL_VERB_HWWATCH,  // 8a-2b-3: arm a per-Proc HW watchpoint ("hwwatch <rwx> <hexva> <declen>")
+    CTL_VERB_HWRMWATCH,// 8a-2b-3: disarm a per-Proc HW watchpoint ("hwrmwatch <hexva>")
     CTL_VERB_OTHER,
 };
 
@@ -1040,6 +1043,8 @@ static enum ctl_verb parse_ctl_verb(const char *s, long n) {
     if (ctl_tok_eq(s + start, len, "hwverify")) return CTL_VERB_HWVERIFY;
     if (ctl_tok_eq(s + start, len, "hwbreak"))  return CTL_VERB_HWBREAK;
     if (ctl_tok_eq(s + start, len, "hwrmbreak")) return CTL_VERB_HWRMBREAK;
+    if (ctl_tok_eq(s + start, len, "hwwatch"))  return CTL_VERB_HWWATCH;
+    if (ctl_tok_eq(s + start, len, "hwrmwatch")) return CTL_VERB_HWRMWATCH;
     return CTL_VERB_OTHER;
 }
 
@@ -1093,6 +1098,68 @@ static bool parse_ctl_hexva(const char *s, long n, u64 *va_out) {
     u64 v = 0;
     if (parse_hwverify_arg(s, n, &v) != HWVERIFY_ARG_VA) return false;
     *va_out = v;
+    return true;
+}
+
+// 8a-2b-3: parse "hwwatch <rwx> <hexaddr> <declen>". *flags = DEBUG_WP_R|W from the
+// rwx token ('r'/'w' chars, at least one), *addr = the hex VA (optional 0x), *len =
+// the decimal region length 1..8. Returns false on any missing/malformed token.
+// Self-contained bounded scan (no libc, no allocation); mirrors parse_hwverify_arg.
+static bool parse_ctl_hwwatch(const char *s, long n, u8 *flags, u64 *addr, u32 *len) {
+    if (!s || n <= 0) return false;
+    long i = 0;
+    long ts[4], tl[4];   // token [start,len) for verb + 3 args
+    for (int k = 0; k < 4; k++) {
+        while (i < n && (s[i] == ' ' || s[i] == '\t')) i++;
+        ts[k] = i;
+        while (i < n && s[i] != ' '  && s[i] != '\t' && s[i] != '\n' &&
+                        s[i] != '\r' && s[i] != '\0') i++;
+        tl[k] = i - ts[k];
+    }
+    if (tl[1] == 0 || tl[2] == 0 || tl[3] == 0) return false;   // tl[0] = the verb (already matched)
+
+    // rwx (token 1): 'r'/'w' (case-insensitive); at least one, no other char.
+    u8 f = 0;
+    for (long k = 0; k < tl[1]; k++) {
+        char c = s[ts[1] + k];
+        if (c == 'r' || c == 'R') f |= DEBUG_WP_R;
+        else if (c == 'w' || c == 'W') f |= DEBUG_WP_W;
+        else return false;
+    }
+    if (f == 0) return false;
+
+    // hexaddr (token 2): optional 0x prefix, then hex digits, overflow-guarded.
+    const char *p = s + ts[2];
+    long pl = tl[2], j = 0;
+    if (pl >= 2 && p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) j = 2;
+    if (j >= pl) return false;   // "0x" with no digits
+    u64 a = 0;
+    for (; j < pl; j++) {
+        char c = p[j];
+        u64 d;
+        if (c >= '0' && c <= '9') d = (u64)(c - '0');
+        else if (c >= 'a' && c <= 'f') d = (u64)(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') d = (u64)(c - 'A' + 10);
+        else return false;
+        if (a > (~0ull >> 4)) return false;   // overflow guard
+        a = (a << 4) | d;
+    }
+
+    // declen (token 3): 1..8 decimal.
+    const char *q = s + ts[3];
+    long ql = tl[3];
+    u32 l = 0;
+    for (long k = 0; k < ql; k++) {
+        char c = q[k];
+        if (c < '0' || c > '9') return false;
+        l = l * 10u + (u32)(c - '0');
+        if (l > 8u) return false;   // clamp early -- v1.0 supports 1..8 bytes
+    }
+    if (l == 0u) return false;
+
+    *flags = f;
+    *addr = a;
+    *len = l;
     return true;
 }
 
@@ -1175,6 +1242,7 @@ static int devproc_debug_walk_cb(struct Proc *target, void *arg) {
         // by hwdebug_breakpoint_from_el0). The table stays allocated (freed at
         // proc_free) so the ctx-switch reader never derefs freed memory.
         hwdebug_bp_clear_all(target->debug_hw);
+        hwdebug_wp_clear_all(target->debug_hw);    // 8a-2b-3: likewise the watchpoints
         proc_debug_resume(target);                 // 8a-1b-beta: clear the stop + wake parked threads (ReleaseSlot -> NoStrand)
         d->result = 1;
     } else {
@@ -1262,6 +1330,49 @@ static int devproc_hwbp_walk_cb(struct Proc *target, void *arg) {
     } else {
         struct debug_hw *hw = target->debug_hw;
         h->result = (hw && hwdebug_bp_remove(hw, h->va)) ? 1 : -1;   // -1 = not present
+    }
+    return 1;
+}
+
+// =============================================================================
+// ctl HW watchpoints -- hwwatch / hwrmwatch (8a-2b-3; I-39, DEBUG-FS section 5).
+// =============================================================================
+//
+// The watchpoint twin of the hwbreak/hwrmbreak path: same gates (slot owner + the
+// I-39 re-check + stopped-only so the per-Proc wp table is quiescent against the
+// ctx-switch reader) + the same lazy debug_hw pre-alloc discipline (kzalloc OUTSIDE
+// g_proc_table_lock; the spare is installed here iff the target has no table yet).
+struct devproc_hwwatch_ctx {
+    int              target_pid;
+    struct Proc     *caller;    // I-39 re-check
+    struct Spoor    *ctl;       // must == target->debug_owner (slot ownership)
+    bool             add;       // true = hwwatch, false = hwrmwatch
+    u64              va;
+    u32              len;        // 1..8 (add only)
+    u8               flags;      // DEBUG_WP_R|W (add only)
+    struct debug_hw *spare;     // pre-allocated table (add only); NULLed if installed
+    int              result;    // 0 not found, +1 ok, -1 denied / full / bad / not-present / not-stopped
+};
+static int devproc_hwwatch_walk_cb(struct Proc *target, void *arg) {
+    struct devproc_hwwatch_ctx *h = (struct devproc_hwwatch_ctx *)arg;
+    if (target->pid != h->target_pid) return 0;                                    // keep walking
+    if (target == kproc())                            { h->result = -1; return 1; } // undebuggable
+    if (!devproc_debug_authorized(h->caller, target)) { h->result = -1; return 1; } // I-39
+    if (target->debug_owner != h->ctl)                { h->result = -1; return 1; } // slot owner
+    if (!devproc_target_fully_stopped(target))        { h->result = -1; return 1; } // stopped-only (quiescent)
+
+    if (h->add) {
+        struct debug_hw *hw = target->debug_hw;
+        if (!hw) {
+            hw = h->spare;
+            if (!hw) { h->result = -1; return 1; }   // pre-alloc failed -> ENOMEM-ish
+            h->spare = NULL;                         // consumed -- caller must not free it
+            __atomic_store_n(&target->debug_hw, hw, __ATOMIC_RELEASE);
+        }
+        h->result = hwdebug_wp_add(hw, h->va, h->len, h->flags) ? 1 : -1;   // -1 = full / dup / bad region
+    } else {
+        struct debug_hw *hw = target->debug_hw;
+        h->result = (hw && hwdebug_wp_remove(hw, h->va)) ? 1 : -1;   // -1 = not present
     }
     return 1;
 }
@@ -1575,7 +1686,8 @@ static long devproc_write(struct Spoor *c, const void *buf, long n, s64 off) {
         v != CTL_VERB_ATTACH && v != CTL_VERB_DETACH &&
         v != CTL_VERB_STOP && v != CTL_VERB_START && v != CTL_VERB_WAITSTOP &&
         v != CTL_VERB_STEP && v != CTL_VERB_HWVERIFY &&
-        v != CTL_VERB_HWBREAK && v != CTL_VERB_HWRMBREAK) return -1;
+        v != CTL_VERB_HWBREAK && v != CTL_VERB_HWRMBREAK &&
+        v != CTL_VERB_HWWATCH && v != CTL_VERB_HWRMWATCH) return -1;
 
     struct Thread *t = current_thread();
     if (!t || !t->proc) return -1;
@@ -1672,6 +1784,37 @@ static long devproc_write(struct Spoor *c, const void *buf, long n, s64 off) {
             .result     = 0,
         };
         proc_for_each(devproc_hwbp_walk_cb, &h);
+        if (h.spare) kfree(h.spare);   // not installed (target had a table / gate failed)
+        return (h.result == 1) ? n : -1;
+    }
+
+    if (v == CTL_VERB_HWWATCH || v == CTL_VERB_HWRMWATCH) {
+        // 8a-2b-3: arm/disarm a real per-Proc hardware watchpoint. hwwatch parses
+        // "<rwx> <hexva> <declen>"; hwrmwatch parses just the VA (keyed removal).
+        // Same lazy-table pre-alloc-outside-the-lock discipline as hwbreak.
+        bool add = (v == CTL_VERB_HWWATCH);
+        u64 va = 0;
+        u32 len = 0;
+        u8 flags = 0;
+        if (add) {
+            if (!parse_ctl_hwwatch((const char *)buf, n, &flags, &va, &len)) return -1;
+        } else {
+            if (!parse_ctl_hexva((const char *)buf, n, &va)) return -1;
+        }
+        if (va == 0 || va >= UACCESS_USER_VA_TOP) return -1;   // user-half only
+        struct debug_hw *spare = add ? (struct debug_hw *)kzalloc(sizeof(struct debug_hw), 0) : NULL;
+        struct devproc_hwwatch_ctx h = {
+            .target_pid = proc_qid_pid(c->qid.path),
+            .caller     = t->proc,
+            .ctl        = c,
+            .add        = add,
+            .va         = va,
+            .len        = len,
+            .flags      = flags,
+            .spare      = spare,
+            .result     = 0,
+        };
+        proc_for_each(devproc_hwwatch_walk_cb, &h);
         if (h.spare) kfree(h.spare);   // not installed (target had a table / gate failed)
         return (h.result == 1) ? n : -1;
     }

@@ -292,22 +292,64 @@ fn debug_flow(child: &mut Child) -> Result<(), &'static str> {
     }
     t_putstr("debug-probe: step ok (single-step + step-over; pc advanced 4B/instr x3)\n");
 
-    // Disarm the bp (stopped-only), set the exit flag (region[2]), resume -> the
-    // child runs bp_landmark clean (now un-armed) and exit(0)s. The un-armed
-    // resume also proves hwrmbreak actually cleared the bp (else it would re-trap
-    // forever and never exit).
+    // Disarm the bp (stopped-only). The child is still stopped mid-bp_landmark.
     ctl.write_all(format!("hwrmbreak 0x{:x}", bp_va).as_bytes())
         .map_err(|_| "debug-probe: FAIL -- hwrmbreak\n")?;
-    let two: u64 = 1;
-    if unsafe { t_pwrite(mem_f.as_raw_fd() as i64, (&two as *const u64) as *const u8, 8, (x21 + 16) as i64) } != 8 {
-        return Err("debug-probe: FAIL -- write exit flag via mem\n");
+
+    // --- 8a-2b-3: arm a real cross-Proc HARDWARE WATCHPOINT on region[3] ---
+    // The watch target is at x21 + 24 (region[3], the 4th stack word). Arm a WRITE
+    // watchpoint (8 bytes) while the target is still stopped (hwwatch is stopped-
+    // only), set region[2]=1 so the child breaks loop2 and proceeds to the watched
+    // store, then resume. The child's `write_volatile(&region[3], ...)` STR traps
+    // (EC 0x34 -> the whole-Proc stop) -- the headline b-3 proof: a debugger-armed
+    // HW watchpoint fires on a cross-Proc EL0 data access.
+    let watch_va = x21 + 24;
+    ctl.write_all(format!("hwwatch w 0x{:x} 8", watch_va).as_bytes())
+        .map_err(|_| "debug-probe: FAIL -- hwwatch\n")?;
+    let proceed: u64 = 1;
+    if unsafe { t_pwrite(mem_f.as_raw_fd() as i64, (&proceed as *const u64) as *const u8, 8, (x21 + 16) as i64) } != 8 {
+        return Err("debug-probe: FAIL -- write proceed flag via mem\n");
     }
+    ctl.write_all(b"start").map_err(|_| "debug-probe: FAIL -- start(into watch)\n")?;
+
+    // Wait for the watchpoint to fire. `wait` blocks until fully-stopped; after
+    // `start` cleared debug_stop_req, a return of "stopped" means the wp re-set it
+    // (the child hit the watched store). If the wp did NOT fire, the child would
+    // complete the store and never stop -> wait blocks -> the boot gate times out
+    // (a non-vacuous failure): a PASS REQUIRES the wp to have fired.
+    {
+        let wait_f = File::open(&format!("/proc/{}/wait", pid)).map_err(|_| "debug-probe: FAIL -- open wait(wp)\n")?;
+        let mut wbuf = [0u8; 16];
+        let wn = unsafe { t_pread(wait_f.as_raw_fd() as i64, wbuf.as_mut_ptr(), wbuf.len(), 0) };
+        if wn < 7 || &wbuf[..7] != b"stopped" {
+            return Err("debug-probe: FAIL -- wp did not deliver a stop\n");
+        }
+    }
+    // The frozen frame's PC is the store instruction (an EL0 VA, past the bp region).
+    // A wp fires with ELR = the accessing instruction; we assert an EL0t frame (the
+    // wp stopped a real user access), not an exact VA (the store's address is
+    // compiler-placed in rs_main, unlike the pinned bp landmark).
+    if read_exact_at(regs_f.as_raw_fd() as i64, 0, &mut regs).is_err() {
+        return Err("debug-probe: FAIL -- read regs(wp)\n");
+    }
+    let wpc = u64_le(&regs, R_PC);
+    let wps = u64_le(&regs, R_PSTATE);
+    if wpc == 0 || wpc >= USER_VA_LIMIT || (wps & 0xf) != 0 {
+        return Err("debug-probe: FAIL -- wp stop frame not a real EL0t access\n");
+    }
+    t_putstr("debug-probe: hwwatch ok (cross-Proc wp fired on store)\n");
+
+    // Remove the wp (stopped-only), resume -> the store re-executes untrapped and
+    // the child exit(0)s. The un-watched resume also proves hwrmwatch actually
+    // cleared the wp (else the store would re-trap forever and never exit).
+    ctl.write_all(format!("hwrmwatch 0x{:x}", watch_va).as_bytes())
+        .map_err(|_| "debug-probe: FAIL -- hwrmwatch\n")?;
     ctl.write_all(b"start").map_err(|_| "debug-probe: FAIL -- start(exit)\n")?;
 
-    // The child exits loop2 and exit(0)s. Reap it.
+    // The child completes the store and exit(0)s. Reap it.
     match child.wait() {
         Ok(st) if st.success() => Ok(()),
-        Ok(_) => Err("debug-probe: FAIL -- child exit status != 0 after bp cycle\n"),
+        Ok(_) => Err("debug-probe: FAIL -- child exit status != 0 after wp cycle\n"),
         Err(_) => Err("debug-probe: FAIL -- reap child\n"),
     }
     // ctl / mem_f / regs_f / kregs_f / kstack_f drop here -> ctl close detaches.

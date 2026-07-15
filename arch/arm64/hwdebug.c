@@ -27,6 +27,10 @@
 // touch only slots [0, g_debug_max_bp); init clears all IMPLEMENTED slots.
 static u32 g_debug_max_bp;
 
+// The v1.0 usable watchpoint count = min(implemented, DEBUG_HWWP_SLOTS). Set at
+// enumerate, same discipline as g_debug_max_bp (8a-2b-3).
+static u32 g_debug_max_wp;
+
 // Per-CPU "our debug regs are loaded" flag. Set by hwdebug_switch_in when it
 // loads a debugged Proc's breakpoints onto this CPU; cleared when it disables
 // them. Lets the common (non-debugged) switch skip every MSR -- a single bool
@@ -81,15 +85,36 @@ static void hwdebug_set_mdscr(bool mde, bool ss) {
     __asm__ __volatile__("msr mdscr_el1, %0\n isb" :: "r"(mdscr) : "memory");
 }
 
+// DBGWCR<n>_EL1 for an EL0 data watchpoint: E=1 (bit 0), PAC=0b10 (bits 2:1 ->
+// EL0), LSC (bits 4:3 -> 0b01 load / 0b10 store / 0b11 both), BAS (bits 12:5 ->
+// the watched bytes within the DBGWVR doubleword), HMC=0, SSC=0, MASK=0 (no
+// address masking -- a single doubleword). DBGWVR = va aligned down to 8.
+void hwdebug_wp_encode(u64 va, u32 len, u8 flags, u64 *vr_out, u64 *cr_out) {
+    u32 nbytes = (len == 0u) ? 1u : (len > 8u ? 8u : len);
+    u32 first  = (u32)(va & 7ull);
+    if (first + nbytes > 8u) nbytes = 8u - first;   // clamp to the doubleword (add rejects this case first)
+    u32 bas = (((1u << nbytes) - 1u) << first) & 0xFFu;
+    u32 lsc = 0u;
+    if (flags & DEBUG_WP_R) lsc |= 0x1u;
+    if (flags & DEBUG_WP_W) lsc |= 0x2u;
+    if (lsc == 0u) lsc = 0x3u;                        // defensive: both (the parser rejects empty flags)
+    if (vr_out) *vr_out = va & ~7ull;
+    if (cr_out) *cr_out = ((u64)bas << 5) | ((u64)lsc << 3) | (0b10ull << 1) | 1ull;
+}
+
 // Load `next`'s debug state onto THIS CPU: arm the breakpoints (slots [0, bp_count)
 // EXCEPT a step-over VA -- loaded disabled so a step FROM a breakpointed PC does
-// not re-trap; the rest of [0, g_debug_max_bp) disabled), then set MDSCR (MDE if
-// any bp is armed, SS if a step is in flight) + one ISB. Caller: hwdebug_switch_in
-// (IRQ-masked, CPU stable). `bp_va` is quiescent-mutated (stopped-only), stable
-// behind the atomic bp_count gate; NULL is safe when bp_count==0 (loop never reads
-// it). MDSCR.SS is loaded here (not held per-CPU) so it FOLLOWS the thread across
-// an IRQ-preempt migration mid-step (the Linux per-task model).
-static void hwdebug_load_debug(u32 bp_count, const u64 *bp_va, u64 skip_va, bool ss) {
+// not re-trap; the rest of [0, g_debug_max_bp) disabled) + the watchpoints
+// (DISABLED entirely during a step -- ss -- so the single stepped instruction's
+// own data access cannot trap a watchpoint mid-step and derail StepExactlyOne),
+// then set MDSCR (MDE if any bp OR wp is armed, SS if a step is in flight) + one
+// ISB. Caller: hwdebug_switch_in (IRQ-masked, CPU stable). `bp_va` / `hw` are
+// quiescent-mutated (stopped-only), stable behind the atomic count gates; NULL `hw`
+// is safe when both counts are 0 (the loops never read it). MDSCR.SS is loaded here
+// (not held per-CPU) so it FOLLOWS the thread across an IRQ-preempt migration
+// mid-step (the Linux per-task model).
+static void hwdebug_load_debug(u32 bp_count, const u64 *bp_va, u64 skip_va,
+                               bool ss, u32 wp_count, const struct debug_hw *hw) {
     u64 skip = skip_va & ~3ull;
     for (u32 n = 0; n < g_debug_max_bp; n++) {
         if (n < bp_count && !(skip_va && (bp_va[n] & ~3ull) == skip))
@@ -97,12 +122,23 @@ static void hwdebug_load_debug(u32 bp_count, const u64 *bp_va, u64 skip_va, bool
         else
             hwbp_write_slot(n, 0, 0);   // unused slot, or the step-over bp (disabled for the step)
     }
-    hwdebug_set_mdscr(bp_count > 0, ss);
+    u32 wpc = ss ? 0u : wp_count;       // watchpoints OFF for the duration of a single-step
+    for (u32 n = 0; n < g_debug_max_wp; n++) {
+        if (n < wpc) {
+            u64 vr, cr;
+            hwdebug_wp_encode(hw->wp_va[n], hw->wp_len[n], hw->wp_flags[n], &vr, &cr);
+            hwwp_write_slot(n, vr, cr);
+        } else {
+            hwwp_write_slot(n, 0, 0);
+        }
+    }
+    hwdebug_set_mdscr(bp_count > 0 || wpc > 0, ss);
 }
 
-// Disable all our breakpoint slots + MDE + SS on THIS CPU.
+// Disable all our breakpoint + watchpoint slots + MDE + SS on THIS CPU.
 static void hwdebug_clear_debug(void) {
     for (u32 n = 0; n < g_debug_max_bp; n++) hwbp_write_slot(n, 0, 0);
+    for (u32 n = 0; n < g_debug_max_wp; n++) hwwp_write_slot(n, 0, 0);
     hwdebug_set_mdscr(false, false);
 }
 
@@ -163,6 +199,7 @@ void hwdebug_enumerate(void) {
     g_hw_features.num_brps = (u8)nb;
     g_hw_features.num_wrps = (u8)nw;
     g_debug_max_bp = nb < DEBUG_HWBP_SLOTS ? nb : DEBUG_HWBP_SLOTS;
+    g_debug_max_wp = nw < DEBUG_HWWP_SLOTS ? nw : DEBUG_HWWP_SLOTS;
 }
 
 // ---- 8a-2b: the per-Proc breakpoint table + install + EC route ----------
@@ -201,16 +238,55 @@ void hwdebug_free(struct debug_hw *hw) {
     if (hw) kfree(hw);
 }
 
+// ---- 8a-2b-3: the per-Proc watchpoint table -----------------------------
+
+bool hwdebug_wp_add(struct debug_hw *hw, u64 va, u32 len, u8 flags) {
+    if (!hw) return false;
+    if (len == 0u || len > 8u) return false;               // v1.0: 1..8 bytes
+    if ((u32)(va & 7ull) + len > 8u) return false;         // must fit ONE doubleword (BAS-only; no MASK at v1.0)
+    if ((flags & (DEBUG_WP_R | DEBUG_WP_W)) == 0u) return false;  // at least one access type
+    for (u32 i = 0; i < hw->wp_count; i++)
+        if (hw->wp_va[i] == va) return false;              // already present (key = the exact VA)
+    if (hw->wp_count >= g_debug_max_wp) return false;      // table full (or 0 slots)
+    u32 i = hw->wp_count;
+    hw->wp_va[i]    = va;
+    hw->wp_len[i]   = len;
+    hw->wp_flags[i] = (u8)(flags & (DEBUG_WP_R | DEBUG_WP_W));
+    __atomic_store_n(&hw->wp_count, i + 1, __ATOMIC_RELEASE);   // publish last (switch-IN reads count then slots)
+    return true;
+}
+
+bool hwdebug_wp_remove(struct debug_hw *hw, u64 va) {
+    if (!hw) return false;
+    for (u32 i = 0; i < hw->wp_count; i++) {
+        if (hw->wp_va[i] != va) continue;
+        // Compact the last entry into the hole, then drop the count RELEASE-last so
+        // a concurrent switch-IN / wp match reads a consistent (count, slots) prefix.
+        u32 last = hw->wp_count - 1;
+        hw->wp_va[i]    = hw->wp_va[last];
+        hw->wp_len[i]   = hw->wp_len[last];
+        hw->wp_flags[i] = hw->wp_flags[last];
+        __atomic_store_n(&hw->wp_count, last, __ATOMIC_RELEASE);
+        return true;
+    }
+    return false;
+}
+
+void hwdebug_wp_clear_all(struct debug_hw *hw) {
+    if (hw) __atomic_store_n(&hw->wp_count, 0u, __ATOMIC_RELEASE);
+}
+
 void hwdebug_switch_in(struct Thread *next) {
     unsigned cpu = smp_cpu_idx_self();
     if (cpu >= DTB_MAX_CPUS) return;
     struct Proc *p = next ? next->proc : NULL;
     struct debug_hw *hw = p ? __atomic_load_n(&p->debug_hw, __ATOMIC_ACQUIRE) : NULL;
     u32 count = hw ? __atomic_load_n(&hw->bp_count, __ATOMIC_ACQUIRE) : 0;
+    u32 wp_count = hw ? __atomic_load_n(&hw->wp_count, __ATOMIC_ACQUIRE) : 0;
     bool ss = next ? __atomic_load_n(&next->debug_ss_armed, __ATOMIC_ACQUIRE) : false;
-    if (count > 0 || ss) {
+    if (count > 0 || wp_count > 0 || ss) {
         u64 skip = ss ? next->debug_stepover_va : 0;   // step-over: skip this bp during the step
-        hwdebug_load_debug(count, count ? hw->bp_va : (const u64 *)0, skip, ss);
+        hwdebug_load_debug(count, count ? hw->bp_va : (const u64 *)0, skip, ss, wp_count, hw);
         g_cpu_debug_loaded[cpu] = true;
     } else if (g_cpu_debug_loaded[cpu]) {
         hwdebug_clear_debug();
@@ -290,6 +366,37 @@ bool hwdebug_singlestep_from_el0(u64 elr) {
     t->debug_stepover_va = 0;
     hwdebug_disable_ss_this_cpu();
     proc_debug_stop_deliver(p);
+    return true;
+}
+
+bool hwdebug_watchpoint_from_el0(u64 elr, u64 far) {
+    (void)elr; (void)far;   // v1.0 exposes no per-wp FAR/WnR surface; the debugger reads regs.pc
+    struct Thread *t = current_thread();
+    if (!t || t->magic != THREAD_MAGIC) return false;
+    struct Proc *p = t->proc;
+    if (!p || p->magic != PROC_MAGIC) return false;
+    struct debug_hw *hw = __atomic_load_n(&p->debug_hw, __ATOMIC_ACQUIRE);
+    if (!hw) return false;   // never debugged -> a truly stray wp EC -> fatal at the caller
+
+    if (__atomic_load_n(&hw->wp_count, __ATOMIC_ACQUIRE) > 0) {
+        // An armed watchpoint fired -- the hardware only traps accesses matching a
+        // programmed DBGWCR, so a wp EC on a debugged Proc with armed wps IS a
+        // debugger hit. arm64 reports FAR imprecise-within-the-block, so we do NOT
+        // gate delivery on an exact FAR match (that would risk a MISSED stop);
+        // wp_count>0 is the sound signal. Deliver the whole-Proc stop (the thread
+        // returns here -> the EL0-return tail's stop-check parks it; death wins, as
+        // the tail's die-check precedes the stop-check). The debugger reads regs.pc
+        // (the load/store instruction; a wp fires with ELR = the accessing insn, so
+        // a plain `start` over a still-armed wp re-traps -- the debugger `step`s
+        // [watchpoints are OFF for the step] or `hwrmwatch`es first).
+        proc_debug_stop_deliver(p);
+        return true;
+    }
+    // wp_count == 0: a STALE hardware watchpoint -- a detach/hwrmwatch cleared the
+    // table but this CPU has not reloaded (the target ran on until this access).
+    // Benign (only the kernel arms a wp): disable this CPU's debug regs + resume
+    // (the access re-executes untrapped). Symmetric with the bp STALE arm.
+    hwdebug_disable_this_cpu();
     return true;
 }
 

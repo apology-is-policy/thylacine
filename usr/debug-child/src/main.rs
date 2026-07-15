@@ -8,10 +8,13 @@
 //   * x20 holds SENTINEL_REG for the whole park loop -- the debugger reads
 //     /proc/<pid>/regs and asserts x20 == SENTINEL_REG (the exact register proof
 //     against a real trapframe).
-//   * x21 holds the address of a 3-word stack region; region[0] = SENTINEL_MEM
+//   * x21 holds the address of a 4-word stack region; region[0] = SENTINEL_MEM
 //     (the debugger READ-checks it via /proc/<pid>/mem), region[1] = a resume
 //     flag the debugger WRITES to 1 (loop1 -> loop2), region[2] = an exit flag
-//     the debugger WRITES to 1 (loop2 -> exit).
+//     the debugger WRITES to 1 (loop2 -> the watch phase), region[3] = the WATCH
+//     TARGET (8a-2b-3): the debugger arms a WRITE watchpoint on &region[3] (VA =
+//     x21 + 24), then the watched store below traps (EC 0x34 -> the whole-Proc
+//     stop). After the debugger removes the wp and resumes, the store completes.
 //   * x22 holds the VA of bp_landmark() -- the debugger reads it from the stopped
 //     frame and arms a HW breakpoint there (8a-2b). The FIRST loop2 call traps.
 //   * loop1 yields each iteration (SYS_YIELD), so the debug stop parks us at the
@@ -35,6 +38,10 @@ use libthyla_rs::t_exits;
 // MUST match debug-probe.
 const SENTINEL_REG: u64 = 0xDEB0_DEB0;
 const SENTINEL_MEM: u64 = 0xDEB0_0001_CAFE_0001;
+// 8a-2b-3: the value the watched store writes into region[3]. Its exact value is
+// immaterial to the E2E (the debugger verifies the STOP, not the byte); it just has
+// to be a store the WRITE watchpoint traps.
+const WATCH_VALUE: u64 = 0xDEB0_0002_CAFE_0002;
 
 // The 8a-2b breakpoint landmark: debug-probe arms a HW breakpoint at this
 // function's entry (its VA is pinned in x22 during the park loop, so the debugger
@@ -72,17 +79,21 @@ fn yield_now() {
 // debug-probe successfully stopping + inspecting it.
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
-    // A 3-word stack region the debugger reaches via /proc/<pid>/mem:
+    // A 4-word stack region the debugger reaches via /proc/<pid>/mem:
     //   [0] = SENTINEL_MEM  (read-checked)
     //   [1] = resume flag   (written 1 to release loop1 into loop2)
-    //   [2] = exit flag     (written 1 to release loop2 into exit)
+    //   [2] = exit flag     (written 1 to release loop2 into the watch phase)
+    //   [3] = watch target  (8a-2b-3: the WRITE watchpoint is armed on &region[3];
+    //                        the watched store below traps). Pre-initialized here
+    //                        (before any wp is armed) so its page is resident.
     // write_volatile pins the initial stores before the asm block reads region[1]
     // and before the debugger reads region[0].
-    let mut region: [u64; 3] = [0; 3];
+    let mut region: [u64; 4] = [0; 4];
     unsafe {
         core::ptr::write_volatile(&mut region[0], SENTINEL_MEM);
         core::ptr::write_volatile(&mut region[1], 0u64);
         core::ptr::write_volatile(&mut region[2], 0u64);
+        core::ptr::write_volatile(&mut region[3], 0u64);
     }
     let ptr = region.as_mut_ptr();
     let bp = (bp_landmark as extern "C" fn()) as usize as u64;
@@ -110,7 +121,7 @@ pub extern "C" fn rs_main() -> i64 {
     // loop2: call the breakpointed landmark each iteration until the debugger sets
     // region[2] != 0. The FIRST call traps (the armed bp -> the whole-Proc stop);
     // after the debugger disarms the bp, sets region[2], and resumes, the landmark
-    // runs clean and we exit(0).
+    // runs clean and we fall through to the watch phase.
     loop {
         bp_landmark();
         if unsafe { core::ptr::read_volatile(&region[2]) } != 0 {
@@ -118,6 +129,14 @@ pub extern "C" fn rs_main() -> i64 {
         }
         yield_now();
     }
+
+    // 8a-2b-3 watch phase: a single store to region[3]. If the debugger armed a
+    // WRITE watchpoint on &region[3] (which it did, before releasing loop2 above),
+    // this STR traps (EC 0x34 -> the whole-Proc stop; the debugger's regs.pc == this
+    // store instruction). After the debugger removes the wp (hwrmwatch, stopped-only)
+    // and resumes, the STR re-executes untrapped and we exit(0). The wp is the ONLY
+    // reason this store stops -- no bp is armed here (the debugger disarmed it).
+    unsafe { core::ptr::write_volatile(&mut region[3], WATCH_VALUE); }
 
     // Keep `region` live to the asm (its address escaped into the block).
     let _ = unsafe { core::ptr::read_volatile(&region[1]) };
