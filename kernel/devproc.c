@@ -598,24 +598,22 @@ bool devproc_kill_authorized(const struct Proc *caller, const struct Proc *targe
 // =============================================================================
 //
 // Two-axis authority for the /proc/<pid> debug surface (attach + the mem/regs/
-// wait reads in later sub-chunks). ctl is 0600 (owner rw), so:
+// wait reads in later sub-chunks), the I-26 kill-gate analog. ctl is 0600
+// (owner rw), so:
 //   - identity axis: the OWNER (same principal_id) may debug its own target;
-//   - capability axis: CAP_DEBUG (the clearance-grantable cross-identity
-//     debug authority) may debug any nameable target.
+//   - capability axis: CAP_HOSTOWNER (the host owner / Plan 9 "eve" — user-voted
+//     a debug axis 2026-07-15: it already kills/chowns/DAC-overrides any target,
+//     and debug is strictly less invasive than kill) OR CAP_DEBUG (the
+//     clearance-grantable cross-identity debug authority) may debug any nameable
+//     target.
 // Checked DIRECTLY (not via perm_check): CAP_DAC_OVERRIDE — the generic fs-rwx
 // admin — is deliberately NOT a debug axis, exactly as the kill gate keeps it
-// off the kill axis. No identity bypasses (I-22 — CAP_DEBUG is a capability).
-// kproc (debugging it would stop the kernel) and a PROC_FLAG_NOTRACE target
-// (the SYS_SET_TRACEABLE(0) no-trace seam — e.g. the login session Proc,
-// DEBUG-FS-DESIGN §8) are refused BEFORE the authority axes: a CAP_DEBUG holder
-// cannot debug either. Non-static: the kernel test suite exercises the predicate.
-//
-// v1.0 NARROW reading of I-39: CAP_HOSTOWNER is NOT a debug axis here. The design
-// doc §3 states the gate as owner-OR-CAP_DEBUG; a host owner debugging any target
-// (the Plan 9 "eve" super-user shape — and the I-26 kill gate DOES admit
-// CAP_HOSTOWNER) is a possible v1.x WIDENING held for signoff, since widening a
-// privilege gate is the user's call and the narrower gate is the safe default. A
-// hostowner that needs to debug acquires CAP_DEBUG via a clearance grant.
+// off the kill axis (fs-admin stays orthogonal to debug). No identity bypasses
+// (I-22 — the cap axes are capabilities, never identities). kproc (debugging it
+// would stop the kernel) and a PROC_FLAG_NOTRACE target (the SYS_SET_TRACEABLE(0)
+// no-trace seam — e.g. the login session Proc, DEBUG-FS-DESIGN §8) are refused
+// BEFORE the authority axes: no cap holder can debug either. Non-static: the
+// kernel test suite exercises the predicate.
 bool devproc_debug_authorized(const struct Proc *caller, const struct Proc *target) {
     if (!caller || !target)                            return false;
     if (target == kproc())                             return false;   // kernel: undebuggable
@@ -626,9 +624,9 @@ bool devproc_debug_authorized(const struct Proc *caller, const struct Proc *targ
         return false;                                                   // no-trace seam
     if (caller->principal_id == target->principal_id)  return true;    // owner-rwx on 0600
     // caps read ATOMICALLY (RW-5 F2): proc_become_legate is a cross-thread writer
-    // of caller->caps; a plain load is C11-racy (CAP_DEBUG is clearance-grantable).
-    if (__atomic_load_n(&caller->caps, __ATOMIC_ACQUIRE) & CAP_DEBUG)
-        return true;                                                    // debug-anyone
+    // of caller->caps; a plain load is C11-racy (both axes are clearance-grantable).
+    if (__atomic_load_n(&caller->caps, __ATOMIC_ACQUIRE) & (CAP_HOSTOWNER | CAP_DEBUG))
+        return true;                                                    // host owner OR debug-anyone
     return false;
 }
 

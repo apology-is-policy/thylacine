@@ -89,9 +89,16 @@ loop with no blockers:
 
 > **I-39 (debug authority bounded, never bypasses memory-safety).** A Proc may
 > debug a target iff it can *name* `/proc/<pid>` in its namespace AND passes the
-> two-axis gate (**owner** — same `principal_id` on the `0600` ctl — **OR**
-> `CAP_DEBUG`), the I-26-analog. The debug surface confers no authority beyond
-> that gate. Register/memory reads AND writes are permitted only on a **stopped**
+> two-axis gate (**owner** — same `principal_id` on the `0600` ctl — **OR** the
+> capability axis `CAP_HOSTOWNER`/`CAP_DEBUG`), the I-26-analog (owner OR the host
+> owner OR the domain cap, exactly as the kill gate is owner OR
+> `CAP_HOSTOWNER`/`CAP_KILL`). `CAP_HOSTOWNER` is a debug axis (the Plan 9 "eve"
+> super-user shape; the host owner already kills/chowns/DAC-overrides any target,
+> and debug is strictly less invasive than kill — user-voted 2026-07-15);
+> `CAP_DEBUG` is the clearance-grantable cross-identity axis for a non-hostowner
+> debugger; `CAP_DAC_OVERRIDE` is deliberately NOT a debug axis (fs-admin stays
+> orthogonal to debug, as it is to kill). The debug surface confers no authority
+> beyond that gate. Register/memory reads AND writes are permitted only on a **stopped**
 > target (a running target's mem/regs are refused). No debug operation (a) writes
 > executable text (I-12 W^X holds — breakpoints are hardware, never a software
 > `BRK` patched into text), (b) corrupts the shared REVENANT Image cache (I-36
@@ -104,8 +111,8 @@ loop with no blockers:
 > `PROC_FLAG_NOTRACE` policy seams are honored.
 
 Enforcement: the two-axis gate at each debug read/write site (the
-`devctl_kernel_base_readable` pattern — atomic-load `caller->caps`, check
-`CAP_DEBUG` or owner, NULL->deny); the stopped-only guard on mem/reg access; HW
+`devctl_kernel_base_readable` pattern — atomic-load `caller->caps`, check owner
+OR `CAP_HOSTOWNER`/`CAP_DEBUG`, NULL->deny); the stopped-only guard on mem/reg access; HW
 breakpoints (never software `BRK`) preserving I-12/I-36; the cross-Proc VA->PA
 walk confined to the target `pgtable_root` under the target `vma_lock`; the
 handle-lifetime-tied stop ownership. Validation: `specs/debug_stop.tla` (the

@@ -572,12 +572,11 @@ void test_devproc_debug_authorized_predicate(void) {
     TEST_ASSERT(devproc_debug_authorized(caller, target),
                 "CAP_DEBUG authorizes a cross-identity debug");
 
-    // 4. Different principal + CAP_HOSTOWNER -> DENIED at v1.0. Unlike the kill
-    //    gate, CAP_HOSTOWNER is NOT a debug axis here (the deliberate v1.0 narrow
-    //    reading of I-39; the Plan-9-eve widening is held for signoff).
+    // 4. Different principal + CAP_HOSTOWNER -> allowed (the host owner / Plan 9
+    //    "eve" is a debug axis, user-voted 2026-07-15; the I-26 kill-gate analog).
     caller->caps = CAP_HOSTOWNER;
-    TEST_ASSERT(!devproc_debug_authorized(caller, target),
-                "CAP_HOSTOWNER is NOT a debug axis at v1.0 (narrow I-39)");
+    TEST_ASSERT(devproc_debug_authorized(caller, target),
+                "CAP_HOSTOWNER authorizes a debug (host owner / eve)");
 
     // 5. Different principal + CAP_DAC_OVERRIDE -> DENIED (fs-admin != debug).
     caller->caps = CAP_DAC_OVERRIDE;

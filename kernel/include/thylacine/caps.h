@@ -123,8 +123,11 @@ typedef u64 caps_t;
 #define CAP_KILL            (1ull << 9)
 
 // CAP_DEBUG — elevation-only. The cross-Proc debug authority (I-39): the
-// capability axis on the /proc/<pid> debug surface (owner-on-the-0600-ctl OR
-// CAP_DEBUG), the I-26 analog for the read/write/run-control axis. A holder
+// clearance-grantable cross-identity axis on the /proc/<pid> debug surface
+// (owner-on-the-0600-ctl OR CAP_HOSTOWNER OR CAP_DEBUG — the I-26 analog for the
+// read/write/run-control axis, where CAP_HOSTOWNER is the host-owner/eve axis
+// and CAP_DEBUG the domain cap, exactly as kill is owner OR HOSTOWNER OR KILL).
+// A holder
 // may attach a debugger to, stop, and inspect/modify the registers + memory
 // of a STOPPED target it can name in its namespace. Clearance-grantable (a
 // member of CAP_GRANTABLE_CLEARANCE) so a dev-session debugger acquires it via
