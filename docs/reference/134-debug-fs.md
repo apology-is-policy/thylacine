@@ -344,13 +344,54 @@ DELIVERY. Also `#73`: `mmu_cross_proc_read`/`write` gained an explicit
 8a-1 complete (the software-checkpoint tier: audited, SMP-gated, `debug_stop.tla`
 green). 8a-2a complete (the HW-debug delivery verify: PASS on HVF + TCG). 8a-2b-1
 complete (real per-Proc hardware breakpoints: the table + ctx-switch install +
-the EC 0x30 route + `hwbreak`/`hwrmbreak` + `#73`; `/debug-probe` proves a
-cross-Proc bp fires). Next: 8a-2b-2 (single-step via the `MDSCR.SS` machine + the
-step-over-breakpoint dance + the `step` verb, model-first against
-`specs/debug_step.tla`), 8a-2b-3 (watchpoints), and 8a-2c (the consolidated
-Fable-5-max holotype + the SMP gate + the ARCH section 25.4 row + docs). The ARCH
-section 25.4 audit-trigger row + the CLAUDE.md mirror for the 8a-2 HW-debug tier
-land at 8a-2c, when the whole surface is coherent + audited.
+the EC 0x30 route + `hwbreak`/`hwrmbreak` + `#73`). 8a-2b-2 complete (the arm64
+single-step machine + the step-over-breakpoint dance + the `step` verb; §
+below). Next: 8a-2b-3 (watchpoints via `DBGWCR`/`DBGWVR` + the EC 0x34 route +
+the `hwwatch` verb) and 8a-2c (the consolidated Fable-5-max holotype + the SMP
+gate + the ARCH §25.4 row + docs). The ARCH §25.4 audit-trigger row + the
+CLAUDE.md mirror for the 8a-2 HW-debug tier land at 8a-2c, when the whole surface
+is coherent + audited.
+
+## 8a-2b-2 — single-step + the step-over-breakpoint dance
+
+A `step` resumes a stopped thread for exactly ONE EL0 instruction, then re-parks
+(model-first against `specs/debug_step.tla`, the sibling of `debug_stop.tla`;
+single-step is the only genuine protocol growth in 8a-2 — a bp-fire is
+trigger-agnostic).
+
+**The SS machine is per-thread** (`Thread.debug_ss_armed` + `debug_stepover_va`,
+struct 1168 → 1184) so `MDSCR.SS` follows the thread across an IRQ-preempt
+migration mid-step — the Linux per-task model (SS is per-PE; a migrated step would
+run free otherwise). `hwdebug_switch_in` loads `MDSCR.SS` from `debug_ss_armed`
+(alongside `MDE`/bps) and SKIPS `debug_stepover_va` when loading the bp table (the
+step-over: a thread stopped AT a bp would re-trap on the resume instead of
+stepping, so that bp is loaded disabled for its step). `el0_return_stop_check`
+arms `SPSR.SS` (bit 21) in the resume frame the `eret` restores (active-not-
+pending → one instruction), IRQ-masked from the arm to the `eret`.
+
+`hwdebug_singlestep_from_el0` (the EC 0x32 route): an armed step completed →
+disarm SS (the per-thread flags + this CPU's `MDSCR.SS`) + re-stop the whole Proc
+(`proc_debug_stop_deliver`) so the thread re-parks at the tail (death wins there)
+and the debugger reads the advanced `regs.pc`; a spurious step EC → benign clear +
+resume (only the kernel arms `MDSCR.SS`).
+
+The `step` ctl verb arms the head thread's SS + the step-over VA (if the PC is at
+an armed bp) + resumes, then **blocks via `devproc_wait_block`** (which polls
+`devproc_target_fully_stopped` — it checks `debug_stop_req`, re-set by the EC
+0x32) — NOT the `all_threads_parked` wait `stop` uses. That is the load-bearing
+fix the in-guest E2E caught: `proc_debug_resume` clears `debug_stop_req` + wakes
+the head, but the head's `rendez_blocked_on` stays `&debug_rendez` (+ `on_cpu ==
+false`) until it resumes from `sleep()`, so `all_threads_parked` reads a STALE
+"still parked" state and the wait returns before the step even runs (then the
+regs read hits `fully_stopped`'s `debug_stop_req == 0` gate and fails).
+
+v1.0: `step` resumes the WHOLE Proc, so a multi-thread target's peers briefly run
+during the head's step — the per-thread step is a v1.x refinement (with the
+per-thread `/proc/<pid>/thread/<tid>/` layer). Single-threaded targets are clean.
+Tests: `hwdebug.singlestep_benign` (the spurious-step path — the armed path needs
+real EL0 execution) + the `/debug-probe` step phase (steps 3× FROM the
+breakpointed entry, verifying `pc` advances by exactly 4 bytes/instruction — the
+SS machine AND the step-over dance).
 
 ## Known caveats / footguns
 
