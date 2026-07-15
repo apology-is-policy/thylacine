@@ -2302,8 +2302,10 @@ void el0_return_stop_check(struct exception_context *ctx) {
         // cascade reads rendez_blocked_on == &debug_rendez under wait_lock), so
         // we resume here and die rather than re-parking. group_exit_msg is the
         // model's `gflag`.
-        if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL)
-            thread_exit_self();   // noreturn
+        if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL) {
+            t->debug_trapframe = NULL;   // 8a-1c holotype F2: don't die with a dangling frame pointer
+            thread_exit_self();          // noreturn
+        }
 
         // Resumed (specs/debug_stop.tla ResumeThread -> proceed): start / detach
         // / ctl-fd close cleared the flag via proc_debug_resume (a RELEASE clear

@@ -732,6 +732,17 @@ static bool devproc_all_threads_parked(struct Proc *target) {
 static bool devproc_target_fully_stopped(struct Proc *target) {
     if (target->state != PROC_STATE_ALIVE) return false;
     if (__atomic_load_n(&target->debug_stop_req, __ATOMIC_ACQUIRE) == 0) return false;
+    // 8a-1c holotype F1: a group-terminating target is DYING, not debug-stopped.
+    // Its threads transition to THREAD_EXITING and run their exit path
+    // (thread_exit_self -> the final sched(), which WRITES t->ctx WITHOUT
+    // g_proc_table_lock -- proc.c). devproc_all_threads_parked SKIPS EXITING
+    // peers, so without this a dying target reads "fully stopped" and the reg/
+    // kstack readers (which read t->ctx / the head thread) would race the
+    // non-settled dying thread (a torn read; bounded to no-UAF only because the
+    // reader holds g_proc_table_lock, pinning the Thread alive). Death wins: a
+    // target with a pending group_exit_msg is never fully-stopped. Serialized
+    // with proc_group_terminate's set (both under g_proc_table_lock).
+    if (__atomic_load_n(&target->group_exit_msg, __ATOMIC_ACQUIRE) != NULL) return false;
     return devproc_all_threads_parked(target);
 }
 
@@ -809,7 +820,11 @@ static long devproc_mem_rw(struct Spoor *c, void *buf, long n, s64 off, bool is_
 // frame + ctx are settled, not being written by a live cpu_switch_context).
 static long devproc_build_regs(struct Proc *target, u32 kind, u8 *out) {
     struct Thread *th = target->threads;   // the head thread (v1.0)
-    if (!th) return 0;
+    // 8a-1c holotype F1 (defense-in-depth): never read an EXITING head thread's
+    // ctx/trapframe -- it is running its exit path (the final sched() writes
+    // t->ctx). The fully_stopped gate already rejects a group-terminating target;
+    // this backstops any EXITING head not covered by group_exit_msg.
+    if (!th || th->state == THREAD_EXITING) return 0;
 
     // 8a-1b-gamma-3: kregs reads t->ctx (the saved KERNEL-side callee-saved
     // frame), NOT the EL0 trapframe, so it needs only a valid thread -- no
@@ -1190,7 +1205,9 @@ static int devproc_debug_wait_stopped(int pid, struct Spoor *ctl) {
 // past 2 KiB is a v1.x offset-aware multi-read).
 static size_t devproc_format_kstack(struct Proc *target, char *buf, size_t cap) {
     struct Thread *th = target->threads;   // head thread (v1.0)
-    if (!th || !th->kstack_base) return 0;
+    // 8a-1c holotype F1 (defense-in-depth): never walk an EXITING head thread's
+    // ctx/kstack -- it is executing its exit path on that stack.
+    if (!th || th->state == THREAD_EXITING || !th->kstack_base) return 0;
     if (th->kstack_size <= THREAD_KSTACK_GUARD_SIZE) return 0;   // no usable region
 
     // Fault-safe bounds: the USABLE kstack [base + guard, base + total). The low
