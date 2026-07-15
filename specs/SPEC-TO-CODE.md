@@ -1671,3 +1671,30 @@ model's death abstraction): a SOFT interrupt-terminate latch (LS-5c, no
 so `notes_deliver` delivers it at the next checkpoint (necessary to avoid a
 sleep()-SLEEP_INTR livelock; the target is dying anyway). The model's death =
 `group_exit_msg` (the hard, N-4 path), which the loop handles airtight.
+
+## debug_step.tla — Go IDE Stage 8a-2b (the single-step machine; spec-first, model-first)
+
+A SIBLING of `debug_stop.tla` (NOT an extension -- `debug_stop`'s 4 buggy cfgs
+are the landed gate, and a breakpoint-fired stop is trigger-agnostic so it reuses
+that machinery unchanged). The ONLY genuine protocol growth in 8a-2 is the STEP:
+a `step` resumes a stopped Thread for EXACTLY ONE EL0 instruction, then re-parks;
+the death composition rides the SAME tail die-check-first (the loom_multishot /
+loom_order sibling precedent). Landed model-first at **8a-2b-alpha**; the impl
+sites land at **8a-2b-2** (this is a RESERVATION until then).
+
+| cfg | knob(s) | checks | outcome | distinct |
+|---|---|---|---|---|
+| `debug_step.cfg` | all knobs FALSE (2 Threads) | `Safety` (StepExactlyOne) + `EventuallyAllDead` + `StepEventuallyReparks` | clean | 146 |
+| `debug_step_buggy_runs_free.cfg` | `BUGGY_STEP_RUNS_FREE` | `Safety` | violation (StepExactlyOne) | 68 |
+| `debug_step_buggy_death_lost.cfg` | `BUGGY_STEP_DEATH_LOST` | `EventuallyAllDead` | violation | 146 |
+
+| Spec action | Code site (RESERVED -- lands at 8a-2b-2) | Invariant pinned |
+|---|---|---|
+| `RequestStep(t)` (arm a step, wake to the tail) | the `step` ctl verb (`kernel/devproc.c`) -> a per-Thread step-armed flag + the debug-rendez wake (`proc_debug_resume`-shaped) | -- |
+| `Tail(t)` (die-check FIRST, then arm SS or re-park) | `kernel/proc.c::el0_return_stop_check` extended: after the die-check, if a step is armed set `MDSCR.SS` + `SPSR.SS` in the resumed frame (arm one instruction) else re-park | `EventuallyAllDead` (death wins over a step); the die-check-first ordering. `BUGGY_STEP_DEATH_LOST` = the SS EC auto-continues bypassing the tail die-check. |
+| `StepExec(t)` (one EL0 instruction -> SS EC -> tail) | `arch/arm64/exception.c` EC 0x32 (software step) route -> return to the EL0-return tail (re-park); `arch/arm64/hwdebug.c` the SS-machine arm/disarm + the step-over-breakpoint dance (disable the bp E-bit, step, re-enable) | `StepExactlyOne` (one instruction per step window). `BUGGY_STEP_RUNS_FREE` = the SS EC never re-traps (the SPSR.SS/MDSCR.SS stuck/missing-re-trap family). |
+| `SetGflag` / `DeathWake` | `kernel/proc.c::proc_group_terminate` + the death cascade (unchanged from `debug_stop`) | death completes even against a step in flight. |
+
+Pre-commit gate (from 8a-2b-2): `debug_step.cfg` clean GREEN + the 2 buggy cfgs
+confirmed, on any change to the step arm/re-park (`el0_return_stop_check` step
+leg), the SS-machine (`hwdebug.c`), or the EC 0x32 route (`exception.c`).
