@@ -15,6 +15,7 @@
 #include <thylacine/context.h>
 #include <thylacine/types.h>
 #include <thylacine/spinlock.h>
+#include <thylacine/rendez.h>   // 8a-1b-beta: embedded per-Thread debug_rendez
 
 struct Proc;
 struct Rendez;
@@ -295,9 +296,23 @@ struct Thread {
     // by the owning Thread around proc_close_handles_at_exit; read only
     // via thread_die_pending(self). Fits in the tail padding.
     bool               exit_close_active;
+
+    // 8a-1b-beta (I-39; docs/DEBUG-FS-DESIGN.md section 4.2; specs/debug_stop.tla):
+    // this Thread's OWN debugger park rendez. A thread observing a debugger stop
+    // at its EL0-return tail (el0_return_stop_check) parks here via sleep(); the
+    // resume cascade (proc_debug_resume) identifies a debug-parked peer by
+    // `rendez_blocked_on == &debug_rendez` and wakes exactly it (never a syscall-
+    // sleeper). PER-THREAD (single-waiter -- only this Thread ever sleeps here, so
+    // a multi-thread target parks each thread on its own rendez, and the single-
+    // waiter Rendez discipline is never violated by a shared park). Its lifetime
+    // is the Thread's, so the proc_group_terminate death cascade -- which wakes
+    // rendez_blocked_on (== &debug_rendez while parked) under wait_lock -- reaches
+    // a stopped thread with no stack-rendez lifetime concern. KP_ZERO (SLUB) inits
+    // it to { unlocked, no waiter } -- no explicit rendez_init needed.
+    struct Rendez      debug_rendez;
 };
 
-_Static_assert(sizeof(struct Thread) == 1136,
+_Static_assert(sizeof(struct Thread) == 1152,
                "struct Thread size pinned at 1136 bytes (P6 #811 appended a "
                "tail spin_lock_t wait_lock -- death-interruptible sleep, "
                "ARCH 8.8.1; 1120 -> 1136 incl. tail padding). P6-pouch-signals-"

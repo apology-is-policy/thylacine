@@ -255,6 +255,7 @@ _exception_vectors:
     bl      exception_irq_curr_el
     bl      preempt_check_irq            /* P2-Bc: maybe context-switch */
     bl      el0_return_die_check         /* I-24: self-exit if Proc group-terminating (noreturn if so) */
+    bl      el0_return_stop_check        /* 8a-1b-beta I-39: park if a debugger stop is pending (AFTER the die-check -- death wins) */
     b       .Lexception_return
 
     .org _exception_vectors + 0x500
@@ -330,6 +331,7 @@ _exception_vectors:
     bl      el0_return_die_check
     mov     x0, sp
     bl      notes_deliver_at_el0_return
+    bl      el0_return_stop_check        /* 8a-1b-beta I-39: park if a debugger stop is pending (AFTER die-check + notes -- death/interrupt win) */
     b       .Lexception_return
 
 .Lexception_return:

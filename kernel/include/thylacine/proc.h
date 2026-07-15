@@ -516,6 +516,19 @@ struct Proc {
     // 9 one-debugger-per-target shape). KP_ZERO at proc_alloc inits it NULL, so a
     // reused Proc struct never carries a stale token. NOT propagated by rfork.
     struct Spoor      *debug_owner;
+
+    // 8a-1b-beta (I-39; docs/DEBUG-FS-DESIGN.md section 4.2/4.4): the per-Proc
+    // debugger stop flag (the model's `sflag`). 0 = run, 1 = a debugger has
+    // requested every thread park at its next EL0-return checkpoint. SET (RELEASE)
+    // by proc_debug_stop_deliver, CLEARED (RELEASE) by proc_debug_resume -- the
+    // clear is ordered BEFORE the resume's per-peer wake so a thread registering
+    // on the tail after the wake re-observes the cleared flag (the I-9 register-
+    // then-observe close, the mirror of proc_group_terminate's set-before-walk).
+    // READ (ACQUIRE) at the EL0-return tail (el0_return_stop_check) + in the park
+    // wake-cond. A plain u32 driven by __atomic_* (the group_exit_msg / proc_flags
+    // idiom). KP_ZERO -> 0 (a reused struct never carries a stale stop); NOT
+    // propagated by rfork (a spawned child is not being debugged).
+    u32                debug_stop_req;
 };
 
 #define PROC_FLAG_NODUMP            (1u << 0)
@@ -560,10 +573,15 @@ struct Proc {
 // thread, and an armed kproc would *_INTR every kernel-thread sleep).
 #define PROC_FLAG_INTR_TERMINATE_PENDING (1u << 7)
 
-_Static_assert(sizeof(struct Proc) == 312,
-               "struct Proc size pinned at 312 bytes (the 304 baseline + the 8a-1b "
-               "debug_owner Spoor* @304 = 8). Adding a field grows the SLUB cache; "
-               "update this assert deliberately so the change is intentional.");
+_Static_assert(sizeof(struct Proc) == 320,
+               "struct Proc size pinned at 320 bytes (the 312 baseline + the 8a-1b-beta "
+               "debug_stop_req u32 @312, padded to the 8-aligned 320). Adding a field "
+               "grows the SLUB cache; update this assert deliberately so the change is "
+               "intentional.");
+_Static_assert(__builtin_offsetof(struct Proc, debug_stop_req) == 312,
+               "8a-1b-beta debug_stop_req (the I-39 per-Proc debugger stop flag) "
+               "appends after debug_owner (offset 312, the next slot past the Spoor* "
+               "@304); existing offsets stay stable (KP_ZERO inits it 0 = run).");
 _Static_assert(__builtin_offsetof(struct Proc, bounce_bytes) == 296,
                "CF-3 A bounce_bytes appends after the G15 env pointer (offset 296); "
                "existing offsets stay stable (KP_ZERO inits it 0).");
@@ -848,6 +866,45 @@ void proc_group_terminate(struct Proc *p, const char *msg);
 // Otherwise returns. #713: runs BEFORE the DAIF-masked ELR-set..eret window;
 // the die path sched()s away and never reaches the eret.
 void el0_return_die_check(void);
+
+// 8a-1b-beta debugger stop/resume (I-39; docs/DEBUG-FS-DESIGN.md section 4.2/4.4;
+// specs/debug_stop.tla). The stop machinery sits on the death-path lineage and
+// composes with it (DeathWinsOverStop): the EL0-return tail runs the stop-check
+// AFTER el0_return_die_check, so death always wins; a resume re-runs the die-
+// check on unpark.
+//
+// proc_debug_stop_deliver: request every thread of `p` park at its next EL0-
+// return checkpoint. Sets p->debug_stop_req (RELEASE) then smp_resched_others()
+// so a peer RUNNING at EL0 on another CPU traps to its IRQ-from-EL0 tail and
+// observes the flag (the periodic tick is the floor). A thread already in the
+// kernel observes the flag when its syscall/handler returns to the tail; a
+// thread blocked in a syscall sleep is NOT interrupted -- it stops at its next
+// checkpoint (the Plan 9 non-preemptive stop; explicit-stop-of-a-sleeper is a
+// v1.x refinement). LOCK CONTRACT: caller holds g_proc_table_lock (mirrors
+// proc_group_terminate; the flag-set + IPI take no sleeping lock).
+void proc_debug_stop_deliver(struct Proc *p);
+
+// proc_debug_resume: resume `p` -- clear p->debug_stop_req (RELEASE, ordered
+// BEFORE the wake so a thread registering at the tail after the walk re-observes
+// the cleared flag: the I-9 register-then-observe close, the mirror of
+// proc_group_terminate's set-before-walk) then wake every thread parked on its
+// OWN debug_rendez (walk p->threads, per-peer wait_lock -> wakeup, exactly the
+// #811 death-cascade shape, waking only debug-parked peers). Drives the model's
+// StartResume (start verb) AND ReleaseSlot (detach / ctl-fd close / debugger
+// death) -- the release paths in devproc.c call this after clearing debug_owner,
+// so a dead/detached debugger provably resumes its quarry (NoStrand). LOCK
+// CONTRACT: caller holds g_proc_table_lock (the p->threads walk + the
+// g_proc_table_lock -> wait_lock -> r->lock chain, acyclic).
+void proc_debug_resume(struct Proc *p);
+
+// 8a-1b-beta EL0-return-tail stop-check (specs/debug_stop.tla TailStep). Called
+// at every return-to-EL0 AFTER el0_return_die_check (+ notes on the sync tail),
+// so death/interrupt win over a stop. Fast-paths out when no debugger stop is
+// pending; otherwise parks the calling Thread on its own debug_rendez (register-
+// then-observe under wait_lock) until resumed, re-checking group death (terminate
+// here, never eret) on every wake. Returns to the tail (-> eret) when the stop
+// is cleared or a soft interrupt-terminate must be delivered at the next tail.
+void el0_return_stop_check(void);
 
 // P6-pouch-threads (sub-chunk 9a) audit F1 close: cross-module access to
 // `g_proc_table_lock` (kept static in proc.c). thread.c's

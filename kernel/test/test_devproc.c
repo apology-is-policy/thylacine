@@ -48,6 +48,7 @@ void test_devproc_write_ctl_kill_dispatch(void);
 // 8a-1b: the I-39 debug gate + the attach/detach/close slot lifecycle.
 void test_devproc_debug_authorized_predicate(void);
 void test_devproc_debug_attach_detach_lifecycle(void);
+void test_devproc_debug_stop_start_resume(void);
 
 // A-4b + 8a-1b impl hooks (non-static in kernel/devproc.c) + Proc test helpers
 // (non-static in kernel/proc.c; the test_proc.c / test_devsrv_conn.c pattern).
@@ -687,4 +688,112 @@ void test_devproc_debug_attach_detach_lifecycle(void) {
                    "attach to kproc is refused (-1)");
     TEST_EXPECT_EQ((void *)kproc()->debug_owner, (void *)NULL, "kproc slot untouched");
     spoor_clunk(kctl);
+}
+
+// 8a-1b-beta: the run-control state machine (specs/debug_stop.tla, the model's
+// RequestStop / StartResume / Confirm / ReleaseSlot). Drives it end-to-end via
+// ctl writes on a SYNTHETIC (thread-less) target: with no threads to park, the
+// stop-wait scan is VACUOUSLY "fully stopped" (no non-EXITING thread to wait
+// for), so `stop` sets the flag + returns without blocking -- exercising the
+// deliver + the slot-owner gate + the scan + the release-resume without needing
+// a real EL0 thread parked at the tail (that park/resume is the SMP gate + the
+// in-guest probe's job at 8a-1c). Proves the DeathWinsOverStop tail order + the
+// register-then-observe park are the MODEL's job (debug_stop.tla, TLC-green);
+// this pins the ctl surface + the flag mechanism + the NoStrand release.
+void test_devproc_debug_stop_start_resume(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t && t->proc, "test thread has a proc");
+    struct Proc *caller = t->proc;
+
+    const char attach_cmd[]   = "attach";
+    const char stop_cmd[]     = "stop";
+    const char start_cmd[]    = "start";
+    const char waitstop_cmd[] = "waitstop";
+    const char detach_cmd[]   = "detach";
+    const long an  = (long)sizeof(attach_cmd) - 1;    // 6
+    const long sn  = (long)sizeof(stop_cmd) - 1;      // 4
+    const long stn = (long)sizeof(start_cmd) - 1;     // 5
+    const long wn  = (long)sizeof(waitstop_cmd) - 1;  // 8
+    const long dn  = (long)sizeof(detach_cmd) - 1;    // 6
+
+    // (0) The bare deliver/resume flag mechanism (no ctl): proc_debug_stop_deliver
+    //     sets the flag; proc_debug_resume clears it; resume is idempotent.
+    struct Proc *flagt = proc_alloc();
+    TEST_ASSERT(flagt != NULL, "alloc flag target");
+    flagt->state = PROC_STATE_ALIVE;
+    TEST_EXPECT_EQ((int)flagt->debug_stop_req, 0, "fresh Proc: no stop pending (KP_ZERO)");
+    proc_debug_stop_deliver(flagt);
+    TEST_EXPECT_EQ((int)flagt->debug_stop_req, 1, "deliver sets debug_stop_req");
+    proc_debug_resume(flagt);
+    TEST_EXPECT_EQ((int)flagt->debug_stop_req, 0, "resume clears debug_stop_req");
+    proc_debug_resume(flagt);
+    TEST_EXPECT_EQ((int)flagt->debug_stop_req, 0, "resume is idempotent (stays 0)");
+    flagt->state = PROC_STATE_ZOMBIE;
+    proc_free(flagt);
+
+    // A thread-less, caller-owned target the debugger attaches to.
+    struct Proc *tgt = proc_alloc();
+    TEST_ASSERT(tgt != NULL, "alloc run-control target");
+    tgt->principal_id = caller->principal_id;   // owner -> attach authorized
+    tgt->state        = PROC_STATE_ALIVE;
+    proc_test_link(tgt);
+
+    // (a) stop/start on a NON-attached target are refused (the slot-owner gate is
+    //     stricter than the attach gate -- you must attach first).
+    struct Spoor *pre = open_ctl_for_pid(tgt->pid);
+    TEST_ASSERT(pre != NULL, "open target ctl (pre-attach)");
+    TEST_EXPECT_EQ(devproc.write(pre, stop_cmd, sn, 0), (long)-1,
+                   "stop without attach is refused (not the slot owner)");
+    TEST_EXPECT_EQ((int)tgt->debug_stop_req, 0, "refused stop set no flag");
+    TEST_EXPECT_EQ(devproc.write(pre, start_cmd, stn, 0), (long)-1,
+                   "start without attach is refused");
+    spoor_clunk(pre);
+
+    // (b) attach, then the stop -> start cycle (thread-less -> stop returns n).
+    struct Spoor *ctl = open_ctl_for_pid(tgt->pid);
+    TEST_ASSERT(ctl != NULL, "open target ctl");
+    TEST_EXPECT_EQ(devproc.write(ctl, attach_cmd, an, 0), an, "attach returns n");
+    TEST_EXPECT_EQ((void *)tgt->debug_owner, (void *)ctl, "attach claims the slot");
+
+    TEST_EXPECT_EQ(devproc.write(ctl, stop_cmd, sn, 0), sn,
+                   "owner stop returns n (thread-less target is vacuously stopped)");
+    TEST_EXPECT_EQ((int)tgt->debug_stop_req, 1, "stop set debug_stop_req");
+
+    // waitstop on an already-stopped target returns n immediately.
+    TEST_EXPECT_EQ(devproc.write(ctl, waitstop_cmd, wn, 0), wn,
+                   "waitstop on a stopped target returns n");
+    TEST_EXPECT_EQ((int)tgt->debug_stop_req, 1, "waitstop does not change the flag");
+
+    TEST_EXPECT_EQ(devproc.write(ctl, start_cmd, stn, 0), stn, "start returns n");
+    TEST_EXPECT_EQ((int)tgt->debug_stop_req, 0, "start cleared debug_stop_req (StartResume)");
+
+    // (c) a NON-owner ctl cannot stop/start (a 2nd fd that never attached).
+    struct Spoor *stranger = open_ctl_for_pid(tgt->pid);
+    TEST_ASSERT(stranger != NULL, "open a 2nd (non-owner) ctl");
+    TEST_EXPECT_EQ(devproc.write(ctl, stop_cmd, sn, 0), sn, "re-stop by the owner");
+    TEST_EXPECT_EQ(devproc.write(stranger, start_cmd, stn, 0), (long)-1,
+                   "a non-owner start is refused (slot-owner gate)");
+    TEST_EXPECT_EQ((int)tgt->debug_stop_req, 1, "the non-owner start did NOT resume");
+    spoor_clunk(stranger);
+
+    // (d) detach while STOPPED resumes (ReleaseSlot -> NoStrand): the flag clears
+    //     AND the slot frees in one step.
+    TEST_EXPECT_EQ(devproc.write(ctl, detach_cmd, dn, 0), dn, "detach returns n");
+    TEST_EXPECT_EQ((int)tgt->debug_stop_req, 0,
+                   "detach-while-stopped resumes the target (debug_stop_req cleared)");
+    TEST_EXPECT_EQ((void *)tgt->debug_owner, (void *)NULL, "detach freed the slot");
+
+    // (e) the ctl-fd CLOSE path also resumes: re-attach + stop, then close the fd
+    //     (no explicit detach) -- the handle-lifetime-tied release resumes.
+    TEST_EXPECT_EQ(devproc.write(ctl, attach_cmd, an, 0), an, "re-attach");
+    TEST_EXPECT_EQ(devproc.write(ctl, stop_cmd, sn, 0), sn, "stop again");
+    TEST_EXPECT_EQ((int)tgt->debug_stop_req, 1, "stopped again");
+    spoor_clunk(ctl);   // close -> devproc_close -> release + resume
+    TEST_EXPECT_EQ((int)tgt->debug_stop_req, 0,
+                   "ctl-fd close resumes the target (ReleaseSlot via the close hook)");
+    TEST_EXPECT_EQ((void *)tgt->debug_owner, (void *)NULL, "close freed the slot");
+
+    proc_test_unlink(tgt);
+    tgt->state = PROC_STATE_ZOMBIE;
+    proc_free(tgt);
 }

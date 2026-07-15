@@ -45,6 +45,8 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
+#include "../arch/arm64/timer.h"   // 8a-1b-beta: timer_now_ns -- the stop-wait poll deadline
+
 // =============================================================================
 // Qid path encoding.
 // =============================================================================
@@ -457,6 +459,7 @@ static int devproc_debug_release_cb(struct Proc *p, void *arg) {
     struct devproc_debug_release_ctx *r = (struct devproc_debug_release_ctx *)arg;
     if (p->debug_owner != r->ctl) return 0;        // keep walking
     p->debug_owner = NULL;                          // release
+    proc_debug_resume(p);                           // 8a-1b-beta: a dead/detached debugger provably resumes its quarry (ReleaseSlot -> NoStrand)
     // 8a-1b-beta: resume threads parked on p's debugger rendez here.
     r->found = true;
     return 1;                                        // matched -> stop
@@ -636,8 +639,11 @@ bool devproc_debug_authorized(const struct Proc *caller, const struct Proc *targ
 // tokens are rejected.
 enum ctl_verb {
     CTL_VERB_NONE, CTL_VERB_KILL, CTL_VERB_KILLGRP,
-    CTL_VERB_ATTACH,   // 8a-1b: claim the one-debugger slot (I-39-gated; Einuse)
-    CTL_VERB_DETACH,   // 8a-1b: release the slot (owner-fd only)
+    CTL_VERB_ATTACH,   // 8a-1b-alpha: claim the one-debugger slot (I-39-gated; Einuse)
+    CTL_VERB_DETACH,   // 8a-1b-alpha: release the slot (owner-fd only) + resume (beta)
+    CTL_VERB_STOP,     // 8a-1b-beta: park the target's threads; block until stopped/exit
+    CTL_VERB_START,    // 8a-1b-beta: resume the target (non-blocking)
+    CTL_VERB_WAITSTOP, // 8a-1b-beta: block until the target is stopped/exits
     CTL_VERB_OTHER,
 };
 
@@ -660,8 +666,11 @@ static enum ctl_verb parse_ctl_verb(const char *s, long n) {
     if (len == 0)                              return CTL_VERB_NONE;
     if (ctl_tok_eq(s + start, len, "kill"))    return CTL_VERB_KILL;
     if (ctl_tok_eq(s + start, len, "killgrp")) return CTL_VERB_KILLGRP;
-    if (ctl_tok_eq(s + start, len, "attach"))  return CTL_VERB_ATTACH;
-    if (ctl_tok_eq(s + start, len, "detach"))  return CTL_VERB_DETACH;
+    if (ctl_tok_eq(s + start, len, "attach"))   return CTL_VERB_ATTACH;
+    if (ctl_tok_eq(s + start, len, "detach"))   return CTL_VERB_DETACH;
+    if (ctl_tok_eq(s + start, len, "stop"))     return CTL_VERB_STOP;
+    if (ctl_tok_eq(s + start, len, "start"))    return CTL_VERB_START;
+    if (ctl_tok_eq(s + start, len, "waitstop")) return CTL_VERB_WAITSTOP;
     return CTL_VERB_OTHER;
 }
 
@@ -737,7 +746,7 @@ static int devproc_debug_walk_cb(struct Proc *target, void *arg) {
     // so a stranger's detach or a stale post-reap detach is a clean -1 / no-op).
     if (target->debug_owner == d->ctl) {
         target->debug_owner = NULL;                // release
-        // 8a-1b-beta: resume threads parked on target's debugger rendez here.
+        proc_debug_resume(target);                 // 8a-1b-beta: clear the stop + wake parked threads (ReleaseSlot -> NoStrand)
         d->result = 1;
     } else {
         d->result = -1;
@@ -745,9 +754,110 @@ static int devproc_debug_walk_cb(struct Proc *target, void *arg) {
     return 1;
 }
 
+// =============================================================================
+// ctl run-control -- stop / start / waitstop (8a-1b-beta; I-39, DEBUG-FS §4.3).
+// =============================================================================
+//
+// Run-control verbs require the caller's ctl fd to OWN the attach slot
+// (target->debug_owner == c) -- attach first (I-39-gated), then control. This
+// slot-ownership gate is STRICTER than the attach gate: only the attached
+// debugger drives the run state, so a stranger who could attach (but hasn't)
+// cannot stop/start/resume a target another debugger owns.
+
+enum debug_runctl { DBG_RC_STOP, DBG_RC_START, DBG_RC_WAITSTOP };
+
+struct devproc_runctl_ctx {
+    int                target_pid;
+    struct Spoor      *ctl;      // must == target->debug_owner (slot ownership)
+    enum debug_runctl  op;
+    int                result;   // 0 not found, +1 ok, -1 not-owner
+};
+
+// Resolve + slot-owner-check + (STOP) deliver / (START) resume, all under
+// g_proc_table_lock (proc_for_each holds it). proc_debug_stop_deliver /
+// proc_debug_resume take no sleeping lock (a flag store + smp_resched_others /
+// a per-peer wait_lock wake), so both are safe under the lock -- the audited
+// devproc_kill_walk_cb idiom. WAITSTOP mutates nothing here (the block is
+// outside the lock, in devproc_debug_wait_stopped).
+static int devproc_runctl_walk_cb(struct Proc *target, void *arg) {
+    struct devproc_runctl_ctx *rc = (struct devproc_runctl_ctx *)arg;
+    if (target->pid != rc->target_pid) return 0;   // keep walking
+    if (target->debug_owner != rc->ctl) { rc->result = -1; return 1; }  // not the slot owner
+    switch (rc->op) {
+        case DBG_RC_STOP:     proc_debug_stop_deliver(target); break;
+        case DBG_RC_START:    proc_debug_resume(target);       break;
+        case DBG_RC_WAITSTOP: break;   // no mutation; the block is outside the lock
+    }
+    rc->result = 1;
+    return 1;
+}
+
+// Scan a target (by pid) for full debug-stop. state: -1 gone/not-found, 0
+// not-yet-stopped, 1 fully stopped, 2 slot released (debug_owner != ctl). "Fully
+// stopped" = every non-EXITING thread is parked on its OWN debug_rendez with
+// on_cpu==false (the #788 discipline: a thread mid-cpu_switch_context still reads
+// on_cpu==true until it fully deschedules -- required so a later mem/reg read
+// (gamma) sees a settled frame). rendez_blocked_on is read under the peer's
+// wait_lock (the same lock the park's register-then-observe takes), so this
+// never confirms a thread that is about to proceed to EL0 (NoLostStop). A target
+// with a syscall-sleeping thread never reaches state 1 until that thread hits a
+// checkpoint (the v1.0 non-preemptive stop).
+struct devproc_stopscan_ctx {
+    int           target_pid;
+    struct Spoor *ctl;
+    int           state;
+};
+static int devproc_stopscan_cb(struct Proc *target, void *arg) {
+    struct devproc_stopscan_ctx *s = (struct devproc_stopscan_ctx *)arg;
+    if (target->pid != s->target_pid) return 0;    // keep walking
+    if (target->debug_owner != s->ctl) { s->state = 2; return 1; }  // slot released -- abort the wait
+    bool all_parked = true;
+    for (struct Thread *peer = target->threads; peer; peer = peer->next_in_proc) {
+        if (peer->state == THREAD_EXITING) continue;   // dying -- does not need to park
+        irq_state_t ws = spin_lock_irqsave(&peer->wait_lock);
+        bool parked = (peer->rendez_blocked_on == &peer->debug_rendez);
+        spin_unlock_irqrestore(&peer->wait_lock, ws);
+        bool offcpu = (__atomic_load_n(&peer->on_cpu, __ATOMIC_ACQUIRE) == false);
+        if (!(parked && offcpu)) { all_parked = false; break; }
+    }
+    s->state = all_parked ? 1 : 0;
+    return 1;
+}
+
+// tsleep cond for the stop-wait poll: never wakes on the cond (only the deadline
+// does), so tsleep is a pure timed sleep between re-scans.
+static int devproc_debug_poll_never(void *arg) { (void)arg; return 0; }
+
+// Block the caller until the target (by pid) is fully debug-stopped, exits/is
+// reaped, the slot is released, or the CALLER is death-interrupted. v1.0 uses a
+// bounded re-poll (the edge-triggered /proc/<pid>/wait file is the gamma / v1.x
+// upgrade -- but the poll re-scans under g_proc_table_lock so it can only be
+// latent, never wrong). LIFETIME-SAFE: it re-resolves the target by pid each
+// round (proc_for_each), holding NO target pointer across the lock drop, so a
+// reaped target is simply not found. Sleeps on the caller's OWN stack rendez
+// (single-waiter -- only the caller ever sleeps here); the deadline is the sole
+// wake source. tsleep is death-interruptible, so a debugger killed while waiting
+// unwinds (and its ctl-fd close then resumes the target). Returns +1 stopped,
+// 0 gone / slot-released, -1 caller death-interrupted.
+#define DEBUG_STOP_POLL_NS  (2ull * 1000ull * 1000ull)   // 2 ms between scans
+static int devproc_debug_wait_stopped(int pid, struct Spoor *ctl) {
+    struct Rendez pollr = RENDEZ_INIT;   // caller-private, single-waiter
+    for (;;) {
+        struct devproc_stopscan_ctx s = { .target_pid = pid, .ctl = ctl, .state = -1 };
+        proc_for_each(devproc_stopscan_cb, &s);
+        if (s.state == 1)  return 1;   // fully stopped
+        if (s.state != 0)  return 0;   // -1 gone/reaped, or 2 slot released -- either ends the wait
+        // state 0: not yet stopped -- sleep ~2 ms, then re-scan.
+        u64 deadline = timer_now_ns() + DEBUG_STOP_POLL_NS;
+        if (tsleep(&pollr, devproc_debug_poll_never, NULL, deadline) == TSLEEP_INTR)
+            return -1;   // the caller's Proc is group-terminating -> unwind
+    }
+}
+
 // Write: ctl parses kill / killgrp and terminates the target Proc's thread-
-// group (A-4b). Writes to status / cmdline / ns / dirs, and unrecognized
-// verbs, return -1. The verb is offset-agnostic (a control message, not a byte
+// group (A-4b), and the debug verbs attach / detach / stop / start / waitstop
+// (8a-1b). Writes to status / cmdline / ns / dirs, and unrecognized verbs,
+// return -1. The verb is offset-agnostic (a control message, not a byte
 // stream), so off is ignored.
 static long devproc_write(struct Spoor *c, const void *buf, long n, s64 off) {
     (void)off;
@@ -759,7 +869,8 @@ static long devproc_write(struct Spoor *c, const void *buf, long n, s64 off) {
 
     enum ctl_verb v = parse_ctl_verb((const char *)buf, n);
     if (v != CTL_VERB_KILL && v != CTL_VERB_KILLGRP &&
-        v != CTL_VERB_ATTACH && v != CTL_VERB_DETACH) return -1;
+        v != CTL_VERB_ATTACH && v != CTL_VERB_DETACH &&
+        v != CTL_VERB_STOP && v != CTL_VERB_START && v != CTL_VERB_WAITSTOP) return -1;
 
     struct Thread *t = current_thread();
     if (!t || !t->proc) return -1;
@@ -774,6 +885,21 @@ static long devproc_write(struct Spoor *c, const void *buf, long n, s64 off) {
         };
         proc_for_each(devproc_debug_walk_cb, &d);
         return (d.result == 1) ? n : -1;
+    }
+
+    if (v == CTL_VERB_STOP || v == CTL_VERB_START || v == CTL_VERB_WAITSTOP) {
+        int pid = proc_qid_pid(c->qid.path);
+        enum debug_runctl op = (v == CTL_VERB_STOP)  ? DBG_RC_STOP  :
+                               (v == CTL_VERB_START) ? DBG_RC_START : DBG_RC_WAITSTOP;
+        // Resolve + slot-owner-check + (STOP) deliver / (START) resume under the
+        // lock; a non-owner / not-found is -1.
+        struct devproc_runctl_ctx rc = { .target_pid = pid, .ctl = c, .op = op, .result = 0 };
+        proc_for_each(devproc_runctl_walk_cb, &rc);
+        if (rc.result != 1) return -1;
+        if (op == DBG_RC_START) return n;   // resume is non-blocking
+        // stop / waitstop: block (outside the lock) until stopped / exit / slot
+        // release; -1 only if the CALLER was death-interrupted.
+        return (devproc_debug_wait_stopped(pid, c) >= 0) ? n : -1;
     }
 
     struct devproc_kill_ctx k = {

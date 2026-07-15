@@ -2254,6 +2254,130 @@ void el0_return_die_check(void) {
     }
 }
 
+// =============================================================================
+// 8a-1b-beta: the debugger stop / resume state machine (I-39; specs/debug_stop.
+// tla). Composes with the death path (#811/#68) -- the most bug-prone lineage in
+// the tree -- so DeathWinsOverStop is load-bearing: the EL0-return tail runs this
+// stop-check AFTER el0_return_die_check, and this loop re-checks group death on
+// every wake, so a kill/exit_group racing the stop terminates the thread here,
+// never eret-ing to EL0.
+// =============================================================================
+
+// The park wake-cond (specs/debug_stop.tla RegisterObserve): proceed when the
+// stop flag is cleared. Death is handled separately -- sleep()'s own
+// thread_die_pending SLEEP_INTR return breaks the park, and the loop's
+// group_exit check terminates -- so this cond need only track the resume.
+static int debug_stop_wake_cond(void *arg) {
+    const struct Proc *p = (const struct Proc *)arg;
+    return __atomic_load_n(&p->debug_stop_req, __ATOMIC_ACQUIRE) == 0;
+}
+
+void el0_return_stop_check(void) {
+    struct Thread *t = current_thread();
+    if (!t || t->magic != THREAD_MAGIC) return;
+    struct Proc *p = t->proc;
+    if (!p || p->magic != PROC_MAGIC)   return;
+
+    // Fast path: no debugger stop pending -- the overwhelmingly common case. One
+    // ACQUIRE load on an already-hot line + a predictable not-taken branch. The
+    // ACQUIRE pairs with proc_debug_stop_deliver's RELEASE set (specs/debug_stop.
+    // tla: the tail observes a set sflag).
+    if (__atomic_load_n(&p->debug_stop_req, __ATOMIC_ACQUIRE) == 0)
+        return;
+
+    for (;;) {
+        // DEATH WINS (DeathWinsOverStop). A group termination (kill /
+        // SYS_EXIT_GROUP / a multi-thread interrupt-terminate, all via
+        // proc_group_terminate) that races the stop terminates the thread HERE
+        // -- thread_exit_self is el0_return_die_check's core (noreturn), so we
+        // never eret to EL0. Re-checked at the top every iteration: a death
+        // flagged while we were parked woke debug_rendez (proc_group_terminate's
+        // cascade reads rendez_blocked_on == &debug_rendez under wait_lock), so
+        // we resume here and die rather than re-parking. group_exit_msg is the
+        // model's `gflag`.
+        if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL)
+            thread_exit_self();   // noreturn
+
+        // Resumed (specs/debug_stop.tla ResumeThread -> proceed): start / detach
+        // / ctl-fd close cleared the flag via proc_debug_resume (a RELEASE clear
+        // ordered before that cascade's per-peer wake -- the I-9 close). Proceed
+        // to the eret. (This is also the fast-path re-observe under no death.)
+        if (__atomic_load_n(&p->debug_stop_req, __ATOMIC_ACQUIRE) == 0)
+            return;
+
+        // A SOFT interrupt-terminate latched while parked (LS-5c; group death
+        // ruled out above, so thread_die_pending here is exactly the latch leg).
+        // Its terminate-vs-handler-vs-mask resolution is notes_deliver's, not
+        // ours; leave the park so the thread erets and delivers it at its next
+        // checkpoint (standard interrupt checkpoint-delivery -- an interrupt
+        // never preempts mid-EL0). Without this bail, sleep() would return
+        // SLEEP_INTR every iteration on the still-set latch -> a livelock.
+        if (thread_die_pending(t))
+            return;
+
+        // Park (specs/debug_stop.tla Acquire+RegisterObserve). sleep() registers
+        // rendez_blocked_on = &t->debug_rendez under t->wait_lock, re-checks
+        // debug_stop_wake_cond under wait_lock+r->lock (serialized against
+        // proc_debug_resume's clear-before-walk -- the register-then-observe I-9
+        // close), and returns SLEEP_INTR if this Proc is group-terminating (the
+        // loop's death check fires next iteration). The rendez is THIS thread's
+        // own (single-waiter -- a multi-thread target parks each thread on its
+        // own debug_rendez, never a shared one).
+        (void)sleep(&t->debug_rendez, debug_stop_wake_cond, p);
+    }
+}
+
+void proc_debug_stop_deliver(struct Proc *p) {
+    if (!p || p->magic != PROC_MAGIC) return;
+    if (p == g_kproc) return;   // kproc is never debuggable (undebuggable at the gate too)
+
+    // Set the stop flag BEFORE the kick (the I-9 shape, mirror of
+    // proc_group_terminate's flag-set-before-walk): a thread reaching the tail
+    // after this store observes the set flag in its ACQUIRE load and parks. A
+    // thread already heading to the tail (returning from a syscall/handler)
+    // observes it too. RELEASE pairs with el0_return_stop_check's ACQUIRE.
+    __atomic_store_n(&p->debug_stop_req, 1u, __ATOMIC_RELEASE);
+
+    // Kick any peer RUNNING at EL0 on another CPU so it traps to its IRQ-from-EL0
+    // tail (0x480 -> el0_return_stop_check) and parks without waiting for a timer
+    // tick. Broadcast to online CPUs (rare path; a CPU not running a peer of p
+    // no-ops at its tail); the periodic tick is the floor if an IPI is missed.
+    // A thread blocked in a syscall SLEEP is deliberately NOT interrupted -- it
+    // stops at its next checkpoint (the Plan 9 non-preemptive stop; explicit-
+    // stop-of-a-sleeper is a v1.x refinement). This mirrors proc_group_terminate
+    // step (4) but sets a park flag rather than a die flag. Targeted STOP_SGI
+    // (fewer spurious IPIs) is a v1.x optimization; the broadcast reschedule is
+    // the proven death-delivery vehicle.
+    smp_resched_others();
+}
+
+void proc_debug_resume(struct Proc *p) {
+    if (!p || p->magic != PROC_MAGIC) return;
+
+    // Clear the stop flag BEFORE the wake walk (specs/debug_stop.tla StartResume:
+    // sflag' = FALSE armed before the wake). This is the register-then-observe
+    // I-9 close mirrored on the CLEAR: a thread that registers on its debug_rendez
+    // at the tail AFTER this walk re-observes the cleared flag under its wait_lock
+    // (via the wait_lock release/acquire sync with this walk) and proceeds without
+    // parking; a thread that registered BEFORE the walk is found + woken below.
+    __atomic_store_n(&p->debug_stop_req, 0u, __ATOMIC_RELEASE);
+
+    // Wake every thread parked on its OWN debug_rendez -- the #811 death-cascade
+    // shape (walk p->threads, per-peer wait_lock -> read rendez_blocked_on ->
+    // wakeup), but waking ONLY debug-parked peers (rendez_blocked_on ==
+    // &peer->debug_rendez), never a peer legitimately sleeping in a syscall.
+    // wait_lock is held across wakeup (Option A, ARCH 8.8.1): it pins the peer so
+    // its debug_rendez cannot be resumed + reused under the waker. Lock order
+    // g_proc_table_lock (caller-held) -> wait_lock -> (wakeup) g_timerwait.lock ->
+    // r->lock; acyclic (only the owner WRITES rendez_blocked_on).
+    for (struct Thread *peer = p->threads; peer; peer = peer->next_in_proc) {
+        irq_state_t ws = spin_lock_irqsave(&peer->wait_lock);
+        if (peer->rendez_blocked_on == &peer->debug_rendez)
+            wakeup(&peer->debug_rendez);
+        spin_unlock_irqrestore(&peer->wait_lock, ws);
+    }
+}
+
 // child_wait_ready_cond — wait_pid_for's sleep predicate (#344). Returns 1
 // iff the caller's OWN stack `poll_waiter` has its `ready` flag set, i.e. a
 // child of this Proc entered ZOMBIE (or was adopted ZOMBIE) and the wake site

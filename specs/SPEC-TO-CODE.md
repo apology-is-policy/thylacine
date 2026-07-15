@@ -1626,14 +1626,21 @@ mutation surface (install/evict/invalidate) is untouched.
 
 Spec-first re-enabled for this surface (user-directed 2026-07-14; CLAUDE.md +
 docs/DEBUG-FS-DESIGN.md section 6) -- the 6th instance of re-enabling point (a).
-Written + TLC-green BEFORE the 8a-1 impl (this section is the RESERVATION; the
-code sites land at 8a-1b). Models the stop/continue/step state machine and its
-composition with the death path (#811/#68) -- an SMP wait/wake race on the most
-bug-prone lineage in the tree, the class the runtime tests are blind to (the
-death_wake / loom / asid / allowance precedent). Clean cfg TLC-green (Safety =
-NoLostStop + NoEL0AfterStopped + ExactlyOnceResume; PROPERTIES EventuallyAllDead
-[DeathWinsOverStop] + EventuallyResumed [NoStrand]); 4 buggy cfgs, each a minimal
-counterexample on its named property.
+Written + TLC-green BEFORE the 8a-1 impl. Models the stop/continue/step state
+machine and its composition with the death path (#811/#68) -- an SMP wait/wake
+race on the most bug-prone lineage in the tree, the class the runtime tests are
+blind to (the death_wake / loom / asid / allowance precedent). Clean cfg
+TLC-green (Safety = NoLostStop + NoEL0AfterStopped + ExactlyOnceResume;
+PROPERTIES EventuallyAllDead [DeathWinsOverStop] + EventuallyResumed [NoStrand]);
+4 buggy cfgs, each a minimal counterexample on its named property.
+
+**The stop machinery LANDED at 8a-1b-beta** -- the code sites below are as-built
+(the mapping was a reservation at 8a-1a). The impl faithfully realizes the model:
+the park uses the audited `sleep()` register-then-observe, the resume cascade
+mirrors `proc_group_terminate`'s set-before-walk (clear-before-walk here), and
+the death cascade already wakes a debug-parked Thread via its `rendez_blocked_on`.
+The cross-Proc mem/regs files + the unified stack are 8a-1b-gamma (not modeled --
+they read a stopped frame, off the race surface).
 
 | Config | Flag | Invariant / Property | Result | Distinct |
 |---|---|---|---|---|
@@ -1643,18 +1650,24 @@ counterexample on its named property.
 | `debug_stop_buggy_double_wake.cfg` | `BUGGY_DOUBLE_WAKE` | `ExactlyOnceResume` | violation | -- |
 | `debug_stop_buggy_strand_on_debugger_death.cfg` | `BUGGY_STRAND_ON_CLOSE` | `EventuallyResumed` | violation | 276 |
 
-| Spec action | Code site (lands at 8a-1b) | Invariant pinned |
+| Spec action | Code site (as-built, 8a-1b-beta) | Invariant pinned |
 |---|---|---|
-| `TailStep` (die-check FIRST, then the stop handshake) | `arch/arm64/vectors.S` EL0-return tail (sync :328 + IRQ :0x480) -> the NEW stop leg, ordered AFTER `el0_return_die_check` | `EventuallyAllDead` (DeathWinsOverStop): the die-check precedes the stop-check; a resume re-runs the tail. `BUGGY_STOP_BEFORE_DIE` = the leg ordered before the die-check. |
-| `Acquire` / `RegisterObserve` (register-then-observe UNDER `wlock`) | `kernel/sched.c` stop-park: take the per-Thread `wait_lock`, register (`rendez_blocked_on` on the debugger rendez + `THREAD_SLEEPING`), re-check the stop flag BEFORE sleeping | `NoLostStop` (I-9): a Thread the debugger confirms is genuinely parked. |
+| `TailStep` (die-check FIRST, then the stop handshake) | `arch/arm64/vectors.S` EL0-return tail: `.Lel0_sync_return` (`bl el0_return_stop_check` AFTER `el0_return_die_check` + `notes_deliver`) + the `0x480` IRQ slot (AFTER `el0_return_die_check`). The leg is `kernel/proc.c::el0_return_stop_check` (fast-path load, else the park loop) | `EventuallyAllDead` (DeathWinsOverStop): the die-check precedes the stop-check; the loop re-checks `group_exit_msg` (-> `thread_exit_self`) on every wake so a resume never eret-s a dying Thread. `BUGGY_STOP_BEFORE_DIE` = the leg ordered before the die-check. |
+| `Acquire` / `RegisterObserve` (register-then-observe UNDER `wlock`) | `kernel/proc.c::el0_return_stop_check` parks via `sleep(&t->debug_rendez, debug_stop_wake_cond, p)` -- `kernel/sched.c::sleep` takes the per-Thread `wait_lock`, registers `rendez_blocked_on = &t->debug_rendez` + `THREAD_SLEEPING`, re-checks the cond BEFORE sleeping | `NoLostStop` (I-9): a Thread the debugger confirms is genuinely parked. |
 | `RegisterBuggy` (observe BEFORE register, OUTSIDE the lock) | (none -- the anti-pattern the impl does NOT do; the buggy cfg only) | `BUGGY_OBSERVE_BEFORE_REGISTER` makes `NoLostStop` fail. |
-| `Confirm(t)` (the delivery walk marks t confirmed-parked under `~wlock[t]`) | `kernel/proc.c` stop-delivery cascade -- walk `p->threads`, per-peer `wait_lock`, targeted `gic_send_ipi(cpu, STOP_SGI)` for a Thread running at EL0, confirm when parked with `on_cpu==false` | the confirm sees only a genuinely-parked Thread (mutual exclusion on `wlock` vs `RegisterObserve`). |
-| `WakeFrom(t, s)` (single-wake latch; sources start/release/death) | `kernel/sched.c` resume + the death cascade waking a debugger-parked Thread | `ExactlyOnceResume`: one wakeup per park. `BUGGY_DOUBLE_WAKE` = no latch (a `start` racing a `detach`/close double-wakes). |
-| `ResumeThread(t)` (woken park -> re-run the tail) | `kernel/sched.c` -- a woken parked Thread returns to the EL0-return tail (re-checks death) | a resume never resumes a dead Thread; death wins on the re-run. |
-| `ReleaseSlot` (detach / ctl-fd close / debugger death -> resume + detach) | `kernel/handle.c` the debug ctl-fd close hook + `kernel/proc.c` (#68/#926 close-at-exit) -> clear the stop + wake all parked | `EventuallyResumed` (NoStrand): the handle-lifetime-tied slot resumes the target on release. `BUGGY_STRAND_ON_CLOSE` = the release neither clears the stop nor wakes. |
-| `SetGflag` / the death legs | `kernel/proc.c::proc_group_terminate` (the set-once `group_exit_msg`) + `el0_return_die_check` | death completes even against a live debugger holding a stop (the death cascade wakes debugger-parked Threads). |
+| `Confirm(t)` (the delivery walk marks t confirmed-parked under `~wlock[t]`) | `kernel/devproc.c::devproc_stopscan_cb` -- walk `p->threads` under `g_proc_table_lock`, read `rendez_blocked_on == &peer->debug_rendez` under each peer `wait_lock`, confirm when `parked && on_cpu==false`. Delivery: `kernel/proc.c::proc_debug_stop_deliver` sets the flag + `smp_resched_others()` (a broadcast reschedule IPI kicks an EL0-running peer to its `0x480` tail; targeted STOP_SGI is a v1.x optimization) | the confirm sees only a genuinely-parked Thread (mutual exclusion on `wait_lock` vs `RegisterObserve`). |
+| `WakeFrom(t, s)` (single-wake latch; sources start/release/death) | `kernel/proc.c::proc_debug_resume` walk (waking only `rendez_blocked_on == &peer->debug_rendez` peers) + the `proc_group_terminate` death cascade. The per-Thread `debug_rendez` is single-waiter, and `wakeup` re-validates `r->waiter` under `r->lock`; all resume paths are serialized under `g_proc_table_lock` | `ExactlyOnceResume`: one wakeup per park. `BUGGY_DOUBLE_WAKE` = no latch (a `start` racing a `detach`/close double-wakes). |
+| `ResumeThread(t)` (woken park -> re-run the tail) | `kernel/proc.c::el0_return_stop_check` loop -- a woken parked Thread re-checks `group_exit_msg` (death wins) then the stop flag; returns to the tail (-> eret) only when cleared | a resume never resumes a dead Thread; death wins on the re-run. |
+| `ReleaseSlot` (detach / ctl-fd close / debugger death -> resume + detach) | `kernel/devproc.c`: the `detach` verb branch (`devproc_debug_walk_cb`) + the ctl-fd close hook (`devproc_close` -> `devproc_debug_release_cb`, incl. #68/#926 close-at-exit) clear `debug_owner` THEN call `proc_debug_resume` (clear the stop + wake all parked) | `EventuallyResumed` (NoStrand): the handle-lifetime-tied slot resumes the target on release. `BUGGY_STRAND_ON_CLOSE` = the release neither clears the stop nor wakes. |
+| `SetGflag` / the death legs | `kernel/proc.c::proc_group_terminate` (the set-once `group_exit_msg`) + `el0_return_die_check` | death completes even against a live debugger holding a stop (the death cascade wakes debugger-parked Threads via `rendez_blocked_on`). |
 
-Pre-commit gate (from 8a-1b): `debug_stop.cfg` clean GREEN + the 4 buggy cfgs
-confirmed, on any change to the EL0-return tail stop leg, the stop-park
-register-then-observe protocol, the stop-delivery cascade, or the ctl-fd-close
-resume.
+Pre-commit gate: `debug_stop.cfg` clean GREEN + the 4 buggy cfgs confirmed, on
+any change to the EL0-return tail stop leg (`el0_return_stop_check`), the
+stop-park register-then-observe (`sleep` on `debug_rendez`), the stop-delivery
+cascade (`proc_debug_stop_deliver`), the resume cascade (`proc_debug_resume`),
+or the ctl-fd-close resume (`devproc_close`). v1.0 corner (documented, off the
+model's death abstraction): a SOFT interrupt-terminate latch (LS-5c, no
+`group_exit_msg`) that lands while a Thread is parked bails the park to the tail
+so `notes_deliver` delivers it at the next checkpoint (necessary to avoid a
+sleep()-SLEEP_INTR livelock; the target is dying anyway). The model's death =
+`group_exit_msg` (the hard, N-4 path), which the loop handles airtight.
