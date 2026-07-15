@@ -322,9 +322,28 @@ struct Thread {
     // is fully-stopped (parked in el0_return_stop_check on this same entry), so it
     // is never stale. NULL when not debug-parked.
     struct exception_context *debug_trapframe;
+
+    // 8a-2b-2 (I-39; docs/DEBUG-FS-DESIGN.md section 5.5; specs/debug_step.tla):
+    // the arm64 single-step machine, per-THREAD so it follows the thread across
+    // an IRQ-preempt migration mid-step (the Linux per-task MDSCR.SS model -- SS
+    // is per-PE, so a step must re-arm MDSCR.SS on the destination CPU's
+    // ctx-switch-IN, or a migrated step runs free). `debug_ss_armed` = a step is
+    // in flight: hwdebug_switch_in sets MDSCR.SS from it (SPSR.SS is armed in the
+    // resume trapframe by el0_return_stop_check); the EC 0x32 handler clears it +
+    // re-stops. `debug_stepover_va` (0 = none) is the breakpoint VA to SKIP while
+    // stepping (the step-over-breakpoint dance: a thread stopped AT a bp would
+    // re-trap on the resume instead of stepping, so switch_in loads that bp
+    // disabled for this thread's step). Both set only while the target is
+    // fully-stopped (the `step` verb, under g_proc_table_lock) + on the local
+    // CPU under IRQ-mask; read (ACQUIRE) in the ctx-switch install. KP_ZERO inits
+    // them (not stepping); NOT propagated by rfork.
+    bool               debug_ss_armed;
+    u64                debug_stepover_va;
 };
 
-_Static_assert(sizeof(struct Thread) == 1168,
+_Static_assert(sizeof(struct Thread) == 1184,
+               "8a-2b-2 appended debug_ss_armed (bool) + debug_stepover_va (u64) "
+               "for the single-step machine: 1168 -> 1184. "
                "8a-1c appended debug_trapframe (8-byte struct exception_context* "
                "for /proc/<pid>/regs); the 16-aligned struct pads 1152 -> 1168. "
                "struct Thread size pinned at 1136 bytes (P6 #811 appended a "

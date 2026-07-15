@@ -43,6 +43,7 @@
 
 #include "../arch/arm64/mmu.h"
 #include "../arch/arm64/hwdebug.h" // 8a-2b: hwdebug_free (per-Proc bp table teardown)
+#include "../arch/arm64/exception.h" // 8a-2b-2: struct exception_context -- arm SPSR.SS in the resume frame
 #include "../arch/arm64/timer.h"   // timer_now_ns (A-4a legate valid_until expiry)
 #include "../arch/arm64/uaccess.h"
 #include "../arch/arm64/uart.h"
@@ -2322,6 +2323,16 @@ void el0_return_stop_check(struct exception_context *ctx) {
         // ordered before that cascade's per-peer wake -- the I-9 close). Proceed
         // to the eret. (This is also the fast-path re-observe under no death.)
         if (__atomic_load_n(&p->debug_stop_req, __ATOMIC_ACQUIRE) == 0) {
+            // 8a-2b-2 (specs/debug_step.tla Tail->stepping): a step-resume arms the
+            // arm64 SS machine in the frame the eret restores -- SPSR.SS (bit 21) =
+            // active-not-pending, so exactly ONE EL0 instruction executes before
+            // the EC 0x32. MDSCR.SS is armed per-thread by hwdebug_switch_in (so it
+            // survives a mid-step migration); this sets the frame's SPSR.SS. `ctx`
+            // is the on-stack trapframe the KERNEL_EXIT eret restores from (== SP).
+            // A step-resume is IRQ-masked from here to the eret (KERNEL_EXIT masks
+            // DAIF), so no preempt lands between arming SPSR.SS and the eret.
+            if (t->debug_ss_armed && ctx)
+                ctx->spsr |= (1ull << 21);   // SPSR_EL1.SS
             t->debug_trapframe = NULL;   // 8a-1c: no longer parked -> stop pointing at the (about-to-be-live) frame
             return;
         }

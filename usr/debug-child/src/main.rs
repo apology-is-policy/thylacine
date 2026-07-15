@@ -40,11 +40,21 @@ const SENTINEL_MEM: u64 = 0xDEB0_0001_CAFE_0001;
 // function's entry (its VA is pinned in x22 during the park loop, so the debugger
 // reads it from /proc/<pid>/regs), then loop2 calls it and the bp fires (EC 0x30
 // -> the whole-Proc stop; the debugger's regs.pc == this VA). #[inline(never)] +
-// the volatile nop keep it a real, called-into function with a stable entry.
+// the volatile nops keep it a real, called-into function with a stable entry.
+// The RUN of nops makes it single-STEPPABLE (8a-2b-2): from the bp'd entry the
+// debugger steps a few times and each step advances pc by exactly one A64
+// instruction (4 bytes) through the linear prologue+nops -- so it exercises both
+// the SS machine AND the step-over-breakpoint dance (the first step is FROM the
+// breakpointed entry, which the step-over must skip).
 #[no_mangle]
 #[inline(never)]
 extern "C" fn bp_landmark() {
-    unsafe { core::arch::asm!("nop", options(nostack, preserves_flags)); }
+    unsafe {
+        core::arch::asm!(
+            "nop", "nop", "nop", "nop", "nop", "nop",
+            options(nostack, preserves_flags),
+        );
+    }
 }
 
 // Cooperative yield (SYS_YIELD = 87) so the probe runs at -smp 1 between our

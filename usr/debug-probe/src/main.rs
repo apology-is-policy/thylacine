@@ -271,6 +271,27 @@ fn debug_flow(child: &mut Child) -> Result<(), &'static str> {
     }
     t_putstr("debug-probe: hwbreak ok (cross-Proc bp fired; pc == landmark)\n");
 
+    // --- 8a-2b-2: single-step FROM the breakpointed PC (the step-over dance) ---
+    // The target is stopped AT bp_landmark (pc == bp_va, the bp still armed). Each
+    // `step` executes exactly one A64 instruction (4 bytes) and re-stops. The
+    // FIRST step is from the breakpointed entry, so the step-over-breakpoint dance
+    // must disable the bp for that step (else the resume re-traps on it instead of
+    // advancing). Verify pc advances by exactly 4 for three steps -- staying
+    // within the linear prologue+nops of bp_landmark (before any ret/branch).
+    let mut prev_pc = bp_va;
+    for _ in 0..3 {
+        ctl.write_all(b"step").map_err(|_| "debug-probe: FAIL -- step\n")?; // blocks until re-stopped
+        if read_exact_at(regs_f.as_raw_fd() as i64, 0, &mut regs).is_err() {
+            return Err("debug-probe: FAIL -- read regs(step)\n");
+        }
+        let pc = u64_le(&regs, R_PC);
+        if pc != prev_pc + 4 {
+            return Err("debug-probe: FAIL -- step did not advance pc by one instruction\n");
+        }
+        prev_pc = pc;
+    }
+    t_putstr("debug-probe: step ok (single-step + step-over; pc advanced 4B/instr x3)\n");
+
     // Disarm the bp (stopped-only), set the exit flag (region[2]), resume -> the
     // child runs bp_landmark clean (now un-armed) and exit(0)s. The un-armed
     // resume also proves hwrmbreak actually cleared the bp (else it would re-trap

@@ -1005,6 +1005,7 @@ enum ctl_verb {
     CTL_VERB_STOP,     // 8a-1b-beta: park the target's threads; block until stopped/exit
     CTL_VERB_START,    // 8a-1b-beta: resume the target (non-blocking)
     CTL_VERB_WAITSTOP, // 8a-1b-beta: block until the target is stopped/exits
+    CTL_VERB_STEP,     // 8a-2b-2: single-step the head thread one instruction; block until re-stopped
     CTL_VERB_HWVERIFY, // 8a-2a: arm ("hwverify <hexva>") / disarm ("hwverify off") the self-scoped HW-breakpoint verify
     CTL_VERB_HWBREAK,  // 8a-2b-1: arm a real per-Proc HW breakpoint ("hwbreak <hexva>"; slot-owner + stopped-only)
     CTL_VERB_HWRMBREAK,// 8a-2b-1: disarm a per-Proc HW breakpoint ("hwrmbreak <hexva>")
@@ -1035,6 +1036,7 @@ static enum ctl_verb parse_ctl_verb(const char *s, long n) {
     if (ctl_tok_eq(s + start, len, "stop"))     return CTL_VERB_STOP;
     if (ctl_tok_eq(s + start, len, "start"))    return CTL_VERB_START;
     if (ctl_tok_eq(s + start, len, "waitstop")) return CTL_VERB_WAITSTOP;
+    if (ctl_tok_eq(s + start, len, "step"))     return CTL_VERB_STEP;
     if (ctl_tok_eq(s + start, len, "hwverify")) return CTL_VERB_HWVERIFY;
     if (ctl_tok_eq(s + start, len, "hwbreak"))  return CTL_VERB_HWBREAK;
     if (ctl_tok_eq(s + start, len, "hwrmbreak")) return CTL_VERB_HWRMBREAK;
@@ -1261,6 +1263,60 @@ static int devproc_hwbp_walk_cb(struct Proc *target, void *arg) {
         struct debug_hw *hw = target->debug_hw;
         h->result = (hw && hwdebug_bp_remove(hw, h->va)) ? 1 : -1;   // -1 = not present
     }
+    return 1;
+}
+
+// =============================================================================
+// ctl single-step -- step (8a-2b-2; I-39, DEBUG-FS section 5.5).
+// =============================================================================
+//
+// Arm the arm64 SS machine on the target's HEAD thread and resume for exactly ONE
+// EL0 instruction. Gated like the run-control verbs (slot owner) + the I-39
+// re-check + stopped-only (the target's threads are parked, so the head's
+// trapframe is settled -- the PC we read for the step-over decision is real). The
+// step-over: if the head's PC is at an armed breakpoint, that bp is skipped during
+// the step (else the resume re-traps on it instead of stepping). v1.0 resumes the
+// WHOLE Proc (proc_debug_resume clears the per-Proc stop flag), so a multi-thread
+// target's peers briefly run during the head's step -- the per-thread step is a
+// v1.x refinement (with the per-thread /proc/<pid>/thread/<tid>/ layer). The EC
+// 0x32 handler (hwdebug_singlestep_from_el0) re-stops the Proc after the one
+// instruction; the caller then blocks until fully-stopped.
+struct devproc_step_ctx {
+    int           target_pid;
+    struct Proc  *caller;   // I-39
+    struct Spoor *ctl;      // must == target->debug_owner (slot ownership)
+    int           result;   // 0 not found, +1 armed+resumed, -1 denied / not-stopped / no-thread
+};
+static int devproc_step_walk_cb(struct Proc *target, void *arg) {
+    struct devproc_step_ctx *s = (struct devproc_step_ctx *)arg;
+    if (target->pid != s->target_pid) return 0;                                    // keep walking
+    if (target == kproc())                            { s->result = -1; return 1; } // undebuggable
+    if (!devproc_debug_authorized(s->caller, target)) { s->result = -1; return 1; } // I-39
+    if (target->debug_owner != s->ctl)                { s->result = -1; return 1; } // slot owner
+    if (!devproc_target_fully_stopped(target))        { s->result = -1; return 1; } // stopped-only
+    struct Thread *head = target->threads;
+    if (!head)                                        { s->result = -1; return 1; } // no thread to step
+
+    // The step-over VA: if the head's PC (its trapframe's ELR) sits at an armed
+    // breakpoint, mark that bp to be skipped during the step (hwdebug_switch_in
+    // loads it disabled for this thread). Read the trapframe -- valid because the
+    // target is fully-stopped (the head is parked on this same entry).
+    u64 pc = (head->debug_trapframe) ? (head->debug_trapframe->elr & ~3ull) : 0;
+    u64 stepover = 0;
+    struct debug_hw *hw = target->debug_hw;
+    if (hw && pc) {
+        u32 count = hw->bp_count;
+        for (u32 i = 0; i < count && i < DEBUG_HWBP_SLOTS; i++)
+            if (hw->bp_va[i] == pc) { stepover = pc; break; }
+    }
+    head->debug_stepover_va = stepover;
+    __atomic_store_n(&head->debug_ss_armed, true, __ATOMIC_RELEASE);
+
+    // Resume: clear debug_stop_req + wake the parked threads. The head runs one
+    // instruction with SS armed (SPSR.SS set by el0_return_stop_check, MDSCR.SS by
+    // hwdebug_switch_in), takes the EC 0x32, and the whole Proc re-stops.
+    proc_debug_resume(target);
+    s->result = 1;
     return 1;
 }
 
@@ -1518,7 +1574,7 @@ static long devproc_write(struct Spoor *c, const void *buf, long n, s64 off) {
     if (v != CTL_VERB_KILL && v != CTL_VERB_KILLGRP &&
         v != CTL_VERB_ATTACH && v != CTL_VERB_DETACH &&
         v != CTL_VERB_STOP && v != CTL_VERB_START && v != CTL_VERB_WAITSTOP &&
-        v != CTL_VERB_HWVERIFY &&
+        v != CTL_VERB_STEP && v != CTL_VERB_HWVERIFY &&
         v != CTL_VERB_HWBREAK && v != CTL_VERB_HWRMBREAK) return -1;
 
     struct Thread *t = current_thread();
@@ -1572,6 +1628,27 @@ static long devproc_write(struct Spoor *c, const void *buf, long n, s64 off) {
         // stop / waitstop: block (outside the lock) until stopped / exit / slot
         // release; -1 only if the CALLER was death-interrupted.
         return (devproc_debug_wait_stopped(pid, c) >= 0) ? n : -1;
+    }
+
+    if (v == CTL_VERB_STEP) {
+        // 8a-2b-2: single-step the head thread one instruction. Arm + resume under
+        // the lock, then block (outside the lock) until the target re-stops (the
+        // step completed) / exits / the slot is released; -1 only if the CALLER was
+        // death-interrupted.
+        int pid = proc_qid_pid(c->qid.path);
+        struct devproc_step_ctx s = { .target_pid = pid, .caller = t->proc, .ctl = c, .result = 0 };
+        proc_for_each(devproc_step_walk_cb, &s);
+        if (s.result != 1) return -1;
+        // Block until the step COMPLETES + the target RE-stops. Must poll
+        // devproc_target_fully_stopped (which checks debug_stop_req, re-set by the
+        // EC 0x32 handler) via devproc_wait_block -- NOT devproc_debug_wait_stopped
+        // (all_threads_parked), which would return prematurely on the STALE parked
+        // state: proc_debug_resume clears debug_stop_req + wakes the head, but the
+        // head's rendez_blocked_on stays &debug_rendez (+ on_cpu==false) until it
+        // resumes from sleep(), so all_threads_parked reads "still parked" before
+        // the step even runs. fully_stopped's debug_stop_req==0 gate rejects that
+        // window and waits for the real re-stop.
+        return (devproc_wait_block(pid, t->proc) >= 0) ? n : -1;
     }
 
     if (v == CTL_VERB_HWBREAK || v == CTL_VERB_HWRMBREAK) {

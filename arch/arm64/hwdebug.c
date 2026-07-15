@@ -71,29 +71,51 @@ static void hwwp_write_slot(unsigned n, u64 vr, u64 cr) {
     }
 }
 
-static void hwdebug_set_mde(bool on) {
+#define MDSCR_SS_BIT   (1ull << 0)   // MDSCR_EL1.SS — enable the single-step machine (8a-2b-2)
+
+static void hwdebug_set_mdscr(bool mde, bool ss) {
     u64 mdscr;
     __asm__ __volatile__("mrs %0, mdscr_el1" : "=r"(mdscr));
-    if (on) mdscr |= MDSCR_MDE_BIT; else mdscr &= ~MDSCR_MDE_BIT;
+    if (mde) mdscr |= MDSCR_MDE_BIT; else mdscr &= ~MDSCR_MDE_BIT;
+    if (ss)  mdscr |= MDSCR_SS_BIT;  else mdscr &= ~MDSCR_SS_BIT;
     __asm__ __volatile__("msr mdscr_el1, %0\n isb" :: "r"(mdscr) : "memory");
 }
 
-// Load a Proc's breakpoints onto THIS CPU: arm slots [0, bp_count), disable the
-// rest of [0, g_debug_max_bp), then MDE=1 + one ISB. Caller: hwdebug_switch_in
-// (IRQ-masked, CPU stable). `hw` is quiescent-mutated (stopped-only), so the read
-// of bp_va is stable behind the atomic bp_count gate.
-static void hwdebug_load_bps(u32 bp_count, const u64 *bp_va) {
+// Load `next`'s debug state onto THIS CPU: arm the breakpoints (slots [0, bp_count)
+// EXCEPT a step-over VA -- loaded disabled so a step FROM a breakpointed PC does
+// not re-trap; the rest of [0, g_debug_max_bp) disabled), then set MDSCR (MDE if
+// any bp is armed, SS if a step is in flight) + one ISB. Caller: hwdebug_switch_in
+// (IRQ-masked, CPU stable). `bp_va` is quiescent-mutated (stopped-only), stable
+// behind the atomic bp_count gate; NULL is safe when bp_count==0 (loop never reads
+// it). MDSCR.SS is loaded here (not held per-CPU) so it FOLLOWS the thread across
+// an IRQ-preempt migration mid-step (the Linux per-task model).
+static void hwdebug_load_debug(u32 bp_count, const u64 *bp_va, u64 skip_va, bool ss) {
+    u64 skip = skip_va & ~3ull;
     for (u32 n = 0; n < g_debug_max_bp; n++) {
-        if (n < bp_count) hwbp_write_slot(n, bp_va[n] & ~3ull, DBGBCR_EL0_BP);
-        else              hwbp_write_slot(n, 0, 0);
+        if (n < bp_count && !(skip_va && (bp_va[n] & ~3ull) == skip))
+            hwbp_write_slot(n, bp_va[n] & ~3ull, DBGBCR_EL0_BP);
+        else
+            hwbp_write_slot(n, 0, 0);   // unused slot, or the step-over bp (disabled for the step)
     }
-    hwdebug_set_mde(true);
+    hwdebug_set_mdscr(bp_count > 0, ss);
 }
 
-// Disable all our breakpoint slots on THIS CPU + clear MDE (+ ISB via set_mde).
-static void hwdebug_clear_bps(void) {
+// Disable all our breakpoint slots + MDE + SS on THIS CPU.
+static void hwdebug_clear_debug(void) {
     for (u32 n = 0; n < g_debug_max_bp; n++) hwbp_write_slot(n, 0, 0);
-    hwdebug_set_mde(false);
+    hwdebug_set_mdscr(false, false);
+}
+
+// Clear ONLY MDSCR.SS on THIS CPU (leave MDE / bps as-is) -- the EC 0x32 disarm.
+// IRQ-masked to pin the CPU across the register write.
+static void hwdebug_disable_ss_this_cpu(void) {
+    u64 s;
+    __asm__ __volatile__("mrs %0, daif\n msr daifset, #2" : "=r"(s) :: "memory");
+    u64 mdscr;
+    __asm__ __volatile__("mrs %0, mdscr_el1" : "=r"(mdscr));
+    mdscr &= ~MDSCR_SS_BIT;
+    __asm__ __volatile__("msr mdscr_el1, %0\n isb" :: "r"(mdscr) : "memory");
+    __asm__ __volatile__("msr daif, %0" :: "r"(s) : "memory");
 }
 
 // Local IRQ mask (mirror of spinlock.h's mechanism) -- pins the CPU across a
@@ -185,23 +207,25 @@ void hwdebug_switch_in(struct Thread *next) {
     struct Proc *p = next ? next->proc : NULL;
     struct debug_hw *hw = p ? __atomic_load_n(&p->debug_hw, __ATOMIC_ACQUIRE) : NULL;
     u32 count = hw ? __atomic_load_n(&hw->bp_count, __ATOMIC_ACQUIRE) : 0;
-    if (count > 0) {
-        hwdebug_load_bps(count, hw->bp_va);
+    bool ss = next ? __atomic_load_n(&next->debug_ss_armed, __ATOMIC_ACQUIRE) : false;
+    if (count > 0 || ss) {
+        u64 skip = ss ? next->debug_stepover_va : 0;   // step-over: skip this bp during the step
+        hwdebug_load_debug(count, count ? hw->bp_va : (const u64 *)0, skip, ss);
         g_cpu_debug_loaded[cpu] = true;
     } else if (g_cpu_debug_loaded[cpu]) {
-        hwdebug_clear_bps();
+        hwdebug_clear_debug();
         g_cpu_debug_loaded[cpu] = false;
     }
-    // else: the common path -- next is not debugged and this CPU has nothing
-    // loaded -> zero MSRs.
+    // else: the common path -- next is not debugged/stepping and this CPU has
+    // nothing loaded -> zero MSRs.
 }
 
-// Disable this CPU's breakpoints + MDE (the EC benign path). IRQ-masked so the
-// CPU is pinned across the local register writes.
+// Disable this CPU's breakpoints + MDE + SS (the EC benign path). IRQ-masked so
+// the CPU is pinned across the local register writes.
 static void hwdebug_disable_this_cpu(void) {
     u64 s = hwdebug_irq_save();
     unsigned cpu = smp_cpu_idx_self();
-    hwdebug_clear_bps();
+    hwdebug_clear_debug();
     if (cpu < DTB_MAX_CPUS) g_cpu_debug_loaded[cpu] = false;
     hwdebug_irq_restore(s);
 }
@@ -240,6 +264,32 @@ bool hwdebug_breakpoint_from_el0(u64 elr) {
     // Disable this CPU's debug regs and resume the instruction (the caller
     // returns -> the tail sees no stop -> eret re-executes it, now un-trapped).
     hwdebug_disable_this_cpu();
+    return true;
+}
+
+bool hwdebug_singlestep_from_el0(u64 elr) {
+    (void)elr;   // the debugger reads the advanced PC via /proc/<pid>/regs, not here
+    struct Thread *t = current_thread();
+    if (!t || t->magic != THREAD_MAGIC) return false;
+    if (!__atomic_load_n(&t->debug_ss_armed, __ATOMIC_ACQUIRE)) {
+        // A software-step EC with no armed step: spurious (only the kernel sets
+        // MDSCR.SS). Benign -- clear SS on this CPU + resume the instruction.
+        // Never fatal (EL0 cannot arm it); defense-in-depth.
+        hwdebug_disable_ss_this_cpu();
+        return true;
+    }
+    struct Proc *p = t->proc;
+    if (!p || p->magic != PROC_MAGIC) return false;
+    // Our step completed: exactly one EL0 instruction executed (ELR = the NEXT
+    // PC). Disarm the step (the per-Thread flags + this CPU's MDSCR.SS) and
+    // re-stop the whole Proc so the thread re-parks at the tail (death wins there)
+    // and the debugger's step/wait returns with the advanced regs.pc. Clearing
+    // debug_ss_armed BEFORE the re-stop keeps a racing switch-IN from re-arming SS
+    // (specs/debug_step.tla StepExec -> Tail: one instruction, then re-park).
+    __atomic_store_n(&t->debug_ss_armed, false, __ATOMIC_RELEASE);
+    t->debug_stepover_va = 0;
+    hwdebug_disable_ss_this_cpu();
+    proc_debug_stop_deliver(p);
     return true;
 }
 

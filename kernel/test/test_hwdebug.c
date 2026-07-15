@@ -16,6 +16,7 @@
 void test_hwdebug_dfr0_enumerate(void);
 void test_hwdebug_arm_disarm_roundtrip(void);
 void test_hwdebug_bp_table(void);
+void test_hwdebug_singlestep_benign(void);
 
 // DFR0 enumeration: every ARMv8 debug implementation has at least 2 breakpoints
 // and 2 watchpoints (architectural minimum). hw_features_detect already ran at
@@ -111,4 +112,30 @@ void test_hwdebug_bp_table(void) {
     TEST_ASSERT(rm_absent,      "removing an absent VA is refused");
     TEST_ASSERT(refit,          "a freed slot accepts a new VA");
     TEST_ASSERT(cleared,        "clear_all zeroes bp_count");
+}
+
+#define MDSCR_SS_BIT  (1ull << 0)
+
+// 8a-2b-2: the spurious-step benign path. The test thread has no armed step
+// (debug_ss_armed == 0), so a software-step EC -> hwdebug_singlestep_from_el0
+// must clear MDSCR.SS on this CPU + return true (benign resume), NEVER terminate.
+// Simulate a stale MDSCR.SS and confirm the handler clears it. (The ARMED step
+// path -- one instruction + re-stop -- needs real EL0 scheduling and is the
+// /debug-probe step phase's job; a kernel test runs at EL1 with no EL0 step.)
+// Inert at EL1: MDSCR.SS only fires on an eret to EL0 (which the test thread
+// never does), and the handler + this test clear it.
+void test_hwdebug_singlestep_benign(void) {
+    u64 m;
+    __asm__ __volatile__("mrs %0, mdscr_el1" : "=r"(m));
+    __asm__ __volatile__("msr mdscr_el1, %0\n isb" :: "r"(m | MDSCR_SS_BIT) : "memory");  // stale SS
+
+    bool handled = hwdebug_singlestep_from_el0(0x1000);
+
+    u64 after;
+    __asm__ __volatile__("mrs %0, mdscr_el1" : "=r"(after));
+    // Restore MDSCR without SS regardless (defensive -- the handler should have).
+    __asm__ __volatile__("msr mdscr_el1, %0\n isb" :: "r"(after & ~MDSCR_SS_BIT) : "memory");
+
+    TEST_ASSERT(handled, "a spurious step EC is handled (benign, not fatal)");
+    TEST_ASSERT((after & MDSCR_SS_BIT) == 0, "the benign path cleared MDSCR.SS on this CPU");
 }

@@ -78,6 +78,7 @@ _Static_assert(__builtin_offsetof(struct exception_context, far) == 0x118,
 #define EC_BRK             0x3C     /* deliberate brk #imm */
 #define EC_SVC_AARCH64     0x15     /* svc #imm at EL0 (AArch64) */
 #define EC_BREAKPOINT_LOWER 0x30    /* HW breakpoint from lower EL (8a-2) */
+#define EC_SOFTSTEP_LOWER   0x32    /* software step from lower EL (8a-2b-2) */
 
 // ---------------------------------------------------------------------------
 // HX-1: per-CPU live-frame tracking. Each public exception entry point is a
@@ -470,6 +471,16 @@ static void exception_sync_lower_el_impl(struct exception_context *ctx) {
         //           with snare:ill as a defensive backstop.
         if (hwdebug_verify_on_ec(ctx->elr)) return;
         if (hwdebug_breakpoint_from_el0(ctx->elr)) return;
+        proc_fault_terminate(NOTE_NAME_SNARE_ILL, (uintptr_t)esr);
+
+    case EC_SOFTSTEP_LOWER:
+        // 8a-2b-2: a software-step exception from EL0. hwdebug_singlestep_from_el0
+        // handles an armed step (one instruction executed -> disarm SS + re-stop
+        // the Proc so the thread re-parks and the debugger reads the advanced PC),
+        // or a spurious step (benign: clear SS + resume). It returns false only
+        // for a corrupt thread/Proc -- fatal, since EL0 cannot arm MDSCR.SS so a
+        // step EC is always kernel-originated.
+        if (hwdebug_singlestep_from_el0(ctx->elr)) return;
         proc_fault_terminate(NOTE_NAME_SNARE_ILL, (uintptr_t)esr);
 
     default:
