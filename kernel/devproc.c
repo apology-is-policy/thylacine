@@ -45,8 +45,9 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
-#include "../arch/arm64/timer.h"   // 8a-1b-beta: timer_now_ns -- the stop-wait poll deadline
-#include "../arch/arm64/mmu.h"     // 8a-1b-gamma: mmu_cross_proc_read/write -- /proc/<pid>/mem
+#include "../arch/arm64/timer.h"      // 8a-1b-beta: timer_now_ns -- the stop-wait poll deadline
+#include "../arch/arm64/mmu.h"        // 8a-1b-gamma: mmu_cross_proc_read/write -- /proc/<pid>/mem
+#include "../arch/arm64/exception.h"  // 8a-1b-gamma-2: struct exception_context -- /proc/<pid>/regs
 
 // =============================================================================
 // Qid path encoding.
@@ -64,7 +65,9 @@ enum {
     PQS_CMDLINE  = 3,        // /proc/<pid>/cmdline          (QTFILE)
     PQS_CTL      = 4,        // /proc/<pid>/ctl              (QTFILE)
     PQS_NS       = 5,        // /proc/<pid>/ns               (QTFILE)
-    PQS_MEM      = 6,        // /proc/<pid>/mem              (QTFILE; 8a-1b-gamma, I-39)
+    PQS_MEM      = 6,        // /proc/<pid>/mem              (QTFILE; 8a-1b-gamma-1, I-39)
+    PQS_REGS     = 7,        // /proc/<pid>/regs             (QTFILE; 8a-1b-gamma-2, I-39)
+    PQS_FPREGS   = 8,        // /proc/<pid>/fpregs           (QTFILE; 8a-1b-gamma-2, I-39)
 };
 
 #define PROC_QID_ROOT_PATH  0ULL
@@ -96,6 +99,8 @@ static const struct proc_pid_file g_proc_pid_files[] = {
     { "ctl",     PQS_CTL     },
     { "ns",      PQS_NS      },
     { "mem",     PQS_MEM     },
+    { "regs",    PQS_REGS    },
+    { "fpregs",  PQS_FPREGS  },
 };
 
 #define PROC_PID_FILE_COUNT \
@@ -382,7 +387,9 @@ static int devproc_stat(struct Spoor *c, u8 *dp, int n) {
 static u32 devproc_mode_for_kind(u32 kind) {
     switch (kind) {
     case PQS_CTL:     return 0600u;
-    case PQS_MEM:     return 0600u;   // 8a-1b-gamma: owner-private (I-39-gated at the RW site)
+    case PQS_MEM:     return 0600u;   // 8a-1b-gamma-1: owner-private (I-39-gated at the RW site)
+    case PQS_REGS:    return 0600u;   // 8a-1b-gamma-2: owner-private (I-39-gated at the RW site)
+    case PQS_FPREGS:  return 0600u;
     case PQS_STATUS:
     case PQS_CMDLINE:
     case PQS_NS:      return 0444u;
@@ -539,6 +546,9 @@ static int devproc_read_cb(struct Proc *p, void *arg) {
 // it. `off` is the target user VA (mem is VA-addressed); `buf` is the kernel
 // staging buffer the syscall layer bounced.
 static long devproc_mem_rw(struct Spoor *c, void *buf, long n, s64 off, bool is_write);
+// 8a-1b-gamma-2: /proc/<pid>/regs + fpregs RW (I-39-gated, stopped-only). Same
+// forward-decl reason as devproc_mem_rw.
+static long devproc_regs_rw(struct Spoor *c, void *buf, long n, s64 off, bool is_write);
 
 static long devproc_read(struct Spoor *c, void *buf, long n, s64 off) {
     if (!c || !buf) return -1;
@@ -552,6 +562,7 @@ static long devproc_read(struct Spoor *c, void *buf, long n, s64 off) {
     // mem is a VA-addressed cross-Proc read (I-39 + stopped-only), not a
     // formatted info file -- its own path (gamma), before the format dispatch.
     if (kind == PQS_MEM) return devproc_mem_rw(c, buf, n, off, false);
+    if (kind == PQS_REGS || kind == PQS_FPREGS) return devproc_regs_rw(c, buf, n, off, false);
 
     // Root + pid_dir reads return -1 (directories -- readdir lands with 9P
     // readdir). ctl is write-only at v1.0 (reads return empty; Plan 9: ctl is
@@ -737,6 +748,126 @@ static long devproc_mem_rw(struct Spoor *c, void *buf, long n, s64 off, bool is_
     };
     proc_for_each(devproc_mem_walk_cb, &m);
     return m.result;   // -1 not-found / denied; else bytes moved (0 = a hole at off)
+}
+
+// =============================================================================
+// 8a-1b-gamma-2: /proc/<pid>/regs + fpregs -- the stopped target's saved EL0
+// register frames (I-39; DEBUG-FS 4.5). Same gate as mem. v1.0 reads the HEAD
+// thread (p->threads); a per-thread /proc/<pid>/thread/<tid>/ layer is v1.x.
+// =============================================================================
+
+// Build the target head thread's regs (the EL0 trapframe at the kstack top) or
+// fpregs (t->ctx's saved FP/SIMD) into `out`. Returns the struct size, or 0 on
+// failure (no head thread / no kstack). The trapframe is at kstack_base +
+// kstack_size - EXCEPTION_CTX_SIZE (the outermost EL0->EL1 KERNEL_ENTRY frame;
+// a debug-parked thread always entered from EL0, so it is valid). It is kernel
+// memory (TTBR1) -- a plain deref, no cross-Proc walk. Caller holds
+// g_proc_table_lock + has gated I-39 + fully-stopped (so on_cpu==false: the
+// frame + ctx are settled, not being written by a live cpu_switch_context).
+static long devproc_build_regs(struct Proc *target, u32 kind, u8 *out) {
+    struct Thread *th = target->threads;   // the head thread (v1.0)
+    if (!th || !th->kstack_base || th->kstack_size < EXCEPTION_CTX_SIZE) return 0;
+
+    if (kind == PQS_REGS) {
+        struct exception_context *tf = (struct exception_context *)
+            ((u8 *)th->kstack_base + th->kstack_size - EXCEPTION_CTX_SIZE);
+        struct t_user_regs *ur = (struct t_user_regs *)out;
+        for (int i = 0; i < 31; i++) ur->regs[i] = tf->regs[i];
+        ur->sp     = tf->sp;      // SP_EL0
+        ur->pc     = tf->elr;     // ELR_EL1
+        ur->pstate = tf->spsr;    // SPSR_EL1 (read reflects it; write ignores it)
+        return (long)sizeof(struct t_user_regs);
+    }
+    // PQS_FPREGS
+    struct t_user_fpregs *uf = (struct t_user_fpregs *)out;
+    for (int i = 0; i < 512; i++) uf->vregs[i] = th->ctx.fp_v[i];
+    uf->fpsr = th->ctx.fpsr;
+    uf->fpcr = th->ctx.fpcr;
+    return (long)sizeof(struct t_user_fpregs);
+}
+
+// Apply an edited struct back to the target head thread. regs: x0..x30, sp
+// (SP_EL0), pc (ELR_EL1). pstate (SPSR_EL1) is DELIBERATELY NOT written -- an
+// arbitrary SPSR could eret the target to EL1 (privilege escalation), so the
+// saved SPSR is kept (step-related SPSR.SS is 8a-2). fpregs: all fields (no
+// privilege bits). Caller holds g_proc_table_lock + gated fully-stopped.
+static void devproc_apply_regs(struct Proc *target, u32 kind, const u8 *in) {
+    struct Thread *th = target->threads;
+    if (!th || !th->kstack_base || th->kstack_size < EXCEPTION_CTX_SIZE) return;
+
+    if (kind == PQS_REGS) {
+        struct exception_context *tf = (struct exception_context *)
+            ((u8 *)th->kstack_base + th->kstack_size - EXCEPTION_CTX_SIZE);
+        const struct t_user_regs *ur = (const struct t_user_regs *)in;
+        for (int i = 0; i < 31; i++) tf->regs[i] = ur->regs[i];
+        tf->sp  = ur->sp;    // SP_EL0
+        tf->elr = ur->pc;    // ELR_EL1 (resume PC; still EL0 -- SPSR unchanged)
+        // tf->spsr LEFT UNCHANGED (the privilege guard).
+        return;
+    }
+    const struct t_user_fpregs *uf = (const struct t_user_fpregs *)in;
+    for (int i = 0; i < 512; i++) th->ctx.fp_v[i] = uf->vregs[i];
+    th->ctx.fpsr = uf->fpsr;
+    th->ctx.fpcr = uf->fpcr;
+}
+
+struct devproc_regs_ctx {
+    int          target_pid;
+    struct Proc *caller;
+    u32          kind;      // PQS_REGS or PQS_FPREGS
+    void        *kbuf;      // the kernel staging buffer
+    long         n;
+    s64          off;       // byte offset into the register struct
+    bool         is_write;
+    long         result;    // >=0 bytes moved (0 = off past EOF), -1 denied/not-found
+};
+
+static int devproc_regs_walk_cb(struct Proc *target, void *arg) {
+    struct devproc_regs_ctx *r = (struct devproc_regs_ctx *)arg;
+    if (target->pid != r->target_pid) return 0;
+    if (target == kproc())                              { r->result = -1; return 1; }
+    if (!devproc_debug_authorized(r->caller, target))   { r->result = -1; return 1; }  // I-39
+    if (!devproc_target_fully_stopped(target))          { r->result = -1; return 1; }  // stopped-only
+
+    // Build the current struct, apply the [off,off+n) slice (write) or copy it
+    // out (read). The build-overlay-apply write path makes a PARTIAL write use
+    // the current bytes for the untouched fields -- and the pstate guard holds
+    // regardless of the write's offset (devproc_apply_regs never writes SPSR).
+    u8 scratch[sizeof(struct t_user_fpregs)];   // the larger struct (520)
+    long size = devproc_build_regs(target, r->kind, scratch);
+    if (size == 0)       { r->result = -1; return 1; }   // no head thread / no kstack
+    if (r->off >= size)  { r->result = 0;  return 1; }   // off past EOF -> 0
+    long avail = size - (long)r->off;
+    long cnt = (r->n < avail) ? r->n : avail;
+    if (r->is_write) {
+        for (long i = 0; i < cnt; i++) scratch[r->off + i] = ((const u8 *)r->kbuf)[i];
+        devproc_apply_regs(target, r->kind, scratch);
+    } else {
+        for (long i = 0; i < cnt; i++) ((u8 *)r->kbuf)[i] = scratch[r->off + i];
+    }
+    r->result = cnt;
+    return 1;
+}
+
+static long devproc_regs_rw(struct Spoor *c, void *buf, long n, s64 off, bool is_write) {
+    if (!c || !buf || n < 0) return -1;
+    if (off < 0)             return -1;
+    if (n == 0)              return 0;
+    struct Thread *t = current_thread();
+    if (!t || !t->proc) return -1;
+
+    struct devproc_regs_ctx r = {
+        .target_pid = proc_qid_pid(c->qid.path),
+        .caller     = t->proc,
+        .kind       = proc_qid_kind(c->qid.path),
+        .kbuf       = buf,
+        .n          = n,
+        .off        = off,
+        .is_write   = is_write,
+        .result     = -1,
+    };
+    proc_for_each(devproc_regs_walk_cb, &r);
+    return r.result;
 }
 
 // ctl verbs. v1.0: kill / killgrp both terminate the target Proc's thread-
@@ -964,6 +1095,8 @@ static long devproc_write(struct Spoor *c, const void *buf, long n, s64 off) {
     // mem: a VA-addressed cross-Proc write (I-39 + stopped-only + W^X). `off` is
     // the target VA -- NOT ignored, unlike the ctl control message below.
     if (kind == PQS_MEM) return devproc_mem_rw(c, (void *)buf, n, off, true);
+    // regs/fpregs: `off` is the byte offset into the register struct.
+    if (kind == PQS_REGS || kind == PQS_FPREGS) return devproc_regs_rw(c, (void *)buf, n, off, true);
     (void)off;
     if (kind != PQS_CTL) return -1;
 

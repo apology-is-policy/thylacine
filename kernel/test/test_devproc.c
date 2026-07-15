@@ -20,8 +20,9 @@
 
 #include "test.h"
 
-#include "../../arch/arm64/mmu.h"   // 8a-1b-gamma: mmu_install_user_pte + mmu_cross_proc_* + pa_to_kva
-#include "../../mm/phys.h"          // alloc_pages / free_pages
+#include "../../arch/arm64/mmu.h"        // 8a-1b-gamma-1: mmu_install_user_pte + mmu_cross_proc_* + pa_to_kva
+#include "../../arch/arm64/exception.h"  // 8a-1b-gamma-2: struct exception_context (the regs test's synthetic trapframe)
+#include "../../mm/phys.h"               // alloc_pages / free_pages
 
 #include <thylacine/caps.h>
 #include <thylacine/dev.h>
@@ -55,6 +56,7 @@ void test_devproc_debug_authorized_predicate(void);
 void test_devproc_debug_attach_detach_lifecycle(void);
 void test_devproc_debug_stop_start_resume(void);
 void test_devproc_debug_mem(void);
+void test_devproc_debug_regs(void);
 
 // A-4b + 8a-1b impl hooks (non-static in kernel/devproc.c) + Proc test helpers
 // (non-static in kernel/proc.c; the test_proc.c / test_devsrv_conn.c pattern).
@@ -180,6 +182,26 @@ static struct Spoor *open_mem_for_pid(int pid) {
         return NULL;
     }
     return mem;
+}
+
+// 8a-1b-gamma-2: open /proc/<pid>/<name> with `omode`. Caller spoor_clunk's it.
+static struct Spoor *open_pidfile_for(int pid, const char *name, int omode) {
+    struct Spoor *root = devproc.attach("");
+    if (!root) return NULL;
+    char pidstr[12]; int n = 0; int v = pid;
+    if (v == 0) pidstr[n++] = '0';
+    else { char tmp[12]; int tn = 0;
+           while (v > 0) { tmp[tn++] = (char)('0' + (v % 10)); v /= 10; }
+           for (int i = tn - 1; i >= 0; i--) pidstr[n++] = tmp[i]; }
+    pidstr[n] = '\0';
+    struct Spoor *piddir = walk_one(root, pidstr);
+    spoor_unref(root);
+    if (!piddir) return NULL;
+    struct Spoor *f = walk_one(piddir, name);
+    spoor_unref(piddir);
+    if (!f) return NULL;
+    if (!devproc.open(f, omode)) { spoor_unref(f); return NULL; }
+    return f;
 }
 
 // =============================================================================
@@ -918,6 +940,107 @@ void test_devproc_debug_mem(void) {
     proc_test_unlink(tgt);
     free_pages(rw_pg, 0);
     free_pages(ro_pg, 0);
+    tgt->state = PROC_STATE_ZOMBIE;
+    proc_free(tgt);
+}
+
+// 8a-1b-gamma-2: /proc/<pid>/regs + fpregs -- the saved EL0 register frames of a
+// STOPPED target's head thread (I-39; DEBUG-FS 4.5). Drives the full devproc
+// path on a SYNTHETIC parked thread with a real kstack buffer + a known
+// trapframe + FP ctx. The headline check is the SPSR (pstate) privilege guard:
+// a regs write applies x0..x30 + sp + pc but NEVER SPSR -- an arbitrary SPSR
+// could eret the target to EL1.
+void test_devproc_debug_regs(void) {
+    struct Thread *tt = current_thread();
+    TEST_ASSERT(tt && tt->proc, "test thread has a proc");
+    struct Proc *caller = tt->proc;
+
+    struct Proc *tgt = proc_alloc();
+    TEST_ASSERT(tgt != NULL, "alloc regs target");
+    tgt->principal_id = caller->principal_id;   // owner -> I-39 authorized
+    tgt->state        = PROC_STATE_ALIVE;
+
+    // A real kstack buffer (8 pages) + a synthetic parked head thread.
+    struct page *kstk = alloc_pages(THREAD_KSTACK_TOTAL_ORDER, KP_ZERO);
+    TEST_ASSERT(kstk != NULL, "alloc synthetic kstack");
+    u8 *kbase = (u8 *)pa_to_kva(page_to_pa(kstk));
+
+    struct Thread th;
+    for (size_t i = 0; i < sizeof(th); i++) ((u8 *)&th)[i] = 0;
+    th.magic            = THREAD_MAGIC;
+    th.state            = THREAD_SLEEPING;
+    th.kstack_base      = kbase;
+    th.kstack_size      = THREAD_KSTACK_TOTAL_SIZE;
+    th.on_cpu           = false;
+    th.rendez_blocked_on = &th.debug_rendez;    // "parked on its own debug_rendez"
+    th.next_in_proc     = NULL;
+    for (int i = 0; i < 512; i++) th.ctx.fp_v[i] = (u8)(0x30 + (i & 0x3f));
+    th.ctx.fpsr = 0xFEEDFACEu;
+    th.ctx.fpcr = 0x0BADF00Du;
+
+    struct exception_context *tf = (struct exception_context *)
+        (kbase + THREAD_KSTACK_TOTAL_SIZE - EXCEPTION_CTX_SIZE);
+    for (int i = 0; i < 31; i++) tf->regs[i] = 0x1000ull + (u64)i;
+    tf->sp   = 0xDEAD0000ull;
+    tf->elr  = 0xCAFE0000ull;
+    tf->spsr = 0x60000000ull;   // NZCV-ish, EL0t (M[3:0]=0)
+
+    tgt->threads       = &th;
+    tgt->debug_stop_req = 1;     // "stopped" (this one parked thread + on_cpu==false)
+    proc_test_link(tgt);
+
+    // --- regs read ---
+    struct Spoor *regs = open_pidfile_for(tgt->pid, "regs", 2);   // ORDWR
+    TEST_ASSERT(regs != NULL, "open /proc/<pid>/regs");
+    struct t_user_regs ur;
+    TEST_EXPECT_EQ(devproc.read(regs, &ur, (long)sizeof(ur), 0), (long)sizeof(ur), "regs read: full struct");
+    bool m = true; for (int i = 0; i < 31; i++) if (ur.regs[i] != 0x1000ull + (u64)i) m = false;
+    TEST_ASSERT(m, "regs read: x0..x30");
+    TEST_EXPECT_EQ(ur.sp,     0xDEAD0000ull, "regs read: sp = SP_EL0");
+    TEST_EXPECT_EQ(ur.pc,     0xCAFE0000ull, "regs read: pc = ELR_EL1");
+    TEST_EXPECT_EQ(ur.pstate, 0x60000000ull, "regs read: pstate = SPSR_EL1");
+
+    // --- regs write: x0..x30 + sp + pc applied; pstate (SPSR) IGNORED (guard) ---
+    struct t_user_regs wr = ur;
+    for (int i = 0; i < 31; i++) wr.regs[i] = 0x2000ull + (u64)i;
+    wr.sp     = 0xBEEF0000ull;
+    wr.pc     = 0xF00D0000ull;
+    wr.pstate = 0x00000005ull;   // an EL1h-mode SPSR (M[3:0]=0b0101) -- MUST be ignored
+    TEST_EXPECT_EQ(devproc.write(regs, &wr, (long)sizeof(wr), 0), (long)sizeof(wr), "regs write");
+    m = true; for (int i = 0; i < 31; i++) if (tf->regs[i] != 0x2000ull + (u64)i) m = false;
+    TEST_ASSERT(m, "regs write applied x0..x30");
+    TEST_EXPECT_EQ(tf->sp,  0xBEEF0000ull, "regs write applied sp (SP_EL0)");
+    TEST_EXPECT_EQ(tf->elr, 0xF00D0000ull, "regs write applied pc (ELR_EL1)");
+    TEST_EXPECT_EQ(tf->spsr, 0x60000000ull,
+                   "regs write did NOT change SPSR (the EL1-mode pstate was ignored -- privilege guard)");
+    spoor_clunk(regs);
+
+    // --- fpregs read + write (all fields; no privilege bits) ---
+    struct Spoor *fp = open_pidfile_for(tgt->pid, "fpregs", 2);
+    TEST_ASSERT(fp != NULL, "open /proc/<pid>/fpregs");
+    struct t_user_fpregs uf;
+    TEST_EXPECT_EQ(devproc.read(fp, &uf, (long)sizeof(uf), 0), (long)sizeof(uf), "fpregs read: full struct");
+    m = true; for (int i = 0; i < 512; i++) if (uf.vregs[i] != (u8)(0x30 + (i & 0x3f))) m = false;
+    TEST_ASSERT(m, "fpregs read: V0..V31");
+    TEST_EXPECT_EQ(uf.fpsr, 0xFEEDFACEu, "fpregs read: fpsr");
+    TEST_EXPECT_EQ(uf.fpcr, 0x0BADF00Du, "fpregs read: fpcr");
+    uf.fpcr = 0x11112222u;
+    TEST_EXPECT_EQ(devproc.write(fp, &uf, (long)sizeof(uf), 0), (long)sizeof(uf), "fpregs write");
+    TEST_EXPECT_EQ(th.ctx.fpcr, 0x11112222u, "fpregs write applied fpcr");
+    spoor_clunk(fp);
+
+    // --- not-stopped -> refused (stopped-only) ---
+    tgt->debug_stop_req = 0;
+    struct Spoor *regs2 = open_pidfile_for(tgt->pid, "regs", 2);
+    TEST_EXPECT_EQ(devproc.read(regs2, &ur, (long)sizeof(ur), 0), (long)-1,
+                   "regs of a NOT-stopped target is refused");
+    spoor_clunk(regs2);
+
+    // Cleanup: unlink + drop the synthetic (stack-local) thread BEFORE the frame
+    // dies, free the kstack, then the Proc.
+    proc_test_unlink(tgt);
+    tgt->threads = NULL;
+    free_pages(kstk, THREAD_KSTACK_TOTAL_ORDER);
     tgt->state = PROC_STATE_ZOMBIE;
     proc_free(tgt);
 }

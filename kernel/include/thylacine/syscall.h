@@ -1901,6 +1901,40 @@ _Static_assert(__builtin_offsetof(struct t_stat, blocks)    == 64, "t_stat.block
 _Static_assert(__builtin_offsetof(struct t_stat, uid)       == 72, "t_stat.uid at ABI offset 72 (A-2a)");
 _Static_assert(__builtin_offsetof(struct t_stat, gid)       == 76, "t_stat.gid at ABI offset 76 (A-2a)");
 
+// 8a-1b-gamma-2 (I-39; docs/DEBUG-FS-DESIGN.md 4.5): the /proc/<pid>/regs read/
+// write format -- the saved EL0 GPR frame in the Linux arm64 `user_pt_regs`
+// layout, so the dlv arm64 backend maps it directly. `pstate` (SPSR_EL1) is
+// READ-ONLY on a write: an arbitrary SPSR could eret the target to EL1 (privilege
+// escalation), so the kernel keeps the saved SPSR and ignores this field on
+// write (step-related SPSR.SS is 8a-2). `pc` = ELR_EL1 (the resume PC), `sp` =
+// SP_EL0. Read reflects the live saved frame.
+struct t_user_regs {
+    u64 regs[31];   // x0..x30 (x30 = lr)
+    u64 sp;         // SP_EL0
+    u64 pc;         // ELR_EL1 (resume PC)
+    u64 pstate;     // SPSR_EL1 (READ-ONLY on write -- privilege guard)
+};
+_Static_assert(sizeof(struct t_user_regs) == 272,
+               "struct t_user_regs is the /proc/<pid>/regs ABI (Linux user_pt_regs): "
+               "31*8 GPR + sp + pc + pstate = 272 bytes");
+_Static_assert(__builtin_offsetof(struct t_user_regs, sp)     == 248, "t_user_regs.sp at ABI offset 248");
+_Static_assert(__builtin_offsetof(struct t_user_regs, pc)     == 256, "t_user_regs.pc at ABI offset 256");
+_Static_assert(__builtin_offsetof(struct t_user_regs, pstate) == 264, "t_user_regs.pstate at ABI offset 264");
+
+// /proc/<pid>/fpregs -- the saved FP/SIMD state (V0..V31 + FPSR + FPCR), the
+// Linux arm64 `user_fpsimd_state` core (minus its reserved tail). All fields are
+// user-writable (no privilege bits).
+struct t_user_fpregs {
+    u8  vregs[512]; // V0..V31 (32 x 16 B Q-reg payloads)
+    u32 fpsr;
+    u32 fpcr;
+};
+_Static_assert(sizeof(struct t_user_fpregs) == 520,
+               "struct t_user_fpregs is the /proc/<pid>/fpregs ABI: 512 V-reg bytes "
+               "+ FPSR + FPCR = 520 bytes");
+_Static_assert(__builtin_offsetof(struct t_user_fpregs, fpsr) == 512, "t_user_fpregs.fpsr at ABI offset 512");
+_Static_assert(__builtin_offsetof(struct t_user_fpregs, fpcr) == 516, "t_user_fpregs.fpcr at ABI offset 516");
+
 // SYS_LSEEK whence values (P6-pouch-stratumd-boot sub-chunk 16b-gamma).
 // Mirror POSIX SEEK_SET / SEEK_CUR / SEEK_END but stay namespaced so
 // the kernel ABI never depends on a libc header. The libt + pouch arms
