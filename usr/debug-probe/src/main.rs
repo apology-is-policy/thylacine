@@ -50,6 +50,7 @@ const SENTINEL_MEM: u64 = 0xDEB0_0001_CAFE_0001;
 // t_user_regs byte offsets (the /proc/<pid>/regs ABI, syscall.h).
 const R_X20: usize = 20 * 8;
 const R_X21: usize = 21 * 8;
+const R_X22: usize = 22 * 8; // 8a-2b: the child pins &bp_landmark here
 const R_SP: usize = 248;
 const R_PC: usize = 256;
 const R_PSTATE: usize = 264;
@@ -223,18 +224,69 @@ fn debug_flow(child: &mut Child) -> Result<(), &'static str> {
     }
     t_putstr("debug-probe: wait ok (stopped)\n");
 
-    // --- MODIFY + RESUME: cross-Proc WRITE the resume flag, then `start` ---
+    // The child pinned &bp_landmark in x22 -- capture it from the phase-1 frame
+    // (before we overwrite `regs` at the bp stop below).
+    let bp_va = u64_le(&regs, R_X22);
+    if bp_va == 0 || bp_va >= USER_VA_LIMIT {
+        return Err("debug-probe: FAIL -- regs x22 not an EL0 VA (bp landmark)\n");
+    }
+
+    // --- MODIFY + RESUME into loop2: cross-Proc WRITE the resume flag, `start` ---
+    // (region[1] releases loop1; the child then loops calling bp_landmark).
     let one: u64 = 1;
-    let w = unsafe { t_pwrite(mem_f.as_raw_fd() as i64, (&one as *const u64) as *const u8, 8, (x21 + 8) as i64) };
-    if w != 8 {
+    if unsafe { t_pwrite(mem_f.as_raw_fd() as i64, (&one as *const u64) as *const u8, 8, (x21 + 8) as i64) } != 8 {
         return Err("debug-probe: FAIL -- write resume flag via mem\n");
     }
-    ctl.write_all(b"start").map_err(|_| "debug-probe: FAIL -- start(resume)\n")?;
 
-    // The child reloads the flag, sees 1, and exit(0)s. Reap it.
+    // --- 8a-2b: arm a real cross-Proc HARDWARE BREAKPOINT at bp_landmark ---
+    // Arm while the target is still stopped (hwbreak is stopped-only), then resume
+    // it into loop2. The first bp_landmark() call traps (EC 0x30 -> the whole-Proc
+    // stop). This is the headline b-1 proof: a debugger-armed HW breakpoint fires
+    // for a cross-Proc EL0 target and delivers a stop -- what only a real
+    // scheduled EL0 execution can exercise (the kernel tests are structurally
+    // blind to the install + EC route, exactly as they were to 8a-1's F1/F2).
+    ctl.write_all(format!("hwbreak 0x{:x}", bp_va).as_bytes())
+        .map_err(|_| "debug-probe: FAIL -- hwbreak\n")?;
+    ctl.write_all(b"start").map_err(|_| "debug-probe: FAIL -- start(into loop2)\n")?;
+
+    // Wait for the breakpoint to fire. `wait` blocks until fully-stopped; after
+    // `start` cleared debug_stop_req, a return of "stopped" means the bp re-set it
+    // (the child parked at bp_landmark). Not a fixed-sleep race -- the wait file
+    // polls the stop state.
+    {
+        let wait_f = File::open(&format!("/proc/{}/wait", pid)).map_err(|_| "debug-probe: FAIL -- open wait(bp)\n")?;
+        let mut wbuf = [0u8; 16];
+        let wn = unsafe { t_pread(wait_f.as_raw_fd() as i64, wbuf.as_mut_ptr(), wbuf.len(), 0) };
+        if wn < 7 || &wbuf[..7] != b"stopped" {
+            return Err("debug-probe: FAIL -- bp did not deliver a stop\n");
+        }
+    }
+    // The frozen frame's PC must be the breakpoint VA -- a HW bp fires with
+    // ELR = the bp'd instruction (not yet executed). This is the end-to-end proof.
+    if read_exact_at(regs_f.as_raw_fd() as i64, 0, &mut regs).is_err() {
+        return Err("debug-probe: FAIL -- read regs(bp)\n");
+    }
+    if u64_le(&regs, R_PC) != bp_va {
+        return Err("debug-probe: FAIL -- bp stop pc != landmark VA\n");
+    }
+    t_putstr("debug-probe: hwbreak ok (cross-Proc bp fired; pc == landmark)\n");
+
+    // Disarm the bp (stopped-only), set the exit flag (region[2]), resume -> the
+    // child runs bp_landmark clean (now un-armed) and exit(0)s. The un-armed
+    // resume also proves hwrmbreak actually cleared the bp (else it would re-trap
+    // forever and never exit).
+    ctl.write_all(format!("hwrmbreak 0x{:x}", bp_va).as_bytes())
+        .map_err(|_| "debug-probe: FAIL -- hwrmbreak\n")?;
+    let two: u64 = 1;
+    if unsafe { t_pwrite(mem_f.as_raw_fd() as i64, (&two as *const u64) as *const u8, 8, (x21 + 16) as i64) } != 8 {
+        return Err("debug-probe: FAIL -- write exit flag via mem\n");
+    }
+    ctl.write_all(b"start").map_err(|_| "debug-probe: FAIL -- start(exit)\n")?;
+
+    // The child exits loop2 and exit(0)s. Reap it.
     match child.wait() {
         Ok(st) if st.success() => Ok(()),
-        Ok(_) => Err("debug-probe: FAIL -- child exit status != 0 after resume\n"),
+        Ok(_) => Err("debug-probe: FAIL -- child exit status != 0 after bp cycle\n"),
         Err(_) => Err("debug-probe: FAIL -- reap child\n"),
     }
     // ctl / mem_f / regs_f / kregs_f / kstack_f drop here -> ctl close detaches.

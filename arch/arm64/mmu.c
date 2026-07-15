@@ -1853,6 +1853,12 @@ static void *cross_proc_resolve(paddr_t pgtable_root, u64 vaddr, bool *writable_
 // hold spans this copy).
 long mmu_cross_proc_read(paddr_t pgtable_root, u64 vaddr, void *dst, long len) {
     if (len <= 0 || !dst) return 0;
+    // #73 (8a-1c holotype HF3, defense-in-depth): reject a vaddr+len that would
+    // wrap the u64 VA space. The caller clamps len (DEBUG_MEM_CHUNK) and
+    // cross_proc_resolve rejects any vaddr>>47 per page, so no realizable path
+    // reaches this -- but the explicit guard keeps the per-page `vaddr + done`
+    // arithmetic below provably non-wrapping.
+    if (vaddr + (u64)len < vaddr) return 0;
     u8 *d = (u8 *)dst;
     long done = 0;
     while (done < len) {
@@ -1874,6 +1880,7 @@ long mmu_cross_proc_read(paddr_t pgtable_root, u64 vaddr, void *dst, long len) {
 // writable (text; use a HW breakpoint, 8a-2).
 long mmu_cross_proc_write(paddr_t pgtable_root, u64 vaddr, const void *src, long len) {
     if (len <= 0 || !src) return 0;
+    if (vaddr + (u64)len < vaddr) return 0;   // #73: u64 VA-space wrap guard (defense-in-depth)
     const u8 *s = (const u8 *)src;
     long done = 0;
     while (done < len) {

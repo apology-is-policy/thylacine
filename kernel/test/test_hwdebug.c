@@ -15,6 +15,7 @@
 
 void test_hwdebug_dfr0_enumerate(void);
 void test_hwdebug_arm_disarm_roundtrip(void);
+void test_hwdebug_bp_table(void);
 
 // DFR0 enumeration: every ARMv8 debug implementation has at least 2 breakpoints
 // and 2 watchpoints (architectural minimum). hw_features_detect already ran at
@@ -70,4 +71,44 @@ void test_hwdebug_arm_disarm_roundtrip(void) {
     TEST_ASSERT(second_refused, "a concurrent arm is refused (one verify at a time)");
     TEST_ASSERT((bcr_after & DBGBCR_E_BIT) == 0, "DBGBCR0.E cleared after disarm");
     TEST_ASSERT((mdscr_after & MDSCR_MDE_BIT) == 0, "MDSCR.MDE cleared after disarm");
+}
+
+// 8a-2b-1: the per-Proc breakpoint TABLE logic (hwdebug_bp_add/remove/clear_all),
+// independent of hardware -- a stack debug_hw struct. Covers dedup, the capacity
+// cap (g_debug_max_bp = min(num_brps, DEBUG_HWBP_SLOTS) >= 2), remove-present vs
+// remove-absent, slot reuse after a remove, and clear_all. The ctx-switch INSTALL
+// + the EC-0x30 route (which need real EL0 execution) are the /debug-probe E2E's
+// job -- the kernel test is structurally blind to them, exactly as it is to the
+// verify DELIVERY.
+void test_hwdebug_bp_table(void) {
+    hwdebug_enumerate();   // ensure g_debug_max_bp is set (self-contained)
+    struct debug_hw hw = { 0 };
+
+    // Add distinct 4-aligned user VAs until the table is full (add -> false).
+    u32 added = 0;
+    for (u32 i = 0; i < DEBUG_HWBP_SLOTS + 2u; i++) {
+        u64 va = 0x100000ull + (u64)i * 0x1000ull;
+        if (hwdebug_bp_add(&hw, va)) added++;
+        else break;
+    }
+    bool at_least_two   = (added >= 2u);
+    bool count_matches  = (hw.bp_count == added);
+    bool dup_refused    = !hwdebug_bp_add(&hw, 0x100000ull);   // first VA -- already present
+    bool full_refused   = !hwdebug_bp_add(&hw, 0x999000ull);   // table full
+    bool rm_ok          = hwdebug_bp_remove(&hw, 0x100000ull); // remove the first VA
+    bool count_after_rm = (hw.bp_count == added - 1u);
+    bool rm_absent      = !hwdebug_bp_remove(&hw, 0x100000ull);// already gone
+    bool refit          = hwdebug_bp_add(&hw, 0x999000ull);    // a freed slot now fits
+    hwdebug_bp_clear_all(&hw);
+    bool cleared        = (hw.bp_count == 0u);
+
+    TEST_ASSERT(at_least_two,   "bp table holds >= 2 breakpoints (architectural min)");
+    TEST_ASSERT(count_matches,  "bp_count matches the number added");
+    TEST_ASSERT(dup_refused,    "adding a duplicate VA is refused");
+    TEST_ASSERT(full_refused,   "adding beyond the table capacity is refused");
+    TEST_ASSERT(rm_ok,          "removing a present VA succeeds");
+    TEST_ASSERT(count_after_rm, "bp_count decrements on remove");
+    TEST_ASSERT(rm_absent,      "removing an absent VA is refused");
+    TEST_ASSERT(refit,          "a freed slot accepts a new VA");
+    TEST_ASSERT(cleared,        "clear_all zeroes bp_count");
 }

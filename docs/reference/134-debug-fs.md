@@ -282,14 +282,75 @@ stick + a concurrent arm is refused + disarm clears them). The DELIVERY half
 needs real EL0 execution and is the in-guest `/hwbp-verify` probe (a kernel test
 runs at EL1 with no EL0-scheduling loop).
 
+## 8a-2b-1 — real per-Proc hardware breakpoints
+
+The first arm from the 8a-2b HW-debug tier: a debugger arms a real hardware
+breakpoint at a user VA in a stopped target, and the target stops when a thread
+executes that VA. No software `BRK` (I-12 W^X + I-36 REVENANT Image cache) — the
+break is a debug register.
+
+**The per-Proc table** (`struct debug_hw`, `arch/arm64/hwdebug.h`): a lazily
+`kzalloc`'d array of up to `DEBUG_HWBP_SLOTS` (4, clamped to the CPU's `num_brps`)
+breakpoint VAs, hung off `Proc.debug_hw`. Allocated on the first `hwbreak`, freed
+ONLY at `proc_free` (never at detach) — so the ctx-switch reader never derefs
+freed memory (every thread is reaped + on_cpu-spun before `proc_free`, so no CPU
+is in a switch-in for the Proc). The table is mutated only when the target is
+fully-stopped (`hwbreak`/`hwrmbreak` are stopped-only), so the ctx-switch reader
+is quiescent; `bp_count` is `__atomic` so a detach-while-running (count -> 0)
+races cleanly.
+
+**The context-switch install** (`hwdebug_switch_in`, called from `sched.c` after
+`sched_install_asid_ttbr0`, IRQs masked + CPU stable): loads `next`'s Proc
+breakpoints into THIS CPU's `DBGBVR`/`DBGBCR` + sets `MDSCR.MDE`, or clears them
+if `next` is not a debugged Proc and this CPU had them loaded (a per-CPU
+`g_cpu_debug_loaded` flag keeps the common non-debugged switch MSR-free). This
+is the load-bearing per-CPU-MDE isolation: a breakpoint at VA X fires ONLY while
+the debugged Proc runs — `PMC=EL0` alone does NOT isolate two Procs sharing X, so
+the install is keyed to "a thread of the debugged Proc is scheduled here."
+`hwdebug_init_cpu` clears every IMPLEMENTED bp/wp control register at boot (a
+reset-garbage `E`-bit would fire the first time `MDE` is set), on every CPU.
+
+**The EC 0x30 route** (`hwdebug_breakpoint_from_el0`, `exception.c`): matches the
+trap's `ELR` against the current Proc's armed table. A HIT calls
+`proc_debug_stop_deliver` (the whole-Proc stop, Delve all-stop) — the thread
+returns to the EL0-return tail and parks via the 8a-1 checkpoint machinery
+(death still wins: the tail's die-check precedes the stop-check), and the
+debugger learns via `/proc/<pid>/wait` and reads `regs.pc == the bp VA` (a HW bp
+fires with `ELR` = the not-yet-executed bp'd instruction). A no-match on a Proc
+that HAS a `debug_hw` is a benign STALE bp (a detach cleared the table before
+this CPU reloaded) — this CPU's debug regs are disabled and the instruction
+resumes (only the kernel arms a bp, so an unmatched fire is never an attack). A
+no-match on a never-debugged Proc is a defensive `snare:ill` (impossible in
+practice).
+
+**The verbs** (`ctl`, DEBUG-FS-DESIGN section 4.3): `hwbreak <hexva>` /
+`hwrmbreak <hexva>`, gated on slot-ownership + the I-39 two-axis re-check +
+stopped-only (the quiescent-table discipline; Delve arms on a stopped process).
+`detach` and the ctl-fd-close release both clear the table (`bp_count=0`) so an
+orphaned target never re-traps on a dead debugger's breakpoint.
+
+Data structure: `struct debug_hw { u32 bp_count; u64 bp_va[4]; }`;
+`Proc.debug_hw` (`struct Proc` 320 -> 328, the pointer @320). Tests:
+`hwdebug.bp_table` (the table logic — dedup, capacity, remove, reuse, clear);
+the ctx-switch INSTALL + the EC route need real EL0 execution and are the
+`/debug-probe` E2E's job (a bp armed at the child's `bp_landmark` VA fires
+cross-Proc, `regs.pc == landmark`, then `hwrmbreak` + resume runs it clean) --
+the kernel test is structurally blind to them, exactly as it is to the verify
+DELIVERY. Also `#73`: `mmu_cross_proc_read`/`write` gained an explicit
+`vaddr+len` u64-wrap guard (HF3 defense-in-depth).
+
 ## Status
 
 8a-1 complete (the software-checkpoint tier: audited, SMP-gated, `debug_stop.tla`
-green). 8a-2a complete (the HW-debug delivery verify: PASS on HVF + TCG). 8a-2b
-(the full arm64 HW-debug tier: the `DBGBCR`/`BVR`/`WCR`/`WVR` + `MDSCR.MDE` +
-the EC routing to `/proc/<pid>/wait` + single-step + the step-over-breakpoint
-dance + the per-thread register install on ctx-switch) + 8a-2c (its focused
-Fable-5-max holotype + the SMP gate) are next.
+green). 8a-2a complete (the HW-debug delivery verify: PASS on HVF + TCG). 8a-2b-1
+complete (real per-Proc hardware breakpoints: the table + ctx-switch install +
+the EC 0x30 route + `hwbreak`/`hwrmbreak` + `#73`; `/debug-probe` proves a
+cross-Proc bp fires). Next: 8a-2b-2 (single-step via the `MDSCR.SS` machine + the
+step-over-breakpoint dance + the `step` verb, model-first against
+`specs/debug_step.tla`), 8a-2b-3 (watchpoints), and 8a-2c (the consolidated
+Fable-5-max holotype + the SMP gate + the ARCH section 25.4 row + docs). The ARCH
+section 25.4 audit-trigger row + the CLAUDE.md mirror for the 8a-2 HW-debug tier
+land at 8a-2c, when the whole surface is coherent + audited.
 
 ## Known caveats / footguns
 

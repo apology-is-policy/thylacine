@@ -64,6 +64,7 @@ struct Vma;
 struct Allowance;   // I-34 hardware allowance (<thylacine/allowance.h>)
 struct Env;         // G15 per-Proc environment group (<thylacine/env.h>)
 struct Spoor;       // 8a-1b debug_owner slot token (<thylacine/spoor.h>)
+struct debug_hw;    // 8a-2b per-Proc HW-breakpoint table (arch/arm64/hwdebug.h)
 
 // A-1a: identity model (docs/IDENTITY-DESIGN.md §3.3 + §9.1; ARCH §28 I-22).
 //
@@ -529,6 +530,19 @@ struct Proc {
     // idiom). KP_ZERO -> 0 (a reused struct never carries a stale stop); NOT
     // propagated by rfork (a spawned child is not being debugged).
     u32                debug_stop_req;
+
+    // 8a-2b (I-39; DEBUG-FS-DESIGN section 5): the per-Proc hardware-breakpoint
+    // table (struct debug_hw, arch/arm64/hwdebug.h). NULL = no breakpoints (the
+    // overwhelmingly common case); non-NULL = lazily kmalloc'd on the first
+    // `hwbreak` ctl verb and freed at proc_free (never at detach -- so the
+    // context-switch reader hwdebug_switch_in never derefs freed memory; detach
+    // clears the table to bp_count=0 instead). The POINTER is set once (RELEASE)
+    // under g_proc_table_lock when the target is fully-stopped, read (ACQUIRE) in
+    // the ctx-switch install hook + the EC-0x30 handler. The table CONTENTS
+    // (bp_count/bp_va) are mutated only stopped (add/remove) or benign-running
+    // (detach's count=0), guarded by the atomic bp_count. KP_ZERO inits it NULL;
+    // NOT propagated by rfork (a spawned child is not being debugged).
+    struct debug_hw   *debug_hw;
 };
 
 #define PROC_FLAG_NODUMP            (1u << 0)
@@ -573,11 +587,15 @@ struct Proc {
 // thread, and an armed kproc would *_INTR every kernel-thread sleep).
 #define PROC_FLAG_INTR_TERMINATE_PENDING (1u << 7)
 
-_Static_assert(sizeof(struct Proc) == 320,
-               "struct Proc size pinned at 320 bytes (the 312 baseline + the 8a-1b-beta "
-               "debug_stop_req u32 @312, padded to the 8-aligned 320). Adding a field "
-               "grows the SLUB cache; update this assert deliberately so the change is "
-               "intentional.");
+_Static_assert(sizeof(struct Proc) == 328,
+               "struct Proc size pinned at 328 bytes (the 320 baseline + the 8a-2b "
+               "debug_hw pointer @320). Adding a field grows the SLUB cache; update "
+               "this assert deliberately so the change is intentional.");
+_Static_assert(__builtin_offsetof(struct Proc, debug_hw) == 320,
+               "8a-2b debug_hw (the per-Proc HW-breakpoint table pointer) appends "
+               "after debug_stop_req (offset 320, the next 8-aligned slot past the "
+               "u32 @312 + its pad); existing offsets stay stable (KP_ZERO inits it "
+               "NULL = no breakpoints).");
 _Static_assert(__builtin_offsetof(struct Proc, debug_stop_req) == 312,
                "8a-1b-beta debug_stop_req (the I-39 per-Proc debugger stop flag) "
                "appends after debug_owner (offset 312, the next slot past the Spoor* "

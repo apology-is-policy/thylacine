@@ -53,6 +53,7 @@
 #include "../arch/arm64/halls.h"        // 8a-1b-gamma-3: halls_walk_kernel_frames/link_addr -- /proc/<pid>/kstack
 #include "../arch/arm64/halls_symtab.h" // 8a-1b-gamma-3: halls_symbolize -- on-target kstack symbolization
 #include "../arch/arm64/kaslr.h"        // 8a-1b-gamma-3: kaslr_get_offset -- kstack link-translation
+#include "../mm/slub.h"                 // 8a-2b: kzalloc/kfree -- the lazy debug_hw table
 
 // =============================================================================
 // Qid path encoding.
@@ -525,6 +526,7 @@ static int devproc_debug_release_cb(struct Proc *p, void *arg) {
     struct devproc_debug_release_ctx *r = (struct devproc_debug_release_ctx *)arg;
     if (p->debug_owner != r->ctl) return 0;        // keep walking
     p->debug_owner = NULL;                          // release
+    hwdebug_bp_clear_all(p->debug_hw);              // 8a-2b-1: a dead debugger's breakpoints are disarmed (else the orphaned target re-traps forever)
     proc_debug_resume(p);                           // 8a-1b-beta: a dead/detached debugger provably resumes its quarry (ReleaseSlot -> NoStrand)
     // 8a-1b-beta: resume threads parked on p's debugger rendez here.
     r->found = true;
@@ -1004,6 +1006,8 @@ enum ctl_verb {
     CTL_VERB_START,    // 8a-1b-beta: resume the target (non-blocking)
     CTL_VERB_WAITSTOP, // 8a-1b-beta: block until the target is stopped/exits
     CTL_VERB_HWVERIFY, // 8a-2a: arm ("hwverify <hexva>") / disarm ("hwverify off") the self-scoped HW-breakpoint verify
+    CTL_VERB_HWBREAK,  // 8a-2b-1: arm a real per-Proc HW breakpoint ("hwbreak <hexva>"; slot-owner + stopped-only)
+    CTL_VERB_HWRMBREAK,// 8a-2b-1: disarm a per-Proc HW breakpoint ("hwrmbreak <hexva>")
     CTL_VERB_OTHER,
 };
 
@@ -1032,6 +1036,8 @@ static enum ctl_verb parse_ctl_verb(const char *s, long n) {
     if (ctl_tok_eq(s + start, len, "start"))    return CTL_VERB_START;
     if (ctl_tok_eq(s + start, len, "waitstop")) return CTL_VERB_WAITSTOP;
     if (ctl_tok_eq(s + start, len, "hwverify")) return CTL_VERB_HWVERIFY;
+    if (ctl_tok_eq(s + start, len, "hwbreak"))  return CTL_VERB_HWBREAK;
+    if (ctl_tok_eq(s + start, len, "hwrmbreak")) return CTL_VERB_HWRMBREAK;
     return CTL_VERB_OTHER;
 }
 
@@ -1075,6 +1081,17 @@ static enum hwverify_arg parse_hwverify_arg(const char *s, long n, u64 *va_out) 
     }
     *va_out = v;
     return HWVERIFY_ARG_VA;
+}
+
+// 8a-2b: parse the bare hex VA of a "hwbreak <hexva>" / "hwrmbreak <hexva>" write.
+// Delegates to the hwverify scan (verb-skip + separator + optional-0x hex +
+// overflow guard); a numeric token yields the VA, and "off" (not a VA) is
+// correctly rejected. Returns true + *va_out on success.
+static bool parse_ctl_hexva(const char *s, long n, u64 *va_out) {
+    u64 v = 0;
+    if (parse_hwverify_arg(s, n, &v) != HWVERIFY_ARG_VA) return false;
+    *va_out = v;
+    return true;
 }
 
 // proc_for_each context for the kill walk. result: 0 = target pid not found
@@ -1149,6 +1166,13 @@ static int devproc_debug_walk_cb(struct Proc *target, void *arg) {
     // so a stranger's detach or a stale post-reap detach is a clean -1 / no-op).
     if (target->debug_owner == d->ctl) {
         target->debug_owner = NULL;                // release
+        // 8a-2b-1: disarm every breakpoint (bp_count=0) BEFORE the resume, so the
+        // resumed threads reload an EMPTY table (their next ctx-switch-IN) and do
+        // not re-trap on an orphaned bp. Safe whether the target is stopped (the
+        // resume's switch-IN clears MDE) or running (a stale-fire is caught benign
+        // by hwdebug_breakpoint_from_el0). The table stays allocated (freed at
+        // proc_free) so the ctx-switch reader never derefs freed memory.
+        hwdebug_bp_clear_all(target->debug_hw);
         proc_debug_resume(target);                 // 8a-1b-beta: clear the stop + wake parked threads (ReleaseSlot -> NoStrand)
         d->result = 1;
     } else {
@@ -1192,6 +1216,51 @@ static int devproc_runctl_walk_cb(struct Proc *target, void *arg) {
         case DBG_RC_WAITSTOP: break;   // no mutation; the block is outside the lock
     }
     rc->result = 1;
+    return 1;
+}
+
+// =============================================================================
+// ctl HW breakpoints -- hwbreak / hwrmbreak (8a-2b-1; I-39, DEBUG-FS section 5).
+// =============================================================================
+//
+// Arm/disarm a real per-Proc hardware breakpoint at a user VA. Gated like the
+// run-control verbs (the caller's ctl fd must OWN the attach slot) PLUS the I-39
+// two-axis re-check (a hardware-arming write) PLUS stopped-only (the target's
+// threads are all parked -> no CPU is running a target thread -> the per-Proc bp
+// table is quiescent, so the ctx-switch install reader never races the mutation;
+// and Delve arms breakpoints on a stopped process). The lazy debug_hw table is
+// pre-allocated by the caller OUTSIDE g_proc_table_lock (kzalloc may not run
+// under the spinlock) and installed here if the target has none yet.
+struct devproc_hwbp_ctx {
+    int              target_pid;
+    struct Proc     *caller;    // I-39 re-check
+    struct Spoor    *ctl;       // must == target->debug_owner (slot ownership)
+    bool             add;       // true = hwbreak, false = hwrmbreak
+    u64              va;
+    struct debug_hw *spare;     // pre-allocated table (add only); NULLed if installed
+    int              result;    // 0 not found, +1 ok, -1 denied / full / not-present / not-stopped
+};
+static int devproc_hwbp_walk_cb(struct Proc *target, void *arg) {
+    struct devproc_hwbp_ctx *h = (struct devproc_hwbp_ctx *)arg;
+    if (target->pid != h->target_pid) return 0;                                    // keep walking
+    if (target == kproc())                            { h->result = -1; return 1; } // undebuggable
+    if (!devproc_debug_authorized(h->caller, target)) { h->result = -1; return 1; } // I-39
+    if (target->debug_owner != h->ctl)                { h->result = -1; return 1; } // slot owner
+    if (!devproc_target_fully_stopped(target))        { h->result = -1; return 1; } // stopped-only (quiescent)
+
+    if (h->add) {
+        struct debug_hw *hw = target->debug_hw;
+        if (!hw) {
+            hw = h->spare;
+            if (!hw) { h->result = -1; return 1; }   // pre-alloc failed -> ENOMEM-ish
+            h->spare = NULL;                         // consumed -- caller must not free it
+            __atomic_store_n(&target->debug_hw, hw, __ATOMIC_RELEASE);
+        }
+        h->result = hwdebug_bp_add(hw, h->va) ? 1 : -1;   // -1 = table full or already armed
+    } else {
+        struct debug_hw *hw = target->debug_hw;
+        h->result = (hw && hwdebug_bp_remove(hw, h->va)) ? 1 : -1;   // -1 = not present
+    }
     return 1;
 }
 
@@ -1449,7 +1518,8 @@ static long devproc_write(struct Spoor *c, const void *buf, long n, s64 off) {
     if (v != CTL_VERB_KILL && v != CTL_VERB_KILLGRP &&
         v != CTL_VERB_ATTACH && v != CTL_VERB_DETACH &&
         v != CTL_VERB_STOP && v != CTL_VERB_START && v != CTL_VERB_WAITSTOP &&
-        v != CTL_VERB_HWVERIFY) return -1;
+        v != CTL_VERB_HWVERIFY &&
+        v != CTL_VERB_HWBREAK && v != CTL_VERB_HWRMBREAK) return -1;
 
     struct Thread *t = current_thread();
     if (!t || !t->proc) return -1;
@@ -1502,6 +1572,31 @@ static long devproc_write(struct Spoor *c, const void *buf, long n, s64 off) {
         // stop / waitstop: block (outside the lock) until stopped / exit / slot
         // release; -1 only if the CALLER was death-interrupted.
         return (devproc_debug_wait_stopped(pid, c) >= 0) ? n : -1;
+    }
+
+    if (v == CTL_VERB_HWBREAK || v == CTL_VERB_HWRMBREAK) {
+        // 8a-2b-1: arm/disarm a real per-Proc hardware breakpoint. Parse the VA
+        // (user-half, non-zero), pre-allocate the lazy table OUTSIDE the lock (for
+        // hwbreak; kzalloc must not run under g_proc_table_lock), then resolve +
+        // gate + mutate under proc_for_each. A spare table not consumed by the cb
+        // (target already had one, or the gate failed) is freed here.
+        u64 va = 0;
+        if (!parse_ctl_hexva((const char *)buf, n, &va)) return -1;
+        if (va == 0 || va >= UACCESS_USER_VA_TOP) return -1;   // user-half only
+        bool add = (v == CTL_VERB_HWBREAK);
+        struct debug_hw *spare = add ? (struct debug_hw *)kzalloc(sizeof(struct debug_hw), 0) : NULL;
+        struct devproc_hwbp_ctx h = {
+            .target_pid = proc_qid_pid(c->qid.path),
+            .caller     = t->proc,
+            .ctl        = c,
+            .add        = add,
+            .va         = va,
+            .spare      = spare,
+            .result     = 0,
+        };
+        proc_for_each(devproc_hwbp_walk_cb, &h);
+        if (h.spare) kfree(h.spare);   // not installed (target had a table / gate failed)
+        return (h.result == 1) ? n : -1;
     }
 
     struct devproc_kill_ctx k = {

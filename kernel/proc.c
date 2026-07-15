@@ -42,6 +42,7 @@
 #include <thylacine/weft.h>
 
 #include "../arch/arm64/mmu.h"
+#include "../arch/arm64/hwdebug.h" // 8a-2b: hwdebug_free (per-Proc bp table teardown)
 #include "../arch/arm64/timer.h"   // timer_now_ns (A-4a legate valid_until expiry)
 #include "../arch/arm64/uaccess.h"
 #include "../arch/arm64/uart.h"
@@ -518,6 +519,15 @@ void proc_free(struct Proc *p) {
     // independent of the frees above; owned 1:1 by this Proc (RFENVG sharing
     // deferred), so this is the sole release.
     env_free(p);
+
+    // 8a-2b (I-39): release the per-Proc HW-breakpoint table (NULL-tolerant). A
+    // plain heap struct freed ONLY here at reap -- never at detach -- so the
+    // ctx-switch install hook (hwdebug_switch_in) never derefs freed memory
+    // (every thread was reaped + on_cpu-spun before proc_free, so no CPU is in a
+    // switch-in for this Proc). detach clears the table (bp_count=0) but leaves
+    // it allocated for this final free.
+    hwdebug_free(p->debug_hw);
+    p->debug_hw = NULL;
 
     // RW-1 B-F1: release the per-Proc page table. There is NO per-Proc ASID
     // free in the rolling-ASID model -- the Proc's context_id is simply

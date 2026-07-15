@@ -42,6 +42,7 @@
 #include <atomic_lse.h>   // t_atomic_fetch_add_relaxed_u32 (W1.5 LSE-patchable)
 
 #include "../arch/arm64/asid.h"     // RW-1 B-F1: asid_resolve (context-switch ASID pre-hook).
+#include "../arch/arm64/hwdebug.h"  // 8a-2b: hwdebug_switch_in (context-switch HW-breakpoint install).
 #include "../arch/arm64/gic.h"      // P3-G: gic_send_ipi for ready/wakeup wake-idle-peer.
 #include "../arch/arm64/timer.h"    // P5-tsleep: counter read + ns->counter conversion.
 #include "../arch/arm64/uart.h"     // DEBUG (#857): sched_dump_runnable diagnostic.
@@ -1355,6 +1356,13 @@ void sched(void) {
     // it. Runs here -- IRQs masked, cs->lock held, CPU stable -- so the ASID
     // resolve publishes into the active slot of the CPU next will run on.
     sched_install_asid_ttbr0(next);
+
+    // 8a-2b (I-39): install next's Proc HW breakpoints onto THIS CPU (or clear
+    // them + MDE if next is not debugged and this CPU had them loaded). Same
+    // invariants as the ASID install -- IRQs masked, cs->lock held, CPU stable --
+    // so the DBGB*/MDSCR writes take effect on the CPU next runs on, and the
+    // per-CPU MDE isolation fires a bp ONLY while next's (debugged) Proc runs.
+    hwdebug_switch_in(next);
 
     cpu_switch_context(&prev->ctx, &next->ctx);
 

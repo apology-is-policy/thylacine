@@ -454,15 +454,22 @@ static void exception_sync_lower_el_impl(struct exception_context *ctx) {
         proc_fault_terminate(NOTE_NAME_SNARE_BRK, (uintptr_t)ctx->elr);
 
     case EC_BREAKPOINT_LOWER:
-        // 8a-2a: a hardware breakpoint from EL0. The self-scoped verify
-        // (usr/hwbp-verify via the debug-fs `hwverify` ctl verb) arms bp0 on a
-        // VA it will execute; hwdebug_verify_on_ec records the delivery + disarms
-        // and returns true, so the resumed EL0 instruction proceeds -- the
-        // empirical proof that guest-programmed HW debug delivers to guest EL1.
-        // With no verify armed there is no 8a-2b routing yet, so a stray HW
-        // breakpoint is fatal-to-Proc, exactly as the pre-8a-2a default treated
-        // an unknown EC 0x30 (snare:ill; 8a-2b routes it to /proc/<pid>/wait).
+        // A hardware breakpoint from EL0. Three arms, in order:
+        //   (8a-2a) the self-scoped `hwverify` bp -- ELR-matched, swallowed +
+        //           disarmed (the empirical delivery witness).
+        //   (8a-2b) a real per-Proc debugger breakpoint -- hwdebug_breakpoint_
+        //           from_el0 matches ELR against the current Proc's armed table:
+        //           a HIT delivers a whole-Proc stop (the thread returns here ->
+        //           the EL0-return tail's stop-check parks it; the debugger
+        //           learns via /proc/<pid>/wait), and a benign STALE bp (armed
+        //           before a detach cleared the table) disables this CPU's debug
+        //           regs and resumes the instruction. Either way -> return.
+        //   (fatal) only a Proc that was NEVER debugged (no debug_hw) reaches
+        //           here; since ONLY the kernel arms a bp (EL0 cannot touch
+        //           MDSCR/DBGB*), this is impossible in practice -- terminate
+        //           with snare:ill as a defensive backstop.
         if (hwdebug_verify_on_ec(ctx->elr)) return;
+        if (hwdebug_breakpoint_from_el0(ctx->elr)) return;
         proc_fault_terminate(NOTE_NAME_SNARE_ILL, (uintptr_t)esr);
 
     default:

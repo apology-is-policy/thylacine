@@ -25,6 +25,52 @@ void hwdebug_init_cpu(void);
 // 2 / 2). Called once at boot from hw_features_detect.
 void hwdebug_enumerate(void);
 
+// ---- 8a-2b: real per-Proc hardware breakpoints --------------------------
+//
+// DEBUG-FS-DESIGN section 5. A debugger arms breakpoints at user VAs in a
+// STOPPED target (the ctl `hwbreak <hexva>` / `hwrmbreak <hexva>` verbs); the
+// kernel installs that Proc's breakpoint set into a CPU's DBGB* + MDSCR.MDE on
+// every context-switch-IN to one of the target's threads and disables them on
+// switch-OUT (the per-CPU-MDE isolation that fires a bp ONLY while the debugged
+// Proc runs -- PMC=EL0 alone does NOT isolate two Procs sharing a user VA). A bp
+// fire (EC 0x30) routes to a whole-Proc stop via the 8a-1 checkpoint machinery.
+
+#define DEBUG_HWBP_SLOTS 4u   // v1.0 breakpoint table size (clamped to num_brps)
+
+// The per-Proc breakpoint table (lazily kmalloc'd on the first hwbreak, freed at
+// proc_free). MUTATED only when the target is fully-stopped (all threads parked,
+// no CPU running a target thread -> the ctx-switch reader is quiescent), so the
+// switch-IN read needs no lock; bp_count is __atomic so a detach-while-running
+// (count -> 0) races cleanly with a switch-IN / a bp match.
+struct debug_hw {
+    u32 bp_count;                 // armed breakpoints occupy bp_va[0 .. bp_count)
+    u64 bp_va[DEBUG_HWBP_SLOTS];  // 4-byte-aligned user VAs
+};
+
+// Table mutation (caller holds g_proc_table_lock; the target is fully-stopped for
+// add/remove -- hwbreak/hwrmbreak; detach's count=0 clear is stopped-or-running-
+// benign). hwdebug_free is the proc_free teardown.
+bool hwdebug_bp_add(struct debug_hw *hw, u64 va);     // false: table full or already present
+bool hwdebug_bp_remove(struct debug_hw *hw, u64 va);  // false: not present
+void hwdebug_bp_clear_all(struct debug_hw *hw);       // bp_count = 0 (detach / close release)
+void hwdebug_free(struct debug_hw *hw);               // kfree (proc_free)
+
+// The context-switch install/clear hook. Loads next's Proc breakpoints onto THIS
+// CPU (or clears them + MDE if next is not a debugged Proc and this CPU had them
+// loaded). Called from the switch path with IRQs masked + the CPU stable
+// (sched.c, after sched_install_asid_ttbr0, before cpu_switch_context).
+struct Thread;
+void hwdebug_switch_in(struct Thread *next);
+
+// The EC 0x30 (breakpoint from EL0) handler. Returns true if handled: a matched
+// bp -> the whole Proc stop is delivered (proc_debug_stop_deliver) and the
+// current thread parks at the EL0-return tail; OR a benign STALE bp after a table
+// change (detach cleared the table before this CPU reloaded) -> this CPU's debug
+// regs are disabled and the instruction resumes. Returns false only when
+// `current`'s Proc was never debugged (debug_hw == NULL) -- a truly stray EC the
+// caller treats as fatal (only the kernel ever arms a bp; EL0 cannot).
+bool hwdebug_breakpoint_from_el0(u64 elr);
+
 // ---- The 8a-2a self-scoped EL0-breakpoint verify ------------------------
 //
 // A boot probe (usr/hwbp-verify) drives this via the debug-fs `hwverify` ctl
