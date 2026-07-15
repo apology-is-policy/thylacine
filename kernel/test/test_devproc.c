@@ -1007,7 +1007,10 @@ void test_devproc_debug_regs(void) {
     TEST_EXPECT_EQ(ur.pstate, 0x60000000ull, "regs read: pstate = SPSR_EL1");
 
     // --- regs write: x0..x30 + sp + pc applied; pstate (SPSR) IGNORED (guard) ---
-    struct t_user_regs wr = ur;
+    // Field-wise init (every field is set below), NOT `wr = ur`: the 272-byte
+    // struct copy lowers to a memcpy call the freestanding kernel does not link
+    // under the UBSan (low-opt) build.
+    struct t_user_regs wr;
     for (int i = 0; i < 31; i++) wr.regs[i] = 0x2000ull + (u64)i;
     wr.sp     = 0xBEEF0000ull;
     wr.pc     = 0xF00D0000ull;
