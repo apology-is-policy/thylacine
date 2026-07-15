@@ -1045,13 +1045,41 @@ void test_devproc_debug_regs(void) {
                    "regs of a NOT-stopped target is refused");
     spoor_clunk(regs2);
 
-    // Cleanup: unlink + drop the synthetic (stack-local) thread BEFORE the frame
-    // dies, free the kstack, then the Proc.
+    // --- 8a-1c holotype HF1 regression: a DYING target is never debug-stopped ---
+    // (a) A pending group_exit_msg (SYS_EXIT_GROUP / kill in flight): the parked
+    //     head thread still satisfies all_threads_parked, so pre-HF1 the read
+    //     returned the full struct -- a torn-ctx read racing the exiting
+    //     thread's final sched(). Death wins (debug_stop.tla DeathWinsOverStop).
+    tgt->debug_stop_req = 1;
+    __atomic_store_n(&tgt->group_exit_msg, "hf1-dying", __ATOMIC_RELEASE);
+    struct Spoor *regs3 = open_pidfile_for(tgt->pid, "regs", 2);
+    long hf1_msg_rc = regs3 ? devproc.read(regs3, &ur, (long)sizeof(ur), 0) : -2;
+    if (regs3) spoor_clunk(regs3);
+    __atomic_store_n(&tgt->group_exit_msg, (const char *)NULL, __ATOMIC_RELEASE);
+
+    // (b) The EXITING-head backstop: all-EXITING peers are SKIPPED by
+    //     all_threads_parked (vacuously parked, group_exit_msg already NULL
+    //     again), so build_regs itself must refuse an EXITING head thread.
+    th.state = THREAD_EXITING;
+    struct Spoor *regs4 = open_pidfile_for(tgt->pid, "regs", 2);
+    long hf1_exiting_rc = regs4 ? devproc.read(regs4, &ur, (long)sizeof(ur), 0) : -2;
+    if (regs4) spoor_clunk(regs4);
+    th.state = THREAD_SLEEPING;
+
+    // Cleanup BEFORE the HF1 asserts: unlink + drop the synthetic (stack-local)
+    // thread BEFORE the frame dies, free the kstack, then the Proc. TEST_ASSERT
+    // returns on failure -- asserting first would leave tgt linked with a
+    // dangling tgt->threads (the kregs lesson).
     proc_test_unlink(tgt);
     tgt->threads = NULL;
     free_pages(kstk, THREAD_KSTACK_TOTAL_ORDER);
     tgt->state = PROC_STATE_ZOMBIE;
     proc_free(tgt);
+
+    TEST_EXPECT_EQ(hf1_msg_rc, (long)-1,
+                   "regs of a group-terminating target is refused (HF1)");
+    TEST_EXPECT_EQ(hf1_exiting_rc, (long)-1,
+                   "regs of an EXITING head thread is refused (HF1 backstop)");
 }
 
 // 8a-1b-gamma-3: /proc/<pid>/{kregs,kstack,wait} -- the kernel-side inspection +
