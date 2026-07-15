@@ -1619,3 +1619,42 @@ mutation surface (install/evict/invalidate) is untouched.
   keeps a stale entry validated) — a 4-state counterexample.
 - `fs_cache_buggy_no_invalidate.cfg`: `NoWrongRead` VIOLATED (a read serves the
   guest's own stale write) — a 4-state counterexample.
+
+---
+
+## debug_stop.tla — Go IDE Stage 8a (the debugger stop/continue/step SM; spec-first re-enabled, model-first)
+
+Spec-first re-enabled for this surface (user-directed 2026-07-14; CLAUDE.md +
+docs/DEBUG-FS-DESIGN.md section 6) -- the 6th instance of re-enabling point (a).
+Written + TLC-green BEFORE the 8a-1 impl (this section is the RESERVATION; the
+code sites land at 8a-1b). Models the stop/continue/step state machine and its
+composition with the death path (#811/#68) -- an SMP wait/wake race on the most
+bug-prone lineage in the tree, the class the runtime tests are blind to (the
+death_wake / loom / asid / allowance precedent). Clean cfg TLC-green (Safety =
+NoLostStop + NoEL0AfterStopped + ExactlyOnceResume; PROPERTIES EventuallyAllDead
+[DeathWinsOverStop] + EventuallyResumed [NoStrand]); 4 buggy cfgs, each a minimal
+counterexample on its named property.
+
+| Config | Flag | Invariant / Property | Result | Distinct |
+|---|---|---|---|---|
+| `debug_stop.cfg` | all knobs FALSE (2 Threads) | `Safety` + `EventuallyAllDead` + `EventuallyResumed` | clean | 2264 |
+| `debug_stop_buggy_park_before_die.cfg` | `BUGGY_STOP_BEFORE_DIE` | `EventuallyAllDead` | violation | 296 |
+| `debug_stop_buggy_lost_stop.cfg` | `BUGGY_OBSERVE_BEFORE_REGISTER` | `NoLostStop` | violation | -- |
+| `debug_stop_buggy_double_wake.cfg` | `BUGGY_DOUBLE_WAKE` | `ExactlyOnceResume` | violation | -- |
+| `debug_stop_buggy_strand_on_debugger_death.cfg` | `BUGGY_STRAND_ON_CLOSE` | `EventuallyResumed` | violation | 276 |
+
+| Spec action | Code site (lands at 8a-1b) | Invariant pinned |
+|---|---|---|
+| `TailStep` (die-check FIRST, then the stop handshake) | `arch/arm64/vectors.S` EL0-return tail (sync :328 + IRQ :0x480) -> the NEW stop leg, ordered AFTER `el0_return_die_check` | `EventuallyAllDead` (DeathWinsOverStop): the die-check precedes the stop-check; a resume re-runs the tail. `BUGGY_STOP_BEFORE_DIE` = the leg ordered before the die-check. |
+| `Acquire` / `RegisterObserve` (register-then-observe UNDER `wlock`) | `kernel/sched.c` stop-park: take the per-Thread `wait_lock`, register (`rendez_blocked_on` on the debugger rendez + `THREAD_SLEEPING`), re-check the stop flag BEFORE sleeping | `NoLostStop` (I-9): a Thread the debugger confirms is genuinely parked. |
+| `RegisterBuggy` (observe BEFORE register, OUTSIDE the lock) | (none -- the anti-pattern the impl does NOT do; the buggy cfg only) | `BUGGY_OBSERVE_BEFORE_REGISTER` makes `NoLostStop` fail. |
+| `Confirm(t)` (the delivery walk marks t confirmed-parked under `~wlock[t]`) | `kernel/proc.c` stop-delivery cascade -- walk `p->threads`, per-peer `wait_lock`, targeted `gic_send_ipi(cpu, STOP_SGI)` for a Thread running at EL0, confirm when parked with `on_cpu==false` | the confirm sees only a genuinely-parked Thread (mutual exclusion on `wlock` vs `RegisterObserve`). |
+| `WakeFrom(t, s)` (single-wake latch; sources start/release/death) | `kernel/sched.c` resume + the death cascade waking a debugger-parked Thread | `ExactlyOnceResume`: one wakeup per park. `BUGGY_DOUBLE_WAKE` = no latch (a `start` racing a `detach`/close double-wakes). |
+| `ResumeThread(t)` (woken park -> re-run the tail) | `kernel/sched.c` -- a woken parked Thread returns to the EL0-return tail (re-checks death) | a resume never resumes a dead Thread; death wins on the re-run. |
+| `ReleaseSlot` (detach / ctl-fd close / debugger death -> resume + detach) | `kernel/handle.c` the debug ctl-fd close hook + `kernel/proc.c` (#68/#926 close-at-exit) -> clear the stop + wake all parked | `EventuallyResumed` (NoStrand): the handle-lifetime-tied slot resumes the target on release. `BUGGY_STRAND_ON_CLOSE` = the release neither clears the stop nor wakes. |
+| `SetGflag` / the death legs | `kernel/proc.c::proc_group_terminate` (the set-once `group_exit_msg`) + `el0_return_die_check` | death completes even against a live debugger holding a stop (the death cascade wakes debugger-parked Threads). |
+
+Pre-commit gate (from 8a-1b): `debug_stop.cfg` clean GREEN + the 4 buggy cfgs
+confirmed, on any change to the EL0-return tail stop leg, the stop-park
+register-then-observe protocol, the stop-delivery cascade, or the ctl-fd-close
+resume.
