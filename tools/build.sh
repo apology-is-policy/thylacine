@@ -314,6 +314,17 @@ EOF
     cat > "$ramfs_src/version" <<'EOF'
 Thylacine v0.1-dev
 EOF
+    # Go Stage 8c-1 (iteration 1): the Ambush non-interactive init script that
+    # /ambush-probe drives via `ambush attach <pid> /ambush-child --init
+    # /ambush-init`. These commands run once against the attached, debug-stopped
+    # /ambush-child, then Ambush reads stdin -> EOF (the probe closes the child's
+    # stdin) -> the REPL exits + detaches. No `exit` command (which would prompt
+    # to kill the attached target and block on the EOF'd stdin).
+    cat > "$ramfs_src/ambush-init" <<'EOF'
+goroutines
+bt
+print main.Sentinel
+EOF
     # U-6e-a: the `source` builtin's read fixture (/u-builtin-test sources
     # this and asserts the assignment + fn registration persist into the
     # caller's Env).
@@ -396,7 +407,7 @@ EOF
     # file-backed exec path carries it, like net-echo. Absent if the Go fork was
     # not present at build time (build_go_probes skipped); the joey go-hello
     # probe then degrades to "not spawned".
-    local go_bins=( "go-hello" "go-goroutines" "go-fs" "go-exec" "go-net" "go-env" "go-web" "go-get" "ambush" )
+    local go_bins=( "go-hello" "go-goroutines" "go-fs" "go-exec" "go-net" "go-env" "go-web" "go-get" "ambush" "ambush-child" )
     local go_release="$BUILD_DIR/go"
     for bin in "${go_bins[@]}"; do
         local src="$go_release/$bin"
@@ -520,7 +531,7 @@ build_go_probes() {
     #                    from proxy.golang.org through /net; build; run the
     #                    result). EXTERNAL-NETWORK dependent, like go-web.
     local probe
-    for probe in go-hello go-goroutines go-fs go-exec go-net go-env go-web go-get; do
+    for probe in go-hello go-goroutines go-fs go-exec go-net go-env go-web go-get ambush-child; do
         ( cd "$REPO_ROOT/usr/$probe" && \
           GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 "$go_bin" build -o "$go_out/$probe" . ) \
             || { echo "==> Go-port: go build $probe FAILED" >&2; return 1; }

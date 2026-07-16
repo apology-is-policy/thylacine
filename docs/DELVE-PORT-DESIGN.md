@@ -586,3 +586,56 @@ variable/frame. This is where the *backend* assumptions get verified: the non-PI
 `EntryPoint==0`, the `iscgo`/`tpidr` Go-`g` recovery, the exe-path DWARF load, and
 the wait-file/stop semantics under a real parked Go target. Iteration 0 having
 proven the binary runs, iteration 1's failures (if any) isolate to the backend.
+
+## 17. 8c-1 iteration 1 -- the multi-thread-stop seam (ground truth, 2026-07-16)
+
+Iteration 1 wired the attach E2E (`usr/ambush-child`, a parking Go target with a
+known global + named park frame; `/ambush-init`, the non-interactive Delve
+command file; the grown `usr/ambush-probe`). It ground-truthed the backend to a
+single, precise blocker.
+
+**The path, one fix at a time (the ground-truth method):**
+1. First attach: Delve refused -- `Stdin is not a terminal, use ...
+   --allow-non-terminal-interactive=true`. Correct: the `isatty_thylacine.go`
+   shim returns false (Thylacine has no termios tty), so Delve's non-terminal
+   guard fires. Added the flag.
+2. Second attach: HANG (~25 s, zero output). `--log --log-output=debugger`
+   pinned it: Delve logs `attaching to pid <N>` then goes silent -- it hangs in
+   the backend halt (`ctl stop`), before any REPL command.
+
+**Root cause (confirmed at three levels):** the kernel debug-stop is the **Plan 9
+non-preemptive stop** -- it sets `debug_stop_req` + IPIs *running* peers to their
+EL0-return tail, but **never wakes a *sleeping* thread**
+(`kernel/proc.c::proc_debug_stop_deliver`: *"a thread blocked in a syscall SLEEP
+is deliberately NOT interrupted ... explicit-stop-of-a-sleeper is a v1.x
+refinement"*). A multi-threaded Go target always has idle M threads parked in a
+futex/torpor wait; they are parked on the torpor rendez, **not** `debug_rendez`,
+so `kernel/devproc.c::devproc_all_threads_parked` (which requires *every*
+non-EXITING thread on its own `debug_rendez` with `on_cpu==false`) is never
+satisfied -> the target is never *fully-stopped* -> `ctl stop` (which blocks
+until fully-stopped) hangs forever. debug-child (a single-thread Rust yield loop)
+stops fine precisely because its one thread returns to EL0 every yield; a
+multi-M Go program cannot.
+
+This is the Linux `ptrace` group-stop that Thylacine deferred: on Linux a
+`SIGSTOP` stops a futex-blocked thread *in-kernel*; Thylacine only stops at
+EL0-return.
+
+**The seam (the fix, deferred to a design decision):** an **explicit
+stop-of-a-sleeper** -- the #811-analog for debug-stop. On stop, wake every
+interruptible sleeper (as #811's death-wake does) so it unwinds toward its
+EL0-return tail, observes `debug_stop_req`, and parks on `debug_rendez`; on
+resume, the interrupted syscall **restarts** (the sleeper re-blocks). Unlike
+#811 (where the woken sleeper DIES, abandoning the syscall), a debug-stopped
+sleeper must PRESERVE + restart it. This touches the wait/wake invariant (I-9)
+and `specs/debug_stop.tla`, spans every blocking site (the #811 site set), and
+sits on the most bug-prone lineage (#788/#806/#860/#809/#811/#68) -- so it is a
+spec-first, focused-audit, SMP-gated chunk of its own (8c-2-kernel or an 8a-3
+extension; **task #87**), surfaced for a design decision rather than built inline.
+
+**State:** the attach E2E is written + verified to REACH the target and is GATED
+OFF (`ATTACH_ENABLED = false` in `ambush-probe`) so it does not hang every boot;
+it flips to a gated assertion the moment the seam closes. Stage A (the version
+smoke) stays gated-green: **Ambush runs on-device.** The scaffold (§15) + it.0
+(§16) + this backend ground-truth (§17) are the 8c-1 deliverable pending the
+multi-thread-stop decision.
