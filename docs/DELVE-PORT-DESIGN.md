@@ -484,3 +484,66 @@ Remaining 8c-1 work: set up the outside-repo Ambush fork (Delve v1.25.2 + the
 sentinel tag + the telemetry strip + the `proc_thylacine` backend), the
 `tools/build.sh` cross-build + pool-bake integration, and the on-device
 `ambush attach <pid>` E2E (`usr/ambush-probe`).
+
+---
+
+## 15. 8c-1 as-built -- the fork + the cross-build-green backend
+
+The outside-repo Ambush fork lives at **`~/projects/ambush`** (git-init'd from
+stock Delve v1.25.2 as `f0e3cb8`, the go-toolchain-fork pattern). Three commits:
+the stock baseline, `vendor:` (repopulate the deps for an offline cross-build --
+the module-cache extraction shipped only `vendor/modules.txt`), and `8c-1:` (the
+backend + shims).
+
+**`GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 go build ./...` is GREEN** with the
+go-thylacine fork (go1.25.3) -- a 15 MB static aarch64 ELF with `debug_info`;
+`go vet` on the native backend is clean. This is the single biggest 8c-1
+de-risking: the whole Delve dependency graph (service/debugger, service/dap,
+terminal, dwarf, the goroutine/DWARF engine) cross-builds for Thylacine, gated
+only by the sentinel tag + a handful of thin OS shims.
+
+**The backend (`pkg/proc/native`, `//go:build thylacine`):**
+- `proc_thylacine.go` -- `Attach` (open the seven debug files -> ctl `attach` +
+  `stop` -> `initialize`), `trapWait` (block on `wait`: `stopped\n`/`exited\n`),
+  `resume`/`stop`/`kill`/`detach`, `EntryPoint` (0 -- Go is non-PIE, REVENANT
+  maps at the ELF VAs with no load slide), the one-head-thread `updateThreadList`,
+  and the ebpf/dump/BPF `ProcessInternal` stubs. `osProcessDetails` holds the
+  seven open `*os.File` handles (the ctl fd owns the attach slot for its life).
+- `threads_thylacine.go` -- `ReadMemory`/`WriteMemory` (`ReadAt`/`WriteAt` on
+  `mem` @ the target VA), `SoftExc`, `singleStep` (the `step` verb, which blocks
+  kernel-side).
+- `registers_thylacine_arm64.go` -- `registers`/`fpRegisters`/`setPC`/`SetReg`/
+  `restoreRegisters` over the **reused** `linutil.ARM64Registers` decode (a
+  positioned read of `regs`/`fpregs` straight into the byte-identical structs;
+  `tpidr_el0` from `kregs`@104 when `iscgo`).
+- `threads_thylacine_arm64.go` -- the HW breakpoint/watchpoint methods (inert
+  stubs at 8c-1; the ctl `hwbreak`/`hwwatch` routing is 8c-2).
+
+`Attach`, `EntryPoint`, `SupportsBPF`/`SetUProbe`/`GetBufferedTracepoints`/
+`DumpProcessNotes`/`MemoryMap` are the OS surface `dump_*.go`/`proc_no_ebpf_*.go`
+do not cover for Thylacine (they are `_linux`-filename or `darwin||windows`
+tagged); `FollowExec`/`detachChild` port free from `followexec_other.go`
+(`!linux && !windows`).
+
+**The shims** (each excludes thylacine from the unix/other file + provides a
+thylacine stub, or strips a dep):
+- `support_sentinel.go` `+ !thylacine` (the collision fix); `proc_unix.go`
+  `+ !thylacine` (`syscall.SysProcAttr` is `struct{}`); `redirector_other.go`
+  `+ !thylacine` (no `syscall.Mkfifo`).
+- new `redirector_thylacine.go` / `gdbserial/gdbserver_thylacine.go` (lldb/rr,
+  dead-but-must-compile: `sysProcAttr`/`foregroundSignalsIgnore`/`tcsetpgrp`
+  stubs) / `terminal/out_thylacine.go` (no `TIOCGWINSZ` -> non-paging pager) /
+  `vendor/github.com/mattn/go-isatty/isatty_thylacine.go` (`IsTerminal` false;
+  upstream go-isatty has no GOOS=thylacine file).
+- `cmd/dlv/main.go` + `pkg/logflags/logflags.go`: strip `golang.org/x/telemetry`.
+- `service/debugger/debugger.go`: pass the CLI `path` to `native.Attach` (the
+  signature gained a `path` param -- Thylacine has no `/proc/<pid>/exe` and
+  `cmdline` is a v1.0 placeholder, so the debuggee's ELF must be named).
+
+**Owed 8c-1 runtime work** (the ground-truth-over-theory half, unstarted): the
+`tools/build.sh` cross-build + pool-bake wiring (an `AMBUSHFORK` env override
+mirroring `GOFORK` + `THYLACINE_BAKE_GOROOT`), and the on-device `usr/ambush-probe`
+E2E (spawn a known Go child, `ambush attach <pid> <exe>`, assert a known
+variable/frame). The E2E is where the runtime assumptions get verified: the
+non-PIE `EntryPoint==0`, the `iscgo`/`tpidr` Go-`g` recovery, the exe-path
+resolution, and the wait-file/stop semantics under a real parked Go target.
