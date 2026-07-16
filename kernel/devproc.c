@@ -1523,7 +1523,16 @@ static int devproc_debug_wait_stopped(int pid, struct Spoor *ctl) {
 // walk of a stale ctx). An off-cpu head is walked as a settled snapshot; if it
 // then wakes + runs mid-walk, halls_walk_kernel_frames keeps every deref inside
 // [lo,hi) (memory-safe, garbage-but-bounded), the best-effort-consistency contract.
-static size_t devproc_format_kstack(struct Proc *target, char *buf, size_t cap) {
+// `raw` -- may the caller see the raw slid kernel addresses? The raw `addr` + the
+// unslid `link` reveal the KASLR slide (koff = addr - link), an I-16 secret that
+// /ctl/kernel-base gates behind the CAP_HOSTOWNER tier (#57a). So they are emitted
+// ONLY to a CAP_DEBUG/CAP_HOSTOWNER caller (the debugger tier -- it reads
+// /ctl/kernel-base anyway + needs raw addrs to correlate with the kernel DWARF at
+// 8c). The owner axis gets the KASLR-INDEPENDENT symbolic frame (name+soff is
+// link-relative -> reveals no slide), which IS the "why is it hung" diagnostic.
+// (8b-1d holotype F1: without this, an unprivileged owner reads its own koff off a
+// settled head thread -- 8b widened the pre-existing 8a owner-attach-and-stop path.)
+static size_t devproc_format_kstack(struct Proc *target, char *buf, size_t cap, bool raw) {
     struct Thread *th = target->threads;   // head thread (v1.0)
     // 8a-1c holotype F1 (defense-in-depth): never walk an EXITING head thread's
     // ctx/kstack -- it is executing its exit path on that stack.
@@ -1555,15 +1564,23 @@ static size_t devproc_format_kstack(struct Proc *target, char *buf, size_t cap) 
         size_t r;
         r = fmt_str(buf, cap, off, "#");        if (!r) return ls; off += r;
         r = fmt_udec(buf, cap, off, i);         if (!r) return ls; off += r;
-        r = fmt_str(buf, cap, off, "  ");       if (!r) return ls; off += r;
-        r = fmt_hex(buf, cap, off, addr);       if (!r) return ls; off += r;
-        r = fmt_str(buf, cap, off, "  link ");  if (!r) return ls; off += r;
-        r = fmt_hex(buf, cap, off, link);       if (!r) return ls; off += r;
+        if (raw) {
+            // I-16: the raw slid addr + unslid link leak koff -> CAP tier only.
+            r = fmt_str(buf, cap, off, "  ");       if (!r) return ls; off += r;
+            r = fmt_hex(buf, cap, off, addr);       if (!r) return ls; off += r;
+            r = fmt_str(buf, cap, off, "  link ");  if (!r) return ls; off += r;
+            r = fmt_hex(buf, cap, off, link);       if (!r) return ls; off += r;
+        }
         if (name) {
+            // name+soff is link-relative -> KASLR-independent (safe for the owner).
             r = fmt_str(buf, cap, off, "  ");    if (!r) return ls; off += r;
             r = fmt_str(buf, cap, off, name);    if (!r) return ls; off += r;
             r = fmt_str(buf, cap, off, "+");     if (!r) return ls; off += r;
             r = fmt_hex(buf, cap, off, soff);    if (!r) return ls; off += r;
+        } else if (!raw) {
+            // Owner axis + unsymbolized: emit no address (a bare slid addr leaks
+            // koff). A CAP reader already got the raw addr above.
+            r = fmt_str(buf, cap, off, "  <unknown>"); if (!r) return ls; off += r;
         }
         r = fmt_str(buf, cap, off, "\n");        if (!r) return ls; off += r;
     }
@@ -1589,7 +1606,14 @@ static int devproc_kstack_walk_cb(struct Proc *target, void *arg) {
     // the head on on_cpu==false; the walk is bounded to the thread's own kstack
     // (memory-safe) + runs under g_proc_table_lock (the Thread lifetime pin). This
     // is what lets 8b inspect a thread blocked DEEP in a syscall (sleep -> rendez).
-    k->total  = devproc_format_kstack(target, k->buf, k->cap);
+    //
+    // I-16 (8b-1d holotype F1): raw slid kernel addresses reveal the KASLR slide, so
+    // they go ONLY to the CAP_DEBUG/CAP_HOSTOWNER tier (the /ctl/kernel-base tier);
+    // the owner axis gets the KASLR-independent symbolic form. Same acquire-load of
+    // caps as devproc_debug_authorized (both axes are clearance-grantable).
+    bool raw = (__atomic_load_n(&k->caller->caps, __ATOMIC_ACQUIRE)
+                & (CAP_HOSTOWNER | CAP_DEBUG)) != 0;
+    k->total  = devproc_format_kstack(target, k->buf, k->cap, raw);
     k->result = 1;
     return 1;
 }

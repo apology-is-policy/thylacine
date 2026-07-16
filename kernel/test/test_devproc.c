@@ -1231,10 +1231,15 @@ void test_devproc_debug_kregs_kstack_wait(void) {
         spoor_clunk(kregs);
     }
 
+    // 8b F1 (I-16): the raw slid frame addrs are CAP-tier only; this walk-frame
+    // verification reads in the CAP_DEBUG tier to see them (the owner axis gets the
+    // KASLR-independent symbolic form, covered by devproc.debug_kstack_settled).
     char sbuf[512]; for (size_t i = 0; i < sizeof(sbuf); i++) sbuf[i] = 0;
     long slen = -999;
+    __atomic_fetch_or(&caller->caps, CAP_DEBUG, __ATOMIC_RELEASE);
     struct Spoor *ks = open_pidfile_for(tgt->pid, "kstack", 0);
     if (ks) { slen = devproc.read(ks, sbuf, (long)sizeof(sbuf), 0); spoor_clunk(ks); }
+    __atomic_fetch_and(&caller->caps, ~(u64)CAP_DEBUG, __ATOMIC_RELEASE);
 
     char wbuf[16], ebuf[16]; long wl = -999, wl_nonowner = -999, el = -999;
     for (size_t i = 0; i < sizeof(wbuf); i++) { wbuf[i] = 0; ebuf[i] = 0; }
@@ -1343,11 +1348,21 @@ void test_devproc_debug_kstack_settled(void) {
     proc_test_link(tgt);
 
     // --- Capture every result (NO content asserts yet; cleanup precedes asserts) ---
-    // (a) settled + NOT debug-stopped -> the 8b walk (fully_stopped would -1 here).
+    // (a) settled + NOT debug-stopped, OWNER axis (no cap) -> the 8b walk in the
+    //     SYMBOLIC form (F1/I-16: no raw slid addr -> no koff leak to the owner).
     char sbuf[512]; for (size_t i = 0; i < sizeof(sbuf); i++) sbuf[i] = 0;
     long slen_settled = -999;
     struct Spoor *ks = open_pidfile_for(tgt->pid, "kstack", 0);
     if (ks) { slen_settled = devproc.read(ks, sbuf, (long)sizeof(sbuf), 0); spoor_clunk(ks); }
+
+    // (a2) the SAME settled read with CAP_DEBUG -> the RAW form (the debugger tier
+    //      sees the slid addr, exactly as it reads /ctl/kernel-base).
+    char cbuf[512]; for (size_t i = 0; i < sizeof(cbuf); i++) cbuf[i] = 0;
+    long slen_cap = -999;
+    __atomic_fetch_or(&caller->caps, CAP_DEBUG, __ATOMIC_RELEASE);
+    struct Spoor *kc = open_pidfile_for(tgt->pid, "kstack", 0);
+    if (kc) { slen_cap = devproc.read(kc, cbuf, (long)sizeof(cbuf), 0); spoor_clunk(kc); }
+    __atomic_fetch_and(&caller->caps, ~(u64)CAP_DEBUG, __ATOMIC_RELEASE);
 
     // (b) a running head -> "<running>" (no walk of a stale ctx).
     char rbuf[512]; for (size_t i = 0; i < sizeof(rbuf); i++) rbuf[i] = 0;
@@ -1365,6 +1380,14 @@ void test_devproc_debug_kstack_settled(void) {
     if (kn) { slen_nonowner = devproc.read(kn, jbuf, (long)sizeof(jbuf), 0); spoor_clunk(kn); }
     tgt->principal_id = saved_pid;
 
+    // (d) F3: an EXITING head -> empty (never walk a head running its exit path).
+    char dbuf[64]; for (size_t i = 0; i < sizeof(dbuf); i++) dbuf[i] = 0;
+    long slen_exiting = -999;
+    th.state = THREAD_EXITING;
+    struct Spoor *kx = open_pidfile_for(tgt->pid, "kstack", 0);
+    if (kx) { slen_exiting = devproc.read(kx, dbuf, (long)sizeof(dbuf), 0); spoor_clunk(kx); }
+    th.state = THREAD_SLEEPING;   // restore (cleanup nulls threads next anyway)
+
     // --- Cleanup FIRST (before any content assert can return + strand the link) ---
     proc_test_unlink(tgt);
     tgt->threads = NULL;
@@ -1378,10 +1401,20 @@ void test_devproc_debug_kstack_settled(void) {
     // (debug_stop_req==0 -> devproc_target_fully_stopped false).
     TEST_ASSERT(slen_settled > 0,                              "8b: settled (not debug-stopped) kstack walks");
     TEST_ASSERT(contains(sbuf, (size_t)slen_settled, "#0"),         "8b: frame #0 present");
-    TEST_ASSERT(contains(sbuf, (size_t)slen_settled, "0x11110000"), "8b: frame #0 addr = ctx.lr");
+    // F1 (I-16): the OWNER axis gets NO raw slid addr (no koff leak). Revert-probe:
+    // dropping the raw-gate (always-raw) makes this CONTAIN "0x11110000" -> FAIL.
+    TEST_ASSERT(!contains(sbuf, (size_t)slen_settled, "0x11110000"),
+                "8b F1: owner axis -> no raw slid addr (koff protected)");
+    // The CAP_DEBUG tier gets the raw slid addr (the debugger view; frame #0 = ctx.lr).
+    TEST_ASSERT(slen_cap > 0,                                  "8b: CAP-tier settled kstack walks");
+    TEST_ASSERT(contains(cbuf, (size_t)slen_cap, "0x11110000"),
+                "8b F1: CAP tier -> raw slid addr (frame #0 = ctx.lr)");
     // A running head reports the marker (its live regs are in HW, not ctx).
     TEST_ASSERT(slen_running > 0,                             "8b: running head produced text");
     TEST_ASSERT(contains(rbuf, (size_t)slen_running, "running"), "8b: running head reports <running>");
     // I-39 authorization preserved for the inspect tier.
     TEST_EXPECT_EQ(slen_nonowner, (long)-1, "8b: non-owner (no CAP_DEBUG) inspect refused (I-39)");
+    // F3: an EXITING head -> empty (the death-adjacent guard; the relaxed gate no
+    // longer rejects a dying target, so the format-time EXITING guard is load-bearing).
+    TEST_EXPECT_EQ(slen_exiting, 0L, "8b F3: EXITING head -> empty read (never walk a dying head)");
 }

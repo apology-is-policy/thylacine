@@ -396,9 +396,14 @@ Relaxing the `kstack` gate from `fully_stopped` to `settled` (`on_cpu==false`)
 must not weaken memory-safety. It does not:
 
 - **Lifetime** — the read holds `g_proc_table_lock` (via `proc_for_each`), which
-  pins the target Proc ALIVE; a live Proc's Thread structs are freed only at the
-  group reap (`wait_pid`, which needs the Proc ZOMBIE + the lock), so `th` cannot
-  be `thread_free`'d under the read. (v1.0 reads the head thread; per-tid is v1.x.)
+  pins the target *reachable*; `wait_pid` UNLINKS the ZOMBIE from the table under
+  `g_proc_table_lock` (`proc_unlink_child`) BEFORE the lock-free `thread_free`, so
+  no reachable target's Thread can be freed under the read — ALIVE or
+  ZOMBIE-unreaped alike (a reachable ZOMBIE's head is `THREAD_EXITING`, atomically
+  under the lock, so `devproc_format_kstack` returns 0). The load-bearing pin is
+  the unlink-before-free ordering, not "ALIVE" per se. (v1.0 reads the head thread;
+  per-tid — which would walk a non-head thread — is v1.x and MUST preserve this
+  ordering. Holotype F2.)
 - **Bounded walk** — `halls_walk_kernel_frames` gates every deref to the thread's
   own usable kstack `[base+guard, base+size)` + `fp+16 <= hi`. A thread that
   *wakes and runs* mid-walk (a wake takes the rendez/rq locks, NOT
@@ -433,6 +438,17 @@ I-39's "register/memory access is only permitted on a stopped target" is refined
 > execution control (stop/step/write) remain stopped-only.** The inspect confers
 > no authority beyond the gate and controls no execution — it is strictly weaker
 > than a debug-stop.
+
+**The raw-address gate (I-16; holotype F1).** A kstack line's raw slid `addr` +
+unslid `link` reveal the KASLR slide (`koff = addr − link`), an I-16 secret
+`/ctl/kernel-base` gates behind `CAP_HOSTOWNER` (#57a). So `devproc_format_kstack`
+emits them ONLY to a `CAP_DEBUG`/`CAP_HOSTOWNER` caller (the debugger tier — it
+reads `/ctl/kernel-base` anyway + needs raw addrs to correlate with the kernel
+DWARF at 8c); the **owner axis** gets the KASLR-INDEPENDENT symbolic form
+(`#N  name+0xsoff` — link-relative, no slide), which IS the "why is it hung"
+diagnostic. Without this, an unprivileged owner reads its own `koff` off a settled
+head thread — 8b widened the pre-existing 8a owner-`attach`-and-`stop`-another-
+owned-Proc path (which reached the same raw kstack) to a no-attach self-read.
 
 ### 5b.3 v1.x seams
 

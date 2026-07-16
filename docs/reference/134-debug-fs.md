@@ -571,6 +571,118 @@ PASS + `/hwbp-verify` PASS on HVF (`-cpu host`, GICv2) — the 8a-2c HVF proof;
 the SMP gate default+UBSan × smp4/smp8 N=10 = **40/40 PASS, 0 corruption**. Closed list:
 `memory/audit_8a2_closed_list.md`.
 
+## 8b — the cross-boundary unified stack (the settled-thread inspect)
+
+Stage 8b makes the §4 headline — the unified user→kernel stack of a thread
+blocked deep in a syscall — first-class, and closes the one gap ground truth
+surfaced. Design: `docs/DEBUG-FS-DESIGN.md §5b` (user-voted 2026-07-16).
+
+**The gap.** The 8a debug-stop parks a target ONLY at the EL0-return tail (a
+syscall *complete*), and every debug read is gated `fully_stopped`. So a
+debug-stopped thread's `kstack` shows the return-tail path, NOT the
+`blocked-in-channel-recv → sched.c::sleep → the rendez` stack the §4 headline
+promises — and a thread genuinely *hung* in a syscall never reaches the tail, so
+a debug-stop never takes: you cannot freeze a hung thread to look at it.
+
+**The fix — the Linux `/proc/<pid>/stack` model.** Reading a *settled*
+(`on_cpu==false`) thread's kernel stack is a **read-only inspection**, distinct
+from and strictly weaker than a debug-stop (no execution control, no user
+memory). So `/proc/<pid>/kstack` (`devproc_kstack_walk_cb`) DROPS the
+`fully_stopped` gate — it reads the head thread's kernel fp-chain whenever the
+head is settled (parked on ANY rendez: the pipe/torpor/debug rendez), with **I-39
+authorization ONLY** (`devproc_debug_authorized` + kproc-refuse — unchanged), NO
+debug-stop. `devproc_format_kstack` gates the head on `on_cpu==false` (a running
+head reports `<running>` — its live registers are in hardware, not `th->ctx`).
+**`mem`/`regs`/`kregs`/`wait` KEEP the `fully_stopped` gate**: user memory, user
+registers, and all execution control stay stopped-only (the vote relaxed ONLY the
+read-only kernel-stack inspect).
+
+**Memory-safety (§5b.1).** The relaxation is memory-safe regardless of the
+target's concurrent execution:
+
+- **Lifetime** — the read holds `g_proc_table_lock` (via `proc_for_each`), which
+  pins the target *reachable*; `wait_pid` UNLINKS the ZOMBIE from the table under
+  GPTL (`proc_unlink_child`) BEFORE the lock-free `thread_free`, so no reachable
+  target's Thread can be freed under the read — ALIVE or ZOMBIE-unreaped alike (the
+  load-bearing pin is the unlink-before-free ordering, not "ALIVE"; a reachable
+  ZOMBIE's head is `THREAD_EXITING` → `devproc_format_kstack` returns 0). [F2]
+- **Bounded walk** — `halls_walk_kernel_frames` gates every deref to the thread's
+  own usable kstack `[base+guard, base+size)` + `fp+16 <= hi`. A thread that wakes
+  and RUNS mid-walk (a wake takes the rendez/rq locks, NOT GPTL, so it is not
+  excluded) can mutate its own kstack + `th->ctx` under the read — a torn `u64`
+  fp/lr, a garbage frame link — but every deref stays inside the thread's own
+  kstack, and an out-of-range/misaligned link stops the walk (`halls_fp_is_sane`).
+  `base`/`kstack_size` are set at thread creation and never change, so the bounds
+  are stable even if `th->ctx` is torn.
+- **Consistency = best-effort** (the Linux `/proc/stack` contract) — a genuinely
+  *sleeping* thread has a stable kstack until woken, so the common case (inspect a
+  hung/blocked thread) is coherent; a running/waking thread yields a
+  possibly-inconsistent but bounded (never unsafe) frame list.
+- **No new stop-machinery race** — the inspect reads `th->ctx` + kstack memory; it
+  touches neither `debug_stop_req` nor the park/wake protocol nor the death path,
+  so `specs/debug_stop.tla` is **UNCHANGED** (the read is a gate condition, not a
+  state-machine transition — the 8a `mem`/`regs`-read precedent). Re-verified
+  clean 2264 distinct GREEN.
+
+**The I-39 refinement (§5b.2).** I-39's "register/memory access only on a stopped
+target" is refined (not weakened): a read-only inspection of a settled thread's
+KERNEL stack is I-39-*authorized* but does not require a debug-stop; user memory,
+user registers, and all execution control remain stopped-only. The inspect
+confers no authority beyond the gate (a non-owner without `CAP_DEBUG` is refused)
+and controls no execution. **The raw-address gate (I-16; holotype F1):** a kstack
+line's raw slid `addr` + unslid `link` reveal the KASLR slide (`koff = addr −
+link`), an I-16 secret `/ctl/kernel-base` gates behind `CAP_HOSTOWNER` (#57a). So
+the raw columns are emitted ONLY to a `CAP_DEBUG`/`CAP_HOSTOWNER` caller (the
+debugger tier — it reads `/ctl/kernel-base` anyway + needs raw addrs to correlate
+with the kernel DWARF at 8c); the **owner axis** gets the KASLR-independent
+symbolic form (`#N  name+0xsoff`), which IS the "why is it hung" diagnostic.
+Without this an unprivileged owner reads its own `koff` off a settled head thread
+(8b widened the pre-existing 8a owner-`attach`-and-`stop` path to a self-read).
+
+**Kernel DWARF — DEFERRED to 8c.** 8b ships `func+offset` kernel symbolization
+(HX-2, already on-target). Source-line mapping + kernel-frame locals need the
+kernel ELF's DWARF (a few MB) + an on-device DWARF reader — dlv (8c) brings Go's
+`debug/dwarf` reader (the consumer) with it; shipping MB of `.debug_*` + a bespoke
+reader with no consumer in 8b is premature.
+
+**Proof.** `usr/stack-probe` (boot-fatal) spawns `usr/stack-child` (which blocks
+forever in `torpor_wait` → `sleep()` on the torpor rendez — settled, never at the
+EL0-return tail), hands it CPU time via a short never-woken timed wait, then reads
+`/proc/<pid>/kstack` **owner-authorized, NO attach/stop** until the child is
+blocked in `sleep()`. The ground truth it prints — the deep-in-syscall kernel
+stack, no debug-stop:
+
+```
+#0 sched   #1 sleep   #2 tsleep   #3 sys_torpor_wait_for_proc
+#4 syscall_dispatch   #5 exception_sync_lower_el   #6 _exception_vectors
+```
+
+That is "why is this thread hung" all the way down to the EL0→EL1 SVC entry
+vector. The kernel unit test `devproc.debug_kstack_settled` covers the mechanism
+synthetically (settled-not-stopped → walks; `on_cpu==true` → `<running>`;
+non-owner → I-39 refused) and is revert-probed: restoring the `fully_stopped` gate
+→ 1136/1137 FAIL at "settled kstack walks".
+
+**A hunt recorded (ground-truth over theory).** The first probe caught the child
+in its NEVER-RUN state — a single frame `thread_trampoline+0x0` (`th->ctx.lr` was
+still the initial value `cpu_switch_context` had not yet overwritten, because the
+child had not been dispatched). Reading `cpu_switch_context` (it saves `ctx.lr =
+x30`, the return into `sched`) proved the single frame meant "not yet run", not
+"blocked" — the poll accepted it too early. Fix: hand the child real CPU time (a
+timed block, not `t_yield`) + wait for the `sleep` frame, not merely "settled".
+
+**v1.x seams**: per-tid `/proc/<pid>/thread/<tid>/kstack` (8b reads the head
+thread); the *user* frames of a hung thread (the full user+kernel stitch of a
+thread blocked mid-syscall needs the user `regs`/`mem` of a non-stopped thread, a
+larger relaxation the vote deliberately did not take — 8b delivers the kernel half
+for a blocked thread and the full stitch for a *stopped* thread); source-line
+kernel DWARF (8c).
+
+**Gates**: default **1137/1137** + boot OK + 0 EXTINCTION + `/stack-probe` PASS
+(the `sched→sleep→tsleep→torpor→dispatch→exception-entry` chain) +
+`debug_stop.tla` clean 2264 GREEN (unchanged) + the SMP gate. Closed list:
+`memory/audit_8b_closed_list.md`.
+
 ## Known caveats / footguns
 
 - **The trapframe is not at `kstack_top − 288`.** Any future consumer of a
@@ -584,8 +696,10 @@ the SMP gate default+UBSan × smp4/smp8 N=10 = **40/40 PASS, 0 corruption**. Clo
   `/proc/<pid>/thread/<tid>/` layer is v1.x.
 - The stop is a checkpoint stop (Plan 9 `startsyscall` semantics), not
   preemptive: a thread blocked deep in a syscall sleep stops at the *next*
-  checkpoint it reaches, not by interrupting the sleep. An explicit
-  stop-a-sleeping-thread-now is a v1.x refinement.
+  checkpoint it reaches, not by interrupting the sleep. **8b's settled-thread
+  `kstack` inspect READS a blocked thread's kernel stack without stopping it (the
+  Linux `/proc/<pid>/stack` model — see §8b);** an explicit *stop*-a-sleeping-
+  thread-now (execution control on a blocked thread) remains a v1.x refinement.
 - Software breakpoints are FORBIDDEN (I-12 W^X + I-36 REVENANT Image cache) —
   the `dlv` backend routes breakpoints to the 8a-2 HW path.
 - The 8a-2a `hwverify` breakpoint is GLOBAL (one at a time) and armed on the CPU
