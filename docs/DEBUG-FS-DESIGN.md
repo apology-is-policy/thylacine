@@ -1,13 +1,14 @@
-# DEBUG-FS-DESIGN — the kernel debug surface (Go IDE Stage 8a)
+# DEBUG-FS-DESIGN — the kernel debug surface (Go IDE Stage 8a-8b)
 
-**Status: DESIGN (focused pass, ratified 2026-07-14, user-voted). Scripture,
-no code.** This is the Stage 8a focused design pass mandated by
-`docs/GO-IDE-DESIGN.md §8` ("each kernel sub-stage opens with its own focused
-design pass + audit — it is a new privilege surface"). It designs the kernel
-half of the cross-boundary debugger: the `/proc/<pid>` debug filesystem, the
-stop/continue/single-step state machine, cross-Proc memory + register access,
-the unified user->kernel stack walk, arm64 hardware breakpoints/watchpoints, and
-the debug-authority invariant **I-39**. It is prose- and spec-validated (per the
+**Status: 8a AS-BUILT (8a-1 + 8a-2 landed + audited, 2026-07-15). §5b (Stage 8b)
+DESIGN ratified 2026-07-16, user-voted — scripture, no code yet.** This is the
+Stage 8a-8b focused design pass mandated by `docs/GO-IDE-DESIGN.md §8` ("each
+kernel sub-stage opens with its own focused design pass + audit — it is a new
+privilege surface"). It designs the kernel half of the cross-boundary debugger:
+the `/proc/<pid>` debug filesystem, the stop/continue/single-step state machine,
+cross-Proc memory + register access, the unified user->kernel stack walk (§4.6 +
+the Stage-8b settled-thread inspect §5b), arm64 hardware breakpoints/watchpoints,
+and the debug-authority invariant **I-39**. It is prose- and spec-validated (per the
 2026-05-23 suspension, with spec-first RE-ENABLED for the stop/step state
 machine — a race-bearing wait/wake surface on the death-path lineage).
 
@@ -267,6 +268,13 @@ single user->kernel call stack — every frame symbolized on-target (kernel via
 HX-2, userspace via the ramfs `.symtab`); DWARF locals are the 8b host-`.elf`
 plumbing (out of 8a scope, but the walk is here).
 
+**As-built (8a-1b-gamma-3):** the walker is the ADDITIVE `halls_walk_kernel_frames`
+(not a refactor of `halls_backtrace` — the dying-machine dump path stays
+byte-for-byte unchanged), taking explicit `[lo,hi)` bounds + `fp+16<=hi`, fed by
+`th->ctx.lr`/`th->ctx.fp`. **Stage 8b (§5b)** makes this walk available on a
+*settled but not debug-stopped* thread (the blocked-in-syscall case the §4
+headline needs) and defers source-line kernel DWARF to 8c.
+
 ---
 
 ## 5. 8a-2 — the arm64 hardware-debug tier
@@ -341,6 +349,101 @@ parking the thread (§4.2) instead of terminating the Proc. The kernel-side
   access).
 - Note the Cortex-A76 erratum 1463225 (step-into-SVC) for real hardware
   (Lazarus); QEMU/HVF is unaffected.
+
+---
+
+## 5b. Stage 8b — the cross-boundary unified stack (settled-thread inspect)
+
+Stage 8b makes §4.6's headline first-class and closes the one gap ground truth
+surfaced. It delivers two things and defers a third (all three user-voted
+2026-07-16):
+
+1. **The stitch** — one `user -> kernel` call stack. The kernel already exposes
+   both halves: the user frames via `regs` + `mem` (a stopped target), the kernel
+   frames via `kstack` (the additive `halls_walk_kernel_frames` fp-chain,
+   symbolized `func+offset` via the HX-2 symtab). The debugger concatenates them
+   at the SVC boundary. This is consumer-side (dlv's `proc_thylacine` backend at
+   8c does the full user fp-walk + DWARF); 8b proves the kernel *provides* both
+   halves and they classify + stitch (user = TTBR0 VAs; kernel = named TTBR1).
+
+2. **The settled-thread kernel-stack inspect** — the new kernel work, and the
+   answer to the gap. The 8a debug-stop parks a target **only at the EL0-return
+   tail** (a syscall *complete*, §4.2), so a debug-stopped thread's `kstack` shows
+   the return-tail path, **not** the deep `blocked-in-channel-recv -> sched.c::sleep
+   -> the exact rendez` stack the §4 headline promises. Worse, a thread genuinely
+   *hung* in a syscall never reaches the tail, so a debug-stop never takes — you
+   cannot freeze a hung thread to look at it. The fix is the **Linux
+   `/proc/<pid>/stack` + Plan 9 model**: reading a *settled* (`on_cpu==false`)
+   thread's kernel stack is a **read-only inspection**, distinct from and strictly
+   weaker than a debug-stop — no execution control, no user-memory access. So
+   `/proc/<pid>/kstack` reads the head thread's kernel fp-chain whenever it is
+   settled (parked on **any** rendez — the pipe rendez, the torpor rendez, the
+   debug rendez), **without requiring `debug_stop_req`**. "Why is this thread
+   hung" becomes a `cat /proc/<pid>/kstack` — the single most useful debug
+   diagnostic, available even without attaching.
+
+3. **Kernel DWARF — DEFERRED to 8c.** 8b ships `func+offset` kernel symbolization
+   (HX-2, already on-target: reloc-free, KASLR-independent). Source-line mapping +
+   kernel-frame locals need the kernel ELF's DWARF (a few MB) *and* an on-device
+   DWARF reader — neither exists yet, and dlv (8c) brings Go's `debug/dwarf`
+   reader (the consumer) with it. Shipping MB of `.debug_*` + a bespoke reader with
+   no consumer in 8b is premature; it lands at 8c where the reader + the consumer
+   arrive together. (Chunk-completeness deferral, user-signed-off 2026-07-16.)
+
+### 5b.1 The safety of reading a settled-but-not-stopped thread
+
+Relaxing the `kstack` gate from `fully_stopped` to `settled` (`on_cpu==false`)
+must not weaken memory-safety. It does not:
+
+- **Lifetime** — the read holds `g_proc_table_lock` (via `proc_for_each`), which
+  pins the target Proc ALIVE; a live Proc's Thread structs are freed only at the
+  group reap (`wait_pid`, which needs the Proc ZOMBIE + the lock), so `th` cannot
+  be `thread_free`'d under the read. (v1.0 reads the head thread; per-tid is v1.x.)
+- **Bounded walk** — `halls_walk_kernel_frames` gates every deref to the thread's
+  own usable kstack `[base+guard, base+size)` + `fp+16 <= hi`. A thread that
+  *wakes and runs* mid-walk (a wake takes the rendez/rq locks, NOT
+  `g_proc_table_lock`, so it is not excluded) can mutate its own kstack and
+  `th->ctx` under the read — a **torn `u64`** fp/lr or a garbage frame link — but
+  every deref stays inside the thread's own kstack and an out-of-range link stops
+  the walk. So the walk is memory-safe **regardless** of the target's concurrent
+  execution.
+- **Consistency = best-effort** (the Linux `/proc/stack` contract). A genuinely
+  *sleeping* thread (blocked on a rendez) has a stable kstack until it is woken,
+  so the common case — inspect a hung/blocked thread — is coherent. A running or
+  waking thread yields a possibly-inconsistent (but bounded, never unsafe) frame
+  list. `on_cpu==true` is reported as `running` (no meaningful saved frame — the
+  live registers are in hardware, not `th->ctx`), not walked.
+- **No new race with the stop machinery** — the inspect reads `th->ctx` +
+  kstack memory; it touches neither `debug_stop_req` nor the park/wake protocol
+  nor the death path, so `specs/debug_stop.tla` is **unchanged** (the read is a
+  gate condition, not a state-machine transition — like the 8a `mem`/`regs`
+  reads). The gate change is prose-validated (this section + the focused audit),
+  not a spec extension.
+
+### 5b.2 The I-39 refinement
+
+I-39's "register/memory access is only permitted on a stopped target" is refined
+(not weakened) to name the diagnostic-inspect tier explicitly:
+
+> A read-only inspection of a **settled** (`on_cpu==false`) thread's **kernel**
+> stack (`/proc/<pid>/kstack`) is I-39-*authorized* (the same owner-or-`CAP_DEBUG`/
+> `CAP_HOSTOWNER` gate) but does **not** require a debug-stop — the Linux
+> `/proc/<pid>/stack` diagnostic tier. It is memory-safe (bounded to the thread's
+> own kstack) and best-effort-consistent. **User memory, user registers, and all
+> execution control (stop/step/write) remain stopped-only.** The inspect confers
+> no authority beyond the gate and controls no execution — it is strictly weaker
+> than a debug-stop.
+
+### 5b.3 v1.x seams
+
+- **Per-tid inspect** (`/proc/<pid>/thread/<tid>/kstack`) — 8b reads the head
+  thread; the specific blocked M of a multi-thread Go proc is v1.x.
+- **The user frames of a *hung* thread** — the full `user + kernel` unified stack
+  of a thread blocked mid-syscall needs the user `regs`/`mem` of a non-stopped
+  thread, a larger (and genuinely racier) relaxation the vote deliberately did not
+  take. 8b delivers the *kernel* half for a blocked thread (the "where is it
+  stuck" answer) and the full stitch for a *stopped* thread; joining them is v1.x.
+- **Source-line kernel DWARF** — 8c (above).
 
 ---
 
@@ -481,6 +584,26 @@ composition is load-bearing and prosecuted hard:
 - **8a-2c** — the focused 8a-2 audit (the per-thread install SMP race; the EC
   routing; W^X/I-36 preservation; the step-over dance correctness) + the SMP gate
   + the HVF+TCG boot proofs + docs.
+- **8b-1a** — scripture (this pass): the DEBUG-FS §5b design (the settled-thread
+  kstack inspect + the I-39 refinement §5b.2 + the DWARF-defer-to-8c) + the ARCH
+  §28 I-39 text. No code.
+- **8b-1b** — relax `/proc/<pid>/kstack` from `fully_stopped` to the settled-thread
+  gate (`on_cpu==false` + non-EXITING; a `running` marker on `on_cpu==true`), I-39
+  authorization + kproc-refuse unchanged; the kernel test (settled non-stopped ->
+  walks; running -> marker); `debug_stop.tla` re-verified UNCHANGED (the read is a
+  gate condition, not an SM transition). The §25.4 prosecution row + the CLAUDE.md
+  mirror join here (the reserved-surface pattern).
+- **8b-1c** — the in-guest proof (`usr/stack-probe`, boot-fatal): (B) a child
+  blocked in `torpor_wait`-forever, its `/proc/<pid>/kstack` read owner-authorized
+  WITHOUT a debug-stop -> a named blocked kernel frame; (A) the cross-boundary
+  stitch on a debug-stopped child (user `regs.pc` [TTBR0] ++ `kstack` [named
+  TTBR1] -> both halves present + classified). Kernel-byte-unchanged (consumer).
+- **8b-1d** — the focused 8b audit (the settled-thread read's memory-safety +
+  the `g_proc_table_lock` lifetime pin + the best-effort-consistency contract +
+  no-new-stop-race) + the SMP gate + `docs/reference/134` §8b.
+- **8c+** — `dlv`'s `proc_thylacine` backend (which ships kernel DWARF — the
+  consumer + the reader arrive together), `gopls`, the Nora plugin, the Kaua UI,
+  the superpowers, the whole-arc audit.
 
 Each audit-bearing sub-chunk gets a focused Fable-5-max `holotype-reviewer` round
 + a concurrent self-audit + the SMP gate, per the standard cadence. The audit
