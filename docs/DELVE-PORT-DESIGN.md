@@ -304,10 +304,19 @@ frames.
   fork (`~/projects/go-thylacine`), exactly like the toolchain and the coreutils
   ports. Delve's imports (`os`, `os/exec`, `syscall`, `debug/dwarf`,
   `debug/elf`, `encoding/json`, networking) are all covered by the fork's
-  `GOOS=thylacine` support (Stages 4-6). Vendor Delve at `usr/ambush/` (a
-  fork-and-patch, like the Go fork itself) built into the `ambush` binary — the
-  patch set is the `proc_thylacine` backend + the build-tag surgery; a 8c-1
-  mechanics call on the exact fork layout.
+  `GOOS=thylacine` support (Stages 4-6).
+- **Vendoring — an OUTSIDE-repo Delve fork, pool-baked (the Go-toolchain
+  pattern; refined from the initial `usr/ambush/` guess by the 8c-1 probe, §14).**
+  Delve is a large multi-package program whose binary is tens of MB — it cannot
+  ride a ramfs blob, and its full tree would bloat the OS repo. So Ambush
+  patterns with the **Go toolchain fork**, not the small in-`usr/` probes: the
+  Delve fork lives OUTSIDE the thylacine repo (e.g. `~/projects/ambush`, like
+  `~/projects/go-thylacine`), `tools/build.sh` cross-builds it with an
+  `AMBUSHFORK` env override (mirroring `GOFORK`), and the `ambush` binary is
+  **baked onto the Stratum pool** alongside the trimmed GOROOT (the
+  `THYLACINE_BAKE_GOROOT` machinery). The fork's patch set is small: the sentinel
+  build-tag exclusion + the `proc_thylacine` backend files + stripping the
+  `x/telemetry` integration (§14).
 - **DAP transport = stdio first.** `dlv dap` speaks DAP over stdin/stdout (no
   listener needed) — the clean transport for the Nora plugin (8e) and for
   in-guest E2E. A TCP listener over `/net` (`dlv dap --listen`) is available for
@@ -386,8 +395,9 @@ the stock Delve port. The kernel debug surface (8a/8b) keeps its Plan 9 verbs
 (`stop`/`start`/`step`/`attach`/`detach`, `mem`/`regs`/`wait`) — descriptive,
 lineage-correct, unchanged; Ambush is the userspace debugger that drives them.
 
-Vendored at `usr/ambush/` (a Delve fork-and-patch, like the Go fork), built
-`GOOS=thylacine GOARCH=arm64`.
+Vendored as an outside-repo Delve fork, cross-built `GOOS=thylacine
+GOARCH=arm64` and pool-baked like the Go toolchain (§9, refined by the 8c-1
+probe §14 — Delve is too large for the in-`usr/` module pattern).
 
 ---
 
@@ -425,3 +435,52 @@ Reported-at-implementation calls (mine to make + surface, not block on):
   `pkg/proc/native/{proc,threads,ptrace,registers}_linux*.go` (the backend
   contract + the OS-factored surface `proc_thylacine` fills).
 - `docs/NOVEL.md` angle #13 (the capability-scoped cross-boundary debugger).
+
+---
+
+## 14. 8c-1 feasibility probe (ground truth, 2026-07-16)
+
+A cross-build of stock Delve v1.25.2 for `GOOS=thylacine GOARCH=arm64
+CGO_ENABLED=0` with the Go fork (`~/projects/go-thylacine`, go1.25.3),
+de-risking the port before writing the backend. Results:
+
+- **The mechanism is confirmed.** Delve's `pkg/proc/native` has a build sentinel
+  (`support_sentinel.go`, `//go:build !linux && !darwin && !windows && !freebsd`
+  → `package your_operating_system_is_not_supported_by_delve`) that collides with
+  `package native` for any unlisted OS. Adding `&& !thylacine` to that tag
+  resolves the collision — the single line the port needs there. The `_linux*.go`
+  backend files are Linux-only by **filename convention** (no explicit tags), so
+  the port adds parallel `*_thylacine*.go` files. The shared files
+  `proc.go` / `proc_unix.go` / `threads.go` / `followexec_other.go` already
+  select on thylacine — they port for free.
+- **Two dependency gaps sit above the backend, both tractable:**
+  - **`os/user` (the FORK) — FIXED + committed** (`go-thylacine` `7242ba7`). The
+    `!cgo` `lookup_stubs.go` path thylacine takes provides `currentUID`/
+    `currentGID` (so `user.Current()` works from the kernel uid/gid), but the
+    `lookupUser`/`lookupUserId`/`lookupGroup`/`lookupGroupId`/`listGroups` family
+    lived only in `lookup_unix.go` (thylacine isn't in the `unix` tag set) → a new
+    `lookup_thylacine.go` stubs the five (no `/etc/passwd`, the Plan 9 shape).
+    `os/user` now builds green for thylacine.
+  - **`x/telemetry/internal/mmap` (a dep) — strip in the Ambush fork.** Delve
+    imports `golang.org/x/telemetry` in exactly two places (`cmd/dlv/main.go`
+    `telemetry.Start(...)` + `pkg/logflags` `counter.NewStack("delve/bug", 16)`);
+    the dep's `internal/mmap` has no thylacine file. A debugger does not need Go
+    usage analytics — the fork strips both sites (trivial), removing the dep
+    entirely.
+- **The backend contract is the designed set.** Behind those deps, the
+  `_thylacine*.go` fill-list is the `_linux*.go` surface: the `osProcessDetails`/
+  thread-`osSpecificDetails` types + `Launch`/`Attach`/`initialize`/`kill`/
+  `requestManualStop`/`addThread`/`updateThreadList`/`trapWait`/`wait`/`resume`/
+  `stop`/`detach`/`EntryPoint` + `ReadMemory`/`WriteMemory`/`singleStep` +
+  `registers`/`setPC`/`SetReg`/`fpRegisters` + the `writeHardwareBreakpoint`/
+  `clearHardwareBreakpoint`/`findHardwareBreakpoint`/`getWatchpoints`/
+  `setWatchpoints` family + the unsupported `SetUProbe`/`FollowExec`/dump stubs —
+  each a thin `pread`/`pwrite`/ctl-write over the debug-fs, wearing the reused
+  `linutil.ARM64Registers` decode.
+- **Vendoring confirmed (§9):** Delve's binary is tens of MB → outside-repo fork
+  + pool-bake (the Go-toolchain pattern), not `usr/ambush/`.
+
+Remaining 8c-1 work: set up the outside-repo Ambush fork (Delve v1.25.2 + the
+sentinel tag + the telemetry strip + the `proc_thylacine` backend), the
+`tools/build.sh` cross-build + pool-bake integration, and the on-device
+`ambush attach <pid>` E2E (`usr/ambush-probe`).
