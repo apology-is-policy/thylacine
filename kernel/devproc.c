@@ -1486,15 +1486,25 @@ static int devproc_debug_wait_stopped(int pid, struct Spoor *ctl) {
 }
 
 // =============================================================================
-// 8a-1b-gamma-3: /proc/<pid>/kstack -- the stopped thread's symbolized KERNEL
-// backtrace (I-39; DEBUG-FS 4.6, the 8a-1 half of the unified user->kernel
-// stack). The USER frames are the debugger's job (walk the EL0 x29 chain via
-// /proc/<pid>/regs + /proc/<pid>/mem); the KERNEL frames need a kernel walker
-// because the debugger cannot read kernel VAs (TTBR1) through mem. The walk
-// reuses the audited Halls fp-chain logic via an ADDITIVE, fault-safe primitive
-// (halls_walk_kernel_frames) that leaves the dying-machine dump path byte-
-// unchanged. Same gate as mem/regs: I-39 + fully-stopped (so on_cpu==false ->
-// t->ctx + the kstack are settled), all under g_proc_table_lock.
+// 8a-1b-gamma-3: /proc/<pid>/kstack -- the symbolized KERNEL backtrace (I-39;
+// DEBUG-FS 4.6, the 8a-1 half of the unified user->kernel stack). The USER
+// frames are the debugger's job (walk the EL0 x29 chain via /proc/<pid>/regs +
+// /proc/<pid>/mem); the KERNEL frames need a kernel walker because the debugger
+// cannot read kernel VAs (TTBR1) through mem. The walk reuses the audited Halls
+// fp-chain logic via an ADDITIVE, fault-safe primitive (halls_walk_kernel_frames)
+// that leaves the dying-machine dump path byte-unchanged.
+//
+// 8b (DEBUG-FS 5b): this read is the SETTLED-THREAD INSPECT tier -- the Linux
+// /proc/<pid>/stack + Plan 9 model. Gate = I-39 authorization ONLY; NO
+// debug-stop required (unlike mem/regs/kregs/wait, which stay fully_stopped-
+// gated). The head thread is walked whenever it is SETTLED (on_cpu==false --
+// parked on ANY rendez: the pipe/torpor/debug rendez); a running head reports
+// "<running>". Memory-safe regardless of the target's concurrent execution
+// (bounded to the thread's own kstack + the g_proc_table_lock lifetime pin);
+// best-effort-consistent (coherent for a sleeping thread -- the "why is it
+// hung" diagnostic -- garbage-but-bounded for a racing one). This is why 8b
+// can show a thread blocked DEEP in a syscall (sleep -> the rendez), which a
+// debug-stop -- parking only at the EL0-return tail -- cannot.
 // =============================================================================
 
 #define DEBUG_KSTACK_MAX_FRAMES  32u
@@ -1503,16 +1513,25 @@ static int devproc_debug_wait_stopped(int pid, struct Spoor *ctl) {
 // Walk + symbolize the head thread's kernel stack into `buf`; return the byte
 // length (0 if no walkable thread). Runs under g_proc_table_lock in the cb; the
 // walk reads only the target's own USABLE kstack (guard excluded) + the .rodata
-// symtab -- no sleep, no alloc. t->ctx is canonical here (the fully-stopped gate
-// guaranteed on_cpu==false). Truncates at a whole-line boundary if `cap` fills
+// symtab -- no sleep, no alloc. Truncates at a whole-line boundary if `cap` fills
 // (best-effort; the shallow checkpoint stack fits easily -- a deep 8a-2 bp stack
 // past 2 KiB is a v1.x offset-aware multi-read).
+//
+// 8b: th->ctx is canonical ONLY off-cpu (the #788 discipline: a running/switching
+// thread's live state is in hardware, not th->ctx). Since the 8b relaxation drops
+// the fully_stopped gate, a running head is possible -> report "<running>" (no
+// walk of a stale ctx). An off-cpu head is walked as a settled snapshot; if it
+// then wakes + runs mid-walk, halls_walk_kernel_frames keeps every deref inside
+// [lo,hi) (memory-safe, garbage-but-bounded), the best-effort-consistency contract.
 static size_t devproc_format_kstack(struct Proc *target, char *buf, size_t cap) {
     struct Thread *th = target->threads;   // head thread (v1.0)
     // 8a-1c holotype F1 (defense-in-depth): never walk an EXITING head thread's
     // ctx/kstack -- it is executing its exit path on that stack.
     if (!th || th->state == THREAD_EXITING || !th->kstack_base) return 0;
     if (th->kstack_size <= THREAD_KSTACK_GUARD_SIZE) return 0;   // no usable region
+    // 8b: a running head has no meaningful saved frame (live regs are in HW).
+    if (__atomic_load_n(&th->on_cpu, __ATOMIC_ACQUIRE))
+        return fmt_str(buf, cap, 0, "#0  <running>\n");   // 0 if it did not fit
 
     // Fault-safe bounds: the USABLE kstack [base + guard, base + total). The low
     // guard is no-access -- walking into it would fault (there is no HX-I1 guard
@@ -1557,7 +1576,7 @@ struct devproc_kstack_ctx {
     char        *buf;
     size_t       cap;
     size_t       total;
-    int          result;   // 0 not found, +1 built, -1 denied / not-stopped / no-thread
+    int          result;   // 0 not found, +1 built, -1 denied / no-thread
 };
 
 static int devproc_kstack_walk_cb(struct Proc *target, void *arg) {
@@ -1565,7 +1584,11 @@ static int devproc_kstack_walk_cb(struct Proc *target, void *arg) {
     if (target->pid != k->target_pid) return 0;   // keep walking
     if (target == kproc())                            { k->result = -1; return 1; }
     if (!devproc_debug_authorized(k->caller, target)) { k->result = -1; return 1; }   // I-39
-    if (!devproc_target_fully_stopped(target))        { k->result = -1; return 1; }   // stopped-only
+    // 8b: the SETTLED-thread inspect -- NO debug-stop required (unlike mem/regs/
+    // kregs/wait, which keep the fully_stopped gate). devproc_format_kstack gates
+    // the head on on_cpu==false; the walk is bounded to the thread's own kstack
+    // (memory-safe) + runs under g_proc_table_lock (the Thread lifetime pin). This
+    // is what lets 8b inspect a thread blocked DEEP in a syscall (sleep -> rendez).
     k->total  = devproc_format_kstack(target, k->buf, k->cap);
     k->result = 1;
     return 1;

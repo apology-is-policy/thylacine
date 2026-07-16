@@ -58,6 +58,7 @@ void test_devproc_debug_stop_start_resume(void);
 void test_devproc_debug_mem(void);
 void test_devproc_debug_regs(void);
 void test_devproc_debug_kregs_kstack_wait(void);
+void test_devproc_debug_kstack_settled(void);
 void test_devproc_debug_step_cancel_on_stop(void);
 
 // A-4b + 8a-1b impl hooks (non-static in kernel/devproc.c) + Proc test helpers
@@ -1291,4 +1292,96 @@ void test_devproc_debug_kregs_kstack_wait(void) {
     TEST_EXPECT_EQ(wl_nonowner, (long)-1, "wait by a non-owner (no CAP_DEBUG) is refused (I-39)");
     TEST_EXPECT_EQ(el, 7L, "wait on an exiting target returns 'exited\\n'");
     TEST_ASSERT(el == 7 && contains(ebuf, (size_t)el, "exited"), "wait status = exited");
+}
+
+// 8b: the SETTLED-thread kstack inspect (DEBUG-FS 5b). Reads a thread's KERNEL
+// stack while it is BLOCKED in a syscall (on_cpu==false, debug_stop_req==0)
+// WITHOUT a debug-stop -- the Linux /proc/<pid>/stack tier. The 8a fully_stopped
+// gate rejected this (debug_stop_req==0 -> -1); the 8b relaxation walks it. Also:
+// a running head (on_cpu==true) reports "<running>", and I-39 is preserved.
+void test_devproc_debug_kstack_settled(void) {
+    struct Thread *tt = current_thread();
+    TEST_ASSERT(tt && tt->proc, "test thread has a proc");
+    struct Proc *caller = tt->proc;
+    TEST_ASSERT(!(caller->caps & (CAP_HOSTOWNER | CAP_DEBUG)),
+                "test caller lacks CAP_HOSTOWNER/CAP_DEBUG (the non-owner deny case is meaningful)");
+
+    struct Proc *tgt = proc_alloc();
+    TEST_ASSERT(tgt != NULL, "alloc debug target");
+    tgt->principal_id = caller->principal_id;   // owner -> I-39 authorized
+    tgt->state        = PROC_STATE_ALIVE;
+
+    struct page *kstk = alloc_pages(THREAD_KSTACK_TOTAL_ORDER, KP_ZERO);
+    if (!kstk) { tgt->state = PROC_STATE_ZOMBIE; proc_free(tgt); }
+    TEST_ASSERT(kstk != NULL, "alloc synthetic kstack");
+    u8 *kbase = (u8 *)pa_to_kva(page_to_pa(kstk));
+
+    // Hand-built kernel fp-chain (fp0 -> fp1 -> sentinel), the gamma-3 shape.
+    u8 *fp0 = kbase + THREAD_KSTACK_TOTAL_SIZE - 256;
+    u8 *fp1 = kbase + THREAD_KSTACK_TOTAL_SIZE - 128;
+    *(volatile u64 *)fp0        = (u64)(uintptr_t)fp1;
+    *(volatile u64 *)(fp0 + 8)  = 0x22220000ull;
+    *(volatile u64 *)fp1        = 0;
+    *(volatile u64 *)(fp1 + 8)  = 0x33330000ull;
+
+    struct Thread th;
+    for (size_t i = 0; i < sizeof(th); i++) ((u8 *)&th)[i] = 0;
+    th.magic             = THREAD_MAGIC;
+    th.state             = THREAD_SLEEPING;
+    th.kstack_base       = kbase;
+    th.kstack_size       = THREAD_KSTACK_TOTAL_SIZE;
+    th.on_cpu            = false;
+    // Blocked on a NON-debug rendez (a real syscall block) -- the 8b case the
+    // fully_stopped gate rejected. The relaxed read never consults this field.
+    th.rendez_blocked_on = NULL;
+    th.next_in_proc      = NULL;
+    th.ctx.fp = (u64)(uintptr_t)fp0;
+    th.ctx.lr = 0x11110000ull;
+
+    tgt->threads        = &th;
+    tgt->debug_stop_req = 0;            // NOT debug-stopped -- the 8b relaxation
+    proc_test_link(tgt);
+
+    // --- Capture every result (NO content asserts yet; cleanup precedes asserts) ---
+    // (a) settled + NOT debug-stopped -> the 8b walk (fully_stopped would -1 here).
+    char sbuf[512]; for (size_t i = 0; i < sizeof(sbuf); i++) sbuf[i] = 0;
+    long slen_settled = -999;
+    struct Spoor *ks = open_pidfile_for(tgt->pid, "kstack", 0);
+    if (ks) { slen_settled = devproc.read(ks, sbuf, (long)sizeof(sbuf), 0); spoor_clunk(ks); }
+
+    // (b) a running head -> "<running>" (no walk of a stale ctx).
+    char rbuf[512]; for (size_t i = 0; i < sizeof(rbuf); i++) rbuf[i] = 0;
+    long slen_running = -999;
+    th.on_cpu = true;
+    struct Spoor *kr = open_pidfile_for(tgt->pid, "kstack", 0);
+    if (kr) { slen_running = devproc.read(kr, rbuf, (long)sizeof(rbuf), 0); spoor_clunk(kr); }
+    th.on_cpu = false;
+
+    // (c) I-39: a non-owner (no CAP_DEBUG) is refused even for the read-only inspect.
+    char jbuf[64]; long slen_nonowner = -999;
+    u32 saved_pid = tgt->principal_id;
+    tgt->principal_id = (caller->principal_id == 0x0D0D0D0Du) ? 0x0E0E0E0Eu : 0x0D0D0D0Du;
+    struct Spoor *kn = open_pidfile_for(tgt->pid, "kstack", 0);
+    if (kn) { slen_nonowner = devproc.read(kn, jbuf, (long)sizeof(jbuf), 0); spoor_clunk(kn); }
+    tgt->principal_id = saved_pid;
+
+    // --- Cleanup FIRST (before any content assert can return + strand the link) ---
+    proc_test_unlink(tgt);
+    tgt->threads = NULL;
+    free_pages(kstk, THREAD_KSTACK_TOTAL_ORDER);
+    tgt->state = PROC_STATE_ZOMBIE;
+    proc_free(tgt);
+
+    // --- Assert (safe: nothing linked) ---
+    // The 8b headline: a settled-but-NOT-stopped thread's kernel stack walks.
+    // Revert-probe: restoring the fully_stopped gate makes slen_settled == -1
+    // (debug_stop_req==0 -> devproc_target_fully_stopped false).
+    TEST_ASSERT(slen_settled > 0,                              "8b: settled (not debug-stopped) kstack walks");
+    TEST_ASSERT(contains(sbuf, (size_t)slen_settled, "#0"),         "8b: frame #0 present");
+    TEST_ASSERT(contains(sbuf, (size_t)slen_settled, "0x11110000"), "8b: frame #0 addr = ctx.lr");
+    // A running head reports the marker (its live regs are in HW, not ctx).
+    TEST_ASSERT(slen_running > 0,                             "8b: running head produced text");
+    TEST_ASSERT(contains(rbuf, (size_t)slen_running, "running"), "8b: running head reports <running>");
+    // I-39 authorization preserved for the inspect tier.
+    TEST_EXPECT_EQ(slen_nonowner, (long)-1, "8b: non-owner (no CAP_DEBUG) inspect refused (I-39)");
 }
