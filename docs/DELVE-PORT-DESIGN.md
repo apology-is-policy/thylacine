@@ -4,7 +4,9 @@
 This is the binding design charter for **Stage 8c** of the Go IDE arc
 (`docs/GO-IDE-DESIGN.md §8`): a `proc_thylacine` backend for **Delve** (`dlv`,
 the standard Go debugger) driven entirely over the as-built kernel debug-fs
-(`docs/reference/134-debug-fs.md`, Stage 8a + 8b). Per the spec-to-code
+(`docs/reference/134-debug-fs.md`, Stage 8a + 8b). The resulting Thylacine
+debugger is named **Ambush** (§11, user-voted 2026-07-16) — a Delve port
+(binary `ambush`, its CLI mirroring `dlv`). Per the spec-to-code
 suspension this is a prose-validated arc; 8c is a **userspace port** (a Go
 program cross-built `GOOS=thylacine`, execution-verified, NOT a new kernel
 surface), a different — lighter-audit — risk profile than the 8a/8b kernel work.
@@ -235,25 +237,25 @@ rights to: netd, stratumd, a stuck shell).
 *before* the Go runtime runs, to set breakpoints before `main.main`. Thylacine
 has no "stop at exec/entry" primitive today. Two paths:
 
-- **(a) attach-first + breakpoint-at-entry (the recommended 8c start).** Spawn
-  the child (`SYS_SPAWN`, stdio piped) → `attach` immediately (the pid is known
-  from spawn) → `stop` (the child parks at its *first* EL0-return tail — the
-  first syscall the runtime makes at startup, microseconds in, far before
-  `main.main`) → `hwbreak <entry>` (or the DWARF entry) → `start` → the child
-  runs to the entry breakpoint. This needs **no new kernel surface** and matches
-  how Delve launches on backends without a stop-at-exec primitive. The only gap:
-  a *trivial* program that reaches `main.main` between spawn and the stop landing
-  (a genuine but narrow race; real programs do substantial runtime init first).
-- **(b) a `SYS_SPAWN` "debug-stopped-at-birth" flag (the robust closure).** A
+- **(a) attach-first + breakpoint-at-entry (the DECIDED 8c path, user-voted
+  2026-07-16).** Spawn the child (`SYS_SPAWN`, stdio piped) → `attach`
+  immediately (the pid is known from spawn) → `stop` (the child parks at its
+  *first* EL0-return tail — the first syscall the runtime makes at startup,
+  microseconds in, far before `main.main`) → `hwbreak <entry>` (or the DWARF
+  entry) → `start` → the child runs to the entry breakpoint. This needs **no new
+  kernel surface** and matches how Delve launches on backends without a
+  stop-at-exec primitive. The only gap: a *trivial* program that reaches
+  `main.main` between spawn and the stop landing (a genuine but narrow race;
+  real programs do substantial runtime init first).
+- **(b) a `SYS_SPAWN` "debug-stopped-at-birth" flag (the v-next closure).** A
   spawn variant that creates the child already debug-stopped before its first
   instruction, with the debugger's attach slot pre-claimed. This closes the
   race unconditionally but adds a **new kernel surface** (I-39-adjacent,
-  audit-bearing) to the arc.
+  audit-bearing). **Recorded, NOT in the 8c arc** — a small, well-scoped kernel
+  follow-up if the entry race proves to bite in practice.
 
-**Recommendation: start with (a); note (b) as the robust v-next closure.** (a)
-keeps 8c a pure userspace port and delivers both `dlv attach` and `dlv exec`;
-(b) is a small, well-scoped kernel follow-up if the entry race proves to bite in
-practice. This is a scope/kernel-surface signoff item (§13).
+Path (a) keeps 8c a pure userspace port and delivers both `ambush attach` and
+`ambush exec`.
 
 `EntryPoint()` reads the ELF `e_entry`. Go's default build is **non-PIE**
 (position-dependent) — the toolchain links at a fixed base and REVENANT maps
@@ -302,9 +304,10 @@ frames.
   fork (`~/projects/go-thylacine`), exactly like the toolchain and the coreutils
   ports. Delve's imports (`os`, `os/exec`, `syscall`, `debug/dwarf`,
   `debug/elf`, `encoding/json`, networking) are all covered by the fork's
-  `GOOS=thylacine` support (Stages 4-6). Vendor Delve under a Thylacine build
-  path (a `usr/dlv/` fork-and-patch, like the Go fork itself) OR build from the
-  module cache with a small patch set — a mechanics decision for 8c-1.
+  `GOOS=thylacine` support (Stages 4-6). Vendor Delve at `usr/ambush/` (a
+  fork-and-patch, like the Go fork itself) built into the `ambush` binary — the
+  patch set is the `proc_thylacine` backend + the build-tag surgery; a 8c-1
+  mechanics call on the exact fork layout.
 - **DAP transport = stdio first.** `dlv dap` speaks DAP over stdin/stdout (no
   listener needed) — the clean transport for the Nora plugin (8e) and for
   in-guest E2E. A TCP listener over `/net` (`dlv dap --listen`) is available for
@@ -330,11 +333,11 @@ arc close (not per-sub-chunk kernel audits — the kernel is byte-unchanged).
 - **8c-1 — scaffold + attach + inspect.** Vendor/patch Delve for
   `GOOS=thylacine`; the `proc_thylacine` backend skeleton (`Attach`, `Valid`,
   `Memory` via `mem`, `regs`/`fpregs`/`kregs` via `linutil`, `ThreadList` =
-  head thread, `trapWait` via `wait`, `detach`). Milestone: `dlv attach <pid>`
-  to a running Go program on-device → `goroutines`, `stack`, `regs`, `print
-  <var>`, `bt` all work (read-only inspect). Verify the non-PIE entry
-  assumption. In-guest E2E: a `usr/dlv-probe` that spawns a known Go child and
-  `dlv attach`es it, asserting a known variable/frame.
+  head thread, `trapWait` via `wait`, `detach`). Milestone: `ambush attach
+  <pid>` to a running Go program on-device → `goroutines`, `stack`, `regs`,
+  `print <var>`, `bt` all work (read-only inspect). Verify the non-PIE entry
+  assumption. In-guest E2E: a `usr/ambush-probe` that spawns a known Go child and
+  `ambush attach`es it, asserting a known variable/frame.
 - **8c-2 — breakpoints + continue + step (the HW-routing).**
   `WriteBreakpoint`/`EraseBreakpoint` → `hwbreak`/`hwrmbreak` (the §6
   HW-only routing + the slot-ceiling error handling); `ContinueOnce` → `start`
@@ -349,8 +352,8 @@ arc close (not per-sub-chunk kernel audits — the kernel is byte-unchanged).
   stack-trace (§8), including the 8b settled-thread inspect for a
   blocked-in-kernel goroutine. Milestone: `goroutines -with running`, `goroutine
   <n> bt` shows the Go frames → the SVC boundary → the kernel frames.
-- **8c-4 — launch + the DAP server.** `dlv exec`/`dlv debug` (the §7(a)
-  attach-first + bp-at-entry launch); `dlv dap` over stdio drives the same
+- **8c-4 — launch + the DAP server.** `ambush exec`/`ambush debug` (the §7(a)
+  attach-first + bp-at-entry launch); `ambush dap` over stdio drives the same
   backend through the DAP protocol (the Nora-plugin transport). Milestone: a DAP
   `launch` → `setBreakpoints` → `configurationDone` → `stackTrace` →
   `variables` → `continue` round-trip against a Go program, over stdio. The
@@ -365,44 +368,46 @@ built, at 8c.
 
 ---
 
-## 11. Naming (signoff item — held since the charter)
+## 11. Naming — **Ambush** (user-voted 2026-07-16)
 
-The debugger product name has been **held for the user's signoff at 8c**
-(`GO-IDE-DESIGN §10`; lead candidate **Ambush** — the breakpoint-as-trap; alt
-**Vigil**). The kernel debug surface already shipped keeping Plan 9 verbs
+The debugger is named **Ambush** — the breakpoint-as-trap: it lies in wait and
+takes its quarry at the chosen instant, even across the kernel boundary (the
+apex-predator instinct made literal, `GO-IDE-DESIGN §10`). The name applies to
+the whole debugger capability (the `proc_thylacine`-backed dlv port + the 8f
+Nora/Kaua debug UI), not only the UI.
+
+Realization: the on-disk binary is **`ambush`** — Thylacine's Go debugger, a
+**Delve (`dlv`) port** under the hood. Its CLI **mirrors dlv's verbatim**
+(`ambush attach <pid>`, `ambush exec <bin>`, `ambush debug`, `ambush dap`,
+`ambush trace`) so a user who knows Delve transfers directly, and the DAP/JSON
+protocol is byte-identical (the Nora plugin at 8e is a standard DAP client). The
+`proc_thylacine` backend is the only genuinely new code; everything above it is
+the stock Delve port. The kernel debug surface (8a/8b) keeps its Plan 9 verbs
 (`stop`/`start`/`step`/`attach`/`detach`, `mem`/`regs`/`wait`) — descriptive,
-lineage-correct, not renamed.
+lineage-correct, unchanged; Ambush is the userspace debugger that drives them.
 
-**Recommendation: keep the port named `dlv`; reserve the thematic name for the
-user-facing Nora debug UI (8f).** The flex of 8c is precisely that *unmodified,
-standard Delve* runs on Thylacine — renaming the ported tool fights that
-recognizability (a user who knows `dlv` finds `dlv`), exactly the "some things
-keep their standard name because that's what readers expect" discipline
-(`CLAUDE.md` thematic-naming). The apex-predator name (Ambush/Vigil) is most
-potent on the *user-facing* debugger — the Nora plugin + Kaua UI (8f) — where
-"set an **ambush** and the program is taken at the chosen instant, even across
-the kernel boundary" is the story the user sees. This is a signoff item, not a
-unilateral rename; the port stays `dlv` internally either way.
+Vendored at `usr/ambush/` (a Delve fork-and-patch, like the Go fork), built
+`GOOS=thylacine GOARCH=arm64`.
 
 ---
 
-## 12. Open forks / signoff items
+## 12. Signoff items — RESOLVED
 
-1. **Naming (§11)** — keep `dlv` + reserve Ambush/Vigil for the 8f UI
-   (recommended), or name the debugger capability now.
-2. **Launch strategy / spawn-stopped primitive (§7)** — start attach-first +
-   bp-at-entry, defer the kernel primitive (recommended, keeps 8c a pure
-   userspace port), or build the `SYS_SPAWN` debug-stopped-at-birth flag in the
-   8c arc (robust launch, adds an I-39-adjacent kernel surface).
-3. **Delve vendoring** — a `usr/dlv/` fork (like the Go fork) vs a minimal patch
-   set over the module cache (a 8c-1 mechanics call, not a value fork; will be
-   decided at implementation and reported).
-4. **HW breakpoint slot ceiling (§6)** — ship at the v1.0 clamp (4 code / 4
-   data) with clear errors; weigh the 4→6 kernel-clamp lift + a slot-mux policy
-   at 8c-2 (an ergonomics call, reported at 8c-2).
+1. **Naming (§11)** — RESOLVED: the debugger is **Ambush** (user-voted
+   2026-07-16), a Delve port; binary `ambush`, CLI mirrors `dlv`.
+2. **Launch strategy (§7)** — RESOLVED: **attach-first + bp-at-entry**
+   (user-voted 2026-07-16); 8c stays a pure userspace port. The `SYS_SPAWN`
+   debug-stopped-at-birth flag is the recorded v-next closure if the entry race
+   proves to bite in practice (a small, well-scoped kernel follow-up, not in
+   the 8c arc).
 
-Items 1-2 are the user's; 3-4 are reported-at-implementation calls I will make
-and surface, not block on.
+Reported-at-implementation calls (mine to make + surface, not block on):
+
+- **Delve vendoring mechanics** — the `usr/ambush/` fork layout + the patch set
+  scope (a 8c-1 mechanics call).
+- **HW breakpoint slot ceiling (§6)** — ship at the v1.0 clamp (4 code / 4
+  data) with clear "out of slots" errors; weigh the 4→6 kernel-clamp lift + a
+  slot-mux policy at 8c-2 (an ergonomics call, reported at 8c-2).
 
 ---
 

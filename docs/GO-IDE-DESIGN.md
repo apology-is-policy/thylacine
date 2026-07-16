@@ -202,9 +202,9 @@ with its own focused design pass + audit (it is a new privilege surface).
   confirmed feasible: guest self-hosted EL0 debug works under HVF QEMU>=8.2, TCG
   fallback).
 - **8b** — cross-boundary unified stack walk + ship kernel DWARF (section 4).
-- **8c** — `dlv` `proc_thylacine` backend; `dlv` drives a Go program on-device
-  (CLI first — breakpoints, step, inspect — before any UI). **DESIGN LANDED
-  2026-07-16 — the focused pass is `docs/DELVE-PORT-DESIGN.md`.** A userspace
+- **8c** — **Ambush** (§10), a `dlv` `proc_thylacine` backend; drives a Go
+  program on-device (CLI first — breakpoints, step, inspect — before any UI).
+  **DESIGN LANDED 2026-07-16 — the focused pass is `docs/DELVE-PORT-DESIGN.md`.** A userspace
   port (Delve cross-builds `GOOS=thylacine`, no new kernel surface): the backend
   is ~4-5 build-tagged Go files that wrap the debug-fs (`ctl`/`mem`/`regs`/
   `fpregs`/`kregs`/`kstack`/`wait`), reusing Delve's `linutil.ARM64Registers`
@@ -243,21 +243,24 @@ earned afterward, as **Stage 9** + a NOVEL entry of its own.
 
 ---
 
-## 10. Naming (held proposals, per CLAUDE.md naming discipline)
+## 10. Naming — the debugger is **Ambush** (signed off 2026-07-16)
 
 The debugger is the apex predator's instinct made literal: it **tracks** a
 running program by the **spoor** the OS already leaves (Plan 9 file handles are
 already named `Spoor`), and a breakpoint is an **ambush** — it lies in wait and
 takes its quarry at the chosen instant, even across the kernel boundary.
 
-Held candidate names for the debugger (the kernel debug surface + the dlv-backed
-capability), for the user's signoff when it lands:
-- **Ambush** — the breakpoint-as-trap; the debugger lies in wait. (lead proposal)
-- **Vigil** — keeping watch over the quarry until it reaches the chosen point.
+**Ambush** is the debugger (the whole dlv-backed capability + the 8f Nora/Kaua
+debug UI), signed off at Stage 8c (`docs/DELVE-PORT-DESIGN.md §11`). The on-disk
+binary is `ambush` — a **Delve (`dlv`) port** whose CLI mirrors dlv's
+(`ambush attach`/`exec`/`debug`/`dap`), so Delve knowledge transfers directly
+and the DAP protocol is standard. The kernel debug surface (8a/8b) keeps its
+descriptive Plan 9 verbs (`stop`/`start`/`step`/`attach`/`detach`,
+`mem`/`regs`/`wait`); Ambush is the userspace debugger that drives them. (Alt
+candidate **Vigil** — keeping watch over the quarry — not chosen.)
 
 The IDE itself needs no new name — it is *Nora's Go plugin* (the first plugin of
-the Nora extension architecture). Load-bearing identifiers stay held until
-signoff.
+the Nora extension architecture).
 
 ---
 
