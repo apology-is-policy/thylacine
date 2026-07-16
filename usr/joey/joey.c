@@ -2370,6 +2370,30 @@ int main(void) {
     }
     t_putstr("joey: /debug-probe reaped status=0; debug-fs stop/inspect/resume verified\n");
 
+    // === /stack-probe orchestration (Go Stage 8b-1c: the settled-thread kstack
+    //     inspect E2E) === Proves the 8b headline -- reading the KERNEL stack of a
+    //     thread blocked DEEP in a syscall, WITHOUT a debug-stop (the Linux
+    //     /proc/<pid>/stack tier). stack-probe spawns /stack-child (which blocks
+    //     forever in torpor_wait -> sleep() on the torpor rendez: settled but never
+    //     at the EL0-return tail, so a debug-stop could never freeze it), reads its
+    //     /proc/<pid>/kstack owner-authorized with NO attach/stop, asserts a stable
+    //     symbolized kernel backtrace, and killgrp+reaps it. Runs pre-pivot (bare
+    //     name via the cpio cwd; /proc is mounted in the boot namespace).
+    //     "stack-probe: PASS" + exit 0 gates the boot.
+    const char stack_probe_name[] = "stack-probe";
+    long sp_pid = t_spawn(stack_probe_name, sizeof(stack_probe_name) - 1);
+    if (sp_pid <= 0) {
+        t_putstr("joey: t_spawn(\"stack-probe\") FAILED\n");
+        return 1;
+    }
+    int sp_status = -1;
+    long sp_reaped = t_wait_pid_for((int)sp_pid, 0, &sp_status);
+    if (sp_reaped != sp_pid || sp_status != 0) {
+        t_putstr("joey: /stack-probe orchestration FAILED\n");
+        return 1;
+    }
+    t_putstr("joey: /stack-probe reaped status=0; settled-thread kstack inspect verified\n");
+
     // === /hwbp-verify orchestration (Go Stage 8a-2a: the HW-debug delivery verify) ===
     // The empirical confirmation (DEBUG-FS-DESIGN §10) that a guest-programmed EL0
     // hardware breakpoint delivers EC 0x30 to guest EL1 on THIS substrate (TCG
