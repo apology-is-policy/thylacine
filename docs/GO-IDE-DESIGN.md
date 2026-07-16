@@ -203,7 +203,18 @@ with its own focused design pass + audit (it is a new privilege surface).
   fallback).
 - **8b** — cross-boundary unified stack walk + ship kernel DWARF (section 4).
 - **8c** — `dlv` `proc_thylacine` backend; `dlv` drives a Go program on-device
-  (CLI first — breakpoints, step, inspect — before any UI).
+  (CLI first — breakpoints, step, inspect — before any UI). **DESIGN LANDED
+  2026-07-16 — the focused pass is `docs/DELVE-PORT-DESIGN.md`.** A userspace
+  port (Delve cross-builds `GOOS=thylacine`, no new kernel surface): the backend
+  is ~4-5 build-tagged Go files that wrap the debug-fs (`ctl`/`mem`/`regs`/
+  `fpregs`/`kregs`/`kstack`/`wait`), reusing Delve's `linutil.ARM64Registers`
+  verbatim because `t_user_regs` *is* Linux `user_pt_regs`. The load-bearing
+  decision: **all breakpoints route to the arm64 HW path** (I-12 W^X + I-36
+  forbid a software `BRK` into shared text), giving a hard ceiling of the debug
+  registers (4 code + 4 data at the v1.0 clamp) — the defining ergonomic
+  difference from `dlv` on Linux. Sub-chunks 8c-1 (attach + inspect) → 8c-2
+  (HW breakpoints + step + continue) → 8c-3 (goroutines + the unified user→
+  kernel stack via `kstack`) → 8c-4 (launch + the DAP server over stdio).
 - **8d** — `gopls` port (the editing-intelligence half).
 - **8e** — the Nora plugin architecture + the Go plugin (DAP + LSP clients).
 - **8f** — the Kaua debug UI (source / vars / stack / goroutines / watch) + the
