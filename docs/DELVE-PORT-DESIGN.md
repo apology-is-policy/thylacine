@@ -540,10 +540,49 @@ thylacine stub, or strips a dep):
   signature gained a `path` param -- Thylacine has no `/proc/<pid>/exe` and
   `cmdline` is a v1.0 placeholder, so the debuggee's ELF must be named).
 
-**Owed 8c-1 runtime work** (the ground-truth-over-theory half, unstarted): the
-`tools/build.sh` cross-build + pool-bake wiring (an `AMBUSHFORK` env override
-mirroring `GOFORK` + `THYLACINE_BAKE_GOROOT`), and the on-device `usr/ambush-probe`
-E2E (spawn a known Go child, `ambush attach <pid> <exe>`, assert a known
-variable/frame). The E2E is where the runtime assumptions get verified: the
-non-PIE `EntryPoint==0`, the `iscgo`/`tpidr` Go-`g` recovery, the exe-path
-resolution, and the wait-file/stop semantics under a real parked Go target.
+## 16. 8c-1 runtime iteration 0 -- Ambush EXECUTES on-device (2026-07-16)
+
+The scaffold proved Ambush *compiles*; iteration 0 proves it *runs* -- the
+biggest runtime unknown for a 10.8 MB, 710-dep ported binary, deliberately
+isolated from the debug-fs backend so a first-boot failure pins "binary does not
+run" vs "backend is wrong".
+
+**Build wiring (`tools/build.sh`):** a `build_ambush` function mirrors
+`build_go_probes` -- it cross-builds the fork with the Go toolchain
+(`$GOFORK/bin/go build -mod=vendor -ldflags="-s -w" -o build/go/ambush
+./cmd/dlv`) into a STRIPPED 10.8 MB ELF (Ambush reads the *target's* debug info,
+never its own, so its symbols are dead ramfs weight). `AMBUSHFORK` (default
+`~/projects/ambush`) points at the fork; either fork absent -> skip cleanly.
+`build_ambush` runs right after `build_go_probes`; `ambush` joins the `go_bins`
+bake list so `build_ramfs` copies it into the cpio root (which binds at `/bin`
+post-pivot). Baked into the cpio, NOT the pool -- the debugger is core infra, not
+a `/goroot` payload, and the probe runs pre-pivot.
+
+**The proof (`usr/ambush-probe`, native Rust, boot-fatal via joey):** it spawns
+`/ambush version` (Piped stdio -- Ambush writes its banner on fd 1, unlike the
+fd-less SYS_PUTS probes), drains stdout to EOF (the #68 last-thread-out fd close
+delivers the EOF), reaps, and asserts exit 0 + a `Version` banner. Ambush being
+optional infra, an unbaked `/ambush` (fork absent) makes the probe SKIP (exit 0)
+so a fork-absent checkout still boots; a present-but-broken Ambush FAILS the boot
+(the 8c regression sentinel).
+
+**Ground truth (the boot log):**
+```
+ambush-probe: starting (8c-1 Ambush version smoke)
+ambush-probe: ambush version output follows:
+Delve Debugger
+Version: 1.25.2
+ambush-probe: PASS (ambush runs; version banner ok)
+joey: /ambush-probe reaped status=0; Ambush debugger runs (or fork-absent SKIP)
+```
+The full Go runtime comes up (scheduler, mallocinit, sysmon OS-thread spawn), the
+cobra command tree initializes across 710 vendored deps, `version` writes fd 1 +
+`exit_group(0)`. Boot reaches `Thylacine boot OK`.
+
+**Owed 8c-1 runtime work (iteration 1, the backend exercise):** the on-device
+`ambush attach <pid> <exe>` E2E -- a parking Go child target + a non-interactive
+Ambush driver (init-script `goroutines`/`bt`/`print`) asserting a known
+variable/frame. This is where the *backend* assumptions get verified: the non-PIE
+`EntryPoint==0`, the `iscgo`/`tpidr` Go-`g` recovery, the exe-path DWARF load, and
+the wait-file/stop semantics under a real parked Go target. Iteration 0 having
+proven the binary runs, iteration 1's failures (if any) isolate to the backend.

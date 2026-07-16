@@ -2423,6 +2423,31 @@ int main(void) {
         return 1;
     }
 
+    // === /ambush-probe orchestration (Go Stage 8c-1: the Ambush debugger smoke) ===
+    // Iteration 0 of the 8c-1 runtime half: prove the cross-built Ambush debugger
+    // (the Thylacine Delve port) EXECUTES on-device before its debug-fs backend
+    // is exercised. ambush-probe spawns `/ambush version` -- driving the full Go
+    // runtime + the cobra command tree (710 vendored deps) + an fd-1 write +
+    // exit_group -- and asserts exit 0 + a "Version" banner. It is ALWAYS baked
+    // (a native Rust probe); the OPTIONAL /ambush it drives is baked only when
+    // both the Go fork and the Ambush fork were present at build. If /ambush is
+    // unbaked, the probe SKIPs (exit 0) so a fork-absent build still boots; a
+    // present-but-broken Ambush FAILS the boot (the 8c regression sentinel).
+    // Pre-pivot (bare-name spawn via the cpio cwd, like the other debug probes).
+    const char ambush_probe_name[] = "ambush-probe";
+    long ap_pid = t_spawn(ambush_probe_name, sizeof(ambush_probe_name) - 1);
+    if (ap_pid <= 0) {
+        t_putstr("joey: t_spawn(\"ambush-probe\") FAILED\n");
+        return 1;
+    }
+    int ap_status = -1;
+    long ap_reaped = t_wait_pid_for((int)ap_pid, 0, &ap_status);
+    if (ap_reaped != ap_pid || ap_status != 0) {
+        t_putstr("joey: /ambush-probe orchestration FAILED\n");
+        return 1;
+    }
+    t_putstr("joey: /ambush-probe reaped status=0; Ambush debugger runs (or fork-absent SKIP)\n");
+
     // === /go-hello orchestration (GOOS=thylacine Go-port, Stage 1) ===
     // The first GOOS=thylacine Go binary: a runtime-direct `println` hello.
     // Spawning it drives the real SVC ABI end-to-end -- the SysV initial-stack

@@ -286,6 +286,10 @@ build_kernel() {
     # GOOS=thylacine Stage 1: cross-compile the Go boot probe before build_ramfs
     # bakes it. Skips cleanly if the Go fork is absent.
     build_go_probes
+    # Go Stage 8c-1: cross-compile the Ambush debugger (the Thylacine Delve port)
+    # before build_ramfs bakes it. Skips cleanly if the Go fork or the Ambush
+    # fork is absent.
+    build_ambush
     build_ramfs
 
     # P4-Ic5b2: produce build/disk.img alongside the kernel so
@@ -377,7 +381,7 @@ EOF
     # P4-Ia2: copy any built Rust-side userspace binaries from
     # build/usr-rs/<target>/release/. Same curation discipline.
     # Binary name = crate's [[bin]] name = directory under usr/.
-    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "coreutil-smoke" "fs-mut-smoke" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "pipe-src" "pipe-sink" "legate-prover" "login" "ut" "nora" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" )
+    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "coreutil-smoke" "fs-mut-smoke" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "pipe-src" "pipe-sink" "legate-prover" "login" "ut" "nora" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "ambush-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" )
     local rs_release="$USR_RS_BUILD/$USR_RS_TARGET/release"
     for bin in "${usr_rs_bins[@]}"; do
         local src="$rs_release/$bin"
@@ -392,7 +396,7 @@ EOF
     # file-backed exec path carries it, like net-echo. Absent if the Go fork was
     # not present at build time (build_go_probes skipped); the joey go-hello
     # probe then degrades to "not spawned".
-    local go_bins=( "go-hello" "go-goroutines" "go-fs" "go-exec" "go-net" "go-env" "go-web" "go-get" )
+    local go_bins=( "go-hello" "go-goroutines" "go-fs" "go-exec" "go-net" "go-env" "go-web" "go-get" "ambush" )
     local go_release="$BUILD_DIR/go"
     for bin in "${go_bins[@]}"; do
         local src="$go_release/$bin"
@@ -524,6 +528,39 @@ build_go_probes() {
         ls -la "$go_out/$probe"
     done
     ledger "go-hello + go-goroutines + go-fs + go-exec + go-net + go-env + go-web + go-get: Go cross-compile (GOOS=thylacine) -> ramfs (Stage 1/2/3a/3b/3c/4a boot probes + Stage 5 on-demand probes)"
+}
+
+# Go Stage 8c-1: cross-compile the Ambush debugger -- the Thylacine port of Delve
+# (a Go program) -- with the Go fork's toolchain ($GOFORK/bin/go), so its
+# GOOS=thylacine runtime + the proc_thylacine debug-fs backend are used. The
+# Ambush fork source lives OUTSIDE this repo ($AMBUSHFORK, default
+# ~/projects/ambush); it is self-contained (vendored deps) so the build is
+# offline (-mod=vendor). STRIPPED (-s -w): Ambush reads the TARGET's debug info,
+# never its own, so its symbols are dead weight in the ramfs (the ~15 MiB
+# unstripped binary halves to ~9 MiB). Skips cleanly if EITHER fork is absent --
+# Ambush is optional infra (like the Go probes): the binary is unbaked and joey's
+# /ambush-probe SKIPs, so a fresh checkout still builds + boots.
+build_ambush() {
+    local go_bin="$GOFORK/bin/go"
+    local ambush_src="${AMBUSHFORK:-$HOME/projects/ambush}"
+    local go_out="$BUILD_DIR/go"
+    if [[ ! -x "$go_bin" ]]; then
+        echo "==> Ambush: Go fork toolchain not found at $go_bin -- skipping (set GOFORK)"
+        return 0
+    fi
+    if [[ ! -d "$ambush_src/cmd/dlv" ]]; then
+        echo "==> Ambush: fork source not found at $ambush_src -- skipping (set AMBUSHFORK)"
+        return 0
+    fi
+    mkdir -p "$go_out"
+    echo "==> Building Ambush (GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0, fork=$ambush_src)"
+    ( cd "$ambush_src" && \
+      GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 "$go_bin" build -mod=vendor \
+        -ldflags="-s -w" -o "$go_out/ambush" ./cmd/dlv ) \
+        || { echo "==> Ambush: go build FAILED" >&2; return 1; }
+    echo "==> Ambush built: $go_out/ambush"
+    ls -la "$go_out/ambush"
+    ledger "ambush: Delve port cross-compile (GOOS=thylacine, stripped) -> ramfs (Stage 8c-1 debugger)"
 }
 
 # GOOS=thylacine Stage 4b: assemble a trimmed thylacine GOROOT (the cross-built
