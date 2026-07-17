@@ -2579,6 +2579,7 @@ s64 sys_tty_fd_op_for_proc(struct Proc *p, u64 fd_raw, u64 op_num, u64 arg) {
         switch (op_num) {
         case SYS_TTY_ACQUIRE: r = pts_tty_acquire(p, cn, qid);            break;
         case SYS_TTY_SET_FG:  r = pts_tty_set_fg(p, cn, qid, (u32)arg);   break;
+        case SYS_TTY_CONT:    r = pts_tty_cont(p, cn, qid, (u32)arg);     break;
         default:              r = pts_tty_get_fg(p, cn, qid);             break;
         }
     }
@@ -2612,6 +2613,13 @@ static s64 sys_tty_get_fg_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
     struct Thread *t = current_thread();             if (!t) return -1;
     struct Proc *p = t->proc;                        if (!p) return -1;
     return sys_tty_fd_op_for_proc(p, a0, SYS_TTY_GET_FG, 0);
+}
+
+static s64 sys_tty_cont_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+    (void)a2; (void)a3;
+    struct Thread *t = current_thread();             if (!t) return -1;
+    struct Proc *p = t->proc;                        if (!p) return -1;
+    return sys_tty_fd_op_for_proc(p, a0, SYS_TTY_CONT, a1);
 }
 
 // SYS_YIELD (#33): the thin syscall front for sched_yield_hint (sched.c) --
@@ -7151,6 +7159,11 @@ void syscall_dispatch(struct exception_context *ctx) {
     case SYS_TTY_GET_FG:
         ctx->regs[0] = (u64)sys_tty_get_fg_handler(ctx->regs[0], ctx->regs[1],
                                                    ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_TTY_CONT:
+        ctx->regs[0] = (u64)sys_tty_cont_handler(ctx->regs[0], ctx->regs[1],
+                                                 ctx->regs[2], ctx->regs[3]);
         return;
 
     case SYS_CLOCK_GETTIME:

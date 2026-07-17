@@ -225,9 +225,11 @@ pub const T_SYS_TTY_SIGNAL: u64       = 94;
 pub const T_SYS_TTY_ACQUIRE: u64      = 95;
 pub const T_SYS_TTY_SET_FG: u64       = 96;
 pub const T_SYS_TTY_GET_FG: u64       = 97;
+// PTY-1f: the shell's fg/bg resume of a job-stopped pgrp (gated like SET_FG).
+pub const T_SYS_TTY_CONT: u64         = 98;
 pub const T_TTY_SIG_INT: u64          = 1;
 pub const T_TTY_SIG_QUIT: u64         = 2;
-pub const T_TTY_SIG_TSTP: u64         = 3;   // -EOPNOTSUPP until PTY-1f
+pub const T_TTY_SIG_TSTP: u64         = 3;   // live since PTY-1f (default job STOP)
 pub const T_TTY_SIG_WINCH: u64        = 4;
 pub const T_TTY_SIG_HUP: u64          = 5;
 // FS-mutation foundation (IDENTITY-DESIGN.md section 9.2): create-then-open,
@@ -2099,6 +2101,17 @@ pub unsafe fn t_tty_get_fg(fd: i64) -> i64 {
     let mut x0: i64 = fd;
     asm!("svc #0", inlateout("x0") x0, in("x8") T_SYS_TTY_GET_FG,
          options(nostack));
+    x0
+}
+
+// t_tty_cont -- resume job-stopped `pgid` via a slave fd of one's controlling
+// terminal (PTY-1f; the shell's fg/bg). Gated like t_tty_set_fg; returns the
+// visited-member count or -errno.
+#[inline(always)]
+pub unsafe fn t_tty_cont(fd: i64, pgid: u64) -> i64 {
+    let mut x0: i64 = fd;
+    asm!("svc #0", inlateout("x0") x0, in("x1") pgid,
+         in("x8") T_SYS_TTY_CONT, options(nostack));
     x0
 }
 

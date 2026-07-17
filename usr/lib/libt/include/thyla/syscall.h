@@ -119,6 +119,7 @@ enum {
     T_SYS_TTY_ACQUIRE       = 95,  // PTY-1d: controlling-terminal acquisition
     T_SYS_TTY_SET_FG        = 96,  // PTY-1d: tcsetpgrp
     T_SYS_TTY_GET_FG        = 97,  // PTY-1d: tcgetpgrp
+    T_SYS_TTY_CONT          = 98,  // PTY-1f: fg/bg resume of a job-stopped pgrp
 };
 
 // SYS_PTY_REGISTER ops (PTY-1c). Server-side (ptyfs) only: MINT records a
@@ -128,8 +129,10 @@ enum {
 #define T_PTY_REG_SLAVE  1
 #define T_PTY_REG_FREE   2
 
-// SYS_TTY_SIGNAL classes (PTY-1d). TSTP answers -95 (EOPNOTSUPP) until the
-// job-stop machinery lands (PTY-1f).
+// SYS_TTY_SIGNAL classes (PTY-1d). TSTP (live since PTY-1f) is the
+// job-control suspend: a caught susp delivers the tty:susp note only; an
+// uncaught one on a non-orphaned foreground group takes the default STOP
+// (waitpid-with-T_WAIT_UNTRACED reports it; T_SYS_TTY_CONT resumes).
 #define T_TTY_SIG_INT    1
 #define T_TTY_SIG_QUIT   2
 #define T_TTY_SIG_TSTP   3
@@ -951,6 +954,23 @@ static inline long t_tty_get_fg(long fd) {
         "svc #0"
         : "+r"(x0)
         : "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_tty_cont — resume job-stopped `pgid` via a slave fd of one's controlling
+// terminal (PTY-1f; the shell's fg/bg). Gated like t_tty_set_fg; returns the
+// visited-member count or -errno.
+__attribute__((always_inline))
+static inline long t_tty_cont(long fd, long pgid) {
+    register long x0 __asm__("x0") = fd;
+    register long x1 __asm__("x1") = pgid;
+    register long x8 __asm__("x8") = T_SYS_TTY_CONT;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x8)
         : "memory", "cc"
     );
     return x0;

@@ -53,6 +53,7 @@
 #include <thylacine/spoor.h>
 #include <thylacine/srvconn.h>
 #include <thylacine/syscall.h>
+#include <thylacine/thread.h>   // PTY-1f: fabricated member Threads
 #include <thylacine/types.h>
 
 void test_pts_mint_bind_resolve_free(void);
@@ -74,6 +75,7 @@ extern s64 sys_tty_fd_op_for_proc(struct Proc *p, u64 fd_raw, u64 op_num,
 // Test-harness hooks (the test_proc.c pattern).
 extern void proc_test_link(struct Proc *p);
 extern void proc_test_unlink(struct Proc *p);
+extern void proc_test_link_child(struct Proc *parent, struct Proc *p);
 
 static struct SrvConn *pts_make_conn(struct Proc *owner) {
     return srvconn_create(proc_stripes(owner), owner->pid, false, 0,
@@ -543,8 +545,16 @@ void test_pts_tty_signal_routing(void) {
         "class below the range rejects");
     TEST_EXPECT_EQ(pts_tty_signal(srv, (u64)id, 99), -T_E_INVAL,
         "class above the range rejects");
-    TEST_EXPECT_EQ(pts_tty_signal(srv, (u64)id, TTY_SIG_TSTP),
-        -T_E_OPNOTSUPP, "TSTP is the honest not-yet (PTY-1f)");
+    // TSTP is LIVE (PTY-1f). This fixture's fg member is THREAD-LESS, so
+    // the catchability gate reads "no unmasked thread" -> the fail-safe
+    // note-only disposition (nothing to stop); the stop legs live in
+    // pts.tty_tstp_stop_cont_seam.
+    TEST_EXPECT_EQ(pts_tty_signal(srv, (u64)id, TTY_SIG_TSTP), 1,
+        "TSTP on a thread-less member is note-only (fail-safe)");
+    TEST_EXPECT_EQ(pts_note_count(fgm, NOTE_NAME_TTY_SUSP), 1u,
+        "the fg member got the susp note");
+    TEST_EXPECT_EQ((int)fgm->job_stop_req, 0,
+        "note-only disposition set no job stop");
     s64 scratch = pts_mint(srv, cn, 510);
     TEST_ASSERT(scratch > 0, "scratch mint");
     TEST_EXPECT_EQ(pts_free(srv, (u64)scratch), 0, "scratch free");
@@ -593,4 +603,196 @@ void test_pts_tty_signal_routing(void) {
     pts_drop_linked(fgm);
     pts_drop_proc(srv);
     pts_drop_proc(other_srv);
+}
+
+// ---------------------------------------------------------------------------
+// pts.tty_tstp_stop_cont_seam (PTY-1f)
+// ---------------------------------------------------------------------------
+// The TSTP -> job-stop -> SYS_TTY_CONT seam over a THREADED fg member: the
+// uncaught default STOP consumes the signal (flag + report latch, NO queued
+// note), the catchability gates (self-managing; all-threads-masked) are
+// note-only, a second TSTP on a stopped member neither re-latches nor
+// re-posts, and pts_tty_cont's SET_FG-shaped gates + per-member resume
+// (note + flag clear + cont latch) run end-to-end. Threads are fabricated
+// statics (the deliver cascade walks them; zeroed state = unlocked wait_lock
+// + no rendez -> the wakes no-op), the devproc fixture pattern.
+
+void test_pts_tty_tstp_stop_cont_seam(void);
+void test_pts_tty_tstp_stop_cont_seam(void) {
+    struct Proc *srv = proc_alloc();
+    TEST_ASSERT(srv != NULL, "proc_alloc srv");
+    struct SrvConn *cn = pts_make_conn(srv);
+    TEST_ASSERT(cn != NULL, "srvconn_create");
+    s64 id = pts_mint(srv, cn, 600);
+    TEST_ASSERT(id > 0, "mint");
+    TEST_EXPECT_EQ(pts_bind_slave(srv, cn, 601, (u64)id), 0, "slave bind");
+
+    struct Proc *leader = proc_alloc();
+    TEST_ASSERT(leader != NULL, "proc_alloc leader");
+    proc_test_link(leader);
+    struct Proc *m = proc_alloc();          // the fg member, own group, in S
+    TEST_ASSERT(m != NULL, "proc_alloc m");
+    m->sid  = (u32)leader->pid;
+    m->pgid = (u32)m->pid;
+    // BSS-zeroed static (a whole-struct compound-literal assignment would
+    // emit a memset the freestanding kernel does not link); the machinery
+    // reads magic + note_mask + next_in_proc + rendez_blocked_on +
+    // wait_lock, all zero-correct except magic.
+    static struct Thread m_th;
+    m_th.magic = THREAD_MAGIC;
+    m_th.note_mask = 0;
+    m_th.next_in_proc = NULL;
+    m_th.rendez_blocked_on = NULL;
+    m->threads = &m_th;                     // unmasked -> the stop can land
+    // Linked UNDER the leader (the shell-parent shape): the leader -- same
+    // session, another group -- ANCHORS m's group, else the TSTP fan would
+    // correctly DISCARD the stop as orphaned (proc.job_stop_orphan_rule).
+    proc_test_link_child(leader, m);
+    struct Proc *outsider = proc_alloc();   // its own session; group linked
+    TEST_ASSERT(outsider != NULL, "proc_alloc outsider");
+    proc_test_link(outsider);
+
+    TEST_EXPECT_EQ(pts_tty_acquire(leader, cn, 601), 0, "leader acquires");
+    TEST_EXPECT_EQ(pts_tty_set_fg(leader, cn, 601, (u32)m->pid), 0,
+        "fg = the member's group");
+
+    // The uncaught default STOP: flag + report latch, NO note queued (the
+    // default action CONSUMES the signal -- nothing pending across the stop).
+    TEST_EXPECT_EQ(pts_tty_signal(srv, (u64)id, TTY_SIG_TSTP), 1,
+        "TSTP stops the one unmasked fg member");
+    TEST_EXPECT_EQ((int)m->job_stop_req, 1, "job_stop_req set");
+    TEST_ASSERT(m->stop_report_pending, "the stop latched the wait report");
+    TEST_EXPECT_EQ(pts_note_count(m, NOTE_NAME_TTY_SUSP), 0u,
+        "the default stop queued NO susp note");
+
+    // A second TSTP on an already-stopped member is a POSIX discard: no
+    // re-latch (a consumed report stays consumed), no note.
+    m->stop_report_pending = false;
+    TEST_EXPECT_EQ(pts_tty_signal(srv, (u64)id, TTY_SIG_TSTP), 1,
+        "a second TSTP visits the member (idempotent stop)");
+    TEST_ASSERT(!m->stop_report_pending,
+        "the idempotent stop did NOT re-latch the report");
+    TEST_EXPECT_EQ(pts_note_count(m, NOTE_NAME_TTY_SUSP), 0u,
+        "the idempotent stop queued no note either");
+    m->stop_report_pending = true;          // restore the latch for the cont
+
+    // pts_tty_cont's gates (the SET_FG shape).
+    TEST_EXPECT_EQ(pts_tty_cont(leader, cn, 601, 0), -T_E_INVAL,
+        "cont pgid 0 rejects");
+    TEST_EXPECT_EQ(pts_tty_cont(leader, cn, 601, 7777u), -T_E_ACCES,
+        "cont on a group with no ALIVE session member rejects");
+    TEST_EXPECT_EQ(pts_tty_cont(outsider, cn, 601, (u32)outsider->pid),
+        -T_E_ACCES, "an outside-session caller cannot cont");
+    TEST_EXPECT_EQ(pts_tty_cont(leader, cn, 999, (u32)m->pid), -T_E_NOENT,
+        "cont via an unbound qid misses");
+
+    // The resume: note + flag clear + the cont report superseding the stop.
+    TEST_EXPECT_EQ(pts_tty_cont(leader, cn, 601, (u32)m->pid), 1,
+        "SYS_TTY_CONT resumes the member's group");
+    TEST_EXPECT_EQ((int)m->job_stop_req, 0, "job_stop_req cleared");
+    TEST_ASSERT(m->cont_report_pending, "the cont latched the wait report");
+    TEST_ASSERT(!m->stop_report_pending,
+        "the cont superseded the unreported stop");
+    TEST_EXPECT_EQ(pts_note_count(m, NOTE_NAME_TTY_CONT), 1u,
+        "the member got the tty:cont note");
+
+    // The catchability gates: self-managing -> note-only; all-masked ->
+    // note-only (deferred).
+    proc_mark_self_managing_notes(m);
+    TEST_EXPECT_EQ(pts_tty_signal(srv, (u64)id, TTY_SIG_TSTP), 1,
+        "TSTP on a self-managing member is caught");
+    TEST_EXPECT_EQ((int)m->job_stop_req, 0, "caught: no stop");
+    TEST_EXPECT_EQ(pts_note_count(m, NOTE_NAME_TTY_SUSP), 1u,
+        "caught: the susp note was delivered to the queue");
+
+    struct Proc *m2 = proc_alloc();         // the all-masked member
+    TEST_ASSERT(m2 != NULL, "proc_alloc m2");
+    m2->sid  = (u32)leader->pid;
+    m2->pgid = (u32)m2->pid;
+    static struct Thread m2_th;             // BSS-zeroed (see m_th)
+    m2_th.magic = THREAD_MAGIC;
+    m2_th.note_mask = (1ull << NOTE_BIT_TTY);
+    m2_th.next_in_proc = NULL;
+    m2_th.rendez_blocked_on = NULL;
+    m2->threads = &m2_th;
+    proc_test_link(m2);
+    TEST_EXPECT_EQ(pts_tty_set_fg(leader, cn, 601, (u32)m2->pid), 0,
+        "fg = the masked member's group");
+    TEST_EXPECT_EQ(pts_tty_signal(srv, (u64)id, TTY_SIG_TSTP), 1,
+        "TSTP on an all-masked member defers");
+    TEST_EXPECT_EQ((int)m2->job_stop_req, 0, "all-masked: no stop");
+    TEST_EXPECT_EQ(pts_note_count(m2, NOTE_NAME_TTY_SUSP), 1u,
+        "all-masked: the note queued (deferred delivery)");
+
+    TEST_EXPECT_EQ(pts_free(srv, (u64)id), 0, "cleanup free");
+    m->threads  = NULL;                     // the statics outlive proc_free
+    m2->threads = NULL;
+    pts_drop_conn(cn);
+    pts_drop_linked(m);                     // unlinks from leader (its parent)
+    pts_drop_linked(m2);
+    pts_drop_linked(outsider);
+    pts_drop_linked(leader);
+    pts_drop_proc(srv);
+}
+
+// ---------------------------------------------------------------------------
+// pts.teardown_hup_cont (PTY-1f, F8)
+// ---------------------------------------------------------------------------
+// The pts-teardown carrier-loss fan: freeing a controlled pts whose fg group
+// holds a job-stopped member delivers tty:hup (dual target -- the fg member
+// AND the out-of-fg session leader) + tty:cont, resumes the stop, and arms
+// the uncaught-hup terminate latch. The GC arm shares pts_teardown_fan with
+// FREE (one staging path), so the explicit-free proof covers the shape.
+
+void test_pts_teardown_hup_cont(void);
+void test_pts_teardown_hup_cont(void) {
+    struct Proc *srv = proc_alloc();
+    TEST_ASSERT(srv != NULL, "proc_alloc srv");
+    struct SrvConn *cn = pts_make_conn(srv);
+    TEST_ASSERT(cn != NULL, "srvconn_create");
+    s64 id = pts_mint(srv, cn, 700);
+    TEST_ASSERT(id > 0, "mint");
+    TEST_EXPECT_EQ(pts_bind_slave(srv, cn, 701, (u64)id), 0, "slave bind");
+
+    struct Proc *leader = proc_alloc();
+    TEST_ASSERT(leader != NULL, "proc_alloc leader");
+    proc_test_link(leader);
+    struct Proc *m = proc_alloc();
+    TEST_ASSERT(m != NULL, "proc_alloc m");
+    m->sid  = (u32)leader->pid;
+    m->pgid = (u32)m->pid;
+    static struct Thread f8_th;             // BSS-zeroed (see the seam test)
+    f8_th.magic = THREAD_MAGIC;
+    f8_th.note_mask = 0;
+    f8_th.next_in_proc = NULL;
+    f8_th.rendez_blocked_on = NULL;
+    m->threads = &f8_th;
+    proc_test_link_child(leader, m);        // the leader anchors m's group
+
+    TEST_EXPECT_EQ(pts_tty_acquire(leader, cn, 701), 0, "leader acquires");
+    TEST_EXPECT_EQ(pts_tty_set_fg(leader, cn, 701, (u32)m->pid), 0,
+        "fg = the member's group (the leader outside it)");
+    TEST_EXPECT_EQ(pts_tty_signal(srv, (u64)id, TTY_SIG_TSTP), 1,
+        "stop the fg member");
+    TEST_EXPECT_EQ((int)m->job_stop_req, 1, "stopped");
+
+    TEST_EXPECT_EQ(pts_free(srv, (u64)id), 0, "FREE the controlled pts");
+
+    TEST_EXPECT_EQ((int)m->job_stop_req, 0,
+        "the teardown fan resumed the stopped fg member (F8)");
+    TEST_EXPECT_EQ(pts_note_count(m, NOTE_NAME_TTY_HUP), 1u,
+        "the fg member got the carrier-loss hup");
+    TEST_EXPECT_EQ(pts_note_count(m, NOTE_NAME_TTY_CONT), 1u,
+        "...and the cont");
+    TEST_EXPECT_EQ(pts_note_count(leader, NOTE_NAME_TTY_HUP), 1u,
+        "the out-of-fg controlling process got the hup (F13 dual target)");
+    TEST_ASSERT((__atomic_load_n(&m->proc_flags, __ATOMIC_ACQUIRE) &
+                 PROC_FLAG_TTY_TERMINATE_PENDING) != 0,
+        "the uncaught hup armed the terminate latch on the resumed member");
+
+    m->threads = NULL;
+    pts_drop_conn(cn);
+    pts_drop_linked(m);                     // unlinks from leader (its parent)
+    pts_drop_linked(leader);
+    pts_drop_proc(srv);
 }

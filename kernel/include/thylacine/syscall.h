@@ -1692,11 +1692,17 @@ enum {
 
     // SYS_TTY_SIGNAL(pts_id, class) -> posted count (>= 0) / -T_E_ACCES (not
     //   the minting server) / -T_E_INVAL (stale id -- the gen guard -- or bad
-    //   class) / -T_E_OPNOTSUPP (TTY_SIG_TSTP until the job-stop machinery,
-    //   PTY-1f). 0 = the pts has no controlling session (routes nowhere).
+    //   class). 0 = the pts has no controlling session (routes nowhere).
     //   TTY_SIG_HUP reaches the foreground group AND the controlling process
     //   (the session leader) when the leader is not in the foreground group
-    //   -- the two POSIX carrier-loss targets.
+    //   -- the two POSIX carrier-loss targets. TTY_SIG_TSTP (live since
+    //   PTY-1f) is the job-control suspend: per fg-group member, a CAUGHT
+    //   susp (handler / self-managing / all-threads-masked) delivers the
+    //   tty:susp note only; an uncaught one on a non-orphaned group takes
+    //   the default STOP (job_stop_req -- the second stop owner beside the
+    //   debugger's, parked at the same EL0-return checkpoint; the parent's
+    //   WAIT_UNTRACED wait reports it); an uncaught one on an ORPHANED
+    //   group is discarded (POSIX -- nobody could resume it).
     SYS_TTY_SIGNAL = 94,   // arg: pts_id (x0), class (x1)
 
     // SYS_TTY_ACQUIRE(slave_fd) -> 0 / -T_E_ACCES / -T_E_INVAL / -T_E_NOENT.
@@ -1720,6 +1726,22 @@ enum {
     //   unconditionally (the terminal emulator owns the terminal); a SLAVE-
     //   side fd requires the caller in the controlling session.
     SYS_TTY_GET_FG = 97,   // arg: fd (x0)
+
+    // SYS_TTY_CONT(fd, pgid) -> visited-member count / -T_E_ACCES /
+    //   -T_E_INVAL / -T_E_NOENT (PTY-1f; user-signed-off 2026-07-17 as the
+    //   one number beyond the 89-97 pin). The shell's `fg`/`bg` resume --
+    //   the ONE named path by which a session member resumes a job-stopped
+    //   group in its session (tty:cont stays kernel-synthetic-only on the
+    //   POST axis, so no SYS_POSTNOTE reaches it -- the I-39 F4 gate; and
+    //   ordinary kill covers only one's OWN group). Gated exactly like
+    //   SYS_TTY_SET_FG: `fd` a binding of the caller's controlling terminal
+    //   + `pgid` a group with an ALIVE member in that session. Per member:
+    //   the tty:cont note (catchable-informational) + the job-stop clear +
+    //   the parked-thread wake + the parent's WAIT_CONTINUED report. Clears
+    //   ONLY the job owner -- a debugger-stopped member re-parks (the
+    //   per-owner separation, pty_stop.tla StopCompatI39). The target group
+    //   need not be the foreground group (bg) nor stopped (POSIX SIGCONT).
+    SYS_TTY_CONT = 98,     // arg: fd (x0), pgid (x1)
 };
 
 // SYS_PTY_REGISTER ops.
@@ -1732,7 +1754,7 @@ enum {
 // server-owned half of the seam).
 #define TTY_SIG_INT    1u   // -> "interrupt" (LS-5 catchable-default-terminate)
 #define TTY_SIG_QUIT   2u   // -> "tty:quit"  (the terminate class, PTY-1b)
-#define TTY_SIG_TSTP   3u   // -T_E_OPNOTSUPP until PTY-1f (default-STOP)
+#define TTY_SIG_TSTP   3u   // -> "tty:susp" caught / default job STOP (PTY-1f)
 #define TTY_SIG_WINCH  4u   // -> "tty:winch" (catchable; ignored if uncaught)
 #define TTY_SIG_HUP    5u   // -> "tty:hup"   (the terminate class; dual target)
 

@@ -531,6 +531,25 @@ struct Proc {
     // propagated by rfork (a spawned child is not being debugged).
     u32                debug_stop_req;
 
+    // PTY-1f (I-20 stop leg; PTY-DESIGN.md section 4; specs/pty_stop.tla
+    // stopOwners): the SECOND, INDEPENDENT stop owner -- the job-control
+    // stop (an uncaught tty:susp on a foreground-group member). A thread
+    // parks at its EL0-return checkpoint (or the sleep/tsleep stop detour)
+    // iff `debug_stop_req | job_stop_req` (proc_stop_requested), and each
+    // resume clears ONLY its own owner: proc_job_resume_one_locked clears
+    // THIS flag (the tty:cont fan / SYS_TTY_CONT / the F8 teardown + orphan
+    // rule), proc_debug_resume clears only debug_stop_req -- a tty:cont can
+    // never run a debugger-stopped thread (StopCompatI39; the
+    // BUGGY_DOUBLE_STOP counterexample). Death overrides both (the park
+    // loop's group_exit_msg check precedes; GroupDie clears stopOwners).
+    // SET (RELEASE) by proc_job_stop_pgrp's uncaught-susp arm under
+    // g_proc_table_lock, CLEARED (RELEASE) by the job-resume paths under the
+    // same lock; READ (ACQUIRE) at the park predicate sites, exactly the
+    // debug_stop_req discipline. Occupies the pad slot after debug_stop_req
+    // (same cache line as the debug flag -- the tail's fast path reads both;
+    // no struct growth). KP_ZERO -> 0; NOT propagated by rfork.
+    u32                job_stop_req;
+
     // 8a-2b (I-39; DEBUG-FS-DESIGN section 5): the per-Proc hardware-breakpoint
     // table (struct debug_hw, arch/arm64/hwdebug.h). NULL = no breakpoints (the
     // overwhelmingly common case); non-NULL = lazily kmalloc'd on the first
@@ -649,8 +668,14 @@ _Static_assert(__builtin_offsetof(struct Proc, cont_report_pending) == 337,
 _Static_assert(__builtin_offsetof(struct Proc, debug_hw) == 320,
                "8a-2b debug_hw (the per-Proc HW-breakpoint table pointer) appends "
                "after debug_stop_req (offset 320, the next 8-aligned slot past the "
-               "u32 @312 + its pad); existing offsets stay stable (KP_ZERO inits it "
-               "NULL = no breakpoints).");
+               "u32 @312 + its pad -- the pad PTY-1f's job_stop_req now occupies); "
+               "existing offsets stay stable (KP_ZERO inits it NULL = no "
+               "breakpoints).");
+_Static_assert(__builtin_offsetof(struct Proc, job_stop_req) == 316,
+               "PTY-1f job_stop_req (the second stop owner, I-20) occupies the pad "
+               "slot after debug_stop_req @312 -- same cache line as the debug flag "
+               "(the EL0-return tail's fast path reads both), NO struct growth, "
+               "every existing offset stable.");
 _Static_assert(__builtin_offsetof(struct Proc, debug_stop_req) == 312,
                "8a-1b-beta debug_stop_req (the I-39 per-Proc debugger stop flag) "
                "appends after debug_owner (offset 312, the next slot past the Spoor* "
@@ -951,7 +976,7 @@ void el0_return_die_check(void);
 // sleeping peer (torpor_wake_all_for_proc + the per-peer wait_lock rendez wake,
 // proc_group_terminate's cascade) so a thread blocked in an indefinite syscall
 // sleep returns, re-observes the flag, and DETOURS to park on its debug_rendez
-// (proc_debug_stop_sleeper_park), then smp_resched_others() so a peer RUNNING at
+// (proc_stop_sleeper_park), then smp_resched_others() so a peer RUNNING at
 // EL0 on another CPU traps to its tail (the periodic tick is the floor). A thread
 // already in the kernel observes the flag when its syscall/handler returns to the
 // tail. LOCK CONTRACT: caller holds g_proc_table_lock (mirrors
@@ -959,15 +984,19 @@ void el0_return_die_check(void);
 // per-peer wait_lock walk is g_proc_table_lock -> wait_lock -> r->lock).
 void proc_debug_stop_deliver(struct Proc *p);
 
-// proc_debug_stop_sleeper_park: the nested debug-stop park a blocking
-// sleep()/tsleep() detours into when a debugger stop is pending (8c-2,
-// DEBUG-FS-DESIGN 5c.2). Sleeps on the caller's own debug_rendez until the stop
-// clears; returns SLEEP_OK (re-check the original wait cond + re-block) or
-// SLEEP_INTR (dying/soft-int while stop-parked -> unwind + die at the tail;
-// DEATH WINS). Called from sched.c's sleep()/tsleep() detour with their wait
-// loop locks RELEASED. The `r != &debug_rendez` detour gate makes this
+// proc_stop_sleeper_park: the nested stop park a blocking sleep()/tsleep()
+// detours into when ANY stop is pending -- a debugger stop (8c-2,
+// DEBUG-FS-DESIGN 5c.2) or a job-control stop (PTY-1f; the park predicate is
+// proc_stop_requested's disjunction). Sleeps on the caller's own debug_rendez
+// (the shared stop-park rendez -- one park, two owners, per-owner clears)
+// until BOTH stop owners clear; returns SLEEP_OK (re-check the original wait
+// cond + re-block) or SLEEP_INTR (dying/soft-int while stop-parked -> unwind
+// + die at the tail; DEATH WINS -- pty_stop.tla DeathWinsOverJobStop is the
+// job-owner leg). Called from sched.c's sleep()/tsleep() detour with their
+// wait loop locks RELEASED. The `r != &debug_rendez` detour gate makes this
 // nested park (r == debug_rendez) skip the stop-check -> no recursion.
-int proc_debug_stop_sleeper_park(struct Thread *t);
+// (Named proc_debug_stop_sleeper_park before PTY-1f generalized the cond.)
+int proc_stop_sleeper_park(struct Thread *t);
 
 // proc_debug_fault_stop: the EC-path (hardware bp/wp hit or single-step
 // completion) stop delivery. Unlike proc_debug_stop_deliver (the ctl `stop`
@@ -996,14 +1025,82 @@ bool proc_debug_fault_stop(struct Proc *p);
 // so a dead/detached debugger provably resumes its quarry (NoStrand). LOCK
 // CONTRACT: caller holds g_proc_table_lock (the p->threads walk + the
 // g_proc_table_lock -> wait_lock -> r->lock chain, acyclic).
+// PTY-1f (pty_stop.tla ResumeDebug): clears ONLY the debug owner -- a woken
+// thread whose Proc is ALSO job-stopped re-checks the park cond (both flags)
+// and re-parks; job_stop_req is never touched here (StopCompatI39's twin:
+// neither resume may clear the other's owner).
 void proc_debug_resume(struct Proc *p);
+
+// =============================================================================
+// PTY-1f: the job-control stop (I-20 stop leg; PTY-DESIGN.md section 4;
+// specs/pty_stop.tla). The SECOND stop owner beside the debugger's -- same
+// park (debug_rendez + the EL0-return tail / sleep-detour machinery), its own
+// flag (job_stop_req), per-owner clears.
+// =============================================================================
+
+// The park predicate: is ANY stop owner requesting this Proc parked? The
+// EL0-return tail, the sleep()/tsleep() stop detours, the 9P client's
+// client_stop_pending, and the elected-reader handoff skip ALL read this
+// disjunction (round-2 R2-F2: a flag the audited park machinery does not read
+// re-opens the #89 whole-FS freeze via the job axis). Two ACQUIRE loads off
+// one cache line (job_stop_req occupies debug_stop_req's pad slot).
+static inline bool proc_stop_requested(const struct Proc *p) {
+    return (__atomic_load_n(&p->debug_stop_req, __ATOMIC_ACQUIRE) |
+            __atomic_load_n(&p->job_stop_req,  __ATOMIC_ACQUIRE)) != 0;
+}
+
+// proc_job_stop_pgrp: the SYS_TTY_SIGNAL TSTP fan-out -- deliver the
+// job-control suspend to every ALIVE member of `pgid` under ONE
+// g_proc_table_lock hold (the notes_post_pgrp shape: membership read under
+// the lock that serializes setpgid/rfork/exit -- never a half-delivered
+// group). Per member, the catchability gate (round-2 R2-F3, the LS-5
+// notes_interrupt_should_terminate_locked analog) decides the disposition:
+//   - CAUGHT (an async handler registered, OR self-managing via the notes
+//     fd, OR every thread masks NOTE_BIT_TTY): the tty:susp note is POSTED
+//     (delivered/deferred on the target's own terms) and NO stop happens.
+//     (The all-masked case is note-only at v1.0: the POSIX stop-on-unmask
+//     of a pending stop signal is a recorded deviation -- masking defers
+//     the note, and the stop disposition is evaluated once, at post.)
+//   - UNCAUGHT + the group ORPHANED (no member has a parent in the same
+//     session but another group -- nobody to resume it): DISCARDED entirely
+//     (the POSIX orphan rule's stop-suppression half; no note, no stop).
+//   - UNCAUGHT otherwise: the default STOP -- job_stop_req set + the
+//     sleeper-wake cascade (the proc_debug_stop_deliver shape) + the
+//     stop_report_pending latch + the parent's child_waiters wake (the
+//     PTY-1e WAIT_UNTRACED edge). The signal is CONSUMED by the default
+//     action (no note queued -- nothing stays pending across the stop,
+//     POSIX-exact; a stale susp delivered after a later cont would
+//     re-suspend a resumed program).
+// An already-job-stopped member is skipped (a second Ctrl-Z on a stopped
+// group is a no-op -- POSIX discards a stop signal for a stopped process).
+// pgid 0 refused (the notes_post_pgrp precedent). Returns the count of
+// members affected (posted or stopped). Lock-free callers only (takes
+// g_proc_table_lock itself; the pts seam calls it with g_pts_lock RELEASED).
+int proc_job_stop_pgrp(u32 pgid);
+
+// proc_job_cont_pgrp: the tty:cont fan-out -- SYS_TTY_CONT (the shell's
+// `fg`/`bg`), the F8 pts-teardown resume, and the orphan rule's cont half.
+// Under one g_proc_table_lock hold, every ALIVE member of `pgid` gets the
+// tty:cont note POSTED (catchable-informational, best-effort -- the resume
+// side effect is the kernel's, not a note disposition) and, iff job-stopped,
+// its job_stop_req CLEARED + its debug_rendez-parked threads woken (the
+// proc_debug_resume walk -- a member ALSO debugger-stopped re-parks on the
+// still-set debug flag: the per-owner clear, pty_stop.tla ResumeJob vs
+// BUGGY_DOUBLE_STOP) + cont_report_pending latched + the parent's
+// child_waiters woken (the PTY-1e WAIT_CONTINUED edge). The resume is
+// UNCONDITIONAL on catchability (POSIX: SIGCONT resumes whether or not
+// caught; a handler observes the note after resuming). pgid 0 refused.
+// Returns the count of ALIVE members visited.
+int proc_job_cont_pgrp(u32 pgid);
 
 // 8a-1b-beta EL0-return-tail stop-check (specs/debug_stop.tla TailStep). Called
 // at every return-to-EL0 AFTER el0_return_die_check (+ notes on the sync tail),
-// so death/interrupt win over a stop. Fast-paths out when no debugger stop is
-// pending; otherwise parks the calling Thread on its own debug_rendez (register-
-// then-observe under wait_lock) until resumed, re-checking group death (terminate
-// here, never eret) on every wake. Returns to the tail (-> eret) when the stop
+// so death/interrupt win over a stop. Fast-paths out when NO stop is pending
+// (neither owner -- PTY-1f: the check reads proc_stop_requested's
+// debug|job disjunction); otherwise parks the calling Thread on its own
+// debug_rendez (register-then-observe under wait_lock) until BOTH owners
+// clear, re-checking group death (terminate here, never eret) on every wake.
+// Returns to the tail (-> eret) when the stop
 // is cleared or a soft interrupt-terminate must be delivered at the next tail.
 // 8a-1c: `ctx` is the vector-supplied EL0 trapframe pointer (== the current SP);
 // recorded into the Thread so /proc/<pid>/regs reads the RIGHT saved frame (its

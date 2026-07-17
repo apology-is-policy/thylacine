@@ -347,7 +347,7 @@ void el0_return_die_check(void);
 
 static void exception_sync_lower_el_impl(struct exception_context *ctx) {
     // 8c-2 (#88): publish THIS EL0-entry frame as the current thread's debug
-    // trapframe, so a thread that DETOUR-parks (proc_debug_stop_sleeper_park --
+    // trapframe, so a thread that DETOUR-parks (proc_stop_sleeper_park --
     // the stop-of-a-sleeper) while blocked in a syscall/demand-page sleep has a
     // valid frame for /proc/<pid>/regs. el0_return_stop_check records the frame
     // from its own vector ctx at the RETURN tail, but a detour-parked sleeper is

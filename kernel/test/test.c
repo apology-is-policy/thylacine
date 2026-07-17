@@ -170,6 +170,8 @@ void test_pts_syscall_gates(void);
 void test_pts_tty_acquire_matrix(void);
 void test_pts_tty_set_get_fg_matrix(void);
 void test_pts_tty_signal_routing(void);
+void test_pts_tty_tstp_stop_cont_seam(void);
+void test_pts_teardown_hup_cont(void);
 void test_resource_exempt_only_system(void);
 void test_resource_page_charge_caps(void);
 void test_resource_thread_cap_ok(void);
@@ -197,6 +199,9 @@ void test_proc_wait_pid_for_wnohang_alive_then_reap(void);
 void test_proc_wait_pid_for_selects_target(void);
 void test_proc_wait_pid_for_pgrp_selectors(void);
 void test_proc_wait_pid_for_report_not_reap(void);
+void test_proc_job_stop_owner_algebra(void);
+void test_proc_job_stop_park_report_cont_live(void);
+void test_proc_job_stop_orphan_rule(void);
 void test_namespace_bind_smoke(void);
 void test_namespace_cycle_rejected(void);
 void test_namespace_fork_isolated(void);
@@ -1382,6 +1387,8 @@ struct test_case g_tests[] = {
     { "pts.tty_acquire_matrix",        test_pts_tty_acquire_matrix,        false, NULL },
     { "pts.tty_set_get_fg_matrix",     test_pts_tty_set_get_fg_matrix,     false, NULL },
     { "pts.tty_signal_routing",        test_pts_tty_signal_routing,        false, NULL },
+    { "pts.tty_tstp_stop_cont_seam",   test_pts_tty_tstp_stop_cont_seam,   false, NULL },
+    { "pts.teardown_hup_cont",         test_pts_teardown_hup_cont,         false, NULL },
     { "proc.legate_teardown_from_zombie_chokepoint",
                                        test_proc_legate_teardown_from_zombie_chokepoint, false, NULL },
     { "proc.wait_pid_for_no_match",    test_proc_wait_pid_for_no_match,    false, NULL },
@@ -1393,6 +1400,10 @@ struct test_case g_tests[] = {
                                        test_proc_wait_pid_for_pgrp_selectors, false, NULL },
     { "proc.wait_pid_for_report_not_reap",
                                        test_proc_wait_pid_for_report_not_reap, false, NULL },
+    { "proc.job_stop_owner_algebra",   test_proc_job_stop_owner_algebra,   false, NULL },
+    { "proc.job_stop_park_report_cont_live",
+                                       test_proc_job_stop_park_report_cont_live, false, NULL },
+    { "proc.job_stop_orphan_rule",     test_proc_job_stop_orphan_rule,     false, NULL },
     { "resource.exempt_only_system",   test_resource_exempt_only_system,   false, NULL },
     { "resource.page_charge_caps",     test_resource_page_charge_caps,     false, NULL },
     { "resource.thread_cap_ok",        test_resource_thread_cap_ok,        false, NULL },

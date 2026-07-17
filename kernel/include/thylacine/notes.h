@@ -243,11 +243,13 @@ struct NoteQueue {
 // them like any note (bash/vim/tmux install SIGTSTP handlers; SIGWINCH is
 // routinely caught). Uncaught defaults: tty:quit / tty:hup TERMINATE (the
 // LS-5 interrupt pattern -- fires only with no handler + not self-managing
-// + unmasked); tty:susp STOPS (the PTY-1f job_stop machinery; nothing
-// emits it until SYS_TTY_SIGNAL's TSTP class un-gates there); tty:winch /
+// + unmasked); tty:susp STOPS (LIVE since PTY-1f: an UNCAUGHT susp is
+// CONSUMED by the default stop at post time -- proc_job_stop_pgrp sets
+// job_stop_req and never queues the note, so nothing stays pending across
+// the stop; only a CAUGHT one is queued); tty:winch /
 // tty:cont are informational (queue for the fd-read path, no default
 // action -- the pipe/child_exit shape; cont's RESUME side effect is the
-// kernel stop-clear at PTY-1f, not a note disposition).
+// kernel stop-clear -- proc_job_cont_pgrp -- not a note disposition).
 #define NOTE_NAME_TTY_WINCH  "tty:winch"  // SIGWINCH -- winsize changed
 #define NOTE_NAME_TTY_SUSP   "tty:susp"   // SIGTSTP  -- default STOP (PTY-1f)
 #define NOTE_NAME_TTY_CONT   "tty:cont"   // SIGCONT  -- resume (kernel side)

@@ -1743,23 +1743,26 @@ int sleep(struct Rendez *r, int (*cond)(void *arg), void *arg) {
     // Loop: re-check cond on each wakeup. Single-waiter UP: cond should be true
     // after a normal wakeup. The loop also absorbs spurious / cascade wakes.
     while (!cond(arg)) {
-        // 8c-2 stop-of-a-sleeper (DEBUG-FS-DESIGN 5c.2): if a debugger stop is
-        // pending on this EL0 Proc, DETOUR -- park on our own debug_rendez until
-        // resumed, then re-loop to re-check the ORIGINAL cond (the syscall
-        // re-blocks in place; no unwind, no restart). The debug_stop_req read is
-        // UNDER wait_lock, held continuously from here through the register +
-        // sched-drop below, so it serializes with proc_debug_stop_deliver's
-        // RELEASE-set + per-peer wait_lock wake: either we observe the set flag
-        // here, or we register on r and the deliver's wake-walk (which takes our
-        // wait_lock) finds us + wakes us -> the next iteration observes it -- no
-        // stop-wake lost (register-then-observe, I-9). Gated `r != &debug_rendez`
-        // so the nested park (which IS a sleep on debug_rendez) does not recurse;
-        // gated `t->proc` so a kernel thread (never debuggable) is skipped.
-        // SLEEP_INTR from the park = dying / soft interrupt-terminate while
-        // stop-parked -> unwind the outer syscall (DEATH WINS over a stop, exactly
-        // as at the tail). specs/debug_stop.tla StopWakesSleeper.
-        if (r != &t->debug_rendez && t->proc &&
-            __atomic_load_n(&t->proc->debug_stop_req, __ATOMIC_ACQUIRE) != 0) {
+        // 8c-2 stop-of-a-sleeper (DEBUG-FS-DESIGN 5c.2): if a stop is pending
+        // on this EL0 Proc -- a debugger stop OR (PTY-1f) a job-control stop;
+        // the gate is proc_stop_requested's debug|job disjunction (round-2
+        // R2-F2: a flag this detour does not read re-opens the #89 freeze via
+        // the job axis) -- DETOUR: park on our own debug_rendez until BOTH
+        // owners clear, then re-loop to re-check the ORIGINAL cond (the
+        // syscall re-blocks in place; no unwind, no restart). The flag reads
+        // are UNDER wait_lock, held continuously from here through the
+        // register + sched-drop below, so they serialize with each deliver's
+        // RELEASE-set + per-peer wait_lock wake: either we observe a set flag
+        // here, or we register on r and the deliver's wake-walk (which takes
+        // our wait_lock) finds us + wakes us -> the next iteration observes
+        // it -- no stop-wake lost (register-then-observe, I-9). Gated
+        // `r != &debug_rendez` so the nested park (which IS a sleep on
+        // debug_rendez) does not recurse; gated `t->proc` so a kernel thread
+        // (never stoppable) is skipped. SLEEP_INTR from the park = dying /
+        // soft interrupt-terminate while stop-parked -> unwind the outer
+        // syscall (DEATH WINS over a stop, exactly as at the tail).
+        // specs/debug_stop.tla StopWakesSleeper; pty_stop.tla stopOwners.
+        if (r != &t->debug_rendez && t->proc && proc_stop_requested(t->proc)) {
             // 8c-3 (#89; DEBUG-FS-DESIGN 5c.6): the elected 9P reader sets
             // stop_unwinds around its blocking recv. A stop must NOT park it in
             // place here -- it holds reader_active, and a parked reader freezes
@@ -1796,7 +1799,7 @@ int sleep(struct Rendez *r, int (*cond)(void *arg), void *arg) {
             if (!t->stop_no_park) {
                 spin_unlock(&r->lock);
                 spin_unlock_irqrestore(&t->wait_lock, s);
-                int drc = proc_debug_stop_sleeper_park(t);
+                int drc = proc_stop_sleeper_park(t);
                 s = spin_lock_irqsave(&t->wait_lock);
                 spin_lock(&r->lock);
                 if (drc == SLEEP_INTR) { rc = SLEEP_INTR; break; }
@@ -1931,17 +1934,18 @@ int tsleep(struct Rendez *r, int (*cond)(void *arg), void *arg,
         }
 
         // 8c-2 stop-of-a-sleeper (DEBUG-FS-DESIGN 5c.2), the tsleep twin of
-        // sleep()'s detour: park on debug_rendez when a stop is pending, then
-        // re-loop. The detour is BEFORE timerwait_link (below), so this thread is
-        // not on the timer-wait list during the indefinite debug-park -- on resume
+        // sleep()'s detour: park on debug_rendez when a stop is pending from
+        // EITHER owner (the PTY-1f debug|job disjunction, proc_stop_requested
+        // -- see sleep()'s detour), then re-loop. The detour is BEFORE
+        // timerwait_link (below), so this thread is
+        // not on the timer-wait list during the indefinite stop-park -- on resume
         // it re-registers with its ORIGINAL deadline. A deadline that expired while
         // stop-parked reports TSLEEP_TIMEDOUT at the re-loop's timeout check
         // (wall-clock advances while the thread is stopped -- the accepted
-        // debugger-freeze semantics; a timed wait timing out is a legal outcome).
-        // Same I-9 register-then-observe + DEATH-WINS + no-recursion reasoning as
-        // sleep()'s detour.
-        if (r != &t->debug_rendez && t->proc &&
-            __atomic_load_n(&t->proc->debug_stop_req, __ATOMIC_ACQUIRE) != 0) {
+        // debugger-freeze / Ctrl-Z-freeze semantics; a timed wait timing out is a
+        // legal outcome). Same I-9 register-then-observe + DEATH-WINS +
+        // no-recursion reasoning as sleep()'s detour.
+        if (r != &t->debug_rendez && t->proc && proc_stop_requested(t->proc)) {
             // 8c-3 (#89): the tsleep twin of sleep()'s stop_unwinds branch. The
             // 9P reader's recv (srvconn_client_recv) is a deadline-bounded tsleep;
             // when stop_unwinds is set, UNWIND (return TSLEEP_INTR, which
@@ -1962,7 +1966,7 @@ int tsleep(struct Rendez *r, int (*cond)(void *arg), void *arg,
                 spin_unlock(&r->lock);
                 spin_unlock(&g_timerwait.lock);
                 spin_unlock_irqrestore(&t->wait_lock, s);
-                int drc = proc_debug_stop_sleeper_park(t);
+                int drc = proc_stop_sleeper_park(t);
                 s = spin_lock_irqsave(&t->wait_lock);
                 spin_lock(&g_timerwait.lock);
                 spin_lock(&r->lock);

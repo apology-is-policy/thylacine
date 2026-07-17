@@ -143,10 +143,13 @@ int pts_spoor_conn_qid(struct Spoor *sp, struct SrvConn **cn_out,
 // class's note to the controlling session's foreground group via
 // notes_post_pgrp; TTY_SIG_HUP additionally reaches the controlling process
 // (the session leader) when it is not in the foreground group (F13's two
-// POSIX carrier-loss targets). Returns the posted count (0 when the pts has
+// POSIX carrier-loss targets); TTY_SIG_TSTP (live since PTY-1f) routes to
+// proc_job_stop_pgrp instead -- the job-control stop fan (the per-member
+// catchability gate: a caught susp is a note, never a stop [R2-F3]; the
+// orphaned-group discard; the default STOP + the PTY-1e stop report).
+// Returns the posted/affected count (0 when the pts has
 // no controlling session -- a terminal nobody controls routes nowhere);
-// -T_E_ACCES (not the minting server); -T_E_INVAL (stale id / bad class);
-// -T_E_OPNOTSUPP (TTY_SIG_TSTP until the job-stop machinery, PTY-1f).
+// -T_E_ACCES (not the minting server); -T_E_INVAL (stale id / bad class).
 // The route targets are SNAPSHOTTED under the gen-valid lock hold and the
 // posts run after release (no g_pts_lock -> g_proc_table_lock nesting); a
 // concurrent free/re-mint cannot redirect an in-flight signal (the fg value
@@ -175,5 +178,16 @@ s64 pts_tty_set_fg(struct Proc *p, struct SrvConn *cn, u64 qid, u32 pgid);
 // reads unconditionally (the terminal emulator owns the terminal); a
 // SLAVE-side fd requires the caller in the controlling session.
 s64 pts_tty_get_fg(struct Proc *p, struct SrvConn *cn, u64 qid);
+
+// SYS_TTY_CONT (PTY-1f; signed off 2026-07-17): resume job-stopped `pgid`
+// via a slave fd of the caller's controlling terminal -- the shell's
+// `fg`/`bg` path. Gated exactly like tcsetpgrp (session membership of pgid
+// checked UNLOCKED, then the binding + ct-session gates under g_pts_lock),
+// then the proc_job_cont_pgrp fan with the registry leaf RELEASED (tty:cont
+// note per member + the per-owner job resume -- a debugger-stopped member
+// re-parks, StopCompatI39). Returns the visited-member count; -T_E_ACCES
+// (pgid not a live group in the caller's session / not the caller's
+// controlling terminal); -T_E_NOENT (unbound fd); -T_E_INVAL.
+s64 pts_tty_cont(struct Proc *p, struct SrvConn *cn, u64 qid, u32 pgid);
 
 #endif // THYLACINE_PTS_H

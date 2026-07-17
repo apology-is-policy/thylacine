@@ -69,15 +69,21 @@ static struct pts_entry *pts_find_binding_locked(struct SrvConn *cn, u64 qid,
 
 // Clear an entry: stage its binding conns for the caller to srvconn_unref
 // AFTER g_pts_lock drops (the last unref tears down + frees -- chan/slab
-// locks; never under the registry leaf). Bumps the gen so every stale id
-// fails from here on. Lock held.
+// locks; never under the registry leaf), and stage the controlling-terminal
+// snapshot (ct_sid, fg_pgid) for the caller's F8 teardown fan -- ALSO after
+// release (the F11 no-nesting discipline: no note post / proc-table walk
+// under g_pts_lock). Bumps the gen so every stale id fails from here on.
+// Lock held.
 static int pts_clear_locked(struct pts_entry *e,
-                            struct SrvConn *drop[PTS_BINDINGS_MAX]) {
+                            struct SrvConn *drop[PTS_BINDINGS_MAX],
+                            u32 *ct_sid_out, u32 *fg_out) {
     int ndrop = 0;
     for (u32 j = 0; j < PTS_BINDINGS_MAX; j++) {
         if (e->bindings[j].used) drop[ndrop++] = e->bindings[j].conn;
         e->bindings[j] = (struct pts_binding){0};
     }
+    if (ct_sid_out) *ct_sid_out = e->ct_sid;
+    if (fg_out)     *fg_out     = e->fg_pgid;
     e->live       = false;
     e->server_pid = 0;
     e->ct_sid     = 0;
@@ -87,16 +93,47 @@ static int pts_clear_locked(struct pts_entry *e,
     return ndrop;
 }
 
+// F8 (PTY-1f): the pts-teardown carrier-loss fan, run with g_pts_lock
+// RELEASED on the (ct_sid, fg) snapshot pts_clear_locked staged. The pts is
+// gone (explicit FREE, or GC of a dead server's entry) -- POSIX modem-hangup:
+// tty:hup to the foreground group AND (F13) the controlling process (the
+// session leader) when it sits outside the fg group, THEN tty:cont + the
+// job-resume to the fg group, per-member hup-before-cont (POSIX 2.4.3's
+// order -- the resume lets an uncaught hup's terminate actually run, and a
+// hup-catching survivor actually handle it; "no group stranded with a dead
+// SIGCONT source"). Groups stopped via this pts that are NOT the fg at
+// teardown (the shell re-seated itself after a ^Z -- the standard sequence)
+// are covered by the composition, not tracked provenance: the shell/leader
+// receives this hup; if it dies, proc_become_zombie_locked's orphan rule
+// delivers hup+cont to its newly-orphaned stopped groups; if it catches the
+// hup and survives, its slave fd still resolves (the registry compares
+// POINTERS -- a TORN conn still matches), so SYS_TTY_CONT keeps working...
+// on the still-LIVE entry. Once the entry is FREED that path dies with it --
+// the hup-surviving-shell-with-stopped-bg-jobs corner is a recorded v1.x
+// seam (a kill-authority SIGCONT). `caller` feeds proc_getpgid's leader
+// lookup (any Proc may query -- PTY-1a).
+static void pts_teardown_fan(struct Proc *caller, u32 ct_sid, u32 fg) {
+    if (ct_sid == 0 || fg == 0) return;   // nobody controlled this terminal
+    (void)notes_post_pgrp(fg, NOTE_NAME_TTY_HUP, 0);
+    s64 lp = proc_getpgid(caller, (int)ct_sid);
+    if (lp > 0 && (u32)lp != fg)
+        (void)notes_post_pid((int)ct_sid, NOTE_NAME_TTY_HUP, 0);
+    (void)proc_job_cont_pgrp(fg);
+}
+
 // Reclaim ONE entry whose every binding conn is torn (a dead server's conns
 // are TORN by its handle-close teardown), making room for the caller's mint.
 // A live slave conn on an otherwise-dead entry blocks reclaim -- conservative;
 // the pts may still be serving through that side. srvconn_is_live reads
 // cn->state (LIVE -> TORN is monotonic), a leaf nested under g_pts_lock.
-// PTY-1d seam: entries reclaimed here carried inert ct_sid/fg_pgid at 1c;
-// once the tty:hup teardown path lands (1d), server-death hup delivery runs
-// on the conn-teardown path itself, so GC'd entries are already hup'd.
+// PTY-1f (F8): the reclaimed entry's (ct_sid, fg) is staged for the caller's
+// post-release pts_teardown_fan -- a dead server's controlled session gets
+// its carrier-loss hup + the stopped-fg resume at GC time (lazy: at the next
+// mint-full; the interim is covered by the orphan rule + the torn-conn
+// SYS_TTY_CONT resolve, see pts_teardown_fan's composition note).
 static struct pts_entry *pts_gc_one_locked(struct SrvConn *drop[PTS_BINDINGS_MAX],
-                                           int *ndrop_out) {
+                                           int *ndrop_out,
+                                           u32 *ct_sid_out, u32 *fg_out) {
     for (u32 i = 0; i < PTS_MAX; i++) {
         struct pts_entry *e = &g_pts[i];
         if (!e->live) continue;
@@ -106,7 +143,7 @@ static struct pts_entry *pts_gc_one_locked(struct SrvConn *drop[PTS_BINDINGS_MAX
                 all_torn = false;
         }
         if (all_torn) {
-            *ndrop_out = pts_clear_locked(e, drop);
+            *ndrop_out = pts_clear_locked(e, drop, ct_sid_out, fg_out);
             return e;
         }
     }
@@ -118,6 +155,7 @@ s64 pts_mint(struct Proc *server, struct SrvConn *cn, u64 master_qid) {
 
     struct SrvConn *drop[PTS_BINDINGS_MAX];
     int ndrop = 0;
+    u32 gc_ct_sid = 0, gc_fg = 0;   // the GC'd entry's F8 fan snapshot
     s64 ret;
 
     spin_lock(&g_pts_lock);
@@ -129,7 +167,7 @@ s64 pts_mint(struct Proc *server, struct SrvConn *cn, u64 master_qid) {
     for (u32 i = 0; i < PTS_MAX; i++) {
         if (!g_pts[i].live) { e = &g_pts[i]; break; }
     }
-    if (!e) e = pts_gc_one_locked(drop, &ndrop);
+    if (!e) e = pts_gc_one_locked(drop, &ndrop, &gc_ct_sid, &gc_fg);
     if (!e) {
         ret = -T_E_AGAIN;
         goto out;
@@ -147,6 +185,10 @@ s64 pts_mint(struct Proc *server, struct SrvConn *cn, u64 master_qid) {
 out:
     spin_unlock(&g_pts_lock);
     for (int k = 0; k < ndrop; k++) srvconn_unref(drop[k]);
+    // F8: the GC victim's carrier-loss fan -- after the lock + the unrefs
+    // (the fan takes g_proc_table_lock + note queue locks; never under the
+    // registry leaf). The minter is the proc_getpgid query caller.
+    pts_teardown_fan(server, gc_ct_sid, gc_fg);
     return ret;
 }
 
@@ -197,6 +239,7 @@ int pts_free(struct Proc *server, u64 pts_id) {
 
     struct SrvConn *drop[PTS_BINDINGS_MAX];
     int ndrop = 0;
+    u32 ct_sid = 0, fg = 0;
     int ret;
 
     spin_lock(&g_pts_lock);
@@ -206,11 +249,14 @@ int pts_free(struct Proc *server, u64 pts_id) {
     } else if (e->server_pid != (u32)server->pid) {
         ret = -T_E_ACCES;
     } else {
-        ndrop = pts_clear_locked(e, drop);
+        ndrop = pts_clear_locked(e, drop, &ct_sid, &fg);
         ret = 0;
     }
     spin_unlock(&g_pts_lock);
     for (int k = 0; k < ndrop; k++) srvconn_unref(drop[k]);
+    // F8: the explicit-FREE (last-master-close) carrier-loss fan, after the
+    // lock + the unrefs. (ct_sid, fg) stay 0 on the error arms -> no-op.
+    pts_teardown_fan(server, ct_sid, fg);
     return ret;
 }
 
@@ -276,10 +322,16 @@ s64 pts_tty_signal(struct Proc *server, u64 pts_id, u32 sig_class) {
     fg     = e->fg_pgid;
     spin_unlock(&g_pts_lock);
 
-    // The authority gate precedes the not-yet reject: an unauthorized caller
-    // learns nothing class-specific; a real server probing TSTP gets the
-    // honest not-yet.
-    if (sig_class == TTY_SIG_TSTP) return -T_E_OPNOTSUPP;
+    // PTY-1f: the suspend class is LIVE -- the job-control stop fan-out
+    // (proc_job_stop_pgrp: per-member catchability gate [a caught susp is a
+    // note, not a stop -- R2-F3] + the orphaned-group discard + the default
+    // STOP with the PTY-1e stop report). Runs with g_pts_lock RELEASED on
+    // the snapshot, exactly like the note fans below (the F11 no-nesting
+    // discipline). No controlling session / no fg seated -> 0, like INT.
+    if (sig_class == TTY_SIG_TSTP) {
+        if (ct_sid == 0 || fg == 0) return 0;
+        return (s64)proc_job_stop_pgrp(fg);
+    }
 
     const char *name;
     switch (sig_class) {
@@ -364,6 +416,43 @@ s64 pts_tty_set_fg(struct Proc *p, struct SrvConn *cn, u64 qid, u32 pgid) {
         ret = 0;
     }
     spin_unlock(&g_pts_lock);
+    return ret;
+}
+
+// PTY-1f (SYS_TTY_CONT = 98, user-signed-off 2026-07-17): the shell's
+// `fg`/`bg` resume -- the ONE named path by which a session member resumes a
+// job-stopped group in its session (F4 keeps tty:cont kernel-synthetic-only
+// on the POST axis; F8 covers only the teardown cont; ordinary kill covers
+// only one's OWN group). Gated EXACTLY like SET_FG: the membership check
+// runs UNLOCKED before the seat lookup (no g_pts_lock -> g_proc_table_lock
+// nesting; the group-empties-in-the-window race is the benign POSIX one),
+// then the binding + controlling-session gates under the registry leaf,
+// then -- with g_pts_lock RELEASED -- the proc_job_cont_pgrp fan (tty:cont
+// note + the per-owner job resume; a debugger-stopped member re-parks:
+// StopCompatI39). The target group need NOT be the fg (bg resumes a
+// background job) and need not be stopped (the cont note still posts --
+// POSIX SIGCONT semantics). Works on a TORN conn (the resolve is pure
+// pointer identity), so a shell whose ptyfs died can still resume its jobs
+// while the registry entry lives.
+s64 pts_tty_cont(struct Proc *p, struct SrvConn *cn, u64 qid, u32 pgid) {
+    if (!p || !cn || qid == 0)      return -T_E_INVAL;
+    if (pgid == 0 || (s32)pgid < 0) return -T_E_INVAL;
+    if (!proc_pgrp_in_session(pgid, p->sid)) return -T_E_ACCES;
+
+    s64 ret;
+    spin_lock(&g_pts_lock);
+    struct pts_binding *b = NULL;
+    struct pts_entry *e = pts_find_binding_locked(cn, qid, &b);
+    if (!e) {
+        ret = -T_E_NOENT;
+    } else if (e->ct_sid == 0 || e->ct_sid != p->sid) {
+        ret = -T_E_ACCES;              // not the caller's controlling terminal
+    } else {
+        ret = 0;
+    }
+    spin_unlock(&g_pts_lock);
+    if (ret == 0)
+        ret = (s64)proc_job_cont_pgrp(pgid);
     return ret;
 }
 

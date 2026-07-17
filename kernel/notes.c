@@ -254,8 +254,9 @@ static int notes_find_locked(struct NoteQueue *q, const char *name,
 // PTY-1b: the terminate class -- names whose UNCAUGHT default disposition
 // is process termination at the EL0-return tail (the LS-5 interrupt pattern
 // generalized: interrupt == SIGINT, tty:quit == SIGQUIT, tty:hup == SIGHUP).
-// tty:susp's default is STOP (the PTY-1f job_stop machinery; nothing emits
-// it until SYS_TTY_SIGNAL's TSTP class un-gates there) and tty:winch /
+// tty:susp's default is STOP, applied at POST time by proc_job_stop_pgrp
+// (PTY-1f) -- an uncaught susp never reaches a queue, so it deliberately has
+// NO latch here -- and tty:winch /
 // tty:cont are informational (queue for the fd-read path, no default
 // action -- the pipe/child_exit shape). Returns the class's LATCH flag
 // (PROC_FLAG_INTR_TERMINATE_PENDING for interrupt,
