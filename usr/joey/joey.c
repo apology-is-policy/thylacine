@@ -5995,6 +5995,57 @@ int main(void) {
     }
 #endif /* THYLA_BOOT_PROBES (login + recover boot-test E2Es) */
 
+    // === PTY-2a: spawn /sbin/ptyfs (the pseudoterminal 9P server) ===
+    // A device-less native /srv server (the corvus precedent -- NOT the warden,
+    // which is hardware-device-bind driven). It posts /srv/ptyfs + serves the pts
+    // pairs; joey grants MAY_POST_SERVICE so it may post (no fds, no caps).
+    // Persistent + fire-and-forget (joey does not reap it) -- nothing depends on it
+    // yet; the /dev/pts mount + real clients land at PTY-2a-mount / PTY-2b+. Its
+    // startup selftest ("ptyfs: 2a selftest PASS") + "serving /srv/ptyfs" appear in
+    // the boot log. Ungated -- a persistent production service, not a boot probe.
+    {
+        char pbuf[24];
+        const char ptyfs_name[] = "/bin/ptyfs"; // #58: post-pivot /bin bind
+        long ptyfs_pid = t_spawn_with_perms(ptyfs_name, sizeof(ptyfs_name) - 1,
+                                            NULL, 0, 0,
+                                            T_SPAWN_PERM_MAY_POST_SERVICE);
+        if (ptyfs_pid <= 0) {
+            t_putstr("joey: t_spawn_with_perms(\"ptyfs\") FAILED\n");
+        } else {
+            // Bounded liveness connect (the connect_corvus idiom): wait for ptyfs to
+            // post /srv/ptyfs. Its selftest runs BEFORE the post, so a connect
+            // success also confirms the selftest passed -- a real gate for an
+            // otherwise-silent selftest failure. Printing only AFTER the connect
+            // keeps joey silent during ptyfs's startup, so ptyfs's one selftest line
+            // cannot interleave with joey's boot-complete output. open=connect drives
+            // Tversion+Tattach; the close tears the probe session down. 30 x 500 ms
+            // backstop -- ptyfs starts fast (no 24 MiB BSS), so the first try wins.
+            long yr = -1, yw = -1;
+            int ptyfs_up = 0;
+            if (t_pipe(&yr, &yw) == 0) {
+                for (int i = 0; i < 30; i++) {
+                    long root = t_open(T_WALK_OPEN_FROM_ROOT, "/srv/ptyfs", 10, T_OREAD);
+                    if (root >= 0) {
+                        (void)t_close(root);
+                        ptyfs_up = 1;
+                        break;
+                    }
+                    struct pollfd pfd = { .fd = (int)yr, .events = POLLIN, .revents = 0 };
+                    (void)t_poll(&pfd, 1, 500);
+                }
+                t_close(yr);
+                t_close(yw);
+            }
+            if (ptyfs_up) {
+                t_putstr("joey: /sbin/ptyfs up pid=");
+                t_putstr(itoa_dec(ptyfs_pid, pbuf, sizeof(pbuf)));
+                t_putstr(" (2a selftest passed; serving /srv/ptyfs)\n");
+            } else {
+                t_putstr("joey: /sbin/ptyfs DOWN (failed to post /srv/ptyfs -- selftest?)\n");
+            }
+        }
+    }
+
     // (2) Signal boot-complete. All boot-test asserts have passed, so the kernel
     // prints "Thylacine boot OK" here (the banner no longer rides joey's exit;
     // joey persists as the session supervisor).

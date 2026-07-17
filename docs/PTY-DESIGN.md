@@ -291,8 +291,24 @@ TLC-green; step-vs-resume composes `debug_step.tla`.**
 
 ## 5. The userspace `ptyfs` server (PTY-2)
 
-A native `libthyla-rs` Proc, warden-manifested `lifecycle = persistent` (the netd
-precedent), posting `/srv/ptyfs`; joey mounts `/dev/ptmx` + `/dev/pts` from it.
+A native `libthyla-rs` Proc, **joey-spawned directly with
+`T_SPAWN_PERM_MAY_POST_SERVICE`** (the corvus precedent -- NOT the warden: the
+warden is hardware-device-bind driven, intersecting DTB device-node resources into
+an allowance, and `ptyfs` owns no hardware, so the warden does not fit a device-less
+service), posting `/srv/ptyfs`. joey mounts ptyfs's tree at **`/dev/pts`** -- a
+`devdev` synthetic mount-point **directory** child (the `devhw` `/hw/pci`
+precedent) -- with the clone file *inside* it at `/dev/pts/ptmx` (the Linux-devpts
+shape). The POSIX `/dev/ptmx` master path is a PTY-3 concern (a symlink or a
+file-mount, deferred until symlinks) because **union-mount *walking* is unbuilt at
+v1.0** (`kernel/territory.c`: `MBEFORE`/`MAFTER` are recorded but treated as "append
+an entry"; union walking is Phase 5+), so a single directory mount at `/dev/pts` --
+not a union over the occupied `/dev` -- is the realizable placement.
+
+*As-built (PTY-2a-1)*: the server + the two byte rings + the Plan 9 clone-mint +
+`SYS_PTY_REGISTER` + the deferred multi-waiter read + the in-server ring selftest
+are landed; joey spawns it with a bounded liveness connect that gates a silent
+selftest failure. The `/dev/pts` devdev child + a real master/slave round-trip probe
+are PTY-2a-2; the line discipline is PTY-2b.
 
 - **`/dev/ptmx` open → mint pts N** (the netd clone idiom): allocate the pts
   slot, its M2S + S2M rings, its per-pts `Ldisc` (the de-globalized LS-8 cooking
