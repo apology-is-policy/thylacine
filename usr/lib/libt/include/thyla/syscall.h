@@ -1108,6 +1108,24 @@ static inline long t_spawn(const char *name, size_t name_len) {
 // WAIT_WNOHANG (proc.h); the value MUST match.
 #define WAIT_WNOHANG 1
 
+// PTY-1e job-control wait flags (mirror POSIX WUNTRACED/WCONTINUED and the
+// kernel proc.h values). Passing either OPTS INTO the packed status
+// encoding below (a plain wait keeps the raw exit status); a stop/continue
+// REPORT returns the child's pid WITHOUT reaping it. want_pid extends to
+// the POSIX group selectors: 0 = any child in the caller's process group;
+// < -1 = any child in group -want_pid.
+#define WAIT_UNTRACED  2
+#define WAIT_CONTINUED 4
+
+// The packed status encoding (only under WAIT_UNTRACED/WAIT_CONTINUED;
+// the Linux wait(2) layout).
+#define WAIT_STATUS_STOPPED       (0x7f | (20 << 8))
+#define WAIT_STATUS_CONTINUED     0xffff
+#define WAIT_IF_EXITED(st)        (((st) & 0x7f) == 0)
+#define WAIT_EXITSTATUS(st)       (((st) >> 8) & 0xff)
+#define WAIT_IF_STOPPED(st)       (((st) & 0xff) == 0x7f)
+#define WAIT_IF_CONTINUED(st)     ((st) == 0xffff)
+
 // t_wait_pid_for — reap a ZOMBIE child, filtered by pid and/or flags.
 //   want_pid: -1 = any child; >0 = that specific child.
 //   flags:    WAIT_WNOHANG = do not block.

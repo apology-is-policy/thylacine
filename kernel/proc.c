@@ -2749,6 +2749,15 @@ int wait_pid_for(int want_pid, int flags, int *status_out) {
                              extinction("wait_pid with corrupted proc");
 
     const bool nohang = (flags & WAIT_WNOHANG) != 0;
+    // PTY-1e: either job-control flag opts the caller into the packed
+    // status encoding (a plain wait keeps the raw exit status -- full
+    // compatibility for every pre-PTY caller).
+    const bool want_stops = (flags & WAIT_UNTRACED)  != 0;
+    const bool want_conts = (flags & WAIT_CONTINUED) != 0;
+    const bool packed     = want_stops || want_conts;
+    // The pgrp selector's group, computed in s64 so want_pid == INT_MIN
+    // cannot overflow the negation.
+    const u32 want_pgid_sel = (want_pid < -1) ? (u32)(-(s64)want_pid) : 0u;
 
     // #344 multi-waiter wait. THIS Thread's OWN private rendez + stack
     // poll_waiter. ANY number of a Proc's Threads may be in wait_pid_for
@@ -2772,22 +2781,42 @@ int wait_pid_for(int want_pid, int flags, int *status_out) {
         // transition state (zombie ready to reap).
         irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
 
-        // Single scan: find a MATCHING zombie to reap; also note whether
-        // any matching child exists at all (alive or zombie). No matching
-        // child → -1; matching-but-alive → sleep (or 0 under WNOHANG).
-        struct Proc *zombie = NULL;
-        bool any_match = false;
+        // Single scan: find a MATCHING zombie to reap (exit outranks the
+        // PTY-1e reports) + the first reportable latched child; also note
+        // whether any matching child exists at all. No matching child ->
+        // -1; matching-but-nothing-ready -> sleep (or 0 under WNOHANG).
+        //
+        // The selectors (PTY-1e): -1 = any; > 0 = that child; 0 = any
+        // child in the CALLER's group (p->pgid read here, under the same
+        // lock setpgid mutates it -- the POSIX at-each-check reading);
+        // < -1 = any child in group -want_pid. A child setpgid-leaving the
+        // waited group simply stops matching at this authoritative
+        // re-scan (the R2-F6 mid-wait obligation).
+        struct Proc *zombie   = NULL;
+        struct Proc *reportee = NULL;
+        bool report_cont = false;
+        bool any_match   = false;
         for (struct Proc *c = p->children; c; c = c->sibling) {
-            // want_pid -1 = any; >0 = that child. A child's pid is in
-            // [1, INT_MAX) (proc_alloc: g_next_pid starts at 1), and pid 0
-            // is kproc (never a child of a user Proc), so want_pid 0 / < -1
-            // (POSIX pgroup selectors) match no child here -> any_match stays
-            // false -> -1. Reserved for a future process-group lift.
-            if (want_pid != -1 && c->pid != want_pid) continue;
+            bool match;
+            if      (want_pid > 0)   match = (c->pid == want_pid);
+            else if (want_pid == -1) match = true;
+            else if (want_pid == 0)  match = (c->pgid == p->pgid);
+            else                     match = (c->pgid == want_pgid_sel);
+            if (!match) continue;
             any_match = true;
             if (c->state == PROC_STATE_ZOMBIE) {
                 zombie = c;
-                break;
+                break;                       // exit outranks every report
+            }
+            if (!reportee && c->state == PROC_STATE_ALIVE) {
+                // Continue outranks stop (proc.h precedence note); each
+                // arm only fires when its flag requested it, so a plain
+                // wait neither sees nor consumes a latch.
+                if (want_conts && c->cont_report_pending) {
+                    reportee = c; report_cont = true;
+                } else if (want_stops && c->stop_report_pending) {
+                    reportee = c; report_cont = false;
+                }
             }
         }
 
@@ -2800,7 +2829,8 @@ int wait_pid_for(int want_pid, int flags, int *status_out) {
 
         if (zombie) {
             int pid    = zombie->pid;
-            int status = zombie->exit_status;
+            int status = packed ? WAIT_STATUS_EXITED(zombie->exit_status)
+                                : zombie->exit_status;
 
             // P6-pouch-threads (sub-chunk 9): multi-thread Procs are
             // allowed. Every Thread in zombie->threads must be EXITING
@@ -2863,6 +2893,22 @@ int wait_pid_for(int want_pid, int flags, int *status_out) {
             proc_free(zombie);
 
             if (status_out) *status_out = status;
+            ret = pid;
+            goto out;
+        }
+
+        if (reportee) {
+            // PTY-1e report-is-not-reap (R2-F6): return the pid + packed
+            // status, consume the latch exactly once (under the same lock
+            // the 1f setters take), run NONE of the reap teardown -- the
+            // child stays linked + ALIVE, reapable by a later wait.
+            int pid = reportee->pid;
+            if (report_cont) reportee->cont_report_pending = false;
+            else             reportee->stop_report_pending = false;
+            spin_unlock_irqrestore(&g_proc_table_lock, s);
+            if (status_out)
+                *status_out = report_cont ? WAIT_STATUS_CONTINUED
+                                          : WAIT_STATUS_STOPPED;
             ret = pid;
             goto out;
         }

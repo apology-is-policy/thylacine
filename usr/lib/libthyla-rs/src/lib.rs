@@ -2434,6 +2434,21 @@ pub unsafe fn t_spawn_full_argv(req_va: *const TSpawnArgs) -> i64 {
 /// `WAIT_WNOHANG` (proc.h); the value MUST match.
 pub const T_WAIT_WNOHANG: i32 = 1;
 
+/// PTY-1e job-control wait flags (mirror POSIX `WUNTRACED`/`WCONTINUED`
+/// and the kernel proc.h values). Passing either OPTS INTO the packed
+/// status encoding (the Linux wait(2) layout); a stop/continue REPORT
+/// returns the child's pid WITHOUT reaping it. `want_pid` extends to the
+/// POSIX group selectors: 0 = any child in the caller's process group;
+/// < -1 = any child in group `-want_pid`.
+pub const T_WAIT_UNTRACED: i32 = 2;
+pub const T_WAIT_CONTINUED: i32 = 4;
+pub const T_WAIT_STATUS_STOPPED: i32 = 0x7f | (20 << 8);
+pub const T_WAIT_STATUS_CONTINUED: i32 = 0xffff;
+#[inline(always)] pub fn t_wait_if_exited(st: i32) -> bool { (st & 0x7f) == 0 }
+#[inline(always)] pub fn t_wait_exitstatus(st: i32) -> i32 { (st >> 8) & 0xff }
+#[inline(always)] pub fn t_wait_if_stopped(st: i32) -> bool { (st & 0xff) == 0x7f }
+#[inline(always)] pub fn t_wait_if_continued(st: i32) -> bool { st == 0xffff }
+
 // t_wait_pid_for — reap a ZOMBIE child, filtered by pid and/or flags.
 //   want_pid: -1 = any child; >0 = that specific child.
 //   flags:    T_WAIT_WNOHANG = do not block.

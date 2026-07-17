@@ -1139,3 +1139,131 @@ void test_proc_wait_pid_for_selects_target(void) {
     TEST_EXPECT_EQ(reaped_spin, spin_pid, "reap the spinner by its own pid");
     TEST_EXPECT_EQ(st, 0, "spinner status");
 }
+
+// =============================================================================
+// PTY-1e: the wait extension — pgrp selectors + WUNTRACED/WCONTINUED reports
+// =============================================================================
+
+static volatile u32 g_wpf_grouped;   // the group-minting spinner signals ready
+
+static void wpf_group_spinner_thunk(void *arg) {
+    (void)arg;
+    // Mint our own process group (self-target; same session as kproc; not a
+    // session leader), announce, then spin until released.
+    struct Proc *self = current_thread()->proc;
+    if (proc_setpgid(self, 0, 0) != 0) exits("setpgid failed");
+    __atomic_store_n(&g_wpf_grouped, 1u, __ATOMIC_RELEASE);
+    while (__atomic_load_n(&g_wpf_release, __ATOMIC_ACQUIRE) == 0u)
+        sched();
+    exits("ok");
+}
+
+static void wpf_failer_thunk(void *arg) {
+    (void)arg;
+    exits("boom");                   // non-"ok" -> exit_status 1
+}
+
+// The POSIX group selectors: want_pid == 0 matches a child in the CALLER's
+// group; want_pid < -1 matches the named group; a group nobody occupies
+// answers -1 (the ECHILD shape); a child that setpgid-minted its own group
+// is reachable ONLY through its group's selector once it leaves ours.
+void test_proc_wait_pid_for_pgrp_selectors(void) {
+    __atomic_store_n(&g_wpf_release, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_wpf_grouped, 0u, __ATOMIC_RELEASE);
+
+    int plain_pid = rfork(RFPROC, wpf_spinner_thunk, NULL);
+    TEST_ASSERT(plain_pid > 0, "rfork plain spinner failed");
+    int grp_pid = rfork(RFPROC, wpf_group_spinner_thunk, NULL);
+    TEST_ASSERT(grp_pid > 0, "rfork group spinner failed");
+    while (__atomic_load_n(&g_wpf_grouped, __ATOMIC_ACQUIRE) == 0u)
+        sched();                     // the child has minted its own group
+
+    int st = -42;
+    // want 0 = the caller's (kproc's) group: the plain spinner inherited
+    // pgid 0 and is alive-matched (0 under WNOHANG, never -1).
+    TEST_EXPECT_EQ(wait_pid_for(0, WAIT_WNOHANG, &st), 0,
+        "want 0 matches an alive child in the caller's group");
+    // The group child LEFT pgid 0; its own group matches it alive.
+    TEST_EXPECT_EQ(wait_pid_for(-grp_pid, WAIT_WNOHANG, &st), 0,
+        "want -G matches the alive child that minted group G");
+    TEST_EXPECT_EQ(wait_pid_for(-9999, WAIT_WNOHANG, &st), -1,
+        "an unoccupied group answers -1 (no matching child)");
+    TEST_EXPECT_EQ(wait_pid_for(-9999, 0, &st), -1,
+        "the blocking form does not block on an unoccupied group");
+
+    __atomic_store_n(&g_wpf_release, 1u, __ATOMIC_RELEASE);
+    TEST_EXPECT_EQ(wait_pid_for(-grp_pid, 0, &st), grp_pid,
+        "the group selector reaps the released group child");
+    TEST_EXPECT_EQ(st, 0, "group child status");
+    TEST_EXPECT_EQ(wait_pid_for(plain_pid, 0, &st), plain_pid,
+        "reap the plain spinner");
+}
+
+// Report-is-not-reap (R2-F6): a WAIT_UNTRACED/WAIT_CONTINUED wait REPORTS a
+// latched ALIVE child (pid + packed status) without any teardown, consumes
+// the latch exactly once, and a plain wait neither sees nor consumes a
+// latch. The latches are set directly here (the PTY-1f stop/cont paths are
+// the production setters); the packed-exited arm + raw compatibility use a
+// real failing child.
+void test_proc_wait_pid_for_report_not_reap(void) {
+    struct Proc *c = proc_alloc();
+    TEST_ASSERT(c != NULL, "proc_alloc");
+    proc_test_link(c);
+    int cpid = c->pid;
+    int st = -42;
+
+    // Stop report: pid + WAIT_STATUS_STOPPED; the child is NOT reaped
+    // (still ALIVE + still matched: the second poll answers 0, where a
+    // reaped child would answer -1 no-match).
+    c->stop_report_pending = true;
+    TEST_EXPECT_EQ(wait_pid_for(cpid, WAIT_UNTRACED | WAIT_WNOHANG, &st),
+        cpid, "the stop latch reports the child's pid");
+    TEST_EXPECT_EQ(st, WAIT_STATUS_STOPPED, "packed stopped status");
+    TEST_ASSERT(WAIT_IF_STOPPED(st) && !WAIT_IF_EXITED(st) &&
+                !WAIT_IF_CONTINUED(st), "stopped decodes as stopped only");
+    TEST_ASSERT(c->state == PROC_STATE_ALIVE, "the report did not reap");
+    TEST_ASSERT(!c->stop_report_pending, "the report consumed the latch");
+    TEST_EXPECT_EQ(wait_pid_for(cpid, WAIT_UNTRACED | WAIT_WNOHANG, &st), 0,
+        "a consumed latch reports nothing further");
+
+    // A plain wait neither sees nor consumes a latch.
+    c->stop_report_pending = true;
+    TEST_EXPECT_EQ(wait_pid_for(cpid, WAIT_WNOHANG, &st), 0,
+        "a plain wait does not see the stop latch");
+    TEST_ASSERT(c->stop_report_pending,
+        "a plain wait did not consume the latch");
+
+    // Precedence: continue outranks stop; each consumed independently.
+    c->cont_report_pending = true;
+    TEST_EXPECT_EQ(wait_pid_for(cpid,
+        WAIT_UNTRACED | WAIT_CONTINUED | WAIT_WNOHANG, &st), cpid,
+        "both latched: the continue reports first");
+    TEST_EXPECT_EQ(st, WAIT_STATUS_CONTINUED, "packed continued status");
+    TEST_ASSERT(WAIT_IF_CONTINUED(st) && !WAIT_IF_STOPPED(st),
+        "continued decodes as continued only");
+    TEST_EXPECT_EQ(wait_pid_for(cpid,
+        WAIT_UNTRACED | WAIT_CONTINUED | WAIT_WNOHANG, &st), cpid,
+        "then the still-latched stop reports");
+    TEST_EXPECT_EQ(st, WAIT_STATUS_STOPPED, "the second report is the stop");
+
+    // The group selector composes with reports.
+    c->stop_report_pending = true;
+    TEST_EXPECT_EQ(wait_pid_for(-(int)c->pgid,
+        WAIT_UNTRACED | WAIT_WNOHANG, &st), cpid,
+        "the pgrp selector reaches a latched child");
+    legate_drop_linked(c);
+
+    // Packed-exited vs raw: a failing child (exit_status 1) reads 0x100
+    // under a PTY-1e flag and raw 1 without one.
+    int f1 = rfork(RFPROC, wpf_failer_thunk, NULL);
+    TEST_ASSERT(f1 > 0, "rfork failer 1");
+    TEST_EXPECT_EQ(wait_pid_for(f1, WAIT_UNTRACED, &st), f1,
+        "reap the failer under WAIT_UNTRACED");
+    TEST_EXPECT_EQ(st, WAIT_STATUS_EXITED(1), "packed exited status (0x100)");
+    TEST_ASSERT(WAIT_IF_EXITED(st) && WAIT_EXITSTATUS(st) == 1,
+        "exited decodes: code 1");
+    int f2 = rfork(RFPROC, wpf_failer_thunk, NULL);
+    TEST_ASSERT(f2 > 0, "rfork failer 2");
+    TEST_EXPECT_EQ(wait_pid_for(f2, 0, &st), f2, "reap the failer plainly");
+    TEST_EXPECT_EQ(st, 1, "a plain wait keeps the raw exit status");
+}

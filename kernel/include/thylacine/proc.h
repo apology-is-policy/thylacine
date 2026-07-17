@@ -557,6 +557,21 @@ struct Proc {
     // (PTY-1e). Values are pids (< 2^31), stored u32 per the design.
     u32                sid;
     u32                pgid;
+
+    // PTY-1e (PTY-DESIGN.md section 4; the wait extension). The per-child
+    // report latches -- the Linux CLD_STOPPED/CLD_CONTINUED shape. A
+    // WAIT_UNTRACED / WAIT_CONTINUED wait_pid_for REPORTS a latched child
+    // (returns its pid + a packed status WITHOUT reaping -- report-is-not-
+    // reap, round-2 R2-F6) and consumes the latch exactly once, under
+    // g_proc_table_lock. SET by the job-stop park / tty:cont resume
+    // (PTY-1f -- the setters also wake the parent's child_waiters, the
+    // fresh I-9 edge; until 1f nothing sets them, so the report arms are
+    // complete-but-quiescent). KP_ZERO-fresh false; never rfork-inherited
+    // (a new child has no pending report). A latch set while no wait
+    // requests its flag stays LATCHED (a plain wait neither sees nor
+    // consumes it).
+    bool               stop_report_pending;
+    bool               cont_report_pending;
 };
 
 #define PROC_FLAG_NODUMP            (1u << 0)
@@ -615,16 +630,22 @@ struct Proc {
 // propagated by rfork; never set on kproc.
 #define PROC_FLAG_TTY_TERMINATE_PENDING (1u << 8)
 
-_Static_assert(sizeof(struct Proc) == 336,
-               "struct Proc size pinned at 336 bytes (the 328 baseline + the PTY-1a "
-               "sid/pgid pair @328/@332). Adding a field grows the SLUB cache; update "
-               "this assert deliberately so the change is intentional.");
+_Static_assert(sizeof(struct Proc) == 344,
+               "struct Proc size pinned at 344 bytes (the 328 baseline + the PTY-1a "
+               "sid/pgid pair @328/@332 + the PTY-1e report latches @336/@337 + tail "
+               "pad). Adding a field grows the SLUB cache; update this assert "
+               "deliberately so the change is intentional.");
 _Static_assert(__builtin_offsetof(struct Proc, sid) == 328,
                "PTY-1a sid (the POSIX session id) appends after debug_hw (offset "
                "328); existing offsets stay stable (rfork-INHERITED, unlike the "
                "KP_ZERO tail fields around it).");
 _Static_assert(__builtin_offsetof(struct Proc, pgid) == 332,
                "PTY-1a pgid (the POSIX process-group id) follows sid (offset 332).");
+_Static_assert(__builtin_offsetof(struct Proc, stop_report_pending) == 336,
+               "PTY-1e stop_report_pending appends after pgid (offset 336; "
+               "KP_ZERO-fresh false, never rfork-inherited).");
+_Static_assert(__builtin_offsetof(struct Proc, cont_report_pending) == 337,
+               "PTY-1e cont_report_pending follows (offset 337).");
 _Static_assert(__builtin_offsetof(struct Proc, debug_hw) == 320,
                "8a-2b debug_hw (the per-Proc HW-breakpoint table pointer) appends "
                "after debug_stop_req (offset 320, the next 8-aligned slot past the "
@@ -1024,20 +1045,62 @@ int proc_count_live_peers_locked(struct Proc *p, struct Thread *self);
 // (WAIT_WNOHANG / T_WAIT_WNOHANG) MUST hold the same value.
 #define WAIT_WNOHANG 1
 
-// wait_pid_for — reap a ZOMBIE child, optionally filtered by pid and/or
+// PTY-1e (PTY-DESIGN.md section 4): the job-control wait flags. Mirror
+// POSIX WUNTRACED / WCONTINUED. A wait that passes either OPTS INTO the
+// packed status encoding below (a plain wait keeps the raw exit status --
+// full compatibility for every pre-PTY caller); a stop/continue REPORT
+// returns the child's pid + packed status WITHOUT reaping (round-2 R2-F6:
+// only an exit runs the unlink/thread_free/proc_free teardown) and
+// consumes the per-child latch exactly once. Job stops only -- a DEBUGGER
+// stop (I-39) is never waitpid-visible; the debug surface has its own
+// /proc wait file.
+#define WAIT_UNTRACED  2
+#define WAIT_CONTINUED 4
+
+// The packed wait-status encoding (ABI; the Linux wait(2) layout so the
+// Pouch boundary-line maps 1:1). In effect ONLY when the caller passed
+// WAIT_UNTRACED and/or WAIT_CONTINUED:
+//   exited:    (code & 0xff) << 8         (WAIT_IF_EXITED; WAIT_EXITSTATUS)
+//   stopped:   0x7f | (20 << 8)           (20 = the SIGTSTP-shaped job-stop
+//                                          cause, the Linux value, so the
+//                                          boundary-line is the identity)
+//   continued: 0xffff
+#define WAIT_STATUS_EXITED(code)  ((((code) & 0xff)) << 8)
+#define WAIT_STATUS_STOPPED       (0x7f | (20 << 8))
+#define WAIT_STATUS_CONTINUED     0xffff
+#define WAIT_IF_EXITED(st)        (((st) & 0x7f) == 0)
+#define WAIT_EXITSTATUS(st)       (((st) >> 8) & 0xff)
+#define WAIT_IF_STOPPED(st)       (((st) & 0xff) == 0x7f)
+#define WAIT_IF_CONTINUED(st)     ((st) == 0xffff)
+
+// wait_pid_for — reap a ZOMBIE child (or, under the PTY-1e flags, REPORT a
+// stopped/continued one), optionally filtered by pid/pgrp and/or
 // non-blocking. The selection-and-blocking generalization underlying
 // SYS_WAIT_PID and the wait_pid wrapper.
 //
 //   want_pid == -1     : any child (the original wait_pid semantics).
 //   want_pid  >  0     : only the child with that pid.
-//   want_pid  == 0/<-1 : POSIX process-group selectors — no v1.0 meaning;
-//                        match nothing (→ -1). Reserved for a future lift.
-//   flags & WAIT_WNOHANG : do not block (see WAIT_WNOHANG).
+//   want_pid == 0      : any child in the CALLER's process group (the
+//                        caller's pgid read at each scan -- POSIX).
+//   want_pid  < -1     : any child in process group -want_pid.
+//   flags & WAIT_WNOHANG   : do not block (see WAIT_WNOHANG).
+//   flags & WAIT_UNTRACED  : also report a child with a pending stop
+//                            latch (packed WAIT_STATUS_STOPPED).
+//   flags & WAIT_CONTINUED : also report a pending continue latch
+//                            (packed WAIT_STATUS_CONTINUED).
+//
+// Report precedence: an exit outranks a continue outranks a stop (a zombie
+// frees resources; the order among reportables is otherwise unspecified by
+// POSIX). A child leaving the waited pgrp mid-wait (setpgid) simply stops
+// matching at the next authoritative re-scan; if no matching child
+// remains, the wait answers -1 (the POSIX ECHILD shape).
 //
 // Returns:
-//   > 0 : reaped child's pid; *status_out (if non-NULL) holds its status.
-//   0   : WAIT_WNOHANG set and a matching child is alive but not yet a
-//         zombie. 0 is never a valid child pid (g_next_pid starts at 1),
+//   > 0 : the child's pid. For a reap, *status_out holds the exit status
+//         (raw, or WAIT_STATUS_EXITED(code) when a PTY-1e flag was
+//         passed); for a report, the packed stop/continue status.
+//   0   : WAIT_WNOHANG set and a matching child is alive with nothing to
+//         report. 0 is never a valid child pid (g_next_pid starts at 1),
 //         so it is an unambiguous "not ready" sentinel.
 //   -1  : no matching child (none at all, or none with want_pid), OR the
 //         caller's Proc is group-terminating (#811 SLEEP_INTR).
