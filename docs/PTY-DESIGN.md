@@ -106,30 +106,52 @@ kernel; the byte/cooking engine is the userspace server.**
    The child under its controlling terminal  (slave fd = /dev/pts/<n>)
 ```
 
+**The kernel pts kobject is what makes the seam realizable** (round-1 F1/F2 —
+the load-bearing correction). The seam needs a kernel-side pts identity that BOTH
+the server's `SYS_TTY_SIGNAL` and the slave's controlling-terminal acquisition +
+`tcsetpgrp` name — otherwise the kernel-owned `fg_pgid` has no write path (the
+pts `ctl` file is an OPAQUE 9P Twrite to the userspace server; the kernel is only
+the 9P transport and never inspects it — the earlier "`tcsetpgrp` → a pts ctl
+write, like `tcsetattr` → consctl" analogy was FALSE: `consctl` is a *kernel* Dev
+[`devdev.c`] the kernel naturally mediates, a pts ctl is not). So:
+
+- **`/dev/ptmx` open mints a kernel `KObj_Pts`** (a small kernel object, gen-
+  stamped — §11.11 F11) alongside the server's pts. The server learns its
+  `kernel_pts_id` (a `SYS_PTY_REGISTER(master_fd) → kernel_pts_id`, or the mint is
+  kernel-mediated at ptmx-open); the slave's controlling-terminal acquisition
+  threads the SAME `kernel_pts_id`. The kobject holds the controlling-terminal
+  binding `(session S, fg_pgid, gen)` — kernel state, never server-held.
+- **`tcsetpgrp`/`tcgetpgrp` + controlling-terminal acquisition are KERNEL
+  syscalls keyed on `kernel_pts_id`** — NOT server-served pts ctl writes. Only
+  `termios`/`winsize` stay on the server-served pts ctl (they carry no security
+  routing). This keeps P1 intact (the server still owns the rings + cooking +
+  termios + winsize — the byte/cooking engine; only the security-routing triple
+  is kernel).
+
 **The signal seam is the load-bearing safety property.** The server can NEVER
 name a process group — it can only report "a signal-class event occurred on a
-pts I serve." `SYS_TTY_SIGNAL(pts_fd, class)` is gated: the caller must be the
-registered `ptyfs` server owning that pts (the connection that minted it), and
-the kernel does the routing — `pts N → its controlling session → that session's
-fg_pgid → deliver the note to that pgrp`. So a compromised/buggy ptyfs can, at
-worst, signal the foreground groups of the terminals it *already* serves (its own
-clients) — it cannot reach an arbitrary Proc or pgrp. This is the pty analog of
-netd owning only its `/net` flows (I-1/I-5): authority bounded to the resource
-the server was granted. (Rejected: a generic `SYS_PGRP_SIGNAL(pgid, sig)` the
-server calls — that hands a userspace Proc the authority to signal any pgrp, the
-ambient-authority hole I-22 forbids.)
+pts I serve." `SYS_TTY_SIGNAL(kernel_pts_id, gen, class)` is gated: the caller
+must be the registered `ptyfs` server owning that pts, and the kernel does the
+routing — `KObj_Pts → its controlling session → that session's fg_pgid → deliver
+the note to that pgrp`. So a compromised/buggy ptyfs can, at worst, signal the
+foreground groups of the terminals it *already* serves — it cannot reach an
+arbitrary Proc or pgrp. The pty analog of netd owning only its `/net` flows
+(I-1/I-5). **The seam is NOT the only path to a STOP/CONT/HUP disposition, though**
+— those notes are kernel-synthetic-only (§4, round-1 F4), so no ordinary
+`SYS_POSTNOTE` reaches them. (Rejected: a generic `SYS_PGRP_SIGNAL(pgid, sig)`
+the server calls — ambient authority, I-22.)
 
-**Controlling-terminal acquisition** (the POSIX dance, kernel-side): a session
-leader (`setsid` → new session, no controlling tty) that opens a pts slave with
-neither `O_NOCTTY` nor an existing controlling tty acquires pts N as its
-controlling terminal — the kernel binds `session S ↔ pts N` and sets `fg_pgid =
-the leader's pgid`. `tcsetpgrp(pts_fd, pgid)` updates `fg_pgid` (kernel-checked:
-the caller is in session S and pgid is a pgrp in S); `tcgetpgrp` reads it. These
-two are **pts `ctl` operations the kernel mediates** (the Plan 9 "it's a file"
-idiom — no new `tcsetpgrp` syscall; the Pouch boundary-line maps
-`tcsetpgrp(fd)` → the pts ctl write, like `tcsetattr` → consctl), with the
-foreground-pgid held in KERNEL controlling-terminal state (not the server), so
-the signal routing needs no server round-trip and no server-held security state.
+**Controlling-terminal acquisition** (the POSIX dance, KERNEL syscall on
+`kernel_pts_id`): a session leader (`setsid` → new session, no controlling tty)
+that opens a pts slave with neither `O_NOCTTY` nor an existing controlling tty,
+**AND where that pts is not already any other session's controlling terminal**
+(round-1 F7 — the anti-steal guard; a second such open inherits, never steals;
+explicit `TIOCSCTTY` stealing is unbuilt/fail-closed), acquires it: the kernel
+binds `session S ↔ KObj_Pts` and sets `fg_pgid = the leader's pgid`.
+`tcsetpgrp(pts_fd, pgid)` updates `fg_pgid` (kernel-checked: the caller is in
+session S and pgid is a pgrp in S); `tcgetpgrp` reads it — both KERNEL syscalls
+resolving the pts fd → `KObj_Pts`, never a server round-trip and never
+server-held security state.
 
 ---
 
@@ -147,7 +169,16 @@ signal routing need it):
 - `SYS_SETPGID(pid, pgid)` → move a Proc into a pgrp in its session (the
   self-or-child, same-session, not-a-session-leader POSIX rules).
 - `SYS_GETPGID(pid)` / `SYS_GETSID(pid)` → reads.
-- `tcsetpgrp`/`tcgetpgrp` are **pts ctl ops** (§3), not syscalls.
+- `tcsetpgrp`/`tcgetpgrp` + controlling-terminal acquisition are **KERNEL
+  syscalls keyed on `KObj_Pts`** (§3, round-1 F1/F2 — NOT server-served ctl
+  writes).
+- **`SYS_WAIT_PID` gains `WUNTRACED`/`WCONTINUED` + the pgrp selectors**
+  (`want_pid == 0` = my pgrp, `< -1` = a named pgrp) — the `wait_pid_for`
+  extension (round-1 F5). WITHOUT this a shell cannot detect a `^Z`-stopped
+  child (`waitpid` never returns on a stop), so job control is non-functional
+  and the PTY-4 gate cannot pass; a stopped/continued child becomes
+  waitpid-reportable. **Pulled forward into PTY-1** (a real current-arc
+  dependency, not a seam).
 
 **Note-to-pgrp delivery**: generalize `proc_console_post_interrupt` (single
 `g_console_owner`) to `notes_post_pgrp(pgid, note)` — deliver a note to every
@@ -158,25 +189,45 @@ path routes through the controlling-terminal → fg_pgid lookup.
 
 **New note names + bits** (append-only, ABI — the `snare:*`/errno registry
 discipline, ERRORS.md): `tty:winch` (SIGWINCH — resize), `tty:susp` (SIGTSTP —
-the default-stop disposition), `cont` (SIGCONT — resume), `tty:quit` (SIGQUIT),
-`hup` (SIGHUP — controlling-terminal hangup / session-leader death). `interrupt`
-(SIGINT) already exists. Default dispositions: `interrupt`/`tty:quit` terminate
-(LS-5 disposition family); `tty:susp` STOPS; `cont` resumes; `hup` terminates;
-`tty:winch` is ignored-by-default (a resize notification a handler opts into).
+the default-stop disposition), `tty:cont` (SIGCONT — resume), `tty:quit`
+(SIGQUIT), `tty:hup` (SIGHUP — controlling-terminal hangup / session-leader
+death). `interrupt` (SIGINT) already exists. Default dispositions:
+`interrupt`/`tty:quit` terminate (LS-5 family); `tty:susp` STOPS; `tty:cont`
+resumes; `tty:hup` terminates; `tty:winch` is ignored-by-default. **The whole
+`tty:*` family is KERNEL-SYNTHETIC-ONLY — `notes_post` REJECTS a userspace
+`SYS_POSTNOTE` of a `tty:`-prefixed name, exactly as it rejects `snare:*`**
+(round-1 F4 + F15 — the uniform gate-able prefix; `cont`/`hup` renamed to
+`tty:cont`/`tty:hup`). Their SOLE entry is the tty seam (`SYS_TTY_SIGNAL`) + the
+kernel controlling-terminal / stop paths. WITHOUT this, `tty:cont` would be
+postable via the parent-only `SYS_POSTNOTE` gate (`syscall.c` — parent-only, no
+`CAP_DEBUG`), letting an unprivileged parent `cont` a debugger-stopped child =
+an I-39 leak. A Proc signalling its OWN pgrp still uses ordinary `kill`, which
+maps to the standard (non-`tty:`) note authority.
 
 **The generalized stopped-state** (P3 — audit-bearing, I-39): the debug arc's
 fully-stopped thread-state (a thread parked on a rendez, resumed under
-`g_proc_table_lock`) gets a **second, non-`CAP_DEBUG` entry**: a `tty:susp` with
-the default STOP disposition parks the target Proc's threads (the whole
-foreground group's Procs) in the job-control stopped state; a `cont` note resumes
-them. The `CAP_DEBUG` gate stays on the *debugger* entry (I-39's `CTL_VERB_STOP`
-via `/proc/<pid>/ctl`); the job-control entry's authority is the tty signal seam
-(§3) — you can only Ctrl-Z the fg group of a terminal you serve. **The
-composition obligation (prosecute hard): a job-control stop and a debug stop of
+`g_proc_table_lock`) gets a **second, non-`CAP_DEBUG` entry**. **The as-built
+stop is a SINGLE `debug_stop_req` flag (`proc.h`); the job-control stop MUST add
+an INDEPENDENT `job_stop_req` owner** (round-1 F3 — NOT a reuse of the one flag):
+a thread parks iff `debug_stop_req ∨ job_stop_req`, and each resume clears ONLY
+its own owner (`tty:cont` clears `job_stop_req`, never `debug_stop_req`; the
+debugger's resume clears only `debug_stop_req`). Reusing the single flag would
+make `tty:cont` run a debugger-stopped thread — precisely the `BUGGY_DOUBLE_STOP`
+counterexample (`pty.tla`), which the spec's two-owner `stopOwners` set is the
+contract against. A `tty:susp` parks the whole fg group's threads; a `tty:cont`
+resumes them. The `CAP_DEBUG` gate stays on the *debugger* entry (I-39's
+`CTL_VERB_STOP` via `/proc/<pid>/ctl`); the job-control entry's authority is the
+kernel-synthetic `tty:*` gate + the tty seam (§3) — you can only Ctrl-Z the fg
+group of a terminal you serve, and no ordinary `SYS_POSTNOTE` reaches `tty:cont`
+(F4). **The composition obligation (prosecute hard): a job stop + a debug stop of
 the same thread must not corrupt the shared stopped-state** (double-stop /
-stop-vs-resume races / the reap-vs-stop interaction) — the audit re-validates
-I-39 under the new entry, and `debug_stop.tla` extends (or `pty.tla` models the
-interaction) to cover it.
+stop-vs-resume / the reap-vs-stop + the 8c-2 nested-sleep detour interaction) —
+the audit re-validates I-39 under the new entry, and **`specs/pty_stop.tla` (the
+focused stop-composition sibling, the `debug_stop.tla` precedent) models it
+(round-1 F6): the death-wins-over-job-stop leg (`DeathWinsOverJobStop` +
+`BUGGY_DEATH_BLOCKED`) + the cook↔stop linkage (a `CookSusp` action, so a cooked
+Ctrl-Z produces a STOP not a byte/signal) + `StopCompatI39` composed with both —
+TLC-green; step-vs-resume composes `debug_step.tla`.**
 
 ---
 
@@ -208,10 +259,20 @@ precedent), posting `/srv/ptyfs`; joey mounts `/dev/ptmx` + `/dev/pts` from it.
   fg pgrp; `TIOCGWINSZ` reads it.
 - **isatty**: the pts presents as a terminal (the Pouch boundary-line's
   `isatty()` returns true for a pts fd; a regular file/pipe returns false).
+- **multi-waiter reads** (round-1 F12): a pts is a 9P file read via the kernel
+  dev9p client, so a MULTI-THREAD slave Proc (peer threads sharing the fd table)
+  can have TWO concurrent outstanding `read` Treads on one pts — ptyfs holds a
+  per-pts **pending-read SET** (the net-6a-1 `PendingRead` flat-Vec discipline,
+  each parked read woken on data/EOF), NOT the cons single-reader (which extincts
+  on a 2nd sleeper — a physical-console v1.0 limit that must NOT be inherited).
+  The `pty.tla` single-waiter reader is a v1.0 abstraction; the impl is
+  multi-waiter (§11.12).
 - **teardown** (I-20): master close (last master fd) → the slave's reads return
-  EOF + the kernel raises `hup` to the controlling session (SIGHUP); slave close
-  (last slave fd) → the master's reads return EOF. Quiesce: in-flight bytes in
-  the rings are delivered before EOF (no byte lost at teardown).
+  EOF + the kernel raises `tty:hup` to the fg pgrp + the controlling process
+  (SIGHUP — POSIX carrier-loss target, §11.13); slave close (last slave fd) →
+  the master's reads return EOF. Quiesce: in-flight bytes in the rings are
+  delivered before EOF (no byte lost at teardown). The `KObj_Pts` frees at last
+  close of both ends, gen-bumped before the id is reusable (§11.11).
 
 ---
 
@@ -313,3 +374,114 @@ session grouping could carry a marsupial-aggregation word (**`mob`**, a group of
 kangaroos) in internal identifiers where it adds color without obscuring the
 POSIX mapping. Descriptive names ship until the user rules; the ABI surface never
 changes.
+
+---
+
+## 11. Round-1 holotype close (amendments, 2026-07-17)
+
+The design + spec were prosecuted by the Fable-max holotype reviewer + a
+concurrent self-audit: **1 P0 / 5 P1 / 6 P2 / 4 P3** — a heavy round that caught
+the seam as originally written was UNREALIZABLE (F1) + a privilege leak (F4).
+The four votes (P1–P4) STAND — the fixes correct the *boundary* the design
+mis-drew, they do not overturn a vote (F1's kernel pts kobject keeps P1: the
+server still owns rings + cooking + termios + winsize; only the security-routing
+is kernel). The load-bearing corrections (F1–F5) are folded INLINE (§3/§4/§5);
+this section is the authoritative resolution record + binds the rest. Closed
+list: `memory/audit_pty_design_closed_list.md`.
+
+**F1 [P0] — the seam was unrealizable (inline §3).** The `tcsetpgrp` → pts-ctl-
+write "like `tcsetattr` → consctl" analogy was FALSE (consctl is a kernel Dev;
+a pts ctl is an opaque 9P Twrite to the userspace server), so the kernel-owned
+`fg_pgid` had no write path. FIXED: a kernel `KObj_Pts` (minted at ptmx-open);
+`tcsetpgrp`/`tcgetpgrp` + controlling-terminal acquisition are KERNEL syscalls
+keyed on it; only termios/winsize stay server-served. **ABI — signoff at PTY-1**
+(the kobject + the syscalls; the biggest new kernel surface).
+
+**F2 [P1] — the pts identity binding (inline §3).** The same `KObj_Pts` is named
+by BOTH the server's `SYS_TTY_SIGNAL` and the slave's controlling-terminal
+acquisition (`SYS_PTY_REGISTER(master_fd) → kernel_pts_id`, threaded to the slave
+open); no free-floating server-only pts identity.
+
+**F3 [P1] — an INDEPENDENT job-stop owner (inline §4).** The as-built stop is a
+single `debug_stop_req`; the job-control stop adds a separate `job_stop_req`
+(park iff either; each resume clears only its own). Reusing the one flag = the
+`BUGGY_DOUBLE_STOP` counterexample by default.
+
+**F4 [P1] — the `tty:*` notes are kernel-synthetic-only (inline §4).**
+`notes_post` rejects a userspace `SYS_POSTNOTE` of a `tty:`-prefixed name (like
+`snare:*`); their sole entry is the tty seam + the kernel stop/controlling-
+terminal paths. Closes the parent-posts-`cont`-to-a-debug-stopped-child I-39 leak
+(the ordinary cross-Proc note gate is parent-only, no CAP_DEBUG).
+
+**F5 [P1] — the wait side (inline §4).** `SYS_WAIT_PID` gains
+`WUNTRACED`/`WCONTINUED` + the `want_pid == 0`/`< -1` pgrp selectors, pulled
+forward into PTY-1 — WITHOUT it a shell cannot detect a `^Z`-stopped child and
+job control is non-functional (the PTY-4 gate can't pass).
+
+**F6 [P1] — the spec models the hard stop compositions.** NEW sibling
+`specs/pty_stop.tla` (the focused stop-composition module — the `debug_stop.tla`
+/ `sched_alpha.tla` sibling pattern; keeps `pty.tla`'s data-path model clean):
+`gflag` (death) + `DeathWinsOverJobStop` (death wins over a stop, #811) + a
+`CookSusp` action (the cook↔stop linkage — a cooked Ctrl-Z produces a STOP, not
+a byte/signal) + `StopCompatI39` composed with both, and the `BUGGY_DEATH_BLOCKED`
+counterexample (a stopped group's death never completes). TLC-green (clean +
+liveness + `double_stop` + `death_blocked` cfgs); step-vs-resume composes
+`debug_step.tla`.
+
+**F7 [P2] — the anti-steal acquisition guard (inline §3).** Acquisition requires
+the pts is not already ANY other session's controlling terminal (a second such
+open inherits, never steals); explicit `TIOCSCTTY` stealing stays
+unbuilt/fail-closed.
+
+**F8 [P2] — server-death + orphaned-stopped-pgrp resume.** On ptyfs death /
+last-master-close, the kernel `tty:cont`-resumes any group stopped via that pts
+before EOF/`tty:hup` (no group stranded with a dead SIGCONT source); an orphaned
+process group with stopped members gets `tty:hup` then `tty:cont` (the POSIX
+orphan rule). Both are kernel-side (the `KObj_Pts` teardown path), the true
+residual of the dropped `EventuallyResumed`.
+
+**F9 [P2] — the I-20 ordering/tearing legs are prose, not spec.** `pty.tla`'s
+conservation counters prove no byte lost/duplicated; the "in order, not torn"
+legs rest on the STRUCTURAL single-writer-per-ring + the cook-under-lock memcpy
+(a FIFO ring preserves order by construction; a byte is copied whole under the
+ring lock) — stated in §6 + the impl header, not modeled. (Modeling byte
+identity/order is a v1.x spec lift if a reviewer wants it machine-checked.)
+
+**F10 [P2] — the ECHO-off no-leak guarantee is prose+unit-tested.** The LS-8b
+hard guarantee (no input byte reaches OUTPUT when ECHO is clear — the password
+mask), carried per-pts, is a data-transform property validated by prose + the
+per-pts cooking unit tests (the LS-8b suspension), NOT `pty.tla` (whose count-
+rings cannot express origin-tagged bytes). Named a documented spec boundary.
+
+**F11 [P2] — the `KObj_Pts` carries a monotonic generation.** `SYS_TTY_SIGNAL`
+and the controlling-terminal binding validate `(pts_id, gen)`; the binding tears
+down + in-flight signals drain before the id returns to the free pool (the netd
+slot-gen / net-3d F1 mis-route class).
+
+**F12 [P2] — multi-waiter pts reads (inline §5).** ptyfs holds a per-pts
+pending-read SET (net-6a-1), not the cons single-reader; a multi-thread slave
+Proc reading its pts from two threads loses no wake or byte.
+
+**F13/F14/F15 [P3].** SIGHUP targets the fg pgrp + the controlling process on
+carrier loss (session-leader death fans `tty:hup`+`tty:cont` to orphaned stopped
+pgrps) — the two distinct POSIX targets (F13, inline §5 teardown). `notes_post_pgrp`
+exactly-once-per-Proc fan-out under a membership-mutating group is the focused
+PTY-1 audit + prose (F14). The note-name prefix is uniform `tty:*`
+(`cont`→`tty:cont`, `hup`→`tty:hup`) for the gate-able reservation (F15, inline
+§4).
+
+**Round-1 verified-sound (do not re-litigate):** the `SYS_TTY_SIGNAL` server-
+scoping DIRECTION (vs a generic `SYS_PGRP_SIGNAL`) is the right I-22 call — only
+its realizability (F1/F2) + non-exclusivity (F4) were the defects; the precedence
+fix is correct + non-vacuous; dropping unconditional `EventuallyResumed` is right
+(only the server-death/orphan residual F8 remained); the four buggy cfgs each
+fire their exact invariant; the setsid POSIX edges + the "setsid drops the
+controlling tty" I-2 argument hold; reusing `debug_rendez` (not a second wait/wake
+primitive) is the right instinct given F3's two-owner separation.
+
+**Escalation owed to the user (ABI, signoff at PTY-1):** the `KObj_Pts` kobject +
+the new syscalls (`SYS_PTY_REGISTER`, the kernel `tcsetpgrp`/`tcgetpgrp` +
+acquisition, `SYS_TTY_SIGNAL`, `SYS_SETSID`/`SETPGID`/`GETPGID`/`GETSID`, the
+`SYS_WAIT_PID` `WUNTRACED`/`WCONTINUED`+pgrp-selector extension) + the `tty:*`
+note-name family. Recorded, not built — the PTY-1 impl surfaces the exact ABI
+for signoff, the way the Tapestry DMA-weave ABI defers to G-2.
