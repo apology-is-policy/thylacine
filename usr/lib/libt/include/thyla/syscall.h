@@ -110,6 +110,10 @@ enum {
     T_SYS_PWRITE            = 86,  // #37: positioned write (cursor untouched)
     T_SYS_YIELD             = 87,  // #33: voluntary yield (hint; always 0)
     T_SYS_STAT              = 88,  // POUNCE: path-stat in one syscall (1 RPC)
+    T_SYS_SETSID            = 89,  // PTY-1a: new session (POSIX setsid)
+    T_SYS_SETPGID           = 90,  // PTY-1a: move self/child into a pgrp
+    T_SYS_GETPGID           = 91,  // PTY-1a: read a Proc's pgid (0 = self)
+    T_SYS_GETSID            = 92,  // PTY-1a: read a Proc's sid (0 = self)
 };
 
 // SYS_CLOCK_*TIME clock ids (match Linux clockid_t) + the 16-byte timespec.
@@ -784,6 +788,68 @@ static inline long t_yield(void) {
     __asm__ volatile (
         "svc #0"
         : "=r"(x0)
+        : "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_setsid — become the leader of a new session + group (PTY-1a; POSIX
+// setsid(2)). Returns the new sid (> 0), -T_E_ACCES (13, negated) if the
+// caller is already a process-group leader, or -1.
+__attribute__((always_inline))
+static inline long t_setsid(void) {
+    register long x0 __asm__("x0");
+    register long x8 __asm__("x8") = T_SYS_SETSID;
+    __asm__ volatile (
+        "svc #0"
+        : "=r"(x0)
+        : "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_setpgid — move self (pid 0) or a live direct child into a process group
+// (PTY-1a; POSIX setpgid(2)). pgid 0 mints a new group of the target's own
+// pid. 0 on success; negative errno per the SYS_SETPGID contours (EPERM
+// contours arrive as -13 EACCES).
+__attribute__((always_inline))
+static inline long t_setpgid(long pid, long pgid) {
+    register long x0 __asm__("x0") = pid;
+    register long x1 __asm__("x1") = pgid;
+    register long x8 __asm__("x8") = T_SYS_SETPGID;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_getpgid / t_getsid — read a Proc's pgid / sid (PTY-1a; pid 0 = self).
+// Returns the id or -3 (ESRCH) if no such Proc.
+__attribute__((always_inline))
+static inline long t_getpgid(long pid) {
+    register long x0 __asm__("x0") = pid;
+    register long x8 __asm__("x8") = T_SYS_GETPGID;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+__attribute__((always_inline))
+static inline long t_getsid(long pid) {
+    register long x0 __asm__("x0") = pid;
+    register long x8 __asm__("x8") = T_SYS_GETSID;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
         : "r"(x8)
         : "memory", "cc"
     );

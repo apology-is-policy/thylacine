@@ -154,6 +154,10 @@ void test_proc_group_terminate_smoke(void);
 void test_proc_legate_scope_teardown(void);
 void test_proc_legate_teardown_except_and_zero(void);
 void test_proc_legate_teardown_from_zombie_chokepoint(void);
+void test_pgrp_defaults_and_inherit(void);
+void test_pgrp_setsid_semantics(void);
+void test_pgrp_setpgid_rule_matrix(void);
+void test_pgrp_zombie_reads_alive_mutations(void);
 void test_resource_exempt_only_system(void);
 void test_resource_page_charge_caps(void);
 void test_resource_thread_cap_ok(void);
@@ -1344,6 +1348,11 @@ struct test_case g_tests[] = {
     { "proc.legate_scope_teardown",    test_proc_legate_scope_teardown,    false, NULL },
     { "proc.legate_teardown_except_and_zero",
                                        test_proc_legate_teardown_except_and_zero, false, NULL },
+    { "pgrp.defaults_and_inherit",     test_pgrp_defaults_and_inherit,     false, NULL },
+    { "pgrp.setsid_semantics",         test_pgrp_setsid_semantics,         false, NULL },
+    { "pgrp.setpgid_rule_matrix",      test_pgrp_setpgid_rule_matrix,      false, NULL },
+    { "pgrp.zombie_reads_alive_mutations",
+                                       test_pgrp_zombie_reads_alive_mutations, false, NULL },
     { "proc.legate_teardown_from_zombie_chokepoint",
                                        test_proc_legate_teardown_from_zombie_chokepoint, false, NULL },
     { "proc.wait_pid_for_no_match",    test_proc_wait_pid_for_no_match,    false, NULL },

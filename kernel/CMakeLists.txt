@@ -134,6 +134,7 @@ set(KERNEL_TEST_SRCS
     test/test_tsleep.c
     test/test_smp.c
     test/test_proc.c
+    test/test_pgrp.c
     test/test_proc_identity.c
     test/test_resource.c
     test/test_exec_namespace.c

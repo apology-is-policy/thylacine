@@ -2457,6 +2457,43 @@ s64 sys_getgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
     return (s64)(u64)p->primary_gid;
 }
 
+// =============================================================================
+// PTY-1a (PTY-DESIGN.md section 4): POSIX sessions + process groups. Thin
+// fronts over the proc.c cores (which hold g_proc_table_lock across find +
+// validate + mutate). NON-static so the kernel tests call them directly (the
+// LS-K identity-handler precedent). pid args arrive as u64 registers; the
+// (int)(s64) cast preserves a negative pid, which the cores answer -T_E_SRCH
+// (self-or-child lookup misses) rather than mis-treating as huge-positive.
+// =============================================================================
+
+s64 sys_setsid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+    (void)a0; (void)a1; (void)a2; (void)a3;
+    struct Thread *t = current_thread();             if (!t) return -1;
+    struct Proc *p = t->proc;                        if (!p) return -1;
+    return (s64)proc_setsid(p);
+}
+
+s64 sys_setpgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+    (void)a2; (void)a3;
+    struct Thread *t = current_thread();             if (!t) return -1;
+    struct Proc *p = t->proc;                        if (!p) return -1;
+    return (s64)proc_setpgid(p, (int)(s64)a0, (int)(s64)a1);
+}
+
+s64 sys_getpgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+    (void)a1; (void)a2; (void)a3;
+    struct Thread *t = current_thread();             if (!t) return -1;
+    struct Proc *p = t->proc;                        if (!p) return -1;
+    return (s64)proc_getpgid(p, (int)(s64)a0);
+}
+
+s64 sys_getsid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+    (void)a1; (void)a2; (void)a3;
+    struct Thread *t = current_thread();             if (!t) return -1;
+    struct Proc *p = t->proc;                        if (!p) return -1;
+    return (s64)proc_getsid(p, (int)(s64)a0);
+}
+
 // SYS_YIELD (#33): the thin syscall front for sched_yield_hint (sched.c) --
 // the whole contract lives there. Always 0 (POSIX sched_yield(2)); whether a
 // dispatch happened is deliberately not surfaced (a hint has no observable
@@ -6948,6 +6985,26 @@ void syscall_dispatch(struct exception_context *ctx) {
 
     case SYS_GETGID:
         ctx->regs[0] = (u64)sys_getgid_handler(ctx->regs[0], ctx->regs[1],
+                                               ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_SETSID:
+        ctx->regs[0] = (u64)sys_setsid_handler(ctx->regs[0], ctx->regs[1],
+                                               ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_SETPGID:
+        ctx->regs[0] = (u64)sys_setpgid_handler(ctx->regs[0], ctx->regs[1],
+                                                ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_GETPGID:
+        ctx->regs[0] = (u64)sys_getpgid_handler(ctx->regs[0], ctx->regs[1],
+                                                ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_GETSID:
+        ctx->regs[0] = (u64)sys_getsid_handler(ctx->regs[0], ctx->regs[1],
                                                ctx->regs[2], ctx->regs[3]);
         return;
 

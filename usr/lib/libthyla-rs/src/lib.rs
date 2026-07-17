@@ -208,6 +208,13 @@ pub const T_SYS_PREAD: u64            = 85;
 pub const T_SYS_PWRITE: u64           = 86;
 pub const T_SYS_YIELD: u64            = 87;
 pub const T_SYS_STAT: u64             = 88;
+// PTY-1a (PTY-DESIGN.md section 4): POSIX sessions + process groups. EPERM
+// contours arrive as -13 (EACCES -- the kernel errno.h -1-alias rule);
+// no-such-process is -3 (ESRCH).
+pub const T_SYS_SETSID: u64           = 89;
+pub const T_SYS_SETPGID: u64          = 90;
+pub const T_SYS_GETPGID: u64          = 91;
+pub const T_SYS_GETSID: u64           = 92;
 // FS-mutation foundation (IDENTITY-DESIGN.md section 9.2): create-then-open,
 // durability barrier, directory enumeration.
 pub const T_SYS_WALK_CREATE: u64      = 54;
@@ -1986,6 +1993,40 @@ pub unsafe fn t_getpid() -> i64 {
 pub unsafe fn t_getuid() -> i64 {
     let mut x0: i64 = 0;
     asm!("svc #0", inlateout("x0") x0, in("x8") T_SYS_GETUID, options(nostack));
+    x0
+}
+
+// t_setsid / t_setpgid / t_getpgid / t_getsid -- POSIX sessions + process
+// groups (PTY-1a). setsid returns the new sid (> 0) or -13 (already a group
+// leader); setpgid moves self (pid 0) or a live direct child (pgid 0 mints a
+// new group of the target's own pid) and returns 0 or a negative errno; the
+// reads take pid 0 = self and return the id or -3 (ESRCH).
+#[inline(always)]
+pub unsafe fn t_setsid() -> i64 {
+    let mut x0: i64 = 0;
+    asm!("svc #0", inlateout("x0") x0, in("x8") T_SYS_SETSID, options(nostack));
+    x0
+}
+
+#[inline(always)]
+pub unsafe fn t_setpgid(pid: i64, pgid: i64) -> i64 {
+    let mut x0: i64 = pid;
+    asm!("svc #0", inlateout("x0") x0, in("x1") pgid, in("x8") T_SYS_SETPGID,
+         options(nostack));
+    x0
+}
+
+#[inline(always)]
+pub unsafe fn t_getpgid(pid: i64) -> i64 {
+    let mut x0: i64 = pid;
+    asm!("svc #0", inlateout("x0") x0, in("x8") T_SYS_GETPGID, options(nostack));
+    x0
+}
+
+#[inline(always)]
+pub unsafe fn t_getsid(pid: i64) -> i64 {
+    let mut x0: i64 = pid;
+    asm!("svc #0", inlateout("x0") x0, in("x8") T_SYS_GETSID, options(nostack));
     x0
 }
 

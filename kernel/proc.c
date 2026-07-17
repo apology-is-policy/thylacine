@@ -22,6 +22,7 @@
 #include <thylacine/devcap.h>
 #include <thylacine/devsrv.h>
 #include <thylacine/env.h>
+#include <thylacine/errno.h>
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
 #include <thylacine/mmio_handle.h>
@@ -184,6 +185,12 @@ static spin_lock_t g_proc_table_lock = SPIN_LOCK_INIT;
 static void proc_init_fields(struct Proc *p, int pid) {
     p->magic = PROC_MAGIC;
     p->pid   = pid;
+    // PTY-1a: a parentless Proc is its own session + group leader (sid =
+    // pgid = pid). rfork_internal overwrites both with the parent's (a
+    // child JOINS its parent's session + group, POSIX fork semantics);
+    // proc_alloc re-stamps beside its real pid assignment.
+    p->sid   = (u32)pid;
+    p->pgid  = (u32)pid;
     p->state = PROC_STATE_ALIVE;
     poll_waiter_list_init(&p->child_waiters);   // #344: multi-waiter child-reap
     // P3-Bcb: pgtable_root + context_id left at 0 by KP_ZERO. proc_alloc
@@ -360,6 +367,11 @@ struct Proc *proc_alloc(void) {
     u32 next = __atomic_fetch_add(&g_next_pid, 1u, __ATOMIC_RELAXED);
     if (next >= 0x7fffffffu) extinction("proc_alloc: g_next_pid would overflow INT_MAX");
     p->pid = (int)next;
+    // PTY-1a: keep the own-session default tracking the REAL pid (the
+    // proc_init_fields stamp used the placeholder). rfork_internal
+    // overwrites both for a spawned child.
+    p->sid  = next;
+    p->pgid = next;
 
     // P5-corvus-srv: stamp the per-Proc identity tag. Consumed HERE,
     // alongside the PID — late, after every fallible alloc step has
@@ -605,6 +617,126 @@ static int proc_for_each_walk(struct Proc *root,
 int proc_for_each(int (*callback)(struct Proc *p, void *arg), void *arg) {
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
     int rv = proc_for_each_walk(kproc(), callback, arg);
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return rv;
+}
+
+// =============================================================================
+// PTY-1a (PTY-DESIGN.md section 4): POSIX sessions + process groups.
+// =============================================================================
+//
+// sid/pgid live on struct Proc (rfork-inherited; own-session default for a
+// parentless Proc). Every operation runs find + validate + mutate under ONE
+// g_proc_table_lock hold -- the children list, the table linkage, and
+// sid/pgid are all guarded fields, and splitting the hold would let a
+// concurrent exit / setpgid / rfork invalidate a checked premise.
+//
+// Errno discipline: -T_E_ACCES for every POSIX-EPERM contour (the errno.h
+// warning: -T_E_PERM would alias the bare -1 sentinel), -T_E_SRCH for
+// no-such-process, -T_E_INVAL for a negative pgid. The PTY-3 boundary-line
+// re-maps ACCES -> EPERM at the libc surface.
+
+// Lock-held: does process group `pgid` exist within session `sid`? POSIX: a
+// group persists while it has ANY member (the leader may already be gone), so
+// existence is a membership scan, not a leader lookup. ZOMBIEs do not count
+// as members for setpgid-target purposes (a group of only corpses is not a
+// group you can join).
+struct pgrp_scan_ctx { u32 pgid; u32 sid; };
+static int pgrp_exists_cb(struct Proc *q, void *arg) {
+    struct pgrp_scan_ctx *c = arg;
+    return (q->state == PROC_STATE_ALIVE
+            && q->pgid == c->pgid && q->sid == c->sid) ? 1 : 0;
+}
+
+// proc_setsid -- SYS_SETSID core. The caller becomes the leader of a new
+// session + a new group (sid = pgid = pid) with NO controlling terminal.
+// POSIX: fails if the caller is ALREADY a process-group leader -- else the
+// leader's own group would be left spanning two sessions. The controlling-
+// terminal drop is structural at PTY-1a: the pts registry that can hold a
+// session<->pts binding lands at PTY-1c, and its acquisition path checks
+// "caller is a session leader with no existing ctty" against the registry,
+// so a fresh setsid session starts clean by construction; when the registry
+// exists, this core also clears any binding owned by the OLD session iff
+// the caller was its leader (wired at PTY-1d).
+int proc_setsid(struct Proc *p) {
+    if (!p) return -1;
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    if (p->pgid == (u32)p->pid) {
+        spin_unlock_irqrestore(&g_proc_table_lock, s);
+        return -T_E_ACCES;              // POSIX EPERM: already a group leader
+    }
+    p->sid  = (u32)p->pid;
+    p->pgid = (u32)p->pid;
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return p->pid;
+}
+
+// proc_setpgid -- SYS_SETPGID core. POSIX rules, one lock hold:
+//   pid 0 = the caller; pgid 0 = the target's own pid (mint a new group).
+//   The target must be the caller or a LIVE direct child (-T_E_SRCH).
+//   The target must share the caller's session and must not be a session
+//   leader (EPERM contour -> -T_E_ACCES).
+//   pgid must equal the target's pid (minting) or name an existing group in
+//   the CALLER's session (EPERM contour -> -T_E_ACCES).
+// The POSIX "child already exec'd -> EACCES" rule has no analog (spawn is a
+// fused fork+exec); the self-or-child + same-session rules carry the
+// security weight. A ZOMBIE target is -T_E_SRCH: the mutation is meaningless
+// on a corpse, and PTY-1e's waitpid(-pgid) reads a zombie's pgid for reap
+// matching -- moving a corpse between groups mid-wait would be a seam.
+int proc_setpgid(struct Proc *self, int pid, int pgid) {
+    if (!self) return -1;
+    if (pgid < 0) return -T_E_INVAL;
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    struct Proc *target = NULL;
+    if (pid == 0 || pid == self->pid) {
+        target = self;
+    } else {
+        for (struct Proc *c = self->children; c; c = c->sibling) {
+            if (c->pid == pid) { target = c; break; }
+        }
+    }
+    if (!target || target->state != PROC_STATE_ALIVE) {
+        spin_unlock_irqrestore(&g_proc_table_lock, s);
+        return -T_E_SRCH;
+    }
+    if (target->sid != self->sid || (u32)target->pid == target->sid) {
+        spin_unlock_irqrestore(&g_proc_table_lock, s);
+        return -T_E_ACCES;
+    }
+    u32 want = (pgid == 0) ? (u32)target->pid : (u32)pgid;
+    if (want != (u32)target->pid) {
+        struct pgrp_scan_ctx ctx = { .pgid = want, .sid = self->sid };
+        if (!proc_for_each_walk(kproc(), pgrp_exists_cb, &ctx)) {
+            spin_unlock_irqrestore(&g_proc_table_lock, s);
+            return -T_E_ACCES;          // POSIX EPERM: no such group in session
+        }
+    }
+    target->pgid = want;
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return 0;
+}
+
+// proc_getpgid / proc_getsid -- SYS_GETPGID/GETSID cores. pid 0 = the
+// caller. Read-only introspection, no privilege gate (POSIX getpgid(2)/
+// getsid(2); /proc exposes more). ZOMBIEs answer: a zombie still HAS a pgid
+// -- PTY-1e's waitpid(-pgid) matches zombie children by it, and a shell may
+// legitimately getpgid a child that already exited. One lock hold covers
+// find + read (the walk only reaches table-linked Procs; unlinking requires
+// the same lock, so the deref is safe).
+int proc_getpgid(struct Proc *self, int pid) {
+    if (!self) return -1;
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    struct Proc *target = (pid == 0) ? self : proc_find_by_pid_walk(kproc(), pid);
+    int rv = target ? (int)target->pgid : -T_E_SRCH;
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return rv;
+}
+
+int proc_getsid(struct Proc *self, int pid) {
+    if (!self) return -1;
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    struct Proc *target = (pid == 0) ? self : proc_find_by_pid_walk(kproc(), pid);
+    int rv = target ? (int)target->sid : -T_E_SRCH;
     spin_unlock_irqrestore(&g_proc_table_lock, s);
     return rv;
 }
@@ -885,6 +1017,12 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
                           ? PROC_SUPP_GIDS_MAX : parent->supp_gid_count;
     for (u8 i = 0; i < child->supp_gid_count; i++)
         child->supp_gids[i] = parent->supp_gids[i];
+
+    // PTY-1a (PTY-DESIGN.md section 4): a child JOINS its parent's session
+    // + process group -- POSIX fork semantics. Overwrites proc_alloc's
+    // own-session default; only proc_setsid / proc_setpgid move it later.
+    child->sid  = parent->sid;
+    child->pgid = parent->pgid;
 
     // A-4a: inherit the legate scope tag across rfork (IDENTITY-DESIGN
     // §9.8, I-25). A child of a legate-scoped Proc JOINS the scope: it

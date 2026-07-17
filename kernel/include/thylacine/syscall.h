@@ -1607,6 +1607,46 @@ enum {
     //   existence-probe under a forbidden directory); the bare -1 on
     //   argument-validation / copy-out faults (the SYS_FSTAT shape).
     SYS_STAT = 88,     // arg: path_va (x0), path_len (x1), stat_va (x2)
+
+    // =========================================================================
+    // PTY-1a (PTY-DESIGN.md section 4; the 2026-07-17 signed-off PTY ABI):
+    // POSIX sessions + process groups. sid/pgid live on struct Proc
+    // (rfork-inherited: a child joins its parent's session + group; a
+    // parentless Proc defaults to its own). These four are the membership
+    // surface; the controlling-terminal + tty-signal syscalls (93-97) land
+    // with the pts registry (PTY-1c/1d).
+    //
+    // Errno note: POSIX-EPERM contours return -T_E_ACCES (13) -- -T_E_PERM
+    // (= -1) would alias the bare error sentinel (the errno.h warning). The
+    // pouch boundary-line (PTY-3) re-maps ACCES -> EPERM at the libc surface
+    // for these calls. -T_E_SRCH (3) = no such process.
+    // =========================================================================
+
+    // SYS_SETSID() -> new sid (> 0) / -T_E_ACCES / -1 (POSIX setsid(2)).
+    //   The caller becomes the leader of a NEW session and a NEW process
+    //   group (sid = pgid = pid) with NO controlling terminal. Fails
+    //   -T_E_ACCES if the caller is already a process-group leader.
+    SYS_SETSID = 89,   // no args
+
+    // SYS_SETPGID(pid, pgid) -> 0 / -T_E_SRCH / -T_E_ACCES / -T_E_INVAL
+    //   (POSIX setpgid(2)). pid 0 = the caller; pgid 0 = the target's own
+    //   pid (mint a new group). The target must be the caller or a LIVE
+    //   direct child (-T_E_SRCH otherwise, ZOMBIE included), must share the
+    //   caller's session, and must not be a session leader (-T_E_ACCES).
+    //   pgid must equal the target's pid (minting) or name an existing
+    //   group in the caller's session (-T_E_ACCES). pgid < 0 -> -T_E_INVAL.
+    //   The POSIX "child already exec'd -> EACCES" rule has no analog
+    //   (spawn is a fused fork+exec).
+    SYS_SETPGID = 90,  // arg: pid (x0), pgid (x1)
+
+    // SYS_GETPGID(pid) -> pgid / -T_E_SRCH (POSIX getpgid(2)).
+    //   pid 0 = the caller. Read-only, no privilege gate; a ZOMBIE target
+    //   answers (a corpse still has a pgid -- waitpid(-pgid) matches by it).
+    SYS_GETPGID = 91,  // arg: pid (x0)
+
+    // SYS_GETSID(pid) -> sid / -T_E_SRCH (POSIX getsid(2)). Same contours
+    //   as SYS_GETPGID.
+    SYS_GETSID = 92,   // arg: pid (x0)
 };
 
 // SYS_CLOCK_GETTIME clock ids. Values match Linux clockid_t so a future pouch

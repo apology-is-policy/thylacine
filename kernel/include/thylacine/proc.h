@@ -543,6 +543,20 @@ struct Proc {
     // (detach's count=0), guarded by the atomic bp_count. KP_ZERO inits it NULL;
     // NOT propagated by rfork (a spawned child is not being debugged).
     struct debug_hw   *debug_hw;
+
+    // PTY-1a (PTY-DESIGN.md section 4; POSIX sessions + process groups).
+    // sid = the session id (the session leader's pid); pgid = the process-
+    // group id (the group leader's pid). UNLIKE the debug/resource tail
+    // fields these ARE rfork-INHERITED (a child joins its parent's session
+    // + group -- POSIX fork semantics; rfork_internal copies them in the
+    // identity-inherit block). A parentless Proc defaults to its own
+    // session/group (sid = pgid = pid, stamped beside the pid at both
+    // assignment sites). Mutated ONLY by proc_setsid / proc_setpgid under
+    // g_proc_table_lock; read by the tty seam (fg-pgid routing, PTY-1d),
+    // notes_post_pgrp (PTY-1b), and the SYS_WAIT_PID pgrp selectors
+    // (PTY-1e). Values are pids (< 2^31), stored u32 per the design.
+    u32                sid;
+    u32                pgid;
 };
 
 #define PROC_FLAG_NODUMP            (1u << 0)
@@ -587,10 +601,16 @@ struct Proc {
 // thread, and an armed kproc would *_INTR every kernel-thread sleep).
 #define PROC_FLAG_INTR_TERMINATE_PENDING (1u << 7)
 
-_Static_assert(sizeof(struct Proc) == 328,
-               "struct Proc size pinned at 328 bytes (the 320 baseline + the 8a-2b "
-               "debug_hw pointer @320). Adding a field grows the SLUB cache; update "
+_Static_assert(sizeof(struct Proc) == 336,
+               "struct Proc size pinned at 336 bytes (the 328 baseline + the PTY-1a "
+               "sid/pgid pair @328/@332). Adding a field grows the SLUB cache; update "
                "this assert deliberately so the change is intentional.");
+_Static_assert(__builtin_offsetof(struct Proc, sid) == 328,
+               "PTY-1a sid (the POSIX session id) appends after debug_hw (offset "
+               "328); existing offsets stay stable (rfork-INHERITED, unlike the "
+               "KP_ZERO tail fields around it).");
+_Static_assert(__builtin_offsetof(struct Proc, pgid) == 332,
+               "PTY-1a pgid (the POSIX process-group id) follows sid (offset 332).");
 _Static_assert(__builtin_offsetof(struct Proc, debug_hw) == 320,
                "8a-2b debug_hw (the per-Proc HW-breakpoint table pointer) appends "
                "after debug_stop_req (offset 320, the next 8-aligned slot past the "
@@ -1022,6 +1042,19 @@ int proc_count_live_peers_locked(struct Proc *p, struct Thread *self);
 // the legacy wait_pid; only the selection (pid filter) and the blocking
 // decision (WNOHANG) differ.
 int wait_pid_for(int want_pid, int flags, int *status_out);
+
+// PTY-1a (PTY-DESIGN.md section 4): POSIX sessions + process groups. The
+// SYS_SETSID/SETPGID/GETPGID/GETSID cores -- find + validate + mutate under
+// one g_proc_table_lock hold. proc_setsid returns the new sid (> 0) or
+// -T_E_ACCES (caller already a group leader); proc_setpgid returns 0 /
+// -T_E_SRCH / -T_E_ACCES / -T_E_INVAL per the POSIX contours (EPERM cases
+// map to -T_E_ACCES -- the errno.h -1-alias rule); the reads return the id
+// or -T_E_SRCH (pid 0 = the caller; ZOMBIEs answer reads -- waitpid(-pgid)
+// matches zombies by pgid -- but reject the setpgid mutation).
+int proc_setsid(struct Proc *p);
+int proc_setpgid(struct Proc *self, int pid, int pgid);
+int proc_getpgid(struct Proc *self, int pid);
+int proc_getsid(struct Proc *self, int pid);
 
 // wait_pid — reap ANY zombie child, blocking. The pervasive case;
 // equivalent to wait_pid_for(-1, 0, status_out). Plan 9 wait(2) shape.
