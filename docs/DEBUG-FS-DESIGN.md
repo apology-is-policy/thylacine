@@ -623,19 +623,94 @@ detour-resume does not `eret` from, so the single-step is ineffective — the he
 in a syscall, not at an EL0 instruction. This was already broken (NULL trapframe)
 before #88; the per-thread `/proc/<pid>/thread/<tid>/` step is its v1.x home.
 
-**#89 (deferred to 8c-3, user-approved).** The elected 9P-reader role (the #841
-`reader_active` + the srvconn chan-role) is HELD across the detour-park: a debugged
-Proc whose thread holds the **system** Stratum client's reader role at stop-time
-freezes system-FS (`/bin`, `/lib`) for every survivor Proc sharing that client,
-until the debugger continues/detaches. Per-user home clients (A-5b
-`--single-session`) are isolated, so the surface is the system client only; the
-freeze is bounded to the debug-stop duration (developer-controlled). NOT exercised
-by the current E2E (the target does no FS I/O). The fix mirrors the death path's
-role-release (`client_self_dying` → clear `reader_active` →
-`client_handoff_reader_locked` → park with the role released → re-elect on resume),
-but it is invasive to the 3-round-audited #841 reader machinery, so it lands as its
-own focused, independently-audited sub-chunk **8c-3** rather than bundled into this
-close.
+**#89 (fixed in 8c-3, as-built).** The elected 9P-reader role (the #841
+`reader_active`) was HELD across the detour-park: a debugged Proc whose thread
+holds the **system** Stratum client's reader role at stop-time froze system-FS
+(`/bin`, `/lib`) for every survivor Proc sharing that client, until the debugger
+continued/detached. Per-user home clients (A-5b `--single-session`) are isolated,
+so the surface was the system client only; the freeze was bounded to the
+debug-stop duration (developer-controlled). The fix mirrors the death path's
+role-release, composed of three mechanisms:
+
+The fix is **FRAME-ATOMIC** (the 8c-3 holotype F1 correction — see below): the
+elected reader is interruptible-by-a-stop ONLY at a frame boundary and blocks a
+mid-frame stop through. It is composed of a fourth flag plus three role-release
+mechanisms:
+
+0. **`Thread.stop_no_park`** (a 2nd per-Thread bool in the same padding). The
+   `reader_recv_frame` wrapper holds it for the WHOLE recv tenure. A stop hitting
+   the recv MID-FRAME (bytes already consumed, `stop_unwinds` false) must NOT
+   unwind (would discard the partial frame → desync) NOR park in place (holds
+   `reader_active` + pins the partial frame): the `sleep()`/`tsleep()` detour, when
+   `stop_no_park` is set and `stop_unwinds` is clear, FALLS THROUGH to the normal
+   register+sched so the reader finishes the frame (bounded by the trusted server's
+   chunked delivery), then unwinds at the next boundary. Both flags are cleared on
+   the wrapper's exit so a following role-free park PARKS.
+1. **`Thread.stop_unwinds`** (a per-Thread bool, in the `debug_ss_armed` padding
+   — no struct-size change). `reader_recv_frame` sets it `= (got == 0)` PER-CHUNK,
+   so a stop unwinds ONLY at a clean frame boundary (no bytes consumed). The
+   `sleep()`/`tsleep()` detour, when it is set, RETURNS `SLEEP_INTR`/`TSLEEP_INTR`
+   — reusing the death-interrupt propagation the transport recv already tolerates
+   (it leaves the transport reusable, no `ERROR` latch) — INSTEAD of parking in
+   place. So the recv unwinds to `client_wait`, which detects the stop
+   (`debug_stop_req` set, not dying), releases +
+   `client_handoff_reader_locked`s the role, parks role-free
+   (`proc_debug_stop_sleeper_park`, with `stop_unwinds` cleared so it parks), and
+   re-elects on resume (the re-loop's `rpc->done` may already be true — a survivor
+   demuxed the reply while stopped). Every OTHER sleep (both flags clear —
+   Go's sysmon `nanosleep`, a futex wait) parks in place (the 8c-2 default,
+   preserving the syscall).
+2. **A top-of-loop stop guard** in `client_wait`: a debug-stopped thread reaching
+   `client_wait` fresh (a mid-syscall stop) parks PROMPTLY (never elects); it
+   re-hands-off first if it was handed `be_reader` (the handed-then-stopped race).
+3. **The handoff skips debug-stopped owners** (`p9_rpc.owner` = the submitting
+   Proc): the released role must land on a SURVIVOR, not bounce to another stopped
+   sibling — a stopped sibling's thread has parked, so its `rpc->rendez` has no
+   waiter and the `be_reader` wakeup would be a no-op (a lost role). If no survivor
+   op is pending, the handoff finds nothing → the role is dropped (`reader_active`
+   is already false) → a future survivor op self-elects.
+
+4. **F2 — the role-release covers ALL FOUR `reader_active` sites.** Centralizing
+   the flags in `reader_recv_frame` gives the block-through to every caller, and
+   each handles its stop-return without killing the shared session or spinning:
+   the `client_pump_or_park_locked` self-pump skips `client_mark_dead_locked` on a
+   `client_stop_pending` unwind; `client_send_flow` (spilling `out_buf` FIRST, the
+   #375 discipline, since `client_debug_stop_park` drops `c->lock`) +
+   `client_drain_until_free_tag` PARK a stopped sender at their loop top — WITHOUT
+   this a stop-unwound self-pump drains nothing, so `c2s` never frees, every send
+   EAGAINs, the Proc never fully-stops, and the debugger's stop HANGS; and
+   `p9_client_reader_pump_once` skips mark_dead on a stop. Only
+   `p9_client_reader_pump_once_deadline` has no guard, justified kproc-only (its
+   sole callers — `dev9p_poll.c` + `loom.c` SQPOLL — have `t->proc == NULL`, so
+   the detour is immune).
+
+**Why frame-atomic (the 8c-3 holotype F1 [P1]).** The FIRST fix (set `stop_unwinds`
+for the whole recv, a plain unwind) was WRONG: delivery is CHUNKED, so a stop can
+unwind mid-frame and desync. `srvconn_client_recv` tsleeps when the ring is EMPTY
+(`count == 0`), but under pipelining depth ≥ 2 + ring pressure a frame is SPLIT
+across the ring in time (`srvconn` `chan_ring` short-read/write + a wrendez park
+when the frame doesn't fit), so the reader consumes a partial frame and its next
+recv (for the tail) tsleeps MID-FRAME (`got > 0`). A stop-unwind there discards the
+consumed bytes → a survivor's fresh `reader_recv_frame` reads the frame TAIL as a
+header → shared SYSTEM-Stratum session death / task-#50 silent misframe. The
+frame-atomic design (mechanisms 0 + 1) closes it for the STOP path. The IDENTICAL
+death-path mid-frame unwind — the `#811` die-check below the detour is UNCHANGED,
+so a death still unwinds mid-frame — is a PRE-EXISTING #841/#811 latent (grep-
+confirmed: the #841/#845 audits never analyzed it) that #89 does not introduce but
+would WIDEN from Proc-death (rare, terminal) to a debug stop (normal, repeatable);
+it is **owned + tracked as task #90** (fixing it narrows #811 universal
+death-interruptible sleep for this one recv → a §28 refinement → user-deferred to
+its own spec-first sub-chunk).
+
+`DeathWinsOverStop` holds at every branch (the dying check precedes the stop check
+in the recv loop, the top-of-loop, and the role-free park; a death still unwinds a
+mid-frame block-through via the die-check below the detour). NO new §28 invariant
+and NO spec change (the reader-role is below the `9p_client.tla` +
+`debug_stop.tla` models, both re-verified GREEN; validated by the focused 8c-3
+Fable holotype + the `9p_client.handoff_skips_debug_stopped_owner` regression +
+the SMP gate; the block-through decision lives in the sched detour, kproc-immune,
+so it has no deterministic kproc regression — the SMP gate + reasoning are its
+durable coverage).
 
 ---
 

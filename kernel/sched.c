@@ -1760,13 +1760,49 @@ int sleep(struct Rendez *r, int (*cond)(void *arg), void *arg) {
         // as at the tail). specs/debug_stop.tla StopWakesSleeper.
         if (r != &t->debug_rendez && t->proc &&
             __atomic_load_n(&t->proc->debug_stop_req, __ATOMIC_ACQUIRE) != 0) {
-            spin_unlock(&r->lock);
-            spin_unlock_irqrestore(&t->wait_lock, s);
-            int drc = proc_debug_stop_sleeper_park(t);
-            s = spin_lock_irqsave(&t->wait_lock);
-            spin_lock(&r->lock);
-            if (drc == SLEEP_INTR) { rc = SLEEP_INTR; break; }
-            continue;
+            // 8c-3 (#89; DEBUG-FS-DESIGN 5c.6): the elected 9P reader sets
+            // stop_unwinds around its blocking recv. A stop must NOT park it in
+            // place here -- it holds reader_active, and a parked reader freezes
+            // every survivor sharing the client. UNWIND instead: return SLEEP_INTR
+            // (reusing the death-interrupt propagation the transport recv already
+            // tolerates -- leaves the transport reusable, no ERROR latch), so
+            // client_wait regains control, releases + hands off the role, then
+            // parks role-free (stop_unwinds cleared) via the branch below. Break
+            // with the locks HELD (like the die-check below) -> the post-loop
+            // release balances. The recv-return is classified at the client layer
+            // via the STABLE stop_unwound latch this branch sets (below), NOT by
+            // re-reading debug_stop_req (which races an async proc_debug_resume --
+            // the F1 re-audit's whole-FS-DoS root cause).
+            if (t->stop_unwinds) {
+                // F1 re-audit: latch a STABLE stop-unwound signal the client
+                // classifier reads (SLEEP_INTR aliases death + a transport error;
+                // re-reading debug_stop_req races an async proc_debug_resume). Set
+                // + read by THIS thread only -> a concurrent resume cannot flip it.
+                t->stop_unwound = true;
+                rc = SLEEP_INTR;
+                break;
+            }
+            // 8c-3 (#89, F1 frame-atomic): the elected reader MID-FRAME
+            // (stop_no_park set, stop_unwinds false -- some bytes of the frame
+            // already consumed) must BLOCK THROUGH the stop: neither unwind
+            // (SLEEP_INTR would discard the partial frame -> the survivor reads
+            // the tail as a header -> stream desync) nor park in place (holds
+            // reader_active -> freezes survivors AND pins the partial frame).
+            // Fall through to the normal register+sched below so the reader
+            // finishes the frame (bounded by the trusted server's delivery),
+            // then unwinds at the next frame boundary (got==0 -> stop_unwinds).
+            // DEATH still unwinds mid-frame -- the die-check below is UNCHANGED
+            // (the pre-existing death-mid-frame desync is task #90).
+            if (!t->stop_no_park) {
+                spin_unlock(&r->lock);
+                spin_unlock_irqrestore(&t->wait_lock, s);
+                int drc = proc_debug_stop_sleeper_park(t);
+                s = spin_lock_irqsave(&t->wait_lock);
+                spin_lock(&r->lock);
+                if (drc == SLEEP_INTR) { rc = SLEEP_INTR; break; }
+                continue;
+            }
+            // else: block through (reader mid-frame) -> register+sched below.
         }
 
         if (r->waiter)
@@ -1906,15 +1942,34 @@ int tsleep(struct Rendez *r, int (*cond)(void *arg), void *arg,
         // sleep()'s detour.
         if (r != &t->debug_rendez && t->proc &&
             __atomic_load_n(&t->proc->debug_stop_req, __ATOMIC_ACQUIRE) != 0) {
-            spin_unlock(&r->lock);
-            spin_unlock(&g_timerwait.lock);
-            spin_unlock_irqrestore(&t->wait_lock, s);
-            int drc = proc_debug_stop_sleeper_park(t);
-            s = spin_lock_irqsave(&t->wait_lock);
-            spin_lock(&g_timerwait.lock);
-            spin_lock(&r->lock);
-            if (drc == SLEEP_INTR) { ret = TSLEEP_INTR; break; }
-            continue;
+            // 8c-3 (#89): the tsleep twin of sleep()'s stop_unwinds branch. The
+            // 9P reader's recv (srvconn_client_recv) is a deadline-bounded tsleep;
+            // when stop_unwinds is set, UNWIND (return TSLEEP_INTR, which
+            // srvconn_client_recv maps to -1, exactly as the death-interrupt)
+            // instead of parking in place, so client_wait releases the reader role
+            // before parking. Break with all three locks HELD -> the post-loop
+            // release balances. See sleep()'s branch for the full rationale.
+            if (t->stop_unwinds) {
+                t->stop_unwound = true;   // F1 re-audit: see sleep()'s branch
+                ret = TSLEEP_INTR;
+                break;
+            }
+            // 8c-3 (#89, F1): tsleep twin of sleep()'s block-through. The
+            // reader mid-frame (stop_no_park set, stop_unwinds false) falls
+            // through to register+sched so it finishes the frame instead of
+            // unwinding (desync) or parking (holds reader_active). See sleep().
+            if (!t->stop_no_park) {
+                spin_unlock(&r->lock);
+                spin_unlock(&g_timerwait.lock);
+                spin_unlock_irqrestore(&t->wait_lock, s);
+                int drc = proc_debug_stop_sleeper_park(t);
+                s = spin_lock_irqsave(&t->wait_lock);
+                spin_lock(&g_timerwait.lock);
+                spin_lock(&r->lock);
+                if (drc == SLEEP_INTR) { ret = TSLEEP_INTR; break; }
+                continue;
+            }
+            // else: block through (reader mid-frame) -> register+sched below.
         }
 
         if (r->waiter)

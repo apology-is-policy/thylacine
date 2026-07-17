@@ -883,6 +883,7 @@ void test_9p_client_async_session_death_posts_error_cqe(void);
 void test_9p_client_async_peer_gone_posts_nodev_cqe(void);
 void test_9p_client_async_mark_devgone_posts_nodev_cqe(void);
 void test_9p_client_async_handoff_skips_async(void);
+void test_9p_client_handoff_skips_debug_stopped_owner(void);
 void test_9p_client_pump_deadline_idle(void);
 void test_9p_client_pump_deadline_data_ready_progresses(void);
 void test_9p_client_pump_deadline_chunked_frame_completes(void);
@@ -2293,6 +2294,9 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "9p_client.async_handoff_skips_async",
                                        test_9p_client_async_handoff_skips_async,
+                                                                           false, NULL },
+    { "9p_client.handoff_skips_debug_stopped_owner",
+                                       test_9p_client_handoff_skips_debug_stopped_owner,
                                                                            false, NULL },
     { "9p_client.pump_deadline_idle",  test_9p_client_pump_deadline_idle,  false, NULL },
     { "9p_client.pump_deadline_data_ready_progresses",

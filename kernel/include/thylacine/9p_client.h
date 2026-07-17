@@ -100,6 +100,7 @@ struct p9_dirfid_cache {
 #define P9_CLIENT_MAGIC        0x50394354u   // "P9CT" little-endian
 
 struct p9_rpc;   // forward (the completion callback takes one)
+struct Proc;     // forward (p9_rpc.owner -- the submitting Proc, for the #89 handoff skip)
 
 // Pluggable completion front-end (Loom §8.4 / I-29). `on_complete == NULL` is
 // the synchronous WAKE_RENDEZ path: the submitter sleeps on `rendez` and the
@@ -151,6 +152,13 @@ struct p9_rpc {
     u8            *reply_buf;  // SYNC: kmalloc'd recv_cap bytes; ASYNC: NULL
     struct Rendez  rendez;     // SYNC: the submitter sleeps here; reader wakes it
     p9_rpc_complete_fn on_complete;  // NULL = sync WAKE_RENDEZ; set = async POST_CQE
+    struct Proc   *owner;      // 8c-3 (#89): the submitting Proc (sync only). The
+                               // reader-role handoff skips an op whose owner is
+                               // debug-stopped (it would park holding the role,
+                               // freezing survivors). Alive while the rpc is
+                               // inflight (== as safe to deref as `done`). Unused
+                               // for async ops (on_complete != NULL are skipped
+                               // first); may be NULL there.
 };
 
 struct p9_client {

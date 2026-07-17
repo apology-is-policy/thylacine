@@ -171,6 +171,86 @@ a valid PC but arms `SPSR.SS` in a frame the detour-resume does not `eret` from,
 so the single-step is ineffective — pre-existing (NULL trapframe before #88),
 unchanged; the per-thread `/proc/<pid>/thread/<tid>/` step is its v1.x home.
 
+**8c-3 (#89) — releasing the elected-9P-reader role across the park.** The 5c
+detour parks a syscall-blocked sleeper IN PLACE. When the sleeper is the #841
+**elected 9P reader** (blocked in `reader_recv_frame`'s transport recv on the
+SYSTEM Stratum client), parking in place holds `reader_active`, freezing every
+SURVIVOR Proc sharing the client (`/bin`, `/lib`) for the debug-stop's duration.
+(Per-user home clients — A-5b `--single-session` — are isolated, so the surface
+is the system client only.) The fix is **FRAME-ATOMIC** (the holotype F1
+correction — a mid-frame stop must block through, never unwind) and composed of a
+fourth flag plus the three role-release mechanisms:
+
+- **`Thread.stop_no_park`** (`kernel/include/thylacine/thread.h`, the 2nd bool in
+  the same padding). The `reader_recv_frame` wrapper holds it for the WHOLE recv
+  tenure; `do_reader_recv_frame` sets `stop_unwinds = (got == 0)` before each recv.
+  A stop hitting the recv MID-FRAME (`got > 0`, `stop_unwinds` false) must NOT
+  unwind (discards the partial frame → the survivor reads the tail as a header →
+  desync) NOR park in place (holds `reader_active`): the `sleep()`/`tsleep()`
+  detour, when `stop_no_park` is set + `stop_unwinds` clear, FALLS THROUGH to the
+  normal register+sched so the reader finishes the frame (bounded by the trusted
+  server's chunked delivery), then unwinds at the next boundary. Both flags are
+  cleared on the wrapper's exit so a following role-free park PARKS.
+- **`Thread.stop_unwinds`** (`kernel/include/thylacine/thread.h`, in the
+  `debug_ss_armed` padding — no struct-size change). `reader_recv_frame` sets it
+  `= (got == 0)` PER-CHUNK — a stop unwinds ONLY at a clean frame boundary. The
+  `sleep()`/`tsleep()` detour (`kernel/sched.c`), when it is
+  set, RETURNS `SLEEP_INTR`/`TSLEEP_INTR` — reusing the death-interrupt
+  propagation the transport recv already tolerates (leaves the transport reusable,
+  no `ERROR` latch) — instead of parking in place. The recv unwinds to
+  `client_wait`, which detects the stop (`client_stop_pending`: `debug_stop_req`
+  set, not dying), clears `reader_active`, `client_handoff_reader_locked`s the
+  role, then parks role-free (`client_debug_stop_park` →
+  `proc_debug_stop_sleeper_park`, with `stop_unwinds` cleared so it PARKS), and
+  re-elects on resume (the re-loop's `rpc->done` may already be true — a survivor
+  demuxed the reply while stopped). Every other sleep (`stop_unwinds` clear) parks
+  in place (the 8c-2 default).
+- **The top-of-loop stop guard** in `client_wait`: a debug-stopped thread reaching
+  `client_wait` fresh (a mid-syscall stop) parks promptly (never elects), after
+  re-handing-off if it holds `be_reader` (the handed-then-stopped race).
+- **The handoff skips debug-stopped owners** (`p9_rpc.owner` = the submitting
+  Proc; `client_handoff_reader_locked` skips `owner->debug_stop_req != 0`): the
+  released role must land on a runnable SURVIVOR, not bounce to a stopped sibling
+  (whose thread has parked, so its `rpc->rendez` has no waiter and the `be_reader`
+  wakeup is a no-op — a lost role). No survivor pending → the role is dropped
+  (`reader_active` already false) → a future survivor op self-elects. `owner` is
+  alive while its rpc is inflight (as safe as the existing `r->done` deref; the
+  only two non-NULL `inflight[]` installs — `client_run`, `submit_async` — set it);
+  the death path is unchanged (dying owners carry no `debug_stop_req`, so the F6
+  bounce still handles them).
+
+**F2 — the role-release covers ALL FOUR `reader_active` sites.** Centralizing the
+flags in `reader_recv_frame` gives the block-through to every caller; each handles
+its stop-return without killing the shared session or spinning: the
+`client_pump_or_park_locked` self-pump skips `client_mark_dead_locked` on a
+`client_stop_pending` unwind; `client_send_flow` (spilling `out_buf` FIRST — the
+#375 discipline, since `client_debug_stop_park` drops `c->lock`) +
+`client_drain_until_free_tag` PARK a stopped sender at their loop top (else a
+stop-unwound self-pump drains nothing → `c2s` never frees → every send EAGAINs →
+the Proc never fully-stops → the debugger's stop HANGS); `p9_client_reader_pump_once`
+skips mark_dead on a stop. `p9_client_reader_pump_once_deadline` alone has no guard,
+kproc-only (its sole callers, `dev9p_poll.c` + `loom.c` SQPOLL, have
+`t->proc == NULL`, detour-immune).
+
+**Why frame-atomic (the holotype F1 [P1]).** The first fix (plain unwind for the
+whole recv) desynced mid-frame: delivery is CHUNKED — `srvconn_client_recv` tsleeps
+on an EMPTY ring, but under pipelining depth ≥ 2 + ring pressure a frame is split
+across the ring in time (`srvconn` `chan_ring` short-read/write), so the reader
+consumes a partial frame and its next recv tsleeps MID-FRAME (`got > 0`); a
+stop-unwind there discards the consumed bytes → the survivor reads the frame TAIL
+as a header → shared-session death / task-#50 misframe. Mechanisms 0+1 (frame-
+atomic) close it for the STOP path. The IDENTICAL death-path mid-frame unwind (the
+`#811` die-check below the detour is UNCHANGED) is a PRE-EXISTING #841/#811 latent,
+**owned + tracked as task #90** (its fix narrows #811 → a §28 refinement → deferred
+to its own spec-first sub-chunk). `DeathWinsOverStop` holds at every branch (a death
+still unwinds a mid-frame block-through via the die-check). NO new §28 invariant and
+NO spec change (the reader-role is below the `9p_client.tla` + `debug_stop.tla`
+models, both re-verified GREEN). Validated by the 8c-3 (dirty-close) Fable holotype +
+`9p_client.handoff_skips_debug_stopped_owner` (revert-probed: pre-fix 1137/1138 FAIL)
++ the SMP gate (the block-through decision is in the sched detour, kproc-immune, so
+it has no deterministic kproc regression — the SMP gate + reasoning are its durable
+coverage).
+
 `fpregs` (from `t->ctx.fp_v` + fpsr + fpcr), `kregs` (from `t->ctx`), and
 `kstack` (from `t->ctx.lr`/`fp`) all read the SAVED kernel context, not the
 trapframe, so they were never affected by F2 — only `regs` was.

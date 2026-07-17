@@ -201,7 +201,22 @@ static void client_handoff_reader_locked(struct p9_client *c,
     for (u32 tag = 0; tag < P9_SESSION_MAX_OUTSTANDING; tag++) {
         struct p9_rpc *r = c->inflight[tag];
         if (r && r != departing && !r->done && !r->dead && !r->be_reader &&
-            !r->on_complete) {
+            !r->on_complete &&
+            // 8c-3 (#89): skip an op whose owner is being debug-stopped. Its
+            // thread parks (8c-2) and cannot run the reader loop, so handing it
+            // the role would strand a survivor whose reply needs reading (the
+            // wakeup would land on a rpc->rendez whose waiter moved to
+            // debug_rendez -- a no-op). Handing to a runnable survivor (or, if
+            // none is pending, dropping the role -- reader_active is already
+            // false, so a future survivor op self-elects) keeps the shared client
+            // LIVE across a debug-stop. `owner` is the submitter's Proc, alive
+            // while this rpc is inflight (this deref is as safe as `r->done`
+            // above). Async ops (on_complete) are skipped first, so `owner` is
+            // never read there. A death (owner group-terminating, not stopped)
+            // sets no debug_stop_req -> unaffected: the existing F6 bounce handles
+            // the dying-owner case.
+            !(r->owner &&
+              __atomic_load_n(&r->owner->debug_stop_req, __ATOMIC_ACQUIRE) != 0)) {
             // Skip async (POST_CQE) ops: they have no submitter thread to run
             // the reader loop. An async op's reply is demuxed by the
             // SYS_LOOM_ENTER reap / SQPOLL kthread / p9_client_reader_pump_once
@@ -250,8 +265,18 @@ static void client_send_progress_signal(struct p9_client *c) {
 // unconditionally. `deadline_ns == 0` + `idle == NULL` is the original
 // unbounded behavior. A backend with no set_recv_deadline op (NULL) ignores the
 // deadline entirely (the recv just blocks).
-static int reader_recv_frame(struct p9_client *c, u64 deadline_ns, bool *idle) {
+// 8c-3 (#89, F1): the inner recv. The wrapper (reader_recv_frame) holds
+// stop_no_park for the whole tenure so a mid-frame stop BLOCKS THROUGH; this
+// body sets self->stop_unwinds = (got == 0) before each recv, so a debugger
+// stop UNWINDS the reader ONLY at a frame boundary (no bytes of the frame
+// consumed) and NEVER mid-frame (unwinding mid-frame discards the consumed
+// partial bytes -> the survivor reader reads the frame TAIL as a header ->
+// stream desync). `self` may be a kproc thread (SQPOLL, site 4): kproc is
+// undebuggable (proc_debug_stop_deliver rejects it), so its debug_stop_req is
+// always 0 and the detour never reads the flags -- the sets are harmless.
+static int do_reader_recv_frame(struct p9_client *c, u64 deadline_ns, bool *idle) {
     struct p9_transport *t = &c->transport;
+    struct Thread *self = current_thread();
     u8 *buf = t->recv_buf;
     size_t cap = t->recv_cap;
     size_t got = 0;
@@ -259,6 +284,8 @@ static int reader_recv_frame(struct p9_client *c, u64 deadline_ns, bool *idle) {
     while (got < P9_HDR_LEN) {
         if (got == 0 && deadline_ns)
             p9_transport_set_recv_deadline(t, deadline_ns);
+        // Unwindable-by-stop ONLY at got==0 (a clean frame boundary).
+        if (self) self->stop_unwinds = (got == 0);
         int n = t->ops.recv(t->ops.ctx, buf + got, P9_HDR_LEN - got);
         if (got == 0 && deadline_ns) {
             // Read the timeout signal BEFORE disarming (disarm resets it),
@@ -280,6 +307,8 @@ static int reader_recv_frame(struct p9_client *c, u64 deadline_ns, bool *idle) {
     if (size < P9_HDR_LEN) return -1;
     if ((size_t)size > cap) return -1;
     while (got < (size_t)size) {
+        // Mid-frame (got>0): a stop must NOT unwind here -- block through.
+        if (self) self->stop_unwinds = false;
         int n = t->ops.recv(t->ops.ctx, buf + got, (size_t)size - got);
         if (n == 0) return 0;              // mid-frame EOF: peer vanished mid-reply (device-gone)
         if (n < 0)  return -1;             // transport error
@@ -287,6 +316,26 @@ static int reader_recv_frame(struct p9_client *c, u64 deadline_ns, bool *idle) {
         got += (size_t)n;
     }
     return (int)got;
+}
+
+// 8c-3 (#89, F1): the frame-atomic reader recv. stop_no_park is held for the
+// WHOLE recv so the sched detour blocks a mid-frame stop through (the reader
+// finishes the frame, bounded by the trusted server's delivery -- CF-3 B) and
+// unwinds ONLY at a frame boundary (do_reader_recv_frame sets stop_unwinds).
+// Both flags are cleared on exit so a following client_debug_stop_park PARKS.
+// Centralizing here gives all four reader_active-holding callers (the
+// client_wait election, the client_pump_or_park_locked self-pump, and both
+// p9_client_reader_pump_once variants) the block-through, closing F2.
+static int reader_recv_frame(struct p9_client *c, u64 deadline_ns, bool *idle) {
+    struct Thread *self = current_thread();
+    // Reset stop_unwound at ENTRY (per-recv). The detour SETS it if this recv
+    // stop-unwinds at a boundary; the client classifier READS+clears it after we
+    // return (F1 re-audit -- a STABLE signal vs a racy debug_stop_req re-read).
+    // It is deliberately NOT cleared at exit (it must survive to the classifier).
+    if (self) { self->stop_no_park = true; self->stop_unwound = false; }
+    int r = do_reader_recv_frame(c, deadline_ns, idle);
+    if (self) { self->stop_no_park = false; self->stop_unwinds = false; }
+    return r;
 }
 
 // Demux one received frame (in c->transport.recv_buf, `len` bytes) to its owner.
@@ -350,9 +399,39 @@ static void demux_frame_locked(struct p9_client *c, size_t len) {
     }
 }
 
+// 8c-3 (#89): is a debugger stop pending on the calling thread's Proc? Mirror of
+// client_self_dying(). A debug-stopped thread must not hold or assume the elected-
+// reader role -- it parks (8c-2), and a parked reader freezes every survivor
+// sharing this client. ACQUIRE pairs with proc_debug_stop_deliver's RELEASE set;
+// a racy miss at the client layer is caught by the sleep/tsleep detour's
+// register-then-observe under wait_lock (the I-9-critical path). A kproc thread
+// has t->proc == kproc() (non-NULL), but kproc is undebuggable
+// (proc_debug_stop_deliver rejects it), so kproc()->debug_stop_req is always 0 ->
+// this returns false for a kthread.
+static bool client_stop_pending(struct Thread *t) {
+    return t && t->proc &&
+           __atomic_load_n(&t->proc->debug_stop_req, __ATOMIC_ACQUIRE) != 0;
+}
+
+// 8c-3 (#89): park the calling thread on its debug_rendez for a debugger stop,
+// with the reader role ALREADY released. Drops c->lock across the blocking park
+// (proc_debug_stop_sleeper_park sleeps on debug_rendez until proc_debug_resume
+// clears debug_stop_req) then re-acquires it. stop_unwinds MUST be false here so
+// this park PARKS (it must not itself unwind). Returns SLEEP_OK on resume, or
+// SLEEP_INTR if the Proc started dying while stopped -> the caller re-loops and
+// client_self_dying() unwinds (DEATH WINS). c->lock HELD on entry + exit.
+static int client_debug_stop_park(struct p9_client *c) {
+    struct Thread *t = current_thread();
+    spin_unlock(&c->lock);
+    int drc = proc_debug_stop_sleeper_park(t);
+    spin_lock(&c->lock);
+    return drc;
+}
+
 // Block until rpc->done, the session dies, or my Proc dies (the elected-reader
 // loop). c->lock HELD on entry + exit.
 static int client_wait(struct p9_client *c, struct p9_rpc *rpc) {
+    struct Thread *t = current_thread();
     for (;;) {
         if (rpc->done)            return CLIENT_WAIT_DONE;
         if (rpc->dead)            return CLIENT_WAIT_DEAD;
@@ -373,11 +452,38 @@ static int client_wait(struct p9_client *c, struct p9_rpc *rpc) {
             }
             return CLIENT_WAIT_DIED;
         }
+        if (client_stop_pending(t)) {
+            // 8c-3 (#89): a debugger stop is pending on my Proc. I must NOT hold
+            // or assume the elected-reader role -- a stopped thread parks (8c-2),
+            // and a parked reader freezes every survivor sharing this client until
+            // the debugger resumes. Release the role (re-hand-off if I was
+            // designated the next reader, mirroring the F6 death case) + park
+            // role-free + re-loop on resume to re-elect. The handoff skips
+            // debug-stopped owners, so the role always lands on a survivor (or is
+            // dropped -> a future survivor op self-elects). This is the top-of-
+            // loop guard so a debug-stopped thread that reaches client_wait fresh
+            // (a mid-syscall stop) parks PROMPTLY instead of electing + reading.
+            // The blocked-reader case (the common one) is handled below via
+            // stop_unwinds. DEBUG-FS-DESIGN 5c.6.
+            if (rpc->be_reader) {
+                rpc->be_reader = false;
+                client_handoff_reader_locked(c, rpc);
+            }
+            (void)client_debug_stop_park(c);   // drop c->lock, park, re-acquire
+            continue;                          // resumed (or dying): re-check
+        }
         if (!c->reader_active) {
             // Become THE reader: read frames (c->lock dropped) until MY reply
             // lands, the session dies, or I'm dying.
             c->reader_active = true;
             rpc->be_reader   = false;
+            // 8c-3 (#89, F1): reader_recv_frame manages stop_no_park/stop_unwinds
+            // (frame-atomic -- a mid-frame stop blocks through, a boundary stop
+            // unwinds the recv). On a boundary unwind the recv returns <= 0 with
+            // client_stop_pending true -> `stopped` -> release + hand off the
+            // role + park role-free below (the wrapper cleared both flags, so the
+            // park PARKS), then re-elect on resume.
+            bool stopped     = false;
             for (;;) {
                 if (rpc->done || rpc->dead) break;
                 if (client_self_dying())    break;
@@ -388,7 +494,25 @@ static int client_wait(struct p9_client *c, struct p9_rpc *rpc) {
                     demux_frame_locked(c, (size_t)rr);
                     client_send_progress_signal(c);     // #349: a c2s slot freed
                 } else if (client_self_dying()) {
-                    break;                              // death-interrupt: unwind
+                    // death-interrupt: unwind. Clear a possibly-set stop_unwound
+                    // (a stop+death at the same boundary sets it) so no branch
+                    // leaves the latch set -- symmetric with the arms below (the
+                    // reader_recv_frame entry reset already guards a later read;
+                    // this is defense-in-depth on the dying path).
+                    if (t) t->stop_unwound = false;
+                    break;
+                } else if (t && t->stop_unwound) {
+                    // 8c-3 (#89): my recv was stop-unwound at a frame boundary (the
+                    // detour's stop_unwinds branch). F1 re-audit: read the STABLE
+                    // stop_unwound latch, NOT client_stop_pending (which re-reads
+                    // debug_stop_req -- cleared asynchronously by proc_debug_resume,
+                    // so a debugger detach/death in this window would misclassify a
+                    // benign stop-unwind as a real break -> mark the SHARED session
+                    // dead). Not a death, not a real error: release + hand off +
+                    // park role-free below. Read+clear (owner-only).
+                    t->stop_unwound = false;
+                    stopped = true;
+                    break;
                 } else {
                     // rr == 0 (clean EOF = peer/server endpoint gone) -> device-
                     // gone; rr < 0 (recv error / malformed) -> transport.
@@ -399,7 +523,14 @@ static int client_wait(struct p9_client *c, struct p9_rpc *rpc) {
             client_send_progress_signal(c);             // #349: I departed -- a
                                                         // parked sender may self-pump
             client_handoff_reader_locked(c, rpc);
-            // re-loop: done / dead / dying now decides the return.
+            if (stopped) {
+                // Role released + handed to a survivor; park role-free, then
+                // re-loop to re-elect on resume. My reply may have been demuxed by
+                // the survivor reader while I was stopped -> the re-loop's
+                // rpc->done check returns CLIENT_WAIT_DONE.
+                (void)client_debug_stop_park(c);
+            }
+            // re-loop: done / dead / dying / stop now decides the return.
         } else {
             // Another thread is the reader. Sleep on MY rpc (c->lock dropped)
             // until my reply lands, the session dies, or I'm handed the reader
@@ -469,8 +600,24 @@ static void client_pump_or_park_locked(struct p9_client *c, struct p9_rpc *rpc) 
         spin_unlock(&c->lock);
         int rr = reader_recv_frame(c, 0, NULL);
         spin_lock(&c->lock);
-        if (rr > 0)                    demux_frame_locked(c, (size_t)rr);
-        else if (!client_self_dying()) client_mark_dead_locked(c, rr == 0);
+        struct Thread *self = current_thread();
+        if (rr > 0) {
+            demux_frame_locked(c, (size_t)rr);
+        } else {
+            bool unwound = self && self->stop_unwound;   // F1 re-audit: stable latch
+            if (unwound) self->stop_unwound = false;     // read+clear (owner-only)
+            if (!client_self_dying() && !unwound) {
+                // rr <= 0, not self-dying, not a boundary stop-unwind -> a real
+                // transport break; latch the shared session dead (#841 fail-close).
+                // A stop-unwind (8c-3 F2) skips this -- the role is released below,
+                // and client_send_flow / client_drain_until_free_tag parks me at
+                // its loop top (else I would spin re-electing without draining).
+                // Reading the STABLE stop_unwound latch (not client_stop_pending)
+                // closes the F1 async-resume race that would spuriously mark the
+                // SHARED session dead on a debugger detach/death mid-stop.
+                client_mark_dead_locked(c, rr == 0);
+            }
+        }
         c->reader_active = false;
         client_send_progress_signal(c);          // a c2s slot / tag may have freed
         client_handoff_reader_locked(c, rpc);
@@ -538,9 +685,28 @@ static int client_send_flow(struct p9_client *c, size_t built_len,
     u8 *spill = NULL;
     const u8 *frame = c->out_buf;
     int rc;
+    struct Thread *self = current_thread();
     for (;;) {
         if (client_self_dying()) { rc = CLIENT_SEND_NEVER; break; }
         if (c->dead)             { rc = CLIENT_SEND_NEVER; break; }
+
+        // 8c-3 (#89, F2): a debugger stop is pending -- park role-free instead
+        // of retrying/self-pumping. A stop-unwound self-pump drains nothing (it
+        // unwinds at the frame boundary), so retrying would SPIN: c2s never
+        // frees -> every send EAGAINs -> the Proc never fully-stops -> the
+        // debugger's stop HANGS. Spill out_buf FIRST -- client_debug_stop_park
+        // drops c->lock, opening the #375 out_buf-clobber window; on resume the
+        // retry pushes the spill, never a peer's overwritten frame.
+        if (client_stop_pending(self)) {
+            if (!spill) {
+                spill = kmalloc(built_len, 0);
+                if (!spill) { rc = CLIENT_SEND_NEVER; break; }   // never sent
+                client_copy(spill, c->out_buf, built_len);
+                frame = spill;
+            }
+            (void)client_debug_stop_park(c);
+            continue;
+        }
 
         int src = p9_transport_send(&c->transport, frame, built_len);
         if (src == 0)                   { rc = 0; break; }          // whole frame sent
@@ -569,6 +735,7 @@ static int client_send_flow(struct p9_client *c, size_t built_len,
 // tag; even a sync peer's reply drain frees a tag). Uses the SAME pump/park body
 // as the send flow. c->lock HELD; returns 0 (a tag is free) or -P9_E_IO (death).
 static int client_drain_until_free_tag(struct p9_client *c, struct p9_rpc *rpc) {
+    struct Thread *self = current_thread();
     for (;;) {
         // has_free_tag FIRST (round-2 F1): with a free tag, proceed to
         // send_clunk even when the caller's Proc is dying, so the fid unbinds
@@ -580,6 +747,10 @@ static int client_drain_until_free_tag(struct p9_client *c, struct p9_rpc *rpc) 
         if (p9_session_has_free_tag(&c->session)) return 0;
         if (c->dead)             return -P9_E_IO;
         if (client_self_dying()) return -P9_E_IO;
+        // 8c-3 (#89, F2): a debugger stop -- park role-free (no frame built, so
+        // no spill). Else a stop-unwound self-pump would spin (drains nothing).
+        // Resume re-checks has_free_tag.
+        if (client_stop_pending(self)) { (void)client_debug_stop_park(c); continue; }
         client_pump_or_park_locked(c, rpc);
     }
 }
@@ -634,6 +805,10 @@ static int client_run(struct p9_client *c, size_t built_len,
     rpc.be_reader   = false;
     rpc.reply_len   = 0;
     rpc.on_complete = NULL;          // sync (WAKE_RENDEZ): the submitter waits
+    struct Thread *submitter = current_thread();
+    rpc.owner       = submitter ? submitter->proc : NULL;   // 8c-3 (#89): the
+                                     // handoff skips a debug-stopped owner's op;
+                                     // NULL for a kproc client (never stopped)
     rendez_init(&rpc.rendez);
     rpc.reply_buf = kmalloc(c->recv_cap, KP_ZERO);
     if (!rpc.reply_buf) {
@@ -807,6 +982,9 @@ int p9_client_submit_async(struct p9_client *c, struct p9_rpc *rpc,
     rpc->be_reader = false;
     rpc->reply_len = 0;
     rpc->reply_buf = NULL;          // async: demux dispatches from recv_buf
+    rpc->owner     = NULL;          // 8c-3 (#89): async ops are skipped in the
+                                    // handoff (on_complete != NULL first), so
+                                    // owner is never read -- keep it non-garbage
     rendez_init(&rpc->rendez);      // unused for async, but kept inert
     c->inflight[tag] = rpc;
 
@@ -841,6 +1019,17 @@ int p9_client_reader_pump_once(struct p9_client *c) {
     } else if (client_self_dying()) {
         // Death-interrupt: the caller's Proc is dying. Do NOT mark the shared
         // session dead (it serves survivors). Unwind after handing the role on.
+        ret = -P9_E_IO;
+    } else if (current_thread() && current_thread()->stop_unwound) {
+        // 8c-3 (#89, F2 + F1 re-audit): a debugger stop unwound the recv at a
+        // FRAME BOUNDARY (frame-atomic -- no bytes lost). NOT a break: do NOT
+        // latch the shared session dead. Hand the role off below; this thread
+        // parks at its EL0-return tail (pump_once is one-shot). Read the STABLE
+        // stop_unwound latch, NOT client_stop_pending (which races an async
+        // proc_debug_resume -> would misclassify a stop-unwind as a real break ->
+        // spuriously mark the SHARED session dead). Read+clear (owner-only). A
+        // kproc caller never sets it (the detour never fires for a kthread).
+        current_thread()->stop_unwound = false;
         ret = -P9_E_IO;
     } else {
         // rr == 0 (clean EOF = peer/server endpoint gone) -> device-gone
@@ -892,6 +1081,14 @@ int p9_client_reader_pump_once_deadline(struct p9_client *c, u64 deadline_ns) {
     } else {
         // rr == 0 (clean EOF = peer/server endpoint gone) -> device-gone
         // (-P9_E_NODEV CQEs); rr < 0 (recv error) -> transport (-P9_E_IO).
+        // 8c-3 (#89, F2 + F1 re-audit): NO stop_unwound arm here (unlike
+        // pump_once) -- the deadline variant is called ONLY by the SQPOLL /
+        // dev9p-poll-pump KPROC kthreads (dev9p_poll.c, loom.c). Their t->proc is
+        // kproc() (NON-NULL), but kproc is undebuggable (proc_debug_stop_deliver
+        // rejects it), so kproc()->debug_stop_req is always 0, the detour never
+        // fires, and stop_unwound is never set -> a stop can never unwind this
+        // recv. If an EL0 thread is ever added as a caller, add the stop_unwound
+        // arm like pump_once.
         client_mark_dead_locked(c, rr == 0);
         ret = P9_PUMP_DEAD;
     }

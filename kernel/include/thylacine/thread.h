@@ -344,10 +344,62 @@ struct Thread {
     // CPU under IRQ-mask; read (ACQUIRE) in the ctx-switch install. KP_ZERO inits
     // them (not stepping); NOT propagated by rfork.
     bool               debug_ss_armed;
+
+    // 8c-3 (#89; docs/DEBUG-FS-DESIGN.md 5c.6): the elected 9P reader sets this
+    // around its blocking recv so a debugger stop UNWINDS the recv (sleep/tsleep
+    // return SLEEP_INTR/TSLEEP_INTR, reusing the death-interrupt propagation the
+    // transport recv already tolerates) instead of parking IN PLACE (the 8c-2
+    // detour default) -- a reader parked mid-recv holds reader_active and freezes
+    // every survivor sharing the client. The caller (client_wait) classifies the
+    // recv-return via the STABLE stop_unwound latch (below), NOT by re-reading
+    // debug_stop_req (which races an async proc_debug_resume -- the F1 re-audit
+    // fix); on a stop-unwind it releases the reader role, hands it to a survivor,
+    // then parks role-free + re-elects on resume. Every
+    // OTHER sleep (clear) parks in place (8c-2, preserves the syscall). Owner-only
+    // access (only the reader thread reads/writes its own flag, in program order
+    // -- no atomic needed); set/cleared within one reader_recv_frame, never
+    // persists past it; KP_ZERO inits it false; NOT propagated by rfork. Fits the
+    // debug_ss_armed padding -- no struct-size change.
+    bool               stop_unwinds;
+
+    // 8c-3 (#89; F1 frame-atomic fix): the elected 9P reader sets this for its
+    // WHOLE recv tenure (reader_recv_frame entry..exit). A stop hitting the recv
+    // MID-FRAME (bytes of the frame already consumed, stop_unwinds false) must
+    // BLOCK THROUGH -- neither unwind (SLEEP_INTR would discard the consumed
+    // partial bytes -> the survivor reads the frame TAIL as a header -> stream
+    // desync = shared-session death / task-#50 corruption) nor park-in-place
+    // (holds reader_active -> freezes survivors AND pins the partial frame). The
+    // detour, when stop_no_park is set + stop_unwinds is false, FALLS THROUGH to
+    // the normal register+sched so the reader finishes the frame (bounded by the
+    // trusted server's delivery), then unwinds at the next frame boundary
+    // (got==0, stop_unwinds true). DEATH still unwinds mid-frame (the die-check
+    // below the detour is unchanged) -- the pre-existing death-mid-frame desync
+    // is task #90 (needs a #811 narrowing; signoff). Same padding, no size change.
+    bool               stop_no_park;
+
+    // 8c-3 (#89; F1 re-audit fix): the STABLE "my recv was stop-unwound at a
+    // boundary" latch. The sched detour's stop_unwinds branch returns SLEEP_INTR
+    // -- byte-identical to a death-interrupt AND a transport error -> the client
+    // classifier cannot tell them apart by return value. It USED to re-derive the
+    // stop case by re-reading debug_stop_req (client_stop_pending), but that flag
+    // is cleared ASYNCHRONOUSLY by proc_debug_resume (debugger detach/death via
+    // devproc_debug_release_cb; NOT under c->lock), so a resume in the recv-return
+    // -> classify window turned a benign stop-unwind into a spurious
+    // client_mark_dead_locked of the SHARED session (whole-FS DoS). This latch is
+    // SET by the detour and READ+cleared by the SAME reader thread at the
+    // classifier, so a concurrent resume cannot flip it. Reset false at
+    // reader_recv_frame entry; KP_ZERO inits it false; owner-only; not
+    // rfork-propagated.
+    bool               stop_unwound;
+
     u64                debug_stepover_va;
 };
 
 _Static_assert(sizeof(struct Thread) == 1184,
+               "8c-3 appended stop_unwinds + stop_no_park + stop_unwound (bools) in "
+               "the debug_ss_armed padding -- no size change (#89 reader-role-release "
+               "+ the F1 frame-atomic block-through + the F1-re-audit stop-unwound "
+               "classifier latch). "
                "8a-2b-2 appended debug_ss_armed (bool) + debug_stepover_va (u64) "
                "for the single-step machine: 1168 -> 1184. "
                "8a-1c appended debug_trapframe (8-byte struct exception_context* "

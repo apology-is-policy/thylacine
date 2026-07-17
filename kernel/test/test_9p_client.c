@@ -23,6 +23,7 @@
 #include <thylacine/handle.h>
 #include <thylacine/loom.h>
 #include <thylacine/page.h>       // pa_to_kva / page_to_pa (the buffer direct map)
+#include <thylacine/proc.h>       // 8c-3 (#89): struct Proc + debug_stop_req (handoff skip)
 #include <thylacine/rendez.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
@@ -50,6 +51,7 @@ void test_9p_client_async_session_death_posts_error_cqe(void);
 void test_9p_client_async_peer_gone_posts_nodev_cqe(void);
 void test_9p_client_async_mark_devgone_posts_nodev_cqe(void);
 void test_9p_client_async_handoff_skips_async(void);
+void test_9p_client_handoff_skips_debug_stopped_owner(void);
 void test_9p_client_pump_deadline_idle(void);
 void test_9p_client_pump_deadline_data_ready_progresses(void);
 void test_9p_client_pump_deadline_chunked_frame_completes(void);
@@ -1064,12 +1066,15 @@ void test_9p_client_async_handoff_skips_async(void) {
     async_rpc.tag = 30; async_rpc.done = false; async_rpc.dead = false;
     async_rpc.be_reader = false; async_rpc.reply_len = 0; async_rpc.reply_buf = NULL;
     async_rpc.on_complete = test_handoff_async_recorder;   // async -> must be skipped
+    async_rpc.owner = NULL;                           // 8c-3: not debug-stopped
     rendez_init(&async_rpc.rendez);
 
     struct p9_rpc sync_rpc;
     sync_rpc.tag = 31; sync_rpc.done = false; sync_rpc.dead = false;
     sync_rpc.be_reader = false; sync_rpc.reply_len = 0; sync_rpc.reply_buf = NULL;
     sync_rpc.on_complete = NULL;                      // sync -> the handoff target
+    sync_rpc.owner = NULL;                            // 8c-3: not debug-stopped (the
+                                                      // handoff's `r->owner &&` skips)
     rendez_init(&sync_rpc.rendez);
 
     spin_lock(&g_client.lock);
@@ -1086,6 +1091,71 @@ void test_9p_client_async_handoff_skips_async(void) {
     spin_lock(&g_client.lock);
     g_client.inflight[30] = NULL;
     g_client.inflight[31] = NULL;
+    spin_unlock(&g_client.lock);
+
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// 8c-3 (#89): the elected-reader handoff MUST skip an op whose owner is being
+// debug-stopped. A debug-stopped thread parks (8c-2) and cannot run the reader
+// loop, so handing it the role would strand a survivor whose reply needs
+// reading (the be_reader wakeup lands on a rendez whose waiter has moved to
+// debug_rendez -- a no-op). The role must land on a runnable survivor, or be
+// dropped if none is pending (reader_active is already false -> a future
+// survivor op self-elects). The full reader-election path (client_wait) needs a
+// debuggable EL0 thread the kproc test context cannot provide, so drive the
+// handoff directly over synthetic inflight rpcs with synthetic owner Procs.
+void test_9p_client_handoff_skips_debug_stopped_owner(void) {
+    drive_client_open(&g_client, &g_loopback);
+
+    // Two synthetic owner Procs. The handoff reads ONLY owner->debug_stop_req,
+    // so set just that field (a full {0} on the ~400-byte struct would emit a
+    // memset the freestanding kernel does not link; every other field is unread).
+    struct Proc owner_stopped;
+    struct Proc owner_survivor;
+    owner_stopped.debug_stop_req  = 1;   // being debug-stopped
+    owner_survivor.debug_stop_req = 0;   // runnable
+
+    // The STOPPED op sits at the LOWER tag: the pre-fix handoff picks the first
+    // eligible inflight, so without the skip it would choose owner_stopped and
+    // set its be_reader -- the revert-probe (this test FAILS on pre-fix code).
+    struct p9_rpc rpc_stopped;
+    rpc_stopped.tag = 40; rpc_stopped.done = false; rpc_stopped.dead = false;
+    rpc_stopped.be_reader = false; rpc_stopped.reply_len = 0; rpc_stopped.reply_buf = NULL;
+    rpc_stopped.on_complete = NULL; rpc_stopped.owner = &owner_stopped;
+    rendez_init(&rpc_stopped.rendez);
+
+    struct p9_rpc rpc_survivor;
+    rpc_survivor.tag = 41; rpc_survivor.done = false; rpc_survivor.dead = false;
+    rpc_survivor.be_reader = false; rpc_survivor.reply_len = 0; rpc_survivor.reply_buf = NULL;
+    rpc_survivor.on_complete = NULL; rpc_survivor.owner = &owner_survivor;
+    rendez_init(&rpc_survivor.rendez);
+
+    spin_lock(&g_client.lock);
+    g_client.inflight[40] = &rpc_stopped;
+    g_client.inflight[41] = &rpc_survivor;
+    spin_unlock(&g_client.lock);
+
+    p9_client_handoff_reader(&g_client);
+
+    TEST_ASSERT(!rpc_stopped.be_reader,
+                "#89: a debug-stopped owner's op is NOT handed the reader role");
+    TEST_ASSERT(rpc_survivor.be_reader,
+                "#89: the runnable survivor's op IS handed the reader role");
+
+    // Now stop BOTH owners: no eligible survivor -> the handoff drops the role
+    // (no be_reader set), leaving a future survivor op to self-elect.
+    rpc_stopped.be_reader  = false;
+    rpc_survivor.be_reader = false;
+    owner_survivor.debug_stop_req = 1;
+    p9_client_handoff_reader(&g_client);
+    TEST_ASSERT(!rpc_stopped.be_reader && !rpc_survivor.be_reader,
+                "#89: all owners debug-stopped -> the role is dropped, not handed");
+
+    spin_lock(&g_client.lock);
+    g_client.inflight[40] = NULL;
+    g_client.inflight[41] = NULL;
     spin_unlock(&g_client.lock);
 
     p9_client_destroy(&g_client);
