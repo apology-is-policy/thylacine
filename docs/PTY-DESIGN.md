@@ -617,3 +617,49 @@ at impl against real code, and (b) a real EXTERNAL sequencing dependency (8c-3).
 A round-3 confirms the R2-F1 correlation + the R2-F2 fan-out shape; if it returns
 only P2/P3, the design is converged at design altitude and PTY-1 owns the
 precise realization.
+
+## 13. As-built: the PTY-1 kernel arc (LANDED, 2026-07-17)
+
+The kernel half is built — sub-chunks 1a–1f on branch `pty-1` (rebased onto
+`a58403fb`, the 8c-3 tip). The as-built technical reference is
+`docs/reference/135-pty-kernel.md`; the audit-trigger row (the authoritative
+prosecution copy) is ARCH §25.4; the spec is `specs/pty_stop.tla` (the
+stop-ownership gate) + `specs/pty.tla` (the design-altitude data-path model).
+
+| Sub-chunk | Commit | Delivered |
+|---|---|---|
+| 1a | `a418dba0` | sessions + process groups; `sid`/`pgid` on `Proc` (rfork-inherited); `SYS_SETSID`/`SETPGID`/`GETPGID`/`GETSID` = 89–92; `T_E_SRCH = 3`. |
+| 1b | `131ea092` | the `tty:*` note class (kernel-only-POST + catchable; `NOTE_BIT_TTY = 5`); the terminate class `{interrupt, tty:quit, tty:hup}` via `PROC_FLAG_TTY_TERMINATE_PENDING`; `notes_post_pgrp`/`notes_post_pid`. |
+| 1c | `2a006c3e` | the pts registry (gen-stamped, the `(SrvConn ptr, qid)` correlation, torn-conn GC); `SYS_PTY_REGISTER = 93`; `p9_srvconn_transport_conn` (the identity downcast). |
+| 1d | `96900a36` | the tty seam (`SYS_TTY_SIGNAL` server-scoped; HUP's F13 dual target) + the controlling-terminal syscalls 94–97. |
+| 1e | `f2ee7f66` | the `SYS_WAIT_PID` extension: `WAIT_UNTRACED`/`WAIT_CONTINUED` + pgrp selectors + report-is-not-reap + the opt-in packed status. |
+| 1f | `bce3fe33` | `job_stop_req` (the 2nd stop owner @316) + the park-predicate fan-out + TSTP live + `SYS_TTY_CONT = 98` (signed off) + the F8 teardown fan + the POSIX orphan rule. |
+
+**The ABI beyond the design pin.** The design escalated syscalls 89–97 + the
+`tty:*` family + the wait extension (§11 "Escalation owed to the user"). PTY-1f's
+impl surfaced one gap the design named but did not resolve — the shell's `fg`/`bg`
+resume has no path (F4 keeps `tty:cont` kernel-synthetic-only; F8 covers only
+teardown; ordinary `kill` covers only one's own group). Resolved to
+**`SYS_TTY_CONT = 98`** (user-signed-off 2026-07-17), gated exactly like
+`SYS_TTY_SET_FG` — one number beyond the 89–97 pin. Also appended: `T_E_SRCH = 3`
+(1a) under the errno registry discipline.
+
+**The R2 impl-precision obligations, discharged** (the round-2 "lead items" above):
+R2-F1 (the correlation) realized as the pointer-identity `(SrvConn, qid)` registry
+(reference §5); R2-F2 (the fan-out) realized as `proc_stop_requested`'s disjunction
+threaded through every `debug_stop_req` park site + the 8c-3 reader-role release
+(reference §7.6); R2-F3 (catchability) as `proc_tty_susp_would_stop_locked`
+(reference §7.2); R2-F6 (the wait composition) as report-is-not-reap with the
+per-child latches (reference §8).
+
+**Gates at the PTY-1g close**: default 1161/1161 + boot OK + 0 EXTINCTION + login
+E2E; the spec gate GREEN (`pty_stop` clean + liveness + both buggy cfgs exact;
+`debug_stop` clean + all buggy cfgs exact; `pty` clean + liveness); the SMP gate
+PASS (default+UBSan × smp4/smp8 N=10 = 40/40, 0 corruption). The focused
+Fable-5-max holotype over 1a–1f + the closed list are the PTY-1g close record
+(`memory/audit_pty1_closed_list.md`).
+
+**What remains (PTY-2+)**: the userspace `ptyfs` byte/cooking server, `/dev/ptmx` +
+`/dev/pts/<n>`, per-fd `termios`, and `specs/pty.tla`'s master/slave data-path
+realization. The pouch boundary-line (`tcsetpgrp`/`tcgetpgrp` → the §4 kernel
+syscalls; `O_NOCTTY`; `SIGTSTP`/`SIGCONT` handler install) is PTY-3.

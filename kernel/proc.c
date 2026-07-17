@@ -2649,14 +2649,13 @@ int proc_stop_sleeper_park(struct Thread *t) {
 // rendez_blocked_on and is skipped -- it stops at its tail via the IPI kick.
 // wakeup() re-validates r->waiter under r->lock, so a peer already woken (or
 // by torpor_wake_all) is a safe no-op; wait_lock held across wakeup pins a
-// torpor waiter's stack rendez. Then kick any peer RUNNING at EL0 on another
-// CPU so it traps to its IRQ-from-EL0 tail (0x480 -> el0_return_stop_check)
-// and parks without waiting for a timer tick (broadcast; the periodic tick is
-// the floor if an IPI is missed -- proc_group_terminate step (4)'s proven
-// delivery vehicle). LOCK CONTRACT: caller holds g_proc_table_lock (pins
-// p->threads); order g_proc_table_lock -> wait_lock -> (wakeup: r->lock);
-// torpor_lock strictly below g_proc_table_lock.
-static void proc_stop_wake_cascade_locked(struct Proc *p) {
+// torpor waiter's stack rendez. LOCK CONTRACT: caller holds g_proc_table_lock
+// (pins p->threads); order g_proc_table_lock -> wait_lock -> (wakeup: r->lock);
+// torpor_lock strictly below g_proc_table_lock. The EL0-running-peer IPI kick
+// is SEPARATE (smp_resched_others below) -- it is group-GLOBAL (a broadcast to
+// every online CPU), so a fan-out over N members issues it ONCE after the walk
+// (audit F2), not per-member.
+static void proc_stop_wake_sleepers_locked(struct Proc *p) {
     torpor_wake_all_for_proc(p);
     for (struct Thread *peer = p->threads; peer; peer = peer->next_in_proc) {
         irq_state_t ws = spin_lock_irqsave(&peer->wait_lock);
@@ -2664,6 +2663,17 @@ static void proc_stop_wake_cascade_locked(struct Proc *p) {
         if (r) wakeup(r);
         spin_unlock_irqrestore(&peer->wait_lock, ws);
     }
+}
+
+// The full single-target cascade: wake this Proc's sleepers, then kick any
+// peer RUNNING at EL0 on another CPU so it traps to its IRQ-from-EL0 tail
+// (0x480 -> el0_return_stop_check) and parks without waiting for a timer tick
+// (broadcast; the periodic tick is the floor if an IPI is missed --
+// proc_group_terminate step (4)'s proven delivery vehicle). Used by the
+// single-target debugger deliver. The per-member job-stop fan uses
+// proc_stop_wake_sleepers_locked + one trailing smp_resched_others (F2).
+static void proc_stop_wake_cascade_locked(struct Proc *p) {
+    proc_stop_wake_sleepers_locked(p);
     smp_resched_others();
 }
 
@@ -2775,19 +2785,22 @@ void proc_debug_resume(struct Proc *p) {
 // under g_proc_table_lock -- the same lock wait_pid_for's report arm consumes
 // them under -- and each stop supersedes any unreported cont (latest-state
 // reporting: a parent that never saw the cont sees only the current stop).
-static void proc_job_stop_one_locked(struct Proc *m) {
-    if (!m || m->magic != PROC_MAGIC) return;
-    if (m == g_kproc) return;   // the boot Proc is never a job-stop target
-    if (__atomic_load_n(&m->job_stop_req, __ATOMIC_ACQUIRE) != 0) return;
+// Returns true iff it stopped `m` (a fresh stop -- the caller issues ONE
+// group-global reschedule IPI after the fan if any member stopped, F2).
+static bool proc_job_stop_one_locked(struct Proc *m) {
+    if (!m || m->magic != PROC_MAGIC) return false;
+    if (m == g_kproc) return false;   // the boot Proc is never a job-stop target
+    if (__atomic_load_n(&m->job_stop_req, __ATOMIC_ACQUIRE) != 0) return false;
     __atomic_store_n(&m->job_stop_req, 1u, __ATOMIC_RELEASE);
     m->stop_report_pending = true;
     m->cont_report_pending = false;
-    proc_stop_wake_cascade_locked(m);
+    proc_stop_wake_sleepers_locked(m);   // the IPI is hoisted to the fan (F2)
     // The PTY-1e WAIT_UNTRACED edge: a parent parked in wait_pid_for
     // re-scans on any child_waiters wake (the latch was set above under the
     // SAME lock its re-scan takes -- register-then-observe holds exactly as
     // for the zombie wake).
     if (m->parent) poll_waiter_list_wake(&m->parent->child_waiters);
+    return true;
 }
 
 // Resume ONE member: the job owner's OWN clear (pty_stop.tla ResumeJob) +
@@ -2962,7 +2975,7 @@ static void proc_orphan_rule_locked(struct Proc *dying) {
 
 // The TSTP fan-out (SYS_TTY_SIGNAL's suspend class routes here from
 // pts_tty_signal, with g_pts_lock RELEASED). Full contract in proc.h.
-struct job_stop_ctx { u32 pgid; bool orphaned; int affected; };
+struct job_stop_ctx { u32 pgid; bool orphaned; int affected; bool any_stopped; };
 static int job_stop_cb(struct Proc *q, void *arg) {
     struct job_stop_ctx *c = arg;
     if (q->state != PROC_STATE_ALIVE || q->pgid != c->pgid) return 0;
@@ -2975,7 +2988,7 @@ static int job_stop_cb(struct Proc *q, void *arg) {
             c->affected++;
     } else if (!c->orphaned) {
         // UNCAUGHT + resumable: the default STOP consumes the signal.
-        proc_job_stop_one_locked(q);
+        if (proc_job_stop_one_locked(q)) c->any_stopped = true;
         c->affected++;
     }
     // UNCAUGHT + orphaned: discarded entirely (the POSIX orphan rule's
@@ -2985,10 +2998,16 @@ static int job_stop_cb(struct Proc *q, void *arg) {
 int proc_job_stop_pgrp(u32 pgid) {
     if (pgid == 0) return 0;
     struct job_stop_ctx ctx = { .pgid = pgid, .orphaned = false,
-                                .affected = 0 };
+                                .affected = 0, .any_stopped = false };
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
     ctx.orphaned = pgrp_orphaned_locked(pgid, NULL);
     proc_for_each_walk(g_kproc, job_stop_cb, &ctx);
+    // ONE group-global reschedule IPI after every member's job_stop_req is set
+    // (F2): a peer RUNNING at EL0 on another CPU traps to its tail and observes
+    // the set flag. Issued only if a member actually stopped (a pure note fan
+    // needs no kick). Every stopped member's OWN sleepers were already woken
+    // per-member inside proc_job_stop_one_locked.
+    if (ctx.any_stopped) smp_resched_others();
     spin_unlock_irqrestore(&g_proc_table_lock, s);
     return ctx.affected;
 }

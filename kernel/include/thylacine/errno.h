@@ -163,10 +163,11 @@
 // or a code path is reachable but stubbed at v1.0. POSIX: ENOSYS.
 #define T_E_NOSYS      38
 
-// Operation not supported. PTY-1d: SYS_TTY_SIGNAL's TTY_SIG_TSTP class
-// answers this until the job-stop machinery lands (PTY-1f) -- the seam
-// exists and is gated, the disposition does not yet. Appended under the
-// PTY-1 ABI signoff (the T_E_SRCH precedent). POSIX: EOPNOTSUPP.
+// Operation not supported. Appended under the PTY-1 ABI signoff (PTY-1d, the
+// T_E_SRCH precedent -- it originally gated SYS_TTY_SIGNAL's TTY_SIG_TSTP
+// class until PTY-1f made the job-stop disposition live). RESERVED /
+// append-only now: a legitimate POSIX EOPNOTSUPP, kept for future
+// not-yet-supported syscall dispositions. POSIX: EOPNOTSUPP.
 #define T_E_OPNOTSUPP  95
 
 // Operation timed out. Use when a tsleep / torpor_wait with a
