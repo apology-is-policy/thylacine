@@ -23,6 +23,9 @@
 #include <thylacine/perm.h>
 #include <thylacine/proc.h>
 #include <thylacine/caps.h>
+#include <thylacine/handle.h>
+
+#include "../../mm/slub.h"             // kmalloc (the wb heap scratch)
 
 void test_dev9p_registered(void);
 void test_dev9p_attach_client_root_spoor(void);
@@ -38,17 +41,41 @@ void test_dev9p_create_dir(void);
 void test_dev9p_fsync(void);
 void test_dev9p_readdir(void);
 void test_dev9p_poll_regular_file_always_ready(void);
+void test_dev9p_prw_wire_offset_and_cursor(void);
+void test_dev9p_wstat_readonly_fd(void);
+void test_dev9p_wstat_size(void);
+void test_dev9p_walk_attrs(void);
+void test_dev9p_page_cache_serve_and_gate(void);
+void test_dev9p_cached_open(void);
+void test_dev9p_cached_open_fallbacks(void);
+void test_dev9p_cached_open_loose(void);
+void test_dev9p_wb_coalesce_one_twrite(void);
+void test_dev9p_wb_overlay_read(void);
+void test_dev9p_wb_flush_at_close(void);
+void test_dev9p_wb_fsync_flush_and_error(void);
+void test_dev9p_wb_nonappend_writethrough(void);
+void test_dev9p_wb_fstat_staged_size(void);
+void test_dev9p_wb_cap_flush(void);
+void test_dev9p_wb_budget_fallback(void);
+void test_dev9p_wb_populate_readback(void);
+void test_dev9p_wb_populate_append_chain(void);
+void test_dev9p_wb_populate_failed_flush(void);
+void test_dev9p_wb_writethrough_range_invalidate(void);
 
-// File-scope buffers — client is ~12 KiB, won't fit on the 16 KiB test
-// thread stack alongside a few smaller locals.
+// File-scope buffers — client is ~80 KiB (the embedded Larder attr+dentry+page
+// metadata), won't fit on the 16 KiB test thread stack alongside a few locals.
 static struct p9_client g_client;
 static struct p9_loopback g_loopback;
-static u8 g_recv_buf[4096];
-static u8 g_loopback_resp[4096];
+// Sized to the fixture's negotiated msize (8192): a 9P endpoint's recv/resp
+// buffers must hold a full msize frame (the task-#44 big-file Rread is the
+// first reply that actually needs it -- the "hello"-era 4096 was under-msize).
+static u8 g_recv_buf[8192];
+static u8 g_loopback_resp[8192];
 
 // A-2a: capture the Tsetattr fields dev9p_wstat_native put on the wire so a
 // test can assert the T_WSTAT_* -> P9_SETATTR_* mask + values reached it.
 static u32 g_setattr_valid, g_setattr_mode, g_setattr_uid, g_setattr_gid;
+static u64 g_setattr_size;
 static u32 le32_at(const u8 *p) {
     return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24);
 }
@@ -62,6 +89,78 @@ static u64 le64_at(const u8 *p) {
 // rather than sign-clamping it to 0.
 static u64 g_readdir_req_offset;
 
+// #37: capture the Tread/Twrite request offsets so the positioned-I/O tests
+// can assert the CALLER's offset (SYS_PREAD/SYS_PWRITE) vs the Spoor cursor
+// (SYS_READ/SYS_WRITE) is what actually reaches the wire.
+static u64 g_tread_req_offset, g_twrite_req_offset;
+static u64 g_tread_seen;        // Tread RPC counter (task-#44 wire-op assertions)
+static u64 g_tread_file_size;   // != 0: the loopback serves a pattern file this big
+static u32 g_tread_clamp_once;  // != 0: the NEXT big-file Tread short-returns
+                                // at most this many bytes (a legal mid-file
+                                // short Rread -- the R-5 SA-F1 shape), then
+                                // clears. The D44-audit F1 injection knob.
+
+// POUNCE: when set, the Twalkgetattr responder answers one component SHORT
+// (a partial walk) -- the session layer must then leave newfid unbound and
+// dev9p_walk_attrs must leave nc untouched.
+static bool g_dev9p_wga_partial;
+
+// F1 write-behind: wire-op counters, sequencing, payload capture + fault
+// injection for the wb_* tests. g_wire_seq bumps on EVERY request the
+// responder sees; the per-op last_seq captures let a test assert ordering
+// (the flush Twrite must precede the close Tclunk / the fsync Tfsync).
+static u32  g_wire_seq;
+static u32  g_twrite_seen;
+static u32  g_twrite_last_seq, g_clunk_last_seq, g_tfsync_last_seq;
+static u32  g_twrite_fail_ecode;     // != 0: the NEXT Twrite answers Rlerror(ecode), then clears
+static u8  *g_twrite_cap_buf;        // payload capture of the LAST Twrite (heap, 8 KiB)
+#define WB_CAP_BUF_SZ 8192u
+static u32  g_twrite_cap_len;
+static u64  g_twrite_cap_off;
+static u64  g_twrite_off_log[8];     // offsets of the first 8 Twrites since reset
+static u32  g_twrite_log_n;
+static bool g_twrite_pat_on;         // verify every payload byte == wb_pat(off+i)
+static bool g_twrite_pat_ok;
+static u64  g_twrite_total;          // accumulated payload bytes since reset
+
+static u8 wb_pat(u64 o) { return (u8)((o * 29u) ^ (o >> 7) ^ 0xA5u); }
+
+// Shared heap scratch for the wb_* tests (32 KiB -- the largest single write
+// they stage). Heap, not static: the kernel image's L3 window is finite and
+// the UBSan build sits near it; tests run serially so sharing is safe.
+static u8 *wb_scratch(void) {
+    static u8 *s;
+    if (!s) s = kmalloc(32768, 0);
+    return s;
+}
+
+static void wb_wire_reset(void) {
+    if (!g_twrite_cap_buf) g_twrite_cap_buf = kmalloc(WB_CAP_BUF_SZ, 0);
+    g_wire_seq = 0;
+    g_twrite_seen = 0;
+    g_twrite_last_seq = g_clunk_last_seq = g_tfsync_last_seq = 0;
+    g_twrite_fail_ecode = 0;
+    g_twrite_cap_len = 0;
+    g_twrite_cap_off = 0;
+    g_twrite_log_n = 0;
+    g_twrite_pat_on = false;
+    g_twrite_pat_ok = true;
+    g_twrite_total = 0;
+    g_tread_seen = 0;
+}
+
+// FID-LIFECYCLE cached-open: wire-op counters (which ops actually hit the
+// wire -- the fidless open's whole point is Tlopen/Tclunk NEVER do) + shape
+// overrides on the Rwalkgetattr body so tests can drive the leaf's size /
+// qid.version / qid.type (the canonical body is size 0x200+e / vers 0 / FILE).
+static u32  g_wga_seen, g_lopen_seen, g_clunk_seen;
+static u64  g_wga_path_base = 0x20;  // Rwalkgetattr qid.path = base + component
+static u32  g_unlinkat_fail_ecode;   // != 0: the NEXT Tunlinkat answers Rlerror, then clears
+static bool g_wga_size_ov_on;
+static u64  g_wga_size_ov;
+static u32  g_wga_vers_ov;    // 0 = the canonical body (version 0)
+static u8   g_wga_type_ov;    // 0 = the canonical P9_QTFILE
+
 // Canonical responder — synthesizes valid Rmsgs for every op type
 // dev9p might issue. Mirrors the responder used in test_9p_client.c
 // but adds Rclunk handling for the close path.
@@ -71,6 +170,7 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
     if (req_len < P9_HDR_LEN) return -1;
     u32 size; u8 type; u16 tag;
     if (p9_peek_header(req, req_len, &size, &type, &tag) < 0) return -1;
+    g_wire_seq++;   // F1 wb ordering witness (every request bumps)
 
     if (type == P9_TVERSION) {
         size_t total = P9_HDR_LEN + 4 + 2 + 8;
@@ -120,6 +220,8 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         return (int)total;
     }
     if (type == P9_TCLUNK) {
+        g_clunk_seen++;
+        g_clunk_last_seq = g_wire_seq;   // F1 wb ordering witness
         // Empty body.
         if (resp_cap < P9_HDR_LEN) return -1;
         resp[0] = 7; resp[1] = 0; resp[2] = 0; resp[3] = 0;
@@ -128,6 +230,7 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         return (int)P9_HDR_LEN;
     }
     if (type == P9_TLOPEN) {
+        g_lopen_seen++;
         size_t total = P9_HDR_LEN + P9_QID_LEN + 4;
         if (resp_cap < total) return -1;
         resp[0] = (u8)(total & 0xff); resp[1] = 0; resp[2] = 0; resp[3] = 0;
@@ -140,6 +243,37 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         return (int)total;
     }
     if (type == P9_TREAD) {
+        // Capture the request offset (Tread body: fid@7, offset@11, count@19).
+        if (req_len >= P9_HDR_LEN + 4 + 8 + 4)
+            g_tread_req_offset = le64_at(req + 11);
+        g_tread_seen++;
+        // Big-file mode (task-#44 aligned-read tests): a pattern file of
+        // g_tread_file_size bytes, honoring offset + count (the client already
+        // clamps count to the msize payload, 8169 -- the SAME non-page-multiple
+        // stride shape as production's 131049). byte(o) = pattern below.
+        if (g_tread_file_size) {
+            u64 off = le64_at(req + 11);
+            u32 cnt = le32_at(req + 19);
+            u64 rem = (off < g_tread_file_size) ? g_tread_file_size - off : 0;
+            u32 n = (cnt < rem) ? cnt : (u32)rem;
+            if (g_tread_clamp_once) {
+                if (n > g_tread_clamp_once) n = g_tread_clamp_once;
+                g_tread_clamp_once = 0;
+            }
+            size_t btotal = P9_HDR_LEN + 4 + n;
+            if (resp_cap < btotal) return -1;
+            resp[0] = (u8)(btotal & 0xff); resp[1] = (u8)((btotal >> 8) & 0xff);
+            resp[2] = (u8)((btotal >> 16) & 0xff); resp[3] = 0;
+            resp[4] = P9_RREAD;
+            resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+            resp[7] = (u8)(n & 0xff); resp[8] = (u8)((n >> 8) & 0xff);
+            resp[9] = (u8)((n >> 16) & 0xff); resp[10] = (u8)((n >> 24) & 0xff);
+            for (u32 i = 0; i < n; i++) {
+                u64 o = off + i;
+                resp[11 + i] = (u8)((o * 131u) ^ (o >> 8));
+            }
+            return (int)btotal;
+        }
         // Respond with 5-byte payload "hello".
         const u8 payload[] = {'h','e','l','l','o'};
         size_t total = P9_HDR_LEN + 4 + sizeof(payload);
@@ -154,10 +288,41 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
     if (type == P9_TWRITE) {
         // Echo accepted count = requested count.
         if (req_len < P9_HDR_LEN + 4 + 8 + 4) return -1;
+        // Capture the request offset (Twrite body: fid@7, offset@11, count@19).
+        g_twrite_req_offset = le64_at(req + 11);
         u32 count = (u32)req[P9_HDR_LEN + 4 + 8]
                   | ((u32)req[P9_HDR_LEN + 4 + 8 + 1] << 8)
                   | ((u32)req[P9_HDR_LEN + 4 + 8 + 2] << 16)
                   | ((u32)req[P9_HDR_LEN + 4 + 8 + 3] << 24);
+        // F1 wb witnesses: count + seq + offset log + payload capture /
+        // pattern verify + the fail-once injection (payload at req+23).
+        g_twrite_seen++;
+        g_twrite_last_seq = g_wire_seq;
+        if (g_twrite_log_n < 8) g_twrite_off_log[g_twrite_log_n++] = g_twrite_req_offset;
+        if (g_twrite_fail_ecode) {
+            u32 ec = g_twrite_fail_ecode;
+            g_twrite_fail_ecode = 0;
+            size_t etotal = P9_HDR_LEN + 4;
+            if (resp_cap < etotal) return -1;
+            resp[0] = 11; resp[1] = 0; resp[2] = 0; resp[3] = 0;
+            resp[4] = P9_RLERROR;
+            resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+            resp[7] = (u8)(ec & 0xff);        resp[8] = (u8)((ec >> 8) & 0xff);
+            resp[9] = (u8)((ec >> 16) & 0xff); resp[10] = (u8)((ec >> 24) & 0xff);
+            return (int)etotal;
+        }
+        if (g_twrite_cap_buf && count <= WB_CAP_BUF_SZ &&
+            req_len >= (size_t)23 + count) {
+            for (u32 i = 0; i < count; i++) g_twrite_cap_buf[i] = req[23 + i];
+            g_twrite_cap_len = count;
+            g_twrite_cap_off = g_twrite_req_offset;
+        }
+        if (g_twrite_pat_on && req_len >= (size_t)23 + count) {
+            for (u32 i = 0; i < count && g_twrite_pat_ok; i++)
+                if (req[23 + i] != wb_pat(g_twrite_req_offset + i))
+                    g_twrite_pat_ok = false;
+        }
+        g_twrite_total += count;
         size_t total = P9_HDR_LEN + 4;
         if (resp_cap < total) return -1;
         resp[0] = 11; resp[1] = 0; resp[2] = 0; resp[3] = 0;
@@ -196,6 +361,7 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         return (int)total;
     }
     if (type == P9_TFSYNC) {
+        g_tfsync_last_seq = g_wire_seq;   // F1 wb ordering witness
         // Rfsync = header only (empty body).
         if (resp_cap < P9_HDR_LEN) return -1;
         resp[0] = 7; resp[1] = 0; resp[2] = 0; resp[3] = 0;
@@ -243,6 +409,18 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         return (int)P9_HDR_LEN;
     }
     if (type == P9_TUNLINKAT) {
+        if (g_unlinkat_fail_ecode) {
+            u32 ec = g_unlinkat_fail_ecode;
+            g_unlinkat_fail_ecode = 0;
+            size_t etotal = P9_HDR_LEN + 4;
+            if (resp_cap < etotal) return -1;
+            resp[0] = 11; resp[1] = 0; resp[2] = 0; resp[3] = 0;
+            resp[4] = P9_RLERROR;
+            resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+            resp[7] = (u8)(ec & 0xff);        resp[8] = (u8)((ec >> 8) & 0xff);
+            resp[9] = (u8)((ec >> 16) & 0xff); resp[10] = (u8)((ec >> 24) & 0xff);
+            return (int)etotal;
+        }
         // Runlinkat = header only (empty body).
         if (resp_cap < P9_HDR_LEN) return -1;
         resp[0] = 7; resp[1] = 0; resp[2] = 0; resp[3] = 0;
@@ -277,15 +455,62 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         (void)o;                                             // o == total here
         return (int)total;
     }
+    if (type == P9_TWALKGETATTR) {
+        g_wga_seen++;
+        // POUNCE: Rwalkgetattr = nwqid(2) + nwqid * getattr_body(153). Echo
+        // the requested component count (or one fewer under g_wga_partial --
+        // the session layer then leaves newfid unbound). Body offsets:
+        // hdr(7) + fid(4) + newfid(4) + request_mask(8) = 23; nwname at 23.
+        if (req_len < P9_HDR_LEN + 4 + 4 + 8 + 2) return -1;
+        u16 nwname = (u16)req[23] | ((u16)req[24] << 8);
+        u16 nwqid  = nwname;
+        if (g_dev9p_wga_partial && nwqid > 0) nwqid--;
+        size_t total = P9_HDR_LEN + 2 + (size_t)nwqid * P9_WGA_BODY_LEN;
+        if (resp_cap < total) return -1;
+        for (size_t i = 0; i < total; i++) resp[i] = 0;
+        resp[0] = (u8)(total & 0xff); resp[1] = (u8)((total >> 8) & 0xff);
+        resp[4] = P9_RWALKGETATTR;
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        resp[7] = (u8)(nwqid & 0xff); resp[8] = (u8)((nwqid >> 8) & 0xff);
+        for (u16 e = 0; e < nwqid; e++) {
+            size_t o = P9_HDR_LEN + 2 + (size_t)e * P9_WGA_BODY_LEN;
+            resp[o] = 0xff; resp[o + 1] = 0x07;              // valid = BASIC
+            o += 8;
+            resp[o] = g_wga_type_ov ? g_wga_type_ov : P9_QTFILE;   // qid.type
+            { u32 v = g_wga_vers_ov;                         // qid.version
+              resp[o + 1] = (u8)v;         resp[o + 2] = (u8)(v >> 8);
+              resp[o + 3] = (u8)(v >> 16); resp[o + 4] = (u8)(v >> 24); }
+            o += 1 + 4;
+            resp[o] = (u8)(g_wga_path_base + e); o += 8;    // qid.path
+            { u32 m = 0100644u;                              // mode
+              resp[o] = (u8)m; resp[o + 1] = (u8)(m >> 8);
+              resp[o + 2] = (u8)(m >> 16); resp[o + 3] = (u8)(m >> 24); o += 4; }
+            resp[o] = 0x11; resp[o + 1] = 0x11; o += 4;      // uid = 0x1111
+            resp[o] = 0x22; resp[o + 1] = 0x22; o += 4;      // gid = 0x2222
+            resp[o] = 1; o += 8;                             // nlink
+            o += 8;                                          // rdev
+            if (g_wga_size_ov_on) {                          // size (overridden)
+                u64 sz = g_wga_size_ov;
+                for (int b = 0; b < 8; b++) resp[o + b] = (u8)(sz >> (8 * b));
+                o += 8;
+            } else {
+                resp[o] = (u8)e; resp[o + 1] = 0x02; o += 8; // size = 0x200 + e
+            }
+            resp[o] = 0x00; resp[o + 1] = 0x10; o += 8;      // blksize = 4096
+            // blocks + times + gen + dv stay 0.
+        }
+        return (int)total;
+    }
     if (type == P9_TSETATTR) {
         // Capture the request's valid/mode/uid/gid (Tsetattr body: fid@7,
         // valid@11, mode@15, uid@19, gid@23) so the test asserts the
         // T_WSTAT_* mask + values reached the wire.
-        if (req_len >= P9_HDR_LEN + 4 + 4 + 4 + 4 + 4) {
+        if (req_len >= P9_HDR_LEN + 4 + 4 + 4 + 4 + 4 + 8) {
             g_setattr_valid = le32_at(req + 11);
             g_setattr_mode  = le32_at(req + 15);
             g_setattr_uid   = le32_at(req + 19);
             g_setattr_gid   = le32_at(req + 23);
+            g_setattr_size  = le64_at(req + 27);
         }
         // Rsetattr = header only (empty body).
         if (resp_cap < P9_HDR_LEN) return -1;
@@ -431,6 +656,80 @@ void test_dev9p_write_routes_through_client(void) {
     teardown(root);
 }
 
+// #3 (Area F errno-rollout) regression: a 9P write/read error (Rlerror)
+// must surface as the real negative -errno through dev9p, NOT collapse to
+// -1 (== -EPERM, which mis-reported every Stratum write failure as a
+// permission error -- the go-build's STM_ENOSPC -> EPERM cascade).
+// g_io_error_ecode, when nonzero, makes the responder answer every
+// Twrite/Tread with Rlerror(ecode); the handshake/walk/open/clunk ops
+// delegate to the canonical responder so the fid is openable first.
+static u32 g_io_error_ecode;
+
+static int dev9p_io_error_responder(void *ctx, const u8 *req, size_t req_len,
+                                     u8 *resp, size_t resp_cap) {
+    if (req_len < P9_HDR_LEN) return -1;
+    u32 size; u8 type; u16 tag;
+    if (p9_peek_header(req, req_len, &size, &type, &tag) < 0) return -1;
+    if ((type == P9_TWRITE || type == P9_TREAD) && g_io_error_ecode != 0) {
+        // Rlerror body: [ecode:u32]. Frame = [size:4][type=7][tag:2][ecode:4].
+        size_t total = P9_HDR_LEN + 4;
+        if (resp_cap < total) return -1;
+        resp[0] = (u8)total; resp[1] = 0; resp[2] = 0; resp[3] = 0;
+        resp[4] = P9_RLERROR;
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        resp[7] = (u8)(g_io_error_ecode & 0xff);
+        resp[8] = (u8)((g_io_error_ecode >> 8) & 0xff);
+        resp[9] = (u8)((g_io_error_ecode >> 16) & 0xff);
+        resp[10] = (u8)((g_io_error_ecode >> 24) & 0xff);
+        return (int)total;
+    }
+    return dev9p_responder(ctx, req, req_len, resp, resp_cap);
+}
+
+void test_dev9p_write_read_propagate_errno(void) {
+    g_io_error_ecode = 0;
+    TEST_ASSERT(p9_loopback_init(&g_loopback, g_loopback_resp,
+                                  sizeof(g_loopback_resp),
+                                  dev9p_io_error_responder, NULL) == 0,
+                 "loopback init (error responder)");
+    TEST_ASSERT(p9_client_init(&g_client, /*root_fid=*/0, 8192,
+                                p9_loopback_ops_for(&g_loopback),
+                                g_recv_buf, sizeof(g_recv_buf)) == 0,
+                 "client init");
+    const u8 uname[] = {'r','o','o','t'};
+    const u8 aname[] = {'/'};
+    TEST_ASSERT(p9_client_handshake(&g_client, uname, sizeof(uname),
+                                      aname, sizeof(aname), 0) == 0,
+                 "handshake");
+    struct Spoor *root = dev9p_attach_client(&g_client, /*root_fid=*/0);
+    TEST_ASSERT(root != NULL, "root");
+    struct Spoor *nc = spoor_clone(root);
+    const char *name = "file";
+    struct Walkqid *w = dev9p.walk(root, nc, &name, 1);
+    walkqid_free(w);
+    dev9p.open(nc, 0);
+
+    // ENOSPC (28) -- the exact go-build `_pkg_.a` exhaustion ecode. Pre-#3
+    // dev9p.write collapsed any rc!=0 to -1 (== -EPERM); post-#3 it
+    // propagates the real -errno so userspace sees ENOSPC.
+    g_io_error_ecode = 28u;     // ENOSPC
+    u8 wbuf[8] = {0};
+    long wr = dev9p.write(nc, wbuf, 8, 0);
+    TEST_EXPECT_EQ((u64)wr, (u64)(-(long)28),
+                    "dev9p.write propagates -ENOSPC (not the -1 collapse)");
+
+    // EIO (5 == T_E_IO) on the read twin (dev9p_read had the same collapse).
+    g_io_error_ecode = 5u;      // EIO
+    u8 rbuf[8];
+    long rd = dev9p.read(nc, rbuf, 8, 0);
+    TEST_EXPECT_EQ((u64)rd, (u64)(-(long)5),
+                    "dev9p.read propagates -EIO (not the -1 collapse)");
+
+    g_io_error_ecode = 0;
+    spoor_clunk(nc);
+    teardown(root);
+}
+
 void test_dev9p_close_clunks_owned_fid(void) {
     struct Spoor *root = make_open_client_and_root();
     struct Spoor *nc = spoor_clone(root);
@@ -441,16 +740,21 @@ void test_dev9p_close_clunks_owned_fid(void) {
     // Capture inflight count before close (should be 0 — walk completed).
     size_t before = p9_session_inflight(&g_client.session);
     spoor_clunk(nc);
-    // After close, the dev9p.close path issued a Tclunk + got Rclunk
-    // synchronously through the loopback. Inflight should still be 0.
-    size_t after = p9_session_inflight(&g_client.session);
-    TEST_EXPECT_EQ((u64)before, (u64)after,
-                    "clunk completed synchronously (inflight unchanged)");
-    // The walk-allocated fid is no longer in the session's bound set.
-    // The walk allocated fid 1 (next_fid after root_fid=0); verify it's
-    // not bound anymore.
+    // FID-LIFECYCLE async-clunk: dev9p_close fires the Tclunk FIRE-AND-FORGET.
+    // The fid unbinds at SEND (I-11), but the Rclunk is NOT drained here -- the
+    // tag stays outstanding until a later op's elected reader pumps it (I-10, the
+    // #845 ownerless drain). The single-slot loopback has no later op, so the
+    // deferred reply is verified by driving the reader pump explicitly (exactly
+    // what the next real op does).
     TEST_ASSERT(!p9_session_fid_bound(&g_client.session, 1),
-                 "walk-allocated fid 1 is unbound after close");
+                 "walk-allocated fid 1 is unbound at send (async-clunk)");
+    size_t after_send = p9_session_inflight(&g_client.session);
+    TEST_EXPECT_EQ((u64)after_send, (u64)(before + 1),
+                    "async-clunk leaves the Tclunk outstanding (deferred, not synchronous)");
+    (void)p9_client_reader_pump_once(&g_client);
+    size_t after_drain = p9_session_inflight(&g_client.session);
+    TEST_EXPECT_EQ((u64)after_drain, (u64)before,
+                    "the ownerless Rclunk drains via the reader pump (tag freed)");
 
     teardown(root);
 }
@@ -488,6 +792,396 @@ void test_dev9p_create_file(void) {
     TEST_ASSERT((nc->flag & COPEN) != 0,       "COPEN set after Tlcreate");
     TEST_EXPECT_EQ((u64)nc->qid.path, (u64)0x77,
                     "qid taken from the Rlcreate response");
+
+    spoor_clunk(nc);
+    teardown(root);
+}
+
+// L1c regression (the create-reuse stale-serve, the stalk-2-e2e failure): a
+// create at a qid.path that carries a STALE cached attr -- Stratum reused a
+// just-freed ino, so the new file's qid.path had a prior occupant cached -- MUST
+// invalidate that child, or the base X-check on the new file serves the old
+// file's attr. The create path never runs walk_attrs (no revalidate-by-
+// overwrite), so dev9p_create must invalidate the child explicitly. The
+// responder mints 0x77 for the created file; pre-seed a bogus 0x77 entry and
+// verify create drops it. FAILS pre-fix (create invalidated only the parent).
+void test_dev9p_create_invalidates_reused_child(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    struct Spoor *nc = spoor_clone(root);
+    TEST_ASSERT(nc != NULL, "clone target");
+    struct Walkqid *w = dev9p.walk(root, nc, NULL, 0);
+    TEST_ASSERT(w != NULL, "clone-walk");
+    walkqid_free(w);
+
+    // Pre-seed a stale attr at qid.path 0x77 (the created file's qid), as if a
+    // prior file at that reused ino was cached -- a FILE mode (no X-bit), which a
+    // base X-check on the new dir/file would wrongly consult.
+    struct t_stat stale;
+    for (size_t i = 0; i < sizeof(stale); i++) ((u8 *)&stale)[i] = 0;
+    stale.mode = 0644;
+    larder_attr_install(&g_client.larder, larder_gen_snapshot(&g_client.larder),
+                        0x77, /*cvers=*/1, &stale);
+    struct t_stat probe; u64 s0 = 0;
+    TEST_ASSERT(larder_attr_serve(&g_client.larder, 0x77, &probe, &s0),
+                "stale child entry present pre-create");
+
+    struct Spoor *opened = dev9p.create(nc, "newfile", 1 /*OWRITE*/, 0644u, 1000u);
+    TEST_ASSERT(opened == nc, "create returns the Spoor");
+    TEST_EXPECT_EQ((u64)nc->qid.path, (u64)0x77, "qid from Rlcreate");
+    TEST_ASSERT(!larder_attr_serve(&g_client.larder, 0x77, &probe, &s0),
+                "create invalidates the reused child's stale attr");
+
+    spoor_clunk(nc);
+    teardown(root);
+}
+
+// L1e (L1f audit F1): the reused-ino hazard applies to the child's PAGES exactly
+// as to its attr. A create at a freed+reused qid.path can carry a stale prior-
+// occupant page whose cvers collides with the fresh file's qid.version -- a
+// collision the Thylacine tree cannot rule out (it depends on Stratum's fresh-
+// inode si_cvers). dev9p_create must invalidate the child's pages, mirroring the
+// attr defense above. Pre-seed a stale page at 0x77 (the created file's qid);
+// verify create drops it. FAILS pre-fix (create invalidated the child's attr +
+// the parent, never the child's pages -- the only page invalidate was
+// dev9p_write).
+void test_dev9p_create_invalidates_reused_child_pages(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    struct Spoor *nc = spoor_clone(root);
+    TEST_ASSERT(nc != NULL, "clone target");
+    struct Walkqid *w = dev9p.walk(root, nc, NULL, 0);
+    TEST_ASSERT(w != NULL, "clone-walk");
+    walkqid_free(w);
+
+    // Pre-seed a stale page at qid.path 0x77, page 0, cvers 1 -- as if a prior
+    // file at that reused ino had a page cached.
+    static const u8 stale_pg[5] = { 'S', 'T', 'A', 'L', 'E' };
+    larder_page_install(&g_client.larder, larder_gen_snapshot(&g_client.larder),
+                        0x77, /*page_index=*/0, /*cvers=*/1, stale_pg, 5);
+    u8 probe[16]; u64 s0 = 0;
+    TEST_EXPECT_EQ((u64)larder_page_serve(&g_client.larder, 0x77, 0, 0, 16,
+                                          /*want_cvers=*/1, probe, &s0),
+                   (u64)5, "stale child page present pre-create");
+
+    struct Spoor *opened = dev9p.create(nc, "newfile", 1 /*OWRITE*/, 0644u, 1000u);
+    TEST_ASSERT(opened == nc, "create returns the Spoor");
+    TEST_EXPECT_EQ((u64)nc->qid.path, (u64)0x77, "qid from Rlcreate");
+    TEST_EXPECT_EQ((u64)larder_page_serve(&g_client.larder, 0x77, 0, 0, 16, 1,
+                                          probe, &s0),
+                   (u64)0, "create invalidates the reused child's stale page");
+
+    larder_destroy(&g_client.larder);
+    spoor_clunk(nc);
+    teardown(root);
+}
+
+// G3 (term-4): dev9p_create DOWNGRADES the parent-dir attr instead of dropping
+// it -- a child create stales the parent's size/mtime/nlink/cvers but cannot
+// edit its mode/uid/gid, so the perm-servable core must keep the resolver's
+// intermediate-hop X-check RPC-free while a stat of the dir still refetches.
+// Non-vacuous: with the pre-G3 call site (larder_attr_invalidate on the parent)
+// the mid-hop walk serve fails on the attr miss.
+void test_dev9p_create_downgrades_parent_attr(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    struct Spoor *nc = spoor_clone(root);
+    TEST_ASSERT(nc != NULL, "clone target");
+    struct Walkqid *w = dev9p.walk(root, nc, NULL, 0);
+    TEST_ASSERT(w != NULL, "clone-walk");
+    walkqid_free(w);
+
+    // Seed a synthetic chain that places the REAL parent (the fixture root, the
+    // dir the create below mutates) as the MID hop of a 2-hop walk: a fake base
+    // 0x500 -> "r" -> root, then root -> "sib" -> a fake sibling 0x600.
+    struct larder *l = &g_client.larder;
+    u64 parent = root->qid.path;
+    u64 seq = larder_gen_snapshot(l);
+    struct t_stat pa;
+    for (size_t i = 0; i < sizeof(pa); i++) ((u8 *)&pa)[i] = 0;
+    pa.mode = 040755; pa.qid_path = parent; pa.qid_vers = 1; pa.qid_type = 0x80;
+    larder_attr_install(l, seq, parent, /*cvers=*/1, &pa);
+    larder_dentry_install(l, seq, 0x500, "r", 1, parent, /*negative=*/false);
+    struct t_stat sa;
+    for (size_t i = 0; i < sizeof(sa); i++) ((u8 *)&sa)[i] = 0;
+    sa.mode = 0644; sa.qid_path = 0x600; sa.qid_vers = 1; sa.qid_type = 0;
+    larder_attr_install(l, seq, 0x600, /*cvers=*/1, &sa);
+    larder_dentry_install(l, seq, parent, "sib", 3, 0x600, /*negative=*/false);
+
+    const char *names[] = {"r", "sib"};
+    size_t      lens[]  = {1, 3};
+    struct t_stat sts[4];
+    int nres = -1; bool miss = true;
+    TEST_ASSERT(larder_walk_serve(l, 0x500, names, lens, 2, sts, &nres, &miss, NULL),
+                "baseline 2-hop serve through the parent");
+
+    struct Spoor *opened = dev9p.create(nc, "newfile", 1 /*OWRITE*/, 0644u, 1000u);
+    TEST_ASSERT(opened == nc, "create returns the Spoor");
+
+    // The parent attr survives as perm_only: the mid-hop walk still serves
+    // (the sibling dentry preserved by L1d name-scoping; the perm core by G3)...
+    nres = -1; miss = true;
+    TEST_ASSERT(larder_walk_serve(l, 0x500, names, lens, 2, sts, &nres, &miss, NULL),
+                "post-create the mid-hop X-check chain still serves");
+    TEST_ASSERT(!miss, "not a cached miss");
+    TEST_EXPECT_EQ(sts[0].mode, 040755u, "parent perm core served");
+    TEST_EXPECT_EQ(g_client.larder.attr_downgrades, 1ull, "one downgrade counted");
+
+    // ...while a stat of the parent refetches (perm_only misses attr_serve).
+    struct t_stat probe; u64 s0 = 0;
+    TEST_ASSERT(!larder_attr_serve(l, parent, &probe, &s0),
+                "post-create a stat of the parent misses (times staled)");
+
+    spoor_clunk(nc);
+    teardown(root);
+}
+
+// -- G2: the dir-fid cache (docs/FID-LIFECYCLE-DESIGN.md section 4) ------------
+
+// The full recycle: a bind-form walk to a DIR wires once; closing the unopened
+// Spoor PARKS the fid (no Tclunk); the next bind-form walk of the same dir
+// consumes the parked fid with ZERO wire ops; the minted Spoor drives a real
+// by-name op; its close re-parks. Non-vacuous: without the consume the second
+// walk wires (g_wga_seen bumps); without the donate the close clunks.
+void test_dev9p_dirfid_consume_and_recycle(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    g_wga_seen = 0; g_clunk_seen = 0;
+    g_wga_type_ov = P9_QTDIR; g_wga_path_base = 0x20;
+    g_unlinkat_fail_ecode = 0;
+
+    const char  *names[1] = { "d" };
+    const size_t lens[1]  = { 1 };
+    struct t_stat sts[4];
+
+    // Walk 1: wire (populates the Larder chain + latches cacheable).
+    struct Spoor *nc1 = spoor_clone(root);
+    TEST_ASSERT(nc1 != NULL, "clone 1");
+    struct Walkqid *w1 = dev9p.walk_attrs(root, nc1, names, lens, 1, sts);
+    TEST_ASSERT(w1 != NULL && w1->spoor == nc1, "bind walk 1");
+    TEST_EXPECT_EQ((u64)g_wga_seen, 1ull, "walk 1 wired");
+    walkqid_free(w1);
+    spoor_clunk(nc1);   // unopened dir fid -> PARKED, not clunked
+    TEST_EXPECT_EQ((u64)g_clunk_seen, 0ull, "donate elides the clunk");
+
+    // Walk 2: consumed from the cache -- zero wire ops.
+    struct Spoor *nc2 = spoor_clone(root);
+    TEST_ASSERT(nc2 != NULL, "clone 2");
+    struct Walkqid *w2 = dev9p.walk_attrs(root, nc2, names, lens, 1, sts);
+    TEST_ASSERT(w2 != NULL && w2->spoor == nc2, "bind walk 2 (consume)");
+    TEST_EXPECT_EQ((u64)g_wga_seen, 1ull, "walk 2 did NOT wire (0-RT resolve)");
+    TEST_EXPECT_EQ(nc2->qid.path, (u64)0x20, "consumed Spoor at the dir qid");
+    walkqid_free(w2);
+
+    // The consumed fid drives a real by-name op.
+    TEST_ASSERT(dev9p.unlink != NULL, "unlink slot");
+    TEST_EXPECT_EQ((u64)dev9p.unlink(nc2, "x", 0), 0ull,
+                   "by-name op through the consumed fid");
+    spoor_clunk(nc2);   // healthy, unopened -> re-parked
+    TEST_EXPECT_EQ((u64)g_clunk_seen, 0ull, "re-donate elides the clunk again");
+
+    g_wga_type_ov = 0; g_wga_path_base = 0x20;
+    teardown(root);
+}
+
+// G3 x G2: a perm_only (downgraded) leaf serves the BIND-form consume -- its
+// consumer reads only mode/uid/gid + qid, all fresh -- so a bind-walk TO a
+// just-mutated dir is still a 0-RT resolve (the am_leaf=901 class). The QUERY
+// form keeps refetching. Non-vacuous: without the leaf_perm_only out-param the
+// serve bails and the walk wires.
+void test_dev9p_dirfid_perm_only_leaf_consume(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    g_wga_seen = 0; g_clunk_seen = 0;
+    g_wga_type_ov = P9_QTDIR; g_wga_path_base = 0x20;
+
+    const char  *names[1] = { "d" };
+    const size_t lens[1]  = { 1 };
+    struct t_stat sts[4];
+
+    struct Spoor *nc1 = spoor_clone(root);
+    TEST_ASSERT(nc1 != NULL, "clone 1");
+    struct Walkqid *w1 = dev9p.walk_attrs(root, nc1, names, lens, 1, sts);
+    TEST_ASSERT(w1 != NULL, "bind walk 1");
+    walkqid_free(w1);
+    spoor_clunk(nc1);   // parked
+
+    // The dir mutates (a child create's parent downgrade).
+    larder_attr_downgrade(&g_client.larder, 0x20);
+
+    struct Spoor *nc2 = spoor_clone(root);
+    TEST_ASSERT(nc2 != NULL, "clone 2");
+    struct Walkqid *w2 = dev9p.walk_attrs(root, nc2, names, lens, 1, sts);
+    TEST_ASSERT(w2 != NULL && w2->spoor == nc2, "bind walk consumes");
+    TEST_EXPECT_EQ((u64)g_wga_seen, 1ull,
+                   "perm_only leaf still serves the bind consume (0-RT)");
+    walkqid_free(w2);
+    spoor_clunk(nc2);
+
+    g_wga_type_ov = 0;
+    teardown(root);
+}
+
+// G2 reuse-hazard, the create leg: a parked fid keyed by the qid the create
+// RETURNS (an ino reuse) references a dead inode -- dev9p_create must drop +
+// clunk it. Non-vacuous: without the create-drop no Tclunk fires here.
+void test_dev9p_dirfid_create_reuse_drop(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    g_wga_seen = 0; g_clunk_seen = 0;
+    g_wga_type_ov = P9_QTDIR; g_wga_path_base = 0x77;  // leaf qid == the create qid
+
+    const char  *names[1] = { "d" };
+    const size_t lens[1]  = { 1 };
+    struct t_stat sts[4];
+
+    struct Spoor *nc1 = spoor_clone(root);
+    TEST_ASSERT(nc1 != NULL, "clone 1");
+    struct Walkqid *w1 = dev9p.walk_attrs(root, nc1, names, lens, 1, sts);
+    TEST_ASSERT(w1 != NULL, "bind walk");
+    TEST_EXPECT_EQ(nc1->qid.path, (u64)0x77, "dir parked at qid 0x77");
+    walkqid_free(w1);
+    spoor_clunk(nc1);   // parked {0x77}
+    TEST_EXPECT_EQ((u64)g_clunk_seen, 0ull, "parked, not clunked");
+
+    // The create returns qid 0x77 (the fixture's fixed Rlcreate qid) -- the
+    // parked fid now names a DEAD object and must die.
+    struct Spoor *nc2 = spoor_clone(root);
+    TEST_ASSERT(nc2 != NULL, "clone 2");
+    struct Walkqid *w2 = dev9p.walk(root, nc2, NULL, 0);
+    TEST_ASSERT(w2 != NULL, "clone-walk");
+    walkqid_free(w2);
+    struct Spoor *opened = dev9p.create(nc2, "newfile", 1 /*OWRITE*/, 0644u, 1000u);
+    TEST_ASSERT(opened == nc2, "create");
+    TEST_EXPECT_EQ((u64)g_clunk_seen, 1ull, "create dropped + clunked the parked fid");
+    (void)p9_client_reader_pump_once(&g_client);   // drain the async Rclunk
+
+    g_wga_type_ov = 0; g_wga_path_base = 0x20;
+    spoor_clunk(nc2);
+    (void)p9_client_reader_pump_once(&g_client);
+    teardown(root);
+}
+
+// G2 reuse-hazard, the rmdir leg + the checked-out staleness gate. Leg 1: an
+// unlink(REMOVEDIR) whose (parent, name) dentry names a PARKED dir drops +
+// clunks the parked fid and invalidates the dead object's attr. Leg 2: the
+// same rmdir landing while the dir's fid is CHECKED OUT logs the event, and
+// the close's donate gate (larder_qid_staled_since over the G4 ring) CLUNKS
+// instead of re-parking -- the stale fid never re-enters the cache.
+void test_dev9p_dirfid_rmdir_drop_and_no_stale_repark(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    g_wga_seen = 0; g_clunk_seen = 0;
+    g_wga_type_ov = P9_QTDIR; g_wga_path_base = 0x20;
+    g_unlinkat_fail_ecode = 0;
+
+    const char  *names[1] = { "d" };
+    const size_t lens[1]  = { 1 };
+    struct t_stat sts[4];
+
+    // Leg 1: park, then rmdir by name -> the parked fid dies.
+    struct Spoor *nc1 = spoor_clone(root);
+    TEST_ASSERT(nc1 != NULL, "clone 1");
+    struct Walkqid *w1 = dev9p.walk_attrs(root, nc1, names, lens, 1, sts);
+    TEST_ASSERT(w1 != NULL, "bind walk 1");
+    walkqid_free(w1);
+    spoor_clunk(nc1);   // parked {0x20}
+    TEST_EXPECT_EQ((u64)g_clunk_seen, 0ull, "parked");
+
+    struct dev9p_priv *rootp = dev9p_priv_of(root);
+    TEST_ASSERT(rootp != NULL, "root priv");
+    TEST_EXPECT_EQ((u64)dev9p.unlink(root, "d", SYS_UNLINK_REMOVEDIR), 0ull,
+                   "rmdir d");
+    TEST_EXPECT_EQ((u64)g_clunk_seen, 1ull, "rmdir dropped + clunked the parked fid");
+    (void)p9_client_reader_pump_once(&g_client);
+    struct t_stat probe; u64 s0 = 0;
+    TEST_ASSERT(!larder_attr_serve(&g_client.larder, 0x20, &probe, &s0),
+                "the dead object's attr invalidated (the donate-gate event)");
+
+    // Leg 2: re-walk (checked out), rmdir mid-use, close -> clunk, not re-park.
+    struct Spoor *nc2 = spoor_clone(root);
+    TEST_ASSERT(nc2 != NULL, "clone 2");
+    struct Walkqid *w2 = dev9p.walk_attrs(root, nc2, names, lens, 1, sts);
+    TEST_ASSERT(w2 != NULL && w2->spoor == nc2, "bind walk 2 (wire)");
+    TEST_EXPECT_EQ((u64)g_wga_seen, 2ull, "walk 2 wired (cache empty)");
+    TEST_EXPECT_EQ((u64)dev9p.unlink(root, "d", SYS_UNLINK_REMOVEDIR), 0ull,
+                   "rmdir d while its fid is checked out");
+    u32 pre = g_clunk_seen;
+    spoor_clunk(nc2);   // staled while out -> MUST clunk, never re-park
+    TEST_EXPECT_EQ((u64)g_clunk_seen, (u64)pre + 1ull,
+                   "a staled checked-out fid is clunked at close");
+    (void)p9_client_reader_pump_once(&g_client);
+
+    g_wga_type_ov = 0;
+    teardown(root);
+}
+
+// G2 suspect backstop: a by-name op ERRORING through a consumed fid latches
+// fid_suspect, and the close CLUNKS instead of re-parking -- the loop-breaker
+// for a stale fid whose staleness event was unknowable (the evicted-dentry
+// residual). Non-vacuous: without the suspect gate the close re-parks (no
+// clunk) and the poisoned fid would serve again.
+void test_dev9p_dirfid_suspect_not_reparked(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    g_wga_seen = 0; g_clunk_seen = 0;
+    g_wga_type_ov = P9_QTDIR; g_wga_path_base = 0x20;
+
+    const char  *names[1] = { "d" };
+    const size_t lens[1]  = { 1 };
+    struct t_stat sts[4];
+
+    struct Spoor *nc1 = spoor_clone(root);
+    TEST_ASSERT(nc1 != NULL, "clone 1");
+    struct Walkqid *w1 = dev9p.walk_attrs(root, nc1, names, lens, 1, sts);
+    TEST_ASSERT(w1 != NULL, "bind walk");
+    walkqid_free(w1);
+
+    g_unlinkat_fail_ecode = 2;   // ENOENT: the op through this fid errors
+    TEST_ASSERT(dev9p.unlink(nc1, "x", 0) != 0, "the by-name op errors");
+    g_unlinkat_fail_ecode = 0;
+
+    u32 pre = g_clunk_seen;
+    spoor_clunk(nc1);   // suspect -> clunk, never park
+    TEST_EXPECT_EQ((u64)g_clunk_seen, (u64)pre + 1ull,
+                   "a suspect fid is clunked at close, not re-parked");
+    (void)p9_client_reader_pump_once(&g_client);
+
+    g_wga_type_ov = 0;
+    teardown(root);
+}
+
+// L1d: dev9p_create must invalidate the PARENT's cached dentries (own-write) so a
+// stale NEGATIVE entry for the created name cannot serve ENOENT for the new file.
+// The parent's si_cvers does NOT bump on a create (Stratum stores dirents in a
+// separate index -- verified src/fs/fs.c), so own-write invalidation is the SOLE
+// coherence mechanism (no parent-cvers gate). Non-vacuous: fails if the
+// dev9p_create -> larder_dentry_invalidate_name hook is missing.
+void test_dev9p_create_invalidates_negative_dentry(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    struct Spoor *nc = spoor_clone(root);
+    TEST_ASSERT(nc != NULL, "clone target");
+    struct Walkqid *w = dev9p.walk(root, nc, NULL, 0);
+    TEST_ASSERT(w != NULL, "clone-walk");
+    walkqid_free(w);
+
+    // dev9p_create captures parent_path = c->qid.path pre-transition; nc inherited
+    // root's qid via the 0-element clone-walk, so this is the parent dir.
+    u64 parent = nc->qid.path;
+    larder_dentry_install(&g_client.larder, larder_gen_snapshot(&g_client.larder),
+                          parent, "newfile", 7, 0, /*negative=*/true);
+    const char *nm[] = { "newfile" };
+    size_t      ln[] = { 7 };
+    struct t_stat sts[2];
+    int nres; bool miss;
+    TEST_ASSERT(larder_walk_serve(&g_client.larder, parent, nm, ln, 1, sts, &nres, &miss, NULL) &&
+                miss, "negative dentry serves the miss pre-create");
+
+    struct Spoor *opened = dev9p.create(nc, "newfile", 1 /*OWRITE*/, 0644u, 1000u);
+    TEST_ASSERT(opened == nc, "create returns the Spoor");
+    TEST_ASSERT(!larder_walk_serve(&g_client.larder, parent, nm, ln, 1, sts, &nres, &miss, NULL),
+                "create invalidates the stale NEGATIVE dentry (no ENOENT for the new file)");
 
     spoor_clunk(nc);
     teardown(root);
@@ -619,7 +1313,7 @@ void test_dev9p_wstat_native_drives_setattr(void) {
     g_setattr_valid = g_setattr_mode = g_setattr_uid = g_setattr_gid = 0xdeadbeefu;
     TEST_EXPECT_EQ((u64)dev9p.wstat_native(root,
                        T_WSTAT_MODE | T_WSTAT_UID | T_WSTAT_GID,
-                       0640u, 1000u, 2000u), (u64)0,
+                       0640u, 1000u, 2000u, 0), (u64)0,
                     "wstat_native -> 0 (Rsetattr)");
     TEST_EXPECT_EQ((u64)g_setattr_valid,
                     (u64)(T_WSTAT_MODE | T_WSTAT_UID | T_WSTAT_GID),
@@ -688,4 +1382,1488 @@ void test_dev9p_poll_regular_file_always_ready(void) {
     dev9p_poll_priv_release(p);
     TEST_ASSERT(p->poll == NULL, "priv_release on NULL poll is a no-op");
     teardown(root);
+}
+
+// =============================================================================
+// #294 cancel-at-close: a readiness op outstanding at dev9p_close.
+// =============================================================================
+
+static u32  g_cancel_treads;        // readiness Treads the responder saw
+static u32  g_cancel_tflushes;      // cancel-at-close Tflushes the responder saw
+static u32  g_cancel_tclunks;       // Tclunks the responder saw
+static u32  g_cancel_ready_fid;     // the fid the readiness Tread + close Tclunk name
+static bool g_cancel_ready_clunked; // the readiness fid's Tclunk was delivered
+
+// A responder for the cancel-at-close test: the walked file is QTPOLL (so
+// dev9p_poll probes it) and its readiness Tread DEFERS (stages no reply, so the op
+// stays outstanding). The Tflush (the cancel) stages NOTHING -- p9_client_abandon_
+// async does not await an Rflush, and a staged-undrained reply would block the
+// synchronous Tclunk that follows (loopback_send refuses a second send while a
+// reply is undrained). The Tclunk -- the leak fix's deliverable -- replies Rclunk
+// and is recorded.
+static int dev9p_cancel_responder(void *ctx, const u8 *req, size_t req_len,
+                                  u8 *resp, size_t resp_cap) {
+    (void)ctx;
+    if (req_len < P9_HDR_LEN) return -1;
+    u32 size; u8 type; u16 tag;
+    if (p9_peek_header(req, req_len, &size, &type, &tag) < 0) return -1;
+
+    if (type == P9_TVERSION) {
+        size_t total = P9_HDR_LEN + 4 + 2 + 8;
+        if (resp_cap < total) return -1;
+        resp[0] = (u8)(total & 0xff); resp[1] = (u8)((total >> 8) & 0xff);
+        resp[2] = 0; resp[3] = 0;
+        resp[4] = P9_RVERSION;
+        resp[5] = 0xff; resp[6] = 0xff;
+        resp[7] = 0; resp[8] = 0x20; resp[9] = 0; resp[10] = 0;     // msize=8192
+        resp[11] = 8; resp[12] = 0;
+        const char *v = "9P2000.L";
+        for (int i = 0; i < 8; i++) resp[13 + i] = (u8)v[i];
+        return (int)total;
+    }
+    if (type == P9_TATTACH) {
+        size_t total = P9_HDR_LEN + P9_QID_LEN;
+        if (resp_cap < total) return -1;
+        resp[0] = (u8)(total & 0xff); resp[1] = 0; resp[2] = 0; resp[3] = 0;
+        resp[4] = P9_RATTACH;
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        resp[7] = P9_QTDIR;
+        for (int i = 0; i < 4; i++) resp[8 + i] = 0;
+        resp[12] = 1; for (int i = 1; i < 8; i++) resp[12 + i] = 0;
+        return (int)total;
+    }
+    if (type == P9_TWALK) {
+        if (req_len < P9_HDR_LEN + 4 + 4 + 2) return -1;
+        u16 nwname = (u16)req[15] | ((u16)req[16] << 8);
+        size_t body_len = 2 + (size_t)nwname * P9_QID_LEN;
+        size_t total = P9_HDR_LEN + body_len;
+        if (resp_cap < total) return -1;
+        resp[0] = (u8)(total & 0xff); resp[1] = (u8)((total >> 8) & 0xff);
+        resp[2] = 0; resp[3] = 0;
+        resp[4] = P9_RWALK;
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        resp[7] = (u8)(nwname & 0xff); resp[8] = (u8)((nwname >> 8) & 0xff);
+        for (u16 i = 0; i < nwname; i++) {
+            size_t off = P9_HDR_LEN + 2 + (size_t)i * P9_QID_LEN;
+            resp[off] = (u8)(P9_QTFILE | P9_QTPOLL);   // QTPOLL => the readiness file
+            for (int j = 0; j < 4; j++) resp[off + 1 + j] = 0;
+            resp[off + 5] = (u8)(0x10 + i);
+            for (int j = 1; j < 8; j++) resp[off + 5 + j] = 0;
+        }
+        return (int)total;
+    }
+    if (type == P9_TREAD) {
+        // The readiness probe (Tread offset=mask). DEFER: stage NO reply so the op
+        // stays outstanding. Record the fid for the Tclunk assertion.
+        g_cancel_treads++;
+        if (req_len >= P9_HDR_LEN + 4) g_cancel_ready_fid = le32_at(req + 7);
+        return 0;
+    }
+    if (type == P9_TFLUSH) {
+        // The cancel-at-close Tflush. Stage NOTHING (see the responder comment).
+        g_cancel_tflushes++;
+        return 0;
+    }
+    if (type == P9_TCLUNK) {
+        // The `ready`-fd Tclunk -- the leak fix's deliverable.
+        g_cancel_tclunks++;
+        if (req_len >= P9_HDR_LEN + 4 && le32_at(req + 7) == g_cancel_ready_fid)
+            g_cancel_ready_clunked = true;
+        if (resp_cap < P9_HDR_LEN) return -1;
+        resp[0] = 7; resp[1] = 0; resp[2] = 0; resp[3] = 0;
+        resp[4] = P9_RCLUNK;
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        return (int)P9_HDR_LEN;
+    }
+    return -1;
+}
+
+// #294 cancel-at-close regression. A readiness op outstanding at dev9p_close must
+// be CANCELLED (Tflush) and the `ready`-fd Tclunk delivered -- not extinct (the
+// pre-#294 dev9p_poll_priv_release extincted on a live op) and not leak (the bug:
+// the kthread-GC-deferred Tclunk could never reach netd, leaving the slot pinned).
+// Deterministic: in the in-kernel suite SMP + preemption are off and the test
+// thread does not yield between submit and close, so the close -- not the poll-pump
+// kthread -- grabs + cancels the op. attached_owner==NULL here (the test path); the
+// session-ref leg is exercised by the live netd boot probes.
+void test_dev9p_poll_cancel_at_close(void) {
+    g_cancel_treads = 0; g_cancel_tflushes = 0; g_cancel_tclunks = 0;
+    g_cancel_ready_fid = 0; g_cancel_ready_clunked = false;
+
+    TEST_ASSERT(p9_loopback_init(&g_loopback, g_loopback_resp, sizeof(g_loopback_resp),
+                                 dev9p_cancel_responder, NULL) == 0, "loopback init");
+    TEST_ASSERT(p9_client_init(&g_client, /*root_fid=*/0, 8192,
+                               p9_loopback_ops_for(&g_loopback),
+                               g_recv_buf, sizeof(g_recv_buf)) == 0, "client init");
+    const u8 uname[] = {'r','o','o','t'};
+    const u8 aname[] = {'/'};
+    TEST_ASSERT(p9_client_handshake(&g_client, uname, sizeof(uname),
+                                    aname, sizeof(aname), 0) == 0, "handshake");
+    struct Spoor *root = dev9p_attach_client(&g_client, /*root_fid=*/0);
+    TEST_ASSERT(root != NULL, "root");
+
+    // Walk to a QTPOLL file (a netd `ready` analog) -- a fid_owned walked Spoor,
+    // so its close issues a Tclunk (the leak fix's deliverable).
+    struct Spoor *nc = spoor_clone(root);
+    TEST_ASSERT(nc != NULL, "clone target");
+    const char *name = "ready";
+    struct Walkqid *w = dev9p.walk(root, nc, &name, 1);
+    TEST_ASSERT(w != NULL && w->spoor == nc, "walk to the readiness file");
+    walkqid_free(w);
+    TEST_ASSERT((nc->qid.type & QTPOLL) != 0, "the walked qid carries QTPOLL");
+
+    u32 base = dev9p_poll_op_count_for_test();
+
+    // Poll: the responder defers the readiness Tread, so dev9p_poll submits an op +
+    // returns not-ready, leaving it OUTSTANDING (the timed-out-poll state). NOTE: a
+    // live op-COUNT snapshot here would race the poll-pump kthread, which runs on a
+    // secondary CPU during the suite (SMP is up) and can stranded-GC a pw==NULL op
+    // before this thread reads the count -- so we assert the NON-racy submission
+    // witness (the Tread reached the responder, recorded synchronously during the
+    // submit) instead. The post-close assertions below hold whether the close OR the
+    // kthread tore the op down (both deliver the Tflush + leave the Tclunk to close).
+    short rv = dev9p_poll(nc, (short)POLLIN, NULL);
+    TEST_EXPECT_EQ((u64)(rv & POLLIN), (u64)0, "deferred readiness -> not ready");
+    TEST_EXPECT_EQ((u64)g_cancel_treads, (u64)1, "one readiness Tread submitted");
+
+    struct dev9p_priv *ncp = dev9p_priv_of(nc);
+    TEST_ASSERT(ncp != NULL && ncp->fid_owned, "the walked Spoor owns its fid");
+    u32 want_fid = ncp->fid;
+
+    // Close the readiness Spoor WITH the op still live. Pre-#294 this extincted in
+    // dev9p_poll_priv_release; now it cancels the op (Tflush) + delivers the Tclunk.
+    spoor_clunk(nc);
+
+    TEST_EXPECT_EQ((u64)dev9p_poll_op_count_for_test(), (u64)base,
+                   "the live op was torn down at close (registry back to baseline)");
+    TEST_ASSERT(g_cancel_tflushes >= 1, "the outstanding op was cancelled (Tflush)");
+    // The `ready`-fd Tclunk reached the server -> netd's slot_unref fires (the leak
+    // fix). Note the Tflush leaves the readiness tag awaiting_flush; the clunk
+    // succeeds because any_outstanding_on_fid no longer counts a flushed op (the
+    // 9p_session SendClunk-precondition fix this test surfaced).
+    TEST_ASSERT(g_cancel_ready_clunked,
+                "the `ready`-fd Tclunk was delivered at close (#294 leak fix)");
+    TEST_EXPECT_EQ((u64)p9_session_fid_bound(&g_client.session, want_fid), (u64)0,
+                   "the readiness fid is unbound after close (clunk completed)");
+
+    spoor_clunk(root);   // root_fid is not clunked by dev9p (fid_owned false); frees the Spoor
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// =============================================================================
+// SYS_PREAD / SYS_PWRITE (#37) + SYS_WSTAT kind-gate (#47) — syscall-layer
+// tests against the loopback client (the wire-visible halves).
+// =============================================================================
+
+// The positioned inners + the wstat inner (defined in kernel/syscall.c).
+extern s64 sys_pread_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len,
+                              s64 off);
+extern s64 sys_pwrite_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf,
+                               u64 len, s64 off);
+extern s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf,
+                              u64 len);
+extern s64 sys_wstat_for_proc(struct Proc *p, hidx_t h, u32 valid, u32 mode,
+                              u32 uid, u32 gid, u64 size);
+
+// #37: SYS_PREAD/SYS_PWRITE put the CALLER's offset in the Tread/Twrite and
+// never move the Spoor cursor; SYS_READ/SYS_WRITE keep putting the CURSOR
+// there and advancing it. The loopback responder captures the wire offsets.
+void test_dev9p_prw_wire_offset_and_cursor(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "client+root");
+    struct Spoor *nc = spoor_clone(root);
+    const char *name = "file";
+    struct Walkqid *w = dev9p.walk(root, nc, &name, 1);
+    TEST_ASSERT(w != NULL, "walk");
+    walkqid_free(w);
+    TEST_ASSERT(dev9p.open(nc, 2) != NULL, "open ORDWR");
+
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    hidx_t fd = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, nc);
+    TEST_ASSERT(fd >= 0, "handle_alloc");   // adopts nc's ref
+
+    const u8 payload[5] = {'w','r','i','t','e'};
+    u8 buf[8];
+
+    g_twrite_req_offset = 0xdeadbeefull;
+    TEST_EXPECT_EQ(sys_pwrite_for_proc(p, fd, payload, 5, 0x1234), 5L,
+                   "pwrite accepted");
+    TEST_EXPECT_EQ(g_twrite_req_offset, 0x1234ull,
+                   "Twrite carries the caller's offset");
+    TEST_EXPECT_EQ((s64)nc->offset, 0LL, "cursor untouched by pwrite");
+
+    g_tread_req_offset = 0xdeadbeefull;
+    TEST_EXPECT_EQ(sys_pread_for_proc(p, fd, buf, 5, 0x77), 5L,
+                   "pread returned payload");
+    TEST_EXPECT_EQ(g_tread_req_offset, 0x77ull,
+                   "Tread carries the caller's offset");
+    TEST_EXPECT_EQ((s64)nc->offset, 0LL, "cursor untouched by pread");
+
+    // The cursor path interleaves cleanly: a plain write goes at the cursor
+    // (0) and advances it; a positioned write elsewhere leaves it; the next
+    // plain write continues from 5.
+    TEST_EXPECT_EQ(sys_write_for_proc(p, fd, payload, 5), 5L, "cursor write");
+    TEST_EXPECT_EQ(g_twrite_req_offset, 0ull, "cursor write went at 0");
+    TEST_EXPECT_EQ((s64)nc->offset, 5LL, "cursor advanced to 5");
+    TEST_EXPECT_EQ(sys_pwrite_for_proc(p, fd, payload, 5, 9), 5L, "pwrite @9");
+    TEST_EXPECT_EQ(g_twrite_req_offset, 9ull, "Twrite offset 9");
+    TEST_EXPECT_EQ((s64)nc->offset, 5LL, "cursor still 5 after pwrite");
+    TEST_EXPECT_EQ(sys_write_for_proc(p, fd, payload, 5), 5L, "cursor write 2");
+    TEST_EXPECT_EQ(g_twrite_req_offset, 5ull,
+                   "second cursor write continued at 5");
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);        // releases the handle -> clunks nc's fid
+    teardown(root);
+}
+
+// #47: SYS_WSTAT is kind-gated only. POSIX fchmod(2) works on an fd opened
+// O_RDONLY -- the write authority is perm_wstat_check (the IDENTITY axis),
+// not the handle rights. The loopback Rgetattr reports uid 0x1234: an
+// owner-principal Proc chmods through a RIGHT_READ-only handle (pre-#47 this
+// returned -1 at the rights gate); a stranger holding FULL rights is still
+// denied by the identity gate -- the rights-drop opened no authority hole.
+void test_dev9p_wstat_readonly_fd(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "client+root");
+    const char *name = "file";
+
+    struct Spoor *nc = spoor_clone(root);
+    struct Walkqid *w = dev9p.walk(root, nc, &name, 1);
+    TEST_ASSERT(w != NULL, "walk");
+    walkqid_free(w);
+
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->principal_id = 0x1234u;     // the owner the loopback Rgetattr reports
+    p->primary_gid  = 0x5678u;
+    p->caps         = 0;
+    hidx_t fd = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, nc);
+    TEST_ASSERT(fd >= 0, "handle_alloc R-only");
+
+    g_setattr_valid = g_setattr_mode = 0xdeadbeefu;
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fd, T_WSTAT_MODE, 0644u, 0, 0, 0), 0L,
+                   "owner chmod through a READ-only handle succeeds (#47)");
+    TEST_EXPECT_EQ(g_setattr_mode, 0644u, "mode reached the wire");
+
+    // The identity gate is the live authority: a non-owner without caps is
+    // denied even holding R|W rights.
+    struct Spoor *nc2 = spoor_clone(root);
+    struct Walkqid *w2 = dev9p.walk(root, nc2, &name, 1);
+    TEST_ASSERT(w2 != NULL, "walk 2");
+    walkqid_free(w2);
+    struct Proc *q = proc_alloc();
+    TEST_ASSERT(q != NULL, "proc_alloc q");
+    q->principal_id = 0x9999u;
+    q->primary_gid  = 0x9999u;
+    q->caps         = 0;
+    hidx_t fq = handle_alloc(q, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, nc2);
+    TEST_ASSERT(fq >= 0, "handle_alloc q");
+    TEST_EXPECT_EQ(sys_wstat_for_proc(q, fq, T_WSTAT_MODE, 0600u, 0, 0, 0), -1L,
+                   "non-owner chmod denied by perm_wstat_check despite R|W");
+
+    q->state = PROC_STATE_ZOMBIE;
+    proc_free(q);
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+    teardown(root);
+}
+
+// Go Stage 5: T_WSTAT_SIZE (ftruncate). The truth table of the per-axis
+// gates: SIZE is a CONTENT axis -- it requires RIGHT_WRITE on the fd (the
+// POSIX write-opened-fd rule; the open-time perm_check carried the identity
+// W axis) and deliberately SKIPS perm_wstat_check (which stays the sole
+// authority gate for the metadata axes, #47). The u64 value must reach the
+// Tsetattr wire full-width.
+void test_dev9p_wstat_size(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "client+root");
+    const char *name = "file";
+
+    struct Spoor *nc = spoor_clone(root);
+    struct Walkqid *w = dev9p.walk(root, nc, &name, 1);
+    TEST_ASSERT(w != NULL, "walk");
+    walkqid_free(w);
+
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->principal_id = 0x1234u;     // the owner the loopback Rgetattr reports
+    p->primary_gid  = 0x5678u;
+    p->caps         = 0;
+    hidx_t fd = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, nc);
+    TEST_ASSERT(fd >= 0, "handle_alloc R|W");
+
+    // (a) owner + R|W fd: the size reaches the wire full-width (a >4 GiB
+    // value proves the u64 plumbing end to end).
+    g_setattr_valid = 0xdeadbeefu; g_setattr_size = 0;
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fd, T_WSTAT_SIZE, 0, 0, 0,
+                                      0x112233445566ull), 0L,
+                   "truncate through an R|W handle succeeds");
+    TEST_EXPECT_EQ((u64)g_setattr_valid, (u64)T_WSTAT_SIZE,
+                   "wire valid carries exactly the SIZE bit");
+    TEST_EXPECT_EQ(g_setattr_size, 0x112233445566ull,
+                   "wire size is the full u64");
+
+    // (b) the s64 domain bound.
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fd, T_WSTAT_SIZE, 0, 0, 0,
+                                      (1ull << 63)), -1L,
+                   "size past INT64_MAX rejected");
+
+    // (c) an R-only fd cannot truncate (the rights gate) -- while the SAME
+    // fd still chmods (#47 unchanged; regression-guards the per-axis split).
+    struct Spoor *nc2 = spoor_clone(root);
+    struct Walkqid *w2 = dev9p.walk(root, nc2, &name, 1);
+    TEST_ASSERT(w2 != NULL, "walk 2");
+    walkqid_free(w2);
+    hidx_t fr = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, nc2);
+    TEST_ASSERT(fr >= 0, "handle_alloc R-only");
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fr, T_WSTAT_SIZE, 0, 0, 0, 16), -1L,
+                   "truncate through a READ-only handle rejected");
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fr, T_WSTAT_MODE, 0644u, 0, 0, 0), 0L,
+                   "chmod through the same READ-only handle still works");
+
+    // (d) a NON-owner with an R|W fd truncates (size skips the identity
+    // gate -- the write authority was the open) but cannot chmod, and a
+    // combined SIZE|MODE call is denied whole (the metadata axis gates it).
+    struct Spoor *nc3 = spoor_clone(root);
+    struct Walkqid *w3 = dev9p.walk(root, nc3, &name, 1);
+    TEST_ASSERT(w3 != NULL, "walk 3");
+    walkqid_free(w3);
+    struct Proc *q = proc_alloc();
+    TEST_ASSERT(q != NULL, "proc_alloc q");
+    q->principal_id = 0x9999u;
+    q->primary_gid  = 0x9999u;
+    q->caps         = 0;
+    hidx_t fq = handle_alloc(q, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, nc3);
+    TEST_ASSERT(fq >= 0, "handle_alloc q");
+    TEST_EXPECT_EQ(sys_wstat_for_proc(q, fq, T_WSTAT_SIZE, 0, 0, 0, 8), 0L,
+                   "non-owner truncate via a WRITE fd succeeds (open carried W)");
+    TEST_EXPECT_EQ(sys_wstat_for_proc(q, fq, T_WSTAT_SIZE | T_WSTAT_MODE,
+                                      0600u, 0, 0, 8), -1L,
+                   "combined SIZE|MODE still denied by the identity gate");
+
+    // (e) the #81 O_PATH class: a CWALKONLY handle is born RIGHT_WRITE but
+    // perm_check-EXEMPT at open, so its RIGHT_WRITE is hollow -- a truncate
+    // through it must be REJECTED (else it mutates a file the caller has no
+    // W permission on). The SAME handle still chmods (metadata goes through
+    // perm_wstat_check, the owner authority, unaffected by O_PATH).
+    struct Spoor *nc4 = spoor_clone(root);
+    struct Walkqid *w4 = dev9p.walk(root, nc4, &name, 1);
+    TEST_ASSERT(w4 != NULL, "walk 4");
+    walkqid_free(w4);
+    nc4->flag |= CWALKONLY;   // model the T_OPATH born-R|W navigation handle
+    hidx_t fo = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, nc4);
+    TEST_ASSERT(fo >= 0, "handle_alloc O_PATH-like");
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fo, T_WSTAT_SIZE, 0, 0, 0, 16), -1L,
+                   "truncate through an O_PATH (CWALKONLY) handle rejected (#81)");
+    TEST_EXPECT_EQ(sys_wstat_for_proc(p, fo, T_WSTAT_MODE, 0644u, 0, 0, 0), 0L,
+                   "owner chmod through the O_PATH handle still works");
+
+    q->state = PROC_STATE_ZOMBIE;
+    proc_free(q);
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+    teardown(root);
+}
+
+// POUNCE (docs/POUNCE-DESIGN.md §4): dev9p.walk_attrs -> Twalkgetattr. The
+// wire mechanics were proven at P-2 (test_9p_client walkgetattr); this test
+// pins the VTABLE layer: the p9_attr -> t_stat conversion parity with
+// dev9p_stat_native (one shared converter), the bind/partial/query fid
+// discipline, and the strict nc contract.
+void test_dev9p_walk_attrs(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "client + root");
+    TEST_ASSERT(dev9p.walk_attrs != NULL, "slot wired");
+
+    const char  *names[2] = { "dirA", "fileB" };
+    const size_t lens[2]  = { 4, 5 };
+
+    // These sub-tests flip the wire result for the SAME path (dirA/fileB) by
+    // toggling g_dev9p_wga_partial -- a non-physical change in the single-writer
+    // model (a name cannot appear/vanish without a create/unlink that would
+    // invalidate the Larder). Reset the L1d dentry/attr cache before each so this
+    // WIRE-mechanics test exercises the wire fresh, not a stale served entry.
+    struct larder *lard = &dev9p_priv_of(root)->client->larder;
+
+    // BIND form, FULL walk: nc transitions (own fid, leaf qid), and the
+    // fused attrs map exactly as dev9p_stat_native maps an Rgetattr
+    // (mode/uid/gid under the valid mask; size; qid).
+    {
+        larder_init(lard);
+        g_dev9p_wga_partial = false;
+        struct Spoor *nc = spoor_clone(root);
+        TEST_ASSERT(nc != NULL, "clone");
+        struct t_stat sts[2];
+        struct Walkqid *w = dev9p.walk_attrs(root, nc, names, lens, 2, sts);
+        TEST_ASSERT(w != NULL, "full bind walk");
+        TEST_EXPECT_EQ(w->nqid, 2, "both components walked");
+        TEST_ASSERT(w->spoor == nc, "nc transitioned");
+        TEST_EXPECT_EQ(nc->qid.path, (u64)0x21, "nc at the leaf qid (0x20+1)");
+        TEST_EXPECT_EQ((u64)sts[0].qid_path, (u64)0x20, "element 0 qid");
+        TEST_EXPECT_EQ((u64)sts[1].qid_path, (u64)0x21, "element 1 qid");
+        TEST_EXPECT_EQ((u64)sts[1].mode, (u64)0100644u, "mode mapped");
+        TEST_EXPECT_EQ((u64)sts[1].uid,  (u64)0x1111u, "uid mapped");
+        TEST_EXPECT_EQ((u64)sts[1].gid,  (u64)0x2222u, "gid mapped");
+        TEST_EXPECT_EQ(sts[1].size, (u64)0x201, "size mapped (0x200+1)");
+        walkqid_free(w);
+        spoor_clunk(nc);   // clunks the bound fid (FID-LIFECYCLE async-clunk)
+        // async-clunk defers the Rclunk; drain it before the next sub-test's op
+        // so the single-slot loopback is not left holding a stale reply (the real
+        // system drains it via the next op's reader).
+        (void)p9_client_reader_pump_once(&g_client);
+    }
+
+    // BIND form, PARTIAL walk: the responder answers one short; the session
+    // layer leaves new_fid unbound and nc must be UNTOUCHED (still sharing
+    // the root's priv via the shallow clone).
+    {
+        larder_init(lard);
+        g_dev9p_wga_partial = true;
+        struct Spoor *nc = spoor_clone(root);
+        TEST_ASSERT(nc != NULL, "clone");
+        void *aux_before = nc->aux;
+        struct t_stat sts[2];
+        struct Walkqid *w = dev9p.walk_attrs(root, nc, names, lens, 2, sts);
+        TEST_ASSERT(w != NULL, "partial walk returns the prefix");
+        TEST_EXPECT_EQ(w->nqid, 1, "one component walked");
+        TEST_ASSERT(w->spoor == NULL, "partial binds NOTHING");
+        TEST_ASSERT(nc->aux == aux_before, "nc untouched (shallow aux intact)");
+        TEST_EXPECT_EQ((u64)sts[0].qid_path, (u64)0x20, "prefix attrs present");
+        walkqid_free(w);
+        nc->aux = NULL;      // detach the shared aux; never clunk it
+        spoor_unref(nc);
+        g_dev9p_wga_partial = false;
+    }
+
+    // QUERY form (nc == NULL -> newfid = P9_NOFID): attrs only; no fid was
+    // consumed on either end (the wire op carries NOFID; nothing to clunk).
+    {
+        larder_init(lard);
+        g_dev9p_wga_partial = false;
+        struct t_stat sts[2];
+        struct Walkqid *w = dev9p.walk_attrs(root, NULL, names, lens, 2, sts);
+        TEST_ASSERT(w != NULL, "query walk");
+        TEST_EXPECT_EQ(w->nqid, 2, "query walked both");
+        TEST_ASSERT(w->spoor == NULL, "query transitions NOTHING");
+        TEST_EXPECT_EQ((u64)sts[1].uid, (u64)0x1111u, "query attrs mapped");
+        walkqid_free(w);
+    }
+
+    teardown(root);
+}
+
+// L1e integration: a read on a CACHEABLE client populates the page cache; a
+// re-read of the same offset is served from the cache with NO second Tread. The
+// cacheability GATE: on a non-cacheable client (the default -- no walk_attrs has
+// proven POUNCE support), a read is never page-cached, so the re-read RPCs (a
+// netd /net stream is never served stale). The sentinel-offset trick reuses the
+// loopback's Tread-offset capture as a "was a Tread sent?" probe: set it to a
+// sentinel before the re-read; if the cache served, no Tread fires and it stays.
+void test_dev9p_page_cache_serve_and_gate(void) {
+    struct Spoor *root = make_open_client_and_root();
+    struct Spoor *nc = spoor_clone(root);
+    const char *name = "file";
+    struct Walkqid *w = dev9p.walk(root, nc, &name, 1);   // per-component: leaves cacheable false
+    walkqid_free(w);
+    dev9p.open(nc, 0);
+    u8 buf[64];
+
+    // --- Gate OFF (cacheable=false, the default): no caching -> the re-read RPCs. ---
+    __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
+    long g1 = dev9p.read(nc, buf, 64, 0);
+    TEST_EXPECT_EQ((u64)g1, (u64)5, "gate-off first read");
+    g_tread_req_offset = 0xDEAD;                            // sentinel
+    long g2 = dev9p.read(nc, buf, 64, 0);
+    TEST_EXPECT_EQ((u64)g2, (u64)5, "gate-off re-read");
+    TEST_EXPECT_EQ(g_tread_req_offset, 0ull,
+                   "gate-off re-read RPCs (non-cacheable client is not page-cached)");
+
+    // --- Gate ON (cacheable=true): the re-read is served from the page cache. ---
+    __atomic_store_n(&g_client.cacheable, true, __ATOMIC_RELAXED);
+    long h1 = dev9p.read(nc, buf, 64, 0);                   // miss -> RPC + populate page 0
+    TEST_EXPECT_EQ((u64)h1, (u64)5, "gate-on first read populates");
+    TEST_ASSERT(buf[0] == 'h' && buf[4] == 'o', "populate payload correct");
+    g_tread_req_offset = 0xDEAD;                            // sentinel
+    long h2 = dev9p.read(nc, buf, 64, 0);                   // HIT -> served from cache
+    TEST_EXPECT_EQ((u64)h2, (u64)5, "gate-on re-read serves the cached bytes");
+    TEST_ASSERT(buf[0] == 'h' && buf[4] == 'o', "served payload correct");
+    TEST_EXPECT_EQ(g_tread_req_offset, 0xDEADull,
+                   "gate-on re-read served from the page cache (NO second Tread)");
+    TEST_ASSERT(g_client.larder.page_hits >= 1ull, "a page hit was counted");
+
+    // An own-write invalidates the cached page: the next read RPCs again.
+    dev9p.write(nc, (const u8 *)"x", 1, 0);
+    g_tread_req_offset = 0xDEAD;
+    long h3 = dev9p.read(nc, buf, 64, 0);
+    TEST_EXPECT_EQ((u64)h3, (u64)5, "post-write read");
+    TEST_EXPECT_EQ(g_tread_req_offset, 0ull,
+                   "own-write invalidated the page (post-write read RPCs)");
+
+    larder_destroy(&g_client.larder);
+    __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);   // restore default for teardown
+    spoor_clunk(nc);
+    teardown(root);
+}
+
+// Task-#44 aligned wire read: the msize payload (8169 here; 131049 in
+// production) is not a page multiple, so a big sequential stream's chunks each
+// end in a PARTIAL page. Pre-fix, the partial-front page could never be
+// re-populated (populate starts at aligned starts >= the read offset), so the
+// hole persisted and EVERY re-read of the stream pv-missed at it and re-paid
+// the wire for the whole tail. The fix wires a big unaligned read at the
+// containing page's ALIGNED start (a legal short read): each chunk fully
+// rewrites its predecessor's partial tail, so pass 2 serves from pages.
+void test_dev9p_read_align_heals_partial(void) {
+    struct Spoor *root = make_open_client_and_root();
+    struct Spoor *nc = spoor_clone(root);
+    const char *name = "file";
+    struct Walkqid *w = dev9p.walk(root, nc, &name, 1);
+    walkqid_free(w);
+    dev9p.open(nc, 0);
+    enum { FSZ = 20000 };
+    g_tread_file_size = FSZ;
+    __atomic_store_n(&g_client.cacheable, true, __ATOMIC_RELAXED);
+
+    static u8 buf[16384];
+    static u8 pass1[FSZ], pass2[FSZ];
+
+    // Pass 1 (first touch): stream to EOF. Chunk 1 wires at 0 and ends at 8169
+    // (page 1 partial, valid_len 4073); chunk 2 MUST wire at the ALIGNED 4096
+    // (healing page 1), not the caller's 8169.
+    u64 off = 0; long n;
+    u64 chunk2_wire = 0; int chunk_i = 0;
+    while ((n = dev9p.read(nc, buf, (long)sizeof buf, (s64)off)) > 0) {
+        TEST_ASSERT(off + (u64)n <= (u64)FSZ, "pass-1 bounds");
+        for (long i = 0; i < n; i++) pass1[off + (u64)i] = buf[i];
+        off += (u64)n;
+        chunk_i++;
+        if (chunk_i == 1) g_tread_req_offset = 0xEEEE;   // sentinel for chunk 2
+        if (chunk_i == 2) chunk2_wire = g_tread_req_offset;
+    }
+    TEST_EXPECT_EQ(off, (u64)FSZ, "pass 1 read the whole file");
+    TEST_EXPECT_EQ(chunk2_wire, 4096ull,
+                   "chunk 2 wired at the ALIGNED offset (4096, not 8169)");
+    bool ok = true;
+    for (u64 o = 0; o < (u64)FSZ; o++)
+        if (pass1[o] != (u8)((o * 131u) ^ (o >> 8))) { ok = false; break; }
+    TEST_ASSERT(ok, "pass-1 bytes match the pattern (the shift is byte-exact)");
+
+    // Pass 2 (re-stream): every page serves from the cache; the ONLY wire ops
+    // are the tail EOF probe (no fresh attr installed in this fixture) -- the
+    // shifted probe returns got == lead (delivered exactly up to the caller's
+    // offset), which is AMBIGUOUS between EOF and a mid-file short (the
+    // D44-audit F1 split), so the unshifted retry confirms the EOF: exactly
+    // TWO wire ops. In production a fresh attr serves the EOF with ZERO wire
+    // ops (read_eof_attr_served). Pre-fix the holes persisted and the stream
+    // tail re-wired every pass (>= 3 ops).
+    u64 wires0 = g_tread_seen;
+    off = 0;
+    while ((n = dev9p.read(nc, buf, (long)sizeof buf, (s64)off)) > 0) {
+        for (long i = 0; i < n; i++) pass2[off + (u64)i] = buf[i];
+        off += (u64)n;
+    }
+    TEST_EXPECT_EQ(off, (u64)FSZ, "pass 2 read the whole file");
+    TEST_EXPECT_EQ(g_tread_seen - wires0, 2ull,
+                   "pass 2 wired ONLY the EOF probe + its retry (holes healed)");
+    ok = true;
+    for (u64 o = 0; o < (u64)FSZ; o++)
+        if (pass2[o] != pass1[o]) { ok = false; break; }
+    TEST_ASSERT(ok, "pass-2 bytes identical to pass 1");
+
+    larder_destroy(&g_client.larder);
+    __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
+    g_tread_file_size = 0;
+    spoor_clunk(nc);
+    teardown(root);
+}
+
+// D44-audit F1 [P1] regression: a single Rread may legitimately short-return
+// MID-FILE (the R-5 SA-F1 ground truth). If the aligned wire read's fetch
+// short-returns at/below `lead`, that is NOT an EOF -- the pre-fix arm
+// returned 0, manufacturing a false mid-file EOF that looping consumers
+// (the REVENANT cluster fill, exec's eager segment read, userspace streams)
+// treat as end-of-file. The fix retries UNSHIFTED at the caller's offset.
+void test_dev9p_read_align_short_not_eof(void) {
+    struct Spoor *root = make_open_client_and_root();
+    struct Spoor *nc = spoor_clone(root);
+    const char *name = "file";
+    struct Walkqid *w = dev9p.walk(root, nc, &name, 1);
+    walkqid_free(w);
+    dev9p.open(nc, 0);
+    enum { FSZ = 20000 };
+    g_tread_file_size = FSZ;
+    __atomic_store_n(&g_client.cacheable, true, __ATOMIC_RELAXED);
+
+    static u8 buf[16384];
+    static u8 all[FSZ];
+
+    // Read 1: the server short-returns 1500 mid-file (a legal partial Rread).
+    g_tread_clamp_once = 1500;
+    long n1 = dev9p.read(nc, buf, (long)sizeof buf, 0);
+    TEST_EXPECT_EQ((u64)n1, 1500ull, "read 1 accepts the mid-file short");
+    for (long i = 0; i < n1; i++) all[i] = buf[i];
+
+    // Read 2 at 1500 (lead=1500, wire_off=0): the shifted fetch is ALSO
+    // shorted, to 1200 <= lead. Pre-fix: return 0 = a FALSE mid-file EOF.
+    // Post-fix: the unshifted retry at 1500 returns real bytes.
+    g_tread_clamp_once = 1200;
+    long n2 = dev9p.read(nc, buf, (long)sizeof buf, 1500);
+    TEST_ASSERT(n2 > 0, "a short-below-lead fetch is NOT an EOF (the retry serves)");
+    for (long i = 0; i < n2; i++) all[1500 + i] = buf[i];
+
+    // Finish the stream; the caller must receive the WHOLE file, byte-exact.
+    u64 off = 1500 + (u64)n2; long n;
+    while ((n = dev9p.read(nc, buf, (long)sizeof buf, (s64)off)) > 0) {
+        TEST_ASSERT(off + (u64)n <= (u64)FSZ, "stream bounds");
+        for (long i = 0; i < n; i++) all[off + (u64)i] = buf[i];
+        off += (u64)n;
+    }
+    TEST_EXPECT_EQ(off, (u64)FSZ, "the stream reaches the true EOF");
+    bool ok = true;
+    for (u64 o = 0; o < (u64)FSZ; o++)
+        if (all[o] != (u8)((o * 131u) ^ (o >> 8))) { ok = false; break; }
+    TEST_ASSERT(ok, "the assembled bytes match the pattern (no zero holes)");
+
+    larder_destroy(&g_client.larder);
+    __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
+    g_tread_file_size = 0;
+    spoor_clunk(nc);
+    teardown(root);
+}
+
+// D44-audit F3 close: an OTRUNC open is an own-write (the server truncates) --
+// dev9p_open must drop the file's cached attr + pages like dev9p_write does,
+// independent of any server version-bump-on-truncate guarantee.
+void test_dev9p_open_trunc_invalidates(void) {
+    struct Spoor *root = make_open_client_and_root();
+    struct Spoor *nc = spoor_clone(root);
+    const char *name = "file";
+    struct Walkqid *w = dev9p.walk(root, nc, &name, 1);
+    walkqid_free(w);
+    dev9p.open(nc, 0);
+    g_tread_file_size = 20000;
+    __atomic_store_n(&g_client.cacheable, true, __ATOMIC_RELAXED);
+    struct larder *l = &g_client.larder;
+    u8 buf[64];
+
+    // Cache a fresh attr + page 0 for the file.
+    struct t_stat st = {0};
+    st.size = 20000; st.qid_path = nc->qid.path; st.qid_vers = nc->qid.vers;
+    larder_attr_install(l, larder_gen_snapshot(l), nc->qid.path, nc->qid.vers, &st);
+    (void)dev9p.read(nc, buf, 64, 0);            // populates nothing (<=4K, but
+    u64 fsz = 0;                                  // the attr is the assertion target)
+    TEST_ASSERT(larder_attr_fresh_size(l, nc->qid.path, nc->qid.vers, &fsz),
+                "attr cached before the OTRUNC open");
+
+    // A second walk to the same file, opened with OTRUNC (0x10): the open
+    // must invalidate the file's cached attr (and pages).
+    struct Spoor *nc2 = spoor_clone(root);
+    struct Walkqid *w2 = dev9p.walk(root, nc2, &name, 1);
+    walkqid_free(w2);
+    dev9p.open(nc2, 0x10 | 1);                    // OWRITE | OTRUNC
+    TEST_ASSERT(!larder_attr_fresh_size(l, nc->qid.path, nc->qid.vers, &fsz),
+                "OTRUNC open dropped the cached attr (own-write-through)");
+
+    larder_destroy(&g_client.larder);
+    __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
+    g_tread_file_size = 0;
+    spoor_clunk(nc2);
+    spoor_clunk(nc);
+    teardown(root);
+}
+
+// Task-#44 attr-served EOF: a FRESH cached attr (cvers == the fid's open-time
+// qid.vers -- the page-serve freshness rule) answers the sequential reader's
+// final read-returns-0 probe RPC-free; absent/stale attrs stay conservative
+// (the probe wires). Own-write invalidation restores the wire probe.
+void test_dev9p_read_eof_attr_served(void) {
+    struct Spoor *root = make_open_client_and_root();
+    struct Spoor *nc = spoor_clone(root);
+    const char *name = "file";
+    struct Walkqid *w = dev9p.walk(root, nc, &name, 1);
+    walkqid_free(w);
+    dev9p.open(nc, 0);
+    g_tread_file_size = 20000;
+    __atomic_store_n(&g_client.cacheable, true, __ATOMIC_RELAXED);
+    struct larder *l = &g_client.larder;
+    u8 buf[64];
+
+    // No attr cached: the EOF probe pays a wire RPC (conservative).
+    u64 w0 = g_tread_seen;
+    long r = dev9p.read(nc, buf, 64, 20000);
+    TEST_EXPECT_EQ((u64)r, 0ull, "EOF read returns 0");
+    TEST_EXPECT_EQ(g_tread_seen - w0, 1ull, "no fresh attr -> the probe wires");
+
+    // FRESH attr: EOF serves RPC-free; in-range reads still return bytes.
+    struct t_stat st = {0};
+    st.size = 20000; st.qid_path = nc->qid.path; st.qid_vers = nc->qid.vers;
+    larder_attr_install(l, larder_gen_snapshot(l), nc->qid.path, nc->qid.vers, &st);
+    w0 = g_tread_seen;
+    r = dev9p.read(nc, buf, 64, 20000);
+    TEST_EXPECT_EQ((u64)r, 0ull, "EOF read returns 0 (attr-served)");
+    TEST_EXPECT_EQ(g_tread_seen - w0, 0ull, "fresh attr -> ZERO wire ops");
+    r = dev9p.read(nc, buf, 64, 19990);
+    TEST_EXPECT_EQ((u64)r, 10ull, "in-range read still returns bytes");
+
+    // An own-write invalidates the attr: the next EOF probe wires again.
+    dev9p.write(nc, (const u8 *)"x", 1, 0);
+    w0 = g_tread_seen;
+    r = dev9p.read(nc, buf, 64, 20000);
+    TEST_EXPECT_EQ((u64)r, 0ull, "post-write EOF read returns 0");
+    TEST_EXPECT_EQ(g_tread_seen - w0, 1ull, "post-write EOF probe wires");
+
+    larder_destroy(&g_client.larder);
+    __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
+    g_tread_file_size = 0;
+    spoor_clunk(nc);
+    teardown(root);
+}
+
+// =============================================================================
+// FID-LIFECYCLE cached-open (docs/FID-LIFECYCLE-DESIGN.md section 3.3).
+// =============================================================================
+
+// Prime the Larder metadata for `name`: a bind-form walk_attrs latches
+// cacheable + installs the dentry + attr from the wire (the canonical
+// responder: qid.path 0x20, size 0x200 unless overridden), then close the
+// bound Spoor + drain its deferred Rclunk so the single-slot loopback is
+// clean for the next wire op.
+static void co_prime(struct Spoor *root, const char *name, size_t len) {
+    struct Spoor *nc = spoor_clone(root);
+    TEST_ASSERT(nc != NULL, "co_prime clone");
+    const char *names[1] = { name };
+    size_t lens[1] = { len };
+    struct t_stat sts[DEV_WALK_ATTRS_MAX];
+    struct Walkqid *w = dev9p.walk_attrs(root, nc, names, lens, 1, sts);
+    TEST_ASSERT(w != NULL && w->spoor == nc, "co_prime bind walk");
+    walkqid_free(w);
+    // Drain the async Rclunk ONLY if the close actually clunked: a DIR-typed
+    // prime's close DONATES the fid (G2 -- no Tclunk), and a pump with
+    // nothing pending latches the single-slot loopback client dead.
+    u32 pre_clunk = g_clunk_seen;
+    spoor_clunk(nc);
+    if (g_clunk_seen != pre_clunk)
+        (void)p9_client_reader_pump_once(&g_client);
+}
+
+void test_dev9p_cached_open(void) {
+    struct Spoor *root = make_open_client_and_root();
+    struct larder *l = &g_client.larder;
+    const char *names[1] = { "fileA" };
+    size_t lens[1] = { 5 };
+    struct t_stat sts[DEV_WALK_ATTRS_MAX];
+
+    co_prime(root, "fileA", 5);
+
+    // Pages absent -> the RPC-free hint misses; NO wire op is spent.
+    g_wga_seen = 0; g_lopen_seen = 0; g_clunk_seen = 0;
+    struct Spoor *co = dev9p.open_cached(root, (const char *const *)names,
+                                         lens, 1, sts);
+    TEST_ASSERT(co == NULL, "no pages cached -> hint miss -> NULL");
+    TEST_EXPECT_EQ((u64)g_wga_seen, 0ull, "a hint miss costs no wire op");
+
+    // Install the covering page: content [0, 0x200) at cvers 0 (the canonical
+    // responder's fresh version).
+    static u8 data[0x200];
+    for (u32 i = 0; i < sizeof(data); i++) data[i] = (u8)(i * 7 + 3);
+    larder_page_install(l, larder_gen_snapshot(l), 0x20, 0, 0, data,
+                        (u32)sizeof(data));
+
+    u64 budget0 = dev9p_co_budget_used();
+
+    // The fidless open: exactly ONE wire op (the forced-fresh query), no
+    // Tlopen, the fresh records in sts, the budget charged.
+    g_wga_seen = 0;
+    co = dev9p.open_cached(root, (const char *const *)names, lens, 1, sts);
+    TEST_ASSERT(co != NULL, "cached-open mints the fidless Spoor");
+    TEST_EXPECT_EQ((u64)g_wga_seen, 1ull, "exactly one wire op (the fresh query)");
+    TEST_EXPECT_EQ((u64)g_lopen_seen, 0ull, "no Tlopen");
+    TEST_ASSERT((co->flag & COPEN) != 0, "the Spoor is opened");
+    TEST_EXPECT_EQ(co->qid.path, 0x20ull, "the leaf qid");
+    struct dev9p_priv *cp = dev9p_priv_of(co);
+    TEST_ASSERT(cp != NULL && cp->cached_open, "cached_open priv");
+    TEST_EXPECT_EQ((u64)cp->fid, (u64)P9_NOFID, "fidless (P9_NOFID)");
+    TEST_EXPECT_EQ(sts[0].qid_path, 0x20ull, "fresh sts filled for the post-scan");
+    TEST_EXPECT_EQ(sts[0].size, 0x200ull, "fresh leaf size");
+    TEST_EXPECT_EQ(dev9p_co_budget_used() - budget0, 0x200ull, "budget charged");
+
+    // Reads serve the snapshot: full, sliced, EOF at + past size.
+    u8 buf[0x260];
+    long r = dev9p.read(co, buf, (long)sizeof(buf), 0);
+    TEST_EXPECT_EQ((u64)r, 0x200ull, "read serves the full snapshot");
+    bool bytes_ok = true;
+    for (u32 i = 0; i < 0x200; i++)
+        if (buf[i] != data[i]) { bytes_ok = false; break; }
+    TEST_ASSERT(bytes_ok, "snapshot bytes verbatim");
+    r = dev9p.read(co, buf, 50, 100);
+    TEST_EXPECT_EQ((u64)r, 50ull, "sliced read");
+    TEST_ASSERT(buf[0] == data[100] && buf[49] == data[149], "slice bytes");
+    r = dev9p.read(co, buf, 64, 0x200);
+    TEST_EXPECT_EQ((u64)r, 0ull, "read at size -> EOF");
+    r = dev9p.read(co, buf, 64, 5000);
+    TEST_EXPECT_EQ((u64)r, 0ull, "read past size -> EOF");
+
+    // fstat serves the open-time stat; the fidless seams fail loud / no-op.
+    struct t_stat st;
+    TEST_EXPECT_EQ((u64)dev9p.stat_native(co, &st), 0ull, "fidless fstat serves");
+    TEST_EXPECT_EQ(st.size, 0x200ull, "fstat size");
+    TEST_EXPECT_EQ(st.qid_path, 0x20ull, "fstat qid");
+    TEST_ASSERT(dev9p.wstat_native(co, T_WSTAT_MODE, 0644, 0, 0, 0) == -1,
+                "wstat on a fidless fd fails LOUD (the documented seam)");
+    TEST_EXPECT_EQ((u64)dev9p.fsync(co, 0), 0ull, "fsync no-ops 0 (read-only fd)");
+    TEST_ASSERT(dev9p.write(co, "x", 1, 0) < 0, "write rejected");
+    TEST_ASSERT(dev9p.readdir(co, buf, 64, 0) < 0, "readdir rejected");
+    TEST_ASSERT(dev9p.walk(co, NULL, names, 1) == NULL,
+                "walk FROM a fidless Spoor rejected (NOFID guard)");
+    TEST_ASSERT(dev9p.walk_attrs(co, NULL, names, lens, 1, sts) == NULL,
+                "walk_attrs FROM a fidless Spoor rejected (NOFID guard)");
+
+    // Close: wire-free (no Tclunk) + the budget released.
+    g_clunk_seen = 0;
+    spoor_clunk(co);
+    TEST_EXPECT_EQ((u64)g_clunk_seen, 0ull, "close sends NO Tclunk");
+    TEST_EXPECT_EQ(dev9p_co_budget_used(), budget0, "budget uncharged at close");
+
+    larder_destroy(l);
+    __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
+    teardown(root);
+}
+
+// B1 per-attach loose mode (I-38 opt-in; docs/chase/B1-VOTE.md): a LOOSE
+// client's cached-open serves a FULL hint hit with ZERO wire ops (the wga
+// query skipped; the snapshot at the CACHED cvers); a hint miss still
+// returns NULL without a wire op from open_cached (first touch takes the
+// normal path); a STRICT client is byte-unchanged (the sibling test above
+// pins its exactly-one-wire-op contract, which fails if loose leaks).
+void test_dev9p_cached_open_loose(void) {
+    struct Spoor *root = make_open_client_and_root();
+    struct larder *l = &g_client.larder;
+    const char *names[1] = { "fileA" };
+    size_t lens[1] = { 5 };
+    struct t_stat sts[DEV_WALK_ATTRS_MAX];
+
+    co_prime(root, "fileA", 5);
+    static u8 data[0x200];
+    for (u32 i = 0; i < sizeof(data); i++) data[i] = (u8)(i * 3 + 1);
+    larder_page_install(l, larder_gen_snapshot(l), 0x20, 0, 0, data,
+                        (u32)sizeof(data));
+
+    g_client.loose = true;
+    u64 budget0 = dev9p_co_budget_used();
+
+    // The loose fidless open: ZERO wire ops -- the B1 contract. The sts
+    // post-scan records come from the caches (the same attrs the L1c base
+    // X-check serves).
+    g_wga_seen = 0; g_lopen_seen = 0;
+    struct Spoor *co = dev9p.open_cached(root, (const char *const *)names,
+                                         lens, 1, sts);
+    TEST_ASSERT(co != NULL, "loose cached-open mints the fidless Spoor");
+    TEST_EXPECT_EQ((u64)g_wga_seen, 0ull, "ZERO wire ops on a full hint hit");
+    TEST_EXPECT_EQ((u64)g_lopen_seen, 0ull, "no Tlopen");
+    struct dev9p_priv *cp = dev9p_priv_of(co);
+    TEST_ASSERT(cp != NULL && cp->cached_open, "cached_open priv");
+    TEST_EXPECT_EQ((u64)cp->fid, (u64)P9_NOFID, "fidless (P9_NOFID)");
+    TEST_EXPECT_EQ(sts[0].qid_path, 0x20ull, "cached sts filled for the post-scan");
+    TEST_EXPECT_EQ(sts[0].size, 0x200ull, "cached leaf size");
+    TEST_EXPECT_EQ(dev9p_co_budget_used() - budget0, 0x200ull, "budget charged");
+
+    // Reads serve the snapshot taken at the CACHED cvers.
+    u8 buf[0x200];
+    long r = dev9p.read(co, buf, (long)sizeof(buf), 0);
+    TEST_EXPECT_EQ((u64)r, 0x200ull, "read serves the full snapshot");
+    bool bytes_ok = true;
+    for (u32 i = 0; i < 0x200; i++)
+        if (buf[i] != data[i]) { bytes_ok = false; break; }
+    TEST_ASSERT(bytes_ok, "snapshot bytes verbatim");
+    spoor_clunk(co);
+    TEST_EXPECT_EQ(dev9p_co_budget_used(), budget0, "budget uncharged at close");
+
+    // A hint MISS on a loose client: NULL and STILL zero wire ops from
+    // open_cached (first touch belongs to the normal path -- the loose
+    // mode never invents state it has not cached).
+    const char *miss[1] = { "absent" };
+    size_t mlen[1] = { 6 };
+    g_wga_seen = 0;
+    co = dev9p.open_cached(root, (const char *const *)miss, mlen, 1, sts);
+    TEST_ASSERT(co == NULL, "hint miss -> NULL on a loose client");
+    TEST_EXPECT_EQ((u64)g_wga_seen, 0ull, "a loose hint miss costs no wire op");
+
+    // An own-write invalidate drops the coverage: the next loose
+    // cached-open must MISS (fall back), not serve the stale snapshot.
+    larder_page_invalidate(l, 0x20);
+    g_wga_seen = 0;
+    co = dev9p.open_cached(root, (const char *const *)names, lens, 1, sts);
+    TEST_ASSERT(co == NULL, "own-write invalidate -> loose hint miss");
+    TEST_EXPECT_EQ((u64)g_wga_seen, 0ull, "no wire op on the post-invalidate miss");
+
+    g_client.loose = false;
+    larder_destroy(l);
+    __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
+    teardown(root);
+}
+
+void test_dev9p_cached_open_fallbacks(void) {
+    struct Spoor *root = make_open_client_and_root();
+    struct larder *l = &g_client.larder;
+    const char *names[1] = { "fileB" };
+    size_t lens[1] = { 5 };
+    struct t_stat sts[DEV_WALK_ATTRS_MAX];
+    static u8 data[0x200];
+    for (u32 i = 0; i < sizeof(data); i++) data[i] = (u8)(i ^ 0x5a);
+
+    co_prime(root, "fileB", 5);
+
+    // (a) Page cvers stale vs the CACHED attr -> the hint misses; no wire op.
+    larder_page_install(l, larder_gen_snapshot(l), 0x20, 0, /*cvers=*/7, data,
+                        (u32)sizeof(data));
+    g_wga_seen = 0;
+    struct Spoor *co = dev9p.open_cached(root, (const char *const *)names,
+                                         lens, 1, sts);
+    TEST_ASSERT(co == NULL, "stale page cvers (hint) -> NULL");
+    TEST_EXPECT_EQ((u64)g_wga_seen, 0ull, "no wire op on a hint miss");
+
+    // (b) THE B2 REGRESSION: the hint passes (cached attr cvers 0 == page
+    // cvers 0) but the SERVER's fresh version moved -> the FRESH gate must
+    // fail the open. A buggy impl that trusted the locally-served attr
+    // (B1/loose) would mint here and serve stale content.
+    larder_page_install(l, larder_gen_snapshot(l), 0x20, 0, /*cvers=*/0, data,
+                        (u32)sizeof(data));
+    g_wga_vers_ov = 5;
+    u64 b0 = dev9p_co_budget_used();
+    g_wga_seen = 0;
+    co = dev9p.open_cached(root, (const char *const *)names, lens, 1, sts);
+    TEST_ASSERT(co == NULL, "fresh-cvers mismatch -> fallback (B2, not B1)");
+    TEST_EXPECT_EQ((u64)g_wga_seen, 1ull, "the query DID reach the wire");
+    TEST_EXPECT_EQ(dev9p_co_budget_used(), b0, "budget balanced on the miss");
+    g_wga_vers_ov = 0;
+
+    // (c) Partial coverage: valid_len short of the required boundary (the
+    // msize-clamp shape) -> the hint's coverage fails; no served hole.
+    larder_page_install(l, larder_gen_snapshot(l), 0x20, 0, /*cvers=*/0, data,
+                        300);
+    g_wga_seen = 0;
+    co = dev9p.open_cached(root, (const char *const *)names, lens, 1, sts);
+    TEST_ASSERT(co == NULL, "partial page -> coverage fails -> NULL");
+    TEST_EXPECT_EQ((u64)g_wga_seen, 0ull, "no wire op on a coverage miss");
+
+    // (d) Oversize leaf: the size cap gates at the hint; no wire op.
+    g_wga_size_ov_on = true;
+    g_wga_size_ov = (u64)DEV9P_CO_MAX_SIZE + 1u;
+    co_prime(root, "fileB", 5);           // re-prime the attr at the new size
+    g_wga_seen = 0;
+    co = dev9p.open_cached(root, (const char *const *)names, lens, 1, sts);
+    TEST_ASSERT(co == NULL, "over-cap size -> NULL");
+    TEST_EXPECT_EQ((u64)g_wga_seen, 0ull, "no wire op on the size gate");
+
+    // (e) A DIRECTORY leaf with size 0 would be "trivially covered" -- the
+    // type gate MUST refuse it (a minted dir-as-file Spoor would break
+    // readdir). Load-bearing, not defense.
+    g_wga_size_ov = 0;                    // size 0: trivially covered
+    g_wga_type_ov = P9_QTDIR;
+    co_prime(root, "fileB", 5);
+    g_wga_seen = 0;
+    co = dev9p.open_cached(root, (const char *const *)names, lens, 1, sts);
+    TEST_ASSERT(co == NULL, "a size-0 DIRECTORY leaf is refused (type gate)");
+    g_wga_type_ov = 0;
+
+    // (f) The empty FILE: size 0, plain type -> the 1-RT fidless open works
+    // (no pages needed; reads are EOF immediately). (e)'s DIR-typed prime of
+    // the SAME leaf is a non-physical toggle (no type-morph exists in the
+    // single-writer model) -- and with G2 a bind walk is cache-servable, so
+    // the stale DIR chain must be dropped or this re-prime consumes (e)'s
+    // parked DIR fid instead of re-wiring (the test_dev9p_walk_attrs
+    // toggle-reset discipline).
+    larder_destroy(l);
+    co_prime(root, "fileB", 5);           // attr: size 0, type FILE
+    u64 b1 = dev9p_co_budget_used();
+    g_wga_seen = 0; g_lopen_seen = 0; g_clunk_seen = 0;
+    co = dev9p.open_cached(root, (const char *const *)names, lens, 1, sts);
+    TEST_ASSERT(co != NULL, "empty-file cached-open mints");
+    TEST_EXPECT_EQ((u64)g_wga_seen, 1ull, "one wire op");
+    u8 buf[16];
+    TEST_EXPECT_EQ((u64)dev9p.read(co, buf, 16, 0), 0ull, "empty file: EOF at 0");
+    spoor_clunk(co);
+    TEST_EXPECT_EQ((u64)g_lopen_seen + (u64)g_clunk_seen, 0ull,
+                   "empty-file open+close fully wire-free beyond the query");
+    TEST_EXPECT_EQ(dev9p_co_budget_used(), b1, "budget balanced (0-byte charge)");
+    g_wga_size_ov_on = false;
+    g_wga_size_ov = 0;
+
+    larder_destroy(l);
+    __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
+    teardown(root);
+}
+
+// =============================================================================
+// F1 write-behind (LARDER-DESIGN section 12): the wb_* suite. Every test
+// runs on a LOOSE + cacheable client (the staging gate); the wire witnesses
+// (g_twrite_seen / seq ordering / payload capture / pattern verify) prove
+// what actually crossed vs what was staged.
+// =============================================================================
+
+// Mint a loose+cacheable client + root and create `wbfile` opened OWRITE
+// (the create-born eligibility path). Returns the opened Spoor via *out;
+// the caller clunks it, then teardown(root).
+static struct Spoor *wb_make_created(struct Spoor **out_root) {
+    struct Spoor *root = make_open_client_and_root();
+    if (!root) return NULL;
+    g_client.loose = true;
+    __atomic_store_n(&g_client.cacheable, true, __ATOMIC_RELAXED);
+    struct Spoor *nc = spoor_clone(root);
+    if (!nc) { teardown(root); return NULL; }
+    struct Walkqid *w = dev9p.walk(root, nc, NULL, 0);
+    if (!w) { spoor_clunk(nc); teardown(root); return NULL; }
+    walkqid_free(w);
+    struct Spoor *opened = dev9p.create(nc, "wbfile", 1 /*OWRITE*/, 0644u, 1000u);
+    if (!opened) { spoor_clunk(nc); teardown(root); return NULL; }
+    *out_root = root;
+    return opened;   // == nc, transitioned to the created file
+}
+
+static void wb_test_end(struct Spoor *root) {
+    g_client.loose = false;
+    __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
+    teardown(root);
+}
+
+// N small appends stage wire-free; close flushes them as ONE Twrite whose
+// payload is the exact concatenation, ordered BEFORE the Tclunk; the global
+// budget balances back to baseline. Also pins the strict-mount non-regression:
+// on a non-loose client the same create+write goes straight through.
+void test_dev9p_wb_coalesce_one_twrite(void) {
+    // (a) strict client: write-through, byte-identical to pre-F1.
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root (strict)");
+    struct Spoor *nc = spoor_clone(root);
+    struct Walkqid *w = dev9p.walk(root, nc, NULL, 0);
+    TEST_ASSERT(w != NULL, "clone-walk (strict)");
+    walkqid_free(w);
+    struct Spoor *f = dev9p.create(nc, "wbfile", 1, 0644u, 1000u);
+    TEST_ASSERT(f != NULL, "create (strict)");
+    struct dev9p_priv *fp = dev9p_priv_of(f);
+    TEST_ASSERT(fp != NULL && !fp->wb_eligible, "strict client: NOT wb-eligible");
+    wb_wire_reset();
+    u8 b[64];
+    for (u32 i = 0; i < sizeof(b); i++) b[i] = wb_pat(i);
+    TEST_EXPECT_EQ((u64)dev9p.write(f, b, 64, 0), 64ull, "strict write ok");
+    TEST_EXPECT_EQ((u64)g_twrite_seen, 1ull, "strict client: write-through");
+    spoor_clunk(f);
+    teardown(root);
+
+    // (b) loose client: 4 appends stage; close coalesces to ONE Twrite.
+    root = NULL;
+    f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create (loose)");
+    fp = dev9p_priv_of(f);
+    TEST_ASSERT(fp != NULL && fp->wb_eligible, "create-born wb-eligible");
+    u64 budget0 = dev9p_wb_budget_used();
+    wb_wire_reset();
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 c = 0; c < 4; c++) {
+        for (u32 i = 0; i < 1000; i++) chunk[i] = wb_pat((u64)c * 1000u + i);
+        TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 1000, (s64)((u64)c * 1000u)),
+                       1000ull, "staged write returns count");
+    }
+    TEST_EXPECT_EQ((u64)g_twrite_seen, 0ull, "4 appends: ZERO wire writes");
+    TEST_ASSERT(dev9p_wb_budget_used() > budget0, "staged bytes charged");
+    g_twrite_pat_on = true;
+    spoor_clunk(f);   // close: flush + async clunk
+    TEST_EXPECT_EQ((u64)g_twrite_seen, 1ull, "close: ONE coalesced Twrite");
+    TEST_EXPECT_EQ(g_twrite_cap_off, 0ull, "flush lands at offset 0");
+    TEST_EXPECT_EQ((u64)g_twrite_cap_len, 4000ull, "flush carries all 4000 bytes");
+    TEST_ASSERT(g_twrite_pat_ok, "payload == the exact concatenation");
+    TEST_ASSERT(g_clunk_seen >= 1 && g_twrite_last_seq < g_clunk_last_seq,
+                "the flush Twrite precedes the Tclunk");
+    TEST_EXPECT_EQ(dev9p_wb_budget_used(), budget0, "budget balanced at close");
+    wb_test_end(root);
+}
+
+// Reads on the staging fd: within the run = staged bytes wire-free (short to
+// the run end); below the run (after a flush advanced the anchor) = the
+// normal wire path; past the run end = falls through to the wire (never a
+// synthesized EOF).
+void test_dev9p_wb_overlay_read(void) {
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 1000; i++) chunk[i] = wb_pat(i);
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 1000, 0), 1000ull, "stage [0,1000)");
+    wb_wire_reset();
+    // Within: served from the buffer, no wire.
+    u8 rb[400];
+    long got = dev9p.read(f, rb, 400, 500);
+    TEST_EXPECT_EQ((u64)got, 400ull, "within-run read serves 400");
+    bool ok = true;
+    for (u32 i = 0; i < 400 && ok; i++)
+        if (rb[i] != wb_pat(500u + i)) ok = false;
+    TEST_ASSERT(ok, "within-run bytes == staged content");
+    TEST_EXPECT_EQ((u64)g_tread_seen + (u64)g_twrite_seen, 0ull,
+                   "within-run read is fully wire-free");
+    // Spanning: starts within, short-returns at the run end.
+    got = dev9p.read(f, rb, 400, 800);
+    TEST_EXPECT_EQ((u64)got, 200ull, "spanning read shorts at the run end");
+    // Past the run end: falls through to the wire (the responder answers;
+    // the point is it ASKED rather than synthesizing 0).
+    wb_wire_reset();
+    (void)dev9p.read(f, rb, 16, 4096);
+    TEST_EXPECT_EQ((u64)g_tread_seen, 1ull, "past-run read consults the wire");
+    // Flush via fsync, then stage a second run [1000,2000): a below-run read
+    // serves the FLUSHED bytes wire-free (G1 write-populate: the flush
+    // installs OWN pages instead of invalidating -- pre-G1 this read went to
+    // the wire), a within-run read still serves staged.
+    wb_wire_reset();
+    TEST_EXPECT_EQ((u64)dev9p.fsync(f, 0), 0ull, "fsync flushes");
+    TEST_EXPECT_EQ((u64)g_twrite_seen, 1ull, "fsync: one flush Twrite");
+    for (u32 i = 0; i < 1000; i++) chunk[i] = wb_pat(1000u + i);
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 1000, 1000), 1000ull,
+                   "post-flush append re-stages (anchor advanced)");
+    wb_wire_reset();
+    got = dev9p.read(f, rb, 100, 100);   // below the new run: flushed content
+    TEST_EXPECT_EQ((u64)got, 100ull, "below-run read serves the flushed run");
+    TEST_EXPECT_EQ((u64)g_tread_seen, 0ull,
+                   "below-run read is wire-free (G1 own pages)");
+    ok = true;
+    for (u32 i = 0; i < 100 && ok; i++)
+        if (rb[i] != wb_pat(100u + i)) ok = false;
+    TEST_ASSERT(ok, "below-run bytes == the flushed content");
+    wb_wire_reset();
+    got = dev9p.read(f, rb, 100, 1500);  // within the new run
+    TEST_EXPECT_EQ((u64)got, 100ull, "new-run read serves staged");
+    TEST_EXPECT_EQ((u64)g_tread_seen, 0ull, "…wire-free");
+    ok = true;
+    for (u32 i = 0; i < 100 && ok; i++)
+        if (rb[i] != wb_pat(1500u + i)) ok = false;
+    TEST_ASSERT(ok, "new-run bytes correct");
+    spoor_clunk(f);
+    wb_test_end(root);
+}
+
+// The OTRUNC-open eligibility twin: an existing file opened OWRITE|OTRUNC on
+// a loose client stages; close flushes BEFORE the Tclunk.
+void test_dev9p_wb_flush_at_close(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    g_client.loose = true;
+    __atomic_store_n(&g_client.cacheable, true, __ATOMIC_RELAXED);
+    struct Spoor *nc = spoor_clone(root);
+    const char *names[1] = { "fileA" };
+    struct Walkqid *w = dev9p.walk(root, nc, names, 1);
+    TEST_ASSERT(w != NULL && w->nqid == 1, "walk to fileA");
+    walkqid_free(w);
+    struct Spoor *o = dev9p.open(nc, 1 | 0x10 /*OWRITE|OTRUNC*/);
+    TEST_ASSERT(o != NULL, "OTRUNC open");
+    struct dev9p_priv *op = dev9p_priv_of(o);
+    TEST_ASSERT(op != NULL && op->wb_eligible, "OTRUNC-born wb-eligible");
+    wb_wire_reset();
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 512; i++) chunk[i] = wb_pat(i);
+    TEST_EXPECT_EQ((u64)dev9p.write(o, chunk, 512, 0), 512ull, "stage");
+    TEST_EXPECT_EQ((u64)g_twrite_seen, 0ull, "staged, not wired");
+    g_twrite_pat_on = true;
+    spoor_clunk(o);
+    TEST_EXPECT_EQ((u64)g_twrite_seen, 1ull, "close flushes ONE Twrite");
+    TEST_ASSERT(g_twrite_pat_ok && g_twrite_cap_len == 512,
+                "flush payload correct");
+    TEST_ASSERT(g_twrite_last_seq < g_clunk_last_seq,
+                "flush precedes the Tclunk (the fid was live)");
+    g_client.loose = false;
+    __atomic_store_n(&g_client.cacheable, false, __ATOMIC_RELAXED);
+    teardown(root);
+}
+
+// fsync flushes then Tfsyncs (ordered); a flush failure surfaces on fsync,
+// LATCHES (subsequent write + fsync return it), drops the run, and close
+// emits no further Twrite.
+void test_dev9p_wb_fsync_flush_and_error(void) {
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 256; i++) chunk[i] = wb_pat(i);
+    wb_wire_reset();
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 256, 0), 256ull, "stage");
+    TEST_EXPECT_EQ((u64)dev9p.fsync(f, 0), 0ull, "fsync ok");
+    TEST_EXPECT_EQ((u64)g_twrite_seen, 1ull, "fsync flushed the run");
+    TEST_ASSERT(g_tfsync_last_seq > g_twrite_last_seq,
+                "the flush Twrite precedes the Tfsync");
+    // Stage again; inject a one-shot ENOSPC on the flush Twrite.
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 256, 256), 256ull, "re-stage");
+    g_twrite_fail_ecode = 28;   // ENOSPC
+    long fe = dev9p.fsync(f, 0);
+    TEST_EXPECT_EQ((u64)(-fe), 28ull, "fsync surfaces the flush ENOSPC");
+    // Latched: write + fsync keep returning it; the run is dropped.
+    TEST_EXPECT_EQ((u64)(-dev9p.write(f, chunk, 256, 512)), 28ull,
+                   "subsequent write returns the latched errno");
+    fe = dev9p.fsync(f, 0);
+    TEST_EXPECT_EQ((u64)(-fe), 28ull, "subsequent fsync returns the latch");
+    u32 tw_before_close = g_twrite_seen;
+    spoor_clunk(f);
+    TEST_EXPECT_EQ((u64)g_twrite_seen, (u64)tw_before_close,
+                   "close emits no Twrite (the run was dropped)");
+    wb_test_end(root);
+}
+
+// A non-append write (the Go buildid interior pwrite) flushes the staged run
+// FIRST, then writes through -- two Twrites in old-bytes-first order. A wstat
+// on the staging fd also flushes first and stops staging.
+void test_dev9p_wb_nonappend_writethrough(void) {
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 1000; i++) chunk[i] = wb_pat(i);
+    wb_wire_reset();
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 1000, 0), 1000ull, "stage [0,1000)");
+    u8 hdr[4] = { 0xde, 0xad, 0xbe, 0xef };
+    TEST_EXPECT_EQ((u64)dev9p.write(f, hdr, 4, 0), 4ull, "interior pwrite");
+    TEST_EXPECT_EQ((u64)g_twrite_seen, 2ull, "flush THEN the through-write");
+    TEST_ASSERT(g_twrite_log_n == 2 &&
+                g_twrite_off_log[0] == 0 && g_twrite_off_log[1] == 0,
+                "order: the 1000-byte flush first, the 4-byte patch second");
+    TEST_EXPECT_EQ((u64)g_twrite_cap_len, 4ull, "the LAST Twrite is the patch");
+    // The anchor survived (both completed ops end at/below 1000): a cursor
+    // append at 1000 stages again.
+    wb_wire_reset();
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 500, 1000), 500ull, "re-stage");
+    TEST_EXPECT_EQ((u64)g_twrite_seen, 0ull, "…wire-free");
+    // wstat flushes the new run + stops staging on this priv.
+    TEST_EXPECT_EQ((u64)dev9p.wstat_native(f, T_WSTAT_MODE, 0600u, 0, 0, 0), 0ull,
+                   "wstat ok");
+    TEST_EXPECT_EQ((u64)g_twrite_seen, 1ull, "wstat flushed the run first");
+    struct dev9p_priv *fp = dev9p_priv_of(f);
+    TEST_ASSERT(fp != NULL && !fp->wb_eligible, "wstat stops staging");
+    wb_wire_reset();
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 100, 1500), 100ull, "post-wstat write");
+    TEST_EXPECT_EQ((u64)g_twrite_seen, 1ull, "…goes straight through");
+    spoor_clunk(f);
+    wb_test_end(root);
+}
+
+// fstat on the staging fd patches size = max(server view, the run's end) --
+// on BOTH the larder-serve and the wire-fetch stat paths.
+void test_dev9p_wb_fstat_staged_size(void) {
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 1536; i++) chunk[i] = wb_pat(i);
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 1536, 0), 1536ull, "stage 1536");
+    // First stat: wire getattr (the canonical body reports size 0x200=512),
+    // patched to the staged end.
+    struct t_stat st;
+    TEST_EXPECT_EQ((u64)dev9p.stat_native(f, &st), 0ull, "fstat (wire path)");
+    TEST_EXPECT_EQ(st.size, 1536ull, "size patched to the staged end");
+    // Second stat: larder-served (installed by the first), same patch.
+    TEST_EXPECT_EQ((u64)dev9p.stat_native(f, &st), 0ull, "fstat (serve path)");
+    TEST_EXPECT_EQ(st.size, 1536ull, "served size patched too");
+    spoor_clunk(f);
+    wb_test_end(root);
+}
+
+// Reaching DEV9P_WB_CAP flushes the whole run inline and staging continues;
+// every payload byte that crosses the wire matches the written pattern, and
+// close drains the tail. The msize-clamped flush chunks are the CF-3 short-
+// write loop in action.
+void test_dev9p_wb_cap_flush(void) {
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    u64 budget0 = dev9p_wb_budget_used();
+    u8 *big = wb_scratch();
+    TEST_ASSERT(big != NULL, "scratch");
+    wb_wire_reset();
+    g_twrite_pat_on = true;
+    // 8 x 32 KiB fill the run to exactly DEV9P_WB_CAP -- all staged.
+    for (u32 c = 0; c < 8; c++) {
+        u64 base = (u64)c * 32768u;
+        for (u32 i = 0; i < 32768u; i++) big[i] = wb_pat(base + i);
+        TEST_EXPECT_EQ((u64)dev9p.write(f, big, 32768, (s64)base), 32768ull,
+                       "staged 32 KiB append");
+    }
+    TEST_EXPECT_EQ((u64)g_twrite_seen, 0ull, "256 KiB staged, zero wire");
+    // The 9th write overflows the cap: the run flushes inline (msize-clamped
+    // chunks), then the write stages into the emptied run.
+    u64 base9 = 8ull * 32768u;
+    for (u32 i = 0; i < 32768u; i++) big[i] = wb_pat(base9 + i);
+    TEST_EXPECT_EQ((u64)dev9p.write(f, big, 32768, (s64)base9), 32768ull,
+                   "9th append triggers the cap flush + stages");
+    TEST_ASSERT(g_twrite_seen >= 32, "the cap flush crossed as msize chunks");
+    TEST_EXPECT_EQ(g_twrite_total, 262144ull, "exactly the 256 KiB flushed");
+    TEST_ASSERT(g_twrite_pat_ok, "every wire byte matches the pattern");
+    u32 tw_after_cap = g_twrite_seen;
+    spoor_clunk(f);   // drains the staged 9th chunk
+    TEST_ASSERT(g_twrite_seen > tw_after_cap, "close drained the tail");
+    TEST_EXPECT_EQ(g_twrite_total, 294912ull, "all 9 x 32 KiB on the wire");
+    TEST_ASSERT(g_twrite_pat_ok, "tail bytes match too");
+    TEST_EXPECT_EQ(dev9p_wb_budget_used(), budget0, "budget balanced");
+    wb_test_end(root);
+}
+
+// Budget exhaustion degrades to write-through (the strict-mount behavior),
+// and recovery is automatic once the budget frees: the through-write advanced
+// the anchor, so the next append stages.
+void test_dev9p_wb_budget_fallback(void) {
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 1000; i++) chunk[i] = wb_pat(i);
+    dev9p_wb_budget_bias_for_test((s64)DEV9P_WB_BUDGET);   // exhaust
+    wb_wire_reset();
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 1000, 0), 1000ull,
+                   "over-budget write still succeeds");
+    TEST_EXPECT_EQ((u64)g_twrite_seen, 1ull, "…as a write-through");
+    dev9p_wb_budget_bias_for_test(-(s64)DEV9P_WB_BUDGET);  // release
+    wb_wire_reset();
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 1000, 1000), 1000ull,
+                   "post-release append (the through-write advanced the anchor)");
+    TEST_EXPECT_EQ((u64)g_twrite_seen, 0ull, "…stages again");
+    spoor_clunk(f);
+    wb_test_end(root);
+}
+
+
+// ---- G1 (term-4) write-populate: the flush installs OWN pages ----------
+// The landed run's pages serve WITHOUT the cvers gate (fs_cache.tla
+// EnableFlushPopulate; the loose single-writer premise). E2E revert-probe:
+// pre-G1 the flush INVALIDATED the file's pages, so the post-flush read
+// went to the wire (the responder answers "hello") -- both assertions fail.
+void test_dev9p_wb_populate_readback(void) {
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 512; i++) chunk[i] = wb_pat(i);
+    wb_wire_reset();
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 512, 0), 512ull, "stage");
+    TEST_EXPECT_EQ((u64)dev9p.fsync(f, 0), 0ull, "flush ok");
+    TEST_EXPECT_EQ((u64)g_client.larder.page_own_installs, 1ull,
+                   "one own page installed");
+    // Same-priv read AFTER the flush (wb empty): the own pages serve; no wire.
+    u8 rb[512];
+    for (u32 i = 0; i < sizeof(rb); i++) rb[i] = 0;
+    TEST_EXPECT_EQ((u64)dev9p.read(f, rb, 512, 0), 512ull, "readback length");
+    TEST_EXPECT_EQ((u64)g_tread_seen, 0ull, "readback is wire-free");
+    bool ok = true;
+    for (u32 i = 0; i < 512; i++) if (rb[i] != wb_pat(i)) { ok = false; break; }
+    TEST_ASSERT(ok, "readback bytes == the flushed run");
+    // The own gate itself: a serve under an arbitrary (mismatched) cvers.
+    u8 one[64];
+    u32 got = larder_page_serve(&g_client.larder, f->qid.path, 0, 0, 64,
+                                1234u, one, NULL);
+    TEST_EXPECT_EQ((u64)got, 64ull, "own page serves past the cvers gate");
+    // A normal (read-populate) install over the same key clears own: the
+    // mismatched-cvers serve must now MISS.
+    larder_page_install(&g_client.larder, g_client.larder.gen, f->qid.path,
+                        0, 5u, chunk, 512);
+    got = larder_page_serve(&g_client.larder, f->qid.path, 0, 0, 64,
+                            1234u, one, NULL);
+    TEST_EXPECT_EQ((u64)got, 0ull, "normal install upgrades own -> cvers gate");
+    spoor_clunk(f);
+    wb_test_end(root);
+}
+
+// Two flushes with an unaligned boundary: the second run's front partial
+// EXTENDS the first run's own tail page (valid_len == page_off), so the whole
+// [0, 8000) range serves wire-free with exact bytes.
+void test_dev9p_wb_populate_append_chain(void) {
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    wb_wire_reset();
+    for (u32 i = 0; i < 5000; i++) chunk[i] = wb_pat(i);
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 5000, 0), 5000ull, "stage run 1");
+    TEST_EXPECT_EQ((u64)dev9p.fsync(f, 0), 0ull, "flush 1");
+    for (u32 i = 0; i < 3000; i++) chunk[i] = wb_pat(5000u + i);
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 3000, 5000), 3000ull, "stage run 2");
+    u64 qid = f->qid.path;
+    spoor_clunk(f);                      // close = flush 2 (extends page 1)
+    u8 *out = wb_scratch();
+    u32 got = larder_page_serve(&g_client.larder, qid, 0, 0, 4096, 99u, out, NULL);
+    TEST_EXPECT_EQ((u64)got, 4096ull, "page 0 full");
+    bool ok = true;
+    for (u32 i = 0; i < 4096; i++) if (out[i] != wb_pat(i)) { ok = false; break; }
+    TEST_ASSERT(ok, "page 0 bytes");
+    got = larder_page_serve(&g_client.larder, qid, 1, 0, 4096, 99u, out, NULL);
+    TEST_EXPECT_EQ((u64)got, 3904ull, "page 1 extended to 8000-4096");
+    ok = true;
+    for (u32 i = 0; i < 3904; i++)
+        if (out[i] != wb_pat(4096u + i)) { ok = false; break; }
+    TEST_ASSERT(ok, "page 1 bytes span both runs");
+    wb_test_end(root);
+}
+
+// A FAILED flush must not populate (the buggy_populate_unflushed cfg's impl
+// coupling): the landed range is unknown, the file's pages drop fail-safe.
+void test_dev9p_wb_populate_failed_flush(void) {
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 256; i++) chunk[i] = wb_pat(i);
+    wb_wire_reset();
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 256, 0), 256ull, "stage");
+    g_twrite_fail_ecode = 28;   // ENOSPC on the flush Twrite
+    long fe = dev9p.fsync(f, 0);
+    TEST_EXPECT_EQ((u64)(-fe), 28ull, "flush fails");
+    TEST_EXPECT_EQ((u64)g_client.larder.page_own_installs, 0ull,
+                   "no own install on the failed arm");
+    u8 one[64];
+    u32 got = larder_page_serve(&g_client.larder, f->qid.path, 0, 0, 64,
+                                0u, one, NULL);
+    TEST_EXPECT_EQ((u64)got, 0ull, "nothing servable after the failed flush");
+    spoor_clunk(f);
+    wb_test_end(root);
+}
+
+
+// G1b: a non-append write-through drops ONLY the pages it touched -- the
+// buildid-pwrite class (a ~100-byte in-place patch on a just-flushed archive)
+// must not nuke the whole file's freshly-populated own pages. Revert-probe:
+// with the pre-G1b whole-file invalidate, page 1's serve below returns 0.
+void test_dev9p_wb_writethrough_range_invalidate(void) {
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    wb_wire_reset();
+    for (u32 i = 0; i < 8000; i++) chunk[i] = wb_pat(i);
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 8000, 0), 8000ull, "stage");
+    TEST_EXPECT_EQ((u64)dev9p.fsync(f, 0), 0ull, "flush (own pages 0+1)");
+    u8 one[64];
+    TEST_EXPECT_EQ((u64)larder_page_serve(&g_client.larder, f->qid.path, 1,
+                                          0, 64, 77u, one, NULL),
+                   64ull, "page 1 own-serves pre-patch");
+    // The buildid-shaped patch: 100 bytes at offset 100 (page 0), NON-append
+    // -> flush-then-write-through -> the range invalidate touches page 0 only.
+    for (u32 i = 0; i < 100; i++) chunk[i] = 0x5A;
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 100, 100), 100ull, "patch");
+    TEST_EXPECT_EQ((u64)larder_page_serve(&g_client.larder, f->qid.path, 0,
+                                          0, 64, 77u, one, NULL),
+                   0ull, "page 0 (patched) dropped");
+    u32 got = larder_page_serve(&g_client.larder, f->qid.path, 1, 0, 64,
+                                77u, one, NULL);
+    TEST_EXPECT_EQ((u64)got, 64ull, "page 1 survives the patch (range scope)");
+    bool ok = true;
+    for (u32 i = 0; i < 64 && ok; i++)
+        if (one[i] != wb_pat(4096u + i)) ok = false;
+    TEST_ASSERT(ok, "page 1 bytes intact");
+    spoor_clunk(f);
+    wb_test_end(root);
 }

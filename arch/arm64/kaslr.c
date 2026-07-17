@@ -256,12 +256,12 @@ u64 kaslr_init(void) {
     // cookie at both prologue and epilogue — consistent.
     canary_init(mixed);
 
-    // Choose offset: 4 MiB-aligned (KASLR_ALIGN_BITS), bounded to
+    // Choose offset: 8 MiB-aligned (KASLR_ALIGN_BITS), bounded to
     // < 16 GiB (KASLR_OFFSET_MASK). Always non-zero — so KASLR doesn't
     // trivially return slide=0 if the mix yields all-zero low bits.
     u64 offset = mixed & KASLR_OFFSET_MASK;
     if (offset == 0) {
-        offset = 1ull << KASLR_ALIGN_BITS;   // minimum 4 MiB
+        offset = 1ull << KASLR_ALIGN_BITS;   // minimum 8 MiB
     }
 
     g_kaslr_offset = offset;

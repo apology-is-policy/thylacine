@@ -148,9 +148,11 @@ uaccess_store_u8_fault:
 //
 // Implementation mirrors uaccess_load_u8: one `ldr w2, [x0]` is the
 // fault point; the fixup-table entry maps it to the `.L` fault label.
-// Plain LDR (not LDAR) — the consumer's torpor_lock acquire pairs with
-// the producer's torpor_lock release on its preceding WAKE to provide
-// the memory ordering. Standard Linux-futex discipline.
+// Plain LDR (not LDAR) — a PARKING consumer's torpor_lock acquire pairs
+// with the producer's torpor_lock release on its preceding WAKE to
+// provide the memory ordering. Standard Linux-futex discipline. (The
+// lock-free mismatch path — torpor.c's pre-lock compare — deliberately
+// gets only this load's single-copy-atomicity; see torpor.h.)
 .global uaccess_load_u32
 .type uaccess_load_u32, @function
 uaccess_load_u32:
@@ -206,4 +208,153 @@ uaccess_store_u32_fault:
 .balign 4
 .long   uaccess_store_u32_op    - .
 .long   uaccess_store_u32_fault - .
+.popsection
+
+// uaccess_copy_out — copy `len` bytes from a kernel buffer to a user VA.
+//
+// CF-3 A: the bulk replacement for the per-byte uaccess_store_u8 loops in
+// the byte-I/O syscall handlers (SYS_READ / SYS_PREAD copy-out). One call
+// is one fault-recovery domain: a translation/permission fault on any of
+// the user-side stores lands on the shared fault label and returns -1.
+//
+// AArch64 ABI: x0 = user dst VA, x1 = kernel src (direct-map), x2 = len.
+// Returns: x0 = 0 on success; x0 = -1 on fault (no VMA / perm denied /
+//          OOM during demand-page sub-table alloc).
+//
+// Caller contract mirrors uaccess_store_u8: [x0, x0+len) must lie in
+// [0, UACCESS_USER_VA_TOP) (sys_validate_user_buf gates the syscall
+// surface); x1 must be kernel-readable for len bytes.
+//
+// Shape: byte head until the USER VA is 8-aligned, 8-byte body, byte
+// tail. The kernel-side ldr may be unaligned (Normal memory,
+// SCTLR_EL1.A = 0 per INIT_SCTLR_EL1_MMU_OFF = 0x30D00800). The faulting
+// stores use NO writeback: on a demand-page resume the re-executed store
+// sees unchanged registers. On a mid-copy fault (page N mapped, page N+1
+// not) bytes already stored stay stored -- the caller returns -1 and the
+// syscall's documented partial-copy caveat applies (unchanged from the
+// per-byte era, which had the same property).
+.global uaccess_copy_out
+.type uaccess_copy_out, @function
+uaccess_copy_out:
+    cbz     x2, .Lcpo_ok
+.Lcpo_head:
+    tst     x0, #7
+    b.eq    .Lcpo_body
+    ldrb    w3, [x1]
+.global uaccess_copy_out_op_head
+uaccess_copy_out_op_head:
+    strb    w3, [x0]                // FAULT POINT — table entry below
+    add     x0, x0, #1
+    add     x1, x1, #1
+    subs    x2, x2, #1
+    b.ne    .Lcpo_head
+    b       .Lcpo_ok
+.Lcpo_body:
+    cmp     x2, #8
+    b.lo    .Lcpo_tail
+    ldr     x3, [x1]
+.global uaccess_copy_out_op_body
+uaccess_copy_out_op_body:
+    str     x3, [x0]                // FAULT POINT — table entry below
+    add     x0, x0, #8
+    add     x1, x1, #8
+    sub     x2, x2, #8
+    b       .Lcpo_body
+.Lcpo_tail:
+    cbz     x2, .Lcpo_ok
+    ldrb    w3, [x1]
+.global uaccess_copy_out_op_tail
+uaccess_copy_out_op_tail:
+    strb    w3, [x0]                // FAULT POINT — table entry below
+    add     x0, x0, #1
+    add     x1, x1, #1
+    sub     x2, x2, #1
+    b       .Lcpo_tail
+.Lcpo_ok:
+    mov     x0, xzr
+    ret
+.global uaccess_copy_out_fault
+uaccess_copy_out_fault:
+    mov     x0, #-1
+    ret
+.size uaccess_copy_out, . - uaccess_copy_out
+
+.pushsection .uaccess_fixup, "a", @progbits
+.balign 4
+.long   uaccess_copy_out_op_head  - .
+.long   uaccess_copy_out_fault    - .
+.long   uaccess_copy_out_op_body  - .
+.long   uaccess_copy_out_fault    - .
+.long   uaccess_copy_out_op_tail  - .
+.long   uaccess_copy_out_fault    - .
+.popsection
+
+// uaccess_copy_in — copy `len` bytes from a user VA to a kernel buffer.
+//
+// The mirror of uaccess_copy_out for the write-side staging (SYS_WRITE /
+// SYS_PWRITE copy-in): here the user-side LOADS are the fault points; the
+// kernel-side stores may be unaligned (same SCTLR_EL1.A = 0 argument).
+//
+// AArch64 ABI: x0 = kernel dst (direct-map), x1 = user src VA, x2 = len.
+// Returns: x0 = 0 on success; x0 = -1 on fault.
+//
+// Caller contract: [x1, x1+len) must lie in [0, UACCESS_USER_VA_TOP)
+// (sys_validate_user_buf); x0 must be kernel-writable for len bytes. On a
+// mid-copy fault the kernel buffer's already-copied prefix is defined,
+// the rest is unspecified -- callers treat -1 as whole-op EFAULT and must
+// not consume the buffer.
+.global uaccess_copy_in
+.type uaccess_copy_in, @function
+uaccess_copy_in:
+    cbz     x2, .Lcpi_ok
+.Lcpi_head:
+    tst     x1, #7
+    b.eq    .Lcpi_body
+.global uaccess_copy_in_op_head
+uaccess_copy_in_op_head:
+    ldrb    w3, [x1]                // FAULT POINT — table entry below
+    strb    w3, [x0]
+    add     x0, x0, #1
+    add     x1, x1, #1
+    subs    x2, x2, #1
+    b.ne    .Lcpi_head
+    b       .Lcpi_ok
+.Lcpi_body:
+    cmp     x2, #8
+    b.lo    .Lcpi_tail
+.global uaccess_copy_in_op_body
+uaccess_copy_in_op_body:
+    ldr     x3, [x1]                // FAULT POINT — table entry below
+    str     x3, [x0]
+    add     x0, x0, #8
+    add     x1, x1, #8
+    sub     x2, x2, #8
+    b       .Lcpi_body
+.Lcpi_tail:
+    cbz     x2, .Lcpi_ok
+.global uaccess_copy_in_op_tail
+uaccess_copy_in_op_tail:
+    ldrb    w3, [x1]                // FAULT POINT — table entry below
+    strb    w3, [x0]
+    add     x0, x0, #1
+    add     x1, x1, #1
+    sub     x2, x2, #1
+    b       .Lcpi_tail
+.Lcpi_ok:
+    mov     x0, xzr
+    ret
+.global uaccess_copy_in_fault
+uaccess_copy_in_fault:
+    mov     x0, #-1
+    ret
+.size uaccess_copy_in, . - uaccess_copy_in
+
+.pushsection .uaccess_fixup, "a", @progbits
+.balign 4
+.long   uaccess_copy_in_op_head  - .
+.long   uaccess_copy_in_fault    - .
+.long   uaccess_copy_in_op_body  - .
+.long   uaccess_copy_in_fault    - .
+.long   uaccess_copy_in_op_tail  - .
+.long   uaccess_copy_in_fault    - .
 .popsection

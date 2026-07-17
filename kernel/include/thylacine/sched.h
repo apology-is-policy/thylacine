@@ -121,6 +121,52 @@ void sched_install_bootcpu_idle(struct Thread *t);
 void sched_set_idle_in_wfi(bool in_wfi);
 bool sched_idle_in_wfi(unsigned cpu_idx);
 
+// Tickless idle (NO_HZ_IDLE; docs/TICKLESS-IDLE.md TI-1, #299). The earliest
+// pending deadline (absolute CNTVCT counter value) across all deadlined tsleep
+// sleepers, or 0 if none. The idle loop (TI-2) arms its one-shot to
+// min(this, now + TICKLESS_IDLE_BACKSTOP) before WFI so a genuinely-idle CPU
+// takes no 1 kHz ticks yet still wakes for the next real deadline. O(n)
+// min-scan under g_timerwait.lock (irqsave; a leaf acquisition). At TI-1 no
+// production path calls this -- it lands with its consumer at TI-2.
+u64 timerwait_earliest_deadline(void);
+
+// Tickless idle re-poll backstop (NO_HZ_IDLE; docs/TICKLESS-IDLE.md TI-4e, #299).
+// An idle CPU arms its one-shot to min(nearest deadline, now + this), so it
+// re-polls (sched() -> try_steal) at ~250 Hz. 4 ms (TI-4e, user-voted).
+//
+// WHY 4 ms not the prior 100 ms: TI-4e root-caused the tickless boot slowdown to
+// the wake LATENCY, not a guest bug -- the wake path is IPI-prompt (measured:
+// 99.85% of tickless parks woken by an IPI, not the backstop), but under HVF
+// resuming a DEEP-parked vCPU via SGI costs ~0.85 ms vs ~7 us when hot. That is
+// an EMULATION artifact (HVF GICv2-MMIO vmexits + the host vCPU-thread resume;
+// #299/#890), NOT a scheduler defect: on the bare-metal production target an SGI
+// to a WFI'd core is hardware-fast (~ns), so deep-park already gives fast boot +
+// ~0% idle. The 4 ms re-poll keeps the dev-loop vCPUs warm enough for a fast HVF
+// boot (~7 s vs the ~17-35 s the 100 ms deep-park took) at ~5% HVF idle; on bare
+// metal the re-poll is ~free. The 100 ms deep-park (0.3% HVF idle, the #299
+// number) is the alternative -- 4 ms trades HVF idle for HVF dev-boot speed. A
+// v1.x adaptive (warm-while-active / deep-when-idle) or accel-gated backstop is
+// the recorded path to reclaim 0.3% HVF idle without the dev-boot cost.
+#define TICKLESS_IDLE_BACKSTOP_NS  4000000ull
+
+// Tickless idle (NO_HZ_IDLE; docs/TICKLESS-IDLE.md TI-2). Pure: the absolute
+// CNTVCT value an idle CPU arms its one-shot to, given the current counter, the
+// nearest pending deadline (0 = none), and the backstop delta in counter ticks.
+// min(deadline, now + backstop), or just the backstop when no deadline. Split
+// out so the arm-decision is unit-testable without the live timer/list.
+u64 tickless_target_cnt(u64 now_cnt, u64 earliest_deadline, u64 backstop_cnt);
+
+// Tickless idle (NO_HZ_IDLE; docs/TICKLESS-IDLE.md TI-2, #299). The shared idle
+// body for bootcpu_idle_main + per_cpu_main: under one IRQ-masked region, set
+// idle_in_wfi, sched() (yield to any runnable), arm a one-shot to the nearest
+// deadline-or-backstop, WFI, then on wake restore the periodic tick + run the
+// deadline scan. `tickless` gates the one-shot arm + restore: the boot CPU
+// passes true; a secondary passes false until its timer PPI is enabled (then it
+// just WFIs on IPI -- the byte-identical pre-preempt behavior). The I-9 arm-race
+// holds because idle_in_wfi is set BEFORE the arm + WFI (register-then-observe;
+// specs/sched_tickless.tla). See ARCH 8.6.
+void sched_idle_park(bool tickless);
+
 // P3-G: notify-idle-peer toggle. Off (default) during in-kernel tests so
 // they keep their UP-like assumptions; on (set by boot_main between
 // test_run_all() and joey_run()) for production. When off, ready() /
@@ -255,15 +301,78 @@ bool sched_in_cpu_tree(unsigned cpu, struct Thread *t);
 //   - sched_clear_need_resched_for_test (RW-11 SA-1b): clears a CPU's
 //     need_resched so a unit test can establish a clean baseline before
 //     exercising the same-CPU wake-preempt path.
+//   - sched_cpu_has_surplus_for_test (TI-4c): the busy-tick overload-kick
+//     decision for `cpu` -- true iff a non-IDLE run-tree band head is non-NULL
+//     (migratable surplus). The unit test asserts a queued NORMAL thread makes
+//     it true and a band-IDLE thread does not.
 #ifdef KERNEL_TESTS
 bool sched_need_resched_pending(unsigned cpu);
 void sched_clear_need_resched_for_test(unsigned cpu);
+bool sched_cpu_has_surplus_for_test(unsigned cpu);
+void sched_set_need_resched_for_test(unsigned cpu);   // #360 gate test
 #endif /* KERNEL_TESTS */
+
+// #361 (audit-360 F2): extinction tail of the EL0-return preempt-count leak
+// detector. Called from el0_return_die_check (kernel/proc.c) ONLY when
+// t->preempt_count != 0 at an EL0 return -- a counted-acquire/raw-release
+// mismatch (or an outright leak) that would otherwise pin the CPU
+// non-preemptible forever with no detector (the sched() assert needs a
+// sleep; a CPU-bound EL0 loop never sleeps). Lives in sched.c to read the
+// sched-private outer-acquire breadcrumb for the report.
+void sched_report_el0_leak(void) __attribute__((noreturn));
 
 // Diagnostic accessors.
 unsigned sched_runnable_count(void);
 unsigned sched_runnable_count_band(unsigned band);
 void sched_dump_runnable(const char *tag);   // DEBUG (#857): all-CPU runnable set + RX-IRQ counters
+
+// TI-4d work-conservation telemetry. A core that parks in WFI while a runqueue
+// holds queued-but-not-running work is the classic "wasted core" -- the
+// work-conservation invariant ("A Decade of Wasted Cores", EuroSys'16). The
+// idle-park path samples sched_has_runnable_work() at the instant it commits to
+// parking; if work is queued, the WHOLE park duration is charged as STARVED (a
+// steal/handoff gap -- this CPU should have run that work, not slept). The
+// numbers decide a scheduler workload's character: a high starved fraction says
+// queued-but-unstolen work exists (push/steal rebalance is the lever); ~0 says
+// the workload is genuinely sequential (idle parks are correct, the cost is
+// per-park overhead). Diagnostic only -- consulted by NO scheduling decision.
+// The accumulators split by idle regime: the TOTAL covers every park; the
+// TICKLESS subset covers only parks that went tickless (go_tickless == true,
+// i.e. production -- g_sched_notify_enabled on). The split is load-bearing for
+// the TI-4 question: a starved PERIODIC park ends at the next <=1ms tick (the
+// pre-tickless baseline, correct), so most boot-time starvation is periodic
+// test-phase re-poll; a starved TICKLESS park can run to the 100ms backstop, so
+// the TICKLESS starved_ns / max is the regression's clean signal.
+struct sched_wc_stats {
+    u64 park_events;     // total idle parks (periodic + tickless)
+    u64 idle_ns;         // total ns spent parked (the denominator)
+    u64 starved_events;  // total parks committed while work was queued elsewhere
+    u64 starved_ns;      // total ns parked while work was queued
+    u64 max_starved_ns;  // the single longest starved park (any regime)
+    u64 tickless_parks;          // parks that went tickless (production)
+    u64 tickless_starved_events; // tickless parks committed on queued work
+    u64 tickless_starved_ns;     // ns the tickless path starved (THE regression signal)
+    u64 tickless_max_starved_ns; // longest tickless starved park (= backstop if hit)
+    u64 tickless_oneshot_wakes;  // TI-4e wake-source telemetry: parks woken by the one-shot/backstop
+    u64 tickless_ipi_wakes;      // TI-4e wake-source telemetry: parks woken (prompt) by an IPI
+};
+void sched_wc_stats(struct sched_wc_stats *out);
+
+// True iff any non-idle band on any CPU's run tree is non-empty (queued
+// runnable work exists somewhere). Reads ONLY the per-band head pointers
+// (never dereferences a Thread), so it is safe to call lock-free from the hot
+// idle-park path without risking a dangling runnable_next walk -- unlike
+// sched_runnable_count(), which follows the chains and is for the cold callers.
+bool sched_has_runnable_work(void);
+
+// SYS_YIELD (#33): voluntary yield. If another non-idle thread is queued
+// runnable on the calling CPU, requeue the caller (sched() with prev RUNNING
+// -- the modeled StartSwitch kind="yield") and dispatch it; if the only local
+// tree occupant is the pinned idle, return false WITHOUT switching (skipping
+// the pointless idle bounce). Lock-free advisory peek (the TI-4c
+// cpu_has_surplus_for_kick predicate); a hint, never a fairness guarantee.
+// Returns whether it dispatched.
+bool sched_yield_hint(void);
 
 // Internal — called by thread_free if t->state == THREAD_RUNNABLE so the
 // run tree doesn't carry a dangling pointer. Idempotent: safe to call

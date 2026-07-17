@@ -35,7 +35,7 @@ KERNEL_ELF="$KERNEL_BUILD_DIR/thylacine.elf"
 KERNEL_BIN="$KERNEL_BUILD_DIR/thylacine.bin"
 
 cpus=4
-mem_mib=2048
+mem_mib="${THYLACINE_MEM_MIB:-2048}"
 gdb_flags=()
 share_flags=()
 snapshot=""
@@ -123,7 +123,7 @@ if [[ -f "$DISK_IMG" ]]; then
     # don't support).
     disk_flags=(
         -global virtio-mmio.force-legacy=false
-        -drive "if=none,id=disk0,format=raw,file=$DISK_IMG,cache=writethrough"
+        -drive "if=none,id=disk0,format=raw,file=$DISK_IMG,cache=writeback"
         -device virtio-blk-device,drive=disk0
     )
 fi
@@ -150,7 +150,7 @@ POOL_IMG="${THYLACINE_POOL_IMG:-$REPO_ROOT/build/fixtures/pool.img}"
 pool_flags=()
 if [[ -f "$POOL_IMG" ]]; then
     pool_flags=(
-        -drive "if=none,id=pool0,format=raw,file=$POOL_IMG,cache=writethrough"
+        -drive "if=none,id=pool0,format=raw,file=$POOL_IMG,cache=writeback"
         -device virtio-blk-device,drive=pool0
     )
 fi
@@ -343,7 +343,7 @@ exec qemu-system-aarch64 \
     -device virtio-rng-device,id=rng0 \
     -device virtio-rng-pci,id=rng_pci0 \
     -nographic \
-    -serial mon:stdio \
+    -serial "${THYLACINE_SERIAL:-mon:stdio}" \
     ${qmp_flags[@]+"${qmp_flags[@]}"} \
     ${gdb_flags[@]+"${gdb_flags[@]}"} \
     ${share_flags[@]+"${share_flags[@]}"} \

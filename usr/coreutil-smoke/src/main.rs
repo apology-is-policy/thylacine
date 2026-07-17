@@ -170,7 +170,12 @@ pub extern "C" fn rs_main() -> i64 {
     c.expect("uname", "uname", &[], b"", b"Thylacine\n", 0);
     c.expect("uname -m", "uname", &["-m"], b"", b"aarch64\n", 0);
     c.expect("uname -a", "uname", &["-a"], b"", b"Thylacine (none) 1.0-dev #1-thylacine aarch64\n", 0);
-    c.expect("env empty", "env", &[], b"", b"", 0);
+    // The `env` coreutil is NOT bare-name smoked here: G15 reserves `/env` as
+    // the per-Proc environment DEVICE (a directory; ARCH 9.7), so a bare-name
+    // `env` spawn (cwd "/" -> "/env") now resolves to the device, not the
+    // coreutil. The Plan 9 location for the env(1) command is `/bin/env` (the
+    // /bin bind -> the cpio `env` binary), reachable post-pivot via the shell's
+    // $path -- exercised there, not in this pre-pivot bare-name smoke.
     c.expect("realpath abs", "realpath", &["/a/b/../c"], b"", b"/a/c\n", 0);
     c.expect("realpath rel", "realpath", &["x/../y"], b"", b"/y\n", 0); // cwd "/" -> "/y"
     c.expect("sleep 0", "sleep", &["0"], b"", b"", 0);

@@ -85,7 +85,7 @@ static void drop_test_proc(struct Proc *p) {
 static int post_svc_9p(struct Proc *p, const char *name, size_t name_len) {
     struct Spoor *root = devsrv_attach_registry(srv_boot_registry());
     if (!root) return -1;
-    int h = devsrv_post_listener(p, root, name, name_len, SRV_MODE_9P);
+    int h = devsrv_post_listener(p, root, name, name_len, SRV_MODE_9P, false);
     spoor_clunk(root);   // the listener handle's obj is the registry entry,
                          // not the root; the root is transient
     return h;
@@ -413,7 +413,7 @@ void test_devsrv_post_listener(void) {
     TEST_ASSERT(root != NULL, "attach a boot /srv root");
 
     // 9P-mode post via the create path.
-    int h = devsrv_post_listener(p, root, "corvus", 6, SRV_MODE_9P);
+    int h = devsrv_post_listener(p, root, "corvus", 6, SRV_MODE_9P, false);
     TEST_ASSERT(h >= 0, "devsrv_post_listener(9P) -> handle");
     struct Handle sh;
     TEST_ASSERT(handle_get(p, h, &sh) == 0, "listener handle installed");
@@ -427,7 +427,7 @@ void test_devsrv_post_listener(void) {
         "entry stamped with the poster's stripes");
 
     // byte-mode post (the DMSRVBYTE arm -> SRV_MODE_BYTE).
-    int hb = devsrv_post_listener(p, root, "byter", 5, SRV_MODE_BYTE);
+    int hb = devsrv_post_listener(p, root, "byter", 5, SRV_MODE_BYTE, false);
     TEST_ASSERT(hb >= 0, "devsrv_post_listener(BYTE) -> handle");
     struct SrvService *svb = srv_lookup_in(srv_boot_registry(), "byter", 5);
     TEST_ASSERT(svb != NULL, "byte service registered");
@@ -437,7 +437,7 @@ void test_devsrv_post_listener(void) {
     // cannot post.
     struct Proc *u = make_test_proc();
     TEST_ASSERT(u != NULL, "unmarked proc");
-    TEST_EXPECT_EQ(devsrv_post_listener(u, root, "nope", 4, SRV_MODE_9P), -1,
+    TEST_EXPECT_EQ(devsrv_post_listener(u, root, "nope", 4, SRV_MODE_9P, false), -1,
         "create=post by an unmarked Proc -> -1 (MAY_POST_SERVICE gate)");
 
     // Defense-in-depth: the parent must be a devsrv ROOT (SRV_REGISTRY_MAGIC).
@@ -449,7 +449,7 @@ void test_devsrv_post_listener(void) {
     TEST_ASSERT(w != NULL && w->nqid == 1 && w->spoor == svc_ref,
         "walk /corvus -> service-ref Spoor");
     walkqid_free(w);
-    TEST_EXPECT_EQ(devsrv_post_listener(p, svc_ref, "x", 1, SRV_MODE_9P), -1,
+    TEST_EXPECT_EQ(devsrv_post_listener(p, svc_ref, "x", 1, SRV_MODE_9P, false), -1,
         "create=post on a non-root (service-ref) Spoor -> -1");
     spoor_clunk(svc_ref);
 

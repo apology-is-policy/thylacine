@@ -133,4 +133,14 @@ static inline paddr_t kva_to_pa(const void *kva) {
     return (paddr_t)((u64)(uintptr_t)kva & ~KERNEL_DIRECT_MAP_BASE);
 }
 
+// Make `len` bytes at kernel VA `addr` coherent for instruction fetch: clean
+// the D-cache to the point-of-unification then invalidate the I-cache to PoU
+// over the range (ARM ARM B2.4). Required whenever bytes written via the data
+// path will subsequently be EXECUTED -- freshly demand-paged or copied text
+// (REVENANT: the file fault arm + exec's eager-from-file fallback). Strides by
+// the implemented line sizes from CTR_EL0; `addr`'s PA is the PoU line (D/I
+// caches are PIPT on ARMv8), so cleaning + invalidating the same VA suffices.
+// Defined in arch/arm64/mmu.c.
+void arch_icache_sync_range(const void *addr, size_t len);
+
 #endif // THYLACINE_PAGE_H

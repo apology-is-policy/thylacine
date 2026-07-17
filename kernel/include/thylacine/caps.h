@@ -122,8 +122,26 @@ typedef u64 caps_t;
 // `cap` device; rfork-stripped. IDENTITY-DESIGN.md §9.8 (A-4b).
 #define CAP_KILL            (1ull << 9)
 
+// CAP_DEBUG — elevation-only. The cross-Proc debug authority (I-39): the
+// clearance-grantable cross-identity axis on the /proc/<pid> debug surface
+// (owner-on-the-0600-ctl OR CAP_HOSTOWNER OR CAP_DEBUG — the I-26 analog for the
+// read/write/run-control axis, where CAP_HOSTOWNER is the host-owner/eve axis
+// and CAP_DEBUG the domain cap, exactly as kill is owner OR HOSTOWNER OR KILL).
+// A holder
+// may attach a debugger to, stop, and inspect/modify the registers + memory
+// of a STOPPED target it can name in its namespace. Clearance-grantable (a
+// member of CAP_GRANTABLE_CLEARANCE) so a dev-session debugger acquires it via
+// a corvus-mediated, scope- and time-bounded legate — exactly like CAP_KILL /
+// CAP_DAC_OVERRIDE / CAP_CHOWN. Elevation-only (rfork-stripped): a
+// debug-anything right must not leak to a legate's children; the debugger Proc
+// itself holds it, and debugging your OWN-identity target never needs it
+// (owner-on-0600 covers that). Never bypasses memory-safety (I-12 W^X + I-13
+// isolation hold — breakpoints are hardware, never a software BRK patched into
+// shared text). docs/DEBUG-FS-DESIGN.md; Go IDE Stage 8a.
+#define CAP_DEBUG           (1ull << 10)
+
 // Reserved for Phase 5+ (one bit per capability domain; next free bit is
-// 1<<10):
+// 1<<11):
 //   CAP_NS_MOUNT     — bind/mount in /proc and /ctl (kernel admin Devs).
 //   CAP_NS_BIND      — bind in any namespace (forward-looking).
 //   CAP_NET_RAW      — open raw network sockets / Ethernet frames.
@@ -136,11 +154,12 @@ typedef u64 caps_t;
 // excluded from CAP_ALL that no Proc holds at creation and that rfork
 // MUST strip from every child, so an elevated parent cannot leak
 // elevation across a fork. rfork_internal ANDs the child's caps with
-// ~CAP_ELEVATION_ONLY (A-4-pre). All four are acquired ONLY through the
+// ~CAP_ELEVATION_ONLY (A-4-pre). All five are acquired ONLY through the
 // `cap` device: CAP_HOSTOWNER (the unified fs-admin authority) plus the
-// A-4 finer caps split out of it — CAP_DAC_OVERRIDE, CAP_CHOWN, CAP_KILL.
+// A-4 finer caps split out of it — CAP_DAC_OVERRIDE, CAP_CHOWN, CAP_KILL —
+// plus CAP_DEBUG (the Stage-8a cross-Proc debug authority).
 // Maps to specs/handles.tla::ElevationOnly.
-#define CAP_ELEVATION_ONLY  (CAP_HOSTOWNER | CAP_DAC_OVERRIDE | CAP_CHOWN | CAP_KILL)
+#define CAP_ELEVATION_ONLY  (CAP_HOSTOWNER | CAP_DAC_OVERRIDE | CAP_CHOWN | CAP_KILL | CAP_DEBUG)
 
 // CAP_ALL — the FORK-GRANTABLE capability ceiling: every capability a
 // Proc may legitimately hold from creation, and the mask kproc gets at

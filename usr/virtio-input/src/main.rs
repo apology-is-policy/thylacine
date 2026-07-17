@@ -34,15 +34,17 @@
 //     INTERRUPT_STATUS + writes INTERRUPT_ACK with the same bits, so
 //     the device's interrupt line deasserts before the next event
 //     batch.
-//   - SKIP-on-poll-exhaustion: 5M-iteration busy-poll cap (~3-5 sec
-//     wall-clock on QEMU TCG) ensures the driver terminates even
-//     without QMP injection. Boot proceeds; the test framework's
-//     status==0 contract is preserved.
+//   - SKIP-on-poll-exhaustion: a wall-clock poll budget (#362;
+//     POLL_BUDGET_MS via CNTVCT_EL0, with an iteration backstop per
+//     the #188 discipline) ensures the driver terminates even without
+//     QMP injection. Boot proceeds; the test framework's status==0
+//     contract is preserved.
 //
-// CI verification: `tools/test.sh` runs a background QMP injector
-// that, upon observing the sentinel "virtio-input: AWAITING_QMP_KEY"
-// in the boot log, connects to the QMP socket and sends `send-key`
-// for `a`. The driver then sees the EV_KEY/30/1 event in the eventq
+// CI verification: `tools/test.sh` spawns a QMP injector
+// (tools/qmp-inject-key.py) at QEMU launch; it connects to QMP during
+// boot, tail-follows the boot log for the sentinel "virtio-input:
+// AWAITING_QMP_KEY", and fires `send-key` for `a` within ~25 ms of the
+// sentinel. The driver then sees the EV_KEY/30/1 event in the eventq
 // and prints "virtio-input: saw target key". `tools/test.sh` greps
 // the log for that line after boot completes and fails the run if
 // THYLACINE_INPUT_INJECT != 0 and the line is absent.
@@ -192,20 +194,32 @@ const _: () = {
 // Event-consumption loop tuning.
 // =============================================================================
 //
-// MAX_POLL_ITER: outer iteration cap on the busy-poll over `used.idx`.
-// At ~30-50 ns per AArch64 volatile-read of a Normal-WB cache line on
-// QEMU TCG (dominated by guest-host loop overhead), 5,000,000
-// iterations is ~3-5 sec wall-clock. That window comfortably covers
-// the test harness's QMP injector (which fires within ~100-300 ms of
-// observing the AWAITING_QMP_KEY sentinel) and bounds the interactive
-// `tools/run-vm.sh` hang to a few seconds.
+// Poll budget (the #188 wall-clock pattern; #362). The busy-poll over
+// `used.idx` is WALL-CLOCK-bounded via CNTVCT_EL0, not iteration-
+// bounded: an iteration count is substrate-speed-dependent (HVF-native
+// runs ~10-50x more iterations per second than TCG), so a cap sized
+// for TCG under-sizes the window on HVF to well under a second --
+// exactly when the host-side injector is slowest (ci-smp-gate load:
+// 4-8 vCPU threads starving host-side helpers; 23/40 boots missed the
+// key, #362). POLL_BUDGET_MS is the SKIP-path cost on injector-less
+// interactive boots; the PASS path exits as soon as the key lands.
+//
+// MAX_POLL_ITER is the UNCONDITIONAL iteration backstop (the #188
+// discipline: a frozen/misconfigured counter must not hang the loop) --
+// sized well above the budget on the fastest substrate, never the
+// working bound. CNTFRQ_EL0 == 0 falls back to a pure iteration cap
+// (FREQ0_FALLBACK_ITER, the pre-#362 value).
 //
 // MAX_EVENTS_TO_PROCESS: drains at most this many events even if more
 // arrive. Each QMP `send-key` produces 4 events (KEY press + SYN +
 // KEY release + SYN); 32 leaves headroom for a few extra injections
-// without unbounded looping.
+// (the #362 injector re-sends once if the success marker lags) without
+// unbounded looping.
 
-const MAX_POLL_ITER: u32 = 200_000_000;
+const POLL_BUDGET_MS: u64 = 3_000;
+const MAX_POLL_ITER: u64 = 4_000_000_000;
+const FREQ0_FALLBACK_ITER: u64 = 200_000_000;
+const CLOCK_CHECK_MASK: u64 = 0xFFF; // read CNTVCT every 4096 iterations
 const MAX_EVENTS_TO_PROCESS: u32 = 32;
 
 // =============================================================================
@@ -241,6 +255,29 @@ fn dsb_sy() {
 #[inline(always)]
 fn yield_cpu() {
     unsafe { asm!("yield", options(nostack, preserves_flags)) }
+}
+
+// EL0 counter reads (EL0VCTEN is enabled kernel-side; the irq-bench
+// idiom). The isb orders the read against prior speculation -- cheap at
+// the CLOCK_CHECK_MASK cadence.
+#[inline(always)]
+fn read_cntvct() -> u64 {
+    let v: u64;
+    unsafe {
+        asm!("isb", "mrs {0}, cntvct_el0", out(reg) v,
+             options(nomem, nostack, preserves_flags));
+    }
+    v
+}
+
+#[inline(always)]
+fn read_cntfrq() -> u64 {
+    let v: u64;
+    unsafe {
+        asm!("mrs {0}, cntfrq_el0", out(reg) v,
+             options(nomem, nostack, preserves_flags));
+    }
+    v
 }
 
 // =============================================================================
@@ -711,16 +748,24 @@ pub extern "C" fn rs_main() -> i64 {
     // below will time out cleanly into SKIP).
     log("virtio-input: AWAITING_QMP_KEY\n");
 
-    // Busy-poll on `used.idx` with iteration cap. The DMA region is
-    // Normal-WB so volatile reads are cheap. ARM `yield` hints the
-    // CPU/scheduler to pace itself.
+    // Busy-poll on `used.idx`, wall-clock-bounded (#362; see the
+    // POLL_BUDGET_MS comment). The DMA region is Normal-WB so volatile
+    // reads are cheap. ARM `yield` hints the CPU/scheduler to pace
+    // itself. The clock starts AFTER the sentinel print -- the sentinel
+    // is what triggers the host-side injector, so the budget counts
+    // from the moment delivery becomes possible.
+    let freq = read_cntfrq();
+    let deadline = read_cntvct()
+        .wrapping_add(freq.saturating_mul(POLL_BUDGET_MS) / 1000);
+    let iter_cap: u64 = if freq == 0 { FREQ0_FALLBACK_ITER } else { MAX_POLL_ITER };
+
     let mut last_used_idx: u16 = 0;
     let mut avail_idx_local: u16 = QUEUE_SIZE; // matches populate_eventq's avail.idx = 16
     let mut total_consumed: u32 = 0;
     let mut saw_target = false;
-    let mut iters: u32 = 0;
+    let mut iters: u64 = 0;
 
-    while iters < MAX_POLL_ITER && !saw_target
+    while iters < iter_cap && !saw_target
           && total_consumed < MAX_EVENTS_TO_PROCESS {
         let cur_used = unsafe { read16(DMA_USER_VA + USED_OFF + 2) };
         if cur_used != last_used_idx {
@@ -741,6 +786,12 @@ pub extern "C" fn rs_main() -> i64 {
             continue;
         }
         iters += 1;
+        // Wrap-safe signed comparison; checked every 4096 idle
+        // iterations so the hot poll stays two volatile reads + yield.
+        if freq != 0 && (iters & CLOCK_CHECK_MASK) == 0
+           && (read_cntvct().wrapping_sub(deadline) as i64) >= 0 {
+            break;
+        }
         yield_cpu();
     }
 
@@ -764,9 +815,9 @@ pub extern "C" fn rs_main() -> i64 {
         // `tools/test.sh` enforces PASS when injection is expected.
         log("virtio-input: SKIP — no EV_KEY/");
         log_dec(KEY_A as u32);
-        log("/1 observed within ");
-        log_dec(MAX_POLL_ITER);
-        log(" poll iterations (events_seen=");
+        log("/1 observed within the ");
+        log_dec(POLL_BUDGET_MS as u32);
+        log(" ms poll budget (events_seen=");
         log_dec(total_consumed);
         log("); QMP injection likely absent (tools/run-vm.sh interactive run, or THYLACINE_INPUT_INJECT=0)\n");
         0

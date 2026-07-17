@@ -76,11 +76,13 @@ struct poll_waiter;
 // §6.2). corvus accepts promptly, so a short backlog suffices.
 #define SRV_ACCEPT_BACKLOG  16u
 
-// Global cap on live /srv connections. Each SrvConn pins ~32 KiB of
-// kernel heap (two rings + the dedicated p9_client); the cap bounds the
-// worst-case exposure. CORVUS-DESIGN §6.2 sizes this at corvus's
-// MAX_USERS order (~256); v1.0 caps at 64 (~2 MiB worst case) — a
-// tunable, raised when a multi-user workload needs the headroom.
+// Global cap on live /srv connections. Each SrvConn pins two heap rings
+// (2 x 64 KiB at the default class; 2 x 256 KiB for a DMSRVBULK service
+// — CF-3 B) plus a small struct; the cap bounds the worst-case
+// user-drivable exposure at 64 x ~516 KiB ~= 32 MiB if every conn were
+// bulk (realistically only the FS mounts are). CORVUS-DESIGN §6.2 sizes
+// this at corvus's MAX_USERS order (~256); v1.0 caps at 64 — a tunable,
+// raised when a multi-user workload needs the headroom.
 #define SRV_MAX_CONNS  64u
 
 // DEVSRV_SVC_MAGIC — sentinel at offset 0 of struct devsrv_svc_ref, the
@@ -175,6 +177,17 @@ struct SrvService {
     enum srv_mode  mode;             // transport: 9P (default) or byte stream
                                      // (P6-pouch-sockets, sub-chunk 12). Set at
                                      // srv_reserve, immutable through LIVE.
+    u32            ring_msize;       // the service's conn ring class (CF-3 B):
+                                     // SRVCONN_MSIZE (default) or
+                                     // SRVCONN_BULK_MSIZE (a DMSRVBULK post).
+                                     // Every conn minted for this service gets
+                                     // rings of 2x this + a matching kernel-
+                                     // client msize proposal. Set at
+                                     // srv_reserve; part of the service
+                                     // IDENTITY on a tombstone rebind (like
+                                     // `mode` -- the F2 rebind discipline), so
+                                     // an already-minted conn's geometry can
+                                     // never disagree with a rebound poster.
 
     // Accept backlog — a bounded FIFO ring of kernel-minted connections
     // awaiting SYS_SRV_ACCEPT. A client open enqueues one (holding a
@@ -317,7 +330,12 @@ int srv_registry_count(void);
 // / D2). A SYS_WALK_CREATE against a /srv directory (a devsrv root Spoor) is a
 // service post: mint a KObj_Srv listener bound to `p` for service `name` in
 // `root`'s registry and return its handle index. `mode` (derived by the
-// caller from the create perm's DMSRVBYTE bit) selects byte- vs 9P-mode.
+// caller from the create perm's DMSRVBYTE bit) selects byte- vs 9P-mode;
+// `bulk` (the DMSRVBULK bit; CF-3 B) selects the SRVCONN_BULK_MSIZE ring
+// class for every conn minted on this service (the default is
+// SRVCONN_MSIZE). The bulk class is bounded authority: the poster is
+// already MAY_POST_SERVICE-gated, and the per-conn cost is capped by the
+// two-point ring-class policy x SRV_MAX_CONNS.
 //
 // Gated on PROC_FLAG_MAY_POST_SERVICE — the SAME one-way joey-stamped gate
 // SYS_POST_SERVICE checks (CORVUS-DESIGN.md §6.1); an unmarked Proc gets -1.
@@ -335,7 +353,8 @@ int srv_registry_count(void);
 // post yields a different handle KIND, so it cannot ride the Spoor-returning
 // create path; the handler branches to here and returns the hidx directly.
 int devsrv_post_listener(struct Proc *p, struct Spoor *root,
-                         const char *name, size_t name_len, enum srv_mode mode);
+                         const char *name, size_t name_len, enum srv_mode mode,
+                         bool bulk);
 
 // =============================================================================
 // Per-connection layer (P5-corvus-srv-impl-a3b).

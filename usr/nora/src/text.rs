@@ -525,6 +525,22 @@ impl TextBuffer {
         }
     }
 
+    /// Replace the whole content (format-on-save), pushing an undo checkpoint
+    /// first so a single `u` restores the pre-format text, and re-clamping the
+    /// cursor to the new bounds (a formatter mostly preserves line structure,
+    /// so the clamped position stays near the edit point). The same
+    /// trailing-newline round-trip rule as `new()`.
+    pub fn replace_content(&mut self, content: &str) {
+        self.checkpoint();
+        let mut lines: Vec<String> = content.split('\n').map(String::from).collect();
+        if lines.is_empty() {
+            lines.push(String::new());
+        }
+        self.lines = lines;
+        let (row, col) = (self.row, self.col);
+        self.set_cursor(row, col);
+    }
+
     // -- internal helpers -------------------------------------------------
 
     /// Class of the char at `(r, c)`; a line-end (`c == len`) on a non-final
@@ -833,6 +849,21 @@ mod tests {
             t.checkpoint();
         }
         assert_eq!(t.undo.len(), UNDO_CAP);
+    }
+
+    #[test]
+    fn replace_content_clamps_cursor_and_undoes() {
+        // Cursor on the last line, past the new content's bounds.
+        let mut t = TextBuffer::new("aaaa\nbbbb\ncccc");
+        t.set_cursor(2, 4);
+        t.replace_content("zz\ny");
+        assert_eq!(t.content(), "zz\ny");
+        // Row clamped to the last line (1), col to its char_len (1).
+        assert_eq!(t.cursor(), (1, 1));
+        // One undo restores the pre-replace text AND cursor.
+        assert!(t.undo());
+        assert_eq!(t.content(), "aaaa\nbbbb\ncccc");
+        assert_eq!(t.cursor(), (2, 4));
     }
 
     #[test]

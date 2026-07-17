@@ -105,7 +105,7 @@ static struct SrvConn *open_byte_mode_pair(struct Proc **out_server,
     // create=post (byte mode) on a transient boot /srv root.
     struct Spoor *proot = devsrv_attach_registry(srv_boot_registry());
     if (!proot) { drop_test_proc(server); return NULL; }
-    int svc_h = devsrv_post_listener(server, proot, "btest", 5, SRV_MODE_BYTE);
+    int svc_h = devsrv_post_listener(server, proot, "btest", 5, SRV_MODE_BYTE, false);
     spoor_clunk(proot);
     if (svc_h < 0) { drop_test_proc(server); return NULL; }
 

@@ -173,6 +173,15 @@
 (*   9p_client_buggy_unbounded.cfg          BUGGY_UNBOUNDED = TRUE —      *)
 (*                                          counterexample where Send    *)
 (*                                          fires past MaxWindow.        *)
+(*   9p_client_buggy_async_clunk_tag_leak.cfg                             *)
+(*                                          BUGGY_ASYNC_CLUNK_TAG_LEAK = *)
+(*                                          TRUE — counterexample where  *)
+(*                                          an ownerless Rclunk is       *)
+(*                                          consumed off the wire but    *)
+(*                                          the tag is never freed (the  *)
+(*                                          FID-LIFECYCLE async-clunk    *)
+(*                                          hazard: the fire-and-forget  *)
+(*                                          clunk's tag slot leaks).     *)
 (*                                                                         *)
 (* Invariants enforced (TLC-checked):                                      *)
 (*                                                                         *)
@@ -196,7 +205,8 @@ CONSTANTS
     BUGGY_TAG_COLLISION,          \* BOOLEAN
     BUGGY_FID_AFTER_CLUNK,        \* BOOLEAN
     BUGGY_OOO_MATCH,              \* BOOLEAN
-    BUGGY_UNBOUNDED               \* BOOLEAN
+    BUGGY_UNBOUNDED,              \* BOOLEAN
+    BUGGY_ASYNC_CLUNK_TAG_LEAK    \* BOOLEAN
 
 ASSUME Cardinality(TagIds) >= 2
 ASSUME Cardinality(FidIds) >= 2
@@ -207,6 +217,7 @@ ASSUME BUGGY_TAG_COLLISION \in BOOLEAN
 ASSUME BUGGY_FID_AFTER_CLUNK \in BOOLEAN
 ASSUME BUGGY_OOO_MATCH \in BOOLEAN
 ASSUME BUGGY_UNBOUNDED \in BOOLEAN
+ASSUME BUGGY_ASYNC_CLUNK_TAG_LEAK \in BOOLEAN
 
 \* Op kinds. "walk" allocates a new fid bound to src; "clunk" releases a fid;
 \* "io" uses a fid for any of Tread/Twrite/Tgetattr/Tsetattr/Tlock/Tstatfs/
@@ -502,6 +513,40 @@ BuggyUnboundedSend(t, fid) ==
     /\ sent_ops' = sent_ops \cup {op_seq + 1}
     /\ UNCHANGED <<session_open, bound_fids, completed_ops>>
 
+(***************************************************************************)
+(* BuggyAsyncClunkLeakReceive(t) — the FID-LIFECYCLE async-clunk hazard    *)
+(* (docs/FID-LIFECYCLE-DESIGN.md §3.1). The impl's p9_client_clunk_async   *)
+(* sends Tclunk fire-and-forget: no submitter thread waits, and the        *)
+(* Rclunk arrives OWNERLESS — it must be drained by a later op's elected   *)
+(* reader via the #845 ownerless-dispatch arm, whose clear_outstanding     *)
+(* frees the tag. The CLEAN model needs no new action: SendClunk already   *)
+(* holds the tag until ReceiveOp(t) frees it, and the spec never modeled   *)
+(* a blocking submitter — ReceiveOp(t) on a clunk-kind tag IS the          *)
+(* ownerless drain (who drains is below the abstraction). The impl's      *)
+(* monotonic never-reused fid allocator is strictly MORE conservative     *)
+(* than the spec's finite-FidIds reuse-after-clunk traces, so the checked *)
+(* state space is a superset of the impl's.                               *)
+(*                                                                         *)
+(* THE BUG this action injects: the ownerless Rclunk is consumed off the   *)
+(* wire (the reply landed — completed_ops grows) but the dispatch fails    *)
+(* to clear_outstanding — outstanding[t] retains the op FOREVER. One of    *)
+(* the 64 outstanding[] slots is permanently burned; enough leaked clunks  *)
+(* exhaust the tag pool and the client stalls. Caught by                   *)
+(* TagAndOpAccounting at the leaking step (the op_id enters completed_ops  *)
+(* while still present in InflightOpIds — the bijection breaks).           *)
+(*                                                                         *)
+(* Real-world analogue: demux_frame_locked consuming a reply whose tag has *)
+(* no waiter and discarding it WITHOUT the dispatch_rmsg P9_TCLUNK →       *)
+(* clear_outstanding arm — exactly what the pre-#845 code would have done  *)
+(* with any ownerless reply.                                               *)
+(***************************************************************************)
+BuggyAsyncClunkLeakReceive(t) ==
+    /\ BUGGY_ASYNC_CLUNK_TAG_LEAK
+    /\ outstanding[t] # NONE
+    /\ outstanding[t].kind = "clunk"
+    /\ completed_ops' = completed_ops \cup {outstanding[t].op_id}
+    /\ UNCHANGED <<session_open, bound_fids, outstanding, op_seq, sent_ops>>
+
 Next ==
     \/ OpenSession
     \/ CloseSession
@@ -513,6 +558,7 @@ Next ==
     \/ \E t \in TagIds, f \in FidIds : BuggyFidAfterClunkSend(t, f)
     \/ \E t \in TagIds, ft \in TagIds : BuggyOOOReceive(t, ft)
     \/ \E t \in TagIds, f \in FidIds : BuggyUnboundedSend(t, f)
+    \/ \E t \in TagIds : BuggyAsyncClunkLeakReceive(t)
 
 Spec == Init /\ [][Next]_vars
 

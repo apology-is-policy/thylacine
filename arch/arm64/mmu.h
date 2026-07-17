@@ -485,4 +485,18 @@ int mmu_uninstall_user_pte(paddr_t pgtable_root, u16 asid, u64 vaddr);
 int mmu_uninstall_user_range(paddr_t pgtable_root, u16 asid,
                              u64 vaddr_start, u64 vaddr_end);
 
+// 8a-1b-gamma (I-39; docs/DEBUG-FS-DESIGN.md 4.5): read-only, non-growing
+// cross-Proc user-memory access for /proc/<pid>/mem. Walk `pgtable_root` (the
+// TARGET's L0 PA) L0..L3 through the kernel direct map; NOT uaccess, NOT a
+// fault-in. Copy up to `len` bytes to/from the kernel buffer, page by page,
+// stopping at the first non-resident (read) / non-resident-or-read-only (write)
+// page. Returns the byte count moved before that boundary (0 = the first page
+// is a hole; a short count = a hole / an RO leaf mid-range). The write refuses
+// a read-only leaf (I-12 W^X + I-36 REVENANT Image cache: a debugger writes
+// DATA; breakpoints are HW). LOCK CONTRACT: the caller holds the target's
+// vma_lock and has confirmed the target is fully stopped (no thread runs, so no
+// fault mutates the tree).
+long mmu_cross_proc_read(paddr_t pgtable_root, u64 vaddr, void *dst, long len);
+long mmu_cross_proc_write(paddr_t pgtable_root, u64 vaddr, const void *src, long len);
+
 #endif // THYLACINE_ARCH_ARM64_MMU_H

@@ -683,6 +683,18 @@ substrate + decouples the buffer's lifetime from the user mapping: a later
 alive (the #847 dual-refcount), so a registered buffer stays valid for the ring's
 life.
 
+The `BURROW_TYPE_ANON` (eager) requirement is load-bearing, not incidental: the
+single-base-kva resolution assumes one physically-contiguous chunk. The
+overcommit lazy heap (`BURROW_TYPE_ANON_LAZY`, doc 127 — pages allocated
+per-fault, scattered in the sparse `filepages`, no single `->pages`) does NOT
+satisfy it and is rejected. So a registered buffer is allocated eagerly +
+explicitly: native code uses **`libthyla_rs::loom::RegisteredBuffer`** (an eager
+`SYS_BURROW_ATTACH` region), the way a DMA buffer is special memory — a plain
+`Vec`/`Box` from the lazy general heap is not a valid registered buffer. (A
+Linux-io_uring-style scatter-gather registration — pin an ordinary heap buffer
+via a bvec — is the v1.x upgrade; it needs the chunk-walking kva path the
+Loom-6c-audit F3 anchor flagged.)
+
 **Dispatch** (`loom_submit_rw`). A `LOOM_OP_READ`/`WRITE` SQE names a registered
 file fid (`handle_idx`), a registered buffer (`buf_idx_or_off`), a file offset
 (`offset`), a byte count (`len`), and a buffer sub-offset (`_resv1[0]`,
@@ -734,7 +746,11 @@ like `LOOM_OP_READ`.
 the resolve+pin (file `spoor_ref` + buffer `burrow_ref` -- the two I-30 pins),
 the `[buf_off, buf_off+len)` slice bounds-check, and the async submit are shared;
 only the *builder* and the *required right* are selected per opcode. The
-read-shaped ops require `RIGHT_READ` (the `SYS_FSTAT` gate); WRITE requires
+read-shaped ops require `RIGHT_READ` (the SYS_READ-side posture -- DELIBERATELY
+stricter than the synchronous `SYS_FSTAT`, which since #46 is kind-gated only
+per POSIX; the Loom registered-handle surface keeps the conservative floor
+until a consumer needs a W-only async GETATTR, at which point relaxing it is a
+Loom-owned decision with its own focused look); WRITE requires
 `RIGHT_WRITE`. So the 6a I-30 gates apply uniformly to every 6b op with no new
 gate code (the `loom_metaread_rejects` test proves a read-shaped op without
 `RIGHT_READ` is denied `-EACCES`, and a bad buffer index `-EINVAL`).
@@ -1231,6 +1247,20 @@ rolled back via `spoor_clunk`); a user-VA fault reading the fd array.
 | #916 | the direct-descriptor ops (WALK / LOPEN / LCREATE / CLUNK -- mint/open/release a registered fid from the op path) | deferred (post-Loom-6 seam) |
 
 ## Known caveats / footguns
+
+- **Loom `SETATTR` is truncate-only at v1.0 (the identity axes are
+  fail-closed).** `LOOM_OP_SETATTR` mutates the TARGET the fid points at, so
+  its authority splits by axis exactly as the sync `SYS_WSTAT` path: `SIZE`
+  (truncate) authority is the fd's `RIGHT_WRITE` and is checkable statelessly
+  at submit -- it stays (on a non-`CWALKONLY` handle, with the s64 bound). But
+  `MODE`/`UID`/`GID` (chmod/chown) authority is IDENTITY (owner-only chmod /
+  CAP chown -- `perm_wstat_check`), which the async submit cannot evaluate
+  without a blocking owner-stat, so they are rejected `-EACCES`. This closes
+  the `T_WSTAT_SIZE`-audit finding (a hollow-`RIGHT_WRITE` O_PATH handle could
+  otherwise chmod/chown/truncate any X-reachable file). **v1.x seam**: async
+  identity-setattr needs a submit-time owner-stat or a completion-recheck
+  design before chmod/chown-via-Loom can be re-enabled soundly. The sync
+  `SYS_WSTAT` path is the identity-checked route today.
 
 - **Loom `READDIR` cursors are caller-managed and unguarded.** `loom_build_readdir`
   passes the SQE `offset` (a `u64` the userspace client owns) straight to

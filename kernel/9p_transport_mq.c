@@ -23,6 +23,10 @@ int p9_mq_loopback_init(struct p9_mq_loopback *mq,
     mq->recvs          = 0;
     mq->deadline_armed = false;
     mq->timed_out      = false;
+    mq->eagain_budget  = 0;
+    mq->scribble_buf   = NULL;
+    mq->scribble_len   = 0;
+    mq->scribble_arm   = 0;
     return 0;
 }
 
@@ -44,6 +48,11 @@ static int mq_send(void *ctx, const u8 *buf, size_t len) {
     if (!mq || mq->magic != P9_MQ_LOOPBACK_MAGIC) return -1;
     spin_lock(&mq->lock);
     if (mq->closed) { spin_unlock(&mq->lock); return -1; }
+    if (mq->eagain_budget > 0) {            // #349: transiently-full-but-ALIVE ring
+        mq->eagain_budget--;                // reject the frame; do NOT synthesize a
+        spin_unlock(&mq->lock);             // reply (a real full ring drops nothing
+        return P9_TRANSPORT_EAGAIN;         // on the floor -- the sender retries)
+    }
     int n = mq->responder(mq->user_ctx, buf, len, mq->scratch, sizeof(mq->scratch));
     if (n < 0 || (size_t)n > sizeof(mq->scratch)) { spin_unlock(&mq->lock); return -1; }
     if ((size_t)mq->tail + (size_t)n > P9_MQ_RING_CAP) {   // would overflow the ring
@@ -68,6 +77,13 @@ static int mq_recv(void *ctx, u8 *buf, size_t cap) {
     if (!mq || mq->magic != P9_MQ_LOOPBACK_MAGIC) return -1;
     spin_lock(&mq->lock);
     if (mq->closed) { spin_unlock(&mq->lock); return -1; }
+    // #375 clobber knob: this recv runs inside the client's pump/park window
+    // (c->lock dropped), where a peer may legally rebuild the shared out_buf.
+    // Model that peer write here, deterministically.
+    if (mq->scribble_arm > 0 && mq->scribble_buf && mq->scribble_len > 0) {
+        mq->scribble_arm--;
+        for (u32 i = 0; i < mq->scribble_len; i++) mq->scribble_buf[i] = 0x5A;
+    }
     u32 avail = mq->tail - mq->head;
     if (avail == 0) {
         if (mq->deadline_armed) { mq->timed_out = true; spin_unlock(&mq->lock); return -1; }

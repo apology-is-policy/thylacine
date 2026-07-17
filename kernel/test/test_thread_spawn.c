@@ -264,46 +264,56 @@ void test_proc_multi_thread_reap(void) {
 }
 
 // ---------------------------------------------------------------------------
-// proc.wait_pid_concurrent_waiter_refused  (RW-2 2B-F1/F2)
+// proc.wait_pid_concurrent_waiters_both_reap  (#344, the multi-waiter lift)
 //
-// At most ONE Thread of a Proc may be inside wait_pid_for at a time (p->child_-
-// done is a single-waiter Rendez -> F1 extinction; wait_pid_cond's lockless
-// p->children walk races a peer's reap+free -> F2 UAF). The per-Proc wait_active
-// flag refuses a genuinely-CONCURRENT 2nd caller with -1 (a SOLE waiter, even in
-// a multi-thread Proc, is correctly allowed -- this is why kproc's boot Thread
-// keeps reaping).
+// #344 retired the RW-2 2B-F1/F2 `wait_active` guard that REFUSED a 2nd
+// concurrent same-Proc waiter with -1. Now ANY number of a Proc's Threads may
+// be inside wait_pid_for at once: each registers its OWN poll_waiter on the
+// Proc's `child_waiters` list and parks on its OWN private rendez; a child's
+// ZOMBIE transition wakes ALL registered waiters; exactly one reaps each zombie.
 //
-// Two worker Threads of one Proc race into wait_pid_for with a live (spinning)
-// CHILD present. Exactly one claims wait_active + sleeps on child_done; the
-// other hits the guard -> -1. The child then exits, waking the claimer to reap
-// it. Asserts: exactly ONE worker was refused, and the OTHER reaped the child.
-// FAILS PRE-FIX: pre-fix BOTH workers sleep on child_done -> the 2nd trips the
-// single-waiter assert -> kernel extinction (deterministic on -smp 1: the
-// claimer sleeps, then the peer's sleep() hits r->waiter != NULL).
+// Two worker Threads of one Proc each call wait_pid_for(-1) once, with TWO live
+// (spinning) children present. Both workers MUST park concurrently -- the very
+// thing the old single-waiter `child_done` Rendez could not survive (a 2nd
+// sleeper tripped sleep's single-waiter assert, which is the whole reason the
+// guard existed). The children then exit; each worker reaps a DISTINCT child.
+//
+// FAILS PRE-FIX: with the wait_active guard, exactly one worker reaps and the
+// 2nd is refused (-1) -> reaped_count == 1, neg == 1. POST-FIX both reap ->
+// reaped_count == 2, neg == 0, and the two reaped pids are the two children.
+// (Pre-fix WITHOUT the guard would instead extinct on the 2nd concurrent
+// sleeper; "both park + both reap" is precisely the property #344 makes safe.)
 // ---------------------------------------------------------------------------
 
-static volatile u32 g_wpcw_refused;     // count of guard-refused workers (rc==-1)
-static volatile int g_wpcw_reaped_pid;  // SET only by the worker that reaped (its rc)
-static volatile int g_wpcw_expect_pid;  // the child's pid (the expected reaped value)
-static volatile u32 g_wpcw_done;        // workers finished
+#define WPCW_NCHILD 2
+static volatile u32 g_wpcw_go;             // children spin until set
+static volatile u32 g_wpcw_entered;        // workers that ENTERED wait_pid_for
+static volatile u32 g_wpcw_reaped_count;   // workers that reaped (rc > 0)
+static volatile u32 g_wpcw_neg;            // workers that returned <= 0
+static volatile int g_wpcw_pid[WPCW_NCHILD];   // pids the workers reaped
+static volatile u32 g_wpcw_pid_n;          // next free slot in g_wpcw_pid
+static volatile u32 g_wpcw_done;           // workers finished
 
 static void wpcw_child_entry(void *arg) {
     (void)arg;
-    // Stay alive (a non-zombie child) until a worker has been guard-refused, so
-    // the claiming worker is provably SLEEPING (holding wait_active) when the
-    // other worker hits the guard. Then exit to wake the claimer to reap us.
-    while (__atomic_load_n(&g_wpcw_refused, __ATOMIC_ACQUIRE) == 0u) sched();
+    // Stay a live (non-zombie) child until BOTH workers have parked, so the
+    // concurrent-park path -- the #344 property -- is exercised, not dodged.
+    while (__atomic_load_n(&g_wpcw_go, __ATOMIC_ACQUIRE) == 0u) sched();
     exits("ok");
 }
 
 static void wpcw_worker_entry(void *arg) {
     (void)arg;
+    __atomic_fetch_add(&g_wpcw_entered, 1u, __ATOMIC_ACQ_REL);
     int status = -123;
     int rc = wait_pid_for(-1, 0, &status);
-    if (rc == -1) {
-        __atomic_fetch_add(&g_wpcw_refused, 1u, __ATOMIC_ACQ_REL);
+    if (rc > 0) {
+        u32 slot = __atomic_fetch_add(&g_wpcw_pid_n, 1u, __ATOMIC_ACQ_REL);
+        if (slot < (u32)WPCW_NCHILD)
+            __atomic_store_n(&g_wpcw_pid[slot], rc, __ATOMIC_RELEASE);
+        __atomic_fetch_add(&g_wpcw_reaped_count, 1u, __ATOMIC_ACQ_REL);
     } else {
-        __atomic_store_n(&g_wpcw_reaped_pid, rc, __ATOMIC_RELEASE);
+        __atomic_fetch_add(&g_wpcw_neg, 1u, __ATOMIC_ACQ_REL);
     }
     __atomic_fetch_add(&g_wpcw_done, 1u, __ATOMIC_ACQ_REL);
     thread_exit_self();
@@ -313,9 +323,9 @@ static void wpcw_parent_entry(void *arg) {
     (void)arg;
     struct Proc *p = current_thread()->proc;
 
-    int child_pid = rfork(RFPROC, wpcw_child_entry, NULL);
-    if (child_pid <= 0) extinction("wpcw: rfork child failed");
-    __atomic_store_n(&g_wpcw_expect_pid, child_pid, __ATOMIC_RELEASE); // expected
+    int c0 = rfork(RFPROC, wpcw_child_entry, NULL);
+    int c1 = rfork(RFPROC, wpcw_child_entry, NULL);
+    if (c0 <= 0 || c1 <= 0) extinction("wpcw: rfork child failed");
 
     struct Thread *w0 = thread_create_with_arg(p, wpcw_worker_entry, NULL);
     struct Thread *w1 = thread_create_with_arg(p, wpcw_worker_entry, NULL);
@@ -323,19 +333,27 @@ static void wpcw_parent_entry(void *arg) {
     ready(w0);
     ready(w1);
 
+    // Wait until BOTH workers have ENTERED wait_pid_for, then spin so they both
+    // reach the park (the children are still alive -> no zombie -> both MUST
+    // sleep concurrently, the #344 property). Only THEN release the children.
+    while (__atomic_load_n(&g_wpcw_entered, __ATOMIC_ACQUIRE) < 2u) sched();
+    for (int i = 0; i < 1000; i++) sched();
+
+    __atomic_store_n(&g_wpcw_go, 1u, __ATOMIC_RELEASE);   // both children exit
+
     while (__atomic_load_n(&g_wpcw_done, __ATOMIC_ACQUIRE) < 2u) sched();
     exits("ok");
 }
 
-void test_proc_wait_pid_concurrent_waiter_refused(void) {
-    __atomic_store_n(&g_wpcw_refused, 0u, __ATOMIC_RELEASE);
+void test_proc_wait_pid_concurrent_waiters_both_reap(void) {
+    __atomic_store_n(&g_wpcw_go, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_wpcw_entered, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_wpcw_reaped_count, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_wpcw_neg, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_wpcw_pid_n, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_wpcw_done, 0u, __ATOMIC_RELEASE);
-    // RW-2 R2-F2: reaped_pid is a SENTINEL (0) -- it is witnessed ONLY when the
-    // claiming worker actually reaps the child (storing the child's pid). The
-    // parent stores the expected child pid into expect_pid separately, so the
-    // final equality is NON-tautological (a never-reaped child leaves 0 != pid).
-    __atomic_store_n(&g_wpcw_reaped_pid, 0, __ATOMIC_RELEASE);
-    __atomic_store_n(&g_wpcw_expect_pid, 0, __ATOMIC_RELEASE);
+    for (int i = 0; i < WPCW_NCHILD; i++)
+        __atomic_store_n(&g_wpcw_pid[i], 0, __ATOMIC_RELEASE);
 
     int pid = rfork(RFPROC, wpcw_parent_entry, NULL);
     TEST_ASSERT(pid > 0, "rfork parent failed");
@@ -344,13 +362,15 @@ void test_proc_wait_pid_concurrent_waiter_refused(void) {
     int reaped = wait_pid(&status);   // boot reaps the multi-thread test Proc
     TEST_EXPECT_EQ(reaped, pid, "reaped the multi-thread test Proc");
 
-    TEST_EXPECT_EQ(__atomic_load_n(&g_wpcw_refused, __ATOMIC_ACQUIRE), 1u,
-        "exactly ONE of two concurrent same-Proc waiters is guard-refused "
-        "(pre-fix: the 2nd trips the single-waiter assert -> extinction)");
-    int got = __atomic_load_n(&g_wpcw_reaped_pid, __ATOMIC_ACQUIRE);
-    int exp = __atomic_load_n(&g_wpcw_expect_pid, __ATOMIC_ACQUIRE);
-    TEST_ASSERT(exp > 0, "child pid recorded");
-    TEST_EXPECT_EQ(got, exp,
-        "the OTHER (sole) waiter actually reaped the child (its pid) -- a "
-        "multi-thread Proc with one waiter is correctly ALLOWED (kproc reaps)");
+    // #344: BOTH concurrent same-Proc waiters reaped a child. Pre-fix the
+    // wait_active guard refused the 2nd -> reaped_count would be 1, neg 1.
+    TEST_EXPECT_EQ(__atomic_load_n(&g_wpcw_reaped_count, __ATOMIC_ACQUIRE), 2u,
+        "both concurrent same-Proc waiters reaped a child (#344 multi-waiter; "
+        "pre-fix the wait_active guard refused the 2nd -> only 1 reaped)");
+    TEST_EXPECT_EQ(__atomic_load_n(&g_wpcw_neg, __ATOMIC_ACQUIRE), 0u,
+        "neither concurrent waiter was refused / returned <= 0 (#344)");
+    int p0 = __atomic_load_n(&g_wpcw_pid[0], __ATOMIC_ACQUIRE);
+    int p1 = __atomic_load_n(&g_wpcw_pid[1], __ATOMIC_ACQUIRE);
+    TEST_ASSERT(p0 > 0 && p1 > 0, "both reaped pids recorded");
+    TEST_ASSERT(p0 != p1, "the two waiters reaped DISTINCT children");
 }

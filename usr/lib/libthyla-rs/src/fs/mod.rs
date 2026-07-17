@@ -32,12 +32,14 @@ pub use self::path::{Component, Components, Display, Path, PathBuf, SEPARATOR};
 
 use crate::err::{Error, Result};
 
-/// Fetch `path`'s metadata. Opens the file with OREAD, calls fstat,
-/// closes the handle. Convenience for callers that don't otherwise
-/// need a `File`.
+/// Fetch `path`'s metadata in ONE syscall (POUNCE SYS_STAT = 88): the
+/// resolution's final run is the walk-QUERY, so on the disk FS this is a
+/// single fused Twalkgetattr RPC with no handle ever created. The X-search
+/// authority is the path-X-only POSIX stat shape -- notably this now
+/// succeeds on a file the caller may stat but not READ (the old
+/// open-OREAD emulation wrongly required read access).
 pub fn metadata<P: AsRef<Path>>(path: P) -> Result<Metadata> {
-    let file = File::open(path)?;
-    file.metadata()
+    metadata::stat_path(path.as_ref())
 }
 
 /// Set `path`'s permission bits (chmod). Opens with `T_OPATH` -- a navigation

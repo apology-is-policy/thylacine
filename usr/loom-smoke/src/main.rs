@@ -28,13 +28,11 @@
 
 extern crate alloc;
 
-use alloc::vec;
-
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
 use libthyla_rs::fs::File;
-use libthyla_rs::loom::{BufReg, Ring, Sqe};
+use libthyla_rs::loom::{RegisteredBuffer, Ring, Sqe};
 use libthyla_rs::{t_exits, t_putstr};
 
 fn fail(msg: &str) -> ! {
@@ -58,14 +56,16 @@ pub extern "C" fn rs_main() -> i64 {
     }
     t_putstr("loom-smoke: NOP round-trip ok\n");
 
-    // 2. register a heap buffer (ThylaAlloc -> one anon VMA) -- the I-30 buffer pin.
-    //    `as_mut_ptr`: the kernel writes registered buffers through the pinning.
-    let mut buf = vec![0u8; 4096];
-    let breg = BufReg {
-        va: buf.as_mut_ptr() as u64,
-        len: buf.len() as u64,
+    // 2. register an eager contiguous buffer (RegisteredBuffer -> SYS_BURROW_ATTACH,
+    //    one alloc_pages chunk) -- the I-30 buffer pin. A registered Loom buffer needs
+    //    contiguous physical backing, which the lazy general heap (ThylaAlloc ->
+    //    SYS_BURROW_ATTACH_LAZY, demand-zero + scattered) does NOT provide; the kernel
+    //    rejects it. Held to scope end so the kernel's pin always has a live VMA.
+    let buf = match RegisteredBuffer::new(4096) {
+        Ok(b) => b,
+        Err(_) => fail("loom-smoke: FAIL -- RegisteredBuffer::new\n"),
     };
-    if ring.register_buffers(&[breg]).is_err() {
+    if ring.register_buffers(&[buf.buf_reg()]).is_err() {
         fail("loom-smoke: FAIL -- register_buffers\n");
     }
 

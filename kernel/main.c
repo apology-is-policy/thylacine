@@ -16,6 +16,7 @@
 
 #include "uart.h"
 #include "../arch/arm64/alternatives.h"  // apply_alternatives (W1.5 LSE patcher)
+#include "../arch/arm64/hwdebug.h"        // 8a-2: hwdebug_init_cpu (OS-Lock unlock)
 #include "../arch/arm64/asid.h"
 #include "../arch/arm64/exception.h"
 #include "../arch/arm64/gic.h"
@@ -49,6 +50,8 @@
 #include <thylacine/thread.h>
 #include <thylacine/vma.h>      // vma_init (P3-Da)
 #include <thylacine/burrow.h>
+#include <thylacine/image.h>    // image_cache_init (REVENANT R-3)
+#include <thylacine/vdso.h>     // vdso_init (the clock vDSO page, #343)
 #include <thylacine/cons.h>     // console_mgr_main (A-4c-1)
 #include <thylacine/dev.h>
 #include <thylacine/dev9p.h>
@@ -139,10 +142,66 @@ void boot_main(void);
 // SYS_BOOT_COMPLETE handler additionally gates on the caller being
 // console-attached so no spawned child can emit a premature banner (-> a false
 // test PASS). Returns true iff this call printed the banner.
+// File-scope so boot_is_complete() can read it (8a-2c F2: the hwverify verb is a
+// boot-only diagnostic -- vestigial once the 8a-2b per-Proc HW install is the real
+// mechanism -- so devproc.c refuses it post-boot; that keeps an unprivileged Proc
+// from arming the global verify slot and swallowing another Proc's real breakpoint).
+static bool g_boot_complete_done;   // BSS false
+
+// boot_is_complete: true once SYS_BOOT_COMPLETE has fired (the boot->session
+// boundary; the "Thylacine boot OK" banner). Boot-window-only gates read this.
+bool boot_is_complete(void) {
+    return __atomic_load_n(&g_boot_complete_done, __ATOMIC_ACQUIRE);
+}
+
 bool boot_mark_complete(void) {
-    static bool g_boot_complete_done;   // BSS false
     if (__atomic_exchange_n(&g_boot_complete_done, true, __ATOMIC_SEQ_CST))
         return false;
+    // TI-4b boot-duration gate: timer_now_ns() is CLOCK_MONOTONIC (ns since the
+    // CNTVCT reset == since boot), so at this one-shot SYS_BOOT_COMPLETE point it
+    // IS the boot duration. A greppable in-guest number (tools/ci-smp-gate.sh
+    // thresholds it) -- the throughput sentinel TI-3 lacked. On HVF CNTVCT tracks
+    // wall-clock, so boot-ms ~= the wall-clock seconds the #299 / TI-4 regression
+    // was measured in; on TCG it is the virtual-clock elapsed, comparable
+    // run-to-run. Printed BEFORE the banner so the "Thylacine boot OK" tooling
+    // ABI line (TOOLING.md section 10) stays a clean standalone line.
+    uart_puts("boot-ms: ");
+    uart_putdec(timer_now_ns() / 1000000ull);
+    uart_puts("\n");
+    // TI-4d work-conservation summary for the boot itself: how much idle time
+    // was spent parked WHILE work was queued elsewhere (a steal/handoff gap).
+    // This is THE diagnostic for the tickless boot regression -- a large
+    // starved_ms / max_ms means queued-but-unstolen work (rebalance is the
+    // lever); ~0 means the boot is genuinely sequential (the cost is per-park
+    // overhead, not work-conservation). The /ctl/sched `wc:` line carries the
+    // live counters; this is the boot-window snapshot the ci-gate can grep.
+    struct sched_wc_stats wc;
+    sched_wc_stats(&wc);
+    uart_puts("boot-wc: parks=");
+    uart_putdec(wc.park_events);
+    uart_puts(" idle_ms=");
+    uart_putdec(wc.idle_ns / 1000000ull);
+    uart_puts(" starved=");
+    uart_putdec(wc.starved_events);
+    uart_puts(" starved_ms=");
+    uart_putdec(wc.starved_ns / 1000000ull);
+    uart_puts(" max_ms=");
+    uart_putdec(wc.max_starved_ns / 1000000ull);
+    // The tickless subset is the regression signal -- starved parks here can run
+    // to the backstop (the periodic remainder ends at the next <=1ms tick).
+    uart_puts(" | tickless: parks=");
+    uart_putdec(wc.tickless_parks);
+    uart_puts(" starved=");
+    uart_putdec(wc.tickless_starved_events);
+    uart_puts(" starved_ms=");
+    uart_putdec(wc.tickless_starved_ns / 1000000ull);
+    uart_puts(" max_ms=");
+    uart_putdec(wc.tickless_max_starved_ns / 1000000ull);
+    uart_puts(" wake-ipi=");
+    uart_putdec(wc.tickless_ipi_wakes);
+    uart_puts(" wake-oneshot=");
+    uart_putdec(wc.tickless_oneshot_wakes);
+    uart_puts("\n");
     uart_puts("Thylacine boot OK\n");
     return true;
 }
@@ -246,6 +305,12 @@ void boot_main(void) {
     // where FEAT_LSE is present. The `features:` line below reports what the
     // running CPU actually implements. Set up `g_hw_features` early.
     hw_features_detect();
+
+    // Go IDE Stage 8a-2: per-PE debug bring-up on the boot CPU (secondaries do
+    // it in per_cpu_main). Clears the OS Lock (LOCKED at reset — it suppresses
+    // debug exceptions) so a guest-programmed EL0 hardware breakpoint can
+    // deliver; hw_features_detect already enumerated DFR0's bp/wp counts.
+    hwdebug_init_cpu();
 
     uart_puts("  hardening: MMU+W^X+extinction+KASLR+vectors+IRQ+canaries (unconditional); PAC/BTI/LSE conditional (P1-H; Lazarus W1)\n");
 
@@ -427,6 +492,15 @@ void boot_main(void) {
     territory_init();
     handle_init();
     burrow_init();
+    // vDSO clock page: one kernel-owned BURROW_TYPE_ANON page, mapped RO into
+    // every exec'd Proc so native userspace reads CLOCK_MONOTONIC/_REALTIME
+    // without a SYS_CLOCK_GETTIME trap (docs/VDSO-DESIGN.md, #343). Runs AFTER
+    // burrow_init (it burrow_create_anons the page), timer_init (freq known,
+    // line 398), and the boot wall anchor (offset set, line 406) so the page
+    // seeds correct values. Best-effort: on OOM the page is absent + readers
+    // fall back to the syscall.
+    vdso_init();
+    image_cache_init();    // REVENANT R-3: the qid-keyed shared-text Image cache (BSS-backed; after burrow_init)
     vma_init();
     asid_init();
     // P4-Ib: kobj_mmio_init sets up the MMIO claim-tracking table.
@@ -696,7 +770,7 @@ void boot_main(void) {
     // sanitizer matrix lands at P1-I.
 #ifdef KERNEL_TESTS
     // #58: the spawn tests resolve the binary through the caller's namespace
-    // (exec_load_from_namespace -> stalk), so the test Proc (kproc) needs a
+    // (exec_resolve_from_namespace -> stalk), so the test Proc (kproc) needs a
     // root_spoor. Root it at devramfs BEFORE the suite; joey_run idempotently
     // re-roots it later for the boot chain. NOTE (#58 audit F5): kproc's root is
     // now devramfs for the WHOLE suite -- no test may assume an unrooted kproc or

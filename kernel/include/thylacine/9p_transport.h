@@ -164,11 +164,21 @@ int  p9_transport_close(struct p9_transport *t);
 // I/O.
 // =============================================================================
 
+// Transient send back-pressure (#349). A backend whose outbound buffer is
+// momentarily full but ALIVE returns this from ops.send, and p9_transport_send
+// propagates it -- distinct from a genuine break (<0) and from success (0). The
+// caller (client_run's flow control) drains the reply path + retries; it is NOT
+// a session death. Only the SrvConn c2s ring backend produces it (a transiently-
+// full ring under #841 pipelining); single-frame backends never do. The value
+// is outside {0, -1, any byte count} so no backend collides with it.
+#define P9_TRANSPORT_EAGAIN  (-11)
+
 // Send one complete framed Tmsg. `msg` is the bytes the session module
 // produced. `len` is the total frame length (including the 7-byte
 // header; equals header.size). Returns 0 on success, -1 on error
 // (validates frame consistency before calling the backend; transitions
-// to ERROR on backend failure).
+// to ERROR on backend failure), or P9_TRANSPORT_EAGAIN on transient
+// all-or-nothing back-pressure (the whole frame did not fit; retryable).
 int  p9_transport_send(struct p9_transport *t,
                         const u8 *msg, size_t len);
 

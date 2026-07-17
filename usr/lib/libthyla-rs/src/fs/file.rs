@@ -91,7 +91,7 @@ impl File {
     ///
     /// Errors:
     ///   - `Error::InvalidArgument`: path is empty, relative, contains
-    ///     `..`, or a component exceeds `T_WALK_OPEN_NAME_MAX` (64).
+    ///     `..`, or a component exceeds `T_WALK_OPEN_NAME_MAX` (255).
     ///   - `Error::NotFound`: a component along the walk doesn't
     ///     exist.
     ///   - `Error::PermissionDenied`: rights/mode insufficient at

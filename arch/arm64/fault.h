@@ -65,6 +65,17 @@ enum fault_result {
     // via demand paging — and the remaining "truly bad VA" cases stay
     // as the P5+ note path.
     FAULT_UNHANDLED_USER  = 2,
+
+    // REVENANT / I-36 condition 6: a file-backed (BURROW_TYPE_FILE) demand-
+    // page I/O error — a dead/wedged FS server, or a failed/death-interrupted
+    // dev->read while faulting in executable text. The caller terminates the
+    // faulting Proc with snare:bus (POSIX SIGBUS for an I/O error on a mapped
+    // file), attributable to the faulting VA — NEVER a silent zero-fill of
+    // text, NEVER a kernel extinction. The dedicated enum value the
+    // FAULT_FATAL comment in exception.c anticipated for SIGBUS-class user
+    // faults. Distinct from FAULT_UNHANDLED_USER (snare:segv = a bad VA): a
+    // FILE page-in error is a valid mapping whose backing store failed.
+    FAULT_USER_BUS        = 3,
 };
 
 // Decode raw exception state into a fault_info. Pure function; no

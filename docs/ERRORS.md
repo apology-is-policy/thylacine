@@ -209,15 +209,85 @@ With the new errno registry, Thylacine kernel code returns `-T_E_<NAME>`
 instead of `-1` wherever the cause is known. Pouch sees the POSIX
 errno number directly. No boundary-line patch change needed.
 
-**Rollout policy** (staged):
+**Rollout policy** (the retrospective sweep — *user-decided 2026-06-24,
+the "errno-rollout arc"*).
+
+The original policy below deferred the sweep ("A retrospective sweep is
+NOT scheduled — incremental + per-touch is cheaper"). That deferral is
+**reversed**: the GOOS=thylacine Go toolchain is the forcing function.
+Go's runtime decodes a negative syscall return Linux-style (`CMN $4095`),
+so a bare `-1` becomes `errno == EPERM` ("operation not permitted") — and
+`os.IsNotExist`, the `O_CREATE` create-or-open fallback, and the build
+cache's existence checks ALL depend on distinguishing `ENOENT` from a real
+error. A `-1`-for-everything kernel makes a correct toolchain (and any
+Linux-compat consumer) impossible. So the sweep is now scheduled.
+
+The original staged policy still holds for NEW syscalls:
 - Sub-chunks introducing NEW syscalls return `-T_E_<NAME>` from day one.
-- Existing syscalls return `-1` today; sub-chunks that touch them
-  upgrade to `-T_E_<NAME>` as they're modified. A retrospective sweep
-  is NOT scheduled — incremental + per-touch is cheaper than a
-  cross-cutting refactor.
-- The boundary-line patch's `EIO` fallback covers the unchanged-yet
-  callsites; userspace observes a slow improvement in error fidelity
-  as the kernel sweeps through.
+- The boundary-line patch's `EIO` fallback (the `-1` row) still covers any
+  not-yet-swept callsite; fidelity improves monotonically as the sweep
+  lands.
+
+**Architecture (propagate the known cause; do not re-classify).** The real
+errno almost always already exists at the failure source — it is only
+*discarded* on the way up:
+- The 9P client (`kernel/9p_client.c`) already returns `-(int)ecode` from
+  an `Rlerror` (I-14 bounds the hostile ecode), and the errno values are
+  POSIX-aligned (`T_E_NOENT == 2 == ENOENT == the 9P ecode`), so a
+  Stratum `ENOENT`/`EEXIST` arrives intact — the Dev layer just dropped it
+  by collapsing `dev9p_*` to `NULL`/`-1`.
+- `stat_native` already returns `int`; `dev9p_stat_native` can return the
+  real `-errno` instead of `-1`.
+- `stalk()` already *knows* its own failure reason locally (walk-miss vs a
+  `perm_check` X/RW denial vs a structural reject); it discards it by
+  returning `NULL`. Threading an `int *errp` out-param recovers it.
+- The ~700 `-1` sites in `kernel/syscall.c` are mostly *local* handler
+  validations (handle-miss → `EBADF`, bad arg → `EINVAL`, missing right →
+  `ACCES`, uaccess fault → `FAULT`) — a one-line errno swap at the site,
+  no deep threading.
+
+**The binding rules.**
+- **NEVER return `-T_E_PERM` (== `-1`)** from a handler — it collides with
+  the generic `-1` sentinel (errno.h warning). A capability/permission
+  denial returns `T_E_ACCES` (13); reserve `T_E_PERM`'s *name* for the
+  symbolic constant only.
+- Reserve a bare `-1` for a *truly generic / unclassifiable* failure. When
+  the cause is known, return the specific `-T_E_<NAME>`.
+- **Backward-compatible**: native `libthyla-rs`/`libt` callers test `r < 0`
+  — a `-2`/`-17` is still `< 0`, so no native consumer regresses; pouch
+  and Go observe the *correct* POSIX errno instead of `EIO`/`EPERM`.
+
+**Key FS-path mappings** (the toolchain-load-bearing set):
+
+| Operation | Failure | Returns |
+|---|---|---|
+| `SYS_OPEN` / `SYS_WALK_OPEN` | component not found | `-T_E_NOENT` (2) |
+| `SYS_OPEN` / X-search | `perm_check` denial | `-T_E_ACCES` (13) |
+| `SYS_WALK_CREATE` | target already exists | `-T_E_EXIST` (17) |
+| `SYS_WALK_CREATE` | missing parent component | `-T_E_NOENT` (2) |
+| `SYS_WALK_CREATE` | not a directory | `-T_E_NOTDIR` (20) |
+| `SYS_UNLINK` (rmdir) | directory not empty | `-T_E_NOTEMPTY` (39) |
+| `SYS_FSTAT` / `SYS_*` | bad / wrong-kind handle | `-T_E_BADF` (9) |
+| any handler | structurally bad argument | `-T_E_INVAL` (22) |
+| any handler | uaccess fault on a user VA | `-T_E_FAULT` (14) |
+
+**Staging** (audit-bearing — the FS-mutation + resolution surfaces are
+trigger surfaces; self + Fable audit before the arc closes):
+- **ER-0** — this scripture (no code).
+- **ER-1** — the resolution keystone: `stalk()` `int *errp` (walk-miss →
+  `NOENT`, perm → `ACCES`, structural → `INVAL`, stat-fail → propagate) +
+  `dev9p_stat_native` real `-errno` + `SYS_OPEN`/`SYS_WALK_OPEN` return
+  `-errno`. Unblocks the Go build's `os.IsNotExist` + create-or-open.
+- **ER-2** — FS mutation: `SYS_WALK_CREATE` → `EEXIST`/`NOENT`/`NOTDIR`,
+  `SYS_UNLINK`/`SYS_RENAME` → `NOENT`/`NOTEMPTY`/..., `SYS_FSTAT`/`LSEEK`/
+  `READDIR`/`FSYNC`/`WSTAT`/`CHDIR` → their specific errnos.
+- **ER-3** — the rest of the surface: the local-validation `-1` sites
+  (`EBADF`/`EINVAL`/`ACCES`/`FAULT`/...) across the syscall families.
+- **ER-4** — pouch `__syscall_ret` rework (the `-1 -> EIO` special case is
+  now reachable only by the residual truly-generic returns; verify pouch
+  programs observe the correct errnos).
+- **ER-5** — focused Fable + self audit over the swept surface, SMP gate,
+  in-VM Go-build proof, close.
 
 ## Cross-project coordination
 

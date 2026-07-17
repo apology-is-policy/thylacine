@@ -38,8 +38,12 @@
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
 #include <thylacine/burrow.h>
+#include <thylacine/dev.h>       // #45: the blob-serving stub Dev
+#include <thylacine/spoor.h>     // #45: spoor_alloc for the from_spoor path
+#include <thylacine/image.h>     // #45: Image-cache counters (dispatch proof)
 
 #include "../../mm/phys.h"
+#include "../../arch/arm64/hwfeat.h"   // g_hw_features.linux_hwcap (AT_HWCAP)
 
 void test_exec_setup_smoke(void);
 void test_exec_setup_segment_data_copied(void);
@@ -49,8 +53,9 @@ void test_exec_setup_lifecycle_round_trip(void);
 void test_exec_user_stack_guard(void);
 void test_exec_setup_auxv(void);
 void test_exec_setup_auxv_no_phdr_segment(void);
+void test_exec_from_spoor_rodata_dispatch(void);
 
-#define ELF_BLOB_SIZE 8192
+#define ELF_BLOB_SIZE 16384   // 4 pages: headers + 3 one-page segments (#45)
 // 8-byte aligned per elf_load's R5-G F61 alignment precondition. We use
 // 16-byte alignment for safety (struct Elf64_Ehdr alignment fits inside).
 static _Alignas(struct Elf64_Ehdr) u8 g_elf_blob[ELF_BLOB_SIZE];
@@ -135,6 +140,37 @@ static size_t build_elf_phdrs_loaded(void) {
     return size;
 }
 
+
+// =============================================================================
+// #45 / REVENANT 4.6: the from_spoor PT_LOAD dispatch.
+//
+// A stub Dev serving file bytes straight from g_elf_blob, so
+// exec_setup_from_spoor runs against a synthetic "file" with no FS. Proves the
+// generalized gate: NON-WRITABLE segments (R+X text AND R-only rodata) route
+// file-backed through the Image cache; writable data stays eager anon
+// (I-36 condition 4). Fails on the pre-#45 gate by construction (rodata would
+// come back BURROW_TYPE_ANON and only ONE Image entry would be created).
+// =============================================================================
+
+static size_t g_blob_dev_size;
+
+static long blob_dev_read(struct Spoor *c, void *buf, long n, s64 off) {
+    (void)c;
+    if (n <= 0 || off < 0 || (u64)off >= (u64)g_blob_dev_size) return 0;
+    size_t avail = g_blob_dev_size - (size_t)off;
+    size_t want  = (size_t)n < avail ? (size_t)n : avail;
+    u8 *b = (u8 *)buf;
+    for (size_t i = 0; i < want; i++) b[i] = g_elf_blob[(size_t)off + i];
+    return (long)want;
+}
+
+static struct Dev g_blob_dev = {
+    .dc   = '?',
+    .name = "execblob",
+    .read = blob_dev_read,
+};
+
+
 static struct Proc *make_proc(void) {
     return proc_alloc();
 }
@@ -143,6 +179,109 @@ static void drop_proc(struct Proc *p) {
     if (!p) return;
     p->state = 2;     // PROC_STATE_ZOMBIE
     proc_free(p);
+}
+
+void test_exec_from_spoor_rodata_dispatch(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    // text RX @ 0x10000 (file 0x1000), rodata R @ 0x20000 (file 0x2000),
+    // data RW @ 0x30000 (file 0x3000); each filesz == memsz == one page.
+    u32 flags[3] = { PF_R | PF_X, PF_R, PF_R | PF_W };
+    size_t size = build_elf(flags, 3, /*filesz=*/0x1000);
+    // Recognizable bytes in the RW data segment (proves the eager copy still
+    // reads through the Dev). The FILE segments are not faulted here -- their
+    // content path is demand_page.file_rodata_prot / file_smoke.
+    for (size_t i = 0; i < 0x20; i++) g_elf_blob[0x3000 + i] = (u8)(0xE0 + i);
+    g_blob_dev_size = size;
+
+    u64 creates0 = image_cache_creates_for_test();
+
+    struct Spoor *exe = spoor_alloc(&g_blob_dev);
+    TEST_ASSERT(exe != NULL, "spoor_alloc");
+    exe->qid.path = 0x45C0DEull;      // distinct Image key vs any other test
+    exe->qid.vers = 7;
+
+    u64 entry = 0, sp = 0;
+    int rc = exec_setup_from_spoor(p, exe, size, NULL, 0, 0, &entry, &sp);
+    TEST_EXPECT_EQ(rc, 0, "exec_setup_from_spoor");
+    TEST_EXPECT_EQ(entry, (u64)0x10000, "entry == e_entry");
+
+    struct Vma *text = vma_lookup(p, 0x10000ull);
+    struct Vma *ro   = vma_lookup(p, 0x20000ull);
+    struct Vma *rw   = vma_lookup(p, 0x30000ull);
+    TEST_ASSERT(text != NULL && ro != NULL && rw != NULL, "three VMAs");
+    TEST_EXPECT_EQ(text->prot, VMA_PROT_RX,   "text prot RX");
+    TEST_EXPECT_EQ(ro->prot,   VMA_PROT_READ, "rodata prot R-only");
+    TEST_EXPECT_EQ(rw->prot,   VMA_PROT_RW,   "data prot RW");
+    TEST_EXPECT_EQ((int)text->burrow->type, (int)BURROW_TYPE_FILE,
+        "text FILE-backed");
+    TEST_EXPECT_EQ((int)ro->burrow->type, (int)BURROW_TYPE_FILE,
+        "rodata FILE-backed (the #45 gate)");
+    TEST_EXPECT_EQ((int)rw->burrow->type, (int)BURROW_TYPE_ANON,
+        "data eager ANON (I-36 condition 4: writable never file-backed)");
+    TEST_EXPECT_EQ(image_cache_creates_for_test() - creates0, 2,
+        "two Image entries created (text + rodata)");
+
+    // The eager RW copy carried the file bytes.
+    u8 *rwb = (u8 *)pa_to_kva(page_to_pa(rw->burrow->pages));
+    TEST_EXPECT_EQ((u64)rwb[0],    (u64)0xE0, "data byte 0 eager-copied");
+    TEST_EXPECT_EQ((u64)rwb[0x1f], (u64)0xFF, "data byte 0x1f eager-copied");
+
+    // Teardown: unmap (drop_proc) -> both Image entries go idle -> evict frees
+    // the FILE Burrows (each clunks its adopted spoor ref) -> our own ref last.
+    drop_proc(p);
+    image_cache_evict_idle_for_test();
+    spoor_clunk(exe);
+}
+
+// #45 audit F1: a crafted ELF whose R+X and R-only PT_LOADs share an IDENTICAL
+// file window (same file_offset + filesz, distinct vaddrs). The prot-less Image
+// key (pre-fix) resolved BOTH to the SAME FILE Burrow -> one physical page
+// mapped at both an executable and a non-executable prot; a rodata-first fill
+// (no I-cache sync) then a text resident-hit executed stale I-cache lines
+// (#317 hazard). The fix keys on `exec`, so the two segments get DISTINCT
+// Burrows. This test asserts distinct Burrows + TWO Image creates; it FAILS on
+// the pre-fix code by construction (same Burrow pointer, one create).
+void test_exec_from_spoor_aliased_window_distinct(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    // seg0 R+X @ 0x10000, seg1 R-only @ 0x20000 -- both point at file 0x1000.
+    u32 flags[2] = { PF_R | PF_X, PF_R };
+    size_t size = build_elf(flags, 2, /*filesz=*/0x1000);
+    // Repoint seg1's file_offset onto seg0's window (the alias). build_elf packs
+    // seg1 at file 0x2000; make it 0x1000 == seg0. The blob at 0x1000 backs both.
+    struct Elf64_Phdr *ph = (struct Elf64_Phdr *)
+        (g_elf_blob + sizeof(struct Elf64_Ehdr));
+    ph[1].p_offset = ph[0].p_offset;    // == 0x1000; same (file_offset, size)
+    g_blob_dev_size = size;
+
+    u64 creates0 = image_cache_creates_for_test();
+
+    struct Spoor *exe = spoor_alloc(&g_blob_dev);
+    TEST_ASSERT(exe != NULL, "spoor_alloc");
+    exe->qid.path = 0xA11A5ull;         // distinct Image key vs other tests
+    exe->qid.vers = 3;
+
+    u64 entry = 0, sp = 0;
+    int rc = exec_setup_from_spoor(p, exe, size, NULL, 0, 0, &entry, &sp);
+    TEST_EXPECT_EQ(rc, 0, "exec_setup_from_spoor (aliased window)");
+
+    struct Vma *text = vma_lookup(p, 0x10000ull);
+    struct Vma *ro   = vma_lookup(p, 0x20000ull);
+    TEST_ASSERT(text != NULL && ro != NULL, "both VMAs");
+    TEST_EXPECT_EQ((int)text->burrow->type, (int)BURROW_TYPE_FILE, "text FILE");
+    TEST_EXPECT_EQ((int)ro->burrow->type,   (int)BURROW_TYPE_FILE, "rodata FILE");
+    // THE FIX: distinct Burrows despite the identical file window.
+    TEST_ASSERT(text->burrow != ro->burrow,
+        "aliased-window R+X and R-only resolve to DISTINCT Burrows (no dual-prot)");
+    TEST_EXPECT_EQ(image_cache_creates_for_test() - creates0, 2,
+        "TWO Image entries -- the exec bit splits the aliased key (fails pre-fix)");
+
+    drop_proc(p);
+    image_cache_evict_idle_for_test();
+    spoor_clunk(exe);
 }
 
 void test_exec_setup_smoke(void) {
@@ -390,7 +529,9 @@ void test_exec_setup_auxv(void) {
     TEST_EXPECT_EQ(w[1], 0ull, "argv[] terminator is NULL");
     TEST_EXPECT_EQ(w[2], 0ull, "envp[] terminator is NULL");
 
-    // auxv — six (a_type, a_val) pairs, AT_NULL last.
+    // auxv — eight (a_type, a_val) pairs: AT_PHDR/PHENT/PHNUM/PAGESZ,
+    // AT_HWCAP, AT_RANDOM, AT_VDSO_CLOCK (the vDSO page maps at boot --
+    // vdso_init ran), AT_NULL last.
     TEST_EXPECT_EQ(w[3],  (u64)AT_PHDR,   "auxv[0].a_type == AT_PHDR");
     TEST_EXPECT_EQ(w[4],  0x10040ull,     "AT_PHDR == seg0 vaddr + e_phoff");
     TEST_EXPECT_EQ(w[5],  (u64)AT_PHENT,  "auxv[1].a_type == AT_PHENT");
@@ -400,13 +541,23 @@ void test_exec_setup_auxv(void) {
     TEST_EXPECT_EQ(w[8],  1ull,           "AT_PHNUM == e_phnum");
     TEST_EXPECT_EQ(w[9],  (u64)AT_PAGESZ, "auxv[3].a_type == AT_PAGESZ");
     TEST_EXPECT_EQ(w[10], (u64)PAGE_SIZE, "AT_PAGESZ == PAGE_SIZE");
-    TEST_EXPECT_EQ(w[11], (u64)AT_RANDOM, "auxv[4].a_type == AT_RANDOM");
-    TEST_EXPECT_EQ(w[13], (u64)AT_NULL,   "auxv[5].a_type == AT_NULL");
-    TEST_EXPECT_EQ(w[14], 0ull,           "AT_NULL.a_val == 0");
+    TEST_EXPECT_EQ(w[11], (u64)AT_HWCAP,  "auxv[4].a_type == AT_HWCAP");
+    TEST_EXPECT_EQ(w[12], g_hw_features.linux_hwcap,
+        "AT_HWCAP == g_hw_features.linux_hwcap");
+    // FP + AdvSIMD are architecturally present on every ARMv8-A target
+    // Thylacine boots on (QEMU-virt TCG/HVF; the Lazarus boards) — a
+    // zero word would mean the PFR0 inverted-sentinel decode regressed.
+    TEST_ASSERT((w[12] & 0x3ull) == 0x3ull,
+        "AT_HWCAP carries FP|ASIMD (the PFR0 decode)");
+    TEST_EXPECT_EQ(w[13], (u64)AT_RANDOM, "auxv[5].a_type == AT_RANDOM");
+    TEST_EXPECT_EQ(w[15], (u64)AT_VDSO_CLOCK, "auxv[6].a_type == AT_VDSO_CLOCK");
+    TEST_EXPECT_EQ(w[16], EXEC_USER_VDSO_BASE, "AT_VDSO_CLOCK == EXEC_USER_VDSO_BASE");
+    TEST_EXPECT_EQ(w[17], (u64)AT_NULL,   "auxv[7].a_type == AT_NULL");
+    TEST_EXPECT_EQ(w[18], 0ull,           "AT_NULL.a_val == 0");
 
     // AT_RANDOM points at the 16-byte entropy block, which must lie
     // within the user stack region.
-    u64 rand_va = w[12];
+    u64 rand_va = w[14];
     TEST_EXPECT_EQ(rand_va, sp + EXEC_INIT_RANDOM_OFFSET,
         "AT_RANDOM a_val == sp + EXEC_INIT_RANDOM_OFFSET");
     TEST_ASSERT(rand_va >= EXEC_USER_STACK_BASE &&
@@ -450,9 +601,11 @@ void test_exec_setup_auxv_no_phdr_segment(void) {
     // The whole phdr triple is zeroed when no segment covers the table —
     // a coherent "no phdrs" auxv (audit F1).
     TEST_EXPECT_EQ(w[6], 0ull, "AT_PHENT == 0 when AT_PHDR is unresolved");
-    // The startup frame is otherwise well-formed.
+    // The startup frame is otherwise well-formed. With the vDSO page mapped,
+    // AT_VDSO_CLOCK occupies the slot at w[15] and AT_NULL terminates at
+    // w[17] (AT_HWCAP shifted the tail by one entry).
     TEST_EXPECT_EQ(w[0],  0ull,          "argc == 0");
-    TEST_EXPECT_EQ(w[13], (u64)AT_NULL,  "auxv terminated by AT_NULL");
+    TEST_EXPECT_EQ(w[17], (u64)AT_NULL,  "auxv terminated by AT_NULL");
 
     drop_proc(p);
 }

@@ -42,6 +42,22 @@ struct Block;       // 9P-style block I/O carrier; defined when bread/bwrite-usi
 struct poll_waiter; // <thylacine/poll.h>; the hook a polling thread installs on .poll
 struct t_stat;      // <thylacine/syscall.h>; the SYS_FSTAT native metadata record
 
+// Per-call component cap for Dev.walk_attrs (POUNCE). Vtable-level so
+// non-9P Devs and the resolver need no wire header; dev9p _Static_asserts
+// it equals the wire's P9_MAX_WALK (the Twalkgetattr per-op bound).
+#define DEV_WALK_ATTRS_MAX 16
+
+// Distinguished Dev.walk_attrs return: THIS SESSION's backing server does
+// not implement the fused op (Twalkgetattr is a Stratum extension; netd and
+// any plain 9P2000.L peer answer it Rlerror ENOSYS). The resolver falls back
+// to the per-component loop -- correctness identical, RPC count higher.
+// Distinct from NULL (a REAL walk failure at the first component). Callers
+// must NOT walkqid_free it. dev9p latches the answer per-session, so after
+// the one probe RPC the sentinel returns instantly. Native implementations
+// (devramfs) never return it.
+extern struct Walkqid dev_walk_attrs_unsupported;
+#define DEV_WALK_ATTRS_UNSUPPORTED (&dev_walk_attrs_unsupported)
+
 // The Plan 9 Dev vtable. ARCH §9.2 verbatim with C99 const additions on
 // input strings (read-only inputs that were `char *` in 9front; we
 // preserve the original typing for buffer params + `void *`/`u8 *` for
@@ -104,9 +120,10 @@ struct Dev {
     //                    particular) implement this; trivial leaf Devs
     //                    (devcons / devnull / devzero / devnotes) leave
     //                    the slot NULL.
-    //   wstat_native(c, valid, mode, uid, gid) — Thylacine-native chmod/chown
-    //                    surface (A-2a; IDENTITY-DESIGN.md §9.5). Apply the
-    //                    subset of (mode, uid, gid) selected by the `valid`
+    //   wstat_native(c, valid, mode, uid, gid, size) — Thylacine-native
+    //                    chmod/chown/ftruncate surface (A-2a + Go Stage 5;
+    //                    IDENTITY-DESIGN.md §9.5). Apply the subset of
+    //                    (mode, uid, gid, size) selected by the `valid`
     //                    mask (T_WSTAT_* bits) to the file backed by c.
     //                    Returns 0 on success, -1 on failure. NULL-permitted
     //                    (like .stat_native / .fsync): a NULL slot => SYS_WSTAT
@@ -114,13 +131,77 @@ struct Dev {
     //                    less Devs (devramfs at v1.0) leave it NULL. The
     //                    handler has already validated the mask + value bounds;
     //                    the Dev forwards to its backing.
+    //                    A Dev exposing this MUST set .perm_enforced = true
+    //                    (#47 audit F1): SYS_WSTAT's fd gate is kind-only, so
+    //                    perm_wstat_check -- which runs only when
+    //                    perm_enforced -- is the ONLY write-authority check on
+    //                    the metadata path. dev_register extincts on a
+    //                    wstat-capable Dev that does not enforce.
     struct Spoor   *(*attach)(const char *spec);
     struct Walkqid *(*walk)(struct Spoor *c, struct Spoor *nc,
                             const char **name, int nname);
     int             (*stat)(struct Spoor *c, u8 *dp, int n);
     int             (*stat_native)(struct Spoor *c, struct t_stat *out);
     int             (*wstat_native)(struct Spoor *c, u32 valid,
-                                    u32 mode, u32 uid, u32 gid);
+                                    u32 mode, u32 uid, u32 gid, u64 size);
+
+    // walk_attrs(c, nc, names, name_lens, nname, sts) — the walk-fused getattr
+    // (POUNCE; docs/POUNCE-DESIGN.md §4). OPTIONAL (NULL-permitted, like
+    // .fsync): a NULL slot means the resolver keeps the per-component
+    // walk + stat_native loop — correctness identical, only the RPC count
+    // differs. Only Devs whose backing can sample per-step attributes in one
+    // operation set it (dev9p -> Twalkgetattr; devramfs -> the RAM table).
+    //
+    // Walks `nname` REAL components (the resolver never passes "." / "..")
+    // from c in ONE operation, filling sts[0..nqid) with each walked
+    // component's attributes. Names are (ptr, len) pairs — NOT necessarily
+    // NUL-terminated (name_lens defines each extent; every len is
+    // 1..SYS_WALK_OPEN_NAME_MAX); 1 <= nname <= DEV_WALK_ATTRS_MAX.
+    //
+    // The Walkqid contract SHARPENS Dev.walk's reuse-nc rule:
+    //   - nc != NULL (the BIND form): nc is the caller's spoor_clone(c). On a
+    //     FULL walk (w->nqid == nname) nc is transitioned (own backing fid for
+    //     dev9p; qid = the leaf's) and w->spoor == nc. On a PARTIAL walk
+    //     (w->nqid < nname) nc is left UNTOUCHED (still shallow-sharing c's
+    //     aux — the caller detaches + unrefs it) and w->spoor == NULL: nothing
+    //     was bound, nothing to clunk. This mirrors the Twalkgetattr session
+    //     rule (new_fid binds only on a full walk).
+    //   - nc == NULL (the QUERY form): a pure sample — no Spoor transitions,
+    //     no fid binds on either end (dev9p sends newfid=P9_NOFID), and
+    //     w->spoor == NULL always. The 1-RPC stat.
+    //   - NULL return: the walk failed at the FIRST component (or transport /
+    //     OOM). Nothing bound; nc untouched.
+    struct Walkqid *(*walk_attrs)(struct Spoor *c, struct Spoor *nc,
+                                  const char **names, const size_t *name_lens,
+                                  int nname, struct t_stat *sts);
+
+    // open_cached(c, names, name_lens, nname, sts) — the FID-LIFECYCLE fidless
+    // cached open (docs/FID-LIFECYCLE-DESIGN.md §3.3; refines I-38). OPTIONAL
+    // (NULL-permitted, like .walk_attrs): stalk calls it on the FINAL run of a
+    // plain read-only STALK_OPEN resolution (omode == 0 exactly) BEFORE the
+    // normal bind walk. Names are (ptr, len) pairs like walk_attrs; 1 <= nname
+    // <= DEV_WALK_ATTRS_MAX.
+    //
+    // The Dev attempts, wholly internally: an RPC-free eligibility hint; ONE
+    // FORCED-WIRE query walk of the run (no fid binds on either end — the
+    // close-to-open revalidation, which MUST be server-fresh, never served
+    // from a cache); a snapshot of the leaf's full content at the fresh
+    // content-version; and the mint of an OPENED read-only fidless Spoor.
+    //
+    //   - Success: returns the opened Spoor (one owned ref; wire-free to
+    //     destroy) AND fills sts[0..nname) with the walk's FRESH per-component
+    //     records. The CALLER (the resolver) then MUST run its fail-ordering
+    //     post-scan on those records — per-component X-search, mount-membership
+    //     scan, final-hop R/W perm — and destroy the Spoor on any denial or
+    //     mount crossing; permission policy stays in the resolver (I-28/I-22),
+    //     never in the Dev.
+    //   - NULL: not servable (ineligible mode/type, coverage miss, budget,
+    //     stale, OOM, wire failure). Nothing is bound and nothing is revealed
+    //     to the caller; sts may be scribbled. The caller proceeds with the
+    //     normal walk + open path, whose outcome is the observable one.
+    struct Spoor *(*open_cached)(struct Spoor *c, const char *const *names,
+                                 const size_t *name_lens, int nname,
+                                 struct t_stat *sts);
 
     // Open / create / close.
     //   open(c, omode) — transition c from "walked" to "opened". Returns
@@ -247,6 +328,7 @@ extern struct Dev devramfs;       // dc='m'  — /ramfs/<file> from cpio newc in
 extern struct Dev devdev;         // dc='d'  — /dev char-device directory (#57b)
 extern struct Dev devhw;          // dc='H'  — DTB hardware inventory tree (Menagerie devhw)
 extern struct Dev devpci;         // dc='P'  — /hw/pci mediated PCI topology (Menagerie 6b)
+extern struct Dev devenv;         // dc='E'  — /env per-Proc environment (G15, Go Stage 4a)
 
 // devramfs diagnostics (used by tests).
 int  devramfs_file_count(void);

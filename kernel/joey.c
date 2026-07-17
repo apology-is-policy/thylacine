@@ -73,7 +73,7 @@
 // net boot probes (net-2c/3a/3b/3c each add a /net fid-machine harness)
 // pushed it past 256 KiB at net-3c; 384 KiB restores headroom for the
 // remaining net arc (net-3d..net-8) and later orchestration.
-#define JOEY_BLOB_MAX (384u * 1024u)
+#define JOEY_BLOB_MAX (512u * 1024u)
 static _Alignas(struct Elf64_Ehdr) u8 g_joey_elf_blob[JOEY_BLOB_MAX];
 
 // Arguments passed via rfork's `arg` to the child entry. Lives on the
@@ -158,7 +158,7 @@ static void joey_thunk(void *arg) {
 // root_spoor pointing at the devramfs root. The child Territory clone inherits
 // it (territory_clone deep-copies + spoor_refs), so joey + every descendant has
 // a sane FROM_ROOT base AND (post-#58) a namespace for SYS_SPAWN binary
-// resolution (exec_load_from_namespace -> stalk). Idempotent: an already-rooted
+// resolution (exec_resolve_from_namespace -> stalk). Idempotent: an already-rooted
 // Territory is left as-is -- the kernel test harness calls this before the
 // spawn-resolution tests, so joey_run's later call finds it done. devramfs.
 // attach returns ref=1; territory_chroot takes its own ref; we unref to leave
@@ -355,6 +355,15 @@ void joey_run(void) {
         if (joey_mount_static_dev(kt, &devpci, "hw/pci", 6) != 0)
             extinction("joey: /hw/pci mount (devpci) failed");
         uart_puts("  joey: /hw/pci mounted (mediated PCI topology)\n");
+
+        // G15: graft the per-Proc environment directory at /env (devenv: the
+        // Plan 9 Egrp -- read /env/NAME, write/create to set, readdir to list).
+        // ARCH section 9.7. The mount is global but every op resolves the
+        // calling Proc's own env (per-Proc content, I-1); inherited by every
+        // Proc via territory_clone. Go's runtime reads it at startup (goenvs).
+        if (joey_mount_static_dev(kt, &devenv, "env", 3) != 0)
+            extinction("joey: /env mount (devenv) failed");
+        uart_puts("  joey: /env mounted (per-Proc environment)\n");
     }
 
     uart_puts("  joey: rforking child for /joey (");

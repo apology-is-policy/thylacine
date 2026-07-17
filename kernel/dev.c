@@ -23,6 +23,11 @@
 // bestiary[] backing storage — sized to BESTIARY_MAX + 1 so the sentinel
 // (NULL pointer at index dev_count) is always present. Iterators stop
 // at the first NULL.
+// POUNCE: the Dev.walk_attrs "backing does not implement the fused op"
+// sentinel (see <thylacine/dev.h>). Address-compared only; never read or
+// freed. Zero contents.
+struct Walkqid dev_walk_attrs_unsupported;
+
 struct Dev *bestiary[BESTIARY_MAX + 1];
 
 static int  g_dev_count;
@@ -42,6 +47,17 @@ int dev_register(struct Dev *d) {
         extinction("dev_register(NULL)");
     if (g_dev_count >= BESTIARY_MAX)
         extinction("dev_register: bestiary full (BESTIARY_MAX exceeded)");
+
+    // #47 (audit F1): a Dev exposing .wstat_native MUST enforce rwx.
+    // SYS_WSTAT's fd gate is kind-only since #47, so perm_wstat_check --
+    // which runs only when perm_enforced -- is the ONLY write-authority
+    // check on the metadata-mutation path. A wstat-capable
+    // perm_enforced==false Dev would let ANY handle holder mutate its
+    // metadata with no identity check; fail the boot rather than ship
+    // that silently.
+    if (d->wstat_native && !d->perm_enforced)
+        extinction("dev_register: .wstat_native without .perm_enforced "
+                   "(#47: perm_wstat_check is the only wstat authority gate)");
 
     // Collision check — both dc and name must be unique. The bestiary's
     // primary lookup is by dc (the on-wire identity that walks/syscalls
@@ -125,6 +141,7 @@ void dev_init(void) {
     dev_register(&devdev);          // #57b: /dev char-device directory (dc='d')
     dev_register(&devhw);           // Menagerie devhw: DTB inventory tree (dc='H')
     dev_register(&devpci);          // Menagerie 6b: /hw/pci mediated PCI topology (dc='P')
+    dev_register(&devenv);          // G15: /env per-Proc environment (dc='E', Go Stage 4a)
 
     // Walk bestiary: dev->init() may itself dev_register additional
     // devs (e.g., a virtio probe that fans out to multiple instances).

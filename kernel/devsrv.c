@@ -133,6 +133,7 @@ static void srv_clear_locked(struct SrvService *e) {
     for (u32 i = 0; i < SRV_NAME_MAX; i++) e->name[i] = 0;
     e->poster_stripes = 0;
     e->poster_pid     = 0;
+    e->ring_msize     = 0;
     e->backlog_head   = 0;
     e->backlog_tail   = 0;
     e->backlog_count  = 0;
@@ -286,12 +287,16 @@ u64 srv_registry_total_destroyed(void) { return __atomic_load_n(&g_srv_registry_
 // srv_reserve binds the boot registry (the retained syscall path).
 static int srv_reserve_in(struct SrvRegistry *reg,
                           const char *name, u8 name_len, struct Proc *poster,
-                          enum srv_mode mode,
+                          enum srv_mode mode, u32 ring_msize,
                           struct SrvService **svc_out, enum srv_state *prior_out) {
     if (!reg)                                              return -1;
     if (!name || name_len == 0 || name_len > SRV_NAME_MAX) return -1;
     if (!svc_out || !prior_out)                            return -1;
     if (mode != SRV_MODE_9P && mode != SRV_MODE_BYTE)      return -1;
+    // CF-3 B: exactly two ring classes -- the two-point policy that keeps
+    // per-conn ring memory a bounded choice, not an arbitrary demand.
+    if (ring_msize != SRVCONN_MSIZE &&
+        ring_msize != SRVCONN_BULK_MSIZE)                  return -1;
     /* F2 mode_change_on_rebind close (P6-pouch-sockets audit) is in the
      * TOMBSTONED branch below — see the same-mode check. */
 
@@ -324,6 +329,15 @@ static int srv_reserve_in(struct SrvRegistry *reg,
             spin_unlock_irqrestore(&reg->lock, s);
             return -1;
         }
+        // CF-3 B: the ring class is identity for the same reason -- a
+        // client mid-connect captured ring_msize alongside mode; a rebind
+        // that flips the class would hand the new poster a conn whose
+        // geometry (and the kernel client's msize proposal) disagree with
+        // its serve buffers. A class change requires a different name.
+        if (e->ring_msize != ring_msize) {
+            spin_unlock_irqrestore(&reg->lock, s);
+            return -1;
+        }
         *prior_out = SRV_STATE_TOMBSTONED;
     } else {
         // Fresh post — claim a FREE slot.
@@ -348,6 +362,7 @@ static int srv_reserve_in(struct SrvRegistry *reg,
     e->poster_stripes = stripes;
     e->poster_pid     = poster->pid;
     e->mode           = mode;
+    e->ring_msize     = ring_msize;
     *svc_out = e;
 
     spin_unlock_irqrestore(&reg->lock, s);
@@ -402,11 +417,13 @@ void srv_abort(struct SrvService *svc, enum srv_state prior) {
 // outlives the handle (tombstoned at the poster's exit, never freed by handle
 // close), so handle_release_obj's KOBJ_SRV case is a no-op for it.
 int devsrv_post_listener(struct Proc *p, struct Spoor *root,
-                         const char *name, size_t name_len, enum srv_mode mode) {
+                         const char *name, size_t name_len, enum srv_mode mode,
+                         bool bulk) {
     if (!p)                                              return -1;
     if (!name)                                           return -1;
     if (name_len == 0 || name_len > SRV_NAME_MAX)        return -1;
     if (mode != SRV_MODE_9P && mode != SRV_MODE_BYTE)    return -1;
+    u32 ring_msize = bulk ? SRVCONN_BULK_MSIZE : SRVCONN_MSIZE;
 
     // The parent MUST be a devsrv root Spoor whose aux is a SrvRegistry. The
     // caller (sys_walk_create_handler's devsrv branch) verified this; re-read
@@ -433,7 +450,8 @@ int devsrv_post_listener(struct Proc *p, struct Spoor *root,
     // LIVE until the handle below exists).
     struct SrvService *svc = NULL;
     enum srv_state     prior = SRV_STATE_FREE;
-    if (srv_reserve_in(reg, name, (u8)name_len, p, mode, &svc, &prior) != 0)
+    if (srv_reserve_in(reg, name, (u8)name_len, p, mode, ring_msize,
+                       &svc, &prior) != 0)
         return -1;
 
     // Install the KObj_Srv listener handle. handle_alloc does not take a
@@ -840,11 +858,14 @@ struct Spoor *devsrv_open_connect(struct Proc *p, struct Spoor *c, int omode) {
     if (!svc) return NULL;
     u64           poster_stripes;
     enum srv_mode service_mode;
+    u32           ring_msize;
     {
         irq_state_t ls = spin_lock_irqsave(&reg->lock);
         bool live      = (svc->state == SRV_STATE_LIVE);
         poster_stripes = svc->poster_stripes;
         service_mode   = svc->mode;
+        ring_msize     = svc->ring_msize;   // CF-3 B: the conn's ring class,
+                                            // captured atomically with LIVE
         spin_unlock_irqrestore(&reg->lock, ls);
         if (!live) return NULL;
     }
@@ -853,7 +874,8 @@ struct Spoor *devsrv_open_connect(struct Proc *p, struct Spoor *c, int omode) {
     // Proc* / SrvService* held, so neither a peer exit nor a tombstone-then-
     // rebind turns a later read into a UAF). create ref == 1.
     struct SrvConn *cn = srvconn_create(proc_stripes(p), p->pid,
-                                        proc_is_console_attached(p), poster_stripes);
+                                        proc_is_console_attached(p), poster_stripes,
+                                        ring_msize);
     if (!cn) return NULL;
     if (service_mode == SRV_MODE_BYTE) srvconn_set_byte_mode(cn);
 
@@ -894,7 +916,8 @@ struct Spoor *devsrv_open_connect(struct Proc *p, struct Spoor *c, int omode) {
     // above, accepts + responds concurrently. On any failure the conn is torn
     // down so the poster's accept sees a dead conn.
     int err = 0;
-    struct Spoor *root = srvconn_attach_dev9p_root(cn, NULL, 0, p->principal_id, &err);
+    struct Spoor *root = srvconn_attach_dev9p_root(cn, NULL, 0, p->principal_id,
+                                                   /*loose=*/false, &err);
     if (!root) {
         srvconn_teardown(cn);      // idempotent (the helper may already have torn it)
         srvconn_unref(cn);         // drop the create ref; the poster drains the backlog ref
@@ -1059,12 +1082,25 @@ static long devsrv_write(struct Spoor *c, const void *buf, long n, s64 off) {
         // (see devsrv_read) -- a userspace write would interleave bytes into the
         // c2s ring out-of-band with the kernel 9P client's request stream.
         if (srvconn_is_kernel_attached(cn)) return -1;
-        // CLIENT endpoint: write toward the server via c2s (non-blocking). The
-        // mirror of the server arm; stalk-3b-β (see devsrv_read).
-        return srvconn_client_send(cn, (const u8 *)buf, n);
+        // CLIENT endpoint: write toward the server via c2s. BLOCKING (CF-3 B,
+        // the third producer of the #348/#349 family): a POSIX byte client
+        // whose write() gets 0 from a transiently-full c2s ring treats it as
+        // EPIPE and closes -- the per-user stratumd proxy's write_full
+        // forwarding a Tmsg upstream is exactly that caller. Parks until the
+        // server drains c2s or teardown; role-parked vs a concurrent
+        // peer-thread writer (#354).
+        return srvconn_client_send_blocking(cn, (const u8 *)buf, n);
     }
-    // SERVER endpoint: write replies toward the client via s2c.
-    return srvconn_server_send(cn, (const u8 *)buf, n);
+    // SERVER endpoint: write replies toward the client via s2c. BLOCKING
+    // (#348): a 9P-server Proc (stratumd) writing reply frames must not get
+    // a 0 from a full s2c ring -- its write_full treats 0 as EPIPE and
+    // CLOSES the kernel-attached mount mid-build. srvconn_server_send_
+    // blocking parks the writer until the kernel client drains s2c (the s2c
+    // twin of #349's c2s client_send_flow). A 2nd concurrent blocking writer
+    // PARKS until the first releases the role (#354 close -- pre-fix it was
+    // refused -1, sound only while stratumd's own write_mu serialized its
+    // CF-2 worker threads' replies; the kernel no longer leans on that).
+    return srvconn_server_send_blocking(cn, (const u8 *)buf, n);
 }
 
 static long devsrv_bwrite(struct Spoor *c, struct Block *bp, s64 off) {

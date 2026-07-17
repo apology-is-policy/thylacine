@@ -44,7 +44,16 @@ esac
 KERNEL_ELF="$KERNEL_BUILD/thylacine.elf"
 LOG_FILE="$BUILD_DIR/test-boot.log"
 
-BOOT_TIMEOUT="${BOOT_TIMEOUT:-90}"          # seconds -- wallclock max,
+# Stage 6: with the Go GOROOT baked by default, joey's go4c on-device
+# compile+link probe rides every boot, so a baked build's default timeout is
+# the bake pipeline's 300 s. Keyed on the staged tree (build_go_goroot leaves
+# it iff the pool was baked); an explicit BOOT_TIMEOUT always wins.
+if [[ -d "$BUILD_DIR/go/goroot" ]]; then
+    BOOT_TIMEOUT="${BOOT_TIMEOUT:-300}"
+else
+    BOOT_TIMEOUT="${BOOT_TIMEOUT:-90}"
+fi
+                                            # seconds -- wallclock max,
                                             # not a fixed wait. test.sh
                                             # exits early on banner or
                                             # extinction (polls log every
@@ -125,68 +134,22 @@ echo "    Log: $LOG_FILE"
 THYLACINE_BUILD_DIR="$KERNEL_BUILD" "$REPO_ROOT/tools/run-vm.sh" --no-share --cpus "${THYLACINE_TEST_CPUS:-4}" < /dev/null > "$LOG_FILE" 2>&1 &
 QEMU_PID=$!
 
-# P4-K-events: spawn background QMP key-injector if enabled. Polls
-# the boot log for INPUT_SENTINEL; on match, connects to QMP and
-# sends `send-key` for "a". On QEMU virt's virtio-keyboard-device
-# this fires KEY press (EV_KEY/30/1) + SYN + KEY release + SYN into
-# the eventq.
+# P4-K-events: spawn the QMP key-injector (a single long-lived python
+# process, tools/qmp-inject-key.py) at QEMU launch if enabled. It
+# connects to QMP immediately -- paying interpreter startup + connect +
+# capabilities during the guest's multi-second boot -- then tail-follows
+# the boot log and issues `send-key` (qcode "a") within ~25 ms of the
+# AWAITING_QMP_KEY sentinel. On QEMU virt's virtio-keyboard-device this
+# fires KEY press (EV_KEY/30/1) + SYN + KEY release + SYN into the
+# eventq. The pre-#362 shape (a bash grep-poll spawning python3 only on
+# sentinel match) paid its whole startup inside the guest probe's poll
+# window and lost the race under gate load (23/40 ci-smp-gate boots).
 INJECT_PID=""
 if [[ "$INPUT_INJECT" != "0" ]]; then
     : > "$INJECT_LOG"
-    (
-        # Wait up to BOOT_TIMEOUT for the sentinel to appear, then
-        # connect to QMP and send-key. Both stages have brief retry
-        # loops so socket-create + sentinel-print races don't matter.
-        echo "[$(date +%H:%M:%S.%N)] injector: waiting for sentinel" >>"$INJECT_LOG"
-        deadline=$(( $(date +%s) + BOOT_TIMEOUT ))
-        while [[ $(date +%s) -lt $deadline ]]; do
-            if [[ -f "$LOG_FILE" ]] && grep -q "$INPUT_SENTINEL" "$LOG_FILE"; then
-                break
-            fi
-            sleep 0.05
-        done
-        if [[ ! -f "$LOG_FILE" ]] || ! grep -q "$INPUT_SENTINEL" "$LOG_FILE"; then
-            echo "[$(date +%H:%M:%S.%N)] injector: sentinel never seen; exiting" >>"$INJECT_LOG"
-            exit 0
-        fi
-        echo "[$(date +%H:%M:%S.%N)] injector: sentinel observed; connecting QMP" >>"$INJECT_LOG"
-        python3 - "$QMP_SOCK" "$INJECT_LOG" <<'PY' 2>>"$INJECT_LOG" || echo "[$(date +%H:%M:%S.%N)] injector: python3 returned non-zero" >>"$INJECT_LOG"
-import socket, json, sys, time, datetime
-sock_path = sys.argv[1]
-log_path = sys.argv[2]
-def lg(msg):
-    with open(log_path, "a") as fp:
-        fp.write(f"[{datetime.datetime.now().strftime('%H:%M:%S.%f')}] python: {msg}\n")
-sock = None
-for i in range(50):
-    try:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.connect(sock_path)
-        sock = s
-        lg(f"connected to {sock_path} after {i} retries")
-        break
-    except (FileNotFoundError, ConnectionRefusedError) as e:
-        time.sleep(0.05)
-if sock is None:
-    lg("socket not reachable; giving up")
-    sys.exit("qmp: socket not reachable")
-f = sock.makefile("rw", buffering=1)
-greeting = f.readline()
-lg(f"greeting: {greeting.strip()[:120]}")
-f.write(json.dumps({"execute": "qmp_capabilities"}) + "\n"); f.flush()
-caps_resp = f.readline()
-lg(f"caps resp: {caps_resp.strip()[:120]}")
-f.write(json.dumps({
-    "execute": "send-key",
-    "arguments": {"keys": [{"type": "qcode", "data": "a"}]}
-}) + "\n"); f.flush()
-sk_resp = f.readline()
-lg(f"send-key resp: {sk_resp.strip()[:120]}")
-sock.close()
-lg("sent + closed cleanly")
-PY
-        echo "[$(date +%H:%M:%S.%N)] injector: done" >>"$INJECT_LOG"
-    ) &
+    python3 "$REPO_ROOT/tools/qmp-inject-key.py" \
+        "$QMP_SOCK" "$LOG_FILE" "$INPUT_SENTINEL" "$INPUT_SUCCESS_MARKER" \
+        "$BOOT_TIMEOUT" >>"$INJECT_LOG" 2>&1 &
     INJECT_PID=$!
 fi
 

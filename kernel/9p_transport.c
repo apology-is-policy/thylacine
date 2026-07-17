@@ -68,6 +68,18 @@ static int do_send(struct p9_transport *t, const u8 *buf, size_t len) {
     size_t sent = 0;
     while (sent < len) {
         int n = t->ops.send(t->ops.ctx, buf + sent, len - sent);
+        if (n == P9_TRANSPORT_EAGAIN) {
+            // #349: transient all-or-nothing back-pressure (a transiently-full
+            // SrvConn c2s ring under #841 pipelining). Valid ONLY before any
+            // byte of this frame is on the wire (sent == 0); a mid-frame EAGAIN
+            // would strand a fragment + desync the shared stream, so treat that
+            // as fatal. Propagate the retryable signal to client_run's flow
+            // control -- do NOT mark the transport ERROR (the ring is alive).
+            if (sent == 0) return P9_TRANSPORT_EAGAIN;
+            t->state         = P9_TRANS_ERROR;
+            t->total_errors++;
+            return -1;
+        }
         if (n <= 0) {
             t->state         = P9_TRANS_ERROR;
             t->total_errors++;
@@ -174,6 +186,7 @@ int p9_transport_send(struct p9_transport *t,
     if ((size_t)size != len) return -1;
 
     int rc = do_send(t, msg, len);
+    if (rc == P9_TRANSPORT_EAGAIN) return P9_TRANSPORT_EAGAIN;  // #349: retryable
     if (rc < 0) return -1;
     t->total_sent++;
     return 0;

@@ -2,21 +2,17 @@
 //
 // Foundation chunk: U-2g per docs/UTOPIA-SHELL-DESIGN.md section 15.6.11.
 //
-// At v1.0 the kernel exposes NO native SYS_CLOCK_GETTIME / SYS_NANOSLEEP
-// surface. `sleep` is built on the only ambient-time primitive the
-// kernel has -- `SYS_TORPOR_WAIT` with a timeout against an atomic
-// the caller never wakes. The kernel returns `-ETIMEDOUT` when the
-// timeout lapses; we map that to `Ok(())`. The atomic itself is a
-// stack-local sentinel; nobody else has its address, so spurious
-// matches are impossible.
+// `sleep` is built on the only ambient-time primitive the kernel has for
+// blocking -- `SYS_TORPOR_WAIT` with a timeout against a stack-local sentinel
+// atomic the caller never wakes (kernel returns `-ETIMEDOUT` -> `Ok(())`; nobody
+// else has the atomic's address, so spurious matches are impossible).
 //
-// `Duration` is re-exported from `core::time` since libthyla-rs is
-// no_std (no `std::time`).
+// Timestamps (`now`/`Instant`/`SystemTime`, below) land on `CLOCK_MONOTONIC` /
+// `CLOCK_REALTIME`: the #343 vDSO fast-path (CNTVCT_EL0 + the kernel timekeeping
+// page, no syscall -- read_clock -> crate::vdso_now_ns) with a
+// `SYS_CLOCK_GETTIME` (LS-K) fallback when the page is absent.
 //
-// v1.x extensions (when the kernel grows the surface):
-//   - `now()`: monotonic + wall clock.
-//   - `Instant`: timestamp newtype.
-//   - `SystemTime`: epoch-based timestamp.
+// `Duration` is re-exported from `core::time` since libthyla-rs is no_std.
 
 pub use core::time::Duration;
 use core::sync::atomic::AtomicU32;
@@ -85,11 +81,16 @@ struct TimeSpec {
     tv_nsec: i64,
 }
 
-// Read a clock into a Duration. The kernel only returns non-zero on a bad
+// Read a clock into a Duration. Fast-path: the #343 vDSO page (CNTVCT_EL0 + the
+// kernel timekeeping page, no syscall) when present. Fallback: SYS_CLOCK_GETTIME
+// (an older kernel without the vDSO). The kernel only returns non-zero on a bad
 // clk_id (we pass the two valid constants) or a bad buffer (ours is a valid
 // stack slot), so a non-zero return is unreachable here -- map it to ZERO
 // defensively. tv_sec >= 0 (epoch or uptime); tv_nsec is clamped to [0, 1e9).
 fn read_clock(clk_id: u64) -> Duration {
+    if let Some(ns) = crate::vdso_now_ns(clk_id) {
+        return Duration::new(ns / 1_000_000_000, (ns % 1_000_000_000) as u32);
+    }
     let mut ts = TimeSpec { tv_sec: 0, tv_nsec: 0 };
     let rc = unsafe { t_clock_gettime(clk_id, &mut ts as *mut TimeSpec as u64) };
     if rc != 0 {

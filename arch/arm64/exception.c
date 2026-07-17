@@ -22,6 +22,7 @@
 #include "fault.h"                    // P3-C: arch_fault_handle / fault_info_decode
 #include "gic.h"
 #include "halls.h"                    // HX-1: per-CPU live-frame tracking for the crash dump
+#include "hwdebug.h"                  // 8a-2a: the EL0 hardware-breakpoint verify (EC 0x30 swallow)
 #include "uaccess.h"                  // R12-uaccess: kernel-mode user-VA fault-fixup
 
 #include <thylacine/extinction.h>
@@ -76,6 +77,9 @@ _Static_assert(__builtin_offsetof(struct exception_context, far) == 0x118,
 #define EC_BTI             0x0D     /* Branch Target Exception (FEAT_BTI) */
 #define EC_BRK             0x3C     /* deliberate brk #imm */
 #define EC_SVC_AARCH64     0x15     /* svc #imm at EL0 (AArch64) */
+#define EC_BREAKPOINT_LOWER 0x30    /* HW breakpoint from lower EL (8a-2) */
+#define EC_SOFTSTEP_LOWER   0x32    /* software step from lower EL (8a-2b-2) */
+#define EC_WATCHPOINT_LOWER 0x34    /* data watchpoint from lower EL (8a-2b-3) */
 
 // ---------------------------------------------------------------------------
 // HX-1: per-CPU live-frame tracking. Each public exception entry point is a
@@ -221,6 +225,15 @@ static void exception_sync_curr_el_impl(struct exception_context *ctx) {
         case FAULT_UNHANDLED_USER:
             extinction_with_addr("unhandled user-mode fault (no VMA / SIGSEGV pending)",
                                  (uintptr_t)fi.vaddr);
+        case FAULT_USER_BUS:
+            // REVENANT: only userland_demand_page (the EL0 / uaccess demand-page
+            // path) ever returns FAULT_USER_BUS; arch_fault_handle never does,
+            // so this is unreachable here (a uaccess FILE-fault routes through
+            // the `== FAULT_HANDLED` fixup branch above, not this switch).
+            // Defense-in-depth + -Wswitch completeness: a genuine EL1 abort
+            // returning it would be a kernel-side bug -> extinct, don't mask.
+            extinction_with_addr("arch_fault_handle returned FAULT_USER_BUS (EL1)",
+                                 (uintptr_t)fi.vaddr);
         case FAULT_FATAL:
             // Reserved — current arch_fault_handle paths extinct
             // internally. Defense-in-depth.
@@ -333,6 +346,26 @@ void notes_deliver_at_el0_return(struct exception_context *ctx);
 void el0_return_die_check(void);
 
 static void exception_sync_lower_el_impl(struct exception_context *ctx) {
+    // 8c-2 (#88): publish THIS EL0-entry frame as the current thread's debug
+    // trapframe, so a thread that DETOUR-parks (proc_debug_stop_sleeper_park --
+    // the stop-of-a-sleeper) while blocked in a syscall/demand-page sleep has a
+    // valid frame for /proc/<pid>/regs. el0_return_stop_check records the frame
+    // from its own vector ctx at the RETURN tail, but a detour-parked sleeper is
+    // stopped WITHOUT reaching that tail, so devproc_build_regs would read a NULL
+    // debug_trapframe and return EPERM (the #88 regression: bt/print on a
+    // multi-M Go target whose head thread was sleeping-in-a-syscall at stop-time).
+    // The EL0-entry frame is the outermost EL0->EL1 frame, valid on the kstack for
+    // the whole syscall/fault -- the correct "ptrace at the syscall boundary" EL0
+    // register state. Only read when the thread is fully-stopped (parked); the
+    // tail-park path overrides it with its return ctx (same frame for a syscall,
+    // fresh for an IRQ-kicked EL0 stop), and the death/resume clears keep NULLing
+    // it on the parked lifecycle. Cheap (one store of an in-register ctx to the
+    // already-hot current Thread); read-gated on fully-stopped, so a non-debugged
+    // Proc never reads its own stale-between-syscalls value.
+    struct Thread *cur = current_thread();
+    if (cur && cur->magic == THREAD_MAGIC)
+        cur->debug_trapframe = ctx;
+
     u64 esr = ctx->esr;
     u64 far = ctx->far;
     u32 ec  = (u32)ESR_EC(esr);
@@ -364,6 +397,16 @@ static void exception_sync_lower_el_impl(struct exception_context *ctx) {
             // Diagnostic preserves the visibility the prior
             // extinction_with_addr line provided.
             proc_fault_terminate(NOTE_NAME_SNARE_SEGV, (uintptr_t)fi.vaddr);
+        case FAULT_USER_BUS:
+            // REVENANT / I-36 condition 6 (the dedicated enum value the
+            // FAULT_FATAL comment below anticipated): a file-backed
+            // (BURROW_TYPE_FILE) demand-page I/O error -- a dead/wedged FS
+            // server, or a failed/death-interrupted dev->read while faulting in
+            // executable text. Terminate the faulting Proc with snare:bus (POSIX
+            // SIGBUS for an I/O error on a mapped file), attributable to the
+            // faulting VA -- NEVER a silent zero-fill of text, NEVER a kernel
+            // extinction. proc_fault_terminate is noreturn (exits()).
+            proc_fault_terminate(NOTE_NAME_SNARE_BUS, (uintptr_t)fi.vaddr);
         case FAULT_FATAL:
             // F3 audit close: FAULT_FATAL's documented contract (per
             // arch/arm64/fault.h) is "kernel-side invariant violation;
@@ -431,6 +474,46 @@ static void exception_sync_lower_el_impl(struct exception_context *ctx) {
         // Terminate with snare:brk. Debuggers attaching at EL0 are a
         // Phase 5+ concern; v1.0 treats all EL0 brk as fatal-to-Proc.
         proc_fault_terminate(NOTE_NAME_SNARE_BRK, (uintptr_t)ctx->elr);
+
+    case EC_BREAKPOINT_LOWER:
+        // A hardware breakpoint from EL0. Three arms, in order:
+        //   (8a-2a) the self-scoped `hwverify` bp -- ELR-matched, swallowed +
+        //           disarmed (the empirical delivery witness).
+        //   (8a-2b) a real per-Proc debugger breakpoint -- hwdebug_breakpoint_
+        //           from_el0 matches ELR against the current Proc's armed table:
+        //           a HIT delivers a whole-Proc stop (the thread returns here ->
+        //           the EL0-return tail's stop-check parks it; the debugger
+        //           learns via /proc/<pid>/wait), and a benign STALE bp (armed
+        //           before a detach cleared the table) disables this CPU's debug
+        //           regs and resumes the instruction. Either way -> return.
+        //   (fatal) only a Proc that was NEVER debugged (no debug_hw) reaches
+        //           here; since ONLY the kernel arms a bp (EL0 cannot touch
+        //           MDSCR/DBGB*), this is impossible in practice -- terminate
+        //           with snare:ill as a defensive backstop.
+        if (hwdebug_verify_on_ec(ctx->elr)) return;
+        if (hwdebug_breakpoint_from_el0(ctx->elr)) return;
+        proc_fault_terminate(NOTE_NAME_SNARE_ILL, (uintptr_t)esr);
+
+    case EC_SOFTSTEP_LOWER:
+        // 8a-2b-2: a software-step exception from EL0. hwdebug_singlestep_from_el0
+        // handles an armed step (one instruction executed -> disarm SS + re-stop
+        // the Proc so the thread re-parks and the debugger reads the advanced PC),
+        // or a spurious step (benign: clear SS + resume). It returns false only
+        // for a corrupt thread/Proc -- fatal, since EL0 cannot arm MDSCR.SS so a
+        // step EC is always kernel-originated.
+        if (hwdebug_singlestep_from_el0(ctx->elr)) return;
+        proc_fault_terminate(NOTE_NAME_SNARE_ILL, (uintptr_t)esr);
+
+    case EC_WATCHPOINT_LOWER:
+        // 8a-2b-3: a data watchpoint from EL0. hwdebug_watchpoint_from_el0 handles
+        // an armed wp (deliver the whole-Proc stop; the thread parks at the tail and
+        // the debugger reads regs.pc == the accessing instruction) or a spurious/
+        // stale wp (benign: disable this CPU's debug regs + resume). It returns false
+        // only for a Proc that was never debugged -- fatal, since EL0 cannot arm a wp
+        // (MDSCR/DBGW* are EL1-only), so a wp EC is always kernel-originated. FAR
+        // carries the faulting VA (imprecise-within-the-block on arm64).
+        if (hwdebug_watchpoint_from_el0(ctx->elr, far)) return;
+        proc_fault_terminate(NOTE_NAME_SNARE_ILL, (uintptr_t)esr);
 
     default:
         // Unknown EC from EL0 -- terminate with snare:ill (illegal

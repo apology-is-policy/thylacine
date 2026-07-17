@@ -24,7 +24,10 @@
 use crate::err::{Error, Result};
 use crate::fs::{File, OpenOptions};
 use crate::io::{Read, Write};
+use crate::loom::{self, BufReg, Cqe, Ring, Sqe};
 use crate::poll::{PollEvents, PollSet, PollTimeout};
+use crate::t_weft_map;
+use crate::weft;
 use alloc_crate::format;
 use alloc_crate::string::String;
 use alloc_crate::vec::Vec;
@@ -613,4 +616,305 @@ pub fn resolve(host: &str, port: u16) -> Result<SocketAddrV4> {
     let ip = Ipv4Addr::parse(ip_s)?;
     let rport: u16 = port_s.trim().parse().map_err(|_| Error::InvalidArgument)?;
     Ok(SocketAddrV4::new(ip, rport))
+}
+
+// =============================================================================
+// Weft -- the native zero-copy dataplane flow (NET-THROUGHPUT 6; I-37; Weft-6c-2).
+// =============================================================================
+
+/// An opaque handle to a submitted [`WeftFlow::push`] / [`WeftFlow::pop`],
+/// redeemed by [`WeftFlow::wait`] (the Demikernel qtoken).
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct Ticket(u64);
+
+/// The result of a completed [`WeftFlow`] push/pop: the byte count moved through
+/// the shared ring (a send's accepted bytes, or a recv's delivered bytes -- 0 on a
+/// recv means EOF). For a recv the bytes are in [`WeftFlow::rx_buf`].
+#[derive(Copy, Clone, Debug)]
+pub struct Completion {
+    bytes: usize,
+    recv: bool,
+}
+
+impl Completion {
+    /// Bytes sent (push) or received into the ring (pop). 0 on a pop = EOF.
+    #[inline]
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    /// `true` if this completed a [`WeftFlow::pop`] (the bytes are in `rx_buf`).
+    #[inline]
+    pub fn is_recv(&self) -> bool {
+        self.recv
+    }
+}
+
+#[derive(Copy, Clone)]
+struct Inflight {
+    tok: u64,
+    recv: bool,
+}
+
+/// A Weft zero-copy dataplane flow bound to a [`TcpStream`]'s `/net` data fid
+/// (NET-THROUGHPUT 6; I-37). It maps the per-flow shared ring (`SYS_WEFT_MAP`),
+/// sets up a Loom ring, and registers `(data fd, the whole shared ring)` as the
+/// Loom `(handle, buffer)` so push/pop ride the kernel weft fast-path -- a
+/// `Tweftio` descriptor, no 9P-body copy, the bytes moving through the shared
+/// ring in place. This is the native, Demikernel-shaped async API the
+/// NET-THROUGHPUT §6 design names: `push`/`pop` submit (non-blocking), `wait`
+/// blocks for the completion. **It rides Loom and mints no new ABI** -- a weft
+/// flow is just a Loom ring whose registered buffer is a `SYS_WEFT_MAP`'d region,
+/// which the kernel's `loom_submit_payload` detects and routes to `Tweftio`.
+///
+/// The park is the Loom CQ wait (NET-THROUGHPUT §6: "the consumer's park *is* the
+/// Loom CQ wait, not a separate weft Rendez"). The readiness ring is the
+/// syscall-free busy-poll edge: [`WeftFlow::rx_ready_seq`] observes netd's
+/// `ready_seq` bump (after it writes RX bytes into the ring) without a syscall.
+///
+/// **Buffer-lifetime contract (the Weft-7 audit surface).** The shared ring's
+/// payload region is a SINGLE buffer, so exactly ONE op (push XOR pop) is in
+/// flight at a time -- a second push/pop before its `wait` returns
+/// [`Error::WouldBlock`]. The TX/RX region must not be mutated while an op is in
+/// flight (between submit and the CQE); the borrow checker enforces it -- `tx_buf`
+/// / `rx_buf` borrow `self`, `push` / `pop` / `wait` take `&mut self`, and no ring
+/// slice outlives a submit. The kernel pins the ring Burrow (the #847 payload-
+/// buffer ref) from submit to reap and validates the slice at submit against its
+/// private `weft_ring_view` (I-30), so a buggy producer corrupts only its own
+/// in-flight bytes -- never the kernel or netd. `WeftFlow` is auto-`!Send`+`!Sync`
+/// (its `Ring` field holds raw `*mut` pointers), so the raw `ring_va` mapping can
+/// never be shared across threads -- the single-in-flight contract is per-instance
+/// and the `&mut self` discipline keeps even an aliased `&self` reader (`rx_buf`)
+/// from overlapping a submit.
+///
+/// A weft flow is self-sufficient after `open`: the Loom handle registration takes
+/// its own I-30 pin on the data fid, so push/pop keep working even if the
+/// originating `TcpStream` is dropped (the kernel keeps the flow + ring alive until
+/// the Loom registrations drop with the `WeftFlow`). Small/control transfers should
+/// stay on `TcpStream::read`/`write` (the §4.8 hybrid threshold); weft is for bulk.
+pub struct WeftFlow {
+    ring: Ring,                 // the Loom SQ/CQ driving the async Tweftio ops
+    ring_va: u64,               // the SYS_WEFT_MAP'd shared ring base (this Proc's VA)
+    geom: weft::RingGeom,       // payload_off / payload_size / ready_off (the mirror)
+    tok_seq: u64,               // monotonic user_data for push/pop tickets
+    inflight: Option<Inflight>, // the single op in flight (one payload region)
+}
+
+impl WeftFlow {
+    /// The fixed Loom registration indices: handle 0 = the data fd, buffer 0 = the
+    /// whole shared ring. (One flow per Loom ring at v1.0.)
+    const HANDLE: u32 = 0;
+    const BUFIDX: u32 = 0;
+    /// The Loom SQ depth. Single-in-flight, so a tiny ring is ample.
+    const RING_ENTRIES: u32 = 8;
+
+    /// Bind a Weft flow to an established [`TcpStream`]'s `/net` data fid: map the
+    /// per-flow ring (the first map issues `Tweft` -> netd allocates + registers +
+    /// answers `Rweft`, idempotent thereafter), read its geometry mirror, set up a
+    /// Loom ring, and register `(data fd, whole ring)`. The stream must already be
+    /// connected (its `data` fid open).
+    pub fn open(stream: &TcpStream) -> Result<WeftFlow> {
+        Self::open_fd(stream.as_raw_fd())
+    }
+
+    /// `open` over a raw `/net` data fd (the internal path; `open` is the public
+    /// entry over a `TcpStream`). The fd must be an open `/net/<proto>/N/data` fid.
+    fn open_fd(data_fd: i32) -> Result<WeftFlow> {
+        // Map the per-flow ring. SYS_WEFT_MAP returns ring_va (> 0) or -1; the first
+        // call issues Tweft(F) on the shared /net dev9p client, netd allocates +
+        // registers the ring and answers Rweft(share_id, geom), the kernel claims
+        // the share + maps it into this Proc. Idempotent on the same fd.
+        let rc = unsafe { t_weft_map(data_fd as u64, 0) };
+        if rc <= 0 {
+            return Err(Error::Io);
+        }
+        let ring_va = rc as u64;
+        // The geometry mirror netd wrote at grant (magic-validated). ring_size =
+        // payload_off + payload_size == netd's whole-ring Burrow size, which the
+        // kernel's weft-bound detection requires the registered buffer length to
+        // equal exactly (buf == the flow's ring Burrow && buf_reg_len == ring_size).
+        let geom = unsafe { weft::read_ring_geom(ring_va as *const u8) }.ok_or(Error::Io)?;
+        // A Loom ring to drive the async Tweftio ops, and the two registrations the
+        // kernel routing keys on: the data fid (the I-30 fid pin) as handle 0, the
+        // WHOLE shared ring as buffer 0.
+        let ring = Ring::setup(Self::RING_ENTRIES, 0)?;
+        ring.register_handles(&[data_fd])?;
+        ring.register_buffers(&[BufReg {
+            va: ring_va,
+            len: geom.ring_size as u64,
+        }])?;
+        Ok(WeftFlow {
+            ring,
+            ring_va,
+            geom,
+            tok_seq: 1,
+            inflight: None,
+        })
+    }
+
+    /// The ring's payload region as a writable slice -- fill it directly for a
+    /// true zero-copy [`push`](WeftFlow::push) (no app->ring copy). Borrows `self`,
+    /// so it cannot be held across a `push` / `wait`.
+    pub fn tx_buf(&mut self) -> &mut [u8] {
+        let base = (self.ring_va + self.geom.payload_off as u64) as *mut u8;
+        // SAFETY: [ring_va+payload_off, +payload_size) is the payload region of this
+        // Proc's own SYS_WEFT_MAP'd ring mapping (a live RW anon page span). The &mut
+        // borrow is tied to &mut self, so no concurrent alias and no overlap with an
+        // in-flight op (push/pop take &mut self).
+        unsafe { core::slice::from_raw_parts_mut(base, self.geom.payload_size as usize) }
+    }
+
+    /// The ring's payload region as a read-only slice -- read the bytes a
+    /// [`pop`](WeftFlow::pop) delivered (the first [`Completion::bytes`] are
+    /// valid). Zero-copy: those bytes were written by netd into this shared
+    /// mapping, never copied through a 9P body.
+    pub fn rx_buf(&self) -> &[u8] {
+        let base = (self.ring_va + self.geom.payload_off as u64) as *const u8;
+        // SAFETY: as tx_buf, but a shared read-only borrow tied to &self.
+        unsafe { core::slice::from_raw_parts(base, self.geom.payload_size as usize) }
+    }
+
+    /// The ring's payload-region capacity (the max single push/pop length).
+    #[inline]
+    pub fn payload_capacity(&self) -> usize {
+        self.geom.payload_size as usize
+    }
+
+    /// Submit a zero-copy send of the first `len` bytes already in [`tx_buf`] (the
+    /// Demikernel `push`: non-blocking; redeem with [`wait`](WeftFlow::wait)). The
+    /// Loom WRITE is staged in the SQ now and submitted by `wait` (the io_uring
+    /// submit-and-wait batch); the kernel routes it to the weft fast-path
+    /// (`Tweftio` WRITE -- netd reads the slice in place + sends). Returns
+    /// [`Error::WouldBlock`] if an op is already in flight (single payload region),
+    /// [`Error::InvalidArgument`] if `len` is 0 or exceeds the payload capacity.
+    pub fn push(&mut self, len: usize) -> Result<Ticket> {
+        if self.inflight.is_some() {
+            return Err(Error::WouldBlock);
+        }
+        if len == 0 || len > self.geom.payload_size as usize {
+            return Err(Error::InvalidArgument);
+        }
+        let tok = self.next_tok();
+        let sqe = Sqe::write(
+            Self::HANDLE,
+            0, // file offset -- ignored on a weft op (the kernel uses the ring offset)
+            len as u32,
+            Self::BUFIDX,
+            self.geom.payload_off as u64, // buf_off = the ring payload-region start
+            tok,
+        );
+        self.ring.try_submit(&sqe)?; // stage in the SQ (no kernel entry until wait)
+        self.inflight = Some(Inflight { tok, recv: false });
+        Ok(Ticket(tok))
+    }
+
+    /// Submit a recv of up to `max` bytes into the ring (the Demikernel `pop`:
+    /// non-blocking; redeem with [`wait`](WeftFlow::wait), then read [`rx_buf`]).
+    /// The Loom READ rides the weft read fast-path (`Tweftio` READ -- netd recvs in
+    /// place into the ring). Returns [`Error::WouldBlock`] if an op is in flight.
+    pub fn pop(&mut self, max: usize) -> Result<Ticket> {
+        if self.inflight.is_some() {
+            return Err(Error::WouldBlock);
+        }
+        let len = core::cmp::min(max, self.geom.payload_size as usize);
+        if len == 0 {
+            return Err(Error::InvalidArgument);
+        }
+        let tok = self.next_tok();
+        let sqe = Sqe::read(
+            Self::HANDLE,
+            0,
+            len as u32,
+            Self::BUFIDX,
+            self.geom.payload_off as u64,
+            tok,
+        );
+        self.ring.try_submit(&sqe)?;
+        self.inflight = Some(Inflight { tok, recv: true });
+        Ok(Ticket(tok))
+    }
+
+    /// Block until `t`'s push/pop completes; return its [`Completion`]. Submits the
+    /// staged SQE and parks on the Loom CQ wait (death-interruptible, no per-op
+    /// deadline). A negative CQE result maps to the kernel errno. The op is no
+    /// longer in flight on return (success or error), so a new push/pop may follow.
+    pub fn wait(&mut self, t: Ticket) -> Result<Completion> {
+        let inflight = match self.inflight {
+            Some(i) if i.tok == t.0 => i,
+            _ => return Err(Error::InvalidArgument), // not the outstanding op
+        };
+        // io_uring submit-and-wait: submit the single staged SQE + block for >= 1 CQE.
+        self.ring.enter(1, 1, loom::ENTER_GETEVENTS)?;
+        let cqe = self.reap_token(t.0)?;
+        // Clear inflight BEFORE decoding the result: the op is done (even on an error
+        // CQE), so a new push/pop may follow regardless of the outcome.
+        self.inflight = None;
+        let bytes = cqe.ok()? as usize;
+        Ok(Completion {
+            bytes,
+            recv: inflight.recv,
+        })
+    }
+
+    /// A blocking convenience: copy `data` into the ring + push + wait. Returns the
+    /// bytes sent. `data.len()` must be `<= payload_capacity()`.
+    pub fn send(&mut self, data: &[u8]) -> Result<usize> {
+        let cap = self.geom.payload_size as usize;
+        if data.len() > cap {
+            return Err(Error::InvalidArgument);
+        }
+        self.tx_buf()[..data.len()].copy_from_slice(data);
+        let t = self.push(data.len())?;
+        Ok(self.wait(t)?.bytes())
+    }
+
+    /// A blocking convenience: pop + wait + copy the recv'd bytes into `buf`.
+    /// Returns the bytes received (0 = EOF). For zero-copy, use `pop` + `wait` +
+    /// [`rx_buf`] directly (this copy-out is the ergonomic path).
+    pub fn recv(&mut self, buf: &mut [u8]) -> Result<usize> {
+        let t = self.pop(buf.len())?;
+        let n = self.wait(t)?.bytes();
+        let n = core::cmp::min(n, buf.len());
+        buf[..n].copy_from_slice(&self.rx_buf()[..n]);
+        Ok(n)
+    }
+
+    /// The syscall-free readiness observe (NET-THROUGHPUT §6 busy-poll edge): netd
+    /// bumps `ready_seq` after writing RX bytes into the ring, so a change since a
+    /// prior snapshot means RX data landed -- letting a client skip a parking READ.
+    /// Returns the current sequence; the caller compares it to a prior snapshot.
+    pub fn rx_ready_seq(&self) -> u32 {
+        let ready_base = (self.ring_va + self.geom.ready_off as u64) as *const u8;
+        // SAFETY: ready_off is within this Proc's live ring mapping; observe reads
+        // only the producer-owned words.
+        unsafe { weft::ready_observe(ready_base) }.0
+    }
+
+    /// The raw Loom fd (`KObj_Loom`; in-Proc only -- non-transferable).
+    #[inline]
+    pub fn ring_fd(&self) -> i32 {
+        self.ring.raw_fd()
+    }
+
+    #[inline]
+    fn next_tok(&mut self) -> u64 {
+        let t = self.tok_seq;
+        self.tok_seq = self.tok_seq.wrapping_add(1);
+        t
+    }
+
+    /// Drain CQEs until the one whose `user_data == tok` (single op in flight -> the
+    /// first CQE after a blocking enter is it; loop defensively for a spurious
+    /// wakeup or a stray CQE).
+    fn reap_token(&self, tok: u64) -> Result<Cqe> {
+        loop {
+            match self.ring.reap() {
+                Some(c) if c.user_data == tok => return Ok(c),
+                Some(_) => continue, // foreign CQE (not expected single-in-flight); drain
+                None => {
+                    self.ring.enter(0, 1, loom::ENTER_GETEVENTS)?;
+                }
+            }
+        }
+    }
 }

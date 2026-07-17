@@ -50,6 +50,24 @@ struct p9_mq_loopback {
     // returns -1 + sets timed_out (the frame-boundary-timeout model) instead of 0.
     bool                   deadline_armed;
     bool                   timed_out;
+    // Back-pressure knob (#349 regression). A test sets eagain_budget = K to make
+    // the next K send calls return P9_TRANSPORT_EAGAIN (a transiently-full-but-ALIVE
+    // c2s ring) and REJECT the frame -- no reply synthesized, no acceptance --
+    // exactly like a real full ring. The reply is generated only when the frame is
+    // accepted (budget exhausted), so a prior op's already-queued reply stays
+    // drainable: the production shape where client_send_flow's self-pump drains an
+    // OTHER op's reply, frees the slot, then the rejected frame's retry is accepted.
+    u32                    eagain_budget;
+    // Clobber knob (#375 regression). While armed, the next `scribble_arm` recv
+    // calls overwrite scribble_buf[0..scribble_len) with 0x5A BEFORE returning the
+    // frame -- modeling a PEER legally rebuilding the SHARED c->out_buf in the
+    // exact window where client_send_flow's pump/park has dropped c->lock (the
+    // self-pump arm's recv sits inside that window). A back-pressured sender that
+    // re-reads out_buf after the window (the pre-spill #375 clobber) sends the
+    // scribble; the spill fix sends its private copy and never re-reads out_buf.
+    u8                    *scribble_buf;
+    u32                    scribble_len;
+    u32                    scribble_arm;
 };
 
 // Initialize. `responder` is required (same contract as p9_loopback_responder:

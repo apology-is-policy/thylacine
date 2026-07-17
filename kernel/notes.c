@@ -668,6 +668,26 @@ void notes_mark_self_managing(struct Proc *p) {
 // deferrable; N-4).
 bool thread_die_pending(struct Thread *t) {
     if (!t) return false;
+    // #68 F1: the exit-close window is ORDERLY FINALIZATION, not duress.
+    // group_exit_msg is set on EVERY SYS_EXIT_GROUP (a clean exit_group(0)
+    // included), and the LS-5 interrupt default-terminate path calls
+    // exits() with the terminate LATCH deliberately still armed -- so
+    // without this gate the closing thread's dev9p write-behind flush and
+    // Tclunk sends short-circuited (client_self_dying), silently dropping
+    // staged writes and leaking server-side fids on every normal
+    // multi-thread exit AND every Ctrl-C'd default-terminate. The gate
+    // suppresses BOTH death legs while set. While the flag is set the
+    // closer's sends/waits behave like a live thread's; the wedged-server
+    // strand this re-admits is the pre-#68 reap-time exposure RELOCATED
+    // from the parent's wait_pid onto the already-dying Proc -- and,
+    // unlike the old strand, NOT breakable by a further kill (a wedged
+    // flagged close parks the dying Proc unreapably; precondition = a
+    // wedged trusted server, an already system-degraded state -- the
+    // bounded/abortable close-flush is the recorded v1.x seam). The window
+    // is one bounded close pass; only the owning thread sets/clears it
+    // (inside proc_close_handles_at_exit), and every caller passes self,
+    // so the read needs no synchronization.
+    if (t->exit_close_active) return false;
     struct Proc *p = t->proc;
     if (!p) return false;
     if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL)

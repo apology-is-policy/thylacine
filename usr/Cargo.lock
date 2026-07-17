@@ -55,6 +55,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ambush-probe"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
 name = "argon2"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -223,6 +230,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cpubench"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -303,6 +317,20 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "debug-child"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
+name = "debug-probe"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
 ]
 
 [[package]]
@@ -458,6 +486,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fsbench"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -558,6 +593,13 @@ version = "0.1.0"
 dependencies = [
  "libthyla-rs",
  "tls",
+]
+
+[[package]]
+name = "hwbp-verify"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
 ]
 
 [[package]]
@@ -1352,6 +1394,20 @@ name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
+
+[[package]]
+name = "stack-child"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
+name = "stack-probe"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
 
 [[package]]
 name = "subtle"

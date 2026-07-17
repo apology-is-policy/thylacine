@@ -261,6 +261,7 @@ VISION §4 budget: 500 ms. Headroom remains generous.
 | **SMP redesign: per-CPU `cpu_pinned` in-tree idle (retires `g_bootcpu_idle`); `idle_in_wfi` F7 fix; steal/pick invariant assert** | **Landed (deep-smp-review #863; ARCH §8.4.2/§8.4.5; gate `specs/sched_alpha.tla`; closes #860)** |
 | **HMP foundation: `select_target_cpu` placement hook + `ready_on` cross-CPU enqueue + per-CPU `capacity` (DTB) + per-task `util` + `balance_pull`** | **Landed (deep-smp-review #864; ARCH §8.4.3/§8.4.4; logic-verified vs synthetic asymmetric DTB; inert on uniform v1.0 targets)** |
 | **#866 formal adversarial audit (Opus + self-audit) of #863+#864** | **CLOSED CLEAN (0 P0 + 1 P1 + 0 P2 + 5 P3); F1 cross-CPU `need_resched` + F2 steal band-walk + F3 capacity release/acquire + F4 self-OOB guard + F6 doc fixed; F5 deferred (dormant `r->lock` coupling). `memory/audit_smp_redesign_closed_list.md`** |
+| **TI-4 work-conservation under tickless: push-placement (TI-4b) + the busy-tick overload kick (TI-4c, `sched_rebalance.tla::Overload`) + the affinity-ready `thread_may_run_on` seam + the 4 ms re-poll backstop (TI-4e)** | **Landed (TI arc; #304/#307/#309). Focused Opus-4.8-max audit + SMP gate. The tickless boot slowdown root-caused to HVF deep-park vCPU resume latency (99.85% IPI wakes — not a guest bug; the design is correct for the bare-metal target). See "Work-conservation under tickless idle (TI-4)" above.** |
 | `LatencyBound` liveness spec | Phase 2 close |
 | Red-black tree refactor | Phase 7 |
 | **Empirical EAS tuning (PELT decay, energy model, schedutil/DVFS, misfit push)** | **Deferred to real heterogeneous HW (ARCH §8.4.4 verification boundary)** |
@@ -561,6 +562,149 @@ Existing buggy configs (`scheduler_buggy.cfg`, `scheduler_buggy_steal.cfg`, `sch
 
 ---
 
+## Work-conservation under tickless idle (TI-4)
+
+Tickless idle (TI-3) stopped the 1 kHz periodic tick on a genuinely-idle CPU — but that tick was *also*, silently, the **work-steal re-poll**: every tick an idle CPU re-ran `sched()` → `try_steal` and pulled any queued work within 1 ms (`sched_notify_idle_peer` wakes only ONE peer per `ready()`; the tick was the catch-all for the rest). Removing it stranded queued work until the 100 ms backstop → a **2.4× boot slowdown**. TI-4 restores work-conservation with three composing pieces (the Linux `NO_HZ_IDLE` shape: idle CPUs deep-park; a still-ticking busy CPU drives rebalancing), an affinity-ready seam, and a backstop retune. All are production-only (`g_sched_notify_enabled`); the in-kernel test phase runs periodic idle, byte-identical to pre-tickless.
+
+### The enqueue side: push-placement (TI-4b)
+
+`select_target_cpu(t, prev_cpu)` (the HMP placement hook, above) prefers an **idle peer** for a waking thread in production: `select_idle_target` rotates `g_cpu_sched[]` for the first `idle_in_wfi` peer and `ready_on` enqueues `t` there + `sched_notify_cpu` IPIs it. The common case — a wake with an idle CPU available — runs `t` promptly there, no steal needed.
+
+### The pull side: `try_steal` at idle entry (existing)
+
+When `pick_next` returns NULL (nothing local) a CPU runs `try_steal` *before* parking (the `sched()` in `sched_idle_park`), so a CPU going idle already does one steal pass. The gap tickless opened is the **already-deep-parked** CPU: work that strands on a busy peer *after* a CPU parked has no local re-poll to catch it.
+
+### The push-on-overload kick (TI-4c) — `sched_rebalance.tla::Overload`
+
+`sched_tick()` runs at 1 kHz on every **running** CPU (tickless stops only the *idle* tick). At the tail of the tick, if THIS running CPU holds **surplus** stealable work AND a peer is parked in WFI, it kicks ONE peer to come steal:
+
+```c
+struct CpuSched *cs = &g_cpu_sched[cpu];
+if (g_sched_notify_enabled && t != cs->idle && cpu_has_surplus_for_kick(cs))
+    (void)sched_notify_idle_peer();
+```
+
+- `cpu_has_surplus_for_kick(cs)` is a **lock-free** read of the INTERACTIVE + NORMAL `run_tree[]` head pointers (`__atomic_load_n` RELAXED, never deref — the `sched_has_runnable_work` discipline; safe from the IRQ-context tick without the run-tree lock; a racy stale read costs only a benign spurious/skipped kick, self-correcting next tick). A non-NULL head is a RUNNABLE thread queued *behind* the running current (current is unlinked while running) = genuine migratable surplus. `SCHED_BAND_IDLE` is excluded (the pinned idle + at most best-effort IDLE work — never worth a cross-CPU kick).
+- The kick **reuses `sched_notify_idle_peer`** — it finds a registered-idle peer (`idle_in_wfi`) and sends `IPI_RESCHED`, "stops on first send" (no thundering herd; never self). It *lifts the peer's park* exactly as a placement IPI does: the peer set `idle_in_wfi` BEFORE its WFI under the IRQ-masked idle region (register-then-observe), so the IPI is never lost (I-9). The migration is **pull-realized** — the kicked peer's `sched()` → `try_steal` pulls the surplus — inside `sched_alpha.tla`'s proven arbitrary-placement envelope.
+- `t != cs->idle` suppresses the kick when THIS CPU runs its own idle (no surplus to push — it would run any queued work itself via preempt).
+
+This is structurally the Linux `NO_HZ_IDLE` model. Modeled by `specs/sched_rebalance.tla` (`Overload` / `NoLostWake` / `EventuallyParallelized`; clean + `buggy_nokick` [the TI-3 regression] + `buggy_nolift` [the kick that forgets the park-lift] counterexamples, TLC-green). Regression: `scheduler.cpu_surplus_for_kick`.
+
+### The affinity-ready seam (the priority/affinity pluggable point)
+
+`thread_may_run_on(const struct Thread *t, unsigned cpu)` is the single future plug point for a per-thread affinity mask. v1.0 has no mask, so it is **unconditionally `true`** — a trivially-true gate today that becomes load-bearing the day a `SYS_SCHED_SETATTR` affinity mask lands (then `return (t->affinity_mask >> cpu) & 1u;`). It is consulted at the two CPU-binding decisions so the work-conserving machinery never binds a thread to a forbidden CPU: `select_target_cpu` (placement — the idle-target + capacity-target returns) and `try_steal`'s victim pick (steal — beside the `cpu_pinned` skip). Inert today (always-true → the gates collapse to their pre-change behavior); the future mask plugs into THIS one function, so the redesign does not foreclose affinity. `cpu_pinned` (the idle/kthread hard pin) stays a separate, stronger predicate. The kick is band-aware by construction (it scans the real-work bands; `try_steal` then pulls highest-band-first).
+
+### The #363 park-guard — never park over your own queue (the #33-audit F1)
+
+`sched()` picks **before** it requeues: `pick_next` runs while prev (RUNNING)
+is not in the tree; prev is inserted only afterwards. So a slice-expiry
+preempt (or a yield) of a thread with an otherwise-empty local queue always
+dispatches the pinned in-tree idle, and the preempted thread lands in
+`run_tree[NORMAL]` right after the pick. The dispatched idle does not restart
+its loop — it resumes inside `sched_idle_park` past its own `sched()` call,
+headed for the one-shot arm + WFI, and pre-#363 there was **no re-check of
+the local queue** on that resume path: the CPU parked up to
+`TICKLESS_IDLE_BACKSTOP_NS` (4 ms) over its own just-requeued RUNNABLE
+thread (no IPI exists for a local self-requeue; the one-shot deasserted the
+periodic tick). Cost: up to ~4 ms per 6 ms slice for a solo compute-bound
+thread. The TI-4d multi-ms `max_starved` records (e.g. the 103 ms
+full-backstop park) were this — previously misattributed to peer backlog
+("even when that work's home CPU handles it promptly" — false: the home CPU
+*was* the parked CPU), and the `scale` bench is structurally blind to it
+(a self-ratio; the solo baseline suffers the identical loss).
+
+The fix is the #33 predicate applied at the park commit: after `sched()`
+returns in `sched_idle_park`, loop `while (cpu_has_surplus_for_kick(cs))
+sched();` before arming the one-shot — two relaxed head loads; the park is
+deferred, never lost (a peer's concurrent insert still rides the
+`idle_in_wfi` register-then-observe IPI, I-9; the deferred park is a stutter
+on `sched_tickless.tla`'s park action, so no spec change). Witness: the
+boot-wc `tickless starved` counters (pre-fix ~9.6 s starved-park time per
+boot; see the commit for the post-fix numbers).
+
+### The 4 ms re-poll backstop (TI-4e) + the wake-latency finding
+
+`TICKLESS_IDLE_BACKSTOP_NS = 4 ms` (was 100 ms at TI-3) → an idle CPU re-polls at ~250 Hz. **Why:** TI-4e root-caused the residual tickless boot slowdown to wake **latency**, NOT a guest bug. The wake path is IPI-prompt — measured **99.85% of tickless parks woken by an IPI** (`sched_wc_stats.tickless_ipi_wakes` vs `tickless_oneshot_wakes`; `wake-ipi=`/`wake-oneshot=` in the `boot-wc:` banner), not stranding on the backstop. But **resuming a DEEP-parked vCPU via SGI costs ~0.85 ms under HVF vs ~7 µs when hot** — an emulation artifact (HVF GICv2-MMIO vmexits + the host vCPU-thread resume; #299/#890), not a scheduler defect: on bare metal an SGI to a WFI'd core is hardware-fast (~ns), so deep-park there already gives fast boot + ~0% idle. The 4 ms re-poll keeps the dev-loop vCPUs warm enough that IPI resumes drop to ~0.09 ms → HVF boot ~7 s (≈ tickful) vs ~17–35 s at 100 ms, at ~5% HVF idle (vs 0.3%). The kick still earns its place: it is the fast (~1 ms) parallel-surplus catch, validated by the `cpubench` work-conservation counter (starvation −34…−60% across the parallel modes) even though the *sequential* boot is dominated by the per-wake latency the re-poll mitigates. A v1.x adaptive (warm-while-active / deep-when-idle) or accel-gated backstop reclaims 0.3% HVF idle without the dev-boot cost. (Bare-metal confirmation is owed at the Lazarus/RPi bring-up.)
+
+### Telemetry (`/ctl/sched` + the `boot-wc:` banner)
+
+`struct sched_wc_stats` (read by `sched_wc_stats`) carries the work-conservation counters sampled in `sched_idle_park`: `park_events` / `idle_ns` (denominators), `starved_events` / `starved_ns` / `max_starved_ns` (a park committed while work was queued — the steal-gap signal), the `tickless_*` subset (production only; the regression lives there), and the TI-4e wake-source split `tickless_ipi_wakes` / `tickless_oneshot_wakes` (the wake-path health signal). `cpubench` (`/bin/cpubench`) reads the deltas; the boot-window snapshot is the `boot-wc:` banner line.
+
+---
+
+## Voluntary yield — `SYS_YIELD` / `sched_yield_hint` (#33)
+
+`SYS_YIELD` (87) is the EL0 entry to the yield transition `sched()` has always
+implemented (prev `RUNNING` → requeue at the back of the band + dispatch — the
+`sched_alpha.tla` `StartSwitch kind="yield"` action, the same one tick
+preemption drives). Until #33 nothing but preemption drove it from EL0; the Go
+runtime's `osyield` was a `torpor_wait` mismatch-return that made a syscall
+round-trip without ever giving up the CPU, degrading the spinbit-mutex passive
+tier and every runtime spin loop (36.8M calls per `go build`).
+
+`sched_yield_hint()` (`kernel/sched.c`) is the whole mechanism:
+
+```c
+bool sched_yield_hint(void) {
+    struct CpuSched *cs = this_cpu_sched();
+    if (!cpu_has_surplus_for_kick(cs)) return false;
+    sched();
+    return true;
+}
+```
+
+- **The fast path is the point.** The per-CPU pinned idle is ALWAYS in-tree
+  while a non-idle thread runs (`IdleAvailable`), so an unconditional `sched()`
+  on an otherwise-empty queue would dispatch the idle — two context switches
+  per call (thread → idle → the #363 park-guard re-dispatches the requeued
+  yielder), on a syscall issued from spin loops. Pre-#363 the cost was far
+  worse: the dispatched idle resumed inside `sched_idle_park` headed for the
+  WFI and parked up to the backstop over the requeued yielder (the #33-audit
+  F1 — see "The #363 park-guard" under TI-4 below). The peek reuses the TI-4c
+  `cpu_has_surplus_for_kick` predicate verbatim: INTERACTIVE + NORMAL head
+  pointers, relaxed loads, never a `Thread` deref. Band IDLE is deliberately
+  excluded — it holds only the pinned idle (+ at most best-effort work the
+  tick path serves at slice granularity); yielding to it is never useful.
+- **Advisory, racy in both directions, both benign**: a stale non-NULL costs
+  one wasteful-but-correct idle bounce inside `sched()` (which re-picks under
+  `cs->lock`; the #363 park-guard re-dispatches and the idle parks only on a
+  genuinely-empty queue); a stale NULL skips one yield — the placer's
+  wake-preemption `need_resched_set` is served at this very syscall's return
+  tail (`preempt_check_irq` runs on the EL0 sync-return path in `vectors.S`,
+  not merely "the next IRQ"), and yield callers loop. The CPU-identity
+  staleness note (the #104/#107 TOCTOU shape) is HYPOTHETICAL today: syscalls
+  run IRQ-masked end-to-end (`spinlock.h`), so no preempt can land inside the
+  peek from the SVC path, and the test callers run on the `cpu_pinned`
+  kthread; a future IRQ-enabled kthread caller migrating mid-peek would read
+  a foreign CPU's heads — still benign (no lock taken, nothing mutated on
+  the peeked slot; `sched()` re-derives the CPU under its own entry mask).
+  In the model the skipped call is a stutter (no state change).
+- The syscall handler (`sys_yield_handler`, `kernel/syscall.c`) discards the
+  bool and returns 0 always — the POSIX `sched_yield(2)` shape; a hint has no
+  observable success/failure.
+- `need_resched` is deliberately untouched on the fast path (pure read-only).
+  A pending cross-CPU placement kick is always served: the flag's consumer
+  (`preempt_check_irq` → `sched()`) acquires `cs->lock`, which pairs with the
+  placer's release, so the insert is visible to whoever consumes the flag —
+  the sound argument is consumer-under-the-lock, NOT "flag implies the peek
+  sees the head" (a later plain store may be observed before an earlier
+  store-release on ARM64, so flag-visible ∧ head-not-yet-visible is
+  architecturally permitted; behavior is unaffected either way).
+
+Consumers: the Go runtime `osyield` (`runtime·osyield` in
+`sys_thylacine_arm64.s` — the linux `SYS_sched_yield` shape), musl
+`sched_yield`/`thrd_yield` via the pouch seam (`__NR_sched_yield` 0xFFFF → 87;
+proven boot-fatally by `pouch-hello`'s `sched_yield ok` probe), `t_yield` in
+libt + libthyla-rs.
+
+Regressions: `scheduler.yield_fast_path_no_work` (empty queue → no dispatch;
+a queued band-IDLE thread is not competition) +
+`scheduler.yield_dispatches_queued_work` (a queued NORMAL thread runs across
+the yield and the caller resumes — the dispatch_smoke rotation driven through
+`sched_yield_hint`).
+
+---
+
 ## Build + verify
 
 ```bash
@@ -709,3 +853,103 @@ new deterministic failure mode — virtio-input passed 3/3 on re-run post-change
 - **`tools/ci-smp-gate.sh`** (`make smp-gate`) builds the needed kernels once and runs the matrix — `default-smp4` / `default-smp8` / `ubsan-smp4` (the #860 amplifier) / `ubsan-smp8` — at **N≥10** boots each (env `SMP_GATE_N`, `SMP_GATE_CONFIGS`). It composes **`tools/smp-multiboot.sh`**, which re-runs `tools/test.sh` against one built kernel and classifies each failure: **CORRUPTION** (a ctx/stack-corruption signature — `invalid prev state`, `stack canary mismatch`, `kernel stack overflow`, `already on_cpu`, `#860`, …) FAILS the gate; benign host-**TIMING** fragility is reported, not failed; **OTHER** is surfaced for investigation. `test.sh` itself is the *primitive* the gate multi-boots — it is deliberately NOT a soundness gate, and the gate is a separate CI entry point to avoid recursion. `smp-multiboot.sh` clears its own label's prior `build/multiboot-fails/*.log` at the start of each run, so the captures dir only ever reflects the latest run — stale logs (including any written by a since-fixed classifier) cannot masquerade as current findings.
 
 - **`TEST_SOFT_WARN(cond, msg)`** (`kernel/test/test.h`) is a host-fragility budget that logs `[SOFT-WARN]` + bumps a counter surfaced in the boot summary (`tests: N/M PASS (K soft-warn)`) **without failing the suite**. `test_irq_latency_bench`'s QEMU-TCG p99 budget (`IRQ_BENCH_CI_BUDGET_NS`, 50 ms) now soft-warns instead of hard-extincting: a `TEST_ASSERT` there turned host throttling into a kernel "crash" AND — because `boot_main` extincts on any suite failure — masked any real fault later in the SAME boot (the #860 class lived in the post-test production bringup). A true pathological regression is still caught (an infinite hang trips `BOOT_TIMEOUT`; broken counter math trips the hard `valid >= N-2` assert). **Use `TEST_SOFT_WARN` only for host-timing budgets** — never to soften a correctness check. The cons/torpor `sched_runnable_count()==0` quiescence asserts are a *correctness* class (tasks #857/#858/#859), deliberately left hard so a leaked-runnable helper still fails.
+
+---
+
+## Preemption discipline: the per-thread spinlock preempt count (#359/#360)
+
+Plain `spin_lock` disables preemption for the holding THREAD (the Linux
+"spin_lock disables preemption" rule, realized per-thread). Landed as the
+general fix for #359 — the parallel-`go build` whole-guest wedge.
+
+### The bug class (#359)
+
+Syscalls (and EL0 faults) run IRQ-masked end-to-end, so a syscall spinning on
+a contended plain spinlock is non-preemptible. Before #360, a holder running
+IRQ-ENABLED — a kproc kthread (loom sqpoll, the dev9p_poll pump, console_mgr),
+or a spawn thunk on a fresh thread (`thread_trampoline` unmasks) — could be
+preempted MID-HOLD: it goes RUNNABLE off-CPU still holding the lock, sibling
+IRQ-masked spinners occupy every CPU waiting for it, and the holder never gets
+a CPU again. Permanent whole-guest deadlock. #359's confirmed instance: the
+REVENANT eager exec read holding the shared dev9p pool client's `c->lock`
+preemptibly under a parallel `go build` (~1-in-1.5 boots); the same shape was
+latent on `l->lock`, `g_dev9p_poll_lock`, the poll hook-list locks — any lock
+shared between a preemptible context and syscall paths.
+
+### Mechanism
+
+- **`Thread.preempt_count`** (`thread.h`): the number of plain spinlocks the
+  thread currently holds. `spin_lock`/`spin_trylock`-success increment BEFORE
+  the acquire; `spin_unlock` decrements AFTER the release store
+  (`spin_preempt_inc`/`spin_preempt_dec`, out-of-line in `sched.c` because
+  `spinlock.h` cannot see `struct Thread`).
+- **The gate** — `preempt_check_irq` returns WITHOUT consuming `need_resched`
+  while the interrupted thread's count is nonzero. The flag stays pending
+  (it may be the #866-F1 cross-CPU placement kick, set exactly once), so the
+  deferred preempt fires at the first IRQ-return after the hold drops
+  (≤ 1 tick — the granularity preemption already had).
+- **The assert** — `sched()` extincts if entered with `count != 0`
+  ("plain spinlock held across sched()"): sleeping or yielding while holding
+  a plain spinlock is forbidden (the lock-across-sleep deadlock class). A
+  per-CPU breadcrumb (`g_spin_outer_acquire`) names the outermost acquire
+  site in the extinction. `spin_preempt_dec` extincts on an unlock at
+  count==0 (an unbalanced release — it would otherwise silently poison the
+  gate).
+- **The raw pair** — `spin_lock_raw`/`spin_unlock_raw` (uncounted) exist
+  EXCLUSIVELY for sched()'s `cs->lock` pending-release handoff: the one lock
+  acquired by one thread (prev, inside sched) and released by another (the
+  resuming thread / a fresh thread's trampoline via
+  `sched_finish_task_switch`), which a per-thread count cannot balance. The
+  hold needs no count: sched runs fully IRQ-masked from its entry mask
+  through `cpu_switch_context` to the release. Three release sites pair with
+  the one raw acquire: `sched_finish_task_switch`, sched's resume block, and
+  sched's nothing-runnable early return. Any other use of the raw variants
+  is a bug (it opts a lock out of the discipline).
+
+### Why per-THREAD and not per-CPU (the first-cut bug)
+
+The first cut used a per-CPU count. It has an unfixable-in-place tear: the
+increment is `ldr/add/str` on a slot whose ADDRESS is computed first; an IRQ
+landing mid-RMW reads the pre-increment value (0), the gate passes, the
+thread is preempted and MIGRATED, and the `str` then lands in the OLD CPU's
+slot — poisoning that CPU permanently non-preemptible (an EL0 thread pinned
+there livelocks the box) while the thread's later unlock underflows the NEW
+CPU's slot. Reproduced under the parallel go build (two simultaneous
+extinctions = the two halves of one migration event). Per-thread is
+structurally immune: the count travels with the thread, so the gate and the
+RMW always target the same thread — an IRQ reading a mid-increment pre-value
+may preempt, but the thread holds nothing at that point and the half-done
+RMW completes correctly wherever it resumes.
+
+### The one lock-across-sleep site the assert found
+
+`p9_client_handshake` held the fresh client's `c->lock` across the serial
+NOTAG Tversion exchange's BLOCKING recv (by design — "unshared client").
+Sound pre-#360 only because nothing could contend; the assert rightly
+rejected it, and `client_run`'s NOTAG branch now drops `c->lock` across
+`p9_transport_exchange`, aligning the handshake with the elected reader's
+drop-before-recv discipline (`9p_client.c`).
+
+### Tests
+
+- `spinlock.preempt_count_balance` — inc/dec bookkeeping across lock,
+  trylock success/failure, irqsave-with-lock, and the raw variants (which
+  must NOT count).
+- `scheduler.preempt_gate_defers_while_locked` — the gate regression: an
+  armed `need_resched` survives 3 tick-returns while a plain lock is held
+  (pre-#360 it was consumed at the first tick-return, deterministically),
+  and is consumed within a bounded number of ticks after release.
+- The end-to-end regression witness is the parallel-`go build` roll test
+  (the #359 reproducer): N boots × 2 parallel cold builds, 0 wedges.
+
+### Trip-hazards
+
+- A syscall RETURNING to EL0 with a plain lock held (a leak) now pins its
+  CPU non-preemptible forever — the assert cannot see it (no sched call).
+  The underflow extinction catches the double-release flavor; a pure leak
+  surfaces as a livelock. Pre-existing bug class, sharper consequence.
+- `spin_lock_irqsave(l)`/`spin_unlock_irqrestore(l, s)` with a non-NULL lock
+  COUNT (they wrap spin_lock/spin_unlock); the mask-only NULL forms do not.
+- Pre-thread boot code (TPIDR_EL1 not yet parked) skips counting entirely —
+  single-CPU, IRQs masked, no gate needed. A lock held ACROSS the TPIDR
+  park would underflow at its release; don't do that.

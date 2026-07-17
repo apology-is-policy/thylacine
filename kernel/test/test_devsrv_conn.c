@@ -152,7 +152,7 @@ static void drop_linked_test_proc(struct Proc *p) {
 static int post_svc_byte(struct Proc *p, const char *name, size_t name_len) {
     struct Spoor *root = devsrv_attach_registry(srv_boot_registry());
     if (!root) return -1;
-    int h = devsrv_post_listener(p, root, name, name_len, SRV_MODE_BYTE);
+    int h = devsrv_post_listener(p, root, name, name_len, SRV_MODE_BYTE, false);
     spoor_clunk(root);
     return h;
 }
@@ -414,7 +414,7 @@ void test_devsrv_kernel_attached_io_refused(void) {
 
 void test_devsrv_kernel_attached_server_close_eofs(void) {
     // Part A: a SERVER-endpoint close on a kernel-attached conn MUST tear down.
-    struct SrvConn *cn = srvconn_create(0, 1, false, 0);
+    struct SrvConn *cn = srvconn_create(0, 1, false, 0, SRVCONN_MSIZE);
     TEST_ASSERT(cn != NULL, "srvconn_create (server-close case)");
     srvconn_set_kernel_attached(cn);
     TEST_ASSERT(srvconn_is_live(cn), "conn born live");
@@ -430,7 +430,7 @@ void test_devsrv_kernel_attached_server_close_eofs(void) {
 
     // Part B (control): a CLIENT-endpoint close on a kernel-attached conn must
     // SKIP teardown -- its rings are load-bearing for the kernel 9P client.
-    struct SrvConn *cn2 = srvconn_create(0, 1, false, 0);
+    struct SrvConn *cn2 = srvconn_create(0, 1, false, 0, SRVCONN_MSIZE);
     TEST_ASSERT(cn2 != NULL, "srvconn_create (client-close case)");
     srvconn_set_kernel_attached(cn2);
     srvconn_ref(cn2);                                   // inspection ref

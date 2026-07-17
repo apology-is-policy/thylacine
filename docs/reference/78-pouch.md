@@ -1401,3 +1401,21 @@ address until another thread rouses it. See POUCH-DESIGN.md §16.
 *Binding design: `docs/POUCH-DESIGN.md`. Phase pickup: `docs/phase6-status.md`.
 Vendoring record: `third_party/README.md`. Patch series:
 `usr/lib/pouch/patches/`.*
+
+
+## The AF_UNIX bulk-ring hint — `0020-pouch-srv-bulk.patch` (CF-3 B)
+
+A pre-bind `setsockopt(SOL_SOCKET, SO_SNDBUF | SO_RCVBUF, >= 128 KiB)`
+on an AF_UNIX socket marks the pouch slot BULK (`bulk_hint`); `bind()`'s
+create=post then ORs `DMSRVBULK` (`POUCH_SRV_DMSRVBULK`, 0x01000000)
+into the `SYS_WALK_CREATE` perm alongside `DMSRVBYTE`, so every
+connection minted on the service carries 128 KiB-frame rings and a
+kernel-attached mount negotiates a 128 KiB msize (CONCURRENT-FS.md
+CF-3 B). Any SO_SNDBUF/SO_RCVBUF value is accepted `0` (POSIX treats
+the buffer sizes as advisory); below the `POUCH_SRV_BULK_MIN` (128 KiB)
+threshold it is a no-op, and after `bind()` the hint is inert. Every
+other AF_UNIX option keeps its `ENOPROTOOPT`. The consumer is
+stratumd's listener setup (`stm_stratumd_listen_unix`'s `sockbuf`
+param, the thylacine-pouch-arm branch): on a Linux/macOS host the same
+call is an ordinary advisory buffer request, so the stratumd code
+carries no platform gate.

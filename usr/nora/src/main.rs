@@ -35,6 +35,7 @@ use libthyla_rs::err::{Error, Result};
 use libthyla_rs::fs::{self, File};
 use libthyla_rs::io::{slurp_capped, Write};
 use libthyla_rs::poll::PollTimeout;
+use libthyla_rs::process::{Command, Stdio};
 use libthyla_rs::{t_fsync, t_putstr};
 
 use kaua::event::Event;
@@ -214,9 +215,33 @@ fn handle_request(ed: &mut Editor, req: Request) {
             let path = name.or_else(|| ed.filename.clone());
             match path {
                 Some(p) => {
-                    let bytes = ed.text.content();
+                    // Stage 6: format-on-save for Go sources -- pipe the buffer
+                    // THROUGH gofmt (stdin -> stdout) BEFORE the durable write,
+                    // so one write lands the formatted bytes and unformatted
+                    // content never touches disk. The save is NEVER blocked:
+                    // a gofmt reject (syntax error mid-edit) or an absent
+                    // toolchain saves the buffer as-is.
+                    let mut bytes = ed.text.content();
+                    let mut fmt_note: Option<String> = None;
+                    if p.ends_with(".go") {
+                        match gofmt_source(&bytes) {
+                            FmtOutcome::Formatted(new) => {
+                                if new != bytes {
+                                    ed.text.replace_content(&new);
+                                    bytes = new;
+                                }
+                            }
+                            FmtOutcome::Rejected(msg) => fmt_note = Some(msg),
+                            FmtOutcome::Unavailable => {}
+                        }
+                    }
                     match write_file(&p, bytes.as_bytes()) {
-                        Ok(n) => ed.mark_saved(p, n),
+                        Ok(n) => {
+                            ed.mark_saved(p, n);
+                            if let Some(msg) = fmt_note {
+                                ed.set_status(format!("saved unformatted; gofmt: {}", msg));
+                            }
+                        }
                         Err(e) => ed.set_status(format!("{}: {}", p, e)),
                     }
                 }
@@ -271,6 +296,96 @@ fn read_file(path: &str) -> Result<String> {
     let bytes = slurp_capped(&mut f, MAX_FILE)?;
     let s = core::str::from_utf8(&bytes).map_err(|_| Error::InvalidArgument)?;
     Ok(String::from(s))
+}
+
+/// Where the Go toolchain ships in the default image (Stage 6); matches ut's
+/// static `$path` entry. A namespace without it (a non-bake image, a confined
+/// Proc) fails the spawn -> `Unavailable` -> the save proceeds unformatted.
+const GOFMT_PATH: &str = "/goroot/bin/gofmt";
+/// stderr drain cap: go/parser bails out after ~10 errors per file, so real
+/// diagnostics are far under this (and under the 4 KiB kernel pipe ring --
+/// which is why draining stdout BEFORE stderr cannot deadlock).
+const GOFMT_STDERR_CAP: usize = 4096;
+
+/// Outcome of piping a buffer through gofmt.
+enum FmtOutcome {
+    /// rc 0: the formatted source (may equal the input).
+    Formatted(String),
+    /// gofmt rejected the input (syntax error mid-edit is the normal case);
+    /// the first diagnostic line, for the status bar. The save proceeds
+    /// with the UNFORMATTED buffer -- a formatter must never block a save.
+    Rejected(String),
+    /// No usable formatter (absent binary / spawn failure / output pathology).
+    /// Silently save as-is.
+    Unavailable,
+}
+
+/// Format Go source by piping it THROUGH gofmt: write the buffer to the
+/// child's stdin, close it, read the formatted result from stdout. No
+/// tempfile, no `-w` + reload -- one durable write later lands the formatted
+/// bytes, and unformatted content never touches disk.
+///
+/// Deadlock-freedom: gofmt slurps ALL of stdin before emitting anything
+/// (processFile does io.ReadAll first), so write-all -> close -> read-all is
+/// safe; stderr stays under the pipe ring (see GOFMT_STDERR_CAP).
+///
+/// Console discipline: all three stdio slots are Piped -- the child can never
+/// scribble on nora's raw-mode alt-screen (fd 1) or read its keystrokes
+/// (fd 0). nora is not self-managing (no notes fd), so a `pipe` note from a
+/// died-early gofmt is dropped by the kernel and the failed write surfaces
+/// here as a plain Err (LS-5: only `interrupt` default-terminates).
+fn gofmt_source(input: &str) -> FmtOutcome {
+    let mut child = match Command::new(GOFMT_PATH)
+        .stdin(Stdio::Piped)
+        .stdout(Stdio::Piped)
+        .stderr(Stdio::Piped)
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => {
+            return FmtOutcome::Unavailable;
+        }
+    };
+    // Feed the buffer; the drop closes the write end so gofmt sees EOF. A
+    // write error (child died early) falls through -- the exit status decides.
+    let mut stdin_ok = false;
+    if let Some(mut si) = child.stdin.take() {
+        stdin_ok = si.write_all(input.as_bytes()).is_ok();
+    }
+    // Drain stdout first (the big stream), then stderr. On overflow
+    // slurp_capped errors (never truncates) -> empty -> the guards below
+    // refuse the result rather than adopt a partial one.
+    let out = match child.stdout.take() {
+        Some(mut so) => slurp_capped(&mut so, MAX_FILE).unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let err_text = match child.stderr.take() {
+        Some(mut se) => slurp_capped(&mut se, GOFMT_STDERR_CAP).unwrap_or_default(),
+        None => Vec::new(),
+    };
+    // ALWAYS reap -- nora is long-lived; an unreaped child is a zombie leak.
+    let ok = match child.wait() {
+        Ok(st) => st.success() && stdin_ok,
+        Err(_) => false,
+    };
+    if !ok {
+        // First diagnostic line ("<standard input>:LINE:COL: message"),
+        // clipped for the one-line status bar.
+        let first = err_text.split(|&b| b == b'\n').next().unwrap_or(&[]);
+        let msg = core::str::from_utf8(first).unwrap_or("(non-utf8 diagnostic)");
+        let msg = if msg.is_empty() { "formatter failed" } else { msg };
+        let clipped: String = msg.chars().take(120).collect();
+        return FmtOutcome::Rejected(clipped);
+    }
+    // rc 0: adopt the output -- guarded so a pathological empty/oversized/
+    // non-UTF-8 result can never clobber the user's buffer.
+    if out.is_empty() && !input.is_empty() {
+        return FmtOutcome::Unavailable;
+    }
+    match String::from_utf8(out) {
+        Ok(s) => FmtOutcome::Formatted(s),
+        Err(_) => FmtOutcome::Unavailable,
+    }
 }
 
 /// Write `data` to `path` (create-or-truncate) and fsync it -- an editor save

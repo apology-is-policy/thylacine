@@ -85,6 +85,19 @@ const MAX_POLLS: u32 = 500;
 /// sockets the hint is the DHCP renew deadline (minutes), so idle netd wakes
 /// ~once/sec. net-2b-2 replaces this loop with the IRQ + 9P-accept event loop.
 const IDLE_POLL_MIN_MS: u64 = 50;
+/// #291: the re-poll cap while a connection has a pending probe (a deferred read /
+/// readiness / accept / connect). On loopback the TCP window-update / delayed-ACK
+/// that unblocks a parked bulk sender is driven by `net.poll` with NO 9P frame to
+/// wake on, and smoltcp does not expose a prompt-enough timer for it via
+/// `poll_delay` (honoring the hint alone only lifted bulk loopback throughput
+/// ~1.6x; this cap lifts it ~6x, to ~14 MiB/s). We still honor a SOONER `poll_delay`
+/// hint, so this is a ceiling, not a fixed spin. TRADEOFF: while a probe is pending
+/// netd re-polls at up to ~500 Hz, so a long-lived idle blocked-reader connection
+/// polls faster than the old 50 ms -- bounded by MAX_CONNS and benign at v1.0
+/// (transient /net clients; no idle-blocked-reader server in the workload). The
+/// v1.x refinement is a loopback-vs-NIC-aware cap (only the lo stack needs the
+/// fast re-poll; a NIC read is RX-latency-bounded at IDLE_POLL_MIN_MS as before).
+const ACTIVE_POLL_MAX_MS: u64 = 2;
 const IDLE_POLL_MAX_MS: u64 = 1000;
 
 // =============================================================================
@@ -303,7 +316,7 @@ impl Driver for NetD {
         // are both pinned at THIS bring-up lease -- they stay coherent (a DHCP
         // renewal re-application is a v1.x seam). `ifc` carries the lease into
         // the ipifc/ndb views and seeds the resolver socket.
-        let mut net = server::Net::new(iface, sockets, base, ifc);
+        let mut net = server::Net::new(iface, sockets, base, ifc, Some(dhcp_handle));
         // net-8a: stand up the resident loopback interface (127.0.0.1/8 on its own
         // Loopback device + socket set), so an in-guest client dialing 127.x reaches
         // an in-guest server over the REAL /net path. Serviced by net.poll alongside
@@ -445,6 +458,15 @@ impl Driver for NetD {
             say!("netd: net-4c ipifc E2E FAIL");
         }
 
+        // #293: the connect-sweep disposal self-test -- a stuck connecting socket
+        // is REMOVED (not abort()ed), so an abandoned dial to an unreachable host
+        // cannot re-ARP forever and starve DNS. Deterministic, no host coupling.
+        if server::connect_sweep_selftest(base) {
+            say!("netd: #293 connect-sweep selftest PASS (stuck dial socket removed)");
+        } else {
+            say!("netd: #293 connect-sweep selftest FAIL");
+        }
+
         // net-4d: deterministic in-guest proofs of the net-4 surface (no host
         // coupling -> ASSERTED PASS lines, like the loopback/ipifc selftests).
         // (1) the cs/dns/ndb/mask parser battery; (2) the F1 deferred-read guard
@@ -507,6 +529,39 @@ impl Driver for NetD {
         loop {
             net.poll(&mut device);
 
+            // Drain + re-apply the DHCP lease event each tick. smoltcp drives the
+            // renew/rebind exchange inside net.poll, but the resulting
+            // Configured/Deconfigured EVENTS are delivered only via this poll(), and
+            // the bring-up apply ran once -- so a real DHCP server's lease expiry
+            // (vs slirp's silent auto-renew) would otherwise never reach the live
+            // iface address/route/resolver. A delta is rare; log it.
+            match net.poll_dhcp() {
+                server::DhcpDelta::Renewed {
+                    addr,
+                    prefix,
+                    dns_changed,
+                } => say!(
+                    "netd: DHCP lease re-applied t={}s addr={}.{}.{}.{}/{} dns_changed={}",
+                    base.elapsed().as_secs(),
+                    addr[0],
+                    addr[1],
+                    addr[2],
+                    addr[3],
+                    prefix,
+                    dns_changed
+                ),
+                server::DhcpDelta::Lost => say!(
+                    "netd: DHCP lease LOST t={}s -- link down until re-lease",
+                    base.elapsed().as_secs()
+                ),
+                server::DhcpDelta::None => {}
+            }
+
+            // #293: abort any TCP connect stuck SynSent past CONNECT_TIMEOUT_MS, so
+            // an abandoned dial to an UNREACHABLE host stops re-ARPing forever
+            // (which starves DNS via smoltcp's global ARP rate-limit). Cheap scan.
+            net.sweep_stale_connects();
+
             // Deliver any deferred accepts whose inbound call has landed: rebind
             // the blocked listen fid onto the accepted connection's ctl and send
             // the held Rlopen (NET-DESIGN 3.4 server side). A write failure means
@@ -538,6 +593,7 @@ impl Driver for NetD {
                     i -= 1;
                     if !conns[i].poll_dns(&mut net)
                         || !conns[i].poll_data(&mut net)
+                        || !conns[i].poll_weftio(&mut net)
                         || !conns[i].poll_ready(&mut net)
                         || !conns[i].poll_connects(&mut net)
                     {
@@ -551,17 +607,31 @@ impl Driver for NetD {
             // With a pending accept OR a deferred DNS read OR a blocking data
             // read OR a deferred connect, the event that unblocks it (an inbound
             // SYN / a DNS reply / RX data / a connect SYN-ACK) arrives on the
-            // NIC, not a pollable fd -- only a timeout-driven net.poll catches
-            // it. Clamp to the floor to keep accept/resolve/recv/connect latency
-            // <= IDLE_POLL_MIN_MS.
-            let delay = if net.has_pending_accepts()
+            // NIC, not a pollable fd -- only a timeout-driven net.poll catches it.
+            //
+            // #291: while a probe is pending, re-poll at up to ACTIVE_POLL_MAX_MS
+            // (honoring a SOONER poll_delay hint), not the flat 50ms the old code
+            // forced. On loopback the TCP window-update that unblocks a parked bulk
+            // sender is net.poll-driven with no 9P frame to wake on, and smoltcp
+            // exposes no prompt timer for it -- so only frequent re-polling catches
+            // it. This lifts bulk loopback ~6x (~2.4 -> ~14 MiB/s). See the
+            // ACTIVE_POLL_MAX_MS doc for the idle-wakeup tradeoff + the v1.x
+            // loopback-vs-NIC-aware refinement.
+            let pending = net.has_pending_accepts()
                 || conns.iter().any(|c| {
                     c.has_pending_dns()
                         || c.has_pending_reads()
+                        || c.has_pending_weftio()
                         || c.has_pending_ready()
                         || c.has_pending_connects()
-                }) {
-                IDLE_POLL_MIN_MS
+                });
+            let delay = if pending {
+                // clamp(1, ..): floor at 1ms so a poll_delay of Some(0) (work due
+                // now, which net.poll already drained) cannot become a 0ms t_poll
+                // busy-spin -- the same anti-spin intent as the idle branch's floor.
+                net.poll_delay_ms()
+                    .unwrap_or(ACTIVE_POLL_MAX_MS)
+                    .clamp(1, ACTIVE_POLL_MAX_MS)
             } else {
                 net.poll_delay_ms()
                     .unwrap_or(IDLE_POLL_MAX_MS)

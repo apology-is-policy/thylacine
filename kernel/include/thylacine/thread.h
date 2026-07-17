@@ -15,9 +15,11 @@
 #include <thylacine/context.h>
 #include <thylacine/types.h>
 #include <thylacine/spinlock.h>
+#include <thylacine/rendez.h>   // 8a-1b-beta: embedded per-Thread debug_rendez
 
 struct Proc;
 struct Rendez;
+struct exception_context;   // 8a-1c: /proc/<pid>/regs trapframe pointer (debug_trapframe)
 
 // Thread states. P2-A primarily uses RUNNING and RUNNABLE (only those
 // transition during context switches). SLEEPING and EXITING land at
@@ -266,9 +268,90 @@ struct Thread {
     // deadlock the cascade). Zero (KP_ZERO from the SLUB cache) == unlocked,
     // so no explicit init is needed.
     spin_lock_t        wait_lock;
+
+    // #360 preemption discipline: the number of plain spinlocks THIS thread
+    // currently holds (see spinlock.h). Nonzero => preempt_check_irq will not
+    // involuntarily deschedule the thread, and sched() asserts it is zero at
+    // every voluntary entry (lock-across-sleep is forbidden). PER-THREAD, not
+    // per-CPU, deliberately: the count travels with the thread across a
+    // migration, so the mid-increment preempt+migrate window that corrupted a
+    // per-CPU slot (the #360 first-cut bug: an IRQ reading the pre-increment
+    // value passes the gate, the thread migrates, and the store lands in the
+    // OLD CPU's slot -- poisoning it non-preemptible forever) is structurally
+    // gone: the gate and the RMW target the same thread. Only this thread
+    // (and its own nested IRQ handlers, which are inc/dec-balanced before
+    // IRQ-return) mutates it. The ONE cross-thread lock handoff -- sched()'s
+    // cs->lock pending-release, released by the NEXT thread -- bypasses the
+    // count via spin_lock_raw/spin_unlock_raw (sound: sched runs fully
+    // IRQ-masked, so that hold is non-preemptible by masking). KP_ZERO init.
+    u32                preempt_count;
+
+    // #68 F1: true while this (last-out) Thread runs the pre-ZOMBIE handle
+    // close in thread_exit_self. thread_die_pending() returns false while
+    // set, so the close's 9P sends / RPC waits / sleeps behave like a live
+    // thread's -- group_exit_msg is set on EVERY SYS_EXIT_GROUP (a clean
+    // exit_group(0) included), and treating the orderly final close as
+    // "dying" short-circuited the dev9p write-behind close-flush (silent
+    // data loss for a file left open at a multi-thread exit) and the
+    // close-time Tclunk (a server-side fid leak per fd). Set/cleared ONLY
+    // by the owning Thread around proc_close_handles_at_exit; read only
+    // via thread_die_pending(self). Fits in the tail padding.
+    bool               exit_close_active;
+
+    // 8a-1b-beta (I-39; docs/DEBUG-FS-DESIGN.md section 4.2; specs/debug_stop.tla):
+    // this Thread's OWN debugger park rendez. A thread observing a debugger stop
+    // at its EL0-return tail (el0_return_stop_check) parks here via sleep(); the
+    // resume cascade (proc_debug_resume) identifies a debug-parked peer by
+    // `rendez_blocked_on == &debug_rendez` and wakes exactly it (never a syscall-
+    // sleeper). PER-THREAD (single-waiter -- only this Thread ever sleeps here, so
+    // a multi-thread target parks each thread on its own rendez, and the single-
+    // waiter Rendez discipline is never violated by a shared park). Its lifetime
+    // is the Thread's, so the proc_group_terminate death cascade -- which wakes
+    // rendez_blocked_on (== &debug_rendez while parked) under wait_lock -- reaches
+    // a stopped thread with no stack-rendez lifetime concern. KP_ZERO (SLUB) inits
+    // it to { unlocked, no waiter } -- no explicit rendez_init needed.
+    struct Rendez      debug_rendez;
+
+    // 8a-1c (I-39; docs/DEBUG-FS-DESIGN.md section 4.5/5c.6): the EL0-entry
+    // trapframe pointer for /proc/<pid>/regs. The trapframe is NOT at a fixed
+    // kstack offset -- it lives at (SP_EL1 at the exception - EXCEPTION_CTX_SIZE),
+    // which is only kstack_top-288 for a thread's very first entry; for a running
+    // thread the outermost EL0 frame sits lower. Captured from the thread's vector
+    // `ctx` at TWO points: el0_return_stop_check records it at the RETURN tail (a
+    // TAIL-parked thread), and exception_sync_lower_el records it at the EL0-SYNC
+    // ENTRY (the #88 fix -- a DETOUR-parked sleeper, proc_debug_stop_sleeper_park,
+    // never reaches the tail while stopped, so the entry frame is its ONLY source).
+    // Read ONLY while the thread is fully-stopped (parked on debug_rendez, tail or
+    // detour), so it is always fresh: the tail-park overwrites with the return ctx;
+    // a detour-park is mid-syscall so the entry frame is the current outermost EL0
+    // frame; the between-syscalls stale value is never read (a non-parked thread's
+    // field is never read). Non-NULL during any syscall of any Proc (harmless -- a
+    // non-debugged Proc is never fully-stopped, so it never reads its own).
+    struct exception_context *debug_trapframe;
+
+    // 8a-2b-2 (I-39; docs/DEBUG-FS-DESIGN.md section 5.5; specs/debug_step.tla):
+    // the arm64 single-step machine, per-THREAD so it follows the thread across
+    // an IRQ-preempt migration mid-step (the Linux per-task MDSCR.SS model -- SS
+    // is per-PE, so a step must re-arm MDSCR.SS on the destination CPU's
+    // ctx-switch-IN, or a migrated step runs free). `debug_ss_armed` = a step is
+    // in flight: hwdebug_switch_in sets MDSCR.SS from it (SPSR.SS is armed in the
+    // resume trapframe by el0_return_stop_check); the EC 0x32 handler clears it +
+    // re-stops. `debug_stepover_va` (0 = none) is the breakpoint VA to SKIP while
+    // stepping (the step-over-breakpoint dance: a thread stopped AT a bp would
+    // re-trap on the resume instead of stepping, so switch_in loads that bp
+    // disabled for this thread's step). Both set only while the target is
+    // fully-stopped (the `step` verb, under g_proc_table_lock) + on the local
+    // CPU under IRQ-mask; read (ACQUIRE) in the ctx-switch install. KP_ZERO inits
+    // them (not stepping); NOT propagated by rfork.
+    bool               debug_ss_armed;
+    u64                debug_stepover_va;
 };
 
-_Static_assert(sizeof(struct Thread) == 1136,
+_Static_assert(sizeof(struct Thread) == 1184,
+               "8a-2b-2 appended debug_ss_armed (bool) + debug_stepover_va (u64) "
+               "for the single-step machine: 1168 -> 1184. "
+               "8a-1c appended debug_trapframe (8-byte struct exception_context* "
+               "for /proc/<pid>/regs); the 16-aligned struct pads 1152 -> 1168. "
                "struct Thread size pinned at 1136 bytes (P6 #811 appended a "
                "tail spin_lock_t wait_lock -- death-interruptible sleep, "
                "ARCH 8.8.1; 1120 -> 1136 incl. tail padding). P6-pouch-signals-"

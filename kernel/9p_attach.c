@@ -62,9 +62,11 @@ struct p9_attached *p9_attached_create(
     struct p9_attached *a = kmalloc(sizeof(*a), KP_ZERO);
     if (!a) { if (out_err) *out_err = -T_E_NOMEM; return NULL; }
 
-    // The p9_client struct is ~36 KiB (it inlines out_buf =
-    // P9_CLIENT_OUT_BUF_MAX = 32 KiB, Weft-0); kmalloc routes large
-    // requests through alloc_pages (slub.c bypass at SLUB_MAX_OBJECT_SIZE).
+    // The p9_client struct is ~36 KiB (it inlines the DEFAULT-tier
+    // out_buf_inline = P9_CLIENT_OUT_BUF_MAX = 32 KiB; a bulk-msize session
+    // additionally kmallocs an msize-sized out_buf at init -- CF-3 B);
+    // kmalloc routes large requests through alloc_pages (slub.c bypass at
+    // SLUB_MAX_OBJECT_SIZE).
     a->client = kmalloc(sizeof(*a->client), KP_ZERO);
     if (!a->client) {
         kfree(a);
@@ -242,7 +244,7 @@ bool p9_attached_is_open(const struct p9_attached *a) {
 
 struct Spoor *srvconn_attach_dev9p_root(struct SrvConn *cn,
                                         const u8 *aname, size_t aname_len,
-                                        u32 n_uname, int *out_err) {
+                                        u32 n_uname, bool loose, int *out_err) {
     if (out_err) *out_err = 0;
     if (!cn) { if (out_err) *out_err = -T_E_INVAL; return NULL; }
 
@@ -267,12 +269,18 @@ struct Spoor *srvconn_attach_dev9p_root(struct SrvConn *cn,
         timer_now_ns() + SRVCONN_HANDSHAKE_DEADLINE_NS);
 
     struct p9_transport_ops ops = p9_srvconn_transport_ops(adapter);
+    // CF-3 B: the msize proposal + recv cap come from the CONNECTION's ring
+    // class (set at mint from the service's DMSRVBULK bit) -- a bulk FS
+    // service negotiates 128 KiB (stratumd's STM_9P_MSIZE_DEFAULT accepts
+    // exactly that), a default service stays at 32 KiB. The proposal can
+    // never exceed what the conn's rings carry (cap = 2x msize).
+    u32 conn_msize = srvconn_msize(cn);
     int aerr = 0;
     struct p9_attached *att = p9_attached_create(
         ops,
-        SRVCONN_MSIZE,           // recv_cap (= msize; matches the SrvConn ring)
+        conn_msize,              // recv_cap (= msize; matches the SrvConn ring)
         SRVCONN_ROOT_FID,        // root_fid
-        SRVCONN_MSIZE,           // msize (client proposal; negotiated down)
+        conn_msize,              // msize (client proposal; negotiated down)
         NULL, 0,                 // uname (empty; SO_PEERCRED is the live channel)
         aname_len > 0 ? aname : NULL, aname_len,
         n_uname, &aerr);
@@ -295,6 +303,13 @@ struct Spoor *srvconn_attach_dev9p_root(struct SrvConn *cn,
     // The HANDSHAKE_DEADLINE armed above bounded only the serial, fresh-client
     // handshake, where a timeout tears down the unshared client with no desync.
     srvconn_set_client_deadline(cn, 0);
+
+    // B1 per-attach loose mode (I-38 opt-in): stamped on the still-private
+    // client BEFORE the root Spoor exists -- the caller's handle publication
+    // orders it against every subsequent dev9p op, so the plain bool needs no
+    // atomics and is never flipped after this point.
+    if (loose && att->client)
+        att->client->loose = true;
 
     // Transfer adapter ownership into the attached (tx == rx == NULL: the SrvConn
     // lifetime is the adapter's own srvconn_ref, not a transport-Spoor pair).

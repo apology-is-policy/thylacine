@@ -57,15 +57,44 @@
 #include <thylacine/9p_session.h>
 #include <thylacine/9p_transport.h>
 #include <thylacine/9p_wire.h>
+#include <thylacine/larder.h>
+
+// G2 (term-4): the dir-fid cache table (the policy lives in dev9p.c; the
+// struct lives here because it is per-session state embedded in p9_client,
+// like the Larder). 64 parked fids bounds the server-side fid-table residency;
+// round-robin eviction (a consume REMOVES its entry, so entries do not age --
+// eviction only fires when 64 distinct dirs are parked between consumes).
+#define P9_DIRFID_ENTRIES 64u
+struct p9_dirfid_ent {
+    u64  qid_path;
+    u32  fid;
+    bool valid;
+};
+struct p9_dirfid_cache {
+    spin_lock_t          lock;    // leaf; never held across a wire op
+    struct p9_dirfid_ent e[P9_DIRFID_ENTRIES];
+    u32                  hand;    // round-robin eviction cursor
+    // Diagnostics (the T4-G A/B counters; not load-bearing).
+    u64 takes;          // bind-form resolves served a parked fid (0-RT walks)
+    u64 donates;        // unopened dir fids parked at close (clunks elided)
+    u64 dedup_clunks;   // donate found the qid already parked -> incoming clunked
+    u64 evict_clunks;   // donate evicted a victim -> victim clunked
+    u64 drops;          // reuse-hazard drops (create/rmdir/rename-replace)
+};
+#include <thylacine/poll.h>
 #include <thylacine/rendez.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/types.h>
 
-// Inline outbound Tmsg buffer. Must hold one whole Tmsg frame (<= the
-// session's negotiated msize). The /net SrvConn session negotiates
-// SRVCONN_MSIZE (32 KiB, Weft-0), so a /net Twrite frame can be ~32 KiB
-// -- size to match. Stratum / corvus sessions negotiate smaller and use
-// only a prefix. Inline in struct p9_client -> kmalloc'd per session.
+// INLINE outbound Tmsg buffer capacity -- the DEFAULT msize class. Must
+// hold one whole Tmsg frame (<= the session's negotiated msize) for a
+// default (32 KiB) session; a session initialized with a LARGER msize
+// (CF-3 B: a DMSRVBULK service negotiates SRVCONN_BULK_MSIZE = 128 KiB)
+// spills to a heap out_buf sized to that msize at p9_client_init, so the
+// frame-build bound always matches the proposal. Static test clients +
+// every default session stay on the inline tier (no allocation); the
+// heap tier degrades BACK to inline on OOM (writes then clamp shorter --
+// a short op, never a failed init; the CF-3 A degrade discipline).
 #define P9_CLIENT_OUT_BUF_MAX  (32u * 1024u)
 
 #define P9_CLIENT_MAGIC        0x50394354u   // "P9CT" little-endian
@@ -136,9 +165,25 @@ struct p9_client {
     struct p9_transport  transport;
     // Shared outbound Tmsg buffer. Used only under c->lock during the
     // build+send of one op (serialized), so the elected-reader pipeline can
-    // share it across ops without per-op allocation -- the frame is copied
-    // into the c2s ring by the send before c->lock is released.
-    u8                   out_buf[P9_CLIENT_OUT_BUF_MAX];
+    // share it across ops without per-op allocation. NOTE (#375): on c2s
+    // back-pressure the send returns EAGAIN with NOTHING on the ring, and
+    // client_send_flow drops c->lock to pump/park -- so out_buf content is
+    // UNDEFINED across any lock drop (a peer may rebuild it). client_send_flow
+    // therefore SPILLS the frame to a private buffer at the first EAGAIN and
+    // retries from the spill; no path may re-read out_buf after
+    // client_pump_or_park_locked has run (the sole exception is the NOTAG
+    // handshake exchange -- private client by construction, #360).
+    //
+    // Two-tier (CF-3 B): `out_buf` points at `out_buf_inline` for a
+    // default-msize session (<= P9_CLIENT_OUT_BUF_MAX; every static test
+    // client and small-frame service), or at a kmalloc'd `msize`-byte
+    // buffer for a bulk session (freed at destroy). `out_buf_cap` is the
+    // usable size -- EVERY frame build passes it as the cap (never
+    // sizeof), and the CF-3 A write clamp min(msize, out_buf_cap) keeps
+    // the two tiers correct by construction.
+    u8                   out_buf_inline[P9_CLIENT_OUT_BUF_MAX];
+    u8                  *out_buf;
+    u32                  out_buf_cap;
     size_t               recv_cap;     // transport recv-buf cap; per-rpc reply_buf size
     // Pipeline state (ARCH §21.10). inflight[tag] is the submitter's stack
     // p9_rpc for the op holding `tag`, or NULL (free / op died + unwound,
@@ -148,6 +193,27 @@ struct p9_client {
     struct p9_rpc       *inflight[P9_SESSION_MAX_OUTSTANDING];
     bool                 reader_active;
     bool                 dead;
+    // #349 send flow control. A send whose c2s ring is transiently FULL (under
+    // #841 pipelining + concurrent large frames) is back-pressure, NOT a death:
+    // the sender drains the reply path + retries (client_send_flow). A reader
+    // bumps send_progress + (iff send_waiters) wakes the parked senders on each
+    // demux and on reader departure -- so a continuously-busy pipeline cannot
+    // starve a sender (it retries on every reader-progress edge, not just on
+    // reader-exit). send_progress + send_waiters are under c->lock; a parked
+    // sender's cond reads send_progress under ITS OWN rendez lock -- the poll()
+    // register-then-observe pattern (I-9, no lost wake; poll.tla).
+    //
+    // MULTI-WAITER (R2-F1): the client is shared across every Proc whose territory
+    // resolves through its dev9p mount, so N senders can be back-pressured at once.
+    // A single `Rendez` is single-waiter (extincts on the 2nd sleeper, rendez.h) --
+    // an unprivileged SMP-reachable panic on exactly this workload (parallel writers
+    // filling the shared c2s). So senders park on a `poll_waiter_list`: each holds
+    // its OWN stack `Rendez` via a `poll_waiter`, and the reader wakes them all with
+    // `poll_waiter_list_wake`. send_waiters is the registered-waiter count, gating
+    // the wake off the hot demux path.
+    struct poll_waiter_list send_waiters_list;
+    u64                  send_progress;
+    u32                  send_waiters;
     // Most-recently-completed op's reply buffer, kept alive past client_run's
     // return. The read/readdir/readlink dispatch results ZERO-COPY ALIAS into
     // it (out->read_data / readdir_data / readlink_target point inside the
@@ -163,6 +229,53 @@ struct p9_client {
     // fresh fids for walk-derived Spoors. Mutated only under
     // c->lock.
     u32                  next_fid;
+    // POUNCE per-session capability latch (dev9p_walk_attrs). Twalkgetattr is
+    // a Stratum extension; a server that does not implement it (netd's /net,
+    // any plain 9P2000.L peer) answers the first probe with Rlerror ENOSYS /
+    // EOPNOTSUPP -- dev9p latches this true and every later walk_attrs on the
+    // session returns the unsupported sentinel WITHOUT an RPC (the resolver
+    // falls back to the per-component loop). One-way false -> true; a benign
+    // one-word race (two concurrent probes both latch the same value).
+    bool                 wga_unsupported;
+    // L1e cacheability gate: true once this mount's server has proven it is a
+    // content-versioned FS by answering a Twalkgetattr (POUNCE) successfully --
+    // the v1.0 proxy for "offset-stable, content-versioned reads" (Stratum). The
+    // whole Larder (attr + page) engages ONLY for a cacheable client: a stream /
+    // control server (netd /net -- consuming reads, qid.version always 0) answers
+    // Twalkgetattr Rlerror ENOSYS, so it never latches cacheable and is never
+    // cached (a re-read of an offset would serve stale stream bytes). FAIL-SAFE:
+    // default false; set only on proven support (before any read -- a file is
+    // resolved via walk_attrs before it is read). One-way false -> true; a benign
+    // one-word race. Accessed with __atomic (relaxed -- a monotonic optimization
+    // hint; the Larder lock orders the cached data itself).
+    bool                 cacheable;
+    // B1 per-attach loose mode (I-38 opt-in; user-voted option B 2026-07-11,
+    // docs/chase/B1-VOTE.md + the ARCH I-38 row): a cached-open whose RPC-free
+    // hint FULLY hits skips the per-open forced-wire revalidation and
+    // snapshots at the CACHED cvers. Set ONCE by the attach path (from the
+    // validated SYS_ATTACH_9P_LOOSE flag) BEFORE the root Spoor publishes --
+    // ordered by the handle publication, never flipped at runtime, so a plain
+    // read is sound. Default false = strict close-to-open (I-38's default).
+    bool                 loose;
+    // The Larder -- the guest-side FS cache (L1c; docs/LARDER-DESIGN.md, I-38).
+    // Shared by every Proc/thread resolving through this mount; protected by its
+    // OWN near-leaf lock (never held with c->lock -- the RPCs that take c->lock
+    // run outside the Larder lock). Serves the base X-check re-stat storm + fstat
+    // from local metadata; own-write invalidation keeps it close-to-open coherent.
+    struct larder        larder;
+    // G2 (term-4): the dir-fid cache -- PARKED, walk-fresh (never-opened) server
+    // fids for DIRECTORIES, keyed by qid.path (docs/FID-LIFECYCLE-DESIGN.md
+    // section 4). A by-name op (unlink/rename/create-in) resolves its parent dir
+    // with a bind-form walk whose ONLY wire purpose is minting the fid once the
+    // Larder chain fully serves; parking the fid at close and re-issuing it at
+    // the next bind-form resolve makes the repeat resolution ZERO wire ops.
+    // Ownership is exclusive: take() REMOVES the entry (one Spoor per fid,
+    // I-11), put() re-parks it (dedup: a second fid for a parked qid is clunked
+    // by the caller). The POLICY (donate/consume/drop hooks) lives in dev9p.c;
+    // this is only the table. The lock is a pure leaf (never held across a wire
+    // op -- evict/dedup clunks run outside it). Fids die with the session, so
+    // destroy needs no wire teardown.
+    struct p9_dirfid_cache dirfid;
     // Diagnostics.
     u32                  total_ops;
     u32                  total_errors;
@@ -221,8 +334,31 @@ int  p9_client_walk_one(struct p9_client *c,
                          const u8 *name, size_t name_len,
                          struct p9_qid *out_qid);
 
+// Fused walk+getattr (POUNCE, Twalkgetattr 140; docs/POUNCE-DESIGN.md):
+// p9_client_walk's contract PLUS each walked component's full attribute
+// record in out_attrs[i] (caller capacity >= nwname). new_fid may be
+// P9_NOFID: the walk-QUERY form -- the server walks + samples and binds
+// NOTHING (nothing to clunk; the 1-RPC stat). A real new_fid binds ONLY
+// on a full walk (nwqid == nwname); a partial walk returns the walked
+// prefix's qids+attrs with new_fid unbound. Returns 0 on success (which
+// includes a partial walk -- the caller checks *out_nwqid).
+int  p9_client_walkgetattr(struct p9_client *c,
+                           u32 src_fid, u32 new_fid,
+                           u64 request_mask,
+                           u16 nwname,
+                           const u8 *const *names, const size_t *name_lens,
+                           u16 *out_nwqid, struct p9_qid *out_qids,
+                           struct p9_attr *out_attrs);
+
 // Clunk (release) a fid.
 int  p9_client_clunk(struct p9_client *c, u32 fid);
+
+// Fire-and-forget clunk (FID-LIFECYCLE async-clunk): send the Tclunk, do NOT
+// block on Rclunk. The fid unbinds at send (I-11; the number is never reused);
+// the ownerless Rclunk drains via a later op's elected reader (I-10, the #845
+// Tflush discipline). For the hot close path (dev9p_close) where the submitter
+// need not wait for the release. Returns 0 on send, -P9_E_* on a build/send error.
+int  p9_client_clunk_async(struct p9_client *c, u32 fid);
 
 // =============================================================================
 // IO operations.

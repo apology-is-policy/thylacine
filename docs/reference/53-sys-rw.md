@@ -21,7 +21,7 @@ Return:
     x0 = bytes transferred (>=0); 0 on EOF (read only); -1 on error.
 ```
 
-Per-call cap: `SYS_RW_MAX = 4096` bytes (matches `PIPE_BUF_SIZE`). Userspace loops for larger transfers. The cap is the kernel-side bounce-buffer size; raising it would require either growing the stack frame past safety bounds or routing through heap.
+Per-call cap: `SYS_RW_MAX = 128 KiB` (CF-3 A; was 4096). Userspace still loops for larger transfers — short reads/writes remain normal, and a single 9P RPC's payload is additionally clamped by the negotiated msize. The staging is two-tier: ops ≤ `SYS_RW_STACK` (4096, matches `PIPE_BUF_SIZE`) use the kernel-stack scratch exactly as before; larger ops take a transient `kmalloc` bounce (freed before return), degrading to the stack tier on allocation failure so memory pressure shortens an op rather than failing it.
 
 ### Rights gates
 
@@ -46,11 +46,11 @@ SYS_PIPE (P5-fd-pipe) grants `RIGHT_READ | RIGHT_WRITE | RIGHT_TRANSFER` on both
 
 1. Resolve the calling Proc via `current_thread()`.
 2. Validate the user-VA range: NULL / `>= UACCESS_USER_VA_TOP` / overflow rejected.
-3. Cap `len` at `SYS_RW_MAX`.
+3. Cap `len` at `SYS_RW_MAX` (128 KiB).
 4. For `len == 0`: just validate the fd (handle exists + RIGHT_WRITE) and return 0.
-5. Otherwise: allocate a 4 KiB stack scratch (`u8 scratch[SYS_RW_MAX]`).
-6. Loop: `uaccess_load_u8(buf_va + i, &scratch[i])` for `i = 0..len`. On any fault → return -1 (partial scratch is dropped; no bytes delivered).
-7. Call `sys_write_for_proc(p, fd, scratch, len)`.
+5. Otherwise pick the staging tier: `len <= SYS_RW_STACK` → the 4 KiB stack scratch; larger → a transient `kmalloc(len)` (on allocation failure, `len` degrades to `SYS_RW_STACK` and the stack scratch serves — a short write, never a failed one).
+6. `uaccess_copy_in(scratch, buf_va, len)` — the bulk fault-fixup copy (CF-3 A; replaced the per-byte `uaccess_load_u8` loop). On fault → free the bounce, return -1 (no bytes delivered).
+7. Call `sys_write_for_proc(p, fd, scratch, len)`; free the bounce.
 
 `sys_write_for_proc`:
 1. Look up the handle: `KOBJ_SPOOR` kind, `RIGHT_WRITE` set.
@@ -128,7 +128,7 @@ Extends:
 
 New attack surfaces:
 1. **User-VA store can write to attacker-controlled location** (within `[0, UACCESS_USER_VA_TOP)`). The VMA write-permission check inside `userland_demand_page` blocks writes to read-only mappings. No additional kernel-mode privilege escalation surface introduced.
-2. **Stack scratch buffer** (4 KiB on the kernel stack). Bounded by `SYS_RW_MAX`; can't exceed the bounds.
+2. **Two-tier scratch** (CF-3 A): 4 KiB on the kernel stack (`SYS_RW_STACK`) for small ops; a transient `kmalloc` bounce up to `SYS_RW_MAX` (128 KiB) for bulk ops, freed on every path. The heap tier is user-drivable transient kernel memory, and "transient" is attacker-delayable: a blocked `dev->read`/`write` (a held-open pipe, an idle `/net` socket, a hung server) holds its bounce for the block's duration, and the allocation is order-5 (buddy-fragmentation-hostile). The CF-3 audit (F1) therefore added the **per-Proc bounce budget**: `sys_bounce_charge`/`uncharge` against `Proc.bounce_bytes`, capped at `PROC_BOUNCE_MAX` (512 KiB = four concurrent bulk ops; ample for the measured 84%-depth-1 build workloads); over-budget ops degrade to the stack tier (a short op, never a failure). `PRINCIPAL_SYSTEM` is exempt (the I-32 TCB pattern). The honest residual bound: a fork tree still aggregates per-Proc budgets (the I-32 per-Proc shape, same as `page_count`), capped by the child/thread axes.
 
 The `uaccess_store_u8` fault path is structurally identical to `uaccess_load_u8` (same fixup-table format, same dispatcher). No new fault-handling logic.
 
@@ -136,12 +136,7 @@ The `uaccess_store_u8` fault path is structurally identical to `uaccess_load_u8`
 
 ## Performance characteristics
 
-Per-byte loops are not the fastest possible — production uses larger `copy_from_user` / `copy_to_user` primitives (u64-stride). v1.0 uses single-byte loops because:
-1. The existing `uaccess_load_u8` already operates byte-wise (matches SYS_PUTS).
-2. Performance budget at v1.0 P5 isn't tight enough to require wider strides.
-3. Larger-stride primitives need separate fixup-table entries + per-stride fault recovery; each adds audit-bearing surface.
-
-A future `P5-fd-rw-uaccess-fast` chunk can land u64-stride `copy_from_user` / `copy_to_user` once a benchmark justifies it.
+CF-3 A landed the u64-stride bulk primitives this section originally deferred: `uaccess_copy_in` / `uaccess_copy_out` (arch/arm64/uaccess.S — byte head to 8-align the user VA, 8-byte body, byte tail; three fixup entries each sharing one fault label; see 40-uaccess.md). The benchmark that justified it: the CF-3 Tread-stream measurement — 67% of a go build's read RPCs were exactly-4096 userspace chunks (the 4 KiB cap, not the 32 KiB msize, was the binding constraint on bulk read throughput ≈ 27 MiB/s), and the per-byte copy loop was a function call per byte on every op.
 
 ---
 
@@ -162,17 +157,17 @@ A future `P5-fd-rw-uaccess-fast` chunk can land u64-stride `copy_from_user` / `c
 
 ## Known caveats / footguns
 
-### Per-call cap = 4096 bytes
+### Per-call cap = SYS_RW_MAX (128 KiB since CF-3 A)
 
-Larger transfers require userspace to loop. The libc shim (Phase 6+) will loop transparently for POSIX `read(2)` / `write(2)` semantics.
+Larger transfers require userspace to loop (the libc shim + the go port already do). A single 9P RPC still carries at most the negotiated msize's payload (32,757 B today), so bulk reads return short at that boundary until the CF-3 B transport lift lands. `SYS_READDIR` / `SYS_GETRANDOM` / `SYS_EXPLICIT_BZERO` deliberately keep the 4 KiB bound (`SYS_RW_STACK`).
 
 ### Partial-fault data loss on SYS_READ
 
 If `uaccess_store_u8` faults mid-copy, the bytes already drained from the Spoor's `dev->read` but not yet written to user-VA are LOST. The kernel returns -1 without indicating the partial drain. Documented; Phase 5+ can pre-touch user pages to mitigate.
 
-### Stack-allocated bounce buffer
+### Stack-allocated bounce buffer (small tier)
 
-4 KiB on the kernel test thread's 16 KiB stack is borderline. Real syscalls run on the per-Proc kernel stack which is the same size. The 12 KiB headroom is sufficient for v1.0 syscall depths but should be revisited when the call graph deepens.
+4 KiB on the kernel test thread's 16 KiB stack is borderline. Real syscalls run on the per-Proc kernel stack which is the same size. The 12 KiB headroom is sufficient for v1.0 syscall depths but should be revisited when the call graph deepens. CF-3 A deliberately did NOT grow this: the bulk tier lives on the heap precisely so the stack frame stays at the audited 4 KiB.
 
 ### `dev->offset` advance is unguarded
 

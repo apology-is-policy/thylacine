@@ -42,7 +42,7 @@ use libthyla_rs::{
 };
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{ChecksumCapabilities, Device, Loopback, Medium};
-use smoltcp::socket::{dns, icmp, tcp, udp};
+use smoltcp::socket::{dhcpv4, dns, icmp, tcp, udp};
 use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{
     DnsQueryType, EthernetAddress, HardwareAddress, Icmpv4Packet, Icmpv4Repr, IpAddress, IpCidr,
@@ -356,6 +356,16 @@ struct Slot {
     // last unref. None until a flow goes zero-copy -- the hybrid threshold keeps
     // small-payload flows on the byte-copy path, so most slots never allocate one.
     weft: Option<WeftFlow>,
+    // The abort deadline for an in-flight TCP connect (#293). Set to
+    // `now_ms + CONNECT_TIMEOUT_MS` when `connect` puts the socket in SynSent;
+    // 0 once it establishes / aborts / is non-TCP. The serve loop sweeps it
+    // (sweep_stale_connects): a socket still SynSent past the deadline is aborted
+    // so an abandoned dial to an UNREACHABLE host cannot leave the socket
+    // re-ARPing forever -- which (smoltcp's single global ARP rate-limit) starves
+    // every other neighbor lookup once its cache entry expires (the live #293:
+    // the M6 boot probe to 10.0.2.100 killed DNS at 60s). Independent of the
+    // PendingConnect deadline, which only exists on the deferred data-open path.
+    connect_deadline_ms: u64,
 }
 
 /// The per-flow ring geometry netd allocates (Weft-6b). 256 KiB total (64 pages,
@@ -397,6 +407,7 @@ impl Slot {
             gen: 0,
             lo: false,
             weft: None,
+            connect_deadline_ms: 0,
         }
     }
 }
@@ -491,6 +502,25 @@ struct PendingReady {
     mask: u16,   // the requested poll events (POLLIN | POLLOUT) from the offset
 }
 
+/// A blocking weft `data` read holding its Rweftio (Weft-6b-3, RX). The kernel
+/// issues Tweftio(READ) on a weft-bound flow's data fd; netd recvs IN PLACE into
+/// the flow's shared ring at `[off, off+len)`. If the socket's rx is empty but the
+/// connection is still open, the read DEFERS (park this, return Disp::Deferred)
+/// instead of replying Rweftio(0) -- a 0 would look like EOF to the guest's
+/// `recv()`. poll_weftio re-resolves the ring + recvs when bytes arrive (or 0 on
+/// EOF), then sends the held Rweftio. This is the weft twin of PendingRead: the
+/// recv target is the shared ring (not a 9P-body scratch) and the reply is the
+/// byte count (not the bytes). Cancelled by the fid's clunk / a Tflush on its tag
+/// / teardown / Tversion, exactly like PendingRead. Bounded by MAX_FIDS (#65).
+#[derive(Copy, Clone)]
+struct PendingWeftRead {
+    fid: u32,    // the data fid the read is on (cancelled on its clunk)
+    slot_n: u32, // the connection slot to recv from + whose ring to write into
+    tag: u16,    // the held Tweftio tag (cancelled by a Tflush on it)
+    off: u32,    // the ring payload offset to recv into (validated at park time)
+    len: u32,    // the recv window length (the Tweftio len; the recv cap)
+}
+
 /// The result of a non-blocking dequeue from a connection's rx (net-6a). The
 /// blocking read path needs to distinguish "no data yet, the connection is open"
 /// (DEFER) from "end of stream" (return 0) -- a distinction the older `data_recv`
@@ -504,6 +534,63 @@ enum RecvOutcome {
     // empty UDP datagram)
     WouldBlock, // no data yet, the connection is open -- the caller may defer
     Eof,        // end of stream (TCP FIN drained / socket gone) -- read returns 0
+}
+
+/// Recv from connection `n`'s socket directly INTO its weft ring at
+/// `[off, off+len)` (Weft-6b-3, RX). Re-resolves the flow's ring + re-validates
+/// the window on every call, so a slot freed/re-minted mid-defer is safe -- a
+/// vanished or shrunk ring yields Eof, never an OOB write (the net-3d slot-reuse
+/// discipline). On Data(k) the k bytes are already in the guest's shared mapping
+/// (zero-copy). Used by both h_weftio's first attempt and poll_weftio's deferred
+/// delivery. SAFETY: ring_va is netd's live mapping of the flow's ring (held
+/// while the slot is live); `[payload_off+off, +len)` is bounds-checked here
+/// before the &mut slice is built, against geometry derived from the flow's own
+/// ring_size.
+fn weft_recv_into_ring(net: &mut Net, n: u32, off: u32, len: u32) -> RecvOutcome {
+    let flow = match net.weft_flow(n) {
+        Some(w) => w, // a Copy -- no borrow of `net` is held across data_recv_outcome
+        None => return RecvOutcome::Eof, // no ring (slot gone) -> nothing arrives
+    };
+    let geom = match weftlib::ring_layout(flow.ring_size, WEFT_RING_ENTRIES) {
+        Some(g) => g,
+        None => return RecvOutcome::Eof,
+    };
+    let off = off as usize;
+    let len = len as usize;
+    let psz = geom.payload_size as usize;
+    if len == 0 || off > psz || len > psz - off {
+        return RecvOutcome::Eof; // window no longer fits (ring changed) -> stop
+    }
+    let base = flow.ring_va as usize + geom.payload_off as usize + off;
+    // SAFETY: bounds-checked above; ring_va is netd's live per-flow mapping. The
+    // &mut slice is a raw pointer into netd's own AS (not borrowed from `net`), so
+    // the &mut net for data_recv_outcome does not alias it. INVARIANT (Weft-7 F4):
+    // ring_va's liveness against a concurrent slot_unref -> t_burrow_detach rests
+    // on netd being SINGLE-THREADED -- this runs synchronously inside the serve
+    // loop (h_weftio / poll_weftio), so no slot_unref can interleave. The VALUE
+    // safety (a vanished/shrunk ring yields Eof above, never an OOB) already holds
+    // unconditionally; only the mapping LIVENESS needs single-threadedness, so a
+    // future netd-concurrency lift (A-5b per-user-netd) MUST add a per-slot guard
+    // keeping the ring mapped across this raw write.
+    let dst: &mut [u8] = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, len) };
+    let outcome = net.data_recv_outcome(n, dst);
+    // Weft-6c readiness edge (NET-THROUGHPUT 6 busy-poll): on a real RX delivery
+    // into the ring, bump the single-cache-line readiness seq (WEFT_READY_RX) so a
+    // native client's syscall-free `rx_ready_seq` observe sees the edge without a
+    // Loom ENTER. The native client's park is the Loom CQ wait (the CQE is what
+    // wakes it), so there is no weft Rendez to wake here -- the bump is purely the
+    // busy-poll edge (the direct-park leg stays validated-not-wired, v1.x). Single-
+    // writer-per-word: netd owns ready_seq/ready_mask. `ready_base` is within the
+    // same bounds-checked live mapping (ready_off < payload_off).
+    if let RecvOutcome::Data(k) = &outcome {
+        if *k > 0 {
+            let ready_base = (flow.ring_va as usize + geom.ready_off as usize) as *mut u8;
+            unsafe {
+                let _ = weftlib::ready_signal(ready_base, weftlib::WEFT_READY_RX);
+            }
+        }
+    }
+    outcome
 }
 
 /// A completed accept ready to deliver: the serve loop rebinds `fid` onto the
@@ -568,6 +655,22 @@ pub enum DnsProbeResult {
     NoResponse,
     /// No resolver was learned from the lease (the dns socket is absent).
     NoServer,
+}
+
+/// The outcome of draining the DHCP socket in the resident loop (#293).
+pub enum DhcpDelta {
+    /// No pending lease event this tick (the common case).
+    None,
+    /// A renewed/re-acquired lease was re-applied to the live iface + ifc + (if
+    /// it changed) the resolver.
+    Renewed {
+        addr: [u8; 4],
+        prefix: u8,
+        dns_changed: bool,
+    },
+    /// The lease was lost (expired / NAK); the address + default route were
+    /// cleared and the link marked down until a fresh lease re-applies.
+    Lost,
 }
 
 /// The live interface configuration snapshot (net-4c, NET-DESIGN section 6).
@@ -642,6 +745,13 @@ pub struct Net {
     // query across its growable query-slot table. None if the lease carried no
     // resolver (then a DNS query fails closed to an empty answer, never hangs).
     dns: Option<SocketHandle>,
+    // The DHCP client socket (#293). It stays in `sockets` after bring-up so
+    // smoltcp drives the RENEW/REBIND exchange inside `iface.poll`; the resident
+    // loop additionally DRAINS its Configured/Deconfigured events each tick
+    // (poll_dhcp) and re-applies them to the live iface/route/resolver -- without
+    // that the link silently dies at the first lease event (T1 ~= 60s on slirp's
+    // 120s default lease). None for a statically-configured iface (the selftests).
+    dhcp: Option<SocketHandle>,
     // The live interface-config snapshot (net-4c): the lease (or static) facts,
     // surfaced read-only through /net/ipifc/0 + /net/ndb. Kept coherent with the
     // iface by ifc_set_static / ifc_clear.
@@ -664,6 +774,7 @@ impl Net {
         mut sockets: SocketSet<'static>,
         base: Instant,
         ifc: IfConfig,
+        dhcp: Option<SocketHandle>,
     ) -> Net {
         // The DNS socket holds DNS_MAX_SERVER_COUNT (=1) server; the lease's
         // primary resolver is it. A growable (alloc) query-slot table backs the
@@ -689,10 +800,112 @@ impl Net {
             mint_seq: 0,
             pending: Vec::new(),
             dns,
+            dhcp,
             ifc,
             lo: None,
         }
     }
+
+    /// Drain + re-apply the DHCP socket's pending event each resident-loop tick.
+    /// smoltcp drives the RENEW/REBIND request/ack exchange inside `iface.poll`,
+    /// but the resulting `Configured`/`Deconfigured` EVENTS are delivered only via
+    /// this `poll()` -- and the bring-up apply (main.rs) ran ONCE. On QEMU slirp the
+    /// lease auto-renews silently (no event ever fires, so this is a no-op there),
+    /// but a REAL DHCP server's lease genuinely expires/re-leases; without re-
+    /// applying here, that renewed/re-acquired lease would never reach the live
+    /// iface address / default route / resolver. This is the resident twin of the
+    /// bring-up apply. Returns a (rare) delta for the caller to log. (NOTE: this is
+    /// NOT the #293 fix -- that DNS death was the unbounded connect ARP-storm, see
+    /// sweep_stale_connects; this is the companion DHCP-renewal-correctness path
+    /// that also backs the `ipconfig renew` ctl verb.)
+    pub fn poll_dhcp(&mut self) -> DhcpDelta {
+        let h = match self.dhcp {
+            Some(h) => h,
+            None => return DhcpDelta::None,
+        };
+        let ev = self.sockets.get_mut::<dhcpv4::Socket>(h).poll();
+        match ev {
+            Some(dhcpv4::Event::Configured(cfg)) => {
+                let cidr = cfg.address;
+                let router = cfg.router;
+                let new_dns = cfg.dns_servers.first().map(|d| d.octets());
+                let dns_changed = new_dns != self.ifc.dns;
+                self.iface.update_ip_addrs(|a| {
+                    a.clear();
+                    let _ = a.push(IpCidr::Ipv4(cidr));
+                });
+                // Remove any stale default route first, so a gateway change cannot
+                // leave two defaults (smoltcp keeps only one, but be explicit).
+                let _ = self.iface.routes_mut().remove_default_ipv4_route();
+                if let Some(r) = router {
+                    let _ = self.iface.routes_mut().add_default_ipv4_route(r);
+                }
+                if dns_changed {
+                    self.reseed_resolver(new_dns);
+                }
+                self.ifc.addr = cidr.address().octets();
+                self.ifc.prefix = cidr.prefix_len();
+                self.ifc.gw = router.map(|r| r.octets());
+                self.ifc.dns = new_dns;
+                self.ifc.up = true;
+                self.ifc.dynamic = true;
+                DhcpDelta::Renewed {
+                    addr: cidr.address().octets(),
+                    prefix: cidr.prefix_len(),
+                    dns_changed,
+                }
+            }
+            Some(dhcpv4::Event::Deconfigured) => {
+                // Lease lost (expired / NAK). Drop the address + default route and
+                // mark the link down; smoltcp re-DISCOVERs and a fresh Configured
+                // re-applies above. ifc.dns is left intact (a numeric path is
+                // unaffected); the resolver socket keeps its server.
+                self.iface.update_ip_addrs(|a| a.clear());
+                let _ = self.iface.routes_mut().remove_default_ipv4_route();
+                self.ifc.up = false;
+                DhcpDelta::Lost
+            }
+            None => DhcpDelta::None,
+        }
+    }
+
+    /// (Re)seed the shared DNS resolver socket with the lease's primary resolver.
+    /// `update_servers` keeps the existing per-fid query table intact; a None
+    /// resolver clears the server list (queries then fail closed to empty). If the
+    /// resolver first appears on a later lease, the socket is created here.
+    fn reseed_resolver(&mut self, dns: Option<[u8; 4]>) {
+        match (self.dns, dns) {
+            (Some(h), Some(d)) => {
+                let server = IpAddress::Ipv4(Ipv4Address::new(d[0], d[1], d[2], d[3]));
+                self.sockets
+                    .get_mut::<dns::Socket>(h)
+                    .update_servers(&[server]);
+            }
+            (Some(h), None) => {
+                self.sockets.get_mut::<dns::Socket>(h).update_servers(&[]);
+            }
+            (None, Some(d)) => {
+                let server = IpAddress::Ipv4(Ipv4Address::new(d[0], d[1], d[2], d[3]));
+                self.dns = Some(self.sockets.add(dns::Socket::new(&[server], Vec::new())));
+            }
+            (None, None) => {}
+        }
+    }
+
+    /// Manual DHCP renew (ipconfig renew / the ipifc `renew` ctl verb, #293):
+    /// reset the DHCP client to Discovering, forcing a fresh DISCOVER -> lease.
+    /// The next `poll_dhcp` drains the resulting `Configured` and re-applies it.
+    /// Returns false on a statically-configured iface (no DHCP socket).
+    pub fn dhcp_renew(&mut self) -> bool {
+        match self.dhcp {
+            Some(h) => {
+                self.sockets.get_mut::<dhcpv4::Socket>(h).reset();
+                true
+            }
+            None => false,
+        }
+    }
+
 
     /// Stand up the resident loopback stack (net-8a): a second isolated smoltcp
     /// interface on a `Loopback` device, addressed `127.0.0.1/8`. Idempotent. The
@@ -876,6 +1089,71 @@ impl Net {
         }
         if let Some(h) = self.slot_socket(n) {
             self.set_mut(n).get_mut::<tcp::Socket>(h).abort();
+        }
+        if (n as usize) < MAX_SLOTS {
+            self.slots[n as usize].connect_deadline_ms = 0;
+        }
+    }
+
+    /// #293: fully drop a TCP connect stuck SynSent past its deadline by REMOVING
+    /// its socket from the SocketSet -- NOT abort(). abort() makes smoltcp try to
+    /// send a RST, which to an UNREACHABLE peer needs the same unresolved neighbor,
+    /// so the socket keeps re-ARPing FOREVER (the live bug: the sweep's abort()
+    /// left the 10.0.2.100 ARP storm running, and smoltcp's single global ARP
+    /// rate-limit then still starved DNS). Removing the socket leaves nothing to
+    /// dispatch -> the ARP stops at once. The slot stays allocated while a fid
+    /// still refs it (a stranded QTPOLL `ready` fid, #293 part B); `err` is set so
+    /// check_ready reports POLLERR (completing any stranded readiness probe), and a
+    /// later slot_unref finds socket=None and frees the slot with no double-remove.
+    fn tcp_drop_stuck_connect(&mut self, n: u32) {
+        let i = n as usize;
+        if i >= MAX_SLOTS {
+            return;
+        }
+        let h = self.slots[i].socket.take();
+        if let Some(h) = h {
+            let _ = self.set_mut(n).remove(h);
+        }
+        self.slots[i].err = Some("connect timed out");
+        self.slots[i].connect_deadline_ms = 0;
+    }
+
+    /// #293: sweep every TCP slot with an armed connect deadline. A slot that has
+    /// ESTABLISHED (left SynSent/SynReceived) clears its deadline; a slot still
+    /// handshaking PAST the deadline is aborted. This bounds EVERY outbound
+    /// connect -- not only the deferred-data-open path that registers a
+    /// PendingConnect (the ready-poll path does not). Without it, a dial to an
+    /// unreachable host stays SynSent and re-ARPs forever, and smoltcp's SINGLE
+    /// GLOBAL ARP rate-limit (silent_until) then starves every other neighbor
+    /// lookup once its 60s cache entry expires -- the live #293 (the M6 boot probe
+    /// to 10.0.2.100 killed DNS at 60s). Cheap: MAX_SLOTS (=16) is a tiny scan.
+    /// The owning Conn's poll_connects still delivers the Rlerror to a client that
+    /// is waiting on the data-open; a client that abandoned the dial (the M6 gate)
+    /// just gets its now-Failed socket aborted here, ending the ARP storm.
+    pub fn sweep_stale_connects(&mut self) {
+        let now = self.now_ms();
+        for n in 0..MAX_SLOTS as u32 {
+            let i = n as usize;
+            if !self.slots[i].used
+                || self.slots[i].proto != PROTO_TCP
+                || self.slots[i].connect_deadline_ms == 0
+            {
+                continue;
+            }
+            match self.tcp_connect_state(n) {
+                // Still handshaking (SynSent/SynReceived). Abort iff past deadline.
+                ConnectState::Pending => {
+                    if now >= self.slots[i].connect_deadline_ms {
+                        self.tcp_drop_stuck_connect(n);
+                    }
+                }
+                // ESTABLISHED or already Closed/aborted: the connect resolved, so
+                // disarm (tcp_abort_connect already disarms the Failed-by-abort
+                // case; this also disarms a normal establish + a peer RST).
+                ConnectState::Ready | ConnectState::Failed => {
+                    self.slots[i].connect_deadline_ms = 0;
+                }
+            }
         }
     }
 
@@ -1102,6 +1380,7 @@ impl Net {
             gen,
             lo: false,
             weft: None,
+            connect_deadline_ms: 0,
         };
         self.tcp_active += 1;
         self.tcp_opened += 1;
@@ -1136,6 +1415,7 @@ impl Net {
             gen,
             lo: false,
             weft: None,
+            connect_deadline_ms: 0,
         };
         self.udp_active += 1;
         self.udp_opened += 1;
@@ -1179,6 +1459,7 @@ impl Net {
             gen,
             lo: false,
             weft: None,
+            connect_deadline_ms: 0,
         };
         self.icmp_active += 1;
         self.icmp_opened += 1;
@@ -1426,6 +1707,16 @@ impl Net {
                 self.ifc_clear();
                 Ok(())
             }
+            // `renew` (ipconfig renew, #293): reset the DHCP client so it
+            // re-DISCOVERs a lease; the resident loop's poll_dhcp re-applies the
+            // result. Err on a no-DHCP (statically configured) iface.
+            b"renew" => {
+                if self.dhcp_renew() {
+                    Ok(())
+                } else {
+                    Err(())
+                }
+            }
             _ => Err(()),
         }
     }
@@ -1627,6 +1918,11 @@ impl Net {
                 self.slots[n as usize].local = le.map(endpoint_octets);
                 self.slots[n as usize].remote = re.map(endpoint_octets);
                 self.slots[n as usize].err = None;
+                // #293: arm the connect-abort deadline. A 127.x dial establishes
+                // synchronously over lo (the sweep then sees !SynSent and clears
+                // it next tick); a NIC dial is SynSent until the handshake, and an
+                // UNREACHABLE peer would stay SynSent + re-ARP forever without this.
+                self.slots[n as usize].connect_deadline_ms = self.now_ms() + CONNECT_TIMEOUT_MS;
                 Ok(())
             }
             None => {
@@ -1681,6 +1977,18 @@ impl Net {
         let listened = self.set_mut(n).get_mut::<tcp::Socket>(h).listen(ep).is_ok();
         if listened {
             self.slots[n as usize].listen_ep = Some(ep);
+            // Record the bound local endpoint so `/net/tcp/N/local` reports the
+            // listen address. A plan9 net client (Go's net.Listen, via
+            // listenPlan9 -> readPlan9Addr) reads `local` immediately after
+            // `announce`; without this it sees an empty file -> EOF. A wildcard
+            // announce (addr None) binds 0.0.0.0. (The native libthyla-rs client
+            // never read `local` post-announce, so this gap stayed latent until
+            // the Go port exercised the full Plan 9 listen sequence.)
+            let local_ip = match ep.addr {
+                Some(IpAddress::Ipv4(a)) => a.octets(),
+                _ => [0u8; 4],
+            };
+            self.slots[n as usize].local = Some((local_ip, ep.port));
             self.slots[n as usize].err = None;
             Ok(())
         } else {
@@ -1810,6 +2118,7 @@ impl Net {
             gen: mgen,
             lo: nlo,
             weft: None,
+            connect_deadline_ms: 0,
         };
         self.tcp_active += 1;
         self.tcp_opened += 1;
@@ -2569,7 +2878,7 @@ pub fn loopback_e2e(base: Instant) -> LoopbackResult {
     iface.update_ip_addrs(|a| {
         let _ = a.push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8));
     });
-    let mut lo = Net::new(iface, SocketSet::new(Vec::new()), base, IfConfig::empty());
+    let mut lo = Net::new(iface, SocketSet::new(Vec::new()), base, IfConfig::empty(), None);
     LoopbackResult {
         icmp: lo_icmp_roundtrip(&mut lo, &mut device),
         udp: lo_udp_roundtrip(&mut lo, &mut device),
@@ -2599,7 +2908,7 @@ pub fn resident_lo_selftest(base: Instant) -> &'static str {
     iface.update_ip_addrs(|a| {
         let _ = a.push(IpCidr::new(IpAddress::v4(10, 0, 0, 1), 24));
     });
-    let mut net = Net::new(iface, SocketSet::new(Vec::new()), base, IfConfig::empty());
+    let mut net = Net::new(iface, SocketSet::new(Vec::new()), base, IfConfig::empty(), None);
     net.enable_loopback();
 
     // announce 127.0.0.1!port -> the listener migrates to the lo stack.
@@ -2717,7 +3026,7 @@ pub fn echo_e2e(base: Instant) -> bool {
     iface.update_ip_addrs(|a| {
         let _ = a.push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8));
     });
-    let mut lo = Net::new(iface, SocketSet::new(Vec::new()), base, IfConfig::empty());
+    let mut lo = Net::new(iface, SocketSet::new(Vec::new()), base, IfConfig::empty(), None);
     echo_e2e_inner(&mut lo, &mut device)
 }
 
@@ -2850,6 +3159,50 @@ fn lo_recv_n(lo: &mut Net, device: &mut Loopback, n: u32, want: usize, out: &mut
 /// local content (the lease-into-view render in reverse -- a static fact in,
 /// the rendered bytes out), `remove`, and the malformed-input rejects. No NIC,
 /// no host -> fully deterministic, so the caller ASSERTS it (a PASS/FAIL line).
+/// #293: prove the connect-sweep's disposal REMOVES a stuck connecting socket --
+/// the live bug was that `abort()` left it re-ARPing an unreachable peer forever
+/// (which, via smoltcp's single global ARP rate-limit, starved DNS at the 60s
+/// neighbor-cache expiry). Deterministic: mint a TCP slot (which reserves a real
+/// socket), arm a past connect deadline, drop it, and assert the socket is GONE
+/// (so smoltcp has nothing left to dispatch), the slot reads Failed/socketless,
+/// and the sweep then runs safely over it.
+pub fn connect_sweep_selftest(base: Instant) -> bool {
+    let mut device = Loopback::new(Medium::Ethernet);
+    let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress([
+        0x02, 0x00, 0x00, 0x00, 0x00, 0x0c,
+    ])));
+    config.random_seed = LO_SEED;
+    let ts0 = SmolInstant::from_millis(base.elapsed().as_millis() as i64);
+    let iface = Interface::new(config, &mut device, ts0);
+    let mut net = Net::new(iface, SocketSet::new(Vec::new()), base, IfConfig::empty(), None);
+
+    let n = match net.tcp_clone() {
+        Some(n) => n,
+        None => return false,
+    };
+    let i = n as usize;
+    if net.slots[i].socket.is_none() {
+        return false; // a fresh slot must hold its reserved socket
+    }
+    // Arm a past connect deadline so the slot looks like a stuck dial.
+    net.slots[i].connect_deadline_ms = net.now_ms().saturating_sub(1).max(1);
+
+    // The load-bearing fix: dropping REMOVES the socket from the set (not abort()).
+    net.tcp_drop_stuck_connect(n);
+    if net.slots[i].socket.is_some()
+        || net.slots[i].err.is_none()
+        || net.slots[i].connect_deadline_ms != 0
+    {
+        return false;
+    }
+    // A socketless slot reads Failed (no panic), and the sweep runs safely over it.
+    if !matches!(net.tcp_connect_state(n), ConnectState::Failed) {
+        return false;
+    }
+    net.sweep_stale_connects();
+    true
+}
+
 pub fn ipifc_e2e(base: Instant) -> bool {
     let mut device = Loopback::new(Medium::Ethernet);
     let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress([
@@ -2858,7 +3211,7 @@ pub fn ipifc_e2e(base: Instant) -> bool {
     config.random_seed = LO_SEED;
     let ts0 = SmolInstant::from_millis(base.elapsed().as_millis() as i64);
     let iface = Interface::new(config, &mut device, ts0);
-    let mut net = Net::new(iface, SocketSet::new(Vec::new()), base, IfConfig::empty());
+    let mut net = Net::new(iface, SocketSet::new(Vec::new()), base, IfConfig::empty(), None);
 
     let has = |c: &Content, needle: &[u8]| {
         let s = c.as_slice();
@@ -2998,7 +3351,7 @@ pub fn dns_loopback_e2e(base: Instant) -> bool {
     // The resolver IS our loopback responder (127.0.0.1).
     let mut ifc = IfConfig::empty();
     ifc.dns = Some([127, 0, 0, 1]);
-    let mut net = Net::new(iface, SocketSet::new(Vec::new()), base, ifc);
+    let mut net = Net::new(iface, SocketSet::new(Vec::new()), base, ifc, None);
 
     // The mock resolver: a udp socket bound to 127.0.0.1:53 that answers any A
     // query with `answer`. On the same iface + SocketSet, so the loopback device
@@ -3161,7 +3514,7 @@ pub fn dns_defer_guard_selftest(base: Instant) -> bool {
     });
     let mut ifc = IfConfig::empty();
     ifc.dns = Some([10, 0, 0, 1]); // a resolver (never polled -> the query stays Pending)
-    let mut net = Net::new(iface, SocketSet::new(Vec::new()), base, ifc);
+    let mut net = Net::new(iface, SocketSet::new(Vec::new()), base, ifc, None);
     let mut conn = Conn::new(0);
 
     // A DNS name resolution begins; the first read defers (Pending, no poll).
@@ -3322,7 +3675,7 @@ pub fn recv_blocking_e2e(base: Instant) -> &'static str {
     iface.update_ip_addrs(|a| {
         let _ = a.push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8));
     });
-    let mut lo = Net::new(iface, SocketSet::new(Vec::new()), base, IfConfig::empty());
+    let mut lo = Net::new(iface, SocketSet::new(Vec::new()), base, IfConfig::empty(), None);
 
     // Establish a connection (announce + connect + the deferred accept), KEEPING
     // the server side M (lo_tcp_accept discards it; here we recv on it).
@@ -3442,7 +3795,7 @@ pub fn ready_e2e(base: Instant) -> &'static str {
     iface.update_ip_addrs(|a| {
         let _ = a.push(IpCidr::new(IpAddress::v4(127, 0, 0, 1), 8));
     });
-    let mut lo = Net::new(iface, SocketSet::new(Vec::new()), base, IfConfig::empty());
+    let mut lo = Net::new(iface, SocketSet::new(Vec::new()), base, IfConfig::empty(), None);
     let (m, cn, ln) = match lo_establish_pair(&mut lo, &mut device) {
         Some(t) => t,
         None => return "establish",
@@ -4031,6 +4384,11 @@ pub struct Conn {
     // reaches ESTABLISHED (or fails / times out). Makes the data open block to
     // ESTABLISHED, as TcpStream::connect documents -- the outbound NIC path.
     pending_connects: Vec<PendingConnect>,
+    // Blocking weft `data` reads holding their Rweftio (Weft-6b-3, RX): each
+    // parked on an empty rx, completed by poll_weftio (recv IN PLACE into the
+    // flow's shared ring) when bytes arrive (or 0 on EOF). The weft twin of
+    // pending_reads -- the recv target is the ring, the reply is the byte count.
+    pending_weftio: Vec<PendingWeftRead>,
 }
 
 impl Conn {
@@ -4047,6 +4405,7 @@ impl Conn {
             pending_reads: Vec::new(),
             pending_ready: Vec::new(),
             pending_connects: Vec::new(),
+            pending_weftio: Vec::new(),
         }
     }
 
@@ -4282,6 +4641,53 @@ impl Conn {
         !self.pending_reads.is_empty()
     }
 
+    /// Complete any blocking weft `data` reads whose bytes arrived (Weft-6b-3,
+    /// RX): recv IN PLACE into the flow's shared ring + send the held Rweftio
+    /// (the byte count). False on a write failure (tear the connection down). The
+    /// weft twin of poll_data -- register-then-observe holds the same way (net.poll
+    /// runs before this pass, and netd is single-threaded, so no readiness edge is
+    /// lost between h_weftio's empty dequeue and the park).
+    pub fn poll_weftio(&mut self, net: &mut Net) -> bool {
+        let mut i = 0;
+        while i < self.pending_weftio.len() {
+            let pw = self.pending_weftio[i];
+            match weft_recv_into_ring(net, pw.slot_n, pw.off, pw.len) {
+                RecvOutcome::WouldBlock => i += 1, // still empty; check next tick
+                RecvOutcome::Data(k) => {
+                    self.pending_weftio.remove(i);
+                    if !self.deliver_weftio(pw.tag, k as u32) {
+                        return false;
+                    }
+                }
+                RecvOutcome::Eof => {
+                    self.pending_weftio.remove(i);
+                    if !self.deliver_weftio(pw.tag, 0) {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// Build + send the held Rweftio for a now-ready blocking weft read. False on
+    /// a write failure (tear the connection down). Mirrors deliver_read.
+    fn deliver_weftio(&mut self, tag: u16, count: u32) -> bool {
+        self.out_buf.clear();
+        self.out_buf.resize(SRV_MSIZE_USIZE, 0);
+        match p9::build_rweftio(&mut self.out_buf, tag, count) {
+            Ok(rlen) => self.send_all(rlen),
+            Err(()) => false,
+        }
+    }
+
+    /// Any parked weft read clamps the serve-loop poll delay to the floor (RX
+    /// arrives on the NIC, not a pollable 9P fd) -- the same property as
+    /// has_pending_reads for the byte-copy stream.
+    pub fn has_pending_weftio(&self) -> bool {
+        !self.pending_weftio.is_empty()
+    }
+
     /// Complete any deferred TCP `data` opens whose handshake has resolved (#257;
     /// the serve-loop pass, called per-Conn after net.poll so a transition this
     /// tick is visible). ESTABLISHED -> send the held Rlopen (the data stream is
@@ -4452,6 +4858,7 @@ impl Conn {
         self.query_clear_all(net); // free cs/dns sessions + cancel queries (net-4b)
         self.pending_reads.clear(); // the held Rreads die with the connection (net-6a)
         self.pending_ready.clear(); // ... and the held readiness Rreads (net-6b)
+        self.pending_weftio.clear(); // ... and the held weft Rweftios (Weft-6b-3)
         self.pending_connects.clear(); // ... and the held connect Rlopens (#257)
     }
 
@@ -4496,6 +4903,7 @@ impl Conn {
             self.query_drop(net, fid); // free cs/dns session + cancel query (net-4b)
             self.pending_reads.retain(|pr| pr.fid != fid); // drop blocked reads (net-6a)
             self.pending_ready.retain(|pr| pr.fid != fid); // drop readiness probes (net-6b)
+            self.pending_weftio.retain(|pw| pw.fid != fid); // drop blocked weft reads (Weft-6b-3)
             self.pending_connects.retain(|pc| pc.fid != fid); // drop deferred connects (#257)
             if let Some(n) = path_conn_n(f.path) {
                 net.slot_unref(n);
@@ -4700,6 +5108,7 @@ impl Conn {
         self.query_clear_all(net); // a Tversion also resets cs/dns sessions (net-4b)
         self.pending_reads.clear(); // ... and drops any blocked data reads (net-6a)
         self.pending_ready.clear(); // ... and any deferred readiness probes (net-6b)
+        self.pending_weftio.clear(); // ... and any blocked weft reads (Weft-6b-3)
         self.pending_connects.clear(); // ... and any deferred connect opens (#257)
     }
 
@@ -5165,6 +5574,7 @@ impl Conn {
         self.cancel_dns_flush(net, a.oldtag); // net-4b: drop a deferred dns read
         self.pending_reads.retain(|pr| pr.tag != a.oldtag); // net-6a: drop a blocked read
         self.pending_ready.retain(|pr| pr.tag != a.oldtag); // net-6b: drop a readiness probe
+        self.pending_weftio.retain(|pw| pw.tag != a.oldtag); // Weft-6b-3: drop a blocked weft read
         self.pending_connects.retain(|pc| pc.tag != a.oldtag); // #257: drop a deferred connect
         p9::build_rflush(&mut self.out_buf, tag)
     }
@@ -5238,8 +5648,7 @@ impl Conn {
         if !net.slot_live(n) {
             return self.err(tag, p9::E_INVAL);
         }
-        // v1.0: TX only. RX (READ) is Weft-6b-3.
-        if req.dir != p9::WEFT_DIR_WRITE {
+        if req.dir != p9::WEFT_DIR_WRITE && req.dir != p9::WEFT_DIR_READ {
             return self.err(tag, p9::E_INVAL);
         }
         // The flow must have a mapped ring: the kernel issues Tweftio only after
@@ -5248,10 +5657,11 @@ impl Conn {
             Some(w) => w,
             None => return self.err(tag, p9::E_INVAL),
         };
-        // Memory-safety bound: [off, off+len) must lie within the ring's payload
-        // region. The kernel already validated against ITS view; netd re-checks
-        // its OWN mapping before reading (defense in depth -- a memory bound, NOT
-        // a per-op capability re-check).
+        // Memory-safety bound (shared by both directions): [off, off+len) must lie
+        // within the ring's payload region. The kernel already validated against
+        // ITS view; netd re-checks its OWN mapping (defense in depth -- a memory
+        // bound, NOT a per-op capability re-check). A malformed window is E_INVAL
+        // (a protocol error), never silently treated as 0/EOF.
         let geom = match weftlib::ring_layout(flow.ring_size, WEFT_RING_ENTRIES) {
             Some(g) => g,
             None => return self.err(tag, p9::E_INVAL),
@@ -5262,14 +5672,45 @@ impl Conn {
         if len == 0 || off > psz || len > psz - off {
             return self.err(tag, p9::E_INVAL);
         }
-        // Read the payload IN PLACE from the shared ring (no 9P-body copy) + hand
-        // it to smoltcp. SAFETY: ring_va is netd's live mapping of the per-flow
-        // ring (held while the slot is live); [payload_off+off, +len) is
-        // bounds-checked above to lie within the payload region.
-        let base = flow.ring_va as usize + geom.payload_off as usize + off;
-        let payload: &[u8] = unsafe { core::slice::from_raw_parts(base as *const u8, len) };
-        let sent = net.data_send(n, payload);
-        p9::build_rweftio(&mut self.out_buf, tag, sent as u32)
+        if req.dir == p9::WEFT_DIR_WRITE {
+            // TX: read the payload IN PLACE from the shared ring (no 9P-body copy)
+            // + hand it to smoltcp. SAFETY: ring_va is netd's live mapping of the
+            // per-flow ring (held while the slot is live); [payload_off+off, +len)
+            // is bounds-checked above to lie within the payload region. INVARIANT
+            // (Weft-7 F4): ring_va's liveness against a concurrent slot_unref ->
+            // t_burrow_detach rests on netd being single-threaded (this runs in the
+            // serve loop; see weft_recv_into_ring's note) -- a future concurrency
+            // lift MUST keep the slot mapped across this raw read.
+            let base = flow.ring_va as usize + geom.payload_off as usize + off;
+            let payload: &[u8] =
+                unsafe { core::slice::from_raw_parts(base as *const u8, len) };
+            let sent = net.data_send(n, payload);
+            return p9::build_rweftio(&mut self.out_buf, tag, sent as u32);
+        }
+        // RX (WEFT_DIR_READ): recv from the socket directly INTO the ring at
+        // [off, off+len). Bytes now -> reply the count (already in the guest's
+        // shared mapping, zero-copy). An empty-but-open socket DEFERS (park a
+        // PendingWeftRead; poll_weftio recvs + replies when bytes arrive) -- a 0
+        // would look like EOF to the guest's recv() (the net-6a-1 distinction).
+        // EOF -> Rweftio(0).
+        match weft_recv_into_ring(net, n, req.off, req.len) {
+            RecvOutcome::Data(k) => p9::build_rweftio(&mut self.out_buf, tag, k as u32),
+            RecvOutcome::Eof => p9::build_rweftio(&mut self.out_buf, tag, 0),
+            RecvOutcome::WouldBlock => {
+                if self.pending_weftio.len() >= MAX_FIDS {
+                    return self.err(tag, p9::E_PROTO);
+                }
+                self.pending_weftio.push(PendingWeftRead {
+                    fid: req.fid,
+                    slot_n: n,
+                    tag,
+                    off: req.off,
+                    len: req.len,
+                });
+                self.defer = true;
+                Ok(0) // ignored: dispatch returns Disp::Deferred
+            }
+        }
     }
 
     fn h_write(&mut self, net: &mut Net, tmsg: &[u8], tag: u16) -> Result<usize, ()> {

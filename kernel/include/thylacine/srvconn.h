@@ -14,11 +14,12 @@
 // The transport is two independent byte rings:
 //   c2s — the kernel 9P client writes Tmsg bytes; corvus drains them.
 //   s2c — corvus writes Rmsg bytes; the kernel 9P client drains them.
-// The kernel 9P client is synchronous and single-frame-in-flight, so a
-// ring sized to hold a whole msize frame (SRVCONN_RING_CAP) means a
-// writer never blocks — a frame that would not fit is a protocol
-// violation that tears the connection down. The one blocking wait is
-// the kernel client draining s2c: it is `tsleep`-bounded
+// Each ring is sized to hold a whole msize frame (cap = 2x the conn's
+// msize; CF-3 B sizes it per service class), so a frame that would not
+// fit an EMPTY ring is a protocol violation that tears the connection
+// down; a frame that transiently does not fit a BUSY ring is
+// back-pressure, absorbed by blocking (#348/#349 flow control on all
+// three producers). The kernel client draining s2c is `tsleep`-bounded
 // (CORVUS-DESIGN §6.2) so a corvus that *hangs* times the client out
 // rather than wedging it; a corvus that *crashes* wakes the client at
 // once via the EOF that teardown sets.
@@ -62,16 +63,26 @@ struct poll_waiter;
 // on free so a read of a freed SrvConn fast-fails (UAF defense).
 #define SRV_CONN_MAGIC  0x535256434F4E4E00ULL    // 'SRVCONN' || 0x00
 
-// The negotiated 9P msize for a /srv connection -- the per-op payload
-// ceiling for EVERY SrvConn-backed 9P session. corvus's wire
-// (CORVUS-DESIGN §6.4) sends only short verb frames + the 1217-byte DEK
-// envelope, but the /net mount (netd posts /srv/net byte-mode; joey
-// attaches it via SYS_ATTACH_9P_SRV) rides the SAME SrvConn transport,
-// and its Tread/Twrite throughput is window/round-trip-bound by this
-// msize (Weft-0 / NET-THROUGHPUT.md Tier A). 32 KiB lifts the /net
-// per-op payload 8x over the prior 4 KiB; corvus is unaffected (msize is
-// a max -- its frames stay small). The inline ring below scales with it.
+// The DEFAULT 9P msize for a /srv connection -- the per-op payload
+// ceiling for a SrvConn-backed 9P session whose service did not opt into
+// bulk rings (CF-3 B). corvus's wire (CORVUS-DESIGN §6.4) sends only
+// short verb frames + the 1217-byte DEK envelope; netd's /srv/net rides
+// the same default. 32 KiB keeps the per-conn ring memory modest for the
+// many small-frame services (msize is a max -- their frames stay small).
 #define SRVCONN_MSIZE   (32u * 1024u)
+
+// The BULK 9P msize (CF-3 B; CONCURRENT-FS.md CF-3): the per-service
+// opt-in for high-throughput FS services. A service posted with the
+// DMSRVBULK create-perm bit mints connections whose rings hold 128 KiB
+// frames, so the kernel dev9p client proposes (and stratumd accepts --
+// STM_9P_MSIZE_DEFAULT is exactly 128 KiB) a 128 KiB msize: one bulk
+// read/write RPC then carries 4x the default payload, on top of the
+// CF-3 A SYS_RW_MAX lift. Sized to SYS_RW_MAX so a single max-size
+// byte-I/O syscall maps to one RPC (minus the 9P frame overhead).
+// Exactly two ring classes exist at v1.0 -- srv_reserve validates
+// against this pair, so a hostile poster cannot demand arbitrary ring
+// memory.
+#define SRVCONN_BULK_MSIZE  (128u * 1024u)
 
 // The 9P root fid for a SrvConn-backed session (P9 convention; matches
 // SYS_ATTACH_DEFAULT_ROOT_FID). srvconn_attach_dev9p_root (9p_attach.c)
@@ -79,20 +90,23 @@ struct poll_waiter;
 // the shared attach helper can pass the same root fid.
 #define SRVCONN_ROOT_FID  1u
 
-// Per-direction ring capacity (2x msize). Sized to comfortably hold one
-// whole msize frame so the synchronous, single-frame-in-flight kernel 9P
-// client never blocks on a write (see the file-header rationale). INLINE
-// in struct srvconn_chan (x2: c2s + s2c), so it scales struct SrvConn --
-// at 32 KiB msize a SrvConn is ~129 KiB of kmalloc'd kernel memory (NOT
-// #65-charged; allocated at connection setup, mostly boot-time, and
-// graceful-fail on OOM). The 64 KiB+ /net throughput ceiling comes from
-// the Weft shared-page dataplane (which retires this byte-copy ring),
-// not from growing this further.
+// DEFAULT per-direction ring capacity (2x the default msize). Every
+// conn's ring is sized 2x its service's msize (CF-3 B: srvconn_create
+// computes cap = 2 * msize) so it comfortably holds one whole msize
+// frame plus a second in flight -- the #841 pipelined kernel 9P client
+// can have several frames outstanding, and a frame that fits an empty
+// ring is the all-or-nothing send's floor. The ring buffers are HEAP
+// allocations owned by the SrvConn (a default conn carries 2 x 64 KiB,
+// a DMSRVBULK conn 2 x 256 KiB; NOT #65-charged -- bounded by
+// SRV_MAX_CONNS, see devsrv.h). This macro is the DEFAULT-class value
+// (tests + the default-msize maths); per-conn code reads ch->cap.
 #define SRVCONN_RING_CAP  (2u * SRVCONN_MSIZE)
 
 _Static_assert(SRVCONN_RING_CAP >= SRVCONN_MSIZE,
                "a connection ring must hold a full msize frame so the "
                "synchronous kernel 9P client never blocks on a write");
+_Static_assert((2u * SRVCONN_BULK_MSIZE) >= SRVCONN_BULK_MSIZE,
+               "the bulk ring must hold a full bulk msize frame");
 
 // P5-corvus-srv-impl-b2: max bytes of a path component the open path's
 // Twalk consumes. v1.0 has one-component paths (e.g. "ctl", "ops"); the
@@ -136,28 +150,55 @@ enum srvconn_state {
 };
 
 // One direction of the transport: a byte FIFO with a single blocking
-// consumer. `eof` latches at teardown — the consumer then drains any
-// residual bytes and reads EOF; the producer's writes fail. `rendez`
-// is where the (single) blocking consumer waits; the single-waiter
-// Rendez convention holds because the kernel 9P client serializes
-// every op on `p9_client.lock`, so at most one thread drains a given
-// ring at a time.
+// consumer ROLE and a single blocking producer ROLE. `eof` latches
+// at teardown — the consumer then drains any residual bytes and reads
+// EOF; the producer's writes fail. `rendez` is where the (single)
+// role-holding consumer waits; `wrendez` is where the (single)
+// role-holding producer waits for ring room (#348 s2c back-pressure).
+// The two are SEPARATE Rendezes so a reader and a writer never contend
+// one single-waiter slot; the single-waiter convention then holds
+// trivially — each Rendez has exactly one possible waiter: the current
+// holder of the `reading` / `writing` role.
+//
+// #354 (CF-3 B): role CONTENTION no longer fails. A 2nd concurrent
+// blocking party parks on `role_waiters` (each on its OWN stack Rendez
+// via a poll_waiter — the #349 send_waiters_list multi-waiter pattern)
+// until the holder releases, then re-contends. So N threads may
+// blocking-read (or blocking-write) one direction concurrently: reads
+// serialize per CALL (each recv consumes one lock-atomic chunk), writes
+// serialize per BUFFER (the role is held across the whole multi-chunk
+// delivery — frame/call atomicity vs any other producer). Pre-#354 the
+// 2nd party was refused (-1), which a POSIX server's write_full treated
+// as fatal — the mount-close cascade the #348 audit flagged (F1).
 struct srvconn_chan {
-    spin_lock_t    lock;          // protects count / head / tail / eof
-    u32            count;         // bytes buffered; 0..SRVCONN_RING_CAP
-    u32            head;          // next write index; mod SRVCONN_RING_CAP
-    u32            tail;          // next read index; mod SRVCONN_RING_CAP
+    spin_lock_t    lock;          // protects count / head / tail / eof + roles
+    u32            cap;           // ring capacity (2x the conn's msize; CF-3 B)
+    u32            count;         // bytes buffered; 0..cap
+    u32            head;          // next write index; mod cap
+    u32            tail;          // next read index; mod cap
     bool           eof;           // teardown latched this direction
-    bool           reading;       // a blocking consumer holds the single-reader
-                                  // role (RW-4 R2-F1 busy-guard): the rendez is
-                                  // single-waiter, but the byte-mode userspace
-                                  // read() path has no p9_client-lock serializer
-                                  // and peer Threads share the fd, so a 2nd
-                                  // concurrent blocking recv is refused (-1)
-                                  // rather than registering a 2nd waiter (which
-                                  // trips the single-waiter extinction)
-    struct Rendez  rendez;        // the single blocking consumer waits here
-    u8             buf[SRVCONN_RING_CAP];
+    bool           reading;       // the single blocking-consumer ROLE (RW-4
+                                  // R2-F1): the holder is the only thread that
+                                  // may park on `rendez`. Contenders park on
+                                  // `role_waiters` until release (#354).
+    bool           writing;       // the single blocking-PRODUCER role (#348):
+                                  // symmetric to `reading`; the holder is the
+                                  // only thread that may park on `wrendez`.
+                                  // Held across the WHOLE buffer delivery so
+                                  // bytes of one call never interleave with
+                                  // another producer's (frame atomicity).
+    struct Rendez  rendez;        // the role-holding consumer waits here
+    struct Rendez  wrendez;       // the role-holding producer waits here, for
+                                  // ring room (FULL -> has-room). A SEPARATE
+                                  // Rendez from `rendez` so the reader and the
+                                  // writer never share a single-waiter slot.
+    struct poll_waiter_list role_waiters;  // #354: parked role CONTENDERS
+                                  // (read + write share the list; each woken
+                                  // party re-checks its own role under lock
+                                  // and re-parks if still held). Woken on
+                                  // every role release + at teardown.
+    u8            *buf;           // heap ring storage, `cap` bytes; owned by
+                                  // the SrvConn (freed at the last unref)
 };
 
 // A kernel-minted /srv connection. Allocated by srvconn_create; freed
@@ -183,6 +224,14 @@ struct SrvConn {
     // mint, by value. SYS_SRV_PEER's poster gate compares it against the
     // caller's stripes (CORVUS-DESIGN §6.3).
     u64                 server_stripes;
+
+    // The conn's 9P msize class (CF-3 B), captured from the SERVICE at
+    // mint (SRVCONN_MSIZE default; SRVCONN_BULK_MSIZE for a DMSRVBULK
+    // post). Both rings are sized 2x this. srvconn_attach_dev9p_root
+    // reads it (srvconn_msize) as the kernel client's msize proposal +
+    // recv cap, so the negotiated session msize can never exceed what
+    // the rings carry. Immutable for the conn's lifetime.
+    u32                 msize;
 
     // Kernel-client-side blocking-recv deadline. Absolute ns on the
     // timer_now_ns timebase; 0 = no deadline (blocks indefinitely,
@@ -272,16 +321,24 @@ _Static_assert(__builtin_offsetof(struct SrvConn, magic) == 0,
 // srvconn_create — mint a connection. `peer_stripes` / `peer_pid` /
 // `peer_console` are the opening client Proc's kernel-stamped identity;
 // `server_stripes` is the service poster's (corvus's) stripes tag. All
-// four are captured by value. Allocates the SrvConn + initializes its
-// byte transport (c2s / s2c) + poll list. The connection is born LIVE
-// with refcount 1 — the caller owns that reference and drops it via
-// srvconn_unref.
+// four are captured by value. `msize` is the conn's 9P msize class
+// (SRVCONN_MSIZE or SRVCONN_BULK_MSIZE, from the service's ring class --
+// CF-3 B; any other value is rejected NULL); each ring is heap-allocated
+// at 2x msize. Allocates the SrvConn + initializes its byte transport
+// (c2s / s2c) + poll list. The connection is born LIVE with refcount 1 —
+// the caller owns that reference and drops it via srvconn_unref.
 //
-// Returns NULL on allocation failure. A 9P-mode session over this
-// connection is the caller's responsibility to construct
+// Returns NULL on allocation failure or a bad msize. A 9P-mode session
+// over this connection is the caller's responsibility to construct
 // (srvconn_attach_dev9p_root wraps the rings in a kernel 9P client).
 struct SrvConn *srvconn_create(u64 peer_stripes, int peer_pid,
-                               bool peer_console, u64 server_stripes);
+                               bool peer_console, u64 server_stripes,
+                               u32 msize);
+
+// srvconn_msize — the conn's 9P msize class (set at mint from the
+// service's ring class). Fail-closes to SRVCONN_MSIZE on a NULL /
+// corrupted conn so a defensive caller never proposes past the rings.
+u32 srvconn_msize(const struct SrvConn *cn);
 
 // srvconn_server_recv_blocking — F1 close (P6-pouch-sockets audit).
 // Blocking variant of srvconn_server_recv; mirrors srvconn_client_recv
@@ -411,17 +468,62 @@ long srvconn_client_send_frame(struct SrvConn *cn, const u8 *buf, long n);
 
 // srvconn_client_recv — kernel client reads up to `n` bytes from corvus
 // (the s2c ring), BLOCKING until data arrives, the connection is torn
-// down, or `client_deadline_ns` passes. Returns:
+// down, or `client_deadline_ns` passes. A concurrent blocking reader
+// parks until the current one finishes (#354 role-park; the same
+// deadline bounds the role wait). Returns:
 //   >0  — bytes read.
 //    0  — EOF: the connection is torn down and no residual bytes remain.
 //   -1  — the deadline passed (then srvconn_client_timed_out is true),
-//         or args are bad.
+//         a #811 death-interrupt, or args are bad.
 long srvconn_client_recv(struct SrvConn *cn, u8 *buf, long n);
+
+// srvconn_client_send_blocking — the BLOCKING client-side byte write
+// (CF-3 B; the c2s twin of #348's srvconn_server_send_blocking). The
+// non-blocking srvconn_client_send above short-writes (or returns 0) on
+// a full c2s ring; a POSIX byte client — a pouch AF_UNIX writer, or the
+// per-user stratumd proxy forwarding a Tmsg upstream through its conn
+// Spoor — treats a 0 from write() as EPIPE and closes (the #348 cascade
+// on the third producer). This variant delivers the WHOLE buffer,
+// parking on c2s.wrendez until the SERVER drains c2s
+// (srvconn_server_recv / _blocking wake wrendez on drain) or teardown
+// latches eof. Return contract identical to srvconn_server_send_blocking
+// (n / partial-then-eof / -1). Death-interruptible (#811). Role-parked
+// vs a concurrent blocking producer (#354): the whole buffer enters c2s
+// contiguously. Both-directions-full with a peer that never reads is
+// the classic full-duplex application deadlock POSIX AF_UNIX has too —
+// death/teardown still unwinds it.
+long srvconn_client_send_blocking(struct SrvConn *cn, const u8 *buf, long n);
 
 // srvconn_server_send — corvus writes `n` bytes toward the kernel
 // client (the s2c ring). Returns bytes accepted (0..n) or -1 if torn
 // down / bad args. Non-blocking.
 long srvconn_server_send(struct SrvConn *cn, const u8 *buf, long n);
+
+// srvconn_server_send_blocking — the BLOCKING server-side write (#348).
+//
+// The non-blocking srvconn_server_send above can short-write (or return 0)
+// when the s2c ring is full. A POSIX server endpoint — a 9P-server Proc
+// like stratumd writing reply frames through devsrv_write — treats a 0
+// from write() as EPIPE and CLOSES the connection, killing the kernel-
+// attached mount mid-build (the #348 s2c back-pressure, the s2c twin of
+// the #349 c2s fix). This blocking variant instead delivers the WHOLE
+// buffer: it writes what fits, then parks on s2c.wrendez until the kernel
+// client drains s2c (srvconn_client_recv wakes wrendez) or teardown
+// latches eof. Returns:
+//   n   — all bytes delivered.
+//   >0  — partial then eof (the connection tore down mid-write).
+//   -1  — eof before any byte / bad args / #811 death-interrupt.
+// Death-interruptible (#811): a dying Proc unwinds at its EL0-return
+// die-check. Frame-atomicity vs a concurrent producer is the `writing`
+// role's: it is held across the WHOLE multi-chunk delivery, and a 2nd
+// concurrent blocking producer PARKS on the role list until release
+// (#354 close; pre-#354 it was refused -1, which a POSIX server's
+// write_full treated as fatal -> mount close -- the #348-audit F1
+// latent, live once stratumd went threaded at CF-2). A partial return
+// after a death-interrupt is safe-by-construction (audit F2): the dying
+// Proc unwinds at its next EL0 return before any write_full retry can
+// re-enter, so the partial count is never re-driven from a live caller.
+long srvconn_server_send_blocking(struct SrvConn *cn, const u8 *buf, long n);
 
 // srvconn_server_recv — corvus reads up to `n` bytes from the kernel
 // client (the c2s ring). Non-blocking — corvus polls. Returns:
@@ -435,7 +537,7 @@ long srvconn_server_recv(struct SrvConn *cn, u8 *buf, long n);
 //
 // The Dev `.poll` slot for a devsrv connection Spoor (devsrv_poll) routes
 // to here. Server-endpoint semantics: POLLIN is c2s.count > 0 (bytes to
-// read), POLLOUT is !s2c.eof && s2c.count < SRVCONN_RING_CAP (room to
+// read), POLLOUT is !s2c.eof && s2c.count < s2c.cap (room to
 // write), POLLHUP is c2s.eof, POLLERR is s2c.eof. Both EOFs latch
 // together at srvconn_teardown so HUP and ERR fire on the same edge.
 // POLLIN may coexist with POLLHUP — POSIX: buffered bytes plus EOF.

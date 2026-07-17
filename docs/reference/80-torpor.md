@@ -103,15 +103,17 @@ Hash function: `(Proc * ^ user_va >> 3) & (TORPOR_HASH_BUCKETS - 1)`. 64 buckets
 
 1. Validate args. NULL Proc / addr_va == 0 / unaligned / above USER_VA_TOP / straddles top / `timeout_us > MAX` → `-EINVAL`.
 2. Initialise the stack-local `struct torpor_waiter` — set `awoken = 0`, `proc = p`, `user_va = addr_va`.
-3. `spin_lock(&torpor_lock)`.
-4. `uaccess_load_u32(addr_va, &observed)`. On fault → `spin_unlock`, return `-EFAULT`.
-5. If `observed != expected` → `spin_unlock`, return `0` (fast path; the caller re-evaluates).
-6. Link the waiter at the bucket head — published under the lock so WAKE's walk sees it.
-7. Compute `deadline_ns` (timer_now_ns timebase): `timeout_us < 0` → `0` (no deadline); `timeout_us == 0` → `now` (a past deadline that times out immediately at tsleep entry); `timeout_us > 0` → `now + timeout_us * 1000` with wrap-clamping.
-8. `spin_unlock(&torpor_lock)`.
-9. `tsleep(&waiter->rendez, cond_awoken, &waiter, deadline_ns)` — blocks until `waiter->awoken != 0` OR the deadline lapses.
-10. Re-`spin_lock(&torpor_lock)`. Unlink. Scribble `rendez.waiter = NULL` (defense-in-depth). `spin_unlock`.
-11. Return `0` on `TSLEEP_AWOKEN`, `-ETIMEDOUT` on `TSLEEP_TIMEDOUT`.
+3. **Pre-fault load, NO lock** (REVENANT R-5 F1): `uaccess_load_u32(addr_va, &prefault)`. On fault → `-EFAULT`. Exists so the authoritative under-lock load below cannot fault-and-sleep (a file-backed futex page would otherwise block a `dev->read` under `torpor_lock` — a system-wide futex stall).
+4. **Lock-free compare** (the Linux-futex compare-before-queue shape; the go-arc osyield-floor fix): if `prefault != expected` → return `0` **without taking `torpor_lock`**. Sound because NO waiter is registered on this path — I-9's missed-wakeup window exists only between a waiter's bucket-register and its sleep, which only the equal path reaches. A stale mismatch (the word changed under us) is a benign spurious return the futex contract permits: the caller re-evaluates its own predicate. **Ordering contract**: the mismatch return provides only the plain aligned-u32 load's single-copy-atomicity, NOT the acquire-over-`torpor_lock` the pre-change locked path incidentally provided; every consumer (musl `__futexwait` loops, the Go runtime `futexsleep` re-checks, libthyla-rs `torpor::wait`'s documented re-check contract) orders its own data with its own atomics, per the universal futex contract.
+5. `spin_lock(&torpor_lock)`.
+6. `uaccess_load_u32(addr_va, &observed)` — the authoritative load (fault-free by the pre-fault; a re-fault after a concurrent decommit still routes to `spin_unlock` + `-EFAULT`).
+7. If `observed != expected` → `spin_unlock`, return `0` (the near-zero residue: the word changed between the pre-fault compare and here).
+8. Link the waiter at the bucket head — published under the lock so WAKE's walk sees it.
+9. Compute `deadline_ns` (timer_now_ns timebase): `timeout_us < 0` → `0` (no deadline); `timeout_us == 0` → `now` (a past deadline that times out immediately at tsleep entry); `timeout_us > 0` → `now + timeout_us * 1000` with wrap-clamping.
+10. `spin_unlock(&torpor_lock)`.
+11. `tsleep(&waiter->rendez, cond_awoken, &waiter, deadline_ns)` — blocks until `waiter->awoken != 0` OR the deadline lapses.
+12. Re-`spin_lock(&torpor_lock)`. Unlink. Scribble `rendez.waiter = NULL` (defense-in-depth). `spin_unlock`.
+13. Return `0` on `TSLEEP_AWOKEN`, `-ETIMEDOUT` on `TSLEEP_TIMEDOUT`.
 
 ### WAKE state machine (`sys_torpor_wake_for_proc`)
 
@@ -130,7 +132,7 @@ The walk *leaves* the waiter linked — the consumer unlinks on its own post-tsl
 
 Only WAKE ever takes both `torpor_lock` and a `rendez.lock` simultaneously; the consumer never holds `rendez.lock` while taking `torpor_lock` (it acquires `rendez.lock` only inside `tsleep`, after releasing `torpor_lock`). No inversion is possible.
 
-The held-across-fault discipline (torpor_lock held during the `uaccess_load_u32` demand-page) is a v1.0 acceptable cost (single-threaded Procs make `torpor_lock` uncontended). The Linux-futex `get_user_inatomic` + retry-without-lock pattern can be added in v1.x if contention warrants it.
+The original held-across-fault discipline (torpor_lock held during a faulting `uaccess_load_u32`) was retired in two steps: REVENANT R-5 F1 moved the fault-in BEFORE the lock (a file-backed futex page must never block a `dev->read` under `torpor_lock`), and the go-arc lock-free compare then made the mismatch path avoid the lock entirely — the Linux-futex compare-before-queue shape this paragraph originally deferred to v1.x. The under-lock load remains the authoritative register-vs-WAKE serialization for the equal (parking) path.
 
 ### `uaccess_load_u32` (`arch/arm64/uaccess.S`)
 

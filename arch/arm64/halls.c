@@ -251,6 +251,50 @@ static void halls_backtrace(const struct exception_context *ctx, u64 koff, bool 
     }
 }
 
+// 8a-1b-gamma-3 (I-39; DEBUG-FS-DESIGN.md section 4.6): the LIVE-thread twin of
+// the halls_backtrace fp-walk, for the /proc/<pid>/kstack debug file. Fills `out`
+// with the canonical (PAC-stripped) addresses of a STOPPED thread's kernel
+// frame-pointer chain: out[0] = strip(pc) (the frame-0 resume/interrupt PC),
+// out[1..] = strip(saved LR) walking the x29 chain from start_fp. Returns the
+// frame count (>= 1 when max >= 1). Symbolize each via halls_link_addr +
+// halls_symbolize.
+//
+// TWO changes from halls_backtrace make this fault-safe on the LIVE path, where
+// a bad read is NOT caught by HX-I1 (there is no dump guard -- a fault would
+// extinct the running kernel):
+//   1. EXPLICIT [lo, hi) bounds. The caller passes the target thread's USABLE
+//      kstack range (base + guard .. base + total), excluding the no-access
+//      guard; halls_backtrace's fp+512KiB dying-machine heuristic can read past
+//      a real stack, which is acceptable only because HX-I1 catches the fault.
+//   2. A per-frame `fp + 16 <= hi` gate: the full 16-byte AAPCS64 frame record
+//      [fp, fp+16) must fit within [lo, hi). Given [lo, hi) is a mapped range,
+//      every halls_peek here (at fp and fp+8) is in-bounds and cannot fault.
+//
+// It is a SEPARATE function, NOT a refactor of halls_backtrace, by intent: the
+// dying-machine dump path is an AUDIT-TRIGGER surface (halls.h) whose HX-I1/I2/I4
+// invariants must not be perturbed. This adds no stack pressure, no branch, and
+// no shared state to that path -- it only reuses the pure helpers (halls_peek /
+// halls_strip_pac / halls_fp_is_sane), leaving halls_backtrace byte-for-byte
+// unchanged.
+unsigned halls_walk_kernel_frames(u64 pc, u64 start_fp, u64 lo, u64 hi,
+                                  u64 *out, unsigned max) {
+    if (!out || max == 0u) return 0u;
+    unsigned n = 0;
+    out[n++] = halls_strip_pac(pc);   // frame 0: the PC (no stack read)
+
+    u64 fp = start_fp, prev = 0;
+    while (n < max) {
+        // halls_fp_is_sane bounds fp to [lo, hi) (16-aligned, strictly > prev),
+        // so fp < hi and `fp + 16u` below cannot overflow (hi is a normal VA).
+        if (!halls_fp_is_sane(fp, prev, lo, hi)) break;
+        if (fp + 16u > hi)                       break;   // the frame record [fp,fp+16) must fit -- fault-safe
+        out[n++] = halls_strip_pac(halls_peek(fp + 8));   // saved LR, canonical
+        prev = fp;
+        fp   = halls_peek(fp);                            // next frame's fp (fp in [lo,hi) -> in-bounds)
+    }
+    return n;
+}
+
 static void halls_stack_hexdump(u64 ksp) {
     uart_puts("HALLS: stack @");
     uart_puthex64(ksp);

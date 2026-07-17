@@ -137,7 +137,28 @@ struct p9_outstanding {
     // is the I-10 reuse-race guard. `flush_oldtag` is meaningful only on a
     // TFLUSH entry: the original tag this flush abandons.
     bool awaiting_flush;
+    // #53-audit F1: a rolled-back or flush-less abandon (the flush-EAGAIN
+    // path via flush_rollback; the flush-BUILD-failure path via
+    // mark_abandoned). The owner is gone but NO Tflush is in flight, so --
+    // unlike awaiting_flush -- the tag is freed by its late original reply
+    // (the pre-#845 ownerless reclaim) OR by session teardown (a
+    // deferred-reply server that cancels a parked op without replying, the
+    // task-#56 netd tail). Like awaiting_flush it is EXCLUDED from
+    // any_outstanding_on_fid: the op is cancelled and will not act on its
+    // fid, so it must not refuse the #294 cancel-then-close Tclunk. Its late
+    // reply's only reachable fid mutation is a walk-family fid_bind on a
+    // FRESH monotonic new_fid -- conflict-free with any post-exclusion fid
+    // op (the Rattach arm also binds, but an abandoned attach exists only on
+    // a private pre-publish client with no survivor to dispatch it).
+    bool abandoned;
     u16  flush_oldtag;
+    // Twalkgetattr bookkeeping (POUNCE): the REQUESTED nwname, so the
+    // dispatch can bind new_fid ONLY on a full walk (nwqid == wga_nwname).
+    // Meaningful only on a TWALKGETATTR entry. (The TWALK arm predates
+    // this and still binds unconditionally -- safe because every TWALK
+    // caller sends 0/1 names, where a partial walk cannot exist; the
+    // pounce sends multi-name walks, where it can.)
+    u16  wga_nwname;
 };
 
 // =============================================================================
@@ -229,6 +250,19 @@ int p9_session_send_walk(struct p9_session *s,
                          const u8 *const *names,
                          const size_t *name_lens);
 
+// Build a Twalkgetattr (POUNCE, 140): send_walk's preconditions when
+// new_fid is real; new_fid == P9_NOFID is the walk-QUERY form (no fid
+// gates on the destination, nothing binds at dispatch). Dispatch binds
+// a real new_fid ONLY on a full walk (nwqid == nwname) -- the correct
+// partial-walk semantics the multi-name pounce requires.
+int p9_session_send_walkgetattr(struct p9_session *s,
+                                u8 *out, size_t cap,
+                                u32 src_fid, u32 new_fid,
+                                u64 request_mask,
+                                u16 nwname,
+                                const u8 *const *names,
+                                const size_t *name_lens);
+
 // Build a Tclunk on `fid`. Only valid in state OPEN. Preconditions:
 //   - fid is bound.
 //   - fid is NOT the root fid (root released only at session close).
@@ -250,6 +284,22 @@ int p9_session_send_clunk(struct p9_session *s,
 int p9_session_send_flush(struct p9_session *s,
                           u8 *out, size_t cap,
                           u16 oldtag);
+
+// #52: reclaim the tag of an op whose frame never reached the wire (all-or-
+// nothing send contract -> the server never saw it -> I-10-safe immediate
+// reuse). No-op on an inactive or awaiting_flush tag (fail-soft).
+void p9_session_abort_unsent(struct p9_session *s, u16 tag);
+
+// #53: undo send_flush after its frame hit c2s back-pressure (EAGAIN): free
+// the never-sent flush tag + clear the victim's awaiting_flush, restoring
+// the pre-#845 ownerless reclaim. No-op unless the (victim, flush-slot)
+// pair matches what send_flush staged (fail-soft).
+void p9_session_flush_rollback(struct p9_session *s, u16 oldtag);
+
+// #52/#53 R2-F1: mark an owner-gone op abandoned when NO flush could even be
+// staged (pool-full / build failure) -- the flush-less sibling of
+// flush_rollback. Fail-soft on inactive / awaiting_flush tags.
+void p9_session_mark_abandoned(struct p9_session *s, u16 tag);
 
 // =============================================================================
 // IO send-side API (P5-wire-io extension; spec's SendIO action).
@@ -490,6 +540,12 @@ struct p9_dispatch_result {
     struct p9_weft_geom weft_geom;
     // For Tweftio, the count of payload bytes the consumer moved (Weft-6b-2).
     u32 weftio_count;
+    // For Twalkgetattr (POUNCE), the per-component attr elements: nwqid
+    // fixed-stride (P9_WGA_BODY_LEN) Rgetattr bodies aliasing the input
+    // rmsg (frame validated by p9_parse_rwalkgetattr; the qids land in
+    // `qids` above). The caller extracts each element via
+    // p9_parse_getattr_body while rmsg stays alive (done_reply_buf).
+    const u8      *wga_data;
 };
 
 // Dispatch one received Rmsg. The Rmsg's tag is looked up in
@@ -511,6 +567,7 @@ int p9_session_dispatch_rmsg(struct p9_session *s,
 bool   p9_session_is_open(const struct p9_session *s);   // state == OPEN
 bool   p9_session_fid_bound(const struct p9_session *s, u32 fid);
 size_t p9_session_inflight(const struct p9_session *s);  // outstanding count
+bool   p9_session_has_free_tag(const struct p9_session *s);  // a tag slot is free
 size_t p9_session_n_bound_fids(const struct p9_session *s);
 
 #endif  // THYLACINE_9P_SESSION_H

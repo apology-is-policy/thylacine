@@ -3,9 +3,11 @@
 // Surfaces SYS_TORPOR_WAIT / SYS_TORPOR_WAKE as typed Rust functions
 // over `core::sync::atomic::AtomicU32`. The kernel-side guarantee
 // (CLAUDE.md "Spec-to-code suspended -- validated by reasoning, not
-// specs/futex.tla"): the consumer atomically loads under
+// specs/futex.tla"): a consumer that PARKS atomically loads under
 // `torpor_lock` and registers before sleeping; the producer's WAKE
-// takes the same lock to walk. No lost wakeup.
+// takes the same lock to walk. No lost wakeup. (A value MISMATCH may
+// return without the lock -- no waiter registers on that path, and
+// the caller's mandatory re-check below carries its own ordering.)
 //
 // Foundation chunk: U-2g per docs/UTOPIA-SHELL-DESIGN.md section 15.6.10.
 //

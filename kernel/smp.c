@@ -19,6 +19,7 @@
 #include <thylacine/types.h>
 
 #include "../arch/arm64/gic.h"
+#include "../arch/arm64/hwdebug.h"     // 8a-2: hwdebug_init_cpu (per-PE OS-Lock unlock)
 #include "../arch/arm64/kaslr.h"
 #include "../arch/arm64/psci.h"
 #include "../arch/arm64/timer.h"
@@ -400,6 +401,11 @@ void per_cpu_main(int cpu_idx) {
     // register (banked) → must be set independently on each CPU.
     timer_enable_el0_counter_access();
 
+    // Go IDE Stage 8a-2: per-PE debug bring-up on this secondary (boot CPU does
+    // it in boot_main). Clears the banked OS Lock so a guest-programmed EL0
+    // hardware breakpoint can deliver if the debugged thread runs here.
+    hwdebug_init_cpu();
+
     // VBAR_EL1 — install the kernel exception vector table. ISB so
     // any subsequent exception sees the new VBAR.
     u64 vbar = (u64)(uintptr_t)_exception_vectors;
@@ -493,11 +499,12 @@ void per_cpu_main(int cpu_idx) {
             timer_arm_this_cpu();
             timer_armed = true;
         }
-        irq_state_t s = spin_lock_irqsave(NULL);
-        sched_set_idle_in_wfi(true);
-        sched();
-        __asm__ __volatile__("wfi" ::: "memory");
-        sched_set_idle_in_wfi(false);
-        spin_unlock_irqrestore(NULL, s);
+        // Tickless idle (NO_HZ_IDLE; TI-2): once this secondary's timer PPI is
+        // enabled (timer_armed), sched_idle_park arms a one-shot to the nearest
+        // deadline-or-backstop instead of holding the 1 kHz periodic tick. Until
+        // then it passes false -> the byte-identical pre-preempt behavior (just
+        // WFI on IPI, quiescent during the deterministic test phase). The shared
+        // body lives in sched.c::sched_idle_park.
+        sched_idle_park(timer_armed);
     }
 }

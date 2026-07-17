@@ -85,6 +85,7 @@ pub mod notes;
 pub mod poll;
 pub mod process;
 pub mod rand;
+pub mod sched;
 pub mod territory;
 pub mod thread;
 pub mod time;
@@ -200,6 +201,13 @@ pub const T_TORPOR_MAX_TIMEOUT_US: i64     = 3600 * 1_000_000; // 1 hour
 pub const T_SYS_WALK_OPEN: u64        = 34;
 pub const T_SYS_FSTAT: u64            = 50;
 pub const T_SYS_LSEEK: u64            = 51;
+// #37: positioned byte I/O -- the per-Spoor cursor is neither read nor
+// advanced, so concurrent positioned ops on one fd share no mutable state
+// (the POSIX pread/pwrite contract).
+pub const T_SYS_PREAD: u64            = 85;
+pub const T_SYS_PWRITE: u64           = 86;
+pub const T_SYS_YIELD: u64            = 87;
+pub const T_SYS_STAT: u64             = 88;
 // FS-mutation foundation (IDENTITY-DESIGN.md section 9.2): create-then-open,
 // durability barrier, directory enumeration.
 pub const T_SYS_WALK_CREATE: u64      = 54;
@@ -234,6 +242,11 @@ pub const T_SYS_CLOCK_SETTIME: u64    = 79;     // net-7a: step CLOCK_REALTIME (
 // 80 reserved for SYS_FD_DEVCLASS (Menagerie; not yet built).
 pub const T_SYS_WEFT_SHARE: u64       = 81;     // Weft-6a-2: register a per-flow ring -> share_id
 pub const T_SYS_WEFT_MAP: u64         = 82;     // Weft-6a-2: map a /net data fd's ring -> ring_va
+// Overcommit memory model (#321): reserve cheaply, commit on first touch,
+// release via decommit. SYS_BURROW_ATTACH (37) stays the eager path for
+// kernel-internal copy-target callers; the native heap reserves lazily.
+pub const T_SYS_BURROW_ATTACH_LAZY: u64 = 83;   // reserve demand-zero VA, no pages until touched
+pub const T_SYS_BURROW_DECOMMIT: u64    = 84;   // drop resident pages (madvise DONTNEED analog)
 // SYS_CLOCK_GETTIME clock ids (match Linux clockid_t).
 pub const T_CLOCK_REALTIME: u64       = 0;
 pub const T_CLOCK_MONOTONIC: u64      = 1;
@@ -271,6 +284,13 @@ pub const T_WALK_CREATE_DMDIR: u32    = 0x8000_0000;
 // against a /srv directory, this perm bit posts the new service in BYTE mode;
 // its absence posts 9P mode. Mirrors SYS_WALK_CREATE_DMSRVBYTE in the kernel.
 pub const T_WALK_CREATE_DMSRVBYTE: u32 = 0x0200_0000;
+// DMSRVBULK (CF-3 B; CONCURRENT-FS.md): on a /srv service post, selects the
+// BULK ring class -- connections carry 128 KiB-frame rings and a
+// kernel-attached mount negotiates a 128 KiB msize. Mirrors
+// SYS_WALK_CREATE_DMSRVBULK in the kernel. No native poster uses it yet
+// (netd's /net stays default-class); stratumd posts it via the pouch
+// SO_SNDBUF mapping.
+pub const T_WALK_CREATE_DMSRVBULK: u32 = 0x0100_0000;
 
 // SYS_WALK_OPEN sentinel for "walk from the calling Proc's territory
 // root spoor" (P5-stratumd-stub-bringup-e2). Passed as spoor_fd when
@@ -280,7 +300,7 @@ pub const T_WALK_OPEN_FROM_ROOT: i64  = -1;
 
 // Maximum single-component name length for SYS_WALK_OPEN. Multi-
 // component paths split at '/' and call SYS_WALK_OPEN per component.
-pub const T_WALK_OPEN_NAME_MAX: usize = 64;
+pub const T_WALK_OPEN_NAME_MAX: usize = 255;
 
 // SYS_LSEEK whence values — must mirror kernel/include/thylacine/syscall.h.
 pub const T_SEEK_SET: u32             = 0;
@@ -298,11 +318,11 @@ pub const T_S_IFCHR: u32              = 0o020000;
 
 // SYS_SPAWN_FULL_ARGV bounds — must mirror SYS_SPAWN_ARGV_MAX +
 // SYS_SPAWN_ARGV_DATA_MAX in kernel/include/thylacine/syscall.h.
-pub const T_SYS_SPAWN_ARGV_MAX: usize        = 16;
-pub const T_SYS_SPAWN_ARGV_DATA_MAX: usize   = 4096;
+pub const T_SYS_SPAWN_ARGV_MAX: usize        = 512;
+pub const T_SYS_SPAWN_ARGV_DATA_MAX: usize   = 65536;
 
 // Maximum binary name length (mirror SYS_SPAWN_NAME_MAX).
-pub const T_SPAWN_NAME_MAX: usize    = 64;
+pub const T_SPAWN_NAME_MAX: usize    = 256;
 
 // Maximum inherited-fd count (mirror SYS_SPAWN_MAX_FDS).
 pub const T_SPAWN_MAX_FDS: usize     = 16;
@@ -956,8 +976,9 @@ pub unsafe fn t_pipe() -> (i64, i64) {
 //   = 0  : EOF (peer closed write side)
 //   < 0  : error (-1 on invalid fd / bad buf / fault)
 //
-// Per-call cap is 4 KiB (kernel-side SYS_RW_MAX); userspace loops for
-// larger transfers.
+// Per-call cap is 128 KiB (kernel-side SYS_RW_MAX, CF-3 A; the 9P
+// transport clamps a single RPC's payload below that, so short reads
+// stay normal); userspace loops for larger transfers.
 //
 // Safety: caller must ensure `buf` points to at least `len` writable
 // bytes in valid user-VA memory.
@@ -1196,6 +1217,12 @@ pub unsafe fn t_pivot_root(new_root_fd: i64) -> i64 {
     x0
 }
 
+/// SYS_ATTACH_9P_SRV flags: the B1 per-attach loose mode (I-38 opt-in --
+/// the caller asserts the single-writer premise for this attach;
+/// cached-opens then serve full Larder-hint hits without the per-open
+/// wire revalidation). docs/chase/B1-VOTE.md + the ARCH I-38 row.
+pub const T_ATTACH_9P_LOOSE: u64 = 0x1;
+
 /// t_attach_9p_srv -- drive a 9P attach over a byte-mode `/srv` connection
 /// (16c; SYS_ATTACH_9P_SRV). `srv_fd` is a KOBJ_SPOOR CLIENT byte-conn from
 /// open=connect on a byte-mode service (must carry R+W; the kernel 9P client
@@ -1203,12 +1230,13 @@ pub unsafe fn t_pivot_root(new_root_fd: i64) -> i64 {
 /// the caller's principal_id for `n_uname`) and returns a KOBJ_SPOOR rooting
 /// the attached tree (R|W|TRANSFER). `aname` is the server-side path /
 /// capability string (<= SYS_ATTACH_ANAME_MAX; pass NULL+0 for the default
-/// root). After a successful attach the `srv_fd` handle may be closed -- the
-/// attach holds its own ref and the rings are kernel_attached. Returns the
-/// new fd (>= 0) or -1.
+/// root). `flags` is 0 (strict close-to-open) or T_ATTACH_9P_LOOSE; unknown
+/// bits reject. After a successful attach the `srv_fd` handle may be closed
+/// -- the attach holds its own ref and the rings are kernel_attached.
+/// Returns the new fd (>= 0) or -1.
 #[inline(always)]
 pub unsafe fn t_attach_9p_srv(srv_fd: i64, aname: *const u8, aname_len: usize,
-                              n_uname: u64) -> i64 {
+                              n_uname: u64, flags: u64) -> i64 {
     let mut x0: i64 = srv_fd;
     asm!(
         "svc #0",
@@ -1216,6 +1244,7 @@ pub unsafe fn t_attach_9p_srv(srv_fd: i64, aname: *const u8, aname_len: usize,
         in("x1") aname as u64,
         in("x2") aname_len as u64,
         in("x3") n_uname,
+        in("x4") flags,
         in("x8") T_SYS_ATTACH_9P_SRV,
         options(nostack)
     );
@@ -1435,7 +1464,7 @@ pub unsafe fn t_set_traceable(traceable: u64) -> i64 {
 // t_explicit_bzero — compiler-barrier'd memset to zero of `len` bytes at
 // `buf`. The kernel performs a per-byte uaccess_store_u8 loop which the
 // optimizer cannot elide. Returns 0 on success, -1 on validation
-// failure (buf in kernel-VA, len > SYS_RW_MAX, mid-stream fault).
+// failure (buf in kernel-VA, len > SYS_RW_STACK, mid-stream fault).
 //
 // Use this for in-RAM secrets immediately after they're consumed —
 // passphrase buffers, derived KEKs, unwrapped DEKs. Without it, the
@@ -1459,7 +1488,7 @@ pub unsafe fn t_explicit_bzero(buf: *mut u8, len: usize) -> i64 {
 
 // t_getrandom — read `len` random bytes into `buf` from the kernel
 // CSPRNG. `flags` is reserved at v1.0 (must be 0). Caller must hold
-// CAP_CSPRNG_READ. Per-call cap is SYS_RW_MAX (4 KiB) at v1.0.
+// CAP_CSPRNG_READ. Per-call cap is SYS_RW_STACK (4 KiB) at v1.0.
 //
 // Returns `len` on success, -1 on cap missing / non-zero flags /
 // oversized len / mid-stream uaccess fault. The kernel CSPRNG is
@@ -1738,6 +1767,49 @@ pub unsafe fn t_burrow_detach(vaddr: u64, length: u64) -> i64 {
         inlateout("x0") x0,
         in("x1") length,
         in("x8") T_SYS_BURROW_DETACH,
+        options(nostack)
+    );
+    x0
+}
+
+// t_burrow_attach_lazy — like t_burrow_attach, but the region is RESERVED,
+// not committed: no physical pages are allocated until each page is first
+// touched (the Linux overcommit contract; ARCHITECTURE.md §6.5). The kernel
+// zero-fills + installs RW/XN on the first fault, charging the page to the
+// Proc then (so RSS == what was touched, not what was reserved). Returns the
+// page-aligned base user-VA on success, -1 on:
+//   - length == 0 or length > BURROW_RESERVE_MAX (= 1 GiB)
+//   - no free gap of round_up(length) in the burrow window
+//   - VMA-slab cap (PROC_VMA_MAX) or burrow OOM
+//
+// This is the substrate the native global heap reserves on (alloc.rs), so a
+// program that allocates little commits little.
+#[inline(always)]
+pub unsafe fn t_burrow_attach_lazy(length: u64) -> i64 {
+    let mut x0: i64 = length as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x8") T_SYS_BURROW_ATTACH_LAZY,
+        options(nostack)
+    );
+    x0
+}
+
+// t_burrow_decommit — drop the resident pages of [vaddr, vaddr + length) of a
+// lazily-attached region (the madvise(MADV_DONTNEED) analog): clear the PTEs,
+// free the pages, and uncharge them; the VMA reservation stays, so a later
+// touch re-faults a fresh zero page. Returns 0 on success, -1 on:
+//   - the range is not within one BURROW_TYPE_ANON_LAZY VMA
+//   - vaddr not page-aligned or length == 0 / > BURROW_RESERVE_MAX
+#[inline(always)]
+pub unsafe fn t_burrow_decommit(vaddr: u64, length: u64) -> i64 {
+    let mut x0: i64 = vaddr as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") length,
+        in("x8") T_SYS_BURROW_DECOMMIT,
         options(nostack)
     );
     x0
@@ -2034,7 +2106,7 @@ pub unsafe fn t_fsync(fd: i64, datasync: u32) -> i64 {
 }
 
 // t_readdir — read the next run of 9P2000.L dirents from directory `fd`
-// (KOBJ_SPOOR, RIGHT_READ) into `buf` (<= SYS_RW_MAX), advancing the Spoor's
+// (KOBJ_SPOOR, RIGHT_READ) into `buf` (<= SYS_RW_STACK = 4096), advancing the Spoor's
 // offset. Returns bytes (>= 0; 0 = end-of-directory), -1 on error. Each entry:
 // qid(13) + offset(8 LE) + type(1) + name_len(2 LE) + name. FS-mutation
 // foundation (§9.2).
@@ -2108,6 +2180,83 @@ pub unsafe fn t_lseek(spoor_fd: i64, offset: i64, whence: u32) -> i64 {
         in("x1") offset,
         in("x2") whence as u64,
         in("x8") T_SYS_LSEEK,
+        options(nostack)
+    );
+    x0
+}
+
+// t_pread — read up to `len` bytes from `spoor_fd` at absolute byte
+// offset `off` (#37). The per-Spoor cursor is neither read nor advanced.
+// Returns bytes read (>0), 0 at EOF, -1 / -errno on error -- including
+// off < 0 and a non-seekable Dev (the POSIX ESPIPE shape: pread on a
+// pipe fails). Per-call cap is SYS_RW_MAX (128 KiB, CF-3 A); loop for more.
+#[inline(always)]
+pub unsafe fn t_pread(spoor_fd: i64, buf: *mut u8, len: usize, off: i64) -> i64 {
+    let mut x0: i64 = spoor_fd;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") buf as u64,
+        in("x2") len as u64,
+        in("x3") off,
+        in("x8") T_SYS_PREAD,
+        options(nostack)
+    );
+    x0
+}
+
+// t_pwrite — write up to `len` bytes to `spoor_fd` at absolute byte
+// offset `off` (#37). Cursor untouched; same gates as t_pread. Returns
+// bytes written (>=0), -1 / -errno on error.
+#[inline(always)]
+pub unsafe fn t_pwrite(spoor_fd: i64, buf: *const u8, len: usize, off: i64) -> i64 {
+    let mut x0: i64 = spoor_fd;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") buf as u64,
+        in("x2") len as u64,
+        in("x3") off,
+        in("x8") T_SYS_PWRITE,
+        options(nostack)
+    );
+    x0
+}
+
+// t_yield — voluntary yield (#33). If another thread is queued runnable on
+// the calling CPU, the caller is requeued behind it and it runs; otherwise
+// returns immediately. A hint (POSIX sched_yield shape); always returns 0.
+#[inline(always)]
+pub fn t_yield() -> i64 {
+    let mut x0: i64;
+    unsafe {
+        asm!(
+            "svc #0",
+            lateout("x0") x0,
+            in("x8") T_SYS_YIELD,
+            options(nostack)
+        );
+    }
+    x0
+}
+
+// t_stat_path — path-stat in ONE syscall (POUNCE; SYS_STAT = 88): resolve
+// `path` (absolute from the Territory root; relative joined with the cwd)
+// and fill the 80-byte `struct t_stat` at stat_va with the LEAF's metadata.
+// On the disk FS the whole resolution is a single fused Twalkgetattr RPC and
+// no handle/Spoor/fid is ever created. The X-search authority equals the
+// O_PATH+fstat emulation it replaces (path-X only). Returns 0, -errno
+// (-T_E_NOENT / -T_E_ACCES) on resolution failure, -1 on argument faults.
+// Backs t::fs::metadata (the free function).
+#[inline(always)]
+pub unsafe fn t_stat_path(path: *const u8, path_len: usize, stat_va: *mut u8) -> i64 {
+    let mut x0: i64 = path as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") path_len as u64,
+        in("x2") stat_va as u64,
+        in("x8") T_SYS_STAT,
         options(nostack)
     );
     x0
@@ -2310,6 +2459,7 @@ extern "C" {
 unsafe extern "C" fn __libthyla_rt_start(argc: usize, argv: *const *const u8) -> i64 {
     RT_ARGC.store(argc, Ordering::Release);
     RT_ARGV.store(argv as *mut *const u8, Ordering::Release);
+    capture_vdso_clock(argc, argv);
     rs_main()
 }
 
@@ -2321,6 +2471,112 @@ pub(crate) fn rt_raw_args() -> (usize, *const *const u8) {
     let argc = RT_ARGC.load(Ordering::Acquire);
     let argv = RT_ARGV.load(Ordering::Acquire) as *const *const u8;
     (argc, argv)
+}
+
+// =============================================================================
+// Monotonic-clock vDSO (Thylacine #343). The kernel maps a read-only
+// timekeeping page into every Proc and delivers its VA in the AT_VDSO_CLOCK
+// auxv entry. Reading CNTVCT_EL0 (EL0-enabled by the kernel) + this page
+// computes CLOCK_MONOTONIC / CLOCK_REALTIME with NO syscall. See
+// docs/VDSO-DESIGN.md + kernel/include/thylacine/vdso.h. Best-effort: if the
+// page is absent (an older kernel, or an exec OOM left no AT_VDSO_CLOCK), the
+// clock reads fall back to t_clock_gettime.
+// =============================================================================
+
+const AT_NULL_TAG: usize = 0;
+const AT_VDSO_CLOCK_TAG: usize = 0x5654;
+const VDSO_CLOCK_MAGIC: u64 = 0x5644534f4c4b3031; // "VDSOLK01"
+const VDSO_CLOCK_VERSION: u64 = 1;
+
+// Mirror of struct vdso_clock (kernel/include/thylacine/vdso.h): 64 bytes.
+#[repr(C)]
+struct VdsoClock {
+    magic: u64,
+    version: u64,
+    freq: u64,           // CNTVCT Hz (write-once before smp_init)
+    wall_offset_ns: u64, // CLOCK_REALTIME = mono + this (atomic; settime updates)
+    _reserved: [u64; 4],
+}
+
+// The validated page pointer, or null to fall back to the syscall. Set once in
+// capture_vdso_clock at startup; read-only thereafter (Release/Acquire so a peer
+// thread sharing the address space observes it).
+static RT_VDSO_CLOCK: AtomicPtr<VdsoClock> = AtomicPtr::new(core::ptr::null_mut());
+
+// Walk the auxv (after argv + envp on the initial stack -- the _start frame
+// gives argc + &argv[0]) for AT_VDSO_CLOCK; validate magic/version/freq and
+// cache the page.
+unsafe fn capture_vdso_clock(argc: usize, argv: *const *const u8) {
+    if argv.is_null() {
+        return;
+    }
+    // argv[argc] is the NULL terminator; argv[argc+1] is envp[0]. Skip envp to
+    // its NULL terminator, then the separator lands us on auxv[0].
+    let mut p = argv.add(argc + 1);
+    while !(*p).is_null() {
+        p = p.add(1);
+    }
+    p = p.add(1);
+    let mut a = p as *const usize; // auxv: (tag, val) pairs, AT_NULL-terminated
+    loop {
+        let tag = *a;
+        if tag == AT_NULL_TAG {
+            return;
+        }
+        if tag == AT_VDSO_CLOCK_TAG {
+            let pg = *a.add(1) as *const VdsoClock;
+            if !pg.is_null()
+                && (*pg).magic == VDSO_CLOCK_MAGIC
+                && (*pg).version == VDSO_CLOCK_VERSION
+                && (*pg).freq != 0
+            {
+                RT_VDSO_CLOCK.store(pg as *mut VdsoClock, Ordering::Release);
+            }
+            return;
+        }
+        a = a.add(2);
+    }
+}
+
+#[inline(always)]
+fn read_cntvct() -> u64 {
+    let cnt: u64;
+    // SAFETY: CNTVCT_EL0 is EL0-readable (the kernel sets CNTKCTL_EL1.EL0VCTEN);
+    // a pure register read, no memory/stack effects. No ISB before the MRS:
+    // CNTVCT is architecturally monotonic, so a few-cycle speculative skew stays
+    // monotonic across calls separated by real work (the FreeBSD getCntxct +
+    // Go-fork precedent). The kernel's own read_cntvct_el0 ISBs; this relaxation
+    // is the deliberate userspace fast-path choice (vDSO audit F3).
+    unsafe {
+        core::arch::asm!("mrs {c}, cntvct_el0", c = out(reg) cnt,
+                         options(nomem, nostack, preserves_flags));
+    }
+    cnt
+}
+
+/// Nanoseconds for `clk_id` (T_CLOCK_REALTIME / T_CLOCK_MONOTONIC) read from the
+/// vDSO page, or None if the page is absent (caller falls back to the syscall).
+/// Replicates the kernel's timer_now_ns() split form (no u64 overflow), so the
+/// value is bit-identical to SYS_CLOCK_GETTIME at the same instant.
+#[inline]
+pub(crate) fn vdso_now_ns(clk_id: u64) -> Option<u64> {
+    let pg = RT_VDSO_CLOCK.load(Ordering::Acquire);
+    if pg.is_null() {
+        return None;
+    }
+    // SAFETY: pg is a validated, kernel-mapped RO page; freq is write-once
+    // non-zero; wall_offset_ns is a single aligned u64 (read volatile so the
+    // kernel's atomic settime update is observed, never cached).
+    unsafe {
+        let freq = (*pg).freq;
+        let cnt = read_cntvct();
+        let mono = (cnt / freq) * 1_000_000_000 + (cnt % freq) * 1_000_000_000 / freq;
+        if clk_id == T_CLOCK_REALTIME {
+            Some(mono.wrapping_add(core::ptr::read_volatile(&(*pg).wall_offset_ns)))
+        } else {
+            Some(mono)
+        }
+    }
 }
 
 // =============================================================================

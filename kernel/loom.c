@@ -18,6 +18,7 @@
 #include <thylacine/loom.h>
 #include <thylacine/9p_client.h>
 #include <thylacine/9p_session.h>
+#include <thylacine/9p_wire.h>     // WEFT_DIR_* (the Tweftio direction)
 #include <thylacine/burrow.h>
 #include <thylacine/dev9p.h>
 #include <thylacine/errno.h>
@@ -33,6 +34,7 @@
 #include <thylacine/thread.h>     // thread_create_with_arg / thread_free / THREAD_EXITING
 #include <thylacine/types.h>
 #include <thylacine/vma.h>        // vma_lookup / VMA_PROT_* (Loom-6 registered buffers)
+#include <thylacine/weft.h>       // weft_binding / weft_binding_validate_rw (Weft-6c)
 
 #include "../mm/slub.h"
 #include "../arch/arm64/timer.h"  // timer_now_ns (the SQPOLL frame-boundary idle deadline)
@@ -102,6 +104,19 @@ struct loom_async_op {
     bool                   multishot;   // re-arms after each non-terminal reply
     bool                   rearm;       // a MORE shot posted; the drive loop must re-issue
     u8                     opcode;      // LOOM_OP_*
+    // Weft-6c (NET-THROUGHPUT 6; I-37): set when this READ/WRITE was routed to the
+    // zero-copy weft fast-path -- a /net data fid whose registered buffer IS the
+    // flow's whole shared ring. A weft op issues a Tweftio (off/len/dir descriptor)
+    // via loom_build_weftio instead of a byte-copying Tread/Twrite, and its
+    // completion copies NOTHING (the bytes moved through the shared ring in place,
+    // netd side) -- loom_payload_result returns the Rweftio count with no bufcopy.
+    // A weft WRITE is a zero-copy SEND: at v1.0 netd's h_weftio copies the ring into
+    // its socket buffer, so the slice is reusable the instant Rweftio returns -- the
+    // single terminal CQE (no LOOM_CQE_MORE) is the reusability signal. The deferred
+    // F_NOTIF two-CQE (a later LOOM_CQE_F_NOTIF on the last {netd,NIC,ACK} holder
+    // release) is the v1.x true-zero-copy seam: it needs a netd-holds-the-page TX
+    // path + a netd->kernel holder-clear channel, neither of which exists at v1.0.
+    bool                   weft;
     bool                   terminal;    // CQE posted (set under l->lock by completion)
     // Loom-5b: when this async op backs a LINK/DRAIN chain entry, `chain` points
     // at it (NULL for a fast-path op). On the op's TERMINAL, loom_async_complete
@@ -615,6 +630,11 @@ static s32 loom_count_result(u32 got) {
 static s32 loom_payload_result(struct loom_async_op *op, int status,
                                struct p9_dispatch_result *dr) {
     if (status < 0) return (s32)status;        // error reply: -errno, no payload
+    // Weft-6c zero-copy completion: the bytes already moved through the shared ring
+    // (netd in place -- a READ's bytes are in the guest's ring slice; a WRITE's were
+    // read out of it), so the kernel copies NOTHING. The Rweftio count IS the result
+    // (the byte count netd moved). No loom_bufcopy -- that is the zero-copy property.
+    if (op->weft) return dr ? loom_count_result(dr->weftio_count) : 0;
     switch (op->opcode) {
     case LOOM_OP_READ: {
         if (!dr) return 0;
@@ -750,6 +770,21 @@ static int loom_build_write(struct p9_session *s, u8 *out, size_t cap, void *ctx
     struct loom_async_op *op = (struct loom_async_op *)ctx;
     return p9_session_send_write(s, out, cap, op->op_fid, op->op_offset,
                                  op->op_count, op->buf_kva);
+}
+
+// Weft-6c: the zero-copy data drive (NET-THROUGHPUT 6; I-37). A READ/WRITE on a
+// /net data fid whose registered buffer is the per-flow shared ring issues a
+// Tweftio carrying the payload-relative ring offset + len + direction -- NO payload
+// rides the wire (netd moves the bytes IN PLACE in the shared ring). The direction
+// is the opcode (READ -> netd writes the recv'd bytes into the slice; WRITE -> netd
+// reads the slice + sends). The descriptor was validated + op_offset computed at
+// submit (loom_submit_payload, via weft_binding_validate_rw -- the same gate the
+// synchronous dev9p_weft_try_rw uses), so op_offset already fits the u32 ring domain.
+static int loom_build_weftio(struct p9_session *s, u8 *out, size_t cap, void *ctx) {
+    struct loom_async_op *op = (struct loom_async_op *)ctx;
+    u32 dir = (op->opcode == LOOM_OP_READ) ? WEFT_DIR_READ : WEFT_DIR_WRITE;
+    return p9_session_send_weftio(s, out, cap, op->op_fid, (u32)op->op_offset,
+                                  op->op_count, dir);
 }
 
 // Loom-6b read-shaped builders. READDIR mirrors READ (op_offset = dir offset,
@@ -897,6 +932,12 @@ static void loom_submit_payload(struct Loom *l, const struct loom_sqe *sqe,
     u64  buf_off = LOOM_SQE_BUF_OFF(sqe);
     u32  count   = sqe->len;                // total pinned-region span
     u32  bidx    = sqe->buf_idx_or_off;
+    // Weft-6c: buf_reg_len is the registered buffer's whole length (NOT the slice
+    // count) -- the whole-ring-registration check that makes buf_off ring-base-
+    // relative. is_weft / weft_off carry the routing decision down to the op fields.
+    u32  buf_reg_len = 0;
+    bool is_weft  = false;
+    u32  weft_off = 0;
 
     // Opcode -> (Tmsg builder, primary right, secondary right). need2 != 0 marks
     // a two-fid op (RENAMEAT / LINK) whose SECOND registered-handle index lives in
@@ -963,8 +1004,9 @@ static void loom_submit_payload(struct Loom *l, const struct loom_sqe *sqe,
         // Slice bounds (no overflow: rb->len is u32, buf_off u64): the op's
         // [buf_off, buf_off+count) must lie within the registered buffer.
         if (buf_off <= (u64)rb->len && (u64)count <= (u64)rb->len - buf_off) {
-            buf     = rb->burrow;
-            buf_kva = rb->kva + buf_off;
+            buf         = rb->burrow;
+            buf_kva     = rb->kva + buf_off;
+            buf_reg_len = rb->len;           // Weft-6c: the whole registered length
             burrow_ref(buf);                 // the I-30 buffer pin
         } else {
             buf_bad = true;
@@ -986,14 +1028,48 @@ static void loom_submit_payload(struct Loom *l, const struct loom_sqe *sqe,
     if (has_second && !(rt2 & need2)) { err = -(s32)T_E_ACCES; goto fail; }
     // #81 F2: an O_PATH (CWALKONLY) handle does NO byte/dir-content I/O. Reject the
     // content opcodes (READ/WRITE/READDIR) on a CWALKONLY-pinned Spoor -- mirrors the
-    // syscall-path gate. The metadata opcodes (GETATTR/STATFS/READLINK) are the
-    // fstat-equivalent class, allowed on O_PATH; the mutation opcodes (MKDIR/SETATTR/
-    // ...) are the create-from-O_PATH-base pattern, legitimately allowed like
-    // SYS_WALK_CREATE. Defense-in-depth: today an O_PATH dev9p fid is un-Tlopen'd so
-    // the server rejects Tread/Treaddir, but this makes the block in-kernel.
+    // syscall-path gate. The metadata READ opcodes (GETATTR/STATFS/READLINK) are the
+    // fstat-equivalent class, allowed on O_PATH; the CHILD-create opcodes (MKDIR/MKNOD/
+    // SYMLINK/UNLINKAT) create/remove a child OF the O_PATH directory base -- the
+    // create-from-O_PATH-base pattern, legitimately allowed like SYS_WALK_CREATE.
+    // Defense-in-depth: today an O_PATH dev9p fid is un-Tlopen'd so the server rejects
+    // Tread/Treaddir, but this makes the block in-kernel.
     if ((sqe->opcode == LOOM_OP_READ || sqe->opcode == LOOM_OP_WRITE ||
          sqe->opcode == LOOM_OP_READDIR) && (sp->flag & CWALKONLY)) {
         err = -(s32)T_E_INVAL; goto fail;
+    }
+    // T_WSTAT_SIZE audit F1/F2: LOOM_OP_SETATTR is NOT a create-from-O_PATH-base op
+    // (those create a CHILD; handled above) -- it MUTATES the TARGET the fid points
+    // at, so its authority splits by axis exactly as the sync SYS_WSTAT path
+    // (kernel/syscall.c::sys_wstat_for_proc):
+    //   * SIZE (truncate) = a CONTENT mutation; authority is the fd's RIGHT_WRITE
+    //     (POSIX write-opened-fd; need1 checked above). But an O_PATH (CWALKONLY)
+    //     handle is born RIGHT_WRITE + perm_check-EXEMPT -> its RIGHT_WRITE is HOLLOW,
+    //     so SIZE-on-CWALKONLY truncates a no-W-permission file (the async twin of the
+    //     sync O_PATH bypass). Reject it; bound size to the s64 domain (sync parity).
+    //   * MODE/UID/GID (chmod/chown) = IDENTITY authority (owner-only chmod / CAP
+    //     chown -- perm_wstat_check), which the ASYNC submit CANNOT evaluate without a
+    //     blocking owner-stat. A hollow-RIGHT_WRITE O_PATH handle would otherwise
+    //     chmod/chown ANY X-reachable file. v1.0 Loom SETATTR therefore supports ONLY
+    //     size-truncate; the identity axes are rejected FAIL-CLOSED. Async
+    //     identity-setattr is a v1.x seam (a submit-stat or a completion-recheck).
+    //   * atime/mtime (and any other bit) are unsupported -- reject (sync parity).
+    if (sqe->opcode == LOOM_OP_SETATTR) {
+        struct p9_setattr sa_chk;
+        loom_bufcopy((u8 *)&sa_chk, buf_kva, (u32)sizeof(sa_chk));
+        if (sa_chk.valid & ~(u32)(P9_SETATTR_MODE | P9_SETATTR_UID |
+                                  P9_SETATTR_GID | P9_SETATTR_SIZE)) {
+            err = -(s32)T_E_INVAL; goto fail;
+        }
+        if (sa_chk.valid & (P9_SETATTR_MODE | P9_SETATTR_UID | P9_SETATTR_GID)) {
+            err = -(s32)T_E_ACCES; goto fail;   // F2: async identity-setattr deferred
+        }
+        if (sa_chk.valid & P9_SETATTR_SIZE) {
+            if (sp->flag & CWALKONLY) { err = -(s32)T_E_INVAL; goto fail; }   // F1 P0
+            if (sa_chk.size > 0x7FFFFFFFFFFFFFFFull) {
+                err = -(s32)T_E_INVAL; goto fail;                            // s64 bound
+            }
+        }
     }
     if (dev9p_client_fid(sp, &cl, &fid) != 0) { err = -(s32)T_E_INVAL; goto fail; }   // not a dev9p Spoor
     if (has_second) {
@@ -1003,6 +1079,34 @@ static void loom_submit_payload(struct Loom *l, const struct loom_sqe *sqe,
         // cross-session pair (mirrors sys_rename's same-Dev/same-p9_client gate).
         if (cl2 != cl)                             { err = -(s32)T_E_INVAL; goto fail; }
         fid2 = f2;
+    }
+    // Weft-6c fast-path (NET-THROUGHPUT 6; I-37): a READ/WRITE whose pinned /net
+    // data fid carries a weft binding AND whose registered buffer is that flow's
+    // WHOLE shared ring goes zero-copy -- a Tweftio descriptor (off/len/dir) netd
+    // acts on IN PLACE -- instead of a byte-copying Tread/Twrite. The whole-ring
+    // registration (buf is the ring Burrow AND its registered length == the ring
+    // size) makes buf_off ring-base-relative, so the slice's guest VA reconstructs
+    // as wb->guest_va + buf_off and runs the SAME bounds validator the synchronous
+    // dev9p_weft_try_rw uses (weft_binding_validate_rw -- the guest_va cancels in
+    // the validator, so only the offset WITHIN the ring is load-bearing). A non-ring
+    // buffer (or a partial-ring registration) on a weft fid falls through to the
+    // byte path -- the section-4.8 hybrid (small/control transfers stay byte-copy).
+    // An in-ring slice that lands outside the payload region is rejected (-EINVAL).
+    // The weft binding is read __atomic-acquire (a /net data fid is handle_dup-
+    // shareable, so SYS_WEFT_MAP installs it via CAS; the sync path reads it the
+    // same way). buf is non-NULL here (the buf_bad check above already fired).
+    if ((sqe->opcode == LOOM_OP_READ || sqe->opcode == LOOM_OP_WRITE) && buf) {
+        struct dev9p_priv *priv = dev9p_priv_of(sp);
+        struct weft_binding *wb = priv
+            ? __atomic_load_n(&priv->weft, __ATOMIC_ACQUIRE) : NULL;
+        if (wb && buf == wb->burrow && buf_reg_len == wb->ring_size) {
+            if (weft_binding_validate_rw(wb, wb->guest_va + buf_off, count,
+                                         &weft_off) != 0) {
+                err = -(s32)T_E_INVAL; goto fail;     // in-ring slice outside payload
+            }
+            build   = loom_build_weftio;
+            is_weft = true;
+        }
     }
     op = kmalloc(sizeof(*op), KP_ZERO);
     if (!op) { err = -(s32)T_E_NOMEM; goto fail; }
@@ -1014,12 +1118,16 @@ static void loom_submit_payload(struct Loom *l, const struct loom_sqe *sqe,
     op->user_data   = ud;
     op->op_fid      = fid;
     op->op_fid2     = fid2;
-    op->op_offset   = sqe->offset;        // file/dir offset / GETATTR request_mask / op scalar
+    // Weft-6c: a weft op's wire offset is the payload-relative RING offset computed
+    // from buf_off at submit (weft_off), NOT the SQE's file offset. A normal payload
+    // op uses sqe->offset (file/dir offset / GETATTR request_mask / op scalar).
+    op->op_offset   = is_weft ? (u64)weft_off : sqe->offset;
     op->op_count    = count;              // wire count / dest cap / pinned-region span
     op->pinned_buf  = buf;                // adopt the buffer pin
     op->buf_kva     = buf_kva;
     op->sqe         = *sqe;               // TOCTOU snapshot (mutation build-thunk decode)
     op->opcode      = sqe->opcode;
+    op->weft        = is_weft;            // Weft-6c: zero-copy completion (no bufcopy)
     op->terminal    = false;
     op->multishot   = false;              // single-shot (no event-source dev yet)
     op->shot_limit  = 1u;

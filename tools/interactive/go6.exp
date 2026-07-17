@@ -1,0 +1,134 @@
+#!/usr/bin/expect -f
+# tools/interactive/go6.exp -- GO-PORT-PLAN Stage 6 over a real PTY: the full
+# out-of-the-box loop -- write a Go program IN NORA, gofmt formats it on save,
+# `go mod init` + a BARE `go build` compile it, the binary runs -- all as the
+# logged-in user, with ZERO manual environment setup.
+#
+# OFFLINE + DETERMINISTIC (unlike go5.exp): a stdlib-only module build never
+# touches the network, so this runs in the standard LS-CI set.
+#
+# What each leg actually proves (the Stage 6 surfaces):
+#   which go        -> login seeded /env/PATH + env::var + which's $PATH search
+#   go env GOROOT   -> bare `go` self-derives GOROOT from os.Executable
+#                      (the fork's Args[0] model; ut's resolve_command found
+#                      /goroot/bin/go via its static $path -- no /env/GOROOT!)
+#   go env GOCACHE  -> login seeded /env/HOME; Go's defaults derive from it
+#                      (the per-user encrypted home -- writable, private)
+#   nora + tr '\t'  -> gofmt-on-save piped the buffer THROUGH gofmt before the
+#                      durable write: the saved file contains a TAB we never
+#                      typed (nora has no auto-indent; the Println line was
+#                      typed at column 0)
+#   go build        -> a bare build works with an EMPTY per-user cache (cold
+#                      stdlib compile -- the honest first-build experience)
+#   ./hello         -> the built Thylacine ELF execs and its COMPUTED output
+#                      (a runtime concatenation, never a typed line) matches
+
+source [file join [file dirname [info script]] lib.exp]
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# Reset for retry idempotency (the LS-CI wrapper re-runs the whole scenario up
+# to 3x): drop any prior attempt's artifacts so nora always opens a FRESH file
+# and `go mod init` never sees a stale go.mod. Unasserted -- errors from a
+# clean first attempt ("no such file") are expected noise.
+lc_send "rm go6/hello.go"
+sleep 1
+lc_send "rm go6/go.mod"
+sleep 1
+lc_send "rm go6/hello"
+sleep 1
+lc_send "mkdir go6"
+sleep 1
+lc_send "cd go6"
+sleep 1
+
+# Toolchain reachability: the session env chain (login /env seed -> inherited
+# by ut -> inherited by which) + which's $PATH search.
+lc_run_expect "which go" "/goroot/bin/go"
+lc_pass "go6(a): which go resolves via the login-seeded \$PATH"
+
+# Bare-invocation defaults: GOROOT self-derived from the executable path (the
+# Stage 6 fork change -- no GOROOT anywhere in the session env), GOCACHE
+# derived from the login-seeded $HOME (the per-user encrypted home).
+lc_run_expect "go env GOROOT" "/goroot"
+lc_run_expect "go env GOCACHE" "/home/michael/.cache/go-build"
+lc_pass "go6(b): bare go self-locates GOROOT + HOME-derived cache"
+
+# Write the program IN NORA (the ls-7 raw-mode dance). The body is typed
+# DELIBERATELY MISFORMATTED: the fmt.Println line at column 0 (nora has no
+# auto-indent), so the only way a TAB can appear in the saved file is
+# gofmt-on-save. (gofmt preserves author line structure -- a semicolon
+# one-liner would stay one line and never produce a tab -- so the program
+# must really be typed multi-line.)
+#
+# TYPED PER LINE, not one burst: nora repaints a full frame per keystroke, so
+# a long burst is still draining when a trailing Esc arrives -- the Esc then
+# lands at the tail of an in-burst read and Alt-joins with the next byte
+# instead of resolving (the go6 attempt-1..3 failure: `:wq` and even the next
+# shell command typed INTO the buffer, status chip stuck at INS). Short
+# bursts + sleeps keep the console drained.
+lc_send "nora hello.go"
+sleep 2
+lc_step "nora: insert + type the (misformatted) Go program, line by line"
+send "ipackage main\r"
+sleep 1
+send "\r"
+sleep 1
+send "import \"fmt\"\r"
+sleep 1
+send "\r"
+sleep 1
+send "func main() {\r"
+sleep 1
+send "fmt.Println(\"go6-run-\" + \"ok-7431\")\r"
+sleep 1
+send "}"
+sleep 1
+# Advance expect's consume point past the LAUNCH-time "NOR" chip: match an
+# "INS" chip (exists only after `i`), so the NOR gate below can only match
+# the POST-Esc repaint.
+lc_expect "INS" "nora in insert mode (status chip)"
+# Double-Esc, each isolated in its own kernel read: if one ever Alt-joins a
+# read tail, the second resolves; Esc in normal mode is a harmless no-op.
+lc_step "nora: Esc (x2, isolated) to normal mode"
+send "\x1b"
+sleep 1
+send "\x1b"
+sleep 1
+# The self-verifying gate: :wq is sent only once the mode chip proves normal
+# mode -- a broken mode dance fails HERE, loudly, not as a misleading
+# downstream cat timeout.
+lc_expect "NOR" "nora back in normal mode (status chip)"
+lc_step "nora: :wq (gofmt-on-save + durable write + quit)"
+send ":wq\r"
+sleep 2
+
+# The gofmt proof: translate tabs to a literal T -- "Tfmt.Println" can only
+# exist if gofmt indented the line we typed at column 0. (The alt-screen draw
+# shows a raw tab, never a 'T', so the token is unambiguous in the transcript.)
+lc_run_expect "cat hello.go | tr '\\t' T" "Tfmt.Println"
+lc_pass "go6(c): nora formatted on save (a tab we never typed)"
+
+# Module init + the bare build. The build is COLD (empty per-user cache: the
+# fmt closure compiles on-device) -- give it headroom; warm retries are fast.
+# ut has no `&&`: send the build, then a $status readback typed WHILE the
+# build runs (the cons ring buffers it; ut executes it after the build
+# returns). ut word-splits `go6-build-$status` into two argv words, so the
+# success output is "go6-build- 0" -> upper-cased "GO6-BUILD- 0" -- a token
+# that cannot appear in the typed (lowercase) line.
+lc_run_expect "go mod init hello" "creating new go.mod"
+lc_send "go build"
+set ::lc_cmd_timeout 600
+lc_run_expect "echo go6-build-\$status | tr a-z A-Z" "GO6-BUILD- 0"
+set ::lc_cmd_timeout 30
+lc_pass "go6(d): bare go build (cold user cache) succeeded"
+
+# Run the built Thylacine ELF; its output is COMPUTED (runtime concatenation),
+# so the match cannot be an echo of any typed line.
+lc_run_expect "./hello" "go6-run-ok-7431"
+lc_pass "go6(e): the nora-written, gofmt-formatted, on-device-built binary ran"
+
+lc_quit
+lc_pass "LS-CI go6: Stage 6 out-of-the-box write/format/build/run verified"
+exit 0

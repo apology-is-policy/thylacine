@@ -265,22 +265,24 @@ static int poll_scan_one(struct Proc *p, struct pollfd *pfd,
 s64 sys_poll_for_proc(struct Proc *p, struct pollfd *kfds, u64 nfds,
                       s32 timeout_ms) {
     if (!p)                                   return -1;
-    if (nfds == 0 || nfds > PROC_HANDLE_MAX)  return -1;
+    if (nfds == 0 || nfds > POLL_MAX_NFDS)    return -1;
     if (!kfds)                                return -1;
 
     __atomic_fetch_add(&g_poll_calls, 1u, __ATOMIC_RELAXED);
 
     // The poller's private rendez and the per-fd waiter array — stack-
-    // allocated for the lifetime of this call. With nfds ≤ 64,
-    // sizeof(poll_waiter) ≈ 32 B → ~2 KiB; plus the kfds[] array the
-    // handler stack-allocates. Well within the kernel-thread stack.
+    // allocated for the lifetime of this call. With nfds ≤ POLL_MAX_NFDS (64),
+    // sizeof(poll_waiter) ≈ 32 B → ~2 KiB; plus the kfds[] array the handler
+    // stack-allocates. Well within the kernel-thread stack. Sized to
+    // POLL_MAX_NFDS, NOT PROC_HANDLE_MAX, so a larger fd table cannot grow
+    // this frame past the kstack guard.
     struct Rendez r;
     rendez_init(&r);
-    struct poll_waiter waiters[PROC_HANDLE_MAX];
+    struct poll_waiter waiters[POLL_MAX_NFDS];
     // RW-2 2C-F1: per-fd retained obj refs. A registering scan holds the obj
     // ref past the sleep (zeroed = "nothing held"); released after the
     // unregister sweep. ~1.5 KiB on the kstack alongside waiters[] (~2 KiB).
-    struct Handle held[PROC_HANDLE_MAX];
+    struct Handle held[POLL_MAX_NFDS];
     for (u64 i = 0; i < nfds; i++) {
         poll_waiter_init(&waiters[i], &r);
         held[i] = (struct Handle){0};

@@ -42,6 +42,7 @@ set(KERNEL_SRCS
     ../arch/arm64/timer.c
     ../arch/arm64/rtc.c
     ../arch/arm64/hwfeat.c
+    ../arch/arm64/hwdebug.c
     ../arch/arm64/alternatives.c
     ../arch/arm64/context.S
     ../arch/arm64/userland.S
@@ -55,11 +56,13 @@ set(KERNEL_SRCS
     territory.c
     handle.c
     burrow.c
+    image.c
     loom.c
     weft.c
     vma.c
     elf.c
     exec.c
+    vdso.c
     syscall.c
     joey.c
     spoor.c
@@ -81,6 +84,8 @@ set(KERNEL_SRCS
     devdev.c
     devhw.c
     devpci.c
+    devenv.c
+    env.c
     cpio.c
     virtio.c
     virtio_pci.c
@@ -92,6 +97,7 @@ set(KERNEL_SRCS
     9p_session.c
     9p_transport.c
     9p_client.c
+    larder.c
     dev9p.c
     dev9p_poll.c
     9p_attach.c
@@ -119,6 +125,7 @@ set(KERNEL_TEST_SRCS
     test/test_timer.c
     test/test_clock.c
     test/test_hardening.c
+    test/test_hwdebug.c
     test/test_alternatives.c
     test/test_context.c
     test/test_fp.c
@@ -136,6 +143,7 @@ set(KERNEL_TEST_SRCS
     test/test_territory_chroot.c
     test/test_handle.c
     test/test_burrow.c
+    test/test_image.c
     test/test_elf.c
     test/test_asid.c
     test/test_directmap.c
@@ -145,6 +153,7 @@ set(KERNEL_TEST_SRCS
     test/test_vma.c
     test/test_burrow_map_proc.c
     test/test_demand_page.c
+    test/test_vdso.c
     test/test_exec.c
     test/test_syscall.c
     test/test_dev.c
@@ -155,6 +164,7 @@ set(KERNEL_TEST_SRCS
     test/test_devdev.c
     test/test_devhw.c
     test/test_devpci.c
+    test/test_env.c
     test/test_allowance.c
     test/test_cpio.c
     test/test_devramfs.c
@@ -189,6 +199,7 @@ set(KERNEL_TEST_SRCS
     test/test_9p_session.c
     test/test_9p_transport.c
     test/test_9p_client.c
+    test/test_larder.c
     test/test_dev9p.c
     test/test_perm.c
     test/test_path.c
@@ -262,6 +273,16 @@ if(KERNEL_TESTS)
     message(STATUS "Kernel: in-kernel test suite ENABLED (KERNEL_TESTS=ON)")
 else()
     message(STATUS "Kernel: production shape -- in-kernel test suite DISABLED (KERNEL_TESTS=OFF)")
+endif()
+
+# TI-4e tickful-baseline lever (tools/build.sh --no-tickless): force the old
+# 1 kHz-always idle (sched_idle_park's go_tickless=false) so cpubench can capture
+# the gold-standard "fast tickful scheduler" numbers the work-conservation
+# redesign must match-or-exceed. Diagnostic-only; production builds leave it OFF
+# (the kernel is then byte-identical to the committed tickless idle).
+if(THYLACINE_NO_TICKLESS)
+    target_compile_definitions(thylacine.elf PRIVATE THYLACINE_NO_TICKLESS)
+    message(STATUS "Kernel: TICKFUL-BASELINE build -- tickless idle DISABLED (THYLACINE_NO_TICKLESS=ON)")
 endif()
 
 target_include_directories(thylacine.elf

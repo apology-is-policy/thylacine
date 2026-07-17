@@ -2,8 +2,9 @@
 //
 // At P1-C-extras Part B, the kernel is linked at high VA
 // KASLR_LINK_VA (0xFFFFA00000080000) and randomized at boot by a
-// 4 MiB-aligned offset. mmu.c builds TWO mappings sharing two
-// contiguous L3 page-grain tables (a 4 MiB kernel-image span):
+// 8 MiB-aligned offset. mmu.c builds TWO mappings sharing
+// KERNEL_L3_TABLES contiguous L3 page-grain tables (an 8 MiB
+// kernel-image span):
 //
 //   - TTBR0 identity for the low 4 GiB. Required for early boot
 //     (PC = load PA pre-branch), DTB access (DTB at PA 0x48000000),
@@ -94,7 +95,7 @@ extern char _boot_stack_guard[];
 //     - 1 L2 table (two consecutive entries used — L2 index of slide
 //       and slide+2 MiB; point at the two SHARED l3_kernel tables).
 //   Shared:
-//     - 2 L3 tables for the kernel-image 4 MiB region (fine-grained
+//     - KERNEL_L3_TABLES L3 tables for the kernel-image 8 MiB region (fine-grained
 //       perms; serve both TTBR0 and TTBR1 mappings).
 //
 // Memory cost: 11 × 4 KiB = 44 KiB. Negligible.
@@ -120,23 +121,29 @@ static u64 l0_ttbr1[ENTRIES_PER_TABLE]    __attribute__((aligned(PAGE_SIZE)));
 static u64 l1_ttbr1[ENTRIES_PER_TABLE]    __attribute__((aligned(PAGE_SIZE)));
 static u64 l2_ttbr1[ENTRIES_PER_TABLE]    __attribute__((aligned(PAGE_SIZE)));
 
-// Shared L3 tables for the kernel-image 4 MiB region — two contiguous
-// 512-entry L3 tables: l3_kernel[0..511] maps the first 2 MiB,
-// l3_kernel[512..1023] the second. Both TTBR0 and TTBR1 walks land here
-// for kernel-image accesses. The 4 MiB span (P5-kernel-l3-4mib; was
-// 2 MiB) gives headroom as the kernel image grows — notably the
-// UBSan-instrumented build, which crossed the 2 MiB ceiling.
-static u64 l3_kernel[ENTRIES_PER_TABLE * 2] __attribute__((aligned(PAGE_SIZE)));
+// Shared L3 tables for the kernel-image region — KERNEL_L3_TABLES
+// contiguous 512-entry L3 tables (2 MiB each): l3_kernel[0..511] maps the
+// first 2 MiB, l3_kernel[512..1023] the second, and so on. Both TTBR0 and
+// TTBR1 walks land here for kernel-image accesses. The span has grown with
+// the image: 2 MiB originally, 4 MiB at P5-kernel-l3-4mib (the UBSan build
+// crossed 2 MiB), 8 MiB at the F1 write-behind chunk (the UBSan build
+// crossed 4 MiB). kernel.ld's overflow ASSERT keeps the literal in sync.
+#define KERNEL_L3_TABLES 4
+#define KERNEL_L3_SPAN   ((u64)KERNEL_L3_TABLES * BLOCK_SIZE_L2)   /* 8 MiB */
+static u64 l3_kernel[ENTRIES_PER_TABLE * KERNEL_L3_TABLES]
+    __attribute__((aligned(PAGE_SIZE)));
 
-// The kernel's 4 MiB region occupies two consecutive 2 MiB L2 entries.
-// The TTBR1 high-VA wiring relies on those two entries living in one
-// l2_ttbr1 table — i.e. on the KASLR slide being 4 MiB-aligned, so the
-// 4 MiB region never straddles a 1 GiB (L2-table) boundary. Pin the
+// The kernel's 8 MiB region occupies KERNEL_L3_TABLES consecutive 2 MiB
+// L2 entries. The TTBR1 high-VA wiring relies on those entries living in
+// one l2_ttbr1 table — i.e. on the KASLR slide being 8 MiB-aligned, so
+// the region never straddles a 1 GiB (L2-table) boundary. Pin the
 // kaslr.h constant the wiring depends on.
-_Static_assert(KASLR_ALIGN_BITS >= 22,
-               "KASLR slide must be >= 4 MiB-aligned so the kernel's "
-               "4 MiB L3 region maps to two consecutive same-table L2 "
-               "entries (build_page_tables TTBR1 wiring)");
+_Static_assert(KASLR_ALIGN_BITS >= 23,
+               "KASLR slide must be >= 8 MiB-aligned so the kernel's "
+               "8 MiB L3 region maps to KERNEL_L3_TABLES consecutive "
+               "same-table L2 entries (build_page_tables TTBR1 wiring)");
+_Static_assert((1u << KASLR_ALIGN_BITS) >= KERNEL_L3_SPAN,
+               "KASLR alignment must cover the kernel L3 span");
 
 // =============================================================================
 // P3-Bb: Direct map + vmalloc tables (TTBR1 high half).
@@ -209,9 +216,12 @@ _Static_assert(VMALLOC_MMIO_ENTRIES >=
 // Other 2 MiB blocks within the kernel's GiB remain default R/W + XN
 // (struct_pages, free RAM for buddy/SLUB).
 static u64 l2_directmap_kernel[ENTRIES_PER_TABLE]   __attribute__((aligned(PAGE_SIZE)));
-// Two contiguous L3 tables — the direct-map alias of the kernel-image
-// 4 MiB region, matching l3_kernel's two-table span (P5-kernel-l3-4mib).
-static u64 l3_directmap_kernel[ENTRIES_PER_TABLE * 2] __attribute__((aligned(PAGE_SIZE)));
+// KERNEL_L3_TABLES contiguous L3 tables — the direct-map alias of the
+// kernel-image 8 MiB region, matching l3_kernel's span in lockstep (the
+// RO/XN demotion must cover every PA the image can occupy, or .text bytes
+// past the alias span stay writable via the direct map).
+static u64 l3_directmap_kernel[ENTRIES_PER_TABLE * KERNEL_L3_TABLES]
+    __attribute__((aligned(PAGE_SIZE)));
 
 // vmalloc bump-allocator cursor. Tracks the next free L3 entry index across
 // the two MMIO L3 tables (l3_vmalloc, then l3_vmalloc2). Each mmu_map_mmio
@@ -310,9 +320,9 @@ static void build_page_tables(u64 slide) {
     // runtime load PA when called pre-MMU-on with PC = load PA.
     u64 pa_kernel_start = (u64)(uintptr_t)_kernel_start;
     // The 2 MiB-aligned PA below the load PA. It is also the base of the
-    // kernel image's 4 MiB L3-mapped region [kernel_2mib_pa, +4 MiB):
+    // kernel image's 8 MiB L3-mapped region [kernel_2mib_pa, +KERNEL_L3_SPAN):
     // the load PA is fixed (0x40080000 on QEMU virt) so this is likewise
-    // 4 MiB-aligned, and per-page L3 overrides index off it linearly.
+    // 8 MiB-aligned, and per-page L3 overrides index off it linearly.
     u64 kernel_2mib_pa  = pa_kernel_start & ~(BLOCK_SIZE_L2 - 1);
 
     // P3-Bdb: capture the PA of l0_ttbr0 — used as the kernel-only
@@ -344,13 +354,14 @@ static void build_page_tables(u64 slide) {
         l2_ttbr0[gib][idx] = make_block_pte_l2(pa, PTE_DEVICE_RW_BLOCK);
     }
 
-    // Build the SHARED kernel L3 tables — two contiguous 512-entry L3
-    // tables covering the 4 MiB region containing the kernel image. Same
-    // content under TTBR0 (low VA) and TTBR1 (high VA): page descriptors
-    // mapping to PA. Per-section perm overrides below index l3_kernel[]
-    // linearly by page offset from kernel_2mib_pa, so an offset in the
-    // second 2 MiB lands in l3_kernel[512..1023] with no special-casing.
-    for (int j = 0; j < ENTRIES_PER_TABLE * 2; j++) {
+    // Build the SHARED kernel L3 tables — KERNEL_L3_TABLES contiguous
+    // 512-entry L3 tables covering the 8 MiB region containing the kernel
+    // image. Same content under TTBR0 (low VA) and TTBR1 (high VA): page
+    // descriptors mapping to PA. Per-section perm overrides below index
+    // l3_kernel[] linearly by page offset from kernel_2mib_pa, so an offset
+    // in a later 2 MiB lands in the corresponding table with no special-
+    // casing.
+    for (int j = 0; j < ENTRIES_PER_TABLE * KERNEL_L3_TABLES; j++) {
         paddr_t pa = kernel_2mib_pa + ((paddr_t)j << PAGE_SHIFT);
         l3_kernel[j] = make_page_pte_l3(pa, PTE_KERN_RW);
     }
@@ -418,17 +429,18 @@ static void build_page_tables(u64 slide) {
 
         // #867: cpu0's idle stack guard (g_bootcpu_idle_stack, a struct
         // secondary_stack co-located with g_secondary_boot_stacks above in this
-        // 4 MiB image). Bounds-checked: the guard page MUST index inside the
-        // l3_kernel table (ENTRIES_PER_TABLE * 2 = the kernel-image 4 MiB L3
-        // region) -- extinct loudly if a future BSS layout ever moves it out,
-        // rather than an out-of-bounds l3_kernel[] write that would corrupt the
-        // page tables. (The secondary loop above shares this co-location
-        // assumption unchecked; it holds today.)
+        // 8 MiB image). Bounds-checked: the guard page MUST index inside the
+        // l3_kernel table (ENTRIES_PER_TABLE * KERNEL_L3_TABLES = the kernel-
+        // image 8 MiB L3 region) -- extinct loudly if a future BSS layout ever
+        // moves it out, rather than an out-of-bounds l3_kernel[] write that
+        // would corrupt the page tables. (The secondary loop above shares this
+        // co-location assumption unchecked; it holds today.)
         {
             u64 ig_pa = (u64)(uintptr_t)&g_bootcpu_idle_stack.guard[0];
             if (ig_pa < kernel_2mib_pa ||
-                ((ig_pa - kernel_2mib_pa) >> PAGE_SHIFT) >= (u64)(ENTRIES_PER_TABLE * 2))
-                extinction("g_bootcpu_idle_stack guard outside the kernel 4 MiB L3 region");
+                ((ig_pa - kernel_2mib_pa) >> PAGE_SHIFT) >=
+                    (u64)(ENTRIES_PER_TABLE * KERNEL_L3_TABLES))
+                extinction("g_bootcpu_idle_stack guard outside the kernel 8 MiB L3 region");
             u32 ig_idx = (u32)((ig_pa - kernel_2mib_pa) >> PAGE_SHIFT);
             l3_kernel[ig_idx] = 0;
         }
@@ -436,20 +448,20 @@ static void build_page_tables(u64 slide) {
 
     // TTBR0: link the two kernel L3 tables into the identity map (so the
     // kernel image is reachable at PA pre-branch). The image spans a
-    // 4 MiB region = two contiguous 2 MiB L2 entries; wire each to its
-    // L3 half. kernel_2mib_pa derives from the fixed KERNEL_LOAD_PA, so
-    // `idx` and `idx + 1` (the two halves) stay inside one per-GiB
-    // l2_ttbr0 table — that the 4 MiB region does not straddle a 1 GiB
-    // (L2-table) boundary is pinned at link time by kernel.ld's "4 MiB
-    // L3 region within a 1 GiB L2 table" ASSERT. (The TTBR1 path below is
-    // guarded at runtime instead — its index derives from the KASLR
-    // slide, a runtime value, not a link-time constant.)
-    for (int half = 0; half < 2; half++) {
-        u64 sub_pa = kernel_2mib_pa + (u64)half * BLOCK_SIZE_L2;
+    // 8 MiB region = KERNEL_L3_TABLES contiguous 2 MiB L2 entries; wire each to its
+    // L3 slice. kernel_2mib_pa derives from the fixed KERNEL_LOAD_PA, so
+    // the KERNEL_L3_TABLES consecutive `idx` values stay inside one
+    // per-GiB l2_ttbr0 table — that the 8 MiB region does not straddle a
+    // 1 GiB (L2-table) boundary is pinned at link time by kernel.ld's
+    // "8 MiB L3 region within a 1 GiB L2 table" ASSERT. (The TTBR1 path
+    // below is guarded at runtime instead — its index derives from the
+    // KASLR slide, a runtime value, not a link-time constant.)
+    for (int slice = 0; slice < KERNEL_L3_TABLES; slice++) {
+        u64 sub_pa = kernel_2mib_pa + (u64)slice * BLOCK_SIZE_L2;
         u32 gib = (u32)(sub_pa >> BLOCK_SHIFT_L1);
         u32 idx = (u32)((sub_pa >> BLOCK_SHIFT_L2) & 0x1ff);
         l2_ttbr0[gib][idx] =
-            make_table_pte(&l3_kernel[half * ENTRIES_PER_TABLE]);
+            make_table_pte(&l3_kernel[slice * ENTRIES_PER_TABLE]);
     }
 
     // TTBR1: kernel high-half mapping at KASLR_LINK_VA + slide.
@@ -472,19 +484,22 @@ static void build_page_tables(u64 slide) {
         u32 l1_idx = (u32)((high_va_2mib >> BLOCK_SHIFT_L1) & 0x1ff);
         u32 l2_idx = (u32)((high_va_2mib >> BLOCK_SHIFT_L2) & 0x1ff);
 
-        // The kernel image spans a 4 MiB region — two contiguous 2 MiB
-        // L2 entries. The KASLR slide is 4 MiB-aligned (kaslr.h
-        // KASLR_ALIGN_BITS = 22), so high_va_2mib is 4 MiB-aligned,
-        // l2_idx is even, and l2_idx + 1 stays inside this same l2_ttbr1
-        // table — the pair never straddles a 1 GiB (L2-table) boundary.
-        if ((l2_idx & 1u) != 0 || l2_idx + 1 >= ENTRIES_PER_TABLE)
-            extinction("kernel 4 MiB region misaligned in the L2 table "
-                       "(KASLR slide not 4 MiB-aligned — kaslr.h drift)");
+        // The kernel image spans an 8 MiB region — KERNEL_L3_TABLES
+        // contiguous 2 MiB L2 entries. The KASLR slide is 8 MiB-aligned
+        // (kaslr.h KASLR_ALIGN_BITS = 23), so high_va_2mib is 8 MiB-
+        // aligned, l2_idx is a multiple of KERNEL_L3_TABLES, and the run
+        // stays inside this same l2_ttbr1 table — it never straddles a
+        // 1 GiB (L2-table) boundary.
+        if ((l2_idx & (KERNEL_L3_TABLES - 1)) != 0 ||
+            l2_idx + (KERNEL_L3_TABLES - 1) >= ENTRIES_PER_TABLE)
+            extinction("kernel 8 MiB region misaligned in the L2 table "
+                       "(KASLR slide not 8 MiB-aligned — kaslr.h drift)");
 
         l0_ttbr1[l0_idx] = make_table_pte(l1_ttbr1);
         l1_ttbr1[l1_idx] = make_table_pte(l2_ttbr1);
-        l2_ttbr1[l2_idx]     = make_table_pte(&l3_kernel[0]);                 // first 2 MiB
-        l2_ttbr1[l2_idx + 1] = make_table_pte(&l3_kernel[ENTRIES_PER_TABLE]); // second 2 MiB
+        for (u32 s = 0; s < KERNEL_L3_TABLES; s++)
+            l2_ttbr1[l2_idx + s] =
+                make_table_pte(&l3_kernel[s * ENTRIES_PER_TABLE]);
     }
 
     // P3-Bb: TTBR1 direct map at base KERNEL_DIRECT_MAP_BASE
@@ -531,9 +546,9 @@ static void build_page_tables(u64 slide) {
 
                 // Build l3_directmap_kernel: mirror l3_kernel's per-
                 // section perms but force PTE_PXN | PTE_UXN. Default
-                // R/W + XN; sections override below. Two contiguous L3
-                // tables span the 4 MiB kernel region (P5-kernel-l3-4mib).
-                for (u32 j = 0; j < ENTRIES_PER_TABLE * 2; j++) {
+                // R/W + XN; sections override below. KERNEL_L3_TABLES
+                // contiguous L3 tables span the 8 MiB kernel region.
+                for (u32 j = 0; j < ENTRIES_PER_TABLE * KERNEL_L3_TABLES; j++) {
                     paddr_t page_pa = kernel_2mib_pa + ((paddr_t)j << PAGE_SHIFT);
                     l3_directmap_kernel[j] = make_page_pte_l3(page_pa, PTE_KERN_RW);
                 }
@@ -584,24 +599,24 @@ static void build_page_tables(u64 slide) {
                 {
                     u64 ig_pa = (u64)(uintptr_t)&g_bootcpu_idle_stack.guard[0];
                     if (ig_pa < kernel_2mib_pa ||
-                        ((ig_pa - kernel_2mib_pa) >> PAGE_SHIFT) >= (u64)(ENTRIES_PER_TABLE * 2))
-                        extinction("g_bootcpu_idle_stack guard outside the kernel 4 MiB L3 region (directmap)");
+                        ((ig_pa - kernel_2mib_pa) >> PAGE_SHIFT) >=
+                            (u64)(ENTRIES_PER_TABLE * KERNEL_L3_TABLES))
+                        extinction("g_bootcpu_idle_stack guard outside the kernel 8 MiB L3 region (directmap)");
                     u32 ig_idx = (u32)((ig_pa - kernel_2mib_pa) >> PAGE_SHIFT);
                     l3_directmap_kernel[ig_idx] = 0;
                 }
 
-                // Wire the kernel-image 4 MiB → l3_directmap_kernel's
-                // two L3 tables (two contiguous L2 entries). kernel_l2_idx
-                // derives from the fixed KERNEL_LOAD_PA, so kernel_l2_idx
-                // and kernel_l2_idx + 1 stay inside this per-GiB
-                // l2_directmap_kernel table — that the 4 MiB region does
-                // not straddle a 1 GiB boundary is pinned at link time by
-                // kernel.ld's "4 MiB L3 region within a 1 GiB L2 table"
-                // ASSERT (the same pin as the TTBR0 path).
-                l2_directmap_kernel[kernel_l2_idx] =
-                    make_table_pte(&l3_directmap_kernel[0]);
-                l2_directmap_kernel[kernel_l2_idx + 1] =
-                    make_table_pte(&l3_directmap_kernel[ENTRIES_PER_TABLE]);
+                // Wire the kernel-image 8 MiB → l3_directmap_kernel's
+                // KERNEL_L3_TABLES L3 tables (consecutive L2 entries).
+                // kernel_l2_idx derives from the fixed KERNEL_LOAD_PA, so
+                // the run stays inside this per-GiB l2_directmap_kernel
+                // table — that the 8 MiB region does not straddle a 1 GiB
+                // boundary is pinned at link time by kernel.ld's "8 MiB
+                // L3 region within a 1 GiB L2 table" ASSERT (the same pin
+                // as the TTBR0 path).
+                for (u32 s = 0; s < KERNEL_L3_TABLES; s++)
+                    l2_directmap_kernel[kernel_l2_idx + s] =
+                        make_table_pte(&l3_directmap_kernel[s * ENTRIES_PER_TABLE]);
 
                 l1_directmap[gib] = make_table_pte(l2_directmap_kernel);
             } else {
@@ -953,6 +968,25 @@ static void patch_sync_icache(const void *scratch, const void *canon, u32 len) {
     dsb_ish();
     uintptr_t c = (uintptr_t)canon, cend = c + len;
     for (uintptr_t p = c & ~(uintptr_t)(iline - 1); p < cend; p += iline)
+        __asm__ __volatile__("ic ivau, %0" :: "r"(p) : "memory");
+    dsb_ish();
+    __asm__ __volatile__("isb" ::: "memory");
+}
+
+// Single-VA instruction-cache sync (page.h contract). The write and the fetch
+// share the same kernel VA (and PA) -- unlike patch_sync_icache, whose scratch
+// alias differs from the canonical VA -- so clean + invalidate the one range.
+void arch_icache_sync_range(const void *addr, size_t len) {
+    if (len == 0) return;
+    u64 ctr;
+    __asm__ __volatile__("mrs %0, ctr_el0" : "=r"(ctr));
+    u32 dline = 4u << ((u32)(ctr >> 16) & 0xF);   // DminLine (words -> bytes)
+    u32 iline = 4u << ((u32)ctr & 0xF);           // IminLine
+    uintptr_t s = (uintptr_t)addr, end = s + len;
+    for (uintptr_t p = s & ~(uintptr_t)(dline - 1); p < end; p += dline)
+        __asm__ __volatile__("dc cvau, %0" :: "r"(p) : "memory");
+    dsb_ish();
+    for (uintptr_t p = s & ~(uintptr_t)(iline - 1); p < end; p += iline)
         __asm__ __volatile__("ic ivau, %0" :: "r"(p) : "memory");
     dsb_ish();
     __asm__ __volatile__("isb" ::: "memory");
@@ -1744,6 +1778,127 @@ int mmu_uninstall_user_range(paddr_t pgtable_root, u16 asid,
         (void)mmu_uninstall_user_pte(pgtable_root, asid, v);
     }
     return 0;
+}
+
+// =============================================================================
+// 8a-1b-gamma: cross-Proc user-memory access (I-39; docs/DEBUG-FS-DESIGN.md 4.5).
+// =============================================================================
+//
+// The read-only, NON-GROWING VA->PA resolver a debugger uses to read/write a
+// STOPPED target's user memory through /proc/<pid>/mem. Cloned from
+// mmu_install_user_pte's walk but it NEVER allocates a sub-table and NEVER
+// faults in: an absent level (or an absent L3 leaf) means "not resident" (an
+// unfaulted BURROW_TYPE_ANON_LAZY or REVENANT BURROW_TYPE_FILE page), reported
+// honestly to the caller -- the debug reader does NOT drive userland_demand_page
+// on the target (that path assumes `current` is the faulting Proc; v1.0 reports
+// not-resident). Access is through the kernel DIRECT MAP (pa_to_kva) against the
+// TARGET's pgtable_root -- NOT uaccess (which reaches only CURRENT's TTBR0), NOT
+// the ASID (the walk keys on the PA root, never the rolling context_id).
+//
+// I-13 (kernel/user isolation): the walk reaches ONLY pages mapped in the
+// target's own TTBR0 tree, so a debug read/write cannot touch another Proc's
+// memory (or the kernel's -- the tree holds only user leaves). The write
+// additionally REFUSES a read-only leaf (AP[2]==1): a debugger writes DATA, and
+// letting it write a user-RO page via the direct map would violate I-12 (W^X:
+// the page is RO+X text) AND corrupt the I-36 REVENANT Image cache (shared text
+// pages) -- which is exactly why breakpoints are HW (8a-2), never a software BRK
+// patched into text. LOCK CONTRACT: the caller holds the target's vma_lock (for
+// a coherent VMA/PTE snapshot) and has confirmed the target is fully stopped (no
+// thread of the target runs, so no concurrent fault mutates the tree).
+
+// Bits [47:12] of a PTE = the output address (the 4-KiB granule PA). The leaf
+// PTE's upper bits [54:52] carry UXN/PXN/etc, so a bare `& ~0xFFFull` (correct
+// for table descriptors, whose upper bits are 0) would leave them in the PA --
+// mask [47:12] explicitly for the leaf.
+#define PTE_OA_MASK  0x0000FFFFFFFFF000ull
+
+// Resolve one user byte at `vaddr` in `pgtable_root` to a direct-map kernel
+// pointer, or NULL if not resident. `*writable_out` (when non-NULL) = the leaf
+// is user-writable (AP[2] == 0). Read-only, non-growing.
+static void *cross_proc_resolve(paddr_t pgtable_root, u64 vaddr, bool *writable_out) {
+    if (pgtable_root == 0)  return NULL;
+    if (vaddr >> 47)        return NULL;   // must be a TTBR0 user-half VA
+
+    u32 i0 = (u32)((vaddr >> BLOCK_SHIFT_L0) & 0x1ff);
+    u32 i1 = (u32)((vaddr >> BLOCK_SHIFT_L1) & 0x1ff);
+    u32 i2 = (u32)((vaddr >> BLOCK_SHIFT_L2) & 0x1ff);
+    u32 i3 = (u32)((vaddr >> PAGE_SHIFT)     & 0x1ff);
+
+    u64 *l0 = (u64 *)pa_to_kva(pgtable_root);
+    u64 e = l0[i0];
+    if (!(e & PTE_VALID) || !(e & PTE_TYPE_TABLE)) return NULL;
+    u64 *l1 = (u64 *)pa_to_kva(e & PTE_OA_MASK);
+    e = l1[i1];
+    // No 1-GiB block at L1 for v1.0 user mappings (make_user_pte_l3 is L3-only) --
+    // a non-table entry is not a resolvable user page.
+    if (!(e & PTE_VALID) || !(e & PTE_TYPE_TABLE)) return NULL;
+    u64 *l2 = (u64 *)pa_to_kva(e & PTE_OA_MASK);
+    e = l2[i2];
+    if (!(e & PTE_VALID) || !(e & PTE_TYPE_TABLE)) return NULL;   // no 2-MiB block at v1.0
+    u64 *l3 = (u64 *)pa_to_kva(e & PTE_OA_MASK);
+    e = l3[i3];
+    if (!(e & PTE_VALID)) return NULL;   // not resident (unfaulted lazy-anon / REVENANT FILE)
+
+    if (writable_out)
+        *writable_out = ((e & (1ull << 7)) == 0);   // AP[2] (bit 7) clear -> writable
+    paddr_t page_pa = e & PTE_OA_MASK;
+    u64 pgoff = vaddr & (PAGE_SIZE - 1);
+    return (void *)((u8 *)pa_to_kva(page_pa) + pgoff);
+}
+
+// Copy up to `len` bytes from the target's user memory at `vaddr` into the
+// kernel buffer `dst`, page by page, stopping at the FIRST non-resident page.
+// Returns the byte count copied before the hole (0 if `vaddr`'s own page is not
+// resident). `len` must be >= 0; the caller bounds it (the g_proc_table_lock
+// hold spans this copy).
+long mmu_cross_proc_read(paddr_t pgtable_root, u64 vaddr, void *dst, long len) {
+    if (len <= 0 || !dst) return 0;
+    // #73 (8a-1c holotype HF3, defense-in-depth): reject a vaddr+len that would
+    // wrap the u64 VA space. The caller clamps len (DEBUG_MEM_CHUNK) and
+    // cross_proc_resolve rejects any vaddr>>47 per page, so no realizable path
+    // reaches this -- but the explicit guard keeps the per-page `vaddr + done`
+    // arithmetic below provably non-wrapping.
+    if (vaddr + (u64)len < vaddr) return 0;
+    u8 *d = (u8 *)dst;
+    long done = 0;
+    while (done < len) {
+        void *src = cross_proc_resolve(pgtable_root, vaddr + (u64)done, NULL);
+        if (!src) break;   // hole -> short read
+        u64 pgoff = (vaddr + (u64)done) & (PAGE_SIZE - 1);
+        long chunk = (long)(PAGE_SIZE - pgoff);
+        if (chunk > len - done) chunk = len - done;
+        for (long i = 0; i < chunk; i++) d[done + i] = ((u8 *)src)[i];
+        done += chunk;
+    }
+    return done;
+}
+
+// Write up to `len` bytes from `src` into the target's user memory at `vaddr`,
+// page by page, stopping at the first non-resident OR read-only page. Returns
+// the byte count written before that boundary. A read-only leaf is REFUSED
+// (I-12 / I-36): a short write there tells the debugger the page is not
+// writable (text; use a HW breakpoint, 8a-2).
+long mmu_cross_proc_write(paddr_t pgtable_root, u64 vaddr, const void *src, long len) {
+    if (len <= 0 || !src) return 0;
+    if (vaddr + (u64)len < vaddr) return 0;   // #73: u64 VA-space wrap guard (defense-in-depth)
+    const u8 *s = (const u8 *)src;
+    long done = 0;
+    while (done < len) {
+        bool writable = false;
+        void *dst = cross_proc_resolve(pgtable_root, vaddr + (u64)done, &writable);
+        if (!dst || !writable) break;   // hole or RO -> short write (W^X / Image cache)
+        u64 pgoff = (vaddr + (u64)done) & (PAGE_SIZE - 1);
+        long chunk = (long)(PAGE_SIZE - pgoff);
+        if (chunk > len - done) chunk = len - done;
+        for (long i = 0; i < chunk; i++) ((u8 *)dst)[i] = s[done + i];
+        done += chunk;
+    }
+    // The written pages are user RAM (Normal-WB, coherent); no I-cache sync is
+    // needed for a DATA write (the debugger never writes text -- RO leaves are
+    // refused above). A DSB orders the stores before the debugger observes the
+    // return (the target is stopped, so no concurrent reader races them).
+    if (done > 0) dsb_ishst();
+    return done;
 }
 
 void proc_pgtable_destroy(paddr_t root) {

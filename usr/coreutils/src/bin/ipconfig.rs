@@ -6,6 +6,7 @@
 //   ipconfig add IP MASK [GW] assign a static address (MASK = 255.255.255.0,
 //                             a /24, or a bare 24); replaces the current addr
 //   ipconfig remove           clear the address + default route
+//   ipconfig renew            re-acquire the DHCP lease (force a fresh DISCOVER)
 //
 // The status + ndb views are streamed verbatim (netd's authoritative text) under
 // EMBER section headers; errors use the Bonfire palette. Reads go to
@@ -39,11 +40,12 @@ pub extern "C" fn rs_main() -> i64 {
 }
 
 const USAGE: &str = "\
-usage: ipconfig [--color[=WHEN]] [add IP MASK [GW] | remove]
+usage: ipconfig [--color[=WHEN]] [add IP MASK [GW] | remove | renew]
   Read or set the network interface configuration (the /net/ipifc tree).
   (no args)         print the interface status + the dynamic ndb
   add IP MASK [GW]  assign a static address (MASK = 255.255.255.0, /24, or 24)
   remove            clear the address + default route
+  renew             re-acquire the DHCP lease (force a fresh DISCOVER)
   --color[=WHEN]    colorize headers/errors: always (default) | never | auto
   --help            show this help
 
@@ -52,6 +54,7 @@ Examples:
   ipconfig add 192.168.1.50 24   # a static address with a /24 mask
   ipconfig add 10.0.0.5 255.255.255.0 10.0.0.1   # with a gateway
   ipconfig remove                # clear the address
+  ipconfig renew                 # re-acquire the lease via DHCP
 ";
 
 fn run(args: Args) -> i64 {
@@ -86,10 +89,14 @@ fn run(args: Args) -> i64 {
         None => show(on),
         Some("add") => add(&ops[1..], on),
         Some("remove") | Some("down") => ctl("remove", on),
+        Some("renew") => ctl("renew", on),
         Some(_) => {
             let emb = color::col(palette::EMBER, on);
             let rst = color::reset(on);
-            eprintln!("{}ipconfig:{} usage: ipconfig [add IP MASK [GW] | remove]", emb, rst);
+            eprintln!(
+                "{}ipconfig:{} usage: ipconfig [add IP MASK [GW] | remove | renew]",
+                emb, rst
+            );
             1
         }
     }

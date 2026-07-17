@@ -27,16 +27,25 @@
 
 #include "test.h"
 
+#include <thylacine/dev.h>
 #include <thylacine/handle.h>
 #include <thylacine/pipe.h>
 #include <thylacine/proc.h>
 #include <thylacine/spoor.h>
 #include <thylacine/types.h>
 
+// The boot ramfs Dev — the seekable known-content FS the #37 positioned-I/O
+// tests read (/welcome is pinned by tools/build.sh).
+extern struct Dev devramfs;
+
 // Inner SVC handlers (extern declarations; defined in kernel/syscall.c).
 extern int sys_pipe_for_proc(struct Proc *p, hidx_t *out_rd, hidx_t *out_wr);
 extern s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len);
 extern s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len);
+extern s64 sys_pread_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len,
+                              s64 off);
+extern s64 sys_pwrite_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf,
+                               u64 len, s64 off);
 
 void test_sys_pipe_allocates_two_distinct_spoor_handles(void);
 void test_sys_pipe_proc_free_releases_handles(void);
@@ -45,6 +54,9 @@ void test_sys_rw_write_then_read_round_trip(void);
 void test_sys_rw_rights_check(void);
 void test_sys_rw_zero_length_validates_fd(void);
 void test_sys_rw_read_after_close_returns_eof(void);
+void test_sys_prw_pipe_not_seekable(void);
+void test_sys_pread_devramfs_offset_and_cursor(void);
+void test_sys_prw_rights_and_walkonly(void);
 
 // Local copy of the proc-test helpers used by test_handle.c. Kept
 // independent so the two test files can be reordered without import
@@ -320,6 +332,140 @@ void test_sys_pipe_handle_close_releases_one_end(void) {
         "ring freed after second end close");
     TEST_EXPECT_EQ(spoor_total_freed() - spoor_freed_before, 2ull,
         "both Spoors freed");
+
+    drop_test_proc(p);
+}
+
+// =============================================================================
+// SYS_PREAD / SYS_PWRITE (#37) — positioned byte I/O.
+//
+// The positioned inners share spoor_read_common / spoor_write_common with the
+// cursor path; these tests pin the FOUR properties the sharing must uphold:
+// (a) the cursor is never read or advanced by a positioned op, (b) the
+// caller's offset is what the Dev sees (asserted against devramfs's known
+// /welcome content; the dev9p wire-offset twin lives in test_dev9p.c),
+// (c) positioned I/O on a non-seekable Dev is rejected up front (the POSIX
+// ESPIPE shape -- a pread on a pipe must NOT silently consume stream data),
+// (d) the rights + #81 CWALKONLY gates carry over unchanged.
+// =============================================================================
+
+// Walk a file out of the boot ramfs and open it. Returns a REF-OWNED Spoor
+// (the caller transfers it to handle_alloc, which ADOPTS the ref).
+static struct Spoor *prw_open_ramfs(const char *name) {
+    struct Spoor *root = devramfs.attach("");
+    if (!root) return NULL;
+    const char *names[1] = { name };
+    struct Walkqid *wq = devramfs.walk(root, NULL, names, 1);
+    spoor_unref(root);
+    if (!wq) return NULL;
+    if (wq->nqid != 1) { walkqid_free(wq); return NULL; }
+    struct Spoor *f = wq->spoor;
+    walkqid_free(wq);
+    if (!devramfs.open(f, 0)) { spoor_unref(f); return NULL; }
+    return f;
+}
+
+void test_sys_prw_pipe_not_seekable(void) {
+    struct Proc *p = make_test_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    hidx_t fd_rd = -1, fd_wr = -1;
+    TEST_EXPECT_EQ(sys_pipe_for_proc(p, &fd_rd, &fd_wr), 0, "sys_pipe");
+
+    u8 buf[8] = { 0 };
+    // devpipe has no byte offsets (dev->seekable == false): positioned I/O
+    // fails up front instead of silently acting as a cursor-free stream op.
+    TEST_EXPECT_EQ(sys_pwrite_for_proc(p, fd_wr, buf, 8, 0), -1L,
+        "pwrite on a pipe rejected (not seekable)");
+    TEST_EXPECT_EQ(sys_pread_for_proc(p, fd_rd, buf, 8, 0), -1L,
+        "pread on a pipe rejected (not seekable)");
+    // The seekable gate sits BEFORE the len==0 short-circuit, so even the
+    // zero-length probe reports the ESPIPE-shaped reject.
+    TEST_EXPECT_EQ(sys_pwrite_for_proc(p, fd_wr, NULL, 0, 0), -1L,
+        "zero-length pwrite on a pipe still rejected");
+
+    // The rejects perturbed nothing: the cursor path round-trips.
+    const u8 payload[4] = { 1, 2, 3, 4 };
+    TEST_EXPECT_EQ(sys_write_for_proc(p, fd_wr, payload, 4), 4L, "write OK");
+    u8 got[4] = { 0 };
+    TEST_EXPECT_EQ(sys_read_for_proc(p, fd_rd, got, 4), 4L, "read OK");
+    TEST_ASSERT(got[0] == 1 && got[3] == 4, "payload intact");
+
+    drop_test_proc(p);
+}
+
+void test_sys_pread_devramfs_offset_and_cursor(void) {
+    // /welcome content is pinned by tools/build.sh: "Welcome to Thylacine
+    // ramfs.\n" (28 bytes). Offsets are asserted against it.
+    struct Spoor *f = prw_open_ramfs("welcome");
+    if (!f) return;   // initrd without the smoke files (never in CI)
+    struct Proc *p = make_test_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    hidx_t fd = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, f);   // adopts the ref
+    TEST_ASSERT(fd >= 0, "handle_alloc");
+
+    u8 buf[32];
+    TEST_EXPECT_EQ(sys_pread_for_proc(p, fd, buf, 7, 0), 7L, "pread @0");
+    TEST_ASSERT(buf[0] == 'W' && buf[6] == 'e', "pread @0 = 'Welcome'");
+    TEST_EXPECT_EQ(sys_pread_for_proc(p, fd, buf, 4, 2), 4L, "pread @2");
+    TEST_ASSERT(buf[0] == 'l' && buf[1] == 'c' && buf[2] == 'o' && buf[3] == 'm',
+        "pread @2 = 'lcom'");
+    // Past-EOF -> 0; negative offset -> -1; off+len past INT64_MAX -> -1.
+    TEST_EXPECT_EQ(sys_pread_for_proc(p, fd, buf, 8, 4096), 0L,
+        "pread past EOF returns 0");
+    TEST_EXPECT_EQ(sys_pread_for_proc(p, fd, buf, 8, -1), -1L,
+        "negative offset rejected");
+    TEST_EXPECT_EQ(sys_pread_for_proc(p, fd, buf, 8,
+                                      (s64)0x7FFFFFFFFFFFFFFCLL), -1L,
+        "off+len past INT64_MAX rejected");
+
+    // The cursor is untouched by everything above: a cursor read still
+    // starts at byte 0, and a pread BETWEEN cursor reads does not move it.
+    TEST_EXPECT_EQ(sys_read_for_proc(p, fd, buf, 4), 4L, "cursor read");
+    TEST_ASSERT(buf[0] == 'W' && buf[3] == 'c', "cursor read starts at 0");
+    TEST_EXPECT_EQ(sys_pread_for_proc(p, fd, buf, 2, 11), 2L, "pread @11");
+    TEST_ASSERT(buf[0] == 'T' && buf[1] == 'h', "pread @11 = 'Th'");
+    TEST_EXPECT_EQ(sys_read_for_proc(p, fd, buf, 3), 3L, "cursor read 2");
+    TEST_ASSERT(buf[0] == 'o' && buf[1] == 'm' && buf[2] == 'e',
+        "cursor continued at 4 (pread did not move it)");
+
+    drop_test_proc(p);   // releases the handle -> the Spoor
+}
+
+void test_sys_prw_rights_and_walkonly(void) {
+    struct Proc *p = make_test_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    // A WRITE-only handle cannot pread (the RIGHT_READ gate) -- the
+    // omode-derived-rights shape (#46 family) applied to the positioned ops.
+    struct Spoor *fw = prw_open_ramfs("welcome");
+    if (!fw) { drop_test_proc(p); return; }
+    hidx_t fdw = handle_alloc(p, KOBJ_SPOOR, RIGHT_WRITE, fw);
+    TEST_ASSERT(fdw >= 0, "handle_alloc W-only");
+    u8 buf[8];
+    TEST_EXPECT_EQ(sys_pread_for_proc(p, fdw, buf, 8, 0), -1L,
+        "pread on a WRITE-only handle rejected");
+
+    // A READ-only handle cannot pwrite.
+    struct Spoor *fr = prw_open_ramfs("welcome");
+    TEST_ASSERT(fr != NULL, "open welcome (r)");
+    hidx_t fdr = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, fr);
+    TEST_ASSERT(fdr >= 0, "handle_alloc R-only");
+    TEST_EXPECT_EQ(sys_pwrite_for_proc(p, fdr, buf, 8, 0), -1L,
+        "pwrite on a READ-only handle rejected");
+
+    // #81: a CWALKONLY (O_PATH) handle does no byte I/O -- positioned
+    // included, len 0 included.
+    struct Spoor *fo = prw_open_ramfs("welcome");
+    TEST_ASSERT(fo != NULL, "open welcome (opath)");
+    fo->flag |= CWALKONLY;
+    hidx_t fdo = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, fo);
+    TEST_ASSERT(fdo >= 0, "handle_alloc walkonly");
+    TEST_EXPECT_EQ(sys_pread_for_proc(p, fdo, buf, 8, 0), -1L,
+        "pread on O_PATH rejected");
+    TEST_EXPECT_EQ(sys_pwrite_for_proc(p, fdo, buf, 8, 0), -1L,
+        "pwrite on O_PATH rejected");
+    TEST_EXPECT_EQ(sys_pread_for_proc(p, fdo, NULL, 0, 0), -1L,
+        "zero-length pread on O_PATH rejected");
 
     drop_test_proc(p);
 }

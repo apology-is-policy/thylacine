@@ -838,6 +838,25 @@ struct Spoor *mount_lookup(struct Territory *territory, struct Spoor *probe) {
     return src;
 }
 
+bool mount_is_point_id(struct Territory *territory, int dc, u32 devno,
+                       u64 qid_path) {
+    if (!territory)                    return false;
+    if (territory->magic != PGRP_MAGIC) extinction("mount_is_point_id on corrupted Territory");
+
+    bool hit = false;
+    spin_lock(&territory->ns_lock);
+    for (int i = 0; i < territory->nmounts; i++) {
+        const struct PgrpMount *m = &territory->mounts[i];
+        if (m->mp_dc == dc && m->mp_devno == devno &&
+            m->mp_qid_path == qid_path) {
+            hit = true;
+            break;
+        }
+    }
+    spin_unlock(&territory->ns_lock);
+    return hit;
+}
+
 // =============================================================================
 // chroot (root-Spoor pivot) — P5-stratumd-stub-bringup-e2.
 // =============================================================================

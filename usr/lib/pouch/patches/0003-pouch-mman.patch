@@ -1,15 +1,17 @@
 pouch boundary-line patch 0003 - the anonymous-memory backend.
 
-Phase 6 sub-chunk 7b (pouch-mem). Retargets musl's mman/ lower half onto
-Thylacine's anonymous-memory syscalls (SYS_BURROW_ATTACH = 37 /
-SYS_BURROW_DETACH = 38; <thylacine/syscall.h>; landed at sub-chunk 7a -
-docs/reference/79-sys-burrow.md). Three files, one change:
+Phase 6 sub-chunk 7b (pouch-mem); retargeted to the overcommit model at #321.
+Retargets musl's mman/ lower half onto Thylacine's anonymous-memory syscalls.
+mmap maps onto SYS_BURROW_ATTACH_LAZY = 83 (the overcommit reserve: demand-zero
+RW, no pages until first touch - the Linux anon-mmap contract); munmap maps onto
+SYS_BURROW_DETACH = 38 (<thylacine/syscall.h>; docs/reference/79-sys-burrow.md +
+127-overcommit.md). Three files, one change:
 
   arch/aarch64/bits/syscall.h.in  Two macros that 0001 set to the 0xFFFF
-      sentinel get their Thylacine numbers: __NR_mmap = 37, __NR_munmap =
+      sentinel get their Thylacine numbers: __NR_mmap = 83, __NR_munmap =
       38. Future awk-filter re-runs after a musl re-vendor extend 0001's
       m[] table with two entries:
-          m["mmap"]="37"; m["munmap"]="38";
+          m["mmap"]="83"; m["munmap"]="38";
       All other mman/ macros stay at 0xFFFF - the sentinel guard short-
       circuits to -ENOSYS, which is the contract pouch wants for
       madvise / mprotect / mremap / mlock / msync / mincore / ... (none
@@ -74,7 +76,7 @@ P-4 (the boundary line holds - mman/ is lower-half).
  #define __NR_clone 0xFFFF
  #define __NR_execve 0xFFFF
 -#define __NR_mmap 0xFFFF
-+#define __NR_mmap 37
++#define __NR_mmap 83
  #define __NR_fadvise64 0xFFFF
  #define __NR_swapon 0xFFFF
  #define __NR_swapoff 0xFFFF
@@ -97,15 +99,15 @@ P-4 (the boundary line holds - mman/ is lower-half).
 -#define UNIT SYSCALL_MMAP2_UNIT
 -#define OFF_MASK ((-0x2000ULL << (8*sizeof(syscall_arg_t)-1)) | (UNIT-1))
 +   pouch's __mmap retains the POSIX prototype for source-compatibility but
-+   maps only the anonymous subset onto Thylacine's SYS_BURROW_ATTACH and
-+   refuses everything else with ENOSYS. The kernel chooses the VA; the
-+   region is always demand-zero RW (W^X invariant I-12 forbids X at attach
-+   - mmap PROT bits are silently upgraded to RW); an anonymous region has
-+   no offset. `start`, `prot`, `fd`, `off` are accepted and ignored.
++   maps only the anonymous subset onto Thylacine's SYS_BURROW_ATTACH_LAZY
++   and refuses everything else with ENOSYS. The kernel chooses the VA; the
++   region is demand-zero RW and overcommitted (no pages until first touch;
++   W^X invariant I-12 forbids X, so mmap PROT bits are upgraded to RW); an
++   anon region has no offset. `start`, `prot`, `fd`, `off` are ignored.
 +   MAP_FIXED is rejected (the v1.0 burrow-attach window is kernel-chosen).
 
 +   SYS_mmap is __NR_mmap after the 0001-syscall-seam-retarget aliases it
-+   to Thylacine number 37 (= SYS_BURROW_ATTACH; see thylacine/syscall.h).
++   to Thylacine number 83 (= SYS_BURROW_ATTACH_LAZY; see thylacine/syscall.h).
 +   The call passes ONE argument, the length - all other Linux mmap fields
 +   are stripped at the seam. */
  void *__mmap(void *start, size_t len, int prot, int flags, int fd, off_t off)
@@ -162,7 +164,7 @@ P-4 (the boundary line holds - mman/ is lower-half).
 +/* pouch: musl's __munmap targets Linux munmap(2); Thylacine's equivalent is
 +   SYS_BURROW_DETACH, which takes the same (vaddr, len) shape. The kernel
 +   matches against the installed VMA exactly - the page-rounded
-+   [start, start + len) range must match what SYS_BURROW_ATTACH (= __mmap)
++   [start, start + len) range must match what SYS_BURROW_ATTACH_LAZY (= __mmap)
 +   produced. mallocng tracks `needed` exactly as the length it passed to
 +   __mmap, so the round-trip is lossless.
 

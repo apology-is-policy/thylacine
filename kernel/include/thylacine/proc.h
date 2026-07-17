@@ -10,7 +10,8 @@
 // History:
 //   P2-A:  pid + threads list + thread_count.
 //   P2-D:  + state (ALIVE / ZOMBIE) + parent + children + sibling
-//          + exit_status + exit_msg + child_done Rendez.
+//          + exit_status + exit_msg + the child-reap wait (multi-waiter
+//          child_waiters since #344; single-waiter child_done Rendez before).
 //   P2-E:  + territory pointer (Territory).
 //   P2-F:  + handle table head.
 //   P2-G:  + address space (page table root, vma_tree) + credentials
@@ -22,6 +23,7 @@
 #include <thylacine/caps.h>     // caps_t (P4-Ic3 rfork_with_caps signature)
 #include <thylacine/page.h>     // paddr_t (P3-Bcb pgtable_root)
 #include <thylacine/rendez.h>
+#include <thylacine/poll.h>      // poll_waiter_list -- the multi-waiter child-reap wait (#344)
 #include <thylacine/spinlock.h>
 #include <thylacine/types.h>
 
@@ -60,6 +62,9 @@ struct Territory;
 struct HandleTable;
 struct Vma;
 struct Allowance;   // I-34 hardware allowance (<thylacine/allowance.h>)
+struct Env;         // G15 per-Proc environment group (<thylacine/env.h>)
+struct Spoor;       // 8a-1b debug_owner slot token (<thylacine/spoor.h>)
+struct debug_hw;    // 8a-2b per-Proc HW-breakpoint table (arch/arm64/hwdebug.h)
 
 // A-1a: identity model (docs/IDENTITY-DESIGN.md §3.3 + §9.1; ARCH §28 I-22).
 //
@@ -103,8 +108,25 @@ struct Allowance;   // I-34 hardware allowance (<thylacine/allowance.h>)
 //                      kstack (256 threads -> 8 MiB kstacks).
 //   PROC_CHILD_MAX  -- live DIRECT children (the direct-fork rate).
 #define PROC_PAGE_MAX   65536u   // 256 MiB at 4-KiB pages
+// CF-3 A audit F1: per-Proc cap on TRANSIENT byte-I/O bounce heap (the
+// SYS_RW_MAX kmalloc tier in the read/write/pread/pwrite handlers).
+// 512 KiB = four concurrent 128-KiB bulk ops -- ample for the measured
+// build workloads (84% of ops run at in-flight depth 1) while bounding
+// the order-5 heap a Proc's BLOCKED ops can pin (a held-open pipe / idle
+// socket / hung server holds its bounce for the block's duration) at
+// 64x below the unbudgeted threads x SYS_RW_MAX. Over-budget ops degrade
+// to the 4-KiB stack tier -- shorter, never failed.
+#define PROC_BOUNCE_MAX (512u * 1024u)
 #define PROC_THREAD_MAX 256
 #define PROC_CHILD_MAX  256
+// PROC_VMA_MAX -- live VMAs (the I-32 FOURTH axis; overcommit, ARCH section 6.5).
+// The Linux vm.max_map_count analog. The eager attach path is already transitively
+// bounded (each VMA charges >=1 page, so PROC_PAGE_MAX caps eager VMAs), but a FREE
+// lazy reservation (SYS_BURROW_ATTACH_LAZY -- uncharged at attach) reopens a
+// VMA-slab DoS this axis closes. Charged at vma_insert / uncharged at vma_remove,
+// both under p->vma_lock; TCB-exempt. 65536 * sizeof(struct Vma) (64 B) = 4 MiB of
+// Vma slab is the per-Proc ceiling.
+#define PROC_VMA_MAX    65536u
 
 struct Proc {
     u64               magic;            // PROC_MAGIC
@@ -131,12 +153,25 @@ struct Proc {
     // a per-Proc exit_msg buffer to copy from user.
     const char       *exit_msg;
 
-    // P2-D: parent's wait Rendez. Parent's wait_pid() sleeps on this
-    // until any child enters ZOMBIE (which is the wakeup edge). Single-
-    // waiter convention (only the parent waits on its own children;
-    // multiple parent threads waiting concurrently are a Phase 5+
-    // concern handled by promoting to multi-waiter wait queue).
-    struct Rendez     child_done;
+    // P2-D / #344: parent's child-reap wait list. Every Thread that calls
+    // wait_pid_for registers its OWN stack-local poll_waiter here and parks
+    // on its OWN private Rendez; a child entering ZOMBIE (the wakeup edge)
+    // calls poll_waiter_list_wake under g_proc_table_lock, which wakes EVERY
+    // registered waiter. This is the #344 multi-waiter lift the old single-
+    // waiter `struct Rendez child_done` could not do: a 2nd concurrent waiter
+    // tripped sleep's single-waiter assert (-> extinction), so the RW-2
+    // 2B-F1/F2 `wait_active` guard had to REFUSE the 2nd caller (-1) rather
+    // than serve it -- which broke multi-threaded Go's parallel `go build`.
+    // `struct poll_waiter_list` is byte-identical in layout to the old
+    // `struct Rendez` (a spinlock + a pointer), so the swap is offset-stable
+    // (every following field keeps its pinned offset). The list is the
+    // wake-RELAY only; the AUTHORITATIVE "is a matching zombie reapable"
+    // decision is wait_pid_for's re-scan of `children` under g_proc_table_-
+    // lock (register-then-observe, the poll.c discipline). poll_waiter_list_-
+    // wake is called UNDER g_proc_table_lock (the established exits() order
+    // proc_table_lock -> list -> rendez), so the parent stays alive through
+    // the wake and no death-wake is lost (I-9).
+    struct poll_waiter_list  child_waiters;
 
     // P2-Eb: territory (Plan 9 Territory). At v1.0 each Proc has its own
     // private Territory (rfork(RFPROC) calls territory_clone). Phase 5+ adds
@@ -248,18 +283,16 @@ struct Proc {
     // visible via future debug surfaces for audit verification.
     u32                proc_flags;
 
-    // RW-2 2B-F1/F2: per-Proc wait_pid_for serialization (repurposed from the
-    // former srv_conn_count/_pad_srv reserved u32, removed in stalk-3b-β -- same
-    // size + offset at the time, so this field's offset is unchanged; the struct
-    // later grew to 272 when the #65 resource-floor counters appended).
-    // At most ONE Thread of a Proc may be inside wait_pid_for's reap-or-sleep
-    // critical section at a time: p->child_done is a single-waiter Rendez (a 2nd
-    // concurrent waiter trips sleep's single-waiter assert -> extinction) and
-    // wait_pid_cond walks p->children locklessly (racing a peer's reap+free ->
-    // UAF). Accessed via __atomic exchange(1)/store(0); 0 == free. The v1.x
-    // multi-waiter child_done + proc_table_lock-protected cond promotion lifts
-    // this from "refuse the 2nd concurrent caller" to "all may wait".
-    u32                wait_active;
+    // #344: formerly `wait_active`, the RW-2 2B-F1/F2 per-Proc wait_pid_for
+    // serialization that refused a genuinely-concurrent 2nd waiter with -1.
+    // The #344 multi-waiter lift -- a per-Thread stack `poll_waiter` on
+    // `child_waiters` + the g_proc_table_lock-protected re-scan (replacing the
+    // single-waiter `child_done` Rendez + the lockless `wait_pid_cond` walk
+    // that the guard existed to protect) -- RETIRES the guard: all may wait.
+    // The field is kept (now reserved) so every following field holds its
+    // pinned offset; the size + offset _Static_asserts below depend on it.
+    // KP_ZERO inits it to 0; nothing reads or writes it.
+    u32                _reserved0;
 
     // P5-corvus-srv: the kernel's per-Proc identity tag — the
     // thylacine's stripe pattern; every animal's is unique. Drawn from
@@ -436,6 +469,80 @@ struct Proc {
     // reduction, I-2); freed by proc_free (allowance_free). KP_ZERO inits it
     // NULL (broad/none). See <thylacine/allowance.h>.
     struct Allowance  *allowance;
+
+    // I-32 FOURTH axis (overcommit, ARCH section 6.5): live VMA count -- the DoS
+    // bound a free (uncharged-at-attach) SYS_BURROW_ATTACH_LAZY reservation needs
+    // (eager self-limits at ~PROC_PAGE_MAX VMAs since each charges >=1 page). ++ at
+    // vma_insert (gated on PROC_VMA_MAX unless exempt), -- at vma_remove, both under
+    // p->vma_lock (the VMA-list mutation domain) -> the cap is EXACT. Counted
+    // uniformly for every VMA (attach / exec image / guard / DMA / Weft share). NOT
+    // propagated by rfork (KP_ZERO -> 0). PRINCIPAL_SYSTEM is exempt from the CAP
+    // (the count is still maintained for observability). All accesses use __atomic_*;
+    // a FUTURE /proc reader (none is wired at this commit -- audit F2) MUST use
+    // __atomic_load_n for a coherent cross-Proc snapshot, as page_count's reader does.
+    // Like page_count, it is a resource axis, not a privilege axis (orthogonal to I-22).
+    u32                vma_count;
+
+    // G15 (ARCH section 9.7): the per-Proc environment group -- the Plan 9 Egrp
+    // surfaced as the per-Proc /env directory (devenv). Lazily allocated (NULL ==
+    // empty), deep-COPIED across rfork by env_clone_into (the Plan 9 default-copy;
+    // the reserved RFENVG share-flag stays deferred), freed by proc_free
+    // (env_free). KP_ZERO inits it NULL. Shared across a Proc's threads (one
+    // p->env, env->lock serializes); never shared cross-Proc at v1.0. See
+    // <thylacine/env.h>.
+    struct Env        *env;
+
+    // CF-3 A audit F1 (an I-32-shaped resource axis): live TRANSIENT bounce
+    // bytes -- the byte-I/O syscall staging's heap tier currently allocated
+    // by this Proc's in-flight reads/writes. Charged before the kmalloc,
+    // uncharged at the free on every path. A blocked dev->read/write (a
+    // held-open pipe, an idle socket, a hung server) holds its charge for
+    // the block's duration, so the cap bounds the order-5 heap a Proc can
+    // pin: an over-budget op DEGRADES to the stack tier (a short op, never
+    // a failure). PRINCIPAL_SYSTEM is exempt per proc_resource_exempt (the
+    // I-32 pattern; the counter is not maintained for exempt Procs -- the
+    // charge and uncharge gates are symmetric). NOT propagated by rfork
+    // (KP_ZERO -> 0). __atomic_* CAS charge / fetch_sub uncharge; no lock.
+    u64                bounce_bytes;
+
+    // 8a-1b (I-39; docs/DEBUG-FS-DESIGN.md section 7.2): the one-debugger attach
+    // slot. NULL = not being debugged; non-NULL = the /proc/<pid>/ctl Spoor that
+    // holds the debug attach (an IDENTITY TOKEN only -- NEVER dereferenced, only
+    // compared for pointer-equality, so no spoor_ref is taken and the debugger's
+    // fd Spoor and this target have independent lifetimes: no cross-ref, no UAF).
+    // Guarded by g_proc_table_lock: claimed (attach), released (detach / the
+    // ctl-fd close hook, incl. debugger death via #68/#926 close-at-exit), and
+    // -- from 8a-1b-beta -- read by proc_group_terminate's death cascade, all
+    // under proc_for_each. A second attach on a non-NULL slot is Einuse (the Plan
+    // 9 one-debugger-per-target shape). KP_ZERO at proc_alloc inits it NULL, so a
+    // reused Proc struct never carries a stale token. NOT propagated by rfork.
+    struct Spoor      *debug_owner;
+
+    // 8a-1b-beta (I-39; docs/DEBUG-FS-DESIGN.md section 4.2/4.4): the per-Proc
+    // debugger stop flag (the model's `sflag`). 0 = run, 1 = a debugger has
+    // requested every thread park at its next EL0-return checkpoint. SET (RELEASE)
+    // by proc_debug_stop_deliver, CLEARED (RELEASE) by proc_debug_resume -- the
+    // clear is ordered BEFORE the resume's per-peer wake so a thread registering
+    // on the tail after the wake re-observes the cleared flag (the I-9 register-
+    // then-observe close, the mirror of proc_group_terminate's set-before-walk).
+    // READ (ACQUIRE) at the EL0-return tail (el0_return_stop_check) + in the park
+    // wake-cond. A plain u32 driven by __atomic_* (the group_exit_msg / proc_flags
+    // idiom). KP_ZERO -> 0 (a reused struct never carries a stale stop); NOT
+    // propagated by rfork (a spawned child is not being debugged).
+    u32                debug_stop_req;
+
+    // 8a-2b (I-39; DEBUG-FS-DESIGN section 5): the per-Proc hardware-breakpoint
+    // table (struct debug_hw, arch/arm64/hwdebug.h). NULL = no breakpoints (the
+    // overwhelmingly common case); non-NULL = lazily kmalloc'd on the first
+    // `hwbreak` ctl verb and freed at proc_free (never at detach -- so the
+    // context-switch reader hwdebug_switch_in never derefs freed memory; detach
+    // clears the table to bp_count=0 instead). The POINTER is set once (RELEASE)
+    // under g_proc_table_lock when the target is fully-stopped, read (ACQUIRE) in
+    // the ctx-switch install hook + the EC-0x30 handler. The table CONTENTS
+    // (bp_count/bp_va) are mutated only stopped (add/remove) or benign-running
+    // (detach's count=0), guarded by the atomic bp_count. KP_ZERO inits it NULL;
+    // NOT propagated by rfork (a spawned child is not being debugged).
+    struct debug_hw   *debug_hw;
 };
 
 #define PROC_FLAG_NODUMP            (1u << 0)
@@ -480,11 +587,33 @@ struct Proc {
 // thread, and an armed kproc would *_INTR every kernel-thread sleep).
 #define PROC_FLAG_INTR_TERMINATE_PENDING (1u << 7)
 
-_Static_assert(sizeof(struct Proc) == 280,
-               "struct Proc size pinned at 280 bytes (the #65 272 baseline + "
-               "the I-34 hardware-allowance pointer = 8 -> 280). Adding a field "
-               "grows the SLUB cache; update this assert deliberately so the "
-               "change is intentional.");
+_Static_assert(sizeof(struct Proc) == 328,
+               "struct Proc size pinned at 328 bytes (the 320 baseline + the 8a-2b "
+               "debug_hw pointer @320). Adding a field grows the SLUB cache; update "
+               "this assert deliberately so the change is intentional.");
+_Static_assert(__builtin_offsetof(struct Proc, debug_hw) == 320,
+               "8a-2b debug_hw (the per-Proc HW-breakpoint table pointer) appends "
+               "after debug_stop_req (offset 320, the next 8-aligned slot past the "
+               "u32 @312 + its pad); existing offsets stay stable (KP_ZERO inits it "
+               "NULL = no breakpoints).");
+_Static_assert(__builtin_offsetof(struct Proc, debug_stop_req) == 312,
+               "8a-1b-beta debug_stop_req (the I-39 per-Proc debugger stop flag) "
+               "appends after debug_owner (offset 312, the next slot past the Spoor* "
+               "@304); existing offsets stay stable (KP_ZERO inits it 0 = run).");
+_Static_assert(__builtin_offsetof(struct Proc, bounce_bytes) == 296,
+               "CF-3 A bounce_bytes appends after the G15 env pointer (offset 296); "
+               "existing offsets stay stable (KP_ZERO inits it 0).");
+_Static_assert(__builtin_offsetof(struct Proc, debug_owner) == 304,
+               "8a-1b debug_owner (the I-39 one-debugger attach slot) appends after "
+               "bounce_bytes (offset 304, the next 8-aligned slot past the u64 @296); "
+               "existing offsets stay stable (KP_ZERO inits it NULL = not debugged).");
+_Static_assert(__builtin_offsetof(struct Proc, vma_count) == 280,
+               "I-32 fourth-axis vma_count appends after the I-34 allowance pointer "
+               "(offset 280); existing offsets stay stable (KP_ZERO inits it 0).");
+_Static_assert(__builtin_offsetof(struct Proc, env) == 288,
+               "G15 per-Proc env pointer appends after vma_count (offset 288, the "
+               "next 8-aligned slot past the u32 @280 + its pad); existing offsets "
+               "stay stable (KP_ZERO inits it NULL = empty).");
 _Static_assert(__builtin_offsetof(struct Proc, page_count) == 264,
                "#65 resource-floor counters append after the A-4a legate "
                "block; existing offsets stay stable (KP_ZERO inits them 0).");
@@ -530,7 +659,7 @@ void proc_publish_init(struct Proc *p);
 struct Proc *proc_init_proc(void);
 
 // SLUB-allocate a fresh Proc descriptor. Initializes pid (next monotonic
-// pid), threads = NULL, thread_count = 0, state = ALIVE, child_done
+// pid), threads = NULL, thread_count = 0, state = ALIVE, child_waiters
 // initialized. parent / children / sibling left NULL (caller wires
 // linkage). Returns NULL on OOM.
 struct Proc *proc_alloc(void);
@@ -559,6 +688,16 @@ bool proc_resource_exempt(const struct Proc *p);
 //   overflow. uncharge clamp-subtracts (never underflows past 0).
 bool proc_page_charge(struct Proc *p, u32 npages);
 void proc_page_uncharge(struct Proc *p, u32 npages);
+
+// proc_vma_charge / proc_vma_uncharge -- the live-VMA counter (I-32 FOURTH axis;
+//   the overcommit VMA-slab DoS bound). The CALLER MUST HOLD p->vma_lock (the
+//   vma_insert/vma_remove domain), so the check + charge is atomic against a
+//   sibling attach and the cap is EXACT. charge returns true (and ++vma_count) if
+//   the Proc is exempt OR vma_count < PROC_VMA_MAX; false (charging nothing) if it
+//   would exceed (the vma_insert caller rejects with -1, like an overlap) or the
+//   counter would saturate. uncharge clamp-decrements (never underflows past 0).
+bool proc_vma_charge(struct Proc *p);
+void proc_vma_uncharge(struct Proc *p);
 
 // proc_thread_cap_ok -- the thread-spawn gate. Returns true if the Proc is
 //   exempt OR thread_count < PROC_THREAD_MAX. Takes g_proc_table_lock for the
@@ -652,7 +791,8 @@ int rfork_with_caps(unsigned flags, void (*entry)(void *), void *arg,
 //   1. Mark the Proc ZOMBIE, set exit_status + exit_msg.
 //   2. Mark the calling Thread EXITING — sched() will leave it out of
 //      the run tree.
-//   3. Wake parent's child_done Rendez (if parent exists).
+//   3. Wake parent's child_waiters -- every Thread waiting in wait_pid_for
+//      (if a parent exists). #344 multi-waiter.
 //   4. yield via sched(). exits() never returns; the thread is left in
 //      EXITING state until wait() reaps it.
 //
@@ -663,7 +803,7 @@ int rfork_with_caps(unsigned flags, void (*entry)(void *), void *arg,
 //
 // Re-parenting of orphaned children: if the exiting Proc has children, they
 // re-parent to init (g_init_proc), or to kproc() while init is not up. The
-// adopter's child_done IS load-bearing: a child adopted already-ZOMBIE gets an
+// adopter's child_waiters wake IS load-bearing: a child adopted already-ZOMBIE gets an
 // explicit wakeup so an adopter blocked in wait_pid reaps it rather than
 // sleeping over it (the I-9 fix in proc_reparent_children); init reaps adoptees
 // via its getty supervisor loop.
@@ -699,7 +839,7 @@ void proc_fault_terminate(const char *name, uintptr_t faulting_addr);
 //      the wake but does not extinct.
 //   2. Mark self THREAD_EXITING under g_proc_table_lock.
 //   3. If this was the last non-EXITING Thread in the Proc, ALSO mark
-//      the Proc ZOMBIE with exit_status = 0 + wake parent's child_done
+//      the Proc ZOMBIE with exit_status = 0 + wake parent's child_waiters
 //      (mirrors exits("ok")).
 //   4. yield via sched(); never returns.
 //
@@ -744,6 +884,77 @@ void proc_group_terminate(struct Proc *p, const char *msg);
 // Otherwise returns. #713: runs BEFORE the DAIF-masked ELR-set..eret window;
 // the die path sched()s away and never reaches the eret.
 void el0_return_die_check(void);
+
+// 8a-1b-beta debugger stop/resume (I-39; docs/DEBUG-FS-DESIGN.md section 4.2/4.4;
+// specs/debug_stop.tla). The stop machinery sits on the death-path lineage and
+// composes with it (DeathWinsOverStop): the EL0-return tail runs the stop-check
+// AFTER el0_return_die_check, so death always wins; a resume re-runs the die-
+// check on unpark.
+//
+// proc_debug_stop_deliver: request every thread of `p` park at its next EL0-
+// return checkpoint. Sets p->debug_stop_req (RELEASE), then (8c-2) WAKES every
+// sleeping peer (torpor_wake_all_for_proc + the per-peer wait_lock rendez wake,
+// proc_group_terminate's cascade) so a thread blocked in an indefinite syscall
+// sleep returns, re-observes the flag, and DETOURS to park on its debug_rendez
+// (proc_debug_stop_sleeper_park), then smp_resched_others() so a peer RUNNING at
+// EL0 on another CPU traps to its tail (the periodic tick is the floor). A thread
+// already in the kernel observes the flag when its syscall/handler returns to the
+// tail. LOCK CONTRACT: caller holds g_proc_table_lock (mirrors
+// proc_group_terminate; the flag-set + wake + IPI take no sleeping lock; the
+// per-peer wait_lock walk is g_proc_table_lock -> wait_lock -> r->lock).
+void proc_debug_stop_deliver(struct Proc *p);
+
+// proc_debug_stop_sleeper_park: the nested debug-stop park a blocking
+// sleep()/tsleep() detours into when a debugger stop is pending (8c-2,
+// DEBUG-FS-DESIGN 5c.2). Sleeps on the caller's own debug_rendez until the stop
+// clears; returns SLEEP_OK (re-check the original wait cond + re-block) or
+// SLEEP_INTR (dying/soft-int while stop-parked -> unwind + die at the tail;
+// DEATH WINS). Called from sched.c's sleep()/tsleep() detour with their wait
+// loop locks RELEASED. The `r != &debug_rendez` detour gate makes this
+// nested park (r == debug_rendez) skip the stop-check -> no recursion.
+int proc_debug_stop_sleeper_park(struct Thread *t);
+
+// proc_debug_fault_stop: the EC-path (hardware bp/wp hit or single-step
+// completion) stop delivery. Unlike proc_debug_stop_deliver (the ctl `stop`
+// verb, which runs under g_proc_table_lock via proc_for_each with debug_owner
+// already verified), a hardware fire arrives in the TARGET's own exception
+// context holding no lock, so it must SERIALIZE with a concurrent detach / ctl-fd
+// close (which clears debug_owner + the hw table + calls proc_debug_resume, all
+// under g_proc_table_lock). This takes g_proc_table_lock and delivers the stop
+// ONLY while a debugger still owns the slot (p->debug_owner != NULL), then
+// returns whether it delivered. Without the gate a fire's debug_stop_req store
+// could land AFTER a detach's proc_debug_resume cleared it, parking the target
+// with no debugger left to resume it -- the 8a-2 SA-1 strand (specs/debug_stop.
+// tla StopImpliesOwned / NoStrand). Returns false (deliver skipped) when the
+// debugger detached in the race window; the EC caller then treats the fire as a
+// benign STALE arm (disables this CPU's debug regs + resumes the instruction).
+bool proc_debug_fault_stop(struct Proc *p);
+
+// proc_debug_resume: resume `p` -- clear p->debug_stop_req (RELEASE, ordered
+// BEFORE the wake so a thread registering at the tail after the walk re-observes
+// the cleared flag: the I-9 register-then-observe close, the mirror of
+// proc_group_terminate's set-before-walk) then wake every thread parked on its
+// OWN debug_rendez (walk p->threads, per-peer wait_lock -> wakeup, exactly the
+// #811 death-cascade shape, waking only debug-parked peers). Drives the model's
+// StartResume (start verb) AND ReleaseSlot (detach / ctl-fd close / debugger
+// death) -- the release paths in devproc.c call this after clearing debug_owner,
+// so a dead/detached debugger provably resumes its quarry (NoStrand). LOCK
+// CONTRACT: caller holds g_proc_table_lock (the p->threads walk + the
+// g_proc_table_lock -> wait_lock -> r->lock chain, acyclic).
+void proc_debug_resume(struct Proc *p);
+
+// 8a-1b-beta EL0-return-tail stop-check (specs/debug_stop.tla TailStep). Called
+// at every return-to-EL0 AFTER el0_return_die_check (+ notes on the sync tail),
+// so death/interrupt win over a stop. Fast-paths out when no debugger stop is
+// pending; otherwise parks the calling Thread on its own debug_rendez (register-
+// then-observe under wait_lock) until resumed, re-checking group death (terminate
+// here, never eret) on every wake. Returns to the tail (-> eret) when the stop
+// is cleared or a soft interrupt-terminate must be delivered at the next tail.
+// 8a-1c: `ctx` is the vector-supplied EL0 trapframe pointer (== the current SP);
+// recorded into the Thread so /proc/<pid>/regs reads the RIGHT saved frame (its
+// kstack offset is not fixed -- see thread.h debug_trapframe).
+struct exception_context;
+void el0_return_stop_check(struct exception_context *ctx);
 
 // P6-pouch-threads (sub-chunk 9a) audit F1 close: cross-module access to
 // `g_proc_table_lock` (kept static in proc.c). thread.c's

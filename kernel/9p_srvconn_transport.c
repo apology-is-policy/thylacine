@@ -36,11 +36,15 @@ static int srvconn_transport_send(void *ctx, const u8 *buf, size_t len) {
     // ALL-OR-NOTHING send (#841): srvconn_client_send_frame writes the WHOLE
     // frame or nothing (0 = ring full). With pipelining, c2s can transiently
     // hold a prior undrained frame, so a partial write would leave a fragment
-    // on the wire + desync the shared stream; all-or-nothing turns a full ring
-    // into a clean op failure (the client marks the session dead) instead.
+    // on the wire + desync the shared stream; all-or-nothing avoids the fragment.
+    // #349: a full-but-ALIVE ring (n == 0) is transient back-pressure, NOT a
+    // death -- surface it as P9_TRANSPORT_EAGAIN so client_run drains the reply
+    // path + retries instead of marking the whole session dead. A genuine break
+    // (n < 0 = c2s eof / framing bug) stays fatal.
     long n = srvconn_client_send_frame(st->cn, buf, (long)len);
-    if (n < 0)                return -1;
-    if ((size_t)n != len)     return -1;   // 0 (ring full) / short -> caller -EIO
+    if (n < 0)                return -1;                  // eof / framing -> fatal
+    if (n == 0)               return P9_TRANSPORT_EAGAIN; // ring full but alive
+    if ((size_t)n != len)     return -1;                 // partial (cannot happen)
     return (int)n;
 }
 

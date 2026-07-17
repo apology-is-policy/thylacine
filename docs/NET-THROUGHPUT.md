@@ -364,17 +364,30 @@ toucher creeps back.* The answer Weft must demonstrate:
   (the kernel validates everything). The cross-Proc hop is *not removed* — its *per-op cost*
   is removed; the isolation it buys is intact.
 
-### 5.4 The latency convergence (this subsumes NET-PERF N1)
+### 5.4 The latency picture (Weft's guest-wake half vs NET-PERF N1's netd-notice floor)
 
-The net-optimization arc has two halves: **latency** (the RX-wake floor — NET-PERF N1, the
-"netd parks for up to 50 ms because there is no pollable NIC-IRQ fd") and **throughput**
-(this doc). They converge on the **same mechanism**: Weft's readiness ring (§5.2-2) is the
-Shenango single-cache-line readiness poke — netd signals RX-ready over a shared line the
-guest observes immediately, so a reply that lands while the guest is parked wakes it at
-once. **Weft's data path removes the throughput round-trip; Weft's readiness ring removes
-the latency floor.** So the dataplane arc closes both halves — the ideologically-coherent
-end-state. (The separate "Tier 0/1/2 latency fork" the earlier session left open is resolved
-*into* Weft: the pollable-readiness mechanism is the readiness ring, not a bolt-on irq-fd.)
+The net-optimization arc has two halves: **latency** (NET-PERF N1) and **throughput** (this
+doc). N1 is precise (NET-PERF §2.1, ground-truthed by M6): the measured ~50 ms floor is
+**netd's own poll timeout** — netd cannot wait on the NIC IRQ and the 9P request fds together
+(`SYS_IRQ_WAIT` blocks; it is not pollable), so it polls the NIC on a ~50 ms timer and an RX
+frame waits up to that long before netd even *notices* it. That floor is on the
+**netd-notice** side, and the guest-facing readiness ring does **not** move it — netd still
+polls the NIC the same way.
+
+What Weft's readiness ring removes is the **second** crossing — the **guest-wake** round-trip.
+Once netd *has* the bytes, a native client observes RX-readiness over the shared cache line
+(the Shenango poke, §5.2-2) instead of a 9P reply round-trip + an elected-reader wake: a reply
+that lands while the client busy-polls is seen at memory speed, and a parked client is woken by
+its Loom CQ completion. So **Weft's data path removes the throughput round-trip and its
+readiness ring removes the guest-wake round-trip — both real, both on the *guest* side.**
+
+The netd-notice floor (the measured 50 ms) is closed by the **orthogonal** pollable
+NIC-IRQ-readiness fd (NET-PERF's "#1 lever"): a small kernel ABI making netd's NIC IRQ
+pollable, so its `t_poll` wakes on a NIC RX *or* a 9P request — a **separate net-perf chunk,
+not part of the Weft dataplane.** (So the earlier "Tier 0/1/2 latency fork" resolves to *two
+complementary mechanisms*, not one: the readiness ring is the guest-side wake; the NIC-IRQ fd
+is the netd-side wake. The honest claim is that Weft closes the guest-side latency it owns —
+not that it subsumes N1's netd-notice floor.)
 
 ### 5.5 Invariant I-37 + the spec reservation
 
@@ -573,9 +586,9 @@ dataplane arc the user committed.
   on the 9P fid** (Option B, §6.1 — superseding the earlier eager "data-fid auto-map" sketch).
   The mechanism:
   - **`Tweft(fid F) → Rweft(share_id, geometry)`** — a new Thylacine-private 9P op
-    (`P9_TWEFT = 134` / `P9_RWEFT = 135`, just past the Stratum-extension range
-    [`Tfallocate` 132/133; **128/129 are already `Tsync`/`Rsync`**]; the **#845
-    `Tflush` precedent** — a kernel-client-issued op the netd 9P server handles). The kernel
+    (`P9_TWEFT = 142` / `P9_RWEFT = 143` since the #371 renumber -- born 134/135,
+    which latently collided with Stratum `Tfadvise`/`Tpin`; the cross-project
+    registry is `docs/9P-EXTENSIONS.md`; the **#845 `Tflush` precedent** — a kernel-client-issued op the netd 9P server handles). The kernel
     dev9p client issues it on the shared `/net` client the **first** time a flow goes
     zero-copy.
   - **`SYS_WEFT_SHARE(ring_va, ring_size) → share_id / -1`** (netd-side, syscall 81). On
@@ -616,8 +629,8 @@ dataplane arc the user committed.
     the `dev9p_priv` binding + the `share_id` correlation + teardown + kernel tests) / 6b (netd:
     handle `Tweft` + alloc/register the ring + drive the desc ring on large Twrite/Tread + the
     live readiness park/wake + the `F_NOTIF` posting) / 6c (the native API + the in-guest E2E).
-    **Weft-6a-1 LANDED** (`Tweft`/`Rweft` + `p9_client_weft`; `P9_TWEFT = 134` / `P9_RWEFT =
-    135`). **Weft-6a-2 LANDED** — the `share_id` registry in `kernel/weft.c` + `SYS_WEFT_SHARE
+    **Weft-6a-1 LANDED** (`Tweft`/`Rweft` + `p9_client_weft`; `P9_TWEFT = 142` / `P9_RWEFT =
+    143` since #371 -- born 134/135). **Weft-6a-2 LANDED** — the `share_id` registry in `kernel/weft.c` + `SYS_WEFT_SHARE
     = 81` / `SYS_WEFT_MAP = 82` + the `dev9p_priv->weft` binding + the `dev9p_close` teardown +
     the `proc.c` owner-death GC. The registration pin is held by the binding; the guest mapping
     is reclaimed by `vma_drain` (the Loom-ring precedent), so `dev9p_close` drops only the pin.
@@ -638,10 +651,84 @@ dataplane arc the user committed.
     proven in-guest by `net-echo`'s `weft_e2e` (a real `SYS_WEFT_MAP` round-trip over the
     resident loopback: a ring VA + the visible geometry mirror + an idempotent second map,
     `net-echo: weft-6b MAP E2E PASS`), with the soak leak-baseline confirming no teardown leak.
-    The live DATA DRIVE (the descriptor ring on large Twrite/Tread, the readiness park/wake, the
-    F_NOTIF posting) is **Weft-6b-2/6b-3** — the data-drive wire mechanism (the new `Tweftio` op)
-    is resolved in **§6.2** (user-voted 2026-06-20); `weft.tla` stays unchanged (6b-1 realizes the
-    netd side of `Init`/`Teardown`, no new mechanism).
+    The live DATA DRIVE's wire mechanism (the new `Tweftio` op) is resolved in **§6.2**
+    (user-voted 2026-06-20). **Weft-6b-2 LANDED** — the live TX zero-copy drive (`Tweftio`/
+    `Rweftio` + the kernel write fast-path + the binding ring view + netd's `h_weftio`; a large
+    write whose buffer points into the ring moves zero-copy, proven by `net-echo`'s `weft_tx_e2e`,
+    `net-echo: weft-6b TX E2E PASS`). **Weft-6b-3a LANDED** — the symmetric RX direction
+    (`Tweftio` `dir=READ` + the kernel read fast-path + netd's recv-into-ring + the net-6a-1-shaped
+    blocking defer: a weft `recv()` parks on an empty socket and `poll_weftio` delivers the held
+    `Rweftio` when bytes arrive, so it blocks instead of spuriously returning 0; proven by
+    `weft_rx_e2e`, `net-echo: weft-6b RX E2E PASS`). `weft.tla` stays unchanged for both (the data
+    drive is the symmetric read/write direction of the modeled `Consume`; the 4 buggy cfgs re-ran
+    green). The standalone 6b-3b (readiness park/wake) + 6b-3c (F_NOTIF posting) legs are
+    **folded into one coherent Weft-6c chunk** (user-directed 2026-06-20) so each new mechanism
+    ships with its native-API consumer + a real in-guest data E2E — see Weft-6c below.
+- **Weft-6c (the native `libthyla_rs::net` push/pop/wait API + the live F_NOTIF + the readiness
+  busy-poll) — DESIGN (2026-06-20; the user folded the standalone 6b-3b/6b-3c legs into one
+  coherent native-async chunk).** The native API **rides Loom** (§4.4/§4.5: command queue = SQ,
+  completion queue = CQ, the Demikernel PDPIX contract Loom already presents) — so it **composes
+  the existing Loom + Weft ABI and mints no new syscall / wire op:**
+  - **`pop` (recv)** = a `LOOM_OP_READ` SQE on the registered `/net` data fid whose registered
+    buffer is the `SYS_WEFT_MAP`'d ring region. The kernel's `loom_submit_payload`, after
+    `dev9p_client_fid` resolves the Spoor, detects the `dev9p_priv->weft` binding (the buffer is
+    in the ring) and routes the async op to `p9_client_weftio(READ)` (the 6b-3a zero-copy
+    fast-path: netd recvs in place into the ring, the kernel does **no** copy-out) instead of the
+    byte-copy `loom_build_read`. The terminal CQE carries the byte count; the bytes are already
+    in the guest's ring.
+  - **`push` (send)** = a `LOOM_OP_WRITE` SQE → `loom_build_weftio(WRITE)` (the 6b-2b zero-copy
+    fast-path). **AS-BUILT (6c-1) — the honest F_NOTIF realization:** a weft WRITE is a zero-copy
+    send *across the guest↔netd boundary*, but at v1.0 netd's `h_weftio` COPIES the ring into its
+    socket buffer, so the slice is reusable the instant `Rweftio` returns — the io_uring SEND_ZC
+    "copied" path: a **single terminal CQE, no `LOOM_CQE_MORE`** (`loom.tla` single-shot), which
+    *is* the "buffer reusable" signal. There is no deferral and no `loom_async_op.notif` field at
+    v1.0. The deferred two-CQE (a result CQE with `MORE` "queued", then a `LOOM_CQE_F_NOTIF`
+    "reusable" CQE when the **last** of {netd stack done, NIC DMA done, peer ACK} clears — the I-30
+    pin held to notification-terminal, I-37 leg 2) is the **v1.x true-zero-copy seam**: it needs a
+    netd-holds-the-page TX path (no internal copy) + a netd→kernel holder-clear channel, neither of
+    which exists at v1.0. The consumer reads `LOOM_CQE_MORE` to decide whether to wait for the
+    notification — clear ⇒ reusable now (v1.0), set ⇒ wait (v1.x) — so the native API is forward-
+    compatible without change. `weft.tla` already models both (the copied case =
+    `weft_notif_arm_copied` → not-in-flight; the deferred case = `HolderRelease`/`ReleaseClean`).
+  - **`wait`** = `SYS_LOOM_ENTER(min_complete)` — the **existing** Loom CQ wait
+    (`loom_wait_for_completions` on `cq_waiters`; `loom.tla` I-9 no-missed-CQ-wake). **No new weft
+    wait/wake syscall**: the park is the Loom CQ wait, woken by the CQE post. This is the answer to
+    "wire the Weft-4 Rendez": the consumer's park *is* the Loom CQ wait, not a separate weft Rendez.
+  - **The readiness ring** (Weft-4) is the **syscall-free busy-poll edge**: a native client
+    `weft_ready_observe`s `ready_seq` (the Shenango cache-line acquire, no syscall) to skip the
+    SQE/ENTER when data is already in its ring; netd `weft_ready_signal`s the edge after a recv.
+    The substrate's `arm_park` / Rendez-park leg (a netd→kernel *direct* wake) stays
+    **validated-not-wired** — a v1.x ultra-low-latency direct-park mode, which is the one shape
+    that *would* mint the cross-Proc weft wait/wake the Loom-ride avoids. The readiness ring
+    removes the **guest-wake** round-trip (§5.4); the netd-notice 50 ms floor is the orthogonal
+    NIC-IRQ-fd chunk.
+  - **netd: PULL-first.** The guest's `LOOM_OP_READ` drives the `Tweftio`; netd recvs into the
+    ring on demand (the audited 6b-3a path) + writes the readiness edge for the busy-poll fast
+    path — netd is **byte-unchanged in the kernel** and adds only the readiness write. **PUSH**
+    (netd pre-fills the per-flow ring on NIC RX, decoupled from the guest read — the §5.2-2 "netd
+    writes RX frames into the ring" end-state) is a **v1.x latency seam**; PULL-first delivers the
+    native async API + zero-copy + Loom batching without the netd redesign.
+  - **`weft.tla` UNCHANGED** (the READ/WRITE drive is the symmetric `Consume`; the F_NOTIF posting
+    is the modeled `HolderRelease`/`ReleaseClean`, already TLC-green at Weft-5; the 4 buggy cfgs
+    re-run). **`weft_readiness.tla` UNCHANGED** (the busy-poll observe is the modeled
+    `ConsumerProcess`; the arm_park-park leg stays validated-not-wired). **`loom.tla` +
+    `loom_multishot`/`loom_order` cfgs re-run** (the async completion path the weft op rides).
+    **No new spec module** (the Loom-ride composes audited mechanisms).
+  - **Sub-split:** **6c-1 LANDED** (kernel — the weft-binding detection + routing in
+    `loom_submit_payload` to `loom_build_weftio` for a weft-bound `/net` data fd; the honest
+    single-CQE copied-send realization; kernel tests; spec re-runs). **6c-2 LANDED** (pure
+    userspace; the kernel byte-unchanged) — `libthyla_rs::net::WeftFlow`, the native
+    Demikernel-shaped `push`/`pop`/`wait` over Loom + `SYS_WEFT_MAP` + the registered whole-ring
+    buffer (the park *is* the Loom CQ wait; single-in-flight over the one payload region); the
+    `libthyla_rs::weft` readiness-drive primitives (`ready_signal`/`ready_observe`, the
+    `weft_readiness.tla` mirror) + netd's `WEFT_READY_RX` edge on each recv-into-ring (the §6
+    syscall-free busy-poll); proven in-guest by `net-echo`'s `weft_async_e2e` (`net-echo: weft-6c
+    async E2E PASS`) — a bidirectional zero-copy round-trip over the resident `lo` (push verified
+    server-side, pop verified out of `rx_buf`, the readiness seq advancing, single-in-flight
+    enforced); 965/965 + boot OK + 0 EXTINCTION + the spec gate (weft + weft_readiness + loom
+    clean). The deferred two-CQE true-ZC path stays the v1.x seam. **6c-3 = Weft-7** (the focused
+    buffer-lifetime-UAF + `Tweft`/`share_id`-correlation + F_NOTIF-holder audit + SMP gate + the §8
+    throughput benchmark + #269 M6 + docs).
 - **Weft-7 (the focused audit + SMP gate + benchmark).** Prosecute the buffer-lifetime UAF
   (the §4.6 hazard, the F1-class), the no-per-op-mediation property, the cross-Proc Burrow
   lifetime, **and the new Weft-6 `Tweft` / `share_id` correlation** (the consumed-exactly-once
@@ -699,8 +786,8 @@ TCB onto netd.
 
 **The as-decided mechanism (impl OWED across 6b-2a/6b-2b):**
 
-- **`Tweftio(fid, off, len, dir) → Rweftio(count)`** — `P9_TWEFTIO = 136` /
-  `P9_RWEFTIO = 137` (just past `Tweft`/`Rweft` 134/135; the parity `RX = TX + 1`). The
+- **`Tweftio(fid, off, len, dir) → Rweftio(count)`** — `P9_TWEFTIO = 144` /
+  `P9_RWEFTIO = 145` since #371 (just past `Tweft`/`Rweft` 142/143; the parity `RX = TX + 1`). The
   kernel dev9p data path issues it on a large transfer on a weft-bound fd; netd's server
   handles it (the `Tweft`/`Tflush` precedent). `dir` = WRITE (TX) / READ (RX). Body 16 B:
   `[fid:u32][off:u32][len:u32][dir:u32]`; reply `[count:u32]` (4 B). Reuses the audited
@@ -761,6 +848,40 @@ Extend `usr/netperf nic` + `tools/np3-bench.sh` so each lever is **measured, not
    threshold toggled), on M6, to measure C's headroom against A+B.
 5. **The latency convergence check**: M6-rtt with the readiness ring on vs the 50 ms RX-wake
    off — confirms Weft-4 closes N1.
+
+**Weft-7 as-built (the MW loopback bench, #269 M6) — CORRECTED 2026-06-21 (#290).** `netperf`'s
+**MW** mode is the deterministic in-guest realization of item 4 (the Weft delta) over the
+resident `lo`: the M2 twin with the SEND side on a `WeftFlow` (push/wait over Loom → `Tweftio`
+→ netd reads the ring in place) vs `TcpStream::write` (byte-copy). Run head-to-head with M2 at
+the SAME 256 KiB and instrumented to split the data-move cost from the readiness-stall cost
+(an earlier write-up here claimed "weft is ~10× slower ... pays per-op Loom+Tweftio overhead",
+which was WRONG): **(1)** weft is NOT slower — the aggregate is a dead heat (MW ~2394 vs M2
+~2382 KiB/s); the "~4.3× slower" was a SIZE artifact (M2 had been at 32 KiB, too small to fill
+the 4 KiB window, so it never stalled, vs MW at 256 KiB which did). **(2)** Weft's DATA-MOVE is
+~2× faster (it moves the bytes in ~half the ops — each push absorbs more than the window;
+per-op cost is EQUAL, so there is NO Loom/`Tweftio` penalty). **(3)** ~95% of BOTH aggregates is
+the POLLOUT readiness-stall and it is IDENTICAL for the two transports (M2 ~100620 µs, MW
+~101519 µs — transport-independent): a bulk sender fills the 4 KiB window then waits for the
+writable edge, which on the resident `lo` stack is driven by `net.poll` with no 9P frame to
+wake on. NEITHER is a weft defect. The bench now reports a `weft_breakdown` line for both M2+MW.
+
+**#221 LANDED 2026-06-21 (the readiness-stall fix; ~6× loopback throughput).** Root cause:
+netd's serve loop forced a flat 50 ms re-poll while any connection had a pending probe, and
+smoltcp exposes no prompt timer for the loopback window-update — so the unblock waited up to
+50 ms/stall. Fix (netd-only, off the audited kernel surface): honor smoltcp's `poll_delay`
+clamped to `[1 ms, 2 ms]` while a probe is pending (vs the idle 50 ms floor). Result: M2 byte-copy
+2370 → **14267 KiB/s**, MW weft 2436 → **15073 KiB/s** (~6×), and MW now edges M2 — weft's
+~2× faster data-move finally surfaces in the aggregate once the shared stall shrinks. The
+residual stall (~12 ms over the transfer) is smoltcp's own loopback window-update round-trip.
+
+NOTE — **#288 ("grow netd's 4 KiB socket tx buffer") is mis-scoped (found #291).** netd's TCP
+socket buffers are ALREADY 64 KiB and msize is 32 KiB (Weft-0 #267). The real ~4 KiB/op cap is
+the KERNEL `SYS_RW_MAX = 4096` bounce buffer on the byte-copy path (every `SYS_WRITE` is capped
+at 4 KiB) -- which **weft BYPASSES** (it moves the ring slice in place, ~8 KiB/op here, the
+source of its ~2× data-move edge). So the only residual byte-copy lever is growing `SYS_RW_MAX`
+(a kernel-wide change that does NOT help weft, the future path); weft's own ceiling is the
+loopback drain / window-update timing, not a buffer size. The full window/msize sweep + the
+NIC-path Weft delta (items 1-3, 5) stay the v1.x measurement backlog.
 
 Per the no-host-load discipline: every timing boot is ground-truthed to the healthy guest
 end-state; a nondeterministic result is a guest race to hunt, never "host load."

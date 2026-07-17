@@ -77,6 +77,8 @@ void test_slub_kmalloc_overflow_guard(void);
 void test_slub_cache_destroy_guards(void);
 void test_gic_init_smoke(void);
 void test_timer_tick_increments(void);
+void test_timer_oneshot_tval_clamps(void);
+void test_timer_arm_oneshot_restores(void);
 void test_clock_monotonic_advances(void);
 void test_clock_realtime_anchored(void);
 void test_clock_wallclock_offset_math(void);
@@ -85,6 +87,12 @@ void test_clock_gettime_errors(void);
 void test_clock_settime_reanchors(void);
 void test_clock_settime_cap_gate(void);
 void test_hardening_detect_smoke(void);
+void test_hwdebug_dfr0_enumerate(void);
+void test_hwdebug_arm_disarm_roundtrip(void);
+void test_hwdebug_bp_table(void);
+void test_hwdebug_singlestep_benign(void);
+void test_hwdebug_wp_table(void);
+void test_hwdebug_wp_encode(void);
 void test_alternatives_patch_applied(void);
 void test_alternatives_atomics_correct(void);
 void test_context_create_destroy(void);
@@ -102,9 +110,14 @@ void test_sched_capacity_normalize_synthetic_dtb(void);
 void test_sched_place_by_capacity_synthetic_dtb(void);
 void test_sched_select_target_cpu_homogeneous_is_prev(void);
 void test_sched_ready_on_cross_cpu_enqueue(void);
+void test_sched_cpu_surplus_for_kick(void);
+void test_sched_yield_fast_path_no_work(void);
+void test_sched_yield_dispatches_queued_work(void);
 void test_sched_ready_on_clamps_stale_vd(void);
 void test_sched_wake_preempts_policy(void);
 void test_sched_wake_preempt_same_cpu(void);
+void test_spinlock_preempt_count_balance(void);
+void test_sched_preempt_gate_defers_while_locked(void);
 void test_rendez_sleep_immediate_cond_true(void);
 void test_rendez_basic_handoff(void);
 void test_rendez_death_interrupts_sleep(void);
@@ -119,6 +132,8 @@ void test_tsleep_past_deadline_immediate(void);
 void test_tsleep_woken_before_deadline(void);
 void test_tsleep_timeout_via_tick(void);
 void test_tsleep_herd_timeout(void);
+void test_timerwait_earliest_deadline(void);
+void test_tickless_target_cnt(void);
 void test_smp_bringup_smoke(void);
 void test_smp_exception_stack_smoke(void);
 void test_smp_per_cpu_idle_smoke(void);
@@ -146,6 +161,7 @@ void test_resource_child_cap_ok(void);
 void test_resource_child_count_tracks_list(void);
 void test_resource_child_count_rfork_reap(void);
 void test_resource_page_cap_attach_enforced(void);
+void test_resource_vma_cap(void);
 
 void test_exec_ns_resolve_absolute_ok(void);
 void test_exec_ns_resolve_relative_ok(void);
@@ -201,6 +217,17 @@ void test_vmo_via_handle_table(void);
 void test_vmo_handle_table_orphan_cleanup(void);
 void test_vmo_size_overflow_rejected(void);
 void test_vmo_dup_oom_rollback(void);
+void test_vmo_file_create_close_round_trip(void);
+void test_vmo_file_create_failure_retains_spoor(void);
+void test_vmo_file_map_unmap_lifecycle(void);
+void test_vmo_file_resident_pages_freed(void);
+void test_image_miss_then_hit_shares(void);
+void test_image_distinct_qid_distinct_entry(void);
+void test_image_qid_vers_bump_new_entry(void);
+void test_image_distinct_offset_distinct_entry(void);
+void test_image_exec_discriminates_key(void);
+void test_image_eviction_bounds_cache(void);
+void test_image_bad_arg_retains_spoor(void);
 void test_asid_width_valid(void);
 void test_asid_resolve_reuse(void);
 void test_asid_distinct_active(void);
@@ -224,7 +251,7 @@ void test_burrow_share_into_constraints(void);
 void test_weft_ring_basic(void);
 void test_weft_ring_toctou_snapshot(void);
 void test_weft_ring_bounds_reject(void);
-void test_weft_binding_validate_write(void);
+void test_weft_binding_validate_rw(void);
 void test_weft_ring_multi_split(void);
 void test_weft_should_ring_threshold(void);
 void test_weft_ring_layout_constraints(void);
@@ -239,6 +266,7 @@ void test_weft_share_full(void);
 void test_weft_share_owner_gc(void);
 void test_weft_syscall_share(void);
 void test_weft_map_binding_lifetime(void);
+void test_weft_share_cap_gate(void);
 void test_pgtable_install_user_pte_smoke(void);
 void test_pgtable_install_user_pte_constraints(void);
 void test_pgtable_install_user_pte_idempotent(void);
@@ -246,7 +274,26 @@ void test_demand_page_smoke(void);
 void test_demand_page_no_vma(void);
 void test_demand_page_permission_denied(void);
 void test_demand_page_lifecycle_round_trip(void);
+void test_demand_page_file_smoke(void);
+void test_demand_page_file_rodata_prot(void);
+void test_demand_page_file_read_error_snare_bus(void);
+void test_demand_page_file_multi_page(void);
+void test_demand_page_file_short_read_fills_page(void);
+void test_demand_page_file_cluster_short_read(void);
+void test_demand_page_file_eof_tail_zero(void);
+void test_demand_page_lazy_zero_fill(void);
+void test_demand_page_lazy_decommit_refault(void);
+void test_demand_page_lazy_charge_on_fault_oom(void);
+void test_demand_page_lazy_detach_uncharges_resident(void);
+// vDSO clock page (docs/VDSO-DESIGN.md, #343).
+void test_vdso_page_populated(void);
+void test_vdso_publish_updates(void);
+void test_vdso_mono_matches_timer(void);
+void test_vdso_maps_ro_read(void);
+void test_vdso_maps_ro_write_faults(void);
 void test_exec_setup_smoke(void);
+void test_exec_from_spoor_rodata_dispatch(void);
+void test_exec_from_spoor_aliased_window_distinct(void);
 void test_exec_setup_segment_data_copied(void);
 void test_exec_setup_constraints(void);
 void test_exec_setup_multi_segment(void);
@@ -265,6 +312,9 @@ void test_uaccess_fixup_table_well_formed(void);
 void test_uaccess_fixup_lookup_known(void);
 void test_uaccess_fixup_lookup_unknown_returns_zero(void);
 void test_uaccess_load_u8_unmapped_user_va_returns_minus1(void);
+void test_uaccess_copy_out_unmapped_faults_all_arms(void);
+void test_uaccess_copy_in_unmapped_faults_all_arms(void);
+void test_uaccess_copy_fixup_entries_present(void);
 void test_fault_decode_kernel_data_translation_l2(void);
 void test_fault_decode_kernel_data_permission_write(void);
 void test_fault_decode_user_data_translation(void);
@@ -296,6 +346,8 @@ void test_sys_burrow_attach_rounds_up(void);
 void test_sys_burrow_attach_rejects_bad_length(void);
 void test_sys_burrow_detach_rejects(void);
 void test_sys_burrow_detach_window_confined(void);
+void test_sys_burrow_attach_lazy_window_va(void);
+void test_sys_burrow_attach_lazy_large(void);
 void test_torpor_wait_rejects_bad_args(void);
 void test_torpor_wait_rejects_unmapped_va(void);
 void test_torpor_wake_rejects_bad_args(void);
@@ -333,7 +385,7 @@ void test_thread_create_user_ctx_layout(void);
 void test_thread_exit_self_marks_exiting(void);
 void test_thread_exit_self_last_thread_zombies(void);
 void test_proc_multi_thread_reap(void);
-void test_proc_wait_pid_concurrent_waiter_refused(void);
+void test_proc_wait_pid_concurrent_waiters_both_reap(void);
 void test_notes_queue_alloc_free_smoke(void);
 void test_notes_post_dequeue_smoke(void);
 void test_notes_post_ordering(void);
@@ -405,6 +457,14 @@ void test_devproc_read_partial_offset(void);
 void test_devproc_kill_authorized_predicate(void);
 void test_devproc_stat_native_ctl_owner(void);
 void test_devproc_write_ctl_kill_dispatch(void);
+void test_devproc_debug_authorized_predicate(void);
+void test_devproc_debug_attach_detach_lifecycle(void);
+void test_devproc_debug_stop_start_resume(void);
+void test_devproc_debug_mem(void);
+void test_devproc_debug_regs(void);
+void test_devproc_debug_kregs_kstack_wait(void);
+void test_devproc_debug_kstack_settled(void);
+void test_devproc_debug_step_cancel_on_stop(void);
 void test_cons_blocking_read_wakeup(void);
 void test_cons_ring_fill_drain(void);
 void test_cons_ring_overflow_drop(void);
@@ -474,6 +534,18 @@ void test_devpci_readonly(void);
 void test_devpci_readdir(void);
 void test_devpci_walk_reuse_nc(void);
 
+void test_env_set_get(void);
+void test_env_create_idempotent(void);
+void test_env_overwrite_truncate(void);
+void test_env_unset_monotonic(void);
+void test_env_iter_order(void);
+void test_env_bounds(void);
+void test_env_clone_deep_independent(void);
+void test_env_free_null_tolerant(void);
+void test_devenv_bestiary(void);
+void test_devenv_walk_reuse_nc(void);
+void test_devenv_walk_read(void);
+
 void test_allowance_null_is_broad(void);
 void test_allowance_mmio_containment(void);
 void test_allowance_irq_membership(void);
@@ -509,6 +581,7 @@ void test_devramfs_read_dir_returns_neg1(void);
 void test_devramfs_write_rejected(void);
 void test_devramfs_stat_native_system_owned(void);
 void test_devramfs_readdir_enumerates_root(void);
+void test_devramfs_walk_attrs(void);
 void test_devramfs_readdir_file_returns_neg1(void);
 void test_devramfs_readdir_buffer_too_small_errs(void);
 void test_devramfs_readdir_synth_dir_empty(void);
@@ -543,11 +616,13 @@ void test_stalk_dotdot_pop(void);
 void test_stalk_dotdot_containment(void);
 void test_stalk_xsearch_deny(void);
 void test_stalk_missing_component(void);
+void test_stalk_err_codes(void);
 void test_stalk_opath_no_open(void);
 void test_stalk_open_root(void);
 void test_stalk_open_replace(void);
 void test_stalk_depth_cap(void);
 void test_stalk_lifetime_no_leak(void);
+void test_stalk_long_component_bound(void);
 void test_stalk_cross_mount(void);
 void test_stalk_cross_mount_final_quarry(void);
 void test_stalk_cross_mount_xsearch_deny(void);
@@ -558,6 +633,18 @@ void test_stalk_path_accumulate(void);
 void test_stalk_path_dotdot(void);
 void test_stalk_path_cross_transplant(void);
 void test_stalk_path_adopt_transplant(void);
+// POUNCE (docs/POUNCE-DESIGN.md): the batched fast path + stalk_stat.
+void test_stalk_pounce_engaged(void);
+void test_stalk_pounce_acces_masks_noent(void);
+void test_stalk_pounce_parity_nowa(void);
+void test_stalk_pounce_full_walk_past_mount(void);
+void test_stalk_stat_query(void);
+void test_stalk_stat_mount_leaf(void);
+void test_sys_stat_for_proc(void);
+void test_stalk_pounce_unsupported_fallback(void);
+void test_stalk_cached_open_arm(void);
+void test_stalk_cached_open_denials(void);
+void test_stalk_cached_open_mount_fallback(void);
 void test_devsrv_registered(void);
 void test_devsrv_open_root_dir(void);
 void test_devsrv_stat_native_root(void);
@@ -599,6 +686,12 @@ void test_srvconn_recv_blocks_then_wakes(void);
 void test_srvconn_recv_deadline_timeout(void);
 void test_srvconn_teardown_eofs(void);
 void test_srvconn_teardown_wakes_blocked(void);
+void test_srvconn_server_send_blocks_then_drain_wakes(void);
+void test_srvconn_bulk_ring_class(void);
+void test_srvconn_role_park_second_writer(void);
+void test_srvconn_role_park_second_reader(void);
+void test_srvconn_client_send_blocking_backpressure(void);
+void test_srvconn_client_send_blocking_poll_edge(void);
 void test_devsrv_walk_service(void);
 void test_devsrv_open_connect_byte(void);
 void test_devsrv_kernel_attached_io_refused(void);
@@ -677,6 +770,7 @@ void test_9p_wire_tclunk_round_trip(void);
 void test_9p_wire_tflush_round_trip(void);
 void test_9p_wire_tweft_round_trip(void);
 void test_9p_wire_tweftio_round_trip(void);
+void test_9p_wire_twalkgetattr_round_trip(void);
 void test_9p_wire_rlerror_parse(void);
 void test_9p_wire_rmsg_size_mismatch_rejected(void);
 void test_9p_wire_rmsg_wrong_type_rejected(void);
@@ -753,6 +847,8 @@ void test_9p_session_unlinkat_permits_concurrent(void);
 void test_9p_session_mutation_from_unbound_fid_refused(void);
 void test_9p_session_flush_reclaims_both(void);
 void test_9p_session_late_reply_does_not_free_awaiting_flush(void);
+void test_9p_session_abort_unsent_reclaims_tag(void);
+void test_9p_session_flush_rollback_restores_victim(void);
 void test_9p_transport_init_destroy(void);
 void test_9p_transport_round_trip(void);
 void test_9p_transport_send_frame_size_mismatch_rejected(void);
@@ -766,8 +862,10 @@ void test_9p_transport_deadline_idle_vs_eof(void);
 void test_9p_client_init_destroy(void);
 void test_9p_client_handshake(void);
 void test_9p_client_walk_and_clunk(void);
+void test_9p_client_walkgetattr(void);
 void test_9p_client_lopen_read(void);
 void test_9p_client_write(void);
+void test_9p_client_bulk_write_clamps_short(void);
 void test_9p_client_getattr(void);
 void test_9p_client_readdir(void);
 void test_9p_client_statfs(void);
@@ -801,6 +899,10 @@ void test_9p_client_loom_independent_past_held(void);
 void test_9p_client_loom_drain_waits_for_rearm_pending(void);
 void test_9p_client_loom_read_e2e(void);
 void test_9p_client_loom_write_e2e(void);
+void test_9p_client_loom_weft_read_e2e(void);
+void test_9p_client_loom_weft_write_e2e(void);
+void test_9p_client_loom_weft_hybrid_fallback(void);
+void test_9p_client_loom_weft_oob_rejected(void);
 void test_9p_client_loom_rw_rejects(void);
 void test_9p_client_loom_readdir_e2e(void);
 void test_9p_client_loom_readlink_e2e(void);
@@ -813,6 +915,44 @@ void test_9p_client_loom_renameat_e2e(void);
 void test_9p_client_loom_mutation_rejects(void);
 void test_9p_client_loom_multi_inflight_e2e(void);
 void test_9p_client_loom_multi_inflight_read_e2e(void);
+void test_9p_client_async_clunk_burst_no_fid_leak(void);
+void test_9p_client_send_backpressure_self_pump(void);
+void test_9p_client_send_backpressure_multi_waiter(void);
+void test_9p_client_send_backpressure_spill_survives_outbuf_reuse(void);
+void test_9p_client_abandon_async_eagain_keeps_session_alive(void);
+void test_larder_install_serve(void);
+void test_larder_serve_miss(void);
+void test_larder_invalidate(void);
+void test_larder_gen_guard_skips_raced_install(void);
+void test_larder_root_qid_zero(void);
+void test_larder_overwrite_wins(void);
+void test_larder_eviction_bounded(void);
+void test_larder_dentry_serve(void);
+void test_larder_dentry_serve_miss(void);
+void test_larder_dentry_negative(void);
+void test_larder_dentry_multi_hop(void);
+void test_larder_dentry_partial_chain_bails(void);
+void test_larder_dentry_attr_miss_bails(void);
+void test_larder_dentry_invalidate_name(void);
+void test_larder_dentry_gen_guard(void);
+void test_larder_dentry_name_too_long(void);
+void test_larder_dentry_bounded(void);
+void test_larder_page_serve(void);
+void test_larder_page_serve_miss(void);
+void test_larder_page_offset(void);
+void test_larder_page_cvers_mismatch(void);
+void test_larder_page_partial(void);
+void test_larder_page_invalidate(void);
+void test_larder_page_invalidate_multifile(void);
+void test_larder_page_gen_guard(void);
+void test_larder_pages_snapshot_gen_witness(void);
+void test_larder_page_overwrite(void);
+void test_larder_page_bounded(void);
+void test_larder_page_destroy_frees(void);
+void test_larder_attr_downgrade_perm_only(void);
+void test_larder_downgrade_guards_raced_populate(void);
+void test_larder_gen_scope_qid(void);
+
 void test_dev9p_registered(void);
 void test_dev9p_attach_client_root_spoor(void);
 void test_dev9p_walk_one_component(void);
@@ -820,18 +960,53 @@ void test_dev9p_walk_clone(void);
 void test_dev9p_open_lopens_fid(void);
 void test_dev9p_read_routes_through_client(void);
 void test_dev9p_write_routes_through_client(void);
+void test_dev9p_write_read_propagate_errno(void);
 void test_dev9p_close_clunks_owned_fid(void);
 void test_dev9p_close_does_not_clunk_root_fid(void);
 void test_dev9p_create_file(void);
+void test_dev9p_create_invalidates_reused_child(void);
+void test_dev9p_create_invalidates_reused_child_pages(void);
+void test_dev9p_create_downgrades_parent_attr(void);
+void test_dev9p_dirfid_consume_and_recycle(void);
+void test_dev9p_dirfid_perm_only_leaf_consume(void);
+void test_dev9p_dirfid_create_reuse_drop(void);
+void test_dev9p_dirfid_rmdir_drop_and_no_stale_repark(void);
+void test_dev9p_dirfid_suspect_not_reparked(void);
+void test_dev9p_create_invalidates_negative_dentry(void);
 void test_dev9p_create_dir(void);
 void test_dev9p_fsync(void);
 void test_dev9p_readdir(void);
 void test_dev9p_readdir_cookie_high_bit(void);
 void test_dev9p_poll_regular_file_always_ready(void);
+void test_dev9p_poll_cancel_at_close(void);
 void test_dev9p_rename(void);
 void test_dev9p_unlink(void);
 void test_dev9p_stat_native_maps_getattr(void);
 void test_dev9p_wstat_native_drives_setattr(void);
+void test_dev9p_prw_wire_offset_and_cursor(void);
+void test_dev9p_wstat_readonly_fd(void);
+void test_dev9p_wstat_size(void);
+void test_dev9p_walk_attrs(void);
+void test_dev9p_page_cache_serve_and_gate(void);
+void test_dev9p_read_align_heals_partial(void);
+void test_dev9p_read_align_short_not_eof(void);
+void test_dev9p_open_trunc_invalidates(void);
+void test_dev9p_read_eof_attr_served(void);
+void test_dev9p_cached_open(void);
+void test_dev9p_cached_open_fallbacks(void);
+void test_dev9p_cached_open_loose(void);
+void test_dev9p_wb_coalesce_one_twrite(void);
+void test_dev9p_wb_overlay_read(void);
+void test_dev9p_wb_flush_at_close(void);
+void test_dev9p_wb_fsync_flush_and_error(void);
+void test_dev9p_wb_nonappend_writethrough(void);
+void test_dev9p_wb_fstat_staged_size(void);
+void test_dev9p_wb_cap_flush(void);
+void test_dev9p_wb_budget_fallback(void);
+void test_dev9p_wb_populate_readback(void);
+void test_dev9p_wb_populate_append_chain(void);
+void test_dev9p_wb_populate_failed_flush(void);
+void test_dev9p_wb_writethrough_range_invalidate(void);
 void test_dev9p_perm_enforced_deny_allow(void);
 void test_p9_attached_create_destroy(void);
 void test_p9_attached_handshake_failure_returns_null(void);
@@ -910,6 +1085,9 @@ void test_sys_rw_write_then_read_round_trip(void);
 void test_sys_rw_rights_check(void);
 void test_sys_rw_zero_length_validates_fd(void);
 void test_sys_rw_read_after_close_returns_eof(void);
+void test_sys_prw_pipe_not_seekable(void);
+void test_sys_pread_devramfs_offset_and_cursor(void);
+void test_sys_prw_rights_and_walkonly(void);
 void test_sys_pipe_dup_spoor_handle_acquires_ref(void);
 void test_pipe_probe_round_trip(void);
 void test_sys_attach_9p_rejection_paths(void);
@@ -948,6 +1126,8 @@ void test_sys_spawn_with_fds_rejects_non_spoor_fd(void);
 void test_sys_spawn_with_fds_rejects_missing_binary(void);
 void test_sys_spawn_with_fds_zero_count_succeeds(void);
 void test_sys_spawn_with_fds_child_rights_subset_of_parent(void);
+void test_sys_spawn_killed_child_delivers_pipe_eof_before_reap(void);
+void test_sys_spawn_joined_multithread_child_delivers_pipe_eof_before_reap(void);
 void test_sys_spawn_with_caps_happy_path_zero_mask(void);
 void test_sys_spawn_with_caps_happy_path_subset_of_parent(void);
 void test_sys_spawn_with_caps_clamps_to_parent(void);
@@ -1049,6 +1229,8 @@ struct test_case g_tests[] = {
     { "slub.cache_destroy_guards",     test_slub_cache_destroy_guards,     false, NULL },
     { "gic.init_smoke",                test_gic_init_smoke,                false, NULL },
     { "timer.tick_increments",         test_timer_tick_increments,         false, NULL },
+    { "timer.oneshot_tval_clamps",     test_timer_oneshot_tval_clamps,     false, NULL },
+    { "timer.arm_oneshot_restores",    test_timer_arm_oneshot_restores,    false, NULL },
     { "clock.monotonic_advances",      test_clock_monotonic_advances,      false, NULL },
     { "clock.realtime_anchored",       test_clock_realtime_anchored,       false, NULL },
     { "clock.wallclock_offset_math",   test_clock_wallclock_offset_math,   false, NULL },
@@ -1084,12 +1266,22 @@ struct test_case g_tests[] = {
                                        test_sched_select_target_cpu_homogeneous_is_prev, false, NULL },
     { "scheduler.ready_on_cross_cpu_enqueue",
                                        test_sched_ready_on_cross_cpu_enqueue, false, NULL },
+    { "scheduler.cpu_surplus_for_kick",
+                                       test_sched_cpu_surplus_for_kick, false, NULL },
+    { "scheduler.yield_fast_path_no_work",
+                                       test_sched_yield_fast_path_no_work, false, NULL },
+    { "scheduler.yield_dispatches_queued_work",
+                                       test_sched_yield_dispatches_queued_work, false, NULL },
     { "scheduler.ready_on_clamps_stale_vd",
                                        test_sched_ready_on_clamps_stale_vd, false, NULL },
     { "scheduler.wake_preempts_policy",
                                        test_sched_wake_preempts_policy,    false, NULL },
     { "scheduler.wake_preempt_same_cpu",
                                        test_sched_wake_preempt_same_cpu,   false, NULL },
+    { "spinlock.preempt_count_balance",
+                                       test_spinlock_preempt_count_balance, false, NULL },
+    { "scheduler.preempt_gate_defers_while_locked",
+                                       test_sched_preempt_gate_defers_while_locked, false, NULL },
     { "rendez.sleep_immediate_cond_true",
                                        test_rendez_sleep_immediate_cond_true,
                                                                            false, NULL },
@@ -1122,6 +1314,10 @@ struct test_case g_tests[] = {
     { "tsleep.herd_timeout",
                                        test_tsleep_herd_timeout,
                                                                            false, NULL },
+    { "timerwait.earliest_deadline",
+                                       test_timerwait_earliest_deadline,
+                                                                           false, NULL },
+    { "tickless.target_cnt",           test_tickless_target_cnt,           false, NULL },
     { "smp.bringup_smoke",             test_smp_bringup_smoke,             false, NULL },
     { "smp.exception_stack_smoke",     test_smp_exception_stack_smoke,     false, NULL },
     { "smp.per_cpu_idle_smoke",        test_smp_per_cpu_idle_smoke,        false, NULL },
@@ -1169,6 +1365,7 @@ struct test_case g_tests[] = {
     { "namespace_layout.proc_ctl_cross", test_namespace_layout_proc_ctl_cross, false, NULL },
     { "resource.page_cap_attach_enforced",
                                        test_resource_page_cap_attach_enforced, false, NULL },
+    { "resource.vma_cap",              test_resource_vma_cap,              false, NULL },
     { "proc_identity.kproc_is_system", test_proc_identity_kproc_is_system, false, NULL },
     { "proc_identity.rfork_inherits",  test_proc_identity_rfork_inherits,  false, NULL },
     { "proc_identity.apply_sets_fields",
@@ -1232,6 +1429,17 @@ struct test_case g_tests[] = {
     { "burrow.handle_table_orphan_cleanup", test_vmo_handle_table_orphan_cleanup, false, NULL },
     { "burrow.size_overflow_rejected",    test_vmo_size_overflow_rejected,    false, NULL },
     { "burrow.dup_oom_rollback",          test_vmo_dup_oom_rollback,          false, NULL },
+    { "burrow.file_create_close_round_trip",   test_vmo_file_create_close_round_trip,   false, NULL },
+    { "burrow.file_create_failure_retains_spoor", test_vmo_file_create_failure_retains_spoor, false, NULL },
+    { "burrow.file_map_unmap_lifecycle",  test_vmo_file_map_unmap_lifecycle,  false, NULL },
+    { "burrow.file_resident_pages_freed", test_vmo_file_resident_pages_freed, false, NULL },
+    { "image.miss_then_hit_shares",       test_image_miss_then_hit_shares,       false, NULL },
+    { "image.distinct_qid_distinct_entry", test_image_distinct_qid_distinct_entry, false, NULL },
+    { "image.qid_vers_bump_new_entry",    test_image_qid_vers_bump_new_entry,    false, NULL },
+    { "image.distinct_offset_distinct_entry", test_image_distinct_offset_distinct_entry, false, NULL },
+    { "image.exec_discriminates_key",       test_image_exec_discriminates_key,       false, NULL },
+    { "image.eviction_bounds_cache",      test_image_eviction_bounds_cache,      false, NULL },
+    { "image.bad_arg_retains_spoor",      test_image_bad_arg_retains_spoor,      false, NULL },
     { "asid.width_valid",              test_asid_width_valid,              false, NULL },
     { "asid.resolve_reuse",            test_asid_resolve_reuse,            false, NULL },
     { "asid.distinct_active",          test_asid_distinct_active,          false, NULL },
@@ -1261,7 +1469,7 @@ struct test_case g_tests[] = {
     { "weft.ring_basic",                  test_weft_ring_basic,               false, NULL },
     { "weft.ring_toctou_snapshot",        test_weft_ring_toctou_snapshot,     false, NULL },
     { "weft.ring_bounds_reject",          test_weft_ring_bounds_reject,       false, NULL },
-    { "weft.binding_validate_write",      test_weft_binding_validate_write,   false, NULL },
+    { "weft.binding_validate_rw",         test_weft_binding_validate_rw,      false, NULL },
     { "weft.ring_multi_split",            test_weft_ring_multi_split,         false, NULL },
     { "weft.should_ring_threshold",       test_weft_should_ring_threshold,    false, NULL },
     { "weft.ring_layout_constraints",     test_weft_ring_layout_constraints,  false, NULL },
@@ -1276,6 +1484,7 @@ struct test_case g_tests[] = {
     { "weft.share_owner_gc",              test_weft_share_owner_gc,           false, NULL },
     { "weft.syscall_share",               test_weft_syscall_share,            false, NULL },
     { "weft.map_binding_lifetime",        test_weft_map_binding_lifetime,     false, NULL },
+    { "weft.share_cap_gate",              test_weft_share_cap_gate,           false, NULL },
     { "pgtable.install_user_pte_smoke",
                                        test_pgtable_install_user_pte_smoke,
                                                                            false, NULL },
@@ -1291,7 +1500,31 @@ struct test_case g_tests[] = {
     { "demand_page.lifecycle_round_trip",
                                        test_demand_page_lifecycle_round_trip,
                                                                            false, NULL },
+    { "demand_page.file_smoke",        test_demand_page_file_smoke,        false, NULL },
+    { "demand_page.file_rodata_prot",  test_demand_page_file_rodata_prot,  false, NULL },
+    { "demand_page.file_read_error_snare_bus",
+                                       test_demand_page_file_read_error_snare_bus, false, NULL },
+    { "demand_page.file_multi_page",   test_demand_page_file_multi_page,   false, NULL },
+    { "demand_page.file_short_read_fills_page",
+                                       test_demand_page_file_short_read_fills_page, false, NULL },
+    { "demand_page.file_cluster_short_read",
+                                       test_demand_page_file_cluster_short_read, false, NULL },
+    { "demand_page.file_eof_tail_zero", test_demand_page_file_eof_tail_zero, false, NULL },
+    { "demand_page.lazy_zero_fill",    test_demand_page_lazy_zero_fill,    false, NULL },
+    { "demand_page.lazy_decommit_refault",
+                                       test_demand_page_lazy_decommit_refault, false, NULL },
+    { "demand_page.lazy_charge_on_fault_oom",
+                                       test_demand_page_lazy_charge_on_fault_oom, false, NULL },
+    { "demand_page.lazy_detach_uncharges_resident",
+                                       test_demand_page_lazy_detach_uncharges_resident, false, NULL },
+    { "vdso.page_populated",           test_vdso_page_populated,           false, NULL },
+    { "vdso.publish_updates",          test_vdso_publish_updates,          false, NULL },
+    { "vdso.mono_matches_timer",       test_vdso_mono_matches_timer,       false, NULL },
+    { "vdso.maps_ro_read",             test_vdso_maps_ro_read,             false, NULL },
+    { "vdso.maps_ro_write_faults",     test_vdso_maps_ro_write_faults,     false, NULL },
     { "exec.setup_smoke",              test_exec_setup_smoke,              false, NULL },
+    { "exec.from_spoor_rodata_dispatch", test_exec_from_spoor_rodata_dispatch, false, NULL },
+    { "exec.from_spoor_aliased_window_distinct", test_exec_from_spoor_aliased_window_distinct, false, NULL },
     { "exec.setup_segment_data_copied",
                                        test_exec_setup_segment_data_copied,
                                                                            false, NULL },
@@ -1329,6 +1562,15 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "uaccess.load_u8_unmapped_user_va_returns_minus1",
                                        test_uaccess_load_u8_unmapped_user_va_returns_minus1,
+                                                                           false, NULL },
+    { "uaccess.copy_out_unmapped_faults_all_arms",
+                                       test_uaccess_copy_out_unmapped_faults_all_arms,
+                                                                           false, NULL },
+    { "uaccess.copy_in_unmapped_faults_all_arms",
+                                       test_uaccess_copy_in_unmapped_faults_all_arms,
+                                                                           false, NULL },
+    { "uaccess.copy_fixup_entries_present",
+                                       test_uaccess_copy_fixup_entries_present,
                                                                            false, NULL },
     { "fault.decode_kernel_data_translation_l2",
                                        test_fault_decode_kernel_data_translation_l2,
@@ -1371,6 +1613,8 @@ struct test_case g_tests[] = {
     { "sys_burrow.attach_rejects_bad_length", test_sys_burrow_attach_rejects_bad_length, false, NULL },
     { "sys_burrow.detach_rejects",            test_sys_burrow_detach_rejects,            false, NULL },
     { "sys_burrow.detach_window_confined",    test_sys_burrow_detach_window_confined,    false, NULL },
+    { "sys_burrow.attach_lazy_window_va",     test_sys_burrow_attach_lazy_window_va,     false, NULL },
+    { "sys_burrow.attach_lazy_large",         test_sys_burrow_attach_lazy_large,         false, NULL },
     { "torpor.wait_rejects_bad_args",          test_torpor_wait_rejects_bad_args,          false, NULL },
     { "torpor.wait_rejects_unmapped_va",       test_torpor_wait_rejects_unmapped_va,       false, NULL },
     { "torpor.wake_rejects_bad_args",          test_torpor_wake_rejects_bad_args,          false, NULL },
@@ -1408,7 +1652,7 @@ struct test_case g_tests[] = {
     { "thread.exit_self_marks_exiting",        test_thread_exit_self_marks_exiting,        false, NULL },
     { "thread.exit_self_last_thread_zombies",  test_thread_exit_self_last_thread_zombies,  false, NULL },
     { "proc.multi_thread_reap",                test_proc_multi_thread_reap,                false, NULL },
-    { "proc.wait_pid_concurrent_waiter_refused", test_proc_wait_pid_concurrent_waiter_refused, false, NULL },
+    { "proc.wait_pid_concurrent_waiters_both_reap", test_proc_wait_pid_concurrent_waiters_both_reap, false, NULL },
     { "notes.queue_alloc_free_smoke",          test_notes_queue_alloc_free_smoke,          false, NULL },
     { "notes.post_dequeue_smoke",              test_notes_post_dequeue_smoke,              false, NULL },
     { "notes.post_ordering",                   test_notes_post_ordering,                   false, NULL },
@@ -1486,6 +1730,20 @@ struct test_case g_tests[] = {
     { "devproc.kill_authorized_predicate", test_devproc_kill_authorized_predicate, false, NULL },
     { "devproc.stat_native_ctl_owner",     test_devproc_stat_native_ctl_owner,     false, NULL },
     { "devproc.write_ctl_kill_dispatch",   test_devproc_write_ctl_kill_dispatch,   false, NULL },
+    { "devproc.debug_authorized_predicate",   test_devproc_debug_authorized_predicate,   false, NULL },
+    { "devproc.debug_attach_detach_lifecycle", test_devproc_debug_attach_detach_lifecycle, false, NULL },
+    { "devproc.debug_stop_start_resume",       test_devproc_debug_stop_start_resume,       false, NULL },
+    { "devproc.debug_mem",                     test_devproc_debug_mem,                     false, NULL },
+    { "devproc.debug_regs",                    test_devproc_debug_regs,                    false, NULL },
+    { "devproc.debug_kregs_kstack_wait",       test_devproc_debug_kregs_kstack_wait,       false, NULL },
+    { "devproc.debug_kstack_settled",          test_devproc_debug_kstack_settled,          false, NULL },
+    { "devproc.debug_step_cancel_on_stop",     test_devproc_debug_step_cancel_on_stop,     false, NULL },
+    { "hwdebug.dfr0_enumerate",                test_hwdebug_dfr0_enumerate,                false, NULL },
+    { "hwdebug.arm_disarm_roundtrip",          test_hwdebug_arm_disarm_roundtrip,          false, NULL },
+    { "hwdebug.bp_table",                      test_hwdebug_bp_table,                      false, NULL },
+    { "hwdebug.singlestep_benign",             test_hwdebug_singlestep_benign,             false, NULL },
+    { "hwdebug.wp_table",                      test_hwdebug_wp_table,                      false, NULL },
+    { "hwdebug.wp_encode",                     test_hwdebug_wp_encode,                     false, NULL },
     { "cons.blocking_read_wakeup",     test_cons_blocking_read_wakeup,     false, NULL },
     { "cons.ring_fill_drain",          test_cons_ring_fill_drain,          false, NULL },
     { "cons.ring_overflow_drop",       test_cons_ring_overflow_drop,       false, NULL },
@@ -1558,6 +1816,18 @@ struct test_case g_tests[] = {
     { "devpci.readdir",                test_devpci_readdir,                false, NULL },
     { "devpci.walk_reuse_nc",          test_devpci_walk_reuse_nc,          false, NULL },
 
+    { "env.set_get",                   test_env_set_get,                   false, NULL },
+    { "env.create_idempotent",         test_env_create_idempotent,         false, NULL },
+    { "env.overwrite_truncate",        test_env_overwrite_truncate,        false, NULL },
+    { "env.unset_monotonic",           test_env_unset_monotonic,           false, NULL },
+    { "env.iter_order",                test_env_iter_order,                false, NULL },
+    { "env.bounds",                    test_env_bounds,                    false, NULL },
+    { "env.clone_deep_independent",    test_env_clone_deep_independent,    false, NULL },
+    { "env.free_null_tolerant",        test_env_free_null_tolerant,        false, NULL },
+    { "devenv.bestiary",               test_devenv_bestiary,               false, NULL },
+    { "devenv.walk_reuse_nc",          test_devenv_walk_reuse_nc,          false, NULL },
+    { "devenv.walk_read",              test_devenv_walk_read,              false, NULL },
+
     { "allowance.null_is_broad",            test_allowance_null_is_broad,            false, NULL },
     { "allowance.mmio_containment",         test_allowance_mmio_containment,         false, NULL },
     { "allowance.irq_membership",           test_allowance_irq_membership,           false, NULL },
@@ -1604,6 +1874,7 @@ struct test_case g_tests[] = {
                                        test_devramfs_readdir_buffer_too_small_errs, false, NULL },
     { "devramfs.readdir_synth_dir_empty",
                                        test_devramfs_readdir_synth_dir_empty, false, NULL },
+    { "devramfs.walk_attrs",           test_devramfs_walk_attrs,           false, NULL },
     { "devramfs.readdir_paginates_no_dup_no_skip",
                                        test_devramfs_readdir_paginates_no_dup_no_skip, false, NULL },
     { "devsrv.registered",             test_devsrv_registered,             false, NULL },
@@ -1645,6 +1916,22 @@ struct test_case g_tests[] = {
     { "srvconn.ring_capacity",         test_srvconn_ring_capacity,         false, NULL },
     { "srvconn.recv_blocks_then_wakes",
                                        test_srvconn_recv_blocks_then_wakes,
+                                                                           false, NULL },
+    { "srvconn.server_send_blocks_then_drain_wakes",
+                                       test_srvconn_server_send_blocks_then_drain_wakes,
+                                                                           false, NULL },
+    { "srvconn.bulk_ring_class",       test_srvconn_bulk_ring_class,       false, NULL },
+    { "srvconn.role_park_second_writer",
+                                       test_srvconn_role_park_second_writer,
+                                                                           false, NULL },
+    { "srvconn.role_park_second_reader",
+                                       test_srvconn_role_park_second_reader,
+                                                                           false, NULL },
+    { "srvconn.client_send_blocking_backpressure",
+                                       test_srvconn_client_send_blocking_backpressure,
+                                                                           false, NULL },
+    { "srvconn.client_send_blocking_poll_edge",
+                                       test_srvconn_client_send_blocking_poll_edge,
                                                                            false, NULL },
     { "srvconn.recv_deadline_timeout",
                                        test_srvconn_recv_deadline_timeout, false, NULL },
@@ -1770,6 +2057,7 @@ struct test_case g_tests[] = {
     { "9p_wire.tflush_round_trip",     test_9p_wire_tflush_round_trip,     false, NULL },
     { "9p_wire.tweft_round_trip",      test_9p_wire_tweft_round_trip,      false, NULL },
     { "9p_wire.tweftio_round_trip",    test_9p_wire_tweftio_round_trip,    false, NULL },
+    { "9p_wire.twalkgetattr_round_trip", test_9p_wire_twalkgetattr_round_trip, false, NULL },
     { "9p_wire.rlerror_parse",         test_9p_wire_rlerror_parse,         false, NULL },
     { "9p_wire.rmsg_size_mismatch_rejected",
                                        test_9p_wire_rmsg_size_mismatch_rejected,
@@ -1902,6 +2190,10 @@ struct test_case g_tests[] = {
     { "9p_session.late_reply_does_not_free_awaiting_flush",
                                        test_9p_session_late_reply_does_not_free_awaiting_flush,
                                                                            false, NULL },
+    { "9p_session.abort_unsent_reclaims_tag",
+                                       test_9p_session_abort_unsent_reclaims_tag, false, NULL },
+    { "9p_session.flush_rollback_restores_victim",
+                                       test_9p_session_flush_rollback_restores_victim, false, NULL },
     { "9p_transport.init_destroy",     test_9p_transport_init_destroy,     false, NULL },
     { "9p_transport.round_trip",       test_9p_transport_round_trip,       false, NULL },
     { "9p_transport.send_frame_size_mismatch_rejected",
@@ -1929,12 +2221,50 @@ struct test_case g_tests[] = {
     { "9p_client.init_destroy",        test_9p_client_init_destroy,        false, NULL },
     { "9p_client.handshake",           test_9p_client_handshake,           false, NULL },
     { "9p_client.walk_and_clunk",      test_9p_client_walk_and_clunk,      false, NULL },
+    { "9p_client.walkgetattr",         test_9p_client_walkgetattr,         false, NULL },
     { "9p_client.lopen_read",          test_9p_client_lopen_read,          false, NULL },
     { "9p_client.write",               test_9p_client_write,               false, NULL },
+    { "9p_client.bulk_write_clamps_short",
+                                       test_9p_client_bulk_write_clamps_short,
+                                                                           false, NULL },
     { "9p_client.getattr",             test_9p_client_getattr,             false, NULL },
     { "9p_client.readdir",             test_9p_client_readdir,             false, NULL },
     { "9p_client.statfs",              test_9p_client_statfs,              false, NULL },
     { "9p_client.weft",                test_9p_client_weft,                false, NULL },
+    { "larder.install_serve",          test_larder_install_serve,          false, NULL },
+    { "larder.serve_miss",             test_larder_serve_miss,             false, NULL },
+    { "larder.invalidate",             test_larder_invalidate,             false, NULL },
+    { "larder.gen_guard",              test_larder_gen_guard_skips_raced_install, false, NULL },
+    { "larder.root_qid_zero",          test_larder_root_qid_zero,          false, NULL },
+    { "larder.overwrite_wins",         test_larder_overwrite_wins,         false, NULL },
+    { "larder.eviction_bounded",       test_larder_eviction_bounded,       false, NULL },
+    { "larder.dentry_serve",           test_larder_dentry_serve,           false, NULL },
+    { "larder.dentry_serve_miss",      test_larder_dentry_serve_miss,      false, NULL },
+    { "larder.dentry_negative",        test_larder_dentry_negative,        false, NULL },
+    { "larder.dentry_multi_hop",       test_larder_dentry_multi_hop,       false, NULL },
+    { "larder.dentry_partial_chain_bails", test_larder_dentry_partial_chain_bails, false, NULL },
+    { "larder.dentry_attr_miss_bails", test_larder_dentry_attr_miss_bails, false, NULL },
+    { "larder.dentry_invalidate_name", test_larder_dentry_invalidate_name, false, NULL },
+    { "larder.dentry_gen_guard",       test_larder_dentry_gen_guard,       false, NULL },
+    { "larder.dentry_name_too_long",   test_larder_dentry_name_too_long,   false, NULL },
+    { "larder.dentry_bounded",         test_larder_dentry_bounded,         false, NULL },
+    { "larder.page_serve",             test_larder_page_serve,             false, NULL },
+    { "larder.page_serve_miss",        test_larder_page_serve_miss,        false, NULL },
+    { "larder.page_offset",            test_larder_page_offset,            false, NULL },
+    { "larder.page_cvers_mismatch",    test_larder_page_cvers_mismatch,    false, NULL },
+    { "larder.page_partial",           test_larder_page_partial,           false, NULL },
+    { "larder.page_invalidate",        test_larder_page_invalidate,        false, NULL },
+    { "larder.page_invalidate_multifile", test_larder_page_invalidate_multifile, false, NULL },
+    { "larder.page_gen_guard",         test_larder_page_gen_guard,         false, NULL },
+    { "larder.pages_snapshot_gen_witness", test_larder_pages_snapshot_gen_witness, false, NULL },
+    { "larder.page_overwrite",         test_larder_page_overwrite,         false, NULL },
+    { "larder.page_bounded",           test_larder_page_bounded,           false, NULL },
+    { "larder.page_destroy_frees",     test_larder_page_destroy_frees,     false, NULL },
+    { "larder.attr_downgrade_perm_only", test_larder_attr_downgrade_perm_only, false, NULL },
+    { "larder.downgrade_guards_raced_populate",
+                                       test_larder_downgrade_guards_raced_populate,
+                                                                           false, NULL },
+    { "larder.gen_scope_qid",          test_larder_gen_scope_qid,          false, NULL },
     { "9p_client.weftio",              test_9p_client_weftio,              false, NULL },
     { "9p_client.mkdir",               test_9p_client_mkdir,               false, NULL },
     { "9p_client.unlinkat",            test_9p_client_unlinkat,            false, NULL },
@@ -1994,6 +2324,12 @@ struct test_case g_tests[] = {
                                        test_9p_client_loom_drain_waits_for_rearm_pending, false, NULL },
     { "9p_client.loom_read_e2e",       test_9p_client_loom_read_e2e,       false, NULL },
     { "9p_client.loom_write_e2e",      test_9p_client_loom_write_e2e,      false, NULL },
+    { "9p_client.loom_weft_read_e2e",  test_9p_client_loom_weft_read_e2e,  false, NULL },
+    { "9p_client.loom_weft_write_e2e", test_9p_client_loom_weft_write_e2e, false, NULL },
+    { "9p_client.loom_weft_hybrid_fallback",
+                                       test_9p_client_loom_weft_hybrid_fallback, false, NULL },
+    { "9p_client.loom_weft_oob_rejected",
+                                       test_9p_client_loom_weft_oob_rejected, false, NULL },
     { "9p_client.loom_rw_rejects",     test_9p_client_loom_rw_rejects,     false, NULL },
     { "9p_client.loom_readdir_e2e",    test_9p_client_loom_readdir_e2e,    false, NULL },
     { "9p_client.loom_readlink_e2e",   test_9p_client_loom_readlink_e2e,   false, NULL },
@@ -2006,10 +2342,21 @@ struct test_case g_tests[] = {
     { "9p_client.loom_renameat_e2e",   test_9p_client_loom_renameat_e2e,   false, NULL },
     { "9p_client.loom_mutation_rejects",
                                        test_9p_client_loom_mutation_rejects, false, NULL },
+    { "9p_client.async_clunk_burst_no_fid_leak",
+                                       test_9p_client_async_clunk_burst_no_fid_leak, false, NULL },
     { "9p_client.loom_multi_inflight_e2e",
                                        test_9p_client_loom_multi_inflight_e2e, false, NULL },
     { "9p_client.loom_multi_inflight_read_e2e",
                                        test_9p_client_loom_multi_inflight_read_e2e, false, NULL },
+    { "9p_client.send_backpressure_self_pump",
+                                       test_9p_client_send_backpressure_self_pump, false, NULL },
+    { "9p_client.send_backpressure_multi_waiter",
+                                       test_9p_client_send_backpressure_multi_waiter, false, NULL },
+    { "9p_client.send_backpressure_spill_survives_outbuf_reuse",
+                                       test_9p_client_send_backpressure_spill_survives_outbuf_reuse, false, NULL },
+    { "9p_client.abandon_async_eagain_keeps_session_alive",
+                                       test_9p_client_abandon_async_eagain_keeps_session_alive,
+                                                                           false, NULL },
     { "dev9p.registered",              test_dev9p_registered,              false, NULL },
     { "dev9p.attach_client_root_spoor",test_dev9p_attach_client_root_spoor,false, NULL },
     { "dev9p.walk_one_component",      test_dev9p_walk_one_component,      false, NULL },
@@ -2021,22 +2368,78 @@ struct test_case g_tests[] = {
     { "dev9p.write_routes_through_client",
                                        test_dev9p_write_routes_through_client,
                                                                            false, NULL },
+    { "dev9p.write_read_propagate_errno",
+                                       test_dev9p_write_read_propagate_errno,
+                                                                           false, NULL },
     { "dev9p.close_clunks_owned_fid",  test_dev9p_close_clunks_owned_fid,  false, NULL },
     { "dev9p.close_does_not_clunk_root_fid",
                                        test_dev9p_close_does_not_clunk_root_fid,
                                                                            false, NULL },
     { "dev9p.create_file",             test_dev9p_create_file,             false, NULL },
+    { "dev9p.create_invalidates_reused_child",
+                                       test_dev9p_create_invalidates_reused_child,
+                                                                           false, NULL },
+    { "dev9p.create_invalidates_reused_child_pages",
+                                       test_dev9p_create_invalidates_reused_child_pages,
+                                                                           false, NULL },
+    { "dev9p.create_downgrades_parent_attr",
+                                       test_dev9p_create_downgrades_parent_attr,
+                                                                           false, NULL },
+    { "dev9p.dirfid_consume_and_recycle",
+                                       test_dev9p_dirfid_consume_and_recycle,
+                                                                           false, NULL },
+    { "dev9p.dirfid_perm_only_leaf_consume",
+                                       test_dev9p_dirfid_perm_only_leaf_consume,
+                                                                           false, NULL },
+    { "dev9p.dirfid_create_reuse_drop",
+                                       test_dev9p_dirfid_create_reuse_drop,
+                                                                           false, NULL },
+    { "dev9p.dirfid_rmdir_drop_and_no_stale_repark",
+                                       test_dev9p_dirfid_rmdir_drop_and_no_stale_repark,
+                                                                           false, NULL },
+    { "dev9p.dirfid_suspect_not_reparked",
+                                       test_dev9p_dirfid_suspect_not_reparked,
+                                                                           false, NULL },
+    { "dev9p.create_invalidates_negative_dentry",
+                                       test_dev9p_create_invalidates_negative_dentry,
+                                                                           false, NULL },
     { "dev9p.create_dir",              test_dev9p_create_dir,              false, NULL },
     { "dev9p.fsync",                   test_dev9p_fsync,                   false, NULL },
     { "dev9p.readdir",                 test_dev9p_readdir,                 false, NULL },
     { "dev9p.readdir_cookie_high_bit", test_dev9p_readdir_cookie_high_bit, false, NULL },
     { "dev9p.poll_regular_file_always_ready", test_dev9p_poll_regular_file_always_ready, false, NULL },
+    { "dev9p.poll_cancel_at_close",    test_dev9p_poll_cancel_at_close,    false, NULL },
     { "dev9p.rename",                  test_dev9p_rename,                  false, NULL },
     { "dev9p.unlink",                  test_dev9p_unlink,                  false, NULL },
     { "dev9p.stat_native_maps_getattr",
                                        test_dev9p_stat_native_maps_getattr, false, NULL },
     { "dev9p.wstat_native_drives_setattr",
                                        test_dev9p_wstat_native_drives_setattr, false, NULL },
+    { "dev9p.prw_wire_offset_and_cursor",
+                                       test_dev9p_prw_wire_offset_and_cursor, false, NULL },
+    { "dev9p.wstat_readonly_fd",       test_dev9p_wstat_readonly_fd,          false, NULL },
+    { "dev9p.wstat_size",              test_dev9p_wstat_size,                 false, NULL },
+    { "dev9p.walk_attrs",              test_dev9p_walk_attrs,                 false, NULL },
+    { "dev9p.page_cache_serve_and_gate", test_dev9p_page_cache_serve_and_gate, false, NULL },
+    { "dev9p.read_align_heals_partial", test_dev9p_read_align_heals_partial,    false, NULL },
+    { "dev9p.read_align_short_not_eof", test_dev9p_read_align_short_not_eof,    false, NULL },
+    { "dev9p.open_trunc_invalidates",   test_dev9p_open_trunc_invalidates,      false, NULL },
+    { "dev9p.read_eof_attr_served",     test_dev9p_read_eof_attr_served,        false, NULL },
+    { "dev9p.cached_open",             test_dev9p_cached_open,                 false, NULL },
+    { "dev9p.cached_open_fallbacks",   test_dev9p_cached_open_fallbacks,       false, NULL },
+    { "dev9p.cached_open_loose",       test_dev9p_cached_open_loose,           false, NULL },
+    { "dev9p.wb_coalesce_one_twrite",  test_dev9p_wb_coalesce_one_twrite,      false, NULL },
+    { "dev9p.wb_overlay_read",         test_dev9p_wb_overlay_read,             false, NULL },
+    { "dev9p.wb_flush_at_close",       test_dev9p_wb_flush_at_close,           false, NULL },
+    { "dev9p.wb_fsync_flush_and_error", test_dev9p_wb_fsync_flush_and_error,   false, NULL },
+    { "dev9p.wb_nonappend_writethrough", test_dev9p_wb_nonappend_writethrough, false, NULL },
+    { "dev9p.wb_fstat_staged_size",    test_dev9p_wb_fstat_staged_size,        false, NULL },
+    { "dev9p.wb_cap_flush",            test_dev9p_wb_cap_flush,                false, NULL },
+    { "dev9p.wb_budget_fallback",      test_dev9p_wb_budget_fallback,          false, NULL },
+    { "dev9p.wb_populate_readback",    test_dev9p_wb_populate_readback,        false, NULL },
+    { "dev9p.wb_populate_append_chain", test_dev9p_wb_populate_append_chain,   false, NULL },
+    { "dev9p.wb_populate_failed_flush", test_dev9p_wb_populate_failed_flush,   false, NULL },
+    { "dev9p.wb_writethrough_range",   test_dev9p_wb_writethrough_range_invalidate, false, NULL },
     { "dev9p.perm_enforced_deny_allow",
                                        test_dev9p_perm_enforced_deny_allow, false, NULL },
     { "p9_attached.create_destroy",    test_p9_attached_create_destroy,    false, NULL },
@@ -2121,6 +2524,9 @@ struct test_case g_tests[] = {
     { "sys_rw.rights_check",                           test_sys_rw_rights_check,                           false, NULL },
     { "sys_rw.zero_length_validates_fd",               test_sys_rw_zero_length_validates_fd,               false, NULL },
     { "sys_rw.read_after_close_returns_eof",           test_sys_rw_read_after_close_returns_eof,           false, NULL },
+    { "sys_prw.pipe_not_seekable",                      test_sys_prw_pipe_not_seekable,                      false, NULL },
+    { "sys_prw.pread_devramfs_offset_and_cursor",       test_sys_pread_devramfs_offset_and_cursor,           false, NULL },
+    { "sys_prw.rights_and_walkonly",                    test_sys_prw_rights_and_walkonly,                    false, NULL },
     { "sys_pipe.dup_spoor_handle_acquires_ref",        test_sys_pipe_dup_spoor_handle_acquires_ref,        false, NULL },
     { "userspace.pipe_probe_round_trip",               test_pipe_probe_round_trip,                         false, NULL },
     { "sys_attach_9p.rejection_paths",                 test_sys_attach_9p_rejection_paths,                 false, NULL },
@@ -2159,6 +2565,8 @@ struct test_case g_tests[] = {
     { "sys_spawn_with_fds.rejects_missing_binary",     test_sys_spawn_with_fds_rejects_missing_binary,     false, NULL },
     { "sys_spawn_with_fds.zero_count_succeeds",        test_sys_spawn_with_fds_zero_count_succeeds,        false, NULL },
     { "sys_spawn_with_fds.child_rights_subset_of_parent", test_sys_spawn_with_fds_child_rights_subset_of_parent, false, NULL },
+    { "sys_spawn.killed_child_delivers_pipe_eof_before_reap", test_sys_spawn_killed_child_delivers_pipe_eof_before_reap, false, NULL },
+    { "sys_spawn.joined_multithread_child_delivers_pipe_eof_before_reap", test_sys_spawn_joined_multithread_child_delivers_pipe_eof_before_reap, false, NULL },
     { "sys_spawn_with_caps.happy_path_zero_mask",      test_sys_spawn_with_caps_happy_path_zero_mask,      false, NULL },
     { "sys_spawn_with_caps.happy_path_subset_of_parent", test_sys_spawn_with_caps_happy_path_subset_of_parent, false, NULL },
     { "sys_spawn_with_caps.clamps_to_parent",          test_sys_spawn_with_caps_clamps_to_parent,          false, NULL },
@@ -2330,11 +2738,13 @@ struct test_case g_tests[] = {
     { "stalk.dotdot_containment",      test_stalk_dotdot_containment,      false, NULL },
     { "stalk.xsearch_deny",            test_stalk_xsearch_deny,            false, NULL },
     { "stalk.missing_component",       test_stalk_missing_component,       false, NULL },
+    { "stalk.err_codes",               test_stalk_err_codes,               false, NULL },
     { "stalk.opath_no_open",           test_stalk_opath_no_open,           false, NULL },
     { "stalk.open_root",               test_stalk_open_root,               false, NULL },
     { "stalk.open_replace",            test_stalk_open_replace,            false, NULL },
     { "stalk.depth_cap",               test_stalk_depth_cap,               false, NULL },
     { "stalk.lifetime_no_leak",        test_stalk_lifetime_no_leak,        false, NULL },
+    { "stalk.long_component_bound",    test_stalk_long_component_bound,    false, NULL },
     { "stalk.cross_mount",             test_stalk_cross_mount,             false, NULL },
     { "stalk.cross_mount_final_quarry", test_stalk_cross_mount_final_quarry, false, NULL },
     { "stalk.cross_mount_xsearch_deny", test_stalk_cross_mount_xsearch_deny, false, NULL },
@@ -2345,6 +2755,17 @@ struct test_case g_tests[] = {
     { "stalk.path_dotdot",             test_stalk_path_dotdot,             false, NULL },
     { "stalk.path_cross_transplant",   test_stalk_path_cross_transplant,   false, NULL },
     { "stalk.path_adopt_transplant",   test_stalk_path_adopt_transplant,   false, NULL },
+    { "stalk.pounce_engaged",          test_stalk_pounce_engaged,          false, NULL },
+    { "stalk.pounce_acces_masks_noent", test_stalk_pounce_acces_masks_noent, false, NULL },
+    { "stalk.pounce_parity_nowa",      test_stalk_pounce_parity_nowa,      false, NULL },
+    { "stalk.pounce_full_walk_past_mount", test_stalk_pounce_full_walk_past_mount, false, NULL },
+    { "stalk.stat_query",              test_stalk_stat_query,              false, NULL },
+    { "stalk.stat_mount_leaf",         test_stalk_stat_mount_leaf,         false, NULL },
+    { "sys_stat.for_proc",             test_sys_stat_for_proc,             false, NULL },
+    { "stalk.pounce_unsupported_fallback", test_stalk_pounce_unsupported_fallback, false, NULL },
+    { "stalk.cached_open_arm",           test_stalk_cached_open_arm,             false, NULL },
+    { "stalk.cached_open_denials",       test_stalk_cached_open_denials,         false, NULL },
+    { "stalk.cached_open_mount_fallback", test_stalk_cached_open_mount_fallback, false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
 };
 

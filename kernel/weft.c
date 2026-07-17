@@ -378,13 +378,15 @@ struct weft_binding *weft_binding_alloc(struct Burrow *burrow, u64 guest_va,
     return b;
 }
 
-int weft_binding_validate_write(const struct weft_binding *b, u64 ubuf_va,
-                                u32 len, u32 *out_off) {
+int weft_binding_validate_rw(const struct weft_binding *b, u64 ubuf_va,
+                             u32 len, u32 *out_off) {
     if (!b || !out_off) return -1;
-    // The descriptor's addr is PAYLOAD-region-relative: the guest's write buffer
-    // must sit at or after the payload region's base in the SAME address space
-    // it mapped the ring into (guest_va is the guest mapping; ubuf_va is the
-    // same-Proc SYS_WRITE buffer).
+    // Direction-agnostic: a Tweftio READ and WRITE both name a region [off,
+    // off+len) within the payload, so the descriptor validation is identical --
+    // the buffer (the WRITE source, or the READ destination) must sit at or after
+    // the payload region's base in the SAME address space the guest mapped the
+    // ring into (guest_va is the guest mapping; ubuf_va is the same-Proc syscall
+    // buffer that points INTO the ring).
     u64 payload_base = b->guest_va + (u64)b->view.payload_off;
     if (ubuf_va < payload_base) return -1;        // below the payload region
     u64 o = ubuf_va - payload_base;

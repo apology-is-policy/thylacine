@@ -17,6 +17,8 @@
 
 #![allow(dead_code)]
 
+use core::sync::atomic::{AtomicU32, Ordering};
+
 /// "WEFT" -- the ring header magic the guest reads to confirm a live ring.
 pub const WEFT_MAGIC: u32 = 0x5746_4554;
 
@@ -100,6 +102,7 @@ pub struct WeftReadyHdr {
 
 const _: () = assert!(core::mem::size_of::<WeftReadyHdr>() == 128);
 const _: () = assert!(core::mem::offset_of!(WeftReadyHdr, ready_seq) == 0);
+const _: () = assert!(core::mem::offset_of!(WeftReadyHdr, ready_mask) == 4);
 const _: () = assert!(core::mem::offset_of!(WeftReadyHdr, wait_seq) == 64);
 const _: () = assert!(core::mem::offset_of!(WeftReadyHdr, wait_active) == 68);
 
@@ -188,4 +191,107 @@ pub unsafe fn init_ring(base: *mut u8, size: u64, ring_entries: u32) -> Option<R
     };
     core::ptr::write(base.add(geom.ready_off as usize) as *mut WeftReadyHdr, ready);
     Some(geom)
+}
+
+/// Read the geometry mirror netd wrote into a freshly-mapped ring Burrow at `base`
+/// (the inverse of `init_ring`'s header write -- the Weft-6c native client's first
+/// step after `SYS_WEFT_MAP`). Validates the WEFT_MAGIC, recovers the byte offsets,
+/// and computes `ring_size = payload_off + payload_size` (the whole-Burrow size,
+/// which the kernel's weft-bound Loom detection requires the registered buffer
+/// length to equal exactly). Returns None on a wrong magic (an unmapped or
+/// non-weft page) or a degenerate header.
+///
+/// The header is written once at grant and immutable thereafter; the volatile
+/// per-field reads keep the optimizer from assuming constancy across a re-map.
+/// A wrong geometry can only mis-shape THIS guest's own ring I/O -- the kernel
+/// validates every weft slice against its private `weft_ring_view` (I-30), so a
+/// scribbled mirror never crosses a safety boundary.
+///
+/// # Safety
+/// `base` must point at a readable mapping of at least one ring header (a
+/// `SYS_WEFT_MAP` return is page-aligned, so the u32 field reads are aligned).
+pub unsafe fn read_ring_geom(base: *const u8) -> Option<RingGeom> {
+    let rd = |off: usize| core::ptr::read_volatile(base.add(off) as *const u32);
+    if rd(0) != WEFT_MAGIC {
+        return None; // unmapped / non-weft page
+    }
+    let ring_entries = rd(4); // WeftRingHdr: ring_entries @ 4
+    let desc_off = rd(8); //                desc_off     @ 8
+    let payload_off = rd(12); //            payload_off  @ 12
+    let payload_size = rd(16); //           payload_size @ 16
+    let ready_off = rd(32); //              ready_off    @ 32
+    let ring_size = payload_off.checked_add(payload_size)?;
+    if ring_entries == 0 || payload_size == 0 {
+        return None; // degenerate -- a live ring always has a non-empty payload
+    }
+    Some(RingGeom {
+        ring_size,
+        ring_entries,
+        desc_off,
+        payload_off,
+        payload_size,
+        ready_off,
+    })
+}
+
+// =============================================================================
+// Readiness-ring drive primitives (Weft-6c) -- the userspace mirror of the kernel
+// weft.c weft_ready_signal / weft_ready_observe. The producer (netd) bumps the
+// edge after writing RX bytes into a flow's ring; the consumer (the native client)
+// observes the edge syscall-free (the Shenango single-cache-line poll, the §6
+// busy-poll fast path). Single-writer-per-word: the producer owns ready_seq/
+// ready_mask, the consumer owns wait_seq/wait_active (the consumer-park leg --
+// arm_park/unpark -- is the v1.x direct-park mode, validated-not-wired; the native
+// client's park is the Loom CQ wait, so v1.0 needs only signal + observe). The
+// no-lost-wake reasoning is the store-buffer register-then-observe of
+// specs/weft_readiness.tla (I-9); these wrappers reproduce the kernel orderings
+// exactly so the cross-Proc seq-cst story holds across the shared page.
+// =============================================================================
+
+// Byte offsets of the readiness words within a WeftReadyHdr (asserted above).
+const READY_SEQ_OFF: usize = 0; // producer-owned
+const READY_MASK_OFF: usize = 4; // producer-owned
+const WAIT_SEQ_OFF: usize = 64; // consumer-owned
+const WAIT_ACTIVE_OFF: usize = 68; // consumer-owned
+
+/// Producer (netd) readiness signal: publish `mask`, then bump `ready_seq`
+/// (seq-cst), returning whether a parked consumer must be woken. Mirrors the
+/// kernel `weft_ready_signal`: the seq-cst bump is the StoreLoad barrier before
+/// the `wait_active` load, so a consumer that armed concurrently is never missed.
+/// The native client's park is the Loom CQ wait (no weft Rendez), so v1.0 netd
+/// ignores the return -- the bump alone drives the consumer's `ready_observe`
+/// busy-poll. Single-writer-per-word: only the producer writes ready_seq/ready_mask.
+///
+/// # Safety
+/// `ready_base` must point at a live, writable `WeftReadyHdr` in a mapping this
+/// Proc owns (the ring base + `ready_off`).
+pub unsafe fn ready_signal(ready_base: *mut u8, mask: u32) -> bool {
+    let base = ready_base as *const u8;
+    let mask_w = &*(base.add(READY_MASK_OFF) as *const AtomicU32);
+    let seq_w = &*(base.add(READY_SEQ_OFF) as *const AtomicU32);
+    let active_w = &*(base.add(WAIT_ACTIVE_OFF) as *const AtomicU32);
+    let wseq_w = &*(base.add(WAIT_SEQ_OFF) as *const AtomicU32);
+    mask_w.store(mask, Ordering::Relaxed);
+    // add_fetch semantics: the post-increment value is what the kernel compares.
+    let seq = seq_w.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
+    let armed = active_w.load(Ordering::SeqCst) != 0;
+    let wseq = wseq_w.load(Ordering::Relaxed);
+    armed && wseq != seq
+}
+
+/// Consumer (client) readiness observe: acquire-load `ready_seq` (paired with the
+/// producer's seq-cst bump that release-published the mask) plus the latest mask.
+/// Syscall-free. The caller compares the returned seq to its private last-seen to
+/// detect a producer edge. Mirrors the kernel `weft_ready_observe`. Returns
+/// `(ready_seq, ready_mask)`.
+///
+/// # Safety
+/// `ready_base` must point at a live, readable `WeftReadyHdr` in a mapping this
+/// Proc owns. Reads only the producer-owned words.
+pub unsafe fn ready_observe(ready_base: *const u8) -> (u32, u32) {
+    let seq_w = &*(ready_base.add(READY_SEQ_OFF) as *const AtomicU32);
+    let mask_w = &*(ready_base.add(READY_MASK_OFF) as *const AtomicU32);
+    let seq = seq_w.load(Ordering::Acquire);
+    let mask = mask_w.load(Ordering::Relaxed);
+    (seq, mask)
 }

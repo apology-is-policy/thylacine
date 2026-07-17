@@ -318,8 +318,20 @@ static volatile u32 g_notify_test_ran;
 
 static void notify_test_thread(void) {
     g_notify_test_ran++;
+    // Reach a stable, reapable terminal (EXITING) rather than falling off the
+    // end into thread_trampoline's RUNNING wfe-halt loop. With TI-4b push
+    // placement a notify-enabled ready() places this thread on an idle secondary
+    // that RUNS it (under the old pull model the steal often did not complete in
+    // the test window, leaving it RUNNABLE on cpu0 -- the latent assumption push
+    // made deterministic). sched() with state EXITING does not re-insert us; the
+    // CPU switches to its idle and we sit EXITING + off-cpu, which the cleanup's
+    // thread_free accepts (its on_cpu-spin covers the EXITING-but-still-on_cpu
+    // window). If notify is DISABLED (the no_ipi test) this thread is never run
+    // -> it stays RUNNABLE on cpu0's tree and thread_free removes it; both
+    // terminals are safe.
+    current_thread()->state = THREAD_EXITING;
     sched();
-    // Unreachable — boot doesn't switch back here.
+    // Unreachable -- EXITING is never re-dispatched.
 }
 
 // scheduler.notify_idle_peer_smoke — verify that with notify enabled,
@@ -374,9 +386,10 @@ void test_sched_notify_idle_peer_smoke(void) {
     TEST_ASSERT(any_secondary_received,
         "at least one secondary received IPI_RESCHED via notify_idle_peer");
 
-    // Cleanup. Either secondary stole + ran the thread (g_notify_test_ran
-    // > 0), or the thread is still RUNNABLE in some tree (boot's or
-    // a secondary's). thread_free is idempotent across both.
+    // Cleanup. The secondary ran the thread (g_notify_test_ran > 0 -> it
+    // reached its EXITING terminal off-cpu), or -- if the IPI raced -- it is
+    // still RUNNABLE in a tree. thread_free accepts both (its on_cpu-spin covers
+    // the EXITING-but-still-on_cpu window).
     thread_free(t);
 }
 
@@ -617,6 +630,121 @@ void test_sched_ready_on_cross_cpu_enqueue(void) {
     thread_free(t);
 }
 
+// scheduler.cpu_surplus_for_kick  (TI-4c)
+//   The busy-tick overload kick (sched_rebalance.tla::Overload) fires only when
+//   THIS CPU holds migratable surplus -- a RUNNABLE thread queued in a non-IDLE
+//   band behind the running current. cpu_has_surplus_for_kick is that decision.
+//   Assert: a queued NORMAL thread makes it TRUE; a band-IDLE thread does NOT
+//   (the per-CPU idle + best-effort IDLE work are never a cross-CPU kick
+//   reason); removal returns it to FALSE. thread_may_run_on (the inert affinity-
+//   ready gate) is exercised on the placement path by ready_on_cross_cpu_enqueue.
+void test_sched_cpu_surplus_for_kick(void) {
+    unsigned self = smp_cpu_idx_self();
+
+    // Baseline: with no queued non-idle work on self, no surplus to kick.
+    TEST_EXPECT_EQ(sched_cpu_has_surplus_for_test(self), false,
+        "no surplus when self's non-idle bands are empty");
+
+    // A queued NORMAL work thread = migratable surplus -> kick-eligible.
+    struct Thread *work = thread_create(kproc(), sched_test_thread_a);
+    TEST_ASSERT(work != NULL, "thread_create(work) failed");   // default NORMAL
+    ready(work);
+    TEST_EXPECT_EQ(sched_cpu_has_surplus_for_test(self), true,
+        "a queued NORMAL thread is migratable surplus");
+    sched_remove_if_runnable(work);
+    TEST_EXPECT_EQ(sched_cpu_has_surplus_for_test(self), false,
+        "surplus clears when the queued work is removed");
+
+    // A band-IDLE thread is NOT surplus (the kick excludes the IDLE band: it
+    // holds the pinned idle + at most best-effort work, never worth a kick).
+    struct Thread *idle_band = thread_create(kproc(), sched_test_thread_b);
+    TEST_ASSERT(idle_band != NULL, "thread_create(idle_band) failed");
+    idle_band->band = SCHED_BAND_IDLE;
+    ready(idle_band);
+    TEST_EXPECT_EQ(sched_cpu_has_surplus_for_test(self), false,
+        "a band-IDLE thread is NOT a cross-CPU kick reason");
+    sched_remove_if_runnable(idle_band);
+
+    thread_free(work);
+    thread_free(idle_band);
+}
+
+// scheduler.yield_fast_path_no_work  (#33)
+//   With no queued non-idle work on this CPU, sched_yield_hint returns false
+//   WITHOUT dispatching -- the fast path that makes the yield syscall
+//   affordable from spin loops (the pinned in-tree idle is NOT competition; an
+//   unconditional sched() would bounce through it and back). A queued
+//   band-IDLE thread is likewise not competition -- the predicate is
+//   cpu_has_surplus_for_kick, and band IDLE holds the pinned idle + at most
+//   best-effort work that the tick path serves at slice granularity.
+void test_sched_yield_fast_path_no_work(void) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u,
+        "run tree must be empty at test entry");
+
+    TEST_EXPECT_EQ(sched_yield_hint(), false,
+        "yield with an empty local queue takes the fast path (no dispatch)");
+    TEST_EXPECT_EQ(current_thread(), kthread(),
+        "fast-path yield returns on the calling thread");
+
+    // A band-IDLE occupant is not competition either. Masked across the
+    // place->peek->remove triplet so a slice-expiry preempt cannot dispatch
+    // the queued thread mid-window (the RW-2 R2-F1 pattern from
+    // ready_on_clamps_stale_vd below; the peek itself never sched()s here).
+    struct Thread *idle_band = thread_create(kproc(), sched_test_thread_a);
+    TEST_ASSERT(idle_band != NULL, "thread_create failed");
+    idle_band->band = SCHED_BAND_IDLE;
+    irq_state_t s = spin_lock_irqsave(NULL);
+    ready(idle_band);
+    bool dispatched = sched_yield_hint();
+    sched_remove_if_runnable(idle_band);
+    spin_unlock_irqrestore(NULL, s);
+    TEST_EXPECT_EQ(dispatched, false,
+        "a queued band-IDLE thread does not trigger a yield dispatch");
+    thread_free(idle_band);
+}
+
+// scheduler.yield_dispatches_queued_work  (#33)
+//   The dispatch half: a queued NORMAL thread makes sched_yield_hint dispatch
+//   -- the caller is requeued at the back of its band and the queued work
+//   runs (the sched_alpha.tla StartSwitch kind="yield" transition, the same
+//   one tick preemption drives). The rotation is the dispatch_smoke shape:
+//   the queued thread runs (counter increments), yields away, the caller
+//   resumes. Pre-#33 nothing but preemption drove this transition from EL0.
+void test_sched_yield_dispatches_queued_work(void) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u,
+        "run tree must be empty at test entry");
+    g_test_sched_state[0] = 0;
+
+    struct Thread *ta = thread_create(kproc(), sched_test_thread_a);
+    TEST_ASSERT(ta != NULL, "thread_create failed");
+
+    // Mask across the ready -> yield window (the sibling test's RW-2 R2-F1
+    // pattern; the #33-audit F3): a slice-expiry preempt landing between
+    // ready(ta) and the hint would dispatch ta EARLY, and the hint's own
+    // sched() would then re-dispatch it PAST its lone sched() call into the
+    // trampoline's wfe halt -- the asserts still pass (ta increments exactly
+    // once), but through an unintended ~2-slice detour. sched() runs masked
+    // anyway (preempt_check_irq calls it masked), so the dispatch inside the
+    // mask is the ordinary shape; ta itself runs unmasked (a fresh thread's
+    // trampoline unmasks).
+    irq_state_t s = spin_lock_irqsave(NULL);
+    ready(ta);
+    bool dispatched = sched_yield_hint();
+    spin_unlock_irqrestore(NULL, s);
+
+    TEST_EXPECT_EQ(dispatched, true,
+        "yield with queued NORMAL work dispatches (returns true)");
+    TEST_EXPECT_EQ(g_test_sched_state[0], 1u,
+        "the queued thread ran across the yield");
+    TEST_EXPECT_EQ(current_thread(), kthread(),
+        "the yielding thread resumed after the rotation");
+
+    // ta is RUNNABLE in the tree (suspended inside its own sched()).
+    thread_free(ta);
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u,
+        "tree empty after thread_free");
+}
+
 // scheduler.ready_on_clamps_stale_vd  (RW-2 2A-F1)
 //   A thread carries its vd_t from its last yield on whatever CPU it last ran
 //   on; each CPU's vd_counter is an independent clock. A cross-CPU wake must
@@ -751,4 +879,88 @@ void test_sched_wake_preempt_same_cpu(void) {
     TEST_EXPECT_EQ(k->band, (u32)SCHED_BAND_NORMAL,
         "sched_mark_interactive is a no-op on a kproc (kernel) thread");
     thread_free(k);
+}
+
+// ===========================================================================
+// #360: the per-CPU plain-spinlock preempt count (spinlock.h).
+
+// spinlock.preempt_count_balance -- bookkeeping: inc on lock / trylock-
+// success, none on trylock-failure, dec on unlock; the irqsave-with-lock
+// variants count too; the raw variants never count. Whole test under an IRQ
+// mask so no tick perturbs the reads (the counted IRQ-handler locks are
+// inc/dec-balanced within each handler, but masking makes the assertions
+// exact). The count is per-thread (Thread.preempt_count, #360).
+void test_spinlock_preempt_count_balance(void) {
+    irq_state_t s0 = spin_lock_irqsave(NULL);
+    struct Thread *me = current_thread();
+    u32 base = me->preempt_count;
+
+    spin_lock_t a = SPIN_LOCK_INIT;
+    spin_lock_t b = SPIN_LOCK_INIT;
+
+    spin_lock(&a);
+    TEST_EXPECT_EQ(me->preempt_count, base + 1u, "spin_lock increments");
+    TEST_EXPECT_EQ(spin_trylock(&b), true, "trylock acquires a free lock");
+    TEST_EXPECT_EQ(me->preempt_count, base + 2u, "trylock-success increments");
+    TEST_EXPECT_EQ(spin_trylock(&b), false, "trylock on a held lock fails");
+    TEST_EXPECT_EQ(me->preempt_count, base + 2u, "trylock-failure is balanced");
+    spin_unlock(&b);
+    TEST_EXPECT_EQ(me->preempt_count, base + 1u, "spin_unlock decrements");
+
+    irq_state_t s1 = spin_lock_irqsave(&b);
+    TEST_EXPECT_EQ(me->preempt_count, base + 2u, "irqsave-with-lock increments");
+    spin_unlock_irqrestore(&b, s1);
+    TEST_EXPECT_EQ(me->preempt_count, base + 1u, "irqrestore-with-lock decrements");
+
+    spin_lock_raw(&b);
+    TEST_EXPECT_EQ(me->preempt_count, base + 1u, "raw lock does NOT count");
+    spin_unlock_raw(&b);
+    TEST_EXPECT_EQ(me->preempt_count, base + 1u, "raw unlock does NOT count");
+
+    spin_unlock(&a);
+    TEST_EXPECT_EQ(me->preempt_count, base, "balanced at exit");
+    spin_unlock_irqrestore(NULL, s0);
+}
+
+// scheduler.preempt_gate_defers_while_locked -- the #360 gate regression.
+// While this CPU holds a plain spinlock, an armed need_resched is DEFERRED
+// across tick returns (preempt_check_irq returns without consuming); after
+// release it is consumed within a bounded number of ticks.
+//
+// RED pre-#360 deterministically: without the gate, EVERY tick's IRQ-return
+// consumed a pending flag (preempting the holder mid-hold -- the #359
+// deadlock ingredient), and the sample below runs strictly after a tick
+// return, so it always read clear.
+void test_sched_preempt_gate_defers_while_locked(void) {
+    spin_lock_t l = SPIN_LOCK_INIT;
+
+    spin_lock(&l);
+    // Non-preemptible from here: no migration, so `self` is stable for the
+    // whole hold (read it only now, under the count).
+    unsigned self = smp_cpu_idx_self();
+    sched_clear_need_resched_for_test(self);
+    sched_set_need_resched_for_test(self);
+
+    // Spin 3 tick boundaries with IRQs ENABLED: ticks fire, sched_tick runs,
+    // preempt_check_irq runs at every return -- and must defer each time.
+    u64 t0 = timer_get_ticks();
+    while (timer_get_ticks() < t0 + 3) {
+        __asm__ __volatile__("" ::: "memory");
+    }
+    bool held_pending = sched_need_resched_pending(self);
+    spin_unlock(&l);
+
+    TEST_EXPECT_EQ(held_pending, true,
+        "the gate DEFERS (does not consume) need_resched while a plain lock is held");
+
+    // Released: the deferred preempt is consumed at an IRQ-return within a
+    // bounded number of ticks (self's next tick return passes the gate).
+    u64 t1 = timer_get_ticks();
+    bool saw_clear = false;
+    while (timer_get_ticks() < t1 + 12) {
+        if (!sched_need_resched_pending(self)) { saw_clear = true; break; }
+        __asm__ __volatile__("" ::: "memory");
+    }
+    TEST_EXPECT_EQ(saw_clear, true, "released -> the deferred preempt is consumed");
+    sched_clear_need_resched_for_test(smp_cpu_idx_self());  // leave no dangling preempt
 }

@@ -25,12 +25,18 @@
 #                                        # subset (e.g. a fast pre-push check)
 #
 # Configs (label / cpus / sanitizer / per-boot BOOT_TIMEOUT seconds):
-#   default-smp4   4   --          90    the canonical CI default
-#   default-smp8   8   --         120    max-CPU concurrency
-#   ubsan-smp4     4   undefined  300    the #860 amplifier (most sensitive)
-#   ubsan-smp8     8   undefined  300    amplifier + max concurrency
+#   default-smp4   4   --         300    the canonical CI default
+#   default-smp8   8   --         300    max-CPU concurrency
+#   ubsan-smp4     4   undefined  420    the #860 amplifier (most sensitive)
+#   ubsan-smp8     8   undefined  420    amplifier + max concurrency
 #
-# UBSan boots are ~120-300 s each (vs ~20-40 s default), so a full N=10
+# Timeouts are sized for the go4c-ENFORCING boot (#362): every boot runs two
+# real on-device go builds (~65-70 s of the boot) plus the suite + fsbench, so
+# a default boot is ~95-110 s -- the pre-go4c 90/120 s budgets timed out
+# HEALTHY boots (a 10/10 false-OTHER band). A timeout is a ceiling, not a
+# sleep: fast boots exit early, only a genuine wedge waits it out.
+#
+# UBSan boots are ~150-300 s each (vs ~95-110 s default), so a full N=10
 # matrix is intentionally heavy (~tens of minutes to ~hours of wall clock).
 # That cost IS the gate -- per "complexity is permitted only where it is
 # verified," the SMP soundness claim is only as good as the multi-boot
@@ -48,10 +54,10 @@ N="${SMP_GATE_N:-10}"
 
 # label  cpus  sanitizer  boot_timeout
 DEFAULT_MATRIX=(
-    "default-smp4 4 -        90"
-    "default-smp8 8 -       120"
-    "ubsan-smp4   4 undefined 300"
-    "ubsan-smp8   8 undefined 300"
+    "default-smp4 4 -       300"
+    "default-smp8 8 -       300"
+    "ubsan-smp4   4 undefined 420"
+    "ubsan-smp8   8 undefined 420"
 )
 
 # Allow selecting a subset by label. SMP_GATE_CONFIGS is a space-separated

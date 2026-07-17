@@ -31,6 +31,7 @@ The goal is to make `ARCHITECTURE.md` easier to write: each angle becomes a know
 | 10 | Capability-scoped service storage | Low | ~0.5-1 KLOC userspace + FS-delta O_PATH primitive (small kernel) | Convergence detour: FS-delta -> A-1.7, before A-1b |
 | 11 | Capability-sandboxed third-party drivers (Menagerie) | Medium | small kernel (the allowance + `devhw`) + ~6-10 KLOC Rust (warden + libdriver + sources) | The Menagerie arc (after pci, before net-2); `docs/MENAGERIE.md` |
 | 12 | Unified runtime authority: self-elevation (imperium) + persistent attenuated delegation (mandate) + medium-independent trusted path, on one `cap ∩ namespace ∩ time` substrate | Medium | small kernel (fork-propagating scope + the v1.x scoped-cap table) + ~4-8 KLOC Rust (corvus album + `censor` + netd enforcement) | Phase 8, post-net (the Imperium/Authority arc); `docs/MANDATE-DESIGN.md` + `docs/IMPERIUM-DESIGN.md` + `docs/TRUSTED-PATH.md` |
+| 13 | Self-hosting Go dev environment + a **capability-scoped, namespace-native, cross-boundary visual debugger** (Nora as a Go IDE; unified user->kernel stacks; debug a process's whole OS reality; debug authority bounded by the same `cap ∩ namespace` as everything else). Time-travel/record-replay is a deferred sub-stretch. | Medium-high | the on-device toolchain ( port + bake) + a small kernel debug surface (`/proc` debug-fs + arm64 HW breakpoints) + ~Go ports (dlv backend + gopls) + Rust (Nora plugin arch + Kaua debug UI) | Post-toolchain (Stage 8; the toolchain 4-6 LANDED). **Stage 8a design LANDED 2026-07-14 — `docs/DEBUG-FS-DESIGN.md`**: the kernel debug surface + the debug-authority invariant **I-39** (namespace + owner-or-`CAP_DEBUG`); the `cap ∩ namespace` bound is realized. `docs/GO-IDE-DESIGN.md` + `docs/GO-PORT-PLAN.md` |
 
 **Angle #11 — capability-sandboxed third-party drivers (the Menagerie inversion).**
 Angle #2 made userspace drivers *possible*; Menagerie makes a **stable third-party
@@ -88,6 +89,24 @@ These are not v1.0 angles — they're recorded so a future direction isn't lost.
   native op-descriptor SQE + a reserved wire-passthrough seam; SQPOLL + multishot
   built up front; `specs/loom.tla` gates impl; reserves invariants I-29 + I-30).
   Audit-bearing. (Renamed from "Warren" 2026-06-05.)
+
+- **The fidless close-to-open open** (`docs/FID-LIFECYCLE-DESIGN.md`, user-voted
+  2026-07-09; BEING BUILT in the go-build FS-perf arc, task #24 — recorded here
+  for the NOVEL inventory, not deferred). A guest 9P client serves a read-only
+  open+read+close of a fully-cached file with a SINGLE close-to-open revalidation
+  getattr — no fid bind, no lopen, no clunk. The measured on-device go-build warm
+  floor is 67% per-file fid lifecycle (bind-walk + open + clunk); the Larder (I-38)
+  caches the metadata + content but 9P's fid model still forces those round-trips
+  per open. The novel synthesis: Linux v9fs `cache=loose` (the SOTA) ALWAYS binds a
+  server fid to open; NFSv4 delegations serve locally only via a server→client
+  callback (9P has none). Thylacine's angle uses the Larder's existing close-to-open
+  discipline as the coherence source — the query-`Twalkgetattr` at open IS the I-38
+  `Open` revalidation — so a cached read-only file needs 1 RT/open instead of 3-4,
+  WITHOUT weakening close-to-open (the fully-loose 0-RT variant was rejected as the
+  default) and WITHOUT NFS-style callbacks. Composes Angle #3 (the pipelined 9P
+  client) + Angle #5 (Stratum content-version `si_cvers`). The companion
+  async-clunk (fire-and-forget Tclunk, ownerless drain) is a known 9P optimization,
+  not novel; the fidless open is the new synthesis.
 
 - **Tapestry — a graphics fast-path woven on Loom** (`docs/TAPESTRY.md`, signed
   off 2026-06-07). The concrete consumer that shapes Loom-5 (multishot) + Loom-6
@@ -161,6 +180,27 @@ These are not v1.0 angles — they're recorded so a future direction isn't lost.
   same mechanism. The build is the **Weft arc** (Weft-0 Tier-A window win is the v1.0 piece;
   Weft-1..7 the dataplane). Audit-bearing (the buffer-lifetime UAF + the no-per-op-mediation
   property). (Name ratified 2026-06-20 — the crosswise thread woven through the Loom warp.)
+
+- **Concurrent-FS — a fully concurrent 9P file server on a lockless metadata
+  core** (`docs/CONCURRENT-FS.md`, **RATIFIED 2026-07-05** as the scheduled
+  post-Go-arc arc; charter user-directed 2026-06-25). A network-FS server that is
+  **fully concurrent across the 9P boundary** — a per-request worker pool per
+  connection (the Plan 9 `exportfs` slave-proc idiom + the diod/npfs SOTA)
+  dispatching onto a **lockless (Bε CAS-prepend + EBR) metadata core** (the
+  Stratum 9.8-BE write half) — so a single user's `make -j` / parallel `go build`
+  gets the concurrency a kernel FS has, *through* a 9P mount. Why it's novel:
+  concurrent 9P servers exist (diod) but sit on conventional kernel filesystems;
+  lockless-metadata filesystems exist but present POSIX in-kernel, not a wire
+  boundary; the fusion — wait-free reads + CAS-prepend writes surfaced through
+  per-request 9P dispatch, with the client side already pipelined (Angle #3) —
+  is the unoccupied square, and it makes the 9P-totalization thesis (Angle #1)
+  *performance-credible* for build workloads, the exact place network
+  filesystems historically concede to local ones. Soundness-first staging:
+  the lockless write half (R171 closure) lands BEFORE server-side concurrency
+  ships. Audit-bearing on both halves (the R171 UAF family closure; the fid-pin
+  + Tflush + reply-serialization discipline). Measured motivation: the go-build
+  mission's exit bar (2026-07-05) — device `-p 4` builds execute at serial
+  wall-clock because every FS op funnels through one serial server loop.
 
 ---
 

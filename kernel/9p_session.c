@@ -119,7 +119,9 @@ static void mark_outstanding(struct p9_session *s, u16 t,
     s->outstanding[t].new_fid       = new_fid;
     s->outstanding[t].op_id         = s->next_op_id;
     s->outstanding[t].awaiting_flush = false;
+    s->outstanding[t].abandoned     = false;
     s->outstanding[t].flush_oldtag  = 0;
+    s->outstanding[t].wga_nwname    = 0;
     s->total_sent++;
 }
 
@@ -131,16 +133,32 @@ static void clear_outstanding(struct p9_session *s, u16 t) {
     s->outstanding[t].new_fid       = 0;
     s->outstanding[t].op_id         = 0;
     s->outstanding[t].awaiting_flush = false;
+    s->outstanding[t].abandoned     = false;
     s->outstanding[t].flush_oldtag  = 0;
     s->total_completed++;
 }
 
-// Check whether any in-flight op targets `fid` (as either `fid` or
-// `new_fid`). Used by SendClunk to enforce the spec's "no other
-// in-flight op on the same fid" discipline.
+// Check whether any LIVE in-flight op targets `fid` (as either `fid` or
+// `new_fid`). Used by SendClunk / SendWalk(new_fid) / SendLopen / SendLcreate /
+// SendWalkgetattr / SendSetattr / SendRename (SEVEN callers -- keep this list
+// current: a stale list narrows future audit scoping, R2-F2) to
+// enforce the spec's "no other in-flight op on the same fid" discipline.
+//
+// A FLUSHED op (awaiting_flush, #845) is EXCLUDED: it has been cancelled, its
+// reply is discarded (the I-10 ownerless-demux path), and it will not act on the
+// fid, so it does not block a fid op. This makes Tflush-then-Tclunk -- the
+// standard cancel-then-close pattern -- legal: #294's cancel-at-close abandons
+// (Tflush) an outstanding readiness op then IMMEDIATELY clunks its fid, before any
+// Rflush has cleared the tag; counting the awaiting_flush entry here would refuse
+// the clunk (-> the netd `ready`-fd Tclunk never goes out -> the slot leaks --
+// exactly the leak the cancel-at-close was meant to close). The tag itself stays
+// reserved until its Rflush (the I-10 reuse guard) -- that is orthogonal to this
+// precondition, which is about whether a LIVE op references the fid.
 static bool any_outstanding_on_fid(const struct p9_session *s, u32 fid) {
     for (size_t t = 0; t < P9_SESSION_MAX_OUTSTANDING; t++) {
         if (!s->outstanding[t].active) continue;
+        if (s->outstanding[t].awaiting_flush) continue;   // cancelled -> not live
+        if (s->outstanding[t].abandoned) continue;        // rolled-back abandon (#53-F1)
         if (s->outstanding[t].fid == fid) return true;
         if (s->outstanding[t].new_fid == fid) return true;
     }
@@ -169,6 +187,7 @@ int p9_session_init(struct p9_session *s, u32 root_fid, u32 msize) {
         s->outstanding[i].new_fid       = 0;
         s->outstanding[i].op_id         = 0;
         s->outstanding[i].awaiting_flush = false;
+        s->outstanding[i].abandoned     = false;
         s->outstanding[i].flush_oldtag  = 0;
     }
     s->next_op_id       = 0;
@@ -302,6 +321,43 @@ int p9_session_send_walk(struct p9_session *s,
 }
 
 // =============================================================================
+// Send: Twalkgetattr (POUNCE, 140).
+// =============================================================================
+
+int p9_session_send_walkgetattr(struct p9_session *s,
+                                u8 *out, size_t cap,
+                                u32 src_fid, u32 new_fid,
+                                u64 request_mask,
+                                u16 nwname,
+                                const u8 *const *names,
+                                const size_t *name_lens) {
+    if (!s) return -1;
+    if (s->magic != P9_SESSION_MAGIC) return -1;
+    if (s->state != P9_SESS_OPEN) return -1;
+    if (!out) return -1;
+    if (!fid_bound(s, src_fid)) return -1;
+    if (nwname > P9_MAX_WALK) return -1;
+    if (new_fid != P9_NOFID) {
+        // send_walk's destination gates apply only when a fid will bind;
+        // the NOFID query names no destination (nothing binds, nothing
+        // to reserve, no capacity to pre-check).
+        if (fid_bound(s, new_fid)) return -1;
+        if (new_fid == s->root_fid) return -1;
+        if (any_outstanding_on_fid(s, new_fid)) return -1;
+        if (s->n_bound_fids >= P9_SESSION_MAX_FIDS) return -1;
+    }
+    int t = alloc_tag(s);
+    if (t < 0) return -1;
+    int rc = p9_build_twalkgetattr(out, cap, (u16)t,
+                                   src_fid, new_fid, request_mask,
+                                   nwname, names, name_lens);
+    if (rc < 0) return -1;
+    mark_outstanding(s, (u16)t, P9_TWALKGETATTR, src_fid, new_fid);
+    s->outstanding[t].wga_nwname = nwname;
+    return rc;
+}
+
+// =============================================================================
 // Send: Tclunk.
 // =============================================================================
 
@@ -359,6 +415,89 @@ int p9_session_send_flush(struct p9_session *s,
     s->outstanding[t].flush_oldtag = oldtag;
     victim->awaiting_flush = true;
     return rc;
+}
+
+// #52: reclaim the tag of an op whose frame NEVER reached the wire (a
+// never-sent abort). The transport send contract is all-or-nothing (zero
+// bytes pushed on back-pressure; a genuine break latches the session dead
+// elsewhere), so on the never-sent paths -- reply-buffer OOM before the
+// send, a self-dying sender refusing to park, a spill-OOM under
+// back-pressure -- the server has NEVER seen this tag. Clearing it is
+// therefore I-10-safe: no late reply can ever arrive for a request that was
+// never sent, so immediate reuse cannot be mis-attributed. Without this,
+// each such abort leaks one of the 64 outstanding[] slots on a LIVE shared
+// session; 64 accumulated aborts wedge every mount that resolves through
+// the client (alloc_tag fails -> every op -P9_E_IO).
+//
+// Fail-soft guards: an inactive tag is a no-op; an awaiting_flush tag is
+// owned by the #845 flush protocol (freed only by its Rflush) and is left
+// alone -- a never-sent op can never be a flush victim (flush targets
+// in-flight ops), so hitting that guard means the caller is wrong and
+// leaving the slot is the conservative disposition.
+void p9_session_abort_unsent(struct p9_session *s, u16 tag) {
+    if (!s) return;
+    if (s->magic != P9_SESSION_MAGIC) return;
+    if (tag >= P9_SESSION_MAX_OUTSTANDING) return;
+    if (!s->outstanding[tag].active) return;
+    if (s->outstanding[tag].awaiting_flush) return;
+    if (s->outstanding[tag].abandoned) return;   // sent (rolled-back abandon) -- not ours
+    clear_outstanding(s, tag);
+}
+
+// #53: roll back a Tflush whose frame could NOT be pushed because the c2s
+// ring is transiently FULL (P9_TRANSPORT_EAGAIN) -- back-pressure, not a
+// break. The DIED-path / abandon-path senders must neither park (a dying
+// thread is unwinding; an abandoner holds c->lock in a teardown) nor latch
+// the WHOLE shared session dead (the #349 collapse on a different send
+// path). Undo exactly what send_flush staged: free the flush op's own tag
+// (never sent -> I-10-safe, as above) and clear the victim's
+// awaiting_flush, restoring the pre-#845 ownerless reclaim -- the victim
+// tag stays ACTIVE until its late original reply is drained ownerlessly by
+// a survivor's reader, or session teardown reclaims it (the documented
+// no-regression fallback the flush-BUILD-failure path already takes).
+//
+// The flush slot is found by scan: at most one flush per oldtag can exist
+// (send_flush rejects an already-awaiting_flush victim), and a real flush
+// slot is uniquely (active && kind==TFLUSH && flush_oldtag==oldtag). If the
+// victim is not awaiting_flush, or no such slot exists, the state did not
+// come from send_flush -- leave everything untouched (fail-soft).
+// #52/#53 R2-F1: the flush-BUILD-failure fallback (tag pool full at the
+// abandon instant, or a non-OPEN state) stages NO flush, so flush_rollback
+// (which requires awaiting_flush) cannot run -- yet the owner is exactly as
+// gone as on the EAGAIN path. Mark the victim abandoned directly so the
+// #294 cancel-then-close Tclunk is not refused on this rarer sibling path.
+// Fail-soft: only an active, un-flushed, un-abandoned tag is marked; a tag
+// with a flush in flight is owned by the flush protocol.
+void p9_session_mark_abandoned(struct p9_session *s, u16 tag) {
+    if (!s) return;
+    if (s->magic != P9_SESSION_MAGIC) return;
+    if (tag >= P9_SESSION_MAX_OUTSTANDING) return;
+    if (!s->outstanding[tag].active) return;
+    if (s->outstanding[tag].awaiting_flush) return;
+    s->outstanding[tag].abandoned = true;
+}
+
+void p9_session_flush_rollback(struct p9_session *s, u16 oldtag) {
+    if (!s) return;
+    if (s->magic != P9_SESSION_MAGIC) return;
+    if (oldtag >= P9_SESSION_MAX_OUTSTANDING) return;
+    if (!s->outstanding[oldtag].active) return;
+    if (!s->outstanding[oldtag].awaiting_flush) return;
+    for (size_t t = 0; t < P9_SESSION_MAX_OUTSTANDING; t++) {
+        if (!s->outstanding[t].active) continue;
+        if (s->outstanding[t].kind != P9_TFLUSH) continue;
+        if (s->outstanding[t].flush_oldtag != oldtag) continue;
+        clear_outstanding(s, (u16)t);
+        s->outstanding[oldtag].awaiting_flush = false;
+        // #53-audit F1: the victim's owner is gone and no flush is in flight.
+        // Without this bit the victim counts LIVE in any_outstanding_on_fid
+        // and the #294 cancel-then-close Tclunk that dev9p_close issues NEXT
+        // is refused with no retry -- re-opening the #294 netd slot leak (+
+        // tag accumulation on deferred-reply servers) on the exact congestion
+        // path #53 targets. The late original reply still frees the tag.
+        s->outstanding[oldtag].abandoned = true;
+        return;
+    }
 }
 
 // =============================================================================
@@ -954,6 +1093,35 @@ int p9_session_dispatch_rmsg(struct p9_session *s,
         } else {
             out->nwqid    = nwqid;
         }
+    } else if (op->kind == P9_TWALKGETATTR) {
+        u16 tag_check;
+        u16 nwqid;
+        const u8 *body = NULL;
+        rc = p9_parse_rwalkgetattr(rmsg, len, &tag_check, &nwqid,
+                                   out->qids, P9_MAX_WALK, &body);
+        if (rc < 0) return -1;
+        if (tag_check != tag) return -1;
+        // Bind new_fid ONLY on a FULL walk with a real destination -- the
+        // correct partial-walk semantics (a partial Rwalkgetattr binds
+        // nothing server-side; the NOFID query never names a destination).
+        // This is the nuance the TWALK arm defers (its callers send 0/1
+        // names, where partial cannot exist); the multi-name pounce
+        // requires it.
+        if (op->new_fid != P9_NOFID && nwqid == op->wga_nwname) {
+            if (fid_bind(s, op->new_fid) < 0) {
+                // Same LOCAL-failure posture as the TWALK arm: a fid-table
+                // exhaustion completes THIS op with -EIO; it must not latch
+                // the shared session dead.
+                out->is_error = true;
+                out->ecode    = T_E_IO;
+            } else {
+                out->nwqid    = nwqid;
+                out->wga_data = body;
+            }
+        } else {
+            out->nwqid    = nwqid;
+            out->wga_data = body;
+        }
     } else if (op->kind == P9_TCLUNK) {
         u16 tag_check;
         rc = p9_parse_rclunk(rmsg, len, &tag_check);
@@ -1171,6 +1339,19 @@ size_t p9_session_inflight(const struct p9_session *s) {
         if (s->outstanding[t].active) n++;
     }
     return n;
+}
+
+// True iff a tag slot is free (a send would find a tag). A pure scan (no
+// mutation) -- the FID-LIFECYCLE async-clunk uses it to detect a full tag pool
+// (a >64-fd async-close burst) BEFORE p9_session_send_clunk's alloc_tag would
+// fail, so it can drain an ownerless reply first instead of leaking the fid.
+bool p9_session_has_free_tag(const struct p9_session *s) {
+    if (!s) return false;
+    if (s->magic != P9_SESSION_MAGIC) return false;
+    for (size_t t = 0; t < P9_SESSION_MAX_OUTSTANDING; t++) {
+        if (!s->outstanding[t].active) return true;
+    }
+    return false;
 }
 
 size_t p9_session_n_bound_fids(const struct p9_session *s) {

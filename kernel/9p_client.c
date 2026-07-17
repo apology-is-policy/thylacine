@@ -182,6 +182,13 @@ static void client_mark_dead_locked(struct p9_client *c, bool devgone) {
             wakeup(&r->rendez);
         }
     }
+    // #349 SA-1: also wake every sender parked on c2s back-pressure
+    // (client_send_flow). They sleep on their OWN rendez, NOT their rpc->rendez,
+    // so the per-rpc wake above does not reach them; their cond reads c->dead (now
+    // true) -> each returns -EIO. A death from a path with no subsequent
+    // reader-clear signal (e.g. the c2s send-break in client_run) would otherwise
+    // leave them parked indefinitely. (mark_dead is the SOLE c->dead setter.)
+    if (c->send_waiters) poll_waiter_list_wake(&c->send_waiters_list);
 }
 
 // Hand the reader role to one still-pending op so a survivor keeps reading
@@ -204,6 +211,17 @@ static void client_handoff_reader_locked(struct p9_client *c,
             return;
         }
     }
+}
+
+// #349 send flow control. Signal senders parked on c2s back-pressure that a
+// reader made progress (a frame was demuxed -> the server drained a c2s slot,
+// or the reader departed -> a sender may itself self-pump). Bump the progress
+// generation the parked senders' conds compare against, and wake EVERY parked
+// sender iff any is waiting (gating the list-walk off the hot demux path).
+// c->lock HELD (lock order c->lock -> send_waiters_list.lock -> rendez.lock).
+static void client_send_progress_signal(struct p9_client *c) {
+    c->send_progress++;
+    if (c->send_waiters) poll_waiter_list_wake(&c->send_waiters_list);
 }
 
 // Read ONE complete 9P frame into c->transport.recv_buf, mirroring
@@ -368,6 +386,7 @@ static int client_wait(struct p9_client *c, struct p9_rpc *rpc) {
                 spin_lock(&c->lock);
                 if (rr > 0) {
                     demux_frame_locked(c, (size_t)rr);
+                    client_send_progress_signal(c);     // #349: a c2s slot freed
                 } else if (client_self_dying()) {
                     break;                              // death-interrupt: unwind
                 } else {
@@ -377,6 +396,8 @@ static int client_wait(struct p9_client *c, struct p9_rpc *rpc) {
                 }
             }
             c->reader_active = false;
+            client_send_progress_signal(c);             // #349: I departed -- a
+                                                        // parked sender may self-pump
             client_handoff_reader_locked(c, rpc);
             // re-loop: done / dead / dying now decides the return.
         } else {
@@ -403,6 +424,166 @@ static int client_wait(struct p9_client *c, struct p9_rpc *rpc) {
     }
 }
 
+// #349 send-flow-control park condition. The parked sender retries its send on
+// ANY reader progress (send_progress bumped past the snapshot) or session death.
+struct send_wait_ctx { struct p9_client *c; u64 gen; };
+static int send_wait_cond(void *arg) {
+    struct send_wait_ctx *w = (struct send_wait_ctx *)arg;
+    return w->c->dead || w->c->send_progress != w->gen;
+}
+
+// Send the framed Tmsg in c->out_buf with #349 flow control. c->lock HELD on
+// entry + exit. A transiently-FULL c2s ring (P9_TRANSPORT_EAGAIN -- back-pressure
+// under #841 pipelining + concurrent large frames) is NOT a session death: the
+// sender makes progress on the reply path so the server drains c2s, then retries.
+// Returns 0 = the whole frame is on the wire; -P9_E_IO = a genuine transport
+// break or self-death (the caller cleans up + decides whether to latch dead).
+//
+// Deadlock-freedom: a back-pressured sender MUST drop c->lock (else it blocks the
+// active reader's demux -> the server can't drain s2c -> can't drain c2s -> wedge).
+// If no reader is active it self-pumps one s2c frame (the reader-election body);
+// else it parks until a reader makes progress (register-then-observe on
+// send_progress -- the rpc->done pattern). A live server always produces replies
+// for the queued requests, so the reply path drains + c2s frees; a dead server
+// surfaces as a reader EOF/error -> c->dead -> the park/loop exits -EIO. The op's
+// own tag is NOT on the wire (this send is failing), so a self-pump only demuxes
+// OTHER ops' replies -- never its own (no reentrancy on rpc).
+// Make ONE unit of s2c progress while back-pressured, then return so the caller
+// re-tests its retry condition. Either self-pump one s2c frame (draining a reply
+// -> the server frees a c2s slot AND its tag) when no reader is active, or park
+// on the multi-waiter list until an active reader signals progress. c->lock HELD
+// on entry + exit (dropped only across the blocking recv/sleep). Extracted from
+// client_send_flow so the FID-LIFECYCLE async-clunk's tag-pool drain reuses the
+// IDENTICAL, audited wait/wake body (F1/F2 share this root).
+static void client_pump_or_park_locked(struct p9_client *c, struct p9_rpc *rpc) {
+    if (!c->reader_active) {
+        // No reader: pump one s2c frame myself (drain -> free the server to
+        // drain c2s), then retry. Mirrors client_wait's elected-reader body.
+        // R2-F3: a recv error/EOF here latches the SHARED session dead via
+        // client_mark_dead_locked, identically to the elected reader -- a real
+        // peer-gone/transport break is a death for everyone; the fail-close
+        // semantics are unchanged from #841 (just now reachable from the send
+        // path too, not only the read path).
+        c->reader_active = true;
+        rpc->be_reader   = false;
+        spin_unlock(&c->lock);
+        int rr = reader_recv_frame(c, 0, NULL);
+        spin_lock(&c->lock);
+        if (rr > 0)                    demux_frame_locked(c, (size_t)rr);
+        else if (!client_self_dying()) client_mark_dead_locked(c, rr == 0);
+        c->reader_active = false;
+        client_send_progress_signal(c);          // a c2s slot / tag may have freed
+        client_handoff_reader_locked(c, rpc);
+    } else {
+        // Another thread is the reader (draining s2c). Park until it makes
+        // progress (bumps send_progress) or the session dies, then retry.
+        // MULTI-WAITER (R2-F1): N senders can be back-pressured on the shared
+        // client at once, so each parks on its OWN stack Rendez via a
+        // poll_waiter on c->send_waiters_list -- a single Rendez extincts on the
+        // 2nd sleeper (rendez.h). register-then-observe: register the hook +
+        // snapshot send_progress under c->lock, so a concurrent reader's
+        // bump-then-wake is either captured by the snapshot (cond true at
+        // sleep's re-check) or delivered to the now-registered hook -- no lost
+        // wake (I-9; the poll.tla register-then-observe). The stack Rendez/hook
+        // outlive the sleep (unregistered under c->lock before this frame pops).
+        struct Rendez      pr;
+        struct poll_waiter pw;
+        rendez_init(&pr);
+        poll_waiter_init(&pw, &pr);
+        struct send_wait_ctx w = { c, c->send_progress };
+        poll_waiter_list_register(&c->send_waiters_list, &pw);
+        c->send_waiters++;
+        spin_unlock(&c->lock);
+        (void)sleep(&pr, send_wait_cond, &w);
+        spin_lock(&c->lock);
+        c->send_waiters--;
+        poll_waiter_list_unregister(&pw);
+    }
+}
+
+// client_send_flow return contract (#52): 0 = the whole frame is on the wire;
+// CLIENT_SEND_NEVER = the frame NEVER reached the wire and the byte stream is
+// INTACT (a self-dying sender refusing to park, the session observed already
+// dead, or a spill-OOM under back-pressure -- in every case the transport's
+// all-or-nothing contract means zero bytes were pushed), so the caller must
+// reclaim the never-sent tag (p9_session_abort_unsent) and must NOT latch the
+// shared session dead; any other negative = a genuine transport break (the
+// stream may hold a partial frame), the caller latches dead as before.
+#define CLIENT_SEND_NEVER  (-1000)
+
+static int client_send_flow(struct p9_client *c, size_t built_len,
+                            struct p9_rpc *rpc) {
+    // #375: the frame is built in the SHARED c->out_buf, but the pump/park
+    // above DROPS c->lock -- and a peer may then legally build ITS frame into
+    // out_buf. Pre-spill, the retry pushed built_len bytes of whatever out_buf
+    // then held: an equal-length peer frame (two msize-clamped F1 flush
+    // Twrites -- the dominant concurrent cold-build shape) went out as a clean
+    // DUPLICATE with this frame LOST; the duplicate's second reply landed on
+    // the freed-then-reused tag as a WRONG reply (an Rlerror parses cleanly
+    // for ANY op -- 9P has no per-tag wire generation), so a stray
+    // Rlerror(ENOENT) poisoned a live Twalkgetattr into a persistent negative
+    // dentry (the task-#50 S3 ENOENT cluster) and injected stray errors (the
+    // write EIO). An unequal-length peer frame fails p9_transport_send's
+    // size==len validation -> session death. So: at the FIRST back-pressure,
+    // BEFORE the window can open, spill the frame to a private buffer and
+    // retry from the spill -- out_buf is never re-read after the lock has
+    // dropped, closing the whole class (including the DIED-path Tflush +
+    // async-clunk writers, which reuse out_buf assuming the prior frame is
+    // fully on the wire). kmalloc under c->lock is non-blocking (the
+    // rpc->reply_buf precedent). The transport's all-or-nothing EAGAIN
+    // contract (zero bytes pushed) is what makes the retry-from-spill exact:
+    // there is never a partial prefix on the ring -- and it is also what
+    // makes the CLIENT_SEND_NEVER exits (self-dying / dead-observed /
+    // spill-OOM) safely reclaimable: the server never saw the frame.
+    u8 *spill = NULL;
+    const u8 *frame = c->out_buf;
+    int rc;
+    for (;;) {
+        if (client_self_dying()) { rc = CLIENT_SEND_NEVER; break; }
+        if (c->dead)             { rc = CLIENT_SEND_NEVER; break; }
+
+        int src = p9_transport_send(&c->transport, frame, built_len);
+        if (src == 0)                   { rc = 0; break; }          // whole frame sent
+        if (src != P9_TRANSPORT_EAGAIN) { rc = -P9_E_IO; break; }   // genuine break
+
+        if (!spill) {
+            spill = kmalloc(built_len, 0);
+            if (!spill) { rc = CLIENT_SEND_NEVER; break; }   // never sent (zero pushed)
+            client_copy(spill, c->out_buf, built_len);
+            frame = spill;
+        }
+        client_pump_or_park_locked(c, rpc);         // drain c2s, then retry
+    }
+    if (spill) kfree(spill);
+    return rc;
+}
+
+// FID-LIFECYCLE async-clunk F1: drain ownerless replies until a tag slot frees.
+// A >64-fd async-close burst (the #926 proc-exit close of a handle table, or a
+// userspace batch-close) with no interleaved sync op fills the 64-slot tag pool
+// with undrained ownerless Rclunks; the next p9_session_send_clunk's alloc_tag
+// would then fail and the fid would leak BOUND (send_clunk returns before its
+// fid_unbind) -> eventual bound_fids[] exhaustion -> a system-wide FS partial
+// DoS on the shared mount. Draining ANY reply frees its tag (in a full pool the
+// outstanding set is dominated by ownerless clunks, so a drain frees a clunk
+// tag; even a sync peer's reply drain frees a tag). Uses the SAME pump/park body
+// as the send flow. c->lock HELD; returns 0 (a tag is free) or -P9_E_IO (death).
+static int client_drain_until_free_tag(struct p9_client *c, struct p9_rpc *rpc) {
+    for (;;) {
+        // has_free_tag FIRST (round-2 F1): with a free tag, proceed to
+        // send_clunk even when the caller's Proc is dying, so the fid unbinds
+        // cleanly -- matching the old sync clunk (which unbound BEFORE it
+        // detected death). Only the rare burst-DURING-a-kill (pool full AND
+        // dying) bails, and a bail there leaks the fid bound exactly as the old
+        // sync path did on the same race. The common (not-in-a-burst) close is a
+        // free tag -> a clean immediate unbind.
+        if (p9_session_has_free_tag(&c->session)) return 0;
+        if (c->dead)             return -P9_E_IO;
+        if (client_self_dying()) return -P9_E_IO;
+        client_pump_or_park_locked(c, rpc);
+    }
+}
+
 // Submit the Tmsg already built into c->out_buf (built_len bytes; the caller's
 // session_send_* allocated the tag + set session.outstanding[tag]), run the
 // elected-reader wait, dispatch the reply, surface the result in *out. c->lock
@@ -412,18 +593,39 @@ static int client_wait(struct p9_client *c, struct p9_rpc *rpc) {
 static int client_run(struct p9_client *c, size_t built_len,
                       struct p9_dispatch_result *out) {
     u32 size; u8 type; u16 tag;
-    if (p9_peek_header(c->out_buf, built_len, &size, &type, &tag) < 0)
+    if (p9_peek_header(c->out_buf, built_len, &size, &type, &tag) < 0) {
+        // Unreachable by construction (session_send_* built the frame), but a
+        // future builder bug would otherwise leak the just-marked tag on a
+        // LIVE session with no way to identify it -- mirror submit_async's
+        // fail-closed posture (the orphaned tag is moot on a dead session).
+        client_mark_dead_locked(c, false);
         return -P9_E_IO;
+    }
 
     if (tag == P9_NOTAG) {
         // Tversion (the only NOTAG message; serial handshake path -- single-
         // threaded on a fresh client, so send + recv-one + dispatch is safe).
+        //
+        // #360: drop c->lock across the exchange -- its recv BLOCKS (the
+        // srvconn/spoor transports tsleep), and a plain spinlock may never be
+        // held across sched() (the lock-across-sleep class; sched() asserts).
+        // The drop is data-race-free by the same argument that made the old
+        // held-across-recv shape deadlock-free: Tversion exists only inside
+        // p9_client_handshake on a client that is PRIVATE by construction
+        // (p9_attached_create has not yet published it -- no spoor, no handle,
+        // no peer thread can reach c->lock / out_buf / session). The elected-
+        // reader steady state already follows this exact drop discipline
+        // (client_wait line ~384).
+        spin_unlock(&c->lock);
         int rc = p9_transport_exchange(&c->transport, &c->session,
                                        c->out_buf, built_len, out);
+        spin_lock(&c->lock);
         return map_error(0, rc, out);
     }
-    if (tag >= P9_SESSION_MAX_OUTSTANDING)
+    if (tag >= P9_SESSION_MAX_OUTSTANDING) {
+        client_mark_dead_locked(c, false);   // as above: fail closed, not leak
         return -P9_E_IO;                 // the session never allocates such a tag
+    }
 
     struct p9_rpc rpc;
     rpc.tag         = (u16)tag;
@@ -434,19 +636,42 @@ static int client_run(struct p9_client *c, size_t built_len,
     rpc.on_complete = NULL;          // sync (WAKE_RENDEZ): the submitter waits
     rendez_init(&rpc.rendez);
     rpc.reply_buf = kmalloc(c->recv_cap, KP_ZERO);
-    if (!rpc.reply_buf)
+    if (!rpc.reply_buf) {
+        // #52: the caller's session_send_* already marked outstanding[tag],
+        // but the frame will never be sent -- reclaim the slot (never-sent =>
+        // I-10-safe) or 64 such OOMs wedge the shared session's tag pool.
+        p9_session_abort_unsent(&c->session, tag);
         return -P9_E_IO;
+    }
 
     c->inflight[tag] = &rpc;
 
-    // Send the framed Tmsg. c->lock HELD: the send is a non-blocking ring write
-    // (the srvconn adapter's all-or-nothing send never leaves a partial frame),
-    // and holding the lock serializes senders so two frames never interleave.
-    int src = p9_transport_send(&c->transport, c->out_buf, built_len);
-    if (src < 0) {
+    // Send the framed Tmsg with #349 flow control. c->lock HELD: holding it
+    // serializes senders so two frames never interleave; a transiently-full c2s
+    // ring (back-pressure under #841 pipelining) is drained + retried inside
+    // client_send_flow, NOT a death (the pre-#349 path marked the whole session
+    // dead here, killing every other op including in-flight text page-ins).
+    int sfr = client_send_flow(c, built_len, &rpc);
+    if (sfr == CLIENT_SEND_NEVER) {
+        // #52: the frame never reached the wire and the stream is intact (a
+        // self-dying sender, a dead-observed session, or a spill-OOM -- all
+        // zero-bytes-pushed by the all-or-nothing contract). Reclaim the tag
+        // (never-sent => I-10-safe) and leave the session LIVE for peers --
+        // pre-#52 the self-dying path leaked the slot and the spill-OOM
+        // latched the whole shared session dead.
         c->inflight[tag] = NULL;
         kfree(rpc.reply_buf);
-        client_mark_dead_locked(c, false);
+        p9_session_abort_unsent(&c->session, tag);
+        return -P9_E_IO;
+    }
+    if (sfr < 0) {
+        c->inflight[tag] = NULL;
+        kfree(rpc.reply_buf);
+        // A genuine transport break: the stream may hold a partial frame, so
+        // latch the session dead (every op then fails closed). The tag slot is
+        // moot on a dead session (teardown reclaims).
+        if (!c->dead)
+            client_mark_dead_locked(c, false);
         return -P9_E_IO;
     }
 
@@ -471,10 +696,28 @@ static int client_run(struct p9_client *c, size_t built_len,
         c->inflight[tag] = NULL;
         kfree(rpc.reply_buf);
         int flen = p9_session_send_flush(&c->session, c->out_buf,
-                                         sizeof(c->out_buf), (u16)tag);
+                                         c->out_buf_cap, (u16)tag);
+        if (flen <= 0) {
+            // R2-F1: no flush could be staged (pool full at the abandon
+            // instant) -- the owner is still gone; mark abandoned so the
+            // #294 cancel-then-close clunk is not refused (see rollback).
+            p9_session_mark_abandoned(&c->session, (u16)tag);
+        }
         if (flen > 0) {
-            if (p9_transport_send(&c->transport, c->out_buf, (size_t)flen) < 0)
+            int fsr = p9_transport_send(&c->transport, c->out_buf, (size_t)flen);
+            if (fsr == P9_TRANSPORT_EAGAIN) {
+                // #53: a transiently-full c2s ring is BACK-PRESSURE, not a
+                // break. A dying thread must not park (it is unwinding), and
+                // latching the SHARED session dead here is the #349 collapse
+                // on a different send path. Roll the flush back (the flush
+                // frame never left -> its tag is I-10-safe to free) and fall
+                // to the pre-#845 ownerless reclaim: outstanding[tag] stays
+                // ACTIVE until the late original reply is drained by a
+                // survivor's reader, or session teardown reclaims it.
+                p9_session_flush_rollback(&c->session, (u16)tag);
+            } else if (fsr < 0) {
                 client_mark_dead_locked(c, false);
+            }
         }
         return -P9_E_IO;
     }
@@ -538,7 +781,7 @@ int p9_client_submit_async(struct p9_client *c, struct p9_rpc *rpc,
     }
     // Build the Tmsg into the shared out_buf under the lock (allocating the tag
     // + marking session.outstanding[tag]); a >0 return is a well-formed frame.
-    int built = build(&c->session, c->out_buf, sizeof(c->out_buf), build_ctx);
+    int built = build(&c->session, c->out_buf, c->out_buf_cap, build_ctx);
     if (built <= 0) {
         spin_unlock(&c->lock);
         rpc->on_complete(rpc, -P9_E_IO, NULL);
@@ -701,10 +944,23 @@ void p9_client_abandon_async(struct p9_client *c, struct p9_rpc *rpc) {
         // a non-blocking ring write reusing out_buf under c->lock.
         if (!c->dead && p9_session_is_open(&c->session)) {
             int flen = p9_session_send_flush(&c->session, c->out_buf,
-                                             sizeof(c->out_buf), tag);
+                                             c->out_buf_cap, tag);
+            if (flen <= 0) {
+                // R2-F1: flush-less abandon (see the DIED-path twin).
+                p9_session_mark_abandoned(&c->session, tag);
+            }
             if (flen > 0) {
-                if (p9_transport_send(&c->transport, c->out_buf, (size_t)flen) < 0)
+                int fsr = p9_transport_send(&c->transport, c->out_buf,
+                                            (size_t)flen);
+                if (fsr == P9_TRANSPORT_EAGAIN) {
+                    // #53: back-pressure, not a break (see the DIED-path
+                    // twin). Roll the flush back; the abandoned op's tag
+                    // stays reserved until its late reply drains ownerlessly
+                    // or teardown reclaims -- never latch the shared session.
+                    p9_session_flush_rollback(&c->session, tag);
+                } else if (fsr < 0) {
                     client_mark_dead_locked(c, false);
+                }
             }
         }
     }
@@ -744,6 +1000,31 @@ int p9_client_init(struct p9_client *c,
         p9_session_destroy(&c->session);
         return -P9_E_INVAL;
     }
+    // CF-3 B two-tier outbound buffer: a default-msize session builds frames
+    // in the inline array (no allocation -- every static test client + every
+    // small-frame service); a bulk session (msize > the inline cap) takes a
+    // heap buffer sized to its msize so the frame-build bound matches the
+    // proposal. OOM DEGRADES to the inline tier: writes then clamp at the
+    // smaller cap (a short op, never a failed init -- reads are unaffected,
+    // their payload rides the recv buffer). No KP_ZERO: every send writes a
+    // built frame of exact length, so uninitialized bytes never leave.
+    // B1-audit F3: the cache-mode flags are contract-bearing ("set ONLY from
+    // the validated attach flag") -- initialize them explicitly rather than
+    // relying on allocation zeroing, so an in-place re-init of a recycled
+    // client (destroy -> init, no re-alloc -- the test scaffolding's shape)
+    // can never carry a stale loose/cacheable/wga latch across lives.
+    c->loose           = false;
+    c->cacheable       = false;
+    c->wga_unsupported = false;
+    c->out_buf     = c->out_buf_inline;
+    c->out_buf_cap = P9_CLIENT_OUT_BUF_MAX;
+    if (msize > P9_CLIENT_OUT_BUF_MAX) {
+        u8 *big = kmalloc(msize, 0);
+        if (big) {
+            c->out_buf     = big;
+            c->out_buf_cap = msize;
+        }
+    }
     c->magic        = P9_CLIENT_MAGIC;
     spin_lock_init(&c->lock);
     // #841 elected-reader pipeline state. recv_cap sizes each per-rpc reply
@@ -753,10 +1034,21 @@ int p9_client_init(struct p9_client *c,
     c->reader_active  = false;
     c->dead           = false;
     c->done_reply_buf = NULL;
+    poll_waiter_list_init(&c->send_waiters_list);   // #349 send-flow-control park (multi-waiter)
+    c->send_progress  = 0;
+    c->send_waiters   = 0;
     for (u32 i = 0; i < P9_SESSION_MAX_OUTSTANDING; i++) c->inflight[i] = NULL;
     // Fid allocator starts at root_fid + 1; dev9p (and other callers)
     // pull fresh fids monotonically via p9_client_alloc_fid.
     c->next_fid     = (root_fid < P9_NOFID - 1) ? (root_fid + 1) : 1;
+    c->wga_unsupported = false;   // POUNCE: Twalkgetattr capability unknown
+    c->cacheable       = false;   // L1e: not a proven content-versioned FS yet
+    larder_init(&c->larder);      // L1c: the guest FS cache (its own leaf lock)
+    // G2: the dir-fid table starts empty; arm its leaf lock and zero it (init
+    // may run on non-zeroed storage -- the loopback tests stack/reuse clients).
+    // Parked fids die with the session, so destroy has no wire teardown for it.
+    for (size_t di = 0; di < sizeof(c->dirfid); di++) ((u8 *)&c->dirfid)[di] = 0;
+    spin_lock_init(&c->dirfid.lock);
     c->total_ops    = 0;
     c->total_errors = 0;
     return 0;
@@ -774,6 +1066,16 @@ void p9_client_destroy(struct p9_client *c) {
     spin_lock(&c->lock);
     if (c->done_reply_buf) { kfree(c->done_reply_buf); c->done_reply_buf = NULL; }
     spin_unlock(&c->lock);
+    // CF-3 B: release a heap out_buf (bulk-msize tier). The inline tier is
+    // storage inside *c -- nothing to free. No op is in flight at destroy
+    // (the last attached ref dropped), so no builder can be mid-frame here.
+    if (c->out_buf && c->out_buf != c->out_buf_inline) kfree(c->out_buf);
+    c->out_buf     = NULL;
+    c->out_buf_cap = 0;
+    // L1e: free the Larder's lazily-allocated page buffers (the attr/dentry
+    // sub-caches are inline in *c -- nothing to free there). No op is in flight
+    // (last attached ref dropped), so the Larder lock is uncontended.
+    larder_destroy(&c->larder);
     p9_transport_destroy(&c->transport);
     p9_session_destroy(&c->session);
 }
@@ -805,7 +1107,7 @@ int p9_client_handshake(struct p9_client *c,
     // Phase 1: Tversion → Rversion (drives INIT → VERSIONED). Tversion is the
     // only NOTAG message; client_run's NOTAG branch keeps it serial.
     int len = p9_session_send_version(&c->session, c->out_buf,
-                                       sizeof(c->out_buf), NULL, 0);
+                                       c->out_buf_cap, NULL, 0);
     if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     struct p9_dispatch_result r;
     int e = client_run(c, (size_t)len, &r);
@@ -816,7 +1118,7 @@ int p9_client_handshake(struct p9_client *c,
     // elected-reader path; the fresh client is unshared, so the single thread
     // simply becomes the reader for its own Rattach (no contention).
     len = p9_session_send_attach(&c->session, c->out_buf,
-                                  sizeof(c->out_buf),
+                                  c->out_buf_cap,
                                   uname, uname_len, aname, aname_len,
                                   n_uname);
     if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
@@ -842,7 +1144,7 @@ int p9_client_walk(struct p9_client *c,
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     int len = p9_session_send_walk(&c->session, c->out_buf,
-                                    sizeof(c->out_buf),
+                                    c->out_buf_cap,
                                     src_fid, new_fid,
                                     nwname, names, name_lens);
     if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
@@ -875,6 +1177,50 @@ int p9_client_walk_one(struct p9_client *c,
     return 0;
 }
 
+int p9_client_walkgetattr(struct p9_client *c,
+                          u32 src_fid, u32 new_fid,
+                          u64 request_mask,
+                          u16 nwname,
+                          const u8 *const *names, const size_t *name_lens,
+                          u16 *out_nwqid, struct p9_qid *out_qids,
+                          struct p9_attr *out_attrs) {
+    if (!c) return -P9_E_INVAL;
+    if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
+    spin_lock(&c->lock);
+    if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
+    if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
+    int len = p9_session_send_walkgetattr(&c->session, c->out_buf,
+                                          c->out_buf_cap,
+                                          src_fid, new_fid, request_mask,
+                                          nwname, names, name_lens);
+    if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
+    struct p9_dispatch_result r;
+    int e = client_run(c, (size_t)len, &r);
+    c->total_ops++;
+    if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
+    if (out_nwqid) *out_nwqid = r.nwqid;
+    if (out_qids) {
+        for (u16 i = 0; i < r.nwqid && i < P9_MAX_WALK; i++)
+            copy_qid(&out_qids[i], &r.qids[i]);
+    }
+    if (out_attrs && r.wga_data) {
+        // The reply frame is retained (done_reply_buf) until the NEXT op
+        // on this client and we still hold c->lock, so the fixed-stride
+        // elements (frame-validated by p9_parse_rwalkgetattr) are safe
+        // to extract here.
+        for (u16 i = 0; i < r.nwqid && i < P9_MAX_WALK; i++) {
+            if (p9_parse_getattr_body(
+                    r.wga_data + (size_t)i * P9_WGA_BODY_LEN,
+                    P9_WGA_BODY_LEN, &out_attrs[i]) < 0) {
+                c->total_errors++;
+                CLIENT_UNLOCK_RET(c, -P9_E_IO);
+            }
+        }
+    }
+    spin_unlock(&c->lock);
+    return 0;
+}
+
 int p9_client_clunk(struct p9_client *c, u32 fid) {
     if (!c) return -P9_E_INVAL;
     if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
@@ -882,12 +1228,101 @@ int p9_client_clunk(struct p9_client *c, u32 fid) {
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     int len = p9_session_send_clunk(&c->session, c->out_buf,
-                                     sizeof(c->out_buf), fid);
+                                     c->out_buf_cap, fid);
     if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     struct p9_dispatch_result r;
     int e = client_run(c, (size_t)len, &r);
     c->total_ops++;
     if (e != 0) { c->total_errors++; CLIENT_UNLOCK_RET(c, e); }
+    spin_unlock(&c->lock);
+    return 0;
+}
+
+// Fire-and-forget clunk (FID-LIFECYCLE async-clunk; docs/FID-LIFECYCLE-DESIGN.md
+// section 3.1): send the Tclunk and return WITHOUT blocking on Rclunk, so the
+// submitter's thread is not parked for the clunk RTT (the go-build close path was
+// 21% of the warm-floor RTs). Correctness rests on the #845 Tflush ownerless-drain
+// discipline, and the verified fid-lifecycle facts make it hazard-light:
+//   - I-11 (fid): p9_session_send_clunk unbinds the fid at SEND (already
+//     reply-independent); the monotonic fid NUMBER (p9_client_alloc_fid) is never
+//     reused, so the clunk-pending fid can never be re-referenced.
+//   - I-10 (tag): the Tclunk marks session.outstanding[tag] but we register NO
+//     c->inflight[tag] owner, so the Rclunk is OWNERLESS. A later op's elected
+//     reader drains it via demux_frame_locked's else-branch -> dispatch_rmsg
+//     (the P9_TCLUNK arm, "send-time already unbound; no further action") ->
+//     clear_outstanding frees the tag.
+// Two contention cases the fire-and-forget must compose with (the arc-audit
+// F1/F2), both via the SAME audited pump/park machinery the sync send uses:
+//   - F1 tag-pool full: a >64-fd async-close BURST with no interleaved sync op
+//     fills all 64 outstanding[] slots with undrained ownerless Rclunks; without
+//     a drain, alloc_tag fails and the fid leaks BOUND (send_clunk returns before
+//     fid_unbind) -> bound_fids[] exhaustion -> a shared-mount FS DoS. FIX:
+//     client_drain_until_free_tag pumps an ownerless reply (freeing a tag) before
+//     send_clunk. So the burst self-limits (each clunk drains ~1, sends 1).
+//   - F2 c2s back-pressure: a transiently-full c2s ring returns EAGAIN; the send
+//     goes through client_send_flow (self-pump s2c + retry), NEVER a session
+//     death (the pre-fix raw send treated EAGAIN as fatal -- the #349 collapse).
+// A GENUINE transport break marks the session dead (mirror client_run). A
+// send_clunk failure now means only fid unbound / root / a live op on the fid --
+// all cases where the fid should not be clunked here; the sole caller
+// (dev9p_close) ignores it exactly as it ignored a sync-clunk error.
+int p9_client_clunk_async(struct p9_client *c, u32 fid) {
+    if (!c) return -P9_E_INVAL;
+    if (c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
+    spin_lock(&c->lock);
+    if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
+    if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
+
+    // The async clunk composes with the #841 tag pool + the #349 c2s back-
+    // pressure via a SYNTHETIC (never-inflight) rpc token: the pump/park body
+    // uses it only for `be_reader` + the handoff "not-me" pointer compare (it is
+    // never stored in c->inflight[], so a stack rpc is safe). on_complete = NULL,
+    // be_reader = false.
+    struct p9_rpc rpc;
+    for (size_t i = 0; i < sizeof(rpc); i++) ((u8 *)&rpc)[i] = 0;
+
+    // F1: ensure a free tag BEFORE send_clunk (else alloc_tag fails and the fid
+    // leaks bound). Drains ownerless Rclunks on a full pool (the close-burst).
+    int de = client_drain_until_free_tag(c, &rpc);
+    if (de != 0) CLIENT_UNLOCK_RET(c, de);
+
+    int len = p9_session_send_clunk(&c->session, c->out_buf,
+                                     c->out_buf_cap, fid);
+    // send_clunk fails only for a non-tag reason now (fid unbound / root / a live
+    // op targets the fid) -- all cases where the fid should NOT be clunked here;
+    // the caller ignores the error exactly as it ignored a sync-clunk error.
+    if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
+    // #52: capture the clunk's tag NOW -- out_buf is reusable by a peer once
+    // send_flow's pump/park drops c->lock (the #375 lesson: a post-send peek
+    // could read a PEER's frame and abort the peer's LIVE tag).
+    u32 csz; u8 cty; u16 ctag = P9_NOTAG;
+    (void)p9_peek_header(c->out_buf, (size_t)len, &csz, &cty, &ctag);
+
+    // F2: send via the #349 flow-control discipline -- a transiently-full c2s
+    // ring is back-pressure (self-pump s2c + retry), NEVER a session death (the
+    // pre-fix raw send treated EAGAIN as fatal, re-opening the #349 shared-mount
+    // collapse). No inflight[tag] is registered, so the Rclunk is OWNERLESS
+    // (drained by a later op's reader or this function's own F1 drain in a
+    // burst). On a GENUINE break, mirror client_run: mark dead only if the
+    // ring actually broke (a self-death leaves the session live for peers).
+    int sfr = client_send_flow(c, (size_t)len, &rpc);
+    if (sfr == CLIENT_SEND_NEVER) {
+        // #52: never-sent (see client_run). Reclaim the clunk's tag (captured
+        // BEFORE the send -- out_buf is not re-readable here) -- the frame
+        // never left, so I-10 holds on immediate reuse. The fid was already
+        // unbound at send (I-11, reply-independent); the server-side fid
+        // persists until session end -- the documented dying-path cost,
+        // bounded, vs the pre-#52 leak of a tag slot on a LIVE session.
+        if (ctag != P9_NOTAG)
+            p9_session_abort_unsent(&c->session, ctag);
+        CLIENT_UNLOCK_RET(c, -P9_E_IO);
+    }
+    if (sfr < 0) {
+        if (!c->dead)
+            client_mark_dead_locked(c, false);
+        CLIENT_UNLOCK_RET(c, -P9_E_IO);
+    }
+    c->total_ops++;
     spin_unlock(&c->lock);
     return 0;
 }
@@ -904,7 +1339,7 @@ int p9_client_lopen(struct p9_client *c, u32 fid, u32 flags,
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     int len = p9_session_send_lopen(&c->session, c->out_buf,
-                                     sizeof(c->out_buf), fid, flags);
+                                     c->out_buf_cap, fid, flags);
     if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     struct p9_dispatch_result r;
     int e = client_run(c, (size_t)len, &r);
@@ -926,7 +1361,7 @@ int p9_client_lcreate(struct p9_client *c, u32 fid,
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     int len = p9_session_send_lcreate(&c->session, c->out_buf,
-                                       sizeof(c->out_buf), fid,
+                                       c->out_buf_cap, fid,
                                        name, name_len, flags, mode, gid);
     if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     struct p9_dispatch_result r;
@@ -939,6 +1374,30 @@ int p9_client_lcreate(struct p9_client *c, u32 fid,
     return 0;
 }
 
+// CF-3 A: a single op's payload is bounded by the negotiated msize (and, for
+// Twrite, additionally by this client's out_buf -- the frame-build bound).
+// Pre-lift no syscall caller could exceed either (SYS_RW_MAX was 4096); the
+// lift made bulk counts reachable, and an unclamped Twrite FAILED the frame
+// build (-P9_E_IO on every over-payload write -- the CF-3 bench cascade:
+// EIO'd object writes -> no cache puts -> the warm build ran cold). The
+// client clamps and returns the SHORT count -- the protocol's own contract
+// (a 9P client never emits an op exceeding the negotiated msize); callers
+// loop per the POSIX short-read/short-write discipline.
+static u32 client_max_read_count(const struct p9_client *c) {
+    u32 ms = c->session.negotiated_msize ? c->session.negotiated_msize
+                                         : c->session.msize;
+    // Rread reply framing: hdr(7) + count(4).
+    return (ms > P9_HDR_LEN + 4u) ? ms - (P9_HDR_LEN + 4u) : 0;
+}
+
+static u32 client_max_write_payload(const struct p9_client *c) {
+    u32 ms = c->session.negotiated_msize ? c->session.negotiated_msize
+                                         : c->session.msize;
+    if (ms > (u32)c->out_buf_cap) ms = (u32)c->out_buf_cap;
+    // Twrite framing: hdr(7) + fid(4) + offset(8) + count(4).
+    return (ms > P9_HDR_LEN + 16u) ? ms - (P9_HDR_LEN + 16u) : 0;
+}
+
 int p9_client_read(struct p9_client *c, u32 fid, u64 offset,
                     u32 count, u8 *out_data, u32 *out_count) {
     if (!c) return -P9_E_INVAL;
@@ -947,8 +1406,14 @@ int p9_client_read(struct p9_client *c, u32 fid, u64 offset,
     spin_lock(&c->lock);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
+    u32 rmax = client_max_read_count(c);
+    // Audit F2: a degenerate negotiated msize (<= the framing overhead)
+    // would clamp every op to 0 -- a spurious EOF a looping reader spins
+    // on. Unreachable from any v1.0 mount (all >= 4096); fail closed.
+    if (rmax == 0 && count > 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
+    if (count > rmax) count = rmax;      // short read; the caller loops
     int len = p9_session_send_read(&c->session, c->out_buf,
-                                    sizeof(c->out_buf),
+                                    c->out_buf_cap,
                                     fid, offset, count);
     if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     struct p9_dispatch_result r;
@@ -974,8 +1439,13 @@ int p9_client_write(struct p9_client *c, u32 fid, u64 offset,
     spin_lock(&c->lock);
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
+    u32 wmax = client_max_write_payload(c);
+    // Audit F2: the write-side twin of the degenerate-msize guard above --
+    // a 0-clamp would return accepted=0 forever to a looping writer.
+    if (wmax == 0 && count > 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
+    if (count > wmax) count = wmax;      // short write; the caller loops
     int len = p9_session_send_write(&c->session, c->out_buf,
-                                     sizeof(c->out_buf),
+                                     c->out_buf_cap,
                                      fid, offset, count, data);
     if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     struct p9_dispatch_result r;
@@ -999,7 +1469,7 @@ int p9_client_getattr(struct p9_client *c, u32 fid,
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     int len = p9_session_send_getattr(&c->session, c->out_buf,
-                                       sizeof(c->out_buf),
+                                       c->out_buf_cap,
                                        fid, request_mask);
     if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     struct p9_dispatch_result r;
@@ -1019,7 +1489,7 @@ int p9_client_setattr(struct p9_client *c, u32 fid,
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     int len = p9_session_send_setattr(&c->session, c->out_buf,
-                                       sizeof(c->out_buf), fid, attr);
+                                       c->out_buf_cap, fid, attr);
     if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     struct p9_dispatch_result r;
     int e = client_run(c, (size_t)len, &r);
@@ -1038,7 +1508,7 @@ int p9_client_readdir(struct p9_client *c, u32 fid, u64 offset,
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     int len = p9_session_send_readdir(&c->session, c->out_buf,
-                                       sizeof(c->out_buf),
+                                       c->out_buf_cap,
                                        fid, offset, count);
     if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     struct p9_dispatch_result r;
@@ -1062,7 +1532,7 @@ int p9_client_statfs(struct p9_client *c, u32 fid,
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     int len = p9_session_send_statfs(&c->session, c->out_buf,
-                                      sizeof(c->out_buf), fid);
+                                      c->out_buf_cap, fid);
     if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     struct p9_dispatch_result r;
     int e = client_run(c, (size_t)len, &r);
@@ -1080,7 +1550,7 @@ int p9_client_fsync(struct p9_client *c, u32 fid, u32 datasync) {
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     int len = p9_session_send_fsync(&c->session, c->out_buf,
-                                     sizeof(c->out_buf), fid, datasync);
+                                     c->out_buf_cap, fid, datasync);
     if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     struct p9_dispatch_result r;
     int e = client_run(c, (size_t)len, &r);
@@ -1106,7 +1576,7 @@ int p9_client_weft(struct p9_client *c, u32 fid,
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     int len = p9_session_send_weft(&c->session, c->out_buf,
-                                    sizeof(c->out_buf), fid);
+                                    c->out_buf_cap, fid);
     if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     struct p9_dispatch_result r;
     int e = client_run(c, (size_t)len, &r);
@@ -1129,7 +1599,7 @@ int p9_client_weftio(struct p9_client *c, u32 fid,
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     int slen = p9_session_send_weftio(&c->session, c->out_buf,
-                                       sizeof(c->out_buf), fid, off, len, dir);
+                                       c->out_buf_cap, fid, off, len, dir);
     if (slen < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     struct p9_dispatch_result r;
     int e = client_run(c, (size_t)slen, &r);
@@ -1154,7 +1624,7 @@ int p9_client_symlink(struct p9_client *c, u32 fid,
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     int len = p9_session_send_symlink(&c->session, c->out_buf,
-                                       sizeof(c->out_buf),
+                                       c->out_buf_cap,
                                        fid, name, name_len,
                                        symtgt, symtgt_len, gid);
     if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
@@ -1177,7 +1647,7 @@ int p9_client_mknod(struct p9_client *c, u32 dfid,
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     int len = p9_session_send_mknod(&c->session, c->out_buf,
-                                     sizeof(c->out_buf),
+                                     c->out_buf_cap,
                                      dfid, name, name_len,
                                      mode, major, minor, gid);
     if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
@@ -1198,7 +1668,7 @@ int p9_client_rename(struct p9_client *c, u32 fid, u32 dfid,
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     int len = p9_session_send_rename(&c->session, c->out_buf,
-                                      sizeof(c->out_buf),
+                                      c->out_buf_cap,
                                       fid, dfid, name, name_len);
     if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     struct p9_dispatch_result r;
@@ -1218,7 +1688,7 @@ int p9_client_readlink(struct p9_client *c, u32 fid,
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     int len = p9_session_send_readlink(&c->session, c->out_buf,
-                                        sizeof(c->out_buf), fid);
+                                        c->out_buf_cap, fid);
     if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     struct p9_dispatch_result r;
     int e = client_run(c, (size_t)len, &r);
@@ -1244,7 +1714,7 @@ int p9_client_link(struct p9_client *c, u32 dfid, u32 fid,
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     int len = p9_session_send_link(&c->session, c->out_buf,
-                                    sizeof(c->out_buf),
+                                    c->out_buf_cap,
                                     dfid, fid, name, name_len);
     if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     struct p9_dispatch_result r;
@@ -1264,7 +1734,7 @@ int p9_client_mkdir(struct p9_client *c, u32 dfid,
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     int len = p9_session_send_mkdir(&c->session, c->out_buf,
-                                     sizeof(c->out_buf),
+                                     c->out_buf_cap,
                                      dfid, name, name_len, mode, gid);
     if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     struct p9_dispatch_result r;
@@ -1286,7 +1756,7 @@ int p9_client_renameat(struct p9_client *c, u32 olddirfid,
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     int len = p9_session_send_renameat(&c->session, c->out_buf,
-                                        sizeof(c->out_buf),
+                                        c->out_buf_cap,
                                         olddirfid, oldname, oldname_len,
                                         newdirfid, newname, newname_len);
     if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
@@ -1306,7 +1776,7 @@ int p9_client_unlinkat(struct p9_client *c, u32 dfid,
     if (c->dead) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     if (!p9_session_is_open(&c->session)) CLIENT_UNLOCK_RET(c, -P9_E_BUSY);
     int len = p9_session_send_unlinkat(&c->session, c->out_buf,
-                                        sizeof(c->out_buf),
+                                        c->out_buf_cap,
                                         dfid, name, name_len, flags);
     if (len < 0) CLIENT_UNLOCK_RET(c, -P9_E_IO);
     struct p9_dispatch_result r;

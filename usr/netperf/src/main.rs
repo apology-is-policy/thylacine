@@ -52,7 +52,7 @@ use core::time::Duration;
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
 use libthyla_rs::env;
-use libthyla_rs::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
+use libthyla_rs::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream, WeftFlow};
 use libthyla_rs::poll::{PollEvents, PollSet, PollTimeout};
 use libthyla_rs::thread;
 use libthyla_rs::time::Instant;
@@ -139,13 +139,14 @@ const M2_BUF: usize = 16 * 1024; // server read + client write scratch.
 const M2_POLL_MS: u32 = 2000; // POLLOUT wait per stalled write (safety bound).
 const M2_MAX_STALLS: u32 = 15; // consecutive POLLOUT timeouts before bailing.
 
-// The boot-probe transfer. DELIBERATELY small: M2's throughput is bounded by the
-// per-4-KiB-window POLLOUT-readiness cadence (netd's data write is non-blocking,
-// so a bulk sender polls POLLOUT per window, and that readiness delivery is
-// timer-paced -- the dev9p.poll idle-pump, #221/#220), so the rate is
-// ~size-independent. 8 windows (32 KiB) measures it stably in ~1s; the shell
-// (`netperf [iters] [mib] [conns]`) passes bigger MiB for a long baseline.
-const M2_BOOT_BYTES: u64 = 32 * 1024;
+// The boot-probe transfer. Matched to MW (#290) so M2 and MW are an apples-to-
+// apples head-to-head: at this size BOTH saturate the 4 KiB socket window and pay
+// the same per-window POLLOUT-readiness-stall time (the transport-independent
+// #221/#288 seam that dominates the aggregate). The earlier 32 KiB was too small
+// to ever fill the window -- it never stalled, which made M2 look ~4x faster than
+// MW purely because MW (256 KiB) did stall. The breakdown line splits the honest
+// per-transport cost (the data-move us) from the shared readiness-stall us.
+const M2_BOOT_BYTES: u64 = 256 * 1024;
 
 // The server Thread's outcome codes.
 const M2_PENDING: u32 = 0;
@@ -251,6 +252,12 @@ fn m2_throughput(total: u64) -> Result<(), &'static str> {
     ps.add_raw(ready_raw, PollEvents::WRITE);
 
     let scratch = vec![0xa5u8; M2_BUF];
+    // Same data-move vs readiness-stall split as MW (#290), so M2 + MW report a
+    // directly comparable breakdown.
+    let mut ops: u64 = 0;
+    let mut stall_count: u64 = 0;
+    let mut send_us: u64 = 0;
+    let mut poll_us: u64 = 0;
     let t = Instant::now();
     let mut sent: u64 = 0;
     while sent < total {
@@ -258,13 +265,20 @@ fn m2_throughput(total: u64) -> Result<(), &'static str> {
         let mut off = 0usize;
         let mut stalls = 0u32;
         while off < take {
-            match client.write(&scratch[off..take]) {
+            let op_t = Instant::now();
+            let r = client.write(&scratch[off..take]);
+            send_us += op_t.elapsed().as_micros() as u64;
+            ops += 1;
+            match r {
                 Ok(0) => {
+                    stall_count += 1;
+                    let poll_t = Instant::now();
                     // Window full: block on POLLOUT until the server drains.
                     let woke = ps
                         .poll(PollTimeout::Millis(M2_POLL_MS))
                         .map(|r| r.into_iter().any(|e| e.is_writable()))
                         .map_err(|_| "poll")?;
+                    poll_us += poll_t.elapsed().as_micros() as u64;
                     if woke {
                         stalls = 0;
                     } else {
@@ -313,7 +327,232 @@ fn m2_throughput(total: u64) -> Result<(), &'static str> {
         dt.as_micros() % 1000,
         kibps
     ));
+    weft_breakdown("M2 byte-copy", ops, stall_count, send_us, poll_us);
     Ok(())
+}
+
+// =============================================================================
+// MW -- Weft zero-copy loopback throughput (the NET-THROUGHPUT section 8
+// benchmark; #269 M6). The M2 twin: the SAME bulk transfer over the SAME
+// resident `lo`, but the SEND side rides a WeftFlow (push/pop/wait over Loom ->
+// Tweftio -> netd reads the ring IN PLACE) instead of TcpStream::write (byte-copy
+// through the 9P body). The drain server stays a byte-copy TcpStream reader.
+//
+// WHAT THIS MEASURES (#290 ground truth): run head-to-head with M2 at the SAME
+// byte count, the AGGREGATE KiB/s is a dead heat -- because ~95% of both numbers
+// is the per-window POLLOUT readiness-stall time (a bulk sender fills the 4 KiB
+// socket window, then waits for the writable edge via the dev9p.poll bridge), and
+// that stall is TRANSPORT-INDEPENDENT: byte-copy pays it exactly as much as weft
+// (the registered seam #221 / #288). The zero-copy win is REAL but lives in the
+// data-move time, which the breakdown line below isolates: weft moves the bytes
+// ~3x faster than byte-copy (no user->kernel-scratch copy, no 9P body copy), and
+// each weft op moves more (the ring is >> the 4 KiB window). The earlier "weft
+// pays per-op Loom+Tweftio overhead / ~10x slower" reading was a benchmark
+// artifact (M2 measured at a too-small 32 KiB that never filled the window).
+// =============================================================================
+
+const MW_PORT: u16 = 7814;
+const MW_BUF: usize = 16 * 1024; // the drain server's read scratch.
+// The boot-probe transfer: a few weft rings' worth. Weft has no POLLOUT-per-
+// window cadence (each push parks on the Loom CQE), so a larger byte count
+// measures the rate stably without the M2 size-independence caveat.
+const MW_BOOT_BYTES: u64 = 256 * 1024;
+
+static MW_SRV_TID: AtomicU32 = AtomicU32::new(0);
+static MW_READY: AtomicU32 = AtomicU32::new(0);
+static MW_RESULT: AtomicU32 = AtomicU32::new(M2_PENDING);
+static MW_GOT: AtomicU64 = AtomicU64::new(0);
+static MW_EXPECT: AtomicU64 = AtomicU64::new(0);
+
+/// The drain server Thread (a byte-copy TcpStream reader, exactly like M2's): the
+/// receive side stays byte-copy so MW isolates the SEND-side zero-copy delta.
+extern "C" fn mw_server_entry(_arg: u64) {
+    let _ = thread::set_tid_address(&MW_SRV_TID);
+    let code = mw_server_run();
+    MW_RESULT.store(code, Ordering::SeqCst);
+    thread::exit_self();
+}
+
+fn mw_server_run() -> u32 {
+    let listener = match TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, MW_PORT)) {
+        Ok(l) => l,
+        Err(_) => return M2_BIND,
+    };
+    MW_READY.store(1, Ordering::Release);
+    let _ = libthyla_rs::torpor::wake_all(&MW_READY);
+    let (mut server, _peer) = match listener.accept() {
+        Ok(s) => s,
+        Err(_) => return M2_ACCEPT,
+    };
+    let expect = MW_EXPECT.load(Ordering::Acquire);
+    let mut buf = vec![0u8; MW_BUF];
+    let mut got: u64 = 0;
+    loop {
+        let n = match server.read(&mut buf) {
+            Ok(n) => n,
+            Err(_) => return M2_READ,
+        };
+        if n == 0 {
+            break; // EOF: the client half-closed (FIN).
+        }
+        got += n as u64;
+    }
+    MW_GOT.store(got, Ordering::SeqCst);
+    if got != expect {
+        return M2_SHORT;
+    }
+    M2_OK
+}
+
+/// Stream `total` bytes through a WeftFlow over loopback while a byte-copy drain
+/// server reads to EOF, timed from the first push to the join. Each push moves up
+/// to `payload_capacity()` bytes zero-copy -- the kernel routes the Loom WRITE to
+/// `Tweftio` and netd reads netd's ring slice IN PLACE; `wait` parks on the Loom
+/// CQE (no POLLOUT-per-window cadence). The fill below is the bench's own write
+/// into the shared ring (the only copy on the send side).
+fn weft_throughput(total: u64) -> Result<(), &'static str> {
+    MW_READY.store(0, Ordering::SeqCst);
+    MW_RESULT.store(M2_PENDING, Ordering::SeqCst);
+    MW_GOT.store(0, Ordering::SeqCst);
+    MW_EXPECT.store(total, Ordering::SeqCst);
+    MW_SRV_TID.store(M2_SENTINEL, Ordering::SeqCst);
+
+    let stack = unsafe { t_burrow_attach(M2_STACK) };
+    if stack < 0 {
+        return Err("server stack attach");
+    }
+    let sp = (stack as u64) + M2_STACK;
+    if unsafe { thread::spawn_raw(mw_server_entry as *const () as u64, sp, 0, 0) }.is_err() {
+        return Err("server spawn");
+    }
+    let mut waited = 0;
+    while MW_READY.load(Ordering::Acquire) == 0 && waited < 8 {
+        let _ = libthyla_rs::torpor::wait(&MW_READY, 0, Some(Duration::from_secs(1)));
+        waited += 1;
+    }
+    if MW_READY.load(Ordering::Acquire) == 0 {
+        return Err("server announce timeout");
+    }
+
+    let mut client = TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, MW_PORT))
+        .map_err(|_| "connect")?;
+    // open() reads only the data fd (a Copy i32), holding no borrow of `client`,
+    // so `client` stays usable for the shutdown below.
+    let mut flow = WeftFlow::open(&client).map_err(|_| "weft open")?;
+    let cap = flow.payload_capacity() as u64;
+    if cap == 0 {
+        return Err("zero payload capacity");
+    }
+    // A weft push moves at most the socket's FREE tx window (netd's data_send is
+    // non-blocking, like the byte-copy write); a full 4 KiB window returns a
+    // 0-count Rweftio -- back-pressure, NOT EOF (the connection is live). So a bulk
+    // weft sender pays the SAME per-window POLLOUT cadence M2 does (the ring is 255
+    // KiB but the socket tx buffer is 4 KiB -- the buffer, not the ring, paces
+    // loopback throughput; the weft win is the per-op COPY savings, not the
+    // cadence). Poll the QTPOLL `ready` sibling for POLLOUT on a 0 + retry.
+    let ready = client.ready_fd().map_err(|_| "ready fd")?;
+    let mut ps = PollSet::new();
+    ps.add_raw(ready.as_raw_fd(), PollEvents::WRITE);
+
+    // Split the per-op cost into the weft data-move (push+wait) vs the POLLOUT
+    // readiness-stall wait (#290): the breakdown line reports both so the honest
+    // per-transport cost (data-move us, where weft wins ~3x) is separable from the
+    // transport-independent readiness-stall us that dominates the aggregate.
+    let mut ops: u64 = 0;
+    let mut stall_count: u64 = 0;
+    let mut send_us: u64 = 0;
+    let mut poll_us: u64 = 0;
+    let t = Instant::now();
+    let mut sent: u64 = 0;
+    let mut stalls = 0u32;
+    // netd's data_send accepts at most the socket's free tx window (~4 KiB) per op,
+    // so pushing the WHOLE 254 KiB ring would re-read ~254 KiB of ring per 4 KiB
+    // sent (a bench artifact). Size each push to the window: start at a modest app
+    // chunk + self-tune to the last accepted count, so the ring read tracks what
+    // data_send will take. (A larger socket tx buffer is the v1.x lever that lets
+    // one weft push absorb a big send -- the real zero-copy throughput win.)
+    let mut hint = core::cmp::min(cap, M2_BUF as u64);
+    while sent < total {
+        let chunk = core::cmp::min(hint, total - sent) as usize;
+        flow.tx_buf()[..chunk].fill(0xa5); // fill the shared ring in place.
+        let op_t = Instant::now();
+        let tok = flow.push(chunk).map_err(|_| "push")?;
+        let moved = flow.wait(tok).map_err(|_| "wait")?.bytes();
+        send_us += op_t.elapsed().as_micros() as u64;
+        ops += 1;
+        if moved == 0 {
+            stall_count += 1;
+            let poll_t = Instant::now();
+            // Full send window: wait for the drain server to read, then retry the
+            // push (the server only EOFs after `total` bytes, so 0 here is always
+            // back-pressure). Bounded so a never-draining peer fails loudly.
+            let woke = ps
+                .poll(PollTimeout::Millis(M2_POLL_MS))
+                .map(|r| r.into_iter().any(|e| e.is_writable()))
+                .map_err(|_| "poll")?;
+            poll_us += poll_t.elapsed().as_micros() as u64;
+            if woke {
+                stalls = 0;
+            } else {
+                stalls += 1;
+                if stalls > M2_MAX_STALLS {
+                    return Err("stalled (server not draining)");
+                }
+            }
+            continue;
+        }
+        stalls = 0;
+        sent += moved as u64;
+        // Self-tune: the next push fills only what the socket window took (>= 4 KiB
+        // so we never under-fill the live window), so the ring read tracks the send.
+        hint = core::cmp::max(moved as u64, 4096);
+    }
+    client.shutdown().map_err(|_| "shutdown")?; // FIN -> the server reads EOF.
+    let joined = thread::join_tid(&MW_SRV_TID, M2_SENTINEL, Some(Duration::from_secs(30)));
+    let dt = t.elapsed();
+    drop(flow); // drop the Loom ring (releases the data-fd registration) first,
+    drop(client); // then the connection fids.
+
+    if joined.is_err() {
+        return Err("server join timeout");
+    }
+    match MW_RESULT.load(Ordering::SeqCst) {
+        M2_OK => {}
+        M2_BIND => return Err("server bind"),
+        M2_ACCEPT => return Err("server accept"),
+        M2_READ => return Err("server read"),
+        M2_SHORT => return Err("server short (byte count mismatch)"),
+        _ => return Err("server pending"),
+    }
+
+    let us_total = dt.as_micros() as u64;
+    let kibps = if us_total > 0 {
+        total * 1_000_000 / 1024 / us_total
+    } else {
+        0
+    };
+    t_putstr(&format!(
+        "netperf MW weft-throughput: {} KiB over lo in {}.{:03} ms; {} KiB/s (zero-copy push, {} KiB ring; #221-fixed ~6x; residual stall is the loopback window-update round-trip; byte-copy is also SYS_RW_MAX=4KiB/op-capped while weft bypasses it -- the zero-copy data-move is ~2x faster, see breakdown)\n",
+        total / 1024,
+        dt.as_millis(),
+        dt.as_micros() % 1000,
+        kibps,
+        cap / 1024
+    ));
+    weft_breakdown("MW weft", ops, stall_count, send_us, poll_us);
+    Ok(())
+}
+
+/// The #290 send-vs-stall breakdown shared by M2 + MW: isolate the transport's
+/// data-move cost (where weft's zero-copy wins ~3x) from the transport-independent
+/// POLLOUT readiness-stall cost (the #221 / #288 seam that dominates loopback for
+/// BOTH paths). Logged head-to-head so the honest comparison is the data-move us.
+fn weft_breakdown(tag: &str, ops: u64, stalls: u64, send_us: u64, poll_us: u64) {
+    let send_per = if ops > 0 { send_us / ops } else { 0 };
+    t_putstr(&format!(
+        "netperf {} breakdown (#290): {} ops, {} stalls; data-move {} us ({} us/op); readiness-stall {} us (transport-independent)\n",
+        tag, ops, stalls, send_us, send_per, poll_us
+    ));
 }
 
 // =============================================================================
@@ -698,7 +937,11 @@ pub extern "C" fn rs_main() -> i64 {
     if let Err(e) = m3_connect(conns) {
         fail("M3", e);
     }
+    // MW -- the Weft zero-copy throughput twin of M2 (NET-THROUGHPUT s8; #269 M6).
+    if let Err(e) = weft_throughput(MW_BOOT_BYTES) {
+        fail("MW", e);
+    }
 
-    t_putstr("netperf: NP-1 OK (M1+M2+M3 over the resident lo stack)\n");
+    t_putstr("netperf: NP-1 OK (M1+M2+M3+MW[weft] over the resident lo stack)\n");
     0
 }

@@ -381,7 +381,7 @@ void test_perm_check_want_zero_denied(void) {
 // CAP_HOSTOWNER does not rescue it.
 void test_perm_wstat_rejects_unknown_valid_bit(void) {
     struct Proc p;
-    u32 unknown = (1u << 3);   // outside T_WSTAT_VALID (MODE|UID|GID = bits 0-2)
+    u32 unknown = (1u << 4);   // outside T_WSTAT_VALID (MODE|UID|GID|SIZE = bits 0-3)
 
     mkproc(&p, 100u, 200u, CAP_HOSTOWNER);
     TEST_EXPECT_EQ(perm_wstat_check(&p, 100u, unknown, 0u), -1,
@@ -389,4 +389,15 @@ void test_perm_wstat_rejects_unknown_valid_bit(void) {
     // A known|unknown combination is also rejected (the unknown bit taints it).
     TEST_EXPECT_EQ(perm_wstat_check(&p, 100u, T_WSTAT_MODE | unknown, 0u), -1,
                    "perm_wstat_check rejects known|unknown valid bits");
+    // T_WSTAT_SIZE is KNOWN but outside this policy's jurisdiction (a content
+    // axis, rights-gated at the syscall layer): it passes through untainted,
+    // and the metadata policy still applies to the rest of a combined mask.
+    TEST_EXPECT_EQ(perm_wstat_check(&p, 100u, T_WSTAT_SIZE, 0u), 0,
+                   "SIZE alone passes (no identity policy on the content axis)");
+    TEST_EXPECT_EQ(perm_wstat_check(&p, 100u, T_WSTAT_SIZE | T_WSTAT_MODE, 0u), 0,
+                   "owner SIZE|MODE passes (mode policy applies, size tolerated)");
+    struct Proc q;
+    mkproc(&q, 999u, 200u, 0);   // non-owner, no caps
+    TEST_EXPECT_EQ(perm_wstat_check(&q, 100u, T_WSTAT_SIZE | T_WSTAT_MODE, 0u), -1,
+                   "non-owner SIZE|MODE still denied by the mode policy");
 }

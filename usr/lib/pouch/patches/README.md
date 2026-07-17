@@ -58,11 +58,13 @@ Three patches landed:
 - `0002-pouch-stdio-no-iovec.patch` — sub-chunk 4 (`pouch-syscall-seam`).
   Replaces the `writev`/`readv`-based stdio backend ops
   (`__stdio_write.c`, `__stdio_read.c`) with `SYS_write` / `SYS_read`.
-- `0003-pouch-mman.patch` — sub-chunk 7b (`pouch-mem`). Retargets musl's
-  `mman/` lower half onto Thylacine's anonymous-memory syscalls.
-  `__NR_mmap` = 37 (= `SYS_BURROW_ATTACH`), `__NR_munmap` = 38 (=
-  `SYS_BURROW_DETACH`); `src/mman/mmap.c` and `src/mman/munmap.c`
-  rewritten to call them with the Thylacine shape. File-backed `mmap` is
+- `0003-pouch-mman.patch` — sub-chunk 7b (`pouch-mem`); retargeted to the
+  overcommit model at #321. Retargets musl's `mman/` lower half onto
+  Thylacine's anonymous-memory syscalls. `__NR_mmap` = 83 (=
+  `SYS_BURROW_ATTACH_LAZY`: demand-zero RW, no pages until first touch),
+  `__NR_munmap` = 38 (= `SYS_BURROW_DETACH`); `src/mman/mmap.c` and
+  `src/mman/munmap.c` rewritten to call them with the Thylacine shape.
+  File-backed `mmap` is
   refused with `ENOSYS` by design (a mapped file cannot be 9P-network-
   transparent; ARCHITECTURE.md §6.5). All other `mman/` calls (`madvise`,
   `mprotect`, `mremap`, `mlock`, `msync`, `mincore`, ...) stay at the

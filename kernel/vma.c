@@ -164,6 +164,17 @@ int vma_insert(struct Proc *p, struct Vma *v) {
         cur  = cur->next;
     }
 
+    // I-32 FOURTH axis (overcommit, ARCH §6.5): bound live VMAs — the DoS a free
+    // SYS_BURROW_ATTACH_LAZY reservation (uncharged at attach) would otherwise open.
+    // Checked AFTER the overlap walk (so a rejected overlap doesn't consume the
+    // budget) and BEFORE the list mutation (so a cap-hit installs nothing). A non-TCB
+    // Proc at PROC_VMA_MAX is rejected here, identically to an overlap (the caller
+    // vma_frees the rejected Vma). proc_vma_charge requires p->vma_lock — every
+    // vma_insert caller holds it (attach / share under vma_lock; exec_setup is
+    // single-threaded). Paired by proc_vma_uncharge in vma_remove. Charges nothing on
+    // failure, so no rollback is needed on the rejected path.
+    if (!proc_vma_charge(p)) return -1;
+
     // Insert v between prev and cur.
     v->prev = prev;
     v->next = cur;
@@ -184,6 +195,12 @@ void vma_remove(struct Proc *p, struct Vma *v) {
 
     v->next = NULL;
     v->prev = NULL;
+
+    // I-32: a removed VMA frees its slab slot -> uncharge the live-VMA count (pairs
+    // with proc_vma_charge in vma_insert). Under p->vma_lock (every vma_remove caller
+    // holds it: detach / share teardown; vma_drain at proc_free is single-threaded).
+    // Clamp-safe.
+    proc_vma_uncharge(p);
 }
 
 struct Vma *vma_lookup(struct Proc *p, u64 vaddr) {

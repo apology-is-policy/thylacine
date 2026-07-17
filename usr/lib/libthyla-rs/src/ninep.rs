@@ -633,8 +633,10 @@ pub fn build_rgetattr(
 // Tweft body: [fid: u32].  Rweft body: [share_id: u64][ring_size: u32][ring_entries: u32].
 // =============================================================================
 
-pub const P9_TWEFT: u8 = 134;
-pub const P9_RWEFT: u8 = 135;
+// 142/143: renumbered from 134/135 at #371 (the old pair latently collided
+// with Stratum Tfadvise/Tpin; registry = thylacine docs/9P-EXTENSIONS.md).
+pub const P9_TWEFT: u8 = 142;
+pub const P9_RWEFT: u8 = 143;
 
 /// The ring grant an Rweft carries: the kernel-scoped registration token + the
 /// geometry the kernel needs to compute its private weft_ring_view (it does NOT
@@ -700,8 +702,9 @@ pub fn parse_rweft(buf: &[u8]) -> Result<WeftGeom, ()> {
 // Rweftio body: [count: u32]                               (4 bytes).
 // =============================================================================
 
-pub const P9_TWEFTIO: u8 = 136;
-pub const P9_RWEFTIO: u8 = 137;
+// 144/145: renumbered from 136/137 at #371 (see P9_TWEFT above).
+pub const P9_TWEFTIO: u8 = 144;
+pub const P9_RWEFTIO: u8 = 145;
 
 /// Tweftio direction -- which way the payload moves through the shared ring.
 pub const WEFT_DIR_WRITE: u32 = 0; // TX: netd reads ring[off..off+len] -> send

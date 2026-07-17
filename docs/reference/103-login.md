@@ -76,6 +76,27 @@ Flow (`rs_main`):
    -> `supp_gids` (missing/short -> empty, non-fatal).
 5. Emit the resolution marker `login: <user> uid=N gid=M` via `t_putstr` (the
    UART -> the boot log AND, at v1.0 single-console, the live console).
+5a. **Seed the session environment** (`seed_session_env`, Go Stage 6 -- the
+   Unix login(1) role): write `/env/HOME` (= `/home/<user>`), `/env/USER`,
+   `/env/PATH` (= `/bin:/goroot/bin`, mirroring ut's static `$path`) into
+   login's own per-Proc /env; the shell and every session child inherit a deep
+   copy at spawn (`env_clone_into`). Values only -- the corvus token and the
+   DEK lease must NEVER enter /env (it is readable by every descendant).
+   Best-effort: a failed seed prints a marker and degrades toolchain defaults
+   (Go derives GOCACHE/GOPATH/GOENV from `$HOME`), never the login.
+5b. **The per-user /tmp is bound by `ut`, not login** (Go Stage 6): login runs
+   as `PRINCIPAL_SYSTEM`, which cannot create -- or even X-search -- inside the
+   0700 user-owned home, so the `~/tmp` mkdir + the MREPL bind over `/tmp`
+   live in the shell (`ut`'s `bind_user_tmp`, gated on `--home`), which is
+   born AS the user and whose private territory scopes the bind to exactly
+   the session subtree. Rationale (why a bind at all): the global `/tmp`
+   rides the shared SYSTEM-attach system mount, where a create's OWNER is
+   the attach identity (9P identity is per-Tattach; only the gid travels
+   per-op) -- a user's mode-0700 `MkdirTemp` under it (Go's `$WORK`; any
+   POSIX `mkdtemp`) landed SYSTEM-owned and the user could not create
+   inside it. The underlying per-op-identity limitation of the shared
+   system mount is A-3's documented v1.x foreign/authenticated-attach seam;
+   sessions never see it through the bind.
 6. Spawn `ut` via `Command::identity(pid, gid, &supp).caps(LOCK_PAGES |
    CSPRNG_READ)` with fd 0/1/2 inherited -- the shell is born AS the user, with
    the two benign user caps but NOT `CAP_SET_IDENTITY` (a shell is not an

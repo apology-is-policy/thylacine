@@ -52,6 +52,7 @@ void test_resource_child_cap_ok(void);
 void test_resource_child_count_tracks_list(void);
 void test_resource_child_count_rfork_reap(void);
 void test_resource_page_cap_attach_enforced(void);
+void test_resource_vma_cap(void);
 
 #define A_REAL_USER 1000u
 
@@ -233,4 +234,45 @@ void test_resource_page_cap_attach_enforced(void) {
                    "exempt charged past the cap");
     (void)sys_burrow_detach_for_proc(sys, (u64)ex, 2u * PAGE_SIZE);
     res_drop(sys);
+}
+
+// I-32 FOURTH axis (overcommit, ARCH section 6.5): proc_vma_charge bounds live VMAs
+// at PROC_VMA_MAX -- the DoS a free SYS_BURROW_ATTACH_LAZY reservation would open.
+// Mirrors the page-charge cap test (no 65536 real VMAs; pre-set vma_count near the
+// boundary). proc_vma_charge requires p->vma_lock in production for EXACTNESS under
+// contention; this single-threaded test calls it directly (the __atomic ops are
+// coherent without the lock when no peer races).
+void test_resource_vma_cap(void) {
+    struct Proc *p = res_make(A_REAL_USER);   // non-exempt
+
+    // Boundary: charge at MAX-1 succeeds (-> MAX), the next is refused (no over-cap).
+    __atomic_store_n(&p->vma_count, PROC_VMA_MAX - 1u, __ATOMIC_RELEASE);
+    TEST_ASSERT(proc_vma_charge(p),  "charge at MAX-1 succeeds (-> MAX)");
+    TEST_EXPECT_EQ(p->vma_count, PROC_VMA_MAX, "vma_count == cap after the boundary charge");
+    TEST_ASSERT(!proc_vma_charge(p), "charge at the cap is refused");
+    TEST_EXPECT_EQ(p->vma_count, PROC_VMA_MAX, "a refused charge charges nothing");
+
+    // Uncharge re-opens a slot; charge then succeeds again.
+    proc_vma_uncharge(p);
+    TEST_EXPECT_EQ(p->vma_count, PROC_VMA_MAX - 1u, "uncharge re-opens a slot");
+    TEST_ASSERT(proc_vma_charge(p), "charge succeeds again after uncharge");
+
+    // Over-uncharge clamps at 0 (no underflow).
+    __atomic_store_n(&p->vma_count, 0u, __ATOMIC_RELEASE);
+    proc_vma_uncharge(p);
+    TEST_EXPECT_EQ(p->vma_count, 0u, "over-uncharge clamps at 0 (no underflow)");
+
+    // Saturation guard: a charge on a maxed counter is refused (no wrap).
+    __atomic_store_n(&p->vma_count, 0xFFFFFFFFu, __ATOMIC_RELEASE);
+    TEST_ASSERT(!proc_vma_charge(p), "saturated counter refuses a charge");
+    __atomic_store_n(&p->vma_count, 0u, __ATOMIC_RELEASE);
+
+    // Exempt Procs (PRINCIPAL_SYSTEM) bypass the cap; the count is still maintained.
+    struct Proc *sys = res_make((u32)PRINCIPAL_SYSTEM);
+    __atomic_store_n(&sys->vma_count, PROC_VMA_MAX, __ATOMIC_RELEASE);
+    TEST_ASSERT(proc_vma_charge(sys), "exempt charges past the cap");
+    TEST_EXPECT_EQ(sys->vma_count, PROC_VMA_MAX + 1u, "exempt is unbounded by the cap");
+    __atomic_store_n(&sys->vma_count, 0u, __ATOMIC_RELEASE);
+
+    res_drop(p); res_drop(sys);
 }

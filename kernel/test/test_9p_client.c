@@ -18,6 +18,7 @@
 #include <thylacine/9p_wire.h>
 #include <thylacine/burrow.h>     // Loom-6 white-box registered-buffer install
 #include <thylacine/dev9p.h>
+#include <thylacine/weft.h>       // Weft-6c: weft_binding_alloc + the zero-copy drive
 #include <thylacine/errno.h>
 #include <thylacine/handle.h>
 #include <thylacine/loom.h>
@@ -82,6 +83,10 @@ static u8 g_loopback_resp[4096];
 // SrvConn-vehicle device-gone tests (test_9p_srvconn_transport.c)
 // pre-stage handshake replies through it -- the single source of
 // truth for the canonical 9P2000.L reply byte layouts.
+// Staged by the walkgetattr test: the responder answers one element
+// FEWER than requested (a partial walk).
+static bool g_wga_partial = false;
+
 int canonical_responder(void *ctx, const u8 *req, size_t req_len,
                                  u8 *resp, size_t resp_cap) {
     (void)ctx;
@@ -124,6 +129,37 @@ int canonical_responder(void *ctx, const u8 *req, size_t req_len,
         resp[9] = P9_QTFILE;
         for (int i = 0; i < 4; i++) resp[10 + i] = 0;
         resp[14] = 77; for (int i = 1; i < 8; i++) resp[14 + i] = 0;
+        return (int)total;
+    }
+    if (type == P9_TWALKGETATTR) {
+        // POUNCE: echo the REQUESTED nwname back as full-walk elements
+        // (or one fewer when the partial-walk flag is staged), each with
+        // distinctive per-index attrs so client-side extraction is
+        // assertable. Bytes hand-written (independent of the builders).
+        if (req_len < P9_HDR_LEN + 18) return -1;
+        u16 nwname = (u16)(req[P9_HDR_LEN + 16] |
+                           ((u16)req[P9_HDR_LEN + 17] << 8));
+        u16 n = (g_wga_partial && nwname > 0) ? (u16)(nwname - 1) : nwname;
+        size_t total = P9_HDR_LEN + 2 + (size_t)n * P9_WGA_BODY_LEN;
+        if (resp_cap < total) return -1;
+        resp[0] = (u8)(total & 0xff); resp[1] = (u8)((total >> 8) & 0xff);
+        resp[2] = 0; resp[3] = 0;
+        resp[4] = P9_RWALKGETATTR;
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        resp[7] = (u8)(n & 0xff); resp[8] = (u8)((n >> 8) & 0xff);
+        for (u16 i = 0; i < n; i++) {
+            u8 *el = resp + 9 + (size_t)i * P9_WGA_BODY_LEN;
+            for (u32 b = 0; b < P9_WGA_BODY_LEN; b++) el[b] = 0;
+            el[0] = 0xFF; el[1] = 0x3F;                  // valid = ALL
+            el[8] = (i + 1 == n) ? P9_QTFILE : P9_QTDIR; // qid.type
+            el[13] = (u8)(200 + i);                      // qid.path
+            if (i + 1 == n) { el[21] = 0xA4; el[22] = 0x81; }  // 0100644
+            else            { el[21] = 0xED; el[22] = 0x41; }  // 0040755
+            el[25] = 7;                                  // uid
+            el[29] = 8;                                  // gid
+            el[33] = 1;                                  // nlink
+            el[49] = (u8)(100 + i);                      // size
+        }
         return (int)total;
     }
     if (type == P9_TCLUNK || type == P9_TSETATTR || type == P9_TFSYNC ||
@@ -409,6 +445,59 @@ void test_9p_client_walk_and_clunk(void) {
     p9_loopback_destroy(&g_loopback);
 }
 
+void test_9p_client_walkgetattr(void) {
+    drive_client_open(&g_client, &g_loopback);
+
+    const u8 *names[2];
+    size_t lens[2];
+    names[0] = (const u8 *)"a"; lens[0] = 1;
+    names[1] = (const u8 *)"f"; lens[1] = 1;
+    u16 nwqid;
+    struct p9_qid  qids[P9_MAX_WALK];
+    struct p9_attr attrs[2];
+
+    // Full walk with a real newfid: binds + per-component attrs extract.
+    int rc = p9_client_walkgetattr(&g_client, /*src=*/0, /*new=*/30,
+                                   P9_GETATTR_ALL, 2, names, lens,
+                                   &nwqid, qids, attrs);
+    TEST_EXPECT_EQ(rc, 0,                              "walkgetattr(0->30) ok");
+    TEST_EXPECT_EQ((u64)nwqid, (u64)2,                 "2 elements");
+    TEST_EXPECT_EQ(qids[0].path, (u64)200,             "qid0.path 200");
+    TEST_EXPECT_EQ(qids[1].path, (u64)201,             "qid1.path 201");
+    TEST_EXPECT_EQ((u64)attrs[0].mode, (u64)0x41ED,    "attr0 dir mode");
+    TEST_EXPECT_EQ((u64)attrs[1].mode, (u64)0x81A4,    "attr1 file mode");
+    TEST_EXPECT_EQ((u64)attrs[1].uid, (u64)7,          "attr1 uid");
+    TEST_EXPECT_EQ(attrs[1].size, (u64)101,            "attr1 size");
+    TEST_EXPECT_EQ(attrs[0].qid.path, (u64)200,        "attr0 embedded qid");
+    rc = p9_client_clunk(&g_client, 30);
+    TEST_EXPECT_EQ(rc, 0,                              "bound newfid clunks ok");
+
+    // NOFID query: attrs return; the session binds NOTHING.
+    size_t fids_before = p9_session_n_bound_fids(&g_client.session);
+    rc = p9_client_walkgetattr(&g_client, 0, P9_NOFID, P9_GETATTR_ALL,
+                               2, names, lens, &nwqid, qids, attrs);
+    TEST_EXPECT_EQ(rc, 0,                              "NOFID query ok");
+    TEST_EXPECT_EQ((u64)nwqid, (u64)2,                 "query: 2 elements");
+    TEST_EXPECT_EQ((u64)attrs[0].gid, (u64)8,          "query attr gid");
+    TEST_EXPECT_EQ((u64)p9_session_n_bound_fids(&g_client.session),
+                   (u64)fids_before,                   "query bound NOTHING");
+
+    // Partial walk with a real newfid: prefix attrs; newfid NOT bound.
+    g_wga_partial = true;
+    rc = p9_client_walkgetattr(&g_client, 0, 31, P9_GETATTR_ALL,
+                               2, names, lens, &nwqid, qids, attrs);
+    g_wga_partial = false;
+    TEST_EXPECT_EQ(rc, 0,                              "partial walkgetattr ok");
+    TEST_EXPECT_EQ((u64)nwqid, (u64)1,                 "partial: 1 element");
+    TEST_EXPECT_EQ((u64)p9_session_n_bound_fids(&g_client.session),
+                   (u64)fids_before,                   "partial bound NOTHING");
+    rc = p9_client_clunk(&g_client, 31);
+    TEST_ASSERT(rc != 0,               "unbound partial newfid cannot clunk");
+
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
 void test_9p_client_lopen_read(void) {
     drive_client_open(&g_client, &g_loopback);
     p9_client_walk_one(&g_client, 0, 10, (const u8 *)"f", 1, NULL);
@@ -440,6 +529,43 @@ void test_9p_client_write(void) {
                                (u32)sizeof(payload), payload, &accepted);
     TEST_EXPECT_EQ(rc, 0,                                  "write ok");
     TEST_EXPECT_EQ((u64)accepted, (u64)sizeof(payload),    "accepted = sent");
+
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// CF-3 A regression: a write whose count exceeds the negotiated msize's
+// Twrite payload must be CLAMPED to a short write (the POSIX contract;
+// callers loop), never fail the frame build. Pre-clamp this returned
+// -P9_E_IO for every over-payload write -- the bench cascade: the go
+// compiler's bulk object writes EIO'd, no cache puts landed, the warm
+// build ran cold. msize here is the negotiated 8192, so the payload max
+// is 8192 - 23 (hdr 7 + fid 4 + offset 8 + count 4) = 8169.
+void test_9p_client_bulk_write_clamps_short(void) {
+    drive_client_open(&g_client, &g_loopback);
+    p9_client_walk_one(&g_client, 0, 14, (const u8 *)"f", 1, NULL);
+
+    static u8 big[16000];
+    for (u32 i = 0; i < sizeof(big); i++) big[i] = (u8)(i & 0xFF);
+    u32 nmsize = g_client.session.negotiated_msize;
+    TEST_ASSERT(nmsize > 0 && nmsize <= 8192, "loopback msize sanity");
+    u64 wmax = (u64)nmsize - 23u;
+
+    u32 accepted = 0;
+    int rc = p9_client_write(&g_client, 14, 0,
+                               (u32)sizeof(big), big, &accepted);
+    TEST_EXPECT_EQ(rc, 0,               "over-payload write must not EIO");
+    TEST_EXPECT_EQ((u64)accepted, wmax, "accepted = the msize payload max");
+
+    // The read-side twin clamp: an over-payload count is clamped before the
+    // Tread goes out (observable only as rc==0 here -- the loopback file is
+    // 5 bytes; the pre-clamp count would have been legal on the wire anyway
+    // since Tread carries no payload, but the clamp keeps the REPLY bound
+    // inside the negotiated msize by construction).
+    static u8 rbuf[16000];
+    u32 n = 0;
+    rc = p9_client_read(&g_client, 14, 0, (u32)sizeof(rbuf), rbuf, &n);
+    TEST_EXPECT_EQ(rc, 0, "over-payload read count must not error");
 
     p9_client_destroy(&g_client);
     p9_loopback_destroy(&g_loopback);
@@ -1724,6 +1850,277 @@ void test_9p_client_loom_write_e2e(void) {
     p9_loopback_destroy(&g_loopback);
 }
 
+// =============================================================================
+// Weft-6c (NET-THROUGHPUT 6; I-37): the zero-copy data drive over Loom. A
+// LOOM_OP_READ/WRITE on a /net data fid whose registered buffer IS the per-flow
+// shared ring is routed to a Tweftio (off/len/dir descriptor) instead of a byte-
+// copying Tread/Twrite -- netd moves the bytes IN PLACE in the shared ring, so the
+// kernel copies NOTHING and the Rweftio count is the CQE result. The capture
+// responder records which wire op the server saw (Tweftio vs Tread) + the Tweftio
+// descriptor, and echoes the requested len back as the moved count.
+// =============================================================================
+static u8  g_weft_req_type;     // last request type the server saw (0 == none)
+static u32 g_weft_off;          // captured Tweftio offset (payload-relative)
+static u32 g_weft_len;          // captured Tweftio len
+static u32 g_weft_dir;          // captured Tweftio direction (WEFT_DIR_*)
+static int loom_weft_capture_responder(void *ctx, const u8 *req, size_t req_len,
+                                       u8 *resp, size_t cap) {
+    u32 size; u8 type; u16 tag;
+    if (p9_peek_header(req, req_len, &size, &type, &tag) >= 0) {
+        g_weft_req_type = type;
+        if (type == P9_TWEFTIO && req_len >= P9_HDR_LEN + 16) {
+            // Tweftio body: [fid u32][off u32][len u32][dir u32].
+            g_weft_off = (u32)req[P9_HDR_LEN+4]  | ((u32)req[P9_HDR_LEN+5]<<8)
+                       | ((u32)req[P9_HDR_LEN+6]<<16) | ((u32)req[P9_HDR_LEN+7]<<24);
+            g_weft_len = (u32)req[P9_HDR_LEN+8]  | ((u32)req[P9_HDR_LEN+9]<<8)
+                       | ((u32)req[P9_HDR_LEN+10]<<16) | ((u32)req[P9_HDR_LEN+11]<<24);
+            g_weft_dir = (u32)req[P9_HDR_LEN+12] | ((u32)req[P9_HDR_LEN+13]<<8)
+                       | ((u32)req[P9_HDR_LEN+14]<<16) | ((u32)req[P9_HDR_LEN+15]<<24);
+            // Rweftio echoing the requested len (proves the len round-trips the wire).
+            size_t total = P9_HDR_LEN + 4;
+            if (cap < total) return -1;
+            resp[0] = (u8)total; resp[1] = 0; resp[2] = 0; resp[3] = 0;
+            resp[4] = P9_RWEFTIO;
+            resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+            resp[7]  = (u8)(g_weft_len & 0xff);         resp[8]  = (u8)((g_weft_len >> 8) & 0xff);
+            resp[9]  = (u8)((g_weft_len >> 16) & 0xff); resp[10] = (u8)((g_weft_len >> 24) & 0xff);
+            return (int)total;
+        }
+    }
+    return canonical_responder(ctx, req, req_len, resp, cap);
+}
+
+// Open the loopback client with the weft capture responder (mirrors
+// drive_client_open, which wires canonical_responder).
+static int weft_drive_open(struct p9_client *c, struct p9_loopback *lb) {
+    int rc = p9_loopback_init(lb, g_loopback_resp, sizeof(g_loopback_resp),
+                              loom_weft_capture_responder, NULL);
+    if (rc < 0) return -1;
+    rc = p9_client_init(c, 0, 8192, p9_loopback_ops_for(lb),
+                        g_recv_buf, sizeof(g_recv_buf));
+    if (rc < 0) return -1;
+    const u8 uname[] = {'r','o','o','t'};
+    const u8 aname[] = {'/'};
+    return p9_client_handshake(c, uname, sizeof(uname), aname, sizeof(aname), 0);
+}
+
+#define WEFT_TEST_RING_SIZE   PAGE_SIZE
+#define WEFT_TEST_RING_ENTS   8u
+#define WEFT_TEST_GUEST_VA    0x40000000ULL
+
+// Install a fresh anon Burrow as BOTH the Loom reg_buf[idx] AND a weft binding on
+// `sp`'s dev9p priv -- the SYS_WEFT_MAP'd per-flow ring. The WHOLE Burrow is the
+// registered buffer (buf_reg_len == ring_size), so a slice's buf_off is ring-base-
+// relative -- the weft routing's whole-ring contract. The binding holds one
+// registration pin (burrow_ref), released by dev9p_close -> weft_binding_release
+// when `sp` is clunked at loom_unref. Returns the payload-region offset (where a
+// zero-copy slice must start); the binding pointer comes back via out_wb so the
+// caller asserts the install.
+static u32 weft_install_ring(struct Loom *l, u32 idx, struct Spoor *sp,
+                             struct Burrow **out_b, u8 **out_kva,
+                             struct weft_binding **out_wb) {
+    loom_install_test_buf(l, idx, WEFT_TEST_RING_SIZE, out_b, out_kva);
+    struct weft_binding *wb = weft_binding_alloc(*out_b, WEFT_TEST_GUEST_VA,
+                                                 WEFT_TEST_RING_SIZE, WEFT_TEST_RING_ENTS);
+    *out_wb = wb;
+    if (!wb) return 0;
+    burrow_ref(*out_b);                          // the binding's registration pin
+    dev9p_priv_of(sp)->weft = wb;
+    return wb->view.payload_off;
+}
+
+// Weft READ E2E: a LOOM_OP_READ on a weft-bound fid + the ring buffer routes to a
+// Tweftio(dir=READ); the kernel copies NOTHING into the ring slice (netd places the
+// recv'd bytes there in place -- the canned reply carries none, so the sentinel must
+// survive), and the CQE result is the Rweftio count. A single terminal CQE, no MORE.
+void test_9p_client_loom_weft_read_e2e(void) {
+    TEST_ASSERT(weft_drive_open(&g_client, &g_loopback) == 0, "weft client open");
+    // Walk-bind fid 20 (like a real /net data fid -- a walked, opened fid, never the
+    // attach root); an unbound fid would fail fid_bound in p9_session_send_*.
+    p9_client_walk_one(&g_client, 0, 20, (const u8 *)"d", 1, NULL);
+    struct Spoor *sp = dev9p_attach_client(&g_client, 20);
+    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
+
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create");
+    rights_t rt = RIGHT_READ | RIGHT_WRITE;
+    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p handle");
+
+    struct Burrow *ringb; u8 *rkva; struct weft_binding *wb;
+    u32 poff = weft_install_ring(l, 0, sp, &ringb, &rkva, &wb);
+    TEST_ASSERT(wb != NULL, "weft binding installed");
+    int hc0 = burrow_handle_count(ringb);
+    for (u32 i = 0; i < 256; i++) rkva[poff + i] = 0xAA;   // sentinel (must survive)
+
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    g_weft_req_type = 0;
+    cl_stage_rw(l, 0, LOOM_OP_READ, /*handle=*/0, /*offset=*/0, /*count=*/256,
+                /*bidx=*/0, /*buf_off=*/poff, 0xBEEFBEEF00000100ULL);
+    __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
+
+    int n = loom_enter(l, 1, 1, 0);
+    TEST_EXPECT_EQ(n, 1, "one SQE consumed");
+    TEST_EXPECT_EQ((u64)g_weft_req_type, (u64)P9_TWEFTIO, "server saw a Tweftio (not Tread)");
+    TEST_EXPECT_EQ((u64)g_weft_dir, (u64)WEFT_DIR_READ, "Tweftio dir = READ");
+    TEST_EXPECT_EQ((u64)g_weft_off, (u64)0, "Tweftio off = payload-relative 0");
+    TEST_EXPECT_EQ((u64)g_weft_len, (u64)256, "Tweftio len = 256");
+    TEST_EXPECT_EQ((u64)l->cq_tail, (u64)1, "one CQE");
+    TEST_ASSERT((cqes[0].flags & LOOM_CQE_MORE) == 0, "single terminal CQE (no MORE)");
+    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)256, "result = Rweftio count");
+    bool intact = true;
+    for (u32 i = 0; i < 256; i++) if (rkva[poff + i] != 0xAA) intact = false;
+    TEST_ASSERT(intact, "ring slice untouched by the kernel (zero-copy READ)");
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "op reaped");
+    TEST_EXPECT_EQ(burrow_handle_count(ringb), hc0, "op buffer pin balanced");
+
+    burrow_unref(ringb);
+    loom_unref(l);
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// Weft WRITE E2E: a LOOM_OP_WRITE routes to a Tweftio(dir=WRITE) carrying ONLY the
+// off/len descriptor (no payload on the wire -- netd reads the ring in place); the
+// CQE result is the Rweftio count, and the completion is a single terminal CQE (no
+// LOOM_CQE_MORE -- the COPIED F_NOTIF realization: at v1.0 netd copies the ring into
+// its socket buffer, so the slice is reusable the instant the CQE arrives).
+void test_9p_client_loom_weft_write_e2e(void) {
+    TEST_ASSERT(weft_drive_open(&g_client, &g_loopback) == 0, "weft client open");
+    // Walk-bind fid 20 (like a real /net data fid -- a walked, opened fid, never the
+    // attach root); an unbound fid would fail fid_bound in p9_session_send_*.
+    p9_client_walk_one(&g_client, 0, 20, (const u8 *)"d", 1, NULL);
+    struct Spoor *sp = dev9p_attach_client(&g_client, 20);
+    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
+
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create");
+    rights_t rt = RIGHT_READ | RIGHT_WRITE;
+    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p handle");
+
+    struct Burrow *ringb; u8 *rkva; struct weft_binding *wb;
+    u32 poff = weft_install_ring(l, 0, sp, &ringb, &rkva, &wb);
+    TEST_ASSERT(wb != NULL, "weft binding installed");
+    int hc0 = burrow_handle_count(ringb);
+    for (u32 i = 0; i < 512; i++) rkva[poff + i] = (u8)i;   // the guest's payload, in the ring
+
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    g_weft_req_type = 0;
+    cl_stage_rw(l, 0, LOOM_OP_WRITE, /*handle=*/0, /*offset=*/0, /*count=*/512,
+                /*bidx=*/0, /*buf_off=*/poff, 0xF00DF00D00000200ULL);
+    __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
+
+    int n = loom_enter(l, 1, 1, 0);
+    TEST_EXPECT_EQ(n, 1, "one SQE consumed");
+    TEST_EXPECT_EQ((u64)g_weft_req_type, (u64)P9_TWEFTIO, "server saw a Tweftio (not Twrite)");
+    TEST_EXPECT_EQ((u64)g_weft_dir, (u64)WEFT_DIR_WRITE, "Tweftio dir = WRITE");
+    TEST_EXPECT_EQ((u64)g_weft_len, (u64)512, "Tweftio len = 512");
+    TEST_EXPECT_EQ((u64)l->cq_tail, (u64)1, "one CQE");
+    TEST_ASSERT((cqes[0].flags & LOOM_CQE_MORE) == 0,
+                "single terminal CQE, no MORE (copied F_NOTIF realization)");
+    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)512, "result = Rweftio count");
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "op reaped");
+    TEST_EXPECT_EQ(burrow_handle_count(ringb), hc0, "op buffer pin balanced");
+
+    burrow_unref(ringb);
+    loom_unref(l);
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// Weft hybrid fallback (section 4.8): a LOOM_OP_READ on a weft-bound fid but with a
+// NON-ring registered buffer (slot 1, a separate Burrow) falls through to the byte
+// path -- a normal Tread, NOT a Tweftio. Only the per-flow ring goes zero-copy; a
+// small/control transfer over a scratch buffer stays byte-copy, and its reply is
+// copied into the buffer as usual.
+void test_9p_client_loom_weft_hybrid_fallback(void) {
+    TEST_ASSERT(weft_drive_open(&g_client, &g_loopback) == 0, "weft client open");
+    // Walk-bind fid 20 (like a real /net data fid -- a walked, opened fid, never the
+    // attach root); an unbound fid would fail fid_bound in p9_session_send_*.
+    p9_client_walk_one(&g_client, 0, 20, (const u8 *)"d", 1, NULL);
+    struct Spoor *sp = dev9p_attach_client(&g_client, 20);
+    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
+
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create");
+    rights_t rt = RIGHT_READ | RIGHT_WRITE;
+    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p handle");
+
+    struct Burrow *ringb; u8 *rkva; struct weft_binding *wb;
+    (void)weft_install_ring(l, 0, sp, &ringb, &rkva, &wb);   // ring + binding -> slot 0
+    TEST_ASSERT(wb != NULL, "weft binding installed");
+    struct Burrow *plain; u8 *pkva;
+    loom_install_test_buf(l, 1, PAGE_SIZE, &plain, &pkva);   // a NON-ring buffer -> slot 1
+    pkva[0] = 0x00;
+
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    g_weft_req_type = 0;
+    // bidx = 1 (the NON-ring buffer) -> the weft routing does not fire.
+    cl_stage_rw(l, 0, LOOM_OP_READ, /*handle=*/0, /*offset=*/0, /*count=*/5,
+                /*bidx=*/1, /*buf_off=*/0, 0xCAFE000000000005ULL);
+    __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
+
+    int n = loom_enter(l, 1, 1, 0);
+    TEST_EXPECT_EQ(n, 1, "one SQE consumed");
+    TEST_EXPECT_EQ((u64)g_weft_req_type, (u64)P9_TREAD, "non-ring buffer -> byte Tread, not Tweftio");
+    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)5, "byte READ result = 5 (hello)");
+    TEST_ASSERT(pkva[0] == 'h' && pkva[4] == 'o', "byte path copied the reply into the buffer");
+
+    burrow_unref(ringb);
+    burrow_unref(plain);
+    loom_unref(l);
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// Weft OOB rejection: a weft op whose slice lands in the ring's CONTROL region
+// (buf_off < payload_off) is rejected at submit (-EINVAL) -- the same bounds gate
+// the synchronous dev9p_weft_try_rw uses. No Tweftio is sent (rejected before the
+// engine), proving the validator-once runs on the kernel SQE snapshot.
+void test_9p_client_loom_weft_oob_rejected(void) {
+    TEST_ASSERT(weft_drive_open(&g_client, &g_loopback) == 0, "weft client open");
+    // Walk-bind fid 20 (like a real /net data fid -- a walked, opened fid, never the
+    // attach root); an unbound fid would fail fid_bound in p9_session_send_*.
+    p9_client_walk_one(&g_client, 0, 20, (const u8 *)"d", 1, NULL);
+    struct Spoor *sp = dev9p_attach_client(&g_client, 20);
+    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
+
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create");
+    rights_t rt = RIGHT_READ | RIGHT_WRITE;
+    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p handle");
+
+    struct Burrow *ringb; u8 *rkva; struct weft_binding *wb;
+    u32 poff = weft_install_ring(l, 0, sp, &ringb, &rkva, &wb);
+    TEST_ASSERT(wb != NULL && poff > 0, "binding installed; payload after the control region");
+
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    g_weft_req_type = 0;
+    // buf_off = 0 lands in the control region [0, payload_off) -> rejected.
+    cl_stage_rw(l, 0, LOOM_OP_WRITE, /*handle=*/0, /*offset=*/0, /*count=*/64,
+                /*bidx=*/0, /*buf_off=*/0, 0xDEAD000000000040ULL);
+    __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
+
+    int n = loom_enter(l, 1, 1, 0);
+    TEST_EXPECT_EQ(n, 1, "one SQE consumed");
+    TEST_EXPECT_EQ((u64)g_weft_req_type, (u64)0, "no wire op sent (rejected at submit)");
+    TEST_EXPECT_EQ((u64)l->cq_tail, (u64)1, "one CQE (the inline rejection)");
+    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)(s64)(-(s32)T_E_INVAL),
+                   "in-ring slice outside payload -> -EINVAL");
+
+    burrow_unref(ringb);
+    loom_unref(l);
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
 // Submit-time rejections (inline CQEs; the op NEVER goes in flight): a bad
 // registered-buffer index, an out-of-bounds slice, and a READ against a handle
 // whose rights snapshot lacks RIGHT_READ. The I-30 gates run at submit and a
@@ -2043,6 +2440,10 @@ static u8  g_loom_mname[64];  static u32 g_loom_mname_len;
 static u32 g_loom_mname_mode;
 static u8  g_loom_mname2[64]; static u32 g_loom_mname2_len;
 static u32 g_loom_msetattr_valid; static u32 g_loom_msetattr_mode;
+static u64 g_loom_msetattr_size;
+static u64 loom_rd_le64(const u8 *p) {
+    u64 v = 0; for (int i = 0; i < 8; i++) v |= (u64)p[i] << (8 * i); return v;
+}
 static u32 loom_rd_le16(const u8 *p) { return (u32)p[0] | ((u32)p[1] << 8); }
 static u32 loom_rd_le32(const u8 *p) {
     return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24);
@@ -2062,9 +2463,10 @@ static int loom_mut_capture_responder(void *ctx, const u8 *req, size_t req_len,
                 loom_cap_name(g_loom_mname, &g_loom_mname_len, req + P9_HDR_LEN + 6, nl);
                 g_loom_mname_mode = loom_rd_le32(req + P9_HDR_LEN + 6 + nl);  // mode after name
             }
-        } else if (type == P9_TSETATTR && req_len >= (size_t)P9_HDR_LEN + 12) {
+        } else if (type == P9_TSETATTR && req_len >= (size_t)P9_HDR_LEN + 28) {
             g_loom_msetattr_valid = loom_rd_le32(req + P9_HDR_LEN + 4);   // valid u32
             g_loom_msetattr_mode  = loom_rd_le32(req + P9_HDR_LEN + 8);   // mode u32
+            g_loom_msetattr_size  = loom_rd_le64(req + P9_HDR_LEN + 20);  // size u64
         } else if (type == P9_TRENAMEAT && req_len >= (size_t)P9_HDR_LEN + 6) {
             u32 onl = loom_rd_le16(req + P9_HDR_LEN + 4);            // oldname s len
             size_t after_old = (size_t)P9_HDR_LEN + 6 + onl;        // -> newdirfid
@@ -2140,6 +2542,19 @@ void test_9p_client_loom_mkdir_e2e(void) {
 // SETATTR end-to-end: the input struct p9_setattr is read FROM the pinned buffer
 // (align-safe copy); the capture responder proves valid + mode reached the wire;
 // Rsetattr (empty) -> result 0. Exercises the struct-from-buffer input path.
+// Scan the CQ ring for the CQE echoing `ud` and return its result. The Loom
+// completions land in submit-completion order, NOT submit order: an inline
+// reject completes at submit while an async op completes when its reply lands,
+// so a mixed batch (reject + async + reject) posts CQEs out of leg order.
+// Match by user_data instead of assuming index == leg.
+static s32 loom_cqe_result(const struct loom_cqe *cqes,
+                           const struct loom_ring_hdr *h, u64 ud) {
+    u32 tail = __atomic_load_n(&h->cq_tail, __ATOMIC_ACQUIRE);
+    for (u32 i = 0; i < tail && i < 64; i++)
+        if (cqes[i].user_data == ud) return cqes[i].result;
+    return 0x7FFFFFFF;   // sentinel: not found (never a valid < 0 or == 0 result)
+}
+
 void test_9p_client_loom_setattr_e2e(void) {
     g_loom_msetattr_valid = 0; g_loom_msetattr_mode = 0;
     int rc = p9_loopback_init(&g_loopback, g_loopback_resp, sizeof(g_loopback_resp),
@@ -2165,25 +2580,72 @@ void test_9p_client_loom_setattr_e2e(void) {
     struct Burrow *b; u8 *bkva;
     loom_install_test_buf(l, 0, PAGE_SIZE, &b, &bkva);
     int hc0 = burrow_handle_count(b);
-    // Write a struct p9_setattr into the registered buffer (valid=MODE, mode=0600).
     struct p9_setattr *sa = (struct p9_setattr *)bkva;
-    for (u32 i = 0; i < sizeof(*sa); i++) ((u8 *)sa)[i] = 0;
-    sa->valid = P9_SETATTR_MODE; sa->mode = 0600u;
 
     struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
     struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
 
+    // (a) T_WSTAT_SIZE audit F2: a Loom SETATTR carrying an IDENTITY axis
+    // (MODE/UID/GID) is REJECTED fail-closed -- the async submit cannot run the
+    // owner-only perm_wstat_check the sync path enforces, and a hollow-RIGHT_WRITE
+    // O_PATH handle would otherwise chmod/chown any X-reachable file. The chmod
+    // must NEVER reach the wire (pre-fix this landed a Tsetattr(MODE=0600)).
+    g_loom_msetattr_valid = 0; g_loom_msetattr_mode = 0; g_loom_msetattr_size = 0;
+    for (u32 i = 0; i < sizeof(*sa); i++) ((u8 *)sa)[i] = 0;
+    sa->valid = P9_SETATTR_MODE; sa->mode = 0600u;
     cl_stage_mut(l, 0, LOOM_OP_SETATTR, /*handle=*/0, /*offset=*/0,
                  /*len=*/(u32)sizeof(struct p9_setattr), /*bidx=*/0, /*buf_off=*/0,
                  0, 0, 0, 0x5E77000000000000ULL);
     __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
-
     int n = loom_enter(l, 1, 1, 0);
-    TEST_EXPECT_EQ(n, 1, "one SQE consumed");
-    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)0, "SETATTR result = 0 (scalar success)");
-    TEST_EXPECT_EQ((u64)g_loom_msetattr_valid, (u64)P9_SETATTR_MODE, "setattr valid mask on wire");
-    TEST_EXPECT_EQ((u64)g_loom_msetattr_mode, (u64)0600u, "setattr mode read from the buffer");
-    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "op reaped");
+    TEST_EXPECT_EQ(n, 1, "one SQE consumed (chmod)");
+    TEST_ASSERT(loom_cqe_result(cqes, h, 0x5E77000000000000ULL) < 0,
+                "async chmod rejected fail-closed (F2)");
+    TEST_EXPECT_EQ((u64)g_loom_msetattr_valid, (u64)0, "chmod NEVER reached the wire");
+    // Drain the CQ so the NEXT leg's min_complete=1 waits for its OWN new CQE
+    // (an inline reject + an async op mixed in one un-drained CQ makes a bare
+    // min_complete=1 return on a stale entry before the async op lands).
+    __atomic_store_n(&h->cq_head, __atomic_load_n(&h->cq_tail, __ATOMIC_ACQUIRE),
+                     __ATOMIC_RELEASE);
+
+    // (b) SIZE (truncate) on the SAME RIGHT_WRITE (non-O_PATH) handle is the
+    // legitimate content mutation -- its authority IS the write-fd -- so it
+    // reaches the wire full-width (a >4 GiB value proves the u64 path).
+    for (u32 i = 0; i < sizeof(*sa); i++) ((u8 *)sa)[i] = 0;
+    sa->valid = P9_SETATTR_SIZE; sa->size = 0x112233445566ull;
+    cl_stage_mut(l, 1, LOOM_OP_SETATTR, /*handle=*/0, /*offset=*/0,
+                 /*len=*/(u32)sizeof(struct p9_setattr), /*bidx=*/0, /*buf_off=*/0,
+                 0, 0, 0, 0x5E77000000000001ULL);
+    __atomic_store_n(&h->sq_tail, 2u, __ATOMIC_RELEASE);
+    n = loom_enter(l, 1, 1, 0);
+    TEST_EXPECT_EQ(n, 1, "one SQE consumed (truncate)");
+    TEST_EXPECT_EQ((u64)(s64)loom_cqe_result(cqes, h, 0x5E77000000000001ULL), (u64)0,
+                   "truncate result = 0 (scalar success)");
+    TEST_EXPECT_EQ((u64)g_loom_msetattr_valid, (u64)P9_SETATTR_SIZE, "truncate valid on wire");
+    TEST_EXPECT_EQ(g_loom_msetattr_size, 0x112233445566ull, "truncate size is the full u64");
+    __atomic_store_n(&h->cq_head, __atomic_load_n(&h->cq_tail, __ATOMIC_ACQUIRE),
+                     __ATOMIC_RELEASE);
+
+    // (c) T_WSTAT_SIZE audit F1 [P0]: SIZE (truncate) through an O_PATH
+    // (CWALKONLY) handle is REJECTED -- the O_PATH handle is born RIGHT_WRITE but
+    // perm_check-EXEMPT, so its RIGHT_WRITE is hollow (the async twin of the sync
+    // O_PATH truncate bypass). Flag the registered Spoor CWALKONLY + re-submit
+    // SIZE; it must be rejected and NEVER reach the wire.
+    sp->flag |= CWALKONLY;
+    g_loom_msetattr_valid = 0; g_loom_msetattr_size = 0;
+    for (u32 i = 0; i < sizeof(*sa); i++) ((u8 *)sa)[i] = 0;
+    sa->valid = P9_SETATTR_SIZE; sa->size = 16;
+    cl_stage_mut(l, 2, LOOM_OP_SETATTR, /*handle=*/0, /*offset=*/0,
+                 /*len=*/(u32)sizeof(struct p9_setattr), /*bidx=*/0, /*buf_off=*/0,
+                 0, 0, 0, 0x5E77000000000002ULL);
+    __atomic_store_n(&h->sq_tail, 3u, __ATOMIC_RELEASE);
+    n = loom_enter(l, 1, 1, 0);
+    TEST_EXPECT_EQ(n, 1, "one SQE consumed (O_PATH truncate)");
+    TEST_ASSERT(loom_cqe_result(cqes, h, 0x5E77000000000002ULL) < 0,
+                "truncate via O_PATH handle rejected (F1 P0)");
+    TEST_EXPECT_EQ((u64)g_loom_msetattr_valid, (u64)0, "O_PATH truncate NEVER reached the wire");
+
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "ops reaped");
     TEST_EXPECT_EQ(burrow_handle_count(b), hc0, "op buffer pin balanced");
 
     burrow_unref(b);
@@ -2441,6 +2903,322 @@ void test_9p_client_loom_multi_inflight_read_e2e(void) {
     TEST_EXPECT_EQ(burrow_handle_count(b), hc0, "all N buffer pins balanced (released at reap)");
 
     burrow_unref(b);
+    loom_unref(l);
+    p9_client_destroy(&g_client);
+    p9_mq_loopback_destroy(&g_mq);
+}
+
+// FID-LIFECYCLE async-clunk F1 regression (the arc audit): a >64-fd async-close
+// BURST with NO interleaved sync op must NOT leak bound fids. Pre-fix, the tag
+// pool (64 slots) filled with undrained ownerless Rclunks; alloc_tag then failed
+// and p9_session_send_clunk returned BEFORE fid_unbind, so closes 65..N left
+// their fids bound forever (-> bound_fids[] exhaustion -> a shared-mount DoS).
+// The mq transport stages every unread Rclunk (a single-slot loopback cannot),
+// so the pool genuinely fills; the fix's client_drain_until_free_tag pumps one
+// ownerless reply to free a tag before each over-full send. NON-VACUOUS: with
+// the drain reverted, n_bound_fids stays at 1 + (N - 64) instead of 1.
+void test_9p_client_async_clunk_burst_no_fid_leak(void) {
+    int rc = p9_mq_loopback_init(&g_mq, canonical_responder, NULL);
+    TEST_EXPECT_EQ(rc, 0, "mq loopback init");
+    rc = p9_client_init(&g_client, /*root_fid=*/0, /*msize=*/8192,
+                        p9_mq_loopback_ops_for(&g_mq), g_recv_buf, sizeof(g_recv_buf));
+    TEST_EXPECT_EQ(rc, 0, "client init over mq transport");
+    const u8 uname[] = {'r','o','o','t'};
+    const u8 aname[] = {'/'};
+    TEST_EXPECT_EQ(p9_client_handshake(&g_client, uname, sizeof(uname),
+                                       aname, sizeof(aname), 0),
+                   0, "handshake");
+    // Baseline: only the root fid is bound.
+    TEST_EXPECT_EQ((u64)p9_session_n_bound_fids(&g_client.session), (u64)1,
+                   "baseline: root bound");
+
+    // Bind N > 64 distinct fids (each Twalk is a sync op that drains its own
+    // Rwalk, so the pool is EMPTY before the burst).
+    const u32 N = 70;   // > P9_SESSION_MAX_OUTSTANDING (64)
+    for (u32 i = 0; i < N; i++) {
+        struct p9_qid q;
+        const u8 nm[] = {'f'};
+        TEST_EXPECT_EQ(p9_client_walk_one(&g_client, /*src=*/0, /*new=*/(u32)(i + 1),
+                                          nm, sizeof(nm), &q), 0, "walk binds a fid");
+    }
+    TEST_EXPECT_EQ((u64)p9_session_n_bound_fids(&g_client.session), (u64)(N + 1),
+                   "N + root fids bound");
+
+    // THE BURST: async-clunk all N with NO interleaved sync op. Closes 65..N hit
+    // a full pool; the F1 drain must free a tag for each.
+    for (u32 i = 0; i < N; i++)
+        TEST_EXPECT_EQ(p9_client_clunk_async(&g_client, (u32)(i + 1)), 0,
+                       "async clunk succeeds (drains the full pool)");
+
+    // Every burst-closed fid is UNBOUND -> back to the root-only baseline. A leak
+    // would leave (N - 64) fids bound.
+    TEST_EXPECT_EQ((u64)p9_session_n_bound_fids(&g_client.session), (u64)1,
+                   "all burst-closed fids unbound (no F1 leak)");
+
+    p9_client_destroy(&g_client);
+    p9_mq_loopback_destroy(&g_mq);
+}
+
+// =============================================================================
+// #349: a transiently-FULL c2s ring is flow-control, NOT session death. Under
+// #841 pipelining + concurrent large frames the kernel->server c2s ring can fill
+// momentarily; pre-fix, srvconn collapsed ring-full to -1 and client_run marked
+// the WHOLE session dead -- killing every in-flight op, including a peer's text
+// page-in (the go-build snare:bus + EIO cascade). The fix (client_send_flow)
+// treats P9_TRANSPORT_EAGAIN as back-pressure: it drains the reply path (self-
+// pumps when no reader, else parks on a per-sender waiter) so the server frees a
+// c2s slot, then RETRIES the send -- the session stays live.
+//
+// This drives the FAITHFUL production shape on the mq transport (eagain_budget):
+// a PRIOR op A (async Tclunk) is in flight with its Rclunk queued; a sync op B
+// (Twalk) hits one armed EAGAIN; B self-pumps -> drains A's reply (completing A)
+// -> retries -> B succeeds. Both complete, the session is never marked dead.
+// Pre-fix this fails by construction: B's EAGAIN -> -1 -> client_mark_dead, so B
+// returns -P9_E_IO and A is completed with -P9_E_IO (a dead session), not 0.
+// =============================================================================
+void test_9p_client_send_backpressure_self_pump(void) {
+    int rc = p9_mq_loopback_init(&g_mq, canonical_responder, NULL);
+    TEST_EXPECT_EQ(rc, 0, "mq loopback init");
+    rc = p9_client_init(&g_client, /*root_fid=*/0, /*msize=*/8192,
+                        p9_mq_loopback_ops_for(&g_mq), g_recv_buf, sizeof(g_recv_buf));
+    TEST_EXPECT_EQ(rc, 0, "client init over mq transport");
+    const u8 uname[] = {'r','o','o','t'};
+    const u8 aname[] = {'/'};
+    TEST_EXPECT_EQ(p9_client_handshake(&g_client, uname, sizeof(uname), aname, sizeof(aname), 0),
+                   0, "handshake over mq transport");
+
+    // The async-op completion records into a Loom CQ (reuse the proven harness).
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create(8,16)");
+
+    // Bind fid 20 so op A (an async Tclunk(20)) is well-formed.
+    TEST_EXPECT_EQ(p9_client_walk_one(&g_client, 0, 20, (const u8 *)"f", 1, NULL), 0,
+                   "walk binds fid 20 (sync; drains clean)");
+
+    // Op A: async Tclunk(20). Its Rclunk is queued in the FIFO and A stays in
+    // flight (no reader has pumped) -- the prior op whose reply B's self-pump drains.
+    g_async_op.loom           = l;
+    g_async_op.user_data      = 0xA0A0A0A0ULL;
+    g_async_op.last_result    = 0x7fffffff;
+    g_async_op.completed      = false;
+    g_async_op.rpc.on_complete = test_async_on_complete;
+    u32 fid_a = 20;
+    rc = p9_client_submit_async(&g_client, &g_async_op.rpc, test_build_clunk, &fid_a);
+    TEST_EXPECT_EQ(rc, 0, "submit_async(clunk A): A in flight, its reply queued");
+    TEST_ASSERT(!g_async_op.completed, "A not completed before B's self-pump drains it");
+
+    // Arm ONE EAGAIN: op B's NEXT send hits a transiently-full-but-alive ring.
+    g_mq.eagain_budget = 1;
+
+    // Op B: sync Twalk(21). Its send EAGAINs once -> client_send_flow self-pumps
+    // (drains A's Rclunk, completing A) -> retries -> B is accepted and completes.
+    rc = p9_client_walk_one(&g_client, 0, 21, (const u8 *)"g", 1, NULL);
+    TEST_EXPECT_EQ(rc, 0, "sync op B survives c2s back-pressure (self-pump + retry)");
+
+    TEST_EXPECT_EQ((u64)g_mq.eagain_budget, (u64)0, "the armed EAGAIN actually fired");
+    TEST_ASSERT(g_async_op.completed, "op A completed (its reply drained by B's self-pump)");
+    TEST_EXPECT_EQ((u64)(s64)g_async_op.last_result, (u64)0,
+                   "op A completed with SUCCESS, not -EIO (the session never died)");
+    TEST_ASSERT(!g_client.dead, "session stayed LIVE through the back-pressure");
+
+    loom_unref(l);
+    p9_client_destroy(&g_client);
+    p9_mq_loopback_destroy(&g_mq);
+}
+
+// =============================================================================
+// #349 R2-F1: the send-flow park is MULTI-WAITER. N Procs share one dev9p client
+// (docs/reference/47-9p-client.md), so N senders can be back-pressured at once
+// and park concurrently. The original fix parked them on a single `Rendez`, which
+// extincts on the 2nd sleeper (rendez.h "Extincts on second sleeper") -- an
+// unprivileged SMP panic on exactly the #349 workload (parallel writers filling
+// the shared c2s while a third op reads). The fix parks each on its OWN stack
+// Rendez via a poll_waiter on c->send_waiters_list; the reader's
+// client_send_progress_signal wakes them ALL.
+//
+// This deterministically exercises the multi-waiter wake the park branch relies
+// on: register 2 send-waiters, then run the client_send_progress_signal body
+// (bump the generation + wake the list) and assert BOTH are woken with NO
+// extinction -- the structural guard against the F1 single-waiter regression (a
+// single Rendez could not even hold the 2nd register). The full concurrent
+// park->retry->complete loop needs 2 live threads racing the shared client (the
+// SMP-gate workload + the deterministic multi-thread harness owed since
+// #841/#845/Loom); here the multi-waiter mechanism itself is proven directly.
+// =============================================================================
+void test_9p_client_send_backpressure_multi_waiter(void) {
+    int rc = p9_mq_loopback_init(&g_mq, canonical_responder, NULL);
+    TEST_EXPECT_EQ(rc, 0, "mq loopback init");
+    rc = p9_client_init(&g_client, /*root_fid=*/0, /*msize=*/8192,
+                        p9_mq_loopback_ops_for(&g_mq), g_recv_buf, sizeof(g_recv_buf));
+    TEST_EXPECT_EQ(rc, 0, "client init (send_waiters_list initialized)");
+
+    // Two concurrent back-pressured senders, each parked on its OWN stack Rendez
+    // via a hook on the shared send-waiter list. A single Rendez would extinct at
+    // the 2nd register/sleeper; the poll_waiter_list holds N.
+    struct Rendez      r1, r2;
+    struct poll_waiter pw1, pw2;
+    rendez_init(&r1);
+    rendez_init(&r2);
+    poll_waiter_init(&pw1, &r1);
+    poll_waiter_init(&pw2, &r2);
+    u64 gen = g_client.send_progress;
+    poll_waiter_list_register(&g_client.send_waiters_list, &pw1);
+    poll_waiter_list_register(&g_client.send_waiters_list, &pw2);
+    g_client.send_waiters = 2;
+
+    // A reader makes progress -- the client_send_progress_signal body: bump the
+    // generation, then wake EVERY parked sender. No extinction => the multi-waiter
+    // holds 2; both `ready` => both woken; the bumped generation => each parked
+    // sender's send_wait_cond (send_progress != gen) would now flip true on retry.
+    g_client.send_progress++;
+    poll_waiter_list_wake(&g_client.send_waiters_list);
+
+    TEST_ASSERT(pw1.ready, "sender 1 woken by the shared-list wake");
+    TEST_ASSERT(pw2.ready, "sender 2 woken (no single-waiter extinction at the 2nd parker)");
+    TEST_ASSERT(g_client.send_progress != gen, "progress generation advanced (the park cond would flip)");
+
+    poll_waiter_list_unregister(&pw1);
+    poll_waiter_list_unregister(&pw2);
+    g_client.send_waiters = 0;
+
+    p9_client_destroy(&g_client);
+    p9_mq_loopback_destroy(&g_mq);
+}
+
+// =============================================================================
+// #375: a back-pressured sender's frame lives in the SHARED c->out_buf, and the
+// pump/park (client_pump_or_park_locked) DROPS c->lock -- so a peer can legally
+// build ITS frame into out_buf during the window, and the pre-spill retry then
+// pushed built_len bytes of the PEER's frame: an equal-length peer frame (two
+// msize-clamped F1 flush Twrites -- the dominant concurrent cold-build shape)
+// went out as a clean DUPLICATE with the parked frame LOST, whose second reply
+// landed on the freed-then-reused tag as a WRONG reply -- an Rlerror parses
+// cleanly for ANY op (9P has no per-tag wire generation), so a stray
+// Rlerror(ENOENT) poisoned a live Twalkgetattr into a persistent negative
+// dentry (the task-#50 S3 ENOENT cluster + write-EIO); an unequal-length peer
+// frame fails p9_transport_send's size==len validation -> session death.
+//
+// This test models the peer write DETERMINISTICALLY, single-threaded: the mq
+// scribble knob overwrites out_buf during the recv that the self-pump arm makes
+// INSIDE the dropped-lock window (exactly where a peer would build). Pre-spill,
+// the retry sends the scribble -> the send fails -> the op dies and the session
+// latches dead: this test FAILS. With the spill (the frame copied to a private
+// buffer at the first EAGAIN; out_buf never re-read), the retry sends the
+// intact frame: the op completes and the session stays live.
+// =============================================================================
+void test_9p_client_send_backpressure_spill_survives_outbuf_reuse(void) {
+    int rc = p9_mq_loopback_init(&g_mq, canonical_responder, NULL);
+    TEST_EXPECT_EQ(rc, 0, "mq loopback init");
+    rc = p9_client_init(&g_client, /*root_fid=*/0, /*msize=*/8192,
+                        p9_mq_loopback_ops_for(&g_mq), g_recv_buf, sizeof(g_recv_buf));
+    TEST_EXPECT_EQ(rc, 0, "client init over mq transport");
+    const u8 uname[] = {'r','o','o','t'};
+    const u8 aname[] = {'/'};
+    TEST_EXPECT_EQ(p9_client_handshake(&g_client, uname, sizeof(uname), aname, sizeof(aname), 0),
+                   0, "handshake over mq transport");
+
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create(8,16)");
+
+    // Op A: async Tclunk whose Rclunk stays queued -- the reply op B's self-pump
+    // will drain from inside the dropped-lock window (the same shape as the
+    // #349 self_pump test).
+    TEST_EXPECT_EQ(p9_client_walk_one(&g_client, 0, 20, (const u8 *)"f", 1, NULL), 0,
+                   "walk binds fid 20 (sync; drains clean)");
+    g_async_op.loom            = l;
+    g_async_op.user_data       = 0xB5B5B5B5ULL;
+    g_async_op.last_result     = 0x7fffffff;
+    g_async_op.completed       = false;
+    g_async_op.rpc.on_complete = test_async_on_complete;
+    u32 fid_a = 20;
+    rc = p9_client_submit_async(&g_client, &g_async_op.rpc, test_build_clunk, &fid_a);
+    TEST_EXPECT_EQ(rc, 0, "submit_async(clunk A): A in flight, its reply queued");
+
+    // Arm ONE EAGAIN (op B's first send back-pressures) + the peer-write model:
+    // the recv inside B's self-pump overwrites the head of the SHARED out_buf --
+    // where B's built frame sits -- exactly as a peer's build would.
+    g_mq.eagain_budget = 1;
+    g_mq.scribble_buf  = g_client.out_buf;
+    g_mq.scribble_len  = 64;
+    g_mq.scribble_arm  = 1;
+
+    // Op B: sync Twalk. Send -> EAGAIN -> self-pump (drops c->lock; the recv
+    // fires the scribble + drains A's Rclunk) -> retry. Pre-spill the retry
+    // reads the scribbled out_buf and the op/session dies; with the spill the
+    // retry sends B's private copy and B completes.
+    rc = p9_client_walk_one(&g_client, 0, 21, (const u8 *)"g", 1, NULL);
+    TEST_EXPECT_EQ(rc, 0, "op B survives a peer rebuilding out_buf during its park (#375)");
+
+    TEST_EXPECT_EQ((u64)g_mq.eagain_budget, (u64)0, "the armed EAGAIN actually fired");
+    TEST_EXPECT_EQ((u64)g_mq.scribble_arm, (u64)0, "the peer-write model actually fired");
+    TEST_ASSERT(g_async_op.completed, "op A completed (its reply drained by B's self-pump)");
+    TEST_ASSERT(!g_client.dead, "session stayed LIVE (no clobbered frame reached the wire)");
+
+    g_mq.scribble_buf = NULL;
+    loom_unref(l);
+    p9_client_destroy(&g_client);
+    p9_mq_loopback_destroy(&g_mq);
+}
+
+// #53 regression (revert-probing): an abandon whose Tflush hits transient c2s
+// back-pressure (EAGAIN) must NOT latch the SHARED session dead -- it rolls
+// the flush back to the pre-#845 ownerless reclaim, and the session stays
+// fully usable: the orphan reply drains ownerlessly on the next op's reader
+// and the tag pool is restored. Pre-fix, the single EAGAIN marked the whole
+// session dead (every peer mount's op then failed -P9_E_IO) -- the #349
+// collapse on a different send path.
+void test_9p_client_abandon_async_eagain_keeps_session_alive(void) {
+    int rc = p9_mq_loopback_init(&g_mq, canonical_responder, NULL);
+    TEST_EXPECT_EQ(rc, 0, "mq loopback init");
+    rc = p9_client_init(&g_client, /*root_fid=*/0, /*msize=*/8192,
+                        p9_mq_loopback_ops_for(&g_mq), g_recv_buf, sizeof(g_recv_buf));
+    TEST_EXPECT_EQ(rc, 0, "client init over mq transport");
+    const u8 uname[] = {'r','o','o','t'};
+    const u8 aname[] = {'/'};
+    TEST_EXPECT_EQ(p9_client_handshake(&g_client, uname, sizeof(uname),
+                                       aname, sizeof(aname), 0),
+                   0, "handshake over mq transport");
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create(8,16)");
+
+    // An async op in flight: the mq transport stages its Rclunk in the ring
+    // (undrained -- nothing pumps), so inflight[tag] is still ours at abandon.
+    TEST_EXPECT_EQ(p9_client_walk_one(&g_client, 0, 31, (const u8 *)"f", 1, NULL),
+                   0, "walk root -> fid 31");
+    g_async_op.loom        = l;
+    g_async_op.user_data   = 0x53535353;
+    g_async_op.last_result = 0x7fffffff;
+    g_async_op.completed   = false;
+    g_async_op.rpc.on_complete = test_async_on_complete;
+    u32 fid = 31;
+    rc = p9_client_submit_async(&g_client, &g_async_op.rpc, test_build_clunk, &fid);
+    TEST_EXPECT_EQ(rc, 0, "submit_async succeeds (op in flight)");
+    u16 vt = g_async_op.rpc.tag;
+
+    // The abandon's Tflush hits a transiently-full ring: ONE EAGAIN.
+    g_mq.eagain_budget = 1;
+    p9_client_abandon_async(&g_client, &g_async_op.rpc);
+    TEST_EXPECT_EQ((u64)g_mq.eagain_budget, (u64)0, "the flush send consumed the EAGAIN");
+
+    // The #53 core: back-pressure is NOT a break.
+    TEST_ASSERT(!g_client.dead, "session ALIVE after EAGAIN'd abandon flush");
+    TEST_ASSERT(!g_async_op.completed, "abandoned op fired no completion");
+    // The rollback restored the pre-#845 shape: the victim tag is still
+    // ACTIVE (reserved against reuse until its late reply) and NOT
+    // awaiting_flush; the never-sent flush tag was freed.
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&g_client.session), (u64)1,
+                   "victim active; flush tag freed");
+    TEST_ASSERT(g_client.session.outstanding[vt].active, "victim still reserved");
+    TEST_ASSERT(!g_client.session.outstanding[vt].awaiting_flush,
+                "victim not awaiting_flush (rolled back)");
+
+    // The ownerless reclaim + live-session proof: a fresh sync op on the SAME
+    // session pumps the orphan Rclunk (clearing the victim tag) and completes.
+    TEST_EXPECT_EQ(p9_client_walk_one(&g_client, 0, 32, (const u8 *)"g", 1, NULL),
+                   0, "a fresh op completes on the still-live session");
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&g_client.session), (u64)0,
+                   "orphan reply drained ownerlessly; tag pool restored");
+
     loom_unref(l);
     p9_client_destroy(&g_client);
     p9_mq_loopback_destroy(&g_mq);

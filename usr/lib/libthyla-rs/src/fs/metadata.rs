@@ -207,6 +207,21 @@ impl Metadata {
 /// Returns the populated Metadata on success; any kernel rejection
 /// (bad fd, Dev without `stat_native`, etc.) propagates as the matching
 /// `Error` variant.
+/// Path-stat via SYS_STAT (POUNCE): one syscall, and on a walk_attrs-capable
+/// Dev one fused RPC with no handle/Spoor/fid ever created. The hot path
+/// under `fs::metadata` / `exists` / `is_file` / `is_dir`.
+pub(crate) fn stat_path(path: &super::Path) -> Result<Metadata> {
+    let bytes = path.as_str().as_bytes();
+    let mut buf: MaybeUninit<Metadata> = MaybeUninit::uninit();
+    // SAFETY: as fstat_fd -- the kernel fully initializes the 80 bytes on
+    // success; on failure the uninitialized struct is discarded unread.
+    let rc = unsafe {
+        crate::t_stat_path(bytes.as_ptr(), bytes.len(), buf.as_mut_ptr() as *mut u8)
+    };
+    let _n = Error::from_syscall_return(rc)?;
+    Ok(unsafe { buf.assume_init() })
+}
+
 pub(crate) fn fstat_fd(spoor_fd: i32) -> Result<Metadata> {
     // SAFETY: MaybeUninit<Metadata> reserves 80 bytes of stack-aligned
     // memory; t_fstat fully initializes it on success. On failure we

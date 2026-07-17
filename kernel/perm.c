@@ -112,5 +112,12 @@ int perm_wstat_check(const struct Proc *p, u32 cur_uid, u32 valid, u32 new_gid) 
     // authority to any group.
     if ((valid & T_WSTAT_GID)  && !chown_any &&
         !(owner && proc_in_group(p, new_gid)))           return -1;
+    // T_WSTAT_SIZE (Go Stage 5) deliberately has NO policy arm here: a
+    // truncate is a CONTENT mutation whose write authority is the fd's
+    // RIGHT_WRITE (enforced at the syscall layer) + the open-time perm_check
+    // W axis -- the POSIX ftruncate model, not an identity-policy op. The
+    // self-defend mask above admits it (it is inside T_WSTAT_VALID); it
+    // passes through untainted while the metadata policy applies to any
+    // combined bits.
     return 0;
 }

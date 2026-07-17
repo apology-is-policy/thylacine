@@ -81,6 +81,11 @@ CORVUS_RECOVERY_HEADER="$GEN_DIR/corvus_system_recovery_phrase.h"
 TOOLCHAIN_FILE="$REPO_ROOT/cmake/Toolchain-aarch64-thylacine.cmake"
 USR_TOOLCHAIN_FILE="$REPO_ROOT/cmake/Toolchain-aarch64-userspace.cmake"
 USR_RS_TARGET="aarch64-unknown-none"
+# GOOS=thylacine Go-port fork (the Thylacine Go toolchain). Lives OUTSIDE this
+# repo -- a sibling tree, like ~/projects/stratum. Absent on a fresh checkout,
+# so build_go_probes skips cleanly when it is missing (the Go boot probe just
+# does not get baked). Override with GOFORK=/path/to/go-thylacine.
+GOFORK="${GOFORK:-$HOME/projects/go-thylacine}"
 # LLVM install prefix for the pouch sysroot build (clang/llvm-ar/llvm-ranlib).
 # Mirrors cmake/Toolchain-aarch64-pouch.cmake + tools/pouch-clang.
 LLVM_PREFIX="${LLVM_PREFIX:-/opt/homebrew/opt/llvm}"
@@ -95,6 +100,7 @@ build_type="Debug"
 hardening_full="OFF"
 kaslr="OFF"
 sanitize=""
+no_tickless="OFF"
 # #61 (RW-11 R4-F1/F2): production boot shape. ON (default) keeps the in-kernel
 # test suite + joey's boot-test probe ladder (dev/CI); --production flips both
 # OFF for the lean V1.0 boot-to-getty.
@@ -131,6 +137,13 @@ while [[ $# -gt 0 ]]; do
             # P1-I: opt-in sanitizer build. Currently supports
             # --sanitize=undefined (UBSan trapping). KASAN deferred.
             sanitize="${1#--sanitize=}"
+            shift
+            ;;
+        --no-tickless)
+            # TI-4e tickful-baseline capture: force the old 1 kHz-always idle
+            # (sched_idle_park go_tickless=false). Diagnostic-only; uses its own
+            # build dir so it never clobbers the production tickless kernel.
+            no_tickless="ON"
             shift
             ;;
         --build-dir=*)
@@ -170,6 +183,8 @@ if [[ -n "$build_dir_override" ]]; then
     KERNEL_BUILD="$build_dir_override"
 elif [[ -n "$sanitize_cmake" ]]; then
     KERNEL_BUILD="$BUILD_DIR/kernel-${sanitize_cmake}"
+elif [[ "$no_tickless" == "ON" ]]; then
+    KERNEL_BUILD="$BUILD_DIR/kernel-no-tickless"
 fi
 
 # --- build ledger -------------------------------------------------------------
@@ -233,6 +248,7 @@ build_kernel() {
         -DTHYLACINE_KASLR="$kaslr" \
         -DTHYLACINE_SANITIZE="$sanitize_cmake" \
         -DKERNEL_TESTS="$kernel_tests" \
+        -DTHYLACINE_NO_TICKLESS="$no_tickless" \
         ${extra_cmake_args[@]+"${extra_cmake_args[@]}"}
     cmake --build "$KERNEL_BUILD" $verbose
     # HX-2: bake the live symbol table from the linked ELF + re-link (two-pass;
@@ -258,10 +274,22 @@ build_kernel() {
     # on no-source-change rebuilds (CMake/ninja dep tracking inside
     # $stratumd_build keep this <5s warm; cold rebuild is ~2-3 min).
     build_stratumd
+    # GOOS=thylacine Stage 4b/6: stage a trimmed GOROOT BEFORE the pool fixture
+    # so populate_stratum_pool can `stratum-fs put` it. DEFAULT-ON since Stage 6
+    # (the toolchain ships in the default image); THYLACINE_BAKE_GOROOT=0 opts
+    # out for a fast iteration loop, and an absent fork skips gracefully.
+    build_go_goroot
     # P6-pouch-stratumd-boot sub-chunk 16b-beta: produce the boot pool
     # fixture (pool.img + system.key) before build_ramfs so the keyfile
     # gets copied into the cpio at /etc/stratum/system.key.
     build_stratum_pool_fixture
+    # GOOS=thylacine Stage 1: cross-compile the Go boot probe before build_ramfs
+    # bakes it. Skips cleanly if the Go fork is absent.
+    build_go_probes
+    # Go Stage 8c-1: cross-compile the Ambush debugger (the Thylacine Delve port)
+    # before build_ramfs bakes it. Skips cleanly if the Go fork or the Ambush
+    # fork is absent.
+    build_ambush
     build_ramfs
 
     # P4-Ic5b2: produce build/disk.img alongside the kernel so
@@ -285,6 +313,17 @@ Welcome to Thylacine ramfs.
 EOF
     cat > "$ramfs_src/version" <<'EOF'
 Thylacine v0.1-dev
+EOF
+    # Go Stage 8c-1 (iteration 1): the Ambush non-interactive init script that
+    # /ambush-probe drives via `ambush attach <pid> /ambush-child --init
+    # /ambush-init`. These commands run once against the attached, debug-stopped
+    # /ambush-child, then Ambush reads stdin -> EOF (the probe closes the child's
+    # stdin) -> the REPL exits + detaches. No `exit` command (which would prompt
+    # to kill the attached target and block on the EOF'd stdin).
+    cat > "$ramfs_src/ambush-init" <<'EOF'
+goroutines
+bt
+print main.Sentinel
 EOF
     # U-6e-a: the `source` builtin's read fixture (/u-builtin-test sources
     # this and asserts the assignment + fn registration persist into the
@@ -353,7 +392,7 @@ EOF
     # P4-Ia2: copy any built Rust-side userspace binaries from
     # build/usr-rs/<target>/release/. Same curation discipline.
     # Binary name = crate's [[bin]] name = directory under usr/.
-    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "coreutil-smoke" "fs-mut-smoke" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "pipe-src" "pipe-sink" "legate-prover" "login" "ut" "nora" "loom-smoke" "loom-stress" "loom-bench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" )
+    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "coreutil-smoke" "fs-mut-smoke" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "pipe-src" "pipe-sink" "legate-prover" "login" "ut" "nora" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "ambush-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" )
     local rs_release="$USR_RS_BUILD/$USR_RS_TARGET/release"
     for bin in "${usr_rs_bins[@]}"; do
         local src="$rs_release/$bin"
@@ -363,18 +402,34 @@ EOF
         fi
     done
 
+    # GOOS=thylacine Stage 1: bake the Go boot probe (build_go_probes produced it
+    # under $BUILD_DIR/go/). Shipped UNSTRIPPED (~1.5 MiB) -- the REVENANT
+    # file-backed exec path carries it, like net-echo. Absent if the Go fork was
+    # not present at build time (build_go_probes skipped); the joey go-hello
+    # probe then degrades to "not spawned".
+    local go_bins=( "go-hello" "go-goroutines" "go-fs" "go-exec" "go-net" "go-env" "go-web" "go-get" "ambush" "ambush-child" )
+    local go_release="$BUILD_DIR/go"
+    for bin in "${go_bins[@]}"; do
+        local src="$go_release/$bin"
+        if [[ -f "$src" ]]; then
+            cp "$src" "$ramfs_src/$bin"
+            chmod 0755 "$ramfs_src/$bin"
+        fi
+    done
+
     # net-7c-2 / net-8c-2: the native rustls TLS binaries link the full rustls +
-    # RustCrypto stack and exceed SYS_SPAWN_BLOB_MAX (1 MiB) UNSTRIPPED (tls-smoke
-    # ~1.11 MiB, https ~1.06 MiB, net-echo ~1.10 MiB since it gained the
-    # TLS-over-/net E2E), so the kernel could not slurp them into a spawn blob.
-    # Strip the COPY in the cpio root (-> ~520-543 KiB each): no userspace tool
-    # consumes their symbols -- the only addr2line is the kernel's own Halls
-    # symtab over the KERNEL image. The UNSTRIPPED artifacts stay under
-    # build/usr-rs/.../release/ for manual fault-PC resolution. This is the
-    # recorded v1.0 size strategy (NET-DESIGN 9.1); REVENANT's file-backed exec
-    # (#231) retires the cap, after which the strip becomes optional. Surgical
-    # (TLS bins only) -- the global workspace keeps symbols for every other bin.
-    local tls_strip_bins=( "tls-smoke" "https" "net-echo" "curl" "wget" "tlsperf" )
+    # RustCrypto stack and exceed the OLD SYS_SPAWN_BLOB_MAX (1 MiB) UNSTRIPPED
+    # (tls-smoke ~1.11 MiB, https ~1.06 MiB, net-echo ~1.10 MiB). REVENANT R-4
+    # (#231) RETIRED that cap: exec no longer slurps the whole binary -- it
+    # demand-pages text + eager-copies data per segment -- so a >1 MiB binary
+    # execs. **net-echo is now shipped UNSTRIPPED on purpose**: its boot probe
+    # (joey: net-8 PROBE) execs a ~1.1 MiB binary via the file-backed path -- the
+    # live R-4 >1-MiB-exec proof. The remaining TLS bins stay stripped purely for
+    # ramfs-SIZE economy (-> ~520-543 KiB each; no userspace tool consumes their
+    # symbols), NOT for correctness; un-stripping them is now safe but grows the
+    # cpio (a separable build-economy choice). The UNSTRIPPED artifacts stay under
+    # build/usr-rs/.../release/ for manual fault-PC resolution.
+    local tls_strip_bins=( "tls-smoke" "https" "curl" "wget" "tlsperf" )
     local llvm_strip="$LLVM_PREFIX/bin/llvm-strip"
     if [[ ! -x "$llvm_strip" ]]; then
         echo "==> ramfs: llvm-strip not found at $llvm_strip -- the TLS bins exceed" >&2
@@ -387,7 +442,7 @@ EOF
                 || { echo "==> ramfs: llvm-strip $bin FAILED" >&2; exit 1; }
         fi
     done
-    ledger "ramfs.cpio: TLS bins stripped (tls-smoke + https + net-echo; SYS_SPAWN_BLOB_MAX, net-7c-2/net-8c-2)"
+    ledger "ramfs.cpio: TLS bins stripped for ramfs economy (tls-smoke + https + curl + wget + tlsperf); net-echo ships UNSTRIPPED (~1.1 MiB) -- the live REVENANT R-4 >1-MiB-exec proof"
 
     # P6-pouch-hello-smoke: copy the pouch POSIX test binaries (built
     # against the pouch sysroot by build_pouch_progs) into the cpio root.
@@ -433,6 +488,245 @@ EOF
     python3 "$REPO_ROOT/tools/mkcpio.py" "$ramfs_src" "$ramfs_out"
     echo "==> ramfs cpio: $ramfs_out"
     ledger "ramfs.cpio: REBUILT (bakes the current userspace binaries + system.key)"
+}
+
+# GOOS=thylacine Go-port (Stage 1): cross-compile the runtime-direct Go probe
+# binaries with the Thylacine Go fork ($GOFORK) and stage them under
+# $BUILD_DIR/go/ so build_ramfs bakes them into the cpio root. The Go fork lives
+# outside this repo; if it is absent, skip cleanly (the binary is not baked and
+# joey's go-hello probe degrades to "not spawned" -- a fresh checkout still
+# builds). The Go binary is shipped UNSTRIPPED (>1 MiB) -- the REVENANT
+# file-backed exec path carries it, like net-echo.
+build_go_probes() {
+    local go_bin="$GOFORK/bin/go"
+    local go_out="$BUILD_DIR/go"
+    if [[ ! -x "$go_bin" ]]; then
+        echo "==> Go-port: fork toolchain not found at $go_bin -- skipping go-hello (set GOFORK)"
+        return 0
+    fi
+    mkdir -p "$go_out"
+    echo "==> Building Go probes (GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0, fork=$GOFORK)"
+    # `go build` infers GOROOT from the fork's own bin/go location, so the fork's
+    # GOOS=thylacine runtime is used. Each probe is its own module (go.mod), which
+    # keeps the build self-contained.
+    #   go-hello      -- Stage 1: println hello (single goroutine, exit).
+    #   go-goroutines -- Stage 2: GOMAXPROCS(4) workers, channels, WaitGroup,
+    #                    sync/atomic, and a concurrent runtime.GC() (multi-M
+    #                    SYS_THREAD_SPAWN + torpor sched-sync + STW GC + decommit).
+    #   go-fs         -- Stage 3a: os/syscall file I/O (create/write/read/stat/
+    #                    seek/readdir/rename/remove) against the post-pivot FS.
+    #   go-exec       -- Stage 3b: os/exec (spawn a /bin coreutil via
+    #                    SYS_SPAWN_FULL_ARGV, capture stdout through a pipe,
+    #                    reap via SYS_WAIT_PID, read the exit status).
+    #   go-net        -- Stage 3c: net (the plan9-shaped net package over netd's
+    #                    /net) -- listen + accept + dial + TCP round-trip on the
+    #                    resident lo (cs/clone/connect/announce/data; blocking
+    #                    accept-open + Read ride the entersyscall path).
+    #   go-web        -- Stage 5 (half 1): net/http against a real URL (DNS via
+    #                    /net/cs -> slirp, TLS + x509 against the baked system
+    #                    CA bundle, h2 via ALPN). EXTERNAL-NETWORK dependent:
+    #                    never boot-wired; driven by go5.exp + by hand.
+    #   go-get        -- Stage 5 (half 2): the module workflow driver (embedded
+    #                    demo project; /env-set module env; go mod tidy pulls
+    #                    from proxy.golang.org through /net; build; run the
+    #                    result). EXTERNAL-NETWORK dependent, like go-web.
+    local probe
+    for probe in go-hello go-goroutines go-fs go-exec go-net go-env go-web go-get ambush-child; do
+        ( cd "$REPO_ROOT/usr/$probe" && \
+          GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 "$go_bin" build -o "$go_out/$probe" . ) \
+            || { echo "==> Go-port: go build $probe FAILED" >&2; return 1; }
+        echo "==> Go probe built: $go_out/$probe"
+        ls -la "$go_out/$probe"
+    done
+    ledger "go-hello + go-goroutines + go-fs + go-exec + go-net + go-env + go-web + go-get: Go cross-compile (GOOS=thylacine) -> ramfs (Stage 1/2/3a/3b/3c/4a boot probes + Stage 5 on-demand probes)"
+}
+
+# Go Stage 8c-1: cross-compile the Ambush debugger -- the Thylacine port of Delve
+# (a Go program) -- with the Go fork's toolchain ($GOFORK/bin/go), so its
+# GOOS=thylacine runtime + the proc_thylacine debug-fs backend are used. The
+# Ambush fork source lives OUTSIDE this repo ($AMBUSHFORK, default
+# ~/projects/ambush); it is self-contained (vendored deps) so the build is
+# offline (-mod=vendor). STRIPPED (-s -w): Ambush reads the TARGET's debug info,
+# never its own, so its symbols are dead weight in the ramfs (the ~15 MiB
+# unstripped binary halves to ~9 MiB). Skips cleanly if EITHER fork is absent --
+# Ambush is optional infra (like the Go probes): the binary is unbaked and joey's
+# /ambush-probe SKIPs, so a fresh checkout still builds + boots.
+build_ambush() {
+    local go_bin="$GOFORK/bin/go"
+    local ambush_src="${AMBUSHFORK:-$HOME/projects/ambush}"
+    local go_out="$BUILD_DIR/go"
+    if [[ ! -x "$go_bin" ]]; then
+        echo "==> Ambush: Go fork toolchain not found at $go_bin -- skipping (set GOFORK)"
+        return 0
+    fi
+    if [[ ! -d "$ambush_src/cmd/dlv" ]]; then
+        echo "==> Ambush: fork source not found at $ambush_src -- skipping (set AMBUSHFORK)"
+        return 0
+    fi
+    mkdir -p "$go_out"
+    echo "==> Building Ambush (GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0, fork=$ambush_src)"
+    ( cd "$ambush_src" && \
+      GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 "$go_bin" build -mod=vendor \
+        -ldflags="-s -w" -o "$go_out/ambush" ./cmd/dlv ) \
+        || { echo "==> Ambush: go build FAILED" >&2; return 1; }
+    echo "==> Ambush built: $go_out/ambush"
+    ls -la "$go_out/ambush"
+    ledger "ambush: Delve port cross-compile (GOOS=thylacine, stripped) -> ramfs (Stage 8c-1 debugger)"
+}
+
+# GOOS=thylacine Stage 4b: assemble a trimmed thylacine GOROOT (the cross-built
+# toolchain binaries + the stdlib SOURCE) under $BUILD_DIR/go/goroot, for the
+# on-device `go build` (Stage 4c). DEFAULT-ON since Stage 6: the toolchain
+# ships in the default image (GO-PORT-PLAN "BY DEFAULT"), retiring the
+# every-invocation THYLACINE_BAKE_GOROOT=1 recipe and its forgot-the-flag
+# footgun (a pool without /goroot broke every go probe). Set
+# THYLACINE_BAKE_GOROOT=0 to opt out for a fast iteration loop (64 MiB pool, no
+# cross-build/populate); an absent fork skips gracefully either way. When
+# staged, build_stratum_pool_fixture grows pool.img and populate_stratum_pool
+# `stratum-fs put`s this tree at /goroot. The `go` driver shells out to
+# $GOROOT/pkg/tool/thylacine_arm64/{compile,link,asm,...} and compiles a
+# program's imports from $GOROOT/src on the device.
+build_go_goroot() {
+    if [[ "${THYLACINE_BAKE_GOROOT:-1}" != "1" ]]; then
+        # Explicit opt-out: remove any stale stage so the pool-size + populate
+        # sites (which also key on the -d check) cannot bake a leftover tree.
+        rm -rf "$BUILD_DIR/go/goroot"
+        return 0
+    fi
+    local go_bin="$GOFORK/bin/go"
+    if [[ ! -x "$go_bin" ]]; then
+        echo "==> Go GOROOT bake: fork toolchain not found at $go_bin -- skipping (set GOFORK)"
+        # Drop any stale stage from an earlier build: baking a tree the current
+        # fork can no longer rebuild would ship outdated toolchain bytes.
+        rm -rf "$BUILD_DIR/go/goroot"
+        return 0
+    fi
+    if ! command -v rsync >/dev/null 2>&1; then
+        echo "==> Go GOROOT bake: rsync not found (needed to stage src/) -- skipping" >&2
+        return 1
+    fi
+    local stage="$BUILD_DIR/go/goroot"
+    echo "==> Building Go GOROOT staging (thylacine/arm64, stripped) at $stage"
+    rm -rf "$stage"
+    mkdir -p "$stage/bin" "$stage/pkg/tool/thylacine_arm64"
+    # The `go` command driver.
+    ( cd "$GOFORK" && GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 \
+        "$go_bin" build -ldflags="-s -w" -o "$stage/bin/go" cmd/go ) \
+        || { echo "==> Go GOROOT bake: build cmd/go FAILED" >&2; return 1; }
+    # gofmt lives at $GOROOT/bin like every real GOROOT (not pkg/tool). Stage 6
+    # consumers: nora's format-on-save + the bare `gofmt` at the ut prompt.
+    ( cd "$GOFORK" && GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 \
+        "$go_bin" build -ldflags="-s -w" -o "$stage/bin/gofmt" cmd/gofmt ) \
+        || { echo "==> Go GOROOT bake: build cmd/gofmt FAILED" >&2; return 1; }
+    # The toolchain commands the driver execs.
+    local tool
+    for tool in compile link asm pack buildid cover vet; do
+        ( cd "$GOFORK" && GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 \
+            "$go_bin" build -ldflags="-s -w" \
+            -o "$stage/pkg/tool/thylacine_arm64/$tool" "cmd/$tool" ) \
+            || { echo "==> Go GOROOT bake: build cmd/$tool FAILED" >&2; return 1; }
+    done
+    # The assembler headers ($GOROOT/pkg/include/{textflag,funcdata,asm_*}.h).
+    # Every stdlib .s file `#include`s textflag.h (and many funcdata.h), so the
+    # on-device `asm` step of any assembly-bearing package (internal/cpu,
+    # runtime, internal/bytealg, sync/atomic, crypto, ...) fails without them --
+    # i.e. effectively every real build. Tiny (~40 KB); always stage it.
+    cp -RL "$GOFORK/pkg/include" "$stage/pkg/include" \
+        || { echo "==> Go GOROOT bake: stage pkg/include FAILED" >&2; return 1; }
+    # The stdlib SOURCE (go build compiles a program's imports from here on the
+    # device). Deref symlinks; drop *_test.go + testdata + src/cmd (the
+    # toolchain source -- needed only to self-host [Stage 7], never to build a
+    # user program, whose imports never reach into cmd).
+    rsync -aL --exclude='*_test.go' --exclude='testdata/' --exclude='/cmd/' \
+        "$GOFORK/src/" "$stage/src/" \
+        || { echo "==> Go GOROOT bake: rsync src FAILED" >&2; return 1; }
+    # cmd/gofmt + cmd/compile and their cmd-internal/vendor deps -- the #34
+    # REAL multi-package on-device build target (gofmt, 91 pkgs, the CHASE W1
+    # bar workload) + the CHASE W2 triangulation workload (cmd/compile, the
+    # heaviest pure-std real program; docs/CHASE.md section 3). The blanket
+    # /cmd/ exclusion above stands; these subtrees are the union of the exact
+    # `go list -deps` closures under cmd/ for both. Per-dir rsync + mkdir
+    # (macOS openrsync does not honor the -R "/./" relative anchor).
+    local gocmd_sub
+    for gocmd_sub in cmd/gofmt cmd/compile \
+                     cmd/internal/archive cmd/internal/bio cmd/internal/cov \
+                     cmd/internal/dwarf cmd/internal/goobj cmd/internal/hash \
+                     cmd/internal/obj cmd/internal/objabi cmd/internal/pgo \
+                     cmd/internal/src cmd/internal/sys cmd/internal/telemetry \
+                     cmd/vendor/golang.org/x/telemetry \
+                     cmd/vendor/golang.org/x/sync; do
+        mkdir -p "$stage/src/$(dirname "$gocmd_sub")"
+        rsync -aL --exclude='*_test.go' --exclude='testdata/' \
+            "$GOFORK/src/$gocmd_sub" "$stage/src/$(dirname "$gocmd_sub")/" \
+            || { echo "==> Go GOROOT bake: rsync $gocmd_sub FAILED" >&2; return 1; }
+    done
+    # GOROOT metadata the toolchain reads (version string, go.env, timezone db).
+    cp "$GOFORK/VERSION" "$GOFORK/go.env" "$stage/" 2>/dev/null || true
+    [[ -d "$GOFORK/lib" ]] && cp -RL "$GOFORK/lib" "$stage/" 2>/dev/null
+    echo "==> Go GOROOT staged: $(du -sh "$stage" | cut -f1) ($(find "$stage" -type f | wc -l | tr -d ' ') files)"
+    ledger "Go GOROOT: cross-built toolchain + trimmed stdlib src staged at $stage (Stage 6 default-on)"
+
+    # Stage 4c: warm a GOCACHE for the on-device probe's stdlib deps + stage the
+    # probe source. The correct production design (not a timeout hack): real Go
+    # delivers a snappy edit->build->run loop via the build cache -- a from-cold
+    # stdlib compile is always slow, even on Linux. A blank-import SEED program
+    # (importing exactly the probe's stdlib set) compiles those packages INTO the
+    # cache without ever caching a "real main", so the on-device `go build` of the
+    # probe cold-compiles only the user package + links (a GENUINE device
+    # compile+link), with every stdlib dep a cache HIT. Portability is exact: Go's
+    # build-cache action IDs key on (target arm64/thylacine + tool version + source
+    # + flags), and the tool IDs are VERSION-ONLY (`compile version go1.25.3`, no
+    # per-binary hash -- verified), so a cache warmed by the darwin-cross compiler
+    # is hit byte-for-byte by the thylacine-native compiler on-device. The cache is
+    # content-keyed + relocatable. GO111MODULE=off (GOPATH/script mode) matches the
+    # device build exactly + avoids any module resolution walking the pool over 9P.
+    local gocache="$BUILD_DIR/go/gocache"
+    local go4c="$BUILD_DIR/go/go4c"
+    local seed="$BUILD_DIR/go/seed"
+    rm -rf "$gocache" "$go4c" "$seed"
+    mkdir -p "$gocache" "$go4c" "$seed"
+    cat > "$seed/seed.go" <<'GOSEEDEOF'
+package main
+
+import (
+	_ "fmt"
+	_ "os"
+	_ "sort"
+	_ "strings"
+)
+
+func main() {}
+GOSEEDEOF
+    # The probe source (baked; never built on the host, so its main stays COLD on
+    # the device -> the device's compile+link actually run). Imports == the seed's
+    # set, so all stdlib deps are warm.
+    cat > "$go4c/hello.go" <<'GO4CEOF'
+package main
+
+import (
+	"fmt"
+	"os"
+	"sort"
+	"strings"
+)
+
+func main() {
+	xs := []int{5, 3, 8, 1, 9, 2, 7, 4, 6, 0}
+	sort.Ints(xs)
+	parts := make([]string, len(xs))
+	for i, v := range xs {
+		parts[i] = fmt.Sprintf("%d", v)
+	}
+	fmt.Fprintf(os.Stdout, "go-4c on-device build OK: %s\n", strings.Join(parts, ","))
+}
+GO4CEOF
+    ( cd "$seed" && GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 GO111MODULE=off \
+        GOCACHE="$gocache" GOPATH="$BUILD_DIR/go/gopath" \
+        GOPROXY=off GOTELEMETRY=off GOENV=off \
+        "$go_bin" build -o /dev/null "$seed/seed.go" ) \
+        || { echo "==> Go 4c: seed cache warm FAILED" >&2; return 1; }
+    echo "==> Go 4c: GOCACHE warmed ($(du -sh "$gocache" | cut -f1)); probe source staged at $go4c"
+    ledger "Go 4c: seed-warmed GOCACHE + probe source staged (Stage 4c; baked at /go-cache + /go4c)"
 }
 
 # A-5c-c: emit the host-baked system recovery phrase as a C header BEFORE the
@@ -606,7 +900,7 @@ build_sysroot() {
                     'SYS_rt_sigaction 0xFFFF' 'SYS_rt_sigprocmask 0xFFFF' \
                     'SYS_tkill 0xFFFF' 'SYS_kill 0xFFFF' \
                     'SYS_rt_sigreturn 0xFFFF' \
-                    'SYS_mmap 37' 'SYS_munmap 38' \
+                    'SYS_mmap 83' 'SYS_munmap 38' \
                     'SYS_srv_accept 27' 'SYS_srv_peer 28' \
                     'SYS_mmio_create 2' 'SYS_irq_create 3' 'SYS_irq_wait 4' \
                     'SYS_mmio_map 5' 'SYS_dma_create 6' 'SYS_dma_map 7' \
@@ -817,16 +1111,29 @@ build_libsodium() {
     # 2. The compose-list. Curated from src/libsodium/Makefile.am
     #    (libsodium_la_SOURCES base + !HAVE_AMD64_ASM ref-salsa20 +
     #    !EMSCRIPTEN randombytes + !MINIMAL non-minimal arm).
-    #    Excluded: x86 ASM (AESNI, SSE, AVX, sandy2x); ARMv8 crypto extension
-    #    sources (libarmcrypto_la — needs +crypto march, pouch baseline is
-    #    -march=armv8-a+lse+pauth+bti). The portable refs implement every
-    #    primitive; performance is fine for a proving binary.
+    #    Excluded: x86 ASM (AESNI, SSE, AVX, sandy2x).
+    #    INCLUDED since the AEAD-lever chunk: the ARMv8 crypto-extension
+    #    sources (libarmcrypto_la). They need no +crypto -march — each TU
+    #    self-arms via `#pragma clang attribute push(target("neon,crypto,
+    #    aes"))` — and they are RUNTIME-gated: the per-primitive picker
+    #    calls sodium_runtime_has_armcrypto(), which under HAVE_GETAUXVAL
+    #    reads getauxval(AT_HWCAP) & (1<<3) — the Linux-compatible word
+    #    the kernel publishes in the exec auxv from ID_AA64ISAR0. A CPU
+    #    without the AES extensions (RPi4's A72) reports a clear bit and
+    #    the soft implementation is picked, so the crypto-instruction TUs
+    #    never execute there. Measured why: the on-device go-build cold
+    #    window was 20.0 s of 20.7 s inside soft AEGIS-256 decrypt
+    #    (~43 MB/s) while the M2's hardware AES sat idle behind the
+    #    missing HWCAP gate.
     local sources=(
         crypto_aead/aegis128l/aead_aegis128l.c
         crypto_aead/aegis128l/aegis128l_soft.c
+        crypto_aead/aegis128l/aegis128l_armcrypto.c
         crypto_aead/aegis256/aead_aegis256.c
         crypto_aead/aegis256/aegis256_soft.c
+        crypto_aead/aegis256/aegis256_armcrypto.c
         crypto_aead/aes256gcm/aead_aes256gcm.c
+        crypto_aead/aes256gcm/armcrypto/aead_aes256gcm_armcrypto.c
         crypto_aead/chacha20poly1305/aead_chacha20poly1305.c
         crypto_aead/xchacha20poly1305/aead_xchacha20poly1305.c
         crypto_auth/crypto_auth.c
@@ -928,16 +1235,21 @@ build_libsodium() {
 
     # 3. Compile flags. The HAVE_* set mirrors what ./configure would AC_DEFINE
     #    for aarch64-thylacine: musl-style libc (1.2.5), clang 22.1, no x86
-    #    ASM, no ARMv8 crypto extension, pthreads available. Notes on the
-    #    POUCH-specific choices:
+    #    ASM, ARMv8 crypto extension RUNTIME-gated (HAVE_ARMCRYPTO + the
+    #    self-arming TUs above; picked only when AT_HWCAP reports AES),
+    #    pthreads available. Notes on the POUCH-specific choices:
     #      - HAVE_MPROTECT / HAVE_MLOCK / HAVE_MADVISE NOT defined — pouch's
     #        sentinel returns ENOSYS for these; libsodium's sodium_mlock would
     #        try to call them and silently return -1, which is benign but
     #        defining them would mislead libsodium consumers about what it
     #        actually does.
-    #      - HAVE_NANOSLEEP / HAVE_CLOCK_GETTIME NOT defined — pouch's sentinel
-    #        returns ENOSYS for these too; libsodium uses them only on retry
-    #        paths and busy-waits adequately without them at v1.0.
+    #      - HAVE_NANOSLEEP NOT defined — pouch's sentinel returns ENOSYS;
+    #        libsodium uses it only on retry paths and busy-waits adequately.
+    #        HAVE_CLOCK_GETTIME also NOT defined, but for a different reason
+    #        since the clock seam was wired (0xFFFF -> SYS_CLOCK_GETTIME=75):
+    #        it is now DEFINABLE — a separate small lift, deliberately not
+    #        taken with the AEAD chunk (libsodium only uses it on non-default
+    #        entropy paths).
     #      - HAVE_GETPID defined — getpid() in pouch returns -1 (sentinel
     #        ENOSYS); libsodium uses it only for fork-detection in the
     #        internal_random path (not the default sysrandom path), where the
@@ -956,7 +1268,10 @@ build_libsodium() {
     local cflags=( --target=aarch64-thylacine -march=armv8-a+lse+pauth+bti
                    -std=gnu11 -O2 -fno-pic -fomit-frame-pointer
                    -fno-stack-protector
-                   -nostdinc -isystem "$sysroot/include"
+                   # -nostdlibinc (NOT -nostdinc): the armcrypto TUs include
+                   # the COMPILER-provided <arm_neon.h>; musl's headers still
+                   # take priority via the -isystem (the compiler-rt idiom).
+                   -nostdlibinc -isystem "$sysroot/include"
                    -I"$sodium_obj/gen/sodium"
                    -I"$sodium_src/include"
                    -I"$sodium_src/include/sodium"
@@ -972,6 +1287,7 @@ build_libsodium() {
                    -DHAVE_SYS_PARAM_H=1
                    -DHAVE_SYS_RANDOM_H=1
                    -DHAVE_SYS_AUXV_H=1
+                   -DHAVE_ARMCRYPTO=1
                    -DHAVE_PTHREAD=1
                    -DHAVE_WEAK_SYMBOLS=1
                    -DHAVE_C11_MEMORY_FENCES=1
@@ -1287,12 +1603,30 @@ build_stratum_pool_fixture() {
     # (PRINCIPAL_SYSTEM) owns the whole baked tree once the OS enforces dev9p
     # rwx (A-3b) -- otherwise joey-as-other cannot create in the root -> brick.
     local bake_owner=4294967294
-    echo "==> generating stratum pool fixture ($pool_img, system.key)"
-    "$mkfs_bin" "$pool_img" --size 64M --keyfile "$keyfile" \
+    # Stage 4b/4c: a baked Go GOROOT (~109 MB tree) + an on-device `go build`
+    # needs a real dev pool. The default bootstrap pool stays 64 MiB; the GOROOT
+    # bake grows to 1 GiB so a from-cold build (which compiles all of stdlib into
+    # $WORK and writes a native /go-cache) does not ENOSPC -- the 256 MiB pool
+    # filled mid-build, truncating the last _pkg_.a -> the linker's `not package
+    # main`. Keyed on the staged GOROOT existing (build_go_goroot -- default-on
+    # since Stage 6; THYLACINE_BAKE_GOROOT=0 opts out and removes the stage).
+    local pool_size="64M"
+    if [[ "${THYLACINE_BAKE_GOROOT:-1}" == "1" && -d "$BUILD_DIR/go/goroot" ]]; then
+        # Sized against MEASURED consumption (2026-07-03, task #39): the bake
+        # itself uses ~575M for ~170M logical (~3.3x FS amplification) and the
+        # boot's go4c build + suite burned the ~960M that remained free in a
+        # 1536M pool (~6x on fsync-less small-write churn -- CoW garbage only a
+        # commit sweeps). 2560M = bake + boot-at-6x + margin. The REAL fix is
+        # commit-on-allocation-pressure (task #39, the P1.2 write-amp lever);
+        # this is capacity so the gate boot isn't hostage to it.
+        pool_size="2560M"
+    fi
+    echo "==> generating stratum pool fixture ($pool_img, system.key, size=$pool_size)"
+    "$mkfs_bin" "$pool_img" --size "$pool_size" --keyfile "$keyfile" \
             --seed "$mkfs_seed" --root-uid "$bake_owner" --root-gid "$bake_owner" \
             >/dev/null 2>&1 || {
         echo "==> stratum-mkfs failed; rerunning with stderr visible" >&2
-        "$mkfs_bin" "$pool_img" --size 64M --keyfile "$keyfile" \
+        "$mkfs_bin" "$pool_img" --size "$pool_size" --keyfile "$keyfile" \
             --seed "$mkfs_seed" --root-uid "$bake_owner" --root-gid "$bake_owner"
         exit 2
     }
@@ -1431,6 +1765,45 @@ populate_stratum_pool() {
         || { echo "==> populate pool: sync FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
     echo "==> populate pool: /thylacine-version written ($(echo "$sentinel_content" | wc -c | tr -d ' ') bytes)"
 
+    # CHASE W2 marker (docs/CHASE.md section 3): gates joey's heavy
+    # cmd/compile bench steps. Baked only on request, so SMP gates and
+    # normal boots never pay a full on-device compiler build.
+    if [[ "${THYLACINE_CHASE_W2:-0}" == "1" ]]; then
+        echo "w2" | "$stratum_fs_bin" -s "$sock_path" write /chase-w2 \
+            || { echo "==> populate pool: write /chase-w2 FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        echo "==> populate pool: CHASE W2 marker baked (/chase-w2)"
+    fi
+
+    # GOOS=thylacine Stage 4b: bake the trimmed Go GOROOT (if staged) at /goroot
+    # via the single-session recursive `put` (a per-file CLI loop over ~3600
+    # files is infeasible). Default-on since Stage 6; no-op when
+    # THYLACINE_BAKE_GOROOT=0 opted out (which removes the stage) or the fork
+    # is absent (never staged).
+    local goroot_stage="$BUILD_DIR/go/goroot"
+    if [[ "${THYLACINE_BAKE_GOROOT:-1}" == "1" && -d "$goroot_stage" ]]; then
+        echo "==> populate pool: baking Go GOROOT ($goroot_stage -> /goroot, $(du -sh "$goroot_stage" | cut -f1))"
+        "$stratum_fs_bin" -s "$sock_path" put "$goroot_stage" /goroot \
+            || { echo "==> populate pool: put GOROOT FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" sync \
+            || { echo "==> populate pool: sync after GOROOT FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        echo "==> populate pool: Go GOROOT baked at /goroot"
+        # Stage 4c: the seed-warmed GOCACHE (-> /go-cache, read+write by the
+        # on-device build) + the probe source (-> /go4c). Top-level paths so the
+        # `put`-created parents do not collide with the /var corvus bake below.
+        local gocache_stage="$BUILD_DIR/go/gocache"
+        local go4c_stage="$BUILD_DIR/go/go4c"
+        if [[ -d "$gocache_stage" && -d "$go4c_stage" ]]; then
+            echo "==> populate pool: baking Go warm cache ($(du -sh "$gocache_stage" | cut -f1)) -> /go-cache + probe source -> /go4c"
+            "$stratum_fs_bin" -s "$sock_path" put "$gocache_stage" /go-cache \
+                || { echo "==> populate pool: put /go-cache FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+            "$stratum_fs_bin" -s "$sock_path" put "$go4c_stage" /go4c \
+                || { echo "==> populate pool: put /go4c FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+            "$stratum_fs_bin" -s "$sock_path" sync \
+                || { echo "==> populate pool: sync after Go cache FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+            echo "==> populate pool: Go warm cache + probe source baked"
+        fi
+    fi
+
     # --- A-5c-b: host-bake the system identity into /var/lib/corvus ---
     # corvus-mint mints the admin keypair + system-wrap (keypair under the
     # build-time system passphrase) + system-recovery-wrap (the same keypair under
@@ -1519,6 +1892,19 @@ populate_stratum_pool() {
     # Clear the trap; happy path is done.
     trap - EXIT INT TERM
     echo "==> populate pool: stratumd shut down cleanly; pool.img populated"
+
+    # Refresh the pool/key snapshot twins from the just-populated COHERENT
+    # pair. The twins are the per-boot restore source (the gate's
+    # pool_restore + manual roll recovery); before this they were a manual
+    # convention, so a re-bake regenerating pool + key left STALE twins --
+    # and a subsequent restore then pairs an old-key pool with the
+    # fresh-key ramfs, which stratumd greets with STM_EBADTAG (-201, AEAD
+    # verification failure) on its first read. cp -c = APFS clonefile.
+    cp -c "$pool_img" "$pool_img.baked-snapshot" 2>/dev/null \
+        || cp "$pool_img" "$pool_img.baked-snapshot"
+    cp -c "$keyfile" "$keyfile.baked-snapshot" 2>/dev/null \
+        || cp "$keyfile" "$keyfile.baked-snapshot"
+    echo "==> populate pool: snapshot twins refreshed (pool.img/system.key .baked-snapshot)"
 }
 
 build_pouch_progs() {
@@ -1692,11 +2078,14 @@ case "$target" in
     # year; coupling the ramfs rebuild to the pool re-bake is the fix. See
     # docs/DEBUGGING-PLAYBOOK.md.
     pool)        build_stratum_pool_fixture; build_ramfs ;;
+    # GOOS=thylacine Stage 1: rebuild the Go boot probe + re-bake the ramfs so the
+    # new binary lands in the cpio without a full kernel rebuild.
+    go-probes)   build_go_probes; build_ramfs ;;
     all)         build_all         ;;
     clean)       clean             ;;
     *)
         echo "Unknown target: $target" >&2
-        echo "Valid: kernel, ramfs, sysroot, pouch-progs, stratumd, userspace, disk, pool, all, clean" >&2
+        echo "Valid: kernel, ramfs, sysroot, pouch-progs, stratumd, userspace, disk, pool, go-probes, all, clean" >&2
         exit 1
         ;;
 esac

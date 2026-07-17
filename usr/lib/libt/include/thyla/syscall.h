@@ -69,10 +69,12 @@ enum {
     T_SYS_CHROOT      = 35,      // P5-stratumd-stub-bringup-e2: stamp territory root_spoor
     T_SYS_SET_TID_ADDRESS = 36,  // P6-pouch-kernel-auxv: return the calling thread's tid
     // 37 + 38 — SYS_BURROW_ATTACH / SYS_BURROW_DETACH (P6-pouch-mem-a).
-    // No libt C-side wrappers yet — pouch's mmap/munmap reaches the
-    // syscalls directly through the musl seam (0003-pouch-mman). Native
-    // C consumers will land a t_burrow_attach / t_burrow_detach pair
-    // when the first one materialises.
+    // 83 + 84 — SYS_BURROW_ATTACH_LAZY / SYS_BURROW_DECOMMIT (#321, the
+    // overcommit model): reserve demand-zero VA + madvise(DONTNEED).
+    // No libt C-side wrappers yet — pouch's mmap reaches the lazy attach
+    // (83) directly through the musl seam (0003-pouch-mman); the native
+    // Rust heap reaches it through libthyla-rs::t_burrow_attach_lazy.
+    // Native C consumers will land a wrapper pair when one materialises.
     T_SYS_TORPOR_WAIT = 39,      // P6-pouch-wait-addr: wait on a user-VA word
     T_SYS_TORPOR_WAKE = 40,      // P6-pouch-wait-addr: wake waiters on a user-VA word
     T_SYS_THREAD_SPAWN = 41,     // P6-pouch-threads: spawn an EL0 Thread in the caller's Proc
@@ -104,6 +106,10 @@ enum {
     T_SYS_PCI_MAP_BAR       = 77,  // pci-1c: map a KObj_PCI BAR into user VA
     T_SYS_PCI_INFO          = 78,  // pci-1c: read a KObj_PCI's resolved topology
     T_SYS_CLOCK_SETTIME     = 79,  // net-7a: step CLOCK_REALTIME (CAP_HOSTOWNER)
+    T_SYS_PREAD             = 85,  // #37: positioned read (cursor untouched)
+    T_SYS_PWRITE            = 86,  // #37: positioned write (cursor untouched)
+    T_SYS_YIELD             = 87,  // #33: voluntary yield (hint; always 0)
+    T_SYS_STAT              = 88,  // POUNCE: path-stat in one syscall (1 RPC)
 };
 
 // SYS_CLOCK_*TIME clock ids (match Linux clockid_t) + the 16-byte timespec.
@@ -205,8 +211,9 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 #define T_OPATH    0x80u
 
 // Maximum single-component name length for t_walk_open (matches the
-// kernel cap; passing longer returns -1 from the syscall).
-#define T_WALK_OPEN_NAME_MAX  64u
+// kernel cap; passing longer returns -1 from the syscall). 255 since the
+// #36 raise (the 64-era cap EINVAL'd content-addressed names).
+#define T_WALK_OPEN_NAME_MAX  255u
 
 // SYS_SPAWN_WITH_PERMS perm_flags — must mirror SPAWN_PERM_* in
 // kernel/include/thylacine/syscall.h. SPAWN_PERM_MAY_POST_SERVICE stamps
@@ -226,8 +233,8 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 
 // SYS_SPAWN_FULL_ARGV bounds — must mirror SYS_SPAWN_ARGV_MAX +
 // SYS_SPAWN_ARGV_DATA_MAX in kernel/include/thylacine/syscall.h.
-#define T_SYS_SPAWN_ARGV_MAX        16u
-#define T_SYS_SPAWN_ARGV_DATA_MAX   4096u
+#define T_SYS_SPAWN_ARGV_MAX        512u
+#define T_SYS_SPAWN_ARGV_DATA_MAX   65536u
 
 // SYS_SPAWN_FULL_ARGV argument record — must mirror struct sys_spawn_args
 // in kernel/include/thylacine/syscall.h. The 80-byte ABI shape is pinned
@@ -372,7 +379,7 @@ _Static_assert(__builtin_offsetof(struct t_allowance_desc, pci) == 180,
 #define T_CAP_KILL            (1UL << 9)   // elevation-only; cross-identity kill override
 
 // Maximum binary name length for t_spawn (mirror SYS_SPAWN_NAME_MAX).
-#define T_SPAWN_NAME_MAX  64u
+#define T_SPAWN_NAME_MAX  256u
 
 // Maximum inherited-fd count for t_spawn_with_fds (mirror SYS_SPAWN_MAX_FDS).
 #define T_SPAWN_MAX_FDS   16u
@@ -691,8 +698,9 @@ static inline long t_pipe(long *out_rd_fd, long *out_wr_fd) {
 }
 
 // t_read — read up to `len` bytes from `fd` into `buf`. Returns bytes
-// read (>0), 0 on EOF, -1 on error. Per-call cap is 4096 bytes
-// (kernel-side SYS_RW_MAX); userspace loops for larger transfers.
+// read (>0), 0 on EOF, -1 on error. Per-call cap is 128 KiB
+// (kernel-side SYS_RW_MAX, CF-3 A; a single 9P RPC's payload is still
+// msize-clamped, so short reads stay normal); userspace loops.
 __attribute__((always_inline))
 static inline long t_read(long fd, void *buf, size_t len) {
     register long x0 __asm__("x0") = fd;
@@ -720,6 +728,63 @@ static inline long t_write(long fd, const void *buf, size_t len) {
         "svc #0"
         : "+r"(x0)
         : "r"(x1), "r"(x2), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_pread — read up to `len` bytes from `fd` at absolute byte offset
+// `off` (#37). The per-Spoor cursor is neither read nor advanced, so
+// concurrent positioned ops on one fd share no mutable state (the POSIX
+// pread contract). Returns bytes read (>0), 0 on EOF, -1 on error --
+// including off < 0 and a non-seekable Dev (the ESPIPE shape: pread on
+// a pipe fails). Per-call cap is SYS_RW_MAX (128 KiB, CF-3 A).
+__attribute__((always_inline))
+static inline long t_pread(long fd, void *buf, size_t len, long off) {
+    register long x0 __asm__("x0") = fd;
+    register long x1 __asm__("x1") = (long)(unsigned long)buf;
+    register long x2 __asm__("x2") = (long)len;
+    register long x3 __asm__("x3") = off;
+    register long x8 __asm__("x8") = T_SYS_PREAD;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x2), "r"(x3), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_pwrite — write up to `len` bytes from `buf` to `fd` at absolute byte
+// offset `off` (#37). Cursor untouched; same gates as t_pread. Returns
+// bytes written (>=0), -1 on error.
+__attribute__((always_inline))
+static inline long t_pwrite(long fd, const void *buf, size_t len, long off) {
+    register long x0 __asm__("x0") = fd;
+    register long x1 __asm__("x1") = (long)(unsigned long)buf;
+    register long x2 __asm__("x2") = (long)len;
+    register long x3 __asm__("x3") = off;
+    register long x8 __asm__("x8") = T_SYS_PWRITE;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x2), "r"(x3), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_yield — voluntary yield (#33). If another thread is queued runnable on
+// the calling CPU, the caller is requeued behind it and it runs; otherwise
+// returns immediately. A hint (POSIX sched_yield shape); always returns 0.
+__attribute__((always_inline))
+static inline long t_yield(void) {
+    register long x0 __asm__("x0");
+    register long x8 __asm__("x8") = T_SYS_YIELD;
+    __asm__ volatile (
+        "svc #0"
+        : "=r"(x0)
+        : "r"(x8)
         : "memory", "cc"
     );
     return x0;
@@ -812,7 +877,7 @@ static inline long t_set_traceable(unsigned long traceable) {
 }
 
 // t_explicit_bzero — compiler-barrier'd memset to zero of `len` bytes
-// starting at `buf`. Per-call cap is SYS_RW_MAX (4096); loop for
+// starting at `buf`. Per-call cap is SYS_RW_STACK (4096); loop for
 // larger buffers. Returns 0 on success, -1 on user-VA validation
 // failure. The kernel's per-byte uaccess_store_u8 path is the
 // barrier — the compiler cannot elide the writes across the syscall
@@ -832,7 +897,7 @@ static inline long t_explicit_bzero(void *buf, size_t len) {
 }
 
 // t_getrandom — read `len` random bytes into `buf` from the kernel
-// CSPRNG. Caller must hold CAP_CSPRNG_READ. Per-call cap is SYS_RW_MAX
+// CSPRNG. Caller must hold CAP_CSPRNG_READ. Per-call cap is SYS_RW_STACK
 // (4096); loop for larger buffers. Returns bytes read (= len on
 // success) or -1 on: missing cap / bad user-VA / CSPRNG unseeded /
 // CSPRNG hardware fault.
@@ -1407,7 +1472,7 @@ static inline long t_fsync(long fd, unsigned long datasync) {
 }
 
 // t_readdir — read the next run of 9P2000.L dirents from a directory `fd`
-// (KOBJ_SPOOR, RIGHT_READ) into `buf` (<= SYS_RW_MAX), advancing the Spoor's
+// (KOBJ_SPOOR, RIGHT_READ) into `buf` (<= SYS_RW_STACK = 4096), advancing the Spoor's
 // offset. Returns bytes written (>=0; 0 = end-of-directory), -1 on error. Each
 // entry: qid(13) + offset(8 LE) + type(1) + name_len(2 LE) + name. FS-mutation
 // foundation (IDENTITY-DESIGN.md section 9.2).
@@ -1721,6 +1786,30 @@ static inline long t_fstat(long fd, struct t_stat *out) {
     return x0;
 }
 
+// t_stat_path — fill *out with the metadata of the file at `path` (POUNCE;
+// SYS_STAT = 88). Resolves through the caller's Territory (absolute from
+// root; relative joined with the cwd) with the standard per-component
+// X-search; on a walk_attrs-capable Dev this is ONE 9P RPC and creates no
+// handle/fid. Returns 0 on success, -errno (-T_E_NOENT / -T_E_ACCES) on a
+// resolution failure, -1 on argument faults. `out` is the same 80-byte
+// struct t_stat t_fstat fills.
+__attribute__((always_inline))
+static inline long t_stat_path(const char *path, size_t path_len,
+                               struct t_stat *out) {
+    register long x0 __asm__("x0") = (long)(unsigned long)path;
+    register long x1 __asm__("x1") = (long)path_len;
+    register long x2 __asm__("x2") = (long)(unsigned long)out;
+    register long x8 __asm__("x8") = T_SYS_STAT;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x2), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+
 // t_lseek — reposition the per-Spoor offset cursor on `fd`. Returns the
 // new offset (>= 0) on success, -1 on bad fd / bad whence / underflow /
 // overflow / SEEK_END on a Dev without native stat.
@@ -1751,24 +1840,33 @@ static inline long t_lseek(long fd, long offset, long whence) {
 // v1.0). n_uname is 0 for no-auth attach at v1.0; a Phase 5+ auth backend
 // will use it as the per-user identifier.
 //
+// flags: 0 (strict close-to-open, the I-38 default) or T_ATTACH_9P_LOOSE
+// (the B1 per-attach opt-in -- the caller asserts the single-writer
+// premise for this attach; cached-opens then serve full Larder-hint hits
+// without the per-open wire revalidation). Unknown bits reject.
+//
 // Returns the new fd (>=0) on success, -1 on:
 //   - invalid srv_fd / wrong kind / missing R+W rights / not byte-mode
 //   - aname out of user-VA bound / aname_len > 256
+//   - unknown flags bits
 //   - server-side Rlerror on Tversion or Tattach
 //   - kmalloc OOM / handle table full
+#define T_ATTACH_9P_LOOSE 0x1ul
 __attribute__((always_inline))
 static inline long t_attach_9p_srv(long srv_fd,
                                     const char *aname, size_t aname_len,
-                                    unsigned long n_uname) {
+                                    unsigned long n_uname,
+                                    unsigned long flags) {
     register long x0 __asm__("x0") = srv_fd;
     register long x1 __asm__("x1") = (long)(unsigned long)aname;
     register long x2 __asm__("x2") = (long)aname_len;
     register long x3 __asm__("x3") = (long)n_uname;
+    register long x4 __asm__("x4") = (long)flags;
     register long x8 __asm__("x8") = T_SYS_ATTACH_9P_SRV;
     __asm__ volatile (
         "svc #0"
         : "+r"(x0)
-        : "r"(x1), "r"(x2), "r"(x3), "r"(x8)
+        : "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x8)
         : "memory", "cc"
     );
     return x0;

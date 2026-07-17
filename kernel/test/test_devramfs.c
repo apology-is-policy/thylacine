@@ -439,3 +439,65 @@ void test_devramfs_readdir_paginates_no_dup_no_skip(void) {
 
     spoor_clunk(root);
 }
+
+// POUNCE (docs/POUNCE-DESIGN.md §4): devramfs.walk_attrs -- the native
+// walk-fused getattr. The synth mount-point dirs always exist (no initrd
+// dependency), so the query walks them.
+void test_devramfs_walk_attrs(void) {
+    struct Spoor *root = devramfs.attach("");
+    TEST_ASSERT(root != NULL, "attach");
+    TEST_ASSERT(devramfs.walk_attrs != NULL, "slot wired");
+
+    // QUERY form (nc == NULL): qid + attrs, nothing transitioned.
+    {
+        const char  *names[1] = { "srv" };
+        const size_t lens[1]  = { 3 };
+        struct t_stat sts[1];
+        struct Walkqid *w = devramfs.walk_attrs(root, NULL, names, lens, 1, sts);
+        TEST_ASSERT(w != NULL, "query walk allocates");
+        TEST_EXPECT_EQ(w->nqid, 1, "srv walked");
+        TEST_ASSERT(w->spoor == NULL, "query transitions NOTHING");
+        TEST_EXPECT_EQ((u64)w->qid[0].type, (u64)QTDIR, "srv is a dir");
+        TEST_EXPECT_EQ((u64)sts[0].mode, (u64)(T_S_IFDIR | 0555u),
+                       "synth dir attrs (0555 SYSTEM) fused with the walk");
+        TEST_EXPECT_EQ((u64)sts[0].uid, (u64)PRINCIPAL_SYSTEM, "SYSTEM-owned");
+        TEST_EXPECT_EQ(sts[0].qid_path, w->qid[0].path, "attrs match the qid");
+        walkqid_free(w);
+    }
+
+    // BIND form, FULL walk: nc transitions to the leaf.
+    {
+        struct Spoor *nc = spoor_clone(root);
+        TEST_ASSERT(nc != NULL, "clone");
+        const char  *names[1] = { "srv" };
+        const size_t lens[1]  = { 3 };
+        struct t_stat sts[1];
+        struct Walkqid *w = devramfs.walk_attrs(root, nc, names, lens, 1, sts);
+        TEST_ASSERT(w != NULL && w->nqid == 1 && w->spoor == nc,
+                    "full bind walk transitions nc");
+        TEST_EXPECT_EQ(nc->qid.path, w->qid[0].path, "nc at the leaf qid");
+        walkqid_free(w);
+        spoor_clunk(nc);
+    }
+
+    // BIND form, PARTIAL walk (srv is empty -- nothing under it): the walked
+    // prefix's qid+attrs return, nc is left UNTOUCHED (the strict contract).
+    {
+        struct Spoor *nc = spoor_clone(root);
+        TEST_ASSERT(nc != NULL, "clone");
+        u64 qid_before = nc->qid.path;
+        const char  *names[2] = { "srv", "nope" };
+        const size_t lens[2]  = { 3, 4 };
+        struct t_stat sts[2];
+        struct Walkqid *w = devramfs.walk_attrs(root, nc, names, lens, 2, sts);
+        TEST_ASSERT(w != NULL, "partial walk allocates");
+        TEST_EXPECT_EQ(w->nqid, 1, "walked prefix = srv only");
+        TEST_ASSERT(w->spoor == NULL, "partial binds NOTHING");
+        TEST_EXPECT_EQ(nc->qid.path, qid_before, "nc untouched on partial");
+        walkqid_free(w);
+        nc->aux = NULL;
+        spoor_unref(nc);
+    }
+
+    spoor_unref(root);
+}

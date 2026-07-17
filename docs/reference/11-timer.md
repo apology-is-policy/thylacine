@@ -247,9 +247,15 @@ Without `CNTHCTL_EL2.{EL1PCEN, EL1PCTEN} = 1` set during the EL2 → EL1 drop, E
 
 The EL1 non-secure physical timer is banked per PE (CPU). At P1-G with NCPUS=1, there's only one timer; Phase 2 SMP introduces per-CPU `g_ticks` counters. Until then, the global `g_ticks` is correct because only CPU 0 receives ticks.
 
-### No tickless / NOHZ mode
+### Tickless idle (NO_HZ_IDLE) — as-built (TI arc, #299)
 
-The timer fires unconditionally at 1 kHz. A modern Linux kernel suppresses the periodic tick when no thread needs it; we don't. Cost is ~50 µs/s per CPU = 0.005% — acceptable at v1.0. NOHZ is a post-v1.0 power optimization (matters for battery-powered hardware; QEMU virt doesn't care).
+The timer fires at 1 kHz for any **running** thread (slice accounting), but a **genuinely-idle** CPU stops the periodic tick and arms a **one-shot** instead. This is the as-built reversal of the original "the timer fires unconditionally at 1 kHz; we don't do NOHZ" caveat — the never-stopped tick was measured at **332% HVF host CPU when idle** (per-tick VTIMER exit + emulated-GICv2 MMIO vmexits + a WFI that never parks at the 1 ms period); see `docs/TICKLESS-IDLE.md` for the measurement + design.
+
+- **The primitive** (TI-1, `arch/arm64/timer.c`): `timer_arm_oneshot_cnt(u64 target_cnt)` arms the banked virtual timer as a one-shot at an absolute `CNTVCT` value, via the pure clamp `timer_oneshot_tval(target, now)` → `[TIMER_MIN_RELOAD, TIMER_MAX_RELOAD]` (target≤now → MIN = fire-ASAP; over-horizon → MAX). `TIMER_MIN_RELOAD`/`TIMER_MAX_RELOAD` are the public clamp contract in `timer.h`.
+- **The integration** (TI-2, `kernel/sched.c::sched_idle_park`): an idle CPU arms to `min(nearest g_timerwait deadline, now + TICKLESS_IDLE_BACKSTOP_NS=4ms)` — i.e. it re-polls (`sched()` → `try_steal`) at ~250 Hz. **TI-4e retuned the backstop 100 ms → 4 ms** (the TI-4e finding below). The 1 kHz tick is byte-unchanged for running threads (I-17 / the §8.2 slice model untouched). Work-arrival wakes ride the existing `IPI_RESCHED` (tick-independent). On wake the loop re-arms periodic (`timer_arm_this_cpu`) **before** dispatching placed work and runs `timerwait_tick()` explicitly (the re-arm deasserts the one-shot's pending IRQ). The I-9 no-lost-wake arm-race is register-then-observe (`specs/sched_tickless.tla`).
+- **The handler is unchanged**: when the one-shot fires it re-enters `timer_irq_handler`, which re-arms the periodic `g_reload` exactly as for any tick — correct the moment the CPU has runnable work. There is no `timer_disable_this_cpu` (the always-arm-the-backstop design makes it dead code).
+- **Cost**: an idle CPU re-polls ~250×/s (the 4 ms backstop, TI-4e) instead of 1000×/s → **HVF idle ~5%** (the 100 ms deep-park's ~0.3% is the alternative — TI-4e trades HVF idle for HVF dev-boot speed; on the bare-metal production target the re-poll is ~free). Timekeeping is unaffected (`CLOCK_MONOTONIC`/`REALTIME` ride `CNTVCT`, not the tick; `g_ticks` freezes during cpu0 idle but is busy-wait/diagnostic-only, run from a running context). Full design + invariants: `docs/TICKLESS-IDLE.md` + ARCH §8.6.
+- **TI-4e finding — why 4 ms, why the re-poll (#299/#890).** The 100 ms deep-park (TI-3) gave ~0.3% HVF idle but a **2.4× boot slowdown** on HVF. TI-4e root-caused it to wake **latency**, NOT a guest bug: the wake path is IPI-prompt (measured **99.85% of tickless parks woken by an IPI**, not the backstop — `sched.h::sched_wc_stats.tickless_ipi_wakes` vs `tickless_oneshot_wakes`, in the `boot-wc:` banner), but **resuming a DEEP-parked vCPU via SGI costs ~0.85 ms under HVF vs ~7 µs when hot** — an emulation artifact (HVF GICv2-MMIO vmexits + the host vCPU-thread resume; #299/#890), not a scheduler defect. On bare metal an SGI to a WFI'd core is hardware-fast (~ns), so deep-park there already gives fast boot + ~0% idle. The 4 ms re-poll keeps the dev-loop vCPUs warm enough that IPI resumes drop to ~0.09 ms → HVF boot ~7 s (≈ the tickful gold) vs ~17–35 s at 100 ms. A v1.x adaptive (warm-while-active / deep-when-idle) or accel-gated backstop is the recorded path to reclaim 0.3% HVF idle without the dev-boot cost.
 
 ### `timer_busy_wait_ticks` doesn't yield
 
@@ -383,11 +389,86 @@ non-elevated tool [`-EACCES`]) is covered by joey's elevated round-trip probe
 
 A continuous timekeeper that *slews* rather than steps (the `SYS_CLOCK_SETTIME`
 step primitive landed net-7a; the userspace UTC-clock-object discipline is the
-v1.x refinement); a vDSO `clock_gettime` (EL0 CNTVCT is
-already enabled, see `timer_enable_el0_counter_access`); a 64-bit RTC (the 32-bit
+v1.x refinement); a 64-bit RTC (the 32-bit
 `RTCDR` wraps in 2106); uid→name resolution + `getgroups` (whoami/id are numeric
 at v1.0); the pouch boundary-line mapping musl `getpid`/`clock_gettime` onto these
-numbers.
+numbers. (The vDSO `clock_gettime` is no longer a seam — see below.)
+
+---
+
+## The vDSO clock page (`kernel/vdso.c`, #343)
+
+`SYS_CLOCK_GETTIME` is a trap. A native program that reads the clock in a hot
+loop pays a kernel round-trip per read — and #343's measurement found the
+on-device Go toolchain does exactly that: its scheduler (`findRunnable` / sysmon)
+hammers `nanotime()` ~740 million times for a single `go tool compile`. The vDSO
+removes those reads from the syscall path.
+
+### What it is
+
+One kernel-owned page, populated once at boot and **mapped read-only into every
+exec'd Proc at the same physical page** (the Linux shared-`vvar` model — there is
+no per-Proc timekeeping state). Userspace reads `CNTVCT_EL0` directly (already
+EL0-enabled, `timer_enable_el0_counter_access`) plus this page, and runs
+`timer_now_ns()`'s split arithmetic itself — **no syscall, no seqlock**.
+
+```c
+// kernel/include/thylacine/vdso.h  (ABI; _Static_assert-pinned, 64 bytes)
+struct vdso_clock {
+    u64 magic;            // == VDSO_CLOCK_MAGIC ("VDSOLK01"); mismatch -> fall back
+    u64 version;          // == VDSO_CLOCK_VERSION (append-only)
+    u64 freq;             // CNTVCT Hz (== g_freq; write-once before smp_init)
+    u64 wall_offset_ns;   // CLOCK_REALTIME = mono + this (atomic; settime updates)
+    u64 reserved[4];      // zeroed
+};
+```
+
+The reader computes:
+```
+cnt  = read CNTVCT_EL0
+mono = (cnt / freq) * 1e9 + (cnt % freq) * 1e9 / freq   // == timer_now_ns()
+real = mono + wall_offset_ns                            // == timer_realtime_ns()
+```
+
+### Why no code page and no seqlock
+
+- **No code page.** Linux ships a vDSO *code* page (`__kernel_clock_gettime` +
+  ELF symbol resolution). Thylacine doesn't need it — EL0 reads `CNTVCT_EL0`
+  itself, so no kernel code runs in EL0; the reader does the arithmetic inline.
+- **No seqlock.** The reader needs two values, both trivially consistent:
+  `freq` is write-once before `smp_init` (and *must* come from the page —
+  `CNTFRQ_EL0` is not EL0-readable, only the counter is), and `wall_offset_ns`
+  is a single aligned `u64` written by one `__atomic_store` in
+  `wallclock_publish_ns` (the boot anchor + every `SYS_CLOCK_SETTIME`). A
+  concurrent reader sees old-or-new, never torn — the LS-K single-`u64` design.
+
+### Discovery — auxv
+
+The page VA is delivered in a new Thylacine-private auxv entry,
+`AT_VDSO_CLOCK = 0x5654`, pushed by `exec_fill_auxv` (the builder both Shape-A
+and Shape-B frames route through). It sits **outside** the Linux/System V `AT_`
+range so a pouch/musl binary stores-and-ignores it; native readers (libthyla-rs,
+the Go fork) query it at `_start` and cache the pointer. A reader whose
+`magic`/`version` does not validate **falls back to `SYS_CLOCK_GETTIME`** — the
+vDSO is best-effort and never a boot gate (`exec_map_vdso` returns 0 on OOM, the
+auxv entry is omitted, the frame stays well-formed).
+
+### Lifecycle + isolation
+
+`vdso_init` (`kernel/main.c`, after `burrow_init` + the boot anchor) allocates
+the page via `burrow_create_anon(PAGE_SIZE)` and **never unref's it** — the
+Burrow's `handle_count` stays 1 forever, so the page is never freed even as Procs
+map and unmap it. At exec, `burrow_map(p, vdso_clock_burrow(), EXEC_USER_VDSO_BASE,
+PAGE_SIZE, VMA_PROT_READ)` adds a `mapping_count` ref that `vma_drain` drops at
+teardown; the shared page survives. The mapping is **RO+XN** (W^X-clean, I-12), a
+**dedicated** page holding only the four timekeeping scalars (no pointers, no
+secrets, no KASLR — I-13), and a user **write faults** (`userland_demand_page`
+rejects a write on a read-only VMA) so no Proc can corrupt the shared timebase.
+
+Audit-trigger surface (`CLAUDE.md` + ARCH §25.4); binding design
+`docs/VDSO-DESIGN.md`. Tests: `vdso.page_populated` / `publish_updates` /
+`mono_matches_timer` / `maps_ro_read` (the PTE points at the shared page) /
+`maps_ro_write_faults` (a write is rejected).
 
 ---
 

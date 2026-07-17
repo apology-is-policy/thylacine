@@ -28,7 +28,10 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <sched.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 // emit — write the whole NUL-terminated string to stdout, looping on
@@ -72,6 +75,140 @@ int main(void) {
     }
     if (emit("pouch-hello: open -> ENOENT (16b-gamma openat live)\n") != 0)
         return 1;
+
+    // #37: pread/pwrite ride SYS_PREAD/SYS_PWRITE (musl's pread64/pwrite64
+    // seam numbers went 0xFFFF -> 85/86). Pre-#37 both short-circuited to
+    // ENOSYS, so a successful pread IS the wiring proof. /welcome is the
+    // read-only devramfs smoke file ("Welcome to Thylacine ramfs.\n",
+    // pinned by tools/build.sh) -- runs PRE-pivot like the stdio prover's
+    // /version read. The read()-pread()-read() sandwich proves the POSIX
+    // cursor contract end-to-end through musl: the positioned read must
+    // not move the fd cursor.
+    {
+        int fd = open("/welcome", O_RDONLY);
+        if (fd < 0) {
+            (void)emit("pouch-hello: FAIL open /welcome\n");
+            return 1;
+        }
+        char a[4], b[4], c[3];
+        if (read(fd, a, 4) != 4 || memcmp(a, "Welc", 4) != 0) {
+            (void)emit("pouch-hello: FAIL read /welcome head\n");
+            return 1;
+        }
+        errno = 0;
+        ssize_t pn = pread(fd, b, 4, 1);
+        if (pn != 4 || memcmp(b, "elco", 4) != 0) {
+            (void)emit(errno == ENOSYS
+                       ? "pouch-hello: FAIL pread -> ENOSYS (seam not wired)\n"
+                       : "pouch-hello: FAIL pread @1 content\n");
+            return 1;
+        }
+        if (read(fd, c, 3) != 3 || memcmp(c, "ome", 3) != 0) {
+            (void)emit("pouch-hello: FAIL cursor moved by pread\n");
+            return 1;
+        }
+        // pwrite must reach the kernel (devramfs is read-only and the fd is
+        // O_RDONLY, so it fails there) -- ENOSYS would mean the seam number
+        // never left musl.
+        errno = 0;
+        if (pwrite(fd, "x", 1, 0) != -1 || errno == ENOSYS) {
+            (void)emit("pouch-hello: FAIL pwrite seam (expected kernel -1, not ENOSYS)\n");
+            return 1;
+        }
+        (void)close(fd);
+        if (emit("pouch-hello: pread/pwrite seam ok (#37: cursor untouched, wired to 85/86)\n") != 0)
+            return 1;
+    }
+
+    // #33: sched_yield rides SYS_YIELD (musl's seam number went 0xFFFF -> 87).
+    // Pre-#33 it short-circuited to ENOSYS -> musl returned -1, so rc == 0 IS
+    // the wiring proof (the kernel handler always returns 0).
+    errno = 0;
+    if (sched_yield() != 0) {
+        (void)emit(errno == ENOSYS
+                   ? "pouch-hello: FAIL sched_yield -> ENOSYS (seam not wired)\n"
+                   : "pouch-hello: FAIL sched_yield rc\n");
+        return 1;
+    }
+    if (emit("pouch-hello: sched_yield ok (#33: wired to 87)\n") != 0)
+        return 1;
+
+    // POUNCE P-4 (patch 0019): stat(path) rides SYS_STAT (musl's fstatat
+    // AT_FDCWD/absolute forms went 0xFFFF -> SYS_thyla_stat 88; there is
+    // no aarch64 __NR_stat, so pre-0019 the whole stat(path) family
+    // short-circuited to ENOSYS -- success IS the wiring proof). Field
+    // equality against fstat(2) on the same file proves the 0019 t_stat
+    // translation agrees with 0010's (both mirror the 80-byte kernel
+    // struct); the miss leg proves resolution errnos pass through.
+    {
+        struct stat st, fst;
+        errno = 0;
+        if (stat("/welcome", &st) != 0) {
+            (void)emit(errno == ENOSYS
+                       ? "pouch-hello: FAIL stat -> ENOSYS (0019 seam not wired)\n"
+                       : "pouch-hello: FAIL stat /welcome\n");
+            return 1;
+        }
+        int fd = open("/welcome", O_RDONLY);
+        if (fd < 0 || fstat(fd, &fst) != 0) {
+            (void)emit("pouch-hello: FAIL fstat /welcome (stat probe)\n");
+            return 1;
+        }
+        (void)close(fd);
+        if (st.st_size != fst.st_size || st.st_ino != fst.st_ino ||
+            st.st_mode != fst.st_mode || st.st_uid != fst.st_uid ||
+            st.st_gid != fst.st_gid) {
+            (void)emit("pouch-hello: FAIL stat/fstat field mismatch\n");
+            return 1;
+        }
+        errno = 0;
+        if (stat("/no-such-pouch-stat-probe", &st) != -1 || errno != ENOENT) {
+            (void)emit("pouch-hello: FAIL stat miss -> ENOENT\n");
+            return 1;
+        }
+        if (emit("pouch-hello: stat(path) ok (0019: SYS_STAT=88, fields == fstat, miss -> ENOENT)\n") != 0)
+            return 1;
+    }
+
+    // clock_gettime rides SYS_CLOCK_GETTIME (musl's seam number went
+    // 0xFFFF -> 75; the LS-K kernel surface predates the wiring). Pre-wiring
+    // it short-circuited to ENOSYS and left the timespec untouched, so a
+    // 0-rc + a sane advancing MONOTONIC value IS the wiring proof. musl
+    // routes gettimeofday()/time() through the same call, so this covers
+    // the whole ported-code time family.
+    {
+        struct timespec t1, t2;
+        errno = 0;
+        if (clock_gettime(CLOCK_MONOTONIC, &t1) != 0) {
+            (void)emit(errno == ENOSYS
+                       ? "pouch-hello: FAIL clock_gettime -> ENOSYS (seam not wired)\n"
+                       : "pouch-hello: FAIL clock_gettime rc\n");
+            return 1;
+        }
+        for (volatile int spin = 0; spin < 50000; spin++) { }
+        if (clock_gettime(CLOCK_MONOTONIC, &t2) != 0) {
+            (void)emit("pouch-hello: FAIL clock_gettime 2nd rc\n");
+            return 1;
+        }
+        if (t1.tv_sec == 0 && t1.tv_nsec == 0) {
+            (void)emit("pouch-hello: FAIL clock_gettime returned zero time\n");
+            return 1;
+        }
+        if (t2.tv_sec < t1.tv_sec ||
+            (t2.tv_sec == t1.tv_sec && t2.tv_nsec < t1.tv_nsec)) {
+            (void)emit("pouch-hello: FAIL MONOTONIC went backward\n");
+            return 1;
+        }
+        errno = 0;
+        if (clock_gettime(CLOCK_REALTIME, &t1) != 0 || t1.tv_sec < 1577836800) {
+            // 2020-01-01 floor: the LS-K RTC anchor guarantees a post-2020
+            // wall clock on QEMU-virt (PL031 present).
+            (void)emit("pouch-hello: FAIL clock_gettime REALTIME\n");
+            return 1;
+        }
+        if (emit("pouch-hello: clock_gettime ok (wired to 75: MONOTONIC advances, REALTIME > 2020)\n") != 0)
+            return 1;
+    }
 
     if (emit("pouch-hello: exit 0\n") != 0)
         return 1;

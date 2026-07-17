@@ -183,10 +183,15 @@ kernel-pinned `Spoor` (the executable's Chan) at a base offset. It holds:
    KB). `SYS_SPAWN_BLOB_MAX` degrades to a sanity bound on the *header*, not the
    whole binary. The 1-MiB wall is gone.
 3. For each `PT_LOAD` segment, create a VMA over a Burrow:
-   - **Text (`R+X`, read-only):** a `BURROW_TYPE_FILE` Burrow over the pinned
-     Spoor at the segment's file offset. Demand-paged; **shared read-only across
-     Procs** via the Image cache (§4.4). W^X-clean by construction (text is never
-     writable).
+   - **Non-writable (`PF_W` clear — `R+X` text AND `R`-only rodata; the #45
+     extension, §4.6):** a `BURROW_TYPE_FILE` Burrow over the pinned Spoor at
+     the segment's file offset. Demand-paged; **shared read-only across Procs**
+     via the Image cache (§4.4); the PTE prot is the segment's ELF prot (`R+X`
+     for text, `R`-only [XN] for rodata). W^X-clean by construction (`elf_load`
+     rejects `PF_W|PF_X`; nothing non-writable is ever writable). Gated by
+     `round_up(filesz) == round_up(memsz)` (every mapped page has a file page
+     behind it) — a whole-bss-page tail routes eager. Originally text-only;
+     generalized to all non-writable segments at #45 (§4.6).
    - **Data (`R+W`):** at v1.0 (D4), eager-copy the segment's file bytes into a
      **private anonymous** Burrow at exec (per-segment, not the whole ELF), `+`
      zero-fill `.bss`. No file-backed writable mapping is ever exposed — this
@@ -241,6 +246,72 @@ terminate, *attributable* (which page, which Spoor) — **never** a silent
 zero-fill of executable text, **never** a whole-system stall. The hostile-ecode
 bounding (I-14) extends to the page-in path.
 
+### 4.6 R-only (rodata) segments ride the file-backed path (#45, the CHASE addendum — 2026-07-11)
+
+The original dispatch file-backed only `PF_X` text; the R-only rodata segment
+was lumped into the eager-copy class with writable data. The CHASE D44
+decomposition measured what that costs: a modern Go binary carries roughly
+HALF its bytes in the R-only segment (compile: 8.62 MiB R+X / **7.89 MiB R** /
+0.99 MiB RW filesz; the `go` command: 5.41 / **5.92** / 0.41), so every exec
+eagerly `dev->read` the R-only megabytes into a PRIVATE anon copy — ~89% of
+the per-exec eager bytes, ~792 MiB re-read across one cold `go build`'s 91
+compile execs, and a private per-live-Proc RAM copy under parallel builds.
+
+An R-only segment is semantically text-minus-the-X-bit: immutable, never
+written, safely shared. The dispatch predicate generalizes from `PF_X` to
+`PF_R && !PF_W` (the `PF_R` requirement — #45 audit F2 — keeps a no-access
+`flags==0` PT_LOAD on the eager path; it can never be faulted, so file-backing
+it would only pin an idle Image slot):
+
+    file_shareable = (flags & PF_R) && !(flags & PF_W) &&
+                     round_up(filesz) == round_up(memsz)
+
+Text behavior is byte-identical (`elf_load` rejects `PF_W|PF_X`, so
+`PF_X ⇒ !PF_W`). Writable segments keep the D4 eager-copy-into-anon path.
+
+Soundness — why this is an extension, not new mechanism:
+
+- **All seven I-36 conditions apply verbatim** — none is text-specific.
+  Condition 4 governs WRITABLE data, which stays eager-copied anon; condition
+  3's W^X: rodata maps `R`-only (no W, no X) — trivially clean.
+- **The fault arm is already prot-general**: `file_install_locked` /
+  `file_install_cluster_locked` install at `vma->prot`; the #317 I-cache sync
+  is gated on `freq->exec` — a rodata page is never synced, which is sound
+  because each FILE Burrow backs exactly ONE segment at ONE **exec-class**, so
+  no page ever migrates from a non-exec to an exec mapping. **This is ENFORCED,
+  not assumed (#45 audit F1)**: the Image key is `(dc, devno, qid.path,
+  qid.vers, file_offset, size, exec)` — the `exec` component splits a crafted
+  ELF's aliased R+X + R-only PT_LOADs (identical file window, different X-ness)
+  into DISTINCT Burrows, so no single FILE Burrow is ever mapped at both an
+  executable and a non-executable prot. Without it, a rodata-first fill (no
+  sync) then a text resident-hit would execute stale I-cache lines — the #317
+  hazard, reachable by a crafted binary; the exec key closes it. A legit binary
+  is unaffected (the same file's same segment always carries the same X bit ->
+  the same key -> maximal cross-Proc sharing).
+- **The Image cache already keys per-segment** `(dc, devno, qid.path,
+  qid.vers, file_offset, size)`; a binary now occupies two entries (text +
+  rodata). `IMAGE_CACHE_MAX` doubles 64 → 128 to keep the effective binary
+  capacity (~4 KiB more BSS; the LRU-idle eviction + the full-of-live bypass
+  degrade are unchanged).
+- **The last-page tail** past `filesz` is the same file padding the text path
+  already exposes (page-aligned segment starts — enforced by the dispatch —
+  make cross-segment page overlap impossible; an EOF tail is KP_ZERO via the
+  audited short-read loop discipline).
+- **torpor R-5 F1 composes**: the pre-fault before `torpor_lock` is
+  address-based (it faults in whatever backs the word), so a futex word in a
+  FILE rodata page cannot newly sleep under the lock. A rodata futex word can
+  never be WRITTEN by userspace, so a matched wait sleeps until an explicit
+  wake — userspace's own bug, same as Linux; no kernel hazard.
+- **I-32 posture unchanged**: file pages keep the v1.0 charge model (the
+  per-page charge is the recorded v1.x seam); rodata widens the shared
+  uncharged set exactly as text does.
+
+What this buys (the D44 measurement driving the change): the first exec per
+boot demand-pages only the touched rodata subset (64-page read-ahead
+clusters); every later exec Image-hits — zero reads, zero copies (previously
+an ~8.9 MiB eager copy per compile exec even when Larder-served). Live Procs
+share one resident rodata copy (a RAM win under parallel builds).
+
 ---
 
 ## 5. The keystone: correcting ARCH §6.5
@@ -292,7 +363,10 @@ sufficient, become a §28 invariant. Kernel-internal file-backed exec is sound i
    floor (I-32) like anon; shared text charged once (the I-7 dual-refcount).
 
 Conditions 1-2 are free from Stratum; 3-4-7 are existing mechanisms; 5-6 are the
-genuinely-new bits, and the hard primitive (5) already exists. The invariant
+genuinely-new bits, and the hard primitive (5) already exists. The conditions
+are segment-class-generic: an R-only (rodata) segment satisfies them
+identically — the #45 extension (§4.6) routes it through the same path with
+the X bit dropped. The invariant
 number is assigned in the ARCH §28 edit (the Imperium arc reserves I-35; this
 takes the next free slot).
 

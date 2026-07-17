@@ -1239,3 +1239,70 @@ void test_9p_wire_tweftio_round_trip(void) {
                                     &off_out, &len_out, &dir_out), -1,
                    "Tweftio parse NULL fid");
 }
+
+void test_9p_wire_twalkgetattr_round_trip(void) {
+    // Build: fid=3, newfid=NOFID (the walk-query form), mask=ALL, 2 names.
+    const u8 *names[2] = { (const u8 *)"ab", (const u8 *)"c" };
+    const size_t lens[2] = { 2, 1 };
+    int n = p9_build_twalkgetattr(g_buf, sizeof(g_buf), 7, 3, P9_NOFID,
+                                  P9_GETATTR_ALL, 2, names, lens);
+    // hdr(7) + fid(4) + newfid(4) + mask(8) + nwname(2) + (2+2) + (2+1) = 32
+    TEST_EXPECT_EQ(n, 32,                              "Twalkgetattr total len");
+    TEST_EXPECT_EQ((u64)g_buf[4], (u64)P9_TWALKGETATTR, "type 140");
+    TEST_EXPECT_EQ((u64)(g_buf[5] | ((u16)g_buf[6] << 8)), (u64)7, "tag");
+    TEST_EXPECT_EQ((u64)g_buf[7], (u64)3,              "fid LE low");
+    TEST_ASSERT(g_buf[11] == 0xFF && g_buf[14] == 0xFF, "newfid = NOFID");
+    TEST_EXPECT_EQ((u64)(g_buf[23] | ((u16)g_buf[24] << 8)), (u64)2, "nwname");
+    TEST_EXPECT_EQ((u64)g_buf[27], (u64)'a',           "name0 bytes follow");
+
+    // nwname > P9_MAX_WALK rejected at build.
+    TEST_EXPECT_EQ(p9_build_twalkgetattr(g_buf, sizeof(g_buf), 7, 3, 4,
+                                         0, 17, names, lens), -1,
+                   "nwname 17 rejected");
+
+    // Craft an Rwalkgetattr with 2 elements; parse + extract.
+    size_t total = P9_HDR_LEN + 2 + 2 * P9_WGA_BODY_LEN;
+    for (size_t i = 0; i < total; i++) g_buf[i] = 0;
+    g_buf[0] = (u8)(total & 0xff); g_buf[1] = (u8)((total >> 8) & 0xff);
+    g_buf[4] = P9_RWALKGETATTR;
+    g_buf[5] = 7; g_buf[6] = 0;
+    g_buf[7] = 2; g_buf[8] = 0;                        // nwqid = 2
+    u8 *e0 = g_buf + 9, *e1 = g_buf + 9 + P9_WGA_BODY_LEN;
+    e0[8] = P9_QTDIR;  e0[13] = 9;                     // qid0: dir, path 9
+    e1[8] = P9_QTFILE; e1[13] = 10; e1[49] = 0x2A;     // qid1: file, size 42
+
+    u16 tag_out, nwqid;
+    struct p9_qid qids[P9_MAX_WALK];
+    const u8 *body = (const u8 *)0;
+    int rc = p9_parse_rwalkgetattr(g_buf, total, &tag_out, &nwqid, qids,
+                                   P9_MAX_WALK, &body);
+    TEST_EXPECT_EQ(rc, 0,                              "Rwalkgetattr parse ok");
+    TEST_EXPECT_EQ((u64)tag_out, (u64)7,               "tag round-trip");
+    TEST_EXPECT_EQ((u64)nwqid, (u64)2,                 "nwqid 2");
+    TEST_EXPECT_EQ(qids[0].path, (u64)9,               "qid0 path");
+    TEST_EXPECT_EQ(qids[1].path, (u64)10,              "qid1 path");
+    TEST_ASSERT(body == g_buf + 9,                     "body aliases elements");
+
+    struct p9_attr a;
+    rc = p9_parse_getattr_body(body + P9_WGA_BODY_LEN, P9_WGA_BODY_LEN, &a);
+    TEST_EXPECT_EQ(rc, (int)P9_WGA_BODY_LEN,           "body parse consumed 153");
+    TEST_EXPECT_EQ(a.size, (u64)42,                    "attr size 42");
+    TEST_EXPECT_EQ(a.qid.path, (u64)10,                "attr embedded qid");
+
+    // Truncated frame rejected (len one short of the header's claim).
+    rc = p9_parse_rwalkgetattr(g_buf, total - 1, &tag_out, &nwqid, qids,
+                               P9_MAX_WALK, &body);
+    TEST_EXPECT_EQ(rc, -1,                             "short frame rejected");
+
+    // nwqid/body-length mismatch rejected (claim 3, provide 2 elements).
+    g_buf[7] = 3;
+    rc = p9_parse_rwalkgetattr(g_buf, total, &tag_out, &nwqid, qids,
+                               P9_MAX_WALK, &body);
+    TEST_EXPECT_EQ(rc, -1,                             "count/length mismatch rejected");
+    g_buf[7] = 2;
+
+    // Caller cap bound honored (cap 1 < nwqid 2).
+    rc = p9_parse_rwalkgetattr(g_buf, total, &tag_out, &nwqid, qids,
+                               1, &body);
+    TEST_EXPECT_EQ(rc, -1,                             "qid_cap bound rejected");
+}

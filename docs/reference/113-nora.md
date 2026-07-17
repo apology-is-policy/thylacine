@@ -202,6 +202,36 @@ forced). `/<pat>` Enter searches forward (wrapping); `n` repeats. `nora -R
   model, not tree-sitter at v1.0): the view colors tokens from the Bonfire syntax
   hues. Off the edit hot-path (re-lexed per redraw, at human input speed).
 
+## Format-on-save (gofmt, Go Stage 6)
+
+A `:w`/`:wq` of a path ending `.go` pipes the buffer THROUGH gofmt before the
+durable write (`main.rs::gofmt_source` -> `/goroot/bin/gofmt`, stdin->stdout
+mode): one write lands the formatted bytes; unformatted content never touches
+disk; no tempfile, no `-w`-then-reload. On success with changed output,
+`TextBuffer::replace_content` swaps the buffer (an undo checkpoint first --
+one `u` restores the pre-format text; cursor clamped to the new bounds).
+
+**A formatter can never block or lose a save**: a gofmt reject (the normal
+mid-edit syntax error) or an absent toolchain (non-bake image, confined
+namespace -> spawn fails) saves the buffer AS-IS; a reject additionally notes
+the first diagnostic line in the status bar ("saved unformatted; gofmt: ...").
+Guards on the adopt path: empty-output-for-nonempty-input and non-UTF-8 both
+refuse the result (Unavailable) rather than clobber the buffer; the stdout
+read is capped at MAX_FILE (slurp_capped errors on overflow, never truncates).
+
+Deadlock-freedom: gofmt slurps ALL stdin before emitting (processFile does
+io.ReadAll first), so write-all -> close -> read-stdout -> read-stderr is
+safe; go/parser bails after ~10 errors, keeping stderr far under the 4 KiB
+kernel pipe ring while stdout is being drained. All three child stdio slots
+are `Piped`: the child can never scribble on the raw-mode alt-screen or read
+nora's keystrokes (the I-27 posture is unchanged -- nora still never touches
+consctl). nora is not self-managing (no notes fd), so a died-early gofmt's
+`pipe` note is dropped by the kernel (LS-5: only `interrupt`
+default-terminates) and the failed stdin write surfaces as a plain Err. The
+child is ALWAYS reaped (nora is long-lived; an unreaped child is a zombie
+leak). Proven end-to-end by `tools/interactive/go6.exp` (a tab appears in the
+saved file that was never typed).
+
 ## Console discipline (I-27)
 
 `nora` acquires the **screen** on fd 1 (Kaua `Terminal`) and **reads input** on
@@ -279,6 +309,14 @@ open / edit / `:w` / `cat`).
 
 ## Known caveats / seams
 
+- **Lone-Esc under a long typed burst (task #65)**: nora repaints a full frame
+  per keystroke, so a long burst of injected input is still draining when a
+  trailing Esc arrives; kaua's parser resolves a lone Esc only at a read
+  boundary, so an Esc at an in-burst read tail Alt-joins with the NEXT read's
+  first byte -- insert mode never exits (the go6.exp attempt-1..3 failure:
+  `:wq` typed into the buffer). Drivers type per-line + double-Esc + gate on
+  the `NOR` status chip (see go6.exp); the real fix is kaua-side ESC-timeout
+  disambiguation (#65). Human typing is far below the trigger rate.
 - **Console size** is measured at launch via a CPR round-trip
   (`kaua::query::terminal_size`, #117) so nora fills the real terminal; it falls
   back to **80×24** when the terminal does not answer (a dumb terminal / the

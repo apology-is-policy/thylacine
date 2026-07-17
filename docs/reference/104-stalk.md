@@ -42,16 +42,28 @@ because they had never been mounted.
 #define STALK_MOUNT 2   // resolve to the mount point's OWN identity (final
                         //   component NOT crossed) + no open. SYS_MOUNT/UNMOUNT
                         //   use it so MREPL re-keys the same underlying point.
+#define STALK_STAT  3   // resolve for METADATA only (POUNCE): like STALK_WALK,
+                        //   but the final run may be the walk-QUERY -- no
+                        //   quarry Spoor/fid ever exists. Use via stalk_stat().
 #define STALK_MAX_DEPTH 40
 
 struct Spoor *stalk(struct Proc *p, struct Spoor *start,
                     const char *path, u64 pathlen, int amode, u32 omode);
+
+// stalk_stat: fill *out with the LEAF's metadata; the SYS_STAT (= 88) core.
+// X-search identical to a STALK_WALK resolution; 0 on success, -1 + *errp on
+// failure. The 1-RPC / 0-handle path stat on a walk_attrs-capable Dev.
+int stalk_stat(struct Proc *p, struct Spoor *start,
+               const char *path, u64 pathlen,
+               struct t_stat *out, int *errp);
 ```
 
-stalk-2 added `STALK_MOUNT` and the mount-crossing behavior (below). The `amode`
-is validated at entry (`amode != STALK_WALK && != STALK_OPEN && != STALK_MOUNT
--> NULL`); a sub-chunk adding a new amode MUST extend this guard AND give it a
-final-hop dispatch arm (stalk-1 audit F1).
+stalk-2 added `STALK_MOUNT` and the mount-crossing behavior (below); POUNCE
+added `STALK_STAT` + `stalk_stat()`. The `amode` is validated at entry
+(anything outside {WALK, OPEN, MOUNT, STAT} -> NULL); a sub-chunk adding a new
+amode MUST extend this guard AND give it a final-hop dispatch arm (stalk-1
+audit F1). Passing `STALK_STAT` through `stalk()`/`stalk_err()` (no stat sink)
+degrades to `STALK_WALK` behavior.
 
 - `p` -- the calling Proc (for the per-component `perm_check`).
 - `start` -- the base Spoor. **BORROWED**: the caller owns it (a handle's Spoor
@@ -178,13 +190,75 @@ exactly once. The leak/UAF balance is verified by `stalk.lifetime_no_leak` (the
 `spoor_total_allocated - spoor_total_freed` live count returns to baseline across
 both a successful resolve+clunk and a denied resolve).
 
-### No component batching at v1.0
+### The POUNCE — component batching with kernel-side checks (P-3)
 
-stalk walks **one** component per `Dev.walk` with a kernel X-check at each hop,
-even though `dev9p_walk` can batch up to `P9_MAX_WALK = 16` components into one
-`Twalk`. Batching would skip the kernel's intermediate X-checks (delegating them
-to the server); correctness-first, batching is a documented v1.x perf
-optimization. Cost: a deep dev9p path is N x [Tgetattr + Twalk].
+stalk originally walked **one** component per `Dev.walk` (one Twalk RPC) with
+a kernel X-check per hop (one Tgetattr RPC on a perm-enforced Dev) — a deep
+dev9p path cost N x [Tgetattr + Twalk]. The POUNCE (`docs/POUNCE-DESIGN.md`;
+the 2026-07-07 metadata-RT arc) batches a **run** of consecutive real
+components through ONE `Dev.walk_attrs` call (dev9p: one `Twalkgetattr` 140
+RPC returning each walked component's full attributes), then enforces the
+per-component X-search + mount scan in a LEFT-TO-RIGHT **post-scan** whose
+observable outcome is byte-identical to the per-component loop. The original
+concern ("batching would skip the kernel's intermediate X-checks") is
+resolved by the fusion: the attrs arrive WITH the walk, so every check still
+runs kernel-side against server-fresh samples of this resolution — zero
+staleness added.
+
+Mechanics (`kernel/stalk.c`, the pounce block inside `stalk_core`):
+
+- **Run gather**: the maximal sequence of consecutive real components; `.` /
+  `..` / an over-long token ends the run and is left for the outer loop
+  (preserving its existing disposition and ordering). Capped at
+  `DEV_WALK_ATTRS_MAX` (== `P9_MAX_WALK` = 16) and the remaining
+  logical-depth budget.
+- **The fail-ordering invariant** (the audit obligation): the post-scan
+  consumes results strictly left-to-right; an X-denial at component k MASKS
+  everything past k INCLUDING a deeper walk-miss (`T_E_ACCES`, never
+  `T_E_NOENT`) — a caller cannot existence-probe under a forbidden
+  directory. `stalk.pounce_acces_masks_noent` pins it.
+- **Mount-mid-run split**: the batch may walk PAST a mount point server-side
+  (the underlying tree's answer, including a partial walk's miss verdict, is
+  then junk). The post-scan tests each walked component's would-be identity
+  (the run parent's `(dc, devno)` + the reply qid) against the mount table
+  (`mount_is_point_id`); on a hit it discards the batch, re-walks the
+  validated prefix to materialize the mount point (one extra RPC; rare),
+  pushes it, and resumes — the next iteration's cross-on-descent then does
+  today's exact cross + X-check of the MOUNTED root. The leaf of a full BIND
+  walk is exempt (the batch Spoor IS the mount point; the existing quarry /
+  descent cross machinery handles it). `stalk.pounce_full_walk_past_mount`
+  pins that a full underlying walk past a mount is discarded.
+- **`..` disables the pounce** (`path_has_dotdot`): a run compresses its
+  intermediates into ONE trail entry, so a `..` pop into the middle of a
+  pounced run has no Spoor to land on. Any `..` in the path takes the whole
+  resolution down the per-component loop (the design's stated worst case;
+  resolved paths in the motivating workloads are lexically cleaned).
+  `logical_depth` (components consumed) enforces the `STALK_MAX_DEPTH`
+  surface that the compressed trail `depth` no longer measures.
+- **Carried attrs**: a run's leaf record seeds the NEXT run's base X-check
+  and the `STALK_OPEN` final-hop R/W check (saving those Tgetattrs);
+  invalidated on every event that changes the tip (cross-on-descent, quarry
+  cross, `..` pop, an old-path hop, a split push).
+- **The walk-query (`STALK_STAT` / `stalk_stat`)**: the FINAL run of a stat
+  resolution passes `nc == NULL` — dev9p sends `newfid = P9_NOFID`, nothing
+  binds on either end, and the leaf's fused record is the answer: a 1-RPC,
+  0-handle, 0-fid path stat (`SYS_STAT = 88` rides it). Fallbacks (a
+  walk_attrs-less final Dev, a mount-point leaf, a zero-component path)
+  materialize a quarry and `spoor_stat_native` it — the old O_PATH+fstat
+  shape. `stalk.stat_query` pins the no-materialization property via the
+  live-Spoor count.
+- **The capability latch**: `Twalkgetattr` is a Stratum extension; netd's
+  `/net` answers it `Rlerror(ENOSYS)`. dev9p latches the first ENOSYS per
+  session (`p9_client.wga_unsupported`) and thereafter returns the
+  distinguished `DEV_WALK_ATTRS_UNSUPPORTED` sentinel RPC-free; the resolver
+  falls back to the per-component loop (`stalk.pounce_unsupported_fallback`).
+  The sentinel is a static object — it must never reach `walkqid_free`.
+
+Devs without the slot (everything except dev9p + devramfs) keep the
+per-component loop unchanged. `stalkfix` (the test fixture) implements
+`walk_attrs`, so the ENTIRE pre-existing stalk battery runs through the
+pounce — their unchanged expectations are the parity proof, plus the explicit
+A/B `stalk.pounce_parity_nowa` against the slot-less twin fixture.
 
 ### Mount crossing (stalk-2, Plan 9 `domount`)
 
@@ -332,7 +406,22 @@ clarity bar there, and the discipline is not to force it.
   `opath_no_open` (STALK_WALK leaves COPEN clear), `open_root` (the 0-component
   clone-walk path), `depth_cap` (a self-referential `loop` node overflows the
   trail cap -> clean NULL), `lifetime_no_leak` (Spoor count balance across
-  success + denial). **stalk-2 cross-mount** (6 more): `cross_mount` (graft
+  success + denial). **POUNCE** (7 more + the whole battery): `stalkfix` now
+  implements `walk_attrs`, so EVERY test above runs through the pounce (their
+  unchanged expectations = the parity proof); `pounce_engaged` (one batched
+  call, zero per-component walks -- non-vacuity), `pounce_acces_masks_noent`
+  (the fail-ordering invariant), `pounce_parity_nowa` (explicit A/B vs the
+  slot-less twin), `pounce_full_walk_past_mount` (the batch's underlying
+  full-walk result is discarded at a mount; the split + cross resolve in the
+  mounted tree), `pounce_unsupported_fallback` (the ENOSYS-latch sentinel
+  degrades to the loop with identical results), `stat_query` (the 1-RPC stat
+  materializes NO Spoor -- live-count pinned), `stat_mount_leaf` (stat of a
+  mount point reports the MOUNTED root via the fallback), plus
+  `sys_stat.for_proc` (the SYS_STAT inner: absolute/relative/cwd-join,
+  -T_E_NOENT / -T_E_ACCES passthrough). Plus `devramfs.walk_attrs` +
+  `dev9p.walk_attrs` (the two slot impls: bind/partial/query contract) and
+  the joey boot probe (SYS_STAT end-to-end through the real SVC + uaccess).
+  **stalk-2 cross-mount** (6 more): `cross_mount` (graft
   subtree onto a dir, resolve THROUGH it), `cross_mount_final_quarry` (open a
   mount point -> the mounted root), `cross_mount_xsearch_deny` (the MOUNTED
   root's no-x perms deny traversal), `mount_amode_no_cross` (STALK_MOUNT returns

@@ -48,6 +48,8 @@
 #define THYLACINE_DEV9P_H
 
 #include <thylacine/types.h>
+#include <thylacine/spinlock.h>  // spin_lock_t (the write-behind wb_lock)
+#include <thylacine/syscall.h>   // struct t_stat (the cached-open co_stat field)
 
 struct p9_client;
 struct p9_attached;
@@ -90,6 +92,18 @@ struct dev9p_priv {
     bool               fid_owned;  // true iff close should clunk; root Spoor's fid
                                    // (the one from p9_client_handshake) is NOT clunked
                                    // by dev9p — the higher layer manages it.
+    // G2 (the dir-fid cache; docs/FID-LIFECYCLE-DESIGN.md section 4):
+    // fid_gen is the Larder invalidation-gen snapshot at the fid's MINT (the
+    // RPC bind tail or a dir-fid consume). dev9p_close parks an unopened dir
+    // fid ONLY if no invalidation event has named this qid since fid_gen
+    // (larder_qid_staled_since over the G4 ring) -- a checked-out fid whose
+    // dir was rmdir'd/replaced mid-use must die, never re-park. fid_suspect
+    // latches when a by-name op (create/unlink/rename/wstat) ERRORS through
+    // this priv -- the backstop that breaks the stale-fid re-park loop when
+    // the staleness event was unknowable (the evicted-dentry residual): a fid
+    // that misbehaved once is clunked at close, never re-served.
+    u64                fid_gen;
+    bool               fid_suspect;
     // F2: attached_owner is the session-resource holder. NULL when the
     // p9_client is externally owned (test path); non-NULL for every priv
     // derived from a SYS_ATTACH_9P session (root + walks). Each non-NULL
@@ -97,8 +111,11 @@ struct dev9p_priv {
     struct p9_attached       *attached_owner;
     // net-6b-2b: lazily-allocated poll state for a QTPOLL (netd `ready`) Spoor;
     // NULL for every regular dev9p file (the common path). Allocated by dev9p_poll
-    // on the first poll of a readiness file; freed by dev9p_close. Owned by THIS
-    // priv (not shared across walks -- each walked Spoor gets its own priv).
+    // on the first poll of a readiness file. #294: independently REFCOUNTED -- the
+    // priv holds one ref (dropped via dev9p_poll_priv_release at dev9p_close), each
+    // outstanding readiness op holds one; freed when both drop (so an op the kthread
+    // still owns keeps it alive after this priv frees). Owned by THIS priv (not
+    // shared across walks -- each walked Spoor gets its own priv).
     struct dev9p_poll_state  *poll;
     // Weft-6a-2: lazily-bound per-flow ring share for a /net data fid; NULL for
     // every fd that has not gone zero-copy (the common path). Installed by
@@ -108,7 +125,78 @@ struct dev9p_priv {
     // __atomic-acquire; dev9p_close reads it plainly (it runs at the LAST ref, so
     // no concurrent mapper exists).
     struct weft_binding      *weft;
+    // FID-LIFECYCLE cached-open (docs/FID-LIFECYCLE-DESIGN.md section 3.3): the
+    // fidless open's per-open state. cached_open == true implies fid == P9_NOFID
+    // + fid_owned == false; co_buf holds the [0, co_size) content snapshot taken
+    // at open (NULL iff co_size == 0 -- the empty-file open), immutable for the
+    // Spoor's lifetime (reads copy out with no lock); co_stat is the open-time
+    // metadata (serves fstat -- the same close-to-open discipline as the attr
+    // cache). dev9p_close frees co_buf + uncharges the global budget.
+    bool                      cached_open;
+    u8                       *co_buf;
+    u64                       co_size;
+    struct t_stat             co_stat;
+    // F1 write-behind (LARDER-DESIGN section 12): the per-open-file append-run
+    // staging state. wb_lock is a PURE LEAF (only byte copies + state reads
+    // under it -- wire I/O never; nothing else is ever acquired under it).
+    // The run is the single contiguous byte range [wb_off, wb_off + wb_len)
+    // held in wb_buf; wb_base is the append ANCHOR (the file's known current
+    // end -- valid iff wb_known, born 0 at create/OTRUNC, advanced by
+    // completed flushes + completed write-throughs). wb_flushers counts
+    // in-flight flushes: while nonzero the run is FROZEN (no stage, no growth
+    // realloc -- a flusher reads wb_buf outside the lock) and concurrent
+    // writes go write-through; readers overlay the still-visible run.
+    // wb_err latches the first flush failure (positive errno); once set,
+    // every subsequent write/fsync on this fd returns it (the voted NFS
+    // error model) and the run is dropped.
+    spin_lock_t               wb_lock;
+    bool                      wb_eligible;  // create/OTRUNC-born + loose+cacheable plain file
+    bool                      wb_known;     // wb_base is the file's true current end
+    u32                       wb_flushers;  // in-flight flush count (freezes the run)
+    int                       wb_err;       // latched flush errno (0 = none)
+    u8                       *wb_buf;       // staged bytes (budget-charged wb_cap)
+    u32                       wb_cap;       // wb_buf allocation size
+    u32                       wb_len;       // staged byte count
+    u64                       wb_off;       // run start offset
+    u64                       wb_base;      // append anchor (valid iff wb_known)
 };
+
+// Cached-open bounds (FID-LIFECYCLE section 3.3; the CF-3 bounce-budget class --
+// the snapshot is user-drivable kernel heap). Per-file cap: beyond it the fid
+// RTs amortize against the read volume anyway (the target is the small go-cache
+// file, ~1.6 pages measured). Global outstanding-bytes budget: GLOBAL, not
+// per-Proc -- a cached-open fd crosses Proc boundaries (rfork inheritance,
+// handle transfer), so a per-Proc charge would unbalance at close-by-inheritor.
+// Exhaustion degrades the fast path only (the fallback is the normal open).
+#define DEV9P_CO_MAX_SIZE  (128u * 1024u)
+#define DEV9P_CO_BUDGET    (8u * 1024u * 1024u)
+
+// Diagnostics: bytes currently held by live cached-open snapshots (the global
+// budget's occupancy). Tests assert the charge/uncharge balance.
+u64 dev9p_co_budget_used(void);
+
+// Write-behind bounds (F1, LARDER-DESIGN section 12; the DEV9P_CO_* class).
+// Per-run buffer cap: two msize payloads -- steady-state staging turns the
+// measured 4-KiB write dribble into full-msize wire writes. Stage-size cap:
+// a bigger write is already wire-efficient and would stretch the copy held
+// under the priv spinlock -- it flushes the run then writes through. Global
+// outstanding-staged-bytes budget: GLOBAL, not per-Proc -- the priv crosses
+// Proc boundaries (handle_dup / rfork inheritance / the #926 close-at-exit
+// runs in whichever holder dies last), so a per-Proc charge would unbalance
+// at close-by-inheritor, exactly the DEV9P_CO_BUDGET reasoning above.
+// Exhaustion degrades to write-through (the strict-mount behavior).
+#define DEV9P_WB_CAP        (256u * 1024u)
+#define DEV9P_WB_STAGE_MAX  (32u * 1024u)
+#define DEV9P_WB_BUDGET     (8u * 1024u * 1024u)
+
+// Diagnostics: bytes currently held by live staged-run buffers (the global
+// wb budget's occupancy). Tests assert the charge/uncharge balance.
+u64 dev9p_wb_budget_used(void);
+
+// Test-only: bias the wb budget occupancy by +/-n (a signed add). Lets the
+// budget-denial fallback be exercised without minting DEV9P_WB_BUDGET worth
+// of live runs. Balanced add/subtract pairs only; never in production paths.
+void dev9p_wb_budget_bias_for_test(s64 n);
 
 #define DEV9P_PRIV_MAGIC 0x44395050u   // "D9PP" little-endian
 
@@ -151,6 +239,17 @@ int dev9p_client_fid(struct Spoor *c, struct p9_client **out_client, u32 *out_fi
 // from the write syscall handler with the caller's user VA (before any copy-in).
 int dev9p_weft_try_write(struct Spoor *spoor, u64 ubuf_va, u32 len, u32 *accepted);
 
+// Weft-6b-3 data drive (RX): try the zero-copy read path for a /net data fd whose
+// SYS_READ buffer points INTO its weft-bound shared ring. The kernel validates the
+// destination descriptor against the flow's private ring view (the I-30
+// validator-once) and issues Tweftio(READ); netd recvs IN PLACE into the ring +
+// replies the count. Returns 1 if handled (*got = bytes recv'd, written directly
+// into the guest's ring), 0 if NOT a weft read (the caller falls back to the
+// byte-copy path), -1 on a weft transport error. Called from the read syscall
+// handler with the caller's user VA; on a handled read the handler does NO
+// uaccess_store (netd already wrote the bytes into the guest's shared mapping).
+int dev9p_weft_try_read(struct Spoor *spoor, u64 ubuf_va, u32 len, u32 *got);
+
 // Resolve a dev9p-backed Spoor to its `struct dev9p_priv *` (dc + magic gated;
 // NULL if `c` is not a live dev9p Spoor). Exposed for kernel/dev9p_poll.c (the
 // `.poll` bridge reads p->poll + p->client + p->fid) + the dev9p_poll tests.
@@ -180,9 +279,18 @@ void dev9p_poll_init(void);
 // process context), reaps terminal ops, and garbage-collects stranded ops.
 void dev9p_poll_pump_main(void);
 
-// Release a priv's poll state at dev9p_close (frees p->poll if allocated). Safe
-// because the Spoor's last ref cannot drop while an op holds a pin on it, so at
-// close there is no outstanding op + no registered poller.
+// Release a priv's poll state at dev9p_close (#294 cancel-at-close,
+// specs/net_poll_teardown.tla). A registered poller holds the Spoor obj-ref, so
+// poll_list is empty at close, but an outstanding readiness op may still be live
+// (it pins the refcounted poll-state + the session, NOT the Spoor). This grabs +
+// cancels that op at the client (Tflush) -- so the subsequent `ready`-fd Tclunk in
+// dev9p_close frees the netd slot deterministically without orphaning the held
+// readiness Tread -- and drops the priv's poll-state ref.
 void dev9p_poll_priv_release(struct dev9p_priv *p);
+
+// Test accessor (test_dev9p): the live readiness-op registry length. Lets a test
+// assert the cancel-at-close teardown (op count back to baseline) without exposing
+// the static registry. Reads the atomic count; no lock needed.
+u32 dev9p_poll_op_count_for_test(void);
 
 #endif  // THYLACINE_DEV9P_H

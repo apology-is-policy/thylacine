@@ -421,6 +421,7 @@ small (<200 distinct) but every bug class reaches its violation in ≤ 6 steps
 | `SendIO(t, fid)` — symlink / mknod / link / mkdir / unlinkat / renameat | Send `Tsymlink` / `Tmknod` / `Tlink` / `Tmkdir` / `Tunlinkat` / `Trenameat` (read-or-mutation-shaped; concurrent ops on same dfid permitted) | `kernel/9p_session.c::p9_session_send_symlink` / `_mknod` / `_link` / `_mkdir` / `_unlinkat` / `_renameat` (use the matching `p9_build_*`). Send-time precondition: dfid bound (+ fid bound for link). Dispatcher: qid-shape Rmsgs populate `out->created_qid`; empty-body Rmsgs are header-only validation. **Landed at P5-wire-mutation.** |
 | `SendIO(t, fid)` — readlink | Send `Treadlink` on tag `t` for `fid` (read-shaped; concurrent permitted) | `kernel/9p_session.c::p9_session_send_readlink` (uses `p9_build_treadlink`). Send-time precondition: fid bound. Dispatcher: surfaces zero-copy `out->readlink_target` + `out->readlink_target_len`. **Landed at P5-wire-mutation.** |
 | `SendIO(t, fid)` — rename | Send `Trename(fid, dfid, name)` on tag `t` (mutation-shaped; fid-exclusive — server-side identity moves) | `kernel/9p_session.c::p9_session_send_rename` (uses `p9_build_trename`). Send-time precondition: fid + dfid bound + no other in-flight op on fid. Dispatcher: Rrename is body-empty header validation. **Landed at P5-wire-mutation.** |
+| `SendClunk(t, fid)` — async | `p9_client_clunk_async` (FID-LIFECYCLE): the fire-and-forget Tclunk. The SPEC IS UNCHANGED for the clean model -- SendClunk already unbinds at send + holds the tag until `ReceiveOp(t)` frees it, and the spec never modeled a blocking submitter; `ReceiveOp` on a clunk tag IS the ownerless drain (who drains is below the abstraction; impl: a later op's elected reader via the #845 dispatch arm -> `clear_outstanding`). NEW buggy action `BuggyAsyncClunkLeakReceive` (+ `9p_client_buggy_async_clunk_tag_leak.cfg`): the ownerless Rclunk consumed off the wire WITHOUT freeing the tag -- a permanently burned `outstanding[]` slot; caught by `TagAndOpAccounting`. The impl's monotonic never-reused fid allocator makes the spec's finite-FidIds reuse traces a SUPERSET of the impl's. |
 | `SendIO(t, fid)` — weft | Send `Tweft(fid)` on tag `t` (Weft-6; read-shaped — queries the flow's stable share_id + ring geometry; idempotent on the netd side; concurrent ops permitted) | `kernel/9p_session.c::p9_session_send_weft` (uses `p9_build_tweft`). Send-time precondition: fid bound. Dispatcher: the `op->kind == P9_TWEFT` arm populates `out->weft_geom` by value (no rmsg alias) via `p9_parse_rweft`; no fid-table mutation. `kernel/9p_client.c::p9_client_weft` copies the geom out. **Landed at Weft-6a-1.** This composes the existing `SendIO`/`ReceiveOp` tag-and-fid machinery (no `9p_client.tla` change; the buggy cfgs re-ran green). |
 | `SendIO(t, fid)` — other families | `Tlock` / `Tsync` / `Treflink` / `Tfallocate` / `Tfadvise` / xattr family on tag `t` for `fid` | Wire builders deferred to P5-wire-lock / -xattr / -stratum-ext; session-side dispatch handlers extend `p9_session_dispatch_rmsg` at each landing. |
 | `SendWalk(t, src, new)` | Send `Twalk(fid=src, newfid=new, n_names=N)` on tag `t` | `kernel/9p_session.c::p9_session_send_walk` (uses `p9_build_twalk`). Send-time precondition: src bound, new not bound, new ≠ root, no other in-flight op on new. **Landed at P5-session.** |
@@ -1077,8 +1078,14 @@ on_cpu handoff, stealing, and `Place`. TLC-green (2-CPU + 3-CPU cfgs).
 | Spec action | Code site | Invariant pinned |
 |---|---|---|
 | `StartSwitch(c)` / `FinishSwitch(c)` | `kernel/sched.c::sched` + `arch/arm64/context.S::cpu_switch_context` — the two-step switch with the `prev_to_clear_on_cpu` handoff | I-21-adjacent migration safety: a ctx/kstack is never written by two CPUs concurrently |
+| `StartSwitch(c)` with `kind = "yield"` | `kernel/sched.c::sched` with prev RUNNING — driven by tick preemption AND (since #33) voluntarily by `sched_yield_hint` / `SYS_YIELD` | the yield requeue is the already-modeled transition; no new protocol step |
 | `StealCand(c)` / `RemoveFromRunq` | `kernel/sched.c::try_steal` (pinned idles excluded — `cpu_pinned`) | steal never moves a pinned idle; no double-enqueue |
 | `Place(t)` | `kernel/sched.c::ready` / `ready_on` (+ the RW-2 2A-F1 vd_t clamp) | a woken thread lands in exactly one runq |
+
+`SYS_YIELD` (#33) adds NO spec change: `sched_yield_hint`'s dispatch path IS
+`StartSwitch(kind="yield")`, and its fast path (skip `sched()` when the only
+local tree occupant is the pinned idle — the TI-4c `cpu_has_surplus_for_kick`
+peek) is a model *stutter* (no state change), trivially within the envelope.
 
 Pre-commit gate: `sched_alpha.cfg` + `sched_alpha_3cpu.cfg` clean on any
 change to the on_cpu protocol, the pinned-idle dispatch, or `try_steal`.
@@ -1206,6 +1213,62 @@ PRE-terminal, so it is still caught). See NET-DESIGN.md §12.2 + ARCH §28 I-9.
 
 ---
 
+## net_poll_teardown.tla — #294 (the dev9p.poll readiness-op cancel-at-close; spec-first re-enabled, model-first)
+
+Status: **spec landed model-first @bb72098; the cancel-at-close impl landed at
+#294-B (`kernel/dev9p_poll.c`).** `net_poll.tla` proves the I-9 readiness
+invariants (no missed edge) for a LIVE poller; it ABSTRACTS AWAY the layer this
+module models: the readiness op's MEMORY/pin lifetime and the delivery of the
+`ready`-fd Tclunk to netd (which frees the connection slot). The #294 leak lived
+entirely in that abstracted-away layer -- a permanent per-connection netd
+slot leak on the poll-timeout path: the readiness op pinned the `ready` Spoor, so
+`dev9p_close` (which sends the slot-freeing Tclunk) could only run after the
+kthread GC'd the stranded op + dropped the pin, and a real SMP race left ops
+un-GC'd. The Heisenbug (heavy instrumentation hides the leak) made the model the
+reliable verifier.
+
+CONSTANT `Fix` selects the design: **Fix=FALSE** (the bug) = the op pins the
+Spoor, so the Tclunk delivery hinges on `KthreadGc` firing (a liveness assumption
+the buggy cfg withholds WF on -> the leak counterexample). **Fix=TRUE** (the
+landed design) = the op pins a refcounted poll-state + the session, NOT the
+Spoor, so the user's fd-close is the Spoor's LAST ref -> `dev9p_close` runs AT
+fd-close, cancels the still-outstanding op (Tflush, under c->lock), and delivers
+the Tclunk DETERMINISTICALLY (a SAFETY consequence of the close, not a liveness
+assumption on the kthread).
+
+| Config | Flags | Checked | Result |
+|---|---|---|---|
+| `net_poll_teardown.cfg`            | `Fix=TRUE`  | `SafetyInvariants` (TypeOk + NoUseAfterFreePs + ClunkAtMostOnce) | clean |
+| `net_poll_teardown_liveness.cfg`   | `Fix=TRUE`  | `Liveness` (SlotEventuallyFreed) -- with NO kthread fairness | clean |
+| `net_poll_teardown_buggy_leak.cfg` | `Fix=FALSE` | `Liveness` -- no WF on `KthreadGc` | violation (the #294 leak) |
+
+Spec action ↔ impl mapping (`kernel/dev9p_poll.c` unless noted):
+- `Init` (op pins ps[refcount] + session, NOT the Spoor) = `dev9p_poll_submit_locked`
+  takes `dev9p_poll_state_ref(ps)` + `p9_attached_ref(attached_owner)` under
+  `g_dev9p_poll_lock`; the priv's ps ref is `cand->refs = 1` at lazy-alloc.
+- `PollTimeout` (the poll ends, op stranded) = `kernel/poll.c::sys_poll_for_proc`
+  unregisters the hook; the op stays live (no Spoor pin to defer close).
+- `KthreadTouchPs` (the UAF probe) = the kthread derefs `op->ps->poll_list` /
+  `cached_revents` via a LIVE op only (`dev9p_poll_service_once`, `dev9p_poll_complete`).
+- `KthreadGc` (collect + tear down a stranded op) = `dev9p_poll_service_once`
+  Phase 1 unlink + Phase 2b `p9_client_abandon_async` + `dev9p_poll_op_free`.
+- `UserClose` (Fix) = `dev9p_poll_priv_release` grabs `ps->op` from the registry
+  under g_lock (whoever removes it owns the teardown), `p9_client_abandon_async`
+  (clear inflight + Tflush) + `dev9p_poll_op_free`, drops the priv's ps ref; then
+  `kernel/dev9p.c::dev9p_close` delivers the `ready`-fd Tclunk (`p9_client_clunk`).
+
+NOT modeled (caught by the kernel test `dev9p.poll_cancel_at_close`, not the
+spec): the abandon's Tflush leaves the readiness oldtag `awaiting_flush`, which
+`kernel/9p_session.c::any_outstanding_on_fid` counted -> the immediate
+SendClunk-precondition refused the Tclunk -> the slot would leak anyway. Fix:
+`any_outstanding_on_fid` excludes flushed (awaiting_flush) entries -- a cancelled
+op does not block a fid op (Tflush-then-Tclunk is the standard cancel-then-close).
+The model specifies "the clunk IS delivered at UserClose"; the impl had to make
+the session core honor that. See `memory/bug_294_net_session_death.md` + ARCH §28
+I-9 / §25.4 (the dev9p.poll row).
+
+---
+
 ## weft.tla — Weft-1 (the capability network dataplane; spec-first re-enabled, model-first)
 
 Status: **spec landed model-first at Weft-1; the cross-Proc share substrate
@@ -1214,8 +1277,16 @@ landed at Weft-2 (`burrow_share_into`) and the descriptor-ring leg
 Weft-3 (`kernel/weft.c`); the `F_NOTIF` holder lifecycle at Weft-5; the EL0
 delivery (`Init`/`Teardown` — the `share_id` registry + `SYS_WEFT_SHARE`/`MAP` +
 the `dev9p_priv` binding) at Weft-6a-2 (`weft.tla` unchanged — the registry is
-the model's `Init`/`Teardown` plumbing). The live ring drive + the full
-`SYS_WEFT_MAP` E2E are OWED across Weft-6b/6c/7.** Models the per-flow zero-copy network
+the model's `Init`/`Teardown` plumbing). The netd `Tweft` handler + per-flow ring
+register at Weft-6b-1; the **live data drive** at Weft-6b-2 (TX:
+`sys_write_weft_fastpath` → `dev9p_weft_try_write` → `p9_client_weftio(WRITE)`) +
+Weft-6b-3a (RX: `sys_read_weft_fastpath` → `dev9p_weft_try_read` →
+`p9_client_weftio(READ)` + netd's recv-into-ring defer) — both are the symmetric
+write/read direction of the modeled `Consume` (the descriptor is a trusted
+register-passed syscall arg validated by `weft_binding_validate_rw` against the
+kernel-private `weft_ring_view`, so `weft.tla` is unchanged; the 4 buggy cfgs
+re-ran green). The live readiness park/wake (6b-3b) + the `F_NOTIF` posting
+(6b-3c) + the full native-API E2E are OWED across Weft-6b-3/6c/7.** Models the per-flow zero-copy network
 dataplane (NET-THROUGHPUT.md §5; ARCH §28 I-37) and pins I-37 — the
 generalization of the Loom I-29/I-30 pin to the cross-Proc SHARED PAGE + the
 notification-terminal (`F_NOTIF`) multi-holder release. `loom.tla` owns the
@@ -1303,3 +1374,327 @@ durable regression for this surface (the Weft-7 audit). Exercised by
 `burrow_share_into` page; the SB hardware reordering itself is the spec's + the
 seq-cst code's proof). See NET-THROUGHPUT.md §5.2-2 / §5.4 + ARCH §28 I-9 +
 `docs/reference/125-weft.md`.
+
+## sched_tickless.tla — TI-spec (#299); model-first, impl mapping at TI-1/TI-2
+
+The tickless idle (NO_HZ_IDLE) one-shot ARM-RACE (I-9). A **sibling** of the
+audited `scheduler.tla`, not an extension: `scheduler.tla` already proves the
+tickless WAKE-correctness — its `wfi`/IPI/`Wake` model never treats the periodic
+tick as a wake source, and `LatencyBound` holds under exactly the IPI +
+deadline-`Wake` sources tickless leans on. The arm-race needs `EnterWFI` (atomic
+there) split into a register + park step + a new flag + a `NotifyWFIPeer`
+precondition change, which would ripple through `scheduler.tla`'s 11 cfgs — the
+`sched_oncpu`/`sched_alpha` precedent of a focused sibling. See
+`docs/TICKLESS-IDLE.md` §7 + ARCH §8.6 / §8.10 / §25.2.
+
+### Model ↔ impl
+
+As-built (TI-2): the whole register/arm/park/restore body is the shared
+`kernel/sched.c::sched_idle_park(bool tickless)`, called by `bootcpu_idle_main`
+(always) + `per_cpu_main` (`tickless=timer_armed`).
+
+- `registered[cpu]` ↔ the impl's `idle_in_wfi` flag
+  (`sched_idle_park`'s `sched_set_idle_in_wfi(true)`). The "register" half of
+  register-then-observe.
+- `parked[cpu]` ↔ the CPU halted in WFI with the one-shot armed.
+- `pending[cpu]` ↔ a runnable thread placed in this CPU's runq.
+- `Register(cpu)` ↔ `sched_set_idle_in_wfi(true)` set BEFORE the arm + WFI (the
+  first statements of `sched_idle_park`).
+- `Park(cpu)` ↔ `timer_arm_oneshot_cnt(tickless_target_cnt(now,
+  timerwait_earliest_deadline(), backstop))` + `wfi` (TI-1 primitives; the TI-2
+  `sched_idle_park` arm). CORRECT: the arm runs only after `Register` set
+  `idle_in_wfi`. The wake-to-running restore (`timer_arm_this_cpu()` +
+  `timerwait_tick()`) is below the model's abstraction — it preserves I-17 +
+  services the deadline, not part of the no-lost-wake property modeled here.
+- `PlaceWork(cpu)` ↔ a peer's `ready()` / `wakeup()` placing a thread + the
+  `sched_notify_idle_peer()` `IPI_RESCHED` decision keyed on `idle_in_wfi`
+  (`kernel/sched.c:569`): registered ⇒ IPI ⇒ park lifted.
+- `Dispatch(cpu)` ↔ `pick_next` / `Resume` running the placed thread.
+
+### Bug class (executable counterexample)
+
+`sched_tickless_buggy.cfg` (`BUGGY_PARK = TRUE`) ↔ `BuggyPark` = park WITHOUT
+registering (arm-before-register). A peer placing work reads `idle_in_wfi =
+FALSE`, sends no IPI, and the CPU stays parked with runnable work — `NoLostWake`
+(~(parked ∧ pending)) VIOLATED at depth 4 (Block → BuggyPark → PlaceWork). The
+register-then-observe ordering (TI-2) is what forbids it.
+
+### TLC posture
+
+- `sched_tickless.cfg` (clean, `BUGGY_PARK = FALSE`, 2 CPUs): `TypeOK` +
+  `NoLostWake` + `ParkedImpliesRegistered` + `RunningNotParked` invariants + the
+  `EventuallyRuns` liveness (WF on `Dispatch`). GREEN — 36 distinct states.
+- `sched_tickless_buggy.cfg` (`BUGGY_PARK = TRUE`, 1 CPU): `NoLostWake` VIOLATED
+  — the executable counterexample.
+
+The deadline one-shot (the timed-sleeper wake) + the 100 ms backstop
+(defense-in-depth vs a hypothetical dropped IPI) are ORTHOGONAL to the arm-race
+and prose-validated (`docs/TICKLESS-IDLE.md` §3.1 / §4); they are deliberately
+unmodeled, so the buggy cfg is a clean lost-wake counterexample rather than a
+masked latency hiccup. The runtime regression (TI-2/TI-3): a deadlined sleeper
+wakes on time under tickless; a cross-CPU `ready()` wakes a tickless CPU; an idle
+CPU's tick count stops advancing.
+
+## sched_rebalance.tla — TI-4a (#304) spec; impl LANDED at TI-4c (#307)
+
+The push-on-overload rebalance leg of tickless work-conservation (ARCH §8.6 /
+§8.10). A **sibling** of `sched_tickless.tla` (the `sched_oncpu`/`sched_alpha`
+precedent): `sched_alpha.tla` already proves placement SAFETY under an arbitrary
+target CPU (`Place` is non-deterministic), so push-PLACEMENT (place a waking
+thread on an idle CPU) needs no new model; `sched_tickless.tla` proves the
+idle-enter arm-race. This module captures the ONE remaining mechanism — the
+busy-side push of ALREADY-QUEUED work to an idle peer, the leg the 1 kHz periodic
+tick used to cover by pull-polling (its removal at TI-3 was the 2.4x boot
+regression). See `docs/TICKLESS-IDLE.md` §9 (TI-4) + ARCH §8.6 / §8.10 / §25.2.
+
+### Model ↔ impl (impl LANDED at TI-4c — `kernel/sched.c::sched_tick` + `cpu_has_surplus_for_kick`)
+
+- `surplus[cpu]` ↔ `cpu_has_surplus_for_kick(cs)`: a non-NULL INTERACTIVE/NORMAL
+  `run_tree[]` head (the running thread is unlinked while running, so a queued
+  head IS the migratable surplus). Lock-free relaxed head read (the
+  `sched_has_runnable_work` discipline).
+- `Overload(b, i)` ↔ the busy CPU's `sched_tick` tail: `if (g_sched_notify_enabled
+  && t != cs->idle && cpu_has_surplus_for_kick(cs)) sched_notify_idle_peer();` —
+  detects surplus + (inside the reused `sched_notify_idle_peer`) an idle peer
+  (`idle_in_wfi`) and kicks it (`IPI_RESCHED`) to `try_steal`. The kick lifts the
+  peer's park exactly as `sched_tickless`'s `PlaceWork` does (register-then-
+  observe — `idle_in_wfi` set BEFORE the WFI under the IRQ-masked idle region).
+  The migration is pull-realized (kicked peer → `try_steal`), inside
+  `sched_alpha.tla`'s arbitrary-placement envelope.
+- `Dispatch(i)` ↔ the kicked idle CPU's `sched()` → `try_steal` pulling the work.
+- `Block`/`DrainLocally`/`Register`/`Park` ↔ the existing idle-enter + local-run
+  paths. `DrainLocally` is UNFAIR: a CPU-bound producer need not yield, so the
+  kick is the only GUARANTEED rebalance.
+
+### Bug class (executable counterexamples)
+
+- `sched_rebalance_buggy_nokick.cfg` (`BUGGY_NO_KICK = TRUE`) ↔ `Overload`
+  disabled = the TI-3 regression: a non-yielding producer's surplus strands
+  forever while a peer idles. `EventuallyParallelized` (surplus ~> ¬surplus)
+  VIOLATED.
+- `sched_rebalance_buggy_nolift.cfg` (`BUGGY_KICK_NO_LIFT = TRUE`) ↔ the kick
+  pushes work but does not lift the peer's park. `NoLostWake` (~(parked ∧
+  pending)) VIOLATED — the register-then-observe obligation the kick must honor.
+
+### TLC posture
+
+- `sched_rebalance.cfg` (clean, 3 CPUs): `TypeOK` + `NoLostWake` +
+  `PendingImpliesNotRunning` + `SurplusImpliesRunning` + `ParkedImpliesRegistered`
+  + the `EventuallyParallelized` liveness (WF on `Overload` + `Dispatch`). GREEN —
+  117 distinct states.
+- `sched_rebalance_buggy_nokick.cfg` (2 CPUs): `EventuallyParallelized` VIOLATED.
+- `sched_rebalance_buggy_nolift.cfg` (2 CPUs): `NoLostWake` VIOLATED.
+
+The 100 ms backstop (defense-in-depth vs a dropped kick) is ORTHOGONAL and
+deliberately unmodeled (as in `sched_tickless`), so `buggy_nokick` is a clean
+stranded-work counterexample rather than a masked latency hiccup.
+
+---
+
+## fs_cache.tla — L1b (the guest-side Larder cache; close-to-open content-version coherence; spec-first re-enabled, model-first)
+
+> **Model-first (2026-07-09).** The spec is written + TLC-green BEFORE the guest
+> Larder impl (L1c-e). This section maps each action / invariant to its INTENDED
+> impl site; the sites are OWED at L1c-e and this section is updated to real
+> `file:line` as each lands. The Stratum companion (`si_cvers` bump; `si_gen`
+> decoupled) landed at L1a-1 (`inode.tla`) + L1a-2 (the 9P wire, `server.c`).
+
+Status: **model LANDED (L1b), TLC-green; ATTR sub-cache LANDED (L1c); DENTRY
+sub-cache LANDED (L1d); PAGE sub-cache LANDED (L1e, + the cacheability gate).** Models the per-`p9_client` Larder + the `cvers`
+close-to-open coherence: the open-time revalidation gate AND the own-write
+write-through invalidation, interleaved on the shared client (the
+invalidate-vs-serve SMP race). Proves I-38 (LARDER-DESIGN §6): a served value
+never lags the current content (single-writer), no entry is trusted past its
+revalidation (the gate bounds an external writer to one episode), the cache is
+bounded, and a fresh write is eventually visible. Two buggy cfgs each produce a
+minimal 4-state counterexample on its named invariant.
+
+The L1c impl is `kernel/larder.{c,h}` (the substrate + attr sub-cache) hooked
+into `kernel/dev9p.c`; the dentry (L1d) and page (L1e) sub-caches extend the same
+owner/lock/key.
+
+### Action → impl mapping (attr sub-cache; L1c LANDED)
+
+| Spec action | Impl site |
+|---|---|
+| `Open(f)` (revalidate + populate; the `cvers` check point) | `kernel/dev9p.c::dev9p_walk_attrs` (per-component free populate, `larder_attr_install` after the walkgetattr RPC) + `dev9p_stat_native`'s miss-populate. Both ALWAYS install from the fresh RPC (revalidate-by-overwrite) — the L1c attr serve does not re-check `cvers` (that's a `Read`). The `cvers`-compare `Open` gate is used by the attr/page sub-caches (each validated by its OWN file's `cvers`); the **dentry** sub-cache (L1d) does NOT use it — a name-binding has no directory-content version to revalidate against (the parent `si_cvers` does not track dirent changes; L1d ground truth), so the dentry cache is the `Read`+`OwnWrite` subset. The `cvers` gate becomes load-bearing at the L1e page-serve. |
+| `Read(f)` (serve without re-check) | `kernel/dev9p.c::dev9p_stat_native` serve fast path (`larder_attr_serve` — the base X-check re-stat storm + fstat, the biggest cheap win). Page serve at `dev9p_read` (`larder_page_serve`) is L1e (below). Both serve paths are gated on `p9_client.cacheable`. |
+| `OwnWrite(f)` (bump + write-through invalidate) | `kernel/dev9p.c` `larder_attr_invalidate` at `dev9p_write` / `dev9p_wstat_native` (file) + `dev9p_create` (parent AND the child — the created qid.path may reuse a freed ino, so its stale prior-occupant attr must drop; the create path never runs `walk_attrs`) / `dev9p_rename` (both dirs) / `dev9p_unlink` (parent). |
+| `ExternalWrite(f)` (out-of-band bump, no invalidate) | not an impl site — models an out-of-band Stratum mutation; the impl obligation is that `Open`'s revalidation catches it. |
+| `Evict(f)` (capacity/LRU drop) | `kernel/larder.c::attr_install_slot_locked` (LRU-min victim when the bounded `LARDER_ATTR_ENTRIES` array is full; I-32). |
+| `Refetch(f, fresh)` (install, evict-if-full) | `kernel/larder.c::larder_attr_install` (install `{attr, cvers}`; overwrite existing / free slot / LRU-evict). GEN-GUARDED: `larder_gen_snapshot` before the RPC, install skipped if `l->gen` changed — the impl realization of the spec's ATOMIC read-and-install (closes the populate-after-invalidate resurrection). |
+
+### Action → impl mapping (dentry sub-cache; L1d LANDED)
+
+The dentry sub-cache is the `Read`+`OwnWrite` SUBSET of this model (NO `Open`/`cvers`
+gate — a `(parent,name)→child` binding has no directory-content version to
+revalidate against; the parent `si_cvers` does not track a dirent change, verified
+`stratum/src/fs/fs.c`, the L1d ground-truth correction). The "file" of the model is
+the parent directory; a valid dentry is always current because own-writes
+invalidate. This is exactly `fs_cache.cfg`'s single-writer regime restricted to
+`{Read, OwnWrite, Evict}`.
+
+| Spec action | Impl site |
+|---|---|
+| `Read(f)` (serve without re-check) | `kernel/larder.c::larder_walk_serve` (called at `kernel/dev9p.c::dev9p_walk_attrs` before the RPC): chains the dentry+attr caches under ONE lock hold. Skips the `Twalkgetattr` for a full positive run in the query form (`nc==NULL`) or a cached miss (either form). |
+| `OwnWrite(f)` (write-through invalidate) | `kernel/larder.c::larder_dentry_invalidate_name` (drop ONLY the mutated `(parent, name)` binding + bump gen -- exactly the per-token `OwnWrite(f)`; siblings preserved) at `dev9p_create` / `dev9p_rename` (both endpoints) / `dev9p_unlink`. This is the SOLE dentry coherence mechanism. |
+| `Refetch(f, fresh)` (install) | `kernel/larder.c::larder_dentry_install` (positive per walked component + negative on a partial/first-component miss) at `dev9p_walk_attrs`. GEN-GUARDED by the same `wga_seq0` snapshot as the attr populate. |
+| `Evict(f)` (capacity/LRU drop) | `kernel/larder.c::dentry_install_slot_locked` (LRU-min victim when the bounded `LARDER_DENTRY_ENTRIES` array is full; I-32). |
+| `Open(f)` / `ExternalWrite(f)` | NOT used by the dentry sub-cache (no `cvers` gate). An out-of-band dirent change is bounded by LRU / the next own-sync mutation, not a revalidation window (the documented dentry external-writer seam, LARDER-DESIGN §11). |
+
+### Action → impl mapping (page sub-cache; L1e LANDED)
+
+The page sub-cache is the full `Read`+`Open`+`OwnWrite` model on content tokens
+keyed `(qid.path, page_index)` — a page IS a content token like an attr, so **no
+spec extension**. It engages ONLY for a `cacheable` client (a proven
+content-versioned FS; the gate below). The "file" of the model is the file's
+content; a cached page is correct iff its `cvers` matches the file's current
+content-version.
+
+| Spec action | Impl site |
+|---|---|
+| `Read(f)` (serve, cvers-gated) | `kernel/larder.c::larder_page_serve` (called at `kernel/dev9p.c::dev9p_read` before the RPC, gated on `cacheable`): serve the one page containing the offset if `page.cvers == c->qid.vers` (the `Open`/close-to-open gate applied at serve — this is where the `cvers` compare is load-bearing) and `page_off < valid_len`. Copies `min(want, valid_len - page_off)` bytes out UNDER the leaf lock (a short serve the caller loops on). |
+| `Open(f)` (the `cvers` revalidation) | folded into the serve above: the serve's `page.cvers == c->qid.vers` check IS the close-to-open `Open` gate. A cross-open external write bumps the reopened fid's `qid.vers` → mismatch → miss → refetch. Within a client, own-writes invalidate immediately (below), so the gate is strong. |
+| `OwnWrite(f)` (write-through invalidate) | `kernel/larder.c::larder_page_invalidate` (drop EVERY cached page of the file + bump gen) at `kernel/dev9p.c::dev9p_write`, alongside `larder_attr_invalidate`. A whole-file drop (sound; per-range is a v1.x tuning). |
+| `Refetch(f, fresh)` (install, evict-if-full) | `kernel/larder.c::larder_page_install` at `dev9p_read` after the RPC: install each page the read covered FROM ITS ALIGNED START (`page_start ∈ [offset, offset+got)` → `[0, valid_len)`, no hole). GEN-GUARDED by the `seq0` snapshot from the serve miss (skips a fill that raced an own-write — the resurrection close). Lazily kmallocs the slot's 4 KiB buffer (non-blocking under the leaf lock — the `l->lock → buddy` order). |
+| `Evict(f)` (capacity/LRU drop) | `kernel/larder.c::page_install_slot_locked` (LRU-min victim when the bounded `LARDER_PAGE_ENTRIES`=512 table is full; I-32). The victim's buffer is REUSED (overwritten), never freed on evict; buffers free only at `kernel/larder.c::larder_destroy` (from `p9_client_destroy`). |
+| `ExternalWrite(f)` (out-of-band bump) | not an impl site — the impl obligation is that the serve's `cvers` gate (`Open`) catches it at the next open (close-to-open; the accepted within-episode window). |
+
+**The cacheability gate (not a spec action — a soundness precondition on which
+mounts the model applies to).** The model assumes offset-stable, content-versioned
+reads. `kernel/9p_client.c` inits `p9_client.cacheable = false`; `kernel/dev9p.c::dev9p_walk_attrs`
+sets it true on a successful `Twalkgetattr` (the v1.0 proxy for a content-versioned
+FS). A stream/control server (netd `/net`) answers `Twalkgetattr` ENOSYS → never
+cacheable → the model never applies to it (a `/net` read is neither offset-stable
+nor content-versioned, so caching it would violate `Read`). `dev9p_stat_native`
+(attr) and `dev9p_read` (page) gate serve+populate on it; `dev9p_walk_attrs`'s
+`larder_walk_serve` (dentry) is additionally guarded by the `wga_unsupported` latch.
+
+### Invariant / property → obligation
+
+| Spec name | Obligation |
+|---|---|
+| `NoWrongRead` (single-writer; `~bad_read`) | own-write write-through invalidation — a read never serves the guest's own stale write. `dev9p_write` MUST invalidate before returning. |
+| `NoStalePastRevalidation` (the close-to-open gate) | `Open` MUST compare `cvers` and drop+refetch on mismatch — never trust a stale entry. The load-bearing coherence property (the reason spec-first is re-enabled). |
+| `Bounded` (I-32 / I-38) | the Larder is LRU-capped; a hostile workload cannot grow it unbounded. |
+| `CacheNeverAhead` | a cached `cvers` never exceeds the server's (populate always takes the reply's `cvers`). |
+| `WriteEventuallyVisible` (liveness) | a fresh write is eventually served (the revalidation refetches). |
+
+**Guest-side populate rule (the L1a-2 audit-F1 disposition):** the Larder is
+populated ONLY from a `getattr`/`walk_attrs` qid (true `si_cvers`), NEVER from a
+`readdir` qid (a link-time `si_gen` snapshot). `Read`/`Open`'s `fresh` is always
+a content-version; a v1.0 impl that fed a readdir qid into the cache would break
+the `MODELING ASSUMPTIONS`. Enforced in the L1c-e impl (no `dev9p_readdir`
+populate) + documented in LARDER-DESIGN §3.2/§11.
+
+### TLC posture
+
+- `fs_cache.cfg` (single-writer; Files={f1,f2}, Capacity=1, MaxCvers=2):
+  `Invariants` = `TypeOk` + `CacheNeverAhead` + `Bounded` +
+  `NoStalePastRevalidation` + `NoWrongRead` (ABSOLUTE single-writer). GREEN —
+  72 distinct states.
+- `fs_cache_external.cfg` (external writer): `SafetyCore` (incl.
+  `NoStalePastRevalidation` — the gate holds vs an out-of-band writer). GREEN —
+  213 distinct states. NoWrongRead deliberately unchecked (the accepted
+  within-episode window).
+- `fs_cache_liveness.cfg` (external writer, WF(Open)+WF(Evict)):
+  `WriteEventuallyVisible`. GREEN, non-vacuous.
+
+### FID-LIFECYCLE cached-open (the fidless open) — maps onto the EXISTING actions
+
+The cached-open fast path (docs/FID-LIFECYCLE-DESIGN.md section 3.3;
+`kernel/dev9p.c::dev9p_open_cached` + the stalk pounce-block arm) adds NO new
+`fs_cache.tla` action. The forced-wire query Twalkgetattr at open IS the
+modeled `Open` (the close-to-open revalidation, reading the fresh cvers); the
+private per-open snapshot taken under ONE Larder lock hold at that fresh cvers
+is `Open`-time `Read` of every covered page, atomically (a concurrent
+`OwnWrite` invalidate either precedes -- failing the coverage -- or follows the
+whole copy, exactly the spec's atomic-Open linearization the gen guard realizes
+for installs); serving every read of the open from the immutable snapshot
+serves open-time values, which close-to-open permits (the model constrains what
+a serve may RETURN relative to the last Open, not which store it comes from).
+`larder_pages_cover`/`larder_pages_snapshot` are pure readers -- the modeled
+mutation surface (install/evict/invalidate) is untouched.
+- `fs_cache_buggy_stale_serve.cfg`: `NoStalePastRevalidation` VIOLATED (Open
+  keeps a stale entry validated) — a 4-state counterexample.
+- `fs_cache_buggy_no_invalidate.cfg`: `NoWrongRead` VIOLATED (a read serves the
+  guest's own stale write) — a 4-state counterexample.
+
+---
+
+## debug_stop.tla — Go IDE Stage 8a (the debugger stop/continue/step SM; spec-first re-enabled, model-first)
+
+Spec-first re-enabled for this surface (user-directed 2026-07-14; CLAUDE.md +
+docs/DEBUG-FS-DESIGN.md section 6) -- the 6th instance of re-enabling point (a).
+Written + TLC-green BEFORE the 8a-1 impl. Models the stop/continue/step state
+machine and its composition with the death path (#811/#68) -- an SMP wait/wake
+race on the most bug-prone lineage in the tree, the class the runtime tests are
+blind to (the death_wake / loom / asid / allowance precedent). Clean cfg
+TLC-green (Safety = NoLostStop + NoEL0AfterStopped + ExactlyOnceResume;
+PROPERTIES EventuallyAllDead [DeathWinsOverStop] + EventuallyResumed [NoStrand]);
+4 buggy cfgs, each a minimal counterexample on its named property.
+
+**The stop machinery LANDED at 8a-1b-beta** -- the code sites below are as-built
+(the mapping was a reservation at 8a-1a). The impl faithfully realizes the model:
+the park uses the audited `sleep()` register-then-observe, the resume cascade
+mirrors `proc_group_terminate`'s set-before-walk (clear-before-walk here), and
+the death cascade already wakes a debug-parked Thread via its `rendez_blocked_on`.
+The cross-Proc mem/regs files + the unified stack are 8a-1b-gamma (not modeled --
+they read a stopped frame, off the race surface).
+
+| Config | Flag | Invariant / Property | Result | Distinct |
+|---|---|---|---|---|
+| `debug_stop.cfg` | all knobs FALSE (2 Threads) | `Safety` + `EventuallyAllDead` + `EventuallyResumed` | clean | 2264 |
+| `debug_stop_buggy_park_before_die.cfg` | `BUGGY_STOP_BEFORE_DIE` | `EventuallyAllDead` | violation | 296 |
+| `debug_stop_buggy_lost_stop.cfg` | `BUGGY_OBSERVE_BEFORE_REGISTER` | `NoLostStop` | violation | -- |
+| `debug_stop_buggy_double_wake.cfg` | `BUGGY_DOUBLE_WAKE` | `ExactlyOnceResume` | violation | -- |
+| `debug_stop_buggy_strand_on_debugger_death.cfg` | `BUGGY_STRAND_ON_CLOSE` | `EventuallyResumed` | violation | 276 |
+
+| Spec action | Code site (as-built, 8a-1b-beta) | Invariant pinned |
+|---|---|---|
+| `TailStep` (die-check FIRST, then the stop handshake) | `arch/arm64/vectors.S` EL0-return tail: `.Lel0_sync_return` (`bl el0_return_stop_check` AFTER `el0_return_die_check` + `notes_deliver`) + the `0x480` IRQ slot (AFTER `el0_return_die_check`). The leg is `kernel/proc.c::el0_return_stop_check` (fast-path load, else the park loop) | `EventuallyAllDead` (DeathWinsOverStop): the die-check precedes the stop-check; the loop re-checks `group_exit_msg` (-> `thread_exit_self`) on every wake so a resume never eret-s a dying Thread. `BUGGY_STOP_BEFORE_DIE` = the leg ordered before the die-check. |
+| `Acquire` / `RegisterObserve` (register-then-observe UNDER `wlock`) | `kernel/proc.c::el0_return_stop_check` parks via `sleep(&t->debug_rendez, debug_stop_wake_cond, p)` -- `kernel/sched.c::sleep` takes the per-Thread `wait_lock`, registers `rendez_blocked_on = &t->debug_rendez` + `THREAD_SLEEPING`, re-checks the cond BEFORE sleeping | `NoLostStop` (I-9): a Thread the debugger confirms is genuinely parked. |
+| `RegisterBuggy` (observe BEFORE register, OUTSIDE the lock) | (none -- the anti-pattern the impl does NOT do; the buggy cfg only) | `BUGGY_OBSERVE_BEFORE_REGISTER` makes `NoLostStop` fail. |
+| `Confirm(t)` (the delivery walk marks t confirmed-parked under `~wlock[t]`) | `kernel/devproc.c::devproc_stopscan_cb` -- walk `p->threads` under `g_proc_table_lock`, read `rendez_blocked_on == &peer->debug_rendez` under each peer `wait_lock`, confirm when `parked && on_cpu==false`. Delivery: `kernel/proc.c::proc_debug_stop_deliver` sets the flag + `smp_resched_others()` (a broadcast reschedule IPI kicks an EL0-running peer to its `0x480` tail; targeted STOP_SGI is a v1.x optimization) | the confirm sees only a genuinely-parked Thread (mutual exclusion on `wait_lock` vs `RegisterObserve`). |
+| `WakeFrom(t, s)` (single-wake latch; sources start/release/death) | `kernel/proc.c::proc_debug_resume` walk (waking only `rendez_blocked_on == &peer->debug_rendez` peers) + the `proc_group_terminate` death cascade. The per-Thread `debug_rendez` is single-waiter, and `wakeup` re-validates `r->waiter` under `r->lock`; all resume paths are serialized under `g_proc_table_lock` | `ExactlyOnceResume`: one wakeup per park. `BUGGY_DOUBLE_WAKE` = no latch (a `start` racing a `detach`/close double-wakes). |
+| `ResumeThread(t)` (woken park -> re-run the tail) | `kernel/proc.c::el0_return_stop_check` loop -- a woken parked Thread re-checks `group_exit_msg` (death wins) then the stop flag; returns to the tail (-> eret) only when cleared | a resume never resumes a dead Thread; death wins on the re-run. |
+| `ReleaseSlot` (detach / ctl-fd close / debugger death -> resume + detach) | `kernel/devproc.c`: the `detach` verb branch (`devproc_debug_walk_cb`) + the ctl-fd close hook (`devproc_close` -> `devproc_debug_release_cb`, incl. #68/#926 close-at-exit) clear `debug_owner` THEN call `proc_debug_resume` (clear the stop + wake all parked) | `EventuallyResumed` (NoStrand): the handle-lifetime-tied slot resumes the target on release. `BUGGY_STRAND_ON_CLOSE` = the release neither clears the stop nor wakes. |
+| `SetGflag` / the death legs | `kernel/proc.c::proc_group_terminate` (the set-once `group_exit_msg`) + `el0_return_die_check` | death completes even against a live debugger holding a stop (the death cascade wakes debugger-parked Threads via `rendez_blocked_on`). |
+
+Pre-commit gate: `debug_stop.cfg` clean GREEN + the 4 buggy cfgs confirmed, on
+any change to the EL0-return tail stop leg (`el0_return_stop_check`), the
+stop-park register-then-observe (`sleep` on `debug_rendez`), the stop-delivery
+cascade (`proc_debug_stop_deliver`), the resume cascade (`proc_debug_resume`),
+or the ctl-fd-close resume (`devproc_close`). v1.0 corner (documented, off the
+model's death abstraction): a SOFT interrupt-terminate latch (LS-5c, no
+`group_exit_msg`) that lands while a Thread is parked bails the park to the tail
+so `notes_deliver` delivers it at the next checkpoint (necessary to avoid a
+sleep()-SLEEP_INTR livelock; the target is dying anyway). The model's death =
+`group_exit_msg` (the hard, N-4 path), which the loop handles airtight.
+
+## debug_step.tla — Go IDE Stage 8a-2b (the single-step machine; spec-first, model-first)
+
+A SIBLING of `debug_stop.tla` (NOT an extension -- `debug_stop`'s 4 buggy cfgs
+are the landed gate, and a breakpoint-fired stop is trigger-agnostic so it reuses
+that machinery unchanged). The ONLY genuine protocol growth in 8a-2 is the STEP:
+a `step` resumes a stopped Thread for EXACTLY ONE EL0 instruction, then re-parks;
+the death composition rides the SAME tail die-check-first (the loom_multishot /
+loom_order sibling precedent). Landed model-first at **8a-2b-alpha**; the impl
+sites land at **8a-2b-2** (this is a RESERVATION until then).
+
+| cfg | knob(s) | checks | outcome | distinct |
+|---|---|---|---|---|
+| `debug_step.cfg` | all knobs FALSE (2 Threads) | `Safety` (StepExactlyOne) + `EventuallyAllDead` + `StepEventuallyReparks` | clean | 146 |
+| `debug_step_buggy_runs_free.cfg` | `BUGGY_STEP_RUNS_FREE` | `Safety` | violation (StepExactlyOne) | 68 |
+| `debug_step_buggy_death_lost.cfg` | `BUGGY_STEP_DEATH_LOST` | `EventuallyAllDead` | violation | 146 |
+
+| Spec action | Code site (RESERVED -- lands at 8a-2b-2) | Invariant pinned |
+|---|---|---|
+| `RequestStep(t)` (arm a step, wake to the tail) | the `step` ctl verb (`kernel/devproc.c`) -> a per-Thread step-armed flag + the debug-rendez wake (`proc_debug_resume`-shaped) | -- |
+| `Tail(t)` (die-check FIRST, then arm SS or re-park) | `kernel/proc.c::el0_return_stop_check` extended: after the die-check, if a step is armed set `MDSCR.SS` + `SPSR.SS` in the resumed frame (arm one instruction) else re-park | `EventuallyAllDead` (death wins over a step); the die-check-first ordering. `BUGGY_STEP_DEATH_LOST` = the SS EC auto-continues bypassing the tail die-check. |
+| `StepExec(t)` (one EL0 instruction -> SS EC -> tail) | `arch/arm64/exception.c` EC 0x32 (software step) route -> return to the EL0-return tail (re-park); `arch/arm64/hwdebug.c` the SS-machine arm/disarm + the step-over-breakpoint dance (disable the bp E-bit, step, re-enable) | `StepExactlyOne` (one instruction per step window). `BUGGY_STEP_RUNS_FREE` = the SS EC never re-traps (the SPSR.SS/MDSCR.SS stuck/missing-re-trap family). |
+| `SetGflag` / `DeathWake` | `kernel/proc.c::proc_group_terminate` + the death cascade (unchanged from `debug_stop`) | death completes even against a step in flight. |
+
+Pre-commit gate (from 8a-2b-2): `debug_step.cfg` clean GREEN + the 2 buggy cfgs
+confirmed, on any change to the step arm/re-park (`el0_return_stop_check` step
+leg), the SS-machine (`hwdebug.c`), or the EC 0x32 route (`exception.c`).

@@ -52,7 +52,7 @@ void test_virtio_input_probe_rfork_with_caps(void);
 // per probe + keeps the kernel-side .bss reservation modest. Earlier
 // composed-driver binaries (virtio-blk / virtio-net) keep their
 // pre-P4-K 96-KiB caps; tightening those is a separate sub-chunk.
-#define VIRTIO_INPUT_PROBE_BLOB_MAX 16384
+#define VIRTIO_INPUT_PROBE_BLOB_MAX 32768
 static _Alignas(16) u8 g_virtio_input_probe_blob[VIRTIO_INPUT_PROBE_BLOB_MAX];
 
 struct virtio_input_probe_exec_args {

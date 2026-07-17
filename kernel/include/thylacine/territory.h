@@ -69,8 +69,10 @@ struct Path;   // <thylacine/path.h> -- #66 namespace name retention (I-33)
 // uncollected at pivot) plus restored headroom for /net (Phase 8); the pivot-time
 // GC (#80) is the real fix. The proc.rfork stress test clones Territories en
 // masse; each clone deep-copies mounts[] + bumps a spoor_ref per entry, so the cap
-// stays modest to hold the per-clone cost in check.
-#define PGRP_MAX_MOUNTS  16
+// stays modest to hold the per-clone cost in check. G15 (Go Stage 4a) adds /env
+// (devenv) as a boot mount + a post-pivot re-graft (pre+post like the others),
+// so the cap grows 16 -> 20 to keep headroom under the #80 orphan accumulation.
+#define PGRP_MAX_MOUNTS  20
 
 // Path identifier. At v1.0 abstract `u32` — bind/mount take whatever
 // numeric ID the caller decides on (tests pick small integers). The
@@ -343,6 +345,19 @@ int unmount(struct Territory *territory, struct Spoor *mountpoint);
 // spoor_clunk the returned Spoor when done (stalk_cross_mounts clunks it after
 // clone_walk_zero mints the independent crossed Spoor).
 struct Spoor *mount_lookup(struct Territory *territory, struct Spoor *probe);
+
+// mount_is_point_id: MEMBERSHIP-only mount-point test by raw (dc, devno,
+// qid_path) identity — no Spoor needed, no ref minted. The stalk POUNCE
+// post-scan uses it on batch-walked components that were never materialized as
+// Spoors (their would-be identity = the run parent's (dc, devno) + the walk
+// reply's qid.path): a hit means the batch walked PAST a mount point
+// server-side, so the resolver splits the run and crosses via the normal
+// mount_lookup path on a re-walked Spoor. Same ns_lock discipline as
+// mount_lookup; the boolean is a snapshot (the resolver's cross machinery
+// re-tests via mount_lookup on the materialized Spoor, so a racing
+// mount/unmount degrades to today's unsynchronized-snapshot behavior).
+bool mount_is_point_id(struct Territory *territory, int dc, u32 devno,
+                       u64 qid_path);
 
 // territory_root_ref: atomically read root_spoor + take a ref under ns_lock, so
 // the read+ref cannot race a concurrent territory_pivot_root / territory_chroot

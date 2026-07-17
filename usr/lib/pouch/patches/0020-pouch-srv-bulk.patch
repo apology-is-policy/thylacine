@@ -1,0 +1,91 @@
+pouch: the AF_UNIX bulk-ring hint -- SO_SNDBUF/SO_RCVBUF -> DMSRVBULK (CF-3 B)
+
+Maps the POSIX socket-buffer hint onto the Thylacine per-service ring
+class (CONCURRENT-FS.md CF-3 B). A pre-bind setsockopt(SOL_SOCKET,
+SO_SNDBUF or SO_RCVBUF, >= 128 KiB) on an AF_UNIX socket marks the slot
+BULK; bind()'s create=post then carries the DMSRVBULK perm bit, so every
+connection minted on the service gets 128 KiB-frame rings and a
+kernel-attached mount negotiates a 128 KiB msize. stratumd's listener
+setup (stm_stratumd_listen_unix, the thylacine-pouch-arm branch) is the
+consumer -- on a Linux/macOS host build the same setsockopt is just a
+real (advisory) buffer-size request, so the stratumd code needs no
+platform gate.
+
+Three files, stacking on 0006 (the AF_UNIX socket layer) + 0016 (the
+setsockopt override):
+  - src/internal/_pouch_socket.h  POUCH_SRV_DMSRVBULK + POUCH_SRV_BULK_MIN
+                                  + the per-slot bulk_hint field.
+  - src/network/setsockopt.c     the FAM_UNIX SO_SNDBUF/SO_RCVBUF arm
+                                  (accept-any as advisory; >= the
+                                  threshold sets the hint; every other
+                                  AF_UNIX option stays ENOPROTOOPT).
+  - src/network/bind.c           OR the hint into the walk_create perm.
+--- a/src/internal/_pouch_socket.h
++++ b/src/internal/_pouch_socket.h
+@@ -74,6 +74,14 @@
+ #define POUCH_SRV_ORDWR      2u
+ #define POUCH_SRV_OPATH      0x80u
+ #define POUCH_SRV_DMSRVBYTE  0x02000000u
++#define POUCH_SRV_DMSRVBULK  0x01000000u /* CF-3 B: the bulk ring class */
++/* The SO_SNDBUF/SO_RCVBUF threshold at or above which a pre-bind
++ * setsockopt marks the socket BULK: its bind()-time service post carries
++ * DMSRVBULK, so every connection gets 128 KiB-frame rings and the
++ * kernel-attached mount negotiates a 128 KiB msize (CONCURRENT-FS.md
++ * CF-3 B). Below the threshold the option is an accepted no-op (POSIX
++ * treats the buffer sizes as advisory hints). */
++#define POUCH_SRV_BULK_MIN   (128 * 1024)
+ 
+ /* net-5 (AF_INET over /net): a slot is either an AF_UNIX /srv byte-stream
+  * (family FAM_UNIX, the 0006 path) or an AF_INET /net connection (family
+@@ -110,6 +118,9 @@
+     unsigned int              laddr;      /* bound local IPv4 host-order; 0=ANY */
+     unsigned short            lport;      /* bound local port host-order; 0=unbound */
+     unsigned char             bound;      /* bind() recorded a local addr     */
++    unsigned char             bulk_hint;  /* CF-3 B: pre-bind SO_SNDBUF/RCVBUF
++                                           * >= POUCH_SRV_BULK_MIN seen; bind()
++                                           * posts the service DMSRVBULK       */
+ };
+ 
+ /* pouch_sock_alloc — claim a fresh slot.
+--- a/src/network/setsockopt.c
++++ b/src/network/setsockopt.c
+@@ -24,6 +24,24 @@
+ 	 * ENOPROTOOPT (P-3: no silently-wrong POSIX). */
+ 	if ((fd & POUCH_SOCK_TAG) != 0) {
+ 		struct pouch_sock_slot *pslot = pouch_sock_resolve(fd);
++		/* CF-3 B: SO_SNDBUF / SO_RCVBUF on an AF_UNIX socket is the
++		 * BULK-ring hint. A value >= POUCH_SRV_BULK_MIN set BEFORE
++		 * bind() makes the bind-time service post carry DMSRVBULK
++		 * (128 KiB-frame connection rings; the kernel-attached mount
++		 * then negotiates a 128 KiB msize -- stratumd's listener setup
++		 * is the consumer). Any value is accepted 0 (POSIX buffer
++		 * sizes are advisory); after bind() the hint is inert. */
++		if (pslot && pslot->family == POUCH_SOCK_FAM_UNIX
++		    && level == SOL_SOCKET
++		    && (optname == SO_SNDBUF || optname == SO_RCVBUF)) {
++			if (!optval || optlen < sizeof(int)) {
++				errno = EINVAL;
++				return -1;
++			}
++			if (*(const int *)optval >= POUCH_SRV_BULK_MIN)
++				pslot->bulk_hint = 1;
++			return 0;
++		}
+ 		if (pslot && pslot->family == POUCH_SOCK_FAM_INET
+ 		    && ((level == SOL_SOCKET
+ 		         && (optname == SO_REUSEADDR || optname == SO_REUSEPORT))
+--- a/src/network/bind.c
++++ b/src/network/bind.c
+@@ -159,8 +159,11 @@
+ 		errno = EACCES;
+ 		return -1;
+ 	}
++	long perm = (long)POUCH_SRV_DMSRVBYTE;
++	if (slot->bulk_hint)
++		perm |= (long)POUCH_SRV_DMSRVBULK;   /* CF-3 B bulk ring class */
+ 	long r = __syscall(SYS_walk_create, srv, name, name_len,
+-	                   (long)POUCH_SRV_OREAD, (long)POUCH_SRV_DMSRVBYTE);
++	                   (long)POUCH_SRV_OREAD, perm);
+ 	__syscall(SYS_close, srv);
+ 	if (r < 0) {
+ 		errno = EACCES;

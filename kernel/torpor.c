@@ -175,6 +175,45 @@ s64 sys_torpor_wait_for_proc(struct Proc *p, u64 addr_va, u32 expected,
     w.awoken  = 0;
     w._pad    = 0;
 
+    // REVENANT R-5 audit F1: fault the futex word in BEFORE taking torpor_lock.
+    // Pre-REVENANT every user page was eager-anon, so the under-lock
+    // uaccess_load_u32 below could fault but never SLEEP (the ANON demand-page arm
+    // allocs + installs in place). REVENANT adds file-backed (BURROW_TYPE_FILE)
+    // text VMAs whose demand-page does a BLOCKING dev->read; a crafted
+    // torpor_wait(addr = an unfaulted text VA) would make the under-lock load sleep
+    // on that 9P read while holding the GLOBAL torpor_lock -> a system-wide futex
+    // stall (every CPU in torpor_wait/torpor_wake busy-spins on the lock; a wedged
+    // FS makes it permanent). Pre-faulting outside the lock makes the page resident
+    // + its PTE installed, so the under-lock load cannot fault-and-sleep; a
+    // concurrent unmap in the window makes the under-lock load -EFAULT (no VMA ->
+    // the sleeping FILE arm is never reached), handled there. FILE pages are not
+    // individually evicted at v1.0; a future reclaim pass (REVENANT section 9) must
+    // re-establish this non-blocking-uaccess-under-lock property (e.g. a
+    // pagefault-disabled atomic uaccess + drop-lock-fault-in-retry, the Linux
+    // futex pattern).
+    {
+        u32 prefault = 0;
+        if (uaccess_load_u32(addr_va, &prefault) != 0)
+            return TORPOR_ERR_EFAULT;
+
+        // Lock-free pre-lock compare (the Linux futex
+        // get_futex_value_locked / compare-before-queue shape). If the word
+        // already differs from `expected`, NO waiter is registered, so there is
+        // no register-vs-WAKE race to close: I-9's missed-wakeup window exists
+        // ONLY between a waiter's bucket-register and its sleep, which only the
+        // EQUAL path below ever reaches. A stale mismatch (the word equalled
+        // `expected` and changed to != between this load and now) returning
+        // TORPOR_OK is a benign spurious return the futex contract permits --
+        // the caller re-evaluates its own predicate. Returning here WITHOUT
+        // touching torpor_lock removes the global-lock acquire from every
+        // osyield (torpor_wait(&sleepDummy, 1, 1)), the #343 go-build floor:
+        // 36.8M of the 67.7M torpor_wait calls are this mismatch path, all on
+        // the single sleepDummy address (one bucket -- per-bucket locking can
+        // never shard them, so the lock-free skip is the only fix).
+        if (prefault != expected)
+            return TORPOR_OK;
+    }
+
     spin_lock(&torpor_lock);
 
     // Load the user-VA word and compare under torpor_lock. The lock
@@ -190,8 +229,11 @@ s64 sys_torpor_wait_for_proc(struct Proc *p, u64 addr_va, u32 expected,
         return TORPOR_ERR_EFAULT;
     }
     if (observed != expected) {
-        // Fast path: value already differs. No sleep, no register;
-        // caller re-evaluates the predicate and proceeds.
+        // Rare post-lock-free-compare: the word changed from `expected` to !=
+        // between the prefault compare and this authoritative under-lock
+        // reload. Still correct -- no waiter is registered, caller
+        // re-evaluates. (Pre-#343 this was the common osyield path; the
+        // lock-free compare above now catches nearly all of them.)
         spin_unlock(&torpor_lock);
         return TORPOR_OK;
     }

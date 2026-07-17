@@ -27,6 +27,7 @@
 #include <thylacine/sched.h>
 #include <thylacine/smp.h>
 #include <thylacine/types.h>
+#include <thylacine/vdso.h>     // vdso_publish_wall (mirror the wall offset)
 
 // Compile-time sanity: PPI 11 → INTID 27 (architectural per ARMv8 ARM
 // D11.2.4). Catches a regression to GIC_PPI_TO_INTID's offset.
@@ -93,15 +94,10 @@ static volatile u64 g_ticks;
 // timer_init.
 // ---------------------------------------------------------------------------
 
-// CNTP_TVAL_EL0 is a 32-bit signed value per ARMv8 ARM D11.2.4. Reload
-// values must fit in [1, INT32_MAX]; reload of 1 fires every counter
-// tick (pathological — handler can't keep up), reload > INT32_MAX
-// truncates and the timer fires sooner than intended. We bound on
-// both sides: minimum reload of 100 keeps IRQ rate under freq/100
-// (well under 1% CPU even at 5 GHz counter freq), maximum bounded by
-// the architectural register width.
-#define TIMER_MIN_RELOAD   100u
-#define TIMER_MAX_RELOAD   0x7FFFFFFFu     // INT32_MAX
+// TIMER_MIN_RELOAD / TIMER_MAX_RELOAD bound every reload (the periodic
+// g_reload below AND the tickless one-shot delta); they moved to timer.h as
+// the public clamp contract for timer_arm_oneshot_cnt -- see the rationale
+// there.
 
 bool timer_init(u32 hz) {
     if (hz == 0) return false;
@@ -144,6 +140,33 @@ void timer_arm_this_cpu(void) {
 }
 
 // ---------------------------------------------------------------------------
+// Tickless idle one-shot (NO_HZ_IDLE; docs/TICKLESS-IDLE.md, #299).
+//
+// An idle CPU does not need the 1 kHz periodic re-arm: it arms a SINGLE shot
+// to the nearest pending deadline (min'd with a backstop at TI-2) and parks,
+// so a genuinely-idle CPU takes zero timer IRQs until there is real work --
+// closing the HVF per-tick vmexit storm (idle 332% -> ~0). The periodic tick
+// stays byte-unchanged for any RUNNING thread (the slice model, I-17, the
+// tick-coupled tests). TI-1 lands the primitive; the idle loop wires it at
+// TI-2, so nothing here changes behavior yet.
+// ---------------------------------------------------------------------------
+
+u32 timer_oneshot_tval(u64 target_cnt, u64 now_cnt) {
+    u64 delta = (target_cnt > now_cnt) ? (target_cnt - now_cnt) : 0;
+    if (delta < TIMER_MIN_RELOAD) delta = TIMER_MIN_RELOAD;
+    if (delta > TIMER_MAX_RELOAD) delta = TIMER_MAX_RELOAD;
+    return (u32)delta;
+}
+
+void timer_arm_oneshot_cnt(u64 target_cnt) {
+    if (g_reload == 0)
+        extinction("timer_arm_oneshot_cnt before timer_init (g_reload unset)");
+    u64 now = read_cntvct_el0();
+    write_cntv_tval_el0(timer_oneshot_tval(target_cnt, now));
+    write_cntv_ctl_el0(CNTV_CTL_ENABLE);
+}
+
+// ---------------------------------------------------------------------------
 // IRQ handler.
 // ---------------------------------------------------------------------------
 
@@ -175,6 +198,10 @@ void timer_irq_handler(u32 intid, void *arg) {
 u64 timer_get_ticks(void)   { return g_ticks; }
 u64 timer_get_counter(void) { return read_cntvct_el0(); }
 u32 timer_get_freq(void)    { return (u32)g_freq; }
+// The FULL CNTVCT frequency -- the same u64 divisor timer_now_ns() uses. The
+// vDSO page must seed this (NOT the u32-truncating timer_get_freq) so a reader's
+// cnt/freq is bit-identical to SYS_CLOCK_GETTIME on any counter (vDSO audit F1).
+u64 timer_freq_hz(void)     { return g_freq; }
 
 // P5-tsleep: counter <-> nanosecond conversion. Both use the split
 // (quotient, remainder) form: a flat `value * 1e9` would overflow u64
@@ -235,6 +262,10 @@ static void wallclock_publish_ns(u64 epoch_ns) {
     u64 mono = timer_now_ns();
     u64 off  = (epoch_ns == 0 || epoch_ns < mono) ? 0 : (epoch_ns - mono);
     __atomic_store_n(&g_wallclock_offset_ns, off, __ATOMIC_RELAXED);
+    // Mirror into the vDSO clock page so userspace's syscall-free CLOCK_REALTIME
+    // tracks the same offset. Null-safe before vdso_init (the boot anchor runs
+    // first, then vdso_init seeds the page from timer_wallclock_offset_ns_now).
+    vdso_publish_wall(off);
 }
 
 void timer_set_wallclock_anchor(u64 epoch_seconds) {
@@ -257,6 +288,10 @@ void timer_reset_wallclock_anchor_ns(u64 epoch_ns) {
 u64 timer_realtime_ns(void) {
     return timer_now_ns()
          + __atomic_load_n(&g_wallclock_offset_ns, __ATOMIC_RELAXED);
+}
+
+u64 timer_wallclock_offset_ns_now(void) {
+    return __atomic_load_n(&g_wallclock_offset_ns, __ATOMIC_RELAXED);
 }
 
 void timer_busy_wait_ticks(u64 n) {

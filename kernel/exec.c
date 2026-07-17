@@ -27,8 +27,14 @@
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
 #include <thylacine/burrow.h>
+#include <thylacine/vdso.h>     // vdso_clock_burrow (map the RO clock page, #343)
+#include "../arch/arm64/hwfeat.h" // g_hw_features.linux_hwcap (the AT_HWCAP word)
+#include <thylacine/dev.h>      // REVENANT R-4: exe->dev->read for the file-backed path
+#include <thylacine/spoor.h>    // REVENANT R-4: spoor_ref / spoor_clunk
+#include <thylacine/image.h>    // REVENANT R-4: image_lookup_or_create (shared text)
 
 #include "../mm/phys.h"
+#include "../mm/slub.h"         // REVENANT R-4: kmalloc/kfree for the ELF header read
 
 // =============================================================================
 // Helpers
@@ -107,26 +113,11 @@ static int exec_map_segment(struct Proc *p, const void *blob,
         // bytes don't change across iterations.
         //
         // Only required when segment is executable. RW-only segments
-        // (data, bss) don't need I-cache maintenance.
-        if (seg->flags & PF_X) {
-            // ARM ARM cache-line size from CTR_EL0.DminLine; v1.0 uses
-            // a conservative 64-byte fixed line (matches Cortex-A72/76
-            // DminLine 4 → 16 words = 64B). Phase 5+ may read CTR_EL0
-            // dynamically.
-            const size_t line = 64;
-            uintptr_t start = (uintptr_t)burrow_kva;
-            uintptr_t end   = start + seg->filesz;
-            uintptr_t addr  = start & ~(uintptr_t)(line - 1);
-            for (; addr < end; addr += line) {
-                __asm__ __volatile__("dc cvau, %0" :: "r" (addr) : "memory");
-            }
-            __asm__ __volatile__("dsb ish" ::: "memory");
-            addr = start & ~(uintptr_t)(line - 1);
-            for (; addr < end; addr += line) {
-                __asm__ __volatile__("ic ivau, %0" :: "r" (addr) : "memory");
-            }
-            __asm__ __volatile__("dsb ish\nisb\n" ::: "memory");
-        }
+        // (data, bss) don't need I-cache maintenance. REVENANT R-4 routed
+        // this through the shared arch helper (correct CTR_EL0 line sizes
+        // vs the prior hardcoded 64B; same helper the FILE fault arm uses).
+        if (seg->flags & PF_X)
+            arch_icache_sync_range(burrow_kva, seg->filesz);
     }
     // [filesz, size) stays zero from KP_ZERO.
 
@@ -176,13 +167,30 @@ static int exec_map_user_stack(struct Proc *p) {
     return 0;
 }
 
+// Map the shared vDSO clock page READ-ONLY into `p` at the fixed
+// EXEC_USER_VDSO_BASE (docs/VDSO-DESIGN.md). Returns the mapped user VA for the
+// AT_VDSO_CLOCK auxv entry, or 0 if the page is unavailable (boot OOM left
+// vdso_clock_burrow() NULL) or the per-Proc VMA install fails (VMA SLUB OOM) --
+// in which case exec omits the auxv entry and the reader falls back to
+// SYS_CLOCK_GETTIME (best-effort; never a boot gate). Unlike the stack/segment
+// Burrows, the vDSO Burrow is kernel-owned + shared + held forever (never
+// unref'd), so burrow_map's mapping_count++ is the Proc's ONLY reference; the
+// VVA's vma_drain drops it at teardown and the shared page never frees.
+static u64 exec_map_vdso(struct Proc *p) {
+    struct Burrow *v = vdso_clock_burrow();
+    if (!v)                                    return 0;
+    if (burrow_map(p, v, EXEC_USER_VDSO_BASE, EXEC_USER_VDSO_SIZE,
+                   VMA_PROT_READ) != 0)        return 0;
+    return EXEC_USER_VDSO_BASE;
+}
+
 // Build the System V initial-process stack frame — argc / argv / envp /
 // auxv (+ argv strings region under Shape B) — at the top of the user
 // stack. See exec.h for the byte layout.
 //
 // Two shapes (selected by whether argv_data is non-NULL and argc > 0):
 //   Shape A — no argv (legacy: argc == 0; fixed-size frame =
-//             EXEC_INIT_STACK_SIZE = 144 bytes).
+//             EXEC_INIT_STACK_SIZE = 176 bytes).
 //   Shape B — argv-bearing (P6-pouch-stratumd-boot sub-chunk 16b-alpha;
 //             variable-size frame bounded by EXEC_INIT_STACK_MAX_SIZE).
 //
@@ -191,13 +199,35 @@ static int exec_map_user_stack(struct Proc *p) {
 // BURROW corresponds to EXEC_USER_STACK_BASE, so the frame's bytes land
 // in the BURROW's last `frame_size` bytes. Returns the initial user sp —
 // the user VA of the frame's `argc` word.
-_Static_assert(EXEC_INIT_AUXV_COUNT == 6,
-               "exec_build_init_stack writes exactly 6 auxv entries by "
-               "literal index — adding an entry means editing the auxv "
-               "block below, not just bumping the exec.h macro");
+// Fill the System V auxv block: AT_PHDR/PHENT/PHNUM/PAGESZ, AT_HWCAP (the
+// Linux-compatible feature word from g_hw_features.linux_hwcap — read-only
+// after boot, so a plain read is coherent), AT_RANDOM, the OPTIONAL
+// AT_VDSO_CLOCK (only when vdso_va != 0 — the page mapped), then the AT_NULL
+// terminator. `a` has room for EXEC_INIT_AUXV_COUNT (8) entries; with no
+// vDSO it writes 7 and the 8th 16-byte slot stays the caller-zeroed padding
+// before the AT_RANDOM block (the reader stops at the AT_NULL terminator). Both
+// frame shapes route through here, so the entry set cannot diverge.
+_Static_assert(EXEC_INIT_AUXV_COUNT == 8,
+               "exec_fill_auxv reserves room for exactly 8 auxv entries "
+               "(AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_HWCAP, AT_RANDOM, "
+               "AT_VDSO_CLOCK, AT_NULL) — keep this in sync with the macro");
+static void exec_fill_auxv(u64 *a, u64 phdr_va, u64 phent, u64 phnum,
+                           u64 rand_va, u64 vdso_va) {
+    *a++ = AT_PHDR;   *a++ = phdr_va;
+    *a++ = AT_PHENT;  *a++ = phent;
+    *a++ = AT_PHNUM;  *a++ = phnum;
+    *a++ = AT_PAGESZ; *a++ = PAGE_SIZE;
+    *a++ = AT_HWCAP;  *a++ = g_hw_features.linux_hwcap;
+    *a++ = AT_RANDOM; *a++ = rand_va;
+    if (vdso_va) { *a++ = AT_VDSO_CLOCK; *a++ = vdso_va; }
+    *a++ = AT_NULL;   *a++ = 0;
+}
+
+// `vdso_va` is the user VA of the mapped vDSO clock page (from exec_map_vdso),
+// or 0 if it could not be mapped (-> no AT_VDSO_CLOCK; reader falls back).
 static u64 exec_build_init_stack(struct Proc *p, const struct elf_image *img,
                                  const char *argv_data, u32 argv_data_len,
-                                 u32 argc) {
+                                 u32 argc, u64 vdso_va) {
     // Shape selection. argv_data_len > 0 iff argc > 0 (caller's
     // invariant enforced at the syscall body); we re-check the
     // structural invariant here as defense-in-depth.
@@ -205,11 +235,11 @@ static u64 exec_build_init_stack(struct Proc *p, const struct elf_image *img,
     if (has_argv) {
         if (argv_data_len == 0 || !argv_data)
             extinction("exec_build_init_stack: argc > 0 with no argv_data");
-        if (argc > 16u)                    // SYS_SPAWN_ARGV_MAX bound — kept
+        if (argc > 512u)                   // mirrors SYS_SPAWN_ARGV_MAX — kept
                                            // local to this file to avoid a
                                            // syscall.h include cycle
             extinction("exec_build_init_stack: argc exceeds bound");
-        if (argv_data_len > 4096u)         // SYS_SPAWN_ARGV_DATA_MAX bound
+        if (argv_data_len > 65536u)        // mirrors SYS_SPAWN_ARGV_DATA_MAX
             extinction("exec_build_init_stack: argv_data_len exceeds bound");
         if (argv_data[argv_data_len - 1] != '\0')
             extinction("exec_build_init_stack: argv_data not NUL-terminated");
@@ -223,10 +253,10 @@ static u64 exec_build_init_stack(struct Proc *p, const struct elf_image *img,
 
     // Compute frame layout.
     //
-    // Shape A: fixed-size 144-byte frame; same as the legacy layout.
+    // Shape A: fixed-size 176-byte frame; same as the legacy layout.
     // Shape B:
     //   structured_top_bytes = 8 (argc) + 8*(argc+1) (argv[]+NULL)
-    //                          + 8 (envp NULL) + 96 (auxv) = 120 + 8*argc.
+    //                          + 8 (envp NULL) + 128 (auxv) = 152 + 8*argc.
     //   strings_region_offset = round_up(structured_top_bytes, 16) + 16
     //                            (the 16-aligned AT_RANDOM block precedes
     //                            the strings region).
@@ -283,13 +313,11 @@ static u64 exec_build_init_stack(struct Proc *p, const struct elf_image *img,
         w[0]  = 0;                           // argc
         w[1]  = 0;                           // argv[0] — NULL terminator
         w[2]  = 0;                           // envp[0] — NULL terminator
-        w[3]  = AT_PHDR;    w[4]  = phdr_va;
-        w[5]  = AT_PHENT;   w[6]  = phent;
-        w[7]  = AT_PHNUM;   w[8]  = phnum;
-        w[9]  = AT_PAGESZ;  w[10] = PAGE_SIZE;
-        w[11] = AT_RANDOM;  w[12] = sp + EXEC_INIT_RANDOM_OFFSET;
-        w[13] = AT_NULL;    w[14] = 0;
-        // w[15] is the 8-byte alignment pad — left zero.
+        // auxv at w[3..]; up to 8 entries (16 u64s) reserved before the
+        // AT_RANDOM block at EXEC_INIT_RANDOM_OFFSET. The trailing slots beyond
+        // the AT_NULL the helper writes stay zero (the stack BURROW is KP_ZERO).
+        exec_fill_auxv(&w[3], phdr_va, phent, phnum,
+                       sp + EXEC_INIT_RANDOM_OFFSET, vdso_va);
     } else {
         // Shape B — argc real, argv[] points into the strings region.
         // The strings region starts at (sp + random_offset_from_sp + 16);
@@ -319,14 +347,10 @@ static u64 exec_build_init_stack(struct Proc *p, const struct elf_image *img,
         w[1 + argc]   = 0;                   // argv[argc] = NULL terminator
         w[2 + argc]   = 0;                   // envp[0]    = NULL terminator
 
-        // auxv at w[3 + argc .. 14 + argc]; 12 u64s (6 entries × 2).
-        u64 *auxv = &w[3 + argc];
-        auxv[0]  = AT_PHDR;   auxv[1]  = phdr_va;
-        auxv[2]  = AT_PHENT;  auxv[3]  = phent;
-        auxv[4]  = AT_PHNUM;  auxv[5]  = phnum;
-        auxv[6]  = AT_PAGESZ; auxv[7]  = PAGE_SIZE;
-        auxv[8]  = AT_RANDOM; auxv[9]  = sp + random_offset_from_sp;
-        auxv[10] = AT_NULL;   auxv[11] = 0;
+        // auxv at w[3 + argc ..]; up to 8 entries (16 u64s) reserved (the
+        // EXEC_INIT_AUXV_COUNT the structured-size math at the top accounts for).
+        exec_fill_auxv(&w[3 + argc], phdr_va, phent, phnum,
+                       sp + random_offset_from_sp, vdso_va);
 
         // Copy argv strings into the strings region.
         u8 *strings_dst = frame + random_offset_from_sp + 16u;
@@ -386,11 +410,15 @@ static int exec_setup_argv_body(struct Proc *p,
         return -1;
     }
 
+    // Map the shared vDSO clock page RO (best-effort; 0 -> no AT_VDSO_CLOCK).
+    u64 vdso_va = exec_map_vdso(p);
+
     // Build the System V startup frame (argc / argv / envp / auxv +
     // strings region under Shape B) at the top of the user stack;
     // *sp_out points at its `argc` word.
     *entry_out = img.entry;
-    *sp_out    = exec_build_init_stack(p, &img, argv_data, argv_data_len, argc);
+    *sp_out    = exec_build_init_stack(p, &img, argv_data, argv_data_len, argc,
+                                       vdso_va);
     return 0;
 }
 
@@ -408,4 +436,204 @@ int exec_setup_with_argv(struct Proc *p, const void *blob, size_t blob_size,
     return exec_setup_argv_body(p, blob, blob_size,
                                 argv_data, argv_data_len, argc,
                                 entry_out, sp_out);
+}
+
+// =============================================================================
+// REVENANT R-4: the file-backed production exec path.
+// =============================================================================
+//
+// docs/REVENANT.md §4.2 + §4.6. exec_setup_from_spoor reads ONLY the ELF
+// header+phdrs from the pinned executable, then maps each PT_LOAD: NON-WRITABLE
+// segments (R+X text AND R-only rodata -- #45) whose memsz fits within
+// file-backed pages are SHARED file-backed via the Image cache (demand-paged by
+// the R-2 fault arm); writable data (and degenerate whole-bss-page tails) is a
+// private eager-copied anonymous segment. This retires the whole-binary slurp
+// -- a binary of any size execs.
+
+// map_file_backed -- a NON-WRITABLE PT_LOAD (R+X text or R-only rodata, #45 /
+// REVENANT §4.6) as a SHARED file-backed segment. Gated by the caller to
+// round_up(filesz) == round_up(memsz) (every mapped page has a file page behind
+// it; the last partial page's tail is the file's zero padding between
+// page-aligned segments, or EOF -> the fault arm's KP_ZERO). BORROWS exe;
+// spoor_refs a fresh ref for the consuming Image lookup.
+static int map_file_backed(struct Proc *p, struct Spoor *exe,
+                           const struct elf_load_segment *seg) {
+    u64 vaddr_end = seg->vaddr + seg->memsz;
+    if (vaddr_end < seg->vaddr)             return -1;
+    u64 vaddr_end_aligned = round_up_page(vaddr_end);
+    if (vaddr_end_aligned == 0)             return -1;
+    size_t size = (size_t)(vaddr_end_aligned - seg->vaddr);
+
+    // image_lookup_or_create CONSUMES one spoor ref (adopts on miss / clunks on
+    // hit). The thunk keeps the borrowed `exe`, so hand the lookup a FRESH ref;
+    // on a NULL return it consumed nothing -> drop the fresh ref.
+    spoor_ref(exe);
+    struct Burrow *b = image_lookup_or_create(exe, seg->file_offset, seg->filesz,
+                                              (seg->flags & PF_X) != 0);
+    if (!b) { spoor_clunk(exe); return -1; }
+
+    // The segment's own ELF prot: R+X for text, R-only (XN) for rodata. W^X
+    // (I-12) holds by construction: the gate admits only NOT-PF_W segments, so
+    // nothing mapped here is ever writable. Each FILE Burrow backs exactly ONE
+    // segment at ONE prot (the Image keys per-segment), which is what keeps the
+    // fault arm's freq->exec-gated I-cache sync sound (REVENANT §4.6).
+    u32 prot = vma_prot_for_elf(seg->flags);
+    int rc = burrow_map(p, b, seg->vaddr, size, prot);
+    // Drop the caller's handle ref. On success mapping_count + the cache's
+    // strong ref keep the image alive; on map failure the image stays validly
+    // cached (idle) for a later exec -- never leaked.
+    burrow_unref(b);
+    return rc == 0 ? 0 : -1;
+}
+
+// map_eager_from_file -- a non-shared PT_LOAD eager-copied from the file into a
+// PRIVATE anonymous Burrow: writable data (R+W), or a rare non-writable segment
+// whose memsz extends past the file's last page (whole bss pages the file-backed
+// path cannot zero). Since #45 rodata (R-only) rides map_file_backed instead.
+// filesz bytes are dev->read; the [filesz, size) tail stays zero (KP_ZERO) =
+// .bss. No userspace file-backed writable mapping is ever created (I-36-4).
+static int map_eager_from_file(struct Proc *p, struct Spoor *exe,
+                               const struct elf_load_segment *seg) {
+    u64 vaddr_end = seg->vaddr + seg->memsz;
+    if (vaddr_end < seg->vaddr)             return -1;
+    u64 vaddr_end_aligned = round_up_page(vaddr_end);
+    if (vaddr_end_aligned == 0)             return -1;
+    size_t size = (size_t)(vaddr_end_aligned - seg->vaddr);
+
+    struct Burrow *b = burrow_create_anon(size);
+    if (!b)                                  return -1;
+
+    if (seg->filesz > 0) {
+        u8 *kva = (u8 *)pa_to_kva(page_to_pa(b->pages));
+        size_t got = 0;
+        while (got < seg->filesz) {
+            long n = exe->dev->read(exe, kva + got, (long)(seg->filesz - got),
+                                    (s64)(seg->file_offset + got));
+            if (n < 0)  { burrow_unref(b); return -1; }   // #811-interruptible / I/O error
+            if (n == 0) break;                             // short read (caught below)
+            got += (size_t)n;
+        }
+        if (got != seg->filesz) { burrow_unref(b); return -1; }   // truncated -> no partial map
+
+        // A PF_X segment routed here (memsz extends past the file pages) still
+        // executes its loaded bytes -> I-cache maintenance on the copied range.
+        if (seg->flags & PF_X)
+            arch_icache_sync_range(kva, seg->filesz);
+    }
+    // [filesz, size) stays zero (KP_ZERO from alloc_pages) = .bss.
+
+    u32 prot = vma_prot_for_elf(seg->flags);
+    int rc = burrow_map(p, b, seg->vaddr, size, prot);
+    burrow_unref(b);
+    return rc == 0 ? 0 : -1;
+}
+
+// Read the ELF header + program-header table from the pinned executable into a
+// kmalloc'd buffer, bounded so elf_load (which derefs the ehdr + ph[]) never
+// reads past it. Returns the buffer (caller kfree) + *got_out, or NULL on any
+// failure. elf_load re-validates everything against the real file size; this is
+// purely the OOB-deref guard for handing it a header-only buffer.
+static void *exec_read_header(struct Spoor *exe, size_t *got_out) {
+    *got_out = 0;
+    void *hdr = kmalloc(EXEC_ELF_HEADER_MAX, 0);
+    if (!hdr)                                  return NULL;
+    if (((uintptr_t)hdr & 0x7) != 0)           { kfree(hdr); return NULL; }  // 8-align the Ehdr cast
+
+    u8 *dst = (u8 *)hdr;
+    size_t got = 0;
+    while (got < EXEC_ELF_HEADER_MAX) {
+        long n = exe->dev->read(exe, dst + got, (long)(EXEC_ELF_HEADER_MAX - got),
+                                (s64)got);
+        if (n < 0) { kfree(hdr); return NULL; }   // #811-interruptible / I/O error
+        if (n == 0) break;                        // EOF (a header smaller than the cap)
+        got += (size_t)n;
+    }
+
+    // Bound the phdr table within what we read, so elf_load's ph[0..phnum) deref
+    // stays in-bounds. elf_load enforces phentsize == sizeof(Phdr) before it
+    // indexes ph[] (returning early otherwise) and uses that fixed stride; the
+    // span below mirrors it. Overflow-safe: got <= EXEC_ELF_HEADER_MAX (16 KiB)
+    // and phnum is a u16, so span <= 65535*56 fits a u64 with no wrap, and the
+    // phoff > got check runs before the subtraction.
+    if (got < sizeof(struct Elf64_Ehdr))       { kfree(hdr); return NULL; }
+    const struct Elf64_Ehdr *eh = (const struct Elf64_Ehdr *)hdr;
+    if (eh->e_phentsize != sizeof(struct Elf64_Phdr)) { kfree(hdr); return NULL; }
+    u64 phoff = eh->e_phoff;
+    u64 span  = (u64)eh->e_phnum * sizeof(struct Elf64_Phdr);
+    if (phoff > (u64)got || (u64)got - phoff < span)  { kfree(hdr); return NULL; }
+
+    *got_out = got;
+    return hdr;
+}
+
+int exec_setup_from_spoor(struct Proc *p, struct Spoor *exe, size_t exe_size,
+                          const char *argv_data, u32 argv_data_len, u32 argc,
+                          u64 *entry_out, u64 *sp_out) {
+    if (!p || !exe || !entry_out || !sp_out)   return -1;
+    if (p->magic != PROC_MAGIC)                return -1;
+    if (p->pgtable_root == 0)                  return -1;     // kproc rejected
+    if (p->vmas != NULL)                       return -1;     // clean address space only
+    if (!exe->dev || !exe->dev->read)          return -1;
+    if (exe_size == 0 || exe_size > EXEC_FILE_MAX) return -1;
+
+    // argv invariants (defense-in-depth; the syscall body already checked them,
+    // but the contract is owned here too -- exec_setup_from_spoor is exported).
+    if (argc > 0) {
+        if (argv_data_len == 0 || !argv_data)      return -1;
+        if (argv_data[argv_data_len - 1] != '\0')  return -1;
+    } else {
+        if (argv_data_len != 0)                    return -1;
+    }
+
+    // 1. Read + parse ONLY the ELF header + phdrs (a few KB), not the whole
+    //    binary. elf_load validates segment extents against the real file size.
+    size_t hdr_got = 0;
+    void *hdr = exec_read_header(exe, &hdr_got);
+    if (!hdr)                                  return -1;
+    struct elf_image img;
+    int r = elf_load(hdr, exe_size, &img);
+    kfree(hdr);
+    if (r != ELF_LOAD_OK)                      return -1;
+
+    // 2. Map each PT_LOAD. Non-writable segments (R+X text, R-only rodata --
+    //    #45) whose memsz fits within file-backed pages are SHARED file-backed
+    //    (demand-paged); writable data is a private eager-copied anon segment.
+    //    Page-aligned vaddr + file_offset is required (matches
+    //    exec_map_segment): the fault arm + the eager copy both assume
+    //    burrow-offset-0 == seg->vaddr.
+    for (int i = 0; i < img.n_segments; i++) {
+        const struct elf_load_segment *seg = &img.segments[i];
+        if (seg->vaddr & (PAGE_SIZE - 1))       return -1;
+        if (seg->file_offset & (PAGE_SIZE - 1)) return -1;
+        if (seg->memsz == 0)                    return -1;
+
+        // file_shareable iff PF_R AND NOT PF_W (R+X text, R-only rodata -- #45 /
+        // REVENANT §4.6; text byte-identical since elf_load rejects W|X) AND
+        // round_up(filesz) == round_up(memsz) (no whole bss page beyond the
+        // file). The PF_R requirement (#45 audit F2) keeps a no-access (flags==0)
+        // PT_LOAD on the eager path -- it can never be read/faulted, so caching
+        // it would only pin an idle Image slot + spoor ref. vaddr is
+        // page-aligned, so the vaddr-relative rounded ends compare the rounded
+        // sizes; a 0 from round_up_page is overflow -> fall to the eager path
+        // (which re-rejects). PF_W MUST stay eager: a file-backed writable
+        // mapping violates I-36-4 + the §6.5 refusal.
+        u64 fend = round_up_page(seg->vaddr + seg->filesz);
+        u64 mend = round_up_page(seg->vaddr + seg->memsz);
+        bool file_shareable = (seg->flags & PF_R) && !(seg->flags & PF_W) &&
+                              fend != 0 && fend == mend;
+
+        int rc = file_shareable ? map_file_backed(p, exe, seg)
+                                : map_eager_from_file(p, exe, seg);
+        if (rc != 0)                            return -1;   // partial -> caller disposes Proc
+    }
+
+    // 3. User stack + the vDSO clock page + the System V startup frame (reads
+    //    img metadata, not the file -- AT_PHDR resolves into the first mapped
+    //    segment's VA; AT_VDSO_CLOCK into the RO clock page).
+    if (exec_map_user_stack(p) != 0)           return -1;
+    u64 vdso_va = exec_map_vdso(p);            // best-effort; 0 -> no AT_VDSO_CLOCK
+    *entry_out = img.entry;
+    *sp_out    = exec_build_init_stack(p, &img, argv_data, argv_data_len, argc,
+                                       vdso_va);
+    return 0;
 }

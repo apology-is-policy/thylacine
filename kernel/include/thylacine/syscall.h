@@ -90,10 +90,11 @@ enum {
     // SYS_READ(fd, buf_va, len)  → bytes read (>=0), 0 on EOF, -1 on error
     // SYS_WRITE(fd, buf_va, len) → bytes written (>=0), -1 on error
     //
-    // Length is capped at SYS_RW_MAX (4096) per call — userspace
-    // loops for larger transfers. Bouncing through a 4 KiB kernel
-    // stack scratch buffer; uaccess_load_u8 / uaccess_store_u8 do
-    // the per-byte user-VA copy with fault-fixup.
+    // Length is capped at SYS_RW_MAX (128 KiB since CF-3 A) per call —
+    // userspace loops for larger transfers. Ops <= SYS_RW_STACK bounce
+    // through the 4 KiB kernel stack scratch; larger ops take a
+    // transient kmalloc bounce. uaccess_copy_in / uaccess_copy_out do
+    // the bulk user-VA copy with fault-fixup.
     SYS_READ        = 9,    // arg: fd (x0), buf_va (x1), len (x2)
     SYS_WRITE       = 10,   // arg: fd (x0), buf_va (x1), len (x2)
 
@@ -219,17 +220,18 @@ enum {
 
     // SYS_EXPLICIT_BZERO(buf_va, len) → 0/-1
     //   x0 = buf_va (user-VA; same bound checks as SYS_PUTS)
-    //   x1 = len (bytes; ≤ SYS_RW_MAX = 4096 per call)
+    //   x1 = len (bytes; ≤ SYS_RW_STACK = 4096 per call)
     // Compiler-barrier'd memset of the user-VA buffer to zero. Used by
     // corvus + per-user stratumd to wipe secrets without the optimizer
     // eliding the memset. Returns 0 on success, -1 on user-VA bound
-    // violation. Length cap matches SYS_PUTS / SYS_RW_MAX; userspace
-    // loops for larger buffers.
+    // violation. Length cap matches SYS_PUTS / SYS_RW_STACK (CF-3 A kept
+    // the secret-scrub arm at the 4 KiB reject bound -- RW-3 R2-F1);
+    // userspace loops for larger buffers.
     SYS_EXPLICIT_BZERO = 19, // arg: buf_va (x0), len (x1)
 
     // SYS_GETRANDOM(buf_va, len, flags) → bytes_read / -1
     //   x0 = buf_va (user-VA destination)
-    //   x1 = len (bytes; ≤ SYS_RW_MAX = 4096 per call)
+    //   x1 = len (bytes; ≤ SYS_RW_STACK = 4096 per call)
     //   x2 = flags (u32; 0 = block until kernel CSPRNG seeded [default];
     //                    GRND_NONBLOCK (= 1) = return -1 if not seeded)
     // Read `len` bytes from the kernel CSPRNG into the user-VA buffer.
@@ -247,10 +249,11 @@ enum {
     // a fresh child Proc via rfork(RFPROC, ...), exec_setup the binary
     // into the child, and return its PID. Returns -1 on:
     //   - name_len out of range / name_va bound violation
-    //   - binary not found in devramfs
-    //   - blob exceeds SYS_SPAWN_BLOB_MAX (1 MiB)
+    //   - binary not resolvable in the caller's namespace (stalk miss / X-deny)
+    //   - executable exceeds EXEC_FILE_MAX (256 MiB sanity ceiling; REVENANT R-4
+    //     retired the old 1-MiB SYS_SPAWN_BLOB_MAX slurp cap)
     //   - kmalloc / rfork OOM
-    //   - exec_setup failure (child exits "fail-exec" → parent's
+    //   - exec_setup_from_spoor failure (child exits "fail-exec" → parent's
     //     SYS_WAIT_PID observes non-zero status)
     // The child inherits no capabilities (CAP_ALL & 0u = 0). v1.0 model
     // is "the child fully describes its needs"; future SYS_RFORK with a
@@ -722,7 +725,7 @@ enum {
     //   2. Mark self THREAD_EXITING under g_proc_table_lock.
     //   3. If this is the LAST non-EXITING thread in the Proc, also
     //      transition the Proc to ZOMBIE with exit_status = 0 + wake
-    //      parent's child_done (mirrors exits() with status 0).
+    //      parent's child_waiters (mirrors exits() with status 0).
     //   4. yield via sched(); never returns.
     //
     // After-exit reaping: the Thread descriptor + kstack remain
@@ -879,7 +882,8 @@ enum {
     //   - perm_flags carries any bit outside SPAWN_PERM_ALL
     //   - perm_flags nonzero but caller is not console-attached
     //   - any inherited fd is not a KOBJ_SPOOR handle
-    //   - devramfs binary not found OR oversize (> SYS_SPAWN_BLOB_MAX)
+    //   - binary not resolvable in the namespace, OR exceeds EXEC_FILE_MAX
+    //     (REVENANT R-4 retired the 1-MiB SYS_SPAWN_BLOB_MAX slurp cap)
     //   - kmalloc OOM at any step
     //   - rfork_with_caps OOM (Proc / Thread allocation)
     SYS_SPAWN_FULL_ARGV = 49,
@@ -891,7 +895,7 @@ enum {
     // mode/size/timestamps so pouch's `fstat()` can translate to musl's
     // `struct stat` without losing 9P provenance.
     //
-    //   x0 = spoor_fd   (hidx_t; must be KOBJ_SPOOR with RIGHT_READ)
+    //   x0 = spoor_fd   (hidx_t; must be KOBJ_SPOOR — any rights)
     //   x1 = stat_va    user-VA pointer to an 80-byte struct t_stat (must be
     //                   fully mapped + writable; alignment NOT required — the
     //                   kernel stores byte-by-byte for alignment tolerance)
@@ -903,15 +907,25 @@ enum {
     // SrvConn) leave the slot NULL — SYS_FSTAT on those fds returns -1, the
     // graceful "no stat for this object" answer.
     //
-    // Rights: RIGHT_READ on the handle. fstat does not "read" file contents
-    // but it does observe metadata, which is the read-side of access (POSIX
-    // fstat requires the fd be valid, not specifically readable; we tighten
-    // to RIGHT_READ because every v1.0 caller that fstats a fd also reads it,
-    // and the tightening cheaply blocks a fstat-as-side-channel on a
-    // write-only handle).
+    // Rights: none (kind-gate only, the SYS_LSEEK precedent) — #46. fstat
+    // observes metadata, not content; POSIX fstat(2) works on any valid fd
+    // (Linux: O_WRONLY, O_PATH, anything; Plan 9 Tstat / 9P2000.L Tgetattr
+    // have no open/read requirement). The original RIGHT_READ tightening
+    // ("every v1.0 caller that fstats also reads") was falsified by the
+    // standard write-then-stat pattern: an O_WRONLY create mints a
+    // WRITE-only handle (omode-derived rights, A-3 F1), and cmd/go's
+    // putIndexEntry fstats exactly such an fd — the -1 self-deleted every
+    // fresh go-cache index entry. The tightening also guarded nothing for
+    // any Proc that can WALK the path: metadata is already reachable by
+    // re-walking it O_PATH (#81 keeps fstat allowed on O_PATH by design).
+    // The one real residual (#46 audit F1) -- a spawn-endowed
+    // rights-stripped handle in a child whose Territory cannot walk the
+    // file now reveals its metadata -- is ACCEPTED by the POSIX/Plan 9
+    // fd-passing precedent (a passed fd conveys fstat; rights-stripping
+    // bounds read/write/transfer, never metadata secrecy).
     //
     // Returns 0 on success (out_stat populated), -1 on:
-    //   - spoor_fd not KOBJ_SPOOR / out-of-range / missing RIGHT_READ
+    //   - spoor_fd not KOBJ_SPOOR / out-of-range
     //   - stat_va outside the user-VA bound / unmapped at store time
     //   - the Dev does not implement stat_native (NULL slot)
     //   - dev->stat_native returned an error
@@ -957,7 +971,8 @@ enum {
     SYS_LSEEK        = 51,   // arg: spoor_fd (x0), offset (x1), whence (x2)
 
     // P6-pouch-stratumd-boot 16c: SYS_ATTACH_9P_SRV(srv_fd, aname_va,
-    //                                                 aname_len, n_uname)
+    //                                                 aname_len, n_uname,
+    //                                                 flags)
     //                                                 -> spoor_fd / -1
     //   x0 = srv_fd      (hidx_t; must be a byte-mode CSRVCLIENT conn Spoor
     //                    (KOBJ_SPOOR) the caller holds, with RIGHT_READ +
@@ -969,6 +984,15 @@ enum {
     //   x2 = aname_len   (bytes; <= SYS_ATTACH_ANAME_MAX = 256;
     //                    zero-length aname is permitted)
     //   x3 = n_uname     (u32; 0 for no-auth attach at v1.0)
+    //   x4 = flags       (B1: SYS_ATTACH_9P_LOOSE opts the minted client
+    //                    into the per-attach loose mode -- the mounter
+    //                    asserts the single-writer premise for THIS attach
+    //                    (docs/chase/B1-VOTE.md + the ARCH I-38 row); a
+    //                    cached-open whose RPC-free hint fully hits then
+    //                    skips the per-open wire revalidation. Unknown
+    //                    bits reject. The #112 ABI discipline: EVERY
+    //                    caller sets x4 -- the libt/libthyla-rs wrappers
+    //                    take it as an explicit parameter)
     //
     // Parallel to SYS_ATTACH_9P but the transport is a byte-mode SrvConn
     // reached by open=connect (SYS_OPEN on a byte-mode /srv service ->
@@ -1017,7 +1041,7 @@ enum {
     //
     // Audit-bearing: CLAUDE.md §"Audit-triggering changes" SYS_ATTACH_
     // 9P_SRV row.
-    SYS_ATTACH_9P_SRV = 52,  // arg: srv_fd, aname_va, aname_len, n_uname
+    SYS_ATTACH_9P_SRV = 52,  // arg: srv_fd, aname_va, aname_len, n_uname, flags
 
     // P6-pouch-stratumd-boot 16c: SYS_PIVOT_ROOT(new_root_fd) -> 0 / -1
     //   x0 = new_root_fd   (hidx_t; must be KOBJ_SPOOR with RIGHT_READ)
@@ -1116,15 +1140,15 @@ enum {
     // SYS_READDIR(fd, buf_va, buf_len) -> bytes_written (>=0) / -1 (§9.2).
     //   x0 = fd        (hidx_t; KOBJ_SPOOR opened on a directory, RIGHT_READ.)
     //   x1 = buf_va    (user-VA out buffer.)
-    //   x2 = buf_len   (1 .. SYS_RW_MAX (4096).)
+    //   x2 = buf_len   (1 .. SYS_RW_STACK (4096).)
     // Reads the next run of directory entries into buf, advancing the Spoor's
     // offset (the same offset SYS_READ / SYS_LSEEK use); 0 bytes returned ==
     // end-of-directory. The buffer is the raw 9P2000.L Treaddir dirent stream
     // (per entry: qid(13) + offset(8) + type(1) + name_len(2 LE) + name); the
     // caller parses it. Dispatches dev->readdir (dev9p -> p9_client_readdir).
     // Returns -1 on: fd not KOBJ_SPOOR / missing RIGHT_READ; buf_len 0 or >
-    // SYS_RW_MAX; buf_va outside user-VA; the Dev has no .readdir slot; server
-    // Rlerror. Audit-bearing: CLAUDE.md FS-mutation-syscalls row.
+    // SYS_RW_STACK; buf_va outside user-VA; the Dev has no .readdir slot;
+    // server Rlerror. Audit-bearing: CLAUDE.md FS-mutation-syscalls row.
     SYS_READDIR      = 56,   // arg: fd (x0), buf_va (x1), buf_len (x2)
 
     // Convergence-detour FS-gamma (IDENTITY-DESIGN.md §9.3). rename + unlink,
@@ -1187,24 +1211,47 @@ enum {
     //
     // This chunk builds the MECHANISM only. The per-file rwx PERMISSION check
     // (who may chmod/chown -- owner-only chmod, CAP_HOSTOWNER chown) is A-2d
-    // (the kernel rwx-enforcement layer); at A-2a the handle RIGHT_WRITE gate is
+    // (the kernel rwx-enforcement layer); at A-2a the handle RIGHT_WRITE gate was
     // the only gate, and I-22 stands (no rwx enforcement exists yet to bypass).
     //
-    // SYS_WSTAT(fd, valid, mode, uid, gid) -> 0 / -1
-    //   x0 = fd     (hidx_t; KOBJ_SPOOR with RIGHT_WRITE -- setattr mutates.)
-    //   x1 = valid  (u32 bitmask of T_WSTAT_MODE | T_WSTAT_UID | T_WSTAT_GID;
-    //                at least one bit set; any other bit -> -1.)
+    // #47 (the #46 sibling, landed with #37): the RIGHT_WRITE gate is DROPPED --
+    // the fd is kind-gated only (KOBJ_SPOOR, any rights). POSIX fchmod(2)/
+    // fchown(2) work on an fd opened O_RDONLY: the authority to change metadata
+    // is the IDENTITY axis (owner-or-CAP -- perm_wstat_check, live since A-2d/
+    // A-3), never the handle's byte-I/O envelope. An O_RDONLY open mints a
+    // RIGHT_READ-only handle (A-3 F1 omode-derived rights), so the old gate made
+    // fchmod on it fail -1 while guarding nothing (metadata mutation stayed
+    // reachable by re-walking the path -- the fd is just a name for the file;
+    // the SYS_FSTAT/#46 + SYS_LSEEK precedent).
+    //
+    // SYS_WSTAT(fd, valid, mode, uid, gid, size) -> 0 / -1
+    //   x0 = fd     (hidx_t; must be KOBJ_SPOOR -- any rights (kind-gate only,
+    //                #47) for the METADATA axes. The write-authority gate for
+    //                mode/uid/gid is perm_wstat_check on perm-enforced Devs,
+    //                an identity check, not a rights check. T_WSTAT_SIZE is
+    //                the exception: a CONTENT mutation (POSIX ftruncate(2)),
+    //                so the fd must carry RIGHT_WRITE -- "opened for writing"
+    //                under the A-3 F1 omode-derived rights; the open-time
+    //                perm_check already enforced the identity W axis.)
+    //   x1 = valid  (u32 bitmask of T_WSTAT_MODE | T_WSTAT_UID | T_WSTAT_GID
+    //                | T_WSTAT_SIZE; at least one bit set; any other bit -> -1.)
     //   x2 = mode   (u32; new permission bits when T_WSTAT_MODE. The 9 rwx bits
     //                only -- setuid/setgid/sticky (07000) + any bit outside 0777
     //                are REJECTED (-1). setuid is explicitly unsupported, §S5.)
     //   x3 = uid    (u32; new owner principal-id when T_WSTAT_UID. PRINCIPAL_-
     //                INVALID (0) -> -1.)
     //   x4 = gid    (u32; new group when T_WSTAT_GID. GID_INVALID (0) -> -1.)
-    //   Returns 0 on success, -1 on: fd not KOBJ_SPOOR / missing RIGHT_WRITE;
-    //   valid 0 or with a reserved bit; mode outside 0777; uid/gid INVALID;
-    //   Dev has no .wstat_native slot; server Rlerror. Audit-bearing:
-    //   CLAUDE.md A-2 FS-permission row.
-    SYS_WSTAT        = 59,   // arg: fd (x0), valid (x1), mode (x2), uid (x3), gid (x4)
+    //   x5 = size   (u64; new file length when T_WSTAT_SIZE (Go Stage 5:
+    //                ftruncate for cmd/go's module cache). size > INT64_MAX
+    //                -> -1 (the s64 offset domain). Shrink discards; extend
+    //                zero-fills (Tsetattr semantics, Stratum-side).)
+    //   Returns 0 on success, -1 on: fd not KOBJ_SPOOR; valid 0 or with a
+    //   reserved bit; mode outside 0777; uid/gid INVALID; size out of the s64
+    //   domain; T_WSTAT_SIZE on a handle without RIGHT_WRITE; perm_wstat_check
+    //   denial (perm-enforced Dev, metadata axes, caller neither owner nor
+    //   CAP-holder); Dev has no .wstat_native slot; server Rlerror.
+    //   Audit-bearing: CLAUDE.md A-2 FS-permission row.
+    SYS_WSTAT        = 59,   // arg: fd (x0), valid (x1), mode (x2), uid (x3), gid (x4), size (x5)
 
     // SYS_EXIT_GROUP(status) -- terminate the WHOLE Proc (POSIX exit_group(2)).
     // NEVER returns. Cascades termination to every peer Thread of the calling
@@ -1465,6 +1512,101 @@ enum {
     //   the burrow-attach window). -1 on: bad fd / not a dev9p file / Tweft
     //   failure (e.g. a server with no Tweft handler) / a bad share_id / OOM.
     SYS_WEFT_MAP = 82,     // arg: data_fd (x0), hint_va (x1)
+
+    // Overcommit / I-32 (ARCH section 6.5 "The overcommit model"). A DEDICATED
+    // lazy-attach syscall (user-voted 2026-06-23 over a flags-on-SYS_BURROW_ATTACH
+    // arg, for blast-radius discipline -- the eager SYS_BURROW_ATTACH = 37 stays a
+    // 1-arg syscall, byte-identical; the Plan 9 small-syscall idiom).
+    //
+    // SYS_BURROW_ATTACH_LAZY(length) -> vaddr / -1. The demand-ZERO twin of
+    //   SYS_BURROW_ATTACH: reserves a VA + VMA + a sparse BURROW_TYPE_ANON_LAZY
+    //   Burrow in the burrow-attach window but commits NO physical pages. Each page
+    //   faults in zero-filled (RW/XN, W^X-clean) on first touch, and the I-32
+    //   page_count is charged THERE (per page) -- the whole point is a free
+    //   reservation, so page_count tracks true RSS. The VMA-count axis (PROC_VMA_MAX)
+    //   IS charged at attach, so a free reservation cannot exhaust the vma slab.
+    //   -1 on: length == 0 / length > BURROW_ATTACH_MAX / no free gap / OOM. Same
+    //   page-rounding as SYS_BURROW_ATTACH.
+    SYS_BURROW_ATTACH_LAZY = 83,  // arg: length (x0)
+
+    // SYS_BURROW_DECOMMIT(vaddr, length) -> 0 / -1. The madvise(MADV_DONTNEED)
+    //   analog: release the resident pages backing [vaddr, vaddr+length) of a
+    //   BURROW_TYPE_ANON_LAZY mapping WITHOUT removing the VMA. Clears each PTE
+    //   (+ TLBI before the page frees to the buddy), frees the page, NULLs the sparse
+    //   slot, and uncharges page_count. The VMA + reservation stay; a later touch
+    //   re-faults a fresh zero page. Idempotent on never-faulted pages. Confined to
+    //   the burrow-attach window (like SYS_BURROW_DETACH); rejects a non-ANON_LAZY
+    //   VMA / a range outside one VMA. Backs the Go runtime's sysUnused (the GC
+    //   shrinks RSS). -1 on a bad range / wrong VMA type.
+    SYS_BURROW_DECOMMIT = 84,     // arg: vaddr (x0), length (x1)
+
+    // Positioned byte I/O (#37; the go-build clean+perf mission P2.1). The Dev
+    // vtable read/write have ALWAYS taken an explicit byte offset (the Plan 9
+    // shape) -- the per-Spoor cursor is syscall-layer sugar -- so pread/pwrite
+    // are the same lookup + rights + O_PATH gates as SYS_READ/SYS_WRITE with the
+    // caller's offset passed through and the cursor NEVER read or advanced.
+    // That absence is the whole point: concurrent positioned ops on one fd share
+    // NO mutable state (POSIX pread(2); Go io.ReaderAt's documented parallel-use
+    // contract) -- a property no Seek+Read emulation can provide.
+    //
+    // SYS_PREAD(fd, buf, len, off) -> bytes read (0 = EOF) / -1 / -errno
+    //   x0 = fd   (hidx_t; KOBJ_SPOOR with RIGHT_READ; CWALKONLY/O_PATH
+    //              rejected, as SYS_READ.)
+    //   x1 = buf  (user VA; validated + staged exactly like SYS_READ.)
+    //   x2 = len  (clamped to SYS_RW_MAX per call; short reads are normal.)
+    //   x3 = off  (s64 absolute byte offset. off < 0 -> -1; off + len past
+    //              INT64_MAX -> -1. Requires dev->seekable (the SYS_LSEEK
+    //              gate) -- positioned I/O on a pipe/cons/srv stream fails up
+    //              front (the POSIX ESPIPE shape), never silently acts as a
+    //              cursor read.)
+    //   Returns like SYS_READ: bytes read, 0 at EOF, -1 sentinel, or the
+    //   Dev's -errno passthrough (#3). The Spoor cursor is untouched on
+    //   every path, success or failure.
+    SYS_PREAD  = 85,   // arg: fd (x0), buf (x1), len (x2), off (x3)
+
+    // SYS_PWRITE(fd, buf, len, off) -> bytes written / -1 / -errno
+    //   The write twin: RIGHT_WRITE + the same off >= 0 / overflow /
+    //   dev->seekable gates; cursor untouched. No O_APPEND interaction
+    //   exists (Thylacine has no kernel append mode; ports emulate
+    //   O_APPEND above this layer).
+    SYS_PWRITE = 86,   // arg: fd (x0), buf (x1), len (x2), off (x3)
+
+    // SYS_YIELD() -> 0 (#33)
+    //   Voluntary yield: if another non-idle thread is queued runnable on the
+    //   calling CPU, requeue the caller at the back of its band's rotation and
+    //   dispatch the queued work (the sched_alpha.tla StartSwitch kind="yield"
+    //   transition -- the same one tick preemption drives). If the only local
+    //   tree occupant is the CPU's pinned idle, return WITHOUT switching (a
+    //   dispatch would bounce through the idle thread and back: two context
+    //   switches for nothing). The peek is advisory (lock-free head loads);
+    //   yield is a hint, never a fairness guarantee -- the POSIX
+    //   sched_yield(2) shape. No arguments; always returns 0. Consumers: the
+    //   Go runtime's osyield (spin-loop backoff), musl sched_yield via the
+    //   pouch seam, libt/libthyla-rs t_yield.
+    SYS_YIELD = 87,    // no args
+
+    // SYS_STAT(path_va, path_len, stat_va) -> 0 / -1 / -errno (POUNCE;
+    // docs/POUNCE-DESIGN.md section 7)
+    //   Path-stat in ONE syscall: resolve `path` through the caller's
+    //   Territory (absolute from root_spoor; relative joined with the LS-4
+    //   cwd, exactly like SYS_OPEN's FROM_ROOT arm) and fill the 80-byte
+    //   struct t_stat at stat_va with the LEAF's metadata. The X-search is
+    //   identical to the O_PATH walk-open + SYS_FSTAT + close emulation it
+    //   replaces (POSIX stat authority = the path X-search only; the leaf's
+    //   own R/W bits are irrelevant) -- but on a walk_attrs-capable Dev
+    //   (dev9p/devramfs) the resolution is the stalk POUNCE walk-QUERY: the
+    //   attrs arrive fused with the walk and NO handle, Spoor, or server fid
+    //   is ever created. os.Stat = 1 RPC (was 13). Symlinks do not exist at
+    //   v1.0 (G11), so stat == lstat.
+    //   x0 = path_va  (user VA; NUL-free; '/'-separated multi-component)
+    //   x1 = path_len (1 .. SYS_OPEN_PATH_MAX bytes)
+    //   x2 = stat_va  (user VA of an 80-byte struct t_stat; copy-out)
+    //   Returns 0 on success; -errno from resolution (-T_E_NOENT walk-miss,
+    //   -T_E_ACCES X-denial -- the fail-ordering invariant guarantees an
+    //   X-denial at component k masks everything past k, so a caller cannot
+    //   existence-probe under a forbidden directory); the bare -1 on
+    //   argument-validation / copy-out faults (the SYS_FSTAT shape).
+    SYS_STAT = 88,     // arg: path_va (x0), path_len (x1), stat_va (x2)
 };
 
 // SYS_CLOCK_GETTIME clock ids. Values match Linux clockid_t so a future pouch
@@ -1759,6 +1901,68 @@ _Static_assert(__builtin_offsetof(struct t_stat, blocks)    == 64, "t_stat.block
 _Static_assert(__builtin_offsetof(struct t_stat, uid)       == 72, "t_stat.uid at ABI offset 72 (A-2a)");
 _Static_assert(__builtin_offsetof(struct t_stat, gid)       == 76, "t_stat.gid at ABI offset 76 (A-2a)");
 
+// 8a-1b-gamma-2 (I-39; docs/DEBUG-FS-DESIGN.md 4.5): the /proc/<pid>/regs read/
+// write format -- the saved EL0 GPR frame in the Linux arm64 `user_pt_regs`
+// layout, so the dlv arm64 backend maps it directly. `pstate` (SPSR_EL1) is
+// READ-ONLY on a write: an arbitrary SPSR could eret the target to EL1 (privilege
+// escalation), so the kernel keeps the saved SPSR and ignores this field on
+// write (step-related SPSR.SS is 8a-2). `pc` = ELR_EL1 (the resume PC), `sp` =
+// SP_EL0. Read reflects the live saved frame.
+struct t_user_regs {
+    u64 regs[31];   // x0..x30 (x30 = lr)
+    u64 sp;         // SP_EL0
+    u64 pc;         // ELR_EL1 (resume PC)
+    u64 pstate;     // SPSR_EL1 (READ-ONLY on write -- privilege guard)
+};
+_Static_assert(sizeof(struct t_user_regs) == 272,
+               "struct t_user_regs is the /proc/<pid>/regs ABI (Linux user_pt_regs): "
+               "31*8 GPR + sp + pc + pstate = 272 bytes");
+_Static_assert(__builtin_offsetof(struct t_user_regs, sp)     == 248, "t_user_regs.sp at ABI offset 248");
+_Static_assert(__builtin_offsetof(struct t_user_regs, pc)     == 256, "t_user_regs.pc at ABI offset 256");
+_Static_assert(__builtin_offsetof(struct t_user_regs, pstate) == 264, "t_user_regs.pstate at ABI offset 264");
+
+// /proc/<pid>/fpregs -- the saved FP/SIMD state (V0..V31 + FPSR + FPCR), the
+// Linux arm64 `user_fpsimd_state` core (minus its reserved tail). All fields are
+// user-writable (no privilege bits).
+struct t_user_fpregs {
+    u8  vregs[512]; // V0..V31 (32 x 16 B Q-reg payloads)
+    u32 fpsr;
+    u32 fpcr;
+};
+_Static_assert(sizeof(struct t_user_fpregs) == 520,
+               "struct t_user_fpregs is the /proc/<pid>/fpregs ABI: 512 V-reg bytes "
+               "+ FPSR + FPCR = 520 bytes");
+_Static_assert(__builtin_offsetof(struct t_user_fpregs, fpsr) == 512, "t_user_fpregs.fpsr at ABI offset 512");
+_Static_assert(__builtin_offsetof(struct t_user_fpregs, fpcr) == 516, "t_user_fpregs.fpcr at ABI offset 516");
+
+// 8a-1b-gamma-3 (I-39; docs/DEBUG-FS-DESIGN.md 4.5/4.6): the /proc/<pid>/kregs
+// READ-ONLY format -- a stopped thread's saved KERNEL-side callee-saved GP frame
+// (from t->ctx). It is the input to the unified kernel stack walk
+// (/proc/<pid>/kstack: fp + lr feed the frame-pointer chain) AND carries
+// tpidr_el0, the EL0 TLS base dlv reads to recover the Go `g` (DEBUG-FS 4.5).
+// Callee-saved-only (x19..x28 + fp/lr/sp) because those are exactly what
+// cpu_switch_context preserves; the caller-saved x0..x18 are not saved across a
+// switch (the EL0-frame copies live in /proc/<pid>/regs). ttbr0 is DELIBERATELY
+// omitted (a kernel pgtable PA + ASID -- an info-leak with no debug value). No
+// writable path (0400): the kernel-side frame is inspected, never edited.
+//
+// The field offsets deliberately mirror struct Context's GP region (context.h:
+// fp@80, lr@88, sp@96, tpidr_el0@104) so the build is a verbatim copy.
+struct t_kernel_regs {
+    u64 x[10];      // x19..x28 (AAPCS64 callee-saved)
+    u64 fp;         // x29 (kernel frame pointer -- the kstack-walk start)
+    u64 lr;         // x30 (kernel resume PC -- the walk's frame 0)
+    u64 sp;         // kernel SP
+    u64 tpidr_el0;  // EL0 TLS base (dlv reads the Go g from here)
+};
+_Static_assert(sizeof(struct t_kernel_regs) == 112,
+               "struct t_kernel_regs is the /proc/<pid>/kregs ABI: 10 callee-saved "
+               "GP (x19..x28) + fp + lr + sp + tpidr_el0 = 14*8 = 112 bytes");
+_Static_assert(__builtin_offsetof(struct t_kernel_regs, fp)        == 80,  "t_kernel_regs.fp at ABI offset 80");
+_Static_assert(__builtin_offsetof(struct t_kernel_regs, lr)        == 88,  "t_kernel_regs.lr at ABI offset 88");
+_Static_assert(__builtin_offsetof(struct t_kernel_regs, sp)        == 96,  "t_kernel_regs.sp at ABI offset 96");
+_Static_assert(__builtin_offsetof(struct t_kernel_regs, tpidr_el0) == 104, "t_kernel_regs.tpidr_el0 at ABI offset 104");
+
 // SYS_LSEEK whence values (P6-pouch-stratumd-boot sub-chunk 16b-gamma).
 // Mirror POSIX SEEK_SET / SEEK_CUR / SEEK_END but stay namespaced so
 // the kernel ABI never depends on a libc header. The libt + pouch arms
@@ -1777,15 +1981,20 @@ _Static_assert(__builtin_offsetof(struct t_stat, gid)       == 76, "t_stat.gid a
 #define T_S_IFCHR   0020000u
 
 // SYS_WSTAT valid-mask bits (A-2a; IDENTITY-DESIGN.md §9.5). Which of the
-// (mode, uid, gid) register arguments the kernel applies. Chosen to equal the
-// 9P Tsetattr P9_SETATTR_{MODE,UID,GID} bit values so dev9p_wstat_native maps
-// the mask with no translation; the equality is pinned by a _Static_assert in
-// dev9p.c (the only TU that sees both). Userspace chmod() sets T_WSTAT_MODE;
-// chown() sets T_WSTAT_UID | T_WSTAT_GID (or just one).
+// (mode, uid, gid, size) register arguments the kernel applies. Chosen to
+// equal the 9P Tsetattr P9_SETATTR_{MODE,UID,GID,SIZE} bit values so
+// dev9p_wstat_native maps the mask with no translation; the equality is
+// pinned by a _Static_assert in dev9p.c (the only TU that sees both).
+// Userspace chmod() sets T_WSTAT_MODE; chown() sets T_WSTAT_UID |
+// T_WSTAT_GID (or just one); ftruncate() sets T_WSTAT_SIZE (Go Stage 5).
+// SIZE is a CONTENT axis: it additionally requires RIGHT_WRITE on the fd
+// (POSIX ftruncate needs a write-opened fd), unlike the #47 kind-gate-only
+// metadata axes.
 #define T_WSTAT_MODE   (1u << 0)
 #define T_WSTAT_UID    (1u << 1)
 #define T_WSTAT_GID    (1u << 2)
-#define T_WSTAT_VALID  (T_WSTAT_MODE | T_WSTAT_UID | T_WSTAT_GID)
+#define T_WSTAT_SIZE   (1u << 3)
+#define T_WSTAT_VALID  (T_WSTAT_MODE | T_WSTAT_UID | T_WSTAT_GID | T_WSTAT_SIZE)
 
 // Permission bits a SYS_WSTAT mode may carry (the 9 rwx bits). setuid/setgid/
 // sticky (07000) + any bit outside 0777 are rejected -- setuid is explicitly
@@ -1800,16 +2009,43 @@ _Static_assert(__builtin_offsetof(struct t_stat, gid)       == 76, "t_stat.gid a
 // "pool/data"). 256 bytes is generous.
 #define SYS_ATTACH_ANAME_MAX  256u
 
-// Maximum bytes transferred per SYS_READ / SYS_WRITE call. Userspace
-// loops for larger transfers. Kept at PIPE_BUF_SIZE (4 KiB) to match
-// the kernel pipe ring buffer; longer single calls would either need
-// a heap scratch (avoidable for v1.0) or per-call segmented copy.
-#define SYS_RW_MAX  4096u
+// SYS_ATTACH_9P_SRV flags (x4). SYS_ATTACH_9P_LOOSE = the B1 per-attach
+// I-38 opt-in (user-voted option B, 2026-07-11; docs/chase/B1-VOTE.md +
+// the ARCH I-38 row): the mounter asserts the single-writer premise for
+// THIS attach, and the minted client's cached-opens serve full hint hits
+// without the per-open wire revalidation (first touch / any hint miss
+// still wires; strict clients byte-unchanged). Unknown bits reject.
+#define SYS_ATTACH_9P_LOOSE   0x1u
 
-// Maximum binary name length for SYS_SPAWN. Names are devramfs entries
-// ("hello", "stratumd-stub", "corvus" — all short). 64 bytes is more
-// than enough; bounds the kernel-stack scratch buffer at a small cap.
-#define SYS_SPAWN_NAME_MAX  64u
+// Maximum bytes transferred per SYS_READ / SYS_WRITE / SYS_PREAD /
+// SYS_PWRITE call. Userspace still loops for larger transfers (short
+// reads/writes are normal -- the POSIX contract is unchanged).
+//
+// CF-3 A lifted this from 4096 to 128 KiB: the 4 KiB stack scratch was
+// the binding constraint on every bulk read RPC -- 67% of a go build's
+// Treads were exactly-4096 userspace chunks against a 32 KiB negotiated
+// msize (the CF3 Tread-stream measurement), i.e. the transport frame was
+// never the limit, the syscall bounce was. Ops above SYS_RW_STACK bounce
+// through a transient kmalloc (freed before return; degrades to the
+// stack tier on allocation failure -- memory pressure shortens an op,
+// never fails it). 128 KiB is sized for the CF-3 transport lift (the
+// Stratum server's msize default); the negotiated msize still clamps a
+// single RPC's payload until that lands.
+#define SYS_RW_MAX  (128u * 1024u)
+
+// The stack-bounce bound: byte-I/O ops <= this stay on the 4 KiB kernel-
+// stack scratch (no allocation on the metadata-storm path). SYS_READDIR
+// and SYS_GETRANDOM keep THIS as their per-call bound (their handlers
+// stack-allocate the scratch; the scrub arm additionally REJECTS oversize
+// per RW-3 R2-F1 rather than capping). Matches PIPE_BUF_SIZE.
+#define SYS_RW_STACK  4096u
+
+// Maximum binary name length for SYS_SPAWN. Most callers pass short
+// devramfs/`/bin` names, but the on-device Go toolchain (Stage 4c) execs
+// absolute tool paths (`/goroot/pkg/tool/thylacine_arm64/compile`) and
+// $WORK-relative output paths, so 256 bytes accommodates a deep namespace
+// path. Bounds the kernel-stack `name[]` scratch (257 bytes — small).
+#define SYS_SPAWN_NAME_MAX  256u
 
 // Maximum ELF blob size for SYS_SPAWN. v1.0 userspace binaries that
 // stay near the cap: /pouch-hello-sodium = 276848 bytes at sub-chunk 14
@@ -1826,28 +2062,37 @@ _Static_assert(__builtin_offsetof(struct t_stat, gid)       == 76, "t_stat.gid a
 // kernel-stack scratch for the fd-list copy.
 #define SYS_SPAWN_MAX_FDS   16u
 
-// Maximum argc for SYS_SPAWN_FULL_ARGV (P6-pouch-stratumd-boot sub-chunk
-// 16b-alpha). 16 is well above the v1.0 callers' needs: stratumd's full
-// CLI shape is ~8 args (binary-path + --keyfile + path + --listen + path
-// + optional --read-only + optional --bind-pool-serial + hex). Bounds the
-// kernel argv-pointer array sizing in exec_build_init_stack.
-#define SYS_SPAWN_ARGV_MAX  16u
+// Maximum argc for SYS_SPAWN_FULL_ARGV. Raised from 16 (the original
+// stratumd-CLI sizing) to 512 for the on-device Go toolchain (Stage 4c):
+// `go build` execs `compile` with one argv entry per source file plus its
+// flags, and the widest stdlib package (runtime/arm64) is ~200 .go+.s
+// files. 512 leaves headroom. Bounds the argv-pointer array in
+// exec_build_init_stack ((argc+1)*8 = ~4 KiB at 512).
+#define SYS_SPAWN_ARGV_MAX  512u
 
 // Maximum total bytes of the argv buffer for SYS_SPAWN_FULL_ARGV (the
-// concatenated NUL-terminated strings). One page is generous for the
-// v1.0 callers (stratumd's longest CLI is well under 200 bytes). Bounds
-// the kernel-side kmalloc + the user-stack region that holds the strings.
-// At the maximum (4 KiB strings + 16 argv pointers * 8 + 152 fixed-frame
-// bytes), the System V frame fits comfortably under EXEC_USER_STACK_SIZE
-// (256 KiB).
-#define SYS_SPAWN_ARGV_DATA_MAX  4096u
+// concatenated NUL-terminated strings). Raised from 4 KiB to 64 KiB for the
+// Go toolchain: a runtime compile passes ~200 $WORK-relative source paths
+// (~50 B each) ≈ 25 KiB + flags. The kernel copies it via kmalloc (the
+// handler's buffer is heap, NOT a kernel-stack array — the 16 KiB kstack
+// could not hold 64 KiB), and the System V init frame (structured + the
+// strings region, ≤ ~68 KiB) sits at the top of the 256 KiB user stack
+// (EXEC_USER_STACK_SIZE) with ~188 KiB to spare.
+#define SYS_SPAWN_ARGV_DATA_MAX  65536u
 
 // Maximum single-component name length for SYS_WALK_OPEN. Matches the
 // Plan 9 + 9P2000.L practical cap for a single path element; bounds the
-// kernel-stack scratch + the per-byte uaccess loop. The wire codec's
-// per-name cap is larger; we choose the smaller bound here because v1.0
-// callers (joey, the bringup probes) all walk short server-stamped names.
-#define SYS_WALK_OPEN_NAME_MAX  64u
+// kernel-stack scratch + the per-byte uaccess loop. 255 = the Linux
+// NAME_MAX / 9P2000.L-conventional per-component bound (the wire codec's
+// s16 cap is larger). The original 64 was sized for the bringup probes'
+// short server-stamped names and silently broke every content-addressed
+// name: the Go build cache's 66-char entry basenames (64-hex + "-a")
+// EINVAL'd at the stalk component check, so /go-cache could neither read
+// the baked entries nor persist device-written ones (#36 -- the total
+// GOCACHE miss; cmd/go treats every cache error as a silent best-effort
+// miss). Per-site cost: the [MAX+1] kernel-stack scratches grow 65 -> 256
+// bytes (at most two live at once, in rename).
+#define SYS_WALK_OPEN_NAME_MAX  255u
 
 // Maximum full-path length for SYS_OPEN (stalk-1). Bounds the kernel-stack
 // path scratch + the per-byte uaccess copy. A path is at most STALK_MAX_DEPTH
@@ -1885,13 +2130,33 @@ _Static_assert(__builtin_offsetof(struct t_stat, gid)       == 76, "t_stat.gid a
 // SYS_WALK_CREATE_PERM_VALID so it reaches the devsrv-post branch of
 // sys_walk_create_handler; that branch is the ONLY place it is meaningful -- a
 // regular (non-/srv) create rejects it (it must not leak into a dev9p Tlcreate
-// perm). For a service post the only valid perm bits are {0, DMSRVBYTE}.
+// perm). For a service post the valid perm bits are {0, DMSRVBYTE} |
+// {0, DMSRVBULK}.
 #define SYS_WALK_CREATE_DMSRVBYTE   0x02000000u
+// DMSRVBULK (Thylacine extension; CF-3 B, CONCURRENT-FS.md): on a /srv
+// service post, selects the BULK ring class -- every connection minted on
+// the service gets rings sized for SRVCONN_BULK_MSIZE (128 KiB) frames and
+// the kernel dev9p client proposes that msize (stratumd's
+// STM_9P_MSIZE_DEFAULT accepts exactly 128 KiB), so one bulk read/write
+// RPC carries 4x the default payload. Its absence posts the default
+// 32 KiB class. Bit 24 is the next free bit below DMSRVBYTE (bits 26..31
+// are Plan 9's standard DM set -- DMTMP occupies 0x04000000). Like
+// DMSRVBYTE it is meaningful ONLY on the devsrv-post branch; a regular
+// create rejects it. The pouch AF_UNIX boundary-line maps a pre-bind
+// setsockopt(SO_SNDBUF/SO_RCVBUF >= 128 KiB) to this bit (stratumd's
+// listener setup is the consumer).
+#define SYS_WALK_CREATE_DMSRVBULK   0x01000000u
 #define SYS_WALK_CREATE_PERM_VALID  (0x1FFu | SYS_WALK_CREATE_DMDIR | \
-                                     SYS_WALK_CREATE_DMSRVBYTE)
+                                     SYS_WALK_CREATE_DMSRVBYTE | \
+                                     SYS_WALK_CREATE_DMSRVBULK)
 _Static_assert((SYS_WALK_CREATE_DMSRVBYTE &
                 (0x1FFu | SYS_WALK_CREATE_DMDIR)) == 0,
                "DMSRVBYTE must not collide with the mode bits or DMDIR");
+_Static_assert((SYS_WALK_CREATE_DMSRVBULK &
+                (0x1FFu | SYS_WALK_CREATE_DMDIR |
+                 SYS_WALK_CREATE_DMSRVBYTE)) == 0,
+               "DMSRVBULK must not collide with the mode bits, DMDIR, or "
+               "DMSRVBYTE");
 
 // SYS_UNLINK flags: the only permitted bit at v1.0 is SYS_UNLINK_REMOVEDIR
 // (rmdir an empty directory vs unlink a non-directory). Mirrors the wire
@@ -1910,6 +2175,21 @@ _Static_assert((SYS_WALK_CREATE_DMSRVBYTE &
 // never one enormous one. Being page-aligned, it also bounds the
 // page-rounding so `length + PAGE_SIZE` cannot overflow.
 #define BURROW_ATTACH_MAX  (256u * 1024u * 1024u)
+
+// Overcommit / I-32 (ARCH §6.5): the maximum length for a single LAZY reservation
+// (SYS_BURROW_ATTACH_LAZY). DISTINCT from BURROW_ATTACH_MAX because a lazy
+// reservation commits NO data pages at attach -- the eager 256-MiB bound (sized for
+// the committed allocation) would defeat the whole purpose (Go's stock 64-bit page
+// allocator reserves a ~512-MiB page-summary; #321). The real bounds on a lazy
+// region's resource use are page_count (charged at FAULT, per touched page) +
+// PROC_VMA_MAX (the slab DoS) -- NOT the reservation byte size. 1 GiB is 2x Go-stock
+// with headroom; the only eager cost is the sparse `filepages` array (8 B / reserved
+// page -> 2 MiB for 1 GiB, a kmalloc -> alloc_pages order-9, within MAX_ORDER 18).
+// v1.x SEAM: the flat eager `filepages` array is UNCHARGED kernel memory and does not
+// scale to huge reservations -- a per-Proc array-DoS bounded today only by graceful-
+// OOM (alloc fails -> attach -1) + PROC_VMA_MAX; the fix is a charged radix/sparse
+// metadata structure (the Linux page-table-radix shape), which also lifts this cap.
+#define BURROW_RESERVE_MAX  (1024ull * 1024ull * 1024ull)
 
 // SYS_SPAWN_FULL_ARGV argument record (P6-pouch-stratumd-boot sub-chunk
 // 16b-alpha). The caller fills this in user memory and passes its
