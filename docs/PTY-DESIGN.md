@@ -115,14 +115,33 @@ the 9P transport and never inspects it — the earlier "`tcsetpgrp` → a pts ct
 write, like `tcsetattr` → consctl" analogy was FALSE: `consctl` is a *kernel* Dev
 [`devdev.c`] the kernel naturally mediates, a pts ctl is not). So:
 
-- **`/dev/ptmx` open mints a kernel `KObj_Pts`** (a small kernel object, gen-
-  stamped — §11.11 F11) alongside the server's pts. The server learns its
-  `kernel_pts_id` (a `SYS_PTY_REGISTER(master_fd) → kernel_pts_id`, or the mint is
-  kernel-mediated at ptmx-open); the slave's controlling-terminal acquisition
-  threads the SAME `kernel_pts_id`. The kobject holds the controlling-terminal
-  binding `(session S, fg_pgid, gen)` — kernel state, never server-held.
+- **The `KObj_Pts` correlation is SERVER-MEDIATED, at both ends** (round-2 R2-F1
+  — the kernel does NOT inspect 9P opens, so "mint kernel-mediated at ptmx-open"
+  is UNREALIZABLE, the very opacity break F1 rejected; it is deleted). ptyfs
+  registers a `(ptyfs-connection, qid) → KObj_Pts` mapping with the kernel at
+  BOTH the master mint AND each slave serve — the only opacity-preserving shape:
+  - `SYS_PTY_REGISTER(master_fd) → kernel_pts_id` mints the gen-stamped
+    `KObj_Pts` and records the master-side `(connection, master_qid)`.
+  - when ptyfs serves a `/dev/pts/<n>` slave open, it registers that slave's
+    `(connection, slave_qid) → KObj_Pts` too. So a later slave fd → `KObj_Pts`
+    resolution is a **kernel lookup keyed on the ptyfs connection + the fd's qid**
+    (the fd is a `KOBJ_SPOOR` on the ptyfs dev9p session — the kernel already
+    holds the (connection, qid), the Weft/dev9p grant-is-the-share correlation).
+  The kobject holds the controlling-terminal binding `(session S, fg_pgid, gen)`
+  — kernel state, never server-held. **The gen threads every `SYS_TTY_SIGNAL`
+  (F11).**
+- **`SYS_PTY_REGISTER`'s authority anchor** (round-2 R2-F4 — else registration
+  IS the ungated authority the seam rests on): the caller must be the ptyfs
+  connection that MINTED the pts (the kernel correlates by connection, above),
+  and `master_fd` must be a live pts-master `KOBJ_SPOOR` on that connection. So
+  `SYS_TTY_SIGNAL`'s "the registered server owning that pts" gate is anchored to
+  the minting connection, not a bare assertion — the netd-owns-its-flows analog
+  made concrete. (The single-trusted-ptyfs deployment is the v1.0 assumption; a
+  second ptyfs cannot register a pts in another's namespace — the connection
+  correlation forbids it.)
 - **`tcsetpgrp`/`tcgetpgrp` + controlling-terminal acquisition are KERNEL
-  syscalls keyed on `kernel_pts_id`** — NOT server-served pts ctl writes. Only
+  syscalls keyed on `KObj_Pts`** (resolved from the pts fd via the server-
+  registered (connection, qid) lookup) — NOT server-served pts ctl writes. Only
   `termios`/`winsize` stay on the server-served pts ctl (they carry no security
   routing). This keeps P1 intact (the server still owns the rings + cooking +
   termios + winsize — the byte/cooking engine; only the security-routing triple
@@ -178,7 +197,16 @@ signal routing need it):
   child (`waitpid` never returns on a stop), so job control is non-functional
   and the PTY-4 gate cannot pass; a stopped/continued child becomes
   waitpid-reportable. **Pulled forward into PTY-1** (a real current-arc
-  dependency, not a seam).
+  dependency, not a seam). **The composition (round-2 R2-F6) — a PTY-1 audit
+  obligation:** the report is NOT a reap — a `WUNTRACED` stop-report /
+  `WCONTINUED` continue-report returns the child's status WITHOUT running the
+  `wait_pid_for` teardown (proc_unlink_child / on_cpu-spin / thread_free /
+  proc_free); ONLY an exit reaps. A child STOPPING (setting `job_stop_req`) is a
+  NEW wake trigger on the parent's `wait_pid_for` rendez — a fresh I-9
+  register-then-observe edge (today the rendez wakes only on child *exit*).
+  `WCONTINUED` needs a per-child continued-since-last-wait latch (the Linux
+  `CLD_CONTINUED` shape). The pgrp selector must handle a child `setpgid`-leaving
+  the waited pgrp mid-wait.
 
 **Note-to-pgrp delivery**: generalize `proc_console_post_interrupt` (single
 `g_console_owner`) to `notes_post_pgrp(pgid, note)` — deliver a note to every
@@ -194,15 +222,27 @@ the default-stop disposition), `tty:cont` (SIGCONT — resume), `tty:quit`
 death). `interrupt` (SIGINT) already exists. Default dispositions:
 `interrupt`/`tty:quit` terminate (LS-5 family); `tty:susp` STOPS; `tty:cont`
 resumes; `tty:hup` terminates; `tty:winch` is ignored-by-default. **The whole
-`tty:*` family is KERNEL-SYNTHETIC-ONLY — `notes_post` REJECTS a userspace
-`SYS_POSTNOTE` of a `tty:`-prefixed name, exactly as it rejects `snare:*`**
-(round-1 F4 + F15 — the uniform gate-able prefix; `cont`/`hup` renamed to
-`tty:cont`/`tty:hup`). Their SOLE entry is the tty seam (`SYS_TTY_SIGNAL`) + the
-kernel controlling-terminal / stop paths. WITHOUT this, `tty:cont` would be
-postable via the parent-only `SYS_POSTNOTE` gate (`syscall.c` — parent-only, no
-`CAP_DEBUG`), letting an unprivileged parent `cont` a debugger-stopped child =
-an I-39 leak. A Proc signalling its OWN pgrp still uses ordinary `kill`, which
-maps to the standard (non-`tty:`) note authority.
+`tty:*` family is KERNEL-SYNTHETIC-ONLY on the POST axis — `notes_post` REJECTS a
+userspace `SYS_POSTNOTE` of a `tty:`-prefixed name, exactly as it rejects
+`snare:*`** (round-1 F4 + F15). WITHOUT this, `tty:cont` would be postable via the
+parent-only `SYS_POSTNOTE` gate (parent-only, no `CAP_DEBUG`), letting an
+unprivileged parent `cont` a debugger-stopped child = an I-39 leak.
+
+**But `tty:*` is a NEW note CLASS — kernel-only-POST *and* CATCHABLE — distinct
+from `snare:*` (kernel-only-post AND uncatchable-terminate)** (round-2 R2-F3, the
+unresolved round-1 SA-5). POSIX `SIGTSTP`/`SIGWINCH`/`SIGCONT` are catchable +
+maskable (bash/vim/tmux install `SIGTSTP` handlers to save terminal state before
+stopping; a program may `SIG_IGN` it). So the DELIVERY axis is the LS-5 pattern:
+`SYS_TTY_SIGNAL`→`tty:susp`/`tty:quit` applies its **default disposition (STOP /
+terminate) ONLY when the target Proc has no handler for it and it is unmasked**
+(the `notes_interrupt_should_terminate_locked` analog); a CAUGHT `tty:susp` is
+delivered to the async handler and does **NOT** set `job_stop_req` (the program
+suspends itself, or not, on its own terms), and a masked one defers. An
+uncatchable `tty:susp` would fail the PTY-4 gate itself (tmux/bash catch it).
+`tty:winch`/`tty:cont` are likewise catchable (winch ignored-if-uncaught; cont's
+resume is the kernel stop-clear, delivered as a note the program may also catch).
+A Proc signalling its OWN pgrp still uses ordinary `kill` (the standard non-`tty:`
+authority).
 
 **The generalized stopped-state** (P3 — audit-bearing, I-39): the debug arc's
 fully-stopped thread-state (a thread parked on a rendez, resumed under
@@ -215,7 +255,25 @@ debugger's resume clears only `debug_stop_req`). Reusing the single flag would
 make `tty:cont` run a debugger-stopped thread — precisely the `BUGGY_DOUBLE_STOP`
 counterexample (`pty.tla`), which the spec's two-owner `stopOwners` set is the
 contract against. A `tty:susp` parks the whole fg group's threads; a `tty:cont`
-resumes them. The `CAP_DEBUG` gate stays on the *debugger* entry (I-39's
+resumes them.
+
+**`job_stop_req` MUST be threaded through EVERY site that reads `debug_stop_req`
+today** (round-2 R2-F2 — the load-bearing realization detail, NOT just the abstract
+park predicate): the `sleep`/`tsleep` stop detours (`kernel/sched.c`), the
+`el0_return_stop_check` + `debug_stop_wake_cond` (`kernel/proc.c`), AND — the
+sharpest — **the 8c-3 elected-9P-reader-role release** (`kernel/9p_client.c::client_stop_pending`,
+which today reads `debug_stop_req` ONLY). Miss it and an everyday **unprivileged
+Ctrl-Z of a fg child blocked as the elected reader on the shared SYSTEM-Stratum
+dev9p client (`/bin`,`/lib`) freezes those trees for every survivor Proc until
+`fg`** — the EXACT #89/8c-3 bug, re-opened via a flag the audited machinery does
+not read. So the job stop must ALSO release + re-elect the reader role, exactly as
+8c-3 makes the debug stop do. **SEQUENCING: PTY-1's job stop composes with 8c-3's
+reader-release mechanism, which is LIVE/uncommitted on the main track — PTY-1 is
+sequenced AFTER 8c-3 lands, and generalizes its `debug_stop_req` gate to the
+`debug_stop_req ∨ job_stop_req` disjunction.** (`pty_stop.tla` models the stop
+OWNERSHIP algebra — the per-owner clear = the F3 correctness; the PARK PREDICATE +
+the reader-role fan-out are the `debug_stop.tla`/8c-3 park domain + the PTY-1
+audit, not re-modeled in the ownership sibling.) The `CAP_DEBUG` gate stays on the *debugger* entry (I-39's
 `CTL_VERB_STOP` via `/proc/<pid>/ctl`); the job-control entry's authority is the
 kernel-synthetic `tty:*` gate + the tty seam (§3) — you can only Ctrl-Z the fg
 group of a terminal you serve, and no ordinary `SYS_POSTNOTE` reaches `tty:cont`
@@ -316,7 +374,8 @@ The POSIX porters' surface (ABI names stay standard — `isatty`, `/dev/ptmx`,
   name.
 - `tcgetattr`/`tcsetattr(struct termios)` → the boundary-line decomposes into the
   per-flag pts `ctl` `+name`/`-name` writes / reads (the LS-8b mapping, per-pts).
-- `tcsetpgrp`/`tcgetpgrp` → the pts `ctl` foreground-pgrp op (§3).
+- `tcsetpgrp`/`tcgetpgrp` → the §4 KERNEL syscalls keyed on `KObj_Pts` (round-2
+  R2-F5 — NOT a pts `ctl` write; that was the unrealizable F1 boundary).
 - `setsid`/`setpgid`/`getpgid`/`getsid` → the §4 syscalls 1:1.
 - `TIOCSWINSZ`/`TIOCGWINSZ` → the pts `ctl` winsize op (§5).
 - `isatty`/`ttyname` → a pts-fd characteristic check.
@@ -419,14 +478,15 @@ forward into PTY-1 — WITHOUT it a shell cannot detect a `^Z`-stopped child and
 job control is non-functional (the PTY-4 gate can't pass).
 
 **F6 [P1] — the spec models the hard stop compositions.** NEW sibling
-`specs/pty_stop.tla` (the focused stop-composition module — the `debug_stop.tla`
-/ `sched_alpha.tla` sibling pattern; keeps `pty.tla`'s data-path model clean):
-`gflag` (death) + `DeathWinsOverJobStop` (death wins over a stop, #811) + a
-`CookSusp` action (the cook↔stop linkage — a cooked Ctrl-Z produces a STOP, not
-a byte/signal) + `StopCompatI39` composed with both, and the `BUGGY_DEATH_BLOCKED`
-counterexample (a stopped group's death never completes). TLC-green (clean +
-liveness + `double_stop` + `death_blocked` cfgs); step-vs-resume composes
-`debug_step.tla`.
+`specs/pty_stop.tla` (the focused stop-OWNERSHIP module — the `debug_stop.tla` /
+`sched_alpha.tla` sibling pattern; keeps `pty.tla`'s data-path model clean):
+`gflag` (death) + `DeathWinsOverJobStop` (death wins over a stop, #811) +
+`StopCompatI39` (the two-owner per-owner-clear) + the `BUGGY_DOUBLE_STOP` /
+`BUGGY_DEATH_BLOCKED` counterexamples. TLC-green. **Scope (round-2 R2-F7):** it
+models the stop OWNERSHIP algebra only — the park-predicate + reader-role fan-out
+is the `debug_stop.tla`/8c-3 domain (R2-F2), the cook↔stop linkage is `pty.tla`'s
+data-path domain, and catchability is the notes boundary (R2-F3) — none re-modeled
+here; step-vs-resume composes `debug_step.tla`.
 
 **F7 [P2] — the anti-steal acquisition guard (inline §3).** Acquisition requires
 the pts is not already ANY other session's controlling terminal (a second such
@@ -485,3 +545,75 @@ acquisition, `SYS_TTY_SIGNAL`, `SYS_SETSID`/`SETPGID`/`GETPGID`/`GETSID`, the
 `SYS_WAIT_PID` `WUNTRACED`/`WCONTINUED`+pgrp-selector extension) + the `tty:*`
 note-name family. Recorded, not built — the PTY-1 impl surfaces the exact ABI
 for signoff, the way the Tapestry DMA-weave ABI defers to G-2.
+
+## 12. Round-2 holotype close (amendments, 2026-07-17)
+
+The round-1 amendment (§11) was itself prosecuted by a second Fable-max holotype
+round + a concurrent self-audit — the dirty-close re-audit (a P0 + 5 P1 warranted
+it). **0 P0 / 3 P1 / 3 P2 / 1 P3** — the re-audit prediction held: the
+architectural fixes bred fresh gaps, two P1s the round-1 class relocated one
+layer down. All three P1s matched the self-audit. Trajectory: R1 (1 P0 / 5 P1) →
+R2 (0 P0 / 3 P1) — converging at the "pin the precise mechanism" layer. The votes
+P1–P4 STAND. Closed inline (§3/§4/§7) + here. Closed list:
+`memory/audit_pty_design_closed_list.md` (round 2).
+
+**R2-F1 [P1] — F1 was relocated, not fixed (inline §3).** The `KObj_Pts`↔pts
+correlation had no realizable mechanism, and "mint kernel-mediated at ptmx-open"
+was unrealizable for the very reason F1 was (the kernel doesn't inspect 9P opens).
+FIXED: ONE server-mediated correlation — ptyfs registers `(connection, qid) →
+KObj_Pts` at BOTH master-mint AND slave-serve; a slave-fd → `KObj_Pts` resolve is
+a kernel lookup on the ptyfs connection + qid (the Weft/dev9p grant-is-the-share
+shape). The ptmx-mediated alternative is DELETED.
+
+**R2-F2 [P1] — the `job_stop_req` re-opened the 8c-3 whole-FS-freeze (inline
+§4).** `client_stop_pending` (`9p_client.c`) + the `sleep`/`tsleep` detours
+(`sched.c`) read `debug_stop_req` ONLY, so a job-stopped elected-9P-reader would
+freeze `/bin`/`/lib` for every survivor — the exact #89 bug via a different flag.
+FIXED: `job_stop_req` is threaded through EVERY `debug_stop_req` site + the 8c-3
+reader-role-release; the gate generalizes to `debug_stop_req ∨ job_stop_req`,
+per-owner clear. **SEQUENCING: PTY-1 is sequenced AFTER 8c-3 lands** (its
+reader-release is LIVE/uncommitted on the main track) and generalizes it.
+
+**R2-F3 [P1] — `tty:susp` catchability (inline §4; the unresolved round-1 SA-5).**
+`tty:*` is a NEW note class — kernel-only-POST *and* CATCHABLE — distinct from
+`snare:*` (kernel-only-post AND uncatchable). FIXED: the default STOP/terminate
+fires only if the target has no handler + is unmasked (the LS-5
+`notes_interrupt_should_terminate_locked` analog); a caught `tty:susp` delivers to
+the handler and does NOT set `job_stop_req` (else an uncatchable SIGTSTP fails
+PTY-4's own gate — tmux/bash catch it).
+
+**R2-F4 [P2] — `SYS_PTY_REGISTER`'s authority anchor (inline §3).** The gate is
+the caller being the ptyfs connection that MINTED the pts (the kernel correlates
+by connection) + `master_fd` a live pts-master `KOBJ_SPOOR` — the seam's I-22
+anchor made concrete, not a bare assertion.
+
+**R2-F5 [P2] — §7 stale text (inline §7).** `tcsetpgrp`/`tcgetpgrp` in the Pouch
+boundary-line row now points at the §4 kernel syscalls, not the (unrealizable)
+pts ctl write.
+
+**R2-F6 [P2] — the wait composition (inline §4).** The `WUNTRACED`/`WCONTINUED`
+report is NOT a reap (only exit reaps); a child STOPPING is a NEW I-9
+register-then-observe edge on the parent's `wait_pid_for` rendez; `WCONTINUED`
+needs a continued-since-last-wait latch; the pgrp selector handles a mid-wait
+`setpgid`-leave — the PTY-1 audit obligations.
+
+**R2-F7 [P3] — `pty_stop.tla` decorative CookSusp (fixed in the spec).** The
+`CookSusp`/`suspCount`/`inputLeft` machinery was write-only (no invariant read
+it). Replaced with an abstract `StopJob`; the module's honest scope is the stop
+OWNERSHIP algebra, with the cook↔stop linkage (pty.tla) + catchability (notes
+boundary) + park-predicate/reader-role (debug_stop.tla/8c-3) stated as OUT of its
+scope (the module header SCOPE block).
+
+**Round-2 verified-sound:** `StopCompatI39`'s `grpDead` exception is correct
+(death reaps → no EL0 corpse to keep stopped); `BUGGY_DEATH_BLOCKED` is the right
+counterexample; F8's kernel-posted orphan `tty:cont` composes with F4's post gate
+(the kernel is the synthetic poster, exempt); F11's gen composes with the R2-F1
+correlation at the `SYS_TTY_SIGNAL(pts_id, gen, class)` signature.
+
+**Convergence:** R2 is a dirty close (3 P1). The remaining shape is sound; the
+lead items are now (a) PTY-1 impl-precision obligations (the correlation
+realization, the flag fan-out, the catchable gate, the wait composition) audited
+at impl against real code, and (b) a real EXTERNAL sequencing dependency (8c-3).
+A round-3 confirms the R2-F1 correlation + the R2-F2 fan-out shape; if it returns
+only P2/P3, the design is converged at design altitude and PTY-1 owns the
+precise realization.

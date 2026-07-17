@@ -101,3 +101,43 @@ The `KObj_Pts` kobject + the new syscalls (`SYS_PTY_REGISTER`, kernel
 `WUNTRACED`/`WCONTINUED`+pgrp-selector extension) + the `tty:*` note-name family.
 Recorded, not built — PTY-1 impl surfaces the exact ABI for signoff (the Tapestry
 DMA-weave-at-G-2 precedent).
+
+---
+
+## Round 2 — 2026-07-17 (Fable-max holotype re-audit of the round-1 fixes)
+
+The dirty-close re-audit (round-1: 1 P0 + 5 P1). Prosecutor: holotype-reviewer,
+MODEL(start)==MODEL(end)==Fable 5 — no fallback. Scope: 9a3a0057 (the fixes).
+Self-audit ran in parallel; all 3 P1s matched (R2-SA-a/b/c). **0 P0 / 3 P1 / 3 P2
+/ 1 P3 — DIRTY.** Amendment commit: <pending>. Trajectory R1 1P0/5P1 → R2 0P0/3P1
+(converging at the "pin the mechanism" layer). The re-audit prediction held: 2 P1s
+are the R1 class relocated one layer down.
+
+- **R2-F1 [P1]** F1 relocated — the KObj_Pts↔pts correlation had no realizable
+  mechanism; "mint kernel-mediated at ptmx-open" was unrealizable (kernel doesn't
+  inspect 9P opens). FIXED (§3): ONE server-mediated correlation — ptyfs registers
+  (connection,qid)→KObj_Pts at master-mint AND slave-serve; slave-fd→KObj_Pts is a
+  kernel lookup on the ptyfs connection+qid (Weft/dev9p pattern). ptmx-mediated
+  alt DELETED.
+- **R2-F2 [P1]** the job_stop_req re-opened the 8c-3 whole-FS-freeze
+  (client_stop_pending + the sleep/tsleep detours read debug_stop_req ONLY).
+  FIXED (§4): thread job_stop_req through EVERY debug_stop_req site + the 8c-3
+  reader-role-release (gate = debug_stop_req ∨ job_stop_req). **SEQUENCING: PTY-1
+  AFTER 8c-3 (its reader-release is LIVE/uncommitted main-track).**
+- **R2-F3 [P1]** tty:susp catchability (the unresolved R1 SA-5) — an uncatchable
+  SIGTSTP breaks POSIX + fails PTY-4's gate. FIXED (§4): tty:* is a NEW class
+  (kernel-only-post + CATCHABLE); default STOP fires only if no handler + unmasked
+  (LS-5 analog); a caught tty:susp delivers to the handler, no job_stop_req.
+- R2-F4 [P2] SYS_PTY_REGISTER authority anchor = the minting connection (§3).
+  R2-F5 [P2] §7 stale "pts ctl op" → §4 kernel syscall (§7). R2-F6 [P2] the wait
+  composition (reap-vs-report split; the stop→parent I-9 edge; the WCONTINUED
+  latch) = PTY-1 items (§4). R2-F7 [P3] pty_stop.tla CookSusp decorative →
+  replaced with abstract StopJob; the cook-linkage/catchability/park-fan-out
+  stated OUT of the module's scope (header SCOPE block). TLC-green re-run.
+- Verified-sound: StopCompatI39 grpDead exception; BUGGY_DEATH_BLOCKED; F8 orphan
+  composes F4; F11 gen composes R2-F1.
+
+**Convergence**: dirty (3 P1) but converging — the remaining lead items are PTY-1
+impl-precision obligations (audited at impl vs real code) + a real external dep
+(8c-3). Round-3 confirms the R2-F1 correlation + R2-F2 fan-out shape; if it returns
+only P2/P3, the design is converged at design altitude.
