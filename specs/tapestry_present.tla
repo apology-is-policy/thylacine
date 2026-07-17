@@ -74,14 +74,25 @@
 (* Reweave action encodes the rule structurally: it fires only with        *)
 (* wstate["g2"] = "none" (no reweave already outstanding).                 *)
 (*                                                                         *)
-(* SERVER DEATH (round-1 holotype F4). ServerDeath models a tapestryd      *)
-(* crash: every live/woven generation snaps to "retiring" and the armed    *)
-(* claim tokens clear, but the CLIENT MAPPING stays (mapped unchanged) --  *)
-(* the #847 mapping_count keeps the weave pages backed with the server (+  *)
-(* its KObj_DMA + virtio-gpu resource) gone. The clean invariants hold     *)
-(* across it (no UAF: MappedImpliesBacked keeps backed while mapped; Free  *)
-(* still gates on ~mapped), and the client's ClunkMap -> Free path drains  *)
-(* to gone -- the reconnect contract's teardown leg.                       *)
+(* THE #847 DUAL REFCOUNT (round-2 R2-F2). The weave pages are held by TWO  *)
+(* independent refs: serverRef (the server's handle_count -- tapestryd's    *)
+(* allocation + KObj_DMA + virtio-gpu resource) and mapped (the client's    *)
+(* mapping_count -- burrow_share_into). Free needs BOTH dropped. This is    *)
+(* modeled EXPLICITLY (not collapsed into `backed`) so a crash is a         *)
+(* checkable, non-vacuous state -- the round-1 spec cleared only `armed`    *)
+(* (which no invariant read) and reached zero new distinct states.          *)
+(*                                                                         *)
+(* SERVER DEATH (round-1 holotype F4, sharpened by round-2 R2-F2).          *)
+(* A GRACEFUL retire drops serverRef via ServerRelease only AFTER quiesce   *)
+(* (intransfer = 0). A CRASH (ServerDeath) drops serverRef AT ONCE for      *)
+(* every live/woven generation -- even with a host DMA-read in flight --    *)
+(* and clears the armed claim tokens, but leaves the CLIENT MAPPING. So the *)
+(* crash reaches serverRef=FALSE /\ mapped=TRUE /\ intransfer>0, a state     *)
+(* the graceful path CANNOT (ServerRelease requires intransfer=0). On that  *)
+(* state RefImpliesBacked (either ref => backed) is the #847-across-crash   *)
+(* no-UAF check: the client mapping alone keeps the pages backed with the   *)
+(* server + its resource gone. The client's ClunkMap -> Free drains to gone *)
+(* (the reconnect contract's teardown leg); EventuallyRetired covers it.    *)
 (*                                                                         *)
 (* THE WEAVE LIFECYCLE (per generation g; "g2" is the reweave target)      *)
 (*                                                                         *)
@@ -165,8 +176,12 @@ ASSUME BUGGY_STALE_MAP          \in BOOLEAN
 
 VARIABLES
     wstate,      \* [Gens -> {"none","woven","live","retiring","gone"}]
-    backed,      \* [Gens -> BOOLEAN] -- pages allocated + mapped-membership intact (T-1 payload)
-    mapped,      \* [Gens -> BOOLEAN] -- the client's share mapping (#847 mapping-side ref)
+    backed,      \* [Gens -> BOOLEAN] -- the weave pages are allocated + backing intact
+    serverRef,   \* [Gens -> BOOLEAN] -- the #847 SERVER-side ref (handle_count): tapestryd's
+                 \*   allocation + KObj_DMA + virtio-gpu resource. A crash drops it at once
+                 \*   (round-2 R2-F2 -- distinct from `backed`, so "server ref gone, client
+                 \*   ref holds, pages alive" is a checkable state, not a vacuous one).
+    mapped,      \* [Gens -> BOOLEAN] -- the #847 CLIENT-side ref (mapping_count): burrow_share_into
     armed,       \* [Gens -> BOOLEAN] -- the consume-once Tweft claim token (V2)
     slot,        \* [Gens -> [Slots -> {"free","drawn","pending"}]] -- client recycle state
     intransfer,  \* [Gens -> [Slots -> 0..MaxInflight]] -- host DMA-reads in flight
@@ -174,12 +189,13 @@ VARIABLES
     staleMapped, \* BOOLEAN -- history: a claim resolved against a retiring/gone weave
     destroyReq   \* BOOLEAN -- the surface destroy was requested
 
-vars == <<wstate, backed, mapped, armed, slot, intransfer, displayed,
+vars == <<wstate, backed, serverRef, mapped, armed, slot, intransfer, displayed,
           staleMapped, destroyReq>>
 
 TypeOK ==
     /\ wstate      \in [Gens -> {"none", "woven", "live", "retiring", "gone"}]
     /\ backed      \in [Gens -> BOOLEAN]
+    /\ serverRef   \in [Gens -> BOOLEAN]
     /\ mapped      \in [Gens -> BOOLEAN]
     /\ armed       \in [Gens -> BOOLEAN]
     /\ slot        \in [Gens -> [Slots -> {"free", "drawn", "pending"}]]
@@ -191,6 +207,7 @@ TypeOK ==
 Init ==
     /\ wstate      = [g \in Gens |-> "none"]
     /\ backed      = [g \in Gens |-> FALSE]
+    /\ serverRef   = [g \in Gens |-> FALSE]
     /\ mapped      = [g \in Gens |-> FALSE]
     /\ armed       = [g \in Gens |-> FALSE]
     /\ slot        = [g \in Gens |-> [s \in Slots |-> "free"]]
@@ -206,9 +223,10 @@ Init ==
 WeaveFirst ==
     /\ ~destroyReq
     /\ wstate["g1"] = "none"
-    /\ wstate' = [wstate EXCEPT !["g1"] = "woven"]
-    /\ backed' = [backed EXCEPT !["g1"] = TRUE]
-    /\ armed'  = [armed  EXCEPT !["g1"] = TRUE]
+    /\ wstate'    = [wstate    EXCEPT !["g1"] = "woven"]
+    /\ backed'    = [backed    EXCEPT !["g1"] = TRUE]
+    /\ serverRef' = [serverRef EXCEPT !["g1"] = TRUE]
+    /\ armed'     = [armed     EXCEPT !["g1"] = TRUE]
     /\ UNCHANGED <<mapped, slot, intransfer, displayed, staleMapped, destroyReq>>
 
 Reweave ==
@@ -216,9 +234,10 @@ Reweave ==
     /\ ~destroyReq
     /\ wstate["g1"] = "live"
     /\ wstate["g2"] = "none"
-    /\ wstate' = [wstate EXCEPT !["g2"] = "woven"]
-    /\ backed' = [backed EXCEPT !["g2"] = TRUE]
-    /\ armed'  = [armed  EXCEPT !["g2"] = TRUE]
+    /\ wstate'    = [wstate    EXCEPT !["g2"] = "woven"]
+    /\ backed'    = [backed    EXCEPT !["g2"] = TRUE]
+    /\ serverRef' = [serverRef EXCEPT !["g2"] = TRUE]
+    /\ armed'     = [armed     EXCEPT !["g2"] = TRUE]
     /\ UNCHANGED <<mapped, slot, intransfer, displayed, staleMapped, destroyReq>>
 
 (***************************************************************************)
@@ -231,7 +250,8 @@ Map(g) ==
     /\ mapped' = [mapped EXCEPT ![g] = TRUE]
     /\ armed'  = [armed  EXCEPT ![g] = FALSE]
     /\ wstate' = [wstate EXCEPT ![g] = "live"]
-    /\ UNCHANGED <<backed, slot, intransfer, displayed, staleMapped, destroyReq>>
+    /\ UNCHANGED <<backed, serverRef, slot, intransfer, displayed, staleMapped,
+                   destroyReq>>
 
 MapStale(g) ==
     /\ BUGGY_STALE_MAP
@@ -240,12 +260,13 @@ MapStale(g) ==
     /\ mapped'      = [mapped EXCEPT ![g] = TRUE]
     /\ armed'       = [armed  EXCEPT ![g] = FALSE]
     /\ staleMapped' = TRUE
-    /\ UNCHANGED <<wstate, backed, slot, intransfer, displayed, destroyReq>>
+    /\ UNCHANGED <<wstate, backed, serverRef, slot, intransfer, displayed,
+                   destroyReq>>
 
 ClunkMap(g) ==
     /\ mapped[g]
     /\ mapped' = [mapped EXCEPT ![g] = FALSE]
-    /\ UNCHANGED <<wstate, backed, armed, slot, intransfer, displayed,
+    /\ UNCHANGED <<wstate, backed, serverRef, armed, slot, intransfer, displayed,
                    staleMapped, destroyReq>>
 
 (***************************************************************************)
@@ -258,8 +279,8 @@ Draw(g, s) ==
     /\ mapped[g]
     /\ slot[g][s] = "free"
     /\ slot' = [slot EXCEPT ![g][s] = "drawn"]
-    /\ UNCHANGED <<wstate, backed, mapped, armed, intransfer, displayed,
-                   staleMapped, destroyReq>>
+    /\ UNCHANGED <<wstate, backed, serverRef, mapped, armed, intransfer,
+                   displayed, staleMapped, destroyReq>>
 
 Submit(g, s) ==
     /\ ~destroyReq
@@ -269,8 +290,8 @@ Submit(g, s) ==
     /\ intransfer[g][s] = 0
     /\ slot'       = [slot       EXCEPT ![g][s] = "pending"]
     /\ intransfer' = [intransfer EXCEPT ![g][s] = 1]
-    /\ UNCHANGED <<wstate, backed, mapped, armed, displayed, staleMapped,
-                   destroyReq>>
+    /\ UNCHANGED <<wstate, backed, serverRef, mapped, armed, displayed,
+                   staleMapped, destroyReq>>
 
 SubmitEarlyFree(g, s) ==
     /\ BUGGY_EARLY_FREE
@@ -281,8 +302,8 @@ SubmitEarlyFree(g, s) ==
     /\ intransfer[g][s] < MaxInflight
     /\ slot'       = [slot       EXCEPT ![g][s] = "free"]
     /\ intransfer' = [intransfer EXCEPT ![g][s] = @ + 1]
-    /\ UNCHANGED <<wstate, backed, mapped, armed, displayed, staleMapped,
-                   destroyReq>>
+    /\ UNCHANGED <<wstate, backed, serverRef, mapped, armed, displayed,
+                   staleMapped, destroyReq>>
 
 Complete(g, s) ==
     /\ intransfer[g][s] > 0
@@ -298,10 +319,17 @@ Complete(g, s) ==
                          ELSE IF GenNo(g) > GenNo(displayed)
                               THEN g
                               ELSE displayed
-    /\ UNCHANGED <<wstate, backed, mapped, armed, staleMapped, destroyReq>>
+    /\ UNCHANGED <<wstate, backed, serverRef, mapped, armed, staleMapped,
+                   destroyReq>>
 
 (***************************************************************************)
 (* Teardown: destroy / the reweave displacement / the free edge.           *)
+(*                                                                         *)
+(* The #847 dual-refcount: `serverRef` (handle_count) + `mapped`            *)
+(* (mapping_count). A GRACEFUL retire drops serverRef via ServerRelease     *)
+(* AFTER quiesce; a CRASH (ServerDeath) drops it AT ONCE, even with a       *)
+(* transfer in flight -- the distinct state the round-2 R2-F2 fix exists to  *)
+(* make checkable. Free requires BOTH refs dropped (~serverRef /\ ~mapped). *)
 (***************************************************************************)
 
 Destroy ==
@@ -312,23 +340,38 @@ Destroy ==
     /\ wstate' = [g \in Gens |->
                     IF wstate[g] \in {"woven", "live"} THEN "retiring"
                                                        ELSE wstate[g]]
-    /\ UNCHANGED <<backed, mapped, armed, slot, intransfer, displayed,
-                   staleMapped>>
+    /\ UNCHANGED <<backed, serverRef, mapped, armed, slot, intransfer,
+                   displayed, staleMapped>>
 
 RetireDisplaced ==
     /\ wstate["g1"] = "live"
     /\ displayed = "g2"
     /\ wstate' = [wstate EXCEPT !["g1"] = "retiring"]
-    /\ UNCHANGED <<backed, mapped, armed, slot, intransfer, displayed,
+    /\ UNCHANGED <<backed, serverRef, mapped, armed, slot, intransfer,
+                   displayed, staleMapped, destroyReq>>
+
+\* The graceful server-side ref drop: tapestryd finishes quiescing a retiring
+\* weave's in-flight presents (#898), then releases its #847 handle_count ref.
+\* Requires intransfer = 0 -- the graceful path NEVER drops the server ref with a
+\* host DMA-read in flight (that is exactly what a crash does; ServerDeath).
+ServerRelease(g) ==
+    /\ wstate[g] = "retiring"
+    /\ serverRef[g]
+    /\ \A s \in Slots : intransfer[g][s] = 0
+    /\ serverRef' = [serverRef EXCEPT ![g] = FALSE]
+    /\ UNCHANGED <<wstate, backed, mapped, armed, slot, intransfer, displayed,
                    staleMapped, destroyReq>>
 
-\* F4: a tapestryd crash. Every live/woven generation snaps to "retiring" and
-\* the registry's claim tokens die (armed -> FALSE -- weft_share_release_owner),
-\* but the CLIENT MAPPING stays: the #847 mapping_count keeps the weave pages
-\* backed with the server + its KObj_DMA + virtio-gpu resource gone. The clean
-\* invariants must hold across it (no UAF), and the client's ClunkMap -> Free
-\* drains to gone (the reconnect contract's teardown leg). Modeled as a terminal
-\* surface event (sets destroyReq), so EventuallyRetired covers it too.
+\* F4: a tapestryd crash. Every live/woven generation snaps to "retiring", the
+\* registry's claim tokens die (armed -> FALSE -- weft_share_release_owner), AND
+\* the #847 SERVER ref drops AT ONCE (serverRef -> FALSE, even with a transfer in
+\* flight -- the KObj_DMA + virtio-gpu resource die with the reaped Proc). The
+\* CLIENT MAPPING stays (mapped unchanged): mapping_count alone keeps the pages
+\* backed -- RefImpliesBacked must hold across it (the #847-across-crash check,
+\* now NON-VACUOUS: serverRef=FALSE /\ mapped=TRUE /\ intransfer>0 is a state the
+\* graceful path cannot reach). The client's ClunkMap -> Free drains to gone (the
+\* reconnect contract's teardown leg). A terminal surface event (sets destroyReq)
+\* so EventuallyRetired covers it too.
 ServerDeath ==
     /\ ALLOW_SERVER_DEATH
     /\ ~destroyReq
@@ -337,25 +380,30 @@ ServerDeath ==
     /\ wstate' = [g \in Gens |->
                     IF wstate[g] \in {"woven", "live"} THEN "retiring"
                                                        ELSE wstate[g]]
+    /\ serverRef' = [g \in Gens |->
+                    IF wstate[g] \in {"woven", "live"} THEN FALSE
+                                                       ELSE serverRef[g]]
     /\ armed'  = [g \in Gens |-> FALSE]
     /\ UNCHANGED <<backed, mapped, slot, intransfer, displayed, staleMapped>>
 
 Free(g) ==
     /\ wstate[g] = "retiring"
+    /\ ~serverRef[g]
     /\ ~mapped[g]
     /\ \A s \in Slots : intransfer[g][s] = 0
     /\ wstate'    = [wstate EXCEPT ![g] = "gone"]
     /\ backed'    = [backed EXCEPT ![g] = FALSE]
     /\ displayed' = IF displayed = g THEN "nothing" ELSE displayed
-    /\ UNCHANGED <<mapped, armed, slot, intransfer, staleMapped, destroyReq>>
+    /\ UNCHANGED <<serverRef, mapped, armed, slot, intransfer, staleMapped,
+                   destroyReq>>
 
 FreeNoQuiesce(g) ==
     /\ BUGGY_RETIRE_NO_QUIESCE
     /\ wstate[g] = "retiring"
     /\ wstate' = [wstate EXCEPT ![g] = "gone"]
     /\ backed' = [backed EXCEPT ![g] = FALSE]
-    /\ UNCHANGED <<mapped, armed, slot, intransfer, displayed, staleMapped,
-                   destroyReq>>
+    /\ UNCHANGED <<serverRef, mapped, armed, slot, intransfer, displayed,
+                   staleMapped, destroyReq>>
 
 ReweaveEagerFree ==
     /\ BUGGY_REWEAVE_NO_QUIESCE
@@ -363,8 +411,8 @@ ReweaveEagerFree ==
     /\ wstate["g2"] # "none"
     /\ wstate' = [wstate EXCEPT !["g1"] = "gone"]
     /\ backed' = [backed EXCEPT !["g1"] = FALSE]
-    /\ UNCHANGED <<mapped, armed, slot, intransfer, displayed, staleMapped,
-                   destroyReq>>
+    /\ UNCHANGED <<serverRef, mapped, armed, slot, intransfer, displayed,
+                   staleMapped, destroyReq>>
 
 (***************************************************************************)
 (* The next-state relation.                                                *)
@@ -379,7 +427,7 @@ Next ==
     \/ ReweaveEagerFree
     \/ \E g \in Gens :
          \/ Map(g) \/ MapStale(g) \/ ClunkMap(g)
-         \/ Free(g) \/ FreeNoQuiesce(g)
+         \/ ServerRelease(g) \/ Free(g) \/ FreeNoQuiesce(g)
     \/ \E g \in Gens, s \in Slots :
          \/ Draw(g, s) \/ Submit(g, s) \/ SubmitEarlyFree(g, s)
          \/ Complete(g, s)
@@ -403,13 +451,23 @@ RecycleGate ==
     \A g \in Gens, s \in Slots :
         ~(slot[g][s] = "drawn" /\ intransfer[g][s] > 0)
 
-\* #847: the client's mapping keeps the pages alive, whatever the server does.
+\* #847 no-UAF (round-2 R2-F2): while EITHER ref is held -- the server's
+\* handle_count OR the client's mapping_count -- the pages stay backed. The
+\* crash-specific state (serverRef=FALSE /\ mapped=TRUE, the client mapping
+\* outliving the reaped server) is checked here: the mapping alone keeps the
+\* pages alive, no UAF. Generalizes MappedImpliesBacked to both refs.
+RefImpliesBacked ==
+    \A g \in Gens : (serverRef[g] \/ mapped[g]) => backed[g]
+
+\* #847: the client's mapping keeps the pages alive, whatever the server does
+\* (the mapping-side leg of RefImpliesBacked; kept for continuity).
 MappedImpliesBacked ==
     \A g \in Gens : mapped[g] => backed[g]
 
-\* GONE means BOTH sides finished: unmapped, and the pages actually freed.
+\* GONE means BOTH #847 refs dropped + the pages freed.
 GoneClean ==
-    \A g \in Gens : wstate[g] = "gone" => (~mapped[g] /\ ~backed[g])
+    \A g \in Gens :
+        wstate[g] = "gone" => (~serverRef[g] /\ ~mapped[g] /\ ~backed[g])
 
 \* V2 consume-once: no claim ever resolved against a retiring/gone weave.
 NoStaleMap == ~staleMapped
@@ -422,6 +480,7 @@ Invariants ==
     /\ NoTornScanout
     /\ DisplayedBacked
     /\ RecycleGate
+    /\ RefImpliesBacked
     /\ MappedImpliesBacked
     /\ GoneClean
     /\ NoStaleMap
@@ -433,6 +492,7 @@ Invariants ==
 
 Fairness ==
     /\ \A g \in Gens : WF_vars(ClunkMap(g))
+    /\ \A g \in Gens : WF_vars(ServerRelease(g))
     /\ \A g \in Gens : WF_vars(Free(g))
     /\ \A g \in Gens : \A s \in Slots : WF_vars(Complete(g, s))
 

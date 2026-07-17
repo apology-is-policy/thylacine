@@ -597,21 +597,31 @@ create-surface ──> WOVEN (weave allocated, mapped by client via Tweft)
     `burrow_share_into` (and the Weft claim path); NOT `BURROW_TYPE_DMA`
     generally** (§18.11 F1 tightens this — the earlier broad-DMA phrasing
     weakened I-5 from a *structural* guarantee to a *server-behavioral* one).
-    A weave is allocated from a distinguished device-passive DMA path (a flag
-    on `t_dma_create` / the share path asserting the region holds ONLY pixels —
-    no device-interpreted structures, e.g. a virtqueue/descriptor ring the
-    device reads as commands). The share path admits ONLY that subtype, so a
-    device-command DMA region stays structurally unshareable, exactly as MMIO
-    does — I-5's "a client cannot reach hardware control" stays STRUCTURAL, not
-    a matter of tapestryd discipline. A device-passive DMA Burrow is pinned RAM
-    the device only DMA-*reads* (pixels), with PAs known to its
-    CAP_HW_CREATE-holding creator; a client's Normal-WB RW mapping of it (the
-    same cacheable attrs as ANON — distinct from MMIO's Device-nGnRnE) conveys
-    ZERO hardware authority. Prosecute at G-2 (the DMA case is a distinct,
+    A weave is allocated as a distinguished **kernel-tracked** weave-backing
+    Burrow type (round-2 R2-F1 corrects the "structural like MMIO" claim: a
+    creator-asserted *flag* is NOT kernel-verifiable — device-passive-ness is a
+    sub-distinction WITHIN the DMA type that the kernel cannot derive from the
+    physical resource the way it derives MMIO-vs-DMA, so a bare flag would rest
+    on the creator's honesty, one layer down). The structural guarantee holds
+    ONLY if the kernel MINTS the type and BINDS its use: a `BURROW_TYPE_GPU_BACKING`
+    (name provisional) the kernel hands ONLY to the `RESOURCE_ATTACH_BACKING`
+    scanout path, NEVER to a virtqueue/descriptor region the device reads as
+    commands, and the share path admits ONLY that type — then a device-command
+    DMA region is structurally unshareable exactly as MMIO is. A weave-backing
+    Burrow is pinned RAM the device only DMA-*reads* (pixels); a client's
+    Normal-WB RW mapping of it (the same cacheable attrs as ANON — distinct from
+    MMIO's Device-nGnRnE) conveys ZERO hardware authority. **This is an ABI
+    addition requiring user signoff at G-2** (`SYS_DMA_CREATE`/`t_dma_create` is
+    two-arg today — a new type/flag or a new allocation syscall is
+    escalation-worthy per CLAUDE.md); until it lands, the honest fallback is that
+    the guarantee rests on tapestryd's EXISTING trust as the sole GPU owner (the
+    same trust it already holds by owning the device — not a NEW trust, but not
+    MMIO-parity structural either). Prosecute at G-2 (the DMA case is a distinct,
     currently-unaudited hardware-mapping surface): the KObj_DMA second-refcount
     domain + the virtio-gpu-2D-resource detach are NOT "type-independent" with
     ANON (a DMA Burrow has `pages == NULL`, its refs live on the KObj_DMA) —
     fold both into the T-1 spec/audit rather than asserting equivalence.
+    (§18.12 R2-F1.)
 - **Slots**: one weave carries N=3 page-aligned slot sub-regions (D1 triple
   buffering); tapestryd chooses stride/offsets and reports them in `geometry`.
   The client draws only into free slots; the present CQE frees a slot (D1).
@@ -658,7 +668,9 @@ Wayland-xdg-shell-class (configure/ack, serialized), realized Thylacine-shaped:
    (§18.11 F3 CORRECTS the earlier "same fid" prose: `SYS_WEFT_MAP` is
    idempotent-per-fid and would return the old weave's cached VA). The fresh
    fid carries no stale binding cache; the old weave fid is clunked as its
-   presents drain.
+   presents drain. The `resize`-ack `Rwrite` reply completes only AFTER g2 is
+   allocated (§18.12 R2-F5), so the client's fresh-fid re-open is guaranteed to
+   bind g2 and never resolve to g1.
 3. The client's first present into the new weave **completes** (its terminal
    CQE — the first frame has transferred) and tapestryd then switches scanout
    composition (`SET_SCANOUT`) to it (§18.11 F16 aligns this with the spec's
@@ -990,6 +1002,84 @@ spec's `Complete`); the model pins T-1 as a *lifetime* invariant
 (`NoTornScanout`/backing) with content-tearing pinned separately by
 `RecycleGate` (a header line now says so); the G-2 SPEC-TO-CODE map binds
 `Map`'s `wstate` guard to the concrete claim-vs-retire gate (per F3).
+
+### 18.12 Round-2 holotype close (the fixes re-audited, 2026-07-17)
+
+The round-1 amendment (§18.11) was itself prosecuted by a second Fable-max
+holotype round (the dirty-close discipline — invasive fixes breed fresh gaps) +
+a concurrent self-audit: **0 P0 / 0 P1 / 4 P2 / 2 P3**, all on the two most
+invasive fixes (F1's DMA narrowing, F4's crash contract + spec action) + F5's
+buffer policy. No unsoundness; the spec is internally consistent. Closed here.
+Closed list: `memory/audit_tapestry_design_closed_list.md` (round 2).
+
+**R2-F1 [P2] — the device-passive DMA claim was still behavioral + is an ABI
+add.** Corrected inline in §18.1: the guarantee is structural ONLY if the kernel
+MINTS + BINDS a weave-backing Burrow type (handed only to `RESOURCE_ATTACH_BACKING`,
+never a virtqueue), not via a creator-asserted flag; and `t_dma_create` is
+two-arg today, so this is an **ABI addition requiring user signoff at G-2**. The
+honest fallback until then: the guarantee rests on tapestryd's existing
+sole-GPU-owner trust (not MMIO-parity structural). The reviewer's ground truth
+(`SYS_DMA_CREATE` two-arg; `burrow.c` DMA-rejected-wholesale + BURROW_TYPE
+create-immutable) is correct.
+
+**R2-F2 [P2] — the round-1 `ServerDeath` spec action was empirically vacuous
+(2840 == 2840).** FIXED in the spec: the `#847` dual refcount is now modeled
+EXPLICITLY (`serverRef` = handle_count, distinct from `mapped` = mapping_count
+and from `backed`), a graceful `ServerRelease` drops the server ref only after
+quiesce, `ServerDeath` drops it at once (even with a transfer in flight), and
+the new `RefImpliesBacked` invariant (either ref ⇒ backed) is the
+`#847`-across-crash no-UAF check. TLC re-run: clean GREEN at **5413 distinct
+states (up from 2840 — the state jump IS the non-vacuity proof)**; liveness
+GREEN incl. `EventuallyRetired` across the crash; all four buggy cfgs still fire
+their exact invariant. The claim is now a real machine-check, not framing.
+
+**R2-F3 [P2] — the crash contract designed-in an uncharged pinned-DMA leak.**
+Bound: `burrow_share_into` bumps `mapping_count` only (never the client's #65
+`page_count` — F9 confirms), so post-crash a client mapping pins tapestryd's
+freed DMA pages charged to nothing live. Resolution: the crash contract adds a
+**kernel force-reclaim of orphaned weave mappings after a bounded grace period**
+(a client that ignores "compositor gone" and never re-attaches takes a
+`snare:segv` on the stale mapping — it was warned); AND the share is charged to
+a per-client shared-mapping budget (the I-32/#65 composition axis F9 opens), so
+the pin is bounded + accounted, not an unqualified "#847 keeps pages alive"
+feature. Both land with the G-2/G-3 crash-contract impl.
+
+**R2-F4 [P2] — the never-drop set + bounded buffer had no overflow disposition
+(a stalled client → compositor DoS).** Bound: the droppable class is exactly
+{FRAME, PTR_MOVE}; keys/PTR_BTN/SCROLL/CONFIGURE/CLOSE/FOCUS are non-droppable
+and a stalled client fills the bounded buffer with them. Resolution: (a)
+**present and event ride SEPARATE rings** (resolving the §18.11-F5 A/B — event
+back-pressure then never touches the present recycle gate); (b) when the
+non-coalescible class alone fills a surface's bounded event buffer, tapestryd
+declares the surface **WEDGED and force-retires it** (queue/deliver CLOSE, drop
+the session) rather than blocking (self-DoS) or dropping a control event — the
+never-drop guarantee holds for a LIVE client and terminates a dead one.
+
+**R2-F5 [P3] — F3's "atomic with the RETIRING transition" mislocated the
+ordering + the reweave-open was unordered.** Sharpened: the real obligations are
+(i) the kernel **registry-removal-before-page-free** and (ii) the kernel
+**claim-join re-checks the registry** (a join that wins sets `mapped`, blocking
+`Free`; a join after removal fails-closed) — this is what the G-2 SPEC-TO-CODE
+binding of `Map`'s guard realizes, NOT an atomic on tapestryd's local state. And
+§18.3 step 2 gains: the `resize`-ack `Rwrite` reply follows g2 allocation, so
+the client's fresh-fid open is guaranteed to bind g2 (never resolve to g1).
+
+**R2-F6 [P3] — reusing `SPAWN_PERM_CONSOLE_OWNER`'s shape risked a third console
+role muddying I-27.** Sharpened: the drain/feed grant (F8) uses a DISTINCT
+`SPAWN_PERM_CONSOLE_RENDERER` (name provisional), stated orthogonal to BOTH
+console-ATTACH (no elevation authority — already implied by the §18.7
+suspension) AND console-OWNER (the drain/feed conveys no Ctrl-C-target
+authority), preserving the round-1-verified I-27 ATTACH-vs-OWNER split as a
+three-role clarity — the renderer is neither the elevation gate nor the
+interrupt target.
+
+**Round-2 verified-sound (do not re-litigate):** the fresh-fid + separate-map-
+branch (F3/F10) compose; F2 per-session scoping composes with F3/F4 (re-attach =
+a new session, no cross-session leak); the ≤2-generation bound is faithful for a
+single reweave; no two §18.11/§18.12 resolutions contradict; the inline
+§18.0/§18.1/§18.3 edits are consistent with their §18.11/§18.12 entries; the
+spec's four buggy cfgs still violate their exact named invariant after the
+dual-refcount addition.
 
 ---
 

@@ -94,3 +94,65 @@ opcodes; the trusted-path medium-binding soundly reconciles ARCH §17.2.
 None dropped. F1's KObj_DMA/resource-detach lifetime + F3's unregister +
 F10's map branch are IMPL work SCOPED into G-2 (named, not dropped). The G-2
 SPEC-TO-CODE map owes: Map's guard → the atomic claim-vs-retire site (F3/F16).
+
+---
+
+## Round 2 — 2026-07-17 (Fable-max holotype re-audit of the round-1 fixes)
+
+The dirty-close re-audit (round-1 was dirty: 4 P1 + 6 P2 ≥ 6). Prosecutor:
+holotype-reviewer, MODEL(start)==MODEL(end)==Fable 5 — no fallback. Scope: the
+round-1 amendment commit b7322841 (the fixes THEMSELVES). Self-audit ran in
+parallel (R2-SA-a..f); a/b/c/d matched the reviewer's R2-F1/F5/F2/F4.
+
+**Counts: 0 P0 / 0 P1 / 4 P2 / 2 P3.** NOT a clean round-2 (4 P2), but NOT a
+dirty close (P1+P2 = 4 < 6, no P0/P1, no load-bearing-mechanism restructure — the
+spec change is an ADDITION). All closed as binding amendments (§18.12 + inline
+§18.1/§18.3 + the spec dual-refcount). **No round-3 mandated.** Amendment
+commit: <pending>. Convergence: round-1 4 P1+6 P2 → round-2 0 P1+4 P2 → these
+close without re-opening a P1 (design is converging; the residue is impl-scoped).
+
+- **R2-F1 [P2]** — the device-passive DMA subtype was still creator-asserted
+  (not kernel-verifiable) + is an ABI add. Corrected §18.1: structural ONLY via
+  a kernel-minted+bound weave-backing type (handed only to RESOURCE_ATTACH_BACKING),
+  ELSE it rests on tapestryd's existing sole-GPU-owner trust (not MMIO-parity).
+  **The t_dma_create type/flag is an ABI addition → USER SIGNOFF at G-2**
+  (escalation-worthy; flagged, not silently bound).
+- **R2-F2 [P2]** — the round-1 ServerDeath spec action was EMPIRICALLY VACUOUS
+  (reviewer ran TLC both ways: 2840==2840; no invariant read `armed`; the #847
+  dual refcount was collapsed into one `backed` bool). FIXED: modeled the dual
+  refcount explicitly — `serverRef` (handle_count) distinct from `mapped`
+  (mapping_count); `ServerRelease` (graceful, post-quiesce) vs `ServerDeath`
+  (crash, at-once even mid-transfer); new `RefImpliesBacked` invariant (either
+  ref ⇒ backed) = the #847-across-crash no-UAF check. TLC: clean GREEN **5413
+  distinct (up from 2840 — the jump IS the non-vacuity proof)**; liveness GREEN
+  incl. EventuallyRetired across the crash; 4 buggy cfgs still fire.
+- **R2-F3 [P2]** — the crash contract designed-in an uncharged pinned-DMA leak
+  (burrow_share_into bumps mapping_count only, never #65 page_count). Bound: a
+  kernel force-reclaim of orphaned weave mappings after a bounded grace (the
+  client that ignores "compositor gone" takes a snare:segv) + charge to a
+  per-client shared-mapping budget (the I-32/#65 axis F9 opens). G-2/G-3 impl.
+- **R2-F4 [P2]** — the never-drop set + bounded buffer had no overflow
+  disposition (a stalled client → compositor DoS). Bound: separate present/event
+  rings (resolves the §18.11-F5 A/B) + a WEDGED-client force-retire when the
+  non-coalescible class fills the buffer (never-drop holds for a live client,
+  terminates a dead one).
+- **R2-F5 [P3]** — F3's "atomic with RETIRING" mislocated the ordering + the
+  reweave-open was unordered. Sharpened: the real obligations are
+  registry-removal-before-page-free + claim-join-re-checks-registry (the G-2
+  SPEC-TO-CODE binding of Map's guard); §18.3 step 2 now orders the resize-ack
+  Rwrite after g2 alloc.
+- **R2-F6 [P3]** — reusing SPAWN_PERM_CONSOLE_OWNER's shape muddied I-27.
+  Sharpened: a distinct SPAWN_PERM_CONSOLE_RENDERER, orthogonal to BOTH
+  console-ATTACH and console-OWNER (a three-role clarity).
+
+**Round-2 verified-sound**: fresh-fid + separate-map-branch compose; F2 scoping
+composes with F3/F4 (re-attach = new session); ≤2-gen bound faithful; no
+resolution contradicts; inline edits consistent with their §18.11/§18.12
+entries; the 4 buggy cfgs survive the dual-refcount addition.
+
+### Round-2 escalation flag (owed to the user)
+
+**R2-F1's t_dma_create ABI addition needs signoff at G-2** — a new BURROW_TYPE /
+create flag / allocation syscall for the kernel-minted weave-backing type. Not
+decided here; recorded as a G-2 gate. Until it lands, the DMA-share guarantee is
+tapestryd-trust-based (honest fallback stated in §18.1).
