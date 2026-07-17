@@ -2361,6 +2361,27 @@ void el0_return_stop_check(struct exception_context *ctx) {
     }
 }
 
+// 8c-2 stop-of-a-sleeper (DEBUG-FS-DESIGN 5c.2): the nested debug-stop park a
+// blocking sleep()/tsleep() detours into when a debugger stop is pending on the
+// caller's Proc. This is el0_return_stop_check's park reached from a blocking
+// syscall instead of the EL0-return tail -- sleep on THIS thread's own
+// debug_rendez until proc_debug_resume clears debug_stop_req (debug_stop_wake_
+// cond), then return SLEEP_OK so the caller re-checks its ORIGINAL wait condition
+// and re-blocks in place (the syscall is preserved on the stack; no unwind, no
+// restart). Returns SLEEP_INTR if the Proc is group-terminating (or a soft
+// interrupt-terminate latched) while stop-parked -- sleep()'s own
+// thread_die_pending check catches it -- so the caller unwinds and the thread
+// dies / delivers at its EL0-return tail: DEATH WINS over a stop, exactly as at
+// the tail. sleep()'s `r != &debug_rendez` detour gate skips the stop-check for
+// this nested park (r == debug_rendez here), so there is no recursion.
+// specs/debug_stop.tla: the sleeper's register-then-observe park (StopWakesSleeper
+// -> the handshake -> "stopped"); NoLostStop + DeathWinsOverStop + the
+// EventuallyStopSettles liveness.
+int proc_debug_stop_sleeper_park(struct Thread *t) {
+    if (!t || t->magic != THREAD_MAGIC) return SLEEP_OK;
+    return sleep(&t->debug_rendez, debug_stop_wake_cond, t->proc);
+}
+
 void proc_debug_stop_deliver(struct Proc *p) {
     if (!p || p->magic != PROC_MAGIC) return;
     if (p == g_kproc) return;   // kproc is never debuggable (undebuggable at the gate too)
@@ -2389,16 +2410,41 @@ void proc_debug_stop_deliver(struct Proc *p) {
         peer->debug_stepover_va = 0;
     }
 
+    // 8c-2 stop-of-a-sleeper (DEBUG-FS-DESIGN 5c.2): WAKE every SLEEPING peer so
+    // it returns from its blocking sleep()/tsleep(), re-observes the now-set
+    // debug_stop_req under its wait_lock, and DETOURS to park on its own
+    // debug_rendez -- the multi-thread-Go-target fix (an idle futex-parked M never
+    // reaches the EL0-return tail on its own, so without this the target could
+    // never become fully-stopped and the debugger's blocking `stop` hangs). This
+    // is proc_group_terminate's death-wake cascade VERBATIM, but the woken sleeper
+    // arms the sleep()-detour park instead of the die: torpor_wake_all_for_proc
+    // for the futex (torpor) waiters -- Go's idle M's -- then the per-peer
+    // wait_lock rendez wake for every other blocking sleep. The RELEASE store of
+    // debug_stop_req above happens-before each wake AND before each peer's
+    // wait_lock acquire here, so the woken sleeper's ACQUIRE-read of debug_stop_req
+    // under its wait_lock observes the stop -- no stop-wake is lost between the
+    // wake and the sleeper's detour re-park (register-then-observe, I-9;
+    // specs/debug_stop.tla StopWakesSleeper). A RUNNING peer reads NULL
+    // rendez_blocked_on and is skipped -- it stops at its tail (below). wakeup()
+    // re-validates r->waiter under r->lock, so a peer already woken (or by
+    // torpor_wake_all) is a safe no-op; wait_lock held across wakeup pins a torpor
+    // waiter's stack rendez. Lock order g_proc_table_lock -> wait_lock -> (wakeup:
+    // r->lock); torpor_lock is strictly below g_proc_table_lock.
+    torpor_wake_all_for_proc(p);
+    for (struct Thread *peer = p->threads; peer; peer = peer->next_in_proc) {
+        irq_state_t ws = spin_lock_irqsave(&peer->wait_lock);
+        struct Rendez *r = peer->rendez_blocked_on;
+        if (r) wakeup(r);
+        spin_unlock_irqrestore(&peer->wait_lock, ws);
+    }
+
     // Kick any peer RUNNING at EL0 on another CPU so it traps to its IRQ-from-EL0
     // tail (0x480 -> el0_return_stop_check) and parks without waiting for a timer
     // tick. Broadcast to online CPUs (rare path; a CPU not running a peer of p
     // no-ops at its tail); the periodic tick is the floor if an IPI is missed.
-    // A thread blocked in a syscall SLEEP is deliberately NOT interrupted -- it
-    // stops at its next checkpoint (the Plan 9 non-preemptive stop; explicit-
-    // stop-of-a-sleeper is a v1.x refinement). This mirrors proc_group_terminate
-    // step (4) but sets a park flag rather than a die flag. Targeted STOP_SGI
-    // (fewer spurious IPIs) is a v1.x optimization; the broadcast reschedule is
-    // the proven death-delivery vehicle.
+    // This mirrors proc_group_terminate step (4) but sets a park flag rather than
+    // a die flag. Targeted STOP_SGI (fewer spurious IPIs) is a v1.x optimization;
+    // the broadcast reschedule is the proven death-delivery vehicle.
     smp_resched_others();
 }
 

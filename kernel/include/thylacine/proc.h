@@ -892,15 +892,27 @@ void el0_return_die_check(void);
 // check on unpark.
 //
 // proc_debug_stop_deliver: request every thread of `p` park at its next EL0-
-// return checkpoint. Sets p->debug_stop_req (RELEASE) then smp_resched_others()
-// so a peer RUNNING at EL0 on another CPU traps to its IRQ-from-EL0 tail and
-// observes the flag (the periodic tick is the floor). A thread already in the
-// kernel observes the flag when its syscall/handler returns to the tail; a
-// thread blocked in a syscall sleep is NOT interrupted -- it stops at its next
-// checkpoint (the Plan 9 non-preemptive stop; explicit-stop-of-a-sleeper is a
-// v1.x refinement). LOCK CONTRACT: caller holds g_proc_table_lock (mirrors
-// proc_group_terminate; the flag-set + IPI take no sleeping lock).
+// return checkpoint. Sets p->debug_stop_req (RELEASE), then (8c-2) WAKES every
+// sleeping peer (torpor_wake_all_for_proc + the per-peer wait_lock rendez wake,
+// proc_group_terminate's cascade) so a thread blocked in an indefinite syscall
+// sleep returns, re-observes the flag, and DETOURS to park on its debug_rendez
+// (proc_debug_stop_sleeper_park), then smp_resched_others() so a peer RUNNING at
+// EL0 on another CPU traps to its tail (the periodic tick is the floor). A thread
+// already in the kernel observes the flag when its syscall/handler returns to the
+// tail. LOCK CONTRACT: caller holds g_proc_table_lock (mirrors
+// proc_group_terminate; the flag-set + wake + IPI take no sleeping lock; the
+// per-peer wait_lock walk is g_proc_table_lock -> wait_lock -> r->lock).
 void proc_debug_stop_deliver(struct Proc *p);
+
+// proc_debug_stop_sleeper_park: the nested debug-stop park a blocking
+// sleep()/tsleep() detours into when a debugger stop is pending (8c-2,
+// DEBUG-FS-DESIGN 5c.2). Sleeps on the caller's own debug_rendez until the stop
+// clears; returns SLEEP_OK (re-check the original wait cond + re-block) or
+// SLEEP_INTR (dying/soft-int while stop-parked -> unwind + die at the tail;
+// DEATH WINS). Called from sched.c's sleep()/tsleep() detour with their wait
+// loop locks RELEASED. The `r != &debug_rendez` detour gate makes this
+// nested park (r == debug_rendez) skip the stop-check -> no recursion.
+int proc_debug_stop_sleeper_park(struct Thread *t);
 
 // proc_debug_fault_stop: the EC-path (hardware bp/wp hit or single-step
 // completion) stop delivery. Unlike proc_debug_stop_deliver (the ctl `stop`

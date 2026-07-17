@@ -1743,6 +1743,32 @@ int sleep(struct Rendez *r, int (*cond)(void *arg), void *arg) {
     // Loop: re-check cond on each wakeup. Single-waiter UP: cond should be true
     // after a normal wakeup. The loop also absorbs spurious / cascade wakes.
     while (!cond(arg)) {
+        // 8c-2 stop-of-a-sleeper (DEBUG-FS-DESIGN 5c.2): if a debugger stop is
+        // pending on this EL0 Proc, DETOUR -- park on our own debug_rendez until
+        // resumed, then re-loop to re-check the ORIGINAL cond (the syscall
+        // re-blocks in place; no unwind, no restart). The debug_stop_req read is
+        // UNDER wait_lock, held continuously from here through the register +
+        // sched-drop below, so it serializes with proc_debug_stop_deliver's
+        // RELEASE-set + per-peer wait_lock wake: either we observe the set flag
+        // here, or we register on r and the deliver's wake-walk (which takes our
+        // wait_lock) finds us + wakes us -> the next iteration observes it -- no
+        // stop-wake lost (register-then-observe, I-9). Gated `r != &debug_rendez`
+        // so the nested park (which IS a sleep on debug_rendez) does not recurse;
+        // gated `t->proc` so a kernel thread (never debuggable) is skipped.
+        // SLEEP_INTR from the park = dying / soft interrupt-terminate while
+        // stop-parked -> unwind the outer syscall (DEATH WINS over a stop, exactly
+        // as at the tail). specs/debug_stop.tla StopWakesSleeper.
+        if (r != &t->debug_rendez && t->proc &&
+            __atomic_load_n(&t->proc->debug_stop_req, __ATOMIC_ACQUIRE) != 0) {
+            spin_unlock(&r->lock);
+            spin_unlock_irqrestore(&t->wait_lock, s);
+            int drc = proc_debug_stop_sleeper_park(t);
+            s = spin_lock_irqsave(&t->wait_lock);
+            spin_lock(&r->lock);
+            if (drc == SLEEP_INTR) { rc = SLEEP_INTR; break; }
+            continue;
+        }
+
         if (r->waiter)
             extinction("sleep: rendez already has a waiter (single-waiter discipline)");
         if (t->state != THREAD_RUNNING)
@@ -1866,6 +1892,29 @@ int tsleep(struct Rendez *r, int (*cond)(void *arg), void *arg,
         if (t->sleep_timedout || timer_get_counter() >= deadline_cnt) {
             ret = TSLEEP_TIMEDOUT;
             break;
+        }
+
+        // 8c-2 stop-of-a-sleeper (DEBUG-FS-DESIGN 5c.2), the tsleep twin of
+        // sleep()'s detour: park on debug_rendez when a stop is pending, then
+        // re-loop. The detour is BEFORE timerwait_link (below), so this thread is
+        // not on the timer-wait list during the indefinite debug-park -- on resume
+        // it re-registers with its ORIGINAL deadline. A deadline that expired while
+        // stop-parked reports TSLEEP_TIMEDOUT at the re-loop's timeout check
+        // (wall-clock advances while the thread is stopped -- the accepted
+        // debugger-freeze semantics; a timed wait timing out is a legal outcome).
+        // Same I-9 register-then-observe + DEATH-WINS + no-recursion reasoning as
+        // sleep()'s detour.
+        if (r != &t->debug_rendez && t->proc &&
+            __atomic_load_n(&t->proc->debug_stop_req, __ATOMIC_ACQUIRE) != 0) {
+            spin_unlock(&r->lock);
+            spin_unlock(&g_timerwait.lock);
+            spin_unlock_irqrestore(&t->wait_lock, s);
+            int drc = proc_debug_stop_sleeper_park(t);
+            s = spin_lock_irqsave(&t->wait_lock);
+            spin_lock(&g_timerwait.lock);
+            spin_lock(&r->lock);
+            if (drc == SLEEP_INTR) { ret = TSLEEP_INTR; break; }
+            continue;
         }
 
         if (r->waiter)

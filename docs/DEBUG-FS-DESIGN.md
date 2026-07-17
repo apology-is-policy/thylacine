@@ -467,10 +467,12 @@ owned-Proc path (which reached the same raw kstack) to a no-attach self-read.
 
 ## 5c. Stage 8c-2 — explicit stop-of-a-sleeper (the multi-thread-stop refinement)
 
-**Status: DESIGN + spec landed (2026-07-17); kernel impl held for signoff.** This
-is the v1.x refinement §4.2 named ("an explicit-stop-of-a-sleeping-thread … is a
-v1.x refinement"), pulled forward because 8c-1 ground-truthed it as the blocker
-for **every real Go target**.
+**Status: AS-BUILT (2026-07-17). Signed off; kernel impl landed; the E2E is live
++ boot-fatal (DELVE-PORT-DESIGN §18).** Owed pre-close: the SMP gate + a focused
+Fable holotype + the ARCH/CLAUDE I-39 as-built-row updates. This is the v1.x
+refinement §4.2 named ("an explicit-stop-of-a-sleeping-thread … is a v1.x
+refinement"), pulled forward because 8c-1 ground-truthed it as the blocker for
+**every real Go target**.
 
 ### 5c.1 The seam (ground-truthed at 8c-1, DELVE-PORT-DESIGN §17)
 

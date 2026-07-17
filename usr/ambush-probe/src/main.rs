@@ -12,10 +12,12 @@
 // + LOG its stdout/stderr verbatim. This is the first exercise of the
 // proc_thylacine backend against a real M-threaded Go target: the non-PIE
 // EntryPoint==0, the exe-path DWARF load, the iscgo/tpidr Go-g recovery, and the
-// wait-file/stop semantics. Kept SOFT (rich logging, boot never gated on it) for
-// the first iteration so the boot completes and the actual Delve output is
-// captured to ground-truth what works; it tightens to a hard assertion once the
-// output shape is known.
+// wait-file/stop semantics, and (8c-2) the stop-of-a-sleeper that makes a
+// multi-M Go target fully-stoppable. BOOT-FATAL: it asserts the inspect markers
+// (a goroutine listing, the main.parkLoop bt frame, and the Sentinel value read
+// from the target's memory) -- all three require a fully-stopped multi-M target.
+// It gates on the markers, NOT ambush's exit code (Delve exits 1 on the EOF'd
+// "kill? [Y/n]" prompt, a cosmetic artifact; the debug session succeeded).
 //
 // Ambush is OPTIONAL infra (baked only when both forks were present at build). An
 // unbaked /ambush makes stage A SKIP (exit 0) so a fork-absent build still boots;
@@ -111,30 +113,24 @@ fn version_smoke() -> Result<(), &'static str> {
     Ok(())
 }
 
-// The full attach E2E below is written + PROVEN to REACH the target -- Delve
-// logs "attaching to pid <N>" (captured with --log) -- but it then HANGS at the
-// halt on a MULTI-THREADED Go target: an idle Go M parked in a futex/torpor wait
-// never reaches the EL0-return stop checkpoint, so kernel devproc_all_threads_
-// parked (rendez_blocked_on == &debug_rendez for EVERY thread) is never satisfied
-// and `ctl stop` blocks forever. This is a DELIBERATE v1.x kernel seam
-// (kernel/proc.c::proc_debug_stop_deliver: "a thread blocked in a syscall SLEEP
-// is deliberately NOT interrupted ... a v1.x refinement" -- the Plan 9
-// non-preemptive stop). It is the #811-analog for debug-stop: an explicit
-// stop-of-a-sleeper (wake interruptible sleepers -> drive them to the checkpoint
-// -> restart the syscall on resume). Until that lands, the attach is GATED OFF so
-// it does not hang every boot; flip ATTACH_ENABLED + turn the markers into a
-// gated assertion once the seam closes. See docs/DELVE-PORT-DESIGN.md 17.
-const ATTACH_ENABLED: bool = false;
+// The full attach E2E below halts + inspects a MULTI-THREADED Go target -- which
+// works because of 8c-2 (the stop-of-a-sleeper, DEBUG-FS-DESIGN 5c): a debugger
+// stop now WAKES a Go M parked in an indefinite futex/torpor wait so it detours
+// to park on its debug_rendez, so devproc_all_threads_parked is satisfied and the
+// halt completes instead of hanging forever. ATTACH_ENABLED is a plain disable
+// switch (leave it true); it flips false only to skip stage B for a fast
+// iteration loop. See docs/DELVE-PORT-DESIGN.md 17-18 + DEBUG-FS-DESIGN.md 5c.
+const ATTACH_ENABLED: bool = true;
 
-// --- Stage B: attach E2E (gated on the multi-thread-stop seam) ---
-fn attach_e2e() {
+// --- Stage B: attach E2E (the 8c-2 multi-thread-stop proof) ---
+// Returns true on PASS or a legitimate SKIP (forks absent); false only when the
+// attach reached the target but the inspect markers are missing (a real
+// regression). With 8c-2 (the stop-of-a-sleeper), a multi-M Go target becomes
+// fully-stopped, so `goroutines`/`bt`/`print` all complete.
+fn attach_e2e() -> bool {
     if !ATTACH_ENABLED {
-        t_putstr(
-            "ambush-probe: stage B GATED -- the attach E2E reaches the target but \
-             halt hangs on a multi-thread Go target (a sleeping Go M never reaches \
-             the debug-stop checkpoint; kernel v1.x seam). Stage A proves Ambush runs.\n",
-        );
-        return;
+        t_putstr("ambush-probe: stage B DISABLED (ATTACH_ENABLED=false)\n");
+        return true;
     }
     // The parking Go target. Piped stdio (it prints nothing, parks); Piped keeps
     // it from cloning this fd-less probe's absent 0/1/2.
@@ -147,7 +143,7 @@ fn attach_e2e() {
         Ok(c) => c,
         Err(_) => {
             t_putstr("ambush-probe: stage B SKIP (ambush-child not baked)\n");
-            return;
+            return true;
         }
     };
     let pid = kid.pid();
@@ -178,11 +174,13 @@ fn attach_e2e() {
         Err(_) => {
             t_putstr("ambush-probe: stage B SKIP (ambush not baked for attach)\n");
             reap_child(&mut kid);
-            return;
+            return true;
         }
     };
     // Close Ambush's stdin -> its REPL reads EOF after the init file -> exits +
-    // detaches (no `exit` command, which would prompt to kill the target).
+    // detaches. Ambush exits status 1 on the EOF'd "kill the process? [Y/n]"
+    // prompt (a cosmetic Delve exit artifact -- the debug session succeeded), so
+    // this probe gates on the INSPECT MARKERS below, not ambush's exit code.
     let _ = amb.stdin.take();
 
     // Bounded wait (~12s): guards a hang (an EOF-exit that never fires, or a
@@ -217,17 +215,22 @@ fn attach_e2e() {
     echo_block("ambush-probe: === ambush attach STDOUT ===\n", &out);
     echo_block("ambush-probe: === ambush attach STDERR ===\n", &err);
 
-    // Soft report: which expected markers appeared (goroutine listing / the
-    // parkLoop frame / a non-empty result). NOT gated this iteration.
+    // The 8c-2 inspect proof: `goroutines` listed them, `bt` unwound the stack
+    // (the parkLoop frame), and `print main.Sentinel` read the target's memory --
+    // ALL THREE require a FULLY-STOPPED multi-M Go target, which the stop-of-a-
+    // sleeper (a detour-parked idle futex M) now delivers. SENTINEL is
+    // 0x0AABB00DCAFE0001 == 768901734683508737 (see ambush-child).
     let saw_goroutine = contains(&out, b"Goroutine") || contains(&out, b"goroutine");
     let saw_park = contains(&out, b"parkLoop");
+    let saw_sentinel = contains(&out, b"768901734683508737");
     let saw_output = !out.is_empty();
     t_putstr(&format!(
-        "ambush-probe: stage B markers -- output={} goroutine={} parkLoop={}\n",
-        saw_output as u8, saw_goroutine as u8, saw_park as u8
+        "ambush-probe: stage B markers -- output={} goroutine={} parkLoop={} sentinel={}\n",
+        saw_output as u8, saw_goroutine as u8, saw_park as u8, saw_sentinel as u8
     ));
 
     reap_child(&mut kid);
+    saw_goroutine && saw_park && saw_sentinel
 }
 
 // killgrp + reap the parking target (its loop is unbounded).
@@ -248,8 +251,19 @@ pub extern "C" fn rs_main() -> i64 {
             unsafe { t_exits(1) }
         }
     }
-    // Stage B is SOFT this iteration: log-rich, never gates the boot.
-    attach_e2e();
-    t_putstr("ambush-probe: DONE (stage A gated PASS; stage B soft -- see attach output above)\n");
+    // Stage B: the 8c-2 attach + inspect proof (boot-fatal). A legitimate SKIP
+    // (forks absent) returns true; a broken attach (markers missing) returns false.
+    if !attach_e2e() {
+        t_putstr(
+            "ambush-probe: stage B FAIL -- attach reached the target but the inspect \
+             markers (goroutines / parkLoop bt frame / Sentinel) are missing (an \
+             8c-2 multi-thread-stop regression?)\n",
+        );
+        unsafe { t_exits(1) }
+    }
+    t_putstr(
+        "ambush-probe: PASS (stage A: ambush runs; stage B: multi-thread Go attach + \
+         goroutines + bt + print)\n",
+    );
     unsafe { t_exits(0) }
 }

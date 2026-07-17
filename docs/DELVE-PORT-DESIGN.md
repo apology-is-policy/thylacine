@@ -647,3 +647,42 @@ and modeled in `specs/debug_stop.tla` (the `"sleep"` PC + `StopWakesSleeper` +
 `BUGGY_STOP_SKIPS_SLEEPER` + the `EventuallyStopSettles` liveness; clean cfg
 TLC-green, the buggy cfg the executable counterexample). The kernel impl is held
 for signoff.
+
+## 18. 8c-2 as-built -- the multi-thread Go attach WORKS (2026-07-17)
+
+Signed off; the kernel impl landed and the E2E is live + boot-fatal. Ambush now
+attaches to a multi-M Go target, halts it, and inspects it.
+
+**Kernel (the stop-of-a-sleeper, DEBUG-FS-DESIGN 5c.2):** `kernel/sched.c`
+`sleep()`/`tsleep()` gained a top-of-loop detour -- when a debugger stop is
+pending on the caller's Proc, park on the caller's own `debug_rendez` until the
+stop clears, then re-loop to re-check the ORIGINAL wait condition (the syscall
+re-blocks in place; no unwind, no restart). `kernel/proc.c`
+`proc_debug_stop_deliver` gained a sleeper-wake walk (`torpor_wake_all_for_proc`
++ the per-peer `wait_lock` rendez wake -- `proc_group_terminate`'s death-wake
+cascade, arming the detour instead of the die). `proc_debug_stop_sleeper_park` is
+the nested park; the `r != &debug_rendez` gate prevents recursion; `SLEEP_INTR`
+propagation keeps death winning over a stop.
+
+**Backend (two Ambush-fork stubs, unmasked in order by the ground truth):**
+`followexec_thylacine.go` -- `detachChild` is a no-op (no follow-exec on
+Thylacine), NOT `followexec_other.go`'s `panic("not implemented")` that masked
+the real error on `processGroup.add`'s cleanup path; `bininfo.go` -- `"thylacine"`
+joins the ELF `loadBinaryInfo` case (Thylacine binaries are ELF).
+
+**The E2E (`usr/ambush-probe` stage B, boot-fatal):** `ambush attach <pid>
+/ambush-child --init /ambush-init --allow-non-terminal-interactive=true` asserts
+three inspect markers, ALL requiring a fully-stopped multi-M target: the
+`goroutines` listing (incl. `main.parkLoop`), the `bt` of a **detour-parked idle
+M** (`runtime.torpor_wait -> futexsleep -> mcall` -- the direct witness the
+sleeper was stopped), and `print main.Sentinel` == `768901734683508737`
+(`0x0AABB00DCAFE0001`, a cross-Proc memory read). Gated on the markers, not
+ambush's exit code (Delve exits 1 on the EOF'd "kill? [Y/n]" prompt -- cosmetic).
+
+**Owed (the next session's pre-close rigor):** the SMP gate (default+UBSan x
+smp4/smp8 -- this is a wait/wake change on the most bug-prone lineage) + a focused
+Fable holotype (prosecute the sleeper re-park I-9, death-wins-in-detour, no
+lost/double wake, the cond-changed-during-stop re-check, the sleeper-holds-no-
+locks discipline, the hot-path cost) + the ARCH §28 I-39 / CLAUDE.md debug_stop
+as-built row updates (the "NEVER inside sleep()" line is superseded for a sleeper
+by 5c.2) + the `docs/reference/134-debug-fs.md` stop-of-a-sleeper section.
