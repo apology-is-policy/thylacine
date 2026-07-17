@@ -551,8 +551,12 @@ consumers before Halcyon — the highest-risk, last-phase client — commits to 
   MMIO/DMA types); `SYS_WEFT_SHARE` is CAP_HW_CREATE-gated (tapestryd holds it
   anyway); `SYS_WEFT_MAP` resolves any dev9p `KOBJ_SPOOR` fid and issues
   `Tweft` — the mechanism is server-agnostic in shape, netd-only in use. The
-  generalization is a naming/validation pass + the §18.1 backing decision, not
-  new machinery.
+  generalization is a naming/validation pass + the §18.1 backing decision + a
+  bounded amount of NEW machinery (the framebuffer-weave map branch and the
+  retire-time disarm — §18.11 F3/F10 CORRECT the earlier "not new machinery"
+  claim: `SYS_WEFT_MAP` is idempotent-per-fid and there is no
+  `weft_share_unregister` today, so the arm/re-arm/disarm weave lifecycle needs
+  real additions, scoped into the G-2 pass).
 - NO framebuffer surface exists anywhere (no `/dev/fb`, no fb Dev, no
   tapestryd binary); virtio-input events reach only the boot log; the warden's
   `virtio:16` (GPU) slot is currently bound to the `crash-probe` restart test
@@ -589,13 +593,25 @@ create-surface ──> WOVEN (weave allocated, mapped by client via Tweft)
   - REJECTED — client draws into an ANON weave and tapestryd copies into its
     DMA backing per present: a full-frame memcpy on the hot path kills the
     Angle-#2 zero-copy property Tapestry exists to demonstrate.
-  - **BOUND — relax `burrow_share_into` (and the Weft claim path) to admit
-    BURROW_TYPE_DMA weaves.** A DMA Burrow is pinned RAM with PAs known to its
-    CAP_HW_CREATE-holding creator — mapping its pages RW into a client conveys
-    ZERO hardware authority (MMIO — actual register windows — stays rejected;
-    that is the I-5 line, and it does not move). Prosecute at G-2: the DMA
-    admission is memory-only; the PA knowledge stays with tapestryd; the #847
-    dual-refcount and quiesce semantics are type-independent.
+  - **BOUND — admit a NARROWED device-passive DMA weave subtype into
+    `burrow_share_into` (and the Weft claim path); NOT `BURROW_TYPE_DMA`
+    generally** (§18.11 F1 tightens this — the earlier broad-DMA phrasing
+    weakened I-5 from a *structural* guarantee to a *server-behavioral* one).
+    A weave is allocated from a distinguished device-passive DMA path (a flag
+    on `t_dma_create` / the share path asserting the region holds ONLY pixels —
+    no device-interpreted structures, e.g. a virtqueue/descriptor ring the
+    device reads as commands). The share path admits ONLY that subtype, so a
+    device-command DMA region stays structurally unshareable, exactly as MMIO
+    does — I-5's "a client cannot reach hardware control" stays STRUCTURAL, not
+    a matter of tapestryd discipline. A device-passive DMA Burrow is pinned RAM
+    the device only DMA-*reads* (pixels), with PAs known to its
+    CAP_HW_CREATE-holding creator; a client's Normal-WB RW mapping of it (the
+    same cacheable attrs as ANON — distinct from MMIO's Device-nGnRnE) conveys
+    ZERO hardware authority. Prosecute at G-2 (the DMA case is a distinct,
+    currently-unaudited hardware-mapping surface): the KObj_DMA second-refcount
+    domain + the virtio-gpu-2D-resource detach are NOT "type-independent" with
+    ANON (a DMA Burrow has `pages == NULL`, its refs live on the KObj_DMA) —
+    fold both into the T-1 spec/audit rather than asserting equivalence.
 - **Slots**: one weave carries N=3 page-aligned slot sub-regions (D1 triple
   buffering); tapestryd chooses stride/offsets and reports them in `geometry`.
   The client draws only into free slots; the present CQE frees a slot (D1).
@@ -636,16 +652,29 @@ Wayland-xdg-shell-class (configure/ack, serialized), realized Thylacine-shaped:
 1. tapestryd emits `CONFIGURE {serial, W, H}` on the surface's event stream
    (the client learns sizes ONLY this way — it cannot ask for placement).
 2. The client acks: `resize W H <serial>` on `ctl`. tapestryd allocates a NEW
-   weave + resource at the new size (state REWEAVE) and re-arms the share; the
-   client re-runs the map call on the same `weave` fid (the Tweft claim is
-   consume-once per arm — re-arm per reweave) and learns the new geometry.
-3. The client's FIRST present into the new weave switches scanout composition
-   to it. The OLD weave retires only after its in-flight presents quiesce
-   (#898 discipline; T-1). Until the switch, tapestryd shows the old content
-   letterboxed/scaled/frozen — compositor policy, invisible to the client.
+   weave + resource at the new size (state REWEAVE). The client obtains the new
+   mapping by **re-opening `surface/<id>/weave` (a FRESH fid per generation)**
+   and calling the map syscall on it — NOT by re-calling map on the old fid
+   (§18.11 F3 CORRECTS the earlier "same fid" prose: `SYS_WEFT_MAP` is
+   idempotent-per-fid and would return the old weave's cached VA). The fresh
+   fid carries no stale binding cache; the old weave fid is clunked as its
+   presents drain.
+3. The client's first present into the new weave **completes** (its terminal
+   CQE — the first frame has transferred) and tapestryd then switches scanout
+   composition (`SET_SCANOUT`) to it (§18.11 F16 aligns this with the spec's
+   switch-at-Complete: you do not `SET_SCANOUT` a resource before its first
+   frame lands). The OLD weave retires only after its in-flight presents
+   quiesce (#898 discipline; T-1). Until the switch, tapestryd shows the old
+   content letterboxed/scaled/frozen — compositor policy, invisible to the
+   client.
 4. **Never realloc-in-place.** A weave's page membership is immutable for its
    lifetime — this is what keeps T-1's reasoning (and the spec's state space)
    small. Unacked CONFIGUREs coalesce; only the latest serial matters.
+   **At most one reweave is in flight per surface**: a new reweave may not
+   begin until the prior old weave has FULLY retired (§18.11 F6 — this
+   serialization is what bounds a surface to ≤2 live weave generations, the
+   bound the spec models; a resize burst queues, it does not stack
+   generations).
 
 ### 18.4 The event stream — one wire, fixed records
 
@@ -818,6 +847,149 @@ tapestryd + cons-backend rows; T-1 takes its §28 number at G-2/G-3; ARCH §17 +
 NOVEL #4 + ROADMAP Phase 9/10 sync to this section in the same scripture
 commit that lands it; the per-chunk reference docs
 (`docs/reference/1xx-tapestry*.md`) begin at G-1.
+
+### 18.11 Round-1 holotype close (amendments, 2026-07-17)
+
+The §18 design pass was prosecuted by the Fable-max holotype reviewer + a
+concurrent self-audit (0 P0 / 4 P1 / 6 P2 / 6 P3; the self-audit independently
+found 8 of the 16, the reviewer added the DMA-I-5 and Weft-lifecycle P1s). No
+P0. The four already-voted decisions (V1-V4) stand; the findings are gaps and
+unsound *bindings*, closed here as binding amendments. Closed list:
+`memory/audit_tapestry_design_closed_list.md`. The load-bearing corrections
+(F1, F3, F6, F16) are also folded INLINE above (§18.0/§18.1/§18.3); this
+subsection is the authoritative resolution record and binds the newly-specified
+items.
+
+**F1 [P1] — the DMA admission stays STRUCTURAL, not behavioral.** Corrected
+inline in §18.1: the share path admits only a *device-passive* DMA weave
+subtype (pixels only, no device-interpreted structures), so a device-command
+DMA ring is as structurally unshareable as MMIO. The KObj_DMA second-refcount
+domain + the virtio-gpu-resource detach fold into the G-2 T-1 spec/audit (NOT
+asserted type-independent). The client PTE attribute (Normal-WB, verified) was
+already sound; F1 is about region *contents*, not attrs.
+
+**F2 [P1] — `/dev/tapestry` is per-session isolated** (the enforcement V2 rests
+on). A client sees + resolves ONLY the surfaces it created: the surface `<id>`
+qids are per-session-scoped, netd-`/net`-style (the `CONN_FLAG|…|N`
+per-connection encoding — a walk from session B cannot resolve session A's
+`surface/<A-id>/{weave,present,event}`). `surface/new` mints an id in the
+caller's session only. Absent this, B walks A's `weave` fid → the generalized
+map → `burrow_share_into` maps A's framebuffer into B (cross-client
+screen-scrape + deface) — so this is scripture, not an impl detail, and lands
+with G-3.
+
+**F3 [P1] — the arm/re-arm/disarm weave lifecycle needs real machinery**
+(corrected inline in §18.0/§18.3). (a) Re-map uses a FRESH weave fid per
+generation (§18.3) — `SYS_WEFT_MAP` is idempotent-per-fid (`priv->weft` cached,
+cleared only at `dev9p_close`), so "re-map the same fid" would return the old
+VA. (b) Disarm: retire/reweave runs a state-aware `weft_share_unregister(share_id)`
+atomically with the RETIRING transition — otherwise a retired weave's `share_id`
+lingers claimable in the registry until tapestryd dies, and a `Tweft` racing the
+retire maps a retiring weave (the spec's `NoStaleMap` violation, whose clean
+guard `Map`'s `wstate ∈ {woven,live}` has no impl counterpart without the
+unregister). Both scope into the G-2 Weft pass; the G-2 SPEC-TO-CODE map MUST
+bind `Map`'s guard to the concrete atomic claim-vs-retire gate.
+
+**F4 [P1] — the compositor crash/restart contract** (a persistent warden-driver
+crashes + restarts; MENAGERIE §4). On a tapestryd crash: `weft_share_release_owner`
+frees the registry slots; the client's `burrow_share_into` mapping keeps the
+*pages* alive (#847 mapping_count — no UAF), but the KObj_DMA + the virtio-gpu
+2D resource die with the old tapestryd, so scanout is semantically dead. The
+client-visible contract: the weave/present/event fids return a distinguished
+**"compositor gone"** error (the #841/#845 session-dead path); the client
+re-attaches `/dev/tapestry` and re-creates its surfaces (the netd Plan-9
+reconnect shape — MENAGERIE §4). The spec gains a `ServerDeath` action driving
+every generation to RETIRING with the client mapping still live, proving #847
+holds (pages alive, no UAF) while the resource is gone (§18.8; landed with this
+amendment).
+
+**F5 [P2] — the event never-drop set + bounded buffer.** CONFIGURE, CLOSE,
+FOCUS, and key press/release transitions are NEVER dropped; only FRAME and
+pointer-motion coalesce. tapestryd holds a BOUNDED per-surface event buffer; on
+overflow it drops-oldest among the coalescible class only (never a control
+event). Present-CQEs (the D1 recycle gate, pacing-critical) get reserved CQ
+headroom — or present and event ride SEPARATE rings — so an event burst never
+stalls the recycle gate (the Loom-5 CQ-full HOLD must not back-pressure
+presents). A dropped CONFIGURE would deadlock §18.3 (the client learns sizes
+only there), so CONFIGURE's never-drop is load-bearing.
+
+**F6 [P2] — ≤2 live weave generations** (corrected inline in §18.3 step 4): at
+most one reweave in flight per surface; a resize burst queues rather than
+stacking g3-while-g2-drains. This is the impl rule that makes the spec's
+2-generation model (`Gens = {g1,g2}`) faithful rather than accidentally small;
+the spec header now states it.
+
+**F7 [P2] — the graphical login is NOT trusted on virtio-gpu-only media.** On
+QEMU/virtio-gpu media the trusted path stays serial (§18.7), so an Aurora-rendered
+graphical login/elevation prompt is a *convenience surface, not a trusted
+episode* — its passphrase transits UNTRUSTED tapestryd + the virtio keyboard.
+corvus authentication (login, imperium, first-credential mint) occurs on the
+serial trusted path; the graphical prompt must never be presented as trusted.
+(Mirrors TRUSTED-PATH §8's honest serial-asymmetry statement; confined to
+dev/recovery by TRUSTED-PATH §11, which covers QEMU. The framebuffer trusted
+episode + the graphical SAK arrive with simplefb-class board media.)
+
+**F8 [P2] — the `/dev/cons` drain/feed grant gate is named.** The pair is handed
+to exactly the Proc the warden binds as the framebuffer renderer, via a spawn
+perm analogous to `SPAWN_PERM_CONSOLE_OWNER` (single-holder; a second opener is
+refused under `g_proc_table_lock`). Without a named gate, any Proc opening the
+drain fid reads all console output (leak) and injects via the feed fid (into
+cooked/ECHO/ISIG) — the F2 isolation class applied to the console backend.
+
+**F9 [P2] — per-client resource caps** (the I-32/#65 composition for the
+compositor). tapestryd enforces a per-client surface-count cap + a
+weave-dimension cap at `create`, rejecting past a floor — the weave is
+tapestryd's DMA allocation (charged to tapestryd, drawn from the finite global
+DMA pool), so the client's own #65 page cap does not bound it. `WEFT_MAX_SHARES`
+bounds only the transient registry, not live weaves. The DMA-pool aggregate is
+recorded as the compositor's I-32/#65 composition point.
+
+**F10 [P2] — the framebuffer map path is its own branch** (not a reuse of the
+netd Tweftio path). `weft_binding_alloc` rejects `pages == NULL` (a DMA weave)
+and builds a Tweftio ring view irrelevant to a passive framebuffer. The
+framebuffer-weave map claims (`weft_share_claim`) + `burrow_share_into`s WITHOUT
+the Tweftio binding/ring-view, and reports stride/offsets from the KObj_DMA
+geometry (not `burrow->pages`). Scoped into G-2; part of the "real machinery"
+F3 corrects.
+
+**F11 [P3] — the CONFIGURE serial is full-width.** The full 32-bit serial rides
+the tevent `value` field for CONFIGURE; the client reads the new W/H from
+`geometry` (a `read`) rather than packing dims into `value`. (Removes the
+16-bit-truncation ambiguity; F6's ≤1-outstanding-configure bound would also
+make mod-2^16 safe, but full-width is cleaner.)
+
+**F12 [P3] — non-I/O-coherent-backend coherency** (stated now, deferred to
+Lazarus). The client draws Normal-WB into the device-passive DMA weave; on an
+I/O-coherent backend (QEMU/virtio) the device sees the writes. On a
+non-I/O-coherent board backend a cache-clean-to-PoC before the present's
+`TRANSFER` is required — define the mechanism (a present-time flag, or a
+coherent-only weave allocation) with the Lazarus backend. The entire G-0..G-5
+QEMU arc is unaffected.
+
+**F13 [P3] — `TPRESENT_HOLD` release** is a `ctl` verb `release [<surface>]`;
+multi-hold semantics = release composes the most-recent held present per
+surface (§18.6).
+
+**F14 [P3] — the G-0 screendump fallback.** If QMP `screendump` under
+`-display none` fails on a given QEMU/backend, G-0 re-routes to
+`-display egl-headless` (or `-vnc` + a framebuffer snapshot), or pulls the §16
+in-band per-pane snapshot forward — a capability miss is a re-route, not an arc
+stop.
+
+**F15 [P3] — G-arc edges.** crash-probe re-homes to a synthetic restart-test
+device slot needing no real device (not a real driver's slot); the virtio-input
+handoff (boot-log consumer → tapestryd's allowance) is an explicit G-1/G-3
+sub-step; **Loom-5 + Loom-6 complete is an explicit precondition edge before
+G-3** (§18.2/§18.4 need multishot + registered buffers); a test-mode transition
+drains in-flight FRAME ticks before freezing (§18.6, for golden-image
+determinism).
+
+**F16 [P3] — spec fidelity** (corrected inline in §18.3 + the spec header): the
+scanout switch is at first-present-COMPLETE (aligning §18.3 prose with the
+spec's `Complete`); the model pins T-1 as a *lifetime* invariant
+(`NoTornScanout`/backing) with content-tearing pinned separately by
+`RecycleGate` (a header line now says so); the G-2 SPEC-TO-CODE map binds
+`Map`'s `wstate` guard to the concrete claim-vs-retire gate (per F3).
 
 ---
 

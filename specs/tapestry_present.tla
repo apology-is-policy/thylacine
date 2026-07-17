@@ -55,6 +55,34 @@
 (* form lives in loom.tla's I-29 (CqNeverOverfull / no-double-terminal),   *)
 (* which the present op COMPOSES; this module does not re-model the CQ.    *)
 (*                                                                         *)
+(* WHAT LEG OF T-1 THIS MODEL PINS (round-1 holotype F16).                 *)
+(* T-1 has two legs: LIFETIME (the host must not DMA-read freed/reused     *)
+(* pages -- a UAF) and CONTENT (the host must not read a slot mid-redraw   *)
+(* -- a torn frame). This module pins the LIFETIME leg as NoTornScanout /  *)
+(* DisplayedBacked (an in-flight transfer or a scanout reference implies   *)
+(* backed pages) -- the memory-safety property. The CONTENT leg is pinned  *)
+(* SEPARATELY by RecycleGate (D1: a slot is never drawable while the host  *)
+(* still reads it). "torn scanout" in the prose spans both; the model      *)
+(* names them distinctly.                                                  *)
+(*                                                                         *)
+(* GENERATION SCOPE (round-1 holotype F6). Gens = {g1,g2} models ONE       *)
+(* reweave. The impl rule "at most one reweave in flight per surface -- a  *)
+(* new reweave may not begin until the prior old weave FULLY retired"      *)
+(* (TAPESTRY.md section 18.3 step 4) bounds a surface to <=2 live weave    *)
+(* generations, so the 2-symbol Gens is FAITHFUL, not accidentally small;  *)
+(* a resize burst queues (it does not stack g3-while-g2-drains). The       *)
+(* Reweave action encodes the rule structurally: it fires only with        *)
+(* wstate["g2"] = "none" (no reweave already outstanding).                 *)
+(*                                                                         *)
+(* SERVER DEATH (round-1 holotype F4). ServerDeath models a tapestryd      *)
+(* crash: every live/woven generation snaps to "retiring" and the armed    *)
+(* claim tokens clear, but the CLIENT MAPPING stays (mapped unchanged) --  *)
+(* the #847 mapping_count keeps the weave pages backed with the server (+  *)
+(* its KObj_DMA + virtio-gpu resource) gone. The clean invariants hold     *)
+(* across it (no UAF: MappedImpliesBacked keeps backed while mapped; Free  *)
+(* still gates on ~mapped), and the client's ClunkMap -> Free path drains  *)
+(* to gone -- the reconnect contract's teardown leg.                       *)
+(*                                                                         *)
 (* THE WEAVE LIFECYCLE (per generation g; "g2" is the reweave target)      *)
 (*                                                                         *)
 (*   "none"     -- not allocated.                                          *)
@@ -121,6 +149,7 @@ MaxInflight == 2
 CONSTANTS
     ALLOW_DESTROY,             \* BOOLEAN -- enable the surface-destroy path.
     ALLOW_REWEAVE,             \* BOOLEAN -- enable the resize (reweave) path.
+    ALLOW_SERVER_DEATH,        \* BOOLEAN -- enable the tapestryd-crash path (F4).
     BUGGY_EARLY_FREE,          \* BOOLEAN -- recycle the slot at submit-ack (skip D1).
     BUGGY_RETIRE_NO_QUIESCE,   \* BOOLEAN -- free a retiring weave without quiesce.
     BUGGY_REWEAVE_NO_QUIESCE,  \* BOOLEAN -- free the old weave eagerly on reweave.
@@ -128,6 +157,7 @@ CONSTANTS
 
 ASSUME ALLOW_DESTROY            \in BOOLEAN
 ASSUME ALLOW_REWEAVE            \in BOOLEAN
+ASSUME ALLOW_SERVER_DEATH       \in BOOLEAN
 ASSUME BUGGY_EARLY_FREE         \in BOOLEAN
 ASSUME BUGGY_RETIRE_NO_QUIESCE  \in BOOLEAN
 ASSUME BUGGY_REWEAVE_NO_QUIESCE \in BOOLEAN
@@ -292,6 +322,24 @@ RetireDisplaced ==
     /\ UNCHANGED <<backed, mapped, armed, slot, intransfer, displayed,
                    staleMapped, destroyReq>>
 
+\* F4: a tapestryd crash. Every live/woven generation snaps to "retiring" and
+\* the registry's claim tokens die (armed -> FALSE -- weft_share_release_owner),
+\* but the CLIENT MAPPING stays: the #847 mapping_count keeps the weave pages
+\* backed with the server + its KObj_DMA + virtio-gpu resource gone. The clean
+\* invariants must hold across it (no UAF), and the client's ClunkMap -> Free
+\* drains to gone (the reconnect contract's teardown leg). Modeled as a terminal
+\* surface event (sets destroyReq), so EventuallyRetired covers it too.
+ServerDeath ==
+    /\ ALLOW_SERVER_DEATH
+    /\ ~destroyReq
+    /\ \E g \in Gens : wstate[g] \in {"woven", "live"}
+    /\ destroyReq' = TRUE
+    /\ wstate' = [g \in Gens |->
+                    IF wstate[g] \in {"woven", "live"} THEN "retiring"
+                                                       ELSE wstate[g]]
+    /\ armed'  = [g \in Gens |-> FALSE]
+    /\ UNCHANGED <<backed, mapped, slot, intransfer, displayed, staleMapped>>
+
 Free(g) ==
     /\ wstate[g] = "retiring"
     /\ ~mapped[g]
@@ -326,6 +374,7 @@ Next ==
     \/ WeaveFirst
     \/ Reweave
     \/ Destroy
+    \/ ServerDeath
     \/ RetireDisplaced
     \/ ReweaveEagerFree
     \/ \E g \in Gens :
