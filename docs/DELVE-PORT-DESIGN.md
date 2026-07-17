@@ -639,3 +639,11 @@ it flips to a gated assertion the moment the seam closes. Stage A (the version
 smoke) stays gated-green: **Ambush runs on-device.** The scaffold (§15) + it.0
 (§16) + this backend ground-truth (§17) are the 8c-1 deliverable pending the
 multi-thread-stop decision.
+
+**Decision (2026-07-17): design + spec first, then hold.** The stop-of-a-sleeper
+mechanism is designed as **8c-2 in DEBUG-FS-DESIGN.md §5c** (a nested park inside
+`sleep()`, the recommended option; ERESTARTSYS-restart the rejected alternative)
+and modeled in `specs/debug_stop.tla` (the `"sleep"` PC + `StopWakesSleeper` +
+`BUGGY_STOP_SKIPS_SLEEPER` + the `EventuallyStopSettles` liveness; clean cfg
+TLC-green, the buggy cfg the executable counterexample). The kernel impl is held
+for signoff.

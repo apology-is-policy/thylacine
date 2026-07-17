@@ -48,6 +48,20 @@
 (*       (proc_debug_fault_stop) delivers under g_proc_table_lock ONLY while  *)
 (*       debug_owner != NULL, exactly RequestStop's gate for the hardware     *)
 (*       trigger.                                                             *)
+(*   BUGGY_STOP_SKIPS_SLEEPER       -- the stop does NOT wake an              *)
+(*       interruptibly-SLEEPING Thread (the v1.0 Plan 9 non-preemptive stop:  *)
+(*       proc_debug_stop_deliver flags + IPIs RUNNING peers but never wakes a *)
+(*       sleeper). A Thread blocked in a syscall sleep when the stop arrives  *)
+(*       is never driven to its EL0-return checkpoint, so it never parks, the *)
+(*       target never fully-stops, and the debugger hangs on the halt forever *)
+(*       (EventuallyStopSettles). The correct stop-of-a-sleeper (the          *)
+(*       #811-analog for debug-stop) WAKES it -> it unwinds to the tail +     *)
+(*       parks (the die-check still wins if a group-term also raced); on      *)
+(*       resume its interrupted syscall RESTARTS. This is the multi-thread    *)
+(*       Go-target blocker ground-truthed at 8c-1 (DELVE-PORT-DESIGN 17).     *)
+(*       Note this is a LIVENESS bug (a hang), not a safety one: a sleeping   *)
+(*       Thread is off-cpu (never confirmable, so NoEL0AfterStopped stays     *)
+(*       vacuously safe) -- the target simply never becomes fully-stopped.    *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -57,7 +71,8 @@ CONSTANTS
     BUGGY_OBSERVE_BEFORE_REGISTER,  \* TRUE = observe sflag before registering
     BUGGY_DOUBLE_WAKE,              \* TRUE = resume has no single-wake latch
     BUGGY_STRAND_ON_CLOSE,          \* TRUE = slot release does not resume the target
-    BUGGY_FAULT_STOP_UNGATED        \* TRUE = the EC-path fire sets sflag without the attached gate
+    BUGGY_FAULT_STOP_UNGATED,       \* TRUE = the EC-path fire sets sflag without the attached gate
+    BUGGY_STOP_SKIPS_SLEEPER        \* TRUE = the stop does not wake an interruptibly-sleeping Thread
 
 ASSUME Cardinality(Threads) >= 1
 
@@ -76,7 +91,11 @@ Sources == {"start", "release", "death"}
 \*   "obs_stop" -- (buggy) observed sflag=TRUE  outside the lock -> will park
 \*   "stopped"  -- parked on the debugger rendez (registered/findable)
 \*   "dead"     -- terminated at the die-check (noreturn; never EL0)
-PCs == {"el0", "tail", "acq", "reg", "obs_run", "obs_stop", "stopped", "dead"}
+\*   "sleep"    -- blocked in an interruptible syscall sleep (off-cpu; will NOT
+\*                 reach the tail on its own -- it needs a wake). A pre-existing
+\*                 sleeper is the multi-thread-stop hazard: the stop must drive it
+\*                 to the checkpoint, else the target never fully-stops.
+PCs == {"el0", "tail", "acq", "reg", "obs_run", "obs_stop", "stopped", "dead", "sleep"}
 
 VARIABLES
     pc,           \* [Threads -> PCs]
@@ -208,6 +227,44 @@ ResumeThread(t) ==
     /\ fired' = [fired EXCEPT ![t] = [s \in Sources |-> FALSE]]
     /\ UNCHANGED <<gflag, sflag, attached, dbg_live, detach_req,
                    resume_req, release_req, wlock>>
+
+(* A Thread running at EL0 makes a blocking syscall and SLEEPS (off-cpu on some *)
+(* non-debug rendez -- a futex/torpor wait, a pipe/poll/read block). Enabled    *)
+(* only with no stop/death pending: a Thread with a pending stop parks at its   *)
+(* tail BEFORE it could start a new blocking wait. The hazard -- a stop/death   *)
+(* arriving while a Thread ALREADY sleeps -- is modeled by EnterSleep (sflag     *)
+(* clear) THEN RequestStop/SetGflag: the sleeper is then "sleep" with the flag   *)
+(* set. (A resumed Thread returns to "el0" and may EnterSleep again -- the       *)
+(* syscall-restart-on-resume of the correct stop-of-a-sleeper.)                 *)
+EnterSleep(t) ==
+    /\ pc[t] = "el0"
+    /\ ~sflag
+    /\ ~gflag
+    /\ pc' = [pc EXCEPT ![t] = "sleep"]
+    /\ UNCHANGED <<gflag, sflag, attached, dbg_live, detach_req,
+                   resume_req, release_req, wlock, confirmed, fired>>
+
+(* The stop-of-a-sleeper (the #811-analog for debug-stop) + the existing #811   *)
+(* death-wake, modeled uniformly. A sleeping Thread is WOKEN when a              *)
+(* group-terminate OR a stop is pending, and driven to its park via the         *)
+(* die-check-first register-then-observe handshake -- modeled here as reaching   *)
+(* "tail" (the die-check kills it on death; the handshake parks it on the        *)
+(* debugger rendez on a stop). DEATH always wakes a sleeper (the shipped #811    *)
+(* death-interruptible sleep). The STOP wakes it only in the CORRECT model;      *)
+(* BUGGY_STOP_SKIPS_SLEEPER (the v1.0 Plan 9 non-preemptive stop) leaves a       *)
+(* stop-only sleeper asleep forever -> the target never fully-stops              *)
+(* (EventuallyStopSettles). The IMPL places that register-then-observe handshake *)
+(* inside sleep() (DEBUG-FS-DESIGN 5c.2, the recommended nested park -- the      *)
+(* syscall re-blocks in place on resume) or at the tail with syscall restart     *)
+(* (5c.3); the load-bearing register-then-observe + death-first is identical, so *)
+(* this action abstracts both. A resumed Thread returns toward EL0 (the syscall  *)
+(* makes progress / re-blocks) -- modeled by the tail's normal ~sflag routing.   *)
+StopWakesSleeper(t) ==
+    /\ pc[t] = "sleep"
+    /\ (gflag \/ (sflag /\ ~BUGGY_STOP_SKIPS_SLEEPER))
+    /\ pc' = [pc EXCEPT ![t] = "tail"]
+    /\ UNCHANGED <<gflag, sflag, attached, dbg_live, detach_req,
+                   resume_req, release_req, wlock, confirmed, fired>>
 
 (***************************************************************************)
 (* =========================== DEBUGGER ACTIONS ========================== *)
@@ -351,6 +408,8 @@ Next ==
     \/ \E t \in Threads : RegisterBuggy(t)
     \/ \E t \in Threads : ReEnterTail(t)
     \/ \E t \in Threads : ResumeThread(t)
+    \/ \E t \in Threads : EnterSleep(t)
+    \/ \E t \in Threads : StopWakesSleeper(t)
     \/ \E t \in Threads : Confirm(t)
     \/ \E t \in Threads : \E s \in Sources : WakeFrom(t, s)
     \/ Attach
@@ -374,6 +433,7 @@ Fairness ==
     /\ \A t \in Threads : WF_vars(RegisterBuggy(t))
     /\ \A t \in Threads : WF_vars(ReEnterTail(t))
     /\ \A t \in Threads : WF_vars(ResumeThread(t))
+    /\ \A t \in Threads : WF_vars(StopWakesSleeper(t))
     /\ \A t \in Threads : \A s \in Sources : WF_vars(WakeFrom(t, s))
     /\ WF_vars(ReleaseSlot)
 
@@ -435,5 +495,22 @@ EventuallyAllDead ==
 (* breaks it (the slot frees but the stop is never cleared / woken).          *)
 EventuallyResumed ==
     (attached /\ ~dbg_live) ~> (\A t \in Threads : pc[t] # "stopped")
+
+(* EventuallyStopSettles (liveness -- the multi-thread-stop COMPLETES): once a   *)
+(* stop is requested and owned, the target eventually SETTLES -- either every    *)
+(* Thread reaches a quiescent stop state (all "stopped", or "dead" if a group-   *)
+(* terminate also raced) OR the debugger has cleared the stop (start / release). *)
+(* The correct stop-of-a-sleeper guarantees it: StopWakesSleeper drives every    *)
+(* sleeping Thread to its checkpoint, so the halt completes and the debugger's   *)
+(* Confirm can reach all Threads. BUGGY_STOP_SKIPS_SLEEPER breaks it: a Thread    *)
+(* sleeping when the stop arrives is never woken, so it never parks, the target   *)
+(* never fully-stops, sflag can never clear (StartResume needs confirmed =        *)
+(* Threads), and the debugger hangs on the halt forever -- the exact 8c-1         *)
+(* multi-thread-Go-target blocker (DELVE-PORT-DESIGN 17). Safety is untouched     *)
+(* (a sleeper is off-cpu, never confirmable, so NoEL0AfterStopped stays vacuous); *)
+(* this is purely the hang.                                                       *)
+EventuallyStopSettles ==
+    (sflag /\ attached) ~> ( \/ (\A t \in Threads : pc[t] \in {"stopped", "dead"})
+                             \/ ~sflag )
 
 ====

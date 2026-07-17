@@ -184,8 +184,10 @@ slot is the #811 death-interruptible check, whose job is to *unwind* the syscall
 in-progress syscall state. So a thread blocked deep in a syscall sleep is stopped
 at the *next* checkpoint it reaches (Plan 9's `startsyscall` semantics), not by
 interrupting the sleep. (An explicit-stop-of-a-sleeping-thread — a debugger that
-wants a blocked thread to stop *now* — is a v1.x refinement; v1.0 stops at
-checkpoints, matching Plan 9's non-preemptive stop.)
+wants a blocked thread to stop *now* — was deferred as a v1.x refinement here;
+8c-1 ground-truthed it as the blocker for every multi-threaded Go target, so it
+is now **designed as 8c-2 in §5c** — a nested park inside `sleep()` that best
+satisfies this section's "preserve the in-progress syscall" principle.)
 
 ### 4.3 Run-control verbs (on `ctl`, the Plan 9 idiom)
 
@@ -463,6 +465,132 @@ owned-Proc path (which reached the same raw kstack) to a no-attach self-read.
 
 ---
 
+## 5c. Stage 8c-2 — explicit stop-of-a-sleeper (the multi-thread-stop refinement)
+
+**Status: DESIGN + spec landed (2026-07-17); kernel impl held for signoff.** This
+is the v1.x refinement §4.2 named ("an explicit-stop-of-a-sleeping-thread … is a
+v1.x refinement"), pulled forward because 8c-1 ground-truthed it as the blocker
+for **every real Go target**.
+
+### 5c.1 The seam (ground-truthed at 8c-1, DELVE-PORT-DESIGN §17)
+
+§4.4 assumed "a thread sleeping in a syscall … reaches the tail when its
+syscall/handler returns." That holds for a thread whose syscall is *about to
+return* — but **not** for one blocked in an *indefinite* wait. A multi-threaded
+Go target always parks idle M threads in an indefinite `futex`/torpor wait; they
+sit on the torpor rendez, never on `debug_rendez`, and never return to the tail
+on their own. So `devproc_all_threads_parked` (every non-EXITING thread on its
+*own* `debug_rendez`, `on_cpu==false`) is never satisfied → the target never
+becomes fully-stopped → the debugger's blocking `stop` (the `procstopwait` shape)
+hangs forever. `debug-child` (one Rust yield loop) stops fine; Ambush attaching
+to any Go program hangs. This is the Linux `ptrace` group-stop (a `SIGSTOP`
+interrupts the futex wait *in-kernel*) that Thylacine deferred.
+
+### 5c.2 The mechanism — a nested park **inside** `sleep()` (recommended)
+
+§4.2's governing principle is *"a stop must **preserve** the in-progress syscall
+state."* §4.2 framed the choice as tail-park (preserve) vs sleep-unwind (destroy)
+and picked tail-park — but it did not consider a **third** option that best
+satisfies its own principle for a sleeper: **park the sleeper in place, on
+`debug_rendez`, and re-block on resume.** The syscall is never unwound; it stays
+on the stack and resumes exactly where it blocked.
+
+`sleep()`/`tsleep()` (the two primitives every #811-death-interruptible site
+calls) gain a **stop-detour**, checked at the same wake point as the #811
+death-check, in the death-wins order:
+
+1. On wake, **die-check first** (existing #811): if `group_exit_msg` is set →
+   `SLEEP_INTR` → unwind → `el0_return_die_check` → the thread dies. *Death always
+   wins over a stop*, exactly as at the tail.
+2. Else if the per-Proc **stop flag** is set → **re-park on `debug_rendez`** via a
+   register-then-observe under `wait_lock` (the I-9 shape): set
+   `rendez_blocked_on = &debug_rendez`, re-check the stop flag, and sleep on
+   `debug_rendez` if it is still set (else fall through — the debugger already
+   resumed). The debugger's confirm-walk takes the *same* `wait_lock`, so it
+   confirms only a sleeper that has genuinely re-parked — no lost stop.
+3. On resume (`start` clears the stop flag + wakes `debug_rendez`), the sleeper
+   re-registers on its **original** rendez (the existing `sleep()`
+   register-then-observe), re-checks its original condition, and re-blocks or
+   returns. A condition that became true during the stop (e.g. data arrived via an
+   IRQ while every peer was frozen) is seen by the re-check — **no lost data, no
+   spurious `EINTR`, no restart machinery.**
+
+The delivery side: **`proc_debug_stop_deliver` gains a wake of the target's
+sleepers** — it walks `p->threads` and wakes each parked one (each under its
+`wait_lock`), the *exact* cascade `proc_group_terminate` already runs for the
+#811 death-wake, but arming the stop-detour instead of the die. A running peer is
+still IPI'd to the tail (§4.4, unchanged). So the whole change reuses the shipped
+#811 wait/wake substrate; the only genuinely new code is the stop arm of the
+`sleep()` detour.
+
+**Lock discipline (why parking in `sleep()` is safe):** `sleep()` atomically
+releases the caller's condition lock before sleeping, and by the existing
+sleeper-holds-no-locks discipline (a sleeper holding an unrelated lock would
+already deadlock its peers) the thread holds *no* locks at the park point — so
+the nested `debug_rendez` park strands nothing, unlike a die-in-place. This is
+precisely why §4.2 could not park a *dying* thread in `sleep()` (death must
+unwind to release the syscall's frame) but a *stopped* thread can (it resumes and
+continues).
+
+### 5c.3 The rejected alternative — unwind-to-tail + syscall restart (Linux ERESTARTSYS)
+
+The other option: on a stop-wake, propagate `SLEEP_INTR` up the syscall like a
+death, park at the *tail* (reusing the audited tail handshake), and on resume
+**restart** the syscall from its `SVC` (rewind `ELR_EL1`). Rejected: it needs the
+full ERESTARTSYS machinery — every blocking syscall handler must distinguish
+"unwound for stop" from "unwound for death" and re-execute rather than return
+`EINTR`, and every such syscall must be idempotent-from-`SVC`. That is a change
+across *every* #811 site + handler, versus 5c.2's change to the *two* `sleep`
+primitives, and it can surface a spurious `EINTR` if any handler mis-implements
+restart. 5c.2 preserves the syscall literally; ERESTARTSYS destroys-and-recreates
+it. (It is recorded here so the signoff weighs both; the recommendation is 5c.2.)
+
+### 5c.4 Invariants + the spec
+
+No new §28 invariant number — **I-9 generalized** (the sleeper's nested park is a
+register-then-observe leg; no stop-wake is lost between a sleeper re-parking and
+the debugger confirming) and I-39 unchanged (authority/stopped-only gates are
+untouched; a stopped sleeper is as inspectable as a tail-parked thread). **Safety
+is untouched** — a sleeping thread is `off-cpu` and never confirmable until it
+re-parks, so `NoEL0AfterStopped` stays vacuously safe; the seam is purely a
+**liveness** bug (the halt never completes).
+
+`specs/debug_stop.tla` is extended model-first (spec-first RE-ENABLED for this
+surface): a new `"sleep"` PC, `EnterSleep` (a thread blocks), and
+`StopWakesSleeper` (the stop/death drives a sleeper to its park), plus the
+liveness property **`EventuallyStopSettles`** (once a stop is owned, the target
+eventually settles — all parked/dead, or the stop cleared) and the buggy knob
+**`BUGGY_STOP_SKIPS_SLEEPER`** (the v1.0 skip → the executable counterexample).
+The model routes the woken sleeper through the register-then-observe handshake to
+its park; that handshake is the load-bearing part and is identical whether the
+impl places it inside `sleep()` (5c.2) or at the tail (5c.3), so the spec's
+wake-completeness + death-wins + I-9 + liveness properties bind either mechanism.
+Verified: the clean cfg is TLC-green (Safety + `EventuallyAllDead` +
+`EventuallyResumed` + `EventuallyStopSettles`; 2952 distinct states, depth 29) and
+`debug_stop_buggy_stop_skips_sleeper.cfg` violates `EventuallyStopSettles`.
+
+### 5c.5 Audit obligations + impl plan (held for signoff)
+
+An SMP wait/wake change on the most bug-prone lineage (#788/#806/#860/#809/#811/#68)
+→ a focused Fable holotype + the SMP gate. Prosecute: the sleeper's re-park I-9
+(no stop-wake lost between the wake and the `debug_rendez` register-then-observe);
+**death-wins** in the detour (the die-check precedes the stop-check on wake,
+exactly as at the tail — a stop racing a group-terminate never re-parks a dying
+sleeper); no lost/double wake across `start`/`detach`/close/death (the
+`ExactlyOnceResume` latch extends to the nested park); the **cond-changed-during-
+stop** re-check (the resume re-registers on the original rendez + re-checks — no
+lost wakeup, no stale return); the lock discipline (a sleeper holds no locks at
+the park point — audit every `sleep()`/`tsleep()` caller for a held lock across
+the wait); and the interaction with 8a-2 single-step / the fault-stop
+(`proc_debug_fault_stop`) delivery. Impl surface (est.): `kernel/sched.c`
+(`sleep`/`tsleep` stop-detour), `kernel/proc.c` (`proc_debug_stop_deliver`
+sleeper-wake walk), `kernel/devproc.c` (unchanged — `devproc_all_threads_parked`
+already accepts a `debug_rendez` park wherever it happens). The `ambush-probe`
+stage B flips from `ATTACH_ENABLED=false` to a gated assertion (goroutines / bt /
+print against the now-stoppable Go target), the runtime witness.
+
+---
+
 ## 6. `specs/debug_stop.tla` (spec-first, model-first)
 
 Written and TLC-green BEFORE the 8a-1 impl. Models the stop/continue/step state
@@ -482,12 +610,22 @@ machine and its composition with the death path. Target invariants:
 - **NoStrand** — the stop is bounded by the ctl-fd-owned slot: releasing the slot
   (explicit `detach` OR ctl-fd close OR debugger death via #68 close-at-exit)
   provably resumes the target (a liveness witness: `EventuallyResumed`).
+- **StopImpliesOwned** (8a-2 SA-1) — the per-Proc stop flag is set only while a
+  debugger owns the slot; the EC-path fire (`proc_debug_fault_stop`) delivers
+  under `g_proc_table_lock` gated on `debug_owner != NULL`.
+- **EventuallyStopSettles** (8c-2, 5c above) — once a stop is owned, the target
+  eventually settles (all parked/dead, or the stop cleared); the stop-of-a-sleeper
+  guarantees the halt completes even when a thread is blocked in an indefinite
+  sleep.
 
 Buggy cfgs (each a minimal counterexample on its named invariant): `park_before_die`
 (stop-check ordered before the die-check -> DeathWinsOverStop), `lost_stop`
 (observe-before-register at the tail -> NoLostStop), `double_wake` (resume without
 the single-waiter discipline -> ExactlyOnceResume), `strand_on_debugger_death`
-(the slot not released at ctl-fd close -> NoStrand).
+(the slot not released at ctl-fd close -> NoStrand), `fault_stop_ungated` (the EC
+fire sets the flag without the owner gate -> StopImpliesOwned), and `stop_skips_
+sleeper` (the v1.0 Plan 9 non-preemptive stop leaves a sleeper asleep ->
+EventuallyStopSettles, the 8c-2 multi-thread-stop seam).
 
 The model pins the impl sites (the tail stop-leg, the delivery cascade, the
 ctl-fd-close resume); `specs/SPEC-TO-CODE.md` records the action<->site mapping.
