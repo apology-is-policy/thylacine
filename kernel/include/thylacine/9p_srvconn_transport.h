@@ -145,4 +145,16 @@ struct p9_transport_ops p9_srvconn_transport_ops(struct p9_srvconn_transport *st
 // Query: is the adapter live (magic valid + inner SrvConn present)?
 bool p9_srvconn_transport_is_open(const struct p9_srvconn_transport *st);
 
+// The SrvConn wrapped by a client's transport, or NULL when the client's
+// backend is not this adapter (loopback / spoor / mq clients carry no
+// SrvConn). The pts registry (PTY-1c) uses this for the slave-fd -> pts
+// correlation. Discrimination is the ctx magic: every transport backend's
+// ctx struct in the tree leads with a DISTINCT u32 magic, so a non-srvconn
+// ctx fails the check rather than mis-casting. IDENTITY USE ONLY -- the
+// returned pointer is borrowed under the caller's client liveness and is
+// meant for pointer comparison against independently ref-held SrvConns
+// (the pts binding refs), not for dereference.
+struct p9_client;
+struct SrvConn *p9_srvconn_transport_conn(const struct p9_client *c);
+
 #endif  // THYLACINE_9P_SRVCONN_TRANSPORT_H

@@ -31,6 +31,7 @@
 #include <thylacine/notes.h>
 #include <thylacine/page.h>
 #include <thylacine/path.h>    // struct Path (SYS_FD2PATH reads ->s/->len; #66)
+#include <thylacine/pts.h>     // the pts registry (SYS_PTY_REGISTER; PTY-1c)
 #include <thylacine/pci_handle.h>   // KObj_PCI (SYS_PCI_CLAIM/MAP_BAR/INFO; pci-1c)
 #include <thylacine/pipe.h>
 #include <thylacine/poll.h>
@@ -2492,6 +2493,62 @@ s64 sys_getsid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
     struct Thread *t = current_thread();             if (!t) return -1;
     struct Proc *p = t->proc;                        if (!p) return -1;
     return (s64)proc_getsid(p, (int)(s64)a0);
+}
+
+// =============================================================================
+// PTY-1c (PTY-DESIGN.md section 3): SYS_PTY_REGISTER -- the server-mediated
+// (connection, qid) -> pts correlation. The registry cores (kernel/pts.c)
+// gate on the minting server + the gen; this front resolves + gates the conn
+// fd: it must be a SERVER-endpoint devsrv connection Spoor -- the SYS_SRV_
+// ACCEPT product (aux = SrvConn, no CSRVCLIENT). The CLIENT-endpoint reject
+// matters: a byte-mode client holds a CSRVCLIENT conn Spoor on the SAME
+// SrvConn, and letting it register would let a CLIENT of a service claim
+// (conn, qid) bindings the server never made. MINT additionally requires
+// PROC_FLAG_MAY_POST_SERVICE (the service tier -- the Weft-7 F1 registry-
+// squat lesson; only a flag holder can post a service and so be a server at
+// all, making this defense-in-depth). NON-static for the kernel tests.
+// =============================================================================
+
+s64 sys_pty_register_for_proc(struct Proc *p, u64 op, u64 a1, u64 a2, u64 a3) {
+    if (!p) return -T_E_INVAL;
+
+    switch (op) {
+    case PTY_REG_MINT:
+    case PTY_REG_SLAVE: {
+        if (op == PTY_REG_MINT && a3 != 0)        return -T_E_INVAL;
+        if (op == PTY_REG_MINT && !proc_may_post_service(p))
+            return -T_E_ACCES;
+        // RIGHT_READ mirrors sys_srv_peer_for_proc: the accept installs
+        // READ|WRITE on the endpoint; the register performs no I/O on it --
+        // the endpoint + minting-server axes are the real authority.
+        struct Spoor *sp = sys_lookup_spoor(p, (hidx_t)a1, RIGHT_READ);
+        if (!sp)                                  return -T_E_INVAL;
+        struct SrvConn *cn = devsrv_conn_of(sp);
+        s64 r;
+        if (!cn || (sp->flag & CSRVCLIENT)) {
+            r = -T_E_INVAL;                       // not a server-endpoint conn
+        } else if (op == PTY_REG_MINT) {
+            r = pts_mint(p, cn, a2);
+        } else {
+            r = (s64)pts_bind_slave(p, cn, a2, a3);
+        }
+        // sp's ref held cn alive across the registry op (which took its own
+        // binding ref); drop it last (#844 ref-transfer contract).
+        spoor_clunk(sp);
+        return r;
+    }
+    case PTY_REG_FREE:
+        if (a2 != 0 || a3 != 0)                   return -T_E_INVAL;
+        return (s64)pts_free(p, a1);
+    default:
+        return -T_E_INVAL;
+    }
+}
+
+static s64 sys_pty_register_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+    struct Thread *t = current_thread();             if (!t) return -1;
+    struct Proc *p = t->proc;                        if (!p) return -1;
+    return sys_pty_register_for_proc(p, a0, a1, a2, a3);
 }
 
 // SYS_YIELD (#33): the thin syscall front for sched_yield_hint (sched.c) --
@@ -7006,6 +7063,11 @@ void syscall_dispatch(struct exception_context *ctx) {
     case SYS_GETSID:
         ctx->regs[0] = (u64)sys_getsid_handler(ctx->regs[0], ctx->regs[1],
                                                ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_PTY_REGISTER:
+        ctx->regs[0] = (u64)sys_pty_register_handler(ctx->regs[0], ctx->regs[1],
+                                                     ctx->regs[2], ctx->regs[3]);
         return;
 
     case SYS_CLOCK_GETTIME:

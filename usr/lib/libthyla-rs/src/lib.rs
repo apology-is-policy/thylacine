@@ -215,6 +215,11 @@ pub const T_SYS_SETSID: u64           = 89;
 pub const T_SYS_SETPGID: u64          = 90;
 pub const T_SYS_GETPGID: u64          = 91;
 pub const T_SYS_GETSID: u64           = 92;
+// PTY-1c: pts registry ops (ptyfs the server is the only legal caller).
+pub const T_SYS_PTY_REGISTER: u64     = 93;
+pub const T_PTY_REG_MINT: u64         = 0;
+pub const T_PTY_REG_SLAVE: u64        = 1;
+pub const T_PTY_REG_FREE: u64         = 2;
 // FS-mutation foundation (IDENTITY-DESIGN.md section 9.2): create-then-open,
 // durability barrier, directory enumeration.
 pub const T_SYS_WALK_CREATE: u64      = 54;
@@ -2034,6 +2039,18 @@ pub unsafe fn t_getsid(pid: i64) -> i64 {
 pub unsafe fn t_getgid() -> i64 {
     let mut x0: i64 = 0;
     asm!("svc #0", inlateout("x0") x0, in("x8") T_SYS_GETGID, options(nostack));
+    x0
+}
+
+// t_pty_register -- pts registry ops (PTY-1c; ptyfs the server is the only
+// legal caller). op T_PTY_REG_MINT(conn_fd, master_qid, 0) -> pts_id > 0;
+// T_PTY_REG_SLAVE(conn_fd, slave_qid, pts_id) -> 0; T_PTY_REG_FREE(pts_id,
+// 0, 0) -> 0. Negative errno per the SYS_PTY_REGISTER contours.
+#[inline(always)]
+pub unsafe fn t_pty_register(op: u64, a1: u64, a2: u64, a3: u64) -> i64 {
+    let mut x0: i64 = op as i64;
+    asm!("svc #0", inlateout("x0") x0, in("x1") a1, in("x2") a2, in("x3") a3,
+         in("x8") T_SYS_PTY_REGISTER, options(nostack));
     x0
 }
 

@@ -67,6 +67,7 @@ set(KERNEL_SRCS
     joey.c
     spoor.c
     path.c
+    pts.c
     stalk.c
     dev.c
     devnone.c
@@ -213,6 +214,7 @@ set(KERNEL_TEST_SRCS
     test/test_pipe_blocking.c
     test/test_poll.c
     test/test_srvconn.c
+    test/test_pts.c
     test/test_devsrv_conn.c
     test/test_srv_client.c
     test/test_sys_pipe.c

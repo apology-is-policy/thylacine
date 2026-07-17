@@ -1647,7 +1647,43 @@ enum {
     // SYS_GETSID(pid) -> sid / -T_E_SRCH (POSIX getsid(2)). Same contours
     //   as SYS_GETPGID.
     SYS_GETSID = 92,   // arg: pid (x0)
+
+    // =========================================================================
+    // PTY-1c (PTY-DESIGN.md section 3): the pts registry. The server-mediated
+    // (connection, qid) -> pts correlation that makes the PTY signal seam
+    // realizable -- ptyfs registers each pty pair's master mint and slave
+    // serves; the kernel later resolves a slave fd to its pts without a server
+    // round-trip (grant-is-the-share). The registered SERVER (ptyfs) is the
+    // only legal caller: op MINT requires a server-endpoint conn fd + the
+    // MAY_POST_SERVICE service tier; SLAVE/FREE additionally require the
+    // caller to be the pts's MINTING server. See <thylacine/pts.h>.
+    // =========================================================================
+
+    // SYS_PTY_REGISTER(op, ...) -> per-op result / -T_E_* (below).
+    //   op PTY_REG_MINT  (x1 = conn fd, x2 = master qid, x3 = 0):
+    //     record the master-side (connection, qid) + mint the gen-stamped
+    //     pts -> pts_id (> 0). The conn fd must be a SERVER-endpoint devsrv
+    //     connection Spoor (the accept product; a CSRVCLIENT endpoint or any
+    //     other fd kind -> -T_E_INVAL); the caller must carry
+    //     PROC_FLAG_MAY_POST_SERVICE (-T_E_ACCES). -T_E_EXIST if (conn, qid)
+    //     is already bound; -T_E_AGAIN if the registry is full.
+    //   op PTY_REG_SLAVE (x1 = conn fd, x2 = slave qid, x3 = pts_id):
+    //     bind the slave-side (connection, qid) to the pts. Idempotent for
+    //     an identical re-bind. -T_E_ACCES unless the caller is the minting
+    //     server; -T_E_INVAL for a stale/malformed pts_id (the gen guard);
+    //     -T_E_EXIST if (conn, qid) is bound to a different pts; -T_E_NOMEM
+    //     if the entry's binding rows are full.
+    //   op PTY_REG_FREE  (x1 = pts_id, x2 = 0, x3 = 0):
+    //     drop the pts: unbind everything, bump the slot generation (stale
+    //     ids fail closed from here on). Gates as SLAVE.
+    //   qid 0 is rejected everywhere (the dev9p attach-root qid is reserved).
+    SYS_PTY_REGISTER = 93,   // arg: op (x0), per-op x1..x3
 };
+
+// SYS_PTY_REGISTER ops.
+#define PTY_REG_MINT   0u
+#define PTY_REG_SLAVE  1u
+#define PTY_REG_FREE   2u
 
 // SYS_CLOCK_GETTIME clock ids. Values match Linux clockid_t so a future pouch
 // boundary-line maps clock_gettime 1:1.

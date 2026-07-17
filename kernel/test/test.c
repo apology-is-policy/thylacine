@@ -161,6 +161,12 @@ void test_pgrp_zombie_reads_alive_mutations(void);
 void test_tty_note_post_gate(void);
 void test_tty_pgrp_fanout_exactly_once(void);
 void test_tty_terminate_class_gate(void);
+void test_pts_mint_bind_resolve_free(void);
+void test_pts_gen_guard_stale_id(void);
+void test_pts_authority_minting_server_only(void);
+void test_pts_binding_dedup_bounds_uniqueness(void);
+void test_pts_full_registry_torn_conn_gc(void);
+void test_pts_syscall_gates(void);
 void test_resource_exempt_only_system(void);
 void test_resource_page_charge_caps(void);
 void test_resource_thread_cap_ok(void);
@@ -1359,6 +1365,15 @@ struct test_case g_tests[] = {
     { "tty.note_post_gate",            test_tty_note_post_gate,            false, NULL },
     { "tty.pgrp_fanout_exactly_once",  test_tty_pgrp_fanout_exactly_once,  false, NULL },
     { "tty.terminate_class_gate",      test_tty_terminate_class_gate,      false, NULL },
+    { "pts.mint_bind_resolve_free",    test_pts_mint_bind_resolve_free,    false, NULL },
+    { "pts.gen_guard_stale_id",        test_pts_gen_guard_stale_id,        false, NULL },
+    { "pts.authority_minting_server_only",
+                                       test_pts_authority_minting_server_only, false, NULL },
+    { "pts.binding_dedup_bounds_uniqueness",
+                                       test_pts_binding_dedup_bounds_uniqueness, false, NULL },
+    { "pts.full_registry_torn_conn_gc",
+                                       test_pts_full_registry_torn_conn_gc, false, NULL },
+    { "pts.syscall_gates",             test_pts_syscall_gates,             false, NULL },
     { "proc.legate_teardown_from_zombie_chokepoint",
                                        test_proc_legate_teardown_from_zombie_chokepoint, false, NULL },
     { "proc.wait_pid_for_no_match",    test_proc_wait_pid_for_no_match,    false, NULL },

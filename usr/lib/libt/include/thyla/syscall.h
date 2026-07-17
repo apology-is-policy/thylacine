@@ -114,7 +114,15 @@ enum {
     T_SYS_SETPGID           = 90,  // PTY-1a: move self/child into a pgrp
     T_SYS_GETPGID           = 91,  // PTY-1a: read a Proc's pgid (0 = self)
     T_SYS_GETSID            = 92,  // PTY-1a: read a Proc's sid (0 = self)
+    T_SYS_PTY_REGISTER      = 93,  // PTY-1c: pts registry ops (ptyfs-only)
 };
+
+// SYS_PTY_REGISTER ops (PTY-1c). Server-side (ptyfs) only: MINT records a
+// pty pair's master (connection, qid) + returns the gen-stamped pts_id;
+// SLAVE binds each served slave open; FREE drops the pts at last close.
+#define T_PTY_REG_MINT   0
+#define T_PTY_REG_SLAVE  1
+#define T_PTY_REG_FREE   2
 
 // SYS_CLOCK_*TIME clock ids (match Linux clockid_t) + the 16-byte timespec.
 #define T_CLOCK_REALTIME    0
@@ -851,6 +859,26 @@ static inline long t_getsid(long pid) {
         "svc #0"
         : "+r"(x0)
         : "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_pty_register — pts registry ops (PTY-1c; ptyfs the server is the only
+// legal caller). op T_PTY_REG_MINT(conn_fd, master_qid, 0) -> pts_id > 0;
+// T_PTY_REG_SLAVE(conn_fd, slave_qid, pts_id) -> 0; T_PTY_REG_FREE(pts_id,
+// 0, 0) -> 0. Negative errno per the SYS_PTY_REGISTER contours.
+__attribute__((always_inline))
+static inline long t_pty_register(long op, long a1, long a2, long a3) {
+    register long x0 __asm__("x0") = op;
+    register long x1 __asm__("x1") = a1;
+    register long x2 __asm__("x2") = a2;
+    register long x3 __asm__("x3") = a3;
+    register long x8 __asm__("x8") = T_SYS_PTY_REGISTER;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x2), "r"(x3), "r"(x8)
         : "memory", "cc"
     );
     return x0;
