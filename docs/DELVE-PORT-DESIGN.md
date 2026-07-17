@@ -289,6 +289,22 @@ This is the feature no other production debugger gives natively (§4 of the
 charter); 8c is where the dlv side first reads `kstack` and appends the kernel
 frames.
 
+**Unwinder robustness (#91, the arm64 user-stack fp-chain).** Delve's arm64
+user-stack unwind (`pkg/proc/stack.go` + `arm64_arch.go`) needed a Thylacine-port
+fix. A debugger stop can land an M inside a runtime ASM routine that does not
+maintain a normal frame — `runtime.mstart` when the M is idle-parked on its g0
+stack, or `gogo`/`save_g` mid-goroutine-switch — where the frame-pointer chain is
+self-referential, so `advanceRegs` returns the same `(PC, SP)` and `bt` runs away
+emitting one frame to the depth cap (each a slow cross-Proc `/proc/<pid>/mem`
+read → an apparent hang). Linux never hits this: ptrace stops only at
+syscall/signal boundaries, never mid-asm. The fork (`74ef1a4`) adds a general
+no-progress guard (stop on a revisited `(PC, SP)` — a legitimate unwind, recursion
+included, never revisits one) plus the `runtime.mstart` TOPFRAME termination that
+upstream gates `if linux` (dead code under `GOOS=thylacine`). The trigger is the
+debug-stop stop-position variance, so this composes with 8c-2's stop-of-a-sleeper
+(the head M is stopped wherever the scheduler left it — running a goroutine,
+idle-parked, or mid-switch). Root-cause + verification: `memory/bug_91_*`.
+
 ---
 
 ## 9. Build + transport mechanics
