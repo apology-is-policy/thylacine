@@ -95,7 +95,11 @@ serial/QEMU (the host terminal interprets), or **Aurora-backed** on a graphical 
 difference — which is why the installer and Utopia run on Aurora *unchanged*. The
 swappable backend is the kernel-owed plumbing (`cons.c` gains a backend selector
 bound at boot from the DTB medium fact, like the trusted sink); the existing
-UART-backed `/dev/cons` is the serial backend.
+UART-backed `/dev/cons` is the serial backend. The backend MECHANISM is bound
+(2026-07-17, TAPESTRY.md §18.7): a renderer-held **drain/feed fid pair** — console
+output bytes ring into a drain fid the renderer reads; renderer-decoded keyboard
+input enters via a feed fid into the EXISTING LS-8 line discipline, which stays
+backend-independent.
 
 ---
 

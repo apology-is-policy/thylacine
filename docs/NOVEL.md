@@ -427,8 +427,10 @@ The model:
 > tiling-WM convergence (i3/sway/zellij), and the mainstream's own 40-year drift
 > into overlap-*management* UI (Windows 11 Snap Layouts, macOS Sequoia tiling) —
 > heritage and SOTA both point here. **The authoritative model is now
-> `docs/TAPESTRY.md` §13-17** (the compositor, Halcyon UX, layout-as-9P, agentic
-> enablement, sequencing). This callout supersedes the specific scope lines below
+> `docs/TAPESTRY.md` §13-18** (the compositor, Halcyon UX, layout-as-9P, agentic
+> enablement, sequencing; §18 — the 2026-07-17 graphics-phase design pass — is the
+> binding concretization: the `/dev/tapestry` schema, the present/resize/event
+> protocol, T-1 spec-gated, the G-0..G-9 build arc). This callout supersedes the specific scope lines below
 > that forbade splits/tabs; overlapping / floating / z-ordered windows remain out —
 > that *is* the thesis. The risk profile (medium-high, last-phase, fallback to a
 > textual v1.0-rc) is unchanged and re-affirmed.

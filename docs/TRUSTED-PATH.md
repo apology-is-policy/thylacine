@@ -148,7 +148,11 @@ kernel → renderer "enter/leave trusted mode" signal), never to the shell.
 The medium is a **DTB boot fact** (the same I-15 view `cons.c` already uses for
 `arm,pl011`; the graphical case adds a `simple-framebuffer` / virtio-gpu node). It
 is bound once at boot — there is no runtime "am I serial or graphical" branch in the
-SAK path. The trusted output is a medium-aware **sink** with two backends:
+SAK path. (Binding refinement 2026-07-17, TAPESTRY.md §18.7: the framebuffer episode
+binds only to KERNEL-REACHABLE linear framebuffers — simplefb-class; a
+virtio-gpu-only medium (QEMU) keeps the SERIAL trusted path, which QEMU always has —
+the kernel cannot paint through a userspace-owned GPU without violating ARCH §17.2's
+no-graphics-in-kernel posture.) The trusted output is a medium-aware **sink** with two backends:
 
 ```
   corvus --(medium-INDEPENDENT cell grid: rows x cols of glyph+attr)--> kernel trusted sink

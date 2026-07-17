@@ -1088,9 +1088,9 @@ One reserved net spec: **`net_poll.tla`** (clean + `BUGGY_LOST_READY`) — the I
 **Kernel preemption**:
 - Kernel preemption enabled (the Phase 2 deferral). Audit-gated.
 
-**Framebuffer console (fbcon) -- Tapestry stage 0** (added 2026-06-08; `docs/TAPESTRY.md` §17):
+**Framebuffer console (fbcon) -- Tapestry stage 0** (added 2026-06-08; `docs/TAPESTRY.md` §17; decomposed 2026-07-17 as §18.9 G-0..G-5):
 - The shell on a real monitor: the compositor with exactly one fullscreen surface (a shell pane), over virtio-gpu scanout + virtio-input. The forcing function for the bottom of the graphics stack (scanout + raster + bitmap text + input) and the first real consumer that hardens the green virtio-gpu / virtio-input drivers. **The one graphics piece with a v1.0-rc claim** ("a real OS on a monitor, not just a serial console") -- but **optional**: if it slips it becomes v1.1, like Halcyon, and never blocks the rc.
-- The **agentic-enablement capture/inject loop** (TAPESTRY.md §16) wires in HERE, so graphics is never developed blind: QEMU `screendump` -> the agent reads the PNG; QMP `input-send-event`; the 9P structural view (`cat /dev/halcyon/layout`); dev/test-build-gated in-band variants. This keeps the agent-primary loop alive into the graphical phase (TOOLING.md §10 gains the concrete ABI here).
+- The **agentic-enablement capture/inject loop** (TAPESTRY.md §16) wires in HERE, so graphics is never developed blind: QEMU `screendump` -> the agent reads the PNG; QMP `input-send-event`; the 9P structural view (`cat /dev/tapestry/layout`); dev/test-build-gated in-band variants. This keeps the agent-primary loop alive into the graphical phase (TOOLING.md §10 gains the concrete ABI here).
 
 **v1.0-rc release**:
 - Git tag `v1.0-rc.1`.
@@ -1168,10 +1168,10 @@ This is the last phase of v1.0 and the highest-risk angle (`NOVEL.md` Angle #4 �
 > **EVOLVED 2026-06-08 — the compositor / client architecture.** The §11.1
 > deliverables below are the Phase-0 model (a monolithic scroll-buffer Halcyon
 > writing raw `/dev/fb`, with a bash-subset parser). They are **reframed** by the
-> graphics-phase design (`docs/TAPESTRY.md` §13-17 + `NOVEL.md` Angle #4 +
+> graphics-phase design (`docs/TAPESTRY.md` §13-18 + `NOVEL.md` Angle #4 +
 > `ARCHITECTURE.md` §17): Halcyon is the first **client** of `tapestryd` (the
 > compositor), presents pixels over **Loom**, drives layout + input over the
-> `/dev/halcyon` **9P** tree, runs the **Utopia `ut`** shell (not a bash-subset
+> `/dev/tapestry` **9P** tree, runs the **Utopia `ut`** shell (not a bash-subset
 > parser), and renders an **anti-window tiling** UI (uniform containers;
 > placement-transparent surfaces; a Helix-modal transcript) rather than a
 > scroll-buffer-only primitive. New Phase-10 sequencing:
@@ -1189,8 +1189,11 @@ This is the last phase of v1.0 and the highest-risk angle (`NOVEL.md` Angle #4 �
 >   through this phase (it wires in at fbcon, §10.1).
 >
 > The risk profile (highest-risk, last-phase, fallback to the Phase-9 v1.0-rc) is
-> unchanged and re-affirmed. The §11.1 bullets firm up at the graphics-phase design
-> pass; **`docs/TAPESTRY.md` §13-17 is authoritative**.
+> unchanged and re-affirmed. **The graphics-phase design pass LANDED 2026-07-17**
+> (TAPESTRY.md §18: the V1-V4 votes; T-1 spec-gated via `specs/tapestry_present.tla`;
+> the `/dev/tapestry` schema; the G-0..G-9 build arc — G-0..G-5 late Phase 9 [the
+> fbcon/Aurora claim], G-6..G-9 Phase 10); **`docs/TAPESTRY.md` §13-18 is
+> authoritative**.
 
 ### 11.1 Deliverables
 
