@@ -144,6 +144,33 @@ it is non-NULL and fresh exactly while the thread is fully-stopped — the only
 window `build_regs` is reachable. The stop/resume state machine is unchanged,
 so `debug_stop.tla` is unaffected.
 
+**8c-2 (#88) — the detour-park trapframe.** The 5c stop-of-a-sleeper adds a
+SECOND park path, `proc_debug_stop_sleeper_park` — a nested `sleep(&debug_rendez)`
+reached when a `sleep()`/`tsleep()` DETOURS because a debug stop is pending on a
+syscall-blocked thread. That park does NOT go through `el0_return_stop_check`, so
+it never records the trapframe from a vector `ctx`. Without the fix, a
+detour-parked HEAD thread (Go's sysmon in `nanosleep`→`tsleep`, or the elected 9P
+reader) had `debug_trapframe == NULL` → `build_regs` returned 0 →
+`/proc/<pid>/regs` EPERM'd INTERMITTENTLY (only `bt`/`print`, which read regs;
+`goroutines` via `/proc/mem` needs no frame and always worked — the ground-truth
+signature). Fix: record the EL0-entry frame at the single EL0-sync choke point —
+`arch/arm64/exception.c::exception_sync_lower_el_impl` sets
+`current_thread()->debug_trapframe = ctx` at entry, so a syscall/fault-blocked
+detour-parked thread reports the correct "ptrace at the syscall boundary" EL0
+register state (the outermost EL0→EL1 frame, valid on the kstack for the whole
+syscall — not overwritten by the thread's own kernel activity, which runs BELOW
+it). Read-safety is preserved: `debug_trapframe` is READ only when fully-stopped,
+and a fully-stopped thread is always parked (tail-park overrides the entry value
+with its return `ctx`; detour-park is mid-syscall so the entry frame is the
+current outermost EL0 frame), so the between-syscalls stale value (set at a
+syscall entry, not cleared at the syscall exit) is never observed and a
+non-debugged Proc never reads its own. No new field. `debug_stop.tla` is
+unaffected (an impl-level frame-pointer store, below the model). Verified 16/16
+smp8. Corollary seam: a `step` on a detour-parked (syscall-blocked) head now reads
+a valid PC but arms `SPSR.SS` in a frame the detour-resume does not `eret` from,
+so the single-step is ineffective — pre-existing (NULL trapframe before #88),
+unchanged; the per-thread `/proc/<pid>/thread/<tid>/` step is its v1.x home.
+
 `fpregs` (from `t->ctx.fp_v` + fpsr + fpcr), `kregs` (from `t->ctx`), and
 `kstack` (from `t->ctx.lr`/`fp`) all read the SAVED kernel context, not the
 trapframe, so they were never affected by F2 — only `regs` was.

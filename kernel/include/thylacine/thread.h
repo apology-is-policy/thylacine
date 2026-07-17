@@ -312,15 +312,21 @@ struct Thread {
     // it to { unlocked, no waiter } -- no explicit rendez_init needed.
     struct Rendez      debug_rendez;
 
-    // 8a-1c (I-39; docs/DEBUG-FS-DESIGN.md section 4.5): the EL0-entry trapframe
-    // pointer captured at the debug-stop park. The trapframe is NOT at a fixed
+    // 8a-1c (I-39; docs/DEBUG-FS-DESIGN.md section 4.5/5c.6): the EL0-entry
+    // trapframe pointer for /proc/<pid>/regs. The trapframe is NOT at a fixed
     // kstack offset -- it lives at (SP_EL1 at the exception - EXCEPTION_CTX_SIZE),
     // which is only kstack_top-288 for a thread's very first entry; for a running
-    // thread the outermost EL0 frame sits lower. el0_return_stop_check records the
-    // vector-supplied `ctx` (== the current SP = the trapframe) here before it
-    // parks, so /proc/<pid>/regs reads the RIGHT frame. Read ONLY while the thread
-    // is fully-stopped (parked in el0_return_stop_check on this same entry), so it
-    // is never stale. NULL when not debug-parked.
+    // thread the outermost EL0 frame sits lower. Captured from the thread's vector
+    // `ctx` at TWO points: el0_return_stop_check records it at the RETURN tail (a
+    // TAIL-parked thread), and exception_sync_lower_el records it at the EL0-SYNC
+    // ENTRY (the #88 fix -- a DETOUR-parked sleeper, proc_debug_stop_sleeper_park,
+    // never reaches the tail while stopped, so the entry frame is its ONLY source).
+    // Read ONLY while the thread is fully-stopped (parked on debug_rendez, tail or
+    // detour), so it is always fresh: the tail-park overwrites with the return ctx;
+    // a detour-park is mid-syscall so the entry frame is the current outermost EL0
+    // frame; the between-syscalls stale value is never read (a non-parked thread's
+    // field is never read). Non-NULL during any syscall of any Proc (harmless -- a
+    // non-debugged Proc is never fully-stopped, so it never reads its own).
     struct exception_context *debug_trapframe;
 
     // 8a-2b-2 (I-39; docs/DEBUG-FS-DESIGN.md section 5.5; specs/debug_step.tla):

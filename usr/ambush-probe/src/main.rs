@@ -221,16 +221,22 @@ fn attach_e2e() -> bool {
     // sleeper (a detour-parked idle futex M) now delivers. SENTINEL is
     // 0x0AABB00DCAFE0001 == 768901734683508737 (see ambush-child).
     let saw_goroutine = contains(&out, b"Goroutine") || contains(&out, b"goroutine");
-    let saw_park = contains(&out, b"parkLoop");
+    // A REAL `bt` frame: Delve prints frames as `N  0xADDR in FUNC` (frame 0 is
+    // `0  0x`). The prior `parkLoop` marker was a FALSE POSITIVE -- it matched the
+    // `goroutines` listing's `Goroutine 1 - ... main.parkLoop`, NOT a bt frame (the
+    // head thread's bt unwinds the M's runtime stack -- torpor_wake/mcall -- and
+    // never contains "parkLoop"). `bt` reads /proc/<pid>/regs, the exact path the
+    // #88 regression EPERM'd, so gating on a real frame is the honest bt proof.
+    let saw_bt = contains(&out, b"0  0x");
     let saw_sentinel = contains(&out, b"768901734683508737");
     let saw_output = !out.is_empty();
     t_putstr(&format!(
-        "ambush-probe: stage B markers -- output={} goroutine={} parkLoop={} sentinel={}\n",
-        saw_output as u8, saw_goroutine as u8, saw_park as u8, saw_sentinel as u8
+        "ambush-probe: stage B markers -- output={} goroutine={} bt={} sentinel={}\n",
+        saw_output as u8, saw_goroutine as u8, saw_bt as u8, saw_sentinel as u8
     ));
 
     reap_child(&mut kid);
-    saw_goroutine && saw_park && saw_sentinel
+    saw_goroutine && saw_bt && saw_sentinel
 }
 
 // killgrp + reap the parking target (its loop is unbounded).

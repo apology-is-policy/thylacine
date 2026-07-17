@@ -880,10 +880,15 @@ static long devproc_build_regs(struct Proc *target, u32 kind, u8 *out) {
         // 8a-1c: the EL0-entry trapframe is NOT at a fixed kstack offset (its base
         // is SP_EL1-at-entry - EXCEPTION_CTX_SIZE, which is only kstack_top-288 for
         // a thread's first entry; a running thread's outermost frame sits lower).
-        // el0_return_stop_check captured the vector-supplied pointer at the park;
-        // read THAT. Only reached when the target is fully-stopped (parked in
-        // el0_return_stop_check), so debug_trapframe is set + fresh. Validate it
-        // lies within the usable kstack (a NULL / corrupt pointer -> no regs).
+        // debug_trapframe was captured from the thread's vector ctx: at the
+        // RETURN tail by el0_return_stop_check (a TAIL-parked thread), OR at the
+        // EL0-sync ENTRY by exception_sync_lower_el (the #88 fix -- a DETOUR-parked
+        // sleeper never reaches the tail while stopped, so its frame is the entry
+        // frame). Read THAT. Reached ONLY when the target is fully-stopped (parked
+        // on debug_rendez, either way), so it is set + fresh -- do NOT delete the
+        // entry-store as redundant: it is the sole source for a syscall-blocked
+        // detour-parked head. Validate it lies within the usable kstack (a NULL /
+        // corrupt pointer -> no regs).
         struct exception_context *tf = th->debug_trapframe;
         if (!tf) return 0;
         u64 klo = (u64)(uintptr_t)th->kstack_base + (u64)THREAD_KSTACK_GUARD_SIZE;

@@ -346,6 +346,26 @@ void notes_deliver_at_el0_return(struct exception_context *ctx);
 void el0_return_die_check(void);
 
 static void exception_sync_lower_el_impl(struct exception_context *ctx) {
+    // 8c-2 (#88): publish THIS EL0-entry frame as the current thread's debug
+    // trapframe, so a thread that DETOUR-parks (proc_debug_stop_sleeper_park --
+    // the stop-of-a-sleeper) while blocked in a syscall/demand-page sleep has a
+    // valid frame for /proc/<pid>/regs. el0_return_stop_check records the frame
+    // from its own vector ctx at the RETURN tail, but a detour-parked sleeper is
+    // stopped WITHOUT reaching that tail, so devproc_build_regs would read a NULL
+    // debug_trapframe and return EPERM (the #88 regression: bt/print on a
+    // multi-M Go target whose head thread was sleeping-in-a-syscall at stop-time).
+    // The EL0-entry frame is the outermost EL0->EL1 frame, valid on the kstack for
+    // the whole syscall/fault -- the correct "ptrace at the syscall boundary" EL0
+    // register state. Only read when the thread is fully-stopped (parked); the
+    // tail-park path overrides it with its return ctx (same frame for a syscall,
+    // fresh for an IRQ-kicked EL0 stop), and the death/resume clears keep NULLing
+    // it on the parked lifecycle. Cheap (one store of an in-register ctx to the
+    // already-hot current Thread); read-gated on fully-stopped, so a non-debugged
+    // Proc never reads its own stale-between-syscalls value.
+    struct Thread *cur = current_thread();
+    if (cur && cur->magic == THREAD_MAGIC)
+        cur->debug_trapframe = ctx;
+
     u64 esr = ctx->esr;
     u64 far = ctx->far;
     u32 ec  = (u32)ESR_EC(esr);

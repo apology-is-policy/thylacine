@@ -2378,7 +2378,13 @@ void el0_return_stop_check(struct exception_context *ctx) {
 // -> the handshake -> "stopped"); NoLostStop + DeathWinsOverStop + the
 // EventuallyStopSettles liveness.
 int proc_debug_stop_sleeper_park(struct Thread *t) {
-    if (!t || t->magic != THREAD_MAGIC) return SLEEP_OK;
+    // t is always current_thread() (magic-validated by sleep() before the detour
+    // reaches here), so a corrupt t is a real invariant violation -- extinct
+    // rather than return SLEEP_OK, which would make the sleep() detour re-invoke
+    // this on the same corrupt t forever (a busy livelock). Matches sleep()'s own
+    // "corrupted current" guard. (8c-2 close F3.)
+    if (!t || t->magic != THREAD_MAGIC)
+        extinction("proc_debug_stop_sleeper_park: corrupt thread");
     return sleep(&t->debug_rendez, debug_stop_wake_cond, t->proc);
 }
 

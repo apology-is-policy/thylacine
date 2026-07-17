@@ -591,6 +591,52 @@ already accepts a `debug_rendez` park wherever it happens). The `ambush-probe`
 stage B flips from `ATTACH_ENABLED=false` to a gated assertion (goroutines / bt /
 print against the now-stoppable Go target), the runtime witness.
 
+### 5c.6 As-built — the #88 trapframe regression + the #89 reader-role seam
+
+The 5c.2 detour landed (`kernel/sched.c` `sleep`/`tsleep` stop-detour +
+`kernel/proc.c` `proc_debug_stop_sleeper_park` + the `proc_debug_stop_deliver`
+sleeper-wake walk). Two follow-ups surfaced at the close.
+
+**#88 (fixed in 8c-2).** §5c.5's "devproc.c unchanged" assumption was WRONG in one
+respect: `devproc_all_threads_parked` does accept a `debug_rendez` park wherever it
+happens, but `devproc_build_regs` (`/proc/<pid>/regs`) reads the HEAD thread's
+`debug_trapframe`, which **only** `el0_return_stop_check` (the EL0-return TAIL park)
+sets — from its vector `ctx`. A **detour-parked** thread never reaches that tail
+while stopped, so its `debug_trapframe` stayed NULL, and `bt`/`print` on a multi-M
+Go target whose head thread was sleeping-in-a-syscall at stop-time (Go's sysmon in
+`nanosleep`→`tsleep`, or the elected 9P reader) intermittently EPERM'd (NULL frame
+→ build_regs returns 0 → `-1`). The signature that ground-truthed it: `goroutines`
+(a `/proc/mem` read, needs no trapframe) ALWAYS succeeds; `bt`+`print` (both
+`/proc/regs`) fail. **Fix:** capture the EL0-entry frame at the single EL0-sync
+choke point — `arch/arm64/exception.c::exception_sync_lower_el_impl` sets
+`current_thread()->debug_trapframe = ctx` at entry, so a syscall/fault-blocked
+detour-parked thread reports the correct "ptrace at the syscall boundary" EL0
+register state (the outermost EL0→EL1 frame, valid on the kstack for the whole
+syscall). Read-gated on fully-stopped (a parked thread always has a fresh frame —
+tail-park overrides with its return ctx; detour-park is mid-syscall), so the
+between-syscalls stale value is never observed and a non-debugged Proc never reads
+its own. No new field. Verified 16/16 smp8 boots.
+
+Corollary seam (pre-existing, unchanged by #88): a `step` on a detour-parked
+(syscall-blocked) HEAD thread now reads a valid PC but arms `SPSR.SS` in a frame the
+detour-resume does not `eret` from, so the single-step is ineffective — the head is
+in a syscall, not at an EL0 instruction. This was already broken (NULL trapframe)
+before #88; the per-thread `/proc/<pid>/thread/<tid>/` step is its v1.x home.
+
+**#89 (deferred to 8c-3, user-approved).** The elected 9P-reader role (the #841
+`reader_active` + the srvconn chan-role) is HELD across the detour-park: a debugged
+Proc whose thread holds the **system** Stratum client's reader role at stop-time
+freezes system-FS (`/bin`, `/lib`) for every survivor Proc sharing that client,
+until the debugger continues/detaches. Per-user home clients (A-5b
+`--single-session`) are isolated, so the surface is the system client only; the
+freeze is bounded to the debug-stop duration (developer-controlled). NOT exercised
+by the current E2E (the target does no FS I/O). The fix mirrors the death path's
+role-release (`client_self_dying` → clear `reader_active` →
+`client_handoff_reader_locked` → park with the role released → re-elect on resume),
+but it is invasive to the 3-round-audited #841 reader machinery, so it lands as its
+own focused, independently-audited sub-chunk **8c-3** rather than bundled into this
+close.
+
 ---
 
 ## 6. `specs/debug_stop.tla` (spec-first, model-first)
