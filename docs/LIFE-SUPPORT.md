@@ -485,7 +485,13 @@ Proc fields) + the `ls-k` LS-CI (`id` -> `uid=…`, `whoami` -> the principal,
 
 Deferred to **Phase 8** (beyond LS): process groups + controlling terminal +
 Ctrl-Z (stopped thread state) + SIGWINCH + `/dev/ptmx`+`/dev/pts` -> full job
-control + helix/nora/bash via Pouch. (That is I-20 / `pty.tla`.)
+control + helix/nora/bash via Pouch. (That is I-20 / `pty.tla`.) **DESIGN LANDED
+2026-07-17 -> `docs/PTY-DESIGN.md`** (the Fable design pass: a userspace `ptyfs`
+9P server + full POSIX sessions/pgroups + Ctrl-Z generalizing the audited debug
+stopped-state + `specs/pty.tla` model-first; the PTY-1..PTY-4 build arc). The
+stopped-thread-state this list called absent now EXISTS (the Go-debugger arc's
+`debug_rendez`), so Ctrl-Z reuses it via a non-`CAP_DEBUG` entry rather than
+rebuilding it.
 
 ### LS-test — Arc-close cumulative interactive workflow probe
 
