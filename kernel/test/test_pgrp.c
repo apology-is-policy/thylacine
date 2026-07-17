@@ -36,6 +36,7 @@
 
 #include <thylacine/errno.h>
 #include <thylacine/extinction.h>
+#include <thylacine/notes.h>
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
 #include <thylacine/thread.h>
@@ -45,6 +46,9 @@ void test_pgrp_defaults_and_inherit(void);
 void test_pgrp_setsid_semantics(void);
 void test_pgrp_setpgid_rule_matrix(void);
 void test_pgrp_zombie_reads_alive_mutations(void);
+void test_tty_note_post_gate(void);
+void test_tty_pgrp_fanout_exactly_once(void);
+void test_tty_terminate_class_gate(void);
 
 // Test-harness hooks (the test_proc.c pattern).
 extern void proc_test_link(struct Proc *p);
@@ -202,6 +206,186 @@ void test_pgrp_setpgid_rule_matrix(void) {
     pgrp_drop_linked(b);
     pgrp_drop_linked(alien);
     pgrp_drop_linked(leader);
+}
+
+// -- PTY-1b: the tty:* note class + notes_post_pgrp -------------------------
+
+static int tty_streq(const char *a, const char *b) {
+    for (u32 i = 0; i < NOTE_NAME_MAX; i++) {
+        if (a[i] != b[i]) return 0;
+        if (a[i] == '\0') return 1;
+    }
+    return 0;
+}
+
+// Count queued notes named `name` in p's queue (under q->lock).
+static u32 tty_count_named(struct Proc *p, const char *name) {
+    struct NoteQueue *q = p->notes;
+    u32 found = 0;
+    spin_lock(&q->lock);
+    u32 idx = q->head;
+    for (u32 n = 0; n < q->count; n++) {
+        if (tty_streq(q->ring[idx].name, name)) found++;
+        idx = (idx + 1) % NOTE_QUEUE_DEPTH;
+    }
+    spin_unlock(&q->lock);
+    return found;
+}
+
+void test_tty_note_post_gate(void) {
+    struct Proc *p = pgrp_make_linked_in_session();
+    TEST_ASSERT(p, "proc_alloc failed");
+
+    // Userspace (synthetic=false) post of ANY tty:* name: rejected -- the
+    // load-bearing F4 gate (the names ARE in the supported set, so this
+    // prefix gate is the only barrier; without it a parent could post
+    // tty:cont to a debug-stopped child, the I-39 leak).
+    TEST_ASSERT(notes_post(p, NOTE_NAME_TTY_CONT, 0u, NULL, false) == -1,
+                "userspace tty:cont post not rejected");
+    TEST_ASSERT(notes_post(p, NOTE_NAME_TTY_HUP, 0u, NULL, false) == -1,
+                "userspace tty:hup post not rejected");
+    TEST_ASSERT(tty_count_named(p, NOTE_NAME_TTY_CONT) == 0,
+                "rejected post left a queue entry");
+
+    // Kernel-synthetic post: accepted + queued (catchable-informational).
+    TEST_ASSERT(notes_post(p, NOTE_NAME_TTY_WINCH, 7u, NULL, true) == 0,
+                "synthetic tty:winch post failed");
+    TEST_ASSERT(tty_count_named(p, NOTE_NAME_TTY_WINCH) == 1,
+                "synthetic tty:winch not queued");
+
+    // A tty:-prefixed name OUTSIDE the supported set rejects even synthetic
+    // (the supported-set validation, unchanged).
+    TEST_ASSERT(notes_post(p, "tty:bogus", 0u, NULL, true) == -1,
+                "unknown tty name accepted");
+
+    // The snare gate is unregressed.
+    TEST_ASSERT(notes_post(p, "snare:segv", 0u, NULL, false) == -1,
+                "userspace snare post not rejected");
+
+    pgrp_drop_linked(p);
+}
+
+void test_tty_pgrp_fanout_exactly_once(void) {
+    struct Proc *self = current_thread()->proc;
+
+    struct Proc *m1 = pgrp_make_linked_in_session();
+    struct Proc *m2 = pgrp_make_linked_in_session();
+    struct Proc *outsider = pgrp_make_linked_in_session();
+    TEST_ASSERT(m1 && m2 && outsider, "proc_alloc failed");
+
+    // Build a real group: m1 mints it, m2 joins; outsider stays in pgid 0.
+    TEST_ASSERT(proc_setpgid(self, m1->pid, 0) == 0, "mint failed");
+    TEST_ASSERT(proc_setpgid(self, m2->pid, m1->pid) == 0, "join failed");
+
+    // Fan out: exactly the two members, exactly once each.
+    int posted = notes_post_pgrp((u32)m1->pid, NOTE_NAME_TTY_WINCH, 3u);
+    TEST_ASSERT(posted == 2, "fan-out did not post to exactly 2 members");
+    TEST_ASSERT(tty_count_named(m1, NOTE_NAME_TTY_WINCH) == 1,
+                "m1 did not get exactly one note");
+    TEST_ASSERT(tty_count_named(m2, NOTE_NAME_TTY_WINCH) == 1,
+                "m2 did not get exactly one note");
+    TEST_ASSERT(tty_count_named(outsider, NOTE_NAME_TTY_WINCH) == 0,
+                "outsider got a note");
+
+    // pgid 0 (the boot group) is refused -- nothing posted anywhere.
+    TEST_ASSERT(notes_post_pgrp(0u, NOTE_NAME_TTY_HUP, 0u) == 0,
+                "pgid-0 fan-out not refused");
+    TEST_ASSERT(tty_count_named(outsider, NOTE_NAME_TTY_HUP) == 0,
+                "pgid-0 refusal leaked a post");
+
+    pgrp_drop_linked(m1);
+    pgrp_drop_linked(m2);
+    pgrp_drop_linked(outsider);
+}
+
+void test_tty_terminate_class_gate(void) {
+    struct Proc *p = pgrp_make_linked_in_session();
+    TEST_ASSERT(p, "proc_alloc failed");
+    struct Thread *t = current_thread();
+    u32 saved_mask = t->note_mask;
+
+    // tty:quit on a handler-less, non-self-managing Proc: terminate-class.
+    TEST_ASSERT(notes_post(p, NOTE_NAME_TTY_QUIT, 0u, NULL, true) == 0,
+                "synthetic tty:quit post failed");
+    spin_lock(&p->notes->lock);
+    const char *tname = notes_terminate_note_name_locked(p, NULL);
+    spin_unlock(&p->notes->lock);
+    TEST_ASSERT(tname && tty_streq(tname, NOTE_NAME_TTY_QUIT),
+                "tty:quit did not report terminate-class");
+
+    // The TTY latch armed; the INTERRUPT latch untouched (per-class).
+    u32 flags = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE);
+    TEST_ASSERT((flags & PROC_FLAG_TTY_TERMINATE_PENDING) != 0,
+                "tty terminate latch not armed");
+    TEST_ASSERT((flags & PROC_FLAG_INTR_TERMINATE_PENDING) == 0,
+                "interrupt latch spuriously armed");
+
+    // A thread that masked the tty FAMILY defers it (per-family mask).
+    t->note_mask = (1u << NOTE_BIT_TTY);
+    spin_lock(&p->notes->lock);
+    tname = notes_terminate_note_name_locked(p, t);
+    spin_unlock(&p->notes->lock);
+    TEST_ASSERT(tname == NULL, "masked tty family still terminate-pending");
+    t->note_mask = saved_mask;
+
+    // Registering a handler flips the disposition to CATCH: no terminate,
+    // both latches cleared. Unregistering does NOT re-arm (LS-5 contract).
+    notes_set_handler(p, 0x100000u);
+    spin_lock(&p->notes->lock);
+    tname = notes_terminate_note_name_locked(p, NULL);
+    spin_unlock(&p->notes->lock);
+    TEST_ASSERT(tname == NULL, "handler-bearing Proc still terminate-pending");
+    flags = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE);
+    TEST_ASSERT((flags & (PROC_FLAG_TTY_TERMINATE_PENDING |
+                          PROC_FLAG_INTR_TERMINATE_PENDING)) == 0,
+                "handler registration did not clear the latches");
+    // Unregistering splits the two surfaces (the LS-5 contract): the LATCH
+    // (the lock-free wake hint) is NOT re-armed -- but the TRUTH function
+    // reports the still-queued note again, because the unregistering thread
+    // reaches its own EL0-return tail right after the syscall, where the
+    // re-evaluation legitimately terminates it (nothing drained the note).
+    notes_set_handler(p, 0u);
+    flags = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE);
+    TEST_ASSERT((flags & (PROC_FLAG_TTY_TERMINATE_PENDING |
+                          PROC_FLAG_INTR_TERMINATE_PENDING)) == 0,
+                "unregister re-armed the latch");
+    spin_lock(&p->notes->lock);
+    tname = notes_terminate_note_name_locked(p, NULL);
+    spin_unlock(&p->notes->lock);
+    TEST_ASSERT(tname && tty_streq(tname, NOTE_NAME_TTY_QUIT),
+                "truth function lost the still-queued note after unregister");
+
+    pgrp_drop_linked(p);
+
+    // tty:winch is informational: queued, never terminate-class.
+    struct Proc *w = pgrp_make_linked_in_session();
+    TEST_ASSERT(w, "proc_alloc failed");
+    TEST_ASSERT(notes_post(w, NOTE_NAME_TTY_WINCH, 0u, NULL, true) == 0,
+                "synthetic winch post failed");
+    spin_lock(&w->notes->lock);
+    tname = notes_terminate_note_name_locked(w, NULL);
+    spin_unlock(&w->notes->lock);
+    TEST_ASSERT(tname == NULL, "tty:winch wrongly terminate-class");
+    TEST_ASSERT((__atomic_load_n(&w->proc_flags, __ATOMIC_ACQUIRE) &
+                 PROC_FLAG_TTY_TERMINATE_PENDING) == 0,
+                "winch armed the terminate latch");
+
+    // `interrupt` still terminates + arms ITS latch only (regression +
+    // per-class independence).
+    TEST_ASSERT(notes_post(w, "interrupt", 0u, NULL, true) == 0,
+                "interrupt post failed");
+    spin_lock(&w->notes->lock);
+    tname = notes_terminate_note_name_locked(w, NULL);
+    spin_unlock(&w->notes->lock);
+    TEST_ASSERT(tname && tty_streq(tname, "interrupt"),
+                "interrupt terminate regressed");
+    flags = __atomic_load_n(&w->proc_flags, __ATOMIC_ACQUIRE);
+    TEST_ASSERT((flags & PROC_FLAG_INTR_TERMINATE_PENDING) != 0,
+                "interrupt latch not armed");
+    TEST_ASSERT((flags & PROC_FLAG_TTY_TERMINATE_PENDING) == 0,
+                "interrupt armed the tty latch");
+
+    pgrp_drop_linked(w);
 }
 
 void test_pgrp_zombie_reads_alive_mutations(void) {

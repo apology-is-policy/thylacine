@@ -600,6 +600,20 @@ struct Proc {
 // (the arm guards it: in-kernel tests post to kproc's queue via the boot
 // thread, and an armed kproc would *_INTR every kernel-thread sleep).
 #define PROC_FLAG_INTR_TERMINATE_PENDING (1u << 7)
+// PTY-1b: the tty-class twin of the LS-5c latch above -- a terminate-
+// disposition tty:quit / tty:hup is pending (posted with no handler + not
+// self-managing). A SEPARATE bit, not a widening of the interrupt latch,
+// because the lock-free #811 die-pending predicate pairs each latch with
+// ITS OWN family mask bit (interrupt <-> NOTE_BIT_INTERRUPT, tty <->
+// NOTE_BIT_TTY) -- one shared latch would make a thread that masked only
+// interrupts spuriously *_INTR-unwind for a pending tty note it HAS
+// masked, breaking the "a latch-woken thread never unwinds into a tail
+// that refuses to act" property. Same latch discipline as the interrupt
+// bit: set/cleared ONLY under p->notes->lock (armed by notes_post's
+// terminate-class arm; cleared by handler registration, the self-managing
+// mark, or draining the last queued terminate-class tty note); NOT
+// propagated by rfork; never set on kproc.
+#define PROC_FLAG_TTY_TERMINATE_PENDING (1u << 8)
 
 _Static_assert(sizeof(struct Proc) == 336,
                "struct Proc size pinned at 336 bytes (the 328 baseline + the PTY-1a "

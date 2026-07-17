@@ -1235,6 +1235,40 @@ void proc_set_console_trusted(struct Proc *p) {
 // pattern: hold g_proc_table_lock, post a note; lock order g_proc_table_lock ->
 // note q->lock). A no-op when there is no live owner (e.g. after joey exits, or
 // a future SAK revoke-only).
+// PTY-1b (PTY-DESIGN.md section 4): kernel-synthetic note fan-out to a
+// process group -- the pgrp generalization of proc_console_post_interrupt
+// below (see the notes.h declaration for the full contract). One
+// g_proc_table_lock hold covers the membership walk, every member's post
+// (the established g_proc_table_lock -> q->lock edge, the console-poster
+// precedent -- the hold pins each member's lifetime across its post), and
+// the per-member LS-5c terminate-wake (the wake's lock contract; it
+// self-gates on the latch, so non-terminate names cost nothing). The walk
+// visits each table-linked Proc exactly once (a rooted tree), and p->pgid
+// is read under the lock that serializes setpgid/rfork/exit -- the F14
+// exactly-once-per-member argument. pgid 0 is REFUSED (the boot group --
+// kproc/joey -- is never a tty-signal target; the seam's fg_pgid can never
+// be 0 since acquisition copies a setsid'd leader's pgid, but a stray
+// caller must not be able to fan a terminate note across the boot chain).
+struct pgrp_post_ctx { u32 pgid; const char *name; u32 arg; int posted; };
+static int pgrp_post_cb(struct Proc *q, void *arg) {
+    struct pgrp_post_ctx *c = arg;
+    if (q->state == PROC_STATE_ALIVE && q->pgid == c->pgid) {
+        if (notes_post(q, c->name, c->arg, NULL, true) == 0)
+            c->posted++;
+        proc_interrupt_terminate_wake(q);
+    }
+    return 0;   // keep walking -- every member gets its post
+}
+int notes_post_pgrp(u32 pgid, const char *name, u32 arg) {
+    if (pgid == 0 || !name) return 0;
+    struct pgrp_post_ctx ctx = { .pgid = pgid, .name = name, .arg = arg,
+                                 .posted = 0 };
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    proc_for_each_walk(kproc(), pgrp_post_cb, &ctx);
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return ctx.posted;
+}
+
 void proc_console_post_interrupt(void) {
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
     struct Proc *owner = g_console_owner;
@@ -1411,8 +1445,13 @@ bool proc_intr_terminate_pending(const struct Proc *p) {
     // LOCK-FREE by the #811 sleep predicate, thread_die_pending — see the
     // PROC_FLAG_INTR_TERMINATE_PENDING contract in proc.h).
     if (!p || p->magic != PROC_MAGIC) return false;
+    // PTY-1b: EITHER terminate-class latch (interrupt OR tty:quit/hup) --
+    // this is the wake gate; the per-family mask precision lives in
+    // thread_die_pending's re-check, so a spurious wake here costs one
+    // predicate re-evaluation, never a wrong unwind.
     return (__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE)
-            & PROC_FLAG_INTR_TERMINATE_PENDING) != 0;
+            & (PROC_FLAG_INTR_TERMINATE_PENDING |
+               PROC_FLAG_TTY_TERMINATE_PENDING)) != 0;
 }
 
 // LS-5c (P3-terminate, ARCH 8.8.2): wake every blocked Thread of `p` so it

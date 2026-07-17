@@ -126,10 +126,17 @@ struct Thread;
 // have no effect at v1.0; the supported set grows per chunk without ABI
 // break). SYS_POSTNOTE with an unsupported note name returns -EINVAL.
 //
+// PTY-1b: the tty:* family bit. ONE bit for the whole family (winch /
+// susp / cont / quit / hup) -- per-kind masking is a v1.x extension, the
+// NOTE_BIT_SNARE precedent. Unlike SNARE this bit is load-bearing at
+// v1.0: the tty:* names ARE in g_known_notes (deliverable, catchable),
+// and a thread masking the bit defers every tty note.
+#define NOTE_BIT_TTY         5u
+
 // F4 audit close: includes NOTE_BIT_SNARE (bit 4) for the snare:*
 // family even though no v1.0 consumer exists; reserves the bit
-// position for v1.x.
-#define NOTE_MASK_SUPPORTED  0x1fu
+// position for v1.x. PTY-1b adds NOTE_BIT_TTY (bit 5), live.
+#define NOTE_MASK_SUPPORTED  0x3fu
 
 // In-kernel note record. The ring lives in `struct NoteQueue.ring` (inline
 // — the queue is heap-allocated once per Proc at proc_alloc).
@@ -226,6 +233,38 @@ struct NoteQueue {
 // source bytes + padding dst[NOTE_NAME_MAX - 1] = 0 (the padding NUL
 // coincides bit-for-bit with the source NUL). Future entries up to
 // the boundary are safe.
+// `tty:*` family -- kernel-synthetic-POST, CATCHABLE notes (PTY-1b;
+// PTY-DESIGN.md section 4, round-1 F4 + round-2 R2-F3). A NEW note class
+// between `interrupt` (anyone-post + catchable) and `snare:*` (kernel-post
+// + uncatchable-terminate): only the kernel may POST them (the tty signal
+// seam + the controlling-terminal paths -- notes_post rejects a userspace
+// SYS_POSTNOTE of any `tty:`-prefixed name, closing the parent-posts-cont-
+// to-a-debug-stopped-child I-39 leak), but a target Proc may CATCH or mask
+// them like any note (bash/vim/tmux install SIGTSTP handlers; SIGWINCH is
+// routinely caught). Uncaught defaults: tty:quit / tty:hup TERMINATE (the
+// LS-5 interrupt pattern -- fires only with no handler + not self-managing
+// + unmasked); tty:susp STOPS (the PTY-1f job_stop machinery; nothing
+// emits it until SYS_TTY_SIGNAL's TSTP class un-gates there); tty:winch /
+// tty:cont are informational (queue for the fd-read path, no default
+// action -- the pipe/child_exit shape; cont's RESUME side effect is the
+// kernel stop-clear at PTY-1f, not a note disposition).
+#define NOTE_NAME_TTY_WINCH  "tty:winch"  // SIGWINCH -- winsize changed
+#define NOTE_NAME_TTY_SUSP   "tty:susp"   // SIGTSTP  -- default STOP (PTY-1f)
+#define NOTE_NAME_TTY_CONT   "tty:cont"   // SIGCONT  -- resume (kernel side)
+#define NOTE_NAME_TTY_QUIT   "tty:quit"   // SIGQUIT  -- default terminate
+#define NOTE_NAME_TTY_HUP    "tty:hup"    // SIGHUP   -- default terminate
+
+_Static_assert(sizeof(NOTE_NAME_TTY_WINCH) <= NOTE_NAME_MAX,
+               "NOTE_NAME_TTY_WINCH does not fit NOTE_NAME_MAX");
+_Static_assert(sizeof(NOTE_NAME_TTY_SUSP) <= NOTE_NAME_MAX,
+               "NOTE_NAME_TTY_SUSP does not fit NOTE_NAME_MAX");
+_Static_assert(sizeof(NOTE_NAME_TTY_CONT) <= NOTE_NAME_MAX,
+               "NOTE_NAME_TTY_CONT does not fit NOTE_NAME_MAX");
+_Static_assert(sizeof(NOTE_NAME_TTY_QUIT) <= NOTE_NAME_MAX,
+               "NOTE_NAME_TTY_QUIT does not fit NOTE_NAME_MAX");
+_Static_assert(sizeof(NOTE_NAME_TTY_HUP) <= NOTE_NAME_MAX,
+               "NOTE_NAME_TTY_HUP does not fit NOTE_NAME_MAX");
+
 _Static_assert(sizeof(NOTE_NAME_SNARE_ALIGN) <= NOTE_NAME_MAX,
                "NOTE_NAME_SNARE_ALIGN does not fit NOTE_NAME_MAX");
 _Static_assert(sizeof(NOTE_NAME_SNARE_SEGV)  <= NOTE_NAME_MAX,
@@ -343,6 +382,30 @@ int notes_reenqueue_head_locked(struct NoteQueue *q, const struct Note *n);
 // the full decision without the noreturn exits() path. Caller MUST hold
 // p->notes->lock.
 int notes_interrupt_should_terminate_locked(struct Proc *p, struct Thread *t);
+
+// PTY-1b: the name-returning generalization of the above -- the canonical
+// (.rodata, program-lifetime) name of the first DELIVERABLE terminate-class
+// note (interrupt / tty:quit / tty:hup: queued AND its family bit unmasked
+// for `t`), or NULL. Same handler / self-managing gates. The EL0-return
+// tail passes the returned name to exits() so the exit_msg reports WHICH
+// signal terminated the Proc. Caller MUST hold p->notes->lock.
+const char *notes_terminate_note_name_locked(struct Proc *p, struct Thread *t);
+
+// PTY-1b (PTY-DESIGN.md section 4): kernel-synthetic note fan-out to a
+// process group -- the pgrp generalization of proc_console_post_interrupt.
+// Delivers `name` (synthetic; the tty seam + controlling-terminal paths are
+// the callers) to every ALIVE member of `pgid` EXACTLY ONCE, under one
+// g_proc_table_lock hold: membership (p->pgid) is read under the same lock
+// that serializes setpgid/rfork/exit, so a concurrent membership mutation
+// orders entirely before or after the whole fan-out -- never a
+// half-delivered group (the F14 argument); the hold also pins each member
+// across its post, and the per-member LS-5c terminate-wake runs under it
+// (the wake's contract). pgid 0 (the boot session's group -- kproc + joey)
+// is REFUSED, fan-out count 0: the boot group is never a tty-signal target
+// (defense-in-depth; the seam's fg_pgid can never be 0 since acquisition
+// copies a setsid'd leader's pgid). Returns the count of members posted.
+// Implemented in kernel/proc.c (needs the static g_proc_table_lock).
+int notes_post_pgrp(u32 pgid, const char *name, u32 arg);
 
 // =============================================================================
 // LS-5c (P3-terminate, ARCH 8.8.2): the terminate-disposition interrupt latch.

@@ -57,6 +57,16 @@ static const struct note_name_entry g_known_notes[] = {
     { "kill",       NOTE_BIT_KILL       },
     { "pipe",       NOTE_BIT_PIPE       },
     { "child_exit", NOTE_BIT_CHILD_EXIT },
+    // PTY-1b: the tty:* family (kernel-synthetic-POST + catchable; ONE
+    // family mask bit, the SNARE per-kind-masking-is-v1.x precedent).
+    // notes_post's tty-prefix gate is the ONLY thing keeping userspace
+    // posters out of these entries -- load-bearing, unlike the snare
+    // future-proofing (snare:* is not in this table at v1.0).
+    { NOTE_NAME_TTY_WINCH, NOTE_BIT_TTY },
+    { NOTE_NAME_TTY_SUSP,  NOTE_BIT_TTY },
+    { NOTE_NAME_TTY_CONT,  NOTE_BIT_TTY },
+    { NOTE_NAME_TTY_QUIT,  NOTE_BIT_TTY },
+    { NOTE_NAME_TTY_HUP,   NOTE_BIT_TTY },
 };
 #define NOTE_NUM_KNOWN  (sizeof(g_known_notes) / sizeof(g_known_notes[0]))
 
@@ -92,6 +102,26 @@ static int notes_name_to_bit(const char *name) {
 // future supported-set extension (today snare:* isn't in g_known_notes
 // so notes_name_to_bit already rejects; the explicit prefix check
 // future-proofs against that path being relaxed).
+// PTY-1b (round-1 F4): the tty:* prefix is likewise kernel-synthetic-only
+// on the POST axis -- but UNLIKE snare:*, the tty names ARE in
+// g_known_notes (deliverable + catchable), so this prefix gate is the ONLY
+// barrier keeping a userspace SYS_POSTNOTE out of them. Load-bearing:
+// without it, `tty:cont` is postable via the ordinary parent-only note
+// path (no CAP_DEBUG), letting an unprivileged parent resume a
+// debugger-stopped child once the PTY-1f stop machinery reads cont -- the
+// I-39 leak the design closes.
+static int notes_name_has_tty_prefix(const char *name) {
+    static const char prefix[] = "tty:";
+    _Static_assert(sizeof(prefix) <= NOTE_NAME_MAX,
+                   "tty: prefix must be shorter than NOTE_NAME_MAX so the "
+                   "bounded compare below terminates within the name buffer");
+    for (u32 i = 0; i + 1 < sizeof(prefix); i++) {
+        if (name[i] == '\0') return 0;
+        if (name[i] != prefix[i]) return 0;
+    }
+    return 1;
+}
+
 static int notes_name_has_snare_prefix(const char *name) {
     static const char prefix[] = "snare:";
     // F5 audit close: use sizeof(prefix) - 1 directly as the
@@ -221,13 +251,35 @@ static int notes_find_locked(struct NoteQueue *q, const char *name,
 // a test's interrupt post would arm kproc and every subsequent kernel-thread
 // sleep would return *_INTR; kproc threads also never EL0-return, so the
 // latch could never be consumed.
+// PTY-1b: the terminate class -- names whose UNCAUGHT default disposition
+// is process termination at the EL0-return tail (the LS-5 interrupt pattern
+// generalized: interrupt == SIGINT, tty:quit == SIGQUIT, tty:hup == SIGHUP).
+// tty:susp's default is STOP (the PTY-1f job_stop machinery; nothing emits
+// it until SYS_TTY_SIGNAL's TSTP class un-gates there) and tty:winch /
+// tty:cont are informational (queue for the fd-read path, no default
+// action -- the pipe/child_exit shape). Returns the class's LATCH flag
+// (PROC_FLAG_INTR_TERMINATE_PENDING for interrupt,
+// PROC_FLAG_TTY_TERMINATE_PENDING for the tty pair -- each latch pairs
+// with ITS OWN family mask bit in the lock-free die predicate), or 0 for a
+// non-terminate name.
+static u32 notes_name_terminate_latch(const char *name) {
+    int bit = notes_name_to_bit(name);
+    if (bit == (int)NOTE_BIT_INTERRUPT)
+        return PROC_FLAG_INTR_TERMINATE_PENDING;
+    if (bit == (int)NOTE_BIT_TTY &&
+        (notes_name_eq(name, NOTE_NAME_TTY_QUIT) ||
+         notes_name_eq(name, NOTE_NAME_TTY_HUP)))
+        return PROC_FLAG_TTY_TERMINATE_PENDING;
+    return 0;
+}
+
 static void notes_arm_intr_terminate_locked(struct Proc *p, const char *name) {
-    if (notes_name_to_bit(name) != (int)NOTE_BIT_INTERRUPT) return;
+    u32 latch = notes_name_terminate_latch(name);
+    if (latch == 0) return;
     if (p == kproc()) return;
     if (__atomic_load_n(&p->handler_va, __ATOMIC_ACQUIRE) != 0) return;
     if (proc_is_self_managing_notes(p)) return;
-    __atomic_or_fetch(&p->proc_flags, PROC_FLAG_INTR_TERMINATE_PENDING,
-                      __ATOMIC_RELEASE);
+    __atomic_or_fetch(&p->proc_flags, latch, __ATOMIC_RELEASE);
 }
 
 // LS-5c: clear the terminate latch when the LAST queued `interrupt` is
@@ -236,15 +288,18 @@ static void notes_arm_intr_terminate_locked(struct Proc *p, const char *name) {
 // unless the popped note is an interrupt and no interrupt remains queued.
 static void notes_drain_intr_locked(struct Proc *p, struct NoteQueue *q,
                                     const struct Note *popped) {
-    if (notes_name_to_bit(popped->name) != (int)NOTE_BIT_INTERRUPT) return;
+    // PTY-1b: per-CLASS drain -- popping the last terminate-class note of a
+    // class clears THAT class's latch (another class's pending note keeps
+    // its own latch armed independently).
+    u32 latch = notes_name_terminate_latch(popped->name);
+    if (latch == 0) return;
     u32 idx = q->head;
     for (u32 n = 0; n < q->count; n++) {
-        if (notes_name_to_bit(q->ring[idx].name) == (int)NOTE_BIT_INTERRUPT)
-            return;                  // another interrupt remains queued
+        if (notes_name_terminate_latch(q->ring[idx].name) == latch)
+            return;             // another same-class note remains queued
         idx = (idx + 1) % NOTE_QUEUE_DEPTH;
     }
-    __atomic_and_fetch(&p->proc_flags, ~PROC_FLAG_INTR_TERMINATE_PENDING,
-                       __ATOMIC_RELEASE);
+    __atomic_and_fetch(&p->proc_flags, ~latch, __ATOMIC_RELEASE);
 }
 
 int notes_post(struct Proc *p, const char *name, u32 arg,
@@ -264,6 +319,11 @@ int notes_post(struct Proc *p, const char *name, u32 arg,
     // against snare:* being added to the supported set for kernel-
     // synthetic-only delivery.)
     if (!synthetic && notes_name_has_snare_prefix(name)) return -1;
+
+    // PTY-1b (round-1 F4): the tty:* family is kernel-synthetic-only on the
+    // POST axis. Unlike the snare gate above this one is load-bearing TODAY
+    // (the tty names are in the supported set below).
+    if (!synthetic && notes_name_has_tty_prefix(name)) return -1;
 
     // Validate name is in the v1.0 supported set.
     if (notes_name_to_bit(name) < 0) return -1;
@@ -578,17 +638,24 @@ __attribute__((noreturn)) extern void exits(const char *msg);
 // behind another unconsumed note must still trigger the terminate -- a non-
 // self-managing handler-less Proc never drains its queue, so relying on FIFO
 // position would let a leading child_exit/pipe mask the interrupt forever.
-static int notes_interrupt_pending_locked(struct NoteQueue *q,
-                                          struct Thread *t) {
+// PTY-1b: generalized from the interrupt-only scan -- the first queued
+// terminate-class note (interrupt / tty:quit / tty:hup) whose FAMILY mask
+// bit is unmasked for `t`, as its canonical .rodata name; NULL if none. A
+// masked family's note is NOT deliverable (the program chose to defer it),
+// per-family: a thread that masked interrupts still terminates on an
+// unmasked tty:hup, and vice versa.
+static const char *notes_terminate_pending_name_locked(struct NoteQueue *q,
+                                                       struct Thread *t) {
     u32 mask = (t != NULL) ? t->note_mask : 0u;
-    if (mask & (1u << NOTE_BIT_INTERRUPT)) return 0;   // masked -> not deliverable
     u32 idx = q->head;
     for (u32 n = 0; n < q->count; n++) {
-        if (notes_name_to_bit(q->ring[idx].name) == (int)NOTE_BIT_INTERRUPT)
-            return 1;
+        const char *name = q->ring[idx].name;
+        if (notes_name_terminate_latch(name) != 0 &&
+            (mask & (1u << (u32)notes_name_to_bit(name))) == 0)
+            return notes_canonical_name_ptr(name);
         idx = (idx + 1) % NOTE_QUEUE_DEPTH;
     }
-    return 0;
+    return NULL;
 }
 
 // LS-5 P2 (ARCH 8.8.2): would an uncaught `interrupt` default-terminate this
@@ -602,14 +669,21 @@ static int notes_interrupt_pending_locked(struct NoteQueue *q,
 // exercises the full decision without driving the noreturn exits(). Caller
 // MUST hold p->notes->lock.
 int notes_interrupt_should_terminate_locked(struct Proc *p, struct Thread *t) {
-    if (!p || !p->notes) return 0;
-    // A registered handler catches interrupt (the async-delivery path runs it);
-    // never auto-terminate a handler-bearing Proc. Acquire-load pairs with
-    // SYS_NOTIFY's release-store (F9 audit close).
-    if (__atomic_load_n(&p->handler_va, __ATOMIC_ACQUIRE) != 0) return 0;
-    // A self-managing Proc (opened its notes fd) consumes its own notes.
-    if (proc_is_self_managing_notes(p)) return 0;
-    return notes_interrupt_pending_locked(p->notes, t);
+    return notes_terminate_note_name_locked(p, t) != NULL;
+}
+
+// PTY-1b: the name-returning generalization (interrupt + tty:quit +
+// tty:hup). Same gates as the historical interrupt-only decision: a
+// registered handler catches EVERY note (the async-delivery path runs it;
+// acquire pairs with SYS_NOTIFY's release, F9), and a self-managing Proc
+// consumes its own notes -- neither ever default-terminates. The tail
+// passes the returned canonical name to exits() so the exit_msg reports
+// WHICH signal terminated the Proc.
+const char *notes_terminate_note_name_locked(struct Proc *p, struct Thread *t) {
+    if (!p || !p->notes) return NULL;
+    if (__atomic_load_n(&p->handler_va, __ATOMIC_ACQUIRE) != 0) return NULL;
+    if (proc_is_self_managing_notes(p)) return NULL;
+    return notes_terminate_pending_name_locked(p->notes, t);
 }
 
 // LS-5c: the SYS_NOTIFY body. The handler store and the latch clear run
@@ -628,12 +702,15 @@ void notes_set_handler(struct Proc *p, u64 handler_va) {
     __atomic_store_n(&p->handler_va, handler_va, __ATOMIC_RELEASE);
     if (handler_va != 0) {
         // Registering a handler changes the disposition to CATCH: a queued
-        // interrupt now delivers to the handler at the tail. Un-arm.
+        // terminate-class note now delivers to the handler at the tail.
+        // Un-arm BOTH latches (a handler catches every note class).
         // (Unregistering does NOT re-arm -- the unregistering thread reaches
         // its own tail right after this syscall, where LS-5b re-evaluates,
         // and a blocked peer is then covered by the death cascade exits()
         // triggers; see ARCH 8.8.2.)
-        __atomic_and_fetch(&p->proc_flags, ~PROC_FLAG_INTR_TERMINATE_PENDING,
+        __atomic_and_fetch(&p->proc_flags,
+                           ~(PROC_FLAG_INTR_TERMINATE_PENDING |
+                             PROC_FLAG_TTY_TERMINATE_PENDING),
                            __ATOMIC_RELEASE);
     }
     spin_unlock(&q->lock);
@@ -650,7 +727,9 @@ void notes_mark_self_managing(struct Proc *p) {
     }
     spin_lock(&q->lock);
     proc_mark_self_managing_notes(p);
-    __atomic_and_fetch(&p->proc_flags, ~PROC_FLAG_INTR_TERMINATE_PENDING,
+    __atomic_and_fetch(&p->proc_flags,
+                       ~(PROC_FLAG_INTR_TERMINATE_PENDING |
+                         PROC_FLAG_TTY_TERMINATE_PENDING),
                        __ATOMIC_RELEASE);
     spin_unlock(&q->lock);
 }
@@ -697,11 +776,20 @@ bool thread_die_pending(struct Thread *t) {
     // a future arm path that forgot the guard would otherwise put every
     // kernel kthread sleep into perpetual *_INTR unwind -- and kproc threads
     // never EL0-return, so the latch could never be consumed.
-    if (p != kproc() &&
-        (__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) &
-         PROC_FLAG_INTR_TERMINATE_PENDING) != 0 &&
-        (t->note_mask & (1u << NOTE_BIT_INTERRUPT)) == 0)
-        return true;
+    if (p != kproc()) {
+        u32 flags = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE);
+        // PTY-1b: each terminate latch pairs with ITS OWN family mask bit
+        // (interrupt <-> NOTE_BIT_INTERRUPT, the tty:quit/hup latch <->
+        // NOTE_BIT_TTY) so a thread that masked one family never spuriously
+        // unwinds for the other's pending note -- preserving "a latch-woken
+        // thread never unwinds into a tail that refuses to act".
+        if ((flags & PROC_FLAG_INTR_TERMINATE_PENDING) != 0 &&
+            (t->note_mask & (1u << NOTE_BIT_INTERRUPT)) == 0)
+            return true;
+        if ((flags & PROC_FLAG_TTY_TERMINATE_PENDING) != 0 &&
+            (t->note_mask & (1u << NOTE_BIT_TTY)) == 0)
+            return true;
+    }
     return false;
 }
 
@@ -813,14 +901,17 @@ void notes_deliver_at_el0_return(struct exception_context *ctx) {
         // (then it is not "deliverable" here). Only `interrupt` newly default-
         // terminates: other uncaught notes (child_exit / pipe) stay queued for
         // the fd-read path as before, and `kill` (N-4) was handled above.
-        if (notes_interrupt_should_terminate_locked(p, t)) {
+        const char *tname = notes_terminate_note_name_locked(p, t);
+        if (tname) {
             spin_unlock(&q->lock);
             // exits() handles single-thread (-> ZOMBIE, status 1) AND multi-
             // thread (-> the #811 proc_group_terminate cascade); it is
-            // noreturn. The interrupt note is left in the about-to-be-freed
-            // queue -- no consume needed; the Proc is dying. Same terminate
-            // primitive the `kill` branch uses (exits("killed")).
-            exits(NOTE_NAME_INTERRUPT);
+            // noreturn. The terminating note is left in the about-to-be-
+            // freed queue -- no consume needed; the Proc is dying. Same
+            // terminate primitive the `kill` branch uses (exits("killed")).
+            // PTY-1b: tname is the canonical .rodata name (interrupt /
+            // tty:quit / tty:hup) -- program-lifetime storage, exits-safe.
+            exits(tname);
             // unreachable
         }
         // Otherwise leave the note queued for the fd-read path (a self-managing
