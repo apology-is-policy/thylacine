@@ -1,0 +1,395 @@
+---- MODULE tapestry_present ----
+(***************************************************************************)
+(* Thylacine Tapestry -- the present/recycle/reweave lifecycle (G-2).      *)
+(*                                                                         *)
+(* Tapestry is the graphics fast-path woven on Loom (docs/TAPESTRY.md);    *)
+(* tapestryd owns the GPU and scans out client surfaces. A surface's       *)
+(* framebuffer is a WEAVE: a tapestryd-allocated Burrow (D2) the client    *)
+(* maps via the Weft grant-is-the-share mechanism (V2 -- holding the weave *)
+(* fid IS the capability; the claim token is consume-once) and draws into  *)
+(* directly (zero-copy, NOVEL Angle #2). A present (LOOM_OP_WRITE of a     *)
+(* tpresent descriptor, D3) makes the host DMA-read the named slot         *)
+(* (TRANSFER_TO_HOST_2D) out of band; the present's terminal CQE is the    *)
+(* slot's recycle gate (D1).                                               *)
+(*                                                                         *)
+(* This module models that lifecycle and pins T-1 (no torn scanout,        *)
+(* TAPESTRY.md section 6 + section 18.8), the invariant the graphics phase *)
+(* reserves an ARCH section 28 number for at G-2/G-3. Spec-first is        *)
+(* RE-ENABLED for THIS surface (V3 -- the sixth instance of re-enabling    *)
+(* point (a)); the shared-buffer-lifetime class is the weft.tla sibling    *)
+(* (the io_uring ubuf_info race, lifted to the framebuffer).               *)
+(*                                                                         *)
+(* WHAT THIS SPEC PINS (TAPESTRY.md section 18.8)                          *)
+(*                                                                         *)
+(*   (1) T-1 proper: a weave's pages stay BACKED while any present on it   *)
+(*       is in flight (the host may be DMA-reading them) and while scanout *)
+(*       composition references it. Freed/reused pages under an in-flight  *)
+(*       TRANSFER = the torn-scanout UAF. Pinned by NoTornScanout +        *)
+(*       DisplayedBacked.                                                  *)
+(*                                                                         *)
+(*   (2) The recycle gate (D1): a slot is drawable again ONLY after its    *)
+(*       present's terminal CQE. Freeing the slot at submit-ack lets the   *)
+(*       client draw into a slot the host is still reading -- the torn     *)
+(*       FRAME (content, not lifetime). Pinned by RecycleGate.             *)
+(*                                                                         *)
+(*   (3) The #847 dual-refcount across the share: the client's mapping     *)
+(*       keeps the weave's pages backed independently of the server's      *)
+(*       retire intent; GONE requires BOTH sides done (unmapped + drained).*)
+(*       Pinned by MappedImpliesBacked + GoneClean.                        *)
+(*                                                                         *)
+(*   (4) The reweave (resize, section 18.3) is ordered: the old weave      *)
+(*       outlives its last in-flight present and its scanout reference     *)
+(*       (retire only after the displayed switch + quiesce); never         *)
+(*       realloc-in-place -- a reweave is a NEW weave. Pinned by           *)
+(*       NoTornScanout + DisplayedBacked on the reweave path +             *)
+(*       ReweaveOrdered.                                                   *)
+(*                                                                         *)
+(*   (5) The consume-once claim (V2): a weave's map token resolves only    *)
+(*       while the weave is claimable (woven/live); a claim racing         *)
+(*       teardown must refuse -- a stale claim resolving against a         *)
+(*       retired/freed weave maps dead pages. Pinned by NoStaleMap.        *)
+(*                                                                         *)
+(* Exactly-once completion per present (section 18.8's                     *)
+(* ExactlyOneTerminalPerPresent) is STRUCTURAL here (Complete consumes one *)
+(* in-flight transfer that exactly one Submit produced) -- the checked     *)
+(* form lives in loom.tla's I-29 (CqNeverOverfull / no-double-terminal),   *)
+(* which the present op COMPOSES; this module does not re-model the CQ.    *)
+(*                                                                         *)
+(* THE WEAVE LIFECYCLE (per generation g; "g2" is the reweave target)      *)
+(*                                                                         *)
+(*   "none"     -- not allocated.                                          *)
+(*   "woven"    -- tapestryd allocated the weave Burrow + the virtio-gpu   *)
+(*                 resource; the claim token is ARMED; pages BACKED.       *)
+(*   "live"     -- the client mapped it (the token consumed); draw +       *)
+(*                 present flow.                                           *)
+(*   "retiring" -- teardown/displacement began; no new client ops; in-     *)
+(*                 flight presents drain (#898 quiesce).                   *)
+(*   "gone"     -- pages freed. Requires unmapped + drained + not          *)
+(*                 displayed (the clean Free recomposes scanout first).    *)
+(*                                                                         *)
+(* Per slot s: "free" -> Draw -> "drawn" -> Submit -> "pending" ->         *)
+(* Complete (the terminal CQE) -> "free". intransfer[g][s] counts host     *)
+(* DMA-reads in flight on the slot (clean: 0/1, tied to "pending"; the     *)
+(* early-free bug decouples them, which is exactly the point).             *)
+(*                                                                         *)
+(* THE BUGS THIS PINS (each a BUGGY_* flag, each its own cfg)              *)
+(*                                                                         *)
+(*   BUGGY_EARLY_FREE -- SubmitEarlyFree recycles the slot at submit-ack   *)
+(*     instead of at the terminal CQE (skips D1). The client's next Draw   *)
+(*     scribbles a slot the host is still TRANSFER-reading -> RecycleGate  *)
+(*     counterexample (the torn frame).                                    *)
+(*                                                                         *)
+(*   BUGGY_RETIRE_NO_QUIESCE -- FreeNoQuiesce frees a retiring weave's     *)
+(*     pages ignoring in-flight presents / the client mapping / the        *)
+(*     scanout reference -> NoTornScanout counterexample (the destroy-path *)
+(*     UAF: the host DMA-reads freed pages).                               *)
+(*                                                                         *)
+(*   BUGGY_REWEAVE_NO_QUIESCE -- ReweaveEagerFree frees the OLD weave the  *)
+(*     moment the new one exists, without waiting for the displayed switch *)
+(*     + the old weave's drain -> NoTornScanout / DisplayedBacked          *)
+(*     counterexample (the resize-path UAF; scanout composes freed pages). *)
+(*                                                                         *)
+(*   BUGGY_STALE_MAP -- MapStale lets an armed claim token resolve against *)
+(*     a retiring/gone weave (the claim raced teardown and won) ->         *)
+(*     NoStaleMap counterexample (the client maps dead pages).             *)
+(*                                                                         *)
+(* CONFIGS                                                                 *)
+(*                                                                         *)
+(*   tapestry_present.cfg            all BUGGY_* FALSE; ALLOW_DESTROY +    *)
+(*                                   ALLOW_REWEAVE TRUE. Expected: green.  *)
+(*   tapestry_present_liveness.cfg   Spec_Live; EventuallyRetired (a       *)
+(*                                   destroy always drains to gone/none).  *)
+(*                                   Expected: green.                      *)
+(*   tapestry_present_buggy_premature_reuse.cfg        RecycleGate --      *)
+(*                                   expected VIOLATED.                    *)
+(*   tapestry_present_buggy_retire_during_transfer.cfg NoTornScanout --    *)
+(*                                   expected VIOLATED.                    *)
+(*   tapestry_present_buggy_reweave_without_quiesce.cfg NoTornScanout /    *)
+(*                                   DisplayedBacked -- expected VIOLATED. *)
+(*   tapestry_present_buggy_map_after_retire.cfg       NoStaleMap --       *)
+(*                                   expected VIOLATED.                    *)
+(***************************************************************************)
+EXTENDS Naturals, FiniteSets
+
+Gens  == {"g1", "g2"}
+Slots == {"s1", "s2"}
+
+GenNo(g) == IF g = "g1" THEN 1 ELSE 2
+
+MaxInflight == 2
+
+CONSTANTS
+    ALLOW_DESTROY,             \* BOOLEAN -- enable the surface-destroy path.
+    ALLOW_REWEAVE,             \* BOOLEAN -- enable the resize (reweave) path.
+    BUGGY_EARLY_FREE,          \* BOOLEAN -- recycle the slot at submit-ack (skip D1).
+    BUGGY_RETIRE_NO_QUIESCE,   \* BOOLEAN -- free a retiring weave without quiesce.
+    BUGGY_REWEAVE_NO_QUIESCE,  \* BOOLEAN -- free the old weave eagerly on reweave.
+    BUGGY_STALE_MAP            \* BOOLEAN -- let a stale claim token resolve.
+
+ASSUME ALLOW_DESTROY            \in BOOLEAN
+ASSUME ALLOW_REWEAVE            \in BOOLEAN
+ASSUME BUGGY_EARLY_FREE         \in BOOLEAN
+ASSUME BUGGY_RETIRE_NO_QUIESCE  \in BOOLEAN
+ASSUME BUGGY_REWEAVE_NO_QUIESCE \in BOOLEAN
+ASSUME BUGGY_STALE_MAP          \in BOOLEAN
+
+VARIABLES
+    wstate,      \* [Gens -> {"none","woven","live","retiring","gone"}]
+    backed,      \* [Gens -> BOOLEAN] -- pages allocated + mapped-membership intact (T-1 payload)
+    mapped,      \* [Gens -> BOOLEAN] -- the client's share mapping (#847 mapping-side ref)
+    armed,       \* [Gens -> BOOLEAN] -- the consume-once Tweft claim token (V2)
+    slot,        \* [Gens -> [Slots -> {"free","drawn","pending"}]] -- client recycle state
+    intransfer,  \* [Gens -> [Slots -> 0..MaxInflight]] -- host DMA-reads in flight
+    displayed,   \* Gens \cup {"nothing"} -- the generation scanout composition references
+    staleMapped, \* BOOLEAN -- history: a claim resolved against a retiring/gone weave
+    destroyReq   \* BOOLEAN -- the surface destroy was requested
+
+vars == <<wstate, backed, mapped, armed, slot, intransfer, displayed,
+          staleMapped, destroyReq>>
+
+TypeOK ==
+    /\ wstate      \in [Gens -> {"none", "woven", "live", "retiring", "gone"}]
+    /\ backed      \in [Gens -> BOOLEAN]
+    /\ mapped      \in [Gens -> BOOLEAN]
+    /\ armed       \in [Gens -> BOOLEAN]
+    /\ slot        \in [Gens -> [Slots -> {"free", "drawn", "pending"}]]
+    /\ intransfer  \in [Gens -> [Slots -> 0..MaxInflight]]
+    /\ displayed   \in Gens \cup {"nothing"}
+    /\ staleMapped \in BOOLEAN
+    /\ destroyReq  \in BOOLEAN
+
+Init ==
+    /\ wstate      = [g \in Gens |-> "none"]
+    /\ backed      = [g \in Gens |-> FALSE]
+    /\ mapped      = [g \in Gens |-> FALSE]
+    /\ armed       = [g \in Gens |-> FALSE]
+    /\ slot        = [g \in Gens |-> [s \in Slots |-> "free"]]
+    /\ intransfer  = [g \in Gens |-> [s \in Slots |-> 0]]
+    /\ displayed   = "nothing"
+    /\ staleMapped = FALSE
+    /\ destroyReq  = FALSE
+
+(***************************************************************************)
+(* Server: weave allocation (create-surface / the reweave CONFIGURE ack).  *)
+(***************************************************************************)
+
+WeaveFirst ==
+    /\ ~destroyReq
+    /\ wstate["g1"] = "none"
+    /\ wstate' = [wstate EXCEPT !["g1"] = "woven"]
+    /\ backed' = [backed EXCEPT !["g1"] = TRUE]
+    /\ armed'  = [armed  EXCEPT !["g1"] = TRUE]
+    /\ UNCHANGED <<mapped, slot, intransfer, displayed, staleMapped, destroyReq>>
+
+Reweave ==
+    /\ ALLOW_REWEAVE
+    /\ ~destroyReq
+    /\ wstate["g1"] = "live"
+    /\ wstate["g2"] = "none"
+    /\ wstate' = [wstate EXCEPT !["g2"] = "woven"]
+    /\ backed' = [backed EXCEPT !["g2"] = TRUE]
+    /\ armed'  = [armed  EXCEPT !["g2"] = TRUE]
+    /\ UNCHANGED <<mapped, slot, intransfer, displayed, staleMapped, destroyReq>>
+
+(***************************************************************************)
+(* Client: the map claim (V2 grant-is-the-share; consume-once).            *)
+(***************************************************************************)
+
+Map(g) ==
+    /\ armed[g]
+    /\ wstate[g] \in {"woven", "live"}
+    /\ mapped' = [mapped EXCEPT ![g] = TRUE]
+    /\ armed'  = [armed  EXCEPT ![g] = FALSE]
+    /\ wstate' = [wstate EXCEPT ![g] = "live"]
+    /\ UNCHANGED <<backed, slot, intransfer, displayed, staleMapped, destroyReq>>
+
+MapStale(g) ==
+    /\ BUGGY_STALE_MAP
+    /\ armed[g]
+    /\ wstate[g] \in {"retiring", "gone"}
+    /\ mapped'      = [mapped EXCEPT ![g] = TRUE]
+    /\ armed'       = [armed  EXCEPT ![g] = FALSE]
+    /\ staleMapped' = TRUE
+    /\ UNCHANGED <<wstate, backed, slot, intransfer, displayed, destroyReq>>
+
+ClunkMap(g) ==
+    /\ mapped[g]
+    /\ mapped' = [mapped EXCEPT ![g] = FALSE]
+    /\ UNCHANGED <<wstate, backed, armed, slot, intransfer, displayed,
+                   staleMapped, destroyReq>>
+
+(***************************************************************************)
+(* Client: draw + present. Server/host: the transfer completion.           *)
+(***************************************************************************)
+
+Draw(g, s) ==
+    /\ ~destroyReq
+    /\ wstate[g] = "live"
+    /\ mapped[g]
+    /\ slot[g][s] = "free"
+    /\ slot' = [slot EXCEPT ![g][s] = "drawn"]
+    /\ UNCHANGED <<wstate, backed, mapped, armed, intransfer, displayed,
+                   staleMapped, destroyReq>>
+
+Submit(g, s) ==
+    /\ ~destroyReq
+    /\ wstate[g] = "live"
+    /\ mapped[g]
+    /\ slot[g][s] = "drawn"
+    /\ intransfer[g][s] = 0
+    /\ slot'       = [slot       EXCEPT ![g][s] = "pending"]
+    /\ intransfer' = [intransfer EXCEPT ![g][s] = 1]
+    /\ UNCHANGED <<wstate, backed, mapped, armed, displayed, staleMapped,
+                   destroyReq>>
+
+SubmitEarlyFree(g, s) ==
+    /\ BUGGY_EARLY_FREE
+    /\ ~destroyReq
+    /\ wstate[g] = "live"
+    /\ mapped[g]
+    /\ slot[g][s] = "drawn"
+    /\ intransfer[g][s] < MaxInflight
+    /\ slot'       = [slot       EXCEPT ![g][s] = "free"]
+    /\ intransfer' = [intransfer EXCEPT ![g][s] = @ + 1]
+    /\ UNCHANGED <<wstate, backed, mapped, armed, displayed, staleMapped,
+                   destroyReq>>
+
+Complete(g, s) ==
+    /\ intransfer[g][s] > 0
+    /\ backed[g]
+    /\ intransfer' = [intransfer EXCEPT ![g][s] = @ - 1]
+    /\ slot' = IF slot[g][s] = "pending" /\ intransfer[g][s] = 1
+               THEN [slot EXCEPT ![g][s] = "free"]
+               ELSE slot
+    /\ displayed' = IF wstate[g] # "live"
+                    THEN displayed
+                    ELSE IF displayed = "nothing"
+                         THEN g
+                         ELSE IF GenNo(g) > GenNo(displayed)
+                              THEN g
+                              ELSE displayed
+    /\ UNCHANGED <<wstate, backed, mapped, armed, staleMapped, destroyReq>>
+
+(***************************************************************************)
+(* Teardown: destroy / the reweave displacement / the free edge.           *)
+(***************************************************************************)
+
+Destroy ==
+    /\ ALLOW_DESTROY
+    /\ ~destroyReq
+    /\ wstate["g1"] # "none"
+    /\ destroyReq' = TRUE
+    /\ wstate' = [g \in Gens |->
+                    IF wstate[g] \in {"woven", "live"} THEN "retiring"
+                                                       ELSE wstate[g]]
+    /\ UNCHANGED <<backed, mapped, armed, slot, intransfer, displayed,
+                   staleMapped>>
+
+RetireDisplaced ==
+    /\ wstate["g1"] = "live"
+    /\ displayed = "g2"
+    /\ wstate' = [wstate EXCEPT !["g1"] = "retiring"]
+    /\ UNCHANGED <<backed, mapped, armed, slot, intransfer, displayed,
+                   staleMapped, destroyReq>>
+
+Free(g) ==
+    /\ wstate[g] = "retiring"
+    /\ ~mapped[g]
+    /\ \A s \in Slots : intransfer[g][s] = 0
+    /\ wstate'    = [wstate EXCEPT ![g] = "gone"]
+    /\ backed'    = [backed EXCEPT ![g] = FALSE]
+    /\ displayed' = IF displayed = g THEN "nothing" ELSE displayed
+    /\ UNCHANGED <<mapped, armed, slot, intransfer, staleMapped, destroyReq>>
+
+FreeNoQuiesce(g) ==
+    /\ BUGGY_RETIRE_NO_QUIESCE
+    /\ wstate[g] = "retiring"
+    /\ wstate' = [wstate EXCEPT ![g] = "gone"]
+    /\ backed' = [backed EXCEPT ![g] = FALSE]
+    /\ UNCHANGED <<mapped, armed, slot, intransfer, displayed, staleMapped,
+                   destroyReq>>
+
+ReweaveEagerFree ==
+    /\ BUGGY_REWEAVE_NO_QUIESCE
+    /\ wstate["g1"] = "live"
+    /\ wstate["g2"] # "none"
+    /\ wstate' = [wstate EXCEPT !["g1"] = "gone"]
+    /\ backed' = [backed EXCEPT !["g1"] = FALSE]
+    /\ UNCHANGED <<mapped, armed, slot, intransfer, displayed, staleMapped,
+                   destroyReq>>
+
+(***************************************************************************)
+(* The next-state relation.                                                *)
+(***************************************************************************)
+
+Next ==
+    \/ WeaveFirst
+    \/ Reweave
+    \/ Destroy
+    \/ RetireDisplaced
+    \/ ReweaveEagerFree
+    \/ \E g \in Gens :
+         \/ Map(g) \/ MapStale(g) \/ ClunkMap(g)
+         \/ Free(g) \/ FreeNoQuiesce(g)
+    \/ \E g \in Gens, s \in Slots :
+         \/ Draw(g, s) \/ Submit(g, s) \/ SubmitEarlyFree(g, s)
+         \/ Complete(g, s)
+
+Spec == Init /\ [][Next]_vars
+
+(***************************************************************************)
+(* Invariants (TAPESTRY.md section 18.8).                                  *)
+(***************************************************************************)
+
+\* T-1 proper: pages stay backed while any transfer is in flight on them.
+NoTornScanout ==
+    \A g \in Gens : (\E s \in Slots : intransfer[g][s] > 0) => backed[g]
+
+\* T-1's scanout leg: the composed generation's pages are live.
+DisplayedBacked ==
+    displayed \in Gens => backed[displayed]
+
+\* D1: a slot is never drawable while the host still reads it.
+RecycleGate ==
+    \A g \in Gens, s \in Slots :
+        ~(slot[g][s] = "drawn" /\ intransfer[g][s] > 0)
+
+\* #847: the client's mapping keeps the pages alive, whatever the server does.
+MappedImpliesBacked ==
+    \A g \in Gens : mapped[g] => backed[g]
+
+\* GONE means BOTH sides finished: unmapped, and the pages actually freed.
+GoneClean ==
+    \A g \in Gens : wstate[g] = "gone" => (~mapped[g] /\ ~backed[g])
+
+\* V2 consume-once: no claim ever resolved against a retiring/gone weave.
+NoStaleMap == ~staleMapped
+
+\* The reweave allocates strictly after (and because of) the first weave.
+ReweaveOrdered == wstate["g2"] # "none" => wstate["g1"] # "none"
+
+Invariants ==
+    /\ TypeOK
+    /\ NoTornScanout
+    /\ DisplayedBacked
+    /\ RecycleGate
+    /\ MappedImpliesBacked
+    /\ GoneClean
+    /\ NoStaleMap
+    /\ ReweaveOrdered
+
+(***************************************************************************)
+(* Liveness: a destroy always drains to full teardown (no stranded weave). *)
+(***************************************************************************)
+
+Fairness ==
+    /\ \A g \in Gens : WF_vars(ClunkMap(g))
+    /\ \A g \in Gens : WF_vars(Free(g))
+    /\ \A g \in Gens : \A s \in Slots : WF_vars(Complete(g, s))
+
+Spec_Live == Spec /\ Fairness
+
+EventuallyRetired ==
+    destroyReq ~> (\A g \in Gens : wstate[g] \in {"none", "gone"})
+
+====
