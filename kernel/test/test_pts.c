@@ -47,6 +47,7 @@
 #include <thylacine/devsrv.h>
 #include <thylacine/errno.h>
 #include <thylacine/handle.h>
+#include <thylacine/notes.h>
 #include <thylacine/proc.h>
 #include <thylacine/pts.h>
 #include <thylacine/spoor.h>
@@ -60,9 +61,19 @@ void test_pts_authority_minting_server_only(void);
 void test_pts_binding_dedup_bounds_uniqueness(void);
 void test_pts_full_registry_torn_conn_gc(void);
 void test_pts_syscall_gates(void);
+void test_pts_tty_acquire_matrix(void);
+void test_pts_tty_set_get_fg_matrix(void);
+void test_pts_tty_signal_routing(void);
 
 extern s64 sys_pty_register_for_proc(struct Proc *p, u64 op, u64 a1, u64 a2,
                                      u64 a3);
+extern s64 sys_tty_signal_for_proc(struct Proc *p, u64 pts_id, u64 sig_class);
+extern s64 sys_tty_fd_op_for_proc(struct Proc *p, u64 fd_raw, u64 op_num,
+                                  u64 arg);
+
+// Test-harness hooks (the test_proc.c pattern).
+extern void proc_test_link(struct Proc *p);
+extern void proc_test_unlink(struct Proc *p);
 
 static struct SrvConn *pts_make_conn(struct Proc *owner) {
     return srvconn_create(proc_stripes(owner), owner->pid, false, 0,
@@ -79,6 +90,32 @@ static void pts_drop_proc(struct Proc *p) {
     if (!p) return;
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
+}
+
+static void pts_drop_linked(struct Proc *p) {
+    if (!p) return;
+    proc_test_unlink(p);
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+static bool pts_streq(const char *a, const char *b) {
+    while (*a && *a == *b) { a++; b++; }
+    return *a == *b;
+}
+
+// Count queued notes named `name` in p's queue (under q->lock).
+static u32 pts_note_count(struct Proc *p, const char *name) {
+    struct NoteQueue *q = p->notes;
+    u32 found = 0;
+    spin_lock(&q->lock);
+    u32 idx = q->head;
+    for (u32 n = 0; n < q->count; n++) {
+        if (pts_streq(q->ring[idx].name, name)) found++;
+        idx = (idx + 1) % NOTE_QUEUE_DEPTH;
+    }
+    spin_unlock(&q->lock);
+    return found;
 }
 
 // ---------------------------------------------------------------------------
@@ -337,10 +374,223 @@ void test_pts_syscall_gates(void) {
     TEST_EXPECT_EQ(sys_pty_register_for_proc(srv, PTY_REG_FREE, (u64)id, 0, 0),
         -T_E_INVAL, "a double FREE rejects (the gen guard)");
 
+    // PTY-1d fronts over the same fds: the devsrv conn Spoor is not a dev9p
+    // Spoor, so the (SrvConn, qid) extraction fails closed; a bad fd + a
+    // zero pts_id reject at the front.
+    TEST_EXPECT_EQ(sys_tty_fd_op_for_proc(srv, (u64)fd_srv, SYS_TTY_ACQUIRE, 0),
+        -T_E_INVAL, "TTY_ACQUIRE on a non-dev9p fd rejects");
+    TEST_EXPECT_EQ(sys_tty_fd_op_for_proc(srv, 9999, SYS_TTY_GET_FG, 0),
+        -T_E_INVAL, "TTY_GET_FG on a bad fd rejects");
+    TEST_EXPECT_EQ(sys_tty_signal_for_proc(srv, 0, TTY_SIG_INT), -T_E_INVAL,
+        "TTY_SIGNAL on pts_id 0 rejects");
+
     // handle_close runs devsrv_close on both endpoints (teardown is
     // idempotent); each drops the ref fabricated for its Spoor.
     TEST_EXPECT_EQ(handle_close(srv, fd_srv), 0, "close the server endpoint");
     TEST_EXPECT_EQ(handle_close(srv, fd_cli), 0, "close the client endpoint");
     srvconn_unref(cn);   // the create ref
     pts_drop_proc(srv);
+}
+
+// ---------------------------------------------------------------------------
+// pts.tty_acquire_matrix
+// ---------------------------------------------------------------------------
+
+void test_pts_tty_acquire_matrix(void) {
+    struct Proc *srv = proc_alloc();
+    TEST_ASSERT(srv != NULL, "proc_alloc");
+    struct SrvConn *cn = pts_make_conn(srv);
+    TEST_ASSERT(cn != NULL, "srvconn_create");
+    s64 id = pts_mint(srv, cn, 300);
+    TEST_ASSERT(id > 0, "mint");
+    TEST_EXPECT_EQ(pts_bind_slave(srv, cn, 301, (u64)id), 0, "slave bind");
+
+    // proc_alloc defaults sid = pgid = pid: a session leader. The
+    // non-leader fabricates a foreign sid.
+    struct Proc *leader_a   = proc_alloc();
+    struct Proc *leader_b   = proc_alloc();
+    struct Proc *non_leader = proc_alloc();
+    TEST_ASSERT(leader_a && leader_b && non_leader, "proc_alloc x3");
+    non_leader->sid = (u32)non_leader->pid + 1;
+
+    TEST_EXPECT_EQ(pts_tty_acquire(non_leader, cn, 301), -T_E_ACCES,
+        "a non-leader cannot acquire");
+    TEST_EXPECT_EQ(pts_tty_acquire(leader_a, cn, 300), -T_E_INVAL,
+        "acquisition via the MASTER side rejects");
+    TEST_EXPECT_EQ(pts_tty_acquire(leader_a, cn, 999), -T_E_NOENT,
+        "an unbound qid misses");
+    TEST_EXPECT_EQ(pts_tty_acquire(leader_a, cn, 301), 0, "A acquires");
+    TEST_EXPECT_EQ(pts_tty_get_fg(leader_a, cn, 301), (s64)leader_a->pgid,
+        "acquisition seats fg = the leader's pgid");
+    TEST_EXPECT_EQ(pts_tty_acquire(leader_a, cn, 301), 0,
+        "re-acquiring one's own is the second-open inherit (0)");
+    TEST_EXPECT_EQ(pts_tty_acquire(leader_b, cn, 301), -T_E_ACCES,
+        "another session's terminal is never stolen (F7)");
+
+    // One controlling terminal per session: A cannot take a second pts;
+    // B (whose steal failed, so B still has none) can.
+    s64 id2 = pts_mint(srv, cn, 310);
+    TEST_ASSERT(id2 > 0, "mint 2");
+    TEST_EXPECT_EQ(pts_bind_slave(srv, cn, 311, (u64)id2), 0, "slave bind 2");
+    TEST_EXPECT_EQ(pts_tty_acquire(leader_a, cn, 311), -T_E_ACCES,
+        "a session with a controlling terminal cannot acquire a second");
+    TEST_EXPECT_EQ(pts_tty_acquire(leader_b, cn, 311), 0, "B acquires pts 2");
+
+    TEST_EXPECT_EQ(pts_free(srv, (u64)id), 0, "cleanup free 1");
+    TEST_EXPECT_EQ(pts_free(srv, (u64)id2), 0, "cleanup free 2");
+    pts_drop_conn(cn);
+    pts_drop_proc(leader_a);
+    pts_drop_proc(leader_b);
+    pts_drop_proc(non_leader);
+    pts_drop_proc(srv);
+}
+
+// ---------------------------------------------------------------------------
+// pts.tty_set_get_fg_matrix
+// ---------------------------------------------------------------------------
+
+void test_pts_tty_set_get_fg_matrix(void) {
+    struct Proc *srv = proc_alloc();
+    TEST_ASSERT(srv != NULL, "proc_alloc");
+    struct SrvConn *cn = pts_make_conn(srv);
+    TEST_ASSERT(cn != NULL, "srvconn_create");
+    s64 id = pts_mint(srv, cn, 400);
+    TEST_ASSERT(id > 0, "mint");
+    TEST_EXPECT_EQ(pts_bind_slave(srv, cn, 401, (u64)id), 0, "slave bind");
+
+    struct Proc *leader = proc_alloc();       // session S = leader->pid
+    TEST_ASSERT(leader != NULL, "proc_alloc leader");
+    struct Proc *member = proc_alloc();       // its own group, in S; LINKED so
+    TEST_ASSERT(member != NULL, "proc_alloc member");
+    member->sid  = (u32)leader->pid;          // the session walk finds it
+    member->pgid = (u32)member->pid;
+    proc_test_link(member);
+    struct Proc *outsider = proc_alloc();     // its own session; linked so its
+    TEST_ASSERT(outsider != NULL, "proc_alloc outsider");
+    proc_test_link(outsider);                 // own group passes membership
+
+    TEST_EXPECT_EQ(pts_tty_acquire(leader, cn, 401), 0, "leader acquires");
+
+    TEST_EXPECT_EQ(pts_tty_set_fg(leader, cn, 401, 0), -T_E_INVAL,
+        "pgid 0 rejects");
+    TEST_EXPECT_EQ(pts_tty_set_fg(leader, cn, 401, 7777u), -T_E_ACCES,
+        "a pgid with no ALIVE member in the session rejects");
+    TEST_EXPECT_EQ(pts_tty_set_fg(outsider, cn, 401, (u32)outsider->pid),
+        -T_E_ACCES, "a caller outside the controlling session cannot seat fg");
+    TEST_EXPECT_EQ(pts_tty_set_fg(leader, cn, 401, (u32)member->pid), 0,
+        "the leader seats the member's group");
+    TEST_EXPECT_EQ(pts_tty_get_fg(leader, cn, 401), (s64)(u32)member->pid,
+        "get reads the seated fg");
+    TEST_EXPECT_EQ(pts_tty_get_fg(member, cn, 401), (s64)(u32)member->pid,
+        "a controlling-session member reads via the slave side");
+    TEST_EXPECT_EQ(pts_tty_get_fg(outsider, cn, 401), -T_E_ACCES,
+        "an outsider's slave-side read rejects");
+    TEST_EXPECT_EQ(pts_tty_get_fg(outsider, cn, 400), (s64)(u32)member->pid,
+        "the MASTER side reads unconditionally (the emulator's view)");
+    TEST_EXPECT_EQ(pts_tty_get_fg(leader, cn, 999), -T_E_NOENT,
+        "an unbound qid misses");
+
+    // A pts nobody controls: seating fg rejects (no controlling session).
+    s64 id2 = pts_mint(srv, cn, 410);
+    TEST_ASSERT(id2 > 0, "mint 2");
+    TEST_EXPECT_EQ(pts_bind_slave(srv, cn, 411, (u64)id2), 0, "slave bind 2");
+    TEST_EXPECT_EQ(pts_tty_set_fg(leader, cn, 411, (u32)member->pid),
+        -T_E_ACCES, "an unowned pts rejects tcsetpgrp");
+
+    TEST_EXPECT_EQ(pts_free(srv, (u64)id), 0, "cleanup free 1");
+    TEST_EXPECT_EQ(pts_free(srv, (u64)id2), 0, "cleanup free 2");
+    pts_drop_conn(cn);
+    pts_drop_linked(member);
+    pts_drop_linked(outsider);
+    pts_drop_proc(leader);
+    pts_drop_proc(srv);
+}
+
+// ---------------------------------------------------------------------------
+// pts.tty_signal_routing
+// ---------------------------------------------------------------------------
+
+void test_pts_tty_signal_routing(void) {
+    struct Proc *srv       = proc_alloc();
+    struct Proc *other_srv = proc_alloc();
+    TEST_ASSERT(srv && other_srv, "proc_alloc x2");
+    struct SrvConn *cn = pts_make_conn(srv);
+    TEST_ASSERT(cn != NULL, "srvconn_create");
+    s64 id = pts_mint(srv, cn, 500);
+    TEST_ASSERT(id > 0, "mint");
+    TEST_EXPECT_EQ(pts_bind_slave(srv, cn, 501, (u64)id), 0, "slave bind");
+
+    // The controlling session: a LINKED leader (the F13 leader post walks
+    // the table) + a LINKED fg-group member in a DIFFERENT group of the
+    // same session (so the leader is NOT in fg -- the dual-target case).
+    struct Proc *leader = proc_alloc();
+    TEST_ASSERT(leader != NULL, "proc_alloc leader");
+    proc_test_link(leader);
+    struct Proc *fgm = proc_alloc();
+    TEST_ASSERT(fgm != NULL, "proc_alloc fgm");
+    fgm->sid  = (u32)leader->pid;
+    fgm->pgid = (u32)fgm->pid;
+    proc_test_link(fgm);
+
+    TEST_EXPECT_EQ(pts_tty_acquire(leader, cn, 501), 0, "leader acquires");
+    TEST_EXPECT_EQ(pts_tty_set_fg(leader, cn, 501, (u32)fgm->pid), 0,
+        "fg = the member's group (the leader outside it)");
+
+    // Gates.
+    TEST_EXPECT_EQ(pts_tty_signal(other_srv, (u64)id, TTY_SIG_INT),
+        -T_E_ACCES, "only the minting server signals");
+    TEST_EXPECT_EQ(pts_tty_signal(srv, (u64)id, 0), -T_E_INVAL,
+        "class below the range rejects");
+    TEST_EXPECT_EQ(pts_tty_signal(srv, (u64)id, 99), -T_E_INVAL,
+        "class above the range rejects");
+    TEST_EXPECT_EQ(pts_tty_signal(srv, (u64)id, TTY_SIG_TSTP),
+        -T_E_OPNOTSUPP, "TSTP is the honest not-yet (PTY-1f)");
+    s64 scratch = pts_mint(srv, cn, 510);
+    TEST_ASSERT(scratch > 0, "scratch mint");
+    TEST_EXPECT_EQ(pts_free(srv, (u64)scratch), 0, "scratch free");
+    TEST_EXPECT_EQ(pts_tty_signal(srv, (u64)scratch, TTY_SIG_INT),
+        -T_E_INVAL, "a stale id rejects (the gen guard)");
+
+    // Routing: INT/WINCH reach exactly the fg group.
+    TEST_EXPECT_EQ(pts_tty_signal(srv, (u64)id, TTY_SIG_INT), 1,
+        "INT posts to the one fg member");
+    TEST_EXPECT_EQ(pts_note_count(fgm, NOTE_NAME_INTERRUPT), 1u,
+        "the fg member got the interrupt");
+    TEST_EXPECT_EQ(pts_note_count(leader, NOTE_NAME_INTERRUPT), 0u,
+        "the out-of-fg leader did NOT get the interrupt");
+    TEST_EXPECT_EQ(pts_tty_signal(srv, (u64)id, TTY_SIG_WINCH), 1,
+        "WINCH posts to the fg");
+    TEST_EXPECT_EQ(pts_note_count(fgm, NOTE_NAME_TTY_WINCH), 1u,
+        "the fg member got the winch");
+
+    // HUP: the two POSIX carrier-loss targets (F13) -- the fg group AND the
+    // controlling process (the session leader) when the leader is outside fg.
+    TEST_EXPECT_EQ(pts_tty_signal(srv, (u64)id, TTY_SIG_HUP), 2,
+        "HUP reaches the fg member AND the out-of-fg leader");
+    TEST_EXPECT_EQ(pts_note_count(fgm, NOTE_NAME_TTY_HUP), 1u,
+        "the fg member got the hup");
+    TEST_EXPECT_EQ(pts_note_count(leader, NOTE_NAME_TTY_HUP), 1u,
+        "the controlling process got the hup");
+
+    // The leader seated INTO fg: a single deduped target.
+    TEST_EXPECT_EQ(pts_tty_set_fg(leader, cn, 501, (u32)leader->pgid), 0,
+        "fg = the leader's own group");
+    TEST_EXPECT_EQ(pts_tty_signal(srv, (u64)id, TTY_SIG_HUP), 1,
+        "HUP posts once when the leader is in fg (no double post)");
+    TEST_EXPECT_EQ(pts_note_count(leader, NOTE_NAME_TTY_HUP), 2u,
+        "the leader's hup arrived via the fg fan-out only");
+
+    // A pts with no controlling session routes nowhere.
+    s64 id2 = pts_mint(srv, cn, 520);
+    TEST_ASSERT(id2 > 0, "mint 2");
+    TEST_EXPECT_EQ(pts_tty_signal(srv, (u64)id2, TTY_SIG_INT), 0,
+        "no controlling session -> posted count 0");
+
+    TEST_EXPECT_EQ(pts_free(srv, (u64)id), 0, "cleanup free 1");
+    TEST_EXPECT_EQ(pts_free(srv, (u64)id2), 0, "cleanup free 2");
+    pts_drop_conn(cn);
+    pts_drop_linked(leader);
+    pts_drop_linked(fgm);
+    pts_drop_proc(srv);
+    pts_drop_proc(other_srv);
 }

@@ -163,6 +163,12 @@
 // or a code path is reachable but stubbed at v1.0. POSIX: ENOSYS.
 #define T_E_NOSYS      38
 
+// Operation not supported. PTY-1d: SYS_TTY_SIGNAL's TTY_SIG_TSTP class
+// answers this until the job-stop machinery lands (PTY-1f) -- the seam
+// exists and is gated, the disposition does not yet. Appended under the
+// PTY-1 ABI signoff (the T_E_SRCH precedent). POSIX: EOPNOTSUPP.
+#define T_E_OPNOTSUPP  95
+
 // Operation timed out. Use when a tsleep / torpor_wait with a
 // timeout reaches the deadline without satisfying the wait
 // condition. POSIX: ETIMEDOUT.
@@ -182,6 +188,7 @@ _Static_assert(T_E_OK        == 0,   "T_E_OK ABI pin");
 _Static_assert(T_E_PERM      == 1,   "T_E_PERM ABI pin (POSIX EPERM)");
 _Static_assert(T_E_NOENT     == 2,   "T_E_NOENT ABI pin (POSIX ENOENT)");
 _Static_assert(T_E_SRCH      == 3,   "T_E_SRCH ABI pin (POSIX ESRCH)");
+_Static_assert(T_E_OPNOTSUPP == 95,  "T_E_OPNOTSUPP ABI pin (POSIX EOPNOTSUPP)");
 _Static_assert(T_E_IO        == 5,   "T_E_IO ABI pin (POSIX EIO)");
 _Static_assert(T_E_NODEV     == 19,  "T_E_NODEV ABI pin (POSIX ENODEV)");
 _Static_assert(T_E_BADF      == 9,   "T_E_BADF ABI pin (POSIX EBADF)");

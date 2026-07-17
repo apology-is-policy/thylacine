@@ -2551,6 +2551,69 @@ static s64 sys_pty_register_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
     return sys_pty_register_for_proc(p, a0, a1, a2, a3);
 }
 
+// =============================================================================
+// PTY-1d: the tty seam + controlling-terminal fronts. SYS_TTY_SIGNAL takes a
+// pts_id directly (the server holds it from MINT -- no fd). The fd-keyed
+// three resolve the caller's own Spoor to its (SrvConn, qid) -- the pts.c
+// cores gate on the registry entry (binding side, controlling session, gen).
+// RIGHT_READ suffices on the fd: an O_RDONLY slave is still one's
+// controlling terminal (POSIX), and no I/O runs here; the registry axes are
+// the authority. The Spoor ref is held across the core (the extracted cn is
+// only pointer-compared, but the hold keeps the chain trivially sound) and
+// clunked on every path (#844). NON-static _for_proc bodies for the tests.
+// =============================================================================
+
+s64 sys_tty_signal_for_proc(struct Proc *p, u64 pts_id, u64 sig_class) {
+    if (!p) return -T_E_INVAL;
+    return pts_tty_signal(p, pts_id, (u32)sig_class);
+}
+
+s64 sys_tty_fd_op_for_proc(struct Proc *p, u64 fd_raw, u64 op_num, u64 arg) {
+    if (!p) return -T_E_INVAL;
+    struct Spoor *sp = sys_lookup_spoor(p, (hidx_t)fd_raw, RIGHT_READ);
+    if (!sp) return -T_E_INVAL;
+    struct SrvConn *cn = NULL;
+    u64 qid = 0;
+    s64 r = (s64)pts_spoor_conn_qid(sp, &cn, &qid);
+    if (r == 0) {
+        switch (op_num) {
+        case SYS_TTY_ACQUIRE: r = pts_tty_acquire(p, cn, qid);            break;
+        case SYS_TTY_SET_FG:  r = pts_tty_set_fg(p, cn, qid, (u32)arg);   break;
+        default:              r = pts_tty_get_fg(p, cn, qid);             break;
+        }
+    }
+    spoor_clunk(sp);
+    return r;
+}
+
+static s64 sys_tty_signal_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+    (void)a2; (void)a3;
+    struct Thread *t = current_thread();             if (!t) return -1;
+    struct Proc *p = t->proc;                        if (!p) return -1;
+    return sys_tty_signal_for_proc(p, a0, a1);
+}
+
+static s64 sys_tty_acquire_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+    (void)a1; (void)a2; (void)a3;
+    struct Thread *t = current_thread();             if (!t) return -1;
+    struct Proc *p = t->proc;                        if (!p) return -1;
+    return sys_tty_fd_op_for_proc(p, a0, SYS_TTY_ACQUIRE, 0);
+}
+
+static s64 sys_tty_set_fg_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+    (void)a2; (void)a3;
+    struct Thread *t = current_thread();             if (!t) return -1;
+    struct Proc *p = t->proc;                        if (!p) return -1;
+    return sys_tty_fd_op_for_proc(p, a0, SYS_TTY_SET_FG, a1);
+}
+
+static s64 sys_tty_get_fg_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+    (void)a1; (void)a2; (void)a3;
+    struct Thread *t = current_thread();             if (!t) return -1;
+    struct Proc *p = t->proc;                        if (!p) return -1;
+    return sys_tty_fd_op_for_proc(p, a0, SYS_TTY_GET_FG, 0);
+}
+
 // SYS_YIELD (#33): the thin syscall front for sched_yield_hint (sched.c) --
 // the whole contract lives there. Always 0 (POSIX sched_yield(2)); whether a
 // dispatch happened is deliberately not surfaced (a hint has no observable
@@ -7068,6 +7131,26 @@ void syscall_dispatch(struct exception_context *ctx) {
     case SYS_PTY_REGISTER:
         ctx->regs[0] = (u64)sys_pty_register_handler(ctx->regs[0], ctx->regs[1],
                                                      ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_TTY_SIGNAL:
+        ctx->regs[0] = (u64)sys_tty_signal_handler(ctx->regs[0], ctx->regs[1],
+                                                   ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_TTY_ACQUIRE:
+        ctx->regs[0] = (u64)sys_tty_acquire_handler(ctx->regs[0], ctx->regs[1],
+                                                    ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_TTY_SET_FG:
+        ctx->regs[0] = (u64)sys_tty_set_fg_handler(ctx->regs[0], ctx->regs[1],
+                                                   ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_TTY_GET_FG:
+        ctx->regs[0] = (u64)sys_tty_get_fg_handler(ctx->regs[0], ctx->regs[1],
+                                                   ctx->regs[2], ctx->regs[3]);
         return;
 
     case SYS_CLOCK_GETTIME:

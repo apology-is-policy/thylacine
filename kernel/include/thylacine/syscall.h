@@ -1678,12 +1678,63 @@ enum {
     //     ids fail closed from here on). Gates as SLAVE.
     //   qid 0 is rejected everywhere (the dev9p attach-root qid is reserved).
     SYS_PTY_REGISTER = 93,   // arg: op (x0), per-op x1..x3
+
+    // =========================================================================
+    // PTY-1d (PTY-DESIGN.md section 3): the tty signal seam + the kernel
+    // controlling-terminal syscalls. The seam property (I-22): the server can
+    // NEVER name a process group -- SYS_TTY_SIGNAL reports a signal-class
+    // event on a pts the caller MINTED, and the KERNEL routes pts -> its
+    // controlling session -> that session's fg_pgid. tcsetpgrp/tcgetpgrp +
+    // acquisition are kernel syscalls keyed on the pts resolved from the
+    // caller's own fd (round-1 F1/F2 -- never server-served ctl writes).
+    // EPERM contours answer -T_E_ACCES (the errno.h -1-alias rule).
+    // =========================================================================
+
+    // SYS_TTY_SIGNAL(pts_id, class) -> posted count (>= 0) / -T_E_ACCES (not
+    //   the minting server) / -T_E_INVAL (stale id -- the gen guard -- or bad
+    //   class) / -T_E_OPNOTSUPP (TTY_SIG_TSTP until the job-stop machinery,
+    //   PTY-1f). 0 = the pts has no controlling session (routes nowhere).
+    //   TTY_SIG_HUP reaches the foreground group AND the controlling process
+    //   (the session leader) when the leader is not in the foreground group
+    //   -- the two POSIX carrier-loss targets.
+    SYS_TTY_SIGNAL = 94,   // arg: pts_id (x0), class (x1)
+
+    // SYS_TTY_ACQUIRE(slave_fd) -> 0 / -T_E_ACCES / -T_E_INVAL / -T_E_NOENT.
+    //   The POSIX controlling-terminal dance: a session leader with no
+    //   controlling terminal acquires the pts behind its SLAVE fd (binds
+    //   session <-> pts, seats fg_pgid = the leader's pgid). A pts already
+    //   controlled by another session is never stolen (-T_E_ACCES); re-
+    //   acquiring one's own answers 0 (the second open inherits). A MASTER-
+    //   side fd answers -T_E_INVAL. O_NOCTTY lives in the Pouch boundary-
+    //   line (PTY-3): acquisition here is always explicit.
+    SYS_TTY_ACQUIRE = 95,  // arg: slave fd (x0)
+
+    // SYS_TTY_SET_FG(fd, pgid) -> 0 / -T_E_ACCES / -T_E_INVAL / -T_E_NOENT
+    //   (POSIX tcsetpgrp). The caller must be in the pts's controlling
+    //   session, and pgid must name a group with an ALIVE member in that
+    //   session.
+    SYS_TTY_SET_FG = 96,   // arg: fd (x0), pgid (x1)
+
+    // SYS_TTY_GET_FG(fd) -> fg_pgid (0 = none seated) / -T_E_ACCES /
+    //   -T_E_INVAL / -T_E_NOENT (POSIX tcgetpgrp). A MASTER-side fd reads
+    //   unconditionally (the terminal emulator owns the terminal); a SLAVE-
+    //   side fd requires the caller in the controlling session.
+    SYS_TTY_GET_FG = 97,   // arg: fd (x0)
 };
 
 // SYS_PTY_REGISTER ops.
 #define PTY_REG_MINT   0u
 #define PTY_REG_SLAVE  1u
 #define PTY_REG_FREE   2u
+
+// SYS_TTY_SIGNAL classes. Values are ABI (append-only). The class carries
+// no payload; WINCH consumers re-read the winsize from the pts ctl (the
+// server-owned half of the seam).
+#define TTY_SIG_INT    1u   // -> "interrupt" (LS-5 catchable-default-terminate)
+#define TTY_SIG_QUIT   2u   // -> "tty:quit"  (the terminate class, PTY-1b)
+#define TTY_SIG_TSTP   3u   // -T_E_OPNOTSUPP until PTY-1f (default-STOP)
+#define TTY_SIG_WINCH  4u   // -> "tty:winch" (catchable; ignored if uncaught)
+#define TTY_SIG_HUP    5u   // -> "tty:hup"   (the terminate class; dual target)
 
 // SYS_CLOCK_GETTIME clock ids. Values match Linux clockid_t so a future pouch
 // boundary-line maps clock_gettime 1:1.

@@ -115,6 +115,10 @@ enum {
     T_SYS_GETPGID           = 91,  // PTY-1a: read a Proc's pgid (0 = self)
     T_SYS_GETSID            = 92,  // PTY-1a: read a Proc's sid (0 = self)
     T_SYS_PTY_REGISTER      = 93,  // PTY-1c: pts registry ops (ptyfs-only)
+    T_SYS_TTY_SIGNAL        = 94,  // PTY-1d: server-side signal-class report
+    T_SYS_TTY_ACQUIRE       = 95,  // PTY-1d: controlling-terminal acquisition
+    T_SYS_TTY_SET_FG        = 96,  // PTY-1d: tcsetpgrp
+    T_SYS_TTY_GET_FG        = 97,  // PTY-1d: tcgetpgrp
 };
 
 // SYS_PTY_REGISTER ops (PTY-1c). Server-side (ptyfs) only: MINT records a
@@ -123,6 +127,14 @@ enum {
 #define T_PTY_REG_MINT   0
 #define T_PTY_REG_SLAVE  1
 #define T_PTY_REG_FREE   2
+
+// SYS_TTY_SIGNAL classes (PTY-1d). TSTP answers -95 (EOPNOTSUPP) until the
+// job-stop machinery lands (PTY-1f).
+#define T_TTY_SIG_INT    1
+#define T_TTY_SIG_QUIT   2
+#define T_TTY_SIG_TSTP   3
+#define T_TTY_SIG_WINCH  4
+#define T_TTY_SIG_HUP    5
 
 // SYS_CLOCK_*TIME clock ids (match Linux clockid_t) + the 16-byte timespec.
 #define T_CLOCK_REALTIME    0
@@ -879,6 +891,66 @@ static inline long t_pty_register(long op, long a1, long a2, long a3) {
         "svc #0"
         : "+r"(x0)
         : "r"(x1), "r"(x2), "r"(x3), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_tty_signal — report a signal-class event on a pts the caller MINTED
+// (PTY-1d; the server half of the tty seam). Returns the posted count or
+// negative errno per the SYS_TTY_SIGNAL contours.
+__attribute__((always_inline))
+static inline long t_tty_signal(long pts_id, long sig_class) {
+    register long x0 __asm__("x0") = pts_id;
+    register long x1 __asm__("x1") = sig_class;
+    register long x8 __asm__("x8") = T_SYS_TTY_SIGNAL;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_tty_acquire — acquire the pts behind `slave_fd` as the calling session
+// leader's controlling terminal (PTY-1d; POSIX acquisition semantics).
+__attribute__((always_inline))
+static inline long t_tty_acquire(long slave_fd) {
+    register long x0 __asm__("x0") = slave_fd;
+    register long x8 __asm__("x8") = T_SYS_TTY_ACQUIRE;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_tty_set_fg / t_tty_get_fg — tcsetpgrp / tcgetpgrp (PTY-1d).
+__attribute__((always_inline))
+static inline long t_tty_set_fg(long fd, long pgid) {
+    register long x0 __asm__("x0") = fd;
+    register long x1 __asm__("x1") = pgid;
+    register long x8 __asm__("x8") = T_SYS_TTY_SET_FG;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+__attribute__((always_inline))
+static inline long t_tty_get_fg(long fd) {
+    register long x0 __asm__("x0") = fd;
+    register long x8 __asm__("x8") = T_SYS_TTY_GET_FG;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x8)
         : "memory", "cc"
     );
     return x0;

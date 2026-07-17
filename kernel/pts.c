@@ -7,10 +7,12 @@
 #include <thylacine/9p_srvconn_transport.h>
 #include <thylacine/dev9p.h>
 #include <thylacine/errno.h>
+#include <thylacine/notes.h>
 #include <thylacine/proc.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
 #include <thylacine/srvconn.h>
+#include <thylacine/syscall.h>   // the TTY_SIG_* class ABI
 
 struct pts_binding {
     bool            used;
@@ -227,8 +229,9 @@ s64 pts_resolve_conn_qid(struct SrvConn *cn, u64 qid, bool *is_master_out) {
     return ret;
 }
 
-s64 pts_resolve_spoor(struct Spoor *sp, bool *is_master_out) {
-    if (!sp) return -T_E_INVAL;
+int pts_spoor_conn_qid(struct Spoor *sp, struct SrvConn **cn_out,
+                       u64 *qid_out) {
+    if (!sp || !cn_out || !qid_out) return -T_E_INVAL;
     struct p9_client *cl = NULL;
     if (dev9p_client_fid(sp, &cl, NULL) != 0 || !cl) return -T_E_INVAL;
     // The transport downcast: NULL for a loopback / spoor-backed client --
@@ -237,5 +240,147 @@ s64 pts_resolve_spoor(struct Spoor *sp, bool *is_master_out) {
     // pointer-compared against ref-held bindings (pts.h contract).
     struct SrvConn *cn = p9_srvconn_transport_conn(cl);
     if (!cn) return -T_E_NOENT;
-    return pts_resolve_conn_qid(cn, sp->qid.path, is_master_out);
+    *cn_out  = cn;
+    *qid_out = sp->qid.path;
+    return 0;
+}
+
+s64 pts_resolve_spoor(struct Spoor *sp, bool *is_master_out) {
+    struct SrvConn *cn = NULL;
+    u64 qid = 0;
+    int rc = pts_spoor_conn_qid(sp, &cn, &qid);
+    if (rc != 0) return (s64)rc;
+    return pts_resolve_conn_qid(cn, qid, is_master_out);
+}
+
+// =============================================================================
+// PTY-1d: the tty seam + controlling-terminal cores (pts.h contracts).
+// =============================================================================
+
+s64 pts_tty_signal(struct Proc *server, u64 pts_id, u32 sig_class) {
+    if (!server) return -T_E_INVAL;
+    if (sig_class < TTY_SIG_INT || sig_class > TTY_SIG_HUP) return -T_E_INVAL;
+
+    u32 ct_sid, fg;
+    spin_lock(&g_pts_lock);
+    struct pts_entry *e = pts_lookup_locked(pts_id);
+    if (!e) {
+        spin_unlock(&g_pts_lock);
+        return -T_E_INVAL;
+    }
+    if (e->server_pid != (u32)server->pid) {
+        spin_unlock(&g_pts_lock);
+        return -T_E_ACCES;
+    }
+    ct_sid = e->ct_sid;
+    fg     = e->fg_pgid;
+    spin_unlock(&g_pts_lock);
+
+    // The authority gate precedes the not-yet reject: an unauthorized caller
+    // learns nothing class-specific; a real server probing TSTP gets the
+    // honest not-yet.
+    if (sig_class == TTY_SIG_TSTP) return -T_E_OPNOTSUPP;
+
+    const char *name;
+    switch (sig_class) {
+    case TTY_SIG_INT:   name = NOTE_NAME_INTERRUPT; break;
+    case TTY_SIG_QUIT:  name = NOTE_NAME_TTY_QUIT;  break;
+    case TTY_SIG_WINCH: name = NOTE_NAME_TTY_WINCH; break;
+    default:            name = NOTE_NAME_TTY_HUP;   break;
+    }
+    if (ct_sid == 0 || fg == 0) return 0;   // nobody controls this terminal
+
+    s64 n = (s64)notes_post_pgrp(fg, name, 0);
+    if (sig_class == TTY_SIG_HUP) {
+        // F13: carrier loss also reaches the controlling process (the
+        // session leader, pid == ct_sid) when it is not in the foreground
+        // group. proc_getpgid answers for a ZOMBIE leader too; the ALIVE
+        // gate lives in notes_post_pid.
+        s64 lp = proc_getpgid(server, (int)ct_sid);
+        if (lp > 0 && (u32)lp != fg)
+            n += (s64)notes_post_pid((int)ct_sid, name, 0);
+    }
+    return n;
+}
+
+s64 pts_tty_acquire(struct Proc *p, struct SrvConn *cn, u64 qid) {
+    if (!p || !cn || qid == 0) return -T_E_INVAL;
+    if (p->sid != (u32)p->pid) return -T_E_ACCES;   // not a session leader
+    // The leader's own sid is self-stable (only setsid mutates it, self-
+    // only); pgid is racy-benign in principle but a session leader's pgid
+    // is pinned == pid (setpgid rejects session-leader targets).
+    u32 sid  = p->sid;
+    u32 pgid = p->pgid;
+
+    s64 ret;
+    spin_lock(&g_pts_lock);
+    struct pts_binding *b = NULL;
+    struct pts_entry *e = pts_find_binding_locked(cn, qid, &b);
+    if (!e) {
+        ret = -T_E_NOENT;
+    } else if (b->master) {
+        ret = -T_E_INVAL;              // acquisition is a slave-side act
+    } else if (e->ct_sid == sid) {
+        ret = 0;                       // already ours: the second open inherits
+    } else if (e->ct_sid != 0) {
+        ret = -T_E_ACCES;              // another session's terminal: no steal
+    } else {
+        // One session, at most one controlling terminal (POSIX): reject if
+        // this session already controls a different pts.
+        bool has = false;
+        for (u32 i = 0; i < PTS_MAX && !has; i++) {
+            if (g_pts[i].live && g_pts[i].ct_sid == sid) has = true;
+        }
+        if (has) {
+            ret = -T_E_ACCES;
+        } else {
+            e->ct_sid  = sid;
+            e->fg_pgid = pgid;
+            ret = 0;
+        }
+    }
+    spin_unlock(&g_pts_lock);
+    return ret;
+}
+
+s64 pts_tty_set_fg(struct Proc *p, struct SrvConn *cn, u64 qid, u32 pgid) {
+    if (!p || !cn || qid == 0)  return -T_E_INVAL;
+    if (pgid == 0 || (s32)pgid < 0) return -T_E_INVAL;
+    // The membership gate runs UNLOCKED before the seat (no g_pts_lock ->
+    // g_proc_table_lock nesting); the group-empties-in-the-window race is
+    // the benign POSIX one (pts.h contract).
+    if (!proc_pgrp_in_session(pgid, p->sid)) return -T_E_ACCES;
+
+    s64 ret;
+    spin_lock(&g_pts_lock);
+    struct pts_binding *b = NULL;
+    struct pts_entry *e = pts_find_binding_locked(cn, qid, &b);
+    if (!e) {
+        ret = -T_E_NOENT;
+    } else if (e->ct_sid == 0 || e->ct_sid != p->sid) {
+        ret = -T_E_ACCES;              // not the caller's controlling terminal
+    } else {
+        e->fg_pgid = pgid;
+        ret = 0;
+    }
+    spin_unlock(&g_pts_lock);
+    return ret;
+}
+
+s64 pts_tty_get_fg(struct Proc *p, struct SrvConn *cn, u64 qid) {
+    if (!p || !cn || qid == 0) return -T_E_INVAL;
+
+    s64 ret;
+    spin_lock(&g_pts_lock);
+    struct pts_binding *b = NULL;
+    struct pts_entry *e = pts_find_binding_locked(cn, qid, &b);
+    if (!e) {
+        ret = -T_E_NOENT;
+    } else if (!b->master && (e->ct_sid == 0 || e->ct_sid != p->sid)) {
+        ret = -T_E_ACCES;              // a slave read needs session membership
+    } else {
+        ret = (s64)e->fg_pgid;         // 0 = none seated
+    }
+    spin_unlock(&g_pts_lock);
+    return ret;
 }

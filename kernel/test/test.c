@@ -167,6 +167,9 @@ void test_pts_authority_minting_server_only(void);
 void test_pts_binding_dedup_bounds_uniqueness(void);
 void test_pts_full_registry_torn_conn_gc(void);
 void test_pts_syscall_gates(void);
+void test_pts_tty_acquire_matrix(void);
+void test_pts_tty_set_get_fg_matrix(void);
+void test_pts_tty_signal_routing(void);
 void test_resource_exempt_only_system(void);
 void test_resource_page_charge_caps(void);
 void test_resource_thread_cap_ok(void);
@@ -1374,6 +1377,9 @@ struct test_case g_tests[] = {
     { "pts.full_registry_torn_conn_gc",
                                        test_pts_full_registry_torn_conn_gc, false, NULL },
     { "pts.syscall_gates",             test_pts_syscall_gates,             false, NULL },
+    { "pts.tty_acquire_matrix",        test_pts_tty_acquire_matrix,        false, NULL },
+    { "pts.tty_set_get_fg_matrix",     test_pts_tty_set_get_fg_matrix,     false, NULL },
+    { "pts.tty_signal_routing",        test_pts_tty_signal_routing,        false, NULL },
     { "proc.legate_teardown_from_zombie_chokepoint",
                                        test_proc_legate_teardown_from_zombie_chokepoint, false, NULL },
     { "proc.wait_pid_for_no_match",    test_proc_wait_pid_for_no_match,    false, NULL },

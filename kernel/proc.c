@@ -1269,6 +1269,43 @@ int notes_post_pgrp(u32 pgid, const char *name, u32 arg) {
     return ctx.posted;
 }
 
+// The single-Proc sibling (PTY-1d; notes.h contract): the tty seam's F13
+// second SIGHUP target. Same one-lock-hold post + terminate-wake shape as
+// the pgrp fan-out, keyed by pid. pid 0 refused (never a valid target;
+// the pgid-0 refusal analog).
+int notes_post_pid(int pid, const char *name, u32 arg) {
+    if (pid <= 0 || !name) return 0;
+    int posted = 0;
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    struct Proc *q = proc_find_by_pid_walk(kproc(), pid);
+    if (q && q->state == PROC_STATE_ALIVE) {
+        if (notes_post(q, name, arg, NULL, true) == 0) posted = 1;
+        proc_interrupt_terminate_wake(q);
+    }
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return posted;
+}
+
+// PTY-1d (proc.h contract): the tcsetpgrp membership gate.
+struct pgrp_in_sid_ctx { u32 pgid; u32 sid; bool found; };
+static int pgrp_in_sid_cb(struct Proc *q, void *arg) {
+    struct pgrp_in_sid_ctx *c = arg;
+    if (q->state == PROC_STATE_ALIVE && q->pgid == c->pgid &&
+        q->sid == c->sid) {
+        c->found = true;
+        return 1;   // stop walking
+    }
+    return 0;
+}
+bool proc_pgrp_in_session(u32 pgid, u32 sid) {
+    if (pgid == 0) return false;
+    struct pgrp_in_sid_ctx ctx = { .pgid = pgid, .sid = sid, .found = false };
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    proc_for_each_walk(kproc(), pgrp_in_sid_cb, &ctx);
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return ctx.found;
+}
+
 void proc_console_post_interrupt(void) {
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
     struct Proc *owner = g_console_owner;

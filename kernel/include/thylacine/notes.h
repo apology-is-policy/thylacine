@@ -407,6 +407,14 @@ const char *notes_terminate_note_name_locked(struct Proc *p, struct Thread *t);
 // Implemented in kernel/proc.c (needs the static g_proc_table_lock).
 int notes_post_pgrp(u32 pgid, const char *name, u32 arg);
 
+// The single-Proc sibling (PTY-1d): deliver `name` (synthetic) to the ALIVE
+// Proc with `pid`, with the same one-lock-hold post + terminate-wake
+// discipline. The tty seam's F13 second SIGHUP target (the controlling
+// process -- the session leader -- when it is not in the foreground group)
+// is the caller. Returns 1 if posted, 0 if no such ALIVE Proc.
+// Implemented in kernel/proc.c.
+int notes_post_pid(int pid, const char *name, u32 arg);
+
 // =============================================================================
 // LS-5c (P3-terminate, ARCH 8.8.2): the terminate-disposition interrupt latch.
 // =============================================================================

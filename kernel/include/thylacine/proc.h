@@ -1070,6 +1070,13 @@ int proc_setpgid(struct Proc *self, int pid, int pgid);
 int proc_getpgid(struct Proc *self, int pid);
 int proc_getsid(struct Proc *self, int pid);
 
+// PTY-1d: true iff `pgid` names a process group with at least one ALIVE
+// member in session `sid` (one g_proc_table_lock walk). The tcsetpgrp
+// membership gate -- POSIX requires the new foreground group to be an
+// existing group in the caller's session (a dead-members-only group cannot
+// receive signals, so ZOMBIEs do not count here, unlike the getpgid read).
+bool proc_pgrp_in_session(u32 pgid, u32 sid);
+
 // wait_pid — reap ANY zombie child, blocking. The pervasive case;
 // equivalent to wait_pid_for(-1, 0, status_out). Plan 9 wait(2) shape.
 // Most kernel callers (test harness rfork-then-reap) use this form.

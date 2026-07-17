@@ -220,6 +220,16 @@ pub const T_SYS_PTY_REGISTER: u64     = 93;
 pub const T_PTY_REG_MINT: u64         = 0;
 pub const T_PTY_REG_SLAVE: u64        = 1;
 pub const T_PTY_REG_FREE: u64         = 2;
+// PTY-1d: the tty signal seam + the kernel controlling-terminal syscalls.
+pub const T_SYS_TTY_SIGNAL: u64       = 94;
+pub const T_SYS_TTY_ACQUIRE: u64      = 95;
+pub const T_SYS_TTY_SET_FG: u64       = 96;
+pub const T_SYS_TTY_GET_FG: u64       = 97;
+pub const T_TTY_SIG_INT: u64          = 1;
+pub const T_TTY_SIG_QUIT: u64         = 2;
+pub const T_TTY_SIG_TSTP: u64         = 3;   // -EOPNOTSUPP until PTY-1f
+pub const T_TTY_SIG_WINCH: u64        = 4;
+pub const T_TTY_SIG_HUP: u64          = 5;
 // FS-mutation foundation (IDENTITY-DESIGN.md section 9.2): create-then-open,
 // durability barrier, directory enumeration.
 pub const T_SYS_WALK_CREATE: u64      = 54;
@@ -2051,6 +2061,44 @@ pub unsafe fn t_pty_register(op: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     let mut x0: i64 = op as i64;
     asm!("svc #0", inlateout("x0") x0, in("x1") a1, in("x2") a2, in("x3") a3,
          in("x8") T_SYS_PTY_REGISTER, options(nostack));
+    x0
+}
+
+// t_tty_signal -- report a signal-class event on a pts the caller MINTED
+// (PTY-1d; the server half of the tty seam). Returns the posted count or
+// negative errno per the SYS_TTY_SIGNAL contours.
+#[inline(always)]
+pub unsafe fn t_tty_signal(pts_id: u64, sig_class: u64) -> i64 {
+    let mut x0: i64 = pts_id as i64;
+    asm!("svc #0", inlateout("x0") x0, in("x1") sig_class,
+         in("x8") T_SYS_TTY_SIGNAL, options(nostack));
+    x0
+}
+
+// t_tty_acquire -- acquire the pts behind `slave_fd` as the calling session
+// leader's controlling terminal (PTY-1d; POSIX acquisition semantics).
+#[inline(always)]
+pub unsafe fn t_tty_acquire(slave_fd: i64) -> i64 {
+    let mut x0: i64 = slave_fd;
+    asm!("svc #0", inlateout("x0") x0, in("x8") T_SYS_TTY_ACQUIRE,
+         options(nostack));
+    x0
+}
+
+// t_tty_set_fg / t_tty_get_fg -- tcsetpgrp / tcgetpgrp (PTY-1d).
+#[inline(always)]
+pub unsafe fn t_tty_set_fg(fd: i64, pgid: u64) -> i64 {
+    let mut x0: i64 = fd;
+    asm!("svc #0", inlateout("x0") x0, in("x1") pgid,
+         in("x8") T_SYS_TTY_SET_FG, options(nostack));
+    x0
+}
+
+#[inline(always)]
+pub unsafe fn t_tty_get_fg(fd: i64) -> i64 {
+    let mut x0: i64 = fd;
+    asm!("svc #0", inlateout("x0") x0, in("x8") T_SYS_TTY_GET_FG,
+         options(nostack));
     x0
 }
 
