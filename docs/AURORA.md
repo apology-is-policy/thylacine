@@ -63,9 +63,20 @@ it:
   no-torn-scanout). At bring-up the framebuffer is the firmware-provided **`simplefb`**
   (RPi mailbox) or **virtio-gpu** (QEMU) — a linear buffer, so pixels work on day one
   with *no GPU driver*.
-- **Font**: a **baked rasterized bitmap font** (a PSF-style glyph atlas compiled in)
-  — crisp, fast, no runtime TrueType/FreeType dependency, `no_std`-clean. A
-  Thylacine-custom face can ship for the Bonfire identity.
+- **Font**: **Cornucopia** — the Thylacine system face (the user's reconfigured
+  Iosevka; MIT-licensed; a 10-weight scalable TrueType family, Light→Bold ×
+  roman/italic; `github.com/apology-is-policy/cornucopia-font`, the repo's own
+  "default font of Thylacine OS"). Because it is an *outline* TTF but the renderer
+  + the kernel sink must stay TTF-rasterizer-free, Cornucopia is rasterized TWO
+  ways from ONE source: **build-time-baked into a fixed-cell-size bitmap atlas**
+  (a PSF-style glyph table compiled in) for **Aurora's fast path + the kernel
+  trusted sink + Halls** — crisp, fast, `no_std`-clean, no runtime
+  TrueType/FreeType dependency where it must not live (the kernel); and run
+  through the **`no_std` TTF rasterizer at runtime** (TAPESTRY §14) by **Halcyon**
+  for arbitrary sizes. Iosevka's monospace metrics + box-drawing/Latin coverage
+  carry the terminal need (a reconfig changes the design set, not the coverage
+  baseline; confirm the box-drawing block at bake time). The build-time bake tool
+  (TTF → the atlas) is a G-4 deliverable.
 - **VT parser**: Aurora is the *screen-side* of the terminal protocol — it
   **interprets** the VT escape stream (cursor moves, SGR colour) and rasterizes the
   resulting **cell grid** to pixels. (Kaua is the *app-side*; §4.)
