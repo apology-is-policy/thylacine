@@ -268,6 +268,35 @@ pub extern "C" fn rs_main() -> i64 {
     // fd-0 read error below).
     repl.set_stdio_inherit(io::stdout_is_live());
 
+    // LS-5 / Holotype RW-0 F1: open the shell's own note queue EAGERLY for a
+    // real session -- a Ctrl-C before the shell is self-managing would
+    // default-terminate it. Hoisted ABOVE the PTY-4b session dance: the dance
+    // seats this shell as a pts's foreground group, after which a `^C` posts
+    // `interrupt` -- the queue must exist first. `stdout_is_live()` (a
+    // zero-length write to fd 1) is the session-vs-boot-check discriminator:
+    // login (console) and ptyhost (pts) both hand fd 0/1/2 together, so a live
+    // fd 1 implies a live fd 0 and the note fd lands at 3+. The bare-spawn
+    // boot check has an EMPTY handle table + no live fd 1, so we DON'T open
+    // (an eager open there would mint the note fd as fd 0) -- and it breaks on
+    // the fd-0 read error below before ever needing notes.
+    if io::stdout_is_live() {
+        repl.open_notes();
+    }
+
+    // PTY-4b: the pts session dance. When fd 0 is a pts SLAVE (spawned by the
+    // session host), become the pts's controlling session + activate job
+    // control; the pts ctl becomes the line-discipline fd and the SAME
+    // prompt-mode apply runs through it (one ctl grammar). On the console the
+    // dance detects nothing and the #94-B-b consctl path below is unchanged.
+    let jc = repl.init_pts_session();
+    if jc {
+        if repl.console_apply_default() {
+            t_putstr("ut: pts session ok (job control active)\n");
+        } else {
+            t_putstr("ut: pts session (ldisc mode-set rejected)\n");
+        }
+    }
+
     // #94-B-b: a session `ut` receives login's inherited /dev/consctl fd
     // (--consctl-fd N), so the SHELL -- not login -- owns the console line
     // discipline for the session. Establish ut's prompt mode (raw: the line
@@ -276,9 +305,11 @@ pub extern "C" fn rs_main() -> i64 {
     // inherited-fd consctl reach extends to a user-identity shell (the #94-B end
     // of the gate drop; the hard regression is the kernel `devdev.cons_gate`
     // test). The fd is held on the Repl for LS-7's foreground-child mode dance.
-    // A bare-spawned `ut` parses -1 and runs unchanged.
+    // A bare-spawned `ut` parses -1 and runs unchanged. A pts-hosted `ut` is
+    // never given --consctl-fd; the !jc gate keeps a stray one from clobbering
+    // the dance's pts ctl.
     let consctl_fd = parse_consctl_fd();
-    if consctl_fd >= 0 {
+    if !jc && consctl_fd >= 0 {
         repl.set_consctl_fd(consctl_fd as i32);
         if repl.console_apply_default() {
             t_putstr("ut: consctl ok (console line discipline via inherited fd)\n");
@@ -310,24 +341,6 @@ pub extern "C" fn rs_main() -> i64 {
     let mut out = io::stdout();
     // Draw the first prompt (no-op to the UART if fd 1 is absent).
     repl.draw_prompt(&mut out);
-
-    // LS-5 / Holotype RW-0 F1: open the shell's own note queue EAGERLY for a
-    // real session. A session `ut` is the console OWNER (LS-5a), so until it is
-    // self-managing (has opened its note queue) an uncaught `interrupt`
-    // default-terminates it (LS-5b/c) -- a Ctrl-C at a FRESH prompt, before the
-    // first keystroke, would terminate the shell and log the user out. Opening
-    // the queue here makes the shell self-managing from its very first prompt.
-    // `stdout_is_live()` (a zero-length write to fd 1) is the session-vs-boot-
-    // check discriminator already used for set_stdio_inherit above: login hands
-    // a session `ut` fd 0/1/2 together, so a live fd 1 implies a live fd 0 and
-    // the note fd lands at 3+. The bare-spawn boot check has an EMPTY handle
-    // table + no live fd 1, so we DON'T open (an eager open there would mint the
-    // note fd as fd 0 and the first read would block on the note queue instead
-    // of EOFing) -- and it breaks on the fd-0 read error below before ever
-    // needing notes.
-    if io::stdout_is_live() {
-        repl.open_notes();
-    }
 
     // LS-8c: the multi-fd poll loop. LS-8a made /dev/cons pollable (a `.poll`
     // hook + the deferred poll-wake relay), so the shell now polls stdin (fd 0)

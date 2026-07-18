@@ -1,0 +1,62 @@
+#!/usr/bin/expect -f
+# tools/interactive/pty-4.exp -- the PTY-4 interactive job-control scenario.
+#
+# The chartered "interactive LS-CI PTY scenario" (PTY-DESIGN section 14.4):
+# the SAME job-control ladder the boot-fatal /bin/jc-probe scripts, but driven
+# through the REAL console -- login -> `ptyhost` (the outer ut's LS-7 raw dance
+# flips the console to a byte pipe around it) -> the hosted inner `ut` runs its
+# session dance and takes job control -> stop / jobs / fg-resume -> `exit`
+# unwinds back to the outer prompt.
+#
+# The stoppable job is `sleep` (NOT `cat`): a v1.0 pts has no foreground-read
+# arbitration (TTIN), so a stopped job holding an outstanding terminal read
+# would steal the shell's input; `sleep` holds no terminal read and exercises
+# the whole stop/report/resume machinery cleanly (interactive `cat`-under-^Z is
+# the documented TTIN follow-up).
+#
+# Echo discipline: the outer console is RAW (-echo) under the dance and the
+# inner editor draws its own echo, so rendered text is always something a
+# process WROTE -- so the run/int legs match an UPPERCASE token emitted only by
+# a `| tr a-z A-Z` pipeline (never the lowercase editor echo), and the stop/
+# jobs legs match the `Stopped` line (only ut's job-control report emits it).
+
+source [file join [file dirname [info script]] lib.exp]
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# Enter the hosted session. The inner ut's session-dance witness rides the
+# UART (t_putstr) and renders on this same serial -- assert it directly.
+lc_send "ptyhost"
+lc_expect "job control active" "the hosted ut's session dance (setsid+acquire+set_fg+ctl)"
+
+# The inner shell is interactive through both hops (the tr trick: the output
+# token cannot appear in the typed line).
+sleep 1
+lc_run_expect "echo pty-inner | tr a-z A-Z" "PTY-INNER"
+
+# sleep + ^Z: the INNER pts cooks 0x1a (VSUSP) -> tty:susp -> the default STOP
+# -> the WAIT_UNTRACED report -> the inner ut takes the terminal back and
+# prints the Stopped line (emit_line -> the pts -> the host -> here).
+lc_send "sleep 1"
+sleep 1
+send "\x1a"
+lc_expect "Stopped" "^Z stops the foreground sleep"
+
+lc_send "jobs"
+lc_expect "Stopped" "jobs lists the stopped sleep"
+
+# fg resumes (terminal + SYS_TTY_CONT); the resumed sleep runs to a clean exit
+# and fg returns. Prove the shell is back at a working prompt.
+lc_send "fg"
+sleep 1
+lc_run_expect "echo pty-fg | tr a-z A-Z" "PTY-FG"
+
+# Leave the inner session: ut exits -> the master drains-then-EOFs -> ptyhost
+# reaps + exits -> the outer ut restores its prompt mode + screen. The outer
+# probe proves the whole unwind.
+lc_send "exit"
+sleep 1
+lc_run_expect "echo pty-outer | tr a-z A-Z" "PTY-OUTER"
+
+lc_pass "PTY-4: job control end-to-end over a hosted session (stop/jobs/fg-resume + a clean unwind)"

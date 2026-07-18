@@ -154,6 +154,24 @@ void test_proc_group_terminate_smoke(void);
 void test_proc_legate_scope_teardown(void);
 void test_proc_legate_teardown_except_and_zero(void);
 void test_proc_legate_teardown_from_zombie_chokepoint(void);
+void test_pgrp_defaults_and_inherit(void);
+void test_pgrp_setsid_semantics(void);
+void test_pgrp_setpgid_rule_matrix(void);
+void test_pgrp_zombie_reads_alive_mutations(void);
+void test_tty_note_post_gate(void);
+void test_tty_pgrp_fanout_exactly_once(void);
+void test_tty_terminate_class_gate(void);
+void test_pts_mint_bind_resolve_free(void);
+void test_pts_gen_guard_stale_id(void);
+void test_pts_authority_minting_server_only(void);
+void test_pts_binding_dedup_bounds_uniqueness(void);
+void test_pts_full_registry_torn_conn_gc(void);
+void test_pts_syscall_gates(void);
+void test_pts_tty_acquire_matrix(void);
+void test_pts_tty_set_get_fg_matrix(void);
+void test_pts_tty_signal_routing(void);
+void test_pts_tty_tstp_stop_cont_seam(void);
+void test_pts_teardown_hup_cont(void);
 void test_resource_exempt_only_system(void);
 void test_resource_page_charge_caps(void);
 void test_resource_thread_cap_ok(void);
@@ -179,6 +197,12 @@ void test_proc_identity_peer_snapshot_by_stripes(void);
 void test_proc_wait_pid_for_no_match(void);
 void test_proc_wait_pid_for_wnohang_alive_then_reap(void);
 void test_proc_wait_pid_for_selects_target(void);
+void test_proc_wait_pid_for_pgrp_selectors(void);
+void test_proc_wait_pid_for_report_not_reap(void);
+void test_proc_wait_pid_syscall_untraced_flag(void);
+void test_proc_job_stop_owner_algebra(void);
+void test_proc_job_stop_park_report_cont_live(void);
+void test_proc_job_stop_orphan_rule(void);
 void test_namespace_bind_smoke(void);
 void test_namespace_cycle_rejected(void);
 void test_namespace_fork_isolated(void);
@@ -514,6 +538,7 @@ void test_devdev_bestiary_smoke(void);
 void test_devdev_attach_returns_dir(void);
 void test_devdev_walk_to_each_leaf(void);
 void test_devdev_walk_unknown_misses(void);
+void test_devdev_walk_pts_dir(void);
 void test_devdev_trivial_leaves(void);
 void test_devdev_cons_gate(void);
 void test_devhw_bestiary_smoke(void);
@@ -1344,6 +1369,28 @@ struct test_case g_tests[] = {
     { "proc.legate_scope_teardown",    test_proc_legate_scope_teardown,    false, NULL },
     { "proc.legate_teardown_except_and_zero",
                                        test_proc_legate_teardown_except_and_zero, false, NULL },
+    { "pgrp.defaults_and_inherit",     test_pgrp_defaults_and_inherit,     false, NULL },
+    { "pgrp.setsid_semantics",         test_pgrp_setsid_semantics,         false, NULL },
+    { "pgrp.setpgid_rule_matrix",      test_pgrp_setpgid_rule_matrix,      false, NULL },
+    { "pgrp.zombie_reads_alive_mutations",
+                                       test_pgrp_zombie_reads_alive_mutations, false, NULL },
+    { "tty.note_post_gate",            test_tty_note_post_gate,            false, NULL },
+    { "tty.pgrp_fanout_exactly_once",  test_tty_pgrp_fanout_exactly_once,  false, NULL },
+    { "tty.terminate_class_gate",      test_tty_terminate_class_gate,      false, NULL },
+    { "pts.mint_bind_resolve_free",    test_pts_mint_bind_resolve_free,    false, NULL },
+    { "pts.gen_guard_stale_id",        test_pts_gen_guard_stale_id,        false, NULL },
+    { "pts.authority_minting_server_only",
+                                       test_pts_authority_minting_server_only, false, NULL },
+    { "pts.binding_dedup_bounds_uniqueness",
+                                       test_pts_binding_dedup_bounds_uniqueness, false, NULL },
+    { "pts.full_registry_torn_conn_gc",
+                                       test_pts_full_registry_torn_conn_gc, false, NULL },
+    { "pts.syscall_gates",             test_pts_syscall_gates,             false, NULL },
+    { "pts.tty_acquire_matrix",        test_pts_tty_acquire_matrix,        false, NULL },
+    { "pts.tty_set_get_fg_matrix",     test_pts_tty_set_get_fg_matrix,     false, NULL },
+    { "pts.tty_signal_routing",        test_pts_tty_signal_routing,        false, NULL },
+    { "pts.tty_tstp_stop_cont_seam",   test_pts_tty_tstp_stop_cont_seam,   false, NULL },
+    { "pts.teardown_hup_cont",         test_pts_teardown_hup_cont,         false, NULL },
     { "proc.legate_teardown_from_zombie_chokepoint",
                                        test_proc_legate_teardown_from_zombie_chokepoint, false, NULL },
     { "proc.wait_pid_for_no_match",    test_proc_wait_pid_for_no_match,    false, NULL },
@@ -1351,6 +1398,16 @@ struct test_case g_tests[] = {
                                        test_proc_wait_pid_for_wnohang_alive_then_reap, false, NULL },
     { "proc.wait_pid_for_selects_target",
                                        test_proc_wait_pid_for_selects_target, false, NULL },
+    { "proc.wait_pid_for_pgrp_selectors",
+                                       test_proc_wait_pid_for_pgrp_selectors, false, NULL },
+    { "proc.wait_pid_for_report_not_reap",
+                                       test_proc_wait_pid_for_report_not_reap, false, NULL },
+    { "proc.wait_pid_syscall_untraced_flag",
+                                       test_proc_wait_pid_syscall_untraced_flag, false, NULL },
+    { "proc.job_stop_owner_algebra",   test_proc_job_stop_owner_algebra,   false, NULL },
+    { "proc.job_stop_park_report_cont_live",
+                                       test_proc_job_stop_park_report_cont_live, false, NULL },
+    { "proc.job_stop_orphan_rule",     test_proc_job_stop_orphan_rule,     false, NULL },
     { "resource.exempt_only_system",   test_resource_exempt_only_system,   false, NULL },
     { "resource.page_charge_caps",     test_resource_page_charge_caps,     false, NULL },
     { "resource.thread_cap_ok",        test_resource_thread_cap_ok,        false, NULL },
@@ -1797,6 +1854,7 @@ struct test_case g_tests[] = {
     { "devdev.attach_returns_dir",     test_devdev_attach_returns_dir,     false, NULL },
     { "devdev.walk_to_each_leaf",      test_devdev_walk_to_each_leaf,      false, NULL },
     { "devdev.walk_unknown_misses",    test_devdev_walk_unknown_misses,    false, NULL },
+    { "devdev.walk_pts_dir",           test_devdev_walk_pts_dir,           false, NULL },
     { "devdev.trivial_leaves",         test_devdev_trivial_leaves,         false, NULL },
     { "devdev.cons_gate",              test_devdev_cons_gate,              false, NULL },
     { "devhw.bestiary_smoke",          test_devhw_bestiary_smoke,          false, NULL },

@@ -1607,7 +1607,156 @@ enum {
     //   existence-probe under a forbidden directory); the bare -1 on
     //   argument-validation / copy-out faults (the SYS_FSTAT shape).
     SYS_STAT = 88,     // arg: path_va (x0), path_len (x1), stat_va (x2)
+
+    // =========================================================================
+    // PTY-1a (PTY-DESIGN.md section 4; the 2026-07-17 signed-off PTY ABI):
+    // POSIX sessions + process groups. sid/pgid live on struct Proc
+    // (rfork-inherited: a child joins its parent's session + group; a
+    // parentless Proc defaults to its own). These four are the membership
+    // surface; the controlling-terminal + tty-signal syscalls (93-97) land
+    // with the pts registry (PTY-1c/1d).
+    //
+    // Errno note: POSIX-EPERM contours return -T_E_ACCES (13) -- -T_E_PERM
+    // (= -1) would alias the bare error sentinel (the errno.h warning). The
+    // pouch boundary-line (PTY-3) re-maps ACCES -> EPERM at the libc surface
+    // for these calls. -T_E_SRCH (3) = no such process.
+    // =========================================================================
+
+    // SYS_SETSID() -> new sid (> 0) / -T_E_ACCES / -1 (POSIX setsid(2)).
+    //   The caller becomes the leader of a NEW session and a NEW process
+    //   group (sid = pgid = pid) with NO controlling terminal. Fails
+    //   -T_E_ACCES if the caller is already a process-group leader.
+    SYS_SETSID = 89,   // no args
+
+    // SYS_SETPGID(pid, pgid) -> 0 / -T_E_SRCH / -T_E_ACCES / -T_E_INVAL
+    //   (POSIX setpgid(2)). pid 0 = the caller; pgid 0 = the target's own
+    //   pid (mint a new group). The target must be the caller or a LIVE
+    //   direct child (-T_E_SRCH otherwise, ZOMBIE included), must share the
+    //   caller's session, and must not be a session leader (-T_E_ACCES).
+    //   pgid must equal the target's pid (minting) or name an existing
+    //   group in the caller's session (-T_E_ACCES). pgid < 0 -> -T_E_INVAL.
+    //   The POSIX "child already exec'd -> EACCES" rule has no analog
+    //   (spawn is a fused fork+exec).
+    SYS_SETPGID = 90,  // arg: pid (x0), pgid (x1)
+
+    // SYS_GETPGID(pid) -> pgid / -T_E_SRCH (POSIX getpgid(2)).
+    //   pid 0 = the caller. Read-only, no privilege gate; a ZOMBIE target
+    //   answers (a corpse still has a pgid -- waitpid(-pgid) matches by it).
+    SYS_GETPGID = 91,  // arg: pid (x0)
+
+    // SYS_GETSID(pid) -> sid / -T_E_SRCH (POSIX getsid(2)). Same contours
+    //   as SYS_GETPGID.
+    SYS_GETSID = 92,   // arg: pid (x0)
+
+    // =========================================================================
+    // PTY-1c (PTY-DESIGN.md section 3): the pts registry. The server-mediated
+    // (connection, qid) -> pts correlation that makes the PTY signal seam
+    // realizable -- ptyfs registers each pty pair's master mint and slave
+    // serves; the kernel later resolves a slave fd to its pts without a server
+    // round-trip (grant-is-the-share). The registered SERVER (ptyfs) is the
+    // only legal caller: op MINT requires a server-endpoint conn fd + the
+    // MAY_POST_SERVICE service tier; SLAVE/FREE additionally require the
+    // caller to be the pts's MINTING server. See <thylacine/pts.h>.
+    // =========================================================================
+
+    // SYS_PTY_REGISTER(op, ...) -> per-op result / -T_E_* (below).
+    //   op PTY_REG_MINT  (x1 = conn fd, x2 = master qid, x3 = 0):
+    //     record the master-side (connection, qid) + mint the gen-stamped
+    //     pts -> pts_id (> 0). The conn fd must be a SERVER-endpoint devsrv
+    //     connection Spoor (the accept product; a CSRVCLIENT endpoint or any
+    //     other fd kind -> -T_E_INVAL); the caller must carry
+    //     PROC_FLAG_MAY_POST_SERVICE (-T_E_ACCES). -T_E_EXIST if (conn, qid)
+    //     is already bound; -T_E_AGAIN if the registry is full.
+    //   op PTY_REG_SLAVE (x1 = conn fd, x2 = slave qid, x3 = pts_id):
+    //     bind the slave-side (connection, qid) to the pts. Idempotent for
+    //     an identical re-bind. -T_E_ACCES unless the caller is the minting
+    //     server; -T_E_INVAL for a stale/malformed pts_id (the gen guard);
+    //     -T_E_EXIST if (conn, qid) is bound to a different pts; -T_E_NOMEM
+    //     if the entry's binding rows are full.
+    //   op PTY_REG_FREE  (x1 = pts_id, x2 = 0, x3 = 0):
+    //     drop the pts: unbind everything, bump the slot generation (stale
+    //     ids fail closed from here on). Gates as SLAVE.
+    //   qid 0 is rejected everywhere (the dev9p attach-root qid is reserved).
+    SYS_PTY_REGISTER = 93,   // arg: op (x0), per-op x1..x3
+
+    // =========================================================================
+    // PTY-1d (PTY-DESIGN.md section 3): the tty signal seam + the kernel
+    // controlling-terminal syscalls. The seam property (I-22): the server can
+    // NEVER name a process group -- SYS_TTY_SIGNAL reports a signal-class
+    // event on a pts the caller MINTED, and the KERNEL routes pts -> its
+    // controlling session -> that session's fg_pgid. tcsetpgrp/tcgetpgrp +
+    // acquisition are kernel syscalls keyed on the pts resolved from the
+    // caller's own fd (round-1 F1/F2 -- never server-served ctl writes).
+    // EPERM contours answer -T_E_ACCES (the errno.h -1-alias rule).
+    // =========================================================================
+
+    // SYS_TTY_SIGNAL(pts_id, class) -> posted count (>= 0) / -T_E_ACCES (not
+    //   the minting server) / -T_E_INVAL (stale id -- the gen guard -- or bad
+    //   class). 0 = the pts has no controlling session (routes nowhere).
+    //   TTY_SIG_HUP reaches the foreground group AND the controlling process
+    //   (the session leader) when the leader is not in the foreground group
+    //   -- the two POSIX carrier-loss targets. TTY_SIG_TSTP (live since
+    //   PTY-1f) is the job-control suspend: per fg-group member, a CAUGHT
+    //   susp (handler / self-managing / all-threads-masked) delivers the
+    //   tty:susp note only; an uncaught one on a non-orphaned group takes
+    //   the default STOP (job_stop_req -- the second stop owner beside the
+    //   debugger's, parked at the same EL0-return checkpoint; the parent's
+    //   WAIT_UNTRACED wait reports it); an uncaught one on an ORPHANED
+    //   group is discarded (POSIX -- nobody could resume it).
+    SYS_TTY_SIGNAL = 94,   // arg: pts_id (x0), class (x1)
+
+    // SYS_TTY_ACQUIRE(slave_fd) -> 0 / -T_E_ACCES / -T_E_INVAL / -T_E_NOENT.
+    //   The POSIX controlling-terminal dance: a session leader with no
+    //   controlling terminal acquires the pts behind its SLAVE fd (binds
+    //   session <-> pts, seats fg_pgid = the leader's pgid). A pts already
+    //   controlled by another session is never stolen (-T_E_ACCES); re-
+    //   acquiring one's own answers 0 (the second open inherits). A MASTER-
+    //   side fd answers -T_E_INVAL. O_NOCTTY lives in the Pouch boundary-
+    //   line (PTY-3): acquisition here is always explicit.
+    SYS_TTY_ACQUIRE = 95,  // arg: slave fd (x0)
+
+    // SYS_TTY_SET_FG(fd, pgid) -> 0 / -T_E_ACCES / -T_E_INVAL / -T_E_NOENT
+    //   (POSIX tcsetpgrp). The caller must be in the pts's controlling
+    //   session, and pgid must name a group with an ALIVE member in that
+    //   session.
+    SYS_TTY_SET_FG = 96,   // arg: fd (x0), pgid (x1)
+
+    // SYS_TTY_GET_FG(fd) -> fg_pgid (0 = none seated) / -T_E_ACCES /
+    //   -T_E_INVAL / -T_E_NOENT (POSIX tcgetpgrp). A MASTER-side fd reads
+    //   unconditionally (the terminal emulator owns the terminal); a SLAVE-
+    //   side fd requires the caller in the controlling session.
+    SYS_TTY_GET_FG = 97,   // arg: fd (x0)
+
+    // SYS_TTY_CONT(fd, pgid) -> visited-member count / -T_E_ACCES /
+    //   -T_E_INVAL / -T_E_NOENT (PTY-1f; user-signed-off 2026-07-17 as the
+    //   one number beyond the 89-97 pin). The shell's `fg`/`bg` resume --
+    //   the ONE named path by which a session member resumes a job-stopped
+    //   group in its session (tty:cont stays kernel-synthetic-only on the
+    //   POST axis, so no SYS_POSTNOTE reaches it -- the I-39 F4 gate; and
+    //   ordinary kill covers only one's OWN group). Gated exactly like
+    //   SYS_TTY_SET_FG: `fd` a binding of the caller's controlling terminal
+    //   + `pgid` a group with an ALIVE member in that session. Per member:
+    //   the tty:cont note (catchable-informational) + the job-stop clear +
+    //   the parked-thread wake + the parent's WAIT_CONTINUED report. Clears
+    //   ONLY the job owner -- a debugger-stopped member re-parks (the
+    //   per-owner separation, pty_stop.tla StopCompatI39). The target group
+    //   need not be the foreground group (bg) nor stopped (POSIX SIGCONT).
+    SYS_TTY_CONT = 98,     // arg: fd (x0), pgid (x1)
 };
+
+// SYS_PTY_REGISTER ops.
+#define PTY_REG_MINT   0u
+#define PTY_REG_SLAVE  1u
+#define PTY_REG_FREE   2u
+
+// SYS_TTY_SIGNAL classes. Values are ABI (append-only). The class carries
+// no payload; WINCH consumers re-read the winsize from the pts ctl (the
+// server-owned half of the seam).
+#define TTY_SIG_INT    1u   // -> "interrupt" (LS-5 catchable-default-terminate)
+#define TTY_SIG_QUIT   2u   // -> "tty:quit"  (the terminate class, PTY-1b)
+#define TTY_SIG_TSTP   3u   // -> "tty:susp" caught / default job STOP (PTY-1f)
+#define TTY_SIG_WINCH  4u   // -> "tty:winch" (catchable; ignored if uncaught)
+#define TTY_SIG_HUP    5u   // -> "tty:hup"   (the terminate class; dual target)
 
 // SYS_CLOCK_GETTIME clock ids. Values match Linux clockid_t so a future pouch
 // boundary-line maps clock_gettime 1:1.

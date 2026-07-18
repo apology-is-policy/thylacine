@@ -1,0 +1,16 @@
+[package]
+name = "ptyfs"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ptyfs"
+path = "src/main.rs"
+
+[dependencies]
+# libthyla-rs provides _start + #[panic_handler] + the SVC wrappers + ThylaAlloc.
+# ptyfs is a device-less native /srv server (the corvus precedent) -- no libdriver,
+# no netdev, no smoltcp.
+libthyla-rs = { path = "../lib/libthyla-rs" }

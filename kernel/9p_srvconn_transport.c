@@ -9,6 +9,7 @@
 // internally. The adapter holds one pointer + one srvconn_ref; the
 // SrvConn owns the byte rings, the deadline, and the lifecycle.
 
+#include <thylacine/9p_client.h>
 #include <thylacine/9p_srvconn_transport.h>
 #include <thylacine/srvconn.h>
 #include <thylacine/types.h>
@@ -178,4 +179,16 @@ bool p9_srvconn_transport_is_open(const struct p9_srvconn_transport *st) {
     if (!st)                                     return false;
     if (st->magic != P9_SRVCONN_TRANSPORT_MAGIC) return false;
     return st->cn != NULL;
+}
+
+struct SrvConn *p9_srvconn_transport_conn(const struct p9_client *c) {
+    if (!c) return NULL;
+    // The backend downcast (header contract): every transport ctx struct
+    // leads with a distinct u32 magic, so a non-srvconn backend fails here
+    // instead of mis-casting. Reading 4 bytes of any live ctx is safe; the
+    // pointer returned is for identity comparison only.
+    struct p9_srvconn_transport *st =
+        (struct p9_srvconn_transport *)c->transport.ops.ctx;
+    if (!st || st->magic != P9_SRVCONN_TRANSPORT_MAGIC) return NULL;
+    return st->cn;
 }

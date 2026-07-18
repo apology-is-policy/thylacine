@@ -1,0 +1,1182 @@
+pouch boundary-line patch 0021 - the POSIX pty surface (PTY-3).
+
+PTY-DESIGN.md section 7. Makes the POSIX pseudoterminal + job-control
+surface work for ported programs over the PTY-1 kernel syscalls + the
+PTY-2 ptyfs server, WITHOUT any new kernel surface: openpty /
+posix_openpt / grantpt / unlockpt / ptsname_r / isatty / tcgetattr /
+tcsetattr / tcgetpgrp / tcsetpgrp / tcgetwinsize / tcsetwinsize /
+setsid / setpgid / getpgid / getsid + the tty signal family
+(SIGQUIT / SIGTSTP / SIGCONT / SIGWINCH / SIGHUP <-> tty:*).
+
+Sixteen files:
+
+  arch/aarch64/bits/syscall.h.in   Retargets the four POSIX session/
+      process-group syscalls onto the PTY-1a kernel numbers
+      (__NR_setsid 89 / __NR_setpgid 90 / __NR_getpgid 91 /
+      __NR_getsid 92 -- musl's setsid()/setpgid()/getpgid()/getsid()
+      wrappers then work unpatched; the kernel honors the POSIX pid=0
+      self sentinel) and appends the three controlling-terminal
+      syscall aliases the ioctl dispatcher calls (__NR_tty_acquire 95 /
+      __NR_tty_set_fg 96 / __NR_tty_get_fg 97; PTY-1d). After a musl
+      re-vendor, extend 0001's awk filter:
+          m["setsid"]="89"; m["setpgid"]="90";
+          m["getpgid"]="91"; m["getsid"]="92";
+      and re-append the tty aliases.
+
+  src/misc/ioctl.c                 FULL REWRITE -- the tty ioctl
+      dispatcher, the patch's centerpiece. musl's pty/termios surface
+      is entirely ioctl-shaped (isatty = TIOCGWINSZ; unlockpt =
+      TIOCSPTLCK; ptsname_r = TIOCGPTN; tcgetattr/tcsetattr =
+      TCGETS/TCSETS*; tcgetpgrp/tcsetpgrp = TIOC[GS]PGRP; openpty =
+      all of these), so ONE dispatcher makes every upper wrapper work
+      unpatched. Translation: termios/winsize <-> the ptyfs ctl file
+      /dev/pts/<n>ctl (the PTY-2c five-flag grammar + winsize);
+      controlling-terminal ops -> the kernel syscalls 95-97; TIOCGPTN
+      -> the fstat qid decode (PTS_FLAG bit 40 | N<<8 | filekind).
+      Is-a-pts discrimination = S_ISCHR(st_mode) + the qid decode (the
+      ptyfs PTY-3 S_IFCHR posture; load-bearing against /net's bit-40
+      CONN_FLAG qids, which report S_IFREG). Unknown requests answer
+      ENOTTY (the Linux convention; pre-PTY-3 pouch answered ENOSYS
+      for every ioctl). TCFLSH / TIOCGSID / TIOCNOTTY are honest
+      ENOTSUP seams; TCSBRK (drain/break) answers 0 on a pts (drain is
+      complete-on-return by the synchronous-ring construction).
+
+  src/misc/pty.c                   posix_openpt opens /dev/pts/ptmx --
+      the devpts-NATIVE mint node (Linux has the same node; its
+      /dev/ptmx is a compat symlink Thylacine cannot provide
+      pre-symlinks, G11). The open IS the mint (the Plan 9 clone
+      idiom: ptyfs rebinds the opened fid onto a fresh master).
+      grantpt (a musl no-op) + unlockpt (TIOCSPTLCK -> dispatcher
+      no-op) + ptsname_r (TIOCGPTN) then work unpatched.
+
+  src/misc/openpty.c               The same /dev/pts/ptmx redirect
+      (musl's openpty opens the mint node directly, not via
+      posix_openpt). Everything else in openpty() is ioctl-shaped and
+      works via the dispatcher. O_NOCTTY is inert on Thylacine
+      (acquisition is always an explicit TIOCSCTTY; the pouch openat
+      maps only O_ACCMODE).
+
+  src/internal/_pouch_signal.h     POUCH_NOTE_BIT_TTY (1u<<5, the
+      PTY-1b family bit) + POUCH_NOTE_MASK_SUPPORTED widened to 0x2f
+      (bit 4 stays reserved). Doc preamble grows the tty family
+      contract: receive-only signums, the SIG_DFL dispositions, and
+      the DOCUMENTED SIGTSTP-default seam (below).
+
+  src/signal/_pouch_signal.c       The translation + dispatch growth:
+      __pouch_sig_to_note maps SIGQUIT->"tty:quit", SIGTSTP->
+      "tty:susp", SIGCONT->"tty:cont", SIGWINCH->"tty:winch",
+      SIGHUP->"tty:hup"; the sigset marshalling folds any tty-family
+      member onto the ONE kernel family bit (documented coarseness --
+      blocking one blocks all five; the kernel terminate-class latch
+      makes a masked quit/hup fire on unmask); the bootstrap
+      dispatcher routes the five names to their signums and applies
+      the SIG_DFL dispositions: quit/hup NDFLT (whole-Proc terminate,
+      the POSIX default), winch/cont NCONT (POSIX ignore; a cont's
+      RESUME already happened kernel-side at SYS_TTY_CONT),
+      susp NCONT-ignore -- the DOCUMENTED v1.0 SEAM: POSIX default is
+      STOP, but pouch's always-registered bootstrap makes every pouch
+      Proc "caught" to the kernel's pre-delivery stop gate
+      (proc_tty_susp_would_stop_locked reads handler_va != 0), and
+      the kernel NDFLT arm TERMINATES (exits -> proc_group_terminate,
+      never stops), so ^Z on a handler-less pouch program is ignored
+      rather than stopping it. NDFLT here would turn ^Z into process
+      death -- the one actively-wrong option. The clean fix is a
+      kernel NDFLT-stop arm for tty:susp (an ABI-semantics change on
+      the audited notes surface -- needs signoff); tracked in
+      docs/reference/83-pouch-signals.md.
+
+  src/signal/sigaction.c           The accepted-signum set widens by
+      the five tty signums. SIGSTOP stays outside the set (EINVAL --
+      uncatchable per POSIX).
+
+  src/signal/kill.c                The tty receive-only gate: the
+  src/signal/raise.c               kernel POST axis rejects any
+      userspace tty:* post (the PTY-1b round-1 F4 / I-39 gate -- only
+      a pts's minting server can originate terminal events, so nobody
+      forges a HUP), so kill()/raise() of a tty-family signum answer
+      EPERM up front (the POSIX-shaped errno; the kernel would refuse
+      with a bare -1 anyway). Handlers CATCH the kernel-raised
+      events; sending them is not a thing.
+
+  src/fcntl/openat.c               Resolution moved onto the stalk
+      resolver: the 0009 body walked per-component via SYS_walk_open,
+      opening EVERY intermediate with the FINAL omode -- structurally
+      unable to open a write-mode file through a directory or across a
+      mount (the first live instance: posix_openpt's O_RDWR open of
+      /dev/pts/ptmx, crossing devramfs -> devdev -> ptyfs; ENOENT).
+      Now ONE SYS_open (= 65, stalk-1: per-component X-search +
+      mount-crossing inside the resolver; only the FINAL component is
+      opened) + the REAL -errno decode (ER-1) where the loop could
+      only answer a blanket ENOENT. Every pouch open()/openat() rides
+      this (open.c already forwards here, 16b-gamma); the whole
+      existing pouch prover ladder + the stratumd boot re-prove the
+      old surface in-guest.
+
+  src/misc/pty.c (__ptsname_r)     The raw-SYS_ioctl BYPASS reroutes:
+  src/unistd/isatty.c              musl reaches its tty surface two
+  src/termios/tcdrain.c            ways -- the public ioctl() (tcgetattr/
+  src/termios/tcgetwinsize.c       tcsetattr/tcgetpgrp/tcsetpgrp/
+  src/termios/tcsetwinsize.c       unlockpt/openpty) and DIRECT
+  src/stdio/__stdout_write.c       __syscall(SYS_ioctl,...) calls, which
+  src/stdio/__fdopen.c             on Thylacine hit the 0xFFFF -ENOSYS
+      sentinel and BYPASS the dispatcher (ptsname_r returned ENOSYS;
+      isatty was constant-0). Each direct caller is rerouted through
+      the public ioctl(). The two stdio probes are the line-buffering
+      tty detection (fdopen + first stdout write): routing them makes
+      a pouch program's stdout LINE-BUFFERED on a pts (the POSIX
+      interactive behavior PTY-4's consumers need; one probe per
+      stream lifetime), errno-preserved so the common non-tty failure
+      cannot clobber a successful stdio write's errno.
+
+Audit close (the PTY-3 focused Fable-5-max holotype + a concurrent
+self-audit, 0 P0 / 0 P1 / 0 P2 / 3 P3, NOT dirty; the closed list is
+memory/audit_pty3_closed_list.md): F1 put_dec scratch sized for any
+unsigned caller (was call-site-capped); F2 the pts_ctl_read single-read
+render dependency named explicitly (a load-bearing property, not a
+silent assumption); F3 (== the self-audit's SA-11, the two prosecutors
+converged) the three controlling-terminal arms gained the pts_resolve
+pre-gate so a non-tty fd answers the POSIX ENOTTY instead of the
+kernel's refusal errno -- the kernel stays authoritative for real pts
+fds.
+
+Deliberately NOT in this patch:
+
+  - forkpty: structurally dead -- pouch has no fork()/clone()
+    (__NR_fork/__NR_clone are the 0xFFFF -ENOSYS sentinel; a
+    pre-existing pouch-wide seam, not a pty gap). musl's forkpty
+    fails honestly at its fork() call. login_tty likewise depends on
+    the unmapped dup3.
+  - kill(-pgrp): the kernel SYS_POSTNOTE has no process-group form
+    (the PTY-1 design's notes_post_pgrp exists kernel-internally for
+    the tty seam only). A negative pid fails the kernel pid lookup
+    honestly. The postnote pgrp arm is an ABI addition -- deferred
+    with signoff, alongside the NDFLT-stop arm above.
+  - getpid() stays unmapped (out of the pty surface; setsid()'s
+    return value carries the sid == pid where the probe needs it).
+
+diff a/arch/aarch64/bits/syscall.h.in b/arch/aarch64/bits/syscall.h.in
+--- a/arch/aarch64/bits/syscall.h.in	2026-07-18 08:02:22
++++ b/arch/aarch64/bits/syscall.h.in	2026-07-18 08:02:52
+@@ -177,10 +177,10 @@
+ #define __NR_setfsuid 0xFFFF
+ #define __NR_setfsgid 0xFFFF
+ #define __NR_times 0xFFFF
+-#define __NR_setpgid 0xFFFF
+-#define __NR_getpgid 0xFFFF
+-#define __NR_getsid 0xFFFF
+-#define __NR_setsid 0xFFFF
++#define __NR_setpgid 90
++#define __NR_getpgid 91
++#define __NR_getsid 92
++#define __NR_setsid 89
+ #define __NR_getgroups 0xFFFF
+ #define __NR_setgroups 0xFFFF
+ #define __NR_uname 0xFFFF
+@@ -459,3 +459,14 @@
+ #define __NR_fstat 50
+ #undef  __NR_lseek
+ #define __NR_lseek 51
++
++/* PTY-3 (pouch pty boundary-line): the kernel controlling-terminal
++ * syscalls the ioctl dispatcher (src/misc/ioctl.c) calls for
++ * TIOCSCTTY / TIOCSPGRP / TIOCGPGRP. Numbers per
++ * kernel/include/thylacine/syscall.h (PTY-1d). After a musl re-vendor,
++ * extend 0001's awk filter:
++ *   m["tty_acquire"]="95"; m["tty_set_fg"]="96"; m["tty_get_fg"]="97";
++ */
++#define __NR_tty_acquire 95
++#define __NR_tty_set_fg 96
++#define __NR_tty_get_fg 97
+diff a/src/fcntl/openat.c b/src/fcntl/openat.c
+--- a/src/fcntl/openat.c	2026-07-18 08:18:16
++++ b/src/fcntl/openat.c	2026-07-18 08:18:58
+@@ -1,37 +1,38 @@
+-/* pouch boundary-line replacement (P6-pouch-stratumd-boot 16b-beta cont).
++/* pouch boundary-line replacement (P6-pouch-stratumd-boot 16b-beta cont;
++ * resolution moved onto the stalk resolver at PTY-3, patch 0021).
+  *
+- * openat() over Thylacine's SYS_walk_open path-walk primitive.
++ * openat() over Thylacine's SYS_open full-path stalk resolution.
+  * Absolute paths only at v1.0; AT_FDCWD only; O_RDONLY/W/RW only.
+- * See 0009-pouch-openat.patch for the design rationale. */
++ * See 0009-pouch-openat.patch + 0021-pouch-pty.patch for the design
++ * rationale.
++ *
++ * PTY-3 (0021): the original 0009 body walked per-component via
++ * SYS_walk_open, opening EVERY intermediate with the FINAL omode --
++ * which structurally cannot open a write-mode file through a
++ * directory or across a mount (the first O_RDWR dir-open rejects; the
++ * first live instance was posix_openpt's open of /dev/pts/ptmx, which
++ * crosses devramfs -> devdev -> ptyfs). SYS_open (= 65, stalk-1) is
++ * the modern resolver the native t_open uses: ONE syscall, the full
++ * path, per-component X-search + mount-crossing INSIDE the resolver,
++ * and only the FINAL component is opened with the caller's omode. It
++ * also returns the REAL -errno (ER-1: T_E_NOENT walk-miss, T_E_ACCES
++ * perm denial, ...) where the old loop could only answer a blanket
++ * ENOENT. */
+ #include <fcntl.h>
+ #include <stdarg.h>
+ #include <errno.h>
+ #include <stddef.h>
++#include <string.h>
+ #include "syscall.h"
+ 
+ /* Thylacine flag values (mirror kernel/include/thylacine/syscall.h
+- * and usr/lib/libt/include/thyla/syscall.h). Per-component cap is
+- * 64 bytes (the kernel's SYS_WALK_OPEN bound, audited in
+- * P5-stratumd-stub-bringup-e1). */
++ * and usr/lib/libt/include/thyla/syscall.h). */
+ #define POUCH_WALK_FROM_ROOT  ((long)(-1))
+ #define POUCH_OREAD           0u
+ #define POUCH_OWRITE          1u
+ #define POUCH_ORDWR           2u
+-#define POUCH_NAME_MAX        64u
+-#define POUCH_PATH_MAX        1024u
++#define POUCH_PATH_MAX        1024u   /* the kernel SYS_OPEN_PATH_MAX */
+ 
+-static inline long pouch_walk_open(long spoor_fd, const char *name,
+-                                    unsigned long name_len,
+-                                    unsigned long omode)
+-{
+-    return __syscall(SYS_walk_open, spoor_fd, name, name_len, omode);
+-}
+-
+-static inline long pouch_close_fd(long fd)
+-{
+-    return __syscall(SYS_close, fd);
+-}
+-
+ int openat(int fd, const char *filename, int flags, ...)
+ {
+ 	mode_t mode = 0;
+@@ -51,7 +52,7 @@
+ 	}
+ 	/* Refuse O_CREAT / O_TMPFILE: the pouch arm doesn't synthesize
+ 	 * inode creation. Other flags (O_TRUNC, O_APPEND, O_NONBLOCK,
+-	 * O_CLOEXEC) are silently no-op at v1.0. */
++	 * O_CLOEXEC, O_NOCTTY) are silently no-op at v1.0. */
+ 	if ((flags & O_CREAT) || (flags & O_TMPFILE) == O_TMPFILE) {
+ 		errno = ENOTSUP;
+ 		return -1;
+@@ -60,15 +61,16 @@
+ 		errno = EFAULT;
+ 		return -1;
+ 	}
+-	/* Absolute paths only at v1.0. */
++	/* Absolute paths only at v1.0 (pouch has no chdir surface, so a
++	 * relative path has no well-defined base to advertise). */
+ 	if (filename[0] != '/') {
+ 		errno = ENOTSUP;
+ 		return -1;
+ 	}
+ 
+ 	/* Map POSIX O_RDONLY / O_WRONLY / O_RDWR to Thylacine T_OREAD /
+-	 * T_OWRITE / T_ORDWR. The kernel's walk_open enforces the actual
+-	 * envelope; pouch only translates the flag bits. */
++	 * T_OWRITE / T_ORDWR. The kernel's stalk resolution enforces the
++	 * actual envelope; pouch only translates the flag bits. */
+ 	unsigned long omode;
+ 	switch (flags & O_ACCMODE) {
+ 	case O_RDONLY: omode = POUCH_OREAD;  break;
+@@ -77,39 +79,14 @@
+ 	default:       errno = EINVAL; return -1;
+ 	}
+ 
+-	/* Walk each path component. Skip leading '/' + collapse runs of
+-	 * '/'. Bound by POUCH_PATH_MAX to keep the loop finite without
+-	 * stack growth. */
+-	long cur = POUCH_WALK_FROM_ROOT;
+-	const char *p = filename + 1;
+-	for (unsigned long total = 1; *p != '\0'; total++) {
+-		if (total > POUCH_PATH_MAX) {
+-			if (cur >= 0) pouch_close_fd(cur);
+-			errno = ENAMETOOLONG;
+-			return -1;
+-		}
+-		/* Collapse consecutive '/'. */
+-		if (*p == '/') { p++; continue; }
+-		/* Find component end. */
+-		const char *q = p;
+-		while (*q != '\0' && *q != '/') q++;
+-		unsigned long len = (unsigned long)(q - p);
+-		if (len > POUCH_NAME_MAX) {
+-			if (cur >= 0) pouch_close_fd(cur);
+-			errno = ENAMETOOLONG;
+-			return -1;
+-		}
+-		long next = pouch_walk_open(cur, p, len, omode);
+-		if (cur >= 0) pouch_close_fd(cur);
+-		if (next < 0) {
+-			/* The kernel walk_open returns -1 on Twalk Rerror;
+-			 * map to ENOENT as the closest POSIX equivalent. */
+-			errno = ENOENT;
+-			return -1;
+-		}
+-		cur = next;
+-		p = q;
++	size_t len = strlen(filename);
++	if (len > POUCH_PATH_MAX) {
++		errno = ENAMETOOLONG;
++		return -1;
+ 	}
+-	if (cur < 0) { errno = ENOENT; return -1; }  /* trailing-slash-only path */
+-	return (int)cur;
++
++	/* One stalk-resolved open from the Territory root. The kernel
++	 * answers the fd or the real -errno (seam-decoded). */
++	return __syscall_ret(__syscall(SYS_open, POUCH_WALK_FROM_ROOT,
++	                               filename, len, omode));
+ }
+diff a/src/internal/_pouch_signal.h b/src/internal/_pouch_signal.h
+--- a/src/internal/_pouch_signal.h	2026-07-18 08:02:22
++++ b/src/internal/_pouch_signal.h	2026-07-18 08:08:45
+@@ -13,6 +13,24 @@
+  * one for the others. SIGKILL/SIGSTOP cannot be caught; sigaction()
+  * returns EINVAL for them per POSIX. All other signums return EINVAL.
+  *
++ * PTY-3 widens the set with the tty job-control family (PTY-1b/1d):
++ * SIGQUIT -> "tty:quit", SIGTSTP -> "tty:susp", SIGCONT -> "tty:cont",
++ * SIGWINCH -> "tty:winch", SIGHUP -> "tty:hup". RECEIVE-ONLY: the
++ * kernel POST gate rejects any userspace tty:* post (the I-39 F4
++ * gate -- only the pts's minting server can originate tty events), so
++ * kill()/raise() of these five signums answer EPERM; handlers catch
++ * the kernel-raised events. SIG_DFL dispositions: quit/hup NDFLT
++ * (whole-Proc terminate -- the POSIX default); winch/cont NCONT
++ * (ignore -- POSIX; the cont RESUME already happened kernel-side);
++ * susp NCONT-ignore -- a DOCUMENTED v1.0 SEAM: POSIX default is STOP,
++ * but pouch's always-registered bootstrap makes every pouch Proc
++ * "caught" to the kernel's pre-delivery stop gate
++ * (proc_tty_susp_would_stop_locked reads handler_va), and the NDFLT
++ * arm TERMINATES (never stops), so ^Z on a handler-less pouch program
++ * is ignored rather than stopping it. The clean fix is a kernel
++ * NDFLT-stop arm for tty:susp (an ABI-semantics change -- needs
++ * signoff); tracked in docs/reference/83-pouch-signals.md.
++ *
+  * Per-thread shadow + per-Proc sigtab: the kernel's note_mask is per-
+  * Thread (POSIX pthread_sigmask semantics); pouch keeps a __thread shadow
+  * to support SIG_BLOCK / SIG_UNBLOCK read-modify-write. The sigaction
+@@ -76,7 +94,13 @@
+ #define POUCH_NOTE_BIT_KILL        (1u << 1)
+ #define POUCH_NOTE_BIT_PIPE        (1u << 2)
+ #define POUCH_NOTE_BIT_CHILD_EXIT  (1u << 3)
+-#define POUCH_NOTE_MASK_SUPPORTED  0x0fu
++/* PTY-3: the tty:* FAMILY bit (NOTE_BIT_TTY, PTY-1b) -- ONE kernel mask
++ * bit covers all five tty notes (winch/susp/cont/quit/hup), so blocking
++ * any one of SIGQUIT/SIGTSTP/SIGCONT/SIGWINCH/SIGHUP blocks the family
++ * (documented coarseness; the kernel's terminate-class latch makes a
++ * masked tty:quit/tty:hup fire on unmask, the LS-5 latch model). */
++#define POUCH_NOTE_BIT_TTY         (1u << 5)
++#define POUCH_NOTE_MASK_SUPPORTED  0x2fu
+ 
+ /* SYS_NOTED arg semantics (matches kernel/include/thylacine/notes.h
+  * "SYS_NOTED arg semantics" docblock, R4-F6 audit close). */
+diff a/src/misc/ioctl.c b/src/misc/ioctl.c
+--- a/src/misc/ioctl.c	2026-07-18 08:02:22
++++ b/src/misc/ioctl.c	2026-07-18 08:47:58
+@@ -1,128 +1,217 @@
++/* pouch — the tty ioctl dispatcher (PTY-3, the pouch pty boundary-line).
++ *
++ * Replaces musl's Linux ioctl.c (a raw SYS_ioctl passthrough plus a
++ * time64 compat map — both dead on Thylacine: __NR_ioctl is the 0xFFFF
++ * -ENOSYS sentinel and there is no kernel ioctl surface). Thylacine's
++ * terminal control is file- and syscall-shaped instead:
++ *
++ *   - per-pts termios + winsize live in the ptyfs ctl file
++ *     /dev/pts/<n>ctl (the PTY-2c grammar: five "+name"/"-name" flag
++ *     tokens icanon/echo/isig/icrnl/onlcr + "winsize <cols> <rows>");
++ *   - the controlling-terminal ops are kernel syscalls keyed on the
++ *     caller's own fd (PTY-1d: SYS_TTY_ACQUIRE/SET_FG/GET_FG);
++ *   - ptsname is a qid decode: a ptyfs endpoint qid encodes
++ *     PTS_FLAG(bit 40) | N<<8 | filekind, carried VERBATIM in
++ *     t_stat.qid_path (SYS_FSTAT).
++ *
++ * This dispatcher translates the POSIX tty ioctl families onto those
++ * three mechanisms, which makes the UNPATCHED musl wrappers work:
++ * tcgetattr/tcsetattr (TCGETS/TCSETS*), tcgetpgrp/tcsetpgrp
++ * (TIOCGPGRP/TIOCSPGRP), tcgetwinsize/tcsetwinsize + isatty
++ * (TIOCGWINSZ/TIOCSWINSZ), unlockpt (TIOCSPTLCK), ptsname_r (TIOCGPTN),
++ * openpty (all of the above).
++ *
++ * Is-a-pts discrimination: fstat the fd; a pts endpoint reports
++ * S_IFCHR (the ptyfs PTY-3 posture — a pts node IS a character device,
++ * the Linux model) AND a PTS_FLAG qid with filekind master/slave. The
++ * S_ISCHR gate is load-bearing: netd's /net qids also use bit 40
++ * (CONN_FLAG) but netd reports S_IFREG, so a socket fd can never pass.
++ * A tagged pouch socket fd (POUCH_SOCK_TAG) is rejected up front.
++ *
++ * Errno posture:
++ *   - unknown request (any fd): ENOTTY (the Linux convention — Linux
++ *     answers ENOTTY for unsupported ioctls even on real ttys; the
++ *     pre-PTY-3 pouch answered ENOSYS for ALL ioctls).
++ *   - tty request on a non-pts fd: ENOTTY. fstat failure is folded
++ *     into ENOTTY too — the kernel SYS_FSTAT answers a bare -1 for
++ *     both a bad fd and a valid statless fd (pipe/cons/notes), so
++ *     EBADF cannot be distinguished here. Documented nit: a closed fd
++ *     yields ENOTTY, not EBADF (musl's isatty() normalizes to ENOTTY
++ *     anyway, so the app-visible isatty behavior is identical).
++ *   - kernel tty-syscall errors pass through the standard seam decode
++ *     (T_E_* values are POSIX-aligned). One documented divergence: the
++ *     kernel's EPERM contours answer EACCES (the errno.h -1-alias
++ *     rule, PTY-1d), so tcsetpgrp's POSIX-EPERM cases read as EACCES.
++ *   - TCFLSH (tcflush): ENOTSUP — the ctl grammar has no flush verb at
++ *     v1.0 (a silent success would lie about queued bytes). v1.x seam.
++ *   - TIOCGSID / TIOCNOTTY: ENOTSUP (no kernel surface; acquisition is
++ *     explicit and session-scoped, PTY-1d).
++ *   - TCSBRK/TCSBRKP (tcdrain + tcsendbreak): 0 on a pts. Drain is
++ *     genuinely complete-on-return here — a slave write lands in the
++ *     master-side ring before the Twrite returns (the PTY-2 synchronous
++ *     ring model; there is no hardware output queue). BREAK has no pts
++ *     representation (as on Linux pts pairs, where a break is invisible
++ *     to the slave without pktmode — which does not exist here).
++ *
++ * termios subset honesty: exactly the five ldisc flags survive the
++ * translation (ICANON/ECHO/ISIG in c_lflag; ICRNL in c_iflag;
++ * OPOST+ONLCR in c_oflag). Every other termios bit and every c_cc slot
++ * is accepted-and-ignored on set, and reported at a fixed plausible
++ * cooked baseline on get (the fixed control chars are the ldisc's:
++ * VINTR=^C VQUIT=^\ VSUSP=^Z, VERASE=DEL [the ldisc erases on BS and
++ * DEL], VMIN=1 VTIME=0; VEOF/VKILL report 0 — not implemented).
++ * cfmakeraw + tcsetattr works because it clears exactly the five
++ * honored flags (via OPOST for onlcr).
++ */
++
+ #include <sys/ioctl.h>
++#include <termios.h>
++#include <fcntl.h>
++#include <unistd.h>
+ #include <stdarg.h>
+-#include <errno.h>
+-#include <time.h>
+-#include <sys/time.h>
+-#include <stddef.h>
+ #include <stdint.h>
+ #include <string.h>
+-#include <endian.h>
++#include <errno.h>
+ #include "syscall.h"
++#include "_pouch_socket.h"
+ 
+-#define alignof(t) offsetof(struct { char c; t x; }, x)
+-
+-#define W 1
+-#define R 2
+-#define WR 3
+-
+-struct ioctl_compat_map {
+-	int new_req, old_req;
+-	unsigned char old_size, dir, force_align, noffs;
+-	unsigned char offsets[8];
++/* Mirror of the kernel struct t_stat (kernel/include/thylacine/syscall.h,
++ * 80 bytes, layout pinned by kernel _Static_asserts; the same local-mirror
++ * pattern as 0010's fstat.c). Only mode + qid_path are consumed here. */
++struct pouch_tstat {
++	uint64_t size;       /*  0 */
++	uint64_t qid_path;   /*  8 */
++	uint64_t atime_sec;  /* 16 */
++	uint64_t mtime_sec;  /* 24 */
++	uint64_t ctime_sec;  /* 32 */
++	uint32_t mode;       /* 40 */
++	uint32_t nlink;      /* 44 */
++	uint32_t qid_vers;   /* 48 */
++	uint8_t  qid_type;   /* 52 */
++	uint8_t  pad_qid[3]; /* 53 */
++	uint32_t blksize;    /* 56 */
++	uint32_t pad_blk;    /* 60 */
++	uint64_t blocks;     /* 64 */
++	uint32_t uid;        /* 72 */
++	uint32_t gid;        /* 76 */
+ };
+ 
+-#define NINTH(a,b,c,d,e,f,g,h,i,...) i
+-#define COUNT(...) NINTH(__VA_ARGS__,8,7,6,5,4,3,2,1,0)
+-#define OFFS(...) COUNT(__VA_ARGS__), { __VA_ARGS__ }
++/* The ptyfs endpoint qid encoding (usr/ptyfs/src/server.rs; a documented
++ * client ABI — the PTY-2c "ptsname = the fstat qid decode" contract). */
++#define POUCH_PTS_FLAG      (1ULL << 40)
++#define POUCH_PTS_FK_MASK   0xffULL
++#define POUCH_PTS_N_SHIFT   8
++#define POUCH_PTS_N_MASK    0xffffffULL
++#define POUCH_PTS_FK_MASTER 1
++#define POUCH_PTS_FK_SLAVE  2
+ 
+-/* yields a type for a struct with original size n, with a misaligned
+- * timeval/timespec expanded from 32- to 64-bit. for use with ioctl
+- * number producing macros; only size of result is meaningful. */
+-#define new_misaligned(n) struct { int i; time_t t; char c[(n)-4]; }
++/* Resolve fd -> pts (n, filekind), or -1 if the fd is not a pts
++ * master/slave endpoint. */
++static int pts_resolve(int fd, unsigned *n_out, int *fk_out)
++{
++	struct pouch_tstat ts;
++	if ((fd & POUCH_SOCK_TAG) != 0) return -1;  /* pouch socket: never a tty */
++	if (__syscall(SYS_fstat, fd, &ts) != 0) return -1;
++	if ((ts.mode & 0170000u) != 0020000u) return -1;  /* !S_ISCHR */
++	if ((ts.qid_path & POUCH_PTS_FLAG) == 0) return -1;
++	int fk = (int)(ts.qid_path & POUCH_PTS_FK_MASK);
++	if (fk != POUCH_PTS_FK_MASTER && fk != POUCH_PTS_FK_SLAVE) return -1;
++	if (n_out) *n_out = (unsigned)((ts.qid_path >> POUCH_PTS_N_SHIFT) &
++	                               POUCH_PTS_N_MASK);
++	if (fk_out) *fk_out = fk;
++	return 0;
++}
+ 
+-struct v4l2_event {
+-	uint32_t a;
+-	uint64_t b[8];
+-	uint32_t c[2], ts[2], d[9];
+-};
++/* Per-op open of the pts ctl sibling /dev/pts/<n>ctl (the Plan 9
++ * suffix-ctl idiom). Stateless: opened fresh per termios/winsize op,
++ * closed before return — no cached fd to invalidate across a pts free. */
++static int pts_ctl_open(unsigned n, int flags)
++{
++	char path[32];
++	char *p = path + sizeof(path);
++	*--p = 0;
++	p -= 3;
++	memcpy(p, "ctl", 3);
++	if (n == 0) *--p = '0';
++	else for (unsigned v = n; v; v /= 10) *--p = (char)('0' + (v % 10));
++	p -= 9;
++	memcpy(p, "/dev/pts/", 9);
++	return open(p, flags);
++}
+ 
+-static const struct ioctl_compat_map compat_map[] = {
+-	{ SIOCGSTAMP, SIOCGSTAMP_OLD, 8, R, 0, OFFS(0, 4) },
+-	{ SIOCGSTAMPNS, SIOCGSTAMPNS_OLD, 8, R, 0, OFFS(0, 4) },
++/* Read + parse the ctl render: "+icanon +echo +isig +icrnl +onlcr
++ * winsize <cols> <rows>\n" (PTY-2c ctl_render; sign per flag; the
++ * token order is not assumed). flags_out bits: 1 icanon, 2 echo,
++ * 4 isig, 8 icrnl, 16 onlcr. */
++static int pts_ctl_read(unsigned n, unsigned *flags_out,
++                        unsigned *cols_out, unsigned *rows_out)
++{
++	int cfd = pts_ctl_open(n, O_RDONLY);
++	if (cfd < 0) return -1;
++	/* ONE read fetches the WHOLE render (audit F2 -- a load-bearing
++	 * dependency, not an assumption to inherit silently): ctl_render
++	 * is bounded ~54 bytes, ptyfs serves the full render at offset 0
++	 * in one Rread, the negotiated msize payload is far larger, and a
++	 * ctl read never defers. A partial read would silently mis-parse
++	 * flags/winsize -- if any of those properties ever changes, this
++	 * must become a read-to-EOF loop. */
++	char buf[96];
++	long r = read(cfd, buf, sizeof(buf) - 1);
++	close(cfd);
++	if (r <= 0) return -1;
++	buf[r] = 0;
+ 
+-	/* SNDRV_TIMER_IOCTL_STATUS */
+-	{ _IOR('T', 0x14, char[96]), _IOR('T', 0x14, 88), 88, R, 0, OFFS(0,4) },
++	static const char *const names[5] =
++		{ "icanon", "echo", "isig", "icrnl", "onlcr" };
++	unsigned flags = 0;
++	for (int i = 0; i < 5; i++) {
++		size_t nl = strlen(names[i]);
++		for (char *s = buf; (s = strstr(s, names[i])) != 0; s += nl) {
++			if (s == buf) continue;
++			char sign = s[-1];
++			char end = s[nl];
++			if ((sign != '+' && sign != '-') ||
++			    (end != ' ' && end != '\n' && end != 0))
++				continue;
++			if (sign == '+') flags |= 1u << i;
++			break;
++		}
++	}
++	unsigned cols = 0, rows = 0;
++	char *w = strstr(buf, "winsize ");
++	if (w) {
++		w += 8;
++		while (*w >= '0' && *w <= '9')
++			cols = cols * 10 + (unsigned)(*w++ - '0');
++		while (*w == ' ') w++;
++		while (*w >= '0' && *w <= '9')
++			rows = rows * 10 + (unsigned)(*w++ - '0');
++	}
++	if (flags_out) *flags_out = flags;
++	if (cols_out) *cols_out = cols;
++	if (rows_out) *rows_out = rows;
++	return 0;
++}
+ 
+-	/* SNDRV_PCM_IOCTL_STATUS[_EXT] */
+-	{ _IOR('A', 0x20, char[128]), _IOR('A', 0x20, char[108]), 108, R, 1, OFFS(4,8,12,16,52,56,60,64) },
+-	{ _IOWR('A', 0x24, char[128]), _IOWR('A', 0x24, char[108]), 108, WR, 1, OFFS(4,8,12,16,52,56,60,64) },
++static int pts_ctl_write(unsigned n, const char *cmd, size_t len)
++{
++	int cfd = pts_ctl_open(n, O_WRONLY);
++	if (cfd < 0) return -1;
++	long w = write(cfd, cmd, len);
++	close(cfd);
++	return (w == (long)len) ? 0 : -1;
++}
+ 
+-	/* SNDRV_RAWMIDI_IOCTL_STATUS */
+-	{ _IOWR('W', 0x20, char[48]), _IOWR('W', 0x20, char[36]), 36, WR, 1, OFFS(4,8) },
+-
+-	/* SNDRV_PCM_IOCTL_SYNC_PTR - with 3 subtables */
+-	{ _IOWR('A', 0x23, char[136]), _IOWR('A', 0x23, char[132]), 0, WR, 1, 0 },
+-	{ 0, 0, 4, WR, 1, 0 }, /* snd_pcm_sync_ptr (flags only) */
+-	{ 0, 0, 32, WR, 1, OFFS(8,12,16,24,28) }, /* snd_pcm_mmap_status */
+-	{ 0, 0, 4, WR, 1, 0 }, /* snd_pcm_mmap_control (each member) */
+-
+-	/* VIDIOC_QUERYBUF, VIDIOC_QBUF, VIDIOC_DQBUF, VIDIOC_PREPARE_BUF */
+-	{ _IOWR('V',  9, new_misaligned(68)), _IOWR('V',  9, char[68]), 68, WR, 1, OFFS(20, 24) },
+-	{ _IOWR('V', 15, new_misaligned(68)), _IOWR('V', 15, char[68]), 68, WR, 1, OFFS(20, 24) },
+-	{ _IOWR('V', 17, new_misaligned(68)), _IOWR('V', 17, char[68]), 68, WR, 1, OFFS(20, 24) },
+-	{ _IOWR('V', 93, new_misaligned(68)), _IOWR('V', 93, char[68]), 68, WR, 1, OFFS(20, 24) },
+-
+-	/* VIDIOC_DQEVENT */
+-	{ _IOR('V', 89, new_misaligned(120)), _IOR('V', 89, struct v4l2_event), sizeof(struct v4l2_event),
+-	  R, 0, OFFS(offsetof(struct v4l2_event, ts[0]), offsetof(struct v4l2_event, ts[1])) },
+-
+-	/* VIDIOC_OMAP3ISP_STAT_REQ */
+-	{ _IOWR('V', 192+6, char[32]), _IOWR('V', 192+6, char[24]), 22, WR, 0, OFFS(0,4) },
+-
+-	/* PPPIOCGIDLE */
+-	{ _IOR('t', 63, char[16]), _IOR('t', 63, char[8]), 8, R, 0, OFFS(0,4) },
+-
+-	/* PPGETTIME, PPSETTIME */
+-	{ _IOR('p', 0x95, char[16]), _IOR('p', 0x95, char[8]), 8, R, 0, OFFS(0,4) },
+-	{ _IOW('p', 0x96, char[16]), _IOW('p', 0x96, char[8]), 8, W, 0, OFFS(0,4) },
+-
+-	/* LPSETTIMEOUT */
+-	{ _IOW(0x6, 0xf, char[16]), 0x060f, 8, W, 0, OFFS(0,4) },
+-};
+-
+-static void convert_ioctl_struct(const struct ioctl_compat_map *map, char *old, char *new, int dir)
++/* Append an unsigned decimal to cmd at len; returns the new len. */
++static int put_dec(char *cmd, int len, unsigned v)
+ {
+-	int new_offset = 0;
+-	int old_offset = 0;
+-	int old_size = map->old_size;
+-	if (!(dir & map->dir)) return;
+-	if (!map->old_size) {
+-		/* offsets hard-coded for SNDRV_PCM_IOCTL_SYNC_PTR;
+-		 * if another exception appears this needs changing. */
+-		convert_ioctl_struct(map+1, old, new, dir);
+-		convert_ioctl_struct(map+2, old+4, new+8, dir);
+-		/* snd_pcm_mmap_control, special-cased due to kernel
+-		 * type definition having been botched. */
+-		int adj = BYTE_ORDER==BIG_ENDIAN ? 4 : 0;
+-		convert_ioctl_struct(map+3, old+68, new+72+adj, dir);
+-		convert_ioctl_struct(map+3, old+72, new+76+3*adj, dir);
+-		return;
+-	}
+-	for (int i=0; i < map->noffs; i++) {
+-		int ts_offset = map->offsets[i];
+-		int len = ts_offset-old_offset;
+-		if (dir==W) memcpy(old+old_offset, new+new_offset, len);
+-		else memcpy(new+new_offset, old+old_offset, len);
+-		new_offset += len;
+-		old_offset += len;
+-		long long new_ts;
+-		long old_ts;
+-		int align = map->force_align ? sizeof(time_t) : alignof(time_t);
+-		new_offset += (align-1) & -new_offset;
+-		if (dir==W) {
+-			memcpy(&new_ts, new+new_offset, sizeof new_ts);
+-			old_ts = new_ts;
+-			memcpy(old+old_offset, &old_ts, sizeof old_ts);
+-		} else {
+-			memcpy(&old_ts, old+old_offset, sizeof old_ts);
+-			new_ts = old_ts;
+-			memcpy(new+new_offset, &new_ts, sizeof new_ts);
+-		}
+-		new_offset += sizeof new_ts;
+-		old_offset += sizeof old_ts;
+-	}
+-	if (dir==W) memcpy(old+old_offset, new+new_offset, old_size-old_offset);
+-	else memcpy(new+new_offset, old+old_offset, old_size-old_offset);
++	char dec[10];   /* a full unsigned is 10 digits (audit F1; the two
++	                 * live callers pass unsigned short, <= 5) */
++	int dl = 0;
++	if (v == 0) dec[dl++] = '0';
++	else while (v) { dec[dl++] = (char)('0' + (v % 10)); v /= 10; }
++	while (dl) cmd[len++] = dec[--dl];
++	return len;
+ }
+ 
+ int ioctl(int fd, int req, ...)
+@@ -132,20 +221,171 @@
+ 	va_start(ap, req);
+ 	arg = va_arg(ap, void *);
+ 	va_end(ap);
+-	int r = __syscall(SYS_ioctl, fd, req, arg);
+-	if (SIOCGSTAMP != SIOCGSTAMP_OLD && req && r==-ENOTTY) {
+-		for (int i=0; i<sizeof compat_map/sizeof *compat_map; i++) {
+-			if (compat_map[i].new_req != req) continue;
+-			union {
+-				long long align;
+-				char buf[256];
+-			} u;
+-			convert_ioctl_struct(&compat_map[i], u.buf, arg, W);
+-			r = __syscall(SYS_ioctl, fd, compat_map[i].old_req, u.buf);
+-			if (r<0) break;
+-			convert_ioctl_struct(&compat_map[i], u.buf, arg, R);
+-			break;
++
++	unsigned n;
++	int fk;
++
++	switch (req) {
++	case TCGETS: {
++		struct termios *tio = arg;
++		unsigned flags, cols, rows;
++		if (!tio) { errno = EINVAL; return -1; }
++		if (pts_resolve(fd, &n, &fk) != 0) { errno = ENOTTY; return -1; }
++		if (pts_ctl_read(n, &flags, &cols, &rows) != 0) {
++			errno = ENOTTY;
++			return -1;
+ 		}
++		memset(tio, 0, sizeof(*tio));
++		tio->c_iflag = (flags & 8) ? ICRNL : 0;
++		tio->c_oflag = (flags & 16) ? (OPOST | ONLCR) : 0;
++		tio->c_cflag = CS8 | CREAD | B38400;
++		tio->c_lflag = ((flags & 1) ? ICANON : 0) |
++		               ((flags & 2) ? (ECHO | ECHOE | ECHOK) : 0) |
++		               ((flags & 4) ? ISIG : 0);
++		tio->c_cc[VINTR]  = 0x03;   /* ^C  (the ldisc's fixed trio) */
++		tio->c_cc[VQUIT]  = 0x1c;   /* ^\ */
++		tio->c_cc[VSUSP]  = 0x1a;   /* ^Z */
++		tio->c_cc[VERASE] = 0x7f;   /* DEL (the ldisc erases BS + DEL) */
++		tio->c_cc[VMIN]   = 1;
++		tio->c_cc[VTIME]  = 0;
++		tio->__c_ispeed = 38400;
++		tio->__c_ospeed = 38400;
++		return 0;
+ 	}
+-	return __syscall_ret(r);
++	case TCSETS:
++	case TCSETSW:
++	case TCSETSF: {
++		/* All three variants collapse onto the atomic ctl mode write
++		 * (the PTY-2c grammar applies TCSAFLUSH-style: apply-all,
++		 * reset the cooked assembly line). Drain/flush distinctions
++		 * are moot on the synchronous rings — see the TCSBRK note. */
++		const struct termios *tio = arg;
++		if (!tio) { errno = EINVAL; return -1; }
++		if (pts_resolve(fd, &n, &fk) != 0) { errno = ENOTTY; return -1; }
++		char cmd[64];
++		int onlcr = (tio->c_oflag & OPOST) && (tio->c_oflag & ONLCR);
++		int len = 0;
++		cmd[len++] = (tio->c_lflag & ICANON) ? '+' : '-';
++		memcpy(cmd + len, "icanon ", 7); len += 7;
++		cmd[len++] = (tio->c_lflag & ECHO) ? '+' : '-';
++		memcpy(cmd + len, "echo ", 5); len += 5;
++		cmd[len++] = (tio->c_lflag & ISIG) ? '+' : '-';
++		memcpy(cmd + len, "isig ", 5); len += 5;
++		cmd[len++] = (tio->c_iflag & ICRNL) ? '+' : '-';
++		memcpy(cmd + len, "icrnl ", 6); len += 6;
++		cmd[len++] = onlcr ? '+' : '-';
++		memcpy(cmd + len, "onlcr", 5); len += 5;
++		if (pts_ctl_write(n, cmd, (size_t)len) != 0) {
++			errno = ENOTTY;
++			return -1;
++		}
++		return 0;
++	}
++	case TIOCGWINSZ: {
++		struct winsize *ws = arg;
++		unsigned flags, cols, rows;
++		if (!ws) { errno = EINVAL; return -1; }
++		if (pts_resolve(fd, &n, &fk) != 0) { errno = ENOTTY; return -1; }
++		if (pts_ctl_read(n, &flags, &cols, &rows) != 0) {
++			errno = ENOTTY;
++			return -1;
++		}
++		ws->ws_col = (unsigned short)cols;
++		ws->ws_row = (unsigned short)rows;
++		ws->ws_xpixel = 0;
++		ws->ws_ypixel = 0;
++		return 0;
++	}
++	case TIOCSWINSZ: {
++		const struct winsize *ws = arg;
++		if (!ws) { errno = EINVAL; return -1; }
++		if (pts_resolve(fd, &n, &fk) != 0) { errno = ENOTTY; return -1; }
++		char cmd[40];
++		int len = 0;
++		memcpy(cmd, "winsize ", 8); len = 8;
++		len = put_dec(cmd, len, ws->ws_col);
++		cmd[len++] = ' ';
++		len = put_dec(cmd, len, ws->ws_row);
++		if (pts_ctl_write(n, cmd, (size_t)len) != 0) {
++			errno = ENOTTY;
++			return -1;
++		}
++		return 0;
++	}
++	case TIOCGPTN: {
++		/* ptsname_r's source. Master-only (the Linux devpts shape). */
++		int *out = arg;
++		if (!out) { errno = EINVAL; return -1; }
++		if (pts_resolve(fd, &n, &fk) != 0 || fk != POUCH_PTS_FK_MASTER) {
++			errno = ENOTTY;
++			return -1;
++		}
++		*out = (int)n;
++		return 0;
++	}
++	case TIOCSPTLCK:
++		/* unlockpt. Thylacine pts pairs are born unlocked (there is
++		 * no grant/unlock dance — the mint IS the grant); accept the
++		 * unlock as a no-op on a master, per the modern-devpts model. */
++		if (pts_resolve(fd, &n, &fk) != 0 || fk != POUCH_PTS_FK_MASTER) {
++			errno = ENOTTY;
++			return -1;
++		}
++		return 0;
++	case TIOCSCTTY:
++		/* Controlling-terminal acquisition is a KERNEL syscall keyed
++		 * on the caller's own slave fd (PTY-1d; the kernel validates
++		 * fd-is-a-slave-binding + session-leader + not-stolen). The
++		 * pts_resolve pre-gate (audit F3) exists ONLY for POSIX errno
++		 * fidelity -- a non-tty fd answers ENOTTY here instead of the
++		 * kernel's EINVAL/EACCES-shaped refusal; the kernel's own
++		 * validation remains the authority for real pts fds. */
++		if (pts_resolve(fd, &n, &fk) != 0) { errno = ENOTTY; return -1; }
++		return __syscall_ret(__syscall(SYS_tty_acquire, fd));
++	case TIOCGPGRP: {
++		int *out = arg;
++		if (!out) { errno = EINVAL; return -1; }
++		if (pts_resolve(fd, &n, &fk) != 0) { errno = ENOTTY; return -1; }
++		long r = __syscall(SYS_tty_get_fg, fd);
++		if (r < 0) return __syscall_ret(r);
++		/* 0 = no foreground group seated yet (kernel contract). */
++		*out = (int)r;
++		return 0;
++	}
++	case TIOCSPGRP: {
++		const int *pg = arg;
++		if (!pg) { errno = EINVAL; return -1; }
++		if (pts_resolve(fd, &n, &fk) != 0) { errno = ENOTTY; return -1; }
++		return __syscall_ret(__syscall(SYS_tty_set_fg, fd, *pg));
++	}
++	case TCSBRK:
++	case TCSBRKP:
++		/* tcdrain (TCSBRK,1) + tcsendbreak (TCSBRK,0 / TCSBRKP).
++		 * Drain: complete-on-return by construction — a pts write
++		 * lands in the peer ring before the Twrite returns; there is
++		 * no deeper output queue. Break: no pts representation (as on
++		 * Linux pts without pktmode). Both answer 0 on a pts. */
++		if (pts_resolve(fd, &n, &fk) != 0) { errno = ENOTTY; return -1; }
++		return 0;
++	case TCFLSH:
++		/* tcflush: the ctl grammar has no flush verb at v1.0, and a
++		 * silent 0 would lie about queued bytes. Honest ENOTSUP;
++		 * documented v1.x seam (a ctl "flush" verb). */
++		if (pts_resolve(fd, &n, &fk) != 0) { errno = ENOTTY; return -1; }
++		errno = ENOTSUP;
++		return -1;
++	case TIOCGSID:
++	case TIOCNOTTY:
++		/* No kernel surface: acquisition is explicit + session-
++		 * scoped; there is no controlling-terminal drop nor a
++		 * session-of-terminal query at v1.0 (PTY-1d). */
++		if (pts_resolve(fd, &n, &fk) != 0) { errno = ENOTTY; return -1; }
++		errno = ENOTSUP;
++		return -1;
++	default:
++		/* Unknown request on any fd: ENOTTY (the Linux convention;
++		 * the pre-PTY-3 pouch answered ENOSYS for every ioctl). */
++		errno = ENOTTY;
++		return -1;
++	}
+ }
+diff a/src/misc/openpty.c b/src/misc/openpty.c
+--- a/src/misc/openpty.c	2026-07-18 08:02:22
++++ b/src/misc/openpty.c	2026-07-18 08:07:11
+@@ -12,7 +12,8 @@
+ 	int m, s, n=0, cs;
+ 	char buf[20];
+ 
+-	m = open("/dev/ptmx", O_RDWR|O_NOCTTY);
++	/* PTY-3: the devpts-native mint node (see pty.c). */
++	m = open("/dev/pts/ptmx", O_RDWR|O_NOCTTY);
+ 	if (m < 0) return -1;
+ 
+ 	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cs);
+diff a/src/misc/pty.c b/src/misc/pty.c
+--- a/src/misc/pty.c	2026-07-18 08:02:22
++++ b/src/misc/pty.c	2026-07-18 08:22:54
+@@ -7,7 +7,13 @@
+ 
+ int posix_openpt(int flags)
+ {
+-	int r = open("/dev/ptmx", flags);
++	/* PTY-3: Thylacine's master mint is the devpts-NATIVE node
++	 * /dev/pts/ptmx (Linux has the same node; its /dev/ptmx is a
++	 * compat symlink Thylacine cannot provide pre-symlinks, G11).
++	 * The open IS the mint: ptyfs rebinds the opened fid onto a
++	 * fresh master (the Plan 9 clone idiom). O_NOCTTY is inert --
++	 * acquisition is always an explicit TIOCSCTTY on Thylacine. */
++	int r = open("/dev/pts/ptmx", flags);
+ 	if (r < 0 && errno == ENOSPC) errno = EAGAIN;
+ 	return r;
+ }
+@@ -25,9 +31,11 @@
+ 
+ int __ptsname_r(int fd, char *buf, size_t len)
+ {
+-	int pty, err;
++	int pty;
+ 	if (!buf) len = 0;
+-	if ((err = __syscall(SYS_ioctl, fd, TIOCGPTN, &pty))) return -err;
++	/* PTY-3 (0021): via the dispatcher (the fstat qid decode); the
++	 * ptsname_r contract returns the error NUMBER, not -1/errno. */
++	if (ioctl(fd, TIOCGPTN, &pty) < 0) return errno;
+ 	if (snprintf(buf, len, "/dev/pts/%d", pty) >= len) return ERANGE;
+ 	return 0;
+ }
+diff a/src/signal/_pouch_signal.c b/src/signal/_pouch_signal.c
+--- a/src/signal/_pouch_signal.c	2026-07-18 08:02:22
++++ b/src/signal/_pouch_signal.c	2026-07-18 08:08:45
+@@ -59,6 +59,23 @@
+     case SIGCHLD:
+         *out = "child_exit";
+         return 0;
++    /* PTY-3: the tty job-control family (kernel-raised, receive-only --
++     * see the header preamble; kill()/raise() gate these to EPERM). */
++    case SIGQUIT:
++        *out = "tty:quit";
++        return 0;
++    case SIGTSTP:
++        *out = "tty:susp";
++        return 0;
++    case SIGCONT:
++        *out = "tty:cont";
++        return 0;
++    case SIGWINCH:
++        *out = "tty:winch";
++        return 0;
++    case SIGHUP:
++        *out = "tty:hup";
++        return 0;
+     default:
+         return -1;
+     }
+@@ -73,6 +90,12 @@
+     /* SIGKILL/SIGSTOP cannot be blocked; we silently drop them. */
+     if (sigismember(s, SIGPIPE) == 1) m |= POUCH_NOTE_BIT_PIPE;
+     if (sigismember(s, SIGCHLD) == 1) m |= POUCH_NOTE_BIT_CHILD_EXIT;
++    /* PTY-3: any member of the tty family raises the ONE family bit
++     * (documented coarseness -- see the header). */
++    if (sigismember(s, SIGQUIT) == 1 || sigismember(s, SIGTSTP) == 1 ||
++        sigismember(s, SIGCONT) == 1 || sigismember(s, SIGWINCH) == 1 ||
++        sigismember(s, SIGHUP) == 1)
++        m |= POUCH_NOTE_BIT_TTY;
+     return m;
+ }
+ 
+@@ -85,6 +108,13 @@
+     }
+     if (m & POUCH_NOTE_BIT_PIPE)       sigaddset(out, SIGPIPE);
+     if (m & POUCH_NOTE_BIT_CHILD_EXIT) sigaddset(out, SIGCHLD);
++    if (m & POUCH_NOTE_BIT_TTY) {
++        sigaddset(out, SIGQUIT);
++        sigaddset(out, SIGTSTP);
++        sigaddset(out, SIGCONT);
++        sigaddset(out, SIGWINCH);
++        sigaddset(out, SIGHUP);
++    }
+ }
+ 
+ hidden void __pouch_note_handler(const char *name, unsigned int arg)
+@@ -109,6 +139,16 @@
+         sig = SIGPIPE;
+     } else if (__pouch_note_name_eq(name, "child_exit")) {
+         sig = SIGCHLD;
++    } else if (__pouch_note_name_eq(name, "tty:quit")) {
++        sig = SIGQUIT;
++    } else if (__pouch_note_name_eq(name, "tty:susp")) {
++        sig = SIGTSTP;
++    } else if (__pouch_note_name_eq(name, "tty:cont")) {
++        sig = SIGCONT;
++    } else if (__pouch_note_name_eq(name, "tty:winch")) {
++        sig = SIGWINCH;
++    } else if (__pouch_note_name_eq(name, "tty:hup")) {
++        sig = SIGHUP;
+     } else if (__pouch_note_name_eq(name, "kill")) {
+         /* `kill` is non-catchable per N-4 (notes.h). The kernel calls
+          * exits("killed") directly; this branch is defense-in-depth in
+@@ -143,7 +183,18 @@
+          * terminating default, or a kernel re-introducing a refusal) -- NOT
+          * the normal multi-thread path; relying on it to swallow a
+          * terminating signal would be the bug. */
+-        if (sig == SIGCHLD) {
++        /* PTY-3 SIG_DFL dispositions for the tty family:
++         *   SIGQUIT / SIGHUP: NDFLT (whole-Proc terminate -- POSIX).
++         *   SIGWINCH / SIGCONT: NCONT (POSIX default = ignore; a cont's
++         *       RESUME already happened kernel-side at SYS_TTY_CONT).
++         *   SIGTSTP: NCONT-ignore -- the DOCUMENTED v1.0 seam (POSIX
++         *       default is STOP, but the kernel NDFLT arm TERMINATES
++         *       and pouch has no self-stop path; see the header
++         *       preamble + docs/reference/83-pouch-signals.md). Using
++         *       NDFLT here would turn ^Z into process death -- the one
++         *       actively-wrong option. */
++        if (sig == SIGCHLD || sig == SIGWINCH || sig == SIGCONT ||
++            sig == SIGTSTP) {
+             __syscall(SYS_noted, POUCH_SYS_NOTED_NCONT);
+         } else {
+             long r = __syscall(SYS_noted, POUCH_SYS_NOTED_NDFLT);
+diff a/src/signal/kill.c b/src/signal/kill.c
+--- a/src/signal/kill.c	2026-07-18 08:02:22
++++ b/src/signal/kill.c	2026-07-18 08:08:45
+@@ -24,6 +24,18 @@
+ 		return -1;
+ 	}
+ 
++	/* PTY-3: the tty:* family is kernel-synthetic-only on the POST
++	 * axis (the I-39 F4 gate -- notes_post rejects a userspace tty:*
++	 * post so nobody can forge a terminal event). These signums are
++	 * receive-only: handlers catch the kernel-raised events; sending
++	 * them answers EPERM (the kernel would refuse anyway; answering
++	 * here gives the POSIX-shaped errno instead of a bare -1). */
++	if (name[0] == 't' && name[1] == 't' && name[2] == 'y' &&
++	    name[3] == ':') {
++		errno = EPERM;
++		return -1;
++	}
++
+ 	unsigned long len = (unsigned long)strlen(name);
+ 	return syscall(SYS_postnote, (long)pid, name, len);
+ }
+diff a/src/signal/raise.c b/src/signal/raise.c
+--- a/src/signal/raise.c	2026-07-18 08:02:22
++++ b/src/signal/raise.c	2026-07-18 08:08:45
+@@ -27,6 +27,18 @@
+ 		return -1;
+ 	}
+ 
++	/* PTY-3: the tty:* family is kernel-synthetic-only on the POST
++	 * axis (the I-39 F4 gate -- notes_post rejects a userspace tty:*
++	 * post so nobody can forge a terminal event). These signums are
++	 * receive-only: handlers catch the kernel-raised events; sending
++	 * them answers EPERM (the kernel would refuse anyway; answering
++	 * here gives the POSIX-shaped errno instead of a bare -1). */
++	if (name[0] == 't' && name[1] == 't' && name[2] == 'y' &&
++	    name[3] == ':') {
++		errno = EPERM;
++		return -1;
++	}
++
+ 	/* pid = 0 is the kernel's self-post sentinel (sys_postnote_handler
+ 	 * fast-path; see kernel/syscall.c). The kernel handles the kill-vs-
+ 	 * multi-thread gate internally. */
+diff a/src/signal/sigaction.c b/src/signal/sigaction.c
+--- a/src/signal/sigaction.c	2026-07-18 08:02:22
++++ b/src/signal/sigaction.c	2026-07-18 08:08:45
+@@ -29,7 +29,12 @@
+ 	 * also return EINVAL at v1.0 — the supported set grows per chunk
+ 	 * without an ABI break. */
+ 	if (sig != SIGINT && sig != SIGTERM &&
+-	    sig != SIGPIPE && sig != SIGCHLD) {
++	    sig != SIGPIPE && sig != SIGCHLD &&
++	    /* PTY-3: the tty job-control family (receive-only -- the
++	     * kernel raises them; kill()/raise() of them answer EPERM).
++	     * SIGSTOP stays uncatchable (not in the set -> EINVAL). */
++	    sig != SIGQUIT && sig != SIGTSTP && sig != SIGCONT &&
++	    sig != SIGWINCH && sig != SIGHUP) {
+ 		errno = EINVAL;
+ 		return -1;
+ 	}
+diff a/src/stdio/__fdopen.c b/src/stdio/__fdopen.c
+--- a/src/stdio/__fdopen.c	2026-07-18 08:22:17
++++ b/src/stdio/__fdopen.c	2026-07-18 08:22:54
+@@ -43,8 +43,15 @@
+ 
+ 	/* Activate line buffered mode for terminals */
+ 	f->lbf = EOF;
+-	if (!(f->flags & F_NOWR) && !__syscall(SYS_ioctl, fd, TIOCGWINSZ, &wsz))
+-		f->lbf = '\n';
++	/* PTY-3 (0021): via the public dispatcher, errno-preserved (see
++	 * __stdout_write.c). */
++	{
++		int e = errno;
++		int r = ioctl(fd, TIOCGWINSZ, &wsz);
++		errno = e;
++		if (!(f->flags & F_NOWR) && !r)
++			f->lbf = '\n';
++	}
+ 
+ 	/* Initialize op ptrs. No problem if some are unneeded. */
+ 	f->read = __stdio_read;
+diff a/src/stdio/__stdout_write.c b/src/stdio/__stdout_write.c
+--- a/src/stdio/__stdout_write.c	2026-07-18 08:22:17
++++ b/src/stdio/__stdout_write.c	2026-07-18 08:22:54
+@@ -1,11 +1,21 @@
+ #include "stdio_impl.h"
+ #include <sys/ioctl.h>
++#include <errno.h>
+ 
+ size_t __stdout_write(FILE *f, const unsigned char *buf, size_t len)
+ {
+ 	struct winsize wsz;
+ 	f->write = __stdio_write;
+-	if (!(f->flags & F_SVB) && __syscall(SYS_ioctl, f->fd, TIOCGWINSZ, &wsz))
++	/* PTY-3 (0021): the tty probe via the public dispatcher (raw
++	 * SYS_ioctl is -ENOSYS -> every stream looked non-tty -> no line
++	 * buffering on a pts). errno preserved: a failed probe on a
++	 * non-tty is the COMMON path and must not clobber the caller's
++	 * errno from inside a successful stdio write. Runs once per
++	 * stream (f->write is retargeted above). */
++	int e = errno;
++	int r = ioctl(f->fd, TIOCGWINSZ, &wsz);
++	errno = e;
++	if (!(f->flags & F_SVB) && r)
+ 		f->lbf = -1;
+ 	return __stdio_write(f, buf, len);
+ }
+diff a/src/termios/tcdrain.c b/src/termios/tcdrain.c
+--- a/src/termios/tcdrain.c	2026-07-18 08:22:17
++++ b/src/termios/tcdrain.c	2026-07-18 08:22:54
+@@ -4,5 +4,7 @@
+ 
+ int tcdrain(int fd)
+ {
+-	return syscall_cp(SYS_ioctl, fd, TCSBRK, 1);
++	/* PTY-3 (0021): via the dispatcher (see isatty.c). Cancellation
++	 * is a non-surface in pouch (no EINTR retry surface at v1.0). */
++	return ioctl(fd, TCSBRK, 1);
+ }
+diff a/src/termios/tcgetwinsize.c b/src/termios/tcgetwinsize.c
+--- a/src/termios/tcgetwinsize.c	2026-07-18 08:22:17
++++ b/src/termios/tcgetwinsize.c	2026-07-18 08:22:54
+@@ -4,5 +4,5 @@
+ 
+ int tcgetwinsize(int fd, struct winsize *wsz)
+ {
+-	return syscall(SYS_ioctl, fd, TIOCGWINSZ, wsz);
++	return ioctl(fd, TIOCGWINSZ, wsz);   /* PTY-3 (0021): via the dispatcher */
+ }
+diff a/src/termios/tcsetwinsize.c b/src/termios/tcsetwinsize.c
+--- a/src/termios/tcsetwinsize.c	2026-07-18 08:22:17
++++ b/src/termios/tcsetwinsize.c	2026-07-18 08:22:54
+@@ -4,5 +4,5 @@
+ 
+ int tcsetwinsize(int fd, const struct winsize *wsz)
+ {
+-	return syscall(SYS_ioctl, fd, TIOCSWINSZ, wsz);
++	return ioctl(fd, TIOCSWINSZ, wsz);   /* PTY-3 (0021): via the dispatcher */
+ }
+diff a/src/unistd/isatty.c b/src/unistd/isatty.c
+--- a/src/unistd/isatty.c	2026-07-18 08:22:17
++++ b/src/unistd/isatty.c	2026-07-18 08:22:54
+@@ -5,9 +5,11 @@
+ 
+ int isatty(int fd)
+ {
++	/* PTY-3 (0021): SYS_ioctl is the -ENOSYS sentinel on Thylacine;
++	 * the tty surface is the src/misc/ioctl.c dispatcher. Same probe,
++	 * routed through the public ioctl(). */
+ 	struct winsize wsz;
+-	unsigned long r = syscall(SYS_ioctl, fd, TIOCGWINSZ, &wsz);
+-	if (r == 0) return 1;
++	if (ioctl(fd, TIOCGWINSZ, &wsz) == 0) return 1;
+ 	if (errno != EBADF) errno = ENOTTY;
+ 	return 0;
+ }

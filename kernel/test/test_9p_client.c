@@ -1098,24 +1098,30 @@ void test_9p_client_async_handoff_skips_async(void) {
 }
 
 // 8c-3 (#89): the elected-reader handoff MUST skip an op whose owner is being
-// debug-stopped. A debug-stopped thread parks (8c-2) and cannot run the reader
-// loop, so handing it the role would strand a survivor whose reply needs
-// reading (the be_reader wakeup lands on a rendez whose waiter has moved to
-// debug_rendez -- a no-op). The role must land on a runnable survivor, or be
-// dropped if none is pending (reader_active is already false -> a future
-// survivor op self-elects). The full reader-election path (client_wait) needs a
-// debuggable EL0 thread the kproc test context cannot provide, so drive the
-// handoff directly over synthetic inflight rpcs with synthetic owner Procs.
+// stopped -- by the debugger OR (PTY-1f) a job-control stop; the gate is
+// proc_stop_requested's disjunction. A stopped thread parks (8c-2) and cannot
+// run the reader loop, so handing it the role would strand a survivor whose
+// reply needs reading (the be_reader wakeup lands on a rendez whose waiter
+// has moved to debug_rendez -- a no-op). The role must land on a runnable
+// survivor, or be dropped if none is pending (reader_active is already false
+// -> a future survivor op self-elects). The full reader-election path
+// (client_wait) needs a stoppable EL0 thread the kproc test context cannot
+// provide, so drive the handoff directly over synthetic inflight rpcs with
+// synthetic owner Procs. The job leg is the R2-F2 revert-probe: a handoff
+// reading debug_stop_req ONLY hands the role to a Ctrl-Z'd owner -- the #89
+// freeze re-opened via the job axis.
 void test_9p_client_handoff_skips_debug_stopped_owner(void) {
     drive_client_open(&g_client, &g_loopback);
 
-    // Two synthetic owner Procs. The handoff reads ONLY owner->debug_stop_req,
-    // so set just that field (a full {0} on the ~400-byte struct would emit a
+    // Two synthetic owner Procs. The handoff reads ONLY the two stop flags,
+    // so set just those (a full {0} on the ~400-byte struct would emit a
     // memset the freestanding kernel does not link; every other field is unread).
     struct Proc owner_stopped;
     struct Proc owner_survivor;
     owner_stopped.debug_stop_req  = 1;   // being debug-stopped
+    owner_stopped.job_stop_req    = 0;
     owner_survivor.debug_stop_req = 0;   // runnable
+    owner_survivor.job_stop_req   = 0;
 
     // The STOPPED op sits at the LOWER tag: the pre-fix handoff picks the first
     // eligible inflight, so without the skip it would choose owner_stopped and
@@ -1144,14 +1150,29 @@ void test_9p_client_handoff_skips_debug_stopped_owner(void) {
     TEST_ASSERT(rpc_survivor.be_reader,
                 "#89: the runnable survivor's op IS handed the reader role");
 
-    // Now stop BOTH owners: no eligible survivor -> the handoff drops the role
-    // (no be_reader set), leaving a future survivor op to self-elect.
+    // The JOB leg (PTY-1f, R2-F2): a job-stopped owner is skipped exactly as
+    // a debug-stopped one. Flip the stopped owner's axis: debug clear, job
+    // set -- a handoff reading only debug_stop_req would now hand it the role
+    // (the revert-probe for the disjunction).
+    rpc_stopped.be_reader  = false;
+    rpc_survivor.be_reader = false;
+    owner_stopped.debug_stop_req = 0;
+    owner_stopped.job_stop_req   = 1;    // Ctrl-Z'd (the everyday fg suspend)
+    p9_client_handoff_reader(&g_client);
+    TEST_ASSERT(!rpc_stopped.be_reader,
+                "PTY-1f: a JOB-stopped owner's op is NOT handed the reader role");
+    TEST_ASSERT(rpc_survivor.be_reader,
+                "PTY-1f: the survivor takes the role past the job-stopped op");
+
+    // Now stop BOTH owners (one per axis): no eligible survivor -> the
+    // handoff drops the role (no be_reader set), leaving a future survivor
+    // op to self-elect.
     rpc_stopped.be_reader  = false;
     rpc_survivor.be_reader = false;
     owner_survivor.debug_stop_req = 1;
     p9_client_handoff_reader(&g_client);
     TEST_ASSERT(!rpc_stopped.be_reader && !rpc_survivor.be_reader,
-                "#89: all owners debug-stopped -> the role is dropped, not handed");
+                "#89: all owners stopped (either axis) -> the role is dropped");
 
     spin_lock(&g_client.lock);
     g_client.inflight[40] = NULL;

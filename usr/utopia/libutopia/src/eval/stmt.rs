@@ -147,7 +147,10 @@ use libthyla_rs::io::{Read as IoRead, Write as IoWrite};
 use libthyla_rs::process::{pipe, Stdio};
 use libthyla_rs::notes::{send, Note, NoteClass, NoteTarget};
 use libthyla_rs::poll::{PollEvents, PollSet, PollTimeout};
-use libthyla_rs::{t_putstr, t_wait_pid_for, T_WAIT_WNOHANG};
+use libthyla_rs::{
+    t_putstr, t_setpgid, t_tty_cont, t_tty_set_fg, t_wait_exitstatus, t_wait_if_stopped,
+    t_wait_pid_for, T_WAIT_UNTRACED, T_WAIT_WNOHANG,
+};
 
 use super::builtin;
 use super::console;
@@ -699,12 +702,15 @@ fn exec_external_redirected(
     }
 
     let mut spawn_cmd = build_command(argv);
+    let jc = env.job_control.is_some();
     match stdin {
         Some(s) => {
             spawn_cmd.stdin(s);
         }
         None => {
-            spawn_cmd.stdin(Stdio::Piped);
+            // PTY-4b: an un-redirected foreground stdin under job control is
+            // the terminal (see exec_external); a redirect always wins.
+            spawn_cmd.stdin(if jc { Stdio::Inherit } else { Stdio::Piped });
         }
     }
     match stdout {
@@ -730,11 +736,17 @@ fn exec_external_redirected(
                 feed_pipe(&mut wr, body.as_bytes());
                 drop(wr);
             }
-            // Interruptible foreground wait (U-7c-b): reap by pid while
-            // forwarding a Ctrl-C `interrupt` to the running child (see
-            // exec_external for the by-pid / vanished-pid rationale).
             let pid = child.pid();
-            let statuses = wait_pids_interruptible(env, &[pid]);
+            let statuses = if jc {
+                // PTY-4b: own group + the terminal + the stop-aware wait.
+                let pgid = jc_place_in_group(pid, 0);
+                run_foreground_jc(env, &[pid], pgid, render_argv_cmd(argv), false, None)
+            } else {
+                // Interruptible foreground wait (U-7c-b): reap by pid while
+                // forwarding a Ctrl-C `interrupt` to the running child (see
+                // exec_external for the by-pid / vanished-pid rationale).
+                wait_pids_interruptible(env, &[pid])
+            };
             env.status_set(statuses[0]);
             Ok(StatementFlow::Normal)
         }
@@ -841,6 +853,13 @@ enum PipelineSpawn {
         pids: Vec<i32>,
         argvs: Vec<Vec<String>>,
         spawn_err: Option<&'static str>,
+        /// PTY-4b: the job's process group (0 when job control is inactive
+        /// or no element could be group-placed). Under jc every element is
+        /// `setpgid`-placed into the first element's group right after its
+        /// spawn -- foreground AND background (a background job must leave
+        /// the shell's group, else a prompt `^C`, which the kernel fans to
+        /// the FOREGROUND group, would hit it).
+        pgid: u64,
     },
     /// A pre-spawn failure (redirect-target open / `pipe()` alloc) already
     /// set `$status` + `$errstr`; the caller returns `Ok(Normal)`.
@@ -854,7 +873,11 @@ enum PipelineSpawn {
 /// background (register a job). Shared by `exec_pipeline` (foreground) and
 /// `eval_background_pipeline` (`&`); works for n == 1 (a single command:
 /// zero pipes, one element).
-fn spawn_pipeline_elements(env: &mut Env, p: &Pipeline) -> EvalResult<PipelineSpawn> {
+fn spawn_pipeline_elements(
+    env: &mut Env,
+    p: &Pipeline,
+    foreground: bool,
+) -> EvalResult<PipelineSpawn> {
     let n = p.elements.len();
 
     // Validate + evaluate every element's argv AND resolve its redirects
@@ -947,6 +970,8 @@ fn spawn_pipeline_elements(env: &mut Env, p: &Pipeline) -> EvalResult<PipelineSp
     // via the Vecs at fn return.
     let mut pids: Vec<i32> = Vec::with_capacity(n);
     let mut spawn_err: Option<&'static str> = None;
+    // PTY-4b: the job's process group under jc (0 until element 0 mints it).
+    let mut pgid: u64 = 0;
     // Heredoc write ends + bodies, fed after every child is spawned (so
     // each is draining its fd 0), then dropped to deliver EOF.
     let mut heredoc_writes: Vec<(File, String)> = Vec::new();
@@ -967,7 +992,17 @@ fn spawn_pipeline_elements(env: &mut Env, p: &Pipeline) -> EvalResult<PipelineSp
                     spawn_cmd.stdin(Stdio::File(f));
                 }
                 None => {
-                    spawn_cmd.stdin(Stdio::Piped);
+                    // Element 0's outer stdin. PTY-4b: a FOREGROUND job under
+                    // job control reads the terminal (the pts) -- that is what
+                    // makes `cat` interactive and `^Z`-stoppable. Background
+                    // (and the console path) keep the U-6c Piped-drop: with no
+                    // TTIN at v1.0 a background reader on fd 0 would steal
+                    // prompt keystrokes, so it must not inherit the terminal.
+                    if foreground && env.job_control.is_some() {
+                        spawn_cmd.stdin(Stdio::Inherit);
+                    } else {
+                        spawn_cmd.stdin(Stdio::Piped);
+                    }
                 }
             },
         }
@@ -1005,7 +1040,15 @@ fn spawn_pipeline_elements(env: &mut Env, p: &Pipeline) -> EvalResult<PipelineSp
                 drop(child.stdin.take());
                 drop(child.stdout.take());
                 drop(child.stderr.take());
-                pids.push(child.pid());
+                let pid = child.pid();
+                // PTY-4b: place the element into the job's process group
+                // right after its spawn (parent-sets-live-child; spawn has
+                // no pre-exec window, so this immediate placement is the
+                // POSIX race-close analog). Element 0 mints the group.
+                if env.job_control.is_some() {
+                    pgid = jc_place_in_group(pid, pgid);
+                }
+                pids.push(pid);
             }
             Err(_) => {
                 spawn_err = Some("pipeline element spawn failed");
@@ -1026,19 +1069,21 @@ fn spawn_pipeline_elements(env: &mut Env, p: &Pipeline) -> EvalResult<PipelineSp
         pids,
         argvs,
         spawn_err,
+        pgid,
     })
 }
 
 /// Foreground multi-element pipeline (U-6d-a): spawn all elements, reap each
 /// BY PID, aggregate pipefail (scripture 8.4).
 fn exec_pipeline(env: &mut Env, p: &Pipeline) -> EvalResult<StatementFlow> {
-    let (pids, _argvs, spawn_err) = match spawn_pipeline_elements(env, p)? {
+    let (pids, argvs, spawn_err, pgid) = match spawn_pipeline_elements(env, p, true)? {
         PipelineSpawn::Aborted => return Ok(StatementFlow::Normal),
         PipelineSpawn::Spawned {
             pids,
             argvs,
             spawn_err,
-        } => (pids, argvs, spawn_err),
+            pgid,
+        } => (pids, argvs, spawn_err, pgid),
     };
 
     // Reap each spawned element BY PID (U-7-pre `wait_pid_for`). A by-pid
@@ -1048,10 +1093,15 @@ fn exec_pipeline(env: &mut Env, p: &Pipeline) -> EvalResult<StatementFlow> {
     // limitation). statuses[i] holds element i's exit. NB: at v1.0 the
     // kernel collapses any non-zero child exit to 1, so each status is 0
     // or 1; aggregate_pipefail computes rightmost-non-zero regardless.
-    // The reap is the interruptible foreground wait (U-7c-b): a Ctrl-C while
-    // the pipeline runs forwards `interrupt` to its still-live elements. A
-    // vanished pid yields status 0 (never spins; see the helper).
-    let statuses = wait_pids_interruptible(env, &pids);
+    // PTY-4b: under job control the whole job runs in its own group with
+    // the terminal, and the wait is the stop-aware group wait (`^Z` stops
+    // the WHOLE pipeline -- the kernel fans tty:susp to every member); the
+    // console path keeps the interruptible forward-and-reap (U-7c-b).
+    let statuses = if env.job_control.is_some() && pgid != 0 && !pids.is_empty() {
+        run_foreground_jc(env, &pids, pgid, render_pipeline_cmd(&argvs), false, None)
+    } else {
+        wait_pids_interruptible(env, &pids)
+    };
 
     if let Some(tag) = spawn_err {
         env.errstr_set(tag);
@@ -1077,13 +1127,14 @@ fn exec_pipeline(env: &mut Env, p: &Pipeline) -> EvalResult<StatementFlow> {
 /// REPL prompt-cycle reaper (`Repl::reap_jobs`) reclaims the zombies + emits
 /// the `[N]+ Done` line. The spawned children are NOT waited here.
 fn eval_background_pipeline(env: &mut Env, p: &Pipeline) -> EvalResult<StatementFlow> {
-    let (pids, argvs, spawn_err) = match spawn_pipeline_elements(env, p)? {
+    let (pids, argvs, spawn_err, pgid) = match spawn_pipeline_elements(env, p, false)? {
         PipelineSpawn::Aborted => return Ok(StatementFlow::Normal),
         PipelineSpawn::Spawned {
             pids,
             argvs,
             spawn_err,
-        } => (pids, argvs, spawn_err),
+            pgid,
+        } => (pids, argvs, spawn_err, pgid),
     };
 
     if pids.is_empty() {
@@ -1099,13 +1150,18 @@ fn eval_background_pipeline(env: &mut Env, p: &Pipeline) -> EvalResult<Statement
     let last_pid = pids[pids.len() - 1];
     let cmd = render_pipeline_cmd(&argvs);
     let spec = env.jobs_mut().add(pids, cmd);
+    // PTY-4b: record the group so `fg %N` can foreground a running
+    // background job (terminal handoff + the stop-aware wait need it).
+    if pgid != 0 {
+        env.jobs_mut().set_pgid(spec, pgid);
+    }
 
-    // `[N] PID` -- the background-launch announcement (bash). Via t_putstr
-    // (the shell's v1.0 diagnostic sink; same convention as trace_echo + the
-    // banner -- there is no terminal-backed fd 1 yet).
+    // `[N] PID` -- the background-launch announcement (bash), to the
+    // session terminal (fd 1 when live -- on a pts the UART would bypass
+    // it; the fd-less harness keeps the UART sink).
     let mut line = String::new();
     let _ = write!(&mut line, "[{}] {}\n", spec, last_pid);
-    t_putstr(&line);
+    env.emit_line(&line);
 
     // status 0 on a clean launch; 127 if a mid-pipeline element failed (the
     // launched ones still background + reap normally).
@@ -1342,9 +1398,13 @@ fn exec_external(
     // stdout/stderr inherit the console when the shell holds one
     // (env.stdio_inherit, LS-2) so output is visible; else the U-6c
     // Piped + immediate-drop convention (a fd-less harness has nothing
-    // to inherit). stdin stays Piped-drop at LS-2 (interactive child
-    // stdin is LS-5/LS-8). See out_stdio + the module-level note.
-    spawn_cmd.stdin(Stdio::Piped);
+    // to inherit). stdin: under job control (PTY-4b, a pts session) the
+    // foreground child reads the TERMINAL (Inherit) -- that is what makes
+    // it interactive and `^Z`-stoppable; on the console it stays
+    // Piped-drop at LS-2 (interactive child stdin needs a pts). See
+    // out_stdio + the module-level note.
+    let jc = env.job_control.is_some();
+    spawn_cmd.stdin(if jc { Stdio::Inherit } else { Stdio::Piped });
     spawn_cmd.stdout(out_stdio(env.stdio_inherit));
     spawn_cmd.stderr(out_stdio(env.stdio_inherit));
 
@@ -1362,13 +1422,21 @@ fn exec_external(
             drop(child.stdin.take());
             drop(child.stdout.take());
             drop(child.stderr.take());
-            // Interruptible foreground wait (U-7c-b): reap by pid while
-            // forwarding a Ctrl-C `interrupt` to the running child. Child::Drop
-            // does not reap, so this by-pid wait is the sole reap. A vanished
-            // pid yields 0 (the prior `wait failed -> status 1` arm was
-            // unreachable for a just-spawned child -- nothing else reaps it).
             let pid = child.pid();
-            let statuses = wait_pids_interruptible(env, &[pid]);
+            let statuses = if jc {
+                // PTY-4b: own group + the terminal + the stop-aware wait.
+                // The kernel routes `^C`/`^Z` to the job directly.
+                let pgid = jc_place_in_group(pid, 0);
+                run_foreground_jc(env, &[pid], pgid, render_argv_cmd(argv), false, None)
+            } else {
+                // Interruptible foreground wait (U-7c-b): reap by pid while
+                // forwarding a Ctrl-C `interrupt` to the running child.
+                // Child::Drop does not reap, so this by-pid wait is the sole
+                // reap. A vanished pid yields 0 (the prior `wait failed ->
+                // status 1` arm was unreachable for a just-spawned child --
+                // nothing else reaps it).
+                wait_pids_interruptible(env, &[pid])
+            };
             env.status_set(statuses[0]);
             Ok(StatementFlow::Normal)
         }
@@ -2324,6 +2392,207 @@ fn poll_loop_interrupt(env: &mut Env) -> bool {
 }
 
 // ---------------------------------------------------------------------
+// PTY-4b: job control (active only on a pts, after the session dance)
+// ---------------------------------------------------------------------
+//
+// On the console the kernel routes signals to the CONSOLE OWNER (ut), which
+// forwards them (`wait_pids_interruptible`). On a pts the routing inverts:
+// the kernel fans a tty signal to the terminal's FOREGROUND PROCESS GROUP,
+// so the shell's job is to place each job in its own group, hand the
+// foreground group the terminal around the wait, and read stop-reports
+// (`WAIT_UNTRACED`) -- no note forwarding. Every helper here is inert while
+// `env.job_control` is `None` (the console path stays byte-identical).
+
+/// The `$status` of a job the terminal stopped (128 + SIGTSTP -- the bash
+/// value; SIGTSTP == 20 everywhere, matching the kernel's packed encoding).
+const STATUS_STOPPED: i32 = 148;
+
+/// Place freshly spawned `pid` into the job's process group. `job_pgid` 0
+/// mints a group from this pid (element 0); non-zero joins it. Returns the
+/// (possibly minted) group. Best-effort: a `setpgid` failure (the child
+/// already exited -> T_E_SRCH on a zombie) leaves the child in the shell's
+/// group -- the fg wait's by-pid straggler sweep still reaps it, and a
+/// zombie receives no signals, so nothing is lost.
+fn jc_place_in_group(pid: i32, job_pgid: u64) -> u64 {
+    let want = if job_pgid == 0 { pid as u64 } else { job_pgid };
+    // SAFETY: t_setpgid is the SYS_SETPGID SVC wrapper (scalar args).
+    // SAFETY: t_setpgid is the SYS_SETPGID SVC wrapper (scalar args).
+    let _ = unsafe { t_setpgid(pid as i64, want as i64) };
+    want
+}
+
+/// Render a single command's argv for the job table (space-joined).
+fn render_argv_cmd(argv: &[String]) -> String {
+    let mut s = String::new();
+    for (i, a) in argv.iter().enumerate() {
+        if i > 0 {
+            s.push(' ');
+        }
+        s.push_str(a);
+    }
+    s
+}
+
+/// Outcome of the stop-aware foreground wait.
+enum FgOutcome {
+    /// Every element exited; per-element unpacked exit statuses.
+    Done(Vec<i32>),
+    /// A member job-stopped (`^Z`). `finished[i]` marks elements that had
+    /// already exited (their `statuses[i]` is real); unfinished elements'
+    /// statuses are not meaningful yet.
+    Stopped {
+        statuses: Vec<i32>,
+        finished: Vec<bool>,
+    },
+}
+
+/// Block until every pid in the job's process group exits, or a member
+/// job-stops. The wait is by-GROUP (`want_pid = -pgid`, `WAIT_UNTRACED` --
+/// the packed-status encoding), so a stop anywhere in the job surfaces as a
+/// report without reaping (1e report-is-not-reap). A group wait that stops
+/// matching (a member whose `setpgid` raced its exit stayed in the shell's
+/// group) falls back to a blocking by-pid sweep of the stragglers, which is
+/// equally stop-aware -- the loop can never spin or hang on a vanished
+/// member.
+fn wait_fg_job_jc(pids: &[i32], job_pgid: u64) -> FgOutcome {
+    let n = pids.len();
+    let mut statuses: Vec<i32> = (0..n).map(|_| 0i32).collect();
+    let mut finished: Vec<bool> = (0..n).map(|_| false).collect();
+    let mut remaining = n;
+    while remaining > 0 {
+        let mut st: i32 = 0;
+        // SAFETY: SVC wrapper; &mut st is a valid writable i32.
+        let rc = unsafe { t_wait_pid_for(-(job_pgid as i32), T_WAIT_UNTRACED, &mut st as *mut i32) };
+        if rc > 0 {
+            if t_wait_if_stopped(st) {
+                return FgOutcome::Stopped { statuses, finished };
+            }
+            if let Some(i) = pids.iter().position(|&p| p == rc as i32) {
+                if !finished[i] {
+                    statuses[i] = t_wait_exitstatus(st);
+                    finished[i] = true;
+                    remaining -= 1;
+                }
+            }
+            // A reported pid outside `pids` cannot arise (only this job's
+            // elements are placed in the group and jobs spawn no children
+            // into it at v1.0); ignore defensively.
+        } else {
+            // No live-or-zombie child matches the group: the stragglers
+            // never joined it. Sweep them by pid, blocking + stop-aware.
+            for i in 0..n {
+                if finished[i] {
+                    continue;
+                }
+                let mut st2: i32 = 0;
+                // SAFETY: SVC wrapper; &mut st2 is a valid writable i32.
+                let rc2 =
+                    unsafe { t_wait_pid_for(pids[i], T_WAIT_UNTRACED, &mut st2 as *mut i32) };
+                if rc2 > 0 && t_wait_if_stopped(st2) {
+                    return FgOutcome::Stopped { statuses, finished };
+                }
+                // Reaped (unpack) or vanished (0, matching the reap loops).
+                statuses[i] = if rc2 > 0 { t_wait_exitstatus(st2) } else { 0 };
+                finished[i] = true;
+                remaining -= 1;
+            }
+        }
+    }
+    FgOutcome::Done(statuses)
+}
+
+/// The jc foreground run around an already-spawned job: cooked child mode ->
+/// terminal to the job (-> optional `SYS_TTY_CONT` resume) -> the stop-aware
+/// wait -> terminal back -> prompt mode. Returns per-element statuses (a
+/// stopped element reports `STATUS_STOPPED`).
+///
+/// Table maintenance is folded in, keyed by `existing`:
+///   - `None` (a job born in the foreground): a STOP registers it in the
+///     job table (Stopped, with its pgid + already-exited elements marked
+///     reaped) and prints the `[N]+ Stopped` line; a clean finish touches
+///     no table.
+///   - `Some(spec)` (an `fg`-resumed job already in the table): a STOP
+///     re-marks it Stopped + prints; a clean finish marks every element
+///     reaped and removes it silently (its completion is the foreground
+///     command's result -- the U-7b `fg` convention).
+///
+/// The mode discipline is the real-shell shape: cooked (`CHILD_MODE`) is the
+/// CHILD's terminal, raw (`PROMPT_MODE`) is the line editor's -- restored on
+/// every path, stop included.
+pub(crate) fn run_foreground_jc(
+    env: &mut Env,
+    pids: &[i32],
+    job_pgid: u64,
+    cmd: String,
+    resume: bool,
+    existing: Option<u32>,
+) -> Vec<i32> {
+    let own_pgid = match env.job_control {
+        Some(jc) => jc.own_pgid,
+        None => return wait_pids_interruptible(env, pids), // defensive: not jc
+    };
+    if let Some(fd) = env.consctl_fd {
+        console::set_mode(fd, console::CHILD_MODE);
+    }
+    // Terminal to the job BEFORE the resume: a continued job must already be
+    // the foreground group when it runs (else its first terminal read races
+    // the handoff).
+    // SAFETY: t_tty_set_fg / t_tty_cont are SVC wrappers on fd 0 (the pts
+    // slave the session dance validated).
+    let _ = unsafe { t_tty_set_fg(0, job_pgid) };
+    if resume {
+        let _ = unsafe { t_tty_cont(0, job_pgid) };
+    }
+    let out = wait_fg_job_jc(pids, job_pgid);
+    // SAFETY: as above; the restore pairs the handoff on EVERY outcome.
+    let _ = unsafe { t_tty_set_fg(0, own_pgid) };
+    if let Some(fd) = env.consctl_fd {
+        console::set_mode(fd, console::PROMPT_MODE);
+    }
+    match out {
+        FgOutcome::Done(statuses) => {
+            if let Some(spec) = existing {
+                for (i, &pid) in pids.iter().enumerate() {
+                    env.jobs_mut().mark_reaped(pid, statuses[i]);
+                }
+                env.jobs_mut().remove(spec);
+            }
+            statuses
+        }
+        FgOutcome::Stopped {
+            mut statuses,
+            finished,
+        } => {
+            let spec = match existing {
+                Some(spec) => spec,
+                None => env.jobs_mut().add(pids.to_vec(), cmd),
+            };
+            for (i, &pid) in pids.iter().enumerate() {
+                if finished[i] {
+                    env.jobs_mut().mark_reaped(pid, statuses[i]);
+                }
+            }
+            env.jobs_mut().set_pgid(spec, job_pgid);
+            env.jobs_mut().set_stopped(spec, true);
+            let mut line = String::new();
+            let _ = write!(
+                &mut line,
+                "\r\n[{}]+  Stopped  {}\r\n",
+                spec,
+                env.jobs().cmd_of(spec).unwrap_or("")
+            );
+            env.emit_line(&line);
+            for (i, st) in statuses.iter_mut().enumerate() {
+                if !finished[i] {
+                    *st = STATUS_STOPPED;
+                }
+            }
+            statuses
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
 // Interruptible foreground wait (U-7c-b)
 // ---------------------------------------------------------------------
 //
@@ -2491,6 +2760,15 @@ fn dispatch_note(env: &mut Env, note: &Note) -> bool {
         let _ = eval_block(env, &body);
         false
     } else {
+        // PTY-4b: an unhandled tty:hup is carrier loss (the pts host closed
+        // the master / the outer session died) -- end the shell, 128 + SIGHUP
+        // (the bash convention). Every other unhandled tty:* (susp at the
+        // prompt, winch, cont) is discarded here by falling through: a shell
+        // ignores its own SIGTSTP (the bash posture) and the v1.0 editor has
+        // no resize consumer. The fd-0 EOF path backstops the hup.
+        if note.name == "tty:hup" {
+            env.request_exit(129);
+        }
         // A caught interrupt would have fired a handler above; an UNHANDLED
         // interrupt is the shell's own reactive-cancel signal (LS-8c).
         note.name == "interrupt"

@@ -408,7 +408,7 @@ EOF
     # P4-Ia2: copy any built Rust-side userspace binaries from
     # build/usr-rs/<target>/release/. Same curation discipline.
     # Binary name = crate's [[bin]] name = directory under usr/.
-    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "coreutil-smoke" "fs-mut-smoke" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "pipe-src" "pipe-sink" "legate-prover" "login" "ut" "nora" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "ambush-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" )
+    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "ptyfs" "pty-probe" "ptyhost" "jc-probe" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "coreutil-smoke" "fs-mut-smoke" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "pipe-src" "pipe-sink" "legate-prover" "login" "ut" "nora" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "ambush-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" )
     local rs_release="$USR_RS_BUILD/$USR_RS_TARGET/release"
     for bin in "${usr_rs_bins[@]}"; do
         local src="$rs_release/$bin"
@@ -463,7 +463,7 @@ EOF
     # P6-pouch-hello-smoke: copy the pouch POSIX test binaries (built
     # against the pouch sysroot by build_pouch_progs) into the cpio root.
     # Same curation discipline — explicit list, not a glob.
-    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" )
+    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" )
     local pouch_progs="$BUILD_DIR/pouch/progs"
     for bin in "${pouch_bins[@]}"; do
         local src="$pouch_progs/$bin"
@@ -1990,7 +1990,7 @@ build_pouch_progs() {
     rm -f "$progs_out"/pouch-hello*.o "$progs_out"/pouch-hello*
 
     local prog
-    for prog in pouch-hello pouch-hello-stdio pouch-hello-printf pouch-hello-malloc pouch-hello-mallocng-torture pouch-hello-threads pouch-hello-exitgroup pouch-hello-poll pouch-hello-getrandom pouch-hello-sockets pouch-hello-net pouch-hello-signals pouch-hello-sodium pouch-hello-argv pouch-hello-fault; do
+    for prog in pouch-hello pouch-hello-stdio pouch-hello-printf pouch-hello-malloc pouch-hello-mallocng-torture pouch-hello-threads pouch-hello-exitgroup pouch-hello-poll pouch-hello-getrandom pouch-hello-sockets pouch-hello-net pouch-hello-signals pouch-hello-sodium pouch-hello-argv pouch-hello-fault pouch-hello-pty; do
         echo "==> pouch prog: $prog"
         # 1. compile (clang). -nostdinc + -isystem: pouch owns the include
         #    path. -fno-pie: non-PIC codegen for a fixed-address ET_EXEC.

@@ -202,21 +202,24 @@ static void client_handoff_reader_locked(struct p9_client *c,
         struct p9_rpc *r = c->inflight[tag];
         if (r && r != departing && !r->done && !r->dead && !r->be_reader &&
             !r->on_complete &&
-            // 8c-3 (#89): skip an op whose owner is being debug-stopped. Its
-            // thread parks (8c-2) and cannot run the reader loop, so handing it
-            // the role would strand a survivor whose reply needs reading (the
-            // wakeup would land on a rpc->rendez whose waiter moved to
-            // debug_rendez -- a no-op). Handing to a runnable survivor (or, if
-            // none is pending, dropping the role -- reader_active is already
-            // false, so a future survivor op self-elects) keeps the shared client
-            // LIVE across a debug-stop. `owner` is the submitter's Proc, alive
-            // while this rpc is inflight (this deref is as safe as `r->done`
-            // above). Async ops (on_complete) are skipped first, so `owner` is
-            // never read there. A death (owner group-terminating, not stopped)
-            // sets no debug_stop_req -> unaffected: the existing F6 bounce handles
-            // the dying-owner case.
-            !(r->owner &&
-              __atomic_load_n(&r->owner->debug_stop_req, __ATOMIC_ACQUIRE) != 0)) {
+            // 8c-3 (#89): skip an op whose owner is being stopped -- by the
+            // debugger OR (PTY-1f) a job-control stop; the gate is
+            // proc_stop_requested's disjunction (round-2 R2-F2: a Ctrl-Z'd
+            // owner parks exactly as a debug-stopped one, so handing it the
+            // role is the same strand). Its thread parks (8c-2) and cannot run
+            // the reader loop, so handing it the role would strand a survivor
+            // whose reply needs reading (the wakeup would land on a
+            // rpc->rendez whose waiter moved to debug_rendez -- a no-op).
+            // Handing to a runnable survivor (or, if none is pending, dropping
+            // the role -- reader_active is already false, so a future survivor
+            // op self-elects) keeps the shared client LIVE across a stop.
+            // `owner` is the submitter's Proc, alive while this rpc is
+            // inflight (this deref is as safe as `r->done` above). Async ops
+            // (on_complete) are skipped first, so `owner` is never read there.
+            // A death (owner group-terminating, not stopped) sets neither stop
+            // flag -> unaffected: the existing F6 bounce handles the
+            // dying-owner case.
+            !(r->owner && proc_stop_requested(r->owner))) {
             // Skip async (POST_CQE) ops: they have no submitter thread to run
             // the reader loop. An async op's reply is demuxed by the
             // SYS_LOOM_ENTER reap / SQPOLL kthread / p9_client_reader_pump_once
@@ -267,13 +270,15 @@ static void client_send_progress_signal(struct p9_client *c) {
 // deadline entirely (the recv just blocks).
 // 8c-3 (#89, F1): the inner recv. The wrapper (reader_recv_frame) holds
 // stop_no_park for the whole tenure so a mid-frame stop BLOCKS THROUGH; this
-// body sets self->stop_unwinds = (got == 0) before each recv, so a debugger
-// stop UNWINDS the reader ONLY at a frame boundary (no bytes of the frame
-// consumed) and NEVER mid-frame (unwinding mid-frame discards the consumed
-// partial bytes -> the survivor reader reads the frame TAIL as a header ->
-// stream desync). `self` may be a kproc thread (SQPOLL, site 4): kproc is
-// undebuggable (proc_debug_stop_deliver rejects it), so its debug_stop_req is
-// always 0 and the detour never reads the flags -- the sets are harmless.
+// body sets self->stop_unwinds = (got == 0) before each recv, so a stop
+// (either owner -- the debugger's, or PTY-1f's job stop; the detour gate is
+// proc_stop_requested) UNWINDS the reader ONLY at a frame boundary (no bytes
+// of the frame consumed) and NEVER mid-frame (unwinding mid-frame discards
+// the consumed partial bytes -> the survivor reader reads the frame TAIL as
+// a header -> stream desync). `self` may be a kproc thread (SQPOLL, site 4):
+// kproc is neither debuggable nor job-stoppable (both delivers reject it),
+// so both stop flags are always 0 and the detour never fires -- the sets are
+// harmless.
 static int do_reader_recv_frame(struct p9_client *c, u64 deadline_ns, bool *idle) {
     struct p9_transport *t = &c->transport;
     struct Thread *self = current_thread();
@@ -399,31 +404,34 @@ static void demux_frame_locked(struct p9_client *c, size_t len) {
     }
 }
 
-// 8c-3 (#89): is a debugger stop pending on the calling thread's Proc? Mirror of
-// client_self_dying(). A debug-stopped thread must not hold or assume the elected-
-// reader role -- it parks (8c-2), and a parked reader freezes every survivor
-// sharing this client. ACQUIRE pairs with proc_debug_stop_deliver's RELEASE set;
-// a racy miss at the client layer is caught by the sleep/tsleep detour's
-// register-then-observe under wait_lock (the I-9-critical path). A kproc thread
-// has t->proc == kproc() (non-NULL), but kproc is undebuggable
-// (proc_debug_stop_deliver rejects it), so kproc()->debug_stop_req is always 0 ->
-// this returns false for a kthread.
+// 8c-3 (#89): is a stop pending on the calling thread's Proc -- a debugger
+// stop OR (PTY-1f) a job-control stop? Mirror of client_self_dying(). A
+// stopped thread must not hold or assume the elected-reader role -- it parks
+// (8c-2), and a parked reader freezes every survivor sharing this client; the
+// job axis is round-2 R2-F2's exact re-opening of #89 (an everyday Ctrl-Z of
+// a fg child blocked as the elected reader on the shared SYSTEM-Stratum
+// client would freeze /bin,/lib for every survivor until fg), so the gate is
+// proc_stop_requested's disjunction. ACQUIRE pairs with each deliver's
+// RELEASE set; a racy miss at the client layer is caught by the sleep/tsleep
+// detour's register-then-observe under wait_lock (the I-9-critical path). A
+// kproc thread has t->proc == kproc() (non-NULL), but kproc is neither
+// debuggable nor job-stoppable (both delivers reject it), so both flags are
+// always 0 -> this returns false for a kthread.
 static bool client_stop_pending(struct Thread *t) {
-    return t && t->proc &&
-           __atomic_load_n(&t->proc->debug_stop_req, __ATOMIC_ACQUIRE) != 0;
+    return t && t->proc && proc_stop_requested(t->proc);
 }
 
-// 8c-3 (#89): park the calling thread on its debug_rendez for a debugger stop,
-// with the reader role ALREADY released. Drops c->lock across the blocking park
-// (proc_debug_stop_sleeper_park sleeps on debug_rendez until proc_debug_resume
-// clears debug_stop_req) then re-acquires it. stop_unwinds MUST be false here so
+// 8c-3 (#89): park the calling thread on its debug_rendez for a pending stop
+// (either owner), with the reader role ALREADY released. Drops c->lock across
+// the blocking park (proc_stop_sleeper_park sleeps on debug_rendez until BOTH
+// stop owners clear) then re-acquires it. stop_unwinds MUST be false here so
 // this park PARKS (it must not itself unwind). Returns SLEEP_OK on resume, or
 // SLEEP_INTR if the Proc started dying while stopped -> the caller re-loops and
 // client_self_dying() unwinds (DEATH WINS). c->lock HELD on entry + exit.
 static int client_debug_stop_park(struct p9_client *c) {
     struct Thread *t = current_thread();
     spin_unlock(&c->lock);
-    int drc = proc_debug_stop_sleeper_park(t);
+    int drc = proc_stop_sleeper_park(t);
     spin_lock(&c->lock);
     return drc;
 }
@@ -453,18 +461,21 @@ static int client_wait(struct p9_client *c, struct p9_rpc *rpc) {
             return CLIENT_WAIT_DIED;
         }
         if (client_stop_pending(t)) {
-            // 8c-3 (#89): a debugger stop is pending on my Proc. I must NOT hold
-            // or assume the elected-reader role -- a stopped thread parks (8c-2),
-            // and a parked reader freezes every survivor sharing this client until
-            // the debugger resumes. Release the role (re-hand-off if I was
-            // designated the next reader, mirroring the F6 death case) + park
-            // role-free + re-loop on resume to re-elect. The handoff skips
-            // debug-stopped owners, so the role always lands on a survivor (or is
-            // dropped -> a future survivor op self-elects). This is the top-of-
-            // loop guard so a debug-stopped thread that reaches client_wait fresh
-            // (a mid-syscall stop) parks PROMPTLY instead of electing + reading.
-            // The blocked-reader case (the common one) is handled below via
-            // stop_unwinds. DEBUG-FS-DESIGN 5c.6.
+            // 8c-3 (#89): a stop is pending on my Proc (a debugger stop or, per
+            // PTY-1f, a job-control stop -- client_stop_pending reads the
+            // disjunction, so an everyday Ctrl-Z gets the SAME role release).
+            // I must NOT hold or assume the elected-reader role -- a stopped
+            // thread parks (8c-2), and a parked reader freezes every survivor
+            // sharing this client until the resume. Release the role
+            // (re-hand-off if I was designated the next reader, mirroring the
+            // F6 death case) + park role-free + re-loop on resume to
+            // re-elect. The handoff skips stopped owners, so the role always
+            // lands on a survivor (or is dropped -> a future survivor op
+            // self-elects). This is the top-of-loop guard so a stopped thread
+            // that reaches client_wait fresh (a mid-syscall stop) parks
+            // PROMPTLY instead of electing + reading. The blocked-reader case
+            // (the common one) is handled below via stop_unwinds.
+            // DEBUG-FS-DESIGN 5c.6.
             if (rpc->be_reader) {
                 rpc->be_reader = false;
                 client_handoff_reader_locked(c, rpc);
@@ -505,9 +516,11 @@ static int client_wait(struct p9_client *c, struct p9_rpc *rpc) {
                     // 8c-3 (#89): my recv was stop-unwound at a frame boundary (the
                     // detour's stop_unwinds branch). F1 re-audit: read the STABLE
                     // stop_unwound latch, NOT client_stop_pending (which re-reads
-                    // debug_stop_req -- cleared asynchronously by proc_debug_resume,
-                    // so a debugger detach/death in this window would misclassify a
-                    // benign stop-unwind as a real break -> mark the SHARED session
+                    // the stop flags -- each cleared asynchronously by ITS resume:
+                    // debug_stop_req by proc_debug_resume on a debugger
+                    // detach/death, job_stop_req by the PTY-1f tty:cont fan --
+                    // so a resume in this window would misclassify a benign
+                    // stop-unwind as a real break -> mark the SHARED session
                     // dead). Not a death, not a real error: release + hand off +
                     // park role-free below. Read+clear (owner-only).
                     t->stop_unwound = false;
@@ -807,7 +820,8 @@ static int client_run(struct p9_client *c, size_t built_len,
     rpc.on_complete = NULL;          // sync (WAKE_RENDEZ): the submitter waits
     struct Thread *submitter = current_thread();
     rpc.owner       = submitter ? submitter->proc : NULL;   // 8c-3 (#89): the
-                                     // handoff skips a debug-stopped owner's op;
+                                     // handoff skips a stopped owner's op
+                                     // (debug OR job -- PTY-1f);
                                      // NULL for a kproc client (never stopped)
     rendez_init(&rpc.rendez);
     rpc.reply_buf = kmalloc(c->recv_cap, KP_ZERO);
@@ -1084,9 +1098,9 @@ int p9_client_reader_pump_once_deadline(struct p9_client *c, u64 deadline_ns) {
         // 8c-3 (#89, F2 + F1 re-audit): NO stop_unwound arm here (unlike
         // pump_once) -- the deadline variant is called ONLY by the SQPOLL /
         // dev9p-poll-pump KPROC kthreads (dev9p_poll.c, loom.c). Their t->proc is
-        // kproc() (NON-NULL), but kproc is undebuggable (proc_debug_stop_deliver
-        // rejects it), so kproc()->debug_stop_req is always 0, the detour never
-        // fires, and stop_unwound is never set -> a stop can never unwind this
+        // kproc() (NON-NULL), but kproc is neither debuggable nor job-stoppable
+        // (both delivers reject it -- PTY-1f), so both stop flags stay 0, the
+        // detour never fires, and stop_unwound is never set -> a stop can never unwind this
         // recv. If an EL0 thread is ever added as a caller, add the stop_unwound
         // arm like pump_once.
         client_mark_dead_locked(c, rr == 0);

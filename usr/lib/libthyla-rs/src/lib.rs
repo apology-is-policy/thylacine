@@ -208,6 +208,30 @@ pub const T_SYS_PREAD: u64            = 85;
 pub const T_SYS_PWRITE: u64           = 86;
 pub const T_SYS_YIELD: u64            = 87;
 pub const T_SYS_STAT: u64             = 88;
+// PTY-1a (PTY-DESIGN.md section 4): POSIX sessions + process groups. EPERM
+// contours arrive as -13 (EACCES -- the kernel errno.h -1-alias rule);
+// no-such-process is -3 (ESRCH).
+pub const T_SYS_SETSID: u64           = 89;
+pub const T_SYS_SETPGID: u64          = 90;
+pub const T_SYS_GETPGID: u64          = 91;
+pub const T_SYS_GETSID: u64           = 92;
+// PTY-1c: pts registry ops (ptyfs the server is the only legal caller).
+pub const T_SYS_PTY_REGISTER: u64     = 93;
+pub const T_PTY_REG_MINT: u64         = 0;
+pub const T_PTY_REG_SLAVE: u64        = 1;
+pub const T_PTY_REG_FREE: u64         = 2;
+// PTY-1d: the tty signal seam + the kernel controlling-terminal syscalls.
+pub const T_SYS_TTY_SIGNAL: u64       = 94;
+pub const T_SYS_TTY_ACQUIRE: u64      = 95;
+pub const T_SYS_TTY_SET_FG: u64       = 96;
+pub const T_SYS_TTY_GET_FG: u64       = 97;
+// PTY-1f: the shell's fg/bg resume of a job-stopped pgrp (gated like SET_FG).
+pub const T_SYS_TTY_CONT: u64         = 98;
+pub const T_TTY_SIG_INT: u64          = 1;
+pub const T_TTY_SIG_QUIT: u64         = 2;
+pub const T_TTY_SIG_TSTP: u64         = 3;   // live since PTY-1f (default job STOP)
+pub const T_TTY_SIG_WINCH: u64        = 4;
+pub const T_TTY_SIG_HUP: u64          = 5;
 // FS-mutation foundation (IDENTITY-DESIGN.md section 9.2): create-then-open,
 // durability barrier, directory enumeration.
 pub const T_SYS_WALK_CREATE: u64      = 54;
@@ -1989,10 +2013,105 @@ pub unsafe fn t_getuid() -> i64 {
     x0
 }
 
+// t_setsid / t_setpgid / t_getpgid / t_getsid -- POSIX sessions + process
+// groups (PTY-1a). setsid returns the new sid (> 0) or -13 (already a group
+// leader); setpgid moves self (pid 0) or a live direct child (pgid 0 mints a
+// new group of the target's own pid) and returns 0 or a negative errno; the
+// reads take pid 0 = self and return the id or -3 (ESRCH).
+#[inline(always)]
+pub unsafe fn t_setsid() -> i64 {
+    let mut x0: i64 = 0;
+    asm!("svc #0", inlateout("x0") x0, in("x8") T_SYS_SETSID, options(nostack));
+    x0
+}
+
+#[inline(always)]
+pub unsafe fn t_setpgid(pid: i64, pgid: i64) -> i64 {
+    let mut x0: i64 = pid;
+    asm!("svc #0", inlateout("x0") x0, in("x1") pgid, in("x8") T_SYS_SETPGID,
+         options(nostack));
+    x0
+}
+
+#[inline(always)]
+pub unsafe fn t_getpgid(pid: i64) -> i64 {
+    let mut x0: i64 = pid;
+    asm!("svc #0", inlateout("x0") x0, in("x8") T_SYS_GETPGID, options(nostack));
+    x0
+}
+
+#[inline(always)]
+pub unsafe fn t_getsid(pid: i64) -> i64 {
+    let mut x0: i64 = pid;
+    asm!("svc #0", inlateout("x0") x0, in("x8") T_SYS_GETSID, options(nostack));
+    x0
+}
+
 #[inline(always)]
 pub unsafe fn t_getgid() -> i64 {
     let mut x0: i64 = 0;
     asm!("svc #0", inlateout("x0") x0, in("x8") T_SYS_GETGID, options(nostack));
+    x0
+}
+
+// t_pty_register -- pts registry ops (PTY-1c; ptyfs the server is the only
+// legal caller). op T_PTY_REG_MINT(conn_fd, master_qid, 0) -> pts_id > 0;
+// T_PTY_REG_SLAVE(conn_fd, slave_qid, pts_id) -> 0; T_PTY_REG_FREE(pts_id,
+// 0, 0) -> 0. Negative errno per the SYS_PTY_REGISTER contours.
+#[inline(always)]
+pub unsafe fn t_pty_register(op: u64, a1: u64, a2: u64, a3: u64) -> i64 {
+    let mut x0: i64 = op as i64;
+    asm!("svc #0", inlateout("x0") x0, in("x1") a1, in("x2") a2, in("x3") a3,
+         in("x8") T_SYS_PTY_REGISTER, options(nostack));
+    x0
+}
+
+// t_tty_signal -- report a signal-class event on a pts the caller MINTED
+// (PTY-1d; the server half of the tty seam). Returns the posted count or
+// negative errno per the SYS_TTY_SIGNAL contours.
+#[inline(always)]
+pub unsafe fn t_tty_signal(pts_id: u64, sig_class: u64) -> i64 {
+    let mut x0: i64 = pts_id as i64;
+    asm!("svc #0", inlateout("x0") x0, in("x1") sig_class,
+         in("x8") T_SYS_TTY_SIGNAL, options(nostack));
+    x0
+}
+
+// t_tty_acquire -- acquire the pts behind `slave_fd` as the calling session
+// leader's controlling terminal (PTY-1d; POSIX acquisition semantics).
+#[inline(always)]
+pub unsafe fn t_tty_acquire(slave_fd: i64) -> i64 {
+    let mut x0: i64 = slave_fd;
+    asm!("svc #0", inlateout("x0") x0, in("x8") T_SYS_TTY_ACQUIRE,
+         options(nostack));
+    x0
+}
+
+// t_tty_set_fg / t_tty_get_fg -- tcsetpgrp / tcgetpgrp (PTY-1d).
+#[inline(always)]
+pub unsafe fn t_tty_set_fg(fd: i64, pgid: u64) -> i64 {
+    let mut x0: i64 = fd;
+    asm!("svc #0", inlateout("x0") x0, in("x1") pgid,
+         in("x8") T_SYS_TTY_SET_FG, options(nostack));
+    x0
+}
+
+#[inline(always)]
+pub unsafe fn t_tty_get_fg(fd: i64) -> i64 {
+    let mut x0: i64 = fd;
+    asm!("svc #0", inlateout("x0") x0, in("x8") T_SYS_TTY_GET_FG,
+         options(nostack));
+    x0
+}
+
+// t_tty_cont -- resume job-stopped `pgid` via a slave fd of one's controlling
+// terminal (PTY-1f; the shell's fg/bg). Gated like t_tty_set_fg; returns the
+// visited-member count or -errno.
+#[inline(always)]
+pub unsafe fn t_tty_cont(fd: i64, pgid: u64) -> i64 {
+    let mut x0: i64 = fd;
+    asm!("svc #0", inlateout("x0") x0, in("x1") pgid,
+         in("x8") T_SYS_TTY_CONT, options(nostack));
     x0
 }
 
@@ -2327,6 +2446,21 @@ pub unsafe fn t_spawn_full_argv(req_va: *const TSpawnArgs) -> i64 {
 /// matching zombie is ready. Mirrors POSIX `WNOHANG` and the kernel's
 /// `WAIT_WNOHANG` (proc.h); the value MUST match.
 pub const T_WAIT_WNOHANG: i32 = 1;
+
+/// PTY-1e job-control wait flags (mirror POSIX `WUNTRACED`/`WCONTINUED`
+/// and the kernel proc.h values). Passing either OPTS INTO the packed
+/// status encoding (the Linux wait(2) layout); a stop/continue REPORT
+/// returns the child's pid WITHOUT reaping it. `want_pid` extends to the
+/// POSIX group selectors: 0 = any child in the caller's process group;
+/// < -1 = any child in group `-want_pid`.
+pub const T_WAIT_UNTRACED: i32 = 2;
+pub const T_WAIT_CONTINUED: i32 = 4;
+pub const T_WAIT_STATUS_STOPPED: i32 = 0x7f | (20 << 8);
+pub const T_WAIT_STATUS_CONTINUED: i32 = 0xffff;
+#[inline(always)] pub fn t_wait_if_exited(st: i32) -> bool { (st & 0x7f) == 0 }
+#[inline(always)] pub fn t_wait_exitstatus(st: i32) -> i32 { (st >> 8) & 0xff }
+#[inline(always)] pub fn t_wait_if_stopped(st: i32) -> bool { (st & 0xff) == 0x7f }
+#[inline(always)] pub fn t_wait_if_continued(st: i32) -> bool { st == 0xffff }
 
 // t_wait_pid_for — reap a ZOMBIE child, filtered by pid and/or flags.
 //   want_pid: -1 = any child; >0 = that specific child.

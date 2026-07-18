@@ -1,0 +1,11 @@
+[package]
+name = "pty-probe"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "pty-probe"
+path = "src/main.rs"
+
+[dependencies]
+libthyla-rs = { path = "../lib/libthyla-rs" }

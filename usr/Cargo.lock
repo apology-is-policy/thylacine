@@ -635,6 +635,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "jc-probe"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
 name = "kaua"
 version = "0.1.0"
 dependencies = [
@@ -1070,6 +1077,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "pty-probe"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
+name = "ptyfs"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
+name = "ptyhost"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
 ]
 
 [[package]]

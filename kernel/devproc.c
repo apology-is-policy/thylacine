@@ -756,6 +756,16 @@ static bool devproc_all_threads_parked(struct Proc *target) {
 // a debugger stop is pending, AND every thread is parked. Caller holds
 // g_proc_table_lock. (A ZOMBIE/dying target is refused -- its pgtable_root may be
 // torn down; its memory is meaningless to inspect.)
+//
+// PTY-1f: DELIBERATELY reads debug_stop_req ONLY -- a job-stopped Proc
+// (job_stop_req, the second stop owner) is NOT debugger-stopped: its threads
+// park on the same debug_rendez, but the mem/regs/wait surface keys on the
+// DEBUG owner axis (I-39's attach + stop protocol; a Ctrl-Z'd process must
+// not become debugger-readable by whoever holds a ctl fd without issuing the
+// debug stop). A debugger stopping an already-job-parked target sets
+// debug_stop_req and finds the threads already parked -> fully-stopped
+// immediately; correct and cheap. Do NOT generalize this read to
+// proc_stop_requested.
 static bool devproc_target_fully_stopped(struct Proc *target) {
     if (target->state != PROC_STATE_ALIVE) return false;
     if (__atomic_load_n(&target->debug_stop_req, __ATOMIC_ACQUIRE) == 0) return false;

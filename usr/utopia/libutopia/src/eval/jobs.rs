@@ -57,6 +57,15 @@ pub struct Job {
     /// Whether the `[N]+ Done` line has been emitted (one-shot, so a job is
     /// reported exactly once).
     notified: bool,
+    /// PTY-4b: the job's process group (0 = none recorded -- the console
+    /// path, where jobs are never pgrp-formed). `fg`/`bg` resume via
+    /// `SYS_TTY_CONT` on this group; `fg` hands it the terminal.
+    pgid: u64,
+    /// PTY-4b: the job is job-stopped (a `^Z` `WAIT_UNTRACED` stop-report
+    /// moved it here from the foreground, or a re-stop after `fg`). A
+    /// stopped job always has unreaped pids, so it can never satisfy
+    /// `is_complete` -- the Done notification is structurally excluded.
+    stopped: bool,
 }
 
 impl Job {
@@ -81,10 +90,23 @@ impl Job {
     }
 
     /// `true` while any element has not yet been reaped (the job is still
-    /// "Running" for a `jobs` listing, U-7b).
+    /// live -- Running or Stopped -- for a `jobs` listing, U-7b).
     #[must_use]
     pub fn is_running(&self) -> bool {
         self.pids.iter().any(|p| !p.reaped)
+    }
+
+    /// PTY-4b: whether the job is job-stopped (`^Z`). Only meaningful while
+    /// `is_running` (a fully-reaped job cannot be stopped).
+    #[must_use]
+    pub fn stopped(&self) -> bool {
+        self.stopped
+    }
+
+    /// PTY-4b: the job's process group (0 = none recorded).
+    #[must_use]
+    pub fn pgid(&self) -> u64 {
+        self.pgid
     }
 
     /// Every element reaped -- the job has fully finished.
@@ -133,8 +155,58 @@ impl JobTable {
                 })
                 .collect(),
             notified: false,
+            pgid: 0,
+            stopped: false,
         });
         spec
+    }
+
+    /// PTY-4b: record job `spec`'s process group (set once at launch by the
+    /// jc spawn path; 0 stays "none recorded" on the console path).
+    pub fn set_pgid(&mut self, spec: u32, pgid: u64) {
+        if let Some(j) = self.jobs.iter_mut().find(|j| j.spec == spec) {
+            j.pgid = pgid;
+        }
+    }
+
+    /// PTY-4b: the recorded process group of job `spec` (`None` = no such
+    /// job; `Some(0)` = a job launched without pgrp formation).
+    #[must_use]
+    pub fn pgid_of(&self, spec: u32) -> Option<u64> {
+        self.jobs.iter().find(|j| j.spec == spec).map(|j| j.pgid)
+    }
+
+    /// PTY-4b: flip job `spec`'s stopped state (a `^Z` stop-report sets it;
+    /// `fg`/`bg`'s `SYS_TTY_CONT` resume clears it).
+    pub fn set_stopped(&mut self, spec: u32, stopped: bool) {
+        if let Some(j) = self.jobs.iter_mut().find(|j| j.spec == spec) {
+            j.stopped = stopped;
+        }
+    }
+
+    /// PTY-4b: whether job `spec` is job-stopped (false for an unknown spec).
+    #[must_use]
+    pub fn is_stopped(&self, spec: u32) -> bool {
+        self.jobs
+            .iter()
+            .find(|j| j.spec == spec)
+            .is_some_and(|j| j.stopped)
+    }
+
+    /// PTY-4b: the not-yet-reaped element pids of job `spec`, in element
+    /// order (`None` = no such job). `fg` waits on exactly these -- an
+    /// already-reaped element must not be re-waited (its zombie is gone; a
+    /// by-pgrp wait would simply never match it, but the status bookkeeping
+    /// wants the live set explicitly).
+    #[must_use]
+    pub fn live_pids_of(&self, spec: u32) -> Option<Vec<i32>> {
+        self.jobs.iter().find(|j| j.spec == spec).map(|j| {
+            j.pids
+                .iter()
+                .filter(|p| !p.reaped)
+                .map(|p| p.pid)
+                .collect()
+        })
     }
 
     /// Record that `pid` was reaped with `status`. Idempotent: a second call

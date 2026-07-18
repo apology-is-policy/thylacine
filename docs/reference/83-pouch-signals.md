@@ -187,8 +187,49 @@ joey's `do_pouch_hello_smoke` content-checks the trailing `exit 0` and the non-z
 
 ---
 
+## The tty family (PTY-3, `0021-pouch-pty.patch`)
+
+The supported set widens by the five tty job-control signums
+(PTY-DESIGN.md §7):
+
+| POSIX | Note | Kernel default (uncaught) | pouch SIG_DFL |
+|---|---|---|---|
+| `SIGQUIT` | `tty:quit` | terminate (the latch class) | NDFLT → whole-Proc terminate |
+| `SIGHUP` | `tty:hup` | terminate (dual target) | NDFLT → whole-Proc terminate |
+| `SIGWINCH` | `tty:winch` | informational | NCONT (ignore) |
+| `SIGCONT` | `tty:cont` | informational (the RESUME is kernel-side `SYS_TTY_CONT`) | NCONT (ignore) |
+| `SIGTSTP` | `tty:susp` | **STOP** (job control, PTY-1f) | NCONT — **the documented seam, below** |
+
+All five share the ONE kernel family bit `NOTE_BIT_TTY` (bit 5;
+`POUCH_NOTE_MASK_SUPPORTED` = 0x2f) — `sigprocmask` of any one blocks
+the family (coarse; the kernel terminate-class latch makes a masked
+`tty:quit`/`tty:hup` fire on unmask). **Receive-only**: the kernel POST
+axis rejects userspace `tty:*` posts (the PTY-1b F4 / I-39 gate — only
+a pts's minting server originates terminal events), so `kill()` /
+`raise()` of these signums answer `EPERM` at the pouch layer (the
+POSIX-shaped errno; the kernel would refuse with a bare -1 anyway).
+
 ## Known caveats / footguns
 
+- **SIG_DFL `SIGTSTP` is IGNORE, not STOP, in pouch (PTY-3 seam)**. The
+  kernel's pre-delivery default-stop gate
+  (`proc_tty_susp_would_stop_locked`) treats a Proc with a registered
+  notify handler as "caught" — and pouch's `.init_array` constructor
+  ALWAYS registers the bootstrap, so every pouch Proc is "caught": the
+  `tty:susp` note delivers to the bootstrap instead of stopping the
+  Proc. The bootstrap cannot re-enter the default either — the kernel
+  `SYS_NOTED(NDFLT)` arm TERMINATES (`exits` → `proc_group_terminate`),
+  never stops, and pouch has no self-stop path — so SIG_DFL SIGTSTP
+  answers NCONT (ignore): `^Z` on a handler-less pouch program does
+  nothing rather than stopping it (NDFLT would turn `^Z` into process
+  death — the one actively-wrong option). A program with a real SIGTSTP
+  handler is unaffected (the handler runs — POSIX). The clean fix is a
+  kernel NDFLT-stop arm for `tty:susp` (an ABI-semantics change on the
+  audited notes surface — needs signoff; surfaced at the PTY-3 close).
+- **`kill(-pgrp, sig)` has no kernel form**. `SYS_POSTNOTE` has no
+  process-group arm (`notes_post_pgrp` is kernel-internal, tty-seam
+  only); a negative pid fails the kernel pid lookup honestly. An ABI
+  addition — deferred with signoff.
 - **SIGTERM aliased with SIGINT** (R1-F9). Two POSIX signals share one note; the bootstrap arbitrates by handler-presence. Programs that need to distinguish them require the v1.x `term` note. The user-facing limitation is documented in the v1.0 manual.
 - **No mask inheritance across `pthread_create`**. The kernel's `SYS_THREAD_SPAWN` does not propagate `t->note_mask` from parent to child. Child threads start with mask=0; programs that need POSIX-correct inheritance manually set the mask in their entry function. v1.x extension: kernel propagates at spawn time.
 - **`abort()` extincts the kernel at v1.0** (R1-F4). musl's `src/exit/abort.c` reaches `a_crash()` (a deliberate NULL deref) before its `_Exit(127)` tail. At v1.0 the kernel's `FAULT_UNHANDLED_USER` policy extincts on EL0 faults from any pouch program — so abort() manifests as kernel extinction rather than clean process termination. PRE-EXISTING limitation (not introduced by sub-chunk 13b); pre-13b pouch had the same path because `raise(SIGABRT)` hit the SYS_tkill 0xFFFF sentinel and abort() reached a_crash() regardless. v1.x extensions: (1) override pouch's abort.c to `_Exit(127)` directly, bypassing a_crash; (2) deliver SIGSEGV-shaped note instead of extincting on EL0 fault.

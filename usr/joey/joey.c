@@ -61,6 +61,27 @@ static const char *itoa_dec(long v, char *buf, size_t buf_sz) {
 }
 
 #if THYLA_BOOT_PROBES  /* #61: corvus-protocol + smoke-probe helpers (boot-test only) */
+// dirents_have_name — scan a t_readdir buffer (9P2000.L dirents: qid 13 +
+// offset 8 + type 1 + namelen 2 LE + name) for an EXACT name. A bare substring
+// search would false-positive on binary qid/offset bytes (e.g. "0" = 0x30), so
+// this walks entry-by-entry. Bounds-checked; a truncated tail stops the scan
+// (t_readdir returns whole entries only, so that is defensive).
+static int dirents_have_name(const unsigned char *db, long dn,
+                             const char *name, size_t nlen) {
+    long off = 0;
+    while (off + 24 <= dn) {
+        unsigned el = (unsigned)db[off + 22] | ((unsigned)db[off + 23] << 8);
+        if (off + 24 + (long)el > dn) break;
+        if ((size_t)el == nlen) {
+            size_t j = 0;
+            while (j < nlen && db[off + 24 + j] == (unsigned char)name[j]) j++;
+            if (j == nlen) return 1;
+        }
+        off += 24 + (long)el;
+    }
+    return 0;
+}
+
 // mem_contains — is `needle` (length nlen) a substring of `hay` (length
 // hlen)? A tiny no-libc helper for content-checking relayed child output.
 static int mem_contains(const unsigned char *hay, size_t hlen,
@@ -5994,6 +6015,309 @@ int main(void) {
         return 1;
     }
 #endif /* THYLA_BOOT_PROBES (login + recover boot-test E2Es) */
+
+    // === PTY-2a: spawn /sbin/ptyfs + mount /dev/pts (the pseudoterminal server) ===
+    // A device-less native /srv server (the corvus precedent -- NOT the warden,
+    // which is hardware-device-bind driven). joey grants MAY_POST_SERVICE (no fds,
+    // no caps), waits for /srv/ptyfs (bounded liveness connect -- the connect_corvus
+    // idiom; ptyfs's selftest runs BEFORE its post, so connect success also gates a
+    // silent selftest failure), then mounts ptyfs's devpts tree at /dev/pts -- the
+    // devdev synthetic mount-stub child (the devhw /hw/pci precedent; no mkdir, the
+    // walk provides the point; MREPL covers it). Every login inherits the mount.
+    // ptyfs has NO hardware/external dependency, so failure to come up is always a
+    // real defect: spawn/liveness/mount failures are BOOT-FATAL (unlike /net, whose
+    // absence is environment-dependent and soft). PTY-2a-2.
+    {
+        char pbuf[24];
+        const char ptyfs_name[] = "/bin/ptyfs"; // #58: post-pivot /bin bind
+        long ptyfs_pid = t_spawn_with_perms(ptyfs_name, sizeof(ptyfs_name) - 1,
+                                            NULL, 0, 0,
+                                            T_SPAWN_PERM_MAY_POST_SERVICE);
+        if (ptyfs_pid <= 0) {
+            t_putstr("joey: t_spawn_with_perms(\"ptyfs\") FAILED\n");
+            return 1;
+        }
+        // Bounded liveness connect (the connect_corvus idiom): wait for ptyfs to
+        // post /srv/ptyfs. Its selftest runs BEFORE the post, so a connect
+        // success also confirms the selftest passed -- a real gate for an
+        // otherwise-silent selftest failure. Printing only AFTER the connect
+        // keeps joey silent during ptyfs's startup, so ptyfs's one selftest line
+        // cannot interleave with joey's boot-complete output. open=connect drives
+        // Tversion+Tattach; the close tears the probe session down. 30 x 500 ms
+        // backstop -- ptyfs starts fast (no 24 MiB BSS), so the first try wins.
+        long yr = -1, yw = -1;
+        int ptyfs_up = 0;
+        if (t_pipe(&yr, &yw) == 0) {
+            for (int i = 0; i < 30; i++) {
+                long root = t_open(T_WALK_OPEN_FROM_ROOT, "/srv/ptyfs", 10, T_OREAD);
+                if (root >= 0) {
+                    (void)t_close(root);
+                    ptyfs_up = 1;
+                    break;
+                }
+                struct pollfd pfd = { .fd = (int)yr, .events = POLLIN, .revents = 0 };
+                (void)t_poll(&pfd, 1, 500);
+            }
+            t_close(yr);
+            t_close(yw);
+        }
+        if (!ptyfs_up) {
+            t_putstr("joey: /sbin/ptyfs DOWN (failed to post /srv/ptyfs -- selftest?)\n");
+            return 1;
+        }
+        t_putstr("joey: /sbin/ptyfs up pid=");
+        t_putstr(itoa_dec(ptyfs_pid, pbuf, sizeof(pbuf)));
+        t_putstr(" (selftest passed; serving /srv/ptyfs)\n");
+
+        // PTY-2a-2: mount ptyfs's devpts tree at /dev/pts. Fresh open=connect (a
+        // 9P-mode service open yields a mountable dev9p root; the liveness fd was
+        // already closed); t_mount holds its own ref (ARCH 9.6.6), so the connect
+        // fd closes after. The mount point is devdev's synthetic pts child -- the
+        // walk provides it, no mkdir (unlike /net, whose point lives on the disk
+        // root). Sessions rfork-inherit the territory, so every login sees
+        // /dev/pts/{ptmx,<n>}.
+        long pts_root = t_open(T_WALK_OPEN_FROM_ROOT, "/srv/ptyfs", 10, T_OREAD);
+        if (pts_root < 0) {
+            t_putstr("joey: PTY-2a-2 re-connect /srv/ptyfs FAILED\n");
+            return 1;
+        }
+        if (t_mount("/dev/pts", 8, pts_root, T_MREPL) != 0) {
+            t_putstr("joey: PTY-2a-2 t_mount(/dev/pts) FAILED\n");
+            return 1;
+        }
+        (void)t_close(pts_root);
+        t_putstr("joey: /dev/pts mounted (ptyfs devpts tree)\n");
+
+#if THYLA_BOOT_PROBES
+        // PTY-2a-2 PROBE: the master/slave round-trip over the mounted /dev/pts
+        // -- the FIRST real client of the clone-mint + SYS_PTY_REGISTER + the
+        // ring data path (code-reviewed at 2a-1, runtime-exercised here).
+        // Boot-fatal.
+        {
+            // (a) open the clone: /dev/pts/ptmx ORDWR mints pts N and rebinds
+            //     the fid onto the MASTER endpoint (the Plan 9 clone idiom; the
+            //     kernel dev9p client accepts the differing Rlopen qid). ptyfs
+            //     registers the master with the kernel pts registry (MINT).
+            long mfd = t_open(T_WALK_OPEN_FROM_ROOT, "/dev/pts/ptmx", 13, T_ORDWR);
+            if (mfd < 0) {
+                t_putstr("joey: PTY-2a-2 PROBE open(/dev/pts/ptmx) FAILED\n");
+                return 1;
+            }
+            // (b) Treaddir /dev/pts: ptmx + the minted slave "0" (fresh ptyfs
+            //     -> the first mint is slot 0, the net-2c-2 N==0 determinism).
+            //     Exact-name dirent scan -- a substring match would false-
+            //     positive on binary qid bytes.
+            unsigned char db[256];
+            long dd = t_open(T_WALK_OPEN_FROM_ROOT, "/dev/pts", 8, T_OREAD);
+            long dn = (dd >= 0) ? t_readdir(dd, db, sizeof(db)) : -1;
+            if (dd >= 0) (void)t_close(dd);
+            if (dn <= 0 || !dirents_have_name(db, dn, "ptmx", 4) ||
+                !dirents_have_name(db, dn, "0", 1)) {
+                t_putstr("joey: PTY-2a-2 PROBE readdir(/dev/pts) missing ptmx/0 FAILED\n");
+                return 1;
+            }
+            // (c) open the slave leg (ptyfs registers the SLAVE binding).
+            long sfd = t_open(T_WALK_OPEN_FROM_ROOT, "/dev/pts/0", 10, T_ORDWR);
+            if (sfd < 0) {
+                t_putstr("joey: PTY-2a-2 PROBE open(/dev/pts/0) FAILED\n");
+                return 1;
+            }
+            // (d) master -> slave through the COOKED default ldisc (PTY-2b: a
+            //     fresh pts is full cooked). "ping\r": ICRNL folds the CR to
+            //     NL, ICANON flushes the line WITH its newline -> the slave
+            //     reads "ping\n". Write-then-read, so the read never defers.
+            unsigned char rb[16];
+            if (t_write(mfd, "ping\r", 5) != 5 || t_read(sfd, rb, sizeof(rb)) != 5 ||
+                rb[0] != 'p' || rb[1] != 'i' || rb[2] != 'n' || rb[3] != 'g' ||
+                rb[4] != '\n') {
+                t_putstr("joey: PTY-2a-2 PROBE master->slave cooked line FAILED\n");
+                return 1;
+            }
+            // (e) slave -> master. The master first sees the ECHO of what it
+            //     typed ("ping" + the NL echo ONLCR-expanded -> "ping\r\n"),
+            //     then the slave's output "pong" -- one deterministic 10-byte
+            //     drain (the echo landed when (d)'s Twrite was serviced, wire-
+            //     ordered before this Tread). Exercises ECHO + ONLCR live.
+            if (t_write(sfd, "pong", 4) != 4 || t_read(mfd, rb, sizeof(rb)) != 10 ||
+                rb[0] != 'p' || rb[1] != 'i' || rb[2] != 'n' || rb[3] != 'g' ||
+                rb[4] != '\r' || rb[5] != '\n' ||
+                rb[6] != 'p' || rb[7] != 'o' || rb[8] != 'n' || rb[9] != 'g') {
+                t_putstr("joey: PTY-2a-2 PROBE echo+slave->master bytes FAILED\n");
+                return 1;
+            }
+            // (e2) PTY-2c ptsname: t_stat.qid_path carries the 9P qid VERBATIM,
+            //      and a ptyfs endpoint qid encodes PTS_FLAG(bit 40) | N<<8 |
+            //      filekind -- so the master's own fstat names its pts. This is
+            //      the documented ptsname mechanism (the PTY-3 pouch
+            //      ptsname() does exactly this decode; no extra file needed).
+            struct t_stat mst;
+            if (t_fstat(mfd, &mst) != 0 || (mst.qid_path & (1ULL << 40)) == 0 ||
+                ((mst.qid_path >> 8) & 0xffffffULL) != 0) {
+                t_putstr("joey: PTY-2a-2 PROBE ptsname qid decode FAILED\n");
+                return 1;
+            }
+            // (e2b) PTY-3: the master reports S_IFCHR (the Linux pts posture).
+            //      The pouch isatty()/ptsname() discriminator is
+            //      S_ISCHR(st_mode) + the (e2) qid decode; the mode flows
+            //      VERBATIM ptyfs Rgetattr -> t_stat_from_p9_attr -> st_mode,
+            //      and this E2E assertion pins the whole pipeline (a kernel
+            //      mode-masking regression or a ptyfs posture revert both
+            //      break the pouch boundary-line silently otherwise).
+            if ((mst.mode & 0170000u) != 0020000u) {
+                t_putstr("joey: PTY-3 PROBE master S_IFCHR mode FAILED\n");
+                return 1;
+            }
+            // (e3) the per-pts ctl (/dev/pts/0ctl -- the suffix-ctl idiom) +
+            //      the ECHO-off no-leak proof WITHOUT a blocking read: type a
+            //      line under -echo, then +echo and type another; the master's
+            //      next drain shows ONLY the second line's echo -- a leak
+            //      would show both ("hi\r\nok\r\n" = 8 bytes, not 4).
+            long cfd = t_open(T_WALK_OPEN_FROM_ROOT, "/dev/pts/0ctl", 13, T_ORDWR);
+            if (cfd < 0) {
+                t_putstr("joey: PTY-2a-2 PROBE open(/dev/pts/0ctl) FAILED\n");
+                return 1;
+            }
+            if (t_write(cfd, "-echo", 5) != 5 ||
+                t_write(mfd, "hi\r", 3) != 3 || t_read(sfd, rb, sizeof(rb)) != 3 ||
+                rb[0] != 'h' || rb[1] != 'i' || rb[2] != '\n') {
+                t_putstr("joey: PTY-2a-2 PROBE ctl -echo cooked line FAILED\n");
+                return 1;
+            }
+            if (t_write(cfd, "+echo", 5) != 5 ||
+                t_write(mfd, "ok\r", 3) != 3 || t_read(sfd, rb, sizeof(rb)) != 3 ||
+                rb[0] != 'o' || rb[1] != 'k' || rb[2] != '\n') {
+                t_putstr("joey: PTY-2a-2 PROBE ctl +echo cooked line FAILED\n");
+                return 1;
+            }
+            if (t_read(mfd, rb, sizeof(rb)) != 4 ||
+                rb[0] != 'o' || rb[1] != 'k' || rb[2] != '\r' || rb[3] != '\n') {
+                t_putstr("joey: PTY-2a-2 PROBE -echo LEAKED (echo bytes from the masked line)\n");
+                return 1;
+            }
+            // (e4) winsize: set via the ctl + read back via pread (the ctl fd's
+            //      cursor advanced with the writes; pread reads from 0). The
+            //      WINCH note delivery to a live fg pgrp is the 2e E2E.
+            unsigned char cb[96];
+            long cl;
+            if (t_write(cfd, "winsize 132 43", 14) != 14 ||
+                (cl = t_pread(cfd, cb, sizeof(cb), 0)) <= 0 ||
+                !mem_contains(cb, (size_t)cl, "+echo", 5) ||
+                !mem_contains(cb, (size_t)cl, "winsize 132 43", 14)) {
+                t_putstr("joey: PTY-2a-2 PROBE ctl winsize round-trip FAILED\n");
+                return 1;
+            }
+            (void)t_close(cfd); // drop the ctl ref BEFORE the EOF/free legs
+
+            // (f) queued bytes SURVIVE the master close (PTY-2d drain-then-EOF):
+            //     a line flushed just before the close is read AFTER it; only
+            //     the NEXT read is EOF. The close's Tclunk is wire-ordered
+            //     before the Treads on the shared session, so ptyfs processes
+            //     close-then-read deterministically. The close is also the
+            //     LAST-master edge -- ptyfs raises TTY_SIG_HUP (no controlling
+            //     session here -> the kernel routes it nowhere; the live HUP
+            //     delivery E2E is 2e).
+            if (t_write(mfd, "Z\r", 2) != 2) {
+                t_putstr("joey: PTY-2a-2 PROBE teardown queue write FAILED\n");
+                return 1;
+            }
+            (void)t_close(mfd);
+            if (t_read(sfd, rb, sizeof(rb)) != 2 || rb[0] != 'Z' || rb[1] != '\n') {
+                t_putstr("joey: PTY-2a-2 PROBE drain-then-EOF (queued line) FAILED\n");
+                return 1;
+            }
+            long en = t_read(sfd, rb, sizeof(rb));
+            if (en != 0) {
+                t_putstr("joey: PTY-2a-2 PROBE close->EOF FAILED\n");
+                return 1;
+            }
+            (void)t_close(sfd); // the last binding: ptyfs frees pts 0 + FREEs the registry entry
+            t_putstr("joey: PTY-2a-2 PROBE OK (ptmx clone -> pts 0; cooked master<->slave"
+                     " [ICRNL+ICANON+ECHO+ONLCR]; ptsname qid + ctl [-echo no-leak;"
+                     " winsize]; close -> drain-then-EOF)\n");
+        }
+
+        // PTY-2e: the openpty E2E with a LIVE controlling session. The prover
+        // (the emulator role) mints a pts, spawns itself as a session-leader
+        // child that acquires the pts as its controlling terminal, then drives
+        // the SIGNAL seam end to end: Ctrl-C -> "interrupt" observed on the
+        // child's notes fd, a winsize ctl write -> tty:winch, the master close
+        // -> tty:hup. Also the FIRST live deferred master read (the readiness
+        // read parks server-side until the child's slave opens). Boot-fatal.
+        {
+            const char pty_probe_name[] = "/bin/pty-probe"; // post-pivot: needs /dev/pts + /bin
+            long pp_pid = t_spawn(pty_probe_name, sizeof(pty_probe_name) - 1);
+            if (pp_pid <= 0) {
+                t_putstr("joey: t_spawn(\"/bin/pty-probe\") FAILED\n");
+                return 1;
+            }
+            int pp_status = -1;
+            long pp_reaped = t_wait_pid_for((int)pp_pid, 0, &pp_status);
+            if (pp_reaped != pp_pid || pp_status != 0) {
+                t_putstr("joey: PTY-2e openpty E2E FAILED\n");
+                return 1;
+            }
+            t_putstr("joey: PTY-2e openpty E2E OK (live controlling session:"
+                     " INT+WINCH+HUP delivered; parked master read)\n");
+        }
+
+        // PTY-3: the POUCH pty boundary-line (0021-pouch-pty). Spawn the
+        // pouch prover /bin/pouch-hello-pty (built against the patched musl).
+        // It drives the STANDARD POSIX pty surface -- posix_openpt/grantpt/
+        // unlockpt/ptsname_r (the qid decode) / isatty (S_IFCHR) / tcgetattr
+        // cooked-default / cfmakeraw+tcsetattr readback / TIOC[GS]WINSZ /
+        // setsid+TIOCSCTTY+tc[gs]etpgrp (the kernel 89/95/96/97 dance) / a
+        // live cooked ^C -> SIGINT handler (the 0x03 consumed, never a slave
+        // byte) / live WINCH + HUP handlers / the receive-only EPERM gate on
+        // kill/raise of a tty signum / forkpty honest-fail -- entirely
+        // through unpatched-musl wrappers over the tty ioctl dispatcher.
+        // The first POSIX openpty() program Thylacine runs. Boot-fatal.
+        {
+            const char pp3_name[]   = "/bin/pouch-hello-pty";
+            const char pp3_expect[] = "pouch-hello-pty: exit 0";
+            if (pouch_smoke_one(pp3_name, sizeof(pp3_name) - 1,
+                                pp3_expect, sizeof(pp3_expect) - 1) != 0) {
+                t_putstr("joey: PTY-3 PROBE pouch-hello-pty FAILED\n");
+                return 1;
+            }
+            t_putstr("joey: PTY-3 PROBE OK (pouch pty boundary-line: openpt/"
+                     "ptsname/isatty/termios/winsize/session/ISIG/HUP/EPERM-"
+                     "receive-only via the tty ioctl dispatcher)\n");
+        }
+
+        // PTY-4: the job-control E2E. The driver (/bin/jc-probe) hosts a
+        // REAL /bin/ut on a freshly-minted pts (the ptyhost shape) and
+        // scripts the ladder against the master: the session dance + prompt;
+        // a clean fg run under jc (own pgrp + terminal handoff, proven by the
+        // tr-uppercase trick); `sleep` foregrounded on the pts + ^Z ->
+        // tty:susp default-STOP -> the WAIT_UNTRACED stop-report -> the
+        // `[1]+ Stopped` line ON THE PTS (the reroute proof); `jobs` shows it
+        // Stopped; `fg` -> SYS_TTY_CONT resume -> the job runs to a clean
+        // prompt exit (the resume proof: a resume that did nothing would hang
+        // fg forever); the shell reclaims the terminal + still runs commands;
+        // `exit` -> drain-then-EOF + a clean reap (incl. the orphan-rule
+        // teardown of the session). The first shell-under-job-control
+        // Thylacine runs. Boot-fatal. (Interactive `cat`-under-^Z + `fg`/`^Z`
+        // re-stop are the documented PTY-4 follow-ups -- they need the
+        // foreground-read TTIN gate + the resume-then-re-stop tty-signal path;
+        // see docs/reference/136-ptyfs.md.)
+        {
+            const char jc_name[] = "/bin/jc-probe";
+            long jc_pid = t_spawn(jc_name, sizeof(jc_name) - 1);
+            if (jc_pid <= 0) {
+                t_putstr("joey: t_spawn(\"/bin/jc-probe\") FAILED\n");
+                return 1;
+            }
+            int jc_status = -1;
+            long jc_reaped = t_wait_pid_for((int)jc_pid, 0, &jc_status);
+            if (jc_reaped != jc_pid || jc_status != 0) {
+                t_putstr("joey: PTY-4 job-control E2E FAILED\n");
+                return 1;
+            }
+            t_putstr("joey: PTY-4 job-control E2E OK (hosted ut: run/stop/"
+                     "jobs/fg-resume/exit over a live pts)\n");
+        }
+#endif /* THYLA_BOOT_PROBES (the PTY-2a-2 round-trip + the 2e openpty E2E + the PTY-3 pouch probe + the PTY-4 jc E2E) */
+    }
 
     // (2) Signal boot-complete. All boot-test asserts have passed, so the kernel
     // prints "Thylacine boot OK" here (the banner no longer rides joey's exit;

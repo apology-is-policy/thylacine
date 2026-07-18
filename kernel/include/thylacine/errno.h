@@ -77,6 +77,15 @@
 // doesn't exist. POSIX: ENOENT.
 #define T_E_NOENT      2
 
+// No such process -- a pid-addressed operation names no live Proc (or,
+// for SYS_SETPGID, a pid that is neither the caller nor one of its
+// children -- the POSIX setpgid ESRCH contour). Appended for the PTY-1
+// session/pgrp syscalls (PTY-DESIGN.md section 4, the signed-off ABI;
+// the T_E_NODEV/T_E_CANCELED append-under-ratified-scripture precedent)
+// so the PTY-3 pouch boundary-line maps getpgid/getsid/setpgid errnos
+// 1:1. POSIX: ESRCH.
+#define T_E_SRCH       3
+
 // I/O error. Use when a block-device read fails (Stratum/bdev), a
 // 9P transport returns Rerror, or a hardware operation reports
 // failure. POSIX: EIO.
@@ -154,6 +163,13 @@
 // or a code path is reachable but stubbed at v1.0. POSIX: ENOSYS.
 #define T_E_NOSYS      38
 
+// Operation not supported. Appended under the PTY-1 ABI signoff (PTY-1d, the
+// T_E_SRCH precedent -- it originally gated SYS_TTY_SIGNAL's TTY_SIG_TSTP
+// class until PTY-1f made the job-stop disposition live). RESERVED /
+// append-only now: a legitimate POSIX EOPNOTSUPP, kept for future
+// not-yet-supported syscall dispositions. POSIX: EOPNOTSUPP.
+#define T_E_OPNOTSUPP  95
+
 // Operation timed out. Use when a tsleep / torpor_wait with a
 // timeout reaches the deadline without satisfying the wait
 // condition. POSIX: ETIMEDOUT.
@@ -172,6 +188,8 @@
 _Static_assert(T_E_OK        == 0,   "T_E_OK ABI pin");
 _Static_assert(T_E_PERM      == 1,   "T_E_PERM ABI pin (POSIX EPERM)");
 _Static_assert(T_E_NOENT     == 2,   "T_E_NOENT ABI pin (POSIX ENOENT)");
+_Static_assert(T_E_SRCH      == 3,   "T_E_SRCH ABI pin (POSIX ESRCH)");
+_Static_assert(T_E_OPNOTSUPP == 95,  "T_E_OPNOTSUPP ABI pin (POSIX EOPNOTSUPP)");
 _Static_assert(T_E_IO        == 5,   "T_E_IO ABI pin (POSIX EIO)");
 _Static_assert(T_E_NODEV     == 19,  "T_E_NODEV ABI pin (POSIX ENODEV)");
 _Static_assert(T_E_BADF      == 9,   "T_E_BADF ABI pin (POSIX EBADF)");

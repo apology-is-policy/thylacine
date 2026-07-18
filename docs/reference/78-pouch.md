@@ -149,7 +149,7 @@ Classes:
 | `search/` (8) | UPPER | `hsearch` / `tsearch` / `lfind` | — |
 | `fenv/` (18) | UPPER | floating-point environment (aarch64 asm) | — |
 | `setjmp/` (2) | UPPER | `setjmp` / `longjmp` (aarch64 asm) | — |
-| `stdio/` (116) | MIXED | FILE buffering + `printf`/`scanf` upper; the backend ops (`__stdio_read`/`__stdio_write`, `fopen`→`open`) reach the seam | 4 |
+| `stdio/` (116) | MIXED | FILE buffering + `printf`/`scanf` upper; the backend ops (`__stdio_read`/`__stdio_write`, `fopen`→`open`, the `__fdopen`/`__stdout_write` line-buffering tty probes — 0021) reach the seam | 4 |
 | `malloc/` (18) | MIXED | the `mallocng` allocator — logic portable; rests on the anonymous-memory backend | 7b |
 | `time/` (39) | MIXED | `gmtime`/`mktime`/`strftime` upper; `clock_gettime`/`nanosleep` lower | 4 |
 | `locale/` (26) | MIXED | C locale is upper; locale-file loading is lower (v1.0 = `C` locale only) | 4 |
@@ -176,7 +176,7 @@ Classes:
 | `aio/` (3) | LOWER | POSIX async I/O — **deferred** (`ENOSYS`) | — |
 | `ipc/` (13) | LOWER | System V IPC — **deferred** (`ENOSYS`) | — |
 | `mq/` (10) | LOWER | POSIX message queues — **deferred** | — |
-| `termios/` (12) | LOWER | terminal I/O — **deferred** to Phase 7 (Utopia; PTYs) | — |
+| `termios/` (12) | LOWER | terminal I/O — delivered at PTY-3 via the tty ioctl dispatcher (`tcgetattr`/`tcsetattr` are unpatched ioctl wrappers; `tcdrain`/`tc[gs]etwinsize` rerouted) | 0021 |
 | `ldso/` (10) | LOWER | dynamic-linker support — static-only; `dlopen`→`ENOSYS` stubs | 4 |
 | `linux/` (67) | LOWER | Linux-specific calls (`epoll`, `inotify`, `sendfile`, `prctl`) — mostly dropped / `ENOSYS` | 4+ |
 
@@ -1419,3 +1419,127 @@ stratumd's listener setup (`stm_stratumd_listen_unix`'s `sockbuf`
 param, the thylacine-pouch-arm branch): on a Linux/macOS host the same
 call is an ordinary advisory buffer request, so the stratumd code
 carries no platform gate.
+
+
+## The pty boundary-line — `0021-pouch-pty.patch` (PTY-3)
+
+PTY-DESIGN.md §7. The POSIX pseudoterminal + job-control surface for
+ported programs, over the PTY-1 kernel syscalls + the PTY-2 ptyfs
+server. **No kernel surface** — the whole sub-chunk is pouch + one
+ptyfs posture change (S_IFCHR, below). Sixteen files; the per-file
+rationale is the patch preamble. The shape:
+
+### The tty ioctl dispatcher (`src/misc/ioctl.c`, full rewrite)
+
+musl's entire pty/termios surface is ioctl-shaped, so ONE dispatcher
+makes the unpatched upper wrappers work:
+
+| Request | Translation |
+|---|---|
+| `TCGETS` | read `/dev/pts/<n>ctl`, parse the five ± tokens → synthesize `struct termios` (the fixed cc trio `VINTR=^C VQUIT=^\ VSUSP=^Z`, `VERASE=DEL`, `VMIN=1`) |
+| `TCSETS`/`SW`/`SF` | decompose the five honored flags (`ICANON`/`ECHO`/`ISIG`; `ICRNL`; `OPOST`+`ONLCR`) → one atomic ctl mode write (the PTY-2c grammar is TCSAFLUSH-flavored) |
+| `TIOCGWINSZ` / `TIOCSWINSZ` | the ctl `winsize <cols> <rows>` op (note the col/row order inversion vs `struct winsize`) |
+| `TIOCGPTN` | the fstat qid decode (`PTS_FLAG\|N<<8\|fk`); master-only |
+| `TIOCSPTLCK` | no-op 0 on a master (pts pairs are born unlocked — the mint IS the grant) |
+| `TIOCSCTTY` | `SYS_TTY_ACQUIRE(fd)` (95) |
+| `TIOCGPGRP` / `TIOCSPGRP` | `SYS_TTY_GET_FG` (97) / `SYS_TTY_SET_FG` (96) |
+| `TCSBRK`/`TCSBRKP` | 0 on a pts (drain is complete-on-return by the synchronous-ring construction; break has no pts representation) |
+| `TCFLSH`, `TIOCGSID`, `TIOCNOTTY` | honest `ENOTSUP` seams (no ctl flush verb / no kernel surface at v1.0) |
+| anything else | `ENOTTY` (the Linux convention; pre-PTY-3 pouch answered `ENOSYS` for every ioctl) |
+
+**Is-a-pts discrimination**: `fstat` the fd → require `S_ISCHR(mode)`
+(the ptyfs PTY-3 posture) AND a `PTS_FLAG` qid with filekind
+master/slave. The `S_ISCHR` gate is load-bearing: netd's `/net` qids
+also use bit 40 (`CONN_FLAG`) but netd reports `S_IFREG`, so a socket
+fd never passes; a tagged pouch socket fd (`POUCH_SOCK_TAG`) is
+rejected up front. fstat failure folds into `ENOTTY` (the kernel
+answers a bare -1 for both a bad fd and a statless fd — documented
+nit: a closed fd yields `ENOTTY` not `EBADF`; musl's `isatty()`
+normalizes there anyway).
+
+The ctl is opened per-op (`/dev/pts/<n>ctl`, fresh open/read-or-write/
+close) — stateless, no cached fd to invalidate across a pts free.
+
+### The mint path + the raw-SYS_ioctl reroutes
+
+`posix_openpt` + `openpty` open **`/dev/pts/ptmx`** — the devpts-NATIVE
+node (Linux has the same node; its `/dev/ptmx` is a compat symlink
+Thylacine cannot provide pre-symlinks, G11). musl reaches its tty
+surface two ways — the public `ioctl()` (tcgetattr/tcsetattr/
+tc[gs]etpgrp/unlockpt/openpty) and DIRECT `__syscall(SYS_ioctl,...)`
+calls, which hit the 0xFFFF sentinel and bypassed the dispatcher.
+Rerouted through the public `ioctl()`: `__ptsname_r`, `isatty`,
+`tcdrain`, `tcgetwinsize`/`tcsetwinsize`, and the two stdio
+line-buffering tty probes (`__fdopen` + `__stdout_write`) — the last
+two make a pouch program's stdout **line-buffered on a pts** (the
+POSIX interactive behavior; one probe per stream lifetime,
+errno-preserved so the common non-tty failure cannot clobber a
+successful stdio write's errno).
+
+### `openat` on the stalk resolver (supersedes the 0009 walk loop)
+
+The 0009 body walked per-component via `SYS_WALK_OPEN`, opening EVERY
+intermediate with the FINAL omode — structurally unable to open a
+write-mode file through a directory or across a mount (first live
+instance: `posix_openpt`'s `O_RDWR` open of `/dev/pts/ptmx`, crossing
+devramfs → devdev → ptyfs; blanket `ENOENT`). Now ONE `SYS_open`
+(= 65, stalk-1: per-component X-search + mount-crossing inside the
+resolver; only the FINAL component is opened with the caller's omode)
++ the REAL `-errno` decode (ER-1) where the loop could only answer
+`ENOENT`. Every pouch `open()`/`openat()` rides this (`open.c`
+forwards, 16b-γ); the whole pouch prover ladder + the stratumd boot
+re-prove the pre-existing surface in-guest.
+
+### The tty signal family (extends 0007)
+
+`SIGQUIT`/`SIGTSTP`/`SIGCONT`/`SIGWINCH`/`SIGHUP` ↔
+`tty:quit`/`susp`/`cont`/`winch`/`hup`. `sigaction` accepts them;
+the sigset marshalling folds the family onto the ONE kernel
+`NOTE_BIT_TTY` (bit 5; blocking any blocks all five — documented
+coarseness; the kernel terminate-class latch makes a masked quit/hup
+fire on unmask). **Receive-only**: the kernel POST axis rejects any
+userspace `tty:*` post (the PTY-1b F4 / I-39 gate), so
+`kill()`/`raise()` of a tty signum answer `EPERM` up front. SIG_DFL:
+quit/hup → NDFLT (whole-Proc terminate, POSIX); winch/cont → NCONT
+(POSIX ignore; a cont's RESUME already happened kernel-side);
+**susp → NCONT-ignore — the documented v1.0 seam** (see
+`83-pouch-signals.md` "Known caveats").
+
+### Deliberately out
+
+`forkpty` (structurally dead — pouch has no `fork()`; fails honestly
+at its `fork()` call), `kill(-pgrp)` (no kernel `SYS_POSTNOTE` pgrp
+form — an ABI addition, deferred with signoff), `getpid` (out of the
+pty surface). `tcgetsid`, `TIOCNOTTY`, `tcflush` per the table above.
+
+### Verifying — `/pouch-hello-pty`
+
+The joey boot-fatal probe (the first POSIX `openpty()` program
+Thylacine runs): mint → ptsname → isatty trio → the fresh-pts FULL
+COOKED default → cfmakeraw round-trip → winsize → the session dance
+(`setsid`+`TIOCSCTTY`+`tc[gs]etpgrp`) → a LIVE cooked `^C` (SIGINT
+handler fires; the `0x03` is consumed — the slave line reads `xy\n`,
+the echo carries no `^C`: SignalXorByte through the POSIX view) →
+live WINCH + HUP handlers → the EPERM receive-only gate → `forkpty`
+honest-fail → master close → slave EOF (drain-then-EOF).
+
+### Known caveats (PTY-3)
+
+- **`isatty(kernel-console fd) == 0`** (SA-37). devcons has no
+  `.stat_native` (the kernel SYS_FSTAT answers -1), so a pouch program
+  whose stdio is the kernel console — an interactive spawn from `ut`
+  pre-PTY — is not recognized as a tty: no line-buffering, no
+  interactive mode. The v1.0 posture: interactive ported programs run
+  under a pts (PTY-4's multiplexer) where the whole surface works; the
+  v1.x lift is a devcons `stat_native` + a cons arm in the dispatcher
+  (the LS-8 consctl grammar is the same five flags).
+- **The audit close** (the focused Fable-5-max holotype + a concurrent
+  self-audit; `memory/audit_pty3_closed_list.md`): 0 P0 / 0 P1 / 0 P2 /
+  3 P3, NOT dirty — F1 `put_dec` scratch widened, F2 the single-read
+  render dependency named, F3 (== the self-audit's SA-11; the two
+  prosecutors converged) the controlling-terminal arms gained the
+  `pts_resolve` ENOTTY pre-gate. All three fixed in-patch.
+- **Deferred with signoff** (kernel ABI-semantics changes, deliberately
+  not landed): the NDFLT-stop arm for `tty:susp` (makes SIG_DFL `^Z`
+  actually stop a pouch program — see `83-pouch-signals.md`), and the
+  `SYS_POSTNOTE` pgrp arm (`kill(-pgrp)`).

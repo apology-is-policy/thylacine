@@ -27,30 +27,32 @@
 //   type/whence report whether a name is a builtin, function, or
 //               external command.
 //
-// Built-in stdout (pwd / type output) goes via `t_putstr` (the kernel
-// UART), the same v1.0 convention the rest of the shell's diagnostic
-// output uses -- the shell has no terminal-backed fd 1 until U-6g/PTY,
-// at which point this switches to `io::stdout()`.
+// Built-in stdout (pwd / type output) goes via `Env::emit_line`
+// (PTY-4b): fd 1 when the shell holds a live terminal -- the console
+// session AND a pts-hosted session, where the old `t_putstr` (SYS_PUTS =
+// the raw UART) would bypass the terminal entirely -- falling back to the
+// UART on the fd-less boot check / host paths. This is the "switches to
+// io::stdout() at PTY" the U-6e note promised.
 //
 // === Implemented at U-7b (job control) ===
 //
 // The job-control set, over the U-7a `JobTable` (in `Env`) + the U-7-pre
 // `wait_pid_for` primitive (UTOPIA-SHELL-DESIGN.md section 10.6):
 //
-//   jobs        list tracked background jobs as `[N]{+|-} Running|Done cmd`
+//   jobs        list tracked jobs as `[N]{+|-} Running|Stopped|Done cmd`
 //               (refreshes against current truth via a WNOHANG poll, then
 //               consumes the reported-Done jobs so the prompt cycle does
 //               not re-announce them).
 //   wait [id...] block until the named jobs/pids finish, or all jobs with
 //               no argument. Blocking by-pid `wait_pid_for(pid, 0)`.
-//   fg [%N]     block on a RUNNING job to completion (it becomes the
-//               foreground command) + remove it silently. Resuming a
-//               STOPPED job (Ctrl-Z + SIGCONT) needs a kernel stopped
-//               thread-state -- that is U-PTY (a Phase-7 exit criterion);
-//               v1.0 has no stopped jobs.
-//   bg [%N]     v1.0 has no stopped jobs to resume, so `bg` reports the
-//               named job is already running in the background (bash-
-//               faithful); the real resume path lands with U-PTY.
+//   fg [%N]     foreground a job. Under job control (PTY-4b, a pts
+//               session): terminal to the job's group + SYS_TTY_CONT
+//               resume + the stop-aware wait (a re-^Z re-stops it into
+//               the table). On the console: block on a RUNNING job to
+//               completion + remove it silently (the U-7b behavior).
+//   bg [%N]     resume a STOPPED job in the background (SYS_TTY_CONT,
+//               no terminal handoff) under job control; else report the
+//               job already running (bash-faithful).
 //   kill {%N|pid} [interrupt|kill]
 //               post a note to a job's pids / a pid. Default `interrupt`
 //               (the catchable Ctrl-C analogue); `kill` is the non-
@@ -91,11 +93,11 @@ use core::fmt::Write as _;
 use libthyla_rs::fs::{self, Component, Path};
 use libthyla_rs::io::Read as _;
 use libthyla_rs::notes::{self, NoteTarget};
-use libthyla_rs::{t_putstr, t_wait_pid_for, T_WAIT_WNOHANG};
+use libthyla_rs::{t_wait_pid_for, T_WAIT_WNOHANG};
 
 use super::env::Env;
 use super::error::EvalResult;
-use super::stmt::{eval_source, StatementFlow};
+use super::stmt::{eval_source, run_foreground_jc, StatementFlow};
 use super::value::Value;
 
 /// Whether `name` is a built-in the shell intercepts (the implemented
@@ -223,7 +225,7 @@ fn bi_cd(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
     if announce {
         let mut line = target;
         line.push('\n');
-        t_putstr(&line);
+        env.emit_line(&line);
     }
     env.status_set(0);
     Ok(StatementFlow::Normal)
@@ -278,7 +280,7 @@ fn normalize_abs(cwd: &str, arg: &str) -> String {
 fn bi_pwd(env: &mut Env) -> EvalResult<StatementFlow> {
     let mut line = env.cwd().to_string();
     line.push('\n');
-    t_putstr(&line);
+    env.emit_line(&line);
     env.status_set(0);
     Ok(StatementFlow::Normal)
 }
@@ -384,7 +386,7 @@ fn bi_type(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
             // "external" (the name would be spawned as a command).
             let _ = write!(&mut line, "{} is external\n", name);
         }
-        t_putstr(&line);
+        env.emit_line(&line);
     }
     env.status_set(0);
     Ok(StatementFlow::Normal)
@@ -520,11 +522,19 @@ fn bi_jobs(env: &mut Env, _args: &[String]) -> EvalResult<StatementFlow> {
         } else {
             ' '
         };
-        let state = if job.is_running() { "Running" } else { "Done" };
+        // PTY-4b: a live job may be job-stopped (`^Z`); Done only when fully
+        // reaped (a stopped job structurally cannot be, see jobs.rs).
+        let state = if !job.is_running() {
+            "Done"
+        } else if job.stopped() {
+            "Stopped"
+        } else {
+            "Running"
+        };
         let _ = write!(&mut out, "[{}]{}  {:7}  {}\n", job.spec(), mark, state, job.cmd());
     }
     if !out.is_empty() {
-        t_putstr(&out);
+        env.emit_line(&out);
     }
     // Consume the Done jobs we just listed (discard the formatted lines -- the
     // listing above already reported them) so the prompt cycle stays quiet.
@@ -533,11 +543,13 @@ fn bi_jobs(env: &mut Env, _args: &[String]) -> EvalResult<StatementFlow> {
     Ok(StatementFlow::Normal)
 }
 
-/// `fg [%N]` -- bring a background job to the foreground. v1.0 has no STOPPED
-/// thread-state (Ctrl-Z stop/resume is U-PTY), so `fg` blocks on a RUNNING job
-/// to completion -- the job becomes the foreground command -- then removes it
+/// `fg [%N]` -- bring a job to the foreground. Under job control (PTY-4b, a
+/// pts session): the terminal goes to the job's process group, a stopped job
+/// is resumed via `SYS_TTY_CONT`, and the wait is stop-aware -- a re-`^Z`
+/// re-stops it back into the table. On a clean finish the job is removed
 /// silently (its completion is this command's result, not a `[N]+ Done`
-/// event). $status is the job's exit (bash).
+/// event); $status is the job's exit (bash). On the console (no jc) the
+/// U-7b behavior is unchanged: block on a RUNNING job to completion.
 fn bi_fg(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
     if args.len() > 1 {
         return fail(env, "fg: too many arguments".to_string(), 1);
@@ -547,10 +559,34 @@ fn bi_fg(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
         Err(m) => return fail(env, m, 1),
     };
     // Echo the command being foregrounded (bash prints the job's command line).
-    if let Some(cmd) = env.jobs().cmd_of(spec) {
-        let mut line = cmd.to_string();
-        line.push('\n');
-        t_putstr(&line);
+    let cmd = env.jobs().cmd_of(spec).unwrap_or("").to_string();
+    {
+        let mut line = cmd.clone();
+        line.push_str("\r\n");
+        env.emit_line(&line);
+    }
+    let jc_pgid = env
+        .job_control
+        .and_then(|_| env.jobs().pgid_of(spec))
+        .filter(|&g| g != 0);
+    if let Some(pgid) = jc_pgid {
+        // PTY-4b: wait on the LIVE elements only (already-reaped ones keep
+        // their recorded statuses). The resume (`SYS_TTY_CONT`) is posted
+        // whether the job was Stopped or Running -- POSIX SIGCONT on a
+        // running group is a harmless note.
+        let pids = env.jobs().live_pids_of(spec).unwrap_or_default();
+        if pids.is_empty() {
+            // Everything already exited; consume the job silently.
+            env.jobs_mut().remove(spec);
+            env.status_set(0);
+            return Ok(StatementFlow::Normal);
+        }
+        env.jobs_mut().set_stopped(spec, false);
+        let statuses = run_foreground_jc(env, &pids, pgid, cmd, true, Some(spec));
+        // A re-stop keeps the job in the table (run_foreground_jc re-marked
+        // it); a finish removed it. $status: the last element's outcome.
+        env.status_set(statuses.last().copied().unwrap_or(0));
+        return Ok(StatementFlow::Normal);
     }
     let pids = env.jobs().spec_pids(spec).unwrap_or_default();
     let status = wait_pids_blocking(env, &pids);
@@ -559,10 +595,11 @@ fn bi_fg(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
     Ok(StatementFlow::Normal)
 }
 
-/// `bg [%N]` -- v1.0 has no stopped jobs to resume (Ctrl-Z + SIGCONT needs a
-/// kernel stopped thread-state = U-PTY). A `&`-launched job is already running
-/// in the background, so `bg` reports that (bash-faithful), status 0. The real
-/// resume path lands with U-PTY.
+/// `bg [%N]` -- resume a stopped job in the background. Under job control
+/// (PTY-4b): `SYS_TTY_CONT` on the job's group, no terminal handoff -- the
+/// job runs backgrounded and its exit surfaces as the usual `[N]+ Done`.
+/// A job that is not stopped reports "already running" (bash-faithful).
+/// On the console (no jc) there is never a stopped job to resume.
 fn bi_bg(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
     if args.len() > 1 {
         return fail(env, "bg: too many arguments".to_string(), 1);
@@ -571,9 +608,31 @@ fn bi_bg(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
         Ok(s) => s,
         Err(m) => return fail(env, m, 1),
     };
+    let jc_pgid = env
+        .job_control
+        .and_then(|_| env.jobs().pgid_of(spec))
+        .filter(|&g| g != 0);
+    if env.jobs().is_stopped(spec) {
+        if let Some(pgid) = jc_pgid {
+            env.jobs_mut().set_stopped(spec, false);
+            // SAFETY: t_tty_cont is the SYS_TTY_CONT SVC wrapper on fd 0
+            // (the pts slave the session dance validated).
+            let _ = unsafe { libthyla_rs::t_tty_cont(0, pgid) };
+            let mut line = String::new();
+            let _ = write!(
+                &mut line,
+                "[{}]+ {} &\r\n",
+                spec,
+                env.jobs().cmd_of(spec).unwrap_or("")
+            );
+            env.emit_line(&line);
+            env.status_set(0);
+            return Ok(StatementFlow::Normal);
+        }
+    }
     let mut line = String::new();
     let _ = write!(&mut line, "bg: job [{}] already running in background\n", spec);
-    t_putstr(&line);
+    env.emit_line(&line);
     env.status_set(0);
     Ok(StatementFlow::Normal)
 }

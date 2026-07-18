@@ -26,10 +26,17 @@ The leaves:
 | `random`  | `DEV_KIND_RANDOM`  | read → `kern_random_bytes` (CSPRNG); write → consumed | no |
 | `urandom` | `DEV_KIND_URANDOM` | alias of `random` (POSIX compat) | no |
 | `cons`    | `DEV_KIND_CONS`    | read → console RX drain; write → UART | **yes (I-27)** |
-| `consctl` | `DEV_KIND_CONSCTL` | read → EOF; write → -1 (no modes at v1.0) | **yes (I-27)** |
+| `consctl` | `DEV_KIND_CONSCTL` | read → mode-line render; write → `cons_set_mode_cmd` (LS-8b) | **open-gated; I/O delegated (#94-B)** |
+| `pts`     | `DEV_KIND_PTS`     | **directory** mount stub (PTY-2a-2): empty; read/write → -1 | no (visibility only) |
 
 The trivial leaves (`null`/`zero`/`full`/`random`/`urandom`) are world-rw and ungated —
-the same on every Unix. `cons`/`consctl` are the console, gated at open (below).
+the same on every Unix. `cons`/`consctl` are the console, gated at open (below). `pts` is
+the one **directory** child: an EMPTY synthetic mount stub (QTDIR, walkable, no devdev
+children — `..` climbs back to the root) that exists solely as the mount-point identity
+`(dc='d', devno, DEV_KIND_PTS)` for joey's `t_mount("/dev/pts", …)` of the ptyfs devpts
+tree (the `devhw` `/hw/pci` synth-child precedent). Post-mount the resolver crosses into
+ptyfs *before* asking devdev, so the stub never serves content; pre-mount (or in a
+namespace without the mount) it is an empty dir whose reads/writes fail.
 
 ---
 
@@ -138,6 +145,11 @@ the audited `devctl_walk`.
 - **Post-pivot re-graft** (`usr/joey/joey.c`): the long-running init grabs a pre-pivot
   `t_open("/dev", O_PATH)` handle (crossing the mount → the devdev root), then post-pivot
   `mkdir /dev` + `t_mount("/dev", 4, dev_dev_h, MREPL)` onto the pivoted disk root.
+- **The `/dev/pts` graft** (PTY-2a-2, `usr/joey/joey.c`): after spawning `/sbin/ptyfs` and
+  its liveness connect, joey does a fresh open=connect of `/srv/ptyfs` (a 9P-mode service
+  open yields a mountable dev9p root) + `t_mount("/dev/pts", 8, pts_root, MREPL)` onto the
+  synthetic `pts` stub. No mkdir — the devdev walk provides the point. Boot-fatal on
+  failure (ptyfs has no hardware/external dependency, so a failure is always a defect).
 
 ### Mount-table sizing (PGRP_MAX_MOUNTS 8 → 12)
 
@@ -161,6 +173,9 @@ deliberately "does not touch mounts").
   - `devdev.attach_returns_dir` — QTDIR root, qid.path 0.
   - `devdev.walk_to_each_leaf` — all 7 leaves resolve to QTFILE.
   - `devdev.walk_unknown_misses` — nqid 0.
+  - `devdev.walk_pts_dir` — the PTY-2a-2 mount stub: `pts` resolves QTDIR (path
+    `DEV_KIND_PTS`); no devdev children resolve from it; `..` climbs back to the root;
+    read/write on the stub fail.
   - `devdev.trivial_leaves` — null EOF/consume, zero/full NUL-fill, full write -1, random
     two-reads-differ (CSPRNG), urandom alias; all open ungated.
   - **`devdev.cons_gate`** — the I-27 deny/allow: a non-console-attached open of cons AND
@@ -173,7 +188,10 @@ deliberately "does not touch mounts").
 - `kernel/test/test_devramfs.c` — the paginated-readdir count (`files + 4 synth dirs`) and the
   synth-dir-empty test updated for the 4th synth dir (`dev`).
 - **Boot E2E**: the kernel boot mount + the post-pivot re-graft run on every boot (`joey:
-  /dev mounted`), and the login E2E exercises the namespace.
+  /dev mounted`), and the login E2E exercises the namespace. The PTY-2a-2 probe drives the
+  full `/dev/pts` chain every boot (`joey: /dev/pts mounted` + `joey: PTY-2a-2 PROBE OK`):
+  mount over the stub, ptmx clone-mint, Treaddir over the mount, slave open, both ring
+  directions, close→EOF — the first real client of the ptyfs 9P server.
 
 ---
 
@@ -203,9 +221,11 @@ deliberately "does not touch mounts").
 - **The orphaned pre-pivot mounts** (task #80) waste 4 mount slots per Territory and propagate
   to every child. Harmless at v1.0 (the 12-cap holds through /net) but a pivot-time GC would
   reclaim them.
-- **The deferred /dev entries** (`mem`/`tty`/`ptmx`/`pts`/`fb`/`video`/`janus`, etc.) land with
-  their servers (Phase 8 / the container runner #70 / LS-8). `/dev/mem` is `CAP_RAW_MEM`-gated
-  when it lands.
+- **The deferred /dev entries** (`mem`/`tty`/`ptmx`/`fb`/`video`/`janus`, etc.) land with
+  their servers (Phase 8 / the container runner #70). `/dev/mem` is `CAP_RAW_MEM`-gated
+  when it lands. `pts` landed at PTY-2a-2 (the ptyfs mount stub, above); the POSIX
+  `/dev/ptmx` alias is a PTY-3 concern (a symlink or file-mount — the clone file lives at
+  `/dev/pts/ptmx` meanwhile, the Linux-devpts shape).
 
 ---
 

@@ -31,6 +31,7 @@
 #include <thylacine/notes.h>
 #include <thylacine/page.h>
 #include <thylacine/path.h>    // struct Path (SYS_FD2PATH reads ->s/->len; #66)
+#include <thylacine/pts.h>     // the pts registry (SYS_PTY_REGISTER; PTY-1c)
 #include <thylacine/pci_handle.h>   // KObj_PCI (SYS_PCI_CLAIM/MAP_BAR/INFO; pci-1c)
 #include <thylacine/pipe.h>
 #include <thylacine/poll.h>
@@ -2455,6 +2456,170 @@ s64 sys_getgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
     struct Thread *t = current_thread();             if (!t) return -1;
     struct Proc *p = t->proc;                        if (!p) return -1;
     return (s64)(u64)p->primary_gid;
+}
+
+// =============================================================================
+// PTY-1a (PTY-DESIGN.md section 4): POSIX sessions + process groups. Thin
+// fronts over the proc.c cores (which hold g_proc_table_lock across find +
+// validate + mutate). NON-static so the kernel tests call them directly (the
+// LS-K identity-handler precedent). pid args arrive as u64 registers; the
+// (int)(s64) cast preserves a negative pid, which the cores answer -T_E_SRCH
+// (self-or-child lookup misses) rather than mis-treating as huge-positive.
+// =============================================================================
+
+s64 sys_setsid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+    (void)a0; (void)a1; (void)a2; (void)a3;
+    struct Thread *t = current_thread();             if (!t) return -1;
+    struct Proc *p = t->proc;                        if (!p) return -1;
+    return (s64)proc_setsid(p);
+}
+
+s64 sys_setpgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+    (void)a2; (void)a3;
+    struct Thread *t = current_thread();             if (!t) return -1;
+    struct Proc *p = t->proc;                        if (!p) return -1;
+    return (s64)proc_setpgid(p, (int)(s64)a0, (int)(s64)a1);
+}
+
+s64 sys_getpgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+    (void)a1; (void)a2; (void)a3;
+    struct Thread *t = current_thread();             if (!t) return -1;
+    struct Proc *p = t->proc;                        if (!p) return -1;
+    return (s64)proc_getpgid(p, (int)(s64)a0);
+}
+
+s64 sys_getsid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+    (void)a1; (void)a2; (void)a3;
+    struct Thread *t = current_thread();             if (!t) return -1;
+    struct Proc *p = t->proc;                        if (!p) return -1;
+    return (s64)proc_getsid(p, (int)(s64)a0);
+}
+
+// =============================================================================
+// PTY-1c (PTY-DESIGN.md section 3): SYS_PTY_REGISTER -- the server-mediated
+// (connection, qid) -> pts correlation. The registry cores (kernel/pts.c)
+// gate on the minting server + the gen; this front resolves + gates the conn
+// fd: it must be a SERVER-endpoint devsrv connection Spoor -- the SYS_SRV_
+// ACCEPT product (aux = SrvConn, no CSRVCLIENT). The CLIENT-endpoint reject
+// matters: a byte-mode client holds a CSRVCLIENT conn Spoor on the SAME
+// SrvConn, and letting it register would let a CLIENT of a service claim
+// (conn, qid) bindings the server never made. MINT additionally requires
+// PROC_FLAG_MAY_POST_SERVICE (the service tier -- the Weft-7 F1 registry-
+// squat lesson; only a flag holder can post a service and so be a server at
+// all, making this defense-in-depth). NON-static for the kernel tests.
+// =============================================================================
+
+s64 sys_pty_register_for_proc(struct Proc *p, u64 op, u64 a1, u64 a2, u64 a3) {
+    if (!p) return -T_E_INVAL;
+
+    switch (op) {
+    case PTY_REG_MINT:
+    case PTY_REG_SLAVE: {
+        if (op == PTY_REG_MINT && a3 != 0)        return -T_E_INVAL;
+        if (op == PTY_REG_MINT && !proc_may_post_service(p))
+            return -T_E_ACCES;
+        // RIGHT_READ mirrors sys_srv_peer_for_proc: the accept installs
+        // READ|WRITE on the endpoint; the register performs no I/O on it --
+        // the endpoint + minting-server axes are the real authority.
+        struct Spoor *sp = sys_lookup_spoor(p, (hidx_t)a1, RIGHT_READ);
+        if (!sp)                                  return -T_E_INVAL;
+        struct SrvConn *cn = devsrv_conn_of(sp);
+        s64 r;
+        if (!cn || (sp->flag & CSRVCLIENT)) {
+            r = -T_E_INVAL;                       // not a server-endpoint conn
+        } else if (op == PTY_REG_MINT) {
+            r = pts_mint(p, cn, a2);
+        } else {
+            r = (s64)pts_bind_slave(p, cn, a2, a3);
+        }
+        // sp's ref held cn alive across the registry op (which took its own
+        // binding ref); drop it last (#844 ref-transfer contract).
+        spoor_clunk(sp);
+        return r;
+    }
+    case PTY_REG_FREE:
+        if (a2 != 0 || a3 != 0)                   return -T_E_INVAL;
+        return (s64)pts_free(p, a1);
+    default:
+        return -T_E_INVAL;
+    }
+}
+
+static s64 sys_pty_register_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+    struct Thread *t = current_thread();             if (!t) return -1;
+    struct Proc *p = t->proc;                        if (!p) return -1;
+    return sys_pty_register_for_proc(p, a0, a1, a2, a3);
+}
+
+// =============================================================================
+// PTY-1d: the tty seam + controlling-terminal fronts. SYS_TTY_SIGNAL takes a
+// pts_id directly (the server holds it from MINT -- no fd). The fd-keyed
+// three resolve the caller's own Spoor to its (SrvConn, qid) -- the pts.c
+// cores gate on the registry entry (binding side, controlling session, gen).
+// RIGHT_READ suffices on the fd: an O_RDONLY slave is still one's
+// controlling terminal (POSIX), and no I/O runs here; the registry axes are
+// the authority. The Spoor ref is held across the core (the extracted cn is
+// only pointer-compared, but the hold keeps the chain trivially sound) and
+// clunked on every path (#844). NON-static _for_proc bodies for the tests.
+// =============================================================================
+
+s64 sys_tty_signal_for_proc(struct Proc *p, u64 pts_id, u64 sig_class) {
+    if (!p) return -T_E_INVAL;
+    return pts_tty_signal(p, pts_id, (u32)sig_class);
+}
+
+s64 sys_tty_fd_op_for_proc(struct Proc *p, u64 fd_raw, u64 op_num, u64 arg) {
+    if (!p) return -T_E_INVAL;
+    struct Spoor *sp = sys_lookup_spoor(p, (hidx_t)fd_raw, RIGHT_READ);
+    if (!sp) return -T_E_INVAL;
+    struct SrvConn *cn = NULL;
+    u64 qid = 0;
+    s64 r = (s64)pts_spoor_conn_qid(sp, &cn, &qid);
+    if (r == 0) {
+        switch (op_num) {
+        case SYS_TTY_ACQUIRE: r = pts_tty_acquire(p, cn, qid);            break;
+        case SYS_TTY_SET_FG:  r = pts_tty_set_fg(p, cn, qid, (u32)arg);   break;
+        case SYS_TTY_CONT:    r = pts_tty_cont(p, cn, qid, (u32)arg);     break;
+        default:              r = pts_tty_get_fg(p, cn, qid);             break;
+        }
+    }
+    spoor_clunk(sp);
+    return r;
+}
+
+static s64 sys_tty_signal_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+    (void)a2; (void)a3;
+    struct Thread *t = current_thread();             if (!t) return -1;
+    struct Proc *p = t->proc;                        if (!p) return -1;
+    return sys_tty_signal_for_proc(p, a0, a1);
+}
+
+static s64 sys_tty_acquire_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+    (void)a1; (void)a2; (void)a3;
+    struct Thread *t = current_thread();             if (!t) return -1;
+    struct Proc *p = t->proc;                        if (!p) return -1;
+    return sys_tty_fd_op_for_proc(p, a0, SYS_TTY_ACQUIRE, 0);
+}
+
+static s64 sys_tty_set_fg_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+    (void)a2; (void)a3;
+    struct Thread *t = current_thread();             if (!t) return -1;
+    struct Proc *p = t->proc;                        if (!p) return -1;
+    return sys_tty_fd_op_for_proc(p, a0, SYS_TTY_SET_FG, a1);
+}
+
+static s64 sys_tty_get_fg_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+    (void)a1; (void)a2; (void)a3;
+    struct Thread *t = current_thread();             if (!t) return -1;
+    struct Proc *p = t->proc;                        if (!p) return -1;
+    return sys_tty_fd_op_for_proc(p, a0, SYS_TTY_GET_FG, 0);
+}
+
+static s64 sys_tty_cont_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+    (void)a2; (void)a3;
+    struct Thread *t = current_thread();             if (!t) return -1;
+    struct Proc *p = t->proc;                        if (!p) return -1;
+    return sys_tty_fd_op_for_proc(p, a0, SYS_TTY_CONT, a1);
 }
 
 // SYS_YIELD (#33): the thin syscall front for sched_yield_hint (sched.c) --
@@ -6195,12 +6360,18 @@ static s64 sys_wait_pid_handler(u64 want_pid_u, u64 flags_u, u64 status_out_va) 
     struct Proc *p = t->proc;
     if (!p)                                            return -1;
 
-    int want_pid = (int)(s64)want_pid_u;   // -1 (any) or a specific pid
+    int want_pid = (int)(s64)want_pid_u;   // -1 (any), a pid, 0/-N (pgrp)
     // Reject unknown/garbage flag bits (the full x1, before narrowing) so the
     // flag space stays clean for future additions and a fat-fingered flags
     // value fails loudly rather than silently behaving as blocking. Matches
     // the unknown-bit-reject discipline of the spawn / wstat surfaces.
-    if (flags_u & ~(u64)WAIT_WNOHANG)                  return -1;
+    // PTY-1e added WAIT_UNTRACED/WAIT_CONTINUED to the wait_pid_for core + the
+    // pgrp selectors on want_pid; the accepted-flag mask MUST admit them or the
+    // job-control stop/continue reports are unreachable from EL0 (PTY-4: the
+    // shell's WAIT_UNTRACED fg wait returned a spurious -1 -- the whole
+    // ^Z-detects-a-stop path was closed at this gate).
+    if (flags_u & ~(u64)(WAIT_WNOHANG | WAIT_UNTRACED | WAIT_CONTINUED))
+                                                       return -1;
     int flags    = (int)flags_u;
 
     // Validate the destination buffer up-front (skipping if NULL) so a
@@ -6949,6 +7120,56 @@ void syscall_dispatch(struct exception_context *ctx) {
     case SYS_GETGID:
         ctx->regs[0] = (u64)sys_getgid_handler(ctx->regs[0], ctx->regs[1],
                                                ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_SETSID:
+        ctx->regs[0] = (u64)sys_setsid_handler(ctx->regs[0], ctx->regs[1],
+                                               ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_SETPGID:
+        ctx->regs[0] = (u64)sys_setpgid_handler(ctx->regs[0], ctx->regs[1],
+                                                ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_GETPGID:
+        ctx->regs[0] = (u64)sys_getpgid_handler(ctx->regs[0], ctx->regs[1],
+                                                ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_GETSID:
+        ctx->regs[0] = (u64)sys_getsid_handler(ctx->regs[0], ctx->regs[1],
+                                               ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_PTY_REGISTER:
+        ctx->regs[0] = (u64)sys_pty_register_handler(ctx->regs[0], ctx->regs[1],
+                                                     ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_TTY_SIGNAL:
+        ctx->regs[0] = (u64)sys_tty_signal_handler(ctx->regs[0], ctx->regs[1],
+                                                   ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_TTY_ACQUIRE:
+        ctx->regs[0] = (u64)sys_tty_acquire_handler(ctx->regs[0], ctx->regs[1],
+                                                    ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_TTY_SET_FG:
+        ctx->regs[0] = (u64)sys_tty_set_fg_handler(ctx->regs[0], ctx->regs[1],
+                                                   ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_TTY_GET_FG:
+        ctx->regs[0] = (u64)sys_tty_get_fg_handler(ctx->regs[0], ctx->regs[1],
+                                                   ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_TTY_CONT:
+        ctx->regs[0] = (u64)sys_tty_cont_handler(ctx->regs[0], ctx->regs[1],
+                                                 ctx->regs[2], ctx->regs[3]);
         return;
 
     case SYS_CLOCK_GETTIME:

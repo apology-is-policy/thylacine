@@ -34,12 +34,18 @@
 
 #include "test.h"
 
+#include "../../arch/arm64/exception.h"  // PTY-4: struct exception_context + syscall_dispatch
 #include <thylacine/extinction.h>
+#include <thylacine/notes.h>      // PTY-1f: the tty:* note names + queue walk
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
 #include <thylacine/smp.h>
+#include <thylacine/spinlock.h>
+#include <thylacine/syscall.h>    // PTY-4: SYS_WAIT_PID + the wait flags
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
+
+#include "../../arch/arm64/timer.h"   // PTY-1f: the sleeper thunk's deadlines
 
 void test_proc_rfork_basic_smoke(void);
 void test_proc_rfork_exits_status(void);
@@ -60,6 +66,7 @@ void test_proc_legate_teardown_from_zombie_chokepoint(void);
 // which kernel test threads (EL1) never reach, so the flag is the observable.
 extern void proc_test_link(struct Proc *p);
 extern void proc_test_unlink(struct Proc *p);
+extern void proc_test_link_child(struct Proc *parent, struct Proc *p);
 extern void proc_test_legate_teardown(u32 scope_id, struct Proc *except);
 extern void proc_test_set_init(struct Proc *p);
 
@@ -1138,4 +1145,457 @@ void test_proc_wait_pid_for_selects_target(void) {
     int reaped_spin = wait_pid_for(spin_pid, 0, &st);
     TEST_EXPECT_EQ(reaped_spin, spin_pid, "reap the spinner by its own pid");
     TEST_EXPECT_EQ(st, 0, "spinner status");
+}
+
+// =============================================================================
+// PTY-1e: the wait extension — pgrp selectors + WUNTRACED/WCONTINUED reports
+// =============================================================================
+
+static volatile u32 g_wpf_grouped;   // the group-minting spinner signals ready
+
+static void wpf_group_spinner_thunk(void *arg) {
+    (void)arg;
+    // Mint our own process group (self-target; same session as kproc; not a
+    // session leader), announce, then spin until released.
+    struct Proc *self = current_thread()->proc;
+    if (proc_setpgid(self, 0, 0) != 0) exits("setpgid failed");
+    __atomic_store_n(&g_wpf_grouped, 1u, __ATOMIC_RELEASE);
+    while (__atomic_load_n(&g_wpf_release, __ATOMIC_ACQUIRE) == 0u)
+        sched();
+    exits("ok");
+}
+
+static void wpf_failer_thunk(void *arg) {
+    (void)arg;
+    exits("boom");                   // non-"ok" -> exit_status 1
+}
+
+// The POSIX group selectors: want_pid == 0 matches a child in the CALLER's
+// group; want_pid < -1 matches the named group; a group nobody occupies
+// answers -1 (the ECHILD shape); a child that setpgid-minted its own group
+// is reachable ONLY through its group's selector once it leaves ours.
+void test_proc_wait_pid_for_pgrp_selectors(void) {
+    __atomic_store_n(&g_wpf_release, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_wpf_grouped, 0u, __ATOMIC_RELEASE);
+
+    int plain_pid = rfork(RFPROC, wpf_spinner_thunk, NULL);
+    TEST_ASSERT(plain_pid > 0, "rfork plain spinner failed");
+    int grp_pid = rfork(RFPROC, wpf_group_spinner_thunk, NULL);
+    TEST_ASSERT(grp_pid > 0, "rfork group spinner failed");
+    while (__atomic_load_n(&g_wpf_grouped, __ATOMIC_ACQUIRE) == 0u)
+        sched();                     // the child has minted its own group
+
+    int st = -42;
+    // want 0 = the caller's (kproc's) group: the plain spinner inherited
+    // pgid 0 and is alive-matched (0 under WNOHANG, never -1).
+    TEST_EXPECT_EQ(wait_pid_for(0, WAIT_WNOHANG, &st), 0,
+        "want 0 matches an alive child in the caller's group");
+    // The group child LEFT pgid 0; its own group matches it alive.
+    TEST_EXPECT_EQ(wait_pid_for(-grp_pid, WAIT_WNOHANG, &st), 0,
+        "want -G matches the alive child that minted group G");
+    TEST_EXPECT_EQ(wait_pid_for(-9999, WAIT_WNOHANG, &st), -1,
+        "an unoccupied group answers -1 (no matching child)");
+    TEST_EXPECT_EQ(wait_pid_for(-9999, 0, &st), -1,
+        "the blocking form does not block on an unoccupied group");
+
+    __atomic_store_n(&g_wpf_release, 1u, __ATOMIC_RELEASE);
+    TEST_EXPECT_EQ(wait_pid_for(-grp_pid, 0, &st), grp_pid,
+        "the group selector reaps the released group child");
+    TEST_EXPECT_EQ(st, 0, "group child status");
+    TEST_EXPECT_EQ(wait_pid_for(plain_pid, 0, &st), plain_pid,
+        "reap the plain spinner");
+}
+
+// Report-is-not-reap (R2-F6): a WAIT_UNTRACED/WAIT_CONTINUED wait REPORTS a
+// latched ALIVE child (pid + packed status) without any teardown, consumes
+// the latch exactly once, and a plain wait neither sees nor consumes a
+// latch. The latches are set directly here (the PTY-1f stop/cont paths are
+// the production setters); the packed-exited arm + raw compatibility use a
+// real failing child.
+void test_proc_wait_pid_for_report_not_reap(void) {
+    struct Proc *c = proc_alloc();
+    TEST_ASSERT(c != NULL, "proc_alloc");
+    proc_test_link(c);
+    int cpid = c->pid;
+    int st = -42;
+
+    // Stop report: pid + WAIT_STATUS_STOPPED; the child is NOT reaped
+    // (still ALIVE + still matched: the second poll answers 0, where a
+    // reaped child would answer -1 no-match).
+    c->stop_report_pending = true;
+    TEST_EXPECT_EQ(wait_pid_for(cpid, WAIT_UNTRACED | WAIT_WNOHANG, &st),
+        cpid, "the stop latch reports the child's pid");
+    TEST_EXPECT_EQ(st, WAIT_STATUS_STOPPED, "packed stopped status");
+    TEST_ASSERT(WAIT_IF_STOPPED(st) && !WAIT_IF_EXITED(st) &&
+                !WAIT_IF_CONTINUED(st), "stopped decodes as stopped only");
+    TEST_ASSERT(c->state == PROC_STATE_ALIVE, "the report did not reap");
+    TEST_ASSERT(!c->stop_report_pending, "the report consumed the latch");
+    TEST_EXPECT_EQ(wait_pid_for(cpid, WAIT_UNTRACED | WAIT_WNOHANG, &st), 0,
+        "a consumed latch reports nothing further");
+
+    // A plain wait neither sees nor consumes a latch.
+    c->stop_report_pending = true;
+    TEST_EXPECT_EQ(wait_pid_for(cpid, WAIT_WNOHANG, &st), 0,
+        "a plain wait does not see the stop latch");
+    TEST_ASSERT(c->stop_report_pending,
+        "a plain wait did not consume the latch");
+
+    // Precedence: continue outranks stop; each consumed independently.
+    c->cont_report_pending = true;
+    TEST_EXPECT_EQ(wait_pid_for(cpid,
+        WAIT_UNTRACED | WAIT_CONTINUED | WAIT_WNOHANG, &st), cpid,
+        "both latched: the continue reports first");
+    TEST_EXPECT_EQ(st, WAIT_STATUS_CONTINUED, "packed continued status");
+    TEST_ASSERT(WAIT_IF_CONTINUED(st) && !WAIT_IF_STOPPED(st),
+        "continued decodes as continued only");
+    TEST_EXPECT_EQ(wait_pid_for(cpid,
+        WAIT_UNTRACED | WAIT_CONTINUED | WAIT_WNOHANG, &st), cpid,
+        "then the still-latched stop reports");
+    TEST_EXPECT_EQ(st, WAIT_STATUS_STOPPED, "the second report is the stop");
+
+    // The group selector composes with reports.
+    c->stop_report_pending = true;
+    TEST_EXPECT_EQ(wait_pid_for(-(int)c->pgid,
+        WAIT_UNTRACED | WAIT_WNOHANG, &st), cpid,
+        "the pgrp selector reaches a latched child");
+    legate_drop_linked(c);
+
+    // Packed-exited vs raw: a failing child (exit_status 1) reads 0x100
+    // under a PTY-1e flag and raw 1 without one.
+    int f1 = rfork(RFPROC, wpf_failer_thunk, NULL);
+    TEST_ASSERT(f1 > 0, "rfork failer 1");
+    TEST_EXPECT_EQ(wait_pid_for(f1, WAIT_UNTRACED, &st), f1,
+        "reap the failer under WAIT_UNTRACED");
+    TEST_EXPECT_EQ(st, WAIT_STATUS_EXITED(1), "packed exited status (0x100)");
+    TEST_ASSERT(WAIT_IF_EXITED(st) && WAIT_EXITSTATUS(st) == 1,
+        "exited decodes: code 1");
+    int f2 = rfork(RFPROC, wpf_failer_thunk, NULL);
+    TEST_ASSERT(f2 > 0, "rfork failer 2");
+    TEST_EXPECT_EQ(wait_pid_for(f2, 0, &st), f2, "reap the failer plainly");
+    TEST_EXPECT_EQ(st, 1, "a plain wait keeps the raw exit status");
+}
+
+// PTY-4: SYS_WAIT_PID must ADMIT the WAIT_UNTRACED/WAIT_CONTINUED flags.
+// PTY-1e added them to the wait_pid_for CORE (exercised by the tests above,
+// which call the core directly) + the pgrp selectors -- but the SYSCALL
+// HANDLER's accepted-flag mask still rejected any bit outside WAIT_WNOHANG,
+// so a `waitpid(pid, WUNTRACED)` from EL0 returned a spurious -1 and the
+// whole job-control stop/continue-report path was unreachable from userspace
+// (the PTY-4 shell's fg wait). This drives syscall_dispatch (the EL0 entry
+// path the direct-core tests bypass) and fails on the pre-fix mask.
+void test_proc_wait_pid_syscall_untraced_flag(void) {
+    struct Proc *c = proc_alloc();
+    TEST_ASSERT(c != NULL, "proc_alloc");
+    proc_test_link(c);
+    int cpid = c->pid;
+    c->stop_report_pending = true;
+
+    // SYS_WAIT_PID(want_pid=cpid, flags=WAIT_UNTRACED, status_out=0). The
+    // handler admits the flag, runs the core, and REPORTS the stop latch
+    // (returns cpid, no reap). Pre-fix the flag mask rejected WAIT_UNTRACED
+    // -> the handler returned -1 before ever reaching the core.
+    struct exception_context ctx;
+    for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
+    ctx.regs[8] = SYS_WAIT_PID;
+    ctx.regs[0] = (u64)(s64)cpid;
+    ctx.regs[1] = (u64)WAIT_UNTRACED;
+    ctx.regs[2] = 0;               // status_out NULL: the handler skips the copy
+    syscall_dispatch(&ctx);
+    TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)cpid,
+        "SYS_WAIT_PID admits WAIT_UNTRACED + reports the stop latch (pre-fix: -1)");
+    TEST_ASSERT(c->state == PROC_STATE_ALIVE, "the report did not reap");
+    TEST_ASSERT(!c->stop_report_pending, "the report consumed the latch");
+
+    // A garbage flag bit is still rejected (the mask stayed tight).
+    c->stop_report_pending = true;
+    for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
+    ctx.regs[8] = SYS_WAIT_PID;
+    ctx.regs[0] = (u64)(s64)cpid;
+    ctx.regs[1] = 0x40u;           // outside {WNOHANG, UNTRACED, CONTINUED}
+    ctx.regs[2] = 0;
+    syscall_dispatch(&ctx);
+    TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)-1,
+        "an unknown flag bit is still rejected");
+
+    c->stop_report_pending = false;
+    legate_drop_linked(c);
+}
+
+// =============================================================================
+// PTY-1f: the job-control stop -- the second stop owner (specs/pty_stop.tla)
+// =============================================================================
+
+// Count queued notes named `name` in p's queue (under q->lock).
+static u32 js_note_count(struct Proc *p, const char *name) {
+    struct NoteQueue *q = p->notes;
+    u32 found = 0;
+    spin_lock(&q->lock);
+    u32 idx = q->head;
+    for (u32 n = 0; n < q->count; n++) {
+        const char *a = q->ring[idx].name, *b = name;
+        while (*a && *a == *b) { a++; b++; }
+        if (*a == *b) found++;
+        idx = (idx + 1) % NOTE_QUEUE_DEPTH;
+    }
+    spin_unlock(&q->lock);
+    return found;
+}
+
+// The stopOwners algebra (pty_stop.tla StopCompatI39 / BUGGY_DOUBLE_STOP):
+// job + debug are INDEPENDENT owners on one park -- each resume clears ONLY
+// its own flag, and the park predicate (proc_stop_requested) holds until
+// BOTH clear. A resume that cleared the other owner's flag is exactly the
+// BUGGY_DOUBLE_STOP counterexample (a tty:cont running a debugger-stopped
+// thread); this is its deterministic regression.
+void test_proc_job_stop_owner_algebra(void);
+void test_proc_job_stop_owner_algebra(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    // Join the boot session (sid 0) so kproc -- p's proc_test_link parent,
+    // same session, another group -- ANCHORS p's group: a proc_alloc default
+    // (sid = pid, a one-proc session) is ORPHANED and the TSTP fan would
+    // correctly DISCARD the stop (proc.job_stop_orphan_rule proves that arm).
+    p->sid  = 0;
+    p->pgid = (u32)p->pid;
+    // BSS-zeroed static (a whole-struct assignment would emit a memset the
+    // freestanding kernel does not link); only magic needs a value.
+    static struct Thread alg_th;
+    alg_th.magic = THREAD_MAGIC;
+    alg_th.note_mask = 0;
+    alg_th.next_in_proc = NULL;
+    alg_th.rendez_blocked_on = NULL;
+    p->threads = &alg_th;                 // unmasked -> the stop can land
+    proc_test_link(p);
+
+    // job, then debug, on top of each other.
+    TEST_EXPECT_EQ(proc_job_stop_pgrp(p->pgid), 1, "the TSTP fan stops p");
+    TEST_EXPECT_EQ((int)p->job_stop_req, 1, "job owner set");
+    TEST_ASSERT(proc_stop_requested(p), "the park predicate holds (job)");
+    proc_debug_stop_deliver(p);
+    TEST_EXPECT_EQ((int)p->debug_stop_req, 1, "debug owner set");
+
+    // The debugger resumes: ONLY debug clears; the park predicate still
+    // holds on the job owner (the woken thread would re-park).
+    proc_debug_resume(p);
+    TEST_EXPECT_EQ((int)p->debug_stop_req, 0, "debug resume cleared debug");
+    TEST_EXPECT_EQ((int)p->job_stop_req, 1,
+        "debug resume did NOT clear the job owner (StopCompatI39 twin)");
+    TEST_ASSERT(proc_stop_requested(p), "still parked on the job owner");
+
+    // The job resume: ONLY job clears; both now clear -> proceed.
+    TEST_EXPECT_EQ(proc_job_cont_pgrp(p->pgid), 1, "the cont fan visits p");
+    TEST_EXPECT_EQ((int)p->job_stop_req, 0, "job cleared");
+    TEST_ASSERT(!proc_stop_requested(p), "both owners clear -> runnable");
+
+    // The mirror order: a job resume must never clear a debug stop
+    // (BUGGY_DOUBLE_STOP itself).
+    proc_debug_stop_deliver(p);
+    TEST_EXPECT_EQ(proc_job_stop_pgrp(p->pgid), 1, "stop the job owner again");
+    TEST_EXPECT_EQ(proc_job_cont_pgrp(p->pgid), 1, "job resume");
+    TEST_EXPECT_EQ((int)p->job_stop_req, 0, "job cleared");
+    TEST_EXPECT_EQ((int)p->debug_stop_req, 1,
+        "the job resume did NOT clear the debug owner (BUGGY_DOUBLE_STOP)");
+    TEST_ASSERT(proc_stop_requested(p), "still parked on the debug owner");
+    proc_debug_resume(p);
+    TEST_ASSERT(!proc_stop_requested(p), "the debug resume completes the clear");
+
+    p->threads = NULL;
+    legate_drop_linked(p);
+}
+
+// The live end-to-end: a REAL child blocked in a tsleep gets job-stopped
+// (the deliver cascade wakes it -> the sleep detour parks it on its own
+// debug_rendez -- the 8c-2 machinery driven by the JOB owner), the parent's
+// WAIT_UNTRACED wait reports it (report-is-not-reap), SYS_TTY_CONT's fan
+// resumes it (WAIT_CONTINUED reports), and the released child runs to a
+// clean exit -- the resume-liveness proof.
+static struct Proc *volatile g_js_sleeper_proc;
+static volatile u32 g_js_release;
+
+static int js_release_cond(void *arg) {
+    (void)arg;
+    return __atomic_load_n(&g_js_release, __ATOMIC_ACQUIRE) != 0u;
+}
+
+static void js_sleeper_thunk(void *arg) {
+    (void)arg;
+    struct Proc *self = current_thread()->proc;
+    if (proc_setpgid(self, 0, 0) != 0) exits("setpgid failed");
+    __atomic_store_n(&g_js_sleeper_proc, self, __ATOMIC_RELEASE);
+    // Block in short-deadline tsleeps until released. A job stop lands while
+    // we sleep here: the deliver cascade wakes the rendez, the tsleep loop
+    // re-checks the cond, observes the stop, and DETOUR-parks on our
+    // debug_rendez until the cont (the syscall-preserving 8c-2 park).
+    struct Rendez r;
+    rendez_init(&r);
+    while (!js_release_cond(NULL)) {
+        (void)tsleep(&r, js_release_cond, NULL,
+                     timer_now_ns() + 50ull * 1000 * 1000);
+    }
+    exits("ok");
+}
+
+void test_proc_job_stop_park_report_cont_live(void);
+void test_proc_job_stop_park_report_cont_live(void) {
+    __atomic_store_n(&g_js_release, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_js_sleeper_proc, (struct Proc *)NULL, __ATOMIC_RELEASE);
+
+    int pid = rfork(RFPROC, js_sleeper_thunk, NULL);
+    TEST_ASSERT(pid > 0, "rfork sleeper failed");
+    struct Proc *c;
+    while ((c = __atomic_load_n(&g_js_sleeper_proc, __ATOMIC_ACQUIRE)) == NULL)
+        sched();                          // the child minted its group + published
+
+    TEST_EXPECT_EQ(proc_job_stop_pgrp((u32)pid), 1, "job-stop the child's group");
+    TEST_EXPECT_EQ((int)c->job_stop_req, 1, "the child is job-stopped");
+
+    // The child's (only) thread must land parked on its OWN debug_rendez --
+    // the sleep-detour park driven by the job owner. Bounded poll; the head
+    // pointer is stable for an ALIVE unreaped child (only the reap mutates
+    // the thread list), and rendez_blocked_on is read under its wait_lock.
+    struct Thread *th = c->threads;
+    TEST_ASSERT(th != NULL, "the child has a thread");
+    bool parked = false;
+    for (int i = 0; i < 2000000 && !parked; i++) {
+        irq_state_t ws = spin_lock_irqsave(&th->wait_lock);
+        parked = (th->rendez_blocked_on == &th->debug_rendez);
+        spin_unlock_irqrestore(&th->wait_lock, ws);
+        if (!parked) sched();
+    }
+    TEST_ASSERT(parked, "the job-stopped sleeper detour-parked on debug_rendez");
+
+    // The PTY-1e report edge, live: WAIT_UNTRACED reports the stop without
+    // reaping; the latch consumes exactly once.
+    int st = -42;
+    TEST_EXPECT_EQ(wait_pid_for(pid, WAIT_UNTRACED | WAIT_WNOHANG, &st), pid,
+        "WAIT_UNTRACED reports the live stop");
+    TEST_EXPECT_EQ(st, WAIT_STATUS_STOPPED, "packed stopped status");
+    TEST_EXPECT_EQ(wait_pid_for(pid, WAIT_UNTRACED | WAIT_WNOHANG, &st), 0,
+        "the consumed stop reports nothing further");
+
+    // The cont fan: resume + report + the park actually lifts.
+    TEST_EXPECT_EQ(proc_job_cont_pgrp((u32)pid), 1, "cont the group");
+    TEST_EXPECT_EQ((int)c->job_stop_req, 0, "the job owner cleared");
+    TEST_EXPECT_EQ(wait_pid_for(pid, WAIT_CONTINUED | WAIT_WNOHANG, &st), pid,
+        "WAIT_CONTINUED reports the resume");
+    TEST_EXPECT_EQ(st, WAIT_STATUS_CONTINUED, "packed continued status");
+
+    // Liveness: the resumed child runs to a clean exit when released.
+    __atomic_store_n(&g_js_release, 1u, __ATOMIC_RELEASE);
+    TEST_EXPECT_EQ(wait_pid_for(pid, 0, &st), pid, "reap the resumed child");
+    TEST_EXPECT_EQ(st, 0, "the child exited cleanly after the stop/cont cycle");
+}
+
+// The POSIX orphan rules, both halves (2.4.3):
+//   (a) the TSTP-side stop-suppression -- an uncaught susp on an ORPHANED
+//       group (no ALIVE same-session out-of-group parent of any member) is
+//       DISCARDED; anchoring the group makes the same susp stop it; and
+//   (b) the death-side fan -- the death of the ANCHOR delivers tty:hup then
+//       tty:cont to a newly-orphaned group with job-stopped members
+//       (resuming them + arming the uncaught-hup terminate latch), while a
+//       group the dying Proc never anchored (different session) is left
+//       untouched.
+static struct Proc *volatile g_js_anchor_proc;
+static volatile u32 g_js_anchor_release;
+
+static void js_anchor_thunk(void *arg) {
+    (void)arg;
+    struct Proc *self = current_thread()->proc;
+    if (proc_setpgid(self, 0, 0) != 0) exits("setpgid failed");
+    __atomic_store_n(&g_js_anchor_proc, self, __ATOMIC_RELEASE);
+    while (__atomic_load_n(&g_js_anchor_release, __ATOMIC_ACQUIRE) == 0u)
+        sched();
+    exits("ok");
+}
+
+void test_proc_job_stop_orphan_rule(void);
+void test_proc_job_stop_orphan_rule(void) {
+    // ---- (a) the TSTP discard vs the anchored stop ----
+    struct Proc *m = proc_alloc();
+    TEST_ASSERT(m != NULL, "proc_alloc m");
+    m->sid  = 0x5F01u;                    // a fabricated session no table Proc shares
+    m->pgid = (u32)m->pid;
+    static struct Thread orph_th;         // BSS-zeroed (see alg_th)
+    orph_th.magic = THREAD_MAGIC;
+    orph_th.note_mask = 0;
+    orph_th.next_in_proc = NULL;
+    orph_th.rendez_blocked_on = NULL;
+    m->threads = &orph_th;
+    proc_test_link(m);                    // parent kproc (sid 0) -> NO anchor
+
+    TEST_EXPECT_EQ(proc_job_stop_pgrp(m->pgid), 0,
+        "an uncaught susp on an ORPHANED group is discarded (no member affected)");
+    TEST_EXPECT_EQ((int)m->job_stop_req, 0, "discarded: no stop");
+    TEST_EXPECT_EQ(js_note_count(m, NOTE_NAME_TTY_SUSP), 0u,
+        "discarded: no note either");
+
+    // Anchor the group: re-home m under a same-session out-of-group parent.
+    struct Proc *anchor = proc_alloc();
+    TEST_ASSERT(anchor != NULL, "proc_alloc anchor");
+    anchor->sid  = 0x5F01u;
+    anchor->pgid = (u32)anchor->pid;
+    proc_test_link(anchor);
+    proc_test_unlink(m);
+    proc_test_link_child(anchor, m);
+    TEST_EXPECT_EQ(proc_job_stop_pgrp(m->pgid), 1,
+        "the same susp on the now-ANCHORED group stops the member");
+    TEST_EXPECT_EQ((int)m->job_stop_req, 1, "anchored: stopped");
+    (void)proc_job_cont_pgrp(m->pgid);    // resume for a clean teardown
+    m->threads = NULL;
+    legate_drop_linked(m);                // unlinks from `anchor` (its parent)
+    legate_drop_linked(anchor);
+
+    // ---- (b) the death-side hup+cont fan ----
+    __atomic_store_n(&g_js_anchor_release, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_js_anchor_proc, (struct Proc *)NULL, __ATOMIC_RELEASE);
+    int dpid = rfork(RFPROC, js_anchor_thunk, NULL);
+    TEST_ASSERT(dpid > 0, "rfork anchor failed");
+    struct Proc *d;
+    while ((d = __atomic_load_n(&g_js_anchor_proc, __ATOMIC_ACQUIRE)) == NULL)
+        sched();                          // d minted its own group G = dpid
+
+    // c: d's child, its own group in d's session (sid 0), job-stopped.
+    // d anchors c's group (same session, group G != c's group).
+    struct Proc *c = proc_alloc();
+    TEST_ASSERT(c != NULL, "proc_alloc c");
+    c->sid  = d->sid;
+    c->pgid = (u32)c->pid;
+    __atomic_store_n(&c->job_stop_req, 1u, __ATOMIC_RELEASE);
+    c->stop_report_pending = true;
+    proc_test_link_child(d, c);
+
+    // c2: also d's child + job-stopped, but a DIFFERENT session -- d never
+    // anchored its group, so d's death must NOT signal it (the
+    // newly-orphaned qualification; a spurious hup here could kill).
+    struct Proc *c2 = proc_alloc();
+    TEST_ASSERT(c2 != NULL, "proc_alloc c2");
+    c2->sid  = 0x5F02u;
+    c2->pgid = (u32)c2->pid;
+    __atomic_store_n(&c2->job_stop_req, 1u, __ATOMIC_RELEASE);
+    proc_test_link_child(d, c2);
+
+    // The anchor dies: proc_become_zombie_locked runs the orphan rule
+    // (before reparenting c/c2 to kproc), then the reap completes.
+    __atomic_store_n(&g_js_anchor_release, 1u, __ATOMIC_RELEASE);
+    int st = -42;
+    TEST_EXPECT_EQ(wait_pid_for(dpid, 0, &st), dpid, "reap the dying anchor");
+    TEST_EXPECT_EQ(st, 0, "the anchor exited cleanly");
+
+    TEST_EXPECT_EQ((int)c->job_stop_req, 0,
+        "the newly-orphaned stopped group was RESUMED (the F8 residual)");
+    TEST_EXPECT_EQ(js_note_count(c, NOTE_NAME_TTY_HUP), 1u,
+        "...with the orphan hup");
+    TEST_EXPECT_EQ(js_note_count(c, NOTE_NAME_TTY_CONT), 1u,
+        "...then the orphan cont");
+    TEST_ASSERT((__atomic_load_n(&c->proc_flags, __ATOMIC_ACQUIRE) &
+                 PROC_FLAG_TTY_TERMINATE_PENDING) != 0,
+        "the uncaught orphan hup armed the terminate latch");
+    TEST_EXPECT_EQ((int)c2->job_stop_req, 1,
+        "a group the dying Proc never anchored keeps its stop");
+    TEST_EXPECT_EQ(js_note_count(c2, NOTE_NAME_TTY_HUP), 0u,
+        "...and got no spurious hup");
+
+    // d's death reparented c/c2 to kproc; the parent-aware unlink cleans up.
+    legate_drop_linked(c);
+    legate_drop_linked(c2);
 }

@@ -319,7 +319,7 @@ struct Thread {
     // thread the outermost EL0 frame sits lower. Captured from the thread's vector
     // `ctx` at TWO points: el0_return_stop_check records it at the RETURN tail (a
     // TAIL-parked thread), and exception_sync_lower_el records it at the EL0-SYNC
-    // ENTRY (the #88 fix -- a DETOUR-parked sleeper, proc_debug_stop_sleeper_park,
+    // ENTRY (the #88 fix -- a DETOUR-parked sleeper, proc_stop_sleeper_park,
     // never reaches the tail while stopped, so the entry frame is its ONLY source).
     // Read ONLY while the thread is fully-stopped (parked on debug_rendez, tail or
     // detour), so it is always fresh: the tail-park overwrites with the return ctx;

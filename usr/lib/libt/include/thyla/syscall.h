@@ -110,7 +110,34 @@ enum {
     T_SYS_PWRITE            = 86,  // #37: positioned write (cursor untouched)
     T_SYS_YIELD             = 87,  // #33: voluntary yield (hint; always 0)
     T_SYS_STAT              = 88,  // POUNCE: path-stat in one syscall (1 RPC)
+    T_SYS_SETSID            = 89,  // PTY-1a: new session (POSIX setsid)
+    T_SYS_SETPGID           = 90,  // PTY-1a: move self/child into a pgrp
+    T_SYS_GETPGID           = 91,  // PTY-1a: read a Proc's pgid (0 = self)
+    T_SYS_GETSID            = 92,  // PTY-1a: read a Proc's sid (0 = self)
+    T_SYS_PTY_REGISTER      = 93,  // PTY-1c: pts registry ops (ptyfs-only)
+    T_SYS_TTY_SIGNAL        = 94,  // PTY-1d: server-side signal-class report
+    T_SYS_TTY_ACQUIRE       = 95,  // PTY-1d: controlling-terminal acquisition
+    T_SYS_TTY_SET_FG        = 96,  // PTY-1d: tcsetpgrp
+    T_SYS_TTY_GET_FG        = 97,  // PTY-1d: tcgetpgrp
+    T_SYS_TTY_CONT          = 98,  // PTY-1f: fg/bg resume of a job-stopped pgrp
 };
+
+// SYS_PTY_REGISTER ops (PTY-1c). Server-side (ptyfs) only: MINT records a
+// pty pair's master (connection, qid) + returns the gen-stamped pts_id;
+// SLAVE binds each served slave open; FREE drops the pts at last close.
+#define T_PTY_REG_MINT   0
+#define T_PTY_REG_SLAVE  1
+#define T_PTY_REG_FREE   2
+
+// SYS_TTY_SIGNAL classes (PTY-1d). TSTP (live since PTY-1f) is the
+// job-control suspend: a caught susp delivers the tty:susp note only; an
+// uncaught one on a non-orphaned foreground group takes the default STOP
+// (waitpid-with-T_WAIT_UNTRACED reports it; T_SYS_TTY_CONT resumes).
+#define T_TTY_SIG_INT    1
+#define T_TTY_SIG_QUIT   2
+#define T_TTY_SIG_TSTP   3
+#define T_TTY_SIG_WINCH  4
+#define T_TTY_SIG_HUP    5
 
 // SYS_CLOCK_*TIME clock ids (match Linux clockid_t) + the 16-byte timespec.
 #define T_CLOCK_REALTIME    0
@@ -790,6 +817,165 @@ static inline long t_yield(void) {
     return x0;
 }
 
+// t_setsid — become the leader of a new session + group (PTY-1a; POSIX
+// setsid(2)). Returns the new sid (> 0), -T_E_ACCES (13, negated) if the
+// caller is already a process-group leader, or -1.
+__attribute__((always_inline))
+static inline long t_setsid(void) {
+    register long x0 __asm__("x0");
+    register long x8 __asm__("x8") = T_SYS_SETSID;
+    __asm__ volatile (
+        "svc #0"
+        : "=r"(x0)
+        : "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_setpgid — move self (pid 0) or a live direct child into a process group
+// (PTY-1a; POSIX setpgid(2)). pgid 0 mints a new group of the target's own
+// pid. 0 on success; negative errno per the SYS_SETPGID contours (EPERM
+// contours arrive as -13 EACCES).
+__attribute__((always_inline))
+static inline long t_setpgid(long pid, long pgid) {
+    register long x0 __asm__("x0") = pid;
+    register long x1 __asm__("x1") = pgid;
+    register long x8 __asm__("x8") = T_SYS_SETPGID;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_getpgid / t_getsid — read a Proc's pgid / sid (PTY-1a; pid 0 = self).
+// Returns the id or -3 (ESRCH) if no such Proc.
+__attribute__((always_inline))
+static inline long t_getpgid(long pid) {
+    register long x0 __asm__("x0") = pid;
+    register long x8 __asm__("x8") = T_SYS_GETPGID;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+__attribute__((always_inline))
+static inline long t_getsid(long pid) {
+    register long x0 __asm__("x0") = pid;
+    register long x8 __asm__("x8") = T_SYS_GETSID;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_pty_register — pts registry ops (PTY-1c; ptyfs the server is the only
+// legal caller). op T_PTY_REG_MINT(conn_fd, master_qid, 0) -> pts_id > 0;
+// T_PTY_REG_SLAVE(conn_fd, slave_qid, pts_id) -> 0; T_PTY_REG_FREE(pts_id,
+// 0, 0) -> 0. Negative errno per the SYS_PTY_REGISTER contours.
+__attribute__((always_inline))
+static inline long t_pty_register(long op, long a1, long a2, long a3) {
+    register long x0 __asm__("x0") = op;
+    register long x1 __asm__("x1") = a1;
+    register long x2 __asm__("x2") = a2;
+    register long x3 __asm__("x3") = a3;
+    register long x8 __asm__("x8") = T_SYS_PTY_REGISTER;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x2), "r"(x3), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_tty_signal — report a signal-class event on a pts the caller MINTED
+// (PTY-1d; the server half of the tty seam). Returns the posted count or
+// negative errno per the SYS_TTY_SIGNAL contours.
+__attribute__((always_inline))
+static inline long t_tty_signal(long pts_id, long sig_class) {
+    register long x0 __asm__("x0") = pts_id;
+    register long x1 __asm__("x1") = sig_class;
+    register long x8 __asm__("x8") = T_SYS_TTY_SIGNAL;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_tty_acquire — acquire the pts behind `slave_fd` as the calling session
+// leader's controlling terminal (PTY-1d; POSIX acquisition semantics).
+__attribute__((always_inline))
+static inline long t_tty_acquire(long slave_fd) {
+    register long x0 __asm__("x0") = slave_fd;
+    register long x8 __asm__("x8") = T_SYS_TTY_ACQUIRE;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_tty_set_fg / t_tty_get_fg — tcsetpgrp / tcgetpgrp (PTY-1d).
+__attribute__((always_inline))
+static inline long t_tty_set_fg(long fd, long pgid) {
+    register long x0 __asm__("x0") = fd;
+    register long x1 __asm__("x1") = pgid;
+    register long x8 __asm__("x8") = T_SYS_TTY_SET_FG;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+__attribute__((always_inline))
+static inline long t_tty_get_fg(long fd) {
+    register long x0 __asm__("x0") = fd;
+    register long x8 __asm__("x8") = T_SYS_TTY_GET_FG;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_tty_cont — resume job-stopped `pgid` via a slave fd of one's controlling
+// terminal (PTY-1f; the shell's fg/bg). Gated like t_tty_set_fg; returns the
+// visited-member count or -errno.
+__attribute__((always_inline))
+static inline long t_tty_cont(long fd, long pgid) {
+    register long x0 __asm__("x0") = fd;
+    register long x1 __asm__("x1") = pgid;
+    register long x8 __asm__("x8") = T_SYS_TTY_CONT;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
 // t_close — release the handle at `fd`. For KOBJ_SPOOR handles the
 // kernel's release path routes through spoor_clunk (sets pipe EOF +
 // wakes the other side per P5-pipe-blocking). Returns 0 on success,
@@ -941,6 +1127,24 @@ static inline long t_spawn(const char *name, size_t name_len) {
 // matching zombie is ready. Mirrors POSIX WNOHANG and the kernel's
 // WAIT_WNOHANG (proc.h); the value MUST match.
 #define WAIT_WNOHANG 1
+
+// PTY-1e job-control wait flags (mirror POSIX WUNTRACED/WCONTINUED and the
+// kernel proc.h values). Passing either OPTS INTO the packed status
+// encoding below (a plain wait keeps the raw exit status); a stop/continue
+// REPORT returns the child's pid WITHOUT reaping it. want_pid extends to
+// the POSIX group selectors: 0 = any child in the caller's process group;
+// < -1 = any child in group -want_pid.
+#define WAIT_UNTRACED  2
+#define WAIT_CONTINUED 4
+
+// The packed status encoding (only under WAIT_UNTRACED/WAIT_CONTINUED;
+// the Linux wait(2) layout).
+#define WAIT_STATUS_STOPPED       (0x7f | (20 << 8))
+#define WAIT_STATUS_CONTINUED     0xffff
+#define WAIT_IF_EXITED(st)        (((st) & 0x7f) == 0)
+#define WAIT_EXITSTATUS(st)       (((st) >> 8) & 0xff)
+#define WAIT_IF_STOPPED(st)       (((st) & 0xff) == 0x7f)
+#define WAIT_IF_CONTINUED(st)     ((st) == 0xffff)
 
 // t_wait_pid_for — reap a ZOMBIE child, filtered by pid and/or flags.
 //   want_pid: -1 = any child; >0 = that specific child.

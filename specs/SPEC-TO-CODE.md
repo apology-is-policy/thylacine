@@ -787,14 +787,65 @@ Never written. The kernel notes substrate (Phase 6, sub-chunk 13a) is
 prose-validated: design + N-1..N-5 invariants in ARCH §7.6.1-§7.6.8, the
 4-round 13a audit, and the `notes.*` test suite (I-19).
 
-## pty.tla — DEFERRED (the PTY master/slave mechanism unbuilt; Phase 8)
+## pty.tla — PTY design pass (the master/slave data path + signal routing; model-first)
 
-The PTY *master/slave* pair (`/dev/ptmx` + `/dev/pts/<n>`, per-fd termios,
-I-20) is Phase-8; `pty.tla` lands with that server. NOTE: LS-8's
-*single-console* line discipline does NOT wait on this — its load-bearing
-invariant is I-9's deferred poll-wake, specced by `cons_poll.tla` (above),
-not I-20. `kernel/cons.c` records the master/slave deferral; I-20 is
-RESERVED in ARCH §28 until the Phase-8 server lands.
+Spec-first RE-ENABLED for I-20 (the PTY design pass, 2026-07-17;
+`docs/PTY-DESIGN.md`). `pty.tla` models the master/slave DATA path (the byte
+rings + cooking + the signal-routing seam + teardown) — the design-altitude
+model that pinned the votes. The *signal-routing* half is realized by the
+PTY-1 kernel seam (the pts registry + `SYS_TTY_SIGNAL` → ct_sid → fg_pgid — a
+server can never name a pgrp, the I-1/I-22 bound); the *data-path* half is
+realized by the userspace `ptyfs` (`usr/ptyfs/src/server.rs`, PTY-2a rings +
+PTY-2b ldisc — the table below). The `pty_*` buggy cfgs (`signal_wrong_pgrp`
+/ `signal_also_byte` / `lost_teardown_byte` / `double_stop`) each fire their
+exact invariant; clean + `pty_liveness` GREEN.
+NOTE: LS-8's *single-console* line discipline does NOT ride this — its
+load-bearing invariant is I-9's deferred poll-wake (`cons_poll.tla`), not I-20.
+
+| Spec action | Code site (as-built, PTY-2a/2b — userspace `ptyfs`) | Invariant pinned |
+|---|---|---|
+| `CookData` (a non-signal input byte becomes ring data) | `server.rs::Ptys::master_write` — the per-byte input cook (ICRNL → ISIG → ICANON assembly/flush \| raw push into `m2s`) | `RingConserved` (`SignalXorByte`'s data leg): every consumed non-signal byte is ring data (assembled-then-flushed or raw). |
+| `CookSignal` (an ISIG control char raises, is NOT a byte) | `server.rs::Ptys::master_write` — the ISIG arm (collect the class into `p.sigs`, `continue` = never enqueued, never echoed); raised by `h_write`'s master arm via the pts-scoped `t_tty_signal` | `SignalXorByte`: signal XOR data per consumed byte (the `signal_also_byte` counterexample). `SignalToFgOnly` rides the kernel seam (the server names only `(pts_id, class)`). |
+| `SlaveWrite` (the slave produces output toward the master) | `server.rs::Ptys::slave_write` — the ONLCR output cook into `s2m` (pair-atomic expansion; back-pressure short count) | ring conservation on the output direction. |
+| `SlaveDrain` / `MasterDrain` (a reader drains its ring) | `server.rs::Ptys::slave_read` / `master_read` → `ring_drain` (Data while non-empty **regardless of the peer's closure** = drain-then-EOF) | `TeardownDrainsThenEof` (the `lost_teardown_byte` counterexample): a byte in the ring is delivered before EOF. |
+| `SlaveSleep` / `MasterSleep` (a reader parks on empty-but-open) | `server.rs::Conn::h_read` — `RecvOutcome::WouldBlock` → a `PendingRead` parks (`Disp::Deferred`); `Conn::poll_reads` at the serve-loop top re-drains + delivers the held `Rread` | `NoStuckMasterReader`/`SlaveCanRead` (the I-9 family): ptyfs is single-threaded, a ring fills only via a serviced frame, so every parked read is re-checked before the loop parks. |
+| `CloseMaster` / `CloseSlave` (an endpoint fully closes) | `server.rs::Conn::close_endpoint` at every opened-endpoint drop (`fid_clunk` / `fid_set` / `teardown` / `drop_all_fids` — a dying emulator connection IS carrier loss); `ring_drain`'s `other_open == 0` arm returns `Eof` only on an EMPTY ring | drain-then-EOF as above. The `CloseMaster` → `tty:hup` raise (PTY-2d): `open_dec` reports the `n_master` 1→0 edge and `close_endpoint` raises `TTY_SIG_HUP` before the unref. `HupAtMostOnce` is BY CONSTRUCTION — exactly one master fd per pts can ever exist (mint-only; no walk resolves a master path; 9P forbids walking FROM an opened fid; a walk to an existing newfid is rejected), so the edge fires at most once per pts lifetime. |
+
+## pty_stop.tla — PTY-1f (the job-control stop OWNERSHIP; the debug_stop.tla sibling, LANDED)
+
+A focused SIBLING of `debug_stop.tla` (NOT an extension — `debug_stop`'s cfgs
+are the landed debug-park gate, and the job stop reuses that park machinery
+unchanged; the `sched_oncpu`/`loom_multishot` sibling precedent). Models the
+STOP-OWNERSHIP algebra `pty.tla` abstracts: two INDEPENDENT owners (job +
+debug) on one park, each resume clearing ONLY its own owner, composed with
+the death path. **Landed model-first + TLC-green BEFORE the PTY-1f impl**; the
+sites below are as-built. The park PREDICATE fan-out + the elected-reader
+role release (the `debug_stop.tla` / 8c-3 domain) are OUT of this module's
+scope (its SCOPE block), audited at PTY-1g against real code.
+
+| cfg | knob(s) | invariant / property | outcome | distinct |
+|---|---|---|---|---|
+| `pty_stop.cfg` | both knobs FALSE | `StopCompatI39` (Invariant) | clean | — |
+| `pty_stop_liveness.cfg` | both FALSE + `Fairness` | `DeathWinsOverJobStop` (`gflag ~> grpDead`) | clean | — |
+| `pty_stop_buggy_double_stop.cfg` | `BUGGY_DOUBLE_STOP` | `StopCompatI39` | violation | — |
+| `pty_stop_buggy_death_blocked.cfg` | `BUGGY_DEATH_BLOCKED` | `DeathWinsOverJobStop` | violation | — |
+
+| Spec action | Code site (as-built, PTY-1f) | Invariant pinned |
+|---|---|---|
+| `StopJob` (the uncaught-default job stop takes effect; the abstract stop) | `kernel/proc.c::proc_job_stop_one_locked` (set `job_stop_req` RELEASE + `stop_report_pending` + `proc_stop_wake_cascade_locked` + the parent `child_waiters` wake), driven by `proc_job_stop_pgrp` (the `SYS_TTY_SIGNAL` TSTP fan; the catchability gate `proc_tty_susp_would_stop_locked` + the orphaned-group discard are the reachability filters, OUT of the model's scope) | the job owner is INDEPENDENT of the debug owner (`stopOwners ∪ {"job"}`). |
+| `StopDebug` (the debugger stop entry, I-39) | `kernel/proc.c::proc_debug_stop_deliver` (set `debug_stop_req` RELEASE + the shared `proc_stop_wake_cascade_locked`) | the debug owner is INDEPENDENT (`∪ {"debug"}`). |
+| `ResumeJob` (SIGCONT — clears ONLY "job") | `kernel/proc.c::proc_job_resume_one_locked` (clear `job_stop_req` RELEASE-before-walk + `cont_report_pending` + the `debug_rendez` wake walk), driven by `proc_job_cont_pgrp` (`SYS_TTY_CONT` / the F8 teardown fan / the orphan-rule cont) | `StopCompatI39`: a job resume NEVER clears the debug owner. `BUGGY_DOUBLE_STOP` = a job resume clears ALL owners (a tty:cont running a debugger-stopped thread). |
+| `ResumeDebug` (the debug stop's OWN resume — clears ONLY "debug") | `kernel/proc.c::proc_debug_resume` (clear `debug_stop_req` only; `job_stop_req` untouched) | `StopCompatI39` twin: a debug resume never clears the job owner. |
+| the park PREDICATE (`stopOwners = {} ⇒ proceed`) | `kernel/proc.c::proc_stop_requested` (the `debug\|job` disjunction) read at `el0_return_stop_check` / `stop_park_wake_cond` / the `sleep`/`tsleep` detours / `client_stop_pending` — a woken thread re-parks while EITHER owner holds | both owners must clear to run (the per-owner clear realized). |
+| `SetGflag` / `GroupDie` (death wins over the stop) | `kernel/proc.c::proc_group_terminate` (`group_exit_msg`) + every stop path's death check (`el0_return_stop_check` loop top; the `sleep`/`tsleep` `thread_die_pending` bail; the recv-loop dying check) | `DeathWinsOverJobStop` (`gflag ~> grpDead`): a group-terminate reaps even a job-stopped group. `BUGGY_DEATH_BLOCKED` = `GroupDie` gated on `~stopped`. |
+
+Pre-commit gate: `pty_stop.cfg` + `pty_stop_liveness.cfg` clean GREEN + both
+buggy cfgs confirmed, on any change to the stop-ownership protocol (the
+`job_stop_req`/`debug_stop_req` flags, `proc_job_stop_one_locked` /
+`proc_job_resume_one_locked` / `proc_debug_resume`, `proc_stop_requested`, or
+the park-predicate fan-out sites). The elected-9P-reader release under a job
+stop rides `debug_stop.tla` + the 8c-3 machinery (re-verified GREEN — the
+reader-role + the job owner are below its abstraction).
 
 ---
 

@@ -22,6 +22,7 @@ void test_devdev_bestiary_smoke(void);
 void test_devdev_attach_returns_dir(void);
 void test_devdev_walk_to_each_leaf(void);
 void test_devdev_walk_unknown_misses(void);
+void test_devdev_walk_pts_dir(void);
 void test_devdev_trivial_leaves(void);
 void test_devdev_cons_gate(void);
 
@@ -88,6 +89,41 @@ void test_devdev_walk_unknown_misses(void) {
     spoor_unref(wq->spoor);
     walkqid_free(wq);
     spoor_unref(root);
+}
+
+// /dev/pts: the synthetic mount-stub DIRECTORY child (PTY-2a-2). Walkable +
+// QTDIR (the mount-point identity joey's t_mount("/dev/pts") keys on); EMPTY
+// (no devdev children -- ptyfs's mounted tree provides ptmx/<n>); ".." climbs
+// back to the root; read/write fail (a stub, not a data node).
+void test_devdev_walk_pts_dir(void) {
+    struct Spoor *pts = walk_to("pts");
+    TEST_ASSERT(pts != NULL, "walk to /dev/pts succeeds");
+    TEST_EXPECT_EQ(pts->qid.type, QTDIR, "/dev/pts is QTDIR");
+    TEST_ASSERT(pts->qid.path != 0, "/dev/pts path != root");
+
+    // Empty pre-mount: no child resolves from the pts dir here (ptmx lives in
+    // the MOUNTED ptyfs tree, never in devdev).
+    const char *names[1] = { "ptmx" };
+    struct Walkqid *wq = devdev.walk(pts, NULL, names, 1);
+    TEST_ASSERT(wq != NULL, "walk from pts allocates");
+    TEST_EXPECT_EQ(wq->nqid, 0, "pts dir has no devdev children");
+    spoor_unref(wq->spoor);
+    walkqid_free(wq);
+
+    // ".." climbs back to the /dev root.
+    const char *up[1] = { ".." };
+    struct Walkqid *wu = devdev.walk(pts, NULL, up, 1);
+    TEST_ASSERT(wu != NULL && wu->nqid == 1, "pts .. walks");
+    TEST_EXPECT_EQ(wu->spoor->qid.path, (u64)0, "pts .. = the /dev root");
+    spoor_unref(wu->spoor);
+    walkqid_free(wu);
+
+    // A stub, not a data node: read/write fail (-1).
+    char buf[8];
+    TEST_EXPECT_EQ(devdev.read(pts, buf, 8, 0), (long)-1, "pts read fails");
+    TEST_EXPECT_EQ(devdev.write(pts, "x", 1, 0), (long)-1, "pts write fails");
+
+    spoor_unref(pts);
 }
 
 // The trivial leaves are world-rw + UNGATED: these opens succeed regardless of

@@ -43,6 +43,17 @@ pub(crate) const PROMPT_MODE: &[u8] = b"-icanon -echo +isig -icrnl -onlcr";
 /// the dance is a single-bit flip and its restore.
 pub(crate) const RAW_MODE: &[u8] = b"-icanon -echo -isig -icrnl -onlcr";
 
+/// PTY-4b: the COOKED line discipline a job-control shell gives an ordinary
+/// (non-TUI) foreground job on a pts -- the POSIX terminal default a ported
+/// or line-oriented child expects (canonical line assembly, kernel echo,
+/// ISIG signal cooking, CR/NL translation both ways; byte-identical to the
+/// ptyfs cooked default, PTY-2b). The real-shell discipline: raw is the LINE
+/// EDITOR's mode, cooked is the CHILD's -- bash/readline restore the tty to
+/// cooked around every foreground job and re-raw it at the next prompt. Only
+/// the jc path uses this (the console session never hands children the
+/// console input, so its children see no discipline at all).
+pub(crate) const CHILD_MODE: &[u8] = b"+icanon +echo +isig +icrnl +onlcr";
+
 /// The screen-restore escape sequence ut re-emits to fd 1 after a raw child exits
 /// or dies. BYTE-IDENTICAL to `kaua::term::Terminal::leave`'s output, in order:
 /// RESET_SGR `\x1b[0m` + ENABLE_AUTOWRAP `\x1b[?7h` + SHOW_CURSOR `\x1b[?25h` +
@@ -80,6 +91,7 @@ const fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
 // PROMPT-mode assert (it must equal PROMPT_MODE so the login->ut boundary is flat).
 const _: () = assert!(bytes_eq(PROMPT_MODE, b"-icanon -echo +isig -icrnl -onlcr"));
 const _: () = assert!(bytes_eq(RAW_MODE, b"-icanon -echo -isig -icrnl -onlcr"));
+const _: () = assert!(bytes_eq(CHILD_MODE, b"+icanon +echo +isig +icrnl +onlcr"));
 const _: () = assert!(bytes_eq(RESTORE_SCREEN, b"\x1b[0m\x1b[?7h\x1b[?25h\x1b[?1049l"));
 
 /// Write an absolute consctl mode command to `fd` (the kernel applies one write
@@ -105,13 +117,52 @@ pub(crate) fn restore_screen() {
 
 /// Whether `argv0` names a full-screen TUI child that needs the raw-mode dance.
 /// Matches on the BASENAME so `/bin/nora` and a bare `nora` both qualify. v1.0
-/// carries a fixed set (`nora`); a binary self-declaring its console needs (a
-/// spawn flag or an on-disk manifest) is a recorded v1.x seam (KAUA.md) -- until
-/// then a name a user gives their own non-TUI binary that collides with this set
-/// is a known limitation.
+/// carries a fixed set (`nora` + `ptyhost` -- the PTY-4 session host wants the
+/// outer console as a raw byte pipe, so the pts it hosts is the one line
+/// discipline); a binary self-declaring its console needs (a spawn flag or an
+/// on-disk manifest) is a recorded v1.x seam (KAUA.md) -- until then a name a
+/// user gives their own non-TUI binary that collides with this set is a known
+/// limitation.
 pub fn is_raw_command(argv0: &str) -> bool {
     let base = argv0.rsplit('/').next().unwrap_or(argv0);
-    matches!(base, "nora")
+    matches!(base, "nora" | "ptyhost")
+}
+
+// === PTY-4b: pts detection (the session-dance trigger) ===
+
+/// The ptyfs endpoint-qid contract (PTY-DESIGN section 5, the documented
+/// ptsname ABI): `PTS_FLAG | N<<8 | filekind`, filekind 1 = master, 2 = slave.
+const PTS_QID_FLAG: u64 = 1 << 40;
+const PTS_FK_SLAVE: u64 = 2;
+
+/// If fd 0 is a pts SLAVE, return its index `N`. The same TWO-GATE
+/// discrimination the PTY-3 pouch dispatcher uses, native side: S_ISCHR
+/// FIRST (ptyfs reports `S_IFCHR` for its endpoints; netd's `/net` qids also
+/// carry bit 40 but report `S_IFREG`, so the mode gate keeps a socket-backed
+/// fd 0 out), THEN the qid flag + filekind. `None` on the console (devcons
+/// has no `stat_native` -> fstat fails), a pipe, a file, or a pts MASTER --
+/// every non-hosted case, so the caller's dance is skipped and the shell
+/// runs its console path unchanged.
+pub(crate) fn pts_slave_n_of_fd0() -> Option<u32> {
+    let mut st = [0u8; 80];
+    // SAFETY: t_fstat is the SYS_FSTAT SVC wrapper; st is a valid 80-byte
+    // t_stat buffer (the ABI-pinned size).
+    if unsafe { libthyla_rs::t_fstat(0, st.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    let mut w = [0u8; 4];
+    w.copy_from_slice(&st[40..44]); // t_stat.mode @40
+    let mode = u32::from_le_bytes(w);
+    if (mode & 0o170000) != 0o020000 {
+        return None; // not a character device
+    }
+    let mut q = [0u8; 8];
+    q.copy_from_slice(&st[8..16]); // t_stat.qid_path @8
+    let qid = u64::from_le_bytes(q);
+    if qid & PTS_QID_FLAG == 0 || (qid & 0xff) != PTS_FK_SLAVE {
+        return None;
+    }
+    Some(((qid >> 8) & 0xff_ffff) as u32)
 }
 
 // NB: like every libutopia `#[cfg(test)]` module, these are host-unrunnable
@@ -146,6 +197,9 @@ mod tests {
         assert!(is_raw_command("nora"));
         assert!(is_raw_command("/bin/nora"));
         assert!(is_raw_command("/usr/local/bin/nora"));
+        // PTY-4c: the session host wants the outer console raw (a byte pipe).
+        assert!(is_raw_command("ptyhost"));
+        assert!(is_raw_command("/bin/ptyhost"));
         // Ordinary externals stay on the normal spawn path.
         assert!(!is_raw_command("cat"));
         assert!(!is_raw_command("/bin/ut"));

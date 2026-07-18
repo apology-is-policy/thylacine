@@ -291,8 +291,111 @@ TLC-green; step-vs-resume composes `debug_step.tla`.**
 
 ## 5. The userspace `ptyfs` server (PTY-2)
 
-A native `libthyla-rs` Proc, warden-manifested `lifecycle = persistent` (the netd
-precedent), posting `/srv/ptyfs`; joey mounts `/dev/ptmx` + `/dev/pts` from it.
+A native `libthyla-rs` Proc, **joey-spawned directly with
+`T_SPAWN_PERM_MAY_POST_SERVICE`** (the corvus precedent -- NOT the warden: the
+warden is hardware-device-bind driven, intersecting DTB device-node resources into
+an allowance, and `ptyfs` owns no hardware, so the warden does not fit a device-less
+service), posting `/srv/ptyfs`. joey mounts ptyfs's tree at **`/dev/pts`** -- a
+`devdev` synthetic mount-point **directory** child (the `devhw` `/hw/pci`
+precedent) -- with the clone file *inside* it at `/dev/pts/ptmx` (the Linux-devpts
+shape). The POSIX `/dev/ptmx` master path is a PTY-3 concern (a symlink or a
+file-mount, deferred until symlinks) because **union-mount *walking* is unbuilt at
+v1.0** (`kernel/territory.c`: `MBEFORE`/`MAFTER` are recorded but treated as "append
+an entry"; union walking is Phase 5+), so a single directory mount at `/dev/pts` --
+not a union over the occupied `/dev` -- is the realizable placement.
+
+*As-built (PTY-2a-1)*: the server + the two byte rings + the Plan 9 clone-mint +
+`SYS_PTY_REGISTER` + the deferred multi-waiter read + the in-server ring selftest
+are landed; joey spawns it with a bounded liveness connect that gates a silent
+selftest failure.
+
+*As-built (PTY-2a-2)*: the `devdev` synthetic `pts` mount-stub child
+(`DEV_KIND_PTS`, an empty QTDIR — reference/109-devdev.md) + joey's
+`t_mount("/dev/pts", MREPL)` of the ptyfs devpts tree (fresh open=connect of
+`/srv/ptyfs`; boot-fatal on any failure, since ptyfs has no hardware/external
+dependency) + the boot-fatal master/slave round-trip probe — the FIRST real
+client: ptmx clone-mint (the kernel accepts the differing Rlopen qid),
+`SYS_PTY_REGISTER` MINT/SLAVE/FREE live, Treaddir over the mount finds the
+minted slave, both ring directions, master-close→slave-EOF. The line discipline
+is PTY-2b.
+
+*As-built (PTY-2b)*: the per-pts `Ldisc` — the five-flag word + the ICANON
+assembly line + the collected-signal set folded into `Pts` (`tio`/`line`/
+`sigs`); the input cook (`master_write`: ICRNL → ISIG [the standard
+VINTR/VQUIT/VSUSP trio → `SYS_TTY_SIGNAL` INT/QUIT/TSTP, consumed, never a
+byte, never echoed] → ICANON [erase `\b \b`, NL flushes the line WITH its
+newline; overflow past `LINE_MAX`=256 drops un-echoed] → raw); the output cook
+(`slave_write`: ONLCR, pair-atomic back-pressure); the single `echo()`
+chokepoint (echo rides the output transform toward the master; ECHO-off is the
+hard no-leak guarantee, per-pts). **A fresh pts is FULL COOKED**
+(`TIO_DEFAULT` = ICANON|ECHO|ISIG|ICRNL|ONLCR — the Linux fresh-pts posture;
+the "CONS_ICANON-default" above realized as the cooked set; the kernel
+console's ISIG-only boot word is a console posture, not the pts one). Ring-full
+policy: the cooked flush + the echo DROP on full (tty input overrun / the
+best-effort echo — the cons reference posture); the raw input + the output
+path back-pressure via a short count (the 2a contract). `h_write` raises the
+collected classes AFTER the ring work (the syscall stays out of the pure cook,
+so the selftest asserts classes directly). The selftest carries the full
+cooked truth table (ICRNL+flush+echo+ONLCR, assembly-holds, erase + empty-line
+erase, the ISIG trio, ECHO-off no-leak, raw+ISIG, output ONLCR, line
+overflow); the boot probe drives the cooked default live (master `"ping\r"` →
+slave `"ping\n"`; the master's read sees the echo `"ping\r\n"` then `"pong"`).
+The per-pts **ctl surface to change the word is PTY-2c** (`set_tio` is landed,
+resets the assembly — the TCSAFLUSH posture).
+
+*As-built (PTY-2c)*: the per-pts ctl at **`/dev/pts/<n>ctl`** (the Plan 9
+suffix-ctl idiom — `eia0`/`eia0ctl` — so the flat Linux-devpts slave names
+stay POSIX-intact; a ctl fid holds the slot ref but is **not** an EOF-counted
+endpoint). The grammar = the LS-8b consctl grammar per-pts (`+name`/`-name`
+over the five flags; ALL tokens validated before ANY applied — one malformed
+token rejects the whole write, the tcsetattr-atomic posture; a flag apply
+resets the assembly = TCSAFLUSH) **+ the winsize op** `winsize <cols> <rows>`
+(decimal ≤ 65535; stores the per-pts winsize and raises
+`SYS_TTY_SIGNAL(WINCH)` **iff the size changed** — the Linux TIOCSWINSZ
+behavior; the kernel routes `tty:winch` to the fg pgrp). Read-back is one
+line: `+icanon +echo +isig +icrnl +onlcr winsize C R\n`. **ptsname** needs no
+new surface: `t_stat.qid_path` carries the 9P qid verbatim, and a ptyfs
+endpoint qid encodes `PTS_FLAG(bit 40) | N<<8 | filekind` — so
+`ptsname(master_fd)` = the fstat qid decode (the boot probe proves it live;
+the PTY-3 pouch `ptsname()` implements exactly this; the qid encoding is
+thereby a documented ptyfs client contract). The boot probe drives the ctl
+live: the `-echo` **no-leak proof without a blocking read** (type a line under
+`-echo`, then `+echo` and type another — the master's next drain shows ONLY
+the second line's echo) + the winsize round-trip via `t_pread` (the ctl fd's
+cursor advanced with the writes — positioned read from 0).
+
+*As-built (PTY-2d)*: the teardown legs. Drain-then-EOF was structural since 2a
+(`ring_drain` serves Data while non-empty regardless of the peer's closure;
+Eof only on empty+peer-closed) — 2d adds the **HUP raise**: `open_dec` reports
+the `n_master` 1→0 edge and `Conn::close_endpoint` (now the single
+opened-endpoint drop path: clunk / rebind / connection teardown / Tversion
+reset — a dying emulator connection IS carrier loss) raises
+`SYS_TTY_SIGNAL(HUP)` before the unref, which the kernel routes dual-target
+(fg pgrp + session leader, PTY-1d). **HupAtMostOnce is by construction**:
+exactly one master fd per pts can ever exist (masters are mint-only — no walk
+resolves a master path, 9P forbids walking FROM an opened fid so the master
+fid cannot be cloned, and a walk to an existing newfid is rejected), so the
+edge fires at most once per pts lifetime. A slave close is never a hup edge
+(the master just reads EOF — POSIX). The mint-rollback path keeps the raw
+`open_dec` (a failed mint is not carrier loss). The pts free + registry FREE
+at last-unref and the kernel gen guard were live since 2a. The selftest pins
+the edge algebra (edge-once, saturated-re-dec silent, slave-close silent,
+queued-bytes drain-then-EOF both directions); the boot probe drives
+queued-line drain-then-EOF live. The live HUP *delivery* (a controlling
+session observing `tty:hup`) is the 2e E2E.
+
+*As-built (PTY-2e — the arc close)*: the `/bin/pty-probe` openpty E2E — a
+two-role native prover (the emulator mints + ptsname-decodes + spawns itself
+as a session-leader child: `t_setsid` → slave open → `t_tty_acquire` → notes
+fd first [self-managing]) proving the §9 E2E bar live: the parked deferred
+master read (the readiness read parks until the child's slave opens — which
+caught the **`slave_opened_once` latch fix** before ever running: a master
+read before ANY slave open must PARK, not spuriously EOF, the Linux
+master-blocks semantic), Ctrl-C → "interrupt" on the fg session's notes fd,
+winsize → `tty:winch`, master close → `tty:hup`. I-20 takes its **enforced**
+§28 number (ARCH §28 + the §25.4 "ptyfs" prosecution row); the as-built
+server reference is `docs/reference/136-ptyfs.md`; the `pty.tla` data-path
+action map is as-built in `specs/SPEC-TO-CODE.md`.
 
 - **`/dev/ptmx` open → mint pts N** (the netd clone idiom): allocate the pts
   slot, its M2S + S2M rings, its per-pts `Ldisc` (the de-globalized LS-8 cooking
@@ -387,6 +490,33 @@ The POSIX porters' surface (ABI names stay standard — `isatty`, `/dev/ptmx`,
 Covers, when they arrive via Pouch: bash job control, tmux/screen, ssh
 (client + the sshd pty side), vim/less/`script`, any `isatty()`-sniffer.
 
+**As-built (PTY-3, `0021-pouch-pty.patch`; the full reference is
+`docs/reference/78-pouch.md` "The pty boundary-line")**: the whole
+surface landed as ONE pouch patch + one ptyfs posture change
+(`S_IFCHR` on ptmx/master/slave — the pouch is-a-tty discriminator) —
+the kernel byte-unchanged. The centerpiece is the tty ioctl dispatcher
+(`src/misc/ioctl.c` rewritten): musl's pty surface is entirely
+ioctl-shaped, so one dispatcher makes the unpatched wrappers work —
+termios/winsize ↔ the pts ctl grammar; `TIOCSCTTY`/`TIOC[GS]PGRP` →
+the §4 kernel syscalls 95–97; `TIOCGPTN` = the fstat qid decode;
+`/dev/ptmx` → the `/dev/pts/ptmx` path redirect (the devpts-native
+node; a real symlink stays G11-blocked). The landing also moved the
+pouch `openat` onto the stalk resolver (the 0009 per-component loop
+opened intermediates with the final omode — structurally unable to
+open write-mode across a mount) and rerouted musl's direct
+`__syscall(SYS_ioctl,…)` bypasses (ptsname_r/isatty/tcdrain/
+tc[gs]etwinsize + the stdio line-buffering probes) through the
+dispatcher. The signal mappings landed receive-only (`kill`/`raise` of
+a tty signum = `EPERM` — the F4 gate surfaced POSIX-shaped); SIG_DFL
+`SIGTSTP` is the DOCUMENTED ignore-not-stop seam (pouch's
+always-registered bootstrap reads as "caught" to the kernel
+pre-delivery stop gate, and NDFLT terminates — the kernel
+NDFLT-stop-arm fix needs signoff; `83-pouch-signals.md` "Known
+caveats"). `forkpty` fails honestly (pouch has no `fork()` — a
+pouch-wide seam, not a pty gap). Proven by `/pouch-hello-pty` (the
+joey boot-fatal probe): the full mint→termios→session→live-ISIG/WINCH/
+HUP→EPERM ladder through unpatched-musl wrappers.
+
 ---
 
 ## 8. Invariants + audit-trigger surface
@@ -414,7 +544,7 @@ Covers, when they arrive via Pouch: bash job control, tmux/screen, ssh
 | PTY-1 | Kernel primitives + spec | `sid`/`pgid` on Proc + `setsid`/`setpgid`/`getpgid`/`getsid`; `notes_post_pgrp` + the new note names/bits; the controlling-terminal kernel state + the `SYS_TTY_SIGNAL` gate; the generalized (non-CAP_DEBUG) stopped-state; `specs/pty.tla` model-first + the focused audit (I-39 re-validation) | `pty.tla` TLC-green + audit close + kernel unit tests (pgrp membership, pgrp-signal exactly-once, stop/cont, the seam gate rejects a non-owner) + SMP gate |
 | PTY-2 | The `ptyfs` server | de-globalize the LS-8 ldisc into a per-pts `Ldisc`; the `/dev/ptmx`→pts clone mint; the M2S/S2M rings + cooking; per-pts termios via the pts `ctl`; winsize + SIGWINCH; teardown/EOF/SIGHUP; the synthetic `openpty` round-trip E2E (the netd-loopback analog) | E2E: a master/slave round-trip cooks + echoes + raises SIGINT to the fg group + resizes + tears down cleanly; boot OK; SMP gate |
 | PTY-3 | The Pouch boundary-line | `openpty`/`forkpty`/`tcsetattr`/`tcsetpgrp`/`TIOCSWINSZ`/`isatty` + setsid/setpgid + the signal mappings (§7) | a Pouch `openpty`+`forkpty`+job-control control-surface probe |
-| PTY-4 | The first real consumer + close | a Pouch `tmux` OR the sshd pty side (whichever the roadmap reaches first) hosting a shell under job control; the focused audit close; the interactive LS-CI PTY scenario | job control works end-to-end over a real multiplexer; audit clean |
+| PTY-4 | The first real consumer + close (**amended — §14**) | the NATIVE consumer: `ut` job control on a pts (the U-7a jobs table's chartered completion) hosted by the native session host `ptyhost`; the focused audit close; the interactive LS-CI PTY scenario. The originally-named Pouch `tmux`/sshd consumers are structurally unreachable at v1.0 — every POSIX pty-master consumer (tmux, sshd, bash) is `fork()`-shaped and Pouch has no fork (the spawn model); they are the v1.x row (§14.1) | job control works end-to-end over a real pty-hosted session (`^Z` stops the fg job, `fg`/`bg` resume, `^C` terminates, clean teardown); audit clean |
 
 The v1.0-rc textual OS does NOT depend on PTY (like Halcyon/Tapestry, it is
 additive — Aurora + Utopia run cons-level). PTY unblocks the Pouch terminal
@@ -431,8 +561,9 @@ renamed): the server `ptyfs` → a dasyurid sibling (e.g. **`quoll`** — a smal
 marsupial cousin, a fitting "stand-in terminal" server); the process-group →
 session grouping could carry a marsupial-aggregation word (**`mob`**, a group of
 kangaroos) in internal identifiers where it adds color without obscuring the
-POSIX mapping. Descriptive names ship until the user rules; the ABI surface never
-changes.
+POSIX mapping; the PTY-4 session host `ptyhost` → **`den`** (the marsupial den —
+the session lives inside it). Descriptive names ship until the user rules; the
+ABI surface never changes.
 
 ---
 
@@ -617,3 +748,206 @@ at impl against real code, and (b) a real EXTERNAL sequencing dependency (8c-3).
 A round-3 confirms the R2-F1 correlation + the R2-F2 fan-out shape; if it returns
 only P2/P3, the design is converged at design altitude and PTY-1 owns the
 precise realization.
+
+## 13. As-built: the PTY-1 kernel arc (LANDED, 2026-07-17)
+
+The kernel half is built — sub-chunks 1a–1f on branch `pty-1` (rebased onto
+`a58403fb`, the 8c-3 tip). The as-built technical reference is
+`docs/reference/135-pty-kernel.md`; the audit-trigger row (the authoritative
+prosecution copy) is ARCH §25.4; the spec is `specs/pty_stop.tla` (the
+stop-ownership gate) + `specs/pty.tla` (the design-altitude data-path model).
+
+| Sub-chunk | Commit | Delivered |
+|---|---|---|
+| 1a | `a418dba0` | sessions + process groups; `sid`/`pgid` on `Proc` (rfork-inherited); `SYS_SETSID`/`SETPGID`/`GETPGID`/`GETSID` = 89–92; `T_E_SRCH = 3`. |
+| 1b | `131ea092` | the `tty:*` note class (kernel-only-POST + catchable; `NOTE_BIT_TTY = 5`); the terminate class `{interrupt, tty:quit, tty:hup}` via `PROC_FLAG_TTY_TERMINATE_PENDING`; `notes_post_pgrp`/`notes_post_pid`. |
+| 1c | `2a006c3e` | the pts registry (gen-stamped, the `(SrvConn ptr, qid)` correlation, torn-conn GC); `SYS_PTY_REGISTER = 93`; `p9_srvconn_transport_conn` (the identity downcast). |
+| 1d | `96900a36` | the tty seam (`SYS_TTY_SIGNAL` server-scoped; HUP's F13 dual target) + the controlling-terminal syscalls 94–97. |
+| 1e | `f2ee7f66` | the `SYS_WAIT_PID` extension: `WAIT_UNTRACED`/`WAIT_CONTINUED` + pgrp selectors + report-is-not-reap + the opt-in packed status. |
+| 1f | `bce3fe33` | `job_stop_req` (the 2nd stop owner @316) + the park-predicate fan-out + TSTP live + `SYS_TTY_CONT = 98` (signed off) + the F8 teardown fan + the POSIX orphan rule. |
+
+**The ABI beyond the design pin.** The design escalated syscalls 89–97 + the
+`tty:*` family + the wait extension (§11 "Escalation owed to the user"). PTY-1f's
+impl surfaced one gap the design named but did not resolve — the shell's `fg`/`bg`
+resume has no path (F4 keeps `tty:cont` kernel-synthetic-only; F8 covers only
+teardown; ordinary `kill` covers only one's own group). Resolved to
+**`SYS_TTY_CONT = 98`** (user-signed-off 2026-07-17), gated exactly like
+`SYS_TTY_SET_FG` — one number beyond the 89–97 pin. Also appended: `T_E_SRCH = 3`
+(1a) under the errno registry discipline.
+
+**The R2 impl-precision obligations, discharged** (the round-2 "lead items" above):
+R2-F1 (the correlation) realized as the pointer-identity `(SrvConn, qid)` registry
+(reference §5); R2-F2 (the fan-out) realized as `proc_stop_requested`'s disjunction
+threaded through every `debug_stop_req` park site + the 8c-3 reader-role release
+(reference §7.6); R2-F3 (catchability) as `proc_tty_susp_would_stop_locked`
+(reference §7.2); R2-F6 (the wait composition) as report-is-not-reap with the
+per-child latches (reference §8).
+
+**Gates at the PTY-1g close**: default 1161/1161 + boot OK + 0 EXTINCTION + login
+E2E; the spec gate GREEN (`pty_stop` clean + liveness + both buggy cfgs exact;
+`debug_stop` clean + all buggy cfgs exact; `pty` clean + liveness); the SMP gate
+PASS (default+UBSan × smp4/smp8 N=10 = 40/40, 0 corruption). The focused
+Fable-5-max holotype over 1a–1f + the closed list are the PTY-1g close record
+(`memory/audit_pty1_closed_list.md`).
+
+**What remains (PTY-2+)**: the userspace `ptyfs` byte/cooking server, `/dev/ptmx` +
+`/dev/pts/<n>`, per-fd `termios`, and `specs/pty.tla`'s master/slave data-path
+realization. The pouch boundary-line (`tcsetpgrp`/`tcgetpgrp` → the §4 kernel
+syscalls; `O_NOCTTY`; `SIGTSTP`/`SIGCONT` handler install) is PTY-3.
+
+## 14. PTY-4 as-built design: the native consumer (amendment, 2026-07-18)
+
+### 14.1 The fork-collapse — why the consumer is native
+
+The §9 charter named "a Pouch `tmux` OR the sshd pty side (whichever the
+roadmap reaches first)". Neither can be reached at v1.0, and not because of
+this arc: **every canonical POSIX consumer of the pty master + job control is
+`fork()`-shaped** — tmux (`fork`/`forkpty` per window + daemonize), OpenSSH
+sshd (fork per connection + privsep), Dropbear (same), bash (fork per job) —
+and Pouch has no `fork`/`clone` (the kernel's process model is spawn =
+fused fork+exec; PTY-3's prover pins `forkpty() == -1` as the honest fail).
+That absence is a Pouch-wide v1.0 property, not a PTY gap; the ported
+consumers arrive on the v1.x row (with a Pouch fork, or a no-fork mux
+rearchitecture) and ride THIS chunk's machinery unchanged when they do.
+
+The research residue is empty: the ONLY shell that can host job control at
+v1.0 is the native `ut` — and the PTY-1 kernel was explicitly built for it
+(`SYS_TTY_CONT`'s header names "the shell's `fg`/`bg` resume"; the 1e
+`WAIT_UNTRACED` rationale names "a shell cannot detect a `^Z`-stopped child";
+`proc_setpgid` allows parent-sets-live-child precisely because spawn has no
+pre-exec window; the U-7a jobs table's header reserves pgrp machinery as
+"U-PTY territory"). PTY-4 completes that chartered seam. The gate's substance
+is unchanged — job control end-to-end over a real pty-hosted shell; the
+"multiplexer" word is realized as the mux's CORE (mint / host / pump / relay
+is exactly each tmux window's mechanism); multi-window UI is additive atop
+the same host (v1.x / Halcyon terminals).
+
+### 14.2 The consumer stack
+
+Two userspace pieces, ZERO expected kernel bytes:
+
+**(a) `ut` job control (libutopia)** — four mechanisms:
+
+1. **pts detection + the session dance.** At REPL startup, `fstat(0)`: if the
+   qid decodes as a pts SLAVE (`PTS_FLAG` bit 40 + `fk == 2` — the same
+   two-gate discrimination PTY-3 built, native side), ut runs the pty-probe
+   session dance: `t_setsid()` → `t_tty_acquire(0)` → `t_tty_set_fg(0,
+   getpgid(0))`, and opens `/dev/pts/<n>ctl` as its line-discipline fd.
+   Job control is ACTIVE iff the dance succeeded; on the console (no pts)
+   every step is skipped and the shell is byte-identical to today.
+2. **The ldisc-fd generalization.** `Env.consctl_fd` generalizes to "the
+   line-discipline fd" — login's forwarded consctl on the console, the pts
+   `ctl` when hosted. `PROMPT_MODE` / `RAW_MODE` apply VERBATIM (the PTY-2c
+   ctl grammar and the LS-8b consctl grammar are deliberately one
+   vocabulary); the LS-7 raw-command dance keeps its exact shape with the
+   fd swapped.
+3. **pgrp job formation.** With job control active, every external job (fg
+   command, pipeline, `&` background) is placed in its OWN process group:
+   ut `t_setpgid(pid, job_pgid)`s each spawned element (job_pgid = the first
+   element's pid) immediately after spawn — the parent-sets-live-child rule.
+   (The pre-`setpgid` window where a fast child still runs in ut's pgrp is
+   benign at v1.0: no TTIN/TTOU exists, and the fg handoff follows
+   immediately.) A fg job then gets the terminal: `t_tty_set_fg(0,
+   job_pgid)`; the kernel now routes `^C`/`^Z` (via the ptyfs ISIG →
+   `SYS_TTY_SIGNAL` → fg-pgrp path) DIRECTLY to the job — the console-path
+   note-forwarding in `wait_pids_interruptible` is not consulted on a pts.
+4. **The stop-aware fg wait + `fg`/`bg` resume.** The fg wait passes
+   `WAIT_UNTRACED`: an exit reaps (status unpacked via `WAIT_EXITSTATUS` —
+   the flag opts into the packed encoding); a STOP-report (report-is-not-reap,
+   1e) ends the fg wait — ut takes the terminal back (`t_tty_set_fg(0,
+   own_pgid)`), records the job STOPPED in the U-7a table, and prints the
+   `[N]+ Stopped` line. `fg %N` = terminal to the job + `t_tty_cont(0,
+   job_pgid)` + the same stop-aware wait; `bg %N` = `t_tty_cont` only;
+   `jobs` renders the Stopped state. At the prompt, ut's own `tty:susp` is
+   drained-and-discarded (a shell does not stop itself — the bash SIGTSTP
+   posture) and `tty:hup` ends the REPL (carrier loss; the fd-0 EOF path
+   backstops it).
+
+**(b) the session host (`usr/ptyhost`; thematic candidate `den`, held per
+§10).** The native consumer of the master side: open `/dev/pts/ptmx` (the
+clone mint) → decode `N` from the fstat qid (the documented ptsname
+contract) → set the pts winsize (default 80×24; `-w`/`-h` args) → spawn the
+hosted program (default `/bin/ut`, else argv) with the slave as fds 0/1/2
+(`Stdio::File`; the child runs the session dance itself, the pty-probe
+pattern) → pump bytes on two threads (console fd 0 → master; master → fd 1
+— blocking reads, matching ptyfs's deliberate non-QTPOLL posture) → on the
+hosted shell's exit, the master's drain-then-EOF ends the master pump, the
+host reaps + propagates the status, and process exit (the #809 group
+cascade + #68 close-at-exit) unwinds the console-blocked peer thread + closes
+the master (→ `tty:hup` to any survivor, ptyfs teardown).
+
+**The composition that makes the host trivial**: `ptyhost` registers in
+`is_raw_command`, so ut's EXISTING LS-7 console dance flips the outer
+console RAW (`-isig`) around it and restores it after — the host never
+touches consctl (I-27 untouched). The outer console collapses to a byte
+pipe; `^C`/`^Z` arrive as raw 0x03/0x1a bytes, are pumped inward, and the
+PTS is the one line discipline that cooks them — into the INNER session's
+fg-pgrp signals. Nesting is exactly the pty-probe topology (outer session:
+console; inner session: the pts).
+
+### 14.3 Invariants + audit posture
+
+No new kernel surface and no new invariant. Composes: **I-20** (the data
+path — first sustained real-workload exercise), **I-9** (the 1e stop-report
+wake edge + the 1f stop/cont machinery driven by a real shell), **I-24/#68**
+(the host's exit-group unwind of its blocked pump peer + close-at-exit
+delivering the last-master edge), **I-27** (the host never holds consctl;
+ut-hosted is never console-attached; the SAK path is outside the pts
+entirely), **I-28** (spawn resolution unchanged), **LS-5** (the console
+session's interrupt path stays; it is simply dormant while a raw child — the
+host — holds the console). The console (non-pts) ut path must stay
+byte-identical — job control keys on the successful session dance, never on
+a heuristic. Audit focus (4e): the fg-terminal handoff pairing (every
+`t_tty_set_fg(job)` has its restore on EVERY exit path — stop, exit, spawn
+failure, death), the stopped-job table state machine (no lost/double
+Stopped→Running edges vs the 1e latches), the host's pump-thread lifetime
+(no orphaned reader; no fd leak on any error path), and the
+console-byte-identical property.
+
+### 14.4 Verification
+
+The in-guest **boot-fatal probe** (the pty-probe pattern, a driver role on
+the master): spawn `ut` on a freshly-minted slave, script the ladder —
+`cat\r` (fg job reads the pts) → `^Z` → assert the `Stopped` line + a live
+prompt → `jobs\r` shows it Stopped → `fg\r` resumes (cat echoes again) →
+`^C` terminates it → a live prompt → `exit\r` → clean teardown + reap. Then
+the **interactive LS-CI PTY scenario** (`tools/interactive/`): the same
+ladder driven through the REAL console — login → `ptyhost` → the inner
+prompt → the job-control ladder → `exit` → the outer prompt restored. The
+focused audit + the SMP gate close the arc (4e).
+
+Sub-chunks: **4a** this scripture; **4b** ut job control; **4c** the host;
+**4d** the probe + LS-CI; **4e** the audit + ARC close.
+
+### 14.5 As-built (PTY-4b/c/d, 2026-07-18)
+
+Landed on `pty-1`: `ut` job control (`libutopia` -- `JobControlState` on `Env`,
+the `Repl::init_pts_session` dance, per-job pgrp formation + the stop-aware
+`WAIT_UNTRACED` fg wait + `fg`/`bg` via `SYS_TTY_CONT` in `stmt.rs`/`builtin.rs`,
+the consctl->line-discipline-fd generalization, `Env::emit_line` routing shell
+output to the session terminal), the native session host `usr/ptyhost` (ptmx
+mint + qid ptsname + spawn-on-the-slave + the 2-thread blocking pump; registered
+in `is_raw_command`), the boot-fatal E2E `usr/jc-probe`, and the interactive
+`tools/interactive/pty-4.exp`. **Kernel: one PTY-1e bug fix** (`8f1cb8a2`) -- the
+`SYS_WAIT_PID` handler rejected `WAIT_UNTRACED`/`WAIT_CONTINUED` at its
+accepted-flag mask, so the job-control stop/continue reports were unreachable
+from EL0 (latent since PTY-1e; PTY-4 is the first consumer). Otherwise the
+kernel is byte-unchanged.
+
+**Proven end-to-end** (`jc-probe: PASS`, `joey: PTY-4 job-control E2E OK`, boot
+OK, 1163/1163): a clean fg pipeline under jc; `sleep` foregrounded + `^Z` ->
+`[1]+ Stopped` on the pts; `jobs` lists it Stopped; `fg` -> `SYS_TTY_CONT`
+resume -> a clean prompt exit; the shell reclaims the terminal + runs commands;
+`exit` -> the orphan-rule teardown + a clean reap.
+
+**Two follow-ups** (real, both need focused kernel work -- `docs/reference/136-ptyfs.md`
+"PTY-4 job-control gaps"): (1) **TTIN** foreground-read arbitration -- without
+it a stopped job blocked in a terminal read (`cat`) steals the shell's input
+off the shared pts slave, so interactive `cat`-under-`^Z` does not work; the fix
+is a `SYS_READ`-on-a-pts-slave pgrp gate. (2) **resume-then-re-stop** -- `fg`
+resumes a sleeper correctly, but a second `^Z` immediately after does not
+re-stop it (the `tty:susp` never reaches `proc_job_stop_one` post-resume); `bg`
+of a re-stopped job is untested. The E2E + LS-CI drive `sleep` (no terminal
+read) so they exercise the working cycle without either gap. **The PTY-4e
+focused audit + the SMP gate + the ARC close remain; the two follow-ups are
+scope the user should weigh (each is a new kernel mechanism).**
