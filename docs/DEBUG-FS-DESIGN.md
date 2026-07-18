@@ -712,6 +712,51 @@ the SMP gate; the block-through decision lives in the sched detour, kproc-immune
 so it has no deterministic kproc regression — the SMP gate + reasoning are its
 durable coverage).
 
+### 5c.7 As-built — the #95 focus-thread (multi-M breakpoint inspect)
+
+8c-1 did attach + inspect only; 8c-2 (5c.2) made a multi-M target
+*fully-stoppable*. But the FIRST `continue` past a `break` on a real Go target
+exposed a deeper gap the whole 8a/8b/8c-2 design carried silently: the debug-fs
+(`devproc_build_regs`/`apply_regs` + the step verb + the 8b `kstack`) read only
+the **head** thread (`target->threads`, TID==PID). A hardware breakpoint on a
+multi-M Go target fires on whichever M runs the migrated goroutine — **not** the
+head — so `/proc/regs` reported the head M's PC (not the bp), the debugger
+(Ambush/Delve) could not attribute the stop (`FindBreakpoint(pc)` missed →
+`CurrentBreakpoint` nil → pkg/proc's `Continue` fell to its `just repeat`
+default), and `continue` auto-resumed forever (ground truth: 8199 `start`+fire
+pairs, 0 step-over, kernel + Go-side instrumented, on `ambush exec
+/ambush-child`). The `/debug-child` (8a-2b) is single-threaded native, so it never
+exercised this — its bp fires on its only thread, which *is* the head.
+
+**The fix (Option A, user-voted): the debug-fs FOCUSES the stop-triggering
+thread.** `struct Proc.debug_focus_thread` (proc.h, @328) is the M whose frame the
+debug-fs reports; `NULL` = head (the manual-stop / attach default). Every `bp` /
+`step` / `wp` EC fire routes through **one** path — `proc_debug_fault_stop`, from
+`hwdebug_{breakpoint,singlestep,watchpoint}_from_el0` — so setting it there to
+`current_thread()` (under `g_proc_table_lock`) focuses the firing M uniformly, and
+a `step` re-focuses on its own EC 0x32 (which re-enters `fault_stop`).
+`proc_debug_resume` clears it. `devproc_focus_thread(target)` validates the
+pointer is still a thread of `target` (else head) under the lock; the four read
+sites use it, so regs + kregs (`tpidr_el0` → Delve's goroutine recovery) + kstack
++ step report the firing M **coherently**. A single-threaded target has
+`current_thread()` == head, so 8a-2b + attach + the 8b settled-thread kstack are
+byte-behaviour-unchanged.
+
+**Soundness.** No UAF: a debug-stopped thread is parked, never reaped, and the
+read is fully-stopped-gated (a kill makes `fully_stopped` false → the read is
+rejected before the frame deref); a set focus is always `current_thread()` of the
+debugged Proc; any stale/mismatched pointer falls back to head. The set
+(`fault_stop`, under the lock) / clear (`resume`, `__atomic`) / read (the 4
+walk_cbs, under the lock) are consistent. **No new §28 invariant** — I-39 holds
+(it only refines *which* stopped thread's frame crosses, gated identically);
+`debug_stop.tla` + `debug_step.tla` are frame-reporting-agnostic and unchanged
+(re-verified GREEN). Validated by the focused 8c-2-#95 Fable holotype + the
+`/ambush-probe` stage-C E2E (the durable multi-M regression — break + continue +
+bt/print at a HW bp on a multi-M Go target; it loops 8199× without the fix) +
+1138/1138 + boot OK + the SMP gate. This unblocks 8c-4. As-built:
+`docs/reference/134-debug-fs.md` (the "8c-2 #95" section); closed list
+`memory/audit_8c2_95_closed_list.md`.
+
 ---
 
 ## 6. `specs/debug_stop.tla` (spec-first, model-first)

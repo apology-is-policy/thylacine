@@ -790,6 +790,57 @@ kernel DWARF (8c).
 `debug_stop.tla` clean 2264 GREEN (unchanged) + the SMP gate. Closed list:
 `memory/audit_8b_closed_list.md`.
 
+## 8c-2 #95 — the debug-fs focus thread (multi-M breakpoint inspect)
+
+The v1.0 debug-fs read only the **head** thread (`target->threads`, TID==PID) for
+`/proc/<pid>/{regs,fpregs,kregs,kstack}` and the `step` verb. That is correct for
+a single-threaded target and for a manual `stop` (which parks the whole Proc at
+its tails). It is **wrong** for a hardware breakpoint on a multi-M Go target: a Go
+breakpoint fires on whichever M runs the migrated goroutine — **not** the head. So
+`/proc/regs` reported the head M's PC (not the bp), the debugger (Ambush/Delve)
+could not attribute the stop (`FindBreakpoint(pc)` missed → `CurrentBreakpoint`
+nil → `curbp.Active` false), and `continue` fell to pkg/proc's `just repeat`
+default — an auto-resume loop (measured 8199 `start`+fire pairs, 0 step-over, on
+`ambush exec /ambush-child`). This was the documented "single-head-thread
+debug-fs; per-thread layer is v1.x" limitation, invisible until a bp fired on a
+non-head M (8c-1 did attach + inspect only; 8a-2b's `/debug-child` is
+single-threaded native).
+
+**The fix (Option A): the debug-fs FOCUSES the stop-triggering thread.**
+
+- `struct Proc.debug_focus_thread` (proc.h, @328) — the M whose frame the debug-fs
+  reports. `NULL` = the head (the manual-stop / attach default). KP_ZERO inits it
+  NULL; NOT propagated by rfork.
+- `proc_debug_fault_stop` (proc.c) sets it to `current_thread()` under
+  `g_proc_table_lock`. This is the **one** path every `bp` / `step` / `wp` EC fire
+  routes through (`hwdebug_breakpoint_from_el0` / `hwdebug_singlestep_from_el0` /
+  `hwdebug_watchpoint_from_el0`), so the firing M becomes the focus uniformly —
+  and a `step` re-focuses on its own EC 0x32 (which re-enters `fault_stop`).
+- `proc_debug_resume` clears it to NULL (the focus is valid only for the current
+  stop; a manual `stop` then reads NULL → head, preserving the attach / 8a-2b
+  single-thread behavior — for a single-threaded target `current_thread()` == the
+  head, so nothing changes).
+- `devproc_focus_thread(target)` validates the pointer is still a thread of
+  `target` under `g_proc_table_lock` (else head); `build_regs`, `apply_regs`, the
+  `step` verb, and the 8b `kstack` all read it, so regs + kregs (`tpidr_el0` →
+  Delve's goroutine recovery) + kstack + step report the firing M **coherently**.
+
+**No UAF**: a debug-stopped thread is parked, never reaped; the read is
+fully-stopped-gated (a kill makes `fully_stopped` false → the read is rejected
+before the frame deref); a set focus is always `current_thread()` of the debugged
+Proc; any mismatch (a stale pointer, a settling thread) falls back to head. **No
+new §28 invariant** — I-39 holds (the focus is gated identically; it only refines
+*which* stopped thread's frame crosses). `specs/debug_stop.tla` +
+`debug_step.tla` are frame-reporting-agnostic and unchanged (re-verified clean).
+
+This unblocks 8c-4: `ambush exec /ambush-child` sets a HW breakpoint at
+`main.parkLoop`, `continue`s into it, and `bt`/`print` inspect the bp-stopped
+multi-M target — all four stage-C markers GREEN (`bp_set` / `bt` / `parkLoop` /
+`Sentinel`), Ambush exits 0. **Gates**: 1138/1138 + boot OK + 0 EXTINCTION +
+`debug-probe`/`stack-probe`/`hwbp-verify` unregressed + the `/ambush-probe` stage
+C E2E (the durable multi-M regression, non-vacuous: it loops 8199× without the
+fix) + `debug_stop.tla`/`debug_step.tla` clean + the SMP gate.
+
 ## Known caveats / footguns
 
 - **The trapframe is not at `kstack_top − 288`.** Any future consumer of a
