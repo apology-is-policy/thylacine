@@ -918,6 +918,35 @@ extended).
   thread-now (execution control on a blocked thread) remains a v1.x refinement.
 - Software breakpoints are FORBIDDEN (I-12 W^X + I-36 REVENANT Image cache) —
   the `dlv` backend routes breakpoints to the 8a-2 HW path.
+
+### 8c-4c client-side caveats (the Ambush backend, not the kernel)
+
+The 8c-4 arc-close holotype surfaced these client-side (Ambush/Delve-fork)
+limitations. The kernel debug-fs is unaffected; these are the debugger's use of
+it.
+
+- **A manual stop while a watchpoint is armed may mis-report as a watchpoint hit
+  (F4).** The `wait` verdict carries no stop cause, so the backend cannot
+  distinguish a fault-stop from a `pause`/Ctrl-C; with a watchpoint armed,
+  `findHardwareBreakpoint` attributes the manual stop to the (lowest-index)
+  watchpoint. **v1.0 constraint: watchpoints and manual stops are mutually
+  exclusive.** The clean fix — the `wait` file reporting the stop cause — is a
+  kernel change deferred to a later stage; it does not affect the common
+  breakpoint/continue flow.
+- **The HW code-breakpoint ceiling is 4 (F5).** Every breakpoint routes to the HW
+  path, sharing `DEBUG_HWBP_SLOTS`=4 code + 4 data debug registers. A 5th arm
+  fails cleanly (ctl `hwbreak` returns -1 → a "could not set breakpoint" error, no
+  corruption). This will bite line-stepping (`next`/`step`, v1.x), which sets
+  multiple temporary HW breakpoints per operation — that path should use the
+  kernel single-step verb (`MDSCR.SS`, already wired) plus range checks rather
+  than temp HW breakpoints, sidestepping the ceiling.
+- **`ambush attach <pid>` + disconnect-with-kill double-kills (F7, cosmetic).**
+  For an *attached* (non-launched) target, `Detach(kill=true)` issues the I-39
+  debug `kill` (which reliably kills the debuggee) and then a redundant I-26
+  `killProcess`; if the target is already dead (or ambush lacks the I-26 axis),
+  the redundant kill's error is surfaced on an otherwise-successful disconnect.
+  The target *is* killed via I-39; only the returned error is spurious. Launched
+  children (the common `exec`/DAP path) use a single kill and are unaffected.
 - The 8a-2a `hwverify` breakpoint is GLOBAL (one at a time) and armed on the CPU
   where the ctl-write ran; the `EC 0x30` handler disarms the CPU that fired
   (= the arm CPU). The only unpaired case is a not-fired verify whose thread
