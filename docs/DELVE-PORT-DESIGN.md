@@ -377,14 +377,24 @@ arc close (not per-sub-chunk kernel audits — the kernel is byte-unchanged).
   stack-trace (§8), including the 8b settled-thread inspect for a
   blocked-in-kernel goroutine. Milestone: `goroutines -with running`, `goroutine
   <n> bt` shows the Go frames → the SVC boundary → the kernel frames.
-- **8c-4 — launch + the DAP server.** `ambush exec`/`ambush debug` (the §7(a)
-  attach-first + bp-at-entry launch); `ambush dap` over stdio drives the same
-  backend through the DAP protocol (the Nora-plugin transport). Milestone: a DAP
-  `launch` → `setBreakpoints` → `configurationDone` → `stackTrace` →
-  `variables` → `continue` round-trip against a Go program, over stdio. The
+- **8c-4 — launch + the DAP server.** **8c-4a (DONE):** `ambush exec`/`ambush
+  debug` (the §7(a) attach-first + bp-at-entry launch + `verifyBinaryFormat` for
+  the thylacine ELF). **8c-4b (DONE):** the DAP protocol proven end to end on
+  device -- `service/dap` is upstream, backend-agnostic (no thylacine stubs),
+  routing `launch`/`attach` through `native.Launch`/`Attach`. The proof is an
+  **in-process** round-trip: a hidden `ambush dap-selftest` wires a `dap.Server`
+  to a `daptest.Client` over a `net.Pipe` (pure Go-runtime; no `/net`) and drives
+  `initialize → launch(exec, stopOnEntry) → setFunctionBreakpoints[main.parkLoop]
+  → configurationDone → stopped(entry) → continue → stopped("function
+  breakpoint") → stackTrace → scopes → variables → evaluate(main.Sentinel) →
+  disconnect`, gating on the parkLoop stack frame + the Sentinel readback (the
+  `/ambush-probe` stage D, boot-fatal). **Real-socket transport (the as-built
+  `ambush dap` is a headless TCP server) + the Nora DAP client need the Go `net`
+  stack over `/net` -- deferred to Stage 8e.** Kernel byte-unchanged (no new
+  invariant; the debug-fs is driven, not extended). **8c-4c (remaining):** the
   arc-close focused holotype (the backend's debug-fs usage: fd lifetimes, the
   slot ceiling, attach/detach composition with target death, no cross-Proc leak)
-  + the in-guest E2E + docs/reference.
+  + the SMP gate.
 
 The v1.x seams (per-thread `/proc/<pid>/thread/<tid>/`, the spawn-stopped
 primitive §7(b), the software-bp-via-single-step ceiling lift, core-dump /

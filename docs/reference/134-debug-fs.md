@@ -852,6 +852,53 @@ multi-M target — all four stage-C markers GREEN (`bp_set` / `bt` / `parkLoop` 
 C E2E (the durable multi-M regression, non-vacuous: it loops 8199× without the
 fix) + `debug_stop.tla`/`debug_step.tla` clean + the SMP gate.
 
+## 8c-4b — the in-process DAP round-trip
+
+Stage 8c-4b proves that the **Debug Adapter Protocol** works end to end on device
+-- the protocol a real editor (VS Code, the Stage-8e Nora plugin) speaks to a
+debugger. It is **kernel-byte-unchanged**: the DAP server is upstream Delve
+(`service/dap`), backend-agnostic, routing `launch`/`attach` through
+`service/debugger` -> `native.Launch`/`Attach` -- the same paths `ambush exec`
+(stage C) already drives. There are no thylacine stubs in `service/dap`.
+
+**The self-test (`ambush dap-selftest <program>`, ambush fork).** A hidden,
+`//go:build thylacine`-only subcommand (`cmd/dlv/cmds/dapselftest.go`; a no-op
+`registerDapSelftest` off thylacine keeps the host binary clean) runs the whole
+DAP session **in one process, over a `net.Pipe`**: a `dap.NewServer` +
+`RunWithClient(serverConn)` on one end, a `daptest.Client` on the other. `net.Pipe`
+is pure Go-runtime (channels; no netpoll, no `/net`), so this isolates the DAP
+machinery + the backend integration from the separate "DAP over a real socket"
+networking question. Because `net.Pipe` is synchronous/unbuffered, a dedicated
+reader goroutine drains every server message into a channel -- that decoupling is
+what keeps the server's interleaved events + responses from deadlocking a client
+mid-send.
+
+**The round-trip.** The canonical VS-Code sequence against the parking multi-M
+`/ambush-child`: `initialize` -> `launch{mode:exec, program, stopOnEntry}` ->
+(server emits `initialized`) -> `setFunctionBreakpoints[main.parkLoop]` ->
+`configurationDone` -> `stopped{entry}` -> `continue` -> `stopped` ->
+`stackTrace` -> `scopes` -> `variables` -> `evaluate("main.Sentinel")` ->
+`disconnect{kill}`. The proof gates on the **stack**, not the DAP stop-reason
+STRING: a `setFunctionBreakpoints` hit is classified by Delve's DAP as
+`reason: "function breakpoint"` (not `"breakpoint"`), so the substantive check is
+"the program stopped and its stack trace is in `parkLoop`", exactly as stages B/C
+gate on the frame. The observed stack is a clean Go user stack:
+`main.parkLoop -> main.main -> runtime.main -> runtime.goexit`; `evaluate` reads
+back the Sentinel `768901734683508737`. The Rust `/ambush-probe` stage D spawns
+`ambush dap-selftest /ambush-child`, drains it, and asserts the `dap:` progress
+markers + a clean exit (boot-fatal).
+
+**Real-socket transport is a v-next seam.** The as-built `ambush dap` command is a
+headless **TCP** server (upstream Delve); a live editor connection needs the Go
+`net` stack over `/net`, which is the network arc's domain. 8c-4b deliberately
+proves the DAP + backend layer without it (the in-process pipe). Wiring `ambush
+dap` to a real listener -- and the Nora DAP client -- is Stage 8e.
+
+**Gates**: `/ambush-probe` PASS (stage D markers `init=1 bp=1 stop=1 stack=1
+sentinel=1 pass=1 code_ok=1`) + boot OK + 0 EXTINCTION + the SMP gate. Kernel
+byte-unchanged (no new §28 invariant; I-39 holds -- the debug-fs is driven, not
+extended).
+
 ## Known caveats / footguns
 
 - **The trapframe is not at `kstack_top − 288`.** Any future consumer of a

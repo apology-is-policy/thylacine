@@ -131,6 +131,17 @@ const ATTACH_ENABLED: bool = true;
 // not the head -- a Go bp fires on the migrated-goroutine's M).
 const LAUNCH_ENABLED: bool = true;
 
+// Stage D (DAP round-trip) drives `ambush dap-selftest /ambush-child` -- the
+// hidden thylacine-only subcommand runs an IN-PROCESS DAP session (a dap.Server on
+// one end of a net.Pipe, a daptest.Client on the other) and drives the canonical
+// VS-Code sequence (initialize -> launch/exec -> setFunctionBreakpoints ->
+// configurationDone -> continue -> stackTrace -> scopes/variables -> evaluate).
+// This is the 8c-4b proof that the DAP protocol machinery works end-to-end on
+// device -- backend-agnostic, routing through the same native.Launch the stage-C
+// `exec` uses. net.Pipe is pure Go-runtime, so it isolates the DAP layer from the
+// separate "DAP over a real socket" networking question.
+const DAP_ENABLED: bool = true;
+
 // --- Stage B: attach E2E (the 8c-2 multi-thread-stop proof) ---
 // Returns true on PASS or a legitimate SKIP (forks absent); false only when the
 // attach reached the target but the inspect markers are missing (a real
@@ -334,6 +345,94 @@ fn launch_e2e() -> bool {
     saw_bp_set && saw_bt && saw_parkloop && saw_sentinel
 }
 
+// --- Stage D: DAP round-trip E2E (the 8c-4b in-process DAP-server proof) ---
+// `ambush dap-selftest /ambush-child` runs the whole DAP session in-process (no
+// network -- a net.Pipe between a dap.Server and a daptest.Client) and prints a
+// `dap:` progress marker at each step. This proves the DAP protocol machinery +
+// the backend integration end-to-end: the same native.Launch + HW-breakpoint +
+// #95 focus-thread paths as stage C, driven through the standard DAP request set
+// a real editor (VS Code / Nora-8e) speaks. Unlike the REPL stages, dap-selftest
+// exits 0 on PASS / non-zero on any failed step, so this gates on BOTH the PASS
+// marker AND the exit code. Returns true on PASS or a legitimate SKIP (fork
+// absent); false when it ran but a round-trip step is missing (a real regression).
+fn dap_e2e() -> bool {
+    if !DAP_ENABLED {
+        t_putstr("ambush-probe: stage D DISABLED (DAP_ENABLED=false)\n");
+        return true;
+    }
+    let mut amb = match Command::new("/ambush")
+        .args(["dap-selftest", "/ambush-child"])
+        .stdin(Stdio::Piped)
+        .stdout(Stdio::Piped)
+        .stderr(Stdio::Piped)
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => {
+            t_putstr("ambush-probe: stage D SKIP (ambush not baked for dap-selftest)\n");
+            return true;
+        }
+    };
+    // dap-selftest is self-contained (it drives + exits on its own), not a REPL --
+    // no init file, no stdin. Close our write end so it never blocks on a read.
+    let _ = amb.stdin.take();
+
+    // Bounded wait (~30s): launch spawns + attaches + stops-at-entry + arms the bp
+    // + a `continue` that must reach main.parkLoop + re-stop + inspect.
+    let mut exited = false;
+    let mut code_ok = false;
+    for _ in 0..300 {
+        match amb.try_wait() {
+            Ok(Some(s)) => {
+                t_putstr(&format!(
+                    "ambush-probe: stage D -- dap-selftest exited status {}\n",
+                    s.raw()
+                ));
+                code_ok = s.success();
+                exited = true;
+                break;
+            }
+            Ok(None) => {
+                let _ = sleep(Duration::from_millis(100));
+            }
+            Err(_) => break,
+        }
+    }
+    if !exited {
+        t_putstr("ambush-probe: stage D -- dap-selftest did not exit in ~30s; killing\n");
+        let _ = amb.kill();
+        let _ = amb.wait();
+    }
+
+    let out = drain(&mut amb.stdout);
+    let err = drain(&mut amb.stderr);
+    echo_block("ambush-probe: === dap-selftest STDOUT ===\n", &out);
+    echo_block("ambush-probe: === dap-selftest STDERR ===\n", &err);
+
+    // The DAP round-trip proof: each marker is printed by dap-selftest.go only when
+    // that step's response/event arrived (initialize + a function breakpoint set +
+    // the bp-hit stopped event + the parkLoop stack frame + the Sentinel read back
+    // via `evaluate`). SENTINEL is 0x0AABB00DCAFE0001 == 768901734683508737.
+    let saw_init = contains(&out, b"dap: initialized");
+    let saw_bp = contains(&out, b"dap: bp main.parkLoop");
+    let saw_stop = contains(&out, b"dap: stopped breakpoint");
+    let saw_stack = contains(&out, b"dap: stack parkLoop");
+    let saw_sentinel = contains(&out, b"768901734683508737");
+    let saw_pass = contains(&out, b"dap-selftest: PASS");
+    t_putstr(&format!(
+        "ambush-probe: stage D markers -- init={} bp={} stop={} stack={} sentinel={} pass={} code_ok={}\n",
+        saw_init as u8,
+        saw_bp as u8,
+        saw_stop as u8,
+        saw_stack as u8,
+        saw_sentinel as u8,
+        saw_pass as u8,
+        code_ok as u8
+    ));
+
+    saw_init && saw_bp && saw_stop && saw_stack && saw_sentinel && saw_pass && code_ok
+}
+
 // killgrp + reap the parking target (its loop is unbounded).
 fn reap_child(kid: &mut Child) {
     let _ = kid.kill();
@@ -342,7 +441,7 @@ fn reap_child(kid: &mut Child) {
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
-    t_putstr("ambush-probe: starting (8c-1 Ambush E2E: version smoke + attach)\n");
+    t_putstr("ambush-probe: starting (Ambush E2E: A version + B attach + C launch + D dap)\n");
     match version_smoke() {
         Ok(()) => {
             t_putstr("ambush-probe: stage A PASS (ambush runs; version banner ok)\n");
@@ -374,9 +473,23 @@ pub extern "C" fn rs_main() -> i64 {
         );
         unsafe { t_exits(1) }
     }
+    // Stage D: the 8c-4b in-process DAP round-trip (boot-fatal). A legitimate SKIP
+    // (fork absent) returns true; a broken round-trip (a step's marker missing, or
+    // a non-zero exit) returns false.
+    if !dap_e2e() {
+        t_putstr(
+            "ambush-probe: stage D FAIL -- dap-selftest ran but the DAP round-trip \
+             markers (initialized / bp set / stopped at breakpoint / parkLoop stack \
+             frame / Sentinel via evaluate / PASS + exit 0) are missing (a DAP-layer \
+             or backend-integration regression)\n",
+        );
+        unsafe { t_exits(1) }
+    }
     t_putstr(
         "ambush-probe: PASS (stage A: ambush runs; stage B: multi-thread Go attach + \
-         goroutines + bt + print; stage C: launch + HW breakpoint + continue + bt + print)\n",
+         goroutines + bt + print; stage C: launch + HW breakpoint + continue + bt + \
+         print; stage D: in-process DAP round-trip -- initialize/launch/breakpoint/\
+         continue/stackTrace/variables/evaluate)\n",
     );
     unsafe { t_exits(0) }
 }
