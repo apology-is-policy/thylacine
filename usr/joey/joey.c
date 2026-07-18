@@ -6156,6 +6156,17 @@ int main(void) {
                 t_putstr("joey: PTY-2a-2 PROBE ptsname qid decode FAILED\n");
                 return 1;
             }
+            // (e2b) PTY-3: the master reports S_IFCHR (the Linux pts posture).
+            //      The pouch isatty()/ptsname() discriminator is
+            //      S_ISCHR(st_mode) + the (e2) qid decode; the mode flows
+            //      VERBATIM ptyfs Rgetattr -> t_stat_from_p9_attr -> st_mode,
+            //      and this E2E assertion pins the whole pipeline (a kernel
+            //      mode-masking regression or a ptyfs posture revert both
+            //      break the pouch boundary-line silently otherwise).
+            if ((mst.mode & 0170000u) != 0020000u) {
+                t_putstr("joey: PTY-3 PROBE master S_IFCHR mode FAILED\n");
+                return 1;
+            }
             // (e3) the per-pts ctl (/dev/pts/0ctl -- the suffix-ctl idiom) +
             //      the ECHO-off no-leak proof WITHOUT a blocking read: type a
             //      line under -echo, then +echo and type another; the master's
@@ -6248,7 +6259,31 @@ int main(void) {
             t_putstr("joey: PTY-2e openpty E2E OK (live controlling session:"
                      " INT+WINCH+HUP delivered; parked master read)\n");
         }
-#endif /* THYLA_BOOT_PROBES (the PTY-2a-2 round-trip + the 2e openpty E2E) */
+
+        // PTY-3: the POUCH pty boundary-line (0021-pouch-pty). Spawn the
+        // pouch prover /bin/pouch-hello-pty (built against the patched musl).
+        // It drives the STANDARD POSIX pty surface -- posix_openpt/grantpt/
+        // unlockpt/ptsname_r (the qid decode) / isatty (S_IFCHR) / tcgetattr
+        // cooked-default / cfmakeraw+tcsetattr readback / TIOC[GS]WINSZ /
+        // setsid+TIOCSCTTY+tc[gs]etpgrp (the kernel 89/95/96/97 dance) / a
+        // live cooked ^C -> SIGINT handler (the 0x03 consumed, never a slave
+        // byte) / live WINCH + HUP handlers / the receive-only EPERM gate on
+        // kill/raise of a tty signum / forkpty honest-fail -- entirely
+        // through unpatched-musl wrappers over the tty ioctl dispatcher.
+        // The first POSIX openpty() program Thylacine runs. Boot-fatal.
+        {
+            const char pp3_name[]   = "/bin/pouch-hello-pty";
+            const char pp3_expect[] = "pouch-hello-pty: exit 0";
+            if (pouch_smoke_one(pp3_name, sizeof(pp3_name) - 1,
+                                pp3_expect, sizeof(pp3_expect) - 1) != 0) {
+                t_putstr("joey: PTY-3 PROBE pouch-hello-pty FAILED\n");
+                return 1;
+            }
+            t_putstr("joey: PTY-3 PROBE OK (pouch pty boundary-line: openpt/"
+                     "ptsname/isatty/termios/winsize/session/ISIG/HUP/EPERM-"
+                     "receive-only via the tty ioctl dispatcher)\n");
+        }
+#endif /* THYLA_BOOT_PROBES (the PTY-2a-2 round-trip + the 2e openpty E2E + the PTY-3 pouch probe) */
     }
 
     // (2) Signal boot-complete. All boot-test asserts have passed, so the kernel
