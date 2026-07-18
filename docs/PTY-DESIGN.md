@@ -384,6 +384,19 @@ queued-bytes drain-then-EOF both directions); the boot probe drives
 queued-line drain-then-EOF live. The live HUP *delivery* (a controlling
 session observing `tty:hup`) is the 2e E2E.
 
+*As-built (PTY-2e — the arc close)*: the `/bin/pty-probe` openpty E2E — a
+two-role native prover (the emulator mints + ptsname-decodes + spawns itself
+as a session-leader child: `t_setsid` → slave open → `t_tty_acquire` → notes
+fd first [self-managing]) proving the §9 E2E bar live: the parked deferred
+master read (the readiness read parks until the child's slave opens — which
+caught the **`slave_opened_once` latch fix** before ever running: a master
+read before ANY slave open must PARK, not spuriously EOF, the Linux
+master-blocks semantic), Ctrl-C → "interrupt" on the fg session's notes fd,
+winsize → `tty:winch`, master close → `tty:hup`. I-20 takes its **enforced**
+§28 number (ARCH §28 + the §25.4 "ptyfs" prosecution row); the as-built
+server reference is `docs/reference/136-ptyfs.md`; the `pty.tla` data-path
+action map is as-built in `specs/SPEC-TO-CODE.md`.
+
 - **`/dev/ptmx` open → mint pts N** (the netd clone idiom): allocate the pts
   slot, its M2S + S2M rings, its per-pts `Ldisc` (the de-globalized LS-8 cooking
   + a per-pts `termios` word, `CONS_ICANON`-default), its winsize, and return the
