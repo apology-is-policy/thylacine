@@ -157,6 +157,7 @@ const P9_VERSION_9P2000_L: &[u8] = b"9P2000.L";
 
 const S_IFDIR: u32 = 0o040000;
 const S_IFREG: u32 = 0o100000;
+const S_IFCHR: u32 = 0o020000;
 const DIR_MODE: u32 = S_IFDIR | 0o555;
 // The master + slave + ctl endpoints are read/write byte channels. HONEST
 // v1.0 POSTURE (PTY-2e audit F1/F5): the mode is 0666 SYSTEM-owned, so slave
@@ -170,6 +171,17 @@ const DIR_MODE: u32 = S_IFDIR | 0o555;
 // submounts or per-op principal forwarding since the shared kernel mount
 // arrives as SYSTEM).
 const FILE_RW: u32 = S_IFREG | 0o666;
+// PTY-3: ptmx + master + slave report S_IFCHR (the Linux pts posture -- a pts
+// node IS a character device). This is the pouch isatty()/ptsname()
+// discriminator: t_stat.mode flows VERBATIM ptyfs Rgetattr -> kernel
+// t_stat_from_p9_attr -> pouch st_mode, so S_ISCHR(st_mode) + the PTS_FLAG qid
+// decode identifies a pts endpoint soundly. Load-bearing against qid-shape
+// collisions: netd's /net qids also use bit 40 (CONN_FLAG) but netd reports
+// S_IFREG, so a socket fd can never pass the pouch is-a-tty check. The ctl
+// file stays S_IFREG (a control file, not a terminal -- isatty(ctl) is false).
+// The S_IFMT bits sit above the 9 rwx bits, so the kernel dev9p perm_check /
+// X-search (which mask the low 9) are unaffected.
+const CHR_RW: u32 = S_IFCHR | 0o666;
 
 const P9_GETATTR_SIZE: u64 = 0x200;
 
@@ -1492,8 +1504,10 @@ impl Conn {
         let f = self.fids[i].unwrap();
         let (mode, nlink) = if ptys.is_dir(f.path) {
             (DIR_MODE, 2u64)
+        } else if f.path == P_PTMX || is_endpoint_path(f.path) {
+            (CHR_RW, 1u64) // ptmx + master + slave: char devices (PTY-3)
         } else {
-            (FILE_RW, 1u64) // ptmx + master + slave are all rw byte channels
+            (FILE_RW, 1u64) // the per-pts ctl: a plain control file
         };
         // The security trio (mode/uid/gid) MUST be filled: the kernel's dev9p
         // per-component X-search reads them; an unfilled trio fails closed and the
