@@ -38,8 +38,22 @@ hardware/external dependency, so failure to come up is always a defect.
 `t_stat.qid_path` carries the 9P qid verbatim, so
 `ptsname(master_fd) = (fstat(mfd).qid_path >> 8) & 0xffffff` (guarded on
 `PTS_FLAG`) — no extra file or ioctl; the PTY-3 pouch `ptsname()` implements
-exactly this decode. The POSIX `/dev/ptmx` alias is a PTY-3 concern
-(symlink/file-mount); the clone lives at `/dev/pts/ptmx` meanwhile.
+exactly this decode (via its `TIOCGPTN` dispatcher arm). The POSIX
+`/dev/ptmx` alias resolved at PTY-3 as a **pouch path redirect** (musl's
+`posix_openpt`/`openpty` open `/dev/pts/ptmx` — the devpts-NATIVE node
+Linux also has; a real `/dev/ptmx` symlink stays G11-blocked pre-symlinks).
+
+**Getattr mode posture (PTY-3)**: ptmx + master + slave report
+`S_IFCHR|0666` (`CHR_RW` — a pts node IS a character device, the Linux
+model); the per-pts ctl stays `S_IFREG|0666` (a control file, not a
+terminal). The mode flows VERBATIM through the kernel
+(`t_stat_from_p9_attr` passes `attr->mode` when the valid bit is set) to
+the pouch `st_mode`, making `S_ISCHR` + the qid decode the pouch
+is-a-tty discriminator — load-bearing against qid-shape collisions
+(netd's `/net` qids also use bit 40 but report `S_IFREG`). The `S_IFMT`
+bits sit above the 9 rwx bits, so the kernel dev9p perm_check/X-search
+are unaffected. Pinned end-to-end by the joey (e2b) probe leg (a kernel
+mode-masking regression or a posture revert both fail the boot).
 
 ## Data path + the line discipline (PTY-2b)
 

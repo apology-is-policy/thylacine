@@ -490,6 +490,33 @@ The POSIX porters' surface (ABI names stay standard — `isatty`, `/dev/ptmx`,
 Covers, when they arrive via Pouch: bash job control, tmux/screen, ssh
 (client + the sshd pty side), vim/less/`script`, any `isatty()`-sniffer.
 
+**As-built (PTY-3, `0021-pouch-pty.patch`; the full reference is
+`docs/reference/78-pouch.md` "The pty boundary-line")**: the whole
+surface landed as ONE pouch patch + one ptyfs posture change
+(`S_IFCHR` on ptmx/master/slave — the pouch is-a-tty discriminator) —
+the kernel byte-unchanged. The centerpiece is the tty ioctl dispatcher
+(`src/misc/ioctl.c` rewritten): musl's pty surface is entirely
+ioctl-shaped, so one dispatcher makes the unpatched wrappers work —
+termios/winsize ↔ the pts ctl grammar; `TIOCSCTTY`/`TIOC[GS]PGRP` →
+the §4 kernel syscalls 95–97; `TIOCGPTN` = the fstat qid decode;
+`/dev/ptmx` → the `/dev/pts/ptmx` path redirect (the devpts-native
+node; a real symlink stays G11-blocked). The landing also moved the
+pouch `openat` onto the stalk resolver (the 0009 per-component loop
+opened intermediates with the final omode — structurally unable to
+open write-mode across a mount) and rerouted musl's direct
+`__syscall(SYS_ioctl,…)` bypasses (ptsname_r/isatty/tcdrain/
+tc[gs]etwinsize + the stdio line-buffering probes) through the
+dispatcher. The signal mappings landed receive-only (`kill`/`raise` of
+a tty signum = `EPERM` — the F4 gate surfaced POSIX-shaped); SIG_DFL
+`SIGTSTP` is the DOCUMENTED ignore-not-stop seam (pouch's
+always-registered bootstrap reads as "caught" to the kernel
+pre-delivery stop gate, and NDFLT terminates — the kernel
+NDFLT-stop-arm fix needs signoff; `83-pouch-signals.md` "Known
+caveats"). `forkpty` fails honestly (pouch has no `fork()` — a
+pouch-wide seam, not a pty gap). Proven by `/pouch-hello-pty` (the
+joey boot-fatal probe): the full mint→termios→session→live-ISIG/WINCH/
+HUP→EPERM ladder through unpatched-musl wrappers.
+
 ---
 
 ## 8. Invariants + audit-trigger surface
