@@ -128,6 +128,17 @@ Sixteen files:
       stream lifetime), errno-preserved so the common non-tty failure
       cannot clobber a successful stdio write's errno.
 
+Audit close (the PTY-3 focused Fable-5-max holotype + a concurrent
+self-audit, 0 P0 / 0 P1 / 0 P2 / 3 P3, NOT dirty; the closed list is
+memory/audit_pty3_closed_list.md): F1 put_dec scratch sized for any
+unsigned caller (was call-site-capped); F2 the pts_ctl_read single-read
+render dependency named explicitly (a load-bearing property, not a
+silent assumption); F3 (== the self-audit's SA-11, the two prosecutors
+converged) the three controlling-terminal arms gained the pts_resolve
+pre-gate so a non-tty fd answers the POSIX ENOTTY instead of the
+kernel's refusal errno -- the kernel stays authoritative for real pts
+fds.
+
 Deliberately NOT in this patch:
 
   - forkpty: structurally dead -- pouch has no fork()/clone()
@@ -361,8 +372,8 @@ diff a/src/internal/_pouch_signal.h b/src/internal/_pouch_signal.h
   * "SYS_NOTED arg semantics" docblock, R4-F6 audit close). */
 diff a/src/misc/ioctl.c b/src/misc/ioctl.c
 --- a/src/misc/ioctl.c	2026-07-18 08:02:22
-+++ b/src/misc/ioctl.c	2026-07-18 08:06:36
-@@ -1,128 +1,209 @@
++++ b/src/misc/ioctl.c	2026-07-18 08:47:58
+@@ -1,128 +1,217 @@
 +/* pouch — the tty ioctl dispatcher (PTY-3, the pouch pty boundary-line).
 + *
 + * Replaces musl's Linux ioctl.c (a raw SYS_ioctl passthrough plus a
@@ -543,6 +554,13 @@ diff a/src/misc/ioctl.c b/src/misc/ioctl.c
 +{
 +	int cfd = pts_ctl_open(n, O_RDONLY);
 +	if (cfd < 0) return -1;
++	/* ONE read fetches the WHOLE render (audit F2 -- a load-bearing
++	 * dependency, not an assumption to inherit silently): ctl_render
++	 * is bounded ~54 bytes, ptyfs serves the full render at offset 0
++	 * in one Rread, the negotiated msize payload is far larger, and a
++	 * ctl read never defers. A partial read would silently mis-parse
++	 * flags/winsize -- if any of those properties ever changes, this
++	 * must become a read-to-EOF loop. */
 +	char buf[96];
 +	long r = read(cfd, buf, sizeof(buf) - 1);
 +	close(cfd);
@@ -673,7 +691,8 @@ diff a/src/misc/ioctl.c b/src/misc/ioctl.c
 -	}
 -	if (dir==W) memcpy(old+old_offset, new+new_offset, old_size-old_offset);
 -	else memcpy(new+new_offset, old+old_offset, old_size-old_offset);
-+	char dec[8];
++	char dec[10];   /* a full unsigned is 10 digits (audit F1; the two
++	                 * live callers pass unsigned short, <= 5) */
 +	int dl = 0;
 +	if (v == 0) dec[dl++] = '0';
 +	else while (v) { dec[dl++] = (char)('0' + (v % 10)); v /= 10; }
@@ -682,7 +701,7 @@ diff a/src/misc/ioctl.c b/src/misc/ioctl.c
  }
  
  int ioctl(int fd, int req, ...)
-@@ -132,20 +213,164 @@
+@@ -132,20 +221,171 @@
  	va_start(ap, req);
  	arg = va_arg(ap, void *);
  	va_end(ap);
@@ -814,11 +833,17 @@ diff a/src/misc/ioctl.c b/src/misc/ioctl.c
 +	case TIOCSCTTY:
 +		/* Controlling-terminal acquisition is a KERNEL syscall keyed
 +		 * on the caller's own slave fd (PTY-1d; the kernel validates
-+		 * fd-is-a-slave-binding + session-leader + not-stolen). */
++		 * fd-is-a-slave-binding + session-leader + not-stolen). The
++		 * pts_resolve pre-gate (audit F3) exists ONLY for POSIX errno
++		 * fidelity -- a non-tty fd answers ENOTTY here instead of the
++		 * kernel's EINVAL/EACCES-shaped refusal; the kernel's own
++		 * validation remains the authority for real pts fds. */
++		if (pts_resolve(fd, &n, &fk) != 0) { errno = ENOTTY; return -1; }
 +		return __syscall_ret(__syscall(SYS_tty_acquire, fd));
 +	case TIOCGPGRP: {
 +		int *out = arg;
 +		if (!out) { errno = EINVAL; return -1; }
++		if (pts_resolve(fd, &n, &fk) != 0) { errno = ENOTTY; return -1; }
 +		long r = __syscall(SYS_tty_get_fg, fd);
 +		if (r < 0) return __syscall_ret(r);
 +		/* 0 = no foreground group seated yet (kernel contract). */
@@ -828,6 +853,7 @@ diff a/src/misc/ioctl.c b/src/misc/ioctl.c
 +	case TIOCSPGRP: {
 +		const int *pg = arg;
 +		if (!pg) { errno = EINVAL; return -1; }
++		if (pts_resolve(fd, &n, &fk) != 0) { errno = ENOTTY; return -1; }
 +		return __syscall_ret(__syscall(SYS_tty_set_fg, fd, *pg));
 +	}
 +	case TCSBRK:

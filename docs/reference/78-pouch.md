@@ -149,7 +149,7 @@ Classes:
 | `search/` (8) | UPPER | `hsearch` / `tsearch` / `lfind` | — |
 | `fenv/` (18) | UPPER | floating-point environment (aarch64 asm) | — |
 | `setjmp/` (2) | UPPER | `setjmp` / `longjmp` (aarch64 asm) | — |
-| `stdio/` (116) | MIXED | FILE buffering + `printf`/`scanf` upper; the backend ops (`__stdio_read`/`__stdio_write`, `fopen`→`open`) reach the seam | 4 |
+| `stdio/` (116) | MIXED | FILE buffering + `printf`/`scanf` upper; the backend ops (`__stdio_read`/`__stdio_write`, `fopen`→`open`, the `__fdopen`/`__stdout_write` line-buffering tty probes — 0021) reach the seam | 4 |
 | `malloc/` (18) | MIXED | the `mallocng` allocator — logic portable; rests on the anonymous-memory backend | 7b |
 | `time/` (39) | MIXED | `gmtime`/`mktime`/`strftime` upper; `clock_gettime`/`nanosleep` lower | 4 |
 | `locale/` (26) | MIXED | C locale is upper; locale-file loading is lower (v1.0 = `C` locale only) | 4 |
@@ -176,7 +176,7 @@ Classes:
 | `aio/` (3) | LOWER | POSIX async I/O — **deferred** (`ENOSYS`) | — |
 | `ipc/` (13) | LOWER | System V IPC — **deferred** (`ENOSYS`) | — |
 | `mq/` (10) | LOWER | POSIX message queues — **deferred** | — |
-| `termios/` (12) | LOWER | terminal I/O — **deferred** to Phase 7 (Utopia; PTYs) | — |
+| `termios/` (12) | LOWER | terminal I/O — delivered at PTY-3 via the tty ioctl dispatcher (`tcgetattr`/`tcsetattr` are unpatched ioctl wrappers; `tcdrain`/`tc[gs]etwinsize` rerouted) | 0021 |
 | `ldso/` (10) | LOWER | dynamic-linker support — static-only; `dlopen`→`ENOSYS` stubs | 4 |
 | `linux/` (67) | LOWER | Linux-specific calls (`epoll`, `inotify`, `sendfile`, `prctl`) — mostly dropped / `ENOSYS` | 4+ |
 
@@ -1522,3 +1522,24 @@ handler fires; the `0x03` is consumed — the slave line reads `xy\n`,
 the echo carries no `^C`: SignalXorByte through the POSIX view) →
 live WINCH + HUP handlers → the EPERM receive-only gate → `forkpty`
 honest-fail → master close → slave EOF (drain-then-EOF).
+
+### Known caveats (PTY-3)
+
+- **`isatty(kernel-console fd) == 0`** (SA-37). devcons has no
+  `.stat_native` (the kernel SYS_FSTAT answers -1), so a pouch program
+  whose stdio is the kernel console — an interactive spawn from `ut`
+  pre-PTY — is not recognized as a tty: no line-buffering, no
+  interactive mode. The v1.0 posture: interactive ported programs run
+  under a pts (PTY-4's multiplexer) where the whole surface works; the
+  v1.x lift is a devcons `stat_native` + a cons arm in the dispatcher
+  (the LS-8 consctl grammar is the same five flags).
+- **The audit close** (the focused Fable-5-max holotype + a concurrent
+  self-audit; `memory/audit_pty3_closed_list.md`): 0 P0 / 0 P1 / 0 P2 /
+  3 P3, NOT dirty — F1 `put_dec` scratch widened, F2 the single-read
+  render dependency named, F3 (== the self-audit's SA-11; the two
+  prosecutors converged) the controlling-terminal arms gained the
+  `pts_resolve` ENOTTY pre-gate. All three fixed in-patch.
+- **Deferred with signoff** (kernel ABI-semantics changes, deliberately
+  not landed): the NDFLT-stop arm for `tty:susp` (makes SIG_DFL `^Z`
+  actually stop a pouch program — see `83-pouch-signals.md`), and the
+  `SYS_POSTNOTE` pgrp arm (`kill(-pgrp)`).
