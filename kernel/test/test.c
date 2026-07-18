@@ -199,6 +199,7 @@ void test_proc_wait_pid_for_wnohang_alive_then_reap(void);
 void test_proc_wait_pid_for_selects_target(void);
 void test_proc_wait_pid_for_pgrp_selectors(void);
 void test_proc_wait_pid_for_report_not_reap(void);
+void test_proc_wait_pid_syscall_untraced_flag(void);
 void test_proc_job_stop_owner_algebra(void);
 void test_proc_job_stop_park_report_cont_live(void);
 void test_proc_job_stop_orphan_rule(void);
@@ -1401,6 +1402,8 @@ struct test_case g_tests[] = {
                                        test_proc_wait_pid_for_pgrp_selectors, false, NULL },
     { "proc.wait_pid_for_report_not_reap",
                                        test_proc_wait_pid_for_report_not_reap, false, NULL },
+    { "proc.wait_pid_syscall_untraced_flag",
+                                       test_proc_wait_pid_syscall_untraced_flag, false, NULL },
     { "proc.job_stop_owner_algebra",   test_proc_job_stop_owner_algebra,   false, NULL },
     { "proc.job_stop_park_report_cont_live",
                                        test_proc_job_stop_park_report_cont_live, false, NULL },

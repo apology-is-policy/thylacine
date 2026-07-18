@@ -34,12 +34,14 @@
 
 #include "test.h"
 
+#include "../../arch/arm64/exception.h"  // PTY-4: struct exception_context + syscall_dispatch
 #include <thylacine/extinction.h>
 #include <thylacine/notes.h>      // PTY-1f: the tty:* note names + queue walk
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
 #include <thylacine/smp.h>
 #include <thylacine/spinlock.h>
+#include <thylacine/syscall.h>    // PTY-4: SYS_WAIT_PID + the wait flags
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
@@ -1271,6 +1273,52 @@ void test_proc_wait_pid_for_report_not_reap(void) {
     TEST_ASSERT(f2 > 0, "rfork failer 2");
     TEST_EXPECT_EQ(wait_pid_for(f2, 0, &st), f2, "reap the failer plainly");
     TEST_EXPECT_EQ(st, 1, "a plain wait keeps the raw exit status");
+}
+
+// PTY-4: SYS_WAIT_PID must ADMIT the WAIT_UNTRACED/WAIT_CONTINUED flags.
+// PTY-1e added them to the wait_pid_for CORE (exercised by the tests above,
+// which call the core directly) + the pgrp selectors -- but the SYSCALL
+// HANDLER's accepted-flag mask still rejected any bit outside WAIT_WNOHANG,
+// so a `waitpid(pid, WUNTRACED)` from EL0 returned a spurious -1 and the
+// whole job-control stop/continue-report path was unreachable from userspace
+// (the PTY-4 shell's fg wait). This drives syscall_dispatch (the EL0 entry
+// path the direct-core tests bypass) and fails on the pre-fix mask.
+void test_proc_wait_pid_syscall_untraced_flag(void) {
+    struct Proc *c = proc_alloc();
+    TEST_ASSERT(c != NULL, "proc_alloc");
+    proc_test_link(c);
+    int cpid = c->pid;
+    c->stop_report_pending = true;
+
+    // SYS_WAIT_PID(want_pid=cpid, flags=WAIT_UNTRACED, status_out=0). The
+    // handler admits the flag, runs the core, and REPORTS the stop latch
+    // (returns cpid, no reap). Pre-fix the flag mask rejected WAIT_UNTRACED
+    // -> the handler returned -1 before ever reaching the core.
+    struct exception_context ctx;
+    for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
+    ctx.regs[8] = SYS_WAIT_PID;
+    ctx.regs[0] = (u64)(s64)cpid;
+    ctx.regs[1] = (u64)WAIT_UNTRACED;
+    ctx.regs[2] = 0;               // status_out NULL: the handler skips the copy
+    syscall_dispatch(&ctx);
+    TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)cpid,
+        "SYS_WAIT_PID admits WAIT_UNTRACED + reports the stop latch (pre-fix: -1)");
+    TEST_ASSERT(c->state == PROC_STATE_ALIVE, "the report did not reap");
+    TEST_ASSERT(!c->stop_report_pending, "the report consumed the latch");
+
+    // A garbage flag bit is still rejected (the mask stayed tight).
+    c->stop_report_pending = true;
+    for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
+    ctx.regs[8] = SYS_WAIT_PID;
+    ctx.regs[0] = (u64)(s64)cpid;
+    ctx.regs[1] = 0x40u;           // outside {WNOHANG, UNTRACED, CONTINUED}
+    ctx.regs[2] = 0;
+    syscall_dispatch(&ctx);
+    TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)-1,
+        "an unknown flag bit is still rejected");
+
+    c->stop_report_pending = false;
+    legate_drop_linked(c);
 }
 
 // =============================================================================

@@ -6360,12 +6360,18 @@ static s64 sys_wait_pid_handler(u64 want_pid_u, u64 flags_u, u64 status_out_va) 
     struct Proc *p = t->proc;
     if (!p)                                            return -1;
 
-    int want_pid = (int)(s64)want_pid_u;   // -1 (any) or a specific pid
+    int want_pid = (int)(s64)want_pid_u;   // -1 (any), a pid, 0/-N (pgrp)
     // Reject unknown/garbage flag bits (the full x1, before narrowing) so the
     // flag space stays clean for future additions and a fat-fingered flags
     // value fails loudly rather than silently behaving as blocking. Matches
     // the unknown-bit-reject discipline of the spawn / wstat surfaces.
-    if (flags_u & ~(u64)WAIT_WNOHANG)                  return -1;
+    // PTY-1e added WAIT_UNTRACED/WAIT_CONTINUED to the wait_pid_for core + the
+    // pgrp selectors on want_pid; the accepted-flag mask MUST admit them or the
+    // job-control stop/continue reports are unreachable from EL0 (PTY-4: the
+    // shell's WAIT_UNTRACED fg wait returned a spurious -1 -- the whole
+    // ^Z-detects-a-stop path was closed at this gate).
+    if (flags_u & ~(u64)(WAIT_WNOHANG | WAIT_UNTRACED | WAIT_CONTINUED))
+                                                       return -1;
     int flags    = (int)flags_u;
 
     // Validate the destination buffer up-front (skipping if NULL) so a
