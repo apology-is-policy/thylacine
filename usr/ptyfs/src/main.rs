@@ -74,14 +74,24 @@ pub extern "C" fn rs_main() -> i64 {
             }
         }
 
-        // 2. Poll [listener] + the live connections.
+        // 2. Poll the live connections, AND the listener ONLY while there is
+        //    room to accept. A full table (MAX_CONNS held) with a pending 9th
+        //    connection would otherwise keep the listener perpetually readable
+        //    -- the accept is skipped, so t_poll returns every iteration and
+        //    the loop busy-spins at full CPU (PTY-2e audit F4). Dropping the
+        //    listener from the set while full parks the loop instead; the
+        //    pending client waits (bounded acceptance, not a spin).
         let nc = conns.len().min(server::MAX_CONNS);
+        let has_room = conns.len() < server::MAX_CONNS;
         let mut pollfds: Vec<TPollFd> = Vec::with_capacity(1 + nc);
-        pollfds.push(TPollFd {
-            fd: listener as i32,
-            events: T_POLLIN,
-            revents: 0,
-        });
+        if has_room {
+            pollfds.push(TPollFd {
+                fd: listener as i32,
+                events: T_POLLIN,
+                revents: 0,
+            });
+        }
+        let listener_slot = has_room as usize; // 1 if the listener is at [0], else 0
         for c in conns.iter().take(nc) {
             pollfds.push(TPollFd {
                 fd: c.handle() as i32,
@@ -95,8 +105,8 @@ pub extern "C" fn rs_main() -> i64 {
         }
 
         // 3. Accept a new connection (joey's /dev mount drives one; headroom for
-        //    a future direct open=connect consumer).
-        if pollfds[0].revents & T_POLLIN != 0 && conns.len() < server::MAX_CONNS {
+        //    a future direct open=connect consumer). Only reachable with room.
+        if has_room && pollfds[0].revents & T_POLLIN != 0 {
             let h = unsafe { t_srv_accept(listener) };
             if h >= 0 {
                 conns.push(server::Conn::new(h));
@@ -108,7 +118,7 @@ pub extern "C" fn rs_main() -> i64 {
         let mut i = nc;
         while i > 0 {
             i -= 1;
-            let pf = pollfds[1 + i];
+            let pf = pollfds[listener_slot + i];
             if pf.revents & (T_POLLIN | T_POLLHUP) != 0 && !conns[i].service(&mut ptys) {
                 conns[i].teardown(&mut ptys);
                 let _ = unsafe { t_close(conns[i].handle()) };

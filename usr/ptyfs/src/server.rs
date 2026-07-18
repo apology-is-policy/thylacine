@@ -101,9 +101,18 @@ const TIO_DEFAULT: u32 = TIO_ICANON | TIO_ECHO | TIO_ISIG | TIO_ICRNL | TIO_ONLC
 /// byte un-echoed (the cons contract); NL always flushes what is assembled.
 const LINE_MAX: usize = 256;
 
-/// Signal classes collected per master write ([u8] of T_TTY_SIG_*). Overflow
-/// drops -- note-bit delivery dedupes repeats of one class anyway.
-const SIGS_MAX: usize = 8;
+/// The cooked signal classes collected per master write, as a 3-bit SET
+/// (bit `class-1`: INT->b0, QUIT->b1, TSTP->b2). A set, not an array: it
+/// dedups repeats on collect (the kernel note-bit delivery dedups anyway)
+/// AND can never overflow -- so a distinct class is never lost behind a
+/// same-class run (PTY-2e audit F2). Raised in ascending class order.
+fn sig_class_bit(class: u64) -> u8 {
+    if class >= 1 && class <= 3 {
+        1u8 << (class - 1)
+    } else {
+        0
+    }
+}
 
 // The cooked control characters (the standard VINTR/VQUIT/VSUSP set -- the
 // kernel console cooks only Ctrl-C, a boot-console limit, not the pty contract;
@@ -149,9 +158,17 @@ const P9_VERSION_9P2000_L: &[u8] = b"9P2000.L";
 const S_IFDIR: u32 = 0o040000;
 const S_IFREG: u32 = 0o100000;
 const DIR_MODE: u32 = S_IFDIR | 0o555;
-// The master + slave endpoints are read/write byte channels (0o666, world-rw like
-// a Unix pts). The kernel's dev9p per-component X-search + the pts registry gate
-// authority; the file mode is the POSIX-shaped surface.
+// The master + slave + ctl endpoints are read/write byte channels. HONEST
+// v1.0 POSTURE (PTY-2e audit F1/F5): the mode is 0666 SYSTEM-owned, so slave
+// and ctl I/O is gated ONLY by this world-rw mode -- the kernel dev9p
+// perm_check passes any principal as "other" with rw. The pts registry gates
+// ONLY the controlling-terminal syscalls (SYS_TTY_ACQUIRE/SET_FG/CONT), NOT
+// slave/ctl open/read/write. So on the shared /dev/pts mount, any Proc that
+// can name a live pts can read/inject/re-termios it -- an I-1 gap that is
+// inert at single-session v1.0 but goes live under A-5b concurrent multi-user
+// (task #13: per-pts owner + 0600, the Unix pts model, needs per-session
+// submounts or per-op principal forwarding since the shared kernel mount
+// arrives as SYSTEM).
 const FILE_RW: u32 = S_IFREG | 0o666;
 
 const P9_GETATTR_SIZE: u64 = 0x200;
@@ -267,8 +284,9 @@ struct Pts {
     tio: u32,
     line: [u8; LINE_MAX],
     line_len: usize,
-    sigs: [u8; SIGS_MAX],
-    nsigs: usize,
+    /// The cooked signal classes the input cook collected, as a 3-bit set
+    /// (see `sig_class_bit`). Drained + raised by h_write's master arm.
+    sig_set: u8,
     /// Per-pts winsize (PTY-2c). 0x0 until the emulator sets it (the Linux
     /// fresh-pts posture; openpty sets it at once in practice).
     winsz_cols: u32,
@@ -302,8 +320,7 @@ impl Ptys {
             tio: TIO_DEFAULT,
             line: [0; LINE_MAX],
             line_len: 0,
-            sigs: [0; SIGS_MAX],
-            nsigs: 0,
+            sig_set: 0,
             winsz_cols: 0,
             winsz_rows: 0,
         });
@@ -451,10 +468,7 @@ impl Ptys {
                     _ => 0,
                 };
                 if class != 0 {
-                    if p.nsigs < SIGS_MAX {
-                        p.sigs[p.nsigs] = class as u8;
-                        p.nsigs += 1;
-                    }
+                    p.sig_set |= sig_class_bit(class); // dedup-on-collect; never overflows
                     consumed += 1;
                     continue;
                 }
@@ -522,19 +536,18 @@ impl Ptys {
         consumed
     }
 
-    /// Drain the signal classes the input cook collected. h_write raises them
-    /// via the pts-scoped SYS_TTY_SIGNAL AFTER the ring work (the syscall stays
-    /// out of the pure cook, so the selftest asserts classes directly -- its
-    /// local pts has no kernel entry to signal).
-    fn take_sigs(&mut self, n: u32) -> ([u8; SIGS_MAX], usize) {
+    /// Drain the collected signal-class SET (bits per `sig_class_bit`). h_write
+    /// raises the set members via the pts-scoped SYS_TTY_SIGNAL AFTER the ring
+    /// work (the syscall stays out of the pure cook, so the selftest asserts
+    /// the set directly -- its local pts has no kernel entry to signal).
+    fn take_sigs(&mut self, n: u32) -> u8 {
         match self.slot_mut(n) {
             Some(p) => {
-                let out = p.sigs;
-                let k = p.nsigs;
-                p.nsigs = 0;
-                (out, k)
+                let out = p.sig_set;
+                p.sig_set = 0;
+                out
             }
-            None => ([0; SIGS_MAX], 0),
+            None => 0,
         }
     }
 
@@ -687,6 +700,26 @@ impl Ptys {
                 Ptys::ring_drain(&mut p.s2m, buf, other)
             }
             None => RecvOutcome::Eof,
+        }
+    }
+
+    /// Peek whether a parked read on this endpoint would complete NOW (Data or
+    /// Eof) vs WouldBlock -- so poll_reads only allocates a drain buffer when
+    /// there is something to deliver (a long-parked read otherwise churns the
+    /// allocator every 1 s poll; PTY-2e audit note). A pure read mirror of the
+    /// master_read/slave_read ring + EOF logic (which stay authoritative for
+    /// the actual drain).
+    fn read_ready(&self, n: u32, master: bool) -> bool {
+        match self.slot(n) {
+            Some(p) => {
+                let (ring, other_open) = if master {
+                    (&p.s2m, if p.slave_opened_once { p.n_slave } else { 1 })
+                } else {
+                    (&p.m2s, p.n_master)
+                };
+                !ring.is_empty() || other_open == 0
+            }
+            None => true, // slot gone -> the drain returns Eof; deliver it
         }
     }
 
@@ -1378,16 +1411,19 @@ impl Conn {
         // a slave write runs the OUTPUT cook (ONLCR toward s2m).
         let pushed = if is_master_path(f.path) {
             let consumed = ptys.master_write(n, a.data);
-            // Raise the collected signal classes via the pts-scoped seam: the
+            // Raise the collected signal-class SET via the pts-scoped seam: the
             // KERNEL resolves pts -> ct_sid -> fg_pgid and routes -- ptyfs can
             // never name a process group (the I-1/I-22 bound). pts_id 0 = a
             // local/unregistered pts (the selftest) -- nothing to signal.
-            let (sigs, k) = ptys.take_sigs(n);
-            let pid = ptys.pts_id(n);
-            if pid > 0 {
-                for &s in sigs.iter().take(k) {
-                    unsafe {
-                        let _ = t_tty_signal(pid as u64, s as u64);
+            // Ascending class order (INT, QUIT, TSTP).
+            let sig_set = ptys.take_sigs(n);
+            let pts_id = ptys.pts_id(n);
+            if pts_id > 0 && sig_set != 0 {
+                for class in [T_TTY_SIG_INT, T_TTY_SIG_QUIT, T_TTY_SIG_TSTP] {
+                    if sig_set & sig_class_bit(class) != 0 {
+                        unsafe {
+                            let _ = t_tty_signal(pts_id as u64, class);
+                        }
                     }
                 }
             }
@@ -1516,6 +1552,10 @@ impl Conn {
         let mut i = 0;
         while i < self.pending_reads.len() {
             let pr = self.pending_reads[i];
+            if !ptys.read_ready(pr.slot_n, pr.master) {
+                i += 1;
+                continue; // still WouldBlock -- do not allocate a drain buffer
+            }
             let mut scratch = alloc::vec![0u8; pr.cap];
             let outcome = if pr.master {
                 ptys.master_read(pr.slot_n, &mut scratch[..pr.cap])
@@ -1640,8 +1680,7 @@ pub fn selftest() -> Result<(), &'static str> {
         RecvOutcome::Data(2) if buf[0] == CH_INTR && buf[1] == CH_CR => {}
         _ => return Err("raw-transparent-read"),
     }
-    let (_, k) = ptys.take_sigs(n);
-    if k != 0 {
+    if ptys.take_sigs(n) != 0 {
         return Err("raw-no-sigs");
     }
     match ptys.master_read(n, &mut buf) {
@@ -1711,16 +1750,14 @@ pub fn selftest() -> Result<(), &'static str> {
     }
 
     // (5) ISIG: the VINTR/VQUIT/VSUSP trio raises + CONSUMES -- never a byte
-    // toward the slave, never an echo (SignalXorByte).
+    // toward the slave, never an echo (SignalXorByte). The set holds all three.
     if ptys.master_write(n, &[CH_INTR, CH_QUIT, CH_SUSP]) != 3 {
         return Err("isig-write");
     }
-    let (sigs, k) = ptys.take_sigs(n);
-    if k != 3
-        || sigs[0] != T_TTY_SIG_INT as u8
-        || sigs[1] != T_TTY_SIG_QUIT as u8
-        || sigs[2] != T_TTY_SIG_TSTP as u8
-    {
+    let want = sig_class_bit(T_TTY_SIG_INT)
+        | sig_class_bit(T_TTY_SIG_QUIT)
+        | sig_class_bit(T_TTY_SIG_TSTP);
+    if ptys.take_sigs(n) != want {
         return Err("isig-classes");
     }
     match ptys.slave_read(n, &mut buf) {
@@ -1730,6 +1767,18 @@ pub fn selftest() -> Result<(), &'static str> {
     match ptys.master_read(n, &mut buf) {
         RecvOutcome::WouldBlock => {}
         _ => return Err("isig-not-echoed"),
+    }
+
+    // (5b) F2: a DISTINCT class overflowing behind a same-class run is NOT
+    // lost (the set dedups repeats + never overflows). 8x INT then 1x QUIT:
+    // the set carries BOTH.
+    let mut burst = alloc::vec![CH_INTR; 8];
+    burst.push(CH_QUIT);
+    if ptys.master_write(n, &burst) != 9 {
+        return Err("isig-overflow-write");
+    }
+    if ptys.take_sigs(n) != (sig_class_bit(T_TTY_SIG_INT) | sig_class_bit(T_TTY_SIG_QUIT)) {
+        return Err("isig-overflow-distinct-class-lost");
     }
 
     // (6) ECHO off: the typed line still cooks toward the slave; NOTHING --
@@ -1761,8 +1810,7 @@ pub fn selftest() -> Result<(), &'static str> {
         RecvOutcome::Data(1) if buf[0] == b'k' => {}
         _ => return Err("raw-isig-data"),
     }
-    let (sigs, k) = ptys.take_sigs(n);
-    if k != 1 || sigs[0] != T_TTY_SIG_INT as u8 {
+    if ptys.take_sigs(n) != sig_class_bit(T_TTY_SIG_INT) {
         return Err("raw-isig-class");
     }
 

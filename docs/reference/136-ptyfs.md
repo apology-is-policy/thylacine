@@ -126,12 +126,37 @@ fail-safe posture is a prosecuted property, not an accident.
 Single-threaded by construction: one Proc, one serve loop; every 9P frame
 across every session is processed sequentially, so the pts table needs no
 lock and the I-9 argument above holds. A future threading lift must revisit
-BOTH properties (the ARCH row records this). A buggy or hostile 9P client
-corrupts only its own connection's state — the kernel validates the syscall
-surface and ptyfs validates frames; the fid/refcount discipline
+BOTH properties (the ARCH row records this). A buggy or malformed 9P frame
+corrupts nothing outside its own connection — the kernel validates the
+syscall surface, ptyfs validates frames (every `unwrap`/index guarded;
+malformed → `Rlerror`, never a panic), and the fid/refcount discipline
 (refs-new-before-unref-old on rebind; the netd live-slot walk property: a
-stale/forged qid is unreachable) bounds cross-connection effects to the
-shared pts a client legitimately names.
+stale/forged qid is unreachable) is sound.
+
+## Access control (the honest v1.0 posture — a known gap)
+
+**The pts registry gates only the controlling-terminal syscalls**
+(`SYS_TTY_ACQUIRE`/`SET_FG`/`CONT`), NOT slave/ctl `open`/`read`/`write`. The
+*only* gate on slave and ctl I/O is the file mode — which is **0666
+SYSTEM-owned** (`FILE_RW`), so the kernel dev9p `perm_check` passes any
+principal as "other" with rw. The `Ptys` table is global across connections
+and `walk_child` resolves any live pts's `<n>`/`<n>ctl` for any connection.
+So on the shared `/dev/pts` mount, **any Proc that can name a live pts can
+read its input, inject output, flip its termios, or WINCH-spam its fg pgrp**
+— an **I-1 isolation gap**. It is inert at single-session v1.0 (one
+interactive console session) but goes live under A-5b concurrent multi-user;
+it is the same shared-mount world-reachability posture `/net` flows carry.
+
+The proper fix (task #13, pre-A-5b-multi-user) is the Unix pts model —
+per-pts owner + mode 0600/0620 so the kernel gate denies a non-owner — which
+needs either per-session `/dev/pts` submounts or per-op principal forwarding,
+because on the *shared* kernel dev9p mount every pts arrives on the one
+kernel-client connection whose peer principal is SYSTEM (ptyfs cannot see
+which user opened ptmx via SO_PEERCRED). It is a design fork for that chunk,
+not a cheap patch. ptyfs itself never names a process group — its sole
+signal authority is the pts-scoped `SYS_TTY_SIGNAL` (I-1/I-22, prosecuted at
+PTY-1); this gap is the DAC on the byte channels, orthogonal to the signal
+seam.
 
 ## Tests
 

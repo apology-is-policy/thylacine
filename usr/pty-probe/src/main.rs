@@ -155,14 +155,23 @@ fn emulator() -> i64 {
 }
 
 fn session(n_str: &str) -> i64 {
-    if unsafe { t_setsid() } < 0 {
-        t_putstr("pty-probe(session): setsid FAILED\n");
-        return 20;
-    }
+    // Open the slave FIRST, before any fallible step (PTY-2e audit F3): the
+    // emulator's readiness master-read parks until `slave_opened_once` latches
+    // (an open_inc(slave)), and only a slave that OPENED then closed delivers
+    // EOF. If the child died before opening the slave, that read would hang
+    // forever (never data, never EOF) -> a boot hang. Opening the slave up
+    // front means any later failure clunks it -> the emulator gets a clean EOF
+    // (#926 close-at-exit), never a hang. (setsid cannot fail here today --
+    // the child inherits joey's pgid, pid != pgid -- but the ordering is the
+    // regression guard.)
     let sfd = open_rdwr(&format!("/dev/pts/{}", n_str));
     if sfd < 0 {
         t_putstr("pty-probe(session): open(slave) FAILED\n");
         return 21;
+    }
+    if unsafe { t_setsid() } < 0 {
+        t_putstr("pty-probe(session): setsid FAILED\n");
+        return 20;
     }
     if unsafe { t_tty_acquire(sfd) } < 0 {
         t_putstr("pty-probe(session): tty_acquire FAILED\n");
