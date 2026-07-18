@@ -307,8 +307,17 @@ not a union over the occupied `/dev` -- is the realizable placement.
 *As-built (PTY-2a-1)*: the server + the two byte rings + the Plan 9 clone-mint +
 `SYS_PTY_REGISTER` + the deferred multi-waiter read + the in-server ring selftest
 are landed; joey spawns it with a bounded liveness connect that gates a silent
-selftest failure. The `/dev/pts` devdev child + a real master/slave round-trip probe
-are PTY-2a-2; the line discipline is PTY-2b.
+selftest failure.
+
+*As-built (PTY-2a-2)*: the `devdev` synthetic `pts` mount-stub child
+(`DEV_KIND_PTS`, an empty QTDIR — reference/109-devdev.md) + joey's
+`t_mount("/dev/pts", MREPL)` of the ptyfs devpts tree (fresh open=connect of
+`/srv/ptyfs`; boot-fatal on any failure, since ptyfs has no hardware/external
+dependency) + the boot-fatal master/slave round-trip probe — the FIRST real
+client: ptmx clone-mint (the kernel accepts the differing Rlopen qid),
+`SYS_PTY_REGISTER` MINT/SLAVE/FREE live, Treaddir over the mount finds the
+minted slave, both ring directions, master-close→slave-EOF. The line discipline
+is PTY-2b.
 
 - **`/dev/ptmx` open → mint pts N** (the netd clone idiom): allocate the pts
   slot, its M2S + S2M rings, its per-pts `Ldisc` (the de-globalized LS-8 cooking

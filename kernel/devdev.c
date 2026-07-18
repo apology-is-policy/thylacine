@@ -12,6 +12,9 @@
 //   /dev/urandom  — alias of random (POSIX compat; same handler)
 //   /dev/cons     — the console (delegates to the shared cons.c API)
 //   /dev/consctl  — console mode control (LS-8b termios; the five line flags)
+//   /dev/pts      — EMPTY synthetic mount-stub DIRECTORY (PTY-2a-2): joey
+//                   MREPL-mounts ptyfs's devpts tree over it (the devhw
+//                   /hw/pci precedent). Ungated visibility; no data node.
 //
 // dc='d'. The trivial leaves (null/zero/full/random/urandom) are world-rw and
 // UNGATED -- the same on every Unix. cons/consctl are the console: `devdev_open`
@@ -47,6 +50,7 @@ enum {
     DEV_KIND_URANDOM = 5,
     DEV_KIND_CONS    = 6,
     DEV_KIND_CONSCTL = 7,
+    DEV_KIND_PTS     = 8,   // the /dev/pts mount-stub DIRECTORY (not a leaf)
 };
 
 #define DEV_QID_ROOT_PATH  0ULL
@@ -148,6 +152,17 @@ static bool walk_one(u64 cur_path, const char *name, struct Qid *out_qid) {
     }
 
     if (cur_path == DEV_QID_ROOT_PATH) {
+        // The one DIRECTORY child: /dev/pts, the ptyfs mount stub (PTY-2a-2;
+        // the devhw /hw/pci synth-child precedent). EMPTY pre-mount -- no child
+        // resolves from it here; joey MREPL-mounts ptyfs's devpts tree over it,
+        // and post-mount the resolver crosses into ptyfs BEFORE asking devdev,
+        // so this qid serves only as the mount-point identity
+        // (dc='d', devno, DEV_KIND_PTS).
+        if (name_eq("pts", name)) {
+            out_qid->path = (u64)DEV_KIND_PTS;
+            out_qid->type = QTDIR;
+            return true;
+        }
         for (size_t i = 0; i < DEV_LEAF_COUNT; i++) {
             if (name_eq(g_dev_leaves[i].name, name)) {
                 out_qid->path = (u64)g_dev_leaves[i].kind;
@@ -158,7 +173,8 @@ static bool walk_one(u64 cur_path, const char *name, struct Qid *out_qid) {
         return false;
     }
 
-    // From a leaf qid: walk has no meaning (leaves are files).
+    // From a leaf qid: walk has no meaning (leaves are files). The pts dir also
+    // has no devdev children (empty by design -- ".." is handled above).
     return false;
 }
 

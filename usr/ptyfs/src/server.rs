@@ -824,7 +824,7 @@ impl Conn {
             self.fids[i] = Some(nf);
             p9::build_rlopen(&mut self.out_buf, tag, &q, 0)
         } else {
-            // A directory (P_ROOT / P_PTS) open, for Treaddir.
+            // A directory (P_ROOT) open, for Treaddir.
             let q = self.qid_of(ptys, f.path);
             let mut nf = f;
             nf.opened = true;
