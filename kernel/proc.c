@@ -2637,10 +2637,13 @@ int proc_stop_sleeper_park(struct Thread *t) {
 // flag under its wait_lock, and DETOURS to park on its own debug_rendez
 // (8c-2 stop-of-a-sleeper, DEBUG-FS-DESIGN 5c.2 -- the multi-thread-Go-target
 // fix: an idle futex-parked M never reaches the EL0-return tail on its own).
-// This is proc_group_terminate's death-wake cascade VERBATIM, but the woken
-// sleeper arms the sleep()-detour park instead of the die:
-// torpor_wake_all_for_proc for the futex (torpor) waiters, then the per-peer
-// wait_lock rendez wake for every other blocking sleep. The caller's RELEASE
+// This is proc_group_terminate's death-wake cascade's SHAPE, with ONE
+// deliberate difference (#19): the NON-COMPLETING torpor_stop_wake_all_for_proc
+// for the futex (torpor) waiters -- the death walk's completing wake fabricates
+// TORPOR_OK, which a SURVIVING stopped Proc observes at resume (a time::sleep
+// job "finishes" the instant fg resumes it); the stop wake preserves the wait
+// (the woken sleeper reparks + re-registers its original deadline). Then the
+// per-peer wait_lock rendez wake for every other blocking sleep, verbatim. The caller's RELEASE
 // store of its stop flag happens-before each wake AND before each peer's
 // wait_lock acquire here, so the woken sleeper's ACQUIRE-read of the flag
 // under its wait_lock observes the stop -- no stop-wake is lost between the

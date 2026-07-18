@@ -2450,6 +2450,13 @@ int wakeup(struct Rendez *r) {
     // the unlink is done: the on_cpu spin + ready() then run under
     // r->lock alone, off the global lock, so a wakeup racing a context
     // switch cannot stall every CPU's timerwait_tick.
+    //
+    // LOAD-BEARING (PTY-4e R2): the UNCONDITIONAL r->lock acquire — even on
+    // the no-waiter path — is the only ordering chain that delivers a torpor
+    // poster's `w->awoken = 1` (written before this call) to a STOP-PARKED
+    // waiter's resumed tsleep re-loop, whose cond read pairs with THIS
+    // release. A lockless `r->waiter == NULL` fast path here would sever
+    // that chain and reintroduce a lost-wake on the #19 preserved-wait path.
     irq_state_t s = spin_lock_irqsave(&g_timerwait.lock);
     spin_lock(&r->lock);
 

@@ -93,8 +93,21 @@ const SETTLE: Duration = Duration::from_millis(400);
 const WATCHDOG_SECS: u64 = 25;
 const WATCHDOG_STACK: u64 = 32 * 1024;
 
+/// R2-F3: the disarm. Set by run() the moment the ladder has PASSED, so a
+/// slow-but-passing run (the [PASS-print .. process-exit] tail racing the
+/// 25 s mark, or a dilated-host ladder) is never converted into a FAIL by
+/// the watchdog's exit_group beating the main thread's own exit.
+static WD_DISARM: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
 extern "C" fn watchdog_main(_arg: u64) {
     let _ = libthyla_rs::time::sleep(Duration::from_secs(WATCHDOG_SECS));
+    if WD_DISARM.load(core::sync::atomic::Ordering::Acquire) {
+        // The ladder passed while we slept: exit just this thread and let
+        // the main thread's exit carry the real status.
+        // SAFETY: `!`-returning SVC.
+        unsafe { libthyla_rs::t_thread_exit() }
+    }
     t_putstr("jc-probe: FAIL (watchdog -- a leg hung silently)\n");
     // SAFETY: `!`-returning SVC.
     unsafe { t_exit_group(3) }
@@ -398,6 +411,7 @@ fn run() -> i64 {
         return 11;
     }
 
+    WD_DISARM.store(true, core::sync::atomic::Ordering::Release);
     t_putstr("jc-probe: PASS (run/stop/jobs/fg-restop/bg/fg-int/exit over a hosted ut)\n");
     0
 }

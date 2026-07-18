@@ -1002,8 +1002,10 @@ void el0_return_die_check(void);
 //
 // proc_debug_stop_deliver: request every thread of `p` park at its next EL0-
 // return checkpoint. Sets p->debug_stop_req (RELEASE), then (8c-2) WAKES every
-// sleeping peer (torpor_wake_all_for_proc + the per-peer wait_lock rendez wake,
-// proc_group_terminate's cascade) so a thread blocked in an indefinite syscall
+// sleeping peer (the NON-COMPLETING torpor_stop_wake_all_for_proc [#19: the
+// death walk's completing wake fabricates TORPOR_OK, which a surviving stopped
+// Proc observes at resume; the stop wake preserves the wait] + the per-peer
+// wait_lock rendez wake) so a thread blocked in an indefinite syscall
 // sleep returns, re-observes the flag, and DETOURS to park on its debug_rendez
 // (proc_stop_sleeper_park), then smp_resched_others() so a peer RUNNING at
 // EL0 on another CPU traps to its tail (the periodic tick is the floor). A thread
