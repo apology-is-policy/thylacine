@@ -202,6 +202,8 @@ void test_proc_wait_pid_for_report_not_reap(void);
 void test_proc_wait_pid_syscall_untraced_flag(void);
 void test_proc_job_stop_owner_algebra(void);
 void test_proc_job_stop_park_report_cont_live(void);
+void test_proc_job_stop_recycle(void);
+void test_proc_job_stop_preserves_torpor_wait(void);
 void test_proc_job_stop_orphan_rule(void);
 void test_namespace_bind_smoke(void);
 void test_namespace_cycle_rejected(void);
@@ -1407,6 +1409,9 @@ struct test_case g_tests[] = {
     { "proc.job_stop_owner_algebra",   test_proc_job_stop_owner_algebra,   false, NULL },
     { "proc.job_stop_park_report_cont_live",
                                        test_proc_job_stop_park_report_cont_live, false, NULL },
+    { "proc.job_stop_recycle",         test_proc_job_stop_recycle,         false, NULL },
+    { "proc.job_stop_preserves_torpor_wait",
+                                       test_proc_job_stop_preserves_torpor_wait, false, NULL },
     { "proc.job_stop_orphan_rule",     test_proc_job_stop_orphan_rule,     false, NULL },
     { "resource.exempt_only_system",   test_resource_exempt_only_system,   false, NULL },
     { "resource.page_charge_caps",     test_resource_page_charge_caps,     false, NULL },

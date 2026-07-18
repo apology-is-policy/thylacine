@@ -737,10 +737,13 @@ fn exec_external_redirected(
                 drop(wr);
             }
             let pid = child.pid();
-            let statuses = if jc {
-                // PTY-4b: own group + the terminal + the stop-aware wait.
-                let pgid = jc_place_in_group(pid, 0);
-                run_foreground_jc(env, &[pid], pgid, render_argv_cmd(argv), false, None)
+            // PTY-4b: own group + the terminal + the stop-aware wait. A
+            // failed mint (pgid 0: the child zombied first -- PTY-4e F3)
+            // degrades to the non-jc wait rather than seating a memberless
+            // group as the terminal foreground.
+            let jc_pgid = if jc { jc_place_in_group(pid, 0) } else { 0 };
+            let statuses = if jc_pgid != 0 {
+                run_foreground_jc(env, &[pid], jc_pgid, render_argv_cmd(argv), false, None)
             } else {
                 // Interruptible foreground wait (U-7c-b): reap by pid while
                 // forwarding a Ctrl-C `interrupt` to the running child (see
@@ -1423,11 +1426,12 @@ fn exec_external(
             drop(child.stdout.take());
             drop(child.stderr.take());
             let pid = child.pid();
-            let statuses = if jc {
-                // PTY-4b: own group + the terminal + the stop-aware wait.
-                // The kernel routes `^C`/`^Z` to the job directly.
-                let pgid = jc_place_in_group(pid, 0);
-                run_foreground_jc(env, &[pid], pgid, render_argv_cmd(argv), false, None)
+            // PTY-4b: own group + the terminal + the stop-aware wait; the
+            // kernel routes `^C`/`^Z` to the job directly. A failed mint
+            // (pgid 0 -- PTY-4e F3) degrades to the non-jc wait.
+            let jc_pgid = if jc { jc_place_in_group(pid, 0) } else { 0 };
+            let statuses = if jc_pgid != 0 {
+                run_foreground_jc(env, &[pid], jc_pgid, render_argv_cmd(argv), false, None)
             } else {
                 // Interruptible foreground wait (U-7c-b): reap by pid while
                 // forwarding a Ctrl-C `interrupt` to the running child.
@@ -2409,16 +2413,32 @@ const STATUS_STOPPED: i32 = 148;
 
 /// Place freshly spawned `pid` into the job's process group. `job_pgid` 0
 /// mints a group from this pid (element 0); non-zero joins it. Returns the
-/// (possibly minted) group. Best-effort: a `setpgid` failure (the child
-/// already exited -> T_E_SRCH on a zombie) leaves the child in the shell's
-/// group -- the fg wait's by-pid straggler sweep still reaps it, and a
-/// zombie receives no signals, so nothing is lost.
+/// (possibly minted) group. Best-effort with an honest failure window
+/// (PTY-4e F3): a MINT failure (the child zombied in the spawn-return ->
+/// setpgid window) returns 0 -- the callers' `pgid != 0` gates then degrade
+/// that job to the non-jc interruptible wait (a zombie receives no signals,
+/// so nothing is lost THERE). A JOIN failure (the group never formed --
+/// its minter zombied first, so the kernel's ALIVE-member existence check
+/// refuses) RE-MINTS on this element, so a live pipeline sibling still gets
+/// a real group instead of running signal-dead in the shell's own group for
+/// its lifetime. The residual (re-mint also fails: this element zombied
+/// too) is again the harmless-zombie case. The structural close -- a
+/// birth-pgid spawn parameter, eliminating the window -- is a kernel-ABI
+/// v1.x seam.
 fn jc_place_in_group(pid: i32, job_pgid: u64) -> u64 {
     let want = if job_pgid == 0 { pid as u64 } else { job_pgid };
     // SAFETY: t_setpgid is the SYS_SETPGID SVC wrapper (scalar args).
-    // SAFETY: t_setpgid is the SYS_SETPGID SVC wrapper (scalar args).
-    let _ = unsafe { t_setpgid(pid as i64, want as i64) };
-    want
+    if unsafe { t_setpgid(pid as i64, want as i64) } == 0 {
+        return want;
+    }
+    if job_pgid != 0 {
+        // SAFETY: as above.
+        if unsafe { t_setpgid(pid as i64, pid as i64) } == 0 {
+            return pid as u64;
+        }
+        return job_pgid; // both dead-shaped: keep the group id for the wait
+    }
+    0
 }
 
 /// Render a single command's argv for the job table (space-joined).
@@ -2685,8 +2705,9 @@ pub fn wait_pids_interruptible(env: &mut Env, pids: &[i32]) -> Vec<i32> {
 /// Block on the shell's note fd until a note is ready or `FG_WAIT_BACKSTOP_MS`
 /// elapses. No-op (returns at once) if the queue is not open. A poll error
 /// (closed fd / kernel reject) falls through to another WNOHANG sweep -- never
-/// a hang, never a spin.
-fn poll_notes_once(env: &Env) {
+/// a hang, never a spin. pub(crate): the `wait` builtin's interruptible reap
+/// (builtin.rs) parks on the same edge.
+pub(crate) fn poll_notes_once(env: &Env) {
     let notes = match env.notes() {
         Some(n) => n,
         None => return,

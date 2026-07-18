@@ -417,3 +417,26 @@ void torpor_wake_all_for_proc(struct Proc *p) {
     }
     spin_unlock(&torpor_lock);
 }
+
+// The STOP cascade's non-completing wake (contract in torpor.h). Identical
+// walk + lock discipline to the death variant above -- the ONLY difference
+// is that `awoken` stays clear, so the woken thread's tsleep re-loop finds
+// torpor_cond_awoken false, takes the 8c-2 stop detour, and parks with the
+// wait preserved. wakeup() re-validates r->waiter under r->lock, so a waiter
+// already woken (or mid-transition) is a safe no-op; the stack waiter is
+// pinned by its bucket link (unlinked only after its own tsleep returns).
+// Same F2 hazard note as the death walk (torpor_lock held across wakeup's
+// on_cpu spin); the same v1.x per-bucket split applies uniformly.
+void torpor_stop_wake_all_for_proc(struct Proc *p) {
+    if (!p) return;
+    spin_lock(&torpor_lock);
+    for (u32 idx = 0; idx < TORPOR_HASH_BUCKETS; idx++) {
+        for (struct torpor_waiter *w = torpor_buckets[idx];
+             w != NULL; w = w->next) {
+            if (w->proc != p) continue;
+            if (w->awoken)    continue;
+            (void)wakeup(&w->rendez);
+        }
+    }
+    spin_unlock(&torpor_lock);
+}

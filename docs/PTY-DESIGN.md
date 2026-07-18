@@ -940,14 +940,38 @@ OK, 1163/1163): a clean fg pipeline under jc; `sleep` foregrounded + `^Z` ->
 resume -> a clean prompt exit; the shell reclaims the terminal + runs commands;
 `exit` -> the orphan-rule teardown + a clean reap.
 
-**Two follow-ups** (real, both need focused kernel work -- `docs/reference/136-ptyfs.md`
-"PTY-4 job-control gaps"): (1) **TTIN** foreground-read arbitration -- without
-it a stopped job blocked in a terminal read (`cat`) steals the shell's input
-off the shared pts slave, so interactive `cat`-under-`^Z` does not work; the fix
-is a `SYS_READ`-on-a-pts-slave pgrp gate. (2) **resume-then-re-stop** -- `fg`
-resumes a sleeper correctly, but a second `^Z` immediately after does not
-re-stop it (the `tty:susp` never reaches `proc_job_stop_one` post-resume); `bg`
-of a re-stopped job is untested. The E2E + LS-CI drive `sleep` (no terminal
-read) so they exercise the working cycle without either gap. **The PTY-4e
-focused audit + the SMP gate + the ARC close remain; the two follow-ups are
-scope the user should weigh (each is a new kernel mechanism).**
+**The resume-then-re-stop gap: ROOT-CAUSED + FIXED at PTY-4e (task #19).**
+The "second `^Z` after `fg` never re-stops" report was NOT a signal-delivery
+gap: the stop cascade (`proc_stop_wake_sleepers_locked`) reused the DEATH
+cascade's `torpor_wake_all_for_proc`, which fabricates a COMPLETED wait
+(`awoken = 1`) -- immaterial for a dying Proc (#811, the wake's original
+charter), but a job-stopped Proc SURVIVES: the fabricated `TORPOR_OK` rode
+back to EL0 at resume, so a torpor-timed sleep (`time::sleep` ->
+`/bin/sleep`) "finished" the instant `fg` resumed it; the job exited, `fg`
+returned Done + restored the terminal, and the second `^Z` -- correctly --
+found no foreground job (the KDBG chain: `set_fg(job)` -> `cont` -> instant
+`set_fg(own)` restore -> `tstp fg=own would=0`). The fix is two-layer:
+**(a) kernel** -- the stop cascade now calls the non-completing
+`torpor_stop_wake_all_for_proc` (wakes the rendez, leaves `awoken` clear),
+so the woken waiter's tsleep re-loop takes the 8c-2 stop detour, parks with
+the wait PRESERVED, and on resume re-registers with its original deadline
+(the parks-and-reparks contract made total over torpor -- the Linux
+SIGSTOP-over-`futex_wait` restart shape; a REAL wake landing during the
+park still delivers, since the waiter stays bucket-linked); **(b)
+userspace** -- `libthyla_rs::time::sleep` now honors the futex contract and
+re-sleeps the remainder on a spurious `Woken` (its "Woken is unreachable"
+comment was falsified by the proc-wide stop wake). Regressions:
+`proc.job_stop_preserves_torpor_wait` (stop -> parked, wait intact; cont ->
+re-sleeps, wait STILL intact -- the pre-fix code completes it right there;
+a real wake finishes it) + `proc.job_stop_recycle` (the proc-level
+stop/cont/stop cycle) + the jc-probe re-stop leg (`sleep 30`, `^Z`, `fg`,
+`^Z` -> `Stopped` AGAIN, `bg`, `fg` + `^C` -> post-resume interrupt).
+
+**One follow-up remains** (`docs/reference/136-ptyfs.md` "PTY-4 job-control
+gaps"): **TTIN** foreground-read arbitration -- without it a stopped job
+blocked in a terminal read (`cat`) steals the shell's input off the shared
+pts slave, so interactive `cat`-under-`^Z` does not work; the fix is a
+`SYS_READ`-on-a-pts-slave pgrp gate (task #18, a new kernel mechanism --
+scope the user should weigh). The E2E + LS-CI drive `sleep` (no terminal
+read), exercising the full stop / re-stop / bg / fg / interrupt cycle
+without depending on TTIN.

@@ -2656,7 +2656,17 @@ int proc_stop_sleeper_park(struct Thread *t) {
 // every online CPU), so a fan-out over N members issues it ONCE after the walk
 // (audit F2), not per-member.
 static void proc_stop_wake_sleepers_locked(struct Proc *p) {
-    torpor_wake_all_for_proc(p);
+    // PTY-4e (#19): the NON-COMPLETING torpor wake. The death cascade's
+    // torpor_wake_all_for_proc fabricates a completed wait (awoken=1) --
+    // immaterial for a dying Proc, but a STOPPED one SURVIVES: the fabricated
+    // TORPOR_OK rode back to EL0 at resume and made every torpor-timed wait
+    // (time::sleep -> /bin/sleep) "finish" instead of continuing -- the
+    // resumed job exited, fg returned Done, and a second ^Z found no job (the
+    // #19 hang). The non-completing wake leaves `awoken` clear, so the woken
+    // waiter's tsleep re-loop takes the 8c-2 stop detour and parks with the
+    // wait PRESERVED -- on resume it re-registers with its original deadline
+    // (parks-and-reparks; the Linux SIGSTOP-over-futex_wait restart shape).
+    torpor_stop_wake_all_for_proc(p);
     for (struct Thread *peer = p->threads; peer; peer = peer->next_in_proc) {
         irq_state_t ws = spin_lock_irqsave(&peer->wait_lock);
         struct Rendez *r = peer->rendez_blocked_on;

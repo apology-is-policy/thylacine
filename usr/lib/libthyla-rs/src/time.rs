@@ -34,6 +34,13 @@ use crate::{T_CLOCK_MONOTONIC, T_CLOCK_REALTIME, t_clock_gettime, t_clock_settim
 /// v1.x extension may add `sleep_until(deadline)` once a monotonic
 /// clock exists.
 ///
+/// Spurious wakes are part of the futex contract (PTY-4e #19: the
+/// job-stop cascade wakes every torpor waiter of a stopped Proc --
+/// pre-fix it even fabricated a completion, and a conformant caller
+/// must tolerate either), so a `Woken` re-sleeps the REMAINDER
+/// against an absolute monotonic deadline rather than returning
+/// early -- a `^Z`-stopped-then-resumed `sleep 30` keeps sleeping.
+///
 /// Errors:
 ///   - `Error::Io`: defense-in-depth on a kernel return that's
 ///     neither 0 nor -ETIMEDOUT. Unreachable in practice.
@@ -41,27 +48,28 @@ pub fn sleep(dur: Duration) -> Result<()> {
     if dur.is_zero() {
         return Ok(());
     }
+    let start = Instant::now();
     // Stack-local sentinel. We initialize to 0 and pass expected = 0,
     // so the kernel's "value matches => sleep" path is taken. Nobody
-    // else can address this stack slot, so for a SURVIVING caller the
-    // wait can only end via timeout. (LS-5c: a terminate-disposition
-    // `interrupt` -- and group-exit death -- DOES end the wait early,
-    // but only on the way to terminating the whole Proc at the kernel
-    // return tail, so this function never observes it returning.)
+    // else can WAKE this stack slot by address -- but the proc-WIDE
+    // stop-cascade wake (and any future proc-wide waker) can still
+    // spuriously end the wait, hence the deadline loop.
     let sentinel = AtomicU32::new(0);
-    match torpor::wait(&sentinel, 0, Some(dur)) {
-        Ok(torpor::WaitResult::TimedOut) => Ok(()),
-        Ok(torpor::WaitResult::Woken) => {
-            // Unreachable: nobody else holds the sentinel's address.
-            // Defense-in-depth.
-            Ok(())
+    loop {
+        let remaining = dur.saturating_sub(start.elapsed());
+        if remaining.is_zero() {
+            return Ok(());
         }
-        Ok(torpor::WaitResult::ValueMismatch) => {
-            // Unreachable: we wrote 0 ourselves and passed expected = 0.
-            // Defense-in-depth.
-            Ok(())
+        match torpor::wait(&sentinel, 0, Some(remaining)) {
+            Ok(torpor::WaitResult::TimedOut) => return Ok(()),
+            Ok(torpor::WaitResult::Woken) => continue, // spurious: re-sleep the rest
+            Ok(torpor::WaitResult::ValueMismatch) => {
+                // Unreachable: we wrote 0 ourselves and passed expected = 0.
+                // Defense-in-depth -- treat as spurious and re-check the clock.
+                continue;
+            }
+            Err(e) => return Err(e),
         }
-        Err(e) => Err(e),
     }
 }
 

@@ -6288,18 +6288,19 @@ int main(void) {
         // REAL /bin/ut on a freshly-minted pts (the ptyhost shape) and
         // scripts the ladder against the master: the session dance + prompt;
         // a clean fg run under jc (own pgrp + terminal handoff, proven by the
-        // tr-uppercase trick); `sleep` foregrounded on the pts + ^Z ->
+        // tr-uppercase trick); `sleep 30` foregrounded on the pts + ^Z ->
         // tty:susp default-STOP -> the WAIT_UNTRACED stop-report -> the
         // `[1]+ Stopped` line ON THE PTS (the reroute proof); `jobs` shows it
-        // Stopped; `fg` -> SYS_TTY_CONT resume -> the job runs to a clean
-        // prompt exit (the resume proof: a resume that did nothing would hang
-        // fg forever); the shell reclaims the terminal + still runs commands;
-        // `exit` -> drain-then-EOF + a clean reap (incl. the orphan-rule
-        // teardown of the session). The first shell-under-job-control
-        // Thylacine runs. Boot-fatal. (Interactive `cat`-under-^Z + `fg`/`^Z`
-        // re-stop are the documented PTY-4 follow-ups -- they need the
-        // foreground-read TTIN gate + the resume-then-re-stop tty-signal path;
-        // see docs/reference/136-ptyfs.md.)
+        // Stopped; `fg` -> SYS_TTY_CONT resume -> a SECOND ^Z re-stops it
+        // (the PTY-4e re-stop leg: only a RUNNING job can stop, so the second
+        // Stopped is the resume proof AND the task-#19 regression); `bg`
+        // resumes it backgrounded; `fg` + ^C -> interrupt terminates it
+        // (post-resume signal delivery, the F4 leg); the shell reclaims the
+        // terminal + still runs pipelines; `exit` -> drain-then-EOF + a clean
+        // reap (incl. the orphan-rule teardown of the session). Boot-fatal;
+        // a silent hang is converted to a named FAIL by the probe's watchdog.
+        // (Interactive `cat`-under-^Z stays the documented TTIN follow-up --
+        // task #18; see docs/reference/136-ptyfs.md.)
         {
             const char jc_name[] = "/bin/jc-probe";
             long jc_pid = t_spawn(jc_name, sizeof(jc_name) - 1);
@@ -6314,7 +6315,7 @@ int main(void) {
                 return 1;
             }
             t_putstr("joey: PTY-4 job-control E2E OK (hosted ut: run/stop/"
-                     "jobs/fg-resume/exit over a live pts)\n");
+                     "jobs/fg-restop/bg/fg-int/exit over a live pts)\n");
         }
 #endif /* THYLA_BOOT_PROBES (the PTY-2a-2 round-trip + the 2e openpty E2E + the PTY-3 pouch probe + the PTY-4 jc E2E) */
     }

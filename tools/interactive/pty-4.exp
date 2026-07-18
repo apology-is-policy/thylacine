@@ -5,20 +5,24 @@
 # the SAME job-control ladder the boot-fatal /bin/jc-probe scripts, but driven
 # through the REAL console -- login -> `ptyhost` (the outer ut's LS-7 raw dance
 # flips the console to a byte pipe around it) -> the hosted inner `ut` runs its
-# session dance and takes job control -> stop / jobs / fg-resume -> `exit`
-# unwinds back to the outer prompt.
+# session dance and takes job control -> stop / jobs / fg / re-stop / bg /
+# fg + ^C -> `exit` unwinds back to the outer prompt.
 #
 # The stoppable job is `sleep` (NOT `cat`): a v1.0 pts has no foreground-read
 # arbitration (TTIN), so a stopped job holding an outstanding terminal read
 # would steal the shell's input; `sleep` holds no terminal read and exercises
 # the whole stop/report/resume machinery cleanly (interactive `cat`-under-^Z is
-# the documented TTIN follow-up).
+# the documented TTIN follow-up). The sleep is LONG (30 s, ended by ^C, never
+# by its deadline): a short sleep's wall clock keeps running WHILE stopped, so
+# both the stop window and the post-resume window would race the expiry (the
+# PTY-4e F2 right edge -- the artifact that originally masked the re-stop leg).
 #
 # Echo discipline: the outer console is RAW (-echo) under the dance and the
 # inner editor draws its own echo, so rendered text is always something a
-# process WROTE -- so the run/int legs match an UPPERCASE token emitted only by
-# a `| tr a-z A-Z` pipeline (never the lowercase editor echo), and the stop/
-# jobs legs match the `Stopped` line (only ut's job-control report emits it).
+# process WROTE -- so the run/health legs match an UPPERCASE token emitted only
+# by a `| tr a-z A-Z` pipeline (never the lowercase editor echo), and the stop
+# legs match the `Stopped` line (only ut's job-control report emits it; signal
+# chars are consumed by the ldisc, never echoed).
 
 source [file join [file dirname [info script]] lib.exp]
 
@@ -35,10 +39,12 @@ lc_expect "job control active" "the hosted ut's session dance (setsid+acquire+se
 sleep 1
 lc_run_expect "echo pty-inner | tr a-z A-Z" "PTY-INNER"
 
-# sleep + ^Z: the INNER pts cooks 0x1a (VSUSP) -> tty:susp -> the default STOP
-# -> the WAIT_UNTRACED report -> the inner ut takes the terminal back and
-# prints the Stopped line (emit_line -> the pts -> the host -> here).
-lc_send "sleep 1"
+# sleep 30 + ^Z: the INNER pts cooks 0x1a (VSUSP) -> tty:susp -> the default
+# STOP -> the WAIT_UNTRACED report -> the inner ut takes the terminal back and
+# prints the Stopped line (emit_line -> the pts -> the host -> here). The
+# settle covers spawn + pgrp + terminal handoff; the 30 s deadline can never
+# expire inside the ladder.
+lc_send "sleep 30"
 sleep 1
 send "\x1a"
 lc_expect "Stopped" "^Z stops the foreground sleep"
@@ -46,9 +52,27 @@ lc_expect "Stopped" "^Z stops the foreground sleep"
 lc_send "jobs"
 lc_expect "Stopped" "jobs lists the stopped sleep"
 
-# fg resumes (terminal + SYS_TTY_CONT); the resumed sleep runs to a clean exit
-# and fg returns. Prove the shell is back at a working prompt.
+# THE RE-STOP LEG (task #19): fg resumes (terminal + SYS_TTY_CONT; bi_fg
+# echoes the job's command line first), then a second ^Z must stop it AGAIN --
+# only a RUNNING job can stop, so the second Stopped is simultaneously the
+# resume proof and the re-stop regression.
 lc_send "fg"
+lc_expect "sleep 30" "fg echoes the resumed job"
+sleep 1
+send "\x1a"
+lc_expect "Stopped" "a second ^Z re-stops the resumed sleep"
+
+# bg resumes the re-stopped job in the background (no terminal handoff).
+lc_send "bg"
+lc_expect "&" "bg announces the backgrounded job"
+
+# fg the RUNNING job (harmless cont), then ^C -> interrupt -> sleep
+# default-terminates (LS-5) -> fg returns. Post-resume signal delivery
+# through the same pts fan as the susp.
+lc_send "fg"
+lc_expect "sleep 30" "fg echoes the running job"
+sleep 1
+send "\x03"
 sleep 1
 lc_run_expect "echo pty-fg | tr a-z A-Z" "PTY-FG"
 
@@ -59,4 +83,4 @@ lc_send "exit"
 sleep 1
 lc_run_expect "echo pty-outer | tr a-z A-Z" "PTY-OUTER"
 
-lc_pass "PTY-4: job control end-to-end over a hosted session (stop/jobs/fg-resume + a clean unwind)"
+lc_pass "PTY-4: job control end-to-end over a hosted session (stop/jobs/fg-restop/bg/fg-int + a clean unwind)"
