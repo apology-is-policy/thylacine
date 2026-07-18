@@ -555,11 +555,17 @@ struct Proc {
     // focus uniformly. CLEARED (RELEASE) to NULL by proc_debug_resume (the focus is
     // valid only for the current stop; a manual ctl `stop` follows a resume, so it
     // reads NULL -> head, preserving the attach/8a-2b single-thread behavior).
-    // READ (ACQUIRE) only while fully-stopped + under g_proc_table_lock
-    // (devproc_focus_thread validates the pointer is still a thread of `target`,
-    // else head -- no UAF: a debug-stopped thread is parked, never reaped, and the
-    // read is fully-stopped-gated; a set focus is always current_thread() of the
-    // debugged Proc). KP_ZERO inits it NULL; NOT propagated by rfork.
+    // READ (ACQUIRE) under g_proc_table_lock: devproc_focus_thread validates the
+    // pointer is still a thread of `target` (else head). NO UAF -- and the
+    // load-bearing reason is the GPTL PIN, not a stop gate (#95-audit F1): reap
+    // (wait_pid_for) does proc_unlink_child under g_proc_table_lock BEFORE the
+    // lock-free thread_free loop, and proc_for_each walks the kproc-rooted children
+    // tree, so a target a reader can still reach has not been unlinked -> none of
+    // its threads is freed; the in-list validation then rejects any stale/foreign
+    // pointer. The fully-stopped gate is an ADDITIONAL property of the mem / regs /
+    // kregs / step readers but NOT of the 8b settled kstack, so it is not the
+    // safety net -- the pin + validation are (do not delete the validation loop as
+    // "redundant"). KP_ZERO inits it NULL; NOT propagated by rfork.
     struct Thread     *debug_focus_thread;
 };
 

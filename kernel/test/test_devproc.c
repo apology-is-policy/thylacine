@@ -872,6 +872,37 @@ void test_devproc_debug_stop_start_resume(void) {
                    "ctl-fd close resumes the target (ReleaseSlot via the close hook)");
     TEST_EXPECT_EQ((void *)tgt->debug_owner, (void *)NULL, "close freed the slot");
 
+    // (F3, #95-audit) devproc_focus_thread selection: a matched in-list focus is
+    // returned; a foreign / NULL focus falls back to head. The deterministic twin
+    // of the /ambush-probe stage-C multi-M E2E (the kproc harness cannot reproduce a
+    // real off-head fault-stop). Revert-probe: a loop that returns head regardless
+    // of match fails the in-list-peer leg. devproc_focus_thread reads only pointer
+    // identity + ->next_in_proc, so two zero-init stack Threads suffice (unlinked
+    // before free so proc_free never touches them). Only ->next_in_proc + pointer
+    // identity are read, so set those explicitly (NOT `= {0}`: a large struct
+    // Thread zero-init would emit a memset the freestanding kernel does not link).
+    extern struct Thread *devproc_focus_thread(struct Proc *target);
+    struct Proc *ft = proc_alloc();
+    TEST_ASSERT(ft != NULL, "alloc focus-select target");
+    ft->state = PROC_STATE_ALIVE;
+    struct Thread fhth, fpth;
+    fhth.proc = ft;  fpth.proc = ft;
+    fhth.next_in_proc = &fpth;  fpth.next_in_proc = NULL;
+    struct Thread *ft_saved = ft->threads;   // NULL for a fresh proc_alloc
+    ft->threads = &fhth;                       // head = fhth, in-list peer = fpth
+    ft->debug_focus_thread = NULL;
+    TEST_ASSERT(devproc_focus_thread(ft) == &fhth, "focus NULL -> head");
+    ft->debug_focus_thread = &fpth;
+    TEST_ASSERT(devproc_focus_thread(ft) == &fpth, "in-list peer focus -> that thread (not head)");
+    ft->debug_focus_thread = &fhth;
+    TEST_ASSERT(devproc_focus_thread(ft) == &fhth, "in-list head focus -> head");
+    ft->debug_focus_thread = t;   // a foreign thread (t->proc == kproc/test-proc != ft)
+    TEST_ASSERT(devproc_focus_thread(ft) == &fhth, "foreign focus -> head fallback (the validation is load-bearing)");
+    ft->threads = ft_saved;        // unlink the stack Threads before free
+    ft->debug_focus_thread = NULL;
+    ft->state = PROC_STATE_ZOMBIE;
+    proc_free(ft);
+
     proc_test_unlink(tgt);
     tgt->state = PROC_STATE_ZOMBIE;
     proc_free(tgt);

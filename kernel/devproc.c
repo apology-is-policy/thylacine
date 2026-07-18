@@ -843,12 +843,19 @@ static long devproc_mem_rw(struct Spoor *c, void *buf, long n, s64 off, bool is_
 // bp/step/wp-firing M (a Go breakpoint fires on whichever M runs the migrated
 // goroutine, NOT the head TID==PID); a manual stop / attach leaves it NULL. The
 // pointer is validated against the CURRENT p->threads under g_proc_table_lock
-// (the caller holds it): a set focus is always current_thread() of `target` at a
-// fault-stop, and while debug-stopped no thread is reaped -- so a matched pointer
-// is a live thread, no UAF. Any mismatch (NULL / a stale pointer a resume failed
-// to clear / an odd set) falls back to the head thread. The frame's own gates
-// (EXITING / on_cpu / a valid trapframe) are re-checked by each caller downstream.
-static struct Thread *devproc_focus_thread(struct Proc *target) {
+// (every caller holds it): NO UAF, and the load-bearing reason is the GPTL PIN
+// (#95-audit F1), NOT a stop gate -- reap (wait_pid_for) does proc_unlink_child
+// under this lock BEFORE the lock-free thread_free loop, and proc_for_each walks
+// the kproc-rooted children tree, so a target a reader can still reach has not
+// been unlinked -> none of its threads is freed. A pointer that matches an
+// in-list thread is therefore a LIVE struct; this validation loop IS the safety
+// net (do NOT delete it as "redundant" -- the 8b settled kstack drops the
+// fully-stopped gate, so this loop is the only thing turning a stale/foreign focus
+// into a safe head fallback). Any mismatch (NULL / a stale-uncleared / a foreign
+// pointer) -> head; the frame's own gates (EXITING / on_cpu / a valid trapframe)
+// are re-checked by each caller downstream. NON-static so the selection is
+// unit-testable (#95-audit F3; test_devproc.c `devproc.focus_selection`).
+struct Thread *devproc_focus_thread(struct Proc *target) {
     struct Thread *focus = __atomic_load_n(&target->debug_focus_thread, __ATOMIC_ACQUIRE);
     if (focus)
         for (struct Thread *th = target->threads; th; th = th->next_in_proc)

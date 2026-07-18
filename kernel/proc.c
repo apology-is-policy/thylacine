@@ -2473,12 +2473,18 @@ bool proc_debug_fault_stop(struct Proc *p) {
     bool deliver = (p->debug_owner != NULL);
     if (deliver) {
         proc_debug_stop_deliver(p);   // caller (this frame) now holds g_proc_table_lock
-        // 8c-2 #95: the firing M (current_thread() -- this is the bp/step/wp EC
-        // handler's thread, a thread of p) becomes the debug-fs FOCUS, so
+        // 8c-2 #95: the firing M becomes the debug-fs FOCUS, so
         // /proc/<pid>/{regs,kregs,kstack} + step report the M at the stop, not the
-        // head. Every bp/step/wp fire routes through here, so this one store
-        // covers all three. Cleared by proc_debug_resume.
-        __atomic_store_n(&p->debug_focus_thread, current_thread(), __ATOMIC_RELEASE);
+        // head. Every bp/step/wp fire routes through here, so this one store covers
+        // all three; cleared by proc_debug_resume. The `ct->proc == p` guard pins
+        // "the focus is always a thread of p" AT THE STORE (#95-audit F2): the EC
+        // handlers already pass `p == current->proc`, but a foreign current_thread()
+        // -- e.g. a kproc-driven test fault_stop on a thread-less synthetic -- must
+        // never become p's focus, so the reader's in-list validation stays
+        // belt-and-suspenders, not the sole net.
+        struct Thread *ct = current_thread();
+        if (ct && ct->proc == p)
+            __atomic_store_n(&p->debug_focus_thread, ct, __ATOMIC_RELEASE);
     }
     spin_unlock_irqrestore(&g_proc_table_lock, s);
     return deliver;

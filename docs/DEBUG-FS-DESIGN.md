@@ -742,12 +742,18 @@ sites use it, so regs + kregs (`tpidr_el0` → Delve's goroutine recovery) + kst
 `current_thread()` == head, so 8a-2b + attach + the 8b settled-thread kstack are
 byte-behaviour-unchanged.
 
-**Soundness.** No UAF: a debug-stopped thread is parked, never reaped, and the
-read is fully-stopped-gated (a kill makes `fully_stopped` false → the read is
-rejected before the frame deref); a set focus is always `current_thread()` of the
-debugged Proc; any stale/mismatched pointer falls back to head. The set
-(`fault_stop`, under the lock) / clear (`resume`, `__atomic`) / read (the 4
-walk_cbs, under the lock) are consistent. **No new §28 invariant** — I-39 holds
+**Soundness.** No UAF — the load-bearing reason is the **`g_proc_table_lock`
+pin**, not the fully-stopped gate (#95-audit F1): reap does `proc_unlink_child`
+under GPTL *before* the lock-free `thread_free` loop, and `proc_for_each` walks
+the kproc-rooted children tree, so a still-reachable target has not been unlinked
+→ none of its threads is freed; `devproc_focus_thread`'s in-list validation then
+rejects any stale/foreign pointer (that validation is the safety net — the 8b
+settled kstack drops the fully-stopped gate, so it is not the net). The
+fully-stopped gate is an *additional* property of the mem/regs/kregs/step readers.
+A set focus is always `current_thread()` of the debugged Proc — guarded at the
+store (`ct->proc == p`, #95-audit F2); any stale/mismatched pointer falls back to
+head. The set (`fault_stop`, under the lock) / clear (`resume`, `__atomic`) / read
+(the 4 walk_cbs, under the lock) are consistent. **No new §28 invariant** — I-39 holds
 (it only refines *which* stopped thread's frame crosses, gated identically);
 `debug_stop.tla` + `debug_step.tla` are frame-reporting-agnostic and unchanged
 (re-verified GREEN). Validated by the focused 8c-2-#95 Fable holotype + the

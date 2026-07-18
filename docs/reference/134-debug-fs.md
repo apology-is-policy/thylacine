@@ -825,13 +825,24 @@ single-threaded native).
   `step` verb, and the 8b `kstack` all read it, so regs + kregs (`tpidr_el0` →
   Delve's goroutine recovery) + kstack + step report the firing M **coherently**.
 
-**No UAF**: a debug-stopped thread is parked, never reaped; the read is
-fully-stopped-gated (a kill makes `fully_stopped` false → the read is rejected
-before the frame deref); a set focus is always `current_thread()` of the debugged
-Proc; any mismatch (a stale pointer, a settling thread) falls back to head. **No
-new §28 invariant** — I-39 holds (the focus is gated identically; it only refines
-*which* stopped thread's frame crosses). `specs/debug_stop.tla` +
-`debug_step.tla` are frame-reporting-agnostic and unchanged (re-verified clean).
+**No UAF** — and the load-bearing reason is the **`g_proc_table_lock` pin**, NOT
+the fully-stopped gate (#95-audit F1): reap (`wait_pid_for`) does
+`proc_unlink_child` under GPTL *before* the lock-free `thread_free` loop, and
+`proc_for_each` walks the kproc-rooted children tree, so a target a reader can
+still reach has not been unlinked → none of its threads is freed;
+`devproc_focus_thread`'s in-list validation then rejects any stale/foreign pointer
+(**do not delete that validation loop as "redundant"** — the 8b settled kstack
+drops the fully-stopped gate, so the pin + validation are its only safety). The
+fully-stopped gate is an *additional* property of the mem/regs/kregs/step readers.
+A set focus is always `current_thread()` of the debugged Proc — guarded at the
+store (`ct->proc == p`, #95-audit F2); any mismatch (stale/foreign/settling) falls
+back to head. **No new §28 invariant** — I-39 holds (the focus is gated
+identically; it only refines *which* stopped thread's frame crosses).
+`specs/debug_stop.tla` + `debug_step.tla` are frame-reporting-agnostic and
+unchanged (re-verified clean). *Caveat (#95-audit F4, marginal): on a
+fault-stopped-then-killed multi-thread target, a settled `/proc/<pid>/kstack` read
+of the focus M returns empty (its EXITING guard) where pre-8c-2 it returned the
+head's stack — memory-safe, transient, dying-debugged-target-only.*
 
 This unblocks 8c-4: `ambush exec /ambush-child` sets a HW breakpoint at
 `main.parkLoop`, `continue`s into it, and `bt`/`print` inspect the bp-stopped
