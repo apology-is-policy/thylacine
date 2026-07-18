@@ -543,6 +543,24 @@ struct Proc {
     // (detach's count=0), guarded by the atomic bp_count. KP_ZERO inits it NULL;
     // NOT propagated by rfork (a spawned child is not being debugged).
     struct debug_hw   *debug_hw;
+
+    // 8c-2 #95 (I-39; DEBUG-FS-DESIGN section 5c): the debugger's FOCUS thread --
+    // the M whose frame /proc/<pid>/{regs,fpregs,kregs,kstack} + the step verb
+    // report. NULL = report the head thread (the manual-stop / attach default). A
+    // multi-M Go breakpoint fires on whichever M runs the migrated goroutine, NOT
+    // the head (TID==PID), so without this the debug-fs reports the head M's PC
+    // (not the bp) and the debugger cannot attribute the stop -> an auto-resume
+    // loop. SET (RELEASE) to current_thread() by proc_debug_fault_stop -- the ONE
+    // path every bp/step/wp EC fire routes through, so the firing M becomes the
+    // focus uniformly. CLEARED (RELEASE) to NULL by proc_debug_resume (the focus is
+    // valid only for the current stop; a manual ctl `stop` follows a resume, so it
+    // reads NULL -> head, preserving the attach/8a-2b single-thread behavior).
+    // READ (ACQUIRE) only while fully-stopped + under g_proc_table_lock
+    // (devproc_focus_thread validates the pointer is still a thread of `target`,
+    // else head -- no UAF: a debug-stopped thread is parked, never reaped, and the
+    // read is fully-stopped-gated; a set focus is always current_thread() of the
+    // debugged Proc). KP_ZERO inits it NULL; NOT propagated by rfork.
+    struct Thread     *debug_focus_thread;
 };
 
 #define PROC_FLAG_NODUMP            (1u << 0)
@@ -587,10 +605,14 @@ struct Proc {
 // thread, and an armed kproc would *_INTR every kernel-thread sleep).
 #define PROC_FLAG_INTR_TERMINATE_PENDING (1u << 7)
 
-_Static_assert(sizeof(struct Proc) == 328,
-               "struct Proc size pinned at 328 bytes (the 320 baseline + the 8a-2b "
-               "debug_hw pointer @320). Adding a field grows the SLUB cache; update "
-               "this assert deliberately so the change is intentional.");
+_Static_assert(sizeof(struct Proc) == 336,
+               "struct Proc size pinned at 336 bytes (the 328 baseline + the 8c-2 "
+               "#95 debug_focus_thread pointer @328). Adding a field grows the SLUB "
+               "cache; update this assert deliberately so the change is intentional.");
+_Static_assert(__builtin_offsetof(struct Proc, debug_focus_thread) == 328,
+               "8c-2 #95 debug_focus_thread (the debug-fs focus M) appends after "
+               "debug_hw (offset 328, the next 8-aligned slot past the pointer @320); "
+               "existing offsets stay stable (KP_ZERO inits it NULL = report head).");
 _Static_assert(__builtin_offsetof(struct Proc, debug_hw) == 320,
                "8a-2b debug_hw (the per-Proc HW-breakpoint table pointer) appends "
                "after debug_stop_req (offset 320, the next 8-aligned slot past the "

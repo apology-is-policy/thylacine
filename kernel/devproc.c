@@ -833,11 +833,31 @@ static long devproc_mem_rw(struct Spoor *c, void *buf, long n, s64 off, bool is_
 
 // =============================================================================
 // 8a-1b-gamma-2: /proc/<pid>/regs + fpregs -- the stopped target's saved EL0
-// register frames (I-39; DEBUG-FS 4.5). Same gate as mem. v1.0 reads the HEAD
-// thread (p->threads); a per-thread /proc/<pid>/thread/<tid>/ layer is v1.x.
+// register frames (I-39; DEBUG-FS 4.5). Same gate as mem. v1.0 reads the FOCUS
+// thread (the M at the stop; below) or, absent one, the HEAD thread (p->threads);
+// a per-thread /proc/<pid>/thread/<tid>/ layer is v1.x.
 // =============================================================================
 
-// Build the target head thread's regs (the EL0 trapframe at the kstack top) or
+// 8c-2 #95: the debug-fs FOCUS thread -- the M whose frame regs/kregs/kstack +
+// the step verb report. proc_debug_fault_stop sets p->debug_focus_thread to the
+// bp/step/wp-firing M (a Go breakpoint fires on whichever M runs the migrated
+// goroutine, NOT the head TID==PID); a manual stop / attach leaves it NULL. The
+// pointer is validated against the CURRENT p->threads under g_proc_table_lock
+// (the caller holds it): a set focus is always current_thread() of `target` at a
+// fault-stop, and while debug-stopped no thread is reaped -- so a matched pointer
+// is a live thread, no UAF. Any mismatch (NULL / a stale pointer a resume failed
+// to clear / an odd set) falls back to the head thread. The frame's own gates
+// (EXITING / on_cpu / a valid trapframe) are re-checked by each caller downstream.
+static struct Thread *devproc_focus_thread(struct Proc *target) {
+    struct Thread *focus = __atomic_load_n(&target->debug_focus_thread, __ATOMIC_ACQUIRE);
+    if (focus)
+        for (struct Thread *th = target->threads; th; th = th->next_in_proc)
+            if (th == focus)
+                return focus;
+    return target->threads;   // the head thread (the v1.0 manual-stop / attach default)
+}
+
+// Build the target focus thread's regs (the EL0 trapframe at the kstack top) or
 // fpregs (t->ctx's saved FP/SIMD) into `out`. Returns the struct size, or 0 on
 // failure (no head thread / no kstack). The trapframe is at kstack_base +
 // kstack_size - EXCEPTION_CTX_SIZE (the outermost EL0->EL1 KERNEL_ENTRY frame;
@@ -846,7 +866,7 @@ static long devproc_mem_rw(struct Spoor *c, void *buf, long n, s64 off, bool is_
 // g_proc_table_lock + has gated I-39 + fully-stopped (so on_cpu==false: the
 // frame + ctx are settled, not being written by a live cpu_switch_context).
 static long devproc_build_regs(struct Proc *target, u32 kind, u8 *out) {
-    struct Thread *th = target->threads;   // the head thread (v1.0)
+    struct Thread *th = devproc_focus_thread(target);   // 8c-2 #95: the M at the stop (else head)
     // 8a-1c holotype F1 (defense-in-depth): never read an EXITING head thread's
     // ctx/trapframe -- it is running its exit path (the final sched() writes
     // t->ctx). The fully_stopped gate already rejects a group-terminating target;
@@ -917,7 +937,7 @@ static long devproc_build_regs(struct Proc *target, u32 kind, u8 *out) {
 // privilege bits). Caller holds g_proc_table_lock + gated fully-stopped.
 static void devproc_apply_regs(struct Proc *target, u32 kind, const u8 *in) {
     if (kind == PQS_KREGS) return;   // 8a-1b-gamma-3: kregs is RO (no write path routes here; defensive)
-    struct Thread *th = target->threads;
+    struct Thread *th = devproc_focus_thread(target);   // 8c-2 #95: write the M at the stop (else head)
     if (!th || !th->kstack_base || th->kstack_size < EXCEPTION_CTX_SIZE) return;
 
     if (kind == PQS_REGS) {
@@ -1411,7 +1431,7 @@ static int devproc_step_walk_cb(struct Proc *target, void *arg) {
     if (!devproc_debug_authorized(s->caller, target)) { s->result = -1; return 1; } // I-39
     if (target->debug_owner != s->ctl)                { s->result = -1; return 1; } // slot owner
     if (!devproc_target_fully_stopped(target))        { s->result = -1; return 1; } // stopped-only
-    struct Thread *head = target->threads;
+    struct Thread *head = devproc_focus_thread(target);   // 8c-2 #95: the M at the stop (step targets it), else head
     if (!head)                                        { s->result = -1; return 1; } // no thread to step
 
     // The step-over VA: if the head's PC (its trapframe's ELR) sits at an armed
@@ -1538,7 +1558,7 @@ static int devproc_debug_wait_stopped(int pid, struct Spoor *ctl) {
 // (8b-1d holotype F1: without this, an unprivileged owner reads its own koff off a
 // settled head thread -- 8b widened the pre-existing 8a owner-attach-and-stop path.)
 static size_t devproc_format_kstack(struct Proc *target, char *buf, size_t cap, bool raw) {
-    struct Thread *th = target->threads;   // head thread (v1.0)
+    struct Thread *th = devproc_focus_thread(target);   // 8c-2 #95: the M at the stop (else head)
     // 8a-1c holotype F1 (defense-in-depth): never walk an EXITING head thread's
     // ctx/kstack -- it is executing its exit path on that stack.
     if (!th || th->state == THREAD_EXITING || !th->kstack_base) return 0;

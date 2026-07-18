@@ -2471,8 +2471,15 @@ bool proc_debug_fault_stop(struct Proc *p) {
     if (!p || p->magic != PROC_MAGIC) return false;
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
     bool deliver = (p->debug_owner != NULL);
-    if (deliver)
+    if (deliver) {
         proc_debug_stop_deliver(p);   // caller (this frame) now holds g_proc_table_lock
+        // 8c-2 #95: the firing M (current_thread() -- this is the bp/step/wp EC
+        // handler's thread, a thread of p) becomes the debug-fs FOCUS, so
+        // /proc/<pid>/{regs,kregs,kstack} + step report the M at the stop, not the
+        // head. Every bp/step/wp fire routes through here, so this one store
+        // covers all three. Cleared by proc_debug_resume.
+        __atomic_store_n(&p->debug_focus_thread, current_thread(), __ATOMIC_RELEASE);
+    }
     spin_unlock_irqrestore(&g_proc_table_lock, s);
     return deliver;
 }
@@ -2487,6 +2494,13 @@ void proc_debug_resume(struct Proc *p) {
     // (via the wait_lock release/acquire sync with this walk) and proceeds without
     // parking; a thread that registered BEFORE the walk is found + woken below.
     __atomic_store_n(&p->debug_stop_req, 0u, __ATOMIC_RELEASE);
+
+    // 8c-2 #95: the FOCUS is valid only for the stop we are leaving -- clear it so
+    // the next stop re-establishes it (a bp/step/wp fire via proc_debug_fault_stop,
+    // or a manual ctl `stop` which then reads NULL -> head). A resume implies the
+    // target runs, so no debug-fs reader (fully-stopped-gated) observes a stale
+    // focus after this.
+    __atomic_store_n(&p->debug_focus_thread, NULL, __ATOMIC_RELEASE);
 
     // Wake every thread parked on its OWN debug_rendez -- the #811 death-cascade
     // shape (walk p->threads, per-peer wait_lock -> read rendez_blocked_on ->

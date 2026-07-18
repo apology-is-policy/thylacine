@@ -325,6 +325,22 @@ goroutines
 bt
 print main.Sentinel
 EOF
+    # Go Stage 8c-4 (launch E2E): the Ambush init script /ambush-probe drives via
+    # `ambush exec /ambush-child --init /ambush-init-exec`. Ambush spawns the child
+    # (attach-first Launch), stops it before main.main, sets a HARDWARE breakpoint
+    # at main.parkLoop (I-12/I-36 route every bp to the kernel hwbreak path), then
+    # `continue` runs the target INTO the breakpoint (the whole-Proc stop). The
+    # inspect commands then run against the bp-stopped multi-M target; stdin EOF
+    # exits the REPL (killing the launched child). This is the 8c-2-fork
+    # HW-breakpoint-routing + the kernel #95 focus-thread proof: break + continue +
+    # bt/print at a real HW bp on a multi-M Go target.
+    cat > "$ramfs_src/ambush-init-exec" <<'EOF'
+break main.parkLoop
+continue
+goroutines
+bt
+print main.Sentinel
+EOF
     # U-6e-a: the `source` builtin's read fixture (/u-builtin-test sources
     # this and asserts the assignment + fn registration persist into the
     # caller's Env).

@@ -122,6 +122,15 @@ fn version_smoke() -> Result<(), &'static str> {
 // iteration loop. See docs/DELVE-PORT-DESIGN.md 17-18 + DEBUG-FS-DESIGN.md 5c.
 const ATTACH_ENABLED: bool = true;
 
+// Stage C (launch E2E) drives `ambush exec /ambush-child` -- Ambush SPAWNS the
+// child, stops it before main.main, sets a HARDWARE breakpoint at main.parkLoop,
+// `continue`s into it, then inspects. This is the 8c-4 launch + the fork's 8c-2
+// HW-breakpoint routing (DELVE-PORT-DESIGN section 6: every bp routes to the
+// kernel hwbreak path; I-12/I-36 forbid a software BRK into shared RO+X text) +
+// the kernel #95 focus-thread fix (the debug-fs reports the M that HIT the bp,
+// not the head -- a Go bp fires on the migrated-goroutine's M).
+const LAUNCH_ENABLED: bool = true;
+
 // --- Stage B: attach E2E (the 8c-2 multi-thread-stop proof) ---
 // Returns true on PASS or a legitimate SKIP (forks absent); false only when the
 // attach reached the target but the inspect markers are missing (a real
@@ -239,6 +248,92 @@ fn attach_e2e() -> bool {
     saw_goroutine && saw_bt && saw_sentinel
 }
 
+// --- Stage C: launch E2E (the 8c-4 + fork-8c-2 + kernel-#95 HW-breakpoint proof) ---
+// `ambush exec /ambush-child`: Ambush SPAWNS the child (attach-first Launch),
+// stops it before main.main, sets a HARDWARE breakpoint at main.parkLoop, then
+// `continue` runs the target INTO the breakpoint (a HW code bp fires with PC ==
+// the bp'd instruction, on whichever M runs the migrated goroutine -- kernel #95
+// focuses that M). The inspect commands run against the bp-stopped multi-M
+// target; stdin EOF exits the REPL (killing the launched child). This is the
+// first end-to-end exercise of break + continue + the step-over-breakpoint dance.
+// Returns true on PASS or a legitimate SKIP (forks absent); false only when
+// Ambush ran but the bp/inspect markers are missing (a real regression).
+fn launch_e2e() -> bool {
+    if !LAUNCH_ENABLED {
+        t_putstr("ambush-probe: stage C DISABLED (LAUNCH_ENABLED=false)\n");
+        return true;
+    }
+    let mut amb = match Command::new("/ambush")
+        .args([
+            "exec",
+            "/ambush-child",
+            "--init",
+            "/ambush-init-exec",
+            "--allow-non-terminal-interactive=true",
+        ])
+        .stdin(Stdio::Piped)
+        .stdout(Stdio::Piped)
+        .stderr(Stdio::Piped)
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => {
+            t_putstr("ambush-probe: stage C SKIP (ambush not baked for exec)\n");
+            return true;
+        }
+    };
+    // Close Ambush's stdin -> the REPL reads EOF after the init file -> exits +
+    // kills the launched child. Ambush exits status 1 on the EOF'd exit prompt (a
+    // cosmetic Delve artifact), so this gates on the MARKERS below, not the code.
+    let _ = amb.stdin.take();
+
+    // Bounded wait (~18s): launch does spawn + attach + stop + bp-arm + a
+    // `continue` that must reach main.parkLoop before the bp fires + re-stops.
+    let mut exited = false;
+    for _ in 0..180 {
+        match amb.try_wait() {
+            Ok(Some(s)) => {
+                t_putstr(&format!(
+                    "ambush-probe: stage C -- ambush exec exited status {}\n",
+                    s.raw()
+                ));
+                exited = true;
+                break;
+            }
+            Ok(None) => {
+                let _ = sleep(Duration::from_millis(100));
+            }
+            Err(_) => break,
+        }
+    }
+    if !exited {
+        t_putstr("ambush-probe: stage C -- ambush exec did not exit in ~18s; killing\n");
+        let _ = amb.kill();
+        let _ = amb.wait();
+    }
+
+    let out = drain(&mut amb.stdout);
+    let err = drain(&mut amb.stderr);
+    echo_block("ambush-probe: === ambush exec STDOUT ===\n", &out);
+    echo_block("ambush-probe: === ambush exec STDERR ===\n", &err);
+
+    // The HW-breakpoint proof: `break` set the bp (routed to the kernel hwbreak
+    // path -- a routing failure errors here, so the marker is missing), `continue`
+    // reached it, and `bt`/`print` inspected the bp-stopped target. A HW code bp
+    // fires with PC == parkLoop (ELR, not yet executed), so frame 0 of the bt IS
+    // main.parkLoop. SENTINEL is 0x0AABB00DCAFE0001 == 768901734683508737.
+    let saw_bp_set = contains(&out, b"Breakpoint 1");
+    let saw_bt = contains(&out, b"0  0x");
+    let saw_parkloop = contains(&out, b"parkLoop");
+    let saw_sentinel = contains(&out, b"768901734683508737");
+    t_putstr(&format!(
+        "ambush-probe: stage C markers -- bp_set={} bt={} parkloop={} sentinel={}\n",
+        saw_bp_set as u8, saw_bt as u8, saw_parkloop as u8, saw_sentinel as u8
+    ));
+
+    saw_bp_set && saw_bt && saw_parkloop && saw_sentinel
+}
+
 // killgrp + reap the parking target (its loop is unbounded).
 fn reap_child(kid: &mut Child) {
     let _ = kid.kill();
@@ -267,9 +362,21 @@ pub extern "C" fn rs_main() -> i64 {
         );
         unsafe { t_exits(1) }
     }
+    // Stage C: the 8c-4 launch + fork-8c-2 routing + kernel-#95 focus-thread proof
+    // (boot-fatal). A legitimate SKIP (forks absent) returns true; a broken
+    // break/continue (markers missing) returns false.
+    if !launch_e2e() {
+        t_putstr(
+            "ambush-probe: stage C FAIL -- ambush exec ran but the HW-breakpoint \
+             markers (Breakpoint set / parkLoop bt frame / Sentinel) are missing (a \
+             break/continue regression -- did the bp reach the kernel hwbreak path, \
+             and does the debug-fs focus the firing M? kernel #95)\n",
+        );
+        unsafe { t_exits(1) }
+    }
     t_putstr(
         "ambush-probe: PASS (stage A: ambush runs; stage B: multi-thread Go attach + \
-         goroutines + bt + print)\n",
+         goroutines + bt + print; stage C: launch + HW breakpoint + continue + bt + print)\n",
     );
     unsafe { t_exits(0) }
 }
