@@ -918,3 +918,36 @@ focused audit + the SMP gate close the arc (4e).
 
 Sub-chunks: **4a** this scripture; **4b** ut job control; **4c** the host;
 **4d** the probe + LS-CI; **4e** the audit + ARC close.
+
+### 14.5 As-built (PTY-4b/c/d, 2026-07-18)
+
+Landed on `pty-1`: `ut` job control (`libutopia` -- `JobControlState` on `Env`,
+the `Repl::init_pts_session` dance, per-job pgrp formation + the stop-aware
+`WAIT_UNTRACED` fg wait + `fg`/`bg` via `SYS_TTY_CONT` in `stmt.rs`/`builtin.rs`,
+the consctl->line-discipline-fd generalization, `Env::emit_line` routing shell
+output to the session terminal), the native session host `usr/ptyhost` (ptmx
+mint + qid ptsname + spawn-on-the-slave + the 2-thread blocking pump; registered
+in `is_raw_command`), the boot-fatal E2E `usr/jc-probe`, and the interactive
+`tools/interactive/pty-4.exp`. **Kernel: one PTY-1e bug fix** (`8f1cb8a2`) -- the
+`SYS_WAIT_PID` handler rejected `WAIT_UNTRACED`/`WAIT_CONTINUED` at its
+accepted-flag mask, so the job-control stop/continue reports were unreachable
+from EL0 (latent since PTY-1e; PTY-4 is the first consumer). Otherwise the
+kernel is byte-unchanged.
+
+**Proven end-to-end** (`jc-probe: PASS`, `joey: PTY-4 job-control E2E OK`, boot
+OK, 1163/1163): a clean fg pipeline under jc; `sleep` foregrounded + `^Z` ->
+`[1]+ Stopped` on the pts; `jobs` lists it Stopped; `fg` -> `SYS_TTY_CONT`
+resume -> a clean prompt exit; the shell reclaims the terminal + runs commands;
+`exit` -> the orphan-rule teardown + a clean reap.
+
+**Two follow-ups** (real, both need focused kernel work -- `docs/reference/136-ptyfs.md`
+"PTY-4 job-control gaps"): (1) **TTIN** foreground-read arbitration -- without
+it a stopped job blocked in a terminal read (`cat`) steals the shell's input
+off the shared pts slave, so interactive `cat`-under-`^Z` does not work; the fix
+is a `SYS_READ`-on-a-pts-slave pgrp gate. (2) **resume-then-re-stop** -- `fg`
+resumes a sleeper correctly, but a second `^Z` immediately after does not
+re-stop it (the `tty:susp` never reaches `proc_job_stop_one` post-resume); `bg`
+of a re-stopped job is untested. The E2E + LS-CI drive `sleep` (no terminal
+read) so they exercise the working cycle without either gap. **The PTY-4e
+focused audit + the SMP gate + the ARC close remain; the two follow-ups are
+scope the user should weigh (each is a new kernel mechanism).**

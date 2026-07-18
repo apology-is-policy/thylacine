@@ -635,6 +635,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "jc-probe"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
 name = "kaua"
 version = "0.1.0"
 dependencies = [
@@ -1081,6 +1088,13 @@ dependencies = [
 
 [[package]]
 name = "ptyfs"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
+name = "ptyhost"
 version = "0.1.0"
 dependencies = [
  "libthyla-rs",

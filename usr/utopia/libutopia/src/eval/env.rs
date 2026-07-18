@@ -68,6 +68,20 @@ use crate::parser::ast::{FnDecl, Statement};
 use super::jobs::JobTable;
 use super::value::Value;
 
+/// PTY-4b: the shell's job-control identity, established once by the
+/// session dance (`Repl::init_pts_session`) when fd 0 is a pts slave.
+/// Pure data -- the dance's syscalls live in the Repl; stmt/builtin read
+/// this to decide the pgrp/terminal arms.
+#[derive(Clone, Copy)]
+pub struct JobControlState {
+    /// The shell's own process group (== its pid after `setsid`). The
+    /// terminal is restored to this group after every foreground job.
+    pub own_pgid: u64,
+    /// The pts index `N` (from the fd-0 qid decode) -- diagnostic only;
+    /// every tty syscall goes through fd 0 itself.
+    pub pts_n: u32,
+}
+
 /// The evaluator's runtime state. One Env per shell process / per
 /// subshell (a subshell is implemented as a fork with a cloned Env).
 pub struct Env {
@@ -115,19 +129,32 @@ pub struct Env {
     /// / `spawn_pipeline_elements`. stdin stays Piped-drop regardless at
     /// LS-2 -- interactive child stdin is LS-5/LS-8.
     pub stdio_inherit: bool,
-    /// #94-B-b: the inherited `/dev/consctl` fd, if login forwarded one
-    /// (`--consctl-fd N`). A session `ut` -- not login -- owns the console line
-    /// discipline: `Repl::console_apply_default` establishes the prompt mode
-    /// through it, and LS-7's editor dance (set cooked/raw around a foreground
-    /// child) reads it here. `None` on a fd-less boot check / host test, where
-    /// every console-mode call is an inert no-op.
+    /// The LINE-DISCIPLINE ctl fd (#94-B-b, generalized at PTY-4b). On the
+    /// console this is login's forwarded `/dev/consctl` (`--consctl-fd N`);
+    /// hosted on a pts it is the pts's own `/dev/pts/<n>ctl` (opened by the
+    /// PTY-4b session dance). The two ctl surfaces speak ONE vocabulary (the
+    /// LS-8b consctl grammar == the PTY-2c pts-ctl grammar, by design), so
+    /// `Repl::console_apply_default` + LS-7's raw-mode dance work verbatim on
+    /// either -- the fd is the whole delta. `None` on a fd-less boot check /
+    /// host test, where every mode call is an inert no-op.
     ///
-    /// Held as a passive raw `i32`, NOT closed: login retains its own copy and
-    /// the kernel reaps `ut`'s handle table at exit, so closing it here would
-    /// only sever the session line discipline. Do NOT wrap it in a `File` /
-    /// `Handle` (whose `Drop` would close it) -- the no-close lifetime is the
-    /// contract LS-7's dance relies on (audit F2).
+    /// Held as a passive raw `i32`, NOT closed: on the console login retains
+    /// its own copy and the kernel reaps `ut`'s handle table at exit, so
+    /// closing it here would only sever the session line discipline. Do NOT
+    /// wrap it in a `File` / `Handle` (whose `Drop` would close it) -- the
+    /// no-close lifetime is the contract LS-7's dance relies on (audit F2).
     pub consctl_fd: Option<i32>,
+    /// PTY-4b: job-control state -- `Some` iff the session dance succeeded
+    /// (fd 0 is a pts SLAVE + `setsid` + `t_tty_acquire(0)` +
+    /// `t_tty_set_fg(0, own_pgid)` all landed at startup). While `Some`,
+    /// external jobs get their own process groups, the foreground job gets
+    /// the terminal (`t_tty_set_fg`), the fg wait is stop-aware
+    /// (`WAIT_UNTRACED`), and `fg`/`bg` resume via `SYS_TTY_CONT`. While
+    /// `None` (the console session, the boot check, host tests) every
+    /// job-control arm is skipped and the shell is byte-identical to the
+    /// pre-PTY-4 behavior -- job control keys on the successful dance, never
+    /// on a heuristic.
+    pub job_control: Option<JobControlState>,
     /// Nesting depth of `try { ... }` blocks. While > 0, implicit-
     /// fail is suppressed regardless of `interactive` -- the
     /// enclosing try will pick up the failure via its post-body
@@ -234,6 +261,7 @@ impl Env {
             interactive: false,
             stdio_inherit: false,
             consctl_fd: None, // #94-B-b: set by Repl::set_consctl_fd if forwarded
+            job_control: None, // PTY-4b: set by Repl::init_pts_session on a pts
             implicit_fail_suppressed: 0,
             trace_depth: 0,
             pending_exit: None,
@@ -544,6 +572,27 @@ impl Env {
     }
 
     // === Pending exit (U-6e-a) ===
+
+    /// PTY-4b: write a shell-originated notification line (`[N]+ Done`, the
+    /// `jobs` listing, the fg echo, the Stopped report) to the SESSION
+    /// TERMINAL. When the shell holds a live stdout (`stdio_inherit` -- the
+    /// console session AND a pts-hosted session) that is fd 1; on a pts,
+    /// `t_putstr` (SYS_PUTS = the raw UART) would bypass the terminal
+    /// entirely, landing shell output on the machine console instead of the
+    /// user's session. The fd-less boot check / host tests keep the UART
+    /// diagnostic sink. A failed fd-1 write falls back to the UART so a
+    /// notification is never silently lost.
+    pub fn emit_line(&self, s: &str) {
+        if self.stdio_inherit {
+            // SAFETY: t_write is the SYS_WRITE SVC wrapper; s is a valid
+            // byte slice and fd 1 is the session terminal.
+            let n = unsafe { libthyla_rs::t_write(1, s.as_ptr(), s.len()) };
+            if n == s.len() as i64 {
+                return;
+            }
+        }
+        libthyla_rs::t_putstr(s);
+    }
 
     /// Request shell termination with `code` (the `exit` builtin).
     /// One-shot: the first request wins (a nested `exit` while one is

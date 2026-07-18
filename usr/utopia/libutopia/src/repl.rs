@@ -142,6 +142,66 @@ impl Repl {
         }
     }
 
+    /// PTY-4b: the pts session dance. If fd 0 is a pts SLAVE (the shell was
+    /// spawned by a session host -- `ptyhost` -- with the slave as its
+    /// stdio), become the pts's controlling session and activate job
+    /// control: `setsid` (the host spawned us into ITS group, so we are not
+    /// a group leader and this cannot fail on the hosted path) ->
+    /// `t_tty_acquire(0)` (seat this session on the pts) ->
+    /// `t_tty_set_fg(0, own_pgid)` (the shell starts as the foreground) ->
+    /// open `/dev/pts/<n>ctl` as the LINE-DISCIPLINE fd (the consctl slot;
+    /// one grammar, PTY-2c == LS-8b). Returns true iff the WHOLE dance
+    /// landed -- job control keys on that, and any partial failure (a
+    /// respawned leader, a dead ptyfs, a missing ctl) degrades to the plain
+    /// console path: no jc, no ldisc fd, the shell still runs. NOTE: the
+    /// caller must `open_notes` FIRST -- once the shell is the seated
+    /// foreground, a `^C` posts `interrupt`, and an un-self-managing shell
+    /// would be default-terminated by its very first keystroke signal.
+    pub fn init_pts_session(&mut self) -> bool {
+        use crate::eval::console;
+        let n = match console::pts_slave_n_of_fd0() {
+            Some(n) => n,
+            None => return false,
+        };
+        // SAFETY: scalar SVC wrappers; fd 0 is the pts slave just detected.
+        let sid = unsafe { libthyla_rs::t_setsid() };
+        if sid <= 0 {
+            t_putstr("ut: pts session: setsid failed\n");
+            return false;
+        }
+        let own_pgid = sid as u64; // a fresh session leader: sid == pgid == pid
+        if unsafe { libthyla_rs::t_tty_acquire(0) } < 0 {
+            t_putstr("ut: pts session: tty_acquire failed\n");
+            return false;
+        }
+        if unsafe { libthyla_rs::t_tty_set_fg(0, own_pgid) } < 0 {
+            t_putstr("ut: pts session: tty_set_fg failed\n");
+            return false;
+        }
+        let mut path = String::new();
+        {
+            use core::fmt::Write as _;
+            let _ = write!(&mut path, "/dev/pts/{}ctl", n);
+        }
+        // SAFETY: t_open is the SYS_OPEN SVC wrapper; path is a valid
+        // NUL-free byte slice.
+        let ctl = unsafe {
+            libthyla_rs::t_open(
+                libthyla_rs::T_WALK_OPEN_FROM_ROOT,
+                path.as_ptr(),
+                path.len(),
+                libthyla_rs::T_ORDWR,
+            )
+        };
+        if ctl < 0 {
+            t_putstr("ut: pts session: ctl open failed\n");
+            return false;
+        }
+        self.env.consctl_fd = Some(ctl as i32);
+        self.env.job_control = Some(crate::eval::env::JobControlState { own_pgid, pts_n: n });
+        true
+    }
+
     /// #113: record the session user's home directory (login forwards it via
     /// `--home <path>`, since there is no kernel envp). Sets `$home` -- which
     /// `cd` with no argument resolves to, and the prompt abbreviates to `~` --
@@ -545,7 +605,7 @@ impl Repl {
         // prompt-cycle's own. One poll per live pid -- never a busy-loop.
         builtin::reap_background(&mut self.env);
         for line in self.env.jobs_mut().take_done_notifications() {
-            t_putstr(&line);
+            self.env.emit_line(&line); // PTY-4b: the session terminal, not the UART
         }
     }
 

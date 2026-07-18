@@ -1,0 +1,11 @@
+[package]
+name = "ptyhost"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "ptyhost"
+path = "src/main.rs"
+
+[dependencies]
+libthyla-rs = { path = "../lib/libthyla-rs" }

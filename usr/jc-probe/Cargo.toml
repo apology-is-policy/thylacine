@@ -1,0 +1,11 @@
+[package]
+name = "jc-probe"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "jc-probe"
+path = "src/main.rs"
+
+[dependencies]
+libthyla-rs = { path = "../lib/libthyla-rs" }

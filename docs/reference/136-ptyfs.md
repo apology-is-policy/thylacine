@@ -209,3 +209,42 @@ seam.
   (harmless: echo is best-effort; the data path never tears).
 - `PTS_MAX` = 16 concurrent pts pairs (the #65 resource floor; ENFILE-class
   reject at mint).
+
+### PTY-4 job-control gaps (surfaced by the first real consumer)
+
+PTY-4 (`ut` job control over a pts, `docs/PTY-DESIGN.md` §14) exercises the
+whole stop/report/resume machinery and proves it end-to-end for a foreground
+job that holds **no** outstanding terminal read (`sleep`): `^Z` stops it, the
+`WAIT_UNTRACED` report is delivered (once the PTY-1e syscall-gate fix admits
+the flag -- `8f1cb8a2`), `jobs` lists it Stopped, `fg` resumes it via
+`SYS_TTY_CONT` and it runs to a clean prompt exit. Two gaps remain, both real
+and both PTY-4 follow-ups:
+
+- **No foreground-read arbitration (TTIN).** A v1.0 pts serves every slave
+  read the moment data arrives, with no check of the reader's process group
+  vs the terminal's foreground group. So a stopped foreground job that was
+  blocked in a terminal READ (e.g. `cat`) keeps its dev9p `Tread` outstanding
+  at ptyfs; when the shell reclaims the terminal and the user types the next
+  command, ptyfs delivers those bytes to the stopped job's stale read instead
+  of the shell -- the shell never sees its input. Interactive `cat`-under-`^Z`
+  therefore does not work at v1.0. The POSIX fix is TTIN: a slave read from a
+  non-foreground-group process is suspended (or `SIGTTIN`'d) rather than
+  served. This wants the reader's pgrp at the read gate -- a kernel check
+  (`SYS_READ` on a pts slave, caller pgrp vs the pts `fg_pgid` via the
+  registry), since ptyfs (a 9P server) has no pgrp per `Tread`.
+
+- **Resume-then-re-stop signal delivery.** `fg`/`SYS_TTY_CONT` correctly
+  resumes a job-stopped sleeper (it is woken off `debug_rendez` and its
+  original syscall continues -- verified). But a SECOND `^Z` immediately after
+  a resume does not re-stop the job: the resumed job's `tty:susp` never
+  reaches `proc_job_stop_one` (the signal-delivery path after a resume has a
+  gap -- the fg group / cooked-mode state after `SYS_TTY_CONT` needs a closer
+  look). So `fg` then `^Z` again is not yet reliable, and `bg` of a re-
+  stopped job is untested. The resume ITSELF works (a resumed job runs to
+  completion under `fg`); only the immediate re-stop is affected.
+
+Both gaps need focused kernel work (TTIN is a new read-gate mechanism; the
+re-stop is a tty-signal-delivery-after-resume fix) and are the natural PTY-4
+continuation. The PTY-4 boot E2E (`/bin/jc-probe`) and the interactive
+`pty-4.exp` scenario both drive `sleep` (no terminal read) so they exercise
+the working stop/jobs/fg-resume cycle without depending on either gap.
