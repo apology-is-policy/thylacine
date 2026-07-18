@@ -289,10 +289,49 @@ Two runtime findings, both root-caused to ground (not waved off):
    comment corrected. This is a general fix -- every future on-device Go program
    that shells out via LookPath now resolves against the seeded PATH.
 
-Open (8d-3): the trailing `snare:segv` that fires AFTER `gopls check` prints its
-diagnostic + the assert passes -- a gopls (or spawned `go` subprocess) teardown
-robustness nit, non-blocking (the useful work completed, expect exited 0);
-investigate + the TCG-LS-CI validation + a definition-query leg at the arc close.
+## 13. 8d-3 as-built — the arc close (2026-07-18)
+
+The as-built reference is `docs/reference/137-gopls.md`. The kernel is
+byte-unchanged; the Thylacine-side code is a joey boot probe + a `t_chdir` libt
+wrapper. Highlights:
+
+1. **The env-requirement chain (the load-bearing finding).** gopls runs
+   correctly only when its process env provides **`CAP_CSPRNG_READ`** (crypto/rand
+   at trace-ID init -> `SYS_GETRANDOM`, cap-gated; a `-1`/EPERM there is a
+   crypto/rand FATAL) **AND `PATH`** (the `exec.LookPath` for `go` that loads a
+   workspace view, plus the os.Executable fallback). BOTH are login-provided
+   (`SHELL_CAPS = LOCK_PAGES|CSPRNG_READ`; `PATH=/bin:/goroot/bin`), so real
+   users are unaffected; a boot-probe / non-login spawn must supply them
+   explicitly (the probe grants the caps + sets PATH + `t_chdir`s into the
+   module). Neither is a gopls or kernel bug -- it is the capability model +
+   POSIX `$PATH` working as designed.
+
+2. **Telemetry disabled (the private-OS posture).** The fork sets
+   `telemetry.Start(Config{ReportCrashes: false, Upload: false})` -- `Upload`
+   phones home to telemetry.go.dev (undesirable + network-dependent);
+   `ReportCrashes` unconditionally spawns a re-exec'd sidecar + crashmonitor
+   (needs os.Executable). Both off -> no sidecar, no upload. Correct regardless,
+   and it retires the os.Executable-dependent sidecar the segv hypothesis pointed
+   at.
+
+3. **The teardown segv -- disposed.** With the full env (cap + PATH + cwd), gopls
+   fully runs transport-free in the boot probe -- view loads, `check` reports the
+   exact diagnostic, `definition` resolves -- and exits **cleanly (status 0), NO
+   segv**, under telemetry ON *and* OFF. The 8d-2 interactive segv did NOT
+   reproduce in a controlled full-env boot; it was interactive-env-specific /
+   non-deterministic. Mitigated by the telemetry disable (removes the leading
+   suspect).
+
+4. **The deterministic gate.** The joey boot probe (`joey: go8d OK`) runs
+   `gopls check` + `gopls definition` on a `/tmp/gp` module every boot,
+   boot-fatal, transport-free -- the authoritative gopls engine gate. `go8d.exp`
+   is trimmed to the transport-reliable resolve+exec legs (the heavy engine check
+   floods the #66 console transport; guest-exonerated).
+
+5. **Known caveat (task #99, non-fatal):** the persistent-index filecache logs
+   `create …-cas: operation not permitted` on a fresh `HOME/.cache` (a Thylacine
+   file-create / `O_EXCL` behavior); gopls degrades gracefully, correctness
+   intact.
 
 ---
 

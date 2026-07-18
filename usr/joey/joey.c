@@ -2022,7 +2022,7 @@ static long go4c_spawn_wait(const char *name, unsigned int name_len,
 static long go4c_spawn_wait_hb(const char *name, unsigned int name_len,
                                const char *argv_blob, unsigned int argv_len,
                                unsigned int argc, unsigned long max_sec,
-                               unsigned long hb_sec) {
+                               unsigned long hb_sec, unsigned long cap_mask) {
     long cfd = t_console_open();
     unsigned int fds[3] = { 0, 0, 0 };
     unsigned int fd_count = 0;
@@ -2040,7 +2040,7 @@ static long go4c_spawn_wait_hb(const char *name, unsigned int name_len,
         .fd_count      = fd_count,
         .perm_flags    = 0,
         ._pad_envp     = 0,
-        .cap_mask      = 0,
+        .cap_mask      = cap_mask,
     };
     long pid = t_spawn_full_argv(&req);
     if (cfd >= 0) (void)t_close(cfd);
@@ -3913,7 +3913,7 @@ int main(void) {
                         tstep = go4c_now_ms();
                         long st_comp = go4c_spawn_wait_hb(
                             go_path, sizeof(go_path) - 1, argv_compile,
-                            sizeof(argv_compile) - 1, 9, 900, 20);
+                            sizeof(argv_compile) - 1, 9, 900, 20, 0);
                         go4c_timing("bisect-compile", tstep);
                         if (st_comp == -2) {
                             t_putstr("joey: Go-4c BISECT compile DID NOT FINISH "
@@ -4127,6 +4127,145 @@ int main(void) {
                     if (probe46_fstat_wronly("post", "/go-cache", 9, p46_post,
                                              sizeof(p46_post) - 1) != 0)
                         return 1;
+
+                    // === Go 8d-3: gopls LSP-engine on-device probe (task #98) ===
+                    // Run the go/packages -> on-device `go list` -> type-check
+                    // engine at boot, TRANSPORT-FREE, so the trailing teardown
+                    // snare:segv (if any) lands in the plain boot log -- the
+                    // interactive go8d.exp is transport-fragile under ut's redraw
+                    // storm (the #66 class). Gated on the baked /goroot/bin/gopls.
+                    {
+                        long gpb = t_open(T_WALK_OPEN_FROM_ROOT,
+                                          "/goroot/bin/gopls", 17, T_OREAD);
+                        if (gpb < 0) {
+                            t_putstr("joey: go8d gopls absent -- skipping\n");
+                        } else {
+                            (void)t_close(gpb);
+                            long tmpd = t_open(T_WALK_OPEN_FROM_ROOT, "/tmp", 4,
+                                               T_OPATH);
+                            long gpd = (tmpd >= 0)
+                                ? mkdir_or_open(tmpd, "gp", 2) : -1;
+                            if (tmpd >= 0) (void)t_close(tmpd);
+                            int wrote = (gpd >= 0);
+                            if (gpd >= 0) {
+                                // /tmp is disk-backed (persists across boots), so
+                                // the fixed-name module files survive -- unlink
+                                // first (ignore ENOENT) to keep the write
+                                // idempotent (fresh content each boot).
+                                (void)t_unlink(gpd, "go.mod", 6, 0);
+                                (void)t_unlink(gpd, "check.go", 8, 0);
+                                long f = t_walk_create(gpd, "go.mod", 6,
+                                                       T_OWRITE, 0644);
+                                if (f >= 0) {
+                                    const char c[] = "module gp\n\ngo 1.25\n";
+                                    if (t_write(f, c, sizeof(c) - 1) !=
+                                        (long)(sizeof(c) - 1)) wrote = 0;
+                                    (void)t_close(f);
+                                } else wrote = 0;
+                                f = t_walk_create(gpd, "check.go", 8,
+                                                  T_OWRITE, 0644);
+                                if (f >= 0) {
+                                    // Line 3 defines Target; line 5 references it
+                                    // (the `gopls definition` leg resolves 5:9 ->
+                                    // 3:6); line 7's undefinedIdent drives the
+                                    // `gopls check` type-error diagnostic.
+                                    const char c[] =
+                                        "package gp\n\n"
+                                        "func Target() int { return 42 }\n\n"
+                                        "var _ = Target\n\n"
+                                        "var _ = undefinedIdent\n";
+                                    if (t_write(f, c, sizeof(c) - 1) !=
+                                        (long)(sizeof(c) - 1)) wrote = 0;
+                                    (void)t_close(f);
+                                } else wrote = 0;
+                                (void)t_close(gpd);
+                            }
+                            // Module mode: drop go4c's GO111MODULE=off so gopls's
+                            // go/packages honors the baked go.mod (the proven
+                            // go8d.exp path ran with the login default = auto).
+                            // AND set PATH: gopls resolves the `go` binary via
+                            // exec.LookPath($PATH) to load a workspace view, and
+                            // os.Executable() falls back to $PATH -- login gives
+                            // the real user env PATH=/bin:/goroot/bin; joey's boot
+                            // env has none, so without this gopls reports "no
+                            // views" (go not found).
+                            if (edir >= 0) {
+                                (void)t_unlink(edir, "GO111MODULE", 11, 0);
+                                long pv = t_walk_create(edir, "PATH", 4,
+                                                        T_OWRITE, 0644);
+                                if (pv >= 0) {
+                                    const char pc[] = "/bin:/goroot/bin";
+                                    (void)t_write(pv, pc, sizeof(pc) - 1);
+                                    (void)t_close(pv);
+                                }
+                            }
+                            if (!wrote) {
+                                t_putstr("joey: go8d gp module write FAILED\n");
+                            } else {
+                                // argv[0] ABSOLUTE so os.Executable() resolves
+                                // it (executable_path.go's absolute branch) even
+                                // with no PATH in joey's env -- matching the
+                                // login-env interactive run (PATH=/bin:/goroot/bin)
+                                // where os.Executable succeeds + gopls starts its
+                                // telemetry sidecar.
+                                static const char argv_gp[] =
+                                    "/goroot/bin/gopls\0check\0"
+                                    "/tmp/gp/check.go\0";
+                                const char gp_path[] = "/goroot/bin/gopls";
+                                t_putstr("joey: go8d running `gopls check "
+                                         "/tmp/gp/check.go`\n");
+                                // gopls resolves its workspace VIEW from the cwd
+                                // (the interactive go8d.exp did `cd gd` first);
+                                // without a module cwd it reports "no views".
+                                (void)t_chdir("/tmp/gp", 7);
+                                // gopls uses crypto/rand at init (trace-ID seed
+                                // -> SYS_GETRANDOM, CAP_CSPRNG_READ-gated) -- a
+                                // -1/EPERM there is a crypto/rand FATAL. Grant
+                                // the two fork-grantable user caps login gives
+                                // the shell (SHELL_CAPS = LOCK_PAGES|CSPRNG_READ)
+                                // so the boot probe mirrors the real user env.
+                                long st_gp = go4c_spawn_wait_hb(
+                                    gp_path, sizeof(gp_path) - 1, argv_gp,
+                                    sizeof(argv_gp) - 1, 3, 180, 30,
+                                    T_CAP_CSPRNG_READ | T_CAP_LOCK_PAGES);
+                                char gpn[24];
+                                t_putstr("joey: go8d gopls check reaped status=");
+                                t_putstr(itoa_dec(st_gp, gpn, sizeof(gpn)));
+                                t_putstr("\n");
+                                // Item-3: the query/navigation half -- `gopls
+                                // definition <file>:5:9` resolves the Target
+                                // reference (line 5) to its definition (line 3).
+                                static const char argv_def[] =
+                                    "/goroot/bin/gopls\0definition\0"
+                                    "/tmp/gp/check.go:5:9\0";
+                                long st_def = go4c_spawn_wait_hb(
+                                    gp_path, sizeof(gp_path) - 1, argv_def,
+                                    sizeof(argv_def) - 1, 3, 120, 30,
+                                    T_CAP_CSPRNG_READ | T_CAP_LOCK_PAGES);
+                                t_putstr("joey: go8d gopls definition reaped "
+                                         "status=");
+                                t_putstr(itoa_dec(st_def, gpn, sizeof(gpn)));
+                                t_putstr("\n");
+                                (void)t_chdir("/", 1);   // restore cwd
+                                if (edir >= 0)
+                                    (void)t_unlink(edir, "PATH", 4, 0);
+                                // Gate: both legs exit 0 on a successful
+                                // load+query; "no views" / a crypto-rand fatal /
+                                // a missing env exits non-zero. status==0 == the
+                                // engine ran the full go/packages -> on-device
+                                // `go list` -> type-check path on-device.
+                                if (st_gp != 0 || st_def != 0) {
+                                    t_putstr("joey: go8d gopls FAILED -- "
+                                             "check/definition did not run "
+                                             "clean on-device\n");
+                                    return 1;
+                                }
+                                t_putstr("joey: go8d OK -- gopls "
+                                         "(GOOS=thylacine) type-checks + "
+                                         "resolves a definition on-device\n");
+                            }
+                        }
+                    }
 #else
                     long st_b = 0, st_r = 0, st_b2 = 0;
 #endif

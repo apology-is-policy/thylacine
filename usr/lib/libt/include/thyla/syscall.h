@@ -99,6 +99,7 @@ enum {
     T_SYS_CONSOLE_RELINQUISH = 63, // A-5a: drop own console-attach (I-27)
     T_SYS_CONSOLE_OPEN      = 64,  // A-5a: open /dev/cons -> R|W KOBJ_SPOOR fd
     T_SYS_OPEN              = 65,  // A-5b-0/stalk-1: multi-component pathname open
+    T_SYS_CHDIR             = 69,  // LS-4: set the per-Proc cwd (dot_path)
     T_SYS_FD2PATH           = 71,  // #66: fd -> namespace name (Plan 9 fd2path)
     // 72..74 = getpid/uid/gid (native libthyla-rs only).
     T_SYS_CLOCK_GETTIME     = 75,  // LS-K: read CLOCK_REALTIME / CLOCK_MONOTONIC
@@ -1799,6 +1800,22 @@ static inline long t_chroot(long spoor_fd) {
         "svc #0"
         : "+r"(x0)
         : "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_chdir -- set the per-Proc cwd (LS-4 dot_path) to `path`. Requires
+// X-search on the target dir (kernel perm_check); the target must be a
+// directory. Returns 0 on success, -1 on failure.
+static inline long t_chdir(const char *path, unsigned long path_len) {
+    register long x0 __asm__("x0") = (long)(unsigned long)path;
+    register long x1 __asm__("x1") = (long)path_len;
+    register long x8 __asm__("x8") = T_SYS_CHDIR;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x8)
         : "memory", "cc"
     );
     return x0;
