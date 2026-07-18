@@ -52,8 +52,8 @@ use alloc::vec::Vec;
 use libthyla_rs::ninep as p9;
 use libthyla_rs::{
     t_close, t_open, t_pty_register, t_tty_signal, t_walk_create, T_GID_SYSTEM, T_OPATH, T_OREAD,
-    T_PRINCIPAL_SYSTEM, T_PTY_REG_FREE, T_PTY_REG_MINT, T_PTY_REG_SLAVE, T_TTY_SIG_INT,
-    T_TTY_SIG_QUIT, T_TTY_SIG_TSTP, T_TTY_SIG_WINCH, T_WALK_OPEN_FROM_ROOT,
+    T_PRINCIPAL_SYSTEM, T_PTY_REG_FREE, T_PTY_REG_MINT, T_PTY_REG_SLAVE, T_TTY_SIG_HUP,
+    T_TTY_SIG_INT, T_TTY_SIG_QUIT, T_TTY_SIG_TSTP, T_TTY_SIG_WINCH, T_WALK_OPEN_FROM_ROOT,
 };
 
 /// Max concurrent 9P connections the accept loop tracks. In practice joey's one
@@ -361,15 +361,20 @@ impl Ptys {
         }
     }
 
-    /// An opened master/slave fd was clunked.
-    fn open_dec(&mut self, n: u32, master: bool) {
+    /// An opened master/slave fd was clunked. Returns true on the LAST-master
+    /// edge (n_master 1 -> 0) -- the carrier-loss event the caller answers
+    /// with TTY_SIG_HUP (PTY-2d). A slave close is never a hup edge (POSIX:
+    /// no SIGHUP on slave close -- the master just reads EOF).
+    fn open_dec(&mut self, n: u32, master: bool) -> bool {
         if let Some(p) = self.slot_mut(n) {
             if master {
-                p.n_master = p.n_master.saturating_sub(1);
-            } else {
-                p.n_slave = p.n_slave.saturating_sub(1);
+                let was = p.n_master;
+                p.n_master = was.saturating_sub(1);
+                return was == 1;
             }
+            p.n_slave = p.n_slave.saturating_sub(1);
         }
+        false
     }
 
     /// Push bytes onto a ring up to RING_CAP; returns the count accepted (a short
@@ -848,14 +853,41 @@ impl Conn {
         }
     }
 
+    /// Close an OPENED endpoint fid's count -- and on the LAST-master edge
+    /// raise TTY_SIG_HUP (PTY-2d: carrier loss; the kernel routes tty:hup
+    /// dual-target to the fg pgrp + the session leader -- PTY-1d). Reached
+    /// from every opened-endpoint drop: the normal clunk, a connection
+    /// teardown, and a Tversion reset (a dying emulator connection IS carrier
+    /// loss). HupAtMostOnce is BY CONSTRUCTION: exactly one master fd per pts
+    /// can ever exist (masters are mint-only -- no walk resolves a master
+    /// path, 9P forbids walking FROM an opened fid so the master fid cannot
+    /// be cloned, and a walk to an existing newfid is rejected) -- so the
+    /// n_master 1 -> 0 edge fires at most once per pts lifetime. The raise
+    /// PRECEDES the caller's unref (the slot + pts_id must still be live).
+    /// A ctl fid is not an endpoint: no count, no edge.
+    fn close_endpoint(ptys: &mut Ptys, path: u64) {
+        if !is_endpoint_path(path) {
+            return;
+        }
+        let n = pts_n(path);
+        if ptys.open_dec(n, is_master_path(path)) {
+            let pid = ptys.pts_id(n);
+            if pid > 0 {
+                unsafe {
+                    let _ = t_tty_signal(pid as u64, T_TTY_SIG_HUP);
+                }
+            }
+        }
+    }
+
     /// Drop every reference this connection holds before it is closed (the serve
     /// loop calls this before removing a dead Conn), so a session teardown frees
     /// the pts pairs only this session held open and releases their kernel entries.
     pub fn teardown(&mut self, ptys: &mut Ptys) {
         for slot in self.fids.iter_mut() {
             if let Some(f) = slot.take() {
-                if f.opened && is_endpoint_path(f.path) {
-                    ptys.open_dec(pts_n(f.path), is_master_path(f.path));
+                if f.opened {
+                    Conn::close_endpoint(ptys, f.path);
                 }
                 Conn::free_pts(ptys.unref_path(f.path));
             }
@@ -881,8 +913,8 @@ impl Conn {
                 path,
                 opened: false,
             });
-            if old.opened && is_endpoint_path(old.path) {
-                ptys.open_dec(pts_n(old.path), is_master_path(old.path));
+            if old.opened {
+                Conn::close_endpoint(ptys, old.path);
             }
             Conn::free_pts(ptys.unref_path(old.path));
             return true;
@@ -903,8 +935,8 @@ impl Conn {
         if let Some(i) = self.fid_find(fid) {
             let f = self.fids[i].take().unwrap();
             self.pending_reads.retain(|pr| pr.fid != fid);
-            if f.opened && is_endpoint_path(f.path) {
-                ptys.open_dec(pts_n(f.path), is_master_path(f.path));
+            if f.opened {
+                Conn::close_endpoint(ptys, f.path);
             }
             Conn::free_pts(ptys.unref_path(f.path));
             return true;
@@ -1044,8 +1076,8 @@ impl Conn {
     fn drop_all_fids(&mut self, ptys: &mut Ptys) {
         for slot in self.fids.iter_mut() {
             if let Some(f) = slot.take() {
-                if f.opened && is_endpoint_path(f.path) {
-                    ptys.open_dec(pts_n(f.path), is_master_path(f.path));
+                if f.opened {
+                    Conn::close_endpoint(ptys, f.path);
                 }
                 Conn::free_pts(ptys.unref_path(f.path));
             }
@@ -1859,21 +1891,53 @@ pub fn selftest() -> Result<(), &'static str> {
         return Err("walk-ctl-degenerate");
     }
 
-    // ---- The teardown tail (raw again so writes are transparent).
+    // ---- Back-pressure on a SECOND fresh pts (its own rings; freed after):
+    // a write past RING_CAP is a SHORT push, never a drop.
+    {
+        let b = ptys.mint().ok_or("mint2")? as u32;
+        let big = alloc::vec![0x5au8; RING_CAP + 100];
+        if ptys.slave_write(b, &big) != RING_CAP {
+            return Err("backpressure-short-push");
+        }
+        ptys.ref_path(make_pts(b, FK_SLAVE));
+        if ptys.unref_path(make_pts(b, FK_SLAVE)) != Some(0) {
+            return Err("backpressure-free");
+        }
+    }
+
+    // ---- The teardown tail (PTY-2d; raw so writes are transparent).
     ptys.set_tio(n, 0);
 
-    // Master close -> the slave read sees EOF (drain-then-EOF: nothing queued).
-    ptys.open_dec(n, true); // master closed
+    // Queued bytes SURVIVE the master close: drain-then-EOF (pty.tla
+    // TeardownDrainsThenEof) -- the slave reads the queued bytes, THEN Eof.
+    // The close is the LAST-master edge (the HUP raise point).
+    if ptys.master_write(n, b"XY") != 2 {
+        return Err("teardown-queue");
+    }
+    if !ptys.open_dec(n, true) {
+        return Err("hup-edge"); // n_master 1 -> 0 MUST report the edge
+    }
+    match ptys.slave_read(n, &mut buf) {
+        RecvOutcome::Data(2) if &buf[..2] == b"XY" => {}
+        _ => return Err("teardown-drain-first"),
+    }
     match ptys.slave_read(n, &mut buf) {
         RecvOutcome::Eof => {}
         _ => return Err("master-close-not-eof"),
     }
 
-    // Back-pressure: a write past RING_CAP is a SHORT push, never a drop.
-    let big = alloc::vec![0x5au8; RING_CAP + 100];
-    let pushed = ptys.slave_write(n, &big);
-    if pushed != RING_CAP {
-        return Err("backpressure-short-push");
+    // The edge fires at most once (a saturated re-dec is not an edge), and a
+    // slave close is NEVER a hup edge.
+    if ptys.open_dec(n, true) {
+        return Err("hup-double-edge");
+    }
+    if ptys.open_dec(n, false) {
+        return Err("slave-close-not-hup");
+    }
+    // Symmetry: with the slave closed, the master's (empty) drain is EOF too.
+    match ptys.master_read(n, &mut buf) {
+        RecvOutcome::Eof => {}
+        _ => return Err("slave-close-not-eof"),
     }
 
     // The last binding drop frees the slot (refs discipline).

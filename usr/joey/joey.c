@@ -6197,11 +6197,23 @@ int main(void) {
             }
             (void)t_close(cfd); // drop the ctl ref BEFORE the EOF/free legs
 
-            // (f) master close -> the slave read sees EOF. The close's Tclunk is
-            //     wire-ordered before the Tread on the shared session, so ptyfs
-            //     processes close-then-read deterministically (n_master 0 ->
-            //     empty ring -> Eof -> Rread count 0).
+            // (f) queued bytes SURVIVE the master close (PTY-2d drain-then-EOF):
+            //     a line flushed just before the close is read AFTER it; only
+            //     the NEXT read is EOF. The close's Tclunk is wire-ordered
+            //     before the Treads on the shared session, so ptyfs processes
+            //     close-then-read deterministically. The close is also the
+            //     LAST-master edge -- ptyfs raises TTY_SIG_HUP (no controlling
+            //     session here -> the kernel routes it nowhere; the live HUP
+            //     delivery E2E is 2e).
+            if (t_write(mfd, "Z\r", 2) != 2) {
+                t_putstr("joey: PTY-2a-2 PROBE teardown queue write FAILED\n");
+                return 1;
+            }
             (void)t_close(mfd);
+            if (t_read(sfd, rb, sizeof(rb)) != 2 || rb[0] != 'Z' || rb[1] != '\n') {
+                t_putstr("joey: PTY-2a-2 PROBE drain-then-EOF (queued line) FAILED\n");
+                return 1;
+            }
             long en = t_read(sfd, rb, sizeof(rb));
             if (en != 0) {
                 t_putstr("joey: PTY-2a-2 PROBE close->EOF FAILED\n");
@@ -6210,7 +6222,7 @@ int main(void) {
             (void)t_close(sfd); // the last binding: ptyfs frees pts 0 + FREEs the registry entry
             t_putstr("joey: PTY-2a-2 PROBE OK (ptmx clone -> pts 0; cooked master<->slave"
                      " [ICRNL+ICANON+ECHO+ONLCR]; ptsname qid + ctl [-echo no-leak;"
-                     " winsize]; close -> EOF)\n");
+                     " winsize]; close -> drain-then-EOF)\n");
         }
 #endif /* THYLA_BOOT_PROBES (the PTY-2a-2 round-trip) */
     }

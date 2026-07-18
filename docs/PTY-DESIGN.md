@@ -364,6 +364,26 @@ live: the `-echo` **no-leak proof without a blocking read** (type a line under
 the second line's echo) + the winsize round-trip via `t_pread` (the ctl fd's
 cursor advanced with the writes — positioned read from 0).
 
+*As-built (PTY-2d)*: the teardown legs. Drain-then-EOF was structural since 2a
+(`ring_drain` serves Data while non-empty regardless of the peer's closure;
+Eof only on empty+peer-closed) — 2d adds the **HUP raise**: `open_dec` reports
+the `n_master` 1→0 edge and `Conn::close_endpoint` (now the single
+opened-endpoint drop path: clunk / rebind / connection teardown / Tversion
+reset — a dying emulator connection IS carrier loss) raises
+`SYS_TTY_SIGNAL(HUP)` before the unref, which the kernel routes dual-target
+(fg pgrp + session leader, PTY-1d). **HupAtMostOnce is by construction**:
+exactly one master fd per pts can ever exist (masters are mint-only — no walk
+resolves a master path, 9P forbids walking FROM an opened fid so the master
+fid cannot be cloned, and a walk to an existing newfid is rejected), so the
+edge fires at most once per pts lifetime. A slave close is never a hup edge
+(the master just reads EOF — POSIX). The mint-rollback path keeps the raw
+`open_dec` (a failed mint is not carrier loss). The pts free + registry FREE
+at last-unref and the kernel gen guard were live since 2a. The selftest pins
+the edge algebra (edge-once, saturated-re-dec silent, slave-close silent,
+queued-bytes drain-then-EOF both directions); the boot probe drives
+queued-line drain-then-EOF live. The live HUP *delivery* (a controlling
+session observing `tty:hup`) is the 2e E2E.
+
 - **`/dev/ptmx` open → mint pts N** (the netd clone idiom): allocate the pts
   slot, its M2S + S2M rings, its per-pts `Ldisc` (the de-globalized LS-8 cooking
   + a per-pts `termios` word, `CONS_ICANON`-default), its winsize, and return the
