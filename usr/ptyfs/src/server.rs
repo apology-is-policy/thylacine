@@ -249,9 +249,17 @@ struct Pts {
     /// 0 (the only free path).
     refs: u32,
     /// OPENED master / slave fds. The EOF signal: a slave read sees EOF when
-    /// n_master == 0 (the master fully closed); a master read when n_slave == 0.
+    /// n_master == 0 (the master fully closed); a master read when n_slave == 0
+    /// -- but only once a slave has EVER opened (`slave_opened_once`): a master
+    /// read before the slave side comes up PARKS, not EOF (the Linux
+    /// master-blocks-until-the-slave-opens semantic -- EOF means the slave side
+    /// is GONE, which requires it to have existed; without the latch, an
+    /// emulator that reads for the child's first output races the child's
+    /// slave open and gets a spurious 0). The master needs no latch: it is
+    /// born open (the mint IS its open), so n_master == 0 implies it existed.
     n_master: u32,
     n_slave: u32,
+    slave_opened_once: bool,
     /// The per-pts line discipline (PTY-2b): the five-flag termios word + the
     /// ICANON assembly line + the signal classes the input cook collected
     /// (drained by h_write, which raises them via SYS_TTY_SIGNAL -- keeping the
@@ -290,6 +298,7 @@ impl Ptys {
             refs: 0,
             n_master: 0,
             n_slave: 0,
+            slave_opened_once: false,
             tio: TIO_DEFAULT,
             line: [0; LINE_MAX],
             line_len: 0,
@@ -350,13 +359,15 @@ impl Ptys {
         }
     }
 
-    /// A master/slave fd was OPENED (the EOF-tracking count).
+    /// A master/slave fd was OPENED (the EOF-tracking count). A slave open
+    /// also latches `slave_opened_once` (the master-read EOF gate).
     fn open_inc(&mut self, n: u32, master: bool) {
         if let Some(p) = self.slot_mut(n) {
             if master {
                 p.n_master += 1;
             } else {
                 p.n_slave += 1;
+                p.slave_opened_once = true;
             }
         }
     }
@@ -666,10 +677,15 @@ impl Ptys {
     }
 
     /// Drain up to buf.len() bytes toward the master (from s2m). Empty + slave
-    /// closed -> Eof; empty + slave open -> WouldBlock.
+    /// GONE (opened once, now fully closed) -> Eof; empty + slave open OR not
+    /// yet arrived -> WouldBlock (the master blocks until the slave side comes
+    /// up -- see the slave_opened_once field note).
     fn master_read(&mut self, n: u32, buf: &mut [u8]) -> RecvOutcome {
         match self.slot_mut(n) {
-            Some(p) => Ptys::ring_drain(&mut p.s2m, buf, p.n_slave),
+            Some(p) => {
+                let other = if p.slave_opened_once { p.n_slave } else { 1 };
+                Ptys::ring_drain(&mut p.s2m, buf, other)
+            }
             None => RecvOutcome::Eof,
         }
     }
@@ -1895,6 +1911,13 @@ pub fn selftest() -> Result<(), &'static str> {
     // a write past RING_CAP is a SHORT push, never a drop.
     {
         let b = ptys.mint().ok_or("mint2")? as u32;
+        // The slave_opened_once latch (PTY-2e): a master read BEFORE any slave
+        // open PARKS (WouldBlock), never EOF -- the emulator's read for the
+        // child's first output must not race the child's slave open.
+        match ptys.master_read(b, &mut buf) {
+            RecvOutcome::WouldBlock => {}
+            _ => return Err("master-read-before-slave-not-park"),
+        }
         let big = alloc::vec![0x5au8; RING_CAP + 100];
         if ptys.slave_write(b, &big) != RING_CAP {
             return Err("backpressure-short-push");

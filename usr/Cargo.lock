@@ -1073,6 +1073,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "pty-probe"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
 name = "ptyfs"
 version = "0.1.0"
 dependencies = [

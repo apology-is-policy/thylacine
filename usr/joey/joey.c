@@ -6224,7 +6224,31 @@ int main(void) {
                      " [ICRNL+ICANON+ECHO+ONLCR]; ptsname qid + ctl [-echo no-leak;"
                      " winsize]; close -> drain-then-EOF)\n");
         }
-#endif /* THYLA_BOOT_PROBES (the PTY-2a-2 round-trip) */
+
+        // PTY-2e: the openpty E2E with a LIVE controlling session. The prover
+        // (the emulator role) mints a pts, spawns itself as a session-leader
+        // child that acquires the pts as its controlling terminal, then drives
+        // the SIGNAL seam end to end: Ctrl-C -> "interrupt" observed on the
+        // child's notes fd, a winsize ctl write -> tty:winch, the master close
+        // -> tty:hup. Also the FIRST live deferred master read (the readiness
+        // read parks server-side until the child's slave opens). Boot-fatal.
+        {
+            const char pty_probe_name[] = "/bin/pty-probe"; // post-pivot: needs /dev/pts + /bin
+            long pp_pid = t_spawn(pty_probe_name, sizeof(pty_probe_name) - 1);
+            if (pp_pid <= 0) {
+                t_putstr("joey: t_spawn(\"/bin/pty-probe\") FAILED\n");
+                return 1;
+            }
+            int pp_status = -1;
+            long pp_reaped = t_wait_pid_for((int)pp_pid, 0, &pp_status);
+            if (pp_reaped != pp_pid || pp_status != 0) {
+                t_putstr("joey: PTY-2e openpty E2E FAILED\n");
+                return 1;
+            }
+            t_putstr("joey: PTY-2e openpty E2E OK (live controlling session:"
+                     " INT+WINCH+HUP delivered; parked master read)\n");
+        }
+#endif /* THYLA_BOOT_PROBES (the PTY-2a-2 round-trip + the 2e openpty E2E) */
     }
 
     // (2) Signal boot-complete. All boot-test asserts have passed, so the kernel
