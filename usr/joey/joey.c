@@ -2061,7 +2061,7 @@ static long go4c_spawn_wait_hb(const char *name, unsigned int name_len,
         }
         if (el >= max_sec) return -2;
         if (el >= next_hb) {
-            t_putstr("joey: Go-4c BISECT compile running ");
+            t_putstr("joey: go-probe child running ");   // F4: shared helper (go4c + gopls)
             t_putstr(itoa_dec((long)el, hb, sizeof(hb)));
             t_putstr("s\n");
             next_hb = el + hb_sec;
@@ -4180,28 +4180,37 @@ int main(void) {
                                 } else wrote = 0;
                                 (void)t_close(gpd);
                             }
-                            // Module mode: drop go4c's GO111MODULE=off so gopls's
-                            // go/packages honors the baked go.mod (the proven
-                            // go8d.exp path ran with the login default = auto).
-                            // AND set PATH: gopls resolves the `go` binary via
-                            // exec.LookPath($PATH) to load a workspace view, and
-                            // os.Executable() falls back to $PATH -- login gives
-                            // the real user env PATH=/bin:/goroot/bin; joey's boot
-                            // env has none, so without this gopls reports "no
-                            // views" (go not found).
-                            if (edir >= 0) {
-                                (void)t_unlink(edir, "GO111MODULE", 11, 0);
-                                long pv = t_walk_create(edir, "PATH", 4,
-                                                        T_OWRITE, 0644);
-                                if (pv >= 0) {
-                                    const char pc[] = "/bin:/goroot/bin";
-                                    (void)t_write(pv, pc, sizeof(pc) - 1);
-                                    (void)t_close(pv);
-                                }
-                            }
+                            // F1: gopls-present == the bake config, where /tmp
+                            // writes MUST work; a module-write failure is a real
+                            // regression, so it is boot-fatal (the sibling go4c
+                            // env-write + probe46 writes are boot-fatal too) --
+                            // never a silent skip of the engine gate (a vacuous
+                            // green is worse than a red).
                             if (!wrote) {
-                                t_putstr("joey: go8d gp module write FAILED\n");
-                            } else {
+                                t_putstr("joey: go8d gp module write FAILED "
+                                         "(bake config: /tmp writes must work)\n");
+                                return 1;
+                            }
+                            {
+                                // Module mode: drop go4c's GO111MODULE=off so
+                                // gopls's go/packages honors the baked go.mod. AND
+                                // set PATH: gopls resolves `go` via exec.LookPath
+                                // ($PATH) to load a workspace view (else "no
+                                // views") + os.Executable() falls back to $PATH.
+                                // Login gives the real user env PATH=/bin:/goroot/
+                                // bin; joey's boot env has none. Mutated HERE (in
+                                // the will-spawn path) so it is symmetric with the
+                                // unlink below -- F3 (no PATH leak on a skip path).
+                                if (edir >= 0) {
+                                    (void)t_unlink(edir, "GO111MODULE", 11, 0);
+                                    long pv = t_walk_create(edir, "PATH", 4,
+                                                            T_OWRITE, 0644);
+                                    if (pv >= 0) {
+                                        const char pc[] = "/bin:/goroot/bin";
+                                        (void)t_write(pv, pc, sizeof(pc) - 1);
+                                        (void)t_close(pv);
+                                    }
+                                }
                                 // argv[0] ABSOLUTE so os.Executable() resolves
                                 // it (executable_path.go's absolute branch) even
                                 // with no PATH in joey's env -- matching the

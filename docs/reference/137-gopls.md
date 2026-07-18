@@ -145,6 +145,30 @@ check` printed its diagnostic. 8d-3 chased it:
   data. gopls degrades gracefully (re-computes; check + definition still exit 0
   with correct output). Likely a Thylacine file-create / `O_EXCL` behavior;
   under investigation. Correctness is unaffected.
+- **robustio `FileID` cross-dataset collision** (task #100, 8d-3 holotype F2 —
+  a P2 latent needing an ABI decision): the `robustio_thylacine.go` shim returns
+  `FileID{device: 0, inode: stat.QidPath}`. qid.path is unique only *within one
+  served tree*; a real login session mounts two independently-inode-numbered
+  Stratum datasets (the system dataset — `/goroot`, `/bin` — and the per-user
+  home). With `device: 0`, a cross-dataset qid.path collision + a same-second
+  mtime (the `/goroot` bake writes thousands of files in one burst) makes
+  gopls's memoized FS serve file A's bytes under file B's URI (fs_memoized.go
+  alias branch) → silent wrong content. Fail-DANGEROUS, unlike the plan9
+  precedent (which populates `device` from the server identity — the same
+  per-server qid scope Thylacine has). The shim can't do better today: the
+  80-byte `t_stat` surfaces no device identity (`Spoor.devno` exists — stalk-2 —
+  but is unexported). Fix (ABI, user signoff): append `devno` to `t_stat`
+  (80→88, the A-2a 72→80 precedent) and fold it into the shim, matching plan9.
+  Narrow stochastic trigger (double collision) → P2, not P1; the boot probe's
+  single-dataset config can never hit it.
+- **The boot-probe gate is exit-status-based** (8d-3 holotype F5): `gopls check`
+  exits 0 *with* diagnostics present, so `st_gp == 0` proves the engine loaded a
+  view and ran to completion, not that a specific diagnostic was emitted. The
+  diagnostic + the `definition` resolution DO appear in the boot log
+  (human-verifiable), and the `definition` leg (resolving 5:9→3:6) requires the
+  package to have been type-checked — so the engine is genuinely gated; only the
+  diagnostics-*reporting* string is unasserted (a future leg could pipe the
+  child's stdout and scan it).
 - The offline CLI subcommands exercise the full engine but not the LSP transport
   — that is Stage 8e (the Nora client).
 
