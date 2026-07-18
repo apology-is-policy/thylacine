@@ -676,6 +676,27 @@ build_go_goroot() {
             "$GOFORK/src/$gocmd_sub" "$stage/src/$(dirname "$gocmd_sub")/" \
             || { echo "==> Go GOROOT bake: rsync $gocmd_sub FAILED" >&2; return 1; }
     done
+    # Go Stage 8d: gopls -- the LSP editing-intelligence server (a Thylacine port
+    # of golang.org/x/tools/gopls). It lands at $GOROOT/bin/gopls, in the POOL
+    # beside `go`/`gofmt` -- on PATH by construction, disk-backed not ramfs: gopls
+    # is a post-login dev tool that REQUIRES the toolchain it ships beside, so its
+    # bake is correctly coupled to (and gated by) the GOROOT bake, and its ~24 MiB
+    # never bloats the memory-resident initrd. Self-contained (vendored) -> offline
+    # (-mod=vendor). STRIPPED (-s -w): gopls reads the TARGET program's types, not
+    # its own symbols. Skips cleanly if the gopls fork is absent (the goroot still
+    # bakes; /gopls-probe SKIPs) -- so a fresh checkout still builds + boots.
+    local gopls_src="${GOPLSFORK:-$HOME/projects/gopls}"
+    if [[ -f "$gopls_src/main.go" ]]; then
+        echo "==> Building gopls (GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0, fork=$gopls_src)"
+        ( cd "$gopls_src" && GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 \
+            "$go_bin" build -mod=vendor -ldflags="-s -w" -o "$stage/bin/gopls" ./ ) \
+            || { echo "==> gopls: go build FAILED" >&2; return 1; }
+        echo "==> gopls built: $stage/bin/gopls ($(du -h "$stage/bin/gopls" | cut -f1 | tr -d ' '))"
+        ledger "gopls: LSP server cross-compile (GOOS=thylacine, stripped) -> /goroot/bin (Stage 8d)"
+    else
+        echo "==> gopls: fork source not found at $gopls_src -- skipping (set GOPLSFORK)"
+    fi
+
     # GOROOT metadata the toolchain reads (version string, go.env, timezone db).
     cp "$GOFORK/VERSION" "$GOFORK/go.env" "$stage/" 2>/dev/null || true
     [[ -d "$GOFORK/lib" ]] && cp -RL "$GOFORK/lib" "$stage/" 2>/dev/null
