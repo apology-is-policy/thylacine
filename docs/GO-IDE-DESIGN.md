@@ -215,7 +215,18 @@ with its own focused design pass + audit (it is a new privilege surface).
   difference from `dlv` on Linux. Sub-chunks 8c-1 (attach + inspect) → 8c-2
   (HW breakpoints + step + continue) → 8c-3 (goroutines + the unified user→
   kernel stack via `kstack`) → 8c-4 (launch + the DAP server over stdio).
-- **8d** — `gopls` port (the editing-intelligence half).
+- **8d** — `gopls` port (the editing-intelligence half). **DESIGN LANDED
+  2026-07-18 — the focused pass is `docs/GOPLS-PORT-DESIGN.md`.** A userspace
+  port that needs **no kernel surface** (unlike 8c): gopls is pure Go over file
+  I/O + the on-device `go` toolchain (`go/packages`) + LSP over stdio (no
+  `/net`). The cross-build (`GOOS=thylacine`) is GREEN with just **two** vendored
+  build-fallback shims (telemetry-mmap `io.ReadAll` + robustio `getFileID` via
+  the 9P qid.path) — thylacine is not in Go's `unix` build tag. Fork base = gopls
+  v0.21.1 (the newest whose go.mod `go` directive is `1.25`). Sub-chunks 8d-1
+  (cross-build + vendor + `build_gopls`) → 8d-2 (the on-device engine E2E via the
+  offline CLI subcommands `gopls check`/`definition` over `/goroot`) → 8d-3
+  (arc-close robustness holotype + docs). The Nora LSP client is 8e; the Kaua
+  editing UI is 8f.
 - **8e** — the Nora plugin architecture + the Go plugin (DAP + LSP clients).
 - **8f** — the Kaua debug UI (source / vars / stack / goroutines / watch) + the
   interactive run-pane (the "ut pane").
