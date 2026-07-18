@@ -53,7 +53,7 @@ use libthyla_rs::ninep as p9;
 use libthyla_rs::{
     t_close, t_open, t_pty_register, t_tty_signal, t_walk_create, T_GID_SYSTEM, T_OPATH, T_OREAD,
     T_PRINCIPAL_SYSTEM, T_PTY_REG_FREE, T_PTY_REG_MINT, T_PTY_REG_SLAVE, T_TTY_SIG_INT,
-    T_TTY_SIG_QUIT, T_TTY_SIG_TSTP, T_WALK_OPEN_FROM_ROOT,
+    T_TTY_SIG_QUIT, T_TTY_SIG_TSTP, T_TTY_SIG_WINCH, T_WALK_OPEN_FROM_ROOT,
 };
 
 /// Max concurrent 9P connections the accept loop tracks. In practice joey's one
@@ -116,6 +116,34 @@ const CH_DEL: u8 = 0x7f;
 const CH_NL: u8 = 0x0a;
 const CH_CR: u8 = 0x0d;
 
+// The per-pts ctl grammar (PTY-2c; the LS-8b consctl grammar + the winsize op).
+const CTL_FLAGS: [(&[u8], u32); 5] = [
+    (b"icanon", TIO_ICANON),
+    (b"echo", TIO_ECHO),
+    (b"isig", TIO_ISIG),
+    (b"icrnl", TIO_ICRNL),
+    (b"onlcr", TIO_ONLCR),
+];
+/// Render bound: 5 "+name " tokens (34) + "winsize " + two u16 decimals + NL.
+const CTL_RENDER_MAX: usize = 64;
+/// Ops per ctl write (bounded parse; more tokens than this rejects).
+const CTL_MAX_OPS: usize = 16;
+/// Winsize band (the Linux unsigned-short winsize).
+const WINSZ_MAX: u32 = 65535;
+
+#[derive(Copy, Clone)]
+enum CtlOp {
+    Flag(u32, bool), // (bit, set)
+    Winsize(u32, u32),
+}
+
+fn put_bytes(out: &mut [u8], w: &mut usize, s: &[u8]) {
+    if *w + s.len() <= out.len() {
+        out[*w..*w + s.len()].copy_from_slice(s);
+        *w += s.len();
+    }
+}
+
 const P9_VERSION_9P2000_L: &[u8] = b"9P2000.L";
 
 const S_IFDIR: u32 = 0o040000;
@@ -145,9 +173,15 @@ const FK_MASK: u64 = 0xff;
 const N_MASK: u64 = 0x00ff_ffff; // 24-bit pts number
 
 // Endpoint file kinds (the filekind low byte). 0 is unused so a bare PTS_FLAG|
-// (n<<8) is never a valid endpoint (defensive).
+// (n<<8) is never a valid endpoint (defensive). FK_CTL is the per-pts ctl file
+// /dev/pts/<n>ctl (PTY-2c; the Plan 9 suffix-ctl idiom -- eia0/eia0ctl -- so
+// the flat Linux-devpts slave names stay POSIX-intact): the termios grammar +
+// winsize, server-served and kernel-opaque (they carry no security routing --
+// PTY-DESIGN section 4). A ctl fid holds the slot LIVE (refs) but is NOT an
+// EOF-counted endpoint (n_master/n_slave count master/slave DATA fds only).
 const FK_MASTER: u64 = 1;
 const FK_SLAVE: u64 = 2;
+const FK_CTL: u64 = 3;
 
 fn is_pts(path: u64) -> bool {
     path & PTS_FLAG != 0
@@ -167,6 +201,17 @@ fn pts_filekind(path: u64) -> u64 {
 
 fn is_master_path(path: u64) -> bool {
     is_pts(path) && pts_filekind(path) == FK_MASTER
+}
+
+fn is_ctl_path(path: u64) -> bool {
+    is_pts(path) && pts_filekind(path) == FK_CTL
+}
+
+/// A master/slave DATA endpoint -- the opened-fd EOF counts (n_master/n_slave)
+/// track exactly these. A ctl fid is NOT an endpoint: gating every open_dec on
+/// this keeps an opened ctl from corrupting the peer-closed EOF signal.
+fn is_endpoint_path(path: u64) -> bool {
+    is_pts(path) && (pts_filekind(path) == FK_MASTER || pts_filekind(path) == FK_SLAVE)
 }
 
 /// The pts number a path names (a master or slave endpoint), or None for a static
@@ -216,6 +261,10 @@ struct Pts {
     line_len: usize,
     sigs: [u8; SIGS_MAX],
     nsigs: usize,
+    /// Per-pts winsize (PTY-2c). 0x0 until the emulator sets it (the Linux
+    /// fresh-pts posture; openpty sets it at once in practice).
+    winsz_cols: u32,
+    winsz_rows: u32,
 }
 
 pub struct Ptys {
@@ -246,6 +295,8 @@ impl Ptys {
             line_len: 0,
             sigs: [0; SIGS_MAX],
             nsigs: 0,
+            winsz_cols: 0,
+            winsz_rows: 0,
         });
         Some(n)
     }
@@ -481,6 +532,125 @@ impl Ptys {
         }
     }
 
+    /// Render the per-pts ctl read-back: the five +/-name tokens (the kernel
+    /// consctl order) + the winsize, one line -- e.g.
+    /// "+icanon +echo +isig +icrnl +onlcr winsize 80 24\n". Returns the length
+    /// written (out should hold CTL_RENDER_MAX).
+    fn ctl_render(&self, n: u32, out: &mut [u8]) -> usize {
+        let p = match self.slot(n) {
+            Some(p) => p,
+            None => return 0,
+        };
+        let mut w = 0usize;
+        for (name, bit) in CTL_FLAGS {
+            put_bytes(out, &mut w, if p.tio & bit != 0 { b"+" } else { b"-" });
+            put_bytes(out, &mut w, name);
+            put_bytes(out, &mut w, b" ");
+        }
+        put_bytes(out, &mut w, b"winsize ");
+        let mut d = [0u8; 12];
+        let l = fmt_dec(p.winsz_cols, &mut d).len();
+        put_bytes(out, &mut w, &d[..l]);
+        put_bytes(out, &mut w, b" ");
+        let l = fmt_dec(p.winsz_rows, &mut d).len();
+        put_bytes(out, &mut w, &d[..l]);
+        put_bytes(out, &mut w, b"\n");
+        w
+    }
+
+    /// Parse + apply a ctl write (the tcsetattr-atomic posture: ALL tokens are
+    /// validated BEFORE ANY is applied -- one malformed token rejects the whole
+    /// write with the mode unchanged, the kernel consctl contract). Grammar:
+    /// whitespace-separated tokens; "+name"/"-name" over the five LS-8 flags;
+    /// "winsize <cols> <rows>" (decimal, <= 65535; canonical -- no leading
+    /// zeros). Ops apply in order; a flag change resets the ICANON assembly
+    /// (TCSAFLUSH). Returns Ok(winsize_changed) -- the caller raises
+    /// TTY_SIG_WINCH iff the size actually changed (the Linux TIOCSWINSZ
+    /// behavior); Err(()) on any malformed token.
+    fn ctl_apply(&mut self, n: u32, data: &[u8]) -> Result<bool, ()> {
+        // Tokenize (bounded).
+        let mut toks: [&[u8]; CTL_MAX_OPS + 8] = [b""; CTL_MAX_OPS + 8];
+        let mut ntok = 0usize;
+        for t in data.split(|&b| b == b' ' || b == b'\t' || b == b'\r' || b == b'\n') {
+            if t.is_empty() {
+                continue;
+            }
+            if ntok >= toks.len() {
+                return Err(());
+            }
+            toks[ntok] = t;
+            ntok += 1;
+        }
+        // Pass 1: validate ALL into ops.
+        let mut ops: [CtlOp; CTL_MAX_OPS] = [CtlOp::Flag(0, false); CTL_MAX_OPS];
+        let mut nops = 0usize;
+        let mut i = 0usize;
+        while i < ntok {
+            let t = toks[i];
+            let op = if t == b"winsize" {
+                if i + 3 > ntok {
+                    return Err(()); // arity: needs two following tokens
+                }
+                let c = parse_dec(toks[i + 1]).ok_or(())?;
+                let r = parse_dec(toks[i + 2]).ok_or(())?;
+                if c > WINSZ_MAX || r > WINSZ_MAX {
+                    return Err(());
+                }
+                i += 2;
+                CtlOp::Winsize(c, r)
+            } else if t.len() > 1 && (t[0] == b'+' || t[0] == b'-') {
+                let set = t[0] == b'+';
+                let name = &t[1..];
+                let mut bit = 0u32;
+                for (fname, fbit) in CTL_FLAGS {
+                    if name == fname {
+                        bit = fbit;
+                        break;
+                    }
+                }
+                if bit == 0 {
+                    return Err(()); // unknown flag name
+                }
+                CtlOp::Flag(bit, set)
+            } else {
+                return Err(()); // unknown token shape
+            };
+            if nops >= CTL_MAX_OPS {
+                return Err(());
+            }
+            ops[nops] = op;
+            nops += 1;
+            i += 1;
+        }
+        // Pass 2: apply in order.
+        let p = self.slot_mut(n).ok_or(())?;
+        let mut flags_touched = false;
+        let mut winch = false;
+        for op in ops.iter().take(nops) {
+            match *op {
+                CtlOp::Flag(bit, set) => {
+                    if set {
+                        p.tio |= bit;
+                    } else {
+                        p.tio &= !bit;
+                    }
+                    flags_touched = true;
+                }
+                CtlOp::Winsize(c, r) => {
+                    if (c, r) != (p.winsz_cols, p.winsz_rows) {
+                        p.winsz_cols = c;
+                        p.winsz_rows = r;
+                        winch = true;
+                    }
+                }
+            }
+        }
+        if flags_touched {
+            p.line_len = 0; // TCSAFLUSH: a mode change resets the assembly
+        }
+        Ok(winch)
+    }
+
     /// Drain up to buf.len() bytes toward the slave (from m2s). Empty + master
     /// closed -> Eof; empty + master open -> WouldBlock.
     fn slave_read(&mut self, n: u32, buf: &mut [u8]) -> RecvOutcome {
@@ -517,14 +687,23 @@ impl Ptys {
         path == P_ROOT
     }
 
-    /// Resolve one walk step. A pts slave resolves only while its slot is LIVE, so
-    /// a stale/forged slave qid is unreachable (the netd live-slot property).
+    /// Resolve one walk step. A pts slave/ctl resolves only while its slot is
+    /// LIVE, so a stale/forged qid is unreachable (the netd live-slot property).
     fn walk_child(&self, cur: u64, name: &[u8]) -> Option<u64> {
         if cur != P_ROOT {
             return None; // only the devpts root has children
         }
         if name == b"ptmx" {
             return Some(P_PTMX);
+        }
+        // "<n>ctl" resolves to the live per-pts ctl (the suffix-ctl idiom).
+        if name.len() > 3 && name.ends_with(b"ctl") {
+            let n = parse_dec(&name[..name.len() - 3])?;
+            return if self.live(n) {
+                Some(make_pts(n, FK_CTL))
+            } else {
+                None
+            };
         }
         // A decimal name resolves to a live slave (a stale/forged N is unreachable,
         // the netd live-slot property).
@@ -547,8 +726,13 @@ impl Ptys {
         for n in 0..PTS_MAX as u32 {
             if self.live(n) {
                 let mut buf = [0u8; 12];
-                let name = fmt_dec(n, &mut buf);
-                f(name, make_pts(n, FK_SLAVE), false);
+                let len = fmt_dec(n, &mut buf).len();
+                f(&buf[..len], make_pts(n, FK_SLAVE), false);
+                // The suffix-ctl sibling: "<n>ctl".
+                let mut cbuf = [0u8; 15];
+                cbuf[..len].copy_from_slice(&buf[..len]);
+                cbuf[len..len + 3].copy_from_slice(b"ctl");
+                f(&cbuf[..len + 3], make_pts(n, FK_CTL), false);
             }
         }
     }
@@ -670,7 +854,7 @@ impl Conn {
     pub fn teardown(&mut self, ptys: &mut Ptys) {
         for slot in self.fids.iter_mut() {
             if let Some(f) = slot.take() {
-                if f.opened && is_pts(f.path) {
+                if f.opened && is_endpoint_path(f.path) {
                     ptys.open_dec(pts_n(f.path), is_master_path(f.path));
                 }
                 Conn::free_pts(ptys.unref_path(f.path));
@@ -697,7 +881,7 @@ impl Conn {
                 path,
                 opened: false,
             });
-            if old.opened && is_pts(old.path) {
+            if old.opened && is_endpoint_path(old.path) {
                 ptys.open_dec(pts_n(old.path), is_master_path(old.path));
             }
             Conn::free_pts(ptys.unref_path(old.path));
@@ -719,7 +903,7 @@ impl Conn {
         if let Some(i) = self.fid_find(fid) {
             let f = self.fids[i].take().unwrap();
             self.pending_reads.retain(|pr| pr.fid != fid);
-            if f.opened && is_pts(f.path) {
+            if f.opened && is_endpoint_path(f.path) {
                 ptys.open_dec(pts_n(f.path), is_master_path(f.path));
             }
             Conn::free_pts(ptys.unref_path(f.path));
@@ -860,7 +1044,7 @@ impl Conn {
     fn drop_all_fids(&mut self, ptys: &mut Ptys) {
         for slot in self.fids.iter_mut() {
             if let Some(f) = slot.take() {
-                if f.opened && is_pts(f.path) {
+                if f.opened && is_endpoint_path(f.path) {
                     ptys.open_dec(pts_n(f.path), is_master_path(f.path));
                 }
                 Conn::free_pts(ptys.unref_path(f.path));
@@ -1001,6 +1185,15 @@ impl Conn {
                     Err(())
                 }
             }
+        } else if is_ctl_path(f.path) {
+            // The per-pts ctl (/pts/<n>ctl): opens plainly -- no registration,
+            // no EOF count (a ctl fid is not an endpoint); the bound fid
+            // already holds the slot ref.
+            let q = self.qid_of(ptys, f.path);
+            let mut nf = f;
+            nf.opened = true;
+            self.fids[i] = Some(nf);
+            p9::build_rlopen(&mut self.out_buf, tag, &q, 0)
         } else if is_pts(f.path) && !is_master_path(f.path) {
             // A slave open (/pts/<n>): register the slave binding, mark opened.
             let n = pts_n(f.path);
@@ -1045,6 +1238,18 @@ impl Conn {
         }
         if ptys.is_dir(f.path) {
             return self.err(tag, p9::E_ISDIR); // a dir listing is Treaddir
+        }
+        if is_ctl_path(f.path) {
+            // The ctl read-back: a small offset-served file (the kernel consctl
+            // read shape) -- NOT a stream, never defers.
+            let mut lb = [0u8; CTL_RENDER_MAX];
+            let len = ptys.ctl_render(pts_n(f.path), &mut lb);
+            let off = a.offset as usize;
+            if off >= len {
+                return p9::build_rread(&mut self.out_buf, tag, &[]);
+            }
+            let k = (len - off).min(a.count as usize);
+            return p9::build_rread(&mut self.out_buf, tag, &lb[off..off + k]);
         }
         if !is_pts(f.path) {
             return self.err(tag, p9::E_INVAL); // no readable static file (ptmx is open-only)
@@ -1099,6 +1304,26 @@ impl Conn {
         let f = self.fids[i].unwrap();
         if !f.opened || !is_pts(f.path) {
             return self.err(tag, p9::E_INVAL);
+        }
+        if is_ctl_path(f.path) {
+            // The ctl write (PTY-2c): the atomic grammar apply. A winsize
+            // CHANGE raises TTY_SIG_WINCH via the pts-scoped seam -- the
+            // kernel routes tty:winch to the fg pgrp (ptyfs never names one).
+            let n = pts_n(f.path);
+            return match ptys.ctl_apply(n, a.data) {
+                Ok(winch) => {
+                    if winch {
+                        let pid = ptys.pts_id(n);
+                        if pid > 0 {
+                            unsafe {
+                                let _ = t_tty_signal(pid as u64, T_TTY_SIG_WINCH);
+                            }
+                        }
+                    }
+                    p9::build_rwrite(&mut self.out_buf, tag, a.data.len() as u32)
+                }
+                Err(()) => self.err(tag, p9::E_INVAL),
+            };
         }
         let n = pts_n(f.path);
         // PTY-2b: a master write runs the INPUT cook (toward m2s + the echo);
@@ -1536,6 +1761,102 @@ pub fn selftest() -> Result<(), &'static str> {
             RecvOutcome::Data(2) if &sink[..2] == b"\r\n" => {} // the NL echo
             _ => return Err("overflow-nl-echo"),
         }
+    }
+
+    // ---- The ctl battery (PTY-2c: the per-pts termios grammar + winsize).
+    ptys.set_tio(n, TIO_DEFAULT);
+
+    // (a) The render format (fresh winsize is 0x0 until set).
+    let mut cbuf = [0u8; CTL_RENDER_MAX];
+    let l = ptys.ctl_render(n, &mut cbuf);
+    if &cbuf[..l] != b"+icanon +echo +isig +icrnl +onlcr winsize 0 0\n" {
+        return Err("ctl-render");
+    }
+
+    // (b) Atomic reject: one malformed token rejects the WHOLE write (mode
+    // unchanged -- the tcsetattr-atomic posture).
+    if ptys.ctl_apply(n, b"-echo").is_err() {
+        return Err("ctl-apply-simple");
+    }
+    if ptys.ctl_apply(n, b"+echo +bogus").is_ok() {
+        return Err("ctl-atomic-accepted");
+    }
+    let l = ptys.ctl_render(n, &mut cbuf);
+    if !cbuf[..l].starts_with(b"+icanon -echo") {
+        return Err("ctl-atomic-mutated"); // the valid +echo must NOT have applied
+    }
+    if ptys.ctl_apply(n, b"+echo").is_err() {
+        return Err("ctl-reapply");
+    }
+
+    // (c) winsize: raise iff CHANGED (the Linux TIOCSWINSZ behavior); band +
+    // arity + shape rejects.
+    match ptys.ctl_apply(n, b"winsize 132 43") {
+        Ok(true) => {}
+        _ => return Err("winsize-set"),
+    }
+    match ptys.ctl_apply(n, b"winsize 132 43") {
+        Ok(false) => {}
+        _ => return Err("winsize-same-no-winch"),
+    }
+    let l = ptys.ctl_render(n, &mut cbuf);
+    if !cbuf[..l].ends_with(b"winsize 132 43\n") {
+        return Err("winsize-render");
+    }
+    if ptys.ctl_apply(n, b"winsize 1").is_ok()
+        || ptys.ctl_apply(n, b"winsize 70000 1").is_ok()
+        || ptys.ctl_apply(n, b"winsize x 1").is_ok()
+    {
+        return Err("winsize-reject");
+    }
+
+    // (d) Mixed flag + winsize in one atomic write.
+    match ptys.ctl_apply(n, b"-onlcr winsize 80 24") {
+        Ok(true) => {}
+        _ => return Err("ctl-mixed"),
+    }
+    let l = ptys.ctl_render(n, &mut cbuf);
+    if &cbuf[..l] != b"+icanon +echo +isig +icrnl -onlcr winsize 80 24\n" {
+        return Err("ctl-mixed-render");
+    }
+    if ptys.ctl_apply(n, b"+onlcr").is_err() {
+        return Err("ctl-restore");
+    }
+
+    // (e) A flag apply resets the assembly (TCSAFLUSH): a half-typed line is
+    // discarded by the mode change; the following NL flushes an EMPTY line.
+    if ptys.master_write(n, b"zz") != 2 {
+        return Err("tcsaflush-type");
+    }
+    match ptys.master_read(n, &mut buf) {
+        RecvOutcome::Data(2) => {} // drain the "zz" echo
+        _ => return Err("tcsaflush-echo"),
+    }
+    if ptys.ctl_apply(n, b"+icanon").is_err() {
+        return Err("tcsaflush-apply");
+    }
+    if ptys.master_write(n, b"\n") != 1 {
+        return Err("tcsaflush-nl");
+    }
+    match ptys.slave_read(n, &mut buf) {
+        RecvOutcome::Data(1) if buf[0] == b'\n' => {} // just the NL: "zz" gone
+        _ => return Err("tcsaflush-reset"),
+    }
+    match ptys.master_read(n, &mut buf) {
+        RecvOutcome::Data(2) if &buf[..2] == b"\r\n" => {}
+        _ => return Err("tcsaflush-nl-echo"),
+    }
+
+    // (f) The walk grammar: "<n>ctl" resolves while live; degenerate shapes do
+    // not ("ctl" bare, a leading-zero prefix, a suffix mismatch).
+    if ptys.walk_child(P_ROOT, b"0ctl") != Some(make_pts(n, FK_CTL)) {
+        return Err("walk-ctl"); // n == 0: the fresh-table first mint
+    }
+    if ptys.walk_child(P_ROOT, b"ctl").is_some()
+        || ptys.walk_child(P_ROOT, b"00ctl").is_some()
+        || ptys.walk_child(P_ROOT, b"0ctlx").is_some()
+    {
+        return Err("walk-ctl-degenerate");
     }
 
     // ---- The teardown tail (raw again so writes are transparent).

@@ -6067,7 +6067,7 @@ int main(void) {
         }
         t_putstr("joey: /sbin/ptyfs up pid=");
         t_putstr(itoa_dec(ptyfs_pid, pbuf, sizeof(pbuf)));
-        t_putstr(" (2a+2b selftest passed; serving /srv/ptyfs)\n");
+        t_putstr(" (selftest passed; serving /srv/ptyfs)\n");
 
         // PTY-2a-2: mount ptyfs's devpts tree at /dev/pts. Fresh open=connect (a
         // 9P-mode service open yields a mountable dev9p root; the liveness fd was
@@ -6145,6 +6145,58 @@ int main(void) {
                 t_putstr("joey: PTY-2a-2 PROBE echo+slave->master bytes FAILED\n");
                 return 1;
             }
+            // (e2) PTY-2c ptsname: t_stat.qid_path carries the 9P qid VERBATIM,
+            //      and a ptyfs endpoint qid encodes PTS_FLAG(bit 40) | N<<8 |
+            //      filekind -- so the master's own fstat names its pts. This is
+            //      the documented ptsname mechanism (the PTY-3 pouch
+            //      ptsname() does exactly this decode; no extra file needed).
+            struct t_stat mst;
+            if (t_fstat(mfd, &mst) != 0 || (mst.qid_path & (1ULL << 40)) == 0 ||
+                ((mst.qid_path >> 8) & 0xffffffULL) != 0) {
+                t_putstr("joey: PTY-2a-2 PROBE ptsname qid decode FAILED\n");
+                return 1;
+            }
+            // (e3) the per-pts ctl (/dev/pts/0ctl -- the suffix-ctl idiom) +
+            //      the ECHO-off no-leak proof WITHOUT a blocking read: type a
+            //      line under -echo, then +echo and type another; the master's
+            //      next drain shows ONLY the second line's echo -- a leak
+            //      would show both ("hi\r\nok\r\n" = 8 bytes, not 4).
+            long cfd = t_open(T_WALK_OPEN_FROM_ROOT, "/dev/pts/0ctl", 13, T_ORDWR);
+            if (cfd < 0) {
+                t_putstr("joey: PTY-2a-2 PROBE open(/dev/pts/0ctl) FAILED\n");
+                return 1;
+            }
+            if (t_write(cfd, "-echo", 5) != 5 ||
+                t_write(mfd, "hi\r", 3) != 3 || t_read(sfd, rb, sizeof(rb)) != 3 ||
+                rb[0] != 'h' || rb[1] != 'i' || rb[2] != '\n') {
+                t_putstr("joey: PTY-2a-2 PROBE ctl -echo cooked line FAILED\n");
+                return 1;
+            }
+            if (t_write(cfd, "+echo", 5) != 5 ||
+                t_write(mfd, "ok\r", 3) != 3 || t_read(sfd, rb, sizeof(rb)) != 3 ||
+                rb[0] != 'o' || rb[1] != 'k' || rb[2] != '\n') {
+                t_putstr("joey: PTY-2a-2 PROBE ctl +echo cooked line FAILED\n");
+                return 1;
+            }
+            if (t_read(mfd, rb, sizeof(rb)) != 4 ||
+                rb[0] != 'o' || rb[1] != 'k' || rb[2] != '\r' || rb[3] != '\n') {
+                t_putstr("joey: PTY-2a-2 PROBE -echo LEAKED (echo bytes from the masked line)\n");
+                return 1;
+            }
+            // (e4) winsize: set via the ctl + read back via pread (the ctl fd's
+            //      cursor advanced with the writes; pread reads from 0). The
+            //      WINCH note delivery to a live fg pgrp is the 2e E2E.
+            unsigned char cb[96];
+            long cl;
+            if (t_write(cfd, "winsize 132 43", 14) != 14 ||
+                (cl = t_pread(cfd, cb, sizeof(cb), 0)) <= 0 ||
+                !mem_contains(cb, (size_t)cl, "+echo", 5) ||
+                !mem_contains(cb, (size_t)cl, "winsize 132 43", 14)) {
+                t_putstr("joey: PTY-2a-2 PROBE ctl winsize round-trip FAILED\n");
+                return 1;
+            }
+            (void)t_close(cfd); // drop the ctl ref BEFORE the EOF/free legs
+
             // (f) master close -> the slave read sees EOF. The close's Tclunk is
             //     wire-ordered before the Tread on the shared session, so ptyfs
             //     processes close-then-read deterministically (n_master 0 ->
@@ -6157,7 +6209,8 @@ int main(void) {
             }
             (void)t_close(sfd); // the last binding: ptyfs frees pts 0 + FREEs the registry entry
             t_putstr("joey: PTY-2a-2 PROBE OK (ptmx clone -> pts 0; cooked master<->slave"
-                     " [ICRNL+ICANON+ECHO+ONLCR]; close -> EOF)\n");
+                     " [ICRNL+ICANON+ECHO+ONLCR]; ptsname qid + ctl [-echo no-leak;"
+                     " winsize]; close -> EOF)\n");
         }
 #endif /* THYLA_BOOT_PROBES (the PTY-2a-2 round-trip) */
     }

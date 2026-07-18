@@ -34,10 +34,10 @@ pub extern "C" fn rs_main() -> i64 {
     // + mount-independent (the netd echo_e2e analog). A failure gates the boot.
     match server::selftest() {
         Ok(()) => {
-            t_putstr("ptyfs: 2a+2b selftest PASS\n");
+            t_putstr("ptyfs: selftest PASS\n");
         }
         Err(stage) => {
-            t_putstr("ptyfs: 2a+2b selftest FAIL: ");
+            t_putstr("ptyfs: selftest FAIL: ");
             t_putstr(stage);
             t_putstr("\n");
             return 1;

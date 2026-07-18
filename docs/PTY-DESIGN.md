@@ -343,6 +343,27 @@ slave `"ping\n"`; the master's read sees the echo `"ping\r\n"` then `"pong"`).
 The per-pts **ctl surface to change the word is PTY-2c** (`set_tio` is landed,
 resets the assembly — the TCSAFLUSH posture).
 
+*As-built (PTY-2c)*: the per-pts ctl at **`/dev/pts/<n>ctl`** (the Plan 9
+suffix-ctl idiom — `eia0`/`eia0ctl` — so the flat Linux-devpts slave names
+stay POSIX-intact; a ctl fid holds the slot ref but is **not** an EOF-counted
+endpoint). The grammar = the LS-8b consctl grammar per-pts (`+name`/`-name`
+over the five flags; ALL tokens validated before ANY applied — one malformed
+token rejects the whole write, the tcsetattr-atomic posture; a flag apply
+resets the assembly = TCSAFLUSH) **+ the winsize op** `winsize <cols> <rows>`
+(decimal ≤ 65535; stores the per-pts winsize and raises
+`SYS_TTY_SIGNAL(WINCH)` **iff the size changed** — the Linux TIOCSWINSZ
+behavior; the kernel routes `tty:winch` to the fg pgrp). Read-back is one
+line: `+icanon +echo +isig +icrnl +onlcr winsize C R\n`. **ptsname** needs no
+new surface: `t_stat.qid_path` carries the 9P qid verbatim, and a ptyfs
+endpoint qid encodes `PTS_FLAG(bit 40) | N<<8 | filekind` — so
+`ptsname(master_fd)` = the fstat qid decode (the boot probe proves it live;
+the PTY-3 pouch `ptsname()` implements exactly this; the qid encoding is
+thereby a documented ptyfs client contract). The boot probe drives the ctl
+live: the `-echo` **no-leak proof without a blocking read** (type a line under
+`-echo`, then `+echo` and type another — the master's next drain shows ONLY
+the second line's echo) + the winsize round-trip via `t_pread` (the ctl fd's
+cursor advanced with the writes — positioned read from 0).
+
 - **`/dev/ptmx` open → mint pts N** (the netd clone idiom): allocate the pts
   slot, its M2S + S2M rings, its per-pts `Ldisc` (the de-globalized LS-8 cooking
   + a per-pts `termios` word, `CONS_ICANON`-default), its winsize, and return the
