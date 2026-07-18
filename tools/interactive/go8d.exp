@@ -1,0 +1,64 @@
+#!/usr/bin/expect -f
+# tools/interactive/go8d.exp -- GO-IDE Stage 8d over a real PTY: the gopls
+# LSP-engine port runs on-device. Proves gopls (baked at /goroot/bin, on PATH
+# beside `go`) EXECS (the ~25 MB REVENANT file-backed exec) and that its
+# go/packages -> on-device `go list` -> type-check engine loads a real module
+# and reports a diagnostic -- the editing-intelligence half of the Go IDE,
+# driven through gopls's OFFLINE CLI subcommands (no LSP client; that is 8e).
+#
+# The gopls analog of go8c's `ambush exec ... bt/print`: the CLI subcommands run
+# the FULL engine (load -> parse -> type-check -> query) without a transport.
+#
+# Console-frugal by design: every command is SHORT. The ut line editor redraws
+# the whole colored prompt on every keystroke, so a long typed line is a byte
+# storm back through the console -- which the macOS socket transport (the #66
+# unix-socket bridge) can drop under load. Short commands + tiny testdata keep
+# the storm small (a long `echo 'func ... { ... }'` line was what tipped it).
+
+source [file join [file dirname [info script]] lib.exp]
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# Idempotency (the LS-CI wrapper re-runs up to 3x): drop any prior attempt.
+# Unasserted -- "no such file" on a clean first run is expected noise.
+lc_send "rm gd/x.go"
+sleep 1
+lc_send "rm gd/go.mod"
+sleep 1
+lc_send "mkdir gd"
+sleep 1
+lc_send "cd gd"
+sleep 1
+
+# 8d(a): gopls is baked into the pool at /goroot/bin (on PATH beside `go` via
+# the login-seeded $PATH -- the Stage-6 env chain).
+lc_run_expect "which gopls" "/goroot/bin/gopls"
+lc_pass "go8d(a): gopls resolves via the login-seeded \$PATH"
+
+# 8d(b): the ~25 MB gopls binary EXECS on-device (REVENANT file-backed exec) --
+# `gopls version` needs no toolchain, just the binary running to completion.
+lc_run_expect "gopls version" "golang.org/x/tools/gopls"
+lc_pass "go8d(b): gopls execs on-device (version prints)"
+
+# A tiny module with a deterministic type-check diagnostic (an undefined
+# identifier). Short lines -> small redraw storm; no quotes needed for the
+# module lines; the source uses a single-quoted arg (protects the `=`).
+lc_send "echo module p > go.mod"
+sleep 1
+lc_send "echo go 1.25 >> go.mod"
+sleep 1
+lc_send "echo package p > x.go"
+sleep 1
+lc_send "echo 'var _ = zzz' >> x.go"
+sleep 1
+
+# 8d(c): THE ENGINE runs -- go/packages loads the module through the on-device
+# `go list`, type-checks it, and gopls reports the undefined-identifier
+# diagnostic. This is the substantive proof. The first go/packages load spawns
+# a few `go` probes; allow a long window (cold).
+set ::lc_cmd_timeout 300
+lc_run_expect "gopls check x.go" "undefined"
+lc_pass "go8d(c): gopls engine loads + type-checks on-device (undefined-ident diagnostic)"
+
+lc_quit

@@ -251,6 +251,51 @@ gopls keeps its upstream name (it is *Nora's Go plugin's* language server, per
 
 ---
 
+## 12. 8d-2 as-built — the engine runs on-device (2026-07-18)
+
+The `/gopls-probe` is `tools/interactive/go8d.exp` (the go6.exp pattern: boot ->
+login -> drive gopls at the ut prompt). Verified GREEN on HVF:
+
+- **8d(a)** `which gopls` -> `/goroot/bin/gopls` (baked + on PATH).
+- **8d(b)** `gopls version` -> `golang.org/x/tools/gopls v0.0.0-...` (the ~25 MB
+  binary execs on-device via the REVENANT file-backed-exec path).
+- **8d(c)** `gopls check x.go` on a two-line module with an undefined identifier
+  -> `/home/michael/gd/x.go:2:9-12: undefined: zzz`. **The gopls engine runs:**
+  go/packages loaded the module through the on-device `go list`, type-checked it,
+  and produced the exact diagnostic.
+
+Two runtime findings, both root-caused to ground (not waved off):
+
+1. **The interactive-harness transport limit (host-side, not gopls).** Building
+   the test module via long single-quoted `echo` commands made ut's line editor
+   storm the console with per-keystroke prompt redraws, which the macOS
+   unix-socket serial bridge (#66) drops under load -> a host-side `nc`-bridge
+   EOF (qemu clean, no guest crash, nondeterministic point). Fix: the probe uses
+   only SHORT commands + tiny testdata. (A general note for console-driven E2Es:
+   keep typed lines short.)
+
+2. **THE root cause of "gopls cannot find `go`" -- a Go-fork LookPath
+   PATH-casing bug.** gopls's go/packages invokes `go` via
+   `exec.Command("go", ...)` -> `exec.LookPath("go")`, which failed with
+   `exec: "go": executable file not found in $path` -> "no views" -> a segv.
+   The lowercase `$path` in the error was the tell: the fork's
+   `src/os/exec/lp_thylacine.go` read `os.Getenv("path")` -- Plan 9's lowercase
+   variable, copied from `lp_plan9.go` -- while Thylacine's POSIX-shaped /env
+   seeds the UPPERCASE `PATH` (login: `PATH=/bin:/goroot/bin`). `go build` was
+   immune (the `go` driver resolves tools via GOROOT; ut resolves `go` via its
+   own Plan-9 `$path`), so gopls is the FIRST on-device Go program to use
+   `exec.LookPath` and expose the mismatch. Fixed in the go-thylacine fork
+   (`973b872`): LookPath reads `os.Getenv("PATH")` + the stale "no environment"
+   comment corrected. This is a general fix -- every future on-device Go program
+   that shells out via LookPath now resolves against the seeded PATH.
+
+Open (8d-3): the trailing `snare:segv` that fires AFTER `gopls check` prints its
+diagnostic + the assert passes -- a gopls (or spawned `go` subprocess) teardown
+robustness nit, non-blocking (the useful work completed, expect exited 0);
+investigate + the TCG-LS-CI validation + a definition-query leg at the arc close.
+
+---
+
 ## 11. References
 
 - `docs/GO-IDE-DESIGN.md §8` (the staged plan; 8d = this arc).
