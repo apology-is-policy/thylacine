@@ -20,12 +20,20 @@
 //   <master n>     (MASTER n, file) the master byte channel, minted by clone
 //                                  (not a walkable/readdir node).
 //
-// The master writes cooked input toward the slave (m2s); the slave writes output
-// toward the master (s2m). A read on an empty-but-open ring DEFERS (the netd
+// The master writes INPUT toward the slave (m2s); the slave writes OUTPUT toward
+// the master (s2m). A read on an empty-but-open ring DEFERS (the netd
 // PendingRead / Disp::Deferred / poll_reads mechanism -- a multi-waiter SET, not
-// the cons single-reader). PTY-2a is RAW (no cooking): a master write pushes
-// bytes straight to m2s. The line discipline (ICANON/ISIG/ECHO/ICRNL/ONLCR) lands
-// at PTY-2b.
+// the cons single-reader).
+//
+// The per-pts line discipline (PTY-2b -- the de-globalized LS-8 cooking, the
+// kernel cons.c reference algorithm reimplemented per-pts): a master write runs
+// the INPUT cook (ICRNL -> ISIG -> ICANON | raw; echo toward the master through
+// the OUTPUT transform, gated at the single echo() chokepoint -- the ECHO-off
+// hard no-leak guarantee); a slave write runs the OUTPUT cook (ONLCR). ISIG
+// raises via the pts-scoped SYS_TTY_SIGNAL -- the kernel resolves
+// pts -> ct_sid -> fg_pgid; ptyfs can never name a process group (I-1/I-22).
+// A fresh pts is FULL COOKED (TIO_DEFAULT -- the Linux fresh-pts posture); the
+// per-pts ctl surface to change it is PTY-2c.
 //
 // Refcounts: a fid bound to a MASTER/SLAVE node holds the pts slot LIVE (`refs`);
 // separately, OPENED master/slave fds are counted (`n_master`/`n_slave`) so a
@@ -43,8 +51,9 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use libthyla_rs::ninep as p9;
 use libthyla_rs::{
-    t_close, t_open, t_pty_register, t_walk_create, T_GID_SYSTEM, T_OPATH, T_OREAD,
-    T_PRINCIPAL_SYSTEM, T_PTY_REG_FREE, T_PTY_REG_MINT, T_PTY_REG_SLAVE, T_WALK_OPEN_FROM_ROOT,
+    t_close, t_open, t_pty_register, t_tty_signal, t_walk_create, T_GID_SYSTEM, T_OPATH, T_OREAD,
+    T_PRINCIPAL_SYSTEM, T_PTY_REG_FREE, T_PTY_REG_MINT, T_PTY_REG_SLAVE, T_TTY_SIG_INT,
+    T_TTY_SIG_QUIT, T_TTY_SIG_TSTP, T_WALK_OPEN_FROM_ROOT,
 };
 
 /// Max concurrent 9P connections the accept loop tracks. In practice joey's one
@@ -66,8 +75,46 @@ const SRV_MSIZE_USIZE: usize = SRV_MSIZE as usize;
 
 /// Per-direction byte-ring capacity (m2s / s2m). A pts is a terminal, not a bulk
 /// pipe: 4 KiB each way is the classic tty buffer size. A full ring back-pressures
-/// via a short Rwrite (the writer retries) -- no byte is dropped.
+/// via a short Rwrite (the writer retries) -- no byte is dropped -- EXCEPT the
+/// cooked-input flush + the echo, which drop on full (tty input overrun / the
+/// best-effort echo; the kernel cons drop-on-full posture -- see master_write).
 const RING_CAP: usize = 4096;
+
+// =============================================================================
+// The line discipline (PTY-2b). The five LS-8 flags -- the kernel cons.c bit
+// values, so the 2c per-pts ctl grammar speaks the same +name/-name set.
+// =============================================================================
+
+const TIO_ICANON: u32 = 0x01;
+const TIO_ECHO: u32 = 0x02;
+const TIO_ISIG: u32 = 0x04;
+const TIO_ICRNL: u32 = 0x08;
+const TIO_ONLCR: u32 = 0x10;
+
+/// A fresh pts is FULL COOKED (the Linux fresh-pts default; PTY-DESIGN section 5
+/// "CONS_ICANON-default"). The kernel CONSOLE boots ISIG-only, but that is a
+/// boot-console posture -- a pts serves a terminal emulator + a shell, where
+/// cooked is the POSIX expectation. The 2c ctl flips any flag per-pts.
+const TIO_DEFAULT: u32 = TIO_ICANON | TIO_ECHO | TIO_ISIG | TIO_ICRNL | TIO_ONLCR;
+
+/// ICANON line-assembly bound (the kernel CONS_LINE_MAX). Overflow drops the
+/// byte un-echoed (the cons contract); NL always flushes what is assembled.
+const LINE_MAX: usize = 256;
+
+/// Signal classes collected per master write ([u8] of T_TTY_SIG_*). Overflow
+/// drops -- note-bit delivery dedupes repeats of one class anyway.
+const SIGS_MAX: usize = 8;
+
+// The cooked control characters (the standard VINTR/VQUIT/VSUSP set -- the
+// kernel console cooks only Ctrl-C, a boot-console limit, not the pty contract;
+// the kernel signal classes INT/QUIT/TSTP exist for exactly this ldisc).
+const CH_INTR: u8 = 0x03; // Ctrl-C  -> TTY_SIG_INT
+const CH_QUIT: u8 = 0x1c; // Ctrl-\  -> TTY_SIG_QUIT
+const CH_SUSP: u8 = 0x1a; // Ctrl-Z  -> TTY_SIG_TSTP
+const CH_BS: u8 = 0x08;
+const CH_DEL: u8 = 0x7f;
+const CH_NL: u8 = 0x0a;
+const CH_CR: u8 = 0x0d;
 
 const P9_VERSION_9P2000_L: &[u8] = b"9P2000.L";
 
@@ -160,6 +207,15 @@ struct Pts {
     /// n_master == 0 (the master fully closed); a master read when n_slave == 0.
     n_master: u32,
     n_slave: u32,
+    /// The per-pts line discipline (PTY-2b): the five-flag termios word + the
+    /// ICANON assembly line + the signal classes the input cook collected
+    /// (drained by h_write, which raises them via SYS_TTY_SIGNAL -- keeping the
+    /// syscall OUT of the pure cook, so the selftest asserts classes directly).
+    tio: u32,
+    line: [u8; LINE_MAX],
+    line_len: usize,
+    sigs: [u8; SIGS_MAX],
+    nsigs: usize,
 }
 
 pub struct Ptys {
@@ -185,6 +241,11 @@ impl Ptys {
             refs: 0,
             n_master: 0,
             n_slave: 0,
+            tio: TIO_DEFAULT,
+            line: [0; LINE_MAX],
+            line_len: 0,
+            sigs: [0; SIGS_MAX],
+            nsigs: 0,
         });
         Some(n)
     }
@@ -261,8 +322,8 @@ impl Ptys {
     }
 
     /// Push bytes onto a ring up to RING_CAP; returns the count accepted (a short
-    /// push is back-pressure -- the writer retries, no byte dropped). PTY-2a raw:
-    /// the master write goes straight to m2s (cooking is PTY-2b).
+    /// push is back-pressure at the raw/output writers; the cooked-input flush +
+    /// the echo treat a short push as a DROP -- see master_write / echo).
     fn ring_push(ring: &mut VecDeque<u8>, data: &[u8]) -> usize {
         let room = RING_CAP.saturating_sub(ring.len());
         let k = room.min(data.len());
@@ -270,17 +331,153 @@ impl Ptys {
         k
     }
 
-    fn master_write(&mut self, n: u32, data: &[u8]) -> usize {
-        match self.slot_mut(n) {
-            Some(p) => Ptys::ring_push(&mut p.m2s, data),
-            None => 0,
+    /// The single echo chokepoint (PTY-2b): EVERY echo staging passes here,
+    /// gated on ECHO -- the LS-8b ECHO-off hard no-leak guarantee, per-pts:
+    /// clear means NOTHING reaches the master, cooked erase/redraw included
+    /// (the password mask). An echoed byte rides the OUTPUT transform (ONLCR;
+    /// echo IS output, the Linux model) into s2m, drop-on-full (echo is
+    /// best-effort -- a keystroke echo cannot back-pressure the writer).
+    fn echo(p: &mut Pts, b: u8) {
+        if p.tio & TIO_ECHO == 0 {
+            return;
+        }
+        if b == CH_NL && p.tio & TIO_ONLCR != 0 {
+            let _ = Ptys::ring_push(&mut p.s2m, b"\r\n");
+        } else {
+            let _ = Ptys::ring_push(&mut p.s2m, &[b]);
         }
     }
 
+    /// The INPUT line discipline (a master write = the terminal emulator's
+    /// keystrokes) -- the kernel cons_rx_input algorithm per-pts, in the LS-8
+    /// order: ICRNL first -> ISIG (collect the class + CONSUME the byte: never
+    /// enqueued, never echoed -- pty.tla CookSignal / SignalXorByte) -> ICANON
+    /// (erase / line assembly / NL flush, the line INCLUDING its newline) ->
+    /// raw (pty.tla CookData). Echo goes toward the master via echo().
+    ///
+    /// Returns the count of input bytes CONSUMED (the Rwrite count). Cooked
+    /// (ICANON) consumes everything offered: an assembled byte past LINE_MAX
+    /// drops un-echoed (tty input overrun, the cons contract), and a line
+    /// flush into a full m2s drops the tail (the slave has RING_CAP unread --
+    /// a wedged reader; the console reference drops likewise). Raw
+    /// back-pressures instead: a full m2s stops consumption and returns the
+    /// short count (the 2a contract, unchanged).
+    fn master_write(&mut self, n: u32, data: &[u8]) -> usize {
+        let p = match self.slot_mut(n) {
+            Some(p) => p,
+            None => return 0,
+        };
+        let mut consumed = 0usize;
+        for &raw in data {
+            let mut b = raw;
+            // 1. ICRNL: CR -> NL on input.
+            if b == CH_CR && p.tio & TIO_ICRNL != 0 {
+                b = CH_NL;
+            }
+            // 2. ISIG: a signal-class control char raises + CONSUMES (no byte
+            //    reaches the slave, no echo -- SignalXorByte).
+            if p.tio & TIO_ISIG != 0 {
+                let class: u64 = match b {
+                    CH_INTR => T_TTY_SIG_INT,
+                    CH_QUIT => T_TTY_SIG_QUIT,
+                    CH_SUSP => T_TTY_SIG_TSTP,
+                    _ => 0,
+                };
+                if class != 0 {
+                    if p.nsigs < SIGS_MAX {
+                        p.sigs[p.nsigs] = class as u8;
+                        p.nsigs += 1;
+                    }
+                    consumed += 1;
+                    continue;
+                }
+            }
+            if p.tio & TIO_ICANON != 0 {
+                // 3. ICANON line assembly.
+                if b == CH_DEL || b == CH_BS {
+                    // Erase: drop the last unflushed byte; echo "\b \b".
+                    if p.line_len > 0 {
+                        p.line_len -= 1;
+                        Ptys::echo(p, CH_BS);
+                        Ptys::echo(p, b' ');
+                        Ptys::echo(p, CH_BS);
+                    }
+                } else if b == CH_NL {
+                    // NL: the line INCLUDING its newline flushes to the slave
+                    // (drop-on-full -- see above); echo the NL (ONLCR-aware).
+                    let len = p.line_len;
+                    let _ = Ptys::ring_push(&mut p.m2s, &p.line[..len]);
+                    let _ = Ptys::ring_push(&mut p.m2s, &[CH_NL]);
+                    p.line_len = 0;
+                    Ptys::echo(p, CH_NL);
+                } else if p.line_len < LINE_MAX {
+                    p.line[p.line_len] = b;
+                    p.line_len += 1;
+                    Ptys::echo(p, b);
+                }
+                // else: overflow -- dropped, NOT echoed (the cons contract).
+                consumed += 1;
+            } else {
+                // 4. Raw: straight to the slave; back-pressure on full (the
+                //    byte is NOT consumed -- the writer retries).
+                if Ptys::ring_push(&mut p.m2s, &[b]) == 0 {
+                    break;
+                }
+                Ptys::echo(p, b);
+                consumed += 1;
+            }
+        }
+        consumed
+    }
+
+    /// The OUTPUT line discipline (a slave write = the application's output):
+    /// ONLCR expands NL -> CR NL toward the master (pty.tla SlaveWrite).
+    /// Back-pressure: an expansion that does not fully fit stops BEFORE its
+    /// input byte and returns the short count of INPUT bytes consumed (never a
+    /// torn CR-NL pair -- a retry would double the CR).
     fn slave_write(&mut self, n: u32, data: &[u8]) -> usize {
+        let p = match self.slot_mut(n) {
+            Some(p) => p,
+            None => return 0,
+        };
+        let mut consumed = 0usize;
+        for &b in data {
+            if b == CH_NL && p.tio & TIO_ONLCR != 0 {
+                if RING_CAP.saturating_sub(p.s2m.len()) < 2 {
+                    break;
+                }
+                let _ = Ptys::ring_push(&mut p.s2m, b"\r\n");
+            } else if Ptys::ring_push(&mut p.s2m, &[b]) == 0 {
+                break;
+            }
+            consumed += 1;
+        }
+        consumed
+    }
+
+    /// Drain the signal classes the input cook collected. h_write raises them
+    /// via the pts-scoped SYS_TTY_SIGNAL AFTER the ring work (the syscall stays
+    /// out of the pure cook, so the selftest asserts classes directly -- its
+    /// local pts has no kernel entry to signal).
+    fn take_sigs(&mut self, n: u32) -> ([u8; SIGS_MAX], usize) {
         match self.slot_mut(n) {
-            Some(p) => Ptys::ring_push(&mut p.s2m, data),
-            None => 0,
+            Some(p) => {
+                let out = p.sigs;
+                let k = p.nsigs;
+                p.nsigs = 0;
+                (out, k)
+            }
+            None => ([0; SIGS_MAX], 0),
+        }
+    }
+
+    /// Set the per-pts termios word (the 2c ctl surface + the selftest). A mode
+    /// change resets the ICANON assembly line (the TCSAFLUSH posture the kernel
+    /// consctl apply carries).
+    fn set_tio(&mut self, n: u32, tio: u32) {
+        if let Some(p) = self.slot_mut(n) {
+            p.tio = tio;
+            p.line_len = 0;
         }
     }
 
@@ -904,10 +1101,24 @@ impl Conn {
             return self.err(tag, p9::E_INVAL);
         }
         let n = pts_n(f.path);
-        // PTY-2a RAW: a master write goes straight to m2s; a slave write to s2m.
-        // The line discipline (cook a master write) lands at PTY-2b.
+        // PTY-2b: a master write runs the INPUT cook (toward m2s + the echo);
+        // a slave write runs the OUTPUT cook (ONLCR toward s2m).
         let pushed = if is_master_path(f.path) {
-            ptys.master_write(n, a.data)
+            let consumed = ptys.master_write(n, a.data);
+            // Raise the collected signal classes via the pts-scoped seam: the
+            // KERNEL resolves pts -> ct_sid -> fg_pgid and routes -- ptyfs can
+            // never name a process group (the I-1/I-22 bound). pts_id 0 = a
+            // local/unregistered pts (the selftest) -- nothing to signal.
+            let (sigs, k) = ptys.take_sigs(n);
+            let pid = ptys.pts_id(n);
+            if pid > 0 {
+                for &s in sigs.iter().take(k) {
+                    unsafe {
+                        let _ = t_tty_signal(pid as u64, s as u64);
+                    }
+                }
+            }
+            consumed
         } else {
             ptys.slave_write(n, a.data)
         };
@@ -1088,11 +1299,11 @@ pub fn post_srv_ptyfs() -> Result<i64, ()> {
 }
 
 // =============================================================================
-// In-server selftest (PTY-2a): the ring/RecvOutcome logic, deterministic and
+// In-server selftest (PTY-2a rings + PTY-2b cooking): deterministic and
 // mount-independent (the netd echo_e2e analog). Proves the master/slave byte
-// round-trip + the EOF-vs-WouldBlock discipline without a real client. The 9P
-// server path + the kernel registration are exercised by the in-guest /dev probe
-// (PTY-2a's second half).
+// round-trip, the EOF-vs-WouldBlock discipline, and the full ldisc truth table
+// without a real client. The 9P server path + the kernel registration are
+// exercised by the in-guest /dev/pts boot probe.
 // =============================================================================
 
 /// Returns Ok(()) or a stage name on failure.
@@ -1104,8 +1315,11 @@ pub fn selftest() -> Result<(), &'static str> {
     ptys.open_inc(n, true); // master open
     ptys.open_inc(n, false); // slave open
 
+    // ---- The RAW battery (tio = 0: the 2a ring semantics, byte-transparent).
+    ptys.set_tio(n, 0);
+
     // Empty + both open -> WouldBlock, not EOF.
-    let mut buf = [0u8; 8];
+    let mut buf = [0u8; 16];
     match ptys.slave_read(n, &mut buf) {
         RecvOutcome::WouldBlock => {}
         _ => return Err("empty-slave-not-wouldblock"),
@@ -1144,6 +1358,188 @@ pub fn selftest() -> Result<(), &'static str> {
             _ => return Err("fifo-order"),
         }
     }
+
+    // Raw + no-echo transparency: signal chars + CR are DATA with tio = 0.
+    if ptys.master_write(n, &[CH_INTR, CH_CR]) != 2 {
+        return Err("raw-transparent-write");
+    }
+    match ptys.slave_read(n, &mut buf) {
+        RecvOutcome::Data(2) if buf[0] == CH_INTR && buf[1] == CH_CR => {}
+        _ => return Err("raw-transparent-read"),
+    }
+    let (_, k) = ptys.take_sigs(n);
+    if k != 0 {
+        return Err("raw-no-sigs");
+    }
+    match ptys.master_read(n, &mut buf) {
+        RecvOutcome::WouldBlock => {} // no echo staged with ECHO clear
+        _ => return Err("raw-no-echo"),
+    }
+
+    // ---- The COOKED battery (PTY-2b: the ldisc truth table vs the cons.c
+    // reference). set_tio resets the assembly line (the TCSAFLUSH posture).
+    ptys.set_tio(n, TIO_DEFAULT);
+
+    // (1) ICRNL + ICANON flush + ECHO + ONLCR in one stroke: "hi\r" -> the CR
+    // folds to NL -> the line flushes WITH its newline -> slave "hi\n"; the
+    // echo is "hi" + NL-> "\r\n" (echo rides the output transform).
+    if ptys.master_write(n, b"hi\r") != 3 {
+        return Err("cooked-write");
+    }
+    match ptys.slave_read(n, &mut buf) {
+        RecvOutcome::Data(3) if &buf[..3] == b"hi\n" => {}
+        _ => return Err("cooked-icrnl-flush"),
+    }
+    match ptys.master_read(n, &mut buf) {
+        RecvOutcome::Data(4) if &buf[..4] == b"hi\r\n" => {}
+        _ => return Err("cooked-echo-onlcr"),
+    }
+
+    // (2) Assembly holds until NL: no flush -> the slave sees nothing yet.
+    if ptys.master_write(n, b"ab") != 2 {
+        return Err("assembly-write");
+    }
+    match ptys.slave_read(n, &mut buf) {
+        RecvOutcome::WouldBlock => {}
+        _ => return Err("assembly-no-flush"),
+    }
+    match ptys.master_read(n, &mut buf) {
+        RecvOutcome::Data(2) if &buf[..2] == b"ab" => {} // the echo IS immediate
+        _ => return Err("assembly-echo"),
+    }
+
+    // (3) Erase: DEL pops the 'b'; the echo is "\b \b"; the flushed line is "ac\n".
+    if ptys.master_write(n, &[CH_DEL]) != 1 {
+        return Err("erase-write");
+    }
+    match ptys.master_read(n, &mut buf) {
+        RecvOutcome::Data(3) if buf[0] == CH_BS && buf[1] == b' ' && buf[2] == CH_BS => {}
+        _ => return Err("erase-echo"),
+    }
+    if ptys.master_write(n, b"c\n") != 2 {
+        return Err("erase-refill");
+    }
+    match ptys.slave_read(n, &mut buf) {
+        RecvOutcome::Data(3) if &buf[..3] == b"ac\n" => {}
+        _ => return Err("erase-flush"),
+    }
+    match ptys.master_read(n, &mut buf) {
+        RecvOutcome::Data(3) if &buf[..3] == b"c\r\n" => {}
+        _ => return Err("erase-refill-echo"),
+    }
+
+    // (4) Erase on an empty line: a no-op, NOT echoed.
+    if ptys.master_write(n, &[CH_DEL]) != 1 {
+        return Err("erase-empty-write");
+    }
+    match ptys.master_read(n, &mut buf) {
+        RecvOutcome::WouldBlock => {}
+        _ => return Err("erase-empty-no-echo"),
+    }
+
+    // (5) ISIG: the VINTR/VQUIT/VSUSP trio raises + CONSUMES -- never a byte
+    // toward the slave, never an echo (SignalXorByte).
+    if ptys.master_write(n, &[CH_INTR, CH_QUIT, CH_SUSP]) != 3 {
+        return Err("isig-write");
+    }
+    let (sigs, k) = ptys.take_sigs(n);
+    if k != 3
+        || sigs[0] != T_TTY_SIG_INT as u8
+        || sigs[1] != T_TTY_SIG_QUIT as u8
+        || sigs[2] != T_TTY_SIG_TSTP as u8
+    {
+        return Err("isig-classes");
+    }
+    match ptys.slave_read(n, &mut buf) {
+        RecvOutcome::WouldBlock => {}
+        _ => return Err("isig-not-a-byte"),
+    }
+    match ptys.master_read(n, &mut buf) {
+        RecvOutcome::WouldBlock => {}
+        _ => return Err("isig-not-echoed"),
+    }
+
+    // (6) ECHO off: the typed line still cooks toward the slave; NOTHING --
+    // data echo or erase echo -- reaches the master (the hard no-leak
+    // guarantee, the password mask).
+    ptys.set_tio(n, TIO_DEFAULT & !TIO_ECHO);
+    if ptys.master_write(n, b"pw") != 2 || ptys.master_write(n, &[CH_DEL]) != 1 {
+        return Err("echo-off-write");
+    }
+    if ptys.master_write(n, b"x\n") != 2 {
+        return Err("echo-off-nl");
+    }
+    match ptys.slave_read(n, &mut buf) {
+        RecvOutcome::Data(3) if &buf[..3] == b"px\n" => {}
+        _ => return Err("echo-off-cooks"),
+    }
+    match ptys.master_read(n, &mut buf) {
+        RecvOutcome::WouldBlock => {}
+        _ => return Err("echo-off-no-leak"),
+    }
+
+    // (7) Raw + ISIG (the boot-console-style mode): bytes flow transparently,
+    // the signal chars still cook.
+    ptys.set_tio(n, TIO_ISIG);
+    if ptys.master_write(n, &[b'k', CH_INTR]) != 2 {
+        return Err("raw-isig-write");
+    }
+    match ptys.slave_read(n, &mut buf) {
+        RecvOutcome::Data(1) if buf[0] == b'k' => {}
+        _ => return Err("raw-isig-data"),
+    }
+    let (sigs, k) = ptys.take_sigs(n);
+    if k != 1 || sigs[0] != T_TTY_SIG_INT as u8 {
+        return Err("raw-isig-class");
+    }
+
+    // (8) Output ONLCR: the slave's "a\nb" reaches the master as "a\r\nb".
+    ptys.set_tio(n, TIO_DEFAULT);
+    if ptys.slave_write(n, b"a\nb") != 3 {
+        return Err("onlcr-write");
+    }
+    match ptys.master_read(n, &mut buf) {
+        RecvOutcome::Data(4) if &buf[..4] == b"a\r\nb" => {}
+        _ => return Err("onlcr-read"),
+    }
+
+    // (9) Line-overflow: the byte past LINE_MAX drops un-echoed; NL still
+    // flushes the assembled LINE_MAX + the newline.
+    {
+        let fill = alloc::vec![b'A'; LINE_MAX];
+        if ptys.master_write(n, &fill) != LINE_MAX {
+            return Err("overflow-fill");
+        }
+        let mut sink = alloc::vec![0u8; LINE_MAX + 8];
+        match ptys.master_read(n, &mut sink) {
+            RecvOutcome::Data(k2) if k2 == LINE_MAX => {} // the fill echoed
+            _ => return Err("overflow-fill-echo"),
+        }
+        if ptys.master_write(n, b"B") != 1 {
+            return Err("overflow-byte"); // consumed...
+        }
+        match ptys.master_read(n, &mut sink) {
+            RecvOutcome::WouldBlock => {} // ...but dropped: NOT echoed
+            _ => return Err("overflow-not-echoed"),
+        }
+        if ptys.master_write(n, b"\n") != 1 {
+            return Err("overflow-nl");
+        }
+        match ptys.slave_read(n, &mut sink) {
+            RecvOutcome::Data(k2)
+                if k2 == LINE_MAX + 1
+                    && sink[LINE_MAX - 1] == b'A'
+                    && sink[LINE_MAX] == b'\n' => {}
+            _ => return Err("overflow-flush"),
+        }
+        match ptys.master_read(n, &mut sink) {
+            RecvOutcome::Data(2) if &sink[..2] == b"\r\n" => {} // the NL echo
+            _ => return Err("overflow-nl-echo"),
+        }
+    }
+
+    // ---- The teardown tail (raw again so writes are transparent).
+    ptys.set_tio(n, 0);
 
     // Master close -> the slave read sees EOF (drain-then-EOF: nothing queued).
     ptys.open_dec(n, true); // master closed

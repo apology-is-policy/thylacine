@@ -319,6 +319,30 @@ client: ptmx clone-mint (the kernel accepts the differing Rlopen qid),
 minted slave, both ring directions, master-close→slave-EOF. The line discipline
 is PTY-2b.
 
+*As-built (PTY-2b)*: the per-pts `Ldisc` — the five-flag word + the ICANON
+assembly line + the collected-signal set folded into `Pts` (`tio`/`line`/
+`sigs`); the input cook (`master_write`: ICRNL → ISIG [the standard
+VINTR/VQUIT/VSUSP trio → `SYS_TTY_SIGNAL` INT/QUIT/TSTP, consumed, never a
+byte, never echoed] → ICANON [erase `\b \b`, NL flushes the line WITH its
+newline; overflow past `LINE_MAX`=256 drops un-echoed] → raw); the output cook
+(`slave_write`: ONLCR, pair-atomic back-pressure); the single `echo()`
+chokepoint (echo rides the output transform toward the master; ECHO-off is the
+hard no-leak guarantee, per-pts). **A fresh pts is FULL COOKED**
+(`TIO_DEFAULT` = ICANON|ECHO|ISIG|ICRNL|ONLCR — the Linux fresh-pts posture;
+the "CONS_ICANON-default" above realized as the cooked set; the kernel
+console's ISIG-only boot word is a console posture, not the pts one). Ring-full
+policy: the cooked flush + the echo DROP on full (tty input overrun / the
+best-effort echo — the cons reference posture); the raw input + the output
+path back-pressure via a short count (the 2a contract). `h_write` raises the
+collected classes AFTER the ring work (the syscall stays out of the pure cook,
+so the selftest asserts classes directly). The selftest carries the full
+cooked truth table (ICRNL+flush+echo+ONLCR, assembly-holds, erase + empty-line
+erase, the ISIG trio, ECHO-off no-leak, raw+ISIG, output ONLCR, line
+overflow); the boot probe drives the cooked default live (master `"ping\r"` →
+slave `"ping\n"`; the master's read sees the echo `"ping\r\n"` then `"pong"`).
+The per-pts **ctl surface to change the word is PTY-2c** (`set_tio` is landed,
+resets the assembly — the TCSAFLUSH posture).
+
 - **`/dev/ptmx` open → mint pts N** (the netd clone idiom): allocate the pts
   slot, its M2S + S2M rings, its per-pts `Ldisc` (the de-globalized LS-8 cooking
   + a per-pts `termios` word, `CONS_ICANON`-default), its winsize, and return the

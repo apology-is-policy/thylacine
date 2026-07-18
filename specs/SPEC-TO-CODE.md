@@ -792,15 +792,24 @@ prose-validated: design + N-1..N-5 invariants in ARCH §7.6.1-§7.6.8, the
 Spec-first RE-ENABLED for I-20 (the PTY design pass, 2026-07-17;
 `docs/PTY-DESIGN.md`). `pty.tla` models the master/slave DATA path (the byte
 rings + cooking + the signal-routing seam + teardown) — the design-altitude
-model that pinned the votes. The byte/cooking IMPL is the userspace `ptyfs`
-(PTY-2+), so the data-path action↔code mapping is a RESERVATION until that
-server lands; the *signal-routing* half is realized NOW by the PTY-1 kernel
-seam (the pts registry + `SYS_TTY_SIGNAL` → ct_sid → fg_pgid — a server can
-never name a pgrp, the I-1/I-22 bound). The `pty_*` buggy cfgs
-(`signal_wrong_pgrp` / `signal_also_byte` / `lost_teardown_byte` /
-`double_stop`) each fire their exact invariant; clean + `pty_liveness` GREEN.
+model that pinned the votes. The *signal-routing* half is realized by the
+PTY-1 kernel seam (the pts registry + `SYS_TTY_SIGNAL` → ct_sid → fg_pgid — a
+server can never name a pgrp, the I-1/I-22 bound); the *data-path* half is
+realized by the userspace `ptyfs` (`usr/ptyfs/src/server.rs`, PTY-2a rings +
+PTY-2b ldisc — the table below). The `pty_*` buggy cfgs (`signal_wrong_pgrp`
+/ `signal_also_byte` / `lost_teardown_byte` / `double_stop`) each fire their
+exact invariant; clean + `pty_liveness` GREEN.
 NOTE: LS-8's *single-console* line discipline does NOT ride this — its
 load-bearing invariant is I-9's deferred poll-wake (`cons_poll.tla`), not I-20.
+
+| Spec action | Code site (as-built, PTY-2a/2b — userspace `ptyfs`) | Invariant pinned |
+|---|---|---|
+| `CookData` (a non-signal input byte becomes ring data) | `server.rs::Ptys::master_write` — the per-byte input cook (ICRNL → ISIG → ICANON assembly/flush \| raw push into `m2s`) | `RingConserved` (`SignalXorByte`'s data leg): every consumed non-signal byte is ring data (assembled-then-flushed or raw). |
+| `CookSignal` (an ISIG control char raises, is NOT a byte) | `server.rs::Ptys::master_write` — the ISIG arm (collect the class into `p.sigs`, `continue` = never enqueued, never echoed); raised by `h_write`'s master arm via the pts-scoped `t_tty_signal` | `SignalXorByte`: signal XOR data per consumed byte (the `signal_also_byte` counterexample). `SignalToFgOnly` rides the kernel seam (the server names only `(pts_id, class)`). |
+| `SlaveWrite` (the slave produces output toward the master) | `server.rs::Ptys::slave_write` — the ONLCR output cook into `s2m` (pair-atomic expansion; back-pressure short count) | ring conservation on the output direction. |
+| `SlaveDrain` / `MasterDrain` (a reader drains its ring) | `server.rs::Ptys::slave_read` / `master_read` → `ring_drain` (Data while non-empty **regardless of the peer's closure** = drain-then-EOF) | `TeardownDrainsThenEof` (the `lost_teardown_byte` counterexample): a byte in the ring is delivered before EOF. |
+| `SlaveSleep` / `MasterSleep` (a reader parks on empty-but-open) | `server.rs::Conn::h_read` — `RecvOutcome::WouldBlock` → a `PendingRead` parks (`Disp::Deferred`); `Conn::poll_reads` at the serve-loop top re-drains + delivers the held `Rread` | `NoStuckMasterReader`/`SlaveCanRead` (the I-9 family): ptyfs is single-threaded, a ring fills only via a serviced frame, so every parked read is re-checked before the loop parks. |
+| `CloseMaster` / `CloseSlave` (an endpoint fully closes) | `server.rs` — `open_dec` at `fid_clunk`/`fid_set`/`teardown`; `ring_drain`'s `other_open == 0` arm returns `Eof` only on an EMPTY ring | drain-then-EOF as above. The `CloseMaster` → `tty:hup` raise (`HupAtMostOnce`) is the PTY-2d reservation. |
 
 ## pty_stop.tla — PTY-1f (the job-control stop OWNERSHIP; the debug_stop.tla sibling, LANDED)
 

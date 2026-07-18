@@ -6067,7 +6067,7 @@ int main(void) {
         }
         t_putstr("joey: /sbin/ptyfs up pid=");
         t_putstr(itoa_dec(ptyfs_pid, pbuf, sizeof(pbuf)));
-        t_putstr(" (2a selftest passed; serving /srv/ptyfs)\n");
+        t_putstr(" (2a+2b selftest passed; serving /srv/ptyfs)\n");
 
         // PTY-2a-2: mount ptyfs's devpts tree at /dev/pts. Fresh open=connect (a
         // 9P-mode service open yields a mountable dev9p root; the liveness fd was
@@ -6122,18 +6122,27 @@ int main(void) {
                 t_putstr("joey: PTY-2a-2 PROBE open(/dev/pts/0) FAILED\n");
                 return 1;
             }
-            // (d) master -> slave (write-then-read, so the ring has bytes and
-            //     the read never defers).
+            // (d) master -> slave through the COOKED default ldisc (PTY-2b: a
+            //     fresh pts is full cooked). "ping\r": ICRNL folds the CR to
+            //     NL, ICANON flushes the line WITH its newline -> the slave
+            //     reads "ping\n". Write-then-read, so the read never defers.
             unsigned char rb[16];
-            if (t_write(mfd, "ping", 4) != 4 || t_read(sfd, rb, sizeof(rb)) != 4 ||
-                rb[0] != 'p' || rb[1] != 'i' || rb[2] != 'n' || rb[3] != 'g') {
-                t_putstr("joey: PTY-2a-2 PROBE master->slave bytes FAILED\n");
+            if (t_write(mfd, "ping\r", 5) != 5 || t_read(sfd, rb, sizeof(rb)) != 5 ||
+                rb[0] != 'p' || rb[1] != 'i' || rb[2] != 'n' || rb[3] != 'g' ||
+                rb[4] != '\n') {
+                t_putstr("joey: PTY-2a-2 PROBE master->slave cooked line FAILED\n");
                 return 1;
             }
-            // (e) slave -> master (the other direction).
-            if (t_write(sfd, "pong", 4) != 4 || t_read(mfd, rb, sizeof(rb)) != 4 ||
-                rb[0] != 'p' || rb[1] != 'o' || rb[2] != 'n' || rb[3] != 'g') {
-                t_putstr("joey: PTY-2a-2 PROBE slave->master bytes FAILED\n");
+            // (e) slave -> master. The master first sees the ECHO of what it
+            //     typed ("ping" + the NL echo ONLCR-expanded -> "ping\r\n"),
+            //     then the slave's output "pong" -- one deterministic 10-byte
+            //     drain (the echo landed when (d)'s Twrite was serviced, wire-
+            //     ordered before this Tread). Exercises ECHO + ONLCR live.
+            if (t_write(sfd, "pong", 4) != 4 || t_read(mfd, rb, sizeof(rb)) != 10 ||
+                rb[0] != 'p' || rb[1] != 'i' || rb[2] != 'n' || rb[3] != 'g' ||
+                rb[4] != '\r' || rb[5] != '\n' ||
+                rb[6] != 'p' || rb[7] != 'o' || rb[8] != 'n' || rb[9] != 'g') {
+                t_putstr("joey: PTY-2a-2 PROBE echo+slave->master bytes FAILED\n");
                 return 1;
             }
             // (f) master close -> the slave read sees EOF. The close's Tclunk is
@@ -6147,7 +6156,8 @@ int main(void) {
                 return 1;
             }
             (void)t_close(sfd); // the last binding: ptyfs frees pts 0 + FREEs the registry entry
-            t_putstr("joey: PTY-2a-2 PROBE OK (ptmx clone -> pts 0; master<->slave; close -> EOF)\n");
+            t_putstr("joey: PTY-2a-2 PROBE OK (ptmx clone -> pts 0; cooked master<->slave"
+                     " [ICRNL+ICANON+ECHO+ONLCR]; close -> EOF)\n");
         }
 #endif /* THYLA_BOOT_PROBES (the PTY-2a-2 round-trip) */
     }

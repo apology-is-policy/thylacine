@@ -8,10 +8,11 @@
 // terminal state (the PTY-1 kernel arc). See docs/reference/135-pty-kernel.md +
 // the ptyfs reference doc (PTY-2e).
 //
-// PTY-2a: the server skeleton + the RAW master/slave ring data path + the pts
-// registration (SYS_PTY_REGISTER) + an in-server selftest (the ring logic). The
-// line discipline (cooking) is PTY-2b; per-pts termios/winsize PTY-2c; teardown/
-// SIGHUP PTY-2d.
+// PTY-2a: the server skeleton + the master/slave ring data path + the pts
+// registration (SYS_PTY_REGISTER) + an in-server selftest. PTY-2b: the per-pts
+// line discipline (the de-globalized LS-8 cooking -- ICRNL/ISIG/ICANON on input,
+// ONLCR on output, the echo() no-leak chokepoint; a fresh pts is FULL COOKED).
+// Per-pts termios ctl/winsize is PTY-2c; teardown/SIGHUP PTY-2d.
 
 #![no_std]
 #![no_main]
@@ -29,14 +30,14 @@ use libthyla_rs::{t_close, t_poll, t_putstr, t_srv_accept, TPollFd, T_POLLHUP, T
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
-    // Prove the ring / RecvOutcome logic before serving -- deterministic +
-    // mount-independent (the netd echo_e2e analog). A failure gates the boot.
+    // Prove the ring / RecvOutcome / ldisc logic before serving -- deterministic
+    // + mount-independent (the netd echo_e2e analog). A failure gates the boot.
     match server::selftest() {
         Ok(()) => {
-            t_putstr("ptyfs: 2a selftest PASS\n");
+            t_putstr("ptyfs: 2a+2b selftest PASS\n");
         }
         Err(stage) => {
-            t_putstr("ptyfs: 2a selftest FAIL: ");
+            t_putstr("ptyfs: 2a+2b selftest FAIL: ");
             t_putstr(stage);
             t_putstr("\n");
             return 1;
