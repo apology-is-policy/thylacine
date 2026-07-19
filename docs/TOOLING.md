@@ -101,6 +101,8 @@ opens by default (`build/qmp.sock`; disabled by `THYLACINE_NO_QMP=1`):
 tools/screendump.sh out.png                 # capture gpu0 head 0
 tools/screendump.sh -v out.png              # + verify the P4-L 4-quadrant
                                             #   test pattern (red/green/blue/white)
+tools/screendump.sh -c out.png              # + verify the Aurora console (G-4:
+                                            #   exact Bonfire bg dominant + fg text)
 tools/screendump.sh -s SOCK -d DEV -H N ... # explicit socket / qdev id / head
 ```
 
@@ -110,11 +112,18 @@ Properties (all empirically verified at G-0):
   scanout regardless of display backend, so capture works under the
   standing `-nographic` invocation — no `-display` change, no VNC needed.
   The capture targets the `gpu0` qdev id — since G-1 that is the
-  `virtio-gpu-pci` device the RESIDENT gpud driver owns (the one-shot
+  `virtio-gpu-pci` device (owned by tapestryd since G-3; the one-shot
   kernel-test probe's virtio-mmio device is `gpu-mmio0`) — so console
-  muxing never misroutes it. `tools/test.sh` runs `-v` as the
-  pattern-persists gate on every boot (and therefore in every
-  `ci-smp-gate` boot); `THYLACINE_GPU_GATE=0` opts out.
+  muxing never misroutes it. `tools/test.sh` runs the per-boot scanout
+  gate on every boot (and therefore in every `ci-smp-gate` boot);
+  `THYLACINE_GPU_GATE=0` opts out. Since G-4 the gate is `-c` (the
+  Aurora CONSOLE signature — the boot presenter is the fbcon, not the
+  demo pattern) plus a bounded retry-compare liveness leg (the cursor
+  blink / prompt arrival must eventually change a dump); `-v` remains
+  the dev-tool verify for manual `tapestry-demo` runs. G-4 also adds
+  `tools/qmp-sendtext.sh` — QMP `input-send-event` typing on the
+  display-bound PCI keyboard (`kbd-pci0`), the `ls-gfx` scenario's
+  graphical-input leg.
 - **PNG is native** (QEMU ≥ 7.1 `screendump format=png`); `-v` takes a
   PPM sibling dump and asserts the four quadrant-center colors, then
   deletes it.

@@ -913,6 +913,33 @@ double-dump (two captures must differ). As-built:
 `docs/reference/139-tapestryd.md`; the server-half spec map:
 `specs/SPEC-TO-CODE.md::tapestry_present.tla`.
 
+**G-4 AS-BUILT (landed on `gfx-1`): the Aurora renderer MVP + the
+`/dev/cons` drain/feed kernel backend — the fbcon claim.** The §18.7
+drain/feed binding is realized as a MIRROR TAP in `cons_emit` (program
+output + line-discipline echo both cross it): on serial-bearing media the
+UART path continues byte-identical — the tee keeps the tooling ABI, the
+host terminal, and the serial trusted path working — and the exclusive
+switch (suppressing EL0 serial output, bound from the DTB medium fact per
+TRUSTED-PATH §7) is the recorded board-era seam that will gate
+`uart_putc`, composing with the tap. The F8/R2-F6 gate landed as
+`SPAWN_PERM_CONSOLE_RENDERER` (console-attach-only grant + single-holder;
+the pair open- AND I/O-re-gated in devdev), the third console role beside
+ATTACH and OWNER. The feed's `is_break` is hardwired false — no SAK
+forgery, by construction. Aurora is an ORDINARY tapestryd client
+(libtapestry): the Cornucopia baked atlas (committed; box drawing
+procedural), a VT subset (truecolor SGR; real alt-screen; DECSTBM
+ignored — the MVP seam), the Bonfire palette, a blinking cursor; its
+event loop BLOCKS on the Loom CQ (the non-SQPOLL pump — a poll-only loop
+starves its own completions, measured). joey spawns it as the resident
+boot presenter; tapestry-demo stays baked for manual runs (first-present-
+wins scanout would race two residents). The per-boot gate EVOLVED again
+(never dropped): `screendump -c` asserts the rendered-console signature
+(exact Bonfire bg dominant + exact-fg text) + a retry-compare liveness
+(cursor blink); `tools/interactive/ls-gfx.exp` is the full claim — serial
+login + `ls` with before/after dumps, then QMP-typed `whoami` on the
+display-bound kbd-pci0 asserted via the serial TEE (the graphical input
+loop, no pixel OCR). As-built: `docs/reference/140-aurora.md`.
+
 ### 18.10 Audit-trigger + scripture sync obligations
 
 At each landing, per standing discipline: G-2 joins the Weft/burrow rows
