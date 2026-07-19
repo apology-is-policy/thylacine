@@ -51,7 +51,8 @@
 #include <thylacine/vma.h>      // vma_init (P3-Da)
 #include <thylacine/burrow.h>
 #include <thylacine/image.h>    // image_cache_init (REVENANT R-3)
-#include <thylacine/vdso.h>     // vdso_init (the clock vDSO page, #343)
+#include <thylacine/vdso.h>
+#include <thylacine/weft.h>     // vdso_init (the clock vDSO page, #343)
 #include <thylacine/cons.h>     // console_mgr_main (A-4c-1)
 #include <thylacine/dev.h>
 #include <thylacine/dev9p.h>
@@ -752,6 +753,17 @@ void boot_main(void) {
         struct Thread *poll_pump = thread_create(kproc(), dev9p_poll_pump_main);
         if (!poll_pump) extinction("boot_main: dev9p_poll_pump alloc failed");
         ready(poll_pump);
+    }
+
+    // G-3 (R2-F3): the orphaned-weave reaper -- force-reclaims a dead
+    // compositor's stale client weave mappings after a bounded grace
+    // (TAPESTRY.md section 18.12; the tapestry_present.tla ServerDeath leg's
+    // kernel half). Parks indefinitely while no weave binding is registered.
+    weft_reap_init();
+    {
+        struct Thread *weft_reaper = thread_create(kproc(), weft_reaper_main);
+        if (!weft_reaper) extinction("boot_main: weft_reaper alloc failed");
+        ready(weft_reaper);
     }
     uart_puts("  cons:  UART RX live (INTID ");
     uart_putdec((u64)UART_INTID_PL011);

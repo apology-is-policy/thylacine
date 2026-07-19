@@ -1392,6 +1392,12 @@ static void dev9p_close(struct Spoor *c) {
     struct weft_binding *wb = __atomic_load_n(&p->weft, __ATOMIC_ACQUIRE);
     if (wb) {
         __atomic_store_n(&p->weft, NULL, __ATOMIC_RELEASE);
+        // G-3 (R2-F3): leave the reaper's registry FIRST -- returning from
+        // the unregister guarantees no sweep still holds wb, so the reads
+        // below see either the intact binding or the reaper's disarmed one
+        // (burrow NULLed under g_weft_reap_lock; clunk_unmap's identity
+        // guard then never matches and release's unref NULL-guards).
+        weft_reap_unregister(wb);
         // G-2 (TAPESTRY.md §18.1 "the weave fid's clunk drops the client
         // mapping"): a WEAVE binding additionally unmaps the client's mapping
         // at fid-clunk WHEN the closer is the mapping Proc AND the VMA at the

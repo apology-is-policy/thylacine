@@ -4368,6 +4368,15 @@ static s64 weft_map_claimed(struct Proc *p, struct dev9p_priv *priv,
         weft_binding_release(b);         // unrefs b->burrow (the pin) + frees b
         return (s64)expected->guest_va;  // expected == the winner's live binding
     }
+    // G-3 (R2-F3): a WEAVE binding enters the orphan reaper's registry so a
+    // dead compositor's stale client mapping is force-reclaimed after the
+    // grace. Registered only by the CAS WINNER (the loser's binding was just
+    // torn down), with no locks held, while the caller's #844 Spoor ref
+    // still pins priv (a sibling-thread close cannot run until the syscall's
+    // handle_put) -- so the register-vs-close order is structural. The
+    // session pointers are borrowed via priv (see weft.h).
+    if (kind == WEFT_BIND_WEAVE)
+        weft_reap_register(b, priv->attached_owner, priv->client);
     return (s64)va;
 }
 

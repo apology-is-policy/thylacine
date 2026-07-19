@@ -379,6 +379,21 @@ struct weft_binding {
     // header mirror (the I-30 validator-once; the Weft-3 snapshot discipline).
     // ZERO for a WEAVE binding (no ring; never consulted -- the kind gate).
     struct weft_ring_view view;
+    // G-3 (TAPESTRY.md section 18.12 R2-F3): the orphaned-weave reaper's
+    // registry linkage. A WEAVE binding registers after the SYS_WEFT_MAP
+    // CAS-install (weft_reap_register) and unregisters at dev9p_close
+    // (weft_reap_unregister, BEFORE the close touches the binding -- the
+    // g_weft_reap_lock serialization that makes reaper-vs-close sound).
+    // sess_att/sess_cl let the reaper test the SERVING session's liveness
+    // (att when the session is SYS_ATTACH-owned -- production; cl alone on
+    // the externally-owned test path). Both are BORROWED, valid while the
+    // binding is registered: the owning dev9p_priv holds the att ref /
+    // client lifetime, and it unregisters before releasing either. RING
+    // bindings never register (their audited vma_drain lifetime stands).
+    struct weft_binding      *reap_next;
+    u64                       orphan_since_ns;
+    const struct p9_attached *sess_att;
+    const struct p9_client   *sess_cl;
 };
 
 // Register a per-flow ring `v` (netd's backing ANON Burrow) owned by `owner`
@@ -478,5 +493,59 @@ void weft_binding_release(struct weft_binding *b);
 // dev9p_close BEFORE weft_binding_release; unit-driven directly (the closer
 // param exists so a test drives it against a synthetic Proc).
 int weft_binding_clunk_unmap(struct weft_binding *wb, struct Proc *closer);
+
+// =============================================================================
+// G-3: the orphaned-weave force-reclaim (TAPESTRY.md section 18.12 R2-F3;
+// the ServerDeath leg of specs/tapestry_present.tla, kernel half).
+// =============================================================================
+//
+// When the SERVING compositor dies, a claimed weave's client mapping keeps
+// the pixel pages alive (#847 mapping_count -- no UAF) but semantically dead:
+// every fid op returns the session-dead error ("compositor gone"). A client
+// that never closes the fd would pin the pages UNCHARGED forever (the R2-F3
+// leak). The reaper kthread sweeps the registered WEAVE bindings; one whose
+// serving session has been dead longer than WEFT_REAP_GRACE_NS is FORCE-
+// RECLAIMED: the client's stale mapping is cross-Proc unmapped (the client
+// was warned -- a later touch takes snare:segv), the shared-in budget
+// uncharges (inside burrow_unmap), and the binding's registration pin drops
+// so the pixel chunk frees at once. The binding STRUCT itself is freed only
+// by dev9p_close (weft_binding_release) -- the reaper NULLs wb->burrow under
+// g_weft_reap_lock, and the close path unregisters under the same lock
+// before reading the binding, so neither side sees a half-reclaimed state.
+//
+// Lock order: g_weft_reap_lock -> g_proc_table_lock(irqsave) -> vma_lock ->
+// v->lock -> buddy. Acyclic: register runs lock-free (after the map's
+// vma_lock drop), unregister runs lock-free (dev9p_close), and nothing
+// under gptl/vma takes the reap lock. The deferred pin drop (burrow_unref
+// outside the reap lock) follows the weft_share_unregister discipline.
+
+// The dead-session grace before a force-reclaim, and the sweep cadence.
+#define WEFT_REAP_GRACE_NS  (2ull * 1000 * 1000 * 1000)
+#define WEFT_REAP_SWEEP_NS  (1ull * 1000 * 1000 * 1000)
+
+struct p9_attached;
+struct p9_client;
+
+// Register an installed WEAVE binding for orphan tracking. Call AFTER the
+// SYS_WEFT_MAP CAS-install wins, with no locks held. att/cl are borrowed
+// (see the struct comment); att may be NULL (test path), then cl is the
+// liveness source.
+void weft_reap_register(struct weft_binding *wb,
+                        const struct p9_attached *att,
+                        const struct p9_client *cl);
+
+// Remove a binding from the reaper's registry (idempotent). Call from
+// dev9p_close BEFORE touching the binding's fields: returning from this is
+// the guarantee no reaper sweep still holds wb.
+void weft_reap_unregister(struct weft_binding *wb);
+
+// One sweep pass at `now_ns` (the kthread's body; test-drivable). Returns
+// the number of bindings force-reclaimed this pass.
+int weft_reap_sweep(u64 now_ns);
+
+// Boot init + the reaper kthread main (spawned as a kproc thread).
+void weft_reap_init(void);
+void weft_reaper_main(void);
+
 
 #endif
