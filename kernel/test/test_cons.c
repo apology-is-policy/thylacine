@@ -63,6 +63,7 @@ void test_proc_console_relinquish(void);              // A-5a (I-27)
 void test_proc_console_relinquish_other_owner(void);  // A-5a (self-only)
 void test_cons_console_open(void);                    // A-5a (SYS_CONSOLE_OPEN)
 void test_uart_rx_path_enabled(void);                 // #943 console-RX guard
+void test_uart_putc_tx_bounded(void);                 // #67 bounded TX spin
 void test_cons_poll_readiness(void);                  // LS-8a (POLLIN/POLLOUT sample)
 void test_cons_poll_deferred_wake(void);              // LS-8a (the I-9 deferred relay)
 void test_cons_termios_default(void);                 // LS-8b (default == pre-LS-8b)
@@ -93,6 +94,10 @@ extern s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len);
 // #943: the PL011 RX path lives in arch/arm64/uart.c.
 extern bool uart_rx_path_enabled(void);
 
+// #67: uart_putc's bounded-TXFF-spin self-test lives in arch/arm64/uart.c
+// (needs the static PL011 base + register offsets).
+extern bool uart_selftest_tx_bounded(void);
+
 // #943 regression: the PL011 RX path must be live after boot (CR.UARTEN|RXE).
 // QEMU's PL011 resets with UARTEN clear, so this FAILS on the pre-fix kernel
 // where uart_rx_init never set it -- the bug that made the console silently
@@ -100,6 +105,19 @@ extern bool uart_rx_path_enabled(void);
 // during boot; this reads the real PL011 CR directly.
 void test_uart_rx_path_enabled(void) {
     TEST_ASSERT(uart_rx_path_enabled(), "PL011 RX path live (CR.UARTEN|RXE)");
+}
+
+// #67 regression: uart_putc must BOUND its TXFF spin. A stalled host serial
+// consumer leaves the PL011 TX FIFO full, and the original `while(TXFF){}` was
+// unbounded -> the CPU goes interrupt-dead (a soundness hazard on the print /
+// crash-dump path -- the Halls dump runs IRQ-masked, and #66 proved a spin here
+// inside an IRQ dispatch manufactures a seconds-long INTID stall). The helper
+// (in uart.c) points the driver at a scratch region with FR stuck-full, calls
+// uart_putc, and proves it RETURNED (an unbounded spin would hang the boot here)
+// and DROPPED the byte. Revert uart_putc to `while(TXFF){}` and this hangs.
+void test_uart_putc_tx_bounded(void) {
+    TEST_ASSERT(uart_selftest_tx_bounded(),
+                "uart_putc bounds the TXFF spin and drops on a stuck TX FIFO");
 }
 
 // 16-byte-bounded name equality against a literal.

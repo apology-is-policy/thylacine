@@ -510,6 +510,7 @@ void test_proc_console_relinquish(void);
 void test_proc_console_relinquish_other_owner(void);
 void test_cons_console_open(void);
 void test_uart_rx_path_enabled(void);   // #943 console-RX guard
+void test_uart_putc_tx_bounded(void);   // #67 bounded TX spin (interrupt-dead hazard)
 void test_cons_poll_readiness(void);     // LS-8a
 void test_cons_poll_deferred_wake(void); // LS-8a
 void test_cons_termios_default(void);            // LS-8b
@@ -1828,6 +1829,7 @@ struct test_case g_tests[] = {
     { "proc.console_relinquish_other", test_proc_console_relinquish_other_owner, false, NULL },
     { "cons.console_open",             test_cons_console_open,             false, NULL },
     { "uart.rx_path_enabled",          test_uart_rx_path_enabled,          false, NULL },
+    { "uart.putc_tx_bounded",          test_uart_putc_tx_bounded,          false, NULL },
     { "cons.poll_readiness",           test_cons_poll_readiness,           false, NULL },
     { "cons.poll_deferred_wake",       test_cons_poll_deferred_wake,       false, NULL },
     { "cons.termios_default",          test_cons_termios_default,          false, NULL },

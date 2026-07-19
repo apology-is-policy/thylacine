@@ -47,6 +47,13 @@ uintptr_t uart_get_base(void);
 void uart_putc(char c);
 void uart_puts(const char *s);
 
+// #67 regression helper (test-only). Proves uart_putc BOUNDS its TXFF spin --
+// it points the driver at a scratch region whose FR reads TX-full forever, IRQ-
+// masks the swap, calls uart_putc, and returns true iff it terminated AND dropped
+// the byte (a bounded, lossy TX beats an interrupt-dead CPU when the host serial
+// consumer stalls). An unbounded spin would hang the boot inside this call.
+bool uart_selftest_tx_bounded(void);
+
 // A-4c-1: kernel UART console RX.
 //
 // PL011 interrupt number. On the QEMU virt machine the PL011 is wired to

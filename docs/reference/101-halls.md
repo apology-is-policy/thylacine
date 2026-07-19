@@ -145,6 +145,28 @@ Runs once per kernel death (off the hot path entirely). Cost is dominated by
 polled-UART output (~hundreds of `uart_putc`); irrelevant since the kernel is
 about to halt forever.
 
+Each of those `uart_putc` calls is **bounded** (#67): the dump runs IRQ-masked on
+a dying machine, so an unbounded TX-full spin (a stalled host serial consumer)
+would go interrupt-dead and the dump would wedge without ever completing.
+`uart_putc` bounds its TXFF wait (a 20 ms wall-clock deadline + an iteration
+backstop) and drops the byte on timeout — so under a dead console the dump emits
+what it can and reaches `_torpor`, bounded, rather than hanging forever. This
+composes with HX-I1/HX-I2: the bound is a pure comparison (no lock, no alloc, no
+recursion, no `extinction()`), so it cannot re-trip the in-dump guard or the
+depth cap. See `111-cons.md` (the `uart_putc` bounded-TX note).
+
+The bound is *per byte*, so a dump to a genuinely dead console is bounded but not
+snappy: with the timer live it costs up to 20 ms × dump-bytes (~tens of seconds
+for a ~1–2 KB dump); before `timer_init` (a very-early-boot extinction) or with a
+frozen counter the wall-clock deadline is inert and each byte is *iteration*-
+bounded (~seconds/byte), so the aggregate can reach minutes. This only matters
+when the console is dead (no observer) — the soundness property is that the dump
+reaches `_torpor` in bounded time instead of wedging forever; the shape is the
+pre-existing loose-wall-time property of the RNG-F1/#101-F2 idiom. A per-dump
+"console-stalled" latch (drop every remaining byte immediately once one times
+out, bounding the whole dump at ~one deadline) is a v1.x refinement, deliberately
+not built here to keep `uart_putc` free of dump-scoped shared state.
+
 ## Status
 
 - Tier 1 (UART dump): LANDED (HX-1).

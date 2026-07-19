@@ -163,6 +163,32 @@ under `g_cons.lock` (a ≤3-byte stack buffer — the erase `"\b \b"` is the max
 emitted via `cons_emit` AFTER the lock is released, so the UART busy-wait never
 runs under `g_cons.lock`.
 
+**`uart_putc`'s TXFF wait is BOUNDED (#67).** The TX-full spin was originally
+unbounded (`while (FR & TXFF) {}` — "fine at P1-B, single CPU, no scheduler"; the
+IRQ-driven TX buffer of P1-F was never built, so this IS the live TX path). A
+stalled host serial consumer (a full host pty/pipe buffer) leaves the TX FIFO
+full indefinitely, and an unbounded spin then goes *interrupt-dead* — the CPU
+cannot take its timer tick or an IPI while it waits. That is a soundness hazard on
+the print path: it composes with the crash-dump (which runs IRQ-masked on a dying
+machine, see `101-halls.md`), and #66 proved that a print spinning here inside an
+IRQ dispatch manufactured a *seconds-long* per-INTID stall (an interrupt-dead cpu0
+misdiagnosed as a scheduler bug for days). `uart_putc` now bounds the wait with a
+wall-clock deadline (`UART_TX_SPIN_MAX_NS` = 20 ms, via `timer_now_ns()`) plus an
+unconditional iteration backstop (`UART_TX_SPIN_MAX_ITERS`), dropping the byte on
+timeout — a bounded, lossy console is strictly sounder than a wedged CPU. The
+20 ms deadline tolerates even a slow 9600-baud line: a per-call spin ends when
+TXFF *clears*, and each FIFO slot frees at the baud rate — one byte-time, ~1.1 ms
+at 9600 8N1 — far under (~17×) the 20 ms deadline, so no legitimate output is
+dropped (the driver configures no RTS/CTS or XON/XOFF flow control, so nothing
+else can stall TX). The deadline fires only for a genuinely *wedged* consumer
+that is not draining the FIFO at all. `timer_now_ns()` returns 0 before
+`timer_init` (the deadline is inert during the earliest boot prints; the iteration
+backstop covers that window and a frozen counter) — the RNG-audit F1 / #101 F2
+idiom. Healthy case: TXFF is clear on entry, the loop never spins, and no timer is
+read. Regression: `uart.putc_tx_bounded` (points the driver at a scratch region
+with FR stuck-full and proves `uart_putc` returns + drops; reverting to
+`while(TXFF){}` hangs the boot inside the test).
+
 **The boot default is `CONS_ISIG` only** — byte-at-a-time, Ctrl-C cooked, no
 echo, no translation == EXACTLY the pre-LS-8b behavior. So LS-8b **breaks
 nothing**: `ut` and foreground commands are unchanged; the mechanism is inert

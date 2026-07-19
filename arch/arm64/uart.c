@@ -23,6 +23,7 @@
 #include "uart.h"
 
 #include "mmu.h"
+#include "timer.h"   // timer_now_ns() -- the bounded TX-spin wall-clock deadline
 
 #include <stdint.h>
 #include <thylacine/cons.h>
@@ -114,14 +115,69 @@ static void uart_rx_set_enabled(bool en) {
     mmio_write32(base, PL011_IMSC, imsc);
 }
 
+// #67: a stalled host serial consumer (a full host pty/pipe buffer, a paused
+// terminal) leaves the TX FIFO full indefinitely. The original spin here was
+// UNBOUNDED -- "fine at P1-B (single CPU, no scheduler)", but P1-F (IRQ-driven TX
+// with a buffer) was never built, so this IS the live TX path. An unbounded spin
+// goes interrupt-dead: the CPU cannot take its timer tick or an IPI while it
+// waits -- a soundness hazard on the print path. The Halls crash dump runs
+// IRQ-masked on a dying machine and MUST stay bounded (HX-I discipline), and #66
+// proved a print spinning here inside an IRQ dispatch manufactures a seconds-long
+// INTID stall (an interrupt-dead cpu0). Bound the wait: a wall-clock deadline
+// once the timer is up, plus an unconditional iteration backstop -- timer_now_ns()
+// returns 0 before timer_init (the deadline is inert during the earliest boot
+// prints) and a frozen CNTVCT never advances, so the iteration cap covers both
+// (the RNG-audit F1 / #101 F2 shape). On timeout DROP the byte: a stalled
+// consumer is not reading it, and a bounded-but-lossy console is strictly sounder
+// than a wedged CPU. Healthy case: TXFF is clear on entry, the loop body never
+// runs, no timer is read (t0 is anchored lazily on the first spin), and this adds
+// nothing to the common path.
+#define UART_TX_SPIN_MAX_NS    (20ull * 1000ull * 1000ull)   // 20 ms wall-clock
+#define UART_TX_SPIN_MAX_ITERS (1u << 24)                    // ~16.7M FR-read backstop
+
 void uart_putc(char c) {
     uintptr_t base = pl011_base;
-    // Spin until TX FIFO has room (TXFF clear).
+    uint32_t iters = 0;
+    uint64_t t0 = 0;   // wall-clock anchor; set lazily on the FIRST spin (0 = unset / pre-init)
     while (mmio_read32(base, PL011_FR) & PL011_FR_TXFF) {
-        // Busy-wait. This is fine at P1-B (single CPU, no scheduler).
-        // P1-F adds IRQ-driven TX with a buffer.
+        if (++iters >= UART_TX_SPIN_MAX_ITERS) return;   // backstop: drop the byte
+        uint64_t now = timer_now_ns();                   // 0 before timer_init
+        if (t0 == 0) t0 = now;                           // anchor (stays 0 pre-init -> backstop governs)
+        else if (now - t0 >= UART_TX_SPIN_MAX_NS)
+            return;                                       // deadline: drop the byte
     }
     mmio_write32(base, PL011_DR, (uint32_t)(unsigned char)c);
+}
+
+// #67 regression (test-only; production callers never touch this). Proves
+// uart_putc BOUNDS its TXFF spin: point the driver at a scratch region whose FR
+// (offset PL011_FR) always reads TXFF-set, IRQ-mask the swap window (so the boot
+// CPU is the single console writer across it -- secondaries are idle in the test
+// phase), call uart_putc, and confirm it RETURNS (an unbounded spin would hang
+// the boot right here) and DROPPED the byte (the bound fired before the DR write,
+// so the DR sentinel is untouched). Revert uart_putc's loop to `while(TXFF){}`
+// and this hangs the boot -- the regression guard for the wiring, not just the
+// bound arithmetic. Lives in uart.c for access to the static base + PL011 offsets
+// (the #101 g_thread_switch_test_window_ns precedent: a test-only hook in a
+// production file).
+bool uart_selftest_tx_bounded(void) {
+    // scratch[16] covers offsets 0x000..0x03c -- enough for uart_putc, which
+    // touches only FR (0x18) + DR (0x00). Sizing is load-bearing on the IRQ mask
+    // + UART-SPI-cpu0-affinity: no context runs a >0x3c UART access (e.g.
+    // uart_rx_drain_locked's ICR at 0x44) on `scratch` while pl011_base is
+    // swapped -- cpu0 is masked here and the UART RX SPI routes only to cpu0
+    // (gic.c GICv2/GICv3 SPI target = cpu0). Widen this array before adding any
+    // >0x3c access reachable during the swap, or routing the UART SPI off cpu0.
+    static volatile uint32_t scratch[16];
+    scratch[PL011_FR / 4] = PL011_FR_TXFF;  // FR reads full forever
+    scratch[PL011_DR / 4] = 0xdeadu;        // sentinel: a dropped byte won't overwrite it
+    uintptr_t saved = pl011_base;
+    irq_state_t s = spin_lock_irqsave(NULL);
+    pl011_base = (uintptr_t)scratch;
+    uart_putc('x');                          // MUST terminate via the bound
+    pl011_base = saved;
+    spin_unlock_irqrestore(NULL, s);
+    return scratch[PL011_DR / 4] == 0xdeadu; // true iff the byte was dropped (DR untouched)
 }
 
 // A-4c-1: enable the PL011 RX path. QEMU's virt PL011 comes up in its reset
