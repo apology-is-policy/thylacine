@@ -266,6 +266,16 @@ int vma_find_gap(struct Proc *p, u64 length,
 void vma_drain(struct Proc *p) {
     if (!p) return;
 
+    // G-3 (the reaper-audit F1 fix): vma_drain now TAKES p->vma_lock --
+    // retiring its lockless exemption. The weft reaper's cross-Proc
+    // force-reclaim holds the target's vma_lock ACROSS its per-page
+    // TLBI unmap after dropping g_proc_table_lock (so the multi-ms loop
+    // runs IRQs-on, off the global lock); this acquire is what makes a
+    // reap racing that window serialize instead of draining under it.
+    // proc_free's callers are otherwise single-threaded here (the
+    // original exemption argument), so the lock is uncontended on every
+    // path but the rare reclaim race.
+    spin_lock(&p->vma_lock);
     while (p->vmas) {
         struct Vma *v = p->vmas;
         // G-2: a SHARED_IN VMA's teardown uncharges the shared-in budget (the
@@ -278,6 +288,7 @@ void vma_drain(struct Proc *p) {
         vma_remove(p, v);
         vma_free(v);
     }
+    spin_unlock(&p->vma_lock);
 }
 
 // =============================================================================

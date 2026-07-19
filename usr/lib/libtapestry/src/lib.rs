@@ -121,6 +121,10 @@ pub struct Surface {
     staging: RegisteredBuffer,
     cur_slot: u32,
     event_armed: bool,
+    /// Latched when the event stream EOFs (the surface retired server-side):
+    /// no further reads are armed -- without the latch, a non-blocking
+    /// poll_event caller would re-arm through the EOF forever.
+    closed: bool,
     pending: Vec<Event>,
     seq: u64,
 }
@@ -277,6 +281,7 @@ impl Surface {
             staging,
             cur_slot: 0,
             event_armed: false,
+            closed: false,
             pending: Vec::new(),
             seq: 2,
         })
@@ -343,6 +348,10 @@ impl Surface {
     fn route(&mut self, cqe: Cqe) {
         if cqe.user_data == UD_EVENT {
             self.event_armed = false;
+            if cqe.result == 0 {
+                // EOF: the surface retired server-side; latch closed.
+                self.closed = true;
+            }
             if cqe.result > 0 {
                 let n = (cqe.result as usize).min(EV_CAP);
                 let d = self.staging.as_mut_slice();
@@ -374,7 +383,7 @@ impl Surface {
 
     /// Arm the event read if idle (single-shot; see the header note).
     fn arm_events(&mut self) -> Result<(), TapError> {
-        if self.event_armed {
+        if self.event_armed || self.closed {
             return Ok(());
         }
         let sqe = Sqe::read(1, 0, EV_CAP as u32, 0, EV_OFF, UD_EVENT);
@@ -385,12 +394,16 @@ impl Surface {
     }
 
     /// Non-blocking event poll: drain any completed reads, re-arm.
+    /// `Err(Closed)` once the stream has EOF'd and the backlog is drained.
     pub fn poll_event(&mut self) -> Result<Option<Event>, TapError> {
         self.arm_events()?;
         while let Some(cqe) = self.ring.reap() {
             self.route(cqe);
         }
         self.arm_events()?;
+        if self.closed && self.pending.is_empty() {
+            return Err(TapError::Closed);
+        }
         Ok(self.pending.pop_first())
     }
 
@@ -401,20 +414,15 @@ impl Surface {
             if let Some(ev) = self.pending.pop_first() {
                 return Ok(ev);
             }
+            if self.closed {
+                return Err(TapError::Closed); // EOF observed; backlog drained
+            }
             self.arm_events()?;
             self.ring
                 .enter(0, 1, ENTER_GETEVENTS)
                 .map_err(|_| TapError::Loom)?;
-            let mut got = false;
             while let Some(cqe) = self.ring.reap() {
-                if cqe.user_data == UD_EVENT && cqe.result == 0 {
-                    return Err(TapError::Closed); // EOF: the surface retired
-                }
-                self.route(cqe);
-                got = true;
-            }
-            if !got {
-                continue;
+                self.route(cqe); // an EOF latches `closed` inside route()
             }
         }
     }

@@ -553,27 +553,31 @@ void weft_reap_unregister(struct weft_binding *wb) {
     spin_unlock(&g_weft_reap_lock);
 }
 
-// The cross-Proc unmap callback: runs UNDER g_proc_table_lock (proc_for_each
-// pins the target ALIVE across it -- the devproc_mem_walk_cb precedent), takes
-// the target's vma_lock (a leaf below gptl), re-checks the F1 identity guard,
-// and unmaps. A non-ALIVE match is skipped: an exiting Proc's own close/drain
-// owns its teardown.
-struct weft_reap_unmap_ctx {
+// The cross-Proc target FIND-AND-LOCK callback (the G-3-audit F1 fix): the
+// per-page TLBI unmap loop must NOT run inside proc_for_each's
+// irqsave-gptl region (a fullscreen weave is thousands of pages; each
+// uninstall waits a dsb ish -- a multi-ms IRQs-off + global-lock window).
+// So the callback only MATCHES the pid, gates ALIVE, and takes the
+// target's vma_lock UNDER gptl (the established gptl -> vma_lock order),
+// RETURNING with it held: gptl (and the IRQ mask) drop at proc_for_each's
+// exit, and the held vma_lock alone keeps the target's teardown out --
+// vma_drain now takes vma_lock (kernel/vma.c), so a reap racing the
+// reclaim blocks there, and proc_free's pgtable_destroy runs AFTER
+// vma_drain, so the pgtable_root stays valid for the whole unmap. The
+// unmap then runs IRQs-on under vma_lock only -- the same envelope as the
+// normal clunk-unmap path. A non-ALIVE match is skipped: an exiting
+// Proc's own close/drain owns its teardown.
+struct weft_reap_find_ctx {
     u32 pid;
-    u64 guest_va;
-    size_t len;
-    struct Burrow *burrow;
+    struct Proc *locked;   // non-NULL => q->vma_lock is HELD by the caller
 };
 
-static int weft_reap_unmap_cb(struct Proc *q, void *arg) {
-    struct weft_reap_unmap_ctx *c = arg;
+static int weft_reap_find_cb(struct Proc *q, void *arg) {
+    struct weft_reap_find_ctx *c = arg;
     if ((u32)q->pid != c->pid) return 0;
     if (q->state != PROC_STATE_ALIVE) return 1;   // found; teardown owns it
     spin_lock(&q->vma_lock);
-    struct Vma *v = vma_lookup(q, c->guest_va);
-    if (v && v->burrow == c->burrow && v->vaddr_start == c->guest_va)
-        (void)burrow_unmap(q, c->guest_va, c->len);
-    spin_unlock(&q->vma_lock);
+    c->locked = q;
     return 1;   // pid matched -- stop the walk
 }
 
@@ -610,20 +614,24 @@ int weft_reap_sweep(u64 now_ns) {
             continue;
         }
 
-        // Grace expired: force-reclaim. Cross-Proc unmap first (under gptl +
-        // the target's vma_lock; the mapping ref + the shared-in budget drop
-        // inside burrow_unmap), then strip the registration pin (deferred
-        // unref -- the free path takes buddy locks) and NULL wb->burrow under
-        // THIS lock so the eventual dev9p_close sees a disarmed binding
-        // (clunk_unmap's identity guard cannot match a NULL burrow;
-        // weft_binding_release NULL-guards the unref).
-        struct weft_reap_unmap_ctx ctx = {
-            .pid = wb->map_pid,
-            .guest_va = wb->guest_va,
-            .len = (size_t)wb->ring_size,
-            .burrow = wb->burrow,
-        };
-        (void)proc_for_each(weft_reap_unmap_cb, &ctx);
+        // Grace expired: force-reclaim. Find-and-lock the mapping Proc
+        // under gptl (the walk is the ONLY irqsave window), then run the
+        // identity-guarded unmap IRQs-on under the held vma_lock alone
+        // (the mapping ref + the shared-in budget drop inside
+        // burrow_unmap), then strip the registration pin (deferred
+        // unref -- the free path takes buddy locks) and NULL wb->burrow
+        // under THIS lock so the eventual dev9p_close sees a disarmed
+        // binding (clunk_unmap's identity guard cannot match a NULL
+        // burrow; weft_binding_release NULL-guards the unref).
+        struct weft_reap_find_ctx ctx = { .pid = wb->map_pid, .locked = NULL };
+        (void)proc_for_each(weft_reap_find_cb, &ctx);
+        if (ctx.locked) {
+            struct Proc *q = ctx.locked;
+            struct Vma *v = vma_lookup(q, wb->guest_va);
+            if (v && v->burrow == wb->burrow && v->vaddr_start == wb->guest_va)
+                (void)burrow_unmap(q, wb->guest_va, (size_t)wb->ring_size);
+            spin_unlock(&q->vma_lock);
+        }
         drop[ndrop++] = wb->burrow;
         wb->burrow = NULL;
         *pp = wb->reap_next;

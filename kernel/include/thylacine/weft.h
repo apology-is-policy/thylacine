@@ -501,19 +501,33 @@ int weft_binding_clunk_unmap(struct weft_binding *wb, struct Proc *closer);
 //
 // When the SERVING compositor dies, a claimed weave's client mapping keeps
 // the pixel pages alive (#847 mapping_count -- no UAF) but semantically dead:
-// every fid op returns the session-dead error ("compositor gone"). A client
-// that never closes the fd would pin the pages UNCHARGED forever (the R2-F3
-// leak). The reaper kthread sweeps the registered WEAVE bindings; one whose
-// serving session has been dead longer than WEFT_REAP_GRACE_NS is FORCE-
-// RECLAIMED: the client's stale mapping is cross-Proc unmapped (the client
-// was warned -- a later touch takes snare:segv), the shared-in budget
-// uncharges (inside burrow_unmap), and the binding's registration pin drops
-// so the pixel chunk frees at once. The binding STRUCT itself is freed only
-// by dev9p_close (weft_binding_release) -- the reaper NULLs wb->burrow under
+// every fid op returns the session-dead error ("compositor gone"). Without
+// the reaper, a client that never closes the fd pins those pages -- charged
+// to the client's shared-map budget and freed only at the client's own exit
+// (the G-2 accounting bounds the pin; the reaper's value is reclaiming
+// EARLY, at the grace, instead of at client exit). The reaper kthread
+// sweeps the registered WEAVE bindings; one whose serving session has been
+// dead longer than WEFT_REAP_GRACE_NS is FORCE-RECLAIMED: the client's
+// stale mapping is cross-Proc unmapped (the client was warned -- a later
+// touch takes snare:segv), the shared-in budget uncharges (inside
+// burrow_unmap), and the binding's registration pin drops so the pixel
+// chunk frees at once. The binding STRUCT itself is freed only by
+// dev9p_close (weft_binding_release) -- the reaper NULLs wb->burrow under
 // g_weft_reap_lock, and the close path unregisters under the same lock
 // before reading the binding, so neither side sees a half-reclaimed state.
 //
-// Lock order: g_weft_reap_lock -> g_proc_table_lock(irqsave) -> vma_lock ->
+// The liveness observation (the audit F4 contract note): the sweep reads
+// the session's dead latch (c->dead), which only an ACTIVE recv path sets
+// -- so the reaper's guarantee is "reclaim a client whose session OBSERVED
+// the death" (the realistic target: it received the compositor-gone error
+// and ignored it). A client that maps a weave and then never touches the
+// session again is not observed dead and rides the budget + exit-time
+// teardown instead -- bounded, just not early.
+//
+// Lock order (the audit F1 fix): g_weft_reap_lock -> g_proc_table_lock
+// (irqsave; the FIND-AND-LOCK walk ONLY -- the per-page TLBI unmap never
+// runs under it) -> vma_lock (acquired under gptl, HELD PAST its release;
+// vma_drain now takes vma_lock, so the target's reap serializes here) ->
 // v->lock -> buddy. Acyclic: register runs lock-free (after the map's
 // vma_lock drop), unregister runs lock-free (dev9p_close), and nothing
 // under gptl/vma takes the reap lock. The deferred pin drop (burrow_unref

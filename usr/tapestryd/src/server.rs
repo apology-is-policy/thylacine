@@ -467,12 +467,13 @@ impl Comp {
             None => return true,
         };
         if ev.kind == TEV_FRAME {
-            // Coalesce: at most one queued FRAME; refresh its tick.
-            if let Some(last) = s.events.back_mut() {
-                if last.kind == TEV_FRAME {
-                    last.tick = ev.tick;
-                    return true;
-                }
+            // Coalesce GLOBALLY: at most one FRAME queued per surface (the
+            // G-3-audit F3 fix -- a back-of-queue-only check let interleaved
+            // KEY/FRAME streams accumulate FRAMEs). Refresh the queued one's
+            // tick in place; the scan is bounded by EVENT_QUEUE_CAP.
+            if let Some(f) = s.events.iter_mut().find(|e| e.kind == TEV_FRAME) {
+                f.tick = ev.tick;
+                return true;
             }
             if s.events.len() >= EVENT_QUEUE_CAP {
                 return true; // droppable class: drop the new FRAME

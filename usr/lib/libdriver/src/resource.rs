@@ -206,8 +206,8 @@ pub fn resolve_gathered(
         }
         if matches!(manifest.needs.pci, PciNeed::Node) {
             if let Some(bdf) = node.resources.pci {
-                let total = 1 + b.pci_extra.len() + usize::from(b.pci.is_none());
-                if total >= MAX_PCI {
+                let held = usize::from(b.pci.is_some()) + b.pci_extra.len();
+                if held + 1 > MAX_PCI {
                     return Err(Error::TooManyResources);
                 }
                 if b.pci.is_none() {
