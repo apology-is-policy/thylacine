@@ -2361,7 +2361,7 @@ pub fn t_yield() -> i64 {
 
 // t_stat_path — path-stat in ONE syscall (POUNCE; SYS_STAT = 88): resolve
 // `path` (absolute from the Territory root; relative joined with the cwd)
-// and fill the 80-byte `struct t_stat` at stat_va with the LEAF's metadata.
+// and fill the 88-byte `struct t_stat` at stat_va with the LEAF's metadata.
 // On the disk FS the whole resolution is a single fused Twalkgetattr RPC and
 // no handle/Spoor/fid is ever created. The X-search authority equals the
 // O_PATH+fstat emulation it replaces (path-X only). Returns 0, -errno
@@ -2381,12 +2381,12 @@ pub unsafe fn t_stat_path(path: *const u8, path_len: usize, stat_va: *mut u8) ->
     x0
 }
 
-// t_fstat — fill a user-VA 80-byte `struct t_stat` (laid out per
+// t_fstat — fill a user-VA 88-byte `struct t_stat` (laid out per
 // kernel/include/thylacine/syscall.h's ABI pins) with the open Spoor's
 // metadata. Returns 0 on success, -1 on bad fd / unaligned stat_va /
 // stat_va outside user VA / Dev without stat_native vtable op.
 //
-// `stat_va` must point to at least 80 bytes of writable, 8-byte-aligned
+// `stat_va` must point to at least 88 bytes of writable, 8-byte-aligned
 // user memory. Backs t::fs::Metadata (U-2c-fs).
 #[inline(always)]
 pub unsafe fn t_fstat(spoor_fd: i64, stat_va: *mut u8) -> i64 {

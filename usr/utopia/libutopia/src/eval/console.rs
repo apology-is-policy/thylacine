@@ -144,8 +144,8 @@ const PTS_FK_SLAVE: u64 = 2;
 /// every non-hosted case, so the caller's dance is skipped and the shell
 /// runs its console path unchanged.
 pub(crate) fn pts_slave_n_of_fd0() -> Option<u32> {
-    let mut st = [0u8; 80];
-    // SAFETY: t_fstat is the SYS_FSTAT SVC wrapper; st is a valid 80-byte
+    let mut st = [0u8; 88]; // #100: t_stat ABI is 88 bytes (kernel copies out sizeof(t_stat))
+    // SAFETY: t_fstat is the SYS_FSTAT SVC wrapper; st is a valid 88-byte
     // t_stat buffer (the ABI-pinned size).
     if unsafe { libthyla_rs::t_fstat(0, st.as_mut_ptr()) } != 0 {
         return None;

@@ -65,7 +65,7 @@ fn emulator() -> i64 {
         return 2;
     }
     // ptsname: t_stat.qid_path (byte offset 8) carries the 9P qid verbatim.
-    let mut st = [0u8; 80];
+    let mut st = [0u8; 88]; // #100: t_stat ABI is 88 bytes (kernel copies out sizeof(t_stat))
     if unsafe { t_fstat(mfd, st.as_mut_ptr()) } != 0 {
         t_putstr("pty-probe: fstat(master) FAILED\n");
         return 3;

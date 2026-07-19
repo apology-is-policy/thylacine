@@ -237,7 +237,7 @@ pub(crate) fn stat_path(path: &super::Path) -> Result<Metadata> {
 }
 
 pub(crate) fn fstat_fd(spoor_fd: i32) -> Result<Metadata> {
-    // SAFETY: MaybeUninit<Metadata> reserves 80 bytes of stack-aligned
+    // SAFETY: MaybeUninit<Metadata> reserves 88 bytes of stack-aligned
     // memory; t_fstat fully initializes it on success. On failure we
     // discard the (uninitialized) struct without reading it. The
     // pointer cast is safe — Metadata is #[repr(C)] matching the
@@ -247,6 +247,6 @@ pub(crate) fn fstat_fd(spoor_fd: i32) -> Result<Metadata> {
         t_fstat(spoor_fd as i64, buf.as_mut_ptr() as *mut u8)
     };
     let _n = Error::from_syscall_return(rc)?;
-    // Success -- the kernel wrote 80 bytes into buf.
+    // Success -- the kernel wrote 88 bytes into buf.
     Ok(unsafe { buf.assume_init() })
 }

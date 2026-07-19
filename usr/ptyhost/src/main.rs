@@ -119,8 +119,8 @@ fn run() -> i64 {
     }
     // ptsname: the fstat qid carries PTS_FLAG | N<<8 | fk (the documented
     // contract; t_stat.qid_path at byte offset 8).
-    let mut st = [0u8; 80];
-    // SAFETY: SVC wrapper; st is a valid 80-byte t_stat buffer.
+    let mut st = [0u8; 88]; // #100: t_stat ABI is 88 bytes (kernel copies out sizeof(t_stat))
+    // SAFETY: SVC wrapper; st is a valid 88-byte t_stat buffer.
     if unsafe { t_fstat(mfd, st.as_mut_ptr()) } != 0 {
         t_putstr("ptyhost: fstat(master) failed\n");
         let _ = unsafe { t_close(mfd) };
