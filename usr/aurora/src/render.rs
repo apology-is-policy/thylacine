@@ -24,10 +24,22 @@ fn blend(bg: u32, fg: u32, a: u8) -> u32 {
     if a == 255 {
         return fg;
     }
+    // The packed R|B lane trick is only lane-safe with na = 256-a and >>8:
+    // each 16-bit lane's sum is then <= 255*256 = 0xFF00 and the shift moves
+    // whole lanes (the R lane's shifted-in low bits land in the masked-out G
+    // position). The pre-fix /255 form divided the PACKED word -- integer
+    // division does not distribute over lanes (65536 == 1 mod 255), so the B
+    // output absorbed R_sum*257's low byte: interiors (a==0/255 short-circuit)
+    // stayed exact while every antialiased EDGE pixel got a garbage B
+    // correlated with R -- thin glyphs (the prompt) read wholesale violet,
+    // warm colors fringed violet/gold (the user's "something with the
+    // oranges/yellows"). Measured-and-reproduced: fg white over Bonfire bg at
+    // a=127 -> (120,116,6) and a=191 -> (174,168,239), the exact wild pixels
+    // sampled from the screendump.
     let a = a as u32;
-    let na = 255 - a;
-    let rb = ((fg & 0x00FF_00FF) * a + (bg & 0x00FF_00FF) * na) / 255 & 0x00FF_00FF;
-    let g = ((fg & 0x0000_FF00) * a + (bg & 0x0000_FF00) * na) / 255 & 0x0000_FF00;
+    let na = 256 - a;
+    let rb = (((fg & 0x00FF_00FF) * a + (bg & 0x00FF_00FF) * na) >> 8) & 0x00FF_00FF;
+    let g = (((fg & 0x0000_FF00) * a + (bg & 0x0000_FF00) * na) >> 8) & 0x0000_FF00;
     0xFF00_0000 | rb | g
 }
 
@@ -264,4 +276,33 @@ fn draw_boxchar(cp: u32, m: &Metrics, px: &mut [u32], w: usize, x0: usize, y0: u
 fn shade(px: &mut [u32], w: usize, x0: usize, y0: usize, cw: usize, ch: usize, bg: u32, fg: u32, a: u8) {
     let c = blend(bg, fg, a);
     fill_rect(px, w, x0, y0, cw, ch, c);
+}
+
+// DORMANT host-harness tests (the G-4f named seam: aurora is no_std +
+// aarch64, so `cargo test` needs the netd-style cfg_attr refactor; these
+// document + pin the contract until then, alongside vt.rs's module).
+#[cfg(test)]
+mod tests {
+    use super::blend;
+
+    #[test]
+    fn blend_lanes_do_not_cross() {
+        // The packed-lane fix: fg white over the Bonfire bg. The pre-fix
+        // /255 form divided the PACKED word (division does not distribute
+        // over lanes; 65536 == 1 mod 255), contaminating B with R's lane:
+        // (120,116,6) at a=127 and (174,168,239) at a=191 -- the exact wild
+        // pixels sampled from the live screendump. The lane-safe 256-based
+        // form must track the per-channel ideal within 1.
+        let fg = 0xFF00_0000u32 | (228 << 16) | (221 << 8) | 216;
+        let bg = 0xFF00_0000u32 | (14 << 16) | (12 << 8) | 12;
+        for a in [1u8, 64, 127, 180, 191, 254] {
+            let v = blend(bg, fg, a);
+            let (r, g, b) = (v >> 16 & 255, v >> 8 & 255, v & 255);
+            let ideal =
+                |f: u32, bgc: u32| (f * a as u32 + bgc * (255 - a as u32)) / 255;
+            assert!((r as i64 - ideal(228, 14) as i64).abs() <= 1);
+            assert!((g as i64 - ideal(221, 12) as i64).abs() <= 1);
+            assert!((b as i64 - ideal(216, 12) as i64).abs() <= 1);
+        }
+    }
 }

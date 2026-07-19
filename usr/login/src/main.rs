@@ -93,7 +93,11 @@ const SHELL_CAPS: u64 = T_CAP_LOCK_PAGES | T_CAP_CSPRNG_READ;
 //                   line editor wants raw per-keystroke input.
 const MODE_COOKED_ECHO: &[u8] = b"+icanon +echo +isig +icrnl +onlcr";
 const MODE_COOKED_NOECHO: &[u8] = b"+icanon -echo +isig +icrnl +onlcr";
-const MODE_DEFAULT: &[u8] = b"-icanon -echo +isig -icrnl -onlcr";
+// +onlcr: output cooking stays ON in the session default -- raw INPUT for the
+// shell's line editor is orthogonal to output post-processing, and children's
+// plain `\n` writes need the kernel's ONLCR arm (the fbcon staircase fix; the
+// full rationale lives on libutopia's PROMPT_MODE, asserted identical below).
+const MODE_DEFAULT: &[u8] = b"-icanon -echo +isig -icrnl +onlcr";
 
 // #106-F3 drift guard: login's restore-before-shell discipline MUST equal ut's
 // prompt mode (libutopia::eval::console::PROMPT_MODE) so the login->ut boundary
@@ -113,7 +117,7 @@ const _: () = {
         }
         true
     }
-    assert!(bytes_eq(MODE_DEFAULT, b"-icanon -echo +isig -icrnl -onlcr"));
+    assert!(bytes_eq(MODE_DEFAULT, b"-icanon -echo +isig -icrnl +onlcr"));
 };
 
 // Parse "--consctl-fd N" from argv -> the consctl fd, or -1 if absent/malformed.

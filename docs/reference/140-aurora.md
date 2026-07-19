@@ -140,6 +140,22 @@ private session → fullscreen surface → weave map → Loom presents.
   CONTIGUOUS dirty row span into the CURRENT slot, and presents exactly
   that rect (slots rotate per present — presenting rows a pass did not
   just render would transfer stale slot content).
+- **The blend is lane-safe (#35).** `render.rs::blend`'s packed R|B trick
+  originally divided the PACKED word by 255 — integer division does not
+  distribute over lanes (65536 ≡ 1 mod 255), so the B output absorbed
+  `R_sum*257`'s low byte: glyph INTERIORS (the a=0/255 short-circuits)
+  stayed exact — which is precisely why the `-c` gate (near-grey bg/fg
+  interiors) never saw it — while every antialiased EDGE pixel got a
+  garbage B correlated with R. Thin glyphs (the `⊢` prompt) are nearly
+  all edge and read wholesale violet; warm colors fringed violet/gold
+  (the user's "something with the oranges/yellows" against the Ghostty
+  serial view). Diagnosed by pixel-sampling the user's screenshot + a
+  live screendump (framebuffer-side, cocoa exonerated) and closed
+  numerically: the buggy form reproduces the exact sampled wild pixels
+  ((120,116,6)@a=127, (174,168,239)@a=191). The fix is the standard
+  lane-safe form (`na = 256-a`, `>>8`), ideal-tracking within 1; a
+  dormant `#[cfg(test)]` regression pins it (the host-harness seam).
+  The gate's saturated-color blindness is recorded for G-5.
 - **A failed present is a DROPPED FRAME, never death (#31).** The
   pre-#31 loop exited on any `present()` error, so one transient
   compositor GPU hiccup (the controlq desync's client-visible face)
