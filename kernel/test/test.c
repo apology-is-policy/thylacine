@@ -129,6 +129,7 @@ void test_rendez_intr_terminate_masked_sleeps_through(void);
 void test_rendez_intr_terminate_interrupts_tsleep(void);
 void test_rendez_reader_frame_predicate(void);
 void test_rendez_reader_frame_blocks_death(void);
+void test_rendez_reader_frame_blocks_death_sleep(void);
 void test_tsleep_fast_path_cond_true(void);
 void test_tsleep_no_deadline_degrades(void);
 void test_tsleep_past_deadline_immediate(void);
@@ -1332,6 +1333,8 @@ struct test_case g_tests[] = {
     { "rendez.reader_frame_predicate", test_rendez_reader_frame_predicate,  false, NULL },
     { "rendez.reader_frame_blocks_death",
                                        test_rendez_reader_frame_blocks_death, false, NULL },
+    { "rendez.reader_frame_blocks_death_sleep",
+                                       test_rendez_reader_frame_blocks_death_sleep, false, NULL },
     { "tsleep.fast_path_cond_true",
                                        test_tsleep_fast_path_cond_true,
                                                                            false, NULL },

@@ -673,3 +673,96 @@ void test_rendez_reader_frame_blocks_death(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u,
         "run tree empty after cleanup");
 }
+
+// ---------------------------------------------------------------------------
+// rendez.reader_frame_blocks_death_sleep -- #90 (ARCH 8.8.1.1): the frame-atomic
+// death block-through on the sleep() path (the PRODUCTION path -- #90-audit F1).
+// ---------------------------------------------------------------------------
+//
+// The steady-state elected reader recv is reader_recv_frame(c, 0, NULL) --
+// deadline_ns == 0, so srvconn_client_recv's tsleep DEGRADES to sleep(). So the
+// production mid-frame block-through actually fires the sleep() die-check guards
+// (sched.c register-then-observe + resume-path), NOT the tsleep guards the
+// deadline-terminated reader_frame_blocks_death above exercises. This sibling
+// revert-probes BOTH sleep() sites, terminated by a REAL producer wakeup() (not
+// a deadline): a mid-frame reader whose Proc is group-terminating sleep()s on a
+// never-yet-true cond, blocks the pending death through (stays SLEEPING), and
+// when woken with cond now true blocks the STILL-pending death through the
+// resume-path check and returns SLEEP_OK. REVERT-PROBE: dropping the
+// register-then-observe guard unwinds on the first pass (run_cnt==2, not
+// SLEEPING); dropping the resume-path guard unwinds on the cond wake
+// (SLEEP_INTR, not SLEEP_OK).
+
+static volatile int  g_rfs_run_cnt;
+static volatile int  g_rfs_sleep_rc;
+static volatile int  g_rfs_cond;
+static volatile bool g_rfs_exited;
+static struct Rendez g_rfs_rendez;
+static struct Proc  *g_rfs_proc;
+
+static int rfs_cond_check(void *arg) { (void)arg; return g_rfs_cond; }
+
+static void rfs_reader_consumer_entry(void) {
+    struct Thread *self = current_thread();
+    self->stop_no_park = true;
+    self->stop_unwinds = false;
+    g_rfs_run_cnt++;                             // -> 1: pre-sleep
+    g_rfs_sleep_rc = sleep(&g_rfs_rendez, rfs_cond_check, NULL);
+    self->stop_no_park = false;
+    self->stop_unwinds = false;
+    g_rfs_run_cnt++;                             // -> 2: post-sleep
+    test_kthread_park_terminal(&g_rfs_exited);
+}
+
+void test_rendez_reader_frame_blocks_death_sleep(void) {
+    g_rfs_run_cnt  = 0;
+    g_rfs_sleep_rc = 0x7fffffff;
+    g_rfs_cond     = 0;
+    g_rfs_exited   = false;
+    rendez_init(&g_rfs_rendez);
+
+    g_rfs_proc = proc_alloc();
+    TEST_ASSERT(g_rfs_proc != NULL, "proc_alloc failed");
+
+    // Death pending BEFORE the reader sleeps -> the sleep() register-then-observe
+    // die-check must block through.
+    __atomic_store_n(&g_rfs_proc->group_exit_msg, "killed", __ATOMIC_RELEASE);
+
+    struct Thread *consumer =
+        thread_create(g_rfs_proc, rfs_reader_consumer_entry);
+    TEST_ASSERT(consumer != NULL, "thread_create(consumer) failed");
+    ready(consumer);
+    sched();
+
+    // Blocked through the pending death on the register-then-observe check
+    // (SLEEPING, run_cnt==1); a bug there would unwind (run_cnt==2, not SLEEPING).
+    TEST_EXPECT_EQ(g_rfs_run_cnt, 1u,
+        "mid-frame reader blocked the death through on the sleep() path");
+    TEST_EXPECT_EQ(consumer->state, THREAD_SLEEPING,
+        "mid-frame reader is SLEEPING (sleep()-path block-through)");
+    TEST_EXPECT_EQ(g_rfs_rendez.waiter, consumer,
+        "mid-frame reader registered on the rendez");
+
+    // A REAL producer wake with cond TRUE (not a deadline). With the #90
+    // resume-path guard the reader blocks the still-pending death through,
+    // re-checks cond (now true), and returns SLEEP_OK. Revert-probe: dropping the
+    // resume-path guard unwinds it (SLEEP_INTR) on this wake.
+    g_rfs_cond = 1;
+    int woke = wakeup(&g_rfs_rendez);
+    TEST_EXPECT_EQ(woke, 1, "wakeup reported exactly one waiter");
+    sched();
+
+    TEST_EXPECT_EQ(g_rfs_run_cnt, 2u, "reader resumed to completion");
+    TEST_EXPECT_EQ(g_rfs_sleep_rc, SLEEP_OK,
+        "the death blocked through on BOTH sleep() sites -> the cond wake won "
+        "(SLEEP_OK), not an immediate SLEEP_INTR unwind (#90 production path)");
+    TEST_ASSERT(consumer->rendez_blocked_on == NULL,
+        "reader cleared its backref on the cond resume");
+
+    test_kthread_join_free(consumer, &g_rfs_exited);
+    g_rfs_proc->state = PROC_STATE_ZOMBIE;
+    proc_free(g_rfs_proc);
+    g_rfs_proc = NULL;
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u,
+        "run tree empty after cleanup");
+}

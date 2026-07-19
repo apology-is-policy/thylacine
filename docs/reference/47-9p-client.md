@@ -110,6 +110,37 @@ a death-interrupt unwinds leaving it for survivors). On a backend with no
 plain pump. The mechanism rides the transport `set_recv_deadline`/`recv_timed_out`
 vtable ops (reference 46).
 
+### Frame-atomic death block-through (#90, ARCH §8.8.1.1)
+
+The same "a mid-frame unwind desyncs the shared stream" hazard the deadline
+mechanism above guards for TIMEOUTS applies to the #811 universal
+death-interruptible sleep. If a dying reader unwinds MID-FRAME (bytes of the
+current 9P frame already consumed), those bytes are discarded and the survivor
+that takes over the reader role reads the frame TAIL as a header → desync
+(task-#50 corruption). 8c-3 (#89) closed this for a debug/job STOP; #90 closes
+it for DEATH.
+
+`reader_recv_frame` (the recv wrapper) holds two per-Thread latches for the whole
+recv: `stop_no_park` ("in a frame-atomic recv", set at entry / cleared at exit)
+and `stop_unwinds = (got == 0)` ("at a frame boundary", set per-recv by
+`do_reader_recv_frame`). The kernel sleep-site die-check consults them via
+`thread_reader_blocks_death(t) == stop_no_park && !stop_unwinds`: a dying reader
+observed mid-frame BLOCKS THROUGH (the die-check falls to register+sched; the
+reader finishes the frame, bounded by the trusted server's whole-frame delivery,
+CF-3 B) and unwinds only at the next boundary. The guard is on ALL FOUR die-check
+sites — the register-then-observe check and the resume-path prompt check, in both
+`sleep()` and `tsleep()` (`kernel/sched.c`). Every non-reader sleeper
+(`stop_no_park` clear) unwinds immediately, exactly as #811 always did.
+
+This NARROWS I-9's #811 generalization for the reader recv only (the death is
+deferred to a boundary, never lost — the reader still dies, at the next
+boundary). v1.x liveness seam: an untrusted / hung server that sends a partial
+frame then stalls hangs the dying reader mid-frame (the #845-F1 untrusted-server
+class; every v1.0 9P server is a trusted local Proc). Modeled by
+`specs/reader_frame.tla` (NoDesync + UnwindAtBoundary + EventuallyUnwinds; the
+buggy cfg is the pre-#90 mid-frame unwind). Regressions:
+`rendez.reader_frame_predicate` + `rendez.reader_frame_blocks_death`.
+
 ### Composition pattern
 
 Every operation follows the same shape:
