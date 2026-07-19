@@ -531,3 +531,145 @@ void test_rendez_intr_terminate_interrupts_tsleep(void) {
     proc_free(g_intr_proc);
     g_intr_proc = NULL;
 }
+
+// ---------------------------------------------------------------------------
+// rendez.reader_frame_predicate -- #90 (ARCH 8.8.1.1): the frame-atomic
+// reader-recv guard truth table.
+// ---------------------------------------------------------------------------
+//
+// thread_reader_blocks_death(t) == stop_no_park && !stop_unwinds -- true iff a
+// die-check must DEFER (block through) rather than unwind. Pins the full table,
+// including the `|| stop_unwinds` disjunct of the die-check guard: a reader AT a
+// boundary (stop_unwinds set) must still unwind, so dropping that disjunct
+// (block-through even at got==0) would leave a dying reader unable to ever
+// unwind. Pure -- drive it on the boot thread's own latches, restoring them.
+void test_rendez_reader_frame_predicate(void) {
+    struct Thread *t = current_thread();
+    bool save_np = t->stop_no_park, save_uw = t->stop_unwinds;
+
+    // Non-reader (stop_no_park clear): NEVER blocks -- the die-check fires
+    // immediately for every ordinary sleeper, exactly as before #90.
+    t->stop_no_park = false; t->stop_unwinds = false;
+    TEST_ASSERT(!thread_reader_blocks_death(t),
+        "non-reader (no frame-atomic recv) never blocks death");
+    t->stop_no_park = false; t->stop_unwinds = true;
+    TEST_ASSERT(!thread_reader_blocks_death(t),
+        "non-reader never blocks death even with stop_unwinds set");
+
+    // Reader AT a boundary (stop_unwinds set, got==0): unwinds -- a safe point,
+    // no partial frame to discard. This is the `|| stop_unwinds` disjunct.
+    t->stop_no_park = true; t->stop_unwinds = true;
+    TEST_ASSERT(!thread_reader_blocks_death(t),
+        "reader at a frame boundary unwinds (does not block through)");
+
+    // Reader MID-FRAME (stop_no_park set, stop_unwinds clear): BLOCKS THROUGH.
+    t->stop_no_park = true; t->stop_unwinds = false;
+    TEST_ASSERT(thread_reader_blocks_death(t),
+        "reader mid-frame blocks the death through");
+
+    t->stop_no_park = save_np; t->stop_unwinds = save_uw;
+}
+
+// ---------------------------------------------------------------------------
+// rendez.reader_frame_blocks_death -- #90 (ARCH 8.8.1.1): the frame-atomic
+// reader-recv death block-through, end to end.
+// ---------------------------------------------------------------------------
+//
+// The elected 9P reader recv (kernel/9p_client.c::reader_recv_frame) is
+// frame-atomic w.r.t. the #811 death-unwind. A dying reader observed
+// MID-FRAME (stop_no_park set + stop_unwinds clear -- bytes of the current 9P
+// frame already consumed) must NOT unwind at the die-check: an immediate
+// unwind discards the partial frame, and the survivor that takes over the
+// reader role reads the frame TAIL as a header -> the shared byte stream
+// desyncs (task-#50). It BLOCKS THROUGH -- the die-check falls to
+// register+sched, the reader finishes the frame (bounded by the trusted
+// server, CF-3 B), and unwinds only at the next boundary.
+//
+// Forces the block-through leg deterministically: a mid-frame reader whose
+// Proc is ALREADY group-terminating (group_exit_msg set before it sleeps)
+// tsleeps with a short deadline on a never-true cond. The register-then-
+// observe die-check sees death pending; with the #90 guard it BLOCKS THROUGH
+// (the reader stays SLEEPING, run_cnt == 1, does NOT unwind), and only the
+// DEADLINE (via the timer-tick scan) later returns TSLEEP_TIMEDOUT.
+// REVERT-PROBE: dropping the `!thread_reader_blocks_death(t)` guard makes the
+// die-check return TSLEEP_INTR on the first pass -- the reader never sleeps
+// (run_cnt reaches 2 immediately, state != SLEEPING), failing the SLEEPING
+// assertions below.
+
+static volatile int  g_rf_run_cnt;
+static volatile int  g_rf_sleep_rc;
+static volatile bool g_rf_exited;
+static struct Rendez g_rf_rendez;
+static struct Proc  *g_rf_proc;
+
+static int rf_cond_false(void *arg) { (void)arg; return 0; }
+
+static void rf_reader_consumer_entry(void) {
+    struct Thread *self = current_thread();
+    // Simulate the elected reader MID-FRAME: in a frame-atomic recv
+    // (stop_no_park) with bytes of the frame already consumed (stop_unwinds
+    // clear). reader_recv_frame maintains exactly these two latches.
+    self->stop_no_park = true;
+    self->stop_unwinds = false;
+    g_rf_run_cnt++;                              // -> 1: pre-tsleep
+    // Short deadline; cond never true; the Proc is already group-terminating.
+    // The #90 guard blocks the death through -> the deadline wins (TIMEDOUT).
+    g_rf_sleep_rc = tsleep(&g_rf_rendez, rf_cond_false, NULL,
+                           timer_now_ns() + 10ull * 1000000ull);   // +10 ms
+    // Past the recv -> clear the reader latches before the terminal park.
+    self->stop_no_park = false;
+    self->stop_unwinds = false;
+    g_rf_run_cnt++;                              // -> 2: post-tsleep
+    test_kthread_park_terminal(&g_rf_exited);
+}
+
+void test_rendez_reader_frame_blocks_death(void) {
+    g_rf_run_cnt  = 0;
+    g_rf_sleep_rc = 0x7fffffff;
+    g_rf_exited   = false;
+    rendez_init(&g_rf_rendez);
+
+    g_rf_proc = proc_alloc();
+    TEST_ASSERT(g_rf_proc != NULL, "proc_alloc failed");
+
+    // Death is pending BEFORE the reader sleeps: the register-then-observe
+    // die-check on the first tsleep pass is the one that must block through.
+    __atomic_store_n(&g_rf_proc->group_exit_msg, "killed", __ATOMIC_RELEASE);
+
+    struct Thread *consumer =
+        thread_create(g_rf_proc, rf_reader_consumer_entry);
+    TEST_ASSERT(consumer != NULL, "thread_create(consumer) failed");
+    ready(consumer);
+    sched();
+
+    // The revert-probe: with the #90 guard the mid-frame reader BLOCKED
+    // THROUGH the pending death and is SLEEPING (run_cnt still 1). Without it,
+    // the die-check unwound on the first pass (run_cnt == 2, not SLEEPING).
+    TEST_EXPECT_EQ(g_rf_run_cnt, 1u,
+        "mid-frame reader blocked the death through -- did not unwind");
+    TEST_EXPECT_EQ(consumer->state, THREAD_SLEEPING,
+        "mid-frame reader is SLEEPING (blocked through, not unwound)");
+    TEST_EXPECT_EQ(g_rf_rendez.waiter, consumer,
+        "mid-frame reader registered on the rendez (blocked through)");
+
+    // Spin yielding until the timer-tick scan expires the +10 ms deadline and
+    // wakes the reader, which -- the timeout check precedes the die-check on
+    // resume -- returns TSLEEP_TIMEDOUT. The cap turns a stuck block-through
+    // into a clean failure rather than a hang.
+    for (u64 i = 0; i < 100000000ull && g_rf_run_cnt < 2u; i++) sched();
+
+    TEST_EXPECT_EQ(g_rf_run_cnt, 2u,
+        "reader timed out and ran to completion");
+    TEST_EXPECT_EQ(g_rf_sleep_rc, TSLEEP_TIMEDOUT,
+        "the death blocked through -> the deadline won (TSLEEP_TIMEDOUT), "
+        "not an immediate TSLEEP_INTR unwind (#90)");
+    TEST_ASSERT(consumer->rendez_blocked_on == NULL,
+        "reader cleared its backref on the timeout resume");
+
+    test_kthread_join_free(consumer, &g_rf_exited);
+    g_rf_proc->state = PROC_STATE_ZOMBIE;
+    proc_free(g_rf_proc);
+    g_rf_proc = NULL;
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u,
+        "run tree empty after cleanup");
+}

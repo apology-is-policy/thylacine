@@ -1836,7 +1836,21 @@ int sleep(struct Rendez *r, int (*cond)(void *arg), void *arg) {
         // the interrupt, which re-validates against the live queue). kproc
         // never group-terminates and the latch is never armed on kproc, so
         // kernel threads never take this branch.
-        if (thread_die_pending(t)) {
+        // #90 (ARCH 8.8.1.1) frame-atomic exception: a dying ELECTED 9P READER
+        // observed MID-FRAME (thread_reader_blocks_death: in reader_recv_frame,
+        // stop_no_park set + stop_unwinds clear -- some bytes of the current
+        // frame already consumed) must NOT unwind here. An immediate #811
+        // unwind discards the partial frame; the survivor that takes over the
+        // reader role then reads the frame TAIL as a header -> the shared byte
+        // stream desyncs (task-#50). It BLOCKS THROUGH instead: fall to the
+        // sched() below (already registered), finish the frame (bounded by the
+        // trusted server's whole-frame delivery, CF-3 B), then unwind at the
+        // next boundary where stop_unwinds is set. This narrows #811 for the
+        // reader recv ONLY -- every other sleeper (stop_no_park clear) unwinds
+        // immediately, exactly as before. Mirrors the 8c-3 stop block-through
+        // above; DeathWinsOverStop holds (both now unwind at a boundary; the
+        // EL0-return die-check still precedes the stop-check).
+        if (thread_die_pending(t) && !thread_reader_blocks_death(t)) {
             r->waiter            = NULL;
             t->rendez_blocked_on = NULL;
             t->state             = THREAD_RUNNING;
@@ -1863,9 +1877,19 @@ int sleep(struct Rendez *r, int (*cond)(void *arg), void *arg) {
         spin_lock(&r->lock);
 
         // Woken by a death/terminate waker? Return INTR rather than looping
-        // (the next register-then-observe would catch it anyway -- this is
+        // (the register-then-observe above would catch it anyway -- this is
         // the prompt path). Widened to thread_die_pending (LS-5c).
-        if (thread_die_pending(t)) {
+        //
+        // #90 (ARCH 8.8.1.1): the frame-atomic guard applies on the prompt path
+        // TOO. A mid-frame elected reader (thread_reader_blocks_death) that
+        // blocked the death through at the register-then-observe check above,
+        // slept, and is now woken (by the producer, a spurious wake, or -- in
+        // tsleep -- the deadline tick) must NOT unwind here: it would discard
+        // the partial frame and desync the shared stream. It BLOCKS THROUGH --
+        // loop instead of break; the guarded register-then-observe re-blocks it
+        // until a boundary. Without this guard the prompt path silently defeats
+        // the register-then-observe guard on the very next wake.
+        if (thread_die_pending(t) && !thread_reader_blocks_death(t)) {
             rc = SLEEP_INTR;
             break;
         }
@@ -1995,7 +2019,15 @@ int tsleep(struct Rendez *r, int (*cond)(void *arg), void *arg,
         // unmasked for this thread. True => undo the FULL registration
         // (rendez + timer-wait) and return TSLEEP_INTR; the caller unwinds +
         // the Thread dies at its EL0-return tail.
-        if (thread_die_pending(t)) {
+        // #90 (ARCH 8.8.1.1) frame-atomic exception, the tsleep twin of
+        // sleep()'s guard: a dying ELECTED 9P READER observed MID-FRAME
+        // (thread_reader_blocks_death) BLOCKS THROUGH -- fall to sched() below
+        // (already registered on the rendez + timer-wait list), finish the
+        // frame (bounded by the trusted server, CF-3 B), then unwind at the
+        // next boundary. The reader's recv (srvconn_client_recv) is a
+        // deadline-bounded tsleep, so this is the die-check that actually fires
+        // for a mid-frame reader. Every other sleeper unwinds immediately.
+        if (thread_die_pending(t) && !thread_reader_blocks_death(t)) {
             r->waiter            = NULL;
             t->rendez_blocked_on = NULL;
             timerwait_unlink(t);
@@ -2023,8 +2055,13 @@ int tsleep(struct Rendez *r, int (*cond)(void *arg), void *arg,
         spin_lock(&r->lock);
 
         // Woken by a death/terminate waker? Return INTR (prompt path).
-        // Widened to thread_die_pending (LS-5c).
-        if (thread_die_pending(t)) {
+        // Widened to thread_die_pending (LS-5c). #90 (ARCH 8.8.1.1): the
+        // frame-atomic guard applies here too -- a mid-frame elected reader
+        // (thread_reader_blocks_death) blocks the death through on the prompt
+        // path (see sleep()'s twin) and loops; the guarded register-then-observe
+        // re-blocks it until a boundary, or -- reached first here -- the loop's
+        // timeout check returns TSLEEP_TIMEDOUT once the deadline passes.
+        if (thread_die_pending(t) && !thread_reader_blocks_death(t)) {
             ret = TSLEEP_INTR;
             break;
         }

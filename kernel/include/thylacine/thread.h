@@ -445,6 +445,25 @@ static inline void set_current_thread(struct Thread *t) {
     __asm__ __volatile__("msr tpidr_el1, %0" :: "r"((u64)(uintptr_t)t) : "memory");
 }
 
+// #90 (ARCH 8.8.1.1): the elected 9P reader recv (reader_recv_frame,
+// kernel/9p_client.c) is frame-atomic w.r.t. an async unwind. A dying reader
+// observed MID-FRAME at a sleep-site die-check -- in a frame-atomic recv
+// (stop_no_park set) with bytes of the current frame already consumed
+// (stop_unwinds clear, i.e. got != 0) -- must NOT unwind: an immediate #811
+// unwind would discard the consumed partial frame, and the survivor that takes
+// over the reader role would read the frame TAIL as a header -> the shared byte
+// stream desyncs (task-#50 corruption). It BLOCKS THROUGH instead, finishing
+// the frame (bounded by the trusted server's whole-frame delivery, CF-3 B),
+// then unwinds at the next boundary. Reuses the 8c-3 stop latches: stop_no_park
+// = "in a frame-atomic recv", stop_unwinds = "at a boundary (got==0)" -- both
+// already exactly the predicates death needs, so no new field. True iff the
+// die-check must DEFER (block through) rather than unwind. Every non-reader
+// sleeper has stop_no_park clear -> false -> the die-check fires immediately,
+// exactly as before #90.
+static inline bool thread_reader_blocks_death(const struct Thread *t) {
+    return t->stop_no_park && !t->stop_unwinds;
+}
+
 // Bring up the thread subsystem. Allocates the kernel thread (TID 0),
 // wires it to kproc (set up by proc_init), parks it in TPIDR_EL1 as
 // the current thread. Must be called after proc_init (so kproc exists)
