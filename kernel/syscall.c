@@ -1419,7 +1419,14 @@ static s64 sys_close_handler(u64 hraw) {
 int spoor_stat_native(struct Spoor *c, struct t_stat *out) {
     if (!c || !out)                                  return -1;
     if (!c->dev || !c->dev->stat_native)             return -1;
-    return c->dev->stat_native(c, out);
+    int rc = c->dev->stat_native(c, out);
+    // #100: the device identity is the Spoor's (Plan 9 Chan.dev), not the Dev's.
+    // Stamp it after a clean fill so (devno, qid.path) uniquely names a file across
+    // mount sessions -- fstat and the stat leaf-Spoor fallback both land here; the
+    // pounce fused-query path stamps its own leaf in stalk_core. Static single-
+    // instance Devs carry devno 0 (unchanged); dev9p sessions carry a live value.
+    if (rc == 0) out->devno = c->devno;
+    return rc;
 }
 
 static s64 sys_fstat_handler(u64 hraw, u64 stat_va) {

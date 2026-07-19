@@ -159,18 +159,23 @@ check` printed its diagnostic. 8d-3 chased it:
   propagate the real errno through the create path. Audit-bearing (FS-mutation
   surface). Correctness is unaffected.
 - **robustio `FileID` cross-dataset collision** (task #100, 8d-3 holotype F2 —
-  a P2 latent). **Interim fix landed** (`~/projects/gopls` `bd329f6`): the shim
-  now synthesizes `device` from FNV-1a of the (absolute, stable) path instead of
-  `device: 0`, so the dangerous collision below is **closed fail-safe** —
-  distinct paths never alias (killing the false-same wrong-content bug), the same
-  path stays stable (change-detection intact); the only cost is a lost cross-path
-  dedup of aliased files (a perf opt, never wrong bytes). The **proper** fix (the
-  plan9 `device = server identity` model — an ABI change, user-signed-off, owed
-  to a budgeted session because it is a full Go-toolchain rebuild) is described
-  below; it supersedes the interim. The original `device: 0` hazard, for the
-  record: the shim returned `FileID{device: 0, inode: stat.QidPath}`, and
-  qid.path is unique only *within one served tree*; a real login session mounts
-  two independently-inode-numbered
+  was a P2 latent, now **RESOLVED**). **The proper devno ABI fix landed**:
+  `t_stat` grew 80→88 with a `devno` field (Plan 9 Chan.dev / POSIX st_dev),
+  filled from `spoor->devno` on both the SYS_FSTAT (`spoor_stat_native`) and
+  SYS_STAT (pounce fused-query, `stalk.c`) paths; the Go fork's `syscall.Stat_t`
+  grew in lockstep (as did libt `t_stat`, libthyla-rs `Metadata` + `dev()`, and
+  the pouch patches 0010/0019/0021), and the shim now returns
+  `FileID{device: uint64(stat.Dev), inode: stat.QidPath}`, matching
+  robustio_plan9.go. The earlier FNV-of-path interim (gopls `bd329f6`) is
+  superseded. Verified: 1164/1164 + boot OK + `go8d OK` + the pouch stat/fstat
+  agreement (`fields == fstat`). A build-time lesson worth keeping: the
+  per-mirror `_Static_assert(sizeof == 80)` checks only each mirror's *own* size,
+  not that it matches the kernel — a stale mirror left at 80 passes its assert
+  yet overflows at runtime (patches 0019 + 0021 were caught only by the boot
+  segv + a `struct t_stat` grep, not the build). The original `device: 0`
+  hazard, for the record: the shim returned `FileID{device: 0, inode:
+  stat.QidPath}`, and qid.path is unique only *within one served tree*; a real
+  login session mounts two independently-inode-numbered
   Stratum datasets (the system dataset — `/goroot`, `/bin` — and the per-user
   home). With `device: 0`, a cross-dataset qid.path collision + a same-second
   mtime (the `/goroot` bake writes thousands of files in one burst) makes

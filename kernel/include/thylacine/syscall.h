@@ -896,7 +896,7 @@ enum {
     // `struct stat` without losing 9P provenance.
     //
     //   x0 = spoor_fd   (hidx_t; must be KOBJ_SPOOR — any rights)
-    //   x1 = stat_va    user-VA pointer to an 80-byte struct t_stat (must be
+    //   x1 = stat_va    user-VA pointer to an 88-byte struct t_stat (must be
     //                   fully mapped + writable; alignment NOT required — the
     //                   kernel stores byte-by-byte for alignment tolerance)
     //
@@ -1600,7 +1600,7 @@ enum {
     //   v1.0 (G11), so stat == lstat.
     //   x0 = path_va  (user VA; NUL-free; '/'-separated multi-component)
     //   x1 = path_len (1 .. SYS_OPEN_PATH_MAX bytes)
-    //   x2 = stat_va  (user VA of an 80-byte struct t_stat; copy-out)
+    //   x2 = stat_va  (user VA of an 88-byte struct t_stat; copy-out)
     //   Returns 0 on success; -errno from resolution (-T_E_NOENT walk-miss,
     //   -T_E_ACCES X-denial -- the fail-ordering invariant guarantees an
     //   X-denial at component k masks everything past k, so a caller cannot
@@ -2030,12 +2030,22 @@ struct t_stat {
     u64 blocks;          // 64: count of 512-byte blocks
     u32 uid;             // 72: A-2a owner principal-id (PRINCIPAL_SYSTEM/NONE/real)
     u32 gid;             // 76: A-2a owning group (GID_SYSTEM/NONE/real)
+    u32 devno;           // 80: #100 -- per-instance device number (Plan 9 Chan.dev /
+                         //     POSIX st_dev): the mount/session identity that makes a
+                         //     qid.path unambiguous ACROSS datasets. A static single-
+                         //     instance Dev reports 0; dev9p mints one per attach
+                         //     session (spoor_next_devno), inherited by walked/cloned
+                         //     descendants. Consumers key file identity on (devno,
+                         //     qid.path) -- e.g. gopls robustio FileID.
+    u32 _pad_dev;        // 84: pad to 8-byte alignment (t_stat carries u64 members)
 };
 
-_Static_assert(sizeof(struct t_stat) == 80,
-               "struct t_stat is a SYS_FSTAT ABI type — pinned at 80 bytes "
-               "(A-2a appended u32 uid + u32 gid after the 72-byte tail); "
-               "any field add updates the size + asserts");
+_Static_assert(sizeof(struct t_stat) == 88,
+               "struct t_stat is a SYS_FSTAT/SYS_STAT ABI type — pinned at 88 bytes "
+               "(A-2a appended u32 uid+gid -> 80; #100 appended u32 devno+pad -> 88). "
+               "EVERY mirror (libt, libthyla-rs, pouch patch 0010, the go-thylacine "
+               "syscall.Stat_t) MUST grow in lockstep: the kernel writes sizeof(88) "
+               "bytes into the caller's buffer, so a mirror left at 80 overflows it.");
 _Static_assert(__builtin_offsetof(struct t_stat, size)      ==  0, "t_stat.size at ABI offset 0");
 _Static_assert(__builtin_offsetof(struct t_stat, qid_path)  ==  8, "t_stat.qid_path at ABI offset 8");
 _Static_assert(__builtin_offsetof(struct t_stat, atime_sec) == 16, "t_stat.atime_sec at ABI offset 16");
@@ -2049,6 +2059,7 @@ _Static_assert(__builtin_offsetof(struct t_stat, blksize)   == 56, "t_stat.blksi
 _Static_assert(__builtin_offsetof(struct t_stat, blocks)    == 64, "t_stat.blocks at ABI offset 64");
 _Static_assert(__builtin_offsetof(struct t_stat, uid)       == 72, "t_stat.uid at ABI offset 72 (A-2a)");
 _Static_assert(__builtin_offsetof(struct t_stat, gid)       == 76, "t_stat.gid at ABI offset 76 (A-2a)");
+_Static_assert(__builtin_offsetof(struct t_stat, devno)     == 80, "t_stat.devno at ABI offset 80 (#100)");
 
 // 8a-1b-gamma-2 (I-39; docs/DEBUG-FS-DESIGN.md 4.5): the /proc/<pid>/regs read/
 // write format -- the saved EL0 GPR frame in the Linux arm64 `user_pt_regs`

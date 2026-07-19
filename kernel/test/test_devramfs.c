@@ -23,6 +23,7 @@ void test_devramfs_read_partial_offset(void);
 void test_devramfs_read_dir_returns_neg1(void);
 void test_devramfs_write_rejected(void);
 void test_devramfs_stat_native_system_owned(void);
+void test_spoor_stat_native_stamps_devno(void);
 void test_devramfs_readdir_enumerates_root(void);
 void test_devramfs_readdir_file_returns_neg1(void);
 void test_devramfs_readdir_synth_dir_empty(void);
@@ -240,6 +241,32 @@ void test_devramfs_stat_native_system_owned(void) {
         TEST_ASSERT((st.mode & T_S_IFMT) == T_S_IFREG,     "file is regular");
         spoor_unref(f);
     }
+
+    spoor_unref(root);
+}
+
+// #100: spoor_stat_native (the wrapper behind SYS_FSTAT + the stat leaf-Spoor
+// fallback) stamps t_stat.devno from the Spoor's per-instance device number
+// (Plan 9 Chan.dev), so (devno, qid.path) uniquely names a file across mount
+// sessions. Proven for the static-Dev value (0) and a simulated session value.
+void test_spoor_stat_native_stamps_devno(void) {
+    struct Spoor *root = devramfs.attach("");
+    TEST_ASSERT(root != NULL, "attach root");
+
+    struct t_stat st;
+    TEST_EXPECT_EQ((u64)root->devno, (u64)0, "devramfs Spoor devno defaults to 0");
+    TEST_EXPECT_EQ((u64)spoor_stat_native(root, &st), (u64)0, "stat_native -> 0");
+    TEST_EXPECT_EQ((u64)st.devno, (u64)0, "t_stat.devno == 0 for a static Dev");
+
+    // Simulate a live per-attach session id (dev9p mints one via
+    // spoor_next_devno): the wrapper must copy c->devno verbatim. Pre-#100 the
+    // devno field was never written, so st.devno would be stack garbage that
+    // (almost surely) != the sentinel -- a non-vacuous, revert-probed check.
+    root->devno = 0xABCD1234u;
+    TEST_EXPECT_EQ((u64)spoor_stat_native(root, &st), (u64)0, "re-stat -> 0");
+    TEST_EXPECT_EQ((u64)st.devno, (u64)0xABCD1234u,
+                    "t_stat.devno reflects the Spoor's session id (#100)");
+    root->devno = 0;
 
     spoor_unref(root);
 }

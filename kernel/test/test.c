@@ -605,6 +605,7 @@ void test_devramfs_read_partial_offset(void);
 void test_devramfs_read_dir_returns_neg1(void);
 void test_devramfs_write_rejected(void);
 void test_devramfs_stat_native_system_owned(void);
+void test_spoor_stat_native_stamps_devno(void);
 void test_devramfs_readdir_enumerates_root(void);
 void test_devramfs_walk_attrs(void);
 void test_devramfs_readdir_file_returns_neg1(void);
@@ -1924,6 +1925,8 @@ struct test_case g_tests[] = {
                                        test_devramfs_read_dir_returns_neg1, false, NULL },
     { "devramfs.stat_native_system_owned",
                                        test_devramfs_stat_native_system_owned, false, NULL },
+    { "spoor.stat_native_stamps_devno",
+                                       test_spoor_stat_native_stamps_devno, false, NULL },
     { "devramfs.write_rejected",       test_devramfs_write_rejected,       false, NULL },
     { "devramfs.readdir_enumerates_root",
                                        test_devramfs_readdir_enumerates_root, false, NULL },

@@ -24,11 +24,11 @@ _Static_assert against the kernel's 80-byte ABI.
 Depends on: 0001 (the seam), 0010 (fstat + the translation precedent).
 --- a/src/stat/fstatat.c	2026-07-07 10:45:27
 +++ b/src/stat/fstatat.c	2026-07-07 10:49:24
-@@ -1,154 +1,108 @@
+@@ -1,154 +1,111 @@
 +/*
 + * pouch fstatat() -- route the PATH forms onto the Thylacine-native
 + * SYS_stat (= 88; the POUNCE walk-query, docs/POUNCE-DESIGN.md section 7)
-+ * and translate the 80-byte struct t_stat into musl's aarch64 struct stat
++ * and translate the 88-byte struct t_stat into musl's aarch64 struct stat
 + * (the exact 0010-pouch-fstat-lseek translation, one source shape).
 + *
 + * The upstream fstatat is the statx/newfstatat trampoline the whole musl
@@ -104,9 +104,11 @@ Depends on: 0001 (the seam), 0010 (fstat + the translation precedent).
 +	unsigned long blocks;      /* 64 */
 +	unsigned int  uid;         /* 72 */
 +	unsigned int  gid;         /* 76 */
++	unsigned int  devno;       /* 80: #100 per-instance device number (Chan.dev) */
++	unsigned int  _pad_dev;    /* 84 */
  };
-+_Static_assert(sizeof(struct t_stat) == 80,
-+               "pouch fstatat: t_stat ABI must match Thylacine kernel (80 bytes)");
++_Static_assert(sizeof(struct t_stat) == 88,
++               "pouch fstatat: t_stat ABI must match Thylacine kernel (88 bytes; #100 devno)");
  
 -static int fstatat_statx(int fd, const char *restrict path, struct stat *restrict st, int flag)
 +int __fstatat(int fd, const char *restrict path, struct stat *restrict st, int flag)
@@ -237,6 +239,7 @@ Depends on: 0001 (the seam), 0010 (fstat + the translation precedent).
 +	st->st_blocks  = (blkcnt_t)t.blocks;
 +	st->st_uid     = (uid_t)t.uid;
 +	st->st_gid     = (gid_t)t.gid;
++	st->st_dev     = (dev_t)t.devno;
 +	st->st_atim.tv_sec  = (time_t)t.atime_sec;
 +	st->st_mtim.tv_sec  = (time_t)t.mtime_sec;
 +	st->st_ctim.tv_sec  = (time_t)t.ctime_sec;

@@ -559,6 +559,10 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
                 // either end. Success exit WITHOUT touching *errp.
                 walkqid_free(w);
                 *stat_out  = sts[nrun - 1];
+                stat_out->devno = parent->devno;   // #100: the run's base carries the
+                                                   // session identity (Chan.dev); the
+                                                   // fused leaf inherits it, matching
+                                                   // spoor_stat_native's stamp.
                 *stat_done = true;
                 stalk_unwind(trail, depth);
                 return NULL;

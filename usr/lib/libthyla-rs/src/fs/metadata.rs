@@ -30,8 +30,9 @@ use core::mem::MaybeUninit;
 /// File / Spoor metadata returned by `t::fs::File::metadata`,
 /// `t::fs::metadata(path)`, and friends.
 ///
-/// 80-byte plain-data struct mirroring the kernel's `struct t_stat`
-/// (A-2a appended uid + gid after the 72-byte tail). Cheap to copy.
+/// 88-byte plain-data struct mirroring the kernel's `struct t_stat`
+/// (A-2a appended uid + gid -> 80; #100 appended devno + pad -> 88).
+/// Cheap to copy.
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct Metadata {
@@ -50,12 +51,15 @@ pub struct Metadata {
     blocks: u64,
     uid: u32,
     gid: u32,
+    dev: u32,
+    _pad_dev: u32,
 }
 
 // Compile-time check that our Rust mirror matches the kernel's ABI pin
-// (80 bytes; A-2a uid+gid). If a v1.x kernel adds fields to struct t_stat
-// without extending Metadata, this assertion fires.
-const _: () = assert!(core::mem::size_of::<Metadata>() == 80);
+// (88 bytes; #100 devno). If a v1.x kernel adds fields to struct t_stat
+// without extending Metadata, this assertion fires -- and since the kernel
+// writes sizeof(t_stat) bytes into this buffer, a stale size would corrupt.
+const _: () = assert!(core::mem::size_of::<Metadata>() == 88);
 
 impl Metadata {
     /// File size in bytes.
@@ -198,6 +202,16 @@ impl Metadata {
     #[must_use]
     pub const fn gid(&self) -> u32 {
         self.gid
+    }
+
+    /// Per-instance device number (Plan 9 Chan.dev / POSIX st_dev, #100):
+    /// the mount/session identity. `(dev(), qid_path())` uniquely names a
+    /// file ACROSS datasets (two datasets can reuse a qid.path); `0` for a
+    /// static single-instance Dev like the boot ramfs.
+    #[inline]
+    #[must_use]
+    pub const fn dev(&self) -> u32 {
+        self.dev
     }
 }
 

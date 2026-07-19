@@ -1953,10 +1953,10 @@ static inline void t_exit_group(long status) {
 // P6-pouch-stratumd-boot 16b-gamma: native file metadata + offset cursor.
 
 // struct t_stat — userspace mirror of the kernel's struct t_stat from
-// <thylacine/syscall.h>. 80 bytes (A-2a appended uid + gid after the 72-byte
-// tail); field offsets pinned by _Static_asserts at the end. Native callers
-// consume this directly; pouch's fstat() translation layer (patch 0010) maps
-// t_stat onto musl's struct stat for POSIX consumers like stratumd.
+// <thylacine/syscall.h>. 88 bytes (A-2a appended uid+gid -> 80; #100 appended
+// devno+pad -> 88); field offsets pinned by _Static_asserts at the end. Native
+// callers consume this directly; pouch's fstat() translation layer (patch 0010)
+// maps t_stat onto musl's struct stat for POSIX consumers like stratumd.
 struct t_stat {
     unsigned long size;             //  0: file size in bytes
     unsigned long qid_path;         //  8: 9P qid.path
@@ -1973,10 +1973,13 @@ struct t_stat {
     unsigned long blocks;           // 64: count of 512-byte blocks
     unsigned int  uid;              // 72: A-2a owner principal-id
     unsigned int  gid;              // 76: A-2a owning group
+    unsigned int  devno;            // 80: #100 per-instance device number (Chan.dev)
+    unsigned int  _pad_dev;         // 84: pad to 8-byte alignment
 };
 
-_Static_assert(sizeof(struct t_stat) == 80,
-               "libt t_stat must match kernel t_stat ABI (80 bytes; A-2a uid+gid)");
+_Static_assert(sizeof(struct t_stat) == 88,
+               "libt t_stat must match kernel t_stat ABI (88 bytes; #100 devno). "
+               "The kernel writes sizeof(t_stat) bytes into this buffer.");
 _Static_assert(__builtin_offsetof(struct t_stat, size)      ==  0, "t_stat.size at 0");
 _Static_assert(__builtin_offsetof(struct t_stat, qid_path)  ==  8, "t_stat.qid_path at 8");
 _Static_assert(__builtin_offsetof(struct t_stat, mode)      == 40, "t_stat.mode at 40");
@@ -1984,6 +1987,7 @@ _Static_assert(__builtin_offsetof(struct t_stat, qid_type)  == 52, "t_stat.qid_t
 _Static_assert(__builtin_offsetof(struct t_stat, blocks)    == 64, "t_stat.blocks at 64");
 _Static_assert(__builtin_offsetof(struct t_stat, uid)       == 72, "t_stat.uid at 72");
 _Static_assert(__builtin_offsetof(struct t_stat, gid)       == 76, "t_stat.gid at 76");
+_Static_assert(__builtin_offsetof(struct t_stat, devno)     == 80, "t_stat.devno at 80 (#100)");
 
 // Whence values for t_lseek — mirror kernel T_SEEK_* + POSIX SEEK_*.
 #define T_SEEK_SET 0
