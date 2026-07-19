@@ -225,10 +225,19 @@ fi
 # slot 28, virtio-rng drops to slot 27. The probe scans all 32 slots
 # so order is informational. THYLACINE_NO_INPUT=1 disables for
 # environments where the device isn't desired.
+# G-3 adds virtio-keyboard-pci id=kbd-pci0: the RESIDENT compositor's input
+# device. The G-1 co-page rule applies to input verbatim -- the MMIO keyboard
+# slot shares the one page-exclusive 4-KiB slot page whose lifetime belongs
+# to stratumd, so tapestryd (persistent) consumes events over its OWN PCI
+# function; the MMIO device stays for the one-shot P4-K kernel-test probe
+# (the exact gpu0/gpu-mmio0 split, applied to kbd). The warden's gather
+# manifest confers BOTH graphics-path functions (GPU + keyboard) into
+# tapestryd's one allowance.
 input_flags=()
 if [[ "${THYLACINE_NO_INPUT:-0}" != "1" ]]; then
     input_flags=(
         -device "virtio-keyboard-device,id=kbd0"
+        -device "virtio-keyboard-pci,id=kbd-pci0,disable-legacy=on"
     )
 fi
 
@@ -237,17 +246,18 @@ fi
 # console surface for a bound scanout with no display backend --
 # tools/screendump.sh captures either over QMP by qdev id).
 #
-#   - virtio-gpu-pci id=gpu0 (G-1): the RESIDENT gpud driver's device.
-#     PCI because a persistent driver cannot claim a shared virtio-mmio
-#     page: QEMU-virt packs all populated MMIO slots into ONE 4-KiB page
-#     (stride 0x200) and userspace MMIO claims are page-granular +
-#     exclusive, so the page belongs temporally to the transient probes
-#     and then permanently to stratumd (virtio-blk) -- a second
-#     persistent claimant starves the disk (boot-fatal, measured at
-#     G-1). PCI BARs are per-function; no co-residency. gpud holds the
-#     P4-L 4-quadrant pattern + heartbeat on scanout 0 for the life of
-#     the box; tools/test.sh's pattern-persists gate asserts it
-#     post-boot against THIS device (screendump default -d gpu0).
+#   - virtio-gpu-pci id=gpu0 (G-1; tapestryd since G-3): the RESIDENT
+#     compositor's device. PCI because a persistent driver cannot claim
+#     a shared virtio-mmio page: QEMU-virt packs all populated MMIO
+#     slots into ONE 4-KiB page (stride 0x200) and userspace MMIO
+#     claims are page-granular + exclusive, so the page belongs
+#     temporally to the transient probes and then permanently to
+#     stratumd (virtio-blk) -- a second persistent claimant starves the
+#     disk (boot-fatal, measured at G-1). PCI BARs are per-function; no
+#     co-residency. tapestryd owns scanout 0 for the life of the box;
+#     its resident tapestry-demo client presents the P4-L 4-quadrant
+#     pattern + live plasma, and tools/test.sh's pattern-persists gate
+#     asserts it post-boot against THIS device (screendump -d gpu0).
 #   - virtio-gpu-device id=gpu-mmio0 (P4-L): the one-shot /virtio-gpu
 #     kernel-test probe's device (init handshake + the 2D scanout
 #     pipeline over virtio-mmio). Its scanout legitimately dies at the

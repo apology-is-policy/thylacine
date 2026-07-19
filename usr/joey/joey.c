@@ -6320,6 +6320,80 @@ int main(void) {
 #endif /* THYLA_BOOT_PROBES (the PTY-2a-2 round-trip + the 2e openpty E2E + the PTY-3 pouch probe + the PTY-4 jc E2E) */
     }
 
+    // === G-3: mount /dev/tapestry + spawn the compositor's first client ===
+    // tapestryd is WARDEN-spawned (persistent, gather-bound to the GPU +
+    // keyboard PCI functions) long before this point; joey's job is the V4
+    // mount (the /net idiom: /srv/tapestry absence is environment-dependent
+    // -- THYLACINE_NO_GPU boots have no GPU function -- so absent is SOFT;
+    // a mount error on a present service is FATAL) and the demo client.
+    // The mount point is devdev's synthetic tapestry child (the pts shape).
+    // tapestry-demo is spawn-and-leave: it must OUTLIVE the probe ladder --
+    // its presented surface is what the host-side per-boot pattern gate
+    // (tools/screendump.sh -v in tools/test.sh) verifies, and the RW-7
+    // quiesce blanks the scanout the moment its owner reaps. The demo's own
+    // bounded connect-retry absorbs ordering; the pattern gate is the
+    // end-to-end verifier (client -> 9P -> tapestryd -> weave share ->
+    // present -> virtio-gpu -- the G-2-audit F2 round-trip E2E residue).
+    {
+        long tap_root = t_open(T_WALK_OPEN_FROM_ROOT, "/srv/tapestry", 13, T_OREAD);
+        if (tap_root >= 0) {
+            if (t_mount("/dev/tapestry", 13, tap_root, T_MREPL) != 0) {
+                t_putstr("joey: t_mount(/dev/tapestry) FAILED\n");
+                return 1;
+            }
+            (void)t_close(tap_root);
+            t_putstr("joey: /dev/tapestry mounted (tapestryd tree)\n");
+
+#if THYLA_BOOT_PROBES
+            // G-3 PROBE: the shared-mount read path -- /dev/tapestry/ctl must
+            // yield the display geometry line. Boot-fatal once the mount is up.
+            {
+                long ctl = t_open(T_WALK_OPEN_FROM_ROOT, "/dev/tapestry/ctl",
+                                  17, T_OREAD);
+                if (ctl < 0) {
+                    t_putstr("joey: G-3 PROBE open(/dev/tapestry/ctl) FAILED\n");
+                    return 1;
+                }
+                char cbuf[128];
+                long cn = t_read(ctl, cbuf, sizeof(cbuf) - 1);
+                (void)t_close(ctl);
+                static const char disp_pfx[] = "display ";
+                int pfx_ok = (cn >= 10);
+                for (int i = 0; pfx_ok && disp_pfx[i] != '\0'; i++)
+                    if (cbuf[i] != disp_pfx[i])
+                        pfx_ok = 0;
+                if (!pfx_ok) {
+                    t_putstr("joey: G-3 PROBE /dev/tapestry/ctl malformed\n");
+                    return 1;
+                }
+                cbuf[cn] = '\0';
+                t_putstr("joey: G-3 PROBE OK (/dev/tapestry/ctl: ");
+                for (long i = 0; i < cn; i++)
+                    if (cbuf[i] == '\n') { cbuf[i] = '\0'; break; }
+                t_putstr(cbuf);
+                t_putstr(")\n");
+            }
+#endif
+
+            // The first client: draws the -v quadrant pattern + the live
+            // plasma via the FULL surface protocol and presents forever.
+            {
+                char dbuf[24];
+                const char demo_name[] = "/bin/tapestry-demo";
+                long demo_pid = t_spawn(demo_name, sizeof(demo_name) - 1);
+                if (demo_pid <= 0) {
+                    t_putstr("joey: t_spawn(\"/bin/tapestry-demo\") FAILED\n");
+                    return 1;
+                }
+                t_putstr("joey: tapestry-demo spawned pid=");
+                t_putstr(itoa_dec(demo_pid, dbuf, sizeof(dbuf)));
+                t_putstr(" (resident; the pattern gate's scanout owner)\n");
+            }
+        } else {
+            t_putstr("joey: /srv/tapestry absent (no GPU environment); skipping\n");
+        }
+    }
+
     // (2) Signal boot-complete. All boot-test asserts have passed, so the kernel
     // prints "Thylacine boot OK" here (the banner no longer rides joey's exit;
     // joey persists as the session supervisor).

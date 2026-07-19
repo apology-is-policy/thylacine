@@ -156,6 +156,11 @@ pub fn to_allowance(res: &BoundResources) -> TAllowanceDesc {
         // over the KObj_PCI), not allowance windows -- so PCI adds no `mmio` entry.
         let _ = d.push_pci(bus, dev, fun);
     }
+    for (bus, dev, fun) in &res.pci_extra {
+        // Gathered extra functions (gather = all): the same I-34 axis, one bdf
+        // per further matched node.
+        let _ = d.push_pci(*bus, *dev, *fun);
+    }
     d
 }
 

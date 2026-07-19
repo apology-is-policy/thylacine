@@ -1,9 +1,13 @@
 [package]
-name = "gpud"
+name = "tapestryd"
 version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
 license.workspace = true
+
+[[bin]]
+name = "tapestryd"
+path = "src/main.rs"
 
 [dependencies]
 libdriver = { path = "../lib/libdriver" }

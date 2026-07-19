@@ -51,6 +51,7 @@ enum {
     DEV_KIND_CONS    = 6,
     DEV_KIND_CONSCTL = 7,
     DEV_KIND_PTS     = 8,   // the /dev/pts mount-stub DIRECTORY (not a leaf)
+    DEV_KIND_TAPESTRY = 9,  // the /dev/tapestry mount-stub DIRECTORY (G-3)
 };
 
 #define DEV_QID_ROOT_PATH  0ULL
@@ -160,6 +161,14 @@ static bool walk_one(u64 cur_path, const char *name, struct Qid *out_qid) {
         // (dc='d', devno, DEV_KIND_PTS).
         if (name_eq("pts", name)) {
             out_qid->path = (u64)DEV_KIND_PTS;
+            out_qid->type = QTDIR;
+            return true;
+        }
+        // /dev/tapestry: the compositor mount stub (Tapestry G-3, the V4
+        // /dev/tapestry vote) -- same shape as pts: EMPTY pre-mount, joey
+        // MREPL-mounts tapestryd's tree over it.
+        if (name_eq("tapestry", name)) {
+            out_qid->path = (u64)DEV_KIND_TAPESTRY;
             out_qid->type = QTDIR;
             return true;
         }

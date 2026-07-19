@@ -44,7 +44,8 @@ use libthyla_rs::{T_CAP_HW_CREATE, T_SPAWN_PERM_MAY_POST_SERVICE};
 
 use libdriver::driver::to_allowance;
 use libdriver::{
-    best_match, feed_ready_line, next_step, reconcile_reported_node, resolve, BoundResources,
+    best_match, feed_ready_line, next_step, reconcile_reported_node, resolve, resolve_gathered,
+    BoundResources,
     DeviceId, DeviceNode, DiscoverySource, Disposition, DtbSource, Lifecycle, Manifest, PciSource,
     ReadyLine, RunOutcome, SuperviseStep, READY_LINE_MAX, RESTART_LIMIT,
 };
@@ -103,17 +104,18 @@ driver "netdev-driver" {
 }
 "#,
     r#"
-driver "gpud" {
+driver "tapestryd" {
     abi   = 1
-    binds = ["virtio-pci:16"]
+    binds = ["virtio-pci:16", "virtio-pci:18"]
     needs {
         pci = "node"
         irq = "node:interrupts"
-        dma = "pool: 64 KiB"
+        dma = "pool: 32 MiB"
     }
-    serves    = "/dev/gpu/%instance"
+    serves    = "/dev/tapestry"
     restart   = on-crash
     lifecycle = persistent
+    gather    = all
 }
 "#,
     r#"
@@ -245,10 +247,19 @@ pub extern "C" fn rs_main() -> i64 {
     let mut gave_up = 0u32;
     let mut failed = 0u32;
 
-    for node in &discovered {
+    // `gather = all` manifests collect EVERY matched node into one grant/Proc
+    // (TAPESTRY section 18.7: the compositor's allowance carries all its
+    // devices); per-node manifests spawn per match as before.
+    let mut gathered: Vec<Vec<usize>> = alloc::vec![Vec::new(); db.len()];
+
+    for (ni, node) in discovered.iter().enumerate() {
         let Some(idx) = best_match(&db, node) else {
             continue;
         };
+        if db[idx].gather {
+            gathered[idx].push(ni);
+            continue;
+        }
         let inst = instance[idx];
         let grant = match resolve(&db[idx], node, inst) {
             Ok(g) => g,
@@ -265,6 +276,27 @@ pub extern "C" fn rs_main() -> i64 {
         instance[idx] += 1;
         bound += 1;
         match supervise(&db[idx], &grant, &node.label) {
+            Disposition::Up => up += 1,
+            Disposition::GaveUp => gave_up += 1,
+            Disposition::Failed => failed += 1,
+        }
+    }
+
+    for (idx, nodes) in gathered.iter().enumerate() {
+        if nodes.is_empty() {
+            continue;
+        }
+        let refs: Vec<&DeviceNode> = nodes.iter().map(|&ni| &discovered[ni]).collect();
+        let grant = match resolve_gathered(&db[idx], &refs, instance[idx]) {
+            Ok(g) => g,
+            Err(e) => {
+                say!("warden: gather-resolve {} failed {:?}", db[idx].name, e);
+                continue;
+            }
+        };
+        instance[idx] += 1;
+        bound += 1;
+        match supervise(&db[idx], &grant, &discovered[nodes[0]].label) {
             Disposition::Up => up += 1,
             Disposition::GaveUp => gave_up += 1,
             Disposition::Failed => failed += 1,
@@ -346,6 +378,7 @@ fn run_virtio_mmio_source(bank: (u64, u64), trusted: &[DeviceNode]) -> Vec<Devic
         mmio: vec![bank],
         irq: Vec::new(),
         dma_max: 0,
+        pci_extra: Vec::new(),
         pci: None, // the bus source takes only its MMIO bank, no PCI
     };
     let desc = match source_grant.to_descriptor() {

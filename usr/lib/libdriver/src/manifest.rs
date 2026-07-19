@@ -58,6 +58,12 @@ pub struct Manifest {
     /// Whether the warden leaves the brought-up driver resident (`Persistent`) or
     /// owns its teardown (`Transient`, the default).
     pub lifecycle: Lifecycle,
+    /// Node-match aggregation: `false` (`per-node`, the default) spawns one
+    /// driver Proc per matched node; `true` (`gather = all`) collects EVERY
+    /// matched node into ONE grant/Proc whose allowance carries all their
+    /// resources (TAPESTRY section 18.7 -- the compositor owns both the GPU
+    /// and the input functions).
+    pub gather: bool,
     /// An optional package signature -- the section-9 authorization input. Carried
     /// verbatim; this crate neither produces nor verifies it (a warden/policy
     /// concern), it only round-trips the field.
@@ -220,6 +226,9 @@ impl Manifest {
         s.push_str("\n    lifecycle = ");
         s.push_str(lifecycle_str(self.lifecycle));
         s.push('\n');
+        if self.gather {
+            s.push_str("    gather = all\n");
+        }
         if let Some(sig) = &self.sig {
             s.push_str("    sig = \"");
             s.push_str(sig);
@@ -447,6 +456,7 @@ impl<'a> Parser<'a> {
         let mut serves: Option<String> = None;
         let mut restart: Option<Restart> = None;
         let mut lifecycle: Option<Lifecycle> = None;
+        let mut gather: Option<bool> = None;
         let mut sig: Option<String> = None;
 
         loop {
@@ -501,6 +511,13 @@ impl<'a> Parser<'a> {
                     self.expect(&Tok::Eq)?;
                     lifecycle = Some(self.parse_lifecycle()?);
                 }
+                "gather" => {
+                    if gather.is_some() {
+                        return Err(Error::Parse);
+                    }
+                    self.expect(&Tok::Eq)?;
+                    gather = Some(self.parse_gather()?);
+                }
                 "sig" => {
                     if sig.is_some() {
                         return Err(Error::Parse);
@@ -524,6 +541,7 @@ impl<'a> Parser<'a> {
             serves: serves.ok_or(Error::Parse)?,
             restart: restart.unwrap_or(Restart::OnCrash),
             lifecycle: lifecycle.unwrap_or(Lifecycle::Transient),
+            gather: gather.unwrap_or(false),
             sig,
         })
     }
@@ -631,6 +649,17 @@ impl<'a> Parser<'a> {
             Tok::Ident(s) => match s.as_str() {
                 "transient" => Ok(Lifecycle::Transient),
                 "persistent" => Ok(Lifecycle::Persistent),
+                _ => Err(Error::Parse),
+            },
+            _ => Err(Error::Parse),
+        }
+    }
+
+    fn parse_gather(&mut self) -> Result<bool, Error> {
+        match self.next()? {
+            Tok::Ident(s) => match s.as_str() {
+                "per-node" => Ok(false),
+                "all" => Ok(true),
                 _ => Err(Error::Parse),
             },
             _ => Err(Error::Parse),

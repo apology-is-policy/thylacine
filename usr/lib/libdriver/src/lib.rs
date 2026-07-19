@@ -36,7 +36,10 @@ pub use manifest::{
     DmaNeed, IrqNeed, Lifecycle, Manifest, MmioNeed, Needs, PciNeed, Restart, MANIFEST_ABI,
 };
 pub use readyline::{feed_ready_line, ReadyLine, READY_LINE_MAX};
-pub use resource::{resolve, BoundResources, NodeResources, DESCRIPTOR_VERSION, MAX_IRQ, MAX_MMIO};
+pub use resource::{
+    resolve, resolve_gathered, BoundResources, NodeResources, DESCRIPTOR_VERSION, MAX_IRQ,
+    MAX_MMIO, MAX_PCI,
+};
 pub use source::{
     best_match, parse_pci_ctl, reconcile_reported_node, DeviceId, DeviceNode, DiscoverySource,
     MAX_IDS, NODE_RECORD_VERSION,
