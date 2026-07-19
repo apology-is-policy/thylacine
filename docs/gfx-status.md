@@ -16,7 +16,7 @@ with a new liveness leg), and the warden's `gather` mode carries both
 graphics-path PCI functions in one I-34 allowance. Earlier: G-2 (the
 kernel share delta) landed first per the 2026-07-19 directive; G-0 (the
 screendump harness) + G-1 (the resident gpud, now absorbed/retired) built
-the substrate. G-3 + G-4 CLOSED (the fbcon live + ls-gfx PASS; holotype 0/0/1/2 NOT dirty). smp8 re-gate on the fix in flight. Next: G-5 (graphics audit round)
+the substrate. G-3 + G-4 CLOSED (the fbcon live + ls-gfx PASS; holotype 0/0/1/2 NOT dirty). smp8 re-gate PASS (20/20 default + ubsan, 0 corruption). Next: G-5 (graphics audit round)
 (Aurora renderer MVP).
 
 ## Landed chunks
