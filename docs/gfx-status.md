@@ -26,7 +26,6 @@ consume the G-2 substrate.
 
 | # | Chunk | Scope | Gate |
 |---|---|---|---|
-| G-0 | Agentic eyes | QMP `screendump` harness (`tools/`): verify capture under `-display none` FIRST; PNG into the agent loop; TOOLING.md ABI addendum (task #22) | a captured PNG of the existing one-shot test pattern |
 | G-1 | Resident GPU driver | Promote `usr/virtio-gpu` to a warden-manifested persistent driver; re-home `crash-probe` off `virtio:16`; render loop + IRQ-driven flush; fix the stale probe-only comment | boots resident; pattern persists; SMP gate |
 | G-3 | tapestryd stage 0 | The V1 minimal compositor over the G-2 substrate: one fullscreen surface, `/dev/tapestry` `ctl`+`surface/`, present/event fids, FRAME clock, virtio-input; F2 per-session qid scoping; the R2-F3 force-reclaim grace (the crash contract's kernel leg); the SPEC-TO-CODE present-half extension | tapestry-demo plasma LIVE via screendump |
 | G-4 | Aurora renderer MVP | Cell grid + the Cornucopia baked atlas + VT-parser subset; the `/dev/cons` drain/feed backend (kernel, audit-bearing; `SPAWN_PERM_CONSOLE_RENDERER` per R2-F6) | the fbcon claim: login + `ls` via screendump |
