@@ -1790,10 +1790,12 @@ The G-2 action ↔ site map (the kernel share half):
 - **`Map(g)`'s `armed' = FALSE` (consume-once)** ↔ `weft_share_claim`'s slot
   clear + pin transfer (`kernel/weft.c`; the regression
   `weft.share_register_claim` replay leg).
-- **`ClunkMap(g)`** ↔ `kernel/dev9p.c::dev9p_close`'s WEAVE-kind clunk-unmap
-  (pid-matched `burrow_unmap` — drops `mapped` + uncharges the budget) +
-  `weft_binding_release` (drops the registration pin). The RING kind keeps
-  its audited vma_drain-at-exit lifetime (the netd precedent).
+- **`ClunkMap(g)`** ↔ `kernel/weft.c::weft_binding_clunk_unmap` (called from
+  `dev9p_close`; pid-matched + the G-2-audit-F1 IDENTITY guard — unmap only
+  if the VMA at the recorded VA is still THIS weave's Burrow; drops `mapped`
+  + uncharges the budget) + `weft_binding_release` (drops the registration
+  pin). The RING kind keeps its audited vma_drain-at-exit lifetime (the netd
+  precedent). Regression `weft.weave_clunk_unmap_guard` (revert-probed).
 - **`MappedImpliesBacked` / `RefImpliesBacked` (the #847-across-crash no-UAF
   check)** ↔ the dual-refcount across the KObj_DMA SECOND domain: the
   client's `mapping_count` ref keeps the Burrow, whose create-bound

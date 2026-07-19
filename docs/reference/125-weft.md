@@ -1155,18 +1155,33 @@ R2-F3 close: the shared pages are the SHARER's commit (netd's `page_count` /
 tapestryd's DMA pool), so the client's `page_count` is deliberately untouched —
 this axis is what bounds the client's cross-Proc pin, including across a
 compositor crash (the orphaned-weave leg; the bounded-grace force-reclaim
-completes at G-3 with the crash contract).
+completes at G-3 with the crash contract). **The budget deliberately covers
+the RING share too** (a netd flow ring is a cross-Proc pin of the same class):
+this is the one behavioral delta on the audited netd path — a client at the
+cap has `SYS_WEFT_MAP` fail (-1) and the flow falls back to byte-copy, the
+documented fail-soft degrade; at realistic scale (16 flows × 256 KiB = 4 MiB
+against 128 MiB) the cap is unreachable, and the mapping lifetime + the
+Tweftio fast paths are byte-unchanged.
 
 ### The weave clunk-unmap
 
-`dev9p_close` (`kernel/dev9p.c`): a WEAVE binding additionally unmaps the
-client mapping when the closing Proc's pid matches `map_pid` (sound as a bare
-pid — `g_next_pid` is a monotonic u32, no reuse within any realizable runtime),
-realizing "the weave fid's clunk drops the client mapping" (§18.1
-`ClunkMap`) — a surface's retire is not hostage to the client's exit. An
-inherited-fd closer in a different Proc leaves the mapping to the mapper's own
-`vma_drain`. The RING kind's audited vma_drain-at-exit lifetime is
-byte-unchanged.
+`weft_binding_clunk_unmap(wb, closer)` (`kernel/weft.c`; called from
+`dev9p_close` with `current->proc`, unit-drivable via the explicit `closer`):
+a WEAVE binding additionally unmaps the client mapping at fid close iff (a)
+the closing Proc's pid matches `map_pid` (sound as a bare pid — `g_next_pid`
+is a monotonic u32, no reuse within any realizable runtime), AND (b) — **the
+G-2 audit F1 guard** — the VMA at the recorded `guest_va` is still backed by
+THIS weave's Burrow (`v->burrow == wb->burrow && v->vaddr_start ==
+guest_va`). The binding's `guest_va` is a record, not a live claim: after an
+explicit `SYS_BURROW_DETACH` of the weave, `vma_find_gap` can seat an
+unrelated fresh mapping at the same VA, and pre-guard the close tore it down
+(self-contained to the client's own AS — the SHARED_IN uncharge was always
+gated on the matched VMA's flag, so the budget never corrupted — but wrong).
+Realizes "the weave fid's clunk drops the client mapping" (§18.1 `ClunkMap`) —
+a surface's retire is not hostage to the client's exit; an inherited-fd closer
+in a different Proc leaves the mapping to the mapper's own `vma_drain`. The
+RING kind's audited vma_drain-at-exit lifetime is byte-unchanged (the helper
+skips it).
 
 ### Tests + gates
 
@@ -1176,8 +1191,11 @@ budget → the validate_rw kind gate → the #847 teardown across the KObj_DMA
 second refcount domain), `weft.unshare_disarm` (owner gate +
 removal-before-free + fail-closed late claim + claimed-id -1),
 `weft.shared_map_budget_cap` (over-budget fails clean; charge/uncharge
-balance). **Revert-probed 2026-07-19**: weakening the four gates →
-1167/1169 FAIL on exactly the two gate tests; restored → 1169/1169. Spec gate:
+balance), `weft.weave_clunk_unmap_guard` (the F1 identity guard: pid gate +
+happy unmap-and-uncharge + the stale-VA-survives leg). **Revert-probed
+2026-07-19**: weakening the four gates → 1167/1169 FAIL on exactly the two
+gate tests; dropping the F1 identity check → 1169/1170 FAIL on exactly the
+guard assert; restored → 1170/1170. Spec gate:
 `tapestry_present.tla` clean GREEN 5413 distinct + liveness + 4 buggy cfgs
 each firing its named invariant; `weft.tla` (clean 1412 + liveness + 4 buggy) +
 `weft_readiness.tla` re-ran GREEN. Client-side wrappers:

@@ -1394,23 +1394,21 @@ static void dev9p_close(struct Spoor *c) {
         __atomic_store_n(&p->weft, NULL, __ATOMIC_RELEASE);
         // G-2 (TAPESTRY.md §18.1 "the weave fid's clunk drops the client
         // mapping"): a WEAVE binding additionally unmaps the client's mapping
-        // at fid-clunk WHEN the closer is the mapping Proc (pid-match; the
-        // monotonic-u32-pid identity argument in weft.h). This drops the
-        // mapping_count ref + uncharges the shared-in budget (the SHARED_IN
-        // flag pairing inside burrow_unmap), so a surface's retire is not
-        // hostage to the client's exit. An inherited-fd closer in a DIFFERENT
-        // Proc leaves the mapping to the mapper's own vma_drain -- and the
-        // #926/#68 exit-close runs in the dying Proc itself (RUNNING+ALIVE
-        // window, pid matches), so the common paths all unmap here. The RING
-        // kind keeps its audited vma_drain-at-exit lifetime untouched.
-        if (wb->kind == WEFT_BIND_WEAVE) {
+        // at fid-clunk WHEN the closer is the mapping Proc AND the VMA at the
+        // recorded VA is still THIS weave's (the audit-F1 stale-VA guard --
+        // after an explicit detach, an unrelated fresh mapping at the same VA
+        // must survive the close). Drops the mapping_count ref + uncharges the
+        // shared-in budget (the SHARED_IN pairing inside burrow_unmap), so a
+        // surface's retire is not hostage to the client's exit. An
+        // inherited-fd closer in a DIFFERENT Proc leaves the mapping to the
+        // mapper's own vma_drain -- and the #926/#68 exit-close runs in the
+        // dying Proc itself (RUNNING+ALIVE window, pid matches), so the
+        // common paths all unmap here. The RING kind keeps its audited
+        // vma_drain-at-exit lifetime untouched (the helper skips it).
+        {
             struct Thread *ct = current_thread();
-            struct Proc *cp = ct ? ct->proc : NULL;
-            if (cp && cp->pid == wb->map_pid) {
-                spin_lock(&cp->vma_lock);
-                (void)burrow_unmap(cp, wb->guest_va, (size_t)wb->ring_size);
-                spin_unlock(&cp->vma_lock);
-            }
+            if (ct && ct->proc)
+                (void)weft_binding_clunk_unmap(wb, ct->proc);
         }
         weft_binding_release(wb);
     }

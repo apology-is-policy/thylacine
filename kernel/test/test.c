@@ -297,6 +297,7 @@ void test_weft_share_rejects_plain_dma(void);
 void test_weft_weave_share_and_claim(void);
 void test_weft_unshare_disarm(void);
 void test_weft_shared_map_budget_cap(void);
+void test_weft_weave_clunk_unmap_guard(void);
 void test_pgtable_install_user_pte_smoke(void);
 void test_pgtable_install_user_pte_constraints(void);
 void test_pgtable_install_user_pte_idempotent(void);
@@ -1556,6 +1557,7 @@ struct test_case g_tests[] = {
     { "weft.weave_share_and_claim",       test_weft_weave_share_and_claim,    false, NULL },
     { "weft.unshare_disarm",              test_weft_unshare_disarm,           false, NULL },
     { "weft.shared_map_budget_cap",       test_weft_shared_map_budget_cap,    false, NULL },
+    { "weft.weave_clunk_unmap_guard",     test_weft_weave_clunk_unmap_guard,  false, NULL },
     { "pgtable.install_user_pte_smoke",
                                        test_pgtable_install_user_pte_smoke,
                                                                            false, NULL },

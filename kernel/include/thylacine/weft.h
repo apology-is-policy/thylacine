@@ -466,4 +466,17 @@ int weft_binding_validate_rw(const struct weft_binding *b, u64 ubuf_va,
 // mapping (vma_drain owns it, the Loom-ring precedent). NULL-safe.
 void weft_binding_release(struct weft_binding *b);
 
+// G-2 (§18.1 ClunkMap; the G-2 audit F1 close): the WEAVE clunk-unmap --
+// drop `closer`'s mapping of the weave at fid-close, iff (a) the binding is
+// WEAVE-kind, (b) `closer` IS the mapping Proc (pid match; the monotonic-u32
+// identity), and (c) the VMA at the recorded guest_va is STILL backed by this
+// weave's Burrow (the F1 guard: after an explicit SYS_BURROW_DETACH, an
+// unrelated fresh mapping can land at the same VA -- it must survive the
+// close untouched). Takes closer->vma_lock; the unmap uncharges the shared-in
+// budget via the SHARED_IN pairing. Returns 0 (unmapped) or -1 (skipped --
+// wrong kind / wrong Proc / no live weave mapping at the VA). Called by
+// dev9p_close BEFORE weft_binding_release; unit-driven directly (the closer
+// param exists so a test drives it against a synthetic Proc).
+int weft_binding_clunk_unmap(struct weft_binding *wb, struct Proc *closer);
+
 #endif

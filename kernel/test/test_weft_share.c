@@ -47,6 +47,7 @@ void test_weft_share_rejects_plain_dma(void);
 void test_weft_weave_share_and_claim(void);
 void test_weft_unshare_disarm(void);
 void test_weft_shared_map_budget_cap(void);
+void test_weft_weave_clunk_unmap_guard(void);
 
 // Non-static syscall inner (kernel/syscall.c). ring_va (x0), ring_size (x1).
 s64 sys_weft_share_for_proc(struct Proc *p, u64 ring_va, u64 ring_size_raw);
@@ -545,5 +546,79 @@ void test_weft_shared_map_budget_cap(void) {
     TEST_EXPECT_EQ(client->shared_map_pages, 0u, "the drain uncharges");
 
     burrow_unref(v);                       // construction handle -> free
+    drop_proc(client);
+}
+
+// The G-2 audit F1 close: the weave clunk-unmap must be IDENTITY-guarded --
+// the binding's guest_va is a record, not a live claim. After the client
+// explicitly detaches the weave, an unrelated fresh mapping landing at the
+// same VA must SURVIVE the fid close (pre-fix, the close unmapped whatever
+// sat at the recorded VA). Also pins the pid gate + the happy path's
+// unmap-and-uncharge. Fails on pre-fix logic by construction (leg (b)).
+void test_weft_weave_clunk_unmap_guard(void) {
+    struct Proc *server = make_proc();
+    struct Proc *client = make_proc();
+    TEST_ASSERT(server != NULL && client != NULL, "proc_alloc failed");
+    server->caps = CAP_HW_CREATE;
+
+    struct KObj_DMA *k = kobj_dma_create_weave(PAGE_SIZE);
+    TEST_ASSERT(k != NULL, "kobj_dma_create_weave");
+    struct Burrow *weave = burrow_create_dma(k);
+    TEST_ASSERT(weave != NULL, "burrow_create_dma");
+    kobj_dma_unref(k);
+    spin_lock(&server->vma_lock);
+    TEST_EXPECT_EQ(burrow_map(server, weave, WEFT_TEST_VA, PAGE_SIZE, VMA_PROT_RW), 0,
+        "server maps its weave");
+    spin_unlock(&server->vma_lock);
+    burrow_unref(weave);                    // the SYS_DMA_MAP shape {h:0, m:1}
+
+    // Share into the client at VA X + build the WEAVE binding (holding its
+    // own pin via an explicit ref, the claim-transfer stand-in).
+    burrow_ref(weave);                      // the binding's pin
+    spin_lock(&client->vma_lock);
+    TEST_EXPECT_EQ(burrow_share_into(client, weave, WEFT_TEST_VA, VMA_PROT_RW), 0,
+        "share the weave into the client");
+    spin_unlock(&client->vma_lock);
+    struct weft_binding *b =
+        weft_binding_alloc_weave(weave, WEFT_TEST_VA, (u32)PAGE_SIZE, client->pid);
+    TEST_ASSERT(b != NULL, "weave binding");
+
+    // (c) The pid gate: a different Proc's close skips (the mapping survives).
+    TEST_EXPECT_EQ(weft_binding_clunk_unmap(b, server), -1,
+        "a non-mapping Proc's close skips the unmap");
+    TEST_ASSERT(vma_lookup(client, WEFT_TEST_VA) != NULL, "mapping survives");
+
+    // (a) The happy path: the mapping Proc's close unmaps + uncharges.
+    TEST_EXPECT_EQ(client->shared_map_pages, 1u, "charged");
+    TEST_EXPECT_EQ(weft_binding_clunk_unmap(b, client), 0,
+        "the mapping Proc's close unmaps the weave");
+    TEST_ASSERT(vma_lookup(client, WEFT_TEST_VA) == NULL, "weave mapping gone");
+    TEST_EXPECT_EQ(client->shared_map_pages, 0u, "the clunk-unmap uncharged");
+
+    // (b) THE F1 GUARD: an unrelated mapping now sits at the recorded VA
+    // (the detach-and-reuse shape); a second close attempt must leave it
+    // untouched -- the binding's burrow no longer backs the VMA at guest_va.
+    struct Burrow *other = burrow_create_anon(PAGE_SIZE);
+    TEST_ASSERT(other != NULL, "burrow_create_anon");
+    spin_lock(&client->vma_lock);
+    TEST_EXPECT_EQ(burrow_map(client, other, WEFT_TEST_VA, PAGE_SIZE, VMA_PROT_RW), 0,
+        "an unrelated mapping lands at the stale VA");
+    spin_unlock(&client->vma_lock);
+    TEST_EXPECT_EQ(weft_binding_clunk_unmap(b, client), -1,
+        "the stale-VA close is refused (the F1 identity guard)");
+    struct Vma *survivor = vma_lookup(client, WEFT_TEST_VA);
+    TEST_ASSERT(survivor != NULL && survivor->burrow == other,
+        "the unrelated mapping SURVIVES the weave fid's close");
+
+    // Teardown: release the binding (its pin), drain both procs, drop `other`'s
+    // construction handle; the weave frees on the server drain (last mapping).
+    u64 live_before = kobj_dma_live_count();
+    weft_binding_release(b);
+    vma_drain(client);
+    vma_drain(server);
+    burrow_unref(other);
+    TEST_EXPECT_EQ(kobj_dma_live_count(), live_before - 1,
+        "the weave's pixel chunk freed at full teardown");
+    drop_proc(server);
     drop_proc(client);
 }

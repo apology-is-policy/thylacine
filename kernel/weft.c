@@ -25,6 +25,7 @@
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
 #include <thylacine/spinlock.h>
+#include <thylacine/vma.h>          // G-2: vma_lookup for the clunk-unmap F1 guard
 
 #include "../mm/slub.h"
 
@@ -479,4 +480,24 @@ void weft_binding_release(struct weft_binding *b) {
     if (b->burrow) burrow_unref(b->burrow);
     b->burrow = NULL;
     kfree(b);
+}
+
+int weft_binding_clunk_unmap(struct weft_binding *wb, struct Proc *closer) {
+    if (!wb || !closer) return -1;
+    if (wb->kind != WEFT_BIND_WEAVE) return -1;       // RING keeps its lifetime
+    if (closer->pid != wb->map_pid)  return -1;       // not the mapping Proc
+    spin_lock(&closer->vma_lock);
+    // The G-2 audit F1 guard: the binding's guest_va is a RECORD, not a live
+    // claim -- the client may have SYS_BURROW_DETACHed the weave and a fresh
+    // unrelated mapping may have landed at the same VA (vma_find_gap reuses
+    // gaps). Unmap ONLY if the VMA at guest_va is still backed by THIS weave;
+    // anything else survives untouched (the mapping Proc's own vma_drain, or
+    // an earlier explicit detach, already handled -- or never will need to
+    // handle -- the weave's mapping).
+    struct Vma *v = vma_lookup(closer, wb->guest_va);
+    int rc = -1;
+    if (v && v->burrow == wb->burrow && v->vaddr_start == wb->guest_va)
+        rc = burrow_unmap(closer, wb->guest_va, (size_t)wb->ring_size);
+    spin_unlock(&closer->vma_lock);
+    return rc;
 }
