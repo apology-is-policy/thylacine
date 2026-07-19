@@ -1200,3 +1200,18 @@ guard assert; restored → 1170/1170. Spec gate:
 each firing its named invariant; `weft.tla` (clean 1412 + liveness + 4 buggy) +
 `weft_readiness.tla` re-ran GREEN. Client-side wrappers:
 `libthyla_rs::{t_dma_create_weave, t_weft_unshare}`.
+
+
+### The orphaned-weave reaper (G-3; R2-F3)
+
+The `ServerDeath` leg's kernel half landed with tapestryd: a WEAVE binding
+registers with a kproc reaper kthread at the SYS_WEFT_MAP CAS-win and
+unregisters at `dev9p_close`; a binding whose serving session has been dead
+past `WEFT_REAP_GRACE_NS` (2 s) is force-reclaimed (cross-Proc unmap under
+`g_proc_table_lock` + the target's `vma_lock` with the G-2-F1 identity
+guard re-checked; the shared-in budget uncharges; the registration pin
+drops so the pixel chunk frees at reclaim). `g_weft_reap_lock` serializes
+reaper-vs-close (the reaper NULLs `wb->burrow`; the close unregisters
+before reading the binding). Full detail + the lock-order argument:
+`docs/reference/139-tapestryd.md` "The kernel R2-F3 reaper" + the
+`weft.reap_*` regressions.

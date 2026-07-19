@@ -1756,14 +1756,77 @@ Status: **spec landed model-first @005591ba (V3; two design-holotype rounds
 refined it — the R2-F2 explicit dual refcount lifted clean TLC to 5413
 distinct states); the KERNEL SHARE HALF landed at G-2** (the DMA-weave
 `burrow_share_into` admission + the Weft generalization; the ABI
-`SYS_DMA_CREATE_WEAVE`/`SYS_WEFT_UNSHARE` user-signed-off 2026-07-19). The
-SERVER half (tapestryd: `Draw`/`Present`/`Complete`/`Reweave`/`Destroy`/
-`ServerRelease`/`ServerDeath` — the present engine + the quiesce/retire
-protocol) is OWED at G-3 and extends this map then. Clean cfg GREEN 5413
-distinct; liveness GREEN (`EventuallyRetired` incl. across `ServerDeath`);
-the 4 buggy cfgs each fire their named invariant (`premature_reuse` →
-RecycleGate, `retire_during_transfer`/`reweave_without_quiesce` →
-NoTornScanout, `map_after_retire` → NoStaleMap).
+`SYS_DMA_CREATE_WEAVE`/`SYS_WEFT_UNSHARE` user-signed-off 2026-07-19); **the
+SERVER HALF landed at G-3** (tapestryd stage 0 + the R2-F3 reaper — the map
+below). Clean cfg GREEN 5413 distinct (unperturbed across G-2 and G-3 —
+neither impl half changed the model); liveness GREEN (`EventuallyRetired`
+incl. across `ServerDeath`); the 4 buggy cfgs each fire their named
+invariant (`premature_reuse` → RecycleGate,
+`retire_during_transfer`/`reweave_without_quiesce` → NoTornScanout,
+`map_after_retire` → NoStaleMap).
+
+The G-3 action ↔ site map (the server half; `usr/tapestryd/src/server.rs`
+unless noted — a USERSPACE realization: the spec's server actions are
+enforced by tapestryd's own discipline plus the kernel gates the G-2 half
+already binds, so a buggy compositor can break only its own display, never
+the kernel invariants):
+
+- **`WeaveFirst` / `Reweave` (backed := TRUE, serverRef := TRUE)** ↔
+  `Comp::create` (the surface ctl's `create W H`): `t_dma_create_weave`
+  (the G-2 kernel-minted share-admissible subtype) + `t_dma_map` + zero +
+  `RESOURCE_CREATE_2D` + whole-weave `ATTACH_BACKING`. `armed` becomes
+  real LAZILY at the first Tweft — `Comp::weft_ensure` (`t_weft_share`,
+  idempotent per surface, the netd precedent); the Map guard is
+  indifferent to registration timing, only to the retire disarm. Stage 0
+  exercises the g1 arm only (`Reweave` — the resize-ack allocation — lands
+  with the pane layer at G-6; `ALLOW_REWEAVE` stays modeled).
+- **`Draw` (client-side)** ↔ the client's writes into its mapped weave
+  slot (`libtapestry::Surface::pixels`) — invisible to the server, as the
+  model's client-half separation intends.
+- **`Submit` → `Complete` (intransfer 1 → 0; the CQE = the recycle
+  gate)** ↔ `Conn::present`: the tpresent Twrite validates (slot + rect
+  vs the geometry — the untrusted-client boundary) then
+  `TRANSFER_TO_HOST_2D` + `RESOURCE_FLUSH` run SYNCHRONOUSLY inside the
+  one dispatch, and the `Rwrite` reply is the client's CQE. The
+  in-flight window opens and closes within one server dispatch, so the
+  in-flight present set is EMPTY at every retire decision point — the
+  stage-0 realization of `ServerRelease`'s `intransfer = 0` quiesce
+  guard, BY CONSTRUCTION. **A pipelined controlq (G-6+) must implement a
+  real drain before touching retire** — this line is the obligation.
+- **`Complete`'s `displayed` update** ↔ `Comp::scanout_take`: an
+  ownerless scanout is taken at present-COMPLETE (the F16
+  switch-at-first-frame alignment), never before a frame transferred.
+- **`Destroy`** ↔ the ctl `destroy` verb, the owning conn's
+  teardown/Tversion reset (`Conn::teardown` / `drop_all_fids` →
+  `Comp::retire_conn`), and the R2-F4 WEDGE force-retire.
+- **`ServerRelease` (the graceful serverRef drop, post-quiesce)** ↔
+  `Comp::retire`'s ordered tail: (1) quiesce — empty by construction
+  (above); (2) `t_weft_unshare` BEFORE any backing free — the R2-F5
+  registry-removal-before-page-free that discharges the Map guard's
+  `wstate` half kernel-side (a claim racing the retire finds nothing;
+  on an already-claimed share the unshare is a harmless miss); (3) the
+  scanout release; (4) `DETACH_BACKING` + `RESOURCE_UNREF`; (5)
+  `t_burrow_detach` + `t_close` of the weave DMA (serverRef := FALSE;
+  `Free` fires kernel-side when the client's `mapped` ref also drops,
+  #847).
+- **`ServerDeath` (serverRef drops AT ONCE; armed dies; the client
+  mapping survives)** ↔ the tapestryd Proc's reap: the RW-7 quiesce
+  resets its virtio devices, `weft_share_release_owner` GCs the
+  unclaimed registry entries (`armed` := FALSE), the #847 client
+  mapping keeps the pages backed (`RefImpliesBacked` across the crash —
+  the R2-F2 non-vacuity check), and **the R2-F3 reaper**
+  (`kernel/weft.c::weft_reap_sweep` + the kproc kthread) force-reclaims
+  the orphaned client mapping after `WEFT_REAP_GRACE_NS`: the
+  cross-Proc unmap under `g_proc_table_lock` + the target's `vma_lock`
+  re-checks the G-2-audit-F1 identity guard, the budget uncharges, and
+  the registration pin drops so the pixel chunk frees at reclaim.
+  Regressions `weft.reap_{orphan_reclaimed,live_session_untouched,
+  close_unregisters}` drive the sweep deterministically.
+- **`ClunkMap` under a reaped generation** ↔ the reaper NULLs
+  `wb->burrow` under `g_weft_reap_lock` and `dev9p_close` unregisters
+  under the same lock BEFORE reading the binding — the disarmed
+  binding's clunk-unmap cannot match and its release NULL-guards (the
+  reaper-vs-close serialization).
 
 The G-2 action ↔ site map (the kernel share half):
 

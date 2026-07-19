@@ -1,5 +1,13 @@
 # 138 — gpud: the resident virtio-gpu driver (G-1)
 
+> **RETIRED at G-3.** tapestryd (the compositor; `docs/reference/139-tapestryd.md`)
+> absorbed the GPU device half (its `gpu.rs` is this driver's command machinery,
+> generalized to per-surface resources + the retire pair) and took over the
+> `virtio-pci:16` binding via the warden's `gather` manifest; the gpud crate +
+> manifest entry were deleted in the same chunk (one exclusive claimant per
+> function). This document remains as the G-1 historical record -- the transport
+> pivot's measured rationale (the MMIO co-page starvation) and the
+> pattern-persists gate's origin both live on in the successor.
 As-built reference for `usr/gpud`, the Tapestry build arc's stage-0
 device-owning half (TAPESTRY.md §18.9 G-1; landed on `gfx-1`). The number 137
 is reserved by main's `137-gopls.md` (Go 8d); this doc takes 138 to avoid a

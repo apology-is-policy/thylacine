@@ -886,6 +886,33 @@ transport-shifted). crash-probe re-homed to the warden-synthetic
 `tools/test.sh` (every ci-smp-gate boot runs it); as-built detail in
 `docs/reference/138-gpud.md`.
 
+**G-3 AS-BUILT (landed on `gfx-1`): tapestryd stage 0 + the R2-F3 kernel
+reaper — I-40 is COMPLETE (ARCH §28).** The warden's NEW `gather = all`
+manifest mode collects every matched node into ONE grant/Proc, so
+tapestryd's I-34 allowance carries BOTH graphics-path PCI functions —
+`virtio-pci:16` (GPU) + `virtio-pci:18` (keyboard; `virtio-keyboard-pci`
+added to run-vm.sh for the same measured co-page rule, the MMIO keyboard
+staying for the P4-K probe). The §18.7 "binds BOTH ... its allowance
+carries all its devices" binding is realized transport-shifted (PCI, per
+the G-1 rule). gpud retired (absorbed). Stage-0 realization notes: the
+present engine is SYNCHRONOUS (the quiesce set is empty at every retire
+by construction — the pipelined-controlq G-6 lift must land a real drain
+first, the recorded SPEC-TO-CODE obligation); the Tweft mint is lazy +
+idempotent per surface (`armed` at first Tweft; the Map guard is timing-
+indifferent); a retired surface's event stream ends in EOF (the
+queued-CLOSE record rides the pane layer, G-6); client event reads are
+single-shot re-armed (the multishot + provided-buffer-pool client lift
+is a G-6 seam; §18.4's multishot idiom stands as the design). The
+`weave` geometry read reports `slot_stride` explicitly (a compatible
+§18.5 refinement). F2 per-conn scoping rides each client's OWN
+open=connect session (the fid IS the capability; deliberate session
+sharing shares surfaces — the Plan 9 semantic). The per-boot pattern
+gate EVOLVED: tapestry-demo presents the -v quadrant pattern + a live
+plasma through the FULL protocol, and test.sh adds a liveness
+double-dump (two captures must differ). As-built:
+`docs/reference/139-tapestryd.md`; the server-half spec map:
+`specs/SPEC-TO-CODE.md::tapestry_present.tla`.
+
 ### 18.10 Audit-trigger + scripture sync obligations
 
 At each landing, per standing discipline: G-2 joins the Weft/burrow rows

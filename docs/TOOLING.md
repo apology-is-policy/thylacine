@@ -129,6 +129,8 @@ Properties (all empirically verified at G-0):
   compositor's display dies with its Proc until warden restarts it (the
   TAPESTRY crash contract's visible half).
 
+Since G-3 the gate's scanout owner is tapestryd + its resident tapestry-demo client: the `-v` quadrant assert proves the FULL compositor path (private 9P session -> weave share -> Loom presents), and a liveness leg (two dumps 0.6 s apart must differ -- the demo's plasma animates at the FRAME clock) proves the present loop live. FAIL diagnostics grep `tapestryd:|tapestry-demo:|warden:`.
+
 Exit status: 0 on capture (and pattern match under `-v`); nonzero
 otherwise. The tool is safe to run repeatedly against a live VM — it
 only reads the console surface.
