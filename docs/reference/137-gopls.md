@@ -141,14 +141,36 @@ check` printed its diagnostic. 8d-3 chased it:
 
 - **filecache "operation not permitted"** (task #99, non-fatal): on a fresh
   `HOME/.cache`, gopls's persistent-index filecache logs `create …-cas:
-  operation not permitted` (the generic `-1`→EPERM pattern) storing xref/index
-  data. gopls degrades gracefully (re-computes; check + definition still exit 0
-  with correct output). Likely a Thylacine file-create / `O_EXCL` behavior;
-  under investigation. Correctness is unaffected.
+  operation not permitted` storing xref/index data. Root-caused (the earlier
+  `O_EXCL` guess is refuted): filecache `Set` uses `os.OpenFile(O_WRONLY|
+  O_CREATE, 0600)` — **no** `O_EXCL` — so Go's open-or-create does `SYS_OPEN`
+  (returns proper `-T_E_NOENT`, falls through) then `syscall.Create` →
+  `SYS_WALK_CREATE`, which returns a **bare `-1`** that Go reads as
+  `Errno(1)`=EPERM (the go-fork `#102` legacy-errno wart), wrapped `Op:"create"`.
+  The `-1` is one of two unclamped sites in `sys_walk_create_handler` —
+  `perm_check(parent, W|X)` (`syscall.c:2886`, newly live since the dev9p
+  `perm_enforced=true` A-3b flip; the `:2879` "deferred to A-3" comment is now
+  stale) or `dev9p_create→NULL` (`dev9p.c:2989`/`:1299`, which collapses any
+  Tlcreate errno to NULL, unlike `dev9p_stat_native` which propagates it). The
+  differentiator from go-build's working creates: gopls reads-before-create and
+  always reaches `SYS_WALK_CREATE` for a fresh file. gopls degrades gracefully
+  (re-computes; check + definition still exit 0). Fix (owed, budgeted session):
+  instrument to pin the site + underlying cause on a fresh-pool boot, fix it, and
+  propagate the real errno through the create path. Audit-bearing (FS-mutation
+  surface). Correctness is unaffected.
 - **robustio `FileID` cross-dataset collision** (task #100, 8d-3 holotype F2 —
-  a P2 latent needing an ABI decision): the `robustio_thylacine.go` shim returns
-  `FileID{device: 0, inode: stat.QidPath}`. qid.path is unique only *within one
-  served tree*; a real login session mounts two independently-inode-numbered
+  a P2 latent). **Interim fix landed** (`~/projects/gopls` `bd329f6`): the shim
+  now synthesizes `device` from FNV-1a of the (absolute, stable) path instead of
+  `device: 0`, so the dangerous collision below is **closed fail-safe** —
+  distinct paths never alias (killing the false-same wrong-content bug), the same
+  path stays stable (change-detection intact); the only cost is a lost cross-path
+  dedup of aliased files (a perf opt, never wrong bytes). The **proper** fix (the
+  plan9 `device = server identity` model — an ABI change, user-signed-off, owed
+  to a budgeted session because it is a full Go-toolchain rebuild) is described
+  below; it supersedes the interim. The original `device: 0` hazard, for the
+  record: the shim returned `FileID{device: 0, inode: stat.QidPath}`, and
+  qid.path is unique only *within one served tree*; a real login session mounts
+  two independently-inode-numbered
   Stratum datasets (the system dataset — `/goroot`, `/bin` — and the per-user
   home). With `device: 0`, a cross-dataset qid.path collision + a same-second
   mtime (the `/goroot` bake writes thousands of files in one burst) makes
