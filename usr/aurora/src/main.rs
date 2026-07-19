@@ -248,6 +248,14 @@ pub extern "C" fn rs_main() -> i64 {
                 let n = unsafe { t_read(drain, drainbuf.as_mut_ptr(), drainbuf.len()) };
                 if n > 0 {
                     term.feed(&drainbuf[..n as usize]);
+                    // Terminal ANSWERS (CPR [6n etc.): the reply is keyboard
+                    // input -- write it into the consfeed, the same wire the
+                    // key events ride. Kaua's size handshake reads it to
+                    // learn the real grid (128x36, not the 80x24 fallback).
+                    if !term.reply.is_empty() {
+                        let _ = unsafe { t_write(feed, term.reply.as_ptr(), term.reply.len()) };
+                        term.reply.clear();
+                    }
                 } else {
                     if n == 0 {
                         say!("aurora: drain EOF (backend disarmed); staying up");

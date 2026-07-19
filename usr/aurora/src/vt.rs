@@ -68,6 +68,20 @@ enum State {
 
 const MAX_PARAMS: usize = 16;
 
+// Append `n` in decimal (the CPR reply formatter; no core::fmt in the byte
+// machine's hot path).
+fn push_dec(out: &mut Vec<u8>, n: usize) {
+    let mut buf = [0u8; 8];
+    let mut i = buf.len();
+    let mut v = n.max(1); // rows/cols are 1-based and nonzero
+    while v > 0 {
+        i -= 1;
+        buf[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+    }
+    out.extend_from_slice(&buf[i..]);
+}
+
 pub struct Vt {
     pub cols: usize,
     pub rows: usize,
@@ -87,6 +101,19 @@ pub struct Vt {
     param_seen: bool,
     csi_priv: bool,
     saved: (usize, usize),
+    // DECAWM (?7). Default SET (autowrap on -- the VT default). Kaua's
+    // Terminal::enter emits ?7l so it can paint the bottom-right cell
+    // scroll-free; ignoring it made every last-cell paint arm the deferred
+    // wrap, and the next glyph run line-fed at the bottom row -- a full
+    // screen SCROLL per status repaint, each leaving a stale modeline
+    // behind (the nora artifact cascade, #37).
+    wrap: bool,
+    // Bytes the terminal must ANSWER (CPR etc.). vt.rs stays a pure byte
+    // machine: the main loop drains this into the consfeed fd, exactly a
+    // real terminal answering on the keyboard wire. Kaua's size handshake
+    // (SAVE + park-far + [6n + RESTORE) needs the reply or every Kaua app
+    // falls back to 80x24 inside the real grid (#37).
+    pub reply: Vec<u8>,
     // UTF-8 assembly (the prompt glyphs are multi-byte).
     utf_acc: u32,
     utf_rem: u8,
@@ -114,6 +141,8 @@ impl Vt {
             param_seen: false,
             csi_priv: false,
             saved: (0, 0),
+            wrap: true,
+            reply: Vec::new(),
             utf_acc: 0,
             utf_rem: 0,
             dirty: vec![true; rows],
@@ -321,6 +350,23 @@ impl Vt {
                 self.cy = self.saved.1.min(self.rows - 1);
             }
             b'r' => {} // DECSTBM: accepted, ignored (full-screen scroll; MVP seam)
+            b'n' => {
+                // DSR. 6 = CPR: answer with the cursor position -- kaua's
+                // size handshake (SAVE + park-far + [6n + RESTORE) reads the
+                // parked report to learn the real grid; an unanswered
+                // request strands every Kaua app at its 80x24 fallback. The
+                // reply goes out via `reply` (the main loop writes it into
+                // the consfeed fd -- the keyboard wire, like any terminal).
+                if self.p(0, 0) == 6 {
+                    let row = self.cy + 1;
+                    let col = self.cx.min(self.cols - 1) + 1;
+                    self.reply.extend_from_slice(b"\x1b[");
+                    push_dec(&mut self.reply, row);
+                    self.reply.push(b';');
+                    push_dec(&mut self.reply, col);
+                    self.reply.push(b'R');
+                }
+            }
             _ => {}
         }
     }
@@ -331,6 +377,7 @@ impl Vt {
         }
         for i in 0..self.nparams {
             match self.params[i] {
+                7 => self.wrap = set, // DECAWM (kaua paints the last cell under ?7l)
                 25 => self.cursor_visible = set,
                 47 | 1047 | 1049 => self.alt_screen(set),
                 _ => {}
@@ -445,10 +492,18 @@ impl Vt {
 
     fn put_char(&mut self, ch: char) {
         if self.cx >= self.cols {
-            // Deferred wrap (last-column semantics simplified: wrap before
-            // the write once past the edge).
-            self.cx = 0;
-            self.line_feed();
+            if self.wrap {
+                // Deferred wrap (last-column semantics simplified: wrap
+                // before the write once past the edge).
+                self.cx = 0;
+                self.line_feed();
+            } else {
+                // DECAWM reset: the cursor sticks at the right margin; each
+                // new glyph overwrites the last column (the VT100 rule).
+                // Without this gate a bottom-right-cell paint line-fed at
+                // the last row -> a whole-screen scroll per status repaint.
+                self.cx = self.cols - 1;
+            }
         }
         let (cx, cy) = (self.cx, self.cy);
         let idx = cy * self.cols + cx;
@@ -730,5 +785,43 @@ mod tests {
         feed(&mut vt, b"\x1b[?1049l"); // leave: restore
         assert_eq!(vt.cells.len(), 18);
         assert_eq!(vt.cells[0].ch, 'm'); // the main buffer is back
+    }
+
+    // #37: DECAWM (?7l) must make the bottom-right cell paintable WITHOUT a
+    // scroll. Kaua disables autowrap at enter precisely for this; the
+    // pre-fix parser ignored ?7, so painting the last cell armed the
+    // deferred wrap and the NEXT glyph line-fed at the bottom row -- a
+    // whole-screen scroll per status repaint (the nora artifact cascade).
+    #[test]
+    fn autowrap_off_bottom_right_paint_does_not_scroll() {
+        let mut vt = Vt::new(8, 4);
+        feed(&mut vt, b"\x1b[1;1Htop"); // sentinel on row 0
+        feed(&mut vt, b"\x1b[?7l"); // kaua's DISABLE_AUTOWRAP
+        feed(&mut vt, b"\x1b[4;1Habcdefgh"); // the bottom row THROUGH the last cell
+        feed(&mut vt, b"XY"); // more glyphs, no move between: must NOT scroll
+        assert_eq!(vt.cells[0].ch, 't', "row 0 intact -- no scroll happened");
+        assert_eq!(vt.cy, 3);
+        assert_eq!(vt.cx, vt.cols, "sticks at the margin (pending state kept)");
+        // The last cell holds the final overprint (VT100 no-autowrap rule).
+        assert_eq!(vt.cells[3 * 8 + 7].ch, 'Y');
+        // Re-enable: the same sequence wraps + scrolls again (the default).
+        feed(&mut vt, b"\x1b[?7h");
+        feed(&mut vt, b"\x1b[4;1Habcdefgh");
+        feed(&mut vt, b"Z");
+        assert_ne!(vt.cells[0].ch, 't', "wrap-on at the bottom row scrolls");
+    }
+
+    // #37: DSR 6 (CPR) must be ANSWERED -- kaua's size handshake parks the
+    // cursor far and reads the report; an unanswered request strands every
+    // Kaua app at its 80x24 fallback inside the real grid.
+    #[test]
+    fn cpr_reports_the_parked_cursor() {
+        let mut vt = Vt::new(128, 36);
+        feed(&mut vt, b"\x1b[9999;9999H"); // park far: clamps to (36, 128)
+        feed(&mut vt, b"\x1b[6n");
+        assert_eq!(vt.reply.as_slice(), b"\x1b[36;128R");
+        vt.reply.clear();
+        feed(&mut vt, b"\x1b[2;5H\x1b[6n");
+        assert_eq!(vt.reply.as_slice(), b"\x1b[2;5R");
     }
 }

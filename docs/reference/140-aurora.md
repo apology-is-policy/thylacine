@@ -207,3 +207,15 @@ uart-direct (SYS_PUTS) — never into its own drain, so no feedback loop.
 - **Compositor-gone**: aurora exits on the session-dead error (the F4
   contract); no restarter at v1.0 (the shared netd/tapestryd posture) —
   the serial console is unaffected (the tee).
+
+- **Kaua vocabulary complete (#37).** Two VT gaps against kaua's emitted
+  set, both user-found driving nora: `?7` DECAWM was ignored (kaua paints
+  the bottom-right cell under `?7l`; with wrap still on each status
+  repaint line-fed at the last row → a whole-screen scroll leaving stale
+  modeline fragments — the artifact cascade) and `[6n` CPR was unanswered
+  (kaua's size handshake got no report → nora ran the 80x24 fallback
+  inside the 128x36 grid). Fixed: the `wrap` flag + the stick-at-margin
+  overprint rule, and the CPR reply pushed through `Vt.reply` into the
+  consfeed fd — the terminal answering on the keyboard wire. Dormant
+  regressions pin both; the in-guest nora drive (type + arrows) renders
+  fullscreen with zero artifacts.
