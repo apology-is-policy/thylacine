@@ -21,6 +21,7 @@
 
 #include <thylacine/weft.h>
 #include <thylacine/burrow.h>
+#include <thylacine/dma_handle.h>   // G-2: the kernel-minted KObj_DMA weave bit
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
 #include <thylacine/spinlock.h>
@@ -336,6 +337,47 @@ struct Burrow *weft_share_claim(u64 share_id) {
     return NULL;
 }
 
+int weft_share_unregister(struct Proc *owner, u64 share_id) {
+    if (!owner || share_id == 0u) return -1;
+
+    // Find-and-remove under the leaf lock; drop the pin OUTSIDE it (the
+    // release_owner discipline -- burrow_unref takes v->lock + may free, which
+    // takes the buddy lock, never under the registry leaf). The owner gate:
+    // only the registrant may disarm its own share -- a stranger's guess of a
+    // live id (kernel-minted monotonic u64, never guest-visible) cannot yank
+    // another server's in-flight grant.
+    struct Burrow *victim = NULL;
+    spin_lock(&g_weft_lock);
+    for (u32 i = 0; i < WEFT_MAX_SHARES; i++) {
+        if (g_weft_shares[i].share_id == share_id &&
+            g_weft_shares[i].owner == owner) {
+            victim = g_weft_shares[i].burrow;
+            g_weft_shares[i].share_id = 0u;
+            g_weft_shares[i].burrow   = NULL;
+            g_weft_shares[i].owner    = NULL;
+            break;
+        }
+    }
+    spin_unlock(&g_weft_lock);
+    if (!victim) return -1;    // already claimed / GC'd / forged / not yours
+    burrow_unref(victim);      // the registration pin: removal-before-free (R2-F5)
+    return 0;
+}
+
+int weft_claimed_kind(const struct Burrow *v, u32 ring_entries) {
+    if (!v) return -1;
+    // The kernel-minted Burrow type is the single source of truth; the
+    // server's declared geometry must AGREE with it, else fail closed. Types +
+    // the weave bit are create-immutable -- lock-free reads are coherent.
+    if (v->type == BURROW_TYPE_ANON)
+        return (ring_entries != 0u) ? WEFT_BIND_RING : -1;
+    if (v->type == BURROW_TYPE_DMA && v->kobj_dma != NULL && v->kobj_dma->weave)
+        return (ring_entries == 0u) ? WEFT_BIND_WEAVE : -1;
+    // Anything else in the registry would be a register-gate breach; the
+    // claim-side re-check keeps it unmappable regardless (defense-in-depth).
+    return -1;
+}
+
 void weft_share_release_owner(struct Proc *owner) {
     if (!owner) return;
 
@@ -360,6 +402,7 @@ void weft_share_release_owner(struct Proc *owner) {
 struct weft_binding *weft_binding_alloc(struct Burrow *burrow, u64 guest_va,
                                         u32 ring_size, u32 ring_entries) {
     if (!burrow || burrow->pages == NULL) return NULL;
+    if (burrow->type != BURROW_TYPE_ANON) return NULL;   // G-2: rings are ANON
     // Compute the kernel-private ring view from the Burrow's contiguous KVA.
     // BURROW_TYPE_ANON pages are physically contiguous (alloc_pages), so the
     // ring is one direct-map span; weft_ring_layout validates ring_entries +
@@ -374,13 +417,42 @@ struct weft_binding *weft_binding_alloc(struct Burrow *burrow, u64 guest_va,
     b->burrow    = burrow;
     b->guest_va  = guest_va;
     b->ring_size = ring_size;
+    b->kind      = WEFT_BIND_RING;
     b->view      = rv;
+    return b;
+}
+
+struct weft_binding *weft_binding_alloc_weave(struct Burrow *burrow,
+                                              u64 guest_va, u32 size,
+                                              u32 map_pid) {
+    // Defense-in-depth: only the kernel-minted weave subtype reaches here (the
+    // caller derived WEAVE via weft_claimed_kind); re-check anyway so a future
+    // caller cannot mint a weave binding over an inadmissible region.
+    if (!burrow || burrow->type != BURROW_TYPE_DMA ||
+        burrow->kobj_dma == NULL || !burrow->kobj_dma->weave)
+        return NULL;
+
+    struct weft_binding *b = kmalloc(sizeof(*b), KP_ZERO);
+    if (!b) return NULL;
+    b->burrow    = burrow;
+    b->guest_va  = guest_va;
+    b->ring_size = size;
+    b->kind      = WEFT_BIND_WEAVE;
+    b->map_pid   = map_pid;
+    // b->view stays zeroed -- a weave has no descriptor ring; the kind gate in
+    // weft_binding_validate_rw keeps every Tweftio consumer off it.
     return b;
 }
 
 int weft_binding_validate_rw(const struct weft_binding *b, u64 ubuf_va,
                              u32 len, u32 *out_off) {
     if (!b || !out_off) return -1;
+    // G-2 kind gate: only a RING binding carries a payload-region geometry.
+    // This single check closes ALL Tweftio fast paths (sync dev9p_weft_try_
+    // {read,write} + the Loom weft routing) for a WEAVE binding -- a weave fid
+    // is a map capability, never a data-drive target; its reads/writes stay on
+    // the ordinary byte path (the geometry text read).
+    if (b->kind != WEFT_BIND_RING) return -1;
     // Direction-agnostic: a Tweftio READ and WRITE both name a region [off,
     // off+len) within the payload, so the descriptor validation is identical --
     // the buffer (the WRITE source, or the READ destination) must sit at or after

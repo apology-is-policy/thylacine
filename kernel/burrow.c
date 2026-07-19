@@ -618,6 +618,13 @@ int burrow_unmap(struct Proc *p, u64 vaddr, size_t length) {
     (void)mmu_uninstall_user_range(p->pgtable_root, 0,
                                    vaddr, want_end);
 
+    // G-2: a SHARED_IN VMA's teardown uncharges the client's shared-in budget
+    // (paired with burrow_share_into's charge; same p->vma_lock hold, so the
+    // pairing is exact). Covers both the explicit SYS_BURROW_DETACH of a
+    // shared VA and the weave-fid clunk unmap.
+    if (vma->flags & VMA_FLAG_SHARED_IN)
+        proc_shared_map_uncharge(p, (u32)(length / PAGE_SIZE));
+
     vma_remove(p, vma);
     vma_free(vma);
     return 0;
@@ -718,13 +725,29 @@ u32 burrow_lazy_resident_count(struct Burrow *v) {
 // capability dataplane (docs/NET-THROUGHPUT.md §6; ARCH §28 I-37) builds the
 // per-flow guest<->netd shared ring on (Weft-6 wires the EL0 delivery).
 //
-// A share maps the WHOLE Burrow (the entire per-flow ring): the caller passes
-// NO length (unlike burrow_map, whose sub-range callers drive an explicit
-// length) because a share is always whole-Burrow. length comes from v->size
-// via burrow_get_size (magic-checked: 0 on a NULL/corrupted v -> reject).
-// ANON only: a dataplane ring is anonymous memory; cross-Proc sharing of an
-// MMIO/DMA Burrow is a distinct (unaudited) hardware-mapping surface (its own
-// I-5 analysis owed), so it fails closed here.
+// A share maps the WHOLE Burrow (the entire per-flow ring / weave): the caller
+// passes NO length (unlike burrow_map, whose sub-range callers drive an
+// explicit length) because a share is always whole-Burrow. length comes from
+// v->size via burrow_get_size (magic-checked: 0 on a NULL/corrupted v ->
+// reject).
+//
+// Admission (G-2 -- the owed I-5 analysis, TAPESTRY.md §18.1 + §18.12 R2-F1):
+// ANON (a dataplane ring), or a KERNEL-MINTED device-passive DMA WEAVE (a
+// framebuffer-class region whose KObj_DMA carries the create-immutable `weave`
+// bit, set only by SYS_DMA_CREATE_WEAVE / kobj_dma_create_weave). A plain DMA
+// region -- virtqueue, descriptor table, bounce buffer: the device-COMMAND
+// class -- and MMIO stay structurally unshareable: no creator-asserted flag
+// admits them, only the allocation-time kernel mint, so sharing a region the
+// device INTERPRETS is impossible by construction (MMIO parity). The weave bit
+// conveys no hardware authority of its own: the region is pinned Normal-WB RAM
+// the device only DMA-reads (pixels); the client's PTEs are the same cacheable
+// attrs an ANON share installs (the fault arm's BURROW_TYPE_DMA case -- never
+// Device-nGnRnE), and W^X holds (the share prot is RW; vma_alloc rejects X).
+// The #847 dual-refcount proof below is TYPE-INDEPENDENT with one addition for
+// DMA: the freed Burrow's kobj_dma_unref is the SECOND refcount domain -- the
+// weave's page chunk lives on the KObj_DMA, which the Burrow's own ref keeps
+// alive while EITHER Proc maps, so the client's mapping transitively pins the
+// pixels across the sharer's own teardown (the R2-F1 second-domain fold).
 //
 // Composes burrow_map, which is ALREADY Proc-agnostic (it takes any `p`) and
 // #847-SMP-safe (vma_alloc -> burrow_acquire_mapping bumps mapping_count under
@@ -760,9 +783,10 @@ u32 burrow_lazy_resident_count(struct Burrow *v) {
 //     data-fid open is serialized against flow teardown (the Weft-6 caller's
 //     obligation).
 //
-// Returns 0 on success; -1 on NULL inputs, a corrupted/non-ANON/zero-size v,
-// W+X prot (rejected by vma_alloc), VMA overlap, or VMA SLUB OOM. On failure
-// no mapping is installed and v's refcount is unchanged.
+// Returns 0 on success; -1 on NULL inputs, a corrupted/inadmissible-type/
+// zero-size v, an over-budget client (proc_shared_map_charge -- R2-F3), W+X
+// prot (rejected by vma_alloc), VMA overlap, or VMA SLUB OOM. On failure no
+// mapping is installed, no budget is charged, and v's refcount is unchanged.
 int burrow_share_into(struct Proc *dst, struct Burrow *v, u64 vaddr, u32 prot) {
     if (!dst || !v) return -1;
 
@@ -773,14 +797,41 @@ int burrow_share_into(struct Proc *dst, struct Burrow *v, u64 vaddr, u32 prot) {
     size_t length = burrow_get_size(v);
     if (length == 0) return -1;
 
-    // Scope the cross-Proc share to anonymous dataplane rings. MMIO/DMA are
-    // create-immutable types; a lock-free read is coherent here.
-    if (v->type != BURROW_TYPE_ANON) return -1;
+    // The G-2 admission gate (see the header comment): ANON, or the
+    // kernel-minted device-passive DMA weave. Types + the weave bit are
+    // create-immutable; lock-free reads are coherent.
+    bool weave = (v->type == BURROW_TYPE_DMA &&
+                  v->kobj_dma != NULL && v->kobj_dma->weave);
+    if (v->type != BURROW_TYPE_ANON && !weave) return -1;
+
+    // R2-F3: charge the CLIENT's shared-in budget (the I-32 fifth axis) BEFORE
+    // mapping. The pages are the SHARER's commit (netd's page_count /
+    // tapestryd's DMA pool) -- dst->page_count is deliberately NOT charged;
+    // this axis is what bounds a client's cross-Proc pin, including across a
+    // sharer crash (the orphaned-weave leg). Exact under dst->vma_lock (the
+    // precondition). v->size is always a page multiple, and bounded well
+    // under u32 pages by BURROW_ATTACH_MAX / KOBJ_DMA_WEAVE_MAX_SIZE.
+    u32 npages = (u32)(length / PAGE_SIZE);
+    if (!proc_shared_map_charge(dst, npages)) return -1;
 
     // burrow_map takes the mapping_count ref (vma_alloc -> burrow_acquire_
     // mapping) that keeps v alive for dst from here on -- the cross-Proc #847
     // ref. W^X (prot) + VA bounds + overlap are validated inside.
-    return burrow_map(dst, v, vaddr, length, prot);
+    if (burrow_map(dst, v, vaddr, length, prot) != 0) {
+        proc_shared_map_uncharge(dst, npages);
+        return -1;
+    }
+
+    // Flag the freshly-installed VMA so its teardown (burrow_unmap /
+    // vma_drain) uncharges exactly once -- the charge/uncharge pairing rides
+    // the VMA, covering every removal path (explicit detach, the weave-fid
+    // clunk unmap, exit drain). We still hold dst->vma_lock, and burrow_map
+    // just inserted the VMA at exactly vaddr, so the lookup cannot miss; a
+    // miss here is structural corruption of the vmas list under the held lock.
+    struct Vma *vma = vma_lookup(dst, vaddr);
+    if (!vma) extinction("burrow_share_into: installed VMA vanished under vma_lock");
+    vma->flags |= VMA_FLAG_SHARED_IN;
+    return 0;
 }
 
 // =============================================================================

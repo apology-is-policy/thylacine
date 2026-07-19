@@ -514,6 +514,46 @@ static s64 sys_dma_create_handler(u64 size, u64 rights) {
 }
 
 // =============================================================================
+// SYS_DMA_CREATE_WEAVE — mint a share-admissible device-passive DMA weave (G-2).
+// =============================================================================
+//
+// AArch64 ABI: x0 = size, x1 = rights. The TAPESTRY.md §18.1 weave-backing
+// mint (ABI user-signed-off 2026-07-19): byte-for-byte the SYS_DMA_CREATE
+// contract — the SAME CAP_HW_CREATE gate, the SAME I-34 allowance
+// CreateBegin/CreateCommit pair (a narrowed driver's dma_max bounds weave
+// creates identically) — differing only in the size envelope
+// (KOBJ_DMA_WEAVE_MAX_SIZE) and the kernel-minted `weave` subtype bit on the
+// returned KObj_DMA. See the syscall.h doc block for why this is a separate
+// number rather than a flags widening of SYS_DMA_CREATE.
+static s64 sys_dma_create_weave_handler(u64 size, u64 rights) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+
+    if ((__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_HW_CREATE) == 0)
+        return -1;
+    if (rights == 0 || (rights & ~(u64)RIGHT_ALL))   return -1;
+    if (size == 0)                                   return -1;
+
+    // I-34 CreateBegin (the sys_dma_create_handler discipline): the allowance
+    // dma_max axis sees the FULL weave size — a narrowed driver cannot mint a
+    // weave larger than its conferred per-buffer bound.
+    if (!allowance_permits(p, HW_RES_DMA, size, 0))  return -1;
+
+    struct KObj_DMA *k = kobj_dma_create_weave((size_t)size);
+    if (!k)                                          return -1;
+
+    // I-34 CreateCommit: install under the allowance re-check (revoke race).
+    hidx_t h = allowance_handle_alloc(p, KOBJ_DMA, (rights_t)rights, k);
+    if (h < 0) {
+        kobj_dma_unref(k);
+        return -1;
+    }
+    return (s64)h;
+}
+
+// =============================================================================
 // SYS_DMA_MAP — install a user-VA mapping for a KObj_DMA handle (P4-Ic5b1b).
 // =============================================================================
 //
@@ -4209,10 +4249,17 @@ s64 sys_weft_share_for_proc(struct Proc *p, u64 ring_va, u64 ring_size_raw) {
         return -1;
     }
     struct Burrow *v = vma->burrow;
-    // ANON only (cross-Proc MMIO/DMA share is a distinct unaudited hw surface
-    // -> fails closed); RW (no exec -- the share is RW-only, W^X like
-    // SYS_BURROW_ATTACH); whole-ring (ring_size == the Burrow size).
-    if (v->type != BURROW_TYPE_ANON) {
+    // Admission (G-2): ANON (a netd flow ring), or the KERNEL-MINTED
+    // device-passive DMA weave (tapestryd's framebuffer backing --
+    // SYS_DMA_CREATE_WEAVE minted the immutable subtype bit; TAPESTRY.md
+    // §18.1). Plain DMA (virtqueue / descriptor class) + MMIO fail closed --
+    // the same structural gate burrow_share_into enforces at claim time; the
+    // register-side copy keeps an inadmissible region out of the registry
+    // entirely. RW (no exec -- the share is RW-only, W^X like
+    // SYS_BURROW_ATTACH); whole-region (ring_size == the Burrow size).
+    bool share_weave = (v->type == BURROW_TYPE_DMA &&
+                        v->kobj_dma != NULL && v->kobj_dma->weave);
+    if (v->type != BURROW_TYPE_ANON && !share_weave) {
         spin_unlock(&p->vma_lock);
         return -1;
     }
@@ -4249,19 +4296,32 @@ static s64 weft_map_claimed(struct Proc *p, struct dev9p_priv *priv,
         // The id was already consumed. If a concurrent SYS_WEFT_MAP on this SAME
         // data fd won the race (netd returned the same share_id idempotently for
         // the two Tweft(F)), return its cached VA; else it is a genuinely bad /
-        // replayed / forged id.
+        // replayed / forged / UNREGISTERED id (SYS_WEFT_UNSHARE disarmed it --
+        // the retire-vs-claim NoStaleMap gate: removal-before-free + this
+        // live-registry lookup, tapestry_present.tla Map's wstate guard).
         struct weft_binding *winner = __atomic_load_n(&priv->weft, __ATOMIC_ACQUIRE);
         if (winner) return (s64)winner->guest_va;
         return -1;
     }
 
+    // G-2 kind decision: the kernel-minted Burrow type is the authority; the
+    // server's declared geometry must agree (ring: entries != 0; weave:
+    // entries == 0), else fail closed dropping the claimed pin -- a mismatch
+    // means the server's declaration contradicts its own registered region.
+    int kind = weft_claimed_kind(v, ring_entries);
+    if (kind < 0) {
+        burrow_unref(v);
+        return -1;
+    }
+
     size_t bsize = burrow_get_size(v);
 
-    // Place + share the whole ring into the guest's burrow-attach window (so the
-    // returned VA is detach-able by the native client, the SYS_BURROW_ATTACH
-    // shape). burrow_share_into takes the guest mapping ref (mapping_count); the
-    // shared pages are netd's commit (charged at netd's SYS_BURROW_ATTACH), so
-    // the guest is NOT #65-charged for the share.
+    // Place + share the whole region into the guest's burrow-attach window (so
+    // the returned VA is detach-able by the native client, the SYS_BURROW_ATTACH
+    // shape). burrow_share_into takes the guest mapping ref (mapping_count) AND
+    // charges the guest's shared-in budget (Proc.shared_map_pages, the I-32
+    // fifth axis -- R2-F3): the pages are the SHARER's commit, so page_count is
+    // untouched, but the cross-Proc pin is bounded + accounted.
     spin_lock(&p->vma_lock);
     u64 va;
     if (vma_find_gap(p, bsize, EXEC_USER_BURROW_BASE, EXEC_USER_BURROW_TOP, &va) != 0) {
@@ -4277,10 +4337,15 @@ static s64 weft_map_claimed(struct Proc *p, struct dev9p_priv *priv,
     spin_unlock(&p->vma_lock);
 
     // Build the binding -- it will OWN the registration pin (transferred from
-    // the claim) + compute the kernel-private ring view (geometry) from the
-    // Burrow's KVA + the netd-reported ring_entries. On OOM / invalid geometry,
-    // drop BOTH the guest mapping AND the pin.
-    struct weft_binding *b = weft_binding_alloc(v, va, (u32)bsize, ring_entries);
+    // the claim). RING: compute the kernel-private ring view (geometry) from
+    // the Burrow's KVA + the netd-reported ring_entries. WEAVE: no view (the
+    // §18.11 F10 framebuffer branch -- the map IS the deliverable; the kind
+    // gate keeps every Tweftio consumer off it); record the mapping pid for
+    // the clunk-unmap. On OOM / invalid geometry / a non-weave Burrow, drop
+    // BOTH the guest mapping AND the pin.
+    struct weft_binding *b = (kind == WEFT_BIND_WEAVE)
+        ? weft_binding_alloc_weave(v, va, (u32)bsize, p->pid)
+        : weft_binding_alloc(v, va, (u32)bsize, ring_entries);
     if (!b) {
         spin_lock(&p->vma_lock);
         (void)burrow_unmap(p, va, bsize);
@@ -4344,10 +4409,28 @@ s64 sys_weft_map_for_proc(struct Proc *p, hidx_t data_fd, u64 hint_va) {
     return r;
 }
 
+// SYS_WEFT_UNSHARE: disarm one of the caller's own un-claimed shares (G-2 --
+// the retire/reweave NoStaleMap disarm + the #289 minted-but-unclaimed GC).
+s64 sys_weft_unshare_for_proc(struct Proc *p, u64 share_id) {
+    if (!p) return -1;
+    // The same driver-tier gate as SYS_WEFT_SHARE (Weft-7 F1); the owner check
+    // inside weft_share_unregister is the real authority -- only the
+    // registrant's own entry is removable.
+    if ((__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_HW_CREATE) == 0)
+        return -1;
+    return (s64)weft_share_unregister(p, share_id);
+}
+
 static s64 sys_weft_share_handler(u64 ring_va, u64 ring_size_raw) {
     struct Thread *t = current_thread();
     if (!t || !t->proc)                              return -1;
     return sys_weft_share_for_proc(t->proc, ring_va, ring_size_raw);
+}
+
+static s64 sys_weft_unshare_handler(u64 share_id) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc)                              return -1;
+    return sys_weft_unshare_for_proc(t->proc, share_id);
 }
 
 static s64 sys_weft_map_handler(u64 data_fd_raw, u64 hint_va) {
@@ -7188,6 +7271,15 @@ void syscall_dispatch(struct exception_context *ctx) {
 
     case SYS_WEFT_MAP:
         ctx->regs[0] = (u64)sys_weft_map_handler(ctx->regs[0], ctx->regs[1]);
+        return;
+
+    case SYS_DMA_CREATE_WEAVE:
+        ctx->regs[0] = (u64)sys_dma_create_weave_handler(ctx->regs[0],
+                                                         ctx->regs[1]);
+        return;
+
+    case SYS_WEFT_UNSHARE:
+        ctx->regs[0] = (u64)sys_weft_unshare_handler(ctx->regs[0]);
         return;
 
     case SYS_WALK_CREATE:

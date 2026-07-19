@@ -84,7 +84,11 @@ static unsigned order_for_pages(size_t page_count) {
 // Lifecycle.
 // =============================================================================
 
-struct KObj_DMA *kobj_dma_create(size_t size) {
+// Shared construction body. `max_size` is the per-subtype envelope
+// (KOBJ_DMA_MAX_SIZE for general DMA; KOBJ_DMA_WEAVE_MAX_SIZE for a weave);
+// `weave` is the G-2 kernel-minted device-passive subtype bit, set here ONCE
+// and never written again (create-immutable, like `pa`).
+static struct KObj_DMA *dma_create_body(size_t size, size_t max_size, bool weave) {
     if (!g_dma_initialized)               return NULL;
     if (size == 0)                        return NULL;
 
@@ -94,7 +98,7 @@ struct KObj_DMA *kobj_dma_create(size_t size) {
     if (size > SIZE_MAX - (PAGE_SIZE - 1)) return NULL;
     size_t aligned_size = (size + PAGE_SIZE - 1) & ~(size_t)(PAGE_SIZE - 1);
 
-    if (aligned_size > KOBJ_DMA_MAX_SIZE)  return NULL;
+    if (aligned_size > max_size)           return NULL;
 
     size_t page_count = aligned_size / PAGE_SIZE;
     unsigned order = order_for_pages(page_count);
@@ -107,7 +111,9 @@ struct KObj_DMA *kobj_dma_create(size_t size) {
     // Allocate the page chunk. KP_ZERO so the driver sees zeroed memory
     // (matches the security expectation that DMA-reachable pages don't
     // carry residual data from prior users — defense against driver-bug
-    // info-leak through descriptor padding etc.).
+    // info-leak through descriptor padding etc.). For a weave the zeroing
+    // additionally guarantees a client's first map never sees another
+    // surface's stale pixels.
     struct page *pages = alloc_pages(order, KP_ZERO);
     if (!pages) {
         kfree(k);
@@ -120,10 +126,19 @@ struct KObj_DMA *kobj_dma_create(size_t size) {
     k->pages = pages;
     k->order = order;
     k->ref   = 1;
+    k->weave = weave;
 
     __atomic_fetch_add(&g_dma_created, 1u, __ATOMIC_RELAXED);
     __atomic_fetch_add(&g_dma_live,    1u, __ATOMIC_RELAXED);
     return k;
+}
+
+struct KObj_DMA *kobj_dma_create(size_t size) {
+    return dma_create_body(size, KOBJ_DMA_MAX_SIZE, false);
+}
+
+struct KObj_DMA *kobj_dma_create_weave(size_t size) {
+    return dma_create_body(size, KOBJ_DMA_WEAVE_MAX_SIZE, true);
 }
 
 void kobj_dma_ref(struct KObj_DMA *k) {

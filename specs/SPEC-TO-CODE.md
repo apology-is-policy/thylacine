@@ -1749,3 +1749,63 @@ sites land at **8a-2b-2** (this is a RESERVATION until then).
 Pre-commit gate (from 8a-2b-2): `debug_step.cfg` clean GREEN + the 2 buggy cfgs
 confirmed, on any change to the step arm/re-park (`el0_return_stop_check` step
 leg), the SS-machine (`hwdebug.c`), or the EC 0x32 route (`exception.c`).
+
+## tapestry_present.tla — T-1 (the surface present/weave lifecycle; spec-first re-enabled, model-first)
+
+Status: **spec landed model-first @005591ba (V3; two design-holotype rounds
+refined it — the R2-F2 explicit dual refcount lifted clean TLC to 5413
+distinct states); the KERNEL SHARE HALF landed at G-2** (the DMA-weave
+`burrow_share_into` admission + the Weft generalization; the ABI
+`SYS_DMA_CREATE_WEAVE`/`SYS_WEFT_UNSHARE` user-signed-off 2026-07-19). The
+SERVER half (tapestryd: `Draw`/`Present`/`Complete`/`Reweave`/`Destroy`/
+`ServerRelease`/`ServerDeath` — the present engine + the quiesce/retire
+protocol) is OWED at G-3 and extends this map then. Clean cfg GREEN 5413
+distinct; liveness GREEN (`EventuallyRetired` incl. across `ServerDeath`);
+the 4 buggy cfgs each fire their named invariant (`premature_reuse` →
+RecycleGate, `retire_during_transfer`/`reweave_without_quiesce` →
+NoTornScanout, `map_after_retire` → NoStaleMap).
+
+The G-2 action ↔ site map (the kernel share half):
+
+- **`armed[g]` (a live weave registration)** ↔ a live `g_weft_shares[]` entry
+  (`kernel/weft.c::weft_share_register` mints it; tapestryd registers on the
+  kernel's `Tweft` and echoes the id in `Rweft`). The registration pin
+  (`burrow_ref`) is the entry's liveness authority.
+- **`Map(g)`'s guard `armed[g] ∧ wstate[g] ∈ {woven, live}`** ↔ THREE
+  composed kernel gates at `kernel/syscall.c::weft_map_claimed`:
+  (1) `weft_share_claim` — the consume-once LIVE-registry lookup (a claim
+  after `SYS_WEFT_UNSHARE` finds nothing → fails closed; the R2-F5
+  registry-removal-before-free + claim-re-check pair); (2)
+  `weft_claimed_kind` — the kernel-minted-type authority + the server
+  geometry cross-check (weave ⇒ `ring_entries == 0`); (3)
+  `burrow_share_into`'s admission gate (`kernel/burrow.c`) — ANON or the
+  `kobj_dma->weave` kernel-minted subtype ONLY (§18.12 R2-F1), plus the
+  R2-F3 `proc_shared_map_charge` client budget. The `wstate ∉ {retiring,
+  gone}` half is DISCHARGED BY THE SERVER-SIDE DISCIPLINE the unshare verb
+  makes possible: tapestryd runs `SYS_WEFT_UNSHARE(id)` at/before the
+  RETIRING transition (registry-removal-BEFORE-page-free), so no claim can
+  land on a retiring weave — `MapStale` (the `map_after_retire`
+  counterexample) is exactly the pre-G-2 gap (no unregister existed; a
+  stale share stayed claimable until owner death).
+- **`Map(g)`'s `armed' = FALSE` (consume-once)** ↔ `weft_share_claim`'s slot
+  clear + pin transfer (`kernel/weft.c`; the regression
+  `weft.share_register_claim` replay leg).
+- **`ClunkMap(g)`** ↔ `kernel/dev9p.c::dev9p_close`'s WEAVE-kind clunk-unmap
+  (pid-matched `burrow_unmap` — drops `mapped` + uncharges the budget) +
+  `weft_binding_release` (drops the registration pin). The RING kind keeps
+  its audited vma_drain-at-exit lifetime (the netd precedent).
+- **`MappedImpliesBacked` / `RefImpliesBacked` (the #847-across-crash no-UAF
+  check)** ↔ the dual-refcount across the KObj_DMA SECOND domain: the
+  client's `mapping_count` ref keeps the Burrow, whose create-bound
+  `kobj_dma` ref keeps the pixel chunk — `burrow_free_internal`'s
+  type-dispatched `kobj_dma_unref` frees only at `{h:0, m:0}` (the
+  regression `weft.weave_share_and_claim`'s teardown legs).
+
+Regressions (all revert-probed 2026-07-19: the four gate weakenings →
+1167/1169 FAIL on exactly `weft.share_rejects_plain_dma` +
+`weft.weave_share_and_claim`; restored → 1169/1169):
+`weft.share_rejects_plain_dma` (the R2-F1 structural gate, register + claim
+sides), `weft.weave_share_and_claim` (mint → admit → kind → budget → the
+validate_rw kind gate → the second-domain teardown),
+`weft.unshare_disarm` (owner gate + removal-before-free + fail-closed late
+claim), `weft.shared_map_budget_cap` (the R2-F3 budget).

@@ -127,6 +127,18 @@ struct debug_hw;    // 8a-2b per-Proc HW-breakpoint table (arch/arm64/hwdebug.h)
 // both under p->vma_lock; TCB-exempt. 65536 * sizeof(struct Vma) (64 B) = 4 MiB of
 // Vma slab is the per-Proc ceiling.
 #define PROC_VMA_MAX    65536u
+// PROC_SHARED_MAP_MAX_PAGES -- cross-Proc shared-in mappings (G-2; the I-32
+// FIFTH axis; TAPESTRY.md §18.12 R2-F3). burrow_share_into maps ANOTHER Proc's
+// memory (a netd flow ring, a tapestryd weave) into this one: those pages are
+// charged to the SHARER's own budget (netd's SYS_BURROW_ATTACH page_count /
+// tapestryd's DMA pool), NOT the client's page_count -- so without this axis a
+// client's shared-in footprint is unbounded AND (the R2-F3 crash leg) a client
+// mapping pins a crashed compositor's DMA pages charged to nothing live. 128 MiB
+// = room for two live weave generations of a large surface (≤ 2 x 64 MiB across
+// a reweave) + a full complement of flow rings; a DoS floor, not an accountant.
+// Charged in burrow_share_into / uncharged at the SHARED_IN-flagged VMA's
+// teardown (burrow_unmap / vma_drain), all under p->vma_lock; TCB-exempt.
+#define PROC_SHARED_MAP_MAX_PAGES  32768u   // 128 MiB at 4-KiB pages
 
 struct Proc {
     u64               magic;            // PROC_MAGIC
@@ -615,6 +627,15 @@ struct Proc {
     // consumes it).
     bool               stop_report_pending;
     bool               cont_report_pending;
+
+    // G-2 (the I-32 FIFTH axis; TAPESTRY.md §18.12 R2-F3): pages of OTHER
+    // Procs' memory currently shared INTO this Proc via burrow_share_into
+    // (SHARED_IN-flagged VMAs). Charged/uncharged under p->vma_lock (exact);
+    // atomic store for lockless /proc readers, like page_count. KP_ZERO-fresh
+    // 0; never rfork-inherited (a child has no shared-in mappings -- its
+    // address space starts empty). Occupies the former 348..352 tail pad, so
+    // struct Proc stays 352 bytes.
+    u32                shared_map_pages;
 };
 
 #define PROC_FLAG_NODUMP            (1u << 0)
@@ -676,9 +697,14 @@ struct Proc {
 _Static_assert(sizeof(struct Proc) == 352,
                "struct Proc size pinned at 352 bytes (the 328 baseline + the 8c-2 "
                "#95 debug_focus_thread pointer @328 + the PTY-1a sid/pgid pair "
-               "@336/@340 + the PTY-1e report latches @344/@345 + tail pad). Adding "
-               "a field grows the SLUB cache; update this assert deliberately so the "
-               "change is intentional. (Merge of the debug-fs #95 + the PTY-1 arc.)");
+               "@336/@340 + the PTY-1e report latches @344/@345 + the G-2 "
+               "shared_map_pages @348 in the former tail pad -- NO size growth). "
+               "Adding a field grows the SLUB cache; update this assert "
+               "deliberately so the change is intentional.");
+_Static_assert(__builtin_offsetof(struct Proc, shared_map_pages) == 348,
+               "G-2 shared_map_pages (the I-32 fifth axis: cross-Proc shared-in "
+               "pages) occupies the former 348..352 tail pad after the PTY-1e "
+               "report latches; KP_ZERO-fresh 0, never rfork-inherited.");
 _Static_assert(__builtin_offsetof(struct Proc, debug_focus_thread) == 328,
                "8c-2 #95 debug_focus_thread (the debug-fs focus M) appends after "
                "debug_hw (offset 328, the next 8-aligned slot past the pointer @320); "
@@ -807,6 +833,18 @@ void proc_page_uncharge(struct Proc *p, u32 npages);
 //   counter would saturate. uncharge clamp-decrements (never underflows past 0).
 bool proc_vma_charge(struct Proc *p);
 void proc_vma_uncharge(struct Proc *p);
+
+// proc_shared_map_charge / proc_shared_map_uncharge -- the cross-Proc shared-in
+//   mapping counter (G-2; the I-32 FIFTH axis). The CALLER MUST HOLD p->vma_lock
+//   (burrow_share_into's precondition -- the same domain as the flagged-VMA
+//   teardown sites), so the check + charge is atomic against sibling shares and
+//   the cap is EXACT. charge returns true (and adds npages) if the Proc is
+//   exempt OR the new total fits PROC_SHARED_MAP_MAX_PAGES; false (charging
+//   nothing) on exceed/overflow (the share fails clean, -1 -- the flow stays
+//   byte-copy / the surface map fails, never a box event). uncharge
+//   clamp-subtracts (never underflows past 0).
+bool proc_shared_map_charge(struct Proc *p, u32 npages);
+void proc_shared_map_uncharge(struct Proc *p, u32 npages);
 
 // proc_thread_cap_ok -- the thread-spawn gate. Returns true if the Proc is
 //   exempt OR thread_count < PROC_THREAD_MAX. Takes g_proc_table_lock for the

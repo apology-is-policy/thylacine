@@ -31,6 +31,7 @@
 
 #include <thylacine/burrow.h>
 #include <thylacine/caps.h>
+#include <thylacine/dma_handle.h>   // G-2: the weave mint + kobj live count
 #include <thylacine/proc.h>
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
@@ -42,6 +43,10 @@ void test_weft_share_owner_gc(void);
 void test_weft_syscall_share(void);
 void test_weft_map_binding_lifetime(void);
 void test_weft_share_cap_gate(void);
+void test_weft_share_rejects_plain_dma(void);
+void test_weft_weave_share_and_claim(void);
+void test_weft_unshare_disarm(void);
+void test_weft_shared_map_budget_cap(void);
 
 // Non-static syscall inner (kernel/syscall.c). ring_va (x0), ring_size (x1).
 s64 sys_weft_share_for_proc(struct Proc *p, u64 ring_va, u64 ring_size_raw);
@@ -307,4 +312,238 @@ void test_weft_share_cap_gate(void) {
         "ring frees once the pin + mapping drop");
 
     drop_proc(p);
+}
+
+// =============================================================================
+// G-2: the DMA-weave share admission + the disarm + the shared-in budget
+// (TAPESTRY.md §18.1 + §18.11 F3/F10 + §18.12 R2-F1/R2-F3/R2-F5).
+// =============================================================================
+
+// The R2-F1 structural gate: a PLAIN DMA region (the device-command class --
+// virtqueue / descriptor table, minted by kobj_dma_create WITHOUT the weave
+// bit) is as unshareable as MMIO. Both the register-side gate
+// (sys_weft_share_for_proc) and the claim-side gate (burrow_share_into)
+// refuse it. Fails on pre-fix code only if someone widens either gate to
+// "any DMA".
+void test_weft_share_rejects_plain_dma(void) {
+    struct Proc *server = make_proc();
+    struct Proc *client = make_proc();
+    TEST_ASSERT(server != NULL && client != NULL, "proc_alloc failed");
+    server->caps = CAP_HW_CREATE;
+
+    struct KObj_DMA *k = kobj_dma_create(PAGE_SIZE);      // plain: weave == false
+    TEST_ASSERT(k != NULL, "kobj_dma_create");
+    TEST_ASSERT(!k->weave, "plain DMA carries no weave bit");
+    struct Burrow *v = burrow_create_dma(k);              // {h:1, m:0}; kobj ref +1
+    TEST_ASSERT(v != NULL, "burrow_create_dma");
+    kobj_dma_unref(k);   // drop the construction ref: the burrow's ref is now
+                         // the sole holder (the real flow parks this ref in the
+                         // handle table; the test has none)
+
+    // Map it into the server (the SYS_DMA_MAP shape), construction ref kept as
+    // the test's own handle.
+    spin_lock(&server->vma_lock);
+    TEST_EXPECT_EQ(burrow_map(server, v, WEFT_TEST_VA, PAGE_SIZE, VMA_PROT_RW), 0,
+        "server maps its plain DMA region");
+    spin_unlock(&server->vma_lock);
+
+    // Register-side: refused before any registry slot is touched.
+    int h_before = burrow_handle_count(v);
+    TEST_EXPECT_EQ(sys_weft_share_for_proc(server, WEFT_TEST_VA, PAGE_SIZE), -1,
+        "SYS_WEFT_SHARE refuses a plain (non-weave) DMA region");
+    TEST_EXPECT_EQ(burrow_handle_count(v), h_before,
+        "the refused share takes no registration pin");
+
+    // Claim-side (defense-in-depth): burrow_share_into refuses it directly.
+    spin_lock(&client->vma_lock);
+    TEST_EXPECT_EQ(burrow_share_into(client, v, WEFT_TEST_VA, VMA_PROT_RW), -1,
+        "burrow_share_into refuses a plain DMA Burrow");
+    spin_unlock(&client->vma_lock);
+    TEST_EXPECT_EQ(client->shared_map_pages, 0u,
+        "a refused share charges nothing");
+
+    // weft_claimed_kind: inadmissible regardless of the declared geometry.
+    TEST_EXPECT_EQ(weft_claimed_kind(v, 0), -1, "plain DMA never claims as weave");
+    TEST_EXPECT_EQ(weft_claimed_kind(v, 8), -1, "plain DMA never claims as ring");
+
+    // Teardown: unmap + drop the construction handle -> burrow free -> kobj free.
+    u64 live_before = kobj_dma_live_count();
+    vma_drain(server);
+    burrow_unref(v);
+    TEST_EXPECT_EQ(kobj_dma_live_count(), live_before - 1,
+        "kobj chunk freed with its burrow");
+    drop_proc(server);
+    drop_proc(client);
+}
+
+// The full weave arc: mint (kernel-set immutable bit) -> register (the gate
+// ADMITS the weave) -> claim-kind decision (type-derived + declaration
+// cross-check) -> share_into (budget charged) -> the weave binding (no ring
+// view; every Tweftio consumer closed by the validate_rw kind gate) ->
+// teardown (uncharge + the #847 dual count across the KObj_DMA second domain).
+void test_weft_weave_share_and_claim(void) {
+    struct Proc *server = make_proc();    // tapestryd's role
+    struct Proc *client = make_proc();    // the surface client's role
+    TEST_ASSERT(server != NULL && client != NULL, "proc_alloc failed");
+    server->caps = CAP_HW_CREATE;
+
+    struct KObj_DMA *k = kobj_dma_create_weave(2u * PAGE_SIZE);
+    TEST_ASSERT(k != NULL, "kobj_dma_create_weave");
+    TEST_ASSERT(k->weave, "the weave bit is kernel-minted at create");
+    struct Burrow *v = burrow_create_dma(k);              // {h:1, m:0}
+    TEST_ASSERT(v != NULL, "burrow_create_dma over the weave kobj");
+    kobj_dma_unref(k);   // drop the construction ref (handle-table stand-in);
+                         // the burrow's kobj ref is now the sole holder
+
+    spin_lock(&server->vma_lock);
+    TEST_EXPECT_EQ(burrow_map(server, v, WEFT_TEST_VA, 2u * PAGE_SIZE, VMA_PROT_RW), 0,
+        "server maps its weave");
+    spin_unlock(&server->vma_lock);
+    burrow_unref(v);                       // the SYS_DMA_MAP shape: {h:0, m:1}
+
+    // Register: the share gate ADMITS the kernel-minted weave subtype.
+    s64 id = sys_weft_share_for_proc(server, WEFT_TEST_VA, 2u * PAGE_SIZE);
+    TEST_ASSERT(id > 0, "SYS_WEFT_SHARE admits the weave");
+    TEST_EXPECT_EQ(burrow_handle_count(v), 1, "the registration pin held");
+
+    // Claim + the kind decision: the kernel-minted type is the authority; the
+    // server's declaration must AGREE (weave => ring_entries == 0).
+    struct Burrow *claimed = weft_share_claim((u64)id);
+    TEST_EXPECT_EQ(claimed, v, "claim returns the weave");
+    TEST_EXPECT_EQ(weft_claimed_kind(v, 0), (int)WEFT_BIND_WEAVE,
+        "weave + entries==0 -> the weave kind");
+    TEST_EXPECT_EQ(weft_claimed_kind(v, 8), -1,
+        "weave + a declared ring geometry -> mismatch, fail closed");
+
+    // Share into the client: the budget charges npages (2) exactly.
+    TEST_EXPECT_EQ(client->shared_map_pages, 0u, "client starts uncharged");
+    spin_lock(&client->vma_lock);
+    TEST_EXPECT_EQ(burrow_share_into(client, v, WEFT_TEST_VA, VMA_PROT_RW), 0,
+        "share the weave into the client");
+    spin_unlock(&client->vma_lock);
+    TEST_EXPECT_EQ(client->shared_map_pages, 2u, "the shared-in budget charged");
+    TEST_EXPECT_EQ(burrow_mapping_count(v), 2, "server + client mappings");
+    struct Vma *cvma = vma_lookup(client, WEFT_TEST_VA);
+    TEST_ASSERT(cvma != NULL && (cvma->flags & VMA_FLAG_SHARED_IN),
+        "the client VMA carries the SHARED_IN flag");
+
+    // The weave binding: no ring view; the validate_rw kind gate closes every
+    // Tweftio fast path at one chokepoint. The RING allocator refuses the
+    // weave outright (pages == NULL + non-ANON).
+    struct weft_binding *b =
+        weft_binding_alloc_weave(v, WEFT_TEST_VA, 2u * PAGE_SIZE, client->pid);
+    TEST_ASSERT(b != NULL, "weave binding alloc");
+    u32 off = 0;
+    TEST_EXPECT_EQ(weft_binding_validate_rw(b, WEFT_TEST_VA + 64, 128, &off), -1,
+        "a WEAVE binding never validates a Tweftio drive (the kind gate)");
+    TEST_ASSERT(weft_binding_alloc(v, WEFT_TEST_VA, 2u * PAGE_SIZE, 8) == NULL,
+        "the RING allocator refuses a weave Burrow");
+
+    // Teardown: the binding drops the pin; the client unmap uncharges; the
+    // server drain drops the last mapping -> burrow free -> the KObj_DMA
+    // second-refcount domain frees the pixel chunk (R2-F1's fold).
+    u64 destroyed_before = burrow_total_destroyed();
+    u64 live_before = kobj_dma_live_count();
+    weft_binding_release(b);                              // {h:0, m:2}
+    spin_lock(&client->vma_lock);
+    TEST_EXPECT_EQ(burrow_unmap(client, WEFT_TEST_VA, 2u * PAGE_SIZE), 0,
+        "client unmaps the weave");
+    spin_unlock(&client->vma_lock);
+    TEST_EXPECT_EQ(client->shared_map_pages, 0u,
+        "the unmap uncharges the shared-in budget");
+    TEST_EXPECT_EQ(burrow_total_destroyed(), destroyed_before,
+        "weave alive on the server mapping");
+    vma_drain(server);                                    // {h:0, m:0} -> free
+    TEST_EXPECT_EQ(burrow_total_destroyed(), destroyed_before + 1,
+        "weave frees when the last ref drops");
+    TEST_EXPECT_EQ(kobj_dma_live_count(), live_before - 1,
+        "the KObj_DMA pixel chunk freed with its burrow (the second domain)");
+
+    drop_proc(server);
+    drop_proc(client);
+}
+
+// The F3/R2-F5 disarm: weft_share_unregister removes an UN-claimed entry
+// (owner-gated) + drops the pin, so a late claim fails closed -- the kernel
+// half of the retire-vs-claim NoStaleMap gate (registry-removal-before-free +
+// the claim's live-registry lookup). Fails on pre-fix code (no unregister
+// existed: a stale share stayed claimable until owner death).
+void test_weft_unshare_disarm(void) {
+    struct Proc *a = make_proc();
+    struct Proc *b = make_proc();
+    TEST_ASSERT(a != NULL && b != NULL, "proc_alloc failed");
+
+    struct Burrow *v = burrow_create_anon(PAGE_SIZE);
+    TEST_ASSERT(v != NULL, "burrow_create_anon");
+    int h0 = burrow_handle_count(v);
+
+    u64 id = weft_share_register(a, v);
+    TEST_ASSERT(id != 0, "register");
+    TEST_EXPECT_EQ(burrow_handle_count(v), h0 + 1, "pin held");
+
+    // The owner gate: a stranger cannot disarm A's share; the entry survives.
+    TEST_EXPECT_EQ(weft_share_unregister(b, id), -1,
+        "a non-owner's unregister is refused");
+    TEST_EXPECT_EQ(burrow_handle_count(v), h0 + 1, "the entry + pin survive");
+
+    // The owner disarms: entry removed, pin dropped, the late claim fails
+    // closed (the NoStaleMap realization).
+    TEST_EXPECT_EQ(weft_share_unregister(a, id), 0, "the owner disarms");
+    TEST_EXPECT_EQ(burrow_handle_count(v), h0, "the disarm drops the pin");
+    TEST_ASSERT(weft_share_claim(id) == NULL,
+        "a claim after the disarm fails closed");
+
+    // Idempotence-adjacent: a second unregister of the same id is -1 (gone);
+    // an unregister of a CLAIMED id is -1 (the client mapped legitimately --
+    // retire proceeds by quiesce, not by yanking).
+    TEST_EXPECT_EQ(weft_share_unregister(a, id), -1, "double-disarm is -1");
+    u64 id2 = weft_share_register(a, v);
+    TEST_ASSERT(id2 != 0, "re-register");
+    struct Burrow *c = weft_share_claim(id2);
+    TEST_EXPECT_EQ(c, v, "claim consumes");
+    TEST_EXPECT_EQ(weft_share_unregister(a, id2), -1,
+        "an unregister after the claim is -1 (already consumed)");
+    burrow_unref(v);                       // the claimed pin
+    TEST_EXPECT_EQ(burrow_handle_count(v), h0, "pin balance restored");
+
+    burrow_unref(v);                       // the construction handle -> free
+    drop_proc(a);
+    drop_proc(b);
+}
+
+// The R2-F3 budget cap: a non-exempt client at the shared-in cap cannot take
+// another share (fails clean: -1, no VMA, no ref, no charge); the SYSTEM TCB
+// is exempt. Fails on pre-fix code (no budget existed: the share succeeded).
+void test_weft_shared_map_budget_cap(void) {
+    struct Proc *client = make_proc();     // principal 0 -> NON-exempt
+    TEST_ASSERT(client != NULL, "proc_alloc failed");
+    TEST_ASSERT(!proc_resource_exempt(client), "test Proc is non-exempt");
+
+    struct Burrow *v = burrow_create_anon(PAGE_SIZE);
+    TEST_ASSERT(v != NULL, "burrow_create_anon");
+    int m0 = burrow_mapping_count(v);
+
+    // Pre-load the counter to the cap: the next share must fail CLEAN.
+    client->shared_map_pages = PROC_SHARED_MAP_MAX_PAGES;
+    spin_lock(&client->vma_lock);
+    TEST_EXPECT_EQ(burrow_share_into(client, v, WEFT_TEST_VA, VMA_PROT_RW), -1,
+        "an over-budget share is refused");
+    spin_unlock(&client->vma_lock);
+    TEST_EXPECT_EQ(burrow_mapping_count(v), m0, "no mapping ref taken");
+    TEST_ASSERT(vma_lookup(client, WEFT_TEST_VA) == NULL, "no VMA installed");
+    TEST_EXPECT_EQ(client->shared_map_pages, PROC_SHARED_MAP_MAX_PAGES,
+        "the refused share charged nothing");
+
+    // Back under the cap: the share succeeds + charges; the drain uncharges.
+    client->shared_map_pages = 0;
+    spin_lock(&client->vma_lock);
+    TEST_EXPECT_EQ(burrow_share_into(client, v, WEFT_TEST_VA, VMA_PROT_RW), 0,
+        "an under-budget share succeeds");
+    spin_unlock(&client->vma_lock);
+    TEST_EXPECT_EQ(client->shared_map_pages, 1u, "charged one page");
+    vma_drain(client);
+    TEST_EXPECT_EQ(client->shared_map_pages, 0u, "the drain uncharges");
+
+    burrow_unref(v);                       // construction handle -> free
+    drop_proc(client);
 }

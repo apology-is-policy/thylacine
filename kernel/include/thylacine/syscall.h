@@ -1742,6 +1742,42 @@ enum {
     //   per-owner separation, pty_stop.tla StopCompatI39). The target group
     //   need not be the foreground group (bg) nor stopped (POSIX SIGCONT).
     SYS_TTY_CONT = 98,     // arg: fd (x0), pgid (x1)
+
+    // SYS_DMA_CREATE_WEAVE(size, rights) -> hidx / -1  (G-2; TAPESTRY.md
+    //   §18.1 + §18.12 R2-F1; the ABI addition user-signed-off 2026-07-19).
+    //   Identical contract to SYS_DMA_CREATE -- CAP_HW_CREATE + the I-34
+    //   allowance HW_RES_DMA gate + kernel-chosen PA -- with TWO differences:
+    //   the size envelope is KOBJ_DMA_WEAVE_MAX_SIZE (64 MiB; framebuffer-
+    //   class, vs the general 1 MiB), and the minted KObj_DMA carries the
+    //   KERNEL-MINTED create-immutable `weave` bit that admits its Burrow
+    //   into the cross-Proc share gate (burrow_share_into + SYS_WEFT_SHARE).
+    //   A DELIBERATELY SEPARATE NUMBER, not a flags arg on SYS_DMA_CREATE:
+    //   existing two-arg callers (stratumd's pouch seam, every virtio driver)
+    //   leave x2 as garbage, and a garbage-read flags word could accidentally
+    //   set the share-admissibility bit -- the exact #112 missed-caller class,
+    //   eliminated structurally by the fresh number. The weave subtype is how
+    //   a device-command DMA region (virtqueue / descriptor table, allocated
+    //   via plain SYS_DMA_CREATE) stays as structurally unshareable as MMIO:
+    //   admissibility is minted at allocation by the KERNEL, never asserted
+    //   by the creator afterward. A weave conveys no hardware authority --
+    //   pinned Normal-WB RAM the device only DMA-reads (pixels).
+    SYS_DMA_CREATE_WEAVE = 99,   // arg: size (x0), rights (x1)
+
+    // SYS_WEFT_UNSHARE(share_id) -> 0 / -1  (G-2; TAPESTRY.md §18.11 F3 +
+    //   §18.12 R2-F5; closes the #289 seam). Disarm ONE of the caller's own
+    //   un-claimed shares: removes the registry entry + drops the I-30
+    //   registration pin, so a subsequent claim of this id FAILS CLOSED --
+    //   the kernel half of the retire/reweave NoStaleMap guard (the
+    //   tapestry_present.tla Map-guard realization: registry-removal-before-
+    //   free + the claim's live-registry lookup). Returns -1 when no live
+    //   entry matches (already claimed -- the client holds a legitimate
+    //   mapping and retire proceeds by quiesce -- or already GC'd / forged /
+    //   another owner's; indistinguishable, deliberately). CAP_HW_CREATE-
+    //   gated like SYS_WEFT_SHARE; the owner check is the real authority.
+    //   Consumers: tapestryd's surface retire (a weave share must not linger
+    //   claimable past RETIRING), netd's GC of a minted-but-never-claimed
+    //   flow id (#289 -- a client that died between Tweft and claim).
+    SYS_WEFT_UNSHARE = 100,      // arg: share_id (x0)
 };
 
 // SYS_PTY_REGISTER ops.

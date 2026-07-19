@@ -896,6 +896,29 @@ void proc_vma_uncharge(struct Proc *p) {
     __atomic_store_n(&p->vma_count, nv, __ATOMIC_RELEASE);
 }
 
+bool proc_shared_map_charge(struct Proc *p, u32 npages) {
+    if (!p) return false;
+    // Caller holds p->vma_lock (burrow_share_into's precondition -- the same
+    // domain as the SHARED_IN-flagged VMA teardown), so the load + the cap
+    // decision + the store are atomic against sibling shares -> the cap is
+    // EXACT. The atomic store keeps a lockless cross-Proc /proc reader coherent.
+    u32 cur = __atomic_load_n(&p->shared_map_pages, __ATOMIC_RELAXED);
+    if (npages > 0xFFFFFFFFu - cur) return false;   // counter overflow (refuse)
+    if (!proc_resource_exempt(p) && cur + npages > PROC_SHARED_MAP_MAX_PAGES)
+        return false;                                // over cap -> the share fails clean
+    __atomic_store_n(&p->shared_map_pages, cur + npages, __ATOMIC_RELEASE);
+    return true;
+}
+
+void proc_shared_map_uncharge(struct Proc *p, u32 npages) {
+    if (!p) return;
+    // Caller holds p->vma_lock. Clamp so an over-uncharge (every uncharge matches
+    // a charge -- the SHARED_IN flag pairs them) never wraps past 0.
+    u32 cur = __atomic_load_n(&p->shared_map_pages, __ATOMIC_RELAXED);
+    u32 nv  = (cur >= npages) ? cur - npages : 0;
+    __atomic_store_n(&p->shared_map_pages, nv, __ATOMIC_RELEASE);
+}
+
 bool proc_thread_cap_ok(struct Proc *p) {
     if (!p) return false;
     if (proc_resource_exempt(p)) return true;

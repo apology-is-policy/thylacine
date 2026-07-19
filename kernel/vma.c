@@ -268,6 +268,13 @@ void vma_drain(struct Proc *p) {
 
     while (p->vmas) {
         struct Vma *v = p->vmas;
+        // G-2: a SHARED_IN VMA's teardown uncharges the shared-in budget (the
+        // burrow_share_into pairing). Moot for a dying Proc's counters but
+        // keeps the invariant (shared_map_pages == Σ flagged-VMA pages) exact
+        // on every path, so the accounting is auditable at any point.
+        if (v->flags & VMA_FLAG_SHARED_IN)
+            proc_shared_map_uncharge(p,
+                (u32)((v->vaddr_end - v->vaddr_start) / PAGE_SIZE));
         vma_remove(p, v);
         vma_free(v);
     }

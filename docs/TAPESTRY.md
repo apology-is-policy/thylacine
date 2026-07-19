@@ -622,6 +622,20 @@ create-surface ──> WOVEN (weave allocated, mapped by client via Tweft)
     ANON (a DMA Burrow has `pages == NULL`, its refs live on the KObj_DMA) —
     fold both into the T-1 spec/audit rather than asserting equivalence.
     (§18.12 R2-F1.)
+    **G-2 AS-BUILT (2026-07-19; the ABI user-signed-off 2026-07-19 in advance —
+    the recorded pre-signoff, scoped to exactly this item):** the mint is a NEW
+    SYSCALL `SYS_DMA_CREATE_WEAVE` (99; a flags widening of the two-arg
+    `SYS_DMA_CREATE` was rejected — existing callers leave x2 as garbage, and a
+    garbage flags word could accidentally set share-admissibility, the #112
+    class), setting the create-immutable `KObj_DMA.weave` bit (the
+    `BURROW_TYPE_GPU_BACKING` provisional name resolved to a kobj-level subtype
+    — zero switch-site churn, identical structural force); the F3 disarm is
+    `SYS_WEFT_UNSHARE` (100; also closes the netd #289 seam); the R2-F3 budget
+    is `Proc.shared_map_pages` (128 MiB — the I-32 fifth axis). T-1 is
+    ENUMERATED as **I-40** (ARCH §28) with the kernel share half ENFORCED; the
+    present half completes the row at G-3. As-built:
+    `docs/reference/125-weft.md` "The weave share (G-2)"; the action ↔ site
+    map: `specs/SPEC-TO-CODE.md::tapestry_present.tla`.
 - **Slots**: one weave carries N=3 page-aligned slot sub-regions (D1 triple
   buffering); tapestryd chooses stride/offsets and reports them in `geometry`.
   The client draws only into free slots; the present CQE frees a slot (D1).
