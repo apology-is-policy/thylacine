@@ -97,3 +97,52 @@ void test_context_round_trip(void) {
     // resources cleanly.
     thread_free(t);
 }
+
+// context.switch_irq_safe (#101 regression). thread_switch must mask IRQs
+// across its torn window (current_thread()==next while the CPU still runs
+// prev's ctx). This test FORCES a timer-tick preempt into that window via the
+// g_thread_switch_test_window_ns hook (thread_switch busy-spins there while the
+// hook is armed). The test phase runs IRQs-unmasked + preemptible (vectors.S
+// IRQ-from-EL1 tail -> preempt_check_irq -> sched()), so:
+//   - WITH the #101 mask: the forced spin runs IRQ-masked, the tick is deferred,
+//     no in-window sched() -> the round trip completes cleanly (PASS).
+//   - WITHOUT the mask (pre-fix): a preempt lands in the window, sched() saves
+//     prev's live state into next->ctx -> corruption -> canary smash, a hard
+//     suite FAIL (EXTINCTION).
+// Proven both ways: the temp unconditional-spin experiment smashed pre-fix and
+// PASSed post-fix (1165/1165). Deterministic fail-pre/pass-post guard.
+void test_context_switch_irq_safe(void) {
+    g_test_main = current_thread();
+    TEST_ASSERT(g_test_main != NULL,
+        "current_thread() returned NULL");
+    TEST_EXPECT_EQ(g_test_main, kthread(),
+        "test must run from kthread");
+
+    g_test_state = 0;
+
+    struct Thread *t = thread_create(kproc(), test_thread_entry);
+    TEST_ASSERT(t != NULL,
+        "thread_create returned NULL");
+
+    // 30 ms > any scheduler slice: a timer tick is guaranteed to expire the
+    // slice + fire preempt_check_irq while thread_switch sits in its torn
+    // window. The hook fires on BOTH the switch-in (to t) and the switch-back
+    // (to g_test_main), so both windows are stressed.
+    __atomic_store_n(&g_thread_switch_test_window_ns, 30000000ull, __ATOMIC_RELAXED);
+
+    thread_switch(t);
+
+    // Disarm before asserting / freeing so the reclaim path doesn't spin.
+    __atomic_store_n(&g_thread_switch_test_window_ns, 0ull, __ATOMIC_RELAXED);
+
+    TEST_EXPECT_EQ(g_test_state, 1u,
+        "second thread did not increment shared counter (switch corrupted?)");
+    TEST_EXPECT_EQ(current_thread(), g_test_main,
+        "current_thread not restored after switch-back (switch corrupted?)");
+    TEST_EXPECT_EQ(g_test_main->state, THREAD_RUNNING,
+        "main thread state must be RUNNING after resume");
+    TEST_EXPECT_EQ(t->state, THREAD_RUNNABLE,
+        "second thread must be RUNNABLE after switching back");
+
+    thread_free(t);
+}

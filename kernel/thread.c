@@ -9,11 +9,14 @@
 // register) — accessed via inline mrs/msr in thread.h. thread_init
 // installs kthread (TID 0) there as the boot CPU's current.
 //
-// At P2-A, thread_switch is the only multitasking primitive — direct
-// switch, no scheduler dispatch, no IRQ masking (timer IRQ handler at
-// v1.0 doesn't touch thread state, so reentrancy is trivially safe).
-// P2-B adds the EEVDF scheduler on top + IRQ masking around the switch
-// once preemption-via-IRQ becomes possible.
+// thread_switch is the test-only direct-switch primitive (no scheduler
+// dispatch); production multitasking is sched(). #101: it MUST mask IRQs
+// across its switch, exactly like sched() — the timer IRQ now drives
+// preemption (vectors.S IRQ-from-EL1 tail -> preempt_check_irq -> sched()),
+// so an unmasked switch left the set_current_thread(next)-before-cpu_switch_
+// context torn window preemptible and a tick there corrupted the switch. The
+// old "no IRQ masking, reentrancy is trivially safe" claim here was the
+// false premise that caused the bug (P2-B never actually added the mask).
 
 #include <thylacine/context.h>
 #include <thylacine/extinction.h>
@@ -24,6 +27,7 @@
 #include <thylacine/types.h>
 
 #include "../arch/arm64/mmu.h"
+#include "../arch/arm64/timer.h"   // #101: timer_now_ns for the test-window spin hook
 #include "../mm/phys.h"
 #include "../mm/slub.h"
 
@@ -53,6 +57,13 @@ static u64                g_thread_destroyed;
 // the SLEEPING/EXITING-but-still-on_cpu free window is real + the gate caught
 // it. Diagnostic stat; read via thread_free_oncpu_waits().
 static u64                g_thread_free_oncpu_waits;
+
+// #101 regression hook (test-only; 0 in production). When set to N ns, thread_switch
+// busy-spins N ns inside its torn window (after set_current_thread, before
+// cpu_switch_context) so a timer-tick preempt is GUARANTEED to land there.
+// context.switch_irq_safe sets this, runs a round trip, resets it -> a
+// deterministic fail-pre/pass-post guard for the #101 IRQ-mask discipline.
+volatile u64              g_thread_switch_test_window_ns;
 
 u64 thread_free_oncpu_waits(void);
 u64 thread_free_oncpu_waits(void) {
@@ -592,16 +603,48 @@ void thread_switch(struct Thread *next) {
         extinction("thread_switch into uninitialized Thread");
     if (next->state == THREAD_EXITING)
         extinction("thread_switch into EXITING thread");
+    // #101-audit F1: thread_switch's SAFE-USE CONTRACT is narrower than the
+    // gates above -- `next` MUST be off-CPU AND off-tree. Off-CPU: switching
+    // into a thread still mid-ctx-save on a peer CPU (on_cpu==true) loads a
+    // half-written ctx (the #788 class the on_cpu protocol exists to close);
+    // gate it loudly. Off-tree (runnable_next/prev NULL): a tree-resident
+    // target would stay dispatchable by a peer pick_next after we mark it
+    // RUNNING+on_cpu -> two CPUs on one kstack. All current callers satisfy
+    // both (fresh threads never ready()'d, or the round-trip partner whose
+    // on_cpu the destination's sched_finish_task_switch cleared in program
+    // order before this runs); the tree case is left as a documented contract
+    // rather than a gate to avoid a false trip on a link field a future
+    // scheduler refactor might repurpose.
+    if (__atomic_load_n(&next->on_cpu, __ATOMIC_ACQUIRE))
+        extinction("thread_switch into an on_cpu thread (half-saved ctx)");
+
+    // #101: mask IRQs across the ENTIRE mutate+switch+resume window. The
+    // set_current_thread(next)-before-cpu_switch_context sequence leaves a
+    // TORN state: current_thread()==next while the CPU still runs prev's
+    // ctx (prev's SP + registers). A timer-tick preempt landing there drives
+    // preempt_check_irq -> sched(), which reads current==next and saves prev's
+    // live state into next->ctx -> corruption -> a canary smash when a thread
+    // later resumes on a wrong ctx.sp. sched() masks IRQs around its own
+    // switch for exactly this reason; thread_switch (the test-only direct
+    // primitive, written for single-CPU + no-preemption) never did -- though
+    // the RW-1 comment below CLAIMED it. The test phase runs IRQs-unmasked
+    // (main.c daifclr #2) and preemptible (vectors.S IRQ-from-EL1 tail ->
+    // preempt_check_irq), so the window was live. cpu_switch_context does NOT
+    // touch DAIF, so the mask is carried across the switch by the live CPU:
+    // a fresh `next` reached via cpu_switch_context's ret runs
+    // thread_trampoline, which `msr daifclr #2`s BEFORE the entry -> the entry
+    // is preemptible; only the switch itself is atomic. The saved `s` lives on
+    // prev's kstack and is restored (spin_unlock_irqrestore below) when prev
+    // is switched back to -- balanced per-thread exactly like sched()'s resume.
+    irq_state_t sw_irq = spin_lock_irqsave(NULL);
 
     // State + current pointer updates BEFORE the asm switch. From the
     // outgoing thread's perspective these writes are observed by it
     // again only when some peer switches BACK into it (and at that
     // point, the peer's writes have set prev->state = RUNNING and
     // current_thread = prev). The window between these writes and the
-    // cpu_switch_context call is invisible to the outgoing thread —
-    // and at v1.0 single-CPU + no preemption, no other observer races
-    // it. P2-B refines the ordering when SMP + scheduler-tick preemption
-    // make this window observable.
+    // cpu_switch_context call is now IRQ-masked (#101), so no preempt
+    // observes the torn state.
     prev->state = THREAD_RUNNABLE;
     next->state = THREAD_RUNNING;
 
@@ -617,8 +660,34 @@ void thread_switch(struct Thread *next) {
 
     // RW-1 B-F1: install next's rolling-ASID TTBR0 before the asm switch (a
     // no-op for the kernel threads thread_switch is used with, but kept
-    // uniform with sched()'s switch path). IRQs are masked across thread_switch.
+    // uniform with sched()'s switch path). IRQs are masked here (#101 above).
     sched_install_asid_ttbr0(next);
+
+    // #101 regression hook (test-only; g_thread_switch_test_window_ns is 0 in
+    // production). When set, spin this many ns HERE -- inside the torn window,
+    // AFTER set_current_thread(next), so a timer-tick preempt is GUARANTEED to
+    // land in the window. With the #101 irqsave above, IRQs are masked -> the
+    // spin is harmless (the tick is deferred, no in-window sched()) and the
+    // round-trip completes. WITHOUT the irqsave (pre-fix), the spin runs with
+    // IRQs on -> a preempt corrupts the switch -> canary smash. Drives a
+    // deterministic fail-pre/pass-post guard (context.switch_irq_safe).
+    u64 spin_ns = __atomic_load_n(&g_thread_switch_test_window_ns, __ATOMIC_RELAXED);
+    if (spin_ns) {
+        u64 t0 = timer_now_ns();
+        volatile u64 spin = 0;
+        // #101-audit F2: unconditional iteration backstop (the RNG-audit F1
+        // shape) so a frozen/misconfigured CNTVCT cannot hang the boot IRQ-
+        // masked. 1<<30 dwarfs any real 30ms window (~1e5 iters, each doing a
+        // CNTVCT read) with >1e4x headroom; a frozen counter exits early ->
+        // the test window is merely short, never a hang. The wall-clock cond
+        // is the real terminator on a healthy counter.
+        u64 iters = 0;
+        while (timer_now_ns() - t0 < spin_ns && iters < (1ull << 30)) {
+            spin++;
+            iters++;
+        }
+        (void)spin;
+    }
 
     cpu_switch_context(&prev->ctx, &next->ctx);
 
@@ -631,6 +700,11 @@ void thread_switch(struct Thread *next) {
     // thread_switch never took the per-CPU run-tree lock; the helper
     // sched_finish_task_switch's NULL-guard handles that.
     sched_finish_task_switch();
+
+    // #101: restore prev's IRQ state, balanced with the irqsave above. `sw_irq`
+    // is prev's own (captured before the switch on prev's kstack); this runs
+    // when prev is switched back to, so it restores prev's pre-switch DAIF.
+    spin_unlock_irqrestore(NULL, sw_irq);
 }
 
 u64 thread_total_created(void)   { return __atomic_load_n(&g_thread_created, __ATOMIC_RELAXED); }

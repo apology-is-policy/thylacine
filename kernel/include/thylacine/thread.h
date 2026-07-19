@@ -553,11 +553,22 @@ void thread_free(struct Thread *t);
 // Test code uses it to demonstrate the switching primitive works
 // end-to-end; subsequent sub-chunks add the EEVDF dispatch on top.
 //
-// IRQ masking: P2-A does NOT mask IRQs around the switch. The only IRQ
-// source live at v1.0 is the timer; its handler increments g_ticks and
-// returns — it does not touch thread state. P2-B's scheduler will add
-// the IRQ-mask discipline once preemption-via-IRQ becomes possible.
+// IRQ masking (#101): thread_switch masks IRQs across its entire
+// mutate+switch+resume window (spin_lock_irqsave(NULL)), because the
+// set_current_thread(next)-before-cpu_switch_context sequence leaves a torn
+// state and the timer IRQ now drives preemption (vectors.S IRQ-from-EL1 ->
+// preempt_check_irq -> sched()). Without the mask a tick landing in the window
+// corrupts the switch. This mirrors sched()'s own discipline; the mask is
+// balanced per-thread (the saved state rides prev's kstack, restored when prev
+// is switched back to). The stale pre-#101 comment ("P2-A does NOT mask IRQs")
+// was written when preemption-via-IRQ did not yet exist.
 void thread_switch(struct Thread *next);
+
+// #101 regression hook (test-only; 0 in production). thread_switch busy-spins
+// this many ns inside its torn window when nonzero, forcing a preempt to land
+// there -> a deterministic guard for the IRQ-mask discipline. Set/reset by
+// context.switch_irq_safe only.
+extern volatile u64 g_thread_switch_test_window_ns;
 
 // Diagnostic.
 u64 thread_total_created(void);

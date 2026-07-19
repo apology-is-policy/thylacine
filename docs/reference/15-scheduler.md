@@ -484,6 +484,12 @@ void sched_finish_task_switch(void) {
 
 NULL-guard handles `thread_switch` (P2-A direct-switch primitive used by context tests) which doesn't acquire the per-CPU lock.
 
+#### `thread_switch` IRQ-mask discipline (#101)
+
+`thread_switch` brackets its entire mutate+switch+resume window with `spin_lock_irqsave(NULL)` / `spin_unlock_irqrestore(NULL, sw_irq)`, exactly like `sched()` (see the IRQ-mask discipline above). This is **load-bearing**, not cosmetic: `thread_switch` does `set_current_thread(next)` **before** `cpu_switch_context`, leaving a torn state (`current_thread()==next` while the CPU still runs `prev`'s SP + registers). The test phase runs IRQs-unmasked (`main.c` `daifclr #2`) and preemptible (`vectors.S` IRQ-from-EL1 tail → `preempt_check_irq` → `sched()`), so a timer tick landing in that window drove a nested `sched()` that saved `prev`'s live state into `next->ctx` → a stack-canary smash (the `context.round_trip` smash root-caused at #101 — **distinct from** the directmap-BBM guard-page fault of F-B/#806, which was fixed at d80e160). Pre-#101 the invariant was assumed by a comment but never enforced (the primitive was written for single-CPU + no-preemption).
+
+The mask is balanced **per-thread**: `sw_irq` rides `prev`'s kstack (preserved across the switch by `cpu_switch_context`'s SP save/restore) and is restored when `prev` is switched back to. `cpu_switch_context` does not touch DAIF, so the mask is carried across the switch by the live CPU; a **fresh** `next` reached via `ret` runs `thread_trampoline`, which `msr daifclr #2`s **before** its entry — so the entry stays preemptible, only the switch itself is atomic. Both `cpu_switch_context` callers (`thread_switch` + `sched()`) now mask, so no torn-window path remains. Regression: `context.switch_irq_safe` (a test-only `g_thread_switch_test_window_ns` hook forces a preempt into the window; non-vacuous — reverting the mask smashes deterministically).
+
 ### Tests
 
 `smp.work_stealing_smoke`: boot creates N threads, ready()s on its tree, sends IPI_RESCHED to each secondary; secondaries' WFI wakes, post-WFI sched() finds local tree empty and try_steals from boot. Test threads increment per-CPU counters; verify at least one secondary's counter > 0. Threads sleep on per-thread Rendezes after exit signal so thread_free can safely reap them in SLEEPING state.
