@@ -6375,19 +6375,31 @@ int main(void) {
             }
 #endif
 
-            // The first client: draws the -v quadrant pattern + the live
-            // plasma via the FULL surface protocol and presents forever.
+            // G-4: the resident boot presenter is AURORA -- the console
+            // renderer (the fbcon). Spawned WITH T_SPAWN_PERM_CONSOLE_RENDERER
+            // (the I-27 third console role; joey is still console-attached
+            // here, the narrow grant gate) so it may open the /dev/consdrain +
+            // /dev/consfeed pair; its first present takes the scanout and the
+            // session console renders from login onward. The evolved per-boot
+            // gate (tools/screendump.sh -c in tools/test.sh) asserts the
+            // rendered console + a liveness differ (cursor blink / prompt
+            // arrival). tapestry-demo stays baked for manual runs; it no
+            // longer spawns at boot (first-present-wins scanout would race).
             {
                 char dbuf[24];
-                const char demo_name[] = "/bin/tapestry-demo";
-                long demo_pid = t_spawn(demo_name, sizeof(demo_name) - 1);
-                if (demo_pid <= 0) {
-                    t_putstr("joey: t_spawn(\"/bin/tapestry-demo\") FAILED\n");
+                const char aur_name[] = "/bin/aurora";
+                long aur_pid = t_spawn_with_perms(
+                    aur_name, sizeof(aur_name) - 1,
+                    /*fds=*/(const unsigned int *)0, /*fd_count=*/0,
+                    /*cap_mask=*/0,
+                    T_SPAWN_PERM_CONSOLE_RENDERER);
+                if (aur_pid <= 0) {
+                    t_putstr("joey: t_spawn_with_perms(\"/bin/aurora\") FAILED\n");
                     return 1;
                 }
-                t_putstr("joey: tapestry-demo spawned pid=");
-                t_putstr(itoa_dec(demo_pid, dbuf, sizeof(dbuf)));
-                t_putstr(" (resident; the pattern gate's scanout owner)\n");
+                t_putstr("joey: aurora spawned pid=");
+                t_putstr(itoa_dec(aur_pid, dbuf, sizeof(dbuf)));
+                t_putstr(" (the console renderer; the gate's scanout owner)\n");
             }
         } else {
             t_putstr("joey: /srv/tapestry absent (no GPU environment); skipping\n");

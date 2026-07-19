@@ -237,7 +237,7 @@ input_flags=()
 if [[ "${THYLACINE_NO_INPUT:-0}" != "1" ]]; then
     input_flags=(
         -device "virtio-keyboard-device,id=kbd0"
-        -device "virtio-keyboard-pci,id=kbd-pci0,disable-legacy=on"
+        -device "virtio-keyboard-pci,id=kbd-pci0,disable-legacy=on,display=gpu0"
     )
 fi
 

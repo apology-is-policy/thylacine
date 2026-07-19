@@ -81,6 +81,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aurora"
+version = "0.1.0"
+dependencies = [
+ "cornucopia",
+ "libtapestry",
+ "libthyla-rs",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -205,6 +214,10 @@ version = "0.1.0"
 dependencies = [
  "libthyla-rs",
 ]
+
+[[package]]
+name = "cornucopia"
+version = "0.1.0"
 
 [[package]]
 name = "corvus"
