@@ -36,6 +36,7 @@ tools/
   build.sh            ← full build wrapper around CMake + Cargo
   test.sh             ← run the test suite against a running VM
   snapshot.sh         ← save/restore QEMU VM state
+  screendump.sh       ← QMP scanout capture to PNG (the "agentic eyes"; §3.1)
   netboot/            ← Pi 5 TFTP netboot setup (post-v1.0 / v1.1 candidate)
 ```
 
@@ -89,6 +90,44 @@ qemu-system-aarch64 \
 - `--mem <M>`: override RAM. Default 2G.
 - `--no-share`: disable VirtIO-9P host share (for isolation testing).
 - `--virgl`: enable VirtIO-GPU virgl 3D (post-v1.0).
+
+### 3.1 Agentic eyes — `tools/screendump.sh` (QMP scanout capture)
+
+The graphics arc's capture step (G-0; `TAPESTRY.md` §18.9). Captures the
+running VM's virtio-gpu scanout to a PNG over the QMP socket `run-vm.sh`
+opens by default (`build/qmp.sock`; disabled by `THYLACINE_NO_QMP=1`):
+
+```bash
+tools/screendump.sh out.png                 # capture gpu0 head 0
+tools/screendump.sh -v out.png              # + verify the P4-L 4-quadrant
+                                            #   test pattern (red/green/blue/white)
+tools/screendump.sh -s SOCK -d DEV -H N ... # explicit socket / qdev id / head
+```
+
+Properties (all empirically verified at G-0):
+
+- **Headless-safe.** QEMU maintains the QemuConsole surface for a bound
+  scanout regardless of display backend, so capture works under the
+  standing `-nographic` invocation — no `-display` change, no VNC needed.
+  The capture targets the `gpu0` qdev id (run-vm.sh's `-device
+  virtio-gpu-device,id=gpu0`), so console muxing never misroutes it.
+- **PNG is native** (QEMU ≥ 7.1 `screendump format=png`); `-v` takes a
+  PPM sibling dump and asserts the four quadrant-center colors, then
+  deletes it.
+- **Capture requires a LIVE driving Proc.** At driver-Proc reap the RW-7
+  proc-death quiesce (`kernel/virtio.c::virtio_mmio_reset_in_range`)
+  resets every virtio device in the dying Proc's MMIO window — required
+  for DMA soundness (no in-flight device write into freed KObj_DMA
+  pages) — and a virtio-gpu reset destroys the host-side resources and
+  disables the scanout (blank surface). So the one-shot `usr/virtio-gpu`
+  probe's pattern is only capturable during the probe's lifetime; the
+  persistent capture target is the G-1 resident driver, and any
+  compositor's display dies with its Proc until warden restarts it (the
+  TAPESTRY crash contract's visible half).
+
+Exit status: 0 on capture (and pattern match under `-v`); nonzero
+otherwise. The tool is safe to run repeatedly against a live VM — it
+only reads the console surface.
 
 ---
 
