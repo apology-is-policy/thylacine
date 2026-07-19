@@ -499,7 +499,15 @@ impl Vt {
 
     fn erase_display(&mut self, mode: u32) {
         let bg = self.bg;
-        let cur = self.cy * self.cols + self.cx;
+        // Clamp cx: put_char leaves the cursor in the deferred-wrap state
+        // cx == cols (past the last column) after a line that exactly fills
+        // the width. Mode 1's inclusive `..=cur` bound would then form
+        // cur == cells.len() -> `[..=len]` is out of range (a panic ->
+        // renderer abort, reachable from any console writer). The clamp
+        // erases through the last column of the current row (the cursor is
+        // logically ON the last column at the wrap point). Holotype G-4 F1.
+        let cx = self.cx.min(self.cols - 1);
+        let cur = self.cy * self.cols + cx;
         match mode {
             0 => {
                 for c in self.cells[cur..].iter_mut() {
@@ -529,9 +537,15 @@ impl Vt {
     fn erase_line(&mut self, mode: u32) {
         let bg = self.bg;
         let row = self.cy * self.cols;
+        // Clamp cx (the deferred-wrap cx == cols state): mode 1's `cx + 1`
+        // would form b == cols + 1 -> `cells[row .. row + cols + 1]` overruns
+        // the row by one (the same F1 OOB as erase_display). Mode 0's `a = cx`
+        // is already safe (an empty slice when cx == cols), but clamp it too
+        // for consistency. Holotype G-4 F1.
+        let cx = self.cx.min(self.cols - 1);
         let (a, b) = match mode {
-            0 => (self.cx, self.cols),
-            1 => (0, self.cx + 1),
+            0 => (cx, self.cols),
+            1 => (0, cx + 1),
             _ => (0, self.cols),
         };
         for c in self.cells[row + a..row + b].iter_mut() {
@@ -634,5 +648,87 @@ fn xterm256(n: u8) -> u32 {
             let g = 8 + 10 * (n - 232) as u32;
             0xFF00_0000 | (g << 16) | (g << 8) | g
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The VT parser is `no_std`+alloc but pure logic -- these host tests
+    // (cargo test, std available) drive the byte stream directly. The atlas
+    // blit (render.rs) needs a framebuffer + the baked atlas, so it stays
+    // proven by the in-guest ls-gfx E2E; the parser is proven here.
+
+    fn feed(vt: &mut Vt, s: &[u8]) {
+        vt.feed(s);
+    }
+
+    // Holotype G-4 F1: the deferred-wrap-at-last-row + ESC[1J / ESC[1K case
+    // that overran the cell grid (cx == cols -> the mode-1 inclusive bound
+    // formed cells[..=len]). A pre-fix build PANICS here; post-fix it erases
+    // cleanly. Reachable from any console writer, so this is the regression.
+    #[test]
+    fn erase_mode1_at_deferred_wrap_last_row_no_oob() {
+        let mut vt = Vt::new(8, 4); // cols=8, rows=4
+        // Move to the last row, then fill the row exactly to the width so the
+        // cursor lands in the deferred-wrap state cx == cols.
+        feed(&mut vt, b"\x1b[4;1H"); // CUP row 4 col 1 -> cy=3, cx=0
+        feed(&mut vt, b"abcdefgh"); // 8 chars fill the row; cx now == cols (8)
+        assert_eq!(vt.cy, 3);
+        assert_eq!(vt.cx, vt.cols); // the deferred-wrap state
+        // ESC[1J (erase from start of display to cursor inclusive) MUST NOT
+        // panic. Pre-fix: cur = 3*8 + 8 = 32 == cells.len() -> cells[..=32] OOB.
+        feed(&mut vt, b"\x1b[1J");
+        // ESC[1K (erase from start of line to cursor inclusive) -- the sibling.
+        feed(&mut vt, b"\x1b[4;1H");
+        feed(&mut vt, b"abcdefgh");
+        feed(&mut vt, b"\x1b[1K");
+        // Survived without a panic; the grid is intact (the row was cleared).
+        assert_eq!(vt.cells.len(), 32);
+    }
+
+    // The classic full-width type-past-the-edge deferred wrap: writing cols+1
+    // printables wraps to the next row rather than OOB-ing.
+    #[test]
+    fn deferred_wrap_writes_next_row() {
+        let mut vt = Vt::new(4, 3);
+        feed(&mut vt, b"abcd"); // exactly fills row 0; cx == 4 (== cols)
+        assert_eq!(vt.cy, 0);
+        assert_eq!(vt.cx, vt.cols);
+        feed(&mut vt, b"e"); // the wrap: cy -> 1, then write 'e' at (1,0)
+        assert_eq!(vt.cy, 1);
+        assert_eq!(vt.cx, 1);
+        assert_eq!(vt.cells[0].ch, 'a');
+        assert_eq!(vt.cells[4].ch, 'e'); // row 1, col 0
+    }
+
+    // A malformed / truncated escape sequence must never panic or desync
+    // the ground state.
+    #[test]
+    fn malformed_escapes_do_not_panic() {
+        let mut vt = Vt::new(10, 4);
+        feed(&mut vt, b"\x1b[999;999H"); // way-out-of-range CUP -> clamped
+        assert!(vt.cx < vt.cols && vt.cy < vt.rows);
+        feed(&mut vt, b"\x1b["); // truncated CSI
+        feed(&mut vt, b"\x1b[38;2;300;400;500m"); // out-of-range truecolor
+        feed(&mut vt, b"\x1b]0;title-with-no-terminator"); // unterminated OSC
+        feed(&mut vt, b"\xff\xfe"); // stray UTF-8 continuation bytes
+        feed(&mut vt, b"x"); // ground state still works
+        // No panic reaching here is the assertion.
+    }
+
+    // Alt-screen enter/leave swaps a fresh buffer and restores dims + cursor.
+    #[test]
+    fn alt_screen_swap_preserves_dims() {
+        let mut vt = Vt::new(6, 3);
+        feed(&mut vt, b"main");
+        feed(&mut vt, b"\x1b[?1049h"); // enter alt: clear + home
+        assert_eq!(vt.cx, 0);
+        assert_eq!(vt.cells.len(), 18);
+        feed(&mut vt, b"alt");
+        feed(&mut vt, b"\x1b[?1049l"); // leave: restore
+        assert_eq!(vt.cells.len(), 18);
+        assert_eq!(vt.cells[0].ch, 'm'); // the main buffer is back
     }
 }
