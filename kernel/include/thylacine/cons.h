@@ -110,10 +110,52 @@ short cons_poll(short events, struct poll_waiter *pw);
 long cons_set_mode_cmd(const void *buf, long n);
 long cons_render_mode(void *buf, long n);
 
+// =============================================================================
+// G-4: the console-renderer drain/feed backend (TAPESTRY.md section 18.7 /
+// AURORA.md section 4). The bound renderer (Aurora, SPAWN_PERM_CONSOLE_RENDERER)
+// holds the /dev/consdrain + /dev/consfeed pair, served by devdev:
+//
+//   drain (read-only): every byte cons_emit carries -- program output through
+//   cons_output_write AND line-discipline echo -- is MIRRORED into a bounded
+//   drop-oldest ring the renderer reads (blocking; pollable via the LS-8a
+//   deferred-wake relay). On serial-bearing media the UART path continues
+//   byte-identical (the tee -- the tooling ABI + the serial trusted path keep
+//   working); the exclusive board-era switch bound from the DTB medium fact
+//   (TRUSTED-PATH section 7) is the recorded seam. Kernel diagnostics
+//   (SYS_PUTS, extinction, Halls) go uart-direct and are NEVER in the drain --
+//   the crash path must not depend on a userspace renderer.
+//
+//   feed (write-only): the renderer's decoded keyboard bytes enter
+//   cons_rx_input EXACTLY as UART RX bytes do -- the LS-8 cooking (ICANON /
+//   ECHO / ISIG / ICRNL) is backend-independent and unchanged; a graphical
+//   Ctrl-C rides ISIG to the console OWNER. `is_break` is HARDWIRED false:
+//   no feed byte sequence can synthesize the SAK line condition (I-27).
+// =============================================================================
+
+// Arm the drain (the /dev/consdrain open; single-open, -1 if already open;
+// a fresh open discards the prior epoch's bytes) / disarm it (the last close;
+// wakes a parked reader to EOF + the registered pollers).
+int  cons_drain_open(void);
+void cons_drain_close(void);
+
+// Blocking drain read: >= 1 byte on data; 0 (EOF) when disarmed with nothing
+// buffered; -1 on bad args / not-open / a second concurrent reader.
+long cons_drain_read(void *buf, long n);
+
+// Drain poll: POLLIN iff bytes are buffered or the drain is disarmed (EOF is
+// readable); read-only leaf, so never POLLOUT. Registers `pw` on the drain
+// hook list (walked by console_mgr for IRQ-context edges).
+short cons_drain_poll(short events, struct poll_waiter *pw);
+
+// Feed: inject `n` bytes into the console line discipline (never a BREAK).
+// Returns n; -1 on bad args.
+long cons_feed_write(const void *buf, long n);
+
 // The console_mgr kproc kthread entry. Spawned once at boot (boot_main). Sleeps
 // on the console-manager Rendez; on wake, performs the deferred privileged work
 // in process context: post the `interrupt` note to the current console owner
-// (Ctrl-C), and the A-4c-2 SAK revoke/re-grant (proc_console_sak). Never returns.
+// (Ctrl-C), the A-4c-2 SAK revoke/re-grant (proc_console_sak), and the LS-8a /
+// G-4 deferred poll-hook walks (the cons ring's + the drain's). Never returns.
 void console_mgr_main(void);
 
 // =============================================================================
@@ -165,5 +207,11 @@ void cons_test_set_termios(u32 v);
 // (so a test detects truncation/overflow).
 void cons_test_echo_capture(bool on);
 u32  cons_test_echo_captured(u8 *out, u32 max);
+
+// G-4: drain observability for tests. Buffered byte count / cumulative
+// drop-oldest count / the deferred drain POLLIN edge flag.
+u32  cons_test_drain_count(void);
+u32  cons_test_drain_overflow(void);
+bool cons_test_drain_pollwake_pending(void);
 
 #endif // THYLACINE_CONS_H

@@ -257,6 +257,13 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 // CONSOLE_TRUSTED (it never confers console-attach, I-27); gated like
 // MAY_POST_SERVICE so trusted /sbin/login confers it on the session shell.
 #define T_SPAWN_PERM_CONSOLE_OWNER     (1u << 2)
+// T_SPAWN_PERM_CONSOLE_RENDERER (G-4) records the spawned child as the bound
+// console RENDERER (Aurora) -- the single Proc allowed to open the
+// /dev/consdrain + /dev/consfeed pair. The third console role (I-27): no
+// elevation authority, no Ctrl-C-target authority. Gated NARROW
+// (console-attach-only, like CONSOLE_TRUSTED) + single-holder (refused while
+// a live renderer holds the role). joey grants it to /bin/aurora.
+#define T_SPAWN_PERM_CONSOLE_RENDERER  (1u << 3)
 
 // SYS_SPAWN_FULL_ARGV bounds — must mirror SYS_SPAWN_ARGV_MAX +
 // SYS_SPAWN_ARGV_DATA_MAX in kernel/include/thylacine/syscall.h.

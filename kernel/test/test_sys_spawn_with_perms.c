@@ -329,3 +329,64 @@ void test_sys_spawn_with_perms_console_owner_set_wiring(void) {
     proc_free(shell);
     proc_set_console_owner(saved);
 }
+
+// G-4: SPAWN_PERM_CONSOLE_RENDERER -- the third console role's grant gate.
+// NARROW (console-attach-only, the CONSOLE_TRUSTED shape: a MAY_POST_SERVICE
+// holder can NOT confer it -- the pair reads all console output + injects
+// input) AND single-holder (refused while a live renderer holds the role; the
+// child-thunk claim is a CAS that at most one concurrent grant wins).
+void test_sys_spawn_with_perms_renderer_gate(void) {
+    drain_zombies();
+    proc_test_clear_console_renderer();          // known state
+
+    // A non-attached Proc -- even holding MAY_POST_SERVICE -- cannot grant it.
+    struct Proc *holder = proc_alloc();
+    TEST_ASSERT(holder != NULL, "proc_alloc holder");
+    proc_mark_may_post_service(holder);
+    TEST_EXPECT_EQ(spawn_perm_grant_check(holder, SPAWN_PERM_CONSOLE_RENDERER), -1,
+        "MAY_POST_SERVICE holder cannot grant CONSOLE_RENDERER (narrow gate)");
+    holder->state = PROC_STATE_ZOMBIE;
+    proc_free(holder);
+
+    // A console-attached granter passes -- while no renderer holds the role.
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t && t->proc, "current thread has Proc");
+    bool was_attached = proc_is_console_attached(t->proc);
+    proc_mark_console_attached(t->proc);
+    TEST_EXPECT_EQ(spawn_perm_grant_check(t->proc, SPAWN_PERM_CONSOLE_RENDERER), 0,
+        "console-attached granter passes with the role free");
+
+    // The claim: apply stamps the flag + records the holder; the role query
+    // is true for the holder only.
+    struct Proc *aurora = proc_alloc();
+    TEST_ASSERT(aurora != NULL, "proc_alloc aurora");
+    apply_spawn_perms(aurora, SPAWN_PERM_CONSOLE_RENDERER);
+    TEST_ASSERT(proc_test_console_renderer() == aurora, "aurora holds the role");
+    TEST_ASSERT(proc_is_console_renderer(aurora), "role query true for aurora");
+    TEST_ASSERT(!proc_is_console_renderer(t->proc), "role query false for others");
+
+    // Single-holder: the grant gate now refuses even a console-attached
+    // granter; a racing second apply loses the CAS and gets NO role.
+    TEST_EXPECT_EQ(spawn_perm_grant_check(t->proc, SPAWN_PERM_CONSOLE_RENDERER), -1,
+        "grant refused while a live renderer holds the role");
+    struct Proc *late = proc_alloc();
+    TEST_ASSERT(late != NULL, "proc_alloc late");
+    apply_spawn_perms(late, SPAWN_PERM_CONSOLE_RENDERER);
+    TEST_ASSERT(proc_test_console_renderer() == aurora, "the CAS loser did not steal the role");
+    TEST_ASSERT(!proc_is_console_renderer(late), "the loser lacks the role (fail-closed)");
+    late->state = PROC_STATE_ZOMBIE;
+    proc_free(late);
+
+    // The holder's death releases the role (proc_become_zombie_locked clears);
+    // a fresh grant may then claim. Driven via the test clear (the production
+    // clear runs at the death chokepoint the group-terminate suite covers).
+    proc_test_clear_console_renderer();
+    TEST_ASSERT(proc_test_console_renderer() == NULL, "role released");
+    TEST_EXPECT_EQ(spawn_perm_grant_check(t->proc, SPAWN_PERM_CONSOLE_RENDERER), 0,
+        "role free again: a fresh grant passes");
+
+    aurora->state = PROC_STATE_ZOMBIE;
+    proc_free(aurora);
+    if (!was_attached) proc_revoke_console_attached(t->proc);
+    proc_test_clear_console_renderer();
+}

@@ -1252,6 +1252,67 @@ void proc_set_console_trusted(struct Proc *p) {
     spin_unlock_irqrestore(&g_proc_table_lock, s);
 }
 
+// g_console_renderer is the single bound console RENDERER (G-4, the R2-F6
+// third console role): the Proc holding the /dev/consdrain + /dev/consfeed
+// pair (Aurora). Same lifetime discipline as g_console_owner: protected by
+// g_proc_table_lock, cleared by proc_become_zombie_locked on the holder's
+// death so it never dangles. Distinct from BOTH the attach (elevation) and
+// owner (Ctrl-C) roles -- holding it conveys exactly the drain/feed pair.
+static struct Proc *g_console_renderer;   // BSS NULL
+
+// The single-holder claim. Parent-side spawn_perm_grant_check already refuses
+// a grant while a holder lives; this CAS-under-lock closes the residual race
+// (two threads of the one console-attached Proc granting concurrently pass
+// the check before either child stamps). The loser's child simply lacks the
+// flag; the drain/feed open gate then refuses it -- fail-closed downstream,
+// never a torn double-claim or a silent overwrite.
+int proc_set_console_renderer(struct Proc *p) {
+    if (!p) return -1;
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    if (g_console_renderer != NULL) {
+        spin_unlock_irqrestore(&g_proc_table_lock, s);
+        return -1;
+    }
+    g_console_renderer = p;
+    // The proc_mark_console_attached idiom: an atomic RELAXED OR (the flag is
+    // informational; the pointer under g_proc_table_lock is the authority the
+    // gates compare against).
+    __atomic_or_fetch(&p->proc_flags, PROC_FLAG_CONSOLE_RENDERER, __ATOMIC_RELAXED);
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return 0;
+}
+
+// Compare-only under g_proc_table_lock (the proc_is_console_owner shape): the
+// pointer is written under that lock and cleared on holder-death, so a match
+// implies a live holder; never dereferences.
+bool proc_is_console_renderer(const struct Proc *p) {
+    if (!p) return false;
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    bool yes = (g_console_renderer == p);
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return yes;
+}
+
+struct Proc *proc_test_console_renderer(void) {
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    struct Proc *r = g_console_renderer;
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return r;
+}
+
+// Test-only reset: release the role + the holder's flag (production releases
+// only via proc_become_zombie_locked; tests claim on the live test thread's
+// Proc / synthetic Procs and must restore boot state).
+void proc_test_clear_console_renderer(void) {
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    if (g_console_renderer != NULL) {
+        __atomic_and_fetch(&g_console_renderer->proc_flags,
+                           ~PROC_FLAG_CONSOLE_RENDERER, __ATOMIC_RELAXED);
+    }
+    g_console_renderer = NULL;
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+}
+
 // Post the `interrupt` note (Ctrl-C) to the current console owner. Runs in the
 // console_mgr kthread's process context. Reads g_console_owner + posts under
 // g_proc_table_lock so the owner cannot be reaped/freed mid-post (the A-4b kill
@@ -1818,6 +1879,13 @@ static void proc_become_zombie_locked(struct Proc *p, int status, const char *ms
     // re-granting the console to a freed Proc.
     if (g_console_trusted_proc == p) {
         g_console_trusted_proc = NULL;
+    }
+    // G-4: clear the bound console renderer (Aurora) on its death -- the same
+    // never-dangle chokepoint. The renderer's drain fid disarms via its own
+    // handle close (#926/#68 close-at-exit -> devdev close hook); this clear
+    // only frees the ROLE so a future respawn can re-claim it.
+    if (g_console_renderer == p) {
+        g_console_renderer = NULL;
     }
 
     // 2B-F3: clear init on its own death, BEFORE the reparent below --

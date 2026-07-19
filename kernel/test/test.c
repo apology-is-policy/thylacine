@@ -532,6 +532,11 @@ void test_cons_consctl_render(void);             // LS-8b
 void test_cons_cook_line_overflow(void);         // LS-8b
 void test_cons_cook_mode_flip_fresh_line(void);  // LS-8b audit F1
 void test_cons_cook_canonical_poll_edge(void);   // LS-8b audit F2a
+void test_cons_drain_tap_mirrors_output(void);       // G-4
+void test_cons_drain_feed_runs_discipline(void);     // G-4
+void test_cons_drain_overflow_drops_oldest(void);    // G-4
+void test_cons_drain_close_and_reopen_epoch(void);   // G-4
+void test_cons_drain_poll_deferred_wake(void);       // G-4
 void test_devctl_bestiary_smoke(void);
 void test_devctl_attach_returns_dir(void);
 void test_devctl_walk_to_each_leaf(void);
@@ -551,6 +556,7 @@ void test_devdev_walk_unknown_misses(void);
 void test_devdev_walk_pts_dir(void);
 void test_devdev_trivial_leaves(void);
 void test_devdev_cons_gate(void);
+void test_devdev_renderer_gate(void);            // G-4
 void test_devhw_bestiary_smoke(void);
 void test_devhw_attach_returns_root(void);
 void test_devhw_walk_node_and_prop(void);
@@ -1182,6 +1188,7 @@ void test_sys_spawn_with_perms_holder_delegates_may_post(void);
 void test_sys_spawn_with_perms_console_trusted_not_delegable(void);
 void test_sys_spawn_with_perms_console_owner_grant_gate(void);
 void test_sys_spawn_with_perms_console_owner_set_wiring(void);
+void test_sys_spawn_with_perms_renderer_gate(void);   // G-4
 void test_sys_spawn_full_argv_no_argv_acts_as_spawn_with_perms(void);
 void test_sys_spawn_full_argv_golden_argc4(void);
 void test_sys_spawn_full_argv_rejects_argc_over_max(void);
@@ -1858,6 +1865,11 @@ struct test_case g_tests[] = {
     { "cons.cook_line_overflow",       test_cons_cook_line_overflow,       false, NULL },
     { "cons.cook_mode_flip_fresh_line", test_cons_cook_mode_flip_fresh_line, false, NULL },
     { "cons.cook_canonical_poll_edge", test_cons_cook_canonical_poll_edge, false, NULL },
+    { "cons.drain_tap_mirrors_output", test_cons_drain_tap_mirrors_output, false, NULL },
+    { "cons.drain_feed_runs_discipline", test_cons_drain_feed_runs_discipline, false, NULL },
+    { "cons.drain_overflow_drops_oldest", test_cons_drain_overflow_drops_oldest, false, NULL },
+    { "cons.drain_close_and_reopen_epoch", test_cons_drain_close_and_reopen_epoch, false, NULL },
+    { "cons.drain_poll_deferred_wake", test_cons_drain_poll_deferred_wake, false, NULL },
     { "devctl.bestiary_smoke",         test_devctl_bestiary_smoke,         false, NULL },
     { "devctl.attach_returns_dir",     test_devctl_attach_returns_dir,     false, NULL },
     { "devctl.walk_to_each_leaf",      test_devctl_walk_to_each_leaf,      false, NULL },
@@ -1878,6 +1890,7 @@ struct test_case g_tests[] = {
     { "devdev.walk_pts_dir",           test_devdev_walk_pts_dir,           false, NULL },
     { "devdev.trivial_leaves",         test_devdev_trivial_leaves,         false, NULL },
     { "devdev.cons_gate",              test_devdev_cons_gate,              false, NULL },
+    { "devdev.renderer_gate",          test_devdev_renderer_gate,          false, NULL },
     { "devhw.bestiary_smoke",          test_devhw_bestiary_smoke,          false, NULL },
     { "devhw.attach_returns_root",     test_devhw_attach_returns_root,     false, NULL },
     { "devhw.walk_node_and_prop",      test_devhw_walk_node_and_prop,      false, NULL },
@@ -2668,6 +2681,7 @@ struct test_case g_tests[] = {
     { "sys_spawn_with_perms.console_trusted_not_delegable", test_sys_spawn_with_perms_console_trusted_not_delegable, false, NULL },
     { "sys_spawn_with_perms.console_owner_grant_gate",  test_sys_spawn_with_perms_console_owner_grant_gate,  false, NULL },
     { "sys_spawn_with_perms.console_owner_set_wiring",  test_sys_spawn_with_perms_console_owner_set_wiring,  false, NULL },
+    { "sys_spawn_with_perms.renderer_gate",             test_sys_spawn_with_perms_renderer_gate,             false, NULL },
     { "sys_spawn_full_argv.no_argv_acts_as_spawn_with_perms", test_sys_spawn_full_argv_no_argv_acts_as_spawn_with_perms, false, NULL },
     { "sys_spawn_full_argv.golden_argc4",              test_sys_spawn_full_argv_golden_argc4,              false, NULL },
     { "sys_spawn_full_argv.rejects_argc_over_max",     test_sys_spawn_full_argv_rejects_argc_over_max,     false, NULL },

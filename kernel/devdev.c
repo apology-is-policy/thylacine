@@ -52,6 +52,8 @@ enum {
     DEV_KIND_CONSCTL = 7,
     DEV_KIND_PTS     = 8,   // the /dev/pts mount-stub DIRECTORY (not a leaf)
     DEV_KIND_TAPESTRY = 9,  // the /dev/tapestry mount-stub DIRECTORY (G-3)
+    DEV_KIND_CONSDRAIN = 10, // G-4: the renderer's console-output drain (RO)
+    DEV_KIND_CONSFEED  = 11, // G-4: the renderer's input feed (WO)
 };
 
 #define DEV_QID_ROOT_PATH  0ULL
@@ -69,6 +71,8 @@ static const struct dev_leaf g_dev_leaves[] = {
     { "urandom", DEV_KIND_URANDOM },
     { "cons",    DEV_KIND_CONS    },
     { "consctl", DEV_KIND_CONSCTL },
+    { "consdrain", DEV_KIND_CONSDRAIN },
+    { "consfeed",  DEV_KIND_CONSFEED  },
 };
 
 #define DEV_LEAF_COUNT  (sizeof(g_dev_leaves) / sizeof(g_dev_leaves[0]))
@@ -124,6 +128,24 @@ static bool dev_kind_is_cons_io(u32 kind) {
 static bool devdev_console_gate_ok(void) {
     struct Thread *t = current_thread();
     return t != NULL && proc_is_console_attached(t->proc);
+}
+
+// G-4: the renderer leaves (the drain/feed pair, TAPESTRY.md section 18.12
+// R2-F6 / F8). Gated at OPEN *and* re-gated at every I/O + poll on
+// proc_is_console_renderer -- the third console role, distinct from BOTH
+// attach (elevation) and owner (Ctrl-C). The I/O re-gate mirrors the cons
+// data-leaf discipline: an O_PATH walk-open skips devdev_open (and #81
+// CWALKONLY blocks its reads at the syscall layer), so the re-gate is
+// belt-and-suspenders on the two highest-stakes new leaves -- the drain
+// reads ALL console output (the F8 leak), the feed injects input into
+// cooked/ECHO/ISIG. Fail-closed on a NULL thread/proc.
+static bool dev_kind_is_renderer(u32 kind) {
+    return kind == DEV_KIND_CONSDRAIN || kind == DEV_KIND_CONSFEED;
+}
+
+static bool devdev_renderer_gate_ok(void) {
+    struct Thread *t = current_thread();
+    return t != NULL && proc_is_console_renderer(t->proc);
 }
 
 // =============================================================================
@@ -258,6 +280,19 @@ static struct Spoor *devdev_open(struct Spoor *c, int omode) {
     if (!c) return NULL;
     if (dev_kind_is_console((u32)c->qid.path) && !devdev_console_gate_ok())
         return NULL;
+    // G-4: the renderer pair mints only for the bound renderer. The drain
+    // open additionally ARMS the tap (single-open; a second open is refused
+    // by cons_drain_open) -- and unwinds the arm if the generic open then
+    // fails, so a failed mint never leaves a fidless armed drain.
+    if (dev_kind_is_renderer((u32)c->qid.path)) {
+        if (!devdev_renderer_gate_ok()) return NULL;
+        if ((u32)c->qid.path == DEV_KIND_CONSDRAIN) {
+            if (cons_drain_open() != 0) return NULL;
+            struct Spoor *o = dev_simple_open(c, omode);
+            if (!o) cons_drain_close();
+            return o;
+        }
+    }
     return dev_simple_open(c, omode);
 }
 
@@ -267,6 +302,16 @@ static struct Spoor *devdev_create(struct Spoor *c, const char *name, int omode,
 }
 
 static void devdev_close(struct Spoor *c) {
+    // G-4: the OPENED drain Spoor's close disarms the tap. The COPEN check is
+    // load-bearing: devdev_close fires for every clunked devdev Spoor,
+    // including never-opened walk intermediates and O_PATH handles (which
+    // skip dev->open and thus never armed) -- only the Spoor that actually
+    // minted through devdev_open carries COPEN, and there is exactly one at
+    // a time (cons_drain_open's single-open). Runs at the LAST handle ref
+    // (dup/inherited fds share the one Spoor), incl. the renderer's
+    // #926/#68 close-at-exit -- so a dead renderer always disarms.
+    if (c && (u32)c->qid.path == DEV_KIND_CONSDRAIN && (c->flag & COPEN))
+        cons_drain_close();
     dev_simple_close(c);
 }
 
@@ -308,6 +353,11 @@ static long devdev_read(struct Spoor *c, void *buf, long n, s64 off) {
         for (long i = 0; i < cnt; i++) out[i] = (u8)tmp[(long)off + i];
         return cnt;
     }
+    case DEV_KIND_CONSDRAIN:                     // G-4: the renderer's stream
+        if (!devdev_renderer_gate_ok()) return -1;
+        return cons_drain_read(buf, n);
+    case DEV_KIND_CONSFEED:                      // write-only
+        return -1;
     default:
         return -1;
     }
@@ -343,6 +393,11 @@ static long devdev_write(struct Spoor *c, const void *buf, long n, s64 off) {
         return cons_output_write(buf, n);
     case DEV_KIND_CONSCTL:                      // LS-8b: stty-style +/-flag parse
         return cons_set_mode_cmd(buf, n);
+    case DEV_KIND_CONSFEED:                     // G-4: renderer input injection
+        if (!devdev_renderer_gate_ok()) return -1;
+        return cons_feed_write(buf, n);
+    case DEV_KIND_CONSDRAIN:                    // read-only
+        return -1;
     case DEV_KIND_ROOT:
     default:
         return -1;
@@ -385,6 +440,14 @@ static short devdev_poll(struct Spoor *c, short events, struct poll_waiter *pw) 
     if (dev_kind_is_cons_io(kind)) {
         if (!devdev_console_gate_ok()) return POLLNVAL;
         return cons_poll(events, pw);
+    }
+    // G-4: the renderer pair is gated here too (the same O_PATH rationale --
+    // a non-renderer poller must not register a hook that learns console
+    // OUTPUT timing). The drain has real readiness; the feed never blocks.
+    if (dev_kind_is_renderer(kind)) {
+        if (!devdev_renderer_gate_ok()) return POLLNVAL;
+        if (kind == DEV_KIND_CONSDRAIN) return cons_drain_poll(events, pw);
+        return (short)(events & POLL_REQUESTABLE);
     }
     // consctl + the trivial leaves: never block -- always ready for the requested
     // events. consctl poll is UNGATED (#94-B): it returns a state-INDEPENDENT

@@ -5608,6 +5608,16 @@ int spawn_perm_grant_check(struct Proc *p, u32 perm_flags) {
     if ((perm_flags & SPAWN_PERM_CONSOLE_OWNER)
             && !proc_is_console_attached(p)
             && !proc_may_post_service(p))                          return -1;
+    // G-4: CONSOLE_RENDERER is gated NARROW (console-attach-only, the
+    // CONSOLE_TRUSTED shape -- the pair reads all console output + injects
+    // input, so only the boot trust anchor designates it) AND single-holder
+    // (refused while a live renderer holds the role; the residual
+    // two-concurrent-grants race is closed by proc_set_console_renderer's
+    // claim-under-lock in the child thunk).
+    if (perm_flags & SPAWN_PERM_CONSOLE_RENDERER) {
+        if (!proc_is_console_attached(p))                          return -1;
+        if (proc_test_console_renderer() != NULL)                  return -1;
+    }
     return 0;
 }
 
@@ -5631,6 +5641,14 @@ void apply_spawn_perms(struct Proc *p, u32 perm_flags) {
     }
     if (perm_flags & SPAWN_PERM_CONSOLE_OWNER) {
         proc_set_console_owner(p);     // LS-5: the session shell receives Ctrl-C
+    }
+    if (perm_flags & SPAWN_PERM_CONSOLE_RENDERER) {
+        // G-4: single-holder CAS-under-lock. A -1 here means a concurrent
+        // grant won the race (both passed the parent-side check before either
+        // child stamped); the loser proceeds WITHOUT the flag and the
+        // drain/feed open gate refuses it -- fail-closed, never an extinction
+        // (the child is otherwise a valid Proc).
+        (void)proc_set_console_renderer(p);
     }
     if (perm_flags & ~SPAWN_PERM_ALL) {
         extinction("apply_spawn_perms: unknown SPAWN_PERM_* bit");

@@ -693,6 +693,16 @@ struct Proc {
 // mark, or draining the last queued terminate-class tty note); NOT
 // propagated by rfork; never set on kproc.
 #define PROC_FLAG_TTY_TERMINATE_PENDING (1u << 8)
+// G-4 (TAPESTRY.md section 18.12 R2-F6): marks the bound console RENDERER --
+// the Proc granted the /dev/consdrain + /dev/consfeed pair (Aurora). The THIRD
+// console role, orthogonal to BOTH console-ATTACH (the elevation gate; the
+// renderer has NO elevation authority) and console-OWNER (the Ctrl-C target;
+// the drain/feed conveys no interrupt-target authority) -- I-27's three-role
+// split. Kernel-stamped via SPAWN_PERM_CONSOLE_RENDERER only (never a
+// syscall self-mark); one-way; NOT propagated by rfork. Single-holder: the
+// stamp succeeds only while g_console_renderer is NULL (proc_set_console_-
+// renderer's claim under g_proc_table_lock); cleared on the holder's death.
+#define PROC_FLAG_CONSOLE_RENDERER  (1u << 9)
 
 _Static_assert(sizeof(struct Proc) == 352,
                "struct Proc size pinned at 352 bytes (the 328 baseline + the 8c-2 "
@@ -1423,6 +1433,33 @@ void proc_console_relinquish(struct Proc *p);
 // clear; proc_become_zombie_locked also clears it on the trusted Proc's death so
 // the pointer never dangles (a then-fired SAK falls back to revoke-only).
 void proc_set_console_trusted(struct Proc *p);
+
+// proc_set_console_renderer — claim `p` as the bound console RENDERER (G-4,
+// the R2-F6 third console role: the Aurora drain/feed holder). Single-holder:
+// under g_proc_table_lock, succeeds (0) only when no live renderer is
+// recorded, stamping PROC_FLAG_CONSOLE_RENDERER + g_console_renderer = p;
+// returns -1 when a renderer already holds the role (the loser proceeds
+// WITHOUT the flag, and the /dev/consdrain//dev/consfeed open gate then
+// refuses it -- fail-closed, never a torn double-claim). Called from
+// apply_spawn_perms (the child spawn thunk); the parent-side
+// spawn_perm_grant_check already refuses the grant when a holder exists, so
+// this CAS is the race-closer for two concurrent grants, not the common
+// path. proc_become_zombie_locked clears the holder on its death (every
+// death path), after which a fresh grant may claim.
+int proc_set_console_renderer(struct Proc *p);
+
+// proc_is_console_renderer — true iff `p` carries PROC_FLAG_CONSOLE_RENDERER
+// AND is the current g_console_renderer (the live single holder). The
+// /dev/consdrain + /dev/consfeed gate (devdev) and the cons drain/feed I/O
+// re-gates call this. Never dereferences a stale pointer (compare-only under
+// g_proc_table_lock). Fail-closed on NULL.
+bool proc_is_console_renderer(const struct Proc *p);
+
+// proc_test_console_renderer — test-only: read g_console_renderer.
+struct Proc *proc_test_console_renderer(void);
+
+// proc_test_clear_console_renderer — test-only: release the role + flag.
+void proc_test_clear_console_renderer(void);
 
 // proc_console_sak — the A-4c-2 SAK transition (I-27 trusted-path handoff). Run
 // from the console_mgr kthread on a recognized serial BREAK. Under

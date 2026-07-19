@@ -269,3 +269,82 @@ void test_devdev_cons_gate(void) {
     if (cons_a) spoor_unref(cons_a);
     if (cc_a) spoor_unref(cc_a);
 }
+
+// =============================================================================
+// G-4: the renderer pair /dev/consdrain + /dev/consfeed (TAPESTRY.md section
+// 18.12 R2-F6 / F8). Gated at open AND re-gated at I/O + poll on
+// proc_is_console_renderer -- the third console role. This test claims the
+// role on the live test Proc via the production claim (proc_set_console_-
+// renderer), exercises both leaves end-to-end (feed -> line discipline ->
+// input ring; output -> drain), then releases everything.
+// =============================================================================
+void test_devdev_renderer_gate(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t && t->proc, "current thread has Proc");
+    cons_test_reset();
+    cons_test_echo_capture(true);
+    proc_test_clear_console_renderer();          // known state
+
+    struct Spoor *drain = walk_to("consdrain");
+    struct Spoor *feed  = walk_to("consfeed");
+    TEST_ASSERT(drain != NULL, "walk /dev/consdrain resolves the name");
+    TEST_ASSERT(feed  != NULL, "walk /dev/consfeed resolves the name");
+
+    // DENY: not the renderer -> open of either leaf fails (F8: no ungated
+    // reader of all console output; no ungated input injector).
+    TEST_ASSERT(devdev.open(drain, 0) == NULL, "non-renderer open of consdrain DENIED");
+    TEST_ASSERT(devdev.open(feed, 1) == NULL,  "non-renderer open of consfeed DENIED");
+
+    // DENY at I/O too (the O_PATH-shaped bypass: dev->open skipped): direct
+    // read/write/poll on unopened spoors without the role must fail.
+    u8 b[4];
+    TEST_EXPECT_EQ(devdev.read(drain, b, 4, 0), -1L, "non-renderer drain read DENIED");
+    TEST_EXPECT_EQ(devdev.write(feed, "x", 1, 0), -1L, "non-renderer feed write DENIED");
+    TEST_ASSERT(devdev.poll(drain, POLLIN, NULL) == POLLNVAL,
+                "non-renderer drain poll -> POLLNVAL");
+    TEST_ASSERT(devdev.poll(feed, POLLOUT, NULL) == POLLNVAL,
+                "non-renderer feed poll -> POLLNVAL");
+
+    // Claim the role (the production single-holder claim).
+    TEST_EXPECT_EQ(proc_set_console_renderer(t->proc), 0, "renderer role claimed");
+    TEST_ASSERT(proc_is_console_renderer(t->proc), "role query true for the holder");
+
+    // ALLOW: the renderer opens the drain (arms the tap) + the feed.
+    struct Spoor *dopen = devdev.open(drain, 0);
+    TEST_ASSERT(dopen != NULL, "renderer open of consdrain ALLOWED (arms)");
+    struct Spoor *fopen = devdev.open(feed, 1);
+    TEST_ASSERT(fopen != NULL, "renderer open of consfeed ALLOWED");
+
+    // The pair end-to-end: raw mode so a fed byte goes straight to the input
+    // ring; program output lands in the drain.
+    cons_test_set_termios(0u);
+    TEST_EXPECT_EQ(devdev.write(fopen, "q", 1, 0), 1L, "feed write accepted");
+    u8 in[4];
+    TEST_EXPECT_EQ(cons_input_read(in, sizeof(in)), 1L, "fed byte reached the input ring");
+    TEST_ASSERT(in[0] == 'q', "fed byte is q");
+
+    TEST_EXPECT_EQ(cons_output_write("Z", 1), 1L, "output while armed");
+    TEST_EXPECT_EQ(devdev.read(dopen, b, sizeof(b), 0), 1L, "drain read via the leaf");
+    TEST_ASSERT(b[0] == 'Z', "drained byte is Z");
+
+    // Directionality: drain writes / feed reads fail.
+    TEST_EXPECT_EQ(devdev.write(dopen, "x", 1, 0), -1L, "consdrain is read-only");
+    TEST_EXPECT_EQ(devdev.read(fopen, b, 4, 0), -1L, "consfeed is write-only");
+
+    // The role revoked mid-hold (the holder died / a stale fd in a child):
+    // the I/O re-gate refuses even on the still-open spoors.
+    proc_test_clear_console_renderer();
+    TEST_EXPECT_EQ(devdev.read(dopen, b, 4, 0), -1L, "revoked: drain read DENIED");
+    TEST_EXPECT_EQ(devdev.write(fopen, "x", 1, 0), -1L, "revoked: feed write DENIED");
+
+    // Close the opened pair (the drain close disarms via the COPEN hook).
+    devdev.close(dopen);
+    devdev.close(fopen);
+    TEST_EXPECT_EQ(cons_drain_open(), 0, "drain disarmed at close (re-arm succeeds)");
+    cons_drain_close();
+
+    spoor_unref(drain);
+    spoor_unref(feed);
+    cons_test_echo_capture(false);
+    cons_test_reset();
+}

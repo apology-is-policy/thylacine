@@ -1910,9 +1910,22 @@ _Static_assert(__builtin_offsetof(struct t_pci_info, virtio_device_id) == 204,
 // propagate it); the child becomes the owner but, lacking MAY_POST_SERVICE,
 // cannot itself re-designate the owner.
 #define SPAWN_PERM_CONSOLE_OWNER     (1u << 2)
+// SPAWN_PERM_CONSOLE_RENDERER (G-4; TAPESTRY.md section 18.12 R2-F6) records
+// the spawned child as the bound console RENDERER (g_console_renderer) -- the
+// single Proc allowed to open the /dev/consdrain + /dev/consfeed pair (Aurora:
+// console output rings into the drain it reads; its decoded keyboard input
+// enters the LS-8 line discipline via the feed). The THIRD console role, I-27's
+// three-role split: it confers NO elevation authority (not attach) and NO
+// Ctrl-C-target authority (not owner). Gated NARROW like CONSOLE_TRUSTED --
+// console-attach-only, never delegable by a MAY_POST_SERVICE holder (the pair
+// reads ALL console output and injects input; only the boot trust anchor may
+// designate it). Single-holder: the grant is refused while a live renderer
+// holds the role. NOT a cap (rfork does not propagate it).
+#define SPAWN_PERM_CONSOLE_RENDERER  (1u << 3)
 #define SPAWN_PERM_ALL               (SPAWN_PERM_MAY_POST_SERVICE | \
                                       SPAWN_PERM_CONSOLE_TRUSTED | \
-                                      SPAWN_PERM_CONSOLE_OWNER)
+                                      SPAWN_PERM_CONSOLE_OWNER | \
+                                      SPAWN_PERM_CONSOLE_RENDERER)
 
 // A-1a (docs/IDENTITY-DESIGN.md §9.1): sys_spawn_args.identity_flags bits.
 // SPAWN_IDENTITY_SET requests that the child be born with the principal_id
