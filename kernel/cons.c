@@ -684,6 +684,15 @@ int cons_drain_open(void) {
     g_cons_drain.head = g_cons_drain.tail = 0u;
     drain_count_store(0u);
     g_cons_drain.overflow = 0u;
+    // Resetting reader_busy here is sound because no reader from the PRIOR
+    // epoch can still be in flight: an in-flight cons_drain_read runs under
+    // the read syscall's #844 obj pin on the drain Spoor, so the close hook
+    // (the only disarm) cannot have run while it was active; and on the
+    // death path a parked reader is #811-unwound (and never re-parks under
+    // a pending die) BEFORE the #926/#68 close-at-exit closes the fid. A
+    // stale reader surviving into a fresh epoch would race this ring and
+    // make the single-waiter drain Rendez two-sleeper (an extinction) --
+    // the pin + death ordering exclude it structurally.
     g_cons_drain.reader_busy = false;
     drain_pollwake_store(false);
     drain_armed_store(true);

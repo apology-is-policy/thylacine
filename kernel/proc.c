@@ -1268,6 +1268,13 @@ static struct Proc *g_console_renderer;   // BSS NULL
 // never a torn double-claim or a silent overwrite.
 int proc_set_console_renderer(struct Proc *p) {
     if (!p) return -1;
+    // The proc_mark_console_attached parity checks: the role is
+    // trust-adjacent (it gates the drain/feed pair), so a caller bug
+    // claiming it for a corrupted/dying descriptor surfaces loudly.
+    if (p->magic != PROC_MAGIC)
+        extinction("proc_set_console_renderer on corrupted Proc");
+    if (p->state != PROC_STATE_ALIVE)
+        extinction("proc_set_console_renderer on non-ALIVE Proc");
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
     if (g_console_renderer != NULL) {
         spin_unlock_irqrestore(&g_proc_table_lock, s);
