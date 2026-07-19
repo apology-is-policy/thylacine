@@ -1687,27 +1687,39 @@ static int do_corvus_bringup(long storage_dup_fd) {
 // "login: michael uid=1000 gid=1000" and "login: dek michael ds=N home
 // provisioned + unlocked" confirm the resolved identity + the DEK path.
 // Returns 0 / -1.
-static int do_login_e2e(void) {
-    const char pass_michael[] = "correct-horse-battery-staple-v1";
-
+// login_e2e_run -- one full seeded login cycle for (user, pass). Called for
+// michael AND -- since #30 -- cora, IN THAT ORDER: michael's leg leaves a
+// tombstoned /srv/home-michael in the shared boot registry, so cora's leg is
+// a FRESH service name posted AFTER the boot's permanent posts + tombstones
+// have accumulated -- the exact shape that silently broke when the registry
+// hit SRV_MAX_SERVICES (a fresh /srv/home-<user> found no free slot -> bind
+// EACCES -> an unprovisionable home for every user but michael, invisible to
+// a michael-only gate). A registry-capacity regression now fails the BOOT.
+static int login_e2e_run(const char *user, size_t ulen,
+                         const char *pass, size_t plen) {
     long cr_rd = -1, cr_wr = -1;
     if (t_pipe(&cr_rd, &cr_wr) < 0) {
         t_putstr("joey: login-e2e creds t_pipe FAILED\n");
         return -1;
     }
 
-    // Seed "michael\n<pass>\n", then close the write end so login's fd 0 reads
+    // Seed "<user>\n<pass>\n", then close the write end so login's fd 0 reads
     // the creds then EOF. (Audit F4: the U-3 `ut` skeleton prints a banner via
     // SYS_PUTS and exits 0 WITHOUT reading fd 0, so the E2E passes regardless of
     // ut's fd-0 state today; the creds-pipe EOF wiring is forward-looking for
     // when ut grows a REPL that reads stdin.)
     {
-        unsigned char creds[80];
+        unsigned char creds[96];
         size_t o = 0;
-        const char u[] = "michael\n";
-        for (size_t i = 0; i < sizeof(u) - 1; i++) creds[o++] = (unsigned char)u[i];
-        for (size_t i = 0; i < sizeof(pass_michael) - 1; i++)
-            creds[o++] = (unsigned char)pass_michael[i];
+        if (ulen + plen + 2 > sizeof(creds)) {
+            t_putstr("joey: login-e2e creds too long\n");
+            (void)t_close(cr_rd);
+            (void)t_close(cr_wr);
+            return -1;
+        }
+        for (size_t i = 0; i < ulen; i++) creds[o++] = (unsigned char)user[i];
+        creds[o++] = (unsigned char)'\n';
+        for (size_t i = 0; i < plen; i++) creds[o++] = (unsigned char)pass[i];
         creds[o++] = (unsigned char)'\n';
         if (write_all(cr_wr, creds, o) != 0) {
             t_putstr("joey: login-e2e seed write FAILED\n");
@@ -1758,11 +1770,28 @@ static int do_login_e2e(void) {
     int lst = -1;
     long lreaped = t_wait_pid_for((int)lpid, 0, &lst);
     if (lreaped != lpid || lst != 0) {
-        t_putstr("joey: /sbin/login E2E FAILED (login exit_status != 0)\n");
+        t_putstr("joey: /sbin/login E2E FAILED for ");
+        t_putstr(user);   // always a NUL-terminated literal (see do_login_e2e)
+        t_putstr(" (login exit_status != 0)\n");
         return -1;
     }
-    t_putstr("joey: /sbin/login E2E OK (michael authed; ut spawned stamped + reaped; session closed)\n");
+    t_putstr("joey: /sbin/login E2E OK for ");
+    t_putstr(user);
+    t_putstr(" (authed; home bound; ut spawned stamped + reaped; session closed)\n");
     return 0;
+}
+
+static int do_login_e2e(void) {
+    // michael FIRST (the historical single-user gate), then cora -- the
+    // second-user leg whose fresh /srv/home-cora post exercises the shared
+    // boot registry AFTER the permanent posts + michael's freshly-minted
+    // tombstone (#30: the michael-only gate was structurally blind to the
+    // registry filling; every user but michael was unprovisionable while
+    // this gate stayed green).
+    if (login_e2e_run("michael", 7,
+                      "correct-horse-battery-staple-v1", 31) != 0)
+        return -1;
+    return login_e2e_run("cora", 4, "kora", 4);
 }
 
 // A-5c-c-2: do_recover_e2e -- prove the /sbin/login `!recover` UX drives a LIVE

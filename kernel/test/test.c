@@ -693,6 +693,7 @@ void test_devsrv_post_gate(void);
 void test_devsrv_post_basic(void);
 void test_devsrv_tombstone(void);
 void test_devsrv_registry_full(void);
+void test_devsrv_registry_full_tombstone_rebinds(void);
 void test_devsrv_post_rollback(void);
 void test_devsrv_registry_lifecycle(void);
 void test_devsrv_svc_ref_holds_registry(void);
@@ -1977,6 +1978,7 @@ struct test_case g_tests[] = {
     { "devsrv.post_basic",             test_devsrv_post_basic,             false, NULL },
     { "devsrv.tombstone",              test_devsrv_tombstone,              false, NULL },
     { "devsrv.registry_full",          test_devsrv_registry_full,          false, NULL },
+    { "devsrv.registry_full_tombstone_rebinds", test_devsrv_registry_full_tombstone_rebinds, false, NULL },
     { "devsrv.post_rollback",          test_devsrv_post_rollback,          false, NULL },
     { "devsrv.registry_lifecycle",     test_devsrv_registry_lifecycle,     false, NULL },
     { "devsrv.svc_ref_holds_registry", test_devsrv_svc_ref_holds_registry, false, NULL },
