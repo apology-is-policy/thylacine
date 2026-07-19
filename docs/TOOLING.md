@@ -109,8 +109,12 @@ Properties (all empirically verified at G-0):
 - **Headless-safe.** QEMU maintains the QemuConsole surface for a bound
   scanout regardless of display backend, so capture works under the
   standing `-nographic` invocation — no `-display` change, no VNC needed.
-  The capture targets the `gpu0` qdev id (run-vm.sh's `-device
-  virtio-gpu-device,id=gpu0`), so console muxing never misroutes it.
+  The capture targets the `gpu0` qdev id — since G-1 that is the
+  `virtio-gpu-pci` device the RESIDENT gpud driver owns (the one-shot
+  kernel-test probe's virtio-mmio device is `gpu-mmio0`) — so console
+  muxing never misroutes it. `tools/test.sh` runs `-v` as the
+  pattern-persists gate on every boot (and therefore in every
+  `ci-smp-gate` boot); `THYLACINE_GPU_GATE=0` opts out.
 - **PNG is native** (QEMU ≥ 7.1 `screendump format=png`); `-v` takes a
   PPM sibling dump and asserts the four quadrant-center colors, then
   deletes it.

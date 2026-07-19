@@ -103,15 +103,29 @@ driver "netdev-driver" {
 }
 "#,
     r#"
+driver "gpud" {
+    abi   = 1
+    binds = ["virtio-pci:16"]
+    needs {
+        pci = "node"
+        irq = "node:interrupts"
+        dma = "pool: 64 KiB"
+    }
+    serves    = "/dev/gpu/%instance"
+    restart   = on-crash
+    lifecycle = persistent
+}
+"#,
+    r#"
 driver "crash-probe" {
     abi   = 1
-    binds = ["virtio:16"]
+    binds = ["restart-test"]
     needs {
-        mmio = "node:reg"
-        irq  = "node:interrupts"
-        dma  = "pool: 64 KiB"
+        mmio = "none"
+        irq  = "none"
+        dma  = "none"
     }
-    serves  = "/dev/gpu/%instance"
+    serves  = "/dev/restart-test/%instance"
     restart = on-crash
 }
 "#,
@@ -211,6 +225,17 @@ pub extern "C" fn rs_main() -> i64 {
         say!("warden: discovered {} ({})", id, n.label);
     }
     discovered.extend(pci_nodes);
+
+    // The SYNTHETIC restart-test node (TAPESTRY.md section 18.12 F15): the
+    // supervision demo (crash-probe) binds a node no real device backs -- it
+    // crashes before any claim, so it never needed one -- freeing virtio:16
+    // (the GPU) for its real driver (gpud, G-1). Empty resources: the demo's
+    // grant is mmio=0 irq=0 dma=0, exercising the restart ladder alone.
+    discovered.push(DeviceNode {
+        label: String::from("synthetic-restart-demo"),
+        ids: alloc::vec![DeviceId::parse("restart-test")],
+        resources: Default::default(),
+    });
 
     // A per-manifest instance counter so each bound device of a driver gets a
     // distinct %instance in its served path.

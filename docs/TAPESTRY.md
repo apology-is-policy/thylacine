@@ -558,10 +558,13 @@ consumers before Halcyon — the highest-risk, last-phase client — commits to 
   `weft_share_unregister` today, so the arm/re-arm/disarm weave lifecycle needs
   real additions, scoped into the G-2 pass).
 - NO framebuffer surface exists anywhere (no `/dev/fb`, no fb Dev, no
-  tapestryd binary); virtio-input events reach only the boot log; the warden's
-  `virtio:16` (GPU) slot is currently bound to the `crash-probe` restart test
-  (must be re-homed at G-1); QEMU runs `-display none` and QMP is used only for
-  `send-key` — **no screendump is wired** (the §16 agentic loop starts unbuilt).
+  tapestryd binary); virtio-input events reach only the boot log. ~~The
+  warden's `virtio:16` (GPU) slot is currently bound to the `crash-probe`
+  restart test; no screendump is wired~~ — BOTH retired: G-0 landed
+  `tools/screendump.sh` (the §16 agentic-eyes capture, headless-proven) and
+  G-1 landed the resident `gpud` on `virtio-pci:16` with crash-probe
+  re-homed to the synthetic `restart-test` node (see the G-1 AS-BUILT note
+  under §18.9).
 
 ### 18.1 The surface lifecycle — create, weave, present, resize, retire
 
@@ -864,6 +867,24 @@ tapestryd impl):
 
 The Aurora ENVIRONMENT half (session multiplexing, status band — AURORA.md §5)
 sequences after G-4 as its own arc, parallel to G-5+; the renderer half IS G-4.
+
+**G-1 AS-BUILT (landed on `gfx-1`): the resident driver is `usr/gpud` over
+`virtio-gpu-pci` (`virtio-pci:16`), NOT the virtio-mmio slot.** The first
+build promoted the MMIO probe literally and measured the structural blocker:
+QEMU-virt packs all six populated virtio-mmio slots into ONE 4-KiB page
+(stride 0x200), userspace MMIO claims are page-granular + exclusive (I-5),
+and the boot survives on temporal sequencing — the transient probes release
+the page before stratumd (virtio-blk) claims it for the box's life. A second
+persistent claimant starved netdev-driver AND the disk (boot-fatal). PCI
+BARs are per-function (the netd/#140 move), so the resident driver coexists
+with everyone; the MMIO GPU device stays wired (`gpu-mmio0`) for the
+one-shot P4-L kernel-test probe, whose scanout legitimately dies at its reap
+(the RW-7 quiesce — the G-0 finding). Consequence for §18.7/G-3: tapestryd's
+manifest absorbs the GPU as **`virtio-pci:16`** (same identity model,
+transport-shifted). crash-probe re-homed to the warden-synthetic
+`restart-test` node per F15. The pattern-persists gate lives in
+`tools/test.sh` (every ci-smp-gate boot runs it); as-built detail in
+`docs/reference/138-gpud.md`.
 
 ### 18.10 Audit-trigger + scripture sync obligations
 

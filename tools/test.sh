@@ -188,6 +188,31 @@ while [[ $(date +%s) -lt $deadline ]]; do
             fi
             sleep 0.1
         done
+        # G-1 pattern-persists gate: the RESIDENT gpud holds the P4-L
+        # 4-quadrant pattern on scanout 0 past boot (its READY precedes the
+        # banner -- joey waits out the warden bind loop), so a capture +
+        # verify over QMP must succeed while the VM is still up. The bounded
+        # retry absorbs host scheduling noise; a persistent mismatch is a
+        # FAIL (the resident driver is down or blank -- the G-1 regression).
+        # Skipped when the device/socket is absent (THYLACINE_NO_GPU=1 /
+        # THYLACINE_NO_QMP=1), THYLACINE_GPU_GATE=0, or python3 is missing.
+        if [[ "$result" == "pass" && "${THYLACINE_NO_GPU:-0}" != "1" \
+              && "${THYLACINE_NO_QMP:-0}" != "1" && "${THYLACINE_GPU_GATE:-1}" != "0" ]] \
+           && [[ -S "$QMP_SOCK" ]] && command -v python3 >/dev/null 2>&1 \
+           && kill -0 "$QEMU_PID" 2>/dev/null; then
+            gpu_gate_ok=0
+            for _try in $(seq 1 20); do
+                if "$REPO_ROOT/tools/screendump.sh" -s "$QMP_SOCK" -v \
+                       "$BUILD_DIR/pattern-gate.png" >/dev/null 2>&1; then
+                    gpu_gate_ok=1
+                    break
+                fi
+                sleep 0.5
+            done
+            if [[ "$gpu_gate_ok" != "1" ]]; then
+                result="gpu-gate"
+            fi
+        fi
         break
     fi
     if ! kill -0 "$QEMU_PID" 2>/dev/null; then
@@ -235,6 +260,14 @@ case "$result" in
         tail -20 "$LOG_FILE"
         echo "----------------"
         exit 0
+        ;;
+    gpu-gate)
+        echo "==> FAIL: G-1 pattern-persists gate -- the resident gpud scanout did not verify." >&2
+        echo "    tools/screendump.sh -v could not capture the P4-L 4-quadrant pattern post-boot." >&2
+        echo "--- gpud/warden log slice ---" >&2
+        grep -E "gpud:|warden:" "$LOG_FILE" | tail -15 >&2 || true
+        echo "-----------------------------" >&2
+        exit 1
         ;;
     extinction)
         echo "==> FAIL: kernel extinction detected." >&2

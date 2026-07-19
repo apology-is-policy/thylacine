@@ -232,26 +232,37 @@ if [[ "${THYLACINE_NO_INPUT:-0}" != "1" ]]; then
     )
 fi
 
-# P4-L: virtio-gpu-device on the MMIO transport, for the virtio-gpu
-# probe. QEMU virt exposes a virtio-gpu whose DeviceID=16 on the
-# virtio bus. With -nographic + -display none (the default test
-# environment), the device still enumerates a scanout (num_scanouts
-# >= 1) and responds to GET_DISPLAY_INFO with OK_DISPLAY_INFO; the
-# pmodes[0].enabled bit may be 0 if no display backend is attached.
-# The probe exercises (a) DeviceID=16 dispatch, (b) two-virtqueue
-# configuration (controlq idx 0 + cursorq idx 1; first driver to use
-# REG_QUEUE_SEL=1), and (c) the controlq command/response chain
-# pattern (req+resp via two descriptors with NEXT linkage). This is
-# the substrate gate for Phase 8 Halcyon.
+# P4-L / G-1: TWO virtio-gpu devices, one per transport, one per
+# consumer. Both work fully under -nographic (QEMU maintains the
+# console surface for a bound scanout with no display backend --
+# tools/screendump.sh captures either over QMP by qdev id).
 #
-# Slot assignment: this -device sits AFTER input_flags in the exec
-# invocation. With QEMU's reverse-creation slot allocation: disk=31,
-# net=30, kbd=29, gpu=28, rng=27, rng-pci doesn't count (PCI bus, not
-# virtio-mmio). THYLACINE_NO_GPU=1 disables.
+#   - virtio-gpu-pci id=gpu0 (G-1): the RESIDENT gpud driver's device.
+#     PCI because a persistent driver cannot claim a shared virtio-mmio
+#     page: QEMU-virt packs all populated MMIO slots into ONE 4-KiB page
+#     (stride 0x200) and userspace MMIO claims are page-granular +
+#     exclusive, so the page belongs temporally to the transient probes
+#     and then permanently to stratumd (virtio-blk) -- a second
+#     persistent claimant starves the disk (boot-fatal, measured at
+#     G-1). PCI BARs are per-function; no co-residency. gpud holds the
+#     P4-L 4-quadrant pattern + heartbeat on scanout 0 for the life of
+#     the box; tools/test.sh's pattern-persists gate asserts it
+#     post-boot against THIS device (screendump default -d gpu0).
+#   - virtio-gpu-device id=gpu-mmio0 (P4-L): the one-shot /virtio-gpu
+#     kernel-test probe's device (init handshake + the 2D scanout
+#     pipeline over virtio-mmio). Its scanout legitimately dies at the
+#     probe's reap (the RW-7 proc-death quiesce).
+#
+# MMIO slot assignment: the -device order puts gpu-mmio0 AFTER
+# input_flags; with QEMU's reverse-creation slot allocation the MMIO
+# gpu lands beside kbd/net/blk in the top slot page. gpu0 (PCI) takes
+# the next free PCI slot alongside net1/rng_pci0. THYLACINE_NO_GPU=1
+# disables both.
 gpu_flags=()
 if [[ "${THYLACINE_NO_GPU:-0}" != "1" ]]; then
     gpu_flags=(
-        -device "virtio-gpu-device,id=gpu0"
+        -device "virtio-gpu-device,id=gpu-mmio0"
+        -device "virtio-gpu-pci,id=gpu0,disable-legacy=on"
     )
 fi
 
