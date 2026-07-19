@@ -991,6 +991,7 @@ void test_dev9p_write_read_propagate_errno(void);
 void test_dev9p_close_clunks_owned_fid(void);
 void test_dev9p_close_does_not_clunk_root_fid(void);
 void test_dev9p_create_file(void);
+void test_dev9p_create_errno_propagates_eexist(void);   // #99
 void test_dev9p_create_invalidates_reused_child(void);
 void test_dev9p_create_invalidates_reused_child_pages(void);
 void test_dev9p_create_downgrades_parent_attr(void);
@@ -2441,6 +2442,9 @@ struct test_case g_tests[] = {
                                        test_dev9p_close_does_not_clunk_root_fid,
                                                                            false, NULL },
     { "dev9p.create_file",             test_dev9p_create_file,             false, NULL },
+    { "dev9p.create_errno_propagates_eexist",
+                                       test_dev9p_create_errno_propagates_eexist,
+                                                                           false, NULL },
     { "dev9p.create_invalidates_reused_child",
                                        test_dev9p_create_invalidates_reused_child,
                                                                            false, NULL },

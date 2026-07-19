@@ -139,25 +139,37 @@ check` printed its diagnostic. 8d-3 chased it:
 
 ## Known caveats
 
-- **filecache "operation not permitted"** (task #99, non-fatal): on a fresh
-  `HOME/.cache`, gopls's persistent-index filecache logs `create …-cas:
-  operation not permitted` storing xref/index data. Root-caused (the earlier
-  `O_EXCL` guess is refuted): filecache `Set` uses `os.OpenFile(O_WRONLY|
-  O_CREATE, 0600)` — **no** `O_EXCL` — so Go's open-or-create does `SYS_OPEN`
-  (returns proper `-T_E_NOENT`, falls through) then `syscall.Create` →
-  `SYS_WALK_CREATE`, which returns a **bare `-1`** that Go reads as
-  `Errno(1)`=EPERM (the go-fork `#102` legacy-errno wart), wrapped `Op:"create"`.
-  The `-1` is one of two unclamped sites in `sys_walk_create_handler` —
-  `perm_check(parent, W|X)` (`syscall.c:2886`, newly live since the dev9p
-  `perm_enforced=true` A-3b flip; the `:2879` "deferred to A-3" comment is now
-  stale) or `dev9p_create→NULL` (`dev9p.c:2989`/`:1299`, which collapses any
-  Tlcreate errno to NULL, unlike `dev9p_stat_native` which propagates it). The
-  differentiator from go-build's working creates: gopls reads-before-create and
-  always reaches `SYS_WALK_CREATE` for a fresh file. gopls degrades gracefully
-  (re-computes; check + definition still exit 0). Fix (owed, budgeted session):
-  instrument to pin the site + underlying cause on a fresh-pool boot, fix it, and
-  propagate the real errno through the create path. Audit-bearing (FS-mutation
-  surface). Correctness is unaffected.
+- **filecache "operation not permitted"** (task #99 — **RESOLVED**). gopls's
+  persistent-index filecache logged `create …-cas: operation not permitted`
+  storing xref/index data. An instrumented boot pinned the mechanism (the
+  earlier `O_EXCL` guess was refuted): filecache `Set` uses `os.OpenFile(
+  O_WRONLY|O_CREATE, 0600)` — **no** `O_EXCL` — and gopls's parallel analysis
+  races **concurrent** `Set`s of one content-addressed `-cas` path. Thylacine's
+  open-or-create is TWO non-atomic syscalls (`SYS_OPEN` then `SYS_WALK_CREATE`),
+  so the racers all `SYS_OPEN`→`-T_E_NOENT` before the winner's create lands,
+  then race the create; the losers' `SYS_WALK_CREATE`→`Tlcreate` returns
+  **`-EEXIST` (the file now exists)**. `dev9p_create` collapsed every Rlerror
+  to `NULL` and `sys_walk_create_handler` returned a bare `-1`, which Go read as
+  `Errno(1)`=EPERM (the go-fork `#102` wart; pouch: EIO) — so `os.OpenFile`
+  could not tell "already exists" from a real failure. Two coordinated fixes:
+  (a) **kernel** — `dev9p_create` records the real errno (`create_errno` on the
+  priv) and `sys_walk_create_handler` returns `dev9p_create_errno(nc)`
+  (clamped to the `[-4095,-2]` passthrough range) instead of `-1`, so EL0 sees
+  the true `EEXIST`; (b) **go-fork** (`os/file_thylacine.go::openFileNolog`) —
+  the non-`O_EXCL` create path now **retries `Open` on `EEXIST`** (POSIX
+  open-or-create). The retry ALONE was not enough under a race (the SMP gate
+  caught it 2/10): a loser's `Open`->ENOENT installs a **negative** dentry, so
+  its retry-`Open` served that stale negative RPC-free and got ENOENT. So the
+  kernel fix (a) also **drops the `(parent,name)` dentry + bumps the gen on
+  create-EEXIST** in `dev9p_create` -- the loser's own EEXIST invalidate runs
+  right before its retry-Open, which then sees the file (the *success* path
+  already did this; the EEXIST arm returned NULL before reaching it). Verified
+  **10/10** under an 8-way concurrent race (`go-fs` step 6b) +
+  `dev9p.create_errno_propagates_eexist` (kernel: the `-17` return AND the dentry
+  drop) + `go-fs` step 6c (deterministic O_EXCL-EEXIST). The stale `:2879`
+  "deferred to A-3" comment was also corrected. The
+  `perm_check(parent, W|X)` site was NOT the cause (its `-1`→EACCES upgrade is a
+  separate, unobserved improvement). Audit-bearing (FS-mutation surface).
 - **robustio `FileID` cross-dataset collision** (task #100, 8d-3 holotype F2 —
   was a P2 latent, now **RESOLVED**). **The proper devno ABI fix landed**:
   `t_stat` grew 80→88 with a `devno` field (Plan 9 Chan.dev / POSIX st_dev),

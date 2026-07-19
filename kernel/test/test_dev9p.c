@@ -37,6 +37,7 @@ void test_dev9p_write_routes_through_client(void);
 void test_dev9p_close_clunks_owned_fid(void);
 void test_dev9p_close_does_not_clunk_root_fid(void);
 void test_dev9p_create_file(void);
+void test_dev9p_create_errno_propagates_eexist(void);   // #99
 void test_dev9p_create_dir(void);
 void test_dev9p_fsync(void);
 void test_dev9p_readdir(void);
@@ -113,6 +114,7 @@ static u32  g_wire_seq;
 static u32  g_twrite_seen;
 static u32  g_twrite_last_seq, g_clunk_last_seq, g_tfsync_last_seq;
 static u32  g_twrite_fail_ecode;     // != 0: the NEXT Twrite answers Rlerror(ecode), then clears
+static u32  g_tlcreate_fail_ecode;   // #99: != 0: the NEXT Tlcreate answers Rlerror(ecode), then clears
 static u8  *g_twrite_cap_buf;        // payload capture of the LAST Twrite (heap, 8 KiB)
 #define WB_CAP_BUF_SZ 8192u
 static u32  g_twrite_cap_len;
@@ -335,6 +337,18 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         return (int)total;
     }
     if (type == P9_TLCREATE) {
+        if (g_tlcreate_fail_ecode) {              // #99: inject an Rlerror (e.g. EEXIST)
+            u32 ec = g_tlcreate_fail_ecode;
+            g_tlcreate_fail_ecode = 0;
+            size_t etotal = P9_HDR_LEN + 4;
+            if (resp_cap < etotal) return -1;
+            resp[0] = 11; resp[1] = 0; resp[2] = 0; resp[3] = 0;
+            resp[4] = P9_RLERROR;
+            resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+            resp[7] = (u8)(ec & 0xff);        resp[8] = (u8)((ec >> 8) & 0xff);
+            resp[9] = (u8)((ec >> 16) & 0xff); resp[10] = (u8)((ec >> 24) & 0xff);
+            return (int)etotal;
+        }
         // Rlcreate = qid(13) + iounit(4), same shape as Rlopen. path 0x77
         // distinguishes a created file's qid from a walked/opened one.
         size_t total = P9_HDR_LEN + P9_QID_LEN + 4;
@@ -792,6 +806,49 @@ void test_dev9p_create_file(void) {
     TEST_ASSERT((nc->flag & COPEN) != 0,       "COPEN set after Tlcreate");
     TEST_EXPECT_EQ((u64)nc->qid.path, (u64)0x77,
                     "qid taken from the Rlcreate response");
+
+    spoor_clunk(nc);
+    teardown(root);
+}
+
+// #99 (#102 errno-loss) regression: a Tlcreate the server rejects with
+// Rlerror(EEXIST) must surface the REAL errno via dev9p_create_errno (a
+// passthrough-range -T_E_EXIST), not the generic -1. sys_walk_create_handler
+// returns exactly this, so EL0 (go's os.OpenFile(O_CREATE)) can tell "already
+// exists" from a real failure and fall back to opening the file. Pre-fix
+// dev9p_create collapsed every Rlerror to NULL and the handler returned a bare
+// -1 (EPERM on go's seam / EIO on pouch) -- so dev9p_create_errno was 0 -> the
+// accessor returned -1. Non-vacuous: reverting the create_errno record fails
+// the EEXIST assertion.
+void test_dev9p_create_errno_propagates_eexist(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    struct Spoor *nc = spoor_clone(root);
+    TEST_ASSERT(nc != NULL, "clone target");
+    struct Walkqid *w = dev9p.walk(root, nc, NULL, 0);   // clone-walk
+    TEST_ASSERT(w != NULL, "clone-walk gave nc its own fid");
+    walkqid_free(w);
+
+    // #99 F1 (holotype + SMP gate): a create-EEXIST must DROP the (parent,name)
+    // dentry -- else a racing peer's Open->ENOENT->Create->EEXIST retry-Open serves
+    // the stale NEGATIVE binding RPC-free (the file the server just proved exists),
+    // and the open-or-create spuriously fails. Pre-seed a (parent,"dup") entry
+    // (POSITIVE, so lookup can OBSERVE the drop; the real case is a NEGATIVE
+    // Open-first miss -- the same larder_dentry_invalidate_name drops both).
+    u64 parent_qid = nc->qid.path;   // nc shares root's qid; a failed Tlcreate never transitions it
+    larder_dentry_install(&g_client.larder, larder_gen_snapshot(&g_client.larder),
+                          parent_qid, "dup", 3, /*child=*/0xBEEFu, /*negative=*/false);
+    u64 dchild = 0;
+    TEST_ASSERT(larder_dentry_lookup(&g_client.larder, parent_qid, "dup", 3, &dchild),
+                "(parent,dup) dentry present pre-create");
+
+    g_tlcreate_fail_ecode = 17;   // EEXIST -- the racing/duplicate create case
+    struct Spoor *opened = dev9p.create(nc, "dup", 1 /*OWRITE*/, 0644u, 1000u);
+    TEST_ASSERT(opened == NULL, "create fails on server Rlerror(EEXIST)");
+    TEST_EXPECT_EQ((u64)(s64)dev9p_create_errno(nc), (u64)(s64)(-17),
+                   "the real -EEXIST is recorded + clamped for the handler (not -1)");
+    TEST_ASSERT(!larder_dentry_lookup(&g_client.larder, parent_qid, "dup", 3, &dchild),
+                "create-EEXIST invalidates the (parent,dup) dentry (F1: retry-Open sees the file)");
 
     spoor_clunk(nc);
     teardown(root);

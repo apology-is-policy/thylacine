@@ -243,7 +243,10 @@ straight to the wire — a `_Static_assert(SYS_UNLINK_REMOVEDIR ==
 P9_UNLINK_AT_REMOVEDIR)` (in `dev9p.c`, the only TU that sees both) pins the
 equality.
 
-## Error paths (`SYS_WALK_CREATE -> -1`)
+## Error paths (`SYS_WALK_CREATE`)
+
+Most failures return the generic `-1` sentinel; a **dev9p server `Rlerror`**
+returns the **real errno** (#99, see below).
 
 - parent not `KOBJ_SPOOR` / missing `RIGHT_WRITE`; FROM_ROOT with no pivoted root
 - backing Dev has no `.walk` or no `.create`; Dev is not creatable (`create`
@@ -251,8 +254,49 @@ equality.
 - `name_len` 0 / > 64 / contains `/` or `\0` / is `.` or `..`
 - `omode` outside `SYS_WALK_OPEN_OMODE_VALID`
 - `perm` outside `SYS_WALK_CREATE_PERM_VALID` (a reserved `DM*` bit)
-- the 9P server rejects (name exists, no space, permission) -> Rlerror
+- the 9P server rejects (name exists, no space, permission) -> `Rlerror`
 - handle table full
+
+### #99: the dev9p create errno propagates (the #102 errno-loss fix)
+
+`dev9p_create` used to collapse every `Tlcreate`/`Tmkdir` `Rlerror` to `NULL`,
+and the handler returned a bare `-1`. That `-1` == `-T_E_PERM` is the generic
+flat sentinel (EL0 reads it as EPERM on the go seam, EIO on the pouch seam), so
+userspace could not distinguish e.g. `EEXIST` (the file already exists — a
+concurrent/duplicate create, which POSIX `open(O_CREATE)` without `O_EXCL`
+handles by opening the existing file) from a real failure.
+
+Now `dev9p_create` records the p9 client's `-errno` in a transient
+`dev9p_priv.create_errno` on the `Tlcreate`/`Tmkdir` `Rlerror` paths, and
+`sys_walk_create_handler` returns `dev9p_create_errno(nc)` (rather than `-1`)
+when `create` returns NULL. `dev9p_create_errno` is self-gating (`-1` for a
+non-dev9p Spoor or an unrecorded value) and **clamps** to the `[-4095, -2]`
+passthrough range (defense-in-depth vs a hostile `Rlerror` ecode; I-14 already
+bounds them). So `-EEXIST` (`-17`) now reaches EL0 as the true `EEXIST`, and the
+go-fork's `os.OpenFile` retries the open. No behavior change for non-dev9p Devs
+(their `create` stubs still return NULL -> `-1`).
+
+**The dentry-invalidate-on-EEXIST (F1 -- the load-bearing half under a race).**
+Propagating `EEXIST` is not enough on its own: a concurrent racer's
+`Open`->ENOENT installs a **negative** `(parent, name)` dentry, so after the
+winner creates the file the loser's retry-`Open` can serve that stale negative
+RPC-free and spuriously get ENOENT. On a *successful* create `dev9p_create`
+already drops the `(parent, name)` dentry (`larder_dentry_invalidate_name`), but
+the **EEXIST failure arm returned NULL before reaching it**. So both create arms
+now, on `rc == -T_E_EXIST`, call `larder_dentry_invalidate_name(&p->client->
+larder, parent_path, name, name_len)` before returning NULL: EEXIST *proves* the
+file exists, so any cached negative is stale, and the call also bumps the Larder
+gen so a concurrent negative-install that snapshotted the old gen is skipped
+(closing the re-cache race). The loser's own create-EEXIST thus drops the
+negative before its retry-Open, which then sees the file. Verified **10/10**
+under an 8-way concurrent race (`go-fs` step 6b, the SMP gate) -- a single Go
+retry then suffices (no bounded loop needed). The other dir-create failure arms
+(fid-pool exhausted / walk / lopen after a successful `Tmkdir`) also record their
+real errno + latch `fid_suspect` (F2/F3), so a dir that *was* created but could
+not be opened no longer reports an opaque `-1`. Regressions:
+`dev9p.create_errno_propagates_eexist` (loopback injects `Rlerror(EEXIST)`;
+asserts the `-17` return AND that the `(parent,name)` dentry is dropped) + the
+`go-fs` step 6b concurrent-race + step 6c deterministic O_EXCL-EEXIST probes.
 
 ## Error paths (`SYS_RENAME` / `SYS_UNLINK` -> -1)
 

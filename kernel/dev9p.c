@@ -67,6 +67,17 @@ struct dev9p_priv *dev9p_priv_of(struct Spoor *c) {
     return priv_of(c);
 }
 
+// #99: propagate the real create errno (see the header contract). The clamp to
+// the [-4095, -2] passthrough range makes a hostile/garbage Rlerror ecode (I-14
+// bounds them, but be defensive) fail safe to -1 rather than smuggle an
+// out-of-range value into the syscall return.
+s64 dev9p_create_errno(struct Spoor *c) {
+    struct dev9p_priv *p = priv_of(c);
+    if (!p) return -1;
+    int e = p->create_errno;
+    return (e <= -2 && e >= -4095) ? (s64)e : -1;
+}
+
 // -- G2: the dir-fid cache (docs/FID-LIFECYCLE-DESIGN.md section 4) ------------
 //
 // The table lives on p9_client (per-session, like the Larder); ALL policy is
@@ -1266,10 +1277,20 @@ static struct Spoor *dev9p_create(struct Spoor *c, const char *name,
         // lopen it OREAD (you readdir a directory, never write it).
         int rc = p9_client_mkdir(p->client, p->fid, (const u8 *)name, name_len,
                                   mode, gid, &qid);
-        if (rc != 0) return NULL;                 // p->fid still parent; caller clunks
+        if (rc != 0) {                            // p->fid still parent; caller clunks
+            p->create_errno = rc;                 // #99: record the real Rlerror errno (e.g. -EEXIST)
+            p->fid_suspect = true;                // #99 F2: G2-symmetric with the lcreate arm
+            if (rc == -T_E_EXIST)                 // #99: drop the stale NEG (see the file arm)
+                larder_dentry_invalidate_name(&p->client->larder, parent_path,
+                                              name, name_len);
+            return NULL;
+        }
 
         u32 dir_fid = p9_client_alloc_fid(p->client);
-        if (dir_fid == P9_NOFID) return NULL;     // dir created; can't open it
+        if (dir_fid == P9_NOFID) {
+            p->create_errno = -T_E_NOMEM;         // #99 F3: fid pool exhausted (dir created)
+            return NULL;                          // dir created; can't open it
+        }
 
         const u8 *names[1] = { (const u8 *)name };
         size_t   lens[1]  = { name_len };
@@ -1278,6 +1299,8 @@ static struct Spoor *dev9p_create(struct Spoor *c, const char *name,
         rc = p9_client_walk(p->client, p->fid, dir_fid, 1,
                              (const u8 *const *)names, lens, &nwqid, wq);
         if (rc != 0 || nwqid != 1) {
+            p->create_errno = (rc != 0) ? rc : -T_E_IO;  // #99 F3: dir created; walk-to-child failed
+            p->fid_suspect = true;
             (void)p9_client_clunk(p->client, dir_fid);
             return NULL;                          // p->fid still parent; caller clunks
         }
@@ -1287,7 +1310,7 @@ static struct Spoor *dev9p_create(struct Spoor *c, const char *name,
         p->fid = dir_fid;
 
         rc = p9_client_lopen(p->client, dir_fid, 0u /* OREAD */, &qid, &iounit);
-        if (rc != 0) { p->fid_suspect = true; return NULL; }
+        if (rc != 0) { p->create_errno = rc; p->fid_suspect = true; return NULL; }  // #99 F3
         c->mode = 0;                              // OREAD
     } else {
         // File: Tlcreate creates AND opens; afterward p->fid refers to the
@@ -1297,6 +1320,12 @@ static struct Spoor *dev9p_create(struct Spoor *c, const char *name,
         int rc = p9_client_lcreate(p->client, p->fid, (const u8 *)name, name_len,
                                     flags, mode, gid, &qid, &iounit);
         if (rc != 0) {                            // p->fid still parent; caller clunks
+            p->create_errno = rc;                 // #99: record the real Rlerror errno (e.g. -EEXIST)
+            if (rc == -T_E_EXIST)                 // #99: EEXIST PROVES the file exists,
+                larder_dentry_invalidate_name(&p->client->larder, parent_path,
+                                              name, name_len);  // so any cached NEG is stale -> drop it,
+                                              // else a concurrent racer's Open->ENOENT->Create->EEXIST
+                                              // retry-Open would re-serve the stale NEG and spuriously fail.
             p->fid_suspect = true;                // G2: never re-park an erroring fid
             return NULL;
         }

@@ -104,6 +104,14 @@ struct dev9p_priv {
     // that misbehaved once is clunked at close, never re-served.
     u64                fid_gen;
     bool               fid_suspect;
+    // #99 (#102 errno-loss): the last dev9p_create failure's real errno, in the
+    // syscall passthrough range (e.g. -T_E_EXIST on a racing/duplicate create).
+    // Transient create-path state: born 0 (kzalloc), set by dev9p_create on a
+    // Rlerror, read once by sys_walk_create_handler via dev9p_create_errno()
+    // immediately after a NULL create -- BEFORE the handler-local `nc` is clunked
+    // (freeing this priv). Never shared: `nc` is a fresh clone-walk, not yet a
+    // handle. 0 means "not recorded" -> the accessor returns -1 (prior behavior).
+    int                create_errno;
     // F2: attached_owner is the session-resource holder. NULL when the
     // p9_client is externally owned (test path); non-NULL for every priv
     // derived from a SYS_ATTACH_9P session (root + walks). Each non-NULL
@@ -254,6 +262,13 @@ int dev9p_weft_try_read(struct Spoor *spoor, u64 ubuf_va, u32 len, u32 *got);
 // NULL if `c` is not a live dev9p Spoor). Exposed for kernel/dev9p_poll.c (the
 // `.poll` bridge reads p->poll + p->client + p->fid) + the dev9p_poll tests.
 struct dev9p_priv *dev9p_priv_of(struct Spoor *c);
+
+// #99: the create errno accessor for sys_walk_create_handler. Returns the errno
+// dev9p_create recorded for the last create failure on this Spoor -- clamped to
+// the syscall passthrough range [-4095, -2] so it reaches EL0 as the true POSIX
+// errno (e.g. -T_E_EXIST). Self-gating: returns -1 (the prior generic-failure
+// sentinel) for a non-dev9p Spoor, an unrecorded value, or an out-of-range one.
+s64 dev9p_create_errno(struct Spoor *c);
 
 // =============================================================================
 // dev9p.poll -- the readiness bridge (net-6b-2b; NET-DESIGN section 12.2,

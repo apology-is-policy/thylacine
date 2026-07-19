@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"sync"
 )
 
 const (
@@ -83,6 +84,53 @@ func main() {
 		}
 	}
 	must("ReadDir lists probe.txt", found)
+
+	// 6b. #99: concurrent open-or-create of ONE fresh file -- the gopls filecache
+	//     scenario (parallel goroutines racing os.OpenFile of a shared content-
+	//     addressed path). Thylacine's open-or-create is two non-atomic syscalls
+	//     (Open then Create), and Go's scheduler yields at each, so the racers all
+	//     Open->ENOENT before the first Create lands, then race the Create: one
+	//     wins, the rest get SYS_WALK_CREATE -> Tlcreate -> EEXIST. Without O_EXCL
+	//     that is NOT an error -- POSIX opens the existing file, which the port's
+	//     retry-Open now does. Pre-fix the kernel collapsed EEXIST to a blanket -1
+	//     ("operation not permitted"), so every loser here would have FAILED.
+	raceFile := "/go-fs/race.txt"
+	_ = os.Remove(raceFile)
+	const racers = 8
+	errs := make(chan error, racers)
+	var wg sync.WaitGroup
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rf, e := os.OpenFile(raceFile, os.O_WRONLY|os.O_CREATE, 0o600)
+			if e == nil {
+				_ = rf.Close()
+			}
+			errs <- e
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		must("concurrent open-or-create (no O_EXCL) succeeds under a race", e == nil)
+	}
+	must("os.Remove(race.txt)", os.Remove(raceFile) == nil)
+
+	// 6c. #99 F4 (deterministic, single-threaded): an O_CREATE|O_EXCL create of an
+	//     EXISTING file must report EEXIST -- not the pre-fix blanket EPERM. This
+	//     pins the SYS_WALK_CREATE errno propagation (the handler returns the real
+	//     -T_E_EXIST): reverting the kernel record OR the handler return surfaces
+	//     EPERM and os.IsExist goes false. (The O_EXCL path is a distinct branch
+	//     from 6b's non-EXCL retry, so it pins the errno independently of a race.)
+	exclFile := "/go-fs/excl.txt"
+	_ = os.Remove(exclFile)
+	ef0, ee0 := os.OpenFile(exclFile, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	must("O_EXCL create of a fresh file", ee0 == nil)
+	must("O_EXCL File.Close", ef0.Close() == nil)
+	_, ee1 := os.OpenFile(exclFile, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	must("O_EXCL create of an existing file reports EEXIST (not EPERM)", os.IsExist(ee1))
+	must("os.Remove(excl.txt)", os.Remove(exclFile) == nil)
 
 	// 7. Rename within the directory (os.Rename -> SYS_RENAME).
 	must("os.Rename", os.Rename(file, renamed) == nil)

@@ -2883,10 +2883,11 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
     if (!src->dev || !src->dev->walk || !src->dev->create) { spoor_clunk(src); return -1; }
 
     // A-2d: write + search (W|X) permission on the parent directory before
-    // creating in it. Gated on perm_enforced (dev9p deferred to A-3). devramfs
-    // is read-only (its .create stub returns NULL) so this is effectively dead
-    // for devramfs, but correct: a non-system principal lacks other-w on a 0755
-    // dir and is denied here before the create attempt. fail-closed on no stat.
+    // creating in it. Gated on perm_enforced -- LIVE for dev9p since the A-3b
+    // flip (Stratum-backed trees enforce rwx); devramfs is read-only (its
+    // .create stub returns NULL) so this is effectively dead there, but correct:
+    // a non-system principal lacks other-w on a 0755 dir and is denied here
+    // before the create attempt. fail-closed on no stat.
     if (src->dev->perm_enforced) {
         struct t_stat parent_st;
         if (spoor_stat_native(src, &parent_st) != 0)          { spoor_clunk(src); return -1; }
@@ -2992,8 +2993,17 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
     struct Spoor *opened = nc->dev->create(nc, name_scratch, (int)omode_raw,
                                             perm, p->primary_gid);
     if (!opened) {
+        // #99 (#102 errno-loss): propagate the real create errno the Dev
+        // recorded (dev9p maps its Tlcreate/Tmkdir Rlerror -- e.g. -EEXIST on a
+        // racing/duplicate create -- into a passthrough-range errno). Without
+        // this the bare -1 reaches EL0 as a blanket EPERM (go's native seam) or
+        // EIO (pouch), so os.OpenFile(O_CREATE) could not distinguish
+        // "already exists" from a real failure and fall back to opening it.
+        // Self-gating: dev9p_create_errno returns -1 for a non-dev9p Spoor or an
+        // unrecorded/out-of-range value, preserving the prior behavior there.
+        s64 cerr = dev9p_create_errno(nc);
         spoor_clunk(nc);
-        return -1;
+        return cerr;
     }
     // #66 audit F5: the generic create path installs `nc` (handle_alloc below), so
     // it relies on create returning nc opened in place. dev9p does; devramfs's
