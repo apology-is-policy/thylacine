@@ -186,6 +186,13 @@ pub extern "C" fn rs_main() -> i64 {
     let mut keybuf: Vec<u8> = Vec::new();
     let mut drainbuf = [0u8; 2048];
     let mut drain_eof = false;
+    // Consecutive present failures. A transient failure (#31: a compositor
+    // GPU hiccup) is a DROPPED FRAME, never death -- the dirty rows stay
+    // set so the next pass re-renders + re-presents. Real compositor death
+    // ends the event stream (the wait_event exit above); this backstop only
+    // catches a live-stream-but-presents-never-succeed wedge.
+    let mut present_fails: u32 = 0;
+    const PRESENT_FAILS_FATAL: u32 = 240;
 
     loop {
         // (1) Block for the next event (<= one FRAME period), then drain the
@@ -288,13 +295,23 @@ pub extern "C" fn rs_main() -> i64 {
                 h: ((r1 - r0) * m.cell_h) as u32,
             };
             if let Err(e) = surf.present(Some(rect)) {
-                say!("aurora: FAIL present {:?}", e);
-                return 1;
+                present_fails += 1;
+                if present_fails <= 3 || present_fails % 64 == 0 {
+                    say!("aurora: FAIL present {:?} ({} consecutive); frame dropped", e, present_fails);
+                }
+                if present_fails >= PRESENT_FAILS_FATAL {
+                    say!("aurora: presents failing persistently; exiting");
+                    return 1;
+                }
+                // Keep the dirty rows + prev_cursor: slots rotate per
+                // present, so the retry MUST re-render before re-presenting.
+            } else {
+                present_fails = 0;
+                for d in term.dirty[r0..r1].iter_mut() {
+                    *d = false;
+                }
+                prev_cursor = cursor;
             }
-            for d in term.dirty[r0..r1].iter_mut() {
-                *d = false;
-            }
-            prev_cursor = cursor;
         }
     }
 }

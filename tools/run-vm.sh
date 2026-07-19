@@ -274,6 +274,16 @@ if [[ "${THYLACINE_NO_GPU:-0}" != "1" ]]; then
         -device "virtio-gpu-device,id=gpu-mmio0"
         -device "virtio-gpu-pci,id=gpu0,disable-legacy=on"
     )
+    # vnc display mode drops the vestigial MMIO gpu: a display backend
+    # binds QemuConsole 0, and gpu-mmio0 (probe-only, driverless in the
+    # resident boot) would squat it -- the VNC client must land on gpu0's
+    # head (the ls-gfx-live #31 leg). cocoa keeps the canonical device set
+    # (its View menu switches consoles interactively).
+    if [[ "${THYLACINE_DISPLAY:-none}" == vnc:* ]]; then
+        gpu_flags=(
+            -device "virtio-gpu-pci,id=gpu0,disable-legacy=on"
+        )
+    fi
 fi
 
 # P4-K-events: QMP control socket for test-harness key injection.
@@ -332,6 +342,23 @@ detect_accel() {
 }
 accel="${THYLACINE_ACCEL:-$(detect_accel)}"
 
+# Display backend (the fbcon era: tapestryd + Aurora render the console on
+# gpu0). Headless (-nographic) stays the default -- the CI/agent loop.
+#   THYLACINE_DISPLAY=cocoa   the interactive window (switch the View menu
+#                             to the virtio-gpu console; serial stays on
+#                             this terminal)
+#   THYLACINE_DISPLAY=vnc:N   serve the gpu0 console on 127.0.0.1:590N
+#                             (headless live-display; the ls-gfx-live #31
+#                             leg -- gpu-mmio0 is dropped so gpu0 binds
+#                             QemuConsole 0, see gpu_flags above)
+case "${THYLACINE_DISPLAY:-none}" in
+    none)  display_flags=(-nographic) ;;
+    cocoa) display_flags=(-display cocoa) ;;
+    vnc:*) display_flags=(-display "vnc=127.0.0.1:${THYLACINE_DISPLAY#vnc:}") ;;
+    *)     echo "run-vm.sh: unknown THYLACINE_DISPLAY='${THYLACINE_DISPLAY}' (none|cocoa|vnc:N)" >&2
+           exit 2 ;;
+esac
+
 # -cpu model + GIC version default off the chosen accel. HVF wants -cpu host +
 # GICv2: its emulated GICv3 distributor MMIO trips an `isv` data-abort assert,
 # and the GICv2 MMIO CPU interface is the HVF-on-Apple enabler (Lazarus W2). TCG
@@ -363,7 +390,7 @@ exec qemu-system-aarch64 \
     ${gpu_flags[@]+"${gpu_flags[@]}"} \
     -device virtio-rng-device,id=rng0 \
     -device virtio-rng-pci,id=rng_pci0 \
-    -nographic \
+    ${display_flags[@]+"${display_flags[@]}"} \
     -serial "${THYLACINE_SERIAL:-mon:stdio}" \
     ${qmp_flags[@]+"${qmp_flags[@]}"} \
     ${gdb_flags[@]+"${gdb_flags[@]}"} \

@@ -87,7 +87,17 @@ const GPU_RESP_DISPLAY_INFO_LEN: u32 = GPU_CTRL_HDR_LEN + GPU_MAX_SCANOUTS * GPU
 const VIRTQ_DESC_F_NEXT: u16 = 1;
 const VIRTQ_DESC_F_WRITE: u16 = 2;
 
-const MAX_NON_USED_BUFFER_WAKES: u32 = 16;
+// Wakes that did not retire the in-flight command before the submit is
+// declared wedged. Each is a real (if stale) interrupt-ish event, so 16 is
+// generous; a device that never interrupts at all still blocks in
+// irq.wait() forever (the pre-existing all-virtio-drivers posture).
+const MAX_STALE_WAKES_PER_SUBMIT: u32 = 16;
+// Bounded used.idx re-poll between stale wakes. If the wake WAS our
+// completion's notification but the used.idx store is still propagating
+// (the #31 live-display window), no further interrupt is coming -- the
+// spin is the net for that world; the re-wait is the net for the
+// stale-latched-edge world. ~tens of us of (barrier + load).
+const USED_SPIN_PER_WAKE: u32 = 65536;
 
 /// The QEMU-virt virtio-gpu default scanout geometry, used when
 /// GET_DISPLAY_INFO reports no enabled scanout (never observed on QEMU;
@@ -274,10 +284,18 @@ struct Controlq {
     isr_va: u64,
     irq: Irq,
     seq: u16,
+    /// Latched on any submit failure: the engine's seq tracker can no
+    /// longer be trusted against the device's avail consumption, so every
+    /// later submit would read a freshly-zeroed response buffer as
+    /// resp_type=0x0 (the #31 cascade). Fail fast + honestly instead.
+    dead: bool,
 }
 
 impl Controlq {
     fn submit_and_wait(&mut self, req_len: u32, resp_len: u32) -> Result<u32, ()> {
+        if self.dead {
+            return Err(());
+        }
         let next_seq = self.seq.wrapping_add(1);
 
         for i in 0..(GPU_CTRL_HDR_LEN as u64) {
@@ -312,33 +330,64 @@ impl Controlq {
 
         unsafe { w16(self.notify_va, GPU_QUEUE_CONTROL) };
 
+        // The completion authority is the USED RING, never the ISR bit.
+        // VIRTIO 1.2 2.7.13.2 orders the device's used.idx write before its
+        // notification, but a wake proves only that SOME notification-ish
+        // event reached us: irqfwd collapses INTx edges, a level re-fire or
+        // a config event can latch a stale pending event, and under a live
+        // display backend (#31, -display cocoa) such a mis-timed wake is
+        // routine. The pre-fix shape -- break on the first ISR_QUEUE wake,
+        // read used.idx ONCE, hard-fail if behind -- turned that benign
+        // timing into a permanent engine desync (seq diverges from the
+        // device's avail consumption; every later command re-publishes a
+        // consumed avail idx and reads its own zeroed response buffer as
+        // resp_type=0x0). Wait until used.idx retires OUR command, bounded.
+        let used_va = self.ring_va + CTRL_USED_OFF;
         let mut wakes = 0u32;
-        loop {
-            if wakes >= MAX_NON_USED_BUFFER_WAKES {
-                say!("tapestryd: gpu too many non-queue IRQ wakes");
-                return Err(());
-            }
+        'wait: loop {
             if self.irq.wait().is_err() {
                 say!("tapestryd: gpu SYS_IRQ_WAIT returned error");
+                self.dead = true;
                 return Err(());
             }
-            let isr = unsafe { r8(self.isr_va) };
-            if isr & ISR_QUEUE != 0 {
-                break;
+            // Read-to-clear on every wake: consumes + deasserts the INTx
+            // source (level hygiene). Deliberately NOT the break condition.
+            let _ = unsafe { r8(self.isr_va) };
+            virtio_rmb();
+            let used_idx = unsafe { r16(used_va + 2) };
+            if used_idx == next_seq {
+                break 'wait;
+            }
+            if used_idx != self.seq {
+                // Neither not-yet (seq) nor done (next_seq): single-in-flight
+                // submission makes any other value ring corruption, not timing.
+                say!(
+                    "tapestryd: gpu used.idx {} outside {}..{} (ring corrupt)",
+                    used_idx, self.seq, next_seq
+                );
+                self.dead = true;
+                return Err(());
+            }
+            // Not ours yet. If this wake WAS our completion's notification
+            // with the used.idx store still propagating, no further
+            // interrupt is coming -- spin-poll briefly before re-waiting.
+            for _ in 0..USED_SPIN_PER_WAKE {
+                virtio_rmb();
+                if unsafe { r16(used_va + 2) } == next_seq {
+                    break 'wait;
+                }
             }
             wakes += 1;
+            if wakes >= MAX_STALE_WAKES_PER_SUBMIT {
+                say!("tapestryd: gpu command never retired after {} stale wakes", wakes);
+                self.dead = true;
+                return Err(());
+            }
         }
 
-        let used_va = self.ring_va + CTRL_USED_OFF;
-        let used_idx = unsafe { r16(used_va + 2) };
         // VIRTIO 1.2 2.7.13.2: order the used.idx observation before the
         // response-buffer read.
         virtio_rmb();
-        if used_idx != next_seq {
-            say!("tapestryd: gpu used.idx {} != expected {}", used_idx, next_seq);
-            return Err(());
-        }
-
         let resp_type = unsafe { r32(self.ring_va + RESP_OFF) };
         self.seq = next_seq;
         Ok(resp_type)
@@ -449,6 +498,7 @@ impl Gpu {
                 isr_va,
                 irq,
                 seq: 0,
+                dead: false,
             },
             ring_va,
             width: DEFAULT_DISPLAY_W,

@@ -91,6 +91,16 @@ qemu-system-aarch64 \
 - `--no-share`: disable VirtIO-9P host share (for isolation testing).
 - `--virgl`: enable VirtIO-GPU virgl 3D (post-v1.0).
 
+**Display backend (`THYLACINE_DISPLAY`, the fbcon era — #31):** headless
+(`-nographic`) stays the default (the CI/agent loop). `=cocoa` opens the
+interactive window — the human path to the Aurora console (switch the
+window's View menu to the virtio-gpu console; serial stays on the
+launching terminal). `=vnc:N` serves the gpu0 console on
+`127.0.0.1:590N` — the headless live-display mode
+(`tools/interactive/ls-gfx-live.exp` + `tools/rfb-refresh.py` drive it;
+in this mode the vestigial `gpu-mmio0` device is dropped so the gpu0
+console binds QemuConsole 0, which a VNC client attaches to).
+
 ### 3.1 Agentic eyes — `tools/screendump.sh` (QMP scanout capture)
 
 The graphics arc's capture step (G-0; `TAPESTRY.md` §18.9). Captures the

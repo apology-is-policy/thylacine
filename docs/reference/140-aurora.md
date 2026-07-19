@@ -140,6 +140,18 @@ private session → fullscreen surface → weave map → Loom presents.
   CONTIGUOUS dirty row span into the CURRENT slot, and presents exactly
   that rect (slots rotate per present — presenting rows a pass did not
   just render would transfer stale slot content).
+- **A failed present is a DROPPED FRAME, never death (#31).** The
+  pre-#31 loop exited on any `present()` error, so one transient
+  compositor GPU hiccup (the controlq desync's client-visible face)
+  killed the console permanently. Now: the dirty rows + `prev_cursor`
+  stay set (the retry MUST re-render — slots rotate per present, so
+  re-presenting without re-rendering would ship a stale slot), the
+  failure is logged with decay (first 3 + every 64th), and only
+  `PRESENT_FAILS_FATAL` (240) CONSECUTIVE failures exit — the
+  live-stream-but-presents-never-succeed wedge. Real compositor death
+  still exits promptly via the event-stream-EOF path (`wait_event`
+  erroring), and the FIRST present stays fatal (startup must prove the
+  pipe).
 
 joey spawns `/bin/aurora` with the perm in the G-3 block (still
 console-attached), replacing tapestry-demo as the resident boot

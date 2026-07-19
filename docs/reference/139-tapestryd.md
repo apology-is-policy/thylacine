@@ -51,6 +51,30 @@ v1.x) — the display stays blank until reboot.
   INTx wait → verify) — the property the I-40 stage-0 quiesce argument
   stands on (below). `GET_DISPLAY_INFO` adopts scanout 0's enabled rect
   (QEMU-virt default 1280x800; fail-soft to 1024x768; sanity-clamped).
+  **The completion authority is the USED RING, never the ISR bit (#31)**:
+  a wake proves only that *some* notification-ish event arrived (irqfwd
+  collapses INTx edges; a level re-fire or config event latches stale
+  pending events; under a live display backend — `-display cocoa` — a
+  mis-timed wake is routine), so `submit_and_wait` re-reads `used.idx`
+  behind `virtio_rmb` after every wake plus a bounded spin
+  (`USED_SPIN_PER_WAKE`, the net for a mid-propagation store with no
+  further interrupt coming) until the command retires, bounded by
+  `MAX_STALE_WAKES_PER_SUBMIT`. The pre-#31 shape — break on the first
+  `ISR_QUEUE` wake, read `used.idx` ONCE, hard-fail if behind — turned
+  benign display-path timing into a permanent engine desync: `seq`
+  diverged from the device's avail consumption, every later command
+  re-published a consumed avail idx and read its own freshly-zeroed
+  response buffer as `resp_type=0x0` (the cascade the user's cocoa
+  session showed: 13 presents then scanout death). Any submit failure
+  now LATCHES `Controlq.dead` — later submits fail fast + honestly
+  instead of cascading garbage. A device that never interrupts at all
+  still blocks in `irq.wait()` (the pre-existing all-virtio-drivers
+  posture). The trigger needs a real display backend's thread topology:
+  three escalating headless repro attempts (a 66/s screendump hammer at
+  2x cocoa's refresh; a live VNC backend on the gpu0 console at real
+  dirty-rect traffic) never fired it — `tools/interactive/ls-gfx-live.exp`
+  is the standing live-display coverage leg; the cocoa acceptance test
+  is a human at `THYLACINE_DISPLAY=cocoa`.
 - `input.rs` — the virtio-keyboard-PCI eventq: the P4-K probe's audited
   populate/drain/recycle discipline over the same PCI transport,
   POLL-MODE (`VIRTQ_AVAIL_F_NO_INTERRUPT`; no IRQ claimed — the
