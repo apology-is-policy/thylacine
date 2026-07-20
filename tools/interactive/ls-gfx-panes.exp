@@ -1,0 +1,133 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-gfx-panes.exp -- the G-6a compositor acceptance leg
+# (TAPESTRY.md 18.9: "the acceptance battery on synthetic clients").
+#
+# Drives /bin/tapestry-battery in the session foreground and asserts the
+# THREE views agree:
+#   structural : the battery's own in-guest asserts (layout text vs the
+#                pane geometry files; disjoint nonzero rects);
+#   pixels     : screendump -P + tools/ppm-sample.py at the pane centers
+#                the battery prints (client A solid red, B solid blue --
+#                the compose blit path, exact colors);
+#   input      : QMP-typed keys arrive on the FOCUSED surface's event
+#                stream only (focus leg A via the layout file, then leg B
+#                via B's own pane ctl), while the exp's serial commands
+#                keep flowing (the serial input path is focus-independent).
+# The coda proves teardown: the battery exits, its panes collapse, the
+# console returns to fullscreen direct scanout, and the -c console verify
+# passes again.
+#
+# Runs under HVF (the gfx-scenario medium; TCG hangs at the pre-existing
+# 8a-2b hwwatch E2E, task #27). Needs the QMP socket + python3; GPU-less
+# boots use the standing THYLACINE_NO_GPU escape.
+
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+set repo $lc_repo
+set qmp "$repo/build/qmp.sock"
+
+proc gfx_dump {out args_} {
+    global repo qmp
+    if {[catch {exec $repo/tools/screendump.sh -s $qmp {*}$args_ $out} err]} {
+        return $err
+    }
+    return ""
+}
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# Anchor: the fullscreen console renders before the battery perturbs it.
+set ok 0
+for {set i 0} {$i < 12} {incr i} {
+    if {[gfx_dump /tmp/ls-gfx-panes-pre.png "-c"] eq ""} { set ok 1; break }
+    after 700
+}
+if {!$ok} { lc_fail "pre-battery console verify (-c) never passed" }
+lc_pass "panes: pre-battery console verified"
+
+# The battery (foreground; its say! lines land on the serial tee).
+lc_send "tapestry-battery"
+set timeout 30
+expect {
+    -ex "tapestry-battery: structure OK" { lc_pass "panes: in-guest structure asserts OK" }
+    -ex "tapestry-battery: FAIL" { lc_fail "battery structure legs failed" }
+    timeout { lc_fail "battery never reached structure OK" }
+    eof { lc_fail "qemu exited during the battery" }
+}
+expect {
+    -re {battery: A pane=\d+ center=(\d+) (\d+)} {
+        set ax $expect_out(1,string)
+        set ay $expect_out(2,string)
+    }
+    timeout { lc_fail "no A center line" }
+}
+expect {
+    -re {battery: B pane=\d+ center=(\d+) (\d+)} {
+        set bx $expect_out(1,string)
+        set by $expect_out(2,string)
+    }
+    timeout { lc_fail "no B center line" }
+}
+expect {
+    -ex "tapestry-battery: panes ready" {}
+    timeout { lc_fail "battery never reached panes ready" }
+}
+
+# Pixel asserts at the printed centers (solid fills; the compose blit is
+# byte-preserving, so the samples are exact).
+after 400
+if {[gfx_dump /tmp/ls-gfx-panes.ppm "-P"] ne ""} {
+    lc_fail "PPM capture failed"
+}
+set rgba [exec $repo/tools/ppm-sample.py /tmp/ls-gfx-panes.ppm $ax $ay]
+if {$rgba ne "255 0 0"} { lc_fail "A center ($ax,$ay) = '$rgba', want '255 0 0'" }
+set rgbb [exec $repo/tools/ppm-sample.py /tmp/ls-gfx-panes.ppm $bx $by]
+if {$rgbb ne "0 0 255"} { lc_fail "B center ($bx,$by) = '$rgbb', want '0 0 255'" }
+lc_pass "panes: composed pixels exact at both centers (A red, B blue)"
+
+# Focus leg A: the typed key must arrive on A's stream (the battery waits
+# there; a mis-route hangs it into its budget FAIL).
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp "x"} err]} {
+    lc_fail "qmp-sendtext (leg A) failed: $err"
+}
+expect {
+    -ex "battery: A key" { lc_pass "panes: focused-leaf routing (leg A)" }
+    -ex "tapestry-battery: FAIL" { lc_fail "battery focus leg A failed" }
+    timeout { lc_fail "key never arrived on A (focus routing broken)" }
+}
+expect {
+    -ex "tapestry-battery: focus B" {}
+    timeout { lc_fail "battery never switched focus to B" }
+}
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp "y"} err]} {
+    lc_fail "qmp-sendtext (leg B) failed: $err"
+}
+expect {
+    -ex "battery: B key" { lc_pass "panes: focus switch via pane ctl (leg B)" }
+    -ex "tapestry-battery: FAIL" { lc_fail "battery focus leg B failed" }
+    timeout { lc_fail "key never arrived on B (pane-ctl focus broken)" }
+}
+expect {
+    -ex "tapestry-battery: PASS" { lc_pass "panes: battery PASS" }
+    -ex "tapestry-battery: FAIL" { lc_fail "battery failed after the focus legs" }
+    timeout { lc_fail "battery never finished" }
+}
+
+# The coda: panes collapsed, the console is fullscreen direct again; the
+# session prompt answers and the -c verify passes (a serial command first
+# forces a fresh present -- the direct switch rides a present-complete).
+lc_run_expect "pwd" "/home/michael"
+set ok 0
+for {set i 0} {$i < 12} {incr i} {
+    if {[gfx_dump /tmp/ls-gfx-panes-post.png "-c"] eq ""} { set ok 1; break }
+    after 700
+}
+if {!$ok} { lc_fail "post-battery console verify (-c) never passed (collapse/direct-return broken)" }
+lc_pass "panes: console restored fullscreen after the battery"
+
+lc_quit
+lc_pass "ls-gfx-panes: the G-6a compositor leg verified (structure + pixels + focus + collapse)"
+exit 0

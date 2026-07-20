@@ -58,6 +58,7 @@ device="gpu0"
 head=0
 verify=0
 offline=""
+fmt="png"
 
 usage() {
     cat >&2 <<EOF
@@ -73,6 +74,8 @@ usage: tools/screendump.sh [-s QMP_SOCK] [-d DEVICE_ID] [-H HEAD] [-v|-c] OUT.pn
                 sibling dump (TL red, TR green, BL blue, BR white)
   -c            verify the Aurora console signature (Bonfire bg dominant
                 + exact default-fg text + blend-integrity edges)
+  -P            capture OUT as a raw P6 PPM instead of a PNG (for pixel
+                tools -- tools/ppm-sample.py; G-6 battery asserts)
   -F FILE.ppm   offline mode: run the -v/-c verification against an
                 existing P6 PPM instead of a live VM (no QMP; no
                 OUT.png positional; the file is not deleted)
@@ -80,13 +83,14 @@ EOF
     exit 2
 }
 
-while getopts "s:d:H:vcF:h" opt; do
+while getopts "s:d:H:vcPF:h" opt; do
     case "$opt" in
         s) sock="$OPTARG" ;;
         d) device="$OPTARG" ;;
         H) head="$OPTARG" ;;
         v) verify=1 ;;
         c) verify=2 ;;
+        P) fmt="ppm" ;;
         F) offline="$OPTARG" ;;
         *) usage ;;
     esac
@@ -124,12 +128,13 @@ else
     fi
 fi
 
-exec python3 - "$sock" "$device" "$head" "$out" "$verify" "$offline" <<'PYEOF'
+exec python3 - "$sock" "$device" "$head" "$out" "$verify" "$offline" "$fmt" <<'PYEOF'
 import json, os, socket, sys
 
 sock_path, device, head, out = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
 verify = int(sys.argv[5])   # 0 = none, 1 = -v quadrants, 2 = -c console
 offline = sys.argv[6]       # non-empty = verify this PPM, no QMP/VM
+fmt = sys.argv[7]           # png (default) | ppm (-P: pixel-tool captures)
 
 
 class Qmp:
@@ -218,10 +223,11 @@ if offline:
     q = None
 else:
     q = Qmp(sock_path)
-    q.cmd("screendump", filename=out, device=device, head=head, format="png")
-    if not (os.path.getsize(out) > 8
-            and open(out, "rb").read(8) == b"\x89PNG\r\n\x1a\n"):
-        print(f"screendump: {out} is not a PNG", file=sys.stderr)
+    q.cmd("screendump", filename=out, device=device, head=head, format=fmt)
+    magic = b"P6" if fmt == "ppm" else b"\x89PNG\r\n\x1a\n"
+    if not (os.path.getsize(out) > len(magic)
+            and open(out, "rb").read(len(magic)) == magic):
+        print(f"screendump: {out} is not a {fmt.upper()}", file=sys.stderr)
         sys.exit(1)
     print(f"screendump: wrote {out} "
           f"({os.path.getsize(out)} bytes; device={device} head={head})")

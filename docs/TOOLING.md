@@ -116,6 +116,9 @@ tools/screendump.sh -c out.png              # + verify the Aurora console (G-4:
                                             #   G-5: + blend-integrity edges)
 tools/screendump.sh -c -F frame.ppm         # offline: verify an existing P6 PPM
                                             #   (no QMP/VM; the regression path)
+tools/screendump.sh -P out.ppm              # capture a raw P6 PPM instead of PNG
+                                            #   (pixel tools; G-6 battery asserts)
+tools/ppm-sample.py out.ppm X Y             # print "R G B" at (X,Y) of a P6 PPM
 tools/screendump.sh -s SOCK -d DEV -H N ... # explicit socket / qdev id / head
 ```
 

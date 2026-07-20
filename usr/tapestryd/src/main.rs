@@ -49,6 +49,7 @@ macro_rules! say {
 mod gpu;
 mod input;
 mod keymap;
+mod pane;
 mod server;
 
 use alloc::vec::Vec;

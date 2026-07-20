@@ -50,6 +50,14 @@ proc lc_step {msg} {
 
 proc lc_fail {msg} {
     lc_step "FAIL: $msg"
+    # Evidence BEFORE the kill: the VM's process state at failure time
+    # splits "qemu exited" (stat Z* -- Tcl lazy-reaps, so a dead child
+    # lingers as a zombie; kill -0 would lie) from "the serial bridge
+    # died under a live VM" (stat R/S/U) -- the G-6a run-3 EOF class.
+    if {[info exists ::lc_vm_pid]} {
+        if {[catch {exec ps -p $::lc_vm_pid -o stat=} st]} { set st GONE }
+        lc_step "vm-at-fail: pid $::lc_vm_pid stat=[string trim $st]"
+    }
     send_user "\nLS-CI FAIL: $msg\n"
     lc_vm_kill
     exit 1

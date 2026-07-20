@@ -940,6 +940,37 @@ login + `ls` with before/after dumps, then QMP-typed `whoami` on the
 display-bound kbd-pci0 asserted via the serial TEE (the graphical input
 loop, no pixel OCR). As-built: `docs/reference/140-aurora.md`.
 
+**G-6a AS-BUILT (landed on `gfx-2`): the pane tree + multi-surface
+composition — the compositor's first stage.** `pane.rs` realizes the §14
+container model (flatten-same-mode / nest-different-mode splits; split
+focuses the new empty leaf = the auto-host target; collapse; root
+persists; monotonic never-reused pane ids); surfaces host at CREATE
+(focused-empty-leaf else split-focused). Scanout is a mode machine
+(Boot/Off/Direct/Composed): the single-visible-display-sized case keeps
+the stage-0 DIRECT zero-copy path byte-identical (aurora's boot
+unchanged), everything else composes into a compositor-owned screen
+buffer — a WEAVE-subtype DMA chunk (the §18.1 type discipline: scanout
+backings are the weave class; plain SYS_DMA_CREATE is the
+virtqueue class, 1 MiB-capped — measured), never registered for
+sharing. EVERY switch onto a client resource rides a present-COMPLETE
+(F16 uniformly, `pending_direct`). The tearing-freedom invariant:
+client weave bytes are read only inside the present dispatch for the
+just-presented slot; chrome repaints never touch client memory, and a
+geometry-signature split keeps focus-ring moves from blanking idle
+content. **The §18.3 CONFIGURE emission half is pulled forward**
+(chunk-completeness): same-size CONFIGURE = the redraw request (emitted
+at structural composed repaints to all visible surfaces + at
+pending-direct entry), because an accumulator client's slots are
+patchwork (aurora measured — static rows never healed without it); the
+resize-ack/reweave half stays `E_OPNOTSUPP` until G-6b. The 9P tree
+gains `layout` + `pane/<id>/{ctl,mode,role,tag,surface,geometry}` (V4
+§18.5); pane files are global — the environment-role mutation gate + the
+D5 layout-observability caveat are the recorded Halcyon-era seam. Gate:
+`ls-gfx-panes.exp` + `/bin/tapestry-battery` (structure + exact pixels
+via `screendump -P`/`ppm-sample` + QMP focus legs + the collapse coda);
+ls-gfx / ls-gfx-live / the per-boot `-c` gate stay green. As-built:
+`docs/reference/139-tapestryd.md` "The compositor stage 1".
+
 ### 18.10 Audit-trigger + scripture sync obligations
 
 At each landing, per standing discipline: G-2 joins the Weft/burrow rows

@@ -53,7 +53,7 @@ use libthyla_rs::{
     T_WALK_OPEN_FROM_ROOT,
 };
 use render::{render_rows, Metrics};
-use tapestry::{Rect, Surface, TEV_CLOSE, TEV_FRAME, TEV_KEY};
+use tapestry::{Rect, Surface, TEV_CLOSE, TEV_CONFIGURE, TEV_FRAME, TEV_KEY};
 use vt::{Vt, BG};
 
 macro_rules! say {
@@ -224,6 +224,26 @@ pub extern "C" fn rs_main() -> i64 {
                 TEV_CLOSE => {
                     say!("aurora: CLOSE received; exiting");
                     return 0;
+                }
+                TEV_CONFIGURE => {
+                    // The compositor's redraw/resize request (G-6,
+                    // TAPESTRY.md 18.3). Same-size = a full-repaint
+                    // request: the compositor's structural repaints blank
+                    // pane content, and the row-damage renderer would
+                    // otherwise heal only rows that happen to change --
+                    // mark EVERY row dirty so the next render pass
+                    // repaints the whole grid. A size CHANGE needs the
+                    // reweave protocol (G-6b) -- aurora keeps its grid
+                    // until that lands (the compositor crops/letterboxes).
+                    let cw = (e.value >> 16) as usize;
+                    let ch = (e.value & 0xffff) as usize;
+                    if cw == w && ch == h {
+                        for d in term.dirty.iter_mut() {
+                            *d = true;
+                        }
+                    } else {
+                        say!("aurora: CONFIGURE {}x{} ignored (reweave lands at G-6b)", cw, ch);
+                    }
                 }
                 _ => {}
             }

@@ -163,29 +163,36 @@ reply's `ring_entries = 0` is the WEAVE-kind contract
 `weft_claimed_kind` cross-checks kernel-side.
 
 The present engine (`Conn::present`): parse the 32-byte tpresent
-(version-pinned; HOLD + multi-rect honestly `E_OPNOTSUPP` until G-6),
+(version-pinned; HOLD + multi-rect honestly `E_OPNOTSUPP` until G-6c),
 validate slot + rect against the geometry (the untrusted-client
-boundary; overflow-safe u64 sums), then TRANSFER + FLUSH synchronously;
-the `Rwrite` becomes the client's CQE — the D1 recycle gate. **The
-in-flight window opens and closes inside one dispatch, so the in-flight
-present set is EMPTY at every retire decision point: the
-`tapestry_present.tla` quiesce obligation (`ServerRelease`'s
-`intransfer = 0`) holds BY CONSTRUCTION at stage 0.** A pipelined
-controlq (G-6+) must implement a real drain before touching retire —
-this sentence is the recorded obligation.
+boundary; overflow-safe u64 sums), then move the pixels synchronously —
+by scanout mode since G-6a (see "The compositor stage 1" below): the
+Direct arm TRANSFERs + FLUSHes the client's own resource (the stage-0
+path byte-identical), the Composed arm blits into the screen buffer and
+TRANSFERs + FLUSHes that; the `Rwrite` becomes the client's CQE — the
+D1 recycle gate either way. **The in-flight window opens and closes
+inside one dispatch, so the in-flight present set is EMPTY at every
+retire decision point: the `tapestry_present.tla` quiesce obligation
+(`ServerRelease`'s `intransfer = 0`) holds BY CONSTRUCTION.** A
+pipelined controlq must implement a real drain before touching retire —
+this sentence is the recorded obligation (G-6a deliberately KEPT the
+synchronous engine, so it carries forward).
 
-Scanout follows the spec's `Complete`: an ownerless scanout is taken at
-present-COMPLETE (`scanout_take`; the F16 alignment — never before a
-first frame has transferred). The retire (`Comp::retire` — ctl
-`destroy`, the owning conn's teardown/Tversion, or the R2-F4 WEDGE)
-runs the I-40 ordering: (1) quiesce (empty, above); (2)
-`t_weft_unshare` BEFORE any backing free (R2-F5
+Scanout follows the spec's `Complete` uniformly: every switch ONTO a
+client resource rides a present-COMPLETE (`pending_direct`; the F16
+alignment — never before a frame has transferred). The retire
+(`Comp::retire` — ctl `destroy`, the owning conn's teardown/Tversion,
+or the R2-F4 WEDGE) runs the I-40 ordering: (0) the hosting leaf closes
+(G-6a — the layout no longer names the surface); (1) quiesce (empty,
+above); (2) `t_weft_unshare` BEFORE any backing free (R2-F5
 registry-removal-before-page-free — a Tweft claim racing the retire
 fails closed; on an already-claimed share the unshare is a harmless
-miss); (3) scanout release; (4) DETACH_BACKING + RESOURCE_UNREF; (5)
-unmap + close the weave DMA (serverRef drops; the pages free when the
-client's mapping ref also drops, #847 — or at the reaper's
-force-reclaim).
+miss); (3) scanout release — `reconcile()` moves scanout off the dying
+surface, and the two arms that legally leave it referenced (a deferred
+Direct(survivor) + a degraded screen alloc) are forced away explicitly;
+(4) DETACH_BACKING + RESOURCE_UNREF; (5) unmap + close the weave DMA
+(serverRef drops; the pages free when the client's mapping ref also
+drops, #847 — or at the reaper's force-reclaim).
 
 ### Events (TAPESTRY §18.4)
 
@@ -193,16 +200,115 @@ force-reclaim).
 QWERTY: every KEY carries the raw evdev code AND the resolved rune +
 the running modifier mask). FRAME is the synthesized display clock
 (60 Hz default, `clock-rate` ctl; base virtio-gpu 2D has no guest
-vblank), riding the serve loop's poll timeout. Key events route to the
-focused (scanout-owning) surface. The bounded per-surface queue
-(`EVENT_QUEUE_CAP = 128`) implements R2-F4: FRAME coalesces (at most
-one queued; refreshed in place) and drops when full; a NON-droppable
-event overflowing evicts one coalescible first, else the surface is
-WEDGED and force-retired — never blocked, never a dropped control event
-for a live client. Stage 0 signals a retired surface's stream-end via
-the event-fid EOF (a parked read is delivered empty; a later read
-returns empty); the queued-CLOSE record proper rides the pane layer
-(G-6), where compositor-initiated closes need distinguishing.
+vblank), riding the serve loop's poll timeout — since G-6a it is
+delivered to VISIBLE hosted surfaces only (a hidden tab's paced client
+naturally suspends). Key events route to the FOCUSED leaf's surface
+(G-6a). CONFIGURE `{serial in code, W<<16|H in value}` is emitted
+same-size as the REDRAW request (G-6a; see below) and
+coalesces-by-replacement (only the latest serial matters, §18.3). The
+bounded per-surface queue (`EVENT_QUEUE_CAP = 128`) implements R2-F4:
+FRAME coalesces (at most one queued; refreshed in place) and drops when
+full; a NON-droppable event overflowing evicts one coalescible first,
+else the surface is WEDGED and force-retired — never blocked, never a
+dropped control event for a live client. A retired surface's
+stream-end is the event-fid EOF (a parked read is delivered empty; a
+later read returns empty); the queued-CLOSE record proper rides the
+pane-close notification (G-6b), where compositor-initiated closes need
+distinguishing.
+
+## The compositor stage 1 (G-6a): the pane tree + multi-surface composition
+
+`pane.rs` is the i3 container model — ONE structural primitive (a
+container whose mode is `splith | splitv | tabbed | stacked`),
+nestable, leaves hosting surfaces; the screen is the root container.
+Policy encoded there: a split FLATTENS into a same-mode parent (sibling
+insert) and NESTS under a different-mode one; a split focuses the NEW
+empty leaf (the auto-host target); closing collapses single-child
+containers; the root is never removed (an empty root leaf is the blank
+screen); pane PUBLIC ids are monotonic and never reused (a stale pane
+fid resolves to nothing — the net-3d discipline structurally);
+geometry divides equally (remainder to the last child) with a 1px
+content inset per leaf iff more than one leaf is visible (the
+single-fullscreen root leaf keeps the stage-0 borderless look).
+
+**Hosting**: a surface is hosted at CREATE (`Comp::create` →
+`layout.host`) — the focused empty leaf takes it, else the focused
+leaf splits (orientation by content aspect). Hosting is once per
+surface lifetime; `close` deliberately STRANDS a live surface invisible
+(the pane was closed; the client is asked to exit — the TEV_CLOSE
+notification lands at G-6b; a stranded client's conn teardown retires
+it). A pane-table-exhausted surface stays unhosted (presents complete
+without pixels).
+
+**Scanout modes** (`Scanout`): `Boot` (untouched since startup — the
+kernel test pattern stays until first content), `Off`, `Direct(n)`,
+`Composed`. `reconcile()` — run after every layout/hosting mutation —
+recomputes geometry and drives the mode machine: exactly one visible
+leaf hosting a display-sized surface wants `Direct(n)` (the zero-copy
+fullscreen case — aurora's boot is byte-identical to stage 0); anything
+else visible wants `Composed`; nothing wants `Off`. Every entry to
+Direct is DEFERRED to the target's next present-COMPLETE
+(`pending_direct`, the F16 rule uniformly), and that present's transfer
+expands to the full surface when the client resource is stale
+(`res_stale` — composed-era presents never touched it).
+
+**The screen buffer** (`Screen`, `SCREEN_RES = 0x40`): a WEAVE-subtype
+DMA chunk — the G-2 type discipline puts every `RESOURCE_ATTACH_BACKING`
+scanout backing in that class (plain `SYS_DMA_CREATE` is the
+virtqueue/command class, capped at `KOBJ_DMA_MAX_SIZE` = 1 MiB; the
+first G-6a run measured exactly that reject). Share-admissible by TYPE
+but never REGISTERED (`t_weft_share` is never called on it), so no
+share_id exists for a client to claim. Allocated lazily at the first
+Composed entry; held for the process lifetime.
+
+**The tearing-freedom invariant**: client weave bytes are read ONLY
+inside the present dispatch, for the slot the client just presented
+(`blit_composed` — clipped both to the damage and the pane content, so
+an oversized or CONFIGURE-deaf client shows its top-left crop).
+`paint_chrome` never touches client memory; a structural repaint blanks
+pane content and panes heal by redraw. Chrome repaints are split by a
+visible-geometry signature (`calc_geom_sig`): structural changes
+repaint fully; a pure focus move redraws only the 1px frames
+(`paint_borders` — idle clients keep their pixels; the focus ring is
+`FOCUS_COLOR`).
+
+**The CONFIGURE redraw wire** (the §18.3 emission half, pulled forward
+by chunk-completeness): aurora is an ACCUMULATOR client (row-damage
+renders — each weave slot is a patchwork; only the resource/screen
+accumulates), so after a structural repaint its static rows would never
+heal, and a direct-switch full-slot transfer would push patchwork (the
+first G-6a runs measured both). Same-size CONFIGURE = the full-repaint
+request: emitted to every visible hosted surface at a structural
+composed repaint, and to the target at pending-direct ENTRY
+(edge-triggered). Aurora's response (`TEV_CONFIGURE`, same size): mark
+every row dirty → the next pass repaints the whole grid; a size CHANGE
+is logged + ignored until the reweave protocol lands (G-6b) — the
+compositor crops/letterboxes meanwhile. The resize ack
+(`resize W H serial` on the surface ctl) stays `E_OPNOTSUPP` at G-6a.
+
+**The 9P layer**: the root gains `layout` (read: the tree text —
+`epoch`/`focused` header + one pane per line with mode, surface, and
+content rect; write: `split <id> h|v`, `close <id>`, `focus <id>`,
+`mode <id> <m>`) and `pane/<id>/{ctl,mode,role,tag,surface,geometry}`
+(ctl = the same verbs with the fid's pane implicit; mode/role/tag are
+direct field reads/writes; geometry is the content rect). Pane qids
+carry bit 41 (`PANE_FLAG`); ids never reused. Pane files are GLOBAL
+(not F2-gated): the layout is compositor-global state on the same trust
+plane as the stage-0 global ctl — the environment-role mutation gate is
+the recorded Halcyon-era seam, and the D5 observability caveat (a
+client that reads the layout can find its own placement) is part of the
+same record.
+
+**The gate**: `tools/interactive/ls-gfx-panes.exp` +
+`/bin/tapestry-battery` — one process hosting both synthetic clients
+(private sessions) and the layout driver; asserts the THREE views agree
+(the battery's in-guest structure asserts [layout text vs the pane
+geometry files, disjoint nonzero rects], host-side pixel asserts at the
+printed pane centers via `screendump.sh -P` + `tools/ppm-sample.py`
+[solid red/blue, exact], and the focus legs [QMP-typed keys arrive on
+the focused surface only — leg A via the layout file, leg B via B's own
+pane ctl]) plus the collapse coda (the battery exits, panes collapse,
+the console returns to fullscreen direct scanout, `-c` passes again).
 
 ## libtapestry + tapestry-demo
 

@@ -180,6 +180,17 @@ presenter (the demo stays baked for manual runs — first-present-wins
 scanout would race two residents). Aurora's `say!` diagnostics go
 uart-direct (SYS_PUTS) — never into its own drain, so no feedback loop.
 
+**TEV_CONFIGURE (G-6a)**: aurora is an accumulator client — the row
+renderer paints only dirty rows into the current slot, so every weave
+slot is a patchwork and only the compositor-side accumulator (the host
+resource in direct mode, the screen buffer in composed mode) holds a
+complete frame. A same-size CONFIGURE is therefore the compositor's
+full-repaint request (its structural repaints blank pane content):
+aurora marks EVERY row dirty and the next pass repaints the whole grid.
+A size CHANGE is logged and ignored — the reweave protocol (the fresh
+weave at the new size, TAPESTRY §18.3) is the G-6b client lift; the
+compositor crops/letterboxes aurora's grid until then.
+
 ## The gates
 
 - **The per-boot console gate** (`tools/test.sh`, every ci-smp-gate
