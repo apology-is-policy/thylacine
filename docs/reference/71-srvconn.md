@@ -518,11 +518,27 @@ in `kernel/syscall.c` (reference 70's Spec cross-reference).
   `client_recv` blocked on an empty ring; it returns EOF (`0`) — a
   corvus crash never wedges a client.
 
-The three threaded tests (`recv_blocks_then_wakes`,
-`server_send_blocks_then_drain_wakes`, `teardown_wakes_blocked`) use the
-kernel test harness's `thread_create` / `ready` / `sched` cooperative-
-yield pattern (cf. `test_tsleep.c`) plus the #109 terminal-park reap
-handshake. Default + UBSan green.
+The four threaded tests (`recv_blocks_then_wakes`,
+`server_send_blocks_then_drain_wakes`, `client_send_blocking_backpressure`,
+`teardown_wakes_blocked`) use the kernel test harness's `thread_create` /
+`ready` / `sched` cooperative-yield pattern (cf. `test_tsleep.c`) plus the
+#109 terminal-park reap handshake. Default + UBSan green.
+
+**They wait on the OBSERVABLE, never on a single `sched()`** (`SC_YIELD_UNTIL`).
+The bare `sched(); assert(counter advanced)` shape assumed one yield runs the
+peer to its next block — an assumption that predates SMP placement and stopped
+holding once `select_target_cpu` can put the woken peer on another CPU. It
+surfaced 2026-07-20 as a 1-in-10 `ubsan-smp8` failure of
+`teardown_wakes_blocked`, where the harness runnable-dump showed the consumer
+already woken and RUNNABLE on `cpu=4`: the wake had been delivered, the assert
+just ran before it was observed. Both waits of each test are covered — the
+"peer ran and is now SLEEPING" wait carries the same hazard as the wake wait.
+
+The budget keeps the tests honest: a genuinely lost wake never satisfies the
+condition, the budget expires, and the unchanged assert fails exactly as
+before (revert-probed by deleting `wakeup(&cn->s2c.rendez)` from
+`srvconn_teardown` — the test still fails loudly). Task #77 tracks the same
+pattern elsewhere in the suite.
 
 ---
 
