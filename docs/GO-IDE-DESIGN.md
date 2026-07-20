@@ -248,6 +248,13 @@ with its own focused design pass + audit (it is a new privilege surface).
   JSON-RPC codec + dirty-on-event), then **8e-2** (the LSP client, inline in the
   editor) and **8e-3** (the DAP client, headless from `:`). The `MENU`/`COMMANDS`
   const tables become an extensible registry (the plugin architecture).
+  8e-2's owed live coverage LANDED as the boot-fatal joey probe `joey: go8e-2
+  OK` (`/bin/lsp-probe`): `parley::lsp` drives the REAL gopls over stdio through
+  `initialize` → `didOpen` → `publishDiagnostics`, asserting a planted error at
+  its planted LINE. Until then the client had only ever been fed messages its
+  own unit tests wrote, and the go8d probe drives gopls as a *command*, never
+  over the protocol — see `docs/reference/141-parley.md` for what the probe does
+  and does not cover.
 - **8f** — the Kaua debug UI (source / vars / stack / goroutines / watch) + the
   interactive run-pane. Per `docs/NORA-IDE-UX.md`: **8f-1** the Kaua widget
   registry additions (`Tree`/`Table`/`Tabs`/`Scrollbar`, pure + unit-tested) →

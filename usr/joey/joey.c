@@ -4305,6 +4305,38 @@ int main(void) {
                                          "status=");
                                 t_putstr(itoa_dec(st_def, gpn, sizeof(gpn)));
                                 t_putstr("\n");
+
+                                // === Go 8e-2: the LIVE LSP round-trip (#76) ===
+                                // The legs above drive gopls as a COMMAND; this
+                                // drives it as a SERVER -- parley::lsp over
+                                // piped stdio through initialize -> initialized
+                                // -> didOpen -> publishDiagnostics, which is the
+                                // path nora takes and the one that had NO live
+                                // coverage (parley::lsp's 19 unit tests all feed
+                                // it messages the tests themselves wrote, and
+                                // parley-probe's only server is /parley-echo,
+                                // which speaks no protocol).
+                                //
+                                // Runs HERE because it needs exactly the env the
+                                // legs above set up: PATH (gopls LookPaths `go`)
+                                // + the two fork-grantable user caps
+                                // (crypto/rand at gopls init). The probe brings
+                                // its own workspace and chdirs to it, so joey's
+                                // cwd does not matter. Budget above the probe's
+                                // own 240s so a probe-side timeout reports its
+                                // reason rather than being killed mid-diagnosis.
+                                static const char argv_lspp[] = "/bin/lsp-probe\0";
+                                const char lspp_path[] = "/bin/lsp-probe";
+                                t_putstr("joey: go8e-2 running /bin/lsp-probe "
+                                         "(live gopls LSP round-trip)\n");
+                                long st_lspp = go4c_spawn_wait_hb(
+                                    lspp_path, sizeof(lspp_path) - 1, argv_lspp,
+                                    sizeof(argv_lspp) - 1, 1, 300, 30,
+                                    T_CAP_CSPRNG_READ | T_CAP_LOCK_PAGES);
+                                t_putstr("joey: go8e-2 lsp-probe reaped status=");
+                                t_putstr(itoa_dec(st_lspp, gpn, sizeof(gpn)));
+                                t_putstr("\n");
+
                                 (void)t_chdir("/", 1);   // restore cwd
                                 if (edir >= 0)
                                     (void)t_unlink(edir, "PATH", 4, 0);
@@ -4322,6 +4354,21 @@ int main(void) {
                                 t_putstr("joey: go8d OK -- gopls "
                                          "(GOOS=thylacine) type-checks + "
                                          "resolves a definition on-device\n");
+                                // The 8e-2 gate. Separate from go8d's above so
+                                // the boot log names WHICH surface broke: the
+                                // engine (go8d) or the LSP client (8e-2). Placed
+                                // after the PATH unlink for the same reason the
+                                // go8d gate is -- no env leak on a failing path.
+                                if (st_lspp != 0) {
+                                    t_putstr("joey: go8e-2 FAILED -- the LSP "
+                                             "client did not complete a "
+                                             "handshake + diagnostics "
+                                             "round-trip against a real gopls\n");
+                                    return 1;
+                                }
+                                t_putstr("joey: go8e-2 OK -- parley::lsp drives "
+                                         "a real gopls: initialize -> didOpen "
+                                         "-> publishDiagnostics\n");
                             }
                         }
                     }

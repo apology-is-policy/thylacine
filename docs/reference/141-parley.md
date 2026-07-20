@@ -252,6 +252,7 @@ file's errors on these lines.
 | parley pure layers | 51 | `cargo test -p parley --target <host>` |
 | nora lib (engine + diag + view) | 142 | `cargo test -p nora --no-default-features --lib --target <host>` |
 | in-guest transport | — | `/parley-probe` (boot-fatal) |
+| in-guest LIVE LSP round-trip | — | `/bin/lsp-probe` (boot-fatal where gopls is baked) |
 
 `lsp` tests cover: the handshake (and the encoding default when the server is
 silent), diagnostics store/replace/clear, severity mapping and defaults,
@@ -266,6 +267,50 @@ the marked line, warning vs error color, status-line message, explicit status
 outranking, no-diagnostic baseline), and `rev_bumps_on_every_content_mutation_only`
 — which enumerates every `TextBuffer` mutator, because a mutator added later
 without a bump silently costs a document sync.
+
+### The live round-trip (`/bin/lsp-probe`, 8e-2)
+
+Every test above is *synthetic*: the client is fed messages the test itself
+wrote. That validates the client against its own assumptions about the server,
+which is the shape that passes everything and fails on first contact. The
+existing gopls coverage did not close it either — the joey `go8d` probe drives
+gopls as a **command** (`gopls check`, `gopls definition`), never over the LSP
+stdio protocol, and `parley-probe`'s only server is `/parley-echo`, which
+returns bytes and speaks no protocol.
+
+`lsp-probe` closes that: it writes a module with a deliberate undefined
+identifier at a known line, spawns the real `/goroot/bin/gopls` over piped
+stdio **exactly as `lsp_host` does** (bare `Command::new`, no args, inherited
+env and caps — so a wrong invocation in nora fails here), and drives
+`initialize` → `initialized` → `didOpen` → `publishDiagnostics`. It asserts the
+diagnostic carries the planted identifier, at `Severity::Error`, **on the
+planted line** — the line is what proves the range decoded rather than that
+something error-shaped arrived. An empty first publish is waited through, not
+failed: gopls commonly publishes `[]` before the type-check finishes.
+
+The PASS line reports `(<ms>, publishes=N, auto-replies=N)`. Those counters are
+load-bearing, not decoration:
+
+- `auto-replies` reads **0**, and that is correct rather than a gap:
+  `Client::initialize` declares no `workspace.configuration` and no dynamic
+  registration, so gopls has nothing to ask. The `Action::Send` arm is wired and
+  defensive but **unexercised** — a capability that invites server requests
+  would light it up. The counter makes that a measured fact in the boot log
+  instead of an assumption.
+- `publishes` distinguishes a real round-trip from a lucky one, and would show a
+  regression that silently stops gopls talking to us as a number rather than as
+  nothing at all.
+
+Revert-probed both ways: with the expected line deliberately wrong the probe
+reports `FAIL -- diagnostic line 3, expected 4` and joey's gate fails the boot
+(`TEST EXIT=1` + `EXTINCTION`). That second half matters — the first cut of the
+wiring printed the failure and reaped `status=1` but had **no gate**, so
+`tools/test.sh` still exited 0. A probe that cannot fail the build is a vacuous
+green; the revert-probe is what caught it.
+
+Measured cost: ~100 ms, inside the same joey block as `go8d` (which needs the
+same `PATH` + `CAP_CSPRNG_READ`/`CAP_LOCK_PAGES` env), so it adds no meaningful
+boot time.
 
 ---
 
