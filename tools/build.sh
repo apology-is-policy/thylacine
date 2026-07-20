@@ -269,6 +269,8 @@ build_kernel() {
     # build_ramfs ships /pouch-hello + /pouch-hello-stdio.
     build_userspace
     build_pouch_progs
+    # G-7a: cross-build SDL2 + the /sdl-probe prover before the ramfs bake.
+    build_sdl2
     # P6-pouch-stratumd-boot (sub-chunk 16a): cross-build stratumd so it
     # lands in the ramfs alongside the pouch hello binaries. Incremental
     # on no-source-change rebuilds (CMake/ninja dep tracking inside
@@ -463,7 +465,7 @@ EOF
     # P6-pouch-hello-smoke: copy the pouch POSIX test binaries (built
     # against the pouch sysroot by build_pouch_progs) into the cpio root.
     # Same curation discipline — explicit list, not a glob.
-    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" )
+    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "sdl-probe" )
     local pouch_progs="$BUILD_DIR/pouch/progs"
     for bin in "${pouch_bins[@]}"; do
         local src="$pouch_progs/$bin"
@@ -2034,6 +2036,114 @@ build_pouch_progs() {
     echo "==> pouch progs built under $progs_out"
 }
 
+build_sdl2() {
+    # G-7a (the SDL seam; docs/TAPESTRY.md section 9/18.9) -- cross-build
+    # SDL2 for aarch64-thylacine and install libSDL2.a + headers into the
+    # pouch sysroot, libsodium-style (hand config, no autotools), then
+    # build the /sdl-probe proving binary.
+    #
+    # The vendored tree (third_party/SDL2, pruned-pristine per its
+    # PRUNE-MANIFEST.md) is COPIED into build/pouch/sdl2-src, the
+    # usr/ports/sdl2/patches series is applied to the copy (the pouch
+    # musl idiom -- the vendor tree is never edited), the hand
+    # SDL_config.h overwrites the copy's include/SDL_config.h, and OUR
+    # thylacine video driver (usr/ports/sdl2/thylacine/) is copied in as
+    # src/video/thylacine/. The prune IS the compile list: every .c in
+    # the copied tree compiles under the config (src/main is excluded --
+    # apps own main()).
+    local sysroot="$BUILD_DIR/sysroot"
+    local sdl_vendor="$REPO_ROOT/third_party/SDL2"
+    local port_dir="$REPO_ROOT/usr/ports/sdl2"
+    local sdl_src="$BUILD_DIR/pouch/sdl2-src"
+    local sdl_obj="$BUILD_DIR/pouch/sdl2-obj"
+    local progs_out="$BUILD_DIR/pouch/progs"
+    local clang="$LLVM_PREFIX/bin/clang"
+    local ar_tool="$LLVM_PREFIX/bin/llvm-ar"
+    local archive="$sysroot/lib/libSDL2.a"
+
+    if [[ ! -f "$sdl_vendor/src/SDL.c" ]]; then
+        echo "==> sdl2: vendored source missing at $sdl_vendor" >&2
+        exit 1
+    fi
+    if sysroot_is_stale; then
+        echo "==> sdl2: pouch sysroot missing/stale -- building it first"
+        build_sysroot
+    fi
+
+    # Staleness: reuse the archive when it is newer than every input
+    # (the vendored tree + the port dir + libc.a).
+    if [[ -f "$archive" && -f "$progs_out/sdl-probe" ]]; then
+        local stale
+        stale="$(find "$sdl_vendor" "$port_dir" "$REPO_ROOT/usr/sdl-probe" \
+                      -type f -newer "$archive" -print -quit 2>/dev/null)"
+        if [[ -z "$stale" && ! "$sysroot/lib/libc.a" -nt "$archive" ]]; then
+            ledger "libSDL2.a: REUSED (cached + up-to-date)"
+            return 0
+        fi
+    fi
+
+    echo "==> building SDL2 2.32.10 (aarch64-thylacine)"
+    rm -rf "$sdl_src" "$sdl_obj"
+    mkdir -p "$sdl_src" "$sdl_obj"
+    cp -R "$sdl_vendor/src" "$sdl_src/src"
+    cp -R "$sdl_vendor/include" "$sdl_src/include"
+
+    local p
+    for p in "$port_dir"/patches/*.patch; do
+        patch -s -p1 -t -d "$sdl_src" -i "$p"
+    done
+    cp "$port_dir/SDL_config.h" "$sdl_src/include/SDL_config.h"
+    mkdir -p "$sdl_src/src/video/thylacine"
+    cp "$port_dir"/thylacine/*.c "$port_dir"/thylacine/*.h \
+        "$sdl_src/src/video/thylacine/"
+
+    local cflags=( --target=aarch64-thylacine -march=armv8-a+lse+pauth+bti
+                   -std=gnu11 -O2 -fno-pic -fomit-frame-pointer
+                   -fno-stack-protector
+                   -nostdlibinc -isystem "$sysroot/include"
+                   -I"$sdl_src/include"
+                   -I"$REPO_ROOT/usr/lib/libt/include"
+                   -D_GNU_SOURCE=1 -D__thylacine__=1 )
+
+    # The compile list: glob the pruned tree (deterministic order).
+    local srcs=()
+    while IFS= read -r p; do
+        srcs+=( "$p" )
+    done < <(cd "$sdl_src" && find src -name '*.c' ! -path 'src/main/*' | sort)
+
+    local n=0 f obj
+    for f in "${srcs[@]}"; do
+        obj="$sdl_obj/$(echo "${f#src/}" | tr '/' '_').o"
+        "$clang" "${cflags[@]}" -c "$sdl_src/$f" -o "$obj"
+        n=$((n + 1))
+    done
+    echo "    compiled $n objects"
+
+    rm -f "$archive"
+    "$ar_tool" rcs "$archive" "$sdl_obj"/*.o
+
+    # Headers -> sysroot/include/SDL2/ (post-patch copy, so the installed
+    # SDL_config.h is the thylacine one).
+    rm -rf "$sysroot/include/SDL2"
+    mkdir -p "$sysroot/include/SDL2"
+    cp "$sdl_src/include"/*.h "$sysroot/include/SDL2/"
+    echo "    libSDL2.a $(wc -c < "$archive" | tr -d ' ') bytes; headers -> include/SDL2/"
+
+    # The proving binary: /sdl-probe (usr/sdl-probe/sdl-probe.c) -- an SDL
+    # app drawing the quadrant pattern through the full SDL_thylacine ->
+    # tapestry path. Installed into $progs_out so build_ramfs bakes it.
+    mkdir -p "$progs_out"
+    "$clang" "${cflags[@]}" -Wall -Wextra -I"$sysroot/include/SDL2" \
+        -c "$REPO_ROOT/usr/sdl-probe/sdl-probe.c" -o "$progs_out/sdl-probe.o"
+    POUCH_SYSROOT="$sysroot" LLD_PREFIX="$LLD_PREFIX" \
+        "$REPO_ROOT/tools/pouch-ld" "$progs_out/sdl-probe.o" \
+        -L"$sysroot/lib" -lSDL2 \
+        -o "$progs_out/sdl-probe"
+    rm -f "$progs_out/sdl-probe.o"
+    echo "    sdl-probe: $(wc -c < "$progs_out/sdl-probe" | tr -d ' ') bytes (ET_EXEC, static)"
+    ledger "libSDL2.a: BUILT (+ sdl-probe)"
+}
+
 build_disk() {
     # P4-Ic5b2 / P4-Ic7: deterministic raw disk image backing QEMU's
     # virtio-blk-device.
@@ -2102,6 +2212,7 @@ case "$target" in
     ramfs)       build_ramfs       ;;
     sysroot)     build_sysroot     ;;
     pouch-progs) build_pouch_progs ;;
+    sdl2)        build_sdl2        ;;
     stratumd)    build_stratumd    ;;
     userspace)   build_userspace   ;;
     disk)        build_disk        ;;

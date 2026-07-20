@@ -1,0 +1,239 @@
+/* SDL_thylacine — the Tapestry video backend (G-7a). Design notes in
+ * SDL_thylacinevideo.h; the wire client in thyla_tap.c.
+ *
+ * Single-slot present discipline: the framebuffer SDL hands the app IS
+ * slot 0 of the mapped weave (zero-copy draw), and UpdateWindowFramebuffer
+ * is one blocking tpresent write — the compositor consumes the pixels
+ * inside that dispatch (the stage-0 synchronous engine), so the app never
+ * draws a slot the compositor is still reading. No SDL-side shadow
+ * surface, no copy.
+ *
+ * Resize: a size-changing TEV_CONFIGURE acks + reweaves (the §18.3
+ * generation swap) in PumpEvents, then reports SDL_WINDOWEVENT_RESIZED;
+ * SDL core invalidates the window surface and the app's next
+ * SDL_GetWindowSurface returns the NEW slot-0 pointer. An app that keeps
+ * presenting a stale surface pointer after a resize event faults its own
+ * mapping (snare:segv, self-contained) — the standard SDL re-query
+ * contract, stated here honestly.
+ */
+#include "../../SDL_internal.h"
+
+#ifdef SDL_VIDEO_DRIVER_THYLACINE
+
+#include "SDL_video.h"
+#include "../SDL_sysvideo.h"
+#include "../SDL_pixels_c.h"
+#include "../../events/SDL_events_c.h"
+
+#include "SDL_thylacinevideo.h"
+#include "SDL_thylacineevents_c.h"
+
+#define THYLACINEVID_DRIVER_NAME "thylacine"
+
+static int THYLACINE_VideoInit(_THIS);
+static void THYLACINE_VideoQuit(_THIS);
+static int THYLACINE_CreateWindow(_THIS, SDL_Window *window);
+static void THYLACINE_DestroyWindow(_THIS, SDL_Window *window);
+static int THYLACINE_CreateWindowFramebuffer(_THIS, SDL_Window *window,
+                                             Uint32 *format, void **pixels,
+                                             int *pitch);
+static int THYLACINE_UpdateWindowFramebuffer(_THIS, SDL_Window *window,
+                                             const SDL_Rect *rects,
+                                             int numrects);
+static void THYLACINE_DestroyWindowFramebuffer(_THIS, SDL_Window *window);
+
+static void THYLACINE_DeleteDevice(SDL_VideoDevice *device)
+{
+    SDL_free(device->driverdata);
+    SDL_free(device);
+}
+
+static SDL_VideoDevice *THYLACINE_CreateDevice(void)
+{
+    SDL_VideoDevice *device;
+    SDL_VideoData *data;
+
+    device = (SDL_VideoDevice *)SDL_calloc(1, sizeof(SDL_VideoDevice));
+    if (!device) {
+        SDL_OutOfMemory();
+        return NULL;
+    }
+    data = (SDL_VideoData *)SDL_calloc(1, sizeof(SDL_VideoData));
+    if (!data) {
+        SDL_free(device);
+        SDL_OutOfMemory();
+        return NULL;
+    }
+    device->driverdata = data;
+
+    device->VideoInit = THYLACINE_VideoInit;
+    device->VideoQuit = THYLACINE_VideoQuit;
+    device->PumpEvents = THYLACINE_PumpEvents;
+    device->CreateSDLWindow = THYLACINE_CreateWindow;
+    device->DestroyWindow = THYLACINE_DestroyWindow;
+    device->CreateWindowFramebuffer = THYLACINE_CreateWindowFramebuffer;
+    device->UpdateWindowFramebuffer = THYLACINE_UpdateWindowFramebuffer;
+    device->DestroyWindowFramebuffer = THYLACINE_DestroyWindowFramebuffer;
+
+    device->free = THYLACINE_DeleteDevice;
+
+    return device;
+}
+
+VideoBootStrap THYLACINE_bootstrap = {
+    THYLACINEVID_DRIVER_NAME, "Thylacine tapestry video driver",
+    THYLACINE_CreateDevice,
+    NULL /* no ShowMessageBox implementation */
+};
+
+static int THYLACINE_VideoInit(_THIS)
+{
+    SDL_DisplayMode mode;
+    uint32_t w = 0, h = 0;
+
+    /* The display dims come from the compositor's global ctl; failing to
+     * reach /srv/tapestry fails the whole driver (SDL falls through to
+     * the next bootstrap or errors out honestly). */
+    if (thyla_tap_display_size(&w, &h) != 0 || w == 0 || h == 0) {
+        return SDL_SetError("thylacine: /srv/tapestry unreachable");
+    }
+
+    SDL_zero(mode);
+    /* The weave is little-endian 0xAARRGGBB words = SDL ARGB8888. */
+    mode.format = SDL_PIXELFORMAT_ARGB8888;
+    mode.w = (int)w;
+    mode.h = (int)h;
+    mode.refresh_rate = 60;
+    mode.driverdata = NULL;
+    if (SDL_AddBasicVideoDisplay(&mode) < 0) {
+        return -1;
+    }
+    SDL_AddDisplayMode(&_this->displays[0], &mode);
+    return 0;
+}
+
+static void THYLACINE_VideoQuit(_THIS)
+{
+}
+
+static int THYLACINE_CreateWindow(_THIS, SDL_Window *window)
+{
+    SDL_VideoData *vd = (SDL_VideoData *)_this->driverdata;
+    SDL_WindowData *wd;
+    uint32_t w, h;
+
+    if (vd->window) {
+        return SDL_SetError("thylacine: only one window per process");
+    }
+
+    w = (uint32_t)(window->w > 0 ? window->w : 1);
+    h = (uint32_t)(window->h > 0 ? window->h : 1);
+
+    wd = (SDL_WindowData *)SDL_calloc(1, sizeof(SDL_WindowData));
+    if (!wd) {
+        return SDL_OutOfMemory();
+    }
+    if (thyla_tap_open(&wd->tap, w, h) != 0) {
+        SDL_free(wd);
+        return SDL_SetError("thylacine: surface create failed");
+    }
+    window->driverdata = wd;
+    vd->window = window;
+
+    if (THYLACINE_StartEventPump(window) != 0) {
+        vd->window = NULL;
+        window->driverdata = NULL;
+        thyla_tap_close(&wd->tap);
+        SDL_free(wd);
+        return SDL_SetError("thylacine: event pump start failed");
+    }
+
+    /* The compositor decides real placement (placement-transparent);
+     * report fullscreen-ish state honestly enough for games. */
+    window->flags |= SDL_WINDOW_SHOWN;
+    SDL_SetKeyboardFocus(window);
+    SDL_SetMouseFocus(window);
+    return 0;
+}
+
+static void THYLACINE_DestroyWindow(_THIS, SDL_Window *window)
+{
+    SDL_VideoData *vd = (SDL_VideoData *)_this->driverdata;
+    SDL_WindowData *wd = (SDL_WindowData *)window->driverdata;
+
+    if (!wd) {
+        return;
+    }
+    /* Stop the pump FIRST: closing the event fid cancels the parked read
+     * (the kernel's cancel-at-close discipline), so the thread unblocks
+     * and joins; then the remaining fids drop the surface. */
+    THYLACINE_StopEventPump(window);
+    thyla_tap_close(&wd->tap);
+    SDL_free(wd);
+    window->driverdata = NULL;
+    if (vd->window == window) {
+        vd->window = NULL;
+    }
+}
+
+static int THYLACINE_CreateWindowFramebuffer(_THIS, SDL_Window *window,
+                                             Uint32 *format, void **pixels,
+                                             int *pitch)
+{
+    SDL_WindowData *wd = (SDL_WindowData *)window->driverdata;
+
+    if (!wd) {
+        return SDL_SetError("thylacine: no surface for window");
+    }
+    *format = SDL_PIXELFORMAT_ARGB8888;
+    *pixels = thyla_tap_pixels(&wd->tap);
+    *pitch = (int)wd->tap.stride;
+    return 0;
+}
+
+static int THYLACINE_UpdateWindowFramebuffer(_THIS, SDL_Window *window,
+                                             const SDL_Rect *rects,
+                                             int numrects)
+{
+    SDL_WindowData *wd = (SDL_WindowData *)window->driverdata;
+    ThylaRect tr[63];
+    int n = 0;
+
+    if (!wd) {
+        return SDL_SetError("thylacine: no surface for window");
+    }
+    if (numrects > 0 && numrects <= 63) {
+        int i;
+        for (i = 0; i < numrects; i++) {
+            int x = rects[i].x, y = rects[i].y;
+            int rw = rects[i].w, rh = rects[i].h;
+            if (x < 0) { rw += x; x = 0; }
+            if (y < 0) { rh += y; y = 0; }
+            if (x >= (int)wd->tap.w || y >= (int)wd->tap.h || rw <= 0 || rh <= 0) {
+                continue;
+            }
+            if (x + rw > (int)wd->tap.w) rw = (int)wd->tap.w - x;
+            if (y + rh > (int)wd->tap.h) rh = (int)wd->tap.h - y;
+            tr[n].x = (uint32_t)x;
+            tr[n].y = (uint32_t)y;
+            tr[n].w = (uint32_t)rw;
+            tr[n].h = (uint32_t)rh;
+            n++;
+        }
+    }
+    /* n == 0 (no rects, too many, or all clipped away) = full-surface. */
+    if (thyla_tap_present(&wd->tap, tr, n) != 0) {
+        return SDL_SetError("thylacine: present failed");
+    }
+    return 0;
+}
+
+static void THYLACINE_DestroyWindowFramebuffer(_THIS, SDL_Window *window)
+{
+    /* The framebuffer IS the weave slot — owned by the surface, freed at
+     * DestroyWindow. Nothing to do here. */
+    (void)_this;
+    (void)window;
+}
+
+#endif /* SDL_VIDEO_DRIVER_THYLACINE */
