@@ -1,18 +1,24 @@
 #!/usr/bin/expect -f
-# tools/interactive/ls-gfx-panes.exp -- the G-6a compositor acceptance leg
+# tools/interactive/ls-gfx-panes.exp -- the G-6 compositor acceptance leg
 # (TAPESTRY.md 18.9: "the acceptance battery on synthetic clients").
 #
 # Drives /bin/tapestry-battery in the session foreground and asserts the
-# THREE views agree:
+# views agree:
 #   structural : the battery's own in-guest asserts (layout text vs the
 #                pane geometry files; disjoint nonzero rects);
+#   resize     : the 18.3 protocol (G-6b) -- the ack negative probes
+#                (stale/unknown serial), then B reweaves onto its pane's
+#                exact size through the generation fence;
 #   pixels     : screendump -P + tools/ppm-sample.py at the pane centers
-#                the battery prints (client A solid red, B solid blue --
-#                the compose blit path, exact colors);
+#                the battery prints (client A solid red [crop posture],
+#                B solid blue [exact reweaved fit] -- the compose blit
+#                path, exact colors);
 #   input      : QMP-typed keys arrive on the FOCUSED surface's event
 #                stream only (focus leg A via the layout file, then leg B
 #                via B's own pane ctl), while the exp's serial commands
-#                keep flowing (the serial input path is focus-independent).
+#                keep flowing (the serial input path is focus-independent);
+#   close      : a compositor-initiated pane close delivers TEV_CLOSE
+#                (G-6b); the surface retires only when the client drops.
 # The coda proves teardown: the battery exits, its panes collapse, the
 # console returns to fullscreen direct scanout, and the -c console verify
 # passes again.
@@ -71,6 +77,23 @@ expect {
     }
     timeout { lc_fail "no B center line" }
 }
+
+# Scenario 2 (G-6b): the resize protocol -- the negative probes (stale
+# serial E_AGAIN + unknown serial E_INVAL), then the real ack: B reweaves
+# onto its pane's exact size and repaints (the pixel asserts below sample
+# the exact-fit result).
+expect {
+    -ex "battery: resize rejects OK" { lc_pass "panes: resize-ack negative probes OK" }
+    -ex "tapestry-battery: FAIL" { lc_fail "resize negative probes failed" }
+    timeout { lc_fail "battery never reached the resize probes" }
+}
+expect {
+    -re {battery: resize OK (\d+) (\d+)} {
+        lc_pass "panes: B reweaved to $expect_out(1,string)x$expect_out(2,string) (exact pane fit)"
+    }
+    -ex "tapestry-battery: FAIL" { lc_fail "the reweave leg failed" }
+    timeout { lc_fail "battery never completed the reweave" }
+}
 expect {
     -ex "tapestry-battery: panes ready" {}
     timeout { lc_fail "battery never reached panes ready" }
@@ -110,6 +133,14 @@ expect {
     -ex "tapestry-battery: FAIL" { lc_fail "battery focus leg B failed" }
     timeout { lc_fail "key never arrived on B (pane-ctl focus broken)" }
 }
+
+# Scenario 3 (G-6b): a compositor-initiated pane close delivers the
+# queued TEV_CLOSE exit request to the stranded surface.
+expect {
+    -ex "battery: close event OK" { lc_pass "panes: TEV_CLOSE delivered on pane close" }
+    -ex "tapestry-battery: FAIL" { lc_fail "the pane-close leg failed" }
+    timeout { lc_fail "TEV_CLOSE never arrived" }
+}
 expect {
     -ex "tapestry-battery: PASS" { lc_pass "panes: battery PASS" }
     -ex "tapestry-battery: FAIL" { lc_fail "battery failed after the focus legs" }
@@ -129,5 +160,5 @@ if {!$ok} { lc_fail "post-battery console verify (-c) never passed (collapse/dir
 lc_pass "panes: console restored fullscreen after the battery"
 
 lc_quit
-lc_pass "ls-gfx-panes: the G-6a compositor leg verified (structure + pixels + focus + collapse)"
+lc_pass "ls-gfx-panes: the G-6 compositor leg verified (structure + resize + pixels + focus + close + collapse)"
 exit 0

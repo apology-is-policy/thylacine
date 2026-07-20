@@ -204,8 +204,11 @@ vblank), riding the serve loop's poll timeout — since G-6a it is
 delivered to VISIBLE hosted surfaces only (a hidden tab's paced client
 naturally suspends). Key events route to the FOCUSED leaf's surface
 (G-6a). CONFIGURE `{serial in code, W<<16|H in value}` is emitted
-same-size as the REDRAW request (G-6a; see below) and
-coalesces-by-replacement (only the latest serial matters, §18.3). The
+same-size as the REDRAW request OR different-size as the resize offer
+(G-6b) and coalesces-by-replacement (only the latest serial matters,
+§18.3). TEV_CLOSE is the compositor-initiated exit request delivered on
+a pane close (G-6b), distinct from a retired surface's stream-end EOF.
+The
 bounded per-surface queue (`EVENT_QUEUE_CAP = 128`) implements R2-F4:
 FRAME coalesces (at most one queued; refreshed in place) and drops when
 full; a NON-droppable event overflowing evicts one coalescible first,
@@ -235,9 +238,9 @@ single-fullscreen root leaf keeps the stage-0 borderless look).
 `layout.host`) — the focused empty leaf takes it, else the focused
 leaf splits (orientation by content aspect). Hosting is once per
 surface lifetime; `close` deliberately STRANDS a live surface invisible
-(the pane was closed; the client is asked to exit — the TEV_CLOSE
-notification lands at G-6b; a stranded client's conn teardown retires
-it). A pane-table-exhausted surface stays unhosted (presents complete
+(the pane was closed; the client is asked to exit via the queued
+TEV_CLOSE — G-6b, below; a stranded client's conn teardown retires it).
+A pane-table-exhausted surface stays unhosted (presents complete
 without pixels).
 
 **Scanout modes** (`Scanout`): `Boot` (untouched since startup — the
@@ -280,11 +283,12 @@ heal, and a direct-switch full-slot transfer would push patchwork (the
 first G-6a runs measured both). Same-size CONFIGURE = the full-repaint
 request: emitted to every visible hosted surface at a structural
 composed repaint, and to the target at pending-direct ENTRY
-(edge-triggered). Aurora's response (`TEV_CONFIGURE`, same size): mark
+(edge-triggered). Aurora's response (`TEV_CONFIGURE`, any size): mark
 every row dirty → the next pass repaints the whole grid; a size CHANGE
-is logged + ignored until the reweave protocol lands (G-6b) — the
-compositor crops/letterboxes meanwhile. The resize ack
-(`resize W H serial` on the surface ctl) stays `E_OPNOTSUPP` at G-6a.
+aurora does NOT ack (its cell grid is bound to the console history) — it
+keeps its grid and the compositor crops the top-left (the ignore/crop
+posture). The resize ack (`resize W H serial`) is live at G-6b (the
+generation fence — see "The resize protocol" below).
 
 **The 9P layer**: the root gains `layout` (read: the tree text —
 `epoch`/`focused` header + one pane per line with mode, surface, and
@@ -301,14 +305,88 @@ same record.
 
 **The gate**: `tools/interactive/ls-gfx-panes.exp` +
 `/bin/tapestry-battery` — one process hosting both synthetic clients
-(private sessions) and the layout driver; asserts the THREE views agree
+(private sessions) and the layout driver; asserts the views agree
 (the battery's in-guest structure asserts [layout text vs the pane
-geometry files, disjoint nonzero rects], host-side pixel asserts at the
-printed pane centers via `screendump.sh -P` + `tools/ppm-sample.py`
-[solid red/blue, exact], and the focus legs [QMP-typed keys arrive on
-the focused surface only — leg A via the layout file, leg B via B's own
-pane ctl]) plus the collapse coda (the battery exits, panes collapse,
-the console returns to fullscreen direct scanout, `-c` passes again).
+geometry files, disjoint nonzero rects], the resize protocol [G-6b], the
+host-side pixel asserts at the printed pane centers via `screendump.sh
+-P` + `tools/ppm-sample.py` [solid red/blue, exact], the focus legs
+[QMP-typed keys arrive on the focused surface only — leg A via the
+layout file, leg B via B's own pane ctl], and the pane-close leg [G-6b])
+plus the collapse coda (the battery exits, panes collapse, the console
+returns to fullscreen direct scanout, `-c` passes again).
+
+## The resize protocol + pane close (G-6b): weave generations
+
+**Weave generations.** A surface's `weave`/`resource_id` name its
+CURRENT generation; a resize acks onto a NEW one. GPU resource ids are
+per-generation (`Comp::next_res_id`, minted above `SCREEN_RES` — a fresh
+resource never aliases the old one, closing the §317 stale-content
+class), so `Comp::alloc_weave` (the shared body of `create` and
+`resize_ack`) allocates a full generation: DMA + map + zero + a fresh 2D
+resource with the whole weave attached. `Comp::release_gen` tears one
+down in the R2-F5 order (unshare → detach → unref → burrow_detach →
+close).
+
+**The offer.** `Comp::emit_configure_to(n, w, h)` records `offered =
+(serial, w, h)` and pushes the CONFIGURE event. A SAME-size offer is the
+redraw request (above); a DIFFERENT-size one is the resize offer. Only
+the latest is ackable — a newer emission overwrites `offered` and the
+queued (unread) CONFIGURE is coalesced by replacement. The structural
+composed repaint fans `emit_configure_to(n, content.w, content.h)` to
+every visible hosted surface, so a pane whose content differs from its
+surface size is offered its exact fit.
+
+**The generation fence.** `resize W H <serial>` on the surface ctl →
+`Comp::resize_ack`. The ack is the fence: `alloc_weave` mints the new
+generation FIRST (a failure leaves the current one untouched, the offer
+standing for a retry), the surface then swaps
+`weave`/`resource_id`/`w`/`h`/`slot_stride` and marks `res_stale` (the
+fresh resource has no content), and ONLY THEN does `h_write` send the
+`Rwrite` — reply-after-alloc (the R2-F5 precedent). The conn stream is
+FIFO, so every present the client sends after reading that Rwrite
+validates + blits against the new geometry. Verdicts that do NOT consume
+the offer: a stale serial (`< cfg_serial`) → `E_AGAIN` (drain events,
+ack the newer offer); an unknown/mismatched echo → `E_INVAL`; a prior
+reweave still draining (`old_weave.is_some()`) → `E_AGAIN` (the <=2-gens
+bound — present a frame, then re-ack).
+
+**Draining the displaced generation.** The old (weave, resource) moves
+to `old_weave` and drains PASSIVELY — its last content stays displayed,
+is never read again (tearing-freedom holds), and retires at the FIRST
+post-fence present (`Comp::present`'s tail: the display now shows g2
+content — a composed blit COPIES into the screen buffer, a direct arm
+targets g2's resource — so quiesce holds by construction and
+`release_gen` drops g1's server refs; the spec's `RetireDisplaced` +
+`ServerRelease`). A surface retire with g1 still draining releases it in
+`Comp::retire`'s tail. The client's own g1 mapping drains via its old
+weave-fid clunk (`libtapestry::Surface::reweave` maps the new fid BEFORE
+clunking the old — the client stays mapped throughout; #847 keeps g1's
+pages until the clunk).
+
+**The client.** `Surface::handle_configure` acks the size change
+(`reweave`): write `resize W H serial` → open a FRESH weave fid (the old
+fid's kernel map binding is pinned to the old generation) → re-read
+geometry → `t_weft_map` the new weave → clunk the old fid → `cur_slot`
+restarts at 0. `Err(Busy)` (E_AGAIN) means keep draining events; any
+other error is fatal for the surface (the caller destroys + recreates).
+Aurora (the fbcon) deliberately does NOT ack a size change — its cell
+grid is bound to the console history at startup, so it keeps its grid
+and the compositor crops the top-left (the ignore/crop client posture).
+
+**Pane close.** Closing a pane (`layout close`) STRANDS its surfaces
+invisible and delivers each a queued `TEV_CLOSE` (`Comp::send_close`) —
+the exit REQUEST, distinct from the stream END (a retired surface's
+event-fid EOF). Close is a request, never a forced retire: the surface
+stays live until the client destroys it (it may need to save) or its
+conn tears down.
+
+**Seams recorded.** `weave_va_next` is a monotonic bump (no free-list;
+each generation consumes VA that is never reclaimed until the process
+exits) — bounded (a display-sized weave is ~12 MiB; the 47-bit user VA
+holds millions of reweaves), a v1.x free-list closes it. A client error
+AFTER a successful ack leaves the server on g2 with the client still on
+g1's mapping (a blank frame until recovery; the old mapping frees at the
+surface's Drop) — documented as fatal-for-surface.
 
 ## libtapestry + tapestry-demo
 

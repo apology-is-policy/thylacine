@@ -37,10 +37,9 @@ extern crate alloc;
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
 use alloc::string::String;
-use alloc::vec::Vec;
 
 use libthyla_rs::{t_close, t_open, t_read, t_write, T_OREAD, T_OWRITE, T_WALK_OPEN_FROM_ROOT};
-use tapestry::{Surface, TEV_KEY};
+use tapestry::{Event, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_KEY};
 
 macro_rules! say {
     ($($a:tt)*) => {{
@@ -122,6 +121,30 @@ fn fill(surf: &mut Surface, color: u32) {
 
 fn overlap(a: PaneInfo, b: PaneInfo) -> bool {
     a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
+}
+
+/// Wait for an event of `kind` on `surf`; None = budget exhausted or the
+/// stream closed.
+fn wait_kind(surf: &mut Surface, kind: u16, tag: &str) -> Option<Event> {
+    let mut budget = LEG_EVENT_BUDGET;
+    loop {
+        match surf.wait_event() {
+            Ok(ev) => {
+                if ev.kind == kind {
+                    return Some(ev);
+                }
+                budget -= 1;
+                if budget == 0 {
+                    say!("tapestry-battery: FAIL {} never arrived", tag);
+                    return None;
+                }
+            }
+            Err(e) => {
+                say!("tapestry-battery: FAIL {} event stream {:?}", tag, e);
+                return None;
+            }
+        }
+    }
 }
 
 /// Wait for a pressed KEY on `surf`, printing it tagged; false = budget
@@ -260,6 +283,63 @@ pub extern "C" fn rs_main() -> i64 {
     say!("battery: A pane={} center={} {}", pa.id, pa.x + pa.w / 2, pa.y + pa.h / 2);
     say!("battery: B pane={} center={} {}", pb.id, pb.x + pb.w / 2, pb.y + pb.h / 2);
 
+    // Scenario 2 (G-6b, the resize protocol). B's pane content differs
+    // from B's surface size, so the hosting reconcile issued B a
+    // size-changing CONFIGURE offer. Negative probes first -- neither
+    // consumes the standing offer: a stale serial (0 -- every real
+    // serial is >= 1) answers E_AGAIN, an unknown one E_INVAL.
+    match b.reweave(1, 1, 0) {
+        Err(TapError::Busy) => {}
+        r => {
+            say!("tapestry-battery: FAIL stale-serial probe {:?}", r);
+            return 1;
+        }
+    }
+    match b.reweave(1, 1, 60000) {
+        Err(TapError::Protocol) => {}
+        r => {
+            say!("tapestry-battery: FAIL unknown-serial probe {:?}", r);
+            return 1;
+        }
+    }
+    say!("battery: resize rejects OK");
+    // The real ack: drain to the offer, reweave onto the new generation,
+    // repaint at the exact pane size, present (which also retires the
+    // displaced generation server-side).
+    let cfg = match wait_kind(&mut b, TEV_CONFIGURE, "B CONFIGURE") {
+        Some(ev) => ev,
+        None => return 1,
+    };
+    if (cfg.value >> 16, cfg.value & 0xffff) == (b.w, b.h) {
+        say!("tapestry-battery: FAIL expected a size-changing offer, got same-size");
+        return 1;
+    }
+    match b.handle_configure(&cfg) {
+        Ok(true) => {}
+        r => {
+            say!("tapestry-battery: FAIL reweave {:?}", r);
+            return 1;
+        }
+    }
+    fill(&mut b, BLUE);
+    if b.present(None).is_err() {
+        say!("tapestry-battery: FAIL post-reweave present");
+        return 1;
+    }
+    // Two views, one truth again: the pane geometry file (driver view)
+    // agrees with the reweaved surface dimensions (client view) -- B now
+    // fits its pane exactly.
+    {
+        let path = alloc::format!("pane/{}/geometry", pb.id);
+        let g = read_file(root, &path).unwrap_or_default();
+        let want = alloc::format!("{} {} {} {}", pb.x, pb.y, b.w, b.h);
+        if g.trim() != want {
+            say!("tapestry-battery: FAIL reweave geometry '{}' != '{}'", g.trim(), want);
+            return 1;
+        }
+    }
+    say!("battery: resize OK {} {}", b.w, b.h);
+
     // Focus leg 1: A takes focus; a QMP-typed key must arrive on A's
     // stream (and nowhere else -- the exp asserts no "battery: B key"
     // before the switch).
@@ -282,6 +362,27 @@ pub extern "C" fn rs_main() -> i64 {
         return 1;
     }
 
+    // Scenario 3 (G-6b): the compositor-initiated pane close. Closing
+    // B's pane strands the surface and queues the TEV_CLOSE exit
+    // request; the surface stays live until the CLIENT destroys it
+    // (drop) -- close is a request, never a forced retire.
+    let b_id = b.id;
+    if !write_file(root, "layout", &alloc::format!("close {}", pb.id)) {
+        say!("tapestry-battery: FAIL close B pane");
+        return 1;
+    }
+    if wait_kind(&mut b, TEV_CLOSE, "B CLOSE").is_none() {
+        return 1;
+    }
+    if let Some(fresh) = read_file(root, "layout") {
+        if find_pane(&fresh, b_id).is_some() {
+            say!("tapestry-battery: FAIL B pane survived close");
+            return 1;
+        }
+    }
+    say!("battery: close event OK");
+    drop(b);
+
     // Restore focus to the console's pane (the leaf hosting neither A nor
     // B), so the session keyboard works the instant we exit.
     if let Some(fresh) = read_file(root, "layout") {
@@ -295,7 +396,7 @@ pub extern "C" fn rs_main() -> i64 {
             {
                 let n: Option<u32> = tok["surface=".len()..].parse().ok();
                 if let Some(n) = n {
-                    if n != a.id && n != b.id {
+                    if n != a.id && n != b_id {
                         if let Some(info) = find_pane(&fresh, n) {
                             let _ = write_file(root, "layout",
                                 &alloc::format!("focus {}", info.id));
@@ -312,7 +413,8 @@ pub extern "C" fn rs_main() -> i64 {
     }
     unsafe { t_close(root) };
     say!("tapestry-battery: PASS");
-    // (a, b) drop on return: the surfaces retire, their panes collapse,
-    // and the console pane returns to fullscreen direct scanout.
+    // `a` drops on return (`b` already did, scenario 3): the surfaces
+    // retire, the panes collapse, and the console pane returns to
+    // fullscreen direct scanout.
     0
 }

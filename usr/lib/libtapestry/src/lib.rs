@@ -90,6 +90,10 @@ pub enum TapError {
     Loom,
     Present,
     Closed,
+    /// A resize ack answered E_AGAIN: the serial went stale (a newer
+    /// CONFIGURE superseded it -- drain events and ack that one) or a
+    /// prior reweave is still draining (present a frame, then re-ack).
+    Busy,
 }
 
 // The staging RegisteredBuffer layout: the tpresent descriptor at 0, the
@@ -285,6 +289,96 @@ impl Surface {
             pending: Vec::new(),
             seq: 2,
         })
+    }
+
+    /// Handle a CONFIGURE event (section 18.3). A same-size CONFIGURE is
+    /// the compositor's full-REDRAW request; a size-changing one is the
+    /// resize offer, which this acks and reweaves onto. Returns whether
+    /// the surface geometry CHANGED (true: the old pixel view is gone --
+    /// re-derive layout, then repaint). On ANY Ok return from a CONFIGURE
+    /// the caller must fully repaint + present. `Err(Busy)` means the
+    /// offer went stale mid-ack -- keep draining events; a newer
+    /// CONFIGURE carries the current offer.
+    pub fn handle_configure(&mut self, ev: &Event) -> Result<bool, TapError> {
+        if ev.kind != TEV_CONFIGURE {
+            return Ok(false);
+        }
+        let cw = ev.value >> 16;
+        let ch = ev.value & 0xffff;
+        if cw == self.w && ch == self.h {
+            return Ok(false); // the redraw request; geometry unchanged
+        }
+        self.reweave(cw, ch, ev.code)?;
+        Ok(true)
+    }
+
+    /// Ack a resize offer and swap onto the new weave generation:
+    /// write `resize W H <serial>` (the Rwrite is the server's generation
+    /// fence), open a FRESH weave fid (the old fid's kernel-side map
+    /// binding is pinned to the old generation -- fresh state needs a
+    /// fresh fid), re-read the geometry, map the new weave, then clunk
+    /// the old fid (the kernel unmaps the old client mapping -- the
+    /// spec's ClunkMap; map-new-before-clunk-old keeps the client mapped
+    /// throughout). `cur_slot` restarts at 0 -- every slot of the new
+    /// generation is untouched.
+    ///
+    /// A failure AFTER a successful ack (map/open trouble) leaves the
+    /// server on the new generation with this client still holding the
+    /// old mapping: presents would show the new generation's zeroed
+    /// slots. Callers treat any non-Busy error as fatal for the surface.
+    pub fn reweave(&mut self, w: u32, h: u32, serial: u16) -> Result<(), TapError> {
+        let mut cmd = alloc::string::String::new();
+        let _ = core::fmt::write(&mut cmd, format_args!("resize {} {} {}", w, h, serial));
+        let rc = unsafe { t_write(self.ctl, cmd.as_ptr(), cmd.len()) };
+        if rc < 0 {
+            return Err(if rc == -11 { TapError::Busy } else { TapError::Protocol });
+        }
+
+        let mut path = alloc::string::String::new();
+        let _ = core::fmt::write(&mut path, format_args!("surface/{}/weave", self.id));
+        let new_fd = unsafe { t_open(self.root, path.as_ptr(), path.len(), T_OREAD) };
+        if new_fd < 0 {
+            return Err(TapError::Map);
+        }
+        let mut gbuf = [0u8; 128];
+        let n = read_all(new_fd, &mut gbuf);
+        let parsed = core::str::from_utf8(&gbuf[..n]).ok().and_then(|t| {
+            let mut it = t.split_ascii_whitespace();
+            let gw: u32 = it.next()?.parse().ok()?;
+            let gh: u32 = it.next()?.parse().ok()?;
+            let stride: u32 = it.next()?.parse().ok()?;
+            let slot_stride: u64 = it.next()?.parse().ok()?;
+            let nslots: u32 = it.next()?.parse().ok()?;
+            Some((gw, gh, stride, slot_stride, nslots))
+        });
+        let (gw, gh, stride, slot_stride, nslots) = match parsed {
+            Some(p) => p,
+            None => {
+                unsafe { t_close(new_fd) };
+                return Err(TapError::Protocol);
+            }
+        };
+        if gw != w || gh != h || stride != w * 4 || nslots != self.nslots {
+            unsafe { t_close(new_fd) };
+            return Err(TapError::Protocol);
+        }
+        let map_va = unsafe { t_weft_map(new_fd as u64, 0) };
+        if map_va <= 0 {
+            unsafe { t_close(new_fd) };
+            return Err(TapError::Map);
+        }
+
+        // The swap: the old fid's clunk drops the old generation's client
+        // mapping (its VA is dead after this line).
+        unsafe { t_close(self.weave_fd) };
+        self.weave_fd = new_fd;
+        self.map_va = map_va as u64;
+        self.w = w;
+        self.h = h;
+        self.stride = stride;
+        self.slot_stride = slot_stride;
+        self.cur_slot = 0;
+        Ok(())
     }
 
     /// The CURRENT draw slot's pixels (u32 BGRA little-endian: 0xAARRGGBB).

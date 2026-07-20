@@ -180,16 +180,23 @@ presenter (the demo stays baked for manual runs — first-present-wins
 scanout would race two residents). Aurora's `say!` diagnostics go
 uart-direct (SYS_PUTS) — never into its own drain, so no feedback loop.
 
-**TEV_CONFIGURE (G-6a)**: aurora is an accumulator client — the row
+**TEV_CONFIGURE (G-6a/b)**: aurora is an accumulator client — the row
 renderer paints only dirty rows into the current slot, so every weave
 slot is a patchwork and only the compositor-side accumulator (the host
 resource in direct mode, the screen buffer in composed mode) holds a
-complete frame. A same-size CONFIGURE is therefore the compositor's
-full-repaint request (its structural repaints blank pane content):
-aurora marks EVERY row dirty and the next pass repaints the whole grid.
-A size CHANGE is logged and ignored — the reweave protocol (the fresh
-weave at the new size, TAPESTRY §18.3) is the G-6b client lift; the
-compositor crops/letterboxes aurora's grid until then.
+complete frame. So EVERY CONFIGURE marks the whole grid dirty and the
+next pass repaints it — a same-size CONFIGURE is the compositor's
+explicit full-repaint request (structural repaints blank pane content),
+and a size CHANGE also forces a full repaint into the cropped viewport.
+Aurora deliberately does NOT ack a size change (`Surface::reweave` — the
+G-6b generation fence — exists, but the fbcon's cell grid is bound to
+the console history at startup): it keeps its grid and the compositor
+crops the top-left (the ignore/crop client posture). A reweaving fbcon
+(re-derive rows/cols on resize) is a follow-up. No diagnostic is printed
+on a CONFIGURE — aurora shares `/dev/cons` with whatever it renders, so
+a chatty line interleaves byte-for-byte with a concurrent writer's
+output (`t_putstr` is not cross-Proc atomic; the G-6b battery run
+measured exactly that mangling).
 
 ## The gates
 

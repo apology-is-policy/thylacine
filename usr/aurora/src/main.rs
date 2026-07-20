@@ -227,22 +227,22 @@ pub extern "C" fn rs_main() -> i64 {
                 }
                 TEV_CONFIGURE => {
                     // The compositor's redraw/resize request (G-6,
-                    // TAPESTRY.md 18.3). Same-size = a full-repaint
-                    // request: the compositor's structural repaints blank
-                    // pane content, and the row-damage renderer would
-                    // otherwise heal only rows that happen to change --
-                    // mark EVERY row dirty so the next render pass
-                    // repaints the whole grid. A size CHANGE needs the
-                    // reweave protocol (G-6b) -- aurora keeps its grid
-                    // until that lands (the compositor crops/letterboxes).
-                    let cw = (e.value >> 16) as usize;
-                    let ch = (e.value & 0xffff) as usize;
-                    if cw == w && ch == h {
-                        for d in term.dirty.iter_mut() {
-                            *d = true;
-                        }
-                    } else {
-                        say!("aurora: CONFIGURE {}x{} ignored (reweave lands at G-6b)", cw, ch);
+                    // TAPESTRY.md 18.3). EVERY CONFIGURE marks the whole
+                    // grid dirty: structural repaints blank pane content
+                    // (a split blanks aurora's pane exactly like a
+                    // fullscreen transition), and the row-damage renderer
+                    // would otherwise heal only rows that happen to
+                    // change. A size CHANGE is deliberately NOT acked:
+                    // the fbcon's cell grid is bound to the console
+                    // history at startup, so aurora keeps its grid and
+                    // the compositor crops the top-left (the ignore/crop
+                    // client posture; a reweaving fbcon is a follow-up).
+                    // No diagnostic print: aurora shares /dev/cons with
+                    // whatever it renders, so a chatty line here
+                    // interleaves byte-for-byte with a concurrent
+                    // writer's output (t_putstr is not cross-Proc atomic).
+                    for d in term.dirty.iter_mut() {
+                        *d = true;
                     }
                 }
                 _ => {}

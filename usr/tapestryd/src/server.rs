@@ -16,6 +16,17 @@
 //                 LAZILY at the first Tweft (weft_ensure below) -- the
 //                 netd precedent; the Map guard is indifferent to when the
 //                 registration happens, only that retire disarms it.
+//   Reweave     = `resize W H <serial>` on the surface ctl (G-6b): the
+//                 ack of a size-changing CONFIGURE mints the NEW weave
+//                 generation (fresh DMA + fresh resource id) and is THE
+//                 GENERATION FENCE -- the Rwrite completes only after the
+//                 allocation (reply-after-alloc, R2-F5), and the conn
+//                 stream is FIFO, so post-ack presents validate/blit
+//                 against the new geometry. The displaced generation
+//                 drains passively (never read again; its last content
+//                 stays displayed) and retires at the first post-fence
+//                 present (RetireDisplaced + ServerRelease) or with the
+//                 surface. At most one drains (<=2 gens; busy -> E_AGAIN).
 //   Map         = kernel-side (G-2): the client's SYS_WEFT_MAP claims the
 //                 registered share consume-once. tapestryd never observes
 //                 the claim; its Woven->Live edge rides the first present.
@@ -203,10 +214,11 @@ pub const TEV_FRAME: u16 = 5;
 pub const TEV_CONFIGURE: u16 = 6;
 #[allow(dead_code)]
 pub const TEV_FOCUS: u16 = 7;
-#[allow(dead_code)] // Stage 0 signals a retired surface's stream-end via the
-pub const TEV_CLOSE: u16 = 8; // event-fid EOF (poll_events' dead-surface arm
-// + h_read's gone-surface arm); the queued-CLOSE record proper rides the
-// pane layer, where compositor-initiated closes need distinguishing (G-6).
+// CLOSE is the queued exit REQUEST (a compositor-initiated pane close
+// strands the surface + asks the client to leave); a retired surface's
+// stream-END is still the event-fid EOF (poll_events' dead-surface arm +
+// h_read's gone-surface arm). Request and end are distinct on purpose.
+pub const TEV_CLOSE: u16 = 8;
 
 #[derive(Clone, Copy)]
 pub struct Tevent {
@@ -262,16 +274,31 @@ struct Surface {
     w: u32,
     h: u32,
     slot_stride: u64,
+    /// The CURRENT weave generation (the spec's g-highest). weft_ensure,
+    /// the geometry reads, and every post-fence present serve/validate
+    /// against THIS one.
     weave: Option<Weave>,
+    /// The CURRENT generation's GPU resource (per-generation ids minted
+    /// from Comp.res_seq -- a reweave's fresh resource never aliases the
+    /// old one or SCREEN_RES).
     resource_id: u32,
+    /// The DISPLACED generation draining after a resize ack (weave + its
+    /// resource id). At most one -- the spec's <=2-gens bound: a second
+    /// ack while this drains is E_AGAIN (busy). Retired by the first
+    /// post-fence present (RetireDisplaced + ServerRelease) or the
+    /// surface retire.
+    old_weave: Option<(Weave, u32)>,
     /// The CONFIGURE serial counter (section 18.3; low 16 bits ride the
-    /// tevent `code`). At G-6a CONFIGURE is emitted same-size as the
-    /// REDRAW request (accumulator clients repaint fully); the resize-ack
-    /// half lands at G-6b.
+    /// tevent `code`).
     cfg_serial: u16,
+    /// The last CONFIGURE issued: (serial, w, h). The resize ack must
+    /// echo exactly this; a newer emission overwrites it (only the
+    /// latest offer is ackable -- the wayland serial dance).
+    offered: Option<(u16, u32, u32)>,
     /// The client 2D resource's host-side content is stale (presents were
-    /// composed, not transferred to it). A deferred direct-scanout switch
-    /// must expand its first transfer to the full surface (G-6).
+    /// composed, not transferred to it -- or the resource is a reweave's
+    /// fresh mint). A deferred direct-scanout switch must expand its
+    /// first transfer to the full surface (G-6).
     res_stale: bool,
     title: String,
     events: VecDeque<Tevent>,
@@ -293,7 +320,8 @@ struct Screen {
     va: u64,
 }
 
-/// The screen resource id -- outside the per-surface range (n+1, 1..=8).
+/// The screen resource id. Per-generation surface resources mint from
+/// Comp.res_seq, which starts ABOVE this -- no id ever aliases it.
 const SCREEN_RES: u32 = 0x40;
 
 /// What scanout 0 references (G-6). `Boot` = untouched since startup (the
@@ -312,6 +340,9 @@ pub struct Comp {
     surfaces: [Option<Surface>; MAX_SURFACES],
     gen_seq: u32,
     conn_seq: u64,
+    /// GPU resource ids are PER-GENERATION (a reweave mints a fresh one);
+    /// pre-incremented, so the first id is SCREEN_RES + 1.
+    res_seq: u32,
     /// The container tree (G-6): hosting, geometry, focus.
     layout: Layout,
     screen: Option<Screen>,
@@ -340,6 +371,7 @@ impl Comp {
             surfaces: [NO_SURFACE; MAX_SURFACES],
             gen_seq: 0,
             conn_seq: 0,
+            res_seq: SCREEN_RES,
             layout: Layout::new(),
             screen: None,
             scanout: Scanout::Boot,
@@ -391,9 +423,11 @@ impl Comp {
             h: 0,
             slot_stride: 0,
             weave: None,
-            resource_id: n as u32 + 1,
+            resource_id: 0, // minted with the first generation (create)
+            old_weave: None,
             res_stale: false,
             cfg_serial: 0,
+            offered: None,
             title: String::new(),
             events: VecDeque::new(),
             presents: 0,
@@ -401,18 +435,17 @@ impl Comp {
         Some(n)
     }
 
-    /// `create W H`: the spec's WeaveFirst -- allocate + zero the weave,
-    /// create the 2D resource, attach the whole weave as its backing.
-    fn create(&mut self, n: usize, w: u32, h: u32) -> Result<(), u32> {
-        let (disp_w, disp_h) = (self.gpu.width, self.gpu.height);
-        let s = self.surf(n).ok_or(p9::E_BADF)?;
-        if s.state != SurfState::Minted {
-            return Err(p9::E_EXIST); // create is once per surface
-        }
-        // F9: the dimension bound (a weave is tapestryd's DMA allocation).
-        if w == 0 || h == 0 || w > disp_w || h > disp_h {
-            return Err(p9::E_INVAL);
-        }
+    fn next_res_id(&mut self) -> u32 {
+        self.res_seq += 1;
+        self.res_seq
+    }
+
+    /// Allocate one weave GENERATION: DMA chunk + map + zero + a fresh 2D
+    /// resource with the whole weave attached as backing. The shared body
+    /// of the spec's WeaveFirst (create) and Reweave (resize ack).
+    /// Returns (weave, slot_stride, resource_id); every failure path
+    /// rolls back fully.
+    fn alloc_weave(&mut self, w: u32, h: u32) -> Result<(Weave, u64, u32), u32> {
         let stride = (w as u64) * 4;
         let slot_bytes = stride * (h as u64);
         let slot_stride = (slot_bytes + PAGE - 1) & !(PAGE - 1);
@@ -438,28 +471,70 @@ impl Comp {
         // occupant's bytes into a client mapping.
         unsafe { core::ptr::write_bytes(va as *mut u8, 0, size as usize) };
 
-        if self.gpu.resource_create_2d(n as u32 + 1, w, h).is_err() {
+        let res = self.next_res_id();
+        if self.gpu.resource_create_2d(res, w, h).is_err() {
             unsafe { t_burrow_detach(va, size) };
             unsafe { t_close(handle) };
             return Err(p9::E_NOMEM);
         }
-        if self.gpu.attach_backing(n as u32 + 1, pa as u64, size as u32).is_err() {
-            let _ = self.gpu.resource_unref(n as u32 + 1);
+        if self.gpu.attach_backing(res, pa as u64, size as u32).is_err() {
+            let _ = self.gpu.resource_unref(res);
             unsafe { t_burrow_detach(va, size) };
             unsafe { t_close(handle) };
             return Err(p9::E_NOMEM);
         }
+        Ok((
+            Weave {
+                handle,
+                va,
+                size,
+                share_id: None,
+            },
+            slot_stride,
+            res,
+        ))
+    }
+
+    /// Tear down one weave generation's server side, in the R2-F5 order:
+    /// unshare (registry-removal-before-page-free) -> the GPU resource
+    /// dies before its backing -> unmap + close (serverRef -> FALSE; #847
+    /// keeps the pages until the client's mapping ref drops too). The
+    /// caller has already ensured no scanout references `res` (the mode
+    /// machine + force-away in retire; the present-tail old drop runs
+    /// after the current generation's content took the display).
+    fn release_gen(&mut self, w: &Weave, res: u32) {
+        if let Some(id) = w.share_id {
+            let rc = unsafe { t_weft_unshare(id) };
+            if rc < 0 {
+                // Already claimed (consumed at Map) -- expected.
+            }
+        }
+        let _ = self.gpu.detach_backing(res);
+        let _ = self.gpu.resource_unref(res);
+        unsafe { t_burrow_detach(w.va, w.size) };
+        unsafe { t_close(w.handle) };
+    }
+
+    /// `create W H`: the spec's WeaveFirst -- allocate + zero the weave,
+    /// create the 2D resource, attach the whole weave as its backing.
+    fn create(&mut self, n: usize, w: u32, h: u32) -> Result<(), u32> {
+        let (disp_w, disp_h) = (self.gpu.width, self.gpu.height);
+        let s = self.surf(n).ok_or(p9::E_BADF)?;
+        if s.state != SurfState::Minted {
+            return Err(p9::E_EXIST); // create is once per surface
+        }
+        // F9: the dimension bound (a weave is tapestryd's DMA allocation).
+        if w == 0 || h == 0 || w > disp_w || h > disp_h {
+            return Err(p9::E_INVAL);
+        }
+        let (weave, slot_stride, res) = self.alloc_weave(w, h)?;
 
         let s = self.surf_mut(n).unwrap();
         s.w = w;
         s.h = h;
         s.slot_stride = slot_stride;
-        s.weave = Some(Weave {
-            handle,
-            va,
-            size,
-            share_id: None,
-        });
+        s.weave = Some(weave);
+        s.resource_id = res;
         s.state = SurfState::Woven;
         // G-6: host at create -- the focused empty leaf takes it, else the
         // focused leaf splits. A pane-table-exhausted surface stays
@@ -487,6 +562,74 @@ impl Comp {
         }
         w.share_id = Some(id as u64);
         Some((id as u64, w.size as u32))
+    }
+
+    /// The resize ack `resize W H <serial>` (section 18.3; the spec's
+    /// Reweave). The ack is THE GENERATION FENCE: its Rwrite completes
+    /// only after the new generation is fully allocated (the R2-F5
+    /// reply-after-alloc precedent), and the conn stream is FIFO, so
+    /// every present the client sends after reading that Rwrite
+    /// validates + blits against the NEW geometry. The displaced
+    /// generation drains passively (its last content stays displayed;
+    /// never read again -- tearing-freedom holds) until the first
+    /// post-fence present retires it.
+    ///
+    /// Errors: stale serial (a newer CONFIGURE superseded) -> E_AGAIN,
+    /// re-ack after draining events; unknown serial / echo mismatch ->
+    /// E_INVAL; prior reweave still draining -> E_AGAIN (the <=2-gens
+    /// bound: present a frame, then re-ack).
+    fn resize_ack(&mut self, n: usize, w: u32, h: u32, serial: u16) -> Result<(), u32> {
+        let s = self.surf(n).ok_or(p9::E_BADF)?;
+        if s.weave.is_none() {
+            return Err(p9::E_INVAL); // no generation to reweave
+        }
+        let (os, ow, oh) = s.offered.ok_or(p9::E_INVAL)?;
+        if serial != os {
+            // u16 compare; serial spaces are tiny per surface lifetime.
+            // A wrap-straddling stale reads as "unknown" -- fail-closed
+            // either way (both are rejections).
+            return Err(if serial < s.cfg_serial { E_AGAIN } else { p9::E_INVAL });
+        }
+        if w != ow || h != oh {
+            return Err(p9::E_INVAL); // the ack must echo the offer
+        }
+        if w == s.w && h == s.h {
+            // A same-size offer (the redraw request) acked: legal no-op.
+            self.surf_mut(n).unwrap().offered = None;
+            return Ok(());
+        }
+        if s.old_weave.is_some() {
+            return Err(E_AGAIN); // one reweave in flight (<=2 gens)
+        }
+
+        // Reweave: mint the new generation FIRST (a failure leaves the
+        // current one untouched and the offer standing for a retry).
+        let (weave, slot_stride, res) = self.alloc_weave(w, h)?;
+        let s = self.surf_mut(n).unwrap();
+        let old = s.weave.take().unwrap();
+        let old_res = s.resource_id;
+        s.old_weave = Some((old, old_res));
+        s.weave = Some(weave);
+        s.resource_id = res;
+        s.w = w;
+        s.h = h;
+        s.slot_stride = slot_stride;
+        s.res_stale = true; // the fresh resource has no content yet
+        s.offered = None;
+        // Defensive (mode-machine-unreachable: Direct(n) implies the
+        // surface was display-sized, which implies any outstanding offer
+        // was same-size -- handled above): if scanout still names n via
+        // the OLD resource, defer to the new generation's first present.
+        // No set_scanout(0) -- that would blank the user's screen
+        // mid-resize; the old pixels persist until the F16 flip.
+        if self.scanout == Scanout::Direct(n) {
+            self.scanout = Scanout::Off;
+            self.pending_direct = Some(n);
+        }
+        // The new size feeds the scanout-mode predicate (a letterboxed
+        // single leaf acking up to display size becomes Direct-eligible).
+        self.reconcile();
+        Ok(())
     }
 
     /// Allocate the compositor's screen buffer + resource (lazy; kept for
@@ -670,9 +813,10 @@ impl Comp {
                     // accumulator client's individual slots are patchwork
                     // (only the resource/screen accumulates), so the
                     // switch's full-slot transfer needs a full repaint to
-                    // land next.
+                    // land next. Same-size by construction: Direct(n)
+                    // requires the surface display-sized.
                     self.pending_direct = Some(n);
-                    if !self.emit_configure(n) {
+                    if !self.emit_configure_to(n, dw, dh) {
                         self.retire(n); // wedged; retire clears pending
                     }
                 }
@@ -702,11 +846,15 @@ impl Comp {
                     self.scanout = Scanout::Composed;
                 }
                 if structural {
-                    // The redraw requests, last (retire recursion-safe at
-                    // the tail): every visible hosted surface repaints.
+                    // The CONFIGURE fan, last (retire recursion-safe at
+                    // the tail): every visible hosted surface gets its
+                    // pane's CONTENT size -- same-size = the redraw
+                    // request, different = the resize offer (G-6b). A
+                    // client that ignores an offer keeps its size and is
+                    // cropped/letterboxed by the blit clip.
                     let mut wedged: Vec<usize> = Vec::new();
-                    for (_, n, _) in self.layout.visible_hosted() {
-                        if !self.emit_configure(n) {
+                    for (_, n, c) in self.layout.visible_hosted() {
+                        if !self.emit_configure_to(n, c.w, c.h) {
                             wedged.push(n);
                         }
                     }
@@ -816,11 +964,17 @@ impl Comp {
             }
             self.layout.split(slot, mode).ok_or(p9::E_NOMEM)?;
         } else if cmd == "close" {
-            // Closing a pane strands its surfaces invisible BY DESIGN (the
-            // pane was closed; the client is asked to exit -- the
-            // TEV_CLOSE record lands at G-6b). Hosting is once-per-life
-            // (at create); a stranded client's conn teardown retires it.
-            let _ = self.layout.close(slot);
+            // Closing a pane strands its surfaces invisible BY DESIGN
+            // (hosting is once-per-life, at create) and asks each
+            // stranded client to exit via the queued TEV_CLOSE (G-6b).
+            // The surface stays live until the client destroys it or its
+            // conn tears down -- a compositor-initiated pane close is a
+            // request, never a forced retire (the client may need to
+            // save). The event is non-droppable; a wedge force-retires.
+            let unhosted = self.layout.close(slot);
+            for n in unhosted {
+                self.send_close(n);
+            }
         } else if cmd == "focus" {
             if !self.layout.focus(slot) {
                 return Err(p9::E_INVAL);
@@ -886,6 +1040,13 @@ impl Comp {
             // the client's mapping ref drops too).
             unsafe { t_burrow_detach(w.va, w.size) };
             unsafe { t_close(w.handle) };
+        }
+        // A displaced generation still draining (resize acked, no present
+        // yet) dies with the surface -- same per-generation order; its
+        // resource was never scanned out (only a post-fence present could
+        // have made it visible, and that present would have retired it).
+        if let Some((oldw, old_res)) = s.old_weave {
+            self.release_gen(&oldw, old_res);
         }
         say!("tapestryd: surface {} retired (presents={})", n, s.presents);
     }
@@ -970,17 +1131,23 @@ impl Comp {
     }
 
     /// Emit CONFIGURE {serial, W<<16|H} to surface `n` (sections 18.3 +
-    /// 18.4). At G-6a sizes never change: the same-size CONFIGURE is the
-    /// REDRAW request -- a structural repaint blanks pane content, and an
-    /// accumulator client (aurora's row-damage renderer) can only heal by
-    /// a full repaint; the G-6b resize ack rides the same wire. Returns
-    /// push_event's wedge verdict (false = caller must retire).
-    fn emit_configure(&mut self, n: usize) -> bool {
+    /// 18.4), recording it as the surface's ackable offer. A SAME-size
+    /// CONFIGURE is the REDRAW request (a structural repaint blanks pane
+    /// content; an accumulator client heals only by a full repaint); a
+    /// DIFFERENT-size one is the resize offer the `resize W H <serial>`
+    /// ack answers (G-6b). Coalesce-by-replacement in the queue + the
+    /// single `offered` slot both encode "only the latest matters".
+    /// Returns push_event's wedge verdict (false = caller must retire).
+    fn emit_configure_to(&mut self, n: usize, w: u32, h: u32) -> bool {
+        if w == 0 || h == 0 || w > 0xffff || h > 0xffff {
+            return true; // degenerate pane: nothing showable to offer
+        }
         let t = self.tick;
-        let (serial, w, h) = match self.surf_mut(n) {
+        let serial = match self.surf_mut(n) {
             Some(s) => {
                 s.cfg_serial = s.cfg_serial.wrapping_add(1);
-                (s.cfg_serial, s.w, s.h)
+                s.offered = Some((s.cfg_serial, w, h));
+                s.cfg_serial
             }
             None => return true,
         };
@@ -994,6 +1161,23 @@ impl Comp {
             tick: t,
         };
         self.push_event(n, ev)
+    }
+
+    /// Queue TEV_CLOSE on surface `n` (its pane closed under it -- the
+    /// exit request). Wedged surfaces retire inline (R2-F4).
+    fn send_close(&mut self, n: usize) {
+        let ev = Tevent {
+            kind: TEV_CLOSE,
+            code: 0,
+            value: 0,
+            rune: 0,
+            mods: 0,
+            flags: 0,
+            tick: self.tick,
+        };
+        if !self.push_event(n, ev) {
+            self.retire(n);
+        }
     }
 
     /// Deliver a key to the FOCUSED leaf's surface (G-6 routing).
@@ -1810,10 +1994,19 @@ impl Conn {
             }
             return Ok(());
         }
-        if s.starts_with("resize ") {
-            // The reweave protocol (section 18.3) is compositor-initiated
-            // and lands with the pane layer (G-6).
-            return Err(p9::E_OPNOTSUPP);
+        if let Some(rest) = s.strip_prefix("resize ") {
+            // The section-18.3 resize ack: `resize W H <serial>` echoes a
+            // CONFIGURE offer; a successful Rwrite IS the generation
+            // fence (see resize_ack).
+            let mut it = rest.split_ascii_whitespace();
+            let w: u32 = it.next().ok_or(p9::E_INVAL)?.parse().map_err(|_| p9::E_INVAL)?;
+            let h: u32 = it.next().ok_or(p9::E_INVAL)?.parse().map_err(|_| p9::E_INVAL)?;
+            let serial: u16 =
+                it.next().ok_or(p9::E_INVAL)?.parse().map_err(|_| p9::E_INVAL)?;
+            if it.next().is_some() {
+                return Err(p9::E_INVAL);
+            }
+            return comp.resize_ack(n, w, h, serial);
         }
         Err(p9::E_INVAL)
     }
@@ -1928,6 +2121,18 @@ impl Conn {
             if s.state == SurfState::Woven {
                 s.state = SurfState::Live;
             }
+        }
+        // The first post-fence present retires the displaced generation
+        // (the spec's RetireDisplaced + ServerRelease): the display now
+        // shows current-generation content -- composed blits COPY (the
+        // screen resource references no client weave) and the direct arms
+        // target the current resource -- and quiesce holds by construction
+        // (presents complete inside one dispatch), so the old weave's
+        // server refs drop here. The client's own old mapping drains via
+        // its weave-fid clunk (ClunkMap; #847 keeps the pages until then).
+        if let Some((oldw, old_res)) = comp.surf_mut(n).and_then(|s| s.old_weave.take()) {
+            comp.release_gen(&oldw, old_res);
+            say!("tapestryd: surface {} old generation retired (res {})", n, old_res);
         }
         Ok(())
     }
@@ -2162,6 +2367,11 @@ impl Conn {
 /// POSIX EIO (the ninep constant set has no E_IO name): a GPU command
 /// failure surfaces to the client as a remote I/O error.
 const E_IO: u32 = 5;
+
+/// POSIX EAGAIN: the resize-ack "not now" verdicts (stale serial; a
+/// prior reweave still draining) -- the client drains events / presents
+/// a frame and re-acks.
+const E_AGAIN: u32 = 11;
 
 fn parse_dec(name: &[u8]) -> Option<usize> {
     if name.is_empty() || name.len() > 3 {

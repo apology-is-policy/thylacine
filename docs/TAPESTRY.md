@@ -971,6 +971,46 @@ via `screendump -P`/`ppm-sample` + QMP focus legs + the collapse coda);
 ls-gfx / ls-gfx-live / the per-boot `-c` gate stay green. As-built:
 `docs/reference/139-tapestryd.md` "The compositor stage 1".
 
+**G-6b AS-BUILT (landed on `gfx-2`): the resize protocol + pane close —
+weave generations.** The §18.3 resize protocol is live. A surface's
+`weave`/`resource_id` name its CURRENT generation (GPU resource ids are
+per-generation, minted above SCREEN_RES so a fresh resource never
+aliases the old — closing the #317 stale-content class); `alloc_weave`
+(the shared body of `create` + `resize_ack`) allocates a full
+generation, `release_gen` tears one down in the R2-F5 order. A
+size-changing CONFIGURE offer records `offered = (serial, w, h)` (only
+the latest is ackable — coalesce-by-replacement); the structural
+composed repaint offers every visible hosted surface its pane's EXACT
+content size. The ack `resize W H <serial>` on the surface ctl is THE
+GENERATION FENCE — `resize_ack` mints the new generation FIRST (a
+failure leaves the current one untouched, the offer standing), swaps the
+surface onto it, and ONLY THEN sends the Rwrite (reply-after-alloc,
+R2-F5); the conn stream is FIFO, so every post-ack present validates +
+blits against the new geometry. Bounded to <=2 generations
+(`old_weave.is_some()` → E_AGAIN); a stale serial → E_AGAIN, an
+unknown/mismatched echo → E_INVAL — none consume the offer. The
+displaced generation drains PASSIVELY (its last content stays displayed,
+never read again — tearing-freedom holds) and retires at the first
+post-fence present (the spec's `RetireDisplaced` + `ServerRelease`: the
+display shows g2 content, so quiesce holds by construction). The client
+half (`libtapestry::Surface::handle_configure` → `reweave`) opens a
+fresh weave fid, re-maps, then clunks the old fid (map-new-before-
+clunk-old — the client stays mapped throughout; #847 keeps g1's pages
+until then). Pane close delivers a queued `TEV_CLOSE` exit REQUEST
+(distinct from a retired surface's stream-end EOF) — a compositor close
+strands the surface but never force-retires it (the client may need to
+save). `weft.tla`/`tapestry_present.tla` UNCHANGED (the reweave is
+already modeled with `ALLOW_REWEAVE`; retire-on-first-post-fence-present
+is the scheduling refinement under its permissiveness — the
+SPEC-TO-CODE reweave map). Aurora (the fbcon) deliberately does NOT ack
+a size change (fixed cell grid) — crop/ignore posture; a reweaving
+fbcon is a follow-up. Recorded seam: `weave_va_next` is a monotonic bump
+(no free-list; bounded — a display weave is ~12 MiB, the 47-bit VA holds
+millions of reweaves — a v1.x free-list closes it). Gate:
+`ls-gfx-panes.exp` grows the resize legs (the ack negative probes + the
+exact-fit reweave) + the TEV_CLOSE leg. As-built: `139-tapestryd.md`
+"The resize protocol + pane close (G-6b)".
+
 ### 18.10 Audit-trigger + scripture sync obligations
 
 At each landing, per standing discipline: G-2 joins the Weft/burrow rows
