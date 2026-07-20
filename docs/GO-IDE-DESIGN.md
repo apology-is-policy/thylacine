@@ -97,6 +97,15 @@ them.)
   cons/consctl PTY infra from LS-8; rebuild-on-save is instant because the
   toolchain is local).
 
+The **focused UX design is `docs/NORA-IDE-UX.md`** (Stage 8e/8f). Ratified there
+(user-voted 2026-07-20): the layout is the **IDE dashboard** (editor center +
+right sidebar [Variables/Call-Stack/Goroutines] + a bottom Console, collapsible
+when not debugging); the interaction extends Nora's modal + `[Space]`-menu + `:`
+idiom; the load-bearing decision is the **async client architecture** (persistent
+gopls/Ambush over a `PollSet`-multiplexed loop with JSON-RPC framing — the
+one-shot-filter subprocess model would deadlock a persistent server); and the
+debug UI **grows the Kaua widget registry** (`Tree`/`Table`/`Tabs`/`Scrollbar`).
+
 ---
 
 ## 4. The headline feature — cross-boundary unified stacks
@@ -233,8 +242,19 @@ with its own focused design pass + audit (it is a new privilege surface).
   [gopls check + definition, boot-fatal], + the lean go8d.exp console leg). The
   Nora LSP client is 8e; the Kaua editing UI is 8f.
 - **8e** — the Nora plugin architecture + the Go plugin (DAP + LSP clients).
+  **UX design LANDED 2026-07-20 — `docs/NORA-IDE-UX.md`.** The load-bearing
+  sub-chunk is **8e-1** (the async client substrate: persistent gopls/Ambush
+  children + the `PollSet`-multiplexed loop generalizing `PollSource` + a
+  JSON-RPC codec + dirty-on-event), then **8e-2** (the LSP client, inline in the
+  editor) and **8e-3** (the DAP client, headless from `:`). The `MENU`/`COMMANDS`
+  const tables become an extensible registry (the plugin architecture).
 - **8f** — the Kaua debug UI (source / vars / stack / goroutines / watch) + the
-  interactive run-pane (the "ut pane").
+  interactive run-pane. Per `docs/NORA-IDE-UX.md`: **8f-1** the Kaua widget
+  registry additions (`Tree`/`Table`/`Tabs`/`Scrollbar`, pure + unit-tested) →
+  **8f-2** the dashboard (layout + collapse + focus + the sidebar tiles + the
+  Console `Tabs` [Program pts / Debug REPL]) wired to the DAP client state →
+  **8f-3** polish (the cross-boundary `── kernel ──` stack, inline values, LSP
+  affordances, the Bonfire pass).
 - **8g** — the superpowers (section 5): namespace/resource inspector, scheduler
   view, capability-scoped system-wide attach, kernel-aware post-mortem, Stratum
   snapshot-debugging.

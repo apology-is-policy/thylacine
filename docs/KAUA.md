@@ -184,7 +184,16 @@ The scoped v1.0 set (exactly what nora + ut + a SAK prompt need):
 - **`StatusLine`** — a one-row left/center/right segmented bar (mode indicator,
   filename, position). Every TUI's bottom line.
 
-More widgets (Table, Tabs, Gauge, a scrollbar) accrete later, on the same trait.
+More widgets accrete later, on the same trait — **the registry grows with its
+consumers, and a new standard widget is added *here*, never as an app-private
+hack** (user directive, 2026-07-20). The Nora Go IDE (`docs/NORA-IDE-UX.md`,
+Stage 8f) is the first driver of that growth: it adds **`Tree`** (collapsible
+indented nodes — the variable inspector + the resource inspector), **`Table`**
+(columns + a selectable row + per-row style + a divider-row variant — the
+goroutines view + the cross-boundary call stack), **`Tabs`** (a tab strip — the
+Console's Program/Debug split), and a **`Scrollbar`** decoration. Each is a pure,
+host-testable value on `Widget::render`, reusable by every consumer. `Gauge` and
+others follow as later consumers need them.
 
 ### 3.4 `kaua::event` — keys
 
