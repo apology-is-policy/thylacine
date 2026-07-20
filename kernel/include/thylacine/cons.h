@@ -75,6 +75,38 @@ void cons_rx_input(u8 byte, bool is_break);
 long cons_input_read(void *buf, long n);
 long cons_output_write(const void *buf, long n);
 
+// #75 / P1-F (ARCH §23.5.2). The console TX ring.
+//
+// cons_output_write is atomic against other console writers: it holds a writer
+// role for the whole call (contending writers PARK, they do not interleave), and
+// pushes into a ring the PL011 TX interrupt drains. It returns a SHORT count if
+// the #67 deadline fires against a stalled host consumer or a #811 death
+// interrupts it -- it never hangs. Echo (IRQ context) shares the ring but is
+// non-blocking and drops on overrun; the opposite blocking contracts of the two
+// producers are load-bearing.
+
+// Drain ring -> FIFO. Called from uart_irq_handler on MIS.TXMIS (IRQ context).
+void cons_tx_drain_from_irq(void);
+
+// Arm the IRQ-driven path. Until this runs, every byte takes the direct bounded
+// uart_putc, so early-boot prints and the tooling-ABI banner are unaffected.
+// boot_main calls it after gic_attach + gic_enable_irq for the UART SPI.
+void cons_tx_arm(void);
+
+// Bounded synchronous ring flush for the extinction / Halls dump, so pre-crash
+// output is not stranded in the ring. Takes the ring lock by TRYLOCK only (a
+// dying CPU may already hold it) and never waits on the IRQ -- HX-I discipline.
+void cons_tx_flush_for_dump(void);
+
+// #75 test hooks (test-only). The RING needs no dedicated test -- every byte of
+// console output on every boot goes through it, so a ring bug means no boot at
+// all. The ROLE does: it is what makes a write call-atomic, and its absence is
+// silent until two CPUs happen to interleave. These let a test hold the role and
+// prove a second cons_output_write PARKS instead of emitting.
+void cons_test_tx_role_hold(void);
+void cons_test_tx_role_drop(void);
+bool cons_test_tx_role_held(void);
+
 // #174 backpressure: true iff the RX ring can accept at least one more byte
 // (count < CONS_RING_SIZE). The PL011 RX drain (uart_rx_handler / uart_rx_pump)
 // checks this BEFORE reading a byte out of the FIFO -- when the ring is full it

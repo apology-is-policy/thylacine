@@ -315,8 +315,113 @@ but the kernel is unambiguous against any consctl writer (LS-8 audit F1).
 - (A-4c) `cons.blocking_read_wakeup`, `cons.ctrlc_consumed`,
   `cons.break_sets_sak`, `cons.sak_via_console_mgr`, the SAK/owner role-split set.
 
+## The TX ring + the writer role — #75 / P1-F (as-built)
+
+Design: **ARCH §23.5.2**. Before P1-F, `cons_output_write` walked byte-by-byte
+into a **lock-free** `uart_putc` holding no lock across the loop, so two CPUs
+writing `/dev/cons` interleaved at **byte** granularity — shredding multi-byte
+glyphs (the 3-byte `⊢`, U+22A2) and SGR escapes in 10 of 40 gate boots (#75).
+It was **pre-existing since P4-B**: `cons_output_write`'s entire history is
+`6f417e93` / `71d52541` / `966d9341`, and none ever held a lock.
+
+The tell was an asymmetry — console *input* was serialized under `g_cons.lock`
+while console *output* was serialized nowhere. And the blast radius was never
+just the log: `cons_drain_tap` (G-4) appends per byte under its own lock, so
+aurora's drain ring received the same **interleaved order**; a torn cursor or
+alt-screen escape corrupts a live TUI.
+
+Two separable mechanisms:
+
+| | What it buys | Why it is needed |
+|---|---|---|
+| **The ring** | Decouples the writer from `uart_putc`'s bounded-but-slow TXFF spin (#67: up to 20 ms/byte against a stalled host consumer) | A push is a memory write under a leaf spinlock; the PL011 TX interrupt drains ring → FIFO. Per byte it trades an MMIO `FR` read + `DR` write for a spinlock + a store — a win, especially under HVF where each MMIO is a vmexit |
+| **The writer role** | Makes a whole `cons_output_write` call atomic against other console writers | A write larger than the ring must sleep for room, dropping the ring lock — so the ring lock alone can never span the call |
+
+The role is the audited `srvconn.c::chan_role_acquire` shape (#354 / CF-3 B)
+reused in structure: park on a `poll_waiter_list` with register-then-observe,
+`TSLEEP_INTR` unwind, re-contend on wake. It is a **sleeping park, not a
+spinlock** — a long write makes peers wait but never pins a CPU.
+
+**In the healthy case the interrupt is never even armed.** The post-write
+`cons_tx_kick` hands the FIFO everything it will take; `TXIM` is armed only for
+a remainder. So behaviour matches the old direct path minus the spin.
+
+### The two producers have opposite blocking contracts
+
+This asymmetry is **load-bearing** — a change that blurs it is a bug:
+
+- `cons_output_write` runs in **process context** (`spoor_write_common` holds no
+  lock across `dev->write` and documents it as *blocking*), so it **may** sleep
+  for room, and does (`cons_emit_wait`).
+- Echo from `cons_rx_input` runs in **IRQ context**, so it must **never** sleep:
+  it pushes non-blocking and **drops** on a full ring (a tty overrun — the same
+  disposition the drain ring uses).
+
+Exactly **one** thread can ever wait on `g_cons_tx_room`, because only the role
+holder pushes-with-wait and the role is exclusive. That is what makes a
+single-waiter `Rendez` sound here where the role itself needs a waiter list.
+**If a second waiter is ever introduced this must become a `poll_waiter_list`.**
+
+### Invariants a change must preserve
+
+- **`TXIM` armed iff the ring is non-empty**, decided in the *same* critical
+  section as the ring mutation (`cons_tx_drain_locked`). A non-empty ring left
+  with TX interrupts off is a silently wedged console.
+- **`IMSC` is a shared RMW register.** RX masks `RXIM|RTIM` under
+  `g_uart_rx_lock`; TX masks `TXIM` under the ring lock. Two outer locks doing
+  RMW on one register lose updates, so **every** `IMSC` RMW goes through
+  `uart_imsc_update`'s leaf lock (`g_uart_imsc_lock`).
+- **The #67 loss discipline is inherited, not weakened.** A stalled host consumer
+  stops the TX IRQ, so the room-wait is a **deadlined** `tsleep`; on timeout the
+  writer drops the remainder and returns a **short write**. A bounded-but-lossy
+  console beats a wedged writer — the ring must never convert a stalled
+  *consumer* into a wedged *writer*.
+- **The ring lock is a pure irqsave leaf.** The IRQ drain wakes *after* releasing
+  it (the `cons_drain_tap` discipline), and `wakeup()` is the only IRQ-safe wake
+  primitive (LS-8a).
+- **Halls / extinction bypass the ring** (`cons_tx_flush_for_dump`): a dying
+  machine runs IRQ-masked and cannot depend on an interrupt to drain, so the dump
+  flushes by **trylock only** (a dying CPU may already hold the lock) and then
+  falls back to the direct bounded `uart_putc`.
+- **Arming.** The ring arms at `cons_tx_arm()`, after `gic_attach` +
+  `gic_enable_irq` for the UART SPI. Every pre-GIC print takes the direct path;
+  the ring is empty at arm time so the transition cannot reorder output. The
+  `Thylacine boot OK` / `EXTINCTION:` tooling ABI (TOOLING.md §10) is
+  byte-unchanged on both paths.
+
+### Deliberately scoped out (decisions, not omissions)
+
+- **Echo may be interposed at a byte boundary of a larger-than-ring write.** For a
+  write that fits the ring's free space the single lock hold excludes IRQ echo
+  entirely; only a write that sleeps for room can have echo land between its
+  bytes. Deferring echo behind a large write would put user-visible typing lag
+  behind a 128 KiB dump — strictly worse, and Linux interleaves at segment
+  granularity for the same reason.
+- **Kernel prints (`uart_puts`) keep the direct path**, so a kernel print can
+  still interleave with an EL0 write. They must work pre-GIC, in IRQ context and
+  inside extinction, where the ring is unavailable by construction. Post-boot
+  kernel prints are diagnostic and rare; tightening this is v1.x.
+
+### Coverage
+
+`cons.tx_role_serializes_writers` pins the property: with the role held, a second
+`cons_output_write` **parks** and emits nothing; on release it completes and its
+bytes land contiguous. **Revert-probed** — deleting `cons_tx_role_acquire` from
+`cons_output_write` makes the suite read 1188/1189 FAIL on exactly that test.
+
+The **ring** has no dedicated test on purpose: every byte of console output on
+every boot flows through it, so a ring bug means no boot at all — the 1189-test
+boot, the login, and the aurora renderer are its integration proof. The
+byte-interleave itself is an SMP race that no deterministic single-threaded test
+can reproduce; the SMP gate and the `⊢`-tearing signature at 0/40 are its
+runtime witness.
+
 ## Error paths
 
+- `cons_output_write`: returns a **short count** (not an error) when the #67
+  room-wait deadline fires against a stalled host consumer, or when a #811
+  death-interrupt unwinds it mid-write; `-1` only if the role acquire is
+  death-interrupted before any byte was written. It never hangs.
 - `cons_input_read`: `-1` on NULL buf / `n < 0` / a second concurrent reader
   (single-reader guard); `0` on `n == 0` or a death-interrupt with nothing
   buffered.

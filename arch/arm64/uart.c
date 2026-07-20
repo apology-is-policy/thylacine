@@ -48,6 +48,14 @@
 #define PL011_CR_UARTEN   (1u << 0)    // UART master enable
 #define PL011_CR_RXE      (1u << 9)    // receive enable
 
+// #75 / P1-F: TX-side register layout (ARCH section 23.5.2).
+#define PL011_MIS         0x040        // masked interrupt status
+#define PL011_MIS_TXMIS   (1u << 5)    // TX interrupt (masked) pending
+#define PL011_IMSC_TXIM   (1u << 5)    // TX interrupt mask
+#define PL011_ICR_TXIC    (1u << 5)    // clear TX interrupt
+#define PL011_CR_TXE      (1u << 8)    // transmit enable
+#define PL011_FR_TXFE     (1u << 7)    // TX FIFO empty
+
 // Active PL011 base. Defaults to QEMU virt fallback so prints work
 // during early boot (before DTB parsing). uart_set_base() updates this
 // once the DTB is parsed.
@@ -107,12 +115,64 @@ static bool        g_rx_paused;            // true: RX masked, bytes held in FIF
 // stranded by the QEMU "RXRIS is receive-set, not level-recomputed" quirk that
 // caused #172 -- resumption is driven by uart_rx_pump reading the FIFO, never by
 // hoping the interrupt re-fires.
-static void uart_rx_set_enabled(bool en) {
+// #75: IMSC is a SHARED read-modify-write register -- the RX path masks
+// RXIM|RTIM under g_uart_rx_lock, and the TX path (cons.c, under its own ring
+// lock) masks TXIM. Two different outer locks doing RMW on one register lose
+// updates (a dropped TXIM re-arm is a silently wedged console; a dropped RXIM
+// unmask is a dead keyboard). g_uart_imsc_lock serializes EVERY IMSC RMW. It is
+// a pure LEAF -- it takes nothing and is only ever held across two MMIO
+// accesses -- so nesting it inside either outer lock introduces no cycle.
+static spin_lock_t g_uart_imsc_lock = SPIN_LOCK_INIT;
+
+static void uart_imsc_update(uint32_t set, uint32_t clear) {
+    irq_state_t s = spin_lock_irqsave(&g_uart_imsc_lock);
     uintptr_t base = pl011_base;
     uint32_t imsc = mmio_read32(base, PL011_IMSC);
-    if (en) imsc |= (PL011_IMSC_RXIM | PL011_IMSC_RTIM);
-    else    imsc &= ~(uint32_t)(PL011_IMSC_RXIM | PL011_IMSC_RTIM);
+    imsc |= set;
+    imsc &= ~clear;
     mmio_write32(base, PL011_IMSC, imsc);
+    spin_unlock_irqrestore(&g_uart_imsc_lock, s);
+}
+
+static void uart_rx_set_enabled(bool en) {
+    if (en) uart_imsc_update(PL011_IMSC_RXIM | PL011_IMSC_RTIM, 0u);
+    else    uart_imsc_update(0u, PL011_IMSC_RXIM | PL011_IMSC_RTIM);
+}
+
+// #75 / P1-F. Arm or disarm the PL011 TX interrupt. Called by the cons TX ring
+// (kernel/cons.c) under its ring lock, with the rule "TXIM armed iff the ring is
+// non-empty" evaluated in the same critical section -- so a drain that empties
+// the ring and a push that refills it can never leave a non-empty ring with TX
+// interrupts off (the silent-console wedge).
+void uart_tx_irq_set_enabled(bool en) {
+    if (en) uart_imsc_update(PL011_IMSC_TXIM, 0u);
+    else    uart_imsc_update(0u, PL011_IMSC_TXIM);
+}
+
+// #75: clear the TX raw-interrupt state. ICR is write-1-to-clear (NOT a
+// read-modify-write), so it needs no IMSC serialization. The TX drain clears
+// FIRST, mirroring the RX clear-first discipline #172 established -- a source
+// that is level-recomputed needs no clear, but one that is not would otherwise
+// strand, and clearing first re-arms for anything arriving in the drain window.
+void uart_tx_irq_clear(void) {
+    mmio_write32(pl011_base, PL011_ICR, PL011_ICR_TXIC);
+}
+
+// #75 / P1-F. NON-BLOCKING single-byte FIFO push: writes DR iff the TX FIFO has
+// room, else returns false immediately. This is the primitive the ring drains
+// through -- it NEVER spins, so it is safe to call under the ring lock and from
+// IRQ context (unlike uart_putc, whose bounded TXFF spin is #67's compromise for
+// the direct path).
+bool uart_tx_try_putc(char c) {
+    uintptr_t base = pl011_base;
+    if (mmio_read32(base, PL011_FR) & PL011_FR_TXFF) return false;
+    mmio_write32(base, PL011_DR, (uint32_t)(unsigned char)c);
+    return true;
+}
+
+// True once the TX FIFO has fully drained to the wire.
+bool uart_tx_fifo_empty(void) {
+    return (mmio_read32(pl011_base, PL011_FR) & PL011_FR_TXFE) != 0u;
 }
 
 // #67: a stalled host serial consumer (a full host pty/pipe buffer, a paused
@@ -193,8 +253,8 @@ void uart_rx_init(void) {
     uint32_t cr = mmio_read32(base, PL011_CR);
     mmio_write32(base, PL011_CR, cr | PL011_CR_UARTEN | PL011_CR_RXE);
     mmio_write32(base, PL011_ICR, PL011_ICR_RXIC | PL011_ICR_RTIC);
-    uint32_t imsc = mmio_read32(base, PL011_IMSC);
-    mmio_write32(base, PL011_IMSC, imsc | PL011_IMSC_RXIM | PL011_IMSC_RTIM);
+    uart_imsc_update(PL011_IMSC_RXIM | PL011_IMSC_RTIM, 0u);
+    uart_tx_init();   // #75 / P1-F: same bring-up covers the TX direction
 }
 
 // Regression guard (#943): the RX path is live iff the UART is master-enabled
@@ -265,12 +325,49 @@ static bool uart_rx_drain_locked(void) {
 // returns + the GIC EOIs, the exception-return window lets the lower-INTID timer
 // (27 < the UART SPI 33, equal GIC priority -> the timer wins the tie) interleave
 // so the scheduler runs.
-void uart_rx_handler(uint32_t intid, void *arg) {
+// #75 / P1-F: the PL011 SPI is ONE line shared by RX, RX-timeout and TX, so the
+// handler dispatches on MIS (masked interrupt status) and services whichever
+// sources are pending. TX is serviced FIRST: it is the cheap, non-blocking arm
+// (pop ring -> FIFO while there is room) and draining it promptly is what keeps
+// a blocked writer's room-wait short. RX keeps its own lock + backpressure
+// discipline entirely unchanged.
+//
+// TXIC is cleared by the drain in cons.c under the ring lock (the ring's state
+// and the interrupt's state must be decided together -- see uart_tx_irq_set_enabled).
+void uart_irq_handler(uint32_t intid, void *arg) {
     (void)intid;
     (void)arg;
-    irq_state_t s = spin_lock_irqsave(&g_uart_rx_lock);
-    (void)uart_rx_drain_locked();
-    spin_unlock_irqrestore(&g_uart_rx_lock, s);
+
+    uint32_t mis = mmio_read32(pl011_base, PL011_MIS);
+
+    if (mis & PL011_MIS_TXMIS) cons_tx_drain_from_irq();
+
+    if (mis & (PL011_IMSC_RXIM | PL011_IMSC_RTIM)) {
+        irq_state_t s = spin_lock_irqsave(&g_uart_rx_lock);
+        (void)uart_rx_drain_locked();
+        spin_unlock_irqrestore(&g_uart_rx_lock, s);
+    }
+}
+
+// #75 / P1-F: enable the transmitter + clear any stale TX raw-interrupt state.
+// TXIM itself stays MASKED here -- the ring arms it only when it actually has
+// bytes the FIFO could not take (uart_tx_irq_set_enabled). Called from
+// uart_rx_init so the one boot-time UART bring-up covers both directions.
+void uart_tx_init(void) {
+    uintptr_t base = pl011_base;
+    uint32_t cr = mmio_read32(base, PL011_CR);
+    mmio_write32(base, PL011_CR, cr | PL011_CR_UARTEN | PL011_CR_TXE);
+    mmio_write32(base, PL011_ICR, PL011_ICR_TXIC);
+}
+
+// #75: drain the TX FIFO to the wire, bounded. The extinction / Halls path
+// calls this BEFORE its own direct-DR dump so pre-crash ring output is not lost,
+// and it must stay bounded for the same reason uart_putc is (HX-I: a dying
+// machine runs IRQ-masked and must never spin unboundedly).
+void uart_tx_drain_sync(void) {
+    for (uint32_t i = 0; i < UART_TX_SPIN_MAX_ITERS; i++) {
+        if (uart_tx_fifo_empty()) return;
+    }
 }
 
 // #174 backpressure resume (process context; the cons reader calls this after it

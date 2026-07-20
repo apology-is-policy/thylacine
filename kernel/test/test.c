@@ -504,6 +504,7 @@ void test_devproc_debug_kregs_kstack_wait(void);
 void test_devproc_debug_kstack_settled(void);
 void test_devproc_debug_step_cancel_on_stop(void);
 void test_cons_blocking_read_wakeup(void);
+void test_cons_tx_role_serializes_writers(void);
 void test_cons_ring_fill_drain(void);
 void test_cons_ring_overflow_drop(void);
 void test_cons_rx_can_accept_boundary(void);
@@ -1845,6 +1846,7 @@ struct test_case g_tests[] = {
     { "hwdebug.wp_table",                      test_hwdebug_wp_table,                      false, NULL },
     { "hwdebug.wp_encode",                     test_hwdebug_wp_encode,                     false, NULL },
     { "cons.blocking_read_wakeup",     test_cons_blocking_read_wakeup,     false, NULL },
+    { "cons.tx_role_serializes_writers", test_cons_tx_role_serializes_writers, false, NULL },
     { "cons.ring_fill_drain",          test_cons_ring_fill_drain,          false, NULL },
     { "cons.ring_overflow_drop",       test_cons_ring_overflow_drop,       false, NULL },
     { "cons.rx_can_accept_boundary",   test_cons_rx_can_accept_boundary,   false, NULL },

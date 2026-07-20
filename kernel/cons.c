@@ -20,6 +20,7 @@
 #include <thylacine/thread.h>                // RW-11 SA-1b: current_thread
 #include <thylacine/types.h>
 
+#include "../arch/arm64/timer.h"              // #75: the TX room-wait deadline
 #include "../arch/arm64/uart.h"
 
 // =============================================================================
@@ -218,6 +219,230 @@ static inline void cons_pollwake_store(bool v) { __atomic_store_n(&g_cons.poll_w
 static inline u32  cons_termios_load(void)   { return __atomic_load_n(&g_cons.termios, __ATOMIC_RELAXED); }
 static inline void cons_termios_store(u32 v) { __atomic_store_n(&g_cons.termios, v, __ATOMIC_RELAXED); }
 
+// ---------------------------------------------------------------------------
+// #75 / P1-F -- the console TX ring + the writer role (ARCH §23.5.2).
+//
+// Before P1-F, cons_output_write looped byte-by-byte into a LOCK-FREE uart_putc,
+// so two CPUs writing /dev/cons interleaved at BYTE granularity -- shredding a
+// multi-byte glyph or an SGR escape (#75: 10 of 40 gate boots). Two separable
+// mechanisms fix it:
+//
+//   The RING decouples the writer from uart_putc's bounded-but-slow TXFF spin
+//   (#67: up to 20 ms per byte against a stalled host consumer). A push is a
+//   memory write under a leaf spinlock; the PL011 TX interrupt drains ring ->
+//   FIFO. In the HEALTHY case the post-push kick moves the bytes straight into a
+//   non-full FIFO and TXIM is never even armed -- behaviour matches the old
+//   direct path minus the spin, and per byte it trades an MMIO FR read + DR
+//   write for a spinlock + a memory store (a win, especially under HVF where
+//   each MMIO is a vmexit).
+//
+//   The WRITER ROLE makes a whole cons_output_write call atomic against other
+//   console writers. It is REQUIRED because a write larger than the ring must
+//   sleep for room, dropping the ring lock -- so the ring lock alone can never
+//   span the call. This is the audited srvconn.c::chan_role_acquire shape
+//   (#354 / CF-3 B) reused in structure: park on a poll_waiter_list with
+//   register-then-observe, TSLEEP_INTR unwind, re-contend on wake.
+//
+// The two ring producers have OPPOSITE blocking contracts, and the asymmetry is
+// load-bearing -- a change that blurs it is a bug:
+//   - cons_output_write runs in PROCESS context (spoor_write_common holds no
+//     lock across dev->write and documents it as blocking), so it MAY sleep for
+//     room, and does.
+//   - echo from cons_rx_input runs in IRQ context, so it must NEVER sleep: it
+//     pushes non-blocking and DROPS on a full ring (a tty overrun -- the same
+//     disposition the drain ring uses).
+//
+// Exactly ONE thread can ever wait on g_cons_tx_room, because only the role
+// holder pushes-with-wait and the role is exclusive. THAT is what makes a
+// single-waiter Rendez sound here, where the role itself needs a waiter list.
+// If a second waiter is ever introduced this must become a poll_waiter_list.
+// ---------------------------------------------------------------------------
+
+#define CONS_TX_RING_SIZE  8192u   // power of two (mask-indexed)
+_Static_assert((CONS_TX_RING_SIZE & (CONS_TX_RING_SIZE - 1u)) == 0u,
+               "CONS_TX_RING_SIZE must be a power of two");
+
+// #67 inherited, NOT weakened: a stalled host consumer stops the TX IRQ, so the
+// room-wait is DEADLINED and a timeout drops the remainder of the write (a short
+// write). A bounded-but-lossy console is strictly sounder than a wedged writer.
+// Matched to UART_TX_SPIN_MAX_NS so the worst-case per-write stall is the same
+// order as the direct path it replaces.
+#define CONS_TX_ROOM_WAIT_NS  (20ull * 1000ull * 1000ull)   // 20 ms
+
+struct cons_tx {
+    spin_lock_t lock;                  // irqsave: the TX IRQ drains under it
+    u8          ring[CONS_TX_RING_SIZE];
+    u32         head;                  // next byte to hand the FIFO
+    u32         tail;                  // next slot to fill
+    u32         count;
+    bool        armed;                 // the IRQ-driven path is live (post-GIC)
+    bool        writing;               // the writer role (one cons_output_write)
+    u32         dropped;               // overrun + deadline drops (diagnostic)
+    struct poll_waiter_list role_waiters;
+};
+
+static struct cons_tx g_cons_tx = {
+    .lock         = SPIN_LOCK_INIT,
+    .role_waiters = POLL_WAITER_LIST_INIT,
+};
+
+// Single-waiter by construction -- see the header comment.
+static struct Rendez g_cons_tx_room = RENDEZ_INIT;
+
+// Pop ring -> FIFO while the FIFO has room, then re-evaluate TXIM in the SAME
+// critical section. Deciding the ring's state and the interrupt's state together
+// is what makes "a non-empty ring left with TX interrupts off" -- the silent
+// console wedge -- unrepresentable. Caller holds g_cons_tx.lock.
+static void cons_tx_drain_locked(void) {
+    while (g_cons_tx.count != 0u) {
+        if (!uart_tx_try_putc((char)g_cons_tx.ring[g_cons_tx.head])) break;  // FIFO full
+        g_cons_tx.head = (g_cons_tx.head + 1u) & (CONS_TX_RING_SIZE - 1u);
+        g_cons_tx.count--;
+    }
+    uart_tx_irq_set_enabled(g_cons_tx.count != 0u);
+}
+
+// The TX IRQ arm (IRQ context, IRQs masked at PSTATE). Called from
+// uart_irq_handler on MIS.TXMIS.
+void cons_tx_drain_from_irq(void) {
+    irq_state_t s = spin_lock_irqsave(&g_cons_tx.lock);
+    uart_tx_irq_clear();                 // clear-first, the #172 RX discipline
+    u32 before = g_cons_tx.count;
+    cons_tx_drain_locked();
+    bool freed = (g_cons_tx.count < before);
+    spin_unlock_irqrestore(&g_cons_tx.lock, s);
+
+    // Wake OUTSIDE the ring lock (the cons_drain_tap discipline): wakeup() takes
+    // the rendez lock, and keeping the ring lock a pure LEAF keeps the order
+    // acyclic. wakeup() is the only IRQ-safe wake primitive (LS-8a).
+    if (freed) wakeup(&g_cons_tx_room);
+}
+
+// Arm the IRQ-driven path. Until this runs (pre-GIC boot), every byte takes the
+// direct bounded uart_putc, so boot prints and the tooling-ABI banner are
+// unaffected. The ring is empty at arm time, so the transition cannot reorder.
+void cons_tx_arm(void) {
+    irq_state_t s = spin_lock_irqsave(&g_cons_tx.lock);
+    g_cons_tx.armed = true;
+    spin_unlock_irqrestore(&g_cons_tx.lock, s);
+}
+
+// #75: flush the ring synchronously, bounded. The extinction / Halls path calls
+// this before its own direct-DR dump so pre-crash ring output is not lost. It
+// runs on a dying, IRQ-masked machine, so it must NOT wait on the IRQ and must
+// NOT take the ring lock (a dying CPU may already hold it) -- it drains with a
+// bounded trylock, then gives up. HX-I discipline: bounded, never recursing.
+void cons_tx_flush_for_dump(void) {
+    if (!spin_trylock(&g_cons_tx.lock)) return;   // a peer holds it: skip, do not wedge
+    for (u32 i = 0; i < CONS_TX_RING_SIZE && g_cons_tx.count != 0u; i++) {
+        if (!uart_tx_try_putc((char)g_cons_tx.ring[g_cons_tx.head])) break;
+        g_cons_tx.head = (g_cons_tx.head + 1u) & (CONS_TX_RING_SIZE - 1u);
+        g_cons_tx.count--;
+    }
+    spin_unlock(&g_cons_tx.lock);
+    uart_tx_drain_sync();
+}
+
+// Non-blocking ring push. false == the ring is FULL (the caller drops or waits).
+// Pre-arm this takes the direct bounded path and always succeeds.
+static bool cons_tx_push_nowait(u8 b) {
+    irq_state_t s = spin_lock_irqsave(&g_cons_tx.lock);
+    if (!g_cons_tx.armed) {
+        spin_unlock_irqrestore(&g_cons_tx.lock, s);
+        uart_putc((char)b);            // pre-GIC boot path: direct, bounded (#67)
+        return true;
+    }
+    if (g_cons_tx.count == CONS_TX_RING_SIZE) {
+        spin_unlock_irqrestore(&g_cons_tx.lock, s);
+        return false;
+    }
+    g_cons_tx.ring[g_cons_tx.tail] = b;
+    g_cons_tx.tail = (g_cons_tx.tail + 1u) & (CONS_TX_RING_SIZE - 1u);
+    g_cons_tx.count++;
+    spin_unlock_irqrestore(&g_cons_tx.lock, s);
+    return true;
+}
+
+// Hand the FIFO whatever it will take now + (re)arm TXIM for the remainder.
+static void cons_tx_kick(void) {
+    irq_state_t s = spin_lock_irqsave(&g_cons_tx.lock);
+    if (g_cons_tx.armed) cons_tx_drain_locked();
+    spin_unlock_irqrestore(&g_cons_tx.lock, s);
+}
+
+static void cons_tx_count_drop(void) {
+    irq_state_t s = spin_lock_irqsave(&g_cons_tx.lock);
+    g_cons_tx.dropped++;
+    spin_unlock_irqrestore(&g_cons_tx.lock, s);
+}
+
+static int cons_tx_has_room(void *arg) {
+    (void)arg;
+    return (int)(__atomic_load_n(&g_cons_tx.count, __ATOMIC_RELAXED) < CONS_TX_RING_SIZE);
+}
+
+static int cons_tx_role_free(void *arg) {
+    (void)arg;
+    return (int)!__atomic_load_n(&g_cons_tx.writing, __ATOMIC_RELAXED);
+}
+
+// Claim the writer role, parking until it frees. The audited chan_role_acquire
+// (#354) shape. Returns 0 with the role HELD (caller MUST release), or
+// TSLEEP_INTR on a #811 death-interrupt with the role NOT held.
+static int cons_tx_role_acquire(void) {
+    for (;;) {
+        irq_state_t s = spin_lock_irqsave(&g_cons_tx.lock);
+        if (!g_cons_tx.writing) {
+            g_cons_tx.writing = true;
+            spin_unlock_irqrestore(&g_cons_tx.lock, s);
+            return 0;
+        }
+        // Held -- park on the role list. register-then-observe: the hook is
+        // registered under g_cons_tx.lock BEFORE the flag is re-sampled by
+        // tsleep under the waiter's own rendez lock, so a concurrent release's
+        // clear-then-wake is either captured by the cond re-check or delivered
+        // to the registered hook (I-9; poll.tla). The stack Rendez/hook are
+        // unregistered below before this frame pops (poll.tla NoStaleHook).
+        struct Rendez      pr;
+        struct poll_waiter pw;
+        rendez_init(&pr);
+        poll_waiter_init(&pw, &pr);
+        poll_waiter_list_register(&g_cons_tx.role_waiters, &pw);
+        spin_unlock_irqrestore(&g_cons_tx.lock, s);
+
+        int ts = tsleep(&pr, cons_tx_role_free, NULL, 0);
+        poll_waiter_list_unregister(&pw);
+        if (ts == TSLEEP_INTR) return TSLEEP_INTR;
+        // AWOKEN -- loop and re-contend (another writer may have won).
+    }
+}
+
+// #75 test hooks. The RING is exercised by every byte of console output on
+// every boot (a ring bug means no boot at all), so it needs no dedicated test;
+// the ROLE does -- it is the mechanism that makes a write call-atomic, and its
+// absence is silent until two CPUs happen to interleave. These let a test hold
+// the role from one thread and prove a second writer PARKS rather than emitting.
+void cons_test_tx_role_hold(void) {
+    irq_state_t s = spin_lock_irqsave(&g_cons_tx.lock);
+    g_cons_tx.writing = true;
+    spin_unlock_irqrestore(&g_cons_tx.lock, s);
+}
+
+bool cons_test_tx_role_held(void) {
+    return __atomic_load_n(&g_cons_tx.writing, __ATOMIC_RELAXED);
+}
+
+static void cons_tx_role_release(void) {
+    irq_state_t s = spin_lock_irqsave(&g_cons_tx.lock);
+    g_cons_tx.writing = false;
+    spin_unlock_irqrestore(&g_cons_tx.lock, s);
+    // Clear-then-wake, outside the lock (the release side of register-then-observe).
+    poll_waiter_list_wake(&g_cons_tx.role_waiters);
+}
+
+// #75 test hook -- the release half of cons_test_tx_role_hold.
+void cons_test_tx_role_drop(void) { cons_tx_role_release(); }
+
 // LS-8b: the echo / output sink. Console echo (cons_rx_input) AND program output
 // (cons_output_write) emit one cooked byte through cons_emit. In production it is
 // uart_putc; a test enables capture (cons_test_echo_capture) to buffer the bytes
@@ -245,7 +470,44 @@ static void cons_emit(u8 b) {
             g_cons_echo_cap[g_cons_echo_cap_len++] = b;
         return;
     }
-    uart_putc((char)b);
+    // #75: NON-BLOCKING. This is the IRQ-context (echo) contract -- it must
+    // never sleep, so a full ring DROPS (a tty overrun, the same disposition
+    // the drain ring uses). Kick immediately: echo is <= CONS_ECHO_MAX bytes
+    // and typing latency is user-visible, so it does not batch.
+    if (cons_tx_push_nowait(b)) cons_tx_kick();
+    else                        cons_tx_count_drop();
+}
+
+// #75: the PROCESS-context emit used by cons_output_write. Pushes, and on a
+// full ring kicks the FIFO then parks until the TX IRQ frees a slot.
+//
+// Returns false only when the write must be cut short -- a #811 death-interrupt
+// or the #67 deadline against a stalled host consumer. The caller then returns a
+// SHORT WRITE, which is POSIX-legal and is the inherited "bounded-but-lossy
+// console beats a wedged writer" disposition; it must never become a hang.
+//
+// I-9 (no lost wake): cons_tx_kick re-evaluates ring + TXIM under the ring lock,
+// and cons_tx_drain_from_irq wakes AFTER releasing that lock, so a slot freed in
+// the window between our full-observation and our park is either seen by
+// tsleep's cond re-check (under the rendez lock) or delivered to this rendez.
+static bool cons_emit_wait(u8 b) {
+    cons_drain_tap(b);
+    if (g_cons_echo_capture) {
+        if (g_cons_echo_cap_len < sizeof(g_cons_echo_cap))
+            g_cons_echo_cap[g_cons_echo_cap_len++] = b;
+        return true;
+    }
+    for (;;) {
+        if (cons_tx_push_nowait(b)) return true;
+        cons_tx_kick();
+        int ts = tsleep(&g_cons_tx_room, cons_tx_has_room, NULL,
+                        timer_now_ns() + CONS_TX_ROOM_WAIT_NS);
+        if (ts == TSLEEP_INTR) return false;            // #811 death -> short write
+        if (ts == TSLEEP_TIMEDOUT) {                    // #67 stalled consumer
+            cons_tx_count_drop();
+            return false;                               // drop the rest -> short write
+        }
+    }
 }
 
 // Stage one echoed/output byte into `echo[*necho]`, applying ONLCR (NL -> CR NL).
@@ -645,17 +907,31 @@ long cons_output_write(const void *buf, long n) {
     if (n < 0) return -1;
     if (n == 0) return 0;
 
+    // #75 (ARCH §23.5.2): hold the writer role across the WHOLE call so this
+    // write's bytes are contiguous with respect to every other console writer.
+    // Without it two CPUs interleave at byte granularity and tear multi-byte
+    // glyphs and escape sequences. The role is a sleeping park, NOT a spinlock:
+    // a contending writer parks on the role list, so a long write makes peers
+    // wait but never pins a CPU.
+    if (cons_tx_role_acquire() != 0) return -1;   // #811 death before we wrote anything
+
     u32 tio = cons_termios_load();
     const u8 *bytes = (const u8 *)buf;
-    for (long i = 0; i < n; i++) {
+    long i = 0;
+    for (; i < n; i++) {
         if (bytes[i] == (u8)'\n' && (tio & CONS_ONLCR)) {
-            cons_emit((u8)'\r');
-            cons_emit((u8)'\n');
+            if (!cons_emit_wait((u8)'\r')) break;
+            if (!cons_emit_wait((u8)'\n')) break;
         } else {
-            cons_emit(bytes[i]);
+            if (!cons_emit_wait(bytes[i])) break;
         }
     }
-    return n;
+
+    // Hand the FIFO whatever it can take now (the healthy case moves every byte
+    // here and never arms TXIM) and arm the interrupt for any remainder.
+    cons_tx_kick();
+    cons_tx_role_release();
+    return i;   // a short count == the #67 deadline drop or a #811 death unwind
 }
 
 static long devcons_write(struct Spoor *c, const void *buf, long n, s64 off) {

@@ -736,10 +736,15 @@ void boot_main(void) {
     // after sched_init + kproc + bootcpu_idle so the kthread can block + be
     // scheduled; RX bytes arriving before it runs simply sit in the ring.
     uart_rx_init();
-    if (!gic_attach(UART_INTID_PL011, uart_rx_handler, NULL))
-        extinction("boot_main: gic_attach(uart-rx) failed");
+    if (!gic_attach(UART_INTID_PL011, uart_irq_handler, NULL))
+        extinction("boot_main: gic_attach(uart) failed");
     if (!gic_enable_irq(UART_INTID_PL011))
-        extinction("boot_main: gic_enable_irq(uart-rx) failed");
+        extinction("boot_main: gic_enable_irq(uart) failed");
+    // #75 / P1-F: only now can the TX ring rely on an interrupt to drain it, so
+    // this is where the buffered path arms. Every print before this point took
+    // the direct bounded uart_putc; the ring is empty at arm time, so the
+    // transition cannot reorder output.
+    cons_tx_arm();
     {
         struct Thread *console_mgr = thread_create(kproc(), console_mgr_main);
         if (!console_mgr) extinction("boot_main: console_mgr alloc failed");

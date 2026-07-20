@@ -44,6 +44,7 @@
 #include <thylacine/types.h>
 
 void test_cons_blocking_read_wakeup(void);
+void test_cons_tx_role_serializes_writers(void);
 void test_cons_ring_fill_drain(void);
 void test_cons_ring_overflow_drop(void);
 void test_cons_rx_can_accept_boundary(void);
@@ -1246,5 +1247,88 @@ void test_cons_drain_poll_deferred_wake(void) {
                 "closed drain reads EOF -> POLLIN-ready");
 
     cons_test_echo_capture(false);
+    cons_settle_mgr();
+}
+
+// ---------------------------------------------------------------------------
+// cons.tx_role_serializes_writers (#75)
+// ---------------------------------------------------------------------------
+//
+// THE #75 REGRESSION. cons_output_write must be atomic against other console
+// writers (ARCH section 23.5.2): while one writer holds the TX writer role, a
+// second must PARK rather than emit. Pre-P1-F the loop held no lock at all --
+// cons_output_write walked byte-by-byte into a lock-free uart_putc -- so two
+// CPUs interleaved at BYTE granularity, shredding multi-byte glyphs (the 3-byte
+// U+22A2) and SGR escapes in 10 of 40 gate boots.
+//
+// The RING deliberately has no test of its own: every byte of console output on
+// every boot flows through it, so a ring bug means no boot at all. The ROLE is
+// what needs pinning -- its absence is SILENT until two CPUs happen to race.
+//
+// NON-VACUOUS: with cons_tx_role_acquire() removed from cons_output_write the
+// writer emits immediately, so g_txr_ran reaches 2 and the capture buffer holds
+// "BBBB" after the first sched() -- both asserts below fail.
+//
+// Echo capture is on so the writer's bytes land in an observable buffer instead
+// of the real UART, letting the test assert on EXACTLY what was emitted and
+// when. Capture short-circuits cons_emit_wait AFTER the role is taken, so the
+// role -- the thing under test -- is exercised unchanged.
+
+static volatile u32  g_txr_ran;
+static volatile long g_txr_ret;
+static volatile bool g_txr_exited;
+
+static void txr_writer(void) {
+    g_txr_ran++;
+    g_txr_ret = cons_output_write("BBBB", 4);
+    g_txr_ran++;
+    test_kthread_park_terminal(&g_txr_exited);
+}
+
+void test_cons_tx_role_serializes_writers(void) {
+    u8  got[16];
+    u32 n;
+
+    g_txr_ran = 0;
+    g_txr_ret = -999;
+    g_txr_exited = false;
+
+    cons_test_echo_capture(true);
+
+    // Hold the role from the test thread, standing in for a first writer that
+    // is mid-call (a real one parks in the room-wait; the observable state is
+    // identical -- the role is held).
+    cons_test_tx_role_hold();
+    TEST_ASSERT(cons_test_tx_role_held(), "role held before the contender runs");
+
+    struct Thread *w = thread_create(kproc(), txr_writer);
+    TEST_ASSERT(w != NULL, "thread_create");
+    ready(w);
+
+    // Let the writer run until it parks on the role. SMP placement means one
+    // sched() does not guarantee it ran (the #77 lesson) -- wait on the
+    // OBSERVABLE, bounded.
+    for (int spins = 0; g_txr_ran < 1u && spins < 10000; spins++) sched();
+    TEST_EXPECT_EQ(g_txr_ran, 1u, "contender entered cons_output_write");
+
+    // THE PROPERTY: it must NOT have emitted anything while the role is held.
+    for (int spins = 0; spins < 100; spins++) sched();
+    TEST_EXPECT_EQ(g_txr_ran, 1u, "contender is PARKED on the role, not emitting");
+    n = cons_test_echo_captured(got, sizeof got);
+    TEST_EXPECT_EQ(n, 0u, "no byte of the contender's write reached the console");
+
+    // Release: the contender must wake, complete, and emit its bytes CONTIGUOUSLY.
+    cons_test_tx_role_drop();
+    for (int spins = 0; g_txr_ran < 2u && spins < 10000; spins++) sched();
+    TEST_EXPECT_EQ(g_txr_ran, 2u, "contender resumed after the role freed");
+    TEST_EXPECT_EQ(g_txr_ret, 4L, "contender wrote all 4 bytes");
+
+    n = cons_test_echo_captured(got, sizeof got);
+    TEST_EXPECT_EQ(n, 4u, "exactly the contender's 4 bytes were emitted");
+    TEST_ASSERT(got[0] == 'B' && got[1] == 'B' && got[2] == 'B' && got[3] == 'B',
+                "the write landed contiguous and intact");
+
+    cons_test_echo_capture(false);
+    test_kthread_join_free(w, &g_txr_exited);
     cons_settle_mgr();
 }

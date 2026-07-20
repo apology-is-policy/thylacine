@@ -3,6 +3,7 @@
 // failure signal. Don't change without coordinating tools/run-vm.sh,
 // tools/test.sh, tools/agent-protocol.md, CLAUDE.md, and TOOLING.md.
 
+#include <thylacine/cons.h>
 #include <thylacine/extinction.h>
 
 #include "../arch/arm64/halls.h"
@@ -10,7 +11,18 @@
 
 extern void _torpor(void) __attribute__((noreturn));
 
+// #75 / P1-F: console output now stages through a ring the TX interrupt drains,
+// and a dying machine runs IRQ-masked -- so anything still in the ring would be
+// lost. Flush it (bounded, trylock-only) BEFORE the "EXTINCTION: " line so the
+// output that led up to the crash is on the wire and in causal order. Bounded +
+// non-recursing per HX-I; if a peer CPU holds the ring lock we skip rather than
+// wedge the dump.
+static void extinction_flush_console(void) {
+    cons_tx_flush_for_dump();
+}
+
 void extinction(const char *msg) {
+    extinction_flush_console();
     uart_puts("\n");
     uart_puts("EXTINCTION: ");
     uart_puts(msg);
@@ -24,6 +36,7 @@ void extinction(const char *msg) {
 }
 
 void extinction_with_addr(const char *msg, uintptr_t addr) {
+    extinction_flush_console();
     uart_puts("\n");
     uart_puts("EXTINCTION: ");
     uart_puts(msg);

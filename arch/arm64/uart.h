@@ -73,10 +73,48 @@ void uart_rx_init(void);
 // the #943 regression guard for "the console silently never receives".
 bool uart_rx_path_enabled(void);
 
-// PL011 RX IRQ handler (GIC dispatch target; runs in IRQ context). Drains
-// the RX FIFO, splitting each 12-bit DR entry into a data byte + a break
-// flag, and hands each to cons_rx_input. Clears the RX interrupts on exit.
-void uart_rx_handler(uint32_t intid, void *arg);
+// PL011 IRQ handler (GIC dispatch target; runs in IRQ context). The PL011 SPI
+// is ONE line shared by RX, RX-timeout and TX, so this dispatches on MIS.
+// RX: drains the RX FIFO, splitting each 12-bit DR entry into a data byte + a
+// break flag, and hands each to cons_rx_input; clears the RX interrupts on exit.
+// TX (#75 / P1-F): calls cons_tx_drain_from_irq to pop the cons TX ring into
+// the FIFO. TX is serviced first -- it is the cheap non-blocking arm, and
+// draining promptly is what keeps a blocked writer's room-wait short.
+void uart_irq_handler(uint32_t intid, void *arg);
+
+// #75 / P1-F. Enable the transmitter (CR.TXE) + clear stale TX raw-interrupt
+// state. TXIM stays MASKED -- the cons TX ring arms it only when it holds bytes
+// the FIFO could not take. Called from uart_rx_init (one bring-up, both
+// directions).
+void uart_tx_init(void);
+
+// #75 / P1-F. NON-BLOCKING single-byte FIFO push: writes DR iff the TX FIFO has
+// room, else returns false at once. NEVER spins, so unlike uart_putc it is safe
+// under a spinlock and in IRQ context -- this is the primitive the cons TX ring
+// drains through.
+bool uart_tx_try_putc(char c);
+
+// True once the TX FIFO has fully drained to the wire (FR.TXFE).
+bool uart_tx_fifo_empty(void);
+
+// #75 / P1-F. Arm or disarm the PL011 TX interrupt (IMSC.TXIM). The cons TX
+// ring calls this under its ring lock so "TXIM armed iff the ring is non-empty"
+// is decided in one critical section -- a non-empty ring left with TX interrupts
+// off is a silently wedged console. Every IMSC read-modify-write (RX and TX
+// alike) is serialized by an internal leaf lock, because the two directions are
+// driven under DIFFERENT outer locks and would otherwise lose updates.
+void uart_tx_irq_set_enabled(bool en);
+
+// #75 / P1-F. Clear the TX raw-interrupt state (ICR is write-1-to-clear, so no
+// IMSC serialization is needed). The ring's drain clears FIRST, mirroring the
+// RX clear-first discipline #172 established.
+void uart_tx_irq_clear(void);
+
+// #75. Bounded wait for the TX FIFO to drain to the wire. The extinction /
+// Halls path calls this before its own direct-DR dump so pre-crash ring output
+// is not lost; bounded for the same reason uart_putc is (HX-I -- a dying machine
+// runs IRQ-masked and must never spin unboundedly).
+void uart_tx_drain_sync(void);
 
 // #174 backpressure resume. The cons reader calls this AFTER draining ring
 // bytes (freeing space). If RX was paused (the ring filled and the handler
