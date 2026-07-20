@@ -101,6 +101,15 @@ for scen in "${scenarios[@]}"; do
     name="$(basename "$scen" .exp)"
     transcript="$BUILD_DIR/ls-ci-$name.log"
     steps="$BUILD_DIR/ls-ci-$name.steps"
+    # #34: failed-attempt evidence survives the retry. The per-attempt
+    # truncation below used to destroy the very transcript a retry was
+    # retrying over, so "attempt 1 was a host-timing artifact" could never
+    # be verified against its evidence (the no-host-load discipline needs
+    # the artifact to LOOK at). Each failed attempt is archived as
+    # ls-ci-<name>.attempt<N>.{log,steps}; retention is bounded to the
+    # LAST run (cleared here, per scenario, not per attempt).
+    rm -f "$BUILD_DIR/ls-ci-$name.attempt"*.log \
+          "$BUILD_DIR/ls-ci-$name.attempt"*.steps 2>/dev/null || true
     echo "==> scenario: $name (up to $attempts attempt(s))"
     passed=0
     for attempt in $(seq 1 "$attempts"); do
@@ -121,14 +130,17 @@ for scen in "${scenarios[@]}"; do
         reap_qemu
         if [[ $rc -eq 0 ]]; then
             if [[ $attempt -gt 1 ]]; then
-                echo "    PASS: $name (attempt $attempt/$attempts; earlier attempt(s) hit a transient host-timing qemu exit)"
+                echo "    PASS: $name (attempt $attempt/$attempts; earlier failed attempt(s) preserved: $BUILD_DIR/ls-ci-$name.attempt*.{log,steps})"
             else
                 echo "    PASS: $name"
             fi
             passed=1
             break
         fi
-        echo "    attempt $attempt/$attempts FAILED (rc=$rc)" >&2
+        # Preserve this attempt's evidence BEFORE the next attempt truncates.
+        cp "$transcript" "$BUILD_DIR/ls-ci-$name.attempt$attempt.log" 2>/dev/null || true
+        cp "$steps" "$BUILD_DIR/ls-ci-$name.attempt$attempt.steps" 2>/dev/null || true
+        echo "    attempt $attempt/$attempts FAILED (rc=$rc; evidence: ls-ci-$name.attempt$attempt.{log,steps})" >&2
         [[ $attempt -lt $attempts ]] && echo "    retrying (kernel proven stable at idle; an early qemu exit is host-timing)..." >&2
     done
     if [[ $passed -ne 1 ]]; then
@@ -137,6 +149,7 @@ for scen in "${scenarios[@]}"; do
         cat "$steps" >&2 2>/dev/null || true
         echo "    --- transcript tail ($transcript; last attempt) ---" >&2
         tr -d '\r' < "$transcript" 2>/dev/null | tail -40 >&2 || true
+        echo "    every attempt's evidence: $BUILD_DIR/ls-ci-$name.attempt*.{log,steps}" >&2
         echo "    --------------------------------------" >&2
         fails=$((fails + 1))
     fi
