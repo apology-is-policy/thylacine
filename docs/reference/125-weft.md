@@ -1067,3 +1067,151 @@ throughput levers (#221, #288) are NOT weft defects.
   way the Weft-4 `weft_ready_hdr` already separates its two writers). Correctness
   is unaffected (single-writer-per-word holds); only the ping-pong cost. The
   readiness ring, the latency-critical path, is already split.
+
+## The weave share (G-2) — the Tapestry surface-share generalization
+
+**Landed 2026-07-19** (the graphics arc's G-2 kernel delta; TAPESTRY.md §18.1 +
+§18.11 F3/F10 + §18.12 R2-F1/R2-F3/R2-F5; the ABI user-signed-off 2026-07-19;
+realizes the **I-40 (T-1) kernel share half** — ARCH §28 I-40 is the
+authoritative invariant statement; `specs/SPEC-TO-CODE.md::tapestry_present.tla`
+is the action ↔ site map). The Weft share mechanism generalizes from "netd flow
+rings" to "any kernel-admissible cross-Proc region", with exactly one new
+admissible class: the **kernel-minted device-passive DMA weave** (a compositor's
+framebuffer backing).
+
+### The mint — `SYS_DMA_CREATE_WEAVE` (99)
+
+`kobj_dma_create_weave` (`kernel/dma_handle.c`) is the `kobj_dma_create` body
+with a framebuffer-class envelope (`KOBJ_DMA_WEAVE_MAX_SIZE` = 64 MiB; triple-
+buffered 1080p ≈ 25 MiB) and the create-immutable `KObj_DMA.weave` bit — set
+once at allocation, never written on a live object (the `pa` discipline). The
+handler (`kernel/syscall.c::sys_dma_create_weave_handler`) is byte-for-byte the
+`SYS_DMA_CREATE` contract: `CAP_HW_CREATE`, the I-34 allowance
+CreateBegin/CreateCommit pair (a narrowed driver's `dma_max` bounds weave
+creates identically), kernel-chosen PA. **A separate syscall number, not a
+flags widening**: every existing two-arg `SYS_DMA_CREATE` caller (stratumd's
+pouch seam, the virtio drivers) leaves x2 as garbage, and a garbage-read flags
+word could accidentally set the share-admissibility bit — the #112
+missed-caller class, eliminated structurally.
+
+### The admission gates
+
+`burrow_share_into` (`kernel/burrow.c`) and the `SYS_WEFT_SHARE` register gate
+(`kernel/syscall.c::sys_weft_share_for_proc`) admit `BURROW_TYPE_ANON` (rings)
+**or** `BURROW_TYPE_DMA` whose `kobj_dma->weave` is set — nothing else. A
+device-command DMA region (virtqueue, descriptor table — allocated via plain
+`SYS_DMA_CREATE`) is therefore as structurally unshareable as MMIO: no
+creator-asserted flag exists; admissibility is minted at allocation by the
+kernel (the §18.12 R2-F1 close — the earlier creator-asserted-flag design was
+rejected as behavioral, one layer down). The weave bit conveys no hardware
+authority: the region is pinned Normal-WB RAM the device only DMA-reads
+(pixels); a client's PTEs are the same cacheable attrs an ANON share installs
+(the fault arm's `BURROW_TYPE_DMA` case — never Device-nGnRnE), and W^X holds
+(share prot is RW; `vma_alloc` rejects X).
+
+### The claim-time kind decision
+
+`weft_claimed_kind(v, ring_entries)` (`kernel/weft.c`; pure, unit-testable):
+the kernel-minted Burrow type is the single source of truth — ANON ⇒ RING
+(requires the server-declared `ring_entries != 0`; the layout validates the
+exact value), DMA-weave ⇒ WEAVE (requires `ring_entries == 0` — a weave has no
+descriptor ring). A mismatch means the server's declaration contradicts its own
+registered region → fail closed, the claimed pin dropped, nothing mapped.
+`struct weft_binding` gains `kind` + `map_pid`; **`weft_binding_alloc_weave`**
+is the §18.11 F10 framebuffer branch — no ring view — and the kind gate at the
+top of `weft_binding_validate_rw` closes **all three** Tweftio fast-path
+consumers (`dev9p_weft_try_read`/`_write` + the Loom `loom_submit_payload`
+routing) at one chokepoint: a weave fid is a map capability, never a data-drive
+target. (The Loom registered-buffer path was already structurally closed — its
+ANON-only contiguity gate rejects a TYPE_DMA weave VMA.)
+
+### The disarm — `SYS_WEFT_UNSHARE` (100)
+
+`weft_share_unregister(owner, share_id)` (`kernel/weft.c`): find-and-remove
+under the `g_weft_lock` leaf, owner-gated (only the registrant's entry), pin
+dropped OUTSIDE the lock (the `release_owner` discipline). Returns 0 (removed —
+a subsequent claim fails closed) or -1 (already claimed / GC'd / forged / not
+yours — deliberately indistinguishable). This is the §18.12 R2-F5 pair
+realized: (i) registry-removal-**before**-page-free — tapestryd unshares
+at/before a surface's RETIRING transition, so (ii) the claim's live-registry
+lookup (consume-once) makes a retire-raced `Tweft` fail closed instead of
+mapping a retiring weave — the `tapestry_present.tla` `Map`-guard
+(`wstate ∈ {woven, live}`) / `NoStaleMap` kernel half, whose absence was the
+`map_after_retire` counterexample. It also closes the **#289** seam: netd can
+now GC a minted-but-never-claimed flow id (a client that died between `Tweft`
+and the claim) instead of leaking the slot until netd death.
+
+### The shared-in budget (the I-32 fifth axis)
+
+`Proc.shared_map_pages` (offset 348 — the former tail pad; **no struct
+growth**) + `PROC_SHARED_MAP_MAX_PAGES` (32768 = 128 MiB: two live weave
+generations of a large surface across a reweave + a full complement of flow
+rings). Charged inside `burrow_share_into` (before the map; exact under
+`dst->vma_lock`; `PRINCIPAL_SYSTEM` exempt), uncharged at the flagged VMA's
+teardown — `VMA_FLAG_SHARED_IN` (the former `Vma._pad`; no size change) pairs
+every charge with exactly one uncharge across **every** removal path: explicit
+`SYS_BURROW_DETACH`, the weave-fid clunk unmap, exit `vma_drain`. The §18.12
+R2-F3 close: the shared pages are the SHARER's commit (netd's `page_count` /
+tapestryd's DMA pool), so the client's `page_count` is deliberately untouched —
+this axis is what bounds the client's cross-Proc pin, including across a
+compositor crash (the orphaned-weave leg; the bounded-grace force-reclaim
+completes at G-3 with the crash contract). **The budget deliberately covers
+the RING share too** (a netd flow ring is a cross-Proc pin of the same class):
+this is the one behavioral delta on the audited netd path — a client at the
+cap has `SYS_WEFT_MAP` fail (-1) and the flow falls back to byte-copy, the
+documented fail-soft degrade; at realistic scale (16 flows × 256 KiB = 4 MiB
+against 128 MiB) the cap is unreachable, and the mapping lifetime + the
+Tweftio fast paths are byte-unchanged.
+
+### The weave clunk-unmap
+
+`weft_binding_clunk_unmap(wb, closer)` (`kernel/weft.c`; called from
+`dev9p_close` with `current->proc`, unit-drivable via the explicit `closer`):
+a WEAVE binding additionally unmaps the client mapping at fid close iff (a)
+the closing Proc's pid matches `map_pid` (sound as a bare pid — `g_next_pid`
+is a monotonic u32, no reuse within any realizable runtime), AND (b) — **the
+G-2 audit F1 guard** — the VMA at the recorded `guest_va` is still backed by
+THIS weave's Burrow (`v->burrow == wb->burrow && v->vaddr_start ==
+guest_va`). The binding's `guest_va` is a record, not a live claim: after an
+explicit `SYS_BURROW_DETACH` of the weave, `vma_find_gap` can seat an
+unrelated fresh mapping at the same VA, and pre-guard the close tore it down
+(self-contained to the client's own AS — the SHARED_IN uncharge was always
+gated on the matched VMA's flag, so the budget never corrupted — but wrong).
+Realizes "the weave fid's clunk drops the client mapping" (§18.1 `ClunkMap`) —
+a surface's retire is not hostage to the client's exit; an inherited-fd closer
+in a different Proc leaves the mapping to the mapper's own `vma_drain`. The
+RING kind's audited vma_drain-at-exit lifetime is byte-unchanged (the helper
+skips it).
+
+### Tests + gates
+
+`weft.share_rejects_plain_dma` (the R2-F1 structural gate, register + claim
+sides + the kind check), `weft.weave_share_and_claim` (mint → admit → kind →
+budget → the validate_rw kind gate → the #847 teardown across the KObj_DMA
+second refcount domain), `weft.unshare_disarm` (owner gate +
+removal-before-free + fail-closed late claim + claimed-id -1),
+`weft.shared_map_budget_cap` (over-budget fails clean; charge/uncharge
+balance), `weft.weave_clunk_unmap_guard` (the F1 identity guard: pid gate +
+happy unmap-and-uncharge + the stale-VA-survives leg). **Revert-probed
+2026-07-19**: weakening the four gates → 1167/1169 FAIL on exactly the two
+gate tests; dropping the F1 identity check → 1169/1170 FAIL on exactly the
+guard assert; restored → 1170/1170. Spec gate:
+`tapestry_present.tla` clean GREEN 5413 distinct + liveness + 4 buggy cfgs
+each firing its named invariant; `weft.tla` (clean 1412 + liveness + 4 buggy) +
+`weft_readiness.tla` re-ran GREEN. Client-side wrappers:
+`libthyla_rs::{t_dma_create_weave, t_weft_unshare}`.
+
+
+### The orphaned-weave reaper (G-3; R2-F3)
+
+The `ServerDeath` leg's kernel half landed with tapestryd: a WEAVE binding
+registers with a kproc reaper kthread at the SYS_WEFT_MAP CAS-win and
+unregisters at `dev9p_close`; a binding whose serving session has been dead
+past `WEFT_REAP_GRACE_NS` (2 s) is force-reclaimed (cross-Proc unmap under
+`g_proc_table_lock` + the target's `vma_lock` with the G-2-F1 identity
+guard re-checked; the shared-in budget uncharges; the registration pin
+drops so the pixel chunk frees at reclaim). `g_weft_reap_lock` serializes
+reaper-vs-close (the reaper NULLs `wb->burrow`; the close unregisters
+before reading the binding). Full detail + the lock-order argument:
+`docs/reference/139-tapestryd.md` "The kernel R2-F3 reaper" + the
+`weft.reap_*` regressions.

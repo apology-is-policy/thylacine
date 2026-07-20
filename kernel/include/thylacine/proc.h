@@ -127,6 +127,18 @@ struct debug_hw;    // 8a-2b per-Proc HW-breakpoint table (arch/arm64/hwdebug.h)
 // both under p->vma_lock; TCB-exempt. 65536 * sizeof(struct Vma) (64 B) = 4 MiB of
 // Vma slab is the per-Proc ceiling.
 #define PROC_VMA_MAX    65536u
+// PROC_SHARED_MAP_MAX_PAGES -- cross-Proc shared-in mappings (G-2; the I-32
+// FIFTH axis; TAPESTRY.md §18.12 R2-F3). burrow_share_into maps ANOTHER Proc's
+// memory (a netd flow ring, a tapestryd weave) into this one: those pages are
+// charged to the SHARER's own budget (netd's SYS_BURROW_ATTACH page_count /
+// tapestryd's DMA pool), NOT the client's page_count -- so without this axis a
+// client's shared-in footprint is unbounded AND (the R2-F3 crash leg) a client
+// mapping pins a crashed compositor's DMA pages charged to nothing live. 128 MiB
+// = room for two live weave generations of a large surface (≤ 2 x 64 MiB across
+// a reweave) + a full complement of flow rings; a DoS floor, not an accountant.
+// Charged in burrow_share_into / uncharged at the SHARED_IN-flagged VMA's
+// teardown (burrow_unmap / vma_drain), all under p->vma_lock; TCB-exempt.
+#define PROC_SHARED_MAP_MAX_PAGES  32768u   // 128 MiB at 4-KiB pages
 
 struct Proc {
     u64               magic;            // PROC_MAGIC
@@ -615,6 +627,15 @@ struct Proc {
     // consumes it).
     bool               stop_report_pending;
     bool               cont_report_pending;
+
+    // G-2 (the I-32 FIFTH axis; TAPESTRY.md §18.12 R2-F3): pages of OTHER
+    // Procs' memory currently shared INTO this Proc via burrow_share_into
+    // (SHARED_IN-flagged VMAs). Charged/uncharged under p->vma_lock (exact);
+    // atomic store for lockless /proc readers, like page_count. KP_ZERO-fresh
+    // 0; never rfork-inherited (a child has no shared-in mappings -- its
+    // address space starts empty). Occupies the former 348..352 tail pad, so
+    // struct Proc stays 352 bytes.
+    u32                shared_map_pages;
 };
 
 #define PROC_FLAG_NODUMP            (1u << 0)
@@ -672,13 +693,28 @@ struct Proc {
 // mark, or draining the last queued terminate-class tty note); NOT
 // propagated by rfork; never set on kproc.
 #define PROC_FLAG_TTY_TERMINATE_PENDING (1u << 8)
+// G-4 (TAPESTRY.md section 18.12 R2-F6): marks the bound console RENDERER --
+// the Proc granted the /dev/consdrain + /dev/consfeed pair (Aurora). The THIRD
+// console role, orthogonal to BOTH console-ATTACH (the elevation gate; the
+// renderer has NO elevation authority) and console-OWNER (the Ctrl-C target;
+// the drain/feed conveys no interrupt-target authority) -- I-27's three-role
+// split. Kernel-stamped via SPAWN_PERM_CONSOLE_RENDERER only (never a
+// syscall self-mark); one-way; NOT propagated by rfork. Single-holder: the
+// stamp succeeds only while g_console_renderer is NULL (proc_set_console_-
+// renderer's claim under g_proc_table_lock); cleared on the holder's death.
+#define PROC_FLAG_CONSOLE_RENDERER  (1u << 9)
 
 _Static_assert(sizeof(struct Proc) == 352,
                "struct Proc size pinned at 352 bytes (the 328 baseline + the 8c-2 "
                "#95 debug_focus_thread pointer @328 + the PTY-1a sid/pgid pair "
-               "@336/@340 + the PTY-1e report latches @344/@345 + tail pad). Adding "
-               "a field grows the SLUB cache; update this assert deliberately so the "
-               "change is intentional. (Merge of the debug-fs #95 + the PTY-1 arc.)");
+               "@336/@340 + the PTY-1e report latches @344/@345 + the G-2 "
+               "shared_map_pages @348 in the former tail pad -- NO size growth). "
+               "Adding a field grows the SLUB cache; update this assert "
+               "deliberately so the change is intentional.");
+_Static_assert(__builtin_offsetof(struct Proc, shared_map_pages) == 348,
+               "G-2 shared_map_pages (the I-32 fifth axis: cross-Proc shared-in "
+               "pages) occupies the former 348..352 tail pad after the PTY-1e "
+               "report latches; KP_ZERO-fresh 0, never rfork-inherited.");
 _Static_assert(__builtin_offsetof(struct Proc, debug_focus_thread) == 328,
                "8c-2 #95 debug_focus_thread (the debug-fs focus M) appends after "
                "debug_hw (offset 328, the next 8-aligned slot past the pointer @320); "
@@ -807,6 +843,18 @@ void proc_page_uncharge(struct Proc *p, u32 npages);
 //   counter would saturate. uncharge clamp-decrements (never underflows past 0).
 bool proc_vma_charge(struct Proc *p);
 void proc_vma_uncharge(struct Proc *p);
+
+// proc_shared_map_charge / proc_shared_map_uncharge -- the cross-Proc shared-in
+//   mapping counter (G-2; the I-32 FIFTH axis). The CALLER MUST HOLD p->vma_lock
+//   (burrow_share_into's precondition -- the same domain as the flagged-VMA
+//   teardown sites), so the check + charge is atomic against sibling shares and
+//   the cap is EXACT. charge returns true (and adds npages) if the Proc is
+//   exempt OR the new total fits PROC_SHARED_MAP_MAX_PAGES; false (charging
+//   nothing) on exceed/overflow (the share fails clean, -1 -- the flow stays
+//   byte-copy / the surface map fails, never a box event). uncharge
+//   clamp-subtracts (never underflows past 0).
+bool proc_shared_map_charge(struct Proc *p, u32 npages);
+void proc_shared_map_uncharge(struct Proc *p, u32 npages);
 
 // proc_thread_cap_ok -- the thread-spawn gate. Returns true if the Proc is
 //   exempt OR thread_count < PROC_THREAD_MAX. Takes g_proc_table_lock for the
@@ -1002,8 +1050,10 @@ void el0_return_die_check(void);
 //
 // proc_debug_stop_deliver: request every thread of `p` park at its next EL0-
 // return checkpoint. Sets p->debug_stop_req (RELEASE), then (8c-2) WAKES every
-// sleeping peer (torpor_wake_all_for_proc + the per-peer wait_lock rendez wake,
-// proc_group_terminate's cascade) so a thread blocked in an indefinite syscall
+// sleeping peer (the NON-COMPLETING torpor_stop_wake_all_for_proc [#19: the
+// death walk's completing wake fabricates TORPOR_OK, which a surviving stopped
+// Proc observes at resume; the stop wake preserves the wait] + the per-peer
+// wait_lock rendez wake) so a thread blocked in an indefinite syscall
 // sleep returns, re-observes the flag, and DETOURS to park on its debug_rendez
 // (proc_stop_sleeper_park), then smp_resched_others() so a peer RUNNING at
 // EL0 on another CPU traps to its tail (the periodic tick is the floor). A thread
@@ -1383,6 +1433,33 @@ void proc_console_relinquish(struct Proc *p);
 // clear; proc_become_zombie_locked also clears it on the trusted Proc's death so
 // the pointer never dangles (a then-fired SAK falls back to revoke-only).
 void proc_set_console_trusted(struct Proc *p);
+
+// proc_set_console_renderer — claim `p` as the bound console RENDERER (G-4,
+// the R2-F6 third console role: the Aurora drain/feed holder). Single-holder:
+// under g_proc_table_lock, succeeds (0) only when no live renderer is
+// recorded, stamping PROC_FLAG_CONSOLE_RENDERER + g_console_renderer = p;
+// returns -1 when a renderer already holds the role (the loser proceeds
+// WITHOUT the flag, and the /dev/consdrain//dev/consfeed open gate then
+// refuses it -- fail-closed, never a torn double-claim). Called from
+// apply_spawn_perms (the child spawn thunk); the parent-side
+// spawn_perm_grant_check already refuses the grant when a holder exists, so
+// this CAS is the race-closer for two concurrent grants, not the common
+// path. proc_become_zombie_locked clears the holder on its death (every
+// death path), after which a fresh grant may claim.
+int proc_set_console_renderer(struct Proc *p);
+
+// proc_is_console_renderer — true iff `p` carries PROC_FLAG_CONSOLE_RENDERER
+// AND is the current g_console_renderer (the live single holder). The
+// /dev/consdrain + /dev/consfeed gate (devdev) and the cons drain/feed I/O
+// re-gates call this. Never dereferences a stale pointer (compare-only under
+// g_proc_table_lock). Fail-closed on NULL.
+bool proc_is_console_renderer(const struct Proc *p);
+
+// proc_test_console_renderer — test-only: read g_console_renderer.
+struct Proc *proc_test_console_renderer(void);
+
+// proc_test_clear_console_renderer — test-only: release the role + flag.
+void proc_test_clear_console_renderer(void);
 
 // proc_console_sak — the A-4c-2 SAK transition (I-27 trusted-path handoff). Run
 // from the console_mgr kthread on a recognized serial BREAK. Under

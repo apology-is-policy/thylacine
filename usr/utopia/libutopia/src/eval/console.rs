@@ -29,18 +29,28 @@
 /// ut's prompt-mode line discipline (the ABSOLUTE consctl form -- every flag
 /// named, so the result is independent of the prior state): raw byte-at-a-time
 /// (no canonical line assembly), no kernel echo (the line editor draws its own),
-/// ISIG so Ctrl-C cooks to the `interrupt` note the shell services, no CR/NL
-/// translation (the editor handles CR). This is BOTH the mode
-/// `Repl::console_apply_default` establishes at startup AND the mode ut restores
-/// after a raw child -- one vocabulary, no drift.
-pub(crate) const PROMPT_MODE: &[u8] = b"-icanon -echo +isig -icrnl -onlcr";
+/// ISIG so Ctrl-C cooks to the `interrupt` note the shell services, no INPUT
+/// CR->NL translation (the editor handles CR itself) -- but OUTPUT NL->CR-NL
+/// (`+onlcr`) STAYS ON: output post-processing is orthogonal to raw input
+/// (POSIX splits them for exactly this reason), and a console-direct session's
+/// children (`ls` etc.) write plain `\n` line endings that only the kernel's
+/// ONLCR arm can cook. The pre-fix `-onlcr` sent bare LF to the wire for the
+/// whole session; QEMU's `mon:stdio` mux silently re-inserted CRs for every
+/// terminal viewer, so the gap stayed invisible until the first honest raw
+/// renderer (the Aurora fbcon) drew the ls staircase. The editor's own output
+/// is ONLCR-proof either way: its explicit `\r`+CSI redraws pass through
+/// untouched, and its deliberate `\n`s WANT the implied carriage return.
+/// This is BOTH the mode `Repl::console_apply_default` establishes at startup
+/// AND the mode ut restores after a raw child -- one vocabulary, no drift.
+pub(crate) const PROMPT_MODE: &[u8] = b"-icanon -echo +isig -icrnl +onlcr";
 
-/// Full-raw line discipline for a TUI child: byte-identical to `PROMPT_MODE`
-/// except ISIG is OFF, so Ctrl-C (0x03) reaches the child as a raw byte it reads
-/// and interprets rather than being cooked into an `interrupt` note that would
-/// terminate it. No-echo / no-canon / no-CR-NL all still hold (the child draws
-/// its own screen). The ONLY delta from the prompt mode is the `isig` sign --
-/// the dance is a single-bit flip and its restore.
+/// Full-raw line discipline for a TUI child: like `PROMPT_MODE` but ISIG is
+/// OFF, so Ctrl-C (0x03) reaches the child as a raw byte it reads and
+/// interprets rather than being cooked into an `interrupt` note that would
+/// terminate it -- AND `onlcr` is OFF: a fullscreen TUI positions with
+/// explicit CSI sequences and owns every byte it emits; translating a
+/// deliberately-bare LF behind its back would be the driver editorializing.
+/// Two deltas from the prompt mode (`isig`, `onlcr`), both restored together.
 pub(crate) const RAW_MODE: &[u8] = b"-icanon -echo -isig -icrnl -onlcr";
 
 /// PTY-4b: the COOKED line discipline a job-control shell gives an ordinary
@@ -84,12 +94,13 @@ const fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
 // The #106-F3 drift guards, as COMPILE-TIME asserts that fire on the no_std
 // device build -- libutopia has no host test harness (the crate is unconditionally
 // `#![no_std]`), so the `#[cfg(test)]` literal asserts below never run. These do.
-// PROMPT/RAW are the single-bit isig flip; RESTORE_SCREEN is the cross-crate
-// mirror of `kaua::term::Terminal::leave`, pinned to the SAME literal on the kaua
-// side by `kaua::encode::tests::restore_screen_is_the_pinned_sequence`, so a drift
-// on either side fails its own build. login's MODE_DEFAULT carries the matching
-// PROMPT-mode assert (it must equal PROMPT_MODE so the login->ut boundary is flat).
-const _: () = assert!(bytes_eq(PROMPT_MODE, b"-icanon -echo +isig -icrnl -onlcr"));
+// PROMPT/RAW differ by isig + onlcr (see each doc); RESTORE_SCREEN is the
+// cross-crate mirror of `kaua::term::Terminal::leave`, pinned to the SAME literal
+// on the kaua side by `kaua::encode::tests::restore_screen_is_the_pinned_sequence`,
+// so a drift on either side fails its own build. login's MODE_DEFAULT carries the
+// matching PROMPT-mode assert (it must equal PROMPT_MODE so the login->ut
+// boundary is flat).
+const _: () = assert!(bytes_eq(PROMPT_MODE, b"-icanon -echo +isig -icrnl +onlcr"));
 const _: () = assert!(bytes_eq(RAW_MODE, b"-icanon -echo -isig -icrnl -onlcr"));
 const _: () = assert!(bytes_eq(CHILD_MODE, b"+icanon +echo +isig +icrnl +onlcr"));
 const _: () = assert!(bytes_eq(RESTORE_SCREEN, b"\x1b[0m\x1b[?7h\x1b[?25h\x1b[?1049l"));
@@ -177,10 +188,11 @@ mod tests {
 
     #[test]
     fn mode_strings_are_the_pinned_consctl_forms() {
-        // The dance is a single-bit flip: PROMPT carries `+isig`, RAW `-isig`,
-        // every other flag identical -- if these diverge further the dance would
-        // change more than the signal-cooking bit.
-        assert_eq!(PROMPT_MODE, b"-icanon -echo +isig -icrnl -onlcr");
+        // PROMPT vs RAW differ by exactly isig (signal cooking stays with the
+        // shell) and onlcr (output cooking ON at the prompt for children's
+        // plain-\n writes; OFF for a TUI that owns every byte) -- if these
+        // diverge further the dance would change more than those two bits.
+        assert_eq!(PROMPT_MODE, b"-icanon -echo +isig -icrnl +onlcr");
         assert_eq!(RAW_MODE, b"-icanon -echo -isig -icrnl -onlcr");
     }
 

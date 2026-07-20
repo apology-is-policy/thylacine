@@ -20,10 +20,16 @@
 // Weft-6 (SYS_WEFT_SHARE/MAP, keyed on the /net data fid).
 
 #include <thylacine/weft.h>
+#include <thylacine/9p_attach.h>    // G-3: p9_attached_is_open (the reaper's liveness test)
+#include <thylacine/9p_client.h>    // G-3: p9_client_is_open (the test-path liveness source)
 #include <thylacine/burrow.h>
+#include <thylacine/dma_handle.h>   // G-2: the kernel-minted KObj_DMA weave bit
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
+#include <thylacine/rendez.h>       // G-3: the reaper kthread's park/tick
 #include <thylacine/spinlock.h>
+#include "../arch/arm64/timer.h"    // G-3: timer_now_ns for the grace clock
+#include <thylacine/vma.h>          // G-2: vma_lookup for the clunk-unmap F1 guard
 
 #include "../mm/slub.h"
 
@@ -336,6 +342,47 @@ struct Burrow *weft_share_claim(u64 share_id) {
     return NULL;
 }
 
+int weft_share_unregister(struct Proc *owner, u64 share_id) {
+    if (!owner || share_id == 0u) return -1;
+
+    // Find-and-remove under the leaf lock; drop the pin OUTSIDE it (the
+    // release_owner discipline -- burrow_unref takes v->lock + may free, which
+    // takes the buddy lock, never under the registry leaf). The owner gate:
+    // only the registrant may disarm its own share -- a stranger's guess of a
+    // live id (kernel-minted monotonic u64, never guest-visible) cannot yank
+    // another server's in-flight grant.
+    struct Burrow *victim = NULL;
+    spin_lock(&g_weft_lock);
+    for (u32 i = 0; i < WEFT_MAX_SHARES; i++) {
+        if (g_weft_shares[i].share_id == share_id &&
+            g_weft_shares[i].owner == owner) {
+            victim = g_weft_shares[i].burrow;
+            g_weft_shares[i].share_id = 0u;
+            g_weft_shares[i].burrow   = NULL;
+            g_weft_shares[i].owner    = NULL;
+            break;
+        }
+    }
+    spin_unlock(&g_weft_lock);
+    if (!victim) return -1;    // already claimed / GC'd / forged / not yours
+    burrow_unref(victim);      // the registration pin: removal-before-free (R2-F5)
+    return 0;
+}
+
+int weft_claimed_kind(const struct Burrow *v, u32 ring_entries) {
+    if (!v) return -1;
+    // The kernel-minted Burrow type is the single source of truth; the
+    // server's declared geometry must AGREE with it, else fail closed. Types +
+    // the weave bit are create-immutable -- lock-free reads are coherent.
+    if (v->type == BURROW_TYPE_ANON)
+        return (ring_entries != 0u) ? WEFT_BIND_RING : -1;
+    if (v->type == BURROW_TYPE_DMA && v->kobj_dma != NULL && v->kobj_dma->weave)
+        return (ring_entries == 0u) ? WEFT_BIND_WEAVE : -1;
+    // Anything else in the registry would be a register-gate breach; the
+    // claim-side re-check keeps it unmappable regardless (defense-in-depth).
+    return -1;
+}
+
 void weft_share_release_owner(struct Proc *owner) {
     if (!owner) return;
 
@@ -360,6 +407,7 @@ void weft_share_release_owner(struct Proc *owner) {
 struct weft_binding *weft_binding_alloc(struct Burrow *burrow, u64 guest_va,
                                         u32 ring_size, u32 ring_entries) {
     if (!burrow || burrow->pages == NULL) return NULL;
+    if (burrow->type != BURROW_TYPE_ANON) return NULL;   // G-2: rings are ANON
     // Compute the kernel-private ring view from the Burrow's contiguous KVA.
     // BURROW_TYPE_ANON pages are physically contiguous (alloc_pages), so the
     // ring is one direct-map span; weft_ring_layout validates ring_entries +
@@ -374,13 +422,42 @@ struct weft_binding *weft_binding_alloc(struct Burrow *burrow, u64 guest_va,
     b->burrow    = burrow;
     b->guest_va  = guest_va;
     b->ring_size = ring_size;
+    b->kind      = WEFT_BIND_RING;
     b->view      = rv;
+    return b;
+}
+
+struct weft_binding *weft_binding_alloc_weave(struct Burrow *burrow,
+                                              u64 guest_va, u32 size,
+                                              u32 map_pid) {
+    // Defense-in-depth: only the kernel-minted weave subtype reaches here (the
+    // caller derived WEAVE via weft_claimed_kind); re-check anyway so a future
+    // caller cannot mint a weave binding over an inadmissible region.
+    if (!burrow || burrow->type != BURROW_TYPE_DMA ||
+        burrow->kobj_dma == NULL || !burrow->kobj_dma->weave)
+        return NULL;
+
+    struct weft_binding *b = kmalloc(sizeof(*b), KP_ZERO);
+    if (!b) return NULL;
+    b->burrow    = burrow;
+    b->guest_va  = guest_va;
+    b->ring_size = size;
+    b->kind      = WEFT_BIND_WEAVE;
+    b->map_pid   = map_pid;
+    // b->view stays zeroed -- a weave has no descriptor ring; the kind gate in
+    // weft_binding_validate_rw keeps every Tweftio consumer off it.
     return b;
 }
 
 int weft_binding_validate_rw(const struct weft_binding *b, u64 ubuf_va,
                              u32 len, u32 *out_off) {
     if (!b || !out_off) return -1;
+    // G-2 kind gate: only a RING binding carries a payload-region geometry.
+    // This single check closes ALL Tweftio fast paths (sync dev9p_weft_try_
+    // {read,write} + the Loom weft routing) for a WEAVE binding -- a weave fid
+    // is a map capability, never a data-drive target; its reads/writes stay on
+    // the ordinary byte path (the geometry text read).
+    if (b->kind != WEFT_BIND_RING) return -1;
     // Direction-agnostic: a Tweftio READ and WRITE both name a region [off,
     // off+len) within the payload, so the descriptor validation is identical --
     // the buffer (the WRITE source, or the READ destination) must sit at or after
@@ -407,4 +484,190 @@ void weft_binding_release(struct weft_binding *b) {
     if (b->burrow) burrow_unref(b->burrow);
     b->burrow = NULL;
     kfree(b);
+}
+
+int weft_binding_clunk_unmap(struct weft_binding *wb, struct Proc *closer) {
+    if (!wb || !closer) return -1;
+    if (wb->kind != WEFT_BIND_WEAVE) return -1;       // RING keeps its lifetime
+    if (closer->pid != wb->map_pid)  return -1;       // not the mapping Proc
+    spin_lock(&closer->vma_lock);
+    // The G-2 audit F1 guard: the binding's guest_va is a RECORD, not a live
+    // claim -- the client may have SYS_BURROW_DETACHed the weave and a fresh
+    // unrelated mapping may have landed at the same VA (vma_find_gap reuses
+    // gaps). Unmap ONLY if the VMA at guest_va is still backed by THIS weave;
+    // anything else survives untouched (the mapping Proc's own vma_drain, or
+    // an earlier explicit detach, already handled -- or never will need to
+    // handle -- the weave's mapping).
+    struct Vma *v = vma_lookup(closer, wb->guest_va);
+    int rc = -1;
+    if (v && v->burrow == wb->burrow && v->vaddr_start == wb->guest_va)
+        rc = burrow_unmap(closer, wb->guest_va, (size_t)wb->ring_size);
+    spin_unlock(&closer->vma_lock);
+    return rc;
+}
+
+// =============================================================================
+// G-3: the orphaned-weave force-reclaim (R2-F3; see weft.h for the contract
+// + the lock-order argument).
+// =============================================================================
+
+static spin_lock_t g_weft_reap_lock;
+static struct weft_binding *g_weave_bindings;   // singly-linked, reap_next
+static struct Rendez g_weft_reap_rendez;
+
+void weft_reap_init(void) {
+    spin_lock_init(&g_weft_reap_lock);
+    rendez_init(&g_weft_reap_rendez);
+    g_weave_bindings = NULL;
+}
+
+void weft_reap_register(struct weft_binding *wb,
+                        const struct p9_attached *att,
+                        const struct p9_client *cl) {
+    if (!wb || wb->kind != WEFT_BIND_WEAVE) return;
+    wb->sess_att = att;
+    wb->sess_cl = cl;
+    wb->orphan_since_ns = 0;
+    spin_lock(&g_weft_reap_lock);
+    wb->reap_next = g_weave_bindings;
+    g_weave_bindings = wb;
+    spin_unlock(&g_weft_reap_lock);
+    // First-registration wake: the reaper parks indefinitely on an empty
+    // registry (tickless-idle-friendly -- no 1 Hz kthread tick on an idle
+    // box); a registered binding starts its cadence.
+    wakeup(&g_weft_reap_rendez);
+}
+
+void weft_reap_unregister(struct weft_binding *wb) {
+    if (!wb) return;
+    spin_lock(&g_weft_reap_lock);
+    struct weft_binding **pp = &g_weave_bindings;
+    while (*pp) {
+        if (*pp == wb) {
+            *pp = wb->reap_next;
+            wb->reap_next = NULL;
+            break;
+        }
+        pp = &(*pp)->reap_next;
+    }
+    spin_unlock(&g_weft_reap_lock);
+}
+
+// The cross-Proc target FIND-AND-LOCK callback (the G-3-audit F1 fix): the
+// per-page TLBI unmap loop must NOT run inside proc_for_each's
+// irqsave-gptl region (a fullscreen weave is thousands of pages; each
+// uninstall waits a dsb ish -- a multi-ms IRQs-off + global-lock window).
+// So the callback only MATCHES the pid, gates ALIVE, and takes the
+// target's vma_lock UNDER gptl (the established gptl -> vma_lock order),
+// RETURNING with it held: gptl (and the IRQ mask) drop at proc_for_each's
+// exit, and the held vma_lock alone keeps the target's teardown out --
+// vma_drain now takes vma_lock (kernel/vma.c), so a reap racing the
+// reclaim blocks there, and proc_free's pgtable_destroy runs AFTER
+// vma_drain, so the pgtable_root stays valid for the whole unmap. The
+// unmap then runs IRQs-on under vma_lock only -- the same envelope as the
+// normal clunk-unmap path. A non-ALIVE match is skipped: an exiting
+// Proc's own close/drain owns its teardown.
+struct weft_reap_find_ctx {
+    u32 pid;
+    struct Proc *locked;   // non-NULL => q->vma_lock is HELD by the caller
+};
+
+static int weft_reap_find_cb(struct Proc *q, void *arg) {
+    struct weft_reap_find_ctx *c = arg;
+    if ((u32)q->pid != c->pid) return 0;
+    if (q->state != PROC_STATE_ALIVE) return 1;   // found; teardown owns it
+    spin_lock(&q->vma_lock);
+    c->locked = q;
+    return 1;   // pid matched -- stop the walk
+}
+
+// Bounded per-sweep reclaim batch (the deferred pin drops live on the stack;
+// leftovers reclaim next sweep -- a 1 s slip, not a leak).
+#define WEFT_REAP_MAX_DROP 8
+
+int weft_reap_sweep(u64 now_ns) {
+    struct Burrow *drop[WEFT_REAP_MAX_DROP];
+    int ndrop = 0;
+    int reclaimed = 0;
+
+    spin_lock(&g_weft_reap_lock);
+    struct weft_binding **pp = &g_weave_bindings;
+    while (*pp && ndrop < WEFT_REAP_MAX_DROP) {
+        struct weft_binding *wb = *pp;
+        bool dead = wb->sess_att ? !p9_attached_is_open(wb->sess_att)
+                                 : !p9_client_is_open(wb->sess_cl);
+        if (!dead) {
+            // A session can only die, never revive -- but keep the stamp
+            // honest anyway (a cleared stamp on a live session costs nothing
+            // and keeps the state machine two-valued).
+            wb->orphan_since_ns = 0;
+            pp = &wb->reap_next;
+            continue;
+        }
+        if (wb->orphan_since_ns == 0) {
+            wb->orphan_since_ns = now_ns;
+            pp = &wb->reap_next;
+            continue;
+        }
+        if (now_ns - wb->orphan_since_ns < WEFT_REAP_GRACE_NS) {
+            pp = &wb->reap_next;
+            continue;
+        }
+
+        // Grace expired: force-reclaim. Find-and-lock the mapping Proc
+        // under gptl (the walk is the ONLY irqsave window), then run the
+        // identity-guarded unmap IRQs-on under the held vma_lock alone
+        // (the mapping ref + the shared-in budget drop inside
+        // burrow_unmap), then strip the registration pin (deferred
+        // unref -- the free path takes buddy locks) and NULL wb->burrow
+        // under THIS lock so the eventual dev9p_close sees a disarmed
+        // binding (clunk_unmap's identity guard cannot match a NULL
+        // burrow; weft_binding_release NULL-guards the unref).
+        struct weft_reap_find_ctx ctx = { .pid = wb->map_pid, .locked = NULL };
+        (void)proc_for_each(weft_reap_find_cb, &ctx);
+        if (ctx.locked) {
+            struct Proc *q = ctx.locked;
+            struct Vma *v = vma_lookup(q, wb->guest_va);
+            if (v && v->burrow == wb->burrow && v->vaddr_start == wb->guest_va)
+                (void)burrow_unmap(q, wb->guest_va, (size_t)wb->ring_size);
+            spin_unlock(&q->vma_lock);
+        }
+        drop[ndrop++] = wb->burrow;
+        wb->burrow = NULL;
+        *pp = wb->reap_next;
+        wb->reap_next = NULL;
+        reclaimed++;
+    }
+    spin_unlock(&g_weft_reap_lock);
+
+    for (int i = 0; i < ndrop; i++)
+        if (drop[i]) burrow_unref(drop[i]);
+    return reclaimed;
+}
+
+static int weft_reap_have_work(void *arg) {
+    (void)arg;
+    // A lockless head read: the register-then-observe pairing with
+    // weft_reap_register's wakeup makes a set-in-the-window visible either
+    // via this re-check (under the rendez lock) or via the wakeup itself.
+    return g_weave_bindings != NULL;
+}
+
+static int weft_reap_never(void *arg) {
+    (void)arg;
+    return 0;
+}
+
+// The reaper kthread: parks on an empty registry; ticks at WEFT_REAP_SWEEP_NS
+// while bindings exist. kproc-owned (never dies; #811 does not apply).
+void weft_reaper_main(void) {
+    for (;;) {
+        if (!weft_reap_have_work(NULL)) {
+            sleep(&g_weft_reap_rendez, weft_reap_have_work, NULL);
+            continue;
+        }
+        (void)tsleep(&g_weft_reap_rendez, weft_reap_never, NULL,
+                     timer_now_ns() + WEFT_REAP_SWEEP_NS);
+        (void)weft_reap_sweep(timer_now_ns());
+    }
 }

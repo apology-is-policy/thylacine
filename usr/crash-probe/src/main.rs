@@ -5,14 +5,13 @@
 // then give up. A give-up is a SOFT per-device failure: the device is
 // unavailable, but the boot proceeds (the warden does not exit non-zero).
 //
-// It binds an undriven QEMU-virt virtio slot (virtio:16, the GPU id -- discovered
-// by the virtio-mmio bus source but with no real driver), so the demo never
-// contends with a working driver. Critically it crashes BEFORE any hardware
-// claim: it never calls SYS_MMIO/IRQ/DMA_CREATE, so its (page-rounded) allowance
-// is never a live exclusive claim and cannot conflict with the netdev driver that
-// shares the rounded MMIO page (the #140 co-residency over-grant). The allowance
-// is conferred at spawn and revoked at each reap; nothing in between ever pins a
-// device register.
+// It binds the SYNTHETIC `restart-test` node the warden itself publishes
+// (TAPESTRY.md section 18.12 F15) -- no real device backs it, so the demo never
+// contends with a working driver. (It originally squatted virtio:16, the then-
+// undriven GPU id; G-1 gave the GPU a real resident driver, gpud, and re-homed
+// this demo here.) It crashes BEFORE any hardware claim -- its grant is empty
+// (mmio=0 irq=0 dma=0) and it never calls SYS_MMIO/IRQ/DMA_CREATE -- so the
+// supervision ladder is exercised with zero hardware footprint.
 //
 // This is a TEST vehicle -- the deliberate crash that proves the supervisor is
 // real, the negative twin of menagerie-probe's positive bring-up. A real driver

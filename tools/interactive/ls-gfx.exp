@@ -1,0 +1,94 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-gfx.exp -- the G-4 fbcon claim, end to end.
+#
+# Proves the Aurora console renders a REAL session (login + `ls` via
+# screendump) and that the GRAPHICAL input path delivers a command:
+#
+#   render leg : serial login + `ls /`; screendump -c asserts the rendered
+#                console (Bonfire bg dominant + exact-fg text) BEFORE and
+#                AFTER, and the two dumps DIFFER (the session's new output
+#                repainted the screen).
+#   input leg  : QMP types `whoami\n` UN-TARGETED (input-send-event routes
+#                to the console's PCI keyboard under -nographic) -> tapestryd
+#                -> Aurora -> the /dev/consfeed fid -> the LS-8 line
+#                discipline -> ut. The assertion is on SERIAL: the drain is
+#                a TEE, so the command's output ("michael" -- output-only,
+#                cannot come from any typed byte after login scrolled)
+#                proves the whole loop without pixel OCR.
+#
+# Needs the QMP socket (run-vm.sh default build/qmp.sock); SKIPs when
+# python3 is absent. Runs under HVF (THYLACINE_ACCEL=hvf) -- the fbcon
+# claim's medium (screendump + QMP input); the interactive harness's
+# default TCG accel hangs the boot at the pre-existing 8a-2b hwwatch E2E
+# (task #27), unrelated to this scenario. GPU-less boots have no scanout
+# to claim -- the harness's standing THYLACINE_NO_GPU escape applies.
+
+source [file join [file dirname [info script]] lib.exp]
+
+set repo $lc_repo
+set qmp "$repo/build/qmp.sock"
+
+proc gfx_dump {out args_} {
+    global repo qmp
+    if {[catch {exec $repo/tools/screendump.sh -s $qmp {*}$args_ $out} err]} {
+        return $err
+    }
+    return ""
+}
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# The rendered-console assert (the session is on screen). Bounded retry:
+# aurora's repaint of the login exchange settles within a second of the
+# shell banner. (lc_boot returns at SPAWN -- pre-banner -- so any screen
+# assert must sequence after an expect that proves the boot finished; the
+# login above is that anchor.)
+set ok 0
+for {set i 0} {$i < 12} {incr i} {
+    if {[gfx_dump /tmp/ls-gfx-pre.png "-c"] eq ""} { set ok 1; break }
+    after 700
+}
+if {!$ok} { lc_fail "post-login console verify (-c) never passed" }
+lc_pass "fbcon: the session console rendered (screendump -c)"
+
+# The session leg: `ls /` over serial; assert real output, then assert the
+# RENDERED console changed (the session output repainted the screen).
+lc_run_expect "ls /" "bin"
+set ok 0
+for {set i 0} {$i < 10} {incr i} {
+    if {[gfx_dump /tmp/ls-gfx-post.png "-c"] eq ""} { set ok 1; break }
+    after 700
+}
+if {!$ok} { lc_fail "post-ls console verify (-c) never passed" }
+if {![catch {exec cmp -s /tmp/ls-gfx-pre.png /tmp/ls-gfx-post.png}]} {
+    lc_fail "the screen did not change across login + ls (render loop dead)"
+}
+lc_pass "fbcon: login + ls rendered via screendump (dumps differ + -c)"
+
+# The graphical-input leg: type `pwd` + Enter on the PCI keyboard via QMP.
+# The serial tee then shows the command OUTPUT -- `/home/michael` (the
+# login-bound home) -- which the typed `pwd` (no slash) cannot produce, so
+# it is unambiguously output (the lc_run_expect output-only discipline).
+# This proves the WHOLE input loop: keyboard -> tapestryd -> aurora ->
+# /dev/consfeed -> the LS-8 line discipline -> ut's line editor (letters
+# echoed) -> Enter SUBMITS (0x0d -> Accept) -> the command runs.
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp "pwd\n"} err]} {
+    lc_fail "qmp-sendtext failed: $err"
+}
+lc_expect "/home/michael" "output-of graphically-typed pwd"
+lc_pass "fbcon: graphical keyboard -> tapestryd -> aurora -> consfeed -> ut (pwd output on the serial tee)"
+
+# And the injected session activity rendered too.
+after 700
+if {[gfx_dump /tmp/ls-gfx-final.png "-c"] ne ""} {
+    lc_fail "final console verify (-c) failed"
+}
+if {![catch {exec cmp -s /tmp/ls-gfx-post.png /tmp/ls-gfx-final.png}]} {
+    lc_fail "the screen did not change across the injected pwd"
+}
+lc_pass "fbcon: the injected command rendered (final dump differs + -c)"
+
+lc_quit
+lc_pass "ls-gfx: the G-4 fbcon claim verified (render + graphical input, end to end)"
+exit 0

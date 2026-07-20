@@ -34,6 +34,15 @@ struct Burrow;
 #define VMA_PROT_RW   (VMA_PROT_READ | VMA_PROT_WRITE)
 #define VMA_PROT_RX   (VMA_PROT_READ | VMA_PROT_EXEC)
 
+// VMA_FLAG_SHARED_IN (G-2; TAPESTRY.md §18.12 R2-F3): this VMA was installed by
+// burrow_share_into — the backing Burrow is ANOTHER Proc's memory (a netd flow
+// ring or a tapestryd weave) mapped cross-Proc into this one. Set by
+// burrow_share_into after vma_insert (under the same vma_lock hold); read at
+// the two flagged-VMA teardown sites (burrow_unmap + vma_drain) to uncharge the
+// per-client shared-mapping budget (Proc.shared_map_pages) exactly once per
+// charge. The budget invariant: shared_map_pages == Σ pages of SHARED_IN VMAs.
+#define VMA_FLAG_SHARED_IN  (1u << 0)
+
 // VMA_MAGIC at offset 0 — SLUB freelist clobber defense (mirrors
 // struct Proc / struct Thread / struct Burrow / struct Handle pattern).
 #define VMA_MAGIC 0x564D413043ADEFADULL    // 'VMA0' || 0xCADE'FADE
@@ -43,7 +52,8 @@ struct Vma {
     u64 vaddr_start;      // inclusive, page-aligned
     u64 vaddr_end;        // exclusive, page-aligned
     u32 prot;             // VMA_PROT_* bitmask
-    u32 _pad;             // 8-byte alignment
+    u32 flags;            // VMA_FLAG_* bitmask (was the alignment pad; 0 for
+                          //   every pre-G-2 VMA — vma_alloc KP_ZEROs it)
     struct Burrow *burrow;      // backing object (refcounted)
     u64 burrow_offset;       // byte offset into BURROW
 

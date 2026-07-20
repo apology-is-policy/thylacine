@@ -1078,3 +1078,173 @@ void test_cons_cook_canonical_poll_edge(void) {
     poll_waiter_list_unregister(&pw);                   // NoStaleHook (stack waiter)
     cons_settle_mgr();
 }
+
+// =============================================================================
+// G-4: the console-renderer drain/feed backend (TAPESTRY.md section 18.7).
+// The drain taps cons_emit (program output + echo); the feed injects bytes
+// into the SAME line discipline as UART RX. Driven synthetically with echo
+// capture on (UART suppressed) so the tests assert both sinks exactly.
+// =============================================================================
+
+// The tap mirrors program output into the drain while the UART sink (here:
+// the capture buffer) stays byte-identical -- the tee property. Disarmed, the
+// tap is inert; armed, every cons_emit byte lands in both.
+void test_cons_drain_tap_mirrors_output(void) {
+    cons_test_reset();
+    cons_test_echo_capture(true);
+
+    // Disarmed (boot state): output reaches the UART sink only.
+    TEST_EXPECT_EQ(cons_output_write("pre", 3), 3L, "write accepted disarmed");
+    TEST_EXPECT_EQ(cons_test_drain_count(), 0u, "disarmed drain captured nothing");
+
+    TEST_EXPECT_EQ(cons_drain_open(), 0, "drain arms");
+    TEST_EXPECT_EQ(cons_drain_open(), -1, "second concurrent open refused (single-open)");
+
+    TEST_EXPECT_EQ(cons_output_write("hi\n", 3), 3L, "write accepted armed");
+    TEST_EXPECT_EQ(cons_test_drain_count(), 3u, "drain captured the 3 bytes");
+
+    u8 dbuf[8];
+    long dn = cons_drain_read(dbuf, sizeof(dbuf));
+    TEST_EXPECT_EQ(dn, 3L, "drain read returns the buffered bytes");
+    TEST_ASSERT(dbuf[0]=='h' && dbuf[1]=='i' && dbuf[2]=='\n', "drain bytes == output");
+
+    // The tee: the UART capture holds pre + hi\n -- the serial side unchanged.
+    u8 cap[16];
+    u32 got = cons_test_echo_captured(cap, sizeof(cap));
+    TEST_EXPECT_EQ(got, 6u, "UART sink saw all 6 bytes (tee, not switch)");
+    TEST_ASSERT(cap[3]=='h' && cap[4]=='i' && cap[5]=='\n', "UART bytes unchanged");
+
+    cons_drain_close();
+    cons_test_echo_capture(false);
+    cons_test_reset();
+}
+
+// The feed runs the EXISTING line discipline: canonical assembly + echo (the
+// echo landing in BOTH sinks -- the renderer paints its own echo) + ISIG (a
+// graphical Ctrl-C posts `interrupt` exactly like a serial one). is_break is
+// structurally unreachable from the feed (I-27: no SAK forgery).
+void test_cons_drain_feed_runs_discipline(void) {
+    cons_test_reset();
+    cons_test_set_termios(CONS_ICANON | CONS_ECHO | CONS_ISIG);
+    cons_test_echo_capture(true);
+    TEST_EXPECT_EQ(cons_drain_open(), 0, "drain arms");
+
+    // Feed a canonical line: assembled, delivered on NL, echoed to both sinks.
+    TEST_EXPECT_EQ(cons_feed_write("ab\n", 3), 3L, "feed accepted");
+    u8 in[8];
+    long n = cons_input_read(in, sizeof(in));
+    TEST_EXPECT_EQ(n, 3L, "the cooked line reached the input ring");
+    TEST_ASSERT(in[0]=='a' && in[1]=='b' && in[2]=='\n', "line is ab\\n");
+
+    u8 cap[8];
+    u32 got = cons_test_echo_captured(cap, sizeof(cap));
+    TEST_EXPECT_EQ(got, 3u, "echo emitted to the UART sink");
+    TEST_EXPECT_EQ(cons_test_drain_count(), 3u, "echo ALSO mirrored into the drain");
+    u8 dbuf[8];
+    TEST_EXPECT_EQ(cons_drain_read(dbuf, sizeof(dbuf)), 3L, "drain read gets the echo");
+    TEST_ASSERT(dbuf[0]=='a' && dbuf[1]=='b' && dbuf[2]=='\n', "drain echo == ab\\n");
+
+    // The graphical Ctrl-C: ISIG cooks a fed 0x03 into the deferred interrupt.
+    TEST_ASSERT(!cons_test_intr_pending(), "no interrupt pending before");
+    TEST_EXPECT_EQ(cons_feed_write("\x03", 1), 1L, "Ctrl-C fed");
+    TEST_ASSERT(cons_test_intr_pending(), "fed Ctrl-C cooked to the interrupt (ISIG)");
+
+    cons_drain_close();
+    cons_test_echo_capture(false);
+    cons_settle_mgr();
+}
+
+// Bounded drain: overflow drops OLDEST so the newest output (the prompt the
+// user needs to see) survives; writers never block.
+void test_cons_drain_overflow_drops_oldest(void) {
+    cons_test_reset();
+    cons_test_echo_capture(true);
+    TEST_EXPECT_EQ(cons_drain_open(), 0, "drain arms");
+
+    // Fill exactly + 8 more. The ring is 8192; feed 8200 'a's then a tail
+    // marker so the drop-oldest is observable at the read side.
+    u8 chunk[64];
+    for (u32 i = 0; i < sizeof(chunk); i++) chunk[i] = (u8)'a';
+    for (int k = 0; k < 128; k++)                        // 8192 'a's
+        TEST_EXPECT_EQ(cons_output_write(chunk, sizeof(chunk)), (long)sizeof(chunk),
+                       "fill chunk accepted");
+    TEST_EXPECT_EQ(cons_test_drain_overflow(), 0u, "exactly-full: no drop yet");
+    TEST_EXPECT_EQ(cons_output_write("XYZ", 3), 3L, "overflow write accepted (never blocks)");
+    TEST_EXPECT_EQ(cons_test_drain_overflow(), 3u, "3 oldest bytes dropped");
+    TEST_EXPECT_EQ(cons_test_drain_count(), 8192u, "count stays at capacity");
+
+    // Drain fully: the LAST 3 bytes must be the newest ("XYZ").
+    static u8 big[8192];
+    long total = 0;
+    while (total < 8192) {
+        long r = cons_drain_read(big + total, 8192 - total);
+        TEST_ASSERT(r > 0, "drain read progresses");
+        total += r;
+    }
+    TEST_EXPECT_EQ(total, 8192L, "full capacity drained");
+    TEST_ASSERT(big[8189]=='X' && big[8190]=='Y' && big[8191]=='Z',
+                "newest bytes survived the drop-oldest");
+
+    cons_drain_close();
+    cons_test_echo_capture(false);
+    cons_test_reset();
+}
+
+// Close semantics: disarm stops the tap; a fresh open starts a FRESH epoch
+// (stale bytes discarded); a read attempt on a closed drain is refused.
+void test_cons_drain_close_and_reopen_epoch(void) {
+    cons_test_reset();
+    cons_test_echo_capture(true);
+    TEST_EXPECT_EQ(cons_drain_open(), 0, "drain arms");
+    TEST_EXPECT_EQ(cons_output_write("old", 3), 3L, "bytes into epoch 1");
+    cons_drain_close();
+
+    u8 b[4];
+    TEST_EXPECT_EQ(cons_drain_read(b, sizeof(b)), -1L, "read on a closed drain refused");
+    TEST_EXPECT_EQ(cons_output_write("gone", 4), 4L, "closed: write still accepted");
+
+    TEST_EXPECT_EQ(cons_drain_open(), 0, "re-open");
+    TEST_EXPECT_EQ(cons_test_drain_count(), 0u, "fresh epoch: stale bytes discarded");
+    cons_drain_close();
+    cons_test_echo_capture(false);
+    cons_test_reset();
+}
+
+// The drain's POLLIN readiness + the deferred-wake relay (the LS-8a second
+// instance): a drain byte's empty->non-empty edge arms drain poll_wake_pending
+// + wakes console_mgr; the hook is walked in process context only. A disarmed
+// drain is POLLIN-ready (EOF is readable).
+void test_cons_drain_poll_deferred_wake(void) {
+    cons_test_reset();
+    cons_test_echo_capture(true);
+    sched();
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "console_mgr SLEEPING at entry");
+    TEST_EXPECT_EQ(cons_drain_open(), 0, "drain arms");
+
+    struct Rendez r; rendez_init(&r);
+    struct poll_waiter pw; poll_waiter_init(&pw, &r);
+    short rev = cons_drain_poll(POLLIN, &pw);
+    TEST_EXPECT_EQ((int)(rev & POLLIN), 0, "empty drain: no POLLIN at register");
+    TEST_ASSERT(!pw.ready, "hook not ready before any byte");
+
+    cons_output_write("k", 1);
+    TEST_ASSERT(cons_test_drain_pollwake_pending(), "byte armed the drain poll edge");
+    TEST_ASSERT(!pw.ready, "producer did NOT walk the hook (deferred)");
+    TEST_EXPECT_EQ(sched_runnable_count(), 1u, "console_mgr RUNNABLE post-byte");
+
+    sched();
+    TEST_ASSERT(pw.ready, "console_mgr's deferred walk set the drain hook ready");
+    TEST_ASSERT(!cons_test_drain_pollwake_pending(), "drain poll edge consumed");
+    TEST_ASSERT((cons_drain_poll(POLLIN, NULL) & POLLIN) != 0,
+                "buffered drain byte -> POLLIN on re-sample");
+
+    poll_waiter_list_unregister(&pw);
+
+    // Disarmed -> POLLIN (EOF readable), so a parked poller never strands.
+    cons_drain_close();
+    TEST_ASSERT((cons_drain_poll(POLLIN, NULL) & POLLIN) != 0,
+                "closed drain reads EOF -> POLLIN-ready");
+
+    cons_test_echo_capture(false);
+    cons_settle_mgr();
+}

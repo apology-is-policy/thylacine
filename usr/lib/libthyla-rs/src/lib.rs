@@ -266,6 +266,8 @@ pub const T_SYS_CLOCK_SETTIME: u64    = 79;     // net-7a: step CLOCK_REALTIME (
 // 80 reserved for SYS_FD_DEVCLASS (Menagerie; not yet built).
 pub const T_SYS_WEFT_SHARE: u64       = 81;     // Weft-6a-2: register a per-flow ring -> share_id
 pub const T_SYS_WEFT_MAP: u64         = 82;     // Weft-6a-2: map a /net data fd's ring -> ring_va
+pub const T_SYS_DMA_CREATE_WEAVE: u64 = 99;     // G-2: mint a share-admissible DMA weave
+pub const T_SYS_WEFT_UNSHARE: u64     = 100;    // G-2: disarm an un-claimed share (retire/GC)
 // Overcommit memory model (#321): reserve cheaply, commit on first touch,
 // release via decommit. SYS_BURROW_ATTACH (37) stays the eager path for
 // kernel-internal copy-target callers; the native heap reserves lazily.
@@ -937,6 +939,28 @@ pub unsafe fn t_dma_create(size: u64, rights: u32) -> i64 {
         inlateout("x0") x0,
         in("x1") rights as u64,
         in("x8") T_SYS_DMA_CREATE,
+        options(nostack)
+    );
+    x0
+}
+
+// t_dma_create_weave — mint a SHARE-ADMISSIBLE device-passive DMA weave (G-2;
+// TAPESTRY.md §18.1; ABI signed off 2026-07-19). The SYS_DMA_CREATE contract
+// (CAP_HW_CREATE + the I-34 allowance gate; kernel-chosen PA) with a
+// framebuffer-class 64 MiB envelope and the kernel-minted immutable `weave`
+// bit: the returned region — and ONLY a region minted here — is admissible to
+// burrow_share_into / SYS_WEFT_SHARE, so a compositor's scanout backing can be
+// mapped into a client while its virtqueues (plain t_dma_create) stay as
+// structurally unshareable as MMIO. Map it with t_dma_map for the VA + PA
+// (ATTACH_BACKING wants the PA; the client map arrives via the weave fid).
+#[inline(always)]
+pub unsafe fn t_dma_create_weave(size: u64, rights: u32) -> i64 {
+    let mut x0: i64 = size as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") rights as u64,
+        in("x8") T_SYS_DMA_CREATE_WEAVE,
         options(nostack)
     );
     x0
@@ -2162,6 +2186,24 @@ pub unsafe fn t_weft_share(ring_va: u64, ring_size: u64) -> i64 {
         inlateout("x0") x0,
         in("x1") ring_size,
         in("x8") T_SYS_WEFT_SHARE,
+        options(nostack)
+    );
+    x0
+}
+
+// t_weft_unshare -- disarm one of the caller's own UN-claimed shares (G-2):
+// removes the registry entry + drops the registration pin, so a late claim of
+// this id fails closed. Returns 0 (removed) or -1 (no live entry under this
+// owner: already claimed [the client mapped -- retire by quiesce], GC'd, or
+// not yours). The retire/reweave NoStaleMap disarm (a weave share must not
+// linger claimable past RETIRING) + the #289 minted-but-never-claimed flow GC.
+#[inline(always)]
+pub unsafe fn t_weft_unshare(share_id: u64) -> i64 {
+    let mut x0: i64 = share_id as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x8") T_SYS_WEFT_UNSHARE,
         options(nostack)
     );
     x0

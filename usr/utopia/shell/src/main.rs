@@ -403,6 +403,17 @@ pub extern "C" fn rs_main() -> i64 {
         // repaints over the notification via feed's editor render.
         if notes_ready {
             repl.on_notes_ready(&mut out);
+            // PTY-4e F5: an exit-class note serviced at idle (tty:hup ->
+            // request_exit(129)) must end the session NOW, not at the next
+            // Accept -- without this, a hup whose producer does not also
+            // close the slave leaves the shell alive and the next typed
+            // line fully executes before the exit fires. (Every in-tree
+            // hup producer today also EOFs the slave, so this is the
+            // belt-and-braces leg; it becomes load-bearing the day an
+            // explicit TTY_SIG_HUP sender exists.)
+            if let Some(code) = repl.env_exit_requested() {
+                break code;
+            }
         }
         if cons_ready {
             match io::stdin().read(&mut buf) {

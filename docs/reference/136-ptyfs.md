@@ -233,18 +233,32 @@ and both PTY-4 follow-ups:
   (`SYS_READ` on a pts slave, caller pgrp vs the pts `fg_pgid` via the
   registry), since ptyfs (a 9P server) has no pgrp per `Tread`.
 
-- **Resume-then-re-stop signal delivery.** `fg`/`SYS_TTY_CONT` correctly
-  resumes a job-stopped sleeper (it is woken off `debug_rendez` and its
-  original syscall continues -- verified). But a SECOND `^Z` immediately after
-  a resume does not re-stop the job: the resumed job's `tty:susp` never
-  reaches `proc_job_stop_one` (the signal-delivery path after a resume has a
-  gap -- the fg group / cooked-mode state after `SYS_TTY_CONT` needs a closer
-  look). So `fg` then `^Z` again is not yet reliable, and `bg` of a re-
-  stopped job is untested. The resume ITSELF works (a resumed job runs to
-  completion under `fg`); only the immediate re-stop is affected.
+- **Resume-then-re-stop -- ROOT-CAUSED + FIXED at PTY-4e (task #19).** The
+  "second `^Z` after `fg` never re-stops" report was NOT a signal-delivery
+  gap. The stop cascade (`proc_stop_wake_sleepers_locked`) reused the DEATH
+  cascade's `torpor_wake_all_for_proc`, which fabricates a COMPLETED wait
+  (`awoken = 1`) -- immaterial for a dying Proc (#811, that wake's charter),
+  but a job-stopped Proc SURVIVES: the fabricated `TORPOR_OK` rode back to
+  EL0 at resume, so a torpor-timed sleep (`libthyla_rs::time::sleep` ->
+  `/bin/sleep`) "finished" the instant `fg` resumed it -- the job exited,
+  `fg` returned Done + restored the terminal, and the second `^Z` correctly
+  found no foreground job (routed to the self-managing shell as a note; no
+  `proc_job_stop_one` -- exactly the observed KDBG signature). FIXED
+  two-layer: (a) the stop cascade now uses the NON-COMPLETING
+  `torpor_stop_wake_all_for_proc` (wakes the rendez, leaves `awoken` clear:
+  the woken waiter's tsleep re-loop takes the 8c-2 stop detour, parks with
+  the wait preserved, and re-registers its original deadline on resume --
+  parks-and-reparks made total over torpor; a real wake during the park
+  still delivers, the waiter stays bucket-linked); (b) `time::sleep`
+  re-sleeps the remainder on a spurious `Woken` (the futex contract its
+  "Woken is unreachable" comment violated). Pinned by
+  `proc.job_stop_preserves_torpor_wait` (stop -> parked, wait intact; cont
+  -> RE-SLEEPS, wait still intact -- the pre-fix code completes it right
+  there; only a real wake finishes it), `proc.job_stop_recycle`, and the
+  jc-probe re-stop/bg/fg-interrupt ladder.
 
-Both gaps need focused kernel work (TTIN is a new read-gate mechanism; the
-re-stop is a tty-signal-delivery-after-resume fix) and are the natural PTY-4
-continuation. The PTY-4 boot E2E (`/bin/jc-probe`) and the interactive
-`pty-4.exp` scenario both drive `sleep` (no terminal read) so they exercise
-the working stop/jobs/fg-resume cycle without depending on either gap.
+The remaining gap (TTIN) needs a new kernel read-gate mechanism (task #18,
+signoff) and is the natural PTY-4 continuation. The PTY-4 boot E2E
+(`/bin/jc-probe`) and the interactive `pty-4.exp` scenario both drive `sleep`
+(no terminal read) so they exercise the full stop / re-stop / bg / fg /
+interrupt cycle without depending on TTIN.

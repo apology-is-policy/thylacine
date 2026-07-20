@@ -50,9 +50,23 @@ struct poll_waiter;
 // SYS_POST_SERVICE kernel-stack name scratch.
 #define SRV_NAME_MAX  32u
 
-// Service registry capacity. corvus is the sole v1.0 service (ARCH §9.4);
-// 8 is headroom. A post past the cap fails fast.
-#define SRV_MAX_SERVICES  8u
+// Service registry capacity. The "corvus is the sole service; 8 is
+// headroom" era ended: the resident boot posts SIX permanent services
+// (stratum-fs, stratum-ctl, corvus, net, ptyfs, tapestry) and tombstones
+// never free (a dead poster's entry pins its NAME + slot forever -- the
+// stale-handle defense), so the boot-probe socket (pouch-sock-demo) + the
+// login-E2E home-michael tombstones made 8 EXACTLY full at the login
+// prompt (#30): michael forever REBINDS his own tombstone by name (no new
+// slot) while any OTHER user's fresh /srv/home-<user> post found no free
+// slot -> devsrv_create -1 -> the pouch bind's EACCES -> a permanently
+// unprovisionable home. 16 = the 8 occupants + ~8 distinct per-boot
+// usernames of headroom; each unit also costs kernel STACK in
+// srv_registry_drain (SRV_MAX_SERVICES x SRV_ACCEPT_BACKLOG pointers --
+// 2 KiB at 16), so a further raise should land with the real fix: the
+// entry-free-at-last-handle-ref lifecycle that retires tombstone
+// accumulation entirely (the recorded v1.x seam). A post past the cap
+// still fails fast; a TOMBSTONE rebind needs no free slot.
+#define SRV_MAX_SERVICES  16u
 
 // SRV_SERVICE_MAGIC — sentinel at offset 0 of struct SrvService. Lets the
 // KObj_Srv handle-release path discriminate a service object from a

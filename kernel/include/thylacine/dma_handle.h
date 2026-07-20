@@ -63,14 +63,32 @@ struct page;
 // systems).
 #define KOBJ_DMA_MAX_SIZE  (1ull * 1024 * 1024)
 
+// Maximum WEAVE-subtype DMA buffer size (G-2; TAPESTRY.md §18.1). A weave is a
+// framebuffer-class device-passive region (triple-buffered 1080p ≈ 25 MiB), so
+// it gets its own envelope above the general-DMA 1 MiB floor. 64 MiB = order 14,
+// well under the buddy's max order; the contiguous-chunk pressure is accepted at
+// v1.0 (tapestryd allocates its weaves early; QEMU media carry ≥ 2 GiB).
+#define KOBJ_DMA_WEAVE_MAX_SIZE  (64ull * 1024 * 1024)
+
 struct KObj_DMA {
     u64           magic;       // KOBJ_DMA_MAGIC
     u64           pa;          // physical address (page-aligned)
     size_t        size;        // requested bytes (page-aligned, > 0,
-                               //   <= KOBJ_DMA_MAX_SIZE)
+                               //   <= KOBJ_DMA_MAX_SIZE, or the weave bound)
     struct page  *pages;       // alloc_pages chunk (kept for free_pages)
     unsigned      order;       // buddy order for free_pages
     int           ref;         // refcount; starts at 1 from kobj_dma_create
+    // G-2 (TAPESTRY.md §18.1 / §18.12 R2-F1): the KERNEL-MINTED device-passive
+    // weave subtype bit. Set ONLY by kobj_dma_create_weave (SYS_DMA_CREATE_WEAVE),
+    // create-immutable — no code path writes it on a live KObj_DMA (the same
+    // structural discipline as `pa`). The cross-Proc share gate
+    // (burrow_share_into + the SYS_WEFT_SHARE admission) admits a DMA Burrow
+    // ONLY when this bit is set, so a device-command region (virtqueue,
+    // descriptor table — allocated via plain SYS_DMA_CREATE) is structurally
+    // unshareable exactly as MMIO is. The bit conveys no hardware authority of
+    // its own: a weave is pinned Normal-WB RAM the device only DMA-reads
+    // (pixels); what it changes is share-ADMISSIBILITY, not device reach.
+    bool          weave;
 };
 
 // Bring up the DMA-handle subsystem. Atomic init guard extincts on
@@ -94,6 +112,13 @@ void kobj_dma_init(void);
 // pinned (held by struct KObj_DMA's reference) until the last unref
 // drops the refcount to zero.
 struct KObj_DMA *kobj_dma_create(size_t size);
+
+// G-2: mint a WEAVE-subtype KObj_DMA (TAPESTRY.md §18.1; the SYS_DMA_CREATE_WEAVE
+// body). Identical to kobj_dma_create except: the size envelope is
+// KOBJ_DMA_WEAVE_MAX_SIZE (framebuffer-class), and the returned object carries
+// the create-immutable `weave` bit that admits it into the cross-Proc share
+// gate. Same NULL cases as kobj_dma_create (plus size > the weave bound).
+struct KObj_DMA *kobj_dma_create_weave(size_t size);
 
 // Refcount ops. Mirror kobj_mmio_ref / kobj_irq_ref.
 void kobj_dma_ref(struct KObj_DMA *k);

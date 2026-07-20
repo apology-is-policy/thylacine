@@ -44,7 +44,9 @@
 //               consumes the reported-Done jobs so the prompt cycle does
 //               not re-announce them).
 //   wait [id...] block until the named jobs/pids finish, or all jobs with
-//               no argument. Blocking by-pid `wait_pid_for(pid, 0)`.
+//               no argument. Interruptible: a ^C aborts the builtin (130,
+//               bash) -- mandatory under jc, where a wait on a STOPPED job
+//               would otherwise self-deadlock the shell (PTY-4e F1).
 //   fg [%N]     foreground a job. Under job control (PTY-4b, a pts
 //               session): terminal to the job's group + SYS_TTY_CONT
 //               resume + the stop-aware wait (a re-^Z re-stops it into
@@ -97,7 +99,9 @@ use libthyla_rs::{t_wait_pid_for, T_WAIT_WNOHANG};
 
 use super::env::Env;
 use super::error::EvalResult;
-use super::stmt::{eval_source, run_foreground_jc, StatementFlow};
+use super::stmt::{
+    eval_source, poll_notes_once, run_foreground_jc, wait_pids_interruptible, StatementFlow,
+};
 use super::value::Value;
 
 /// Whether `name` is a built-in the shell intercepts (the implemented
@@ -420,26 +424,79 @@ pub fn reap_background(env: &mut Env) {
     }
 }
 
-/// Block (by-pid `wait_pid_for(pid, 0)`) on each pid in order, feeding reaps
-/// into the table. Returns the LAST successfully-waited element's status (the
-/// job's reported exit, bash semantics); 0 if none was waited. An already-
-/// reaped / vanished pid returns -1 from the kernel and is marked reaped +
-/// skipped (never spins). `pids` is an owned snapshot, so the `&mut Env`
-/// reborrow inside the loop is sound.
-fn wait_pids_blocking(env: &mut Env, pids: &[i32]) -> i32 {
+/// The `wait`-builtin reap: block until every pid exits, feeding reaps into
+/// the table -- INTERRUPTIBLE when the shell has a live note queue. A `^C`
+/// (`interrupt` note) ABORTS the builtin (bash: `wait` is interruptible,
+/// returning 128+SIGINT) rather than forwarding it -- background jobs are
+/// keyboard-immune, and under job control a job-STOPPED pid never exits, so
+/// an uninterruptible `wait` on one was an unrecoverable self-deadlock: the
+/// wedged shell reads no input and is itself the only resumer of the stopped
+/// job (PTY-4e F1). `child_exit` is swallowed (the WNOHANG sweep is the reap
+/// ground truth; consuming it clears POLLIN so the next poll genuinely
+/// parks); other notes defer to the post-command drain. DEGRADES to the
+/// plain blocking by-pid wait when no note queue is open (host tests / the
+/// bare-spawn boot check -- no console, so no `^C` can arrive). Returns
+/// (last reaped status, interrupted); an already-reaped / vanished pid is
+/// marked reaped + skipped (never spins), matching the prior loop.
+fn wait_pids_reaping(env: &mut Env, pids: &[i32]) -> (i32, bool) {
     let mut last = 0;
-    for &pid in pids {
-        let mut st: i32 = 0;
-        // SAFETY: SYS_WAIT_PID SVC wrapper; &mut st is a valid writable i32.
-        let rc = unsafe { t_wait_pid_for(pid, 0, &mut st as *mut i32) };
-        if rc > 0 {
-            env.jobs_mut().mark_reaped(pid, st);
-            last = st;
-        } else if rc < 0 {
-            env.jobs_mut().mark_reaped(pid, 0);
+    if env.notes().is_none() {
+        for &pid in pids {
+            let mut st: i32 = 0;
+            // SAFETY: SYS_WAIT_PID SVC wrapper; &mut st is a valid writable i32.
+            let rc = unsafe { t_wait_pid_for(pid, 0, &mut st as *mut i32) };
+            if rc > 0 {
+                env.jobs_mut().mark_reaped(pid, st);
+                last = st;
+            } else if rc < 0 {
+                env.jobs_mut().mark_reaped(pid, 0);
+            }
+        }
+        return (last, false);
+    }
+    let mut reaped: Vec<bool> = (0..pids.len()).map(|_| false).collect();
+    let mut remaining = pids.len();
+    while remaining > 0 {
+        for (i, &pid) in pids.iter().enumerate() {
+            if reaped[i] {
+                continue;
+            }
+            let mut st: i32 = 0;
+            // SAFETY: SYS_WAIT_PID SVC wrapper; &mut st is a valid writable i32.
+            let rc = unsafe { t_wait_pid_for(pid, T_WAIT_WNOHANG, &mut st as *mut i32) };
+            if rc == 0 {
+                continue; // still alive (or stopped -- either way, not exited)
+            }
+            if rc > 0 {
+                env.jobs_mut().mark_reaped(pid, st);
+                last = st;
+            } else {
+                env.jobs_mut().mark_reaped(pid, 0);
+            }
+            reaped[i] = true;
+            remaining -= 1;
+        }
+        if remaining == 0 {
+            break;
+        }
+        poll_notes_once(env);
+        loop {
+            let next = match env.notes() {
+                Some(n) => n.try_read(),
+                None => break,
+            };
+            let note = match next {
+                Ok(Some(note)) => note,
+                _ => break,
+            };
+            match note.name.as_str() {
+                "interrupt" => return (130, true),
+                "child_exit" => {}
+                _ => env.defer_note(note),
+            }
         }
     }
-    last
+    (last, false)
 }
 
 /// Resolve a `%`-prefixed jobspec to an EXISTING job's `[N]` spec. Accepts
@@ -588,10 +645,13 @@ fn bi_fg(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
         env.status_set(statuses.last().copied().unwrap_or(0));
         return Ok(StatementFlow::Normal);
     }
+    // The console (non-jc) fallback: a foregrounded job IS a foreground wait,
+    // so use the fg-semantics interruptible reap (a `^C` FORWARDS to the job,
+    // exactly like any foreground command) rather than an unbreakable block.
     let pids = env.jobs().spec_pids(spec).unwrap_or_default();
-    let status = wait_pids_blocking(env, &pids);
+    let statuses = wait_pids_interruptible(env, &pids);
     env.jobs_mut().remove(spec);
-    env.status_set(status);
+    env.status_set(statuses.last().copied().unwrap_or(0));
     Ok(StatementFlow::Normal)
 }
 
@@ -646,8 +706,8 @@ fn bi_bg(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
 fn bi_wait(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
     if args.is_empty() {
         let pids = env.jobs().live_pids();
-        wait_pids_blocking(env, &pids);
-        env.status_set(0);
+        let (_, intr) = wait_pids_reaping(env, &pids);
+        env.status_set(if intr { 130 } else { 0 });
         return Ok(StatementFlow::Normal);
     }
     let mut last = 0;
@@ -672,7 +732,12 @@ fn bi_wait(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
                 }
             }
         };
-        last = wait_pids_blocking(env, &pids);
+        let (st, intr) = wait_pids_reaping(env, &pids);
+        if intr {
+            env.status_set(130);
+            return Ok(StatementFlow::Normal);
+        }
+        last = st;
     }
     env.status_set(last);
     Ok(StatementFlow::Normal)

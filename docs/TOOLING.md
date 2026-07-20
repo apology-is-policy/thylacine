@@ -36,6 +36,7 @@ tools/
   build.sh            ← full build wrapper around CMake + Cargo
   test.sh             ← run the test suite against a running VM
   snapshot.sh         ← save/restore QEMU VM state
+  screendump.sh       ← QMP scanout capture to PNG (the "agentic eyes"; §3.1)
   netboot/            ← Pi 5 TFTP netboot setup (post-v1.0 / v1.1 candidate)
 ```
 
@@ -89,6 +90,69 @@ qemu-system-aarch64 \
 - `--mem <M>`: override RAM. Default 2G.
 - `--no-share`: disable VirtIO-9P host share (for isolation testing).
 - `--virgl`: enable VirtIO-GPU virgl 3D (post-v1.0).
+
+**Display backend (`THYLACINE_DISPLAY`, the fbcon era — #31):** headless
+(`-nographic`) stays the default (the CI/agent loop). `=cocoa` opens the
+interactive window — the human path to the Aurora console (switch the
+window's View menu to the virtio-gpu console; serial stays on the
+launching terminal). `=vnc:N` serves the gpu0 console on
+`127.0.0.1:590N` — the headless live-display mode
+(`tools/interactive/ls-gfx-live.exp` + `tools/rfb-refresh.py` drive it;
+in this mode the vestigial `gpu-mmio0` device is dropped so the gpu0
+console binds QemuConsole 0, which a VNC client attaches to).
+
+### 3.1 Agentic eyes — `tools/screendump.sh` (QMP scanout capture)
+
+The graphics arc's capture step (G-0; `TAPESTRY.md` §18.9). Captures the
+running VM's virtio-gpu scanout to a PNG over the QMP socket `run-vm.sh`
+opens by default (`build/qmp.sock`; disabled by `THYLACINE_NO_QMP=1`):
+
+```bash
+tools/screendump.sh out.png                 # capture gpu0 head 0
+tools/screendump.sh -v out.png              # + verify the P4-L 4-quadrant
+                                            #   test pattern (red/green/blue/white)
+tools/screendump.sh -c out.png              # + verify the Aurora console (G-4:
+                                            #   exact Bonfire bg dominant + fg text)
+tools/screendump.sh -s SOCK -d DEV -H N ... # explicit socket / qdev id / head
+```
+
+Properties (all empirically verified at G-0):
+
+- **Headless-safe.** QEMU maintains the QemuConsole surface for a bound
+  scanout regardless of display backend, so capture works under the
+  standing `-nographic` invocation — no `-display` change, no VNC needed.
+  The capture targets the `gpu0` qdev id — since G-1 that is the
+  `virtio-gpu-pci` device (owned by tapestryd since G-3; the one-shot
+  kernel-test probe's virtio-mmio device is `gpu-mmio0`) — so console
+  muxing never misroutes it. `tools/test.sh` runs the per-boot scanout
+  gate on every boot (and therefore in every `ci-smp-gate` boot);
+  `THYLACINE_GPU_GATE=0` opts out. Since G-4 the gate is `-c` (the
+  Aurora CONSOLE signature — the boot presenter is the fbcon, not the
+  demo pattern) plus a bounded retry-compare liveness leg (the cursor
+  blink / prompt arrival must eventually change a dump); `-v` remains
+  the dev-tool verify for manual `tapestry-demo` runs. G-4 also adds
+  `tools/qmp-sendtext.sh` — QMP `input-send-event` typing on the
+  display-bound PCI keyboard (`kbd-pci0`), the `ls-gfx` scenario's
+  graphical-input leg.
+- **PNG is native** (QEMU ≥ 7.1 `screendump format=png`); `-v` takes a
+  PPM sibling dump and asserts the four quadrant-center colors, then
+  deletes it.
+- **Capture requires a LIVE driving Proc.** At driver-Proc reap the RW-7
+  proc-death quiesce (`kernel/virtio.c::virtio_mmio_reset_in_range`)
+  resets every virtio device in the dying Proc's MMIO window — required
+  for DMA soundness (no in-flight device write into freed KObj_DMA
+  pages) — and a virtio-gpu reset destroys the host-side resources and
+  disables the scanout (blank surface). So the one-shot `usr/virtio-gpu`
+  probe's pattern is only capturable during the probe's lifetime; the
+  persistent capture target is the G-1 resident driver, and any
+  compositor's display dies with its Proc until warden restarts it (the
+  TAPESTRY crash contract's visible half).
+
+Since G-3 the gate's scanout owner is tapestryd + its resident tapestry-demo client: the `-v` quadrant assert proves the FULL compositor path (private 9P session -> weave share -> Loom presents), and a liveness leg (two dumps 0.6 s apart must differ -- the demo's plasma animates at the FRAME clock) proves the present loop live. FAIL diagnostics grep `tapestryd:|tapestry-demo:|warden:`.
+
+Exit status: 0 on capture (and pattern match under `-v`); nonzero
+otherwise. The tool is safe to run repeatedly against a live VM — it
+only reads the console surface.
 
 ---
 

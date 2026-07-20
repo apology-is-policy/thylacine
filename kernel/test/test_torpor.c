@@ -256,10 +256,13 @@ void test_torpor_wait_value_mismatch_fast_path(void) {
     TEST_ASSERT(consumer != NULL, "thread_create(consumer) failed");
     ready(consumer);
 
-    // Yield: consumer runs, takes torpor_lock, loads the user VA
-    // (demand-zero, reads 0), 0 != 0xDEADBEEF → fast path returns 0
-    // without sleeping. Consumer parks. Boot resumes.
-    sched();
+    // Consumer runs, takes torpor_lock, loads the user VA (demand-zero,
+    // reads 0), 0 != 0xDEADBEEF → fast path returns 0 without sleeping.
+    // SMP (#20): ready() may place the consumer on a peer CPU's runqueue,
+    // so one local sched() does not guarantee it ran — yield until it
+    // completes (the test_thread_spawn.c spin-until idiom; the harness
+    // boot timeout is the backstop).
+    while (g_torpor_done < 2u) sched();
 
     TEST_EXPECT_EQ(g_torpor_done, 2u,
         "consumer must have completed (no sleep)");
@@ -291,7 +294,10 @@ void test_torpor_wait_timeout_zero_returns_etimedout(void) {
                                             torpor_consumer_entry);
     TEST_ASSERT(consumer != NULL, "thread_create(consumer) failed");
     ready(consumer);
-    sched();
+
+    // SMP (#20): yield until the consumer completes — see
+    // wait_value_mismatch_fast_path.
+    while (g_torpor_done < 2u) sched();
 
     TEST_EXPECT_EQ(g_torpor_done, 2u,
         "consumer must have completed (no real sleep)");
@@ -327,10 +333,14 @@ void test_torpor_wait_wake_handoff(void) {
     TEST_ASSERT(consumer != NULL, "thread_create(consumer) failed");
     ready(consumer);
 
-    // Yield to consumer: runs, increments to 1, takes torpor_lock,
-    // loads (0 == 0 match), registers in the bucket, tsleeps with the
-    // far deadline → SLEEPING. sched returns boot here.
-    sched();
+    // Consumer: runs, increments to 1, takes torpor_lock, loads (0 == 0
+    // match), registers in the bucket, tsleeps with the far deadline →
+    // SLEEPING. SMP (#20): it may run on a peer CPU — yield until it is
+    // observably SLEEPING (registration precedes the SLEEPING
+    // transition, so SLEEPING implies registered).
+    while (__atomic_load_n(&consumer->state, __ATOMIC_ACQUIRE)
+               != THREAD_SLEEPING)
+        sched();
 
     TEST_EXPECT_EQ(g_torpor_done, 1u,
         "consumer must have run once before sleeping");
@@ -341,13 +351,13 @@ void test_torpor_wait_wake_handoff(void) {
     // awoken + wakeup(rendez). Consumer transitions RUNNABLE.
     s64 wake_rc = sys_torpor_wake_for_proc(g_torpor_proc, g_torpor_vaddr, 1);
     TEST_EXPECT_EQ(wake_rc, (s64)1, "wake reports one waiter woken");
-    TEST_EXPECT_EQ(consumer->state, THREAD_RUNNABLE,
-        "consumer must be RUNNABLE after wake");
 
-    // Yield: consumer resumes inside tsleep (cond true now), returns
-    // TSLEEP_AWOKEN. torpor_wait unlinks the waiter + returns
-    // TORPOR_OK. Consumer increments to 2 and parks.
-    sched();
+    // Consumer resumes inside tsleep (cond true now), returns
+    // TSLEEP_AWOKEN; torpor_wait unlinks the waiter + returns TORPOR_OK;
+    // consumer increments to 2 and parks. SMP (#20): it may resume on a
+    // peer CPU, so a RUNNABLE point-check here is unsound (it can
+    // already be RUNNING or parked) — completion is the sound witness.
+    while (g_torpor_done < 2u) sched();
 
     TEST_EXPECT_EQ(g_torpor_done, 2u,
         "consumer must have completed wait and parked");
@@ -420,11 +430,19 @@ void test_torpor_wake_two_waiters_count_bound(void) {
     ready(ca);
     ready(cb);
 
-    // Yield: both consumers run (one per sched()) and end up SLEEPING in
-    // the bucket. After two yields control returns to boot with both
-    // consumers in THREAD_SLEEPING.
-    sched();
-    sched();
+    // Both consumers run and end up SLEEPING in the bucket. SMP (#20):
+    // ready() may place a consumer on a peer CPU's runqueue, so N local
+    // sched() calls do NOT guarantee N consumer runs (the observed
+    // 1-in-10 ubsan-smp4 failure: B runnable on cpu3, not yet
+    // dispatched when boot asserted after two sched() calls). Yield
+    // until both are observably SLEEPING — registration precedes the
+    // SLEEPING transition, so this also guarantees both are in the
+    // bucket before the first WAKE (wake1 == 1 stays deterministic).
+    while (__atomic_load_n(&ca->state, __ATOMIC_ACQUIRE)
+               != THREAD_SLEEPING ||
+           __atomic_load_n(&cb->state, __ATOMIC_ACQUIRE)
+               != THREAD_SLEEPING)
+        sched();
 
     TEST_EXPECT_EQ(g_torpor_done_a, 1u, "consumer A reached pre-wait");
     TEST_EXPECT_EQ(g_torpor_done_b, 1u, "consumer B reached pre-wait");
@@ -432,42 +450,42 @@ void test_torpor_wake_two_waiters_count_bound(void) {
     TEST_EXPECT_EQ(cb->state, THREAD_SLEEPING, "B must be SLEEPING");
 
     // First WAKE(count=1) wakes exactly ONE. Order is bucket-walk order
-    // (most-recently-inserted first), but we don't depend on which:
-    // assert the count + the partition "exactly one of {A, B} is now
-    // RUNNABLE, the other is still SLEEPING".
+    // (most-recently-inserted first), but we don't depend on which.
+    // SMP (#20): the woken consumer may resume on a peer CPU, so a
+    // RUNNABLE point-check right here is unsound (it can already be
+    // RUNNING or parked) — the sound partition is over COMPLETION:
+    // yield until exactly one has finished its wait; the other must
+    // still be waiting (no spurious wakes; only wake2 can release it).
     s64 wake1 = sys_torpor_wake_for_proc(g_torpor_proc, g_torpor_vaddr, 1);
     TEST_EXPECT_EQ(wake1, (s64)1,
         "first WAKE(count=1) reports exactly one woken");
-    int a_woke_first = (ca->state == THREAD_RUNNABLE);
-    int b_woke_first = (cb->state == THREAD_RUNNABLE);
-    TEST_ASSERT(a_woke_first != b_woke_first,
-        "exactly one of {A, B} must be RUNNABLE after first WAKE");
 
-    // Yield: the first-woken consumer resumes, unlinks its waiter,
-    // returns TORPOR_OK, parks. The other consumer stays SLEEPING.
-    sched();
+    while (g_torpor_done_a < 2u && g_torpor_done_b < 2u) sched();
+
+    int a_woke_first = (g_torpor_done_a == 2u);
+    TEST_ASSERT((g_torpor_done_a == 2u) != (g_torpor_done_b == 2u),
+        "exactly one of {A, B} completes after first WAKE");
 
     if (a_woke_first) {
-        TEST_EXPECT_EQ(g_torpor_done_a, 2u, "A completed wait after first WAKE");
         TEST_EXPECT_EQ(g_torpor_rc_a, (s64)TORPOR_OK, "A returned OK");
         TEST_EXPECT_EQ(g_torpor_done_b, 1u, "B is still waiting");
         TEST_EXPECT_EQ(cb->state, THREAD_SLEEPING, "B remains SLEEPING");
     } else {
-        TEST_EXPECT_EQ(g_torpor_done_b, 2u, "B completed wait after first WAKE");
         TEST_EXPECT_EQ(g_torpor_rc_b, (s64)TORPOR_OK, "B returned OK");
         TEST_EXPECT_EQ(g_torpor_done_a, 1u, "A is still waiting");
         TEST_EXPECT_EQ(ca->state, THREAD_SLEEPING, "A remains SLEEPING");
     }
 
-    // Second WAKE(count=1) wakes the remaining consumer.
+    // Second WAKE(count=1) wakes the remaining consumer (deterministic:
+    // the survivor was just asserted SLEEPING + registered; its 60 s
+    // deadline cannot lapse).
     s64 wake2 = sys_torpor_wake_for_proc(g_torpor_proc, g_torpor_vaddr, 1);
     TEST_EXPECT_EQ(wake2, (s64)1,
         "second WAKE(count=1) reports exactly one woken");
 
-    sched();
+    // SMP (#20): yield until both have completed.
+    while (g_torpor_done_a < 2u || g_torpor_done_b < 2u) sched();
 
-    TEST_EXPECT_EQ(g_torpor_done_a, 2u, "A completed wait by end");
-    TEST_EXPECT_EQ(g_torpor_done_b, 2u, "B completed wait by end");
     TEST_EXPECT_EQ(g_torpor_rc_a, (s64)TORPOR_OK, "A returned OK overall");
     TEST_EXPECT_EQ(g_torpor_rc_b, (s64)TORPOR_OK, "B returned OK overall");
 

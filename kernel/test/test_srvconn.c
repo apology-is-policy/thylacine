@@ -978,30 +978,56 @@ void test_srvconn_client_send_blocking_poll_edge(void) {
     // pre-fix code the poller stays SLEEPING here (ran_p == 1) and the
     // writer stays parked: the circular wait.
     ready(tw);
-    sched();
+    // Spin-until the poller observes the POLLIN edge. Under -smp N the writer
+    // runs on a SECONDARY CPU concurrently, so ONE sched() is not guaranteed
+    // to let it fill + wake the poller -- the task-#20 SMP-test discipline:
+    // spin-until the condition, never assert an exact sched() outcome (each
+    // sched() is a compiler barrier that reloads the global). Bounded so a
+    // real regression (no wake -> the #349 F1 circular wait) still FAILS.
+    { int spins = 0; while (g_pe_ran_p < 2u && spins++ < 10000) sched(); }
     TEST_ASSERT(g_pe_ran_p >= 2u,
         "the poller saw the POLLIN edge WHILE the send was in flight "
         "(pre-F1-fix: no wake until end-of-delivery -> circular wait)");
 
-    // Let the drain + the writer's completion run out.
-    for (int i = 0; i < 8; i++) sched();
+    // Spin-until both threads run to completion (the poller finished its drain
+    // pass; the writer delivered the whole payload past its park).
+    { int spins = 0;
+      while ((g_pe_ran_w < 2u || g_pe_ran_p < 3u) && spins++ < 10000) sched(); }
     TEST_EXPECT_EQ(g_pe_ran_w, 2u, "writer completed past the park");
     TEST_EXPECT_EQ(g_pe_ret_w, (long)sizeof g_pe_payload,
         "client_send_blocking delivered the WHOLE >cap payload");
     TEST_EXPECT_EQ(g_pe_ran_p, 3u, "poller drained after the edge");
-    TEST_EXPECT_EQ(g_pe_drained, (long)cn->c2s.cap,
-        "the poller's pass drained the full ring the writer had filled");
 
-    // The writer's 256-byte tail landed after the poller's pass; drain +
-    // byte-verify it here (offset cap into the 0x3C ramp).
+    // The poller's ONE drain pass took g_pe_drained bytes -- a NON-EMPTY
+    // bounded prefix. Under -smp N the writer's tail can land in the ring
+    // DURING the poller's pass, so the split is concurrency-dependent and NOT
+    // guaranteed to be exactly c2s.cap (the smp8 gate exposed this
+    // over-specification; task #28). The mechanism invariant: the poller woke
+    // + drained something, and the WHOLE stream reconstructs intact.
+    TEST_ASSERT(g_pe_drained >= 1 && g_pe_drained <= (long)sizeof g_pe_payload,
+        "the poller drained a non-empty bounded prefix (SMP: not exactly cap)");
+
+    // Drain the REMAINDER (sizeof payload - g_pe_drained) and byte-verify each
+    // at its stream offset -- proving the poller's prefix + the remainder
+    // reconstruct the 0x3C ramp with no loss/reorder (the byte-integrity proof,
+    // now split-agnostic). The writer already delivered the whole payload
+    // (g_pe_ret_w asserted), so every remaining byte is buffered.
     {
-        u8 tail[256];
-        long got = srvconn_server_recv(cn, tail, sizeof tail);
-        TEST_EXPECT_EQ(got, (long)sizeof tail, "the tail chunk drained");
-        long base = (long)cn->c2s.cap;
-        for (long j = 0; j < got; j++)
-            TEST_ASSERT(tail[j] == (u8)(0x3C + (u8)(base + j)),
-                "tail byte intact at the stream offset");
+        long base = g_pe_drained;
+        long remaining = (long)sizeof g_pe_payload - base;
+        u8 buf[1024];
+        long verified = 0;
+        int spins = 0;
+        while (verified < remaining && spins++ < 10000) {
+            long got = srvconn_server_recv(cn, buf, sizeof buf);
+            if (got <= 0) { sched(); continue; }
+            for (long j = 0; j < got; j++)
+                TEST_ASSERT(buf[j] == (u8)(0x3C + (u8)(base + verified + j)),
+                    "stream byte intact at its offset (split-agnostic)");
+            verified += got;
+        }
+        TEST_EXPECT_EQ(verified, remaining,
+            "the full remainder drained + byte-verified past the poller's prefix");
     }
 
     test_kthread_join_free(tp, &g_pe_exited_p);

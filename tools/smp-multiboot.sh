@@ -103,9 +103,15 @@ pool_restore() {
 }
 
 pass=0; corrupt=0; inject=0; timing=0; other=0
+# The harness-side (test.sh stdout/stderr) capture. $LOG is the GUEST serial
+# only; a post-banner verdict step (the -c console gate, the liveness
+# compare) that fails leaves NO trace there -- the ubsan-smp8 OTHER of
+# 2026-07-19 was undiagnosable because this stream went to /dev/null. Kept
+# alongside the serial log on every non-PASS classification.
+HARNESS_LOG="$REPO_ROOT/build/test-harness.log"
 for i in $(seq 1 "$N"); do
     pool_restore
-    if THYLACINE_TEST_CPUS="$CPUS" "$REPO_ROOT/tools/test.sh" $sanflag >/dev/null 2>&1; then
+    if THYLACINE_TEST_CPUS="$CPUS" "$REPO_ROOT/tools/test.sh" $sanflag >"$HARNESS_LOG" 2>&1; then
         # Belt-and-suspenders: even on exit 0, fail if a corruption marker leaked.
         if grep -qE "$CORRUPT_RE" "$LOG"; then
             corrupt=$((corrupt+1)); cp "$LOG" "$FAILDIR/$LABEL-$i-CORRUPT.log"
@@ -117,17 +123,24 @@ for i in $(seq 1 "$N"); do
         msg="$(grep -E 'EXTINCTION|tests: [0-9]+/[0-9]+ (FAIL|fail)' "$LOG" | head -1)"
         if grep -qE "$CORRUPT_RE" "$LOG"; then
             corrupt=$((corrupt+1)); cp "$LOG" "$FAILDIR/$LABEL-$i-CORRUPT.log"
+            cp "$HARNESS_LOG" "$FAILDIR/$LABEL-$i-CORRUPT-harness.log" 2>/dev/null || true
             echo "  [$LABEL $i/$N] CORRUPTION: ${msg:-<no extinction line>}"
         elif inject_miss_green; then
             inject=$((inject+1)); cp "$LOG" "$FAILDIR/$LABEL-$i-INJECT.log"
             cp "$INJECT_LOG" "$FAILDIR/$LABEL-$i-INJECT-injector.log" 2>/dev/null || true
+            cp "$HARNESS_LOG" "$FAILDIR/$LABEL-$i-INJECT-harness.log" 2>/dev/null || true
             echo "  [$LABEL $i/$N] inject-miss (harness delivery; guest green)"
         elif grep -qE "$TIMING_RE" "$LOG"; then
             timing=$((timing+1)); cp "$LOG" "$FAILDIR/$LABEL-$i-TIMING.log"
+            cp "$HARNESS_LOG" "$FAILDIR/$LABEL-$i-TIMING-harness.log" 2>/dev/null || true
             echo "  [$LABEL $i/$N] timing (benign host-fragility): ${msg:-?}"
         else
             other=$((other+1)); cp "$LOG" "$FAILDIR/$LABEL-$i-OTHER.log"
+            cp "$HARNESS_LOG" "$FAILDIR/$LABEL-$i-OTHER-harness.log" 2>/dev/null || true
+            # The harness tail is usually the whole story for an OTHER (the
+            # guest log ends healthy; the failed step is a post-banner gate).
             echo "  [$LABEL $i/$N] OTHER fail: ${msg:-<unclassified>}"
+            tail -3 "$HARNESS_LOG" 2>/dev/null | sed 's/^/      harness| /'
         fi
     fi
 done

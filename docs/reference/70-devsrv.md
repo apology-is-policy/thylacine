@@ -292,7 +292,7 @@ struct SrvRegistry {
     u64               magic;    // SRV_REGISTRY_MAGIC at offset 0; 0 once freed
     int               ref;      // instance refcount (atomic)
     spin_lock_t       lock;
-    struct SrvService entries[SRV_MAX_SERVICES];   // SRV_MAX_SERVICES == 8
+    struct SrvService entries[SRV_MAX_SERVICES];   // SRV_MAX_SERVICES == 16 (#30)
 };
 static struct SrvRegistry *g_boot_srv_registry;    // the one immortal boot registry
 ```
@@ -309,10 +309,36 @@ both discriminates a devsrv root Spoor's `aux` and fast-fails a
 stale-pointer read (cleared at free, the `spoor_free_internal` UAF-defense
 pattern).
 
-`corvus` is the only v1.0 service in the boot registry (`/srv/stratum-ctl`
-is a *mounted* 9P tree, not a `devsrv` service); `SRV_MAX_SERVICES = 8` is
-headroom. A future login session gets its OWN registry (A-5b-body), so a
-second user's coordinator is unnameable from another session (I-1).
+The "corvus is the only service; 8 is headroom" era is over (#30). The
+resident boot posts SIX permanent services (`stratum-fs`, `stratum-ctl`,
+`corvus`, `net`, `ptyfs`, `tapestry`), the boot probes tombstone
+`pouch-sock-demo`, and the boot login-E2E tombstones one
+`home-<user>` per E2E user — and **tombstones never free** (a dead
+poster's entry pins its name + slot forever, the stale-handle defense),
+so at `SRV_MAX_SERVICES = 8` the registry was EXACTLY full at the login
+prompt: michael forever REBOUND his own tombstone by name (a rebind
+needs no free slot) while any OTHER user's fresh `/srv/home-<user>`
+post found no slot → `devsrv_create` −1 → the pouch bind's EACCES → an
+unprovisionable home, invisible to the michael-only login gate.
+`SRV_MAX_SERVICES` is now **16** (the ledger + the raise discipline
+live in the `devsrv.h` comment: each unit also costs
+`srv_registry_drain` kernel stack), the boot login-E2E runs a SECOND
+user (cora) whose fresh-name post regresses boot-fatally if the
+registry fills again, and `devsrv.registry_full_tombstone_rebinds`
+pins the at-capacity asymmetry as a tested behavior.
+
+**As-built registry sharing (a recorded design drift):** the old note
+here — "a future login session gets its OWN registry (A-5b-body)" —
+was never built. As-built, every getty-spawned login `territory_clone`s
+joey's territory, whose `/srv` mount carries the SAME devsrv root Spoor
+→ the ONE boot registry is shared by every session, which is exactly
+why per-user tombstones accumulate across sessions. Cross-session
+NAME visibility exists (any session can see `/srv/home-<other>`);
+the actual isolation is downstream (the proxy is `--single-session`,
+the dataset scope + per-user DEK gate the data). The v1.x lifecycle
+seam — entry-free-at-last-handle-ref, or the per-session registry the
+A-5b-body note intended — retires both the accumulation and the
+cross-session name visibility together.
 
 ### Two-phase post
 

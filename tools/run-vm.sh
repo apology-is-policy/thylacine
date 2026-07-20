@@ -225,34 +225,65 @@ fi
 # slot 28, virtio-rng drops to slot 27. The probe scans all 32 slots
 # so order is informational. THYLACINE_NO_INPUT=1 disables for
 # environments where the device isn't desired.
+# G-3 adds virtio-keyboard-pci id=kbd-pci0: the RESIDENT compositor's input
+# device. The G-1 co-page rule applies to input verbatim -- the MMIO keyboard
+# slot shares the one page-exclusive 4-KiB slot page whose lifetime belongs
+# to stratumd, so tapestryd (persistent) consumes events over its OWN PCI
+# function; the MMIO device stays for the one-shot P4-K kernel-test probe
+# (the exact gpu0/gpu-mmio0 split, applied to kbd). The warden's gather
+# manifest confers BOTH graphics-path functions (GPU + keyboard) into
+# tapestryd's one allowance.
 input_flags=()
 if [[ "${THYLACINE_NO_INPUT:-0}" != "1" ]]; then
     input_flags=(
         -device "virtio-keyboard-device,id=kbd0"
+        -device "virtio-keyboard-pci,id=kbd-pci0,disable-legacy=on"
     )
 fi
 
-# P4-L: virtio-gpu-device on the MMIO transport, for the virtio-gpu
-# probe. QEMU virt exposes a virtio-gpu whose DeviceID=16 on the
-# virtio bus. With -nographic + -display none (the default test
-# environment), the device still enumerates a scanout (num_scanouts
-# >= 1) and responds to GET_DISPLAY_INFO with OK_DISPLAY_INFO; the
-# pmodes[0].enabled bit may be 0 if no display backend is attached.
-# The probe exercises (a) DeviceID=16 dispatch, (b) two-virtqueue
-# configuration (controlq idx 0 + cursorq idx 1; first driver to use
-# REG_QUEUE_SEL=1), and (c) the controlq command/response chain
-# pattern (req+resp via two descriptors with NEXT linkage). This is
-# the substrate gate for Phase 8 Halcyon.
+# P4-L / G-1: TWO virtio-gpu devices, one per transport, one per
+# consumer. Both work fully under -nographic (QEMU maintains the
+# console surface for a bound scanout with no display backend --
+# tools/screendump.sh captures either over QMP by qdev id).
 #
-# Slot assignment: this -device sits AFTER input_flags in the exec
-# invocation. With QEMU's reverse-creation slot allocation: disk=31,
-# net=30, kbd=29, gpu=28, rng=27, rng-pci doesn't count (PCI bus, not
-# virtio-mmio). THYLACINE_NO_GPU=1 disables.
+#   - virtio-gpu-pci id=gpu0 (G-1; tapestryd since G-3): the RESIDENT
+#     compositor's device. PCI because a persistent driver cannot claim
+#     a shared virtio-mmio page: QEMU-virt packs all populated MMIO
+#     slots into ONE 4-KiB page (stride 0x200) and userspace MMIO
+#     claims are page-granular + exclusive, so the page belongs
+#     temporally to the transient probes and then permanently to
+#     stratumd (virtio-blk) -- a second persistent claimant starves the
+#     disk (boot-fatal, measured at G-1). PCI BARs are per-function; no
+#     co-residency. tapestryd owns scanout 0 for the life of the box;
+#     its resident tapestry-demo client presents the P4-L 4-quadrant
+#     pattern + live plasma, and tools/test.sh's pattern-persists gate
+#     asserts it post-boot against THIS device (screendump -d gpu0).
+#   - virtio-gpu-device id=gpu-mmio0 (P4-L): the one-shot /virtio-gpu
+#     kernel-test probe's device (init handshake + the 2D scanout
+#     pipeline over virtio-mmio). Its scanout legitimately dies at the
+#     probe's reap (the RW-7 proc-death quiesce).
+#
+# MMIO slot assignment: the -device order puts gpu-mmio0 AFTER
+# input_flags; with QEMU's reverse-creation slot allocation the MMIO
+# gpu lands beside kbd/net/blk in the top slot page. gpu0 (PCI) takes
+# the next free PCI slot alongside net1/rng_pci0. THYLACINE_NO_GPU=1
+# disables both.
 gpu_flags=()
 if [[ "${THYLACINE_NO_GPU:-0}" != "1" ]]; then
     gpu_flags=(
-        -device "virtio-gpu-device,id=gpu0"
+        -device "virtio-gpu-device,id=gpu-mmio0"
+        -device "virtio-gpu-pci,id=gpu0,disable-legacy=on"
     )
+    # vnc display mode drops the vestigial MMIO gpu: a display backend
+    # binds QemuConsole 0, and gpu-mmio0 (probe-only, driverless in the
+    # resident boot) would squat it -- the VNC client must land on gpu0's
+    # head (the ls-gfx-live #31 leg). cocoa keeps the canonical device set
+    # (its View menu switches consoles interactively).
+    if [[ "${THYLACINE_DISPLAY:-none}" == vnc:* ]]; then
+        gpu_flags=(
+            -device "virtio-gpu-pci,id=gpu0,disable-legacy=on"
+        )
+    fi
 fi
 
 # P4-K-events: QMP control socket for test-harness key injection.
@@ -311,6 +342,23 @@ detect_accel() {
 }
 accel="${THYLACINE_ACCEL:-$(detect_accel)}"
 
+# Display backend (the fbcon era: tapestryd + Aurora render the console on
+# gpu0). Headless (-nographic) stays the default -- the CI/agent loop.
+#   THYLACINE_DISPLAY=cocoa   the interactive window (switch the View menu
+#                             to the virtio-gpu console; serial stays on
+#                             this terminal)
+#   THYLACINE_DISPLAY=vnc:N   serve the gpu0 console on 127.0.0.1:590N
+#                             (headless live-display; the ls-gfx-live #31
+#                             leg -- gpu-mmio0 is dropped so gpu0 binds
+#                             QemuConsole 0, see gpu_flags above)
+case "${THYLACINE_DISPLAY:-none}" in
+    none)  display_flags=(-nographic) ;;
+    cocoa) display_flags=(-display cocoa) ;;
+    vnc:*) display_flags=(-display "vnc=127.0.0.1:${THYLACINE_DISPLAY#vnc:}") ;;
+    *)     echo "run-vm.sh: unknown THYLACINE_DISPLAY='${THYLACINE_DISPLAY}' (none|cocoa|vnc:N)" >&2
+           exit 2 ;;
+esac
+
 # -cpu model + GIC version default off the chosen accel. HVF wants -cpu host +
 # GICv2: its emulated GICv3 distributor MMIO trips an `isv` data-abort assert,
 # and the GICv2 MMIO CPU interface is the HVF-on-Apple enabler (Lazarus W2). TCG
@@ -342,7 +390,7 @@ exec qemu-system-aarch64 \
     ${gpu_flags[@]+"${gpu_flags[@]}"} \
     -device virtio-rng-device,id=rng0 \
     -device virtio-rng-pci,id=rng_pci0 \
-    -nographic \
+    ${display_flags[@]+"${display_flags[@]}"} \
     -serial "${THYLACINE_SERIAL:-mon:stdio}" \
     ${qmp_flags[@]+"${qmp_flags[@]}"} \
     ${gdb_flags[@]+"${gdb_flags[@]}"} \

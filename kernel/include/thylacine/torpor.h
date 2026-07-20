@@ -177,4 +177,20 @@ s64 sys_torpor_wake_for_proc(struct Proc *p, u64 addr_va, u32 count);
 // the register-after-this-walk lost-wakeup. Not a syscall surface.
 void torpor_wake_all_for_proc(struct Proc *p);
 
+// PTY-4e (#19): the STOP cascade's non-completing variant. Wakes every one of
+// `p`'s torpor waiters WITHOUT setting `awoken`, so the woken thread's
+// torpor_cond_awoken re-check fails, its tsleep re-loop hits the 8c-2 stop
+// detour, and it parks with the WAIT PRESERVED -- on resume it re-registers
+// with its original deadline (the parks-and-reparks contract, exactly the
+// tsleep-sleeper semantics; the Linux SIGSTOP-over-futex_wait restart shape).
+// The completing torpor_wake_all_for_proc above is the DEATH cascade's (the
+// proc dies at its tail, so the fabricated TORPOR_OK is never observed);
+// using it for a SURVIVING stop made every torpor-timed wait -- e.g. a
+// time::sleep-based /bin/sleep -- spuriously COMPLETE on fg/SYS_TTY_CONT
+// resume (the job "finished" instead of continuing; the #19 root cause).
+// A REAL wake landing during the stop-park still delivers: the waiter stays
+// bucket-linked across the park, the poster sets `awoken`, and the resumed
+// re-loop's cond check returns AWOKEN immediately.
+void torpor_stop_wake_all_for_proc(struct Proc *p);
+
 #endif // THYLACINE_TORPOR_H

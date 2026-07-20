@@ -39,6 +39,10 @@ pub const MAX_MMIO: usize = 8;
 /// Max IRQs in a grant -- mirrors `T_ALLOWANCE_IRQ_MAX`.
 pub const MAX_IRQ: usize = 8;
 
+/// Max PCI functions in a grant (the primary + the gathered extras) -- mirrors
+/// `T_ALLOWANCE_PCI_MAX` (the kernel allowance's pci[8]).
+pub const MAX_PCI: usize = 8;
+
 /// A device node's physical resources, as the warden reads them from /hw.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NodeResources {
@@ -75,6 +79,12 @@ pub struct BoundResources {
     /// `None`. Equals the bound node's `pci` (never fabricated -- the I-34 grant
     /// property), or `None` when the manifest declines PCI or the node supplies none.
     pub pci: Option<(u8, u8, u8)>,
+    /// Additional gathered PCI functions (`gather = all` manifests): each is a
+    /// further matched node's own bdf, conferred into the SAME allowance so one
+    /// driver Proc claims several functions (the compositor's GPU + input pair,
+    /// TAPESTRY section 18.7). Empty for a per-node grant. The I-34 property
+    /// holds per-entry: every bdf is some matched node's own, never fabricated.
+    pub pci_extra: Vec<(u8, u8, u8)>,
 }
 
 /// Compute the narrowed grant for a matched (manifest, node) pair.
@@ -152,7 +162,63 @@ pub fn resolve(
         irq,
         dma_max,
         pci,
+        pci_extra: Vec::new(),
     })
+}
+
+/// Compute ONE gathered grant from every matched node of a `gather = all`
+/// manifest. The primary node (the first match, discovery order) resolves
+/// exactly as `resolve`; each extra node folds in its own resources -- wired
+/// INTIDs and its bdf -- under the same allowance caps. The I-34 property is
+/// preserved axis-by-axis: every conferred value is some matched node's own.
+pub fn resolve_gathered(
+    manifest: &Manifest,
+    nodes: &[&DeviceNode],
+    instance: u32,
+) -> Result<BoundResources, Error> {
+    let primary = nodes.first().ok_or(Error::NoMatch)?;
+    let mut b = resolve(manifest, primary, instance)?;
+    for node in &nodes[1..] {
+        // Each extra node must itself match the manifest (the caller gathered
+        // it via best_match, but re-check -- never fold an unmatched node).
+        if !node
+            .ids
+            .iter()
+            .any(|id| manifest.binds.iter().any(|bind| id.matches_bind(bind)))
+        {
+            return Err(Error::NoMatch);
+        }
+        if matches!(manifest.needs.irq, IrqNeed::Node) {
+            for intid in &node.resources.interrupts {
+                if b.irq.len() >= MAX_IRQ {
+                    return Err(Error::TooManyIrqs);
+                }
+                b.irq.push(*intid);
+            }
+        }
+        if matches!(manifest.needs.mmio, MmioNeed::Node) {
+            for win in &node.resources.reg {
+                if b.mmio.len() >= MAX_MMIO {
+                    return Err(Error::TooManyWindows);
+                }
+                b.mmio.push(*win);
+            }
+        }
+        if matches!(manifest.needs.pci, PciNeed::Node) {
+            if let Some(bdf) = node.resources.pci {
+                let held = usize::from(b.pci.is_some()) + b.pci_extra.len();
+                if held + 1 > MAX_PCI {
+                    return Err(Error::TooManyResources);
+                }
+                if b.pci.is_none() {
+                    b.pci = Some(bdf);
+                } else {
+                    b.pci_extra.push(bdf);
+                }
+            }
+        }
+    }
+    Ok(b)
 }
 
 /// Expand `%instance` in a served-path template to the instance number.
@@ -218,6 +284,22 @@ impl BoundResources {
             s.push('.');
             push_hex(&mut s, fun as u64);
         }
+        if !self.pci_extra.is_empty() {
+            if 1 + self.pci_extra.len() > MAX_PCI {
+                return Err(Error::TooManyResources);
+            }
+            s.push_str(";pcix=");
+            for (i, (bus, dev, fun)) in self.pci_extra.iter().enumerate() {
+                if i != 0 {
+                    s.push(',');
+                }
+                push_hex(&mut s, *bus as u64);
+                s.push('.');
+                push_hex(&mut s, *dev as u64);
+                s.push('.');
+                push_hex(&mut s, *fun as u64);
+            }
+        }
         Ok(s)
     }
 
@@ -243,6 +325,7 @@ impl BoundResources {
         let mut dma_max: Option<u64> = None;
         let mut pci: Option<(u8, u8, u8)> = None;
         let mut pci_seen = false; // distinguishes "absent" (-> None) from a dup
+        let mut pci_extra: Option<Vec<(u8, u8, u8)>> = None;
 
         for field in fields {
             if field.is_empty() {
@@ -293,6 +376,22 @@ impl BoundResources {
                     pci_seen = true;
                     pci = Some(parse_bdf(val)?);
                 }
+                "pcix" => {
+                    if pci_extra.is_some() {
+                        return Err(Error::BadField);
+                    }
+                    let mut v = Vec::new();
+                    for bdf in val.split(',') {
+                        if bdf.is_empty() {
+                            continue;
+                        }
+                        v.push(parse_bdf(bdf)?);
+                        if 1 + v.len() > MAX_PCI {
+                            return Err(Error::TooManyResources);
+                        }
+                    }
+                    pci_extra = Some(v);
+                }
                 _ => return Err(Error::BadField), // unknown key
             }
         }
@@ -305,6 +404,7 @@ impl BoundResources {
             irq: irq.unwrap_or_default(),
             dma_max: dma_max.ok_or(Error::BadField)?,
             pci, // absent => None (the field is optional, like mmio/irq)
+            pci_extra: pci_extra.unwrap_or_default(),
         })
     }
 }
@@ -550,6 +650,7 @@ mod tests {
             irq: vec![0x2a, 0x2b],
             dma_max: 0x20_0000,
             pci: None,
+            pci_extra: vec![],
         };
         let desc = b.to_descriptor().unwrap();
         let b2 = BoundResources::parse_descriptor(&desc).unwrap();
@@ -566,6 +667,7 @@ mod tests {
             irq: vec![],
             dma_max: 0,
             pci: None,
+            pci_extra: vec![],
         };
         let desc = b.to_descriptor().unwrap();
         // empty mmio/irq/pci omitted; dma=0 present
@@ -586,6 +688,7 @@ mod tests {
             irq: vec![0x2a],
             dma_max: 0x100000,
             pci: None,
+            pci_extra: vec![],
         };
         assert_eq!(
             b.to_descriptor().unwrap(),
@@ -663,6 +766,7 @@ mod tests {
             irq: vec![],
             dma_max: 0,
             pci: None,
+            pci_extra: vec![],
         };
         assert_eq!(b.to_descriptor(), Err(Error::BadField));
     }
@@ -772,6 +876,7 @@ mod tests {
             irq: vec![0x23],
             dma_max: 0x1_0000,
             pci: Some((0, 1, 0)),
+            pci_extra: vec![],
         };
         let desc = b.to_descriptor().unwrap();
         assert_eq!(BoundResources::parse_descriptor(&desc).unwrap(), b);
@@ -787,6 +892,7 @@ mod tests {
             irq: vec![0x23],
             dma_max: 0x1_0000,
             pci: Some((0, 0xa, 1)),
+            pci_extra: vec![],
         };
         assert_eq!(
             b.to_descriptor().unwrap(),
@@ -834,6 +940,65 @@ mod tests {
         let driver_grant = BoundResources::parse_descriptor(&desc).unwrap();
         assert_eq!(warden_grant, driver_grant);
         assert_eq!(driver_grant.pci, Some((0, 1, 0)));
+    }
+
+    // -------------------------------------------------------------------------
+    // gather = all (G-3): one grant over several matched PCI functions
+    // -------------------------------------------------------------------------
+
+    fn gather_manifest() -> Manifest {
+        Manifest::parse(
+            r#"driver "tapestryd" {
+                abi = 1
+                binds = ["virtio-pci:16", "virtio-pci:18"]
+                needs { irq = "node:interrupts" dma = "pool: 16 MiB" pci = "node" }
+                serves = "/dev/tapestry"
+                restart = on-crash
+                lifecycle = persistent
+                gather = all
+            }"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn gather_manifest_parses() {
+        let m = gather_manifest();
+        assert!(m.gather);
+        // to_text/parse round-trip keeps the flag.
+        let m2 = Manifest::parse(&m.to_text()).unwrap();
+        assert!(m2.gather);
+    }
+
+    #[test]
+    fn resolve_gathered_folds_both_functions() {
+        let m = gather_manifest();
+        let gpu = pci_node("0.2.0", 16, (0, 2, 0), Some(0x24));
+        let kbd = pci_node("0.3.0", 18, (0, 3, 0), Some(0x25));
+        let b = resolve_gathered(&m, &[&gpu, &kbd], 0).unwrap();
+        assert_eq!(b.pci, Some((0, 2, 0)));
+        assert_eq!(b.pci_extra, [(0, 3, 0)]);
+        assert_eq!(b.irq, [0x24, 0x25]);
+        // codec round-trips the gathered grant
+        let desc = b.to_descriptor().unwrap();
+        assert_eq!(BoundResources::parse_descriptor(&desc).unwrap(), b);
+    }
+
+    #[test]
+    fn resolve_gathered_rejects_unmatched_extra() {
+        let m = gather_manifest();
+        let gpu = pci_node("0.2.0", 16, (0, 2, 0), Some(0x24));
+        let net = pci_node("0.1.0", 1, (0, 1, 0), Some(0x23)); // not in binds
+        assert_eq!(resolve_gathered(&m, &[&gpu, &net], 0), Err(Error::NoMatch));
+    }
+
+    #[test]
+    fn resolve_gathered_single_node_equals_resolve() {
+        let m = gather_manifest();
+        let gpu = pci_node("0.2.0", 16, (0, 2, 0), Some(0x24));
+        let a = resolve(&m, &gpu, 0).unwrap();
+        let b = resolve_gathered(&m, &[&gpu], 0).unwrap();
+        assert_eq!(a, b);
     }
 
     #[test]

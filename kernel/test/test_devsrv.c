@@ -251,30 +251,87 @@ void test_devsrv_tombstone(void) {
     drop_test_proc(p);
 }
 
+// fill_name — "srvfNN" (two decimal digits), so the fill loop scales with
+// SRV_MAX_SERVICES instead of a hardcoded name table (the pre-#30 table
+// was pinned to 8).
+static void fill_name(char out[8], u32 i) {
+    out[0] = 's'; out[1] = 'r'; out[2] = 'v'; out[3] = 'f';
+    out[4] = (char)('0' + (i / 10u) % 10u);
+    out[5] = (char)('0' + i % 10u);
+    out[6] = '\0';
+}
+
 void test_devsrv_registry_full(void) {
     srv_registry_reset();
-
-    static const char *const full_names[SRV_MAX_SERVICES] = {
-        "srvfull0", "srvfull1", "srvfull2", "srvfull3",
-        "srvfull4", "srvfull5", "srvfull6", "srvfull7",
-    };
 
     struct Proc *p = make_marked_test_proc();
     TEST_ASSERT(p != NULL, "proc_alloc + mark");
 
+    char name[8];
     for (u32 i = 0; i < SRV_MAX_SERVICES; i++) {
-        TEST_ASSERT(post_svc_9p(p, full_names[i], 8) >= 0,
+        fill_name(name, i);
+        TEST_ASSERT(post_svc_9p(p, name, 6) >= 0,
             "post fills the registry up to SRV_MAX_SERVICES");
     }
     TEST_EXPECT_EQ((u32)srv_registry_count(), SRV_MAX_SERVICES,
         "registry is full");
 
     // One more — past the cap — fails fast.
-    TEST_EXPECT_EQ(post_svc_9p(p, "srvfull8", 8), -1,
+    fill_name(name, SRV_MAX_SERVICES);
+    TEST_EXPECT_EQ(post_svc_9p(p, name, 6), -1,
         "post past SRV_MAX_SERVICES → -1");
 
     drop_test_proc(p);
     // Leave the registry clean for the rest of boot.
+    srv_registry_reset();
+}
+
+// #30: the at-capacity asymmetry that stranded cora's home. Tombstones
+// never free, so at a FULL registry a FRESH name has no slot to claim
+// (cora's /srv/home-cora -> -1 -> the pouch bind's EACCES) while a
+// TOMBSTONED name still REBINDS in place (michael's /srv/home-michael,
+// minted by the boot login-E2E, rebinds forever). Both behaviors are
+// deliberate (the tombstone pins its name + slot against stale service
+// handles); the capacity must therefore budget one slot per DISTINCT
+// per-boot service name -- the SRV_MAX_SERVICES comment carries the
+// ledger.
+void test_devsrv_registry_full_tombstone_rebinds(void) {
+    srv_registry_reset();
+
+    struct Proc *p = make_marked_test_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc + mark");
+
+    char name[8];
+    for (u32 i = 0; i < SRV_MAX_SERVICES; i++) {
+        fill_name(name, i);
+        TEST_ASSERT(post_svc_9p(p, name, 6) >= 0,
+            "post fills the registry up to SRV_MAX_SERVICES");
+    }
+
+    // The poster dies: every entry tombstones; the registry stays FULL
+    // (tombstones pin their slots).
+    srv_proc_exit_notify(p);
+    TEST_EXPECT_EQ((u32)srv_registry_count(), SRV_MAX_SERVICES,
+        "poster exit tombstoned in place — the registry is still full");
+
+    struct Proc *p2 = make_marked_test_proc();
+    TEST_ASSERT(p2 != NULL, "second marked proc");
+
+    // The cora shape: a FRESH name at a full registry fails fast.
+    TEST_EXPECT_EQ(post_svc_9p(p2, "srvnew", 6), -1,
+        "fresh name at a full registry → -1 (no free slot)");
+
+    // The michael shape: a TOMBSTONED name rebinds without a free slot.
+    fill_name(name, 0);
+    TEST_ASSERT(post_svc_9p(p2, name, 6) >= 0,
+        "tombstone rebind at a full registry → handle (slot reused)");
+    struct SrvService *svc = srv_lookup_in(srv_boot_registry(), name, 6);
+    TEST_ASSERT(svc != NULL, "rebound entry present");
+    TEST_EXPECT_EQ((int)svc->state, (int)SRV_STATE_LIVE,
+        "rebind brought the tombstoned name back LIVE at full capacity");
+
+    drop_test_proc(p2);
+    drop_test_proc(p);
     srv_registry_reset();
 }
 

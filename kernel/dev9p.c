@@ -8,9 +8,12 @@
 #include <thylacine/9p_client.h>
 #include <thylacine/9p_spoor_transport.h>
 #include <thylacine/9p_wire.h>
+#include <thylacine/burrow.h>  // G-2: burrow_unmap for the weave clunk-unmap
 #include <thylacine/dev.h>
 #include <thylacine/dev9p.h>
+#include <thylacine/proc.h>    // G-2: the mapping Proc's vma_lock + pid
 #include <thylacine/sched.h>   // sched() -- the wb single-flight yield-wait
+#include <thylacine/thread.h>  // G-2: current_thread for the clunk-unmap pid match
 #include <thylacine/page.h>
 #include <thylacine/path.h>
 #include <thylacine/spoor.h>
@@ -1418,6 +1421,30 @@ static void dev9p_close(struct Spoor *c) {
     struct weft_binding *wb = __atomic_load_n(&p->weft, __ATOMIC_ACQUIRE);
     if (wb) {
         __atomic_store_n(&p->weft, NULL, __ATOMIC_RELEASE);
+        // G-3 (R2-F3): leave the reaper's registry FIRST -- returning from
+        // the unregister guarantees no sweep still holds wb, so the reads
+        // below see either the intact binding or the reaper's disarmed one
+        // (burrow NULLed under g_weft_reap_lock; clunk_unmap's identity
+        // guard then never matches and release's unref NULL-guards).
+        weft_reap_unregister(wb);
+        // G-2 (TAPESTRY.md §18.1 "the weave fid's clunk drops the client
+        // mapping"): a WEAVE binding additionally unmaps the client's mapping
+        // at fid-clunk WHEN the closer is the mapping Proc AND the VMA at the
+        // recorded VA is still THIS weave's (the audit-F1 stale-VA guard --
+        // after an explicit detach, an unrelated fresh mapping at the same VA
+        // must survive the close). Drops the mapping_count ref + uncharges the
+        // shared-in budget (the SHARED_IN pairing inside burrow_unmap), so a
+        // surface's retire is not hostage to the client's exit. An
+        // inherited-fd closer in a DIFFERENT Proc leaves the mapping to the
+        // mapper's own vma_drain -- and the #926/#68 exit-close runs in the
+        // dying Proc itself (RUNNING+ALIVE window, pid matches), so the
+        // common paths all unmap here. The RING kind keeps its audited
+        // vma_drain-at-exit lifetime untouched (the helper skips it).
+        {
+            struct Thread *ct = current_thread();
+            if (ct && ct->proc)
+                (void)weft_binding_clunk_unmap(wb, ct->proc);
+        }
         weft_binding_release(wb);
     }
 

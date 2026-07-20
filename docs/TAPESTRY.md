@@ -558,10 +558,13 @@ consumers before Halcyon — the highest-risk, last-phase client — commits to 
   `weft_share_unregister` today, so the arm/re-arm/disarm weave lifecycle needs
   real additions, scoped into the G-2 pass).
 - NO framebuffer surface exists anywhere (no `/dev/fb`, no fb Dev, no
-  tapestryd binary); virtio-input events reach only the boot log; the warden's
-  `virtio:16` (GPU) slot is currently bound to the `crash-probe` restart test
-  (must be re-homed at G-1); QEMU runs `-display none` and QMP is used only for
-  `send-key` — **no screendump is wired** (the §16 agentic loop starts unbuilt).
+  tapestryd binary); virtio-input events reach only the boot log. ~~The
+  warden's `virtio:16` (GPU) slot is currently bound to the `crash-probe`
+  restart test; no screendump is wired~~ — BOTH retired: G-0 landed
+  `tools/screendump.sh` (the §16 agentic-eyes capture, headless-proven) and
+  G-1 landed the resident `gpud` on `virtio-pci:16` with crash-probe
+  re-homed to the synthetic `restart-test` node (see the G-1 AS-BUILT note
+  under §18.9).
 
 ### 18.1 The surface lifecycle — create, weave, present, resize, retire
 
@@ -622,6 +625,20 @@ create-surface ──> WOVEN (weave allocated, mapped by client via Tweft)
     ANON (a DMA Burrow has `pages == NULL`, its refs live on the KObj_DMA) —
     fold both into the T-1 spec/audit rather than asserting equivalence.
     (§18.12 R2-F1.)
+    **G-2 AS-BUILT (2026-07-19; the ABI user-signed-off 2026-07-19 in advance —
+    the recorded pre-signoff, scoped to exactly this item):** the mint is a NEW
+    SYSCALL `SYS_DMA_CREATE_WEAVE` (99; a flags widening of the two-arg
+    `SYS_DMA_CREATE` was rejected — existing callers leave x2 as garbage, and a
+    garbage flags word could accidentally set share-admissibility, the #112
+    class), setting the create-immutable `KObj_DMA.weave` bit (the
+    `BURROW_TYPE_GPU_BACKING` provisional name resolved to a kobj-level subtype
+    — zero switch-site churn, identical structural force); the F3 disarm is
+    `SYS_WEFT_UNSHARE` (100; also closes the netd #289 seam); the R2-F3 budget
+    is `Proc.shared_map_pages` (128 MiB — the I-32 fifth axis). T-1 is
+    ENUMERATED as **I-40** (ARCH §28) with the kernel share half ENFORCED; the
+    present half completes the row at G-3. As-built:
+    `docs/reference/125-weft.md` "The weave share (G-2)"; the action ↔ site
+    map: `specs/SPEC-TO-CODE.md::tapestry_present.tla`.
 - **Slots**: one weave carries N=3 page-aligned slot sub-regions (D1 triple
   buffering); tapestryd chooses stride/offsets and reports them in `geometry`.
   The client draws only into free slots; the present CQE frees a slot (D1).
@@ -850,6 +867,78 @@ tapestryd impl):
 
 The Aurora ENVIRONMENT half (session multiplexing, status band — AURORA.md §5)
 sequences after G-4 as its own arc, parallel to G-5+; the renderer half IS G-4.
+
+**G-1 AS-BUILT (landed on `gfx-1`): the resident driver is `usr/gpud` over
+`virtio-gpu-pci` (`virtio-pci:16`), NOT the virtio-mmio slot.** The first
+build promoted the MMIO probe literally and measured the structural blocker:
+QEMU-virt packs all six populated virtio-mmio slots into ONE 4-KiB page
+(stride 0x200), userspace MMIO claims are page-granular + exclusive (I-5),
+and the boot survives on temporal sequencing — the transient probes release
+the page before stratumd (virtio-blk) claims it for the box's life. A second
+persistent claimant starved netdev-driver AND the disk (boot-fatal). PCI
+BARs are per-function (the netd/#140 move), so the resident driver coexists
+with everyone; the MMIO GPU device stays wired (`gpu-mmio0`) for the
+one-shot P4-L kernel-test probe, whose scanout legitimately dies at its reap
+(the RW-7 quiesce — the G-0 finding). Consequence for §18.7/G-3: tapestryd's
+manifest absorbs the GPU as **`virtio-pci:16`** (same identity model,
+transport-shifted). crash-probe re-homed to the warden-synthetic
+`restart-test` node per F15. The pattern-persists gate lives in
+`tools/test.sh` (every ci-smp-gate boot runs it); as-built detail in
+`docs/reference/138-gpud.md`.
+
+**G-3 AS-BUILT (landed on `gfx-1`): tapestryd stage 0 + the R2-F3 kernel
+reaper — I-40 is COMPLETE (ARCH §28).** The warden's NEW `gather = all`
+manifest mode collects every matched node into ONE grant/Proc, so
+tapestryd's I-34 allowance carries BOTH graphics-path PCI functions —
+`virtio-pci:16` (GPU) + `virtio-pci:18` (keyboard; `virtio-keyboard-pci`
+added to run-vm.sh for the same measured co-page rule, the MMIO keyboard
+staying for the P4-K probe). The §18.7 "binds BOTH ... its allowance
+carries all its devices" binding is realized transport-shifted (PCI, per
+the G-1 rule). gpud retired (absorbed). Stage-0 realization notes: the
+present engine is SYNCHRONOUS (the quiesce set is empty at every retire
+by construction — the pipelined-controlq G-6 lift must land a real drain
+first, the recorded SPEC-TO-CODE obligation); the Tweft mint is lazy +
+idempotent per surface (`armed` at first Tweft; the Map guard is timing-
+indifferent); a retired surface's event stream ends in EOF (the
+queued-CLOSE record rides the pane layer, G-6); client event reads are
+single-shot re-armed (the multishot + provided-buffer-pool client lift
+is a G-6 seam; §18.4's multishot idiom stands as the design). The
+`weave` geometry read reports `slot_stride` explicitly (a compatible
+§18.5 refinement). F2 per-conn scoping rides each client's OWN
+open=connect session (the fid IS the capability; deliberate session
+sharing shares surfaces — the Plan 9 semantic). The per-boot pattern
+gate EVOLVED: tapestry-demo presents the -v quadrant pattern + a live
+plasma through the FULL protocol, and test.sh adds a liveness
+double-dump (two captures must differ). As-built:
+`docs/reference/139-tapestryd.md`; the server-half spec map:
+`specs/SPEC-TO-CODE.md::tapestry_present.tla`.
+
+**G-4 AS-BUILT (landed on `gfx-1`): the Aurora renderer MVP + the
+`/dev/cons` drain/feed kernel backend — the fbcon claim.** The §18.7
+drain/feed binding is realized as a MIRROR TAP in `cons_emit` (program
+output + line-discipline echo both cross it): on serial-bearing media the
+UART path continues byte-identical — the tee keeps the tooling ABI, the
+host terminal, and the serial trusted path working — and the exclusive
+switch (suppressing EL0 serial output, bound from the DTB medium fact per
+TRUSTED-PATH §7) is the recorded board-era seam that will gate
+`uart_putc`, composing with the tap. The F8/R2-F6 gate landed as
+`SPAWN_PERM_CONSOLE_RENDERER` (console-attach-only grant + single-holder;
+the pair open- AND I/O-re-gated in devdev), the third console role beside
+ATTACH and OWNER. The feed's `is_break` is hardwired false — no SAK
+forgery, by construction. Aurora is an ORDINARY tapestryd client
+(libtapestry): the Cornucopia baked atlas (committed; box drawing
+procedural), a VT subset (truecolor SGR; real alt-screen; DECSTBM
+ignored — the MVP seam), the Bonfire palette, a blinking cursor; its
+event loop BLOCKS on the Loom CQ (the non-SQPOLL pump — a poll-only loop
+starves its own completions, measured). joey spawns it as the resident
+boot presenter; tapestry-demo stays baked for manual runs (first-present-
+wins scanout would race two residents). The per-boot gate EVOLVED again
+(never dropped): `screendump -c` asserts the rendered-console signature
+(exact Bonfire bg dominant + exact-fg text) + a retry-compare liveness
+(cursor blink); `tools/interactive/ls-gfx.exp` is the full claim — serial
+login + `ls` with before/after dumps, then QMP-typed `whoami` on the
+display-bound kbd-pci0 asserted via the serial TEE (the graphical input
+loop, no pixel OCR). As-built: `docs/reference/140-aurora.md`.
 
 ### 18.10 Audit-trigger + scripture sync obligations
 

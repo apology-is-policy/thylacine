@@ -95,6 +95,103 @@ static struct cons_input g_cons = {
 static struct Rendez g_cons_data_rendez = RENDEZ_INIT;   // a reader parks here
 static struct Rendez g_cons_mgr_rendez  = RENDEZ_INIT;   // console_mgr parks here
 
+// =============================================================================
+// G-4: the console-renderer DRAIN (the Aurora backend's output half).
+// =============================================================================
+//
+// TAPESTRY.md section 18.7: on the Aurora backend, console output bytes ring
+// into a drain fid the bound renderer reads. The tap sits in cons_emit -- the
+// ONE chokepoint both program output (cons_output_write) and line-discipline
+// echo already cross -- so the renderer sees EXACTLY the byte stream a
+// terminal displays. On serial-bearing media (QEMU dev boots) the tap is a
+// MIRROR: uart_putc continues byte-identical (the host terminal, the tooling
+// ABI, and the serial trusted path all keep working); on a serial-less board
+// the uart layer is inert and the ring is the only sink. The exclusive
+// board-era switch (suppressing EL0 serial output, bound from the DTB medium
+// fact per TRUSTED-PATH section 7) is the recorded seam -- the tap composes
+// with it (the selector will gate uart_putc, not the tap).
+//
+// Bounded + non-blocking for writers: console writers NEVER block on the
+// renderer (a stalled/dead renderer must not wedge every console write), so
+// the ring drops OLDEST on overflow -- the newest output (the prompt the user
+// needs) survives; `overflow` counts the loss. The drain producer runs in IRQ
+// context (echo from cons_rx_input), so the lock is irqsave and the only wake
+// primitive used inside is wakeup() (IRQ-safe); the POLLIN hook-list walk is
+// deferred to console_mgr exactly like the cons ring's (the cons_poll.tla
+// deferred-wake relay, second instance).
+
+#define CONS_DRAIN_RING_SIZE  8192u   // power of two (mask-indexed)
+_Static_assert((CONS_DRAIN_RING_SIZE & (CONS_DRAIN_RING_SIZE - 1u)) == 0u,
+               "CONS_DRAIN_RING_SIZE must be a power of two");
+
+struct cons_drain {
+    spin_lock_t lock;                  // irqsave (echo-path pushes run in IRQ context)
+    u8          ring[CONS_DRAIN_RING_SIZE];
+    u32         head;                  // next byte to read
+    u32         tail;                  // next slot to write
+    u32         count;                 // mutated under lock; read locklessly in conds
+    u32         overflow;              // drop-oldest count (diagnostic)
+    bool        open;                  // the single drain fid is open (mutated under lock)
+    bool        armed;                 // == open; RELAXED-atomic tap gate read per byte
+    bool        reader_busy;           // a cons_drain_read is active (single-reader)
+    bool        poll_wake_pending;     // a POLLIN edge awaits console_mgr's hook walk
+    struct poll_waiter_list poll_list;
+};
+
+static struct cons_drain g_cons_drain = {
+    .lock      = SPIN_LOCK_INIT,
+    .poll_list = POLL_WAITER_LIST_INIT,
+};
+static struct Rendez g_cons_drain_rendez = RENDEZ_INIT;  // the drain reader parks here
+
+// The same cross-lock-read discipline as the cons ring's count/flags (see the
+// cons_count_* rationale above): mutated under g_cons_drain.lock, read
+// locklessly inside sleep conds / the tap gate / console_mgr's cond -- RELAXED
+// atomics make the lockless reads well-defined; the no-lost-wakeup guarantee
+// comes from the Rendez lock pairing, never from these.
+static inline u32  drain_count_load(void)      { return __atomic_load_n(&g_cons_drain.count, __ATOMIC_RELAXED); }
+static inline void drain_count_store(u32 v)    { __atomic_store_n(&g_cons_drain.count, v, __ATOMIC_RELAXED); }
+static inline bool drain_armed_load(void)      { return __atomic_load_n(&g_cons_drain.armed, __ATOMIC_RELAXED); }
+static inline void drain_armed_store(bool v)   { __atomic_store_n(&g_cons_drain.armed, v, __ATOMIC_RELAXED); }
+static inline bool drain_pollwake_load(void)   { return __atomic_load_n(&g_cons_drain.poll_wake_pending, __ATOMIC_RELAXED); }
+static inline void drain_pollwake_store(bool v) { __atomic_store_n(&g_cons_drain.poll_wake_pending, v, __ATOMIC_RELAXED); }
+
+// The tap: mirror one output/echo byte into the drain ring. Called from
+// cons_emit (process OR IRQ context). The armed pre-check is a lockless fast
+// path -- disarmed (the boot/serial-only state) costs one RELAXED load per
+// byte; the open re-check under the lock closes the check-vs-disarm race (a
+// byte racing a close is dropped, never pushed to a dead epoch). Wakes the
+// drain reader (wakeup is IRQ-safe) and, on the empty->non-empty edge, arms
+// the deferred POLLIN walk + wakes console_mgr.
+static void cons_drain_tap(u8 byte) {
+    if (!drain_armed_load()) return;
+
+    bool wake_mgr = false;
+    irq_state_t s = spin_lock_irqsave(&g_cons_drain.lock);
+    if (!g_cons_drain.open) {
+        spin_unlock_irqrestore(&g_cons_drain.lock, s);
+        return;
+    }
+    u32 c = drain_count_load();
+    if (c >= CONS_DRAIN_RING_SIZE) {
+        // Full: drop OLDEST (advance head) so the newest output survives.
+        g_cons_drain.head = (g_cons_drain.head + 1u) & (CONS_DRAIN_RING_SIZE - 1u);
+        g_cons_drain.overflow++;
+        c--;
+    }
+    g_cons_drain.ring[g_cons_drain.tail] = byte;
+    g_cons_drain.tail = (g_cons_drain.tail + 1u) & (CONS_DRAIN_RING_SIZE - 1u);
+    drain_count_store(c + 1u);
+    if (c == 0u) {
+        drain_pollwake_store(true);
+        wake_mgr = true;
+    }
+    spin_unlock_irqrestore(&g_cons_drain.lock, s);
+
+    wakeup(&g_cons_drain_rendez);
+    if (wake_mgr) wakeup(&g_cons_mgr_rendez);
+}
+
 // `count` and `intr_pending` are MUTATED only under g_cons.lock, but they are
 // also READ locklessly inside the sleep conds (cons_data_ready /
 // cons_mgr_pending run under the Rendez lock, NOT g_cons.lock). A plain
@@ -138,6 +235,11 @@ static u32  g_cons_echo_cap_len;
 static bool g_cons_echo_capture;
 
 static void cons_emit(u8 b) {
+    // G-4: the drain tap fires FIRST and unconditionally of the capture mode
+    // -- the tap models the renderer's view (which sees the byte stream
+    // regardless of where the serial side lands), and a test with capture ON
+    // can then assert drain content with the UART suppressed.
+    cons_drain_tap(b);
     if (g_cons_echo_capture) {
         if (g_cons_echo_cap_len < sizeof(g_cons_echo_cap))
             g_cons_echo_cap[g_cons_echo_cap_len++] = b;
@@ -278,7 +380,8 @@ static int cons_data_ready(void *arg) {
 // SAK). Same lockless-under-Rendez-lock discipline as cons_data_ready.
 static int cons_mgr_pending(void *arg) {
     (void)arg;
-    return cons_intr_load() || cons_sak_load() || cons_pollwake_load();
+    return cons_intr_load() || cons_sak_load() || cons_pollwake_load()
+        || drain_pollwake_load();   // G-4: a drain POLLIN edge awaits the walk
 }
 
 // Service all deferred console actions in process context: drain the flags
@@ -319,6 +422,16 @@ static void cons_service_deferred(void) {
     // mutation already happened-before via the just-drained flag, so any poller
     // registered before it is found -- cons_poll.tla NoMissedConsPoll.
     if (do_poll)      poll_waiter_list_wake(&g_cons.poll_list);
+
+    // G-4: the drain's deferred poll-wake -- the SAME relay, second instance
+    // (the drain tap can fire in IRQ context via the echo path). The flag is
+    // drained under the DRAIN lock (its own leaf), the walk lock-free after.
+    bool do_drain_poll;
+    irq_state_t ds = spin_lock_irqsave(&g_cons_drain.lock);
+    do_drain_poll = drain_pollwake_load();
+    drain_pollwake_store(false);
+    spin_unlock_irqrestore(&g_cons_drain.lock, ds);
+    if (do_drain_poll) poll_waiter_list_wake(&g_cons_drain.poll_list);
 }
 
 // The console_mgr kproc kthread (spawned once at boot). Services deferred
@@ -344,6 +457,17 @@ void cons_test_reset(void) {
     cons_termios_store(CONS_TERMIOS_DEFAULT);   // LS-8b: back to the boot default
     g_cons.line_len = 0u;
     spin_unlock_irqrestore(&g_cons.lock, s);
+
+    // G-4: the drain back to the boot (disarmed, empty) state.
+    s = spin_lock_irqsave(&g_cons_drain.lock);
+    g_cons_drain.open = false;
+    drain_armed_store(false);
+    g_cons_drain.head = g_cons_drain.tail = 0u;
+    drain_count_store(0u);
+    g_cons_drain.overflow = 0u;
+    g_cons_drain.reader_busy = false;
+    drain_pollwake_store(false);
+    spin_unlock_irqrestore(&g_cons_drain.lock, s);
 }
 
 bool cons_test_intr_pending(void) {
@@ -538,6 +662,160 @@ static long devcons_write(struct Spoor *c, const void *buf, long n, s64 off) {
     (void)c; (void)off;
     return cons_output_write(buf, n);
 }
+
+// =============================================================================
+// G-4: the renderer drain/feed API (the /dev/consdrain + /dev/consfeed leaves,
+// devdev). Reached only by the bound console renderer (the devdev open + I/O
+// gates enforce proc_is_console_renderer).
+// =============================================================================
+
+// Arm the drain: the renderer's open of /dev/consdrain. Single-open (a second
+// concurrent open returns -1 -- one drain fid at a time; the fid may be
+// dup/inherited like any fd, the open is the mint gate). A fresh open starts a
+// FRESH epoch: stale bytes from a dead renderer's epoch are discarded so the
+// new holder never renders another epoch's tail.
+int cons_drain_open(void) {
+    irq_state_t s = spin_lock_irqsave(&g_cons_drain.lock);
+    if (g_cons_drain.open) {
+        spin_unlock_irqrestore(&g_cons_drain.lock, s);
+        return -1;
+    }
+    g_cons_drain.open = true;
+    g_cons_drain.head = g_cons_drain.tail = 0u;
+    drain_count_store(0u);
+    g_cons_drain.overflow = 0u;
+    // Resetting reader_busy here is sound because no reader from the PRIOR
+    // epoch can still be in flight: an in-flight cons_drain_read runs under
+    // the read syscall's #844 obj pin on the drain Spoor, so the close hook
+    // (the only disarm) cannot have run while it was active; and on the
+    // death path a parked reader is #811-unwound (and never re-parks under
+    // a pending die) BEFORE the #926/#68 close-at-exit closes the fid. A
+    // stale reader surviving into a fresh epoch would race this ring and
+    // make the single-waiter drain Rendez two-sleeper (an extinction) --
+    // the pin + death ordering exclude it structurally.
+    g_cons_drain.reader_busy = false;
+    drain_pollwake_store(false);
+    drain_armed_store(true);
+    spin_unlock_irqrestore(&g_cons_drain.lock, s);
+    return 0;
+}
+
+// Disarm: the drain fid's last close (devdev close hook; also fires via the
+// #926/#68 close-at-exit when the renderer dies). Runs in process context
+// (handle close paths only), so waking the parked reader + walking the poll
+// hook list directly is legal (the console_mgr precedent). A reader parked
+// mid-close observes !armed via the sleep cond and returns EOF.
+void cons_drain_close(void) {
+    irq_state_t s = spin_lock_irqsave(&g_cons_drain.lock);
+    g_cons_drain.open = false;
+    drain_armed_store(false);
+    spin_unlock_irqrestore(&g_cons_drain.lock, s);
+    wakeup(&g_cons_drain_rendez);
+    poll_waiter_list_wake(&g_cons_drain.poll_list);
+}
+
+// cond: drain data ready OR the drain was disarmed (EOF). Lockless RELAXED
+// reads under the Rendez lock (the cons_data_ready discipline).
+static int cons_drain_ready(void *arg) {
+    (void)arg;
+    return drain_count_load() > 0u || !drain_armed_load();
+}
+
+// Blocking drain read (the renderer's output stream). Mirrors cons_input_read:
+// single-reader busy-guard; drains what is buffered (>= 1 byte) or parks on
+// the drain Rendez (death-interruptible per #811); returns 0 (EOF) when the
+// drain is disarmed with nothing buffered, -1 on bad args / reader-busy /
+// never-armed.
+long cons_drain_read(void *buf, long n) {
+    if (!buf || n < 0) return -1;
+    if (n == 0)        return 0;
+
+    irq_state_t s = spin_lock_irqsave(&g_cons_drain.lock);
+    if (!g_cons_drain.open || g_cons_drain.reader_busy) {
+        spin_unlock_irqrestore(&g_cons_drain.lock, s);
+        return -1;
+    }
+    g_cons_drain.reader_busy = true;
+    spin_unlock_irqrestore(&g_cons_drain.lock, s);
+
+    // RW-11 SA-1b applied to the renderer: the drain reader IS the display --
+    // its wake (output arrived) should preempt NORMAL work so a keystroke's
+    // echo paints promptly. The gate is structural (only the bound renderer
+    // can reach this read) + narrow (band==NORMAL pre-check keeps the promoted
+    // case off the locking query).
+    struct Thread *reader = current_thread();
+    if (reader && reader->band == SCHED_BAND_NORMAL && reader->proc &&
+        proc_is_console_renderer(reader->proc)) {
+        sched_mark_interactive(reader);
+    }
+
+    u8 *out = (u8 *)buf;
+    long got = 0;
+    for (;;) {
+        s = spin_lock_irqsave(&g_cons_drain.lock);
+        u32 c = drain_count_load();
+        while (c > 0u && got < n) {
+            out[got++] = g_cons_drain.ring[g_cons_drain.head];
+            g_cons_drain.head = (g_cons_drain.head + 1u) & (CONS_DRAIN_RING_SIZE - 1u);
+            c--;
+        }
+        drain_count_store(c);
+        spin_unlock_irqrestore(&g_cons_drain.lock, s);
+        if (got > 0) break;                    // >= 1 byte satisfies the read
+        if (!drain_armed_load()) break;        // disarmed + empty -> EOF (0)
+        if (sleep(&g_cons_drain_rendez, cons_drain_ready, NULL) == SLEEP_INTR) break;
+    }
+
+    s = spin_lock_irqsave(&g_cons_drain.lock);
+    g_cons_drain.reader_busy = false;
+    spin_unlock_irqrestore(&g_cons_drain.lock, s);
+    return got;
+}
+
+// Drain poll: POLLIN iff buffered bytes exist OR the drain is disarmed (a
+// disarmed drain reads EOF immediately -- readable by poll semantics). The
+// drain leaf is read-only, so no POLLOUT. Register-then-observe under the
+// drain lock (the cons_poll discipline; the hook list is walked deferred by
+// console_mgr for IRQ-context edges, directly by cons_drain_close).
+short cons_drain_poll(short events, struct poll_waiter *pw) {
+    short revents = 0;
+    irq_state_t s = spin_lock_irqsave(&g_cons_drain.lock);
+    if (events & POLLIN) {
+        if (drain_count_load() > 0u || !g_cons_drain.open) revents |= POLLIN;
+    }
+    if (pw) poll_waiter_list_register(&g_cons_drain.poll_list, pw);
+    spin_unlock_irqrestore(&g_cons_drain.lock, s);
+    return revents;
+}
+
+// The feed: the renderer's decoded keyboard bytes enter the EXISTING LS-8 line
+// discipline EXACTLY as UART RX bytes do -- cooking, ECHO (whose emit lands in
+// BOTH the UART and the drain -- the renderer paints its own echo), ISIG (a
+// graphical Ctrl-C posts `interrupt` to the console OWNER via the LS-5 path),
+// ICRNL, canonical assembly: all unchanged and backend-independent.
+//
+// I-27 (load-bearing, by construction): `is_break` is HARDWIRED false. A serial
+// BREAK is a PL011 LINE CONDITION -- the one unforgeable SAK trigger -- and no
+// feed byte sequence can synthesize it, so the renderer (untrusted for
+// elevation) can never fire the SAK. The graphical SAK is a KERNEL-scanned
+// trusted-tier keyboard combo (MENAGERIE section 7), a board-era surface;
+// on QEMU media the trusted path stays serial (TAPESTRY section 18.7).
+long cons_feed_write(const void *buf, long n) {
+    if (!buf || n < 0) return -1;
+    const u8 *bytes = (const u8 *)buf;
+    for (long i = 0; i < n; i++)
+        cons_rx_input(bytes[i], /*is_break=*/false);
+    return n;
+}
+
+u32 cons_test_drain_count(void)    { return drain_count_load(); }
+u32 cons_test_drain_overflow(void) {
+    irq_state_t s = spin_lock_irqsave(&g_cons_drain.lock);
+    u32 v = g_cons_drain.overflow;
+    spin_unlock_irqrestore(&g_cons_drain.lock, s);
+    return v;
+}
+bool cons_test_drain_pollwake_pending(void) { return drain_pollwake_load(); }
 
 static long devcons_bwrite(struct Spoor *c, struct Block *bp, s64 off) {
     (void)c; (void)bp; (void)off;

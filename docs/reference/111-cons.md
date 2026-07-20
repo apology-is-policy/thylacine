@@ -232,9 +232,14 @@ fd_list grows from the 3 stdio slots to `3+N`, the extra fd landing at the child
 fd 3) plus the arg `--consctl-fd 3`. `ut` — a USER-identity, NON-console-attached
 Proc — parses the arg, holds the fd on its `Repl` (`Env.consctl_fd`), and
 establishes its prompt-mode line discipline through it (`Repl::console_apply_default`
-writes `CONSOLE_MODE_DEFAULT` = `-icanon -echo +isig -icrnl -onlcr`: raw
+writes the shared `PROMPT_MODE` = `-icanon -echo +isig -icrnl +onlcr`: raw
 byte-at-a-time so the U-4 line editor draws its own echo; ISIG so Ctrl-C cooks to
-the `interrupt` note `ut` services). The boot witness is `ut: consctl ok`. This is
+the `interrupt` note `ut` services; ONLCR stays ON — output post-processing is
+orthogonal to raw input, and a console-direct session's children write plain `\n`
+line endings only the kernel's ONLCR arm can cook. The pre-fix `-onlcr` sent bare
+LF to the wire for the whole session; QEMU's `mon:stdio` mux silently re-inserted
+CRs for terminal viewers, so the gap surfaced only when the Aurora fbcon — the
+first honest raw renderer — drew the `ls` staircase). The boot witness is `ut: consctl ok`. This is
 the controlling-terminal model — the foreground session shell, not login, owns the
 tty termios — and it is I-27-safe: `ut` is never console-attached (the inherited
 consctl fd confers no attach), it holds the fd PRIVATELY (it never re-forwards it

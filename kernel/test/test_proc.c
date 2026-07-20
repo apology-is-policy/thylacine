@@ -46,6 +46,8 @@
 #include <thylacine/types.h>
 
 #include "../../arch/arm64/timer.h"   // PTY-1f: the sleeper thunk's deadlines
+#include <thylacine/page.h>           // PTY-4e #19: the torpor sleeper's page
+#include <thylacine/torpor.h>         // PTY-4e #19: the preserved-wait probe
 
 void test_proc_rfork_basic_smoke(void);
 void test_proc_rfork_exits_status(void);
@@ -68,6 +70,7 @@ extern void proc_test_link(struct Proc *p);
 extern void proc_test_unlink(struct Proc *p);
 extern void proc_test_link_child(struct Proc *parent, struct Proc *p);
 extern void proc_test_legate_teardown(u32 scope_id, struct Proc *except);
+extern s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw);
 extern void proc_test_set_init(struct Proc *p);
 
 static volatile u32 g_proc_test_ran;
@@ -1484,6 +1487,162 @@ void test_proc_job_stop_park_report_cont_live(void) {
     __atomic_store_n(&g_js_release, 1u, __ATOMIC_RELEASE);
     TEST_EXPECT_EQ(wait_pid_for(pid, 0, &st), pid, "reap the resumed child");
     TEST_EXPECT_EQ(st, 0, "the child exited cleanly after the stop/cont cycle");
+}
+
+// #19: the stop -> cont -> RE-STOP cycle (the fg-then-^Z-again shape). The
+// kernel half traced sound statically -- the stop_one idempotence gate
+// (job_stop_req != 0 -> skip) is cleared by the resume, and the catchability
+// gate reads live state -- but the observed no-stop_one-on-the-2nd-^Z report
+// (later diagnosed as the sleep-1-deadline repro artifact) left the cycle
+// unpinned. Deterministic regression: after a full stop/report/cont/report
+// round, a SECOND TSTP fan must stop the group again (fresh park, fresh
+// latch, fresh report), and a second cont must release it to a clean exit.
+void test_proc_job_stop_recycle(void);
+void test_proc_job_stop_recycle(void) {
+    __atomic_store_n(&g_js_release, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_js_sleeper_proc, (struct Proc *)NULL, __ATOMIC_RELEASE);
+
+    int pid = rfork(RFPROC, js_sleeper_thunk, NULL);
+    TEST_ASSERT(pid > 0, "rfork sleeper failed");
+    struct Proc *c;
+    while ((c = __atomic_load_n(&g_js_sleeper_proc, __ATOMIC_ACQUIRE)) == NULL)
+        sched();
+
+    struct Thread *th = c->threads;
+    TEST_ASSERT(th != NULL, "the child has a thread");
+    int st = -42;
+
+    for (int cycle = 0; cycle < 2; cycle++) {
+        // Stop: the fan stops the (sole) member; the report latches.
+        TEST_EXPECT_EQ(proc_job_stop_pgrp((u32)pid), 1,
+            cycle == 0 ? "cycle 1: the TSTP fan stops the group"
+                       : "cycle 2: a second TSTP after a resume stops AGAIN");
+        TEST_EXPECT_EQ((int)c->job_stop_req, 1, "job owner set");
+        bool parked = false;
+        for (int i = 0; i < 2000000 && !parked; i++) {
+            irq_state_t ws = spin_lock_irqsave(&th->wait_lock);
+            parked = (th->rendez_blocked_on == &th->debug_rendez);
+            spin_unlock_irqrestore(&th->wait_lock, ws);
+            if (!parked) sched();
+        }
+        TEST_ASSERT(parked, "the stopped sleeper detour-parked");
+        TEST_EXPECT_EQ(wait_pid_for(pid, WAIT_UNTRACED | WAIT_WNOHANG, &st),
+                       pid, "WAIT_UNTRACED reports this cycle's stop");
+        TEST_EXPECT_EQ(st, WAIT_STATUS_STOPPED, "packed stopped status");
+
+        // Cont: resume + report; the park actually LIFTS before the next
+        // cycle's stop (the fg-then-run-then-^Z shape -- the re-stop must
+        // land on a genuinely running sleeper, not a still-parked one).
+        TEST_EXPECT_EQ(proc_job_cont_pgrp((u32)pid), 1, "cont the group");
+        TEST_EXPECT_EQ((int)c->job_stop_req, 0, "the job owner cleared");
+        TEST_EXPECT_EQ(wait_pid_for(pid, WAIT_CONTINUED | WAIT_WNOHANG, &st),
+                       pid, "WAIT_CONTINUED reports this cycle's resume");
+        bool unparked = false;
+        for (int i = 0; i < 2000000 && !unparked; i++) {
+            irq_state_t ws = spin_lock_irqsave(&th->wait_lock);
+            unparked = (th->rendez_blocked_on != &th->debug_rendez);
+            spin_unlock_irqrestore(&th->wait_lock, ws);
+            if (!unparked) sched();
+        }
+        TEST_ASSERT(unparked, "the resumed sleeper left the detour park");
+    }
+
+    __atomic_store_n(&g_js_release, 1u, __ATOMIC_RELEASE);
+    TEST_EXPECT_EQ(wait_pid_for(pid, 0, &st), pid, "reap the resumed child");
+    TEST_EXPECT_EQ(st, 0, "clean exit after two stop/cont cycles");
+}
+
+// PTY-4e #19 ROOT FIX: a job stop must PRESERVE a torpor-timed wait, never
+// complete it. The stop cascade formerly reused the DEATH cascade's
+// torpor_wake_all_for_proc, which fabricates a completed wait (awoken=1) --
+// immaterial for a dying Proc, but a STOPPED one survives: the fabricated
+// TORPOR_OK rode back to EL0 at resume, so a time::sleep-based job (e.g.
+// /bin/sleep) "finished" the moment fg resumed it, fg returned Done, and a
+// second ^Z found no job (the live re-stop hang). The fix
+// (torpor_stop_wake_all_for_proc) wakes WITHOUT completing: the woken
+// waiter's tsleep re-loop takes the 8c-2 stop detour, parks, and on resume
+// re-registers with its original deadline. This test pins the whole shape:
+// a child blocked in a 60 s torpor wait is stopped (parks, wait intact),
+// resumed (re-sleeps, wait STILL intact -- the pre-fix code flips done to 2
+// right here), and completes only on a REAL torpor wake.
+static struct Proc *volatile g_tsp_proc;
+static volatile u32 g_tsp_done;
+static volatile s64 g_tsp_rc;
+static volatile u64 g_tsp_vaddr;
+
+static void tsp_sleeper_thunk(void *arg) {
+    (void)arg;
+    struct Proc *self = current_thread()->proc;
+    if (proc_setpgid(self, 0, 0) != 0) exits("setpgid failed");
+    s64 va = sys_burrow_attach_for_proc(self, PAGE_SIZE);
+    if (va <= 0) exits("burrow_attach failed");
+    __atomic_store_n(&g_tsp_vaddr, (u64)va, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_tsp_proc, self, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_tsp_done, 1u, __ATOMIC_RELEASE);
+    // Demand-zero page: value 0 == expected 0 -> registers + sleeps 60 s.
+    g_tsp_rc = sys_torpor_wait_for_proc(self, (u64)va, 0,
+                                        60ll * 1000000ll);
+    __atomic_store_n(&g_tsp_done, 2u, __ATOMIC_RELEASE);
+    exits("ok");
+}
+
+void test_proc_job_stop_preserves_torpor_wait(void);
+void test_proc_job_stop_preserves_torpor_wait(void) {
+    __atomic_store_n(&g_tsp_done, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_tsp_proc, (struct Proc *)NULL, __ATOMIC_RELEASE);
+    g_tsp_rc = (s64)-999;
+    g_tsp_vaddr = 0;
+
+    int pid = rfork(RFPROC, tsp_sleeper_thunk, NULL);
+    TEST_ASSERT(pid > 0, "rfork torpor sleeper failed");
+    struct Proc *c;
+    while ((c = __atomic_load_n(&g_tsp_proc, __ATOMIC_ACQUIRE)) == NULL)
+        sched();
+    struct Thread *th = c->threads;
+    TEST_ASSERT(th != NULL, "the child has a thread");
+
+    // Stop: the fan wakes the torpor waiter (non-completing) -> the tsleep
+    // re-loop detour-parks it on its own debug_rendez.
+    TEST_EXPECT_EQ(proc_job_stop_pgrp((u32)pid), 1,
+        "the TSTP fan stops the torpor sleeper's group");
+    bool parked = false;
+    for (int i = 0; i < 2000000 && !parked; i++) {
+        irq_state_t ws = spin_lock_irqsave(&th->wait_lock);
+        parked = (th->rendez_blocked_on == &th->debug_rendez);
+        spin_unlock_irqrestore(&th->wait_lock, ws);
+        if (!parked) sched();
+    }
+    TEST_ASSERT(parked, "the stopped torpor sleeper detour-parked");
+    TEST_EXPECT_EQ(g_tsp_done, 1u, "the wait did not complete under the stop");
+
+    // Cont: the resumed sleeper must RE-SLEEP its torpor wait (the wait is
+    // preserved), never complete it. Pre-fix, the fabricated TORPOR_OK
+    // completes the wait right here (done flips to 2) -- fail fast on that.
+    TEST_EXPECT_EQ(proc_job_cont_pgrp((u32)pid), 1, "cont the group");
+    bool resettled = false;
+    for (int i = 0; i < 2000000 && !resettled; i++) {
+        if (__atomic_load_n(&g_tsp_done, __ATOMIC_ACQUIRE) == 2u)
+            break;   // the wait completed spuriously -- the pre-fix failure
+        irq_state_t ws = spin_lock_irqsave(&th->wait_lock);
+        struct Rendez *r = th->rendez_blocked_on;
+        resettled = (r != NULL && r != &th->debug_rendez);
+        spin_unlock_irqrestore(&th->wait_lock, ws);
+        if (!resettled) sched();
+    }
+    TEST_ASSERT(resettled, "the resumed sleeper re-entered its torpor wait");
+    TEST_EXPECT_EQ(g_tsp_done, 1u,
+        "the torpor wait SURVIVED stop+cont (no fabricated completion)");
+
+    // A REAL wake completes the preserved wait with TORPOR_OK.
+    TEST_EXPECT_EQ(sys_torpor_wake_for_proc(c, g_tsp_vaddr, 1), (s64)1,
+        "the real wake finds the preserved waiter");
+    while (__atomic_load_n(&g_tsp_done, __ATOMIC_ACQUIRE) < 2u) sched();
+    TEST_EXPECT_EQ(g_tsp_rc, (s64)TORPOR_OK,
+        "the preserved wait completed via the real wake");
+
+    int st = -42;
+    TEST_EXPECT_EQ(wait_pid_for(pid, 0, &st), pid, "reap the sleeper");
+    TEST_EXPECT_EQ(st, 0, "clean exit after stop/cont/wake");
 }
 
 // The POSIX orphan rules, both halves (2.4.3):

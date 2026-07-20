@@ -1,0 +1,119 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-gfx-live.exp -- the LIVE-display controlq leg (#31).
+#
+# The headless ls-gfx gate was structurally BLIND to display-timing bugs:
+# with no display backend attached, QEMU never runs the refresh machinery
+# concurrent with tapestryd's controlq submissions, and the #31 desync (the
+# pre-fix single-shot used.idx read hard-failing behind a mis-timed wake
+# under -display cocoa) could not fire. This leg closes the gap as far as a
+# headless CI can: it boots with THYLACINE_DISPLAY=vnc:47 (a REAL display
+# backend; run-vm.sh drops gpu-mmio0 so the gpu0 console binds QemuConsole
+# 0), attaches tools/rfb-refresh.py to keep the display-refresh path live
+# (dirty-rect encoding + graphic_hw_update concurrent with presents), then
+# drives session activity through both input paths and asserts:
+#   - the gpu0 attach is REAL (rfb reports the 1280x-wide console, never a
+#     stray 128x128 head),
+#   - NO controlq-desync diagnostic appears on the serial tee for the whole
+#     window (used.idx / submit error / ring corrupt / stale wakes / FAIL
+#     present),
+#   - the console SURVIVES the window (a -c screendump still verifies and a
+#     final graphically-typed command still round-trips).
+#
+# HONEST LIMIT: the cocoa repro (#31) did not fire under this leg pre-fix
+# (three escalating attempts, incl. this exact VNC shape at real traffic
+# rates -- the trigger needs the cocoa backend's thread topology). The leg
+# is live-display COVERAGE, not a pinned regression; the cocoa acceptance
+# test is a human at THYLACINE_DISPLAY=cocoa.
+#
+# HVF is SELF-FORCED: the desync's environment is HVF, and the harness's
+# TCG default hangs the boot at the pre-existing 8a-2b hwwatch E2E (#27).
+
+source [file join [file dirname [info script]] lib.exp]
+
+set repo $lc_repo
+set qmp "$repo/build/qmp.sock"
+set ::env(THYLACINE_ACCEL) hvf
+set ::env(THYLACINE_DISPLAY) vnc:47
+
+# Full-session transcript (serial included) for the end-of-window
+# desync-string sweep.
+set transcript /tmp/ls-gfx-live-[pid].log
+file delete -force $transcript
+log_file -a $transcript
+
+proc gfx_dump {out args_} {
+    global repo qmp
+    if {[catch {exec $repo/tools/screendump.sh -s $qmp {*}$args_ $out} err]} {
+        return $err
+    }
+    return ""
+}
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# Attach the display refresher for a 45s live window. Its stdout lands in a
+# file so the geometry assert below can read it shortly after connect.
+set rfbout /tmp/ls-gfx-live-rfb-[pid].out
+file delete -force $rfbout
+set rfb_pid [exec $repo/tools/rfb-refresh.py 47 45 > $rfbout 2>@1 &]
+set ok 0
+for {set i 0} {$i < 20} {incr i} {
+    after 500
+    if {![catch {exec grep -q "rfb: connected 1280x" $rfbout}]} { set ok 1; break }
+    if {![catch {exec grep -q "rfb: connected" $rfbout}]} {
+        catch {exec kill -9 $rfb_pid}
+        lc_fail "rfb attached to the WRONG console: [exec head -1 $rfbout]"
+    }
+}
+if {!$ok} { catch {exec kill -9 $rfb_pid}; lc_fail "rfb refresher never connected to the gpu0 console" }
+lc_pass "live-display: rfb refresher attached to the gpu0 console"
+
+# Session activity under the live window: serial round-trips (each `ls /`
+# repaints -> presents -> controlq TRANSFER+FLUSH churn against the
+# concurrent display refresh) + the graphical input path.
+for {set i 0} {$i < 10} {incr i} {
+    lc_run_expect "ls /" "bin"
+}
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp "pwd\n"} err]} {
+    lc_fail "qmp-sendtext failed: $err"
+}
+lc_expect "/home/michael" "output-of graphically-typed pwd (under live display)"
+
+# Let the refresher run out its window. Poll its OUTPUT for the final
+# stats line, never `kill -0` its pid: Tcl reaps async-exec children
+# lazily, so the exited python lingers as a ZOMBIE that kill -0 still
+# sees -- a pid-liveness wait would spin forever.
+set done 0
+for {set i 0} {$i < 90} {incr i} {
+    if {![catch {exec grep -q "update-reqs" $rfbout}]} { set done 1; break }
+    after 1000
+}
+if {!$done} { catch {exec kill -9 $rfb_pid}; lc_fail "rfb refresher never finished its window" }
+lc_pass "live-display: 45s window completed ([exec tail -1 $rfbout])"
+
+# The console survived: the rendered-console signature still verifies and a
+# final graphically-typed command still round-trips.
+set ok 0
+for {set i 0} {$i < 10} {incr i} {
+    if {[gfx_dump /tmp/ls-gfx-live.png "-c"] eq ""} { set ok 1; break }
+    after 700
+}
+if {!$ok} { lc_fail "post-window console verify (-c) never passed (scanout dead)" }
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp "whoami\n"} err]} {
+    lc_fail "qmp-sendtext failed post-window: $err"
+}
+lc_expect "1000" "output-of post-window graphically-typed whoami"
+lc_pass "live-display: console alive after the window (-c + graphical round-trip)"
+
+# The desync sweep: the whole session transcript must carry NO controlq
+# diagnostic. (log_file buffers; close it before grepping.)
+log_file
+if {![catch {exec grep -nE "used\\.idx|submit error|ring corrupt|stale wakes|FAIL present" $transcript} hits]} {
+    lc_fail "controlq desync diagnostics during the live window: $hits"
+}
+lc_pass "live-display: zero controlq desync diagnostics across the window"
+
+lc_quit
+lc_pass "ls-gfx-live: the #31 live-display leg verified (attach + churn + survive + zero desync)"
+exit 0

@@ -946,5 +946,10 @@ pub extern "C" fn rs_main() -> i64 {
     log(" cmds=");
     log_dec(ctrl.seq as u32);
     log("\n");
+    // The presented pattern is capturable (tools/screendump.sh -v) only
+    // while this Proc lives: at reap, the RW-7 proc-death quiesce
+    // (virtio_mmio_reset_in_range) resets the device, which destroys the
+    // host-side resources and disables the scanout. The persistent
+    // scanout is the G-1 resident driver's job.
     0
 }

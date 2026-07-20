@@ -336,21 +336,64 @@ u32 weft_notif_result_flags(const struct weft_notif *n);
 struct Proc;
 struct Burrow;
 
-// The per-data-fd ring binding recorded in dev9p_priv once a flow's ring has
-// been mapped into the guest. Holds the registration pin (transferred from the
-// registry at claim); a weak record of the guest VA for the idempotent SYS_WEFT_
-// MAP return. Allocated by weft_binding_alloc at SYS_WEFT_MAP; released (pin
-// dropped + struct freed) by weft_binding_release at dev9p_close.
+// The binding KIND (G-2; TAPESTRY.md §18.11 F10). Derived at claim time from
+// the KERNEL-MINTED Burrow type -- never from the server's declaration alone:
+//   WEFT_BIND_RING  -- a netd flow ring (BURROW_TYPE_ANON): carries the ring
+//                      view; drives the Tweftio data fast-paths.
+//   WEFT_BIND_WEAVE -- a tapestryd framebuffer weave (the DMA weave subtype):
+//                      NO ring view, NO Tweftio drive (weft_binding_validate_rw
+//                      is kind-gated, which closes all three fast-path
+//                      consumers -- the sync dev9p_weft_try_{read,write} AND
+//                      the Loom routing -- at one chokepoint); the map is the
+//                      whole deliverable (the client draws into it directly).
+enum weft_bind_kind {
+    WEFT_BIND_RING  = 0,
+    WEFT_BIND_WEAVE = 1,
+};
+
+// The per-data-fd binding recorded in dev9p_priv once a flow's ring / a
+// surface's weave has been mapped into the guest. Holds the registration pin
+// (transferred from the registry at claim); a weak record of the guest VA for
+// the idempotent SYS_WEFT_MAP return. Allocated by weft_binding_alloc /
+// weft_binding_alloc_weave at SYS_WEFT_MAP; released (pin dropped + struct
+// freed) by weft_binding_release at dev9p_close -- which for a WEAVE binding
+// additionally unmaps the client mapping when the closer IS the mapping Proc
+// (§18.1 "the weave fid's clunk drops the client mapping"; the RING mapping
+// keeps its audited vma_drain-at-exit lifetime).
 struct weft_binding {
-    struct Burrow *burrow;     // the per-flow ring; the registration pin is held HERE
+    struct Burrow *burrow;     // the ring / weave; the registration pin is held HERE
     u64            guest_va;   // where it is mapped in the guest (idempotent-MAP return)
     u32            ring_size;  // mapped byte length (== burrow size; diagnostics)
+    u32            kind;       // enum weft_bind_kind (claim-time, immutable)
+    // The Proc that holds the mapping (the SYS_WEFT_MAP caller), for the
+    // WEAVE clunk-unmap: dev9p_close unmaps only when the closing Proc's pid
+    // matches (an inherited-fd closer in another Proc leaves the mapping to
+    // the mapper's own vma_drain -- the ring precedent). Sound as a bare pid:
+    // g_next_pid is a monotonic u32 (no reuse within any realizable runtime,
+    // the proc.c precedent), so a matched pid IS the mapping Proc.
+    u32            map_pid;
     // Weft-6b-2: the kernel's PRIVATE trusted geometry of this ring (computed
     // at SYS_WEFT_MAP via weft_ring_layout from the shared Burrow's contiguous
     // KVA + the Rweft-reported ring_entries). The data-drive validate reads the
     // payload-region geometry from HERE, never from the guest-mutable shared
     // header mirror (the I-30 validator-once; the Weft-3 snapshot discipline).
+    // ZERO for a WEAVE binding (no ring; never consulted -- the kind gate).
     struct weft_ring_view view;
+    // G-3 (TAPESTRY.md section 18.12 R2-F3): the orphaned-weave reaper's
+    // registry linkage. A WEAVE binding registers after the SYS_WEFT_MAP
+    // CAS-install (weft_reap_register) and unregisters at dev9p_close
+    // (weft_reap_unregister, BEFORE the close touches the binding -- the
+    // g_weft_reap_lock serialization that makes reaper-vs-close sound).
+    // sess_att/sess_cl let the reaper test the SERVING session's liveness
+    // (att when the session is SYS_ATTACH-owned -- production; cl alone on
+    // the externally-owned test path). Both are BORROWED, valid while the
+    // binding is registered: the owning dev9p_priv holds the att ref /
+    // client lifetime, and it unregisters before releasing either. RING
+    // bindings never register (their audited vma_drain lifetime stands).
+    struct weft_binding      *reap_next;
+    u64                       orphan_since_ns;
+    const struct p9_attached *sess_att;
+    const struct p9_client   *sess_cl;
 };
 
 // Register a per-flow ring `v` (netd's backing ANON Burrow) owned by `owner`
@@ -375,14 +418,50 @@ struct Burrow *weft_share_claim(u64 share_id);
 // Proc's exit (kernel/proc.c exit-notify, alongside srv/cap_proc_exit_notify).
 void weft_share_release_owner(struct Proc *owner);
 
-// Allocate a weft_binding owning the (already-claimed) registration pin on
+// G-2 (SYS_WEFT_UNSHARE; TAPESTRY.md §18.11 F3 + §18.12 R2-F5; closes the #289
+// seam): explicitly disarm ONE un-claimed share. Owner-gated -- the entry is
+// removed only when `owner` matches its registrant. Returns 0 (entry removed,
+// pin dropped -- a subsequent claim of this id fails closed: the spec's
+// Map-guard `wstate ∈ {woven,live}` realized as registry-removal-before-free +
+// the claim's live-registry lookup) or -1 (no live entry with this id under
+// this owner -- already claimed [the client holds a legitimate mapping; retire
+// proceeds by quiesce], already GC'd, forged, or another owner's). The pin
+// drop runs OUTSIDE the registry leaf lock (the release_owner discipline).
+// The two consumers: tapestryd's surface retire/reweave (a weave's share_id
+// must not linger claimable past the RETIRING transition -- the NoStaleMap
+// guard), and netd's per-flow GC of a minted-but-never-claimed id (#289).
+int weft_share_unregister(struct Proc *owner, u64 share_id);
+
+// G-2: the claim-time kind decision (pure; used by SYS_WEFT_MAP's claim path +
+// unit-testable in isolation). Derives the binding kind from the KERNEL-MINTED
+// Burrow type -- the single source of truth -- and CROSS-CHECKS the server's
+// declared geometry: an ANON ring must declare ring_entries != 0 (the layout
+// validates the exact value later); a DMA weave must declare ring_entries == 0
+// (a weave has no descriptor ring). Returns WEFT_BIND_RING / WEFT_BIND_WEAVE,
+// or -1 on a type/declaration mismatch or an inadmissible type (the caller
+// fails closed: unmaps nothing, drops the claimed pin). A mismatch means a
+// buggy/hostile server declared a geometry its own registered Burrow
+// contradicts -- never mapped.
+int weft_claimed_kind(const struct Burrow *v, u32 ring_entries);
+
+// Allocate a RING weft_binding owning the (already-claimed) registration pin on
 // `burrow`, recording the guest VA + size + computing the kernel-private ring
 // view (geometry) from the Burrow's contiguous KVA + `ring_entries` (the
-// netd-reported descriptor-slot count from Rweft). Returns NULL on OOM OR on an
-// invalid geometry (the caller then drops the pin + the guest mapping itself).
-// The binding is stored in the data Spoor's dev9p_priv.
+// netd-reported descriptor-slot count from Rweft). ANON Burrows only (the ring
+// view derives from the ANON contiguity guarantee). Returns NULL on OOM OR on
+// an invalid geometry (the caller then drops the pin + the guest mapping
+// itself). The binding is stored in the data Spoor's dev9p_priv.
 struct weft_binding *weft_binding_alloc(struct Burrow *burrow, u64 guest_va,
                                         u32 ring_size, u32 ring_entries);
+
+// G-2: allocate a WEAVE weft_binding (the §18.11 F10 framebuffer map branch) --
+// no ring view, no Tweftio drive; records the mapping Proc's pid for the
+// clunk-unmap. Same pin-ownership contract as weft_binding_alloc. Returns NULL
+// on OOM or a non-weave Burrow (defense-in-depth: the caller's kind decision
+// already derived WEAVE from the type).
+struct weft_binding *weft_binding_alloc_weave(struct Burrow *burrow,
+                                              u64 guest_va, u32 size,
+                                              u32 map_pid);
 
 // Weft-6b-2/6b-3 data drive: validate a guest syscall buffer against the flow's
 // ring. Direction-agnostic -- a Tweftio WRITE source and a Tweftio READ
@@ -401,5 +480,86 @@ int weft_binding_validate_rw(const struct weft_binding *b, u64 ubuf_va,
 // (burrow_unref) + free the binding struct. Does NOT touch the guest's ring
 // mapping (vma_drain owns it, the Loom-ring precedent). NULL-safe.
 void weft_binding_release(struct weft_binding *b);
+
+// G-2 (§18.1 ClunkMap; the G-2 audit F1 close): the WEAVE clunk-unmap --
+// drop `closer`'s mapping of the weave at fid-close, iff (a) the binding is
+// WEAVE-kind, (b) `closer` IS the mapping Proc (pid match; the monotonic-u32
+// identity), and (c) the VMA at the recorded guest_va is STILL backed by this
+// weave's Burrow (the F1 guard: after an explicit SYS_BURROW_DETACH, an
+// unrelated fresh mapping can land at the same VA -- it must survive the
+// close untouched). Takes closer->vma_lock; the unmap uncharges the shared-in
+// budget via the SHARED_IN pairing. Returns 0 (unmapped) or -1 (skipped --
+// wrong kind / wrong Proc / no live weave mapping at the VA). Called by
+// dev9p_close BEFORE weft_binding_release; unit-driven directly (the closer
+// param exists so a test drives it against a synthetic Proc).
+int weft_binding_clunk_unmap(struct weft_binding *wb, struct Proc *closer);
+
+// =============================================================================
+// G-3: the orphaned-weave force-reclaim (TAPESTRY.md section 18.12 R2-F3;
+// the ServerDeath leg of specs/tapestry_present.tla, kernel half).
+// =============================================================================
+//
+// When the SERVING compositor dies, a claimed weave's client mapping keeps
+// the pixel pages alive (#847 mapping_count -- no UAF) but semantically dead:
+// every fid op returns the session-dead error ("compositor gone"). Without
+// the reaper, a client that never closes the fd pins those pages -- charged
+// to the client's shared-map budget and freed only at the client's own exit
+// (the G-2 accounting bounds the pin; the reaper's value is reclaiming
+// EARLY, at the grace, instead of at client exit). The reaper kthread
+// sweeps the registered WEAVE bindings; one whose serving session has been
+// dead longer than WEFT_REAP_GRACE_NS is FORCE-RECLAIMED: the client's
+// stale mapping is cross-Proc unmapped (the client was warned -- a later
+// touch takes snare:segv), the shared-in budget uncharges (inside
+// burrow_unmap), and the binding's registration pin drops so the pixel
+// chunk frees at once. The binding STRUCT itself is freed only by
+// dev9p_close (weft_binding_release) -- the reaper NULLs wb->burrow under
+// g_weft_reap_lock, and the close path unregisters under the same lock
+// before reading the binding, so neither side sees a half-reclaimed state.
+//
+// The liveness observation (the audit F4 contract note): the sweep reads
+// the session's dead latch (c->dead), which only an ACTIVE recv path sets
+// -- so the reaper's guarantee is "reclaim a client whose session OBSERVED
+// the death" (the realistic target: it received the compositor-gone error
+// and ignored it). A client that maps a weave and then never touches the
+// session again is not observed dead and rides the budget + exit-time
+// teardown instead -- bounded, just not early.
+//
+// Lock order (the audit F1 fix): g_weft_reap_lock -> g_proc_table_lock
+// (irqsave; the FIND-AND-LOCK walk ONLY -- the per-page TLBI unmap never
+// runs under it) -> vma_lock (acquired under gptl, HELD PAST its release;
+// vma_drain now takes vma_lock, so the target's reap serializes here) ->
+// v->lock -> buddy. Acyclic: register runs lock-free (after the map's
+// vma_lock drop), unregister runs lock-free (dev9p_close), and nothing
+// under gptl/vma takes the reap lock. The deferred pin drop (burrow_unref
+// outside the reap lock) follows the weft_share_unregister discipline.
+
+// The dead-session grace before a force-reclaim, and the sweep cadence.
+#define WEFT_REAP_GRACE_NS  (2ull * 1000 * 1000 * 1000)
+#define WEFT_REAP_SWEEP_NS  (1ull * 1000 * 1000 * 1000)
+
+struct p9_attached;
+struct p9_client;
+
+// Register an installed WEAVE binding for orphan tracking. Call AFTER the
+// SYS_WEFT_MAP CAS-install wins, with no locks held. att/cl are borrowed
+// (see the struct comment); att may be NULL (test path), then cl is the
+// liveness source.
+void weft_reap_register(struct weft_binding *wb,
+                        const struct p9_attached *att,
+                        const struct p9_client *cl);
+
+// Remove a binding from the reaper's registry (idempotent). Call from
+// dev9p_close BEFORE touching the binding's fields: returning from this is
+// the guarantee no reaper sweep still holds wb.
+void weft_reap_unregister(struct weft_binding *wb);
+
+// One sweep pass at `now_ns` (the kthread's body; test-drivable). Returns
+// the number of bindings force-reclaimed this pass.
+int weft_reap_sweep(u64 now_ns);
+
+// Boot init + the reaper kthread main (spawned as a kproc thread).
+void weft_reap_init(void);
+void weft_reaper_main(void);
+
 
 #endif

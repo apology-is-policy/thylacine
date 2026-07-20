@@ -206,6 +206,8 @@ void test_proc_wait_pid_for_report_not_reap(void);
 void test_proc_wait_pid_syscall_untraced_flag(void);
 void test_proc_job_stop_owner_algebra(void);
 void test_proc_job_stop_park_report_cont_live(void);
+void test_proc_job_stop_recycle(void);
+void test_proc_job_stop_preserves_torpor_wait(void);
 void test_proc_job_stop_orphan_rule(void);
 void test_namespace_bind_smoke(void);
 void test_namespace_cycle_rejected(void);
@@ -295,6 +297,14 @@ void test_weft_share_owner_gc(void);
 void test_weft_syscall_share(void);
 void test_weft_map_binding_lifetime(void);
 void test_weft_share_cap_gate(void);
+void test_weft_share_rejects_plain_dma(void);
+void test_weft_weave_share_and_claim(void);
+void test_weft_unshare_disarm(void);
+void test_weft_shared_map_budget_cap(void);
+void test_weft_weave_clunk_unmap_guard(void);
+void test_weft_reap_orphan_reclaimed(void);
+void test_weft_reap_live_session_untouched(void);
+void test_weft_reap_close_unregisters(void);
 void test_pgtable_install_user_pte_smoke(void);
 void test_pgtable_install_user_pte_constraints(void);
 void test_pgtable_install_user_pte_idempotent(void);
@@ -527,6 +537,11 @@ void test_cons_consctl_render(void);             // LS-8b
 void test_cons_cook_line_overflow(void);         // LS-8b
 void test_cons_cook_mode_flip_fresh_line(void);  // LS-8b audit F1
 void test_cons_cook_canonical_poll_edge(void);   // LS-8b audit F2a
+void test_cons_drain_tap_mirrors_output(void);       // G-4
+void test_cons_drain_feed_runs_discipline(void);     // G-4
+void test_cons_drain_overflow_drops_oldest(void);    // G-4
+void test_cons_drain_close_and_reopen_epoch(void);   // G-4
+void test_cons_drain_poll_deferred_wake(void);       // G-4
 void test_devctl_bestiary_smoke(void);
 void test_devctl_attach_returns_dir(void);
 void test_devctl_walk_to_each_leaf(void);
@@ -546,6 +561,7 @@ void test_devdev_walk_unknown_misses(void);
 void test_devdev_walk_pts_dir(void);
 void test_devdev_trivial_leaves(void);
 void test_devdev_cons_gate(void);
+void test_devdev_renderer_gate(void);            // G-4
 void test_devhw_bestiary_smoke(void);
 void test_devhw_attach_returns_root(void);
 void test_devhw_walk_node_and_prop(void);
@@ -683,6 +699,7 @@ void test_devsrv_post_gate(void);
 void test_devsrv_post_basic(void);
 void test_devsrv_tombstone(void);
 void test_devsrv_registry_full(void);
+void test_devsrv_registry_full_tombstone_rebinds(void);
 void test_devsrv_post_rollback(void);
 void test_devsrv_registry_lifecycle(void);
 void test_devsrv_svc_ref_holds_registry(void);
@@ -1179,6 +1196,7 @@ void test_sys_spawn_with_perms_holder_delegates_may_post(void);
 void test_sys_spawn_with_perms_console_trusted_not_delegable(void);
 void test_sys_spawn_with_perms_console_owner_grant_gate(void);
 void test_sys_spawn_with_perms_console_owner_set_wiring(void);
+void test_sys_spawn_with_perms_renderer_gate(void);   // G-4
 void test_sys_spawn_full_argv_no_argv_acts_as_spawn_with_perms(void);
 void test_sys_spawn_full_argv_golden_argc4(void);
 void test_sys_spawn_full_argv_rejects_argc_over_max(void);
@@ -1420,6 +1438,9 @@ struct test_case g_tests[] = {
     { "proc.job_stop_owner_algebra",   test_proc_job_stop_owner_algebra,   false, NULL },
     { "proc.job_stop_park_report_cont_live",
                                        test_proc_job_stop_park_report_cont_live, false, NULL },
+    { "proc.job_stop_recycle",         test_proc_job_stop_recycle,         false, NULL },
+    { "proc.job_stop_preserves_torpor_wait",
+                                       test_proc_job_stop_preserves_torpor_wait, false, NULL },
     { "proc.job_stop_orphan_rule",     test_proc_job_stop_orphan_rule,     false, NULL },
     { "resource.exempt_only_system",   test_resource_exempt_only_system,   false, NULL },
     { "resource.page_charge_caps",     test_resource_page_charge_caps,     false, NULL },
@@ -1556,6 +1577,14 @@ struct test_case g_tests[] = {
     { "weft.syscall_share",               test_weft_syscall_share,            false, NULL },
     { "weft.map_binding_lifetime",        test_weft_map_binding_lifetime,     false, NULL },
     { "weft.share_cap_gate",              test_weft_share_cap_gate,           false, NULL },
+    { "weft.share_rejects_plain_dma",     test_weft_share_rejects_plain_dma,  false, NULL },
+    { "weft.weave_share_and_claim",       test_weft_weave_share_and_claim,    false, NULL },
+    { "weft.unshare_disarm",              test_weft_unshare_disarm,           false, NULL },
+    { "weft.shared_map_budget_cap",       test_weft_shared_map_budget_cap,    false, NULL },
+    { "weft.weave_clunk_unmap_guard",     test_weft_weave_clunk_unmap_guard,  false, NULL },
+    { "weft.reap_orphan_reclaimed",       test_weft_reap_orphan_reclaimed,    false, NULL },
+    { "weft.reap_live_session_untouched", test_weft_reap_live_session_untouched, false, NULL },
+    { "weft.reap_close_unregisters",      test_weft_reap_close_unregisters,   false, NULL },
     { "pgtable.install_user_pte_smoke",
                                        test_pgtable_install_user_pte_smoke,
                                                                            false, NULL },
@@ -1851,6 +1880,11 @@ struct test_case g_tests[] = {
     { "cons.cook_line_overflow",       test_cons_cook_line_overflow,       false, NULL },
     { "cons.cook_mode_flip_fresh_line", test_cons_cook_mode_flip_fresh_line, false, NULL },
     { "cons.cook_canonical_poll_edge", test_cons_cook_canonical_poll_edge, false, NULL },
+    { "cons.drain_tap_mirrors_output", test_cons_drain_tap_mirrors_output, false, NULL },
+    { "cons.drain_feed_runs_discipline", test_cons_drain_feed_runs_discipline, false, NULL },
+    { "cons.drain_overflow_drops_oldest", test_cons_drain_overflow_drops_oldest, false, NULL },
+    { "cons.drain_close_and_reopen_epoch", test_cons_drain_close_and_reopen_epoch, false, NULL },
+    { "cons.drain_poll_deferred_wake", test_cons_drain_poll_deferred_wake, false, NULL },
     { "devctl.bestiary_smoke",         test_devctl_bestiary_smoke,         false, NULL },
     { "devctl.attach_returns_dir",     test_devctl_attach_returns_dir,     false, NULL },
     { "devctl.walk_to_each_leaf",      test_devctl_walk_to_each_leaf,      false, NULL },
@@ -1871,6 +1905,7 @@ struct test_case g_tests[] = {
     { "devdev.walk_pts_dir",           test_devdev_walk_pts_dir,           false, NULL },
     { "devdev.trivial_leaves",         test_devdev_trivial_leaves,         false, NULL },
     { "devdev.cons_gate",              test_devdev_cons_gate,              false, NULL },
+    { "devdev.renderer_gate",          test_devdev_renderer_gate,          false, NULL },
     { "devhw.bestiary_smoke",          test_devhw_bestiary_smoke,          false, NULL },
     { "devhw.attach_returns_root",     test_devhw_attach_returns_root,     false, NULL },
     { "devhw.walk_node_and_prop",      test_devhw_walk_node_and_prop,      false, NULL },
@@ -1959,6 +1994,7 @@ struct test_case g_tests[] = {
     { "devsrv.post_basic",             test_devsrv_post_basic,             false, NULL },
     { "devsrv.tombstone",              test_devsrv_tombstone,              false, NULL },
     { "devsrv.registry_full",          test_devsrv_registry_full,          false, NULL },
+    { "devsrv.registry_full_tombstone_rebinds", test_devsrv_registry_full_tombstone_rebinds, false, NULL },
     { "devsrv.post_rollback",          test_devsrv_post_rollback,          false, NULL },
     { "devsrv.registry_lifecycle",     test_devsrv_registry_lifecycle,     false, NULL },
     { "devsrv.svc_ref_holds_registry", test_devsrv_svc_ref_holds_registry, false, NULL },
@@ -2666,6 +2702,7 @@ struct test_case g_tests[] = {
     { "sys_spawn_with_perms.console_trusted_not_delegable", test_sys_spawn_with_perms_console_trusted_not_delegable, false, NULL },
     { "sys_spawn_with_perms.console_owner_grant_gate",  test_sys_spawn_with_perms_console_owner_grant_gate,  false, NULL },
     { "sys_spawn_with_perms.console_owner_set_wiring",  test_sys_spawn_with_perms_console_owner_set_wiring,  false, NULL },
+    { "sys_spawn_with_perms.renderer_gate",             test_sys_spawn_with_perms_renderer_gate,             false, NULL },
     { "sys_spawn_full_argv.no_argv_acts_as_spawn_with_perms", test_sys_spawn_full_argv_no_argv_acts_as_spawn_with_perms, false, NULL },
     { "sys_spawn_full_argv.golden_argc4",              test_sys_spawn_full_argv_golden_argc4,              false, NULL },
     { "sys_spawn_full_argv.rejects_argc_over_max",     test_sys_spawn_full_argv_rejects_argc_over_max,     false, NULL },

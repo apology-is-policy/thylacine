@@ -503,6 +503,14 @@ impl Repl {
         self.env.exit_requested().unwrap_or_else(|| self.env.status())
     }
 
+    /// PTY-4e F5: whether an exit is already pending (an idle-serviced
+    /// exit-class note -- tty:hup -> 129 -- or a handler's `exit`). The ut
+    /// main loop checks this after `on_notes_ready` so a hup at the prompt
+    /// ends the session immediately instead of at the next Accept.
+    pub fn env_exit_requested(&self) -> Option<i32> {
+        self.env.exit_requested()
+    }
+
     /// Evaluate a whole script `src` non-interactively (the `ut SCRIPT` mode,
     /// D2). Binds the positional parameters ($0 = `arg0`, $1.. = `args`, $* =
     /// all args) at the script's global scope, switches the Env to script mode

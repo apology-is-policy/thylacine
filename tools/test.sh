@@ -188,6 +188,52 @@ while [[ $(date +%s) -lt $deadline ]]; do
             fi
             sleep 0.1
         done
+        # G-1/G-3/G-4 console gate (EVOLVED at G-4, never dropped): the boot
+        # scanout owner is now AURORA -- the console renderer (the fbcon) --
+        # so the verify is the -c CONSOLE signature (the exact Bonfire bg
+        # dominant + exact default-fg text pixels: the login banner/prompt
+        # rendered through drain -> VT -> Cornucopia atlas -> the FULL G-2/
+        # G-3 surface protocol). The LIVENESS leg proves the loop live via a
+        # bounded retry-compare: successive dumps must eventually differ from
+        # the first (the 1 Hz cursor blink guarantees change within a second;
+        # the login prompt's arrival is a second independent driver) --
+        # identical-forever dumps = a dead present loop. The bounded retry
+        # absorbs aurora's connect + first-present + login's prompt timing; a
+        # persistent miss is a FAIL (tapestryd or aurora down/blank). Skipped
+        # when the device/socket is absent (THYLACINE_NO_GPU=1 /
+        # THYLACINE_NO_QMP=1), THYLACINE_GPU_GATE=0, or python3 is missing.
+        if [[ "$result" == "pass" && "${THYLACINE_NO_GPU:-0}" != "1" \
+              && "${THYLACINE_NO_QMP:-0}" != "1" && "${THYLACINE_GPU_GATE:-1}" != "0" ]] \
+           && [[ -S "$QMP_SOCK" ]] && command -v python3 >/dev/null 2>&1 \
+           && kill -0 "$QEMU_PID" 2>/dev/null; then
+            gpu_gate_ok=0
+            for _try in $(seq 1 20); do
+                if "$REPO_ROOT/tools/screendump.sh" -s "$QMP_SOCK" -c \
+                       "$BUILD_DIR/pattern-gate.png" >/dev/null 2>&1; then
+                    gpu_gate_ok=1
+                    break
+                fi
+                sleep 0.5
+            done
+            if [[ "$gpu_gate_ok" == "1" ]]; then
+                # The liveness leg: retry-compare against the first dump.
+                gpu_gate_ok=0
+                for _try in $(seq 1 6); do
+                    sleep 0.7
+                    if "$REPO_ROOT/tools/screendump.sh" -s "$QMP_SOCK" \
+                           "$BUILD_DIR/pattern-gate2.png" >/dev/null 2>&1; then
+                        if ! cmp -s "$BUILD_DIR/pattern-gate.png" \
+                                    "$BUILD_DIR/pattern-gate2.png"; then
+                            gpu_gate_ok=1
+                            break
+                        fi
+                    fi
+                done
+            fi
+            if [[ "$gpu_gate_ok" != "1" ]]; then
+                result="gpu-gate"
+            fi
+        fi
         break
     fi
     if ! kill -0 "$QEMU_PID" 2>/dev/null; then
@@ -235,6 +281,17 @@ case "$result" in
         tail -20 "$LOG_FILE"
         echo "----------------"
         exit 0
+        ;;
+    gpu-gate)
+        echo "==> FAIL: G-4 console gate -- the Aurora scanout did not verify." >&2
+        echo "    Either tools/screendump.sh -c could not see the rendered console" >&2
+        echo "    (Bonfire bg dominant + exact-fg text) post-boot, or the liveness" >&2
+        echo "    retry never saw a differing dump (cursor blink / prompt arrival" >&2
+        echo "    -- a dead present loop)." >&2
+        echo "--- aurora/tapestryd/warden log slice ---" >&2
+        grep -E "aurora:|tapestryd:|warden:" "$LOG_FILE" | tail -20 >&2 || true
+        echo "---------------------------------------" >&2
+        exit 1
         ;;
     extinction)
         echo "==> FAIL: kernel extinction detected." >&2

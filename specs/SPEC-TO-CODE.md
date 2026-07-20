@@ -1749,3 +1749,128 @@ sites land at **8a-2b-2** (this is a RESERVATION until then).
 Pre-commit gate (from 8a-2b-2): `debug_step.cfg` clean GREEN + the 2 buggy cfgs
 confirmed, on any change to the step arm/re-park (`el0_return_stop_check` step
 leg), the SS-machine (`hwdebug.c`), or the EC 0x32 route (`exception.c`).
+
+## tapestry_present.tla — T-1 (the surface present/weave lifecycle; spec-first re-enabled, model-first)
+
+Status: **spec landed model-first @005591ba (V3; two design-holotype rounds
+refined it — the R2-F2 explicit dual refcount lifted clean TLC to 5413
+distinct states); the KERNEL SHARE HALF landed at G-2** (the DMA-weave
+`burrow_share_into` admission + the Weft generalization; the ABI
+`SYS_DMA_CREATE_WEAVE`/`SYS_WEFT_UNSHARE` user-signed-off 2026-07-19); **the
+SERVER HALF landed at G-3** (tapestryd stage 0 + the R2-F3 reaper — the map
+below). Clean cfg GREEN 5413 distinct (unperturbed across G-2 and G-3 —
+neither impl half changed the model); liveness GREEN (`EventuallyRetired`
+incl. across `ServerDeath`); the 4 buggy cfgs each fire their named
+invariant (`premature_reuse` → RecycleGate,
+`retire_during_transfer`/`reweave_without_quiesce` → NoTornScanout,
+`map_after_retire` → NoStaleMap).
+
+The G-3 action ↔ site map (the server half; `usr/tapestryd/src/server.rs`
+unless noted — a USERSPACE realization: the spec's server actions are
+enforced by tapestryd's own discipline plus the kernel gates the G-2 half
+already binds, so a buggy compositor can break only its own display, never
+the kernel invariants):
+
+- **`WeaveFirst` / `Reweave` (backed := TRUE, serverRef := TRUE)** ↔
+  `Comp::create` (the surface ctl's `create W H`): `t_dma_create_weave`
+  (the G-2 kernel-minted share-admissible subtype) + `t_dma_map` + zero +
+  `RESOURCE_CREATE_2D` + whole-weave `ATTACH_BACKING`. `armed` becomes
+  real LAZILY at the first Tweft — `Comp::weft_ensure` (`t_weft_share`,
+  idempotent per surface, the netd precedent); the Map guard is
+  indifferent to registration timing, only to the retire disarm. Stage 0
+  exercises the g1 arm only (`Reweave` — the resize-ack allocation — lands
+  with the pane layer at G-6; `ALLOW_REWEAVE` stays modeled).
+- **`Draw` (client-side)** ↔ the client's writes into its mapped weave
+  slot (`libtapestry::Surface::pixels`) — invisible to the server, as the
+  model's client-half separation intends.
+- **`Submit` → `Complete` (intransfer 1 → 0; the CQE = the recycle
+  gate)** ↔ `Conn::present`: the tpresent Twrite validates (slot + rect
+  vs the geometry — the untrusted-client boundary) then
+  `TRANSFER_TO_HOST_2D` + `RESOURCE_FLUSH` run SYNCHRONOUSLY inside the
+  one dispatch, and the `Rwrite` reply is the client's CQE. The
+  in-flight window opens and closes within one server dispatch, so the
+  in-flight present set is EMPTY at every retire decision point — the
+  stage-0 realization of `ServerRelease`'s `intransfer = 0` quiesce
+  guard, BY CONSTRUCTION. **A pipelined controlq (G-6+) must implement a
+  real drain before touching retire** — this line is the obligation.
+- **`Complete`'s `displayed` update** ↔ `Comp::scanout_take`: an
+  ownerless scanout is taken at present-COMPLETE (the F16
+  switch-at-first-frame alignment), never before a frame transferred.
+- **`Destroy`** ↔ the ctl `destroy` verb, the owning conn's
+  teardown/Tversion reset (`Conn::teardown` / `drop_all_fids` →
+  `Comp::retire_conn`), and the R2-F4 WEDGE force-retire.
+- **`ServerRelease` (the graceful serverRef drop, post-quiesce)** ↔
+  `Comp::retire`'s ordered tail: (1) quiesce — empty by construction
+  (above); (2) `t_weft_unshare` BEFORE any backing free — the R2-F5
+  registry-removal-before-page-free that discharges the Map guard's
+  `wstate` half kernel-side (a claim racing the retire finds nothing;
+  on an already-claimed share the unshare is a harmless miss); (3) the
+  scanout release; (4) `DETACH_BACKING` + `RESOURCE_UNREF`; (5)
+  `t_burrow_detach` + `t_close` of the weave DMA (serverRef := FALSE;
+  `Free` fires kernel-side when the client's `mapped` ref also drops,
+  #847).
+- **`ServerDeath` (serverRef drops AT ONCE; armed dies; the client
+  mapping survives)** ↔ the tapestryd Proc's reap: the RW-7 quiesce
+  resets its virtio devices, `weft_share_release_owner` GCs the
+  unclaimed registry entries (`armed` := FALSE), the #847 client
+  mapping keeps the pages backed (`RefImpliesBacked` across the crash —
+  the R2-F2 non-vacuity check), and **the R2-F3 reaper**
+  (`kernel/weft.c::weft_reap_sweep` + the kproc kthread) force-reclaims
+  the orphaned client mapping after `WEFT_REAP_GRACE_NS`: the
+  cross-Proc unmap under `g_proc_table_lock` + the target's `vma_lock`
+  re-checks the G-2-audit-F1 identity guard, the budget uncharges, and
+  the registration pin drops so the pixel chunk frees at reclaim.
+  Regressions `weft.reap_{orphan_reclaimed,live_session_untouched,
+  close_unregisters}` drive the sweep deterministically.
+- **`ClunkMap` under a reaped generation** ↔ the reaper NULLs
+  `wb->burrow` under `g_weft_reap_lock` and `dev9p_close` unregisters
+  under the same lock BEFORE reading the binding — the disarmed
+  binding's clunk-unmap cannot match and its release NULL-guards (the
+  reaper-vs-close serialization).
+
+The G-2 action ↔ site map (the kernel share half):
+
+- **`armed[g]` (a live weave registration)** ↔ a live `g_weft_shares[]` entry
+  (`kernel/weft.c::weft_share_register` mints it; tapestryd registers on the
+  kernel's `Tweft` and echoes the id in `Rweft`). The registration pin
+  (`burrow_ref`) is the entry's liveness authority.
+- **`Map(g)`'s guard `armed[g] ∧ wstate[g] ∈ {woven, live}`** ↔ THREE
+  composed kernel gates at `kernel/syscall.c::weft_map_claimed`:
+  (1) `weft_share_claim` — the consume-once LIVE-registry lookup (a claim
+  after `SYS_WEFT_UNSHARE` finds nothing → fails closed; the R2-F5
+  registry-removal-before-free + claim-re-check pair); (2)
+  `weft_claimed_kind` — the kernel-minted-type authority + the server
+  geometry cross-check (weave ⇒ `ring_entries == 0`); (3)
+  `burrow_share_into`'s admission gate (`kernel/burrow.c`) — ANON or the
+  `kobj_dma->weave` kernel-minted subtype ONLY (§18.12 R2-F1), plus the
+  R2-F3 `proc_shared_map_charge` client budget. The `wstate ∉ {retiring,
+  gone}` half is DISCHARGED BY THE SERVER-SIDE DISCIPLINE the unshare verb
+  makes possible: tapestryd runs `SYS_WEFT_UNSHARE(id)` at/before the
+  RETIRING transition (registry-removal-BEFORE-page-free), so no claim can
+  land on a retiring weave — `MapStale` (the `map_after_retire`
+  counterexample) is exactly the pre-G-2 gap (no unregister existed; a
+  stale share stayed claimable until owner death).
+- **`Map(g)`'s `armed' = FALSE` (consume-once)** ↔ `weft_share_claim`'s slot
+  clear + pin transfer (`kernel/weft.c`; the regression
+  `weft.share_register_claim` replay leg).
+- **`ClunkMap(g)`** ↔ `kernel/weft.c::weft_binding_clunk_unmap` (called from
+  `dev9p_close`; pid-matched + the G-2-audit-F1 IDENTITY guard — unmap only
+  if the VMA at the recorded VA is still THIS weave's Burrow; drops `mapped`
+  + uncharges the budget) + `weft_binding_release` (drops the registration
+  pin). The RING kind keeps its audited vma_drain-at-exit lifetime (the netd
+  precedent). Regression `weft.weave_clunk_unmap_guard` (revert-probed).
+- **`MappedImpliesBacked` / `RefImpliesBacked` (the #847-across-crash no-UAF
+  check)** ↔ the dual-refcount across the KObj_DMA SECOND domain: the
+  client's `mapping_count` ref keeps the Burrow, whose create-bound
+  `kobj_dma` ref keeps the pixel chunk — `burrow_free_internal`'s
+  type-dispatched `kobj_dma_unref` frees only at `{h:0, m:0}` (the
+  regression `weft.weave_share_and_claim`'s teardown legs).
+
+Regressions (all revert-probed 2026-07-19: the four gate weakenings →
+1167/1169 FAIL on exactly `weft.share_rejects_plain_dma` +
+`weft.weave_share_and_claim`; restored → 1169/1169):
+`weft.share_rejects_plain_dma` (the R2-F1 structural gate, register + claim
+sides), `weft.weave_share_and_claim` (mint → admit → kind → budget → the
+validate_rw kind gate → the second-domain teardown),
+`weft.unshare_disarm` (owner gate + removal-before-free + fail-closed late
+claim), `weft.shared_map_budget_cap` (the R2-F3 budget).

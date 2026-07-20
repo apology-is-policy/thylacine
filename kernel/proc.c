@@ -896,6 +896,29 @@ void proc_vma_uncharge(struct Proc *p) {
     __atomic_store_n(&p->vma_count, nv, __ATOMIC_RELEASE);
 }
 
+bool proc_shared_map_charge(struct Proc *p, u32 npages) {
+    if (!p) return false;
+    // Caller holds p->vma_lock (burrow_share_into's precondition -- the same
+    // domain as the SHARED_IN-flagged VMA teardown), so the load + the cap
+    // decision + the store are atomic against sibling shares -> the cap is
+    // EXACT. The atomic store keeps a lockless cross-Proc /proc reader coherent.
+    u32 cur = __atomic_load_n(&p->shared_map_pages, __ATOMIC_RELAXED);
+    if (npages > 0xFFFFFFFFu - cur) return false;   // counter overflow (refuse)
+    if (!proc_resource_exempt(p) && cur + npages > PROC_SHARED_MAP_MAX_PAGES)
+        return false;                                // over cap -> the share fails clean
+    __atomic_store_n(&p->shared_map_pages, cur + npages, __ATOMIC_RELEASE);
+    return true;
+}
+
+void proc_shared_map_uncharge(struct Proc *p, u32 npages) {
+    if (!p) return;
+    // Caller holds p->vma_lock. Clamp so an over-uncharge (every uncharge matches
+    // a charge -- the SHARED_IN flag pairs them) never wraps past 0.
+    u32 cur = __atomic_load_n(&p->shared_map_pages, __ATOMIC_RELAXED);
+    u32 nv  = (cur >= npages) ? cur - npages : 0;
+    __atomic_store_n(&p->shared_map_pages, nv, __ATOMIC_RELEASE);
+}
+
 bool proc_thread_cap_ok(struct Proc *p) {
     if (!p) return false;
     if (proc_resource_exempt(p)) return true;
@@ -1226,6 +1249,74 @@ bool proc_is_console_owner(const struct Proc *p) {
 void proc_set_console_trusted(struct Proc *p) {
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
     g_console_trusted_proc = p;
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+}
+
+// g_console_renderer is the single bound console RENDERER (G-4, the R2-F6
+// third console role): the Proc holding the /dev/consdrain + /dev/consfeed
+// pair (Aurora). Same lifetime discipline as g_console_owner: protected by
+// g_proc_table_lock, cleared by proc_become_zombie_locked on the holder's
+// death so it never dangles. Distinct from BOTH the attach (elevation) and
+// owner (Ctrl-C) roles -- holding it conveys exactly the drain/feed pair.
+static struct Proc *g_console_renderer;   // BSS NULL
+
+// The single-holder claim. Parent-side spawn_perm_grant_check already refuses
+// a grant while a holder lives; this CAS-under-lock closes the residual race
+// (two threads of the one console-attached Proc granting concurrently pass
+// the check before either child stamps). The loser's child simply lacks the
+// flag; the drain/feed open gate then refuses it -- fail-closed downstream,
+// never a torn double-claim or a silent overwrite.
+int proc_set_console_renderer(struct Proc *p) {
+    if (!p) return -1;
+    // The proc_mark_console_attached parity checks: the role is
+    // trust-adjacent (it gates the drain/feed pair), so a caller bug
+    // claiming it for a corrupted/dying descriptor surfaces loudly.
+    if (p->magic != PROC_MAGIC)
+        extinction("proc_set_console_renderer on corrupted Proc");
+    if (p->state != PROC_STATE_ALIVE)
+        extinction("proc_set_console_renderer on non-ALIVE Proc");
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    if (g_console_renderer != NULL) {
+        spin_unlock_irqrestore(&g_proc_table_lock, s);
+        return -1;
+    }
+    g_console_renderer = p;
+    // The proc_mark_console_attached idiom: an atomic RELAXED OR (the flag is
+    // informational; the pointer under g_proc_table_lock is the authority the
+    // gates compare against).
+    __atomic_or_fetch(&p->proc_flags, PROC_FLAG_CONSOLE_RENDERER, __ATOMIC_RELAXED);
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return 0;
+}
+
+// Compare-only under g_proc_table_lock (the proc_is_console_owner shape): the
+// pointer is written under that lock and cleared on holder-death, so a match
+// implies a live holder; never dereferences.
+bool proc_is_console_renderer(const struct Proc *p) {
+    if (!p) return false;
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    bool yes = (g_console_renderer == p);
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return yes;
+}
+
+struct Proc *proc_test_console_renderer(void) {
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    struct Proc *r = g_console_renderer;
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return r;
+}
+
+// Test-only reset: release the role + the holder's flag (production releases
+// only via proc_become_zombie_locked; tests claim on the live test thread's
+// Proc / synthetic Procs and must restore boot state).
+void proc_test_clear_console_renderer(void) {
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    if (g_console_renderer != NULL) {
+        __atomic_and_fetch(&g_console_renderer->proc_flags,
+                           ~PROC_FLAG_CONSOLE_RENDERER, __ATOMIC_RELAXED);
+    }
+    g_console_renderer = NULL;
     spin_unlock_irqrestore(&g_proc_table_lock, s);
 }
 
@@ -1795,6 +1886,13 @@ static void proc_become_zombie_locked(struct Proc *p, int status, const char *ms
     // re-granting the console to a freed Proc.
     if (g_console_trusted_proc == p) {
         g_console_trusted_proc = NULL;
+    }
+    // G-4: clear the bound console renderer (Aurora) on its death -- the same
+    // never-dangle chokepoint. The renderer's drain fid disarms via its own
+    // handle close (#926/#68 close-at-exit -> devdev close hook); this clear
+    // only frees the ROLE so a future respawn can re-claim it.
+    if (g_console_renderer == p) {
+        g_console_renderer = NULL;
     }
 
     // 2B-F3: clear init on its own death, BEFORE the reparent below --
@@ -2637,10 +2735,13 @@ int proc_stop_sleeper_park(struct Thread *t) {
 // flag under its wait_lock, and DETOURS to park on its own debug_rendez
 // (8c-2 stop-of-a-sleeper, DEBUG-FS-DESIGN 5c.2 -- the multi-thread-Go-target
 // fix: an idle futex-parked M never reaches the EL0-return tail on its own).
-// This is proc_group_terminate's death-wake cascade VERBATIM, but the woken
-// sleeper arms the sleep()-detour park instead of the die:
-// torpor_wake_all_for_proc for the futex (torpor) waiters, then the per-peer
-// wait_lock rendez wake for every other blocking sleep. The caller's RELEASE
+// This is proc_group_terminate's death-wake cascade's SHAPE, with ONE
+// deliberate difference (#19): the NON-COMPLETING torpor_stop_wake_all_for_proc
+// for the futex (torpor) waiters -- the death walk's completing wake fabricates
+// TORPOR_OK, which a SURVIVING stopped Proc observes at resume (a time::sleep
+// job "finishes" the instant fg resumes it); the stop wake preserves the wait
+// (the woken sleeper reparks + re-registers its original deadline). Then the
+// per-peer wait_lock rendez wake for every other blocking sleep, verbatim. The caller's RELEASE
 // store of its stop flag happens-before each wake AND before each peer's
 // wait_lock acquire here, so the woken sleeper's ACQUIRE-read of the flag
 // under its wait_lock observes the stop -- no stop-wake is lost between the
@@ -2656,7 +2757,17 @@ int proc_stop_sleeper_park(struct Thread *t) {
 // every online CPU), so a fan-out over N members issues it ONCE after the walk
 // (audit F2), not per-member.
 static void proc_stop_wake_sleepers_locked(struct Proc *p) {
-    torpor_wake_all_for_proc(p);
+    // PTY-4e (#19): the NON-COMPLETING torpor wake. The death cascade's
+    // torpor_wake_all_for_proc fabricates a completed wait (awoken=1) --
+    // immaterial for a dying Proc, but a STOPPED one SURVIVES: the fabricated
+    // TORPOR_OK rode back to EL0 at resume and made every torpor-timed wait
+    // (time::sleep -> /bin/sleep) "finish" instead of continuing -- the
+    // resumed job exited, fg returned Done, and a second ^Z found no job (the
+    // #19 hang). The non-completing wake leaves `awoken` clear, so the woken
+    // waiter's tsleep re-loop takes the 8c-2 stop detour and parks with the
+    // wait PRESERVED -- on resume it re-registers with its original deadline
+    // (parks-and-reparks; the Linux SIGSTOP-over-futex_wait restart shape).
+    torpor_stop_wake_all_for_proc(p);
     for (struct Thread *peer = p->threads; peer; peer = peer->next_in_proc) {
         irq_state_t ws = spin_lock_irqsave(&peer->wait_lock);
         struct Rendez *r = peer->rendez_blocked_on;

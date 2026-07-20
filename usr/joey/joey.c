@@ -1687,27 +1687,39 @@ static int do_corvus_bringup(long storage_dup_fd) {
 // "login: michael uid=1000 gid=1000" and "login: dek michael ds=N home
 // provisioned + unlocked" confirm the resolved identity + the DEK path.
 // Returns 0 / -1.
-static int do_login_e2e(void) {
-    const char pass_michael[] = "correct-horse-battery-staple-v1";
-
+// login_e2e_run -- one full seeded login cycle for (user, pass). Called for
+// michael AND -- since #30 -- cora, IN THAT ORDER: michael's leg leaves a
+// tombstoned /srv/home-michael in the shared boot registry, so cora's leg is
+// a FRESH service name posted AFTER the boot's permanent posts + tombstones
+// have accumulated -- the exact shape that silently broke when the registry
+// hit SRV_MAX_SERVICES (a fresh /srv/home-<user> found no free slot -> bind
+// EACCES -> an unprovisionable home for every user but michael, invisible to
+// a michael-only gate). A registry-capacity regression now fails the BOOT.
+static int login_e2e_run(const char *user, size_t ulen,
+                         const char *pass, size_t plen) {
     long cr_rd = -1, cr_wr = -1;
     if (t_pipe(&cr_rd, &cr_wr) < 0) {
         t_putstr("joey: login-e2e creds t_pipe FAILED\n");
         return -1;
     }
 
-    // Seed "michael\n<pass>\n", then close the write end so login's fd 0 reads
+    // Seed "<user>\n<pass>\n", then close the write end so login's fd 0 reads
     // the creds then EOF. (Audit F4: the U-3 `ut` skeleton prints a banner via
     // SYS_PUTS and exits 0 WITHOUT reading fd 0, so the E2E passes regardless of
     // ut's fd-0 state today; the creds-pipe EOF wiring is forward-looking for
     // when ut grows a REPL that reads stdin.)
     {
-        unsigned char creds[80];
+        unsigned char creds[96];
         size_t o = 0;
-        const char u[] = "michael\n";
-        for (size_t i = 0; i < sizeof(u) - 1; i++) creds[o++] = (unsigned char)u[i];
-        for (size_t i = 0; i < sizeof(pass_michael) - 1; i++)
-            creds[o++] = (unsigned char)pass_michael[i];
+        if (ulen + plen + 2 > sizeof(creds)) {
+            t_putstr("joey: login-e2e creds too long\n");
+            (void)t_close(cr_rd);
+            (void)t_close(cr_wr);
+            return -1;
+        }
+        for (size_t i = 0; i < ulen; i++) creds[o++] = (unsigned char)user[i];
+        creds[o++] = (unsigned char)'\n';
+        for (size_t i = 0; i < plen; i++) creds[o++] = (unsigned char)pass[i];
         creds[o++] = (unsigned char)'\n';
         if (write_all(cr_wr, creds, o) != 0) {
             t_putstr("joey: login-e2e seed write FAILED\n");
@@ -1758,11 +1770,28 @@ static int do_login_e2e(void) {
     int lst = -1;
     long lreaped = t_wait_pid_for((int)lpid, 0, &lst);
     if (lreaped != lpid || lst != 0) {
-        t_putstr("joey: /sbin/login E2E FAILED (login exit_status != 0)\n");
+        t_putstr("joey: /sbin/login E2E FAILED for ");
+        t_putstr(user);   // always a NUL-terminated literal (see do_login_e2e)
+        t_putstr(" (login exit_status != 0)\n");
         return -1;
     }
-    t_putstr("joey: /sbin/login E2E OK (michael authed; ut spawned stamped + reaped; session closed)\n");
+    t_putstr("joey: /sbin/login E2E OK for ");
+    t_putstr(user);
+    t_putstr(" (authed; home bound; ut spawned stamped + reaped; session closed)\n");
     return 0;
+}
+
+static int do_login_e2e(void) {
+    // michael FIRST (the historical single-user gate), then cora -- the
+    // second-user leg whose fresh /srv/home-cora post exercises the shared
+    // boot registry AFTER the permanent posts + michael's freshly-minted
+    // tombstone (#30: the michael-only gate was structurally blind to the
+    // registry filling; every user but michael was unprovisionable while
+    // this gate stayed green).
+    if (login_e2e_run("michael", 7,
+                      "correct-horse-battery-staple-v1", 31) != 0)
+        return -1;
+    return login_e2e_run("cora", 4, "kora", 4);
 }
 
 // A-5c-c-2: do_recover_e2e -- prove the /sbin/login `!recover` UX drives a LIVE
@@ -6436,18 +6465,19 @@ int main(void) {
         // REAL /bin/ut on a freshly-minted pts (the ptyhost shape) and
         // scripts the ladder against the master: the session dance + prompt;
         // a clean fg run under jc (own pgrp + terminal handoff, proven by the
-        // tr-uppercase trick); `sleep` foregrounded on the pts + ^Z ->
+        // tr-uppercase trick); `sleep 30` foregrounded on the pts + ^Z ->
         // tty:susp default-STOP -> the WAIT_UNTRACED stop-report -> the
         // `[1]+ Stopped` line ON THE PTS (the reroute proof); `jobs` shows it
-        // Stopped; `fg` -> SYS_TTY_CONT resume -> the job runs to a clean
-        // prompt exit (the resume proof: a resume that did nothing would hang
-        // fg forever); the shell reclaims the terminal + still runs commands;
-        // `exit` -> drain-then-EOF + a clean reap (incl. the orphan-rule
-        // teardown of the session). The first shell-under-job-control
-        // Thylacine runs. Boot-fatal. (Interactive `cat`-under-^Z + `fg`/`^Z`
-        // re-stop are the documented PTY-4 follow-ups -- they need the
-        // foreground-read TTIN gate + the resume-then-re-stop tty-signal path;
-        // see docs/reference/136-ptyfs.md.)
+        // Stopped; `fg` -> SYS_TTY_CONT resume -> a SECOND ^Z re-stops it
+        // (the PTY-4e re-stop leg: only a RUNNING job can stop, so the second
+        // Stopped is the resume proof AND the task-#19 regression); `bg`
+        // resumes it backgrounded; `fg` + ^C -> interrupt terminates it
+        // (post-resume signal delivery, the F4 leg); the shell reclaims the
+        // terminal + still runs pipelines; `exit` -> drain-then-EOF + a clean
+        // reap (incl. the orphan-rule teardown of the session). Boot-fatal;
+        // a silent hang is converted to a named FAIL by the probe's watchdog.
+        // (Interactive `cat`-under-^Z stays the documented TTIN follow-up --
+        // task #18; see docs/reference/136-ptyfs.md.)
         {
             const char jc_name[] = "/bin/jc-probe";
             long jc_pid = t_spawn(jc_name, sizeof(jc_name) - 1);
@@ -6462,9 +6492,95 @@ int main(void) {
                 return 1;
             }
             t_putstr("joey: PTY-4 job-control E2E OK (hosted ut: run/stop/"
-                     "jobs/fg-resume/exit over a live pts)\n");
+                     "jobs/fg-restop/bg/fg-int/exit over a live pts)\n");
         }
 #endif /* THYLA_BOOT_PROBES (the PTY-2a-2 round-trip + the 2e openpty E2E + the PTY-3 pouch probe + the PTY-4 jc E2E) */
+    }
+
+    // === G-3: mount /dev/tapestry + spawn the compositor's first client ===
+    // tapestryd is WARDEN-spawned (persistent, gather-bound to the GPU +
+    // keyboard PCI functions) long before this point; joey's job is the V4
+    // mount (the /net idiom: /srv/tapestry absence is environment-dependent
+    // -- THYLACINE_NO_GPU boots have no GPU function -- so absent is SOFT;
+    // a mount error on a present service is FATAL) and the demo client.
+    // The mount point is devdev's synthetic tapestry child (the pts shape).
+    // tapestry-demo is spawn-and-leave: it must OUTLIVE the probe ladder --
+    // its presented surface is what the host-side per-boot pattern gate
+    // (tools/screendump.sh -v in tools/test.sh) verifies, and the RW-7
+    // quiesce blanks the scanout the moment its owner reaps. The demo's own
+    // bounded connect-retry absorbs ordering; the pattern gate is the
+    // end-to-end verifier (client -> 9P -> tapestryd -> weave share ->
+    // present -> virtio-gpu -- the G-2-audit F2 round-trip E2E residue).
+    {
+        long tap_root = t_open(T_WALK_OPEN_FROM_ROOT, "/srv/tapestry", 13, T_OREAD);
+        if (tap_root >= 0) {
+            if (t_mount("/dev/tapestry", 13, tap_root, T_MREPL) != 0) {
+                t_putstr("joey: t_mount(/dev/tapestry) FAILED\n");
+                return 1;
+            }
+            (void)t_close(tap_root);
+            t_putstr("joey: /dev/tapestry mounted (tapestryd tree)\n");
+
+#if THYLA_BOOT_PROBES
+            // G-3 PROBE: the shared-mount read path -- /dev/tapestry/ctl must
+            // yield the display geometry line. Boot-fatal once the mount is up.
+            {
+                long ctl = t_open(T_WALK_OPEN_FROM_ROOT, "/dev/tapestry/ctl",
+                                  17, T_OREAD);
+                if (ctl < 0) {
+                    t_putstr("joey: G-3 PROBE open(/dev/tapestry/ctl) FAILED\n");
+                    return 1;
+                }
+                char cbuf[128];
+                long cn = t_read(ctl, cbuf, sizeof(cbuf) - 1);
+                (void)t_close(ctl);
+                static const char disp_pfx[] = "display ";
+                int pfx_ok = (cn >= 10);
+                for (int i = 0; pfx_ok && disp_pfx[i] != '\0'; i++)
+                    if (cbuf[i] != disp_pfx[i])
+                        pfx_ok = 0;
+                if (!pfx_ok) {
+                    t_putstr("joey: G-3 PROBE /dev/tapestry/ctl malformed\n");
+                    return 1;
+                }
+                cbuf[cn] = '\0';
+                t_putstr("joey: G-3 PROBE OK (/dev/tapestry/ctl: ");
+                for (long i = 0; i < cn; i++)
+                    if (cbuf[i] == '\n') { cbuf[i] = '\0'; break; }
+                t_putstr(cbuf);
+                t_putstr(")\n");
+            }
+#endif
+
+            // G-4: the resident boot presenter is AURORA -- the console
+            // renderer (the fbcon). Spawned WITH T_SPAWN_PERM_CONSOLE_RENDERER
+            // (the I-27 third console role; joey is still console-attached
+            // here, the narrow grant gate) so it may open the /dev/consdrain +
+            // /dev/consfeed pair; its first present takes the scanout and the
+            // session console renders from login onward. The evolved per-boot
+            // gate (tools/screendump.sh -c in tools/test.sh) asserts the
+            // rendered console + a liveness differ (cursor blink / prompt
+            // arrival). tapestry-demo stays baked for manual runs; it no
+            // longer spawns at boot (first-present-wins scanout would race).
+            {
+                char dbuf[24];
+                const char aur_name[] = "/bin/aurora";
+                long aur_pid = t_spawn_with_perms(
+                    aur_name, sizeof(aur_name) - 1,
+                    /*fds=*/(const unsigned int *)0, /*fd_count=*/0,
+                    /*cap_mask=*/0,
+                    T_SPAWN_PERM_CONSOLE_RENDERER);
+                if (aur_pid <= 0) {
+                    t_putstr("joey: t_spawn_with_perms(\"/bin/aurora\") FAILED\n");
+                    return 1;
+                }
+                t_putstr("joey: aurora spawned pid=");
+                t_putstr(itoa_dec(aur_pid, dbuf, sizeof(dbuf)));
+                t_putstr(" (the console renderer; the gate's scanout owner)\n");
+            }
+        } else {
+            t_putstr("joey: /srv/tapestry absent (no GPU environment); skipping\n");
+        }
     }
 
     // (2) Signal boot-complete. All boot-test asserts have passed, so the kernel

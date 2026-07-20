@@ -29,10 +29,21 @@ use crate::{T_CLOCK_MONOTONIC, T_CLOCK_REALTIME, t_clock_gettime, t_clock_settim
 ///
 /// `Duration::ZERO` is a no-op (returns immediately).
 ///
-/// Durations longer than `T_TORPOR_MAX_TIMEOUT_US` (1 hour) saturate
-/// at the kernel cap; callers wanting longer sleeps should loop. A
-/// v1.x extension may add `sleep_until(deadline)` once a monotonic
-/// clock exists.
+/// Every outcome routes through the monotonic-deadline loop (PTY-4e
+/// R2-F2), so a duration beyond the kernel's 1-hour per-wait cap
+/// sleeps its FULL length across multiple clamped waits -- the old
+/// "saturates at the cap" behavior is retired. The one exception is a
+/// dead monotonic clock (the `read_clock` ZERO fallback): a full
+/// kernel timeout with no observable clock progress returns rather
+/// than looping forever (the old saturation, deliberately kept as the
+/// fail-soft arm).
+///
+/// Spurious wakes are part of the futex contract (PTY-4e #19: the
+/// job-stop cascade wakes every torpor waiter of a stopped Proc --
+/// pre-fix it even fabricated a completion, and a conformant caller
+/// must tolerate either), so a `Woken` re-sleeps the REMAINDER
+/// against the deadline rather than returning early -- a
+/// `^Z`-stopped-then-resumed `sleep 30` keeps sleeping.
 ///
 /// Errors:
 ///   - `Error::Io`: defense-in-depth on a kernel return that's
@@ -41,27 +52,43 @@ pub fn sleep(dur: Duration) -> Result<()> {
     if dur.is_zero() {
         return Ok(());
     }
+    let start = Instant::now();
     // Stack-local sentinel. We initialize to 0 and pass expected = 0,
     // so the kernel's "value matches => sleep" path is taken. Nobody
-    // else can address this stack slot, so for a SURVIVING caller the
-    // wait can only end via timeout. (LS-5c: a terminate-disposition
-    // `interrupt` -- and group-exit death -- DOES end the wait early,
-    // but only on the way to terminating the whole Proc at the kernel
-    // return tail, so this function never observes it returning.)
+    // else can WAKE this stack slot by address -- but the proc-WIDE
+    // stop-cascade wake (and any future proc-wide waker) can still
+    // spuriously end the wait, hence the deadline loop.
     let sentinel = AtomicU32::new(0);
-    match torpor::wait(&sentinel, 0, Some(dur)) {
-        Ok(torpor::WaitResult::TimedOut) => Ok(()),
-        Ok(torpor::WaitResult::Woken) => {
-            // Unreachable: nobody else holds the sentinel's address.
-            // Defense-in-depth.
-            Ok(())
+    let mut last_elapsed = Duration::ZERO;
+    loop {
+        let elapsed = start.elapsed();
+        let remaining = dur.saturating_sub(elapsed);
+        if remaining.is_zero() {
+            return Ok(());
         }
-        Ok(torpor::WaitResult::ValueMismatch) => {
-            // Unreachable: we wrote 0 ourselves and passed expected = 0.
-            // Defense-in-depth.
-            Ok(())
+        match torpor::wait(&sentinel, 0, Some(remaining)) {
+            Ok(torpor::WaitResult::TimedOut) => {
+                // The kernel timeout lapsed. For dur <= the 1-hour cap the
+                // deadline check above terminates next iteration; a longer
+                // dur re-sleeps the rest (the wait was cap-clamped). The
+                // dead-clock guard: a full timeout with NO clock progress
+                // means the monotonic source is inert (the read_clock ZERO
+                // fallback) -- return (the old saturation, fail-soft)
+                // instead of looping forever.
+                if elapsed == last_elapsed {
+                    return Ok(());
+                }
+                last_elapsed = elapsed;
+                continue;
+            }
+            Ok(torpor::WaitResult::Woken) => continue, // spurious: re-sleep the rest
+            Ok(torpor::WaitResult::ValueMismatch) => {
+                // Unreachable: we wrote 0 ourselves and passed expected = 0.
+                // Defense-in-depth -- treat as spurious and re-check the clock.
+                continue;
+            }
+            Err(e) => return Err(e),
         }
-        Err(e) => Err(e),
     }
 }
 
