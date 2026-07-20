@@ -176,18 +176,18 @@ deadline=$(( $(date +%s) + BOOT_TIMEOUT ))
 result="timeout"
 while [[ $(date +%s) -lt $deadline ]]; do
     # Extinction first: a crash is a FAIL whether or not the banner also printed.
-    if [[ -f "$LOG_FILE" ]] && grep -q "^$EXTINCTION_MARKER" "$LOG_FILE"; then
+    if [[ -f "$LOG_FILE" ]] && grep -aq "^$EXTINCTION_MARKER" "$LOG_FILE"; then
         result="extinction"
         break
     fi
-    if [[ -f "$LOG_FILE" ]] && grep -q "$BOOT_MARKER" "$LOG_FILE"; then
+    if [[ -f "$LOG_FILE" ]] && grep -aq "$BOOT_MARKER" "$LOG_FILE"; then
         # Banner observed. Watch a grace window for a POST-banner extinction
         # (getty/login fault) before declaring PASS -- joey persists past the
         # banner, so a later crash must not be masked.
         result="pass"
         grace_deadline=$(( $(date +%s) + BANNER_GRACE ))
         while [[ $(date +%s) -lt $grace_deadline ]]; do
-            if grep -q "^$EXTINCTION_MARKER" "$LOG_FILE"; then
+            if grep -aq "^$EXTINCTION_MARKER" "$LOG_FILE"; then
                 result="extinction"
                 break
             fi
@@ -246,9 +246,9 @@ while [[ $(date +%s) -lt $deadline ]]; do
     fi
     if ! kill -0 "$QEMU_PID" 2>/dev/null; then
         # QEMU exited before the marker. Final check on the log (extinction first).
-        if grep -q "^$EXTINCTION_MARKER" "$LOG_FILE"; then
+        if grep -aq "^$EXTINCTION_MARKER" "$LOG_FILE"; then
             result="extinction"
-        elif grep -q "$BOOT_MARKER" "$LOG_FILE"; then
+        elif grep -aq "$BOOT_MARKER" "$LOG_FILE"; then
             result="pass"
         else
             result="qemu-exit"
@@ -275,29 +275,29 @@ case "$result" in
         # state), the log MUST also contain INPUT_SUCCESS_MARKER —
         # otherwise the injector failed or events weren't delivered.
         if [[ "$INPUT_INJECT" != "0" ]] \
-           && grep -q "$INPUT_SENTINEL" "$LOG_FILE" \
-           && ! grep -q "$INPUT_SUCCESS_MARKER" "$LOG_FILE"; then
+           && grep -aq "$INPUT_SENTINEL" "$LOG_FILE" \
+           && ! grep -aq "$INPUT_SUCCESS_MARKER" "$LOG_FILE"; then
             echo "==> FAIL: virtio-input probe reached AWAITING_QMP_KEY but never observed the injected EV_KEY event." >&2
             echo "    Expected log line: '$INPUT_SUCCESS_MARKER'" >&2
             echo "    Likely causes: QMP socket connect failed, python3 missing, send-key not delivered, or driver poll cap too short." >&2
             echo "--- virtio-input log slice ---" >&2
-            grep -A 0 "virtio-input:" "$LOG_FILE" >&2 || true
+            grep -a -A 0 "virtio-input:" "$LOG_FILE" >&2 || true
             echo "------------------------------" >&2
             exit 1
         fi
         # task #70: require the watchpoint fire on any accel that can deliver it.
         # run-vm.sh logs the chosen accel ("==> qemu: accel=<a> ..."), so read it
         # back rather than re-deriving the auto-detect here.
-        boot_accel="$(sed -n 's/^==> qemu: accel=\([a-z0-9]*\).*$/\1/p' "$LOG_FILE" | head -1)"
+        boot_accel="$(LC_ALL=C sed -n 's/^==> qemu: accel=\([a-z0-9]*\).*$/\1/p' "$LOG_FILE" | head -1 || true)"
         if [[ -n "$boot_accel" && "$boot_accel" != "tcg" ]] \
-           && ! grep -q "$HWWATCH_MARKER" "$LOG_FILE"; then
+           && ! grep -aq "$HWWATCH_MARKER" "$LOG_FILE"; then
             echo "==> FAIL: accel=$boot_accel delivers EL0 watchpoints, but debug-probe never reported it." >&2
             echo "    Expected log line: '$HWWATCH_MARKER'" >&2
             echo "    A SKIP here means the kernel stopped delivering EC 0x34 on a substrate" >&2
             echo "    that supports it -- i.e. a real regression on the I-39 debug surface," >&2
             echo "    not the QEMU-TCG gap of task #70." >&2
             echo "--- debug-probe log slice ---" >&2
-            grep "debug-probe:" "$LOG_FILE" >&2 || true
+            grep -a "debug-probe:" "$LOG_FILE" >&2 || true
             echo "-----------------------------" >&2
             exit 1
         fi
@@ -313,14 +313,14 @@ case "$result" in
         echo "    retry never saw a differing dump (cursor blink / prompt arrival" >&2
         echo "    -- a dead present loop)." >&2
         echo "--- aurora/tapestryd/warden log slice ---" >&2
-        grep -E "aurora:|tapestryd:|warden:" "$LOG_FILE" | tail -20 >&2 || true
+        grep -aE "aurora:|tapestryd:|warden:" "$LOG_FILE" | tail -20 >&2 || true
         echo "---------------------------------------" >&2
         exit 1
         ;;
     extinction)
         echo "==> FAIL: kernel extinction detected." >&2
         echo "--- ELE context ---" >&2
-        grep -B 2 -A 10 "^$EXTINCTION_MARKER" "$LOG_FILE" >&2
+        grep -a -B 2 -A 10 "^$EXTINCTION_MARKER" "$LOG_FILE" >&2
         echo "-------------------" >&2
         exit 1
         ;;

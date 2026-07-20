@@ -73,11 +73,11 @@ INJECT_LOG="$REPO_ROOT/build/test-inject.log"
 
 # The guest is provably green AND the only defect is the missed key delivery.
 inject_miss_green() {
-    grep -qF "$INJ_SENTINEL" "$LOG" \
-        && grep -qF "$INJ_SKIP" "$LOG" \
-        && grep -q "$BOOT_OK_RE" "$LOG" \
-        && ! grep -q '^EXTINCTION:' "$LOG" \
-        && ! grep -qE "$SUITE_FAIL_RE" "$LOG"
+    grep -aqF "$INJ_SENTINEL" "$LOG" \
+        && grep -aqF "$INJ_SKIP" "$LOG" \
+        && grep -aq "$BOOT_OK_RE" "$LOG" \
+        && ! grep -aq '^EXTINCTION:' "$LOG" \
+        && ! grep -aqE "$SUITE_FAIL_RE" "$LOG"
 }
 
 # Per-boot pool restore (#362): every boot's go4c probes write GOCACHE/$WORK
@@ -113,15 +113,15 @@ for i in $(seq 1 "$N"); do
     pool_restore
     if THYLACINE_TEST_CPUS="$CPUS" "$REPO_ROOT/tools/test.sh" $sanflag >"$HARNESS_LOG" 2>&1; then
         # Belt-and-suspenders: even on exit 0, fail if a corruption marker leaked.
-        if grep -qE "$CORRUPT_RE" "$LOG"; then
+        if grep -aqE "$CORRUPT_RE" "$LOG"; then
             corrupt=$((corrupt+1)); cp "$LOG" "$FAILDIR/$LABEL-$i-CORRUPT.log"
-            echo "  [$LABEL $i/$N] CORRUPTION (despite exit 0): $(grep -oE "$CORRUPT_RE" "$LOG" | head -1)"
+            echo "  [$LABEL $i/$N] CORRUPTION (despite exit 0): $(grep -aoE "$CORRUPT_RE" "$LOG" | head -1)"
         else
             pass=$((pass+1)); echo "  [$LABEL $i/$N] PASS"
         fi
     else
-        msg="$(grep -E 'EXTINCTION|tests: [0-9]+/[0-9]+ (FAIL|fail)' "$LOG" | head -1)"
-        if grep -qE "$CORRUPT_RE" "$LOG"; then
+        msg="$(grep -aE 'EXTINCTION|tests: [0-9]+/[0-9]+ (FAIL|fail)' "$LOG" | head -1)"
+        if grep -aqE "$CORRUPT_RE" "$LOG"; then
             corrupt=$((corrupt+1)); cp "$LOG" "$FAILDIR/$LABEL-$i-CORRUPT.log"
             cp "$HARNESS_LOG" "$FAILDIR/$LABEL-$i-CORRUPT-harness.log" 2>/dev/null || true
             echo "  [$LABEL $i/$N] CORRUPTION: ${msg:-<no extinction line>}"
@@ -130,7 +130,7 @@ for i in $(seq 1 "$N"); do
             cp "$INJECT_LOG" "$FAILDIR/$LABEL-$i-INJECT-injector.log" 2>/dev/null || true
             cp "$HARNESS_LOG" "$FAILDIR/$LABEL-$i-INJECT-harness.log" 2>/dev/null || true
             echo "  [$LABEL $i/$N] inject-miss (harness delivery; guest green)"
-        elif grep -qE "$TIMING_RE" "$LOG"; then
+        elif grep -aqE "$TIMING_RE" "$LOG"; then
             timing=$((timing+1)); cp "$LOG" "$FAILDIR/$LABEL-$i-TIMING.log"
             cp "$HARNESS_LOG" "$FAILDIR/$LABEL-$i-TIMING-harness.log" 2>/dev/null || true
             echo "  [$LABEL $i/$N] timing (benign host-fragility): ${msg:-?}"
