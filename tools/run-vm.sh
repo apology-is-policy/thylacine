@@ -370,6 +370,21 @@ case "$accel" in
 esac
 echo "==> qemu: accel=$accel cpu=$cpu gic=v$gicv smp=$cpus" >&2
 
+# task #70: QEMU TCG programs DBGWVR/DBGWCR but never raises EC 0x34, and a guest
+# thread that touches a watched page then spins inside the emulator's retry of that
+# one instruction -- it takes no timer IRQ, so it never reaches the EL0-return tail
+# and CANNOT be killed. Under TCG's round-robin that wedged vCPU starves the guest
+# and the boot never finishes. The kernel is correct here (the same encoding fires
+# on real silicon under HVF), so the only safe move is to not arm a watchpoint at
+# all on this substrate. Advertise that via the DTB: QEMU turns -append into
+# /chosen/bootargs, which the guest reads back through the /hw FDT mount -- no
+# kernel cmdline parser required. Absence of the token means "watchpoints work",
+# so every other substrate keeps the hard assertion.
+append_flags=()
+if [[ "$accel" == "tcg" ]]; then
+    append_flags=(-append "thylacine.nowatchpoint")
+fi
+
 # Canonical QEMU flags per TOOLING.md §3.
 #
 # disk_flags (P4-Ic5b2) comes BEFORE virtio-rng-device because QEMU
@@ -382,6 +397,7 @@ exec qemu-system-aarch64 \
     -smp "$cpus" \
     -m "$mem_mib" \
     -kernel "$KERNEL_BIN" \
+    ${append_flags[@]+"${append_flags[@]}"} \
     ${ramfs_flags[@]+"${ramfs_flags[@]}"} \
     ${pool_flags[@]+"${pool_flags[@]}"} \
     ${disk_flags[@]+"${disk_flags[@]}"} \

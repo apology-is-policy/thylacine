@@ -38,10 +38,10 @@ static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::Th
 
 use alloc::format;
 use libthyla_rs::fs::{File, OpenOptions};
-use libthyla_rs::io::Write;
+use libthyla_rs::io::{Read, Write};
 use libthyla_rs::process::{Child, Command, Stdio};
 use libthyla_rs::time::{sleep, Duration};
-use libthyla_rs::{t_exits, t_pread, t_putstr, t_pwrite, t_wait_pid_for};
+use libthyla_rs::{t_exits, t_pread, t_putstr, t_pwrite, t_wait_pid_for, T_WAIT_WNOHANG};
 
 // MUST match debug-child.
 const SENTINEL_REG: u64 = 0xDEB0_DEB0;
@@ -64,6 +64,18 @@ const KREGS_LEN: usize = 112;
 
 // EL0 VAs are TTBR0 (< 2^48, bit 63 clear); kernel VAs are TTBR1 (bit 63 set).
 const USER_VA_LIMIT: u64 = 1u64 << 47;
+
+// Bound on the post-`start` wait for the watchpoint stop (task #70). A working
+// substrate re-stops within one instruction of the resume, so ~20 s is orders of
+// magnitude of slack even under full emulation -- it exists only to convert a
+// non-delivering substrate's guest wedge from a boot-long hang into a report.
+const WP_POLL_TRIES: u32 = 800;
+const WP_POLL_MS: u64 = 25;
+
+// Bound on the post-SKIP reap sweep (~2 s). A child that merely ran to completion
+// exits at once; one wedged inside the emulator never will, and waiting cannot
+// change that -- see the SKIP path.
+const REAP_POLL_TRIES: u32 = 80;
 
 fn fail(msg: &str) -> ! {
     t_putstr(msg);
@@ -93,6 +105,37 @@ fn u64_le(buf: &[u8], off: usize) -> u64 {
         i += 1;
     }
     v
+}
+
+// task #70: does this substrate deliver EL0 data watchpoints?
+//
+// Not something the guest can safely probe for itself: *arming* a watchpoint is
+// what wedges a non-delivering substrate, and the wedged thread cannot be killed
+// (it never takes a timer IRQ, so it never reaches the EL0-return die-check), so
+// under TCG's round-robin it starves the whole guest and the boot never finishes.
+// A self-test would therefore destroy the machine it was testing.
+//
+// So the answer comes from outside: run-vm.sh passes `-append
+// thylacine.nowatchpoint` on an accel it knows cannot deliver, QEMU turns that
+// into /chosen/bootargs, and we read it back through the /hw FDT mount. Absent or
+// unreadable -> assume delivery (fail toward the hard assertion, so a substrate
+// that simply lacks the /hw mount still gets the real test rather than a silent
+// skip).
+fn substrate_delivers_watchpoints() -> bool {
+    // NB: devhw is `.seekable = false` (kernel/devhw.c), so the #37 ESPIPE gate
+    // rejects a positioned pread on it up front -- this MUST be a sequential read.
+    let mut f = match File::open("/hw/chosen/bootargs") {
+        Ok(f) => f,
+        Err(_) => return true, // no bootargs property -> nothing opted out
+    };
+    let mut buf = [0u8; 256];
+    let n = match f.read(&mut buf) {
+        Ok(n) if n > 0 => n,
+        _ => return true,
+    };
+    let hay = &buf[..n];
+    let needle = b"nowatchpoint";
+    !hay.windows(needle.len()).any(|w| w == needle)
 }
 
 // Fill `buf` fully via positioned reads (pread does not advance a cursor); a
@@ -304,26 +347,82 @@ fn debug_flow(child: &mut Child) -> Result<(), &'static str> {
     // (EC 0x34 -> the whole-Proc stop) -- the headline b-3 proof: a debugger-armed
     // HW watchpoint fires on a cross-Proc EL0 data access.
     let watch_va = x21 + 24;
-    ctl.write_all(format!("hwwatch w 0x{:x} 8", watch_va).as_bytes())
-        .map_err(|_| "debug-probe: FAIL -- hwwatch\n")?;
+    // task #70: on a substrate that cannot deliver EC 0x34, arming the watchpoint
+    // wedges the child UNRECOVERABLY (see substrate_delivers_watchpoints), so the
+    // only safe handling is not to arm at all. Release the child untrapped instead
+    // and let the rest of the boot proceed.
+    let wp_supported = substrate_delivers_watchpoints();
+    if wp_supported {
+        ctl.write_all(format!("hwwatch w 0x{:x} 8", watch_va).as_bytes())
+            .map_err(|_| "debug-probe: FAIL -- hwwatch\n")?;
+    } else {
+        t_putstr("debug-probe: hwwatch SKIPPED -- substrate cannot deliver EC 0x34 (task #70)\n");
+    }
     let proceed: u64 = 1;
     if unsafe { t_pwrite(mem_f.as_raw_fd() as i64, (&proceed as *const u64) as *const u8, 8, (x21 + 16) as i64) } != 8 {
         return Err("debug-probe: FAIL -- write proceed flag via mem\n");
     }
     ctl.write_all(b"start").map_err(|_| "debug-probe: FAIL -- start(into watch)\n")?;
 
-    // Wait for the watchpoint to fire. `wait` blocks until fully-stopped; after
-    // `start` cleared debug_stop_req, a return of "stopped" means the wp re-set it
-    // (the child hit the watched store). If the wp did NOT fire, the child would
-    // complete the store and never stop -> wait blocks -> the boot gate times out
-    // (a non-vacuous failure): a PASS REQUIRES the wp to have fired.
-    {
-        let wait_f = File::open(&format!("/proc/{}/wait", pid)).map_err(|_| "debug-probe: FAIL -- open wait(wp)\n")?;
-        let mut wbuf = [0u8; 16];
-        let wn = unsafe { t_pread(wait_f.as_raw_fd() as i64, wbuf.as_mut_ptr(), wbuf.len(), 0) };
-        if wn < 7 || &wbuf[..7] != b"stopped" {
-            return Err("debug-probe: FAIL -- wp did not deliver a stop\n");
+    if !wp_supported {
+        // Nothing armed: the child performs the store untrapped and exit(0)s, so
+        // the ordinary reap is the whole remaining cycle.
+        return match child.wait() {
+            Ok(st) if st.success() => Ok(()),
+            Ok(_) => Err("debug-probe: FAIL -- child exit status != 0 (wp-skipped path)\n"),
+            Err(_) => Err("debug-probe: FAIL -- reap child (wp-skipped path)\n"),
+        };
+    }
+
+    // Wait for the watchpoint to fire -- BOUNDED, deliberately not the blocking
+    // /proc/<pid>/wait read. A successful regs read IS a stopped-ness test (the
+    // debug reads are stopped-only, and `start` cleared debug_stop_req, so a read
+    // only succeeds once something re-stopped the child -- and the bp is disarmed,
+    // so that something is the watchpoint). Polling it therefore needs no blocking
+    // channel and cannot hang.
+    //
+    // The bound is load-bearing: a substrate that does not implement EL0 data
+    // watchpoints leaves the child stuck at the watched access, so a blocking wait
+    // here never returns and takes the entire boot with it (task #70 -- QEMU TCG
+    // programs DBGWVR/DBGWCR, never raises EC 0x34, and wedges the guest at the
+    // access; the same kernel + encoding fires on real silicon under HVF). We
+    // report the gap and skip the assertions instead of hanging. This cannot
+    // silently mask a regression: tools/test.sh REQUIRES the "hwwatch ok" line on
+    // any accel that can deliver, so the assertion stays hard where it can run.
+    let mut fired = false;
+    for _ in 0..WP_POLL_TRIES {
+        if read_exact_at(regs_f.as_raw_fd() as i64, 0, &mut regs).is_ok() {
+            fired = true;
+            break;
         }
+        let _ = sleep(Duration::from_millis(WP_POLL_MS));
+    }
+    if !fired {
+        t_putstr("debug-probe: hwwatch SKIPPED -- no EC 0x34 delivered by this substrate (task #70)\n");
+        // The child is stuck at the watched access: it cannot be stopped (it never
+        // reaches the EL0-return checkpoint) and the wp cannot be lifted (hwrmwatch
+        // is stopped-only). Ask it to die, but do NOT block on the reap: measured on
+        // QEMU TCG, such a child is UNKILLABLE. The kill only takes effect at the
+        // EL0-return tail's #809 die-check, which a thread reaches via the timer
+        // IRQ -- and a thread spinning inside the emulator's own retry of a single
+        // instruction never returns to the CPU loop where interrupts are polled, so
+        // no tick is ever taken. Nothing in the guest can reclaim it; a blocking
+        // reap here just moves the hang from the wait to the reap (measured).
+        //
+        // So: best-effort kill (it DOES work on a substrate that merely fails to
+        // deliver EC 0x34 without wedging -- there the child runs to completion and
+        // exits), a bounded WNOHANG sweep, then continue regardless. The stuck Proc
+        // stays ALIVE rather than becoming a zombie, so it does not orphan a zombie
+        // onto joey's reaper; it costs one wedged vCPU for the rest of the boot.
+        let _ = child.kill();
+        let mut st: i32 = 0;
+        for _ in 0..REAP_POLL_TRIES {
+            if unsafe { t_wait_pid_for(child.pid(), T_WAIT_WNOHANG, &mut st as *mut i32) } != 0 {
+                break;
+            }
+            let _ = sleep(Duration::from_millis(WP_POLL_MS));
+        }
+        return Ok(());
     }
     // The frozen frame's PC is the store instruction (an EL0 VA, past the bp region).
     // A wp fires with ELR = the accessing instruction; we assert an EL0t frame (the

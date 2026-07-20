@@ -568,6 +568,78 @@ register math) + the `/debug-probe` watch phase (arm a WRITE watchpoint on a
 cross-Proc stack word, resume, the child's store traps → verify the EL0t stop →
 `hwrmwatch` + resume → exit 0; the wp is the ONLY reason the store stops).
 
+### Watchpoint delivery is substrate-dependent (task #70)
+
+**QEMU TCG does not deliver EL0 data watchpoints, and wedges the guest instead.**
+Measured 2026-07-20 against QEMU 10.0.2 `-cpu max` with a kernel byte-identical to
+the HVF run: the kernel programs `DBGWVR0 = 0x7fffff08` / `DBGWCR0 = 0x1ff5`
+(`E=1`, `PAC=0b10` EL0, `LSC=0b10` store, `BAS=0xFF`, `HMC=0`, `SSC=0` — bit-for-bit
+the Linux `hw_breakpoint.c` user-watchpoint encoding), `ID_AA64DFR0` reports 4
+watchpoints, and **EC 0x34 never arrives**. Under HVF on an Apple M2 the same
+binary and the same register pair fire once, `FAR` = the watched VA. Real silicon
+is the architectural reference, so the encoding is valid and TCG is the deviation.
+
+The failure mode is a livelock, not a miss: the target does not stop and does not
+exit (`devproc_waitscan_cb` reports a dead Proc as `-1` → `"exited"`, so a run-to-
+completion would surface cleanly) — it stays ALIVE and never advances past the
+watched access. QEMU marks the whole page for watchpoint checking, so every access
+the child makes to its own stack takes that path.
+
+**Such a target is UNKILLABLE from inside the guest, and it starves the guest.**
+Both facts were measured the hard way, each refuting a fix attempt:
+
+1. A kill takes effect only at the EL0-return tail's `#809` die-check, which a
+   spinning EL0 thread reaches via the timer IRQ. A thread stuck inside the
+   emulator's own retry of a single instruction never returns to the CPU loop where
+   interrupts are polled — so it never takes a tick, never reaches the tail, and
+   never dies. A blocking reap after the kill just moves the hang.
+2. Leaving it alive is not survivable either. Under TCG's round-robin the wedged
+   vCPU starves the others: the probe reported `PASS` and the boot still never
+   reached the banner.
+
+So there is no in-guest recovery once a watchpoint has been armed on a
+non-delivering substrate. **The only safe handling is to not arm one**, which means
+the substrate's capability must be known *before* the arm — and cannot be
+discovered by trying, since trying is what destroys the machine.
+
+Consequences for the harness:
+
+- **`tools/run-vm.sh` declares the gap out-of-band.** On `accel=tcg` it passes
+  `-append thylacine.nowatchpoint`; QEMU turns that into `/chosen/bootargs`, and the
+  guest reads it back through the existing `/hw` FDT mount
+  (`substrate_delivers_watchpoints()` reads `/hw/chosen/bootargs`). **No kernel
+  cmdline parser and no new kernel surface** — `devhw` already serves FDT
+  properties as files. Absent or unreadable ⇒ assume delivery, so the failure
+  direction is toward running the real assertion, never toward a silent skip.
+  Note that `devhw` is `.seekable = false`, so that read **must be sequential** —
+  the `#37` ESPIPE gate rejects a positioned `pread` on it before the Dev is ever
+  reached, and the symptom is a bare `-1` that looks like a missing property.
+- `/debug-probe` **never arms** when the token is present: it prints
+  `debug-probe: hwwatch SKIPPED -- substrate cannot deliver EC 0x34 (task #70)`,
+  releases the child untrapped, and reaps it normally. Nothing wedges.
+- As a diagnostic net for an *undeclared* non-delivering substrate, the armed path
+  also bounds its post-`start` wait (`WP_POLL_TRIES` × `WP_POLL_MS` ≈ 20 s) rather
+  than blocking on `/proc/<pid>/wait`, polling stopped-ness with a `/proc/<pid>/regs`
+  read (the debug reads are stopped-only, and `start` clears `debug_stop_req`
+  synchronously *before* its wake walk — `proc_debug_resume` — so a successful read
+  cannot be a stale pre-resume stop; it *is* the wp fire). That net converts an
+  unexplained boot-long hang into a logged reason; it does **not** rescue the boot,
+  because the wedged child still starves the guest. The declaration above is the
+  actual fix.
+- `tools/test.sh` **requires** `debug-probe: hwwatch ok` on any accel other than
+  `tcg` (it reads the accel back from run-vm.sh's own `==> qemu: accel=…` line). So
+  the assertion stays hard wherever it can run, and a real regression on the I-39
+  debug surface cannot hide behind the emulator's gap.
+
+Note that no in-guest capability witness is possible here, unlike the 8a-2a
+`hwbp-verify` breakpoint witness: *arming* is what wedges the guest, so a witness
+would destroy the machine it was testing. That asymmetry — breakpoints are
+self-testable, watchpoints are not — is why this one capability is declared from
+outside rather than measured from within.
+
+Anyone debugging under TCG should know that `hwwatch` will wedge the target —
+`hwbreak` and `step` both work there.
+
 ## 8a-2c — the consolidated close (SA-1 + the arc audit)
 
 8a-2c is the arc close: a focused Fable-5-max holotype over the WHOLE 8a-2

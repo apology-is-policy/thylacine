@@ -103,6 +103,14 @@ fi
 BOOT_MARKER="Thylacine boot OK"
 EXTINCTION_MARKER="EXTINCTION:"             # per TOOLING.md §10 ABI
 
+# task #70: debug-probe's cross-Proc hardware-watchpoint leg. QEMU TCG programs
+# DBGWVR/DBGWCR but never raises EC 0x34, and instead wedges the guest at the
+# watched access; the probe bounds its wait and prints a SKIP line there rather
+# than hanging the boot. On every substrate that CAN deliver (HVF, real hardware)
+# the fire stays a hard requirement -- enforced below, so a real kernel regression
+# cannot hide behind the emulator's gap.
+HWWATCH_MARKER="debug-probe: hwwatch ok"
+
 # P4-K-events: QMP key injection. Wakes the userspace virtio-input
 # probe via QEMU's `send-key` after the probe prints its
 # AWAITING_QMP_KEY sentinel to the boot log. THYLACINE_INPUT_INJECT=0
@@ -275,6 +283,22 @@ case "$result" in
             echo "--- virtio-input log slice ---" >&2
             grep -A 0 "virtio-input:" "$LOG_FILE" >&2 || true
             echo "------------------------------" >&2
+            exit 1
+        fi
+        # task #70: require the watchpoint fire on any accel that can deliver it.
+        # run-vm.sh logs the chosen accel ("==> qemu: accel=<a> ..."), so read it
+        # back rather than re-deriving the auto-detect here.
+        boot_accel="$(sed -n 's/^==> qemu: accel=\([a-z0-9]*\).*$/\1/p' "$LOG_FILE" | head -1)"
+        if [[ -n "$boot_accel" && "$boot_accel" != "tcg" ]] \
+           && ! grep -q "$HWWATCH_MARKER" "$LOG_FILE"; then
+            echo "==> FAIL: accel=$boot_accel delivers EL0 watchpoints, but debug-probe never reported it." >&2
+            echo "    Expected log line: '$HWWATCH_MARKER'" >&2
+            echo "    A SKIP here means the kernel stopped delivering EC 0x34 on a substrate" >&2
+            echo "    that supports it -- i.e. a real regression on the I-39 debug surface," >&2
+            echo "    not the QEMU-TCG gap of task #70." >&2
+            echo "--- debug-probe log slice ---" >&2
+            grep "debug-probe:" "$LOG_FILE" >&2 || true
+            echo "-----------------------------" >&2
             exit 1
         fi
         echo "--- log tail ---"
