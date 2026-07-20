@@ -33,6 +33,9 @@ pub const VIOLET: Color = Color::Rgb(0xa8, 0x98, 0xc8);
 pub const GOLD: Color = Color::Rgb(0xc8, 0xa8, 0x82);
 /// Buffer-tab strip -- Bonfire `slate` (keyword / blue ANSI; UTOPIA-VISUAL U-2).
 pub const SLATE: Color = Color::Rgb(0x8a, 0x9a, 0xc8);
+/// Diagnostic error -- a warm rust that reads as ALARM against the ember accent
+/// without leaving the Bonfire family (a raw ANSI red would clash with it).
+pub const RUST: Color = Color::Rgb(0xd0, 0x5a, 0x4a);
 
 /// The cursor's line gets a subtly lifted background (Bonfire `surface`) so the
 /// active row stands out without a loud bar.
@@ -95,6 +98,28 @@ pub fn blank() -> Style {
 /// Gutter line numbers.
 pub fn gutter() -> Style {
     Style::new().fg(DIM).bg(BG)
+}
+
+/// The gutter number on a line carrying an ERROR: rust, bold. Deliberately a
+/// recolor of the existing number rather than an extra marker column -- the
+/// gutter width is shared with the wrapped renderer and a width change would
+/// reflow every visual row.
+pub fn gutter_error() -> Style {
+    Style::new().fg(RUST).bg(BG).attr(Attr::BOLD)
+}
+
+/// The gutter number on a line carrying a WARNING (or a lesser diagnostic).
+pub fn gutter_warn() -> Style {
+    Style::new().fg(GOLD).bg(BG).attr(Attr::BOLD)
+}
+
+/// A diagnostic message shown on the status line (cursor sitting on the line).
+pub fn status_error() -> Style {
+    Style::new().fg(RUST).bg(BAR)
+}
+
+pub fn status_warn() -> Style {
+    Style::new().fg(GOLD).bg(BAR)
 }
 
 /// The `~` past-end-of-buffer markers (vim style).

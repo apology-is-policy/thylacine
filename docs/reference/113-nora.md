@@ -232,6 +232,32 @@ child is ALWAYS reaped (nora is long-lived; an unreaped child is a zombie
 leak). Proven end-to-end by `tools/interactive/go6.exp` (a tab appears in the
 saved file that was never typed).
 
+## Language server (gopls, Stage 8e-2)
+
+A Go buffer brings up a persistent `gopls` alongside the editor and shows its
+diagnostics inline. The client lives in `parley` (`docs/reference/141-parley.md`
+has the full picture); nora's side is `src/lsp_host.rs` plus `src/diag.rs`.
+
+- **The loop polls fd 0 and the server's pipes together** (one `poll(2)` via
+  `parley::transport::Mux`), so an arriving diagnostic wakes the editor exactly
+  like a keystroke. There is no tick -- a message nothing polls for never
+  repaints.
+- **The editor never blocks on it.** No language server (gopls absent, spawn
+  refused, a non-Go buffer) is a fully supported state: nora behaves exactly as
+  it did before 8e. A server that dies is reaped and dropped; editing continues.
+- **`nora::diag` is protocol-free** -- line, byte columns, severity, message.
+  `lsp_host` converts, spending the negotiated LSP position encoding against the
+  real line text.
+- **Rendering**: the gutter number recolors (rust = error, gold = warning), the
+  cursor line's message takes the status centre (an explicit status message
+  still outranks it), and an `NE MW` tally rides the right slot.
+- **Document sync at typing boundaries** -- on save and on leaving Insert, never
+  per keystroke (the `NORA-IDE-UX` section 7 byte-storm discipline). The change
+  test is `TextBuffer::rev()`, an O(1) counter bumped by content mutations only.
+
+Hover / definition / completion are parsed and dispatched by the client but not
+yet surfaced in the editor; those affordances are 8e-2c.
+
 ## Console discipline (I-27)
 
 `nora` acquires the **screen** on fd 1 (Kaua `Terminal`) and **reads input** on

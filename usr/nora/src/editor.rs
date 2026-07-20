@@ -214,6 +214,11 @@ pub struct Editor {
     pub status: Option<String>,
     /// Set when the editor wants to terminate (the binary breaks its loop).
     pub quit: bool,
+    /// Language-server diagnostics for the ACTIVE buffer, published by the
+    /// binary's LSP client (8e-2). Protocol-free (see `nora::diag`); the
+    /// engine only renders them. Cleared on every buffer switch/open, since
+    /// they are keyed to the file that was showing.
+    pub diags: crate::diag::Diagnostics,
     /// Visual-mode selection anchor (the other end is the cursor).
     anchor: Option<Pos>,
     /// The internal yank/paste register (replaces the system clipboard).
@@ -269,6 +274,7 @@ impl Editor {
             wrap: false,
             status: None,
             quit: false,
+            diags: crate::diag::Diagnostics::new(),
             anchor: None,
             register: String::new(),
             carets: Vec::new(),
@@ -461,6 +467,10 @@ impl Editor {
         self.split_buf = None;
         self.pending = None;
         self.count = None;
+        // Diagnostics are keyed to the file that WAS showing -- carrying them
+        // across a switch would paint another file's errors on these lines.
+        // The binary republishes for the new buffer when the server answers.
+        self.diags.clear();
     }
 
     /// The number of open buffers.

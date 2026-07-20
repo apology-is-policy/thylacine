@@ -13,9 +13,10 @@ use alloc::string::String;
 use kaua::buffer::{Buffer, Cell};
 use kaua::layout::{Constraint, Layout};
 use kaua::rect::Rect;
-use kaua::style::Color;
+use kaua::style::{Color, Style};
 use kaua::widget::{Block, List, Span, StatusLine, Widget};
 
+use crate::diag::Severity as DiagSeverity;
 use crate::editor::{Editor, Mode};
 use crate::syntax::HlClass;
 use crate::theme;
@@ -158,6 +159,18 @@ fn render_tabs(ed: &Editor, area: Rect, buf: &mut Buffer) {
 }
 
 /// One logical line per screen row, clipped at the right edge (no wrap).
+/// The gutter style for logical row `row`: a diagnostic RECOLORS the line
+/// number (error rust / warning gold), and it wins over the current-line tint
+/// -- the cursor's own position is already obvious from the lifted row, so the
+/// scarce signal is the error. `None` from the store leaves the base style.
+fn gutter_style_for(ed: &Editor, row: usize, base: Style) -> Style {
+    match ed.diags.severity_of_line(row) {
+        Some(DiagSeverity::Error) => theme::gutter_error(),
+        Some(_) => theme::gutter_warn(),
+        None => base,
+    }
+}
+
 fn render_plain(ed: &Editor, text_area: Rect, gutter_w: u16, tw: u16, th: usize, buf: &mut Buffer) {
     let total = ed.text.line_count();
     let num_w = gutter_w.saturating_sub(1);
@@ -185,7 +198,7 @@ fn render_plain(ed: &Editor, text_area: Rect, gutter_w: u16, tw: u16, th: usize,
             }
         }
         let num = format!("{:>w$} ", row + 1, w = num_w as usize);
-        buf.set_str(text_area.x, y, &num, gut_style);
+        buf.set_str(text_area.x, y, &num, gutter_style_for(ed, row, gut_style));
         // Horizontal scroll: draw the window [left, left+tw) of the line.
         let line = ed.text.line(row);
         let classes = lang.line_classes(line);
@@ -229,7 +242,7 @@ fn render_wrapped(ed: &Editor, text_area: Rect, gutter_w: u16, tw: u16, th: usiz
         }
         if sub == 0 {
             let num = format!("{:>w$} ", row + 1, w = num_w as usize);
-            buf.set_str(text_area.x, y, &num, gut_style);
+            buf.set_str(text_area.x, y, &num, gutter_style_for(ed, row, gut_style));
         }
         let line = ed.text.line(row);
         let classes = lang.line_classes(line);
@@ -544,26 +557,49 @@ fn render_status(ed: &Editor, area: Rect, buf: &mut Buffer) {
 
     let mode = format!(" {} ", ed.mode_str());
     let name = ed.filename.as_deref().unwrap_or("[No Name]");
-    let center = match &ed.status {
-        Some(m) => m.clone(),
-        None => {
+    let (r, c) = ed.text.cursor();
+
+    // The center slot, in priority order:
+    //   1. an explicit status message -- the reply to something the user just
+    //      did, so it must not be buried by an ambient diagnostic;
+    //   2. the diagnostic on the CURSOR's line -- this is the whole "inline"
+    //      surface: put the cursor on a marked line and read the message;
+    //   3. the file name.
+    let cur_diag = ed.diags.for_line(r);
+    let (center, center_style) = match (&ed.status, cur_diag) {
+        (Some(m), _) => (m.clone(), theme::status_msg()),
+        (None, Some(d)) => {
+            let style = match d.severity {
+                DiagSeverity::Error => theme::status_error(),
+                _ => theme::status_warn(),
+            };
+            (d.message.clone(), style)
+        }
+        (None, None) => {
             let mut s = String::from(name);
             if ed.modified {
                 s.push_str(" [+]");
             }
-            s
+            (s, theme::status_msg())
         }
     };
-    let (r, c) = ed.text.cursor();
-    let right = match ed.buffer_indicator() {
-        Some(b) => format!("{} {}:{} ", b, r + 1, c + 1),
-        None => format!("{}:{} ", r + 1, c + 1),
-    };
+
+    // The right slot gains an error/warning tally when the buffer has any --
+    // so a diagnostic off-screen is still visible as a count.
+    let (errs, warns) = ed.diags.counts();
+    let mut right = String::new();
+    if errs > 0 || warns > 0 {
+        right.push_str(&format!("{}E {}W  ", errs, warns));
+    }
+    match ed.buffer_indicator() {
+        Some(b) => right.push_str(&format!("{} {}:{} ", b, r + 1, c + 1)),
+        None => right.push_str(&format!("{}:{} ", r + 1, c + 1)),
+    }
 
     StatusLine::new()
         .fill(theme::statusbar())
         .left(Span::styled(&mode, theme::mode_chip(mode_color(&ed.mode))))
-        .center(Span::styled(&center, theme::status_msg()))
+        .center(Span::styled(&center, center_style))
         .right(Span::styled(&right, theme::statusbar()))
         .render(area, buf);
 }
@@ -652,6 +688,97 @@ mod tests {
         assert_eq!(sym(&b, 4, 1), 'w');
         // cursor at (0,0) -> text col 0 -> x = gutter_w (4), y = 0.
         assert_eq!(cur, (4, 0));
+    }
+
+    fn diag(line: usize, sev: DiagSeverity, msg: &str) -> crate::diag::LineDiag {
+        crate::diag::LineDiag {
+            line,
+            col: 0,
+            end_col: 1,
+            severity: sev,
+            message: alloc::string::ToString::to_string(msg),
+        }
+    }
+
+    /// The row text of `y`, trimmed -- for asserting on the status line.
+    fn row_text(b: &Buffer, y: u16, w: u16) -> String {
+        let mut s = String::new();
+        for x in 0..w {
+            s.push(b.get(x, y).map(|c| c.symbol).unwrap_or(' '));
+        }
+        s
+    }
+
+    #[test]
+    fn a_diagnostic_recolors_its_gutter_number_only() {
+        let mut ed = Editor::new(Some("f.go".into()), "aaa
+bbb
+ccc", false);
+        ed.diags.set(alloc::vec![diag(1, DiagSeverity::Error, "undefined: zzz")]);
+        let mut b = Buffer::empty(area());
+        render(&ed, area(), &mut b);
+        // Row 1 (line 2) is the marked one; its number is rust + bold.
+        let marked = b.get(2, 1).unwrap();
+        assert_eq!(marked.symbol, '2');
+        assert_eq!(marked.style.fg, theme::RUST);
+        // Its NEIGHBOURS keep the ordinary gutter colour -- the tint must not
+        // bleed to the whole buffer.
+        assert_ne!(b.get(2, 2).unwrap().style.fg, theme::RUST);
+        // And the line's TEXT is untouched (we recolor the gutter, not the code).
+        assert_eq!(sym(&b, 4, 1), 'b');
+        assert_ne!(b.get(4, 1).unwrap().style.fg, theme::RUST);
+    }
+
+    #[test]
+    fn a_warning_uses_the_warn_colour_not_the_error_colour() {
+        let mut ed = Editor::new(Some("f.go".into()), "aaa
+bbb", false);
+        ed.diags.set(alloc::vec![diag(0, DiagSeverity::Warning, "unused")]);
+        let mut b = Buffer::empty(area());
+        render(&ed, area(), &mut b);
+        assert_eq!(b.get(2, 0).unwrap().style.fg, theme::GOLD);
+    }
+
+    #[test]
+    fn the_cursor_lines_diagnostic_shows_on_the_status_line() {
+        let mut ed = Editor::new(Some("f.go".into()), "aaa
+bbb
+ccc", false);
+        ed.diags.set(alloc::vec![diag(0, DiagSeverity::Error, "undefined: zzz")]);
+        let a = Rect::new(0, 0, 40, 5);
+        let mut b = Buffer::empty(a);
+        render(&ed, a, &mut b);
+        // Cursor starts on line 0 -> its message occupies the status centre.
+        let status = row_text(&b, a.height - 1, a.width);
+        assert!(status.contains("undefined: zzz"), "status was {:?}", status);
+        // ...and the tally rides the right slot.
+        assert!(status.contains("1E 0W"), "status was {:?}", status);
+    }
+
+    #[test]
+    fn an_explicit_status_message_outranks_the_diagnostic() {
+        let mut ed = Editor::new(Some("f.go".into()), "aaa", false);
+        ed.diags.set(alloc::vec![diag(0, DiagSeverity::Error, "undefined: zzz")]);
+        ed.set_status(alloc::string::ToString::to_string("saved 3 bytes"));
+        let a = Rect::new(0, 0, 40, 5);
+        let mut b = Buffer::empty(a);
+        render(&ed, a, &mut b);
+        let status = row_text(&b, a.height - 1, a.width);
+        // The reply to what the user just did must not be buried.
+        assert!(status.contains("saved 3 bytes"), "status was {:?}", status);
+        assert!(!status.contains("undefined"), "status was {:?}", status);
+    }
+
+    #[test]
+    fn no_diagnostics_leaves_the_status_line_as_before() {
+        let ed = Editor::new(Some("f.go".into()), "aaa", false);
+        let a = Rect::new(0, 0, 40, 5);
+        let mut b = Buffer::empty(a);
+        render(&ed, a, &mut b);
+        let status = row_text(&b, a.height - 1, a.width);
+        assert!(status.contains("f.go"), "status was {:?}", status);
+        // No tally when the buffer is clean.
+        assert!(!status.contains("0E"), "status was {:?}", status);
     }
 
     #[test]

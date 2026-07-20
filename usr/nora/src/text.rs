@@ -60,6 +60,17 @@ pub struct TextBuffer {
     row: usize,
     col: usize,
     undo: Vec<Snapshot>,
+    /// Bumped by every CONTENT mutation (never by cursor movement). Lets a
+    /// consumer answer "did the text change since I last looked" in O(1)
+    /// instead of comparing whole documents -- the LSP document-sync test
+    /// (8e-2) runs on the typing path, where an O(buffer) compare per
+    /// keystroke would be real work for nothing.
+    ///
+    /// Monotonic within a buffer's life; `replace_content` bumps it too (the
+    /// content did change), so it is a change DETECTOR, not a content hash:
+    /// equal revisions imply equal content, a different revision only implies
+    /// a mutation happened.
+    rev: u64,
 }
 
 impl TextBuffer {
@@ -77,7 +88,14 @@ impl TextBuffer {
             row: 0,
             col: 0,
             undo: Vec::new(),
+            rev: 0,
         }
+    }
+
+    /// The content revision -- see the field. Compare two samples to learn
+    /// whether the document changed; the value itself means nothing.
+    pub fn rev(&self) -> u64 {
+        self.rev
     }
 
     /// The whole document as a single string, lines joined by `'\n'`. Inverse
@@ -337,6 +355,7 @@ impl TextBuffer {
     /// Insert one character at the cursor, advancing the column. A `'\n'`
     /// splits the line (delegates to `insert_newline`).
     pub fn insert_char(&mut self, ch: char) {
+        self.rev += 1;
         if ch == '\n' {
             self.insert_newline();
             return;
@@ -349,6 +368,7 @@ impl TextBuffer {
     /// Split the current line at the cursor; the tail becomes a new line below
     /// and the cursor moves to its start.
     pub fn insert_newline(&mut self) {
+        self.rev += 1;
         let bi = byte_of(&self.lines[self.row], self.col);
         let tail = self.lines[self.row].split_off(bi);
         self.lines.insert(self.row + 1, tail);
@@ -358,6 +378,7 @@ impl TextBuffer {
 
     /// Insert a string at the cursor, honoring embedded newlines.
     pub fn insert_str(&mut self, s: &str) {
+        self.rev += 1;
         for ch in s.chars() {
             self.insert_char(ch);
         }
@@ -366,6 +387,7 @@ impl TextBuffer {
     /// Delete the character before the cursor (Backspace); at column 0 joins
     /// the current line onto the end of the previous one.
     pub fn backspace(&mut self) {
+        self.rev += 1;
         if self.col > 0 {
             let bi = byte_of(&self.lines[self.row], self.col - 1);
             self.lines[self.row].remove(bi);
@@ -381,6 +403,7 @@ impl TextBuffer {
     /// Delete the character at the cursor (`x` / Delete); at end-of-line joins
     /// the next line up (deletes the line break).
     pub fn delete_char(&mut self) {
+        self.rev += 1;
         let len = self.char_len(self.row);
         if self.col < len {
             let bi = byte_of(&self.lines[self.row], self.col);
@@ -394,6 +417,7 @@ impl TextBuffer {
     /// Delete the whole current line (`dd`). The buffer keeps at least one
     /// line; the cursor clamps to the line now at `row` (or the new last line).
     pub fn delete_line(&mut self) {
+        self.rev += 1;
         if self.lines.len() == 1 {
             self.lines[0].clear();
             self.col = 0;
@@ -429,6 +453,7 @@ impl TextBuffer {
 
     /// Delete the inclusive span `[a, b]`; the cursor lands at the span start.
     pub fn delete_range(&mut self, a: Pos, b: Pos) {
+        self.rev += 1;
         let (lo, hi) = order(a, b);
         let prefix = char_slice(self.line(lo.0), 0, lo.1).to_string();
         let suffix = char_slice(self.line(hi.0), hi.1 + 1, self.char_len(hi.0)).to_string();
@@ -519,8 +544,12 @@ impl TextBuffer {
             Some(s) => {
                 self.lines = s.lines;
                 self.set_cursor(s.row, s.col);
+                // Restoring a snapshot IS a content change -- rev is a
+                // detector, not a hash, so it moves FORWARD on an undo too.
+                self.rev += 1;
                 true
             }
+            // Nothing to undo: the content did not change, so neither does rev.
             None => false,
         }
     }
@@ -531,6 +560,7 @@ impl TextBuffer {
     /// so the clamped position stays near the edit point). The same
     /// trailing-newline round-trip rule as `new()`.
     pub fn replace_content(&mut self, content: &str) {
+        self.rev += 1;
         self.checkpoint();
         let mut lines: Vec<String> = content.split('\n').map(String::from).collect();
         if lines.is_empty() {
@@ -635,6 +665,52 @@ fn order(a: Pos, b: Pos) -> (Pos, Pos) {
 
 #[cfg(test)]
 mod tests {
+    /// Every CONTENT mutator must bump `rev`, and no CURSOR movement may.
+    /// Enumerated deliberately: a mutator added later without a bump silently
+    /// costs the LSP client a document sync (fail-soft, but wrong), and this
+    /// is the thing that catches it.
+    #[test]
+    fn rev_bumps_on_every_content_mutation_only() {
+        // Movement never bumps.
+        let mut t = TextBuffer::new("alpha\nbeta\ngamma");
+        let r0 = t.rev();
+        t.move_right();
+        t.move_down();
+        t.move_end();
+        t.move_word_forward();
+        t.move_top();
+        t.set_cursor(1, 0);
+        assert_eq!(t.rev(), r0, "cursor movement must not bump rev");
+
+        // Each mutator bumps, from a fresh buffer so one cannot mask another.
+        let bump = |name: &str, f: &dyn Fn(&mut TextBuffer)| {
+            let mut t = TextBuffer::new("alpha\nbeta\ngamma");
+            t.set_cursor(1, 2);
+            let before = t.rev();
+            f(&mut t);
+            assert!(t.rev() > before, "{} did not bump rev", name);
+        };
+        bump("insert_char", &|t| t.insert_char('x'));
+        bump("insert_newline", &|t| t.insert_newline());
+        bump("insert_str", &|t| t.insert_str("xy"));
+        bump("backspace", &|t| t.backspace());
+        bump("delete_char", &|t| t.delete_char());
+        bump("delete_line", &|t| t.delete_line());
+        bump("delete_range", &|t| t.delete_range((0, 0), (1, 1)));
+        bump("replace_content", &|t| t.replace_content("new"));
+
+        // undo bumps only when it actually restores something.
+        let mut t = TextBuffer::new("alpha");
+        let empty = t.rev();
+        assert!(!t.undo(), "nothing to undo yet");
+        assert_eq!(t.rev(), empty, "a no-op undo must not bump rev");
+        t.checkpoint();
+        t.insert_char('z');
+        let edited = t.rev();
+        assert!(t.undo());
+        assert!(t.rev() > edited, "a real undo must bump rev");
+    }
+
     use super::*;
     use alloc::string::ToString;
 

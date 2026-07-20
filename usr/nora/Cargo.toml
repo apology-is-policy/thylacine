@@ -35,8 +35,12 @@ path = "src/main.rs"
 # everything the binary needs. On by default for the device build; host tests of
 # the pure engine drop it (and scope to --lib so the bin is not compiled).
 default = ["backend"]
-backend = ["kaua/backend", "dep:libthyla-rs"]
+#
+# The LSP client (8e-2) rides the same feature: `parley/backend` is the
+# persistent-child transport, which needs libthyla-rs exactly as kaua's does.
+backend = ["kaua/backend", "parley/backend", "dep:libthyla-rs"]
 
 [dependencies]
 kaua = { path = "../lib/kaua", default-features = false }
+parley = { path = "../lib/parley", default-features = false }
 libthyla-rs = { path = "../lib/libthyla-rs", optional = true }

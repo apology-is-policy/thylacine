@@ -43,8 +43,13 @@ use kaua::rect::Rect;
 use kaua::source::{EventSource, PollSource};
 use kaua::term::Terminal;
 
-use nora::editor::{Editor, Request};
+use parley::transport::Mux;
+
+use nora::editor::{Editor, Mode, Request};
 use nora::view;
+
+mod lsp_host;
+use lsp_host::{Lsp, TAG_LSP_ERR, TAG_LSP_OUT, TAG_STDIN};
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: ThylaAlloc = ThylaAlloc;
@@ -126,7 +131,20 @@ pub extern "C" fn rs_main() -> i64 {
     // lost (kaua::query #117-audit F2).
     let mut src = PollSource::with_pending(probe.pending);
 
-    let code = run(&mut term, &mut src, &mut ed);
+    // Bring up gopls for a Go buffer. Absent / unspawnable / non-Go all mean
+    // "no language server" -- a fully supported state in which nora behaves
+    // exactly as it did before 8e (NORA-IDE-UX section 6: never block the UI).
+    let mut lsp = match ed.filename.as_deref() {
+        Some(p) if lsp_host::is_go(p) => Lsp::start(p),
+        _ => None,
+    };
+
+    let code = run(&mut term, &mut src, &mut ed, &mut lsp);
+    // The server must not outlive the editor: an orphaned gopls holds the
+    // workspace (and its memory) for the rest of the session.
+    if let Some(mut l) = lsp {
+        l.shutdown();
+    }
     // Explicit restore (Drop also runs it; both are idempotent).
     let _ = term.leave();
     code as i64
@@ -134,52 +152,107 @@ pub extern "C" fn rs_main() -> i64 {
 
 /// The event loop: poll input, dispatch keys, execute any file request, redraw
 /// when the state changed. Returns the process exit code.
-fn run(term: &mut Terminal, src: &mut PollSource, ed: &mut Editor) -> i32 {
+fn run(
+    term: &mut Terminal,
+    src: &mut PollSource,
+    ed: &mut Editor,
+    lsp: &mut Option<Lsp>,
+) -> i32 {
     if redraw(term, ed).is_err() {
         return 1;
     }
+    let mut mux = Mux::new();
     loop {
         if src.is_eof() {
             return 0;
         }
-        let events = match src.poll(PollTimeout::Block) {
-            Ok(e) => e,
+        // ONE poll(2) over fd 0 and any live server pipes (8e-2). A keystroke
+        // and an arriving diagnostic wake the loop identically -- there is no
+        // tick, so a message nothing polls for never repaints.
+        let ready = match lsp_host::poll_sources(&mut mux, lsp.as_ref()) {
+            Some(r) => r,
             // fd 0 gone (no console) -> exit cleanly rather than spin.
-            Err(_) => return 1,
+            None => return 1,
         };
-        // A wake with no decoded key (a bare HUP) loops; is_eof breaks at the
-        // top. The console read is #811 death-interruptible, so a dying nora
-        // unwinds here rather than wedging.
         let mut dirty = false;
-        for ev in events {
-            match ev {
-                Event::Key(k) => {
-                    ed.handle_key(k);
-                    dirty = true;
-                    if let Some(req) = ed.take_request() {
-                        handle_request(ed, req);
-                    }
-                    if ed.quit {
-                        break;
+        let mut saved = false;
+        for r in ready {
+            match r.tag {
+                TAG_STDIN => {
+                    // Zero timeout: the mux already established readability;
+                    // PollSource still runs its own drain sweep, so the paste
+                    // and split-escape handling (#106-F2 / #173) is unchanged.
+                    let events = match src.poll(PollTimeout::Zero) {
+                        Ok(e) => e,
+                        Err(_) => return 1,
+                    };
+                    // A wake with no decoded key (a bare HUP) loops; is_eof
+                    // breaks at the top. The console read is #811
+                    // death-interruptible, so a dying nora unwinds here rather
+                    // than wedging.
+                    for ev in events {
+                        match ev {
+                            Event::Key(k) => {
+                                ed.handle_key(k);
+                                dirty = true;
+                                if let Some(req) = ed.take_request() {
+                                    saved |= matches!(req, Request::Save(_));
+                                    handle_request(ed, req);
+                                }
+                                if ed.quit {
+                                    break;
+                                }
+                            }
+                            // A late CPR the launch probe missed under HVF (the
+                            // slow serial answered after the deadline): resize
+                            // to the real console, swapping the 80x24 fallback
+                            // for fullscreen + repainting
+                            // (bug_nora_hvf_cpr_handshake -- the steady-state
+                            // backstop).
+                            Event::Resize(c, r) => {
+                                let c = c.clamp(MIN_DIM, MAX_DIM);
+                                let r = r.clamp(MIN_DIM, MAX_DIM);
+                                if (c, r) != (term.area().width, term.area().height) {
+                                    term.resize(Rect::new(0, 0, c, r));
+                                    dirty = true;
+                                }
+                            }
+                            _ => {}
+                        }
                     }
                 }
-                // A late CPR the launch probe missed under HVF (the slow serial
-                // answered after the deadline): resize to the real console,
-                // swapping the 80x24 fallback for fullscreen + repainting
-                // (bug_nora_hvf_cpr_handshake -- the steady-state backstop).
-                Event::Resize(c, r) => {
-                    let c = c.clamp(MIN_DIM, MAX_DIM);
-                    let r = r.clamp(MIN_DIM, MAX_DIM);
-                    if (c, r) != (term.area().width, term.area().height) {
-                        term.resize(Rect::new(0, 0, c, r));
-                        dirty = true;
+                TAG_LSP_OUT | TAG_LSP_ERR => {
+                    if let Some(l) = lsp.as_mut() {
+                        dirty |= l.on_ready(&r, ed);
                     }
                 }
+                // Unknown tag: the fd set is ours, so this cannot happen --
+                // ignore rather than assume.
                 _ => {}
             }
         }
         if ed.quit {
             return 0;
+        }
+        if let Some(l) = lsp.as_mut() {
+            // A save re-checks the file; otherwise push the buffer only at a
+            // typing boundary (leaving Insert), never per keystroke -- see
+            // lsp_host's module header on the byte-storm discipline. Both
+            // gates are O(1) (a revision compare), so this is free when
+            // nothing changed.
+            if saved {
+                l.on_saved(ed);
+            } else if ed.mode != Mode::Insert {
+                l.sync(ed);
+            }
+            // `:e` / buffer switches change which file is on screen.
+            l.open_current(ed);
+            // A server that died takes its session with it: drop the handle so
+            // its fds leave the poll set for good and nothing tries to talk to
+            // a corpse. The editor carries on without diagnostics.
+            if l.is_dead() {
+                *lsp = None;
+            }
         }
         if dirty && redraw(term, ed).is_err() {
             return 1;
