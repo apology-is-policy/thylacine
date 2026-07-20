@@ -29,6 +29,23 @@
 # independent (any session text passes; a blank/black/garbage/demo screen
 # fails), deterministic (exact colors, statistical coverage).
 #
+# -c additionally runs a BLEND-INTEGRITY pass (G-5; the #35 class): the
+# bg/fg counts above are structurally blind to ANTIALIASED EDGE pixels --
+# exactly where the #35 packed-lane blend bug lived (glyph cores stayed
+# exact via the a=255 short-circuit while edge channels scattered, so the
+# G-4 check passed a violet-fringed screen). Every pixel 8-adjacent to an
+# exact-fg core that is neither exact bg nor exact fg is overwhelmingly
+# default-fg antialiasing, and a CORRECT blend is a per-channel convex
+# combination -- each channel must lie inside the [bg,fg] envelope (+/-
+# tolerance). The #35 formula scatters ~15% of default-fg edges outside
+# the envelope (~72% for saturated text colors); legitimate cross-color
+# glyph junctions measure ~2% -- the 5% threshold splits both with ~3x
+# margin either way. Skipped below 100 checked edges (no AA mass).
+#
+# -F PPM verifies an existing P6 PPM offline (no QMP, no VM) -- the probe
+# path tools/test-screendump-edge.sh uses to keep the blend-integrity
+# pass non-vacuous (a synthesized #35-buggy frame must FAIL).
+#
 # Exit: 0 on success (and verify pass when -v/-c); nonzero otherwise.
 
 set -euo pipefail
@@ -40,10 +57,12 @@ sock="$REPO_ROOT/build/qmp.sock"
 device="gpu0"
 head=0
 verify=0
+offline=""
 
 usage() {
     cat >&2 <<EOF
-usage: tools/screendump.sh [-s QMP_SOCK] [-d DEVICE_ID] [-H HEAD] [-v] OUT.png
+usage: tools/screendump.sh [-s QMP_SOCK] [-d DEVICE_ID] [-H HEAD] [-v|-c] OUT.png
+       tools/screendump.sh -F FILE.ppm (-v|-c)
 
   -s QMP_SOCK   QMP unix socket (default: build/qmp.sock -- what
                 tools/run-vm.sh opens unless THYLACINE_NO_QMP=1)
@@ -53,41 +72,64 @@ usage: tools/screendump.sh [-s QMP_SOCK] [-d DEVICE_ID] [-H HEAD] [-v] OUT.png
   -v            verify the P4-L 4-quadrant test pattern via a PPM
                 sibling dump (TL red, TR green, BL blue, BR white)
   -c            verify the Aurora console signature (Bonfire bg dominant
-                + exact default-fg text pixels present)
+                + exact default-fg text + blend-integrity edges)
+  -F FILE.ppm   offline mode: run the -v/-c verification against an
+                existing P6 PPM instead of a live VM (no QMP; no
+                OUT.png positional; the file is not deleted)
 EOF
     exit 2
 }
 
-while getopts "s:d:H:vch" opt; do
+while getopts "s:d:H:vcF:h" opt; do
     case "$opt" in
         s) sock="$OPTARG" ;;
         d) device="$OPTARG" ;;
         H) head="$OPTARG" ;;
         v) verify=1 ;;
         c) verify=2 ;;
+        F) offline="$OPTARG" ;;
         *) usage ;;
     esac
 done
 shift $((OPTIND - 1))
-[[ $# -eq 1 ]] || usage
-out="$1"
 
-# QEMU writes the dump relative to ITS cwd -- absolutize against ours.
-case "$out" in
-    /*) ;;
-    *) out="$(pwd)/$out" ;;
-esac
+if [[ -n "$offline" ]]; then
+    [[ $# -eq 0 ]] || usage
+    if [[ "$verify" -eq 0 ]]; then
+        echo "screendump: -F requires -v or -c" >&2
+        exit 2
+    fi
+    if [[ ! -f "$offline" ]]; then
+        echo "screendump: $offline: no such file" >&2
+        exit 1
+    fi
+    case "$offline" in
+        /*) ;;
+        *) offline="$(pwd)/$offline" ;;
+    esac
+    out=""
+else
+    [[ $# -eq 1 ]] || usage
+    out="$1"
 
-if [[ ! -S "$sock" ]]; then
-    echo "screendump: no QMP socket at $sock (VM not running, or THYLACINE_NO_QMP=1)" >&2
-    exit 1
+    # QEMU writes the dump relative to ITS cwd -- absolutize against ours.
+    case "$out" in
+        /*) ;;
+        *) out="$(pwd)/$out" ;;
+    esac
+
+    if [[ ! -S "$sock" ]]; then
+        echo "screendump: no QMP socket at $sock (VM not running, or THYLACINE_NO_QMP=1)" >&2
+        exit 1
+    fi
 fi
 
-exec python3 - "$sock" "$device" "$head" "$out" "$verify" <<'PYEOF'
+exec python3 - "$sock" "$device" "$head" "$out" "$verify" "$offline" <<'PYEOF'
 import json, os, socket, sys
 
 sock_path, device, head, out = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
 verify = int(sys.argv[5])   # 0 = none, 1 = -v quadrants, 2 = -c console
+offline = sys.argv[6]       # non-empty = verify this PPM, no QMP/VM
 
 
 class Qmp:
@@ -172,18 +214,25 @@ def sample(px, w, x, y):
     return (px[off], px[off + 1], px[off + 2])
 
 
-q = Qmp(sock_path)
-q.cmd("screendump", filename=out, device=device, head=head, format="png")
-if not (os.path.getsize(out) > 8
-        and open(out, "rb").read(8) == b"\x89PNG\r\n\x1a\n"):
-    print(f"screendump: {out} is not a PNG", file=sys.stderr)
-    sys.exit(1)
-print(f"screendump: wrote {out} "
-      f"({os.path.getsize(out)} bytes; device={device} head={head})")
+if offline:
+    q = None
+else:
+    q = Qmp(sock_path)
+    q.cmd("screendump", filename=out, device=device, head=head, format="png")
+    if not (os.path.getsize(out) > 8
+            and open(out, "rb").read(8) == b"\x89PNG\r\n\x1a\n"):
+        print(f"screendump: {out} is not a PNG", file=sys.stderr)
+        sys.exit(1)
+    print(f"screendump: wrote {out} "
+          f"({os.path.getsize(out)} bytes; device={device} head={head})")
 
 if verify == 1:
-    ppm = out + ".verify.ppm"
-    q.cmd("screendump", filename=ppm, device=device, head=head, format="ppm")
+    if offline:
+        ppm = offline
+    else:
+        ppm = out + ".verify.ppm"
+        q.cmd("screendump", filename=ppm, device=device, head=head,
+              format="ppm")
     w, h, px = parse_ppm(ppm)
     quads = [
         ("TL", w // 4,     h // 4,     (255, 0,   0)),
@@ -198,7 +247,8 @@ if verify == 1:
         print(f"screendump: {name} @({x},{y}) rgb={got} want~{want} "
               f"{'OK' if match else 'MISMATCH'}")
         ok = ok and match
-    os.unlink(ppm)
+    if not offline:
+        os.unlink(ppm)
     if not ok:
         print(f"screendump: VERIFY FAIL -- {w}x{h} surface does not show "
               f"the 4-quadrant pattern", file=sys.stderr)
@@ -209,27 +259,90 @@ elif verify == 2:
     # The Aurora console signature (G-4). Exact Bonfire colors
     # (UTOPIA-VISUAL.md section 1: bg #0e0c0c, fg #e4ddd8); statistical
     # coverage so any session content passes and any non-console fails.
-    ppm = out + ".verify.ppm"
-    q.cmd("screendump", filename=ppm, device=device, head=head, format="ppm")
+    if offline:
+        ppm = offline
+    else:
+        ppm = out + ".verify.ppm"
+        q.cmd("screendump", filename=ppm, device=device, head=head,
+              format="ppm")
     w, h, px = parse_ppm(ppm)
     BG = (0x0E, 0x0C, 0x0C)
     FG = (0xE4, 0xDD, 0xD8)
     total = w * h
     nbg = nfg = 0
+    fg_idx = []
     view = memoryview(px)[: total * 3]
-    for off in range(0, total * 3, 3):
+    for idx in range(total):
+        off = idx * 3
         r, g, b = view[off], view[off + 1], view[off + 2]
         if (r, g, b) == BG:
             nbg += 1
         elif (r, g, b) == FG:
             nfg += 1
-    os.unlink(ppm)
+            fg_idx.append(idx)
+
+    # The blend-integrity pass (G-5; the #35 packed-lane class). Glyph
+    # cores are exact-fg (the a=255 short-circuit), so the counts above
+    # are structurally blind to ANTIALIASED EDGES -- exactly where #35
+    # lived (edge channels scattered while cores stayed exact, so the
+    # G-4 check passed a violet-fringed screen). Every pixel 8-adjacent
+    # to an exact-fg core that is neither exact bg nor exact fg is
+    # overwhelmingly default-fg antialiasing; a correct blend is a
+    # per-channel convex combination, so each channel lies inside
+    # [min(bg,fg)-TOL, max(bg,fg)+TOL]. Cross-color glyph junctions
+    # (colored run boundaries, box-drawing seams) measure ~2% of checked
+    # edges; the #35 formula scatters ~15% out for the default fg (~72%
+    # for saturated colors) -- 5% splits both with margin. Skipped below
+    # 100 checked edges (no meaningful AA mass to judge).
+    TOL = 6
+    lo = [min(BG[i], FG[i]) - TOL for i in range(3)]
+    hi = [max(BG[i], FG[i]) + TOL for i in range(3)]
+    fgmask = bytearray(total)
+    for idx in fg_idx:
+        fgmask[idx] = 1
+    seen = bytearray(total)
+    checked = bad = 0
+    for idx in fg_idx:
+        y, x = divmod(idx, w)
+        for dy in (-1, 0, 1):
+            ny = y + dy
+            if ny < 0 or ny >= h:
+                continue
+            base = ny * w
+            for dx in (-1, 0, 1):
+                nx = x + dx
+                if nx < 0 or nx >= w:
+                    continue
+                nidx = base + nx
+                if seen[nidx] or fgmask[nidx]:
+                    continue
+                seen[nidx] = 1
+                noff = nidx * 3
+                p = (view[noff], view[noff + 1], view[noff + 2])
+                if p == BG:
+                    continue
+                checked += 1
+                if not (lo[0] <= p[0] <= hi[0]
+                        and lo[1] <= p[1] <= hi[1]
+                        and lo[2] <= p[2] <= hi[2]):
+                    bad += 1
+    if not offline:
+        os.unlink(ppm)
     bg_pct = 100.0 * nbg / total
+    edge_bad = checked >= 100 and bad > checked * 0.05
     print(f"screendump: console check {w}x{h}: bg {nbg} ({bg_pct:.1f}%), "
-          f"exact-fg {nfg}")
-    if bg_pct < 40.0 or nfg < 200:
-        print(f"screendump: CONSOLE VERIFY FAIL -- want bg >= 40% and "
-              f"exact-fg >= 200 px", file=sys.stderr)
+          f"exact-fg {nfg}, edges {checked} ({bad} out-of-envelope)")
+    if bg_pct < 40.0 or nfg < 200 or edge_bad:
+        why = []
+        if bg_pct < 40.0:
+            why.append("bg < 40%")
+        if nfg < 200:
+            why.append("exact-fg < 200 px")
+        if edge_bad:
+            why.append(f"blend integrity: {bad}/{checked} edge pixels "
+                       f"outside the [bg,fg] envelope (> 5%)")
+        print(f"screendump: CONSOLE VERIFY FAIL -- {'; '.join(why)}",
+              file=sys.stderr)
         sys.exit(1)
     print(f"screendump: CONSOLE VERIFY OK -- the Aurora console is rendered")
 PYEOF

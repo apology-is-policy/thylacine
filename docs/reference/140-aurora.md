@@ -155,7 +155,12 @@ private session → fullscreen surface → weave map → Loom presents.
   ((120,116,6)@a=127, (174,168,239)@a=191). The fix is the standard
   lane-safe form (`na = 256-a`, `>>8`), ideal-tracking within 1; a
   dormant `#[cfg(test)]` regression pins it (the host-harness seam).
-  The gate's saturated-color blindness is recorded for G-5.
+  The gate blindness was closed at G-5: `screendump.sh -c` now runs a
+  blend-integrity pass over exact-fg-adjacent edge pixels (each channel
+  must sit in the `[bg,fg]` envelope ±6; >5% outside fails — junctions
+  measure ~2%, the #35 formula ~15%), and
+  `tools/test-screendump-edge.sh` keeps it non-vacuous offline (a
+  synthesized pre-#35-buggy frame must fail on exactly that arm).
 - **A failed present is a DROPPED FRAME, never death (#31).** The
   pre-#31 loop exited on any `present()` error, so one transient
   compositor GPU hiccup (the controlq desync's client-visible face)
@@ -180,9 +185,10 @@ uart-direct (SYS_PUTS) — never into its own drain, so no feedback loop.
 - **The per-boot console gate** (`tools/test.sh`, every ci-smp-gate
   boot): `screendump -c` asserts the console signature — the exact
   Bonfire bg DOMINANT (≥40%) + exact default-fg text pixels (≥200; AA
-  glyph cores are pure fg) — then a bounded retry-compare proves
-  liveness (the cursor blink / prompt arrival must eventually change a
-  dump). Content-independent, deterministic, never dropped.
+  glyph cores are pure fg) + the G-5 blend-integrity edge pass (above)
+  — then a bounded retry-compare proves liveness (the cursor blink /
+  prompt arrival must eventually change a dump). Content-independent,
+  deterministic, never dropped.
 - **`tools/interactive/ls-gfx.exp`** — the fbcon claim end to end:
   serial login + `ls /`; `-c` + differing dumps before/after; then
   `tools/qmp-sendtext.sh` types `whoami` on kbd-pci0 (display-bound to
