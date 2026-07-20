@@ -39,20 +39,22 @@ struct Spoor;   // REVENANT R-4: exec_setup_from_spoor's pinned executable
 //   0x0000_0000_0001_0000          User code/data (per ELF e_entry +
 //   ...                             per-segment vaddr).
 //   ...
-//   0x0000_0000_7FFB_F000          User stack GUARD page (4 KiB —
+//   0x0000_0000_7FEF_F000          User stack GUARD page (4 KiB —
 //                                   reserved, unmapped, prot==0).
-//   0x0000_0000_7FFC_0000          User stack base (EXEC_USER_STACK_BASE).
+//   0x0000_0000_7FF0_0000          User stack base (EXEC_USER_STACK_BASE).
 //   0x0000_0000_8000_0000          User stack TOP (initial SP_EL0).
 //   0x0000_0001_0000_0000          Burrow-attach window base — the range
 //   ...                             SYS_BURROW_ATTACH places anonymous
 //   0x0000_4000_0000_0000          regions into (first-fit upward).
 //
 // The user-stack region is well below the TTBR1 split (0x0001_0000_*)
-// and well above typical ELF segment vaddrs + BSS heaps. Sized 256 KiB
-// at v1.0: corvus runs ML-KEM-768 (FIPS 203) keygen/decapsulate, whose
-// FO-transform working set is tens of KiB of stack — the prior 16 KiB
-// overflowed. 256 KiB is generous headroom for every userspace Proc;
-// Phase 5+ replaces the fixed size with demand-grow on stack faults.
+// and well above typical ELF segment vaddrs + BSS heaps. Sized 1 MiB
+// (G-7b; was 256 KiB): a real ported program's call graph (TyrQuake's
+// model loader) overflowed 256 KiB into the guard page. 1 MiB is eager
+// headroom for every userspace Proc; the 0x8000_0000..0xC000_0000 gap
+// above TOP leaves room to grow. The Linux-model lazy demand-grown stack
+// (commits only touched pages — no eager per-Proc cost) is the tracked
+// v-next lift.
 //
 // P5-secondary-stack-guard: a 4 KiB guard page sits directly below
 // EXEC_USER_STACK_BASE, installed by exec_map_user_stack as a prot==0
@@ -194,7 +196,7 @@ _Static_assert((EXEC_USER_VDSO_BASE & 0xFFFull) == 0,
 // both raised for the on-device Go toolchain's compile/link command lines),
 // the structured top is (8 + 8*513 + 8 + AUXV*16 + 16-align-pad + 16) bytes,
 // followed by 64 KiB strings bytes, rounded up to 16. ~68 KiB — still well
-// under the 256 KiB user-stack budget; the _Static_assert below proves it.
+// under the 1 MiB user-stack budget; the _Static_assert below proves it.
 #define EXEC_INIT_STACK_MAX_SIZE \
     (((8 + (512u + 1u) * 8 + 8 + EXEC_INIT_AUXV_COUNT * 16 + 16 + 16 + 65536) + 15) & ~15ull)
 _Static_assert(EXEC_INIT_STACK_SIZE % 16 == 0,

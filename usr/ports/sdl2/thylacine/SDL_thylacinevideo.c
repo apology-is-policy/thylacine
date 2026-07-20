@@ -164,9 +164,10 @@ static void THYLACINE_DestroyWindow(_THIS, SDL_Window *window)
     if (!wd) {
         return;
     }
-    /* Stop the pump FIRST: closing the event fid cancels the parked read
-     * (the kernel's cancel-at-close discipline), so the thread unblocks
-     * and joins; then the remaining fids drop the surface. */
+    /* Stop the pump FIRST: it RETIRES the surface (ctl "destroy") so the
+     * parked event read EOFs and the thread joins (closing event_fd would
+     * NOT cancel the parked read — #844; see THYLACINE_StopEventPump); then
+     * the remaining fids drop the surface. */
     THYLACINE_StopEventPump(window);
     thyla_tap_close(&wd->tap);
     SDL_free(wd);
@@ -209,11 +210,16 @@ static int THYLACINE_UpdateWindowFramebuffer(_THIS, SDL_Window *window,
             int rw = rects[i].w, rh = rects[i].h;
             if (x < 0) { rw += x; x = 0; }
             if (y < 0) { rh += y; y = 0; }
+            /* Clamp the extent to the surface BEFORE any additive compare —
+             * an app-supplied w/h near INT_MAX would overflow `x + rw`
+             * (signed UB) and skip the bounds guard (audit F4). The subtract
+             * form cannot overflow (x is in [0, w)). */
+            if (rw > (int)wd->tap.w - x) rw = (int)wd->tap.w - x;
+            if (rh > (int)wd->tap.h - y) rh = (int)wd->tap.h - y;
             if (x >= (int)wd->tap.w || y >= (int)wd->tap.h || rw <= 0 || rh <= 0) {
                 continue;
             }
-            if (x + rw > (int)wd->tap.w) rw = (int)wd->tap.w - x;
-            if (y + rh > (int)wd->tap.h) rh = (int)wd->tap.h - y;
+            /* rw/rh already clamped to the surface above (overflow-safe). */
             tr[n].x = (uint32_t)x;
             tr[n].y = (uint32_t)y;
             tr[n].w = (uint32_t)rw;

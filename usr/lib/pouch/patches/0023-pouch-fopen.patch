@@ -17,6 +17,18 @@ boundary, so the reroute is the correct shape (fchmodat / posix_spawn /
 __map_file / __libc_start_main keep their raw calls -- their arms are
 fail-soft or out of the v1.0 pouch envelope).
 
+SCOPE (audit F2): only the READ arm is functional at v1.0.
+fopen(path,"rb") / __fopen_rb_ca (O_RDONLY) now reach SYS_open and work
+-- the pak0.pak path the gate needs. But the downstream openat() (0021)
+still refuses O_CREAT / O_TMPFILE with ENOTSUP, so fopen(path,"w"/"a")
+(O_WRONLY|O_CREAT|O_TRUNC) and tmpfile() (O_RDWR|O_CREAT|O_EXCL) now
+return NULL with an HONEST ENOTSUP instead of the old blanket -ENOSYS --
+fail-CLOSED, no regression (create-mode fopen never worked in pouch).
+Consequence: interactive TyrQuake's config.cfg / demo record do not
+persist (fail-soft; the read-only +timedemo gate is unaffected).
+Create-mode fopen/tmpfile wait on the SYS_WALK_CREATE openat wiring
+(the v1.x openat-O_CREAT gap).
+
 --- a/src/stdio/__fopen_rb_ca.c
 +++ b/src/stdio/__fopen_rb_ca.c
 @@ -6,7 +6,8 @@

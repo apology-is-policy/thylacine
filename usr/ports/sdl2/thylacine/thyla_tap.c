@@ -276,6 +276,17 @@ int thyla_tap_reweave(ThylaTap *t, uint32_t w, uint32_t h, uint16_t serial)
     return 0;
 }
 
+void thyla_tap_request_close(ThylaTap *t)
+{
+    /* "destroy" on the surface ctl retires the surface; tapestryd then
+     * reads its event fid EMPTY (server.rs: "a retired surface's event
+     * fid reads empty (stream end)") -> a parked event reader wakes on
+     * EOF, bounded + frame-clock-independent. Best-effort. */
+    if (t->ctl >= 0) {
+        t_write(t->ctl, "destroy", 7);
+    }
+}
+
 void thyla_tap_close(ThylaTap *t)
 {
     /* The weave clunk drops the client mapping; the session close (root)

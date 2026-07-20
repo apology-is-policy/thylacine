@@ -103,6 +103,16 @@ int thyla_tap_read_events(ThylaTap *t, ThylaEvent *evs, int max);
  * events, a newer CONFIGURE carries the current offer), -1 fatal. */
 int thyla_tap_reweave(ThylaTap *t, uint32_t w, uint32_t h, uint16_t serial);
 
+/* Request the compositor RETIRE this surface (ctl "destroy"). tapestryd
+ * then reads the surface's event fid EMPTY (stream end) — the wake a
+ * parked event reader (the SDL pump thread) needs at shutdown. Closing
+ * event_fd from a sibling does NOT cancel a parked t_read (#844: the
+ * reader holds its own ref-held Spoor across the blocking read, so the
+ * Dev close hook never runs), so the retire's EOF — not a close — is the
+ * bounded, frame-clock-independent wake. Best-effort (a failed write
+ * leaves the periodic FRAME event as the fallback wake). */
+void thyla_tap_request_close(ThylaTap *t);
+
 void thyla_tap_close(ThylaTap *t);
 
 #endif /* THYLA_TAP_H */

@@ -5,9 +5,12 @@
  * blocks on the fid and feeds a bounded mutex ring; PumpEvents drains the
  * ring and translates on the SDL thread. Fd discipline: the pump thread
  * touches ONLY event_fd; ctl/present/weave (including the reweave's
- * close-and-remap) stay on the SDL thread. Shutdown closes event_fd from
- * the SDL thread — the kernel's cancel-at-close discipline completes the
- * parked read, the thread exits, join succeeds.
+ * close-and-remap) stay on the SDL thread. Shutdown RETIRES the surface
+ * (ctl "destroy") so tapestryd reads the event fid EMPTY (stream end) →
+ * the parked read returns 0 → the pump exits → join succeeds. (Closing
+ * event_fd would NOT cancel the parked read — #844: the pump holds its own
+ * ref-held Spoor across the blocking read, so a sibling close never runs
+ * the Dev close hook. See THYLACINE_StopEventPump.)
  *
  * Translation notes:
  *   - TEV_KEY.code is a raw evdev keycode (the compositor owns the
@@ -83,12 +86,21 @@ void THYLACINE_StopEventPump(SDL_Window *window)
     if (!wd->pump_started) {
         return;
     }
-    /* Cancel-at-close: the fid clunk cancels the parked event read; the
-     * pump sees <= 0 and exits. */
-    if (wd->tap.event_fd >= 0) {
-        t_close(wd->tap.event_fd);
-        wd->tap.event_fd = -1;
-    }
+    /* Wake the parked pump so the join is bounded. Closing event_fd from
+     * HERE does NOT cancel the pump's blocked t_read (#844: the pump holds
+     * its own ref-held Spoor across the read, so a sibling close drops the
+     * refcount to 1, not 0 — the Dev close hook that would cancel the
+     * deferred read never runs). The parked read wakes only on a tapestryd
+     * event delivery. So RETIRE the surface (ctl "destroy") — tapestryd
+     * then reads the event fid EMPTY (stream end) → thyla_tap_read_events
+     * returns 0 → the pump exits. Bounded + frame-clock-independent (the
+     * periodic FRAME event, ≤ 1/clock_hz, is only the FALLBACK wake if the
+     * destroy write couldn't be sent).
+     *
+     * event_fd is left OWNED by the pump until the join; thyla_tap_close
+     * (called after this by DestroyWindow) closes it. So no thread ever
+     * touches event_fd concurrently with the pump — the join races nothing. */
+    thyla_tap_request_close(&wd->tap);
     pthread_join(wd->pump, NULL);
     pthread_mutex_destroy(&wd->lock);
     wd->pump_started = 0;
