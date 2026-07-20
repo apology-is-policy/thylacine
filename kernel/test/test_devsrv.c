@@ -295,6 +295,14 @@ void test_devsrv_registry_full(void) {
 // handles); the capacity must therefore budget one slot per DISTINCT
 // per-boot service name -- the SRV_MAX_SERVICES comment carries the
 // ledger.
+//
+// TEST ROLE (G-5 F4): this pins the at-capacity ASYMMETRY SEMANTICS,
+// which are capacity-INDEPENDENT -- the loop scales with
+// SRV_MAX_SERVICES, so it passes identically at 8 and 16 and is NOT a
+// regression guard for the #30 capacity raise. The capacity guard is
+// the boot login-E2E cora leg (usr/joey/joey.c::do_login_e2e): a fresh
+// /srv/home-<user> posted past the boot's accumulated posts +
+// tombstones fails the BOOT if the registry is full.
 void test_devsrv_registry_full_tombstone_rebinds(void) {
     srv_registry_reset();
 

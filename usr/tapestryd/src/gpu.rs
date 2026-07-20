@@ -20,6 +20,7 @@ use libthyla_rs::hardware::{
     mmio_read16, mmio_read32, mmio_read8, mmio_write16, mmio_write32, mmio_write64, mmio_write8,
     Dma, Irq, PciDev, PciRegion,
 };
+use libthyla_rs::time::Instant;
 use libthyla_rs::virtio_rmb;
 use libthyla_rs::{T_PROT_READ, T_PROT_WRITE};
 
@@ -87,11 +88,18 @@ const GPU_RESP_DISPLAY_INFO_LEN: u32 = GPU_CTRL_HDR_LEN + GPU_MAX_SCANOUTS * GPU
 const VIRTQ_DESC_F_NEXT: u16 = 1;
 const VIRTQ_DESC_F_WRITE: u16 = 2;
 
-// Wakes that did not retire the in-flight command before the submit is
-// declared wedged. Each is a real (if stale) interrupt-ish event, so 16 is
-// generous; a device that never interrupts at all still blocks in
-// irq.wait() forever (the pre-existing all-virtio-drivers posture).
-const MAX_STALE_WAKES_PER_SUBMIT: u32 = 16;
+// Wall-clock bound on the STALE-WAKE regime before the submit is declared
+// wedged (the G-5 F1 close). Anchored LAZILY at the first stale wake -- a
+// device that never interrupts at all still blocks in irq.wait() forever
+// (the pre-existing all-virtio-drivers posture) -- so the deadline trips
+// only on EVENT-ful non-progress: >= this many ms of interrupt-ish events
+// (a config-IRQ train from host window resizes, re-latched levels) with
+// used.idx never retiring our command. A healthy device retires a 2D
+// command in microseconds, so 500 ms is 5+ orders of margin; the first-cut
+// bound here was a wake COUNT (16), which a resize config-storm during one
+// slow-but-healthy present could exhaust -- a false dead-latch whose
+// consequence is exactly the permanent console loss #31 exists to prevent.
+const SUBMIT_DEADLINE_MS: u64 = 500;
 // Bounded used.idx re-poll between stale wakes. If the wake WAS our
 // completion's notification but the used.idx store is still propagating
 // (the #31 live-display window), no further interrupt is coming -- the
@@ -344,6 +352,7 @@ impl Controlq {
         // resp_type=0x0). Wait until used.idx retires OUR command, bounded.
         let used_va = self.ring_va + CTRL_USED_OFF;
         let mut wakes = 0u32;
+        let mut stale_since: Option<Instant> = None;
         'wait: loop {
             if self.irq.wait().is_err() {
                 say!("tapestryd: gpu SYS_IRQ_WAIT returned error");
@@ -378,12 +387,23 @@ impl Controlq {
                 }
             }
             wakes += 1;
-            if wakes >= MAX_STALE_WAKES_PER_SUBMIT {
-                say!("tapestryd: gpu command never retired after {} stale wakes", wakes);
+            let t0 = *stale_since.get_or_insert_with(Instant::now);
+            if t0.elapsed().as_millis() as u64 >= SUBMIT_DEADLINE_MS {
+                say!(
+                    "tapestryd: gpu command never retired ({} stale wakes over {} ms)",
+                    wakes, SUBMIT_DEADLINE_MS
+                );
                 self.dead = true;
                 return Err(());
             }
         }
+
+        // The spin-break path can exit with the COMPLETION's own INTx
+        // assertion unconsumed (the wake-path read above cleared only the
+        // PRIOR level; the device re-asserts when it bumps used.idx during
+        // the spin). Read-to-clear once more so a retired command's own
+        // assertion cannot surface as the next submit's stale wake (G-5 F2).
+        let _ = unsafe { r8(self.isr_va) };
 
         // VIRTIO 1.2 2.7.13.2: order the used.idx observation before the
         // response-buffer read.

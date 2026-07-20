@@ -108,6 +108,13 @@ pub struct Vt {
     // screen SCROLL per status repaint, each leaving a stale modeline
     // behind (the nora artifact cascade, #37).
     wrap: bool,
+    // DECAWM's slot in the DECSC/DECRC saved-cursor state (DEC STD-070:
+    // ESC 7 saves position AND autowrap; ESC 8 restores both), which the
+    // alt-screen switch (1049 = implicit DECSC on enter / DECRC on leave)
+    // also carries -- so a TUI's ?7l inside the alt screen cannot leak a
+    // wrap-off main screen (xterm parity; the G-5 F5 close). CSI s/u
+    // (SCOSC) stays position-only, deliberately.
+    saved_wrap: bool,
     // Bytes the terminal must ANSWER (CPR etc.). vt.rs stays a pure byte
     // machine: the main loop drains this into the consfeed fd, exactly a
     // real terminal answering on the keyboard wire. Kaua's size handshake
@@ -142,6 +149,7 @@ impl Vt {
             csi_priv: false,
             saved: (0, 0),
             wrap: true,
+            saved_wrap: true,
             reply: Vec::new(),
             utf_acc: 0,
             utf_rem: 0,
@@ -249,10 +257,15 @@ impl Vt {
             }
             b']' => self.state = State::Osc,
             b'(' | b')' => self.state = State::EscCharset,
-            b'7' => self.saved = (self.cx, self.cy),
+            b'7' => {
+                // DECSC: position + autowrap (DEC STD-070; G-5 F5).
+                self.saved = (self.cx, self.cy);
+                self.saved_wrap = self.wrap;
+            }
             b'8' => {
                 self.cx = self.saved.0.min(self.cols - 1);
                 self.cy = self.saved.1.min(self.rows - 1);
+                self.wrap = self.saved_wrap;
             }
             b'D' => self.line_feed(),
             b'M' => {
@@ -392,17 +405,22 @@ impl Vt {
         core::mem::swap(&mut self.cells, &mut self.alt_cells);
         self.on_alt = enter;
         if enter {
-            // A fresh alt screen (1049 semantics): clear + home.
+            // A fresh alt screen (1049 semantics: implicit DECSC, so
+            // autowrap saves with the cursor): clear + home.
             let bg = self.bg;
             for c in self.cells.iter_mut() {
                 *c = Cell::blank(bg);
             }
             self.saved = (self.cx, self.cy);
+            self.saved_wrap = self.wrap;
             self.cx = 0;
             self.cy = 0;
         } else {
+            // Implicit DECRC: a TUI's ?7l inside the alt screen must not
+            // leak a wrap-off main screen (G-5 F5).
             self.cx = self.saved.0.min(self.cols - 1);
             self.cy = self.saved.1.min(self.rows - 1);
+            self.wrap = self.saved_wrap;
         }
         self.mark_all();
     }
@@ -785,6 +803,27 @@ mod tests {
         feed(&mut vt, b"\x1b[?1049l"); // leave: restore
         assert_eq!(vt.cells.len(), 18);
         assert_eq!(vt.cells[0].ch, 'm'); // the main buffer is back
+    }
+
+    // G-5 F5: DECAWM rides the DECSC/DECRC saved-cursor state (DEC
+    // STD-070), and the alt-screen switch is an implicit DECSC/DECRC --
+    // so a TUI that sets ?7l inside the alt screen (every Kaua app) must
+    // NOT leak a wrap-off main screen when it leaves, even if it never
+    // emits ?7h itself (the crash-exit shape ut's RESTORE_SCREEN also
+    // covers; this makes the terminal correct WITHOUT the backstop).
+    #[test]
+    fn alt_screen_leave_restores_autowrap() {
+        let mut vt = Vt::new(6, 3);
+        assert!(vt.wrap);
+        feed(&mut vt, b"\x1b[?1049h\x1b[?7l"); // enter alt, wrap off
+        assert!(!vt.wrap);
+        feed(&mut vt, b"\x1b[?1049l"); // leave WITHOUT ?7h
+        assert!(vt.wrap); // the implicit DECRC restored autowrap
+        // The explicit DECSC/DECRC pair carries it too.
+        feed(&mut vt, b"\x1b7\x1b[?7l");
+        assert!(!vt.wrap);
+        feed(&mut vt, b"\x1b8");
+        assert!(vt.wrap);
     }
 
     // #37: DECAWM (?7l) must make the bottom-right cell paintable WITHOUT a

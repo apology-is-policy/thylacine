@@ -59,7 +59,17 @@ v1.x) — the display stays blank until reboot.
   behind `virtio_rmb` after every wake plus a bounded spin
   (`USED_SPIN_PER_WAKE`, the net for a mid-propagation store with no
   further interrupt coming) until the command retires, bounded by
-  `MAX_STALE_WAKES_PER_SUBMIT`. The pre-#31 shape — break on the first
+  `SUBMIT_DEADLINE_MS` (500 ms of WALL CLOCK, anchored lazily at the
+  first stale wake — the G-5 F1 close: the first-cut bound was a wake
+  COUNT of 16, which a window-resize config-IRQ train during one
+  slow-but-healthy present could exhaust, a false dead-latch whose
+  consequence is the permanent console loss #31 exists to prevent; the
+  deadline trips only on event-ful non-progress and carries 5+ orders
+  of margin over a device's µs-scale retire). The spin-break path
+  read-to-clears the ISR once more after the loop (G-5 F2: a
+  completion during the spin re-asserts INTx after the wake-path read,
+  and leaving that level pending cost the NEXT submit a systematic
+  stale wake). The pre-#31 shape — break on the first
   `ISR_QUEUE` wake, read `used.idx` ONCE, hard-fail if behind — turned
   benign display-path timing into a permanent engine desync: `seq`
   diverged from the device's avail consumption, every later command
@@ -69,7 +79,19 @@ v1.x) — the display stays blank until reboot.
   now LATCHES `Controlq.dead` — later submits fail fast + honestly
   instead of cascading garbage. A device that never interrupts at all
   still blocks in `irq.wait()` (the pre-existing all-virtio-drivers
-  posture). The trigger needs a real display backend's thread topology:
+  posture). **Quiesce provability on the dead paths (G-5 F3)**: the
+  deadline-miss and `irq.wait()`-error arms return WITHOUT confirming
+  the device finished, so the strict "in-flight set provably empty"
+  basis of the I-40 stage-0 quiesce narrows there to
+  timeout-≫-device-latency (500 ms vs µs) composed with the #847 dual
+  refcount (the client's mapping keeps the backing pages alive until
+  its own teardown, seconds later) — no reachable device-side UAF, but
+  the honest residual is recorded here; the real controlq drain/reset
+  is the standing G-6 obligation. The retire ordering is UNAFFECTED:
+  `t_weft_unshare` and the backing free are kernel syscalls, not
+  controlq commands, so a dead controlq can never cause a
+  free-without-unshare (R2-F5 holds unconditionally). The trigger
+  needs a real display backend's thread topology:
   three escalating headless repro attempts (a 66/s screendump hammer at
   2x cocoa's refresh; a live VNC backend on the gpu0 console at real
   dirty-rect traffic) never fired it — `tools/interactive/ls-gfx-live.exp`

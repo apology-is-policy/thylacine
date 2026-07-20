@@ -252,8 +252,16 @@ pub extern "C" fn rs_main() -> i64 {
                     // input -- write it into the consfeed, the same wire the
                     // key events ride. Kaua's size handshake reads it to
                     // learn the real grid (128x36, not the 80x24 fallback).
+                    // A short/failed write only degrades the querier to its
+                    // 80x24 fallback, but silently -- log it (G-5 SA-2).
                     if !term.reply.is_empty() {
-                        let _ = unsafe { t_write(feed, term.reply.as_ptr(), term.reply.len()) };
+                        let wr = unsafe {
+                            t_write(feed, term.reply.as_ptr(), term.reply.len())
+                        };
+                        if wr < term.reply.len() as i64 {
+                            say!("aurora: consfeed reply write short/failed ({} of {})",
+                                 wr, term.reply.len());
+                        }
                         term.reply.clear();
                     }
                 } else {
