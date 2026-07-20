@@ -1011,6 +1011,67 @@ millions of reweaves — a v1.x free-list closes it). Gate:
 exact-fit reweave) + the TEV_CLOSE leg. As-built: `139-tapestryd.md`
 "The resize protocol + pane close (G-6b)".
 
+**G-6c AS-BUILT (landed on `gfx-2`): chords, focus events, tab/stack
+visuals, move/zoom, multi-rect, determinism mode — the compositor's
+interaction layer.** (a) **The Super chord layer** (§14 layer 1) is
+intercepted in the input drain, ABOVE the event stream (§18.4): while
+Super is held every non-modifier key is compositor input — bound chords
+act, unbound ones drop, none reaches a surface (the WHOLE plane is
+reserved, so no client can come to depend on a Super combo); a
+swallowed press swallows its release/repeats even if Super lifted
+first, and a key pressed before Super keeps flowing. The baked
+i3-flavored table (compositor policy, a halcyon.rc concern eventually,
+like the keymap): Super+arrows = spatial focus, +Shift+arrows = move,
+h/v = split, f = zoom toggle, t/s = tabbed/stacked, e = split-toggle,
+Tab/+Shift = tab cycle, Shift+q = close the focused pane. (b)
+**TEV_FOCUS** (kind 7, value 1 gained / 0 lost, the F5 never-drop
+class) emits from the single reconcile tail on every focused-surface
+change. (c) **Tab/stack indicator strips** (D7 glyph-free — colored
+segments, never text): a tabbed container carves TAB_STRIP_H=5 rows
+into one segment row (1px gaps), a stacked one carves a row per child;
+the active child's segment lights FOCUS_COLOR on the focus path,
+ACTIVE_COLOR off it, BORDER_COLOR inactive. Strips are chrome
+(repainted with borders on focus-only epochs; never client memory —
+tearing-freedom intact). (d) **Move** (D6): directional re-parenting —
+swap with the matching-axis sibling, pull out of a nested subtree
+beside it (dissolution-safe index bookkeeping), wrap the root on a
+pure cross-axis move; at the screen edge it is a no-op. Tabbed matches
+the h axis, Stacked the v axis (moving walks tab order). (e) **Zoom**
+(§14 pane-zoom, tmux-shaped): a by-id toggle; the leaf alone fills the
+display (the tree untouched; a display-sized surface goes DIRECT
+zero-copy); structural mutations and focus-elsewhere auto-unzoom.
+(f) **Multi-rect presents**: rect_count k >= 2 rides rects 1..k INLINE
+after the 32-byte header (payload 32 + 16*(k-1), count capped at 64,
+EVERY rect validated before any pixel work). This REALIZES D4's
+"compositor case" and supersedes the §18.2 provisional
+`buf_idx_or_off` slice sketch: under D3 the present payload already
+lives in the client's registered buffer, so a separate slice reference
+would be redundant indirection — the inline array preserves the
+registered-buffer intent with zero extra machinery. (g) **Determinism
+mode** (§18.6 + F13 + F15) behind the `test-mode` cargo feature
+(default-on for the dev tree; production builds strip it —
+`--no-default-features` — and every verb answers E_OPNOTSUPP, the #880
+class): `test-mode on` freezes the FRAME clock (the serve loop stops
+wall-clock ticks — queued FRAME events drain normally, which IS the
+F15 transition discipline for a synchronous single-threaded engine;
+the anchor re-seats on unfreeze so no backlog fires), `tick` drives
+time one step per write, and `TPRESENT_HOLD` presents run their pixel
+work normally INSIDE the dispatch (transfer/blit — tearing-freedom
+holds for held presents too) but defer the device-visible push
+(flush / screen transfer+flush) until `release [<surface>]` (F13;
+ownership-gated per F2; holds union, most-recent bytes win; a
+non-HOLD present or `test-mode off` flushes implicitly; a hold cannot
+complete a pending scanout SWITCH — E_AGAIN — and a hold staled by a
+scanout-mode change drops, superseded by the structural repaint).
+Layout grammar grows `move <id> <dir>`, `zoom <id>`, and the id-less
+`focusdir <dir>` / `tab next|prev`. Gate: the battery grows the
+focus-event / multirect / tabbed-strip / tab-cycle / zoom / move /
+chord / test-mode / hold legs with per-stage pixel dumps
+(`qmp-sendtext.sh -k` injects the Super chord). Kernel byte-unchanged;
+the spec suite is unperturbed (presents model identically; HOLD defers
+only sub-CQE flush granularity, below the model's abstraction).
+As-built: `139-tapestryd.md` "The interaction layer (G-6c)".
+
 ### 18.10 Audit-trigger + scripture sync obligations
 
 At each landing, per standing discipline: G-2 joins the Weft/burrow rows

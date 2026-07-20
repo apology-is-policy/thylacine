@@ -33,6 +33,40 @@ pub const MAX_PANES: usize = 32;
 pub const BG_COLOR: u32 = 0xFF10_1014;
 pub const BORDER_COLOR: u32 = 0xFF3A_3A44;
 pub const FOCUS_COLOR: u32 = 0xFF7A_9ECC;
+/// A tab/stack segment whose child is active but not on the focus path.
+pub const ACTIVE_COLOR: u32 = 0xFF5A_5A66;
+
+/// The tab/stack indicator strip height (G-6c; glyph-free per D7 -- the
+/// compositor paints colored segments, never titles). Carved from the TOP
+/// of a tabbed/stacked container's rect: tabbed = ONE row divided into
+/// per-child segments; stacked = one full-width row PER child.
+pub const TAB_STRIP_H: u32 = 5;
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum Dir {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+impl Dir {
+    pub fn parse(s: &str) -> Option<Dir> {
+        match s {
+            "left" => Some(Dir::Left),
+            "right" => Some(Dir::Right),
+            "up" => Some(Dir::Up),
+            "down" => Some(Dir::Down),
+            _ => None,
+        }
+    }
+    fn horizontal(self) -> bool {
+        matches!(self, Dir::Left | Dir::Right)
+    }
+    fn before(self) -> bool {
+        matches!(self, Dir::Left | Dir::Up)
+    }
+}
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Mode {
@@ -143,6 +177,11 @@ pub struct Layout {
     /// Bumped on every structural / geometry / focus mutation; Comp
     /// reconciles scanout + chrome when it observes a change.
     pub epoch: u64,
+    /// The zoomed pane's PUBLIC id (tmux-`zoom`: the leaf temporarily
+    /// fills the display; the tree is untouched). Held by id, not slot --
+    /// slots are reused, ids never are (a freed target self-clears at the
+    /// next recompute).
+    zoomed_id: Option<u32>,
 }
 
 impl Layout {
@@ -153,6 +192,7 @@ impl Layout {
             focused: 0,
             id_seq: 0,
             epoch: 1,
+            zoomed_id: None,
         };
         let root = l
             .alloc(None, Kind::Leaf { surface: None })
@@ -510,6 +550,327 @@ impl Layout {
         }
     }
 
+    /// The zoomed pane's public id (None = not zoomed).
+    pub fn zoom_id(&self) -> Option<u32> {
+        self.zoomed_id
+    }
+
+    /// Toggle zoom on a LEAF: zoomed fills the display alone (recompute
+    /// hides everything else; the tree is untouched). Zooming focuses the
+    /// leaf; re-zooming the zoomed pane restores the layout.
+    pub fn zoom_toggle(&mut self, slot: usize) -> bool {
+        if !self.is_leaf(slot) {
+            return false;
+        }
+        let id = match self.id_of(slot) {
+            Some(id) => id,
+            None => return false,
+        };
+        if self.zoomed_id == Some(id) {
+            self.zoomed_id = None;
+        } else {
+            self.zoomed_id = Some(id);
+            self.focus(slot);
+        }
+        self.epoch += 1;
+        true
+    }
+
+    /// Drop the zoom (structural mutations restore the layout first --
+    /// the tmux rule). No-op when not zoomed.
+    pub fn unzoom(&mut self) {
+        if self.zoomed_id.take().is_some() {
+            self.epoch += 1;
+        }
+    }
+
+    /// Move focus SPATIALLY (G-6c; the Super+arrow walk): among visible
+    /// focusable leaves, pick the nearest one strictly in `dir` with
+    /// orthogonal overlap. False = no candidate (edge of the screen, or
+    /// zoomed -- only one leaf is visible then).
+    pub fn focus_dir(&mut self, dir: Dir) -> bool {
+        let fr = match self.get(self.focused) {
+            Some(p) => p.rect,
+            None => return false,
+        };
+        let overlap = |a1: u32, l1: u32, a2: u32, l2: u32| -> u32 {
+            let lo = a1.max(a2);
+            let hi = (a1 + l1).min(a2 + l2);
+            hi.saturating_sub(lo)
+        };
+        let mut best: Option<(usize, u32, u32)> = None; // (slot, dist, overlap)
+        for (slot, _) in self.live_ids() {
+            if slot == self.focused || !self.is_leaf(slot) {
+                continue;
+            }
+            let p = self.get(slot).unwrap();
+            if !p.visible || !p.focusable {
+                continue;
+            }
+            let r = p.rect;
+            let (ok, dist, ov) = match dir {
+                Dir::Left => (r.x + r.w <= fr.x, fr.x - (r.x + r.w).min(fr.x),
+                    overlap(r.y, r.h, fr.y, fr.h)),
+                Dir::Right => (fr.x + fr.w <= r.x, r.x.saturating_sub(fr.x + fr.w),
+                    overlap(r.y, r.h, fr.y, fr.h)),
+                Dir::Up => (r.y + r.h <= fr.y, fr.y - (r.y + r.h).min(fr.y),
+                    overlap(r.x, r.w, fr.x, fr.w)),
+                Dir::Down => (fr.y + fr.h <= r.y, r.y.saturating_sub(fr.y + fr.h),
+                    overlap(r.x, r.w, fr.x, fr.w)),
+            };
+            if !ok || ov == 0 {
+                continue;
+            }
+            let better = match best {
+                None => true,
+                Some((_, bd, bo)) => dist < bd || (dist == bd && ov > bo),
+            };
+            if better {
+                best = Some((slot, dist, ov));
+            }
+        }
+        match best {
+            Some((s, _, _)) => self.focus(s),
+            None => false,
+        }
+    }
+
+    /// Detach a leaf from its parent (the parent dissolves if left
+    /// single). The leaf stays allocated, parentless; the caller
+    /// re-inserts it (move) -- never exposed un-reinserted.
+    fn detach_leaf(&mut self, slot: usize) {
+        let parent = match self.get(slot).and_then(|p| p.parent) {
+            Some(p) => p,
+            None => return,
+        };
+        if let Some(Kind::Container { children, active, .. }) =
+            self.get_mut(parent).map(|p| &mut p.kind)
+        {
+            if let Some(at) = children.iter().position(|&c| c == slot) {
+                children.remove(at);
+                if *active >= children.len() && !children.is_empty() {
+                    *active = children.len() - 1;
+                }
+            }
+        }
+        self.get_mut(slot).unwrap().parent = None;
+        self.dissolve_if_single(parent);
+    }
+
+    /// Move a leaf directionally (G-6c; the D6 live-reparent verb, the i3
+    /// shape). Within a matching-axis ancestor: swap with the adjacent
+    /// sibling; nested deeper: pull the leaf out beside its subtree; at
+    /// the far edge with no outer matching level: no-op (false). A pure
+    /// cross-axis move at the root wraps the root in a fresh axis
+    /// container. Horizontal moves also walk tab order (Tabbed matches
+    /// the h axis, Stacked the v axis). The moved leaf keeps focus.
+    pub fn move_dir(&mut self, slot: usize, dir: Dir) -> bool {
+        if !self.is_leaf(slot) {
+            return false;
+        }
+        let horiz = dir.horizontal();
+        let before = dir.before();
+        let axis_match = |m: Mode| {
+            if horiz {
+                matches!(m, Mode::SplitH | Mode::Tabbed)
+            } else {
+                matches!(m, Mode::SplitV | Mode::Stacked)
+            }
+        };
+        let mut sub = slot;
+        let mut saw_axis_edge = false;
+        loop {
+            let anc = match self.get(sub).and_then(|p| p.parent) {
+                Some(a) => a,
+                None => {
+                    // Ran out of ancestors. Past a matching container's far
+                    // edge this is the screen edge -- no-op; with NO
+                    // matching level anywhere it is a cross-axis move --
+                    // wrap the root in a fresh axis container.
+                    if sub == slot || saw_axis_edge {
+                        return false;
+                    }
+                    let mode = if horiz { Mode::SplitH } else { Mode::SplitV };
+                    let c = match self.alloc(None, Kind::Container {
+                        mode,
+                        children: Vec::new(),
+                        active: 0,
+                    }) {
+                        Some(c) => c,
+                        None => return false, // pane table full: untouched
+                    };
+                    self.detach_leaf(slot);
+                    let oldroot = self.root; // re-read: detach may dissolve
+                    if let Some(Kind::Container { children, .. }) =
+                        self.get_mut(c).map(|p| &mut p.kind)
+                    {
+                        if before {
+                            children.push(slot);
+                            children.push(oldroot);
+                        } else {
+                            children.push(oldroot);
+                            children.push(slot);
+                        }
+                    }
+                    self.get_mut(oldroot).unwrap().parent = Some(c);
+                    self.get_mut(slot).unwrap().parent = Some(c);
+                    self.root = c;
+                    self.epoch += 1;
+                    self.focus(slot);
+                    return true;
+                }
+            };
+            let (mode, kids) = match self.get(anc).map(|p| &p.kind) {
+                Some(Kind::Container { mode, children, .. }) => (*mode, children.clone()),
+                _ => return false,
+            };
+            if !axis_match(mode) {
+                sub = anc;
+                continue;
+            }
+            let i = match kids.iter().position(|&c| c == sub) {
+                Some(i) => i,
+                None => return false,
+            };
+            if sub == slot {
+                // Direct child: swap with the neighbor, or escalate past
+                // the edge to the next matching level.
+                let j = if before {
+                    i.checked_sub(1)
+                } else if i + 1 < kids.len() {
+                    Some(i + 1)
+                } else {
+                    None
+                };
+                match j {
+                    Some(j) => {
+                        if let Some(Kind::Container { children, .. }) =
+                            self.get_mut(anc).map(|p| &mut p.kind)
+                        {
+                            children.swap(i, j);
+                        }
+                        self.epoch += 1;
+                        self.focus(slot);
+                        return true;
+                    }
+                    None => {
+                        saw_axis_edge = true;
+                        sub = anc;
+                        continue;
+                    }
+                }
+            }
+            // Nested deeper inside child `sub`: pull the leaf out and
+            // insert it beside that subtree. The index stays valid across
+            // detach_leaf's dissolution (a dissolving container is
+            // REPLACED in place at its own index).
+            let at = if before { i } else { i + 1 };
+            self.detach_leaf(slot);
+            if let Some(Kind::Container { children, .. }) =
+                self.get_mut(anc).map(|p| &mut p.kind)
+            {
+                let at = at.min(children.len());
+                children.insert(at, slot);
+            }
+            self.get_mut(slot).unwrap().parent = Some(anc);
+            self.epoch += 1;
+            self.focus(slot);
+            return true;
+        }
+    }
+
+    /// Cycle the ACTIVE child of the nearest tabbed/stacked ancestor of
+    /// the focused leaf (G-6c; Super+Tab). Focus follows into the newly
+    /// revealed child. False = no tab/stack ancestor.
+    pub fn tab_cycle(&mut self, forward: bool) -> bool {
+        let mut cur = self.focused;
+        loop {
+            let p = match self.get(cur).and_then(|p| p.parent) {
+                Some(p) => p,
+                None => return false,
+            };
+            let is_tab = matches!(
+                self.get(p).map(|q| &q.kind),
+                Some(Kind::Container { mode: Mode::Tabbed | Mode::Stacked, .. })
+            );
+            if is_tab {
+                let target = match self.get_mut(p).map(|q| &mut q.kind) {
+                    Some(Kind::Container { children, active, .. }) => {
+                        let n = children.len();
+                        if n == 0 {
+                            return false;
+                        }
+                        *active = if forward { (*active + 1) % n } else { (*active + n - 1) % n };
+                        children[*active]
+                    }
+                    _ => return false,
+                };
+                self.epoch += 1;
+                return self.focus(target);
+            }
+            cur = p;
+        }
+    }
+
+    /// The direct child of `container` on the focused path (None: focus
+    /// is not inside it). Drives the strip focus-highlight.
+    pub fn focus_child_of(&self, container: usize) -> Option<usize> {
+        let mut cur = self.focused;
+        loop {
+            let p = self.get(cur)?.parent?;
+            if p == container {
+                return Some(cur);
+            }
+            cur = p;
+        }
+    }
+
+    /// The strip rows a tabbed/stacked container carves (0 = too small
+    /// to carve; children then get the full rect and no strip paints).
+    fn strip_h(mode: Mode, n: u32, rect: Rect) -> u32 {
+        let total = match mode {
+            Mode::Tabbed => TAB_STRIP_H,
+            Mode::Stacked => TAB_STRIP_H * n.max(1),
+            _ => 0,
+        };
+        if total == 0 || rect.h < total + 8 || rect.w < 8 {
+            0
+        } else {
+            total
+        }
+    }
+
+    /// Every visible tabbed/stacked container with a carved strip:
+    /// (container slot, strip area, mode, children, active index). The
+    /// chrome painter's input (D7 glyph-free segments).
+    pub fn visible_strips(&self) -> Vec<(usize, Rect, Mode, Vec<usize>, usize)> {
+        self.panes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| match p {
+                Some(Pane {
+                    kind: Kind::Container { mode: m @ (Mode::Tabbed | Mode::Stacked), children, active },
+                    visible: true,
+                    rect,
+                    ..
+                }) => {
+                    let strip = Self::strip_h(*m, children.len() as u32, *rect);
+                    if strip == 0 {
+                        return None;
+                    }
+                    Some((
+                        i,
+                        Rect { x: rect.x, y: rect.y, w: rect.w, h: strip },
+                        *m,
+                        children.clone(),
+                        *active,
+                    ))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The number of visible leaves after the last `recompute` -- the
     /// border-inset decision input + the scanout-mode predicate.
     pub fn visible_leaf_count(&self) -> usize {
@@ -528,6 +889,22 @@ impl Layout {
             p.visible = false;
             p.rect = Rect::ZERO;
             p.content = Rect::ZERO;
+        }
+        // A zoomed leaf preempts the walk: it alone fills the display
+        // (one visible leaf -> no inset -> borderless, the stage-0 look).
+        // A stale zoom target (closed/retired) self-clears here.
+        if let Some(zid) = self.zoomed_id {
+            match self.slot_of_id(zid) {
+                Some(z) if self.is_leaf(z) => {
+                    let full = Rect { x: 0, y: 0, w: disp_w, h: disp_h };
+                    let p = self.get_mut(z).unwrap();
+                    p.visible = true;
+                    p.rect = full;
+                    p.content = full;
+                    return;
+                }
+                _ => self.zoomed_id = None,
+            }
         }
         let root = self.root;
         self.layout_pane(root, Rect { x: 0, y: 0, w: disp_w, h: disp_h });
@@ -558,7 +935,7 @@ impl Layout {
     fn layout_pane(&mut self, slot: usize, rect: Rect) {
         enum Next {
             Done,
-            One(usize),
+            One(usize, Rect),
             Split(Mode, Vec<usize>),
         }
         let next = {
@@ -571,18 +948,28 @@ impl Layout {
             match &p.kind {
                 Kind::Leaf { .. } => Next::Done,
                 Kind::Container { mode, children, active } => match mode {
-                    // Tab/stack: only the active child is visible, full rect.
-                    Mode::Tabbed | Mode::Stacked => match children.get(*active).copied() {
-                        Some(a) => Next::One(a),
-                        None => Next::Done,
-                    },
+                    // Tab/stack: only the active child is visible, in the
+                    // rect below the indicator strip (G-6c; strip_h = 0
+                    // when the rect is too small to carve).
+                    m @ (Mode::Tabbed | Mode::Stacked) => {
+                        let strip = Self::strip_h(*m, children.len() as u32, rect);
+                        match children.get(*active).copied() {
+                            Some(a) => Next::One(a, Rect {
+                                x: rect.x,
+                                y: rect.y + strip,
+                                w: rect.w,
+                                h: rect.h - strip,
+                            }),
+                            None => Next::Done,
+                        }
+                    }
                     m => Next::Split(*m, children.clone()),
                 },
             }
         };
         match next {
             Next::Done => {}
-            Next::One(a) => self.layout_pane(a, rect),
+            Next::One(a, r) => self.layout_pane(a, r),
             Next::Split(mode, children) => {
                 let n = children.len() as u32;
                 if n == 0 {
@@ -637,9 +1024,13 @@ impl Layout {
         let mut s = String::new();
         let _ = core::fmt::write(
             &mut s,
-            format_args!("epoch {} focused {}\n", self.epoch,
+            format_args!("epoch {} focused {}", self.epoch,
                 self.id_of(self.focused).unwrap_or(0)),
         );
+        if let Some(z) = self.zoomed_id {
+            let _ = core::fmt::write(&mut s, format_args!(" zoomed {}", z));
+        }
+        s.push('\n');
         self.render_pane(&mut s, self.root, 0);
         s
     }

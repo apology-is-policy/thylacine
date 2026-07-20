@@ -49,6 +49,12 @@ use libthyla_rs::{
 
 pub const TPRESENT_LEN: usize = 32;
 pub const TPRESENT_V1: u32 = 1;
+/// Hold-this-frame (section 18.6; test-mode builds only): the present
+/// completes normally but the scanout push defers until `release`.
+pub const TPRESENT_HOLD: u32 = 1 << 0;
+/// One additional damage rect (multi-rect, G-6c): rect_count k >= 2 rides
+/// rects 1..k inline after the 32-byte header (payload 32 + 16*(k-1)).
+pub const TRECT_LEN: usize = 16;
 pub const TEVENT_LEN: usize = 24;
 
 pub const TEV_KEY: u16 = 1;
@@ -96,11 +102,14 @@ pub enum TapError {
     Busy,
 }
 
-// The staging RegisteredBuffer layout: the tpresent descriptor at 0, the
-// event landing zone at EV_OFF.
-const EV_OFF: u64 = 64;
+// The staging RegisteredBuffer layout: the tpresent descriptor (header +
+// inline rect array) at 0, the event landing zone at EV_OFF.
+const EV_OFF: u64 = 1024;
 const EV_CAP: usize = 4 * TEVENT_LEN; // up to 4 records per delivery
 const STAGING_LEN: usize = 4096;
+/// The client-side rect bound: the descriptor region below EV_OFF holds
+/// 32 + 16*(k-1) bytes -> k <= 63 (the server caps at 64 independently).
+pub const MAX_RECTS: usize = (EV_OFF as usize - TPRESENT_LEN) / TRECT_LEN + 1;
 
 const UD_PRESENT: u64 = 1;
 const UD_EVENT: u64 = 2;
@@ -395,24 +404,76 @@ impl Surface {
     /// recycle gate), rotate to the next slot. Event CQEs reaped while
     /// waiting are queued for `poll_event`.
     pub fn present(&mut self, rect: Option<Rect>) -> Result<(), TapError> {
+        match rect {
+            None => self.submit_present(0, &[]),
+            Some(r) => self.submit_present(0, &[r]),
+        }
+    }
+
+    /// Present a MULTI-rect damage list (G-6c): rect0 rides the header,
+    /// the rest inline after it. An empty list = full-surface damage.
+    pub fn present_rects(&mut self, rects: &[Rect]) -> Result<(), TapError> {
+        self.submit_present(0, rects)
+    }
+
+    /// Present with TPRESENT_HOLD (section 18.6; test-mode builds only):
+    /// the pixel work lands but the scanout push waits for `release` --
+    /// the golden-image capture primitive.
+    pub fn present_hold(&mut self, rect: Option<Rect>) -> Result<(), TapError> {
+        match rect {
+            None => self.submit_present(TPRESENT_HOLD, &[]),
+            Some(r) => self.submit_present(TPRESENT_HOLD, &[r]),
+        }
+    }
+
+    /// Flush this surface's held presents (F13): `release <id>` on the
+    /// session's global ctl (ownership-gated server-side).
+    pub fn release(&mut self) -> Result<(), TapError> {
+        let ctl = unsafe { t_open(self.root, b"ctl".as_ptr(), 3, T_OWRITE) };
+        if ctl < 0 {
+            return Err(TapError::Protocol);
+        }
+        let mut cmd = alloc::string::String::new();
+        let _ = core::fmt::write(&mut cmd, format_args!("release {}", self.id));
+        let rc = unsafe { t_write(ctl, cmd.as_ptr(), cmd.len()) };
+        unsafe { t_close(ctl) };
+        if rc < 0 {
+            return Err(TapError::Protocol);
+        }
+        Ok(())
+    }
+
+    fn submit_present(&mut self, flags: u32, rects: &[Rect]) -> Result<(), TapError> {
+        if rects.len() > MAX_RECTS {
+            return Err(TapError::Present);
+        }
         self.seq += 1;
         let ud = (self.seq << 8) | UD_PRESENT;
+        let len = if rects.len() <= 1 {
+            TPRESENT_LEN
+        } else {
+            TPRESENT_LEN + (rects.len() - 1) * TRECT_LEN
+        };
         {
             let d = self.staging.as_mut_slice();
             d[0..4].copy_from_slice(&TPRESENT_V1.to_le_bytes());
             d[4..8].copy_from_slice(&self.cur_slot.to_le_bytes());
-            d[8..12].copy_from_slice(&0u32.to_le_bytes()); // flags
-            let (rc, x, y, w, h) = match rect {
-                None => (0u32, 0, 0, 0, 0),
-                Some(r) => (1u32, r.x, r.y, r.w, r.h),
-            };
-            d[12..16].copy_from_slice(&rc.to_le_bytes());
-            d[16..20].copy_from_slice(&x.to_le_bytes());
-            d[20..24].copy_from_slice(&y.to_le_bytes());
-            d[24..28].copy_from_slice(&w.to_le_bytes());
-            d[28..32].copy_from_slice(&h.to_le_bytes());
+            d[8..12].copy_from_slice(&flags.to_le_bytes());
+            d[12..16].copy_from_slice(&(rects.len() as u32).to_le_bytes());
+            let r0 = rects.first().copied().unwrap_or(Rect { x: 0, y: 0, w: 0, h: 0 });
+            d[16..20].copy_from_slice(&r0.x.to_le_bytes());
+            d[20..24].copy_from_slice(&r0.y.to_le_bytes());
+            d[24..28].copy_from_slice(&r0.w.to_le_bytes());
+            d[28..32].copy_from_slice(&r0.h.to_le_bytes());
+            for (i, r) in rects.iter().enumerate().skip(1) {
+                let o = TPRESENT_LEN + (i - 1) * TRECT_LEN;
+                d[o..o + 4].copy_from_slice(&r.x.to_le_bytes());
+                d[o + 4..o + 8].copy_from_slice(&r.y.to_le_bytes());
+                d[o + 8..o + 12].copy_from_slice(&r.w.to_le_bytes());
+                d[o + 12..o + 16].copy_from_slice(&r.h.to_le_bytes());
+            }
         }
-        let sqe = Sqe::write(0, 0, TPRESENT_LEN as u32, 0, 0, ud);
+        let sqe = Sqe::write(0, 0, len as u32, 0, 0, ud);
         self.ring.try_submit(&sqe).map_err(|_| TapError::Loom)?;
         // Wait for THIS present's CQE; route any event CQE that arrives
         // first (one ring, mixed ops -- correlate by user_data).

@@ -196,7 +196,9 @@ crops the top-left (the ignore/crop client posture). A reweaving fbcon
 on a CONFIGURE — aurora shares `/dev/cons` with whatever it renders, so
 a chatty line interleaves byte-for-byte with a concurrent writer's
 output (`t_putstr` is not cross-Proc atomic; the G-6b battery run
-measured exactly that mangling).
+measured exactly that mangling). **TEV_FOCUS (G-6c)** falls to the
+default-ignore arm: the fbcon renders no focus state (the compositor's
+focus ring/strip highlight is chrome, outside aurora's pane).
 
 ## The gates
 

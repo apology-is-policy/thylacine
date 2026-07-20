@@ -1820,6 +1820,11 @@ the kernel invariants):
   stage-0 realization of `ServerRelease`'s `intransfer = 0` quiesce
   guard, BY CONSTRUCTION. **A pipelined controlq (G-6+) must implement a
   real drain before touching retire** — this line is the obligation.
+  *(G-6c note: multi-rect presents and TPRESENT_HOLD sit BELOW this
+  action's abstraction — a rect list is still one Submit→Complete, and
+  HOLD defers only the sub-CQE flush granularity [the transfer/blit
+  still runs inside the dispatch; the model's intransfer window is
+  unchanged]. Clean TLC re-ran unperturbed at G-6c: 5413 distinct.)*
 - **`Complete`'s `displayed` update** ↔ `Comp::scanout_take`: an
   ownerless scanout is taken at present-COMPLETE (the F16
   switch-at-first-frame alignment), never before a frame transferred.

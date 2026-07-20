@@ -58,6 +58,16 @@ proc lc_fail {msg} {
         if {[catch {exec ps -p $::lc_vm_pid -o stat=} st]} { set st GONE }
         lc_step "vm-at-fail: pid $::lc_vm_pid stat=[string trim $st]"
     }
+    # #41: a dead bridge leaves its exit record here; a live one leaves
+    # the file empty (the guest-side-failure split).
+    if {[info exists ::lc_ncerr] && [file exists $::lc_ncerr]} {
+        catch {
+            set f [open $::lc_ncerr r]
+            set d [string trim [read $f]]
+            close $f
+            if {$d ne ""} { lc_step "bridge-at-fail: $d" }
+        }
+    }
     send_user "\nLS-CI FAIL: $msg\n"
     lc_vm_kill
     exit 1
@@ -114,7 +124,12 @@ proc lc_boot {} {
         # (expect -> pipe -> nc -> unix socket -> qemu). Every failing
         # configuration in the #66 hunt shared an expect-spawn pty as the
         # input carrier; pipes have none of the tty layer.
-        set chan [open "|nc -U $sock" r+]
+        # #41 instrument: nc dies SILENTLY on a bridge failure (the
+        # G-6a/G-6c EOF clusters) -- capture its stderr + exit code so a
+        # bridge death carries evidence (lc_fail logs bridge-at-fail).
+        set ::lc_ncerr /tmp/thyla-ncerr-[pid].log
+        file delete -force $::lc_ncerr
+        set chan [open "|sh -c \"nc -U $sock 2>$::lc_ncerr; echo bridge exit=\$? >> $::lc_ncerr\"" r+]
         fconfigure $chan -buffering none -translation binary
         spawn -open $chan
         lc_step "BOOT nc pipe-bridge up"

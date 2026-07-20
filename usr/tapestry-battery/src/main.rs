@@ -5,28 +5,39 @@
 // third session writing the `layout` file), so the scenario is
 // deterministic and single-threaded; the host half (the ls-gfx-panes
 // expect scenario) types keys over QMP and pixel-asserts screendumps at
-// the pane centers this binary prints.
+// the coordinates this binary prints.
 //
-// The G-6a leg (`panes`, the default):
-//   1. client A creates a display-sized surface, fills RED, presents ->
-//      auto-hosts by splitting the console's root leaf (aurora | A);
-//   2. client B creates a half-sized surface, fills BLUE, presents ->
-//      auto-hosts by splitting A's leaf (the aspect flips the
-//      orientation: a NESTED splitv -- aurora | [A / B]);
-//   3. both re-present (the second hosting's chrome repaint blanked
-//      A's region -- panes heal on their next present, by design);
-//   4. reads `layout`, parses its own panes, cross-checks each against
-//      pane/<id>/geometry, asserts disjoint nonzero rects
-//      ("structure OK"), prints machine-parseable center lines;
-//   5. the focus legs: focuses A's pane, waits for a QMP-typed key on
-//      A's event stream (proving focused-leaf routing), then focuses
-//      B's pane and waits for a key there;
-//   6. restores focus to the console's pane and exits (Drop retires the
-//      surfaces; the panes collapse; the console returns fullscreen).
+// The legs, in order (each "battery: <stage> ..." line is an exp sync
+// point; pixel stages sleep ~1.5 s so the host dump lands on a static
+// screen):
+//   focus event : TEV_FOCUS gained arrives at A's host-at-create (G-6c);
+//   structure   : layout text vs pane geometry files, disjoint rects;
+//   stage1      : A RED + B BLUE center pixels (the G-6a compose blit);
+//   resize      : the 18.3 protocol (G-6b) -- ack negative probes, then
+//                 B reweaves onto its pane's exact size;
+//   multirect   : ONE present carrying TWO rects paints B's halves green
+//                 + yellow -- both quarter points must land (G-6c);
+//   tabbed      : mode tabbed on [A/B] -- A hides, the D7 glyph-free
+//                 strip paints (segment colors sampled), `tab next`
+//                 cycles the active child (G-6c);
+//   zoom        : the focused-pane zoom toggle -- A alone at full
+//                 display (the direct-scanout path), then restore;
+//   move        : directional re-parenting (D6) -- B pulls out of the
+//                 nested splitv beside it, then swaps right (G-6c);
+//   focus legs  : QMP-typed keys arrive on the FOCUSED surface only;
+//   chord       : QMP Super+Left moves focus compositor-side -- A gets
+//                 TEV_FOCUS gained and B never sees the arrow KEY (the
+//                 section 18.4 interception) (G-6c);
+//   test-mode   : the section 18.6 determinism mode -- the FRAME clock
+//                 freezes and `tick` drives it (G-6c);
+//   hold        : TPRESENT_HOLD defers the scanout push until release
+//                 (B stays blue on screen with magenta already blitted;
+//                 release flips it) (G-6c);
+//   close       : a compositor pane close delivers TEV_CLOSE (G-6b).
 //
 // Clipping is exercised deliberately: A (display-sized) is larger than
-// its pane -> the compose blit crops it; solid fills keep the center
-// pixel asserts exact either way.
+// its pane -> the compose blit crops it; solid fills keep the pixel
+// asserts exact either way.
 
 #![no_std]
 #![no_main]
@@ -38,8 +49,9 @@ static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::Th
 
 use alloc::string::String;
 
+use libthyla_rs::time::{sleep, Duration};
 use libthyla_rs::{t_close, t_open, t_read, t_write, T_OREAD, T_OWRITE, T_WALK_OPEN_FROM_ROOT};
-use tapestry::{Event, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_KEY};
+use tapestry::{Event, Rect, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_FOCUS, TEV_KEY};
 
 macro_rules! say {
     ($($a:tt)*) => {{
@@ -51,10 +63,20 @@ macro_rules! say {
 
 const RED: u32 = 0xFFFF_0000;
 const BLUE: u32 = 0xFF00_00FF;
+const GREEN: u32 = 0xFF00_FF00;
+const YELLOW: u32 = 0xFFFF_FF00;
+const MAGENTA: u32 = 0xFFFF_00FF;
 
-/// Give up a focus-leg wait after this many non-key events (~20 s of
+/// Give up a focus-leg wait after this many non-matching events (~20 s of
 /// FRAME ticks): the host harness failed; exit loudly instead of hanging.
 const LEG_EVENT_BUDGET: u32 = 1200;
+
+/// The static-screen window a pixel stage holds for the host dump.
+const DUMP_MS: u64 = 1500;
+
+fn nap(ms: u64) {
+    let _ = sleep(Duration::from_millis(ms));
+}
 
 fn read_file(root: i64, path: &str) -> Option<String> {
     let fd = unsafe { t_open(root, path.as_ptr(), path.len(), T_OREAD) };
@@ -88,6 +110,7 @@ struct PaneInfo {
     y: u32,
     w: u32,
     h: u32,
+    hidden: bool,
 }
 
 /// Parse a layout line like `5* leaf surface=1 [641,1,638,397]` for the
@@ -108,7 +131,17 @@ fn find_pane(layout: &str, surf: u32) -> Option<PaneInfo> {
         let y: u32 = it.next()?.parse().ok()?;
         let w: u32 = it.next()?.parse().ok()?;
         let h: u32 = it.next()?.parse().ok()?;
-        return Some(PaneInfo { id, x, y, w, h });
+        return Some(PaneInfo { id, x, y, w, h, hidden: line.ends_with("hidden") });
+    }
+    None
+}
+
+/// Parse `<key> <n>` from the ctl text.
+fn ctl_u64(ctl: &str, key: &str) -> Option<u64> {
+    for line in ctl.lines() {
+        if let Some(rest) = line.strip_prefix(key) {
+            return rest.trim().parse().ok();
+        }
     }
     None
 }
@@ -147,6 +180,30 @@ fn wait_kind(surf: &mut Surface, kind: u16, tag: &str) -> Option<Event> {
     }
 }
 
+/// Wait for TEV_FOCUS gained (value 1) on `surf`, skipping everything
+/// else -- including stale FOCUS-lost tails from earlier transitions.
+fn wait_focus_gained(surf: &mut Surface, tag: &str) -> bool {
+    let mut budget = LEG_EVENT_BUDGET;
+    loop {
+        match surf.wait_event() {
+            Ok(ev) => {
+                if ev.kind == TEV_FOCUS && ev.value == 1 {
+                    return true;
+                }
+                budget -= 1;
+                if budget == 0 {
+                    say!("tapestry-battery: FAIL {} focus-gained never arrived", tag);
+                    return false;
+                }
+            }
+            Err(e) => {
+                say!("tapestry-battery: FAIL {} event stream {:?}", tag, e);
+                return false;
+            }
+        }
+    }
+}
+
 /// Wait for a pressed KEY on `surf`, printing it tagged; false = budget
 /// exhausted or the stream closed.
 fn wait_key(surf: &mut Surface, tag: &str) -> bool {
@@ -168,6 +225,23 @@ fn wait_key(surf: &mut Surface, tag: &str) -> bool {
                 say!("tapestry-battery: FAIL {} event stream {:?}", tag, e);
                 return false;
             }
+        }
+    }
+}
+
+/// Drain a surface's event backlog to quiet (3 consecutive empty polls).
+fn drain_settle(surf: &mut Surface) {
+    let mut quiet = 0;
+    let mut budget = 4 * LEG_EVENT_BUDGET;
+    while quiet < 3 && budget > 0 {
+        budget -= 1;
+        match surf.poll_event() {
+            Ok(Some(_)) => quiet = 0,
+            Ok(None) => {
+                quiet += 1;
+                nap(20);
+            }
+            Err(_) => return,
         }
     }
 }
@@ -204,8 +278,8 @@ pub extern "C" fn rs_main() -> i64 {
     }
     say!("battery: display {}x{}", disp.0, disp.1);
 
-    // Client A: display-sized (will be cropped into its pane). Client B:
-    // half-sized (fits its quarter-ish pane loosely).
+    // Client A: display-sized (will be cropped into its pane). Its
+    // host-at-create takes focus -- the first TEV_FOCUS gained (G-6c).
     let mut a = match Surface::open(disp.0, disp.1) {
         Ok(s) => s,
         Err(e) => {
@@ -218,6 +292,12 @@ pub extern "C" fn rs_main() -> i64 {
         say!("tapestry-battery: FAIL A present");
         return 1;
     }
+    if !wait_focus_gained(&mut a, "A create") {
+        return 1;
+    }
+    say!("battery: focus event OK");
+
+    // Client B: half-sized (fits its quarter-ish pane loosely).
     let mut b = match Surface::open(disp.0 / 2, disp.1 / 2) {
         Ok(s) => s,
         Err(e) => {
@@ -280,8 +360,9 @@ pub extern "C" fn rs_main() -> i64 {
         }
     }
     say!("tapestry-battery: structure OK");
-    say!("battery: A pane={} center={} {}", pa.id, pa.x + pa.w / 2, pa.y + pa.h / 2);
-    say!("battery: B pane={} center={} {}", pb.id, pb.x + pb.w / 2, pb.y + pb.h / 2);
+    say!("battery: stage1 centers {} {} {} {}",
+        pa.x + pa.w / 2, pa.y + pa.h / 2, pb.x + pb.w / 2, pb.y + pb.h / 2);
+    nap(DUMP_MS);
 
     // Scenario 2 (G-6b, the resize protocol). B's pane content differs
     // from B's surface size, so the hosting reconcile issued B a
@@ -340,10 +421,206 @@ pub extern "C" fn rs_main() -> i64 {
     }
     say!("battery: resize OK {} {}", b.w, b.h);
 
+    // Scenario 2b (G-6c): the multi-rect present. ONE present carries TWO
+    // rects (left half green, right half yellow); both must land -- a
+    // rect0-only server would leave the right half blue, which the host
+    // quarter-point samples catch.
+    {
+        let (bw, bh) = (b.w, b.h);
+        let px = b.pixels();
+        for y in 0..bh {
+            for x in 0..bw {
+                px[(y * bw + x) as usize] = if x < bw / 2 { GREEN } else { YELLOW };
+            }
+        }
+        let rects = [
+            Rect { x: 0, y: 0, w: bw / 2, h: bh },
+            Rect { x: bw / 2, y: 0, w: bw - bw / 2, h: bh },
+        ];
+        if b.present_rects(&rects).is_err() {
+            say!("tapestry-battery: FAIL multirect present");
+            return 1;
+        }
+        say!("battery: multirect ready {} {} {} {}",
+            pb.x + bw / 4, pb.y + bh / 2, pb.x + 3 * bw / 4, pb.y + bh / 2);
+        nap(DUMP_MS);
+    }
+    fill(&mut b, BLUE);
+    if b.present(None).is_err() {
+        say!("tapestry-battery: FAIL post-multirect restore");
+        return 1;
+    }
+
+    // Scenario 2c (G-6c): tabbed mode + the D7 glyph-free strip. mode on
+    // A's pane targets its parent (the [A/B] splitv). The active child
+    // is B (hosted last), so A hides; the strip paints two segments --
+    // A's BORDER_COLOR, B's FOCUS_COLOR (focus is inside B).
+    if !write_file(root, "layout", &alloc::format!("mode {} tabbed", pa.id)) {
+        say!("tapestry-battery: FAIL mode tabbed");
+        return 1;
+    }
+    {
+        let fresh = read_file(root, "layout").unwrap_or_default();
+        let (ta, tb) = match (find_pane(&fresh, a.id), find_pane(&fresh, b.id)) {
+            (Some(ta), Some(tb)) => (ta, tb),
+            _ => {
+                say!("tapestry-battery: FAIL tabbed layout parse");
+                return 1;
+            }
+        };
+        if !ta.hidden || tb.hidden || tb.w == 0 {
+            say!("tapestry-battery: FAIL tabbed visibility (A hidden={} B hidden={})",
+                ta.hidden, tb.hidden);
+            return 1;
+        }
+        // B heals into the enlarged tab content (its bottom is cropped
+        // until it re-acks; solid blue keeps the samples exact).
+        fill(&mut b, BLUE);
+        let _ = b.present(None);
+        // The strip geometry from B's content rect: the container's
+        // outer rect is content + the 1px leaf inset on x, and strip(5)
+        // + inset above it on y (TAB_STRIP_H = 5).
+        let cx = tb.x - 1;
+        let cw = tb.w + 2;
+        let sy = tb.y - 1 - 5 + 2; // strip row center
+        let sax = cx + cw / 4;
+        let sbx = cx + 3 * cw / 4;
+        say!("battery: tabbed ready {} {} {}", sy, sax, sbx);
+        nap(DUMP_MS);
+    }
+    // Cycle the active child: A reveals, B hides, focus follows into A.
+    if !write_file(root, "layout", "tab next") {
+        say!("tapestry-battery: FAIL tab next");
+        return 1;
+    }
+    {
+        let fresh = read_file(root, "layout").unwrap_or_default();
+        let (ta, tb) = match (find_pane(&fresh, a.id), find_pane(&fresh, b.id)) {
+            (Some(ta), Some(tb)) => (ta, tb),
+            _ => {
+                say!("tapestry-battery: FAIL tab-cycle layout parse");
+                return 1;
+            }
+        };
+        if ta.hidden || !tb.hidden {
+            say!("tapestry-battery: FAIL tab-cycle visibility");
+            return 1;
+        }
+    }
+    say!("battery: tab cycled");
+    // Restore splitv; heal both.
+    if !write_file(root, "layout", &alloc::format!("mode {} splitv", pa.id)) {
+        say!("tapestry-battery: FAIL mode splitv restore");
+        return 1;
+    }
+    fill(&mut a, RED);
+    fill(&mut b, BLUE);
+    let _ = a.present(None);
+    let _ = b.present(None);
+
+    // Scenario 2d (G-6c): zoom. A's pane fills the display alone; A is
+    // display-sized, so the scanout goes DIRECT at A's next present.
+    if !write_file(root, "layout", &alloc::format!("zoom {}", pa.id)) {
+        say!("tapestry-battery: FAIL zoom");
+        return 1;
+    }
+    fill(&mut a, RED);
+    if a.present(None).is_err() {
+        say!("tapestry-battery: FAIL zoom present");
+        return 1;
+    }
+    {
+        let fresh = read_file(root, "layout").unwrap_or_default();
+        let want = alloc::format!("zoomed {}", pa.id);
+        if !fresh.lines().next().unwrap_or("").contains(want.as_str()) {
+            say!("tapestry-battery: FAIL zoom marker missing");
+            return 1;
+        }
+        let g = read_file(root, &alloc::format!("pane/{}/geometry", pa.id)).unwrap_or_default();
+        let wantg = alloc::format!("0 0 {} {}", disp.0, disp.1);
+        if g.trim() != wantg {
+            say!("tapestry-battery: FAIL zoom geometry '{}' != '{}'", g.trim(), wantg);
+            return 1;
+        }
+    }
+    say!("battery: zoom ready");
+    nap(DUMP_MS);
+    // Toggle back; the layout (and A's pane rect) restore exactly.
+    if !write_file(root, "layout", &alloc::format!("zoom {}", pa.id)) {
+        say!("tapestry-battery: FAIL unzoom");
+        return 1;
+    }
+    {
+        let g = read_file(root, &alloc::format!("pane/{}/geometry", pa.id)).unwrap_or_default();
+        let wantg = alloc::format!("{} {} {} {}", pa.x, pa.y, pa.w, pa.h);
+        if g.trim() != wantg {
+            say!("tapestry-battery: FAIL unzoom geometry '{}' != '{}'", g.trim(), wantg);
+            return 1;
+        }
+    }
+    say!("battery: zoom restored");
+    fill(&mut a, RED);
+    fill(&mut b, BLUE);
+    let _ = a.present(None);
+    let _ = b.present(None);
+
+    // Scenario 2e (G-6c): directional move (D6 re-parenting). B's parent
+    // is the splitv -- a LEFT move escalates to the root splith, pulls B
+    // out beside its subtree ([aurora | B | A] after the singleton
+    // dissolves), then a RIGHT move swaps with A ([aurora | A | B]).
+    if !write_file(root, "layout", &alloc::format!("move {} left", pb.id)) {
+        say!("tapestry-battery: FAIL move left");
+        return 1;
+    }
+    {
+        let fresh = read_file(root, "layout").unwrap_or_default();
+        let (ma, mb) = match (find_pane(&fresh, a.id), find_pane(&fresh, b.id)) {
+            (Some(ma), Some(mb)) => (ma, mb),
+            _ => {
+                say!("tapestry-battery: FAIL move-left layout parse");
+                return 1;
+            }
+        };
+        if mb.x >= ma.x || mb.x < disp.0 / 6 {
+            // B must sit BETWEEN aurora (the leftmost third) and A -- a
+            // B at the left edge means the pull-out landed wrong.
+            say!("tapestry-battery: FAIL move-left order (B.x={} A.x={})", mb.x, ma.x);
+            return 1;
+        }
+    }
+    if !write_file(root, "layout", &alloc::format!("move {} right", pb.id)) {
+        say!("tapestry-battery: FAIL move right");
+        return 1;
+    }
+    let (ma, mb) = {
+        let fresh = read_file(root, "layout").unwrap_or_default();
+        match (find_pane(&fresh, a.id), find_pane(&fresh, b.id)) {
+            (Some(ma), Some(mb)) if ma.x < mb.x => (ma, mb),
+            _ => {
+                say!("tapestry-battery: FAIL move-right order");
+                return 1;
+            }
+        }
+    };
+    fill(&mut a, RED);
+    fill(&mut b, BLUE);
+    if a.present(None).is_err() || b.present(None).is_err() {
+        say!("tapestry-battery: FAIL move heal presents");
+        return 1;
+    }
+    // Sample within the region each surface actually covers: the moved
+    // panes are taller than the surfaces (B especially -- exact-fit to
+    // its OLD pane), so a pane-center sample below the blit would hit
+    // chrome background.
+    say!("battery: move OK {} {} {} {}",
+        ma.x + ma.w.min(a.w) / 2, ma.y + ma.h.min(a.h) / 2,
+        mb.x + mb.w.min(b.w) / 2, mb.y + mb.h.min(b.h) / 2);
+    nap(DUMP_MS);
+
     // Focus leg 1: A takes focus; a QMP-typed key must arrive on A's
     // stream (and nowhere else -- the exp asserts no "battery: B key"
     // before the switch).
-    if !write_file(root, "layout", &alloc::format!("focus {}", pa.id)) {
+    if !write_file(root, "layout", &alloc::format!("focus {}", ma.id)) {
         say!("tapestry-battery: FAIL focus A");
         return 1;
     }
@@ -353,7 +630,7 @@ pub extern "C" fn rs_main() -> i64 {
     }
     // Focus leg 2: switch to B via B's own pane ctl (exercising the
     // per-pane ctl verb path, vs the layout-file path used for A).
-    if !write_file(root, &alloc::format!("pane/{}/ctl", pb.id), "focus") {
+    if !write_file(root, &alloc::format!("pane/{}/ctl", mb.id), "focus") {
         say!("tapestry-battery: FAIL focus B");
         return 1;
     }
@@ -362,12 +639,116 @@ pub extern "C" fn rs_main() -> i64 {
         return 1;
     }
 
+    // The chord leg (G-6c): focus sits on B; the host sends Super+Left.
+    // The compositor intercepts it ABOVE the event stream (section 18.4)
+    // and moves focus spatially to A -- A sees TEV_FOCUS gained, and B
+    // sees the FOCUS lost WITHOUT ever seeing the arrow KEY.
+    drain_settle(&mut a);
+    say!("battery: chord ready");
+    if !wait_focus_gained(&mut a, "chord") {
+        return 1;
+    }
+    {
+        // B's stream up to its FOCUS lost must carry no arrow key (the
+        // Super press itself -- a modifier -- may appear; that is the
+        // documented mods-visible behavior).
+        let mut budget = LEG_EVENT_BUDGET;
+        loop {
+            match b.wait_event() {
+                Ok(ev) => {
+                    if ev.kind == TEV_KEY
+                        && matches!(ev.code, 103 | 105 | 106 | 108)
+                    {
+                        say!("tapestry-battery: FAIL chord leaked arrow key {}", ev.code);
+                        return 1;
+                    }
+                    if ev.kind == TEV_FOCUS && ev.value == 0 {
+                        break;
+                    }
+                    budget -= 1;
+                    if budget == 0 {
+                        say!("tapestry-battery: FAIL B focus-lost never arrived");
+                        return 1;
+                    }
+                }
+                Err(e) => {
+                    say!("tapestry-battery: FAIL chord B stream {:?}", e);
+                    return 1;
+                }
+            }
+        }
+    }
+    say!("battery: chord focus OK");
+
+    // The test-mode leg (section 18.6, G-6c): freeze the FRAME clock,
+    // prove it holds still, then drive it one tick by hand.
+    if !write_file(root, "ctl", "test-mode on") {
+        say!("tapestry-battery: FAIL test-mode on");
+        return 1;
+    }
+    {
+        let c1 = read_file(root, "ctl").unwrap_or_default();
+        if !c1.contains("test-mode on") {
+            say!("tapestry-battery: FAIL test-mode not reported on");
+            return 1;
+        }
+        let t0 = ctl_u64(&c1, "tick ").unwrap_or(u64::MAX);
+        nap(300);
+        let t1 = ctl_u64(&read_file(root, "ctl").unwrap_or_default(), "tick ")
+            .unwrap_or(u64::MAX - 1);
+        if t0 != t1 {
+            say!("tapestry-battery: FAIL frozen clock advanced ({} -> {})", t0, t1);
+            return 1;
+        }
+        if !write_file(root, "ctl", "tick") {
+            say!("tapestry-battery: FAIL tick write");
+            return 1;
+        }
+        let t2 = ctl_u64(&read_file(root, "ctl").unwrap_or_default(), "tick ").unwrap_or(0);
+        if t2 != t0 + 1 {
+            say!("tapestry-battery: FAIL tick step ({} -> {})", t0, t2);
+            return 1;
+        }
+    }
+    say!("battery: test-mode OK");
+
+    // The hold leg (TPRESENT_HOLD + release, G-6c): magenta blits into
+    // the screen buffer NOW but the device push defers -- on screen B
+    // stays blue until release. The host samples between the two dumps;
+    // the typed key (routed to A, still focused from the chord) is the
+    // sample-done handshake.
+    fill(&mut b, MAGENTA);
+    if b.present_hold(None).is_err() {
+        say!("tapestry-battery: FAIL hold present");
+        return 1;
+    }
+    say!("battery: hold ready {} {}",
+        mb.x + mb.w.min(b.w) / 2, mb.y + mb.h.min(b.h) / 2);
+    if !wait_key(&mut a, "hold-sync") {
+        return 1;
+    }
+    if b.release().is_err() {
+        say!("tapestry-battery: FAIL release");
+        return 1;
+    }
+    say!("battery: released");
+    nap(DUMP_MS);
+    if !write_file(root, "ctl", "test-mode off") {
+        say!("tapestry-battery: FAIL test-mode off");
+        return 1;
+    }
+    if !read_file(root, "ctl").unwrap_or_default().contains("test-mode off") {
+        say!("tapestry-battery: FAIL test-mode not reported off");
+        return 1;
+    }
+    say!("battery: hold OK");
+
     // Scenario 3 (G-6b): the compositor-initiated pane close. Closing
     // B's pane strands the surface and queues the TEV_CLOSE exit
     // request; the surface stays live until the CLIENT destroys it
     // (drop) -- close is a request, never a forced retire.
     let b_id = b.id;
-    if !write_file(root, "layout", &alloc::format!("close {}", pb.id)) {
+    if !write_file(root, "layout", &alloc::format!("close {}", mb.id)) {
         say!("tapestry-battery: FAIL close B pane");
         return 1;
     }

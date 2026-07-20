@@ -17,11 +17,15 @@
 #                proves the whole loop without pixel OCR.
 #
 # Needs the QMP socket (run-vm.sh default build/qmp.sock); SKIPs when
-# python3 is absent. Runs under HVF (THYLACINE_ACCEL=hvf) -- the fbcon
-# claim's medium (screendump + QMP input); the interactive harness's
-# default TCG accel hangs the boot at the pre-existing 8a-2b hwwatch E2E
-# (task #27), unrelated to this scenario. GPU-less boots have no scanout
-# to claim -- the harness's standing THYLACINE_NO_GPU escape applies.
+# python3 is absent. Runs under HVF -- set BELOW like its siblings
+# (ls-gfx-live / ls-gfx-panes): the interactive harness's default TCG
+# accel hangs the boot at the pre-existing 8a-2b hwwatch E2E (task #27),
+# so a bare TCG run of this scenario can never pass -- it just burns
+# 3x300s (the trap cost three sessions before this line). GPU-less boots
+# have no scanout to claim -- the standing THYLACINE_NO_GPU escape
+# applies.
+
+set ::env(THYLACINE_ACCEL) hvf
 
 source [file join [file dirname [info script]] lib.exp]
 

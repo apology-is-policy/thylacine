@@ -163,9 +163,14 @@ impl Driver for Tapestryd {
         let mut anchor = Instant::now();
         let mut ticks_done: u64 = 0;
         let mut cur_hz = self.comp.clock_hz;
+        let mut was_frozen = false;
 
         loop {
-            // (1) Input drain -> keymap -> the focused surface's events.
+            // (1) Input drain -> keymap -> the Super chord layer (G-6c:
+            // the compositor's reserved plane, intercepted ABOVE the
+            // event stream -- a consumed key never reaches a surface) ->
+            // the focused surface's events. Modifier keys always flow
+            // (clients see mods; Mods::update identifies them).
             if let Some(kbd) = self.kbd.as_mut() {
                 raw_events.clear();
                 kbd.drain(|ev| raw_events.push(ev));
@@ -174,8 +179,11 @@ impl Driver for Tapestryd {
                         continue; // EV_SYN separators etc.
                     }
                     let pressed = ev.value != 0;
-                    self.mods.update(ev.code, pressed);
+                    let was_mod = self.mods.update(ev.code, pressed);
                     let mask = self.mods.mask();
+                    if !was_mod && self.comp.chord_key(ev.code, ev.value, mask) {
+                        continue;
+                    }
                     let rune = if pressed {
                         keymap::resolve(ev.code, mask)
                     } else {
@@ -187,18 +195,24 @@ impl Driver for Tapestryd {
 
             // (2) The FRAME tick (catch-up bounded to one tick per pass --
             // a stalled loop coalesces missed frames, honest for a
-            // synthesized clock).
-            if self.comp.clock_hz != cur_hz {
+            // synthesized clock). Frozen under test-mode (section 18.6):
+            // `tick` ctl writes drive time; the anchor re-seats on
+            // unfreeze so no wall-clock backlog fires.
+            let frozen = self.comp.test_frozen();
+            if self.comp.clock_hz != cur_hz || (was_frozen && !frozen) {
                 cur_hz = self.comp.clock_hz;
                 anchor = Instant::now();
                 ticks_done = 0;
             }
+            was_frozen = frozen;
             let period_ms = (1000 / cur_hz.max(1)) as u64;
             let elapsed_ms = anchor.elapsed().as_millis() as u64;
-            let due = elapsed_ms / period_ms.max(1);
-            if due > ticks_done {
-                ticks_done = due;
-                self.comp.frame_tick();
+            if !frozen {
+                let due = elapsed_ms / period_ms.max(1);
+                if due > ticks_done {
+                    ticks_done = due;
+                    self.comp.frame_tick();
+                }
             }
 
             // (3) Deferred event-read deliveries (backward, remove-safe).
@@ -231,7 +245,11 @@ impl Driver for Tapestryd {
                 });
             }
             let remain = period_ms.saturating_sub(elapsed_ms % period_ms.max(1));
-            let timeout = remain.clamp(1, period_ms.max(1)) as i32;
+            let timeout = if frozen {
+                30 // no tick scheduled; a short pace keeps input drained
+            } else {
+                remain.clamp(1, period_ms.max(1)) as i32
+            };
             let rc = unsafe { t_poll(pollfds.as_mut_ptr(), pollfds.len(), timeout) };
             if rc < 0 {
                 continue;

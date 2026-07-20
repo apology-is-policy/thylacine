@@ -388,6 +388,109 @@ AFTER a successful ack leaves the server on g2 with the client still on
 g1's mapping (a blank frame until recovery; the old mapping frees at the
 surface's Drop) — documented as fatal-for-surface.
 
+## The interaction layer (G-6c): chords, focus, strips, move/zoom, multi-rect, determinism
+
+**The Super chord layer** (§14 layer 1; §18.4 "intercepted ABOVE this
+stream"). The serve loop's input drain consults `Comp::chord_key` after
+the modifier fold and BEFORE `key_event`: while `MOD_SUPER` is in the
+mask, every non-modifier key is compositor input — bound chords dispatch
+(`chord_action`), unbound ones drop; none reaches a surface. The whole
+Super plane is reserved (not just bound combos), so no client can ever
+come to depend on a Super combo. Swallow bookkeeping is a 256-bit set
+(`Comp.chord_down`): a swallowed press swallows its release and repeats
+even if Super lifted first (no stray release reaches a client); a key
+pressed BEFORE Super went down keeps flowing (the client that saw its
+press sees its release). Modifier keys themselves always flow (clients
+see mods — the documented §18.4 behavior). The baked table (compositor
+policy, like the keymap; a halcyon.rc concern eventually): Super+arrows
+spatial focus, +Shift+arrows directional move, h/v split, f zoom
+toggle, t/s tabbed/stacked, e split-orientation toggle, Tab/+Shift tab
+cycle, Shift+q close the focused pane.
+
+**TEV_FOCUS** (kind 7; value 1 = gained, 0 = lost; F5 never-drop
+class). Emitted from the single point `Comp::focus_sync` at the
+reconcile tail — every focus-changing mutation reconciles, so the pair
+emits exactly once per change (`last_focus` dedups; `retire` clears a
+stale `last_focus` naming its slot so a future surface minted there
+still gets its gained event).
+
+**Tab/stack indicator strips** (D7 glyph-free). `Layout::layout_pane`
+carves `TAB_STRIP_H = 5` rows from the top of a tabbed container (one
+segment row) or `5 * n` from a stacked one (a row per child) — children
+lay out below; a too-small rect carves nothing (`strip_h` → 0).
+`Comp::paint_strips` fills the segments: the active child's segment is
+FOCUS_COLOR when the focused leaf is inside it (`focus_child_of`),
+ACTIVE_COLOR otherwise; the rest BORDER_COLOR; tabbed segments carry a
+1px BG gap. Strips are chrome — painted with the borders (structural
+AND focus-only epochs; the highlight follows focus), never touching
+client memory, so the tearing-freedom invariant is untouched.
+
+**Directional focus** (`Layout::focus_dir`). Spatial: among visible
+focusable leaves, the nearest one strictly in the direction with
+orthogonal overlap (ties → larger overlap). A miss (screen edge;
+zoomed — one visible leaf) is a no-op.
+
+**Directional move** (`Layout::move_dir`; D6 re-parenting). Walk up to
+the nearest matching-axis ancestor (SplitH/Tabbed for left-right,
+SplitV/Stacked for up-down — a horizontal move walks tab order): a
+direct child swaps with its neighbor; past the edge it escalates to
+the next matching level; nested deeper, the leaf pulls out of its
+subtree and inserts beside it (`detach_leaf` — the index stays valid
+across dissolution because a dissolving container is REPLACED in place
+at its own index); with NO matching level anywhere (a pure cross-axis
+move) the root wraps in a fresh axis container; past a matching
+level's far edge with nothing outer it is a no-op (`saw_axis_edge`).
+The moved leaf keeps focus.
+
+**Zoom** (`Layout::zoomed_id`; §14 pane-zoom, tmux-shaped). A by-id
+toggle (`zoom <id>` / Super+f): `recompute` lays out ONLY the zoomed
+leaf at full display (the tree untouched; one visible leaf → no inset
+→ borderless; a display-sized surface goes DIRECT zero-copy through
+the ordinary mode machine). Held by public id, not slot (slots are
+reused; ids never) — a stale target self-clears at the next recompute.
+Structural mutations (split/close/mode/move/tab/host) and focus-to-
+another-pane auto-unzoom first (the tmux rule); focus on the zoomed
+pane itself keeps the zoom. The layout header gains `zoomed <id>`.
+
+**Multi-rect presents** (§18.2 D4, as-built). `rect_count k >= 2`
+carries rects 1..k INLINE after the 32-byte header — payload
+`32 + 16*(k-1)`, `TPRESENT_MAX_RECTS = 64`, length must match exactly,
+and EVERY rect validates against the surface geometry before any pixel
+work (no partial present). This realizes D4's "compositor case" and
+supersedes the provisional `buf_idx_or_off` registered-buffer-slice
+sketch: under D3 the present payload already rides the client's
+registered buffer, so a separate slice name would be redundant
+indirection. `libtapestry` grows `present_rects` (client cap
+`MAX_RECTS = 63`, the staging descriptor region below `EV_OFF = 1024`).
+
+**Determinism mode** (§18.6 + F13 + F15; the `test-mode` cargo
+feature, default-on for the dev tree — a production build strips with
+`--no-default-features` and every verb answers E_OPNOTSUPP, the #880
+class). `test-mode on` freezes the FRAME clock: the serve loop skips
+wall-clock ticks (already-queued FRAME events drain normally — the F15
+transition discipline for a synchronous single-threaded engine) and
+re-seats the anchor on unfreeze (no backlog burst); `tick` drives time
+one step per ctl write; the ctl read reports `test-mode on|off`.
+`TPRESENT_HOLD` (accepted only while the mode is on): the present's
+pixel work runs normally INSIDE the dispatch — Direct transfers /
+Composed blits — so client weave bytes are still read only inside the
+present dispatch (tearing-freedom holds for held presents); ONLY the
+device-visible push (Direct flush / Composed screen transfer+flush)
+defers into `Surface.held`, released by the `release [<surface>]` ctl
+verb (F13; ownership-gated per F2 — only the caller's surfaces).
+Multiple holds union (most-recent bytes win where overlapping); a
+non-HOLD present or `test-mode off` releases implicitly (no stuck
+regions); a hold cannot complete a pending direct SWITCH (E_AGAIN —
+the switch is itself scanout composition); a hold staled by a
+scanout-mode change drops at release (the structural repaint
+superseded it).
+
+**Layout grammar (as-built, complete):** `split <id> h|v`,
+`close <id>`, `focus <id>`, `mode <id> <mode>`, `move <id>
+left|right|up|down`, `zoom <id>`, and the id-less `focusdir <dir>` +
+`tab next|prev` (acting on the focused leaf). Pane ctl accepts the
+same per-pane verbs (`move <dir>`, `zoom`, ...).
+
 ## libtapestry + tapestry-demo
 
 `usr/lib/libtapestry` (`tapestry::Surface`) is the aux-POC client model
