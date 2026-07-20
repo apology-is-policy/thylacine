@@ -160,6 +160,14 @@ fn is_surf(path: u64) -> bool {
 
 /// Pane qids name the pane's PUBLIC id (monotonic, never reused -- the
 /// net-3d discipline structurally: a stale pane fid resolves to nothing).
+/// PIN (G-6d F4): the qid carries only the low N_MASK (24) bits of the id,
+/// while the `layout` file parses the FULL u32 from its command string. The
+/// two agree for the first 2^24 pane allocations; past that the pane-ctl-file
+/// path (truncated qid) and the layout-file path (full id) would diverge for
+/// the same pane (a miss -> E_NOENT, never a crash or a cross-pane alias --
+/// ids stay unique). ~16.7M split+close cycles over the wire: unreachable.
+/// Widen the pane-id field (bits 8..40 are free below PANE_FLAG) before that
+/// assumption can bite.
 fn make_pane(id: u32, fk: u64) -> u64 {
     PANE_FLAG | ((id as u64 & N_MASK) << 8) | (fk & FK_MASK)
 }

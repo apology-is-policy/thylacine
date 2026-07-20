@@ -120,19 +120,31 @@ proc lc_boot {} {
         }
         if {![file exists $sock]} { lc_fail "serial socket never appeared (vm log: $vmlog)" }
         # PIPE bridge, not a pty: `spawn -open` drives an already-open Tcl
-        # pipe channel to nc, so NO pty exists anywhere on the input path
-        # (expect -> pipe -> nc -> unix socket -> qemu). Every failing
-        # configuration in the #66 hunt shared an expect-spawn pty as the
-        # input carrier; pipes have none of the tty layer.
-        # #41 instrument: nc dies SILENTLY on a bridge failure (the
-        # G-6a/G-6c EOF clusters) -- capture its stderr + exit code so a
-        # bridge death carries evidence (lc_fail logs bridge-at-fail).
+        # pipe channel to the bridge, so NO pty exists anywhere on the input
+        # path (expect -> pipe -> bridge -> unix socket -> qemu). Every
+        # failing configuration in the #66 hunt shared an expect-spawn pty as
+        # the input carrier; pipes have none of the tty layer.
+        #
+        # #41 FIX: the relay is serial-bridge.py, NOT `nc -U`. BSD nc on macOS
+        # dies with SIGPIPE (exit 141) when its stdout write races the expect
+        # reader under a large boot-output burst -- the guest keeps booting
+        # (RN+, every probe passing) but the bridge EOFs mid-stream, so the
+        # login wait mis-reports "qemu exited before login" (the G-6a/G-6c/
+        # G-6d EOF clusters; guest exonerated every time -- the instrument
+        # below caught `bridge exit=141` with the VM still RN+). serial-
+        # bridge.py is SIGPIPE-immune (Python-default-ignored -> catchable
+        # BrokenPipeError) and drains level-triggered on a bounded park, so a
+        # burst back-pressures instead of racing to death.
+        # #41 instrument: the bridge writes `bridge exit=<rc>` to stderr on
+        # exit -- capture it so a bridge death carries evidence (lc_fail logs
+        # bridge-at-fail).
         set ::lc_ncerr /tmp/thyla-ncerr-[pid].log
         file delete -force $::lc_ncerr
-        set chan [open "|sh -c \"nc -U $sock 2>$::lc_ncerr; echo bridge exit=\$? >> $::lc_ncerr\"" r+]
+        set bridge $lc_repo/tools/interactive/serial-bridge.py
+        set chan [open "|python3 $bridge $sock 2>$::lc_ncerr" r+]
         fconfigure $chan -buffering none -translation binary
         spawn -open $chan
-        lc_step "BOOT nc pipe-bridge up"
+        lc_step "BOOT serial-bridge.py up"
     } else {
         lc_step "BOOT spawn accel=$accel timeout=${lc_boot_timeout}s"
         spawn env THYLACINE_ACCEL=$accel $lc_repo/tools/run-vm.sh

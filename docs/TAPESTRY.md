@@ -965,7 +965,28 @@ patchwork (aurora measured — static rows never healed without it); the
 resize-ack/reweave half stays `E_OPNOTSUPP` until G-6b. The 9P tree
 gains `layout` + `pane/<id>/{ctl,mode,role,tag,surface,geometry}` (V4
 §18.5); pane files are global — the environment-role mutation gate + the
-D5 layout-observability caveat are the recorded Halcyon-era seam. Gate:
+D5 layout-observability caveat are the recorded Halcyon-era seam. **This
+is the intended WM-control model, not a per-surface ACL** (control is
+9P / layout-as-9P; the i3-IPC / tmux-control-mode shape — a WM-control
+client like `halcyon.rc` drives layout globally). Surfaces (pixels /
+events / present / weave) stay F2-owner-gated; the *layout tree* is a
+session-global control surface. **The G-6d weighing** (holotype F1, P2):
+the sharpest consequence of a global control surface is that a session
+peer could `close` another client's pane — for the console renderer
+(aurora) that queues `TEV_CLOSE`, which exits it and darkens the
+graphical console — or focus-steal its input. **The v1.0 trust boundary
+is the per-territory `/srv` (I-1/I-28)**: `/srv/tapestry` lives in the
+driver's own territory, unreachable from a user session's namespace, so
+only the trusted boot chain is spawned where it can connect — no
+untrusted tapestry client exists at v1.0. The per-client
+layout-control CAPABILITY (a WM-control client holds it; ordinary
+surface clients don't) + renderer-role protection + the D5 read ACL are
+the Halcyon-era multi-untrusted-client fix (task #42); a partial
+owner-scope now would break the global-WM model (the no-overfit trap).
+The global `clock-rate` ctl is the same same-session-trust family;
+`test-mode`/`tick`/`release`/HOLD are dev-build-only (the `test-mode`
+cargo feature, stripped to `E_OPNOTSUPP` for production — the #880
+class), with `release` additionally F2-owner-gated. Gate:
 `ls-gfx-panes.exp` + `/bin/tapestry-battery` (structure + exact pixels
 via `screendump -P`/`ppm-sample` + QMP focus legs + the collapse coda);
 ls-gfx / ls-gfx-live / the per-boot `-c` gate stay green. As-built:

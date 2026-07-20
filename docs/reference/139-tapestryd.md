@@ -491,6 +491,32 @@ left|right|up|down`, `zoom <id>`, and the id-less `focusdir <dir>` +
 `tab next|prev` (acting on the focused leaf). Pane ctl accepts the
 same per-pane verbs (`move <dir>`, `zoom`, ...).
 
+**Control scoping (the G-6d weighing).** SURFACE qids (weave / present /
+event / ctl) are F2-owner-gated at every consumer — walk, open, read,
+write, readdir, Tweft — so no client reaches another's pixels or events
+(verified sound). The PANE + LAYOUT tree is deliberately conn-GLOBAL:
+that is the WM-control model (control is 9P / layout-as-9P; a WM-control
+client like `halcyon.rc` drives layout globally — the i3-IPC / tmux
+shape), not a per-surface ACL. The `clock-rate` global ctl is the same
+same-session-trust family. **G-6d holotype F1 (P2)** weighs the sharpest
+consequence: a session peer could `close` another client's pane (for the
+console renderer, aurora, that queues `TEV_CLOSE`, which exits it and
+darkens the graphical console) or focus-steal its input. The v1.0 trust
+boundary that contains this is the per-territory `/srv` (I-1/I-28):
+`/srv/tapestry` lives in the driver's own territory, unreachable from a
+user session's namespace, so only the trusted boot chain connects — no
+untrusted tapestry client exists at v1.0. The per-client
+layout-control capability + renderer-role protection + the D5 read ACL
+are the Halcyon-era multi-untrusted-client fix (task #42); a partial
+owner-scope now would break the global-WM model. `test-mode`/`tick`/
+`release`/HOLD are dev-build-only (the `test-mode` cargo feature; #880),
+with `release` additionally F2-owner-gated. **F2 (P3):** plain (flowed)
+key press-state is not tracked — only swallowed chords — so a focus
+change while a plain key is held leaks a half-pair (release routes to
+the new surface); benign for aurora (ignores releases), a raw-evdev
+client would see a stuck key (task #43). The synthetic-release-on-
+focus-change fix is a hardening seam.
+
 ## libtapestry + tapestry-demo
 
 `usr/lib/libtapestry` (`tapestry::Surface`) is the aux-POC client model
