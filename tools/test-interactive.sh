@@ -89,18 +89,36 @@ fi
 mkdir -p "$BUILD_DIR"
 echo "==> LS-CI: ${#scenarios[@]} scenario(s); accel=$THYLACINE_ACCEL boot<=${LS_CI_BOOT_TIMEOUT}s cmd<=${LS_CI_CMD_TIMEOUT}s"
 
-# Bounded retry per scenario. The kernel is proven stable at idle, so an
-# unexpected qemu exit before a terminal PASS/FAIL is a host-timing artifact
-# (TCG-under-oversubscription, per the documented flake class) -- never a kernel
-# fault. A retry tolerates that. It does NOT mask a real regression: a genuine
+# Bounded retry per scenario. It does NOT mask a real regression: a genuine
 # break (e.g. LS-2 reverted) fails EVERY attempt deterministically (the output is
 # missing each time), so a scenario fails only if ALL attempts fail.
+#
+# #72 CORRECTION -- this block used to justify the retry by asserting that "an
+# unexpected qemu exit before a terminal PASS/FAIL is a host-timing artifact
+# (TCG-under-oversubscription), never a kernel fault". That was WRONG, and it
+# was never measured. Ground truth (N=10, instrumented): 5 of 10 boots were
+# lost, and in ALL FIVE the VM was still ALIVE (stat R+/S+) while the `nc -U`
+# serial relay had died of SIGPIPE (`bridge exit=141`). It was never a qemu
+# exit at all -- it was the HARNESS's own relay dying, mislabelled by lib.exp's
+# `eof` arm and then rationalized here as host timing. The relay is now
+# serial-bridge.py (SIGPIPE-immune); the retry stays as belt-and-braces, but a
+# retry is a TOLERANCE, never a diagnosis. If attempts start failing again,
+# read the preserved evidence -- do not reach for "host timing".
 fails=0
 attempts="${LS_CI_ATTEMPTS:-3}"
 for scen in "${scenarios[@]}"; do
     name="$(basename "$scen" .exp)"
     transcript="$BUILD_DIR/ls-ci-$name.log"
     steps="$BUILD_DIR/ls-ci-$name.steps"
+    # #72: failed-attempt evidence must survive the retry. The per-attempt
+    # truncation below used to destroy the very transcript a retry was
+    # retrying over, so a claim like "attempt 1 was a host-timing artifact"
+    # could never be checked against its own evidence -- the no-host-load
+    # discipline needs the artifact to LOOK at. Each failed attempt is
+    # archived as ls-ci-<name>.attempt<N>.{log,steps}; retention is bounded
+    # to the LAST run (cleared here, per scenario, not per attempt).
+    rm -f "$BUILD_DIR/ls-ci-$name.attempt"*.log \
+          "$BUILD_DIR/ls-ci-$name.attempt"*.steps 2>/dev/null || true
     echo "==> scenario: $name (up to $attempts attempt(s))"
     passed=0
     for attempt in $(seq 1 "$attempts"); do
@@ -121,15 +139,18 @@ for scen in "${scenarios[@]}"; do
         reap_qemu
         if [[ $rc -eq 0 ]]; then
             if [[ $attempt -gt 1 ]]; then
-                echo "    PASS: $name (attempt $attempt/$attempts; earlier attempt(s) hit a transient host-timing qemu exit)"
+                echo "    PASS: $name (attempt $attempt/$attempts; earlier failed attempt(s) preserved: $BUILD_DIR/ls-ci-$name.attempt*.{log,steps})"
             else
                 echo "    PASS: $name"
             fi
             passed=1
             break
         fi
-        echo "    attempt $attempt/$attempts FAILED (rc=$rc)" >&2
-        [[ $attempt -lt $attempts ]] && echo "    retrying (kernel proven stable at idle; an early qemu exit is host-timing)..." >&2
+        # Preserve this attempt's evidence BEFORE the next attempt truncates.
+        cp "$transcript" "$BUILD_DIR/ls-ci-$name.attempt$attempt.log" 2>/dev/null || true
+        cp "$steps" "$BUILD_DIR/ls-ci-$name.attempt$attempt.steps" 2>/dev/null || true
+        echo "    attempt $attempt/$attempts FAILED (rc=$rc; evidence: ls-ci-$name.attempt$attempt.{log,steps})" >&2
+        [[ $attempt -lt $attempts ]] && echo "    retrying (an unexplained early exit -- see the preserved evidence; a retry is NOT a diagnosis)..." >&2
     done
     if [[ $passed -ne 1 ]]; then
         echo "    FAIL: $name -- all $attempts attempts failed (deterministic = a real regression, not a flake)" >&2

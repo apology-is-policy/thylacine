@@ -105,7 +105,7 @@ login to have received every keystroke) + **LS-2** three ways: `echo` stdout
 (`exec_external`), `echo | tr a-z A-Z` upper-cased stdout (`spawn_pipeline_elements`),
 and `cat /missing` -> `cat:` stderr.
 
-Three hard-won portability facts are encoded in the harness (and matter for every
+Four hard-won portability facts are encoded in the harness (and matter for every
 future LS-CI scenario):
 - **Run `expect` under `script(1)`** -- macOS expect 5.45 corrupts its own std
   channels inside `spawn` when its stdout is not a tty (a `>file` redirect OR a
@@ -117,13 +117,47 @@ future LS-CI scenario):
 - **Match command OUTPUT, never typed input** -- the `ut` line editor redraws the
   prompt per keystroke via cursor positioning and does NOT emit the typed line as
   plain bytes, so only the command's output (clean text on its own line) is matchable.
+- **The serial relay is `serial-bridge.py`, never `nc`** (#72) -- on Darwin the
+  console rides a UNIX socket bridged into expect (the #66 fix), and the relay
+  must survive a whole boot-output burst. BSD `nc -U` does not: measured, it lost
+  5 of 10 boots to SIGPIPE while the guest kept booting.
+- **Raise `match_max` before the boot burst** (#72) -- expect's default match
+  buffer is 2000 bytes against ~110 KB of boot output (~55 discard-and-rescan
+  cycles); under that churn expect closes its read end and the relay dies as a
+  consequence. `match_max 200000` took the residual 2/10 to 0/10.
 
-The kernel is proven stable at idle (a no-input boot survives indefinitely), so an
-unexpected qemu exit before a terminal result is a host-timing artifact
-(TCG-under-oversubscription); the wrapper retries each scenario up to
-`LS_CI_ATTEMPTS` (default 3). A real regression fails every attempt deterministically,
-so the retry tolerates flakes without masking a break. Reference: `docs/reference/09-test-harness.md`
-"Interactive E2E harness (LS-CI)".
+The wrapper retries each scenario up to `LS_CI_ATTEMPTS` (default 3). A real
+regression fails every attempt deterministically, so the retry tolerates a
+non-deterministic loss without masking a break. Reference:
+`docs/reference/09-test-harness.md` "Interactive E2E harness (LS-CI)".
+
+**A retracted claim (#72).** This paragraph used to
+read "the kernel is proven stable at idle, so an unexpected qemu exit before a
+terminal result is a host-timing artifact (TCG-under-oversubscription)". That
+was false, and it had never been measured -- it was a *non sequitur* dressed as
+a deduction: kernel-stable-at-idle does rule out a guest fault, but the
+conclusion skipped the third possibility, that the HARNESS's own serial relay
+died. Ground truth (N=10 single-attempt boots, instrumented): 5 were lost, and
+in ALL FIVE the VM was still ALIVE (`stat=R+/S+`) while `nc -U` had taken
+SIGPIPE (`bridge exit=141`). `lib.exp`'s login `eof` arm then *asserted*
+"qemu exited before login prompt" -- a cause it never checked -- and the label
+propagated into the wrapper and these docs as settled fact. The relay is now
+`tools/interactive/serial-bridge.py` (SIGPIPE-immune by construction; also
+covers the #66 lost-wakeup class), and `lc_fail` records `vm-at-fail` +
+`bridge-at-fail` so the two causes can never again be conflated.
+
+There turned out to be **two** causes wearing that one symptom: swapping the
+relay took 5/10 to 2/10, and the survivors reported `reason=stdout-broken`
+(reader closed) rather than `socket-eof` (guest gone) -- which is what made the
+second cause legible instead of reading as "the fix didn't work". The residual
+was byte-locked: all six failures across BOTH relays cut within a ~1.2 KB window
+(~110 KB in), at the same content point, always on a UTF-8 character boundary
+inside a run of box-drawing glyphs. Two unrelated relay implementations dying at
+the same byte position is what ruled out both host timing and the relay itself,
+and pointed at expect's 2000-byte `match_max`. Raising it: **0/10**. The lesson is
+the [[feedback-no-host-load]] one: "host timing" is a hypothesis carrying the
+same burden of proof as any other, and it is the most *convenient* one, which
+is exactly why it went unexamined for so long.
 
 The `expect`/PTY method is the ONLY way to inject real console input -- piped stdin
 hits EOF and closes QEMU's `mon:stdio` chardev, which is why CI never exercised the

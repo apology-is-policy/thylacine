@@ -50,6 +50,26 @@ proc lc_step {msg} {
 
 proc lc_fail {msg} {
     lc_step "FAIL: $msg"
+    # Evidence BEFORE the kill: the VM's process state at failure time splits
+    # "qemu exited" (stat Z* -- Tcl lazy-reaps, so a dead child lingers as a
+    # zombie; kill -0 would lie) from "the serial bridge died under a LIVE VM"
+    # (stat R/S/U). Without this the two are indistinguishable at the expect
+    # layer -- both surface as EOF -- which is how the bridge-death class hid
+    # behind a "qemu exited before login prompt" message for so long.
+    if {[info exists ::lc_vm_pid]} {
+        if {[catch {exec ps -p $::lc_vm_pid -o stat=} st]} { set st GONE }
+        lc_step "vm-at-fail: pid $::lc_vm_pid stat=[string trim $st]"
+    }
+    # A dead bridge leaves its exit record here; a live one leaves the file
+    # empty. rc 141 == 128+SIGPIPE.
+    if {[info exists ::lc_ncerr] && [file exists $::lc_ncerr]} {
+        catch {
+            set f [open $::lc_ncerr r]
+            set d [string trim [read $f]]
+            close $f
+            if {$d ne ""} { lc_step "bridge-at-fail: $d" }
+        }
+    }
     send_user "\nLS-CI FAIL: $msg\n"
     lc_vm_kill
     exit 1
@@ -102,14 +122,42 @@ proc lc_boot {} {
         }
         if {![file exists $sock]} { lc_fail "serial socket never appeared (vm log: $vmlog)" }
         # PIPE bridge, not a pty: `spawn -open` drives an already-open Tcl
-        # pipe channel to nc, so NO pty exists anywhere on the input path
-        # (expect -> pipe -> nc -> unix socket -> qemu). Every failing
+        # pipe channel to the relay, so NO pty exists anywhere on the input
+        # path (expect -> pipe -> bridge -> unix socket -> qemu). Every failing
         # configuration in the #66 hunt shared an expect-spawn pty as the
         # input carrier; pipes have none of the tty layer.
-        set chan [open "|nc -U $sock" r+]
+        #
+        # #72 FIX: the relay is serial-bridge.py, NOT `nc -U`. MEASURED on this
+        # harness: `nc -U` lost 5 of 10 single-attempt boots, every one of them
+        # with the VM still ALIVE (stat R+/S+) and `bridge exit=141` -- BSD nc
+        # taking SIGPIPE mid-boot. expect saw the resulting EOF and lib.exp's
+        # login `eof` arm ASSERTED "qemu exited before login prompt", which is
+        # how a harness bug spent this long being logged as a guest/host-timing
+        # flake. serial-bridge.py is immune by construction: SIGPIPE is
+        # Python-default-ignored (a transient stdout condition raises a
+        # CATCHABLE BrokenPipeError), stdout writes block for back-pressure
+        # instead of racing, a bounded select() park re-checks both endpoints
+        # level-triggered (also covering the #66 lost-wakeup class), and stdin
+        # EOF does NOT end the relay (BSD nc exits there).
+        #
+        # #72 instrument: the bridge reports `bridge exit=<rc> reason=<why>` on
+        # stderr; lc_fail surfaces it as bridge-at-fail, alongside vm-at-fail.
+        # Together they split "the bridge died" from "the guest died" -- expect
+        # sees the same bare EOF either way, so without these two the cause is
+        # unknowable and the temptation is to guess.
+        set ::lc_ncerr /tmp/thyla-ncerr-[pid].log
+        file delete -force $::lc_ncerr
+        set bridge $lc_repo/tools/interactive/serial-bridge.py
+        set chan [open [list | python3 $bridge $sock 2> $::lc_ncerr] r+]
         fconfigure $chan -buffering none -translation binary
         spawn -open $chan
-        lc_step "BOOT nc pipe-bridge up"
+        # #72 residual: expect's default match_max is 2000 bytes, so a ~110 KB
+        # boot burst forces ~55 discard-and-rescan cycles. Every observed
+        # `stdout-broken` cut landed inside the heaviest of those bursts (a run
+        # of 3-byte U+2500 box-drawing), always on a character boundary. Give
+        # the matcher room rather than churning it.
+        match_max 200000
+        lc_step "BOOT serial-bridge.py up"
     } else {
         lc_step "BOOT spawn accel=$accel timeout=${lc_boot_timeout}s"
         spawn env THYLACINE_ACCEL=$accel $lc_repo/tools/run-vm.sh
