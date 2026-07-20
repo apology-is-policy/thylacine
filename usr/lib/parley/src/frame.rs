@@ -12,7 +12,7 @@
 //! envelope, but both frame the same way). The decoder is **streaming**: bytes
 //! arrive from a pipe in arbitrary chunks -- a header or body may be split
 //! across reads, and several frames may arrive in one read -- so callers `push`
-//! whatever they got and `next` out every complete frame.
+//! whatever they got and `next_frame` out every complete frame.
 
 use alloc::format;
 use alloc::vec::Vec;
@@ -80,7 +80,7 @@ impl Decoder {
     ///
     /// Call repeatedly until it returns `Ok(None)` to drain every frame a single
     /// `push` delivered.
-    pub fn next(&mut self) -> Result<Option<Vec<u8>>, FrameError> {
+    pub fn next_frame(&mut self) -> Result<Option<Vec<u8>>, FrameError> {
         loop {
             match self.body_len {
                 None => {
@@ -241,8 +241,8 @@ mod tests {
     fn decode_one_frame() {
         let mut d = Decoder::new();
         d.push(&encode(b"hello"));
-        assert_eq!(d.next().unwrap(), Some(b"hello".to_vec()));
-        assert_eq!(d.next().unwrap(), None);
+        assert_eq!(d.next_frame().unwrap(), Some(b"hello".to_vec()));
+        assert_eq!(d.next_frame().unwrap(), None);
     }
 
     #[test]
@@ -253,11 +253,11 @@ mod tests {
         let split1 = 10;
         let split2 = msg.len() - 3;
         d.push(&msg[..split1]);
-        assert_eq!(d.next().unwrap(), None);
+        assert_eq!(d.next_frame().unwrap(), None);
         d.push(&msg[split1..split2]);
-        assert_eq!(d.next().unwrap(), None);
+        assert_eq!(d.next_frame().unwrap(), None);
         d.push(&msg[split2..]);
-        assert_eq!(d.next().unwrap(), Some(b"the body".to_vec()));
+        assert_eq!(d.next_frame().unwrap(), Some(b"the body".to_vec()));
     }
 
     #[test]
@@ -267,10 +267,10 @@ mod tests {
         stream.extend_from_slice(&encode(b"three"));
         let mut d = Decoder::new();
         d.push(&stream);
-        assert_eq!(d.next().unwrap(), Some(b"one".to_vec()));
-        assert_eq!(d.next().unwrap(), Some(b"two".to_vec()));
-        assert_eq!(d.next().unwrap(), Some(b"three".to_vec()));
-        assert_eq!(d.next().unwrap(), None);
+        assert_eq!(d.next_frame().unwrap(), Some(b"one".to_vec()));
+        assert_eq!(d.next_frame().unwrap(), Some(b"two".to_vec()));
+        assert_eq!(d.next_frame().unwrap(), Some(b"three".to_vec()));
+        assert_eq!(d.next_frame().unwrap(), None);
     }
 
     #[test]
@@ -282,7 +282,7 @@ mod tests {
         );
         let mut d = Decoder::new();
         d.push(&msg);
-        assert_eq!(d.next().unwrap(), Some(b"body".to_vec()));
+        assert_eq!(d.next_frame().unwrap(), Some(b"body".to_vec()));
     }
 
     #[test]
@@ -292,7 +292,7 @@ mod tests {
         let body = framed(&[b"x"], b"y"); // arbitrary bytes containing CRLF
         let mut d = Decoder::new();
         d.push(&encode(&body));
-        assert_eq!(d.next().unwrap(), Some(body));
+        assert_eq!(d.next_frame().unwrap(), Some(body));
     }
 
     #[test]
@@ -300,7 +300,7 @@ mod tests {
         let msg = framed(&[b"Content-Type: text/plain"], b"body");
         let mut d = Decoder::new();
         d.push(&msg);
-        assert!(d.next().is_err());
+        assert!(d.next_frame().is_err());
     }
 
     #[test]
@@ -308,7 +308,7 @@ mod tests {
         let msg = framed(&[b"Content-Length: abc"], b"body");
         let mut d = Decoder::new();
         d.push(&msg);
-        assert!(d.next().is_err());
+        assert!(d.next_frame().is_err());
     }
 
     #[test]
@@ -316,7 +316,7 @@ mod tests {
         let mut d = Decoder::new();
         // no separator ever; feed past the header cap
         d.push(&[b'a'; MAX_HEADER_BYTES + 1]);
-        assert!(d.next().is_err());
+        assert!(d.next_frame().is_err());
     }
 
     #[test]
@@ -329,8 +329,8 @@ mod tests {
         let mut d = Decoder::new();
         d.push(&stream);
         for b in &bodies {
-            assert_eq!(d.next().unwrap(), Some(b.to_vec()));
+            assert_eq!(d.next_frame().unwrap(), Some(b.to_vec()));
         }
-        assert_eq!(d.next().unwrap(), None);
+        assert_eq!(d.next_frame().unwrap(), None);
     }
 }

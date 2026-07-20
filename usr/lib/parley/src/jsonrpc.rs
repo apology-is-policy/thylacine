@@ -239,7 +239,7 @@ mod tests {
 
         let mut d = frame::Decoder::new();
         d.push(&wire);
-        let body = d.next().unwrap().expect("one frame");
+        let body = d.next_frame().unwrap().expect("one frame");
         let parsed = Value::parse(&body).expect("valid json body");
         match classify(parsed).unwrap() {
             Incoming::Request { id, method, params } => {

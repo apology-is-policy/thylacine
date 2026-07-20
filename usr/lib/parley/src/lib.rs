@@ -19,3 +19,9 @@ extern crate alloc;
 pub mod frame;
 pub mod json;
 pub mod jsonrpc;
+
+/// The persistent-child + PollSet transport. Needs libthyla-rs (spawn + poll),
+/// so it lives behind the `backend` feature; the pure layers above stay
+/// host-testable. Proven end to end by the in-guest `parley-probe`.
+#[cfg(feature = "backend")]
+pub mod transport;

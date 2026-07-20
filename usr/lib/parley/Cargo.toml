@@ -32,3 +32,17 @@ license.workspace = true
 [lib]
 name = "parley"
 path = "src/lib.rs"
+
+[features]
+# `backend` pulls in libthyla-rs and compiles the `transport` module (the
+# persistent-child + PollSet driver). It is OFF by default so the pure layers
+# (json/frame/jsonrpc) stay host-testable with no platform dependency:
+#   cargo test -p parley --target aarch64-apple-darwin
+# The device build enables it via the consumers (parley-probe, and nora at
+# 8e-2) that request `features = ["backend"]`; Cargo unifies features across the
+# workspace, so the aarch64-unknown-none build compiles `transport` while the
+# host `-p parley` test builds only the pure layers.
+backend = ["dep:libthyla-rs"]
+
+[dependencies]
+libthyla-rs = { path = "../libthyla-rs", optional = true }

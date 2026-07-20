@@ -956,6 +956,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "parley"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
+name = "parley-echo"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
+name = "parley-probe"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+ "parley",
+]
+
+[[package]]
 name = "password-hash"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

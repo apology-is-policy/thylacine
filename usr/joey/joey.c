@@ -2395,6 +2395,27 @@ int main(void) {
     }
     t_putstr("joey: /loom-smoke reaped status=0; native loom ring API verified\n");
 
+    // === /parley-probe orchestration (Go Stage 8e-1c: the LSP/DAP transport E2E) ===
+    // parley-probe spawns /parley-echo as a persistent server (piped stdio),
+    // frame-sends a JSON-RPC request, Mux-polls the echo's stdout+stderr in one
+    // poll(2), pumps the streaming frame decoder, and asserts the round-trip --
+    // exactly the async-client machinery nora's gopls/Ambush loop will use. On
+    // success "parley-probe: PASS" + exit 0; any failed check prints a tagged
+    // FAIL + exits 1 (gates the boot).
+    const char parley_probe_name[] = "parley-probe";
+    long pp_pid = t_spawn(parley_probe_name, sizeof(parley_probe_name) - 1);
+    if (pp_pid <= 0) {
+        t_putstr("joey: t_spawn(\"parley-probe\") FAILED\n");
+        return 1;
+    }
+    int pp_status = -1;
+    long pp_reaped = t_wait_pid_for((int)pp_pid, 0, &pp_status);
+    if (pp_reaped != pp_pid || pp_status != 0) {
+        t_putstr("joey: /parley-probe orchestration FAILED\n");
+        return 1;
+    }
+    t_putstr("joey: /parley-probe reaped status=0; parley transport (8e-1c) verified\n");
+
     // === /debug-probe orchestration (Go Stage 8a-1c: the debug-fs E2E) ===
     // The first in-guest exercise of the /proc/<pid> debug surface against a
     // GENUINELY-parked EL0 thread -- the one thing the kernel unit tests cannot
