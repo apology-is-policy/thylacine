@@ -2131,6 +2131,17 @@ void proc_fault_terminate(const char *name, uintptr_t faulting_addr) {
     uart_puts(name);
     uart_puts("\" addr=");
     uart_puthex64((u64)faulting_addr);
+    // The faulting EL0 PC (+ lr): debug_trapframe is recorded at the
+    // EL0-sync entry choke point (#88), so on this path -- reached only
+    // from an EL0 exception -- it names the fault frame. A static
+    // non-PIE pouch binary's PC symbolizes directly against its ELF;
+    // without this line every userspace segv is a blind addr.
+    if (t->debug_trapframe) {
+        uart_puts(" pc=");
+        uart_puthex64(t->debug_trapframe->elr);
+        uart_puts(" lr=");
+        uart_puthex64(t->debug_trapframe->regs[30]);
+    }
     uart_puts(" -- terminating Proc\n");
 
     exits(name);

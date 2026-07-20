@@ -56,12 +56,25 @@ struct Spoor;   // REVENANT R-4: exec_setup_from_spoor's pinned executable
 //
 // P5-secondary-stack-guard: a 4 KiB guard page sits directly below
 // EXEC_USER_STACK_BASE, installed by exec_map_user_stack as a prot==0
-// / no-BURROW guard VMA (vma_alloc_guard). An overflow past the 256 KiB
-// stack crosses into it and faults — userland_demand_page rejects the
+// / no-BURROW guard VMA (vma_alloc_guard). An overflow past the stack
+// crosses into it and faults — userland_demand_page rejects the
 // prot==0 VMA — and vma_insert's overlap rejection reserves the page so
 // a future mapping allocator (Phase 5+ mmap / heap) cannot place
 // anything flush against the stack. Closes corvus-bringup-d audit F7.
-#define EXEC_USER_STACK_SIZE         (256ull * 1024)
+//
+// G-7b: 1 MiB (was 256 KiB). The original 256 KiB was too small for a
+// real ported program's call graph — TyrQuake's model loader
+// (Mod_ForName -> Mod_LoadAliasModel, large on-stack temp buffers)
+// overflowed it into the guard page during the first map load. 1 MiB is
+// eager-anon (whole thing committed at exec, like the ELF data), so it
+// stays modest: ~1 MiB * boot-Proc-count, trivial against RAM, and the
+// 0x80000000..0xC0000000 gap above STACK_TOP leaves 1 GiB of headroom to
+// grow down further. The proper Linux-model answer — a large lazy
+// (demand-grown) reservation that commits only touched pages — is the
+// tracked v-next lift (it needs the exec frame-fill to pre-commit just
+// the top page; the overcommit BURROW_TYPE_ANON_LAZY infra already
+// exists). This bump unblocks real ports now at a bounded eager cost.
+#define EXEC_USER_STACK_SIZE         (1024ull * 1024)
 #define EXEC_USER_STACK_TOP          0x0000000080000000ull
 #define EXEC_USER_STACK_BASE         (EXEC_USER_STACK_TOP - EXEC_USER_STACK_SIZE)
 #define EXEC_USER_STACK_GUARD_SIZE   0x1000ull

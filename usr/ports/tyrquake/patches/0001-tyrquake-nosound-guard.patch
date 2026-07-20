@@ -1,0 +1,48 @@
+G-7b (the Quake gate, TAPESTRY.md section 9/18.9) -- guard
+S_ClearOverflow against an un-allocated known_sfx.
+
+With -nosound (no virtio-sound driver exists at v1.0, TAPESTRY.md
+section 10 item 4), S_Init returns at its first line BEFORE allocating
+`known_sfx` (a static pointer, snd_dma.c:75, allocated only at
+snd_dma.c:214). But Host_ClearMemory calls S_ClearOverflow
+unconditionally on every level load (host.c:474), and S_ClearOverflow
+dereferences `known_sfx->overflow` with NO guard -- while its siblings
+S_StopAllSounds and S_ClearBuffer both bail on `!sound_started`. The
+result is a NULL deref (snare:segv addr=0xb008, the ->overflow field
+offset) the instant the demo loads its first map. Upstream simply
+omits the guard its neighbours carry; the fix mirrors them.
+
+Applied to a build-dir COPY of the vendored tree (the SDL2/musl idiom;
+third_party/tyrquake stays byte-pristine).
+--- a/common/snd_dma.c
++++ b/common/snd_dma.c
+@@ -279,6 +279,14 @@
+ void
+ S_ClearOverflow()
+ {
++    /* pouch (G-7b): guard like S_StopAllSounds / S_ClearBuffer. With
++     * -nosound (no virtio-sound at v1.0) S_Init returns before it
++     * allocates known_sfx, but Host_ClearMemory calls this on every
++     * level load -- the unguarded known_sfx->overflow deref NULL-
++     * faults. Upstream lacks the guard its siblings carry. */
++    if (!snd_initialized || !known_sfx)
++	return;
++
+     S_StopAllSounds(true);
+     struct known_sfx *known = known_sfx->overflow;
+ 
+--- a/common/sys_unix.c
++++ b/common/sys_unix.c
+@@ -362,6 +362,12 @@
+     signal(SIGFPE, SIG_IGN);
+ #endif
+ 
++    /* pouch (G-7b): unbuffered stdout so Con_Printf progress reaches the
++     * serial tee in real time (the NQ path's Sys_Printf never fflushes;
++     * block buffering otherwise hides the whole boot behind the crash/
++     * exit flush). */
++    setvbuf(stdout, NULL, _IONBF, 0);
++
+     memset(&parms, 0, sizeof(parms));
+ 
+     COM_InitArgv(argc, (const char **)argv);

@@ -1,0 +1,57 @@
+G-7b (the Quake gate, TAPESTRY.md section 9/18.9) -- musl-INTERNAL path
+opens rerouted onto the patched open(). The stdio openers (fopen,
+__fopen_rb_ca, tmpfile) call musl's sys_open MACRO -- the RAW
+__syscall(SYS_open/SYS_openat, ...) -- which bypasses the 0009/0021
+boundary-line openat() FUNCTION entirely and dies on the unwired 0xFFFF
+sentinel (-ENOSYS). No prior pouch program ever fopen()ed by path
+(stratumd uses open(); the hello probes use stdio on inherited fds), so
+the gap sat latent until TyrQuake's COM_FileOpenRead -> fopen(pak0.pak)
+silently found no pak ("Playing shareware version" + the palette
+Sys_Error were both downstream of ZERO packfiles registering).
+
+The fix routes the three call sites through the public open() -- the
+patched function that resolves via SYS_open = 65 (stalk; real -errno).
+Upstream musl deliberately uses the raw syscall there (no interposition,
+no cancellation point); under pouch the patched function IS the syscall
+boundary, so the reroute is the correct shape (fchmodat / posix_spawn /
+__map_file / __libc_start_main keep their raw calls -- their arms are
+fail-soft or out of the v1.0 pouch envelope).
+
+--- a/src/stdio/__fopen_rb_ca.c
++++ b/src/stdio/__fopen_rb_ca.c
+@@ -6,7 +6,8 @@
+ {
+ 	memset(f, 0, sizeof *f);
+ 
+-	f->fd = sys_open(filename, O_RDONLY|O_CLOEXEC);
++	/* pouch: route through the patched open() -- see fopen.c. */
++	f->fd = open(filename, O_RDONLY|O_CLOEXEC);
+ 	if (f->fd < 0) return 0;
+ 	__syscall(SYS_fcntl, f->fd, F_SETFD, FD_CLOEXEC);
+ 
+--- a/src/stdio/fopen.c
++++ b/src/stdio/fopen.c
+@@ -18,7 +18,10 @@
+ 	/* Compute the flags to pass to open() */
+ 	flags = __fmodeflags(mode);
+ 
+-	fd = sys_open(filename, flags, 0666);
++	/* pouch: sys_open is the RAW SYS_openat -- an unwired 0xFFFF sentinel
++	 * on Thylacine. Route through the public open(), the 0009/0021
++	 * boundary-line (SYS_open = 65 stalk resolution). */
++	fd = open(filename, flags, 0666);
+ 	if (fd < 0) return 0;
+ 	if (flags & O_CLOEXEC)
+ 		__syscall(SYS_fcntl, fd, F_SETFD, FD_CLOEXEC);
+--- a/src/stdio/tmpfile.c
++++ b/src/stdio/tmpfile.c
+@@ -13,7 +13,8 @@
+ 	int try;
+ 	for (try=0; try<MAXTRIES; try++) {
+ 		__randname(s+13);
+-		fd = sys_open(s, O_RDWR|O_CREAT|O_EXCL, 0600);
++		/* pouch: route through the patched open() -- see fopen.c. */
++		fd = open(s, O_RDWR|O_CREAT|O_EXCL, 0600);
+ 		if (fd >= 0) {
+ #ifdef SYS_unlink
+ 			__syscall(SYS_unlink, s);
