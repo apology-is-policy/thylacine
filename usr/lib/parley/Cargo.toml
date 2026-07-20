@@ -1,0 +1,34 @@
+# parley -- the LSP/DAP client substrate for the Nora Go IDE (Stage 8e).
+#
+# The dialogue layer between Nora and the language/debug servers (gopls +
+# Ambush): a "parley" is a formal exchange between two parties under an agreed
+# protocol -- exactly LSP + DAP (JSON-RPC 2.0). Name is provisional (a new
+# crate, easy to rename).
+#
+# Hosts, incrementally:
+#   - json      (8e-1a, this slice) -- a no_std JSON value + parser + serializer.
+#                 The tree's FIRST JSON codec: serde_json is std-only, and the
+#                 existing "hand-rolled JSON" in httpd/curl was HTTP
+#                 Content-Length, not JSON.
+#   - jsonrpc   (8e-1b) -- Content-Length framing + the JSON-RPC 2.0 message
+#                 model (request id matching, notifications).
+#   - transport (8e-1c) -- the persistent-child + PollSet driver that keeps
+#                 gopls/Ambush alive and pumps framed messages (needs
+#                 libthyla-rs; behind a `backend`-style feature, the kaua
+#                 pattern).
+#
+# The pure layers (json, jsonrpc) are terminal- and process-free -> host-testable:
+#   cargo test -p parley --target aarch64-apple-darwin
+#
+# Design: docs/NORA-IDE-UX.md section 6 (the async client architecture).
+
+[package]
+name = "parley"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lib]
+name = "parley"
+path = "src/lib.rs"
