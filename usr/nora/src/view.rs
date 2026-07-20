@@ -22,6 +22,14 @@ use crate::syntax::HlClass;
 use crate::theme;
 use crate::wrap;
 
+/// Most rows a hover popup may occupy. A gopls hover on a documented symbol
+/// can run to a screenful; the box exists to answer "what is this", not to
+/// replace the editor, and it is bounded so it can never bury the code the
+/// question was about.
+const HOVER_ROWS: usize = 8;
+/// Most candidates the completion popup shows at once (it scrolls).
+const COMPLETION_ROWS: usize = 10;
+
 /// The text-region layout for `area`: `(gutter_w, text_width, text_height)`.
 /// The single source of geometry shared by `render` and `Editor::scroll_to`
 /// (they must agree on the text width or the wrapped cursor desyncs).
@@ -77,6 +85,13 @@ pub fn render(ed: &Editor, area: Rect, buf: &mut Buffer) -> (u16, u16) {
         render_hint(text_area, buf);
     }
 
+    // The completion popup overlays Insert and owns the cursor (it is a list
+    // the user is steering), so it is checked with the other selectable
+    // overlays rather than drawn as a passive box.
+    if let Some((items, sel)) = ed.completion_state() {
+        return render_completion(items, sel, text_area, buf);
+    }
+
     // The menu + pickers overlay the text and own the cursor.
     if ed.menu_open() {
         return render_menu(ed, text_area, buf);
@@ -125,6 +140,14 @@ pub fn render(ed: &Editor, area: Rect, buf: &mut Buffer) -> (u16, u16) {
                 }
             }
         }
+    }
+    // Hover paints LAST, over the text and even over the block cursor -- it is
+    // a transient answer to a question the user just asked, so it should be
+    // the most visible thing on screen for the one keystroke it survives. It
+    // deliberately does NOT take the cursor: hover is non-modal, and moving
+    // the cursor into a popup the next key dismisses would be disorienting.
+    if let Some(text) = ed.hover() {
+        render_hover(text, text_area, buf);
     }
     cur
 }
@@ -522,6 +545,83 @@ fn render_command_popup(ed: &Editor, text_area: Rect, buf: &mut Buffer) {
     List::new(&refs).style(theme::palette_surface()).render(inner, buf);
 }
 
+/// The completion popup (Ctrl-N in Insert): the server's candidates, selectable.
+/// Owns the cursor like the other pickers.
+fn render_completion(
+    items: &[crate::editor::Candidate],
+    sel: usize,
+    text_area: Rect,
+    buf: &mut Buffer,
+) -> (u16, u16) {
+    // Window FIRST, then format: the visible slice is chosen before any row is
+    // built, so only what is drawn costs a string -- and, more importantly, the
+    // selection is always inside the rendered list. Formatting the leading N
+    // and windowing afterwards silently drops the highlight off the end once
+    // the selection passes row N.
+    let first = sel.saturating_sub(COMPLETION_ROWS.saturating_sub(1));
+    let rows: alloc::vec::Vec<String> = items
+        .iter()
+        .skip(first)
+        .take(COMPLETION_ROWS)
+        .map(|c| match &c.detail {
+            Some(d) => format!("{}  {}", c.label, d),
+            None => c.label.clone(),
+        })
+        .collect();
+    let refs: alloc::vec::Vec<&str> = rows.iter().map(|s| s.as_str()).collect();
+    let title = " complete ";
+    let inner = popup(text_area, title, widest(&refs, title), rows.len() as u16, buf);
+    List::new(&refs)
+        .select(Some(sel - first))
+        .style(theme::palette_surface())
+        .selected_style(theme::palette_selected())
+        .render(inner, buf);
+    let cy = inner
+        .y
+        .saturating_add((sel - first) as u16)
+        .min(inner.bottom().saturating_sub(1));
+    (inner.x, cy)
+}
+
+/// The hover popup: a language server's description of the symbol under the
+/// cursor, wrapped to the text area and clipped to a few rows.
+fn render_hover(text: &str, text_area: Rect, buf: &mut Buffer) {
+    // gopls answers in markdown with fenced code blocks; the fences are noise
+    // in a plain-text box, and a blank line between sections is worth keeping.
+    let content_w = text_area.width.saturating_sub(4).max(1);
+    let mut rows: alloc::vec::Vec<String> = alloc::vec::Vec::new();
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            continue;
+        }
+        if rows.len() >= HOVER_ROWS {
+            break;
+        }
+        // Hard-wrap rather than truncate: a signature is the most useful part
+        // of a hover and it is exactly what overflows one line.
+        let mut rest = line;
+        loop {
+            let take = rest
+                .char_indices()
+                .nth(content_w as usize)
+                .map(|(i, _)| i)
+                .unwrap_or(rest.len());
+            rows.push(String::from(&rest[..take]));
+            rest = &rest[take..];
+            if rest.is_empty() || rows.len() >= HOVER_ROWS {
+                break;
+            }
+        }
+    }
+    if rows.is_empty() {
+        return;
+    }
+    let refs: alloc::vec::Vec<&str> = rows.iter().map(|s| s.as_str()).collect();
+    let title = " hover ";
+    let inner = popup(text_area, title, widest(&refs, title), rows.len() as u16, buf);
+    List::new(&refs).style(theme::palette_surface()).render(inner, buf);
+}
+
 /// A faint right-aligned `hint: type :help` on the text area's last row, drawn
 /// only for the pristine initial buffer (`Editor::show_hint`) to point new users
 /// at the manual. Skipped if the area is too small to hold it clear of the
@@ -646,7 +746,9 @@ fn mode_color(mode: &Mode) -> Color {
         Mode::Normal | Mode::Menu | Mode::BufferPicker { .. } | Mode::FilePicker { .. } => {
             theme::EMBER
         }
-        Mode::Insert => theme::GREEN,
+        // Completion overlays Insert; keeping the accent means the cursor does
+        // not change colour under the user just because a popup opened.
+        Mode::Insert | Mode::Completion { .. } => theme::GREEN,
         Mode::Visual => theme::VIOLET,
         Mode::Command(_) => theme::GOLD,
     }
@@ -1055,5 +1157,111 @@ ccc", false);
         // "X X": carets at (0,1) and (0,3). The non-primary caret paints a moss
         // (Insert accent) block at col 3 -> x = gutter(4) + 3 = 7.
         assert_eq!(b.get(7, 0).unwrap().style.bg, theme::GREEN);
+    }
+
+    // -- the language-server overlays (8e-2c) ------------------------------
+
+    /// Does any row of the rendered frame contain `needle`?
+    fn frame_has(b: &Buffer, a: Rect, needle: &str) -> bool {
+        (0..a.height).any(|y| row_text(b, y, a.width).contains(needle))
+    }
+
+    #[test]
+    fn hover_draws_a_popup_over_the_text() {
+        let a = Rect::new(0, 0, 30, 8);
+        let mut ed = Editor::new(Some("f.go".into()), "package main", false);
+        let mut b = Buffer::empty(a);
+        ed.show_hover("func F(x int) error".to_string());
+        render(&ed, a, &mut b);
+        assert!(frame_has(&b, a, "hover"));
+        assert!(frame_has(&b, a, "func F(x int) error"));
+    }
+
+    #[test]
+    fn hover_strips_markdown_fences_and_is_row_bounded() {
+        let a = Rect::new(0, 0, 30, 24);
+        let mut ed = Editor::new(Some("f.go".into()), "x", false);
+        let mut b = Buffer::empty(a);
+        // gopls wraps signatures in fenced code blocks; a bare ``` row would
+        // just be noise in a plain-text box.
+        let mut long = String::from("```go\nfunc F()\n```\n");
+        for i in 0..40 {
+            long.push_str(&format!("line {}\n", i));
+        }
+        ed.show_hover(long);
+        render(&ed, a, &mut b);
+        assert!(frame_has(&b, a, "func F()"));
+        assert!(!frame_has(&b, a, "```"));
+        // Bounded: a documented symbol must not bury the code it describes.
+        // HOVER_ROWS content + 2 border rows is the ceiling.
+        assert!(!frame_has(&b, a, &format!("line {}", HOVER_ROWS + 2)));
+    }
+
+    #[test]
+    fn a_long_hover_line_wraps_instead_of_truncating() {
+        let a = Rect::new(0, 0, 20, 10);
+        let mut ed = Editor::new(Some("f.go".into()), "x", false);
+        let mut b = Buffer::empty(a);
+        // A signature is the most useful part of a hover and exactly the part
+        // that overflows one line.
+        ed.show_hover("func Fetch(ctx context.Context) error".to_string());
+        render(&ed, a, &mut b);
+        assert!(frame_has(&b, a, "func Fetch"));
+        assert!(frame_has(&b, a, "error")); // the tail survived the wrap
+    }
+
+    #[test]
+    fn the_completion_popup_lists_candidates_and_marks_the_selection() {
+        let a = Rect::new(0, 0, 30, 10);
+        let mut ed = Editor::new(Some("f.go".into()), "", false);
+        let mut b = Buffer::empty(a);
+        ed.handle_key(KeyEvent::char('i'));
+        ed.handle_key(KeyEvent::char('P'));
+        ed.show_completion(alloc::vec![
+            crate::editor::Candidate {
+                label: "Print".into(),
+                detail: Some("func(...any)".into()),
+                insert: "Print".into(),
+            },
+            crate::editor::Candidate {
+                label: "Println".into(),
+                detail: None,
+                insert: "Println".into(),
+            },
+        ]);
+        let cur = render(&ed, a, &mut b);
+        assert!(frame_has(&b, a, "complete"));
+        assert!(frame_has(&b, a, "Print"));
+        assert!(frame_has(&b, a, "func(...any)")); // detail shown after label
+        assert!(frame_has(&b, a, "Println"));
+        // The popup owns the cursor, parked on the selected row.
+        assert_eq!(b.get(cur.0, cur.1).is_some(), true);
+    }
+
+    #[test]
+    fn the_completion_popup_scrolls_the_selection_into_view() {
+        let a = Rect::new(0, 0, 30, 20);
+        let mut ed = Editor::new(Some("f.go".into()), "", false);
+        let mut b = Buffer::empty(a);
+        ed.handle_key(KeyEvent::char('i'));
+        // More candidates than the popup can show at once -- a server can
+        // easily offer hundreds.
+        let items: alloc::vec::Vec<crate::editor::Candidate> = (0..COMPLETION_ROWS + 5)
+            .map(|i| crate::editor::Candidate {
+                label: format!("cand{}", i),
+                detail: None,
+                insert: format!("cand{}", i),
+            })
+            .collect();
+        let last = items.len() - 1;
+        ed.show_completion(items);
+        // Walk to the last candidate.
+        for _ in 0..last {
+            ed.handle_key(KeyEvent::with(KeyCode::Char('n'), kaua::event::Mods::CTRL));
+        }
+        render(&ed, a, &mut b);
+        // A popup that cannot show the highlighted candidate is useless.
+        assert!(frame_has(&b, a, &format!("cand{}", last)));
+        assert!(!frame_has(&b, a, "cand0 "));
     }
 }

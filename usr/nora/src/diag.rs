@@ -7,8 +7,12 @@
 // engine stays pure + host-tested, and a second language server -- or a
 // non-LSP source like `go vet` output -- feeds the same struct.
 //
-// Columns are BYTE offsets into the line, matching TextBuffer/view everywhere
-// else in nora.
+// Columns are CHARACTER columns -- the coordinate every `Pos` in nora uses
+// (nora::text is char-addressed end to end so multi-byte UTF-8 can never split
+// a grapheme). A producer holding byte offsets converts with
+// `nora::text::byte_to_char_col`; getting this wrong is invisible on ASCII and
+// lands the cursor off by (bytes - chars) on the first non-ASCII line, which is
+// why the coordinate is named here rather than left to each caller.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -28,9 +32,9 @@ pub enum Severity {
 pub struct LineDiag {
     /// 0-based logical row.
     pub line: usize,
-    /// Byte column of the span start within `line`.
+    /// Character column of the span start within `line`.
     pub col: usize,
-    /// Byte column of the span end (exclusive). May equal `col` for a
+    /// Character column of the span end (exclusive). May equal `col` for a
     /// zero-width marker; never less.
     pub end_col: usize,
     pub severity: Severity,

@@ -34,7 +34,8 @@ use parley::lsp::{self, Action};
 use parley::transport::{Mux, Ready, Server, Tag};
 
 use nora::diag::{Diagnostics, LineDiag, Severity};
-use nora::editor::Editor;
+use nora::editor::{Candidate, Editor, LspRequest};
+use nora::text;
 
 /// Where the Go toolchain ships in the default image (Stage 8d) -- beside `go`
 /// and `gofmt` on the pool, on the login PATH.
@@ -242,11 +243,104 @@ impl Lsp {
                 ed.set_status(alloc::format!("gopls: {}", msg));
                 true
             }
-            // 8e-2c wires these to editor affordances (a popup / a jump / a
-            // completion list); the client already delivers them.
-            Action::Hover(_) | Action::Definition(_) | Action::Completion(_) => false,
+            Action::Hover(Some(text)) => {
+                ed.show_hover(text);
+                true
+            }
+            Action::Hover(None) => {
+                ed.set_status(String::from("no hover information"));
+                true
+            }
+            Action::Definition(Some(loc)) => {
+                self.jump(ed, loc);
+                true
+            }
+            Action::Definition(None) => {
+                ed.set_status(String::from("no definition found"));
+                true
+            }
+            Action::Completion(items) => {
+                ed.show_completion(
+                    items
+                        .into_iter()
+                        .map(|c| Candidate {
+                            label: c.label,
+                            detail: c.detail,
+                            insert: c.insert_text,
+                        })
+                        .collect(),
+                );
+                true
+            }
             Action::Ignored => false,
         }
+    }
+
+    /// Issue a query for the cursor position (the binary hands over whatever
+    /// `Editor::take_lsp_request` produced).
+    ///
+    /// Silently does nothing when there is no server, the handshake has not
+    /// finished, or no document is open -- pressing `gd` in a buffer gopls has
+    /// never seen is a no-op, not an error to dismiss.
+    pub fn request(&mut self, req: LspRequest, ed: &Editor) {
+        if !self.ready || self.dead {
+            return;
+        }
+        let uri = match self.open_uri.clone() {
+            Some(u) => u,
+            None => return,
+        };
+        // The server is answering about the text it last received, so make
+        // sure that is the text on screen. `sync` is O(1) when nothing changed.
+        self.sync(ed);
+        let pos = self.cursor_position(ed);
+        let msg = match req {
+            LspRequest::Definition => self.cl.definition(&uri, pos),
+            LspRequest::Hover => self.cl.hover(&uri, pos),
+            LspRequest::Completion => self.cl.completion(&uri, pos),
+        };
+        let _ = self.send(&msg);
+    }
+
+    /// The cursor as an LSP position: nora's CHARACTER column becomes a byte
+    /// offset in the line, then the count the server asked for.
+    fn cursor_position(&self, ed: &Editor) -> lsp::Position {
+        let (row, col) = ed.text.cursor();
+        let line = ed.text.line(row);
+        let byte = text::char_col_to_byte(line, col);
+        lsp::Position::new(row as u32, lsp::byte_to_char(line, byte, self.cl.encoding()))
+    }
+
+    /// Move the editor to a resolved definition.
+    fn jump(&self, ed: &mut Editor, loc: lsp::Location) {
+        let line = loc.range.start.line as usize;
+        let character = loc.range.start.character;
+        // Compare URIs, not paths: `ed.filename` is whatever the user typed
+        // (often relative) while a server's location is absolute, so a path
+        // compare would call a same-file jump "elsewhere" and re-open the file
+        // we are already editing -- losing the undo history for a cursor move.
+        let same_file = self.open_uri.as_deref() == Some(loc.uri.as_str());
+        // `None` means "this buffer", which is exactly what a same-file jump
+        // is, and it sidesteps the relative-vs-absolute comparison entirely.
+        let path = if same_file {
+            None
+        } else {
+            lsp::uri_to_path(&loc.uri)
+        };
+        let col = if same_file {
+            // We hold the text, so the column converts exactly.
+            let byte = lsp::char_to_byte(ed.text.line(line), character, self.cl.encoding());
+            text::byte_to_char_col(ed.text.line(line), byte)
+        } else {
+            // A jump into a file we have not read yet: no line text exists to
+            // convert against, so the server's offset is used as a character
+            // column. Exact whenever the target line is ASCII (every ordinary
+            // Go declaration) and at worst a few columns off on a line with
+            // multi-byte characters before the symbol -- the LINE is always
+            // right, and `set_cursor` clamps, so the miss is cosmetic.
+            character as usize
+        };
+        ed.jump_to(path, line, col);
     }
 
     /// Convert the client's diagnostics for `uri` into the editor's
@@ -266,15 +360,21 @@ impl Lsp {
             if line >= lines {
                 continue;
             }
-            let text = ed.text.line(line);
-            let col = lsp::char_to_byte(text, d.range.start.character, enc);
+            // TWO conversions, and both are load-bearing: the server's offset
+            // is in the negotiated encoding (UTF-8 bytes or UTF-16 units),
+            // while every position in nora is a CHARACTER column. Stopping at
+            // the byte offset is invisible on ASCII and lands the cursor
+            // inside a multi-byte character on the first accented line.
+            let src = ed.text.line(line);
+            let col = text::byte_to_char_col(src, lsp::char_to_byte(src, d.range.start.character, enc));
             // A span ending on a LATER line is clipped to this line's end --
             // the gutter marks the start line, which is where the message
             // belongs.
             let end_col = if d.range.end.line as usize == line {
-                lsp::char_to_byte(text, d.range.end.character, enc).max(col)
+                text::byte_to_char_col(src, lsp::char_to_byte(src, d.range.end.character, enc))
+                    .max(col)
             } else {
-                text.len()
+                src.chars().count()
             };
             out.push(LineDiag {
                 line,

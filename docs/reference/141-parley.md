@@ -75,9 +75,9 @@ match cl.handle(jsonrpc::classify(Value::parse(&body)?)?) {
     Action::Send(reply)      => srv.send(&reply)?,   // answer a server request
     Action::Ready            => { /* handshake done */ }
     Action::Diagnostics(uri) => { /* cl.diagnostics_for(&uri) changed */ }
-    Action::Definition(loc)  => { /* 8e-2c */ }
-    Action::Hover(text)      => { /* 8e-2c */ }
-    Action::Completion(items)=> { /* 8e-2c */ }
+    Action::Definition(loc)  => { /* jump (8e-2c) */ }
+    Action::Hover(text)      => { /* popup (8e-2c) */ }
+    Action::Completion(items)=> { /* list  (8e-2c) */ }
     Action::Log(msg)         => { /* window/logMessage */ }
     Action::Failed(msg)      => { /* one of our requests errored */ }
     Action::Ignored          => {}
@@ -152,7 +152,7 @@ supplies the *meaning*.
 
 ---
 
-## The nora wiring (8e-2b, `usr/nora/src/lsp_host.rs`)
+## The nora wiring (8e-2b/2c, `usr/nora/src/lsp_host.rs`)
 
 ```
 poll(2) over { fd 0, gopls.stdout, gopls.stderr }
@@ -190,6 +190,21 @@ Aurora's row-granular fbcon. The change test itself is O(1): `TextBuffer::rev()`
 (8e-2b) is bumped by every content mutation and by nothing else, so the sync
 check costs a `u64` compare and serializes the document only when it really
 changed.
+
+**The outbound direction (8e-2c).** A key that wants an answer sets
+`Editor::lsp_request`; the loop drains it with `take_lsp_request` and hands it
+to `Lsp::request`, which syncs first (O(1) when nothing changed, so the server
+is always answering about the text on screen), converts the cursor, and sends.
+The conversion is the mirror of the diagnostic one: nora's CHARACTER column →
+byte offset → the count the negotiated encoding asks for. A request is silently
+dropped when there is no server, the handshake has not finished, or no document
+is open — pressing `gd` in a buffer gopls has never seen is a no-op, not an
+error to dismiss.
+
+An answer can itself raise a *file* request: a cross-file definition parks the
+target position and asks the binary to open the file. The loop therefore drains
+`take_request` after the LSP arm as well as per-key — without that second drain
+the jump parks forever.
 
 **Environment.** `libthyla_rs::process::Command` has no envp at v1.0, so gopls
 inherits nora's environment wholesale — which is what we want: the 8d port
@@ -256,9 +271,18 @@ without a bump silently costs a document sync.
 
 ## Known caveats / seams
 
-- **Hover / definition / completion are delivered but not yet surfaced.** The
-  client parses and dispatches them; the editor affordances (a popup, a jump, a
-  completion list) are 8e-2c.
+- **`textDocument/references` is not implemented.** The scripture keymap
+  reserves `gr` for it; the request has the same shape as `definition` but
+  returns N locations, which wants a picker to land in.
+- **A cross-file definition's COLUMN is approximate.** The jump target lives in
+  a file nora has not read, so there is no line text to convert the server's
+  offset against; the offset is used as a character column. Exact whenever the
+  target line is ASCII (every ordinary Go declaration) and at worst a few
+  columns off on a line with multi-byte characters before the symbol. The LINE
+  is always right and `set_cursor` clamps, so the miss is cosmetic. Converting
+  exactly would mean parking the raw LSP position through the file load and
+  teaching the editor the position encoding -- protocol knowledge the
+  editor/host split deliberately keeps out of the engine.
 - **One server, one language.** `lsp_host` speaks Go only (`.go` → gopls). The
   client itself is language-agnostic; a registry of `(pattern, server)` is the
   generalization point.

@@ -245,6 +245,21 @@ fn run(
             } else if ed.mode != Mode::Insert {
                 l.sync(ed);
             }
+            // A key may have asked the server something (`gd` / `K` / Ctrl-N).
+            // Fired here rather than in the key handler so the editor stays
+            // free of the client, and always AFTER the sync above so the
+            // question is asked about the text on screen.
+            if let Some(req) = ed.take_lsp_request() {
+                l.request(req, ed);
+            }
+            // A server answer can itself raise a file op -- a cross-file
+            // go-to-definition asks for the target to be opened. The per-key
+            // drain above only covers requests a KEY raised, so without this
+            // the jump would park forever.
+            if let Some(req) = ed.take_request() {
+                handle_request(ed, req);
+                dirty = true;
+            }
             // `:e` / buffer switches change which file is on screen.
             l.open_current(ed);
             // A server that died takes its session with it: drop the handle so

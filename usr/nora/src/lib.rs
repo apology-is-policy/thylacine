@@ -25,6 +25,6 @@ pub mod view;
 pub mod wrap;
 
 pub use diag::{Diagnostics, LineDiag, Severity};
-pub use editor::{Editor, Mode, Request};
+pub use editor::{Candidate, Editor, LspRequest, Mode, Request};
 pub use syntax::{HlClass, HlSpan, Lang};
 pub use text::TextBuffer;

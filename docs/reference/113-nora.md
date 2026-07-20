@@ -152,9 +152,9 @@ exact residue UTOPIA-VISUAL.md §8 flags; corrected to Bonfire with T2.)*
 
 | Mode | Keys |
 |---|---|
-| Normal | `i`/`a`/`o`/`A` → Insert; `v` → Visual; `:` / `/` → Command; `Space` → Palette; `h j k l` + arrows, `0`/`$`/`g`/`G`/`{n}G`/PageUp/PageDown nav; `w`/`b`/`e`/`W` punctuation-aware word motions; `f`/`F`/`t`/`T` find-char (+ `;`/`,` repeat / reverse-repeat); `mi<o>`/`ma<o>` inner/around text objects (`o` ∈ word/`(`/`[`/`{`/`"`/…) + `mm` jump-to-match-bracket; a numeric **count prefix** (`3w`, `5j`, `2dd`); `%`/`s`/`,` multi-cursor (select-all / split-into-carets / collapse) + `c` multi-edit; `x` delete char; `d` delete line (or the selection / every caret); `y` yank; `p` paste register; `u` undo; `n` repeat search |
+| Normal | `i`/`a`/`o`/`A` → Insert; `v` → Visual; `:` / `/` → Command; `Space` → Palette; `h j k l` + arrows, `0`/`$`/`gg`/`ge`/`G`/`{n}G`/PageUp/PageDown nav; `gd` go-to-definition, `K` hover, `]d`/`[d` diagnostics (see the language-server section); `w`/`b`/`e`/`W` punctuation-aware word motions; `f`/`F`/`t`/`T` find-char (+ `;`/`,` repeat / reverse-repeat); `mi<o>`/`ma<o>` inner/around text objects (`o` ∈ word/`(`/`[`/`{`/`"`/…) + `mm` jump-to-match-bracket; a numeric **count prefix** (`3w`, `5j`, `2dd`); `%`/`s`/`,` multi-cursor (select-all / split-into-carets / collapse) + `c` multi-edit; `x` delete char; `d` delete line (or the selection / every caret); `y` yank; `p` paste register; `u` undo; `n` repeat search |
 | Insert | printable → insert; Enter → split; Backspace/Delete; Tab → 4 spaces (soft tab); Esc → Normal |
-| Visual | `h j k l 0 $ g G w b` extend the selection; `y` yank; `d`/`x` cut; Esc → cancel |
+| Visual | `h j k l 0 $ gg ge G w b` extend the selection (the same goto prefix as Normal, so `gg`/`ge` mean one thing everywhere); `y` yank; `d`/`x` cut; Esc → cancel |
 | Command | type the line; Enter runs it; Backspace (erasing `:`/`/` exits); Esc → Normal |
 | Palette (`[Space]`) | `j`/`k` + arrows / `Ctrl-n`/`Ctrl-p` move; Enter runs the entry; `Space`/Esc close. Entries: **toggle soft-wrap**, next/prev/close buffer, save, quit. |
 
@@ -245,9 +245,15 @@ has the full picture); nora's side is `src/lsp_host.rs` plus `src/diag.rs`.
 - **The editor never blocks on it.** No language server (gopls absent, spawn
   refused, a non-Go buffer) is a fully supported state: nora behaves exactly as
   it did before 8e. A server that dies is reaped and dropped; editing continues.
-- **`nora::diag` is protocol-free** -- line, byte columns, severity, message.
-  `lsp_host` converts, spending the negotiated LSP position encoding against the
-  real line text.
+- **`nora::diag` is protocol-free** -- line, CHARACTER columns, severity,
+  message. `lsp_host` converts, spending the negotiated LSP position encoding
+  against the real line text and then `text::byte_to_char_col`. Both halves are
+  load-bearing: a server offset is bytes (or UTF-16 units) while every position
+  in nora is a character column, and stopping at the byte offset is invisible on
+  ASCII but lands the cursor inside a multi-byte character on the first accented
+  line. (8e-2b stored byte columns; nothing read them, so it was latent until
+  `]d` needed to move the cursor. Fixed in 8e-2c with the conversion helpers and
+  their round-trip tests.)
 - **Rendering**: the gutter number recolors (rust = error, gold = warning), the
   cursor line's message takes the status centre (an explicit status message
   still outranks it), and an `NE MW` tally rides the right slot.
@@ -255,8 +261,37 @@ has the full picture); nora's side is `src/lsp_host.rs` plus `src/diag.rs`.
   per keystroke (the `NORA-IDE-UX` section 7 byte-storm discipline). The change
   test is `TextBuffer::rev()`, an O(1) counter bumped by content mutations only.
 
-Hover / definition / completion are parsed and dispatched by the client but not
-yet surfaced in the editor; those affordances are 8e-2c.
+### The editor affordances (8e-2c)
+
+| Key | Does |
+|---|---|
+| `]d` / `[d` | next / previous diagnostic, wrapping; echoes its message. **No server round-trip** -- the published set is already local, so it answers instantly even while gopls is busy or gone. |
+| `K` | hover: describe the symbol under the cursor. Non-modal -- the popup is drawn last, over everything, and the next key dismisses it *and still does its job*, so hover never costs a keystroke. |
+| `gd` | go to definition. Same-file moves the cursor; cross-file raises `Request::Open` and parks the position, which `open_buffer` applies once the buffer exists. |
+| `Ctrl-N` (Insert) | completions. `Ctrl-N`/`Ctrl-P` or the arrows move, Enter/Tab accepts (replacing the typed word prefix, under one undo checkpoint), Esc cancels, any other key closes the popup and types. Every exit returns to Insert. |
+
+**`g` is now the Helix goto prefix** (`gg` top, `ge` end, `gd` definition).
+Bare `g` used to be "top"; `gg` is the Helix binding and `G` still goes to the
+bottom, so the motion costs at most one extra key. A count still binds directly
+(`42g` is goto-line, resolved before the prefix is ever set), and an unknown
+second key cancels silently rather than doing something else.
+
+The requests flow out through `Editor::take_lsp_request` -- a **separate axis
+from `Request`** on purpose. `Request` is file I/O the binary performs
+synchronously and reports back; an `LspRequest` goes to a server that may be
+absent, slow, or never answer. Keeping them apart means the audited save/open
+path is untouched by the language-server feature, and a client that never
+answers can never wedge a save. The editor names neither the file nor the
+position: it says "definition at my cursor" and `lsp_host` translates.
+
+Answers are equally defensive: an empty hover reports instead of opening a blank
+box; an empty completion list says so rather than opening a popup the user must
+escape to learn nothing; and a completion answer arriving after the user left
+Insert is **dropped**, because completing into a mode that never asked would be
+an edit the user did not initiate.
+
+**`gr` (references) is not built.** The client has no `textDocument/references`
+request, and N locations need a picker; both are additive when wanted.
 
 ## Console discipline (I-27)
 

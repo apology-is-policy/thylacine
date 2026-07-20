@@ -35,6 +35,11 @@ pub enum Mode {
     /// The fuzzy file picker (Space-f): a `query` line over the cwd's files; the
     /// filtered list is arrow-selectable, Enter opens the file in a new buffer.
     FilePicker { query: String, sel: usize },
+    /// The completion list (Ctrl-N in Insert), open over Insert: the candidates
+    /// a language server offered for the cursor position. Enter inserts, Esc
+    /// cancels, and BOTH return to Insert -- completion is a detour within a
+    /// typing session, not a departure from it.
+    Completion { sel: usize },
 }
 
 /// A file operation the editor requests but does not perform; the binary
@@ -50,6 +55,41 @@ pub enum Request {
     /// List `path`'s files to populate the fuzzy file picker (Space-f). The
     /// binary reads the directory and calls `open_file_picker` back.
     ListDir(String),
+}
+
+/// A language-server query the editor wants made AT THE CURSOR, raised for the
+/// binary's LSP client to issue (8e-2c).
+///
+/// A separate axis from [`Request`] on purpose. `Request` is file I/O the
+/// binary performs synchronously and reports back; an `LspRequest` goes to a
+/// server that may be absent, slow, or never answer, and its reply arrives on
+/// a later poll-wake. Keeping them apart means the audited save/open path is
+/// untouched by the language-server feature, and a client that never answers
+/// can never wedge a save.
+///
+/// The editor deliberately does NOT name the file or the position: it has no
+/// URI and no notion of the server's position encoding. It says "definition at
+/// my cursor" and the host translates.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LspRequest {
+    /// Jump to the definition of the symbol at the cursor (`gd`).
+    Definition,
+    /// Describe the symbol at the cursor (`K`).
+    Hover,
+    /// Offer completions for the cursor position (Ctrl-N in Insert).
+    Completion,
+}
+
+/// One completion candidate, as the editor renders and applies it. The
+/// protocol-free twin of the client's item -- same reasoning as `nora::diag`.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Candidate {
+    /// What the list shows.
+    pub label: String,
+    /// Optional type/signature detail, shown dimmed after the label.
+    pub detail: Option<String>,
+    /// What Enter inserts (often the label, but a server may differ).
+    pub insert: String,
 }
 
 /// A selection: a range from `anchor` to `head` (the caret). The rendered span
@@ -154,6 +194,12 @@ enum Pending {
     FindChar(FindKind),
     Match,
     TextObject { around: bool },
+    /// The `g` goto prefix (Helix goto-mode): `gg` top, `ge` end, `gd`
+    /// definition. A count still binds directly (`42g` is goto-line, resolved
+    /// before the prefix is ever set).
+    Goto,
+    /// The `]`/`[` bracket prefix: `]d`/`[d` next/prev diagnostic.
+    Bracket { forward: bool },
 }
 
 /// A backgrounded buffer's parked state -- the per-buffer half of `Editor`. The
@@ -219,6 +265,23 @@ pub struct Editor {
     /// engine only renders them. Cleared on every buffer switch/open, since
     /// they are keyed to the file that was showing.
     pub diags: crate::diag::Diagnostics,
+    /// A language-server description of the symbol under the cursor (`K`),
+    /// drawn last as a transient popup. NON-MODAL: the next key dismisses it
+    /// and still does its job, so hover never costs a keystroke.
+    hover: Option<String>,
+    /// The candidates behind `Mode::Completion`. Held outside the mode so the
+    /// list survives the selection moving, and is dropped when the mode closes.
+    completion: Vec<Candidate>,
+    /// The prefix already typed at the cursor when completion was requested,
+    /// replaced by the accepted candidate. Without it, accepting `Println`
+    /// after typing `Pri` would yield `PriPrintln`.
+    completion_prefix: String,
+    /// A language-server query awaiting the binary (see [`LspRequest`]).
+    lsp_request: Option<LspRequest>,
+    /// Where to put the cursor once a cross-file jump's buffer has loaded.
+    /// Applied by `open_buffer`, which is the single point where a newly-read
+    /// file becomes the active buffer.
+    pending_jump: Option<Pos>,
     /// Visual-mode selection anchor (the other end is the cursor).
     anchor: Option<Pos>,
     /// The internal yank/paste register (replaces the system clipboard).
@@ -275,6 +338,11 @@ impl Editor {
             status: None,
             quit: false,
             diags: crate::diag::Diagnostics::new(),
+            hover: None,
+            completion: Vec::new(),
+            completion_prefix: String::new(),
+            lsp_request: None,
+            pending_jump: None,
             anchor: None,
             register: String::new(),
             carets: Vec::new(),
@@ -305,7 +373,9 @@ impl Editor {
                     "NOR"
                 }
             }
-            Mode::Insert => "INS",
+            // Completion overlays Insert -- the chip stays INS because that is
+            // the mode Enter and Esc both return to.
+            Mode::Insert | Mode::Completion { .. } => "INS",
             Mode::Visual => "VIS",
             Mode::Command(_) => "CMD",
         }
@@ -367,6 +437,97 @@ impl Editor {
             query: String::new(),
             sel: 0,
         };
+    }
+
+    // -- language-server seam (8e-2c) -------------------------------------
+    //
+    // The editor raises requests and accepts answers; it never speaks a
+    // protocol, knows a URI, or blocks. Every answer is optional: a server
+    // that says nothing simply leaves the editor as it was.
+
+    /// Take the pending language-server query, if any (the binary's LSP client
+    /// polls this like `take_request`).
+    pub fn take_lsp_request(&mut self) -> Option<LspRequest> {
+        self.lsp_request.take()
+    }
+
+    /// The hover text currently displayed, if any.
+    pub fn hover(&self) -> Option<&str> {
+        self.hover.as_deref()
+    }
+
+    /// Show hover text for the cursor's symbol. Empty text is treated as no
+    /// answer, so a server replying with a blank string cannot open an empty
+    /// box over the user's code.
+    pub fn show_hover(&mut self, text: String) {
+        if text.trim().is_empty() {
+            self.status = Some("no hover information".to_string());
+            return;
+        }
+        self.hover = Some(text);
+    }
+
+    /// The completion list and its highlighted index, if the popup is open.
+    pub fn completion_state(&self) -> Option<(&[Candidate], usize)> {
+        match self.mode {
+            Mode::Completion { sel } => Some((self.completion.as_slice(), sel)),
+            _ => None,
+        }
+    }
+
+    /// Open the completion popup over Insert mode.
+    ///
+    /// An empty list says so and stays in Insert -- an empty popup would be a
+    /// mode the user has to escape from to learn nothing. Ignored unless the
+    /// editor is still in Insert: the answer is asynchronous, and by the time
+    /// it lands the user may have left insert, switched buffers, or opened a
+    /// picker. Completing into a mode that did not ask for it would be an edit
+    /// the user never initiated.
+    pub fn show_completion(&mut self, items: Vec<Candidate>) {
+        if self.mode != Mode::Insert {
+            return;
+        }
+        if items.is_empty() {
+            self.status = Some("no completions".to_string());
+            return;
+        }
+        self.completion_prefix = self.word_prefix_at_cursor();
+        self.completion = items;
+        self.mode = Mode::Completion { sel: 0 };
+    }
+
+    /// Move the cursor to `(line, col)` -- in `path` when it differs from the
+    /// active buffer's file, in the current buffer otherwise (go-to-definition).
+    ///
+    /// A cross-file jump cannot complete here: the file has to be read first,
+    /// which is the binary's job. So it raises `Request::Open` and parks the
+    /// position, which `open_buffer` applies once the buffer exists.
+    pub fn jump_to(&mut self, path: Option<String>, line: usize, col: usize) {
+        let elsewhere = match (&path, &self.filename) {
+            (Some(p), Some(cur)) => p != cur,
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+        if elsewhere {
+            self.pending_jump = Some((line, col));
+            self.request = Some(Request::Open(path.unwrap_or_default()));
+            return;
+        }
+        self.text.set_cursor(line, col);
+    }
+
+    /// The word characters immediately before the cursor -- the prefix a
+    /// completion replaces.
+    fn word_prefix_at_cursor(&self) -> String {
+        let (row, col) = self.text.cursor();
+        let line = self.text.line(row);
+        let chars: Vec<char> = line.chars().take(col).collect();
+        let start = chars
+            .iter()
+            .rposition(|c| !(c.is_alphanumeric() || *c == '_'))
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        chars[start..].iter().collect()
     }
 
     /// The `:` ex-commands matching what is typed, as `(name, description)` for
@@ -471,6 +632,11 @@ impl Editor {
         // across a switch would paint another file's errors on these lines.
         // The binary republishes for the new buffer when the server answers.
         self.diags.clear();
+        // Same reasoning for the language-server overlays: hover text and a
+        // completion list describe a position in the file we just left.
+        self.hover = None;
+        self.completion.clear();
+        self.completion_prefix.clear();
     }
 
     /// The number of open buffers.
@@ -573,6 +739,13 @@ impl Editor {
         self.load_active(d);
         self.mode = Mode::Normal;
         self.status = self.buffer_indicator().or(Some("opened".to_string()));
+        // A cross-file go-to-definition parked its target here: this is the one
+        // point where the requested file has become the active buffer, so the
+        // cursor can finally be placed. Taken (not peeked) so an ordinary later
+        // `:e` can never inherit a stale jump.
+        if let Some((line, col)) = self.pending_jump.take() {
+            self.text.set_cursor(line, col);
+        }
     }
 
     /// Open the built-in manual in a read-only scratch buffer (`:help`). Always
@@ -748,6 +921,11 @@ impl Editor {
     /// Dispatch one key by mode.
     pub fn handle_key(&mut self, key: KeyEvent) {
         self.status = None;
+        // Hover is transient: the next key takes it down AND still does its
+        // job. Dismissing without consuming the key is what keeps a popup that
+        // arrives unbidden (it lands whenever the server answers) from ever
+        // costing the user a keystroke.
+        self.hover = None;
         if self.split_buf.is_some() {
             self.split_prompt(key);
             return;
@@ -764,6 +942,7 @@ impl Editor {
             Mode::Menu => self.menu(key),
             Mode::BufferPicker { .. } => self.buffer_picker(key),
             Mode::FilePicker { .. } => self.file_picker(key),
+            Mode::Completion { .. } => self.completion_key(key),
         }
     }
 
@@ -861,8 +1040,17 @@ impl Editor {
             KeyCode::Char('$') | KeyCode::End => self.text.move_end(),
             KeyCode::Char('g') if explicit => self.goto_line(n),
             KeyCode::Char('G') if explicit => self.goto_line(n),
-            KeyCode::Char('g') => self.text.move_top(),
+            // `g` opens Helix goto-mode (8e-2c): `gg` top, `ge` end, `gd`
+            // definition. Bare `g` was top before the language server needed
+            // somewhere to live; `gg` is the Helix binding and `G` still goes
+            // to the bottom, so the motion is never more than one extra key.
+            KeyCode::Char('g') => self.pending = Some(Pending::Goto),
             KeyCode::Char('G') => self.text.move_bottom(),
+            // Diagnostic navigation (`]d` / `[d`), Helix/vim bracket motions.
+            KeyCode::Char(']') => self.pending = Some(Pending::Bracket { forward: true }),
+            KeyCode::Char('[') => self.pending = Some(Pending::Bracket { forward: false }),
+            // Hover (vim's `K`): describe the symbol under the cursor.
+            KeyCode::Char('K') => self.lsp_request = Some(LspRequest::Hover),
             KeyCode::Char('w') => self.repeat(n, |t| t.move_word_forward()),
             KeyCode::Char('W') => self.repeat(n, |t| t.move_long_word_forward()),
             KeyCode::Char('e') => self.repeat(n, |t| t.move_word_end()),
@@ -918,6 +1106,13 @@ impl Editor {
     fn insert(&mut self, key: KeyEvent) {
         if !self.carets.is_empty() {
             self.multi_insert(key);
+            return;
+        }
+        // Ctrl-N asks for completions (vim's key; the pickers already use
+        // Ctrl-N/Ctrl-P to move a list, so the letter is consistent here).
+        // Matched before the Char arm so the literal 'n' still types.
+        if key.is_ctrl('n') {
+            self.lsp_request = Some(LspRequest::Completion);
             return;
         }
         match key.code {
@@ -985,7 +1180,9 @@ impl Editor {
             KeyCode::Char('l') | KeyCode::Right => self.text.move_right(),
             KeyCode::Char('0') | KeyCode::Home => self.text.move_home(),
             KeyCode::Char('$') | KeyCode::End => self.text.move_end(),
-            KeyCode::Char('g') => self.text.move_top(),
+            // Same goto prefix as Normal, so `gg`/`ge` mean one thing
+            // everywhere; here the motion extends the selection.
+            KeyCode::Char('g') => self.pending = Some(Pending::Goto),
             KeyCode::Char('G') => self.text.move_bottom(),
             KeyCode::Char('w') => self.text.move_word_forward(),
             KeyCode::Char('W') => self.text.move_long_word_forward(),
@@ -1213,7 +1410,48 @@ impl Editor {
                     self.select_text_object(around, c);
                 }
             }
+            // Helix goto-mode. An unknown second key cancels silently -- a
+            // prefix that swallowed the key and did something else would be
+            // worse than one that does nothing.
+            Pending::Goto => match key.code {
+                KeyCode::Char('g') => self.text.move_top(),
+                KeyCode::Char('e') => self.text.move_bottom(),
+                KeyCode::Char('d') => self.lsp_request = Some(LspRequest::Definition),
+                _ => {}
+            },
+            // Only `d` (diagnostics) at 8e-2c; `]f`/`]c` and friends are the
+            // obvious later additions, which is why this stays a prefix.
+            Pending::Bracket { forward } => {
+                if key.code == KeyCode::Char('d') {
+                    self.goto_diagnostic(forward);
+                }
+            }
         }
+    }
+
+    /// Move to the next/previous diagnostic, wrapping, and echo its message.
+    ///
+    /// Pure editor state -- no server round-trip. The published set is already
+    /// here, so this answers instantly even while gopls is busy or gone.
+    fn goto_diagnostic(&mut self, forward: bool) {
+        let (row, _) = self.text.cursor();
+        let found = if forward {
+            self.diags.next_after(row)
+        } else {
+            self.diags.prev_before(row)
+        };
+        let (line, col, msg) = match found {
+            Some(d) => (d.line, d.col, d.message.clone()),
+            None => {
+                self.status = Some("no diagnostics".to_string());
+                return;
+            }
+        };
+        // `set_cursor` clamps both coordinates, so a diagnostic the server
+        // published against a version we have since edited past lands
+        // harmlessly at the nearest valid position rather than out of bounds.
+        self.text.set_cursor(line, col);
+        self.status = Some(msg);
     }
 
     /// Repeat the last find-char motion (`;` same direction, `,` reversed).
@@ -1477,6 +1715,90 @@ impl Editor {
             }
             _ => {}
         }
+    }
+
+    /// The completion popup's keys. Every exit returns to Insert -- the user
+    /// asked for a completion mid-word and expects to keep typing either way.
+    fn completion_key(&mut self, key: KeyEvent) {
+        let sel = match self.mode {
+            Mode::Completion { sel } => sel,
+            _ => return,
+        };
+        let len = self.completion.len();
+        // The mode and the list must agree. `show_completion` refuses an empty
+        // list, so they always do today -- but the wrap arithmetic below is a
+        // `% len`, and a future path that clears the candidates without
+        // leaving the mode (a buffer switch, say) would turn a keypress into a
+        // divide-by-zero. Fail closed into Insert instead of trusting that no
+        // such path is ever added.
+        if len == 0 {
+            self.close_completion();
+            return;
+        }
+        // Ctrl-N/Ctrl-P move the list, matching the file picker (and vim's
+        // completion), checked before the printable arm so they never type.
+        if key.is_ctrl('n') {
+            self.mode = Mode::Completion { sel: (sel + 1) % len };
+            return;
+        }
+        if key.is_ctrl('p') {
+            self.mode = Mode::Completion {
+                sel: if sel == 0 { len - 1 } else { sel - 1 },
+            };
+            return;
+        }
+        match key.code {
+            KeyCode::Esc => self.close_completion(),
+            KeyCode::Down => self.mode = Mode::Completion { sel: (sel + 1) % len },
+            KeyCode::Up => {
+                self.mode = Mode::Completion {
+                    sel: if sel == 0 { len - 1 } else { sel - 1 },
+                }
+            }
+            KeyCode::Enter | KeyCode::Tab => self.accept_completion(sel),
+            // Any other key closes the popup and is handled as normal typing.
+            // The list was computed for the position the cursor had when it was
+            // requested; once the text moves, the candidates are stale, and
+            // filtering a stale list would show matches the server never
+            // offered for what is now under the cursor. Re-requesting as you
+            // type is the v1.x refinement (NORA-IDE-UX section 4).
+            _ => {
+                self.close_completion();
+                self.insert(key);
+            }
+        }
+    }
+
+    /// Dismiss the popup, back to Insert, candidates dropped.
+    fn close_completion(&mut self) {
+        self.completion.clear();
+        self.completion_prefix.clear();
+        self.mode = Mode::Insert;
+    }
+
+    /// Replace the typed prefix with candidate `sel` and resume typing.
+    fn accept_completion(&mut self, sel: usize) {
+        let insert = match self.completion.get(sel) {
+            Some(c) => c.insert.clone(),
+            None => {
+                self.close_completion();
+                return;
+            }
+        };
+        let prefix_len = self.completion_prefix.chars().count();
+        self.close_completion();
+        if self.readonly {
+            self.status = Some("read-only".to_string());
+            return;
+        }
+        // One checkpoint so a single undo reverts the whole completion --
+        // prefix removal and insertion together, never half of it.
+        self.text.checkpoint();
+        for _ in 0..prefix_len {
+            self.text.backspace();
+        }
+        self.text.insert_str(&insert);
+        self.modified = true;
     }
 
     fn run_menu(&mut self, action: MenuAction) {
@@ -1809,7 +2131,7 @@ Space then c) to return to your work.
                     {n}G or {n}g jumps to line n
     h j k l       left / down / up / right (or the arrow keys)
     0  $          start / end of line (or Home / End)
-    g  G          top / bottom of the buffer
+    g g   g e     top / bottom of the buffer  ( G also goes to the bottom )
     w  b  e       next-word / prev-word / word-end (punctuation-aware)
     W             next WORD (whitespace-delimited; spans punctuation)
     f<c> F<c>     jump onto the next / previous <c> on the line
@@ -1869,6 +2191,19 @@ Space then c) to return to your work.
     n  next buffer             p  previous buffer
     c  close buffer            w  toggle soft-wrap
     s  save file               q  quit
+
+  LANGUAGE SERVER  (Go buffers, when the toolchain is installed)
+    Errors and warnings appear as you edit: the line number is tinted,
+    and the message for the cursor's line shows on the status bar. The
+    right of the status bar counts them ( 2E 1W = 2 errors, 1 warning ).
+    ] d   [ d     jump to the next / previous diagnostic (wraps)
+    K             describe the symbol under the cursor -- any key closes
+    g d           go to the definition (opens another file if it is there)
+    Ctrl-N        in INSERT: offer completions
+                    Ctrl-N / Ctrl-P or the arrows  move the selection
+                    Enter or Tab   accept       Esc   cancel
+                    keep typing    dismiss it and carry on
+    Nothing here needs the server: without one, the editor is unchanged.
 
 That's everything. Happy editing!
 "#;
@@ -1994,6 +2329,7 @@ mod tests {
         assert_eq!(ed.text.cursor(), (1, 0));
         ed.handle_key(ch('G'));
         assert_eq!(ed.text.cursor().0, 1);
+        ed.handle_key(ch('g')); // goto prefix
         ed.handle_key(ch('g'));
         assert_eq!(ed.text.cursor().0, 0);
     }
@@ -2127,7 +2463,8 @@ mod tests {
         }
         ed.scroll_to(80, 3);
         assert_eq!(ed.top, 3); // rows 3,4,5 visible
-        ed.handle_key(ch('g')); // back to top
+        ed.handle_key(ch('g')); // gg -> back to top
+        ed.handle_key(ch('g'));
         ed.scroll_to(80, 3);
         assert_eq!(ed.top, 0);
     }
@@ -2690,7 +3027,8 @@ mod tests {
         assert_eq!(ed.text.cursor(), (2, 0));
         ed.handle_key(ch('G')); // bare -> bottom
         assert_eq!(ed.text.cursor().0, 4);
-        ed.handle_key(ch('g')); // bare -> top
+        ed.handle_key(ch('g')); // gg -> top (the goto prefix, 8e-2c)
+        ed.handle_key(ch('g'));
         assert_eq!(ed.text.cursor().0, 0);
     }
 
@@ -2753,5 +3091,279 @@ mod tests {
         // A named buffer never shows it.
         let named = Editor::new(Some("f".to_string()), "", false);
         assert!(!named.show_hint());
+    }
+
+    // -- the language-server surface (8e-2c) ------------------------------
+
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::with(KeyCode::Char(c), kaua::event::Mods::CTRL)
+    }
+
+    fn diag(line: usize, col: usize, msg: &str) -> crate::diag::LineDiag {
+        crate::diag::LineDiag {
+            line,
+            col,
+            end_col: col,
+            severity: crate::diag::Severity::Error,
+            message: msg.to_string(),
+        }
+    }
+
+    #[test]
+    fn goto_prefix_gg_ge_and_gd() {
+        let mut ed = Editor::new(None, "1\n2\n3", false);
+        ed.handle_key(ch('G')); // bottom
+        assert_eq!(ed.text.cursor().0, 2);
+        ed.handle_key(ch('g'));
+        ed.handle_key(ch('g'));
+        assert_eq!(ed.text.cursor().0, 0);
+        ed.handle_key(ch('g'));
+        ed.handle_key(ch('e'));
+        assert_eq!(ed.text.cursor().0, 2);
+        // `gd` raises the request; it does NOT move the cursor itself (the
+        // answer is asynchronous).
+        let before = ed.text.cursor();
+        ed.handle_key(ch('g'));
+        ed.handle_key(ch('d'));
+        assert_eq!(ed.take_lsp_request(), Some(LspRequest::Definition));
+        assert_eq!(ed.text.cursor(), before);
+        // Taken once.
+        assert_eq!(ed.take_lsp_request(), None);
+    }
+
+    #[test]
+    fn goto_prefix_unknown_key_cancels_without_acting() {
+        let mut ed = Editor::new(None, "1\n2\n3", false);
+        ed.handle_key(ch('G'));
+        ed.handle_key(ch('g'));
+        ed.handle_key(ch('z')); // not a goto target
+        // Neither moved nor requested -- and crucially not treated as a fresh
+        // normal-mode `z` either.
+        assert_eq!(ed.text.cursor().0, 2);
+        assert_eq!(ed.take_lsp_request(), None);
+        // The prefix is spent: a following `g` starts a NEW prefix.
+        ed.handle_key(ch('g'));
+        ed.handle_key(ch('g'));
+        assert_eq!(ed.text.cursor().0, 0);
+    }
+
+    #[test]
+    fn count_g_still_goes_to_a_line_despite_the_prefix() {
+        let mut ed = Editor::new(None, "1\n2\n3\n4\n5", false);
+        ed.handle_key(ch('3'));
+        ed.handle_key(ch('g')); // an explicit count binds directly
+        assert_eq!(ed.text.cursor(), (2, 0));
+    }
+
+    #[test]
+    fn bracket_d_walks_diagnostics_and_echoes_the_message() {
+        let mut ed = Editor::new(None, "a\nb\nc\nd\ne", false);
+        ed.diags.set(alloc::vec![
+            diag(1, 0, "first"),
+            diag(3, 0, "second"),
+        ]);
+        ed.handle_key(ch(']'));
+        ed.handle_key(ch('d'));
+        assert_eq!(ed.text.cursor().0, 1);
+        assert_eq!(ed.status.as_deref(), Some("first"));
+        ed.handle_key(ch(']'));
+        ed.handle_key(ch('d'));
+        assert_eq!(ed.text.cursor().0, 3);
+        // Wraps forward.
+        ed.handle_key(ch(']'));
+        ed.handle_key(ch('d'));
+        assert_eq!(ed.text.cursor().0, 1);
+        // And backward.
+        ed.handle_key(ch('['));
+        ed.handle_key(ch('d'));
+        assert_eq!(ed.text.cursor().0, 3);
+    }
+
+    #[test]
+    fn bracket_d_with_no_diagnostics_says_so_and_stays_put() {
+        let mut ed = Editor::new(None, "a\nb", false);
+        ed.handle_key(ch('j'));
+        ed.handle_key(ch(']'));
+        ed.handle_key(ch('d'));
+        assert_eq!(ed.text.cursor().0, 1);
+        assert_eq!(ed.status.as_deref(), Some("no diagnostics"));
+    }
+
+    #[test]
+    fn a_diagnostic_column_lands_the_cursor_in_char_coordinates() {
+        // The regression for the byte-vs-char column mismatch: with a
+        // multi-byte character before the span, a BYTE column would overshoot.
+        // "aé" is 3 bytes but 2 chars, so a diagnostic at char column 2 is the
+        // 'x' -- a byte column 2 would be inside 'é'.
+        let mut ed = Editor::new(None, "aéx", false);
+        ed.diags.set(alloc::vec![diag(0, 2, "here")]);
+        ed.handle_key(ch(']'));
+        ed.handle_key(ch('d'));
+        assert_eq!(ed.text.cursor(), (0, 2));
+        assert_eq!(ed.text.char_at(0, 2), Some('x'));
+    }
+
+    #[test]
+    fn diagnostic_past_the_buffer_end_clamps_rather_than_escaping() {
+        let mut ed = Editor::new(None, "a\nb", false);
+        // The server is a version behind: it published against a longer file.
+        ed.diags.set(alloc::vec![diag(99, 40, "stale")]);
+        ed.handle_key(ch(']'));
+        ed.handle_key(ch('d'));
+        let (row, col) = ed.text.cursor();
+        assert!(row < ed.text.line_count());
+        assert!(col <= ed.text.char_len(row));
+    }
+
+    #[test]
+    fn k_requests_hover_and_the_next_key_dismisses_it() {
+        let mut ed = Editor::new(None, "abc", false);
+        ed.handle_key(ch('K'));
+        assert_eq!(ed.take_lsp_request(), Some(LspRequest::Hover));
+        ed.show_hover("func F(x int) error".to_string());
+        assert_eq!(ed.hover(), Some("func F(x int) error"));
+        // The dismissing key STILL does its job -- hover never costs a stroke.
+        ed.handle_key(ch('l'));
+        assert_eq!(ed.hover(), None);
+        assert_eq!(ed.text.cursor(), (0, 1));
+    }
+
+    #[test]
+    fn an_empty_hover_answer_reports_instead_of_opening_a_blank_box() {
+        let mut ed = Editor::new(None, "abc", false);
+        ed.show_hover("   \n\n".to_string());
+        assert_eq!(ed.hover(), None);
+        assert_eq!(ed.status.as_deref(), Some("no hover information"));
+    }
+
+    fn cand(label: &str, insert: &str) -> Candidate {
+        Candidate {
+            label: label.to_string(),
+            detail: None,
+            insert: insert.to_string(),
+        }
+    }
+
+    #[test]
+    fn ctrl_n_in_insert_requests_completion() {
+        let mut ed = Editor::new(None, "", false);
+        ed.handle_key(ch('i'));
+        type_str(&mut ed, "fm");
+        ed.handle_key(ctrl('n'));
+        assert_eq!(ed.take_lsp_request(), Some(LspRequest::Completion));
+        // The ctrl key did not type an 'n'.
+        assert_eq!(ed.text.content(), "fm");
+    }
+
+    #[test]
+    fn accepting_a_completion_replaces_the_typed_prefix() {
+        let mut ed = Editor::new(None, "", false);
+        ed.handle_key(ch('i'));
+        type_str(&mut ed, "fmt.Pri");
+        ed.show_completion(alloc::vec![cand("Println", "Println")]);
+        assert!(ed.completion_state().is_some());
+        ed.handle_key(code(KeyCode::Enter));
+        // The prefix is the word chars only -- `fmt.` is not swallowed.
+        assert_eq!(ed.text.content(), "fmt.Println");
+        assert_eq!(ed.mode, Mode::Insert);
+        // One undo reverts the whole completion, not half of it.
+        ed.handle_key(code(KeyCode::Esc));
+        ed.handle_key(ch('u'));
+        assert_eq!(ed.text.content(), "fmt.Pri");
+    }
+
+    #[test]
+    fn completion_selection_wraps_and_esc_cancels() {
+        let mut ed = Editor::new(None, "", false);
+        ed.handle_key(ch('i'));
+        type_str(&mut ed, "P");
+        ed.show_completion(alloc::vec![cand("Print", "Print"), cand("Println", "Println")]);
+        assert_eq!(ed.completion_state().map(|(_, s)| s), Some(0));
+        ed.handle_key(ctrl('n'));
+        assert_eq!(ed.completion_state().map(|(_, s)| s), Some(1));
+        ed.handle_key(ctrl('n')); // wraps
+        assert_eq!(ed.completion_state().map(|(_, s)| s), Some(0));
+        ed.handle_key(ctrl('p')); // wraps backwards
+        assert_eq!(ed.completion_state().map(|(_, s)| s), Some(1));
+        ed.handle_key(code(KeyCode::Esc));
+        assert!(ed.completion_state().is_none());
+        assert_eq!(ed.mode, Mode::Insert);
+        assert_eq!(ed.text.content(), "P"); // nothing inserted
+    }
+
+    #[test]
+    fn typing_through_the_completion_popup_closes_it_and_types() {
+        let mut ed = Editor::new(None, "", false);
+        ed.handle_key(ch('i'));
+        type_str(&mut ed, "P");
+        ed.show_completion(alloc::vec![cand("Print", "Print")]);
+        ed.handle_key(ch('r'));
+        assert!(ed.completion_state().is_none());
+        // The key was not swallowed: the stale list closes AND the char lands.
+        assert_eq!(ed.text.content(), "Pr");
+    }
+
+    #[test]
+    fn an_empty_or_late_completion_answer_never_opens_a_popup() {
+        let mut ed = Editor::new(None, "", false);
+        ed.handle_key(ch('i'));
+        ed.show_completion(Vec::new());
+        assert!(ed.completion_state().is_none());
+        assert_eq!(ed.status.as_deref(), Some("no completions"));
+        // A late answer arriving after the user left Insert is dropped: it
+        // would otherwise complete into a mode that never asked.
+        ed.handle_key(code(KeyCode::Esc));
+        assert_eq!(ed.mode, Mode::Normal);
+        ed.show_completion(alloc::vec![cand("Print", "Print")]);
+        assert!(ed.completion_state().is_none());
+        assert_eq!(ed.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn jump_to_moves_within_the_current_file() {
+        let mut ed = Editor::new(Some("a.go".to_string()), "1\n2\n3\n4", false);
+        ed.jump_to(Some("a.go".to_string()), 2, 0);
+        assert_eq!(ed.text.cursor(), (2, 0));
+        assert_eq!(ed.take_request(), None); // no file op needed
+        // A None path means "wherever we are".
+        ed.jump_to(None, 3, 0);
+        assert_eq!(ed.text.cursor(), (3, 0));
+    }
+
+    #[test]
+    fn a_cross_file_jump_opens_then_positions() {
+        let mut ed = Editor::new(Some("a.go".to_string()), "x", false);
+        ed.jump_to(Some("b.go".to_string()), 2, 1);
+        // The editor cannot read the file; it asks the binary to.
+        assert_eq!(ed.take_request(), Some(Request::Open("b.go".to_string())));
+        // The cursor lands once the buffer exists.
+        ed.open_buffer(Some("b.go".to_string()), "aa\nbb\ncc");
+        assert_eq!(ed.text.cursor(), (2, 1));
+        // The parked jump is spent -- a later unrelated open must not inherit it.
+        ed.open_buffer(Some("c.go".to_string()), "zz\nyy\nxx");
+        assert_eq!(ed.text.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn a_completion_mode_with_no_candidates_fails_closed_into_insert() {
+        // The mode and the list must agree; if they ever drift, a keypress
+        // must not divide by zero.
+        let mut ed = Editor::new(None, "", false);
+        ed.handle_key(ch('i'));
+        ed.show_completion(alloc::vec![cand("Print", "Print")]);
+        ed.completion.clear(); // simulate the drift
+        ed.handle_key(ctrl('n'));
+        assert_eq!(ed.mode, Mode::Insert);
+    }
+
+    #[test]
+    fn a_buffer_switch_drops_hover_and_completion() {
+        let mut ed = Editor::new(Some("a.go".to_string()), "abc", false);
+        ed.show_hover("about a.go".to_string());
+        assert!(ed.hover().is_some());
+        ed.open_buffer(Some("b.go".to_string()), "def");
+        // Overlays describe a position in the file we just left.
+        assert!(ed.hover().is_none());
+        assert!(ed.completion_state().is_none());
     }
 }

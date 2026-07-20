@@ -33,6 +33,35 @@ pub type Pos = (usize, usize);
 /// cap bounds the editor's worst-case memory at roughly UNDO_CAP * file_size.
 const UNDO_CAP: usize = 64;
 
+/// Convert a BYTE offset within `line` to this engine's CHARACTER column.
+///
+/// The bridge for anything that arrives byte-addressed (a language server's
+/// UTF-8 position, a byte-oriented tool's column) into the char coordinates
+/// every `Pos` in nora uses. An offset past the end yields the line's char
+/// length; one landing mid-character rounds DOWN to that character's column,
+/// so the result is always a column the cursor can legally occupy.
+pub fn byte_to_char_col(line: &str, byte: usize) -> usize {
+    let mut n = 0usize;
+    for (off, ch) in line.char_indices() {
+        // The byte falls inside (or before) this character.
+        if off + ch.len_utf8() > byte {
+            return n;
+        }
+        n += 1;
+    }
+    n
+}
+
+/// Convert this engine's CHARACTER column to a BYTE offset within `line` --
+/// the inverse of [`byte_to_char_col`], for handing a position to something
+/// byte-addressed. A column past the end yields `line.len()`.
+pub fn char_col_to_byte(line: &str, col: usize) -> usize {
+    line.char_indices()
+        .nth(col)
+        .map(|(off, _)| off)
+        .unwrap_or(line.len())
+}
+
 /// Character class for word motion. A small-word (`w`/`b`/`e`) is a maximal run
 /// of ONE class -- WORD chars (alphanumeric + `_`) OR punctuation; a big-WORD
 /// (`W`) is any maximal run of non-whitespace. `Space` (whitespace + line
@@ -712,7 +741,42 @@ mod tests {
     }
 
     use super::*;
-    use alloc::string::ToString;
+
+    #[test]
+    fn byte_and_char_columns_convert_both_ways() {
+        // ASCII: the two coordinates coincide, which is exactly why a
+        // byte-vs-char mixup survives every ASCII test and breaks on the first
+        // accented character.
+        assert_eq!(byte_to_char_col("abc", 2), 2);
+        assert_eq!(char_col_to_byte("abc", 2), 2);
+
+        // "aébc": bytes a=0, é=1..3, b=3, c=4.
+        let s = "aébc";
+        assert_eq!(char_col_to_byte(s, 0), 0);
+        assert_eq!(char_col_to_byte(s, 1), 1);
+        assert_eq!(char_col_to_byte(s, 2), 3); // 'b'
+        assert_eq!(byte_to_char_col(s, 0), 0);
+        assert_eq!(byte_to_char_col(s, 1), 1);
+        assert_eq!(byte_to_char_col(s, 3), 2);
+        // Round-trip every valid column.
+        for col in 0..=s.chars().count() {
+            assert_eq!(byte_to_char_col(s, char_col_to_byte(s, col)), col);
+        }
+    }
+
+    #[test]
+    fn column_conversion_clamps_out_of_range() {
+        let s = "aé";
+        // Past the end -> the line's char length / byte length.
+        assert_eq!(byte_to_char_col(s, 99), 2);
+        assert_eq!(char_col_to_byte(s, 99), s.len());
+        // A byte offset INSIDE 'é' (byte 2) rounds down to that char's column,
+        // so the result is always a column the cursor may occupy.
+        assert_eq!(byte_to_char_col(s, 2), 1);
+        // Empty line: every offset is column 0.
+        assert_eq!(byte_to_char_col("", 5), 0);
+        assert_eq!(char_col_to_byte("", 5), 0);
+    }
 
     #[test]
     fn new_and_content_round_trip() {
