@@ -16,4 +16,6 @@
 
 extern crate alloc;
 
+pub mod frame;
 pub mod json;
+pub mod jsonrpc;
