@@ -1498,6 +1498,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tapestry-battery"
+version = "0.1.0"
+dependencies = [
+ "libtapestry",
+ "libthyla-rs",
+]
+
+[[package]]
 name = "tapestry-demo"
 version = "0.1.0"
 dependencies = [

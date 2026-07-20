@@ -1,0 +1,295 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-gfx-panes.exp -- the G-6 compositor acceptance leg
+# (TAPESTRY.md 18.9: "the acceptance battery on synthetic clients").
+#
+# Drives /bin/tapestry-battery in the session foreground and asserts the
+# views agree:
+#   focus event: TEV_FOCUS gained arrives at host-at-create (G-6c);
+#   structural : the battery's own in-guest asserts (layout text vs the
+#                pane geometry files; disjoint nonzero rects);
+#   pixels     : screendump -P + tools/ppm-sample.py at coordinates the
+#                battery prints, one dump per stage (each stage holds the
+#                screen static ~1.5 s);
+#   resize     : the 18.3 protocol (G-6b) -- ack negative probes, then B
+#                reweaves onto its pane's exact size;
+#   multirect  : ONE present carrying TWO rects (G-6c) -- green + yellow
+#                quarter points both land (a rect0-only server leaves
+#                the right half blue);
+#   tabbed     : the D7 glyph-free strip (G-6c) -- segment colors exact
+#                (inactive BORDER, focused-active FOCUS) + `tab next`;
+#   zoom       : the focused pane alone at full display (direct scanout;
+#                corner pixel red), then restored (G-6c);
+#   move       : directional re-parenting (D6/G-6c) -- pull-out + swap,
+#                pixel-verified at the new centers;
+#   input      : QMP-typed keys arrive on the FOCUSED surface's stream
+#                only (focus leg A via the layout file, leg B via B's
+#                own pane ctl);
+#   chord      : QMP Super+Left is intercepted ABOVE the event stream
+#                (18.4) -- focus moves compositor-side, the arrow never
+#                reaches a surface (G-6c);
+#   test-mode  : the 18.6 determinism mode -- frozen FRAME clock + the
+#                `tick` drive (G-6c, in-guest asserts);
+#   hold       : TPRESENT_HOLD + release (G-6c) -- B stays blue on
+#                screen with magenta already presented; release flips
+#                it (two dumps bracket the release);
+#   close      : a compositor-initiated pane close delivers TEV_CLOSE
+#                (G-6b); the surface retires only when the client drops.
+# The coda proves teardown: the battery exits, its panes collapse, the
+# console returns to fullscreen direct scanout, and the -c console verify
+# passes again.
+#
+# Runs under HVF (the gfx-scenario medium; TCG hangs at the pre-existing
+# 8a-2b hwwatch E2E, task #27). Needs the QMP socket + python3; GPU-less
+# boots use the standing THYLACINE_NO_GPU escape.
+
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+set repo $lc_repo
+set qmp "$repo/build/qmp.sock"
+
+proc gfx_dump {out args_} {
+    global repo qmp
+    if {[catch {exec $repo/tools/screendump.sh -s $qmp {*}$args_ $out} err]} {
+        return $err
+    }
+    return ""
+}
+
+# Dump a PPM and assert one pixel; fails the run on mismatch.
+proc gfx_sample {tag x y want} {
+    global repo
+    set ppm /tmp/ls-gfx-panes-$tag.ppm
+    if {[gfx_dump $ppm "-P"] ne ""} { lc_fail "$tag: PPM capture failed" }
+    set rgba [exec $repo/tools/ppm-sample.py $ppm $x $y]
+    if {$rgba ne $want} { lc_fail "$tag: pixel ($x,$y) = '$rgba', want '$want'" }
+}
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# Anchor: the fullscreen console renders before the battery perturbs it.
+set ok 0
+for {set i 0} {$i < 12} {incr i} {
+    if {[gfx_dump /tmp/ls-gfx-panes-pre.png "-c"] eq ""} { set ok 1; break }
+    after 700
+}
+if {!$ok} { lc_fail "pre-battery console verify (-c) never passed" }
+lc_pass "panes: pre-battery console verified"
+
+# The battery (foreground; its say! lines land on the serial tee).
+lc_send "tapestry-battery"
+set timeout 45
+
+# G-6c: TEV_FOCUS gained at A's host-at-create.
+expect {
+    -ex "battery: focus event OK" { lc_pass "panes: TEV_FOCUS gained at create" }
+    -ex "tapestry-battery: FAIL" { lc_fail "battery focus-event leg failed" }
+    timeout { lc_fail "battery never reached the focus event" }
+    eof { lc_fail "qemu exited during the battery" }
+}
+
+expect {
+    -ex "tapestry-battery: structure OK" { lc_pass "panes: in-guest structure asserts OK" }
+    -ex "tapestry-battery: FAIL" { lc_fail "battery structure legs failed" }
+    timeout { lc_fail "battery never reached structure OK" }
+    eof { lc_fail "qemu exited during the battery" }
+}
+
+# Stage 1 pixels: A solid red (crop posture), B solid blue.
+expect {
+    -re {battery: stage1 centers (\d+) (\d+) (\d+) (\d+)\r?\n} {
+        set ax $expect_out(1,string)
+        set ay $expect_out(2,string)
+        set bx $expect_out(3,string)
+        set by $expect_out(4,string)
+    }
+    timeout { lc_fail "no stage1 centers line" }
+}
+gfx_sample stage1a $ax $ay "255 0 0"
+gfx_sample stage1b $bx $by "0 0 255"
+lc_pass "panes: composed pixels exact at both centers (A red, B blue)"
+
+# Scenario 2 (G-6b): the resize protocol.
+expect {
+    -ex "battery: resize rejects OK" { lc_pass "panes: resize-ack negative probes OK" }
+    -ex "tapestry-battery: FAIL" { lc_fail "resize negative probes failed" }
+    timeout { lc_fail "battery never reached the resize probes" }
+}
+expect {
+    -re {battery: resize OK (\d+) (\d+)\r?\n} {
+        lc_pass "panes: B reweaved to $expect_out(1,string)x$expect_out(2,string) (exact pane fit)"
+    }
+    -ex "tapestry-battery: FAIL" { lc_fail "the reweave leg failed" }
+    timeout { lc_fail "battery never completed the reweave" }
+}
+
+# Scenario 2b (G-6c): the multi-rect present -- both halves must land.
+expect {
+    -re {battery: multirect ready (\d+) (\d+) (\d+) (\d+)\r?\n} {
+        set gx $expect_out(1,string)
+        set gy $expect_out(2,string)
+        set yx $expect_out(3,string)
+        set yy $expect_out(4,string)
+    }
+    -ex "tapestry-battery: FAIL" { lc_fail "the multirect leg failed" }
+    timeout { lc_fail "battery never reached multirect" }
+}
+gfx_sample mrg $gx $gy "0 255 0"
+gfx_sample mry $yx $yy "255 255 0"
+lc_pass "panes: multi-rect present painted both halves (green + yellow)"
+
+# Scenario 2c (G-6c): the tabbed strip -- glyph-free segment colors.
+expect {
+    -re {battery: tabbed ready (\d+) (\d+) (\d+)\r?\n} {
+        set sy $expect_out(1,string)
+        set sax $expect_out(2,string)
+        set sbx $expect_out(3,string)
+    }
+    -ex "tapestry-battery: FAIL" { lc_fail "the tabbed leg failed" }
+    timeout { lc_fail "battery never reached tabbed" }
+}
+gfx_sample tabA $sax $sy "58 58 68"
+gfx_sample tabB $sbx $sy "122 158 204"
+lc_pass "panes: tab strip segments exact (inactive border, active focus)"
+expect {
+    -ex "battery: tab cycled" { lc_pass "panes: tab next cycled the active child" }
+    -ex "tapestry-battery: FAIL" { lc_fail "the tab-cycle leg failed" }
+    timeout { lc_fail "battery never cycled the tab" }
+}
+
+# Scenario 2d (G-6c): zoom -- A alone at full display (direct scanout).
+expect {
+    -ex "battery: zoom ready" {}
+    -ex "tapestry-battery: FAIL" { lc_fail "the zoom leg failed" }
+    timeout { lc_fail "battery never reached zoom" }
+}
+gfx_sample zoom 3 3 "255 0 0"
+lc_pass "panes: zoomed pane fills the display (corner red)"
+expect {
+    -ex "battery: zoom restored" { lc_pass "panes: unzoom restored the layout exactly" }
+    -ex "tapestry-battery: FAIL" { lc_fail "the unzoom leg failed" }
+    timeout { lc_fail "battery never restored from zoom" }
+}
+
+# Scenario 2e (G-6c): directional move -- pixel-verified at new centers.
+expect {
+    -re {battery: move OK (\d+) (\d+) (\d+) (\d+)\r?\n} {
+        set max_ $expect_out(1,string)
+        set may_ $expect_out(2,string)
+        set mbx $expect_out(3,string)
+        set mby $expect_out(4,string)
+    }
+    -ex "tapestry-battery: FAIL" { lc_fail "the move leg failed" }
+    timeout { lc_fail "battery never completed the moves" }
+}
+gfx_sample moveA $max_ $may_ "255 0 0"
+gfx_sample moveB $mbx $mby "0 0 255"
+lc_pass "panes: directional move re-parented (A red, B blue at new centers)"
+
+# Focus leg A: the typed key must arrive on A's stream (the battery waits
+# there; a mis-route hangs it into its budget FAIL).
+expect {
+    -ex "tapestry-battery: panes ready" {}
+    timeout { lc_fail "battery never reached panes ready" }
+}
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp "x"} err]} {
+    lc_fail "qmp-sendtext (leg A) failed: $err"
+}
+expect {
+    -ex "battery: A key" { lc_pass "panes: focused-leaf routing (leg A)" }
+    -ex "tapestry-battery: FAIL" { lc_fail "battery focus leg A failed" }
+    timeout { lc_fail "key never arrived on A (focus routing broken)" }
+}
+expect {
+    -ex "tapestry-battery: focus B" {}
+    timeout { lc_fail "battery never switched focus to B" }
+}
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp "y"} err]} {
+    lc_fail "qmp-sendtext (leg B) failed: $err"
+}
+expect {
+    -ex "battery: B key" { lc_pass "panes: focus switch via pane ctl (leg B)" }
+    -ex "tapestry-battery: FAIL" { lc_fail "battery focus leg B failed" }
+    timeout { lc_fail "key never arrived on B (pane-ctl focus broken)" }
+}
+
+# The chord leg (G-6c): Super+Left moves focus compositor-side; the arrow
+# never reaches a surface.
+expect {
+    -ex "battery: chord ready" {}
+    -ex "tapestry-battery: FAIL" { lc_fail "battery died before the chord leg" }
+    timeout { lc_fail "battery never reached the chord leg" }
+}
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k "meta_l+left"} err]} {
+    lc_fail "qmp-sendtext chord failed: $err"
+}
+expect {
+    -ex "battery: chord focus OK" { lc_pass "panes: Super chord intercepted + focus moved (18.4)" }
+    -ex "tapestry-battery: FAIL" { lc_fail "the chord leg failed" }
+    timeout { lc_fail "the chord never moved focus" }
+}
+
+# The test-mode leg (18.6): in-guest frozen-clock + tick asserts.
+expect {
+    -ex "battery: test-mode OK" { lc_pass "panes: test-mode freezes the clock; tick drives it" }
+    -ex "tapestry-battery: FAIL" { lc_fail "the test-mode leg failed" }
+    timeout { lc_fail "battery never completed test-mode" }
+}
+
+# The hold leg (TPRESENT_HOLD + release): B is magenta-presented but the
+# screen must still show blue until the release.
+expect {
+    -re {battery: hold ready (\d+) (\d+)\r?\n} {
+        set hbx $expect_out(1,string)
+        set hby $expect_out(2,string)
+    }
+    -ex "tapestry-battery: FAIL" { lc_fail "the hold present failed" }
+    timeout { lc_fail "battery never reached hold" }
+}
+gfx_sample holdpre $hbx $hby "0 0 255"
+lc_pass "panes: held present deferred (B still blue on screen)"
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp "z"} err]} {
+    lc_fail "qmp-sendtext (hold sync) failed: $err"
+}
+expect {
+    -ex "battery: released" {}
+    -ex "tapestry-battery: FAIL" { lc_fail "the release failed" }
+    timeout { lc_fail "battery never released the hold" }
+}
+gfx_sample holdpost $hbx $hby "255 0 255"
+expect {
+    -ex "battery: hold OK" { lc_pass "panes: release composed the held present (B magenta)" }
+    -ex "tapestry-battery: FAIL" { lc_fail "the hold coda failed" }
+    timeout { lc_fail "battery never finished the hold leg" }
+}
+
+# Scenario 3 (G-6b): a compositor-initiated pane close delivers the
+# queued TEV_CLOSE exit request to the stranded surface.
+expect {
+    -ex "battery: close event OK" { lc_pass "panes: TEV_CLOSE delivered on pane close" }
+    -ex "tapestry-battery: FAIL" { lc_fail "the pane-close leg failed" }
+    timeout { lc_fail "TEV_CLOSE never arrived" }
+}
+expect {
+    -ex "tapestry-battery: PASS" { lc_pass "panes: battery PASS" }
+    -ex "tapestry-battery: FAIL" { lc_fail "battery failed after the close leg" }
+    timeout { lc_fail "battery never finished" }
+}
+
+# The coda: panes collapsed, the console is fullscreen direct again; the
+# session prompt answers and the -c verify passes (a serial command first
+# forces a fresh present -- the direct switch rides a present-complete).
+lc_run_expect "pwd" "/home/michael"
+set ok 0
+for {set i 0} {$i < 12} {incr i} {
+    if {[gfx_dump /tmp/ls-gfx-panes-post.png "-c"] eq ""} { set ok 1; break }
+    after 700
+}
+if {!$ok} { lc_fail "post-battery console verify (-c) never passed (collapse/direct-return broken)" }
+lc_pass "panes: console restored fullscreen after the battery"
+
+lc_quit
+lc_pass "ls-gfx-panes: the G-6 compositor leg verified (focus-event + structure + resize + multirect + tabs + zoom + move + focus + chord + test-mode + hold + close + collapse)"
+exit 0

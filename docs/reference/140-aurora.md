@@ -155,7 +155,12 @@ private session → fullscreen surface → weave map → Loom presents.
   ((120,116,6)@a=127, (174,168,239)@a=191). The fix is the standard
   lane-safe form (`na = 256-a`, `>>8`), ideal-tracking within 1; a
   dormant `#[cfg(test)]` regression pins it (the host-harness seam).
-  The gate's saturated-color blindness is recorded for G-5.
+  The gate blindness was closed at G-5: `screendump.sh -c` now runs a
+  blend-integrity pass over exact-fg-adjacent edge pixels (each channel
+  must sit in the `[bg,fg]` envelope ±6; >5% outside fails — junctions
+  measure ~2%, the #35 formula ~15%), and
+  `tools/test-screendump-edge.sh` keeps it non-vacuous offline (a
+  synthesized pre-#35-buggy frame must fail on exactly that arm).
 - **A failed present is a DROPPED FRAME, never death (#31).** The
   pre-#31 loop exited on any `present()` error, so one transient
   compositor GPU hiccup (the controlq desync's client-visible face)
@@ -175,14 +180,35 @@ presenter (the demo stays baked for manual runs — first-present-wins
 scanout would race two residents). Aurora's `say!` diagnostics go
 uart-direct (SYS_PUTS) — never into its own drain, so no feedback loop.
 
+**TEV_CONFIGURE (G-6a/b)**: aurora is an accumulator client — the row
+renderer paints only dirty rows into the current slot, so every weave
+slot is a patchwork and only the compositor-side accumulator (the host
+resource in direct mode, the screen buffer in composed mode) holds a
+complete frame. So EVERY CONFIGURE marks the whole grid dirty and the
+next pass repaints it — a same-size CONFIGURE is the compositor's
+explicit full-repaint request (structural repaints blank pane content),
+and a size CHANGE also forces a full repaint into the cropped viewport.
+Aurora deliberately does NOT ack a size change (`Surface::reweave` — the
+G-6b generation fence — exists, but the fbcon's cell grid is bound to
+the console history at startup): it keeps its grid and the compositor
+crops the top-left (the ignore/crop client posture). A reweaving fbcon
+(re-derive rows/cols on resize) is a follow-up. No diagnostic is printed
+on a CONFIGURE — aurora shares `/dev/cons` with whatever it renders, so
+a chatty line interleaves byte-for-byte with a concurrent writer's
+output (`t_putstr` is not cross-Proc atomic; the G-6b battery run
+measured exactly that mangling). **TEV_FOCUS (G-6c)** falls to the
+default-ignore arm: the fbcon renders no focus state (the compositor's
+focus ring/strip highlight is chrome, outside aurora's pane).
+
 ## The gates
 
 - **The per-boot console gate** (`tools/test.sh`, every ci-smp-gate
   boot): `screendump -c` asserts the console signature — the exact
   Bonfire bg DOMINANT (≥40%) + exact default-fg text pixels (≥200; AA
-  glyph cores are pure fg) — then a bounded retry-compare proves
-  liveness (the cursor blink / prompt arrival must eventually change a
-  dump). Content-independent, deterministic, never dropped.
+  glyph cores are pure fg) + the G-5 blend-integrity edge pass (above)
+  — then a bounded retry-compare proves liveness (the cursor blink /
+  prompt arrival must eventually change a dump). Content-independent,
+  deterministic, never dropped.
 - **`tools/interactive/ls-gfx.exp`** — the fbcon claim end to end:
   serial login + `ls /`; `-c` + differing dumps before/after; then
   `tools/qmp-sendtext.sh` types `whoami` on kbd-pci0 (display-bound to

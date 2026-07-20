@@ -10,9 +10,13 @@
 # trailing newline in TEXT sends Enter ("ret").
 #
 #   tools/qmp-sendtext.sh [-s QMP_SOCK] "whoami\n"
+#   tools/qmp-sendtext.sh [-s QMP_SOCK] -k "meta_l+left"
 #
 # Lowercase letters, digits, space, '-', '.', '/' and '\n' only (the
 # scenario vocabulary); anything else is a hard error, not a silent skip.
+# -k sends ONE chord: '+'-separated qcodes pressed in order, released in
+# reverse (the G-6c Super-chord leg; qcodes pass through verbatim, e.g.
+# meta_l, shift, left/right/up/down, letters).
 
 set -euo pipefail
 
@@ -20,20 +24,22 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 sock="$REPO_ROOT/build/qmp.sock"
+mode="text"
 
-while getopts "s:h" opt; do
+while getopts "s:kh" opt; do
     case "$opt" in
         s) sock="$OPTARG" ;;
-        *) echo "usage: qmp-sendtext.sh [-s SOCK] TEXT" >&2; exit 2 ;;
+        k) mode="chord" ;;
+        *) echo "usage: qmp-sendtext.sh [-s SOCK] [-k] TEXT|CHORD" >&2; exit 2 ;;
     esac
 done
 shift $((OPTIND - 1))
-[[ $# -eq 1 ]] || { echo "usage: qmp-sendtext.sh [-s SOCK] TEXT" >&2; exit 2; }
+[[ $# -eq 1 ]] || { echo "usage: qmp-sendtext.sh [-s SOCK] [-k] TEXT|CHORD" >&2; exit 2; }
 
-exec python3 - "$sock" "$1" <<'PYEOF'
+exec python3 - "$sock" "$mode" "$1" <<'PYEOF'
 import json, socket, sys, time
 
-sock_path, text = sys.argv[1], sys.argv[2]
+sock_path, mode, text = sys.argv[1], sys.argv[2], sys.argv[3]
 
 QCODE = {**{c: c for c in "abcdefghijklmnopqrstuvwxyz"},
          **{c: c for c in "0123456789"},
@@ -75,19 +81,36 @@ def cmd(name, **args):
         return r
 
 
+def key(qcode, down):
+    cmd("input-send-event",
+        events=[{"type": "key",
+                 "data": {"down": down,
+                          "key": {"type": "qcode", "data": qcode}}}])
+
+
 msg()  # greeting
 cmd("qmp_capabilities")
+if mode == "chord":
+    codes = [c for c in text.split("+") if c]
+    if not codes:
+        print("qmp-sendtext: empty chord", file=sys.stderr)
+        sys.exit(1)
+    for q in codes:
+        key(q, True)
+        time.sleep(0.03)
+    for q in reversed(codes):
+        key(q, False)
+        time.sleep(0.03)
+    print(f"qmp-sendtext: chorded {text!r}")
+    sys.exit(0)
 text = text.replace("\\n", "\n")
 for ch in text:
     q = QCODE.get(ch)
     if q is None:
         print(f"qmp-sendtext: unsupported char {ch!r}", file=sys.stderr)
         sys.exit(1)
-    for down in (True, False):
-        cmd("input-send-event",
-            events=[{"type": "key",
-                     "data": {"down": down,
-                              "key": {"type": "qcode", "data": q}}}])
+    key(q, True)
+    key(q, False)
     time.sleep(0.03)  # keystroke pacing (the guest drains per FRAME tick)
 print(f"qmp-sendtext: typed {text!r}")
 PYEOF

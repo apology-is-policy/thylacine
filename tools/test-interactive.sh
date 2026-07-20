@@ -158,6 +158,7 @@ for scen in "${scenarios[@]}"; do
         cat "$steps" >&2 2>/dev/null || true
         echo "    --- transcript tail ($transcript; last attempt) ---" >&2
         tr -d '\r' < "$transcript" 2>/dev/null | tail -40 >&2 || true
+        echo "    every attempt's evidence: $BUILD_DIR/ls-ci-$name.attempt*.{log,steps}" >&2
         echo "    --------------------------------------" >&2
         fails=$((fails + 1))
     fi

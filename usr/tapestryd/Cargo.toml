@@ -9,6 +9,14 @@ license.workspace = true
 name = "tapestryd"
 path = "src/main.rs"
 
+# Section 18.6 determinism mode (test-mode/tick/HOLD/release) is a BUILD-time
+# gate (the #880 strip-for-production class): default-on for the dev tree; a
+# production profile builds with --no-default-features and the verbs answer
+# E_OPNOTSUPP.
+[features]
+default = ["test-mode"]
+test-mode = []
+
 [dependencies]
 libdriver = { path = "../lib/libdriver" }
 libthyla-rs = { path = "../lib/libthyla-rs" }

@@ -940,6 +940,159 @@ login + `ls` with before/after dumps, then QMP-typed `whoami` on the
 display-bound kbd-pci0 asserted via the serial TEE (the graphical input
 loop, no pixel OCR). As-built: `docs/reference/140-aurora.md`.
 
+**G-6a AS-BUILT (landed on `gfx-2`): the pane tree + multi-surface
+composition — the compositor's first stage.** `pane.rs` realizes the §14
+container model (flatten-same-mode / nest-different-mode splits; split
+focuses the new empty leaf = the auto-host target; collapse; root
+persists; monotonic never-reused pane ids); surfaces host at CREATE
+(focused-empty-leaf else split-focused). Scanout is a mode machine
+(Boot/Off/Direct/Composed): the single-visible-display-sized case keeps
+the stage-0 DIRECT zero-copy path byte-identical (aurora's boot
+unchanged), everything else composes into a compositor-owned screen
+buffer — a WEAVE-subtype DMA chunk (the §18.1 type discipline: scanout
+backings are the weave class; plain SYS_DMA_CREATE is the
+virtqueue class, 1 MiB-capped — measured), never registered for
+sharing. EVERY switch onto a client resource rides a present-COMPLETE
+(F16 uniformly, `pending_direct`). The tearing-freedom invariant:
+client weave bytes are read only inside the present dispatch for the
+just-presented slot; chrome repaints never touch client memory, and a
+geometry-signature split keeps focus-ring moves from blanking idle
+content. **The §18.3 CONFIGURE emission half is pulled forward**
+(chunk-completeness): same-size CONFIGURE = the redraw request (emitted
+at structural composed repaints to all visible surfaces + at
+pending-direct entry), because an accumulator client's slots are
+patchwork (aurora measured — static rows never healed without it); the
+resize-ack/reweave half stays `E_OPNOTSUPP` until G-6b. The 9P tree
+gains `layout` + `pane/<id>/{ctl,mode,role,tag,surface,geometry}` (V4
+§18.5); pane files are global — the environment-role mutation gate + the
+D5 layout-observability caveat are the recorded Halcyon-era seam. **This
+is the intended WM-control model, not a per-surface ACL** (control is
+9P / layout-as-9P; the i3-IPC / tmux-control-mode shape — a WM-control
+client like `halcyon.rc` drives layout globally). Surfaces (pixels /
+events / present / weave) stay F2-owner-gated; the *layout tree* is a
+session-global control surface. **The G-6d weighing** (holotype F1, P2):
+the sharpest consequence of a global control surface is that a session
+peer could `close` another client's pane — for the console renderer
+(aurora) that queues `TEV_CLOSE`, which exits it and darkens the
+graphical console — or focus-steal its input. **The v1.0 trust boundary
+is the per-territory `/srv` (I-1/I-28)**: `/srv/tapestry` lives in the
+driver's own territory, unreachable from a user session's namespace, so
+only the trusted boot chain is spawned where it can connect — no
+untrusted tapestry client exists at v1.0. The per-client
+layout-control CAPABILITY (a WM-control client holds it; ordinary
+surface clients don't) + renderer-role protection + the D5 read ACL are
+the Halcyon-era multi-untrusted-client fix (task #42); a partial
+owner-scope now would break the global-WM model (the no-overfit trap).
+The global `clock-rate` ctl is the same same-session-trust family;
+`test-mode`/`tick`/`release`/HOLD are dev-build-only (the `test-mode`
+cargo feature, stripped to `E_OPNOTSUPP` for production — the #880
+class), with `release` additionally F2-owner-gated. Gate:
+`ls-gfx-panes.exp` + `/bin/tapestry-battery` (structure + exact pixels
+via `screendump -P`/`ppm-sample` + QMP focus legs + the collapse coda);
+ls-gfx / ls-gfx-live / the per-boot `-c` gate stay green. As-built:
+`docs/reference/139-tapestryd.md` "The compositor stage 1".
+
+**G-6b AS-BUILT (landed on `gfx-2`): the resize protocol + pane close —
+weave generations.** The §18.3 resize protocol is live. A surface's
+`weave`/`resource_id` name its CURRENT generation (GPU resource ids are
+per-generation, minted above SCREEN_RES so a fresh resource never
+aliases the old — closing the #317 stale-content class); `alloc_weave`
+(the shared body of `create` + `resize_ack`) allocates a full
+generation, `release_gen` tears one down in the R2-F5 order. A
+size-changing CONFIGURE offer records `offered = (serial, w, h)` (only
+the latest is ackable — coalesce-by-replacement); the structural
+composed repaint offers every visible hosted surface its pane's EXACT
+content size. The ack `resize W H <serial>` on the surface ctl is THE
+GENERATION FENCE — `resize_ack` mints the new generation FIRST (a
+failure leaves the current one untouched, the offer standing), swaps the
+surface onto it, and ONLY THEN sends the Rwrite (reply-after-alloc,
+R2-F5); the conn stream is FIFO, so every post-ack present validates +
+blits against the new geometry. Bounded to <=2 generations
+(`old_weave.is_some()` → E_AGAIN); a stale serial → E_AGAIN, an
+unknown/mismatched echo → E_INVAL — none consume the offer. The
+displaced generation drains PASSIVELY (its last content stays displayed,
+never read again — tearing-freedom holds) and retires at the first
+post-fence present (the spec's `RetireDisplaced` + `ServerRelease`: the
+display shows g2 content, so quiesce holds by construction). The client
+half (`libtapestry::Surface::handle_configure` → `reweave`) opens a
+fresh weave fid, re-maps, then clunks the old fid (map-new-before-
+clunk-old — the client stays mapped throughout; #847 keeps g1's pages
+until then). Pane close delivers a queued `TEV_CLOSE` exit REQUEST
+(distinct from a retired surface's stream-end EOF) — a compositor close
+strands the surface but never force-retires it (the client may need to
+save). `weft.tla`/`tapestry_present.tla` UNCHANGED (the reweave is
+already modeled with `ALLOW_REWEAVE`; retire-on-first-post-fence-present
+is the scheduling refinement under its permissiveness — the
+SPEC-TO-CODE reweave map). Aurora (the fbcon) deliberately does NOT ack
+a size change (fixed cell grid) — crop/ignore posture; a reweaving
+fbcon is a follow-up. Recorded seam: `weave_va_next` is a monotonic bump
+(no free-list; bounded — a display weave is ~12 MiB, the 47-bit VA holds
+millions of reweaves — a v1.x free-list closes it). Gate:
+`ls-gfx-panes.exp` grows the resize legs (the ack negative probes + the
+exact-fit reweave) + the TEV_CLOSE leg. As-built: `139-tapestryd.md`
+"The resize protocol + pane close (G-6b)".
+
+**G-6c AS-BUILT (landed on `gfx-2`): chords, focus events, tab/stack
+visuals, move/zoom, multi-rect, determinism mode — the compositor's
+interaction layer.** (a) **The Super chord layer** (§14 layer 1) is
+intercepted in the input drain, ABOVE the event stream (§18.4): while
+Super is held every non-modifier key is compositor input — bound chords
+act, unbound ones drop, none reaches a surface (the WHOLE plane is
+reserved, so no client can come to depend on a Super combo); a
+swallowed press swallows its release/repeats even if Super lifted
+first, and a key pressed before Super keeps flowing. The baked
+i3-flavored table (compositor policy, a halcyon.rc concern eventually,
+like the keymap): Super+arrows = spatial focus, +Shift+arrows = move,
+h/v = split, f = zoom toggle, t/s = tabbed/stacked, e = split-toggle,
+Tab/+Shift = tab cycle, Shift+q = close the focused pane. (b)
+**TEV_FOCUS** (kind 7, value 1 gained / 0 lost, the F5 never-drop
+class) emits from the single reconcile tail on every focused-surface
+change. (c) **Tab/stack indicator strips** (D7 glyph-free — colored
+segments, never text): a tabbed container carves TAB_STRIP_H=5 rows
+into one segment row (1px gaps), a stacked one carves a row per child;
+the active child's segment lights FOCUS_COLOR on the focus path,
+ACTIVE_COLOR off it, BORDER_COLOR inactive. Strips are chrome
+(repainted with borders on focus-only epochs; never client memory —
+tearing-freedom intact). (d) **Move** (D6): directional re-parenting —
+swap with the matching-axis sibling, pull out of a nested subtree
+beside it (dissolution-safe index bookkeeping), wrap the root on a
+pure cross-axis move; at the screen edge it is a no-op. Tabbed matches
+the h axis, Stacked the v axis (moving walks tab order). (e) **Zoom**
+(§14 pane-zoom, tmux-shaped): a by-id toggle; the leaf alone fills the
+display (the tree untouched; a display-sized surface goes DIRECT
+zero-copy); structural mutations and focus-elsewhere auto-unzoom.
+(f) **Multi-rect presents**: rect_count k >= 2 rides rects 1..k INLINE
+after the 32-byte header (payload 32 + 16*(k-1), count capped at 64,
+EVERY rect validated before any pixel work). This REALIZES D4's
+"compositor case" and supersedes the §18.2 provisional
+`buf_idx_or_off` slice sketch: under D3 the present payload already
+lives in the client's registered buffer, so a separate slice reference
+would be redundant indirection — the inline array preserves the
+registered-buffer intent with zero extra machinery. (g) **Determinism
+mode** (§18.6 + F13 + F15) behind the `test-mode` cargo feature
+(default-on for the dev tree; production builds strip it —
+`--no-default-features` — and every verb answers E_OPNOTSUPP, the #880
+class): `test-mode on` freezes the FRAME clock (the serve loop stops
+wall-clock ticks — queued FRAME events drain normally, which IS the
+F15 transition discipline for a synchronous single-threaded engine;
+the anchor re-seats on unfreeze so no backlog fires), `tick` drives
+time one step per write, and `TPRESENT_HOLD` presents run their pixel
+work normally INSIDE the dispatch (transfer/blit — tearing-freedom
+holds for held presents too) but defer the device-visible push
+(flush / screen transfer+flush) until `release [<surface>]` (F13;
+ownership-gated per F2; holds union, most-recent bytes win; a
+non-HOLD present or `test-mode off` flushes implicitly; a hold cannot
+complete a pending scanout SWITCH — E_AGAIN — and a hold staled by a
+scanout-mode change drops, superseded by the structural repaint).
+Layout grammar grows `move <id> <dir>`, `zoom <id>`, and the id-less
+`focusdir <dir>` / `tab next|prev`. Gate: the battery grows the
+focus-event / multirect / tabbed-strip / tab-cycle / zoom / move /
+chord / test-mode / hold legs with per-stage pixel dumps
+(`qmp-sendtext.sh -k` injects the Super chord). Kernel byte-unchanged;
+the spec suite is unperturbed (presents model identically; HOLD defers
+only sub-CQE flush granularity, below the model's abstraction).
+As-built: `139-tapestryd.md` "The interaction layer (G-6c)".
+
 ### 18.10 Audit-trigger + scripture sync obligations
 
 At each landing, per standing discipline: G-2 joins the Weft/burrow rows

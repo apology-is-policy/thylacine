@@ -16,6 +16,17 @@
 //                 LAZILY at the first Tweft (weft_ensure below) -- the
 //                 netd precedent; the Map guard is indifferent to when the
 //                 registration happens, only that retire disarms it.
+//   Reweave     = `resize W H <serial>` on the surface ctl (G-6b): the
+//                 ack of a size-changing CONFIGURE mints the NEW weave
+//                 generation (fresh DMA + fresh resource id) and is THE
+//                 GENERATION FENCE -- the Rwrite completes only after the
+//                 allocation (reply-after-alloc, R2-F5), and the conn
+//                 stream is FIFO, so post-ack presents validate/blit
+//                 against the new geometry. The displaced generation
+//                 drains passively (never read again; its last content
+//                 stays displayed) and retires at the first post-fence
+//                 present (RetireDisplaced + ServerRelease) or with the
+//                 surface. At most one drains (<=2 gens; busy -> E_AGAIN).
 //   Map         = kernel-side (G-2): the client's SYS_WEFT_MAP claims the
 //                 registered share consume-once. tapestryd never observes
 //                 the claim; its Woven->Live edge rides the first present.
@@ -77,6 +88,7 @@ use libthyla_rs::{
 };
 
 use crate::gpu::Gpu;
+use crate::pane::{self, Dir, Layout, Mode, Rect, Role};
 
 pub const MAX_CONNS: usize = 8;
 const MAX_FIDS: usize = 32;
@@ -109,8 +121,11 @@ const P_ROOT: u64 = 0; // the attach root (qid 0 reserved for it)
 const P_CTL: u64 = 1; // global ctl
 const P_SURF_DIR: u64 = 2; // surface/
 const P_SURF_NEW: u64 = 3; // surface/new
+const P_LAYOUT: u64 = 4; // the container tree (G-6)
+const P_PANE_DIR: u64 = 5; // pane/
 
 const SURF_FLAG: u64 = 1 << 40;
+const PANE_FLAG: u64 = 1 << 41; // pane qids (G-6): PANE_FLAG | id<<8 | fk
 const FK_MASK: u64 = 0xff;
 const N_MASK: u64 = 0x00ff_ffff;
 
@@ -120,6 +135,15 @@ const FK_WEAVE: u64 = 2;
 const FK_PRESENT: u64 = 3;
 const FK_EVENT: u64 = 4;
 const FK_GEOMETRY: u64 = 5;
+
+// Pane-file kinds (pane/<id>/*).
+const PFK_DIR: u64 = 0;
+const PFK_CTL: u64 = 1;
+const PFK_MODE: u64 = 2;
+const PFK_ROLE: u64 = 3;
+const PFK_TAG: u64 = 4;
+const PFK_SURFACE: u64 = 5;
+const PFK_GEOMETRY: u64 = 6;
 
 fn make_surf(n: usize, fk: u64) -> u64 {
     SURF_FLAG | ((n as u64 & N_MASK) << 8) | (fk & FK_MASK)
@@ -134,8 +158,35 @@ fn is_surf(path: u64) -> bool {
     path & SURF_FLAG != 0
 }
 
+/// Pane qids name the pane's PUBLIC id (monotonic, never reused -- the
+/// net-3d discipline structurally: a stale pane fid resolves to nothing).
+/// PIN (G-6d F4): the qid carries only the low N_MASK (24) bits of the id,
+/// while the `layout` file parses the FULL u32 from its command string. The
+/// two agree for the first 2^24 pane allocations; past that the pane-ctl-file
+/// path (truncated qid) and the layout-file path (full id) would diverge for
+/// the same pane (a miss -> E_NOENT, never a crash or a cross-pane alias --
+/// ids stay unique). ~16.7M split+close cycles over the wire: unreachable.
+/// Widen the pane-id field (bits 8..40 are free below PANE_FLAG) before that
+/// assumption can bite.
+fn make_pane(id: u32, fk: u64) -> u64 {
+    PANE_FLAG | ((id as u64 & N_MASK) << 8) | (fk & FK_MASK)
+}
+fn pane_id(path: u64) -> u32 {
+    ((path >> 8) & N_MASK) as u32
+}
+fn pane_fk(path: u64) -> u64 {
+    path & FK_MASK
+}
+fn is_pane(path: u64) -> bool {
+    path & PANE_FLAG != 0
+}
+
 fn is_dir(path: u64) -> bool {
-    path == P_ROOT || path == P_SURF_DIR || (is_surf(path) && surf_fk(path) == FK_DIR)
+    path == P_ROOT
+        || path == P_SURF_DIR
+        || path == P_PANE_DIR
+        || (is_surf(path) && surf_fk(path) == FK_DIR)
+        || (is_pane(path) && pane_fk(path) == PFK_DIR)
 }
 
 // Mode constants (the ptyfs set).
@@ -151,7 +202,18 @@ const P9_GETATTR_SIZE: u64 = 0x200;
 
 pub const TPRESENT_LEN: usize = 32;
 pub const TPRESENT_V1: u32 = 1;
-pub const TPRESENT_HOLD: u32 = 1 << 0; // section 18.6 determinism -- G-6
+pub const TPRESENT_HOLD: u32 = 1 << 0; // section 18.6 determinism (G-6c)
+
+/// One additional damage rect (multi-rect present, G-6c): rect_count k >= 2
+/// rides rects 1..k INLINE after the 32-byte header (payload 32 + 16*(k-1)).
+/// The as-built D4 "compositor case": under D3 the whole present payload
+/// already lives in the client's registered buffer, so a separate
+/// buf_idx_or_off slice reference would be redundant indirection -- the
+/// inline array preserves the registered-buffer intent with zero extra
+/// machinery.
+pub const TRECT_LEN: usize = 16;
+/// The rect-count bound (untrusted-client boundary: validation is O(k)).
+pub const TPRESENT_MAX_RECTS: u32 = 64;
 
 // =============================================================================
 // The tevent record (section 18.4; 24 bytes, version-pinned wire).
@@ -171,10 +233,11 @@ pub const TEV_FRAME: u16 = 5;
 pub const TEV_CONFIGURE: u16 = 6;
 #[allow(dead_code)]
 pub const TEV_FOCUS: u16 = 7;
-#[allow(dead_code)] // Stage 0 signals a retired surface's stream-end via the
-pub const TEV_CLOSE: u16 = 8; // event-fid EOF (poll_events' dead-surface arm
-// + h_read's gone-surface arm); the queued-CLOSE record proper rides the
-// pane layer, where compositor-initiated closes need distinguishing (G-6).
+// CLOSE is the queued exit REQUEST (a compositor-initiated pane close
+// strands the surface + asks the client to leave); a retired surface's
+// stream-END is still the event-fid EOF (poll_events' dead-surface arm +
+// h_read's gone-surface arm). Request and end are distinct on purpose.
+pub const TEV_CLOSE: u16 = 8;
 
 #[derive(Clone, Copy)]
 pub struct Tevent {
@@ -230,11 +293,99 @@ struct Surface {
     w: u32,
     h: u32,
     slot_stride: u64,
+    /// The CURRENT weave generation (the spec's g-highest). weft_ensure,
+    /// the geometry reads, and every post-fence present serve/validate
+    /// against THIS one.
     weave: Option<Weave>,
+    /// The CURRENT generation's GPU resource (per-generation ids minted
+    /// from Comp.res_seq -- a reweave's fresh resource never aliases the
+    /// old one or SCREEN_RES).
     resource_id: u32,
+    /// The DISPLACED generation draining after a resize ack (weave + its
+    /// resource id). At most one -- the spec's <=2-gens bound: a second
+    /// ack while this drains is E_AGAIN (busy). Retired by the first
+    /// post-fence present (RetireDisplaced + ServerRelease) or the
+    /// surface retire.
+    old_weave: Option<(Weave, u32)>,
+    /// The CONFIGURE serial counter (section 18.3; low 16 bits ride the
+    /// tevent `code`).
+    cfg_serial: u16,
+    /// The last CONFIGURE issued: (serial, w, h). The resize ack must
+    /// echo exactly this; a newer emission overwrites it (only the
+    /// latest offer is ackable -- the wayland serial dance).
+    offered: Option<(u16, u32, u32)>,
+    /// The client 2D resource's host-side content is stale (presents were
+    /// composed, not transferred to it -- or the resource is a reweave's
+    /// fresh mint). A deferred direct-scanout switch must expand its
+    /// first transfer to the full surface (G-6).
+    res_stale: bool,
+    /// A TPRESENT_HOLD's deferred scanout push (section 18.6/F13, G-6c):
+    /// the region whose device-visible flush waits for `release`. Held
+    /// presents union in (most-recent bytes win where they overlap); a
+    /// non-HOLD present flushes it implicitly.
+    held: Option<Held>,
     title: String,
     events: VecDeque<Tevent>,
     presents: u64, // diagnostic counter
+}
+
+/// The deferred flush a held present leaves behind. The pixel work
+/// (transfer / blit) already ran inside the present dispatch -- ONLY the
+/// device-visible step is deferred, so the tearing-freedom invariant
+/// (client weave bytes read only inside the present dispatch) holds for
+/// held presents too. A scanout-mode change between hold and release
+/// stales the record (release drops it -- the structural repaint
+/// superseded the held region).
+#[derive(Clone, Copy)]
+enum Held {
+    /// Direct mode: the surface-space region awaiting RESOURCE_FLUSH.
+    Direct(Rect),
+    /// Composed mode: the SCREEN-space region awaiting transfer + flush.
+    Composed(Rect),
+}
+
+fn rect_union(a: Rect, b: Rect) -> Rect {
+    if a.is_empty() {
+        return b;
+    }
+    if b.is_empty() {
+        return a;
+    }
+    let x1 = a.x.min(b.x);
+    let y1 = a.y.min(b.y);
+    let x2 = (a.x + a.w).max(b.x + b.w);
+    let y2 = (a.y + a.h).max(b.y + b.h);
+    Rect { x: x1, y: y1, w: x2 - x1, h: y2 - y1 }
+}
+
+/// The compositor's own screen buffer (Composed mode), attached to
+/// SCREEN_RES. A WEAVE-subtype DMA chunk -- the G-2 type discipline puts
+/// every RESOURCE_ATTACH_BACKING scanout backing in that class (plain
+/// SYS_DMA_CREATE is the virtqueue/command class, capped at
+/// KOBJ_DMA_MAX_SIZE = 1 MiB -- a display buffer does not fit and does
+/// not belong). Share-admissible by TYPE but never REGISTERED
+/// (t_weft_share is never called on it), so no share_id exists for a
+/// client to claim -- unshared in practice. Held for the process
+/// lifetime (no screen teardown path; a tapestryd death reclaims it via
+/// the RW-7 crash contract).
+struct Screen {
+    _handle: i64,
+    va: u64,
+}
+
+/// The screen resource id. Per-generation surface resources mint from
+/// Comp.res_seq, which starts ABOVE this -- no id ever aliases it.
+const SCREEN_RES: u32 = 0x40;
+
+/// What scanout 0 references (G-6). `Boot` = untouched since startup (the
+/// kernel test pattern stays until a first present -- the stage-0 look);
+/// `Off` = explicitly disabled after content went away.
+#[derive(Clone, Copy, PartialEq)]
+enum Scanout {
+    Boot,
+    Off,
+    Direct(usize),
+    Composed,
 }
 
 pub struct Comp {
@@ -242,12 +393,41 @@ pub struct Comp {
     surfaces: [Option<Surface>; MAX_SURFACES],
     gen_seq: u32,
     conn_seq: u64,
-    /// The surface currently bound to scanout 0 (spec: `displayed`).
-    scanout_owner: Option<usize>,
+    /// GPU resource ids are PER-GENERATION (a reweave mints a fresh one);
+    /// pre-incremented, so the first id is SCREEN_RES + 1.
+    res_seq: u32,
+    /// The container tree (G-6): hosting, geometry, focus.
+    layout: Layout,
+    screen: Option<Screen>,
+    scanout: Scanout,
+    /// The F16 deferred direct switch: SET_SCANOUT to this surface's
+    /// resource rides its next present-COMPLETE, never earlier.
+    pending_direct: Option<usize>,
+    /// The layout epoch the chrome (bg + borders) was last painted at.
+    chrome_epoch: u64,
+    /// The visible-geometry signature at the last STRUCTURAL repaint: a
+    /// focus-only epoch bump redraws borders without blanking content
+    /// (idle clients must not lose their pixels to a focus ring move).
+    geom_sig: u64,
     /// The FRAME clock (section 18.4): a synthesized fixed-rate tick.
     pub tick: u64,
     pub clock_hz: u32,
     weave_va_next: u64,
+    /// The surface TEV_FOCUS was last emitted for (G-6c): reconcile
+    /// compares against the layout's focused surface and emits the
+    /// lost/gained pair on every change.
+    last_focus: Option<usize>,
+    /// Keys whose PRESS was swallowed by the Super chord layer (section
+    /// 18.4: reserved chords never reach a surface); their release /
+    /// repeat swallow too, even if Super lifted first (no stray release
+    /// reaches a client). evdev codes are < 256.
+    chord_down: [u64; 4],
+    /// Section 18.6 determinism mode (dev/test builds only -- the #880
+    /// strip-for-production class, enforced by the `test-mode` cargo
+    /// feature at BUILD time): the FRAME clock freezes (ticks only on
+    /// `tick` ctl writes) and TPRESENT_HOLD is accepted.
+    #[cfg(feature = "test-mode")]
+    test_mode: bool,
 }
 
 const NO_SURFACE: Option<Surface> = None;
@@ -259,10 +439,33 @@ impl Comp {
             surfaces: [NO_SURFACE; MAX_SURFACES],
             gen_seq: 0,
             conn_seq: 0,
-            scanout_owner: None,
+            res_seq: SCREEN_RES,
+            layout: Layout::new(),
+            screen: None,
+            scanout: Scanout::Boot,
+            pending_direct: None,
+            chrome_epoch: 0,
+            geom_sig: 0,
             tick: 0,
             clock_hz: 60,
             weave_va_next: WEAVE_VA_BASE,
+            last_focus: None,
+            chord_down: [0; 4],
+            #[cfg(feature = "test-mode")]
+            test_mode: false,
+        }
+    }
+
+    /// True while the FRAME clock is frozen (test-mode on); the serve
+    /// loop skips the wall-clock tick and `tick` ctl writes drive time.
+    pub fn test_frozen(&self) -> bool {
+        #[cfg(feature = "test-mode")]
+        {
+            self.test_mode
+        }
+        #[cfg(not(feature = "test-mode"))]
+        {
+            false
         }
     }
 
@@ -305,7 +508,12 @@ impl Comp {
             h: 0,
             slot_stride: 0,
             weave: None,
-            resource_id: n as u32 + 1,
+            resource_id: 0, // minted with the first generation (create)
+            old_weave: None,
+            res_stale: false,
+            held: None,
+            cfg_serial: 0,
+            offered: None,
             title: String::new(),
             events: VecDeque::new(),
             presents: 0,
@@ -313,18 +521,17 @@ impl Comp {
         Some(n)
     }
 
-    /// `create W H`: the spec's WeaveFirst -- allocate + zero the weave,
-    /// create the 2D resource, attach the whole weave as its backing.
-    fn create(&mut self, n: usize, w: u32, h: u32) -> Result<(), u32> {
-        let (disp_w, disp_h) = (self.gpu.width, self.gpu.height);
-        let s = self.surf(n).ok_or(p9::E_BADF)?;
-        if s.state != SurfState::Minted {
-            return Err(p9::E_EXIST); // create is once per surface
-        }
-        // F9: the dimension bound (a weave is tapestryd's DMA allocation).
-        if w == 0 || h == 0 || w > disp_w || h > disp_h {
-            return Err(p9::E_INVAL);
-        }
+    fn next_res_id(&mut self) -> u32 {
+        self.res_seq += 1;
+        self.res_seq
+    }
+
+    /// Allocate one weave GENERATION: DMA chunk + map + zero + a fresh 2D
+    /// resource with the whole weave attached as backing. The shared body
+    /// of the spec's WeaveFirst (create) and Reweave (resize ack).
+    /// Returns (weave, slot_stride, resource_id); every failure path
+    /// rolls back fully.
+    fn alloc_weave(&mut self, w: u32, h: u32) -> Result<(Weave, u64, u32), u32> {
         let stride = (w as u64) * 4;
         let slot_bytes = stride * (h as u64);
         let slot_stride = (slot_bytes + PAGE - 1) & !(PAGE - 1);
@@ -350,29 +557,80 @@ impl Comp {
         // occupant's bytes into a client mapping.
         unsafe { core::ptr::write_bytes(va as *mut u8, 0, size as usize) };
 
-        if self.gpu.resource_create_2d(n as u32 + 1, w, h).is_err() {
+        let res = self.next_res_id();
+        if self.gpu.resource_create_2d(res, w, h).is_err() {
             unsafe { t_burrow_detach(va, size) };
             unsafe { t_close(handle) };
             return Err(p9::E_NOMEM);
         }
-        if self.gpu.attach_backing(n as u32 + 1, pa as u64, size as u32).is_err() {
-            let _ = self.gpu.resource_unref(n as u32 + 1);
+        if self.gpu.attach_backing(res, pa as u64, size as u32).is_err() {
+            let _ = self.gpu.resource_unref(res);
             unsafe { t_burrow_detach(va, size) };
             unsafe { t_close(handle) };
             return Err(p9::E_NOMEM);
         }
+        Ok((
+            Weave {
+                handle,
+                va,
+                size,
+                share_id: None,
+            },
+            slot_stride,
+            res,
+        ))
+    }
+
+    /// Tear down one weave generation's server side, in the R2-F5 order:
+    /// unshare (registry-removal-before-page-free) -> the GPU resource
+    /// dies before its backing -> unmap + close (serverRef -> FALSE; #847
+    /// keeps the pages until the client's mapping ref drops too). The
+    /// caller has already ensured no scanout references `res` (the mode
+    /// machine + force-away in retire; the present-tail old drop runs
+    /// after the current generation's content took the display).
+    fn release_gen(&mut self, w: &Weave, res: u32) {
+        if let Some(id) = w.share_id {
+            let rc = unsafe { t_weft_unshare(id) };
+            if rc < 0 {
+                // Already claimed (consumed at Map) -- expected.
+            }
+        }
+        let _ = self.gpu.detach_backing(res);
+        let _ = self.gpu.resource_unref(res);
+        unsafe { t_burrow_detach(w.va, w.size) };
+        unsafe { t_close(w.handle) };
+    }
+
+    /// `create W H`: the spec's WeaveFirst -- allocate + zero the weave,
+    /// create the 2D resource, attach the whole weave as its backing.
+    fn create(&mut self, n: usize, w: u32, h: u32) -> Result<(), u32> {
+        let (disp_w, disp_h) = (self.gpu.width, self.gpu.height);
+        let s = self.surf(n).ok_or(p9::E_BADF)?;
+        if s.state != SurfState::Minted {
+            return Err(p9::E_EXIST); // create is once per surface
+        }
+        // F9: the dimension bound (a weave is tapestryd's DMA allocation).
+        if w == 0 || h == 0 || w > disp_w || h > disp_h {
+            return Err(p9::E_INVAL);
+        }
+        let (weave, slot_stride, res) = self.alloc_weave(w, h)?;
 
         let s = self.surf_mut(n).unwrap();
         s.w = w;
         s.h = h;
         s.slot_stride = slot_stride;
-        s.weave = Some(Weave {
-            handle,
-            va,
-            size,
-            share_id: None,
-        });
+        s.weave = Some(weave);
+        s.resource_id = res;
         s.state = SurfState::Woven;
+        // G-6: host at create -- the focused empty leaf takes it, else the
+        // focused leaf splits. A pane-table-exhausted surface stays
+        // unhosted (invisible; presents complete without pixels). Hosting
+        // is structural: a zoomed layout restores first (the tmux rule).
+        self.layout.unzoom();
+        if self.layout.host(n).is_none() {
+            say!("tapestryd: surface {} unhosted (pane table full)", n);
+        }
+        self.reconcile();
         Ok(())
     }
 
@@ -394,20 +652,644 @@ impl Comp {
         Some((id as u64, w.size as u32))
     }
 
-    /// A present completed on surface `n`: the spec Complete's displayed
-    /// update -- an ownerless scanout is taken by the completing surface
-    /// (F16: the switch happens only after a first frame has transferred).
-    fn scanout_take(&mut self, n: usize) {
-        if self.scanout_owner.is_some() {
-            return;
+    /// The resize ack `resize W H <serial>` (section 18.3; the spec's
+    /// Reweave). The ack is THE GENERATION FENCE: its Rwrite completes
+    /// only after the new generation is fully allocated (the R2-F5
+    /// reply-after-alloc precedent), and the conn stream is FIFO, so
+    /// every present the client sends after reading that Rwrite
+    /// validates + blits against the NEW geometry. The displaced
+    /// generation drains passively (its last content stays displayed;
+    /// never read again -- tearing-freedom holds) until the first
+    /// post-fence present retires it.
+    ///
+    /// Errors: stale serial (a newer CONFIGURE superseded) -> E_AGAIN,
+    /// re-ack after draining events; unknown serial / echo mismatch ->
+    /// E_INVAL; prior reweave still draining -> E_AGAIN (the <=2-gens
+    /// bound: present a frame, then re-ack).
+    fn resize_ack(&mut self, n: usize, w: u32, h: u32, serial: u16) -> Result<(), u32> {
+        let s = self.surf(n).ok_or(p9::E_BADF)?;
+        if s.weave.is_none() {
+            return Err(p9::E_INVAL); // no generation to reweave
         }
-        let (w, h, res) = match self.surf(n) {
-            Some(s) => (s.w, s.h, s.resource_id),
+        let (os, ow, oh) = s.offered.ok_or(p9::E_INVAL)?;
+        if serial != os {
+            // u16 compare; serial spaces are tiny per surface lifetime.
+            // A wrap-straddling stale reads as "unknown" -- fail-closed
+            // either way (both are rejections).
+            return Err(if serial < s.cfg_serial { E_AGAIN } else { p9::E_INVAL });
+        }
+        if w != ow || h != oh {
+            return Err(p9::E_INVAL); // the ack must echo the offer
+        }
+        if w == s.w && h == s.h {
+            // A same-size offer (the redraw request) acked: legal no-op.
+            self.surf_mut(n).unwrap().offered = None;
+            return Ok(());
+        }
+        if s.old_weave.is_some() {
+            return Err(E_AGAIN); // one reweave in flight (<=2 gens)
+        }
+
+        // Reweave: mint the new generation FIRST (a failure leaves the
+        // current one untouched and the offer standing for a retry).
+        let (weave, slot_stride, res) = self.alloc_weave(w, h)?;
+        let s = self.surf_mut(n).unwrap();
+        let old = s.weave.take().unwrap();
+        let old_res = s.resource_id;
+        s.old_weave = Some((old, old_res));
+        s.weave = Some(weave);
+        s.resource_id = res;
+        s.w = w;
+        s.h = h;
+        s.slot_stride = slot_stride;
+        s.res_stale = true; // the fresh resource has no content yet
+        s.offered = None;
+        // Defensive (mode-machine-unreachable: Direct(n) implies the
+        // surface was display-sized, which implies any outstanding offer
+        // was same-size -- handled above): if scanout still names n via
+        // the OLD resource, defer to the new generation's first present.
+        // No set_scanout(0) -- that would blank the user's screen
+        // mid-resize; the old pixels persist until the F16 flip.
+        if self.scanout == Scanout::Direct(n) {
+            self.scanout = Scanout::Off;
+            self.pending_direct = Some(n);
+        }
+        // The new size feeds the scanout-mode predicate (a letterboxed
+        // single leaf acking up to display size becomes Direct-eligible).
+        self.reconcile();
+        Ok(())
+    }
+
+    /// Allocate the compositor's screen buffer + resource (lazy; kept for
+    /// the process lifetime once made).
+    fn ensure_screen(&mut self) -> bool {
+        if self.screen.is_some() {
+            return true;
+        }
+        let (dw, dh) = (self.gpu.width, self.gpu.height);
+        let size = ((dw as u64) * (dh as u64) * 4 + PAGE - 1) & !(PAGE - 1);
+        let handle =
+            unsafe { t_dma_create_weave(size, T_RIGHT_READ | T_RIGHT_WRITE | T_RIGHT_MAP) };
+        if handle < 0 {
+            say!("tapestryd: screen t_dma_create_weave({}) failed {}", size, handle);
+            return false;
+        }
+        let va = self.weave_va_next;
+        self.weave_va_next += size;
+        let pa = unsafe { t_dma_map(handle, va, T_PROT_READ | T_PROT_WRITE) };
+        if pa < 0 {
+            unsafe { t_close(handle) };
+            return false;
+        }
+        if self.gpu.resource_create_2d(SCREEN_RES, dw, dh).is_err() {
+            unsafe { t_burrow_detach(va, size) };
+            unsafe { t_close(handle) };
+            return false;
+        }
+        if self.gpu.attach_backing(SCREEN_RES, pa as u64, size as u32).is_err() {
+            let _ = self.gpu.resource_unref(SCREEN_RES);
+            unsafe { t_burrow_detach(va, size) };
+            unsafe { t_close(handle) };
+            return false;
+        }
+        self.screen = Some(Screen { _handle: handle, va });
+        true
+    }
+
+    /// Paint the full chrome into the screen buffer: background everywhere
+    /// (blanking pane content -- panes heal on their next present) + the
+    /// border frames. Client pixels enter the screen buffer ONLY inside a
+    /// present dispatch (the G-6 tearing-freedom invariant), never here.
+    fn paint_chrome(&mut self) {
+        let (dw, dh) = (self.gpu.width as u64, self.gpu.height as u64);
+        let va = match &self.screen {
+            Some(s) => s.va,
             None => return,
         };
-        if self.gpu.set_scanout(res, w, h).is_ok() {
-            self.scanout_owner = Some(n);
+        let px = va as *mut u32;
+        // SAFETY: the screen buffer is dw*dh*4 bytes, mapped RW for the
+        // process lifetime.
+        unsafe {
+            for i in 0..(dw * dh) as usize {
+                *px.add(i) = pane::BG_COLOR;
+            }
         }
+        self.paint_borders();
+        self.paint_strips();
+        self.chrome_epoch = self.layout.epoch;
+    }
+
+    /// Redraw ONLY the 1px leaf frames (focus ring moves must not blank
+    /// idle clients' content).
+    fn paint_borders(&mut self) {
+        let dw = self.gpu.width as u64;
+        let va = match &self.screen {
+            Some(s) => s.va,
+            None => return,
+        };
+        let px = va as *mut u32;
+        let focused = self.layout.focused;
+        for (slot, _id) in self.layout.live_ids() {
+            let p = match self.layout.get(slot) {
+                Some(p) => p,
+                None => continue,
+            };
+            if !p.visible || !self.layout.is_leaf(slot) || p.rect == p.content {
+                continue;
+            }
+            let color = if slot == focused {
+                pane::FOCUS_COLOR
+            } else {
+                pane::BORDER_COLOR
+            };
+            let r = p.rect;
+            // SAFETY: the geometry pass bounds every visible rect inside
+            // the display; the buffer covers the display.
+            unsafe {
+                for x in r.x..r.x + r.w {
+                    *px.add((r.y as u64 * dw + x as u64) as usize) = color;
+                    *px.add(((r.y + r.h - 1) as u64 * dw + x as u64) as usize) = color;
+                }
+                for y in r.y..r.y + r.h {
+                    *px.add((y as u64 * dw + r.x as u64) as usize) = color;
+                    *px.add((y as u64 * dw + (r.x + r.w - 1) as u64) as usize) = color;
+                }
+            }
+        }
+    }
+
+    /// Paint the tab/stack indicator strips (G-6c; D7 glyph-free -- pure
+    /// colored segments, never text, never client memory). Tabbed: one
+    /// strip row split into per-child segments (1px gap); stacked: one
+    /// full-width row per child. The active child's segment lights
+    /// FOCUS_COLOR when the focused leaf is inside it, ACTIVE_COLOR
+    /// otherwise; the rest are BORDER_COLOR. Repainted with the borders
+    /// on focus-only epochs (the highlight follows focus).
+    fn paint_strips(&mut self) {
+        let dw = self.gpu.width as u64;
+        let va = match &self.screen {
+            Some(s) => s.va,
+            None => return,
+        };
+        let px = va as *mut u32;
+        let fill = |r: Rect, color: u32| {
+            if r.is_empty() {
+                return;
+            }
+            // SAFETY: strip areas lie inside their container's rect,
+            // which the geometry pass bounds inside the display.
+            unsafe {
+                for y in r.y..r.y + r.h {
+                    for x in r.x..r.x + r.w {
+                        *px.add((y as u64 * dw + x as u64) as usize) = color;
+                    }
+                }
+            }
+        };
+        for (slot, area, mode, children, active) in self.layout.visible_strips() {
+            let hot = self.layout.focus_child_of(slot);
+            let n = children.len() as u32;
+            if n == 0 {
+                continue;
+            }
+            let seg_color = |i: usize| {
+                if i == active {
+                    if hot == Some(children[i]) {
+                        pane::FOCUS_COLOR
+                    } else {
+                        pane::ACTIVE_COLOR
+                    }
+                } else {
+                    pane::BORDER_COLOR
+                }
+            };
+            match mode {
+                Mode::Tabbed => {
+                    let each = area.w / n;
+                    let mut x = area.x;
+                    for (i, _) in children.iter().enumerate() {
+                        let w = if i as u32 == n - 1 { area.x + area.w - x } else { each };
+                        let gap = if i as u32 == n - 1 || w == 0 { 0 } else { 1 };
+                        fill(Rect { x, y: area.y, w: w - gap, h: area.h }, seg_color(i));
+                        x += w;
+                    }
+                }
+                Mode::Stacked => {
+                    let row_h = pane::TAB_STRIP_H;
+                    for (i, _) in children.iter().enumerate() {
+                        fill(
+                            Rect {
+                                x: area.x,
+                                y: area.y + (i as u32) * row_h,
+                                w: area.w,
+                                h: row_h,
+                            },
+                            seg_color(i),
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// A signature of the visible leaf geometry (FNV-1a over id + content
+    /// rects): structural relayouts change it, focus moves do not.
+    fn calc_geom_sig(&self) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut fold = |v: u64| {
+            h ^= v;
+            h = h.wrapping_mul(0x1_0000_01b3);
+        };
+        for (slot, id) in self.layout.live_ids() {
+            let p = match self.layout.get(slot) {
+                Some(p) => p,
+                None => continue,
+            };
+            if !p.visible || !self.layout.is_leaf(slot) {
+                continue;
+            }
+            fold(id as u64);
+            let c = p.content;
+            fold((c.x as u64) << 32 | c.y as u64);
+            fold((c.w as u64) << 32 | c.h as u64);
+        }
+        h
+    }
+
+    /// Push the whole screen buffer to the host resource + display.
+    fn screen_flush_full(&mut self) {
+        let (dw, dh) = (self.gpu.width, self.gpu.height);
+        let _ = self.gpu.transfer(SCREEN_RES, 0, 0, 0, dw, dh);
+        let _ = self.gpu.flush(SCREEN_RES, 0, 0, dw, dh);
+    }
+
+    /// Reconcile scanout + chrome with the layout (run after every layout
+    /// or hosting mutation). The scanout MODE machine:
+    ///   - exactly one visible leaf hosting a display-sized surface ->
+    ///     Direct(n), switched at that surface's next present-COMPLETE
+    ///     (pending_direct -- the F16 rule, uniformly);
+    ///   - anything else visible (splits, letterbox, empty panes) ->
+    ///     Composed (the screen resource scans out; presents blit);
+    ///   - nothing at all -> Off (Boot stays untouched pre-first-content).
+    fn reconcile(&mut self) {
+        let (dw, dh) = (self.gpu.width, self.gpu.height);
+        self.layout.recompute(dw, dh);
+        let vis = self.layout.visible_hosted();
+        let nleaves = self.layout.visible_leaf_count();
+
+        let want = if vis.is_empty() && nleaves <= 1 {
+            match self.scanout {
+                Scanout::Boot => Scanout::Boot,
+                _ => Scanout::Off,
+            }
+        } else if vis.len() == 1 && nleaves == 1 {
+            let n = vis[0].1;
+            let full = self
+                .surf(n)
+                .map_or(false, |s| s.w == dw && s.h == dh);
+            if full {
+                Scanout::Direct(n)
+            } else {
+                Scanout::Composed
+            }
+        } else {
+            Scanout::Composed
+        };
+
+        match want {
+            Scanout::Boot => {}
+            Scanout::Off => {
+                self.pending_direct = None;
+                if self.scanout != Scanout::Off && self.scanout != Scanout::Boot {
+                    let _ = self.gpu.set_scanout(0, dw, dh);
+                    self.scanout = Scanout::Off;
+                }
+            }
+            Scanout::Direct(n) => {
+                if self.scanout == Scanout::Direct(n) {
+                    self.pending_direct = None;
+                } else if self.pending_direct != Some(n) {
+                    // Defer to n's next present-COMPLETE (F16). Until then
+                    // the current scanout (composed frame / boot pattern)
+                    // stays -- transitional content, compositor policy.
+                    // The edge also emits the redraw CONFIGURE: an
+                    // accumulator client's individual slots are patchwork
+                    // (only the resource/screen accumulates), so the
+                    // switch's full-slot transfer needs a full repaint to
+                    // land next. Same-size by construction: Direct(n)
+                    // requires the surface display-sized.
+                    self.pending_direct = Some(n);
+                    if !self.emit_configure_to(n, dw, dh) {
+                        self.retire(n); // wedged; retire clears pending
+                    }
+                }
+            }
+            Scanout::Composed => {
+                self.pending_direct = None;
+                if !self.ensure_screen() {
+                    return; // degraded: keep the current scanout; retried
+                }
+                let entering = self.scanout != Scanout::Composed;
+                let sig = self.calc_geom_sig();
+                let structural = entering || sig != self.geom_sig;
+                if structural {
+                    // Structural: full repaint (content blanks; panes heal
+                    // by the redraw CONFIGUREs below).
+                    self.paint_chrome();
+                    self.geom_sig = sig;
+                    self.screen_flush_full();
+                } else if self.chrome_epoch != self.layout.epoch {
+                    // Focus-only: redraw the frames + strip highlights,
+                    // keep the content.
+                    self.paint_borders();
+                    self.paint_strips();
+                    self.chrome_epoch = self.layout.epoch;
+                    self.screen_flush_full();
+                }
+                if entering {
+                    let _ = self.gpu.set_scanout(SCREEN_RES, dw, dh);
+                    self.scanout = Scanout::Composed;
+                }
+                if structural {
+                    // The CONFIGURE fan, last (retire recursion-safe at
+                    // the tail): every visible hosted surface gets its
+                    // pane's CONTENT size -- same-size = the redraw
+                    // request, different = the resize offer (G-6b). A
+                    // client that ignores an offer keeps its size and is
+                    // cropped/letterboxed by the blit clip.
+                    let mut wedged: Vec<usize> = Vec::new();
+                    for (_, n, c) in self.layout.visible_hosted() {
+                        if !self.emit_configure_to(n, c.w, c.h) {
+                            wedged.push(n);
+                        }
+                    }
+                    for n in wedged {
+                        self.retire(n);
+                    }
+                }
+            }
+        }
+        self.focus_sync();
+    }
+
+    /// Emit the TEV_FOCUS lost/gained pair when the focused surface
+    /// changed (G-6c; section 18.4 kind 7, the F5 never-drop class).
+    /// value = 1 gained / 0 lost. Runs at every reconcile tail -- every
+    /// focus-changing mutation reconciles, so this is the single
+    /// emission point; `last_focus` dedups (retire's nested reconcile
+    /// re-enters harmlessly).
+    fn focus_sync(&mut self) {
+        let cur = self.layout.focused_surface();
+        if cur == self.last_focus {
+            return;
+        }
+        let prev = self.last_focus;
+        self.last_focus = cur; // set first: a wedge-retire below re-enters
+        let t = self.tick;
+        let focus_ev = |value: u32| Tevent {
+            kind: TEV_FOCUS,
+            code: 0,
+            value,
+            rune: 0,
+            mods: 0,
+            flags: 0,
+            tick: t,
+        };
+        let mut wedged: Vec<usize> = Vec::new();
+        if let Some(o) = prev {
+            if self.surf(o).is_some() && !self.push_event(o, focus_ev(0)) {
+                wedged.push(o);
+            }
+        }
+        if let Some(g) = cur {
+            if self.surf(g).is_some() && !self.push_event(g, focus_ev(1)) {
+                wedged.push(g);
+            }
+        }
+        for n in wedged {
+            self.retire(n);
+        }
+    }
+
+    /// Blit a presented damage rect from the client's weave slot into the
+    /// screen buffer at its pane's content rect (clipped both ways),
+    /// returning the SCREEN-space region written (None: hidden /
+    /// unhosted / fully clipped). Client weave bytes are read ONLY here,
+    /// inside the present dispatch, for the slot the client just
+    /// presented -- the G-6 tearing-freedom invariant. The caller pushes
+    /// the region device-side (`screen_push`) -- or defers it (HOLD).
+    fn blit_composed_pixels(
+        &mut self,
+        n: usize,
+        slot: u32,
+        x: u32,
+        y: u32,
+        pw: u32,
+        ph: u32,
+    ) -> Option<Rect> {
+        let (sw, slot_stride, weave_va) = match self.surf(n) {
+            Some(s) => match &s.weave {
+                Some(w) => (s.w, s.slot_stride, w.va),
+                None => return None,
+            },
+            None => return None,
+        };
+        let content = match self.layout.find_hosting(n) {
+            Some(leaf) => match self.layout.get(leaf) {
+                Some(p) if p.visible => p.content,
+                _ => return None, // hidden: no compose target
+            },
+            None => return None, // unhosted
+        };
+        // Clip the damage to the pane's content size (an oversized or
+        // CONFIGURE-deaf client shows its top-left crop).
+        let inter = Rect { x, y, w: pw, h: ph }
+            .intersect(Rect { x: 0, y: 0, w: content.w, h: content.h });
+        if inter.is_empty() {
+            return None;
+        }
+        let screen_va = match &self.screen {
+            Some(s) => s.va,
+            None => return None,
+        };
+        let dw = self.gpu.width as u64;
+        let src_base = weave_va + (slot as u64) * slot_stride;
+        // SAFETY: src rows lie within the weave slot (damage was validated
+        // against the surface geometry; inter only shrinks it); dst rows
+        // lie within the screen buffer (content is inside the display by
+        // the geometry pass; inter is inside content).
+        unsafe {
+            for row in 0..inter.h as u64 {
+                let sy = inter.y as u64 + row;
+                let dy = content.y as u64 + inter.y as u64 + row;
+                let src = (src_base + (sy * sw as u64 + inter.x as u64) * 4) as *const u8;
+                let dst = (screen_va + (dy * dw + (content.x + inter.x) as u64) * 4) as *mut u8;
+                core::ptr::copy_nonoverlapping(src, dst, inter.w as usize * 4);
+            }
+        }
+        Some(Rect {
+            x: content.x + inter.x,
+            y: content.y + inter.y,
+            w: inter.w,
+            h: inter.h,
+        })
+    }
+
+    /// Push a screen-buffer region to the host resource + display.
+    fn screen_push(&mut self, r: Rect) {
+        if r.is_empty() {
+            return;
+        }
+        let dw = self.gpu.width as u64;
+        let off = ((r.y as u64) * dw + r.x as u64) * 4;
+        let _ = self.gpu.transfer(SCREEN_RES, off, r.x, r.y, r.w, r.h);
+        let _ = self.gpu.flush(SCREEN_RES, r.x, r.y, r.w, r.h);
+    }
+
+    /// Flush surface `n`'s held region (F13 release; also the implicit
+    /// release a non-HOLD present performs). A hold recorded under a
+    /// scanout mode that has since changed is DROPPED -- the structural
+    /// repaint superseded it (pixels already re-fanned via CONFIGURE).
+    fn release_held(&mut self, n: usize) {
+        let held = match self.surf_mut(n).and_then(|s| s.held.take()) {
+            Some(h) => h,
+            None => return,
+        };
+        match held {
+            Held::Direct(r) => {
+                if self.scanout == Scanout::Direct(n) {
+                    if let Some(res) = self.surf(n).map(|s| s.resource_id) {
+                        let _ = self.gpu.flush(res, r.x, r.y, r.w, r.h);
+                    }
+                }
+            }
+            Held::Composed(r) => {
+                if self.scanout == Scanout::Composed {
+                    self.screen_push(r);
+                }
+            }
+        }
+    }
+
+    /// The `layout` file grammar (G-6): `<verb> <pane-id> [args]` --
+    /// `split <id> h|v`, `close <id>`, `focus <id>`, `mode <id> <mode>`,
+    /// `move <id> <dir>`, `zoom <id>` -- plus the id-less verbs acting on
+    /// the focused leaf (G-6c): `focusdir <dir>`, `tab next|prev`.
+    pub fn layout_cmd(&mut self, s: &str) -> Result<(), u32> {
+        let s = s.trim();
+        let mut it = s.splitn(2, ' ');
+        let verb = it.next().ok_or(p9::E_INVAL)?;
+        let rest = it.next().unwrap_or("").trim();
+        match verb {
+            "focusdir" => {
+                let d = Dir::parse(rest).ok_or(p9::E_INVAL)?;
+                // A miss (screen edge; zoomed) is a no-op, not an error --
+                // the chord ergonomic.
+                if self.layout.focus_dir(d) {
+                    self.reconcile();
+                }
+                return Ok(());
+            }
+            "tab" => {
+                let fwd = match rest {
+                    "next" => true,
+                    "prev" => false,
+                    _ => return Err(p9::E_INVAL),
+                };
+                // Revealing another tab is meaningless zoomed: restore
+                // the layout first (the tmux rule).
+                self.layout.unzoom();
+                if self.layout.tab_cycle(fwd) {
+                    self.reconcile();
+                }
+                return Ok(());
+            }
+            _ => {}
+        }
+        let mut it2 = rest.splitn(2, ' ');
+        let id: u32 = it2
+            .next()
+            .and_then(|t| t.trim().parse().ok())
+            .ok_or(p9::E_INVAL)?;
+        let args = it2.next().unwrap_or("").trim();
+        let cmd = match verb {
+            "split" | "mode" | "move" => {
+                if args.is_empty() {
+                    return Err(p9::E_INVAL);
+                }
+                alloc::format!("{} {}", verb, args)
+            }
+            "close" | "focus" | "zoom" => {
+                if !args.is_empty() {
+                    return Err(p9::E_INVAL);
+                }
+                String::from(verb)
+            }
+            _ => return Err(p9::E_INVAL),
+        };
+        self.pane_cmd(id, &cmd)
+    }
+
+    /// One layout mutation targeting pane `id` (shared by the layout file
+    /// and each pane's ctl). Every successful mutation reconciles.
+    /// Structural verbs restore a zoomed layout first (the tmux rule);
+    /// `focus` keeps zoom only when it names the zoomed pane itself.
+    pub fn pane_cmd(&mut self, id: u32, cmd: &str) -> Result<(), u32> {
+        let slot = self.layout.slot_of_id(id).ok_or(p9::E_NOENT)?;
+        let cmd = cmd.trim();
+        if let Some(rest) = cmd.strip_prefix("split ") {
+            let mode = match rest.trim() {
+                "h" => Mode::SplitH,
+                "v" => Mode::SplitV,
+                _ => return Err(p9::E_INVAL),
+            };
+            if !self.layout.is_leaf(slot) {
+                return Err(p9::E_INVAL);
+            }
+            self.layout.unzoom();
+            self.layout.split(slot, mode).ok_or(p9::E_NOMEM)?;
+        } else if let Some(rest) = cmd.strip_prefix("move ") {
+            let d = Dir::parse(rest.trim()).ok_or(p9::E_INVAL)?;
+            self.layout.unzoom();
+            if !self.layout.move_dir(slot, d) {
+                return Err(p9::E_INVAL);
+            }
+        } else if cmd == "zoom" {
+            if !self.layout.zoom_toggle(slot) {
+                return Err(p9::E_INVAL);
+            }
+        } else if cmd == "close" {
+            // Closing a pane strands its surfaces invisible BY DESIGN
+            // (hosting is once-per-life, at create) and asks each
+            // stranded client to exit via the queued TEV_CLOSE (G-6b).
+            // The surface stays live until the client destroys it or its
+            // conn tears down -- a compositor-initiated pane close is a
+            // request, never a forced retire (the client may need to
+            // save). The event is non-droppable; a wedge force-retires.
+            self.layout.unzoom();
+            let unhosted = self.layout.close(slot);
+            for n in unhosted {
+                self.send_close(n);
+            }
+        } else if cmd == "focus" {
+            if self.layout.zoom_id() != Some(id) {
+                self.layout.unzoom();
+            }
+            if !self.layout.focus(slot) {
+                return Err(p9::E_INVAL);
+            }
+        } else if let Some(m) = cmd.strip_prefix("mode ") {
+            let mode = Mode::parse(m.trim()).ok_or(p9::E_INVAL)?;
+            self.layout.unzoom();
+            if !self.layout.set_mode(slot, mode) {
+                return Err(p9::E_INVAL);
+            }
+        } else {
+            return Err(p9::E_INVAL);
+        }
+        self.reconcile();
+        Ok(())
     }
 
     /// The retire (spec Destroy -> ServerRelease -> Free, server side).
@@ -417,6 +1299,18 @@ impl Comp {
             Some(s) => s,
             None => return,
         };
+        // A stale last_focus naming this slot would suppress the gained
+        // event for a FUTURE surface minted into it -- clear it (the
+        // reconcile below re-emits for whatever takes focus).
+        if self.last_focus == Some(n) {
+            self.last_focus = None;
+        }
+        // (0) The pane side (G-6): the hosting leaf closes (single-child
+        // containers collapse; the root collapses to an empty leaf). Done
+        // BEFORE reconcile so the layout no longer names n.
+        if let Some(leaf) = self.layout.find_hosting(n) {
+            let _ = self.layout.close(leaf);
+        }
         // (1) Quiesce: presents are handled synchronously (see header) --
         // the in-flight set is empty here by construction.
         if let Some(w) = &s.weave {
@@ -430,11 +1324,20 @@ impl Comp {
                     // Already claimed (consumed at Map) -- expected.
                 }
             }
-            // (3) Scanout release before the resource dies.
-            if self.scanout_owner == Some(n) {
+            // (3) Scanout release BEFORE the resource dies: reconcile moves
+            // scanout off n (the layout no longer names it). Two arms can
+            // leave scanout still referencing n's resource -- a want of
+            // Direct(survivor) (deferred to the survivor's present, F16)
+            // and a degraded Composed entry (screen alloc failed) -- so
+            // force it away explicitly in both.
+            if self.pending_direct == Some(n) {
+                self.pending_direct = None;
+            }
+            self.reconcile();
+            if self.scanout == Scanout::Direct(n) {
                 let (dw, dh) = (self.gpu.width, self.gpu.height);
                 let _ = self.gpu.set_scanout(0, dw, dh);
-                self.scanout_owner = None;
+                self.scanout = Scanout::Off;
             }
             // (4) The GPU resource dies before its backing.
             let _ = self.gpu.detach_backing(s.resource_id);
@@ -444,8 +1347,13 @@ impl Comp {
             // the client's mapping ref drops too).
             unsafe { t_burrow_detach(w.va, w.size) };
             unsafe { t_close(w.handle) };
-        } else if self.scanout_owner == Some(n) {
-            self.scanout_owner = None;
+        }
+        // A displaced generation still draining (resize acked, no present
+        // yet) dies with the surface -- same per-generation order; its
+        // resource was never scanned out (only a post-fence present could
+        // have made it visible, and that present would have retired it).
+        if let Some((oldw, old_res)) = s.old_weave {
+            self.release_gen(&oldw, old_res);
         }
         say!("tapestryd: surface {} retired (presents={})", n, s.presents);
     }
@@ -481,6 +1389,15 @@ impl Comp {
             s.events.push_back(ev);
             return true;
         }
+        if ev.kind == TEV_CONFIGURE {
+            // Unacked CONFIGUREs coalesce -- only the latest serial matters
+            // (section 18.3): replace a queued unread one WHOLESALE.
+            if let Some(c) = s.events.iter_mut().find(|e| e.kind == TEV_CONFIGURE) {
+                *c = ev;
+                return true;
+            }
+            // Falls through to the non-droppable push below.
+        }
         if s.events.len() >= EVENT_QUEUE_CAP {
             // Evict one coalescible to make room for the non-droppable.
             if let Some(i) = s.events.iter().position(|e| e.coalescible()) {
@@ -496,31 +1413,83 @@ impl Comp {
         true
     }
 
-    /// Emit the FRAME tick to every created surface; deliver a key to the
-    /// focused (scanout-owning) surface. Wedged surfaces retire inline.
+    /// Emit the FRAME tick to every VISIBLE hosted surface (G-6: hidden
+    /// surfaces -- tab-background, unhosted -- get no pacing signal; a
+    /// paced client naturally suspends while hidden). Wedged surfaces
+    /// retire inline.
     pub fn frame_tick(&mut self) {
         self.tick += 1;
         let t = self.tick;
-        for n in 0..MAX_SURFACES {
-            if self.surf(n).map_or(false, |s| s.state != SurfState::Minted) {
-                let ev = Tevent {
-                    kind: TEV_FRAME,
-                    code: 0,
-                    value: 0,
-                    rune: 0,
-                    mods: 0,
-                    flags: 0,
-                    tick: t,
-                };
-                if !self.push_event(n, ev) {
-                    self.retire(n);
-                }
+        let vis: Vec<usize> = self.layout.visible_hosted().iter().map(|v| v.1).collect();
+        for n in vis {
+            let ev = Tevent {
+                kind: TEV_FRAME,
+                code: 0,
+                value: 0,
+                rune: 0,
+                mods: 0,
+                flags: 0,
+                tick: t,
+            };
+            if !self.push_event(n, ev) {
+                self.retire(n);
             }
         }
     }
 
+    /// Emit CONFIGURE {serial, W<<16|H} to surface `n` (sections 18.3 +
+    /// 18.4), recording it as the surface's ackable offer. A SAME-size
+    /// CONFIGURE is the REDRAW request (a structural repaint blanks pane
+    /// content; an accumulator client heals only by a full repaint); a
+    /// DIFFERENT-size one is the resize offer the `resize W H <serial>`
+    /// ack answers (G-6b). Coalesce-by-replacement in the queue + the
+    /// single `offered` slot both encode "only the latest matters".
+    /// Returns push_event's wedge verdict (false = caller must retire).
+    fn emit_configure_to(&mut self, n: usize, w: u32, h: u32) -> bool {
+        if w == 0 || h == 0 || w > 0xffff || h > 0xffff {
+            return true; // degenerate pane: nothing showable to offer
+        }
+        let t = self.tick;
+        let serial = match self.surf_mut(n) {
+            Some(s) => {
+                s.cfg_serial = s.cfg_serial.wrapping_add(1);
+                s.offered = Some((s.cfg_serial, w, h));
+                s.cfg_serial
+            }
+            None => return true,
+        };
+        let ev = Tevent {
+            kind: TEV_CONFIGURE,
+            code: serial,
+            value: (w << 16) | h,
+            rune: 0,
+            mods: 0,
+            flags: 0,
+            tick: t,
+        };
+        self.push_event(n, ev)
+    }
+
+    /// Queue TEV_CLOSE on surface `n` (its pane closed under it -- the
+    /// exit request). Wedged surfaces retire inline (R2-F4).
+    fn send_close(&mut self, n: usize) {
+        let ev = Tevent {
+            kind: TEV_CLOSE,
+            code: 0,
+            value: 0,
+            rune: 0,
+            mods: 0,
+            flags: 0,
+            tick: self.tick,
+        };
+        if !self.push_event(n, ev) {
+            self.retire(n);
+        }
+    }
+
+    /// Deliver a key to the FOCUSED leaf's surface (G-6 routing).
     pub fn key_event(&mut self, code: u16, value: u32, rune: u32, mods: u16) {
-        let n = match self.scanout_owner {
+        let n = match self.layout.focused_surface() {
             Some(n) => n,
             None => return, // no focused surface; input drops
         };
@@ -535,6 +1504,150 @@ impl Comp {
         };
         if !self.push_event(n, ev) {
             self.retire(n);
+        }
+    }
+
+    fn chord_bit(&self, code: u16) -> bool {
+        let i = (code as usize) & 0xff;
+        self.chord_down[i / 64] & (1 << (i % 64)) != 0
+    }
+    fn chord_bit_set(&mut self, code: u16, on: bool) {
+        let i = (code as usize) & 0xff;
+        if on {
+            self.chord_down[i / 64] |= 1 << (i % 64);
+        } else {
+            self.chord_down[i / 64] &= !(1 << (i % 64));
+        }
+    }
+
+    /// The Super chord layer (G-6c; sections 14 + 18.4): the compositor's
+    /// reserved-modifier plane, intercepted ABOVE the event stream. While
+    /// Super is held, EVERY non-modifier key is compositor input -- bound
+    /// chords act, unbound ones drop; none reaches a surface (the whole
+    /// plane is reserved, so no client can ever come to depend on a Super
+    /// combo). A swallowed press swallows its release/repeats too, even
+    /// if Super lifted first (no stray release reaches a client); a key
+    /// pressed BEFORE Super went down keeps flowing (its release must
+    /// reach the client that saw its press). Returns true = consumed.
+    /// The caller filters modifier keys (they flow -- clients see mods).
+    pub fn chord_key(&mut self, code: u16, value: u32, mods: u16) -> bool {
+        if value == 0 {
+            // Release: consume iff its press was swallowed.
+            if self.chord_bit(code) {
+                self.chord_bit_set(code, false);
+                return true;
+            }
+            return false;
+        }
+        let super_held = mods & crate::keymap::MOD_SUPER != 0;
+        if value == 2 {
+            // Repeat: follows its press's disposition; a repeat while
+            // Super is held is plane-reserved regardless.
+            return self.chord_bit(code) || super_held;
+        }
+        if !super_held {
+            return false;
+        }
+        self.chord_bit_set(code, true);
+        self.chord_action(code, mods & crate::keymap::MOD_SHIFT != 0);
+        true
+    }
+
+    /// Dispatch one bound chord (US-QWERTY evdev codes; the binding table
+    /// is compositor policy -- a halcyon.rc concern eventually, baked
+    /// here like the keymap). i3-flavored: Super+arrows focus spatially,
+    /// +Shift move the pane; h/v split; f zoom; t/s tab/stack; e split
+    /// toggle; Tab cycles tabs; Shift+q closes the focused pane.
+    fn chord_action(&mut self, code: u16, shift: bool) {
+        const KEY_TAB: u16 = 15;
+        const KEY_Q: u16 = 16;
+        const KEY_E: u16 = 18;
+        const KEY_T: u16 = 20;
+        const KEY_S: u16 = 31;
+        const KEY_F: u16 = 33;
+        const KEY_H: u16 = 35;
+        const KEY_V: u16 = 47;
+        const KEY_UP: u16 = 103;
+        const KEY_LEFT: u16 = 105;
+        const KEY_RIGHT: u16 = 106;
+        const KEY_DOWN: u16 = 108;
+
+        let dir = match code {
+            KEY_LEFT => Some(Dir::Left),
+            KEY_RIGHT => Some(Dir::Right),
+            KEY_UP => Some(Dir::Up),
+            KEY_DOWN => Some(Dir::Down),
+            _ => None,
+        };
+        if let Some(d) = dir {
+            let changed = if shift {
+                let f = self.layout.focused;
+                self.layout.unzoom();
+                self.layout.move_dir(f, d)
+            } else {
+                self.layout.focus_dir(d)
+            };
+            if changed {
+                self.reconcile();
+            }
+            return;
+        }
+        match (code, shift) {
+            (KEY_H, false) | (KEY_V, false) => {
+                let mode = if code == KEY_H { Mode::SplitH } else { Mode::SplitV };
+                self.layout.unzoom();
+                let f = self.layout.focused;
+                if self.layout.split(f, mode).is_some() {
+                    self.reconcile();
+                }
+            }
+            (KEY_F, false) => {
+                let f = self.layout.focused;
+                if self.layout.zoom_toggle(f) {
+                    self.reconcile();
+                }
+            }
+            (KEY_T, false) | (KEY_S, false) => {
+                let mode = if code == KEY_T { Mode::Tabbed } else { Mode::Stacked };
+                self.layout.unzoom();
+                let f = self.layout.focused;
+                if self.layout.set_mode(f, mode) {
+                    self.reconcile();
+                }
+            }
+            (KEY_E, false) => {
+                // Split-orientation toggle on the focused leaf's parent.
+                let f = self.layout.focused;
+                let parent_mode = self
+                    .layout
+                    .get(f)
+                    .and_then(|p| p.parent)
+                    .and_then(|pi| match self.layout.get(pi).map(|p| &p.kind) {
+                        Some(pane::Kind::Container { mode, .. }) => Some(*mode),
+                        _ => None,
+                    });
+                let want = match parent_mode {
+                    Some(Mode::SplitH) => Mode::SplitV,
+                    _ => Mode::SplitH,
+                };
+                self.layout.unzoom();
+                if self.layout.set_mode(f, want) {
+                    self.reconcile();
+                }
+            }
+            (KEY_TAB, s) => {
+                self.layout.unzoom();
+                if self.layout.tab_cycle(!s) {
+                    self.reconcile();
+                }
+            }
+            (KEY_Q, true) => {
+                let f = self.layout.focused;
+                if let Some(id) = self.layout.id_of(f) {
+                    let _ = self.pane_cmd(id, "close");
+                }
+            }
+            _ => {} // unbound: plane-reserved, dropped
         }
     }
 
@@ -813,9 +1926,36 @@ impl Conn {
                     Some((P_CTL, 0))
                 } else if name == b"surface" {
                     Some((P_SURF_DIR, 0))
+                } else if name == b"layout" {
+                    Some((P_LAYOUT, 0))
+                } else if name == b"pane" {
+                    Some((P_PANE_DIR, 0))
                 } else {
                     None
                 }
+            }
+            P_PANE_DIR => {
+                if name == b".." {
+                    return Some((P_ROOT, 0));
+                }
+                let id = parse_u32(name)?;
+                comp.layout.slot_of_id(id)?;
+                Some((make_pane(id, PFK_DIR), 0))
+            }
+            d if is_pane(d) && pane_fk(d) == PFK_DIR => {
+                let id = pane_id(d);
+                comp.layout.slot_of_id(id)?;
+                let fk = match name {
+                    b".." => return Some((P_PANE_DIR, 0)),
+                    b"ctl" => PFK_CTL,
+                    b"mode" => PFK_MODE,
+                    b"role" => PFK_ROLE,
+                    b"tag" => PFK_TAG,
+                    b"surface" => PFK_SURFACE,
+                    b"geometry" => PFK_GEOMETRY,
+                    _ => return None,
+                };
+                Some((make_pane(id, fk), 0))
             }
             P_SURF_DIR => {
                 if name == b".." {
@@ -941,6 +2081,11 @@ impl Conn {
         if is_surf(f.path) && !comp.surf_owned(surf_n(f.path), self.conn_id, f.gen) {
             return self.err(tag, p9::E_NOENT);
         }
+        // Pane files: re-validate liveness (ids are never reused, so a
+        // stale fid can only resolve to nothing).
+        if is_pane(f.path) && comp.layout.slot_of_id(pane_id(f.path)).is_none() {
+            return self.err(tag, p9::E_NOENT);
+        }
         self.fids[i].as_mut().unwrap().opened = true;
         let q = self.qid_of(f.path);
         p9::build_rlopen(&mut self.out_buf, tag, &q, 0)
@@ -969,15 +2114,35 @@ impl Conn {
             let _ = core::fmt::write(
                 &mut s,
                 format_args!(
-                    "display {} {}\nsurfaces {}\nclock-rate {}\ntick {}\n",
+                    "display {} {}\nsurfaces {}\nclock-rate {}\ntick {}\npanes {}\nfocused {}\n",
                     comp.gpu.width,
                     comp.gpu.height,
                     comp.live_count(),
                     comp.clock_hz,
-                    comp.tick
+                    comp.tick,
+                    comp.layout.live_ids().len(),
+                    comp.layout.id_of(comp.layout.focused).unwrap_or(0)
                 ),
             );
+            #[cfg(feature = "test-mode")]
+            {
+                let _ = core::fmt::write(
+                    &mut s,
+                    format_args!("test-mode {}\n", if comp.test_mode { "on" } else { "off" }),
+                );
+            }
             return self.read_str(tag, &s, a.offset, cap);
+        }
+        if f.path == P_LAYOUT {
+            // The container tree as text (G-6). Reads regenerate the
+            // string; a multi-read straddling a mutation can tear -- the
+            // text fits one frame at every realistic size (the stage-0
+            // ctl posture).
+            let s = comp.layout.render_text();
+            return self.read_str(tag, &s, a.offset, cap);
+        }
+        if is_pane(f.path) {
+            return self.pane_read(comp, f.path, tag, a.offset, cap);
         }
 
         if !is_surf(f.path) {
@@ -1086,6 +2251,111 @@ impl Conn {
         p9::build_rread(&mut self.out_buf, tag, &slice)
     }
 
+    /// Pane file reads (G-6). A stale id (the pane closed) is E_NOENT --
+    /// ids are never reused, so there is nothing it could alias.
+    fn pane_read(
+        &mut self,
+        comp: &Comp,
+        path: u64,
+        tag: u16,
+        offset: u64,
+        cap: usize,
+    ) -> Result<usize, ()> {
+        let id = pane_id(path);
+        let slot = match comp.layout.slot_of_id(id) {
+            Some(s) => s,
+            None => return self.err(tag, p9::E_NOENT),
+        };
+        let mut s = String::new();
+        match pane_fk(path) {
+            PFK_CTL => {
+                let _ = core::fmt::write(&mut s, format_args!("{}\n", id));
+            }
+            PFK_MODE => {
+                let name = match comp.layout.get(slot).map(|p| &p.kind) {
+                    Some(pane::Kind::Container { mode, .. }) => mode.name(),
+                    _ => "leaf",
+                };
+                let _ = core::fmt::write(&mut s, format_args!("{}\n", name));
+            }
+            PFK_ROLE => {
+                let p = comp.layout.get(slot).unwrap();
+                let _ = core::fmt::write(
+                    &mut s,
+                    format_args!(
+                        "{} {}\n",
+                        p.role.name(),
+                        if p.focusable { "focusable" } else { "nofocus" }
+                    ),
+                );
+            }
+            PFK_TAG => {
+                let p = comp.layout.get(slot).unwrap();
+                let _ = core::fmt::write(&mut s, format_args!("{}\n", p.tag));
+            }
+            PFK_SURFACE => match comp.layout.leaf_surface(slot) {
+                Some(n) => {
+                    let _ = core::fmt::write(&mut s, format_args!("{}\n", n));
+                }
+                None => s.push_str("none\n"),
+            },
+            PFK_GEOMETRY => {
+                let c = comp.layout.get(slot).unwrap().content;
+                let _ = core::fmt::write(
+                    &mut s,
+                    format_args!("{} {} {} {}\n", c.x, c.y, c.w, c.h),
+                );
+            }
+            _ => return self.err(tag, p9::E_INVAL),
+        }
+        self.read_str(tag, &s, offset, cap)
+    }
+
+    /// Pane file writes (G-6): the per-pane ctl carries the layout verbs
+    /// with the fid's pane as the implicit target; mode/role/tag are
+    /// direct field writes.
+    fn pane_write(&mut self, comp: &mut Comp, path: u64, data: &[u8]) -> Result<(), u32> {
+        let s = core::str::from_utf8(data).map_err(|_| p9::E_INVAL)?;
+        let s = s.trim();
+        let id = pane_id(path);
+        match pane_fk(path) {
+            PFK_CTL => comp.pane_cmd(id, s),
+            PFK_MODE => {
+                let mode = Mode::parse(s).ok_or(p9::E_INVAL)?;
+                let slot = comp.layout.slot_of_id(id).ok_or(p9::E_NOENT)?;
+                if !comp.layout.set_mode(slot, mode) {
+                    return Err(p9::E_INVAL);
+                }
+                comp.reconcile();
+                Ok(())
+            }
+            PFK_TAG => {
+                let slot = comp.layout.slot_of_id(id).ok_or(p9::E_NOENT)?;
+                comp.layout.get_mut(slot).unwrap().tag = String::from(s);
+                Ok(())
+            }
+            PFK_ROLE => {
+                let slot = comp.layout.slot_of_id(id).ok_or(p9::E_NOENT)?;
+                let mut it = s.split_ascii_whitespace();
+                let role = Role::parse(it.next().ok_or(p9::E_INVAL)?).ok_or(p9::E_INVAL)?;
+                let focusable = match it.next() {
+                    None => true,
+                    Some("focusable") => true,
+                    Some("nofocus") => false,
+                    Some(_) => return Err(p9::E_INVAL),
+                };
+                if it.next().is_some() {
+                    return Err(p9::E_INVAL);
+                }
+                let p = comp.layout.get_mut(slot).unwrap();
+                p.role = role;
+                p.focusable = focusable;
+                Ok(())
+            }
+            _ => Err(p9::E_PERM),
+        }
+    }
+
     fn h_write(&mut self, comp: &mut Comp, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
         let a = match p9::parse_twrite(tmsg) {
             Ok(a) => a,
@@ -1102,6 +2372,21 @@ impl Conn {
 
         if f.path == P_CTL {
             return match self.global_ctl(comp, a.data) {
+                Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
+                Err(e) => self.err(tag, e),
+            };
+        }
+        if f.path == P_LAYOUT {
+            return match core::str::from_utf8(a.data)
+                .map_err(|_| p9::E_INVAL)
+                .and_then(|s| comp.layout_cmd(s))
+            {
+                Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
+                Err(e) => self.err(tag, e),
+            };
+        }
+        if is_pane(f.path) {
+            return match self.pane_write(comp, f.path, a.data) {
                 Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
                 Err(e) => self.err(tag, e),
             };
@@ -1137,10 +2422,56 @@ impl Conn {
             comp.clock_hz = hz;
             return Ok(());
         }
-        if s.starts_with("test-mode") {
-            // Section 18.6 determinism mode: dev/test-only, lands with the
-            // golden-image capture pass (G-6). Honest reject until then.
-            return Err(p9::E_OPNOTSUPP);
+        // Section 18.6 determinism mode (G-6c) -- compiled only into
+        // dev/test builds (the `test-mode` cargo feature; the #880
+        // strip-for-production class). `test-mode on` freezes the FRAME
+        // clock (the serve loop stops wall-clock ticks; queued FRAME
+        // events drain normally -- the F15 transition discipline for a
+        // synchronous single-threaded engine); `tick` then drives time
+        // one step per write; `release [<surface>]` flushes held
+        // presents (F13; ownership-gated -- only the caller's surfaces).
+        #[cfg(feature = "test-mode")]
+        {
+            if s == "test-mode on" {
+                comp.test_mode = true;
+                return Ok(());
+            }
+            if s == "test-mode off" {
+                // No stuck regions: leaving the mode flushes every hold.
+                for n in 0..MAX_SURFACES {
+                    comp.release_held(n);
+                }
+                comp.test_mode = false;
+                return Ok(());
+            }
+            if s == "tick" {
+                if !comp.test_mode {
+                    return Err(p9::E_INVAL); // the wall clock owns time
+                }
+                comp.frame_tick();
+                return Ok(());
+            }
+            if let Some(rest) = s.strip_prefix("release") {
+                let rest = rest.trim();
+                if rest.is_empty() {
+                    for n in 0..MAX_SURFACES {
+                        if comp.surf(n).map_or(false, |s| s.owner_conn == self.conn_id) {
+                            comp.release_held(n);
+                        }
+                    }
+                    return Ok(());
+                }
+                let n: usize = rest.parse().map_err(|_| p9::E_INVAL)?;
+                if !comp.surf(n).map_or(false, |s| s.owner_conn == self.conn_id) {
+                    return Err(p9::E_BADF); // F2: release only your own
+                }
+                comp.release_held(n);
+                return Ok(());
+            }
+        }
+        #[cfg(not(feature = "test-mode"))]
+        if s.starts_with("test-mode") || s == "tick" || s.starts_with("release") {
+            return Err(p9::E_OPNOTSUPP); // stripped for production (#880)
         }
         Err(p9::E_INVAL)
     }
@@ -1167,10 +2498,19 @@ impl Conn {
             }
             return Ok(());
         }
-        if s.starts_with("resize ") {
-            // The reweave protocol (section 18.3) is compositor-initiated
-            // and lands with the pane layer (G-6).
-            return Err(p9::E_OPNOTSUPP);
+        if let Some(rest) = s.strip_prefix("resize ") {
+            // The section-18.3 resize ack: `resize W H <serial>` echoes a
+            // CONFIGURE offer; a successful Rwrite IS the generation
+            // fence (see resize_ack).
+            let mut it = rest.split_ascii_whitespace();
+            let w: u32 = it.next().ok_or(p9::E_INVAL)?.parse().map_err(|_| p9::E_INVAL)?;
+            let h: u32 = it.next().ok_or(p9::E_INVAL)?.parse().map_err(|_| p9::E_INVAL)?;
+            let serial: u16 =
+                it.next().ok_or(p9::E_INVAL)?.parse().map_err(|_| p9::E_INVAL)?;
+            if it.next().is_some() {
+                return Err(p9::E_INVAL);
+            }
+            return comp.resize_ack(n, w, h, serial);
         }
         Err(p9::E_INVAL)
     }
@@ -1179,8 +2519,16 @@ impl Conn {
     /// descriptor against the surface geometry (the untrusted-client
     /// boundary), then TRANSFER + FLUSH synchronously. The Rwrite this
     /// returns becomes the client's CQE -- the D1 recycle gate.
+    ///
+    /// Multi-rect (G-6c): rect_count k >= 2 carries rects 1..k inline
+    /// after the header (payload 32 + 16*(k-1); count bounded; EVERY rect
+    /// validated before any pixel work -- no partial present). HOLD
+    /// (G-6c, test-mode only): the pixel work runs normally INSIDE this
+    /// dispatch (tearing-freedom intact) but the device-visible flush
+    /// defers to `release`; a later non-HOLD present flushes it
+    /// implicitly.
     fn present(&mut self, comp: &mut Comp, n: usize, data: &[u8]) -> Result<(), u32> {
-        if data.len() != TPRESENT_LEN {
+        if data.len() < TPRESENT_LEN {
             return Err(p9::E_INVAL);
         }
         let word = |o: usize| u32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
@@ -1188,18 +2536,29 @@ impl Conn {
         let slot = word(4);
         let flags = word(8);
         let rect_count = word(12);
-        let (rx, ry, rw, rh) = (word(16), word(20), word(24), word(28));
 
         if version != TPRESENT_V1 {
             return Err(p9::E_INVAL);
         }
-        if flags & TPRESENT_HOLD != 0 {
-            return Err(p9::E_OPNOTSUPP); // section 18.6, G-6
+        let hold = flags & TPRESENT_HOLD != 0;
+        #[cfg(feature = "test-mode")]
+        if hold && !comp.test_mode {
+            return Err(p9::E_OPNOTSUPP); // section 18.6: determinism-mode only
         }
-        if rect_count > 1 {
-            // Multi-rect damage rides a registered-buffer slice (D4, the
-            // compositor case) -- G-6.
-            return Err(p9::E_OPNOTSUPP);
+        #[cfg(not(feature = "test-mode"))]
+        if hold {
+            return Err(p9::E_OPNOTSUPP); // stripped for production (#880)
+        }
+        if rect_count > TPRESENT_MAX_RECTS {
+            return Err(p9::E_INVAL);
+        }
+        let expect = if rect_count <= 1 {
+            TPRESENT_LEN
+        } else {
+            TPRESENT_LEN + (rect_count as usize - 1) * TRECT_LEN
+        };
+        if data.len() != expect {
+            return Err(p9::E_INVAL);
         }
 
         let (w, h, slot_stride, res, state) = {
@@ -1212,28 +2571,131 @@ impl Conn {
         if slot >= WEAVE_SLOTS {
             return Err(p9::E_INVAL);
         }
-        let (x, y, pw, ph) = if rect_count == 0 {
-            (0, 0, w, h)
+        // Collect + validate EVERY rect up front (overflow-safe: u32 +
+        // u32 in u64). rect_count 0 = full-surface damage.
+        let mut rects: Vec<(u32, u32, u32, u32)> = Vec::new();
+        if rect_count == 0 {
+            rects.push((0, 0, w, h));
         } else {
-            (rx, ry, rw, rh)
-        };
-        // Rect bounds: overflow-safe (u32 + u32 in u64).
-        if pw == 0
-            || ph == 0
-            || (x as u64) + (pw as u64) > w as u64
-            || (y as u64) + (ph as u64) > h as u64
-        {
-            return Err(p9::E_INVAL);
+            for i in 0..rect_count as usize {
+                let o = if i == 0 { 16 } else { TPRESENT_LEN + (i - 1) * TRECT_LEN };
+                rects.push((word(o), word(o + 4), word(o + 8), word(o + 12)));
+            }
+        }
+        for &(x, y, pw, ph) in &rects {
+            if pw == 0
+                || ph == 0
+                || (x as u64) + (pw as u64) > w as u64
+                || (y as u64) + (ph as u64) > h as u64
+            {
+                return Err(p9::E_INVAL);
+            }
         }
 
-        // The slot base + rect origin ride the TRANSFER offset; rows
-        // advance by the resource stride (w*4).
-        let offset = (slot as u64) * slot_stride + ((y as u64) * (w as u64) + x as u64) * 4;
-        if comp.gpu.transfer(res, offset, x, y, pw, ph).is_err() {
-            return Err(E_IO);
-        }
-        if comp.gpu.flush(res, x, y, pw, ph).is_err() {
-            return Err(E_IO);
+        // Route by scanout mode (G-6). The slot base + rect origin ride
+        // the TRANSFER offset; rows advance by the resource stride (w*4).
+        if comp.pending_direct == Some(n) {
+            if hold {
+                // A held present must not complete a scanout SWITCH (the
+                // switch IS composition); present unheld once first.
+                return Err(E_AGAIN);
+            }
+            // The deferred direct switch (F16: SET_SCANOUT only at a
+            // present-COMPLETE). A stale client resource (composed-era
+            // presents never transferred to it) expands this transfer to
+            // the full surface first.
+            let stale = comp.surf(n).map_or(false, |s| s.res_stale);
+            let xfer: Vec<(u32, u32, u32, u32)> =
+                if stale { alloc::vec![(0, 0, w, h)] } else { rects.clone() };
+            for &(tx, ty, tw, th) in &xfer {
+                let offset =
+                    (slot as u64) * slot_stride + ((ty as u64) * (w as u64) + tx as u64) * 4;
+                if comp.gpu.transfer(res, offset, tx, ty, tw, th).is_err() {
+                    return Err(E_IO);
+                }
+                if comp.gpu.flush(res, tx, ty, tw, th).is_err() {
+                    return Err(E_IO);
+                }
+            }
+            if comp.gpu.set_scanout(res, w, h).is_ok() {
+                comp.scanout = Scanout::Direct(n);
+                comp.pending_direct = None;
+                if let Some(s) = comp.surf_mut(n) {
+                    s.res_stale = false;
+                }
+            }
+        } else if comp.scanout == Scanout::Direct(n) {
+            // The stage-0 direct path, byte-identical for the single-rect
+            // form: damage transfer + flush on the client's own
+            // scanned-out resource (the zero-copy fullscreen case). A
+            // held present transfers but defers every flush to release.
+            let mut acc: Option<Rect> = None;
+            for &(x, y, pw, ph) in &rects {
+                let offset =
+                    (slot as u64) * slot_stride + ((y as u64) * (w as u64) + x as u64) * 4;
+                if comp.gpu.transfer(res, offset, x, y, pw, ph).is_err() {
+                    return Err(E_IO);
+                }
+                if hold {
+                    acc = Some(rect_union(
+                        acc.unwrap_or(Rect::ZERO),
+                        Rect { x, y, w: pw, h: ph },
+                    ));
+                } else if comp.gpu.flush(res, x, y, pw, ph).is_err() {
+                    return Err(E_IO);
+                }
+            }
+            if let Some(r) = acc {
+                let held = match comp.surf(n).and_then(|s| s.held) {
+                    Some(Held::Direct(prev)) => Held::Direct(rect_union(prev, r)),
+                    _ => Held::Direct(r), // a stale Composed hold is superseded
+                };
+                if let Some(s) = comp.surf_mut(n) {
+                    s.held = Some(held);
+                }
+            } else if !hold {
+                // A non-HOLD present flushes any held region implicitly
+                // (F13: no stuck regions; the union already includes the
+                // most-recent bytes).
+                comp.release_held(n);
+            }
+        } else if comp.scanout == Scanout::Composed {
+            // Composed: blit the damage into the screen buffer at the
+            // pane's content rect (a hidden/unhosted surface skips); the
+            // client resource is now stale for a future direct switch.
+            // Held presents blit NOW (weave bytes read only inside this
+            // dispatch) and defer only the screen push.
+            let mut acc: Option<Rect> = None;
+            for &(x, y, pw, ph) in &rects {
+                if let Some(r) = comp.blit_composed_pixels(n, slot, x, y, pw, ph) {
+                    if hold {
+                        acc = Some(rect_union(acc.unwrap_or(Rect::ZERO), r));
+                    } else {
+                        comp.screen_push(r);
+                    }
+                }
+            }
+            if let Some(r) = acc {
+                let held = match comp.surf(n).and_then(|s| s.held) {
+                    Some(Held::Composed(prev)) => Held::Composed(rect_union(prev, r)),
+                    _ => Held::Composed(r), // a stale Direct hold is superseded
+                };
+                if let Some(s) = comp.surf_mut(n) {
+                    s.held = Some(held);
+                }
+            } else if !hold {
+                comp.release_held(n);
+            }
+            if let Some(s) = comp.surf_mut(n) {
+                s.res_stale = true;
+            }
+        } else {
+            // Boot / Off / another surface's Direct: the present completes
+            // without pixels (D1 contract kept; content heals on later
+            // presents once visible).
+            if let Some(s) = comp.surf_mut(n) {
+                s.res_stale = true;
+            }
         }
 
         {
@@ -1243,9 +2705,18 @@ impl Conn {
                 s.state = SurfState::Live;
             }
         }
-        // The spec Complete's displayed update: an ownerless scanout is
-        // taken at present-COMPLETE (F16), never before the first frame.
-        comp.scanout_take(n);
+        // The first post-fence present retires the displaced generation
+        // (the spec's RetireDisplaced + ServerRelease): the display now
+        // shows current-generation content -- composed blits COPY (the
+        // screen resource references no client weave) and the direct arms
+        // target the current resource -- and quiesce holds by construction
+        // (presents complete inside one dispatch), so the old weave's
+        // server refs drop here. The client's own old mapping drains via
+        // its weave-fid clunk (ClunkMap; #847 keeps the pages until then).
+        if let Some((oldw, old_res)) = comp.surf_mut(n).and_then(|s| s.old_weave.take()) {
+            comp.release_gen(&oldw, old_res);
+            say!("tapestryd: surface {} old generation retired (res {})", n, old_res);
+        }
         Ok(())
     }
 
@@ -1270,6 +2741,30 @@ impl Conn {
             P_ROOT => {
                 names.push((b"ctl".to_vec(), P_CTL));
                 names.push((b"surface".to_vec(), P_SURF_DIR));
+                names.push((b"layout".to_vec(), P_LAYOUT));
+                names.push((b"pane".to_vec(), P_PANE_DIR));
+            }
+            P_PANE_DIR => {
+                for (_slot, id) in comp.layout.live_ids() {
+                    let mut nm = String::new();
+                    let _ = core::fmt::write(&mut nm, format_args!("{}", id));
+                    names.push((nm.into_bytes(), make_pane(id, PFK_DIR)));
+                }
+            }
+            d if is_pane(d) && pane_fk(d) == PFK_DIR => {
+                let id = pane_id(d);
+                if comp.layout.slot_of_id(id).is_some() {
+                    for (nm, fk) in [
+                        (&b"ctl"[..], PFK_CTL),
+                        (&b"mode"[..], PFK_MODE),
+                        (&b"role"[..], PFK_ROLE),
+                        (&b"tag"[..], PFK_TAG),
+                        (&b"surface"[..], PFK_SURFACE),
+                        (&b"geometry"[..], PFK_GEOMETRY),
+                    ] {
+                        names.push((nm.to_vec(), make_pane(id, fk)));
+                    }
+                }
             }
             P_SURF_DIR => {
                 names.push((b"new".to_vec(), P_SURF_NEW));
@@ -1456,6 +2951,11 @@ impl Conn {
 /// failure surfaces to the client as a remote I/O error.
 const E_IO: u32 = 5;
 
+/// POSIX EAGAIN: the resize-ack "not now" verdicts (stale serial; a
+/// prior reweave still draining) -- the client drains events / presents
+/// a frame and re-acks.
+const E_AGAIN: u32 = 11;
+
 fn parse_dec(name: &[u8]) -> Option<usize> {
     if name.is_empty() || name.len() > 3 {
         return None;
@@ -1466,6 +2966,22 @@ fn parse_dec(name: &[u8]) -> Option<usize> {
             return None;
         }
         v = v * 10 + (b - b'0') as usize;
+    }
+    Some(v)
+}
+
+/// Pane ids are monotonic u32s (never reused) -- wider than the surface
+/// index parser above.
+fn parse_u32(name: &[u8]) -> Option<u32> {
+    if name.is_empty() || name.len() > 8 {
+        return None;
+    }
+    let mut v = 0u32;
+    for &b in name {
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        v = v.checked_mul(10)?.checked_add((b - b'0') as u32)?;
     }
     Some(v)
 }

@@ -53,7 +53,7 @@ use libthyla_rs::{
     T_WALK_OPEN_FROM_ROOT,
 };
 use render::{render_rows, Metrics};
-use tapestry::{Rect, Surface, TEV_CLOSE, TEV_FRAME, TEV_KEY};
+use tapestry::{Rect, Surface, TEV_CLOSE, TEV_CONFIGURE, TEV_FRAME, TEV_KEY};
 use vt::{Vt, BG};
 
 macro_rules! say {
@@ -225,6 +225,26 @@ pub extern "C" fn rs_main() -> i64 {
                     say!("aurora: CLOSE received; exiting");
                     return 0;
                 }
+                TEV_CONFIGURE => {
+                    // The compositor's redraw/resize request (G-6,
+                    // TAPESTRY.md 18.3). EVERY CONFIGURE marks the whole
+                    // grid dirty: structural repaints blank pane content
+                    // (a split blanks aurora's pane exactly like a
+                    // fullscreen transition), and the row-damage renderer
+                    // would otherwise heal only rows that happen to
+                    // change. A size CHANGE is deliberately NOT acked:
+                    // the fbcon's cell grid is bound to the console
+                    // history at startup, so aurora keeps its grid and
+                    // the compositor crops the top-left (the ignore/crop
+                    // client posture; a reweaving fbcon is a follow-up).
+                    // No diagnostic print: aurora shares /dev/cons with
+                    // whatever it renders, so a chatty line here
+                    // interleaves byte-for-byte with a concurrent
+                    // writer's output (t_putstr is not cross-Proc atomic).
+                    for d in term.dirty.iter_mut() {
+                        *d = true;
+                    }
+                }
                 _ => {}
             }
             ev = match surf.poll_event() {
@@ -252,8 +272,16 @@ pub extern "C" fn rs_main() -> i64 {
                     // input -- write it into the consfeed, the same wire the
                     // key events ride. Kaua's size handshake reads it to
                     // learn the real grid (128x36, not the 80x24 fallback).
+                    // A short/failed write only degrades the querier to its
+                    // 80x24 fallback, but silently -- log it (G-5 SA-2).
                     if !term.reply.is_empty() {
-                        let _ = unsafe { t_write(feed, term.reply.as_ptr(), term.reply.len()) };
+                        let wr = unsafe {
+                            t_write(feed, term.reply.as_ptr(), term.reply.len())
+                        };
+                        if wr < term.reply.len() as i64 {
+                            say!("aurora: consfeed reply write short/failed ({} of {})",
+                                 wr, term.reply.len());
+                        }
                         term.reply.clear();
                     }
                 } else {

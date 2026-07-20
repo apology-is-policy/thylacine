@@ -1771,15 +1771,42 @@ enforced by tapestryd's own discipline plus the kernel gates the G-2 half
 already binds, so a buggy compositor can break only its own display, never
 the kernel invariants):
 
-- **`WeaveFirst` / `Reweave` (backed := TRUE, serverRef := TRUE)** ↔
-  `Comp::create` (the surface ctl's `create W H`): `t_dma_create_weave`
-  (the G-2 kernel-minted share-admissible subtype) + `t_dma_map` + zero +
-  `RESOURCE_CREATE_2D` + whole-weave `ATTACH_BACKING`. `armed` becomes
-  real LAZILY at the first Tweft — `Comp::weft_ensure` (`t_weft_share`,
-  idempotent per surface, the netd precedent); the Map guard is
-  indifferent to registration timing, only to the retire disarm. Stage 0
-  exercises the g1 arm only (`Reweave` — the resize-ack allocation — lands
-  with the pane layer at G-6; `ALLOW_REWEAVE` stays modeled).
+- **`WeaveFirst` (g1; backed := TRUE, serverRef := TRUE)** ↔
+  `Comp::create` (the surface ctl's `create W H`) → `Comp::alloc_weave`:
+  `t_dma_create_weave` (the G-2 kernel-minted share-admissible subtype) +
+  `t_dma_map` + zero + `RESOURCE_CREATE_2D` (a PER-GENERATION resource id
+  from `Comp::next_res_id`, above `SCREEN_RES`) + whole-weave
+  `ATTACH_BACKING`. `armed` becomes real LAZILY at the first Tweft —
+  `Comp::weft_ensure` (`t_weft_share`, idempotent per generation, the
+  netd precedent); the Map guard is indifferent to registration timing,
+  only to the retire disarm.
+- **`Reweave` (g2; the resize-ack allocation) — landed at G-6b** ↔
+  `Comp::resize_ack` (the surface ctl's `resize W H <serial>`): the ack
+  of a size-changing CONFIGURE offer. It is THE GENERATION FENCE —
+  `alloc_weave` mints the new generation FIRST (fresh DMA + fresh
+  resource id), then the surface swaps `weave`/`resource_id`/`w`/`h`, and
+  ONLY THEN does `h_write` send the `Rwrite` (reply-after-alloc, the
+  R2-F5 precedent); the conn stream is FIFO, so every post-ack present
+  validates/blits against the new geometry. Bounded to <=2 generations
+  (`old_weave.is_some()` → E_AGAIN); a stale serial → E_AGAIN, an
+  unknown/mismatched echo → E_INVAL — none consume the standing offer.
+  The offer itself is `Comp::emit_configure_to` (recording `offered`;
+  same-size = the redraw request, different = the resize offer;
+  coalesce-by-replacement). The displaced g1 drains PASSIVELY (its last
+  content stays displayed, never read again — tearing-freedom holds).
+- **`RetireDisplaced` + `ServerRelease(g1)` (the displaced generation
+  drop)** ↔ the `Comp::present` tail: the FIRST post-fence present shows
+  g2 content (a composed blit COPIES into the screen buffer, a direct arm
+  targets g2's resource), so quiesce holds by construction and g1's
+  server refs drop via `Comp::release_gen` (the same R2-F5 ordering —
+  unshare → detach → unref → burrow_detach → close). The client's own g1
+  mapping drains via its old weave-fid `ClunkMap` in
+  `libtapestry::Surface::reweave` (map-new-BEFORE-clunk-old keeps the
+  client mapped throughout; #847 keeps g1's pages until then). A surface
+  retire with g1 still draining releases it in `Comp::retire`'s tail.
+  (Below the spec's abstraction — the reweave `Init` displacement is
+  modeled delivery-agnostically; this is the scheduling refinement under
+  `ALLOW_REWEAVE`'s permissiveness, the sched_oncpu precedent.)
 - **`Draw` (client-side)** ↔ the client's writes into its mapped weave
   slot (`libtapestry::Surface::pixels`) — invisible to the server, as the
   model's client-half separation intends.
@@ -1793,6 +1820,11 @@ the kernel invariants):
   stage-0 realization of `ServerRelease`'s `intransfer = 0` quiesce
   guard, BY CONSTRUCTION. **A pipelined controlq (G-6+) must implement a
   real drain before touching retire** — this line is the obligation.
+  *(G-6c note: multi-rect presents and TPRESENT_HOLD sit BELOW this
+  action's abstraction — a rect list is still one Submit→Complete, and
+  HOLD defers only the sub-CQE flush granularity [the transfer/blit
+  still runs inside the dispatch; the model's intransfer window is
+  unchanged]. Clean TLC re-ran unperturbed at G-6c: 5413 distinct.)*
 - **`Complete`'s `displayed` update** ↔ `Comp::scanout_take`: an
   ownerless scanout is taken at present-COMPLETE (the F16
   switch-at-first-frame alignment), never before a frame transferred.

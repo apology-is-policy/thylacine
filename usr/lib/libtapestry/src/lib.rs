@@ -49,6 +49,12 @@ use libthyla_rs::{
 
 pub const TPRESENT_LEN: usize = 32;
 pub const TPRESENT_V1: u32 = 1;
+/// Hold-this-frame (section 18.6; test-mode builds only): the present
+/// completes normally but the scanout push defers until `release`.
+pub const TPRESENT_HOLD: u32 = 1 << 0;
+/// One additional damage rect (multi-rect, G-6c): rect_count k >= 2 rides
+/// rects 1..k inline after the 32-byte header (payload 32 + 16*(k-1)).
+pub const TRECT_LEN: usize = 16;
 pub const TEVENT_LEN: usize = 24;
 
 pub const TEV_KEY: u16 = 1;
@@ -90,13 +96,20 @@ pub enum TapError {
     Loom,
     Present,
     Closed,
+    /// A resize ack answered E_AGAIN: the serial went stale (a newer
+    /// CONFIGURE superseded it -- drain events and ack that one) or a
+    /// prior reweave is still draining (present a frame, then re-ack).
+    Busy,
 }
 
-// The staging RegisteredBuffer layout: the tpresent descriptor at 0, the
-// event landing zone at EV_OFF.
-const EV_OFF: u64 = 64;
+// The staging RegisteredBuffer layout: the tpresent descriptor (header +
+// inline rect array) at 0, the event landing zone at EV_OFF.
+const EV_OFF: u64 = 1024;
 const EV_CAP: usize = 4 * TEVENT_LEN; // up to 4 records per delivery
 const STAGING_LEN: usize = 4096;
+/// The client-side rect bound: the descriptor region below EV_OFF holds
+/// 32 + 16*(k-1) bytes -> k <= 63 (the server caps at 64 independently).
+pub const MAX_RECTS: usize = (EV_OFF as usize - TPRESENT_LEN) / TRECT_LEN + 1;
 
 const UD_PRESENT: u64 = 1;
 const UD_EVENT: u64 = 2;
@@ -287,6 +300,96 @@ impl Surface {
         })
     }
 
+    /// Handle a CONFIGURE event (section 18.3). A same-size CONFIGURE is
+    /// the compositor's full-REDRAW request; a size-changing one is the
+    /// resize offer, which this acks and reweaves onto. Returns whether
+    /// the surface geometry CHANGED (true: the old pixel view is gone --
+    /// re-derive layout, then repaint). On ANY Ok return from a CONFIGURE
+    /// the caller must fully repaint + present. `Err(Busy)` means the
+    /// offer went stale mid-ack -- keep draining events; a newer
+    /// CONFIGURE carries the current offer.
+    pub fn handle_configure(&mut self, ev: &Event) -> Result<bool, TapError> {
+        if ev.kind != TEV_CONFIGURE {
+            return Ok(false);
+        }
+        let cw = ev.value >> 16;
+        let ch = ev.value & 0xffff;
+        if cw == self.w && ch == self.h {
+            return Ok(false); // the redraw request; geometry unchanged
+        }
+        self.reweave(cw, ch, ev.code)?;
+        Ok(true)
+    }
+
+    /// Ack a resize offer and swap onto the new weave generation:
+    /// write `resize W H <serial>` (the Rwrite is the server's generation
+    /// fence), open a FRESH weave fid (the old fid's kernel-side map
+    /// binding is pinned to the old generation -- fresh state needs a
+    /// fresh fid), re-read the geometry, map the new weave, then clunk
+    /// the old fid (the kernel unmaps the old client mapping -- the
+    /// spec's ClunkMap; map-new-before-clunk-old keeps the client mapped
+    /// throughout). `cur_slot` restarts at 0 -- every slot of the new
+    /// generation is untouched.
+    ///
+    /// A failure AFTER a successful ack (map/open trouble) leaves the
+    /// server on the new generation with this client still holding the
+    /// old mapping: presents would show the new generation's zeroed
+    /// slots. Callers treat any non-Busy error as fatal for the surface.
+    pub fn reweave(&mut self, w: u32, h: u32, serial: u16) -> Result<(), TapError> {
+        let mut cmd = alloc::string::String::new();
+        let _ = core::fmt::write(&mut cmd, format_args!("resize {} {} {}", w, h, serial));
+        let rc = unsafe { t_write(self.ctl, cmd.as_ptr(), cmd.len()) };
+        if rc < 0 {
+            return Err(if rc == -11 { TapError::Busy } else { TapError::Protocol });
+        }
+
+        let mut path = alloc::string::String::new();
+        let _ = core::fmt::write(&mut path, format_args!("surface/{}/weave", self.id));
+        let new_fd = unsafe { t_open(self.root, path.as_ptr(), path.len(), T_OREAD) };
+        if new_fd < 0 {
+            return Err(TapError::Map);
+        }
+        let mut gbuf = [0u8; 128];
+        let n = read_all(new_fd, &mut gbuf);
+        let parsed = core::str::from_utf8(&gbuf[..n]).ok().and_then(|t| {
+            let mut it = t.split_ascii_whitespace();
+            let gw: u32 = it.next()?.parse().ok()?;
+            let gh: u32 = it.next()?.parse().ok()?;
+            let stride: u32 = it.next()?.parse().ok()?;
+            let slot_stride: u64 = it.next()?.parse().ok()?;
+            let nslots: u32 = it.next()?.parse().ok()?;
+            Some((gw, gh, stride, slot_stride, nslots))
+        });
+        let (gw, gh, stride, slot_stride, nslots) = match parsed {
+            Some(p) => p,
+            None => {
+                unsafe { t_close(new_fd) };
+                return Err(TapError::Protocol);
+            }
+        };
+        if gw != w || gh != h || stride != w * 4 || nslots != self.nslots {
+            unsafe { t_close(new_fd) };
+            return Err(TapError::Protocol);
+        }
+        let map_va = unsafe { t_weft_map(new_fd as u64, 0) };
+        if map_va <= 0 {
+            unsafe { t_close(new_fd) };
+            return Err(TapError::Map);
+        }
+
+        // The swap: the old fid's clunk drops the old generation's client
+        // mapping (its VA is dead after this line).
+        unsafe { t_close(self.weave_fd) };
+        self.weave_fd = new_fd;
+        self.map_va = map_va as u64;
+        self.w = w;
+        self.h = h;
+        self.stride = stride;
+        self.slot_stride = slot_stride;
+        self.cur_slot = 0;
+        Ok(())
+    }
+
     /// The CURRENT draw slot's pixels (u32 BGRA little-endian: 0xAARRGGBB).
     pub fn pixels(&mut self) -> &mut [u32] {
         let base = self.map_va + (self.cur_slot as u64) * self.slot_stride;
@@ -301,24 +404,76 @@ impl Surface {
     /// recycle gate), rotate to the next slot. Event CQEs reaped while
     /// waiting are queued for `poll_event`.
     pub fn present(&mut self, rect: Option<Rect>) -> Result<(), TapError> {
+        match rect {
+            None => self.submit_present(0, &[]),
+            Some(r) => self.submit_present(0, &[r]),
+        }
+    }
+
+    /// Present a MULTI-rect damage list (G-6c): rect0 rides the header,
+    /// the rest inline after it. An empty list = full-surface damage.
+    pub fn present_rects(&mut self, rects: &[Rect]) -> Result<(), TapError> {
+        self.submit_present(0, rects)
+    }
+
+    /// Present with TPRESENT_HOLD (section 18.6; test-mode builds only):
+    /// the pixel work lands but the scanout push waits for `release` --
+    /// the golden-image capture primitive.
+    pub fn present_hold(&mut self, rect: Option<Rect>) -> Result<(), TapError> {
+        match rect {
+            None => self.submit_present(TPRESENT_HOLD, &[]),
+            Some(r) => self.submit_present(TPRESENT_HOLD, &[r]),
+        }
+    }
+
+    /// Flush this surface's held presents (F13): `release <id>` on the
+    /// session's global ctl (ownership-gated server-side).
+    pub fn release(&mut self) -> Result<(), TapError> {
+        let ctl = unsafe { t_open(self.root, b"ctl".as_ptr(), 3, T_OWRITE) };
+        if ctl < 0 {
+            return Err(TapError::Protocol);
+        }
+        let mut cmd = alloc::string::String::new();
+        let _ = core::fmt::write(&mut cmd, format_args!("release {}", self.id));
+        let rc = unsafe { t_write(ctl, cmd.as_ptr(), cmd.len()) };
+        unsafe { t_close(ctl) };
+        if rc < 0 {
+            return Err(TapError::Protocol);
+        }
+        Ok(())
+    }
+
+    fn submit_present(&mut self, flags: u32, rects: &[Rect]) -> Result<(), TapError> {
+        if rects.len() > MAX_RECTS {
+            return Err(TapError::Present);
+        }
         self.seq += 1;
         let ud = (self.seq << 8) | UD_PRESENT;
+        let len = if rects.len() <= 1 {
+            TPRESENT_LEN
+        } else {
+            TPRESENT_LEN + (rects.len() - 1) * TRECT_LEN
+        };
         {
             let d = self.staging.as_mut_slice();
             d[0..4].copy_from_slice(&TPRESENT_V1.to_le_bytes());
             d[4..8].copy_from_slice(&self.cur_slot.to_le_bytes());
-            d[8..12].copy_from_slice(&0u32.to_le_bytes()); // flags
-            let (rc, x, y, w, h) = match rect {
-                None => (0u32, 0, 0, 0, 0),
-                Some(r) => (1u32, r.x, r.y, r.w, r.h),
-            };
-            d[12..16].copy_from_slice(&rc.to_le_bytes());
-            d[16..20].copy_from_slice(&x.to_le_bytes());
-            d[20..24].copy_from_slice(&y.to_le_bytes());
-            d[24..28].copy_from_slice(&w.to_le_bytes());
-            d[28..32].copy_from_slice(&h.to_le_bytes());
+            d[8..12].copy_from_slice(&flags.to_le_bytes());
+            d[12..16].copy_from_slice(&(rects.len() as u32).to_le_bytes());
+            let r0 = rects.first().copied().unwrap_or(Rect { x: 0, y: 0, w: 0, h: 0 });
+            d[16..20].copy_from_slice(&r0.x.to_le_bytes());
+            d[20..24].copy_from_slice(&r0.y.to_le_bytes());
+            d[24..28].copy_from_slice(&r0.w.to_le_bytes());
+            d[28..32].copy_from_slice(&r0.h.to_le_bytes());
+            for (i, r) in rects.iter().enumerate().skip(1) {
+                let o = TPRESENT_LEN + (i - 1) * TRECT_LEN;
+                d[o..o + 4].copy_from_slice(&r.x.to_le_bytes());
+                d[o + 4..o + 8].copy_from_slice(&r.y.to_le_bytes());
+                d[o + 8..o + 12].copy_from_slice(&r.w.to_le_bytes());
+                d[o + 12..o + 16].copy_from_slice(&r.h.to_le_bytes());
+            }
         }
-        let sqe = Sqe::write(0, 0, TPRESENT_LEN as u32, 0, 0, ud);
+        let sqe = Sqe::write(0, 0, len as u32, 0, 0, ud);
         self.ring.try_submit(&sqe).map_err(|_| TapError::Loom)?;
         // Wait for THIS present's CQE; route any event CQE that arrives
         // first (one ring, mixed ops -- correlate by user_data).

@@ -112,7 +112,13 @@ tools/screendump.sh out.png                 # capture gpu0 head 0
 tools/screendump.sh -v out.png              # + verify the P4-L 4-quadrant
                                             #   test pattern (red/green/blue/white)
 tools/screendump.sh -c out.png              # + verify the Aurora console (G-4:
-                                            #   exact Bonfire bg dominant + fg text)
+                                            #   exact Bonfire bg dominant + fg text;
+                                            #   G-5: + blend-integrity edges)
+tools/screendump.sh -c -F frame.ppm         # offline: verify an existing P6 PPM
+                                            #   (no QMP/VM; the regression path)
+tools/screendump.sh -P out.ppm              # capture a raw P6 PPM instead of PNG
+                                            #   (pixel tools; G-6 battery asserts)
+tools/ppm-sample.py out.ppm X Y             # print "R G B" at (X,Y) of a P6 PPM
 tools/screendump.sh -s SOCK -d DEV -H N ... # explicit socket / qdev id / head
 ```
 
@@ -137,6 +143,18 @@ Properties (all empirically verified at G-0):
 - **PNG is native** (QEMU ≥ 7.1 `screendump format=png`); `-v` takes a
   PPM sibling dump and asserts the four quadrant-center colors, then
   deletes it.
+- **`-c` includes a blend-integrity pass** (G-5; the #35 packed-lane
+  class): the bg/fg counts are blind to antialiased EDGE pixels — where
+  #35's violet fringing lived while glyph cores stayed exact — so every
+  pixel 8-adjacent to an exact-fg core that is neither exact bg nor
+  exact fg must sit inside the per-channel `[bg,fg]` envelope (±6); >5%
+  outside fails. Legitimate cross-color glyph junctions measure ~2%,
+  the #35 formula ~15% for the default fg — the threshold splits both
+  with margin. `-F FILE.ppm` runs `-v`/`-c` offline against a saved
+  frame (no QMP, no VM); `tools/test-screendump-edge.sh` is the
+  standing non-vacuity regression — it synthesizes a frame with the
+  literal pre-#35 buggy blend and asserts `-c -F` fails it on the
+  blend-integrity arm (and passes the correctly blended twin).
 - **Capture requires a LIVE driving Proc.** At driver-Proc reap the RW-7
   proc-death quiesce (`kernel/virtio.c::virtio_mmio_reset_in_range`)
   resets every virtio device in the dying Proc's MMIO window — required
