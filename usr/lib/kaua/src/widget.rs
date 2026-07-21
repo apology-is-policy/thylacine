@@ -588,6 +588,215 @@ impl Widget for Tree<'_> {
     }
 }
 
+/// Write `s` at `(x, y)`, one cell per char, clipped at `max_x` (the widget's
+/// right edge -- `Buffer::set_str` clips to the whole buffer, which would
+/// overflow a sub-rect widget). Returns the x just past the last written cell.
+fn write_clip(buf: &mut Buffer, x: u16, y: u16, s: &str, style: Style, max_x: u16) -> u16 {
+    let mut cx = x;
+    for ch in s.chars() {
+        if cx >= max_x {
+            break;
+        }
+        buf.set_cell(cx, y, Cell::new(ch, style));
+        cx = cx.saturating_add(1);
+    }
+    cx
+}
+
+/// A `Table` row: either a data row (one string per column) or a full-width
+/// divider (`── label ──…`, the call-stack boundary). A per-row `style`
+/// override wins over the table default (or, for a divider, `divider_style`).
+#[derive(Clone, Copy)]
+pub struct Row<'a> {
+    pub cells: &'a [&'a str],
+    pub label: &'a str,
+    pub style: Option<Style>,
+    pub divider: bool,
+}
+
+impl<'a> Row<'a> {
+    /// A data row: one string per column. Cells past the column count are
+    /// dropped; missing trailing cells leave their columns blank.
+    pub fn new(cells: &'a [&'a str]) -> Self {
+        Row {
+            cells,
+            label: "",
+            style: None,
+            divider: false,
+        }
+    }
+
+    /// A full-width divider row labelled `label`.
+    pub fn divider(label: &'a str) -> Self {
+        Row {
+            cells: &[],
+            label,
+            style: None,
+            divider: true,
+        }
+    }
+
+    /// Override the table default style for this row (e.g. dim a kernel frame).
+    pub fn style(mut self, style: Style) -> Self {
+        self.style = Some(style);
+        self
+    }
+}
+
+/// A columnar table: fixed column widths, an optional header, an optional
+/// selected row (full-width highlight, like `List`), a scroll `offset`, and the
+/// `Row::divider` variant. Columns lay left-to-right with a one-cell gap; each
+/// cell clips to its column width. Pure render; the caller owns selection +
+/// offset. Consumers: goroutines, the cross-boundary call stack (`§5`).
+pub struct Table<'a> {
+    columns: &'a [u16],
+    rows: &'a [Row<'a>],
+    header: Option<&'a [&'a str]>,
+    selected: Option<usize>,
+    style: Style,
+    selected_style: Style,
+    header_style: Style,
+    divider_style: Style,
+    offset: usize,
+}
+
+impl<'a> Table<'a> {
+    pub fn new(columns: &'a [u16], rows: &'a [Row<'a>]) -> Self {
+        Table {
+            columns,
+            rows,
+            header: None,
+            selected: None,
+            style: Style::new(),
+            selected_style: Style::new(),
+            header_style: Style::new(),
+            divider_style: Style::new(),
+            offset: 0,
+        }
+    }
+
+    /// A non-selectable, non-scrolled title row above the data (one per column).
+    pub fn header(mut self, titles: &'a [&'a str]) -> Self {
+        self.header = Some(titles);
+        self
+    }
+
+    pub fn select(mut self, sel: Option<usize>) -> Self {
+        self.selected = sel;
+        self
+    }
+
+    pub fn style(mut self, style: Style) -> Self {
+        self.style = style;
+        self
+    }
+
+    pub fn selected_style(mut self, style: Style) -> Self {
+        self.selected_style = style;
+        self
+    }
+
+    pub fn header_style(mut self, style: Style) -> Self {
+        self.header_style = style;
+        self
+    }
+
+    pub fn divider_style(mut self, style: Style) -> Self {
+        self.divider_style = style;
+        self
+    }
+
+    /// First data row index to show (the scroll position).
+    pub fn offset(mut self, offset: usize) -> Self {
+        self.offset = offset;
+        self
+    }
+}
+
+fn render_row_cells(
+    buf: &mut Buffer,
+    area: Rect,
+    y: u16,
+    columns: &[u16],
+    cells: &[&str],
+    style: Style,
+) {
+    let mut cx = area.x;
+    for (i, &w) in columns.iter().enumerate() {
+        if cx >= area.right() {
+            break;
+        }
+        if let Some(cell) = cells.get(i) {
+            let colend = cx.saturating_add(w).min(area.right());
+            write_clip(buf, cx, y, cell, style, colend);
+        }
+        cx = cx.saturating_add(w).saturating_add(1); // + a one-cell gap
+    }
+}
+
+fn render_divider(buf: &mut Buffer, area: Rect, y: u16, label: &str, style: Style) {
+    for x in area.x..area.right() {
+        buf.set_cell(x, y, Cell::new('\u{2500}', style)); // ─
+    }
+    // Inset the label past two lead dashes: "── label ──…".
+    let start = area.x.saturating_add(2);
+    if start >= area.right() {
+        return;
+    }
+    let mut x = start;
+    buf.set_cell(x, y, Cell::new(' ', style));
+    x = x.saturating_add(1);
+    x = write_clip(buf, x, y, label, style, area.right());
+    if x < area.right() {
+        buf.set_cell(x, y, Cell::new(' ', style));
+    }
+}
+
+impl Widget for Table<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        if area.is_empty() {
+            return;
+        }
+        let bottom = area.bottom();
+        let mut y = area.y;
+        if let Some(hdr) = self.header {
+            render_row_cells(buf, area, y, self.columns, hdr, self.header_style);
+            y = y.saturating_add(1);
+        }
+        let mut r = 0usize;
+        while y < bottom {
+            let idx = self.offset + r;
+            if idx >= self.rows.len() {
+                break;
+            }
+            let row = &self.rows[idx];
+            let selected = self.selected == Some(idx);
+            if row.divider {
+                let st = if selected {
+                    self.selected_style
+                } else {
+                    row.style.unwrap_or(self.divider_style)
+                };
+                render_divider(buf, area, y, row.label, st);
+            } else {
+                let st = if selected {
+                    self.selected_style
+                } else {
+                    row.style.unwrap_or(self.style)
+                };
+                if selected {
+                    for x in area.x..area.right() {
+                        buf.set_cell(x, y, Cell::new(' ', st));
+                    }
+                }
+                render_row_cells(buf, area, y, self.columns, row.cells, st);
+            }
+            y = y.saturating_add(1);
+            r += 1;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -797,5 +1006,75 @@ mod tests {
         Tree::new(&rows).offset(1).render(Rect::new(0, 0, 4, 2), &mut b);
         assert_eq!(sym(&b, 2, 0), 'b'); // "b" is the first shown row
         assert_eq!(sym(&b, 2, 1), 'c');
+    }
+
+    #[test]
+    fn table_lays_columns_with_a_gap() {
+        let cols = [3u16, 4];
+        let rows = [Row::new(&["ab", "cd"])];
+        let mut b = Buffer::empty(Rect::new(0, 0, 10, 1));
+        Table::new(&cols, &rows).render(Rect::new(0, 0, 10, 1), &mut b);
+        assert_eq!(sym(&b, 0, 0), 'a');
+        assert_eq!(sym(&b, 1, 0), 'b');
+        assert_eq!(sym(&b, 3, 0), ' '); // the one-cell inter-column gap
+        assert_eq!(sym(&b, 4, 0), 'c'); // column 1 starts at 3 (width) + 1 (gap)
+        assert_eq!(sym(&b, 5, 0), 'd');
+    }
+
+    #[test]
+    fn table_header_sits_above_the_rows() {
+        let cols = [4u16];
+        let rows = [Row::new(&["r1"])];
+        let mut b = Buffer::empty(Rect::new(0, 0, 6, 2));
+        Table::new(&cols, &rows)
+            .header(&["H1"])
+            .render(Rect::new(0, 0, 6, 2), &mut b);
+        assert_eq!(sym(&b, 0, 0), 'H'); // header on row 0
+        assert_eq!(sym(&b, 0, 1), 'r'); // data starts on row 1
+    }
+
+    #[test]
+    fn table_divider_fills_and_labels() {
+        let cols = [4u16];
+        let rows = [Row::divider("kernel")];
+        let mut b = Buffer::empty(Rect::new(0, 0, 12, 1));
+        Table::new(&cols, &rows).render(Rect::new(0, 0, 12, 1), &mut b);
+        assert_eq!(sym(&b, 0, 0), '\u{2500}'); // ── lead
+        assert_eq!(sym(&b, 1, 0), '\u{2500}');
+        assert_eq!(sym(&b, 2, 0), ' '); // " kernel " inset past two dashes
+        assert_eq!(sym(&b, 3, 0), 'k');
+        assert_eq!(sym(&b, 8, 0), 'l'); // "kernel" = cols 3..9
+        assert_eq!(sym(&b, 9, 0), ' ');
+        assert_eq!(sym(&b, 10, 0), '\u{2500}'); // dashes resume
+    }
+
+    #[test]
+    fn table_highlights_selection_and_scrolls() {
+        let cols = [3u16];
+        let rows = [Row::new(&["a"]), Row::new(&["b"]), Row::new(&["c"])];
+        let mut b = Buffer::empty(Rect::new(0, 0, 3, 2));
+        let ember = Style::new().bg(Color::Rgb(224, 120, 64));
+        Table::new(&cols, &rows)
+            .offset(1)
+            .select(Some(1))
+            .selected_style(ember)
+            .render(Rect::new(0, 0, 3, 2), &mut b);
+        // offset 1 -> rows "b","c"; row 1 ("b") is selected + highlighted.
+        assert_eq!(sym(&b, 0, 0), 'b');
+        assert_eq!(b.get(0, 0).unwrap().style.bg, Color::Rgb(224, 120, 64));
+        assert_eq!(b.get(2, 0).unwrap().style.bg, Color::Rgb(224, 120, 64));
+        assert_eq!(sym(&b, 0, 1), 'c');
+        assert_eq!(b.get(0, 1).unwrap().style.bg, Color::Reset); // "c" not selected
+    }
+
+    #[test]
+    fn table_per_row_style_overrides_the_default() {
+        let cols = [3u16];
+        let dim = Style::new().fg(Color::Rgb(120, 120, 120));
+        let rows = [Row::new(&["k"]).style(dim), Row::new(&["g"])];
+        let mut b = Buffer::empty(Rect::new(0, 0, 3, 2));
+        Table::new(&cols, &rows).render(Rect::new(0, 0, 3, 2), &mut b);
+        assert_eq!(b.get(0, 0).unwrap().style.fg, Color::Rgb(120, 120, 120)); // row override
+        assert_eq!(b.get(0, 1).unwrap().style.fg, Color::Reset); // table default
     }
 }

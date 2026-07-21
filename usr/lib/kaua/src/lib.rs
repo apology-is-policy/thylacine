@@ -43,7 +43,8 @@ pub use layout::{Constraint, Direction, Layout};
 pub use rect::Rect;
 pub use style::{Attr, Color, Style};
 pub use widget::{
-    flatten_tree, Block, List, Mark, Paragraph, Span, StatusLine, Tree, TreeItem, TreeRow, Widget,
+    flatten_tree, Block, List, Mark, Paragraph, Row, Span, StatusLine, Table, Tree, TreeItem,
+    TreeRow, Widget,
 };
 
 #[cfg(feature = "backend")]
