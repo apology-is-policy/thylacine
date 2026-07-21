@@ -6529,6 +6529,26 @@ int main(void) {
                      "receive-only via the tty ioctl dispatcher)\n");
         }
 
+        // Task #50: the create-mode fopen / unlink-family prover
+        // (0024-pouch-fopen-create). Spawn /bin/pouch-hello-fopen -- it
+        // drives fopen("w"/"a") create + O_TRUNC truncation + O_EXCL +
+        // unlink/remove + tmpfile (write/rewind/read AFTER the immediate
+        // unlink = the fid-survives-unlink property) POST-PIVOT on the
+        // Stratum FS, the surface Quake's config.cfg rides. /tmp exists
+        // by this point (the go-arc env block creates it). Boot-fatal.
+        {
+            const char pf_name[]   = "/bin/pouch-hello-fopen";
+            const char pf_expect[] = "pouch-hello-fopen: exit 0";
+            if (pouch_smoke_one(pf_name, sizeof(pf_name) - 1,
+                                pf_expect, sizeof(pf_expect) - 1) != 0) {
+                t_putstr("joey: #50 PROBE pouch-hello-fopen FAILED\n");
+                return 1;
+            }
+            t_putstr("joey: #50 PROBE OK (create-mode fopen: create/append/"
+                     "truncate/excl/unlink/remove/tmpfile over SYS_WALK_CREATE"
+                     " + SYS_UNLINK)\n");
+        }
+
         // PTY-4: the job-control E2E. The driver (/bin/jc-probe) hosts a
         // REAL /bin/ut on a freshly-minted pts (the ptyhost shape) and
         // scripts the ladder against the master: the session dance + prompt;

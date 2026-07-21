@@ -230,6 +230,15 @@ sleep 2
 lc_run_expect "whoami" "1000"
 lc_pass "play: clean quit -- ut is back in the foreground reading the console"
 
+# Task #50: config persistence. Host_Shutdown writes config.cfg into
+# com_gamedir (/quake/id1) via fopen("w") -- the 0024 create arm over
+# SYS_WALK_CREATE, into the world-writable baked game dir, as the
+# session user. Its presence after the quit proves the LIVE chain
+# (quake -> fopen create -> dev9p -> Stratum), the user-facing
+# consequence the mechanism exists for.
+lc_run_expect "ls /quake/id1" "config.cfg"
+lc_pass "play: config.cfg persisted (create-mode fopen live end-to-end)"
+
 lc_quit
 lc_pass "ls-gfx-play: keystrokes reach a running game through the compositor (AURORA-CONFIG 2.1)"
 exit 0

@@ -1543,3 +1543,53 @@ honest-fail → master close → slave EOF (drain-then-EOF).
   not landed): the NDFLT-stop arm for `tty:susp` (makes SIG_DFL `^Z`
   actually stop a pouch program — see `83-pouch-signals.md`), and the
   `SYS_POSTNOTE` pgrp arm (`kill(-pgrp)`).
+
+## The fopen-create boundary-line — `0024-pouch-fopen-create.patch` (task #50)
+
+The create-mode arm the 0023 scope note owed: `openat()` O_CREAT wired
+through `SYS_WALK_CREATE` (= 54) + the unlink family over `SYS_UNLINK`
+(= 58), so `fopen(path, "w"/"a")`, `tmpfile()`, `unlink`/`rmdir`/
+`remove` work in pouch — interactive TyrQuake's `config.cfg` persists
+(the live consequence the ls-gfx-play leg asserts after the quit).
+
+**openat O_CREAT**: open-existing first (unless O_EXCL); on ENOENT
+split the path, `T_OPATH`-open the parent (born-R|W — the A-1.7
+navigation base; #81 blocks only its byte I/O, never create/unlink),
+`SYS_WALK_CREATE` the single base component (`perm = mode & 0777`; no
+pouch umask surface), and resolve an EEXIST race by retrying the plain
+open once (the #99 honest-errno pattern). Two semantic FIXES ride
+along: `O_TRUNC` now maps to `T_OTRUNC` (the prior silent no-op made
+`fopen("w")` overwrite-in-place on an existing file), and `O_APPEND`
+seeks to END after any successful open (single-writer append; no
+kernel append mode — concurrent-append atomicity documented-absent).
+`O_TMPFILE` proper stays ENOTSUP (musl's `tmpfile()` uses
+O_CREAT|O_EXCL, never it).
+
+**The unlink family**: `unlinkat()` carries the real body (split +
+`T_OPATH` parent + `SYS_UNLINK`; AT_REMOVEDIR →
+`SYS_UNLINK_REMOVEDIR`); musl's `unlink`/`rmdir`/`remove`/`tmpfile`
+bodies are raw `__syscall(SYS_unlinkat, …)` — the unwired 0xFFFF
+sentinel — so each reroutes through the public function (the 0023
+sys_open-reroute precedent). **The 0014 `/srv/` short-circuit is
+PRESERVED inside the `unlinkat` chokepoint** (this patch replaces the
+0014 `unlink.c` body): a plain unlink of `/srv/<name>` answers 0 — the
+per-boot kernel registry has no file artifact, and stratumd's
+`stm_stratumd_listen_unix` prologue treats any non-ENOENT unlink
+failure as fatal. Dropping the carve kills the stratumd boot at 16c —
+the first gate run proved it (the staged-from-the-build-tree diff
+silently deleted 0014's lines; the M-PIN unverified-assumption class).
+
+`tmpfile()`'s immediate unlink now works: the open fd keeps the file
+alive after the unlink — the Plan 9-lineage fid-survives-unlink
+property, proven live by `/pouch-hello-fopen`'s tmpfile leg
+(write/rewind/read AFTER the unlink).
+
+**Proof**: `/bin/pouch-hello-fopen` (post-pivot on the Stratum FS —
+the surface config.cfg rides): create / append / truncate / excl /
+unlink / remove / tmpfile, boot-fatal via the joey `#50 PROBE OK`
+line; plus the ls-gfx-play `config.cfg persisted` leg (Host_Shutdown's
+`fopen("w")` into the world-writable baked `/quake`+`/quake/id1` —
+the build stage chmods both, single-user policy; the per-user game-dir
+copy is the v1.x shape). Untested-in-guest: the rmdir/AT_REMOVEDIR arm
+(no pouch mkdir surface to create a removable directory; the kernel
+SYS_UNLINK REMOVEDIR path carries its own kernel tests).

@@ -1,0 +1,438 @@
+Task #50 (the G-7b audit F2 seam): create-mode fopen / the unlink
+family -- openat O_CREAT wired through SYS_WALK_CREATE (= 54) + the
+unlinkat boundary-line over SYS_UNLINK (= 58).
+
+The 0021 openat refused O_CREAT/O_TMPFILE with ENOTSUP (fail-closed;
+create-mode fopen never worked in pouch), so fopen(path,"w"/"a") and
+tmpfile() returned NULL -- interactive TyrQuake's config.cfg / demo
+record did not persist. This patch:
+
+  src/fcntl/openat.c        The O_CREAT arm: open-existing first
+      (unless O_EXCL); on ENOENT split the path, T_OPATH-open the
+      parent (born-R|W -- the A-1.7 navigation base; #81 blocks only
+      its byte I/O, never create/unlink), SYS_WALK_CREATE the single
+      base component (perm = mode & 0777; no pouch umask surface), and
+      resolve an EEXIST-race by retrying the plain open once (the #99
+      honest-errno pattern). ALSO: O_TRUNC now maps to T_OTRUNC (the
+      prior silent no-op made fopen("w") overwrite-in-place on an
+      existing file -- a correctness fix, not just the create arm),
+      and O_APPEND seeks to END after any successful open
+      (single-writer append; no kernel append mode, so concurrent-
+      append atomicity is documented-absent). O_TMPFILE proper stays
+      ENOTSUP (musl's tmpfile() uses O_CREAT|O_EXCL, never it).
+
+  src/unistd/unlinkat.c     The real boundary-line body: split,
+      T_OPATH parent, SYS_UNLINK(parent, base, len, flags);
+      AT_REMOVEDIR -> SYS_UNLINK_REMOVEDIR (0x200). Trailing slashes
+      legal on a directory target; "/" itself answers EBUSY. The 0014
+      /srv short-circuit is PRESERVED here (this patch replaces the
+      0014 unlink.c body, so the carve moves into the chokepoint all
+      of unlink/rmdir/remove route through): a plain unlink of
+      /srv/<name> answers 0 -- the per-boot kernel registry has no
+      file artifact, and stratumd's listen prologue treats any
+      non-ENOENT unlink failure as fatal (the first gate run proved
+      it: dropping the carve killed the stratumd-boot at 16c).
+
+  src/unistd/unlink.c       musl's bodies are RAW
+  src/unistd/rmdir.c        __syscall(SYS_unlinkat, ...) -- the
+  src/stdio/remove.c        unwired 0xFFFF sentinel -- so each is
+  src/stdio/tmpfile.c       rerouted through the public unlinkat()/
+      unlink() (the 0023 sys_open-reroute precedent). tmpfile()'s
+      immediate unlink now works: the open fd keeps the file alive
+      (the Plan 9-lineage fid-survives-unlink property, proven live by
+      /pouch-hello-fopen's tmpfile leg -- write/rewind/read AFTER the
+      unlink).
+
+  arch/aarch64/bits/syscall.h.in   __NR_walk_create 54 +
+      __NR_unlink_component 58 (custom seam names -- the kernel ABI
+      differs from Linux unlinkat's, so the real __NR_unlinkat stays
+      the 0xFFFF sentinel and raw callers keep failing honestly).
+
+Untested-in-guest at v1.0: the rmdir/AT_REMOVEDIR arm (pouch has no
+mkdir surface to create a removable directory; the kernel SYS_UNLINK
+REMOVEDIR path carries its own kernel tests). Proven by
+/pouch-hello-fopen (create/append/truncate/excl/unlink/remove/tmpfile,
+boot-fatal, post-pivot on the Stratum FS) and live by TyrQuake's
+config.cfg persisting across the play-leg quit.
+
+diff a/src/fcntl/openat.c b/src/fcntl/openat.c
+--- a/src/fcntl/openat.c
++++ b/src/fcntl/openat.c
+@@ -1,5 +1,6 @@
+ /* pouch boundary-line replacement (P6-pouch-stratumd-boot 16b-beta cont;
+- * resolution moved onto the stalk resolver at PTY-3, patch 0021).
++ * resolution moved onto the stalk resolver at PTY-3, patch 0021;
++ * create-mode + truncate/append at task #50, patch 0024).
+  *
+  * openat() over Thylacine's SYS_open full-path stalk resolution.
+  * Absolute paths only at v1.0; AT_FDCWD only; O_RDONLY/W/RW only.
+@@ -17,12 +18,25 @@
+  * and only the FINAL component is opened with the caller's omode. It
+  * also returns the REAL -errno (ER-1: T_E_NOENT walk-miss, T_E_ACCES
+  * perm denial, ...) where the old loop could only answer a blanket
+- * ENOENT. */
++ * ENOENT.
++ *
++ * Task #50 (0024): the O_CREAT arm -- open-existing first (unless
++ * O_EXCL), else split the path, T_OPATH-open the parent (born-R|W, the
++ * A-1.7 navigation base; #81 blocks only its byte I/O, never create)
++ * and SYS_WALK_CREATE the base component; a create losing an EEXIST
++ * race retries the plain open once (the #99 honest-errno pattern the
++ * go-fork uses). O_TRUNC now maps to T_OTRUNC (the 0021 silent no-op
++ * made fopen("w") overwrite-in-place on an existing file). O_APPEND
++ * seeks to END after any successful open -- single-writer append
++ * correctness; Thylacine has no kernel append mode, so concurrent-
++ * append atomicity is NOT provided (documented). O_TMPFILE proper
++ * stays ENOTSUP (musl's tmpfile() uses O_CREAT|O_EXCL, not it). */
+ #include <fcntl.h>
+ #include <stdarg.h>
+ #include <errno.h>
+ #include <stddef.h>
+ #include <string.h>
++#include <unistd.h>
+ #include "syscall.h"
+ 
+ /* Thylacine flag values (mirror kernel/include/thylacine/syscall.h
+@@ -31,8 +45,16 @@
+ #define POUCH_OREAD           0u
+ #define POUCH_OWRITE          1u
+ #define POUCH_ORDWR           2u
++#define POUCH_OTRUNC          0x10u
++#define POUCH_OPATH           0x80u
+ #define POUCH_PATH_MAX        1024u   /* the kernel SYS_OPEN_PATH_MAX */
++#define POUCH_NAME_MAX        64u     /* SYS_WALK_OPEN_NAME_MAX */
+ 
++static long pouch_open_raw(const char *path, size_t len, unsigned long omode)
++{
++	return __syscall(SYS_open, POUCH_WALK_FROM_ROOT, path, len, omode);
++}
++
+ int openat(int fd, const char *filename, int flags, ...)
+ {
+ 	mode_t mode = 0;
+@@ -43,17 +65,16 @@
+ 		mode = va_arg(ap, mode_t);
+ 		va_end(ap);
+ 	}
+-	(void)mode;
+ 
+ 	/* AT_FDCWD only at v1.0. */
+ 	if (fd != AT_FDCWD) {
+ 		errno = ENOTSUP;
+ 		return -1;
+ 	}
+-	/* Refuse O_CREAT / O_TMPFILE: the pouch arm doesn't synthesize
+-	 * inode creation. Other flags (O_TRUNC, O_APPEND, O_NONBLOCK,
+-	 * O_CLOEXEC, O_NOCTTY) are silently no-op at v1.0. */
+-	if ((flags & O_CREAT) || (flags & O_TMPFILE) == O_TMPFILE) {
++	/* O_TMPFILE proper stays unsupported (an anonymous-inode ABI the
++	 * kernel does not have; musl's tmpfile() never uses it). Other
++	 * flags (O_NONBLOCK, O_CLOEXEC, O_NOCTTY) are silently no-op. */
++	if ((flags & O_TMPFILE) == O_TMPFILE) {
+ 		errno = ENOTSUP;
+ 		return -1;
+ 	}
+@@ -69,8 +90,8 @@
+ 	}
+ 
+ 	/* Map POSIX O_RDONLY / O_WRONLY / O_RDWR to Thylacine T_OREAD /
+-	 * T_OWRITE / T_ORDWR. The kernel's stalk resolution enforces the
+-	 * actual envelope; pouch only translates the flag bits. */
++	 * T_OWRITE / T_ORDWR (+ T_OTRUNC). The kernel's stalk resolution
++	 * enforces the actual envelope; pouch only translates the bits. */
+ 	unsigned long omode;
+ 	switch (flags & O_ACCMODE) {
+ 	case O_RDONLY: omode = POUCH_OREAD;  break;
+@@ -78,6 +99,7 @@
+ 	case O_RDWR:   omode = POUCH_ORDWR;  break;
+ 	default:       errno = EINVAL; return -1;
+ 	}
++	if (flags & O_TRUNC) omode |= POUCH_OTRUNC;
+ 
+ 	size_t len = strlen(filename);
+ 	if (len > POUCH_PATH_MAX) {
+@@ -85,8 +107,60 @@
+ 		return -1;
+ 	}
+ 
+-	/* One stalk-resolved open from the Territory root. The kernel
+-	 * answers the fd or the real -errno (seam-decoded). */
+-	return __syscall_ret(__syscall(SYS_open, POUCH_WALK_FROM_ROOT,
+-	                               filename, len, omode));
++	long r;
++	if (!(flags & O_CREAT) || !(flags & O_EXCL)) {
++		/* The plain stalk-resolved open (also the O_CREAT
++		 * open-existing fast path). The kernel answers the fd or
++		 * the real -errno (seam-decoded). */
++		r = pouch_open_raw(filename, len, omode);
++		if (r >= 0)
++			goto opened;
++		if (!(flags & O_CREAT) || r != -ENOENT)
++			return __syscall_ret(r);
++	}
++
++	{
++		/* The create arm: split parent/base (trailing slashes on a
++		 * create target are EISDIR), T_OPATH-open the parent, then
++		 * create-and-open the single base component. perm = the 9
++		 * rwx bits (no pouch umask surface at v1.0). */
++		size_t end = len;
++		while (end > 1 && filename[end - 1] == '/') end--;
++		if (end != len || end == 1) {
++			errno = EISDIR;
++			return -1;
++		}
++		size_t bstart = end;
++		while (bstart > 0 && filename[bstart - 1] != '/') bstart--;
++		size_t blen = end - bstart;
++		if (blen > POUCH_NAME_MAX) {
++			errno = ENAMETOOLONG;
++			return -1;
++		}
++		size_t plen = bstart;
++		while (plen > 1 && filename[plen - 1] == '/') plen--;
++
++		long parent = pouch_open_raw(filename, plen, POUCH_OPATH);
++		if (parent < 0)
++			return __syscall_ret(parent);
++		r = __syscall(SYS_walk_create, parent, filename + bstart,
++		              blen, omode, (unsigned long)(mode & 0777));
++		__syscall(SYS_close, parent);
++		if (r == -EEXIST && !(flags & O_EXCL)) {
++			/* Lost the create race: the file exists now -- the
++			 * retry-open is the honest resolution (#99). */
++			r = pouch_open_raw(filename, len, omode);
++		}
++		if (r < 0)
++			return __syscall_ret(r);
++	}
++
++opened:
++	if (flags & O_APPEND) {
++		/* Position at END once: single-writer append correctness
++		 * (no kernel append mode -- concurrent appenders may
++		 * interleave; a config-file writer never notices). */
++		__syscall(SYS_lseek, r, 0, SEEK_END);
++	}
++	return (int)r;
+ }
+diff a/src/unistd/unlinkat.c b/src/unistd/unlinkat.c
+--- a/src/unistd/unlinkat.c
++++ b/src/unistd/unlinkat.c
+@@ -1,7 +1,83 @@
++/* pouch boundary-line replacement (task #50, patch 0024).
++ *
++ * unlinkat() over Thylacine's SYS_UNLINK (= 58, FS-gamma): split the
++ * path, T_OPATH-open the parent directory (born-R|W -- the create/
++ * unlink write authority; #81 blocks only its byte I/O), unlink the
++ * single base component. AT_REMOVEDIR maps to SYS_UNLINK_REMOVEDIR
++ * (rmdir). AT_FDCWD + absolute paths only, the 0021 openat posture.
++ * The kernel answers the real -errno (EISDIR/ENOENT/EACCES/...). */
+ #include <unistd.h>
++#include <fcntl.h>
++#include <errno.h>
++#include <string.h>
+ #include "syscall.h"
+ 
++#define POUCH_WALK_FROM_ROOT  ((long)(-1))
++#define POUCH_OPATH           0x80u
++#define POUCH_PATH_MAX        1024u
++#define POUCH_NAME_MAX        64u
++#define POUCH_UNLINK_REMOVEDIR 0x200u
++
+ int unlinkat(int fd, const char *path, int flag)
+ {
+-	return syscall(SYS_unlinkat, fd, path, flag);
++	/* The 0014 /srv short-circuit, PRESERVED (this patch replaces the
++	 * 0014 unlink.c body, so the carve moves here -- the single
++	 * chokepoint unlink/rmdir/remove all route through): a /srv/<name>
++	 * has no file artifact (the per-boot kernel registry; the slot
++	 * releases with the listener fd), so the idiomatic pre-bind
++	 * "remove any stale socket" unlink answers 0 without a kernel
++	 * call -- stratumd's stm_stratumd_listen_unix prologue treats any
++	 * non-ENOENT failure as fatal. AT_REMOVEDIR falls through (an
++	 * honest error; rmdir of a /srv entry is not a thing). */
++	if (path && flag == 0) {
++		static const char prefix[] = "/srv/";
++		if (strncmp(path, prefix, sizeof(prefix) - 1) == 0)
++			return 0;
++	}
++	if (fd != AT_FDCWD) {
++		errno = ENOTSUP;
++		return -1;
++	}
++	if (flag & ~AT_REMOVEDIR) {
++		errno = EINVAL;
++		return -1;
++	}
++	if (!path) {
++		errno = EFAULT;
++		return -1;
++	}
++	if (path[0] != '/') {
++		errno = ENOTSUP;
++		return -1;
++	}
++	size_t len = strlen(path);
++	if (len > POUCH_PATH_MAX) {
++		errno = ENAMETOOLONG;
++		return -1;
++	}
++	/* Trailing slashes are legal on a directory target (rmdir("/a/")). */
++	size_t end = len;
++	while (end > 1 && path[end - 1] == '/') end--;
++	if (end == 1) {
++		errno = EBUSY;  /* "/" itself */
++		return -1;
++	}
++	size_t bstart = end;
++	while (bstart > 0 && path[bstart - 1] != '/') bstart--;
++	size_t blen = end - bstart;
++	if (blen > POUCH_NAME_MAX) {
++		errno = ENAMETOOLONG;
++		return -1;
++	}
++	size_t plen = bstart;
++	while (plen > 1 && path[plen - 1] == '/') plen--;
++
++	long parent = __syscall(SYS_open, POUCH_WALK_FROM_ROOT, path, plen,
++	                        POUCH_OPATH);
++	if (parent < 0)
++		return __syscall_ret(parent);
++	long r = __syscall(SYS_unlink_component, parent, path + bstart, blen,
++	                   (flag & AT_REMOVEDIR) ? POUCH_UNLINK_REMOVEDIR : 0u);
++	__syscall(SYS_close, parent);
++	return __syscall_ret(r);
+ }
+diff a/src/unistd/unlink.c b/src/unistd/unlink.c
+--- a/src/unistd/unlink.c
++++ b/src/unistd/unlink.c
+@@ -1,32 +1,10 @@
+-/* pouch boundary-line replacement (P6-pouch-stratumd-boot 16c-pre).
+- *
+- * unlink() with /srv/ short-circuit. The Thylacine /srv registry
+- * has no file artifact; "unlinking" a /srv/<name> is the wrong
+- * abstraction for tearing down a registered service (close on the
+- * server's listener fd releases the slot). Returning 0 satisfies
+- * the idiomatic-prep "remove any stale socket file" dance without
+- * making any kernel call.
+- *
+- * Non-/srv paths fall through to the original syscall(SYS_unlinkat)
+- * delegation (ENOSYS via SYS_unlinkat = 0xFFFF today).
+- *
+- * See 0014-pouch-srv-stubs.patch for the design rationale. */
+ #include <unistd.h>
+ #include <fcntl.h>
+-#include <string.h>
+ #include "syscall.h"
+ 
+ int unlink(const char *path)
+ {
+-	if (path) {
+-		static const char prefix[] = "/srv/";
+-		if (strncmp(path, prefix, sizeof(prefix) - 1) == 0) {
+-			return 0;
+-		}
+-	}
+-#ifdef SYS_unlink
+-	return syscall(SYS_unlink, path);
+-#else
+-	return syscall(SYS_unlinkat, AT_FDCWD, path, 0);
+-#endif
++	/* pouch (0024): route through the boundary-line unlinkat() -- the
++	 * raw SYS_unlinkat is the unwired 0xFFFF sentinel on Thylacine. */
++	return unlinkat(AT_FDCWD, path, 0);
+ }
+diff a/src/unistd/rmdir.c b/src/unistd/rmdir.c
+--- a/src/unistd/rmdir.c
++++ b/src/unistd/rmdir.c
+@@ -4,9 +4,6 @@
+ 
+ int rmdir(const char *path)
+ {
+-#ifdef SYS_rmdir
+-	return syscall(SYS_rmdir, path);
+-#else
+-	return syscall(SYS_unlinkat, AT_FDCWD, path, AT_REMOVEDIR);
+-#endif
++	/* pouch (0024): route through the boundary-line unlinkat(). */
++	return unlinkat(AT_FDCWD, path, AT_REMOVEDIR);
+ }
+diff a/src/stdio/remove.c b/src/stdio/remove.c
+--- a/src/stdio/remove.c
++++ b/src/stdio/remove.c
+@@ -1,19 +1,16 @@
+ #include <stdio.h>
+ #include <errno.h>
+ #include <fcntl.h>
++#include <unistd.h>
+ #include "syscall.h"
+ 
+ int remove(const char *path)
+ {
+-#ifdef SYS_unlink
+-	int r = __syscall(SYS_unlink, path);
+-#else
+-	int r = __syscall(SYS_unlinkat, AT_FDCWD, path, 0);
+-#endif
+-#ifdef SYS_rmdir
+-	if (r==-EISDIR) r = __syscall(SYS_rmdir, path);
+-#else
+-	if (r==-EISDIR) r = __syscall(SYS_unlinkat, AT_FDCWD, path, AT_REMOVEDIR);
+-#endif
+-	return __syscall_ret(r);
++	/* pouch (0024): route through the boundary-line unlinkat(); the
++	 * kernel answers EISDIR for unlink-of-a-directory (9P unlinkat),
++	 * which selects the rmdir arm exactly as upstream. */
++	int r = unlinkat(AT_FDCWD, path, 0);
++	if (r && errno == EISDIR)
++		r = unlinkat(AT_FDCWD, path, AT_REMOVEDIR);
++	return r;
+ }
+diff a/src/stdio/tmpfile.c b/src/stdio/tmpfile.c
+--- a/src/stdio/tmpfile.c
++++ b/src/stdio/tmpfile.c
+@@ -1,6 +1,7 @@
+ #include <stdio.h>
+ #include <fcntl.h>
+ #include <stdlib.h>
++#include <unistd.h>
+ #include "stdio_impl.h"
+ 
+ #define MAXTRIES 100
+@@ -16,11 +17,13 @@
+ 		/* pouch: route through the patched open() -- see fopen.c. */
+ 		fd = open(s, O_RDWR|O_CREAT|O_EXCL, 0600);
+ 		if (fd >= 0) {
+-#ifdef SYS_unlink
+-			__syscall(SYS_unlink, s);
+-#else
+-			__syscall(SYS_unlinkat, AT_FDCWD, s, 0);
+-#endif
++			/* pouch (0024): the raw SYS_unlinkat is the unwired
++			 * 0xFFFF sentinel -- route through the boundary-line
++			 * unlink(). The open fd keeps the file alive after the
++			 * unlink (the Plan 9-lineage fid-survives-unlink
++			 * property, proven by /pouch-hello-fopen's tmpfile
++			 * leg); the result stays ignored as upstream. */
++			unlink(s);
+ 			f = __fdopen(fd, "w+");
+ 			if (!f) __syscall(SYS_close, fd);
+ 			return f;
+diff a/arch/aarch64/bits/syscall.h.in b/arch/aarch64/bits/syscall.h.in
+--- a/arch/aarch64/bits/syscall.h.in
++++ b/arch/aarch64/bits/syscall.h.in
+@@ -470,3 +470,13 @@
+ #define __NR_tty_acquire 95
+ #define __NR_tty_set_fg 96
+ #define __NR_tty_get_fg 97
++
++/* Task #50 (pouch fopen-create): the FS-mutation kernel syscalls the
++ * 0024 boundary-line arms call (openat O_CREAT -> walk_create; the
++ * unlink family -> unlink_component). Numbers per
++ * kernel/include/thylacine/syscall.h. After a musl re-vendor, extend
++ * 0001's awk filter:
++ *   m["walk_create"]="54"; m["unlink_component"]="58";
++ */
++#define __NR_walk_create 54
++#define __NR_unlink_component 58
