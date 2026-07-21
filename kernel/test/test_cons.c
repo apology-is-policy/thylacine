@@ -700,39 +700,52 @@ void test_cons_poll_readiness(void) {
 // (the cons_poll.tla NoMissedConsPoll violation) would leave pw.ready false and
 // hang a real poller forever. Mirrors test_cons_sak_via_console_mgr's
 // single-runnable sched() dance.
-void test_cons_poll_deferred_wake(void) {
-    cons_test_reset();
-    sched();                                            // console_mgr to SLEEPING
-    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "console_mgr SLEEPING at entry");
-
+// The dance body returns an error string (NULL = ok) instead of asserting, so
+// the caller can unregister the stack hook on EVERY exit -- the #58 structural
+// rule: a failing mid-dance assert's early return LEAKED the registered hook,
+// and the next walk extincted on the reused frame's clobbered magic
+// (EXTINCTION: pw_wake). The mgr is HELD by the caller across the produce/
+// assert legs, so a peer-CPU dispatch cannot consume the pending flag early
+// (the race that fired the leaking assert, ~1-in-50 HVF boots); the helper
+// releases the hold itself when the dance needs the walk.
+static const char *cons_poll_dance(struct poll_waiter *pw) {
     // Poller side: register a hook via cons_poll on the empty ring (register-
     // then-observe). No POLLIN yet; the hook is not ready.
-    struct Rendez r; rendez_init(&r);
-    struct poll_waiter pw; poll_waiter_init(&pw, &r);
-    short rev = cons_poll(POLLIN, &pw);
-    TEST_EXPECT_EQ((int)(rev & POLLIN), 0, "empty cons: no POLLIN at register");
-    TEST_ASSERT(!pw.ready, "poll_waiter not ready before any data");
+    short rev = cons_poll(POLLIN, pw);
+    if ((rev & POLLIN) != 0) return "empty cons: POLLIN at register";
+    if (pw->ready) return "poll_waiter ready before any data";
 
     // Producer (IRQ side): a data byte on the empty->non-empty edge arms
-    // poll_wake_pending + wakes console_mgr (RUNNABLE) -- but does NOT walk the
-    // hook list (deferred). The hook MUST still be not-ready here.
+    // poll_wake_pending + wakes console_mgr -- but does NOT walk the hook list
+    // (deferred). Deterministic under the hold: the mgr cannot consume yet.
     cons_rx_input((u8)'p', false);
-    TEST_ASSERT(cons_test_pollwake_pending(), "data byte armed poll_wake_pending");
-    TEST_ASSERT(!pw.ready, "the IRQ producer did NOT wake the poll hook (deferred)");
-    TEST_EXPECT_EQ(sched_runnable_count(), 1u, "console_mgr RUNNABLE post-byte");
+    if (!cons_test_pollwake_pending()) return "data byte did not arm poll_wake_pending";
+    if (pw->ready) return "the IRQ producer walked the poll hook (must defer)";
 
-    // Yield: console_mgr runs cons_service_deferred -> drains poll_wake_pending ->
-    // poll_waiter_list_wake walks the list -> pw.ready = true, then re-sleeps.
-    sched();
-    TEST_ASSERT(pw.ready, "console_mgr's deferred walk set the poll hook ready");
-    TEST_ASSERT(!cons_test_pollwake_pending(), "console_mgr consumed poll_wake_pending");
-    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "console_mgr re-SLEEPING after the walk");
+    // Release: console_mgr services -> drains poll_wake_pending ->
+    // poll_waiter_list_wake walks the list -> pw->ready. The mgr may run on a
+    // PEER CPU; the bounded sched() loop just yields until the walk lands.
+    cons_test_mgr_hold(false);
+    for (int i = 0; i < 100000 && !pw->ready; i++) sched();
+    if (!pw->ready) return "console_mgr's deferred walk never set the poll hook ready";
+    if (cons_test_pollwake_pending()) return "poll_wake_pending not consumed";
 
     // The ring now holds the byte -> POLLIN ready on re-sample.
-    TEST_ASSERT((cons_poll(POLLIN, NULL) & POLLIN) != 0,
-                "buffered data -> POLLIN ready on re-sample");
+    if ((cons_poll(POLLIN, NULL) & POLLIN) == 0)
+        return "buffered data: POLLIN not ready on re-sample";
+    return NULL;
+}
 
-    poll_waiter_list_unregister(&pw);                   // NoStaleHook (stack waiter)
+void test_cons_poll_deferred_wake(void) {
+    cons_test_mgr_hold(true);           // deterministic dance (#58)
+    cons_test_reset();
+
+    struct Rendez r; rendez_init(&r);
+    struct poll_waiter pw; poll_waiter_init(&pw, &r);
+    const char *err = cons_poll_dance(&pw);
+    poll_waiter_list_unregister(&pw);   // NoStaleHook on EVERY path (#58)
+    cons_test_mgr_hold(false);          // idempotent (the err path may still hold)
+    TEST_ASSERT(err == NULL, err ? err : "unreachable");
     cons_test_reset();
 }
 
@@ -1215,31 +1228,44 @@ void test_cons_drain_close_and_reopen_epoch(void) {
 // instance): a drain byte's empty->non-empty edge arms drain poll_wake_pending
 // + wakes console_mgr; the hook is walked in process context only. A disarmed
 // drain is POLLIN-ready (EOF is readable).
+// The drain twin of cons_poll_dance -- same #58 shape: error-string returns so
+// the caller unregisters on EVERY exit; the mgr held across the produce/assert
+// legs (THIS test's "byte armed the drain poll edge" assert is the one a
+// peer-CPU mgr dispatch raced on 2026-07-21 -- the failing assert's early
+// return leaked the hook on the DRAIN list, and devdev.renderer_gate's later
+// walk extincted on the reused frame: EXTINCTION: pw_wake).
+static const char *cons_drain_dance(struct poll_waiter *pw) {
+    short rev = cons_drain_poll(POLLIN, pw);
+    if ((rev & POLLIN) != 0) return "empty drain: POLLIN at register";
+    if (pw->ready) return "hook ready before any byte";
+
+    cons_output_write("k", 1);
+    if (!cons_test_drain_pollwake_pending()) return "byte did not arm the drain poll edge";
+    if (pw->ready) return "the producer walked the drain hook (must defer)";
+
+    cons_test_mgr_hold(false);
+    for (int i = 0; i < 100000 && !pw->ready; i++) sched();
+    if (!pw->ready) return "console_mgr's deferred walk never set the drain hook ready";
+    if (cons_test_drain_pollwake_pending()) return "the drain poll edge was not consumed";
+    if ((cons_drain_poll(POLLIN, NULL) & POLLIN) == 0)
+        return "buffered drain byte: POLLIN not ready on re-sample";
+    return NULL;
+}
+
 void test_cons_drain_poll_deferred_wake(void) {
     cons_test_reset();
     cons_test_echo_capture(true);
-    sched();
-    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "console_mgr SLEEPING at entry");
+    // The open-assert precedes the hold + the hook: a failure here latches
+    // nothing and leaks nothing.
     TEST_EXPECT_EQ(cons_drain_open(), 0, "drain arms");
+    cons_test_mgr_hold(true);           // deterministic dance (#58)
 
     struct Rendez r; rendez_init(&r);
     struct poll_waiter pw; poll_waiter_init(&pw, &r);
-    short rev = cons_drain_poll(POLLIN, &pw);
-    TEST_EXPECT_EQ((int)(rev & POLLIN), 0, "empty drain: no POLLIN at register");
-    TEST_ASSERT(!pw.ready, "hook not ready before any byte");
-
-    cons_output_write("k", 1);
-    TEST_ASSERT(cons_test_drain_pollwake_pending(), "byte armed the drain poll edge");
-    TEST_ASSERT(!pw.ready, "producer did NOT walk the hook (deferred)");
-    TEST_EXPECT_EQ(sched_runnable_count(), 1u, "console_mgr RUNNABLE post-byte");
-
-    sched();
-    TEST_ASSERT(pw.ready, "console_mgr's deferred walk set the drain hook ready");
-    TEST_ASSERT(!cons_test_drain_pollwake_pending(), "drain poll edge consumed");
-    TEST_ASSERT((cons_drain_poll(POLLIN, NULL) & POLLIN) != 0,
-                "buffered drain byte -> POLLIN on re-sample");
-
-    poll_waiter_list_unregister(&pw);
+    const char *err = cons_drain_dance(&pw);
+    poll_waiter_list_unregister(&pw);   // NoStaleHook on EVERY path (#58)
+    cons_test_mgr_hold(false);          // idempotent (the err path may still hold)
+    TEST_ASSERT(err == NULL, err ? err : "unreachable");
 
     // Disarmed -> POLLIN (EOF readable), so a parked poller never strands.
     cons_drain_close();

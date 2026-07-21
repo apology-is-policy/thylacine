@@ -672,12 +672,32 @@ static int cons_data_ready(void *arg) {
     return cons_count_load() > 0u;
 }
 
+// #58 test-only hold: while set, console_mgr's wake cond reads false, so a
+// woken mgr RE-PARKS without consuming any pending flag (the flags persist;
+// the release path wakes explicitly, so no wake is lost -- I-9 intact). Lets
+// the deferred-wake tests run their register/produce/assert dance
+// DETERMINISTICALLY on SMP: without it, a woken mgr dispatched on a PEER CPU
+// consumed the pending flag between the producer byte and the assert
+// (~1-in-50 HVF boots), the TEST_ASSERT early-return then LEAKED the test's
+// stack poll_waiter on the list, and the next walk extincted on the reused
+// frame's clobbered magic (EXTINCTION: pw_wake, 2026-07-21). Production never
+// sets it -- the compiled-in cons_test_* family posture. Plain bool + the
+// __atomic_* builtins (the tree idiom; the builtins reject _Atomic-qualified
+// objects).
+static bool g_cons_mgr_hold;
+
 // cond: a deferred console action is pending (a Ctrl-C interrupt OR an A-4c-2
 // SAK). Same lockless-under-Rendez-lock discipline as cons_data_ready.
 static int cons_mgr_pending(void *arg) {
     (void)arg;
+    if (__atomic_load_n(&g_cons_mgr_hold, __ATOMIC_ACQUIRE)) return 0; // #58
     return cons_intr_load() || cons_sak_load() || cons_pollwake_load()
         || drain_pollwake_load();   // G-4: a drain POLLIN edge awaits the walk
+}
+
+void cons_test_mgr_hold(bool on) {
+    __atomic_store_n(&g_cons_mgr_hold, on, __ATOMIC_RELEASE);
+    if (!on) wakeup(&g_cons_mgr_rendez);   // release re-arms the mgr
 }
 
 // Service all deferred console actions in process context: drain the flags

@@ -488,6 +488,22 @@ runtime witness.
   false in production (the emit path is then one never-taken branch + `uart_putc`).
   It is always-compiled, consistent with the other `cons_test_*` hooks; #71 gates
   the file's test-support uniformly under `KERNEL_TESTS` later.
+- **`cons_test_mgr_hold` (#58)** — the deterministic-dance hold: while set,
+  `cons_mgr_pending` reads false, so a woken `console_mgr` re-parks WITHOUT
+  consuming any pending flag (the flags persist; the release path wakes the
+  rendez explicitly — no lost wake, I-9 intact; production never sets it, so
+  the cond is byte-identical there). Exists because the two deferred-wake
+  tests' single-runnable dance was racy on SMP: a woken mgr dispatched on a
+  PEER CPU consumed the pending flag between the producer byte and the assert
+  (~1-in-50 HVF boots), and the failing `TEST_ASSERT`'s early return LEAKED
+  the test's stack `poll_waiter` on the list — the next walk extincted on the
+  reused frame's clobbered magic (`EXTINCTION: pw_wake`, poll.c's stale-hook
+  guard, 2026-07-21 — the guard caught real corruption; the corruption was a
+  test-lifetime leak, not a production defect). Both tests now also run their
+  dance through an error-string helper so the hook is unregistered on EVERY
+  exit path — the structural rule: a stack poll hook never outlives its test.
+  Direct-drive via `cons_test_service_deferred` bypasses the cond and is never
+  blocked by the hold.
 - **The PL011 RX IRQ handler MUST clear ICR *before* draining the FIFO (#172).**
   `arch/arm64/uart.c::uart_rx_handler` clears `RXIC|RTIC` at entry, then drains
   (bounded by `UART_RX_DRAIN_MAX=64`). QEMU's PL011 sets RXRIS on *receive* and
