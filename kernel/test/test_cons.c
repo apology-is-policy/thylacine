@@ -1049,47 +1049,54 @@ void test_cons_cook_mode_flip_fresh_line(void) {
 // empty->non-empty edge exactly once + waking console_mgr, whose deferred walk
 // makes the hook ready (the cons_poll.tla I-9 relay, driven by a multi-byte
 // flush rather than the single-byte 8a path).
-void test_cons_cook_canonical_poll_edge(void) {
-    cons_test_reset();
-    sched();                                            // console_mgr to SLEEPING
-    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "console_mgr SLEEPING at entry");
-    cons_test_set_termios(CONS_ICANON | CONS_ISIG);     // cooked, no echo
-
-    struct Rendez r; rendez_init(&r);
-    struct poll_waiter pw; poll_waiter_init(&pw, &r);
-    short rev = cons_poll(POLLIN, &pw);
-    TEST_EXPECT_EQ((int)(rev & POLLIN), 0, "empty cons: no POLLIN at register");
-    TEST_ASSERT(!pw.ready, "poll_waiter not ready before any line");
+// The canonical-mode twin of cons_poll_dance -- the same #58 shape (held mgr +
+// error-string returns + unregister-on-every-exit in the caller): its
+// post-Enter pending/!ready asserts carried the identical peer-CPU-dispatch
+// race, and any mid-dance failure leaked the hook.
+static const char *cons_cook_edge_dance(struct poll_waiter *pw) {
+    short rev = cons_poll(POLLIN, pw);
+    if ((rev & POLLIN) != 0) return "empty cons: POLLIN at register";
+    if (pw->ready) return "poll_waiter ready before any line";
 
     // Buffer "hi": canonical mode holds it in line[]; the ring stays EMPTY, so
     // there is NO poll edge and console_mgr is NOT woken (the bytes have not
     // entered the ring -- POSIX canonical: a poller waits for a full line).
     cons_rx_input((u8)'h', false);
     cons_rx_input((u8)'i', false);
-    TEST_ASSERT(!cons_test_pollwake_pending(), "buffered chars: no ring edge yet");
-    TEST_ASSERT(!pw.ready, "no poll wake while the line is still assembling");
-    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "console_mgr still SLEEPING (no edge)");
+    if (cons_test_pollwake_pending()) return "buffered chars armed a ring edge";
+    if (pw->ready) return "poll wake fired while the line was still assembling";
 
     // Enter: the whole line ("hi" + NL) flushes to the ring in ONE call, arming
     // the empty->non-empty edge once + waking console_mgr (deferred -- the IRQ
-    // producer does NOT walk the hook).
+    // producer does NOT walk the hook). Deterministic under the hold.
     cons_rx_input((u8)'\n', false);
-    TEST_ASSERT(cons_test_pollwake_pending(), "Enter flushed the line -> poll edge armed");
-    TEST_ASSERT(!pw.ready, "the IRQ producer did NOT walk the hook (deferred)");
-    TEST_EXPECT_EQ(sched_runnable_count(), 1u, "console_mgr RUNNABLE post-line");
+    if (!cons_test_pollwake_pending()) return "Enter did not arm the poll edge";
+    if (pw->ready) return "the IRQ producer walked the hook (must defer)";
 
-    sched();                                            // mgr walks the hook list
-    TEST_ASSERT(pw.ready, "console_mgr's deferred walk set the hook ready");
-    TEST_ASSERT(!cons_test_pollwake_pending(), "console_mgr consumed poll_wake_pending");
-    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "console_mgr re-SLEEPING after the walk");
+    cons_test_mgr_hold(false);
+    for (int i = 0; i < 100000 && !pw->ready; i++) sched();
+    if (!pw->ready) return "console_mgr's deferred walk never set the hook ready";
+    if (cons_test_pollwake_pending()) return "poll_wake_pending not consumed";
 
     // The ring holds the whole delivered line.
     u8 buf[8];
     long n = cons_drain(buf, sizeof(buf));
-    TEST_EXPECT_EQ(n, 3L, "the ring holds the delivered line hi+NL");
-    TEST_ASSERT(buf[0]=='h' && buf[1]=='i' && buf[2]=='\n', "line is hi\\n");
+    if (n != 3L) return "the ring does not hold the delivered line hi+NL";
+    if (!(buf[0]=='h' && buf[1]=='i' && buf[2]=='\n')) return "line is not hi\\n";
+    return NULL;
+}
 
-    poll_waiter_list_unregister(&pw);                   // NoStaleHook (stack waiter)
+void test_cons_cook_canonical_poll_edge(void) {
+    cons_test_mgr_hold(true);           // deterministic dance (#58)
+    cons_test_reset();
+    cons_test_set_termios(CONS_ICANON | CONS_ISIG);     // cooked, no echo
+
+    struct Rendez r; rendez_init(&r);
+    struct poll_waiter pw; poll_waiter_init(&pw, &r);
+    const char *err = cons_cook_edge_dance(&pw);
+    poll_waiter_list_unregister(&pw);   // NoStaleHook on EVERY path (#58)
+    cons_test_mgr_hold(false);          // idempotent (the err path may still hold)
+    TEST_ASSERT(err == NULL, err ? err : "unreachable");
     cons_settle_mgr();
 }
 
