@@ -824,10 +824,13 @@ impl TPciInfo {
     }
 }
 
-// t_pci_claim — claim the first VirtIO-PCI function matching `virtio_device_id`
-// (1 = net, 4 = rng, ...). Returns a non-negative KOBJ_PCI handle (fixed rights
-// R|W|MAP, non-transferable) on success, -1 on cap-missing / not-found /
-// already-claimed / BAR-assign failure. Requires CAP_HW_CREATE.
+// t_pci_claim — the arg packs `virtio_device_id | nth<<32` (G-7c): the low 32
+// bits are the VIRTIO device id (1 = net, 4 = rng, 18 = input, ...), the high
+// 32 the 0-based enumeration-order instance selecting the nth same-id
+// function (a bare id is nth 0 = the first match; `PciDev::claim_nth` packs
+// this). Returns a non-negative KOBJ_PCI handle (fixed rights R|W|MAP,
+// non-transferable) on success, -1 on cap-missing / not-found (an over-large
+// nth included) / already-claimed / BAR-assign failure. Requires CAP_HW_CREATE.
 //
 // Safety: claiming a function gives the caller exclusive control of a real
 // device; the kernel does every check (cap, exclusivity, BAR assignment).

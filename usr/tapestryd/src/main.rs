@@ -147,6 +147,11 @@ impl Driver for Tapestryd {
         let mut tablet: Option<InputDev> = None;
         let windows = [(0u32, KBD_BAR_WINDOW_VA, KBD_DMA_VA), (1u32, TAB_BAR_WINDOW_VA, TAB_DMA_VA)];
         for (nth, bar_va, dma_va) in windows {
+            // Probe BOTH instances unconditionally (G-7c audit F5): a
+            // bring-up fault on nth 0 (FEATURES_OK, DMA, eventq size)
+            // must not cost the other function too -- a claim on an
+            // ABSENT nth fails in microseconds, so there is nothing to
+            // save by breaking early. probe() logs its own failure arm.
             match InputDev::probe(nth, bar_va, dma_va) {
                 Ok(dev) => {
                     if dev.supports_abs() {
@@ -159,13 +164,11 @@ impl Driver for Tapestryd {
                         kbd = Some(dev);
                     }
                 }
-                Err(_) => {
-                    if nth == 0 {
-                        say!("tapestryd: no input functions (input-less)");
-                    }
-                    break; // enumeration is dense: no nth+1 without nth
-                }
+                Err(_) => {}
             }
+        }
+        if kbd.is_none() && tablet.is_none() {
+            say!("tapestryd: no input functions (input-less)");
         }
         let tab_max = tablet
             .as_ref()

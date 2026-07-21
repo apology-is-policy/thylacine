@@ -111,14 +111,18 @@ SDL window events.
 
 **G-7c — the pointer path.** `TEV_PTR_MOVE` carries the surface-relative
 position packed `x<<16|y` (TAPESTRY §18.4). In relative mode (Quake
-mouse-look) the pump computes deltas DRIVER-side from successive positions
-and feeds `SDL_SendMouseMotion(relative=1, dx, dy)` — SDL core's warp
-emulation needs a warpable host cursor this backend lacks, so the video
-init installs a `SetRelativeMouseMode` hook that simply ACCEPTS the mode
-(keeping core off the warp path); the `relative_mode` read from the pump
-thread is benignly racy (a mode flip mid-motion skews one delta,
-self-corrects on the next). Non-relative mode forwards absolute positions
-(SDL derives `xrel/yrel` internally). `TEV_PTR_BTN` maps evdev
+mouse-look) translation computes deltas DRIVER-side from successive
+positions and feeds `SDL_SendMouseMotion(relative=1, dx, dy)` — SDL
+core's warp emulation needs a warpable host cursor this backend lacks,
+so the video init installs a `SetRelativeMouseMode` hook that simply
+ACCEPTS the mode (keeping core off the warp path). **Threading (the G-7c
+audit F2 correction)**: ALL translation — the `relative_mode` read,
+`ptr_x/ptr_y/ptr_valid`, every `SDL_SendMouse*` — runs on the SDL MAIN
+thread inside `PumpEvents` (which drains the pump thread's ring); the
+pump thread itself never touches SDL state. There is no cross-thread
+race here, and translation must NOT be moved onto the pump thread —
+`SDL_Mouse` state is unsynchronized. Non-relative mode forwards absolute
+positions (SDL derives `xrel/yrel` internally). `TEV_PTR_BTN` maps evdev
 `BTN_LEFT/RIGHT/MIDDLE/SIDE/EXTRA` → `SDL_BUTTON_LEFT/RIGHT/MIDDLE/X1/X2`;
 `TEV_SCROLL`'s signed delta feeds `SDL_SendMouseWheel` (positive = up).
 Edge behavior inherited from the tablet: the compositor clamps

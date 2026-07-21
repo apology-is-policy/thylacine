@@ -202,9 +202,12 @@ static void THYLACINE_HandleEvent(SDL_Window *window, SDL_WindowData *wd,
         /* value packs the surface-relative x<<16|y (section 18.4). In
          * relative mode (Quake mouse-look) deltas come from successive
          * positions -- driver-side, since SDL's warp emulation needs a
-         * warpable cursor this backend lacks. The relative_mode read from
-         * the pump thread is benignly racy (a mode flip mid-motion skews
-         * one delta, self-corrects on the next). */
+         * warpable cursor this backend lacks. Translation (this read,
+         * ptr_x/ptr_y/ptr_valid, every SDL_SendMouse*) runs on the SDL
+         * MAIN thread only -- PumpEvents drains the pump thread's ring;
+         * the pump thread itself never touches SDL state (G-7c audit F2:
+         * do NOT move translation onto the pump thread -- SDL_Mouse
+         * state is unsynchronized). */
         int x = (int)(ev->value >> 16);
         int y = (int)(ev->value & 0xffff);
         if (SDL_GetMouse()->relative_mode) {
