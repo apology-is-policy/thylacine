@@ -130,6 +130,26 @@ out-of-surface positions to the far edge, so relative deltas die at the
 boundary (the classic absolute-device limit — irrelevant for QMP/VNC
 injection, which is positional).
 
+**#51 — the FRAME-paced present (default ON).** A 60 Hz compositor can
+only show 60 fps; presents beyond that overwrite un-composed pixels and
+spin a vCPU (the uncapped timedemo ran ~600 fps with a 122–600 HVF
+variance). `UpdateWindowFramebuffer` now waits for the compositor's next
+FRAME tick before presenting: the PUMP thread bumps `frame_seq` +
+signals `frame_cv` per `TEV_FRAME` it reads off the fid (driver-private
+fields — the F2 rule keeps the pump off SDL state; FRAME no longer rides
+the ring), and the present path does ONE `pthread_cond_timedwait`
+bounded at 50 ms wall-clock (the G-5 F1 lesson: never a wake-count
+bound). The bump cannot live at translation — the present's wait runs on
+the main thread and would starve `PumpEvents` into timeout-only pacing.
+Degradations are all bounded: a frozen/degraded frame clock (clock-rate
+ctl, test-mode) or a HIDDEN pane (visible-only FRAME emission) paces at
+~20 fps off the timeout — background throttling for free; teardown (the
+pump exits after the retire, no further signals) is bounded by the same
+50 ms; a spurious wake presents one tick early (pacing slack, never
+correctness). `SDL_THYLACINE_NOPACE=1` opts out (benchmarks). The
+ls-gfx-quake fps line becomes STABLE ≈ clock_hz — still the
+deterministic 969-presents proof, minus the variance.
+
 ## `0022-pouch-nanosleep`
 
 musl's `__clock_nanosleep` (which `nanosleep`/`usleep`/`clock_nanosleep`

@@ -43,6 +43,17 @@ typedef struct SDL_WindowData
     int ptr_x;
     int ptr_y;
     int ptr_valid;
+    /* #51 frame pacing: the pump thread bumps frame_seq + signals on
+     * every TEV_FRAME it reads off the fid (driver-private fields -- the
+     * pump must never touch SDL state, the G-7c F2 rule); the present
+     * path timed-waits for the seq to advance past presented_seq. The
+     * bump CANNOT live at translation (main thread): the present's wait
+     * would then starve PumpEvents and self-deadlock into pure-timeout
+     * pacing. */
+    pthread_cond_t frame_cv;
+    uint32_t frame_seq;
+    uint32_t presented_seq;
+    int nopace;
 } SDL_WindowData;
 
 typedef struct SDL_VideoData

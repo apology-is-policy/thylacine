@@ -26,6 +26,8 @@
 #include "../../events/SDL_events_c.h"
 #include "../../events/SDL_mouse_c.h"
 
+#include <time.h>
+
 #include "SDL_thylacinevideo.h"
 #include "SDL_thylacineevents_c.h"
 
@@ -239,6 +241,37 @@ static int THYLACINE_UpdateWindowFramebuffer(_THIS, SDL_Window *window,
             n++;
         }
     }
+    /* #51 frame pacing (default ON; SDL_THYLACINE_NOPACE=1 opts out --
+     * benchmarks): wait for the compositor's next FRAME tick before the
+     * present. A 60 Hz compositor can only SHOW 60 fps -- presents
+     * beyond that overwrite un-composed pixels and spin a vCPU (the
+     * uncapped timedemo's 600 fps + its 122-600 HVF variance). The pump
+     * thread bumps frame_seq per TEV_FRAME (never the main thread --
+     * this wait would starve PumpEvents and self-deadlock into
+     * timeout-only pacing). ONE timed wait, 50 ms wall-clock bound (the
+     * G-5 F1 lesson: never a wake-count bound): a degraded/frozen frame
+     * clock (clock-rate ctl, test-mode) or a HIDDEN pane (visible-only
+     * FRAME emission) degrades to ~20 fps timeout pacing -- background
+     * throttling for free -- and teardown (the pump exits after the
+     * retire, no further signals) is bounded by the same 50 ms. A
+     * spurious wake presents one tick early: pacing slack, never a
+     * correctness issue. */
+    if (!wd->nopace && wd->pump_started) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_nsec += 50 * 1000000L;
+        if (ts.tv_nsec >= 1000000000L) {
+            ts.tv_sec += 1;
+            ts.tv_nsec -= 1000000000L;
+        }
+        pthread_mutex_lock(&wd->lock);
+        if (wd->frame_seq == wd->presented_seq) {
+            pthread_cond_timedwait(&wd->frame_cv, &wd->lock, &ts);
+        }
+        wd->presented_seq = wd->frame_seq;
+        pthread_mutex_unlock(&wd->lock);
+    }
+
     /* n == 0 (no rects, too many, or all clipped away) = full-surface. */
     if (thyla_tap_present(&wd->tap, tr, n) != 0) {
         return SDL_SetError("thylacine: present failed");

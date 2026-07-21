@@ -56,6 +56,15 @@ static void *THYLACINE_PumpMain(void *arg)
         }
         pthread_mutex_lock(&wd->lock);
         for (i = 0; i < n; i++) {
+            if (tmp[i].kind == THYLA_TEV_FRAME) {
+                /* #51: FRAME is the pacing signal, consumed HERE (the
+                 * present path waits on it); it never rides the ring --
+                 * translation dropped it anyway, and a paced app's
+                 * blocked present must not fill the ring with ticks. */
+                wd->frame_seq++;
+                pthread_cond_signal(&wd->frame_cv);
+                continue;
+            }
             if (wd->q_len >= THYLACINE_EVQ_CAP) {
                 break; /* bounded: drop the newest */
             }
@@ -73,7 +82,13 @@ int THYLACINE_StartEventPump(SDL_Window *window)
     if (pthread_mutex_init(&wd->lock, NULL) != 0) {
         return -1;
     }
+    if (pthread_cond_init(&wd->frame_cv, NULL) != 0) {
+        pthread_mutex_destroy(&wd->lock);
+        return -1;
+    }
+    wd->nopace = (SDL_getenv("SDL_THYLACINE_NOPACE") != NULL);
     if (pthread_create(&wd->pump, NULL, THYLACINE_PumpMain, wd) != 0) {
+        pthread_cond_destroy(&wd->frame_cv);
         pthread_mutex_destroy(&wd->lock);
         return -1;
     }
@@ -104,6 +119,7 @@ void THYLACINE_StopEventPump(SDL_Window *window)
      * touches event_fd concurrently with the pump — the join races nothing. */
     thyla_tap_request_close(&wd->tap);
     pthread_join(wd->pump, NULL);
+    pthread_cond_destroy(&wd->frame_cv);
     pthread_mutex_destroy(&wd->lock);
     wd->pump_started = 0;
 }
