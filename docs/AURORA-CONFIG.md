@@ -222,7 +222,14 @@ byte-unchanged; pure aux.
    acking would reweave to the pane size while the app renders its fixed
    frame into the corner (the pre-fix zoomed-Quake top-left artifact).
    Track B's config file later exposes `zoom-policy` with letterbox as the
-   default value.
+   default value. **Refinement (same day, from live play)**: letterbox
+   applies to FIT-INSIDE surfaces only (the whole-frame-presenter class);
+   an OVERFLOWING surface keeps the pre-fork-2 damage-clipped CROP — a
+   full-slot scaled redraw is unsound for an accumulator client (aurora's
+   cell-diff over rotating patchwork slots → the "utopia pane flipping"
+   bug the first cut shipped). Aurora's CONFIGURE-tracking resize (re-grid
+   + winsize propagation) is the real close of the oversized-console case
+   — tracked as task #55.
 
 ---
 

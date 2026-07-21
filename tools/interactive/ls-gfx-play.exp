@@ -107,6 +107,12 @@ lc_expect "Quake Initialized" "engine init (pak loaded, SW renderer up)"
 # HVF; the in-game leg below hard-asserts signon regardless).
 sleep 6
 
+# The SPLIT-state dump (logged, not gated): aurora cropped on the left,
+# Quake on the right -- the fork-2-refinement visual (the "utopia pane"
+# live-play regression's standing artifact).
+if {[gfx_dump_or_fail /tmp/lsplay-split.png] ne ""} { lc_fail "screendump (split) failed" }
+lc_step "split-state dump at /tmp/lsplay-split.png"
+
 # The new pane already holds focus; zoom it fullscreen (G-6c Super plane).
 qk_chord "meta_l+f"
 sleep 1

@@ -1122,17 +1122,28 @@ impl Comp {
             Some(s) => s.h,
             None => return None,
         };
-        if sw != content.w || sh_full != content.h {
-            // Fork 2 (user-voted 2026-07-21): a fixed-size surface
-            // LETTERBOXES into its pane -- aspect-preserving scale,
-            // centered, nearest-neighbor (crisp for the retro-game
-            // case; cheap integer math). Damage sub-rects are ignored:
-            // any present redraws the FULL scaled rect (a scaled
-            // damage rect would need edge-correct rounding for no
-            // gain -- fixed-size clients present whole frames). The
-            // bars around the rect are the pane background, painted
-            // by the chrome pass. The geometry comes from the SAME
-            // letterbox() ptr_hit inverts -- one authority, no drift.
+        if (sw != content.w || sh_full != content.h)
+            && sw <= content.w
+            && sh_full <= content.h
+        {
+            // Fork 2 (user-voted 2026-07-21): a FIT-INSIDE fixed-size
+            // surface LETTERBOXES into its pane -- aspect-preserving
+            // scale, centered, nearest-neighbor (crisp for the
+            // retro-game case; cheap integer math). Damage sub-rects
+            // are ignored: any present redraws the FULL scaled rect --
+            // sound ONLY for whole-frame presenters (the SDL class),
+            // which is why an OVERFLOWING surface (the gate above)
+            // takes the damage-clipped CROP path below instead: an
+            // accumulator client's individual slots are PATCHWORK
+            // (aurora's cell-diff over rotating slots), and a full-
+            // slot redraw composes alternating patchwork frames --
+            // the live-play "utopia pane flipping" bug. Aurora's
+            // pane-tracking resize is the real close (tracked); until
+            // then the oversized-console case keeps its pre-fork-2
+            // crop. The bars around a letterboxed rect are the pane
+            // background, painted by the chrome pass. The geometry
+            // comes from the SAME letterbox() ptr_hit inverts -- one
+            // authority, no drift.
             if content.w == 0 || content.h == 0 || sh_full == 0 || sw == 0 {
                 return None;
             }
@@ -1609,6 +1620,14 @@ impl Comp {
         let s = self.surf(n)?;
         if s.w == 0 || s.h == 0 || c.w == 0 || c.h == 0 {
             return None;
+        }
+        if s.w > c.w || s.h > c.h {
+            // Overflow = the CROP placement (see blit_composed_pixels):
+            // surface (0,0) at the content origin, damage-clipped. The
+            // inverse is the plain subtract + far-edge clamp.
+            let sx = (px - c.x).min(s.w - 1).min(0xFFFF) as u16;
+            let sy = (py - c.y).min(s.h - 1).min(0xFFFF) as u16;
+            return Some((n, sx, sy));
         }
         let (ox, oy, dw2, dh2) = Self::letterbox(s.w, s.h, c.w, c.h);
         // Content-relative, clamped into the letterbox rect, unscaled.

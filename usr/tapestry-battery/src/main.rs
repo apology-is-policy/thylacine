@@ -152,6 +152,20 @@ fn fill(surf: &mut Surface, color: u32) {
     }
 }
 
+
+/// The compositor's fork-2 placement, mirrored for sample points: a
+/// fit-inside surface LETTERBOXES (centered -- the pane center always
+/// samples the fill); an OVERFLOWING one CROPS top-left (sample the
+/// covered-region center). Must track Comp::blit_composed_pixels'
+/// discriminator exactly.
+fn sample_point(px: u32, py: u32, pw: u32, ph: u32, sw: u32, sh: u32) -> (u32, u32) {
+    if sw <= pw && sh <= ph {
+        (px + pw / 2, py + ph / 2)
+    } else {
+        (px + pw.min(sw) / 2, py + ph.min(sh) / 2)
+    }
+}
+
 fn overlap(a: PaneInfo, b: PaneInfo) -> bool {
     a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
 }
@@ -608,14 +622,11 @@ pub extern "C" fn rs_main() -> i64 {
         say!("tapestry-battery: FAIL move heal presents");
         return 1;
     }
-    // Fork 2 (letterbox): a size-mismatched surface scales
-    // aspect-preserving and CENTERS in its pane content, so the pane
-    // CENTER always lands inside the blit (the scaled rect is centered
-    // and the fills are solid). The pre-fork-2 top-left anchor needed
-    // the covered-region min() sample instead.
-    say!("battery: move OK {} {} {} {}",
-        ma.x + ma.w / 2, ma.y + ma.h / 2,
-        mb.x + mb.w / 2, mb.y + mb.h / 2);
+    // Fork-2 placement-aware samples (see sample_point): fit-inside
+    // letterboxes (pane center), overflow crops (covered-region center).
+    let (sax, say_) = sample_point(ma.x, ma.y, ma.w, ma.h, a.w, a.h);
+    let (sbx, sby) = sample_point(mb.x, mb.y, mb.w, mb.h, b.w, b.h);
+    say!("battery: move OK {} {} {} {}", sax, say_, sbx, sby);
     nap(DUMP_MS);
 
     // Focus leg 1: A takes focus; a QMP-typed key must arrive on A's
@@ -723,8 +734,8 @@ pub extern "C" fn rs_main() -> i64 {
         say!("tapestry-battery: FAIL hold present");
         return 1;
     }
-    say!("battery: hold ready {} {}",
-        mb.x + mb.w / 2, mb.y + mb.h / 2);
+    let (hbx, hby) = sample_point(mb.x, mb.y, mb.w, mb.h, b.w, b.h);
+    say!("battery: hold ready {} {}", hbx, hby);
     if !wait_key(&mut a, "hold-sync") {
         return 1;
     }
