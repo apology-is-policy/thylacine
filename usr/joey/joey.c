@@ -2519,6 +2519,30 @@ int main(void) {
     }
     t_putstr("joey: /ambush-probe reaped status=0; Ambush debugger runs (or fork-absent SKIP)\n");
 
+    // === /dap-probe orchestration (Go Stage 8e-3: the live DAP round-trip) ===
+    // Prove parley::dap + parley::dapc drive a REAL ambush over the stdio DAP
+    // transport (`ambush dap-stdio`), not just against in-process self-tests:
+    // spawn ambush, launch /ambush-child, breakpoint main.parkLoop, continue,
+    // and read main.Sentinel back through the DAP inspect chain. It is ALWAYS
+    // baked (a native Rust probe); the OPTIONAL /ambush + /ambush-child it drives
+    // are baked only when both forks were present at build, so an unbaked ambush
+    // SKIPs (exit 0) and a present-but-broken DAP path FAILS the boot (the 8e-3
+    // regression sentinel). Pre-pivot (bare-name spawn via the cpio cwd, like
+    // /ambush-probe).
+    const char dap_probe_name[] = "dap-probe";
+    long dapp_pid = t_spawn(dap_probe_name, sizeof(dap_probe_name) - 1);
+    if (dapp_pid <= 0) {
+        t_putstr("joey: t_spawn(\"dap-probe\") FAILED\n");
+        return 1;
+    }
+    int dapp_status = -1;
+    long dapp_reaped = t_wait_pid_for((int)dapp_pid, 0, &dapp_status);
+    if (dapp_reaped != dapp_pid || dapp_status != 0) {
+        t_putstr("joey: /dap-probe orchestration FAILED\n");
+        return 1;
+    }
+    t_putstr("joey: /dap-probe reaped status=0; parley DAP client drives ambush (or fork-absent SKIP)\n");
+
     // === /go-hello orchestration (GOOS=thylacine Go-port, Stage 1) ===
     // The first GOOS=thylacine Go binary: a runtime-direct `println` hello.
     // Spawning it drives the real SVC ABI end-to-end -- the SysV initial-stack
