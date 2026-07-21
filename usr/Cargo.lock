@@ -333,6 +333,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dap-probe"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+ "parley",
+]
+
+[[package]]
 name = "debug-child"
 version = "0.1.0"
 dependencies = [
