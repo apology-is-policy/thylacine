@@ -702,6 +702,35 @@ build_go_goroot() {
         echo "==> gopls: fork source not found at $gopls_src -- skipping (set GOPLSFORK)"
     fi
 
+    # Go Stage 8e-3e: the Ambush debugger + a debuggable target for nora's
+    # in-editor `:debug` surface. nora runs POST-pivot, so unlike /ambush-probe
+    # (pre-pivot, ramfs) these must be disk-backed at /goroot/bin like gopls --
+    # dev tools on the login PATH, coupled to the toolchain. Built HERE (not
+    # copied from build_ambush) so the bake is self-contained + ordered before
+    # populate_stratum_pool; the ramfs copy (build_ambush) still ships for the
+    # pre-pivot /ambush-probe. ambush is STRIPPED (it reads the TARGET's debug
+    # info, not its own); ambush-child keeps its DWARF (it IS the debuggee). Each
+    # skips cleanly if its source is absent (nora's :debug reports "not
+    # installed").
+    local ambush_src="${AMBUSHFORK:-$HOME/projects/ambush}"
+    if [[ -d "$ambush_src/cmd/dlv" ]]; then
+        echo "==> Building Ambush for /goroot/bin (GOOS=thylacine, stripped, fork=$ambush_src)"
+        ( cd "$ambush_src" && GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 \
+            "$go_bin" build -mod=vendor -ldflags="-s -w" -o "$stage/bin/ambush" ./cmd/dlv ) \
+            || { echo "==> Ambush /goroot bake FAILED" >&2; return 1; }
+        echo "==> Ambush (/goroot) built: $stage/bin/ambush ($(du -h "$stage/bin/ambush" | cut -f1 | tr -d ' '))"
+        ledger "ambush: Delve port -> /goroot/bin (Stage 8e-3e nora :debug)"
+        if [[ -d "$REPO_ROOT/usr/ambush-child" ]]; then
+            echo "==> Building ambush-child (debuggee, unstripped) for /goroot/bin"
+            ( cd "$REPO_ROOT/usr/ambush-child" && GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 \
+                "$go_bin" build -o "$stage/bin/ambush-child" . ) \
+                || { echo "==> ambush-child /goroot bake FAILED" >&2; return 1; }
+            echo "==> ambush-child (/goroot) built: $stage/bin/ambush-child"
+        fi
+    else
+        echo "==> Ambush: fork source not found at $ambush_src -- skipping /goroot bake"
+    fi
+
     # GOROOT metadata the toolchain reads (version string, go.env, timezone db).
     cp "$GOFORK/VERSION" "$GOFORK/go.env" "$stage/" 2>/dev/null || true
     [[ -d "$GOFORK/lib" ]] && cp -RL "$GOFORK/lib" "$stage/" 2>/dev/null

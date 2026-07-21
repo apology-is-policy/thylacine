@@ -293,6 +293,34 @@ an edit the user did not initiate.
 **`gr` (references) is not built.** The client has no `textDocument/references`
 request, and N locations need a picker; both are additive when wanted.
 
+## Debugger (Ambush, Stage 8e-3e)
+
+nora drives the Ambush (Delve) debugger from `:` commands — headless, before the
+8f dashboard (NORA-IDE-UX §9: prove the debugger *loop* first). The design + the
+`dap_host` state machine live in `141-parley.md`; the editor's part is small and
+deliberately protocol-blind, exactly like the LSP seam:
+
+| `:` command | Does |
+|---|---|
+| `:debug <prog>` | start debugging a compiled Go binary (stops at entry) |
+| `:break <func>` | set a breakpoint by function name (`main.parkLoop`) |
+| `:cont` / `:c` | continue until the next breakpoint or exit |
+| `:next` / `:n`, `:step` / `:s`, `:stepout` / `:so` | step over / into / out |
+| `:bt` | show the call stack in a `*backtrace*` scratch buffer |
+| `:print <expr>` / `:p` | evaluate an expression at the stopped frame |
+| `:kill` | end the session |
+
+A verb sets `Editor::dap_request` (a `DapRequest`, the `LspRequest` sibling — a
+**third async axis** alongside `Request`/`LspRequest`, for the same reason: the
+debugger is a persistent child that may be absent, slow, or exit); the binary
+drains it with `take_dap_request` and hands it to `dap_host`. The editor holds no
+session state and speaks no protocol — it relays verbs and shows a status line
+(state, stops, evaluate results) or the `*backtrace*` scratch (`open_scratch`, the
+generalized `:help` pattern — a read-only buffer refreshed in place). Where the
+Go toolchain is absent, `:debug` reports "debugger not installed" and editing is
+unaffected. Ambush is baked at `/goroot/bin/ambush` (disk, on the login PATH,
+beside the toolchain), reachable by a POST-pivot nora.
+
 ## Console discipline (I-27)
 
 `nora` acquires the **screen** on fd 1 (Kaua `Terminal`) and **reads input** on
@@ -316,7 +344,11 @@ client over them.
 
 ## Tests (`cargo test -p nora --no-default-features --lib --target <host>`)
 
-**41 host unit tests** over the pure engine:
+**172 host unit tests** over the pure engine (the per-module list below is a
+partial breakdown of the original core; later chunks added `diag`, completion,
+and the 8e-3e **debug axis** — 5 tests asserting each `:` debug verb + its
+aliases raise the right `DapRequest`, and that the argument-taking verbs report
+rather than raise when given no argument):
 
 - `text` (19): content round-trip (incl. trailing newline), char-indexed insert
   for UTF-8, newline split, backspace/delete across lines, `dd` keeps one line,
@@ -364,8 +396,10 @@ open / edit / `:w` / `cat`).
 
 | Sub-chunk | State |
 |---|---|
-| T-3 engine + modal core + renderer + binary (this) | landed |
-| T-4 `ut` raw-mode dance + `ls-7` LS-CI | not started |
+| T-3 engine + modal core + renderer + binary | landed |
+| T-4 `ut` raw-mode dance + `ls-7` LS-CI | landed |
+| 8e-2 LSP client (gopls diagnostics/hover/def/completion, inline) | landed |
+| 8e-3e debugger (`:debug` → Ambush, headless) + `dap-nora` LS-CI | landed |
 | audit (Kaua backend + dance) | not started |
 
 ## Known caveats / seams

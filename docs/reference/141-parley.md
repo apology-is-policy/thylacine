@@ -313,6 +313,51 @@ Diagnostics clear on every buffer switch (`Editor::load_active`) — they are ke
 to the file that *was* showing, and carrying them across would paint another
 file's errors on these lines.
 
+## The debugger wiring (8e-3e, `usr/nora/src/dap_host.rs`)
+
+The DAP twin of `lsp_host`. `Dap` is a **third async source** in the same
+`poll(2)` (tags 3/4; gopls owns 1/2, fd 0 is 0), so a `stopped` event wakes the
+loop exactly like a keystroke or a diagnostic. Everything protocol-shaped lives
+in `dapc`; `dap_host` owns the Ambush process lifetime and turns DAP state into a
+status line and a `*backtrace*` scratch buffer.
+
+**Headless from `:`** (NORA-IDE-UX §9 — prove the debugger *loop* before the UI).
+A `:` debug verb sets `Editor::dap_request` (a `DapRequest`, the `LspRequest`
+sibling); the loop drains it with `take_dap_request`:
+
+- `:debug <prog>` starts a session — the binary's `drive_dap` spawns
+  `ambush dap-stdio`, replacing any prior session so a second `:debug` cannot
+  orphan the first Ambush + its debuggee;
+- `:break <func>` / `:cont`/`:c` / `:next`/`:n` / `:step`/`:s` / `:stepout`/`:so`
+  / `:bt` / `:print <expr>`/`:p` / `:kill` act on the live one (reporting "no
+  debug session" when there is none).
+
+**The launch is a handshake, not a call.** `dap_host` runs the canonical order
+across poll-wakes: `initialize` → (`Initialized`) → `launch(stopOnEntry)` → (the
+`initialized` EVENT) → queued breakpoints + `configurationDone` → the entry stop.
+A `:break` issued while the handshake is mid-flight is **queued** (Ambush cannot
+accept breakpoints before the `initialized` event) and flushed then; after it,
+`setFunctionBreakpoints` re-sends the whole accumulated set each time (DAP
+replaces the set, not appends).
+
+**On every stop the host auto-fetches the stack** — it yields the "stopped at
+`<func>` (`file:line`)" status *and* the frame id `:print` evaluates in, and
+caches the frames for `:bt`. A stale auto-stack (the user continued in the tiny
+window before it landed) is dropped so a "stopped at…" status never paints over a
+running target. No live-watch faster than a step (NORA-IDE-UX §7): the stack
+refreshes on stop, never continuously.
+
+**Lifecycle** mirrors gopls: `Dap::start` returns `Option` (debugger absent /
+spawn refused = "not installed", a reported state, not an error); a dead or
+exited session is reaped, dropped from the poll set, and the editor carries on;
+on `:kill` or nora exit the host sends the DAP `disconnect(terminate)`, closes
+stdin, then kills + waits unconditionally — an orphaned Ambush would hold its
+debuggee (and the ptrace stop) for the rest of the session. Ambush is baked at
+`/goroot/bin/ambush` (disk, on the login PATH, beside the Go toolchain), so a
+POST-pivot nora reaches it; `:debug`'s result surfaces on the status line and (for
+a multi-line call stack) the `*backtrace*` scratch. The Variables / Call-Stack /
+Console **tiles** are 8f; this is the headless loop that proves the state machine.
+
 ---
 
 ## Tests
@@ -320,10 +365,11 @@ file's errors on these lines.
 | Suite | Count | Command |
 |---|---|---|
 | parley pure layers | 73 | `cargo test -p parley --target <host>` |
-| nora lib (engine + diag + view) | 167 | `cargo test -p nora --no-default-features --lib --target <host>` |
+| nora lib (engine + diag + view) | 172 | `cargo test -p nora --no-default-features --lib --target <host>` |
 | in-guest transport | — | `/parley-probe` (boot-fatal) |
 | in-guest LIVE LSP round-trip | — | `/bin/lsp-probe` (boot-fatal where gopls is baked) |
 | in-guest LIVE DAP round-trip | — | `/dap-probe` (boot-fatal where ambush is baked) |
+| in-guest LIVE `:debug` in the editor | — | `dap-nora.exp` (HVF, LS-CI; `:debug` → sentinel) |
 
 `dap` + `dapc` add 22 of the 73 (10 envelope + 12 client): the envelope
 build/classify round-trips (including through `frame`), the full launch
@@ -342,9 +388,12 @@ position conversion across all three encodings, clamping, and URI round-trips.
 `nora` adds: the `Diagnostics` model (most-severe-per-line, tie-breaking,
 counts, wrap-around navigation), the render behavior (gutter recolor confined to
 the marked line, warning vs error color, status-line message, explicit status
-outranking, no-diagnostic baseline), and `rev_bumps_on_every_content_mutation_only`
+outranking, no-diagnostic baseline), `rev_bumps_on_every_content_mutation_only`
 — which enumerates every `TextBuffer` mutator, because a mutator added later
-without a bump silently costs a document sync.
+without a bump silently costs a document sync — and the 8e-3e **debug axis** (5):
+each `:` debug verb and its aliases raise the right `DapRequest`, and the
+argument-taking verbs (`:debug`/`:break`/`:print`) report rather than raise when
+given no argument.
 
 ### The live round-trip (`/bin/lsp-probe`, 8e-2)
 
@@ -412,6 +461,42 @@ sequences the handshake against a real backend, and the stdio transport carries
 DAP as faithfully as it carries LSP. A fork-absent build SKIPs; a
 present-but-broken DAP path FAILS the boot (joey gates on exit 0). Measured: the
 whole round-trip in ~46 ms.
+
+### `:debug` in the editor (`dap-nora.exp`, 8e-3e)
+
+`dap-probe` proves parley drives Ambush; it does **not** prove the editor wiring
+(`dap_host`'s handshake sequencing, the stop → auto-stack → status, the `:` verb
+plumbing), which is I/O glue and host-untestable. `dap-nora.exp` closes that over
+a real PTY: it launches nora POST-pivot, `:debug`s the baked
+`/goroot/bin/ambush-child`, `:break main.parkLoop`, `:cont`s into it, and gates
+on nora's status reading `stopped: function breakpoint at main.parkLoop
+(child.go:23)`. That one line is the whole state machine end to end — `:debug`
+spawned Ambush and ran initialize → launch → the `initialized` event →
+configurationDone; `:break` set the function breakpoint; `:cont` continued from
+the entry stop; the `stopped` event landed; the auto-stack resolved the frame and
+its source; the status formatted it — everything except `evaluate`, which
+dap-probe already proves. The assertion rides the ls-7 principle: nora draws blind
+on the alt-screen, but kaua emits a status-line value as a contiguous same-styled
+run, so the frame line appears in the byte stream, and the `(child.go` form is
+stop-specific (a breakpoint-SET status carries no file:line, so it cannot match
+the earlier `:break` echo). A `:print main.Sentinel` best-effort leg follows for
+the transcript (the sentinel `768901734683508737` does appear there), but it is
+not the gate: `evaluate` is dap-probe-proven, and it lands in the window where the
+serial bridge is prone to dying under HVF.
+
+HVF-only (the LS-CI tcg default wedges at a kernel boot probe, task #70 — not
+nora). Two ground-truth findings the harness surfaced, neither a guest fault:
+
+- The first run **caught a real bake gap**: `THYLACINE_MKFS_PRESERVE=1` reuses the
+  prior pool verbatim, so a newly-baked `/goroot/bin/ambush` never lands until the
+  pool is regenerated (`PRESERVE=0`) — nora reported "debugger not installed"
+  precisely, the signal that closed it. This is the pool-bake sibling of the
+  ramfs-bake trap: a change to `/goroot` contents needs a pool regeneration.
+- The serial bridge (task #78) dies (`stdout-broken`, VM still `stat=R+`) under
+  the heavy HVF byte bursts — a fresh-pool first-login provision, or the `:print`
+  redraw. The gate is placed BEFORE that window, and the wrapper's 3× retry
+  catches a bridge-surviving attempt; the passing transcript carries both the
+  stop line and the sentinel, so the wiring is transcript-verified regardless.
 
 ---
 
