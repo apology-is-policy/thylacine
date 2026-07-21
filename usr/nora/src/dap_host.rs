@@ -496,6 +496,9 @@ impl Dap {
                 }
             }
 
+            DapRequest::SelectFrame(idx) => self.select_frame(idx, ed),
+            DapRequest::SelectGoroutine(idx) => self.select_goroutine(idx, ed),
+
             DapRequest::Kill => {
                 self.shutdown();
                 ed.set_debug_view(None); // collapse the dashboard
@@ -565,6 +568,70 @@ impl Dap {
             self.goroutines.clear();
             ed.set_status(verb.to_string());
         }
+    }
+
+    /// Select call-stack frame `idx` (a dashboard row, resolved against the
+    /// cached frames): jump the editor to its source, make it the frame that
+    /// `:print` + the Variables tile evaluate in, and re-fetch its locals
+    /// (scopes -> variables, landing async + republishing via `on_ready`). A
+    /// non-stopped target or a stale/out-of-range index is a reported no-op --
+    /// never a wrong-frame jump. The frame's own values are copied out before the
+    /// send so the borrow does not outlive it.
+    fn select_frame(&mut self, idx: usize, ed: &mut Editor) {
+        if self.phase != Phase::Stopped {
+            ed.set_status(String::from("not stopped (no frame to select)"));
+            return;
+        }
+        let (id, path, line, col, label) = match self.frames.get(idx) {
+            Some(f) => (
+                f.id,
+                f.source_path.clone(),
+                f.line,
+                f.column,
+                format!("frame #{}: {}{}", idx, f.name, location_suffix(f)),
+            ),
+            None => return,
+        };
+        self.frame_id = id;
+        // DAP line/column are 1-based; `jump_to` is 0-based. A runtime frame with
+        // no source leaves the cursor where it was.
+        if let Some(p) = path {
+            let row = (line.max(1) as usize) - 1;
+            let c = (col.max(1) as usize) - 1;
+            ed.jump_to(Some(p), row, c);
+        }
+        // Clear the old locals so the tile does not show the previous frame's
+        // data during the scopes->variables round-trip.
+        self.locals.clear();
+        let sc = self.cl.scopes(self.frame_id);
+        let _ = self.send(&sc);
+        ed.set_status(label);
+    }
+
+    /// Select goroutine `idx` (a dashboard row, resolved against the cached
+    /// goroutines): make it the inspected thread and re-root the Call Stack on
+    /// it. `stackTrace` lands async -- the `StackTrace` action rebuilds the
+    /// frames, sets the top frame current, and chains scopes -> variables -- so
+    /// the tiles refill on the next wake. Re-rooting does not move the editor;
+    /// the user `Enter`s a frame to jump. A non-stopped target or a stale index
+    /// is a reported no-op.
+    fn select_goroutine(&mut self, idx: usize, ed: &mut Editor) {
+        if self.phase != Phase::Stopped {
+            ed.set_status(String::from("not stopped (no goroutine to select)"));
+            return;
+        }
+        let id = match self.goroutines.get(idx) {
+            Some(g) => g.id,
+            None => return,
+        };
+        self.thread_id = id;
+        // The cached frames/locals describe the previous goroutine; drop them so
+        // no tile shows another thread's stack until the refetch lands.
+        self.frames.clear();
+        self.locals.clear();
+        let st = self.cl.stack_trace(self.thread_id, MAX_FRAMES);
+        let _ = self.send(&st);
+        ed.set_status(format!("goroutine {}", id));
     }
 
     /// Re-send `setBreakpoints` for `file` with all its accumulated lines (DAP

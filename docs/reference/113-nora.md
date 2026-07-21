@@ -358,11 +358,21 @@ selection clamps to the live row count each render, so a stop that shrinks the
 data can never leave it pointing off the end. The routing lives entirely in
 `Editor::normal` (a focused-tile branch off the top, reachable only while
 debugging — with no session the focus is always the editor, so ordinary editing
-is byte-unchanged). Still pending: **8f-2b-2** the actions (Call Stack `Enter`
-jumps the editor, Goroutines `Enter` re-roots the stack, the nested-lazy
-Variables tree — all binary-side DAP round-trips); **8f-2c** the `F5`/`F10`/`F11`
-hot-keys + `[Space]d` toggles; **8f-3** the cross-boundary `── kernel ──` divider
-(§5). Kernel byte-unchanged; consumes I-39; no new §28 invariant.
+is byte-unchanged). **8f-2b-2 wired the tile actions** — `Enter` on the **Call
+Stack** raises a `SelectFrame` (the host jumps the editor to that frame's source
+and re-scopes the Variables tile to it via `scopes → variables`), `Enter` on
+**Goroutines** raises a `SelectGoroutine` (the host switches the inspected thread
+and re-roots the stack via `stackTrace`); `Enter` carries the row index clamped to
+the live count so a stale selection names a live row, and the host resolves it
+against its own cached list (a non-stopped target or an out-of-range index is a
+reported no-op, never a wrong-frame jump). The editor half — `Enter` raising the
+right request with the right index — is pure state and host-tested; the host half
+is a binary-side DAP round-trip (`dap_host::select_frame` / `select_goroutine`)
+covered by the `dap-nora` E2E. Still pending: **8f-2b-3** the nested-lazy
+Variables tree (a `VarNode` tree replacing the flat locals, children fetched on
+expand); **8f-2c** the `F5`/`F10`/`F11` hot-keys + `[Space]d` toggles; **8f-3**
+the cross-boundary `── kernel ──` divider (§5). Kernel byte-unchanged; consumes
+I-39; no new §28 invariant.
 
 ## Console discipline (I-27)
 
@@ -396,7 +406,7 @@ client over them.
 
 ## Tests (`cargo test -p nora --no-default-features --lib --target <host>`)
 
-**189 host unit tests** over the pure engine (the per-module list below is a
+**195 host unit tests** over the pure engine (the per-module list below is a
 partial breakdown of the original core; later chunks added `diag`, completion,
 the 8e-3e **debug axis** — 5 tests asserting each `:` debug verb + its aliases
 raise the right `DapRequest`, and that the argument-taking verbs report rather
@@ -404,13 +414,17 @@ than raise when given no argument — the 8f-2a **dashboard axis** — 3 `editor
 tests (collapse-until-pushed / a mid-session refresh keeps focus / `Tab` cycles
 focus only while debugging) + 4 `view` tests (the tiles+editor coexist when
 roomy, the collapse on a small terminal, no dashboard without a session, the
-focused tile takes an ember border) — and the 8f-2b-1 **navigation axis** — 6
+focused tile takes an ember border) — the 8f-2b-1 **navigation axis** — 6
 `editor` tests (`j`/`k`/`g`/`G` move + clamp the selection, the shrink-clamp,
 `l`/`h` collapse+expand the locals group, `l`/`h` step the Console tabs, `Esc`
 returns focus, and the no-regression `j`-is-a-text-motion-over-a-focused-editor)
 + 4 `view` tests (the focused tile's row is highlighted, an unfocused tile shows
 no cursor, an overflowing tile scrolls to the selection + shows a scrollbar,
-collapsing the locals group hides the leaves)):
+collapsing the locals group hides the leaves) — and the 8f-2b-2 **actions axis** —
+6 `editor` tests (`Enter` on the Call Stack raises `SelectFrame`, on Goroutines
+raises `SelectGoroutine`, the clamp-a-stale-selection-before-selecting, inert on
+Variables + Console, inert over an empty tile, and the no-regression
+`Enter`-raises-no-request-over-a-focused-editor)):
 
 - `text` (19): content round-trip (incl. trailing newline), char-indexed insert
   for UTF-8, newline split, backspace/delete across lines, `dd` keeps one line,
@@ -464,7 +478,8 @@ open / edit / `:w` / `cat`).
 | 8e-3e debugger (`:debug` → Ambush, headless) + `dap-nora` LS-CI | landed |
 | 8f-2a dashboard skeleton (split + collapse + `Tab` focus + tiles + Console) | landed |
 | 8f-2b-1 navigable tiles (`j`/`k`/`g`/`G` select, `l`/`h` expand, scrollbars) | landed |
-| 8f-2b-2 tile actions (frame jump, goroutine re-root, nested Variables), 8f-2c hot-keys, 8f-3 cross-boundary stack | pending |
+| 8f-2b-2 tile actions (Call Stack `Enter` → frame jump + re-scope, Goroutines `Enter` → re-root) | landed |
+| 8f-2b-3 nested-lazy Variables tree, 8f-2c hot-keys, 8f-3 cross-boundary stack | pending |
 | audit (Kaua backend + dance) | not started |
 
 ## Known caveats / seams

@@ -109,6 +109,14 @@ pub enum DapRequest {
     Backtrace,
     /// Evaluate an expression in the current frame (`:print <expr>` / `:p`).
     Print(String),
+    /// Select a call-stack frame by its dashboard row index (Call Stack `Enter`):
+    /// jump the editor to the frame's source and re-scope the Variables tile to
+    /// it. The index resolves against the host's own frame list.
+    SelectFrame(usize),
+    /// Select a goroutine by its dashboard row index (Goroutines `Enter`): switch
+    /// the inspected thread and re-root the Call Stack on it. The index resolves
+    /// against the host's own goroutine list.
+    SelectGoroutine(usize),
     /// End the debug session (`:kill`).
     Kill,
 }
@@ -614,7 +622,33 @@ impl Editor {
             KeyCode::Char('G') => self.dash_move_bottom(),
             KeyCode::Char('l') | KeyCode::Right => self.dash_expand(true),
             KeyCode::Char('h') | KeyCode::Left => self.dash_expand(false),
+            KeyCode::Enter => self.dash_activate(),
             _ => {}
+        }
+    }
+
+    /// `Enter` on a tile: act on the selected row. Call Stack raises a
+    /// `SelectFrame` (the host jumps the editor to the frame + re-scopes the
+    /// Variables tile); Goroutines raises a `SelectGoroutine` (the host re-roots
+    /// the stack on that thread). The request carries the row index clamped to
+    /// the live count, so a stale selection after a data shrink names a live row,
+    /// and the host resolves it against its own list. The other tiles carry no
+    /// per-row action yet (the per-variable expand arrives with the lazy tree),
+    /// so `Enter` is inert there -- never an edit.
+    fn dash_activate(&mut self) {
+        let rows = self.dash_rows();
+        if rows == 0 {
+            return;
+        }
+        let idx = |sel: usize| sel.min(rows - 1);
+        match self.dash.focus {
+            DashPane::CallStack => {
+                self.dap_request = Some(DapRequest::SelectFrame(idx(self.dash.stack_sel)));
+            }
+            DashPane::Goroutines => {
+                self.dap_request = Some(DapRequest::SelectGoroutine(idx(self.dash.gor_sel)));
+            }
+            DashPane::Variables | DashPane::Console | DashPane::Editor => {}
         }
     }
 
@@ -3966,5 +4000,72 @@ mod tests {
         ed.handle_key(ch('j'));
         assert_eq!(ed.text.cursor().0, 1); // the buffer cursor moved down
         assert_eq!(ed.dash().stack_sel, 0); // the tile selection did not move
+    }
+
+    #[test]
+    fn dashboard_enter_on_the_call_stack_raises_select_frame() {
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view_n(3, 0, 0)));
+        focus_tile(&mut ed, DashPane::CallStack);
+        ed.handle_key(ch('j')); // stack_sel = 1
+        ed.handle_key(code(KeyCode::Enter));
+        assert_eq!(ed.take_dap_request(), Some(DapRequest::SelectFrame(1)));
+    }
+
+    #[test]
+    fn dashboard_enter_on_goroutines_raises_select_goroutine() {
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view_n(1, 0, 3)));
+        focus_tile(&mut ed, DashPane::Goroutines);
+        ed.handle_key(ch('G')); // gor_sel = 2 (last)
+        ed.handle_key(code(KeyCode::Enter));
+        assert_eq!(ed.take_dap_request(), Some(DapRequest::SelectGoroutine(2)));
+    }
+
+    #[test]
+    fn dashboard_enter_clamps_a_stale_selection_before_selecting() {
+        // The stack shrinks under a bottom-pinned selection; Enter must name a
+        // live row (the clamp), never the stale off-the-end index.
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view_n(3, 0, 0)));
+        focus_tile(&mut ed, DashPane::CallStack);
+        ed.handle_key(ch('G')); // stack_sel = 2
+        ed.set_debug_view(Some(dbg_view_n(1, 0, 0))); // refresh: one frame now
+        ed.handle_key(code(KeyCode::Enter));
+        assert_eq!(ed.take_dap_request(), Some(DapRequest::SelectFrame(0)));
+    }
+
+    #[test]
+    fn dashboard_enter_is_inert_on_the_variables_and_console_tiles() {
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view_n(1, 2, 1)));
+        focus_tile(&mut ed, DashPane::Variables);
+        ed.handle_key(code(KeyCode::Enter));
+        assert_eq!(ed.take_dap_request(), None);
+        focus_tile(&mut ed, DashPane::Console);
+        ed.handle_key(code(KeyCode::Enter));
+        assert_eq!(ed.take_dap_request(), None);
+    }
+
+    #[test]
+    fn dashboard_enter_is_inert_over_an_empty_tile() {
+        // No frames to select: Enter raises nothing (never an out-of-range index).
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view_n(0, 0, 1)));
+        focus_tile(&mut ed, DashPane::CallStack);
+        ed.handle_key(code(KeyCode::Enter));
+        assert_eq!(ed.take_dap_request(), None);
+    }
+
+    #[test]
+    fn dashboard_enter_over_a_focused_editor_raises_no_request() {
+        // A live session but the editor holds focus: Enter is an ordinary text
+        // key, never a tile action -- the no-regression contract for editing
+        // while debugging.
+        let mut ed = Editor::new(Some("m.go".to_string()), "one\ntwo", false);
+        ed.set_debug_view(Some(dbg_view_n(2, 0, 0)));
+        assert_eq!(ed.dash().focus, DashPane::Editor);
+        ed.handle_key(code(KeyCode::Enter));
+        assert_eq!(ed.take_dap_request(), None);
     }
 }

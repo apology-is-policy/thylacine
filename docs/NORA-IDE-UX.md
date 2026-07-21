@@ -334,10 +334,14 @@ proven data. Each is pure-userspace, kernel byte-unchanged.
   113-nora.md`). **8f-2b-1 landed** (the tiles are navigable — a focused tile
   takes a row cursor [`j`/`k`/`g`/`G`], `l`/`h` opens/shuts the Variables group +
   steps the Console tabs, `Esc` returns to the editor, and an overflowing tile
-  scrolls to the selection with a scrollbar; pure, +10 host tests). **8f-2b-2**
-  wires the tile actions (Call Stack `Enter` jumps the editor, Goroutines `Enter`
-  re-roots, the nested-lazy Variables tree — binary-side DAP round-trips);
-  **8f-2c** wires the `F5`/`F10`/`F11` hot-keys + the `[Space]d` toggles.
+  scrolls to the selection with a scrollbar; pure, +10 host tests). **8f-2b-2
+  landed** (the tile actions: Call Stack `Enter` raises a `SelectFrame` — the host
+  jumps the editor to the frame + re-scopes Variables to it; Goroutines `Enter`
+  raises a `SelectGoroutine` — the host switches thread + re-roots the stack; the
+  index is clamped to the live count, resolved against the host's own list, a
+  no-op when not stopped; the editor half is host-tested [+6], the host half is a
+  DAP round-trip covered by `dap-nora`). **8f-2b-3** is the nested-lazy Variables
+  tree; **8f-2c** wires the `F5`/`F10`/`F11` hot-keys + the `[Space]d` toggles.
 - **8f-3 — polish.** The cross-boundary stack divider + select-a-frame, inline
   values, the LSP editor affordances, Bonfire pass. The "this is lovely" bar.
 - **8g — the superpowers** (§5): resource inspector, scheduler view,
