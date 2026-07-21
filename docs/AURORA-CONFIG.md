@@ -206,9 +206,15 @@ byte-unchanged; pure aux.
 
 ## 4. The two forks needing user signoff (before the Track-B build)
 
-1. **Config scope**: per-user `$home/lib/tapestry` (recommend) vs system-wide
-   `/lib/tapestry/config` vs both (system default + per-user override —
-   recommend as the full answer).
+1. **Config scope**: ~~per-user `$home/lib/tapestry` vs system-wide
+   `/lib/tapestry/config` vs both~~ — **RESOLVED: BOTH (user, 2026-07-21)**.
+   The system default at `/lib/tapestry/config` drives boot + the login
+   screen (tapestryd/aurora start before any login, so a purely per-user
+   file cannot set the boot-time mode); the per-user `$home/lib/tapestry`
+   overrides at session start (personal + Stratum-home-persistent +
+   per-user-encrypted for free). The Plan 9 idiom exactly (`/lib/...`
+   defaults, `$home/lib/...` personal). With fork 2 (letterbox) already
+   built, Track B is fully unblocked.
 2. **Zoom policy for fixed-size apps** (§3.2 layer 3): ~~scale-to-fill vs
    letterbox vs centered-native~~ — **RESOLVED: LETTERBOX (user, 2026-07-21,
    from live play: "stretch to the full size of the display, center and keep
