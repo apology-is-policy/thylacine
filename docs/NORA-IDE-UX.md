@@ -331,9 +331,13 @@ proven data. Each is pure-userspace, kernel byte-unchanged.
   **8f-2a landed** (the skeleton: the split + collapse + `Tab` focus + all three
   tiles + the Console rendering live DAP data at a basic level — a `DebugView`
   the DAP host pushes into the `Editor`, the renderer draws; `docs/reference/
-  113-nora.md`). **8f-2b** fills the tiles (per-pane `j`/`k`, `Tree` expand,
-  select-a-frame, scrollbars); **8f-2c** wires the `F5`/`F10`/`F11` hot-keys +
-  the `[Space]d` toggles.
+  113-nora.md`). **8f-2b-1 landed** (the tiles are navigable — a focused tile
+  takes a row cursor [`j`/`k`/`g`/`G`], `l`/`h` opens/shuts the Variables group +
+  steps the Console tabs, `Esc` returns to the editor, and an overflowing tile
+  scrolls to the selection with a scrollbar; pure, +10 host tests). **8f-2b-2**
+  wires the tile actions (Call Stack `Enter` jumps the editor, Goroutines `Enter`
+  re-roots, the nested-lazy Variables tree — binary-side DAP round-trips);
+  **8f-2c** wires the `F5`/`F10`/`F11` hot-keys + the `[Space]d` toggles.
 - **8f-3 — polish.** The cross-boundary stack divider + select-a-frame, inline
   values, the LSP editor affordances, Bonfire pass. The "this is lovely" bar.
 - **8g — the superpowers** (§5): resource inspector, scheduler view,

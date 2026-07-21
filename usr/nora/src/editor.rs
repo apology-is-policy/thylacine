@@ -136,15 +136,32 @@ pub struct DashState {
     pub focus: DashPane,
     /// The active Console tab (Program = 0, Debug = 1).
     pub console_tab: usize,
+    /// The highlighted row in each selectable sidebar tile (`j`/`k` move it).
+    /// `var_sel` indexes the flattened Variables rows -- the `locals` group node,
+    /// then its leaves when expanded; the others index their flat lists. Clamped
+    /// to the live row count at render, since a stop can shrink the data under a
+    /// stale selection. Highlighted only on the FOCUSED tile.
+    pub var_sel: usize,
+    pub stack_sel: usize,
+    pub gor_sel: usize,
+    /// Whether the Variables `locals` group is expanded (`l`/`h` toggle it). The
+    /// per-variable nested expand (a struct's fields, a slice's elements) is a
+    /// later leg -- this is the one group node's collapse.
+    pub locals_expanded: bool,
 }
 
 impl DashState {
     /// The state a freshly-opened dashboard starts in: focus on the source
-    /// buffer, the Program console tab up.
+    /// buffer, the Program console tab up, every selection at the top, the
+    /// `locals` group open.
     fn new() -> Self {
         DashState {
             focus: DashPane::Editor,
             console_tab: 0,
+            var_sel: 0,
+            stack_sel: 0,
+            gor_sel: 0,
+            locals_expanded: true,
         }
     }
 }
@@ -580,6 +597,108 @@ impl Editor {
             DashPane::Goroutines => DashPane::Console,
             DashPane::Console => DashPane::Editor,
         };
+    }
+
+    /// Handle a key while a dashboard tile (not the editor) holds focus.
+    /// Navigation only: `j`/`k` move the selection, `g`/`G` jump to the
+    /// ends, `l`/`h` open/shut the Variables group or step the Console tabs,
+    /// `Tab` cycles focus, `Esc` returns to the editor. Every other key is
+    /// inert, so a stray keystroke over a tile can never edit the buffer.
+    fn dash_nav(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Tab => self.cycle_focus(),
+            KeyCode::Esc => self.dash.focus = DashPane::Editor,
+            KeyCode::Char('j') | KeyCode::Down => self.dash_move(1),
+            KeyCode::Char('k') | KeyCode::Up => self.dash_move(-1),
+            KeyCode::Char('g') => self.dash_move_top(),
+            KeyCode::Char('G') => self.dash_move_bottom(),
+            KeyCode::Char('l') | KeyCode::Right => self.dash_expand(true),
+            KeyCode::Char('h') | KeyCode::Left => self.dash_expand(false),
+            _ => {}
+        }
+    }
+
+    /// The number of selectable rows in the focused tile (for clamping the
+    /// selection). Variables counts the flattened tree rows -- the `locals`
+    /// group node, plus its leaves when the group is expanded; the others are
+    /// their flat lists. The Console tail-follows, so it has no row cursor.
+    fn dash_rows(&self) -> usize {
+        let dv = match &self.debug {
+            Some(d) => d,
+            None => return 0,
+        };
+        match self.dash.focus {
+            DashPane::Variables => {
+                if self.dash.locals_expanded {
+                    1 + dv.locals.len()
+                } else {
+                    1
+                }
+            }
+            DashPane::CallStack => dv.frames.len(),
+            DashPane::Goroutines => dv.goroutines.len(),
+            DashPane::Console | DashPane::Editor => 0,
+        }
+    }
+
+    /// A mutable handle on the focused tile's selection field (`None` for the
+    /// Console + the Editor, which carry no row cursor).
+    fn dash_sel_mut(&mut self) -> Option<&mut usize> {
+        match self.dash.focus {
+            DashPane::Variables => Some(&mut self.dash.var_sel),
+            DashPane::CallStack => Some(&mut self.dash.stack_sel),
+            DashPane::Goroutines => Some(&mut self.dash.gor_sel),
+            DashPane::Console | DashPane::Editor => None,
+        }
+    }
+
+    /// Move the focused tile's selection by `delta` rows, clamping a stale
+    /// selection to the live row count first (a stop can shrink the data).
+    fn dash_move(&mut self, delta: i32) {
+        let rows = self.dash_rows();
+        if rows == 0 {
+            return;
+        }
+        let max = (rows - 1) as i64;
+        if let Some(sel) = self.dash_sel_mut() {
+            let cur = (*sel as i64).min(max);
+            *sel = (cur + delta as i64).clamp(0, max) as usize;
+        }
+    }
+
+    fn dash_move_top(&mut self) {
+        if let Some(sel) = self.dash_sel_mut() {
+            *sel = 0;
+        }
+    }
+
+    fn dash_move_bottom(&mut self) {
+        let rows = self.dash_rows();
+        if rows == 0 {
+            return;
+        }
+        let last = rows - 1;
+        if let Some(sel) = self.dash_sel_mut() {
+            *sel = last;
+        }
+    }
+
+    /// `l`/`h` (expand / collapse): open or shut the Variables `locals` group,
+    /// or step the two Console tabs. Inert on the flat Call Stack / Goroutines
+    /// tiles (their rows have no children yet).
+    fn dash_expand(&mut self, open: bool) {
+        match self.dash.focus {
+            DashPane::Variables => {
+                self.dash.locals_expanded = open;
+                if !open {
+                    // Collapsed -> the group node is the only row left.
+                    self.dash.var_sel = 0;
+                }
+            }
+            // Two tabs (Program = 0, Debug = 1): l -> Debug, h -> Program.
+            DashPane::Console => self.dash.console_tab = usize::from(open),
+            _ => {}
+        }
     }
 
     /// The hover text currently displayed, if any.
@@ -1113,6 +1232,13 @@ impl Editor {
     // -- per-mode handlers ------------------------------------------------
 
     fn normal(&mut self, key: KeyEvent) {
+        // A focused dashboard tile owns the navigation keys (nothing here edits
+        // the buffer). Only reachable while debugging -- with no session the
+        // focus is always the editor, so ordinary editing is untouched.
+        if self.debugging() && self.dash.focus != DashPane::Editor {
+            self.dash_nav(key);
+            return;
+        }
         // Multi-cursor (after Esc from a multi-insert): `,` collapses to the
         // primary; any other key collapses first (no stuck multi-state), then
         // acts as a single cursor.
@@ -3713,5 +3839,132 @@ mod tests {
         assert_eq!(ed.dash().focus, DashPane::Console);
         ed.handle_key(code(KeyCode::Tab)); // wraps back to the editor
         assert_eq!(ed.dash().focus, DashPane::Editor);
+    }
+
+    // -- the navigable dashboard (8f-2b-1) ---------------------------------
+
+    fn dbg_view_n(frames: usize, locals: usize, gors: usize) -> DebugView {
+        DebugView {
+            status: "stopped".to_string(),
+            frames: (0..frames)
+                .map(|i| crate::debug::StackRow {
+                    func: alloc::format!("f{}", i),
+                    location: alloc::format!("m.go:{}", i),
+                })
+                .collect(),
+            locals: (0..locals)
+                .map(|i| crate::debug::VarRow {
+                    name: alloc::format!("v{}", i),
+                    value: i.to_string(),
+                })
+                .collect(),
+            goroutines: (0..gors)
+                .map(|i| crate::debug::GoroutineRow {
+                    id: i as i64,
+                    state: "running".to_string(),
+                })
+                .collect(),
+            console: alloc::vec!["x".to_string()],
+        }
+    }
+
+    /// Focus a specific tile by cycling Tab from the editor.
+    fn focus_tile(ed: &mut Editor, target: DashPane) {
+        for _ in 0..6 {
+            if ed.dash().focus == target {
+                return;
+            }
+            ed.handle_key(code(KeyCode::Tab));
+        }
+        panic!("could not reach {:?}", target);
+    }
+
+    #[test]
+    fn dashboard_j_k_move_the_focused_tiles_selection() {
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view_n(3, 0, 0)));
+        focus_tile(&mut ed, DashPane::CallStack);
+        assert_eq!(ed.dash().stack_sel, 0);
+        ed.handle_key(ch('j'));
+        assert_eq!(ed.dash().stack_sel, 1);
+        ed.handle_key(ch('j'));
+        ed.handle_key(ch('j')); // clamps at the last row (2)
+        assert_eq!(ed.dash().stack_sel, 2);
+        ed.handle_key(ch('k'));
+        assert_eq!(ed.dash().stack_sel, 1);
+        ed.handle_key(ch('g')); // top
+        assert_eq!(ed.dash().stack_sel, 0);
+        ed.handle_key(ch('G')); // bottom
+        assert_eq!(ed.dash().stack_sel, 2);
+    }
+
+    #[test]
+    fn dashboard_selection_clamps_when_the_data_shrinks() {
+        // A stop shrinks the stack under a stale selection; the next move clamps
+        // to the live row count first, so the selection can never point off the
+        // end.
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view_n(3, 0, 0)));
+        focus_tile(&mut ed, DashPane::CallStack);
+        ed.handle_key(ch('G')); // stack_sel = 2
+        assert_eq!(ed.dash().stack_sel, 2);
+        ed.set_debug_view(Some(dbg_view_n(1, 0, 0))); // refresh: one frame now
+        ed.handle_key(ch('j')); // clamp 2 -> 0 (max), then +1 -> stays 0
+        assert_eq!(ed.dash().stack_sel, 0);
+    }
+
+    #[test]
+    fn dashboard_h_l_collapse_and_expand_the_locals_group() {
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view_n(0, 2, 0)));
+        focus_tile(&mut ed, DashPane::Variables);
+        assert!(ed.dash().locals_expanded);
+        // Move onto a leaf, then collapse -> the group node is the only row left,
+        // so the selection snaps back to it.
+        ed.handle_key(ch('j'));
+        assert_eq!(ed.dash().var_sel, 1);
+        ed.handle_key(ch('h')); // collapse
+        assert!(!ed.dash().locals_expanded);
+        assert_eq!(ed.dash().var_sel, 0);
+        ed.handle_key(ch('j')); // only the group node -> no move
+        assert_eq!(ed.dash().var_sel, 0);
+        ed.handle_key(ch('l')); // expand again
+        assert!(ed.dash().locals_expanded);
+        ed.handle_key(ch('j'));
+        assert_eq!(ed.dash().var_sel, 1);
+    }
+
+    #[test]
+    fn dashboard_l_h_step_the_console_tabs() {
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view_n(1, 1, 1)));
+        focus_tile(&mut ed, DashPane::Console);
+        assert_eq!(ed.dash().console_tab, 0); // Program
+        ed.handle_key(ch('l'));
+        assert_eq!(ed.dash().console_tab, 1); // Debug
+        ed.handle_key(ch('h'));
+        assert_eq!(ed.dash().console_tab, 0);
+    }
+
+    #[test]
+    fn dashboard_esc_returns_focus_to_the_editor() {
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view_n(2, 0, 0)));
+        focus_tile(&mut ed, DashPane::CallStack);
+        ed.handle_key(code(KeyCode::Esc));
+        assert_eq!(ed.dash().focus, DashPane::Editor);
+    }
+
+    #[test]
+    fn dashboard_keys_are_inert_over_a_focused_editor() {
+        // A session is live but the editor holds focus: `j` is an ordinary text
+        // motion (moves the cursor down), never a tile move. This is the whole
+        // no-regression contract -- editing is unchanged while debugging.
+        let mut ed = Editor::new(Some("m.go".to_string()), "one\ntwo", false);
+        ed.set_debug_view(Some(dbg_view_n(2, 0, 0)));
+        assert_eq!(ed.dash().focus, DashPane::Editor);
+        ed.handle_key(ch('j'));
+        assert_eq!(ed.text.cursor().0, 1); // the buffer cursor moved down
+        assert_eq!(ed.dash().stack_sel, 0); // the tile selection did not move
     }
 }

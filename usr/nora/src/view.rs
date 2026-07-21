@@ -15,7 +15,8 @@ use kaua::layout::{Constraint, Layout};
 use kaua::rect::Rect;
 use kaua::style::{Color, Style};
 use kaua::widget::{
-    flatten_tree, Block, List, Row, Span, StatusLine, Table, Tabs, Tree, TreeItem, Widget,
+    flatten_tree, Block, List, Row, Scrollbar, Span, StatusLine, Table, Tabs, Tree, TreeItem,
+    Widget,
 };
 
 use crate::debug::DebugView;
@@ -135,23 +136,74 @@ fn tile(area: Rect, title: &str, focused: bool, buf: &mut Buffer) -> Rect {
 }
 
 /// The right sidebar: Variables / Call Stack / Goroutines, stacked in equal
-/// thirds (scrollbars + proportional sizing arrive with 8f-2b).
+/// thirds. Each tile highlights its selected row + shows a scrollbar when it
+/// overflows, but only the FOCUSED tile draws the row cursor (§2.3).
 fn render_sidebar(ed: &Editor, dv: &DebugView, area: Rect, buf: &mut Buffer) {
-    let focus = ed.dash().focus;
+    let d = ed.dash();
+    let focus = d.focus;
     let tiles =
         Layout::vertical(&[Constraint::Fill, Constraint::Fill, Constraint::Fill]).split(area);
-    render_variables(dv, tiles[0], focus == DashPane::Variables, buf);
+    render_variables(
+        dv,
+        tiles[0],
+        focus == DashPane::Variables,
+        d.var_sel,
+        d.locals_expanded,
+        buf,
+    );
     if let Some(&r) = tiles.get(1) {
-        render_call_stack(dv, r, focus == DashPane::CallStack, buf);
+        render_call_stack(dv, r, focus == DashPane::CallStack, d.stack_sel, buf);
     }
     if let Some(&r) = tiles.get(2) {
-        render_goroutines(dv, r, focus == DashPane::Goroutines, buf);
+        render_goroutines(dv, r, focus == DashPane::Goroutines, d.gor_sel, buf);
     }
 }
 
+/// The selection to pass a tile widget: `Some(clamped)` on the focused tile with
+/// rows, `None` otherwise (an unfocused / empty tile shows no cursor).
+fn tile_sel(focused: bool, sel: usize, len: usize) -> Option<usize> {
+    if focused && len > 0 {
+        Some(sel.min(len - 1))
+    } else {
+        None
+    }
+}
+
+/// Compute the scroll offset that keeps `sel` visible in a `rows`-tall list
+/// within `inner`, and -- when the content overflows the tile -- draw a
+/// right-edge Scrollbar, returning the content rect one column narrower to
+/// clear the bar. When it fits (or there is no selection) the offset is 0, no
+/// bar, and the full inner rect. Stateless: a scrolled selection bottom-anchors
+/// (it sits on the window's last row), which needs no stored offset.
+fn scrollable(inner: Rect, rows: usize, sel: Option<usize>, buf: &mut Buffer) -> (Rect, usize) {
+    let h = inner.height as usize;
+    if inner.is_empty() || h == 0 || rows <= h {
+        return (inner, 0);
+    }
+    let off = match sel {
+        Some(s) => s.min(rows - 1).saturating_sub(h - 1).min(rows - h),
+        None => 0,
+    };
+    Scrollbar::new(rows, h, off)
+        .style(theme::tile_scroll_track())
+        .thumb_style(theme::tile_scroll_thumb())
+        .render(inner, buf);
+    let content = Rect::new(inner.x, inner.y, inner.width.saturating_sub(1), inner.height);
+    (content, off)
+}
+
 /// Variables: a `locals` group node with the current frame's locals as leaves
-/// (`name = value`). Flat at 8f-2a -- real nested expand is 8f-2b.
-fn render_variables(dv: &DebugView, area: Rect, focused: bool, buf: &mut Buffer) {
+/// (`name = value`). `l`/`h` collapse the group; the per-variable nested expand
+/// is a later leg. `sel` indexes the flattened rows (the group node, then the
+/// leaves), highlighted only when `focused`.
+fn render_variables(
+    dv: &DebugView,
+    area: Rect,
+    focused: bool,
+    sel: usize,
+    expanded: bool,
+    buf: &mut Buffer,
+) {
     let inner = tile(area, " Variables ", focused, buf);
     let labels: alloc::vec::Vec<String> = dv
         .locals
@@ -164,18 +216,26 @@ fn render_variables(dv: &DebugView, area: Rect, focused: bool, buf: &mut Buffer)
         .collect();
     let roots = [TreeItem::node("locals", children)
         .style(theme::tile_dim())
-        .expanded(true)];
+        .expanded(expanded)];
     let rows = flatten_tree(&roots);
-    Tree::new(&rows).render(inner, buf);
+    let sel = tile_sel(focused, sel, rows.len());
+    let (content, off) = scrollable(inner, rows.len(), sel, buf);
+    Tree::new(&rows)
+        .select(sel)
+        .selected_style(theme::tile_selected())
+        .offset(off)
+        .render(content, buf);
 }
 
 /// Call Stack: `#idx func` and its `file:line`, top frame first. The
 /// cross-boundary `── kernel ──` divider (section 5) fills in at 8f-3.
-fn render_call_stack(dv: &DebugView, area: Rect, focused: bool, buf: &mut Buffer) {
+fn render_call_stack(dv: &DebugView, area: Rect, focused: bool, sel: usize, buf: &mut Buffer) {
     let inner = tile(area, " Call Stack ", focused, buf);
+    let sel = tile_sel(focused, sel, dv.frames.len());
+    let (content, off) = scrollable(inner, dv.frames.len(), sel, buf);
     // Two columns: "#0 func" (fills the tile less the location) and the location.
-    let loc_w = 12u16.min(inner.width / 2);
-    let name_w = inner.width.saturating_sub(loc_w).saturating_sub(1);
+    let loc_w = 12u16.min(content.width / 2);
+    let name_w = content.width.saturating_sub(loc_w).saturating_sub(1);
     let cols = [name_w, loc_w];
     let cells: alloc::vec::Vec<[String; 2]> = dv
         .frames
@@ -188,14 +248,19 @@ fn render_call_stack(dv: &DebugView, area: Rect, focused: bool, buf: &mut Buffer
     let rows: alloc::vec::Vec<Row> = refs.iter().map(|c| Row::new(&c[..])).collect();
     Table::new(&cols, &rows)
         .style(theme::tile_text())
-        .render(inner, buf);
+        .select(sel)
+        .selected_style(theme::tile_selected())
+        .offset(off)
+        .render(content, buf);
 }
 
 /// Goroutines: `g<id>` and the debugger's one-line state.
-fn render_goroutines(dv: &DebugView, area: Rect, focused: bool, buf: &mut Buffer) {
+fn render_goroutines(dv: &DebugView, area: Rect, focused: bool, sel: usize, buf: &mut Buffer) {
     let inner = tile(area, " Goroutines ", focused, buf);
-    let id_w = 5u16.min(inner.width);
-    let state_w = inner.width.saturating_sub(id_w).saturating_sub(1);
+    let sel = tile_sel(focused, sel, dv.goroutines.len());
+    let (content, off) = scrollable(inner, dv.goroutines.len(), sel, buf);
+    let id_w = 5u16.min(content.width);
+    let state_w = content.width.saturating_sub(id_w).saturating_sub(1);
     let cols = [id_w, state_w];
     let cells: alloc::vec::Vec<[String; 2]> = dv
         .goroutines
@@ -207,7 +272,10 @@ fn render_goroutines(dv: &DebugView, area: Rect, focused: bool, buf: &mut Buffer
     let rows: alloc::vec::Vec<Row> = refs.iter().map(|c| Row::new(&c[..])).collect();
     Table::new(&cols, &rows)
         .style(theme::tile_text())
-        .render(inner, buf);
+        .select(sel)
+        .selected_style(theme::tile_selected())
+        .offset(off)
+        .render(content, buf);
 }
 
 /// The bottom Console: a `[Program] Debug` tab strip, the current status line,
@@ -1537,5 +1605,110 @@ ccc", false);
         let mut b2 = Buffer::empty(a);
         render(&ed, a, &mut b2);
         assert_eq!(b2.get(corner_x, 0).unwrap().style.fg, theme::EMBER);
+    }
+
+    // -- the navigable dashboard (8f-2b-1) ---------------------------------
+
+    fn dbg_ed_n(frames: usize, locals: usize, gors: usize) -> Editor {
+        let mut ed = Editor::new(Some("m.go".into()), "hello\nworld", false);
+        ed.set_debug_view(Some(crate::debug::DebugView {
+            status: "stopped".into(),
+            frames: (0..frames)
+                .map(|i| crate::debug::StackRow {
+                    func: format!("f{}", i),
+                    location: format!("m.go:{}", i),
+                })
+                .collect(),
+            locals: (0..locals)
+                .map(|i| crate::debug::VarRow {
+                    name: format!("v{}", i),
+                    value: i.to_string(),
+                })
+                .collect(),
+            goroutines: (0..gors)
+                .map(|i| crate::debug::GoroutineRow {
+                    id: i as i64,
+                    state: "running".into(),
+                })
+                .collect(),
+            console: alloc::vec!["boot".into()],
+        }));
+        ed
+    }
+
+    /// The first buffer row whose text contains `needle`.
+    fn find_row(b: &Buffer, a: Rect, needle: &str) -> Option<u16> {
+        (0..a.height).find(|&y| row_text(b, y, a.width).contains(needle))
+    }
+
+    /// Does any cell on row `y` carry background `bg`? (A selected tile row is a
+    /// full-width highlight; the ember tile border/title use ember *fg* over the
+    /// slate bg, so only a selection paints an ember *bg*.)
+    fn row_has_bg(b: &Buffer, a: Rect, y: u16, bg: kaua::style::Color) -> bool {
+        (0..a.width).any(|x| b.get(x, y).map(|c| c.style.bg == bg).unwrap_or(false))
+    }
+
+    #[test]
+    fn the_focused_tiles_selected_row_is_highlighted() {
+        let a = Rect::new(0, 0, 60, 24);
+        let mut ed = dbg_ed_n(3, 0, 0);
+        // Focus the Call Stack (Tab x2) and select frame #1 (j).
+        ed.handle_key(KeyEvent::new(KeyCode::Tab));
+        ed.handle_key(KeyEvent::new(KeyCode::Tab));
+        ed.handle_key(KeyEvent::char('j'));
+        let mut b = Buffer::empty(a);
+        render(&ed, a, &mut b);
+        let y = find_row(&b, a, "f1").expect("frame #1 shown");
+        assert!(row_has_bg(&b, a, y, theme::EMBER), "selected row is ember");
+        // The other frames are not highlighted.
+        let y0 = find_row(&b, a, "f0").expect("frame #0 shown");
+        assert!(!row_has_bg(&b, a, y0, theme::EMBER));
+    }
+
+    #[test]
+    fn an_unfocused_tile_shows_no_row_cursor() {
+        // Focus stays on the editor -> the tiles render their data but no tile
+        // row carries a selection highlight (§2.3: the cursor is on the focused
+        // tile only).
+        let a = Rect::new(0, 0, 60, 24);
+        let ed = dbg_ed_n(3, 0, 0);
+        let mut b = Buffer::empty(a);
+        render(&ed, a, &mut b);
+        let y = find_row(&b, a, "f0").expect("a frame is shown");
+        assert!(!row_has_bg(&b, a, y, theme::EMBER));
+    }
+
+    #[test]
+    fn a_long_tile_scrolls_to_the_selection_and_shows_a_scrollbar() {
+        // More frames than the Call Stack tile is tall: selecting the last one
+        // scrolls it into view and a scrollbar thumb (█) appears.
+        let a = Rect::new(0, 0, 60, 30);
+        let mut ed = dbg_ed_n(12, 0, 0);
+        ed.handle_key(KeyEvent::new(KeyCode::Tab));
+        ed.handle_key(KeyEvent::new(KeyCode::Tab)); // focus Call Stack
+        ed.handle_key(KeyEvent::char('G')); // select the last frame
+        let mut b = Buffer::empty(a);
+        render(&ed, a, &mut b);
+        assert!(find_row(&b, a, "f11").is_some(), "the selected frame is visible");
+        assert!(find_row(&b, a, "f0").is_none(), "the top frames scrolled off");
+        // A scrollbar thumb glyph is drawn nowhere else in the frame.
+        let has_thumb = (0..a.width)
+            .any(|x| (0..a.height).any(|y| b.get(x, y).map(|c| c.symbol) == Some('\u{2588}')));
+        assert!(has_thumb, "an overflowing tile shows a scrollbar");
+    }
+
+    #[test]
+    fn collapsing_the_locals_group_hides_the_leaves() {
+        let a = Rect::new(0, 0, 60, 24);
+        let mut ed = dbg_ed_n(0, 2, 0);
+        ed.handle_key(KeyEvent::new(KeyCode::Tab)); // focus Variables
+        let mut open = Buffer::empty(a);
+        render(&ed, a, &mut open);
+        assert!(frame_has(&open, a, "v0"), "leaves show while expanded");
+        ed.handle_key(KeyEvent::char('h')); // collapse the group
+        let mut shut = Buffer::empty(a);
+        render(&ed, a, &mut shut);
+        assert!(frame_has(&shut, a, "locals"), "the group node stays");
+        assert!(!frame_has(&shut, a, "v0"), "the leaves are hidden");
     }
 }

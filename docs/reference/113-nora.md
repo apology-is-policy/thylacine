@@ -347,10 +347,22 @@ clears them. Opening a session expands the dashboard immediately (empty tiles +
 a "launching" status); ending it (`:kill`, exit, a dead stream) collapses back.
 
 **8f-2a landed the skeleton** — the split + collapse + `Tab` focus + all three
-tiles + the Console rendering live data at a basic level. 8f-2b fills the tiles
-(per-pane `j`/`k`, `Tree` expand, select-a-frame, scrollbars); 8f-2c wires the
-`F5`/`F10`/`F11` hot-keys + `[Space]d` toggles; the cross-boundary `── kernel ──`
-divider (§5) is 8f-3. Kernel byte-unchanged; consumes I-39; no new §28 invariant.
+tiles + the Console rendering live data at a basic level. **8f-2b-1 made the
+tiles navigable** — a focused sidebar tile takes a row cursor (`j`/`k` move it,
+`g`/`G` jump to the ends), the Variables `locals` group opens/shuts with `l`/`h`
+(the per-variable nested expand of a struct/slice is a later leg), `l`/`h` steps
+the Console `Program`/`Debug` tabs, and `Esc` returns focus to the editor; a tile
+whose content overflows draws an ember scrollbar and scrolls to keep the
+selection visible. The row cursor shows on the **focused tile only**; the
+selection clamps to the live row count each render, so a stop that shrinks the
+data can never leave it pointing off the end. The routing lives entirely in
+`Editor::normal` (a focused-tile branch off the top, reachable only while
+debugging — with no session the focus is always the editor, so ordinary editing
+is byte-unchanged). Still pending: **8f-2b-2** the actions (Call Stack `Enter`
+jumps the editor, Goroutines `Enter` re-roots the stack, the nested-lazy
+Variables tree — all binary-side DAP round-trips); **8f-2c** the `F5`/`F10`/`F11`
+hot-keys + `[Space]d` toggles; **8f-3** the cross-boundary `── kernel ──` divider
+(§5). Kernel byte-unchanged; consumes I-39; no new §28 invariant.
 
 ## Console discipline (I-27)
 
@@ -373,8 +385,10 @@ client over them.
 - `Editor` — the `TextBuffer` + the `Mode` + the file/scroll/status/quit state +
   the private `anchor` (visual), `register` (yank), `last_search`, `request` +
   the debugger dashboard state: `debug: Option<DebugView>` (`Some` == a session
-  is live == the dashboard is shown) and `dash: DashState` (the `DashPane` focus
-  + the Console tab, kept across data refreshes).
+  is live == the dashboard is shown) and `dash: DashState` (the `DashPane` focus,
+  the Console tab, the per-tile row selections `var_sel`/`stack_sel`/`gor_sel`,
+  and `locals_expanded` — kept across data refreshes, reset only on session
+  start/end; the selections clamp to the live row count at render).
 - `DebugView` (`nora::debug`) — the protocol-free dashboard snapshot the DAP host
   pushes: `status`, `frames: Vec<StackRow>`, `locals: Vec<VarRow>`,
   `goroutines: Vec<GoroutineRow>`, `console: Vec<String>`. Plain data (like
@@ -382,15 +396,21 @@ client over them.
 
 ## Tests (`cargo test -p nora --no-default-features --lib --target <host>`)
 
-**179 host unit tests** over the pure engine (the per-module list below is a
+**189 host unit tests** over the pure engine (the per-module list below is a
 partial breakdown of the original core; later chunks added `diag`, completion,
 the 8e-3e **debug axis** — 5 tests asserting each `:` debug verb + its aliases
 raise the right `DapRequest`, and that the argument-taking verbs report rather
-than raise when given no argument — and the 8f-2 **dashboard axis** — 3 `editor`
-tests, collapse-until-pushed / a mid-session refresh keeps focus / `Tab` cycles
-focus only while debugging; and 4 `view` tests, the tiles+editor coexist when
+than raise when given no argument — the 8f-2a **dashboard axis** — 3 `editor`
+tests (collapse-until-pushed / a mid-session refresh keeps focus / `Tab` cycles
+focus only while debugging) + 4 `view` tests (the tiles+editor coexist when
 roomy, the collapse on a small terminal, no dashboard without a session, the
-focused tile takes an ember border):
+focused tile takes an ember border) — and the 8f-2b-1 **navigation axis** — 6
+`editor` tests (`j`/`k`/`g`/`G` move + clamp the selection, the shrink-clamp,
+`l`/`h` collapse+expand the locals group, `l`/`h` step the Console tabs, `Esc`
+returns focus, and the no-regression `j`-is-a-text-motion-over-a-focused-editor)
++ 4 `view` tests (the focused tile's row is highlighted, an unfocused tile shows
+no cursor, an overflowing tile scrolls to the selection + shows a scrollbar,
+collapsing the locals group hides the leaves)):
 
 - `text` (19): content round-trip (incl. trailing newline), char-indexed insert
   for UTF-8, newline split, backspace/delete across lines, `dd` keeps one line,
@@ -443,7 +463,8 @@ open / edit / `:w` / `cat`).
 | 8e-2 LSP client (gopls diagnostics/hover/def/completion, inline) | landed |
 | 8e-3e debugger (`:debug` → Ambush, headless) + `dap-nora` LS-CI | landed |
 | 8f-2a dashboard skeleton (split + collapse + `Tab` focus + tiles + Console) | landed |
-| 8f-2b/2c tile fill + hot-keys, 8f-3 cross-boundary stack | pending |
+| 8f-2b-1 navigable tiles (`j`/`k`/`g`/`G` select, `l`/`h` expand, scrollbars) | landed |
+| 8f-2b-2 tile actions (frame jump, goroutine re-root, nested Variables), 8f-2c hot-keys, 8f-3 cross-boundary stack | pending |
 | audit (Kaua backend + dance) | not started |
 
 ## Known caveats / seams

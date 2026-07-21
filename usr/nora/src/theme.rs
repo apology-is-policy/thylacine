@@ -199,3 +199,21 @@ pub fn tile_text() -> Style {
 pub fn tile_dim() -> Style {
     Style::new().fg(DIM).bg(BG)
 }
+
+/// The selected row in a FOCUSED dashboard tile (a full-width ember highlight,
+/// like the palette selection). Drawn only on the focused tile -- an unfocused
+/// tile shows no cursor.
+pub fn tile_selected() -> Style {
+    Style::new().fg(BG).bg(EMBER).attr(Attr::BOLD)
+}
+
+/// A tile scrollbar track (the dim `│` rail; shown only when the tile overflows).
+pub fn tile_scroll_track() -> Style {
+    Style::new().fg(BORDER).bg(BG)
+}
+
+/// A tile scrollbar thumb (the ember `█`, so the scroll position reads at a
+/// glance against the dim track).
+pub fn tile_scroll_thumb() -> Style {
+    Style::new().fg(EMBER).bg(BG)
+}
