@@ -188,6 +188,19 @@ static void THYLACINE_HandleEvent(SDL_Window *window, SDL_WindowData *wd,
             SDL_SendWindowEvent(window, SDL_WINDOWEVENT_EXPOSED, 0, 0);
             break;
         }
+        if (!(window->flags & SDL_WINDOW_RESIZABLE)) {
+            /* Fork 2 (letterbox): a FIXED-size SDL window DECLINES the
+             * compositor's size offer -- the surface keeps its dims and
+             * the compositor letterboxes the mismatch (aspect-preserving
+             * scale, centered). Acking would reweave to the pane size
+             * while the app keeps rendering its fixed frame into the
+             * corner of the bigger surface (the pre-fix zoomed-Quake
+             * top-left artifact). The offer is a standing CONFIGURE --
+             * unacked is protocol-legal (offers coalesce; the battery's
+             * negative probes pin it). EXPOSED so the app repaints. */
+            SDL_SendWindowEvent(window, SDL_WINDOWEVENT_EXPOSED, 0, 0);
+            break;
+        }
         {
             int rc = thyla_tap_reweave(&wd->tap, cw, ch, ev->code);
             if (rc == 0) {

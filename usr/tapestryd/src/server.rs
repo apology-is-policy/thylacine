@@ -293,6 +293,8 @@ struct Surface {
     state: SurfState,
     w: u32,
     h: u32,
+    /// The last letterbox placement logged (one-shot diagnostic).
+    lb_logged: Option<(u32, u32, u32, u32)>,
     slot_stride: u64,
     /// The CURRENT weave generation (the spec's g-highest). weft_ensure,
     /// the geometry reads, and every post-fence present serve/validate
@@ -513,6 +515,7 @@ impl Comp {
             state: SurfState::Minted,
             w: 0,
             h: 0,
+            lb_logged: None,
             slot_stride: 0,
             weave: None,
             resource_id: 0, // minted with the first generation (create)
@@ -1109,19 +1112,74 @@ impl Comp {
             },
             None => return None, // unhosted
         };
-        // Clip the damage to the pane's content size (an oversized or
-        // CONFIGURE-deaf client shows its top-left crop).
-        let inter = Rect { x, y, w: pw, h: ph }
-            .intersect(Rect { x: 0, y: 0, w: content.w, h: content.h });
-        if inter.is_empty() {
-            return None;
-        }
         let screen_va = match &self.screen {
             Some(s) => s.va,
             None => return None,
         };
         let dw = self.gpu.width as u64;
         let src_base = weave_va + (slot as u64) * slot_stride;
+        let sh_full = match self.surf(n) {
+            Some(s) => s.h,
+            None => return None,
+        };
+        if sw != content.w || sh_full != content.h {
+            // Fork 2 (user-voted 2026-07-21): a fixed-size surface
+            // LETTERBOXES into its pane -- aspect-preserving scale,
+            // centered, nearest-neighbor (crisp for the retro-game
+            // case; cheap integer math). Damage sub-rects are ignored:
+            // any present redraws the FULL scaled rect (a scaled
+            // damage rect would need edge-correct rounding for no
+            // gain -- fixed-size clients present whole frames). The
+            // bars around the rect are the pane background, painted
+            // by the chrome pass. The geometry comes from the SAME
+            // letterbox() ptr_hit inverts -- one authority, no drift.
+            if content.w == 0 || content.h == 0 || sh_full == 0 || sw == 0 {
+                return None;
+            }
+            let (ox, oy, dw2, dh2) = Self::letterbox(sw, sh_full, content.w, content.h);
+            // One-shot geometry diagnostic (per distinct placement).
+            if let Some(su) = self.surf_mut(n) {
+                let sig = (ox, oy, dw2, dh2);
+                if su.lb_logged != Some(sig) {
+                    su.lb_logged = Some(sig);
+                    say!(
+                        "tapestryd: surface {} letterbox {}x{} -> {}x{} @({},{}) in {}x{}",
+                        n, sw, sh_full, dw2, dh2, ox, oy, content.w, content.h
+                    );
+                }
+            }
+            // SAFETY: src reads stay inside the weave slot (sx < sw,
+            // sy < sh by the division bound: lx < dw2 => lx*sw/dw2 <
+            // sw); dst rows stay inside the screen buffer (the scaled
+            // rect is inside content, content inside the display by
+            // the geometry pass).
+            unsafe {
+                for row in 0..dh2 as u64 {
+                    let sy = (row * sh_full as u64) / dh2 as u64;
+                    let dy = content.y as u64 + oy as u64 + row;
+                    let srow = (src_base + sy * sw as u64 * 4) as *const u32;
+                    let drow = (screen_va
+                        + (dy * dw + (content.x + ox) as u64) * 4)
+                        as *mut u32;
+                    for col in 0..dw2 as u64 {
+                        let sx = (col * sw as u64) / dw2 as u64;
+                        *drow.add(col as usize) = *srow.add(sx as usize);
+                    }
+                }
+            }
+            return Some(Rect {
+                x: content.x + ox,
+                y: content.y + oy,
+                w: dw2,
+                h: dh2,
+            });
+        }
+        // Same-size fast path: the byte-copy blit, damage-clipped.
+        let inter = Rect { x, y, w: pw, h: ph }
+            .intersect(Rect { x: 0, y: 0, w: content.w, h: content.h });
+        if inter.is_empty() {
+            return None;
+        }
         // SAFETY: src rows lie within the weave slot (damage was validated
         // against the surface geometry; inter only shrinks it); dst rows
         // lie within the screen buffer (content is inside the display by
@@ -1514,23 +1572,52 @@ impl Comp {
         }
     }
 
+    /// The letterbox placement of a (sw, sh) surface inside a (cw, ch)
+    /// pane content rect: aspect-preserving scale + center (the fork-2
+    /// decision, user-voted 2026-07-21). Returns (ox, oy, dw2, dh2) --
+    /// the scaled rect's content-relative origin + dims. Equal dims
+    /// return the identity (0, 0, cw, ch). THE ONE GEOMETRY AUTHORITY:
+    /// blit_composed_pixels' forward map and ptr_hit's inverse both
+    /// derive from this, so they cannot drift apart (the G-7c audit-F3
+    /// lesson made structural).
+    fn letterbox(sw: u32, sh: u32, cw: u32, ch: u32) -> (u32, u32, u32, u32) {
+        if sw == cw && sh == ch {
+            return (0, 0, cw, ch);
+        }
+        // Width-bound iff cw/sw <= ch/sh  <=>  cw*sh <= ch*sw (u64: no
+        // overflow for display-scale dims).
+        let (dw2, dh2) = if (cw as u64) * (sh as u64) <= (ch as u64) * (sw as u64) {
+            (cw, (((sh as u64) * (cw as u64)) / (sw as u64).max(1)) as u32)
+        } else {
+            ((((sw as u64) * (ch as u64)) / (sh as u64).max(1)) as u32, ch)
+        };
+        let (dw2, dh2) = (dw2.max(1), dh2.max(1));
+        ((cw - dw2) / 2, (ch - dh2) / 2, dw2, dh2)
+    }
+
     /// The surface under display point (px, py) + the point translated to
     /// surface-relative coords (G-7c pointer routing: under-the-pointer,
     /// NOT the focused leaf -- clicking a pane must land in that pane;
     /// keyboard focus stays chord-driven, no click-to-focus at this
-    /// stage). A fixed-size surface smaller than its pane anchors
-    /// TOP-LEFT (blit_composed_pixels: surface (0,0) -> content origin),
-    /// so the inverse is a plain content-origin subtract; a point over
-    /// the pane's black fill CLAMPS to the surface's far edge, keeping
-    /// drag/mouse-look deltas alive at the boundary.
+    /// stage). A fixed-size surface letterboxes into its pane (fork 2),
+    /// so the inverse subtracts the content + letterbox origins and
+    /// UNSCALES -- via the same letterbox() the blit uses. A point over
+    /// the bars CLAMPS into the scaled rect, keeping drag/mouse-look
+    /// deltas alive at the boundary.
     fn ptr_hit(&self, px: u32, py: u32) -> Option<(usize, u16, u16)> {
         let (n, c) = self.layout.surface_at(px, py)?;
         let s = self.surf(n)?;
-        if s.w == 0 || s.h == 0 {
+        if s.w == 0 || s.h == 0 || c.w == 0 || c.h == 0 {
             return None;
         }
-        let sx = (px - c.x).min(s.w - 1).min(0xFFFF) as u16;
-        let sy = (py - c.y).min(s.h - 1).min(0xFFFF) as u16;
+        let (ox, oy, dw2, dh2) = Self::letterbox(s.w, s.h, c.w, c.h);
+        // Content-relative, clamped into the letterbox rect, unscaled.
+        let lx = (px - c.x).saturating_sub(ox).min(dw2 - 1);
+        let ly = (py - c.y).saturating_sub(oy).min(dh2 - 1);
+        let sx = (((lx as u64) * (s.w as u64)) / (dw2 as u64)) as u32;
+        let sy = (((ly as u64) * (s.h as u64)) / (dh2 as u64)) as u32;
+        let sx = sx.min(s.w - 1).min(0xFFFF) as u16;
+        let sy = sy.min(s.h - 1).min(0xFFFF) as u16;
         Some((n, sx, sy))
     }
 

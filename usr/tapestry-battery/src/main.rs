@@ -608,13 +608,14 @@ pub extern "C" fn rs_main() -> i64 {
         say!("tapestry-battery: FAIL move heal presents");
         return 1;
     }
-    // Sample within the region each surface actually covers: the moved
-    // panes are taller than the surfaces (B especially -- exact-fit to
-    // its OLD pane), so a pane-center sample below the blit would hit
-    // chrome background.
+    // Fork 2 (letterbox): a size-mismatched surface scales
+    // aspect-preserving and CENTERS in its pane content, so the pane
+    // CENTER always lands inside the blit (the scaled rect is centered
+    // and the fills are solid). The pre-fork-2 top-left anchor needed
+    // the covered-region min() sample instead.
     say!("battery: move OK {} {} {} {}",
-        ma.x + ma.w.min(a.w) / 2, ma.y + ma.h.min(a.h) / 2,
-        mb.x + mb.w.min(b.w) / 2, mb.y + mb.h.min(b.h) / 2);
+        ma.x + ma.w / 2, ma.y + ma.h / 2,
+        mb.x + mb.w / 2, mb.y + mb.h / 2);
     nap(DUMP_MS);
 
     // Focus leg 1: A takes focus; a QMP-typed key must arrive on A's
@@ -723,7 +724,7 @@ pub extern "C" fn rs_main() -> i64 {
         return 1;
     }
     say!("battery: hold ready {} {}",
-        mb.x + mb.w.min(b.w) / 2, mb.y + mb.h.min(b.h) / 2);
+        mb.x + mb.w / 2, mb.y + mb.h / 2);
     if !wait_key(&mut a, "hold-sync") {
         return 1;
     }

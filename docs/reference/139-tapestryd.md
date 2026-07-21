@@ -122,10 +122,9 @@ v1.x) — the display stays blank until reboot.
   first, so a click always lands AT its position. `Comp::ptr_move/
   ptr_btn/ptr_scroll` route to the surface UNDER the pointer
   (`Layout::surface_at` — visible content rects tile, so the first hit
-  is the only hit), translate to surface-relative coords by the
-  content-origin subtract (the exact inverse of `blit_composed_pixels`'
-  top-left anchor; a point over a smaller-than-pane surface's black
-  fill CLAMPS to the far edge, keeping drag deltas alive), and emit
+  is the only hit), translate to surface-relative coords via the
+  letterbox inverse (fork 2, below; a point over the bars CLAMPS into
+  the scaled rect, keeping drag deltas alive), and emit
   the §18.4 wire kinds: MOVE `value = sx<<16|sy` (coalescible — the
   R2-F4 droppable class, pre-wired), BTN `code = evdev BTN_*` /
   `value = press` (non-droppable), SCROLL `value = signed delta as
@@ -133,6 +132,29 @@ v1.x) — the display stays blank until reboot.
   click-to-focus at this stage (a Track-B policy question). The Super
   chord plane is a KEYBOARD reservation; pointer events flow under
   held modifiers (clients see `mods`).
+
+  **Fork 2 — the letterbox placement (user-voted 2026-07-21).** A
+  surface whose dims mismatch its pane content LETTERBOXES: aspect-
+  preserving nearest-neighbor scale, centered; the bars are pane
+  background (chrome-painted). `Comp::letterbox(sw, sh, cw, ch)` is
+  the ONE geometry authority — `blit_composed_pixels`' forward map
+  and `ptr_hit`'s inverse (subtract content + letterbox origins,
+  clamp into the scaled rect, unscale) both derive from it, so they
+  cannot drift (the audit-F3 lesson made structural). The scaled
+  path ignores damage sub-rects (any present redraws the full scaled
+  rect — fixed-size clients present whole frames); the same-size
+  fast path is byte-identical to the pre-fork-2 blit, so CONFIGURE-
+  tracking clients (aurora, the battery's exact-fit legs) never
+  scale in steady state — a resize transient letterboxes for the
+  frames until the client acks + reweaves (visible in the one-shot
+  `tapestryd: surface N letterbox ...` diagnostic). The SDL backend
+  completes the policy: a window WITHOUT `SDL_WINDOW_RESIZABLE`
+  DECLINES size offers (unacked CONFIGUREs are protocol-legal
+  standing offers), keeping its dims fixed so the compositor scales
+  — acking would reweave to the pane size while the app renders its
+  fixed frame into the corner of the bigger surface (the zoomed-
+  Quake top-left artifact this replaced). The zoomed 640×480 Quake
+  proof: `letterbox 640x480 -> 1066x800 @(107,0) in 1280x800`.
 
 ## The 9P server (`server.rs`)
 

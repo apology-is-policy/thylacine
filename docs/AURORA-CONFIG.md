@@ -209,9 +209,20 @@ byte-unchanged; pure aux.
 1. **Config scope**: per-user `$home/lib/tapestry` (recommend) vs system-wide
    `/lib/tapestry/config` vs both (system default + per-user override —
    recommend as the full answer).
-2. **Zoom policy for fixed-size apps** (§3.2 layer 3): **scale-to-fill**
-   (recommend — best for games, one GPU blit) vs letterbox (aspect-preserving)
-   vs centered-native. This decides the doc-142 seam.
+2. **Zoom policy for fixed-size apps** (§3.2 layer 3): ~~scale-to-fill vs
+   letterbox vs centered-native~~ — **RESOLVED: LETTERBOX (user, 2026-07-21,
+   from live play: "stretch to the full size of the display, center and keep
+   aspect ratio")**. Built compositor-side: `Comp::letterbox()` is the ONE
+   geometry authority (the blit's forward map and `ptr_hit`'s inverse both
+   derive from it — the G-7c audit-F3 lesson made structural);
+   nearest-neighbor scale; the bars are pane background. The SDL backend
+   honors `SDL_WINDOW_RESIZABLE`: a fixed-size window DECLINES the
+   compositor's size offer (unacked CONFIGUREs are protocol-legal standing
+   offers), so the dims mismatch persists and the compositor letterboxes —
+   acking would reweave to the pane size while the app renders its fixed
+   frame into the corner (the pre-fix zoomed-Quake top-left artifact).
+   Track B's config file later exposes `zoom-policy` with letterbox as the
+   default value.
 
 ---
 
