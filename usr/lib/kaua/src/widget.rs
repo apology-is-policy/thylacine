@@ -797,6 +797,172 @@ impl Widget for Table<'_> {
     }
 }
 
+/// A one-row tab strip: `title1 │ title2 │ …`, the active tab styled. The tab
+/// *content* is the caller's (a `Tabs` paints only the strip, on the first row
+/// of `area`); the consumer switches `active` on `Tab`/`BackTab`. Pure render.
+/// Consumer: the Console's Program/Debug split.
+pub struct Tabs<'a> {
+    titles: &'a [&'a str],
+    active: usize,
+    style: Style,
+    active_style: Style,
+    divider: &'a str,
+}
+
+impl<'a> Tabs<'a> {
+    pub fn new(titles: &'a [&'a str]) -> Self {
+        Tabs {
+            titles,
+            active: 0,
+            style: Style::new(),
+            active_style: Style::new(),
+            divider: " \u{2502} ", // " │ "
+        }
+    }
+
+    pub fn active(mut self, idx: usize) -> Self {
+        self.active = idx;
+        self
+    }
+
+    pub fn style(mut self, style: Style) -> Self {
+        self.style = style;
+        self
+    }
+
+    pub fn active_style(mut self, style: Style) -> Self {
+        self.active_style = style;
+        self
+    }
+
+    /// The separator painted between tabs (default `" │ "`).
+    pub fn divider(mut self, divider: &'a str) -> Self {
+        self.divider = divider;
+        self
+    }
+}
+
+impl Widget for Tabs<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        if area.is_empty() {
+            return;
+        }
+        let y = area.y;
+        let max = area.right();
+        let mut x = area.x;
+        for (i, title) in self.titles.iter().enumerate() {
+            if x >= max {
+                break;
+            }
+            if i > 0 {
+                x = write_clip(buf, x, y, self.divider, self.style, max);
+                if x >= max {
+                    break;
+                }
+            }
+            let st = if i == self.active {
+                self.active_style
+            } else {
+                self.style
+            };
+            x = write_clip(buf, x, y, title, st, max);
+        }
+    }
+}
+
+/// Which edge a `Scrollbar` paints on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Edge {
+    Left,
+    Right,
+}
+
+/// A vertical scrollbar decoration on one edge column of `area`. The thumb's
+/// size + position are derived from (content length, viewport rows, scroll
+/// offset): a `█` thumb over a `│` track. When all content fits, the thumb
+/// fills the track. Pure render; paint it AFTER the pane it decorates (it
+/// overwrites the pane's edge column).
+pub struct Scrollbar {
+    content_len: usize,
+    viewport: usize,
+    offset: usize,
+    style: Style,
+    thumb_style: Style,
+    edge: Edge,
+}
+
+impl Scrollbar {
+    pub fn new(content_len: usize, viewport: usize, offset: usize) -> Self {
+        Scrollbar {
+            content_len,
+            viewport,
+            offset,
+            style: Style::new(),
+            thumb_style: Style::new(),
+            edge: Edge::Right,
+        }
+    }
+
+    /// The track glyph style.
+    pub fn style(mut self, style: Style) -> Self {
+        self.style = style;
+        self
+    }
+
+    pub fn thumb_style(mut self, style: Style) -> Self {
+        self.thumb_style = style;
+        self
+    }
+
+    pub fn edge(mut self, edge: Edge) -> Self {
+        self.edge = edge;
+        self
+    }
+}
+
+impl Widget for Scrollbar {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        if area.is_empty() {
+            return;
+        }
+        let h = area.height as usize;
+        let col = match self.edge {
+            Edge::Right => area.right().saturating_sub(1),
+            Edge::Left => area.x,
+        };
+        // Thumb [start, start+len) in row units.
+        let (thumb_start, thumb_len) = if self.viewport == 0 || self.content_len <= self.viewport {
+            (0usize, h) // all content fits (or degenerate) -> the track is the thumb
+        } else {
+            let max_off = self.content_len - self.viewport;
+            let off = self.offset.min(max_off);
+            let mut tlen = (h * self.viewport) / self.content_len;
+            if tlen == 0 {
+                tlen = 1;
+            }
+            if tlen > h {
+                tlen = h;
+            }
+            let travel = h - tlen;
+            let tstart = if max_off == 0 {
+                0
+            } else {
+                (travel * off) / max_off
+            };
+            (tstart, tlen)
+        };
+        for r in 0..h {
+            let y = area.y + r as u16;
+            let (glyph, st) = if r >= thumb_start && r < thumb_start + thumb_len {
+                ('\u{2588}', self.thumb_style) // █
+            } else {
+                ('\u{2502}', self.style) // │
+            };
+            buf.set_cell(col, y, Cell::new(glyph, st));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1076,5 +1242,69 @@ mod tests {
         Table::new(&cols, &rows).render(Rect::new(0, 0, 3, 2), &mut b);
         assert_eq!(b.get(0, 0).unwrap().style.fg, Color::Rgb(120, 120, 120)); // row override
         assert_eq!(b.get(0, 1).unwrap().style.fg, Color::Reset); // table default
+    }
+
+    #[test]
+    fn tabs_render_titles_with_dividers() {
+        let titles = ["a", "bb"];
+        let mut b = Buffer::empty(Rect::new(0, 0, 8, 1));
+        Tabs::new(&titles).render(Rect::new(0, 0, 8, 1), &mut b);
+        assert_eq!(sym(&b, 0, 0), 'a');
+        assert_eq!(sym(&b, 1, 0), ' '); // " │ " default divider
+        assert_eq!(sym(&b, 2, 0), '\u{2502}');
+        assert_eq!(sym(&b, 3, 0), ' ');
+        assert_eq!(sym(&b, 4, 0), 'b');
+        assert_eq!(sym(&b, 5, 0), 'b');
+    }
+
+    #[test]
+    fn tabs_active_tab_is_styled() {
+        let titles = ["a", "b"];
+        let mut b = Buffer::empty(Rect::new(0, 0, 8, 1));
+        let ember = Style::new().fg(Color::Rgb(224, 120, 64));
+        Tabs::new(&titles)
+            .active(1)
+            .active_style(ember)
+            .render(Rect::new(0, 0, 8, 1), &mut b);
+        // "a"(0) inactive; "b"(4) active. Divider " │ " puts "b" at col 4.
+        assert_eq!(b.get(0, 0).unwrap().style.fg, Color::Reset);
+        assert_eq!(sym(&b, 4, 0), 'b');
+        assert_eq!(b.get(4, 0).unwrap().style.fg, Color::Rgb(224, 120, 64));
+    }
+
+    #[test]
+    fn scrollbar_full_thumb_when_content_fits() {
+        let mut b = Buffer::empty(Rect::new(0, 0, 3, 4));
+        // 3 items in a 5-row viewport: nothing to scroll -> the track is thumb.
+        Scrollbar::new(3, 5, 0).render(Rect::new(0, 0, 3, 4), &mut b);
+        for r in 0..4 {
+            assert_eq!(sym(&b, 2, r), '\u{2588}'); // █ on the right edge
+        }
+    }
+
+    #[test]
+    fn scrollbar_thumb_tracks_the_offset() {
+        // 10 items, 2-row viewport, 10-row track -> a 2-row thumb travelling 8.
+        let mut top = Buffer::empty(Rect::new(0, 0, 3, 10));
+        Scrollbar::new(10, 2, 0).render(Rect::new(0, 0, 3, 10), &mut top);
+        assert_eq!(sym(&top, 2, 0), '\u{2588}'); // thumb at top
+        assert_eq!(sym(&top, 2, 1), '\u{2588}');
+        assert_eq!(sym(&top, 2, 2), '\u{2502}'); // │ track below
+
+        let mut bot = Buffer::empty(Rect::new(0, 0, 3, 10));
+        Scrollbar::new(10, 2, 8).render(Rect::new(0, 0, 3, 10), &mut bot); // offset = max
+        assert_eq!(sym(&bot, 2, 7), '\u{2502}'); // track above
+        assert_eq!(sym(&bot, 2, 8), '\u{2588}'); // thumb at bottom
+        assert_eq!(sym(&bot, 2, 9), '\u{2588}');
+    }
+
+    #[test]
+    fn scrollbar_left_edge() {
+        let mut b = Buffer::empty(Rect::new(0, 0, 3, 4));
+        Scrollbar::new(3, 5, 0)
+            .edge(Edge::Left)
+            .render(Rect::new(0, 0, 3, 4), &mut b);
+        assert_eq!(sym(&b, 0, 0), '\u{2588}'); // painted on the left column
+        assert_eq!(sym(&b, 2, 0), ' '); // right column untouched
     }
 }

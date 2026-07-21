@@ -187,13 +187,17 @@ The scoped v1.0 set (exactly what nora + ut + a SAK prompt need):
 More widgets accrete later, on the same trait — **the registry grows with its
 consumers, and a new standard widget is added *here*, never as an app-private
 hack** (user directive, 2026-07-20). The Nora Go IDE (`docs/NORA-IDE-UX.md`,
-Stage 8f) is the first driver of that growth: it adds **`Tree`** (collapsible
-indented nodes — the variable inspector + the resource inspector), **`Table`**
-(columns + a selectable row + per-row style + a divider-row variant — the
-goroutines view + the cross-boundary call stack), **`Tabs`** (a tab strip — the
-Console's Program/Debug split), and a **`Scrollbar`** decoration. Each is a pure,
-host-testable value on `Widget::render`, reusable by every consumer. `Gauge` and
-others follow as later consumers need them.
+Stage 8f) is the first driver of that growth: **8f-1 landed** in `src/widget.rs`
+**`Tree`** (a `TreeItem` forest + `flatten_tree` + the render widget — collapsible
+indented nodes for the variable inspector + the resource inspector), **`Table`**
+(fixed columns + a selectable row + per-row style + the `Row::divider` `── kernel
+──` variant — the goroutines view + the cross-boundary call stack), **`Tabs`** (a
+tab strip — the Console's Program/Debug split), and a **`Scrollbar`** decoration
+(a `█`-over-`│` thumb from `(len, viewport, offset)`). Each is a pure,
+host-testable value on `Widget::render` (14 host tests), reusable by every
+consumer — the caller owns the display state (selection / expand-flags / offset /
+active), exactly the `List` idiom. `Gauge` and others follow as later consumers
+need them.
 
 ### 3.4 `kaua::event` — keys
 
