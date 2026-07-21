@@ -1030,6 +1030,17 @@ impl Comp {
                 }
                 if entering {
                     let _ = self.gpu.set_scanout(SCREEN_RES, dw, dh);
+                    // Flush AFTER the bind (#57): a RESOURCE_FLUSH reaches
+                    // only scanouts bound to the resource, so the
+                    // screen_flush_full above -- issued while the OLD
+                    // scanout was still bound -- was dropped by spec, and
+                    // a same-size surface replace renders NOTHING under
+                    // the QEMU cocoa frontend (10.0.2 switchSurface swaps
+                    // the pixman pointer without a redraw; VNC full-
+                    // dirties on replace, which masked this headless).
+                    // The post-bind flush makes the switch self-healing
+                    // on every frontend.
+                    let _ = self.gpu.flush(SCREEN_RES, 0, 0, dw, dh);
                     self.scanout = Scanout::Composed;
                 }
                 if structural {
@@ -2890,6 +2901,13 @@ impl Conn {
                 }
             }
             if comp.gpu.set_scanout(res, w, h).is_ok() {
+                // Post-bind full flush (#57): the per-rect flushes above
+                // targeted a not-yet-scanned-out resource (dropped by
+                // spec), and cocoa's same-size surface replace renders
+                // nothing -- without this the display keeps the stale
+                // composed frame until later client damage covers it
+                // (the lingering-dead-pane symptom).
+                let _ = comp.gpu.flush(res, 0, 0, w, h);
                 comp.scanout = Scanout::Direct(n);
                 comp.pending_direct = None;
                 if let Some(s) = comp.surf_mut(n) {

@@ -97,6 +97,28 @@ v1.x) — the display stays blank until reboot.
   dirty-rect traffic) never fired it — `tools/interactive/ls-gfx-live.exp`
   is the standing live-display coverage leg; the cocoa acceptance test
   is a human at `THYLACINE_DISPLAY=cocoa`.
+
+  **Scanout-switch flush discipline (#57, the second live-display-class
+  fix)**: every `SET_SCANOUT` that binds a resource is followed by a
+  full-frame `RESOURCE_FLUSH` on the newly bound resource — at the
+  entering-Composed switch in `reconcile()` and at the pending-direct
+  flip in the present path. Two stacked facts make the post-bind flush
+  load-bearing: a `RESOURCE_FLUSH` reaches only scanouts *currently
+  bound* to the resource (virtio-gpu spec), so the frame flushed while
+  the OLD scanout was still bound is dropped; and the QEMU cocoa
+  frontend's `switchSurface` (10.0.2) swaps the pixman pointer with NO
+  redraw when the dimensions are unchanged — so a same-size scanout
+  switch rendered *nothing* under cocoa, leaving the stale frame on
+  screen until later client damage happened to cover it (the
+  lingering-dead-pane + invisible-chrome-at-split symptoms). VNC masked
+  the gap headless: `vnc_dpy_switch` full-dirties on every replace. The
+  divergence probe that proved it (an accumulating RFB client mirroring
+  the `dpy_gfx_update` stream against QMP-screendump resource truth,
+  the whole flow driven over QMP) showed every structural flush
+  delivered under VNC while the cocoa path had no repaint source.
+  Residual: the `set_scanout(0)` disable arms have no resource to
+  flush, so an Off transition keeps the stale frame under cocoa —
+  edge-path cosmetic (the boot session never goes Off).
 - `input.rs` — the virtio-input-PCI eventq (`InputDev`, generalized from
   the G-3 keyboard-only claim at G-7c): the P4-K probe's audited
   populate/drain/recycle discipline over the same PCI transport,
