@@ -153,17 +153,14 @@ fn fill(surf: &mut Surface, color: u32) {
 }
 
 
-/// The compositor's fork-2 placement, mirrored for sample points: a
-/// fit-inside surface LETTERBOXES (centered -- the pane center always
-/// samples the fill); an OVERFLOWING one CROPS top-left (sample the
-/// covered-region center). Must track Comp::blit_composed_pixels'
-/// discriminator exactly.
-fn sample_point(px: u32, py: u32, pw: u32, ph: u32, sw: u32, sh: u32) -> (u32, u32) {
-    if sw <= pw && sh <= ph {
-        (px + pw / 2, py + ph / 2)
-    } else {
-        (px + pw.min(sw) / 2, py + ph.min(sh) / 2)
-    }
+/// The compositor's placement, mirrored for sample points. The battery
+/// presents FULL-FRAME only (present(None) everywhere), so it never
+/// trips the #56 patchwork latch and always LETTERBOXES -- centered,
+/// scaled up or down -- meaning the pane center always samples the
+/// fill. (The pre-#56 size discriminator needed a covered-region-center
+/// arm for the overflow crop; a latched accumulator would need it back.)
+fn sample_point(px: u32, py: u32, pw: u32, ph: u32, _sw: u32, _sh: u32) -> (u32, u32) {
+    (px + pw / 2, py + ph / 2)
 }
 
 fn overlap(a: PaneInfo, b: PaneInfo) -> bool {

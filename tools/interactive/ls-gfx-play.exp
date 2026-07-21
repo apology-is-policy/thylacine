@@ -107,9 +107,11 @@ lc_expect "Quake Initialized" "engine init (pak loaded, SW renderer up)"
 # HVF; the in-game leg below hard-asserts signon regardless).
 sleep 6
 
-# The SPLIT-state dump (logged, not gated): aurora cropped on the left,
-# Quake on the right -- the fork-2-refinement visual (the "utopia pane"
-# live-play regression's standing artifact).
+# The SPLIT-state dump (logged, not gated): aurora cropped on the left
+# (patchwork-latched, #56), Quake LETTERBOXED in the right pane (a
+# full-frame presenter scales down-to-fit: ~638x478 centered) -- the
+# fork-2-refinement visual (the "utopia pane" live-play regression's
+# standing artifact).
 if {[gfx_dump_or_fail /tmp/lsplay-split.png] ne ""} { lc_fail "screendump (split) failed" }
 lc_step "split-state dump at /tmp/lsplay-split.png"
 
@@ -194,7 +196,10 @@ lc_pass "play: a wheel notch lands in the game (G-7c scroll path)"
 # half), aim the tablet INTO the right half, click. Only a LIVE
 # EV_ABS -> scale -> ptr_move chain places the pointer in Quake's pane;
 # a dead one leaves it at (0,0)/stale -> the click lands in aurora's
-# pane (or no pane) -> no banner -> this leg times out.
+# pane (or no pane) -> no banner -> this leg times out. #56 math: abs
+# (24000,16000) -> display ~(937,390); right-pane-rel ~(295,389); the
+# 640x480 surface letterboxes to ~638x478 @oy~159, so the letterbox
+# inverse gives sy ~ (389-159)*480/478 ~ 231 < 480 -- in-surface.
 qk_chord "meta_l+f"
 qk_ptr "abs 24000 16000"
 qk_ptr "btn left down"

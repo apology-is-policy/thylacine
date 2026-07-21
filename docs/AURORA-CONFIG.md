@@ -222,13 +222,18 @@ byte-unchanged; pure aux.
    acking would reweave to the pane size while the app renders its fixed
    frame into the corner (the pre-fix zoomed-Quake top-left artifact).
    Track B's config file later exposes `zoom-policy` with letterbox as the
-   default value. **Refinement (same day, from live play)**: letterbox
-   applies to FIT-INSIDE surfaces only (the whole-frame-presenter class);
-   an OVERFLOWING surface keeps the pre-fork-2 damage-clipped CROP — a
-   full-slot scaled redraw is unsound for an accumulator client (aurora's
-   cell-diff over rotating patchwork slots → the "utopia pane flipping"
-   bug the first cut shipped). Aurora's CONFIGURE-tracking resize (re-grid
-   + winsize propagation) is the real close of the oversized-console case
+   default value. **Refinement (same day, from live play)**: letterbox is
+   sound only for the whole-frame-presenter class — a full-slot scaled
+   redraw is unsound for an accumulator client (aurora's cell-diff over
+   rotating patchwork slots → the "utopia pane flipping" bug the first
+   cut shipped). The interim size discriminator (fit-inside letterboxes,
+   overflow crops) then clipped a 2px-overflowing split Quake, so the
+   final form (**#56, the patchwork latch**) discriminates by PRESENT
+   STYLE, which is protocol-observable: `Surface.patchwork` latches
+   one-way on the first partial-damage present; unlatched surfaces
+   letterbox any mismatch (up or down), latched ones take the
+   damage-clipped CROP. Aurora's CONFIGURE-tracking resize (re-grid +
+   winsize propagation) is the real close of the oversized-console case
    — tracked as task #55.
 
 ---

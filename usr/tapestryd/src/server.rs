@@ -295,6 +295,16 @@ struct Surface {
     h: u32,
     /// The last letterbox placement logged (one-shot diagnostic).
     lb_logged: Option<(u32, u32, u32, u32)>,
+    /// The present-style latch (#56): set the first time a present's
+    /// damage does not cover the full surface; never cleared. A latched
+    /// surface is an ACCUMULATOR (aurora's cell-diff over rotating weave
+    /// slots): each slot is patchwork, so scaling any one slot composes
+    /// alternating half-stale frames -- a size mismatch therefore CROPS
+    /// (damage-clipped) instead of letterboxing. Full-frame presenters
+    /// (the SDL class, the battery) never latch and letterbox both
+    /// directions. One-way by design: a later full redraw must not flap
+    /// the placement back.
+    patchwork: bool,
     slot_stride: u64,
     /// The CURRENT weave generation (the spec's g-highest). weft_ensure,
     /// the geometry reads, and every post-fence present serve/validate
@@ -516,6 +526,7 @@ impl Comp {
             w: 0,
             h: 0,
             lb_logged: None,
+            patchwork: false,
             slot_stride: 0,
             weave: None,
             resource_id: 0, // minted with the first generation (create)
@@ -1118,32 +1129,32 @@ impl Comp {
         };
         let dw = self.gpu.width as u64;
         let src_base = weave_va + (slot as u64) * slot_stride;
-        let sh_full = match self.surf(n) {
-            Some(s) => s.h,
+        let (sh_full, patchwork) = match self.surf(n) {
+            Some(s) => (s.h, s.patchwork),
             None => return None,
         };
-        if (sw != content.w || sh_full != content.h)
-            && sw <= content.w
-            && sh_full <= content.h
-        {
-            // Fork 2 (user-voted 2026-07-21): a FIT-INSIDE fixed-size
-            // surface LETTERBOXES into its pane -- aspect-preserving
-            // scale, centered, nearest-neighbor (crisp for the
-            // retro-game case; cheap integer math). Damage sub-rects
-            // are ignored: any present redraws the FULL scaled rect --
-            // sound ONLY for whole-frame presenters (the SDL class),
-            // which is why an OVERFLOWING surface (the gate above)
-            // takes the damage-clipped CROP path below instead: an
-            // accumulator client's individual slots are PATCHWORK
-            // (aurora's cell-diff over rotating slots), and a full-
-            // slot redraw composes alternating patchwork frames --
-            // the live-play "utopia pane flipping" bug. Aurora's
-            // pane-tracking resize is the real close (tracked); until
-            // then the oversized-console case keeps its pre-fork-2
-            // crop. The bars around a letterboxed rect are the pane
-            // background, painted by the chrome pass. The geometry
-            // comes from the SAME letterbox() ptr_hit inverts -- one
-            // authority, no drift.
+        if (sw != content.w || sh_full != content.h) && !patchwork {
+            // Fork 2 + the #56 patchwork latch (both user-voted
+            // 2026-07-21): a FULL-FRAME presenter (patchwork never
+            // latched) LETTERBOXES into its pane -- aspect-preserving
+            // scale, up OR down, centered, nearest-neighbor (crisp for
+            // the retro-game case; cheap integer math). Damage
+            // sub-rects are ignored: any present redraws the FULL
+            // scaled rect -- sound exactly BECAUSE the latch is clear:
+            // every present so far carried whole-frame bytes. A LATCHED
+            // surface is an accumulator (aurora's cell-diff over
+            // rotating weave slots): its slots are PATCHWORK, and
+            // scaling a full slot composes alternating half-stale
+            // frames -- the live-play "utopia pane flipping" bug -- so
+            // any size mismatch takes the damage-clipped CROP path
+            // below instead. (The pre-#56 discriminator was fit-inside
+            // BY SIZE, which cropped a 2px-overflowing split Quake; the
+            // present style is the property that actually matters, and
+            // it is protocol-observable.) Aurora's pane-tracking resize
+            // is the real close (#55). The bars around a letterboxed
+            // rect are the pane background, painted by the chrome pass.
+            // The geometry comes from the SAME letterbox() ptr_hit
+            // inverts -- one authority, no drift.
             if content.w == 0 || content.h == 0 || sh_full == 0 || sw == 0 {
                 return None;
             }
@@ -1161,9 +1172,11 @@ impl Comp {
             }
             // SAFETY: src reads stay inside the weave slot (sx < sw,
             // sy < sh by the division bound: lx < dw2 => lx*sw/dw2 <
-            // sw); dst rows stay inside the screen buffer (the scaled
-            // rect is inside content, content inside the display by
-            // the geometry pass).
+            // sw -- ratio math, valid for scale-down as well as up);
+            // dst rows stay inside the screen buffer (letterbox()
+            // bounds dw2 <= cw and dh2 <= ch by construction in BOTH
+            // directions, so the scaled rect is inside content, and
+            // content inside the display by the geometry pass).
             unsafe {
                 for row in 0..dh2 as u64 {
                     let sy = (row * sh_full as u64) / dh2 as u64;
@@ -1610,21 +1623,24 @@ impl Comp {
     /// surface-relative coords (G-7c pointer routing: under-the-pointer,
     /// NOT the focused leaf -- clicking a pane must land in that pane;
     /// keyboard focus stays chord-driven, no click-to-focus at this
-    /// stage). A fixed-size surface letterboxes into its pane (fork 2),
-    /// so the inverse subtracts the content + letterbox origins and
-    /// UNSCALES -- via the same letterbox() the blit uses. A point over
-    /// the bars CLAMPS into the scaled rect, keeping drag/mouse-look
-    /// deltas alive at the boundary.
+    /// stage). A full-frame presenter letterboxes into its pane (fork 2
+    /// + the #56 patchwork latch), so the inverse subtracts the content
+    /// + letterbox origins and UNSCALES -- via the same letterbox() the
+    /// blit uses. A point over the bars CLAMPS into the scaled rect,
+    /// keeping drag/mouse-look deltas alive at the boundary.
     fn ptr_hit(&self, px: u32, py: u32) -> Option<(usize, u16, u16)> {
         let (n, c) = self.layout.surface_at(px, py)?;
         let s = self.surf(n)?;
         if s.w == 0 || s.h == 0 || c.w == 0 || c.h == 0 {
             return None;
         }
-        if s.w > c.w || s.h > c.h {
-            // Overflow = the CROP placement (see blit_composed_pixels):
-            // surface (0,0) at the content origin, damage-clipped. The
-            // inverse is the plain subtract + far-edge clamp.
+        if s.patchwork {
+            // Latched accumulator = the CROP placement (see
+            // blit_composed_pixels): surface (0,0) at the content
+            // origin, damage-clipped. The inverse is the plain subtract
+            // + far-edge clamp (which also covers a patchwork surface
+            // SMALLER than its pane: a point past the surface extent
+            // clamps to the far edge, keeping deltas alive).
             let sx = (px - c.x).min(s.w - 1).min(0xFFFF) as u16;
             let sy = (py - c.y).min(s.h - 1).min(0xFFFF) as u16;
             return Some((n, sx, sy));
@@ -1889,6 +1905,54 @@ pub struct Conn {
 }
 
 const NO_FID: Option<Fid> = None;
+
+/// Exact union-cover test (#56): do `rects` (validated in-bounds,
+/// nonempty) jointly cover the full (w, h) surface? The patchwork latch
+/// must NOT trip on a full frame presented as TILES -- the battery's
+/// G-6c multi-rect leg tiles the full surface in two halves by design
+/// (the first-cut single-full-rect shortcut latched it -> the moveB
+/// pane-center regression). Y-band sweep: for each horizontal band
+/// between adjacent y-edges, the x-intervals of the rects spanning the
+/// band must union to [0, w) gap-free. Exact for arbitrary overlap;
+/// bounded by TPRESENT_MAX_RECTS=64 -> at most ~130 bands x 64
+/// intervals per present -- negligible.
+fn rects_cover_full(rects: &[(u32, u32, u32, u32)], w: u32, h: u32) -> bool {
+    // Fast path: a single full-surface rect (the dominant shape --
+    // rect_count 0, SDL_UpdateWindowSurface, present(None)).
+    if rects.iter().any(|&(x, y, pw, ph)| x == 0 && y == 0 && pw == w && ph == h) {
+        return true;
+    }
+    let mut ys: Vec<u32> = Vec::with_capacity(rects.len() * 2 + 2);
+    ys.push(0);
+    ys.push(h);
+    for &(_, y, _, ph) in rects {
+        ys.push(y);
+        ys.push(y + ph);
+    }
+    ys.sort_unstable();
+    ys.dedup();
+    for win in ys.windows(2) {
+        let (band_lo, band_hi) = (win[0], win[1]);
+        // x-intervals of the rects fully spanning this band, sorted.
+        let mut xs: Vec<(u32, u32)> = rects
+            .iter()
+            .filter(|&&(_, y, _, ph)| y <= band_lo && y + ph >= band_hi)
+            .map(|&(x, _, pw, _)| (x, x + pw))
+            .collect();
+        xs.sort_unstable();
+        let mut reach: u32 = 0;
+        for (x0, x1) in xs {
+            if x0 > reach {
+                return false; // horizontal gap in this band
+            }
+            reach = reach.max(x1);
+        }
+        if reach < w {
+            return false; // band not covered to the right edge
+        }
+    }
+    true
+}
 
 impl Conn {
     pub fn new(handle: i64, conn_id: u64) -> Conn {
@@ -2782,6 +2846,21 @@ impl Conn {
                 || (y as u64) + (ph as u64) > h as u64
             {
                 return Err(p9::E_INVAL);
+            }
+        }
+
+        // The #56 present-style latch: a present whose damage does not
+        // cover the full surface marks the client an ACCUMULATOR --
+        // placement (blit + ptr_hit) then crops instead of letterboxing.
+        // Checked on EVERY present (incl. direct-scanout mode, where
+        // placement is moot but the latch must stay accurate for a later
+        // return to composed mode). The cover test is the EXACT union
+        // (rects_cover_full): the battery's multi-rect leg presents the
+        // full frame as two tiles, which a single-full-rect shortcut
+        // falsely latched (the moveB pane-center regression).
+        if !rects_cover_full(&rects, w, h) {
+            if let Some(s) = comp.surf_mut(n) {
+                s.patchwork = true;
             }
         }
 

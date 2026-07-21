@@ -133,28 +133,46 @@ v1.x) — the display stays blank until reboot.
   chord plane is a KEYBOARD reservation; pointer events flow under
   held modifiers (clients see `mods`).
 
-  **Fork 2 — the letterbox placement (user-voted 2026-07-21).** A
-  surface whose dims mismatch its pane content LETTERBOXES: aspect-
-  preserving nearest-neighbor scale, centered; the bars are pane
-  background (chrome-painted). `Comp::letterbox(sw, sh, cw, ch)` is
-  the ONE geometry authority — `blit_composed_pixels`' forward map
-  and `ptr_hit`'s inverse (subtract content + letterbox origins,
-  clamp into the scaled rect, unscale) both derive from it, so they
-  cannot drift (the audit-F3 lesson made structural). The scaled
-  path ignores damage sub-rects (any present redraws the full scaled
-  rect — fixed-size clients present whole frames); the same-size
-  fast path is byte-identical to the pre-fork-2 blit, so CONFIGURE-
-  tracking clients (aurora, the battery's exact-fit legs) never
-  scale in steady state — a resize transient letterboxes for the
-  frames until the client acks + reweaves (visible in the one-shot
-  `tapestryd: surface N letterbox ...` diagnostic). The SDL backend
-  completes the policy: a window WITHOUT `SDL_WINDOW_RESIZABLE`
-  DECLINES size offers (unacked CONFIGUREs are protocol-legal
-  standing offers), keeping its dims fixed so the compositor scales
-  — acking would reweave to the pane size while the app renders its
-  fixed frame into the corner of the bigger surface (the zoomed-
-  Quake top-left artifact this replaced). The zoomed 640×480 Quake
-  proof: `letterbox 640x480 -> 1066x800 @(107,0) in 1280x800`.
+  **Fork 2 — the letterbox placement + the #56 patchwork latch (both
+  user-voted 2026-07-21).** A size-mismatched surface's placement is
+  decided by PRESENT STYLE, not size: `Surface.patchwork` latches
+  (one-way) the first time a present's damage does not cover the full
+  surface — the EXACT rect union (`rects_cover_full`, a y-band sweep),
+  not a single-full-rect shortcut: the battery's G-6c multi-rect leg
+  tiles the full frame in two halves and must stay unlatched (the
+  shortcut cropped its later legs — the moveB regression the gate
+  caught). rect_count 0 counts as full; checked on every present,
+  direct-scanout mode included. An UNLATCHED
+  surface — a full-frame presenter: the SDL class (`SW_RenderPresent
+  → SDL_UpdateWindowSurface` = one full rect), the battery
+  (`present(None)`) — LETTERBOXES on any mismatch, scaled up OR down:
+  aspect-preserving nearest-neighbor, centered; the bars are pane
+  background (chrome-painted). A LATCHED surface is an accumulator
+  (aurora: a full-frame first present, then cell-diff rects over
+  rotating weave slots — each slot is patchwork, so scaling any one
+  slot composes alternating half-stale frames, the live-play "utopia
+  pane flipping" bug) and takes the damage-clipped CROP instead;
+  aurora's pane-tracking resize is the real close (#55). The interim
+  size discriminator (fit-inside letterboxes, overflow crops) cropped
+  a 2px-overflowing split Quake — present style is the property that
+  matters, and it is protocol-observable. `Comp::letterbox(sw, sh,
+  cw, ch)` is the ONE geometry authority — `blit_composed_pixels`'
+  forward map and `ptr_hit`'s inverse (subtract content + letterbox
+  origins, clamp into the scaled rect, unscale; the crop inverse's
+  far-edge clamp also covers a patchwork surface smaller than its
+  pane) both derive from it, so they cannot drift (the audit-F3
+  lesson made structural). The scaled path ignores damage sub-rects —
+  sound exactly because the latch is clear: every present so far
+  carried whole-frame bytes. The same-size fast path is byte-
+  identical to the pre-fork-2 blit. The SDL backend completes the
+  policy: a window WITHOUT `SDL_WINDOW_RESIZABLE` DECLINES size
+  offers (unacked CONFIGUREs are protocol-legal standing offers),
+  keeping its dims fixed so the compositor scales — acking would
+  reweave to the pane size while the app renders its fixed frame into
+  the corner of the bigger surface (the zoomed-Quake top-left
+  artifact this replaced). In-guest proofs: zoom `letterbox 640x480
+  -> 1066x800 @(107,0) in 1280x800`; split `letterbox 640x480 ->
+  638x478` centered in the right pane (the pre-#56 crop clipped it).
 
 ## The 9P server (`server.rs`)
 

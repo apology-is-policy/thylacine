@@ -47,9 +47,13 @@ else
 fi
 export LS_CI_CMD_TIMEOUT="${LS_CI_CMD_TIMEOUT:-30}"
 
-# Reap only THIS repo's qemu (match the kernel bin path) so a co-resident,
-# unrelated qemu on the dev box is left alone.
-reap_qemu() { pkill -9 -f "qemu-system-aarch64.*thylacine" 2>/dev/null || true; }
+# Reap only THIS repo's qemu -- match THIS tree's build dir in the cmdline
+# (-kernel $BUILD_DIR/kernel/thylacine.bin), so a co-resident qemu from a
+# SIBLING WORKTREE survives. The old pattern ("qemu-system-aarch64.*thylacine")
+# matched every thylacine tree: two sessions gating concurrently (main +
+# thylacine-aux, 2026-07-21) shot each other's live VMs -- "qemu GONE, guest
+# healthy" mid-scenario failures on both sides (task #59).
+reap_qemu() { pkill -9 -f "qemu-system-aarch64.*$BUILD_DIR/" 2>/dev/null || true; }
 trap reap_qemu EXIT
 
 # --- ensure boot artifacts exist (match test.sh: build-if-missing) ---
