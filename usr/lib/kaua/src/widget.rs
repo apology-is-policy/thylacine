@@ -583,7 +583,9 @@ impl Widget for Tree<'_> {
             }
             buf.set_cell(mx, y, Cell::new(tr.mark.glyph(), style));
             let lx = mx.saturating_add(2); // marker + a one-cell gap
-            buf.set_str(lx, y, tr.label, style);
+            // Clip to the widget's right edge (like Table/Tabs); `set_str` would
+            // clip only to the whole buffer, overflowing a sub-rect tile.
+            write_clip(buf, lx, y, tr.label, style, area.right());
         }
     }
 }
@@ -1172,6 +1174,21 @@ mod tests {
         Tree::new(&rows).offset(1).render(Rect::new(0, 0, 4, 2), &mut b);
         assert_eq!(sym(&b, 2, 0), 'b'); // "b" is the first shown row
         assert_eq!(sym(&b, 2, 1), 'c');
+    }
+
+    #[test]
+    fn tree_label_clips_to_the_tile_right_edge() {
+        // A label longer than the tile must not spill past area.right() into a
+        // neighbouring pane. Table/Tabs clip with write_clip; Tree must too
+        // (`set_str` would clip only to the whole buffer). The tile occupies
+        // cols [0,5) of a 10-wide buffer; the leaf label starts at col 2.
+        let roots = vec![TreeItem::leaf("abcdefghij")];
+        let rows = flatten_tree(&roots);
+        let mut b = Buffer::empty(Rect::new(0, 0, 10, 1));
+        Tree::new(&rows).render(Rect::new(0, 0, 5, 1), &mut b);
+        assert_eq!(sym(&b, 2, 0), 'a'); // label starts inside the tile
+        assert_eq!(sym(&b, 4, 0), 'c'); // last cell inside the tile
+        assert_eq!(sym(&b, 5, 0), ' '); // just past area.right() -- untouched
     }
 
     #[test]
