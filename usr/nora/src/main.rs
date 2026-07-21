@@ -43,12 +43,14 @@ use kaua::rect::Rect;
 use kaua::source::{EventSource, PollSource};
 use kaua::term::Terminal;
 
-use parley::transport::Mux;
+use parley::transport::{Mux, Ready, Tag};
 
-use nora::editor::{Editor, Mode, Request};
+use nora::editor::{DapRequest, Editor, Mode, Request};
 use nora::view;
 
+mod dap_host;
 mod lsp_host;
+use dap_host::{Dap, TAG_DAP_ERR, TAG_DAP_OUT};
 use lsp_host::{Lsp, TAG_LSP_ERR, TAG_LSP_OUT, TAG_STDIN};
 
 #[global_allocator]
@@ -138,12 +140,19 @@ pub extern "C" fn rs_main() -> i64 {
         Some(p) if lsp_host::is_go(p) => Lsp::start(p),
         _ => None,
     };
+    // No debug session until the user runs `:debug` (8e-3e). It spawns Ambush
+    // then; a buffer that never debugs pays nothing.
+    let mut dap: Option<Dap> = None;
 
-    let code = run(&mut term, &mut src, &mut ed, &mut lsp);
-    // The server must not outlive the editor: an orphaned gopls holds the
-    // workspace (and its memory) for the rest of the session.
+    let code = run(&mut term, &mut src, &mut ed, &mut lsp, &mut dap);
+    // Neither child may outlive the editor: an orphaned gopls holds the
+    // workspace, and an orphaned Ambush holds its debuggee (and the ptrace
+    // stop). Compose #68 close-at-exit.
     if let Some(mut l) = lsp {
         l.shutdown();
+    }
+    if let Some(mut d) = dap {
+        d.shutdown();
     }
     // Explicit restore (Drop also runs it; both are idempotent).
     let _ = term.leave();
@@ -157,6 +166,7 @@ fn run(
     src: &mut PollSource,
     ed: &mut Editor,
     lsp: &mut Option<Lsp>,
+    dap: &mut Option<Dap>,
 ) -> i32 {
     if redraw(term, ed).is_err() {
         return 1;
@@ -166,10 +176,11 @@ fn run(
         if src.is_eof() {
             return 0;
         }
-        // ONE poll(2) over fd 0 and any live server pipes (8e-2). A keystroke
-        // and an arriving diagnostic wake the loop identically -- there is no
-        // tick, so a message nothing polls for never repaints.
-        let ready = match lsp_host::poll_sources(&mut mux, lsp.as_ref()) {
+        // ONE poll(2) over fd 0 and any live server pipes -- gopls (8e-2) and
+        // Ambush (8e-3e). A keystroke, a diagnostic, and a debugger stop all
+        // wake the loop identically -- there is no tick, so a message nothing
+        // polls for never repaints.
+        let ready = match poll_all(&mut mux, lsp.as_ref(), dap.as_ref()) {
             Some(r) => r,
             // fd 0 gone (no console) -> exit cleanly rather than spin.
             None => return 1,
@@ -226,6 +237,11 @@ fn run(
                         dirty |= l.on_ready(&r, ed);
                     }
                 }
+                TAG_DAP_OUT | TAG_DAP_ERR => {
+                    if let Some(d) = dap.as_mut() {
+                        dirty |= d.on_ready(&r, ed);
+                    }
+                }
                 // Unknown tag: the fd set is ours, so this cannot happen --
                 // ignore rather than assume.
                 _ => {}
@@ -269,9 +285,56 @@ fn run(
                 *lsp = None;
             }
         }
+        // Debugger commands + lifecycle (8e-3e), independent of the LSP block.
+        // A `:` debug verb raised a request: `:debug` starts a session, the
+        // rest act on the live one.
+        if let Some(req) = ed.take_dap_request() {
+            drive_dap(dap, req, ed);
+            dirty = true;
+        }
+        // A session that died / exited takes its debuggee with it: drop the
+        // handle so its fds leave the poll set for good.
+        if let Some(d) = dap.as_ref() {
+            if d.is_dead() {
+                *dap = None;
+            }
+        }
         if dirty && redraw(term, ed).is_err() {
             return 1;
         }
+    }
+}
+
+/// Register fd 0 plus any live gopls and Ambush pipes and block for one of them.
+fn poll_all(mux: &mut Mux, lsp: Option<&Lsp>, dap: Option<&Dap>) -> Option<Vec<Ready>> {
+    let mut fds: Vec<(i32, Tag)> = alloc::vec![(0, TAG_STDIN)];
+    if let Some(l) = lsp {
+        fds.extend(l.poll_fds());
+    }
+    if let Some(d) = dap {
+        fds.extend(d.poll_fds());
+    }
+    mux.poll(&fds, PollTimeout::Block).ok()
+}
+
+/// Act on a debugger command. `:debug` (re)starts a session; the rest need a
+/// live one, reporting rather than acting when there is none.
+fn drive_dap(dap: &mut Option<Dap>, req: DapRequest, ed: &mut Editor) {
+    match req {
+        DapRequest::Launch(prog) => {
+            // Replace any existing session so a second `:debug` cannot orphan
+            // the first Ambush + its debuggee.
+            if let Some(mut old) = dap.take() {
+                old.shutdown();
+            }
+            // `Dap::start` sets the status either way (launching / not
+            // installed); nothing to add here.
+            *dap = Dap::start(&prog, ed);
+        }
+        other => match dap.as_mut() {
+            Some(d) => d.command(other, ed),
+            None => ed.set_status(String::from("no debug session (:debug <program> first)")),
+        },
     }
 }
 

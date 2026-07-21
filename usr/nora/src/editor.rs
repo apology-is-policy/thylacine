@@ -80,6 +80,38 @@ pub enum LspRequest {
     Completion,
 }
 
+/// A debugger command the editor wants issued, raised by a `:` debug verb for
+/// the binary's DAP host to drive against Ambush (8e-3e).
+///
+/// A third async axis alongside [`Request`] and [`LspRequest`], for the same
+/// reasons (see [`LspRequest`]): the debugger is a persistent child that may be
+/// absent, slow, or exit, and its events arrive on a later poll-wake. The editor
+/// only relays these verbs and shows a status/scratch result -- it holds no
+/// session state and speaks no protocol. Unlike an `LspRequest` (implicit at the
+/// cursor) a debug command carries its own argument, since it names a program,
+/// a breakpoint, or an expression rather than a screen position.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum DapRequest {
+    /// Start debugging a program (`:debug <program>`).
+    Launch(String),
+    /// Set a breakpoint -- a function name, or `file:line` (`:break <spec>`).
+    Break(String),
+    /// Resume execution (`:cont` / `:c`).
+    Continue,
+    /// Step over one source line (`:next` / `:n`).
+    Next,
+    /// Step into a call (`:step` / `:s`).
+    Step,
+    /// Step out of the current function (`:stepout` / `:so`).
+    StepOut,
+    /// Show the call stack (`:bt`).
+    Backtrace,
+    /// Evaluate an expression in the current frame (`:print <expr>` / `:p`).
+    Print(String),
+    /// End the debug session (`:kill`).
+    Kill,
+}
+
 /// One completion candidate, as the editor renders and applies it. The
 /// protocol-free twin of the client's item -- same reasoning as `nora::diag`.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -278,6 +310,8 @@ pub struct Editor {
     completion_prefix: String,
     /// A language-server query awaiting the binary (see [`LspRequest`]).
     lsp_request: Option<LspRequest>,
+    /// A debugger command awaiting the binary (see [`DapRequest`]).
+    dap_request: Option<DapRequest>,
     /// Where to put the cursor once a cross-file jump's buffer has loaded.
     /// Applied by `open_buffer`, which is the single point where a newly-read
     /// file becomes the active buffer.
@@ -342,6 +376,7 @@ impl Editor {
             completion: Vec::new(),
             completion_prefix: String::new(),
             lsp_request: None,
+            dap_request: None,
             pending_jump: None,
             anchor: None,
             register: String::new(),
@@ -449,6 +484,13 @@ impl Editor {
     /// polls this like `take_request`).
     pub fn take_lsp_request(&mut self) -> Option<LspRequest> {
         self.lsp_request.take()
+    }
+
+    /// Take the pending debugger command, if any (the binary's DAP host polls
+    /// this like `take_lsp_request`). `DapRequest::Launch` starts a session; the
+    /// rest act on the live one.
+    pub fn take_dap_request(&mut self) -> Option<DapRequest> {
+        self.dap_request.take()
     }
 
     /// The hover text currently displayed, if any.
@@ -770,6 +812,39 @@ impl Editor {
         self.load_active(d);
         self.mode = Mode::Normal;
         self.status = Some("help -- press q to close".to_string());
+    }
+
+    /// Show `content` in a read-only scratch buffer named `name` (e.g.
+    /// `*backtrace*`), focusing it. A DAP host uses this for multi-line output
+    /// (a call stack) the one-line status cannot hold; the dashboard (8f)
+    /// supersedes it with real tiles.
+    ///
+    /// REFRESHES an existing scratch of the same name in place, so a fresh `:bt`
+    /// replaces the stale stack rather than stacking buffers. Otherwise ADDS a
+    /// buffer (never overwrites the user's work); `q` / `:bd` returns to it.
+    pub fn open_scratch(&mut self, name: &str, content: &str) {
+        let fresh = DocState::new(Some(name.to_string()), content, true);
+        if let Some(i) = self
+            .bufs
+            .iter()
+            .position(|d| d.filename.as_deref() == Some(name))
+        {
+            // Already open: replace its content and focus it. Snapshot the
+            // current buffer first UNLESS it is the scratch itself (a `:bt`
+            // while already viewing `*backtrace*` refreshes in place).
+            if self.active != i {
+                self.bufs[self.active] = self.save_active();
+                self.active = i;
+            }
+            self.bufs[i] = fresh.clone();
+            self.load_active(fresh);
+        } else {
+            self.bufs[self.active] = self.save_active();
+            self.bufs.push(fresh.clone());
+            self.active = self.bufs.len() - 1;
+            self.load_active(fresh);
+        }
+        self.mode = Mode::Normal;
     }
 
     /// Close the active buffer (`:bd`). Refuses to discard unsaved changes
@@ -1955,6 +2030,25 @@ impl Editor {
             "bd" => self.close_buffer(false),
             "bd!" => self.close_buffer(true),
             "help" => self.open_help(),
+            // -- debugger (8e-3e): the verbs relay to the binary's DAP host --
+            "debug" if arg.is_empty() => {
+                self.status = Some(":debug needs a program (e.g. :debug /goroot/bin/prog)".to_string())
+            }
+            "debug" => self.dap_request = Some(DapRequest::Launch(arg.to_string())),
+            "break" | "br" if arg.is_empty() => {
+                self.status = Some(":break needs a function or file:line".to_string())
+            }
+            "break" | "br" => self.dap_request = Some(DapRequest::Break(arg.to_string())),
+            "cont" | "c" => self.dap_request = Some(DapRequest::Continue),
+            "next" | "n" => self.dap_request = Some(DapRequest::Next),
+            "step" | "s" => self.dap_request = Some(DapRequest::Step),
+            "stepout" | "so" => self.dap_request = Some(DapRequest::StepOut),
+            "bt" | "stack" => self.dap_request = Some(DapRequest::Backtrace),
+            "print" | "p" if arg.is_empty() => {
+                self.status = Some(":print needs an expression".to_string())
+            }
+            "print" | "p" => self.dap_request = Some(DapRequest::Print(arg.to_string())),
+            "kill" | "stop" => self.dap_request = Some(DapRequest::Kill),
             _ => self.status = Some(string_fmt_unknown(cmd)),
         }
     }
@@ -2103,6 +2197,15 @@ const COMMANDS: &[(&str, &str)] = &[
     ("bd", "close the current buffer"),
     ("bd!", "close the buffer, discarding changes"),
     ("help", "open the manual in a new buffer"),
+    ("debug", "start debugging a program (:debug <prog>)"),
+    ("break", "set a breakpoint (:break <func>)"),
+    ("cont", "continue the debuggee (:c)"),
+    ("next", "step over one line (:n)"),
+    ("step", "step into a call (:s)"),
+    ("stepout", "step out of the function (:so)"),
+    ("bt", "show the call stack"),
+    ("print", "evaluate an expression (:p <expr>)"),
+    ("kill", "end the debug session"),
 ];
 
 /// The scratch-buffer name of the built-in manual (`:help`); also the sentinel
@@ -2204,6 +2307,17 @@ Space then c) to return to your work.
                     Enter or Tab   accept       Esc   cancel
                     keep typing    dismiss it and carry on
     Nothing here needs the server: without one, the editor is unchanged.
+
+  DEBUGGER  (Go programs, when Ambush is installed)
+    :debug <prog>   start debugging a compiled binary; it stops at entry
+    :break <func>   set a breakpoint by function name (main.parkLoop)
+    :cont   :c      continue until the next breakpoint or exit
+    :next   :n      step over one source line
+    :step   :s      step into a call     :stepout  :so   step back out
+    :bt             show the call stack (in a scratch buffer)
+    :print <expr>   evaluate an expression at the stopped frame  (:p)
+    :kill           end the session
+    The status bar reports where the program stopped and each result.
 
 That's everything. Happy editing!
 "#;
@@ -2424,6 +2538,81 @@ mod tests {
         type_str(&mut ed, ":e other");
         ed.handle_key(code(KeyCode::Enter));
         assert_eq!(ed.take_request(), Some(Request::Open("other".to_string())));
+    }
+
+    /// Run a `:` command line and return whatever debug request it raised.
+    fn run_dap(ed: &mut Editor, line: &str) -> Option<DapRequest> {
+        type_str(ed, line);
+        ed.handle_key(code(KeyCode::Enter));
+        assert_eq!(ed.mode, Mode::Normal);
+        ed.take_dap_request()
+    }
+
+    #[test]
+    fn command_debug_raises_launch() {
+        let mut ed = Editor::new(None, "", false);
+        assert_eq!(
+            run_dap(&mut ed, ":debug /goroot/bin/prog"),
+            Some(DapRequest::Launch("/goroot/bin/prog".to_string()))
+        );
+    }
+
+    #[test]
+    fn command_break_raises_break_by_alias() {
+        let mut ed = Editor::new(None, "", false);
+        assert_eq!(
+            run_dap(&mut ed, ":break main.parkLoop"),
+            Some(DapRequest::Break("main.parkLoop".to_string()))
+        );
+        assert_eq!(
+            run_dap(&mut ed, ":br main.other"),
+            Some(DapRequest::Break("main.other".to_string()))
+        );
+    }
+
+    #[test]
+    fn command_print_raises_print() {
+        let mut ed = Editor::new(None, "", false);
+        assert_eq!(
+            run_dap(&mut ed, ":print main.Sentinel"),
+            Some(DapRequest::Print("main.Sentinel".to_string()))
+        );
+        assert_eq!(
+            run_dap(&mut ed, ":p x + 1"),
+            Some(DapRequest::Print("x + 1".to_string()))
+        );
+    }
+
+    #[test]
+    fn command_debug_control_verbs_and_aliases() {
+        let mut ed = Editor::new(None, "", false);
+        for (line, want) in [
+            (":cont", DapRequest::Continue),
+            (":c", DapRequest::Continue),
+            (":next", DapRequest::Next),
+            (":n", DapRequest::Next),
+            (":step", DapRequest::Step),
+            (":s", DapRequest::Step),
+            (":stepout", DapRequest::StepOut),
+            (":so", DapRequest::StepOut),
+            (":bt", DapRequest::Backtrace),
+            (":stack", DapRequest::Backtrace),
+            (":kill", DapRequest::Kill),
+            (":stop", DapRequest::Kill),
+        ] {
+            assert_eq!(run_dap(&mut ed, line), Some(want), "verb {line}");
+        }
+    }
+
+    #[test]
+    fn command_debug_empty_args_are_guarded() {
+        let mut ed = Editor::new(None, "", false);
+        // Each argument-taking verb reports rather than raising a request.
+        for line in [":debug", ":break", ":print"] {
+            assert_eq!(run_dap(&mut ed, line), None, "{line} must not raise");
+            assert!(ed.status.is_some(), "{line} must report");
+            ed.status = None;
+        }
     }
 
     #[test]

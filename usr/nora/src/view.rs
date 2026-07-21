@@ -1070,13 +1070,14 @@ ccc", false);
         let big = Rect::new(0, 0, 50, 14);
         let mut ed = Editor::new(None, "x", false);
         ed.handle_key(KeyEvent::char(':'));
-        ed.handle_key(KeyEvent::char('b')); // ":b" -> bn, bp, bd, bd!
+        ed.handle_key(KeyEvent::char('b')); // ":b" -> bn bp bd bd! break bt
         let mut b = Buffer::empty(big);
         let cur = render(&ed, big, &mut b);
-        // 4 matches -> box_h 6; by = 13-6 = 7; inner.y = 8; row 0 = ":bn  ...".
-        assert_eq!(sym(&b, 1, 8), ':');
-        assert_eq!(sym(&b, 2, 8), 'b');
-        assert_eq!(sym(&b, 3, 8), 'n');
+        // 6 matches (the debugger `break` + `bt` join the buffer verbs) ->
+        // box_h 8; by = 13-8 = 5; inner.y = 6; row 0 = ":bn  ..." (COMMANDS order).
+        assert_eq!(sym(&b, 1, 6), ':');
+        assert_eq!(sym(&b, 2, 6), 'b');
+        assert_eq!(sym(&b, 3, 6), 'n');
         // the command line still shows ":b" on the status row and owns the cursor.
         assert_eq!(sym(&b, 0, 13), ':');
         assert_eq!(sym(&b, 1, 13), 'b');

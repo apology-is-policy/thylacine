@@ -27,11 +27,10 @@ use alloc::vec::Vec;
 
 use libthyla_rs::env;
 use libthyla_rs::fs;
-use libthyla_rs::poll::PollTimeout;
 use libthyla_rs::process::Command;
 
 use parley::lsp::{self, Action};
-use parley::transport::{Mux, Ready, Server, Tag};
+use parley::transport::{Ready, Server, Tag};
 
 use nora::diag::{Diagnostics, LineDiag, Severity};
 use nora::editor::{Candidate, Editor, LspRequest};
@@ -508,15 +507,6 @@ impl Lsp {
         let _ = self.srv.kill();
         let _ = self.srv.wait();
     }
-}
-
-/// Register `stdin` plus any live server fds and block for one of them.
-pub fn poll_sources(mux: &mut Mux, lsp: Option<&Lsp>) -> Option<Vec<Ready>> {
-    let mut fds: Vec<(i32, Tag)> = alloc::vec![(0, TAG_STDIN)];
-    if let Some(l) = lsp {
-        fds.extend(l.poll_fds());
-    }
-    mux.poll(&fds, PollTimeout::Block).ok()
 }
 
 /// Is this a Go source file (the only language 8e-2 speaks)?
