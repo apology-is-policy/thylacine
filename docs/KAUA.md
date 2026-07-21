@@ -194,10 +194,14 @@ indented nodes for the variable inspector + the resource inspector), **`Table`**
 ──` variant — the goroutines view + the cross-boundary call stack), **`Tabs`** (a
 tab strip — the Console's Program/Debug split), and a **`Scrollbar`** decoration
 (a `█`-over-`│` thumb from `(len, viewport, offset)`). Each is a pure,
-host-testable value on `Widget::render` (14 host tests), reusable by every
+host-testable value on `Widget::render` (15 host tests), reusable by every
 consumer — the caller owns the display state (selection / expand-flags / offset /
-active), exactly the `List` idiom. `Gauge` and others follow as later consumers
-need them.
+active), exactly the `List` idiom. **8f-2a is their first consumer** (nora's
+debugger dashboard: `Tree` → Variables, `Table` → Call Stack + Goroutines,
+`Tabs` → the Console), which surfaced + fixed a `Tree` clip bug (the label used
+`set_str`, clipping to the whole buffer rather than the tile's right edge like
+`Table`/`Tabs`; now `write_clip`, so a long variable name cannot spill past a
+sub-rect tile). `Gauge` and others follow as later consumers need them.
 
 ### 3.4 `kaua::event` — keys
 

@@ -177,3 +177,25 @@ pub fn palette_title() -> Style {
 pub fn palette_selected() -> Style {
     Style::new().fg(BG).bg(EMBER).attr(Attr::BOLD)
 }
+
+/// A debugger dashboard tile border -- ember when the tile holds focus, dim
+/// otherwise (the keyboard-focus cue, NORA-IDE-UX section 2.3).
+pub fn tile_border(focused: bool) -> Style {
+    Style::new().fg(if focused { EMBER } else { BORDER }).bg(BG)
+}
+
+/// A dashboard tile title -- ember+bold when focused, dim otherwise.
+pub fn tile_title(focused: bool) -> Style {
+    let fg = if focused { EMBER } else { DIM };
+    Style::new().fg(fg).bg(BG).attr(Attr::BOLD)
+}
+
+/// A dashboard tile's body text (frame/variable/goroutine rows).
+pub fn tile_text() -> Style {
+    Style::new().fg(FG).bg(BG)
+}
+
+/// A dashboard tile's dimmed label (a `Tree` group node, an inactive tab).
+pub fn tile_dim() -> Style {
+    Style::new().fg(DIM).bg(BG)
+}

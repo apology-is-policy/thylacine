@@ -343,8 +343,11 @@ fn drive_dap(dap: &mut Option<Dap>, req: DapRequest, ed: &mut Editor) {
 fn redraw(term: &mut Terminal, ed: &mut Editor) -> Result<()> {
     let area = term.area();
     // The text region (above the one-row status line, below the optional tab
-    // strip); soft-wrap needs the width.
-    let (_, tw, text_h) = view::text_metrics(area, ed.text.line_count(), ed.show_tabs());
+    // strip); soft-wrap needs the width. In dashboard mode the editor is a
+    // sub-rect, so scroll to THAT width -- `render` splits the same way, and a
+    // mismatch would desync the wrapped cursor.
+    let ed_area = view::editor_area(ed, area);
+    let (_, tw, text_h) = view::text_metrics(ed_area, ed.text.line_count(), ed.show_tabs());
     ed.scroll_to(tw, text_h);
     let cur;
     {

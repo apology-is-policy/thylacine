@@ -41,6 +41,7 @@ use parley::dap;
 use parley::dapc::{self, Action, StackFrame};
 use parley::transport::{Ready, Server, Tag};
 
+use nora::debug::{DebugView, GoroutineRow, StackRow, VarRow};
 use nora::editor::{DapRequest, Editor};
 
 /// Where the Ambush debugger ships in the default image (Stage 8e-3e) -- baked
@@ -58,6 +59,10 @@ const MAX_FRAMES: i64 = 64;
 
 /// The scratch buffer `:bt` writes the call stack into.
 const BACKTRACE_BUF: &str = "*backtrace*";
+
+/// Console scrollback the dashboard retains (older lines drop past it) -- a
+/// bounded window so a chatty debuggee cannot grow the buffer without limit.
+const CONSOLE_MAX: usize = 200;
 
 /// Poll tags. fd 0 is TAG_STDIN (0) and gopls owns 1/2 (lsp_host); the DAP pipes
 /// take 3/4 so all four sources share one poll(2).
@@ -96,6 +101,14 @@ pub struct Dap {
     frame_id: i64,
     /// The frames from the last stop, for `:bt` (refreshed each stop).
     frames: Vec<StackFrame>,
+    /// The current frame's locals (dashboard Variables tile), fetched via
+    /// scopes->variables after each stop.
+    locals: Vec<VarRow>,
+    /// The debuggee's goroutines (dashboard Goroutines tile), fetched via
+    /// `threads` after each stop.
+    goroutines: Vec<GoroutineRow>,
+    /// The dashboard Console scrollback (bounded by `CONSOLE_MAX`).
+    console: Vec<String>,
     /// The reason from the last `stopped` event, held until the auto-stack lands
     /// so the status can read "stopped: <reason> at <func>".
     last_reason: String,
@@ -153,6 +166,9 @@ impl Dap {
             thread_id: 0,
             frame_id: 0,
             frames: Vec::new(),
+            locals: Vec::new(),
+            goroutines: Vec::new(),
+            console: Vec::new(),
             last_reason: String::new(),
             print_expr: None,
             func_bps: Vec::new(),
@@ -165,6 +181,10 @@ impl Dap {
             return None;
         }
         ed.set_status(format!("debugging {} ...", program));
+        // Expand the dashboard the instant the session starts (empty tiles +
+        // a "launching" status), then fill it at the entry stop -- NORA-IDE-UX
+        // section 2.2 (start expands, end collapses).
+        d.publish(ed);
         Some(d)
     }
 
@@ -216,6 +236,7 @@ impl Dap {
                         // EOF or a read error: the debugger exited.
                         Ok(true) | Err(_) => {
                             ed.set_status(String::from("debugger exited"));
+                            ed.set_debug_view(None); // collapse the dashboard
                             self.reap();
                             return true;
                         }
@@ -228,6 +249,7 @@ impl Dap {
                             // find the next frame boundary; tear it down.
                             Err(_) => {
                                 ed.set_status(String::from("debugger stream error"));
+                                ed.set_debug_view(None);
                                 self.reap();
                                 return true;
                             }
@@ -236,8 +258,15 @@ impl Dap {
                 }
                 if r.hup && !self.dead {
                     ed.set_status(String::from("debugger exited"));
+                    ed.set_debug_view(None);
                     self.reap();
-                    dirty = true;
+                    return true;
+                }
+                // One dashboard refresh per wake (not per message): the tiles
+                // fill incrementally as the stack/scopes/threads replies land
+                // (NORA-IDE-UX section 7, coalesce to one frame per poll-wake).
+                if dirty {
+                    self.publish(ed);
                 }
                 dirty
             }
@@ -302,7 +331,9 @@ impl Dap {
             // A breakpoint set was verified.
             Action::Breakpoints(bl) => {
                 let ok = bl.iter().filter(|b| b.verified).count();
-                ed.set_status(format!("breakpoints: {}/{} verified", ok, bl.len()));
+                let msg = format!("breakpoints: {}/{} verified", ok, bl.len());
+                self.console_push(msg.clone());
+                ed.set_status(msg);
                 true
             }
 
@@ -310,10 +341,18 @@ impl Dap {
                 self.thread_id = s.thread_id;
                 self.last_reason = s.reason.clone();
                 self.phase = Phase::Stopped;
-                // Auto-fetch the stack: it yields the stop location + the frame
-                // id `:print` needs, and caches the frames for `:bt`.
+                self.console_push(format!("stopped: {}", s.reason));
+                // The previous stop's locals/goroutines are stale until the
+                // refetch below lands; clear them so a tile never shows a
+                // different frame's data during the window.
+                self.locals.clear();
+                self.goroutines.clear();
+                // Auto-fetch the stack (stop location + the `:print` frame id +
+                // the `:bt` cache) and the goroutines (the dashboard tile).
                 let st = self.cl.stack_trace(self.thread_id, MAX_FRAMES);
                 let _ = self.send(&st);
+                let th = self.cl.threads();
+                let _ = self.send(&th);
                 // A preliminary status in case the stack fetch turns up nothing.
                 ed.set_status(format!("stopped: {}", s.reason));
                 true
@@ -337,6 +376,48 @@ impl Dap {
                         location_suffix(top)
                     ));
                 }
+                // Chain the locals fetch (scopes -> variables) for the top frame.
+                if !self.frames.is_empty() {
+                    let sc = self.cl.scopes(self.frame_id);
+                    let _ = self.send(&sc);
+                }
+                true
+            }
+
+            // The scopes response: fetch the FIRST scope's variables (Delve puts
+            // "Locals" first). A stop that resumed before this landed is stale.
+            Action::Scopes(scopes) => {
+                if self.phase != Phase::Stopped {
+                    return false;
+                }
+                if let Some(reference) = scopes.first().map(|s| s.variables_reference) {
+                    let vars = self.cl.variables(reference);
+                    let _ = self.send(&vars);
+                }
+                false
+            }
+
+            // The variables response: the current frame's locals.
+            Action::Variables(vars) => {
+                self.locals = vars
+                    .iter()
+                    .map(|v| VarRow {
+                        name: v.name.clone(),
+                        value: v.value.clone(),
+                    })
+                    .collect();
+                true
+            }
+
+            // The threads response: the debuggee's goroutines.
+            Action::Threads(threads) => {
+                self.goroutines = threads
+                    .iter()
+                    .map(|t| GoroutineRow {
+                        id: t.id,
+                        state: t.name.clone(),
+                    })
+                    .collect();
                 true
             }
 
@@ -346,11 +427,11 @@ impl Dap {
                 true
             }
 
-            // The debuggee's own output -- surface it, clearly labelled and
-            // one line (the Program console is 8f).
+            // The debuggee's own output -- one line to the status + the Console.
             Action::Output(o) => {
                 let line: String = o.output.trim_end().chars().take(200).collect();
                 if !line.is_empty() {
+                    self.console_push(format!("[program] {}", line));
                     ed.set_status(format!("[program] {}", line));
                     return true;
                 }
@@ -359,12 +440,15 @@ impl Dap {
 
             Action::Exited(code) => {
                 self.phase = Phase::Exited;
-                ed.set_status(format!("debuggee exited (code {})", code));
+                let msg = format!("debuggee exited (code {})", code);
+                self.console_push(msg.clone());
+                ed.set_status(msg);
                 true
             }
 
             Action::Terminated => {
                 ed.set_status(String::from("debug session ended"));
+                ed.set_debug_view(None); // collapse the dashboard
                 self.reap();
                 true
             }
@@ -374,8 +458,7 @@ impl Dap {
                 true
             }
 
-            // continued / thread / scopes / variables / threads / acks: no
-            // headless surface consumes them at 8e-3e.
+            // continued / thread / acks: no dashboard surface consumes them.
             _ => false,
         }
     }
@@ -415,8 +498,14 @@ impl Dap {
 
             DapRequest::Kill => {
                 self.shutdown();
+                ed.set_debug_view(None); // collapse the dashboard
                 ed.set_status(String::from("debug session ended"));
             }
+        }
+        // Reflect the command in the dashboard (running/stopped, a new
+        // breakpoint). `shutdown` set `dead`, so a `:kill` does not re-open it.
+        if !self.dead {
+            self.publish(ed);
         }
     }
 
@@ -468,6 +557,12 @@ impl Dap {
         let msg = build(&mut self.cl, self.thread_id);
         if self.send(&msg).is_ok() {
             self.phase = Phase::Running;
+            // The stack/locals/goroutines describe where we WERE stopped; a
+            // running target has none, so clear them until the next stop
+            // refetches (the caller republishes -> the tiles show "running").
+            self.frames.clear();
+            self.locals.clear();
+            self.goroutines.clear();
             ed.set_status(verb.to_string());
         }
     }
@@ -490,6 +585,59 @@ impl Dap {
         };
         for f in files {
             self.send_line_breakpoints_for(&f);
+        }
+    }
+
+    /// Rebuild the dashboard snapshot from the current session state and push
+    /// it to the editor (the dashboard mirrors the live session; NORA-IDE-UX
+    /// section 2). Called once per poll-wake after the events are processed,
+    /// and after each `:` command.
+    fn publish(&self, ed: &mut Editor) {
+        let frames = self
+            .frames
+            .iter()
+            .map(|f| StackRow {
+                func: f.name.clone(),
+                location: frame_location(f),
+            })
+            .collect();
+        let view = DebugView {
+            status: self.status_line(),
+            frames,
+            locals: self.locals.clone(),
+            goroutines: self.goroutines.clone(),
+            console: self.console.clone(),
+        };
+        ed.set_debug_view(Some(view));
+    }
+
+    /// The dashboard's persistent state line, derived from the phase.
+    fn status_line(&self) -> String {
+        match self.phase {
+            Phase::Initializing | Phase::Launching | Phase::Configuring => {
+                format!("launching {} ...", self.program)
+            }
+            Phase::Running => String::from("running"),
+            Phase::Stopped => match self.frames.first() {
+                Some(top) => format!(
+                    "stopped: {} at {}{}",
+                    self.last_reason,
+                    top.name,
+                    location_suffix(top)
+                ),
+                None => format!("stopped: {}", self.last_reason),
+            },
+            Phase::Exited => String::from("debuggee exited"),
+        }
+    }
+
+    /// Append a line to the bounded console scrollback (oldest lines drop past
+    /// `CONSOLE_MAX`).
+    fn console_push(&mut self, line: String) {
+        self.console.push(line);
+        if self.console.len() > CONSOLE_MAX {
+            let drop = self.console.len() - CONSOLE_MAX;
+            self.console.drain(0..drop);
         }
     }
 
@@ -533,6 +681,15 @@ impl Dap {
 fn location_suffix(f: &StackFrame) -> String {
     match &f.source_path {
         Some(p) => format!(" ({}:{})", basename(p), f.line),
+        None => String::new(),
+    }
+}
+
+/// `"main.go:12"` for a frame with source (the dashboard Call Stack location
+/// column), else `""`. Like `location_suffix` without the ` (...)` framing.
+fn frame_location(f: &StackFrame) -> String {
+    match &f.source_path {
+        Some(p) => format!("{}:{}", basename(p), f.line),
         None => String::new(),
     }
 }

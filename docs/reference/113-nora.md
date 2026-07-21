@@ -321,6 +321,37 @@ Go toolchain is absent, `:debug` reports "debugger not installed" and editing is
 unaffected. Ambush is baked at `/goroot/bin/ambush` (disk, on the login PATH,
 beside the toolchain), reachable by a POST-pivot nora.
 
+## Debugger dashboard (8f-2, NORA-IDE-UX §2)
+
+While a session is live the editor splits into the ratified IDE dashboard:
+`[editor | right sidebar]` over a full-width bottom Console. The sidebar stacks
+three Kaua tiles — **Variables** (a `Tree`), **Call Stack** (a `Table`),
+**Goroutines** (a `Table`) — and the Console is a `Tabs` strip (`Program`/`Debug`)
+over the scrollback. It **auto-collapses** to a full-width editor when no session
+is live (`Editor::debug_view()` is `None`), and collapses again on a terminal
+below the floor (`< 50×14`, where the debug data still reaches the status line +
+`:bt`). `Tab` cycles keyboard focus (editor → tiles → Console → editor); the
+focused tile takes an ember border.
+
+The architecture keeps the renderer pure. `dap_host` already pushes into the
+`Editor` (`set_status`, `open_scratch`); the dashboard adds one more push — a
+protocol-free `DebugView` snapshot (`nora::debug`: `StackRow`/`VarRow`/
+`GoroutineRow` + a console log), rebuilt and set via `Editor::set_debug_view`
+once per poll-wake and after each `:` command. `view::render` reads it and, when
+present + roomy, splits the screen and draws the tiles (the pre-8f full-width
+render is the `None`/too-small path, byte-for-byte); `view::editor_area` gives
+the binary the editor sub-rect so `scroll_to` matches the width `render` draws.
+On a stop the host chains `stackTrace → scopes → variables` (the locals) and a
+`threads` fetch (the goroutines), so the tiles fill over a few wakes; a resume
+clears them. Opening a session expands the dashboard immediately (empty tiles +
+a "launching" status); ending it (`:kill`, exit, a dead stream) collapses back.
+
+**8f-2a landed the skeleton** — the split + collapse + `Tab` focus + all three
+tiles + the Console rendering live data at a basic level. 8f-2b fills the tiles
+(per-pane `j`/`k`, `Tree` expand, select-a-frame, scrollbars); 8f-2c wires the
+`F5`/`F10`/`F11` hot-keys + `[Space]d` toggles; the cross-boundary `── kernel ──`
+divider (§5) is 8f-3. Kernel byte-unchanged; consumes I-39; no new §28 invariant.
+
 ## Console discipline (I-27)
 
 `nora` acquires the **screen** on fd 1 (Kaua `Terminal`) and **reads input** on
@@ -340,15 +371,26 @@ client over them.
   never empty; `(row, col)` char-addressed. `Snapshot { lines, row, col }` is a
   full clone (bounded by `UNDO_CAP`).
 - `Editor` — the `TextBuffer` + the `Mode` + the file/scroll/status/quit state +
-  the private `anchor` (visual), `register` (yank), `last_search`, `request`.
+  the private `anchor` (visual), `register` (yank), `last_search`, `request` +
+  the debugger dashboard state: `debug: Option<DebugView>` (`Some` == a session
+  is live == the dashboard is shown) and `dash: DashState` (the `DashPane` focus
+  + the Console tab, kept across data refreshes).
+- `DebugView` (`nora::debug`) — the protocol-free dashboard snapshot the DAP host
+  pushes: `status`, `frames: Vec<StackRow>`, `locals: Vec<VarRow>`,
+  `goroutines: Vec<GoroutineRow>`, `console: Vec<String>`. Plain data (like
+  `LineDiag`), so a second backend or a test populates the same struct.
 
 ## Tests (`cargo test -p nora --no-default-features --lib --target <host>`)
 
-**172 host unit tests** over the pure engine (the per-module list below is a
+**179 host unit tests** over the pure engine (the per-module list below is a
 partial breakdown of the original core; later chunks added `diag`, completion,
-and the 8e-3e **debug axis** — 5 tests asserting each `:` debug verb + its
-aliases raise the right `DapRequest`, and that the argument-taking verbs report
-rather than raise when given no argument):
+the 8e-3e **debug axis** — 5 tests asserting each `:` debug verb + its aliases
+raise the right `DapRequest`, and that the argument-taking verbs report rather
+than raise when given no argument — and the 8f-2 **dashboard axis** — 3 `editor`
+tests, collapse-until-pushed / a mid-session refresh keeps focus / `Tab` cycles
+focus only while debugging; and 4 `view` tests, the tiles+editor coexist when
+roomy, the collapse on a small terminal, no dashboard without a session, the
+focused tile takes an ember border):
 
 - `text` (19): content round-trip (incl. trailing newline), char-indexed insert
   for UTF-8, newline split, backspace/delete across lines, `dd` keeps one line,
@@ -400,6 +442,8 @@ open / edit / `:w` / `cat`).
 | T-4 `ut` raw-mode dance + `ls-7` LS-CI | landed |
 | 8e-2 LSP client (gopls diagnostics/hover/def/completion, inline) | landed |
 | 8e-3e debugger (`:debug` → Ambush, headless) + `dap-nora` LS-CI | landed |
+| 8f-2a dashboard skeleton (split + collapse + `Tab` focus + tiles + Console) | landed |
+| 8f-2b/2c tile fill + hot-keys, 8f-3 cross-boundary stack | pending |
 | audit (Kaua backend + dance) | not started |
 
 ## Known caveats / seams

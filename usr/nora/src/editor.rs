@@ -14,6 +14,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use kaua::event::{KeyCode, KeyEvent, Mods};
 
+use crate::debug::DebugView;
 use crate::syntax::Lang;
 use crate::text::{Pos, TextBuffer};
 use crate::wrap;
@@ -110,6 +111,42 @@ pub enum DapRequest {
     Print(String),
     /// End the debug session (`:kill`).
     Kill,
+}
+
+/// Which dashboard pane holds keyboard focus (`Tab` cycles them; the focused
+/// tile takes an ember border, NORA-IDE-UX section 2.3). `Editor` is the source
+/// buffer; the rest are the debug tiles. Only meaningful while a debug session
+/// is live -- the dashboard is collapsed otherwise.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DashPane {
+    Editor,
+    Variables,
+    CallStack,
+    Goroutines,
+    Console,
+}
+
+/// The debugger dashboard UI state (8f-2): the display/selection state the
+/// renderer reads. The DAP data itself lives in the pushed [`DebugView`]; this
+/// is only "which pane has focus" and "which Console tab is up", so it survives
+/// a data refresh (a stop must not steal focus off the tile you were reading).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct DashState {
+    /// The focused pane (`Tab` cycles it).
+    pub focus: DashPane,
+    /// The active Console tab (Program = 0, Debug = 1).
+    pub console_tab: usize,
+}
+
+impl DashState {
+    /// The state a freshly-opened dashboard starts in: focus on the source
+    /// buffer, the Program console tab up.
+    fn new() -> Self {
+        DashState {
+            focus: DashPane::Editor,
+            console_tab: 0,
+        }
+    }
 }
 
 /// One completion candidate, as the editor renders and applies it. The
@@ -312,6 +349,12 @@ pub struct Editor {
     lsp_request: Option<LspRequest>,
     /// A debugger command awaiting the binary (see [`DapRequest`]).
     dap_request: Option<DapRequest>,
+    /// The debugger dashboard snapshot (8f-2), pushed by the binary's DAP host.
+    /// `Some` == a session is live == the dashboard is shown; `None` == the
+    /// editor is full-width (NORA-IDE-UX section 2.2, auto-collapse).
+    debug: Option<DebugView>,
+    /// The dashboard focus/tab state, persisting across data refreshes.
+    dash: DashState,
     /// Where to put the cursor once a cross-file jump's buffer has loaded.
     /// Applied by `open_buffer`, which is the single point where a newly-read
     /// file becomes the active buffer.
@@ -377,6 +420,8 @@ impl Editor {
             completion_prefix: String::new(),
             lsp_request: None,
             dap_request: None,
+            debug: None,
+            dash: DashState::new(),
             pending_jump: None,
             anchor: None,
             register: String::new(),
@@ -491,6 +536,50 @@ impl Editor {
     /// rest act on the live one.
     pub fn take_dap_request(&mut self) -> Option<DapRequest> {
         self.dap_request.take()
+    }
+
+    /// The debugger dashboard snapshot, or `None` when no session is live (the
+    /// dashboard is collapsed and the editor renders full-width).
+    pub fn debug_view(&self) -> Option<&DebugView> {
+        self.debug.as_ref()
+    }
+
+    /// The dashboard focus/tab state the renderer reads.
+    pub fn dash(&self) -> &DashState {
+        &self.dash
+    }
+
+    /// Is a debug session live (the dashboard shown)?
+    pub fn debugging(&self) -> bool {
+        self.debug.is_some()
+    }
+
+    /// Push (or clear) the dashboard snapshot -- the binary's DAP host is the
+    /// only caller. Opening a session (the first `Some` after a `None`) resets
+    /// the dashboard to focus the source buffer; ending it (a `None`) collapses
+    /// back. A data refresh MID-session keeps the current focus + tab, so a stop
+    /// never yanks focus off the tile you were reading.
+    pub fn set_debug_view(&mut self, view: Option<DebugView>) {
+        let was_live = self.debug.is_some();
+        if view.is_none() || !was_live {
+            self.dash = DashState::new();
+        }
+        self.debug = view;
+    }
+
+    /// Cycle dashboard focus (`Tab`): Editor -> Variables -> CallStack ->
+    /// Goroutines -> Console -> Editor. A no-op when not debugging.
+    fn cycle_focus(&mut self) {
+        if !self.debugging() {
+            return;
+        }
+        self.dash.focus = match self.dash.focus {
+            DashPane::Editor => DashPane::Variables,
+            DashPane::Variables => DashPane::CallStack,
+            DashPane::CallStack => DashPane::Goroutines,
+            DashPane::Goroutines => DashPane::Console,
+            DashPane::Console => DashPane::Editor,
+        };
     }
 
     /// The hover text currently displayed, if any.
@@ -1085,6 +1174,9 @@ impl Editor {
             KeyCode::Char(':') => self.mode = Mode::Command(":".to_string()),
             KeyCode::Char('/') => self.mode = Mode::Command("/".to_string()),
             KeyCode::Char(' ') => self.mode = Mode::Menu,
+            // Cycle dashboard focus while debugging; inert (falls through to the
+            // no-op) when there is no session, so normal-mode Tab is unchanged.
+            KeyCode::Tab if self.debugging() => self.cycle_focus(),
             KeyCode::Char('n') if !self.last_search.is_empty() => {
                 self.search(&self.last_search.clone());
             }
@@ -3554,5 +3646,72 @@ mod tests {
         // Overlays describe a position in the file we just left.
         assert!(ed.hover().is_none());
         assert!(ed.completion_state().is_none());
+    }
+
+    // -- the debugger dashboard (8f-2) --------------------------------------
+
+    fn dbg_view() -> DebugView {
+        DebugView {
+            status: "stopped: breakpoint at main.parkLoop".to_string(),
+            frames: alloc::vec![crate::debug::StackRow {
+                func: "main.parkLoop".to_string(),
+                location: "child.go:23".to_string(),
+            }],
+            locals: alloc::vec![crate::debug::VarRow {
+                name: "i".to_string(),
+                value: "3".to_string(),
+            }],
+            goroutines: alloc::vec![crate::debug::GoroutineRow {
+                id: 1,
+                state: "running".to_string(),
+            }],
+            console: alloc::vec!["stopped".to_string()],
+        }
+    }
+
+    #[test]
+    fn the_dashboard_is_collapsed_until_a_view_is_pushed() {
+        let mut ed = Editor::new(Some("m.go".to_string()), "package main", false);
+        assert!(!ed.debugging());
+        assert!(ed.debug_view().is_none());
+        ed.set_debug_view(Some(dbg_view()));
+        assert!(ed.debugging());
+        // Opening focuses the source buffer (NORA-IDE-UX section 2.2).
+        assert_eq!(ed.dash().focus, DashPane::Editor);
+        ed.set_debug_view(None);
+        assert!(!ed.debugging());
+    }
+
+    #[test]
+    fn a_mid_session_refresh_keeps_the_current_focus() {
+        // A stop pushes a fresh view; it must not yank focus off the tile the
+        // user was reading.
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view()));
+        ed.handle_key(code(KeyCode::Tab)); // focus Variables
+        assert_eq!(ed.dash().focus, DashPane::Variables);
+        ed.set_debug_view(Some(dbg_view())); // a later stop refreshes the data
+        assert_eq!(ed.dash().focus, DashPane::Variables);
+    }
+
+    #[test]
+    fn tab_cycles_dashboard_focus_only_while_debugging() {
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        // Not debugging: Tab is inert in Normal (no session to focus).
+        ed.handle_key(code(KeyCode::Tab));
+        assert!(!ed.debugging());
+        assert_eq!(ed.mode, Mode::Normal);
+
+        ed.set_debug_view(Some(dbg_view()));
+        ed.handle_key(code(KeyCode::Tab));
+        assert_eq!(ed.dash().focus, DashPane::Variables);
+        ed.handle_key(code(KeyCode::Tab));
+        assert_eq!(ed.dash().focus, DashPane::CallStack);
+        ed.handle_key(code(KeyCode::Tab));
+        assert_eq!(ed.dash().focus, DashPane::Goroutines);
+        ed.handle_key(code(KeyCode::Tab));
+        assert_eq!(ed.dash().focus, DashPane::Console);
+        ed.handle_key(code(KeyCode::Tab)); // wraps back to the editor
+        assert_eq!(ed.dash().focus, DashPane::Editor);
     }
 }

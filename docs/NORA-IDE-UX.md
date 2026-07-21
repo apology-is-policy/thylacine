@@ -325,9 +325,15 @@ proven data. Each is pure-userspace, kernel byte-unchanged.
 - **8e-3 — the DAP client (Ambush).** Session control + the DAP state machine,
   driven headless from `:` commands (proves the debugger loop before the UI).
 - **8f-1 — the Kaua widget additions** (`Tree`, `Table`, `Tabs`, `Scrollbar`),
-  pure + unit-tested (§3).
+  pure + unit-tested (§3). **Landed.**
 - **8f-2 — the dashboard.** The layout + collapse + focus + the sidebar tiles
   (Variables/Stack/Goroutines) + the Console tabs, wired to the DAP client state.
+  **8f-2a landed** (the skeleton: the split + collapse + `Tab` focus + all three
+  tiles + the Console rendering live DAP data at a basic level — a `DebugView`
+  the DAP host pushes into the `Editor`, the renderer draws; `docs/reference/
+  113-nora.md`). **8f-2b** fills the tiles (per-pane `j`/`k`, `Tree` expand,
+  select-a-frame, scrollbars); **8f-2c** wires the `F5`/`F10`/`F11` hot-keys +
+  the `[Space]d` toggles.
 - **8f-3 — polish.** The cross-boundary stack divider + select-a-frame, inline
   values, the LSP editor affordances, Bonfire pass. The "this is lovely" bar.
 - **8g — the superpowers** (§5): resource inspector, scheduler view,
