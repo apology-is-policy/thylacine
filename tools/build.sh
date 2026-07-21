@@ -269,6 +269,11 @@ build_kernel() {
     # build_ramfs ships /pouch-hello + /pouch-hello-stdio.
     build_userspace
     build_pouch_progs
+    # G-7a: cross-build SDL2 + the /sdl-probe prover before the ramfs bake.
+    build_sdl2
+    # G-7b: cross-build TyrQuake + stage the shareware pak BEFORE the pool
+    # fixture (populate_stratum_pool puts the stage at /quake).
+    build_tyrquake
     # P6-pouch-stratumd-boot (sub-chunk 16a): cross-build stratumd so it
     # lands in the ramfs alongside the pouch hello binaries. Incremental
     # on no-source-change rebuilds (CMake/ninja dep tracking inside
@@ -463,7 +468,7 @@ EOF
     # P6-pouch-hello-smoke: copy the pouch POSIX test binaries (built
     # against the pouch sysroot by build_pouch_progs) into the cpio root.
     # Same curation discipline — explicit list, not a glob.
-    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" )
+    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "sdl-probe" "tyr-quake" )
     local pouch_progs="$BUILD_DIR/pouch/progs"
     for bin in "${pouch_bins[@]}"; do
         local src="$pouch_progs/$bin"
@@ -1841,6 +1846,19 @@ populate_stratum_pool() {
         fi
     fi
 
+    # --- G-7b: the Quake shareware data (-> /quake; QBASEDIR=/quake is
+    # compiled into tyr-quake). Staged by build_tyrquake; skipped
+    # gracefully when the stage is absent (a THYLACINE-minimal build). ---
+    local quake_stage="$BUILD_DIR/quake/stage"
+    if [[ -f "$quake_stage/id1/pak0.pak" ]]; then
+        echo "==> populate pool: baking Quake shareware data ($quake_stage -> /quake, $(du -sh "$quake_stage" | cut -f1))"
+        "$stratum_fs_bin" -s "$sock_path" put "$quake_stage" /quake \
+            || { echo "==> populate pool: put /quake FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" sync \
+            || { echo "==> populate pool: sync after /quake FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        echo "==> populate pool: Quake shareware baked at /quake"
+    fi
+
     # --- A-5c-b: host-bake the system identity into /var/lib/corvus ---
     # corvus-mint mints the admin keypair + system-wrap (keypair under the
     # build-time system passphrase) + system-recovery-wrap (the same keypair under
@@ -2034,6 +2052,271 @@ build_pouch_progs() {
     echo "==> pouch progs built under $progs_out"
 }
 
+build_sdl2() {
+    # G-7a (the SDL seam; docs/TAPESTRY.md section 9/18.9) -- cross-build
+    # SDL2 for aarch64-thylacine and install libSDL2.a + headers into the
+    # pouch sysroot, libsodium-style (hand config, no autotools), then
+    # build the /sdl-probe proving binary.
+    #
+    # The vendored tree (third_party/SDL2, pruned-pristine per its
+    # PRUNE-MANIFEST.md) is COPIED into build/pouch/sdl2-src, the
+    # usr/ports/sdl2/patches series is applied to the copy (the pouch
+    # musl idiom -- the vendor tree is never edited), the hand
+    # SDL_config.h overwrites the copy's include/SDL_config.h, and OUR
+    # thylacine video driver (usr/ports/sdl2/thylacine/) is copied in as
+    # src/video/thylacine/. The prune IS the compile list: every .c in
+    # the copied tree compiles under the config (src/main is excluded --
+    # apps own main()).
+    local sysroot="$BUILD_DIR/sysroot"
+    local sdl_vendor="$REPO_ROOT/third_party/SDL2"
+    local port_dir="$REPO_ROOT/usr/ports/sdl2"
+    local sdl_src="$BUILD_DIR/pouch/sdl2-src"
+    local sdl_obj="$BUILD_DIR/pouch/sdl2-obj"
+    local progs_out="$BUILD_DIR/pouch/progs"
+    local clang="$LLVM_PREFIX/bin/clang"
+    local ar_tool="$LLVM_PREFIX/bin/llvm-ar"
+    local archive="$sysroot/lib/libSDL2.a"
+
+    if [[ ! -f "$sdl_vendor/src/SDL.c" ]]; then
+        echo "==> sdl2: vendored source missing at $sdl_vendor" >&2
+        exit 1
+    fi
+    if sysroot_is_stale; then
+        echo "==> sdl2: pouch sysroot missing/stale -- building it first"
+        build_sysroot
+    fi
+
+    # Staleness: reuse the archive when it is newer than every input
+    # (the vendored tree + the port dir + libc.a).
+    if [[ -f "$archive" && -f "$progs_out/sdl-probe" ]]; then
+        local stale
+        stale="$(find "$sdl_vendor" "$port_dir" "$REPO_ROOT/usr/sdl-probe" \
+                      -type f -newer "$archive" -print -quit 2>/dev/null)"
+        if [[ -z "$stale" && ! "$sysroot/lib/libc.a" -nt "$archive" ]]; then
+            ledger "libSDL2.a: REUSED (cached + up-to-date)"
+            return 0
+        fi
+    fi
+
+    echo "==> building SDL2 2.32.10 (aarch64-thylacine)"
+    rm -rf "$sdl_src" "$sdl_obj"
+    mkdir -p "$sdl_src" "$sdl_obj"
+    cp -R "$sdl_vendor/src" "$sdl_src/src"
+    cp -R "$sdl_vendor/include" "$sdl_src/include"
+
+    local p
+    for p in "$port_dir"/patches/*.patch; do
+        patch -s -p1 -t -d "$sdl_src" -i "$p"
+    done
+    cp "$port_dir/SDL_config.h" "$sdl_src/include/SDL_config.h"
+    mkdir -p "$sdl_src/src/video/thylacine"
+    cp "$port_dir"/thylacine/*.c "$port_dir"/thylacine/*.h \
+        "$sdl_src/src/video/thylacine/"
+
+    local cflags=( --target=aarch64-thylacine -march=armv8-a+lse+pauth+bti
+                   -std=gnu11 -O2 -fno-pic -fomit-frame-pointer
+                   -fno-stack-protector
+                   -nostdlibinc -isystem "$sysroot/include"
+                   -I"$sdl_src/include"
+                   -I"$REPO_ROOT/usr/lib/libt/include"
+                   -D_GNU_SOURCE=1 -D__thylacine__=1 )
+
+    # The compile list: glob the pruned tree (deterministic order).
+    local srcs=()
+    while IFS= read -r p; do
+        srcs+=( "$p" )
+    done < <(cd "$sdl_src" && find src -name '*.c' ! -path 'src/main/*' | sort)
+
+    local n=0 f obj
+    for f in "${srcs[@]}"; do
+        obj="$sdl_obj/$(echo "${f#src/}" | tr '/' '_').o"
+        "$clang" "${cflags[@]}" -c "$sdl_src/$f" -o "$obj"
+        n=$((n + 1))
+    done
+    echo "    compiled $n objects"
+
+    rm -f "$archive"
+    "$ar_tool" rcs "$archive" "$sdl_obj"/*.o
+
+    # Headers -> sysroot/include/SDL2/ (post-patch copy, so the installed
+    # SDL_config.h is the thylacine one).
+    rm -rf "$sysroot/include/SDL2"
+    mkdir -p "$sysroot/include/SDL2"
+    cp "$sdl_src/include"/*.h "$sysroot/include/SDL2/"
+    echo "    libSDL2.a $(wc -c < "$archive" | tr -d ' ') bytes; headers -> include/SDL2/"
+
+    # The proving binary: /sdl-probe (usr/sdl-probe/sdl-probe.c) -- an SDL
+    # app drawing the quadrant pattern through the full SDL_thylacine ->
+    # tapestry path. Installed into $progs_out so build_ramfs bakes it.
+    mkdir -p "$progs_out"
+    "$clang" "${cflags[@]}" -Wall -Wextra -I"$sysroot/include/SDL2" \
+        -c "$REPO_ROOT/usr/sdl-probe/sdl-probe.c" -o "$progs_out/sdl-probe.o"
+    POUCH_SYSROOT="$sysroot" LLD_PREFIX="$LLD_PREFIX" \
+        "$REPO_ROOT/tools/pouch-ld" "$progs_out/sdl-probe.o" \
+        -L"$sysroot/lib" -lSDL2 \
+        -o "$progs_out/sdl-probe"
+    rm -f "$progs_out/sdl-probe.o"
+    echo "    sdl-probe: $(wc -c < "$progs_out/sdl-probe" | tr -d ' ') bytes (ET_EXEC, static)"
+    ledger "libSDL2.a: BUILT (+ sdl-probe)"
+}
+
+build_tyrquake() {
+    # G-7b (the Quake gate; docs/TAPESTRY.md section 9/17/18.9) --
+    # cross-build TyrQuake (NQ, the SOFTWARE renderer, SDL video/input,
+    # null sound/cd) against the pouch sysroot + libSDL2.a, and stage the
+    # id shareware data for the pool bake.
+    #
+    # The vendored tree (third_party/tyrquake, pruned-pristine per its
+    # PRUNE-MANIFEST.md) compiles via a curated object list mirroring the
+    # upstream Makefile's COMMON/CL/SV/NQCL/SW groups + the sdl/null
+    # driver selections (the libsodium idiom -- no cross make). VPATH:
+    # a name resolves NQ/<f>.c first, then common/<f>.c.
+    #
+    # The shareware pak: quake106.zip (the id-official shareware
+    # installer, sha256-pinned) is fetched ONCE into build/quake/ and
+    # ID1/PAK0.PAK extracted via the host bsdtar (libarchive reads the
+    # Deice/LHA resource natively -- no lha dependency). Staged
+    # lowercase at build/quake/stage/id1/pak0.pak; populate_stratum_pool
+    # puts the stage at /quake (QBASEDIR=/quake is compiled in). The
+    # pak is NEVER committed -- build-time fetch only.
+    local sysroot="$BUILD_DIR/sysroot"
+    local tq_vendor="$REPO_ROOT/third_party/tyrquake"
+    local port_dir="$REPO_ROOT/usr/ports/tyrquake"
+    local tq_src="$BUILD_DIR/pouch/tyrquake-src"
+    local tq_obj="$BUILD_DIR/pouch/tyrquake-obj"
+    local progs_out="$BUILD_DIR/pouch/progs"
+    local clang="$LLVM_PREFIX/bin/clang"
+    local quake_dir="$BUILD_DIR/quake"
+    local stage="$quake_dir/stage"
+
+    if [[ ! -f "$tq_vendor/NQ/host.c" ]]; then
+        echo "==> tyrquake: vendored source missing at $tq_vendor" >&2
+        exit 1
+    fi
+    if [[ ! -f "$sysroot/lib/libSDL2.a" ]]; then
+        build_sdl2
+    fi
+
+    # 1. The shareware data (cached across builds; fetch once).
+    if [[ ! -f "$stage/id1/pak0.pak" ]]; then
+        mkdir -p "$quake_dir" "$stage/id1"
+        if [[ ! -f "$quake_dir/quake106.zip" ]]; then
+            echo "==> tyrquake: fetching quake106.zip (id shareware, ~9 MB)"
+            curl -sL --max-time 300 -o "$quake_dir/quake106.zip" \
+                "https://ftp.gwdg.de/pub/misc/ftp.idsoftware.com/idstuff/quake/quake106.zip" \
+                || { echo "==> tyrquake: shareware fetch failed" >&2; exit 1; }
+        fi
+        local got_sha
+        got_sha="$(shasum -a 256 "$quake_dir/quake106.zip" | awk '{print $1}')"
+        if [[ "$got_sha" != "ec6c9d34b1ae0252ac0066045b6611a7919c2a0d78a3a66d9387a8f597553239" ]]; then
+            echo "==> tyrquake: quake106.zip sha256 mismatch ($got_sha)" >&2
+            exit 1
+        fi
+        rm -rf "$quake_dir/unzip"
+        mkdir -p "$quake_dir/unzip"
+        unzip -o -q "$quake_dir/quake106.zip" -d "$quake_dir/unzip"
+        /usr/bin/tar xf "$quake_dir/unzip/resource.1" -C "$quake_dir/unzip" ID1/PAK0.PAK
+        cp "$quake_dir/unzip/ID1/PAK0.PAK" "$stage/id1/pak0.pak"
+        rm -rf "$quake_dir/unzip"
+        local pak_sha
+        pak_sha="$(shasum -a 256 "$stage/id1/pak0.pak" | awk '{print $1}')"
+        if [[ "$pak_sha" != "35a9c55e5e5a284a159ad2a62e0e8def23d829561fe2f54eb402dbc0a9a946af" ]]; then
+            echo "==> tyrquake: pak0.pak sha256 mismatch ($pak_sha)" >&2
+            exit 1
+        fi
+        echo "    pak0.pak staged ($(wc -c < "$stage/id1/pak0.pak" | tr -d ' ') bytes, shareware 1.06)"
+    fi
+
+    # 2. Staleness: reuse the binary when newer than the tree + port + libSDL2.a.
+    if [[ -f "$progs_out/tyr-quake" ]]; then
+        local stale
+        stale="$(find "$tq_vendor" "$port_dir" -type f -newer "$progs_out/tyr-quake" -print -quit 2>/dev/null)"
+        if [[ -z "$stale" && ! "$sysroot/lib/libSDL2.a" -nt "$progs_out/tyr-quake" ]]; then
+            ledger "tyr-quake: REUSED (cached + up-to-date)"
+            return 0
+        fi
+    fi
+
+    echo "==> building tyr-quake 0.71 (NQ software renderer, aarch64-thylacine)"
+    rm -rf "$tq_src" "$tq_obj"
+    mkdir -p "$tq_src" "$tq_obj/gen" "$progs_out"
+    # Copy the pruned-pristine tree, then apply the port patch series (the
+    # SDL2/musl idiom -- the vendored tree is never edited).
+    cp -R "$tq_vendor/common" "$tq_vendor/NQ" "$tq_vendor/include" \
+        "$tq_vendor/external" "$tq_src/"
+    local qp
+    for qp in "$port_dir"/patches/*.patch; do
+        patch -s -p1 -t -d "$tq_src" -i "$qp"
+    done
+
+    # The window-icon header is upstream-GENERATED (ImageMagick over the
+    # pruned icons/); sdl_common.c includes it unconditionally but only
+    # DEREFERENCES it outside DISABLE_ICON. A stub satisfies the include;
+    # -DDISABLE_ICON keeps it untouched (the compositor has no window
+    # icons anyway).
+    printf 'static const unsigned char MagickImage[] = { 0 };\n' \
+        > "$tq_obj/gen/tyrquake_icon_128.h"
+
+    # The curated object list (upstream Makefile groups; SW renderer,
+    # VID/IN=sdl, SND/CD=null; UNIX common; no x86 asm on aarch64).
+    local objs=(
+        # COMMON_OBJS
+        buildinfo cmd common crc cvar mathlib model rb_tree shell zone
+        # UNIX common
+        net_udp sys_unix
+        # CL_OBJS
+        alias_model cd_common cl_demo cl_input cl_main cl_parse cl_tent
+        console developer keys menu pcx r_lerp r_efrag r_light r_model
+        r_part sbar screen snd_dma snd_mem snd_mix snd_music sprite_model
+        vid_mode view wad
+        # driver selections
+        cd_null snd_null in_sdl sdl_common vid_sdl
+        # SV_OBJS
+        pr_cmds pr_edict pr_exec sv_main sv_move sv_phys sv_user
+        # NQCL_OBJS (+ net_bsd)
+        chase host host_cmd net_common net_dgrm net_loop net_main world
+        net_bsd
+        # SW_OBJS
+        d_edge d_fill d_init d_modech d_part d_polyse d_scan d_sky
+        d_sprite d_surf d_vars draw r_aclip r_alias r_bsp r_draw r_edge
+        r_main r_misc r_sky r_sprite r_surf r_vars
+    )
+
+    local cflags=( --target=aarch64-thylacine -march=armv8-a+lse+pauth+bti
+                   -std=gnu11 -O2 -fno-pic -fomit-frame-pointer
+                   -fno-stack-protector -fcommon
+                   -nostdlibinc -isystem "$sysroot/include"
+                   -isystem "$sysroot/include/SDL2"
+                   -iquote "$tq_src/include" -iquote "$tq_src/external"
+                   -iquote "$tq_src/NQ" -iquote "$tq_obj/gen"
+                   -D_GNU_SOURCE=1 -D__thylacine__=1
+                   -DNQ_HACK -DELF -DNDEBUG -DDISABLE_ICON
+                   -DTYR_VERSION=0.71 -DTYR_VERSION_TIME=1662459894LL
+                   -DQBASEDIR=/quake )
+
+    local n=0 f src
+    for f in "${objs[@]}"; do
+        if [[ -f "$tq_src/NQ/$f.c" ]]; then
+            src="$tq_src/NQ/$f.c"
+        elif [[ -f "$tq_src/common/$f.c" ]]; then
+            src="$tq_src/common/$f.c"
+        else
+            echo "==> tyrquake: source for $f not found" >&2
+            exit 1
+        fi
+        "$clang" "${cflags[@]}" -c "$src" -o "$tq_obj/$f.o"
+        n=$((n + 1))
+    done
+    echo "    compiled $n objects"
+
+    POUCH_SYSROOT="$sysroot" LLD_PREFIX="$LLD_PREFIX" \
+        "$REPO_ROOT/tools/pouch-ld" "$tq_obj"/*.o \
+        -L"$sysroot/lib" -lSDL2 \
+        -o "$progs_out/tyr-quake"
+    echo "    tyr-quake: $(wc -c < "$progs_out/tyr-quake" | tr -d ' ') bytes (ET_EXEC, static)"
+    ledger "tyr-quake: BUILT (+ shareware pak staged for the pool)"
+}
+
 build_disk() {
     # P4-Ic5b2 / P4-Ic7: deterministic raw disk image backing QEMU's
     # virtio-blk-device.
@@ -2102,6 +2385,8 @@ case "$target" in
     ramfs)       build_ramfs       ;;
     sysroot)     build_sysroot     ;;
     pouch-progs) build_pouch_progs ;;
+    sdl2)        build_sdl2        ;;
+    tyrquake)    build_tyrquake    ;;
     stratumd)    build_stratumd    ;;
     userspace)   build_userspace   ;;
     disk)        build_disk        ;;

@@ -39,29 +39,44 @@ struct Spoor;   // REVENANT R-4: exec_setup_from_spoor's pinned executable
 //   0x0000_0000_0001_0000          User code/data (per ELF e_entry +
 //   ...                             per-segment vaddr).
 //   ...
-//   0x0000_0000_7FFB_F000          User stack GUARD page (4 KiB —
+//   0x0000_0000_7FEF_F000          User stack GUARD page (4 KiB —
 //                                   reserved, unmapped, prot==0).
-//   0x0000_0000_7FFC_0000          User stack base (EXEC_USER_STACK_BASE).
+//   0x0000_0000_7FF0_0000          User stack base (EXEC_USER_STACK_BASE).
 //   0x0000_0000_8000_0000          User stack TOP (initial SP_EL0).
 //   0x0000_0001_0000_0000          Burrow-attach window base — the range
 //   ...                             SYS_BURROW_ATTACH places anonymous
 //   0x0000_4000_0000_0000          regions into (first-fit upward).
 //
 // The user-stack region is well below the TTBR1 split (0x0001_0000_*)
-// and well above typical ELF segment vaddrs + BSS heaps. Sized 256 KiB
-// at v1.0: corvus runs ML-KEM-768 (FIPS 203) keygen/decapsulate, whose
-// FO-transform working set is tens of KiB of stack — the prior 16 KiB
-// overflowed. 256 KiB is generous headroom for every userspace Proc;
-// Phase 5+ replaces the fixed size with demand-grow on stack faults.
+// and well above typical ELF segment vaddrs + BSS heaps. Sized 1 MiB
+// (G-7b; was 256 KiB): a real ported program's call graph (TyrQuake's
+// model loader) overflowed 256 KiB into the guard page. 1 MiB is eager
+// headroom for every userspace Proc; the 0x8000_0000..0xC000_0000 gap
+// above TOP leaves room to grow. The Linux-model lazy demand-grown stack
+// (commits only touched pages — no eager per-Proc cost) is the tracked
+// v-next lift.
 //
 // P5-secondary-stack-guard: a 4 KiB guard page sits directly below
 // EXEC_USER_STACK_BASE, installed by exec_map_user_stack as a prot==0
-// / no-BURROW guard VMA (vma_alloc_guard). An overflow past the 256 KiB
-// stack crosses into it and faults — userland_demand_page rejects the
+// / no-BURROW guard VMA (vma_alloc_guard). An overflow past the stack
+// crosses into it and faults — userland_demand_page rejects the
 // prot==0 VMA — and vma_insert's overlap rejection reserves the page so
 // a future mapping allocator (Phase 5+ mmap / heap) cannot place
 // anything flush against the stack. Closes corvus-bringup-d audit F7.
-#define EXEC_USER_STACK_SIZE         (256ull * 1024)
+//
+// G-7b: 1 MiB (was 256 KiB). The original 256 KiB was too small for a
+// real ported program's call graph — TyrQuake's model loader
+// (Mod_ForName -> Mod_LoadAliasModel, large on-stack temp buffers)
+// overflowed it into the guard page during the first map load. 1 MiB is
+// eager-anon (whole thing committed at exec, like the ELF data), so it
+// stays modest: ~1 MiB * boot-Proc-count, trivial against RAM, and the
+// 0x80000000..0xC0000000 gap above STACK_TOP leaves 1 GiB of headroom to
+// grow down further. The proper Linux-model answer — a large lazy
+// (demand-grown) reservation that commits only touched pages — is the
+// tracked v-next lift (it needs the exec frame-fill to pre-commit just
+// the top page; the overcommit BURROW_TYPE_ANON_LAZY infra already
+// exists). This bump unblocks real ports now at a bounded eager cost.
+#define EXEC_USER_STACK_SIZE         (1024ull * 1024)
 #define EXEC_USER_STACK_TOP          0x0000000080000000ull
 #define EXEC_USER_STACK_BASE         (EXEC_USER_STACK_TOP - EXEC_USER_STACK_SIZE)
 #define EXEC_USER_STACK_GUARD_SIZE   0x1000ull
@@ -181,7 +196,7 @@ _Static_assert((EXEC_USER_VDSO_BASE & 0xFFFull) == 0,
 // both raised for the on-device Go toolchain's compile/link command lines),
 // the structured top is (8 + 8*513 + 8 + AUXV*16 + 16-align-pad + 16) bytes,
 // followed by 64 KiB strings bytes, rounded up to 16. ~68 KiB — still well
-// under the 256 KiB user-stack budget; the _Static_assert below proves it.
+// under the 1 MiB user-stack budget; the _Static_assert below proves it.
 #define EXEC_INIT_STACK_MAX_SIZE \
     (((8 + (512u + 1u) * 8 + 8 + EXEC_INIT_AUXV_COUNT * 16 + 16 + 16 + 65536) + 15) & ~15ull)
 _Static_assert(EXEC_INIT_STACK_SIZE % 16 == 0,

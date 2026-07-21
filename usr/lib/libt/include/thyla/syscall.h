@@ -107,6 +107,9 @@ enum {
     T_SYS_PCI_MAP_BAR       = 77,  // pci-1c: map a KObj_PCI BAR into user VA
     T_SYS_PCI_INFO          = 78,  // pci-1c: read a KObj_PCI's resolved topology
     T_SYS_CLOCK_SETTIME     = 79,  // net-7a: step CLOCK_REALTIME (CAP_HOSTOWNER)
+    // 80 reserved (SYS_FD_DEVCLASS); 81 = SYS_WEFT_SHARE (CAP_HW_CREATE
+    // server-side only; native libthyla-rs).
+    T_SYS_WEFT_MAP          = 82,  // Weft-6a: map a flow/weave fid's shared ring -> VA
     T_SYS_PREAD             = 85,  // #37: positioned read (cursor untouched)
     T_SYS_PWRITE            = 86,  // #37: positioned write (cursor untouched)
     T_SYS_YIELD             = 87,  // #33: voluntary yield (hint; always 0)
@@ -2041,6 +2044,27 @@ static inline long t_stat_path(const char *path, size_t path_len,
     return x0;
 }
 
+
+// t_weft_map — map the shared ring/weave a server registered for `data_fd`
+// (a dev9p flow-data or tapestry weave fid) into the caller's address space
+// (Weft-6a; SYS_WEFT_MAP). The kernel issues the lazy Tweft on first use,
+// joins the server's share_id to the pinned Burrow, and maps it RW (never
+// executable). Returns the mapped VA (> 0) or -1. Idempotent per fid; the
+// mapping drops at the fid's close (the weave-clunk-unmap contract) or the
+// Proc's reap.
+__attribute__((always_inline))
+static inline long t_weft_map(long data_fd, unsigned long hint_va) {
+    register long x0 __asm__("x0") = data_fd;
+    register long x1 __asm__("x1") = (long)hint_va;
+    register long x8 __asm__("x8") = T_SYS_WEFT_MAP;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
 
 // t_lseek — reposition the per-Spoor offset cursor on `fd`. Returns the
 // new offset (>= 0) on success, -1 on bad fd / bad whence / underflow /

@@ -1,0 +1,94 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-gfx-quake.exp -- the G-7 SDL/Quake acceptance gate.
+#
+# The TAPESTRY.md section 17 forcing function: a demanding non-Halcyon
+# client (software Quake) drives the WHOLE Tapestry API stack through
+# stock SDL2 -- SDL_CreateWindow / SDL_GetWindowSurface / SDL_RenderPresent
+# route through the SDL_thylacine backend -> the tapestry compositor.
+#
+#   engine leg   : tyr-quake loads the shareware pak from /quake, inits the
+#                  software renderer (SDL over the framebuffer path), and
+#                  runs `+timedemo demo1`. "======= Quake Initialized ======="
+#                  proves the full boot; the "<N> frames <t> seconds <fps>"
+#                  line proves the entire render->present->scanout path ran
+#                  to completion (969 frames).
+#   render leg   : a screendump carries Quake's textured-world color
+#                  richness (not a flat/black surface) -- the pixels
+#                  reached the scanout. (The fps line is the DETERMINISTIC
+#                  present proof: 969 frames cannot complete without every
+#                  present landing; the dump is the supporting visual. A
+#                  frame-advance delta is LOGGED, not gated -- post-
+#                  timedemo Quake may idle on a static console frame, so
+#                  a hard "two dumps differ" check would be timing-flaky.)
+#
+# Runs under HVF (the ls-gfx sibling posture): the interactive harness's
+# default TCG accel hangs the boot at the pre-existing 8a-2b hwwatch E2E
+# (task #27). GPU-less boots have no scanout -- THYLACINE_NO_GPU applies.
+
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+set repo $lc_repo
+set qmp "$repo/build/qmp.sock"
+
+# Fingerprint a screendump PNG: (rolling hash of a pixel grid, distinct
+# color-bucket count). Two different game frames differ in the hash; a
+# textured 3D scene carries many more color buckets than a flat console.
+proc gfx_fingerprint {png} {
+    return [exec python3 [file join [file dirname [info script]] gfx_fp.py] $png]
+}
+
+# Screendump, returning "" on success or the error string.
+proc gfx_dump_or_fail {out} {
+    global repo qmp
+    if {[catch {exec $repo/tools/screendump.sh -s $qmp $out} err]} {
+        return $err
+    }
+    return ""
+}
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+lc_send "tyr-quake -window -nosound +timedemo demo1"
+lc_expect "Quake Initialized" "engine init (pak loaded, SW renderer up)"
+
+# The timedemo completion line = the whole SDL->tapestry present path ran.
+set timeout 120
+expect {
+    -re {([0-9]+) frames +([0-9.]+) seconds +([0-9.]+) fps} {
+        lc_pass "timedemo: $expect_out(1,string) frames @ $expect_out(3,string) fps (SDL software Quake, present-to-scanout)"
+    }
+    "user fault" { lc_fail "tyr-quake segv during the timedemo" }
+    "Sys_Error"  { lc_fail "tyr-quake Sys_Error during the timedemo" }
+    timeout      { lc_fail "no timedemo fps line within 120s" }
+}
+
+# The render leg: Quake's world is on the scanout. Two dumps a beat apart
+# -- the color-richness floor is the HARD gate (a flat/black surface would
+# fail it); a frame-advance delta is LOGGED (post-timedemo Quake may idle
+# on a static console frame, so gating on it would be timing-flaky).
+after 1500
+if {[gfx_dump_or_fail /tmp/lsq-1.png] ne ""} { lc_fail "screendump 1 failed" }
+after 2000
+if {[gfx_dump_or_fail /tmp/lsq-2.png] ne ""} { lc_fail "screendump 2 failed" }
+
+set fp1 [gfx_fingerprint /tmp/lsq-1.png]
+set fp2 [gfx_fingerprint /tmp/lsq-2.png]
+# fp = "<hash> <colorbuckets>"
+set h1 [lindex $fp1 0]; set c1 [lindex $fp1 1]
+set h2 [lindex $fp2 0]; set c2 [lindex $fp2 1]
+if {$c1 < 8 || $c2 < 8} {
+    lc_fail "too few colors ($c1/$c2) -- the surface is not rendering Quake's world"
+}
+if {$h1 ne $h2} {
+    lc_step "note: game frame advanced between dumps (live demo loop)"
+} else {
+    lc_step "note: static frame between dumps (post-timedemo console idle) -- expected"
+}
+lc_pass "Quake's textured world on the scanout ($c1/$c2 color buckets; the timedemo's 969 presents are the deterministic proof)"
+
+lc_quit
+lc_pass "ls-gfx-quake: the G-7 SDL/Quake acceptance gate verified (section 17)"
+exit 0

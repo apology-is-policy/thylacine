@@ -1,0 +1,141 @@
+G-7a (the SDL seam, TAPESTRY.md section 9/18.9) -- pouch nanosleep on
+torpor. Rewrites __clock_nanosleep (which nanosleep(), usleep() and
+clock_nanosleep() all route through) from the Linux
+SYS_nanosleep/SYS_clock_nanosleep cascade -- both unwired 0xFFFF
+sentinels on Thylacine, so every sleep returned -ENOSYS instantly -- to
+the one wait-on-address primitive the kernel provides: SYS_TORPOR_WAIT
+on a private stack word nobody ever wakes, with torpor's
+relative-microsecond timeout (the 0004 __timedwait convention: 0 =
+spurious-OK, -ETIMEDOUT = the timeout elapsed, which for a sleep means
+the chunk COMPLETED).
+
+Why now: SDL_Delay and every ported game's frame pacer (TyrQuake
+Sys_Sleep, the SDL timer subsystem) sit on nanosleep. With the ENOSYS
+sentinel, delays busy-return instantly -- frame pacing burns a CPU and
+timedemo timings lie.
+
+Mechanism notes:
+  - A single torpor wait clamps at TORPOR_MAX_TIMEOUT_US = 1 hour
+    (docs/reference/80-torpor.md), so the loop re-measures remaining
+    time against a deadline computed on the requested clock
+    (SYS_CLOCK_GETTIME = 75, wired by 0001) and waits in <= 50-minute
+    chunks. Spurious returns cost one re-measure.
+  - TIMER_ABSTIME uses the caller's deadline directly on the requested
+    clock; only CLOCK_REALTIME/CLOCK_MONOTONIC are supported (EINVAL
+    otherwise, per POSIX option behavior).
+  - An interrupt-class return (a caught note unwinding the wait)
+    surfaces as EINTR with rem filled per POSIX. The death unwind
+    (#811) never returns to EL0, so it needs no arm here.
+  - Plain __syscall, not __syscall_cp: pouch has no cancellation
+    plumbing on torpor (the 0004 precedent).
+
+--- a/src/time/clock_nanosleep.c
++++ b/src/time/clock_nanosleep.c
+@@ -2,37 +2,81 @@
+ #include <errno.h>
+ #include "syscall.h"
+ 
+-#define IS32BIT(x) !((x)+0x80000000ULL>>32)
+-#define CLAMP(x) (int)(IS32BIT(x) ? (x) : 0x7fffffffU+((0ULL+(x))>>63))
++/* pouch: Thylacine has no SYS_nanosleep / SYS_clock_nanosleep. Sleeping is
++ * built on the one wait-on-address primitive: SYS_TORPOR_WAIT on a private
++ * stack word nobody ever wakes, using torpor's relative-microsecond timeout
++ * (the 0004 __timedwait convention: 0 = woken/spurious-OK, -ETIMEDOUT = the
++ * timeout ran out -- which for a sleep means the chunk COMPLETED). A single
++ * torpor wait clamps at TORPOR_MAX_TIMEOUT_US = 1 hour
++ * (docs/reference/80-torpor.md), so the loop below re-measures the remaining
++ * time on each iteration against a deadline computed on the requested clock;
++ * spurious returns re-loop the same way, costing only a re-measure.
++ * TIMER_ABSTIME uses the caller's deadline directly. An interrupt-class
++ * return (a caught note unwinding the wait) surfaces as EINTR with rem
++ * filled per POSIX; the death unwind never returns to EL0 at all.
++ *
++ * SDL_Delay and every port-side frame pacer sit on this path -- before this
++ * patch nanosleep was an unwired 0xFFFF sentinel (-ENOSYS) and delays
++ * busy-returned instantly.
++ */
+ 
++#define THYLA_TORPOR_CHUNK_US 3000000000LL /* 50 min, under the 1 h clamp */
++
++static void thyla_clock_now(clockid_t clk, struct timespec *out)
++{
++	__syscall(SYS_clock_gettime, clk, out);
++}
++
+ int __clock_nanosleep(clockid_t clk, int flags, const struct timespec *req, struct timespec *rem)
+ {
++	struct timespec dl, now;
++	long long rem_ns;
++
+ 	if (clk == CLOCK_THREAD_CPUTIME_ID) return EINVAL;
+-#ifdef SYS_clock_nanosleep_time64
+-	time_t s = req->tv_sec;
+-	long ns = req->tv_nsec;
+-	int r = -ENOSYS;
+-	if (SYS_clock_nanosleep == SYS_clock_nanosleep_time64 || !IS32BIT(s))
+-		r = __syscall_cp(SYS_clock_nanosleep_time64, clk, flags,
+-			((long long[]){s, ns}), rem);
+-	if (SYS_clock_nanosleep == SYS_clock_nanosleep_time64 || r!=-ENOSYS)
+-		return -r;
+-	long long extra = s - CLAMP(s);
+-	long ts32[2] = { CLAMP(s), ns };
+-	if (clk == CLOCK_REALTIME && !flags)
+-		r = __syscall_cp(SYS_nanosleep, &ts32, &ts32);
+-	else
+-		r = __syscall_cp(SYS_clock_nanosleep, clk, flags, &ts32, &ts32);
+-	if (r==-EINTR && rem && !(flags & TIMER_ABSTIME)) {
+-		rem->tv_sec = ts32[0] + extra;
+-		rem->tv_nsec = ts32[1];
++	if (clk != CLOCK_REALTIME && clk != CLOCK_MONOTONIC) return EINVAL;
++	if (req->tv_nsec < 0 || req->tv_nsec >= 1000000000L) return EINVAL;
++
++	if (flags & TIMER_ABSTIME) {
++		dl = *req;
++	} else {
++		if (req->tv_sec < 0) return EINVAL;
++		thyla_clock_now(clk, &dl);
++		dl.tv_sec += req->tv_sec;
++		dl.tv_nsec += req->tv_nsec;
++		if (dl.tv_nsec >= 1000000000L) {
++			dl.tv_nsec -= 1000000000L;
++			dl.tv_sec++;
++		}
+ 	}
+-	return -r;
+-#else
+-	if (clk == CLOCK_REALTIME && !flags)
+-		return -__syscall_cp(SYS_nanosleep, req, rem);
+-	return -__syscall_cp(SYS_clock_nanosleep, clk, flags, req, rem);
+-#endif
++
++	for (;;) {
++		long long us;
++		unsigned int word = 0;
++		long r;
++
++		thyla_clock_now(clk, &now);
++		rem_ns = (long long)(dl.tv_sec - now.tv_sec) * 1000000000LL
++		       + (dl.tv_nsec - now.tv_nsec);
++		if (rem_ns <= 0) return 0;
++
++		us = (rem_ns + 999) / 1000;
++		if (us > THYLA_TORPOR_CHUNK_US) us = THYLA_TORPOR_CHUNK_US;
++
++		/* Nobody wakes &word: 0 = spurious (re-loop), -ETIMEDOUT = the
++		 * chunk elapsed (re-measure; done when the deadline passed). */
++		r = __syscall(SYS_torpor_wait, &word, 0, (long)us);
++		if (r == 0 || r == -ETIMEDOUT) continue;
++
++		if (rem && !(flags & TIMER_ABSTIME)) {
++			thyla_clock_now(clk, &now);
++			rem_ns = (long long)(dl.tv_sec - now.tv_sec) * 1000000000LL
++			       + (dl.tv_nsec - now.tv_nsec);
++			if (rem_ns < 0) rem_ns = 0;
++			rem->tv_sec = rem_ns / 1000000000LL;
++			rem->tv_nsec = rem_ns % 1000000000LL;
++		}
++		return r == -EINTR ? EINTR : (int)-r;
++	}
+ }
+ 
+ weak_alias(__clock_nanosleep, clock_nanosleep);

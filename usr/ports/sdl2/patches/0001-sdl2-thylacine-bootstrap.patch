@@ -1,0 +1,54 @@
+G-7a (the SDL seam, TAPESTRY.md section 9/18.9) -- register the
+thylacine video driver in SDL's compile-time bootstrap list, and take
+the SANCTIONED dynapi off-switch. Three hunks against the pristine
+vendored tree (which build_sdl2 copies into the build dir before
+applying this):
+
+  - SDL_sysvideo.h: the THYLACINE_bootstrap extern.
+  - SDL_video.c: the #ifdef'd bootstrap array entry, ahead of the
+    platform drivers so SDL_VideoInit picks thylacine first (dummy
+    stays hint-gated).
+  - SDL_dynapi.h: a __thylacine__ arm in the master platform switch
+    setting SDL_DYNAMIC_API 0. SDL deliberately #errors when the macro
+    is forced from the command line/config ("you have to edit this
+    file"), so the off-switch for a static-only, dlopen-less target is
+    an in-file platform arm -- exactly what the PS2/PSP/Vita/3DS arms
+    are. build_sdl2 defines -D__thylacine__=1 (the pouch target has no
+    OS predefine), the port-wide platform macro convention.
+
+The driver itself lives OUTSIDE the vendored tree at
+usr/ports/sdl2/thylacine/, copied in as src/video/thylacine/.
+
+--- a/src/dynapi/SDL_dynapi.h
++++ b/src/dynapi/SDL_dynapi.h
+@@ -67,6 +67,8 @@
+ #define SDL_DYNAMIC_API 0 /* The N-Gage doesn't support dynamic linking either */
+ #elif defined(__3DS__)
+ #define SDL_DYNAMIC_API 0 /* devkitARM doesn't support dynamic linking */
++#elif defined(__thylacine__)
++#define SDL_DYNAMIC_API 0 /* Thylacine pouch is static-only (no dlopen; ET_EXEC) */
+ #elif defined(DYNAPI_NEEDS_DLOPEN) && !defined(HAVE_DLOPEN)
+ #define SDL_DYNAMIC_API 0 /* we need dlopen(), but don't have it.... */
+ #endif
+--- a/src/video/SDL_sysvideo.h
++++ b/src/video/SDL_sysvideo.h
+@@ -457,6 +457,7 @@
+ 
+ /* Not all of these are available in a given build. Use #ifdefs, etc. */
+ extern VideoBootStrap COCOA_bootstrap;
++extern VideoBootStrap THYLACINE_bootstrap;
+ extern VideoBootStrap X11_bootstrap;
+ extern VideoBootStrap DirectFB_bootstrap;
+ extern VideoBootStrap WINDOWS_bootstrap;
+--- a/src/video/SDL_video.c
++++ b/src/video/SDL_video.c
+@@ -117,6 +117,9 @@
+ #ifdef SDL_VIDEO_DRIVER_N3DS
+     &N3DS_bootstrap,
+ #endif
++#ifdef SDL_VIDEO_DRIVER_THYLACINE
++    &THYLACINE_bootstrap,
++#endif
+ #ifdef SDL_VIDEO_DRIVER_KMSDRM
+     &KMSDRM_bootstrap,
+ #endif
