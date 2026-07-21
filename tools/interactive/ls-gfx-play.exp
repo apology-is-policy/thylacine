@@ -1,0 +1,152 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-gfx-play.exp -- the Track-A interactive-play E2E
+# (AURORA-CONFIG.md section 2.1): keystrokes reach a RUNNING GAME through
+# the compositor's focus routing -- the one leg the G-7 timedemo gate never
+# exercised (a timedemo takes no input).
+#
+# The proof chain, each leg deterministic on the serial tee (never pixels):
+#
+#   focus leg   : ut spawns tyr-quake; the new pane TAKES focus (pane.rs
+#                 split() -> focused = new_leaf, both branches), so QMP
+#                 keys route to Quake with no focus chord. Super+F zooms.
+#   console leg : Shift+ESC opens Quake's console (keys.c:851 -- HARDCODED,
+#                 unbindable, immune to default.cfg). Typing `version`
+#                 must print "Version TyrQuake-" -- a string ut cannot
+#                 produce (an `echo` sentinel COULD false-pass if focus
+#                 mis-routed the text into ut's own echo builtin; the
+#                 version output is un-fakeable).
+#   in-game leg : `bind uparrow version` (TyrQuake's Key_Bind_f accepts
+#                 argc 2/3 ONLY -- "FIXME - allow arguments bound with the
+#                 commands?" -- so the bound command must be ONE token; a
+#                 multi-token `echo ...` draws the usage message and binds
+#                 nothing, the run-1 failure), console closed, one injected
+#                 Up arrow. A FRESH "Version TyrQuake-" can only print if
+#                 the arrow traversed QMP -> virtio-keyboard -> tapestryd
+#                 (unswallowed, focused surface) -> SDL pump scancode ->
+#                 keysym -> Key_Event(key_game) -> the binding -> Cbuf ->
+#                 Con_Printf -> stdout -> serial. This also asserts the
+#                 map SIGNED ON: pre-signon con_forcedup routes consolekeys
+#                 (arrows included) away from bindings (keys.c dispatch).
+#   render leg  : a zoomed mid-game screendump passes the color-richness
+#                 floor (the ls-gfx-quake calibration); a turn-tap frame
+#                 delta is LOGGED, not gated (torch animation makes any
+#                 hash-diff assertion vacuous, and a static-scene gate
+#                 would be timing-flaky -- same posture as the G-7 gate).
+#   exit leg    : `quit` typed in the console exits directly (Host_Quit_f,
+#                 key_dest == key_console skips the confirm menu); ut
+#                 answers `whoami` -- the shell survived the whole dance.
+#
+# Con_Printf -> Sys_Printf (console.c:321) is what lands every Quake
+# console line on stdout -> the pts -> the serial tee.
+#
+# Runs under HVF (the ls-gfx-quake sibling posture; TCG hangs at the
+# pre-existing 8a-2b hwwatch E2E, task #27).
+
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+set repo $lc_repo
+set qmp "$repo/build/qmp.sock"
+
+proc gfx_fingerprint {png} {
+    return [exec python3 [file join [file dirname [info script]] gfx_fp.py] $png]
+}
+
+proc gfx_dump_or_fail {out} {
+    global repo qmp
+    if {[catch {exec $repo/tools/screendump.sh -s $qmp $out} err]} {
+        return $err
+    }
+    return ""
+}
+
+# One QMP keystroke/chord ('+'-separated qcodes; press in order, release
+# in reverse) or typed text (lowercase/digits/space/-/./ + \n).
+proc qk_chord {chord} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k $chord} err]} {
+        lc_fail "qmp chord '$chord' failed: $err"
+    }
+}
+proc qk_type {text} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp $text} err]} {
+        lc_fail "qmp type '$text' failed: $err"
+    }
+}
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# Launch INTO THE GAME (+map start skips the demo loop; a demo would route
+# most keys to the menu -- keys.c demoplayback special-case).
+lc_send "tyr-quake -window -nosound +map start"
+lc_expect "Quake Initialized" "engine init (pak loaded, SW renderer up)"
+
+# Map-load margin (the shareware start map loads well under a second on
+# HVF; the in-game leg below hard-asserts signon regardless).
+sleep 6
+
+# The new pane already holds focus; zoom it fullscreen (G-6c Super plane).
+qk_chord "meta_l+f"
+sleep 1
+
+# Render leg: the zoomed world is on the scanout.
+if {[gfx_dump_or_fail /tmp/lsplay-game.png] ne ""} { lc_fail "screendump (zoomed game) failed" }
+set fp1 [gfx_fingerprint /tmp/lsplay-game.png]
+set h1 [lindex $fp1 0]; set c1 [lindex $fp1 1]
+if {$c1 < 8} {
+    lc_fail "too few colors ($c1) -- the zoomed surface is not rendering Quake's world"
+}
+lc_pass "play: zoomed mid-game frame on the scanout ($c1 color buckets; /tmp/lsplay-game.png)"
+
+# Console leg: Shift+ESC (hardcoded toggle) + `version`.
+qk_chord "shift+esc"
+qk_type "version\n"
+lc_expect "Version TyrQuake-" "console typing reached Quake (un-fakeable version banner)"
+lc_pass "play: QMP keystrokes land in Quake's console (focus routing + SDL key path)"
+
+# In-game leg: bind an arrow (ONE-token command -- Key_Bind_f argc limit),
+# close the console, tap the arrow.
+qk_type "bind uparrow version\n"
+# Drain the typed-line echo ("]bind uparrow version") THROUGH its newline;
+# the typed line carries only lowercase "version", never the banner, so
+# the sentinel below cannot false-match the echo.
+set timeout $lc_cmd_timeout
+expect {
+    -re {\]bind uparrow[^\r\n]*\r?\n} { lc_step "bind command echoed" }
+    timeout { lc_fail "bind command never echoed on the console" }
+    eof     { lc_fail "unexpected EOF during bind" }
+}
+qk_chord "shift+esc"
+qk_chord "up"
+lc_expect "Version TyrQuake-" "in-game key dispatch (arrow -> binding -> version banner)"
+lc_pass "play: an injected arrow fires an in-game binding (the full compositor->SDL->Key_Event path; map signed on)"
+
+# Turn taps: view rotates ~4 deg per 30 ms tap. Frame delta LOGGED only.
+qk_chord "left"
+qk_chord "left"
+qk_chord "left"
+sleep 1
+if {[gfx_dump_or_fail /tmp/lsplay-turn.png] ne ""} { lc_fail "screendump (post-turn) failed" }
+set fp2 [gfx_fingerprint /tmp/lsplay-turn.png]
+set h2 [lindex $fp2 0]
+if {$h1 ne $h2} {
+    lc_step "note: frame changed after turn taps (view rotated / world animating)"
+} else {
+    lc_step "note: identical frame after turn taps -- not gated (static scene possible)"
+}
+
+# Exit leg: quit from the console (direct, no confirm), ut takes back over.
+# whoami prints the NUMERIC uid at v1.0 (name service = the recorded LS-K
+# v1.x seam) -- michael's principal_id is 1000.
+qk_chord "shift+esc"
+qk_type "quit\n"
+sleep 2
+lc_run_expect "whoami" "1000"
+lc_pass "play: clean quit -- ut is back in the foreground reading the console"
+
+lc_quit
+lc_pass "ls-gfx-play: keystrokes reach a running game through the compositor (AURORA-CONFIG 2.1)"
+exit 0
