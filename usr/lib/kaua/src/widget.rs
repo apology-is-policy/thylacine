@@ -387,6 +387,207 @@ fn place_span(buf: &mut Buffer, x: u16, y: u16, max_x: u16, span: Span<'_>, fill
     }
 }
 
+/// A node in a `Tree`: a label + style, a collapsed/expanded flag, and children.
+/// Data-source-agnostic -- build a forest from variables, a `/proc` walk, a call
+/// stack, anything. The data model is caller-owned: the widget renders a
+/// *flattened* view (`flatten_tree`), the consumer toggles `expanded` and owns
+/// the selection, exactly as `List`'s caller owns `selected`.
+#[derive(Clone)]
+pub struct TreeItem<'a> {
+    pub label: &'a str,
+    pub style: Style,
+    pub expanded: bool,
+    pub children: Vec<TreeItem<'a>>,
+}
+
+impl<'a> TreeItem<'a> {
+    /// A childless node (renders no marker).
+    pub fn leaf(label: &'a str) -> Self {
+        TreeItem {
+            label,
+            style: Style::new(),
+            expanded: false,
+            children: Vec::new(),
+        }
+    }
+
+    /// A branch node (collapsed by default; `expanded(true)` to open it).
+    pub fn node(label: &'a str, children: Vec<TreeItem<'a>>) -> Self {
+        TreeItem {
+            label,
+            style: Style::new(),
+            expanded: false,
+            children,
+        }
+    }
+
+    pub fn style(mut self, style: Style) -> Self {
+        self.style = style;
+        self
+    }
+
+    pub fn expanded(mut self, on: bool) -> Self {
+        self.expanded = on;
+        self
+    }
+
+    /// True iff this node has children (so it shows a `▾`/`▸` marker, not a
+    /// leaf blank).
+    pub fn is_branch(&self) -> bool {
+        !self.children.is_empty()
+    }
+}
+
+/// The marker a `TreeRow` shows before its label.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mark {
+    /// A childless node -- no marker (a blank).
+    Leaf,
+    /// A branch that can open -- `▸`.
+    Collapsed,
+    /// An open branch -- `▾`.
+    Expanded,
+}
+
+impl Mark {
+    /// The glyph painted before the label.
+    pub fn glyph(self) -> char {
+        match self {
+            Mark::Leaf => ' ',
+            Mark::Collapsed => '\u{25B8}', // ▸
+            Mark::Expanded => '\u{25BE}',  // ▾
+        }
+    }
+}
+
+/// One visible row of a flattened tree: its indent depth, marker, label, style.
+/// `Tree` renders a `&[TreeRow]`; `flatten_tree` produces them from a forest.
+#[derive(Clone, Copy)]
+pub struct TreeRow<'a> {
+    pub depth: u16,
+    pub mark: Mark,
+    pub label: &'a str,
+    pub style: Style,
+}
+
+fn flatten_into<'a>(items: &'a [TreeItem<'a>], depth: u16, out: &mut Vec<TreeRow<'a>>) {
+    for it in items {
+        let mark = if !it.is_branch() {
+            Mark::Leaf
+        } else if it.expanded {
+            Mark::Expanded
+        } else {
+            Mark::Collapsed
+        };
+        out.push(TreeRow {
+            depth,
+            mark,
+            label: it.label,
+            style: it.style,
+        });
+        if it.is_branch() && it.expanded {
+            flatten_into(&it.children, depth + 1, out);
+        }
+    }
+}
+
+/// Flatten a forest into its currently-visible rows, depth-first: every root,
+/// plus the children of any *expanded* branch. Collapsed subtrees are omitted.
+/// The row order is the display order, so a row index is a stable selection
+/// handle for the consumer.
+pub fn flatten_tree<'a>(roots: &'a [TreeItem<'a>]) -> Vec<TreeRow<'a>> {
+    let mut out = Vec::new();
+    flatten_into(roots, 0, &mut out);
+    out
+}
+
+/// A collapsible tree view. Renders a flattened `&[TreeRow]` (from
+/// `flatten_tree`): each row is `<indent><marker> <label>`, indent =
+/// `depth * indent` cells, the marker `▾`/`▸`/(blank leaf). An optional selected
+/// row gets a full-width highlight (like `List`); `offset` scrolls. Pure render;
+/// the caller owns the expand-state (on the `TreeItem`s) and the selection.
+pub struct Tree<'a> {
+    rows: &'a [TreeRow<'a>],
+    selected: Option<usize>,
+    style: Style,
+    selected_style: Style,
+    offset: usize,
+    indent: u16,
+}
+
+impl<'a> Tree<'a> {
+    pub fn new(rows: &'a [TreeRow<'a>]) -> Self {
+        Tree {
+            rows,
+            selected: None,
+            style: Style::new(),
+            selected_style: Style::new(),
+            offset: 0,
+            indent: 2,
+        }
+    }
+
+    pub fn select(mut self, sel: Option<usize>) -> Self {
+        self.selected = sel;
+        self
+    }
+
+    pub fn style(mut self, style: Style) -> Self {
+        self.style = style;
+        self
+    }
+
+    pub fn selected_style(mut self, style: Style) -> Self {
+        self.selected_style = style;
+        self
+    }
+
+    /// First visible row index (the scroll position).
+    pub fn offset(mut self, offset: usize) -> Self {
+        self.offset = offset;
+        self
+    }
+
+    /// Cells of indent per depth level (default 2).
+    pub fn indent(mut self, cells: u16) -> Self {
+        self.indent = cells;
+        self
+    }
+}
+
+impl Widget for Tree<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        if area.is_empty() {
+            return;
+        }
+        let rows = area.height as usize;
+        for r in 0..rows {
+            let idx = self.offset + r;
+            if idx >= self.rows.len() {
+                break;
+            }
+            let tr = &self.rows[idx];
+            let y = area.y + r as u16;
+            let selected = self.selected == Some(idx);
+            let style = if selected { self.selected_style } else { tr.style };
+            if selected {
+                for x in area.x..area.right() {
+                    buf.set_cell(x, y, Cell::new(' ', style));
+                }
+            }
+            // <indent><marker><gap><label>, all clipped to the row's right edge.
+            let indent = (tr.depth as u32 * self.indent as u32).min(area.width as u32) as u16;
+            let mx = area.x.saturating_add(indent);
+            if mx >= area.right() {
+                continue;
+            }
+            buf.set_cell(mx, y, Cell::new(tr.mark.glyph(), style));
+            let lx = mx.saturating_add(2); // marker + a one-cell gap
+            buf.set_str(lx, y, tr.label, style);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -527,5 +728,74 @@ mod tests {
         assert_eq!(s.text, "x");
         assert_eq!(s.style.fg, Color::Rgb(1, 2, 3));
         assert_eq!(Span::raw("y").style, Style::new());
+    }
+
+    #[test]
+    fn tree_flatten_respects_expand_state() {
+        let roots = vec![
+            TreeItem::node("open", vec![TreeItem::leaf("child")]).expanded(true),
+            TreeItem::node("shut", vec![TreeItem::leaf("hidden")]),
+            TreeItem::leaf("leaf"),
+        ];
+        let rows = flatten_tree(&roots);
+        // open (expanded) -> its child (depth 1) -> shut (collapsed, child
+        // OMITTED) -> leaf. The hidden grandchild never appears.
+        let got: Vec<(&str, u16, Mark)> =
+            rows.iter().map(|r| (r.label, r.depth, r.mark)).collect();
+        assert_eq!(
+            got,
+            vec![
+                ("open", 0, Mark::Expanded),
+                ("child", 1, Mark::Leaf),
+                ("shut", 0, Mark::Collapsed),
+                ("leaf", 0, Mark::Leaf),
+            ]
+        );
+    }
+
+    #[test]
+    fn tree_renders_indent_marker_and_label() {
+        let roots = vec![TreeItem::node("root", vec![TreeItem::leaf("kid")]).expanded(true)];
+        let rows = flatten_tree(&roots);
+        let mut b = Buffer::empty(Rect::new(0, 0, 10, 2));
+        Tree::new(&rows).render(Rect::new(0, 0, 10, 2), &mut b);
+        // depth 0: marker `▾` at col 0, label at col 2 (marker + one-cell gap).
+        assert_eq!(sym(&b, 0, 0), '\u{25BE}');
+        assert_eq!(sym(&b, 2, 0), 'r');
+        // depth 1: indent 2 -> a leaf blank at col 2, label at col 4.
+        assert_eq!(sym(&b, 2, 1), ' ');
+        assert_eq!(sym(&b, 4, 1), 'k');
+    }
+
+    #[test]
+    fn tree_highlights_selection() {
+        let roots = vec![TreeItem::leaf("a"), TreeItem::leaf("b")];
+        let rows = flatten_tree(&roots);
+        let mut b = Buffer::empty(Rect::new(0, 0, 5, 2));
+        let ember = Style::new().bg(Color::Rgb(224, 120, 64));
+        Tree::new(&rows)
+            .select(Some(1))
+            .selected_style(ember)
+            .render(Rect::new(0, 0, 5, 2), &mut b);
+        // Row 1 (b) is fully highlighted; row 0 (a) keeps the default bg.
+        assert_eq!(b.get(0, 1).unwrap().style.bg, Color::Rgb(224, 120, 64));
+        assert_eq!(b.get(4, 1).unwrap().style.bg, Color::Rgb(224, 120, 64));
+        assert_eq!(b.get(0, 0).unwrap().style.bg, Color::Reset);
+        // A leaf's label sits at col 2 (blank marker at 0, gap, label at 2).
+        assert_eq!(sym(&b, 2, 1), 'b');
+    }
+
+    #[test]
+    fn tree_offset_scrolls_and_clips_narrow() {
+        let roots = vec![
+            TreeItem::leaf("a"),
+            TreeItem::leaf("b"),
+            TreeItem::leaf("c"),
+        ];
+        let rows = flatten_tree(&roots);
+        let mut b = Buffer::empty(Rect::new(0, 0, 4, 2));
+        Tree::new(&rows).offset(1).render(Rect::new(0, 0, 4, 2), &mut b);
+        assert_eq!(sym(&b, 2, 0), 'b'); // "b" is the first shown row
+        assert_eq!(sym(&b, 2, 1), 'c');
     }
 }
